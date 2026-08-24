@@ -126,6 +126,107 @@ static void test_uncommissioned_default_k_covers_realistic_kiln_range(void)
     TEST_CHECK(max31856_tc_range_is_plausible(MAX31856_TC_TYPE_K, 1300.0f), "cone 10 territory");
 }
 
+// --- max31856_tc_range_is_plausible_uncommissioned() (2026-08-24, Part A) --
+//
+// The union band is [-210, 1820]: -210 is J's own low bound (the lowest of
+// all eight), 1820 is B's own high bound (the highest). Every other type's
+// bound sits strictly inside that span, so this test picks values that
+// specifically exercise the union's OWN two extremes, not any single type's.
+static void test_uncommissioned_union_band(void)
+{
+    TEST_SECTION("max31856_tc_range_is_plausible_uncommissioned -- widest-band garbage floor");
+
+    TEST_CHECK(max31856_tc_range_is_plausible_uncommissioned(-210.0f), "union low bound (J's), inclusive");
+    TEST_CHECK(max31856_tc_range_is_plausible_uncommissioned(1820.0f), "union high bound (B's), inclusive");
+    TEST_CHECK(max31856_tc_range_is_plausible_uncommissioned(20.0f), "room temperature");
+    TEST_CHECK(!max31856_tc_range_is_plausible_uncommissioned(NAN), "NaN is never plausible here either");
+
+    // Just past the union's own bounds -- genuine garbage, rejected either way.
+    TEST_CHECK(!max31856_tc_range_is_plausible_uncommissioned(-210.01f), "just below the union's own low bound");
+    TEST_CHECK(!max31856_tc_range_is_plausible_uncommissioned(1820.01f), "just above the union's own high bound");
+}
+
+// The behavioural difference this pass exists to prove (task instructions:
+// "one it accepts that a specific type's band would have rejected"). 1500
+// degC sits inside the union [-210, 1820] but strictly above K's own band
+// (-200..1372) -- an uncommissioned board must accept it, while a board
+// genuinely commissioned as K must still reject it via the ORIGINAL
+// function. Proving both halves in one test is what makes this a real
+// behavioural-difference check, not two independent facts.
+static void test_uncommissioned_accepts_what_a_specific_type_would_reject(void)
+{
+    TEST_SECTION("uncommissioned union band accepts a value K's own (or any single type's) band "
+                 "would reject -- the actual behavioural difference this pass adds");
+
+    float value = 1500.0f;
+    TEST_CHECK(!max31856_tc_range_is_plausible(MAX31856_TC_TYPE_K, value),
+               "K's own exact band rejects 1500 degC (above its 1372 ceiling)");
+    TEST_CHECK(max31856_tc_range_is_plausible_uncommissioned(value),
+               "the SAME 1500 degC is accepted by the uncommissioned union band "
+               "(inside B's 1820 ceiling)");
+
+    // And the union band still rejects a value no real type could ever
+    // report -- it is a floor, not a rubber stamp.
+    float garbage = 5000.0f;
+    TEST_CHECK(!max31856_tc_range_is_plausible_uncommissioned(garbage),
+               "5000 degC is rejected by the union band too -- it is a floor, not 'anything goes'");
+}
+
+// --- max31856_cr1_readback_check() (2026-08-24, Part B) --------------------
+
+static void test_cr1_readback_match_every_real_type(void)
+{
+    TEST_SECTION("max31856_cr1_readback_check -- MATCH for every real type, "
+                 "at the actual CR1 byte this driver writes (AVGSEL=4, 0x2X)");
+
+    for (uint8_t tc_type = MAX31856_TC_TYPE_B; tc_type <= MAX31856_TC_TYPE_T; tc_type++) {
+        uint8_t cr1 = (uint8_t)(0x20u | tc_type); // AVGSEL=4 samples, this driver's own fixed choice
+        TEST_CHECK(max31856_cr1_readback_check(tc_type, cr1) == MAX31856_CR1_READBACK_MATCH,
+                   "readback equal to the byte actually written matches");
+    }
+}
+
+static void test_cr1_readback_mismatch(void)
+{
+    TEST_SECTION("max31856_cr1_readback_check -- MISMATCH when the readback nibble differs");
+
+    // Asked for K (0x03), part reports back running J (0x02) -- e.g. its
+    // failed CR1 write left it on whatever it held before.
+    TEST_CHECK(max31856_cr1_readback_check(MAX31856_TC_TYPE_K, (uint8_t)(0x20u | MAX31856_TC_TYPE_J)) ==
+                   MAX31856_CR1_READBACK_MISMATCH,
+               "K asked for, J read back -- a real, different, real thermocouple type: MISMATCH");
+
+    // Asked for T (0x07), part reports back its own power-on default K (0x03).
+    TEST_CHECK(max31856_cr1_readback_check(MAX31856_TC_TYPE_T, (uint8_t)(0x20u | MAX31856_TC_TYPE_K)) ==
+                   MAX31856_CR1_READBACK_MISMATCH,
+               "T asked for, K (power-on default) read back: MISMATCH -- the exact "
+               "'CR1 write failed, part stuck on its old type' scenario this check exists for");
+}
+
+static void test_cr1_readback_dead_bus(void)
+{
+    TEST_SECTION("max31856_cr1_readback_check -- DEAD_BUS for 0x00/0xFF, not MISMATCH");
+
+    // 0x00 and 0xFF can never be a byte this driver itself wrote for ANY
+    // real type (AVGSEL is always fixed at 4 samples, upper nibble 0x2),
+    // regardless of what tc_type was asked for -- checked against every
+    // real type to prove this classification does not depend on which type
+    // happened to be intended.
+    for (uint8_t tc_type = MAX31856_TC_TYPE_B; tc_type <= MAX31856_TC_TYPE_T; tc_type++) {
+        TEST_CHECK(max31856_cr1_readback_check(tc_type, 0x00u) == MAX31856_CR1_READBACK_DEAD_BUS,
+                   "0x00 readback is DEAD_BUS regardless of intended type");
+        TEST_CHECK(max31856_cr1_readback_check(tc_type, 0xFFu) == MAX31856_CR1_READBACK_DEAD_BUS,
+                   "0xFF readback is DEAD_BUS regardless of intended type");
+    }
+
+    // 0x00's low nibble (0x0) IS MAX31856_TC_TYPE_B -- proving DEAD_BUS is
+    // checked BEFORE the nibble compare, not merely "falls through to
+    // mismatch and happens to differ": asking for B itself must still
+    // report DEAD_BUS on a 0x00 readback, not a spurious MATCH.
+    TEST_CHECK(max31856_cr1_readback_check(MAX31856_TC_TYPE_B, 0x00u) == MAX31856_CR1_READBACK_DEAD_BUS,
+               "0x00 readback is DEAD_BUS even when the intended type's own nibble is 0x0 (B)");
+}
+
 void run_test_max31856_tc_range_policy(void)
 {
     test_in_range_accepted_every_type();
@@ -135,4 +236,9 @@ void run_test_max31856_tc_range_policy(void)
     test_nan_rejected_every_type();
     test_unrecognised_type_rejected();
     test_uncommissioned_default_k_covers_realistic_kiln_range();
+    test_uncommissioned_union_band();
+    test_uncommissioned_accepts_what_a_specific_type_would_reject();
+    test_cr1_readback_match_every_real_type();
+    test_cr1_readback_mismatch();
+    test_cr1_readback_dead_bus();
 }

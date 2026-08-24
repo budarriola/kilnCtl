@@ -356,22 +356,44 @@ judge it with.
 ### S5 — Safety thermocouple invalid · **WARN, then TRIP** · graduated
 
 Trips on: SPI transfer failure, `NaN`, `THERMO_FAULT_OPEN` / `OVUV` /
-`TCRANGE` from the MAX31856's SR register, or (2026-08-24) a linearized
-reading outside the datasheet's per-`tc_type` plausibility band
-(`max31856_tc_range_policy.c`, wired in `thermo_task.c`) — the check that
-catches config_store's commissioned `tc_type` disagreeing with what the
-MAX31856's own CR1 register is actually running (e.g. a failed
-`max31856_configure()` write leaving the part on a stale type): a Type-S
-sensor decoded through a stuck Type-K LUT can land inside K's own wide range
-and never set the part's own `TCRANGE` bit, but will fail this
-config_store-anchored check the moment it disagrees with the commissioned
-type by enough. Ranges are datasheet Table 1 (MAX31856.pdf p.12), inclusive
-at both ends; applied unconditionally, including on a never-commissioned
-(default Type K) board — see `max31856_tc_range_policy.h`'s file header for
-why that does not regress the uncommissioned case (Type K's own band,
--200..+1372 °C, already covers every realistic kiln reading this document
-discusses). This adds a new way S5 can WARN/TRIP; it does not change S5's
-graduated response shape or timing below.
+`TCRANGE` from the MAX31856's SR register, (2026-08-24) a linearized reading
+outside the datasheet's per-`tc_type` plausibility band
+(`max31856_tc_range_policy.c`, wired in `thermo_task.c`), or (also
+2026-08-24) `max31856_tc_type_verified()` reporting that the last
+`max31856_configure()` call could not confirm, via a CR1 readback, that the
+part actually accepted the type it was asked to run.
+
+The plausibility band catches config_store's commissioned `tc_type`
+disagreeing with what the MAX31856's own CR1 register is actually running
+(e.g. a failed `max31856_configure()` write leaving the part on a stale
+type): a Type-S sensor decoded through a stuck Type-K LUT can land inside
+K's own wide range and never set the part's own `TCRANGE` bit, but will
+fail this config_store-anchored check the moment it disagrees with the
+commissioned type by enough. Ranges are datasheet Table 1 (MAX31856.pdf
+p.12), inclusive at both ends. **Updated 2026-08-24:** the band is no
+longer applied unconditionally regardless of commissioning status —
+`config_store`'s `tc_type` now carries a `fields_set` bit
+(`CONFIG_STORE_SET_TC_TYPE`, `config_store.h`) distinguishing "operator
+committed K" from "never touched, defaulted to K", which the old band could
+not do. A genuinely commissioned type still gets its own exact band; a
+never-commissioned board instead gets the union of all eight types' ranges
+(-210..+1820 °C) as a pure garbage floor, wider than K's own -200..+1372 °C
+— a deliberate widening, not a regression, since this check was never the
+uncommissioned board's primary ceiling (S1's `abs_max_temp_c` gating and the
+MAX31856's own `TCRANGE` bit are unaffected). See
+`max31856_tc_range_policy.h`'s file header for the full argument.
+
+The CR1 readback check is independent of the band above: it catches the
+part not accepting the write at all (rather than accepting a different,
+still-real type), including the specific case of a readback of `0x00` or
+`0xFF`, which cannot be a byte this driver's own CR1 write ever produces for
+any real type and is treated as a dead/shifted SPI bus rather than "some
+other type" (`spi_owner.c`'s own baudrate-margin comment on a shifted burst
+producing plausible-looking wrong numbers). The readback happens once, at
+configure-time, not per sample; `thermo_task.c` checks the cached result on
+every reading. Both additions feed S5's existing WARN→TRIP path; neither
+changes S5's graduated response shape or timing below, and neither is a new
+trip.
 
 Deliberately **not** tripping on `TCHIGH` / `TCLOW` (those are threshold
 comparators, which is S1's job) or `CJHIGH` / `CJLOW` / `CJRANGE` alone (a

@@ -55,19 +55,43 @@
 // second, independent layer over the existing hardware one, not a
 // replacement for it.
 //
-// Uncommissioned tc_type -- the crux, argued in full where this is wired in
-// (thermo_task.c): config_store's tc_type field has NO fields_set-gating bit
-// (config_store.h's own doc comment on the `tc_type` field is explicit that
-// this is deliberate, pre-existing, and out of scope for this pass to
-// change), so there is no way to distinguish "operator commissioned type K"
-// from "nobody has ever touched this, it defaulted to K" at this layer or
-// any layer below config_store.h. The check below is applied UNCONDITIONALLY
-// against whatever config_store_get_tc_type() currently returns, commissioned
-// or not, deliberately -- see thermo_task.c's wiring comment for why that is
-// the safe choice for the never-commissioned case specifically (short
-// version: type K's own datasheet range, -200 to +1372degC, already covers
-// every kiln temperature this codebase's own S1 ceiling reasoning discusses,
-// so the never-commissioned board's behaviour does not change in practice).
+// Uncommissioned tc_type -- UPDATED 2026-08-24. config_store's tc_type field
+// now DOES have a fields_set-gating bit (CONFIG_STORE_SET_TC_TYPE,
+// config_store.h) precisely so this file's check can stop applying a type's
+// exact datasheet band to a value nobody ever confirmed. This file therefore
+// exposes TWO functions:
+//   - max31856_tc_range_is_plausible(): the original exact-type band, for a
+//     GENUINELY commissioned tc_type (caller checks config_store_is_tc_type_
+//     set() first).
+//   - max31856_tc_range_is_plausible_uncommissioned(): a single, fixed band
+//     spanning the union of all eight types' ranges (see TC_RANGES in the
+//     .c file for the per-type numbers this is the min/max across), used
+//     when tc_type has NOT been commissioned. This is a pure garbage floor,
+//     not a type-specific check -- it can never single-handedly prove a
+//     reading belongs to whatever type the part is actually wired for, only
+//     that the number is not obvious decode/SPI-corruption garbage
+//     (nowhere close to ANY real thermocouple's range). Asserting anything
+//     tighter against an uncommissioned type would be exactly the "confident,
+//     plausible, WRONG" precision this check cannot honestly claim -- the
+//     same reasoning that made CONFIG_STORE_SET_TC_TYPE necessary in the
+//     first place.
+// Why this is a real behavioural WIDENING for a never-commissioned board,
+// and why that is still the correct, safe choice: before this bit existed,
+// an uncommissioned board got type K's band (-200..+1372degC) unconditionally
+// (this file's history, and thermo_task.c's old wiring comment). The union
+// band below is wider on the hot end (up to +1820degC, type B's ceiling) --
+// so a never-commissioned board now ACCEPTS some readings (1373..1820degC)
+// it used to reject. That is intentional, not a regression: this check was
+// never the primary ceiling for an uncommissioned board (S1's abs_max_temp_c
+// -- itself gated off entirely, "0 = not commissioned", until a real
+// ceiling is committed -- and the MAX31856's own hardware TCRANGE bit,
+// comparing against whatever CR1 the part actually holds, are both still
+// live and unaffected by this change) -- this file's band was always a
+// SECOND, independent layer over those, and a second layer that is honest
+// about how little it actually knows for an uncommissioned board is safer
+// than one that quietly asserts a type-specific boundary nobody confirmed.
+// See thermo_task.c's wiring comment for how it picks between the two
+// functions.
 #ifndef SAFTYFW_MAX31856_TC_RANGE_POLICY_H
 #define SAFTYFW_MAX31856_TC_RANGE_POLICY_H
 
@@ -96,6 +120,72 @@ extern "C" {
 //     excludes 0x08-0x0F from ever reaching max31856_configure() on this
 //     board, so this is a defensive floor, not an expected path.
 bool max31856_tc_range_is_plausible(uint8_t tc_type, float tc_c);
+
+// True iff tc_c falls within the union of all eight types' TEMP RANGEs
+// (min across B/E/J/K/N/R/S/T's own lower bounds .. max across their upper
+// bounds), for use when tc_type has NOT been commissioned
+// (config_store_is_tc_type_set() == false) -- see this file's header comment
+// for why a per-type band is unjustifiable in that case and this wider,
+// type-agnostic floor is used instead. Same NaN handling as
+// max31856_tc_range_is_plausible() (false for NaN). Takes no tc_type
+// argument: unlike the function above, this check is deliberately the SAME
+// regardless of whatever byte config_store currently holds, since that byte
+// is, by construction, a guess in this case.
+bool max31856_tc_range_is_plausible_uncommissioned(float tc_c);
+
+// --- Part B: CR1.TC TYPE[3:0] readback verification -------------------------
+//
+// max31856_configure() (max31856.c) writes CR1 with the caller's tc_type but
+// never used to read it back to confirm the part actually accepted it -- a
+// failed CR1 write (an SPI transient that the OTHER writes in that same
+// function's sequence happen to survive) could leave the part decoding
+// against a stale/different type while config_store, and this file's
+// exact-band check above, both go on believing the type max31856_configure()
+// was ASKED to set. That is invisible to max31856_tc_range_is_plausible():
+// it is keyed off config_store's belief, not the part's actual register, by
+// design (see this file's header comment on why that is a second,
+// independent layer over the MAX31856's own TCRANGE bit) -- but a wrong-CR1
+// desync defeats BOTH layers at once, since TCRANGE also compares against
+// whatever the part actually holds. Reading CR1 back once, right after
+// max31856_configure() writes it, closes that gap independently of either
+// band check.
+//
+// This decision logic lives here, not in max31856.c, for the same
+// host-testability reason max31856_tc_type_policy.h/max31856_decode.h are
+// split out of max31856.c (that file needs real hardware/gpio.h and
+// spi_owner.h and cannot be linked into the host test binary) -- and not in
+// a new file, per this pass's own file-ownership constraint against
+// creating new source files while another change is mid-flight against
+// CMakeLists.txt/test/build_host_tests.ps1. It is unrelated to the
+// plausibility-band logic above in subject matter, but pure/host-testable
+// for the identical reason, and this is the only extension point this pass
+// is allowed to add pure logic to.
+typedef enum {
+    MAX31856_CR1_READBACK_MATCH = 0,   // TC TYPE[3:0] read back equals what was written
+    MAX31856_CR1_READBACK_MISMATCH,    // read back a DIFFERENT real/voltage-mode nibble
+    MAX31856_CR1_READBACK_DEAD_BUS,    // whole byte 0x00 or 0xFF -- see below
+} max31856_cr1_readback_result_t;
+
+// Compares `cr1_readback` (the full byte max31856.c read back from CR1
+// immediately after writing it) against `intended_tc_type` (the value that
+// was written, 0..MAX31856_TC_TYPE_T -- max31856_configure() already refuses
+// anything else before this is ever called, but this function does not
+// itself assume that; an out-of-range `intended_tc_type` simply can never
+// produce MATCH).
+//
+// `cr1_readback == 0x00` or `== 0xFF` is classified DEAD_BUS rather than
+// MISMATCH, deliberately: this driver always writes AVGSEL = 4 samples
+// (max31856.c's fixed CR1 upper nibble, 0x2X) into the same register, so
+// neither whole-byte value can ever be what THIS driver itself wrote for
+// ANY real tc_type -- both are the classic symptoms spi_owner.c's own
+// baudrate-margin comment warns about (MISO stuck low / stuck high, or the
+// whole burst shifted a byte position), not "the part is running some
+// other real type". Collapsing that into ordinary MISMATCH would still be
+// safe (both outcomes end up not-verified, feeding the same S5 path), but
+// would mislabel a dead bus as "a wrong-but-real thermocouple type", which
+// is a worse story to hand a bench log than the honest one.
+max31856_cr1_readback_result_t max31856_cr1_readback_check(uint8_t intended_tc_type,
+                                                             uint8_t cr1_readback);
 
 #ifdef __cplusplus
 }

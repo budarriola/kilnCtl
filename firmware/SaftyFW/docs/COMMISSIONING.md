@@ -187,6 +187,18 @@ value in the wrong field with the right type tag and no error anywhere.
 | `0x0503` | `watchdog_timeout_ms` | U16 |
 | `0x0504` | `config_check_period_s` | U16 |
 
+**`tc_type` (`0x0105`) gained a `fields_set` bit (`CONFIG_STORE_SET_TC_TYPE`)
+on 2026-08-24.** Unlike the other bits in this table, it is not a "no safe
+default" field — it keeps its compiled default (K) — but a committed K and a
+never-touched, defaulted-to-K record are the same byte in the store, and
+`max31856_tc_range_policy.h`'s per-type plausibility band needs to tell them
+apart (a genuinely commissioned type gets its own exact band; an
+uncommissioned one gets a wider, type-agnostic floor instead —
+`THERMOCOUPLE.md` §2). This bit is now folded into the same required-set
+check that gates `calibration_missing` (§2.1's own `config_params_all_
+required_set()`), so a board that has committed every other field but never
+touched `0x0105` still reads back as not fully commissioned.
+
 **`ct_channel_map` is three ids but ONE `fields_set` bit.** The store tracks
 it as a single group bit because `CONFIG_REFERENCE.md` §1 describes it as
 confirmed by one indivisible commissioning pass (the one-relay-at-a-time check

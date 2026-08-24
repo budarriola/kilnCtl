@@ -135,17 +135,58 @@ it does **not** help the wrong-sensor-physically-fitted scenario just
 described above (a real Type-S junction read through a Type-K LUT lands
 *inside* K's own wide range, whether the check compares against the part's
 CR1 or against config_store's belief — both currently agree "K" in that
-scenario, and 320 °C is simply a valid K reading). What it *does* catch is
-config_store's belief and the part's actual CR1 register disagreeing (e.g. a
-transient SPI failure during `max31856_configure()` left the part on a
-stale/default type while config_store believes a different one was
-committed) — a case the existing `THERMO_FAULT_TCRANGE` bit cannot see,
-because that bit only ever compares against whatever CR1 the chip itself is
-currently running. Feeds S5 (marks the reading invalid, same as any other
-bad-read cause) rather than a new trip — see `SAFETY_MODEL.md`'s S5 section
-and `max31856_tc_range_policy.h`'s own header comment for the full argument,
-including why the check runs unconditionally even on a never-commissioned
-(default Type K) board.
+scenario, and 320 °C is simply a valid K reading). **This is still true after
+the update below — nothing in this pass closes that specific hazard.** What
+it *does* catch is config_store's belief and the part's actual CR1 register
+disagreeing (e.g. a transient SPI failure during `max31856_configure()` left
+the part on a stale/default type while config_store believes a different
+one was committed) — a case the existing `THERMO_FAULT_TCRANGE` bit cannot
+see, because that bit only ever compares against whatever CR1 the chip
+itself is currently running. Feeds S5 (marks the reading invalid, same as
+any other bad-read cause) rather than a new trip — see `SAFETY_MODEL.md`'s
+S5 section and `max31856_tc_range_policy.h`'s own header comment for the
+full argument.
+
+**Updated 2026-08-24 (`CONFIG_STORE_SET_TC_TYPE`, `config_store.h`):**
+the paragraph above used to say this check runs unconditionally even on a
+never-commissioned (default Type K) board, because `tc_type` had no
+commissioning bit to tell "operator confirmed K" apart from "nobody has
+ever touched this". It now does:
+
+- **Genuinely commissioned:** the operator's own type gets the exact
+  datasheet band above, unchanged from before.
+- **Never commissioned:** applying K's own tight band to a value nobody
+  confirmed was asserting precision this check could not honestly claim, so
+  an uncommissioned board now gets `max31856_tc_range_is_plausible_
+  uncommissioned()` instead — the union of all eight types' ranges
+  (-210 °C..+1820 °C), a pure garbage floor rather than a type-specific
+  check. This is a deliberate *widening* versus the old K-only behaviour on
+  the hot end (K's own ceiling is 1372 °C; the union's is B's 1820 °C) —
+  not a regression, because this check was never the primary ceiling for an
+  uncommissioned board (S1's `abs_max_temp_c` gating and the MAX31856's own
+  `THERM_FAULT_TCRANGE` bit are both unaffected). The fact that the tight
+  band is inactive is surfaced, not silent: an uncommissioned `tc_type` now
+  keeps `calibration_missing` true (`CONFIG_REFERENCE.md` §1/§7), the same
+  wire-visible signal every other no-safe-default field uses.
+
+**Part B, same date — CR1 readback verification (`max31856.c`):**
+`max31856_configure()` now reads CR1 back once, immediately after writing
+it, and compares TC TYPE[3:0] against the type it was asked to write
+(`max31856_tc_range_policy.h`'s `max31856_cr1_readback_check()`). This closes
+the gap the original paragraph above only partially argued around: before
+this, a CR1 write that silently failed (the OTHER writes in that same
+function surviving) left the part running a stale/different type with
+nothing to say so — not this file's own plausibility band (which is keyed
+off `config_store`'s belief, not the part's real register, by design) and
+not `THERM_FAULT_TCRANGE` (which compares against whatever CR1 the part
+actually holds — the same wrong register this failure produces). A mismatch,
+or a readback of `0x00`/`0xFF` (treated as a dead/shifted bus, per
+`spi_owner.c`'s own baudrate-margin comment about a shifted burst returning
+plausible-looking wrong numbers, not "some other real type") both mark the
+reading invalid, feeding S5 exactly like the plausibility band — no new
+trip. The readback happens once, at configure-time (boot, and any future
+detected-reset re-assert), not on `thermo_task`'s hot per-sample path; the
+per-sample cost is one cached boolean read (`max31856_tc_type_verified()`).
 
 ---
 
@@ -383,14 +424,27 @@ sensor reading low tells you nothing at all.
 - [x] Part thresholds left wide open — `max31856_configure()` never touches
       `CJHF/CJLF`/`LTHFTH/L`/`LTLFTH/L`, so they stay at their power-on
       full-scale defaults; S1 owns the ceiling, in software
-- [ ] Per-type plausibility ranges, driven from the configured type — **not
-      done this phase**. `safety_guards.c`'s S1/S5 do not yet vary any
-      threshold by `tc_type`; this needs a real commissioning field to be
-      meaningful and is deferred alongside it
-- [ ] Config re-asserted if the part is ever seen to have reset — **not
-      done**. `max31856_configure()` can be called again to re-assert, but
-      nothing yet detects a part reset (e.g. CR1 read-back disagreeing with
-      the shadow) and calls it automatically
+- [x] Per-type plausibility ranges, driven from the configured type —
+      `max31856_tc_range_policy.c`, wired into `thermo_task.c`, feeding S5.
+      2026-08-24: gated on `config_store_is_tc_type_set()` -- a genuinely
+      commissioned type gets its own exact datasheet band, an uncommissioned
+      one gets the union of all eight types' ranges instead (§2's "Updated
+      2026-08-24" note above has the full argument)
+- [x] CR1 readback verification at configure-time — `max31856_configure()`
+      (`max31856.c`) reads CR1 back once, right after writing it, and
+      compares TC TYPE[3:0] against what it asked for
+      (`max31856_tc_type_verified()`, §2's "Part B" note above). This closes
+      the "was the write actually accepted" half of the gap this checklist
+      item used to describe.
+- [ ] Automatic config re-assertion if the part is ever seen to have reset
+      — **still not done**. The CR1 readback above only runs inside
+      `max31856_configure()` itself (boot, and any FUTURE explicit re-assert
+      call); nothing yet independently detects a live part reset mid-run
+      and calls `max31856_configure()` again on its own. A part that resets
+      itself after a successful boot-time configure would revert to its
+      power-on CR1 (Type K, `MAX31856_AVGSEL_4_SAMPLES` off) with nothing
+      to notice until the NEXT explicit configure call, which nothing today
+      triggers automatically.
 
 **Borrowed source**
 - [ ] `tc_source` implemented: `OWN_J7` / `BORROWED_ZONE` / `BOTH`

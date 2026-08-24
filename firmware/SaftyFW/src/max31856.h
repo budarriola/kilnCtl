@@ -228,6 +228,23 @@ bool max31856_init(uint8_t cs_gpio, uint8_t fault_gpio);
  * boot. */
 bool max31856_configure(uint8_t tc_type);
 
+/* True iff the LAST max31856_configure() call both wrote CR1 successfully
+ * AND, on reading it back immediately afterward, found TC TYPE[3:0] equal to
+ * the type it was asked to write (max31856_tc_range_policy.h's
+ * max31856_cr1_readback_check() == MAX31856_CR1_READBACK_MATCH -- see that
+ * header's "Part B" comment for the full argument). False for every other
+ * outcome: never configured, configure() itself failed, the readback
+ * transfer failed, a real MISMATCH, or a DEAD_BUS byte (0x00/0xFF) -- this
+ * driver does not distinguish those failure shapes at this API boundary,
+ * because every one of them means the same thing to a caller: do not trust
+ * this driver's tc_type to be what config_store believes it is. thermo_task
+ * checks this on every sample (a cheap boolean read, NOT a fresh SPI
+ * transfer -- the actual CR1 readback happens once, inside
+ * max31856_configure(), not on this hot path) and downgrades the snapshot
+ * to invalid, feeding the existing S5 path, exactly like a failed
+ * max31856_tc_range_is_plausible()/_uncommissioned() check. */
+bool max31856_tc_type_verified(void);
+
 /* One burst read of CJTH..SR (0x0A..0x0F, six registers, one transaction) --
  * cold-junction temperature, linearized thermocouple temperature and fault
  * status, all from the same conversion. Always fills *out, including on

@@ -619,6 +619,22 @@ static void test_v2_full_roundtrip(void)
     TEST_CHECK(back.format_version == rec.format_version, "format_version roundtrips");
     TEST_CHECK(back.seq == rec.seq, "seq roundtrips");
     TEST_CHECK(back.fields_set == rec.fields_set, "fields_set roundtrips");
+    // This test's own `rec.fields_set` (set up above) never includes
+    // CONFIG_STORE_SET_TC_TYPE even though rec.tc_type carries a real,
+    // deliberately-chosen value (0x07u, T) -- exactly the shape of a
+    // genuine pre-existing v2 record written by firmware from before this
+    // bit existed. It must decode as NOT commissioned (this bit clear) and,
+    // just as importantly, must NOT be confused with a corrupt record: the
+    // unpack above already succeeded (CRC valid) and every other field
+    // above/below still roundtrips correctly -- an absent bit is a fact
+    // about commissioning history, never a decode failure.
+    TEST_CHECK((back.fields_set & CONFIG_STORE_SET_TC_TYPE) == 0,
+               "a real value in tc_type (T, not the K default) with the commissioning bit "
+               "absent still decodes cleanly as NOT commissioned -- simulates a real record "
+               "written before CONFIG_STORE_SET_TC_TYPE existed");
+    TEST_CHECK(back.tc_type == 0x07u,
+               "...and the value itself is untouched by that -- decoding 'not commissioned' "
+               "never rewrites the stored byte");
     TEST_CHECK(back.tc_source == rec.tc_source, "tc_source roundtrips");
     TEST_CHECK(back.borrowed_zone_index == rec.borrowed_zone_index, "borrowed_zone_index roundtrips");
     TEST_CHECK(back.tc_placement_mode == rec.tc_placement_mode, "tc_placement_mode roundtrips");
@@ -791,6 +807,14 @@ static void test_v1_migration(void)
     TEST_CHECK(out.fields_set == 0,
                "migrated record has fields_set == 0 -- none of the no-safe-default fields "
                "were ever commissioned, v1 could not have set them");
+    // Explicit, named check for tc_type specifically (2026-08-24): a v1
+    // record's tc_type byte is preserved (checked above, out.tc_type ==
+    // 0x07u), but that value must NOT be mistaken for a commissioning event
+    // -- v1 predates CONFIG_STORE_SET_TC_TYPE entirely, so no migration path
+    // may ever set it, regardless of what value tc_type itself carries.
+    TEST_CHECK((out.fields_set & CONFIG_STORE_SET_TC_TYPE) == 0,
+               "a v1 record's real, preserved tc_type value still decodes as NOT commissioned "
+               "-- v1 never had a concept of commissioning this field");
 
     // Prove this check can actually fail: corrupt the v1 record's CRC and
     // confirm migration is refused, not silently accepted with garbage.
@@ -932,6 +956,20 @@ static void test_config_params_get_set_roundtrip(void)
     TEST_CHECK((rec.fields_set & CONFIG_STORE_SET_ABS_MAX_TEMP_C) != 0, "abs_max_temp_c gates fields_set");
     TEST_CHECK(config_params_get(&rec, 0x0104u, &type, &got), "get abs_max_temp_c");
     TEST_CHECK(type == KILNLINK_PARAM_TYPE_F32 && got.f32_val == 1305.25f, "abs_max_temp_c roundtrips");
+
+    // U8, gated (tc_type) -- 2026-08-24: unlike the other gated fields
+    // above, tc_type's VALUE does not change here (it was already K by
+    // compiled default); only the bit should flip, proving SET_PARAM
+    // actually distinguishes "committed as K" from "defaulted to K".
+    TEST_CHECK((rec.fields_set & CONFIG_STORE_SET_TC_TYPE) == 0,
+               "tc_type starts unset on a fresh default record");
+    v.u8_val = CONFIG_STORE_DEFAULT_TC_TYPE; // K -- same value the default already holds
+    TEST_CHECK(config_params_set(&rec, 0x0105u, KILNLINK_PARAM_TYPE_U8, v), "set tc_type (U8)");
+    TEST_CHECK((rec.fields_set & CONFIG_STORE_SET_TC_TYPE) != 0,
+               "tc_type gates fields_set even though the VALUE did not change");
+    TEST_CHECK(config_params_get(&rec, 0x0105u, &type, &got), "get tc_type");
+    TEST_CHECK(type == KILNLINK_PARAM_TYPE_U8 && got.u8_val == CONFIG_STORE_DEFAULT_TC_TYPE,
+               "tc_type value/type roundtrips");
 
     // U16 wire <-> u32 record (blind_grace_s), NOT gated.
     v.u16_val = 42u;
@@ -1370,12 +1408,28 @@ static void test_config_params_all_required_set(void)
     config_params_finalize_ct_channel_map(&rec);
 
     TEST_CHECK(!config_params_all_required_set(&rec),
-               "mains_voltage_v still unset: NOT fully commissioned yet");
+               "mains_voltage_v (and tc_type) still unset: NOT fully commissioned yet");
 
     v.f32_val = 240.0f;
     config_params_set(&rec, 0x030Eu, KILNLINK_PARAM_TYPE_F32, v); // mains_voltage_v
+
+    // 2026-08-24: tc_type joined the required mask (config_store.h's
+    // CONFIG_STORE_SET_TC_TYPE) -- unlike the seven fields above it, tc_type
+    // already had a real compiled default (K), so a fresh record that never
+    // touches 0x0105 must still read back as NOT fully commissioned even
+    // once every other field is staged, proving this bit is actually
+    // consulted rather than vacuously always-set.
+    TEST_CHECK(!config_params_all_required_set(&rec),
+               "every ORIGINAL no-safe-default field set, but tc_type still untouched: "
+               "still NOT fully commissioned");
+
+    v.u8_val = CONFIG_STORE_DEFAULT_TC_TYPE; // K -- the SAME value the record already
+                                              // holds by default; the point of this
+                                              // check is that committing it explicitly
+                                              // is what flips the bit, not the value
+    config_params_set(&rec, 0x0105u, KILNLINK_PARAM_TYPE_U8, v); // tc_type
     TEST_CHECK(config_params_all_required_set(&rec),
-               "every no-safe-default field now set: fully commissioned");
+               "every no-safe-default field now set, tc_type included: fully commissioned");
 }
 
 // GET_CONFIG_PAGE round trip: mirrors link_task_send_config_page()'s own

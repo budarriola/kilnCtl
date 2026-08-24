@@ -86,6 +86,33 @@
 // docs/COMMISSIONING.md section 2) are a separate, later pass; nothing here
 // wires a new getter for every new field, the same way v1's own landing did
 // not wire getters for fields nothing consumed yet.
+//
+// --- 2026-08-24: `tc_type` joins the fields_set-gated set, for a DIFFERENT
+// reason than the seven fields above ------------------------------------
+//
+// `tc_type` is not a "no safe default" field -- it keeps CONFIG_STORE_
+// DEFAULT_TC_TYPE (K) exactly as before, and every read site
+// (config_store_get_tc_type(), max31856_configure()'s caller) still gets a
+// usable byte with no bit check required. What it lacked, until now, was any
+// way to tell "an operator commissioned Type K" apart from "nobody has ever
+// touched this, it defaulted to K" -- and those two states are NOT merely
+// similar, they are byte-for-byte IDENTICAL in the record, which is a
+// sharper problem than any of the seven no-safe-default fields have (an
+// unset abs_max_temp_c at least reads back as the suspicious value 0.0).
+// max31856_tc_range_policy.h's per-type plausibility band is the first real
+// consumer that cares about this distinction: a genuinely commissioned type
+// earns its own tight datasheet band, but asserting that same tight band
+// against a value nobody ever confirmed is a check dressed as more precise
+// than it can honestly be. CONFIG_STORE_SET_TC_TYPE exists so that consumer
+// (and any future one) can tell the two states apart.
+// config_params_all_required_set() below now includes CONFIG_STORE_SET_
+// TC_TYPE in its required mask, for the same "surfaced, not silently
+// permissive" reason the six/seven original fields are there: this is the
+// existing, already-wired channel (calibration_missing -> DIAG's
+// CALIBRATION_MISSING bit -> link_task.c) for telling an operator/GUI "this
+// board has not been fully commissioned" -- not tc_type's own separate wire
+// flag, because no such per-field flag exists on the wire and this pass adds
+// none.
 #ifndef SAFTYFW_CONFIG_STORE_H
 #define SAFTYFW_CONFIG_STORE_H
 
@@ -226,6 +253,28 @@ extern "C" {
 #define CONFIG_STORE_SET_CT_CHANNEL_MAP_1    (1u << 8)
 #define CONFIG_STORE_SET_CT_CHANNEL_MAP_2    (1u << 9)
 
+// tc_type -- added 2026-08-24, NOT for the "no safe default" reason the nine
+// bits above exist. tc_type already has a real, safe compiled default (K,
+// CONFIG_STORE_DEFAULT_TC_TYPE) and every existing reader (config_store_get_
+// tc_type(), max31856_configure()) keeps working exactly as before whether
+// or not this bit is set. What this bit exists for: a commissioned Type K
+// and a never-touched, defaulted-to-K record are the SAME byte in the
+// record, at every layer below this one -- there is no sentinel value to
+// distinguish them the way abs_max_temp_c == 0 distinguishes "unset" (a
+// plausible temperature IS 0, but at least it is a suspicious one; K is not
+// a suspicious tc_type, it is the single most common real answer). The one
+// consumer that cares about the distinction today is
+// max31856_tc_range_policy.h's per-type plausibility band (see that file's
+// header comment): a genuinely commissioned type earns its own tight
+// datasheet band; an uncommissioned one gets only the widest band across all
+// eight types, because asserting a tight band against a value nobody ever
+// confirmed is precision this check cannot honestly claim. See this file's
+// header comment above ("2026-08-24: tc_type joins...") for the full
+// argument, including why config_params_all_required_set() below folds this
+// bit into `calibration_missing` rather than inventing a second, tc_type-
+// specific wire-visible flag.
+#define CONFIG_STORE_SET_TC_TYPE             (1u << 10)
+
 // True iff every bit in `mask` (some OR of CONFIG_STORE_SET_* above) is set
 // in `rec->fields_set`. Small enough to inline; exists so call sites read as
 // "is X commissioned" rather than repeating the `& / ==` bit-test idiom
@@ -309,15 +358,23 @@ typedef struct {
     uint8_t  tc_type;             // one of MAX31856_TC_TYPE_* (max31856.h) --
                                    // this module does not validate the value
                                    // is a recognised type; that is
-                                   // config_store_flash.c's job. UNLIKE the
-                                   // seven fields_set-gated fields above,
-                                   // tc_type keeps its v1 compiled default
-                                   // (CONFIG_STORE_DEFAULT_TC_TYPE) rather
-                                   // than an unset bit -- it was already a
-                                   // real, consumed field before this pass
-                                   // and already had a documented, safe
-                                   // placeholder default; this pass does not
-                                   // change that contract.
+                                   // config_store_flash.c's job. STILL keeps
+                                   // its v1 compiled default
+                                   // (CONFIG_STORE_DEFAULT_TC_TYPE) -- every
+                                   // existing reader gets a usable byte
+                                   // whether or not commissioned -- but,
+                                   // as of 2026-08-24, ALSO gated by
+                                   // CONFIG_STORE_SET_TC_TYPE (see that
+                                   // bit's own comment above for why a
+                                   // compiled-default field still needed a
+                                   // bit): a consumer that needs to tell
+                                   // "operator commissioned K" apart from
+                                   // "nobody ever touched this, it defaulted
+                                   // to K" MUST check that bit; a consumer
+                                   // that only wants a plausible byte to
+                                   // hand max31856_configure() may keep
+                                   // reading this field unconditionally, as
+                                   // every call site already does.
     uint8_t  ct_channel_map[3];   // zone/relay id watched by each CT channel;
                                    // gated by _SET_CT_CHANNEL_MAP as a whole
     uint8_t  safety_tc_installed; // 0/1, param 0x0211 -- "is the Pico's own
@@ -481,12 +538,14 @@ bool config_store_unpack(const uint8_t in[CONFIG_STORE_RECORD_LEN],
 
 // Fills `*out` with the safe, documented default record: format_version
 // current (2), seq 0, fields_set 0 (nothing commissioned), tc_type
-// CONFIG_STORE_DEFAULT_TC_TYPE (K), calibration_missing true, every section
-// 2-5 field at the compiled default CONFIG_REFERENCE.md documents, and the
-// seven fields_set-gated fields left at 0/0.0f -- which is IRRELEVANT to any
-// caller since fields_set says they are unset, but documented here so the
-// zero is never mistaken for "the default is zero": it is "the bit says
-// don't look at this byte". This is what every caller must fall back to
+// CONFIG_STORE_DEFAULT_TC_TYPE (K, with CONFIG_STORE_SET_TC_TYPE clear --
+// see that bit's comment above: K here is a real, usable, safe value, just
+// not a COMMISSIONED one), calibration_missing true, every section 2-5 field
+// at the compiled default CONFIG_REFERENCE.md documents, and the seven
+// no-safe-default fields_set-gated fields left at 0/0.0f -- which is
+// IRRELEVANT to any caller since fields_set says they are unset, but
+// documented here so the zero is never mistaken for "the default is zero":
+// it is "the bit says don't look at this byte". This is what every caller must fall back to
 // when the flash region has never held a valid record or its latest record
 // is corrupt -- "a missing part must not abort boot" (max31856_configure()'s
 // own doc comment) applies just as much to configuration as to a missing
@@ -565,6 +624,15 @@ uint8_t config_store_get_tc_type(void);
 // The cached calibration_missing flag. Returns true (the safe default) if
 // called before config_store_boot_load().
 bool config_store_is_calibration_missing(void);
+
+// True iff the cached record's tc_type has actually been commissioned
+// (CONFIG_STORE_SET_TC_TYPE, see that bit's own comment) rather than merely
+// holding its compiled default. Returns false (the safe default -- "treat
+// it as uncommissioned") if called before config_store_boot_load(). The one
+// caller today is thermo_task.c, choosing between max31856_tc_range_
+// policy.h's per-type band (this true) and its widest-band garbage floor
+// (this false) -- see that header's file comment.
+bool config_store_is_tc_type_set(void);
 
 // Copies the cached record's CT calibration into `out[0..CONFIG_STORE_CT_
 // CAL_NUM_CHANNELS-1]`. Same "safe default before boot_load()" contract as

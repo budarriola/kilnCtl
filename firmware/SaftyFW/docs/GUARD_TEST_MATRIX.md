@@ -29,7 +29,7 @@ So for every guard, the **first** test written is the one that must *not* trip:
 | S2 | A 40 °C overshoot at the end of a fast ramp, decaying over 90 s |
 | S3 | **A 60 s heater window at 15 % duty, for an hour** — the single most important nuisance test in the suite |
 | S4 | The same, plus every duty from 5 % to 95 % |
-| S5 | A 900 ms sensor dropout; a single failed SPI transfer; three non-consecutive bad reads; any reading inside the commissioned `tc_type`'s datasheet plausibility band (2026-08-24, see note below) |
+| S5 | A 900 ms sensor dropout; a single failed SPI transfer; three non-consecutive bad reads; any reading inside the plausibility band that applies given commissioning status (2026-08-24, see note below); a `max31856_configure()` CR1 readback that confirms the intended type (2026-08-24, see note below) |
 | S6a | `mainFault` glitching for 100 ms |
 | S6b | One dropped telemetry frame; three dropped frames with no current flowing |
 | S7 | 30 ms of contact bounce on both edges |
@@ -48,17 +48,35 @@ heater window and the 1 s peak-hold conspire to break, and it is the reason
 tested one layer upstream of `safety_guards.c` itself, so it does not appear
 in that file's own host-test scenario suite (§2 below): `thermo_task.c`
 downgrades `thermo_snapshot_t.valid` to false *before* the reading ever
-reaches `safety_guard_input_t.tc_valid`, using `max31856_tc_range_policy.c`
-against config_store's commissioned `tc_type`. The pure per-type band itself
-(all 8 real types, inclusive boundaries, NaN, unrecognised type, and the
-never-commissioned-defaults-to-K case) is exhaustively host-tested in
-`test/test_max31856_tc_range_policy.c`, against ranges taken from
-`firmware/KilnFW/Datasheets/MAX31856.pdf` page 12, Table 1 "Supported
-Thermocouples and Temperature Ranges" (TEMP RANGE column) — see that policy
-file's own header comment for the full citation and the argument for why
-the check runs unconditionally, including on an uncommissioned (default
-Type K) board. Not yet hardware-verified — no MAX31856/RP2040 on any bench
-this was built on.
+reaches `safety_guard_input_t.tc_valid`, using `max31856_tc_range_policy.c`.
+**Updated 2026-08-24:** `config_store`'s `tc_type` now carries its own
+commissioning bit (`CONFIG_STORE_SET_TC_TYPE`), so which band applies
+depends on `config_store_is_tc_type_set()`: a genuinely commissioned type
+gets `max31856_tc_range_is_plausible()` (its own exact datasheet band); an
+uncommissioned one gets `max31856_tc_range_is_plausible_uncommissioned()`
+(the union of all eight types' ranges, a garbage floor). Both functions
+(all 8 real types, inclusive boundaries, NaN, unrecognised type, the union
+band's own bounds, and the specific behavioural difference between the two —
+a value the union band accepts that a single type's band would reject) are
+exhaustively host-tested in `test/test_max31856_tc_range_policy.c`, against
+ranges taken from `firmware/KilnFW/Datasheets/MAX31856.pdf` page 12, Table 1
+"Supported Thermocouples and Temperature Ranges" (TEMP RANGE column) — see
+that policy file's own header comment for the full citation and argument.
+Not yet hardware-verified — no MAX31856/RP2040 on any bench this was built
+on.
+
+**S5's CR1 readback verification (2026-08-24, same pass)** is also tested
+one layer upstream: `max31856_configure()` (`max31856.c`) reads CR1 back
+once, right after writing it, and caches whether TC TYPE[3:0] matched what
+it wrote; `thermo_task.c` checks that cached result
+(`max31856_tc_type_verified()`) on every reading, downgrading
+`thermo_snapshot_t.valid` on a mismatch exactly like the plausibility band.
+The pure classification (`max31856_cr1_readback_check()`) — MATCH for every
+real type at the exact byte this driver writes, MISMATCH for a different
+real type, and DEAD_BUS for a readback of `0x00`/`0xFF` (checked to take
+priority over MISMATCH even when the intended type's own low nibble
+happens to be `0x0`) — is exhaustively host-tested alongside the band
+above, in the same file. Also not yet hardware-verified.
 
 ---
 

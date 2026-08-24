@@ -11,6 +11,7 @@
 #include "hardware/gpio.h"
 
 #include "max31856_decode.h"
+#include "max31856_tc_range_policy.h" // max31856_cr1_readback_check() -- Part B CR1 readback verification
 #include "max31856_tc_type_policy.h"
 #include "spi_owner.h"
 
@@ -37,6 +38,15 @@ static uint8_t s_cs_gpio;
 static int s_fault_gpio = -1; // -1 = not wired, matches KilnFW's convention
 static uint8_t s_cr0_shadow;
 static uint8_t s_cr1_shadow;
+
+// Part B (max31856_tc_range_policy.h): whether the LAST max31856_configure()
+// call verified, by reading CR1 back, that the part actually accepted the
+// tc_type it was asked to write. Starts false and stays false across every
+// early-return path in max31856_configure() below -- only the single
+// success path at the very end of that function can set it true -- so a
+// caller can never observe a stale "verified" from a PRIOR configure() call
+// once a new one has started, even if the new call itself fails partway.
+static bool s_tc_type_verified = false;
 
 static bool max31856_write_u8(uint8_t reg, uint8_t value)
 {
@@ -93,6 +103,7 @@ bool max31856_init(uint8_t cs_gpio, uint8_t fault_gpio)
     // rewrites CR0/CR1/MASK unconditionally.
     s_cr0_shadow = 0x00u;
     s_cr1_shadow = 0x03u;
+    s_tc_type_verified = false; // no configure() has run yet on this bring-up
 
     s_initialized = true;
     return true;
@@ -100,6 +111,13 @@ bool max31856_init(uint8_t cs_gpio, uint8_t fault_gpio)
 
 bool max31856_configure(uint8_t tc_type)
 {
+    // Cleared unconditionally at entry, before any of the early-return
+    // guards below -- see this flag's own declaration comment above for why
+    // that is what makes every failure path (including ones added later)
+    // correct by construction rather than by remembering to set it false at
+    // each new return site.
+    s_tc_type_verified = false;
+
     // tc_type > MAX31856_TC_TYPE_T (0x07) selects CR1.TC TYPE[3:0]'s Voltage
     // Mode (datasheet page 20's register field table: 10xx = gain 8, 11xx =
     // gain 32) instead of a real, linearized thermocouple type. In that mode
@@ -160,7 +178,35 @@ bool max31856_configure(uint8_t tc_type)
     }
     s_cr0_shadow = cr0_running;
 
+    // Part B (max31856_tc_range_policy.h): read CR1 back once, here at
+    // configure-time, not on thermo_task's hot per-sample path -- this
+    // function already runs only at boot and on a detected part reset
+    // (THERMOCOUPLE.md's completion checklist), never per-conversion, so one
+    // extra 2-byte SPI transfer here costs nothing a caller would notice,
+    // while adding it to max31856_read()'s burst would cost one on every
+    // single sample forever for a fact that changes at most once per
+    // configure() call.
+    //
+    // A failed readback transfer is deliberately treated the same as a
+    // MISMATCH/DEAD_BUS result (s_tc_type_verified stays false), not as a
+    // reason to fail this whole function: every CR0/CR1/MASK write above
+    // already succeeded, so the part IS configured as far as this function
+    // can tell -- only the CONFIRMATION step failed, which is exactly the
+    // "cannot prove the type" state this getter exists to report honestly,
+    // not a reason to also throw away three good writes and report a boot
+    // probe failure that did not actually happen.
+    uint8_t cr1_readback = 0;
+    if (max31856_read_burst(MAX31856_REG_CR1, &cr1_readback, 1)) {
+        s_tc_type_verified =
+            max31856_cr1_readback_check(tc_type, cr1_readback) == MAX31856_CR1_READBACK_MATCH;
+    }
+
     return true;
+}
+
+bool max31856_tc_type_verified(void)
+{
+    return s_initialized && s_tc_type_verified;
 }
 
 bool max31856_read(max31856_reading_t *out)

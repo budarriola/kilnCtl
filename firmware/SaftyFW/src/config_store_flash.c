@@ -107,6 +107,14 @@ bool config_store_is_calibration_missing(void)
     return s_cached_record.calibration_missing;
 }
 
+bool config_store_is_tc_type_set(void)
+{
+    if (!s_loaded) {
+        return false; // safe default: treat as uncommissioned until proven otherwise
+    }
+    return (s_cached_record.fields_set & CONFIG_STORE_SET_TC_TYPE) != 0u;
+}
+
 void config_store_get_ct_cal(config_store_ct_channel_cal_t out[CONFIG_STORE_CT_CAL_NUM_CHANNELS])
 {
     if (!s_loaded) {

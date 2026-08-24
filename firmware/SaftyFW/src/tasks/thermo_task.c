@@ -316,33 +316,48 @@ static void thermo_task_fn(void *arg)
             // max31856_tc_range_policy.h's file header for the full
             // "confident, plausible, WRONG" argument.
             //
-            // Applied UNCONDITIONALLY, including on a never-commissioned
-            // board (config_store_get_tc_type() then returns
-            // CONFIG_STORE_DEFAULT_TC_TYPE == MAX31856_TC_TYPE_K, the safe-
-            // default path, config_store.h) -- deliberately, not gated on
-            // any "has this been commissioned" flag, because no such flag
-            // exists for tc_type specifically (config_store.h's own doc
-            // comment on that field: unlike the seven fields_set-gated
-            // commissioning fields, tc_type keeps a real compiled default
-            // rather than an unset bit, and changing that is out of this
-            // pass's scope). Applying the SAME check to a default-K board
-            // is still safe and does not newly refuse readings a default-K
-            // board accepted yesterday: type K's own datasheet range
-            // (-200..+1372 degC) already covers every real kiln temperature
-            // this codebase's own S1/SAFETY_MODEL.md discussion assumes
-            // (K is called out there as "marginal above ~1150 degC", not
-            // "unusable" -- 1150 is well inside 1372), and the MAX31856's
-            // own hardware TCRANGE bit was ALREADY enforcing this exact K
-            // boundary for that same uncommissioned board before this
-            // change (its CR1 also defaults to Type K, max31856.h's power-
-            // on-defaults comment) -- so this adds no new failure mode for
-            // the default case, only a second, config_store-anchored check
-            // that starts to matter once a DIFFERENT type is genuinely
-            // commissioned.
+            // UPDATED 2026-08-24: tc_type now has a real commissioning bit
+            // (config_store_is_tc_type_set(), CONFIG_STORE_SET_TC_TYPE --
+            // config_store.h), so this check no longer applies a single
+            // type's exact band unconditionally, replacing the old
+            // "applied UNCONDITIONALLY" behaviour this comment used to
+            // describe:
+            //   - genuinely commissioned: the operator's own type gets the
+            //     tight datasheet band exactly as before.
+            //   - never commissioned: config_store_get_tc_type() still
+            //     returns a real, usable byte (CONFIG_STORE_DEFAULT_TC_TYPE
+            //     == K), but treating that byte as a confirmed type would be
+            //     asserting precision commissioning never granted -- so an
+            //     uncommissioned board instead gets max31856_tc_range_
+            //     policy.h's widest-band floor, deliberately WIDER than K's
+            //     own band (see that header's file comment for the union
+            //     math and why this is a safe widening, not a regression:
+            //     this check was never the primary ceiling for an
+            //     uncommissioned board, and both S1's abs_max_temp_c gating
+            //     and the MAX31856's own hardware TCRANGE bit are unaffected
+            //     by this change).
+            //
+            // Part B, same "only ever downgrades" rule: max31856_tc_type_
+            // verified() reports whether the LAST max31856_configure() call
+            // confirmed, via a CR1 readback, that the part actually accepted
+            // the type it was asked to run -- a cheap cached-bool read here,
+            // not a fresh SPI transfer (see that getter's own doc comment,
+            // max31856.h). A part running a DIFFERENT type than either
+            // config_store or this task believes defeats the plausibility
+            // band above just as thoroughly as it defeats the part's own
+            // TCRANGE bit, so this is checked independently and combines
+            // with the band result rather than replacing it.
             if (snap.valid) {
-                uint8_t configured_type = config_store_get_tc_type();
-                if (!max31856_tc_range_is_plausible(configured_type, snap.tc_c)) {
+                if (!max31856_tc_type_verified()) {
                     snap.valid = false;
+                } else {
+                    uint8_t configured_type = config_store_get_tc_type();
+                    bool plausible = config_store_is_tc_type_set()
+                        ? max31856_tc_range_is_plausible(configured_type, snap.tc_c)
+                        : max31856_tc_range_is_plausible_uncommissioned(snap.tc_c);
+                    if (!plausible) {
+                        snap.valid = false;
+                    }
                 }
             }
         }

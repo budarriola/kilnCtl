@@ -43,3 +43,37 @@ bool max31856_tc_range_is_plausible(uint8_t tc_type, float tc_c)
     const tc_range_t *r = &TC_RANGES[tc_type];
     return tc_c >= r->min_c && tc_c <= r->max_c; // inclusive both ends -- see header comment
 }
+
+// Union of all eight TC_RANGES rows -- computed by inspection, not at
+// runtime: min_c is J's -210 (the lowest of the eight), max_c is B's 1820
+// (the highest). Kept as a named constant, not folded into the loop below,
+// so a reviewer checking this against the datasheet table does not have to
+// re-derive it. See max31856_tc_range_policy.h's header comment for why this
+// union, not any single type's band, is what an uncommissioned tc_type gets.
+static const tc_range_t TC_RANGE_UNION = { -210.0f, 1820.0f };
+
+bool max31856_tc_range_is_plausible_uncommissioned(float tc_c)
+{
+    if (isnan(tc_c)) {
+        return false;
+    }
+    return tc_c >= TC_RANGE_UNION.min_c && tc_c <= TC_RANGE_UNION.max_c;
+}
+
+max31856_cr1_readback_result_t max31856_cr1_readback_check(uint8_t intended_tc_type,
+                                                             uint8_t cr1_readback)
+{
+    // Checked BEFORE the nibble compare -- see header comment: these two
+    // whole-byte values can never be what this driver itself wrote for any
+    // real tc_type (AVGSEL is always fixed at 4 samples, CR1 upper nibble
+    // 0x2X), so they are a dead/shifted-bus symptom, not "a different real
+    // type", regardless of what intended_tc_type's low nibble happens to be.
+    if (cr1_readback == 0x00u || cr1_readback == 0xFFu) {
+        return MAX31856_CR1_READBACK_DEAD_BUS;
+    }
+
+    uint8_t readback_type = (uint8_t)(cr1_readback & 0x0Fu);
+    return (readback_type == (uint8_t)(intended_tc_type & 0x0Fu))
+               ? MAX31856_CR1_READBACK_MATCH
+               : MAX31856_CR1_READBACK_MISMATCH;
+}

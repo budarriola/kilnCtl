@@ -281,7 +281,7 @@ bool config_params_set(config_store_record_t *rec, uint16_t id, uint8_t type,
     case 0x0102u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U8);  CHECK_U8_MAX(2u); /* CONFIG_REFERENCE.md sec1: "0-2" */ rec->borrowed_zone_index = value.u8_val; rec->fields_set |= CONFIG_STORE_SET_BORROWED_ZONE_INDEX; return true;
     case 0x0103u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U8);  CHECK_U8_MAX(CONFIG_STORE_TC_PLACEMENT_EXTERNAL_OVERHEAT); rec->tc_placement_mode = value.u8_val; rec->fields_set |= CONFIG_STORE_SET_TC_PLACEMENT_MODE; return true;
     case 0x0104u: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_F32_NONNEG(); rec->abs_max_temp_c = value.f32_val; rec->fields_set |= CONFIG_STORE_SET_ABS_MAX_TEMP_C; return true;
-    case 0x0105u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U8);  CHECK_U8_MAX(7u); /* MAX31856_TC_TYPE_T (max31856.h); this file stays dependency-free of that header, same reason config_store.h gives -- see this file's own header comment on that isolation */ rec->tc_type = value.u8_val; return true; // NOT fields_set-gated -- keeps its own compiled default (config_store.h)
+    case 0x0105u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U8);  CHECK_U8_MAX(7u); /* MAX31856_TC_TYPE_T (max31856.h); this file stays dependency-free of that header, same reason config_store.h gives -- see this file's own header comment on that isolation */ rec->tc_type = value.u8_val; rec->fields_set |= CONFIG_STORE_SET_TC_TYPE; return true; // 2026-08-24: NOW fields_set-gated too -- tc_type still keeps its own compiled default (config_store.h), the bit exists so a real commissioning write can be told apart from that default (see CONFIG_STORE_SET_TC_TYPE's comment)
     // Per-channel bookkeeping only -- the group bit (CONFIG_STORE_SET_
     // CT_CHANNEL_MAP) is NOT set here. See config_store.h's header comment
     // on these four bits and config_params_finalize_ct_channel_map() below:
@@ -582,9 +582,26 @@ bool config_params_all_required_set(const config_store_record_t *rec)
     if (!rec) {
         return false;
     }
+    // CONFIG_STORE_SET_TC_TYPE joined this mask 2026-08-24. tc_type is NOT a
+    // no-safe-default field the way the other six/seven bits below are (it
+    // keeps a real compiled default, K) -- but this function's return value
+    // is the only thing that feeds calibration_missing
+    // (link_task.c: `to_write.calibration_missing =
+    // !config_params_all_required_set(&to_write);`), and calibration_missing
+    // is the one existing, already-wired, wire-visible ("this board is not
+    // fully commissioned") signal this codebase has (DIAG's
+    // CALIBRATION_MISSING bit). tc_type has no sentinel value that can make
+    // "never touched" visibly distinct from "commissioned as K" the way an
+    // unset abs_max_temp_c reads back as the suspicious 0.0 -- folding
+    // CONFIG_STORE_SET_TC_TYPE into this mask is therefore the only way,
+    // without inventing a second wire flag this pass does not add, to keep
+    // that fact from being silently permissive: a board that has committed
+    // every other field but never touched tc_type now correctly still reads
+    // back as NOT fully commissioned, exactly as if abs_max_temp_c itself
+    // were still 0.
     uint16_t required = (uint16_t)(CONFIG_STORE_SET_TC_SOURCE | CONFIG_STORE_SET_BORROWED_ZONE_INDEX |
                                     CONFIG_STORE_SET_TC_PLACEMENT_MODE | CONFIG_STORE_SET_ABS_MAX_TEMP_C |
                                     CONFIG_STORE_SET_CT_CHANNEL_MAP | CONFIG_STORE_SET_MAX_RATE_C_PER_MIN |
-                                    CONFIG_STORE_SET_MAINS_VOLTAGE_V);
+                                    CONFIG_STORE_SET_MAINS_VOLTAGE_V | CONFIG_STORE_SET_TC_TYPE);
     return config_store_field_is_set(&rec->fields_set, required);
 }

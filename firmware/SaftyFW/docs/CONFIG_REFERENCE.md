@@ -30,8 +30,11 @@ happens if it is wrong; that one owns the mechanism.
 
 ## 1. Commissioning — required, no safe default
 
-These four have **no defaults**. Until each is set, the guards that depend on it
-stay disabled and the diagnostic frame reports `calibration_missing`.
+Most of these have **no defaults**. Until each is set, the guards that depend
+on it stay disabled and the diagnostic frame reports `calibration_missing`.
+`tc_type` is the one exception in this section: it keeps a real compiled
+default (K) rather than shipping disabled, but is *also* required for
+`calibration_missing` to clear — see its own row's Notes for why.
 
 | Field | Unit | Affects | Risk | Notes |
 |---|---|---|---|---|
@@ -39,7 +42,7 @@ stay disabled and the diagnostic frame reports `calibration_missing`.
 | `borrowed_zone_index` | 0–2 | S13, and the reading itself | 🔴 | Only meaningful when `tc_source` ≠ `OWN_J7`. Must name a zone the ESP actually reports |
 | `tc_placement_mode` | enum | S1 ceiling mode, **S2**, **S10** | 🔴🟠 | `CHAMBER_AGREED` \| `EXTERNAL_OVERHEAT`. A statement about where the sensor physically is, not a preference. Wrong in one direction silences the only cross-check; wrong in the other makes S10 fire constantly on correct readings. **Forced to `CHAMBER_AGREED` when `tc_source` is `BORROWED_ZONE`** |
 | `abs_max_temp_c` | °C | **S1** | 🔴 | In `CHAMBER_AGREED`, what the furniture and elements survive (~1300 for cone 10). In `EXTERNAL_OVERHEAT`, what *that location* must never exceed — unrelated to any firing temperature |
-| `tc_type` | enum | the **own** sensor's readings | 🔴 | Must match the thermocouple physically fitted to J7. A mismatch reads **plausible and wrong**, usually low. **Per-thermocouple, not global** — each zone has its own, configured on the ESP and reported in the context frame. See `THERMOCOUPLE.md` §2 |
+| `tc_type` | enum | the **own** sensor's readings | 🔴 | Must match the thermocouple physically fitted to J7. A mismatch reads **plausible and wrong**, usually low. **Per-thermocouple, not global** — each zone has its own, configured on the ESP and reported in the context frame. See `THERMOCOUPLE.md` §2. **Unlike the other rows in this table, `tc_type` keeps a real compiled default (K)** — an uncommissioned board still runs a real, usable type, it is not left disabled. As of 2026-08-24 it is *also* `fields_set`-gated (`CONFIG_STORE_SET_TC_TYPE`), for a narrower reason than "no safe default": a commissioned K and a never-touched, defaulted-to-K record are the identical byte, and the per-type plausibility band (`THERMOCOUPLE.md` §2/§5, `max31856_tc_range_policy.h`) needs to tell them apart. Uncommissioned ⇒ that band widens to the union of all eight types' ranges instead of applying K's alone, and `calibration_missing` stays true until this field is committed too (folded into §7's existing required-set check) |
 | `ct_channel_map[3]` | zone/relay ids | **S3**, **S4** | 🔴🟠 | Which relay each CT actually watches. Confirmed by the one-relay-at-a-time check in `CURRENT_SENSE.md` §5 step 2. S3/S4 stay disabled until it passes |
 
 ## 2. Temperature guards
@@ -170,7 +173,7 @@ no-safe-default guard disabled — do not invent values to fill the gaps.
 - [ ] `config_crc` reported in the version frame and shown in the GUI
 - [ ] Periodic in-RAM re-CRC against flash (`config_check_period_s`)
 - [ ] Every field in §§1–5 present, with these defaults
-- [ ] **The four §1 commissioning fields have no compiled-in default** and their guards refuse to arm until set
+- [ ] **The §1 commissioning fields have no compiled-in default** (except `tc_type`, which keeps K but is still required for `calibration_missing` to clear) and their guards refuse to arm until set
 - [ ] `tc_placement_mode` rejected (not silently reconciled) if it contradicts `tc_source`
 - [ ] Config read-back over the link, so the GUI can display what is actually enforced
 - [ ] §6's ESP-side coupling re-checked whenever `KilnFW` changes a heater or poll constant
