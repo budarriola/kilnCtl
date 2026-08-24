@@ -476,87 +476,24 @@ hardware-trip rows, which is why it earns a milestone here.
 
 ## Future work — KilnFW PC-link command acknowledgement
 
-Not on the dependency spine and not owned by any per-area plan yet — filed
-here until someone picks it up, at which point it should move into
-`firmware/KilnFW/TODO.md` and this becomes a one-line pointer per the upkeep
-rule below. Scoped to the **PC↔ESP link** (`uart_protocol.c`, `uart_bridge.c`,
-`uart_bridge_ext.c`, `tools/PcTools/src/kilnctrl`) — unrelated to the
-ESP↔Pico safety link's `LINK_PROTOCOL.md`, which has its own, already-correct,
-no-ACK doctrine (see below).
+**Moved out of this file, 2026-08-24.** Per the upkeep rule at the top, the
+detail now lives in [`firmware/KilnFW/TODO.md`](firmware/KilnFW/TODO.md)
+section 11, which owns it. In brief: the core defect is fixed — a truncated
+payload, an out-of-range index and each relay refusal reason (owned / safety /
+updating) now produce a reply the host can tell apart from success and from
+each other, and `pc_tools` surfaces the reason instead of decoding it and
+discarding it, which is what it used to do. The rule worth carrying forward is
+recorded in [`firmware/KilnFW/docs/UART_PROTOCOL.md`](firmware/KilnFW/docs/UART_PROTOCOL.md):
+on this hop an ACK means *queued*, not *done*, so a handler that rejects must
+reply for itself. Three narrower instances of the same shape remain open and
+are listed in TODO.md section 11.
 
-**The failure mode.** `uart_protocol.c`'s RX task ACKs a `DATA` frame the
-instant it is enqueued into the destination bridge task's inbox — before that
-task's `switch (subcmd)` ever runs. Commit `c91ed50` closed the narrowest gap
-(all 11 `default:` branches now reply `{subcmd, ok=0}`), and `CONTROL`/
-`PROFILES`/`WIFI`/`AUTOTUNE` already reply ok/fail for their *recognized*
-mutating subcommands via `bx_reply_ok_err`. But `bridge_args_ok`/`bx_args_ok`
-(truncated payload) and `bridge_range_ok` (out-of-range index) in
-`uart_bridge.c` both do `rejected = true; break;` with **no reply at all** —
-comment at `uart_bridge.c:753-755` names the shape explicitly: "rejected ->
-no reply". Same for `IO_CMD_SET_RELAY`/`SET_RELAY_MASK`'s
-`KILN_IO_OWNER_RELAY_ERR_OWNED`/`ERR_SAFETY`/`ERR_UPDATING` refusals
-(`uart_bridge.c:763-846`) — logged on the device, invisible on the wire. A
-caller that only checks the transport ACK cannot distinguish "relay energized"
-from "refused because a profile owns it" from "refused because safety is
-faulted" from "dropped because the frame was truncated." For a relay command,
-that is the worst available shape: success and safety-refusal look identical.
-
-**Why the status quo isn't just an oversight.** `uart_bridge.c` and
-`safety_link.c` both say, deliberately, "the PC observes the outcome via the
-next status/diag poll, not an ACK from here" — for `SAFETY_CMD_SET_CONFIG`/
-`SET_CT_CAL`/`ROLLBACK`, which ride the *fire-and-forget broadcast* half of
-this codebase, that's correct: those commands cross onto the Pico, which
-`LINK_PROTOCOL.md` §1–2 forbids from ever being obliged to reply, so "poll the
-next telemetry frame" is the only mechanism physically available, and it works
-because telemetry already carries the relevant state (`config_crc`, trip
-mask, boot_id) every 500 ms regardless. **That reasoning does not transfer to
-the PC↔ESP hop**: this is a stop-and-wait `DATA`/`ACK` link with retries
-already built in (`uart_protocol_send_limited`), not a one-way broadcast from
-a component that must never block. Reusing the Pico doctrine here is
-borrowing a constraint (no round trip) that doesn't apply, at the cost of the
-one thing a request/response link is good for.
-
-**Options.**
-
-| # | Scheme | Cost | kilnctrl changes? | Wire-compatible? |
-|---|---|---|---|---|
-| a | Status-quo-plus-poll: leave transport ACK as-is, PC always re-queries state after a mutating command | Cheapest to ship (nothing to build) but weakest: nothing on the wire tells a caller *when* to poll, doubles round trips for every write, and a caller that doesn't poll is back to today's blind spot | None required, but only closes the hole if every caller adopts the habit | Yes — no frame change |
-| b | Explicit `{subcmd, ok, [msg]}` reply on **every** mutating subcommand — extend `bx_reply_ok_err`'s existing convention to the paths that currently `break` silently | Touches ~25-30 `rejected = true; break;`/early-return sites across `uart_bridge.c`'s THERMO/IO/DISPLAY/SAFETY tasks (`CONTROL`/`PROFILES`/`WIFI`/`AUTOTUNE` already mostly there) | Yes — `io_expander.py` and siblings currently discard everything but the transport `SendResult`; they'd need to read the reply payload for calls that matter | Yes — appends a reply where none existed, or extends an existing one; no reorder/resize of anything a v5 client already parses |
-| c | Defer the transport ACK itself until after the handler dispatches, so ACK proves execution not delivery | Reaches into `uart_protocol.c`'s core RX/dedup/ACK path; conflates "malformed frame" with "slow but valid command" (SX_SCAN's PC-side timeout is already 4 s); requires either the transport layer to block on the destination task's dispatch (the coupling `LINK_PROTOCOL.md`'s no-block doctrine explicitly targets, even though this is a different link) or a redesigned per-subcommand timeout budget | Yes — full retry/timeout assumption rewrite | No — changes what an ACK has always meant to every existing caller |
-| d | Sequence/receipt: every mutating command gets a seq, PC correlates against a per-task "last applied seq" queryable state, mirroring the Safety link's `seq`/`trip_seq` dedup | New per-task state (`dedup_record`-shaped ring) plus a new query subcommand per task, or a shared new one | Yes — new correlation logic | Yes, but adds real wire surface for a benefit the Safety link needed (surviving a lost reply on a no-ACK broadcast) and this link already has for free (retried `DATA`/`ACK`) |
-
-**Recommendation: (b).** It is the direct generalization of the fix already
-shipped in `c91ed50` and already proven out by `CONTROL`/`WIFI`/`PROFILES` —
-no new frame type, no version bump, no timeout redesign, and it is honest
-about *why* the Pico's no-reply contract doesn't apply here: that contract
-exists to keep a safety processor from ever blocking on a dead peer, and the
-PC↔ESP link already blocks-with-retry by design. The only real cost is
-mechanical breadth — every silent refusal path needs one more line — and a
-second, coordinated change in `kilnctrl` to actually look at what comes back
-instead of trusting a bare transport ACK. (a) is the fallback if effort is
-tightly bounded: it needs zero firmware changes and can be adopted piecemeal
-in `kilnctrl` today, but it never closes the gap for a caller that doesn't
-explicitly poll, which is the caller most likely to be a bug, a script, or an
-impatient human.
-
-**Migration path.** Land per-task, safety-adjacency first: `IO` (relay
-commands) before `THERMO`/`DISPLAY`/`SAFETY`'s remaining silent paths. Every
-new reply is `{subcmd, ok, [msg]}` appended after that task's existing echo
-byte, so a `kilnctrl` build that doesn't yet read it keeps working exactly as
-before (same "purely additive" property `c91ed50`'s commit message claims) —
-no protocol version bump needed unless a specific reply changes the *shape*
-of an already-non-empty response rather than adding one where there was none.
-`kilnctrl` picks up each task's new replies independently, starting with
-`io_expander.py`'s relay `send()` wrapper, so the two sides can land in
-separate commits without either being broken by the other mid-migration.
-
-**Scope estimate.** Two coordinated changes, not one: firmware side is
-`firmware/KilnFW/App/drivers/uart_bridge.c` and `uart_bridge_ext.c`
-(~25-30 call sites); PC side is `tools/PcTools/src/kilnctrl/io_expander.py`
-and the handful of sibling task clients that currently discard the reply
-payload for a mutating call, plus their MCP tool wrappers in
-`mcp_server.py`. Each task can ship and be adopted independently — this is
-not a single flag-day cutover.
+This does NOT apply to the ESP↔Pico safety link, whose no-ACK doctrine is
+deliberate and correct: `LINK_PROTOCOL.md` sections 1–2 forbid obliging the
+Pico to reply, and telemetry already carries `config_crc`, the trip mask and
+`boot_id` every 500 ms, so "poll the next frame" is both available and
+sufficient there. The two files carry similar-looking comments that mean
+different things; keep them distinct.
 
 ---
 
