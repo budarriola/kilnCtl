@@ -255,6 +255,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
                           "re-running a sweep you already know is clean; never use this on "
                           "first bring-up of new wiring.")
 
+    p.add_argument("--ct-id", default="",
+                    help="identifier for the physical CT this sweep is run against (e.g. a part "
+                         "number/serial, \"Triad TY-300P#2\") -- recorded in the output table so a "
+                         "later CT swap is visible instead of silent (docs/PLAN.md section 11 item "
+                         "12). Omit to leave it unrecorded, same as an older table.")
     p.add_argument("--out", type=Path, default=DEFAULT_OUT,
                     help=f"calibration table output path (default {DEFAULT_OUT})")
     p.add_argument("--report-out", type=Path, default=None,
@@ -273,6 +278,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     log("=== SimFW CT calibration (DESIGN_NOTES.md 3.3 / CURRENT_SENSE.md Sec.5) ===")
     log(f"channels={channels} points={args.points} amps=[{args.amps_min},{args.amps_max}] "
         f"min_r2={args.min_r2} crosstalk_threshold_a={args.crosstalk_threshold_a}")
+    if args.ct_id:
+        log(f"CT identifier: {args.ct_id!r} (recorded in the output table)")
+    else:
+        log("CT identifier: NONE GIVEN (--ct-id not passed) -- the output table will carry no "
+            "record of which physical CT this sweep was run against; see docs/PLAN.md section 11 "
+            "item 12")
 
     link = _make_fixture_link(args)
     try:
@@ -369,7 +380,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 "the log above for the specific reason(s), fix them, and re-run.")
             exit_code = 2
         else:
-            table = CalibrationTable.new(crosstalk_passed=crosstalk_ok, channels=channel_cals)
+            table = CalibrationTable.new(crosstalk_passed=crosstalk_ok, channels=channel_cals, ct_id=args.ct_id)
             try:
                 table.save(args.out)
             except CalibrationTableError as exc:

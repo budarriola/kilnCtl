@@ -20,7 +20,15 @@
 // before the calibration path existed. Milestone M-D is NOT closed by
 // this file; only the ability to apply a calibration is.
 
+// NO CT IDENTIFIER RECORDED. docs/PLAN.md section 11 item 12: this table
+// carries no record of which physical CT it was fitted against, so
+// ct_cal_id_known() below is false and ct_cal_id() returns "". Either no
+// calibration run has ever been performed (see above), or the JSON table
+// this was generated from predates the ct_id field / left it blank.
+
 static const ct_cal_table_t CT_CAL_DEFAULT_TABLE = {
+    .ct_id_known = false,
+    .ct_id = "",
     .channels = {
         [0] = { .calibrated = false, .gain = 0.0f, .offset = 0.0f },  // UNCALIBRATED -- identity; gain/offset are ignored
         [1] = { .calibrated = false, .gain = 0.0f, .offset = 0.0f },  // UNCALIBRATED -- identity; gain/offset are ignored

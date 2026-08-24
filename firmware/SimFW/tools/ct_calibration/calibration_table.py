@@ -91,15 +91,32 @@ class CalibrationTable:
     crosstalk_passed: bool
     channels: "dict[int, ChannelCalibration]"
     notes: str = ""
+    #: Identifies the physical CT this table's channels were swept against
+    #: (docs/PLAN.md section 11 item 12). "" means "not recorded" -- either
+    #: an older table written before this field existed, or a run where
+    #: nobody supplied one; both collapse to the same "unknown" state on
+    #: load(), same as gen_ct_cal_table.load_ct_id(). A real id is never
+    #: empty, so "" is an unambiguous sentinel here, no separate bool needed
+    #: on the Python side (unlike ct_cal_table_t's ct_id_known in C, which
+    #: exists so the *compiled-in* representation can't collide an
+    #: accidentally-empty-but-"valid" id with "nobody recorded one").
+    ct_id: str = ""
 
     @classmethod
-    def new(cls, crosstalk_passed: bool, channels: "dict[int, ChannelCalibration]", notes: str = "") -> "CalibrationTable":
+    def new(
+        cls,
+        crosstalk_passed: bool,
+        channels: "dict[int, ChannelCalibration]",
+        notes: str = "",
+        ct_id: str = "",
+    ) -> "CalibrationTable":
         return cls(
             schema_version=SCHEMA_VERSION,
             created_at=datetime.now(timezone.utc).isoformat(),
             crosstalk_passed=crosstalk_passed,
             channels=channels,
             notes=notes,
+            ct_id=ct_id,
         )
 
     def get(self, channel: int) -> ChannelCalibration:
@@ -114,6 +131,7 @@ class CalibrationTable:
             "created_at": self.created_at,
             "crosstalk_passed": self.crosstalk_passed,
             "notes": self.notes,
+            "ct_id": self.ct_id,
             "channels": {
                 str(ch): {
                     "gain": cal.gain,
@@ -177,4 +195,9 @@ class CalibrationTable:
             crosstalk_passed=bool(raw.get("crosstalk_passed", False)),
             channels=channels,
             notes=raw.get("notes", ""),
+            # "" for a table written before this field existed (older,
+            # already-checked-in tables must still load) -- indistinguishable
+            # here from a table that explicitly recorded an empty id, which
+            # is intentional: see this field's docstring above.
+            ct_id=str(raw.get("ct_id", "") or ""),
         )

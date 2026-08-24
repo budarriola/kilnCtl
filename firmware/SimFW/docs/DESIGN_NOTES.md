@@ -496,6 +496,21 @@ a correct rewrite, not just from a clean run.
   correct place for this binding to live — not in the transformer ratio, and
   not anywhere in this document.
 
+  **The table now also records which CT it was fitted against** (`docs/PLAN.md`
+  section 11 item 12, closed): `ct_cal_table_t` carries a fixed-size `ct_id`
+  string (`CT_CAL_ID_MAX_LEN` = 31 chars + NUL, no malloc/pointers) plus a
+  `ct_id_known` flag, same "flag, not a neutral-value convention" idiom as
+  `calibrated` above — an empty-but-"valid" id string would be
+  indistinguishable from "nobody recorded one" otherwise. This is *reported*,
+  never enforced: there is no sensor telling the fixture which CT is actually
+  installed, so a swap after calibrating can only be made visible, not caught
+  automatically. `tools/ct_calibration/calibrate_ct.py --ct-id` records it in
+  the JSON table; `tools/gen_ct_cal_table.py` compiles it into
+  `ct_calibration_defaults.h`; `wave_owner_start()` prints it (or an explicit
+  "NO recorded CT identifier" line) at boot, right after `ct_i2s_gen_init()`.
+  An older JSON table written before this field existed loads the same as one
+  where the field was left blank — both become `ct_id_known == false`.
+
   **Confidence, and why the earlier caveat is downgraded.** The PWM-era
   1.5 V peak primary-drive estimate (assuming ~91% of the theoretical
   ±1.65 V logic-rail swing before a DC-blocking cap) is superseded by the
@@ -1416,6 +1431,14 @@ open.
   overclock as a variable during first bring-up, when everything else in the
   fixture is already unproven. The M-A Saleae capture, not this arithmetic,
   is the real arbiter of whether either deadline actually holds on silicon.
+- **CT calibration table had no record of which CT it was taken against.**
+  Resolved: `ct_cal_table_t` (`src/sim/ct_calibration.h`) now carries a
+  fixed-size `ct_id`/`ct_id_known` pair, plumbed through
+  `tools/ct_calibration/calibration_table.py`'s JSON schema (`--ct-id` on
+  `calibrate_ct.py`), `tools/gen_ct_cal_table.py`'s generator, and reported
+  (never enforced) by `wave_owner_start()` at boot and by `push_ct_cal.py`
+  when pushing to `SaftyFW`. See §3.3 above for the full shape and the
+  reasoning for "report, don't enforce."
 
 ---
 

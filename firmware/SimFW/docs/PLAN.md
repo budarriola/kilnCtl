@@ -330,21 +330,7 @@ Resolved questions have moved to `DESIGN_NOTES.md` §13. What's still open:
    bring-up step 5–6 (§14), alongside the ground-domain check that already
    lives there. (M-A/pre-M-A bring-up)
 
-12. [ ] **CT calibration table has no record of which CT it was taken
-    against.** `ct_cal_table_t` (`src/sim/ct_calibration.h`) stores
-    per-channel `gain`/`offset` but nothing identifying the physical CT the
-    sweep was run with. The board's sense input accepts any self-burdened,
-    voltage-output CT (`DESIGN_NOTES.md` §3.3) — amps-per-volt is a property
-    of whichever CT is installed, not a fixed constant — so if the user
-    swaps CTs after calibrating, the table silently goes wrong with no way
-    to notice: `ct_cal_apply()` has no way to know the fit no longer matches
-    the hardware. Proposed shape (not built, recorded here only): a CT
-    identifier string carried through the calibration table/JSON, plumbed
-    through `tools/ct_calibration/` and `tools/gen_ct_cal_table.py`, and at
-    minimum reported (not necessarily enforced) at startup so a mismatch is
-    visible rather than silent. (M-D)
-
-(Item numbers 3, 4, 5, 7, 8, 10, 11 are resolved — see `DESIGN_NOTES.md`
+(Item numbers 3, 4, 5, 7, 8, 10, 11, 12 are resolved — see `DESIGN_NOTES.md`
 §13. Numbers kept stable here so cross-references elsewhere in the repo
 don't break.)
 

@@ -63,6 +63,9 @@ NUM_CHANNELS = 3
 #: Must match calibration_table.py's SCHEMA_VERSION.
 SCHEMA_VERSION = 1
 
+#: Must match ct_calibration.h's CT_CAL_ID_MAX_LEN.
+CT_ID_MAX_LEN = 31
+
 TOOLS_DIR = Path(__file__).resolve().parent
 SIMFW_DIR = TOOLS_DIR.parent
 DEFAULT_OUT = SIMFW_DIR / "src" / "sim" / "ct_calibration_defaults.h"
@@ -73,15 +76,40 @@ class TableError(ValueError):
     """Raised for a table this generator refuses to compile in."""
 
 
+def _load_raw(json_path: Path) -> dict:
+    raw = json.loads(json_path.read_text(encoding="utf-8"))
+    version = raw.get("schema_version")
+    if version != SCHEMA_VERSION:
+        raise TableError(f"{json_path}: schema_version {version!r} != supported {SCHEMA_VERSION}")
+    return raw
+
+
+def load_ct_id(json_path: Path) -> str:
+    """Returns the CT identifier recorded in the table at `json_path`, or ""
+    if the field is absent (an older table written before docs/PLAN.md
+    section 11 item 12) or was left empty -- both collapse to the same
+    "unknown" answer here; ct_calibration.h's ct_id_known flag is what keeps
+    that distinct from a real, non-empty id once this is compiled in. A
+    recorded id longer than CT_ID_MAX_LEN is refused outright (truncating it
+    silently would let two different CTs collide on the same shortened
+    label), same "refuse rather than silently mis-map" instinct
+    load_channels() applies to a non-invertible fit gain."""
+    raw = _load_raw(json_path)
+    ct_id = str(raw.get("ct_id", "") or "")
+    if len(ct_id) > CT_ID_MAX_LEN:
+        raise TableError(
+            f"{json_path}: ct_id {ct_id!r} is {len(ct_id)} chars, longer than "
+            f"CT_ID_MAX_LEN={CT_ID_MAX_LEN}"
+        )
+    return ct_id
+
+
 def load_channels(json_path: Path) -> "dict[int, tuple[float, float, str]]":
     """Returns {channel: (gain, offset, provenance)} in *firmware* (inverted)
     form. Refuses a table that was not crosstalk-validated, or whose fit gain
     is zero/non-finite -- the same "refuse rather than silently mis-map"
     instinct calibration_table.save() applies on the writing side."""
-    raw = json.loads(json_path.read_text(encoding="utf-8"))
-    version = raw.get("schema_version")
-    if version != SCHEMA_VERSION:
-        raise TableError(f"{json_path}: schema_version {version!r} != supported {SCHEMA_VERSION}")
+    raw = _load_raw(json_path)
     if not raw.get("crosstalk_passed", False):
         raise TableError(
             f"{json_path}: crosstalk_passed is false -- refusing to compile in a table "
@@ -111,7 +139,24 @@ def load_channels(json_path: Path) -> "dict[int, tuple[float, float, str]]":
     return out
 
 
-def render(channels: "dict[int, tuple[float, float, str]]", source: str) -> str:
+def _c_string_literal(s: str) -> str:
+    """Minimal C string-literal escaper for `ct_id` -- only `"`, `\\`, and
+    non-printable ASCII need handling since a real CT id is expected to be a
+    short part number/suffix, but this is data that ultimately came from a
+    JSON file a human edited by hand, so it is not trusted to already be a
+    safe C literal."""
+    out = []
+    for ch in s:
+        if ch == '"' or ch == "\\":
+            out.append("\\" + ch)
+        elif 0x20 <= ord(ch) < 0x7F:
+            out.append(ch)
+        else:
+            out.append(f"\\x{ord(ch):02x}")
+    return '"' + "".join(out) + '"'
+
+
+def render(channels: "dict[int, tuple[float, float, str]]", source: str, ct_id: str = "") -> str:
     lines = [
         "// ct_calibration_defaults.h -- GENERATED FILE, DO NOT EDIT BY HAND.",
         "//",
@@ -139,8 +184,19 @@ def render(channels: "dict[int, tuple[float, float, str]]", source: str) -> str:
             "// this file; only the ability to apply a calibration is.",
             "",
         ]
+    if not ct_id:
+        lines += [
+            "// NO CT IDENTIFIER RECORDED. docs/PLAN.md section 11 item 12: this table",
+            "// carries no record of which physical CT it was fitted against, so",
+            "// ct_cal_id_known() below is false and ct_cal_id() returns \"\". Either no",
+            "// calibration run has ever been performed (see above), or the JSON table",
+            "// this was generated from predates the ct_id field / left it blank.",
+            "",
+        ]
     lines += [
         "static const ct_cal_table_t CT_CAL_DEFAULT_TABLE = {",
+        f"    .ct_id_known = {'true' if ct_id else 'false'},",
+        f"    .ct_id = {_c_string_literal(ct_id)},",
         "    .channels = {",
     ]
     for ch in range(NUM_CHANNELS):
@@ -182,16 +238,18 @@ def main(argv: "list[str] | None" = None) -> int:
 
     if args.json is None:
         channels: "dict[int, tuple[float, float, str]]" = {}
+        ct_id = ""
         source = "none -- no calibration run has been performed (all channels UNCALIBRATED / identity)"
     else:
         try:
             channels = load_channels(args.json)
+            ct_id = load_ct_id(args.json)
         except (OSError, TableError, KeyError, ValueError) as exc:
             print(f"gen_ct_cal_table: {exc}", file=sys.stderr)
             return 1
         source = args.json.as_posix()
 
-    text = render(channels, source)
+    text = render(channels, source, ct_id)
 
     if args.check:
         current = args.out.read_text(encoding="utf-8") if args.out.exists() else ""
@@ -206,6 +264,7 @@ def main(argv: "list[str] | None" = None) -> int:
     calibrated = sorted(channels)
     print(f"gen_ct_cal_table: wrote {args.out}")
     print(f"  calibrated channels: {calibrated if calibrated else 'NONE (identity on all channels)'}")
+    print(f"  CT identifier: {ct_id if ct_id else 'NONE RECORDED -- see docs/PLAN.md section 11 item 12'}")
     return 0
 
 

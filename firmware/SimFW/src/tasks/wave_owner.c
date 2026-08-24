@@ -15,6 +15,7 @@
 // command/model-poll latency -- see WAVE_OWNER_TICK_MS's comment.
 #include "wave_owner.h"
 
+#include <stdio.h>
 #include <string.h>
 
 #include "FreeRTOS.h"
@@ -384,6 +385,25 @@ bool wave_owner_start(void)
     }
 
     ct_i2s_gen_init(&s_gen_ctx, ct_cal_default_table());
+
+    // Report (never enforce/refuse -- docs/PLAN.md section 11 item 12) which
+    // physical CT the compiled-in calibration table was fitted against, so a
+    // CT swapped after calibrating is visible on the boot log instead of
+    // silently making every gain/offset constant wrong. There is no sensor
+    // that tells this fixture which CT is actually plugged in, so this
+    // cannot be more than a printout a human reads.
+    {
+        const ct_cal_table_t *cal = ct_cal_default_table();
+        if (ct_cal_id_known(cal)) {
+            printf("[wave_owner] CT calibration table identifies CT '%s' -- verify the "
+                   "installed CT still matches before trusting its gain/offset constants "
+                   "(amps-per-volt is a property of the physical CT, not a fixed "
+                   "constant).\r\n", ct_cal_id(cal));
+        } else {
+            printf("[wave_owner] CT calibration table carries NO recorded CT identifier -- "
+                   "cannot confirm it matches whatever CT is installed.\r\n");
+        }
+    }
 
     // wave_owner has no fallback CT backend to fall back to (ct_wave_pwm.c
     // is deleted, docs/DESIGN_NOTES.md section 3.3) -- ct_wave_i2s_init()

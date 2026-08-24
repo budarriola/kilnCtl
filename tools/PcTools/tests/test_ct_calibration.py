@@ -42,6 +42,7 @@ import calibration_table as ct  # noqa: E402
 import crosstalk as xt  # noqa: E402
 import fit  # noqa: E402
 import push_ct_cal as push  # noqa: E402
+import gen_ct_cal_table as gen  # noqa: E402
 from gen_ct_cal_table import TableError  # noqa: E402
 
 
@@ -266,6 +267,121 @@ class CalibrationTableTest(unittest.TestCase):
         table = ct.CalibrationTable.new(crosstalk_passed=True, channels={0: self._good_channel(0)})
         with self.assertRaises(ct.CalibrationTableError):
             table.get(2)
+
+    # -- ct_id (docs/PLAN.md section 11 item 12) ---------------------------
+
+    def test_new_defaults_ct_id_to_unrecorded(self):
+        table = ct.CalibrationTable.new(crosstalk_passed=True, channels={0: self._good_channel(0)})
+        self.assertEqual(table.ct_id, "")
+
+    def test_round_trip_preserves_ct_id(self):
+        import tempfile
+
+        table = ct.CalibrationTable.new(
+            crosstalk_passed=True, channels={0: self._good_channel(0)}, ct_id="Triad TY-300P#2"
+        )
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "cal.json"
+            table.save(path)
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(raw["ct_id"], "Triad TY-300P#2")
+            loaded = ct.CalibrationTable.load(path)
+        self.assertEqual(loaded.ct_id, "Triad TY-300P#2")
+
+    def test_load_defaults_ct_id_when_field_absent(self):
+        """An older table written before this field existed must still
+        load -- and its ct_id must come back "" (unrecorded), not raise
+        and not silently invent a value."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "cal.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "created_at": "2020-01-01T00:00:00+00:00",
+                        "crosstalk_passed": True,
+                        "channels": {
+                            "0": {
+                                "gain": 30.0, "offset": 1.0, "r2": 0.999,
+                                "n_points": 8, "max_abs_residual_a": 0.01, "sweep": [],
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            loaded = ct.CalibrationTable.load(path)
+        self.assertEqual(loaded.ct_id, "")
+
+
+# ---------------------------------------------------------------------------
+# gen_ct_cal_table.py -- ct_id load + render (docs/PLAN.md section 11 item 12)
+# ---------------------------------------------------------------------------
+class LoadCtIdTest(unittest.TestCase):
+    def _write(self, tmp_dir: Path, ct_id) -> Path:
+        raw = {
+            "schema_version": 1,
+            "crosstalk_passed": True,
+            "channels": {"0": {"gain": 25.0, "offset": 2.0, "r2": 0.999, "n_points": 10}},
+        }
+        if ct_id is not None:
+            raw["ct_id"] = ct_id
+        p = Path(tmp_dir) / "cal.json"
+        p.write_text(json.dumps(raw), encoding="utf-8")
+        return p
+
+    def test_returns_recorded_id(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            path = self._write(d, "Triad TY-300P#2")
+            self.assertEqual(gen.load_ct_id(path), "Triad TY-300P#2")
+
+    def test_returns_empty_when_field_absent(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            path = self._write(d, None)
+            self.assertEqual(gen.load_ct_id(path), "")
+
+    def test_returns_empty_when_field_explicitly_empty(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            path = self._write(d, "")
+            self.assertEqual(gen.load_ct_id(path), "")
+
+    def test_refuses_id_longer_than_max_len(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            path = self._write(d, "x" * (gen.CT_ID_MAX_LEN + 1))
+            with self.assertRaises(TableError):
+                gen.load_ct_id(path)
+
+
+class RenderCtIdTest(unittest.TestCase):
+    """Exercises the actual C struct-literal text gen_ct_cal_table.render()
+    emits for the ct_id/ct_id_known fields -- the piece
+    ct_calibration_defaults.h's compiled-in default is generated from."""
+
+    def test_no_id_renders_unknown(self):
+        text = gen.render({}, source="none", ct_id="")
+        self.assertIn(".ct_id_known = false,", text)
+        self.assertIn('.ct_id = "",', text)
+        self.assertIn("NO CT IDENTIFIER RECORDED", text)
+
+    def test_known_id_renders_true_and_string_literal(self):
+        text = gen.render({}, source="none", ct_id="Triad TY-300P#2")
+        self.assertIn(".ct_id_known = true,", text)
+        self.assertIn('.ct_id = "Triad TY-300P#2",', text)
+        self.assertNotIn("NO CT IDENTIFIER RECORDED", text)
+
+    def test_id_with_quote_and_backslash_is_escaped_for_c(self):
+        text = gen.render({}, source="none", ct_id='a"b\\c')
+        self.assertIn('.ct_id = "a\\"b\\\\c",', text)
 
 
 # ---------------------------------------------------------------------------

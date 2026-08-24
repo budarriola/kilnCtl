@@ -13,6 +13,8 @@
 //   3. an UNCALIBRATED channel -- the only state that exists today, since
 //      no CT hardware and no calibration run exist -- behaves as exact
 //      identity, byte-for-byte the old placeholder's behavior.
+#include <string.h>
+
 #include "test_common.h"
 #include "../src/sim/ct_calibration.h"
 
@@ -21,6 +23,8 @@
 static ct_cal_table_t make_table(void)
 {
     ct_cal_table_t t;
+    t.ct_id_known = false;
+    t.ct_id[0] = '\0';
     t.channels[0].calibrated = true;
     t.channels[0].gain = 0.05f;    // 20 A -> full scale
     t.channels[0].offset = 0.0f;
@@ -179,6 +183,53 @@ static void test_out_of_range_channel(void)
     TEST_CHECK(!ct_cal_is_calibrated(&t, CT_CAL_NUM_CHANNELS), "out-of-range channel is not 'calibrated'");
 }
 
+static void test_ct_id(void)
+{
+    TEST_SECTION("ct_calibration -- CT identifier (docs/PLAN.md section 11 item 12)");
+
+    // A table with no identifier recorded: ct_id_known == false, poison
+    // string content ignored entirely -- same "flag, not a neutral-value
+    // convention" idiom test_uncalibrated_is_identity() exercises for
+    // `calibrated` above, applied to the id field.
+    ct_cal_table_t t = make_table();
+    TEST_CHECK(!ct_cal_id_known(&t), "make_table(): ct_id_known is false by construction");
+    TEST_CHECK(strcmp(ct_cal_id(&t), "") == 0, "unknown id: ct_cal_id() returns an empty string");
+
+    // Poison the string buffer itself (as if left uninitialised/stale) --
+    // ct_cal_id() must still report "" because ct_id_known is false. If
+    // ct_cal_id() ever started reading the buffer regardless of the flag,
+    // this would fail loudly instead of returning a wrong string.
+    memset(t.ct_id, 'X', sizeof(t.ct_id) - 1);
+    t.ct_id[sizeof(t.ct_id) - 1] = '\0';
+    TEST_CHECK(strcmp(ct_cal_id(&t), "") == 0,
+               "unknown id: poisoned buffer contents are still ignored");
+
+    // A table WITH an identifier recorded.
+    ct_cal_table_t known = make_table();
+    known.ct_id_known = true;
+    {
+        static const char id[] = "Triad TY-300P#2";
+        memcpy(known.ct_id, id, sizeof(id)); /* includes the NUL */
+    }
+    TEST_CHECK(ct_cal_id_known(&known), "known id: ct_cal_id_known() is true");
+    TEST_CHECK(strcmp(ct_cal_id(&known), "Triad TY-300P#2") == 0,
+               "known id: ct_cal_id() returns the recorded string");
+
+    // NULL table: both accessors fail safe, never crash, never claim a
+    // known id.
+    TEST_CHECK(!ct_cal_id_known(NULL), "NULL table: ct_cal_id_known() is false");
+    TEST_CHECK(strcmp(ct_cal_id(NULL), "") == 0, "NULL table: ct_cal_id() returns an empty string");
+
+    // THE SHIPPED DEFAULT. No bench calibration run has ever been taken
+    // (see test_uncalibrated_is_identity() above), so the compiled-in table
+    // must also carry no CT identifier -- if a real bench run is ever
+    // generated into ct_calibration_defaults.h without an id, or generated
+    // WITH one, this is the check that will move, on purpose.
+    const ct_cal_table_t *def = ct_cal_default_table();
+    TEST_CHECK(!ct_cal_id_known(def), "shipped default table: no CT identifier recorded");
+    TEST_CHECK(strcmp(ct_cal_id(def), "") == 0, "shipped default table: ct_cal_id() returns \"\"");
+}
+
 void run_test_ct_calibration(void)
 {
     test_linear_mapping();
@@ -186,4 +237,5 @@ void run_test_ct_calibration(void)
     test_per_channel_independence();
     test_uncalibrated_is_identity();
     test_out_of_range_channel();
+    test_ct_id();
 }

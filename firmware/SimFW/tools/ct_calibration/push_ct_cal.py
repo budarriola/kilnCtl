@@ -83,7 +83,7 @@ _SIMFW_TOOLS_DIR = _TOOLS_DIR.parent  # firmware/SimFW/tools/
 if str(_SIMFW_TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(_SIMFW_TOOLS_DIR))
 
-from gen_ct_cal_table import NUM_CHANNELS, TableError, load_channels  # noqa: E402
+from gen_ct_cal_table import NUM_CHANNELS, TableError, load_channels, load_ct_id  # noqa: E402
 
 #: firmware/SimFW/tools -> repo root -> tools/PcTools/src, same computation
 #: calibrate_ct.py uses (this file lives in the same directory).
@@ -426,9 +426,25 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     log("=== SaftyFW CT calibration push (SET_CT_CAL / GET_CT_CAL) ===")
     try:
         pushes = build_pushes_from_json(args.json)
+        ct_id = load_ct_id(args.json)
     except TableError as exc:
         log(f"REFUSED: {exc}")
         return 1
+
+    # Report-only (docs/PLAN.md section 11 item 12): SAFETY_CMD_SET_CT_CAL's
+    # wire layout (kilnlink_set_ct_cal.h) carries no CT identifier field, and
+    # extending it is out of this task's scope (firmware/CommonFW and
+    # firmware/SaftyFW are owned elsewhere) -- so nothing here is pushed to
+    # the DUT or enforced against it. This only makes a missing identifier
+    # visible to whoever runs this tool, the same "report, don't refuse"
+    # bar the JSON table itself follows.
+    if ct_id:
+        log(f"CT identifier recorded in this table: {ct_id!r} -- "
+            "confirm the CT currently installed still matches before trusting this push.")
+    else:
+        log("CT identifier: NONE RECORDED in this table -- cannot confirm the gain/offset "
+            "constants being pushed still match whichever CT is currently installed "
+            "(docs/PLAN.md section 11 item 12).")
 
     for p in pushes:
         state = f"calibrated gain={p.gain!r} offset={p.offset!r}" if p.calibrated else "UNCALIBRATED"

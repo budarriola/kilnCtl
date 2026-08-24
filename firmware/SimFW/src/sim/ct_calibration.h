@@ -70,6 +70,13 @@ extern "C" {
 // a compile-time assert that the two agree.
 #define CT_CAL_NUM_CHANNELS 3u
 
+// Cap on the CT identifier string (below), plus room for the NUL. 31 chars
+// is enough for a part number + short suffix (e.g. "TY-300P#2") without
+// inviting a heap/pointer -- this is RP2040 firmware, ct_cal_table_t must
+// stay trivially copyable, and the compiled-in default lives in flash as a
+// plain struct literal (ct_calibration_defaults.h).
+#define CT_CAL_ID_MAX_LEN 31u
+
 // One channel's calibration. `calibrated == false` means "no bench
 // calibration exists for this channel" and gain/offset are then ignored
 // entirely -- see the header comment above for why this is a flag and not a
@@ -81,6 +88,24 @@ typedef struct {
 } ct_cal_channel_t;
 
 typedef struct {
+    // Identifies the physical CT the sweep that produced `channels` below
+    // was run against (docs/PLAN.md section 11 item 12): amps-per-volt is a
+    // property of whichever CT is installed, not a fixed constant, so a
+    // gain/offset table is only valid for the CT it was fitted to. Swapping
+    // CTs after calibrating silently invalidates the table with no way for
+    // ct_cal_apply() to notice -- there is no sensor that tells the fixture
+    // which CT is plugged in. `ct_id_known == false` means "no identifier
+    // was recorded for this table" (an older JSON predating this field, or
+    // one nobody filled in) and `ct_id`'s contents are then undefined --
+    // same "flag, not a neutral-value convention" idiom as `calibrated`
+    // above, and for the same reason: an empty-but-"valid" ct_id would be
+    // indistinguishable from "nobody recorded one". Callers must use
+    // ct_cal_id()/ct_cal_id_known() rather than reading these fields
+    // directly. This is reported, not enforced: nothing here refuses to
+    // apply a table with an unknown or (from a human's perspective)
+    // wrong-looking id -- see ct_cal_id()'s callers for where it's surfaced.
+    bool ct_id_known;
+    char ct_id[CT_CAL_ID_MAX_LEN + 1];
     ct_cal_channel_t channels[CT_CAL_NUM_CHANNELS];
 } ct_cal_table_t;
 
@@ -101,6 +126,19 @@ float ct_cal_apply(const ct_cal_table_t *table, uint8_t channel, float amps);
 // carries a real bench calibration. Exists so a status/report path can say
 // "uncalibrated" out loud instead of inferring it from constants.
 bool ct_cal_is_calibrated(const ct_cal_table_t *table, uint8_t channel);
+
+// The CT identifier recorded for `table`, or "" if `table` is NULL or no
+// identifier was recorded (ct_cal_id_known() is then false). Never NULL --
+// safe to pass straight to printf("%s", ...). The string is always
+// NUL-terminated within CT_CAL_ID_MAX_LEN+1 bytes.
+const char *ct_cal_id(const ct_cal_table_t *table);
+
+// True only if `table` is non-NULL and carries a recorded CT identifier
+// (ct_cal_id() then returns a real, non-empty string). Exists for the same
+// reason ct_cal_is_calibrated() exists: a status/report path can say "no CT
+// identifier recorded" out loud instead of inferring it from an empty
+// string.
+bool ct_cal_id_known(const ct_cal_table_t *table);
 
 // The compiled-in default table (src/sim/ct_calibration_defaults.h). Today
 // this is all-uncalibrated -- identity behavior on every channel. Never

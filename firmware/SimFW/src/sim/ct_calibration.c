@@ -37,6 +37,19 @@ bool ct_cal_is_calibrated(const ct_cal_table_t *table, uint8_t channel)
     return table->channels[channel].calibrated;
 }
 
+const char *ct_cal_id(const ct_cal_table_t *table)
+{
+    if (table == NULL || !table->ct_id_known) {
+        return "";
+    }
+    return table->ct_id;
+}
+
+bool ct_cal_id_known(const ct_cal_table_t *table)
+{
+    return table != NULL && table->ct_id_known;
+}
+
 const ct_cal_table_t *ct_cal_default_table(void)
 {
     return &CT_CAL_DEFAULT_TABLE;
