@@ -12,6 +12,7 @@
 #include "ui_page_kiln_cfg_setup.h"
 #include "ui_page_kiln_setup.h"
 #include "ui_page_network.h"
+#include "ui_page_network_manage.h"
 #include "ui_page_profile_builder_review.h"
 #include "ui_page_profile_builder_segment.h"
 #include "ui_page_profile_builder_zones.h"
@@ -156,6 +157,14 @@ esp_err_t kiln_ui_init(void)
      * ui_page_config.c's "Network / Wi-Fi" nav item (previously a
      * "not built yet" placeholder row). */
     err = kiln_ui_register_page("network", ui_page_network_build);
+    if (err != ESP_OK) return err;
+
+    /* 2026-08-24 no-scroll budget split (TODO.md's "ui_page_network.c's
+     * worst-case fit is ~268px against a ~264px budget" item): Scan/Saved/
+     * Connect/Forget moved off "network" to their own page here, reachable
+     * from a "Manage networks" button via kiln_ui_show("network_manage").
+     * See ui_page_network_manage.c's header comment. */
+    err = kiln_ui_register_page("network_manage", ui_page_network_manage_build);
     if (err != ESP_OK) return err;
 
     /* 2026-08-18 no-scroll rewrite -- ui_page_home.c's Safety Processor card

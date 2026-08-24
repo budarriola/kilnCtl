@@ -30,6 +30,7 @@
 #include <stddef.h>
 
 #include "lvgl.h"
+#include "settings.h" /* DISPLAY_WIDTH -- UI_THEME_PAGE_CONTENT_BUDGET_PX's derivation below */
 
 /* ---- Backgrounds -------------------------------------------------------
  * Dark navy, not pure black -- KlipperScreen's reference screenshots showed
@@ -124,6 +125,41 @@
  * status icon row without eating too much of the 320px height budget the
  * rest of the page (10.3's content) needs. */
 #define UI_THEME_STATUS_BAR_HEIGHT_PX  32
+
+/* ---- No-scroll content budget -- TODO.md 10.3's hard rule ("every page
+ * must fit its content height without scrolling; overflow is split into
+ * another page, never scrolled") -- see UI_PLAN.md.
+ *
+ * Every page comment across this codebase has cited this budget as
+ * "~264px", derived by prose rather than by a #define -- which is exactly
+ * how ui_page_network.c's worst case drifted to a few px over it without
+ * anyone noticing (nothing forced the prose and the real ui_theme.h
+ * constants to agree). Computed here instead, from the same constants
+ * every page's own arithmetic already uses:
+ *
+ *   landscape panel height (480x320, DISPLAY_WIDTH -- settings.h's
+ *   Kconfig-driven CONFIG_KILNCTL_DISPLAY_WIDTH is the panel's UNROTATED
+ *   short edge, 320px, which becomes the landscape HEIGHT once rotated)
+ *     - 2 * UI_THEME_PADDING_PX   (scr's own top+bottom outer pad)
+ *     - UI_THEME_STATUS_BAR_HEIGHT_PX   (the fixed top bar)
+ *     - UI_THEME_PADDING_PX / 2   (scr's pad_gap between the bar and content)
+ *   = 320 - 16 - 32 - 4 = 268px.
+ *
+ * That real number is 268, not the ~264 everyone has been citing -- close
+ * enough that nobody's arithmetic was ever wildly wrong, but every
+ * "~264px" comment in this codebase is now off by 4px from what the code
+ * actually computes. Left un-edited elsewhere (they are correct in spirit
+ * and this constant is now the single source of truth going forward); new
+ * budget arithmetic should reference UI_THEME_PAGE_CONTENT_BUDGET_PX
+ * directly rather than copying either number as a literal. */
+#define UI_THEME_PAGE_CONTENT_BUDGET_PX \
+    (DISPLAY_WIDTH - (2 * UI_THEME_PADDING_PX) - UI_THEME_STATUS_BAR_HEIGHT_PX - (UI_THEME_PADDING_PX / 2))
+
+/* LV_FONT_DEFAULT (montserrat_14)'s real single-line height with LVGL's
+ * default line spacing, per ui_page_home.c's own budget derivation. Used by
+ * every per-page worst-case _Static_assert below rather than each page
+ * re-guessing "~20px" independently. */
+#define UI_THEME_FONT_LINE_HEIGHT_PX   20
 
 /* ---- Touch hit-area sizing -- TODO.md 10.4 ("Touch hit-testing") ---------
  *

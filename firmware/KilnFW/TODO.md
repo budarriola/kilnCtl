@@ -877,10 +877,14 @@ Configuration hub (7 nav destinations), Temperature (per-zone reading +
 manual relay toggles, no setpoint override per explicit decline), Network,
 Safety Processor card, Board Health, Diagnostics, Thermocouple Faults, and
 Touch Calibration (with a Cancel path, fixed 2026-08-19) all exist and are
-rebuilt to fit the hard **no-scroll rule**: every page must fit ~264px of
-real content height (320px panel minus status bar/padding), computed from
-`ui_theme.h`'s real constants — not pixel-verified on hardware. Every field
-comes from the same plain-C getters the web HTTP handlers use (10.1a).
+rebuilt to fit the hard **no-scroll rule**: every page must fit
+`ui_theme.h`'s `UI_THEME_PAGE_CONTENT_BUDGET_PX` (268px, computed from real
+constants as of 2026-08-24 — every "~264px" figure in this file and in
+several pages' own comments predates that `#define` and is 4px off, harmless
+in practice but worth knowing the real number now has one source of truth)
+of real content height (320px panel minus status bar/padding) — not
+pixel-verified on hardware. Every field comes from the same plain-C getters
+the web HTTP handlers use (10.1a).
 
 The four pages this section added to the plan 2026-08-18 (Safety/Alarm,
 Diagnostics, Thermocouple Faults, Backup/restore) are tracked in section 0.5,
@@ -922,16 +926,54 @@ invisible on the page the operator watches.
       ability to query Wi-Fi state over UART. Not chased down; worth a
       dedicated pass with more boot instrumentation around
       `uart_bridge_start_wifi_task()`''s call site.
-- [ ] **`ui_page_temperature.c`''s no-scroll fit depends on relay count per
-      zone at runtime** — a zone with several relays wrapping onto a second
-      button row could still overflow the ~264px budget. Real, unresolved
-      risk without a fixed relays-per-zone cap or real hardware to check
-      against.
-- [ ] **`ui_page_network.c`''s worst-case fit (~268px against a ~264px
-      budget) is computed, not hardware-confirmed**, and is the tightest of
-      any page. If it turns out tight on real hardware: split Scan and Saved
-      into their own sub-pages via `kiln_ui_show()`, the same pattern
-      Safety Processor/Temperature History already use.
+- [x] **`ui_page_temperature.c`''s no-scroll fit depends on relay count per
+      zone at runtime** — DONE 2026-08-24. The real budget is
+      `ui_theme.h`''s new `UI_THEME_PAGE_CONTENT_BUDGET_PX` (268px, computed
+      from real constants — every prior "~264px" comment across this
+      codebase was off by 4px, harmless in practice but now a single
+      source of truth). Re-deriving this page''s worst case turned up a
+      LARGER, previously-unnoticed overflow than the relay-count risk this
+      item named: `MAX31856_CHANNEL_COUNT` (3) zone cards at the old fixed
+      relay-row height (80px, 2 button rows) summed to ~362-380px, ~100px+
+      over budget, independent of relay count entirely — the 2026-08-19
+      "relay-count-bound" pass had bounded each card''s own height but
+      nobody had summed all the cards against the real page budget. Fixed
+      by shrinking `UI_PAGE_TEMPERATURE_RELAY_ROW_HEIGHT_PX` to one button
+      row (40px, still internally scrollable for a zone with more relays
+      than fit in one row) and adding a `_Static_assert` bounding
+      `MAX31856_CHANNEL_COUNT` cards + the status label against the real
+      budget. Relays-per-zone itself is now `UI_PAGE_TEMPERATURE_MAX_
+      RELAYS_PER_ZONE` (`== KILN_IO_RELAY_COUNT`, the true structural
+      ceiling — a zone can''t claim more relays than the board has),
+      cross-checked by its own `_Static_assert`, with a RUNTIME clamp+log
+      in `build_zone_row()` for a corrupted/out-of-range `relay_mask`
+      (persisted config data no static assert can see the value of).
+      `firmware/KilnFW/App/test/check_ui_budget_asserts.ps1` is the lint
+      half — fails loudly if any of these `_Static_assert`s is ever
+      deleted. Still NOT hardware-confirmed (no ILI9488 panel in this
+      environment) — arithmetic against real constants, not a pixel-verified
+      fit; the one-row relay display (vs. the old 2-row layout) is also an
+      unverified real UX narrowing for a zone with several relays.
+- [x] **`ui_page_network.c`''s worst-case fit (~268px against a ~264px
+      budget) is computed, not hardware-confirmed** — DONE 2026-08-24, via
+      the exact remedy this item named: Scan/Saved/Connect/Forget split into
+      their own page, `ui_page_network_manage.c`, reachable from a "Manage
+      networks" button via `kiln_ui_show("network_manage")` (same pattern
+      Safety Processor/Temperature History use). Re-deriving the real
+      numbers first (not trusting the old ~268px estimate) found the true
+      worst case was worse than documented: the "Change network"/"Show QR"
+      button being visible at the SAME TIME as the list block once
+      connected was never summed into any prior pass''s arithmetic. A
+      SECOND, entirely undocumented ~34px overflow was also found in the
+      AP-identity section (`s_ap_section`) while deriving this — nothing in
+      TODO.md or this file''s history ever named it, since every earlier
+      budget pass here was chasing the Scan/Saved list. Both are fixed:
+      `ui_page_network.c` now carries two `_Static_assert`s (STA-connected
+      state, AP-mode state — the two real mutually-exclusive states
+      `content` can show) and `ui_page_network_manage.c` carries its own,
+      all three checked by `ui_theme.h`''s new `UI_THEME_PAGE_CONTENT_
+      BUDGET_PX` and enforced by `check_ui_budget_asserts.ps1`. Still NOT
+      hardware-confirmed.
 
 ### 10.4 Touch hit-testing
 
@@ -1315,33 +1357,176 @@ return `OkReason` now (still truthy/falsy-compatible); `mcp_server.py`'s and
 `gui.py`'s matching call sites surface `.reason` on refusal instead of a
 bare "REJECTED".
 
-**Still open**:
-- **SAFETY / DISPLAY / TOUCH's bottom "driver call failed" path is still
-  silent on the wire** — not fixed this pass. Read `5df2190`'s exact shape
-  before touching this: `safety_bridge_task` has a complication THERMO/IO
-  don't — `SAFETY_CMD_GET_CT_CAL` (0x1A) is a **query** whose reply shares
-  its command id with the request, distinguished only by length (1 byte
-  request vs 28-byte reply), and `parse_safety_response()`'s `GET_CT_CAL`
-  branch enforces that exact length, raising `SafetyResponseError` on
-  anything else. Blindly adding `bridge_reply_reject(..., "driver error")`
-  to the shared bottom block would make a failed `GET_CT_CAL` send a
-  ~15-byte frame that the *existing* PC-side branch misreads as a malformed
-  reply (an exception) rather than the clean refusal the fix is supposed to
-  produce — worse than today's silent timeout. Fixing this needs either
-  excluding `GET_CT_CAL` from the generic driver-error reply (keep its
-  current silent-drop-on-failure behavior, since it already has its own
-  "raises SafetyQueryError on timeout" contract PC-side) or teaching
-  `parse_safety_response()`'s `GET_CT_CAL` branch to check for the
-  `{subcmd, ok=0, reason}` shape before enforcing the 28-byte length. Not
-  attempted this pass for lack of an on-target build to verify either firmware
-  change against. DISPLAY and TOUCH don't have this particular complication
-  (no shared-id query on either task), so the plain THERMO/IO-style fix
-  should apply cleanly there — but see the note above that DISPLAY's gap is
-  actually wider than "driver-error only".
-- Two reply shapes flagged in `5df2190`'s commit message for whoever picks
-  up THERMO: `THERMO_CMD_READ_FAULTS` and `IO_CMD_SX_SCAN` both use byte[1]
-  as a count that can legitimately be 0, so their empty-success reply is
-  byte-identical to a reasonless rejection. In practice every rejection
-  carries a reason today, so reply *length* still tells them apart — but a
-  decoder that only checks byte[1] would misread an honest empty result as
-  a refusal.
+**SAFETY / DISPLAY / TOUCH's bottom "driver call failed" path closed
+(commit `a458a8f`, 2026-08-24, ahead of this section catching up)**:
+`SAFETY_CMD_GET_CT_CAL`'s request/reply id-sharing blocker is gone —
+`GET_CT_CAL` moved to its own request id (0x22, `KILNLINK_PROTOCOL_VERSION`
+7), leaving the reply's old id (0x1A, `SAFETY_CMD_CT_CAL`) exclusively for
+the 28-byte success shape. A driver-error refusal now goes out under 0x22
+and can never again be misread as a truncated/malformed CT_CAL reply.
+`GET_PARAM`/`GET_CONFIG_PAGE` had the identical shape and moved under the
+same bump (0x23/0x24). All three bridge tasks' bottom `err != ESP_OK` block
+now calls `bridge_reply_reject(..., "driver error")` — verified by reading
+the current file, not assumed from an old commit message.
+
+**DISPLAY / TOUCH's per-guard rejection paths closed this pass**: the
+gap this section flagged as *wider* than the driver-error item above —
+`display_bridge_task`'s and `touch_bridge_task`'s `bridge_args_ok()`/
+`bridge_range_ok()` failures (truncated frame, out-of-range rotation/text
+size, an odd-length BLIT_DATA chunk) set `rejected = true` and `continue`
+with no reply at all, unlike THERMO/IO/SAFETY where the same guard is
+followed by `bridge_reply_reject(..., "truncated"/"out of range")`. Every
+such path in both tasks now replies the same way, matching THERMO/IO/SAFETY
+exactly. No PC-side decoder yet consumes these DISPLAY/TOUCH guard
+refusals (`parse_display_response()` only recognizes `READ_ID`; most other
+DISPLAY/TOUCH subcommands have no PC-side reply decode at all) — this pass
+was scoped to the firmware wire behavior per the assignment; wiring a PC
+consumer is follow-up work, not a re-opened gap (a client that never reads
+the reply is unaffected either way, same as every other addition
+`bridge_reply_reject()` has made to this file).
+
+**`THERMO_CMD_READ_FAULTS`/`IO_CMD_SX_SCAN` vs. an unsupported-subcommand
+reject closed this pass**: both queries reply `{subcmd, count}` where
+`count` can legitimately be 0 — an honest empty result — which used to be
+byte-identical to `bridge_reply_unsupported()`'s `{subcmd, 0}` 2-byte
+output for an unrecognized subcommand (this section's own flag, from
+`5df2190`'s commit message). `bridge_reply_unsupported()` now passes a real
+reason, `"unsupported"`, into `bridge_reply_reject()` instead of `NULL`, so
+that reply is always longer than 2 bytes and can never again collide with
+an empty-but-successful `READ_FAULTS`/`SX_SCAN` reply. Checked before
+making this change, per the assignment: no `tools/PcTools` parser depends on
+the literal 2-byte `{subcmd, 0}` shape (every `parse_*_response()` routes on
+the subcmd byte alone and raises "unknown ... subcommand" regardless of
+length for anything it doesn't recognize; only `_decode_ok_reason()` reads
+the tail generically, and it already tolerates a variable-length reason).
+Swept the rest of the file for the same collision class (any other
+`{subcmd, count}` reply where `count` can be 0) — none found: `THERMO_CMD_
+READ`'s count is always ≥1 (its `chan_mask` is rejected before this point if
+it would select zero channels), and every other query in this file replies
+a fixed size. `UART_PROTOCOL_VERSION` (7, hard-equality gated) makes this
+safe: the shape change touches only the *unsupported* reply, never a real
+subcommand's success shape, so no existing decoder for a known subcommand
+is affected.
+
+`tools/PcTools/tests/test_bridge_reject_reply.py`'s
+`UnsupportedVsEmptySuccessCollisionTests` covers the *host decoder* side:
+that the 2-byte shape decodes as a clean, wrong "empty success" while the
+reasoned shape raises. Those tests build their own frames with a hardcoded
+reason string, so **they cannot fail if the C side regresses** — flipping
+`bridge_reply_unsupported()` back to a `NULL` reason leaves every one of them
+green, because no Python test reads `uart_bridge.c`. An earlier revision of
+this entry claimed those tests were the negative test for the fix; they are
+not, and that claim was wrong in exactly the way this repo has been bitten by
+three times before.
+
+The C-side rule therefore gets a C-side guard:
+**`tools/check_bridge_reject_reason.ps1`**, modelled on
+`tools/check_uart_version_independence.ps1` (standalone, comment-stripping,
+non-zero exit via `throw`). It fails if any `bridge_reply_reject()` call in
+`uart_bridge.c` passes `NULL` or `""` as the reason, and it also refuses to
+run blind: it throws if `bridge_reply_unsupported()` has vanished or been
+renamed, or if fewer than 10 calls are recognised at all (which would mean
+the call style changed — e.g. calls split across lines — and the check had
+stopped seeing anything).
+
+Proved able to fail, on the real file rather than on a simulation of it:
+reverting `bridge_reply_unsupported()` to pass `NULL` produced
+
+```
+BRIDGE REJECT REASON CHECK FAILED:
+  ...uart_bridge.c:272: bridge_reply_reject() called with a NULL/empty reason -- bridge_reply_reject(proto, msg, src_task, subcmd, NULL);
+```
+
+then, restored, `Bridge reject reason check passed: all 78
+bridge_reply_reject() call(s) supply a reason.`
+
+**PC-side consumer for DISPLAY/TOUCH's guard refusals, and the rest of
+IO's write subcommands, wired this pass.** The entry above left "wiring a
+PC consumer" as explicit follow-up, not a re-opened gap; this closes it,
+plus a wider IO gap the same audit turned up that no earlier pass of this
+section had named.
+
+- `devices.parse_display_response()` used to recognize only
+  `DISPLAY_CMD_READ_ID`; every other subcommand (`RESET`..`BLIT_END`) raised
+  `"unknown DISPLAY response subcommand"` on any reply, so the refusal
+  frames the firmware work above now sends for truncated/out-of-range/
+  driver-error were dropped in `DisplayClient._handle_reply` with a debug
+  log line, invisible to the caller. Every write subcommand's id now
+  decodes via `_decode_ok_reason()` into an `OkReason` (`READ_ID` keeps its
+  own 9-byte layout, unchanged — its case sets `err = ESP_OK`
+  unconditionally, so it can never actually emit this shape).
+  `parse_touch_response()` got the matching fix for `INJECT`/
+  `SET_TAP_DUMP`/`LOG_TAP_TARGETS`, plus a decode (previously a raise) for
+  `GET_STATE`'s own id-sharing refusal — `screen_idle_get_state()` can fail,
+  unlike `DISPLAY_CMD_READ_ID`, so a non-{6,23}-byte `GET_STATE` reply is now
+  an `OkReason` refusal instead of an unparseable frame the caller's query
+  just times out waiting for.
+- `display.py`: `DisplayClient` gained one write method per subcommand
+  (`reset`/`set_power`/`set_rotation`/`set_invert`/`clear`/`fill_rect`/
+  `draw_rect`/`draw_line`/`set_text_cursor`/`set_text_style`/`print_text`),
+  all going through a new `_write()` following `io_expander.py`'s
+  `set_relay()` shape exactly (send, then wait
+  `DRIVER_ERROR_REJECT_WINDOW_S` = 0.5 s for the *optional* refusal reply).
+  `blit()`'s `BLIT_BEGIN`/`BLIT_END` now go through `_write()` too;
+  `BLIT_DATA` deliberately still uses the raw fire-and-forget `send()` — a
+  full image is thousands of chunks, and a 0.5 s wait after each one would
+  turn a ~1-minute transfer into ~20 minutes for a failure BLIT_BEGIN/
+  BLIT_END already bookend. A mid-stream `BLIT_DATA` driver failure is
+  therefore still not surfaced to the caller beyond the existing transport-
+  ACK check — a known, documented gap, not a silent one.
+  `touch.py`: `TouchClient.inject()`/`set_tap_dump()`/`log_tap_targets()`
+  changed from returning a bare `SendResult` (fire-and-forget) to the same
+  send/wait-window shape, returning `OkReason`; `get_state()` now raises
+  `TouchQueryError` with the decoded reason on a `GET_STATE` refusal instead
+  of returning it mistyped as a `TouchState`.
+- Wired through to callers: `mcp_server.py`'s `display_*`/`touch_*` tools
+  (previously every one of them called the generic fire-and-forget `_send()`)
+  now go through the new client methods and surface `.reason` on refusal,
+  via new `_display_mutating()`/`_touch_mutating()` helpers matching
+  `thermo_config_channel()`'s established formatting. `gui.py`'s Display
+  page (Reset/Power/Rotation/Invert/Clear/Fill Rect/Draw Rect/Draw Line/
+  Print/Set Cursor/Apply Style buttons) moved from `send_async` (fire-and-
+  forget) to a new `_display_mutating_async()` helper mirroring
+  `_thermo_mutating_async()`'s status-bar convention exactly. `gui.py` has
+  no Touch page, so there was nothing to rewire there.
+- **A wider gap in the same family, found while auditing IO for this
+  pass**: `parse_io_response()` only ever decoded `SET_RELAY`/
+  `SET_RELAY_MASK` (into `RelayResult`) plus the three queries (`READ`/
+  `SX_READ_REG`/`SX_SCAN`) — every *other* IO write subcommand
+  (`SET_IO`, `SET_IO_DIR`, `SET_AUTO_REPORT`, `ALL_RELAYS_OFF`,
+  `SX_WRITE_REG`, `SX_SET_DIR`, `SX_SET_PULLUP`, `SX_SET_OPENDRAIN`,
+  `SX_SET_DEBOUNCE`, `SX_SET_INT_MASK`, `SX_LED_DRIVER`, `SX_RESET`) has
+  had truncated/out-of-range/`"safety"` (the relay-pin guard `SX_WRITE_REG`/
+  `SX_SET_DIR` share with the relay commands) and driver-error replies in
+  `uart_bridge.c` since the first pass of this section (2026-08-24,
+  `5df2190`) — that pass's own description ("extended that reply convention
+  to every rejection... across THERMO/IO/SAFETY") already covered them, but
+  nothing in `tools/PcTools` ever followed up on the plain-IO half of it.
+  Every write besides the two relay commands went through `IoClient.send()`
+  or `mcp_server._send()`, both fire-and-forget, straight through
+  `gui.py`'s IO/Expander pages too. Closed the same way: `parse_io_response()`
+  decodes all twelve into `OkReason` via `_decode_ok_reason()`;
+  `IoClient._set_relay_style()` generalized into `_write_style()` (relay
+  callers pass a `RelayResult`-shaped silence fallback, the twelve new
+  methods default to `OkReason(ok=True)`); one wrapper method per
+  subcommand; `mcp_server.py`'s `io_all_relays_off`/`io_set_output`/
+  `io_set_direction`/`io_set_auto_report`/`expander_write_reg`/
+  `expander_set_dir`/`expander_set_pullup`/`expander_set_opendrain`/
+  `expander_set_debounce`/`expander_set_int_mask`/`expander_led_driver`/
+  `expander_reset` tools and `gui.py`'s matching IO/Expander-page buttons
+  rewired from `send_async`/`_send()` to the new methods via new
+  `_io_mutating()`/`_io_mutating_async()` helpers.
+- Tests: `tools/PcTools/tests/test_bridge_reject_reply.py` gained
+  `DisplayWriteRefusalTests`/`TouchWriteRefusalTests`/
+  `IoOtherWriteRefusalTests` (byte-exact, mirroring `ThermoMutatingReasonTests`),
+  and `DisplayTouchDriverErrorTests`'s two `TOUCH_CMD_GET_STATE` cases were
+  rewritten from "must raise" to "decodes to a reasonless/reasoned
+  `OkReason`" — they encoded the pre-fix behavior as correct, so the fix
+  above turned them red until updated. Negative-tested by reverting all
+  three new decode branches in `devices.py` in turn: all ten new tests
+  failed with `unknown {DISPLAY,TOUCH,IO} response subcommand 0x..`, then
+  were restored and the suite re-confirmed green.
+- PC suite 688 passed, 91 subtests passed, 0 failed (from 676 passed/91
+  subtests/2 failed at the point this pass started — the 2 failures were the
+  pre-existing `TOUCH_CMD_GET_STATE` tests above, not a regression this pass
+  introduced).

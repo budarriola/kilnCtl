@@ -61,17 +61,79 @@ static const char *TAG = "ui_page_temperature";
  * (build_zone_row()'s comment below), so a zone with several relays wrapping
  * onto a second/third button row grew the card's -- and therefore the whole
  * page's -- drawn height without bound, at odds with every other page's
- * compile-time-fixed ~264px budget. Capped here at a fixed pixel height
- * (room for 2 rows of the 36px relay buttons plus one inter-row gap: 2*36 +
- * UI_THEME_PADDING_PX/2 = 76, rounded up) and left scrollable -- same
- * sanctioned "small internally-scrollable list, not page-level scrolling"
- * pattern ui_page_network.c's s_scan_list/s_saved_list already use (fixed
- * lv_list height, LV_OBJ_FLAG_SCROLLABLE left set rather than cleared, so
- * LVGL's own touch-drag scroll handles overflow inside that one bounded
- * box). A zone with few enough relays to fit in 2 rows never actually
- * scrolls (nothing overflows the fixed height); one with more does, exactly
- * like Scan/Saved's lists. */
-#define UI_PAGE_TEMPERATURE_RELAY_ROW_HEIGHT_PX 80
+ * compile-time-fixed content budget (UI_THEME_PAGE_CONTENT_BUDGET_PX).
+ * Capped here at a fixed pixel height and left scrollable -- same sanctioned
+ * "small internally-scrollable list, not page-level scrolling" pattern
+ * ui_page_network.c's saved-network list uses (fixed lv_obj height,
+ * LV_OBJ_FLAG_SCROLLABLE left set rather than cleared, so LVGL's own
+ * touch-drag scroll handles overflow inside that one bounded box).
+ *
+ * 2026-08-24 re-derivation (TODO.md's two open LCD-budget items): the
+ * original 80px (room for 2 rows of 36px buttons) bounded EACH card's own
+ * height, but nobody had summed MAX31856_CHANNEL_COUNT of those capped
+ * cards against the real page budget -- doing that arithmetic now (see the
+ * _Static_assert below) shows 3 full 80px-relay-row cards alone are already
+ * past UI_THEME_PAGE_CONTENT_BUDGET_PX, regardless of relay count per zone.
+ * Shrunk to a single button row's worth (36px button + a few px of
+ * tolerance, not two rows) so the assert has real margin; a zone whose
+ * relay_mask has enough bits set to wrap past one row still fits via this
+ * container's own vertical scroll -- it was never validated against fewer
+ * than 2 visible rows, so this is a real (if minor) UX narrowing, not free,
+ * but the alternative is a page that silently overflows every time
+ * MAX31856_CHANNEL_COUNT zones are configured, which no amount of relay-cap
+ * bookkeeping fixes on its own. */
+#define UI_PAGE_TEMPERATURE_RELAY_ROW_HEIGHT_PX 40
+
+/* UI_PLAN.md's other open item: "no relays-per-zone cap". KILN_IO_RELAY_COUNT
+ * (kiln_io.h) is the WHOLE BOARD's relay count, so a single zone can never
+ * legitimately claim more relays than that -- relay_mask is a
+ * KILN_IO_RELAY_COUNT-wide bitmask (zones_config_get_relay_mask()) by
+ * construction. Named as its own constant, tied back to KILN_IO_RELAY_COUNT
+ * by the _Static_assert below, so a future change to either is caught
+ * rather than silently drifting apart; build_zone_row() additionally
+ * defends against a corrupted/out-of-range mask at runtime (see its own
+ * comment) since relay_mask is persisted config data no compile-time check
+ * can bound on its own -- a stray bit in a mask this page didn't create
+ * itself is exactly the kind of "runtime data, not compile-time-provable"
+ * case TODO.md's own discipline calls out for a loud runtime guard instead
+ * of a silent trust. */
+#define UI_PAGE_TEMPERATURE_MAX_RELAYS_PER_ZONE KILN_IO_RELAY_COUNT
+_Static_assert(UI_PAGE_TEMPERATURE_MAX_RELAYS_PER_ZONE == KILN_IO_RELAY_COUNT,
+               "ui_page_temperature.c: UI_PAGE_TEMPERATURE_MAX_RELAYS_PER_ZONE must track "
+               "KILN_IO_RELAY_COUNT (kiln_io.h) -- a single zone can never claim more relays "
+               "than the whole board has; update both together if this ever needs to change.");
+
+/* ---- Worst-case page-height arithmetic (TODO.md's "no relays-per-zone cap"
+ * item) ----
+ *
+ * Mirrors build_zone_row()/ui_page_temperature_build()'s real lv_obj_set_*
+ * calls exactly -- if a padding/gap constant below changes, update this
+ * arithmetic in the same commit, the same discipline
+ * UI_PAGE_TEMPERATURE_RELAY_ROW_HEIGHT_PX's own header comment already
+ * follows.
+ *
+ * Per-card height (build_zone_row()'s `row`): its own top+bottom pad_all
+ * (UI_THEME_PADDING_PX/2, twice) + header (one font line) + the header<->
+ * relay_row pad_gap (UI_THEME_PADDING_PX/4) + the fixed relay_row. Relay
+ * COUNT never appears in this arithmetic at all -- relay_row's height is
+ * fixed regardless, per its own header comment -- so this bound holds no
+ * matter what zones_config_get_relay_mask() returns at runtime. */
+#define UI_PAGE_TEMPERATURE_CARD_HEIGHT_PX \
+    (((UI_THEME_PADDING_PX / 2) * 2) + UI_THEME_FONT_LINE_HEIGHT_PX + (UI_THEME_PADDING_PX / 4) + \
+     UI_PAGE_TEMPERATURE_RELAY_ROW_HEIGHT_PX)
+
+/* Worst case: MAX31856_CHANNEL_COUNT zone cards stacked in `content`, plus
+ * s_msg_label (one line), plus one UI_THEME_PADDING_PX/2 inter-child gap
+ * after every card including the one before s_msg_label. */
+#define UI_PAGE_TEMPERATURE_WORST_CASE_HEIGHT_PX \
+    ((MAX31856_CHANNEL_COUNT * UI_PAGE_TEMPERATURE_CARD_HEIGHT_PX) + UI_THEME_FONT_LINE_HEIGHT_PX + \
+     (MAX31856_CHANNEL_COUNT * (UI_THEME_PADDING_PX / 2)))
+
+_Static_assert(UI_PAGE_TEMPERATURE_WORST_CASE_HEIGHT_PX <= UI_THEME_PAGE_CONTENT_BUDGET_PX,
+               "ui_page_temperature.c: MAX31856_CHANNEL_COUNT zone cards plus the status label "
+               "exceed UI_THEME_PAGE_CONTENT_BUDGET_PX (ui_theme.h) -- shrink "
+               "UI_PAGE_TEMPERATURE_RELAY_ROW_HEIGHT_PX or the per-card padding/gap, don't widen "
+               "the budget to match. See TODO.md's no-scroll LCD item for this page.");
 
 typedef struct {
     lv_obj_t *temp_label;
@@ -236,17 +298,31 @@ static void relay_toggle_cb(lv_event_t *e)
  * 2026-08-19 relay-count-bound pass (UI_PLAN.md section 3, LCD item 2): the
  * risk above is now bounded. relay_row is no longer LV_SIZE_CONTENT --
  * UI_PAGE_TEMPERATURE_RELAY_ROW_HEIGHT_PX's header comment above has the
- * arithmetic (fixed height for 2 rows of buttons, internally scrollable
- * beyond that, same pattern as ui_page_network.c's s_scan_list/s_saved_list).
- * Each zone card's own worst-case height is therefore fixed at compile time
- * regardless of zones_config_get_relay_mask()'s runtime relay count: header
- * row (~24px) + relay_row (80px, capped) + card padding/gap
- * (UI_THEME_PADDING_PX/2 * 2 + UI_THEME_PADDING_PX/4 ~= 12px) =~ 116px per
- * card. Still NOT verified against real hardware for a config with more
- * relays-per-zone than the bench currently has (UI_PLAN.md's own
- * "verifiable now on the bench's actual configuration" caveat for this
- * item) -- the fix bounds the worst case, it doesn't prove the scroll
- * gesture feels right on the physical panel. */
+ * arithmetic (fixed height, internally scrollable beyond that, same pattern
+ * ui_page_network.c's saved-network list uses). Each zone card's own
+ * worst-case height is therefore fixed at compile time regardless of
+ * zones_config_get_relay_mask()'s runtime relay count.
+ *
+ * 2026-08-24 pass (TODO.md's two remaining LCD-budget items, both closed
+ * this pass): the per-card bound above was real but nobody had summed
+ * MAX31856_CHANNEL_COUNT of those cards against the actual page budget --
+ * doing that arithmetic turned up a real overflow independent of relay
+ * count (see UI_PAGE_TEMPERATURE_RELAY_ROW_HEIGHT_PX's own updated header
+ * comment). UI_PAGE_TEMPERATURE_CARD_HEIGHT_PX/_WORST_CASE_HEIGHT_PX above,
+ * plus the _Static_assert right after them, now make that arithmetic a
+ * compile-time fact instead of a comment -- shrink
+ * UI_PAGE_TEMPERATURE_RELAY_ROW_HEIGHT_PX or reduce
+ * MAX31856_CHANNEL_COUNT's real card count and the build breaks loudly
+ * instead of silently overflowing. relays-per-zone itself is now formalized
+ * as UI_PAGE_TEMPERATURE_MAX_RELAYS_PER_ZONE (== KILN_IO_RELAY_COUNT, the
+ * true structural ceiling -- a zone can't claim more relays than the board
+ * has), with a runtime clamp+log in this function for a mask that
+ * (should-never-but-defensively) claims a relay index beyond that, since
+ * relay_mask is persisted config data no static assert can see the value
+ * of. Still NOT verified against real hardware (no ILI9488 panel attached
+ * in this environment) -- this is arithmetic against ui_theme.h's real
+ * constants, not a pixel-verified fit, same caveat every other page's
+ * budget arithmetic carries. */
 static void build_zone_row(lv_obj_t *parent, uint8_t zone_index)
 {
     lv_obj_t *row = lv_obj_create(parent);
@@ -284,6 +360,27 @@ static void build_zone_row(lv_obj_t *parent, uint8_t zone_index)
 
     uint8_t relay_mask = 0;
     bool have_mask = zones_config_get_relay_mask(zone_index, &relay_mask);
+
+    /* Runtime guard, not a static one -- relay_mask is persisted config data
+     * (zones_http.h) that no _Static_assert can see the value of. Any bit at
+     * or above KILN_IO_RELAY_COUNT is a corrupted/out-of-range mask (the
+     * setter is supposed to reject those, but this page reads through a
+     * getter, not the setter, and should not trust it blindly); clamp it off
+     * and say so loudly rather than either drawing a button for a relay
+     * index build_zone_row()'s own `for (r = 0; r < KILN_IO_RELAY_COUNT...)`
+     * loop below would silently never reach, or -- the actual UI_PLAN.md
+     * concern -- letting a corrupted mask claim more buttons than
+     * UI_PAGE_TEMPERATURE_MAX_RELAYS_PER_ZONE assumed when this page's
+     * worst-case height was computed above. */
+    if (have_mask) {
+        uint8_t valid_mask = (uint8_t)((1u << KILN_IO_RELAY_COUNT) - 1u);
+        if (relay_mask & (uint8_t)~valid_mask) {
+            ESP_LOGE(TAG, "zone %u: relay_mask 0x%02X has bit(s) beyond KILN_IO_RELAY_COUNT (%u) -- "
+                          "clamping to the valid range",
+                     (unsigned)zone_index, (unsigned)relay_mask, (unsigned)KILN_IO_RELAY_COUNT);
+            relay_mask = (uint8_t)(relay_mask & valid_mask);
+        }
+    }
 
     lv_obj_t *relay_row = lv_obj_create(row);
     lv_obj_set_width(relay_row, lv_pct(100));
