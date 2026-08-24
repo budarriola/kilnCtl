@@ -125,6 +125,7 @@ to change shape for this.
 | `GET_SIM_STATE` | `0x07` | **implemented** (gap-closure pass; new id, not in DESIGN_NOTES.md sec 5's original sketch) |
 | `REBOOT_BOOTLOADER` | `0x08` | **implemented** (later gap-closure pass, "flash over USB without BOOTSEL") |
 | `SESSION_RESET` | `0x09` | **implemented** (bug-fix pass, "PC reconnect misclassified as duplicate traffic") |
+| `GET_TASK_STATS` | `0x0A` | **implemented** (per-task-stack-margin pass) |
 
 ### `PING` (request: `[0x01]`, no args)
 
@@ -368,6 +369,89 @@ failure.
 
 Reply: `[status]` only, always `SIMFW_CMD_STATUS_OK` — this command has no
 failure mode of its own to report.
+
+### `GET_TASK_STATS` (request: `[0x0A]`, no args)
+
+Per-task FreeRTOS stack high-water-mark telemetry (per-task-stack-margin
+pass). **Why this exists:** three separate undersized-task-stack incidents
+have shipped in this project — `telemetry` (1024 B allocated vs. 10736 B
+actually used), `sim_engine` (2048 B vs. a 2328 B measured worst case,
+which actually bricked a board on the bench: it completed every boot
+beacon, started the scheduler, then died in seconds via
+`vApplicationStackOverflowHook`), and `cmd_task`/`spi_emu_a`/`spi_emu_b`
+(found at 1.95x/1.64x/1.67x margin against a `-fstack-usage` audit — see
+`cmd_task.c`'s `CMD_TASK_STACK_WORDS` comment). Every one was found only by
+that same static audit, which has an admitted blind spot: it cannot see
+through function-pointer dispatch (e.g. TinyUSB's internal class-driver
+dispatch inside `usb_owner_task_fn()`'s `tud_task_ext()` call — `usb_owner`'s
+own 3.3x margin is therefore *unproven*, not *verified*). FreeRTOS's own
+`uxTaskGetStackHighWaterMark()` measures ACTUAL peak usage at runtime,
+including every path static analysis misses; this command exposes it over
+the link so a bench tool can check margins continuously instead of finding
+the next one by a dead board.
+
+Reply:
+
+```
+byte0        status
+byte1        task_count, u8
+byte2..      task_count * {
+                 u8  task_stats_id   -- SIMFW_TASK_STATS_ID_*, cmd_ids.h
+                 u16 allocated_bytes LE
+                 u16 hwm_free_bytes  LE
+             }
+```
+
+5 bytes per task record; ~13 tasks today (10 app tasks + 2 SMP idle tasks +
+the FreeRTOS timer daemon) × 5 + 2 header bytes = 67, comfortably inside
+`BENCHPROTO_FRAME_MAX_PAYLOAD` (128) — no pagination needed.
+
+**Enumeration without violating single ownership.** Every app task already
+owns a private `s_task_handle` (`i2c_owner.c`, `telemetry.c`, etc.) — the
+established single-owner doctrine says `cmd_task.c` must not reach into any
+of those. Rather than adding a getter to all ten task modules, or a shared
+registry each one would need to remember to call into at start-up (a second
+place each task's allocated-stack-size constant could drift from what its
+own `xTaskCreate()` call was actually given), `handle_sys_get_task_stats()`
+calls `uxTaskGetSystemState()` — a single, already-public FreeRTOS API
+(`configUSE_TRACE_FACILITY`, `FreeRTOSConfig.h`, flipped on for this pass)
+that walks the kernel's own task list and returns, per task, its handle,
+name, and (with `configRECORD_STACK_HIGH_ADDRESS == 1`, already on) both
+stack-region boundary pointers. That single call is the source of truth for
+**both** halves of this reply:
+
+- `allocated_bytes` = `(pxEndOfStack - pxStackBase + 1) * sizeof(StackType_t)`
+  — exactly the `usStackDepth` each task's own `xTaskCreate()` call was
+  given (`tasks.c`'s `prvInitialiseNewTask()`), recovered from the kernel's
+  own record of it rather than a second, driftable copy of any task's
+  `*_STACK_WORDS` `#define`.
+- `hwm_free_bytes` = `uxTaskGetStackHighWaterMark()`'s own return value,
+  **converted from words to bytes** at this exact point in
+  `handle_sys_get_task_stats()` (see that function's own comment). This is
+  the conversion to get right: `usStackHighWaterMark` is the minimum number
+  of **free words** (`StackType_t` units, `uint32_t` on this port) ever
+  remaining since the task started — not bytes, and not "words used".
+  Misreading that unit is precisely how the `sim_engine` overflow above hid
+  in plain sight (`configMINIMAL_STACK_SIZE` is 256 **words** == 1024
+  bytes). Converting once, firmware-side, means every client of this reply
+  gets bytes directly and never has to know this port's word size.
+
+`task_stats_id` (`SIMFW_TASK_STATS_ID_*`, `cmd_ids.h`) is a **separate**
+numbering from `SIMFW_TASK_ID_*` (the command-group addressing table,
+section 3 above) — one identifies a command group (8 of them), the other a
+FreeRTOS task (~13 of them); they must never be confused. Assigned by
+`cmd_task.c`'s `task_stats_id_for_name()`, which matches each
+`uxTaskGetSystemState()` entry's `pcTaskName` against the literal name
+string that task's own `xTaskCreate()` call used (or FreeRTOS's own fixed
+idle/timer names, `"IDLE0"`/`"IDLE1"`/`"Tmr Svc"`) — already-public
+information, the same visibility any RTOS-aware debugger already has, not a
+reach into private state. A future task with no matching entry reports
+`SIMFW_TASK_STATS_ID_UNKNOWN` (0) rather than being silently dropped.
+
+`margin` (allocated / peak-used, where peak-used = allocated - hwm_free) is
+a PC-side computation (`kilnsim tasks`, `kilnsim.selftest`'s
+`task_stack_margins` check) — the firmware reports the two raw numbers,
+never a derived ratio.
 
 ### The 1200-baud touch convention (`src/tasks/usb_owner.c`)
 

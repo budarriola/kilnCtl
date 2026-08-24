@@ -29,6 +29,7 @@ void run_test_safe_reboot_logic(void);
 void run_test_usb_dual_cdc_logic(void);
 void run_test_cmd_payload_vectors(void);
 void run_test_usb_owner_session_reset_logic(void);
+void run_test_task_stats_encoding(void);
 
 int main(void)
 {
@@ -52,6 +53,7 @@ int main(void)
     run_test_usb_dual_cdc_logic();
     run_test_cmd_payload_vectors();
     run_test_usb_owner_session_reset_logic();
+    run_test_task_stats_encoding();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     if (g_test_failures > 0) {

@@ -49,6 +49,7 @@ $sources = @(
     (Join-Path $testDir "test_usb_dual_cdc_logic.c"),
     (Join-Path $testDir "test_cmd_payload_vectors.c"),
     (Join-Path $testDir "test_usb_owner_session_reset_logic.c"),
+    (Join-Path $testDir "test_task_stats_encoding.c"),
     (Join-Path $simDir "thermal_model.c"),
     (Join-Path $simDir "max31856_regs.c"),
     (Join-Path $simDir "max31856_resp_image.c"),

@@ -16,7 +16,8 @@
       {"name": "set_seed_zero", "cmd": 5, "cmd_name": "SET_SEED", "fields": {"value": 0}, "payload_hex": "0500000000"},
       {"name": "set_seed_max_u32", "cmd": 5, "cmd_name": "SET_SEED", "fields": {"value": 4294967295}, "payload_hex": "05ffffffff"},
       {"name": "reboot_bootloader_correct_magic", "cmd": 8, "cmd_name": "REBOOT_BOOTLOADER", "fields": {"confirm": 2953293831}, "payload_hex": "0807b007b0", "_note": "confirm == SIMFW_CMD_SYS_REBOOT_BOOTLOADER_MAGIC (0xB007B007 == 2953293831 decimal)"},
-      {"name": "reboot_bootloader_bad_magic", "cmd": 8, "cmd_name": "REBOOT_BOOTLOADER", "fields": {"confirm": 0}, "payload_hex": "0800000000"}
+      {"name": "reboot_bootloader_bad_magic", "cmd": 8, "cmd_name": "REBOOT_BOOTLOADER", "fields": {"confirm": 0}, "payload_hex": "0800000000"},
+      {"name": "get_task_stats", "cmd": 10, "cmd_name": "GET_TASK_STATS", "fields": {}, "payload_hex": "0a"}
     ],
     "replies": [
       {"name": "ping_ok", "cmd": 1, "cmd_name": "PING", "status": "OK", "fields": {}, "payload_hex": "00"},
@@ -41,7 +42,11 @@
       {"name": "set_timescale_ok", "cmd": 4, "cmd_name": "SET_TIMESCALE", "status": "OK", "fields": {}, "payload_hex": "00"},
       {"name": "set_seed_ok", "cmd": 5, "cmd_name": "SET_SEED", "status": "OK", "fields": {}, "payload_hex": "00"},
       {"name": "reboot_bootloader_bad_args", "cmd": 8, "cmd_name": "REBOOT_BOOTLOADER", "status": "ERR_BAD_ARGS", "fields": {}, "payload_hex": "02",
-       "_note": "the only reply this command ever sends on the wire in practice, since the success path never ACKs at all (cmd_ids.h's own comment) -- this is the bad-magic/refusal path"}
+       "_note": "the only reply this command ever sends on the wire in practice, since the success path never ACKs at all (cmd_ids.h's own comment) -- this is the bad-magic/refusal path"},
+      {"name": "get_task_stats_two_tasks", "cmd": 10, "cmd_name": "GET_TASK_STATS", "status": "OK",
+       "fields": {"task_count": 2},
+       "payload_hex": "000201000cc409060010e803",
+       "_note": "synthetic (not a real firmware capture) -- pins the per-record encoding [u8 task_stats_id, u16 allocated_bytes LE, u16 hwm_free_bytes LE], 5 bytes/record, and the [status, u8 task_count, records...] envelope (PROTOCOL.md sec 4 GET_TASK_STATS). task_stats_id 1/6 = SIMFW_TASK_STATS_ID_CMD_TASK/_TELEMETRY (cmd_ids.h). allocated=3072 (0x0C00 LE -> 00 0c), hwm_free=2500 (0x09C4 LE -> c4 09); allocated=4096 (0x1000 LE -> 00 10), hwm_free=1000 (0x03E8 LE -> e8 03). Only task_count is asserted here (not the full per-task list) -- decode_reply()'s per-task dicts carry additional PC-side-derived keys (peak_used_bytes/margin, PROTOCOL.md sec 4: 'the firmware reports the two raw numbers, never a derived ratio') that this test file's nested-equality check would otherwise reject; the full per-record decode (task_stats_id/allocated_bytes/hwm_free_bytes for BOTH records) is exercised byte-for-byte instead by tools/PcTools/tests/test_kilnsim_task_stats.py's test_decode_two_tasks against this exact hex string, and by firmware/SimFW/test/test_cmd_payload_vectors.c's own mirror of the encode side."}
     ]
   },
   "io": {

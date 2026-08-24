@@ -36,7 +36,7 @@ import struct
 from typing import Optional
 
 from . import fault_catalog
-from .protocol import CommandGroup, SYS_REBOOT_BOOTLOADER_MAGIC
+from .protocol import CommandGroup, SYS_REBOOT_BOOTLOADER_MAGIC, TaskStatsId
 
 STATUS_OK = 0x00
 STATUS_ERR_NOT_IMPL = 0x01
@@ -140,6 +140,8 @@ def _sys_encode(cmd: int, payload: dict) -> bytes:
         return bytes([cmd]) + struct.pack("<I", confirm)
     if cmd == 9:  # SESSION_RESET (PROTOCOL.md sec 4): LINK state only, no args.
         return bytes([cmd])
+    if cmd == 10:  # GET_TASK_STATS (PROTOCOL.md sec 4) -- no args
+        return bytes([cmd])
     raise PayloadError(f"SYS: unknown command id {cmd}")
 
 
@@ -224,6 +226,38 @@ def _sys_decode(cmd: int, status: int, data: bytes) -> dict:
         # STATUS_OK on real firmware (no failure mode of its own); nothing
         # beyond the shared status byte to decode.
         return {}
+    if cmd == 10:  # GET_TASK_STATS (PROTOCOL.md sec 4): [status, u8 task_count,
+        # task_count * {u8 task_stats_id, u16 allocated_bytes LE, u16 hwm_free_bytes LE}].
+        # `data` here has already had the shared status byte stripped by
+        # decode_reply() -- byte 0 below is task_count, not status.
+        task_count = data[0]
+        tasks = []
+        off = 1
+        for _ in range(task_count):
+            task_stats_id, allocated_bytes, hwm_free_bytes = struct.unpack_from("<BHH", data, off)
+            off += 5
+            try:
+                id_name = TaskStatsId(task_stats_id).name
+            except ValueError:
+                id_name = f"UNKNOWN_{task_stats_id}"
+            # peak_used_bytes/margin are derived here, not on the wire
+            # (PROTOCOL.md sec 4: "the firmware reports the two raw
+            # numbers, never a derived ratio") -- allocated_bytes is always
+            # > 0 for a real FreeRTOS task (xTaskCreate() rejects a 0-depth
+            # stack), so this division is safe without a guard.
+            peak_used_bytes = allocated_bytes - hwm_free_bytes
+            margin = (allocated_bytes / peak_used_bytes) if peak_used_bytes > 0 else float("inf")
+            tasks.append(
+                {
+                    "task_stats_id": task_stats_id,
+                    "task_stats_id_name": id_name,
+                    "allocated_bytes": allocated_bytes,
+                    "hwm_free_bytes": hwm_free_bytes,
+                    "peak_used_bytes": peak_used_bytes,
+                    "margin": margin,
+                }
+            )
+        return {"task_count": task_count, "tasks": tasks}
     raise PayloadError(f"SYS: unknown command id {cmd}")
 
 

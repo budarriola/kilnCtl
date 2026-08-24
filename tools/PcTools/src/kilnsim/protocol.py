@@ -87,6 +87,57 @@ class SysCmd(enum.IntEnum):
     # unrelated cached reply. Tolerates an older firmware build that
     # predates this id (ERR_NOT_IMPL) without failing the connect.
     SESSION_RESET = 9
+    # PROTOCOL.md sec 4 "GET_TASK_STATS" (per-task-stack-margin pass):
+    # per-task FreeRTOS stack high-water-mark telemetry --
+    # uxTaskGetStackHighWaterMark() exposed over the wire so a bench tool
+    # can catch an undersized task stack continuously instead of by a dead
+    # board (three separate incidents have shipped: telemetry, sim_engine
+    # -- the one that actually bricked a board -- and cmd_task/spi_emu_a/
+    # spi_emu_b). See TaskStatsId below and payloads.py's _sys_decode() for
+    # cmd id 10.
+    GET_TASK_STATS = 10
+
+
+#: SIMFW_TASK_STATS_ID_* (firmware/SimFW/src/tasks/cmd_ids.h) -- GET_TASK_STATS's
+#: own per-FreeRTOS-task identifier space, a SEPARATE numbering from
+#: CommandGroup above (that one addresses this device's 8 benchproto command
+#: GROUPS; this one identifies one of the ~13 FreeRTOS tasks the firmware
+#: actually creates -- 10 app tasks + 2 SMP idle tasks + the timer daemon).
+#: The two must never be confused or unified. UNKNOWN (0) is what the
+#: firmware reports for a future task its own task_stats_id_for_name() table
+#: hasn't caught up with yet -- kept distinct from a decode error so a
+#: client still sees the task (and that its margin is unclassified) rather
+#: than the reply failing to decode at all.
+class TaskStatsId(enum.IntEnum):
+    UNKNOWN = 0
+    CMD_TASK = 1
+    USB_OWNER = 2
+    SIM_ENGINE = 3
+    I2C_OWNER = 4
+    FAULT_SCHED = 5
+    TELEMETRY = 6
+    LOG_TASK = 7
+    SPI_EMU_A = 8
+    SPI_EMU_B = 9
+    WAVE_OWNER = 10
+    IDLE_CORE0 = 11
+    IDLE_CORE1 = 12
+    TIMER_SVC = 13
+
+
+#: Working standard for this project's own stack-margin audits -- the
+#: cmd_task/spi_emu_a/spi_emu_b incident (found at 1.95x/1.64x/1.67x margin,
+#: PROTOCOL.md sec 4 / cmd_ids.h's SIMFW_CMD_SYS_GET_TASK_STATS comment) is
+#: exactly the shape of near-miss this whole feature exists to catch before
+#: it becomes a fourth telemetry/sim_engine-style incident, and that incident
+#: was ALREADY under 2x. Real-world stack usage on a function-pointer-heavy
+#: path (TinyUSB's class-driver dispatch, printf-family calls, etc.) is not
+#: reliably bounded by inspection ahead of time, so a comfortable multiple --
+#: not "just above 1.0x" -- is the right bar. Shared by `kilnsim tasks`'
+#: human-readable flagging (cli.py) and `kilnsim selftest`'s
+#: task_stack_margins check (selftest.py) so the two can never silently
+#: drift to different thresholds.
+TASK_STACK_MARGIN_WARN_THRESHOLD = 2.0
 
 
 #: SIMFW_CMD_SYS_REBOOT_BOOTLOADER_MAGIC (firmware/SimFW/src/tasks/cmd_ids.h)

@@ -238,6 +238,10 @@ static void test_sys_requests(void)
         uint32_t confirm = ar_u32le(&r);
         TEST_CHECK(confirm != 0xB007B007u, "sys/reboot_bootloader_bad_magic: decodes to something other than the magic");
     }
+    { // get_task_stats: {0x0A} -- no args
+        static const uint8_t wire[] = {0x0A};
+        TEST_CHECK(wire[0] == 10u, "sys/get_task_stats: cmd_id byte is 10 (0x0A)");
+    }
 }
 
 static void test_sys_replies(void)
@@ -342,6 +346,44 @@ static void test_sys_replies(void)
         rw_u8(&w, 0x02); // ERR_BAD_ARGS
         static const uint8_t expected2[] = {0x02};
         TEST_CHECK(bytes_eq(out, expected2, sizeof(expected2)), "sys/reboot_bootloader_bad_args matches manifest");
+    }
+    { // get_task_stats_two_tasks -- mirrors handle_sys_get_task_stats()'s
+      // own rw_* call sequence: status, then a count byte patched after the
+      // fact (same "patch the count slot once N is known" pattern
+      // handle_fault_list() uses), then N * {u8 task_stats_id,
+      // u16 allocated_bytes LE, u16 hwm_free_bytes LE}. This mirror stands
+      // in for the WORDS->BYTES conversion + uxTaskGetSystemState() walk
+      // the real handler does (not host-testable -- FreeRTOS-only) by
+      // starting directly from already-converted byte values, same as this
+      // file's other reply mirrors stand in for their owner-API call
+      // results with literal values.
+        uint8_t out[32];
+        reply_writer_t w;
+        rw_init(&w, out, sizeof(out));
+        rw_u8(&w, 0x00); // status OK
+        uint8_t *count_slot = &out[w.len];
+        rw_u8(&w, 0); // patched below
+        uint8_t returned = 0;
+
+        rw_u8(&w, 1); // task_stats_id: SIMFW_TASK_STATS_ID_CMD_TASK
+        rw_u16le(&w, 3072); // allocated_bytes
+        rw_u16le(&w, 2500); // hwm_free_bytes
+        returned++;
+
+        rw_u8(&w, 6); // task_stats_id: SIMFW_TASK_STATS_ID_TELEMETRY
+        rw_u16le(&w, 4096); // allocated_bytes
+        rw_u16le(&w, 1000); // hwm_free_bytes
+        returned++;
+
+        *count_slot = returned;
+
+        static const uint8_t expected[] = {
+            0x00, 0x02,
+            0x01, 0x00, 0x0C, 0xC4, 0x09,
+            0x06, 0x00, 0x10, 0xE8, 0x03,
+        };
+        TEST_CHECK(w.len == sizeof(expected) && bytes_eq(out, expected, sizeof(expected)),
+                   "sys/get_task_stats_two_tasks matches manifest");
     }
 }
 

@@ -99,7 +99,16 @@
 #define configUSE_MALLOC_FAILED_HOOK            1
 #define configUSE_DAEMON_TASK_STARTUP_HOOK      0
 #define configGENERATE_RUN_TIME_STATS           0
-#define configUSE_TRACE_FACILITY                0
+/* Flipped 0 -> 1 (per-task stack high-water-mark telemetry pass, cmd_ids.h's
+ * SIMFW_CMD_SYS_GET_TASK_STATS): required for uxTaskGetSystemState() to
+ * exist at all (task.h guards its prototype on this exact macro). That one
+ * call is cmd_task.c's whole enumeration strategy for GET_TASK_STATS -- it
+ * walks the kernel's own task list and returns each task's handle, name,
+ * and (with configRECORD_STACK_HIGH_ADDRESS == 1, already on above) both
+ * stack-region boundary pointers, so the handler needs no per-task getter
+ * and never reaches into another task's private state. See that handler's
+ * own header comment for the full design. */
+#define configUSE_TRACE_FACILITY                1
 #define configUSE_STATS_FORMATTING_FUNCTIONS    0
 #define configRECORD_STACK_HIGH_ADDRESS         1
 

@@ -162,6 +162,75 @@ extern "C" {
 // kilnsim.link's own handling).
 #define SIMFW_CMD_SYS_SESSION_RESET 0x09u
 
+// GET_TASK_STATS (per-task-stack-margin pass): per-task FreeRTOS stack
+// high-water-mark telemetry. Motivation (see this pass's task report / the
+// bench-observed sim_engine boot-loop entry ROADMAP.md M1's bench-state
+// notes describes): THREE separate undersized-task-stack incidents have
+// now shipped in this project -- telemetry (1024 B allocated vs 10736 B
+// actually used), sim_engine (2048 B vs a 2328 B measured worst case,
+// which actually bricked a board -- it booted, ran the scheduler, then
+// died via vApplicationStackOverflowHook a few seconds in), and cmd_task/
+// spi_emu_a/spi_emu_b (found at 1.95x/1.64x/1.67x margin against a
+// -fstack-usage audit). Every one was found by that same static audit,
+// which has an admitted blind spot: it cannot see through function-pointer
+// dispatch (e.g. TinyUSB's class-driver table inside usb_owner_task_fn()'s
+// tud_task_ext() call). FreeRTOS's own uxTaskGetStackHighWaterMark()
+// measures ACTUAL peak usage at runtime, including every path static
+// analysis misses -- this command exposes it over the link so a bench tool
+// can check margins continuously instead of finding the next one by a dead
+// board.
+//
+// request: none.
+//
+// reply: {status, u8 task_count, task_count * {u8 task_stats_id,
+// u16 allocated_bytes LE, u16 hwm_free_bytes LE}}. 5 bytes/record; ~13
+// tasks today (10 app tasks + 2 SMP idle tasks + the timer daemon) * 5 + 2
+// header bytes = 67, comfortably inside BENCHPROTO_FRAME_MAX_PAYLOAD (128).
+// hwm_free_bytes is uxTaskGetStackHighWaterMark()'s own return value
+// (FreeRTOSConfig.h's INCLUDE_uxTaskGetStackHighWaterMark, already 1)
+// CONVERTED from words to bytes by cmd_task.c's handler before it ever
+// goes on the wire -- see that handler's own comment for exactly where and
+// why (misreading that unit is precisely how the sim_engine overflow above
+// hid: configMINIMAL_STACK_SIZE is 256 WORDS == 1024 bytes, and
+// StackType_t is uint32_t on this port).
+//
+// task_stats_id is one of SIMFW_TASK_STATS_ID_* below -- a SEPARATE
+// numbering from SIMFW_TASK_ID_* above. SIMFW_TASK_ID_* addresses this
+// device's benchproto command GROUPS (8 of them: SYS/MODEL/TC/CT/RELAY/IO/
+// FAULT/EVT); SIMFW_TASK_STATS_ID_* instead identifies one FreeRTOS TASK
+// (there are ~13 of those). The two numberings must never be confused or
+// unified -- a command group is not a FreeRTOS task and vice versa (SYS
+// itself, for instance, is served by the single cmd_task FreeRTOS task,
+// which also serves MODEL/TC/CT/RELAY/IO/FAULT).
+#define SIMFW_CMD_SYS_GET_TASK_STATS 0x0Au
+
+// SIMFW_TASK_STATS_ID_* -- GET_TASK_STATS's own per-FreeRTOS-task
+// identifier space (see that command's comment above). Assigned by
+// cmd_task.c's task_stats_id_for_name(), which matches each
+// uxTaskGetSystemState() entry's pcTaskName against the literal name
+// string that task's own xTaskCreate() call used (e.g. cmd_task.c's own
+// "cmd_task"), or FreeRTOS's own fixed idle/timer task names -- that
+// string match is this table's ONLY authority; it carries no other
+// meaning and is never used for wire addressing the way SIMFW_TASK_ID_* is.
+// UNKNOWN (0) covers a future FreeRTOS task added to main.c without a
+// matching entry here -- reported as UNKNOWN rather than silently dropped,
+// so a client can see it exists (and that its margin is currently
+// unclassified) even before this table catches up.
+#define SIMFW_TASK_STATS_ID_UNKNOWN     0u
+#define SIMFW_TASK_STATS_ID_CMD_TASK    1u
+#define SIMFW_TASK_STATS_ID_USB_OWNER   2u
+#define SIMFW_TASK_STATS_ID_SIM_ENGINE  3u
+#define SIMFW_TASK_STATS_ID_I2C_OWNER   4u
+#define SIMFW_TASK_STATS_ID_FAULT_SCHED 5u
+#define SIMFW_TASK_STATS_ID_TELEMETRY   6u
+#define SIMFW_TASK_STATS_ID_LOG_TASK    7u
+#define SIMFW_TASK_STATS_ID_SPI_EMU_A   8u
+#define SIMFW_TASK_STATS_ID_SPI_EMU_B   9u
+#define SIMFW_TASK_STATS_ID_WAVE_OWNER  10u
+#define SIMFW_TASK_STATS_ID_IDLE_CORE0  11u
+#define SIMFW_TASK_STATS_ID_IDLE_CORE1  12u
+#define SIMFW_TASK_STATS_ID_TIMER_SVC   13u
+
 // Reply-payload status byte -- byte 0 of every SYS/MODEL/TC/CT/RELAY/IO/
 // FAULT reply payload (docs/PROTOCOL.md "Reply convention"). This is
 // entirely a SimFW-level convention layered on top of benchproto's own

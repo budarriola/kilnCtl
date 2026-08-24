@@ -449,6 +449,114 @@ static void handle_sys_session_reset(const uint8_t *args, uint8_t args_len, uint
     *out_len = w.len;
 }
 
+// GET_TASK_STATS (cmd_ids.h's SIMFW_CMD_SYS_GET_TASK_STATS -- see that
+// macro's comment for the full motivation/wire-spec). Matches each
+// uxTaskGetSystemState() entry's task name against this fixed table --
+// literal, already-public xTaskCreate() name strings (or FreeRTOS's own
+// fixed idle/timer names), same visibility any RTOS-aware debugger already
+// has. Not a reach into another module's private state: this function
+// never touches any task's TaskHandle_t, private statics, or STACK_WORDS
+// #define directly -- uxTaskGetSystemState() (called by the handler below)
+// is cmd_task's only source for both the stack high-water mark AND the
+// allocated depth (via pxStackBase/pxEndOfStack, see that handler's own
+// comment), so no other task file needs a getter or a registration call
+// added for this feature at all.
+static uint8_t task_stats_id_for_name(const char *name)
+{
+    if (strcmp(name, "cmd_task") == 0) return SIMFW_TASK_STATS_ID_CMD_TASK;
+    if (strcmp(name, "usb_owner") == 0) return SIMFW_TASK_STATS_ID_USB_OWNER;
+    if (strcmp(name, "sim_engine") == 0) return SIMFW_TASK_STATS_ID_SIM_ENGINE;
+    if (strcmp(name, "i2c_owner") == 0) return SIMFW_TASK_STATS_ID_I2C_OWNER;
+    if (strcmp(name, "fault_sched") == 0) return SIMFW_TASK_STATS_ID_FAULT_SCHED;
+    if (strcmp(name, "telemetry") == 0) return SIMFW_TASK_STATS_ID_TELEMETRY;
+    if (strcmp(name, "log_task") == 0) return SIMFW_TASK_STATS_ID_LOG_TASK;
+    if (strcmp(name, "spi_emu_a") == 0) return SIMFW_TASK_STATS_ID_SPI_EMU_A;
+    if (strcmp(name, "spi_emu_b") == 0) return SIMFW_TASK_STATS_ID_SPI_EMU_B;
+    if (strcmp(name, "wave_owner") == 0) return SIMFW_TASK_STATS_ID_WAVE_OWNER;
+    // tasks.c's prvCreateIdleTasks(): with configNUMBER_OF_CORES > 1 (2
+    // here), the per-core idle tasks are named configIDLE_TASK_NAME
+    // ("IDLE", the FreeRTOS-Kernel default -- this project never overrides
+    // it) with the core id appended, i.e. exactly "IDLE0"/"IDLE1".
+    if (strcmp(name, "IDLE0") == 0) return SIMFW_TASK_STATS_ID_IDLE_CORE0;
+    if (strcmp(name, "IDLE1") == 0) return SIMFW_TASK_STATS_ID_IDLE_CORE1;
+    // timers.c's default configTIMER_SERVICE_TASK_NAME, also never
+    // overridden here.
+    if (strcmp(name, "Tmr Svc") == 0) return SIMFW_TASK_STATS_ID_TIMER_SVC;
+    return SIMFW_TASK_STATS_ID_UNKNOWN;
+}
+
+// Generous headroom over the ~13 tasks this build actually creates today
+// (10 app tasks + 2 SMP idle tasks + the timer daemon) -- if
+// uxTaskGetSystemState() ever reports more than this, the extras are
+// simply not visited (its own return value is what this handler trusts as
+// the true count, never SIMFW_TASK_STATS_MAX_TASKS itself).
+#define SIMFW_TASK_STATS_MAX_TASKS 16u
+
+// request: none. See cmd_ids.h's SIMFW_CMD_SYS_GET_TASK_STATS comment for
+// the wire spec and the three prior undersized-stack incidents this
+// command exists to make continuously observable.
+//
+// `s_status` is a function-local STATIC array, deliberately not a local
+// (stack) one: sizeof(TaskStatus_t) * SIMFW_TASK_STATS_MAX_TASKS is large
+// enough that putting it on cmd_task's own stack would eat a substantial
+// fraction of CMD_TASK_STACK_WORDS's 3x margin above (measured by the
+// -fstack-usage audit that set that margin) for a command that has no need
+// to be reentrant -- cmd_task_fn() processes one request at a time from a
+// single queue, so a single shared static buffer is safe.
+static void handle_sys_get_task_stats(const uint8_t *args, uint8_t args_len, uint8_t *out, uint8_t *out_len,
+                                       uint8_t out_cap)
+{
+    (void)args;
+    (void)args_len;
+
+    static TaskStatus_t s_status[SIMFW_TASK_STATS_MAX_TASKS];
+    UBaseType_t n = uxTaskGetSystemState(s_status, SIMFW_TASK_STATS_MAX_TASKS, NULL);
+
+    reply_writer_t w;
+    rw_init(&w, out, out_cap);
+    rw_u8(&w, SIMFW_CMD_STATUS_OK);
+    uint8_t *count_slot = &out[w.len]; // patched below once `returned` is known, same pattern as handle_fault_list()
+    rw_u8(&w, 0);
+    uint8_t returned = 0;
+    for (UBaseType_t i = 0; i < n; i++) {
+        const TaskStatus_t *t = &s_status[i];
+
+        // pxStackBase/pxEndOfStack are populated unconditionally here
+        // (configRECORD_STACK_HIGH_ADDRESS == 1, FreeRTOSConfig.h): the
+        // lowest and highest addresses of the task's stack region, exactly
+        // as prvInitialiseNewTask() (tasks.c) derived them from the
+        // usStackDepth its own xTaskCreate() call was given -- i.e. this
+        // recovers each task's ALLOCATED depth from the kernel's own
+        // record of it, not from a second, driftable copy of any task's
+        // *_STACK_WORDS #define.
+        uint32_t allocated_words = (uint32_t)(t->pxEndOfStack - t->pxStackBase) + 1u;
+        uint32_t allocated_bytes = allocated_words * (uint32_t)sizeof(StackType_t);
+
+        // *** WORDS -> BYTES CONVERSION -- the exact point cmd_ids.h's
+        // comment on this command points at. *** t->usStackHighWaterMark
+        // is uxTaskGetStackHighWaterMark()'s own return value: the MINIMUM
+        // NUMBER OF FREE WORDS (StackType_t units, uint32_t on this port)
+        // ever remaining on this task's stack since it started running --
+        // never bytes, and never "words used" (it counts the opposite
+        // direction: free, not used). Multiplying by sizeof(StackType_t)
+        // here, once, in the one place this value is converted, means
+        // every client of this wire reply gets bytes directly and never
+        // has to know this port's word size to interpret it correctly.
+        uint32_t hwm_free_bytes = (uint32_t)t->usStackHighWaterMark * (uint32_t)sizeof(StackType_t);
+
+        uint8_t id = task_stats_id_for_name(t->pcTaskName);
+        rw_u8(&w, id);
+        rw_u16le(&w, (uint16_t)allocated_bytes);
+        rw_u16le(&w, (uint16_t)hwm_free_bytes);
+        if (w.overflow) {
+            break; // would only happen with far more tasks than this build creates -- see SIMFW_TASK_STATS_MAX_TASKS's comment
+        }
+        returned++;
+    }
+    *count_slot = returned;
+    *out_len = w.len;
+}
+
 // Named (not anonymous) so s_sys_commands[] below and cmd_group_t's
 // `commands` field (also below) refer to the exact same type -- two
 // structurally-identical anonymous struct definitions are still distinct,
@@ -470,6 +578,7 @@ static const cmd_table_entry_t s_sys_commands[] = {
     {SIMFW_CMD_SYS_GET_SIM_STATE, handle_sys_get_sim_state},
     {SIMFW_CMD_SYS_REBOOT_BOOTLOADER, handle_sys_reboot_bootloader},
     {SIMFW_CMD_SYS_SESSION_RESET, handle_sys_session_reset},
+    {SIMFW_CMD_SYS_GET_TASK_STATS, handle_sys_get_task_stats},
 };
 
 // --- MODEL group handlers (sim_engine.h) ------------------------------------
