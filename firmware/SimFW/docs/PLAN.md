@@ -77,8 +77,8 @@ never `[x]`.
 
 ### 0.1 Doable now, in software (no hardware required)
 
-- [~] **Bridge ACK still precedes dispatch — firmware half now done
-      (`5df2190`).** The transport ACK stays where it is, deliberately: the
+- [x] **Bridge ACK still precedes dispatch — both halves now done
+      (`5df2190`, `7b4c087`).** The transport ACK stays where it is, deliberately: the
       ACK/NACK/dedup/retry machine lives in the RX task with no application
       semantics, dispatch can run in a *third* task
       (`bx_run_on_internal_stack` for NVS writes), and
@@ -88,13 +88,25 @@ never `[x]`.
       through silently — truncated args, range refusals, and the relay
       `ERR_OWNED`/`ERR_SAFETY`/`ERR_UPDATING` refusals, which had been
       indistinguishable on the wire from a relay that actually switched.
-      **Still open:** `tools/PcTools/src/kilnctrl` still only checks the
-      transport ACK, so mutating-command callers must move to the
-      `_query()`-style pattern before any of this reaches an operator. That
-      is the larger half and is owned by another session. Two reply shapes
-      are flagged in `5df2190`'s message for whoever picks it up:
-      `THERMO_CMD_READ_FAULTS` and `IO_CMD_SX_SCAN` have an empty-success
-      reply that is byte-identical to a reasonless rejection.
+      **Closed 2026-08-24 (`7b4c087`).** Both halves that were open here are
+      done, and the audit behind it found more than this item described.
+      Host side: 12 IO subcommands, DISPLAY's writes and TOUCH's
+      `INJECT`/`SET_TAP_DUMP`/`LOG_TAP_TARGETS` were fire-and-forget — the
+      firmware replied and nothing was listening, so the refusal landed in
+      the client's consumer thread with nothing pending and was logged at
+      debug as "ignoring unsolicited response"; AUTOTUNE `ABORT`/`ACCEPT`
+      and four WIFI writes *did* wait but discarded the reason via
+      `bool(payload[1])`. Firmware side: `display_bridge_task()` had never
+      received any of `5df2190`'s treatment at all (13 guard failures
+      replying zero bytes), plus 2 in TOUCH. The two flagged reply shapes
+      are fixed too — `bridge_reply_unsupported()` now sends a reason, so
+      `{subcmd, 0}` can only mean an honest empty success, guarded by
+      `tools/check_bridge_reject_reason.ps1` because a Python test cannot
+      fail when the C regresses.
+      **One documented gap remains, deliberately:** `BLIT_DATA` stays raw
+      fire-and-forget, since a per-chunk wait would turn a ~1 minute image
+      transfer into ~20 minutes, so a mid-stream driver failure there is
+      still not surfaced.
 - [x] **Replacement CT coupling transformer selected: Hammond 140QEX**
       (Mouser 546-140QEX, $100.18 ea, 42 in stock, checked 2026-08-24). 1:1
       ratio, 20 Hz – 20 kHz rated, and its own datasheet states Primary
