@@ -9,14 +9,16 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 import unittest
 from types import SimpleNamespace
 from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+from kilnsim import benchproto_codec as bp  # noqa: E402
 from kilnsim import link as kilnsim_link  # noqa: E402
-from kilnsim.link import MockSimLink, SerialSimLink, SimLinkError  # noqa: E402
+from kilnsim.link import MockSimLink, SerialSimLink, SimLinkError, _FramedSimLink  # noqa: E402
 from kilnsim.protocol import CommandGroup, Event, EventType, FaultCmd, IoCmd, SysCmd, TcCmd  # noqa: E402
 
 
@@ -350,6 +352,136 @@ class ProtocolPortDiscoveryTests(unittest.TestCase):
         protocol = _fake_port("COM6", hwid="USB VID:PID=2E8A:F00A", interface="SimFW Control")
         self._set_comports([console, protocol])
         self.assertEqual(sorted(SerialSimLink.list_candidate_ports()), ["COM5", "COM6"])
+
+
+SIMFW_DEVICE_HOST = kilnsim_link.SIMFW_DEVICE_HOST
+SIMFW_DEVICE_TARGET = kilnsim_link.SIMFW_DEVICE_TARGET
+
+
+class _FakeFramedLink(_FramedSimLink):
+    """A minimal, in-memory ``_FramedSimLink`` concrete subclass -- proves
+    ``connect()``'s own SESSION_RESET-before-PING handshake sequencing (see
+    that method's own comment for the full incident it fixes) without any
+    real serial/TCP transport or hardware.
+
+    ``_transport_write`` decodes the outgoing frame (recording it in
+    ``sent_cmd_ids`` for assertions), then synchronously feeds a canned reply
+    back through ``_handle_wire_frame`` -- ``connect()``'s SESSION_RESET/PING
+    calls run under ``_send_lock`` on the calling thread and only ever wait
+    on ``_reply_cv``, which is already satisfied by the time
+    ``_wait_for_reply`` checks it, so no background thread coordination is
+    needed for this synchronous round trip. ``_transport_read_chunk`` still
+    backs the real ``_rx_loop`` thread ``connect()`` starts; it just always
+    reports "nothing new" (a short sleep so that thread doesn't spin hot).
+    """
+
+    def __init__(self, session_reset_status: int = 0x00) -> None:  # 0x00 == STATUS_OK
+        super().__init__()
+        self.session_reset_status = session_reset_status
+        self.sent_cmd_ids: "list[int]" = []
+        self._open = False
+
+    @property
+    def is_connected(self) -> bool:
+        return self._open
+
+    def _transport_open(self, port):
+        self._open = True
+        return "FAKE"
+
+    def _transport_close(self) -> None:
+        self._open = False
+
+    def _transport_read_chunk(self) -> bytes:
+        time.sleep(0.005)
+        return b""
+
+    def _transport_write(self, data: bytes) -> None:
+        frame = bp.decode_frame(data)
+        cmd_id = frame.payload[0] if frame.payload else None
+        self.sent_cmd_ids.append(cmd_id)
+
+        if cmd_id == int(SysCmd.SESSION_RESET):
+            reply_payload = bytes([self.session_reset_status])
+        elif cmd_id == int(SysCmd.PING):
+            reply_payload = bytes([0x00])  # STATUS_OK
+        else:
+            reply_payload = bytes([0x00])
+
+        reply = bp.Frame(
+            msg_type=bp.MsgType.ACK,
+            msg_index=frame.msg_index,
+            src_device=SIMFW_DEVICE_TARGET,
+            src_task=frame.dst_task,
+            dst_device=frame.src_device,
+            dst_task=frame.src_task,
+            payload=reply_payload,
+        )
+        self._handle_wire_frame(bp.encode_frame(reply))
+
+
+class SessionResetHandshakeTests(unittest.TestCase):
+    """SYS/SESSION_RESET (PROTOCOL.md sec 4): kilnsim.link._FramedSimLink.connect()
+    must send this as its very first command, before PING, and must tolerate
+    an older firmware that answers ERR_NOT_IMPL rather than failing the
+    connect -- see link.py's connect() comment and cmd_ids.h's
+    SIMFW_CMD_SYS_SESSION_RESET doc comment for the full incident."""
+
+    def test_connect_sends_session_reset_before_ping(self):
+        link = _FakeFramedLink()
+        port = link.connect()
+        self.assertEqual(port, "FAKE")
+        self.assertTrue(link.is_connected)
+        self.assertEqual(link.sent_cmd_ids[:2], [int(SysCmd.SESSION_RESET), int(SysCmd.PING)])
+        link.disconnect()
+
+    def test_connect_tolerates_session_reset_not_implemented(self):
+        # STATUS_ERR_NOT_IMPL = 0x01 (kilnsim.payloads) -- simulates an older
+        # firmware build that predates SESSION_RESET's cmd_id: cmd_task's
+        # ordinary dispatch fallthrough answers this, not a NACK.
+        link = _FakeFramedLink(session_reset_status=0x01)
+        port = link.connect()
+        self.assertEqual(port, "FAKE")
+        self.assertTrue(link.is_connected)
+        # The handshake was still attempted (and tolerated), and PING still
+        # ran and succeeded right after it -- connect() did not bail out.
+        self.assertEqual(link.sent_cmd_ids[:2], [int(SysCmd.SESSION_RESET), int(SysCmd.PING)])
+        link.disconnect()
+
+    def test_connect_fails_if_ping_itself_fails(self):
+        # Sanity check that this fake harness's failure path still works:
+        # PING failing (a NACK) must still fail connect(), same as before
+        # this feature existed -- the SESSION_RESET tolerance must not have
+        # accidentally swallowed every connect-time failure.
+        class _PingNacksLink(_FakeFramedLink):
+            def _transport_write(self, data: bytes) -> None:
+                frame = bp.decode_frame(data)
+                cmd_id = frame.payload[0] if frame.payload else None
+                self.sent_cmd_ids.append(cmd_id)
+                if cmd_id == int(SysCmd.PING):
+                    msg_type = bp.MsgType.NACK
+                    reply_payload = b""
+                elif cmd_id == int(SysCmd.SESSION_RESET):
+                    msg_type = bp.MsgType.ACK
+                    reply_payload = bytes([self.session_reset_status])
+                else:
+                    msg_type = bp.MsgType.ACK
+                    reply_payload = bytes([0x00])
+                reply = bp.Frame(
+                    msg_type=msg_type,
+                    msg_index=frame.msg_index,
+                    src_device=SIMFW_DEVICE_TARGET,
+                    src_task=frame.dst_task,
+                    dst_device=frame.src_device,
+                    dst_task=frame.src_task,
+                    payload=reply_payload,
+                )
+                self._handle_wire_frame(bp.encode_frame(reply))
+
+        link = _PingNacksLink()
+        with self.assertRaises(SimLinkError):
+            link.connect()
+        self.assertFalse(link.is_connected)
 
 
 if __name__ == "__main__":

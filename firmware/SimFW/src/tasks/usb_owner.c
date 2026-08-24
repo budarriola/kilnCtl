@@ -170,6 +170,23 @@ static bool usb_owner_encode_and_transmit(const benchproto_frame_t *frame, uint8
     return ok;
 }
 
+// Clears every slot of the per-task last-ACK cache -- the usb_owner-side
+// half of a SIMFW_CMD_SYS_SESSION_RESET (cmd_ids.h has the full contract).
+// Unconditional (not filtered by src_device): this cache doesn't record
+// which src_device a given task's last ACK was for in the first place (see
+// usb_owner_ack_cache_slot_t -- just the stuffed bytes + length), and there
+// is exactly one PC device on this link today (SIMFW_DEVICE_HOST), so
+// clearing all of it is both correct and the only option available without
+// widening that struct for a distinction nothing yet needs.
+static void usb_owner_reset_ack_cache(void)
+{
+    if (xSemaphoreTake(s_tx_lock, pdMS_TO_TICKS(USB_OWNER_TX_LOCK_WAIT_MS)) != pdTRUE) {
+        return;
+    }
+    memset(s_ack_cache, 0, sizeof(s_ack_cache));
+    xSemaphoreGive(s_tx_lock);
+}
+
 static void usb_owner_resend_cached_ack(uint8_t task_id)
 {
     if (task_id >= USB_OWNER_ACK_CACHE_SLOTS) {
@@ -472,6 +489,32 @@ static void usb_owner_handle_raw_frame(const uint8_t *stuffed, size_t stuffed_le
 
     if (frame.dst_device != SIMFW_DEVICE_TARGET) {
         return; // not addressed to this device
+    }
+
+    // SIMFW_CMD_SYS_SESSION_RESET dedup-bypass (cmd_ids.h has the full
+    // hazard writeup: this command exists to clear stale dedup/ACK-cache
+    // state left over from a previous USB session, so it must not itself be
+    // swallowed as a "duplicate" of that same stale state). Peeking at
+    // frame.payload[0] here -- before benchproto_link_on_frame() ever
+    // classifies this frame -- is safe precisely because it is checked
+    // against ONE specific (dst_task, cmd_id) pair, not used to skip dedup
+    // generically: whatever the classification would otherwise have been,
+    // this reset always fires and always wipes the requesting device's
+    // *entire* dedup ring + ACK cache, so there is no way to use this path
+    // to sneak a single ordinary duplicate frame past dedup while leaving
+    // everything else deduped normally. Every other (dst_task, cmd_id)
+    // combination reaches benchproto_link_on_frame() completely unchanged,
+    // below.
+    if (frame.msg_type == BENCHPROTO_MSG_DATA && frame.dst_task == SIMFW_TASK_ID_SYS && frame.length >= 1 &&
+        frame.payload[0] == SIMFW_CMD_SYS_SESSION_RESET) {
+        benchproto_link_reset_device(&s_link, frame.src_device);
+        usb_owner_reset_ack_cache();
+        // Fall through to the normal classification below -- the ring for
+        // this src_device is now empty, so on_frame() is guaranteed to
+        // classify this exact frame DELIVER (nothing left to collide
+        // with), which is what lets it flow through cmd_task's ordinary
+        // dispatch/reply path (handle_sys_session_reset(), cmd_task.c) and
+        // come back looking like any other SYS command's ACK.
     }
 
     benchproto_link_action_t action = benchproto_link_on_frame(&s_link, NULL, &frame);

@@ -174,6 +174,35 @@ benchproto_link_status_t benchproto_link_mark_delivered(benchproto_link_t *link,
                                                           uint8_t src_device, uint8_t src_task,
                                                           uint16_t msg_index);
 
+/* Clears every dedup-ring entry recorded for `src_device`, across EVERY
+ * registered task slot on this link -- the receiver-side half of a
+ * link-level "session reset" concept (first consumer: SimFW's
+ * SIMFW_CMD_SYS_SESSION_RESET, firmware/SimFW/src/tasks/cmd_ids.h) that lets
+ * a client which just reconnected and restarted its own msg_index counter
+ * at 0 avoid having its first BENCHPROTO_DEDUP_DEPTH messages misclassified
+ * as duplicates of a previous session's traffic still sitting in the ring
+ * (that ring is only initialized once, at this side's own boot/startup --
+ * see benchproto_link_init()'s caller -- so it outlives any number of the
+ * *transport's* own connects/disconnects on a link like SimFW's USB CDC,
+ * which never resets this struct on a reconnect).
+ *
+ * Deliberately narrow: this touches ONLY the receiver-side dedup rings.
+ * It does not unregister any task, does not touch `next_tx_index` (this
+ * side's own outbound counter, if it ever sends requests on this link), and
+ * does not touch any caller-side benchproto_pending_request_t or a
+ * transport's own reply/ACK cache (if it keeps one, e.g. usb_owner.c's
+ * per-task last-ACK cache on SimFW's side) -- callers that keep such state
+ * of their own must clear it themselves alongside calling this. In
+ * particular this is NOT a simulation/application-state reset of any kind
+ * (SimFW's own SIMFW_CMD_SYS_RESET_SIM is that, a completely different,
+ * unrelated command -- see cmd_ids.h's comment on SIMFW_CMD_SYS_SESSION_RESET
+ * for the full distinction).
+ *
+ * A no-op (not an error) if `src_device` has no matching entries, or if no
+ * tasks are registered at all -- always returns having done whatever subset
+ * of the ring legitimately matched. */
+void benchproto_link_reset_device(benchproto_link_t *link, uint8_t src_device);
+
 #ifdef __cplusplus
 }
 #endif

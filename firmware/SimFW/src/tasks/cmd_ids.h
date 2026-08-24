@@ -91,6 +91,77 @@ extern "C" {
 #define SIMFW_CMD_SYS_REBOOT_BOOTLOADER 0x08u
 #define SIMFW_CMD_SYS_REBOOT_BOOTLOADER_MAGIC 0xB007B007u
 
+// SESSION_RESET (bug-fix pass, "PC reconnect misclassified as duplicate
+// traffic"): clears THIS side's benchproto dedup ring and usb_owner's
+// per-task ACK cache for the requesting src_device -- LINK state only. See
+// "LINK state only" below for exactly what that does and does not mean.
+//
+// The bug this exists to fix: kilnsim's BenchprotoLink restarts its own
+// msg_index counter at 0 on every connect() (tools/PcTools/src/kilnsim/
+// benchproto_codec.py, BenchprotoLink.__init__), while this firmware's
+// dedup ring (benchproto_link_t, firmware/CommonFW/include/benchproto/
+// benchproto_link.h) is initialized exactly ONCE, at usb_owner_start()
+// (MCU boot) -- it has no idea a USB reconnect ever happened. So after a
+// reconnect, the PC's first BENCHPROTO_DEDUP_DEPTH requests (same fixed
+// src_device=SIMFW_DEVICE_HOST/src_task=0 identity, msg_index 0..3) can
+// collide with leftover entries from the *previous* session at that same
+// literal (src_device, src_task, msg_index) tuple. A colliding request is
+// classified DUPLICATE_REACK, never reaches cmd_task, and usb_owner replies
+// with whatever it last cached for that dst_task under
+// usb_owner_resend_cached_ack() -- a stale, unrelated command's answer that
+// still decodes cleanly, or nothing at all if that task's cache slot was
+// never populated. Observed on real hardware as the first 2-3 commands
+// after every reconnect either timing out or getting back a wrong answer.
+//
+// THE DEDUP-BYPASS HAZARD -- read this before touching the dispatch path:
+// this command is itself just another benchproto DATA frame to SYS, so on
+// an ordinary reconnect it is exactly as likely to collide with a stale
+// ring entry as anything else -- the very state this command exists to
+// clear could swallow it as a duplicate before it ever runs. usb_owner.c's
+// usb_owner_handle_raw_frame() special-cases this one (dst_task, cmd_id)
+// pair: it recognizes a SESSION_RESET frame by peeking at
+// frame->payload[0] and calls benchproto_link_reset_device() +
+// usb_owner_reset_ack_cache() UNCONDITIONALLY, BEFORE benchproto_link_on_frame()
+// ever classifies the frame -- so by the time dedup classification runs,
+// there is nothing left for this exact frame to collide with, regardless of
+// what was in the ring a moment earlier. This is not a generic "skip dedup
+// for cmd X" escape hatch: the side effect (wiping the *entire* device's
+// dedup ring + ACK cache) is unconditional and total, so the check cannot be
+// abused to sneak one specific duplicate frame past dedup while leaving
+// dedup intact for everything else -- exercising this path always costs the
+// caller its whole session's worth of dedup/ACK-cache state, which is
+// exactly what a client asking for a session reset should expect. Every
+// other command id still goes through benchproto_link_on_frame() completely
+// unmodified.
+//
+// LINK state only -- do NOT confuse this with SIMFW_CMD_SYS_RESET_SIM
+// above: RESET_SIM reinitializes the *simulation* (thermal state, from
+// either T0 or the last-selected preset); SESSION_RESET touches NEITHER the
+// simulation NOR any fixture I/O -- it never reaches sim_engine.h,
+// fault_sched.h, i2c_owner.h, or wave_owner.h at all. It never changes sim
+// time, seed, timescale, fault schedule/slots, relay outputs, DUT power, or
+// E-stop state. A client reconnecting mid-run (e.g. a scenario runner that
+// lost its USB connection and reopened the port) can send this safely
+// without disturbing anything the run has done so far.
+//
+// Idempotent and safe to send at any time, any number of times: clearing an
+// already-empty ring/cache is a no-op, and this command has no side effect
+// beyond that clearing (handle_sys_session_reset(), cmd_task.c, only builds
+// the ordinary {status} reply -- the actual reset already happened in
+// usb_owner.c by the time cmd_task ever sees this frame). A client SHOULD
+// send it once, as its very first command after every (re)connect, before
+// even PING -- see kilnsim.link's _FramedSimLink.connect() -- so PING and
+// everything after it are also protected from the same collision, not just
+// this command itself.
+//
+// request: none. reply: {status} only (SIMFW_CMD_STATUS_OK always -- this
+// command has no failure mode of its own to report). An older firmware
+// build that predates this id answers ERR_NOT_IMPL via cmd_task_dispatch()'s
+// ordinary fallthrough (SYS's group table simply has no entry for 0x09) --
+// a client must tolerate that without failing its connect (see
+// kilnsim.link's own handling).
+#define SIMFW_CMD_SYS_SESSION_RESET 0x09u
+
 // Reply-payload status byte -- byte 0 of every SYS/MODEL/TC/CT/RELAY/IO/
 // FAULT reply payload (docs/PROTOCOL.md "Reply convention"). This is
 // entirely a SimFW-level convention layered on top of benchproto's own

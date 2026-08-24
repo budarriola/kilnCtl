@@ -40,7 +40,7 @@ from typing import Any, Callable, Optional
 
 from . import benchproto_codec as bp
 from . import payloads as pl
-from .protocol import CommandGroup, Event, EventType
+from .protocol import CommandGroup, Event, EventType, SysCmd
 
 log = logging.getLogger(__name__)
 
@@ -293,10 +293,35 @@ class _FramedSimLink(SimLink):
         self._reader = threading.Thread(target=self._rx_loop, name="simlink-rx", daemon=True)
         self._reader.start()
 
+        # SYS/SESSION_RESET, sent BEFORE anything else (including the PING
+        # right below): this PC-side BenchprotoLink restarts its own
+        # msg_index counter at 0 on every connect() (BenchprotoLink.__init__
+        # above), but the firmware's own dedup ring is only initialized once,
+        # at MCU boot -- it has no idea a USB reconnect just happened. Left
+        # unaddressed, the first few post-reconnect commands (PING included)
+        # can collide with leftover ring entries from a *previous* session at
+        # the same literal (src_device, src_task, msg_index) tuple and get
+        # misclassified as duplicates -- see firmware/SimFW/src/tasks/
+        # cmd_ids.h's SIMFW_CMD_SYS_SESSION_RESET doc comment and
+        # firmware/SimFW/docs/PROTOCOL.md sec 4 for the full incident this
+        # fixes. Sending it first, before PING, is what protects PING itself
+        # from the same collision, not just this command.
+        #
+        # Tolerant of an older firmware build that predates this command
+        # (answers ERR_NOT_IMPL, surfaced here as SimLinkError) -- this is a
+        # best-effort hygiene step, not a hard connect requirement, so a
+        # bench running old firmware still connects exactly as it did before
+        # this fix existed (with the original bug still live for its first
+        # few commands, same as today).
+        try:
+            self.send_command(CommandGroup.SYS, SysCmd.SESSION_RESET, timeout=DEFAULT_CONNECT_TIMEOUT_S)
+        except SimLinkError as exc:
+            log.info("SimFW session-reset handshake not honored (%s) -- continuing connect anyway", exc)
+
         # PING round-trip proves this is actually a SimFW peer, not just a
         # port/address that happened to accept a connection.
         try:
-            self.send_command(CommandGroup.SYS, 1, timeout=DEFAULT_CONNECT_TIMEOUT_S)  # SysCmd.PING
+            self.send_command(CommandGroup.SYS, SysCmd.PING, timeout=DEFAULT_CONNECT_TIMEOUT_S)
         except SimLinkError:
             self.disconnect()
             raise

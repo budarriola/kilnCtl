@@ -124,6 +124,7 @@ to change shape for this.
 | `GET_CAPS` | `0x06` | **implemented** |
 | `GET_SIM_STATE` | `0x07` | **implemented** (gap-closure pass; new id, not in DESIGN_NOTES.md sec 5's original sketch) |
 | `REBOOT_BOOTLOADER` | `0x08` | **implemented** (later gap-closure pass, "flash over USB without BOOTSEL") |
+| `SESSION_RESET` | `0x09` | **implemented** (bug-fix pass, "PC reconnect misclassified as duplicate traffic") |
 
 ### `PING` (request: `[0x01]`, no args)
 
@@ -314,6 +315,59 @@ ever arrived for this one command" as success, not a failure — see
 kilnsim/link.py`) for the PC-side half of that contract, and `kilnsim
 reboot-bootloader --yes` / the `sim_reboot_bootloader` MCP tool for the two
 PC-side entry points.
+
+### `SESSION_RESET` (request: `[0x09]`, no args)
+
+**LINK state only — not to be confused with `RESET_SIM` above.** `RESET_SIM`
+reinitializes the *simulation*; `SESSION_RESET` clears `usb_owner`'s
+`benchproto` dedup ring and its per-task last-ACK cache for the requesting
+`src_device`, and touches nothing else — never sim time, seed, timescale,
+fault schedule/slots, relay outputs, DUT power, or E-stop state. It never
+reaches `sim_engine.h`, `fault_sched.h`, `i2c_owner.h`, or `wave_owner.h`.
+
+**The bug this exists to fix:** `kilnsim`'s `BenchprotoLink` restarts its own
+`msg_index` counter at 0 on every `connect()`
+(`tools/PcTools/src/kilnsim/benchproto_codec.py`, `BenchprotoLink.__init__`),
+but this firmware's dedup ring (`benchproto_link_t`) is initialized exactly
+**once**, at `usb_owner_start()` (MCU boot) — it has no idea a USB reconnect
+ever happened. After a reconnect, the PC's first `BENCHPROTO_DEDUP_DEPTH`
+(4) requests can therefore collide with leftover ring entries from the
+*previous* session at the same literal `(src_device, src_task, msg_index)`
+tuple, get classified `DUPLICATE_REACK`, and never reach `cmd_task` at all —
+observed on real hardware as the first 2-3 commands after every reconnect
+either timing out or getting back a stale, unrelated command's cached
+answer (`usb_owner_resend_cached_ack()`).
+
+**The dedup-bypass hazard.** `SESSION_RESET` is itself just another
+`benchproto` DATA frame to SYS, so on an ordinary reconnect it is exactly as
+likely to collide with a stale ring entry as anything else — the state it
+exists to clear could swallow the very command sent to clear it.
+`usb_owner_handle_raw_frame()` special-cases this one `(dst_task, cmd_id)`
+pair: it peeks at `frame->payload[0]` and calls
+`benchproto_link_reset_device()` + `usb_owner_reset_ack_cache()`
+**unconditionally, before `benchproto_link_on_frame()` ever classifies the
+frame** — so by the time dedup classification runs, there is nothing left
+for this exact frame to collide with. This is not a generic "skip dedup for
+this cmd_id" escape hatch: the side effect (wiping the *entire* requesting
+device's dedup ring + ACK cache) is unconditional and total, so the check
+cannot be used to sneak one specific duplicate frame past dedup while
+leaving dedup intact for everything else — exercising this path always
+costs the caller its whole session's worth of dedup/ACK-cache state. Every
+other command id reaches `benchproto_link_on_frame()` completely unmodified.
+
+Idempotent and safe to send at any time, any number of times — clearing an
+already-empty ring/cache is a no-op. A client SHOULD send it once, as its
+very first command after every (re)connect, before even `PING`
+(`kilnsim.link`'s `_FramedSimLink.connect()` does exactly this), so `PING`
+and everything after it are also protected from the same collision, not
+just this command itself. Tolerates an older firmware build that predates
+this id: `cmd_task_dispatch()`'s ordinary fallthrough answers `ERR_NOT_IMPL`
+(SYS's group table simply has no `0x09` entry), which `kilnsim.link` treats
+as "not supported, continue connecting anyway" rather than a connect
+failure.
+
+Reply: `[status]` only, always `SIMFW_CMD_STATUS_OK` — this command has no
+failure mode of its own to report.
 
 ### The 1200-baud touch convention (`src/tasks/usb_owner.c`)
 

@@ -417,6 +417,31 @@ static void handle_sys_reboot_bootloader(const uint8_t *args, uint8_t args_len, 
     *out_len = w.len;
 }
 
+// request: none. reply: {status} only, always SIMFW_CMD_STATUS_OK -- see
+// cmd_ids.h's comment on SIMFW_CMD_SYS_SESSION_RESET for the full contract.
+// By the time this handler runs, usb_owner_handle_raw_frame() has ALREADY
+// cleared the benchproto dedup ring and usb_owner's own per-task ACK cache
+// for this request's src_device -- that reset happens before this frame is
+// even classified DELIVER, deliberately, specifically so this command
+// itself cannot be swallowed as a duplicate of the very state it exists to
+// clear (see that function's own comment for the hazard and why the
+// dedup-bypass cannot be abused for any other command). This handler has
+// nothing left to do except answer with the ordinary SYS-style {status}
+// reply every other command in this table gives, through cmd_task's usual
+// dispatch path -- it never touches sim_engine.h/fault_sched.h/i2c_owner.h/
+// wave_owner.h, matching cmd_ids.h's "LINK state only, never simulation
+// state" contract.
+static void handle_sys_session_reset(const uint8_t *args, uint8_t args_len, uint8_t *out, uint8_t *out_len,
+                                      uint8_t out_cap)
+{
+    (void)args;
+    (void)args_len;
+    reply_writer_t w;
+    rw_init(&w, out, out_cap);
+    rw_u8(&w, SIMFW_CMD_STATUS_OK);
+    *out_len = w.len;
+}
+
 // Named (not anonymous) so s_sys_commands[] below and cmd_group_t's
 // `commands` field (also below) refer to the exact same type -- two
 // structurally-identical anonymous struct definitions are still distinct,
@@ -437,6 +462,7 @@ static const cmd_table_entry_t s_sys_commands[] = {
     {SIMFW_CMD_SYS_GET_CAPS, handle_sys_get_caps},
     {SIMFW_CMD_SYS_GET_SIM_STATE, handle_sys_get_sim_state},
     {SIMFW_CMD_SYS_REBOOT_BOOTLOADER, handle_sys_reboot_bootloader},
+    {SIMFW_CMD_SYS_SESSION_RESET, handle_sys_session_reset},
 };
 
 // --- MODEL group handlers (sim_engine.h) ------------------------------------

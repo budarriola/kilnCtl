@@ -25,6 +25,7 @@ void run_test_ct_i2s_gen(void);
 void run_test_safe_reboot_logic(void);
 void run_test_usb_dual_cdc_logic(void);
 void run_test_cmd_payload_vectors(void);
+void run_test_usb_owner_session_reset_logic(void);
 
 int main(void)
 {
@@ -44,6 +45,7 @@ int main(void)
     run_test_safe_reboot_logic();
     run_test_usb_dual_cdc_logic();
     run_test_cmd_payload_vectors();
+    run_test_usb_owner_session_reset_logic();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     if (g_test_failures > 0) {

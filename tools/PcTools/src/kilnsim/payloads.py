@@ -138,6 +138,8 @@ def _sys_encode(cmd: int, payload: dict) -> bytes:
         # explicit, named payload key, not a positional footgun.
         confirm = int(payload.get("confirm", SYS_REBOOT_BOOTLOADER_MAGIC)) & 0xFFFFFFFF
         return bytes([cmd]) + struct.pack("<I", confirm)
+    if cmd == 9:  # SESSION_RESET (PROTOCOL.md sec 4): LINK state only, no args.
+        return bytes([cmd])
     raise PayloadError(f"SYS: unknown command id {cmd}")
 
 
@@ -216,6 +218,11 @@ def _sys_decode(cmd: int, status: int, data: bytes) -> dict:
         # it can ACK. decode_reply()'s caller (link.py) still runs this
         # decoder normally for whatever DOES arrive; there is nothing beyond
         # the shared status byte to decode.
+        return {}
+    if cmd == 9:  # SESSION_RESET: {status} only -- see this module's own
+        # docstring and protocol.py's SysCmd.SESSION_RESET comment. Always
+        # STATUS_OK on real firmware (no failure mode of its own); nothing
+        # beyond the shared status byte to decode.
         return {}
     raise PayloadError(f"SYS: unknown command id {cmd}")
 

@@ -71,6 +71,22 @@ class SysCmd(enum.IntEnum):
     # ACK) -- see kilnsim.link's SimLink.send_command_expect_reboot() and
     # payloads.py's _sys_encode/_sys_decode for cmd id 8.
     REBOOT_BOOTLOADER = 8
+    # PROTOCOL.md sec 4 "SESSION_RESET" (bug-fix pass, "PC reconnect
+    # misclassified as duplicate traffic"): clears the firmware's benchproto
+    # dedup ring + per-task ACK cache for this PC's device id. LINK state
+    # only -- never confuse with RESET_SIM (id 3) above, which is the
+    # simulation reset; this one never touches sim_engine/fault_sched/
+    # i2c_owner/wave_owner at all. kilnsim.link's _FramedSimLink.connect()
+    # sends this as the very first command on every (re)connect, before
+    # PING, specifically because kilnsim's own BenchprotoLink restarts its
+    # msg_index counter at 0 on every connect() while the firmware's dedup
+    # ring survives across USB reconnects (only initialized once, at MCU
+    # boot) -- without this, the first few post-reconnect commands
+    # (including PING itself) can be misclassified as duplicates of a
+    # previous session's traffic and either time out or get back a stale,
+    # unrelated cached reply. Tolerates an older firmware build that
+    # predates this id (ERR_NOT_IMPL) without failing the connect.
+    SESSION_RESET = 9
 
 
 #: SIMFW_CMD_SYS_REBOOT_BOOTLOADER_MAGIC (firmware/SimFW/src/tasks/cmd_ids.h)

@@ -14,9 +14,18 @@ if (-not (Test-Path $vcvars)) {
 
 $testDir = $PSScriptRoot
 $simDir = Join-Path $testDir "..\src\sim"
+$tasksDir = Join-Path $testDir "..\src\tasks"
 $outDir = Join-Path $testDir "build"
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 $exe = Join-Path $outDir "simfw_host_tests.exe"
+
+# CommonFW's `benchproto` library (firmware/CommonFW/include/benchproto/,
+# src/benchproto_link.c) -- freestanding C11, zero FreeRTOS/TinyUSB
+# dependencies, so it links into this host-test binary for real (unlike
+# usb_owner.c/cmd_task.c, which stay out per each test file's own header
+# comment). Only test_usb_owner_session_reset_logic.c uses it today.
+$commonfwDir = Join-Path $testDir "..\..\CommonFW"
+$commonfwIncludeDir = Join-Path $commonfwDir "include"
 
 $sources = @(
     (Join-Path $testDir "test_main.c"),
@@ -36,6 +45,7 @@ $sources = @(
     (Join-Path $testDir "test_safe_reboot_logic.c"),
     (Join-Path $testDir "test_usb_dual_cdc_logic.c"),
     (Join-Path $testDir "test_cmd_payload_vectors.c"),
+    (Join-Path $testDir "test_usb_owner_session_reset_logic.c"),
     (Join-Path $simDir "thermal_model.c"),
     (Join-Path $simDir "max31856_regs.c"),
     (Join-Path $simDir "max31856_resp_image.c"),
@@ -43,11 +53,12 @@ $sources = @(
     (Join-Path $simDir "fault_engine.c"),
     (Join-Path $simDir "tc_fault_state.c"),
     (Join-Path $simDir "ct_calibration.c"),
-    (Join-Path $simDir "ct_i2s_gen.c")
+    (Join-Path $simDir "ct_i2s_gen.c"),
+    (Join-Path $commonfwDir "src\benchproto_link.c")
 )
 
 $sourceArgs = ($sources | ForEach-Object { '"' + $_ + '"' }) -join " "
-$cmd = "call `"$vcvars`" x64 >nul && cl /nologo /W4 /WX /EHsc /I `"$simDir`" /Fo:`"$outDir\\`" /Fe:`"$exe`" $sourceArgs"
+$cmd = "call `"$vcvars`" x64 >nul && cl /nologo /W4 /WX /EHsc /I `"$simDir`" /I `"$tasksDir`" /I `"$commonfwIncludeDir`" /Fo:`"$outDir\\`" /Fe:`"$exe`" $sourceArgs"
 
 cmd.exe /c $cmd
 if ($LASTEXITCODE -ne 0) {

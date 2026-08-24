@@ -295,6 +295,124 @@ static void test_dedup_ring_depth(void)
           "UART_PROTOCOL.md's original design)");
 }
 
+/* -- benchproto_link_reset_device: the SESSION_RESET fix ------------------- */
+
+static void test_reset_device_clears_colliding_msg_index(void)
+{
+    /* Mirrors the exact bug this function exists to fix (SimFW's
+     * cmd_ids.h SIMFW_CMD_SYS_SESSION_RESET doc comment / PROTOCOL.md sec
+     * 4): a PC client's own tx msg_index counter restarts at 0 on every
+     * reconnect while this side's dedup ring survives (only initialized
+     * once, at boot) -- so a post-reconnect request can collide with a
+     * ring entry left over from the PREVIOUS session. */
+    benchproto_link_t link;
+    benchproto_link_init(&link, DEV_TARGET);
+    CHECK(benchproto_link_register_task(&link, 3) == BENCHPROTO_LINK_OK, "setup: register task 3");
+
+    /* Previous session: msg_index 0 delivered and marked. */
+    benchproto_frame_t old_session = make_frame(BENCHPROTO_MSG_DATA, 0, DEV_HOST, 0, DEV_TARGET, 3);
+    CHECK(benchproto_link_on_frame(&link, NULL, &old_session) == BENCHPROTO_LINK_ACTION_DELIVER,
+          "previous session's first message -> DELIVER");
+    CHECK(benchproto_link_mark_delivered(&link, 3, DEV_HOST, 0, 0) == BENCHPROTO_LINK_OK,
+          "previous session's first message marked delivered");
+
+    /* New session (reconnect): PC's counter restarted at 0 -- an identical
+     * (src_device, src_task, msg_index) tuple, but a GENUINELY NEW request,
+     * not a retry. Without a reset, this is indistinguishable from the
+     * old session's retry. */
+    benchproto_frame_t new_session = make_frame(BENCHPROTO_MSG_DATA, 0, DEV_HOST, 0, DEV_TARGET, 3);
+    CHECK(benchproto_link_on_frame(&link, NULL, &new_session) == BENCHPROTO_LINK_ACTION_DUPLICATE_REACK,
+          "without a reset, the new session's msg_index 0 collides -> DUPLICATE_REACK (the bug)");
+
+    /* SESSION_RESET clears the ring for DEV_HOST before the new session's
+     * first ordinary command is even sent. */
+    benchproto_link_reset_device(&link, DEV_HOST);
+
+    CHECK(benchproto_link_on_frame(&link, NULL, &new_session) == BENCHPROTO_LINK_ACTION_DELIVER,
+          "after reset_device(), the SAME colliding msg_index -> DELIVER, not suppressed (the fix)");
+}
+
+static void test_reset_device_leaves_other_devices_untouched(void)
+{
+    /* reset_device(DEV_HOST) must not disturb dedup state recorded for a
+     * DIFFERENT src_device on the same link -- a reset scoped to one
+     * client must not affect another's in-flight dedup protection. */
+    enum { DEV_OTHER = 5 };
+    benchproto_link_t link;
+    benchproto_link_init(&link, DEV_TARGET);
+    CHECK(benchproto_link_register_task(&link, 3) == BENCHPROTO_LINK_OK, "setup: register task 3");
+
+    benchproto_frame_t from_other = make_frame(BENCHPROTO_MSG_DATA, 0, DEV_OTHER, 0, DEV_TARGET, 3);
+    CHECK(benchproto_link_on_frame(&link, NULL, &from_other) == BENCHPROTO_LINK_ACTION_DELIVER,
+          "setup: DEV_OTHER's message -> DELIVER");
+    CHECK(benchproto_link_mark_delivered(&link, 3, DEV_OTHER, 0, 0) == BENCHPROTO_LINK_OK,
+          "setup: DEV_OTHER's message marked delivered");
+
+    benchproto_link_reset_device(&link, DEV_HOST); /* resets a DIFFERENT device */
+
+    CHECK(benchproto_link_on_frame(&link, NULL, &from_other) == BENCHPROTO_LINK_ACTION_DUPLICATE_REACK,
+          "resetting DEV_HOST leaves DEV_OTHER's own dedup entry intact -> still DUPLICATE_REACK");
+}
+
+static void test_reset_device_spans_every_registered_task(void)
+{
+    /* The bug is not confined to one task: the PC's single shared
+     * msg_index counter means a reconnect can collide against WHICHEVER
+     * tasks happened to receive traffic near the end of the previous
+     * session. reset_device() must clear every registered task's ring for
+     * that device, not just one. */
+    benchproto_link_t link;
+    benchproto_link_init(&link, DEV_TARGET);
+    CHECK(benchproto_link_register_task(&link, 1) == BENCHPROTO_LINK_OK, "setup: register task 1 (SYS-like)");
+    CHECK(benchproto_link_register_task(&link, 2) == BENCHPROTO_LINK_OK, "setup: register task 2 (MODEL-like)");
+
+    benchproto_frame_t to_task1 = make_frame(BENCHPROTO_MSG_DATA, 0, DEV_HOST, 0, DEV_TARGET, 1);
+    benchproto_frame_t to_task2 = make_frame(BENCHPROTO_MSG_DATA, 1, DEV_HOST, 0, DEV_TARGET, 2);
+    CHECK(benchproto_link_on_frame(&link, NULL, &to_task1) == BENCHPROTO_LINK_ACTION_DELIVER, "setup: task1 DELIVER");
+    CHECK(benchproto_link_mark_delivered(&link, 1, DEV_HOST, 0, 0) == BENCHPROTO_LINK_OK, "setup: task1 marked");
+    CHECK(benchproto_link_on_frame(&link, NULL, &to_task2) == BENCHPROTO_LINK_ACTION_DELIVER, "setup: task2 DELIVER");
+    CHECK(benchproto_link_mark_delivered(&link, 2, DEV_HOST, 0, 1) == BENCHPROTO_LINK_OK, "setup: task2 marked");
+
+    /* Confirm both are indeed dedup-protected before the reset. */
+    CHECK(benchproto_link_on_frame(&link, NULL, &to_task1) == BENCHPROTO_LINK_ACTION_DUPLICATE_REACK,
+          "pre-reset: task1's msg_index 0 is deduped");
+    CHECK(benchproto_link_on_frame(&link, NULL, &to_task2) == BENCHPROTO_LINK_ACTION_DUPLICATE_REACK,
+          "pre-reset: task2's msg_index 1 is deduped");
+
+    benchproto_link_reset_device(&link, DEV_HOST);
+
+    CHECK(benchproto_link_on_frame(&link, NULL, &to_task1) == BENCHPROTO_LINK_ACTION_DELIVER,
+          "post-reset: task1's colliding msg_index -> DELIVER");
+    CHECK(benchproto_link_on_frame(&link, NULL, &to_task2) == BENCHPROTO_LINK_ACTION_DELIVER,
+          "post-reset: task2's colliding msg_index -> DELIVER");
+}
+
+static void test_reset_device_on_empty_ring_is_a_harmless_no_op(void)
+{
+    /* Idempotent/safe-at-any-time (cmd_ids.h's own contract on
+     * SIMFW_CMD_SYS_SESSION_RESET): calling this on a link with nothing
+     * recorded yet must not crash or otherwise misbehave. */
+    benchproto_link_t link;
+    benchproto_link_init(&link, DEV_TARGET);
+    CHECK(benchproto_link_register_task(&link, 3) == BENCHPROTO_LINK_OK, "setup: register task 3");
+
+    benchproto_link_reset_device(&link, DEV_HOST); /* nothing recorded yet */
+
+    benchproto_frame_t data = make_frame(BENCHPROTO_MSG_DATA, 0, DEV_HOST, 0, DEV_TARGET, 3);
+    CHECK(benchproto_link_on_frame(&link, NULL, &data) == BENCHPROTO_LINK_ACTION_DELIVER,
+          "reset on an already-empty ring is a no-op, not a crash -- still classifies normally");
+}
+
+static void test_reset_device_with_no_tasks_registered_is_safe(void)
+{
+    /* Nothing registered at all -- reset_device() must not read/write past
+     * an empty tasks[] array. */
+    benchproto_link_t link;
+    benchproto_link_init(&link, DEV_TARGET);
+    benchproto_link_reset_device(&link, DEV_HOST); /* must not crash */
+    CHECK(!benchproto_link_is_registered(&link, 3), "still nothing registered afterward");
+}
+
 int main(void)
 {
     test_register_unregister();
@@ -313,6 +431,11 @@ int main(void)
     test_on_frame_broadcast_never_deduped();
     test_mark_delivered_unknown_task();
     test_dedup_ring_depth();
+    test_reset_device_clears_colliding_msg_index();
+    test_reset_device_leaves_other_devices_untouched();
+    test_reset_device_spans_every_registered_task();
+    test_reset_device_on_empty_ring_is_a_harmless_no_op();
+    test_reset_device_with_no_tasks_registered_is_safe();
 
     if (g_failures == 0) {
         printf("ALL PASS\n");

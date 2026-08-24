@@ -194,3 +194,21 @@ benchproto_link_status_t benchproto_link_mark_delivered(benchproto_link_t *link,
     dedup_record(slot, src_device, src_task, msg_index);
     return BENCHPROTO_LINK_OK;
 }
+
+void benchproto_link_reset_device(benchproto_link_t *link, uint8_t src_device)
+{
+    if (!link) {
+        return;
+    }
+    for (unsigned i = 0; i < BENCHPROTO_MAX_TASKS; ++i) {
+        if (!link->tasks[i].in_use) {
+            continue;
+        }
+        benchproto_task_slot_t *slot = &link->tasks[i];
+        for (unsigned d = 0; d < BENCHPROTO_DEDUP_DEPTH; ++d) {
+            if (slot->dedup[d].valid && slot->dedup[d].src_device == src_device) {
+                slot->dedup[d].valid = false;
+            }
+        }
+    }
+}
