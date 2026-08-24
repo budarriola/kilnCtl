@@ -96,7 +96,17 @@ DEFAULT_BAUD_RATE = 921600
 #: stops working. If the two links ever need to version independently, the
 #: fix is to give uart_task_ids.h its own constant rather than to relax the
 #: equality gate -- see that header's own comment on the alias.
-UART_PROTOCOL_VERSION = 6
+#: Version 7 (2026-08-24): SAFETY_CMD_GET_CT_CAL/GET_PARAM/GET_CONFIG_PAGE
+#: each moved off the id they used to share with their own reply (0x1A/0x1E/
+#: 0x1F) onto a new id of their own (0x22/0x23/0x24) -- see this file's
+#: SAFETY_CMD_GET_CT_CAL doc comment for why the shared-id scheme had to go
+#: (it structurally blocked a length-different driver-error refusal reply).
+#: UNLIKE version 6, this one IS a real change to this protocol's own
+#: contract, not just a side effect of the isolated-link alias: pc_tools now
+#: sends 0x22 where it used to send 0x1A for GET_CT_CAL, and must be built
+#: against this version or the mismatched id gets no reply at all. Same
+#: same-number-moves-together reasoning as version 6's own bump.
+UART_PROTOCOL_VERSION = 7
 
 
 class Device(enum.IntEnum):
@@ -308,16 +318,35 @@ SAFETY_CMD_ROLLBACK = 0x17
 #: ARMED, or if the channel is out of range -- both refusal decisions belong
 #: to SaftyFW, not this client.
 SAFETY_CMD_SET_CT_CAL = 0x19
-#: PC -> ESP query, shared id with the reply (SAFETY_CMD_CT_CAL, same value)
-#: -- request-vs-reply distinguished by length, same convention as
-#: GET_FW_VERSION above. UNLIKE GET_STATUS/GET_DIAG/GET_FW_VERSION this is
-#: NOT answered from a cache: uart_bridge.c's SAFETY_CMD_GET_CT_CAL case
-#: calls safety_link_get_ct_cal(), which is a live, blocking round trip
-#: across the isolated link to the Pico and can genuinely time out
+#: PC -> ESP query. Through firmware protocol version 6 this shared its wire
+#: id with the reply (SAFETY_CMD_CT_CAL, same value 0x1A), request-vs-reply
+#: distinguished by length, same convention as GET_FW_VERSION above. Version
+#: 7 split this request onto its own id (0x22, uart_task_ids.h's
+#: SAFETY_CMD_GET_CT_CAL) because the shared-id scheme structurally blocked a
+#: length-different driver-error refusal reply on this command: a refusal
+#: frame ({subcmd, ok=0, reason...}) is neither 1 byte (the request) nor
+#: SAFETY_CT_CAL_LEN (the successful 28-byte reply), so under the old scheme
+#: this client could not tell "the ESP is refusing" from "a malformed/
+#: truncated successful reply" -- see devices.py's decode path and
+#: CommonFW/docs/LINK_PROTOCOL.md's "Request/reply ids must never be shared"
+#: rule. The reply keeps id 0x1A (SAFETY_CMD_CT_CAL), unchanged.
+#:
+#: UNLIKE GET_STATUS/GET_DIAG/GET_FW_VERSION this is NOT answered from a
+#: cache: uart_bridge.c's SAFETY_CMD_GET_CT_CAL case calls
+#: safety_link_get_ct_cal(), which is a live, blocking round trip across the
+#: isolated link to the Pico and can genuinely time out
 #: (kilnlink_get_ct_cal.h/kilnlink_ct_cal.h). Expect this call to take up to
 #: ~SAFETY_LINK_REPLY_TIMEOUT_MS (safety_link.h) longer than the other
 #: SAFETY queries, which never leave the ESP.
-SAFETY_CMD_GET_CT_CAL = 0x1A
+SAFETY_CMD_GET_CT_CAL = 0x22
+#: Pico -> ESP -> PC, relayed verbatim. The successful CT_CAL reply's own id
+#: -- unchanged across the version 6 -> 7 split above. A reply carrying THIS
+#: id is always the 28-byte success payload; a reply carrying
+#: SAFETY_CMD_GET_CT_CAL's id instead (the request's own id, echoed back) is
+#: a driver-error/refusal frame from uart_bridge.c's bridge_reply_reject(),
+#: never confusable with each other now that the two ids differ. See
+#: devices.py's parse_safety_response().
+SAFETY_CMD_CT_CAL = 0x1A
 #: Number of CT calibration channels (config_store_ct_channel_cal_t[3]) --
 #: same value as KILNLINK_SET_CT_CAL_NUM_CHANNELS/KILNLINK_CT_CAL_NUM_CHANNELS
 #: in CommonFW.

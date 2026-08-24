@@ -9,10 +9,17 @@
  * and never reports OK except at the one length its own header implies.
  */
 
+/* Also proves the KILNLINK_PROTOCOL_VERSION 7 split from the request
+ * (kilnlink_get_config_page.h's SAFETY_CMD_GET_CONFIG_PAGE, now 0x24): this
+ * reply's id (0x1F, unchanged) and the request's id must be DIFFERENT, and
+ * this decoder must REJECT a frame carrying the request's id.
+ */
+
 #include <stdio.h>
 #include <string.h>
 
 #include "kilnlink/kilnlink_config_page.h"
+#include "kilnlink/kilnlink_get_config_page.h"
 
 static int g_failures = 0;
 
@@ -283,6 +290,24 @@ static void test_length_sweep(void)
     }
 }
 
+/* -- request/reply id separation (KILNLINK_PROTOCOL_VERSION 7) ----------- */
+
+static void test_request_and_reply_ids_differ(void)
+{
+    CHECK(KILNLINK_CONFIG_PAGE_CMD != KILNLINK_GET_CONFIG_PAGE_CMD,
+          "CONFIG_PAGE reply id and GET_CONFIG_PAGE request id must be different");
+}
+
+static void test_decode_rejects_request_id(void)
+{
+    uint8_t buf[KILNLINK_CONFIG_PAGE_HDR_LEN] = {
+        KILNLINK_GET_CONFIG_PAGE_CMD, 0x00, 0x00, 0x00,
+    };
+    kilnlink_config_page_t out;
+    CHECK(kilnlink_config_page_decode(buf, sizeof(buf), &out) == KILNLINK_CONFIG_PAGE_ERR_WRONG_CMD,
+          "CONFIG_PAGE decode() rejects a frame carrying GET_CONFIG_PAGE's (request) id");
+}
+
 int main(void)
 {
     test_pack_all_fit_one_page();
@@ -298,6 +323,8 @@ int main(void)
     test_decode_trailing_garbage();
     test_decode_wrong_cmd();
     test_length_sweep();
+    test_request_and_reply_ids_differ();
+    test_decode_rejects_request_id();
 
     if (g_failures == 0) {
         printf("ALL PASS\n");

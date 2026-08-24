@@ -8,14 +8,22 @@
 extern "C" {
 #endif
 
-/* ESP -> Pico, SAFETY_CMD_GET_CT_CAL = 0x1A -- docs/LINK_PROTOCOL.md sec 4.
- * One byte, no arguments -- same shape and same request/reply-share-an-id
- * convention as SAFETY_CMD_GET_FW_VERSION/kilnlink_get_fw_version.h: the
- * reply (kilnlink_ct_cal.h's SAFETY_CMD_CT_CAL) is sent under the SAME
- * command byte, distinguished by direction and length (this request is
- * always exactly 1 byte; the reply is always KILNLINK_CT_CAL_LEN). The Pico
- * answers every copy it sees and never tracks whether its answer arrived,
- * same as GET_FW_VERSION (LINK_PROTOCOL.md sec 2).
+/* ESP -> Pico, SAFETY_CMD_GET_CT_CAL = 0x22 -- docs/LINK_PROTOCOL.md sec 4.
+ * One byte, no arguments.
+ *
+ * Was 0x1A, sharing that command byte with its own reply (kilnlink_ct_cal.h's
+ * SAFETY_CMD_CT_CAL), distinguished only by direction and length -- the same
+ * convention SAFETY_CMD_GET_FW_VERSION still uses. Moved to its own id
+ * (KILNLINK_PROTOCOL_VERSION 6 -> 7) because sharing an id with the reply
+ * structurally blocks a length-different refusal reply: a driver-error
+ * refusal frame is neither 1 byte (this request's length) nor
+ * KILNLINK_CT_CAL_LEN (the successful reply's length), so under the old
+ * shared-id scheme it could never be sent without being misread as a
+ * malformed CT_CAL reply. 0x1A is now used ONLY by the reply
+ * (kilnlink_ct_cal.h) and is never reused for this request again --
+ * see docs/LINK_PROTOCOL.md's "Request/reply ids must never be shared" rule.
+ * The Pico answers every copy it sees and never tracks whether its answer
+ * arrived, same as GET_FW_VERSION (LINK_PROTOCOL.md sec 2).
  *
  * Freestanding C11, no allocation, no I/O, no globals, every decoder
  * bounds-checked -- CommonFW/README.md rules 1-6. There is no payload beyond
@@ -23,7 +31,7 @@ extern "C" {
  * going through the encode/decode + status-enum shape every other kilnlink
  * codec uses, rather than a special case. */
 
-#define KILNLINK_GET_CT_CAL_CMD 0x1Au
+#define KILNLINK_GET_CT_CAL_CMD 0x22u
 #define KILNLINK_GET_CT_CAL_LEN 1u /* cmd(1), no fields */
 
 typedef enum {
@@ -40,7 +48,7 @@ typedef struct {
     uint8_t reserved; /* unused; always 0, not part of the wire payload */
 } kilnlink_get_ct_cal_t;
 
-/* Serializes `msg` (SAFETY_CMD_GET_CT_CAL payload, byte 0 = 0x1A) into
+/* Serializes `msg` (SAFETY_CMD_GET_CT_CAL payload, byte 0 = 0x22) into
  * `out`. Always exactly KILNLINK_GET_CT_CAL_LEN (1) byte. `msg` may be NULL,
  * since there is nothing in it to read. Returns 1, or 0 on
  * KILNLINK_GET_CT_CAL_ERR_BUFFER_TOO_SMALL. */

@@ -11,11 +11,12 @@ extern "C" {
 #endif
 
 /* Pico -> ESP, SAFETY_CMD_PARAM = 0x1E -- sent in reply to
- * SAFETY_CMD_GET_PARAM (kilnlink_get_param.h), same shared-id,
- * distinguished-by-direction-and-length convention as Frame C/
- * GET_FW_VERSION and GET_CT_CAL/CT_CAL: the request is always exactly
- * KILNLINK_GET_PARAM_LEN (3) bytes; this reply is always longer (5, or
- * 5 + a value length, never 3).
+ * SAFETY_CMD_GET_PARAM (kilnlink_get_param.h, its own id 0x23 since
+ * KILNLINK_PROTOCOL_VERSION 7 -- see that header's comment). Before version
+ * 7 this reply shared 0x1E with its own request, distinguished only by
+ * direction and length; that scheme structurally blocked a length-different
+ * refusal reply, which is why the request moved off this id. 0x1E itself is
+ * unchanged and is now used ONLY by this reply.
  *
  * `found` is carried explicitly, never inferred from a sentinel value,
  * because COMMISSIONING.md sec 2 requires an unknown id to be "refused

@@ -1462,11 +1462,15 @@ static void display_bridge_task(void *arg)
             continue; /* the guard above logged the specific reason */
         }
         if (err != ESP_OK) {
-            /* Logged and dropped. Note the driver has already torn down any
-             * open blit window that the failure invalidated, so the task's
-             * next command starts from a defined panel state rather than half
+            /* Reported to the host, not just the log -- same fix as
+             * thermo_bridge_task()/io_bridge_task()'s own "driver error"
+             * reply: a silent drop here was indistinguishable from success
+             * on the wire. Note the driver has already torn down any open
+             * blit window that the failure invalidated, so the task's next
+             * command starts from a defined panel state rather than half
              * way through an image. */
             ESP_LOGW(TAG, "display: subcmd 0x%02X failed: %s", subcmd, esp_err_to_name(err));
+            bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_DISPLAY, subcmd, "driver error");
             continue;
         }
         if (reply_len > 0) {
@@ -1650,7 +1654,12 @@ static void touch_bridge_task(void *arg)
             continue; /* the guard above logged the specific reason */
         }
         if (err != ESP_OK) {
+            /* Reported to the host, not just the log -- same fix as
+             * thermo_bridge_task()/io_bridge_task()'s own "driver error"
+             * reply: a silent drop here was indistinguishable from success
+             * on the wire. */
             ESP_LOGW(TAG, "touch: subcmd 0x%02X failed: %s", subcmd, esp_err_to_name(err));
+            bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_TOUCH, subcmd, "driver error");
             continue;
         }
         if (reply_len > 0) {
@@ -1870,15 +1879,19 @@ static void safety_bridge_task(void *arg)
                 break;
             }
             case SAFETY_CMD_GET_CT_CAL: {
-                /* Shared id with the reply (SAFETY_CMD_CT_CAL, 0x1A) --
-                 * request-vs-reply-by-length, same convention as
-                 * GET_FW_VERSION/Frame C. Unlike GET_STATUS/GET_DIAG this is
-                 * never answered from a cache: safety_link_get_ct_cal() does
-                 * a live, blocking round trip to the Pico and can genuinely
-                 * time out (ESP_ERR_TIMEOUT) if it never answers -- that
-                 * falls through to the generic "err != ESP_OK -> logged, no
-                 * reply" handling below, same as every other query in this
-                 * file whose driver call can fail. */
+                /* Own id (0x22) since KILNLINK_PROTOCOL_VERSION 7 -- no
+                 * longer shared with the reply (SAFETY_CMD_CT_CAL, 0x1A).
+                 * That split is what lets the "err != ESP_OK" bottom block
+                 * below send a driver-error refusal for this command now:
+                 * a refusal frame ({0x22, ok=0, reason}) can never again be
+                 * misread as a truncated/malformed CT_CAL reply, since a
+                 * real success reply carries the DIFFERENT id 0x1A. Unlike
+                 * GET_STATUS/GET_DIAG this is never answered from a cache:
+                 * safety_link_get_ct_cal() does a live, blocking round trip
+                 * to the Pico and can genuinely time out (ESP_ERR_TIMEOUT)
+                 * if it never answers -- that falls through to the generic
+                 * "err != ESP_OK" handling below, same as every other query
+                 * in this file whose driver call can fail. */
                 size_t got_len = 0;
                 err = safety_link_get_ct_cal(ctx->link, reply, sizeof(reply), &got_len);
                 reply_len = (err == ESP_OK) ? got_len : 0;
@@ -1895,7 +1908,21 @@ static void safety_bridge_task(void *arg)
             continue; /* the guard above logged the specific reason */
         }
         if (err != ESP_OK) {
+            /* Reported to the host, not just the log -- same fix as
+             * thermo_bridge_task()/io_bridge_task()'s own "driver error"
+             * reply: a silent drop here was indistinguishable from success
+             * on the wire. This is also the fix TODO.md section 11 was
+             * blocked on for SAFETY_CMD_GET_CT_CAL specifically: that
+             * command's request and reply used to share id 0x1A
+             * (distinguished only by length), so a refusal frame here --
+             * neither 1 byte nor KILNLINK_CT_CAL_LEN (28) -- could never be
+             * told apart from a truncated/malformed CT_CAL reply. Splitting
+             * the request onto its own id (0x22, KILNLINK_PROTOCOL_VERSION
+             * 7 -- see uart_task_ids.h's SAFETY_CMD_GET_CT_CAL) removed that
+             * structural block, so this refusal can now go out safely for
+             * every subcommand in this switch, GET_CT_CAL included. */
             ESP_LOGW(TAG, "safety: subcmd 0x%02X failed: %s", subcmd, esp_err_to_name(err));
+            bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_SAFETY, subcmd, "driver error");
             continue;
         }
         if (reply_len > 0) {

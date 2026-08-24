@@ -6,9 +6,16 @@
  * and a truncated-mid-value frame.
  */
 
+/* Also proves the KILNLINK_PROTOCOL_VERSION 7 split from the request
+ * (kilnlink_get_param.h's SAFETY_CMD_GET_PARAM, now 0x23): this reply's id
+ * (0x1E, unchanged) and the request's id must be DIFFERENT, and this
+ * decoder must REJECT a frame carrying the request's id.
+ */
+
 #include <stdio.h>
 #include <string.h>
 
+#include "kilnlink/kilnlink_get_param.h"
 #include "kilnlink/kilnlink_param.h"
 
 static int g_failures = 0;
@@ -197,6 +204,24 @@ static void test_encode_buffer_too_small(void)
           "encode() with an undersized output buffer -> ERR_BUFFER_TOO_SMALL");
 }
 
+/* -- request/reply id separation (KILNLINK_PROTOCOL_VERSION 7) ----------- */
+
+static void test_request_and_reply_ids_differ(void)
+{
+    CHECK(KILNLINK_PARAM_CMD != KILNLINK_GET_PARAM_CMD,
+          "PARAM reply id and GET_PARAM request id must be different");
+}
+
+static void test_decode_rejects_request_id(void)
+{
+    uint8_t buf[KILNLINK_PARAM_HDR_LEN] = {
+        KILNLINK_GET_PARAM_CMD, 0x00, 0x00, 0x00, 0x00,
+    };
+    kilnlink_param_t out;
+    CHECK(kilnlink_param_decode(buf, sizeof(buf), &out) == KILNLINK_PARAM_ERR_WRONG_CMD,
+          "PARAM decode() rejects a frame carrying GET_PARAM's (request) id");
+}
+
 int main(void)
 {
     test_round_trip_found_f32();
@@ -211,6 +236,8 @@ int main(void)
     test_decode_wrong_cmd();
     test_encode_bad_type();
     test_encode_buffer_too_small();
+    test_request_and_reply_ids_differ();
+    test_decode_rejects_request_id();
 
     if (g_failures == 0) {
         printf("ALL PASS\n");

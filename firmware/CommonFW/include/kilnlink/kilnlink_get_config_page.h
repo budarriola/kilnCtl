@@ -8,12 +8,18 @@
 extern "C" {
 #endif
 
-/* ESP -> Pico, SAFETY_CMD_GET_CONFIG_PAGE = 0x1F -- docs/LINK_PROTOCOL.md
+/* ESP -> Pico, SAFETY_CMD_GET_CONFIG_PAGE = 0x24 -- docs/LINK_PROTOCOL.md
  * sec 4, docs/COMMISSIONING.md sec 2. Fixed 2-byte request: cmd + a 0-based
- * page index. Same shared-id, distinguished-by-direction-and-length
- * convention as GET_PARAM/PARAM: the reply (kilnlink_config_page.h's
- * SAFETY_CMD_CONFIG_PAGE) rides the same command byte and is always longer
- * than this 2-byte request.
+ * page index.
+ *
+ * Was 0x1F, sharing that command byte with its own reply
+ * (kilnlink_config_page.h's SAFETY_CMD_CONFIG_PAGE), distinguished only by
+ * direction and length. Moved to its own id (KILNLINK_PROTOCOL_VERSION
+ * 6 -> 7), same reasoning and same pass as GET_CT_CAL/CT_CAL and
+ * GET_PARAM/PARAM: a shared id structurally blocks a length-different
+ * refusal reply. 0x1F is now used ONLY by the reply
+ * (kilnlink_config_page.h) -- see docs/LINK_PROTOCOL.md's "Request/reply
+ * ids must never be shared" rule.
  *
  * Paging exists because a whole-record dump does not fit: CONFIG_REFERENCE.md
  * secs 1-5 is far more than the wire's 253-byte payload cap could carry in
@@ -26,7 +32,7 @@ extern "C" {
  * Freestanding C11, no allocation, no I/O, no globals, every decoder
  * bounds-checked -- CommonFW/README.md rules 1-6. */
 
-#define KILNLINK_GET_CONFIG_PAGE_CMD 0x1Fu
+#define KILNLINK_GET_CONFIG_PAGE_CMD 0x24u
 #define KILNLINK_GET_CONFIG_PAGE_LEN 2u /* cmd(1) + page_index u8(1) */
 
 typedef enum {
@@ -40,7 +46,7 @@ typedef struct {
     uint8_t page_index; /* 0-based; the Pico resumes packing from wherever page (page_index - 1) left off */
 } kilnlink_get_config_page_t;
 
-/* Serializes `msg` (SAFETY_CMD_GET_CONFIG_PAGE payload, byte 0 = 0x1F
+/* Serializes `msg` (SAFETY_CMD_GET_CONFIG_PAGE payload, byte 0 = 0x24
  * included) into `out`. Always exactly KILNLINK_GET_CONFIG_PAGE_LEN (2)
  * bytes. Returns 2, or 0 on KILNLINK_GET_CONFIG_PAGE_ERR_BUFFER_TOO_SMALL. */
 size_t kilnlink_get_config_page_encode(const kilnlink_get_config_page_t *msg, uint8_t *out,

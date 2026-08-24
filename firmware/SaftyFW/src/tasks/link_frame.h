@@ -324,15 +324,18 @@ void link_frame_apply_set_ct_cal(const config_store_record_t *committed, uint8_t
                                   bool calibrated, float gain, float offset,
                                   config_store_record_t *out);
 
-// --- ESP -> Pico: SAFETY_CMD_GET_CT_CAL (0x1A), request only ----------------
+// --- ESP -> Pico: SAFETY_CMD_GET_CT_CAL (0x22), request only ----------------
 // CommonFW/docs/LINK_PROTOCOL.md section 4/6. Same value as
 // KILNLINK_GET_CT_CAL_CMD (kilnlink/kilnlink_get_ct_cal.h) -- redefined here
-// as a local dispatch id. Same shared-id-both-directions convention as
-// LINK_FRAME_FW_VERSION_CMD/SAFETY_CMD_GET_FW_VERSION: this is the 1-byte
-// ESP->Pico request; the Pico's reply (kilnlink_ct_cal.h's SAFETY_CMD_
-// CT_CAL, link_task_send_ct_cal()) reuses the SAME wire id, distinguished by
-// direction and length, not a second constant.
-#define LINK_FRAME_GET_CT_CAL_CMD 0x1Au
+// as a local dispatch id.
+//
+// Was 0x1A, sharing that wire id with its own reply (kilnlink_ct_cal.h's
+// SAFETY_CMD_CT_CAL, link_task_send_ct_cal()), distinguished only by
+// direction and length. Moved to its own id (KILNLINK_PROTOCOL_VERSION
+// 6 -> 7) because that scheme structurally blocks a length-different
+// refusal reply -- see kilnlink_get_ct_cal.h's header comment.
+// 0x1A is now used ONLY by the reply.
+#define LINK_FRAME_GET_CT_CAL_CMD 0x22u
 
 // --- Update frames: SAFTYFW Phase 10, CommonFW/docs/UPDATE_PROTOCOL.md
 // section 4's frame table. Plain #define ids, same convention as every other

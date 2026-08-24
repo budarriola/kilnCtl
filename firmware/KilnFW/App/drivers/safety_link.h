@@ -347,12 +347,12 @@ static inline bool safety_link_is_stale(uint16_t age_ms, uint32_t threshold_ms)
  * Pulled out of safety_link.c's safety_drain_inbox_ex() loop: after one
  * inbox message has just been dispatched, should the next uart_protocol_
  * receive() still be allowed to block (this call is still waiting for a
- * specific shared-id reply it asked for), or is it safe to degrade to a
+ * specific out-of-band reply it asked for), or is it safe to degrade to a
  * zero-wait opportunistic drain?
  *
  * Each `want_*` is true iff the caller was handed a non-NULL out-param pair
  * for that reply type (KILNLINK_CT_CAL_CMD / KILNLINK_CONFIG_PAGE_CMD /
- * KILNLINK_COMMIT_CONFIG_REJECTED_CMD -- safety_link.c's shared-id replies);
+ * KILNLINK_COMMIT_CONFIG_REJECTED_CMD -- safety_link.c's out-of-band replies);
  * each matching `got_*` is true once that reply has actually been captured.
  * A caller with no out-params at all (the plain safety_drain_inbox()
  * wrapper -- the periodic poll's pre-drain / GET_STATUS wait) wants none of
@@ -1317,8 +1317,9 @@ esp_err_t safety_link_send_announce_reboot(SafetyLinkClass *link);
 esp_err_t safety_link_send_set_ct_cal(SafetyLinkClass *link, uint8_t channel, bool calibrated,
                                        float gain, float offset);
 
-/* CommonFW/docs/LINK_PROTOCOL.md sec 4/6, SAFETY_CMD_GET_CT_CAL /
- * SAFETY_CMD_CT_CAL (shared id 0x1A) -- kilnlink_get_ct_cal.h/kilnlink_ct_cal.h.
+/* CommonFW/docs/LINK_PROTOCOL.md sec 4/6, SAFETY_CMD_GET_CT_CAL (0x22
+ * request) / SAFETY_CMD_CT_CAL (0x1A reply -- separate ids since
+ * KILNLINK_PROTOCOL_VERSION 7) -- kilnlink_get_ct_cal.h/kilnlink_ct_cal.h.
  * Unlike every other safety_link_build_*_payload()/safety_link_get_status()
  * in this file, this is NOT answered from a cache: this driver keeps no
  * ct_cal state of its own, so every call is a live, blocking round trip to

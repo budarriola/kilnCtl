@@ -93,6 +93,19 @@ exchange). `kilnlink_get_config_page.{c,h}` / `kilnlink_config_page.{c,h}`
 (`SAFETY_CMD_GET_CONFIG_PAGE`/`CONFIG_PAGE`, both 0x1F, bulk read of packed
 `(id, type, value)` triples, one page per frame).
 
+**2026-08-24: the three shared request/reply ids above were split apart**
+(`KILNLINK_PROTOCOL_VERSION` 6 -> 7): `GET_CT_CAL` moved to `0x22`,
+`GET_PARAM` to `0x23`, `GET_CONFIG_PAGE` to `0x24` -- their replies
+(`CT_CAL`/`PARAM`/`CONFIG_PAGE`) keep `0x1A`/`0x1E`/`0x1F` unchanged. A
+shared id structurally blocks a length-different refusal reply (neither a
+bare request nor the fixed-size success reply), which is exactly what was
+blocking `firmware/KilnFW/App/drivers/uart_bridge.c`'s SAFETY task from ever
+telling the PC "driver error" for `GET_CT_CAL` -- see
+`docs/LINK_PROTOCOL.md`'s "Request/reply ids must never be shared" rule for
+the reusable lesson. `GET_FW_VERSION`/Frame C still shares its id
+deliberately -- it sits in the frozen `0x00`-`0x0F` floor, where a refusal
+is never needed.
+
 All five share a new type-tag helper, `kilnlink_param_value.{c,h}`
 (`KILNLINK_PARAM_TYPE_BOOL/U8/U16/F32`, 1/1/2/4 bytes) -- a small closed tag
 set rather than a length-prefixed blob, so a value whose declared type this
@@ -170,15 +183,15 @@ firmware/CommonFW/
 │  ├─ kilnlink_power.h             ← Pico → ESP, Frame E, SAFETY_CMD_POWER (0x0E)
 │  ├─ kilnlink_set_config.h        ← ESP → Pico, SAFETY_CMD_SET_CONFIG (0x16)
 │  ├─ kilnlink_set_ct_cal.h        ← ESP → Pico, SAFETY_CMD_SET_CT_CAL (0x19)
-│  ├─ kilnlink_get_ct_cal.h        ← ESP → Pico, SAFETY_CMD_GET_CT_CAL (0x1A)
+│  ├─ kilnlink_get_ct_cal.h        ← ESP → Pico, SAFETY_CMD_GET_CT_CAL (0x22, own id since v7)
 │  ├─ kilnlink_ct_cal.h            ← Pico → ESP, SAFETY_CMD_CT_CAL (0x1A, reply)
 │  ├─ kilnlink_set_log_level.h     ← ESP → Pico, SAFETY_CMD_SET_LOG_LEVEL (0x1B)
 │  ├─ kilnlink_param_value.h       ← shared type-tag + value codec (BOOL/U8/U16/F32)
 │  ├─ kilnlink_set_param.h         ← ESP → Pico, SAFETY_CMD_SET_PARAM (0x1C)
 │  ├─ kilnlink_commit_config.h     ← ESP → Pico, SAFETY_CMD_COMMIT_CONFIG (0x1D)
-│  ├─ kilnlink_get_param.h         ← ESP → Pico, SAFETY_CMD_GET_PARAM (0x1E)
+│  ├─ kilnlink_get_param.h         ← ESP → Pico, SAFETY_CMD_GET_PARAM (0x23, own id since v7)
 │  ├─ kilnlink_param.h             ← Pico → ESP, SAFETY_CMD_PARAM (0x1E, reply)
-│  ├─ kilnlink_get_config_page.h   ← ESP → Pico, SAFETY_CMD_GET_CONFIG_PAGE (0x1F)
+│  ├─ kilnlink_get_config_page.h   ← ESP → Pico, SAFETY_CMD_GET_CONFIG_PAGE (0x24, own id since v7)
 │  └─ kilnlink_config_page.h       ← Pico → ESP, SAFETY_CMD_CONFIG_PAGE (0x1F, reply)
 │  (no `kilnlink_ids.h` or `kilnlink_port.h` yet — see the Completion checklist)
 ├─ src/

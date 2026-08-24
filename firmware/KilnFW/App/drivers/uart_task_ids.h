@@ -830,19 +830,31 @@
 #define SAFETY_CMD_SET_CT_CAL 0x19u
 
 /* ESP->Pico request / Pico->ESP reply, CommonFW/docs/LINK_PROTOCOL.md sec 4/6
- * -- kilnlink_get_ct_cal.h / kilnlink_ct_cal.h. Same value
+ * -- kilnlink_get_ct_cal.h / kilnlink_ct_cal.h.
+ *
+ * Through KILNLINK_PROTOCOL_VERSION 6, this was one value
  * (KILNLINK_GET_CT_CAL_CMD == KILNLINK_CT_CAL_CMD == 0x1A) shared by request
  * and reply, distinguished by direction and length exactly like
- * SAFETY_CMD_GET_FW_VERSION/Frame C: the request is always 1 byte (cmd only,
- * no arguments), the reply is always KILNLINK_CT_CAL_LEN (28) bytes.
+ * SAFETY_CMD_GET_FW_VERSION/Frame C. Version 7 split the request onto its own
+ * id (0x22, matching kilnlink_get_ct_cal.h's KILNLINK_GET_CT_CAL_CMD) because
+ * that shared-id scheme structurally blocked a length-different refusal
+ * reply on THIS boundary too: a driver-error refusal from
+ * uart_bridge_safety_task() is neither 1 byte (the request) nor
+ * KILNLINK_CT_CAL_LEN (28, the successful reply), so under the old scheme it
+ * could never be sent to the PC without being misread as a truncated/
+ * malformed CT_CAL reply -- see docs/LINK_PROTOCOL.md's "Request/reply ids
+ * must never be shared" rule. pc_tools' protocol.py now sends 0x22 for this
+ * request; 0x1A is used ONLY for the reply, unchanged.
  *
- * Doubles, additively, as the PC->ESP subcommand a bench tool sends on
- * UART_TASK_ID_SAFETY (mirroring SAFETY_CMD_CLEAR_TRIP/SET_CONFIG's own
- * PC->ESP use above) -- 1 byte, no arguments. Unlike GET_STATUS/GET_DIAG this
- * is never answered from a cache: this driver caches no ct_cal state, so
- * every GET_CT_CAL is a live, blocking round trip to the Pico
- * (safety_link_get_ct_cal()) and can genuinely time out if it is absent, the
- * same way safety_link_ping()/safety_link_request_enable() already can.
+ * The request is always 1 byte (cmd only, no arguments); the reply is
+ * always KILNLINK_CT_CAL_LEN (28) bytes on success, or a shorter
+ * driver-error refusal frame now that the id split makes that
+ * distinguishable (see uart_bridge.c's SAFETY_CMD_GET_CT_CAL case). Unlike
+ * GET_STATUS/GET_DIAG this is never answered from a cache: this driver
+ * caches no ct_cal state, so every GET_CT_CAL is a live, blocking round trip
+ * to the Pico (safety_link_get_ct_cal()) and can genuinely time out if it is
+ * absent, the same way safety_link_ping()/safety_link_request_enable()
+ * already can.
  *
  * CT_CAL reply payload (28 bytes, byte-for-byte KILNLINK_CT_CAL_LEN, see
  * kilnlink_ct_cal.h -- relayed to the PC unmodified, not re-encoded):
@@ -850,7 +862,7 @@
  *   bytes1..9  = channel 0: calibrated u8(1) + gain f32 LE(4) + offset f32 LE(4)
  *   bytes10..18= channel 1: same 9-byte shape
  *   bytes19..27= channel 2: same 9-byte shape */
-#define SAFETY_CMD_GET_CT_CAL 0x1Au
+#define SAFETY_CMD_GET_CT_CAL 0x22u
 #define SAFETY_CMD_CT_CAL     0x1Au
 
 /* docs/COMMISSIONING.md sec 2/3 -- field-addressed config staging/commit/
@@ -871,13 +883,20 @@
  * 0x1D COMMIT_CONFIG: ESP -> Pico, no payload. Validates the staged set as a
  *   whole and, if it passes, writes one config_store record and bumps
  *   config_crc. safety_link_send_commit_config().
- * 0x1E GET_PARAM / PARAM: shared id, request/reply distinguished by direction
- *   and length (request always 3 bytes, reply always >= 5) -- same
- *   convention as GET_CT_CAL/CT_CAL just above. Not used by this pass
- *   (safety_cfg_store.c fetches in bulk via 0x1F instead); listed for
- *   completeness and for any future single-parameter caller.
- * 0x1F GET_CONFIG_PAGE / CONFIG_PAGE: shared id, same request/reply-by-length
- *   convention. safety_link_get_config_page() -- the bulk read
+ * 0x1E/0x23 GET_PARAM / PARAM: through KILNLINK_PROTOCOL_VERSION 6 these
+ *   shared id 0x1E, request/reply distinguished by direction and length
+ *   (request always 3 bytes, reply always >= 5) -- same convention as
+ *   GET_CT_CAL/CT_CAL just above. Version 7 split the request onto its own
+ *   id 0x23 (matching kilnlink_get_param.h's KILNLINK_GET_PARAM_CMD), same
+ *   reasoning as GET_CT_CAL's split above; 0x1E is now used ONLY by the
+ *   reply. Not used by this pass (safety_cfg_store.c fetches in bulk via
+ *   GET_CONFIG_PAGE instead); listed for completeness and for any future
+ *   single-parameter caller.
+ * 0x1F/0x24 GET_CONFIG_PAGE / CONFIG_PAGE: through version 6 these shared id
+ *   0x1F, same request/reply-by-length convention as GET_PARAM/PARAM.
+ *   Version 7 split the request onto its own id 0x24 (matching
+ *   kilnlink_get_config_page.h's KILNLINK_GET_CONFIG_PAGE_CMD); 0x1F is now
+ *   used ONLY by the reply. safety_link_get_config_page() -- the bulk read
  *   safety_cfg_store.c pages through to fetch/refresh its whole cache.
  * 0x20 COMMIT_CONFIG_REJECTED (Pico -> ESP only): sent by link_task.c ONLY
  *   when a COMMIT_CONFIG (0x1D) is refused, naming the offending param_id
@@ -890,9 +909,9 @@
 #define SAFETY_CMD_SET_LOG_LEVEL    0x1Bu
 #define SAFETY_CMD_SET_PARAM        0x1Cu
 #define SAFETY_CMD_COMMIT_CONFIG    0x1Du
-#define SAFETY_CMD_GET_PARAM        0x1Eu
+#define SAFETY_CMD_GET_PARAM        0x23u
 #define SAFETY_CMD_PARAM            0x1Eu
-#define SAFETY_CMD_GET_CONFIG_PAGE  0x1Fu
+#define SAFETY_CMD_GET_CONFIG_PAGE  0x24u
 #define SAFETY_CMD_CONFIG_PAGE      0x1Fu
 #define SAFETY_CMD_COMMIT_CONFIG_REJECTED 0x20u
 

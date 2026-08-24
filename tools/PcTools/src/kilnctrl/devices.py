@@ -122,6 +122,7 @@ from .protocol import (
     IO_REG_READ_MAX,
     IO_RELAY_COUNT,
     SAFETY_AGE_NEVER,
+    SAFETY_CMD_CT_CAL,
     SAFETY_CMD_GET_CT_CAL,
     SAFETY_CMD_GET_DIAG,
     SAFETY_CMD_CLEAR_TRIP,
@@ -1778,6 +1779,15 @@ def parse_display_response(payload: bytes) -> "tuple[int, DisplayId]":
         raise DisplayResponseError(
             f"unknown DISPLAY response subcommand 0x{subcommand:02X}"
         )
+    # Strict equality, not a minimum -- deliberately, since
+    # display_bridge_task() can now also send a driver-error refusal under
+    # this SAME id ({subcmd, ok=0, len, "driver error"}, 16 bytes). 16 != 9
+    # today so that refusal correctly falls into the branch below instead of
+    # being misread as a real (if malformed) READ_ID reply; keep this an
+    # exact check if the refusal reason text ever changes length, or the two
+    # could collide -- see parse_touch_response()'s GET_STATE check for a
+    # case where a loose `>=` check on this exact class of collision was a
+    # real bug.
     if len(payload) != 9:
         raise DisplayResponseError(
             f"READ_ID response must be 9 bytes, got {len(payload)}"
@@ -1919,8 +1929,25 @@ def parse_touch_response(payload: bytes) -> "tuple[int, TouchState]":
     subcommand = payload[0]
     if subcommand != TOUCH_CMD_GET_STATE:
         raise TouchResponseError(f"unknown TOUCH response subcommand 0x{subcommand:02X}")
-    if len(payload) < 6:
-        raise TouchResponseError(f"GET_STATE response must be at least 6 bytes, got {len(payload)}")
+    # Exactly 6 (original fields only) or 23 (+ the 2026-08-21 diagnostic
+    # fields) -- uart_bridge.c's TOUCH_CMD_GET_STATE case only ever emits one
+    # of those two lengths, never anything in between (the old `< 6` check
+    # here nominally tolerated any longer length "for a hypothetical
+    # in-between firmware build", but no such build ever existed). Tightened
+    # to this exact set 2026-08-24, the same day touch_bridge_task() started
+    # sending a driver-error refusal ({subcmd, ok=0, len, "driver error"} --
+    # 16 bytes) on a failed screen_idle_get_state(): a loose `>= 6` check
+    # would decode that refusal as if it were a real reply (byte1=ok=0 reads
+    # as a valid screen_on=False, the reason bytes read as garbage idle_ms) --
+    # confidently WRONG data with no exception, worse than the silent drop
+    # this refusal reply exists to replace. See CommonFW/docs/LINK_PROTOCOL.md's
+    # "Request/reply ids must never be shared" rule -- this is the same
+    # length-ambiguity failure mode on a task that has no second id to split
+    # onto, so the fix here is a strict length allowlist instead.
+    if len(payload) not in (6, 23):
+        raise TouchResponseError(
+            f"GET_STATE response must be 6 or 23 bytes, got {len(payload)}"
+        )
     screen_on = payload[1]
     if screen_on > 1:
         raise TouchResponseError(f"GET_STATE screen_on flag must be 0 or 1, got {screen_on}")
@@ -2110,19 +2137,25 @@ def safety_set_ct_cal(channel: int, calibrated: bool, gain: float, offset: float
 
 
 def safety_get_ct_cal() -> bytes:
-    """0x1A GET_CT_CAL request (query): no args.
+    """0x22 GET_CT_CAL request (query): no args.
+
+    Through firmware protocol version 6 this shared its wire id (0x1A) with
+    the reply, distinguished only by length; version 7 split it onto its own
+    id (0x22) so a driver-error refusal reply -- neither 1 byte nor
+    SAFETY_CT_CAL_LEN (28) -- can be told apart from a malformed/truncated
+    successful reply. See protocol.py's SAFETY_CMD_GET_CT_CAL doc comment.
 
     UNLIKE :func:`safety_get_status`/:func:`safety_get_diag`/
     :func:`safety_get_fw_version`, this is **not** answered from the ESP's
     cache -- there is no ct_cal state cached on the ESP side at all
     (safety_link.h's safety_link_get_ct_cal() doc comment: "every call is a
     live, blocking round trip to the Pico"). Sending this causes the Pico to
-    broadcast a fresh SAFETY_CMD_CT_CAL (0x1A) frame, which the ESP relays
-    back to the PC under the same shared id, distinguished from this request
-    by length (1 byte here, 28 bytes for the reply). Expect this call to take
-    noticeably longer than the other SAFETY queries -- it genuinely crosses
-    the isolated link and can time out if the Pico never answers, not just if
-    the ESP itself is unreachable.
+    broadcast a fresh SAFETY_CMD_CT_CAL (0x1A, unchanged) frame, which the
+    ESP relays back to the PC under that reply id -- now DIFFERENT from this
+    request's id, so a length mismatch or refusal is unambiguous. Expect this
+    call to take noticeably longer than the other SAFETY queries -- it
+    genuinely crosses the isolated link and can time out if the Pico never
+    answers, not just if the ESP itself is unreachable.
     """
     return struct.pack("<B", SAFETY_CMD_GET_CT_CAL)
 
@@ -2523,7 +2556,7 @@ class SafetyCtCal:
 
 def parse_safety_response(
     payload: bytes,
-) -> "tuple[int, SafetyStatus | SafetyLinkStats | SafetyDiag | SafetyTripEvent | SafetyFwVersion | SafetyCtCal]":
+) -> "tuple[int, SafetyStatus | SafetyLinkStats | SafetyDiag | SafetyTripEvent | SafetyFwVersion | SafetyCtCal | OkReason]":
     """Decode a SAFETY query reply into ``(subcommand, value)``.
 
     Layouts (uart_task_ids.h)::
@@ -2570,9 +2603,15 @@ def parse_safety_response(
                          datetime_len u8, datetime (N2 ASCII), boot_id u8,
                          config_version u8, config_crc u16 LE  (variable, see
                          CommonFW/docs/LINK_PROTOCOL.md sec 6 Frame C)
-        GET_CT_CAL:      byte0=0x1A, then 3 channels of
+        GET_CT_CAL:      byte0=0x1A (SAFETY_CMD_CT_CAL, the reply's OWN id --
+                         DIFFERENT from the 0x22 request id since firmware
+                         protocol version 7), then 3 channels of
                          [calibrated u8, gain f32 LE, offset f32 LE]
-                         (28 bytes total -- kilnlink_ct_cal.h)
+                         (28 bytes total -- kilnlink_ct_cal.h). A reply
+                         carrying the 0x22 request id instead is a
+                         driver-error refusal, decoded via _decode_ok_reason
+                         like SET_CT_CAL/SET_CONFIG's own refusal replies
+                         below, not this success shape.
     """
     if len(payload) < 1:
         raise SafetyResponseError("SAFETY response is empty")
@@ -2847,7 +2886,11 @@ def parse_safety_response(
             config_crc=config_crc,
         )
 
-    if subcommand == SAFETY_CMD_GET_CT_CAL:
+    if subcommand == SAFETY_CMD_CT_CAL:
+        # The reply's OWN id (0x1A) -- different from SAFETY_CMD_GET_CT_CAL
+        # (0x22, the request's id) since firmware protocol version 7. Always
+        # the 28-byte success payload; a driver-error refusal arrives under
+        # the request's id instead (handled just below), never this one.
         expected_len = 1 + SAFETY_CT_CAL_NUM_CHANNELS * 9  # calibrated(1)+gain f32(4)+offset f32(4)
         if len(payload) != expected_len:
             raise SafetyResponseError(
@@ -2861,6 +2904,17 @@ def parse_safety_response(
                 SafetyCtCalChannel(calibrated=bool(calibrated), gain=gain, offset=cal_offset)
             )
         return subcommand, SafetyCtCal(channels=tuple(channels))
+
+    if subcommand == SAFETY_CMD_GET_CT_CAL:
+        # This is the REQUEST's id echoed back -- only ever seen when
+        # uart_bridge.c's safety_bridge_task() refused the command outright
+        # (bridge_reply_reject(), "driver error" -- e.g. the live round trip
+        # to the Pico timed out). A successful reply always carries
+        # SAFETY_CMD_CT_CAL's id instead, handled above. Splitting the two
+        # ids (version 7) is exactly what makes this refusal distinguishable
+        # from a truncated/malformed success reply in the first place -- see
+        # protocol.py's SAFETY_CMD_GET_CT_CAL doc comment.
+        return subcommand, _decode_ok_reason(payload, SafetyResponseError, "GET_CT_CAL")
 
     if subcommand in (
         SAFETY_CMD_REQUEST_ENABLE,

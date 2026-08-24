@@ -1,14 +1,20 @@
 /* Host-native test for kilnlink_get_config_page.{c,h} -- the ESP->Pico
- * SAFETY_CMD_GET_CONFIG_PAGE (0x1F) request codec, docs/LINK_PROTOCOL.md
+ * SAFETY_CMD_GET_CONFIG_PAGE (0x24) request codec, docs/LINK_PROTOCOL.md
  * sec 4, docs/COMMISSIONING.md sec 2. Fixed 2-byte request -- mirrors
  * test_get_ct_cal.c's structure: round-trip encode/decode, a byte-exact
  * vector, and the hostile input set: too-short, too-long (fixed-size
  * frame), wrong command byte.
+ *
+ * Also proves the KILNLINK_PROTOCOL_VERSION 7 split from the reply
+ * (kilnlink_config_page.h's SAFETY_CMD_CONFIG_PAGE, still 0x1F): this
+ * request's id and the reply's id must be DIFFERENT, and this decoder must
+ * REJECT a frame carrying the reply's id.
  */
 
 #include <stdio.h>
 #include <string.h>
 
+#include "kilnlink/kilnlink_config_page.h"
 #include "kilnlink/kilnlink_get_config_page.h"
 
 static int g_failures = 0;
@@ -47,7 +53,7 @@ static void test_round_trip(void)
 
 static void test_vector_page0(void)
 {
-    static const uint8_t expected[] = {0x1f, 0x00};
+    static const uint8_t expected[] = {0x24, 0x00};
     kilnlink_get_config_page_t msg = {0};
     msg.page_index = 0;
 
@@ -105,6 +111,24 @@ static void test_encode_buffer_too_small(void)
           "encode() with an undersized output buffer -> ERR_BUFFER_TOO_SMALL");
 }
 
+/* -- request/reply id separation (KILNLINK_PROTOCOL_VERSION 7) ----------- */
+
+static void test_request_and_reply_ids_differ(void)
+{
+    CHECK(KILNLINK_GET_CONFIG_PAGE_CMD != KILNLINK_CONFIG_PAGE_CMD,
+          "GET_CONFIG_PAGE request id and CONFIG_PAGE reply id must be different");
+}
+
+static void test_decode_rejects_reply_id(void)
+{
+    uint8_t buf[KILNLINK_GET_CONFIG_PAGE_LEN] = {0};
+    buf[0] = KILNLINK_CONFIG_PAGE_CMD;
+    kilnlink_get_config_page_t out;
+    CHECK(kilnlink_get_config_page_decode(buf, sizeof(buf), &out) ==
+              KILNLINK_GET_CONFIG_PAGE_ERR_WRONG_CMD,
+          "GET_CONFIG_PAGE decode() rejects a frame carrying CONFIG_PAGE's (reply) id");
+}
+
 int main(void)
 {
     test_round_trip();
@@ -113,6 +137,8 @@ int main(void)
     test_decode_too_long();
     test_decode_wrong_cmd();
     test_encode_buffer_too_small();
+    test_request_and_reply_ids_differ();
+    test_decode_rejects_reply_id();
 
     if (g_failures == 0) {
         printf("ALL PASS\n");

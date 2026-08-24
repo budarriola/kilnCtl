@@ -5,12 +5,19 @@
  * exactly as encoded, without bleeding into a neighbouring channel), a
  * byte-exact vector, and the hostile input set: too-short, too-long
  * (fixed-size frame), wrong command byte.
+ *
+ * Also proves the KILNLINK_PROTOCOL_VERSION 7 split from the request
+ * (kilnlink_get_ct_cal.h's SAFETY_CMD_GET_CT_CAL, now 0x22): this reply's id
+ * (0x1A) and the request's id must be DIFFERENT, and this decoder must
+ * REJECT a frame carrying the request's id -- see
+ * test_decode_rejects_request_id().
  */
 
 #include <stdio.h>
 #include <string.h>
 
 #include "kilnlink/kilnlink_ct_cal.h"
+#include "kilnlink/kilnlink_get_ct_cal.h"
 
 static int g_failures = 0;
 
@@ -154,6 +161,23 @@ static void test_encode_buffer_too_small(void)
           "encode() with an undersized output buffer -> ERR_BUFFER_TOO_SMALL");
 }
 
+/* -- request/reply id separation (KILNLINK_PROTOCOL_VERSION 7) ----------- */
+
+static void test_request_and_reply_ids_differ(void)
+{
+    CHECK(KILNLINK_CT_CAL_CMD != KILNLINK_GET_CT_CAL_CMD,
+          "CT_CAL reply id and GET_CT_CAL request id must be different");
+}
+
+static void test_decode_rejects_request_id(void)
+{
+    uint8_t buf[KILNLINK_CT_CAL_LEN] = {0};
+    buf[0] = KILNLINK_GET_CT_CAL_CMD;
+    kilnlink_ct_cal_t out;
+    CHECK(kilnlink_ct_cal_decode(buf, sizeof(buf), &out) == KILNLINK_CT_CAL_ERR_WRONG_CMD,
+          "CT_CAL decode() rejects a frame carrying GET_CT_CAL's (request) id");
+}
+
 int main(void)
 {
     test_round_trip_mixed();
@@ -163,6 +187,8 @@ int main(void)
     test_decode_too_long();
     test_decode_wrong_cmd();
     test_encode_buffer_too_small();
+    test_request_and_reply_ids_differ();
+    test_decode_rejects_request_id();
 
     if (g_failures == 0) {
         printf("ALL PASS\n");

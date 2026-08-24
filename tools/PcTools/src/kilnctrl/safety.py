@@ -51,6 +51,7 @@ from .devices import (
     SafetyTripEvent,
 )
 from .protocol import (
+    SAFETY_CMD_CT_CAL,
     SAFETY_CMD_GET_CT_CAL,
     SAFETY_CMD_GET_DIAG,
     SAFETY_CMD_GET_FW_VERSION,
@@ -95,6 +96,27 @@ MUTATING_REJECT_WINDOW_S = 0.5
 #: safety_link.h's own worst case rather than the same flat 2.0 s every
 #: cache-only query uses.
 CT_CAL_REPLY_TIMEOUT_S = 5.0
+
+#: Maps a request id to the DIFFERENT id its successful reply carries, for
+#: the commands firmware protocol version 7 split off their reply's shared
+#: id (see protocol.py's SAFETY_CMD_GET_CT_CAL doc comment). Only GET_CT_CAL
+#: is wired up as a live query on this task today; the mapping stays a dict
+#: rather than a single special case so a future GET_PARAM/GET_CONFIG_PAGE
+#: query added here does not have to rediscover this same fix.
+_REPLY_ID_FOR_REQUEST: dict[int, int] = {
+    SAFETY_CMD_GET_CT_CAL: SAFETY_CMD_CT_CAL,
+}
+
+
+def _reply_matches_request(request_subcommand: int, reply_subcommand: int) -> bool:
+    """True if `reply_subcommand` is the successful-reply id for a request
+    sent under `request_subcommand` -- the two now differ for GET_CT_CAL
+    (0x22 request vs 0x1A reply) since a shared id would block a
+    length-different driver-error refusal (bridge_reply_reject() echoes the
+    REQUEST's id, which already equals `request_subcommand` and is matched
+    by the plain `==` check at the call site; this only covers the success
+    case)."""
+    return _REPLY_ID_FOR_REQUEST.get(request_subcommand) == reply_subcommand
 
 
 class SafetyQueryError(RuntimeError):
@@ -348,8 +370,19 @@ class SafetyClient:
         ``calibrated`` flag must be checked before trusting its gain/offset;
         an uncalibrated channel's numbers are meaningless (see
         :class:`~kilnctrl.devices.SafetyCtCal`).
+
+        Raises :class:`SafetyQueryError` both on a timeout (no reply at all)
+        and now also on an explicit driver-error refusal -- uart_bridge.c's
+        safety_bridge_task() replies {0x22, ok=0, "driver error"} when
+        safety_link_get_ct_cal()'s round trip to the Pico itself fails
+        (as opposed to timing out before any reply arrives). Firmware
+        protocol version 7 is what makes this refusal distinguishable from
+        a malformed success reply at all -- see protocol.py's
+        SAFETY_CMD_GET_CT_CAL doc comment.
         """
         value = self._query(SAFETY_CMD_GET_CT_CAL, devices.safety_get_ct_cal(), timeout)
+        if isinstance(value, OkReason):
+            raise SafetyQueryError(f"GET_CT_CAL {value.describe()}")
         return value  # type: ignore[return-value]
 
     def _query(self, subcommand: int, payload: bytes, timeout: float) -> object:
@@ -407,7 +440,10 @@ class SafetyClient:
 
         with self._pending_lock:
             pending = self._pending
-        if pending is not None and pending.subcommand == subcommand:
+        if pending is not None and (
+            pending.subcommand == subcommand
+            or _reply_matches_request(pending.subcommand, subcommand)
+        ):
             pending.value = value
             pending.event.set()
             return

@@ -94,9 +94,9 @@
 #include "kilnlink/kilnlink_ct_cal.h" // SAFETY_CMD_CT_CAL reply, see link_task_send_ct_cal()
 #include "kilnlink/kilnlink_diag.h"
 #include "kilnlink/kilnlink_frame.h"
-#include "kilnlink/kilnlink_get_config_page.h" // SAFETY_CMD_GET_CONFIG_PAGE (0x1F), see link_task_handle_get_config_page()
-#include "kilnlink/kilnlink_get_ct_cal.h" // SAFETY_CMD_GET_CT_CAL, see link_task_handle_get_ct_cal()
-#include "kilnlink/kilnlink_get_param.h" // SAFETY_CMD_GET_PARAM (0x1E request), see link_task_handle_get_param()
+#include "kilnlink/kilnlink_get_config_page.h" // SAFETY_CMD_GET_CONFIG_PAGE (0x24), see link_task_handle_get_config_page()
+#include "kilnlink/kilnlink_get_ct_cal.h" // SAFETY_CMD_GET_CT_CAL (0x22), see link_task_handle_get_ct_cal()
+#include "kilnlink/kilnlink_get_param.h" // SAFETY_CMD_GET_PARAM (0x23), see link_task_handle_get_param()
 #include "kilnlink/kilnlink_inject_tc.h" // SAFETY_CMD_INJECT_TC (0x21), see link_task_handle_inject_tc()
 #include "kilnlink/kilnlink_param.h" // SAFETY_CMD_PARAM (0x1E reply), see link_task_send_param()
 #include "kilnlink/kilnlink_power.h"
@@ -406,8 +406,9 @@ static void link_task_ensure_staged_config(void)
 // drop counters have both been ruled out (see link_task_send_broadcast_to()
 // below). These statics latch what this Pico actually built and handed to
 // uart_owner_send() for the most recent frame of any kind, and separately
-// for the config-page reply specifically (cmd 0x1F,
-// KILNLINK_GET_CONFIG_PAGE_CMD), since the 500 ms status broadcast almost
+// for the config-page reply specifically (cmd 0x24,
+// KILNLINK_GET_CONFIG_PAGE_CMD -- was 0x1F before KILNLINK_PROTOCOL_VERSION
+// 7 split it off the reply's id), since the 500 ms status broadcast almost
 // always overwrites the generic set before it can be read over SWD.
 // `volatile` so the compiler can't optimize the stores away or keep them
 // in a register -- nothing in the firmware reads these back.
@@ -1418,10 +1419,11 @@ static void link_task_handle_set_ct_cal(const kilnlink_frame_t *frame)
     }
 }
 
-// SAFETY_CMD_GET_CT_CAL (0x1A), request only -- CommonFW/docs/LINK_PROTOCOL.md
-// section 4. Same shape as SAFETY_CMD_GET_FW_VERSION above: answer every
-// copy seen (the ESP is the side allowed to retry), reply via link_task_
-// send_ct_cal() under the same wire id, distinguished by direction/length.
+// SAFETY_CMD_GET_CT_CAL (0x22, its own id since KILNLINK_PROTOCOL_VERSION 7),
+// request only -- CommonFW/docs/LINK_PROTOCOL.md section 4. Same shape as
+// SAFETY_CMD_GET_FW_VERSION above: answer every copy seen (the ESP is the
+// side allowed to retry), reply via link_task_send_ct_cal() under the
+// reply's own id (0x1A, unchanged).
 static void link_task_handle_get_ct_cal(const kilnlink_frame_t *frame)
 {
     kilnlink_get_ct_cal_t msg;
@@ -1809,8 +1811,8 @@ static void link_task_handle_commit_config(const kilnlink_frame_t *frame)
 }
 
 // SAFETY_CMD_PARAM (0x1E) reply -- sent in answer to SAFETY_CMD_GET_PARAM
-// (link_task_handle_get_param() below), same shared-id/reply-on-request
-// shape as link_task_send_fw_version()/link_task_send_ct_cal(). Reports the
+// (0x23, its own id since KILNLINK_PROTOCOL_VERSION 7; link_task_handle_
+// get_param() below). Reports the
 // currently COMMITTED record (config_store_get_full_record()), never the
 // in-progress staged one -- CONFIG_REFERENCE.md section 7's "which
 // thresholds is the safety processor actually enforcing" must be answerable
@@ -1850,7 +1852,8 @@ static void link_task_handle_get_param(const kilnlink_frame_t *frame)
 }
 
 // SAFETY_CMD_CONFIG_PAGE (0x1F) reply -- sent in answer to SAFETY_CMD_
-// GET_CONFIG_PAGE (link_task_handle_get_config_page() below). Reports the
+// GET_CONFIG_PAGE (0x24, its own id since KILNLINK_PROTOCOL_VERSION 7;
+// link_task_handle_get_config_page() below). Reports the
 // currently COMMITTED record, same reasoning as link_task_send_param()
 // above. kilnlink_config_page_pack() is stateless/greedy per call
 // (kilnlink_config_page.h's own header comment: no server-side cursor to go
@@ -2006,9 +2009,11 @@ static void link_task_handle_raw_frame(const uint8_t *stuffed, size_t stuffed_le
         link_task_handle_set_clock(&frame);
         break;
     case LINK_FRAME_GET_CT_CAL_CMD:
-        // Same id as the reply (SAFETY_CMD_CT_CAL), distinguished by
-        // direction and length: the ESP's request is exactly 1 byte, no
-        // arguments -- same convention as LINK_FRAME_FW_VERSION_CMD above.
+        // Own id (0x22) since KILNLINK_PROTOCOL_VERSION 7 -- no longer
+        // shared with the reply (SAFETY_CMD_CT_CAL, 0x1A). The length check
+        // is kept as a cheap sanity gate (kilnlink_get_ct_cal_decode()
+        // enforces it too either way): the ESP's request is exactly 1 byte,
+        // no arguments -- same convention as LINK_FRAME_FW_VERSION_CMD above.
         if (frame.length == 1) {
             link_task_handle_get_ct_cal(&frame);
         }
@@ -2026,17 +2031,19 @@ static void link_task_handle_raw_frame(const uint8_t *stuffed, size_t stuffed_le
         link_task_handle_commit_config(&frame);
         break;
     case KILNLINK_GET_PARAM_CMD:
-        // Same id as the reply (SAFETY_CMD_PARAM, KILNLINK_PARAM_CMD --
-        // both 0x1E), distinguished by direction and length, same
-        // convention as LINK_FRAME_GET_CT_CAL_CMD/GET_FW_VERSION above: the
+        // Own id (0x23) since KILNLINK_PROTOCOL_VERSION 7 -- no longer
+        // shared with the reply (SAFETY_CMD_PARAM, KILNLINK_PARAM_CMD,
+        // 0x1E). The length check is kept as a cheap sanity gate
+        // (kilnlink_get_param_decode() enforces it too either way): the
         // ESP's request is exactly KILNLINK_GET_PARAM_LEN (3) bytes.
         if (frame.length == KILNLINK_GET_PARAM_LEN) {
             link_task_handle_get_param(&frame);
         }
         break;
     case KILNLINK_GET_CONFIG_PAGE_CMD:
-        // Same id as the reply (SAFETY_CMD_CONFIG_PAGE, KILNLINK_CONFIG_PAGE_CMD
-        // -- both 0x1F), same shared-id convention as GET_PARAM/PARAM above.
+        // Own id (0x24) since KILNLINK_PROTOCOL_VERSION 7 -- no longer
+        // shared with the reply (SAFETY_CMD_CONFIG_PAGE, KILNLINK_CONFIG_
+        // PAGE_CMD, 0x1F).
         s_diag_get_config_page_seen_count++; // 2026-08-23 diagnostic -- counts regardless of length match
         if (frame.length == KILNLINK_GET_CONFIG_PAGE_LEN) {
             s_diag_get_config_page_handled_count++; // 2026-08-23 diagnostic

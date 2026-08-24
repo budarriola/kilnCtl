@@ -476,11 +476,16 @@ fit_gain`, `offset = -fit_offset / fit_gain`, so that the Pico's
 no way to enforce that inversion; see `firmware/SaftyFW/src/config_store.h`'s
 header comment on `config_store_ct_channel_cal_t`.
 
-### `SAFETY_CMD_GET_CT_CAL` = `0x1A` (ESP → Pico), request only
+### `SAFETY_CMD_GET_CT_CAL` = `0x22` (ESP → Pico), request only
 
 One byte, no arguments — same shape as `SAFETY_CMD_GET_FW_VERSION`. The
-Pico answers every copy it sees, under the **same** command byte
-(`SAFETY_CMD_CT_CAL`, §6 Frame G), distinguished by direction and length.
+Pico answers every copy it sees, with `SAFETY_CMD_CT_CAL` (§6 Frame G).
+
+**Through `KILNLINK_PROTOCOL_VERSION` 6** this request shared its wire id
+with the reply (both `0x1A`), distinguished only by direction and length.
+Version 7 split the request onto its own id (`0x22`) — see this file's
+"Request/reply ids must never be shared" rule below for why. `0x1A` is now
+used ONLY by the reply; `0x22` is burned for this request going forward.
 
 ### `SAFETY_CMD_ROLLBACK` = `0x17` (ESP → Pico)
 
@@ -610,6 +615,30 @@ This is also why the ESP must **refuse to push a Pico image whose declared
 protocol version its own build cannot talk to**, unless explicitly overridden:
 that single action is the one that creates the lockout. When both processors
 need updating, the ESP goes first, and the GUI should say so.
+
+### Rule: request/reply ids must never be shared
+
+`GET_CT_CAL`/`CT_CAL`, `GET_PARAM`/`PARAM`, and `GET_CONFIG_PAGE`/`CONFIG_PAGE`
+were all originally specified as one command byte shared between a request
+and its own reply, distinguished only by direction and length (the same
+convention `GET_FW_VERSION`/Frame C above still uses, deliberately left
+alone — see that entry's own note on why). **This has bitten once already
+and is now a documented rule, not just a pattern:** a shared id structurally
+blocks a length-different refusal reply. A driver-error refusal frame
+(`{subcmd, ok=0, reason...}`, `uart_bridge.c`'s `bridge_reply_reject()`) is
+essentially never exactly 1 byte (a bare request) or exactly the successful
+reply's fixed length, so under the shared-id scheme a bridge task has no way
+to tell the peer "I refuse" without that refusal being misread as a
+truncated or malformed successful reply. `GET_CT_CAL`, `GET_PARAM`, and
+`GET_CONFIG_PAGE` were all split onto their own ids at
+`KILNLINK_PROTOCOL_VERSION` 7 (`0x22`/`0x23`/`0x24` respectively) for exactly
+this reason — see each one's own entry for the before/after id.
+
+**When adding a new request/reply pair on this link: give them different ids
+from the start.** The only length-shared exception on this link is
+`GET_FW_VERSION`/Frame C, and only because it sits in the frozen `0x00`-`0x0F`
+floor above, where a refusal reply is never needed (a floor frame is never
+refused — see that section). Anything above the floor gets two ids.
 
 ### `SAFETY_CMD_SET_CLOCK` = `0x0C` (ESP → Pico), optional
 
@@ -888,11 +917,14 @@ investigation. See `tools/PcTools/TODO.md`, "Logging and consoles".
 
 ### Frame G: `SAFETY_CMD_CT_CAL` = `0x1A` — CT amps calibration, in reply to `SAFETY_CMD_GET_CT_CAL`
 
-Sent in reply to `SAFETY_CMD_GET_CT_CAL` (§4 below), same shared-id,
-distinguished-by-direction-and-length convention as Frame C/
-`SAFETY_CMD_GET_FW_VERSION`: the request is always 1 byte, this reply is
-always 28 bytes. Reports the three current-sense channels' stored CT amps
-calibration exactly as `config_store.c` holds it — the GUI's way to show
+Sent in reply to `SAFETY_CMD_GET_CT_CAL` (§4 above, now `0x22`). Through
+`KILNLINK_PROTOCOL_VERSION` 6 this reply shared its wire id with the request
+(both `0x1A`), distinguished only by direction and length; version 7 split
+the request onto its own id — see the "Request/reply ids must never be
+shared" rule above. `0x1A` is unchanged and is used ONLY by this reply now;
+the request is always 1 byte, this reply is always 28 bytes. Reports the
+three current-sense channels' stored CT amps calibration exactly as
+`config_store.c` holds it — the GUI's way to show
 what the safety processor is actually correcting current with right now,
 same motivation as Frame C's `config_crc` field.
 

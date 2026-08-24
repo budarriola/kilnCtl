@@ -12,10 +12,12 @@ extern "C" {
 #endif
 
 /* Pico -> ESP, SAFETY_CMD_CONFIG_PAGE = 0x1F -- sent in reply to
- * SAFETY_CMD_GET_CONFIG_PAGE (kilnlink_get_config_page.h), same shared-id,
- * distinguished-by-direction-and-length convention as PARAM/GET_PARAM: the
- * request is always exactly KILNLINK_GET_CONFIG_PAGE_LEN (2) bytes; this
- * reply is always longer (4, or 4 + one or more packed entries).
+ * SAFETY_CMD_GET_CONFIG_PAGE (kilnlink_get_config_page.h, its own id 0x24
+ * since KILNLINK_PROTOCOL_VERSION 7 -- see that header's comment). Before
+ * version 7 this reply shared 0x1F with its own request, distinguished only
+ * by direction and length; that scheme structurally blocked a
+ * length-different refusal reply, which is why the request moved off this
+ * id. 0x1F itself is unchanged and is now used ONLY by this reply.
  *
  * Wire layout:
  *   0      u8   cmd (0x1F)

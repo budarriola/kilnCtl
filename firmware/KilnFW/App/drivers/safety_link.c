@@ -1090,11 +1090,11 @@ static void safety_count_cmd_byte(SafetyLinkClass *link, uint8_t cmd, uint8_t le
         link->stats.cmd_trip_event_count++;
         link->stats.last_trip_event_len = len;
         break;
-    case KILNLINK_CT_CAL_CMD: /* == SAFETY_CMD_GET_CT_CAL, shared id */
+    case KILNLINK_CT_CAL_CMD: /* the reply's own id (0x1A) -- since KILNLINK_PROTOCOL_VERSION 7, DIFFERENT from SAFETY_CMD_GET_CT_CAL (0x22, the request's id) */
         link->stats.cmd_ct_cal_count++;
         link->stats.last_ct_cal_len = len;
         break;
-    case KILNLINK_CONFIG_PAGE_CMD: /* == SAFETY_CMD_GET_CONFIG_PAGE, shared id */
+    case KILNLINK_CONFIG_PAGE_CMD: /* the reply's own id (0x1F) -- since KILNLINK_PROTOCOL_VERSION 7, DIFFERENT from SAFETY_CMD_GET_CONFIG_PAGE (0x24, the request's id) */
         link->stats.cmd_config_page_count++;
         link->stats.last_config_page_len = len;
         break;
@@ -1171,16 +1171,16 @@ static bool safety_drain_inbox_ex(SafetyLinkClass *link, uint32_t wait_ms,
             case SAFETY_CMD_TRIP_EVENT:
                 safety_apply_trip_event(link, &msg);
                 break;
-            case KILNLINK_CT_CAL_CMD: /* == SAFETY_CMD_GET_CT_CAL, shared id */
+            case KILNLINK_CT_CAL_CMD: /* the reply's own id (0x1A) -- since KILNLINK_PROTOCOL_VERSION 7, DIFFERENT from SAFETY_CMD_GET_CT_CAL (0x22, the request's id) */
                 if (out_ct_cal && out_got_ct_cal && msg.length == KILNLINK_CT_CAL_LEN) {
                     *out_ct_cal = msg;
                     *out_got_ct_cal = true;
                 }
                 break;
-            case KILNLINK_CONFIG_PAGE_CMD: /* == SAFETY_CMD_GET_CONFIG_PAGE, shared id */
+            case KILNLINK_CONFIG_PAGE_CMD: /* the reply's own id (0x1F) -- since KILNLINK_PROTOCOL_VERSION 7, DIFFERENT from SAFETY_CMD_GET_CONFIG_PAGE (0x24, the request's id) */
                 /* Length is NOT fixed (KILNLINK_CONFIG_PAGE_HDR_LEN or more,
                  * per page's entry_count) -- unlike CT_CAL's exact-length
-                 * check above, any frame carrying this shared id long enough
+                 * check above, any frame carrying this id long enough
                  * to plausibly be a reply is captured; kilnlink_config_page_
                  * decode() (called by safety_link_get_config_page()) is what
                  * actually validates it byte-for-byte. */
@@ -1214,7 +1214,7 @@ static bool safety_drain_inbox_ex(SafetyLinkClass *link, uint32_t wait_ms,
 
         /* Bug fix (2026-08-23): this used to be an unconditional `wait = 0`
          * after the first receive, which silently starved a caller still
-         * waiting on a specific shared-id reply (CT_CAL/CONFIG_PAGE/
+         * waiting on a specific out-of-band reply (CT_CAL/CONFIG_PAGE/
          * COMMIT_CONFIG_REJECTED) whenever an unrelated frame -- GET_STATUS/
          * DIAG/POWER/TRIP_EVENT/FW_VERSION, all of which the Pico also sends
          * on this same inbox -- happened to arrive first. Fix: keep blocking
@@ -2339,7 +2339,8 @@ esp_err_t safety_link_send_set_ct_cal(SafetyLinkClass *link, uint8_t channel, bo
 }
 
 /* CommonFW/docs/LINK_PROTOCOL.md sec 4/6, SAFETY_CMD_GET_CT_CAL /
- * SAFETY_CMD_CT_CAL (shared id 0x1A) -- see safety_link.h's doc comment for
+ * SAFETY_CMD_CT_CAL (0x22 request / 0x1A reply -- separate ids since
+ * KILNLINK_PROTOCOL_VERSION 7) -- see safety_link.h's doc comment for
  * the full contract. Structured like safety_exchange() (same xact_lock,
  * same "drain anything already queued first" discipline, same
  * SAFETY_LINK_ACK_TIMEOUT_MS/SAFETY_LINK_REPLY_TIMEOUT_MS budget) rather than
@@ -2514,7 +2515,7 @@ esp_err_t safety_link_send_set_param(SafetyLinkClass *link, uint16_t param_id, u
  * longer is: SAFETY_CMD_COMMIT_CONFIG_REJECTED (0x20,
  * kilnlink_commit_config_rejected.h) is a real reply now, and this function
  * captures it the same way safety_link_get_ct_cal()/safety_link_get_config_
- * page() capture their own shared-id replies (safety_drain_inbox_ex()'s
+ * page() capture their own out-of-band replies (safety_drain_inbox_ex()'s
  * out_commit_rejected/out_got_commit_rejected params).
  *
  * `out_param_id`/`out_reason`/`out_rejected` are all optional (pass NULL for
@@ -2614,7 +2615,8 @@ esp_err_t safety_link_send_commit_config(SafetyLinkClass *link, uint16_t *out_pa
     return err;
 }
 
-/* SAFETY_CMD_GET_CONFIG_PAGE / CONFIG_PAGE (shared id 0x1F) -- one page of
+/* SAFETY_CMD_GET_CONFIG_PAGE (0x24) / CONFIG_PAGE (0x1F reply -- separate
+ * ids since KILNLINK_PROTOCOL_VERSION 7) -- one page of
  * the bulk config readback COMMISSIONING.md sec 2 describes. Structured
  * exactly like safety_link_get_ct_cal() above (own xact_lock hold, own
  * drain-then-send-then-drain-for-the-reply shape) rather than routed through

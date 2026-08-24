@@ -89,8 +89,10 @@ Staged in RAM, then committed as one record:
 | `0x1B` | `SET_LOG_LEVEL` | ESP → Pico | Runtime log verbosity. Unrelated to commissioning; minted in the same pass because it was the last unallocated id blocking `log_task_set_level()` from being reachable over the wire |
 | `0x1C` | `SET_PARAM` | ESP → Pico | `param_id` u16 + type tag + value. **Stages only** — nothing reaches flash |
 | `0x1D` | `COMMIT_CONFIG` | ESP → Pico | Validate the staged set as a whole, write one record, bump `config_crc` |
-| `0x1E` | `GET_PARAM` / `PARAM` | both | Request one parameter / the reply, sharing an id per the `GET_CT_CAL`/`CT_CAL` convention |
-| `0x1F` | `GET_CONFIG_PAGE` / `CONFIG_PAGE` | both | Bulk read: packed `(id, value)` pairs, one page per frame, so the ESP can fetch the whole set in a few frames |
+| `0x23` | `GET_PARAM` | ESP → Pico | Request one parameter. **Was `0x1E`, shared with its own reply until 2026-08-24** |
+| `0x1E` | `PARAM` | Pico → ESP | The reply, carrying the value and a `found` byte |
+| `0x24` | `GET_CONFIG_PAGE` | ESP → Pico | Bulk read request, one page at a time. **Was `0x1F`, shared with its own reply until 2026-08-24** |
+| `0x1F` | `CONFIG_PAGE` | Pico → ESP | Packed `(id, value)` pairs, one page per frame, so the ESP can fetch the whole set in a few frames |
 | `0x20` | `COMMIT_CONFIG_REJECTED` | Pico → ESP | Sent only when a `COMMIT_CONFIG` is refused: names the offending `param_id` (or a "not field-specific" sentinel) and a coarse reason code (range / contradiction / ARMED / storage). Closes the gap section 3.1 used to describe as a known limitation |
 
 ### 2.0.1 `SET_CONFIG` (`0x16`) and `SET_CT_CAL` (`0x19`) — pre-v2 leftovers, not this model

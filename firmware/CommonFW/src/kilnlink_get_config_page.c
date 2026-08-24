@@ -1,7 +1,7 @@
 #include "kilnlink/kilnlink_get_config_page.h"
 
 /* Offsets, per docs/LINK_PROTOCOL.md sec 4:
- *   0      u8  cmd (0x1F)
+ *   0      u8  cmd (0x24)
  *   1      u8  page_index
  */
 #define OFF_PAGE_INDEX 1u

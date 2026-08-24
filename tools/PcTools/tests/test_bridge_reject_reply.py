@@ -29,6 +29,7 @@ from kilnctrl import devices  # noqa: E402
 from kilnctrl.protocol import (  # noqa: E402
     CONTROL_CMD_SET_ZONE_MODEL,
     CONTROL_CMD_SET_ZONE_PID,
+    DISPLAY_CMD_READ_ID,
     IO_CMD_SET_RELAY,
     IO_CMD_SET_RELAY_MASK,
     PROFILES_CMD_ACK_LAST_RUN,
@@ -45,6 +46,7 @@ from kilnctrl.protocol import (  # noqa: E402
     THERMO_CMD_SET_CJ_OFFSET,
     THERMO_CMD_SET_THRESHOLDS,
     THERMO_CMD_WRITE_REG,
+    TOUCH_CMD_GET_STATE,
 )
 
 
@@ -358,6 +360,58 @@ class ProfilesLifecycleReasonTests(unittest.TestCase):
             _reject_frame(PROFILES_CMD_DELETE, "whatever")
         )
         self.assertFalse(value)
+
+
+class DisplayTouchDriverErrorTests(unittest.TestCase):
+    """2026-08-24: display_bridge_task()/touch_bridge_task() now send this
+    same {subcmd, ok=0, reason} refusal on a driver error too (uart_bridge.c),
+    same fix as THERMO/IO/SAFETY. Both queries answer under the SAME id as
+    their own success reply (there is no second id to split onto, unlike
+    GET_CT_CAL/GET_PARAM/GET_CONFIG_PAGE), so the risk is a decoder with a
+    loose length check misreading the refusal as a malformed-but-accepted
+    success reply instead of raising -- exactly the class of bug
+    CommonFW/docs/LINK_PROTOCOL.md's "Request/reply ids must never be
+    shared" rule is about, just solved here with a strict length check
+    instead of a second id."""
+
+    def test_display_read_id_refusal_raises_not_silently_wrong(self):
+        frame = _reject_frame(DISPLAY_CMD_READ_ID, "driver error")
+        self.assertNotEqual(len(frame), 9)  # proves this can't collide with the 9-byte success shape
+        with self.assertRaises(devices.DisplayResponseError):
+            devices.parse_display_response(frame)
+
+    def test_touch_get_state_refusal_raises_not_silently_wrong(self):
+        # The actual regression this test proves fixed: before
+        # parse_touch_response()'s length check was tightened to exactly
+        # {6, 23}, this 16-byte refusal passed the old `>= 6` check and
+        # decoded as a bogus "success" (screen_on=False, garbage idle_ms)
+        # with no exception at all.
+        frame = _reject_frame(TOUCH_CMD_GET_STATE, "driver error")
+        self.assertNotIn(len(frame), (6, 23))
+        with self.assertRaises(devices.TouchResponseError):
+            devices.parse_touch_response(frame)
+
+    def test_touch_get_state_bare_refusal_also_raises(self):
+        # No-reason refusal (2 bytes) -- also must not collide with the
+        # 6-byte success shape.
+        frame = _reject_frame(TOUCH_CMD_GET_STATE, None)
+        self.assertEqual(len(frame), 2)
+        with self.assertRaises(devices.TouchResponseError):
+            devices.parse_touch_response(frame)
+
+    def test_touch_get_state_success_shapes_still_decode(self):
+        # Negative-test control: prove the tightened check didn't also
+        # break the two real success lengths.
+        six_byte = bytes([TOUCH_CMD_GET_STATE, 0, 42, 0, 0, 0])
+        subcmd, value = devices.parse_touch_response(six_byte)
+        self.assertEqual(subcmd, TOUCH_CMD_GET_STATE)
+        self.assertFalse(value.screen_on)
+        self.assertEqual(value.idle_ms, 42)
+
+        twentythree_byte = six_byte + bytes(17)
+        subcmd, value = devices.parse_touch_response(twentythree_byte)
+        self.assertEqual(subcmd, TOUCH_CMD_GET_STATE)
+        self.assertIsNotNone(value.input_enabled)
 
 
 if __name__ == "__main__":

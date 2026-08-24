@@ -1,4 +1,6 @@
 #include "kilnlink/kilnlink_get_ct_cal.h"
+/* Command byte is KILNLINK_GET_CT_CAL_CMD (0x22, its own id since
+ * KILNLINK_PROTOCOL_VERSION 7 -- see the header's comment). */
 
 size_t kilnlink_get_ct_cal_encode(const kilnlink_get_ct_cal_t *msg, uint8_t *out, size_t out_cap,
                                    kilnlink_get_ct_cal_status_t *status)

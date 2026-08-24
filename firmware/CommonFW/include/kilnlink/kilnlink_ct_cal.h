@@ -9,10 +9,12 @@ extern "C" {
 #endif
 
 /* Pico -> ESP, SAFETY_CMD_CT_CAL = 0x1A -- docs/LINK_PROTOCOL.md sec 6. Sent
- * in reply to SAFETY_CMD_GET_CT_CAL (kilnlink_get_ct_cal.h), same shared-id,
- * distinguished-by-direction-and-length convention as Frame C/
- * GET_FW_VERSION: the request is always 1 byte, this reply is always
- * KILNLINK_CT_CAL_LEN bytes.
+ * in reply to SAFETY_CMD_GET_CT_CAL (kilnlink_get_ct_cal.h, its own id
+ * 0x22 since KILNLINK_PROTOCOL_VERSION 7 -- see that header's comment).
+ * Before version 7 this reply shared 0x1A with its own request,
+ * distinguished only by direction and length; that scheme structurally
+ * blocked a length-different refusal reply, which is why the request moved
+ * off this id. 0x1A itself is unchanged and is now used ONLY by this reply.
  *
  * Reports the three current-sense channels' stored CT amps calibration
  * exactly as config_store.c holds it (config_store_ct_channel_cal_t) -- the

@@ -3,7 +3,7 @@
 #include "kilnlink/kilnlink_bytes.h"
 
 /* Offsets, per docs/LINK_PROTOCOL.md sec 4:
- *   0      u8  cmd (0x1E)
+ *   0      u8  cmd (0x23)
  *   1..2   u16 LE  param_id
  */
 #define OFF_PARAM_ID 1u
