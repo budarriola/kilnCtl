@@ -68,6 +68,10 @@ set(SAFTYFW_APP_SOURCES
     # Pure CJ/TC fixed-point decode math, split out of max31856.c for the same
     # host-testing reason -- see max31856_decode.h.
     src/max31856_decode.c
+    # Pure per-tc_type plausibility range (datasheet Table 1), consumed by
+    # thermo_task.c to feed S5's sensor-invalid path -- see
+    # max31856_tc_range_policy.h.
+    src/max31856_tc_range_policy.c
     src/current_sense.c
     # Pure counts-domain presence decision, decoupled from k_ct_v_per_a, split
     # out of current_sense.c so it is host-testable (test/test_current_
@@ -108,6 +112,10 @@ set(SAFTYFW_APP_SOURCES
     src/tasks/console_uart.c
     src/tasks/link_frame.c
     src/tasks/link_task.c
+    # Pure Frame B (DIAG) `flags` byte assembly, split out of link_task.c's
+    # link_task_send_diag() so it is host-testable (test/test_link_diag_
+    # flags.c) -- see link_diag_flags.h.
+    src/link_diag_flags.c
     src/tasks/reboot_announce.c
     src/tasks/log_task.c
     src/tasks/tx_watermark.c

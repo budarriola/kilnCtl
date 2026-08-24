@@ -66,6 +66,7 @@
 #include "boot_reason.h"
 #include "config_params.h" // param_id <-> config_store_record_t field mapping, see SET_PARAM/GET_PARAM/COMMIT_CONFIG/GET_CONFIG_PAGE handlers below
 #include "config_store.h" // SAFETY_CMD_SET_CONFIG, see link_task_handle_set_config()
+#include "link_diag_flags.h" // pure Frame B `flags` assembly, see link_task_send_diag()
 #include "current_task.h"
 #include "discrete_task.h"
 #include "log_task.h" // CLEAR_TRIP/SET_CONFIG outcome logging, see link_task_handle_clear_trip()/_set_config()
@@ -900,18 +901,21 @@ static void link_task_send_diag(void)
 
     // flags bit0 sim_context_seen: real now, from s_context_sim_seen (see
     // that variable's declaration for the "latched, never cleared" contract).
-    uint8_t diag_flags = KILNLINK_DIAG_FLAG_CALIBRATION_MISSING;
-    if (s_context_sim_seen) {
-        diag_flags |= KILNLINK_DIAG_FLAG_SIM_CONTEXT_SEEN;
-    }
-    // flags: bit1 calibration_missing = 1 (no config_store, Phase 9 -- this
-    // is the honest current state, not a bug); bit2 estop_unwired_suspect = 0
-    // (no detection heuristic specified in SAFETY_MODEL.md/HARDWARE.md or
-    // built). Note what parsing PUSH_CONTEXT does NOT yet mean: there is
-    // still no context-consuming correlation guard (S2/S3/S4/S6/S10) to
-    // disable on sim_context_seen or reset on a boot_id change -- this frame
-    // reports that the fact is known, not that anything downstream acts on
-    // it yet.
+    // flags bit1 calibration_missing: WIRED 2026-08-24 to the real
+    // config_store record via config_store_is_calibration_missing() --
+    // previously hard-coded to 1 unconditionally (TODO.md Phase 8; the wire
+    // format already had this bit, so this is a wiring fix, not a protocol
+    // change). bit2 estop_unwired_suspect stays 0 -- no detection heuristic
+    // is specified in SAFETY_MODEL.md/HARDWARE.md or built anywhere in this
+    // codebase yet. Assembly itself lives in link_diag_flags.c, pure and
+    // host-tested (test/test_link_diag_flags.c), since this file cannot be.
+    //
+    // Note what parsing PUSH_CONTEXT does NOT yet mean: there is still no
+    // context-consuming correlation guard (S2/S3/S4/S6/S10) to disable on
+    // sim_context_seen or reset on a boot_id change -- this frame reports
+    // that the fact is known, not that anything downstream acts on it yet.
+    uint8_t diag_flags =
+        link_diag_flags_compute(config_store_is_calibration_missing(), s_context_sim_seen);
     //
     // Built via the shared kilnlink_diag_encode() codec (CommonFW/src/
     // kilnlink_diag.c, host-tested test_diag.c) rather than this file's own

@@ -29,7 +29,7 @@ So for every guard, the **first** test written is the one that must *not* trip:
 | S2 | A 40 °C overshoot at the end of a fast ramp, decaying over 90 s |
 | S3 | **A 60 s heater window at 15 % duty, for an hour** — the single most important nuisance test in the suite |
 | S4 | The same, plus every duty from 5 % to 95 % |
-| S5 | A 900 ms sensor dropout; a single failed SPI transfer; three non-consecutive bad reads |
+| S5 | A 900 ms sensor dropout; a single failed SPI transfer; three non-consecutive bad reads; any reading inside the commissioned `tc_type`'s datasheet plausibility band (2026-08-24, see note below) |
 | S6a | `mainFault` glitching for 100 ms |
 | S6b | One dropped telemetry frame; three dropped frames with no current flowing |
 | S7 | 30 ms of contact bounce on both edges |
@@ -43,6 +43,22 @@ So for every guard, the **first** test written is the one that must *not* trip:
 **S3's low-duty test is the one to write on day one.** It is the case the 60 s
 heater window and the 1 s peak-hold conspire to break, and it is the reason
 `correlation_window_s` is 150 s rather than something that "looks long enough".
+
+**S5's per-`tc_type` plausibility band (2026-08-24, TODO.md Phase 3)** is
+tested one layer upstream of `safety_guards.c` itself, so it does not appear
+in that file's own host-test scenario suite (§2 below): `thermo_task.c`
+downgrades `thermo_snapshot_t.valid` to false *before* the reading ever
+reaches `safety_guard_input_t.tc_valid`, using `max31856_tc_range_policy.c`
+against config_store's commissioned `tc_type`. The pure per-type band itself
+(all 8 real types, inclusive boundaries, NaN, unrecognised type, and the
+never-commissioned-defaults-to-K case) is exhaustively host-tested in
+`test/test_max31856_tc_range_policy.c`, against ranges taken from
+`firmware/KilnFW/Datasheets/MAX31856.pdf` page 12, Table 1 "Supported
+Thermocouples and Temperature Ranges" (TEMP RANGE column) — see that policy
+file's own header comment for the full citation and the argument for why
+the check runs unconditionally, including on an uncommissioned (default
+Type K) board. Not yet hardware-verified — no MAX31856/RP2040 on any bench
+this was built on.
 
 ---
 

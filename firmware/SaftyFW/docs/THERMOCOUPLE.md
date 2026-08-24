@@ -125,6 +125,28 @@ Beyond that it is a commissioning check: at a known soak, the safety reading mus
 agree with a reference. Put it in the commissioning list (`TODO.md` phase 8) and
 record the result.
 
+**A third, narrower layer (2026-08-24, TODO.md Phase 3):**
+`max31856_tc_range_policy.c` re-checks every decoded reading against
+`config_store`'s *own* commissioned `tc_type`, independent of whatever the
+MAX31856's CR1 register is actually running right now, using the datasheet's
+per-type linearization range (`MAX31856.pdf` p.12, Table 1) rather than a
+range hard-coded to K. Be precise about what this does and does not close:
+it does **not** help the wrong-sensor-physically-fitted scenario just
+described above (a real Type-S junction read through a Type-K LUT lands
+*inside* K's own wide range, whether the check compares against the part's
+CR1 or against config_store's belief — both currently agree "K" in that
+scenario, and 320 °C is simply a valid K reading). What it *does* catch is
+config_store's belief and the part's actual CR1 register disagreeing (e.g. a
+transient SPI failure during `max31856_configure()` left the part on a
+stale/default type while config_store believes a different one was
+committed) — a case the existing `THERMO_FAULT_TCRANGE` bit cannot see,
+because that bit only ever compares against whatever CR1 the chip itself is
+currently running. Feeds S5 (marks the reading invalid, same as any other
+bad-read cause) rather than a new trip — see `SAFETY_MODEL.md`'s S5 section
+and `max31856_tc_range_policy.h`'s own header comment for the full argument,
+including why the check runs unconditionally even on a never-commissioned
+(default Type K) board.
+
 ---
 
 ## 3. Borrowing a main-board thermocouple

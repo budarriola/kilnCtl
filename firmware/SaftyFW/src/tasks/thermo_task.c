@@ -28,6 +28,7 @@
 #include "board_pins.h"
 #include "config_store.h" // safety_tc_installed (0x0211) -- the structural injection gate, see thermo_task.h
 #include "max31856.h"
+#include "max31856_tc_range_policy.h" // per-tc_type plausibility band, see its own header for the full argument
 #include "task_priorities.h"
 #include "watchdog_task.h"
 
@@ -288,6 +289,62 @@ static void thermo_task_fn(void *arg)
             // snapshots.h's thermo_snapshot_t doc comment for why valid ==
             // true does not itself guarantee tc_c/cj_c are both finite.
             snap.valid = ok && !reading.spi_failed;
+
+            // Per-type plausibility (TODO.md Phase 3, "Per-type plausibility
+            // ranges" -- max31856_tc_range_policy.h). Checked here, the
+            // smallest place that can feed the existing S5 sensor-invalid
+            // path with no changes to safety_guards.h/.c or its input
+            // struct: this task already owns the one and only place
+            // thermo_snapshot_t.valid is decided from a real transfer, and
+            // safety_core.c already maps that straight onto
+            // safety_guard_input_t.tc_valid, which s5_bad_read_now()
+            // (safety_guards.c) already treats as a bad read.
+            //
+            // Only ever downgrades valid -> invalid, never the reverse: a
+            // reading that already failed for any other reason (spi_failed,
+            // !ok) stays invalid regardless of what this check would say.
+            //
+            // Keyed off config_store_get_tc_type() -- the OPERATOR'S
+            // commissioned belief -- not off whatever CR1 the part itself
+            // currently holds. This is deliberately a SECOND, independent
+            // layer over the MAX31856's own unmaskable TCRANGE fault bit
+            // (already folded into fault_bits/s5_bad_read_now() above): it
+            // catches config_store and the part's actual CR1 going out of
+            // sync (e.g. a failed max31856_configure() SPI write leaving the
+            // part on its old/default type while config_store believes a
+            // different one was commissioned) -- see
+            // max31856_tc_range_policy.h's file header for the full
+            // "confident, plausible, WRONG" argument.
+            //
+            // Applied UNCONDITIONALLY, including on a never-commissioned
+            // board (config_store_get_tc_type() then returns
+            // CONFIG_STORE_DEFAULT_TC_TYPE == MAX31856_TC_TYPE_K, the safe-
+            // default path, config_store.h) -- deliberately, not gated on
+            // any "has this been commissioned" flag, because no such flag
+            // exists for tc_type specifically (config_store.h's own doc
+            // comment on that field: unlike the seven fields_set-gated
+            // commissioning fields, tc_type keeps a real compiled default
+            // rather than an unset bit, and changing that is out of this
+            // pass's scope). Applying the SAME check to a default-K board
+            // is still safe and does not newly refuse readings a default-K
+            // board accepted yesterday: type K's own datasheet range
+            // (-200..+1372 degC) already covers every real kiln temperature
+            // this codebase's own S1/SAFETY_MODEL.md discussion assumes
+            // (K is called out there as "marginal above ~1150 degC", not
+            // "unusable" -- 1150 is well inside 1372), and the MAX31856's
+            // own hardware TCRANGE bit was ALREADY enforcing this exact K
+            // boundary for that same uncommissioned board before this
+            // change (its CR1 also defaults to Type K, max31856.h's power-
+            // on-defaults comment) -- so this adds no new failure mode for
+            // the default case, only a second, config_store-anchored check
+            // that starts to matter once a DIFFERENT type is genuinely
+            // commissioned.
+            if (snap.valid) {
+                uint8_t configured_type = config_store_get_tc_type();
+                if (!max31856_tc_range_is_plausible(configured_type, snap.tc_c)) {
+                    snap.valid = false;
+                }
+            }
         }
 
         thermo_task_publish(&snap);

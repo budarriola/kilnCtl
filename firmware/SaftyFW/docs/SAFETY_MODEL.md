@@ -355,8 +355,23 @@ judge it with.
 
 ### S5 — Safety thermocouple invalid · **WARN, then TRIP** · graduated
 
-Trips on: SPI transfer failure, `NaN`, or `THERMO_FAULT_OPEN` / `OVUV` /
-`TCRANGE` from the MAX31856's SR register.
+Trips on: SPI transfer failure, `NaN`, `THERMO_FAULT_OPEN` / `OVUV` /
+`TCRANGE` from the MAX31856's SR register, or (2026-08-24) a linearized
+reading outside the datasheet's per-`tc_type` plausibility band
+(`max31856_tc_range_policy.c`, wired in `thermo_task.c`) — the check that
+catches config_store's commissioned `tc_type` disagreeing with what the
+MAX31856's own CR1 register is actually running (e.g. a failed
+`max31856_configure()` write leaving the part on a stale type): a Type-S
+sensor decoded through a stuck Type-K LUT can land inside K's own wide range
+and never set the part's own `TCRANGE` bit, but will fail this
+config_store-anchored check the moment it disagrees with the commissioned
+type by enough. Ranges are datasheet Table 1 (MAX31856.pdf p.12), inclusive
+at both ends; applied unconditionally, including on a never-commissioned
+(default Type K) board — see `max31856_tc_range_policy.h`'s file header for
+why that does not regress the uncommissioned case (Type K's own band,
+-200..+1372 °C, already covers every realistic kiln reading this document
+discusses). This adds a new way S5 can WARN/TRIP; it does not change S5's
+graduated response shape or timing below.
 
 Deliberately **not** tripping on `TCHIGH` / `TCLOW` (those are threshold
 comparators, which is S1's job) or `CJHIGH` / `CJLOW` / `CJRANGE` alone (a

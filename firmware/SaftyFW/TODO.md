@@ -118,9 +118,26 @@ real hardware** — no RP2040 attached to any machine this has been built on.
       see [`docs/COMMISSIONING.md`](docs/COMMISSIONING.md) for the mechanism.
       Until a real record is written every board still resolves to type K via
       the safe-default path, which is not a claim that K is correct here.
-- [ ] **Per-type plausibility ranges**, driven from the configured type — a
-      range hard-coded to type K misfires on every other type. Needs a
-      commissioned `tc_type` first.
+- [x] **Per-type plausibility ranges** — done 2026-08-24,
+      `src/max31856_tc_range_policy.c`, wired in `thermo_task.c` (feeds S5's
+      existing sensor-invalid path; no new trip). Ranges are datasheet Table 1
+      (`firmware/KilnFW/Datasheets/MAX31856.pdf` p.12), inclusive both ends;
+      host-tested for all 8 real types, both boundaries, NaN, and the
+      unrecognised/voltage-mode-type case (`test/test_max31856_tc_range_policy.c`).
+      Applied unconditionally, including on a never-commissioned (default
+      Type K) board — deliberate, argued in the policy header and
+      `docs/THERMOCOUPLE.md`'s §2 update, not gated on a "commissioned"
+      flag (tc_type has none — see `config_store.h`'s own doc comment on
+      that field, unchanged by this pass). Distinct from, and does not
+      replace, the MAX31856's own unmaskable `TCRANGE` fault bit already
+      folded into S5: this check is anchored to config_store's belief, so it
+      additionally catches config_store and the part's actual CR1 register
+      going out of sync (e.g. a failed `max31856_configure()` write). Does
+      **not** solve `docs/THERMOCOUPLE.md`'s §2 wrong-sensor-physically-
+      fitted case (a real Type-S junction read through Type-K's LUT still
+      lands inside K's own range) — that section's existing "nothing in the
+      electronics can detect this" stands, and still needs the commissioning
+      soak-test check it already lists. Not yet hardware-verified.
 - [ ] Bench: read ambient with the thermocouple attached; confirm open-circuit
       reports `THERMO_FAULT_OPEN` rather than a plausible number. Phase 9
       commissioning work; no hardware attached to do it yet.
@@ -268,8 +285,15 @@ RP2040/CT hardware attached to any build machine, and the link is bench-dead.
       `config_store_get_config_version()`/`_get_config_crc()`. Still reports
       0/0 on a never-commissioned board, which is the documented meaning of
       "running on compiled-in defaults", not a stub.
-- [ ] DIAG's `calibration_missing` bit is still not wired to the real
-      `config_store` record.
+- [x] DIAG's `calibration_missing` bit wired to the real `config_store`
+      record — done 2026-08-24. It was a wiring fix, not a wire-format
+      change: `KILNLINK_DIAG_FLAG_CALIBRATION_MISSING` already existed in
+      `kilnlink_diag.h`, and `link_task_send_diag()` was setting it
+      unconditionally to 1 every boot rather than reading
+      `config_store_is_calibration_missing()`. The `flags`-byte assembly is
+      now `src/link_diag_flags.c` (pure, host-tested,
+      `test/test_link_diag_flags.c`, since `link_task.c` itself cannot be) —
+      no `KILNLINK_PROTOCOL_VERSION` bump.
 
 ## Phase 8b — ESP web GUI surface (`KilnFW` work)
 
