@@ -306,6 +306,26 @@ recorded per section 4's convention.
 | S12 | `cj_fault` |
 | S13 | `tc_stuck` |
 
+**Read the table below as host-software evidence, not hardware evidence.**
+Every "Yes"/trip-time cell comes from `virtual_dut` (see
+`firmware/SimFW/tools/virtual_dut/README.md`) compiling `safety_guards.c` for
+the host and driving it from a simulated fixture — real guard logic, no real
+SaftyFW board. Running the *same* scenario for real, through `kilnsim run` or
+`kilnsim testmgr` against an actual attached SimFW+SaftyFW bench, currently
+cannot reproduce any of this table's evidence at all:
+`kilnsim.protocol.EventType.GUARD_TRIP`/`GUARD_WARN`/`LINK_UP`/
+`TRIP_INEFFECTIVE_LATCHED` have no wire producer, `kilnsim.runner` never
+synthesizes them from real hardware, and every `guard_trip`/`guard_warn`
+`expect:` clause in these 25 scenario files SKIPS (not fails) against real
+hardware today, which can leave an overall run looking like a clean PASS.
+`kilnsim run`/`kilnsim testmgr` both now print an explicit
+`WARNING: ... do not read this run's overall verdict ... as hardware
+evidence that a guard fired` whenever that happens
+(`kilnsim.testmgr.describe_runner_gap`, `firmware/SimFW/docs/TEST_MANAGER.md`
+§2/§9) — read that warning as confirmation this table's "Yes" is a
+`virtual_dut` finding, not a bench one, until someone teaches `kilnsim.runner`
+to observe real SaftyFW guard state (tracked in TEST_MANAGER.md §9, not done).
+
 **2026-08-21 update: which of the above actually PROVOKE their guard today,
 not merely declare it (25 scenario files now, `virtual_dut` re-run against
 all of them).** The table above answers "does a scenario targeting this

@@ -266,6 +266,22 @@ def cmd_run(args) -> int:
         print(f"report written: {args.report}", file=sys.stderr)
     print(report.to_json())
 
+    # Loud-vacuity check (5th unfailable-check-class finding, see
+    # kilnsim.testmgr's module docstring point 3): a scenario whose
+    # guard-evidence clause(s) target GUARD_TRIP/GUARD_WARN/LINK_UP/
+    # TRIP_INEFFECTIVE_LATCHED can look like a clean hardware PASS here even
+    # though kilnsim.runner never synthesizes those event types against real
+    # hardware -- `kilnsim testmgr` already carries this warning in its own
+    # per-scenario `detail` (testmgr.run_one_scenario), but `kilnsim run`
+    # (this function, the single-scenario/CI-gate path) printed only the raw
+    # report and had no equivalent notice. Reusing testmgr.classify_scenario/
+    # describe_runner_gap rather than re-deriving the same judgment a second
+    # time, per that module's own has_runner_gap concept.
+    gap_req = _testmgr.classify_scenario(scenario)
+    gap_note = _testmgr.describe_runner_gap(gap_req, report.verdict)
+    if gap_note:
+        print(f"WARNING: {gap_note}", file=sys.stderr)
+
     # Exit-code semantics (kilnsim run is the CI gate, module docstring):
     #   0 -- PASS. Every expectation passed (or was SKIPPED -- its
     #        triggering condition never arose) and the run was valid.

@@ -39,6 +39,29 @@ def _inject_after_schedule(link: MockSimLink, events) -> None:
     link.send_command = wrapped
 
 
+def _inject_after_fire_now(link: MockSimLink, events) -> None:
+    """Simulates the real firmware firing (and the EVT frame reaching the
+    PC's link-level event buffer) *during* FAULT_FIRE_NOW's own round trip --
+    i.e. before _check_event_sequence_continuity's read loop has started
+    calling read_events() at all. This is the exact scenario the bench-day
+    investigation's "listener window race" hypothesis worried about: on
+    :class:`MockSimLink`, ``inject_event`` always lands in the same
+    already-buffered list read_events() drains regardless of timing (mirrors
+    the real SimLink's RX-thread buffering, kilnsim/link.py's
+    _handle_broadcast()), so a check that is genuinely robust to this must
+    still PASS."""
+    orig_send = link.send_command
+
+    def wrapped(group, cmd, payload=None, timeout=None):
+        result = orig_send(group, cmd, payload, timeout=timeout)
+        if group == CommandGroup.FAULT and cmd == FaultCmd.FIRE_NOW:
+            for evt in events:
+                link.inject_event(evt)
+        return result
+
+    link.send_command = wrapped
+
+
 class CheckResultAndReportTests(unittest.TestCase):
     def test_check_result_to_dict_rounds_duration(self):
         r = st.CheckResult(name="x", status=st.STATUS_PASS, detail="ok", duration_s=1.23456)
@@ -169,6 +192,56 @@ class IndividualCheckTests(unittest.TestCase):
         status, detail = st._check_event_sequence_continuity(self.link)
         self.assertEqual(status, st.STATUS_PASS)
         self.assertIn("FAULT_FIRED", detail)
+
+    def test_event_sequence_continuity_uses_manual_trigger_and_fire_now(self):
+        # Bench-day fix: was AT_SIM_TIME(t=0.05) (a trigger time that's
+        # essentially always already in the sim's past); now MANUAL +
+        # explicit FAULT_FIRE_NOW, so the check drives the fire itself
+        # instead of relying on an already-past absolute time being handled
+        # correctly by the tick-evaluated path.
+        _inject_after_schedule(self.link, [
+            Event(seq=1, sim_time_us=0, event_type=EventType.FAULT_FIRED),
+        ])
+        st._check_event_sequence_continuity(self.link)
+        sent = self.link.sent_commands
+        schedule_calls = [p for g, c, p in sent if g == CommandGroup.FAULT and c == FaultCmd.SCHEDULE]
+        self.assertEqual(len(schedule_calls), 1)
+        self.assertEqual(schedule_calls[0]["trigger"], {"kind": "manual"})
+        fire_now_calls = [p for g, c, p in sent if g == CommandGroup.FAULT and c == FaultCmd.FIRE_NOW]
+        self.assertEqual(len(fire_now_calls), 1)
+        self.assertEqual(fire_now_calls[0]["fault_slot"], 30)
+
+    def test_event_sequence_continuity_survives_event_arriving_before_read_loop(self):
+        # The bench-day "listener window race" hypothesis: an EVT frame that
+        # arrives *during* FAULT_FIRE_NOW's own round trip, before the check's
+        # read loop below has made its first read_events() call. Confirmed by
+        # reading kilnsim/link.py that this can never actually lose an event
+        # (the RX thread buffers into self._events regardless of whether a
+        # reader is waiting) -- this test proves the check-level behavior
+        # matches that: it must still PASS, not flake, when the event is
+        # already sitting in the buffer before the read loop starts.
+        _inject_after_fire_now(self.link, [
+            Event(seq=1, sim_time_us=0, event_type=EventType.FAULT_FIRED),
+            Event(seq=2, sim_time_us=1000, event_type=EventType.FAULT_FIRED),
+        ])
+        status, detail = st._check_event_sequence_continuity(self.link)
+        self.assertEqual(status, st.STATUS_PASS)
+        self.assertIn("FAULT_FIRED", detail)
+
+    def test_event_sequence_continuity_fail_reports_slot_state_from_fault_list(self):
+        # On a genuine "no EVT frames arrived" failure, the check now queries
+        # FAULT/LIST for the slot so a future flaky run can tell "never went
+        # ACTIVE" (scheduling problem) apart from "went ACTIVE but no EVT
+        # frame reached the PC" (transport/ring-drain problem) -- previously
+        # both looked identical ("produced no EVT frames at all").
+        self.link.script_response(CommandGroup.FAULT, FaultCmd.LIST, {
+            "returned_count": 1,
+            "faults": [{"fault_slot": 30, "state": "active", "fault_type": 0, "target": 0,
+                        "fire_count": 1, "active_since_s": 0.0}],
+        })
+        status, detail = st._check_event_sequence_continuity(self.link)
+        self.assertEqual(status, st.STATUS_FAIL)
+        self.assertIn("state: active", detail)
 
     def test_expander_read_after_write_not_runnable_against_mock(self):
         status, detail = st._check_expander_read_after_write(self.link)

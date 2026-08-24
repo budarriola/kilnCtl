@@ -294,24 +294,48 @@ def _check_event_sequence_continuity(link: SimLink) -> "tuple[str, str]":
     # 30 is the top of that range, unlikely to collide with a real scenario
     # (the shipped scenario library uses small slot ids from 0).
     slot = 30
-    # AT_SIM_TIME, not "manual"+FIRE_NOW: this predates the fix in
-    # firmware/SimFW/src/sim/fault_engine.c (`fault_sched_fire_now()`) that
-    # closed FIRE_NOW's ring-event gap (see virtual_simfw's README, "now emit
-    # a FAULT_FIRED ring event on both real firmware and this harness") --
-    # FIRE_NOW is a legitimate alternative today. AT_SIM_TIME is kept anyway
-    # because it exercises the same tick-evaluated path any real scenario's
-    # faults take (the thing this check actually needs to prove works), not
-    # because FIRE_NOW is still broken.
+    # Was AT_SIM_TIME(t=0.05): on real bench hardware (2026-08-24) this check
+    # failed 3 of 4 consecutive runs with "produced no EVT frames at all",
+    # even though FAULT/LIST confirmed the slot genuinely went ACTIVE and the
+    # firmware's own counters (event_ring_high_water/evt_seq_gap_count/
+    # evt_send_drop_count) were all clean. Investigated whether this was a
+    # listener-window race -- i.e. the fault firing (during AT_SIM_TIME's
+    # deferred tick-evaluated path, since t=0.05 is essentially always
+    # already in the sim's past) before this function's own read loop below
+    # started listening, with the EVT frame then "lost" because nothing was
+    # waiting. That is NOT how the PC-side link works: SimLink._events is
+    # filled by the background RX thread as frames arrive
+    # (kilnsim/link.py's _handle_broadcast(), `self._events.append(evt)`),
+    # completely independent of whether anything is currently blocked in
+    # read_events() -- a frame that arrives between the drain above and the
+    # loop below is still captured and returned by the loop's first
+    # read_events() call. So that specific race is not the bug.
+    # Switched to MANUAL + explicit FAULT_FIRE_NOW anyway, for two reasons
+    # that hold regardless of the above: (1) it removes this check's
+    # dependence on AT_SIM_TIME's "trigger time already in the past"
+    # behavior being evaluated correctly -- an assumption the check was
+    # relying on but never actually asserting -- in favor of a trigger this
+    # check drives explicitly and immediately; FIRE_NOW's own ring-event gap
+    # (fault_engine.c's fault_sched_fire_now() comment) was fixed and is
+    # legitimate today. (2) On a genuine failure it now also queries
+    # FAULT/LIST for the slot's firmware-reported state (below), which the
+    # AT_SIM_TIME version never did -- so a future flaky run tells us
+    # whether the fault ever went ACTIVE at all (a firmware-side scheduling
+    # problem) or went ACTIVE with no EVT frame reaching the PC (a
+    # transport/ring-drain problem upstream of this link -- see PROTOCOL.md
+    # sec 6 on evt_send_drop_count/evt_seq_gap_count) instead of leaving both
+    # possibilities indistinguishable from "produced no EVT frames at all".
     link.send_command(
         CommandGroup.FAULT, FaultCmd.SCHEDULE,
         {
             "fault_slot": slot,
             "fault_type": "welded_ssr",
             "target": "relay:K1",
-            "trigger": {"kind": "at_sim_time", "t": 0.05},
+            "trigger": {"kind": "manual"},
             "duration": {"kind": "permanent"},
         },
     )
+    link.send_command(CommandGroup.FAULT, FaultCmd.FIRE_NOW, {"fault_slot": slot})
     try:
         events = []
         deadline = time.monotonic() + 1.5
@@ -326,7 +350,23 @@ def _check_event_sequence_continuity(link: SimLink) -> "tuple[str, str]":
             pass  # best-effort cleanup; the check's own verdict doesn't depend on this
 
     if not events:
-        return STATUS_FAIL, "AT_SIM_TIME(t=0.05) FAULT_SCHEDULE produced no EVT frames at all within 1.5s"
+        # Enrich the failure with the firmware's own view of the slot, so a
+        # future flaky run distinguishes "never went ACTIVE" (a scheduling/
+        # trigger problem) from "went ACTIVE but no EVT frame arrived" (a
+        # transport/ring-drain problem) -- best-effort only, never lets a
+        # broken diagnostic query mask the real FAIL below it exists to
+        # explain.
+        slot_state = "unknown (FAULT/LIST query itself failed)"
+        try:
+            listing = link.send_command(CommandGroup.FAULT, FaultCmd.LIST, {"start_index": slot, "max_count": 1})
+            entries = [e for e in listing.get("faults", []) if e.get("fault_slot") == slot]
+            slot_state = entries[0]["state"] if entries else "not found in FAULT/LIST"
+        except SimLinkError:
+            pass
+        return STATUS_FAIL, (
+            f"MANUAL+FIRE_NOW FAULT_SCHEDULE(slot={slot}) produced no EVT frames at all within 1.5s "
+            f"(FAULT/LIST reports slot {slot} state: {slot_state})"
+        )
 
     seqs = [e.seq for e in events]
     gaps = [b - a for a, b in zip(seqs, seqs[1:]) if b - a != 1]
@@ -352,7 +392,22 @@ def _fault_fired_gaps(link: SimLink, seed: int) -> "list[int]":
     tools/PcTools/tests/test_kilnsim_virtual_simfw.py's own determinism
     regression test uses and documents at length (that test's own comment
     explains why absolute fire time is NOT expected to match run-to-run but
-    the *interval sequence* is)."""
+    the *interval sequence* is).
+
+    NOT the same "trigger time already in the past" pattern that
+    event_sequence_continuity used to have: SYS/RESET_SIM zeroes sim_time_us
+    firmware-side (firmware/SimFW/src/tasks/sim_engine.c, `s_sim_time_us =
+    0`) immediately above, before this AT_SIM_TIME(t=0.2) is armed, so 0.2s
+    is a genuine near-future trigger relative to a fresh reset, not a stale
+    absolute time. _check_determinism_spot reporting "not enough repeat
+    fires to compare" on every run today is therefore a real, unexplained
+    symptom -- most likely the same underlying FAULT_FIRED EVT delivery
+    unreliability event_sequence_continuity hit, but this function needs
+    several repeated fires over ~1s+ of wall time rather than one single
+    fire immediately after arming, so event_sequence_continuity's fix
+    (MANUAL+FIRE_NOW for a single deterministic fire) does not carry over
+    cleanly -- left unmodified rather than guessed at; see the selftest
+    fix-pass notes for the full writeup."""
     link.send_command(CommandGroup.SYS, SysCmd.RESET_SIM, {"keep_params": False})
     link.send_command(CommandGroup.SYS, SysCmd.SET_SEED, {"value": seed})
     link.send_command(CommandGroup.MODEL, ModelCmd.LOAD_PRESET, {"name": "fast_test"})

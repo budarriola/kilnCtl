@@ -490,6 +490,29 @@ class ScenarioOutcome:
         return d
 
 
+def describe_runner_gap(req: ScenarioRequirement, verdict: str) -> Optional[str]:
+    """The loud-vacuity note for a scenario whose guard-evidence clause(s)
+    target an event type :mod:`kilnsim.runner` cannot produce (module
+    docstring point 3), when the run's overall verdict looks clean enough to
+    be mistaken for hardware evidence (PASS or SKIPPED). Returns ``None``
+    when there is nothing to warn about.
+
+    Factored out of :func:`run_one_scenario` so a caller that runs a single
+    scenario *without* going through the full ``testmgr`` suite --
+    ``kilnsim.cli.cmd_run``'s ``kilnsim run`` is the motivating one, see that
+    module -- can attach the same warning instead of inventing a second,
+    differently-worded concept for the same gap."""
+    if not (req.has_runner_gap and verdict in (PASS, SKIPPED)):
+        return None
+    gap_names = sorted({name for _, kind, name, _, gap in req.refs if gap})
+    return (
+        f"this scenario's guard-evidence clause(s) target event type(s) "
+        f"{gap_names} that kilnsim.runner cannot produce against real hardware today "
+        "(see this module's docstring point 3) -- do not read this run's overall "
+        f"verdict ({verdict}) as hardware evidence that a guard fired"
+    )
+
+
 def run_one_scenario(
     link: SimLink,
     scenario: Scenario,
@@ -566,14 +589,8 @@ def run_one_scenario(
     duration = time.monotonic() - t0
 
     detail = enable_note
-    if req.has_runner_gap and report.verdict in (PASS, SKIPPED):
-        gap_names = sorted({name for _, kind, name, _, gap in req.refs if gap})
-        gap_note = (
-            f"this scenario's guard-evidence clause(s) target event type(s) "
-            f"{gap_names} that kilnsim.runner cannot produce against real hardware today "
-            "(see this module's docstring point 3) -- do not read this run's overall "
-            f"verdict ({report.verdict}) as hardware evidence that a guard fired"
-        )
+    gap_note = describe_runner_gap(req, report.verdict)
+    if gap_note:
         detail = f"{detail}; {gap_note}" if detail else gap_note
 
     return ScenarioOutcome(

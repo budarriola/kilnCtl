@@ -178,6 +178,59 @@ expect:
 
 
 # ---------------------------------------------------------------------------
+# describe_runner_gap -- the loud-vacuity note shared by testmgr.
+# run_one_scenario and kilnsim.cli.cmd_run (kilnsim run), so `kilnsim run`
+# on a single guard_trip/guard_warn/link_up/trip_ineffective_latched
+# scenario carries the same warning the full testmgr suite already gives,
+# instead of a silent, indistinguishable-from-real clean PASS.
+# ---------------------------------------------------------------------------
+class DescribeRunnerGapTests(unittest.TestCase):
+    def test_no_note_when_scenario_has_no_runner_gap(self):
+        req = tm.classify_scenario(_load(_TIER0_YAML))
+        self.assertIsNone(tm.describe_runner_gap(req, report_mod.PASS))
+
+    def test_no_note_when_verdict_is_fail_even_with_a_gap(self):
+        # A genuine FAIL is not vacuous -- the note exists to stop a CLEAN
+        # verdict from being mistaken for hardware evidence, not to annotate
+        # every run of a gappy scenario regardless of outcome.
+        req = tm.classify_scenario(_load(_RUNNER_GAP_YAML))
+        self.assertIsNone(tm.describe_runner_gap(req, report_mod.FAIL))
+
+    def test_note_present_for_pass_verdict_on_a_gappy_scenario(self):
+        req = tm.classify_scenario(_load(_RUNNER_GAP_YAML))
+        note = tm.describe_runner_gap(req, report_mod.PASS)
+        self.assertIsNotNone(note)
+        self.assertIn("guard_trip", note)
+        self.assertIn("PASS", note)
+        self.assertIn("kilnsim.runner cannot produce", note)
+
+    def test_note_present_for_skipped_verdict_too(self):
+        req = tm.classify_scenario(_load(_RUNNER_GAP_YAML))
+        note = tm.describe_runner_gap(req, report_mod.SKIPPED)
+        self.assertIsNotNone(note)
+
+    def test_run_one_scenario_detail_carries_the_same_note(self):
+        """The suite-level path (run_one_scenario) and the single-scenario
+        path (describe_runner_gap, used directly by kilnsim.cli.cmd_run)
+        must not diverge in wording -- both are built from the same
+        function now, this pins that down rather than asserting it once and
+        letting the two drift apart silently."""
+        scenario = _load(_RUNNER_GAP_YAML)
+        link = MockSimLink()
+        link.connect()
+        presence = tm.HardwarePresence(
+            fixture=tm.PresenceResult(True, "ok"),
+            saftyfw=tm.PresenceResult(True, "ok"),
+            esp=tm.PresenceResult(True, "ok"),
+        )
+        outcome = tm.run_one_scenario(link, scenario, presence, mock=True)
+        req = tm.classify_scenario(scenario)
+        standalone_note = tm.describe_runner_gap(req, outcome.verdict)
+        if standalone_note is not None:
+            self.assertIn(standalone_note, outcome.detail)
+
+
+# ---------------------------------------------------------------------------
 # presence detection
 # ---------------------------------------------------------------------------
 class PresenceTests(unittest.TestCase):
