@@ -436,15 +436,17 @@ hardware-trip rows, which is why it earns a milestone here.
       calibration is still an identity placeholder (M-D). Relay sense, E-stop,
       fault line and DUT power are unwired, so no scenario has yet run against
       a real `KilnFW`+`SaftyFW` pair.
-- [ ] **Guard assertions in the scenario suite are currently vacuous**
-      (found 2026-08-24). `kilnsim`'s `EventType` defines `GUARD_TRIP`/
-      `GUARD_WARN`/`LINK_UP`/`TRIP_INEFFECTIVE_LATCHED`, but `runner.py`
-      never synthesizes any of them — verified, it contains no reference to
-      them. 25 of the 27 scenarios have a clause referencing one, so those
-      clauses cannot fail. The suite's guard coverage is therefore nominal,
-      not real, independently of whether hardware is attached. `testmgr`
-      refuses to credit such a pass as evidence; the fix belongs in
-      `runner.py`.
+- [~] **Guard assertions in the scenario suite were vacuous** (found
+      2026-08-24, half fixed the same day by the SimFW-owning session).
+      `kilnsim`'s `EventType` defines `GUARD_TRIP`/`GUARD_WARN`/`LINK_UP`/
+      `TRIP_INEFFECTIVE_LATCHED`; `runner.py` synthesized none of them, so the
+      clause in 25 of 27 scenarios could not fail and the suite's guard
+      coverage was nominal rather than real. `runner.py` now synthesizes them
+      (`6f1cbbf`, recorded in `686a8d0`), and guard-typed clauses come back
+      **BLOCKED** rather than vacuously PASS — the honest outcome. **Still
+      open, owned by SimFW:** `testmgr` attaches no observer on its own runs,
+      and the `SafetyClient` polling shape is unconfirmed against a real
+      board.
 - [x] **`UnitTestFw` deleted** (2026-08-23) — the old ESP32-S3 instrument
       bench tree (App, pc_tools, docs, embedded KiCad files) removed from the
       repo along with every stale reference, ahead of the M-B hardware-proof
