@@ -48,14 +48,16 @@ verified against hardware), the actual pass/fail logic is
    the kind of vacuous-pass the guard-coverage report (requirement 4) exists
    to prevent, so :func:`classify_scenario` also flags these clauses
    (``has_runner_gap``) and :func:`compute_guard_coverage` refuses to credit
-   a guard with "hardware evidence" on the strength of one alone. Fixing
-   the underlying gap (teaching ``kilnsim.runner`` to synthesize these from
-   SaftyFW telemetry via kilnctrl) is out of scope for this pass -- it would
-   mean either polling kilnctrl mid-run from inside kilnsim.runner (a real
-   design decision belonging to that module, not something to smuggle in
-   here) or extending virtual_dut's separate approach; recorded here so it
-   is findable, not silently worked around by this module pretending the
-   gap does not exist.
+   a guard with "hardware evidence" on the strength of one alone. **The
+   underlying gap is since closed** (2026-08-24): ``kilnsim.guard_observer``
+   polls a real SaftyFW through kilnctrl on a second link and produces these
+   four event types, ``kilnsim.runner.run_scenario`` accepts one via
+   ``guard_observer=``, and ``run_suite(guards=True)`` (``kilnsim testmgr
+   --guards``) attaches it. Default is still OFF, so an ordinary run has no
+   guard observation at all -- but a guard-typed expectation now comes back
+   BLOCKED with a reason rather than SKIPPED, which is the whole point: a
+   SKIPPED clause reads as "the triggering condition never arose", which is
+   indistinguishable from "nothing was ever watching".
 
 4. **Known-state reset between scenarios.** ``kilnsim.runner.run_scenario``
    already sets seed/timescale fresh on every call (its own first two
@@ -854,9 +856,22 @@ class SuiteReport:
     @property
     def exit_code(self) -> int:
         """0 = everything runnable passed. 1 = a real failure (including
-        selftest failing, or a scenario ERRORing). 2 = no real failure, but
-        at least one scenario is BLOCKED on documented DUT incompleteness --
-        mirrors kilnsim.cli's own run exit-code convention (0/1/2)."""
+        selftest failing, a scenario ERRORing, or the fixture being absent
+        so that nothing ran at all). 2 = no real failure, but at least one
+        scenario is BLOCKED on documented DUT incompleteness -- mirrors
+        kilnsim.cli's own run exit-code convention (0/1/2)."""
+        if not self.presence.fixture.present:
+            # Found by running this suite for the first time against real
+            # hardware (2026-08-24) with the fixture's CDC port wedged: every
+            # scenario came back NOT_RUNNABLE, selftest never ran at all so it
+            # is None here, nothing was FAIL/ERROR/BLOCKED -- and the suite
+            # exited 0 and printed "PASS". A run that tested nothing must
+            # never be green. This is a setup failure, distinct from a higher
+            # TIER being unavailable: SaftyFW or the ESP being absent is a
+            # legitimate 0, because the fixture-only scenarios really did run
+            # and really did pass. The fixture is this suite's floor -- with
+            # it missing there is no evidence of any kind.
+            return 1
         if self.selftest is not None and not self.selftest.passed:
             return 1
         if any(o.verdict in (FAIL, ERROR) for o in self.scenario_outcomes):
@@ -925,7 +940,18 @@ class SuiteReport:
                 lines.append(f"       declared in: {', '.join(cov.declared_in)}")
         lines.append("")
 
-        lines.append(f"exit code: {self.exit_code} ({'PASS' if self.exit_code == 0 else 'BLOCKED-only' if self.exit_code == 2 else 'FAIL'})")
+        if not self.presence.fixture.present:
+            # Say why, rather than a bare "FAIL" that reads as though a test
+            # failed -- nothing ran, which is a different and more actionable
+            # thing to be told. See exit_code's own comment.
+            label = "FAIL -- fixture absent, nothing ran"
+        elif self.exit_code == 0:
+            label = "PASS"
+        elif self.exit_code == 2:
+            label = "BLOCKED-only"
+        else:
+            label = "FAIL"
+        lines.append(f"exit code: {self.exit_code} ({label})")
         return "\n".join(lines)
 
 

@@ -33,8 +33,8 @@ Exit code, same convention as `kilnsim run`:
 
 | Code | Meaning |
 |---|---|
-| 0 | Everything that ran, passed. Nothing needed hardware that wasn't there. |
-| 1 | A real failure: `kilnsim selftest` failed, a scenario genuinely FAILed, or a scenario ERRORed (couldn't even complete a run). |
+| 0 | Everything that ran, passed. A higher *tier* being absent (no SaftyFW, no ESP) is still a 0 — the fixture-only scenarios genuinely ran and genuinely passed. |
+| 1 | A real failure: `kilnsim selftest` failed, a scenario genuinely FAILed, a scenario ERRORed (couldn't even complete a run), **or the fixture itself was absent, so nothing ran at all**. |
 | 2 | No real failure, but at least one scenario is BLOCKED on documented, tracked DUT incompleteness (same meaning as `kilnsim run`'s exit 2). |
 
 `--quick` is the primary use case the task this suite was built for asked

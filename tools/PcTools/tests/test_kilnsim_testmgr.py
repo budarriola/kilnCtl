@@ -495,6 +495,34 @@ class ExitCodeTests(unittest.TestCase):
     def test_not_runnable_and_skipped_quick_do_not_fail_the_run(self):
         self.assertEqual(self._report(True, [tm.NOT_RUNNABLE, tm.SKIPPED_QUICK]).exit_code, 0)
 
+    def test_fixture_absent_exits_1_even_with_nothing_failing(self):
+        """A suite that ran nothing must not be green -- see run_suite's own
+        test_fixture_absent_reports_not_runnable_never_fail for the real-
+        hardware run that exposed this."""
+        report = self._report(None, [tm.NOT_RUNNABLE, tm.NOT_RUNNABLE])
+        # to_text() walks every guard, so this needs a real (if empty)
+        # coverage map rather than the bare {} the helper builds.
+        report.guard_coverage = tm.compute_guard_coverage([], [])
+        report.presence = tm.HardwarePresence(
+            tm.PresenceResult(False, "fixture not reachable"),
+            tm.PresenceResult(False, "n/a"),
+            tm.PresenceResult(False, "n/a"),
+        )
+        self.assertEqual(report.exit_code, 1)
+        self.assertIn("fixture absent, nothing ran", report.to_text())
+
+    def test_higher_tier_absent_still_exits_0(self):
+        """The fixture is present and its own scenarios passed; SaftyFW and
+        the ESP are not attached. That is a legitimate 0 -- the distinction
+        the fixture-absent case above turns on."""
+        report = self._report(True, [report_mod.PASS, tm.NOT_RUNNABLE])
+        report.presence = tm.HardwarePresence(
+            tm.PresenceResult(True, "ok"),
+            tm.PresenceResult(False, "no SaftyFW on the bench"),
+            tm.PresenceResult(False, "no ESP on the bench"),
+        )
+        self.assertEqual(report.exit_code, 0)
+
 
 # ---------------------------------------------------------------------------
 # run_suite -- end-to-end orchestration against fakes
@@ -515,9 +543,21 @@ class RunSuiteTests(unittest.TestCase):
         self.assertIsNone(report.selftest)
         self.assertGreater(len(report.scenario_outcomes), 20)
         self.assertTrue(all(o.verdict == tm.NOT_RUNNABLE for o in report.scenario_outcomes))
-        # this is finding 1's whole point: never a false FAIL when hardware
-        # simply isn't attached.
-        self.assertEqual(report.exit_code, 0)
+        # Every scenario is NOT_RUNNABLE rather than FAIL -- finding 1's whole
+        # point, and unchanged: a positive assertion must not fail merely
+        # because there was no DUT to observe.
+        #
+        # The exit code, however, is now 1, reversing this test's original
+        # assertion of 0. Found by running the suite against real hardware for
+        # the first time (2026-08-24) with the fixture's CDC port wedged: it
+        # printed "exit code: 0 (PASS)" having run precisely nothing. "No
+        # false FAIL when hardware isn't attached" is the right rule for a
+        # higher TIER -- SaftyFW or the ESP missing still exits 0, covered by
+        # test_higher_tier_absent_still_exits_0 below, because the
+        # fixture-only scenarios genuinely ran and genuinely passed. The
+        # fixture itself is the floor: without it there is no evidence of any
+        # kind, and a green result is a lie about what was tested.
+        self.assertEqual(report.exit_code, 1)
 
     def test_fixture_present_runs_selftest_and_quick_subset(self):
         link = MockSimLink()
