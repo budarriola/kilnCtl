@@ -235,6 +235,42 @@ static SemaphoreHandle_t s_context_lock = NULL;
 static context_snapshot_t s_context_snapshot; // guarded by s_context_lock
 static bool s_context_published = false;
 
+// 2026-08-24: link_task_send_broadcast_to()'s raw[]/stuffed[] used to be
+// locals on THIS function's own stack -- KILNLINK_FRAME_RAW_MAX (263B) +
+// KILNLINK_FRAME_STUFFED_MAX (528B), 791 bytes in one frame. That cost was
+// invisible to whichever task called in: link_task itself (fine, LINK_TASK_
+// STACK_WORDS is sized for far more), log_task (NOT fine -- this was the
+// exact mechanism behind the 2026-08-23 log_task stack overflow that made
+// CLEAR_TRIP reboot the board whenever it took the refusal branch and tried
+// to log the outcome), and update_task (fine today, only by luck of a
+// generous stack nobody sized against this function's real cost).
+//
+// Moved to static storage instead: every caller's stack requirement drops
+// by 791 bytes permanently, and no future caller can add itself to this
+// function's call graph without re-deriving a budget nobody will remember
+// to check. Cost: 791 bytes of static RAM (trivial -- this is a 264KB
+// RP2040) and one new bounded mutex.
+//
+// All three current callers (link_task_send_broadcast(), log_task's
+// link_task_send_log(), update_task's link_task_send_safety()) are pinned
+// to SAFTYFW_CORE_LINK_PATH (core 0) -- confirmed by grep -- so there is no
+// SMP race on these buffers. But FreeRTOS's preemptive scheduler on that one
+// core still means a higher-priority caller (link_task itself, SAFTYFW_PRIO_
+// LINK_TASK) could preempt a lower-priority one (log_task or update_task)
+// mid-use without a real lock -- same-core reasoning alone only rules out
+// hardware races, not preemption. Hence the mutex, not a bare "one core,
+// no lock needed" argument.
+//
+// 50ms bound matches this file's own s_context_lock convention (and
+// thermo_task.c's s_snapshot_lock) -- same "never wait longer than a
+// fraction of the tightest caller's watchdog deadline" reasoning. The
+// shortest deadline among the three callers is link_task's/update_task's
+// 300ms (WATCHDOG_CHECKIN_LINK_TASK/_UPDATE_TASK, watchdog_gate.c); 50ms
+// leaves ample margin even in the worst case of two callers colliding.
+static SemaphoreHandle_t s_broadcast_buf_lock = NULL;
+static uint8_t s_broadcast_raw[KILNLINK_FRAME_RAW_MAX];
+static uint8_t s_broadcast_stuffed[KILNLINK_FRAME_STUFFED_MAX];
+
 // Single-writer bookkeeping: touched only from link_task_fn / functions it
 // calls (all running on this task), read back only by link_task_send_diag()
 // (also this task) -- no lock needed, same reasoning as s_degraded_no_context
@@ -553,23 +589,44 @@ static bool link_task_send_broadcast_to(uint8_t dst_task, const uint8_t *payload
         .payload = payload,
     };
 
-    uint8_t raw[KILNLINK_FRAME_RAW_MAX];
-    kilnlink_frame_status_t status;
-    size_t raw_len = kilnlink_frame_encode_raw(&frame, raw, sizeof(raw), &status);
-    if (raw_len == 0) {
-        return false; // encode failure -- shouldn't happen for a well-formed frame we built ourselves
+    // s_broadcast_raw/s_broadcast_stuffed are shared across every caller of
+    // this function (link_task, log_task, update_task) -- see their own
+    // declaration comment for why they moved off the stack. Held for the
+    // whole encode-stuff-send sequence, released before returning on every
+    // path (including the two early-return failure cases below), matching
+    // this file's own s_context_lock discipline. Fails CLOSED: if the lock
+    // can't be taken within its bound, this frame is dropped exactly like a
+    // full TX ring would drop it -- LINK_PROTOCOL.md section 2 rule 3 again,
+    // just at a different layer, and no caller treats a dropped broadcast
+    // as fatal (that has always been true of uart_owner_send() itself).
+    if (xSemaphoreTake(s_broadcast_buf_lock, pdMS_TO_TICKS(50)) != pdTRUE) {
+        return false;
     }
 
-    uint8_t stuffed[KILNLINK_FRAME_STUFFED_MAX];
-    size_t stuffed_len = kilnlink_stuff(raw, raw_len, stuffed, sizeof(stuffed));
+    kilnlink_frame_status_t status;
+    size_t raw_len = kilnlink_frame_encode_raw(&frame, s_broadcast_raw, sizeof(s_broadcast_raw), &status);
+    if (raw_len == 0) {
+        // encode failure -- shouldn't happen for a well-formed frame we built ourselves
+        xSemaphoreGive(s_broadcast_buf_lock);
+        return false;
+    }
+
+    size_t stuffed_len = kilnlink_stuff(s_broadcast_raw, raw_len, s_broadcast_stuffed, sizeof(s_broadcast_stuffed));
     if (stuffed_len == 0) {
+        xSemaphoreGive(s_broadcast_buf_lock);
         return false;
     }
 
     // uart_owner_send() is itself non-blocking and drops the WHOLE frame if
     // the TX ring has no room (its own counter tracks that) -- exactly
     // LINK_PROTOCOL.md section 2 rule 3. Nothing here retries or escalates.
-    bool accepted = uart_owner_send(stuffed, stuffed_len);
+    // s_broadcast_stuffed is copied into the TX ring by uart_owner_send()
+    // before it returns (uart_owner.c's own contract), so it's safe to
+    // release the lock immediately after this call, before touching the
+    // diagnostic statics below -- nothing past this point reads the shared
+    // buffers again.
+    bool accepted = uart_owner_send(s_broadcast_stuffed, stuffed_len);
+    xSemaphoreGive(s_broadcast_buf_lock);
 
     // --- DIAGNOSTIC: 2026-08-23 truncation investigation, see statics
     // declared above this function -- pure recording, no control-flow effect.
@@ -2187,6 +2244,15 @@ bool link_task_start(void)
     // thermo_task_start()'s s_snapshot_lock.
     s_context_lock = xSemaphoreCreateMutex();
     if (!s_context_lock) {
+        return false;
+    }
+
+    // s_broadcast_buf_lock -- see its own declaration comment. Same
+    // fail-closed handling as s_context_lock: if the mutex can't be
+    // created, refuse to start rather than let link_task_send_broadcast_to()
+    // run unguarded later.
+    s_broadcast_buf_lock = xSemaphoreCreateMutex();
+    if (!s_broadcast_buf_lock) {
         return false;
     }
 
