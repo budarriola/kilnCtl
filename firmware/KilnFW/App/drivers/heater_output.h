@@ -27,7 +27,26 @@ extern "C" {
 #endif
 
 typedef struct {
-    uint32_t window_ms;  /* time-proportioning window; default 60000 (mechanical relay) */
+    /* time-proportioning window; default 60000.
+     *
+     * The old justification for 60 s -- "(mechanical relay)", meaning the
+     * on-board relay's contact life -- is WRONG and was retired 2026-08-24.
+     * K1-K4 are EE2-12NUH signal relays that exist for galvanic isolation and
+     * switch other relays only; they never carry element current (ROADMAP.md's
+     * decisions table, TODO.md 6A.0). Their own loaded life is 1e6 operations,
+     * which a 10 s window would not exhaust for ~2,800 hours of CONTINUOUS
+     * firing -- so this relay is not what constrains the window.
+     *
+     * 60 s is KEPT anyway, on a different and still-open reason: the
+     * DOWNSTREAM device is unknown. Into an SSR input the window could drop
+     * to a few seconds with no wear cost at all; into a mechanical contactor
+     * (1e5-1e6 electrical ops) a 10 s window buys only ~280-2,800 hours, and
+     * the low end of that is marginal. Picking a shorter default before that
+     * is known would be trading real hardware life for control resolution
+     * on an assumption, which is the trade this comment got wrong once
+     * already. Revisit once TODO.md 6A.0's downstream question is answered;
+     * it is a per-zone setting, so a bench can lower it without a rebuild. */
+    uint32_t window_ms;
     uint32_t min_on_ms;   /* default 2000 */
     uint32_t min_off_ms;  /* default 2000 */
 } heater_output_cfg_t;
