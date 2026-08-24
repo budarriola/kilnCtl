@@ -61,7 +61,21 @@ The link contract is shared code, implemented once. See
 [`../CommonFW/README.md`](../CommonFW/README.md) for the full checklist; the
 gating items are:
 
-- [ ] Shared ids split out of `uart_task_ids.h`; PC-link ids left behind
+- [x] **Won't do** — Shared ids split out of `uart_task_ids.h` into a
+      `kilnlink_ids.h`; PC-link ids left behind. Investigated 2026-08-24: the
+      `SAFETY_CMD_*` values in `uart_task_ids.h` that match a `KILNLINK_*_CMD`
+      are deliberate literal mirrors, not accidental drift — several double
+      as real PC→ESP dispatch values in `uart_bridge.c`, and the rest exist
+      only so `uart_task_ids.h` stays the one place every subcommand on this
+      wire is enumerated (its own doc comments say so explicitly). This
+      firmware's own `src/tasks/link_frame.h` makes the identical choice for
+      the identical reason (`LINK_FRAME_CLEAR_TRIP_CMD` etc., redeclared
+      "rather than pulling the kilnlink codec header into this file's own
+      namespace," even though `link_task.c` already includes those codec
+      headers directly) — an established, repo-wide convention this item
+      would have reversed for no fixed drift. See
+      `../CommonFW/README.md`'s matching Contract entry for the full
+      evidence.
 - [x] `kilnlink` codecs — all pure and bounds-checked, host-tested, consumed
       by `pc_tools` as the third implementation. Every wire command through
       `0x1A` (`SET_CT_CAL`/`GET_CT_CAL`/`CT_CAL`) now has a codec in

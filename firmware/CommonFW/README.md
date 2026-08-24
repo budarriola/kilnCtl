@@ -1,6 +1,6 @@
 # CommonFW — shared control-interface code
 
-> **Status:** planning · **Last reviewed:** 2026-08-19
+> **Status:** planning · **Last reviewed:** 2026-08-24
 > **Keep this file current.** If you change anything this document describes,
 > update it in the same commit. If it disagrees with the code, **the code
 > wins** — fix this file and say so in the commit message.
@@ -348,7 +348,7 @@ Tick these as they land. Phase numbers refer to [`../SaftyFW/TODO.md`](../SaftyF
 - [x] `firmware/CommonFW/` created with the layout above (2026-08-16; `docs/`,
       `include/kilnlink/`, `src/`, `test/`, `test/vectors/` all exist —
       `kilnlink_context.h`/`kilnlink_status.h` added 2026-08-18, see Codecs.
-      `kilnlink_ids.h` still not created, see Contract)
+      `kilnlink_ids.h` deliberately not created — see Contract, "Won't do")
 - [x] `CMakeLists.txt` producing a `kilnlink` target consumable by pico-sdk
       (standard `add_library` + `target_include_directories`). **Now actually
       linked into a pico-sdk build**: `firmware/SaftyFW/CMakeLists.txt` has
@@ -374,11 +374,49 @@ Tick these as they land. Phase numbers refer to [`../SaftyFW/TODO.md`](../SaftyF
 - [x] `docs/LINK_PROTOCOL.md` moved here from `firmware/SaftyFW/docs/` and cross-links updated
       (already done before this session — confirmed 2026-08-16, no stale
       duplicate remains under `firmware/SaftyFW/docs/`)
-- [x] `kilnlink_version.h` created (2026-08-16); `KilnFW`'s `UART_PROTOCOL_VERSION`
-      (`App/drivers/uart_task_ids.h`) is now `((uint16_t)KILNLINK_PROTOCOL_VERSION)`,
-      a real alias rather than a second number — both it and
-      `KILNLINK_MIN_COMPATIBLE` are 5
-- [ ] `kilnlink_ids.h` — shared ids split out of `uart_task_ids.h`, PC-link ids left behind
+- [x] `kilnlink_version.h` created (2026-08-16). `KilnFW`'s `UART_PROTOCOL_VERSION`
+      (`App/drivers/uart_task_ids.h`) was a real alias of `KILNLINK_PROTOCOL_VERSION`
+      from 2026-08-17 to 2026-08-24; that alias is now gone (see "Versioning"
+      above) — the two are independent literals again, `UART_PROTOCOL_VERSION`
+      frozen at 7, `KILNLINK_PROTOCOL_VERSION`/`KILNLINK_MIN_COMPATIBLE` at 7/5.
+      This line used to describe the alias as the intended end state; it
+      wasn't, and this entry was stale until 2026-08-24.
+- [x] **Won't do** — `kilnlink_ids.h` as a shared-ids header consumed by
+      `uart_task_ids.h`. Investigated 2026-08-24 (see `SaftyFW/TODO.md`'s
+      matching entry): every `SAFETY_CMD_*` in `uart_task_ids.h` that matches
+      a `KILNLINK_*_CMD` value is a *documented, deliberate* literal mirror,
+      not an oversight —
+        - Several of them are genuinely dual-purpose: `uart_bridge.c` dispatches
+          real PC→ESP commands (`SAFETY_CMD_CLEAR_TRIP`, `SET_CONFIG`,
+          `ROLLBACK`, `SET_CT_CAL`, `GET_CT_CAL`, …) on these exact values,
+          "doubling additively" as PC-link subcommands on
+          `UART_TASK_ID_SAFETY` — they are not "PC-link ids left behind" vs.
+          "shared ids," they are both at once by design.
+        - The rest (`SAFETY_CMD_PUSH_CONTEXT`, `SET_LOG_LEVEL`, `SET_PARAM`,
+          `COMMIT_CONFIG`, `GET_PARAM`/`PARAM`, `GET_CONFIG_PAGE`/`CONFIG_PAGE`,
+          `COMMIT_CONFIG_REJECTED`, `ANNOUNCE_REBOOT`) are redeclared purely so
+          `uart_task_ids.h` stays "the one place every `SAFETY_CMD_*`
+          subcommand on this wire is enumerated" (its own doc comments, e.g.
+          line ~916) — the codec header's `KILNLINK_*_CMD` is named in the
+          same comment as the actual authority.
+        - `SaftyFW/src/tasks/link_frame.h` makes the identical choice for the
+          identical reason: `LINK_FRAME_CLEAR_TRIP_CMD`/`SET_CONFIG_CMD`/
+          `ROLLBACK_CMD`/`SET_CT_CAL_CMD` are redeclared as local dispatch
+          literals "rather than pulling the kilnlink codec header into this
+          file's own namespace," even though `link_task.c` in the same
+          firmware already includes and calls the kilnlink codecs directly.
+          This is an established, repo-wide convention — a dispatch/enumeration
+          header states its own ids as literals with a cross-reference comment
+          to the codec header that owns the value, instead of `#include`-ing
+          the codec just to reach one macro.
+      Collapsing these into a shared `kilnlink_ids.h` would reverse a
+      convention both firmwares already apply on purpose, without fixing any
+      actual drift (nothing has ever gone out of sync — SaftyFW's own
+      duplicate is unmoved evidence this pattern is stable), and does not
+      cleanly separate into "shared" vs. "PC-link" as the item's title
+      assumed. No code changed for this item; `check_uart_version_independence.ps1`
+      still passes (it is unaffected either way — it only ever checked
+      `UART_PROTOCOL_VERSION`, not these subcommand ids).
 
 **Codecs**
 - [x] `kilnlink_frame.{c,h}` — delimiter, stuffing, CRC16/CCITT-FALSE. Done 2026-08-16
