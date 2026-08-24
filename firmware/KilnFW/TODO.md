@@ -1397,6 +1397,42 @@ Both agents that worked this item missed the dead-code note, as did the
 item's own framing. Check section 10.1 before spending further effort on
 `display_bridge_task`.
 
+**TOUCH's new reject path found a real defect while being exercised, and
+that is the one part of this whole item verified against silicon.**
+`TOUCH_CMD_INJECT` had no bounds check on x/y at all — only a truncation
+check — so injecting (9999,9999) on a 320x480 panel returned
+`ok - touch injected` *and* `TOUCH_CMD_GET_STATE`'s `injected_delivered`
+counter went 0 → 107. The operator therefore had both a success reply and
+positive delivery evidence for a touch that cannot hit any widget: LVGL
+hit-tests nothing out there and silently discards it. Same defect class as
+everything else in this section — an action that did nothing looking
+identical to one that worked — and a coordinate typo is the likely real
+cause. Now range-checked and answered with `"out of range"`.
+
+The check is rotation-agnostic on purpose: frame memory is always 320x480
+and rotation only swaps the axes, so a valid point satisfies
+`(x<320 && y<480) || (x<480 && y<320)`. This task holds no display handle
+and cannot ask which rotation is live, so the union is accepted — a point
+valid only in the *other* rotation still passes. That is a deliberate
+false-accept, not a missed bound; such a point is in-panel, merely rotated,
+and plumbing rotation state into this task would buy nothing.
+
+Proved on hardware, both directions, which no other part of this item can
+claim:
+
+```
+W uart_bridge: touch: inject (9999,9999) is outside the 320x480 panel in either rotation -- rejected
+```
+
+host side `refused - touch injected (9999,9999,down): out of range`, while
+(160,240) still returns `ok` and increments `injected_delivered`.
+
+One trap worth recording: the first host-side attempt printed `ok` despite
+the firmware log showing the refusal, because a **stale `kilnctrl` MCP
+server process** was still holding pre-change Python. `close_server` and
+retry gave the refusal. If a wire-level fix appears not to reach the host,
+suspect that before suspecting the fix.
+
 **DISPLAY / TOUCH's per-guard rejection paths closed this pass**: the
 gap this section flagged as *wider* than the driver-error item above —
 `display_bridge_task`'s and `touch_bridge_task`'s `bridge_args_ok()`/

@@ -15,6 +15,7 @@
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "ILI9488.h" /* ILI9488_PANEL_WIDTH/HEIGHT -- TOUCH_CMD_INJECT bounds check */
 #include "SX1509.h"
 #include "heat_interlock.h" /* HEAT_INTERLOCK_REASON_MAX -- IO_CMD_SET_RELAY[_MASK]'s ERR_UPDATING case */
 #include "kiln_io.h"
@@ -1687,6 +1688,42 @@ static void touch_bridge_task(void *arg)
                 uint16_t inj_x = bridge_u16_le(&msg.payload[1]);
                 uint16_t inj_y = bridge_u16_le(&msg.payload[3]);
                 bool inj_pressed = msg.payload[5] != 0;
+                /* Bounds the point to the panel. Until 2026-08-24 this
+                 * accepted anything a uint16 can hold: injecting (9999,9999)
+                 * on the bench returned "ok - touch injected" and
+                 * TOUCH_CMD_GET_STATE's injected_delivered counter went from
+                 * 0 to 107, so the operator saw both a success reply AND
+                 * positive delivery evidence for a touch that cannot hit any
+                 * widget -- LVGL simply hit-tests nothing out there and
+                 * discards it. That is the same class of defect this task's
+                 * reject replies exist to remove: an action that did nothing
+                 * looking exactly like one that worked. A coordinate typo is
+                 * the likely real cause, and it used to be invisible.
+                 *
+                 * The check is deliberately rotation-agnostic. The panel's
+                 * frame memory is always 320x480 (ILI9488.h) and rotation
+                 * only swaps which axis is which, so a valid point satisfies
+                 * either (x<320 && y<480) or (x<480 && y<320). This task has
+                 * no display handle and so cannot ask which rotation is
+                 * live; accepting the union means a point valid only in the
+                 * OTHER rotation still gets through, which is a deliberate
+                 * false-accept rather than a missed bound. It costs nothing
+                 * real -- such a point is in-panel, merely rotated -- while
+                 * catching every grossly wrong coordinate, which is the
+                 * failure this exists for. Tightening it would mean plumbing
+                 * rotation state into this task for no gain. */
+                bool inj_in_panel =
+                    (inj_x < ILI9488_PANEL_WIDTH && inj_y < ILI9488_PANEL_HEIGHT) ||
+                    (inj_x < ILI9488_PANEL_HEIGHT && inj_y < ILI9488_PANEL_WIDTH);
+                if (!inj_in_panel) {
+                    ESP_LOGW(TAG, "touch: inject (%u,%u) is outside the %ux%u panel in either "
+                                  "rotation -- rejected",
+                             inj_x, inj_y, ILI9488_PANEL_WIDTH, ILI9488_PANEL_HEIGHT);
+                    bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_TOUCH, subcmd,
+                                        "out of range");
+                    rejected = true;
+                    break;
+                }
                 /* Two independent consumers of the same wire event, on purpose:
                  * screen_idle_inject_touch() only ever cared THAT a touch
                  * happened (idle-timer reset / wake), never where -- see its
