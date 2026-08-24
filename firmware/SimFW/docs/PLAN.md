@@ -243,10 +243,18 @@ in this table's sense. Where it matters (M-G/M-H, which talk about scenarios
   composition rules.
   **Exit:** same scenario + seed twice ⇒ byte-identical event logs;
   every fault type demonstrated at least once with an event trace.
-  **Status: HOST-TEST MET (software determinism), HARDWARE NOT MET.**
-  The full catalog is implemented against a simulated snapshot and
-  host-tested for deterministic replay from a seed. Nothing has produced an
-  event trace against a real DUT.
+  **Status: HOST-TEST MET, FIXTURE-HARDWARE MET, DUT NOT MET (updated
+  2026-08-24).** The full catalog is implemented against a simulated snapshot
+  and host-tested for deterministic replay from a seed. Determinism is now
+  also demonstrated *on the real RP2040*: `kilnsim selftest`'s
+  `determinism_spot_check` passes repeatedly with identical fire times
+  (`[400000, 400000, 500000]` across three runs). That check had been
+  permanently SKIPping — it was starved of events by the stranded event-ring
+  cursor (`bc5d6d9`), and once unblocked it immediately exposed that
+  `SET_SEED` never reseeded the PRNG at all (`3edf2ae`): every scenario's
+  `seed:` was cosmetic, so §7.2's replayability contract was not actually
+  held by shipped firmware until that fix. **Still not met:** nothing has
+  produced an event trace against a real DUT.
 - [~] **M-G — MCP server + GUI + scenario runner.** Scenario YAML schema
   frozen; reports with assertions and validity flags.
   **Exit:** `baseline_firing`, `welded_ssr_midfire`, `tc_disconnect_ramp`
@@ -350,11 +358,15 @@ between 1 and 2 — see `DESIGN_NOTES.md` §10 for its full description.
 1. [x] **Host tests** (MSVC/CMake, `SaftyFW/test` pattern, `test/`) — done.
    See `DESIGN_NOTES.md` §9/§13 for what's covered.
 2. [x] **Loopback tests** (fixture alone, no DUT) — `kilnsim selftest`, done
-   and verified against source. Two of its three checks
+   and run against the real RP2040 with two MCP23017s attached: **13 PASS,
+   0 SKIP, 0 FAIL**, plus 2 `NOT_RUNNABLE`. Those two
    (`spi_master_loopback`, `ct_adc_loopback`) are *permanently*
    `NOT_RUNNABLE` from `kilnsim` itself — they need hardware `kilnsim` has no
    way to drive from software alone (`tools/spi_test_master/` is the
    intended separate tool for the SPI half). See `DESIGN_NOTES.md` §13.
+   The zero-SKIP figure matters: a SKIP here reads as "fine" in a summary
+   line but is indistinguishable from a check that can never run, which is
+   how the `SET_SEED` bug survived — see M-F in §10.
 3. [ ] **DUT integration** (the point of the project): the scenario library
    against real `KilnFW`+`SaftyFW`. `kilnsim run` exit codes make it a
    scriptable gate; reports are the archived evidence. **Status: unchanged,
