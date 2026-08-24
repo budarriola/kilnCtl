@@ -31,6 +31,11 @@ void fault_engine_init(fault_engine_t *eng, uint32_t seed)
     }
 }
 
+void fault_engine_reseed(fault_engine_t *eng, uint32_t seed)
+{
+    eng->rng_state = (seed != 0u) ? seed : 0x9E3779B9u;
+}
+
 uint16_t fault_engine_schedule(fault_engine_t *eng,
                                 uint16_t slot_id,
                                 uint16_t fault_type,

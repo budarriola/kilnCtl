@@ -617,6 +617,90 @@ static void test_determinism_byte_identical_replay(void)
     TEST_CHECK(differs, "a different seed produces a different event log (the match above is not a trivial constant)");
 }
 
+// The wiring bug kilnsim selftest's determinism_spot_check found on real
+// hardware: fault_sched_start() calls fault_engine_init() exactly once, at
+// boot, with a hardcoded seed (fault_sched.c). Nothing ever re-init'd the
+// engine or its PRNG afterward -- SIM_ENGINE_CMD_SET_SEED
+// (sim_engine.c) used to just store the value for telemetry/
+// sim_engine_get_seed(), never touching fault_engine_t.rng_state. So a
+// live SYS/SET_SEED was a no-op for the RNG: repeated "same seed" runs
+// against the one long-lived engine instance actually drew from wherever
+// the *previous* run's EVERY/jitter draws had left rng_state, not from a
+// fresh seed-13 stream -- exactly "counter/state reset on one side but not
+// the other." fault_engine_reseed() (called from sim_engine.c's
+// SET_SEED handler via fault_sched_reseed()) is the fix: it re-seeds
+// rng_state without discarding slot state, so a live engine reseeded to
+// 13 reproduces the exact stream a fresh fault_engine_init(eng, 13) would.
+// This test proves that property against fault_engine.c directly (host-
+// testable, unlike fault_sched.c/sim_engine.c themselves -- see this
+// file's header and test_cmd_task_gap_closure.c's doc on that boundary).
+static size_t run_every_jitter_probe(fault_engine_t *eng, double *fire_times, size_t cap)
+{
+    fault_trigger_t trig = trigger_at_time(0.2);
+    fault_duration_t dur = duration_for(0.1);
+    fault_repeat_t rep = repeat_every(0.4, 0.3); /* mirrors kilnsim selftest's
+                                                     _fault_fired_gaps() probe scenario */
+    fault_engine_schedule(eng, 29, 5, 0, &trig, &dur, &rep, NULL);
+
+    float temps[1] = {0.0f};
+    bool relays[1] = {false};
+    fault_event_t events[8];
+    size_t n_fired = 0;
+    for (double t = 0.0; t <= 2.5 && n_fired < cap; t += 0.05) {
+        fault_engine_snapshot_t snap = {t, temps, 1, relays, 1, NULL, 0};
+        size_t n = fault_engine_tick(eng, &snap, events, 8);
+        for (size_t i = 0; i < n && n_fired < cap; i++) {
+            if (events[i].kind == FAULT_EVENT_FIRED) {
+                fire_times[n_fired++] = events[i].sim_time_s;
+            }
+        }
+    }
+    return n_fired;
+}
+
+static void test_reseed_restarts_prng_stream(void)
+{
+    TEST_SECTION("fault_engine -- fault_engine_reseed() restarts the PRNG stream "
+                 "(the SIM_ENGINE_CMD_SET_SEED wiring bug kilnsim selftest caught)");
+
+    /* Reference: a completely fresh engine, seed 13, run once. */
+    fault_engine_t ref;
+    fault_engine_init(&ref, 13);
+    double ref_times[16];
+    size_t ref_n = run_every_jitter_probe(&ref, ref_times, 16);
+    TEST_CHECK(ref_n >= 3, "sanity: the EVERY+jitter probe fires several times in the run window");
+
+    /* An engine that already burned PRNG draws from an unrelated earlier
+     * run -- mimics fault_sched's single long-lived engine instance, which
+     * (pre-fix) was never re-init'd after fault_sched_start(), so its
+     * rng_state just kept drifting forward across every "same seed" probe. */
+    fault_engine_t used;
+    fault_engine_init(&used, 999);
+    double burn_times[16];
+    run_every_jitter_probe(&used, burn_times, 16);
+
+    /* fault_engine_reseed(13) must put `used` back on the SAME PRNG stream a
+     * fresh fault_engine_init(eng, 13) would produce. */
+    fault_engine_reseed(&used, 13);
+    double reseeded_times[16];
+    size_t reseeded_n = run_every_jitter_probe(&used, reseeded_times, 16);
+
+    TEST_CHECK(reseeded_n == ref_n,
+               "reseed-then-rerun fires the same number of times as a fresh same-seed run");
+    if (reseeded_n == ref_n) {
+        bool same = true;
+        for (size_t i = 0; i < ref_n; i++) {
+            if (ref_times[i] != reseeded_times[i]) { same = false; break; }
+        }
+        TEST_CHECK(same, "fault_engine_reseed(13) on an already-used engine reproduces the exact "
+                   "same FIRED sim-time sequence as a fresh fault_engine_init(eng, 13) -- proves "
+                   "reseeding actually restarts the PRNG stream rather than continuing wherever "
+                   "the previous run's draws left rng_state (the bug: SET_SEED not reaching the "
+                   "engine at all would show up here as `used`'s reseeded run matching its own "
+                   "*burn* run's continuation instead of `ref`'s fresh-seed run)");
+    }
+}
+
 void run_test_fault_engine(void)
 {
     test_at_sim_time_trigger();
@@ -631,4 +715,5 @@ void run_test_fault_engine(void)
     test_cancel_on_active_slot_emits_cleared();
     test_cancel_on_armed_slot_is_immediate_and_silent();
     test_determinism_byte_identical_replay();
+    test_reseed_restarts_prng_stream();
 }

@@ -545,6 +545,13 @@ bool fault_sched_fire_now(uint16_t slot_id)
     return ok;
 }
 
+void fault_sched_reseed(uint32_t seed)
+{
+    engine_lock();
+    fault_engine_reseed(&s_engine, seed);
+    engine_unlock();
+}
+
 size_t fault_sched_list(fault_slot_t *out, size_t max_out)
 {
     if (out == NULL) {

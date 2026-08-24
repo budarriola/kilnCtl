@@ -279,7 +279,18 @@ static void apply_pending_commands(void)
             break;
 
         case SIM_ENGINE_CMD_SET_SEED:
-            s_seed = cmd.u.seed.seed; // stored only -- see sim_engine.h's doc
+            // Was "stored only" -- s_seed fed telemetry.c's report and
+            // sim_engine_get_seed() but never reached fault_sched's PRNG, so
+            // two runs given the same SET_SEED value drew from wherever the
+            // shared fault_engine_t.rng_state happened to be sitting (i.e.
+            // wherever the previous run's EVERY/jitter draws left it, or
+            // fault_sched_start()'s one-time seed-0 init if this was the
+            // first run since boot) instead of actually restarting from the
+            // seed -- the exact bug kilnsim selftest's determinism_spot_check
+            // caught (DESIGN_NOTES.md sec 4.2/7.2). fault_sched_reseed()
+            // closes that: same seed now really does restart the PRNG.
+            s_seed = cmd.u.seed.seed;
+            fault_sched_reseed(s_seed);
             break;
 
         case SIM_ENGINE_CMD_RESET:

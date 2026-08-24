@@ -294,6 +294,17 @@ bool fault_sched_cancel(uint16_t slot_id);
 // fault_engine_fire_now() does (slot not ARMED, or out of range).
 bool fault_sched_fire_now(uint16_t slot_id);
 
+// Re-seeds the fault engine's PRNG (fault_engine_reseed() passthrough,
+// engine-locked). Called from sim_engine.c's SIM_ENGINE_CMD_SET_SEED
+// handler so SYS/SET_SEED actually reaches the EVERY/jitter and RANDOM_IN
+// draws, not just sim_engine.c's own s_seed/telemetry copy -- see that
+// command's handler for the bug this closes (DESIGN_NOTES.md sec 4.2/7.2's
+// determinism contract: same seed must reproduce the same interval
+// sequence, which requires the PRNG to actually restart from the seed).
+// Does not touch any slot's schedule/state -- see fault_engine_reseed()'s
+// own doc for why that is deliberate.
+void fault_sched_reseed(uint32_t seed);
+
 // Copies up to max_out slots (fault_engine.h's fault_slot_t, including
 // IDLE ones) starting at index 0 into out[]. Returns the number copied
 // (always FAULT_ENGINE_MAX_SLOTS today, capped by max_out) -- a thin,

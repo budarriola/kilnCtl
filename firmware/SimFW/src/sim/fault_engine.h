@@ -172,6 +172,18 @@ typedef struct {
  * nonzero value, same convention as max31856_regs_init). */
 void fault_engine_init(fault_engine_t *eng, uint32_t seed);
 
+/* Re-seeds ONLY the PRNG (same 0-remap convention as fault_engine_init()),
+ * leaving every slot's schedule/state untouched. This is the piece
+ * fault_engine_init() cannot be reused for at runtime: SYS/SET_SEED
+ * (DESIGN_NOTES.md sec 4.2/7.2's "same scenario + seed => same run"
+ * contract) must be able to re-establish a known PRNG starting point
+ * without discarding whatever faults are already ARMED/ACTIVE. Any
+ * in-flight RANDOM_IN pick or EVERY/N_TIMES repeat timer computed from the
+ * PRNG *before* this call keeps whatever value it already drew -- only
+ * draws made after reseeding are affected, same as fault_engine_init()
+ * itself never rewinds a draw already made. */
+void fault_engine_reseed(fault_engine_t *eng, uint32_t seed);
+
 /* Arms slot_id (0..FAULT_ENGINE_MAX_SLOTS-1) with the given definition,
  * overwriting whatever was there. Returns slot_id on success,
  * FAULT_ENGINE_INVALID_SLOT if slot_id is out of range. */
