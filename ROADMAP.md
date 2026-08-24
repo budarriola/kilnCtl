@@ -1,6 +1,6 @@
 # kilnCtl Roadmap — both processors
 
-> **Status:** planning · **Last reviewed:** 2026-08-21
+> **Status:** planning · **Last reviewed:** 2026-08-24
 > **Keep this file current.** This is the top-level dispatch board: the place to
 > start a task from when you do not already know which plan owns it. It holds
 > *ordering and cross-processor dependencies only* — the detail lives in the
@@ -14,7 +14,9 @@ The system is two firmwares that must agree with each other:
 - **`KilnFW`** — ESP32-S3 main controller. Thermocouples, SSR heater outputs, PID,
   profiles, Wi-Fi, web GUI. Partly built and partly verified on hardware.
 - **`SaftyFW`** — RP2040 safety processor (A1). Independent overheat and fault
-  detection, owns the mechanical pilot relay K4. **Nothing built yet.**
+  detection, owns the mechanical pilot relay K4. **Built and running on real
+  silicon**; every guard input is now produced, and what remains is
+  commissioning values plus the hardware-gated trip proofs.
 
 They talk over an opto-isolated UART. That link, and the rule that **the safety
 processor must be alive for the main processor to heat**, is what makes this one
@@ -77,8 +79,11 @@ Owned by [`firmware/SaftyFW/TODO.md`](firmware/SaftyFW/TODO.md) phase 0.
       hardcoded on both sides, and `safety_get_status()` returns live
       telemetry. See `firmware/KilnFW/docs/SAFETY_LINK.md` "Transport" and
       `firmware/SaftyFW/docs/HARDWARE.md` §1.
-- [ ] Tier 0 pin test settles ESP TX/RX by measurement (`HARDWARE.md` §1) — still
-      needs the Pico physically attached
+- [x] Tier 0 pin test settles ESP TX/RX by measurement (`HARDWARE.md` §1) —
+      moot as a separate step: the Pico is attached and the link carries live
+      telemetry both ways (`safety_get_status()` returns fresh frames,
+      `tx_dropped 0`), which settles TX/RX by observation rather than by
+      probing pins
 - [x] ESP TX/RX GPIO assignment and pull-up fixed in code, docs corrected,
       `UART_PROTO_MSG_BROADCAST` added, stale netlist removed, bench path
       decided (Debug Probe SWD + UART bridge on GP16/GP17) — all 2026-08-16
@@ -117,9 +122,15 @@ soldering session.
 **Bench state (2026-08-20):** ILI9488 LCD, ESP32-S3 JTAG, and Pico SWD all
 verified working. Three MAX31856 ICs + thermocouples now fitted on the ESP32-S3
 board (channels 0/1/2 reading correctly, `thermo_owner.c` unblocked); the
-safety processor (RP2040) still has none fitted. Still broken: the Pi↔ESP
-isolated UART link (M0, the top blocker) and the separate PC↔ESP command UART
-(COM9, blocks console/wifi-status/MCP tooling but not the isolated link work).
+safety processor (RP2040) still has none fitted.
+
+**Bench state (2026-08-24):** both UARTs work — the two blockers named above
+are cleared. The isolated Pi↔ESP link is up and carrying telemetry at 9600
+(M0), and the PC↔ESP command UART on COM9 is responsive. Both firmwares were
+flashed over JTAG/SWD today and verified running. The safety processor's own
+MAX31856 is still not populated, so `safety TC invalid` is the expected steady
+state there; the E-stop net measures low (a contact IS fitted, contrary to
+`HARDWARE.md` §5's older note), so S7 correctly stays quiet.
 
 ## M2 — `CommonFW`, before either firmware depends on it · *done, 2026-08-19*
 
@@ -147,12 +158,22 @@ link, so it can run in parallel with M1 and M2 once M0 is out of the way.
 - [x] 12 of 13 guards (`SAFETY_MODEL.md` §4) implemented as pure functions and
       host-tested against synthetic inputs (320+/320+ checks) — S8
       (rate-of-rise) intentionally ships disabled until a real kiln's ramp
-      rate is measured. **Qualified by M9's `virtual_dut` cross-check**: only
-      4 of these 12 (S5, S6b, S7, S12) are reachable by real code today —
-      `safety_core_build_input()` doesn't yet populate the fields the other 8
-      need. Guard logic being correct says nothing about its inputs being
-      wired; see `GUARD_TEST_MATRIX.md`'s reachability section for the
-      guard-by-guard detail and M4/M5 below for the specific gaps
+      rate is measured. **Input wiring now complete (2026-08-24):**
+      `safety_core_build_input()` populates every field the guards read —
+      `context_valid`, `any_current_present`, `relay_commanded_recently`/
+      `_continuously`, `zone_count`, the setpoint/measured reductions,
+      `sample_counter_advancing`, both discretes and `reboot_grace_active`.
+      The older "only S5/S6b/S7/S12 are reachable, the other 8 have no
+      producer" finding is superseded: what still holds a guard dormant is a
+      missing **commissioning value** (S1's `abs_max_temp_c` defaults to 0 =
+      never trip; S13 needs `tc_source`/`borrowed_zone_index`), which is a
+      different kind of gap from a missing producer. Two real producer bugs
+      were found and fixed on 2026-08-24 — the E-stop polarity was inverted
+      (S7 could not fire) and `current_sense_set_cal()` was never called, so
+      `any_current_present` was permanently false (S3/S9/S11 and S6b's
+      current-gated trip could not fire). **The reachability count in
+      `GUARD_TEST_MATRIX.md` predates both fixes; re-run M9's `virtual_dut`
+      to re-establish it rather than trusting the old number.**
 - [x] CI grep: `safety_core.c` never includes the link header — 2026-08-16,
       `firmware/SaftyFW/tools/check_isolation.ps1`
 
@@ -169,13 +190,19 @@ physically stop a kiln, and the first that can nuisance-trip one.
       all built and host-tested (2026-08-19). **Known scope limit** (documented,
       not a bug): a graduated/windowed guard's elapsed-time accumulator resets
       on clear, so it re-trips on its own timescale rather than instantly.
-      **Not hardware-verified**: the physical link has never carried a real
-      CLEAR_TRIP frame (M0)
-- [ ] **K4 is never energized anywhere in the current tree** (found via M9's
-      `virtual_dut` cross-check, 2026-08-20). `relay_owner_command_energize()`
-      is implemented and host-tested but has zero callers — that caller is
-      Phase 7's link_task/GUI integration, not yet built. Not a regression;
-      just means K4 reads open from every boot today regardless of guards
+      **Hardware-verified 2026-08-23/24**: the physical link has carried real
+      CLEAR_TRIP frames. Refused correctly against a latched S5 with the
+      safety thermocouple genuinely absent, accepted once the tripping
+      condition cleared, and the board never rebooted in either case — which
+      it originally did, via a `log_task` stack overflow on the refusal path
+- [x] **K4 now has a real energize path.** The "zero callers" finding of
+      2026-08-20 is stale: `safety_core_request_enable()` calls
+      `relay_owner_command_energize()` (`safety_core.c`), reached from
+      `link_task`'s enable handler, and it refuses ON when the safety
+      thermocouple is declared absent or a trip is latched. **Still not
+      proven on hardware**: K4 has never been observed closing on a real
+      board, and the bench cannot demonstrate a genuine heat-enable until the
+      safety thermocouple is populated (S5 latches without it)
 - [x] Rule engine drives relays through the existing owner arbitration —
       `rules_task.c` claims `RELAY_OWNER_RULE` and never writes the SX1509
       directly, so precedence is PROFILE/AUTOTUNE > RULE > MANUAL. Fails safe
@@ -201,22 +228,32 @@ Owned by [`firmware/SaftyFW/TODO.md`](firmware/SaftyFW/TODO.md) phases 6–8, co
 [`firmware/CommonFW/docs/LINK_PROTOCOL.md`](firmware/CommonFW/docs/LINK_PROTOCOL.md).
 
 - [~] Current sensing: load-active detection and a power estimate (not an
-      over/under-current trip) built and wired onto `SAFETY_CMD_POWER` — **open**:
-      guards S3/S4 are deliberately not wired to `any_current_present` until
-      the per-channel CT-to-jack commissioning check passes on real hardware
-      (`SaftyFW/docs/CURRENT_SENSE.md` §5). More broadly, `safety_core_build_
-      input()` never sets `context_valid` at all, which independently keeps
-      S2/S3/S4/S10/S13 inactive — see M3's guard bullet
+      over/under-current trip) built and wired onto `SAFETY_CMD_POWER`.
+      **2026-08-24: the calibration was never actually loaded** —
+      `current_sense_set_cal()` had no caller anywhere, so `amps[]` was
+      permanently 0 and `any_current_present` permanently false, silently
+      disabling S3/S9/S11 and S6b's current-gated trip while S4 warned
+      forever. Now loaded at boot and on every `COMMIT_CONFIG`, and presence
+      detection is decoupled from `k_ct_v_per_a` (deciding whether current
+      flows never needed a volts-per-amp scale). `CURRENT_SENSE.md` §5 and
+      `CONFIG_REFERENCE.md` both claimed a wrong `k_ct_v_per_a` could not
+      affect guard behaviour; that was false and is corrected. `context_valid`
+      is also computed now — see M3's guard bullet. **Still open**: the
+      per-channel CT-to-jack commissioning check on real hardware, and a bench
+      measurement of the ADC noise floor to confirm the uncommissioned
+      presence fallback margin (25 counts) sits above it
 - [x] ESP → Pico context frames (`SAFETY_CMD_PUSH_CONTEXT`, incl.
       `relay_recent_mask`) built from live board state — 2026-08-18. Not
       hardware-verified: no Pico on this bench to confirm it decodes correctly
 - [~] Pico → ESP telemetry (status, diagnostics, firmware version, trip events,
       power) — all five frame types have working codecs, send paths, and
       `KilnFW`-side decode/dispatch, plus PC-facing `GET_DIAG`/`GET_TRIP_EVENT`
-      subcommands (2026-08-18–19). **Not hardware-verified, and cannot be from
-      this environment**: M0's dead link means no frame here has ever crossed
-      a real wire — host-tested codec vectors and clean builds under each real
-      toolchain only
+      subcommands (2026-08-18–19). **Now hardware-verified (2026-08-23/24)**:
+      M0 is cleared, status/diag/power frames cross the real wire, and the
+      diag/power applied counters were observed climbing at the expected
+      0.5/s over a 90 s soak. Getting there needed a UART TX self-start fix —
+      an edge-triggered TX interrupt that never re-armed stranded a frame in
+      the ring silently, with no counter tripped
 - [x] Pico never blocks on the link — all five no-wait rules audited clean
       2026-08-18 (no ACK/retry, bounded non-blocking TX, `safety_core.c` never
       calls into the link, correct task priority/core affinity)
@@ -300,10 +337,15 @@ path. Two facts set the shape of this milestone:
       update transfer's error rate at that baud, over a sustained
       multi-megabyte run, is still unmeasured. Retry cost is still 200 ms × up to 10
 - [x] Real flash size established (N16R8, 16 MB/8 MB PSRAM) and declared in
-      `sdkconfig` — 2026-08-17. `partitions.csv` still maps only the first 2 MB
-      (single factory slot); the two-app-slot OTA table is the next item.
-      Bootloader still needs reflashing on the physical board for this to
-      take effect there
+      `sdkconfig` — 2026-08-17. **Both follow-ups are now done**: the
+      two-app-slot table exists (`otadata`/`ota_0`/`ota_1`/`factory`/
+      `pico_img`/`coredump`, and `factory` moved to 0x810000 on 2026-08-21),
+      and the bootloader + partition table were flashed and verified on the
+      physical board over JTAG on 2026-08-24. **Consequence worth knowing:**
+      the sanctioned JTAG path writes the app into `factory`, so a
+      bench-flashed build always boots `factory` and the rollback/boot-confirm
+      machinery below never executes — it can only be exercised by a real OTA
+      into `ota_0`/`ota_1`
 - [x] `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y`, app confirms itself only after
       NVS + safety link + web server are up — host-build-verified, not yet
       hardware-flashed
