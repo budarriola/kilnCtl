@@ -715,9 +715,14 @@ and "Pico update" sections below for what each actually covers.
 - [x] **Physical flash size confirmed** — done 2026-08-17 via the LonelyBinary
       product page for the board in hand (N16R8, 16 MB), not `esptool flash_id`
       directly. Buy-list/3D-model records are still stale and separately tracked.
-- [x] `CONFIG_ESPTOOLPY_FLASHSIZE_16MB` set (2026-08-17). **Bootloader reflash
-      still outstanding** — that is a one-time serial step against physical
-      hardware this pass did not have access to; leave unchecked.
+- [x] `CONFIG_ESPTOOLPY_FLASHSIZE_16MB` set (2026-08-17).
+- [x] **Bootloader + partition table reflashed against physical hardware,
+      2026-08-22** — via `flash_firmware()`'s JTAG path
+      (bootloader@0x0, partition table@0x8000, app@0x810000, each verified),
+      reported "flashed and verified OK". The app offset (0x810000) is this
+      table's `factory` partition, so this flash exercises the new table and
+      bootloader but has never written an OTA slot — see the rollback item
+      below for what that means.
 - [x] New partitions placed entirely above `0x200000`, so **nothing existing
       moves** — implemented in `firmware/KilnFW/partitions.csv` 2026-08-17,
       diffed to confirm the six pre-existing entries are byte-identical
@@ -725,9 +730,10 @@ and "Pico update" sections below for what each actually covers.
 - [x] Slot size checked against a **measured** image, not a remembered one. It was
       1167 KB on 2026-08-16, not the 301 KB this plan was first written around —
       `ota_0`/`ota_1` are 2048K each, 1.75x headroom
-- [x] Offsets confirmed against the live table — **host-build-verified only**
-      (`gen_esp32part.py`/`check_sizes.py` reports no overlap/overflow). The
-      one-time serial flash against the physical board has NOT happened.
+- [x] Offsets confirmed against the live table — host-build-verified
+      (`gen_esp32part.py`/`check_sizes.py` reports no overlap/overflow) AND
+      now flashed and verified against the physical board, 2026-08-22 (see
+      the bootloader-reflash item above).
 - [ ] Pre-change table archived for rollback — nothing to archive yet, since no
       physical flash has occurred
 - [ ] **`nvs`, `wifi_nvs`, `kiln_nvs` and `profiles_nvs` read out with esptool and
@@ -736,11 +742,17 @@ and "Pico update" sections below for what each actually covers.
       hardware access and could not perform it — stays unchecked.
 - [x] `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y` — set 2026-08-17, confirmed by a
       clean `idf.py build`
-- [x] `esp_ota_mark_app_valid_cancel_rollback()` called only after NVS, safety link
-      and web server are all confirmed up — never at the end of `app_main()`.
-      Implemented as a background task in `App/main.c`
-      (`ota_rollback_confirm_task()`); all three preconditions are genuinely
-      wired in, none is a placeholder
+- [x] `esp_ota_mark_app_valid_cancel_rollback()` called only after NVS, the web
+      server and the OTA HTTP routes are all confirmed up — never at the end
+      of `app_main()`. Implemented as a background task in `App/main.c`
+      (`ota_rollback_confirm_task()`); a live safety-link exchange was in this
+      bar originally but dropped 2026-08-22 (see `boot_guard.h`). **Only ever
+      exercised on a factory boot on this bench** — the JTAG flash path
+      (`tools/PcTools`) always writes `factory`, not an OTA slot (see
+      `KilnFW/TODO.md` 9.1/9.2), so the PENDING_VERIFY/rollback-cancel path
+      itself is host-test-verified only, not hardware-verified; a factory
+      boot now skips the call entirely (2026-08-24, it has nothing to cancel
+      there) rather than logging it as a false ERROR.
 - [ ] Streamed `esp_ota_ops` POST handler, no whole-image buffering — **not
       built this pass**, deliberately out of scope (see `KilnFW/TODO.md` 9.5)
 

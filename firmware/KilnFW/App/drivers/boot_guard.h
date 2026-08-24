@@ -197,6 +197,39 @@ uint32_t boot_guard_get_boot_count(void);
  * safety-processor link happens to be wired up and answering" never was. */
 bool boot_confirm_is_healthy(bool nvs_ok, bool web_ok, bool ota_routes_ok);
 
+/* What ota_rollback_confirm_task() (main.c) should do this poll, given the
+ * running partition's type and the same nvs/web/ota_routes flags
+ * boot_confirm_is_healthy() already takes. Extracted as its own pure
+ * predicate (2026-08-24) because "is this boot healthy" and "does an OTA
+ * rollback-cancel even apply here" are two separate questions that main.c
+ * used to conflate: esp_ota_mark_app_valid_cancel_rollback() is only
+ * meaningful when running from an OTA slot (ota_0/ota_1) that the bootloader
+ * put into PENDING_VERIFY -- calling it while running from the `factory`
+ * partition (the slot the JTAG-flash bench path in tools/PcTools writes) has
+ * nothing to cancel and reliably returns ESP_FAIL, which used to be logged as
+ * an ERROR every single boot despite being entirely expected.
+ *
+ * BOOT_CONFIRM_SKIP_NOT_HEALTHY  -- not yet healthy; keep polling (same as
+ *                                   before this predicate existed).
+ * BOOT_CONFIRM_SKIP_FACTORY      -- healthy, but running from `factory`: do
+ *                                   NOT call esp_ota_mark_app_valid_cancel_rollback()
+ *                                   (log why at INFO instead of ERROR), but
+ *                                   DO still call boot_guard_mark_healthy() --
+ *                                   that counter's job is independent of
+ *                                   which partition type is running.
+ * BOOT_CONFIRM_CONFIRM_OTA_SLOT  -- healthy and running from an OTA slot:
+ *                                   the existing behavior, unchanged --
+ *                                   call the rollback-cancel API, log its
+ *                                   result, then mark healthy. */
+typedef enum {
+    BOOT_CONFIRM_SKIP_NOT_HEALTHY = 0,
+    BOOT_CONFIRM_SKIP_FACTORY,
+    BOOT_CONFIRM_CONFIRM_OTA_SLOT,
+} boot_confirm_action_t;
+
+boot_confirm_action_t boot_confirm_decide(bool is_factory_partition, bool nvs_ok, bool web_ok,
+                                           bool ota_routes_ok);
+
 #ifdef __cplusplus
 }
 #endif

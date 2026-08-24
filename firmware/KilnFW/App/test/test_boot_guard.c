@@ -223,6 +223,39 @@ static void test_boot_confirm_is_healthy(void)
                "of what a safety link is doing -- this is what changed and why");
 }
 
+// ---------------------------------------------------------------------------
+// boot_confirm_decide() -- main.c's ota_rollback_confirm_task() uses this to
+// decide whether esp_ota_mark_app_valid_cancel_rollback() even applies this
+// poll (2026-08-24: a factory-partition boot reliably fails that call, and
+// used to log it as an ERROR every single boot despite being expected). See
+// boot_guard.h's doc comment on boot_confirm_action_t for what each outcome
+// means.
+// ---------------------------------------------------------------------------
+static void test_boot_confirm_decide(void)
+{
+    // Not healthy yet -- keep polling, regardless of partition type. This is
+    // the exact three-flags-not-all-true case boot_confirm_is_healthy()
+    // already rejects; boot_confirm_decide() must defer to it rather than
+    // inventing a second definition of "healthy".
+    TEST_CHECK(boot_confirm_decide(false, false, true, true) == BOOT_CONFIRM_SKIP_NOT_HEALTHY,
+               "OTA slot, nvs down -- not healthy, keep polling");
+    TEST_CHECK(boot_confirm_decide(true, false, true, true) == BOOT_CONFIRM_SKIP_NOT_HEALTHY,
+               "factory partition, nvs down -- still not healthy, keep polling (factory alone "
+               "does not shortcut the health bar)");
+
+    // Healthy, running from an OTA slot -- the existing behavior: confirm
+    // via esp_ota_mark_app_valid_cancel_rollback().
+    TEST_CHECK(boot_confirm_decide(false, true, true, true) == BOOT_CONFIRM_CONFIRM_OTA_SLOT,
+               "OTA slot, healthy -- confirm the rollback-cancel");
+
+    // Healthy, running from the factory partition -- the new branch: skip
+    // the rollback-cancel call (nothing to cancel there), but boot_guard's
+    // counter still needs clearing (main.c calls boot_guard_mark_healthy()
+    // in this branch too -- see the call site).
+    TEST_CHECK(boot_confirm_decide(true, true, true, true) == BOOT_CONFIRM_SKIP_FACTORY,
+               "factory partition, healthy -- skip the rollback-cancel call, not an error");
+}
+
 void run_test_boot_guard(void)
 {
     test_crc32_reference_vector();
@@ -232,4 +265,5 @@ void run_test_boot_guard(void)
     test_mark_healthy_clears_counter();
     test_corrupted_record_is_treated_as_count_zero();
     test_boot_confirm_is_healthy();
+    test_boot_confirm_decide();
 }

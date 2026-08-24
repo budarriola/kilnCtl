@@ -818,11 +818,14 @@ class KilnCtrlApp:
             self.zones_status_var.set(f"Set PID: {exc}")
             return
 
-        def apply(ok: bool) -> None:
+        def apply(result) -> None:
             if self._is_open("zones"):
-                self.zones_status_var.set(f"Zone {zone} PID {'set' if ok else 'REJECTED'}.")
-                if ok:
+                if result.ok:
+                    self.zones_status_var.set(f"Zone {zone} PID set.")
                     self.zones_refresh_async()
+                else:
+                    detail = f" ({result.reason})" if result.reason else ""
+                    self.zones_status_var.set(f"Zone {zone} PID REJECTED{detail}.")
 
         self.query_async(
             f"Set zone {zone} PID", lambda: self.control.set_zone_pid(zone, kp, ki, kd), apply,
@@ -836,11 +839,14 @@ class KilnCtrlApp:
             self.zones_status_var.set(f"Set Model: {exc}")
             return
 
-        def apply(ok: bool) -> None:
+        def apply(result) -> None:
             if self._is_open("zones"):
-                self.zones_status_var.set(f"Zone {zone} model {'set' if ok else 'REJECTED'}.")
-                if ok:
+                if result.ok:
+                    self.zones_status_var.set(f"Zone {zone} model set.")
                     self.zones_refresh_async()
+                else:
+                    detail = f" ({result.reason})" if result.reason else ""
+                    self.zones_status_var.set(f"Zone {zone} model REJECTED{detail}.")
 
         self.query_async(
             f"Set zone {zone} model",
@@ -2815,11 +2821,19 @@ class KilnCtrlApp:
 
     def _io_write_relay(self, relay: int) -> None:
         on = self._io_relay_vars[relay - 1].get()
-        self.send_async(
-            f"{devices.relay_label(relay)} {'ON' if on else 'off'}",
-            UART_TASK_ID_IO,
-            lambda: devices.io_set_relay(relay, on),
-        )
+        label = f"{devices.relay_label(relay)} {'ON' if on else 'off'}"
+
+        def apply(result) -> None:
+            if result.ok:
+                self.set_status(f"{label}: ok.")
+            else:
+                self.set_status(f"{label}: refused ({result.refusal.value}).", error=True)
+                # The requested state didn't take -- put the checkbox back to
+                # what the relay shadow actually is rather than lying to the
+                # operator about the board's state.
+                self._io_relay_vars[relay - 1].set(not on)
+
+        self.query_async(label, lambda: self.io.set_relay(relay, on), apply, error_types=(IoQueryError,))
 
     def _io_write_level(self, io: int, level: bool) -> None:
         self.send_async(

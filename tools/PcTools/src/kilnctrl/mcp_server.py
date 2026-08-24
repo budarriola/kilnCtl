@@ -1159,8 +1159,21 @@ def io_set_relay(relay: int, on: bool) -> str:
     Relay numbering follows the schematic and does not match the K
     designators: 1=K3/J8, 2=K1/J3, 3=K2/J4, 4=K5/J11. `on` energizes the 12 V
     coil.
+
+    Waits briefly for a refusal reply before reporting success: the
+    firmware can refuse this because a running profile owns the relay, a
+    safety fault is asserted, or an OTA is in progress -- distinguishable
+    reasons that a bare transport ACK cannot tell apart from "energized".
     """
-    return _send(UART_TASK_ID_IO, devices.io_set_relay(relay, on))
+    try:
+        result = _io.set_relay(relay, on)
+    except IoQueryError as exc:
+        return f"error: {exc}"
+    if result.ok:
+        return f"ok - relay {relay} {'on' if on else 'off'}"
+    return f"refused ({result.refusal.value}) - relay {relay} not changed" + (
+        f": {result.reason_text}" if result.reason_text and result.refusal is devices.RelayRefusal.OTHER else ""
+    )
 
 
 @_tool()
@@ -1169,8 +1182,18 @@ def io_set_relay_mask(mask: int, value: int) -> str:
 
     Bits 0-3 are Relay1..Relay4 (K3/J8, K1/J3, K2/J4, K5/J11) in both `mask`
     (which relays to change) and `value` (their new levels).
+
+    Same refusal-aware wait as :func:`io_set_relay` -- see its docstring.
     """
-    return _send(UART_TASK_ID_IO, devices.io_set_relay_mask(mask, value))
+    try:
+        result = _io.set_relay_mask(mask, value)
+    except IoQueryError as exc:
+        return f"error: {exc}"
+    if result.ok:
+        return f"ok - relay mask 0x{mask:02X} set to 0x{value:02X}"
+    return f"refused ({result.refusal.value}) - relay mask not changed" + (
+        f": {result.reason_text}" if result.reason_text and result.refusal is devices.RelayRefusal.OTHER else ""
+    )
 
 
 @_tool()
@@ -2413,10 +2436,13 @@ def control_get_zones() -> str:
 def control_set_zone_pid(zone: int, kp: float, ki: float, kd: float) -> str:
     """Set a zone's PID gains."""
     try:
-        ok = _control.set_zone_pid(zone, kp, ki, kd)
+        result = _control.set_zone_pid(zone, kp, ki, kd)
     except ControlQueryError as exc:
         return f"error: {exc}"
-    return f"ok - zone {zone} PID set" if ok else f"refused - could not set zone {zone} PID"
+    if result.ok:
+        return f"ok - zone {zone} PID set"
+    detail = f": {result.reason}" if result.reason else ""
+    return f"refused - could not set zone {zone} PID{detail}"
 
 
 @_tool()
@@ -2424,10 +2450,13 @@ def control_set_zone_model(zone: int, k_dc: float, tau_s: float, dead_time_s: fl
     """Set a zone's feedforward thermal model (steady-state gain, time
     constant, dead time), used for model feedforward and autotune seeding."""
     try:
-        ok = _control.set_zone_model(zone, k_dc, tau_s, dead_time_s)
+        result = _control.set_zone_model(zone, k_dc, tau_s, dead_time_s)
     except ControlQueryError as exc:
         return f"error: {exc}"
-    return f"ok - zone {zone} model set" if ok else f"refused - could not set zone {zone} model"
+    if result.ok:
+        return f"ok - zone {zone} model set"
+    detail = f": {result.reason}" if result.reason else ""
+    return f"refused - could not set zone {zone} model{detail}"
 
 
 # ---------------------------------------------------------------------------

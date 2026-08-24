@@ -23,6 +23,7 @@ Which tasks answer, and which don't:
 
 from __future__ import annotations
 
+import enum
 import math
 import struct
 from dataclasses import dataclass
@@ -195,6 +196,9 @@ __all__ = [
     "system_set_watchdog_panic_disabled",
     "SystemResponseError",
     "parse_system_response",
+    # Shared {subcmd, ok, [reason]} reply decoding (ROADMAP.md "KilnFW
+    # PC-link command acknowledgement")
+    "OkReason",
     # CONTROL
     "ZoneConfig",
     "ControlResponseError",
@@ -283,6 +287,8 @@ __all__ = [
     "expander_pin_name",
     "IoState",
     "ExpanderRegisters",
+    "RelayRefusal",
+    "RelayResult",
     "IoResponseError",
     "io_set_relay",
     "io_set_relay_mask",
@@ -486,6 +492,62 @@ def _decoded_float(value: float, name: str, allow_nan: bool = False) -> float:
     if math.isinf(value):
         raise ValueError(f"{name} is infinite")
     return value
+
+
+# ---------------------------------------------------------------------------
+# Shared {subcmd, ok, [reason]} reply shape.
+#
+# ROADMAP.md "Future work -- KilnFW PC-link command acknowledgement": the
+# transport ACK a DATA frame gets the instant it lands in a bridge task's
+# inbox only ever proved *delivery*, never that the subcommand switch did
+# anything. uart_bridge.c's bridge_reply_reject() and uart_bridge_ext.c's
+# bx_reply_ok_err() both answer a *rejected* mutating command with the same
+# wire shape: byte0 = subcmd echoed back, byte1 = ok (always 0 from
+# bridge_reply_reject; either from bx_reply_ok_err), then, only when refused
+# and a reason was given, a length-prefixed ASCII string. This is that shape,
+# decoded once so every task-specific parser below shares one bug surface
+# instead of reimplementing the length-prefix walk.
+#
+# The reason text is free-form per call site (uart_bridge.c uses a fixed set
+# for IO's relay refusals -- see RelayRefusal below -- uart_bridge_ext.c uses
+# whatever string the PROFILES/CONTROL handler already had, e.g. "name too
+# long"). Callers that want to branch on *which* reason should classify the
+# text themselves (RelayRefusal.from_wire() is the IO-specific example);
+# this layer only guarantees the text survives the trip instead of being
+# decoded and discarded, which is the bug this whole change exists to fix.
+@dataclass(frozen=True)
+class OkReason:
+    """Decoded ``{subcmd, ok, [len, reason]}`` tail of a mutating-command reply."""
+
+    ok: bool
+    #: None on success, and on a rejection that carried no reason text (the
+    #: plain 2-byte {subcmd, 0} shape every caller could already see before
+    #: this change -- e.g. the unrecognized-subcommand default: case).
+    reason: "str | None" = None
+
+    def __bool__(self) -> bool:
+        return self.ok
+
+    def describe(self) -> str:
+        if self.ok:
+            return "ok"
+        return f"refused: {self.reason}" if self.reason else "refused"
+
+
+def _decode_ok_reason(payload: bytes, error_cls: type, who: str, offset: int = 1) -> OkReason:
+    """Decode the ``ok, [len, reason]`` tail starting at ``offset`` (byte0 is
+    always the echoed subcmd, already consumed by the caller). Raises
+    ``error_cls(...)`` -- the task's own ``*ResponseError`` -- on a payload
+    too short to hold even the ok byte."""
+    if len(payload) <= offset:
+        raise error_cls(f"{who} response is missing its ok byte")
+    ok = bool(payload[offset])
+    reason = None
+    if not ok and len(payload) > offset + 1:
+        reason_len = payload[offset + 1]
+        start = offset + 2
+        reason = payload[start : start + reason_len].decode("ascii", errors="replace")
+    return OkReason(ok=ok, reason=reason)
 
 
 # ---------------------------------------------------------------------------
@@ -1038,6 +1100,66 @@ class IoResponseError(ValueError):
     """Raised when an IO response payload does not match its wire layout."""
 
 
+class RelayRefusal(enum.Enum):
+    """Why uart_bridge.c's io_bridge_task() refused a SET_RELAY/SET_RELAY_MASK.
+
+    Mirrors the exact ASCII reason strings bridge_reply_reject() sends for
+    IO_CMD_SET_RELAY/SET_RELAY_MASK (uart_bridge.c, io_bridge_task() -- the
+    KILN_IO_OWNER_RELAY_ERR_OWNED/ERR_SAFETY/ERR_UPDATING cases plus the
+    truncated-payload/out-of-range/driver-error guards every subcommand
+    shares). Kept as a closed set of *known* strings rather than a numeric
+    wire code -- the firmware side already shipped free-text reasons
+    (commit 5df2190) and there is no protocol version bump backing a switch
+    to a numeric enum; classifying the text here gets the same "tell them
+    apart programmatically" property without another wire change. A string
+    this doesn't recognize (e.g. a future reason, or a build predating one
+    of these) still round-trips as OTHER with the raw text preserved.
+    """
+
+    TRUNCATED = "truncated"
+    OUT_OF_RANGE = "out of range"
+    OWNED = "owned"
+    SAFETY = "safety"
+    UPDATING = "updating"
+    DRIVER_ERROR = "driver error"
+    OTHER = "other"
+
+    @classmethod
+    def from_wire(cls, reason: "str | None") -> "RelayRefusal":
+        if not reason:
+            return cls.OTHER
+        for member in cls:
+            if member is not cls.OTHER and member.value == reason:
+                return member
+        return cls.OTHER
+
+
+@dataclass(frozen=True)
+class RelayResult:
+    """Decoded reply to IO_CMD_SET_RELAY/SET_RELAY_MASK.
+
+    io_bridge_task() replies nothing at all when the write actually happens
+    (bridge_reply_reject() is only ever called from a refusal path), so any
+    reply this decodes IS a refusal -- ``ok`` is carried anyway rather than
+    hardcoded True/False so a future firmware that starts ACKing success
+    explicitly doesn't get silently misread as a refusal.
+    """
+
+    ok: bool
+    reason_text: "str | None"
+    refusal: RelayRefusal
+
+    def __bool__(self) -> bool:
+        return self.ok
+
+    def describe(self) -> str:
+        if self.ok:
+            return "ok"
+        return f"refused ({self.refusal.value})" + (
+            f": {self.reason_text}" if self.reason_text and self.refusal is RelayRefusal.OTHER else ""
+        )
+
+
 def relay_label(relay: int) -> str:
     """e.g. ``"Relay1 (K3 -> J8)"`` -- always show all three names together."""
     designator, block = RELAY_DESIGNATORS[_check_range(relay, 1, IO_RELAY_COUNT, "relay")]
@@ -1306,7 +1428,7 @@ class ExpanderRegisters:
 
 def parse_io_response(
     payload: bytes,
-) -> "tuple[int, IoState | ExpanderRegisters | list[int]]":
+) -> "tuple[int, IoState | ExpanderRegisters | list[int] | RelayResult]":
     """Decode an IO query reply (or auto-report push) into ``(subcmd, value)``.
 
     Layouts (uart_task_ids.h)::
@@ -1315,12 +1437,25 @@ def parse_io_response(
                             relay shadow u8, io levels u8, DRDY u8, flags u8
         SX_READ_REG:        byte0=0x11, reg u8, len(N) u8, N bytes
         SX_SCAN:            byte0=0x19, count(N) u8, N address bytes
+        SET_RELAY / SET_RELAY_MASK: byte0=0x01/0x02, ok(=0) u8,
+                            [len u8, reason ASCII] -- io_bridge_task() never
+                            replies on success, so any frame with this
+                            subcmd IS a refusal; see :class:`RelayResult` /
+                            :class:`RelayRefusal`.
 
     Raises :class:`IoResponseError` on anything that doesn't match.
     """
     if len(payload) < 1:
         raise IoResponseError("IO response is empty")
     subcommand = payload[0]
+
+    if subcommand in (IO_CMD_SET_RELAY, IO_CMD_SET_RELAY_MASK):
+        ok_reason = _decode_ok_reason(payload, IoResponseError, "SET_RELAY/SET_RELAY_MASK")
+        return subcommand, RelayResult(
+            ok=ok_reason.ok,
+            reason_text=ok_reason.reason,
+            refusal=RelayRefusal.from_wire(ok_reason.reason),
+        )
 
     if subcommand == IO_CMD_READ:
         if len(payload) != 9:
@@ -3111,11 +3246,15 @@ def control_set_unit_pref(unit_pref: int) -> bytes:
 
 def parse_control_response(
     payload: bytes,
-) -> "tuple[int, tuple[int, int, list[ZoneConfig]] | bool | int]":
+) -> "tuple[int, tuple[int, int, list[ZoneConfig]] | OkReason | int]":
     """Decode a CONTROL reply into ``(subcmd, value)``.
 
     GET_ZONES value is ``(thermo_count, relay_count, [ZoneConfig, ...])``;
-    SET_ZONE_PID/SET_ZONE_MODEL/SET_UNIT_PREF value is a plain ``ok`` bool;
+    SET_ZONE_PID/SET_ZONE_MODEL/SET_UNIT_PREF value is an :class:`OkReason`
+    (bx_reply_ok_err() in uart_bridge_ext.c appends a reason string on
+    refusal -- e.g. an out-of-range zone index -- that used to be decoded and
+    then discarded here; ``OkReason`` is still truthy/falsy like the old bare
+    bool, so ``if not result:`` call sites keep working unchanged);
     GET_UNIT_PREF value is the raw unit_pref_t byte (0=Celsius, 1=Fahrenheit).
     """
     if len(payload) < 1:
@@ -3163,9 +3302,7 @@ def parse_control_response(
         return subcommand, (thermo_count, relay_count, zones)
 
     if subcommand in (CONTROL_CMD_SET_ZONE_PID, CONTROL_CMD_SET_ZONE_MODEL, CONTROL_CMD_SET_UNIT_PREF):
-        if len(payload) < 2:
-            raise ControlResponseError("SET_ZONE_*/SET_UNIT_PREF response is missing its ok byte")
-        return subcommand, bool(payload[1])
+        return subcommand, _decode_ok_reason(payload, ControlResponseError, "SET_ZONE_*/SET_UNIT_PREF")
 
     if subcommand == CONTROL_CMD_GET_UNIT_PREF:
         if len(payload) < 2:

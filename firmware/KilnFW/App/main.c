@@ -12,6 +12,7 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_ota_ops.h"
+#include "esp_partition.h"
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -149,7 +150,29 @@ static void kiln_enter_safe_state(kiln_io_t *io, SafetyLinkClass *safety, bool s
  * down -- purely as an informational side note; it is NOT part of the
  * confirm/clear decision itself. `safety` may be NULL if safety_link_start()
  * failed this boot, same fail-closed convention as everywhere else in this
- * file; the log below tolerates that. */
+ * file; the log below tolerates that.
+ *
+ * FACTORY VS. OTA-SLOT BOOTS (2026-08-24) ---------------------------------
+ * esp_ota_mark_app_valid_cancel_rollback() only means something when running
+ * from an OTA slot (ota_0/ota_1) that the bootloader put into PENDING_VERIFY.
+ * partitions.csv places `factory` at 0x810000, and the JTAG flash path this
+ * project uses on the bench (flash_firmware in tools/PcTools: bootloader @0x0,
+ * partition table @0x8000, app @0x810000) writes every bench-flashed build
+ * into THAT partition, not an OTA slot -- there is no rollback to cancel, and
+ * the call reliably returns ESP_FAIL. That used to be logged as two ERRORs on
+ * every single boot ("esp_ota_ops: Running firmware is factory" from IDF
+ * itself, plus this file's own ESP_LOGE on the ESP_FAIL) despite being
+ * entirely expected, which is real damage on a board whose whole diagnostic
+ * story is "read the device log" -- it trains the reader to ignore ERROR
+ * lines. This task now checks esp_ota_get_running_partition() once and routes
+ * the decision through boot_confirm_decide() (boot_guard.h): a healthy
+ * factory boot logs an explanatory INFO line and skips the rollback-cancel
+ * call entirely (but still calls boot_guard_mark_healthy() -- that counter's
+ * job does not depend on which partition type is running, and skipping it on
+ * every factory boot would walk an otherwise-healthy bench board into
+ * recovery mode after RECOVERY_MODE_BOOT_THRESHOLD reboots for no real
+ * reason). A healthy OTA-slot boot keeps doing exactly what this file always
+ * did, byte for byte, including the safety-link caveat warning below. */
 typedef struct {
     SafetyLinkClass *safety; /* NULL if safety_link_start() failed this boot -- logged, not gating */
     bool nvs_ok;
@@ -165,6 +188,21 @@ static void ota_rollback_confirm_task(void *arg)
     ota_confirm_ctx_t ctx = *(ota_confirm_ctx_t *)arg;
     free(arg);
 
+    // Fixed for the life of this boot -- the running partition cannot change
+    // underneath a running image. Determined once, outside the poll loop, so
+    // every iteration reuses the same answer rather than re-querying it.
+    const esp_partition_t *running    = esp_ota_get_running_partition();
+    bool                   is_factory = running && running->subtype == ESP_PARTITION_SUBTYPE_APP_FACTORY;
+    if (running) {
+        ESP_LOGI(TAG, "running partition: '%s' (subtype 0x%02x)", running->label, running->subtype);
+    } else {
+        // esp_ota_get_running_partition() returning NULL is not documented to
+        // happen in practice, but treat it the same as "not factory" rather
+        // than crash on a NULL deref -- boot_confirm_decide() then takes the
+        // OTA-slot branch, which is this file's pre-existing behavior.
+        ESP_LOGW(TAG, "esp_ota_get_running_partition() returned NULL -- assuming an OTA slot");
+    }
+
     TickType_t start = xTaskGetTickCount();
     bool       warned = false;
 
@@ -177,7 +215,21 @@ static void ota_rollback_confirm_task(void *arg)
             }
         }
 
-        if (boot_confirm_is_healthy(ctx.nvs_ok, ctx.web_ok, ctx.ota_ok)) {
+        boot_confirm_action_t action =
+            boot_confirm_decide(is_factory, ctx.nvs_ok, ctx.web_ok, ctx.ota_ok);
+
+        if (action == BOOT_CONFIRM_SKIP_FACTORY) {
+            ESP_LOGI(TAG, "running from the factory partition -- OTA rollback confirmation does "
+                          "not apply here (there is no PENDING_VERIFY slot to cancel; "
+                          "esp_ota_mark_app_valid_cancel_rollback() only means something after a "
+                          "real OTA into ota_0/ota_1). NVS, web server and OTA routes are healthy, "
+                          "so boot_guard's counter is still cleared below.");
+            boot_guard_mark_healthy();
+            vTaskDelete(NULL);
+            return;
+        }
+
+        if (action == BOOT_CONFIRM_CONFIRM_OTA_SLOT) {
             esp_err_t err = esp_ota_mark_app_valid_cancel_rollback();
             if (err == ESP_OK) {
                 ESP_LOGI(TAG, "OTA rollback confirmed: NVS readable, web server and OTA routes up "

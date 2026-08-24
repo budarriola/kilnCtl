@@ -32,9 +32,11 @@ import threading
 from typing import Callable, Optional
 
 from . import devices
-from .devices import ExpanderRegisters, IoResponseError, IoState
+from .devices import ExpanderRegisters, IoResponseError, IoState, RelayResult
 from .protocol import (
     IO_CMD_READ,
+    IO_CMD_SET_RELAY,
+    IO_CMD_SET_RELAY_MASK,
     IO_CMD_SX_READ_REG,
     IO_CMD_SX_SCAN,
     UART_TASK_ID_IO,
@@ -50,6 +52,19 @@ log = logging.getLogger(__name__)
 #: per-address timeout, so its worst case is noticeably longer.
 DEFAULT_REPLY_TIMEOUT_S = 2.0
 SCAN_REPLY_TIMEOUT_S = 4.0
+
+#: How long set_relay()/set_relay_mask() wait for an optional refusal reply
+#: before concluding the write went through. io_bridge_task() only ever
+#: replies to these two subcommands when it refuses them (owned by a
+#: profile / safety fault asserted / OTA in progress / truncated / out of
+#: range / driver error -- see uart_bridge.c's bridge_reply_reject() call
+#: sites in IO_CMD_SET_RELAY/SET_RELAY_MASK); a refusal is decided
+#: synchronously against in-RAM state before any I2C transfer, so it comes
+#: back fast if it comes back at all. This is sized with real margin over a
+#: normal round trip, not over BRIDGE_REPLY_ACK_TIMEOUT_MS (that timeout
+#: governs the firmware's own wait for *our* transport ACK of its reply, a
+#: different leg of the trip).
+SET_RELAY_REJECT_WINDOW_S = 0.5
 
 
 class IoQueryError(RuntimeError):
@@ -124,10 +139,83 @@ class IoClient:
 
     # -- writes ------------------------------------------------------------
     def send(self, payload: bytes) -> SendResult:
-        """Send one non-query subcommand payload (built by ``devices.py``)."""
+        """Send one non-query subcommand payload (built by ``devices.py``).
+
+        Fire-and-forget: the returned :class:`SendResult` proves delivery to
+        the task's inbox only, never that the subcommand switch did
+        anything. Relay writes should go through :meth:`set_relay` /
+        :meth:`set_relay_mask` instead -- see their docstrings for why plain
+        ``send()`` cannot distinguish "relay energized" from "refused
+        because a profile owns it" from "refused because safety is faulted"
+        (ROADMAP.md "KilnFW PC-link command acknowledgement").
+        """
         return self.link.send(
             dst_task=self.task_id, src_task=self.task_id, payload=payload
         )
+
+    def set_relay(
+        self, relay: int, on: bool, timeout: float = SET_RELAY_REJECT_WINDOW_S
+    ) -> RelayResult:
+        """Set relay 1-4 on/off, and learn *why* if the firmware refuses.
+
+        IO_CMD_SET_RELAY replies nothing at all when the write actually
+        happens; it replies ``{subcmd, ok=0, reason}`` when refused --
+        owned by a running profile, a safety fault is asserted, an OTA is in
+        progress, the frame was truncated, the relay index is out of range,
+        or the SX1509 write itself failed (uart_bridge.c's io_bridge_task(),
+        IO_CMD_SET_RELAY case). This waits out :data:`SET_RELAY_REJECT_WINDOW_S`
+        for that optional reply: if one arrives, it IS the refusal; if
+        nothing arrives in that window, the write went through.
+
+        Raises :class:`IoQueryError` only if the request itself was not
+        delivered (no transport ACK) -- a *refusal* is a normal
+        ``RelayResult(ok=False, ...)`` return, not an exception, so a caller
+        that only checks ``if not result:`` still gets a clean signal.
+        """
+        return self._set_relay_style(
+            IO_CMD_SET_RELAY, devices.io_set_relay(relay, on), timeout
+        )
+
+    def set_relay_mask(
+        self, mask: int, value: int, timeout: float = SET_RELAY_REJECT_WINDOW_S
+    ) -> RelayResult:
+        """Set several relays (bits 0-3 = Relay1..Relay4) in one write.
+
+        Same silent-success / {subcmd, ok=0, reason} refusal shape as
+        :meth:`set_relay` -- see that docstring.
+        """
+        return self._set_relay_style(
+            IO_CMD_SET_RELAY_MASK, devices.io_set_relay_mask(mask, value), timeout
+        )
+
+    def _set_relay_style(self, subcommand: int, payload: bytes, timeout: float) -> RelayResult:
+        with self._query_lock:
+            pending = _Pending(subcommand)
+            with self._pending_lock:
+                self._pending = pending
+            try:
+                result = self.link.send(
+                    dst_task=self.task_id,
+                    src_task=self.task_id,
+                    payload=payload,
+                    dst_device=Device.ESP,
+                )
+                if not result.ok:
+                    raise IoQueryError(
+                        f"IO request 0x{subcommand:02X} not delivered: "
+                        f"{result.describe()}",
+                        send_result=result,
+                    )
+                if pending.event.wait(timeout):
+                    # A reply arrived -- io_bridge_task() only ever sends one
+                    # for these two subcommands on refusal.
+                    return pending.value  # type: ignore[return-value]
+                # Silence within the window: the write happened.
+                return RelayResult(ok=True, reason_text=None, refusal=devices.RelayRefusal.OTHER)
+            finally:
+                with self._pending_lock:
+                    if self._pending is pending:
+                        self._pending = None
 
     # -- queries -----------------------------------------------------------
     def read(self, timeout: float = DEFAULT_REPLY_TIMEOUT_S) -> IoState:

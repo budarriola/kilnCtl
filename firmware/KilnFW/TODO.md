@@ -615,12 +615,17 @@ overlap/overflow.
 - [ ] **`esptool flash_id` never run** — size was confirmed via the board's
       product page (N16R8) instead; the buy-list and 3D-model records (both
       stale, claiming 8MB/N8R8) still need correcting at the source.
-- [ ] **Reflash the bootloader on the physical board** — a new partition
-      table alone does nothing; the flash size is baked into the bootloader
-      header. One-time USB/serial step, not yet performed.
+- [x] **Bootloader + partition table reflashed on the physical board** —
+      2026-08-24 (the date this was directly observed; an earlier flash on
+      2026-08-22 is likely but was not confirmed against this table), via
+      `flash_firmware()`'s JTAG path (`tools/PcTools`):
+      `bootloader.bin`@0x0, `partition-table.bin`@0x8000, `KilnCtrl.bin`@0x810000,
+      each `program_esp ... verify`, reported "flashed and verified OK". Note
+      the app offset: 0x810000 is `factory`'s offset in this table, so this
+      path has never written an OTA slot (see 9.2's note on what that means
+      for rollback confirmation).
 - [ ] **Pre-change partition table archived** so a rollback to pre-OTA
-      firmware is possible — nothing to archive from yet, no physical flash
-      has happened.
+      firmware is possible — not done before the flash above.
 - [ ] **One-time serial flash documented as a prerequisite step**, not a
       footnote — still outstanding.
 - [ ] **`nvs`/`wifi_nvs`/`kiln_nvs`/`profiles_nvs` read out and archived from
@@ -649,9 +654,26 @@ R2/no-PSRAM part would break the LCD memory plan.
 ### 9.2 Rollback
 
 DONE — `esp_ota_mark_app_valid_cancel_rollback()` runs from a background
-task gated on NVS-readable + safety-link-exchanging-frames + web-server-up,
-all three fully wired (none stays permanently false without a reason).
-`CONFIG_BOOTLOADER_APP_ANTI_ROLLBACK` deliberately left off.
+task gated on NVS-readable + web-server-up + OTA-routes-up
+(`boot_confirm_is_healthy()`, `App/drivers/boot_guard.h`); a live
+safety-link exchange was dropped from the bar 2026-08-22 (a board with no
+RP2040 answering could otherwise never confirm, silently reverting every OTA
+update). `CONFIG_BOOTLOADER_APP_ANTI_ROLLBACK` deliberately left off.
+
+- [x] **Factory-boot false ERROR fixed, 2026-08-24** — every JTAG-flashed
+      build boots from `factory` (see 9.1), and
+      `esp_ota_mark_app_valid_cancel_rollback()` has nothing to cancel there;
+      it reliably returned `ESP_FAIL`, logged as an ERROR every boot.
+      `ota_rollback_confirm_task()` (`App/main.c`) now checks
+      `esp_ota_get_running_partition()` and, via
+      `boot_confirm_decide()` (`boot_guard.h`), skips that call on a factory
+      boot with an explanatory INFO line instead — `boot_guard_mark_healthy()`
+      still runs. OTA-slot boots are unchanged.
+- [ ] **Still not exercised end-to-end by anything on this bench**: the
+      JTAG path only ever writes `factory`, so the PENDING_VERIFY /
+      rollback-cancel machinery itself has only run in host tests
+      (`test_boot_guard.c`), never on real hardware. Exercising it requires an
+      actual OTA push into `ota_0`/`ota_1` (9.5), not another JTAG flash.
 
 ### 9.3 Authentication — the AP password, not sent over the wire
 
@@ -1117,3 +1139,105 @@ suspected to be related to this work, was root-caused separately (also in
 - [ ] `ui_page_network.c`''s three job structs are candidates to migrate onto
       `wifi_prov`''s real owner queue once a shared async shape exists,
       rather than staying page-local one-offs.
+
+## 11. PC-link command acknowledgement (moved from ROADMAP.md 2026-08-24)
+
+Scoped to the **PC↔ESP link only** (`uart_protocol.c`, `uart_bridge.c`,
+`uart_bridge_ext.c`, `tools/PcTools/src/kilnctrl`) — the ESP↔Pico safety
+link's no-ACK doctrine (`CommonFW/docs/LINK_PROTOCOL.md` §1–2) is deliberate
+and separate; do not "fix" that side.
+
+**The rule to not reintroduce**: `uart_protocol.c`'s RX task ACKs a `DATA`
+frame the instant it lands in the destination bridge task's inbox, *before*
+that task's `switch (subcmd)` ever runs. The transport ACK proves delivery,
+never that the command did anything — a handler that falls through with no
+reply makes "queued" and "executed" indistinguishable to a host that only
+checks the transport ACK. Every new mutating subcommand handler on this hop
+must answer through `bridge_reply_reject()` (`uart_bridge.c`) or
+`bx_reply_ok_err()` (`uart_bridge_ext.c`) — same `{subcmd, ok, [len,
+reason]}` shape both already use — on every path that refuses or fails, not
+just the happy path.
+
+**Firmware half done (commit `5df2190`, 2026-08-24)**: extended that reply
+convention to every rejection that used to fall through silently —
+truncated args and out-of-range args across THERMO/IO/SAFETY
+(`uart_bridge.c`), and, worst of the set, `IO_CMD_SET_RELAY`/
+`SET_RELAY_MASK`'s `KILN_IO_OWNER_RELAY_ERR_OWNED`/`ERR_SAFETY`/
+`ERR_UPDATING` refusals, which used to be indistinguishable on the wire from
+a relay that actually switched. Purely additive — no protocol version bump
+(`UART_PROTOCOL_VERSION` stayed at 6 on both sides).
+
+**PC side, done this pass**:
+- `devices.py`: shared `_decode_ok_reason()`/`OkReason` decoder for the
+  `{subcmd, ok, [reason]}` shape now used by every parser below it.
+  `parse_control_response()`'s `SET_ZONE_PID`/`SET_ZONE_MODEL`/
+  `SET_UNIT_PREF` case used to decode the reply's reason string and then
+  throw it away (`return subcommand, bool(payload[1])`); it now returns an
+  `OkReason` (still truthy/falsy like the old bare bool, so existing
+  `if not result:` callers keep working) carrying the text.
+- `devices.py`: `RelayRefusal` (enum: `TRUNCATED`/`OUT_OF_RANGE`/`OWNED`/
+  `SAFETY`/`UPDATING`/`DRIVER_ERROR`/`OTHER`) and `RelayResult` classify
+  `IO_CMD_SET_RELAY`/`SET_RELAY_MASK` refusals so a caller can branch on
+  "profile owns it" vs. "safety fault" vs. "OTA in progress" instead of a
+  flat ok=0. Classified from the firmware's free-text reason strings rather
+  than a new numeric wire code, since the firmware side already shipped
+  text and there's no version bump backing a format change.
+- `io_expander.py`: `IoClient.set_relay()`/`set_relay_mask()` replace the
+  old fire-and-forget `send()` path for these two commands. `io_bridge_task`
+  replies nothing on success and `{subcmd, 0, reason}` on refusal, so these
+  send and wait out a short window (`SET_RELAY_REJECT_WINDOW_S`, 0.5 s) for
+  the *optional* reply: a reply within the window is decoded as the
+  refusal; silence means the write went through. `send()` itself is
+  unchanged (still used by every other IO write) and its docstring now
+  says why relay writes shouldn't go through it.
+- Wired through to callers: `mcp_server.io_set_relay`/`io_set_relay_mask`
+  and `mcp_server.control_set_zone_pid`/`control_set_zone_model` surface the
+  reason text; `actions.py`'s "IO: Set Relay"/"IO: Set Relay Mask" registry
+  entries (the `press_button` MCP tool's backing) go through
+  `ctx.io.set_relay()`/`set_relay_mask()` instead of raw `_send()`; `gui.py`
+  shows the refusal reason in the status bar and puts a rejected relay
+  checkbox back to the board's actual state instead of leaving it showing
+  the requested-but-refused value; the Zones popup's PID/model status text
+  now includes the reason on rejection.
+- Tests: `tools/PcTools/tests/test_bridge_reject_reply.py` — byte-exact
+  vectors for the CONTROL reason-discard bug and for each of the six IO
+  relay refusal strings, including a check that two different refusal
+  reasons (`owned` vs. `safety`) never classify the same. Proved able to
+  fail: reverting both fixes turned 10 relay tests into `IoResponseError:
+  unknown IO response subcommand 0x01` errors and 1 CONTROL test into an
+  `AssertionError` (bare `bool` where an `OkReason` was expected).
+
+**Still open** (found while doing the above, not fixed this pass):
+- `thermo.py`/`safety.py`/`display.py` clients still only call `send()` for
+  their mutating subcommands, so THERMO's `CONFIG_CHANNEL`/
+  `SET_THRESHOLDS`/`SET_CJ_OFFSET`/`CLEAR_FAULTS`/`WRITE_REG` and SAFETY's
+  `REQUEST_ENABLE`/`SET_POLL_PERIOD`/`SET_FAULT_OUT`/`SET_CT_CAL` now get a
+  firmware-side rejection reply that nothing on the PC side waits for or
+  decodes — `parse_thermo_response`/`parse_safety_response` would still
+  raise "unknown response subcommand" on one of these frames today, the
+  same failure mode this section fixed for IO. Same treatment as
+  `set_relay()` above (a `..._REJECT_WINDOW_S`-style wait) is the shape to
+  copy; IO was prioritized because relay commands are the safety-adjacent
+  case ROADMAP.md called out first.
+- `devices.parse_profiles_response()`'s `PROFILES_CMD_DELETE`/`PAUSE`/
+  `RESUME`/`ACK_LAST_RUN`/`STOP` cases still do `bool(payload[1])` and
+  discard any reason `bx_reply_ok_err()` sent (e.g. DELETE's "cannot delete
+  a builtin profile" refusal) — same bug class as the CONTROL fix above,
+  just not reached by this pass's scope.
+- Two reply shapes flagged in `5df2190`'s commit message for whoever picks
+  up THERMO: `THERMO_CMD_READ_FAULTS` and `IO_CMD_SX_SCAN` both use byte[1]
+  as a count that can legitimately be 0, so their empty-success reply is
+  byte-identical to a reasonless rejection. In practice every rejection
+  carries a reason today, so reply *length* still tells them apart — but a
+  decoder that only checks byte[1] would misread an honest empty result as
+  a refusal.
+- Audited while doing this pass: `5df2190` gave THERMO and IO a reply for
+  the "reached the driver call and it failed there" case too (both tasks'
+  bottom `if (err != ESP_OK)` block now calls `bridge_reply_reject(...,
+  "driver error")`). SAFETY, DISPLAY and TOUCH (`uart_bridge.c`'s
+  `safety_bridge_task`/`display_bridge_task`/`touch_bridge_task`) were not
+  touched by that commit and still only `ESP_LOGW()` + `continue` on that
+  same case — a PC client talking to one of those three still gets a
+  reply timeout, not a fabricated value, if an otherwise-valid,
+  otherwise-accepted command's driver call fails. Same fix shape as
+  THERMO/IO's driver-error reply, not yet applied there.

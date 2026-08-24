@@ -86,7 +86,10 @@ class ControlClient:
 
     def set_zone_pid(
         self, zone: int, kp: float, ki: float, kd: float, timeout: float = DEFAULT_REPLY_TIMEOUT_S
-    ) -> bool:
+    ) -> devices.OkReason:
+        """Returns an :class:`devices.OkReason` -- truthy/falsy like a plain
+        bool, but carrying the refusal text (e.g. an out-of-range zone or
+        gain) when the firmware rejects the write, instead of discarding it."""
         return self._query(
             CONTROL_CMD_SET_ZONE_PID,
             devices.control_set_zone_pid(zone, kp, ki, kd),
@@ -96,7 +99,8 @@ class ControlClient:
     def set_zone_model(
         self, zone: int, k_dc: float, tau_s: float, dead_time_s: float,
         timeout: float = DEFAULT_REPLY_TIMEOUT_S,
-    ) -> bool:
+    ) -> devices.OkReason:
+        """See :meth:`set_zone_pid` -- same ``OkReason`` return shape."""
         return self._query(
             CONTROL_CMD_SET_ZONE_MODEL,
             devices.control_set_zone_model(zone, k_dc, tau_s, dead_time_s),

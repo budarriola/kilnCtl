@@ -267,19 +267,34 @@ _register(
 # terminal-block names so a caller can't energize the wrong contactor by
 # assuming Relay1 means K1.
 # ---------------------------------------------------------------------------
+def _describe_relay_result(result: "devices.RelayResult") -> str:
+    if result.ok:
+        return "ok"
+    detail = f": {result.reason_text}" if result.reason_text and result.refusal is devices.RelayRefusal.OTHER else ""
+    return f"refused ({result.refusal.value}){detail}"
+
+
 _register(
     "IO: Set Relay",
-    "Switch one relay: 1=K3/J8, 2=K1/J3, 3=K2/J4, 4=K5/J11. on=true energizes the coil.",
+    "Switch one relay: 1=K3/J8, 2=K1/J3, 3=K2/J4, 4=K5/J11. on=true energizes the coil. "
+    "Waits briefly for a refusal reply (owned / safety / updating / out of range) before "
+    "reporting success, since the firmware answers a rejected relay command but not a "
+    "successful one.",
     {"relay": int, "on": bool},
-    lambda ctx, relay, on: _send(ctx, UART_TASK_ID_IO, devices.io_set_relay(relay, on)),
+    lambda ctx, relay, on: _client_query(
+        ctx.io, "IO", IoQueryError, _describe_relay_result,
+        lambda client: client.set_relay(relay, on),
+    ),
 )
 _register(
     "IO: Set Relay Mask",
     "Switch several relays in one atomic register write. Bits 0-3 = Relay1..4 "
-    "(K3/J8, K1/J3, K2/J4, K5/J11) in both mask (which to change) and value.",
+    "(K3/J8, K1/J3, K2/J4, K5/J11) in both mask (which to change) and value. Same "
+    "refusal-aware wait as \"IO: Set Relay\".",
     {"mask": int, "value": int},
-    lambda ctx, mask, value: _send(
-        ctx, UART_TASK_ID_IO, devices.io_set_relay_mask(mask, value)
+    lambda ctx, mask, value: _client_query(
+        ctx.io, "IO", IoQueryError, _describe_relay_result,
+        lambda client: client.set_relay_mask(mask, value),
     ),
 )
 _register(

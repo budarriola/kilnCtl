@@ -267,6 +267,18 @@ bool boot_confirm_is_healthy(bool nvs_ok, bool web_ok, bool ota_routes_ok)
     return nvs_ok && web_ok && ota_routes_ok;
 }
 
+boot_confirm_action_t boot_confirm_decide(bool is_factory_partition, bool nvs_ok, bool web_ok,
+                                           bool ota_routes_ok)
+{
+    /* Pure logic, no I/O -- exercised directly by test_boot_guard.c. See
+     * boot_guard.h's doc comment on this function for what each outcome
+     * means and why the factory-vs-OTA-slot branch exists at all. */
+    if (!boot_confirm_is_healthy(nvs_ok, web_ok, ota_routes_ok)) {
+        return BOOT_CONFIRM_SKIP_NOT_HEALTHY;
+    }
+    return is_factory_partition ? BOOT_CONFIRM_SKIP_FACTORY : BOOT_CONFIRM_CONFIRM_OTA_SLOT;
+}
+
 void boot_guard_mark_healthy(void)
 {
     if (!s_bg.initialized || s_bg.healthy_marked) {
