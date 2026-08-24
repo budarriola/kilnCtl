@@ -446,7 +446,15 @@ def run_test_scenario(path: str, seed: Optional[int] = None, timescale: Optional
         })
 
     events = _link.read_events(timeout=0.0)
-    report = evaluate_expectations(scenario, events, seed=run_seed, timescale=run_timescale)
+    # spi_underrun_signal_available=False, explicitly: this tool does NOT go
+    # through kilnsim.runner.run_scenario, so nothing here ever polls
+    # TELEMETRY for spi_underrun_count. `_link` may well be a REAL fixture
+    # link, which is what makes silence here dangerous -- a genuine SPI
+    # underrun during an MCP-driven run must not be reported as "checked,
+    # clean". Passing it rather than leaning on the parameter's default
+    # keeps that true even if the default is ever changed back.
+    report = evaluate_expectations(scenario, events, seed=run_seed, timescale=run_timescale,
+                                    spi_underrun_signal_available=False)
 
     run_id = next(_run_id_counter)
     with _reports_lock:

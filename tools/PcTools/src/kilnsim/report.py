@@ -130,18 +130,26 @@ class ValidityFlags:
     #: own doc comment on why `spi_underrun` must never silently default to
     #: False when that happens (MockSimLink has no TELEMETRY frame at all;
     #: a real link on which no TELEMETRY broadcast ever arrived during the
-    #: run is the same situation). Default True preserves every existing
-    #: caller's meaning: a hand-built Report or an evaluate_expectations()
-    #: call that never mentions this parameter is asserting "the signal was
-    #: actually observed" -- the same thing `spi_underrun=False` on its own
-    #: meant before this field existed. Deliberately NOT folded into
-    #: `valid` below: an unavailable signal makes a `forbid: spi_underrun`
-    #: expectation unable to certify anything either way, which is a
-    #: visibility gap to report, not by itself a reason to redden the whole
-    #: run's validity (that would conflate "we didn't check" with "we
-    #: checked and it's bad", the same distinction BLOCKED vs FAIL exists
-    #: to preserve for `expect` clauses).
-    spi_underrun_signal_available: bool = True
+    #: run is the same situation).
+    #:
+    #: **Defaults to False -- "nobody measured this" -- deliberately.** It
+    #: originally defaulted True, on the reasoning that this preserved every
+    #: existing caller's meaning. That was the bug: three callers evaluate a
+    #: scenario WITHOUT going through kilnsim.runner.run_scenario (which is
+    #: the only thing that polls TELEMETRY for the count), and every report
+    #: they produced claimed the signal was observed and clean. The worst of
+    #: them, kilnsim.mcp_server.run_test_scenario, is reachable against REAL
+    #: hardware, so a genuine SPI underrun during an MCP-driven run was
+    #: invisible. Only a caller that actually looked should say it looked;
+    #: run_scenario passes this explicitly.
+    #:
+    #: Deliberately NOT folded into `valid` below: an unavailable signal
+    #: makes a `forbid: spi_underrun` expectation unable to certify anything
+    #: either way, which is a visibility gap to report, not by itself a
+    #: reason to redden the whole run's validity (that would conflate "we
+    #: didn't check" with "we checked and it's bad", the same distinction
+    #: BLOCKED vs FAIL exists to preserve for `expect` clauses).
+    spi_underrun_signal_available: bool = False
 
     @property
     def valid(self) -> bool:
@@ -585,7 +593,7 @@ def _apply_blocked_on(clause, result: ExpectationResult) -> ExpectationResult:
 def evaluate_expectations(scenario: Scenario, events: list,
                            telemetry_samples: Optional[list] = None,
                            spi_underrun: bool = False,
-                           spi_underrun_signal_available: bool = True,
+                           spi_underrun_signal_available: bool = False,
                            seed: Optional[int] = None,
                            timescale: Optional[float] = None,
                            start_time: Optional[float] = None,
