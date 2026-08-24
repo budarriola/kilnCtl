@@ -27,10 +27,20 @@ the plan.
   relay back to `MANUAL`; resuming reclaims `PROFILE`. Chosen deliberately
   over auto-pause-on-touch — a Stop button must never have an unrelated
   side effect. Built in `App/drivers/relay_authority.{c,h}`.
-- `AUTOTUNE` as a distinct ownership tag was never built — a manual
-  `SET_RELAY` during a running autotune step-test is not refused by any
-  ownership mechanism today (autotune's own writes still go through the
-  zone-blocked safety gate, so a real *fault* still wins).
+- `AUTOTUNE` (TODO.md 6A.6, 2026-08-21): fifth tag, same claim/release shape
+  as `PROFILE`. `autotune_engine.c`'s `begin_run_locked()` claims the
+  zone's relay mask as `RELAY_OWNER_AUTOTUNE` before a step-test or
+  relay-test run starts; `force_relays_off()` — the single function every
+  terminal path (`finalize_fit()`, `finalize_relay_fit()`,
+  `escalate_and_abort()`, `abort_locked()`) calls before leaving a running
+  state — releases it. A manual `SET_RELAY`/`SET_RELAY_MASK` against a
+  relay owned by a live autotune run is refused the same way an
+  owned-by-`PROFILE` relay is (`kiln_io_owner.c`'s
+  `relay_authority_manual_blocked_by_owner()` check, `uart_bridge.c`'s
+  `bridge_reply_reject(..., "owned")`). Ownership is still layered strictly
+  under the safety gate: `relay_authority_on_blocked()`/
+  `relay_authority_zone_blocked()` run first and their answer is final when
+  it blocks, exactly as for every other owner.
 
 ## Relay rule engine (v1 design)
 

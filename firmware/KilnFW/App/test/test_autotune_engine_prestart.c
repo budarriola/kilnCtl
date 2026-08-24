@@ -115,14 +115,38 @@ void relay_authority_set_zone_blocked(uint8_t zone_index, bool blocked)
     (void)zone_index; (void)blocked;
 }
 
+// TODO.md 6A.6 (ownership tags): recorded, not a bare no-op, so the
+// STEPPING-loop ownership tests further down can prove begin_run_locked()
+// claims RELAY_OWNER_AUTOTUNE and force_relays_off() (the single release
+// chokepoint every terminal path funnels through) releases it -- both
+// asserted by call count, not just "did not crash". reset_owner_recorder()
+// clears these between tests.
+static int s_claim_calls = 0;
+static uint8_t s_claim_last_mask = 0;
+static relay_owner_t s_claim_last_owner = RELAY_OWNER_NONE;
+static int s_release_calls = 0;
+static uint8_t s_release_last_mask = 0;
+
+static void reset_owner_recorder(void)
+{
+    s_claim_calls = 0;
+    s_claim_last_mask = 0;
+    s_claim_last_owner = RELAY_OWNER_NONE;
+    s_release_calls = 0;
+    s_release_last_mask = 0;
+}
+
 void relay_authority_claim_mask(uint8_t relay_mask, relay_owner_t owner)
 {
-    (void)relay_mask; (void)owner;
+    s_claim_calls++;
+    s_claim_last_mask = relay_mask;
+    s_claim_last_owner = owner;
 }
 
 void relay_authority_release_mask(uint8_t relay_mask)
 {
-    (void)relay_mask;
+    s_release_calls++;
+    s_release_last_mask = relay_mask;
 }
 
 esp_err_t safety_link_set_fault_source(SafetyLinkClass *link, uint32_t source_mask, bool assert_fault)
@@ -461,6 +485,61 @@ static void test_step_no_ceiling_rising_reading_does_not_trip(void)
     TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_STEPPING, "the run must still be stepping, not aborted");
 }
 
+// ---------------------------------------------------------------------------
+// TODO.md 6A.6 ownership tests -- autotune_engine.c claims RELAY_OWNER_AUTOTUNE
+// on the zone it steps (begin_run_locked()) and releases it through
+// force_relays_off(), the single chokepoint every terminal path (finalize_fit,
+// finalize_relay_fit, escalate_and_abort, abort_locked) calls. Proven here by
+// call count against the recording stubs above -- a claim that outlives the
+// run (leaked ownership blocking every future manual command on that relay)
+// or a run that never claims (a manual SET_RELAY racing a live step-test,
+// exactly the TODO.md 6A.6 gap) both fail these checks. Same
+// start_stepping_run()/run_ticks() harness as the guard-coverage tests above.
+// ---------------------------------------------------------------------------
+
+static void test_step_test_claims_autotune_ownership_on_start(void)
+{
+    TEST_SECTION("autotune_engine_run() -- claims RELAY_OWNER_AUTOTUNE on the zone's mask");
+    reset_owner_recorder();
+    start_stepping_run(/*max_temp_c=*/0.0f, /*step_duty=*/1.0f);
+
+    TEST_CHECK(s_claim_calls == 1, "exactly one claim on run start, not zero and not repeated per tick");
+    TEST_CHECK(s_claim_last_owner == RELAY_OWNER_AUTOTUNE, "claimed as RELAY_OWNER_AUTOTUNE specifically");
+    TEST_CHECK(s_claim_last_mask == 0x01, "claims the zone's configured relay mask (stub: 0x01)");
+    TEST_CHECK(s_release_calls == 0, "must not release what it just claimed before the run has done anything");
+}
+
+static void test_guard_trip_releases_autotune_ownership(void)
+{
+    TEST_SECTION("STEPPING guard trip -- force_relays_off() releases the RELAY_OWNER_AUTOTUNE claim");
+    reset_owner_recorder();
+    // Same flat-reading/no-ceiling scenario as test_step_no_ceiling_flat_reading_trips_guard1()
+    // above -- this test only adds the ownership-release assertion.
+    start_stepping_run(/*max_temp_c=*/0.0f, /*step_duty=*/1.0f);
+    TEST_CHECK(s_claim_calls == 1, "sanity: claimed once on start, same as the claim test above");
+    run_ticks(/*start_temp_c=*/25.0f, /*per_tick_delta_c=*/0.0f, /*n_ticks=*/320);
+
+    TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_ABORTED, "sanity: the guard-trip abort this test rides on");
+    TEST_CHECK(s_release_calls == 1, "a claim that outlives an aborted run is worse than no claim at all");
+    TEST_CHECK(s_release_last_mask == 0x01, "releases the same mask it claimed");
+}
+
+static void test_manual_abort_releases_autotune_ownership(void)
+{
+    TEST_SECTION("autotune_engine_abort() (operator Abort button) -- releases the RELAY_OWNER_AUTOTUNE claim");
+    reset_owner_recorder();
+    start_stepping_run(/*max_temp_c=*/0.0f, /*step_duty=*/1.0f);
+    TEST_CHECK(s_claim_calls == 1, "sanity: claimed once on start");
+
+    autotune_engine_abort("operator cancelled");
+
+    TEST_CHECK(s_release_calls == 1, "abort_locked() -> force_relays_off() must release the claim");
+    TEST_CHECK(s_release_last_mask == 0x01, "releases the same mask it claimed");
+    autotune_engine_status_t st;
+    autotune_engine_get_status(&st);
+    TEST_CHECK(st.state == AUTOTUNE_ENGINE_ABORTED, "sanity: the abort actually landed");
+}
+
 void run_test_autotune_engine_prestart(void)
 {
     test_run_refuses_before_start();
@@ -478,6 +557,14 @@ void run_test_autotune_engine_prestart(void)
     test_step_no_ceiling_flat_reading_trips_guard1();
     test_step_max_temp_configured_flat_reading_still_trips_guard1();
     test_step_no_ceiling_rising_reading_does_not_trip();
+
+    // Ownership tests (TODO.md 6A.6) -- order-independent relative to the
+    // guard tests above (each calls start_stepping_run(), which re-zeroes
+    // s_at), but kept after them for narrative order: guards first, then the
+    // ownership bookkeeping layered around the same run lifecycle.
+    test_step_test_claims_autotune_ownership_on_start();
+    test_guard_trip_releases_autotune_ownership();
+    test_manual_abort_releases_autotune_ownership();
 }
 
 int main(void)

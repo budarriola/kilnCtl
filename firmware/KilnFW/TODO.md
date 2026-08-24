@@ -393,12 +393,28 @@ layered on the global gate), the `THERMO`/`THERMAL_SANITY` fault-source
 split, and closing the `SX_WRITE_REG`/`SX_SET_DIR` gate bypass. See
 `docs/SAFETY_MODEL.md`'s updated summary table.
 
-- [ ] **Ownership tags need `AUTOTUNE`**, alongside the `NONE`/`MANUAL`/
-      `PROFILE`/`RULE` tags from section 0 (still not built as a real enum
-      anywhere). A manual `SET_RELAY` from the PC during a running autotune
-      step-test is not refused by any ownership mechanism today — a safety
-      *fault* still wins via `relay_authority_zone_blocked()`, but an
-      unrelated manual override arriving mid-test isn't.
+DONE (2026-08-21, `relay_authority.h`'s `relay_owner_t` — this bullet was
+left open after the fix landed): **ownership tags are a real enum**
+(`RELAY_OWNER_NONE`/`MANUAL`/`PROFILE`/`RULE`/`AUTOTUNE`), not just section
+0's prose. `autotune_engine.c`'s `begin_run_locked()` claims
+`RELAY_OWNER_AUTOTUNE` on the zone's relay mask for the duration of a
+step-test/relay-test run; `force_relays_off()` — the single chokepoint every
+terminal path (`finalize_fit()`, `finalize_relay_fit()`,
+`escalate_and_abort()`, `abort_locked()`) calls before leaving a running
+state — releases it, so a claim cannot outlive an aborted run. A manual
+`SET_RELAY`/`SET_RELAY_MASK` against an autotune-owned relay is refused with
+a reply (`kiln_io_owner.c`'s `relay_authority_manual_blocked_by_owner()` ->
+`uart_bridge.c`'s `bridge_reply_reject(..., "owned")`, same wording as the
+existing `PROFILE` case), not silently dropped. Safety keeps precedence:
+`relay_authority_zone_blocked()`/`relay_authority_on_blocked()` are checked
+first and their block is final regardless of ownership. Host-tested in
+`test_autotune_engine_prestart.c` (claim-on-start, release-on-guard-trip,
+release-on-manual-abort, each proven able to fail by temporarily disabling
+the release call and watching the new checks fail). Not host-tested: the
+`uart_bridge.c`/`kiln_io_owner.c` refusal-with-reply path itself — neither
+file is part of `build_host_tests.ps1`'s harness (FreeRTOS-task-shaped code,
+not pulled in host-side anywhere today), so that leg is verified by reading
+the code, not by a test that can fail.
 
 ### 6A.7 Task, timing, and module layout
 
