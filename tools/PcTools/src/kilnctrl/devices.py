@@ -1032,6 +1032,30 @@ def parse_thermo_response(
             channel=channel, reg=reg, data=bytes(payload[4:])
         )
 
+    if subcommand in (
+        THERMO_CMD_CONFIG_CHANNEL,
+        THERMO_CMD_SET_THRESHOLDS,
+        THERMO_CMD_SET_CJ_OFFSET,
+        THERMO_CMD_ONE_SHOT,
+        THERMO_CMD_CLEAR_FAULTS,
+        THERMO_CMD_SET_AUTO_REPORT,
+        THERMO_CMD_WRITE_REG,
+    ):
+        # thermo_bridge_task() replies nothing at all when one of these
+        # mutating subcommands succeeds; a reply only ever means
+        # bridge_reply_reject() fired -- "truncated"/"out of range" caught
+        # before the driver call, or "driver error" from thermo_owner's
+        # bottom `if (err != ESP_OK)` block (uart_bridge.c). Decoded the same
+        # way CONTROL's SET_ZONE_*/IO's relay refusals are, so the reason
+        # text survives instead of raising "unknown response subcommand" on
+        # what used to be an unhandled reply shape.
+        return subcommand, _decode_ok_reason(
+            payload,
+            ThermoResponseError,
+            "CONFIG_CHANNEL/SET_THRESHOLDS/SET_CJ_OFFSET/ONE_SHOT/CLEAR_FAULTS/"
+            "SET_AUTO_REPORT/WRITE_REG",
+        )
+
     raise ThermoResponseError(f"unknown THERMO response subcommand 0x{subcommand:02X}")
 
 
@@ -2838,6 +2862,24 @@ def parse_safety_response(
             )
         return subcommand, SafetyCtCal(channels=tuple(channels))
 
+    if subcommand in (
+        SAFETY_CMD_REQUEST_ENABLE,
+        SAFETY_CMD_SET_POLL_PERIOD,
+        SAFETY_CMD_SET_FAULT_OUT,
+        SAFETY_CMD_SET_CT_CAL,
+        SAFETY_CMD_SET_CONFIG,
+    ):
+        # safety_bridge_task() replies nothing at all when one of these is
+        # accepted (they are fire-and-forget broadcasts to the Pico, or a
+        # local state change) -- a reply only ever means bridge_reply_reject()
+        # fired for a "truncated"/"out of range" argument caught before
+        # anything was sent (uart_bridge.c, safety_bridge_task()). Decoded
+        # the same way CONTROL's SET_ZONE_*/PROFILES' DELETE etc. are, so any
+        # reason text survives instead of being an unreachable code path.
+        return subcommand, _decode_ok_reason(
+            payload, SafetyResponseError, "REQUEST_ENABLE/SET_POLL_PERIOD/SET_FAULT_OUT/SET_CT_CAL/SET_CONFIG"
+        )
+
     raise SafetyResponseError(f"unknown SAFETY response subcommand 0x{subcommand:02X}")
 
 
@@ -3536,6 +3578,13 @@ def parse_profiles_response(payload: bytes) -> "tuple[int, object]":
 
     Layouts (uart_task_ids.h) -- see the module docstring cross-reference for
     the byte-level offsets; this mirrors them field for field.
+
+    DELETE/PAUSE/RESUME/ACK_LAST_RUN/STOP value is an :class:`OkReason` --
+    ``bx_reply_ok_err()`` appends a reason string on refusal (e.g. DELETE's
+    "cannot delete a builtin profile") that used to be decoded here and then
+    discarded (``bool(payload[1])``), same bug class as CONTROL's SET_* fix
+    above. ``OkReason`` is still truthy/falsy like the old bare bool, so
+    ``if not result:`` call sites keep working unchanged.
     """
     if len(payload) < 1:
         raise ProfilesResponseError("PROFILES response is empty")
@@ -3627,9 +3676,9 @@ def parse_profiles_response(payload: bytes) -> "tuple[int, object]":
         PROFILES_CMD_ACK_LAST_RUN,
         PROFILES_CMD_STOP,
     ):
-        if len(payload) < 2:
-            raise ProfilesResponseError("response is missing its ok byte")
-        return subcommand, bool(payload[1])
+        return subcommand, _decode_ok_reason(
+            payload, ProfilesResponseError, "DELETE/PAUSE/RESUME/ACK_LAST_RUN/STOP"
+        )
 
     if subcommand == PROFILES_CMD_START:
         if len(payload) < 2:

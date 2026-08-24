@@ -1207,23 +1207,91 @@ a relay that actually switched. Purely additive — no protocol version bump
   unknown IO response subcommand 0x01` errors and 1 CONTROL test into an
   `AssertionError` (bare `bool` where an `OkReason` was expected).
 
-**Still open** (found while doing the above, not fixed this pass):
-- `thermo.py`/`safety.py`/`display.py` clients still only call `send()` for
-  their mutating subcommands, so THERMO's `CONFIG_CHANNEL`/
-  `SET_THRESHOLDS`/`SET_CJ_OFFSET`/`CLEAR_FAULTS`/`WRITE_REG` and SAFETY's
-  `REQUEST_ENABLE`/`SET_POLL_PERIOD`/`SET_FAULT_OUT`/`SET_CT_CAL` now get a
-  firmware-side rejection reply that nothing on the PC side waits for or
-  decodes — `parse_thermo_response`/`parse_safety_response` would still
-  raise "unknown response subcommand" on one of these frames today, the
-  same failure mode this section fixed for IO. Same treatment as
-  `set_relay()` above (a `..._REJECT_WINDOW_S`-style wait) is the shape to
-  copy; IO was prioritized because relay commands are the safety-adjacent
-  case ROADMAP.md called out first.
-- `devices.parse_profiles_response()`'s `PROFILES_CMD_DELETE`/`PAUSE`/
-  `RESUME`/`ACK_LAST_RUN`/`STOP` cases still do `bool(payload[1])` and
-  discard any reason `bx_reply_ok_err()` sent (e.g. DELETE's "cannot delete
-  a builtin profile" refusal) — same bug class as the CONTROL fix above,
-  just not reached by this pass's scope.
+**THERMO/SAFETY host-side decode closed this pass (2026-08-24)**: the claim
+above ("nothing on the PC side waits for or decodes") held for both.
+- `devices.parse_thermo_response()` gained a case for
+  `CONFIG_CHANNEL`/`SET_THRESHOLDS`/`SET_CJ_OFFSET`/`ONE_SHOT`/
+  `CLEAR_FAULTS`/`SET_AUTO_REPORT`/`WRITE_REG` (all of `thermo_bridge_task`'s
+  mutating subcommands, not just the five originally named) via the shared
+  `_decode_ok_reason()`; before this, any of those frames raised
+  `ThermoResponseError("unknown THERMO response subcommand...")`.
+  `devices.parse_safety_response()` got the matching case for
+  `REQUEST_ENABLE`/`SET_POLL_PERIOD`/`SET_FAULT_OUT`/`SET_CT_CAL`/
+  `SET_CONFIG` (the last wasn't in the original list but has the identical
+  shape and gap).
+- `thermo.py`/`safety.py`: new `config_channel()`/`set_thresholds()`/
+  `set_cj_offset()`/`one_shot()`/`clear_faults()`/`set_auto_report()`/
+  `write_reg()` on `ThermoClient`, and `request_enable()`/
+  `set_poll_period()`/`set_fault_out()`/`set_config()`/`set_ct_cal()` on
+  `SafetyClient`, all following `io_expander.py`'s `set_relay()` shape
+  exactly: send, then wait a short window (`MUTATING_REJECT_WINDOW_S`) for
+  the *optional* refusal reply — silence means it went through. `send()`'s
+  docstring on both clients now points here instead of staying silent about
+  the risk. Wired through `mcp_server.py`'s matching tools and `gui.py`'s
+  Thermo/Safety pages (new `_thermo_mutating_async()`/
+  `_safety_mutating_async()` helpers) — both previously called the generic
+  fire-and-forget `_send()`/`send_async()`, which doesn't wait for a reply
+  frame at all; a refusal would land in the client's own consumer thread
+  with nothing pending and get logged at debug level as "ignoring
+  unsolicited response", invisible to the caller either way.
+- **`display.py`'s share of the original claim was overstated.**
+  `display_bridge_task` (`uart_bridge.c`) never received *any* of 5df2190's
+  reply treatment — not truncated, not out-of-range, not driver-error; its
+  `bridge_args_ok()` failures just set `rejected = true` and `continue` with
+  no reply at all, unlike THERMO/SAFETY where the same check is followed by
+  an explicit `bridge_reply_reject()` call. So there is currently no
+  refusal frame for `parse_display_response()`/`display.py` to decode —
+  fixing the host side first would have nothing to consume. This is a wider
+  gap than the item below (which only names DISPLAY's *driver-error* path);
+  DISPLAY has no reply on *any* rejection path yet.
+- Tests: `tools/PcTools/tests/test_bridge_reject_reply.py` gained
+  `ThermoMutatingReasonTests`/`SafetyMutatingReasonTests` (byte-exact,
+  mirroring the existing `ControlSetZonePidReasonTests` idiom) plus
+  `ProfilesLifecycleReasonTests` for the item below. Negative-tested by
+  reverting each of the three `devices.py` decode blocks in turn and
+  re-running: all three produced real failures (six THERMO tests raising
+  `ThermoResponseError: unknown THERMO response subcommand 0x0A`, five
+  SAFETY tests likewise on `0x05`, six PROFILES tests either missing the
+  `OkReason` type or losing `.reason` to a bare `bool`), then were restored
+  and the suite re-confirmed green. `test_safety_ct_cal.py`/
+  `test_safety_set_config.py` had two pre-existing tests that patched
+  `mcp_server._send` directly; updated to patch the new
+  `SafetyClient.set_ct_cal()`/`set_config()` methods instead, since those
+  tools no longer go through `_send` at all.
+
+**`devices.parse_profiles_response()`'s reason-discard bug closed this
+pass**: `PROFILES_CMD_DELETE`/`PAUSE`/`RESUME`/`ACK_LAST_RUN`/`STOP` now
+return `OkReason` via `_decode_ok_reason()` instead of
+`bool(payload[1])` — same bug class as the CONTROL fix, e.g. DELETE's
+"cannot delete a builtin profile" refusal no longer vanishes.
+`profiles.py`'s `delete()`/`stop()`/`pause()`/`resume()`/`ack_last_run()`
+return `OkReason` now (still truthy/falsy-compatible); `mcp_server.py`'s and
+`gui.py`'s matching call sites surface `.reason` on refusal instead of a
+bare "REJECTED".
+
+**Still open**:
+- **SAFETY / DISPLAY / TOUCH's bottom "driver call failed" path is still
+  silent on the wire** — not fixed this pass. Read `5df2190`'s exact shape
+  before touching this: `safety_bridge_task` has a complication THERMO/IO
+  don't — `SAFETY_CMD_GET_CT_CAL` (0x1A) is a **query** whose reply shares
+  its command id with the request, distinguished only by length (1 byte
+  request vs 28-byte reply), and `parse_safety_response()`'s `GET_CT_CAL`
+  branch enforces that exact length, raising `SafetyResponseError` on
+  anything else. Blindly adding `bridge_reply_reject(..., "driver error")`
+  to the shared bottom block would make a failed `GET_CT_CAL` send a
+  ~15-byte frame that the *existing* PC-side branch misreads as a malformed
+  reply (an exception) rather than the clean refusal the fix is supposed to
+  produce — worse than today's silent timeout. Fixing this needs either
+  excluding `GET_CT_CAL` from the generic driver-error reply (keep its
+  current silent-drop-on-failure behavior, since it already has its own
+  "raises SafetyQueryError on timeout" contract PC-side) or teaching
+  `parse_safety_response()`'s `GET_CT_CAL` branch to check for the
+  `{subcmd, ok=0, reason}` shape before enforcing the 28-byte length. Not
+  attempted this pass for lack of an on-target build to verify either firmware
+  change against. DISPLAY and TOUCH don't have this particular complication
+  (no shared-id query on either task), so the plain THERMO/IO-style fix
+  should apply cleanly there — but see the note above that DISPLAY's gap is
+  actually wider than "driver-error only".
 - Two reply shapes flagged in `5df2190`'s commit message for whoever picks
   up THERMO: `THERMO_CMD_READ_FAULTS` and `IO_CMD_SX_SCAN` both use byte[1]
   as a count that can legitimately be 0, so their empty-success reply is
@@ -1231,13 +1299,3 @@ a relay that actually switched. Purely additive — no protocol version bump
   carries a reason today, so reply *length* still tells them apart — but a
   decoder that only checks byte[1] would misread an honest empty result as
   a refusal.
-- Audited while doing this pass: `5df2190` gave THERMO and IO a reply for
-  the "reached the driver call and it failed there" case too (both tasks'
-  bottom `if (err != ESP_OK)` block now calls `bridge_reply_reject(...,
-  "driver error")`). SAFETY, DISPLAY and TOUCH (`uart_bridge.c`'s
-  `safety_bridge_task`/`display_bridge_task`/`touch_bridge_task`) were not
-  touched by that commit and still only `ESP_LOGW()` + `continue` on that
-  same case — a PC client talking to one of those three still gets a
-  reply timeout, not a fabricated value, if an otherwise-valid,
-  otherwise-accepted command's driver call fails. Same fix shape as
-  THERMO/IO's driver-error reply, not yet applied there.

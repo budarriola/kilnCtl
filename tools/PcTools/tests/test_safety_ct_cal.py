@@ -153,21 +153,43 @@ class SafetyCtCalParseTests(unittest.TestCase):
 
 
 class SafetySetCtCalToolTests(unittest.TestCase):
+    # 2026-08-24: safety_set_ct_cal() now goes through
+    # SafetyClient.set_ct_cal() (waits a short window for the optional
+    # ESP-side refusal reply -- ROADMAP.md "KilnFW PC-link command
+    # acknowledgement") instead of the raw fire-and-forget mcp_server._send.
+    # These patch SafetyClient.set_ct_cal directly rather than _send.
     def test_sends_expected_bytes(self):
-        with unittest.mock.patch.object(mcp_server, "_send", return_value="ok") as mock_send:
+        with unittest.mock.patch.object(
+            mcp_server._safety, "set_ct_cal", return_value=devices.OkReason(ok=True)
+        ) as mock_set_ct_cal:
             result = mcp_server.safety_set_ct_cal(2, True, 1.0, 0.0)
-        self.assertEqual(result, "ok")
-        mock_send.assert_called_once()
-        _task_id, payload = mock_send.call_args.args
-        self.assertEqual(
-            payload, bytes([0x19, 0x02, 0x01, 0x00, 0x00, 0x80, 0x3F, 0x00, 0x00, 0x00, 0x00])
-        )
+        self.assertTrue(result.startswith("ok"))
+        mock_set_ct_cal.assert_called_once_with(2, True, 1.0, 0.0)
 
-    def test_out_of_range_channel_never_reaches_send(self):
-        with unittest.mock.patch.object(mcp_server, "_send") as mock_send:
+    def test_out_of_range_channel_never_reaches_the_link(self):
+        # devices.safety_set_ct_cal() validates the channel range while
+        # building the payload, inside SafetyClient.set_ct_cal() -- one layer
+        # deeper than before this pass, but still before anything touches the
+        # wire. Patch the link itself (not set_ct_cal, which would mock the
+        # validation away too) to prove that.
+        with unittest.mock.patch.object(mcp_server._link, "send") as mock_send:
             result = mcp_server.safety_set_ct_cal(5, True, 1.0, 0.0)
         mock_send.assert_not_called()
         self.assertTrue(result.startswith("error:"))
+
+    def test_refusal_reason_reaches_the_caller(self):
+        # The regression this pass fixes: a truncated/out-of-range refusal
+        # used to be silently dropped in SafetyClient's own consumer thread
+        # (mcp_server called the fire-and-forget _send, which never waited
+        # for the reply). Now it must show up in the returned string.
+        with unittest.mock.patch.object(
+            mcp_server._safety,
+            "set_ct_cal",
+            return_value=devices.OkReason(ok=False, reason="out of range"),
+        ):
+            result = mcp_server.safety_set_ct_cal(2, True, 1.0, 0.0)
+        self.assertTrue(result.startswith("refused"))
+        self.assertIn("out of range", result)
 
 
 class SafetyGetCtCalToolTests(unittest.TestCase):

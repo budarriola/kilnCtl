@@ -31,6 +31,20 @@ from kilnctrl.protocol import (  # noqa: E402
     CONTROL_CMD_SET_ZONE_PID,
     IO_CMD_SET_RELAY,
     IO_CMD_SET_RELAY_MASK,
+    PROFILES_CMD_ACK_LAST_RUN,
+    PROFILES_CMD_DELETE,
+    PROFILES_CMD_PAUSE,
+    PROFILES_CMD_RESUME,
+    PROFILES_CMD_STOP,
+    SAFETY_CMD_REQUEST_ENABLE,
+    SAFETY_CMD_SET_CT_CAL,
+    SAFETY_CMD_SET_FAULT_OUT,
+    SAFETY_CMD_SET_POLL_PERIOD,
+    THERMO_CMD_CLEAR_FAULTS,
+    THERMO_CMD_CONFIG_CHANNEL,
+    THERMO_CMD_SET_CJ_OFFSET,
+    THERMO_CMD_SET_THRESHOLDS,
+    THERMO_CMD_WRITE_REG,
 )
 
 
@@ -176,6 +190,174 @@ class IoSetRelayRefusalTests(unittest.TestCase):
         )
         self.assertFalse(refusal_value.ok)
         self.assertNotEqual(refusal_value.ok, True)
+
+
+class ThermoMutatingReasonTests(unittest.TestCase):
+    """THERMO's mutating subcommands (CONFIG_CHANNEL/SET_THRESHOLDS/
+    SET_CJ_OFFSET/CLEAR_FAULTS/WRITE_REG, etc) had NO reply at all before
+    firmware commit 5df2190 -- thermo_bridge_task() fell straight through to
+    the shared "log and drop" handling. parse_thermo_response() therefore
+    used to raise ThermoResponseError("unknown THERMO response subcommand")
+    for any frame carrying one of these subcmds; this is the PC-side half
+    that decodes the reply the firmware now sends instead."""
+
+    def test_config_channel_success_decodes_ok_true(self):
+        subcmd, value = devices.parse_thermo_response(_ok_frame(THERMO_CMD_CONFIG_CHANNEL))
+        self.assertEqual(subcmd, THERMO_CMD_CONFIG_CHANNEL)
+        self.assertIsInstance(value, devices.OkReason)
+        self.assertTrue(value.ok)
+
+    def test_config_channel_out_of_range_reason_preserved(self):
+        subcmd, value = devices.parse_thermo_response(
+            _reject_frame(THERMO_CMD_CONFIG_CHANNEL, "out of range")
+        )
+        self.assertEqual(subcmd, THERMO_CMD_CONFIG_CHANNEL)
+        self.assertFalse(value.ok)
+        self.assertEqual(value.reason, "out of range")
+
+    def test_set_thresholds_truncated_reason_preserved(self):
+        subcmd, value = devices.parse_thermo_response(
+            _reject_frame(THERMO_CMD_SET_THRESHOLDS, "truncated")
+        )
+        self.assertEqual(subcmd, THERMO_CMD_SET_THRESHOLDS)
+        self.assertFalse(value.ok)
+        self.assertEqual(value.reason, "truncated")
+
+    def test_set_cj_offset_driver_error_reason_preserved(self):
+        subcmd, value = devices.parse_thermo_response(
+            _reject_frame(THERMO_CMD_SET_CJ_OFFSET, "driver error")
+        )
+        self.assertEqual(subcmd, THERMO_CMD_SET_CJ_OFFSET)
+        self.assertFalse(value.ok)
+        self.assertEqual(value.reason, "driver error")
+
+    def test_clear_faults_refusal_decodes_not_raises(self):
+        subcmd, value = devices.parse_thermo_response(
+            _reject_frame(THERMO_CMD_CLEAR_FAULTS, "out of range")
+        )
+        self.assertEqual(subcmd, THERMO_CMD_CLEAR_FAULTS)
+        self.assertFalse(value.ok)
+
+    def test_write_reg_refusal_decodes_not_raises(self):
+        subcmd, value = devices.parse_thermo_response(
+            _reject_frame(THERMO_CMD_WRITE_REG, "out of range")
+        )
+        self.assertEqual(subcmd, THERMO_CMD_WRITE_REG)
+        self.assertFalse(value.ok)
+        self.assertEqual(value.reason, "out of range")
+
+
+class SafetyMutatingReasonTests(unittest.TestCase):
+    """SAFETY's REQUEST_ENABLE/SET_POLL_PERIOD/SET_FAULT_OUT/SET_CT_CAL had
+    truncated/out-of-range guards added to safety_bridge_task() alongside
+    THERMO/IO (5df2190's commit message: "truncated args and out-of-range
+    args across THERMO/IO/SAFETY"), but nothing on the PC side waited for or
+    decoded the reply -- parse_safety_response() had no case for any of
+    these subcmds at all."""
+
+    def test_request_enable_success_decodes_ok_true(self):
+        subcmd, value = devices.parse_safety_response(_ok_frame(SAFETY_CMD_REQUEST_ENABLE))
+        self.assertEqual(subcmd, SAFETY_CMD_REQUEST_ENABLE)
+        self.assertIsInstance(value, devices.OkReason)
+        self.assertTrue(value.ok)
+
+    def test_request_enable_truncated_reason_preserved(self):
+        subcmd, value = devices.parse_safety_response(
+            _reject_frame(SAFETY_CMD_REQUEST_ENABLE, "truncated")
+        )
+        self.assertEqual(subcmd, SAFETY_CMD_REQUEST_ENABLE)
+        self.assertFalse(value.ok)
+        self.assertEqual(value.reason, "truncated")
+
+    def test_set_poll_period_truncated_reason_preserved(self):
+        subcmd, value = devices.parse_safety_response(
+            _reject_frame(SAFETY_CMD_SET_POLL_PERIOD, "truncated")
+        )
+        self.assertEqual(subcmd, SAFETY_CMD_SET_POLL_PERIOD)
+        self.assertFalse(value.ok)
+        self.assertEqual(value.reason, "truncated")
+
+    def test_set_fault_out_truncated_reason_preserved(self):
+        subcmd, value = devices.parse_safety_response(
+            _reject_frame(SAFETY_CMD_SET_FAULT_OUT, "truncated")
+        )
+        self.assertEqual(subcmd, SAFETY_CMD_SET_FAULT_OUT)
+        self.assertFalse(value.ok)
+        self.assertEqual(value.reason, "truncated")
+
+    def test_set_ct_cal_out_of_range_reason_preserved(self):
+        subcmd, value = devices.parse_safety_response(
+            _reject_frame(SAFETY_CMD_SET_CT_CAL, "out of range")
+        )
+        self.assertEqual(subcmd, SAFETY_CMD_SET_CT_CAL)
+        self.assertFalse(value.ok)
+        self.assertEqual(value.reason, "out of range")
+
+
+class ProfilesLifecycleReasonTests(unittest.TestCase):
+    """DELETE/PAUSE/RESUME/ACK_LAST_RUN/STOP used to decode the reply and
+    then discard everything but the ok byte
+    (``return subcommand, bool(payload[1])``) -- the same bug class as
+    CONTROL's SET_ZONE_PID/SET_ZONE_MODEL fix above, just not reached by
+    that pass's scope. e.g. DELETE's "cannot delete a builtin profile"
+    refusal used to vanish entirely."""
+
+    def test_delete_success_decodes_ok_true(self):
+        subcmd, value = devices.parse_profiles_response(_ok_frame(PROFILES_CMD_DELETE))
+        self.assertEqual(subcmd, PROFILES_CMD_DELETE)
+        self.assertIsInstance(value, devices.OkReason)
+        self.assertTrue(value.ok)
+
+    def test_delete_reason_is_preserved_not_discarded(self):
+        subcmd, value = devices.parse_profiles_response(
+            _reject_frame(PROFILES_CMD_DELETE, "cannot delete a builtin profile")
+        )
+        self.assertEqual(subcmd, PROFILES_CMD_DELETE)
+        self.assertFalse(value.ok)
+        # This is the assertion that fails if the fix is reverted to
+        # `bool(payload[1])`: the reason text would vanish entirely.
+        self.assertEqual(value.reason, "cannot delete a builtin profile")
+
+    def test_pause_reason_is_preserved(self):
+        subcmd, value = devices.parse_profiles_response(
+            _reject_frame(PROFILES_CMD_PAUSE, "nothing running")
+        )
+        self.assertEqual(subcmd, PROFILES_CMD_PAUSE)
+        self.assertFalse(value.ok)
+        self.assertEqual(value.reason, "nothing running")
+
+    def test_resume_reason_is_preserved(self):
+        subcmd, value = devices.parse_profiles_response(
+            _reject_frame(PROFILES_CMD_RESUME, "nothing paused")
+        )
+        self.assertEqual(subcmd, PROFILES_CMD_RESUME)
+        self.assertFalse(value.ok)
+        self.assertEqual(value.reason, "nothing paused")
+
+    def test_ack_last_run_reason_is_preserved(self):
+        subcmd, value = devices.parse_profiles_response(
+            _reject_frame(PROFILES_CMD_ACK_LAST_RUN, "nothing to acknowledge")
+        )
+        self.assertEqual(subcmd, PROFILES_CMD_ACK_LAST_RUN)
+        self.assertFalse(value.ok)
+        self.assertEqual(value.reason, "nothing to acknowledge")
+
+    def test_stop_reason_is_preserved(self):
+        subcmd, value = devices.parse_profiles_response(
+            _reject_frame(PROFILES_CMD_STOP, "nothing running to stop")
+        )
+        self.assertEqual(subcmd, PROFILES_CMD_STOP)
+        self.assertFalse(value.ok)
+        self.assertEqual(value.reason, "nothing running to stop")
+
+    def test_ok_reason_falsy_on_refusal_bool_compat(self):
+        # OkReason must still satisfy `if not result:` the way the old bare
+        # bool did, so pre-existing call sites that only check truthiness
+        # keep working unchanged.
+        _subcmd, value = devices.parse_profiles_response(
+            _reject_frame(PROFILES_CMD_DELETE, "whatever")
+        )
+        self.assertFalse(value)
 
 
 if __name__ == "__main__":

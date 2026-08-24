@@ -41,6 +41,7 @@ from typing import Optional
 
 from . import devices
 from .devices import (
+    OkReason,
     SafetyCtCal,
     SafetyDiag,
     SafetyFwVersion,
@@ -56,6 +57,11 @@ from .protocol import (
     SAFETY_CMD_GET_LINK_STATS,
     SAFETY_CMD_GET_STATUS,
     SAFETY_CMD_GET_TRIP_EVENT,
+    SAFETY_CMD_REQUEST_ENABLE,
+    SAFETY_CMD_SET_CONFIG,
+    SAFETY_CMD_SET_CT_CAL,
+    SAFETY_CMD_SET_FAULT_OUT,
+    SAFETY_CMD_SET_POLL_PERIOD,
     UART_TASK_ID_SAFETY,
     Device,
     Frame,
@@ -68,6 +74,16 @@ log = logging.getLogger(__name__)
 #: Both queries are answered from ESP-side state, so this only has to cover
 #: one more UART round trip -- not the isolated link's own poll period.
 DEFAULT_REPLY_TIMEOUT_S = 2.0
+
+#: How long the mutating-command helpers below wait for an *optional*
+#: refusal reply before concluding the command went through. Same shape and
+#: reasoning as io_expander.py's SET_RELAY_REJECT_WINDOW_S: safety_bridge_task()
+#: replies nothing on success for any of these (they're either a local state
+#: change or a fire-and-forget broadcast to the Pico) and replies
+#: {subcmd, ok=0, reason} only for a "truncated"/"out of range" argument
+#: caught before anything was sent -- decided synchronously, no isolated-link
+#: round trip on the refusal path itself, so a short window is enough.
+MUTATING_REJECT_WINDOW_S = 0.5
 
 #: GET_CT_CAL's reply timeout. UNLIKE every other query on this task, the
 #: ESP does not answer from a cache -- uart_bridge.c's SAFETY_CMD_GET_CT_CAL
@@ -142,10 +158,120 @@ class SafetyClient:
 
     # -- writes ------------------------------------------------------------
     def send(self, payload: bytes) -> SendResult:
-        """Send one non-query subcommand payload (built by ``devices.py``)."""
+        """Send one non-query subcommand payload (built by ``devices.py``).
+
+        Fire-and-forget: the returned :class:`SendResult` proves delivery to
+        the task's inbox only. Prefer :meth:`request_enable`/
+        :meth:`set_poll_period`/:meth:`set_fault_out`/:meth:`set_ct_cal`/
+        :meth:`set_config` instead -- they wait out a short window for the
+        optional refusal reply safety_bridge_task() now sends on a truncated
+        frame or an out-of-range argument (ROADMAP.md "KilnFW PC-link command
+        acknowledgement"). Note that reply only ever covers that ESP-side
+        argument check -- a refusal decided *on the Pico* (relay ARMED, an
+        unrecognised tc_type, ...) still isn't returned here; read that back
+        from the next status/diag/ct_cal poll, same as before.
+        """
         return self.link.send(
             dst_task=self.task_id, src_task=self.task_id, payload=payload
         )
+
+    def request_enable(
+        self, enable: bool, timeout: float = MUTATING_REJECT_WINDOW_S
+    ) -> OkReason:
+        """0x02 REQUEST_ENABLE, and learn *why* if the ESP refuses outright.
+
+        Advisory to the Pico either way -- its own interlocks always win, and
+        that outcome is never reflected in this reply (see :meth:`send`'s
+        docstring).
+        """
+        return self._send_reject_window(
+            SAFETY_CMD_REQUEST_ENABLE, devices.safety_request_enable(enable), timeout
+        )
+
+    def set_poll_period(
+        self, period_ms: int, timeout: float = MUTATING_REJECT_WINDOW_S
+    ) -> OkReason:
+        """0x05 SET_POLL_PERIOD, and learn *why* if the ESP refuses outright."""
+        return self._send_reject_window(
+            SAFETY_CMD_SET_POLL_PERIOD, devices.safety_set_poll_period(period_ms), timeout
+        )
+
+    def set_fault_out(
+        self, assert_fault: bool, timeout: float = MUTATING_REJECT_WINDOW_S
+    ) -> OkReason:
+        """0x06 SET_FAULT_OUT, and learn *why* if the ESP refuses outright."""
+        return self._send_reject_window(
+            SAFETY_CMD_SET_FAULT_OUT, devices.safety_set_fault_out(assert_fault), timeout
+        )
+
+    def set_config(
+        self, tc_type: int, timeout: float = MUTATING_REJECT_WINDOW_S
+    ) -> OkReason:
+        """0x16 SET_CONFIG, and learn *why* if the ESP refuses outright.
+
+        Still fire-and-forget as far as the Pico's own say-so is concerned
+        (see :func:`devices.safety_set_config`'s docstring) -- this only
+        additionally catches a truncated frame or an out-of-range tc_type on
+        the ESP side, before it would have reached the Pico at all.
+        """
+        return self._send_reject_window(
+            SAFETY_CMD_SET_CONFIG, devices.safety_set_config(tc_type), timeout
+        )
+
+    def set_ct_cal(
+        self,
+        channel: int,
+        calibrated: bool,
+        gain: float,
+        offset: float,
+        timeout: float = MUTATING_REJECT_WINDOW_S,
+    ) -> OkReason:
+        """0x19 SET_CT_CAL, and learn *why* if the ESP refuses outright.
+
+        Still fire-and-forget as far as the Pico's own say-so is concerned
+        (relay ARMED, or an out-of-range channel it independently rejects --
+        see :func:`devices.safety_set_ct_cal`'s docstring); this only
+        additionally catches a truncated frame or an out-of-range channel on
+        the ESP side. Read the outcome from the next :meth:`get_ct_cal` call
+        either way.
+        """
+        return self._send_reject_window(
+            SAFETY_CMD_SET_CT_CAL,
+            devices.safety_set_ct_cal(channel, calibrated, gain, offset),
+            timeout,
+        )
+
+    def _send_reject_window(self, subcommand: int, payload: bytes, timeout: float) -> OkReason:
+        """Send a mutating subcommand and wait out ``timeout`` for the
+        *optional* refusal reply, same shape as io_expander.py's
+        ``_set_relay_style``: a reply within the window IS the refusal;
+        silence means the command went through (at least as far as the ESP
+        is concerned).
+        """
+        with self._query_lock:
+            pending = _Pending(subcommand)
+            with self._pending_lock:
+                self._pending = pending
+            try:
+                result = self.link.send(
+                    dst_task=self.task_id,
+                    src_task=self.task_id,
+                    payload=payload,
+                    dst_device=Device.ESP,
+                )
+                if not result.ok:
+                    raise SafetyQueryError(
+                        f"SAFETY request 0x{subcommand:02X} not delivered: "
+                        f"{result.describe()}",
+                        send_result=result,
+                    )
+                if pending.event.wait(timeout):
+                    return pending.value  # type: ignore[return-value]
+                return OkReason(ok=True)
+            finally:
+                with self._pending_lock:
+                    if self._pending is pending:
+                        self._pending = None
 
     # -- queries -----------------------------------------------------------
     def get_status(self, timeout: float = DEFAULT_REPLY_TIMEOUT_S) -> SafetyStatus:
@@ -225,13 +351,6 @@ class SafetyClient:
         """
         value = self._query(SAFETY_CMD_GET_CT_CAL, devices.safety_get_ct_cal(), timeout)
         return value  # type: ignore[return-value]
-
-    def set_ct_cal(self, channel: int, calibrated: bool, gain: float, offset: float) -> SendResult:
-        """Commission one CT channel's calibration. Fire-and-forget: no reply
-        on the wire, delivery only (see :func:`devices.safety_set_ct_cal`).
-        Read the outcome from the next :meth:`get_ct_cal` call.
-        """
-        return self.send(devices.safety_set_ct_cal(channel, calibrated, gain, offset))
 
     def _query(self, subcommand: int, payload: bytes, timeout: float) -> object:
         with self._query_lock:

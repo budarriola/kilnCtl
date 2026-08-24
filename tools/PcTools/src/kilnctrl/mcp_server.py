@@ -1045,10 +1045,14 @@ def thermo_config_channel(
     60 Hz. `auto_convert` false selects one-shot mode, where nothing converts
     until thermo_one_shot().
     """
-    return _send(
-        UART_TASK_ID_THERMO,
-        devices.thermo_config_channel(channel, tc_type, avg_mode, filter_50hz, auto_convert),
-    )
+    try:
+        result = _thermo.config_channel(channel, tc_type, avg_mode, filter_50hz, auto_convert)
+    except ThermoQueryError as exc:
+        return f"error: {exc}"
+    if result.ok:
+        return f"ok - channel {channel} configured"
+    detail = f": {result.reason}" if result.reason else ""
+    return f"refused - could not configure channel {channel}{detail}"
 
 
 @_tool()
@@ -1056,22 +1060,40 @@ def thermo_set_thresholds(
     channel: int, tc_high: float, tc_low: float, cj_high: int, cj_low: int
 ) -> str:
     """Set one channel's TC high/low trip temperatures and CJ high/low limits (degC)."""
-    return _send(
-        UART_TASK_ID_THERMO,
-        devices.thermo_set_thresholds(channel, tc_high, tc_low, cj_high, cj_low),
-    )
+    try:
+        result = _thermo.set_thresholds(channel, tc_high, tc_low, cj_high, cj_low)
+    except ThermoQueryError as exc:
+        return f"error: {exc}"
+    if result.ok:
+        return f"ok - channel {channel} thresholds set"
+    detail = f": {result.reason}" if result.reason else ""
+    return f"refused - could not set channel {channel} thresholds{detail}"
 
 
 @_tool()
 def thermo_set_cj_offset(channel: int, offset_c: float) -> str:
     """Set one channel's cold-junction offset in degC (-8..+8)."""
-    return _send(UART_TASK_ID_THERMO, devices.thermo_set_cj_offset(channel, offset_c))
+    try:
+        result = _thermo.set_cj_offset(channel, offset_c)
+    except ThermoQueryError as exc:
+        return f"error: {exc}"
+    if result.ok:
+        return f"ok - channel {channel} CJ offset set"
+    detail = f": {result.reason}" if result.reason else ""
+    return f"refused - could not set channel {channel} CJ offset{detail}"
 
 
 @_tool()
 def thermo_one_shot(channel: int) -> str:
     """Trigger a single conversion on one channel (poll with thermo_read after)."""
-    return _send(UART_TASK_ID_THERMO, devices.thermo_one_shot(channel))
+    try:
+        result = _thermo.one_shot(channel)
+    except ThermoQueryError as exc:
+        return f"error: {exc}"
+    if result.ok:
+        return f"ok - one-shot triggered on channel {channel}"
+    detail = f": {result.reason}" if result.reason else ""
+    return f"refused - could not trigger one-shot on channel {channel}{detail}"
 
 
 @_tool()
@@ -1081,7 +1103,14 @@ def thermo_clear_faults(channel: int) -> str:
     Only meaningful in the part's interrupt fault mode; in the comparator mode
     this driver uses, fault bits clear themselves when the condition clears.
     """
-    return _send(UART_TASK_ID_THERMO, devices.thermo_clear_faults(channel))
+    try:
+        result = _thermo.clear_faults(channel)
+    except ThermoQueryError as exc:
+        return f"error: {exc}"
+    if result.ok:
+        return f"ok - channel {channel} faults cleared"
+    detail = f": {result.reason}" if result.reason else ""
+    return f"refused - could not clear channel {channel} faults{detail}"
 
 
 @_tool()
@@ -1091,9 +1120,14 @@ def thermo_set_auto_report(channel_mask: int = 0x07, period_ms: int = 1000) -> s
     Bit N of `channel_mask` selects channel N; `period_ms` 0 turns it off.
     Pushed readings are buffered here -- read them with thermo_get_reports().
     """
-    return _send(
-        UART_TASK_ID_THERMO, devices.thermo_set_auto_report(channel_mask, period_ms)
-    )
+    try:
+        result = _thermo.set_auto_report(channel_mask, period_ms)
+    except ThermoQueryError as exc:
+        return f"error: {exc}"
+    if result.ok:
+        return f"ok - auto-report mask 0x{channel_mask:02X} period {period_ms} ms"
+    detail = f": {result.reason}" if result.reason else ""
+    return f"refused - could not set auto-report{detail}"
 
 
 @_tool()
@@ -1126,7 +1160,14 @@ def thermo_read_reg(channel: int, reg: int, length: int = 1) -> str:
 @_tool()
 def thermo_write_reg(channel: int, reg: int, value: int) -> str:
     """Raw MAX31856 register write on one channel (debug)."""
-    return _send(UART_TASK_ID_THERMO, devices.thermo_write_reg(channel, reg, value))
+    try:
+        result = _thermo.write_reg(channel, reg, value)
+    except ThermoQueryError as exc:
+        return f"error: {exc}"
+    if result.ok:
+        return f"ok - channel {channel} reg 0x{reg:02X} written"
+    detail = f": {result.reason}" if result.reason else ""
+    return f"refused - could not write channel {channel} reg 0x{reg:02X}{detail}"
 
 
 # ---------------------------------------------------------------------------
@@ -1620,9 +1661,19 @@ def safety_get_link_stats() -> str:
 def safety_request_enable(enable: bool) -> str:
     """Ask the safety processor to permit (or drop) heating.
 
-    Advisory only: the Pico can refuse, and its own interlocks always win.
+    Advisory only: the Pico can refuse, and its own interlocks always win --
+    that outcome never comes back here. What this DOES report is an ESP-side
+    refusal (a truncated frame) caught before the request ever reached the
+    Pico.
     """
-    return _send(UART_TASK_ID_SAFETY, devices.safety_request_enable(enable))
+    try:
+        result = _safety.request_enable(enable)
+    except SafetyQueryError as exc:
+        return f"error: {exc}"
+    if result.ok:
+        return f"ok - requested enable={enable}"
+    detail = f": {result.reason}" if result.reason else ""
+    return f"refused - could not request enable={enable}{detail}"
 
 
 @_tool()
@@ -1634,7 +1685,14 @@ def safety_ping() -> str:
 @_tool()
 def safety_set_poll_period(period_ms: int) -> str:
     """Set how often the ESP polls the safety processor, in ms (0 stops polling)."""
-    return _send(UART_TASK_ID_SAFETY, devices.safety_set_poll_period(period_ms))
+    try:
+        result = _safety.set_poll_period(period_ms)
+    except SafetyQueryError as exc:
+        return f"error: {exc}"
+    if result.ok:
+        return f"ok - poll period {period_ms} ms"
+    detail = f": {result.reason}" if result.reason else ""
+    return f"refused - could not set poll period{detail}"
 
 
 @_tool()
@@ -1649,7 +1707,14 @@ def safety_set_fault_out(assert_fault: bool) -> str:
     The firmware asserts this by itself on PC-link loss, a thermocouple fault
     or a watchdog trip; this tool is a manual override of that.
     """
-    return _send(UART_TASK_ID_SAFETY, devices.safety_set_fault_out(assert_fault))
+    try:
+        result = _safety.set_fault_out(assert_fault)
+    except SafetyQueryError as exc:
+        return f"error: {exc}"
+    if result.ok:
+        return f"ok - fault out={assert_fault}"
+    detail = f": {result.reason}" if result.reason else ""
+    return f"refused - could not set fault out{detail}"
 
 
 @_tool()
@@ -1694,7 +1759,14 @@ def safety_set_tc_type(tc_type_name: str) -> str:
     if name not in devices.SAFETY_TC_TYPE_NAMES:
         known = ", ".join(sorted(devices.SAFETY_TC_TYPE_NAMES))
         return f"error: unknown tc_type_name {tc_type_name!r} -- expected one of {known}"
-    return _send(UART_TASK_ID_SAFETY, devices.safety_set_config(devices.SAFETY_TC_TYPE_NAMES[name]))
+    try:
+        result = _safety.set_config(devices.SAFETY_TC_TYPE_NAMES[name])
+    except SafetyQueryError as exc:
+        return f"error: {exc}"
+    if result.ok:
+        return f"ok - requested tc_type {name}"
+    detail = f": {result.reason}" if result.reason else ""
+    return f"refused - could not set tc_type{detail}"
 
 
 @_tool()
@@ -1713,9 +1785,14 @@ def safety_set_ct_cal(channel: int, calibrated: bool, gain: float, offset: float
     out-of-range channel) shows up only in the Pico's own log, not here --
     call safety_get_ct_cal() afterward to see whether it actually took.
     """
-    return _send(
-        UART_TASK_ID_SAFETY, devices.safety_set_ct_cal(channel, calibrated, gain, offset)
-    )
+    try:
+        result = _safety.set_ct_cal(channel, calibrated, gain, offset)
+    except SafetyQueryError as exc:
+        return f"error: {exc}"
+    if result.ok:
+        return f"ok - requested CT ch{channel} calibration"
+    detail = f": {result.reason}" if result.reason else ""
+    return f"refused - could not set CT ch{channel} calibration{detail}"
 
 
 @_tool()
@@ -2577,10 +2654,13 @@ def profiles_delete(profile_id: int) -> str:
             f"deleted; hide it instead (web UI / POST /api/profile/builtin/hide)"
         )
     try:
-        ok = _profiles.delete(profile_id)
+        result = _profiles.delete(profile_id)
     except (ProfilesQueryError, ValueError) as exc:
         return f"error: {exc}"
-    return f"ok - deleted #{profile_id}" if ok else f"refused - could not delete #{profile_id}"
+    if result.ok:
+        return f"ok - deleted #{profile_id}"
+    detail = f": {result.reason}" if result.reason else ""
+    return f"refused - could not delete #{profile_id}{detail}"
 
 
 @_tool()
@@ -2630,40 +2710,52 @@ def profiles_start(profile_id: int) -> str:
 def profiles_stop() -> str:
     """Stop the current firing. Relays off."""
     try:
-        ok = _profiles.stop()
+        result = _profiles.stop()
     except ProfilesQueryError as exc:
         return f"error: {exc}"
-    return "ok - stopped" if ok else "refused - nothing running to stop"
+    if result.ok:
+        return "ok - stopped"
+    detail = f": {result.reason}" if result.reason else ""
+    return f"refused - nothing running to stop{detail}"
 
 
 @_tool()
 def profiles_pause() -> str:
     """Pause the current firing (holds state; does not turn off heat outright)."""
     try:
-        ok = _profiles.pause()
+        result = _profiles.pause()
     except ProfilesQueryError as exc:
         return f"error: {exc}"
-    return "ok - paused" if ok else "refused - nothing running to pause"
+    if result.ok:
+        return "ok - paused"
+    detail = f": {result.reason}" if result.reason else ""
+    return f"refused - nothing running to pause{detail}"
 
 
 @_tool()
 def profiles_resume() -> str:
     """Resume a paused firing."""
     try:
-        ok = _profiles.resume()
+        result = _profiles.resume()
     except ProfilesQueryError as exc:
         return f"error: {exc}"
-    return "ok - resumed" if ok else "refused - nothing paused to resume"
+    if result.ok:
+        return "ok - resumed"
+    detail = f": {result.reason}" if result.reason else ""
+    return f"refused - nothing paused to resume{detail}"
 
 
 @_tool()
 def profiles_ack_last_run() -> str:
     """Acknowledge the last completed/faulted run, clearing it so a new one can start."""
     try:
-        ok = _profiles.ack_last_run()
+        result = _profiles.ack_last_run()
     except ProfilesQueryError as exc:
         return f"error: {exc}"
-    return "ok - acknowledged" if ok else "refused - nothing to acknowledge"
+    if result.ok:
+        return "ok - acknowledged"
+    detail = f": {result.reason}" if result.reason else ""
+    return f"refused - nothing to acknowledge{detail}"
 
 
 # ---------------------------------------------------------------------------

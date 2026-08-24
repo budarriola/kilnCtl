@@ -17,7 +17,7 @@ import threading
 from typing import Optional
 
 from . import devices
-from .devices import ProfileDetail, ProfileExecStatus, ProfileSaveResult, ProfileSegment, ProfileSummary, ProfilesResponseError
+from .devices import OkReason, ProfileDetail, ProfileExecStatus, ProfileSaveResult, ProfileSegment, ProfileSummary, ProfilesResponseError
 from .protocol import (
     PROFILES_CMD_ACK_LAST_RUN,
     PROFILES_CMD_DELETE,
@@ -124,7 +124,7 @@ class ProfilesClient:
             PROFILES_CMD_SAVE, devices.profiles_save(profile_id, name, zone_mask, segments), timeout
         )  # type: ignore[return-value]
 
-    def delete(self, profile_id: int, timeout: float = DEFAULT_REPLY_TIMEOUT_S) -> bool:
+    def delete(self, profile_id: int, timeout: float = DEFAULT_REPLY_TIMEOUT_S) -> OkReason:
         return self._query(PROFILES_CMD_DELETE, devices.profiles_delete(profile_id), timeout)  # type: ignore[return-value]
 
     def get_exec_status(self, timeout: float = DEFAULT_REPLY_TIMEOUT_S) -> ProfileExecStatus:
@@ -135,16 +135,16 @@ class ProfilesClient:
     def start(self, profile_id: int, timeout: float = DEFAULT_REPLY_TIMEOUT_S) -> ProfileSaveResult:
         return self._query(PROFILES_CMD_START, devices.profiles_start(profile_id), timeout)  # type: ignore[return-value]
 
-    def stop(self, timeout: float = DEFAULT_REPLY_TIMEOUT_S) -> bool:
+    def stop(self, timeout: float = DEFAULT_REPLY_TIMEOUT_S) -> OkReason:
         return self._query(PROFILES_CMD_STOP, devices.profiles_stop(), timeout)  # type: ignore[return-value]
 
-    def pause(self, timeout: float = DEFAULT_REPLY_TIMEOUT_S) -> bool:
+    def pause(self, timeout: float = DEFAULT_REPLY_TIMEOUT_S) -> OkReason:
         return self._query(PROFILES_CMD_PAUSE, devices.profiles_pause(), timeout)  # type: ignore[return-value]
 
-    def resume(self, timeout: float = DEFAULT_REPLY_TIMEOUT_S) -> bool:
+    def resume(self, timeout: float = DEFAULT_REPLY_TIMEOUT_S) -> OkReason:
         return self._query(PROFILES_CMD_RESUME, devices.profiles_resume(), timeout)  # type: ignore[return-value]
 
-    def ack_last_run(self, timeout: float = DEFAULT_REPLY_TIMEOUT_S) -> bool:
+    def ack_last_run(self, timeout: float = DEFAULT_REPLY_TIMEOUT_S) -> OkReason:
         return self._query(PROFILES_CMD_ACK_LAST_RUN, devices.profiles_ack_last_run(), timeout)  # type: ignore[return-value]
 
     def _query(self, subcommand: int, payload: bytes, timeout: float) -> object:

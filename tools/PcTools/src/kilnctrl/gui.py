@@ -51,6 +51,7 @@ from .devices import (
     FirmwareVersion,
     IoState,
     LogLine,
+    OkReason,
     PinConfigEntry,
     ProfileSegment,
     SafetyStatus,
@@ -1072,10 +1073,13 @@ class KilnCtrlApp:
         if not messagebox.askyesno("Delete profile", f"Delete profile {pid}?", parent=self.root):
             return
 
-        def apply(ok: bool) -> None:
+        def apply(result) -> None:
             if self._is_open("profiles"):
-                self.profiles_status_var.set(f"Delete {pid}: {'ok' if ok else 'REJECTED'}.")
-                if ok:
+                detail = f" ({result.reason})" if not result.ok and result.reason else ""
+                self.profiles_status_var.set(
+                    f"Delete {pid}: {'ok' if result.ok else 'REJECTED'}{detail}."
+                )
+                if result.ok:
                     self.profiles_refresh_async()
 
         self.query_async(
@@ -1128,9 +1132,12 @@ class KilnCtrlApp:
         )
 
     def _profile_exec_action(self, description: str, action) -> None:
-        def apply(ok: bool) -> None:
+        def apply(result) -> None:
             if self._is_open("profiles"):
-                self.profiles_status_var.set(f"{description}: {'ok' if ok else 'REJECTED'}.")
+                detail = f" ({result.reason})" if not result.ok and result.reason else ""
+                self.profiles_status_var.set(
+                    f"{description}: {'ok' if result.ok else 'REJECTED'}{detail}."
+                )
                 self.profiles_refresh_exec_status_async()
 
         self.query_async(description, action, apply, error_types=(ProfilesQueryError,))
@@ -2258,20 +2265,16 @@ class KilnCtrlApp:
                 live,
                 text="One Shot",
                 width=9,
-                command=lambda c=channel: self.send_async(
-                    f"Thermo CH{c} one-shot",
-                    UART_TASK_ID_THERMO,
-                    lambda c=c: devices.thermo_one_shot(c),
+                command=lambda c=channel: self._thermo_mutating_async(
+                    f"Thermo CH{c} one-shot", lambda: self.thermo.one_shot(c)
                 ),
             ).grid(row=channel, column=4, padx=2)
             ttk.Button(
                 live,
                 text="Clear Faults",
                 width=11,
-                command=lambda c=channel: self.send_async(
-                    f"Thermo CH{c} clear faults",
-                    UART_TASK_ID_THERMO,
-                    lambda c=c: devices.thermo_clear_faults(c),
+                command=lambda c=channel: self._thermo_mutating_async(
+                    f"Thermo CH{c} clear faults", lambda: self.thermo.clear_faults(c)
                 ),
             ).grid(row=channel, column=5, padx=(2, 8))
         live.columnconfigure(3, weight=1)
@@ -2417,10 +2420,9 @@ class KilnCtrlApp:
             AvgMode.AVG_1,
         )
         channel = self._thermo_cfg_channel()
-        self.send_async(
+        self._thermo_mutating_async(
             f"Thermo CH{channel} config",
-            UART_TASK_ID_THERMO,
-            lambda: devices.thermo_config_channel(
+            lambda: self.thermo.config_channel(
                 channel,
                 tc_type,
                 avg,
@@ -2432,8 +2434,8 @@ class KilnCtrlApp:
     def _thermo_apply_thresholds(self) -> None:
         channel = self._thermo_cfg_channel()
 
-        def build() -> bytes:
-            return devices.thermo_set_thresholds(
+        def action() -> OkReason:
+            return self.thermo.set_thresholds(
                 channel,
                 _as_float(self.thermo_tc_high, "TC high"),
                 _as_float(self.thermo_tc_low, "TC low"),
@@ -2441,24 +2443,22 @@ class KilnCtrlApp:
                 self.thermo_cj_low.get(),
             )
 
-        self.send_async(f"Thermo CH{channel} thresholds", UART_TASK_ID_THERMO, build)
+        self._thermo_mutating_async(f"Thermo CH{channel} thresholds", action)
 
     def _thermo_apply_cj_offset(self) -> None:
         channel = self._thermo_cfg_channel()
-        self.send_async(
+        self._thermo_mutating_async(
             f"Thermo CH{channel} CJ offset",
-            UART_TASK_ID_THERMO,
-            lambda: devices.thermo_set_cj_offset(
+            lambda: self.thermo.set_cj_offset(
                 channel, _as_float(self.thermo_cj_offset, "CJ offset")
             ),
         )
 
     def _thermo_write_reg(self) -> None:
         channel = self._thermo_cfg_channel()
-        self.send_async(
+        self._thermo_mutating_async(
             f"Thermo CH{channel} write reg",
-            UART_TASK_ID_THERMO,
-            lambda: devices.thermo_write_reg(
+            lambda: self.thermo.write_reg(
                 channel,
                 _as_int(self.thermo_reg_addr, "register"),
                 _as_int(self.thermo_reg_value, "value"),
@@ -2476,10 +2476,9 @@ class KilnCtrlApp:
             return
         period = max(0, int(self.thermo_period_var.get()))
         mask = (1 << THERMO_CHANNEL_COUNT) - 1
-        self.send_async(
+        self._thermo_mutating_async(
             f"Thermo auto-report {period} ms",
-            UART_TASK_ID_THERMO,
-            lambda: devices.thermo_set_auto_report(mask, period),
+            lambda: self.thermo.set_auto_report(mask, period),
         )
 
     def _thermo_stop_reporting(self) -> None:
@@ -2487,11 +2486,26 @@ class KilnCtrlApp:
         doesn't leave the firmware pushing frames nobody is rendering."""
         if not self.link.is_connected or self.info.compatible is not True:
             return
-        self.send_async(
-            "Thermo auto-report off",
-            UART_TASK_ID_THERMO,
-            lambda: devices.thermo_set_auto_report(0, 0),
+        self._thermo_mutating_async(
+            "Thermo auto-report off", lambda: self.thermo.set_auto_report(0, 0)
         )
+
+    def _thermo_mutating_async(self, description: str, action: Callable[[], OkReason]) -> None:
+        """Run a THERMO mutating command and surface a REJECTED reply (with
+        reason, when the firmware gave one) instead of letting it land
+        silently in ThermoClient's own consumer thread -- same "wait a short
+        window for the optional refusal" shape :meth:`thermo.ThermoClient`'s
+        helpers use, just wired into the GUI's async/status-bar convention
+        instead of :meth:`send_async` (which never waits for that reply).
+        """
+        def apply(result: OkReason) -> None:
+            if result.ok:
+                self.set_status(f"{description}: ok.")
+            else:
+                detail = f" ({result.reason})" if result.reason else ""
+                self.set_status(f"{description}: REJECTED{detail}.", error=True)
+
+        self.query_async(description, action, apply, error_types=(ThermoQueryError,))
 
     def thermo_read_async(self) -> None:
         self.query_async(
@@ -3374,19 +3388,15 @@ class KilnCtrlApp:
         ttk.Button(
             controls,
             text="Request Enable",
-            command=lambda: self.send_async(
-                "Safety request enable",
-                UART_TASK_ID_SAFETY,
-                lambda: devices.safety_request_enable(True),
+            command=lambda: self._safety_mutating_async(
+                "Safety request enable", lambda: self.safety.request_enable(True)
             ),
         ).grid(row=0, column=2, padx=(12, 4))
         ttk.Button(
             controls,
             text="Drop Enable",
-            command=lambda: self.send_async(
-                "Safety drop enable",
-                UART_TASK_ID_SAFETY,
-                lambda: devices.safety_request_enable(False),
+            command=lambda: self._safety_mutating_async(
+                "Safety drop enable", lambda: self.safety.request_enable(False)
             ),
         ).grid(row=0, column=3, padx=4)
 
@@ -3398,10 +3408,9 @@ class KilnCtrlApp:
         ttk.Button(
             controls,
             text="Apply",
-            command=lambda: self.send_async(
+            command=lambda: self._safety_mutating_async(
                 f"Safety poll period {self.safety_poll_period.get()} ms",
-                UART_TASK_ID_SAFETY,
-                lambda: devices.safety_set_poll_period(self.safety_poll_period.get()),
+                lambda: self.safety.set_poll_period(self.safety_poll_period.get()),
             ),
         ).grid(row=0, column=6, padx=(2, 8))
 
@@ -3419,21 +3428,33 @@ class KilnCtrlApp:
         ttk.Button(
             fault,
             text="Assert Fault",
-            command=lambda: self.send_async(
-                "Safety assert fault",
-                UART_TASK_ID_SAFETY,
-                lambda: devices.safety_set_fault_out(True),
+            command=lambda: self._safety_mutating_async(
+                "Safety assert fault", lambda: self.safety.set_fault_out(True)
             ),
         ).pack(side="left")
         ttk.Button(
             fault,
             text="Clear Fault",
-            command=lambda: self.send_async(
-                "Safety clear fault",
-                UART_TASK_ID_SAFETY,
-                lambda: devices.safety_set_fault_out(False),
+            command=lambda: self._safety_mutating_async(
+                "Safety clear fault", lambda: self.safety.set_fault_out(False)
             ),
         ).pack(side="left", padx=6)
+
+    def _safety_mutating_async(self, description: str, action: Callable[[], OkReason]) -> None:
+        """Run a SAFETY mutating command and surface a REJECTED reply (with
+        reason, when the firmware gave one) instead of letting it land
+        silently in SafetyClient's own consumer thread -- see
+        :meth:`_thermo_mutating_async`'s docstring for why :meth:`send_async`
+        is the wrong tool for these.
+        """
+        def apply(result: OkReason) -> None:
+            if result.ok:
+                self.set_status(f"{description}: ok.")
+            else:
+                detail = f" ({result.reason})" if result.reason else ""
+                self.set_status(f"{description}: REJECTED{detail}.", error=True)
+
+        self.query_async(description, action, apply, error_types=(SafetyQueryError,))
 
     def _safety_schedule_poll(self) -> None:
         """SAFETY has no auto-report subcommand, so this page polls -- but it
