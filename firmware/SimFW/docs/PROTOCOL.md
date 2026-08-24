@@ -710,18 +710,24 @@ implicit in one command's default behavior.
 
 `SET_DIR` request: `[u8 exp, u8 pin, u8 input, u8 pullup]` (`exp`: 0 =
 `I2C_OWNER_EXP_1` (0x20), 1 = `I2C_OWNER_EXP_2` (0x21); `pin` 0..15, 0..7 =
-port A, 8..15 = port B). `i2c_owner_io_set_dir()` returns `false` both for a
-reserved fixed-role exp1 pin (relay sense / fault-line sense / E-stop drive /
-DUT-power relay main, pins 0..7 on `I2C_OWNER_EXP_1`, plus DUT-power relay
-safety on pin 10) and for a transiently full command queue —
-indistinguishable from the bool alone, so this handler reports
-`ERR_BAD_ARGS` for both (the reserved-pin case is the far more likely cause
-for a well-behaved client). `WRITE`: `[u8 exp, u8 pin, u8 level]`.
-`READ`: `[u8 exp, u8 pin]`, reply `[status, level]`. `i2c_owner_io_read()`
-reports `ERR_BAD_ARGS` for an out-of-range/reserved pin exactly as above, but
-`ERR_NO_SAMPLE` (section 4's Reply-convention table) if the pin itself is
-fine and no expander has ever ACKed a scan on that bus yet — the common
-bench case with no MCP23017 attached to J20.
+port A, 8..15 = port B). `i2c_owner_io_set_dir()` reports which of two
+distinct causes made it return `false` via its `out_status` param
+(`i2c_owner_io_set_status_t`, `i2c_owner.h`): a reserved fixed-role exp1 pin
+(relay sense / fault-line sense / E-stop drive / DUT-power relay main, pins
+0..7 on `I2C_OWNER_EXP_1`, plus DUT-power relay safety on pin 10) maps to
+`ERR_BAD_ARGS` (permanent — retrying never helps); a transiently full
+command queue maps to `ERR_BUSY` (i2c_owner's task drains it on its next
+~8 ms scan tick, so an immediate retry will likely succeed). `WRITE`:
+`[u8 exp, u8 pin, u8 level]`, same `ERR_BAD_ARGS`/`ERR_BUSY` distinction via
+`i2c_owner_io_write()`'s `out_status`. `READ`: `[u8 exp, u8 pin]`, reply
+`[status, level]`. `i2c_owner_io_read()` reports `ERR_BAD_ARGS` for an
+out-of-range/reserved pin exactly as above, but `ERR_NO_SAMPLE` (section 4's
+Reply-convention table) if the pin itself is fine and no expander has ever
+ACKed a scan on that bus yet — the common bench case with no MCP23017
+attached to J20. (`READ`'s third case is `NO_SAMPLE`, not `QUEUE_FULL`,
+because reads don't go through the command queue at all — they're a direct
+mutex-guarded snapshot read, so `SET_DIR`/`WRITE` and `READ` need different
+status codes for their respective third cases.)
 
 `ESTOP_SET`: `[u8 open]` (1 = loop opened/tripped). `ESTOP_GET`: no args,
 reply `[status, open]`. `FAULT_LINE_GET`: no args, reply

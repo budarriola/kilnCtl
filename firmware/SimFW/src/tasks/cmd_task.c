@@ -1185,13 +1185,16 @@ static void handle_io_set_dir(const uint8_t *args, uint8_t args_len, uint8_t *ou
         *out_len = w.len;
         return;
     }
-    // i2c_owner_io_set_dir() returns false both for a reserved pin (a fixed-
-    // role exp1 pin, permanently rejected) and a transiently full command
-    // queue -- indistinguishable from this return value alone, so
-    // ERR_BAD_ARGS is used (the reserved-pin case is the far more likely
-    // cause of a well-behaved client seeing this).
-    rw_u8(&w, i2c_owner_io_set_dir((i2c_owner_expander_t)exp, pin, input != 0, pullup != 0) ? SIMFW_CMD_STATUS_OK
-                                                                                              : SIMFW_CMD_STATUS_ERR_BAD_ARGS);
+    // i2c_owner_io_set_dir()'s out_status tells apart a reserved/out-of-
+    // range exp1 pin (ERR_BAD_ARGS -- permanent, retrying never helps) from
+    // a transiently full command queue (ERR_BUSY -- i2c_owner's task drains
+    // it on its next ~8 ms scan tick, so an immediate retry will likely
+    // succeed) -- see i2c_owner.h's i2c_owner_io_set_status_t.
+    i2c_owner_io_set_status_t set_status = I2C_OWNER_IO_SET_OK;
+    bool set_ok = i2c_owner_io_set_dir((i2c_owner_expander_t)exp, pin, input != 0, pullup != 0, &set_status);
+    rw_u8(&w, set_ok ? SIMFW_CMD_STATUS_OK
+                      : (set_status == I2C_OWNER_IO_SET_QUEUE_FULL ? SIMFW_CMD_STATUS_ERR_BUSY
+                                                                    : SIMFW_CMD_STATUS_ERR_BAD_ARGS));
     *out_len = w.len;
 }
 
@@ -1210,8 +1213,14 @@ static void handle_io_write(const uint8_t *args, uint8_t args_len, uint8_t *out,
         *out_len = w.len;
         return;
     }
-    rw_u8(&w, i2c_owner_io_write((i2c_owner_expander_t)exp, pin, level != 0) ? SIMFW_CMD_STATUS_OK
-                                                                               : SIMFW_CMD_STATUS_ERR_BAD_ARGS);
+    // Same ERR_BAD_ARGS (permanent, reserved/out-of-range pin) vs. ERR_BUSY
+    // (transient, full command queue) distinction as handle_io_set_dir()
+    // above -- see i2c_owner_io_write()'s out_status.
+    i2c_owner_io_set_status_t write_status = I2C_OWNER_IO_SET_OK;
+    bool write_ok = i2c_owner_io_write((i2c_owner_expander_t)exp, pin, level != 0, &write_status);
+    rw_u8(&w, write_ok ? SIMFW_CMD_STATUS_OK
+                        : (write_status == I2C_OWNER_IO_SET_QUEUE_FULL ? SIMFW_CMD_STATUS_ERR_BUSY
+                                                                        : SIMFW_CMD_STATUS_ERR_BAD_ARGS));
     *out_len = w.len;
 }
 

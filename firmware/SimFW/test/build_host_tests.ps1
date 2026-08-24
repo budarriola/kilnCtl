@@ -38,6 +38,7 @@ $sources = @(
     (Join-Path $testDir "test_gap_closure_logic.c"),
     (Join-Path $testDir "test_cmd_task_gap_closure.c"),
     (Join-Path $testDir "test_i2c_owner_io_read.c"),
+    (Join-Path $testDir "test_i2c_owner_io_set.c"),
     (Join-Path $testDir "test_k4_gating_logic.c"),
     (Join-Path $testDir "test_ct_calibration.c"),
     (Join-Path $testDir "test_dut_power_domains.c"),

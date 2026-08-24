@@ -205,10 +205,30 @@ typedef enum {
     I2C_OWNER_EXP_2 = 1, // 0x21
 } i2c_owner_expander_t;
 
+// Distinguishes i2c_owner_io_set_dir()/i2c_owner_io_write()'s two distinct
+// failure causes -- both report the same plain `false` return, but a caller
+// mapping to a protocol-level status (cmd_task.c's handle_io_set_dir()/
+// handle_io_write(), SIMFW_CMD_STATUS_ERR_BAD_ARGS vs
+// SIMFW_CMD_STATUS_ERR_BUSY) needs to tell them apart. This is a PARALLEL
+// enum to i2c_owner_io_read_status_t above, not a reuse of it: read()'s
+// third case (NO_SAMPLE -- "valid target, no scan sample yet") and these
+// setters' third case (QUEUE_FULL -- "valid target, command queue is
+// transiently full") are different failure classes needing different wire
+// status codes (ERR_NO_SAMPLE vs ERR_BUSY), so they get different enum
+// values here too.
+typedef enum {
+    I2C_OWNER_IO_SET_OK = 0,
+    I2C_OWNER_IO_SET_BAD_ARGS,   // exp/pin out of range or reserved (permanent -- retry never helps)
+    I2C_OWNER_IO_SET_QUEUE_FULL, // valid target, but the command queue is transiently full (retry likely helps)
+} i2c_owner_io_set_status_t;
+
 // Same queue-then-apply-next-tick contract as the estop/dut-power setters
-// above.
-bool i2c_owner_io_set_dir(i2c_owner_expander_t exp, uint8_t pin, bool input, bool pullup);
-bool i2c_owner_io_write(i2c_owner_expander_t exp, uint8_t pin, bool level);
+// above. out_status (may be NULL) reports which of the two distinct false
+// causes applied -- see i2c_owner_io_set_status_t above.
+bool i2c_owner_io_set_dir(i2c_owner_expander_t exp, uint8_t pin, bool input, bool pullup,
+                           i2c_owner_io_set_status_t *out_status);
+bool i2c_owner_io_write(i2c_owner_expander_t exp, uint8_t pin, bool level,
+                         i2c_owner_io_set_status_t *out_status);
 
 // Distinguishes i2c_owner_io_read()'s two distinct failure causes -- both
 // report the same plain `false` return, but a caller mapping to a protocol-

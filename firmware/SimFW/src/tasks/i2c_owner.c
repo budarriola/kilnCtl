@@ -41,10 +41,21 @@
 // Which physical board is "exp1" (fixed-role: relay sense, E-stop drive,
 // DUT-power) vs "exp2" (spare pins only) could not be determined from the
 // bus scan alone -- ACK/NACK says nothing about a device's wiring role, only
-// that it answers at that address. This assignment is UNCONFIRMED; verify
-// against the physical board before relying on relay-sense/E-stop-drive
-// behavior, and swap the two values below if a read/write round trip shows
-// the wrong board answering for the wrong role.
+// that it answers at that address.
+//
+// Partially resolved 2026-08-24 on the bench: reading pins 0..5 through the
+// generic IO path shows 0x25 REJECTING them (io_pin_allowed()'s reserved
+// range, exactly as the fixed-role board should) while 0x26 returns all-high
+// (every pin input+pullup, exactly as configure_exp2() leaves the spare
+// board). So the firmware's own exp1/exp2 assignment is internally
+// consistent and the reserved-pin interlock demonstrably works on real
+// hardware.
+//
+// What that does NOT establish: nothing is wired to either expander's pins
+// yet, so this cannot prove the physical board at 0x25 is the one that will
+// actually be harnessed to the relays/E-stop/DUT-power. That check needs the
+// relay harness attached (PLAN.md M-E) -- confirm then, and swap these two
+// values if a relay-sense reading shows the wrong board answering.
 #define MCP23017_ADDR_1 0x25u
 #define MCP23017_ADDR_2 0x26u
 
@@ -535,28 +546,44 @@ static bool io_pin_allowed(i2c_owner_expander_t exp, uint8_t pin)
     return true;
 }
 
-bool i2c_owner_io_set_dir(i2c_owner_expander_t exp, uint8_t pin, bool input, bool pullup)
+bool i2c_owner_io_set_dir(i2c_owner_expander_t exp, uint8_t pin, bool input, bool pullup,
+                           i2c_owner_io_set_status_t *out_status)
 {
     if (!s_cmd_queue || !io_pin_allowed(exp, pin)) {
+        if (out_status) {
+            *out_status = I2C_OWNER_IO_SET_BAD_ARGS;
+        }
         return false;
     }
     i2c_owner_cmd_t cmd = {
         .type = I2C_OWNER_CMD_IO_SET_DIR,
         .u.io_set_dir = { .exp = exp, .pin = pin, .input = input, .pullup = pullup },
     };
-    return xQueueSend(s_cmd_queue, &cmd, 0) == pdTRUE;
+    bool queued = xQueueSend(s_cmd_queue, &cmd, 0) == pdTRUE;
+    if (out_status) {
+        *out_status = queued ? I2C_OWNER_IO_SET_OK : I2C_OWNER_IO_SET_QUEUE_FULL;
+    }
+    return queued;
 }
 
-bool i2c_owner_io_write(i2c_owner_expander_t exp, uint8_t pin, bool level)
+bool i2c_owner_io_write(i2c_owner_expander_t exp, uint8_t pin, bool level,
+                         i2c_owner_io_set_status_t *out_status)
 {
     if (!s_cmd_queue || !io_pin_allowed(exp, pin)) {
+        if (out_status) {
+            *out_status = I2C_OWNER_IO_SET_BAD_ARGS;
+        }
         return false;
     }
     i2c_owner_cmd_t cmd = {
         .type = I2C_OWNER_CMD_IO_WRITE,
         .u.io_write = { .exp = exp, .pin = pin, .level = level },
     };
-    return xQueueSend(s_cmd_queue, &cmd, 0) == pdTRUE;
+    bool queued = xQueueSend(s_cmd_queue, &cmd, 0) == pdTRUE;
+    if (out_status) {
+        *out_status = queued ? I2C_OWNER_IO_SET_OK : I2C_OWNER_IO_SET_QUEUE_FULL;
+    }
+    return queued;
 }
 
 bool i2c_owner_io_read(i2c_owner_expander_t exp, uint8_t pin, bool *level,
