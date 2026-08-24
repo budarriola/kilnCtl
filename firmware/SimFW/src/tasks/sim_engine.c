@@ -233,6 +233,12 @@ static void apply_reset(bool keep_params)
     reset_zone_manual_overrides();
     reset_safety_tc_state();
 
+    // Any consumer cursor already sitting above 0 (i.e. any live client that
+    // has drained at least once) is resynced lazily by
+    // sim_event_ring_drain()'s own start_seq > s_ring_next_seq check, the
+    // first time it drains after this reset -- see that function's comment
+    // for the CONFIRMED BUG this closes. No consumer-side bookkeeping is
+    // reset from here.
     xSemaphoreTake(s_ring_mutex, portMAX_DELAY);
     s_ring_next_seq = 0;
     xSemaphoreGive(s_ring_mutex);
@@ -797,8 +803,32 @@ uint32_t sim_event_ring_drain(sim_event_t *out, uint32_t max_out, uint32_t *inou
                                      ? (s_ring_next_seq - SIM_EVENT_RING_SIZE)
                                      : 0u;
     uint32_t start_seq = *inout_next_seq;
-    if (start_seq < oldest_available) {
-        start_seq = oldest_available; // ring wrapped past what the caller last saw
+    // CONFIRMED BUG fix (2026-08-24 bench find): a caller's cursor can sit
+    // ABOVE s_ring_next_seq, not just below oldest_available, whenever
+    // apply_reset() has zeroed s_ring_next_seq (SYS RESET_SIM / MODEL
+    // LOAD_PRESET, both go through apply_reset()) since the last time this
+    // caller drained. s_ring_next_seq only ever increases except at that one
+    // reset point, so start_seq > s_ring_next_seq is only reachable via a
+    // reset underneath an already-advanced cursor -- never via ordinary
+    // production/drain. Before this fix, `start_seq < oldest_available` was
+    // the only resync check, so a post-reset cursor (e.g. 120, against a
+    // freshly-zeroed s_ring_next_seq) satisfied neither branch and the while
+    // loop below (`start_seq + count < s_ring_next_seq`) could never become
+    // true again until the ring produced its way back up past the cursor's
+    // old value -- telemetry.c's EVT drain would silently stop forwarding
+    // events, with none of its own counters (evt_seq_gap_count/
+    // evt_send_drop_count/evt_ring_hwm) able to see it, since drain returned
+    // 0 every time rather than failing loudly. This is exactly what
+    // tools/virtual_simfw/src/virtual_simfw.c's reset_client_evt_cursors()
+    // (called from reset_device()) exists to prevent for its own per-client
+    // cursors -- this firmware had no equivalent, single-consumer
+    // (telemetry.c) or not. Resyncing to oldest_available here, in the one
+    // place sim_engine.c already owns the ring's read-side contract
+    // (sim_snapshot.h: "sim_engine owns [the drain scheme]"), fixes every
+    // current and future consumer at once with no other file needing to
+    // know a reset happened.
+    if (start_seq < oldest_available || start_seq > s_ring_next_seq) {
+        start_seq = oldest_available; // ring wrapped past what the caller last saw, or was reset underneath it
     }
 
     uint32_t count = 0;
