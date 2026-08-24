@@ -528,7 +528,10 @@ static void control_handle_message(void *vargs)
                 break;
             }
             case CONTROL_CMD_SET_ZONE_PID: {
-                if (!bx_args_ok("control", &msg, 14)) break;
+                if (!bx_args_ok("control", &msg, 14)) {
+                    bx_reply_ok_err(ctx->proto, &msg, UART_TASK_ID_CONTROL, subcmd, false, "truncated");
+                    break;
+                }
                 uint8_t zi = msg.payload[1];
                 float kp = bx_f32_le(&msg.payload[2]);
                 float ki = bx_f32_le(&msg.payload[6]);
@@ -538,7 +541,10 @@ static void control_handle_message(void *vargs)
                 break;
             }
             case CONTROL_CMD_SET_ZONE_MODEL: {
-                if (!bx_args_ok("control", &msg, 14)) break;
+                if (!bx_args_ok("control", &msg, 14)) {
+                    bx_reply_ok_err(ctx->proto, &msg, UART_TASK_ID_CONTROL, subcmd, false, "truncated");
+                    break;
+                }
                 uint8_t zi = msg.payload[1];
                 float k_dc = bx_f32_le(&msg.payload[2]);
                 float tau_s = bx_f32_le(&msg.payload[6]);
@@ -558,7 +564,10 @@ static void control_handle_message(void *vargs)
                 break;
             }
             case CONTROL_CMD_SET_UNIT_PREF: {
-                if (!bx_args_ok("control", &msg, 2)) break;
+                if (!bx_args_ok("control", &msg, 2)) {
+                    bx_reply_ok_err(ctx->proto, &msg, UART_TASK_ID_CONTROL, subcmd, false, "truncated");
+                    break;
+                }
                 uint8_t raw = msg.payload[1];
                 bool ok = (raw == (uint8_t)UNIT_PREF_CELSIUS || raw == (uint8_t)UNIT_PREF_FAHRENHEIT) &&
                           unit_pref_set((unit_pref_t)raw) == ESP_OK;
@@ -817,16 +826,25 @@ static void profiles_handle_message(void *vargs)
                 break;
             }
             case PROFILES_CMD_GET: {
-                if (!bx_args_ok("profiles", &msg, 2)) break;
+                if (!bx_args_ok("profiles", &msg, 2)) {
+                    bx_reply_ok_err(ctx->proto, &msg, UART_TASK_ID_PROFILES, subcmd, false, "truncated");
+                    break;
+                }
                 size_t len = profiles_build_get(reply, msg.payload[1]);
                 bx_reply(ctx->proto, &msg, UART_TASK_ID_PROFILES, reply, len);
                 break;
             }
             case PROFILES_CMD_SAVE: {
-                if (!bx_args_ok("profiles", &msg, 5)) break;
+                if (!bx_args_ok("profiles", &msg, 5)) {
+                    bx_reply_ok_err(ctx->proto, &msg, UART_TASK_ID_PROFILES, subcmd, false, "truncated");
+                    break;
+                }
                 uint8_t requested_id = msg.payload[1];
                 uint8_t name_len = msg.payload[2];
-                if (!bx_args_ok("profiles", &msg, (size_t)3 + name_len + 2)) break;
+                if (!bx_args_ok("profiles", &msg, (size_t)3 + name_len + 2)) {
+                    bx_reply_ok_err(ctx->proto, &msg, UART_TASK_ID_PROFILES, subcmd, false, "truncated");
+                    break;
+                }
                 if (name_len > PROFILE_NAME_MAX_LEN) {
                     bx_reply_ok_err(ctx->proto, &msg, UART_TASK_ID_PROFILES, subcmd, false,
                                     "name too long");
@@ -871,7 +889,10 @@ static void profiles_handle_message(void *vargs)
                 break;
             }
             case PROFILES_CMD_DELETE: {
-                if (!bx_args_ok("profiles", &msg, 2)) break;
+                if (!bx_args_ok("profiles", &msg, 2)) {
+                    bx_reply_ok_err(ctx->proto, &msg, UART_TASK_ID_PROFILES, subcmd, false, "truncated");
+                    break;
+                }
                 uint8_t del_id = msg.payload[1];
                 /* Same refusal profile_delete_post_handler() gives: a builtin
                  * is a const table in flash and cannot be erased. Say so and
@@ -894,7 +915,10 @@ static void profiles_handle_message(void *vargs)
                 break;
             }
             case PROFILES_CMD_START: {
-                if (!bx_args_ok("profiles", &msg, 2)) break;
+                if (!bx_args_ok("profiles", &msg, 2)) {
+                    bx_reply_ok_err(ctx->proto, &msg, UART_TASK_ID_PROFILES, subcmd, false, "truncated");
+                    break;
+                }
                 char err_msg[96] = "";
                 bool ok = profile_executor_run(msg.payload[1], err_msg, sizeof(err_msg));
                 bx_reply_ok_err(ctx->proto, &msg, UART_TASK_ID_PROFILES, subcmd, ok, err_msg);

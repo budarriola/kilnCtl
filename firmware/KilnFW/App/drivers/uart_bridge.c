@@ -199,28 +199,63 @@ static void bridge_reply(uart_protocol_t *proto, const uart_proto_message_t *msg
     bridge_note_link_activity();
 }
 
-/* Sent from a bridge task's default: case -- a subcommand byte this firmware
- * build has never heard of. uart_protocol.c's handle_raw_frame() ACKs the
+/* Sent from a bridge task's default: case, or from any guard below that
+ * refuses a *recognized* subcommand -- a truncated frame, an out-of-range
+ * argument, a relay refused for ownership/safety/OTA reasons, or a driver
+ * call that failed outright. uart_protocol.c's handle_raw_frame() ACKs the
  * frame at the transport layer the instant it lands in this task's inbox,
  * *before* the switch statement below ever runs -- that ACK only proves
- * delivery, not that the command did anything. Falling into default: with no
- * reply left the two indistinguishable to a host that only checks the
- * transport ACK, which is exactly how SET_CT_CAL (commit 5fb6928) got ACKed
- * and silently discarded: safety_bridge_task() simply had no case for it.
+ * delivery, not that the command did anything. Falling through with no
+ * reply left "delivered" and "succeeded" indistinguishable to a host that
+ * only checks the transport ACK, which is exactly how SET_CT_CAL (commit
+ * 5fb6928) got ACKed and silently discarded: safety_bridge_task() simply had
+ * no case for it -- and it is exactly how a relay refused for a safety
+ * reason (KILN_IO_OWNER_RELAY_ERR_SAFETY et al.) looked identical to a relay
+ * that actually switched, right up until 2026-08-24.
  *
- * Echoes the unrecognized subcmd byte back with an explicit ok=0 -- the same
- * {subcmd, ok} shape uart_bridge_ext.c's bx_reply_ok_err() already uses for
- * known-but-refused commands, so a PC client that already understands that
- * convention needs no new parser to recognize this as a rejection. A PC
- * client that does not read this reply is unaffected: it still only sees the
+ * Echoes the subcmd byte back with an explicit ok=0 -- the same {subcmd, ok}
+ * shape uart_bridge_ext.c's bx_reply_ok_err() already uses for known-but-
+ * refused commands there, so a PC client that already understands that
+ * convention needs no new parser to recognize this as a rejection. `reason`
+ * is optional: NULL/empty reproduces bridge_reply_unsupported()'s original
+ * 2-byte {subcmd, 0} wire shape exactly (still the only shape a client that
+ * predates this change will ever see -- the default: case below). A non-NULL
+ * reason is appended as a length-prefixed ASCII string -- same encoding
+ * bx_put_lstring() uses in uart_bridge_ext.c -- truncated rather than
+ * overrunning `reply` on the (never expected in practice) chance a caller
+ * hands this a reason longer than the payload has room for. A PC client that
+ * does not read this reply is unaffected either way: it still only sees the
  * transport ACK, exactly as before this change. See uart_task_ids.h and
  * tools/PcTools' TODO for which callers need updating to actually look for
  * it. */
+static void bridge_reply_reject(uart_protocol_t *proto, const uart_proto_message_t *msg,
+                                uint8_t src_task, uint8_t subcmd, const char *reason)
+{
+    uint8_t reply[BRIDGE_REPLY_MAX];
+    size_t o = 0;
+    reply[o++] = subcmd;
+    reply[o++] = 0; /* ok = 0 */
+    if (reason && reason[0] != '\0') {
+        size_t room = sizeof(reply) - o - 1; /* -1 for the length byte itself */
+        size_t len = strlen(reason);
+        if (len > room) {
+            len = room;
+        }
+        reply[o++] = (uint8_t)len;
+        memcpy(&reply[o], reason, len);
+        o += len;
+    }
+    bridge_reply(proto, msg, src_task, reply, o);
+}
+
+/* Thin wrapper kept for the default: cases below -- an unrecognized subcmd
+ * has no more specific reason to give than "unsupported", and this preserves
+ * the exact 2-byte reply every existing caller (and any PC client already
+ * parsing it) was built against. */
 static void bridge_reply_unsupported(uart_protocol_t *proto, const uart_proto_message_t *msg,
                                      uint8_t src_task, uint8_t subcmd)
 {
-    uint8_t reply[2] = { subcmd, 0 };
-    bridge_reply(proto, msg, src_task, reply, sizeof(reply));
+    bridge_reply_reject(proto, msg, src_task, subcmd, NULL);
 }
 
 /* An unsolicited push (an auto-report tick). Shorter ACK timeout than a reply:
@@ -422,7 +457,11 @@ static void thermo_bridge_task(void *arg)
          * thermo_owner_command_*() instead of a NULL MAX31856_bus_channel(). */
         switch (subcmd) {
             case THERMO_CMD_CONFIG_CHANNEL: {
-                if (!bridge_args_ok("thermo", &msg, 6)) { rejected = true; break; }
+                if (!bridge_args_ok("thermo", &msg, 6)) {
+                    bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_THERMO, subcmd, "truncated");
+                    rejected = true;
+                    break;
+                }
                 if (!bridge_range_ok("thermo", subcmd, "channel", msg.payload[1], 0,
                                      THERMO_CHANNEL_COUNT - 1u) ||
                     /* CR1: TC[3:0] and AVGSEL[2:0]. MAX31856_config_channel drops
@@ -431,6 +470,7 @@ static void thermo_bridge_task(void *arg)
                      * mis-linearize every reading from that channel. */
                     !bridge_range_ok("thermo", subcmd, "tc_type", msg.payload[2], 0, 0x0Fu) ||
                     !bridge_range_ok("thermo", subcmd, "avg_mode", msg.payload[3], 0, 0x07u)) {
+                    bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_THERMO, subcmd, "out of range");
                     rejected = true;
                     break;
                 }
@@ -440,9 +480,17 @@ static void thermo_bridge_task(void *arg)
                 break;
             }
             case THERMO_CMD_SET_THRESHOLDS: {
-                if (!bridge_args_ok("thermo", &msg, 12)) { rejected = true; break; }
+                if (!bridge_args_ok("thermo", &msg, 12)) {
+                    bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_THERMO, subcmd, "truncated");
+                    rejected = true;
+                    break;
+                }
                 if (!bridge_range_ok("thermo", subcmd, "channel", msg.payload[1], 0,
-                                     THERMO_CHANNEL_COUNT - 1u)) { rejected = true; break; }
+                                     THERMO_CHANNEL_COUNT - 1u)) {
+                    bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_THERMO, subcmd, "out of range");
+                    rejected = true;
+                    break;
+                }
                 err = thermo_owner_command_set_thresholds(msg.payload[1], bridge_f32_le(&msg.payload[2]),
                                                           bridge_f32_le(&msg.payload[6]),
                                                           (int8_t)msg.payload[10],
@@ -450,21 +498,41 @@ static void thermo_bridge_task(void *arg)
                 break;
             }
             case THERMO_CMD_SET_CJ_OFFSET: {
-                if (!bridge_args_ok("thermo", &msg, 6)) { rejected = true; break; }
+                if (!bridge_args_ok("thermo", &msg, 6)) {
+                    bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_THERMO, subcmd, "truncated");
+                    rejected = true;
+                    break;
+                }
                 if (!bridge_range_ok("thermo", subcmd, "channel", msg.payload[1], 0,
-                                     THERMO_CHANNEL_COUNT - 1u)) { rejected = true; break; }
+                                     THERMO_CHANNEL_COUNT - 1u)) {
+                    bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_THERMO, subcmd, "out of range");
+                    rejected = true;
+                    break;
+                }
                 err = thermo_owner_command_set_cj_offset(msg.payload[1], bridge_f32_le(&msg.payload[2]));
                 break;
             }
             case THERMO_CMD_ONE_SHOT: {
-                if (!bridge_args_ok("thermo", &msg, 2)) { rejected = true; break; }
+                if (!bridge_args_ok("thermo", &msg, 2)) {
+                    bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_THERMO, subcmd, "truncated");
+                    rejected = true;
+                    break;
+                }
                 if (!bridge_range_ok("thermo", subcmd, "channel", msg.payload[1], 0,
-                                     THERMO_CHANNEL_COUNT - 1u)) { rejected = true; break; }
+                                     THERMO_CHANNEL_COUNT - 1u)) {
+                    bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_THERMO, subcmd, "out of range");
+                    rejected = true;
+                    break;
+                }
                 err = thermo_owner_command_trigger_one_shot(msg.payload[1]);
                 break;
             }
             case THERMO_CMD_READ: {
-                if (!bridge_args_ok("thermo", &msg, 2)) { rejected = true; break; }
+                if (!bridge_args_ok("thermo", &msg, 2)) {
+                    bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_THERMO, subcmd, "truncated");
+                    rejected = true;
+                    break;
+                }
                 /* Selector is a channel index or 0xFF; anything else selects no
                  * channels, and answering that with an empty reply would look
                  * to the host exactly like "all three thermocouples vanished". */
@@ -472,6 +540,7 @@ static void thermo_bridge_task(void *arg)
                 if (chan_mask == 0) {
                     ESP_LOGW(TAG, "thermo: subcmd 0x%02X selector=%u is not a channel or 0xFF -- "
                                   "rejected", subcmd, msg.payload[1]);
+                    bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_THERMO, subcmd, "out of range");
                     rejected = true;
                     break;
                 }
@@ -480,11 +549,16 @@ static void thermo_bridge_task(void *arg)
                 break;
             }
             case THERMO_CMD_READ_FAULTS: {
-                if (!bridge_args_ok("thermo", &msg, 2)) { rejected = true; break; }
+                if (!bridge_args_ok("thermo", &msg, 2)) {
+                    bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_THERMO, subcmd, "truncated");
+                    rejected = true;
+                    break;
+                }
                 chan_mask = thermo_channel_mask(msg.payload[1]);
                 if (chan_mask == 0) {
                     ESP_LOGW(TAG, "thermo: subcmd 0x%02X selector=%u is not a channel or 0xFF -- "
                                   "rejected", subcmd, msg.payload[1]);
+                    bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_THERMO, subcmd, "out of range");
                     rejected = true;
                     break;
                 }
@@ -493,14 +567,26 @@ static void thermo_bridge_task(void *arg)
                 break;
             }
             case THERMO_CMD_CLEAR_FAULTS: {
-                if (!bridge_args_ok("thermo", &msg, 2)) { rejected = true; break; }
+                if (!bridge_args_ok("thermo", &msg, 2)) {
+                    bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_THERMO, subcmd, "truncated");
+                    rejected = true;
+                    break;
+                }
                 if (!bridge_range_ok("thermo", subcmd, "channel", msg.payload[1], 0,
-                                     THERMO_CHANNEL_COUNT - 1u)) { rejected = true; break; }
+                                     THERMO_CHANNEL_COUNT - 1u)) {
+                    bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_THERMO, subcmd, "out of range");
+                    rejected = true;
+                    break;
+                }
                 err = thermo_owner_command_clear_faults(msg.payload[1]);
                 break;
             }
             case THERMO_CMD_SET_AUTO_REPORT: {
-                if (!bridge_args_ok("thermo", &msg, 4)) { rejected = true; break; }
+                if (!bridge_args_ok("thermo", &msg, 4)) {
+                    bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_THERMO, subcmd, "truncated");
+                    rejected = true;
+                    break;
+                }
                 ctx->auto_mask = (uint8_t)(msg.payload[1] &
                                            ((1u << THERMO_CHANNEL_COUNT) - 1u));
                 ctx->auto_period_ms = bridge_clamp_auto_period("thermo",
@@ -513,13 +599,18 @@ static void thermo_bridge_task(void *arg)
                 break;
             }
             case THERMO_CMD_READ_REG: {
-                if (!bridge_args_ok("thermo", &msg, 4)) { rejected = true; break; }
+                if (!bridge_args_ok("thermo", &msg, 4)) {
+                    bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_THERMO, subcmd, "truncated");
+                    rejected = true;
+                    break;
+                }
                 uint8_t len = msg.payload[3];
                 /* Bounds the burst into reply[4..] as well as the driver's own
                  * buffer; reply is BRIDGE_REPLY_MAX so 4 + 16 always fits. */
                 if (!bridge_range_ok("thermo", subcmd, "channel", msg.payload[1], 0,
                                      THERMO_CHANNEL_COUNT - 1u) ||
                     !bridge_range_ok("thermo", subcmd, "len", len, 1, MAX31856_MAX_BURST_LEN)) {
+                    bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_THERMO, subcmd, "out of range");
                     rejected = true;
                     break;
                 }
@@ -554,9 +645,17 @@ static void thermo_bridge_task(void *arg)
                 break;
             }
             case THERMO_CMD_WRITE_REG: {
-                if (!bridge_args_ok("thermo", &msg, 4)) { rejected = true; break; }
+                if (!bridge_args_ok("thermo", &msg, 4)) {
+                    bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_THERMO, subcmd, "truncated");
+                    rejected = true;
+                    break;
+                }
                 if (!bridge_range_ok("thermo", subcmd, "channel", msg.payload[1], 0,
-                                     THERMO_CHANNEL_COUNT - 1u)) { rejected = true; break; }
+                                     THERMO_CHANNEL_COUNT - 1u)) {
+                    bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_THERMO, subcmd, "out of range");
+                    rejected = true;
+                    break;
+                }
                 err = thermo_owner_command_write_reg(msg.payload[1], msg.payload[2], msg.payload[3]);
                 break;
             }
@@ -568,14 +667,18 @@ static void thermo_bridge_task(void *arg)
         }
 
         if (rejected) {
-            continue; /* the guard above logged the specific reason */
+            continue; /* the guard above logged the specific reason and replied */
         }
         if (err != ESP_OK) {
             /* A driver error mid-command is reported and dropped, never
              * retried here: the host resends if it cares, and a bridge task
              * that retried on its own would keep hammering a dead SPI bus
-             * instead of servicing the next command. */
+             * instead of servicing the next command. Now also told to the
+             * host instead of only to the log -- see bridge_reply_reject()'s
+             * doc comment for why a silent drop here was indistinguishable
+             * from success. */
             ESP_LOGW(TAG, "thermo: subcmd 0x%02X failed: %s", subcmd, esp_err_to_name(err));
+            bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_THERMO, subcmd, "driver error");
             continue;
         }
         if (reply_len > 0) {
@@ -761,15 +864,24 @@ static void io_bridge_task(void *arg)
              * "rejected -> no reply" / "err != ESP_OK -> logged, no reply" /
              * "reply_len > 0 -> reply" shape as before. */
             case IO_CMD_SET_RELAY: {
-                if (!bridge_args_ok("io", &msg, 3)) { rejected = true; break; }
+                if (!bridge_args_ok("io", &msg, 3)) {
+                    bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_IO, subcmd, "truncated");
+                    rejected = true;
+                    break;
+                }
                 if (!bridge_range_ok("io", subcmd, "relay", msg.payload[1], 1,
-                                     KILN_IO_RELAY_COUNT)) { rejected = true; break; }
+                                     KILN_IO_RELAY_COUNT)) {
+                    bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_IO, subcmd, "out of range");
+                    rejected = true;
+                    break;
+                }
                 uint32_t sources = 0;
                 kiln_io_owner_relay_result_t rr =
                     kiln_io_owner_command_set_relay(msg.payload[1], msg.payload[2] != 0, &sources);
                 if (rr == KILN_IO_OWNER_RELAY_ERR_OWNED) {
                     ESP_LOGW(TAG, "io: subcmd 0x%02X refused -- relay %u owned by a running profile",
                              subcmd, msg.payload[1]);
+                    bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_IO, subcmd, "owned");
                     rejected = true;
                     break;
                 }
@@ -778,6 +890,7 @@ static void io_bridge_task(void *arg)
                                   "sources 0x%02X asserted (safety wins, see "
                                   "docs/SAFETY_MODEL.md)", subcmd, msg.payload[1],
                              (unsigned)sources);
+                    bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_IO, subcmd, "safety");
                     rejected = true;
                     break;
                 }
@@ -797,6 +910,7 @@ static void io_bridge_task(void *arg)
                         ESP_LOGW(TAG, "io: subcmd 0x%02X refused -- relay %u ON: firmware update "
                                       "in progress", subcmd, msg.payload[1]);
                     }
+                    bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_IO, subcmd, "updating");
                     rejected = true;
                     break;
                 }
@@ -804,7 +918,11 @@ static void io_bridge_task(void *arg)
                 break;
             }
             case IO_CMD_SET_RELAY_MASK: {
-                if (!bridge_args_ok("io", &msg, 3)) { rejected = true; break; }
+                if (!bridge_args_ok("io", &msg, 3)) {
+                    bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_IO, subcmd, "truncated");
+                    rejected = true;
+                    break;
+                }
                 /* kiln_io_set_relay_mask silently trims bits above 3 and then
                  * returns ESP_OK for an all-zero mask, so a host that sent a
                  * garbage mask would be told its relay command succeeded when
@@ -816,6 +934,7 @@ static void io_bridge_task(void *arg)
                     ESP_LOGW(TAG, "io: subcmd 0x%02X relay mask 0x%02X selects no valid relay "
                                   "(valid bits 0x%02X) -- rejected", subcmd, msg.payload[1],
                              relay_bits);
+                    bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_IO, subcmd, "out of range");
                     rejected = true;
                     break;
                 }
@@ -825,6 +944,7 @@ static void io_bridge_task(void *arg)
                 if (rr == KILN_IO_OWNER_RELAY_ERR_OWNED) {
                     ESP_LOGW(TAG, "io: subcmd 0x%02X refused -- mask 0x%02X selects a relay owned "
                                   "by a running profile", subcmd, msg.payload[1]);
+                    bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_IO, subcmd, "owned");
                     rejected = true;
                     break;
                 }
@@ -833,6 +953,7 @@ static void io_bridge_task(void *arg)
                                   "relay ON while safety fault sources 0x%02X asserted (safety "
                                   "wins, see docs/SAFETY_MODEL.md)", subcmd, msg.payload[1],
                              msg.payload[2], (unsigned)sources);
+                    bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_IO, subcmd, "safety");
                     rejected = true;
                     break;
                 }
@@ -847,6 +968,7 @@ static void io_bridge_task(void *arg)
                                       "firmware update in progress", subcmd, msg.payload[1],
                                  msg.payload[2]);
                     }
+                    bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_IO, subcmd, "updating");
                     rejected = true;
                     break;
                 }
@@ -854,16 +976,32 @@ static void io_bridge_task(void *arg)
                 break;
             }
             case IO_CMD_SET_IO: {
-                if (!bridge_args_ok("io", &msg, 3)) { rejected = true; break; }
+                if (!bridge_args_ok("io", &msg, 3)) {
+                    bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_IO, subcmd, "truncated");
+                    rejected = true;
+                    break;
+                }
                 if (!bridge_range_ok("io", subcmd, "io", msg.payload[1], 1,
-                                     KILN_IO_DIGITAL_COUNT)) { rejected = true; break; }
+                                     KILN_IO_DIGITAL_COUNT)) {
+                    bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_IO, subcmd, "out of range");
+                    rejected = true;
+                    break;
+                }
                 err = kiln_io_owner_command_set_io(msg.payload[1], msg.payload[2] != 0);
                 break;
             }
             case IO_CMD_SET_IO_DIR: {
-                if (!bridge_args_ok("io", &msg, 4)) { rejected = true; break; }
+                if (!bridge_args_ok("io", &msg, 4)) {
+                    bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_IO, subcmd, "truncated");
+                    rejected = true;
+                    break;
+                }
                 if (!bridge_range_ok("io", subcmd, "io", msg.payload[1], 1,
-                                     KILN_IO_DIGITAL_COUNT)) { rejected = true; break; }
+                                     KILN_IO_DIGITAL_COUNT)) {
+                    bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_IO, subcmd, "out of range");
+                    rejected = true;
+                    break;
+                }
                 err = kiln_io_owner_command_set_io_dir(msg.payload[1], msg.payload[2] != 0,
                                                        msg.payload[3] != 0);
                 break;
@@ -876,7 +1014,11 @@ static void io_bridge_task(void *arg)
                 break;
             }
             case IO_CMD_SET_AUTO_REPORT: {
-                if (!bridge_args_ok("io", &msg, 3)) { rejected = true; break; }
+                if (!bridge_args_ok("io", &msg, 3)) {
+                    bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_IO, subcmd, "truncated");
+                    rejected = true;
+                    break;
+                }
                 ctx->auto_period_ms = bridge_clamp_auto_period("io",
                                                                bridge_u16_le(&msg.payload[1]));
                 ctx->auto_enabled = (ctx->auto_period_ms != 0);
@@ -891,7 +1033,11 @@ static void io_bridge_task(void *arg)
                 break;
             }
             case IO_CMD_SX_WRITE_REG: {
-                if (!bridge_args_ok("io", &msg, 3)) { rejected = true; break; }
+                if (!bridge_args_ok("io", &msg, 3)) {
+                    bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_IO, subcmd, "truncated");
+                    rejected = true;
+                    break;
+                }
                 uint32_t sources = 0;
                 kiln_io_owner_sx_result_t sr =
                     kiln_io_owner_command_sx_write_reg(msg.payload[1], msg.payload[2], &sources);
@@ -900,6 +1046,7 @@ static void io_bridge_task(void *arg)
                                   "relay pin while safety fault sources 0x%02X asserted (safety wins, "
                                   "see docs/SAFETY_MODEL.md)", msg.payload[1], msg.payload[2],
                              (unsigned)sources);
+                    bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_IO, subcmd, "safety");
                     rejected = true;
                     break;
                 }
@@ -907,11 +1054,19 @@ static void io_bridge_task(void *arg)
                 break;
             }
             case IO_CMD_SX_READ_REG: {
-                if (!bridge_args_ok("io", &msg, 3)) { rejected = true; break; }
+                if (!bridge_args_ok("io", &msg, 3)) {
+                    bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_IO, subcmd, "truncated");
+                    rejected = true;
+                    break;
+                }
                 uint8_t len = msg.payload[2];
                 /* Bounds the burst into reply[3..]; 3 + 16 is well inside
                  * BRIDGE_REPLY_MAX, so no reply can be built past the buffer. */
-                if (!bridge_range_ok("io", subcmd, "len", len, 1, 16)) { rejected = true; break; }
+                if (!bridge_range_ok("io", subcmd, "len", len, 1, 16)) {
+                    bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_IO, subcmd, "out of range");
+                    rejected = true;
+                    break;
+                }
                 err = kiln_io_owner_command_sx_read_reg(msg.payload[1], &reply[3], len);
                 if (err != ESP_OK) break;
                 reply[0] = IO_CMD_SX_READ_REG;
@@ -921,12 +1076,17 @@ static void io_bridge_task(void *arg)
                 break;
             }
             case IO_CMD_SX_SET_DIR: {
-                if (!bridge_args_ok("io", &msg, 3)) { rejected = true; break; }
+                if (!bridge_args_ok("io", &msg, 3)) {
+                    bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_IO, subcmd, "truncated");
+                    rejected = true;
+                    break;
+                }
                 uint16_t dir_mask = bridge_u16_le(&msg.payload[1]);
                 kiln_io_owner_sx_result_t sr = kiln_io_owner_command_sx_set_dir(dir_mask);
                 if (sr == KILN_IO_OWNER_SX_REFUSED_RELAY) {
                     ESP_LOGW(TAG, "io: SX_SET_DIR mask 0x%04X refused -- would retarget a relay pin's "
                                   "direction (relay pins are always outputs, see kiln_io.h)", dir_mask);
+                    bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_IO, subcmd, "safety");
                     rejected = true;
                     break;
                 }
@@ -934,18 +1094,31 @@ static void io_bridge_task(void *arg)
                 break;
             }
             case IO_CMD_SX_SET_PULLUP: {
-                if (!bridge_args_ok("io", &msg, 3)) { rejected = true; break; }
+                if (!bridge_args_ok("io", &msg, 3)) {
+                    bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_IO, subcmd, "truncated");
+                    rejected = true;
+                    break;
+                }
                 err = kiln_io_owner_command_sx_set_pullup(bridge_u16_le(&msg.payload[1]));
                 break;
             }
             case IO_CMD_SX_SET_OPENDRAIN: {
-                if (!bridge_args_ok("io", &msg, 3)) { rejected = true; break; }
+                if (!bridge_args_ok("io", &msg, 3)) {
+                    bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_IO, subcmd, "truncated");
+                    rejected = true;
+                    break;
+                }
                 err = kiln_io_owner_command_sx_set_opendrain(bridge_u16_le(&msg.payload[1]));
                 break;
             }
             case IO_CMD_SX_SET_DEBOUNCE: {
-                if (!bridge_args_ok("io", &msg, 4)) { rejected = true; break; }
+                if (!bridge_args_ok("io", &msg, 4)) {
+                    bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_IO, subcmd, "truncated");
+                    rejected = true;
+                    break;
+                }
                 if (!bridge_range_ok("io", subcmd, "debounce config", msg.payload[3], 0, 7)) {
+                    bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_IO, subcmd, "out of range");
                     rejected = true;
                     break;
                 }
@@ -954,21 +1127,37 @@ static void io_bridge_task(void *arg)
                 break;
             }
             case IO_CMD_SX_SET_INT_MASK: {
-                if (!bridge_args_ok("io", &msg, 5)) { rejected = true; break; }
+                if (!bridge_args_ok("io", &msg, 5)) {
+                    bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_IO, subcmd, "truncated");
+                    rejected = true;
+                    break;
+                }
                 err = kiln_io_owner_command_sx_set_int_mask(
                     bridge_u16_le(&msg.payload[1]), io_expand_sense(bridge_u16_le(&msg.payload[3])));
                 break;
             }
             case IO_CMD_SX_LED_DRIVER: {
-                if (!bridge_args_ok("io", &msg, 4)) { rejected = true; break; }
+                if (!bridge_args_ok("io", &msg, 4)) {
+                    bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_IO, subcmd, "truncated");
+                    rejected = true;
+                    break;
+                }
                 if (!bridge_range_ok("io", subcmd, "pin", msg.payload[1], 0,
-                                     SX1509_PIN_COUNT - 1u)) { rejected = true; break; }
+                                     SX1509_PIN_COUNT - 1u)) {
+                    bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_IO, subcmd, "out of range");
+                    rejected = true;
+                    break;
+                }
                 err = kiln_io_owner_command_sx_led_driver(msg.payload[1], msg.payload[2] != 0,
                                                           msg.payload[3]);
                 break;
             }
             case IO_CMD_SX_RESET: {
-                if (!bridge_args_ok("io", &msg, 2)) { rejected = true; break; }
+                if (!bridge_args_ok("io", &msg, 2)) {
+                    bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_IO, subcmd, "truncated");
+                    rejected = true;
+                    break;
+                }
                 err = kiln_io_owner_command_sx_reset(msg.payload[1] != 0);
                 break;
             }
@@ -993,14 +1182,16 @@ static void io_bridge_task(void *arg)
         }
 
         if (rejected) {
-            continue; /* the guard above logged the specific reason */
+            continue; /* the guard above logged the specific reason and replied */
         }
         if (err != ESP_OK) {
             /* Reported, not retried: an expander that stopped answering will
              * fail the next command too, and a retry loop here would keep the
              * task off its ~INT and auto-report duties for as long as the I2C
-             * bus stays broken. The host sees no reply and can decide. */
+             * bus stays broken. Now also told to the host instead of only the
+             * log -- see bridge_reply_reject()'s doc comment. */
             ESP_LOGW(TAG, "io: subcmd 0x%02X failed: %s", subcmd, esp_err_to_name(err));
+            bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_IO, subcmd, "driver error");
             continue;
         }
         if (reply_len > 0) {
@@ -1537,7 +1728,11 @@ static void safety_bridge_task(void *arg)
                 break;
             }
             case SAFETY_CMD_REQUEST_ENABLE: {
-                if (!bridge_args_ok("safety", &msg, 2)) { rejected = true; break; }
+                if (!bridge_args_ok("safety", &msg, 2)) {
+                    bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_SAFETY, subcmd, "truncated");
+                    rejected = true;
+                    break;
+                }
                 err = safety_link_request_enable(ctx->link, msg.payload[1] != 0);
                 break;
             }
@@ -1588,7 +1783,11 @@ static void safety_bridge_task(void *arg)
                 break;
             }
             case SAFETY_CMD_SET_POLL_PERIOD: {
-                if (!bridge_args_ok("safety", &msg, 3)) { rejected = true; break; }
+                if (!bridge_args_ok("safety", &msg, 3)) {
+                    bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_SAFETY, subcmd, "truncated");
+                    rejected = true;
+                    break;
+                }
                 err = safety_link_set_poll_period(ctx->link, bridge_u16_le(&msg.payload[1]));
                 break;
             }
@@ -1611,7 +1810,11 @@ static void safety_bridge_task(void *arg)
                  * bridge_args_ok() first, same "never guess at a missing
                  * byte" discipline every other subcommand in this file
                  * follows. */
-                if (!bridge_args_ok("safety", &msg, 2)) { rejected = true; break; }
+                if (!bridge_args_ok("safety", &msg, 2)) {
+                    bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_SAFETY, subcmd, "truncated");
+                    rejected = true;
+                    break;
+                }
                 err = safety_link_send_set_config(ctx->link, msg.payload[1]);
                 break;
             }
@@ -1631,7 +1834,11 @@ static void safety_bridge_task(void *arg)
                  * decides whether the isolated fault line into the safety
                  * processor is asserted, and reading a stale buffer byte here
                  * could de-assert a fault that is still real. */
-                if (!bridge_args_ok("safety", &msg, 2)) { rejected = true; break; }
+                if (!bridge_args_ok("safety", &msg, 2)) {
+                    bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_SAFETY, subcmd, "truncated");
+                    rejected = true;
+                    break;
+                }
                 err = safety_link_set_fault(ctx->link, msg.payload[1] != 0);
                 break;
             }
@@ -1647,11 +1854,13 @@ static void safety_bridge_task(void *arg)
                  * bridge_args_ok() first, same discipline every other
                  * subcommand in this file follows. */
                 if (!bridge_args_ok("safety", &msg, KILNLINK_SET_CT_CAL_LEN)) {
+                    bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_SAFETY, subcmd, "truncated");
                     rejected = true;
                     break;
                 }
                 if (!bridge_range_ok("safety", subcmd, "ct_cal channel", msg.payload[1], 0,
                                      KILNLINK_SET_CT_CAL_NUM_CHANNELS - 1u)) {
+                    bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_SAFETY, subcmd, "out of range");
                     rejected = true;
                     break;
                 }
