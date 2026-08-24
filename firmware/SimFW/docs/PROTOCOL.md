@@ -681,6 +681,7 @@ read-only from this task's perspective; a "welded contact" is modeled at
 | `DUT_POWER_GET` | `0x08` | `i2c_owner_get_dut_power_on()` (deprecated alias for `_get_dut_power_main_on()`) |
 | `DUT_POWER_SAFETY_SET` | `0x09` | `i2c_owner_set_dut_power_safety()` |
 | `DUT_POWER_SAFETY_GET` | `0x0A` | `i2c_owner_get_dut_power_safety_on()` |
+| `BUS_SCAN` | `0x0B` | `i2c_owner_bus_scan()` |
 
 `DUT_POWER_SET` is DESIGN_NOTES.md section 3.4's addition (the DUT 12 V power relay
 was added to the plan after section 5's original command table was written)
@@ -735,6 +736,62 @@ reply `[status, open]`. `FAULT_LINE_GET`: no args, reply
 (main domain only). `DUT_POWER_GET`: no args, reply `[status, on]` (main
 domain only). `DUT_POWER_SAFETY_SET`: `[u8 on]`. `DUT_POWER_SAFETY_GET`: no
 args, reply `[status, on]`.
+
+**`BUS_SCAN`** (bench incident pass, 2026-08-24 -- see `cmd_ids.h`'s comment
+on `SIMFW_CMD_IO_BUS_SCAN` for the motivating incident: two MCP23017s found
+re-strapped to non-default addresses with no way to diagnose it short of an
+SWD probe). No request args. Reply:
+`[status, u8 configured_addr1, u8 configured_addr2, u8 found_bitmap[14]]`
+(17 bytes). `found_bitmap` covers the 7-bit address range `0x08..0x77`
+(the reserved `0x00-0x07`/`0x78-0x7F` ranges are excluded, standard I2C
+bus-scan convention) -- bit *n* (`n` = 0..111) is set iff address
+`(0x08 + n)` ACKed a genuine 1-byte probe write; 112 addresses pack into
+exactly 14 bytes with no partial byte. `configured_addr1`/`configured_addr2`
+are this build's `MCP23017_ADDR_1`/`MCP23017_ADDR_2` (`i2c_owner.c`), so a
+client can report "configured 0x25/0x26, found 0x25/0x26 -- OK" or
+"configured 0x20/0x21, found 0x25/0x26 -- MISMATCH" without any further
+round trips.
+
+Unlike every other IO command above, `BUS_SCAN` is answered synchronously by
+blocking `cmd_task` on a completion semaphore `i2c_owner`'s own task signals
+once its scan finishes (`i2c_owner_bus_scan()`, `i2c_owner.h`) rather than
+via the queue-then-apply-next-tick pattern's usual "queued, not yet applied"
+return -- the whole point of this command is one round trip producing an
+immediately useful answer, and a bare fire-and-forget queue send would just
+push a second poll onto the client. The actual I2C0 traffic still only ever
+happens on `i2c_owner`'s own task, preserving the single-owner-per-peripheral
+doctrine; `cmd_task` only waits. The only failure this command can report is
+`ERR_BUSY`, from a generous 1 s internal timeout guarding against an
+unexpected `i2c_owner` stall -- there is no `ERR_BAD_ARGS` case since the
+command takes no arguments.
+
+**Duration / relay-sense debounce interaction:** the scan runs inline,
+synchronously, inside `i2c_owner`'s command-apply step for one scan tick
+(`MCP23017_DEBOUNCE_SCAN_MS` = 8 ms period). At 400 kHz
+(`I2C_OWNER_BAUD_HZ`), sweeping all 112 addresses (2 ACKing, 110 NAKing) is
+roughly 2.9 ms of bus time; this pass estimates a worst case around 5 ms
+including software overhead. That stretches the one tick a scan is commanded
+on by up to ~5 ms out of its normal 8 ms period -- a one-off stall, not a
+sustained one (a client only sends this command when it actually wants a
+scan). At most ~13 ms then separates that tick's relay-sense sample from the
+next, comfortably inside the ~24 ms worst-case debounce settle time
+(3 consecutive 8 ms samples, `mcp23017.h`'s own comment) -- a single
+stretched inter-sample gap delays when the next sample lands, it does not
+desync the debounce state machine's match-count logic.
+
+**Safety of probing unknown addresses:** a 1-byte I2C write is not
+universally a no-op -- some devices treat an unexpected single byte as a
+register write with an implicit/default value. On this bench, I2C0 carries
+only the two MCP23017s (`i2c_owner.h`'s pin map) -- there is no third device
+to disturb. For the MCP23017s specifically this is provably harmless: per
+the datasheet, a 1-byte write only moves the part's internal register
+pointer (consulted by the *next* transaction), it does not change any
+register's stored value, and this driver's read/write helpers
+(`mcp23017.c`) never rely on that pointer's prior state -- every call sends
+its own explicit register address first. `configure_exp1()`/`configure_exp2()`
+also fully reprogram both expanders' direction/pull-up/output-latch registers
+at every boot regardless, so even an unforeseen side effect would not
+survive a power cycle.
 
 ### 5.6 FAULT group (`SIMFW_TASK_ID_FAULT` = 7) — `fault_sched.h`
 

@@ -535,7 +535,18 @@ def _io_encode(cmd: int, payload: dict) -> bytes:
         return bytes([cmd, _bool_byte(payload["on"])])
     if cmd == 10:  # DUT_POWER_SAFETY_GET
         return bytes([cmd])
+    if cmd == 11:  # BUS_SCAN -- no args, PROTOCOL.md sec 5.5
+        return bytes([cmd])
     raise PayloadError(f"IO: unknown command id {cmd}")
+
+
+#: 7-bit I2C address sweep range BUS_SCAN's found_bitmap covers -- must match
+#: firmware/SimFW/src/tasks/i2c_owner.h's I2C_OWNER_BUS_SCAN_ADDR_MIN/MAX
+#: exactly (bit n of the wire bitmap = address IO_BUS_SCAN_ADDR_MIN + n).
+IO_BUS_SCAN_ADDR_MIN = 0x08
+IO_BUS_SCAN_ADDR_MAX = 0x77
+IO_BUS_SCAN_ADDR_COUNT = IO_BUS_SCAN_ADDR_MAX - IO_BUS_SCAN_ADDR_MIN + 1  # 112
+IO_BUS_SCAN_BITMAP_BYTES = (IO_BUS_SCAN_ADDR_COUNT + 7) // 8  # 14
 
 
 def _io_decode(cmd: int, status: int, data: bytes) -> dict:
@@ -566,6 +577,30 @@ def _io_decode(cmd: int, status: int, data: bytes) -> dict:
         return {}
     if cmd == 10:  # DUT_POWER_SAFETY_GET
         return {"on": bool(data[0])}
+    if cmd == 11:  # BUS_SCAN -- [configured_addr1, configured_addr2, found_bitmap[14]]
+        configured_addr1 = data[0]
+        configured_addr2 = data[1]
+        bitmap = data[2 : 2 + IO_BUS_SCAN_BITMAP_BYTES]
+        found_addresses = [
+            IO_BUS_SCAN_ADDR_MIN + n
+            for n in range(IO_BUS_SCAN_ADDR_COUNT)
+            if bitmap[n // 8] & (1 << (n % 8))
+        ]
+        found_set = set(found_addresses)
+        # "match" is the whole point of this command (see cli.py's `io scan`
+        # printing): both addresses this firmware is CURRENTLY configured to
+        # use must have actually ACKed the scan. Extra, unexpected addresses
+        # found on the bus do not by themselves count as a mismatch here --
+        # only a configured address that failed to ACK does -- since a third
+        # device sharing the bus is a separate (if noteworthy) condition from
+        # "the firmware's own two expanders aren't where it thinks they are".
+        match = configured_addr1 in found_set and configured_addr2 in found_set
+        return {
+            "configured_addr1": configured_addr1,
+            "configured_addr2": configured_addr2,
+            "found_addresses": found_addresses,
+            "match": match,
+        }
     raise PayloadError(f"IO: unknown command id {cmd}")
 
 

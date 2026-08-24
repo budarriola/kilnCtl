@@ -311,6 +311,10 @@ def cmd_io(args) -> int:
             result = link.send_command(CommandGroup.IO, IoCmd.DUT_POWER_GET)
         elif args.io_command == "power-safety-get":
             result = link.send_command(CommandGroup.IO, IoCmd.DUT_POWER_SAFETY_GET)
+        elif args.io_command == "scan":
+            result = link.send_command(CommandGroup.IO, IoCmd.BUS_SCAN)
+            _print_io_scan_result(result)
+            return 0
         else:  # pragma: no cover - argparse `choices` already guards this
             print(f"error: unknown io subcommand {args.io_command!r}", file=sys.stderr)
             return 2
@@ -319,6 +323,31 @@ def cmd_io(args) -> int:
         return 1
     print(json.dumps(result, indent=2))
     return 0
+
+
+def _print_io_scan_result(result: dict) -> None:
+    """Human-readable `kilnsim io scan` output -- the whole point of this
+    command is a bench operator not having to compare hex addresses by eye
+    (see the incident this command was built for: the firmware's own
+    MCP23017_ADDR_1/_2 vs. what actually answers on the bus went unnoticed
+    for an hour). Prints the configured-vs-found comparison up front, in
+    plain words, before the raw address lists."""
+    configured = [result["configured_addr1"], result["configured_addr2"]]
+    found = result["found_addresses"]
+    configured_str = "/".join(f"0x{a:02X}" for a in configured)
+    found_str = "/".join(f"0x{a:02X}" for a in found) if found else "(none)"
+    if result["match"]:
+        print(f"configured {configured_str}, found {found_str} -- OK")
+    else:
+        print(f"configured {configured_str}, found {found_str} -- MISMATCH")
+        missing = [a for a in configured if a not in found]
+        if missing:
+            missing_str = "/".join(f"0x{a:02X}" for a in missing)
+            print(f"  configured address(es) not found on the bus: {missing_str}")
+    extra = [a for a in found if a not in configured]
+    if extra:
+        extra_str = "/".join(f"0x{a:02X}" for a in extra)
+        print(f"  additional address(es) found but not configured: {extra_str}")
 
 
 def cmd_ct(args) -> int:
@@ -549,6 +578,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     iosp = io_sub.add_parser(
         "power-safety-get", help="read back the safety-domain (J19) DUT power relay's commanded state"
+    )
+    iosp.set_defaults(func=cmd_io)
+
+    iosp = io_sub.add_parser(
+        "scan",
+        help="sweep I2C0 (0x08..0x77) and report which addresses ACKed, vs. what this firmware "
+             "build is configured to use -- diagnoses a re-strapped/mismatched MCP23017 in one round trip",
     )
     iosp.set_defaults(func=cmd_io)
 

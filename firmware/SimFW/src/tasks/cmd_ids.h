@@ -278,6 +278,30 @@ extern "C" {
 #define SIMFW_CMD_IO_DUT_POWER_GET 0x08u
 #define SIMFW_CMD_IO_DUT_POWER_SAFETY_SET 0x09u
 #define SIMFW_CMD_IO_DUT_POWER_SAFETY_GET 0x0Au
+// BUS_SCAN (bench incident pass, 2026-08-24): "the two MCP23017 expanders
+// were found re-strapped to 0x25/0x26 instead of the POR-default 0x20/0x21
+// this firmware assumed, and there was no way to find out from the PC side
+// -- diagnosing it needed an SWD probe and about an hour." This command
+// sweeps the 7-bit I2C0 address range 0x08..0x77 (the reserved 0x00-0x07 and
+// 0x78-0x7F ranges are excluded, standard I2C bus-scan convention) with a
+// genuine 1-byte probe write per address (see i2c_owner.c's
+// perform_bus_scan() for why it MUST be 1 byte, never 0) and reports which
+// addresses ACKed, alongside the two addresses this firmware is CURRENTLY
+// configured to use (MCP23017_ADDR_1/MCP23017_ADDR_2, i2c_owner.c) -- so a
+// client can print "configured 0x25/0x26, found 0x25/0x26 -- OK" or
+// "configured 0x20/0x21, found 0x25/0x26 -- MISMATCH" in one round trip,
+// without a debug probe.
+//
+// request: none (`[cmd_id]` only).
+//
+// reply: `[status, u8 configured_addr1, u8 configured_addr2,
+// u8 found_bitmap[14]]` -- 17 bytes total, comfortably inside benchproto's
+// 128-byte payload cap. found_bitmap bit n (n = 0..111) corresponds to
+// address (0x08 + n); 112 addresses pack into exactly 14 bytes with no
+// partial byte. status is always OK -- see i2c_owner_bus_scan()'s comment
+// for the (generous, 1 s) internal timeout that turns an unexpected i2c_owner
+// stall into ERR_BUSY rather than hanging cmd_task forever.
+#define SIMFW_CMD_IO_BUS_SCAN 0x0Bu
 
 // --- FAULT group command ids (SIMFW_TASK_ID_FAULT) -- docs/PROTOCOL.md
 // section 5.6, backed by fault_sched.h's schedule/cancel/fire_now/list API.

@@ -165,6 +165,14 @@ class IoCmd(enum.IntEnum):
     # never accidentally command the safety-domain relay too.
     DUT_POWER_SAFETY_SET = 9
     DUT_POWER_SAFETY_GET = 10
+    # BUS_SCAN (PROTOCOL.md sec 5.5, bench incident pass 2026-08-24): sweeps
+    # I2C0's 0x08..0x77 address range and reports which addresses ACKed a
+    # real 1-byte probe write, alongside the two addresses this firmware
+    # build is configured to use -- added after the real bench incident
+    # where the two MCP23017 expanders turned up re-strapped to 0x25/0x26
+    # instead of the assumed 0x20/0x21 defaults, with no way to find out
+    # short of an SWD debug probe.
+    BUS_SCAN = 11
 
 
 # --- FAULT (scheduler, DESIGN_NOTES.md sec 7) -----------------------------------------

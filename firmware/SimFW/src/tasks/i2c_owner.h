@@ -249,6 +249,48 @@ typedef enum {
 bool i2c_owner_io_read(i2c_owner_expander_t exp, uint8_t pin, bool *level,
                         i2c_owner_io_read_status_t *out_status);
 
+// --- Bus scan (SIMFW_CMD_IO_BUS_SCAN, bench incident pass 2026-08-24) ------
+// See cmd_ids.h's comment on SIMFW_CMD_IO_BUS_SCAN for the motivating
+// incident. Sweeps the 7-bit I2C0 address range
+// [I2C_OWNER_BUS_SCAN_ADDR_MIN, I2C_OWNER_BUS_SCAN_ADDR_MAX] and reports
+// which addresses ACKed a 1-byte probe write, alongside the two addresses
+// this build is configured to use (MCP23017_ADDR_1/_2, i2c_owner.c).
+#define I2C_OWNER_BUS_SCAN_ADDR_MIN 0x08u
+#define I2C_OWNER_BUS_SCAN_ADDR_MAX 0x77u
+#define I2C_OWNER_BUS_SCAN_ADDR_COUNT \
+    (I2C_OWNER_BUS_SCAN_ADDR_MAX - I2C_OWNER_BUS_SCAN_ADDR_MIN + 1u) // 112
+// 112 addresses / 8 bits-per-byte = 14 bytes exactly, no partial byte.
+#define I2C_OWNER_BUS_SCAN_BITMAP_BYTES ((I2C_OWNER_BUS_SCAN_ADDR_COUNT + 7u) / 8u)
+
+typedef struct {
+    // bit n (n = 0..I2C_OWNER_BUS_SCAN_ADDR_COUNT-1) set = address
+    // (I2C_OWNER_BUS_SCAN_ADDR_MIN + n) ACKed the probe write.
+    uint8_t found_bitmap[I2C_OWNER_BUS_SCAN_BITMAP_BYTES];
+    uint8_t configured_addr1; // MCP23017_ADDR_1, i2c_owner.c
+    uint8_t configured_addr2; // MCP23017_ADDR_2, i2c_owner.c
+} i2c_owner_bus_scan_result_t;
+
+// Runs a full bus scan and blocks the CALLING task (cmd_task, not
+// i2c_owner) until it completes -- deliberately synchronous, unlike the
+// queue-then-apply-next-tick setters above, because the entire point of this
+// command is a client getting an immediately useful answer in one round
+// trip (see cmd_ids.h's comment); a fire-and-forget queue send would just
+// push the "when is it ready" problem onto the client as a second poll.
+// The actual I2C0 traffic still only ever happens on i2c_owner's own task
+// (single-owner doctrine, this file's header comment) -- this function only
+// enqueues the request and waits on a completion semaphore i2c_owner's task
+// signals once its own scan finishes; see i2c_owner.c's
+// perform_bus_scan()/apply_pending_commands() for where the actual probing
+// happens and for the worst-case duration estimate.
+//
+// Returns false (and zeroes *out) if the scan could not be requested
+// (i2c_owner not started / command queue full) or if i2c_owner did not
+// signal completion within a generous 1-second timeout -- the latter should
+// never happen in normal operation (the scan itself is a few ms, see
+// i2c_owner.c) and exists only so a genuinely wedged i2c_owner task cannot
+// hang cmd_task forever. out must not be NULL.
+bool i2c_owner_bus_scan(i2c_owner_bus_scan_result_t *out);
+
 #ifdef __cplusplus
 }
 #endif

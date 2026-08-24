@@ -1084,6 +1084,23 @@ class MockSimLink(SimLink):
                 return {}
             if cmd == 10:  # DUT_POWER_SAFETY_GET (safety)
                 return {"on": self._state["dut_power_safety_on"]}
+            if cmd == 11:  # BUS_SCAN -- canned "everything matches" mock reply
+                # for shape parity with the real firmware's reply
+                # (payloads.py's IO/_io_decode() dict shape); a mock link has
+                # no real I2C bus to scan, so this reports the two
+                # configured addresses as the only ones found -- the
+                # unremarkable case. `kilnsim io scan --mock` intentionally
+                # cannot exercise the MISMATCH path; see
+                # test_kilnsim_io_bus_scan.py for that (it drives
+                # payloads.decode_reply()/cli._print_io_scan_result()
+                # directly with a synthetic mismatched payload instead).
+                addr1, addr2 = 0x20, 0x21
+                return {
+                    "configured_addr1": addr1,
+                    "configured_addr2": addr2,
+                    "found_addresses": [addr1, addr2],
+                    "match": True,
+                }
         if group is CommandGroup.FAULT and cmd == 3:  # LIST
             return {"returned_count": 0, "faults": []}
         if group is CommandGroup.FAULT and cmd == 1:  # SCHEDULE

@@ -18,6 +18,7 @@
 
 #include "task_priorities.h"
 #include "drivers/mcp23017.h"
+#include "log_task.h"
 
 #define I2C_OWNER_STACK_WORDS (configMINIMAL_STACK_SIZE * 2u) // headroom for the two mcp23017_t handles + local buffers
 
@@ -106,6 +107,7 @@ typedef enum {
     I2C_OWNER_CMD_SET_DUT_POWER_SAFETY,
     I2C_OWNER_CMD_IO_SET_DIR,
     I2C_OWNER_CMD_IO_WRITE,
+    I2C_OWNER_CMD_BUS_SCAN, // no payload -- see i2c_owner_bus_scan()/perform_bus_scan()
 } i2c_owner_cmd_type_t;
 
 typedef struct {
@@ -125,6 +127,18 @@ typedef struct {
 static QueueHandle_t s_cmd_queue = NULL;
 static SemaphoreHandle_t s_state_mutex = NULL;
 static TaskHandle_t s_task_handle = NULL;
+
+// --- Bus scan synchronization (i2c_owner_bus_scan(), i2c_owner.h) ----------
+// s_bus_scan_request_mutex serializes concurrent callers (only cmd_task
+// calls i2c_owner_bus_scan() today -- one request in flight at a time by
+// construction of the request/reply wire protocol -- but a mutex costs
+// nothing and means a future second caller can never interleave with an
+// in-flight scan and corrupt s_bus_scan_result). s_bus_scan_done_sem is a
+// binary semaphore i2c_owner's own task gives once its scan completes;
+// i2c_owner_bus_scan() blocks on it after enqueuing I2C_OWNER_CMD_BUS_SCAN.
+static SemaphoreHandle_t s_bus_scan_request_mutex = NULL;
+static SemaphoreHandle_t s_bus_scan_done_sem = NULL;
+static i2c_owner_bus_scan_result_t s_bus_scan_result; // written by i2c_owner's task, guarded by s_state_mutex
 
 static mcp23017_t s_exp1;
 static mcp23017_t s_exp2;
@@ -260,6 +274,79 @@ static void configure_exp2(void)
     }
 }
 
+// Sweeps I2C_OWNER_BUS_SCAN_ADDR_MIN..MAX with a genuine 1-byte probe write
+// per address and fills *result. Runs entirely on i2c_owner's own task
+// (called only from apply_pending_commands() below), preserving the
+// single-owner-per-peripheral doctrine (this file's header comment) -- the
+// calling task (cmd_task, via i2c_owner_bus_scan()) never touches I2C0
+// itself, it only waits on a completion semaphore.
+//
+// DURATION: at 400 kHz (I2C_OWNER_BAUD_HZ), one address's address-phase is
+// 9 bits (7-bit address + R/W + ACK/NAK); an ACKed address additionally
+// clocks out one data byte + ACK (9 more bits), a NAKed address aborts right
+// after the address phase. With 2 addresses ACKing (the two MCP23017s) and
+// 110 NAKing, that is roughly (2 * 18 + 110 * 9) bits / 400000 Hz =~ 2.9 ms
+// of bus time; with pico-sdk/software call overhead this pass estimates a
+// worst case around 5 ms for all 112 probes. This runs inline inside
+// apply_pending_commands(), i.e. on the same tick that would otherwise just
+// do the ~microsecond register-write setters, so a scan command stretches
+// that ONE tick by up to ~5 ms out of its normal MCP23017_DEBOUNCE_SCAN_MS
+// (8 ms) period -- a one-off stall, not a sustained one, since a client only
+// sends this command when it actually wants a scan (not on every telemetry
+// tick). 5 ms added to one 8 ms tick means at most ~13 ms between the
+// previous tick's relay-sense read and the next one, comfortably inside the
+// ~24 ms worst-case debounce settle time mcp23017.h's own comment documents
+// (3 consecutive 8 ms samples) -- a single stretched inter-sample gap does
+// not by itself desync the N-consecutive-match debounce state machine, it
+// just delays when the next sample is taken. This is the "accept a one-off
+// stall and document it" option (i2c_owner.h's header comment on this
+// function's caller) rather than spreading the scan across many ticks or
+// caching a stale result -- simpler, and a bench operator invoking a
+// diagnostic command is already expecting it to take a moment.
+//
+// SAFETY -- probing addresses that may host devices other than the two
+// MCP23017s: a 1-byte I2C write is not a no-op for every conceivable device
+// (some interpret an unexpected single byte as a full register write with an
+// implicit/default value). On THIS bench, I2C0 carries only the two
+// MCP23017s (i2c_owner.h's file header pin map) -- no other device exists to
+// disturb. And for the MCP23017s specifically this is provably harmless:
+// per the datasheet, a 1-byte write only moves the part's internal register
+// pointer (used by the *next* transaction), it does not change any
+// register's stored value -- and this driver's own mcp23017_read_reg()/
+// _read_regs()/_write_reg() (mcp23017.c) never rely on that pointer's prior
+// state, every call sends its own explicit register address first. So even
+// probing the two real, already-configured expanders cannot corrupt
+// IODIR/GPPU/OLAT. Belt-and-suspenders: configure_exp1()/configure_exp2()
+// fully reprogram both expanders' direction/pull-up/output-latch registers
+// at every boot regardless, so even an unforeseen side effect would not
+// survive a power cycle.
+static void perform_bus_scan(i2c_owner_bus_scan_result_t *result)
+{
+    memset(result, 0, sizeof(*result));
+    result->configured_addr1 = (uint8_t)MCP23017_ADDR_1;
+    result->configured_addr2 = (uint8_t)MCP23017_ADDR_2;
+
+    for (uint8_t addr = I2C_OWNER_BUS_SCAN_ADDR_MIN; addr <= I2C_OWNER_BUS_SCAN_ADDR_MAX; addr++) {
+        uint8_t probe_byte = 0x00u;
+        // CRITICAL: this MUST be a genuine 1-byte write (len == 1), never a
+        // 0-byte one. pico-sdk's i2c_write_blocking_internal() guards `len`
+        // with `invalid_params_if(I2C, len == 0)`, which compiles to
+        // nothing in a release (NDEBUG) build -- with len == 0 the transfer
+        // loop never executes, the address phase is never actually driven
+        // on the bus, and the call returns 0 unconditionally, so EVERY
+        // address would silently report "present" regardless of what is
+        // actually attached. This exact bug is what turned the real
+        // re-strapped-expander incident this command exists to fix into an
+        // hour-long SWD-probe session instead of a one-second scan -- do
+        // not "simplify" this back to a 0-byte write.
+        int ret = i2c_write_blocking(I2C_OWNER_I2C_PORT, addr, &probe_byte, 1u, false);
+        if (ret >= 0) {
+            uint8_t bit_index = (uint8_t)(addr - I2C_OWNER_BUS_SCAN_ADDR_MIN);
+            result->found_bitmap[bit_index / 8u] |= (uint8_t)(1u << (bit_index % 8u));
+        }
+    }
+}
+
 // Drains every pending command (non-blocking) and applies it. Called once
 // per scan tick, before the sense read, so a command's effect (e.g. a
 // freshly-changed exp1 spare's new output level) is reflected in the same
@@ -290,6 +377,13 @@ static void apply_pending_commands(void)
                 state_lock();
                 s_estop_open = cmd.u.estop.open;
                 state_unlock();
+            } else {
+                // No wire-visible way to fail an already-queued command
+                // (i2c_owner_set_estop() returned "queued" to the caller
+                // before this ever ran), so a bench-visible log line is the
+                // only trace of a real I2C failure here -- see the
+                // IO_SET_DIR/IO_WRITE cases below for the same gap.
+                log_task_log(LOG_LEVEL_ERROR, "i2c_owner", "SET_ESTOP: mcp23017 write failed");
             }
             break;
         }
@@ -298,6 +392,8 @@ static void apply_pending_commands(void)
                 state_lock();
                 s_dut_power_main_on = cmd.u.dut_power.on;
                 state_unlock();
+            } else {
+                log_task_log(LOG_LEVEL_ERROR, "i2c_owner", "SET_DUT_POWER_MAIN: mcp23017 write failed");
             }
             break;
         case I2C_OWNER_CMD_SET_DUT_POWER_SAFETY:
@@ -305,17 +401,48 @@ static void apply_pending_commands(void)
                 state_lock();
                 s_dut_power_safety_on = cmd.u.dut_power.on;
                 state_unlock();
+            } else {
+                log_task_log(LOG_LEVEL_ERROR, "i2c_owner", "SET_DUT_POWER_SAFETY: mcp23017 write failed");
             }
             break;
         case I2C_OWNER_CMD_IO_SET_DIR: {
+            // Both calls' return values used to be discarded outright here
+            // (found in the 2026-08-24 robustness audit) -- a failed
+            // mcp23017 write left the caller believing IO_SET_DIR succeeded
+            // (i2c_owner_io_set_dir() already reported "queued" before this
+            // ever ran) with zero trace anywhere that the pin's direction
+            // never actually changed on the bus. mcp23017_pin_set_dir()/
+            // _pin_set_pullup() only touch their own dev->*_shadow on
+            // success (mcp23017.c), so no local state here needs undoing --
+            // logging is the only gap to close.
             mcp23017_t *dev = (cmd.u.io_set_dir.exp == I2C_OWNER_EXP_1) ? &s_exp1 : &s_exp2;
-            mcp23017_pin_set_dir(dev, cmd.u.io_set_dir.pin, cmd.u.io_set_dir.input);
-            mcp23017_pin_set_pullup(dev, cmd.u.io_set_dir.pin, cmd.u.io_set_dir.pullup);
+            bool dir_ok = mcp23017_pin_set_dir(dev, cmd.u.io_set_dir.pin, cmd.u.io_set_dir.input);
+            bool pullup_ok = mcp23017_pin_set_pullup(dev, cmd.u.io_set_dir.pin, cmd.u.io_set_dir.pullup);
+            if (!dir_ok || !pullup_ok) {
+                log_task_log(LOG_LEVEL_ERROR, "i2c_owner", "IO_SET_DIR: mcp23017 write failed");
+            }
             break;
         }
         case I2C_OWNER_CMD_IO_WRITE: {
             mcp23017_t *dev = (cmd.u.io_write.exp == I2C_OWNER_EXP_1) ? &s_exp1 : &s_exp2;
-            mcp23017_pin_write(dev, cmd.u.io_write.pin, cmd.u.io_write.level);
+            if (!mcp23017_pin_write(dev, cmd.u.io_write.pin, cmd.u.io_write.level)) {
+                log_task_log(LOG_LEVEL_ERROR, "i2c_owner", "IO_WRITE: mcp23017 write failed");
+            }
+            break;
+        }
+        case I2C_OWNER_CMD_BUS_SCAN: {
+            // perform_bus_scan() runs the whole 112-address sweep inline,
+            // right here on i2c_owner's own task -- see its own comment for
+            // the worst-case duration and why that one-off stretch of this
+            // tick is acceptable.
+            i2c_owner_bus_scan_result_t result;
+            perform_bus_scan(&result);
+            state_lock();
+            s_bus_scan_result = result;
+            state_unlock();
+            // Wakes i2c_owner_bus_scan() (cmd_task's context), which is
+            // blocked waiting for this scan's result.
+            xSemaphoreGive(s_bus_scan_done_sem);
             break;
         }
         }
@@ -425,7 +552,18 @@ bool i2c_owner_start(void)
         return false;
     }
 
+    s_bus_scan_request_mutex = xSemaphoreCreateMutex();
+    if (s_bus_scan_request_mutex == NULL) {
+        return false;
+    }
+
+    s_bus_scan_done_sem = xSemaphoreCreateBinary();
+    if (s_bus_scan_done_sem == NULL) {
+        return false;
+    }
+
     memset(&s_relay_states, 0, sizeof(s_relay_states));
+    memset(&s_bus_scan_result, 0, sizeof(s_bus_scan_result));
 
     BaseType_t ok = xTaskCreate(i2c_owner_task_fn, "i2c_owner", I2C_OWNER_STACK_WORDS, NULL,
                                  SIMFW_PRIO_I2C_OWNER, &s_task_handle);
@@ -619,4 +757,47 @@ bool i2c_owner_io_read(i2c_owner_expander_t exp, uint8_t pin, bool *level,
         *out_status = I2C_OWNER_IO_READ_OK;
     }
     return true;
+}
+
+bool i2c_owner_bus_scan(i2c_owner_bus_scan_result_t *out)
+{
+    if (!out) {
+        return false;
+    }
+    memset(out, 0, sizeof(*out));
+
+    if (!s_cmd_queue || !s_bus_scan_request_mutex || !s_bus_scan_done_sem) {
+        return false;
+    }
+
+    // Serialize concurrent requesters -- see this pair's declaration
+    // comment above. portMAX_DELAY here is safe (not an unbounded-hang
+    // risk): the only thing that could be holding this mutex is another
+    // in-flight i2c_owner_bus_scan() call, which is itself bounded by the
+    // 1 s timeout below.
+    if (xSemaphoreTake(s_bus_scan_request_mutex, portMAX_DELAY) != pdTRUE) {
+        return false;
+    }
+
+    i2c_owner_cmd_t cmd = { .type = I2C_OWNER_CMD_BUS_SCAN };
+    bool queued = xQueueSend(s_cmd_queue, &cmd, 0) == pdTRUE;
+    bool done = false;
+    if (queued) {
+        // Block until i2c_owner's task drains the queue and runs
+        // perform_bus_scan() -- worst case ~5 ms of actual I2C time
+        // (perform_bus_scan()'s comment) plus up to one
+        // MCP23017_DEBOUNCE_SCAN_MS if this request lands just after a tick
+        // started. 1 second is a generous timeout meant only to guard
+        // against an unexpected stall (e.g. a wedged bus holding SCL low)
+        // rather than hanging cmd_task's caller forever.
+        done = xSemaphoreTake(s_bus_scan_done_sem, pdMS_TO_TICKS(1000)) == pdTRUE;
+        if (done) {
+            state_lock();
+            *out = s_bus_scan_result;
+            state_unlock();
+        }
+    }
+
+    xSemaphoreGive(s_bus_scan_request_mutex);
+    return done;
 }

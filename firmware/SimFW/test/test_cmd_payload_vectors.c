@@ -407,15 +407,17 @@ static void test_io_requests(void)
         ar_init(&r, wire2 + 1, sizeof(wire2) - 1);
         TEST_CHECK(ar_u8(&r) == 1, "io/dut_power_safety_set_on matches manifest");
     }
-    { // no-arg requests: fault_line_get, estop_get, dut_power_get, dut_power_safety_get
+    { // no-arg requests: fault_line_get, estop_get, dut_power_get, dut_power_safety_get, bus_scan
         static const uint8_t w1[] = {0x05};
         static const uint8_t w2[] = {0x07};
         static const uint8_t w3[] = {0x08};
         static const uint8_t w4[] = {0x0A};
+        static const uint8_t w5[] = {0x0B};
         TEST_CHECK(w1[0] == 0x05, "io/fault_line_get: cmd_id byte matches manifest");
         TEST_CHECK(w2[0] == 0x07, "io/estop_get: cmd_id byte matches manifest");
         TEST_CHECK(w3[0] == 0x08, "io/dut_power_get: cmd_id byte matches manifest");
         TEST_CHECK(w4[0] == 0x0A, "io/dut_power_safety_get: cmd_id byte matches manifest");
+        TEST_CHECK(w5[0] == 0x0B, "io/bus_scan: cmd_id byte matches manifest");
     }
 }
 
@@ -493,6 +495,50 @@ static void test_io_replies(void)
         rw_u8(&w, 0);
         static const uint8_t expect_closed[] = {0x00, 0x00};
         TEST_CHECK(bytes_eq(out, expect_closed, 2), "io/estop_get_closed and io/dut_power_safety_get_off match manifest");
+    }
+    { // bus_scan_match: configured 0x25/0x26 (37/38), both found -- bitmap
+      // bit 29 (addr 0x25) + bit 30 (addr 0x26) set = byte index 3 = 0x60,
+      // every other bitmap byte 0 (handle_io_bus_scan()'s rw_bytes(bitmap, 14)).
+        uint8_t out[24];
+        reply_writer_t w;
+        rw_init(&w, out, sizeof(out));
+        rw_u8(&w, 0x00);
+        rw_u8(&w, 37);  // configured_addr1 = 0x25
+        rw_u8(&w, 38);  // configured_addr2 = 0x26
+        uint8_t bitmap_match[14] = {0};
+        bitmap_match[3] = 0x60u;
+        rw_bytes(&w, bitmap_match, sizeof(bitmap_match));
+        static const uint8_t expected[] = {
+            0x00, 0x25, 0x26,
+            0x00, 0x00, 0x00, 0x60, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        };
+        TEST_CHECK(sizeof(expected) == 17u, "sanity: expected array is 17 bytes (1 status + 2 addrs + 14-byte bitmap)");
+        TEST_CHECK(w.len == sizeof(expected) && bytes_eq(out, expected, sizeof(expected)),
+                   "io/bus_scan_match matches manifest (17 bytes: status, 2 configured addrs, 14-byte bitmap)");
+    }
+    { // bus_scan_mismatch: configured 0x20/0x21 (32/33, the POR default this
+      // pass's incident showed was WRONG on the real bench) but the same
+      // 0x25/0x26-only bitmap as bus_scan_match -- proves the reply layout
+      // is identical regardless of match/mismatch; the *content* difference
+      // (configured_addr1/2) is what a client's own comparison (cli.py's
+      // _print_io_scan_result(), payloads.py's "match" field) acts on, not
+      // anything the wire layout itself encodes as a boolean.
+        uint8_t out[24];
+        reply_writer_t w;
+        rw_init(&w, out, sizeof(out));
+        rw_u8(&w, 0x00);
+        rw_u8(&w, 32);  // configured_addr1 = 0x20
+        rw_u8(&w, 33);  // configured_addr2 = 0x21
+        uint8_t bitmap_mismatch[14] = {0};
+        bitmap_mismatch[3] = 0x60u;
+        rw_bytes(&w, bitmap_mismatch, sizeof(bitmap_mismatch));
+        static const uint8_t expected[] = {
+            0x00, 0x20, 0x21,
+            0x00, 0x00, 0x00, 0x60, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        };
+        TEST_CHECK(sizeof(expected) == 17u, "sanity: expected array is 17 bytes (1 status + 2 addrs + 14-byte bitmap)");
+        TEST_CHECK(w.len == sizeof(expected) && bytes_eq(out, expected, sizeof(expected)),
+                   "io/bus_scan_mismatch matches manifest -- same bitmap, different configured addrs");
     }
 }
 
