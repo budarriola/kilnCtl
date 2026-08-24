@@ -214,19 +214,69 @@ static bool signal_from_exp1_pin(uint8_t pin, i2c_owner_signal_t *out)
     }
 }
 
+// True when a relay-sense / fault-line pin reads as ASSERTED (contact closed,
+// fault line active) given the debounced raw word.
+//
+// THE SENSE INPUTS ARE ACTIVE-LOW. Each contact wires through a 1 kOhm series
+// resistor straight to fixture ground against the MCP23017's internal pull-up
+// (docs/BOM.md section 4, DESIGN_NOTES.md section 3.4): an OPEN contact is
+// pulled high by the pull-up, a CLOSED contact drags the pin to ground. So the
+// logical state is the INVERSE of the raw bit, and every reader of these six
+// signals must go through this helper rather than testing the bit directly.
+//
+// This inversion was missing until 2026-08-24: the raw bit was assigned
+// straight into `.k1_closed` and friends, so the fixture reported a relay
+// CLOSED exactly when its contact was OPEN. It was invisible because the
+// internal pull-ups were also disabled, leaving the inputs floating with
+// nothing wired -- the two faults together produced a plausible-looking
+// "everything open" reading. With the pull-ups enabled and the inversion still
+// missing, the same unwired bench read "all five relays closed AND the fault
+// line asserted", which is what exposed it.
+//
+// NOT YET CONFIRMED AGAINST REAL CONTACTS -- nothing is wired to these inputs
+// (PLAN.md M-E). This follows the documented wiring design; verify it the
+// moment the relay harness is attached, because a fixture that reports a
+// welded contactor as open, or an open one as welded, is worse than useless.
+static inline bool sense_asserted(uint16_t debounced_word, uint8_t pin)
+{
+    return (debounced_word & (uint16_t)(1u << pin)) == 0u;
+}
+
 // One-time bring-up of exp1's fixed pin roles (docs/DESIGN_NOTES.md section 3.7):
-// relay-sense + fault-line inputs (no internal pull-up -- the fixture drives
-// a wetting voltage through the sensed contact per DESIGN_NOTES.md section 3.4, an
-// internal pull-up would fight that), E-stop defaulting to INPUT/high-Z
+// relay-sense + fault-line inputs WITH the internal pull-up enabled, E-stop
+// defaulting to INPUT/high-Z
 // (fail-safe open/STOP -- see the block below), DUT-power outputs idling
 // de-asserted, J20 IO_3/IO_4 and the 6 spares defaulted to input+pullup (a
 // safe, non-driving default for pins whose direction a future test may
 // change via i2c_owner_io_set_dir()).
 static void configure_exp1(void)
 {
+    // Relay sense + fault line: INPUT with the MCP23017's internal ~100 kOhm
+    // pull-up ENABLED. Each sensed contact wires through a 1 kOhm series
+    // resistor straight to fixture ground, so an OPEN contact reads high via
+    // this pull-up and a CLOSED contact pulls the pin low -- docs/BOM.md
+    // section 4 and DESIGN_NOTES.md section 3.4, which now agree on this.
+    //
+    // These pull-ups used to be disabled here, with a comment citing an
+    // earlier revision of DESIGN_NOTES.md section 3.4 in which the fixture
+    // supplied its own wetting voltage through the contact (an internal
+    // pull-up would indeed have fought that). That design was superseded when
+    // K4's opto stage was removed and the fixture's ground was commoned with
+    // GND_Safty (DESIGN_NOTES.md section 3.5): there is no wetting supply any
+    // more, and BOM.md section 4 explicitly resolves the wetting circuit as
+    // "no dedicated wetting supply or external pull-up resistor needed",
+    // flagging the exact risk this was -- "confirm GPPU is actually set for
+    // these 5 pins". It was not. With no pull-up and no wetting supply, an
+    // open contact would have floated instead of reading high, so relay sense
+    // would have been meaningless the moment the harness was wired.
+    //
+    // Nothing is wired to these inputs yet (PLAN.md M-E), so this changes no
+    // observed behaviour today -- it removes a fault that would have appeared
+    // only once real contacts were attached, on the path that reports whether
+    // the line contactor actually opened.
     for (uint8_t pin = EXP1_PIN_K1; pin <= EXP1_PIN_FAULT_LINE; pin++) {
         mcp23017_pin_set_dir(&s_exp1, pin, true);
-        mcp23017_pin_set_pullup(&s_exp1, pin, false);
+        mcp23017_pin_set_pullup(&s_exp1, pin, true);
     }
 
     // E-stop: boot-time default is INPUT (high-Z), i.e. loop OPEN/STOP --
@@ -480,12 +530,12 @@ static void scan_tick(void)
                 edge_log_push_locked(signal, level, now_us);
             }
 
-            s_relay_states.k1_closed = (s_exp1_debounce.stable & (1u << EXP1_PIN_K1)) != 0;
-            s_relay_states.k2_closed = (s_exp1_debounce.stable & (1u << EXP1_PIN_K2)) != 0;
-            s_relay_states.k3_closed = (s_exp1_debounce.stable & (1u << EXP1_PIN_K3)) != 0;
-            s_relay_states.k5_closed = (s_exp1_debounce.stable & (1u << EXP1_PIN_K5)) != 0;
-            s_relay_states.k4_closed = (s_exp1_debounce.stable & (1u << EXP1_PIN_K4)) != 0;
-            s_relay_states.fault_line_asserted = (s_exp1_debounce.stable & (1u << EXP1_PIN_FAULT_LINE)) != 0;
+            s_relay_states.k1_closed = sense_asserted(s_exp1_debounce.stable, EXP1_PIN_K1);
+            s_relay_states.k2_closed = sense_asserted(s_exp1_debounce.stable, EXP1_PIN_K2);
+            s_relay_states.k3_closed = sense_asserted(s_exp1_debounce.stable, EXP1_PIN_K3);
+            s_relay_states.k5_closed = sense_asserted(s_exp1_debounce.stable, EXP1_PIN_K5);
+            s_relay_states.k4_closed = sense_asserted(s_exp1_debounce.stable, EXP1_PIN_K4);
+            s_relay_states.fault_line_asserted = sense_asserted(s_exp1_debounce.stable, EXP1_PIN_FAULT_LINE);
             s_relay_states.sample_time_us = now_us;
             s_relay_states.valid = true;
             state_unlock();
@@ -496,12 +546,12 @@ static void scan_tick(void)
             // the initial snapshot once so readers are not stuck at
             // .valid == false forever on a perfectly quiet bus.
             state_lock();
-            s_relay_states.k1_closed = (s_exp1_debounce.stable & (1u << EXP1_PIN_K1)) != 0;
-            s_relay_states.k2_closed = (s_exp1_debounce.stable & (1u << EXP1_PIN_K2)) != 0;
-            s_relay_states.k3_closed = (s_exp1_debounce.stable & (1u << EXP1_PIN_K3)) != 0;
-            s_relay_states.k5_closed = (s_exp1_debounce.stable & (1u << EXP1_PIN_K5)) != 0;
-            s_relay_states.k4_closed = (s_exp1_debounce.stable & (1u << EXP1_PIN_K4)) != 0;
-            s_relay_states.fault_line_asserted = (s_exp1_debounce.stable & (1u << EXP1_PIN_FAULT_LINE)) != 0;
+            s_relay_states.k1_closed = sense_asserted(s_exp1_debounce.stable, EXP1_PIN_K1);
+            s_relay_states.k2_closed = sense_asserted(s_exp1_debounce.stable, EXP1_PIN_K2);
+            s_relay_states.k3_closed = sense_asserted(s_exp1_debounce.stable, EXP1_PIN_K3);
+            s_relay_states.k5_closed = sense_asserted(s_exp1_debounce.stable, EXP1_PIN_K5);
+            s_relay_states.k4_closed = sense_asserted(s_exp1_debounce.stable, EXP1_PIN_K4);
+            s_relay_states.fault_line_asserted = sense_asserted(s_exp1_debounce.stable, EXP1_PIN_FAULT_LINE);
             s_relay_states.sample_time_us = now_us;
             s_relay_states.valid = true;
             state_unlock();
