@@ -31,7 +31,7 @@ following have ever been measured on this hardware:
 | Figure | Status | Where it comes from |
 |---|---|---|
 | DUT-power inrush, ~60 A / ~190 µs (step 9) | **Derived.** Assumes ~0.2 Ω source+ESR resistance that was never measured. | `docs/BOM.md` §6 |
-| CT transformer ratio, **1:1** (step 4/§5) | **Higher confidence than the earlier ~3:1 plan, but still not measured.** 1.06 V rms clears the board's ≈1 Vrms full-scale sense input with margin (a board property, independent of whichever CT is installed) even if the ~1.5 Vpk usable-Pico-drive estimate behind it is off; the candidate part's (Triad TY-300P) actual turns ratio is unconfirmed against its own datasheet. | `docs/DESIGN_NOTES.md` §3.3, `docs/HARDWARE.md` §5 |
+| CT transformer ratio, **1:1** (step 4/§5) | **Higher confidence than the earlier ~3:1 plan, but still not measured.** 1.06 V rms clears the board's ≈1 Vrms full-scale sense input with margin (a board property, independent of whichever CT is installed) even if the ~1.5 Vpk usable-Pico-drive estimate behind it is off; the ratio itself is now **confirmed 1:1** against the candidate part's own datasheet (2026-08-24) — but that same datasheet **disqualifies the Triad TY-300P for this role** (`Frequency Range: 300 to 3500 Hz`), so no part is currently selected. Do not populate a CT transformer this session. | `docs/BOM.md` §9 item 1, `docs/DESIGN_NOTES.md` §3.3, `docs/HARDWARE.md` §5 |
 | SPI first-byte timing budget, ~250 ns / ~1.6 µs (step 3) | **Derived.** RP2040-datasheet arithmetic; no Pico has ever been attached to confirm it. | `docs/SPI_ACCESS_AUDIT.md` §9, `docs/DESIGN_NOTES.md` §3.2.1 |
 | Relay debounce, ~24 ms worst case (step 8) | Derived from `mcp23017.h`'s stated debounce constant, not bench-timed. | `mcp23017.h` |
 | "Plausible, non-zero temperatures" on the DUT (step 6) | **Not proof the SPI framing is correct.** See step 6's note below — a whole-burst byte shift produces exactly this symptom. | §4 step 6, `docs/SPI_ACCESS_AUDIT.md` D2 |
@@ -521,17 +521,31 @@ because no bench calibration run has ever populated real per-channel
 constants; behavior today is identity, same as the old placeholder. Judge
 this step on waveform cleanliness (frequency, shape, no carrier ripple
 bleeding through), not on absolute calibrated amplitude.
-**Also unmeasured: the transformer's 1:1 ratio itself.** It's built on a
-~1.5 Vpk usable-Pico-drive estimate the project itself calls
-medium-confidence — though the fixture's basic correctness is far less
-sensitive to that estimate at 1:1 than it was under the earlier ~3:1 plan —
-and the candidate part's (Triad TY-300P) actual turns ratio has never been
-checked against its datasheet (`docs/DESIGN_NOTES.md` §3.3,
-`docs/HARDWARE.md` §5). If the transformer is populated this session,
-treat any voltage reading at the safety board's ADC as informational, not as
-confirmation the ratio is right — a wrong ratio here reads as a misleading
-current value on the DUT side, not damage (the safety board's clamp diodes
-D12/D13 are the backstop, per §5's CT troubleshooting row below).
+**The 1:1 ratio is now confirmed — and the candidate part is not.**
+Checked 2026-08-24 against the Triad TY-300P datasheet itself
+(`hardware/datasheets/SimFW_TY300P/TY-300P.pdf`): the part is 600 Ω primary
+into two independent 600 Ω secondaries, so **1:1 per secondary is correct**,
+settling the ratio question this runbook previously left open. The drive
+level is fine too — the datasheet's `+7 dBm` maximum is ≈1.73 Vrms into
+600 Ω, comfortably above the board's ≈1 Vrms full-scale sense input, so the
+~1.5 Vpk usable-Pico-drive estimate never needed to be exact.
+
+**But the same datasheet rules the part out of this role:** `Frequency
+Range: 300 to 3500 Hz`, and the CT waveform's fundamental is 60 Hz — a
+factor of 5 below the specified low-frequency limit. `Max. DC Current` is
+`Pri 0 mA` besides, which a directly driven winding cannot honour without a
+DC-blocking capacitor that worsens the same high-pass problem. See
+`docs/BOM.md` §9 item 1 for the full table and the datasheet acceptance test
+a replacement has to pass.
+
+**Practical consequence for this step: there is no CT transformer to
+populate.** Do not fit a TY-300P "to see if it works" — at 60 Hz its primary
+presents a few hundred ohms, which loads the driver down and produces a
+small, distorted waveform that looks like a *drive* or *calibration* fault
+rather than a wrong part. Judge this step on the fixture's own filtered
+output at the RC network instead, upstream of where the transformer would
+go, and leave the isolated side unpopulated until a 50/60 Hz-rated part is
+chosen.
 **NO-GO:** see §5's CT row.
 
 ### Step 5 — PRE-DUT SANITY CHECK BEFORE FIRST DUT CONTACT

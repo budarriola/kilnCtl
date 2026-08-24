@@ -524,11 +524,37 @@ a correct rewrite, not just from a clean run.
   amplitude-to-DAC-scale mapping (`ct_wave_amps_to_pwm_scale()`, the
   PWM-era name kept for source compatibility — see that function's own
   comment) ends up using — that mapping is a `TODO(M-D calibration)`
-  identity placeholder until M-D lands (`PLAN.md` §10). Candidate part: Triad Magnetics TY-300P (`docs/BOM.md` §3), chosen
-  originally as a step-up part but equally usable as a 1:1 coupling
-  transformer, or any comparable 1:1 audio/isolation transformer if sourcing
-  changes. Full sizing derivation lives in `docs/BOM.md` §3; treat this
-  paragraph as the decision summary.
+  identity placeholder until M-D lands (`PLAN.md` §10).
+
+  **No candidate part is currently selected.** The former candidate, Triad
+  Magnetics TY-300P, was **eliminated on 2026-08-24 by its own datasheet**
+  (`hardware/datasheets/SimFW_TY300P/TY-300P.pdf`, publish date 2019-05-31),
+  which specifies `Frequency Range: 300 to 3500 Hz` — the CT waveform's
+  fundamental is 60 Hz, a factor of 5 below the part's specified
+  low-frequency limit. `docs/BOM.md` §9 item 1 had already predicted this
+  outcome from the part *class* (600:600 Ω telecom isolation transformers run
+  1–3 H of primary inductance, well under the ≥8 H the UDA1334A's 3 kΩ
+  minimum load demands at 60 Hz); the datasheet turns that prediction into a
+  settled fact, and adds `Max. DC Current: Pri 0 mA`, which a directly driven
+  winding cannot honour without a DC-blocking capacitor that worsens the same
+  high-pass problem.
+
+  **Two things the same datasheet check did confirm**, so they should not be
+  re-opened: the **1:1 ratio is correct** (600 Ω primary into two independent
+  600 Ω secondaries — distributor listings quoting "1:2" are describing those
+  two secondaries in series, not a different part), and the **drive level was
+  never the constraint** (`Power Level: -45 dBm to +7 dBm`; +7 dBm into 600 Ω
+  is ≈1.73 Vrms, comfortably above the board's ≈1 Vrms full-scale sense
+  input, so the ~1.5 Vpk usable-Pico-drive estimate did not need to be
+  exact). The failure was frequency response alone.
+
+  A replacement must be a **50/60 Hz-rated** 1:1 or 6 V:6 V power/audio
+  transformer whose datasheet states either ≥8 H primary inductance or ≥3 kΩ
+  primary impedance at 60 Hz. A datasheet that merely omits the
+  low-frequency end fails this test the same way the TY-300P does — absence
+  of a limit is not a rating. Full sizing derivation and the acceptance test
+  live in `docs/BOM.md` §3 and §9 item 1; treat this paragraph as the
+  decision summary.
 
 - **Programmable per channel:** amplitude (simulated amps, via calibration
   table), phase, DC offset, clipping, dropout (half-cycle skipping, as a

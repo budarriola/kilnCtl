@@ -399,7 +399,25 @@ Four items, in order of how much they block:
    ```
 
    Typical 600:600 Ω audio/telecom **isolation** transformers — the TY-300P's
-   class — run **1–3 H**, i.e. only **≈380–1130 Ω at 60 Hz**. That is well
+   class — run **1–3 H**, i.e. only **≈380–1130 Ω at 60 Hz**.
+
+   **This is no longer an inference from the part class. The TY-300P's own
+   datasheet disqualifies it** (Triad Magnetics, publish date 2019-05-31,
+   saved at `hardware/datasheets/SimFW_TY300P/TY-300P.pdf`, checked
+   2026-08-24):
+
+   | Datasheet line | Verbatim | Why it decides the question |
+   |---|---|---|
+   | Frequency Range | `300 to 3500 Hz` | 60 Hz is a **factor of 5 below the specified low-frequency limit**. Triad does not characterise this part at the fixture's fundamental at all, so there is no primary-inductance figure to qualify it against — the part is out of specification before the 8 H arithmetic above is even applied. |
+   | Max. DC Current | `Pri 0 mA`, `Sec 0.80 mA` | **Zero** rated DC on the primary. A directly DAC- or PWM-driven winding carries the driver's DC offset unless it is explicitly blocked, so this role would need a series DC-blocking capacitor — which forms yet another high-pass with the primary, at the same 60 Hz that is already the problem. |
+   | Power Level | `-45 dBm to +7 dBm` | +7 dBm into 600 Ω is ≈1.73 Vrms, so the *level* was never the constraint — it comfortably covers the board's ≈1 Vrms full-scale sense input. Confirms the amplitude budget in §3 was sound and isolates the failure to frequency response, not headroom. |
+   | Impedance | `600 (4W)` pri, `600/600` sec | **Turns ratio confirmed 1:1** per secondary (two independent 600 Ω secondaries, SEC 1 and SEC 2), which is what §3 assumed. Distributor listings quoting "1:2" are describing the two secondaries in **series**, not a different part. Note also that `4W` here means **4-wire**, not 4 watts — several distributor pages render it as a power rating. |
+
+   So the open question splits cleanly, and only one half survives: the
+   **turns ratio is settled and was correct**; the **60 Hz suitability is
+   settled and was wrong**. Nothing about this needs a bench measurement —
+   it is a datasheet fact, and it means the replacement search below is the
+   only remaining work on this item. That is well
    under both the 3 kΩ minimum and the DAC's 1.6 mA output-current limit,
    and it shunts most of the 60 Hz signal to ground through the primary
    before it ever reaches the transformer's mutual inductance. **A series
@@ -411,8 +429,14 @@ Four items, in order of how much they block:
    response is irrelevant, since the fixture's waveform of interest tops out
    a few hundred Hz above the 60 Hz fundamental, and at ≈1 V drive it sits
    nowhere near core saturation. **Do not order the TY-300P (or any similar
-   600:600 audio isolation transformer) for this role until a replacement
-   part's primary inductance at 60 Hz is confirmed against the datasheet.**
+   600:600 audio isolation transformer) for this role** — that is now a
+   closed question, not a caution. **What remains is to pick the
+   replacement**, and the acceptance test for a candidate is a datasheet
+   one, runnable without any hardware: it must be **specified at 50/60 Hz**
+   (not merely un-disqualified there) and either state a primary inductance
+   ≥ 8 H or state a primary impedance at 60 Hz ≥ 3 kΩ. A part whose
+   datasheet simply omits the low-frequency end fails this test the same way
+   the TY-300P does; absence of a limit is not a rating.
 2. **J7 mating connector (§8).** Gender and exact pitch (1.27 mm is stated
    in `docs/HARDWARE.md`, but not confirmed against the physical board any
    more rigorously than that document's own provisional status already

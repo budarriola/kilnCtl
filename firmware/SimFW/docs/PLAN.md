@@ -1,6 +1,6 @@
 # SimFW — Kiln Simulator / Unit-Test Fixture Plan
 
-> **Status:** software complete, hardware-gated · **Last reviewed:** 2026-08-21
+> **Status:** software complete, hardware-gated · **Last reviewed:** 2026-08-24
 >
 > **See [section 0](#0-whats-left--index) for the short checklist of what
 > remains.** Sections 10–15 carry per-item checkboxes.
@@ -95,6 +95,14 @@ never `[x]`.
       are flagged in `5df2190`'s message for whoever picks it up:
       `THERMO_CMD_READ_FAULTS` and `IO_CMD_SX_SCAN` have an empty-success
       reply that is byte-identical to a reasonless rejection.
+- [ ] **Select a replacement CT coupling transformer.** Not hardware-gated
+      and not a measurement: the acceptance test is a datasheet one (50/60 Hz
+      rated, ≥8 H primary inductance or ≥3 kΩ primary impedance at 60 Hz —
+      `BOM.md` §9 item 1). The former candidate, Triad TY-300P, was
+      **eliminated 2026-08-24 by its own datasheet** (`Frequency Range: 300
+      to 3500 Hz` against a 60 Hz fundamental); the same check confirmed the
+      1:1 ratio and the drive-level budget were both right, so only part
+      selection remains. This blocks ordering, and therefore M-D.
 - [ ] **`hardware/UnitTestFixture/` deletion** — `firmware/UnitTestFw` (the
       ESP32-S3 instrument bench firmware) was deleted 2026-08-23
       (`DESIGN_NOTES.md` §12), but its embedded KiCad project,
@@ -105,10 +113,13 @@ never `[x]`.
 
 - [ ] **M-A SPI slave timing proof** — Saleae capture, ≥10k transactions,
       zero underruns. *The single biggest unretired risk in the plan.*
-- [ ] **CT calibration against `SaftyFW`'s real ADC readback** (M-D). The
-      ~3:1 transformer ratio behind it is still an unmeasured estimate, but
-      `docs/BENCH_RUNBOOK.md` step 4 now flags it as such explicitly
-      (`9c90d7b`) rather than leaving it only as an open question.
+- [ ] **CT calibration against `SaftyFW`'s real ADC readback** (M-D).
+      The transformer ratio behind it is **1:1**, not the ~3:1 this line used
+      to claim, and it is now datasheet-confirmed rather than estimated
+      (2026-08-24, §11 item 2) — but the calibration sweep itself is still
+      genuinely hardware-gated, and it is now also blocked upstream by having
+      no transformer part selected at all (see 0.1). `docs/BENCH_RUNBOOK.md`
+      step 4 carries the bench-side caveats.
 - [ ] **J7 pin 1 continuity check** — the two main-board docs contradict each
       other; getting it wrong back-feeds a rail or leaves the isolator side
       unpowered. (§11 item 9)
@@ -317,13 +328,25 @@ Resolved questions have moved to `DESIGN_NOTES.md` §13. What's still open:
    continuity-checked against physical silicon; `HARDWARE.md` itself is
    explicit that it reconciles source *documents*, not hardware. (M-A)
 2. [~] **CT input stage transfer function** — target gain/full-scale figures
-   and the transformer ratio (~3:1) are decided; see `DESIGN_NOTES.md` §3.3
-   for the full arithmetic. **Still open:** the ~1.5 Vpk usable-Pico-drive
-   figure behind that ratio is a medium-confidence estimate, not measured or
-   firmware-confirmed; the candidate part's (Triad TY-300P) exact turns
-   ratio is unconfirmed against its datasheet; and `wave_owner.c`'s
-   amplitude mapping is still an IDENTITY placeholder pending the real
-   calibration procedure — see M-D's status in §10. (M-D)
+   and the transformer ratio (**1:1**, revised down from the earlier ~3:1)
+   are decided; see `DESIGN_NOTES.md` §3.3 for the full arithmetic.
+   **Resolved 2026-08-24, by datasheet, no hardware needed:** the candidate
+   part's turns ratio *and* the drive-level question are both settled, and
+   the part itself is eliminated. The Triad TY-300P is 600 Ω primary into two
+   independent 600 Ω secondaries, so **1:1 is correct**, and its
+   `Power Level: -45 dBm to +7 dBm` (≈1.73 Vrms into 600 Ω) clears the
+   board's ≈1 Vrms full-scale sense input — so the ~1.5 Vpk
+   usable-Pico-drive estimate never had to be exact, which retires that
+   worry rather than answering it. But the same datasheet gives
+   `Frequency Range: 300 to 3500 Hz`, and the fundamental here is 60 Hz:
+   **the part is disqualified**, confirming from a spec what `BOM.md` §9
+   item 1 had inferred from the part class. Saved at
+   `hardware/datasheets/SimFW_TY300P/TY-300P.pdf`.
+   **Still open:** no replacement part is selected — it must be 50/60 Hz-rated
+   with ≥8 H primary inductance (or ≥3 kΩ primary impedance at 60 Hz), which
+   is itself a datasheet check, not a bench one (`BOM.md` §9 item 1). And
+   `wave_owner.c`'s amplitude mapping is still an IDENTITY placeholder
+   pending the real calibration procedure — see M-D's status in §10. (M-D)
 6. [ ] **Fixture hardware form** — how long does the breadboard harness
    survive before a real `hardware/SimFixture/` KiCad board is worth it?
    Revisit after M-E. Unchanged — no fixture hardware, breadboard or
@@ -393,8 +416,10 @@ risk, and the DUT is not connected until the fixture alone is proven:
 9. [ ] E-stop + fault line + DUT power relay, one at a time.
 10. [ ] First closed-loop firing on `fast_test` preset.
 
-Each step gets a row in `docs/HARDWARE.md`'s checklist when that doc is
-written, same keep-it-current rule as `SaftyFW/docs/HARDWARE.md`.
+`docs/HARDWARE.md` now exists and carries a row per step, same
+keep-it-current rule as `SaftyFW/docs/HARDWARE.md`; `docs/BENCH_RUNBOOK.md`
+is the operator-facing procedure for the same sequence. Update all three
+together — this list is the dependency order, not the instructions.
 
 ---
 
