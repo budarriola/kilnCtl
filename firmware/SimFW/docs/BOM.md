@@ -414,11 +414,22 @@ Four items, in order of how much they block:
    inductance **at 60 Hz**. That is the whole difference between the two, and
    it is why HS-56 stays listed rather than being dropped on cost alone.
 
-   *Neither figure above has been independently verified from this
-   environment.* Both hammfg.com and Mouser's datasheet mirror refused or
-   timed out on fetch (403 and read-timeout respectively), so the numbers as
-   written are single-sourced. Confirm them against the PDF before placing
-   the order — this is a $100 part and the check costs a minute.
+   *Verification status, checked 2026-08-24.* Hammond's own PDF could not be
+   read from this environment — hammfg.com returns 403 to a plain fetch, and
+   the copy that does download yields no extractable text. Distributor spec
+   tables corroborate most of the acceptance test independently:
+
+   | Figure | Independently corroborated? |
+   |---|---|
+   | 1:1 ratio, 600 Ω CT | Yes — Digi-Key, Newark, RS |
+   | 20 Hz – 20 kHz, ±1 dB | Yes — Digi-Key |
+   | Level rating 10 dB, insertion loss 1.1 dB typ, primary DCR 72.4 Ω | Yes — Digi-Key |
+   | **Primary inductance 10.62 H** | **No.** Digi-Key's spec table omits primary inductance entirely; the figure traces back to Hammond's own datasheet and nowhere else reachable from here. |
+
+   So the one figure the ≥8 H acceptance test actually turns on is the one
+   still unconfirmed. Read it off the PDF before ordering. The level rating
+   is a useful independent sanity check in the meantime: 10 dB into 600 Ω is
+   ≈2.45 Vrms, comfortably above the ~990 mVrms this fixture drives.
 
    Two ranked alternates, both checked against the same acceptance test:
    - **Alternate 1 — Triad Magnetics HS-56 (Mouser 553-HS-56).** Strongest
