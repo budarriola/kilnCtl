@@ -277,25 +277,33 @@ section with what actually happened, the same discipline
 
 ## 9. Known limitations, summarized
 
-- **The runner-gap problem itself is not fixed here** — `kilnsim.runner`
-  still cannot synthesize GUARD_TRIP/GUARD_WARN/LINK_UP/
-  TRIP_INEFFECTIVE_LATCHED events from real SaftyFW telemetry. This suite
-  (and, as of this pass, `kilnsim run` too — see §2) only makes the
-  resulting vacuous-pass visible instead of silent. Fixing it for real means
-  teaching `kilnsim.runner` (or a sibling module) to poll `kilnctrl` mid-run
-  and translate SaftyFW's guard state into these synthetic events, matching
-  what `virtual_dut`'s separate approach already does for the
+- **The runner gap is closed in `kilnsim.runner`, but `testmgr` does not
+  attach an observer yet** (updated 2026-08-24, `6f1cbbf`).
+  `kilnsim/guard_observer.py` now polls a `kilnctrl` SafetyClient over a
+  second link and edge-detects GUARD_TRIP/GUARD_WARN/LINK_UP/
+  TRIP_INEFFECTIVE_LATCHED, and `run_scenario(..., guard_observer=...)`
+  merges them into the event stream. When **no** observer is passed — which
+  is still every call this suite makes — guard-typed expectations are
+  reported `BLOCKED` with an explicit reason rather than passing vacuously,
+  so the honesty property below is unchanged and is now enforced in the
+  runner itself rather than only surfaced by this suite. **What remains:**
+  wiring the observer into `testmgr`'s own runs, and confirming the
+  SafetyClient polling shape against a real board — it has only been
+  exercised against fakes. Note also that `GUARD_WARN` carries
+  `guard: None` on purpose: `link_task.c` says `warn_mask` has no per-guard
+  identity in this build, so there is nothing honest to map it to.
+  For contrast, `virtual_dut`'s separate approach covers the
   host-simulated case (`firmware/SimFW/tools/virtual_dut/dut_core` runs the
   real, unmodified `safety_guards.c`/`relay_grace.c` against a simulated
   fixture on the host — a genuinely different, non-hardware kind of
   evidence from what a real-hardware `kilnsim` run would produce; see
   `firmware/SaftyFW/docs/GUARD_TEST_MATRIX.md`'s "host-software evidence,
   not hardware evidence" note above its per-guard provocation table). That
-  module cannot simply be imported here: it drives a separately-compiled
-  `dut_core.exe` and virtual-only `virtual_simfw.exe` wire extensions that
-  have no equivalent against a real SaftyFW board or `kilnctrl`'s link to
-  one, so reusing its approach against real hardware is a real design task,
-  not a wiring change.
+  module still cannot simply be imported here — it drives a
+  separately-compiled `dut_core.exe` and virtual-only `virtual_simfw.exe`
+  wire extensions with no equivalent against a real SaftyFW board — which is
+  why the observer takes the other route, reading a real board's guard state
+  through `kilnctrl` rather than recompiling the guards.
 - **SaftyFW-without-ESP presence detection is not implemented** — would
   need the OpenOCD/SWD `debug_*` path. Reported as absent whenever the ESP
   link is down, even if the Pico itself is fine.
