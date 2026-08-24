@@ -453,6 +453,19 @@ hardware-trip rows, which is why it earns a milestone here.
       gate `docs/PLAN.md` originally called for, by explicit decision
       (SimFW is the replacement; not re-litigated). Detail in
       `firmware/SimFW/docs/DESIGN_NOTES.md` §12
+- [x] **A hardware-free CI path that is worth trusting** (2026-08-24,
+      `2bfce93`/`925cdee`). `kilnsim --virtual testmgr` runs the whole tiered
+      suite against `virtual_simfw` — the real SimFW simulation code compiled
+      for the host — instead of `MockSimLink`, which proves close to nothing.
+      A virtual run reports SaftyFW and ESP absent with a `--virtual`-specific
+      reason and caps at tier 0, so it cannot claim hardware tiers it does not
+      have, and every saved report now stamps `link_kind` (serial/virtual/
+      mock), which it never did before: a mock run's JSON used to be
+      indistinguishable from a real-hardware one after the fact. Exit code 0
+      against a fresh `virtual_simfw` with `command_groups_reachable` passing.
+      **This does not move any hardware-gated milestone below** — it is the
+      cheapest layer of `PLAN.md` §13's four, not a substitute for the ones
+      that name silicon.
 - [ ] **Dependency this milestone exists to unblock**: `GUARD_TEST_MATRIX.md`
       §3's hardware-trip rows (safe-state power-on, sensor open-circuit,
       current-mapping commissioning, every enabled guard's real trip) stay
