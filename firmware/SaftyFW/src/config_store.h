@@ -142,6 +142,26 @@ extern "C" {
                                             // DOES know about max31856.h)
                                             // asserts the two agree.
 
+// Highest tc_type/borrowed_type_expected byte that is a real, linearized
+// MAX31856 thermocouple type (MAX31856_TC_TYPE_T) -- duplicated as a literal
+// for the same dependency-free reason CONFIG_STORE_DEFAULT_TC_TYPE's comment
+// gives; config_store_flash.c asserts the two agree. Bytes above this select
+// the part's Voltage Mode (CR1 TC TYPE[3:0] 0x08-0x0F, datasheet page 20's
+// field table) rather than a linearized temperature -- see
+// max31856_tc_type_policy.h's header comment for why max31856_configure()
+// refuses them outright. config_store_unpack() (config_store.c) clamps any
+// out-of-range byte it decodes from a CRC-valid record back to
+// CONFIG_STORE_DEFAULT_TC_TYPE using this bound, as a defense-in-depth
+// backstop independent of whatever wrote the record: today's two writers
+// (link_task.c's SAFETY_CMD_SET_CONFIG, config_params.c's SET_PARAM/
+// COMMIT_CONFIG for param 0x0105/0x0210) already bound the byte themselves
+// before it reaches flash, but a CRC-valid record whose tc_type byte was
+// garbled by something that still happens to leave the CRC intact, or a
+// future writer that forgets to validate, must not be able to hand
+// max31856_configure() a voltage-mode code just because the record it came
+// from otherwise checks out.
+#define CONFIG_STORE_TC_TYPE_MAX_REAL 0x07u // MAX31856_TC_TYPE_T
+
 // Number of current-sense channels a config record carries calibration for --
 // must equal current_task.c's channel count (3, one per ADC0/1/2). Not
 // #included from anywhere hardware-specific: this module stays as

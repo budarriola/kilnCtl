@@ -30,7 +30,10 @@
 #define SAFTYFW_PIN_I2C0_SCL    8   // GPIO8
 
 // --- Discretes (discrete_task) ----------------------------------------------
-#define SAFTYFW_PIN_ESTOP       9   // GPIO9, active low, R10 pull-up + C3 debounce cap
+// GPIO9: ACTIVE HIGH for stop. R10 1k pull-up + C3 noise cap; normally-closed
+// contact to GND_Safty, so LOW = healthy, HIGH = pressed/broken/unfitted.
+// docs/HARDWARE.md section 5 forbids inverting this in firmware.
+#define SAFTYFW_PIN_ESTOP       9
 #define SAFTYFW_PIN_MAIN_FAULT  10  // GPIO10, U1 collector, active low
 
 // --- Thermocouple front end (thermo_task, via spi_owner) -------------------

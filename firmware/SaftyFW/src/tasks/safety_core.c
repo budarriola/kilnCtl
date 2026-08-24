@@ -178,21 +178,28 @@
 // invented one.
 #define CONTEXT_MAX_AGE_MS 5000u
 
-// Mirrors safety_guards.c's own I_PRESENT_A_DEFAULT / CORRELATION_WINDOW_S_
-// DEFAULT (safety_guards.h's cfg field doc comment: "0 -> i_present_a=2.0A,
-// correlation_window_s=150.0s") -- duplicated here, not exported from
-// safety_guards.c, because this file needs the SAME "0 means not
-// configured, substitute the default" substitution safety_guards.c already
-// does internally in order to compute any_current_present/
-// relay_commanded_continuously as INPUT facts, one tick before
-// safety_guards_tick() itself runs. Both numbers are the already-documented
-// SAFETY_MODEL.md defaults, not new ones invented for this file -- if
-// safety_guards.c's own defaults ever change, these must change with them
-// (same risk any duplicated constant carries; there is no third home to put
-// a single copy in without violating the isolation boundary this whole file
-// exists to keep, see snapshots.h's own doc comment on why the shared pure
-// helpers live there instead of in safety_guards.c or link_frame.c).
-#define SAFETY_CORE_I_PRESENT_A_DEFAULT          2.0f
+// Mirrors safety_guards.c's own CORRELATION_WINDOW_S_DEFAULT (safety_
+// guards.h's cfg field doc comment: "0 -> correlation_window_s=150.0s") --
+// duplicated here, not exported from safety_guards.c, because this file
+// needs the SAME "0 means not configured, substitute the default"
+// substitution safety_guards.c already does internally in order to compute
+// relay_commanded_continuously as an INPUT fact, one tick before safety_
+// guards_tick() itself runs. This is the already-documented SAFETY_MODEL.md
+// default, not a new one invented for this file -- if safety_guards.c's own
+// default ever changes, this must change with it (same risk any duplicated
+// constant carries; there is no third home to put a single copy in without
+// violating the isolation boundary this whole file exists to keep, see
+// snapshots.h's own doc comment on why the shared pure helpers live there
+// instead of in safety_guards.c or link_frame.c).
+//
+// 2026-08-24: this block used to also define SAFETY_CORE_I_PRESENT_A_
+// DEFAULT for the same reason -- current_any_present() took i_present_a as
+// a parameter and this file had to substitute the same default safety_
+// guards.c's effective_f(cfg->i_present_a, ...) would. Removed: current_
+// any_present() now reads current_snapshot_t.present[n], which current_
+// sense.c already computed against config_store's i_present_a (with its
+// own substitution, current_task_reload_cal()) -- this file no longer
+// touches i_present_a at all for that fact.
 #define SAFETY_CORE_CORRELATION_WINDOW_S_DEFAULT 150.0f
 
 static TaskHandle_t s_task_handle = NULL;
@@ -492,9 +499,14 @@ static safety_guard_input_t safety_core_build_input(void)
     // context at all).
     current_snapshot_t current;
     current_task_get_snapshot(&current);
-    float i_present_a = (s_guard_cfg.i_present_a > 0.0f) ? s_guard_cfg.i_present_a
-                                                           : SAFETY_CORE_I_PRESENT_A_DEFAULT;
-    bool any_current_present = current_any_present(&current, i_present_a);
+    // 2026-08-24: current_any_present() used to take i_present_a here and
+    // recompute amps[n] > i_present_a itself (this file kept its own
+    // SAFETY_CORE_I_PRESENT_A_DEFAULT copy of the substitution, removed
+    // above). It now reads current.present[n], which current_sense.c
+    // already computed -- via current_presence_policy.h, decoupled from
+    // k_ct_v_per_a -- using config_store's i_present_a internally (see
+    // current_task_reload_cal(), current_task.c).
+    bool any_current_present = current_any_present(&current);
 
     // S3/S4's relay-correlation facts (SAFETY_MODEL.md section 4) -- both
     // derived from context, so both collapse to false whenever context_valid

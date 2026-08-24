@@ -347,7 +347,15 @@ static void unpack_v2_fields(const uint8_t *in, config_store_record_t *out)
     out->borrowed_zone_index = in[REC_OFF_BORROWED_ZONE_INDEX];
     out->tc_placement_mode = in[REC_OFF_TC_PLACEMENT_MODE];
     out->abs_max_temp_c = get_f32_le(&in[REC_OFF_ABS_MAX_TEMP_C]);
-    out->tc_type = in[REC_OFF_TC_TYPE];
+    // Defense in depth (config_store.h's CONFIG_STORE_TC_TYPE_MAX_REAL
+    // comment): a CRC-valid record whose tc_type byte is 0x08-0x0F selects
+    // the MAX31856's Voltage Mode, not a real thermocouple type -- clamp to
+    // the safe compiled default here rather than trust the raw byte, so a
+    // garbled-but-CRC-valid record or a future writer that forgot to
+    // validate can never hand max31856_configure() a voltage-mode code.
+    uint8_t tc_type_byte = in[REC_OFF_TC_TYPE];
+    out->tc_type = (tc_type_byte <= CONFIG_STORE_TC_TYPE_MAX_REAL) ? tc_type_byte
+                                                                    : CONFIG_STORE_DEFAULT_TC_TYPE;
     memcpy(out->ct_channel_map, &in[REC_OFF_CT_CHANNEL_MAP], REC_CT_CHANNEL_MAP_LEN);
     out->calibration_missing = in[REC_OFF_CALIBRATION_MISSING] != 0u;
 
@@ -470,7 +478,13 @@ bool config_store_unpack(const uint8_t in[CONFIG_STORE_RECORD_LEN],
         // overlay exactly what v1 actually held.
         config_store_default(out);
         out->seq = get_u32_le(&in[REC_V1_OFF_SEQ]);
-        out->tc_type = in[REC_V1_OFF_TC_TYPE];
+        // Same voltage-mode clamp as unpack_v2_fields() above -- a v1 record
+        // predates this bound existing at all, so its tc_type byte gets no
+        // less scrutiny than a v2 one.
+        uint8_t v1_tc_type_byte = in[REC_V1_OFF_TC_TYPE];
+        out->tc_type = (v1_tc_type_byte <= CONFIG_STORE_TC_TYPE_MAX_REAL)
+                            ? v1_tc_type_byte
+                            : CONFIG_STORE_DEFAULT_TC_TYPE;
         unpack_ct_cal(&in[REC_V1_OFF_CT_CAL], out->ct_cal, REC_V1_CT_CAL_CHANNEL_LEN);
         // calibration_missing is FORCED true regardless of what the v1
         // record held -- see this file's header comment (config_store.h)

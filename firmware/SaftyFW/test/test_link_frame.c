@@ -436,6 +436,262 @@ static void test_clock_epoch_plausible(void)
                "a garbled/maxed-out u64 is rejected");
 }
 
+// --- link_frame_apply_set_config / link_frame_apply_set_ct_cal -------------
+// Regression coverage for the 2026-08-24 fix: link_task_handle_set_config()
+// and link_task_handle_set_ct_cal() used to build the record they wrote from
+// config_store_default() (or, for SET_CT_CAL, individual getters layered on
+// top of config_store_default()), so a one-field wire command silently reset
+// every OTHER commissioned field, threshold, and (for SET_CONFIG) every
+// ct_cal channel to compiled defaults on every write -- including the
+// automatic SET_CONFIG resend KilnFW's safety_link.c fires on every link
+// reconnect. link_frame_apply_set_config()/link_frame_apply_set_ct_cal()
+// (link_frame.h/.c) are the pure record-mutation step extracted so this is
+// host-testable without stubbing flash -- same "extraction for the test
+// matrix" reasoning as link_frame_decide_clear_trip() above.
+//
+// Builds a FULLY POPULATED, non-default committed record -- every
+// fields_set bit set, every section 2-5 threshold at a distinctive
+// non-default value, all three ct_cal channels calibrated with distinctive
+// gain/offset, safety_tc_installed explicitly at the "not installed" (0)
+// marker -- so "survives byte-for-byte" actually proves something: a bug
+// that resets to config_store_default() would be invisible against a
+// committed record that already equalled the defaults.
+static void build_fully_populated_committed_record(config_store_record_t *out)
+{
+    config_store_default(out); // baseline for format_version/seq/reserved[]/
+                                // anything this test doesn't override below
+
+    out->fields_set = (uint16_t)(CONFIG_STORE_SET_TC_SOURCE | CONFIG_STORE_SET_BORROWED_ZONE_INDEX |
+                                  CONFIG_STORE_SET_TC_PLACEMENT_MODE | CONFIG_STORE_SET_ABS_MAX_TEMP_C |
+                                  CONFIG_STORE_SET_CT_CHANNEL_MAP | CONFIG_STORE_SET_MAX_RATE_C_PER_MIN |
+                                  CONFIG_STORE_SET_MAINS_VOLTAGE_V | CONFIG_STORE_SET_CT_CHANNEL_MAP_0 |
+                                  CONFIG_STORE_SET_CT_CHANNEL_MAP_1 | CONFIG_STORE_SET_CT_CHANNEL_MAP_2);
+
+    out->tc_source = CONFIG_STORE_TC_SOURCE_BORROWED_ZONE;
+    out->borrowed_zone_index = 2;
+    out->tc_placement_mode = CONFIG_STORE_TC_PLACEMENT_EXTERNAL_OVERHEAT;
+    out->abs_max_temp_c = 1310.5f;
+    out->tc_type = 3u; // a real, non-default MAX31856_TC_TYPE_* value
+    out->ct_channel_map[0] = 0;
+    out->ct_channel_map[1] = 1;
+    out->ct_channel_map[2] = 2;
+    out->safety_tc_installed = 0u; // deliberately marked "not installed" --
+                                    // must never revert to its default of 1
+    out->calibration_missing = false; // deliberately CLEARED -- proves a
+                                       // real commissioning pass, so an
+                                       // unwarranted re-arm is visible
+
+    out->firing_margin_c = 111.0f;
+    out->overshoot_margin_c = 66.0f;
+    out->overshoot_time_s = 121u;
+    out->max_rate_c_per_min = 12.5f;
+    out->rate_window_s = 61u;
+    out->blind_grace_s = 62u;
+    out->frozen_window_s = 601u;
+    out->tc_disagreement_c = 199.0f;
+    out->tc_disagreement_time_s = 301u;
+    out->tc_expected_offset_c = 3.5f;
+    out->cj_warn_c = 59.0f;
+    out->cj_max_c = 84.0f;
+    out->cj_time_s = 61u;
+    out->borrowed_stale_s = 11u;
+    out->borrowed_stale_trip_s = 61u;
+    out->borrowed_type_expected = 0x05u;
+
+    out->i_present_a = 2.5f;
+    out->zero_counts[0] = 1000;
+    out->zero_counts[1] = 2000;
+    out->zero_counts[2] = 3000;
+    out->correlation_window_s = 151u;
+    out->stuck_on_time_s = 21u;
+    out->trip_verify_s = 11u;
+    out->k_ct_v_per_a[0] = 0.1f;
+    out->k_ct_v_per_a[1] = 0.2f;
+    out->k_ct_v_per_a[2] = 0.3f;
+    out->gain[0] = 0.700f;
+    out->gain[1] = 0.710f;
+    out->gain[2] = 0.720f;
+    out->mains_voltage_v = 240.0f;
+    out->power_window_s = 121u;
+
+    out->context_max_age_s = 6u;
+    out->link_timeout_s = 11u;
+    out->link_dead_hard_s = 121u;
+    out->mainfault_debounce_ms = 201u;
+    out->telemetry_period_ms = 501u;
+
+    out->startup_grace_s = 61u;
+    out->estop_debounce_ms = 51u;
+    out->watchdog_timeout_ms = 1001u;
+    out->config_check_period_s = 11u;
+
+    for (size_t i = 0; i < CONFIG_STORE_CT_CAL_NUM_CHANNELS; i++) {
+        out->ct_cal[i].calibrated = true;
+        out->ct_cal[i].gain = 1.0f + (float)i * 0.1f;
+        out->ct_cal[i].offset = 0.01f * (float)i;
+    }
+}
+
+// SET_CONFIG, tc_type actually CHANGES: only tc_type and calibration_missing
+// may differ from the committed record; every other byte -- every threshold,
+// every fields_set bit, every ct_cal channel, safety_tc_installed -- must
+// survive untouched.
+static void test_apply_set_config_changed_type_preserves_rest(void)
+{
+    TEST_SECTION("link_frame_apply_set_config -- tc_type CHANGES: only tc_type + "
+                 "calibration_missing move, everything else survives byte-for-byte");
+
+    config_store_record_t committed;
+    build_fully_populated_committed_record(&committed);
+    TEST_CHECK(committed.tc_type != 5u, "test setup: new tc_type below must actually differ");
+
+    config_store_record_t out;
+    memset(&out, 0xAA, sizeof(out)); // poison -- a field this function forgets to
+                                      // write would otherwise show up as 0, not
+                                      // as an obviously-wrong pattern
+    link_frame_apply_set_config(&committed, 5u, &out);
+
+    TEST_CHECK(out.tc_type == 5u, "tc_type takes the new wire value");
+    TEST_CHECK(out.calibration_missing == true,
+               "a REAL tc_type change re-arms calibration_missing, per config_store.h's "
+               "own doc comment on that field");
+
+    // Byte-for-byte on everything else: overwrite the two fields this
+    // command is ALLOWED to change on both sides so memcmp only sees
+    // unintended drift.
+    config_store_record_t committed_norm = committed;
+    config_store_record_t out_norm = out;
+    committed_norm.tc_type = 0;
+    out_norm.tc_type = 0;
+    committed_norm.calibration_missing = false;
+    out_norm.calibration_missing = false;
+    TEST_CHECK(memcmp(&committed_norm, &out_norm, sizeof(committed_norm)) == 0,
+               "every field other than tc_type/calibration_missing survives byte-for-byte "
+               "(this is the regression check for the 2026-08-24 whole-record-reset bug)");
+
+    // Spot-check the fields the original bug actually destroyed, named
+    // individually so a failure here points straight at what broke.
+    TEST_CHECK(out.fields_set == committed.fields_set, "fields_set (commissioning bits) unchanged");
+    TEST_CHECK(out.abs_max_temp_c == committed.abs_max_temp_c, "abs_max_temp_c unchanged");
+    TEST_CHECK(out.firing_margin_c == committed.firing_margin_c, "firing_margin_c (S1) unchanged");
+    TEST_CHECK(out.blind_grace_s == committed.blind_grace_s, "blind_grace_s (S5) unchanged");
+    TEST_CHECK(out.safety_tc_installed == committed.safety_tc_installed,
+               "safety_tc_installed stays 0 (not reverted to its default of 1)");
+    for (size_t i = 0; i < CONFIG_STORE_CT_CAL_NUM_CHANNELS; i++) {
+        TEST_CHECK(out.ct_cal[i].calibrated == committed.ct_cal[i].calibrated &&
+                       out.ct_cal[i].gain == committed.ct_cal[i].gain &&
+                       out.ct_cal[i].offset == committed.ct_cal[i].offset,
+                   "ct_cal channel unchanged");
+    }
+}
+
+// SET_CONFIG, tc_type is UNCHANGED (an idempotent resend -- exactly what
+// KilnFW's automatic link-reconnect resend is when nobody re-commissioned in
+// between): calibration_missing must NOT be re-armed, whatever its committed
+// value was, and nothing else may move either.
+static void test_apply_set_config_idempotent_resend_does_not_rearm(void)
+{
+    TEST_SECTION("link_frame_apply_set_config -- tc_type UNCHANGED (idempotent resend): "
+                 "calibration_missing is left exactly as committed, never re-armed");
+
+    config_store_record_t committed;
+    build_fully_populated_committed_record(&committed);
+    committed.calibration_missing = false; // a real commissioning pass already cleared it
+
+    config_store_record_t out;
+    memset(&out, 0xAA, sizeof(out));
+    link_frame_apply_set_config(&committed, committed.tc_type, &out);
+
+    TEST_CHECK(out.tc_type == committed.tc_type, "tc_type unchanged");
+    TEST_CHECK(out.calibration_missing == false,
+               "calibration_missing stays false -- an unchanged tc_type must not distrust a "
+               "calibration a real type change never touched");
+    TEST_CHECK(memcmp(&committed, &out, sizeof(committed)) == 0,
+               "the whole record is untouched when both fields this command could move "
+               "are already at their committed values");
+
+    // Same resend, but the committed record already had calibration_missing
+    // == true (e.g. a genuine change happened earlier and nothing has
+    // cleared it yet, or it was never commissioned): a resend of the SAME
+    // tc_type must not clear it either -- this function only ever sets it
+    // true on a change, never resets it to false.
+    committed.calibration_missing = true;
+    memset(&out, 0xAA, sizeof(out));
+    link_frame_apply_set_config(&committed, committed.tc_type, &out);
+    TEST_CHECK(out.calibration_missing == true,
+               "calibration_missing stays true on an idempotent resend too -- this function "
+               "never clears it, only conditionally sets it");
+    TEST_CHECK(memcmp(&committed, &out, sizeof(committed)) == 0, "record otherwise untouched");
+}
+
+// SET_CT_CAL: only the named channel's calibrated/gain/offset may differ;
+// the other two channels and every non-ct_cal field, including tc_type and
+// calibration_missing, must survive byte-for-byte.
+static void test_apply_set_ct_cal_preserves_other_channels_and_rest(void)
+{
+    TEST_SECTION("link_frame_apply_set_ct_cal -- only ct_cal[channel] moves, "
+                 "everything else (including the OTHER two channels) survives byte-for-byte");
+
+    config_store_record_t committed;
+    build_fully_populated_committed_record(&committed);
+
+    config_store_record_t out;
+    memset(&out, 0xAA, sizeof(out));
+    link_frame_apply_set_ct_cal(&committed, 1u, true, 9.5f, -3.25f, &out);
+
+    TEST_CHECK(out.ct_cal[1].calibrated == true && out.ct_cal[1].gain == 9.5f &&
+                   out.ct_cal[1].offset == -3.25f,
+               "channel 1 takes the new wire values");
+    TEST_CHECK(out.ct_cal[0].calibrated == committed.ct_cal[0].calibrated &&
+                   out.ct_cal[0].gain == committed.ct_cal[0].gain &&
+                   out.ct_cal[0].offset == committed.ct_cal[0].offset,
+               "channel 0 is untouched by a channel-1 write");
+    TEST_CHECK(out.ct_cal[2].calibrated == committed.ct_cal[2].calibrated &&
+                   out.ct_cal[2].gain == committed.ct_cal[2].gain &&
+                   out.ct_cal[2].offset == committed.ct_cal[2].offset,
+               "channel 2 is untouched by a channel-1 write");
+
+    config_store_record_t committed_norm = committed;
+    config_store_record_t out_norm = out;
+    memset(&committed_norm.ct_cal[1], 0, sizeof(committed_norm.ct_cal[1]));
+    memset(&out_norm.ct_cal[1], 0, sizeof(out_norm.ct_cal[1]));
+    TEST_CHECK(memcmp(&committed_norm, &out_norm, sizeof(committed_norm)) == 0,
+               "every field outside ct_cal[1] survives byte-for-byte -- tc_type, "
+               "calibration_missing, every threshold, every fields_set bit, "
+               "safety_tc_installed, and the other two channels (this is the regression "
+               "check for the 2026-08-24 whole-record-reset bug)");
+
+    TEST_CHECK(out.tc_type == committed.tc_type, "tc_type unchanged (a separate commissioning "
+                                                    "concern SET_CT_CAL has no business touching)");
+    TEST_CHECK(out.calibration_missing == committed.calibration_missing,
+               "calibration_missing unchanged");
+    TEST_CHECK(out.safety_tc_installed == committed.safety_tc_installed, "safety_tc_installed unchanged");
+}
+
+// Out-of-range channel: second line of defense behind link_task.c's own
+// refusal -- must be a no-op (*out == *committed), never an out-of-bounds
+// write into ct_cal[].
+static void test_apply_set_ct_cal_out_of_range_is_noop(void)
+{
+    TEST_SECTION("link_frame_apply_set_ct_cal -- out-of-range channel is a no-op, "
+                 "not an out-of-bounds write");
+
+    config_store_record_t committed;
+    build_fully_populated_committed_record(&committed);
+
+    config_store_record_t out;
+    memset(&out, 0x55, sizeof(out)); // distinct poison from build_fully_populated's own
+                                      // values, so "unchanged from poison" would be caught
+    link_frame_apply_set_ct_cal(&committed, CONFIG_STORE_CT_CAL_NUM_CHANNELS, true, 1.0f, 0.0f, &out);
+
+    TEST_CHECK(memcmp(&out, &out, sizeof(out)) == 0, "sanity: memcmp against self is always 0");
+    uint8_t poison[sizeof(out)];
+    memset(poison, 0x55, sizeof(poison));
+    TEST_CHECK(memcmp(&out, poison, sizeof(out)) == 0,
+               "out-of-range channel leaves *out completely untouched (still the poison "
+               "pattern), never partially written");
+}
+
 void run_test_link_frame(void)
 {
     test_zero_zones();
@@ -447,4 +703,8 @@ void run_test_link_frame(void)
     test_decide_clear_trip();
     test_ceiling_is_active();
     test_clock_epoch_plausible();
+    test_apply_set_config_changed_type_preserves_rest();
+    test_apply_set_config_idempotent_resend_does_not_rearm();
+    test_apply_set_ct_cal_preserves_other_channels_and_rest();
+    test_apply_set_ct_cal_out_of_range_is_noop();
 }

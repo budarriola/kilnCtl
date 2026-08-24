@@ -10,6 +10,8 @@
 
 #include "hardware/gpio.h"
 
+#include "max31856_decode.h"
+#include "max31856_tc_type_policy.h"
 #include "spi_owner.h"
 
 // Longest burst this driver ever does: address byte + 6-register temperature
@@ -64,28 +66,9 @@ static bool max31856_read_burst(uint8_t reg, uint8_t *out, size_t len)
     return true;
 }
 
-// CJTH:CJTL -- sign + 2^6..2^-6, low two bits of CJTL hard-wired to 0.
-// Ported verbatim from max31856_decode_cj().
-static float max31856_decode_cj(uint8_t cjth, uint8_t cjtl)
-{
-    int16_t raw = (int16_t)(((uint16_t)cjth << 8) | cjtl);
-    return (float)raw * MAX31856_CJ_TEMP_C_PER_LSB;
-}
-
-// LTCBH:LTCBM:LTCBL -- 19 significant bits at the top of a 24-bit word:
-// sign + 2^10..2^-7, LTCBL[4:0] don't-care. Ported verbatim from
-// max31856_decode_tc().
-static float max31856_decode_tc(uint8_t ltcbh, uint8_t ltcbm, uint8_t ltcbl)
-{
-    uint32_t raw = ((uint32_t)ltcbh << 16) | ((uint32_t)ltcbm << 8) | (uint32_t)ltcbl;
-    raw &= 0x00FFFFE0u;
-
-    int32_t signed_raw = (int32_t)raw;
-    if (raw & 0x00800000u) {
-        signed_raw = (int32_t)(raw | 0xFF000000u); // sign-extend bit 23
-    }
-    return (float)signed_raw * MAX31856_TC_TEMP_C_PER_LSB;
-}
+// CJTH:CJTL / LTCBH:LTCBM:LTCBL fixed-point decode math now lives in
+// max31856_decode.c/.h -- pure, host-tested (test/test_max31856_decode.c),
+// same split-out-for-host-testing pattern as max31856_tc_type_policy.h.
 
 bool max31856_init(uint8_t cs_gpio, uint8_t fault_gpio)
 {
@@ -117,7 +100,25 @@ bool max31856_init(uint8_t cs_gpio, uint8_t fault_gpio)
 
 bool max31856_configure(uint8_t tc_type)
 {
-    if (!s_initialized || tc_type > 0x0Fu) {
+    // tc_type > MAX31856_TC_TYPE_T (0x07) selects CR1.TC TYPE[3:0]'s Voltage
+    // Mode (datasheet page 20's register field table: 10xx = gain 8, 11xx =
+    // gain 32) instead of a real, linearized thermocouple type. In that mode
+    // LTCB holds `gain * 1.6 * 2^17 * VIN` -- a scaled input voltage -- but
+    // max31856_decode_tc() below unconditionally treats LTCB as a linearized
+    // temperature (MAX31856_TC_TEMP_C_PER_LSB), so this part would keep
+    // handing back plausible-looking, silently WRONG degC readings forever
+    // (see max31856_tc_type_policy.h's header comment for the worked
+    // example: a real 1000 degC junction decodes as ~17 degC in voltage
+    // mode). This board's only runtime commissioning axis is tc_type
+    // (THERMOCOUPLE.md section 2) and there is no raw/voltage-mode debug
+    // path here to justify ever accepting 0x08-0x0F (contrast KilnFW, which
+    // deliberately does allow them behind its own separate raw debug
+    // subcommand). Refusing here is the fail-closed outcome: main.c already
+    // treats a false return as a logged, non-fatal probe failure that
+    // surfaces at runtime through S5 ("a blind processor") -- strictly safer
+    // than configuring the part into a mode whose numbers this driver cannot
+    // honestly report as temperature.
+    if (!s_initialized || !max31856_tc_type_is_valid(tc_type)) {
         return false;
     }
 

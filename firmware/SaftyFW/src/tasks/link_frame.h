@@ -23,6 +23,9 @@
 
 #include "safety_guards.h" // safety_trip_t -- pure, no RTOS/SDK, same as this file
 #include "snapshots.h"
+#include "../config_store.h" // config_store_record_t -- pure, host-testable (its own header
+                              // comment), same as this file; link_frame_apply_set_config()/
+                              // link_frame_apply_set_ct_cal() below need the full record shape
 
 #ifdef __cplusplus
 extern "C" {
@@ -219,6 +222,46 @@ bool link_frame_unpack_context(const uint8_t *payload, uint8_t length, context_s
 // variable-length fields, same reasoning as CLEAR_TRIP.
 #define LINK_FRAME_SET_CONFIG_CMD 0x16u
 
+// Builds the record link_task_handle_set_config() should write, by
+// read-modify-write against `committed` (the currently-committed record,
+// e.g. from config_store_get_full_record()) -- extracted so the fix for a
+// real bug can be host-tested. The ORIGINAL handler built `*out` from
+// config_store_default() and set only tc_type/calibration_missing on top,
+// then handed the whole thing to config_store_write() (which replaces the
+// ENTIRE stored record, no merge -- config_store.h's own doc comment). That
+// meant every SET_CONFIG silently factory-reset every OTHER commissioned
+// field: every fields_set bit, every section 2-5 threshold, all three
+// ct_cal channels, and safety_tc_installed back to its "installed" default.
+// Worse, it fires unattended: KilnFW's safety_link.c resends SET_CONFIG
+// automatically on every link down->up transition (tc_type_last_sent =
+// 0xFF forces a resync), so on a board that was ever commissioned, an
+// ordinary link reconnect -- routine on this project, not hypothetical --
+// silently wiped the safety processor's tuned limits back to compiled
+// defaults with no operator action and no wire-visible warning beyond
+// calibration_missing flipping true and config_crc changing.
+//
+// `out` is `*committed` with ONLY tc_type mutated. calibration_missing is
+// re-armed ONLY when tc_type actually differs from committed->tc_type --
+// config_store.h's doc comment on calibration_missing ("a new tc_type
+// invalidates any prior calibration") is still honored for a REAL change,
+// but an idempotent resend of the value already committed (exactly what
+// every automatic reconnect-resend is, when nobody re-commissioned in
+// between) must not distrust calibration that a real type change never
+// touched -- treating every resend as "the type changed" would keep
+// re-breaking commissioning on every reconnect even after this fix, just
+// through a narrower door (calibration_missing flipping instead of the
+// whole record resetting) instead of a wide one.
+//
+// SAFETY_CMD_SET_CONFIG (0x16) itself is a leftover from before the v2
+// staged-commissioning model (config_store.h's own header comment; docs/
+// COMMISSIONING.md documents only SET_PARAM/COMMIT_CONFIG, never 0x16) --
+// this function fixes its one real caller's shape, it does not endorse a
+// single wire command that rewrites a whole record as the right design
+// going forward. See docs/CONFIG_REFERENCE.md / docs/COMMISSIONING.md for
+// the recommendation on 0x16's future.
+void link_frame_apply_set_config(const config_store_record_t *committed, uint8_t tc_type,
+                                  config_store_record_t *out);
+
 // --- ESP -> Pico: SAFETY_CMD_ROLLBACK (0x17) ---------------------------------
 // CommonFW/docs/LINK_PROTOCOL.md section 4. Same value as
 // KILNLINK_ROLLBACK_CMD (kilnlink/kilnlink_rollback.h) -- redefined here as a
@@ -262,6 +305,24 @@ bool link_frame_unpack_context(const uint8_t *payload, uint8_t length, context_s
 // ct_calibration/'s bench sweep-and-fit tool's PC-side path to actually
 // pushing constants into SaftyFW's own flash, TODO.md's documented gap.
 #define LINK_FRAME_SET_CT_CAL_CMD 0x19u
+
+// Builds the record link_task_handle_set_ct_cal() should write, same
+// read-modify-write fix as link_frame_apply_set_config() above, applied to
+// the milder existing form of the same bug in that handler: it already
+// preserved tc_type/calibration_missing/ct_cal via the live getters before
+// this fix, but still started from config_store_default() underneath that,
+// so every section 1-5 threshold and every fields_set bit was still wiped
+// on every SET_CT_CAL. `out` is `*committed` with ONLY ct_cal[channel]
+// mutated (calibrated/gain/offset); tc_type, calibration_missing, and every
+// other field -- including the other two ct_cal channels -- pass through
+// byte-for-byte. No channel bounds check here (link_task.c's own
+// `channel >= CONFIG_STORE_CT_CAL_NUM_CHANNELS` refusal happens before this
+// is ever called); `channel` past range makes this a no-op (`*out` left as
+// `*committed`) rather than an out-of-bounds write, as a second line of
+// defense.
+void link_frame_apply_set_ct_cal(const config_store_record_t *committed, uint8_t channel,
+                                  bool calibrated, float gain, float offset,
+                                  config_store_record_t *out);
 
 // --- ESP -> Pico: SAFETY_CMD_GET_CT_CAL (0x1A), request only ----------------
 // CommonFW/docs/LINK_PROTOCOL.md section 4/6. Same value as

@@ -42,6 +42,25 @@ void current_task_get_power(current_sense_power_t *out);
 // same reasoning as every other current_sense.c setter.
 void current_task_reload_ct_cal(void);
 
+// Re-reads config_store's FULL record (config_store_get_full_record(), one
+// call, not the individual field getters -- config_store.h exposes none for
+// these fields) and pushes the PRIMARY current-sense calibration out of it
+// (i_present_a, zero_counts[3], k_ct_v_per_a[3], gain[3], mains_voltage_v,
+// ct_cal[3], and a derived `calibrated` fact -- see this function's .c
+// comment for exactly how `calibrated` is derived) into current_sense.c via
+// current_sense_set_cal(), which replaces the WHOLE current_sense_cal_t at
+// once (unlike current_task_reload_ct_cal() above, which only ever touches
+// the ct_cal sub-field in place). Because this reads ct_cal out of the same
+// record too, it is self-contained -- callers do not need to also call
+// current_task_reload_ct_cal() around it for ct_cal to end up correct.
+//
+// Called once from current_task_fn()'s own boot sequence (replacing the
+// old ct_cal-only reload), and again by link_task.c's SAFETY_CMD_
+// COMMIT_CONFIG handler every time a commissioning session commits -- same
+// "a live commissioning session must take effect immediately, not after a
+// reboot" reasoning as current_task_reload_ct_cal()'s own doc comment.
+void current_task_reload_cal(void);
+
 #ifdef __cplusplus
 }
 #endif

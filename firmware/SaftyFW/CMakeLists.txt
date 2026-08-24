@@ -61,7 +61,19 @@ set(SAFTYFW_APP_SOURCES
     src/safety_guards.c
     src/spi_owner.c
     src/max31856.c
+    # Pure CR1.TC TYPE[3:0] range predicate, split out of max31856.c so it is
+    # host-testable (test/test_max31856_tc_type_policy.c) with no SPI/GPIO
+    # stubs -- see max31856_tc_type_policy.h.
+    src/max31856_tc_type_policy.c
+    # Pure CJ/TC fixed-point decode math, split out of max31856.c for the same
+    # host-testing reason -- see max31856_decode.h.
+    src/max31856_decode.c
     src/current_sense.c
+    # Pure counts-domain presence decision, decoupled from k_ct_v_per_a, split
+    # out of current_sense.c so it is host-testable (test/test_current_
+    # presence_policy.c) with no hardware/adc.h stub -- see
+    # current_presence_policy.h.
+    src/current_presence_policy.c
     # ct_amps_cal.c -- pure, host-tested (test/test_ct_amps_cal.c) per-channel
     # CT amps correction current_sense.c applies on top of its own physics-
     # based conversion; see that file's header comment.
@@ -84,6 +96,10 @@ set(SAFTYFW_APP_SOURCES
     src/tasks/watchdog_gate.c
     src/tasks/clock_health.c
     src/tasks/safety_core.c
+    # Pure GPIO-level-to-logical-meaning mapping for E-stop/mainFault, split
+    # out of discrete_task.c so it is host-testable (test/test_discrete_pin_
+    # policy.c) with no hardware/gpio.h stub -- see discrete_pin_policy.h.
+    src/discrete_pin_policy.c
     src/tasks/discrete_task.c
     src/tasks/thermo_task.c
     src/tasks/current_task.c

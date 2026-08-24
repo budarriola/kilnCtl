@@ -154,10 +154,25 @@ extern "C" {
 // its documented safe-default path -- the same Type K result as before, just
 // reached honestly through "nothing has ever commissioned this yet" rather
 // than a constant baked into this header. It is still explicitly NOT a claim
-// that K is correct for any given installation. There is still no
-// commissioning UI or wire command (no SAFTY_CMD_SET_CONFIG) that can ever
-// write a different tc_type -- that remains open, TODO.md Phase 9's later
-// bullets.
+// that K is correct for any given installation.
+//
+// STALE as of 2026-08-24, corrected here rather than deleted so the history
+// is legible: this comment used to claim no wire command could ever write a
+// different tc_type. That is no longer true (and per link_task.c's own
+// comments may not have been true for a while) -- SAFETY_CMD_SET_CONFIG
+// (0x16, link_task_handle_set_config()) and config_params.c's SET_PARAM
+// param 0x0105 (via COMMIT_CONFIG) both write config_store's tc_type field
+// today. Both already bound the incoming byte to <= MAX31856_TC_TYPE_T
+// before writing (link_task.c's `msg.tc_type > MAX31856_TC_TYPE_T` check;
+// config_params.c's `RANGE_U8_MAX(rec->tc_type, 7u, ...)` at COMMIT_CONFIG),
+// so a fresh commissioning write cannot hand max31856_configure() a
+// voltage-mode code by either path. config_store_unpack() (config_store.c)
+// additionally clamps any out-of-range byte it finds in a CRC-valid record
+// back to CONFIG_STORE_DEFAULT_TC_TYPE as a defense-in-depth backstop, and
+// max31856_configure() itself (max31856.c, via
+// max31856_tc_type_policy.h's max31856_tc_type_is_valid()) refuses
+// 0x08-0x0F unconditionally regardless of how it got there -- three
+// independent layers, not one.
 
 /* --- Fixed-point scales (datasheet register bit-weight tables), ported
  * verbatim from MAX31856.h. --------------------------------------------- */

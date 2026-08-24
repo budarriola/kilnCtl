@@ -15,6 +15,7 @@
 #include "hardware/gpio.h"
 
 #include "board_pins.h"
+#include "discrete_pin_policy.h"
 #include "task_priorities.h"
 #include "watchdog_task.h"
 
@@ -81,8 +82,22 @@ static void discrete_task_fn(void *arg)
     for (;;) {
         vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(SAFTYFW_PERIOD_DISCRETE_TASK_MS));
 
-        bool estop_raw = !gpio_get(SAFTYFW_PIN_ESTOP);      // active low
-        bool main_fault_raw = !gpio_get(SAFTYFW_PIN_MAIN_FAULT); // active low
+        // Raw-level-to-logical-meaning mapping now lives in discrete_pin_
+        // policy.h/.c (a pure, host-tested module -- test/test_discrete_
+        // pin_policy.c) rather than inline here, specifically so the two
+        // pins' OPPOSITE polarities are each pinned down by their own named
+        // function instead of one bare `!`/no-`!` choice a future edit
+        // could silently get backwards again. See that header's own
+        // comment for the full HARDWARE.md section 5 reasoning (GPIO9
+        // active HIGH for stop, covering pressed/cut-wire/unfitted
+        // identically; GPIO10 active LOW for mainFault) and for why this
+        // bug -- GPIO9 read inverted for a long stretch, silently disabling
+        // S7 in both directions -- was invisible to the existing test
+        // suite (virtual_dut synthesizes `estop_pressed` directly and never
+        // exercises a GPIO read).
+        bool estop_raw = discrete_pin_policy_estop_asserted(gpio_get(SAFTYFW_PIN_ESTOP));
+        bool main_fault_raw =
+            discrete_pin_policy_main_fault_asserted(gpio_get(SAFTYFW_PIN_MAIN_FAULT));
 
         s_estop_pressed = debounce_update(&estop_db, estop_raw, estop_n);
         s_main_fault = debounce_update(&main_fault_db, main_fault_raw, main_fault_n);

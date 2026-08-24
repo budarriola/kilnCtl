@@ -32,6 +32,13 @@
 typedef char config_store_default_tc_type_matches_max31856
     [(CONFIG_STORE_DEFAULT_TC_TYPE == MAX31856_TC_TYPE_K) ? 1 : -1];
 
+// Same cross-check pattern for the other tc_type literal config_store.h
+// duplicates: CONFIG_STORE_TC_TYPE_MAX_REAL must track MAX31856_TC_TYPE_T
+// (the highest real, linearized thermocouple type) or config_store_unpack()'s
+// voltage-mode clamp would silently protect the wrong boundary.
+typedef char config_store_tc_type_max_real_matches_max31856
+    [(CONFIG_STORE_TC_TYPE_MAX_REAL == MAX31856_TC_TYPE_T) ? 1 : -1];
+
 // Compile-time cross-check, same pattern as the one above: config_store.h's
 // CONFIG_STORE_FLASH_RC_* literals are a dependency-free duplicate of
 // pico/error.h's `enum pico_error_codes` (config_store.h's own comment on

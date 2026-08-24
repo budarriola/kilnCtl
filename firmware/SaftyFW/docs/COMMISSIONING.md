@@ -93,6 +93,46 @@ Staged in RAM, then committed as one record:
 | `0x1F` | `GET_CONFIG_PAGE` / `CONFIG_PAGE` | both | Bulk read: packed `(id, value)` pairs, one page per frame, so the ESP can fetch the whole set in a few frames |
 | `0x20` | `COMMIT_CONFIG_REJECTED` | Pico → ESP | Sent only when a `COMMIT_CONFIG` is refused: names the offending `param_id` (or a "not field-specific" sentinel) and a coarse reason code (range / contradiction / ARMED / storage). Closes the gap section 3.1 used to describe as a known limitation |
 
+### 2.0.1 `SET_CONFIG` (`0x16`) and `SET_CT_CAL` (`0x19`) — pre-v2 leftovers, not this model
+
+Two more ESP → Pico commands write to the store outside the `SET_PARAM`/
+`COMMIT_CONFIG` flow above: `SET_CONFIG` (`0x16`, sets `tc_type`) and
+`SET_CT_CAL` (`0x19`, sets one `ct_cal` channel). Both predate the field-
+addressed staging model this section documents, and the ESP still calls
+`SET_CONFIG` **automatically** on every link reconnect
+(`safety_link.c`'s `tc_type_last_sent` resets on link down→up, forcing a
+resync on the next poll) — routine on this project, not a rare edge case.
+
+**2026-08-24 fix:** both handlers used to build the record they wrote by
+starting from `config_store_default()` and setting only the one or two
+fields the command actually names, then handing the result to
+`config_store_write()` — which replaces the **entire** stored record with no
+merge. A one-field wire command was therefore silently factory-resetting
+every other commissioned field, every `SET_PARAM`-staged threshold, and (for
+`SET_CONFIG`) all three `ct_cal` channels, on every call — including the
+automatic reconnect resend above, with no operator action and no wire-visible
+warning beyond `calibration_missing` flipping true and `config_crc` changing.
+Fixed by reading the currently-committed record first
+(`config_store_get_full_record()`) and mutating only the field(s) the command
+names — see `link_frame_apply_set_config()` / `link_frame_apply_set_ct_cal()`
+(`src/tasks/link_frame.h/.c`) for the extracted, host-tested mutation logic
+and `test/test_link_frame.c` for the regression coverage.
+
+**The general rule this bug is an instance of: any wire command that updates
+part of a record must read-modify-write the committed record, never rebuild
+it from compiled defaults.** `SET_PARAM`/`COMMIT_CONFIG` above get this for
+free (staged in RAM against the live cache, committed as one validated
+whole); a bespoke single-field command has to earn it by hand, and `SET_
+CONFIG` didn't.
+
+**Recommendation:** `SET_CONFIG` and `SET_CT_CAL` should eventually be
+retired in favor of routing `tc_type` and `ct_cal` through `SET_PARAM`/
+`COMMIT_CONFIG` (`0x0105` and `0x0310`-`0x0318` already exist in the table
+below) so there is exactly one write path and one place this class of bug can
+occur. That is a two-sided change (KilnFW currently calls `0x16` directly,
+including the automatic reconnect resend) and is out of scope here — noted so
+the next person doesn't have to rediscover why this section exists.
+
 ### 2.1 Parameter ids
 
 Ids are grouped by `CONFIG_REFERENCE.md` section, one hex hundred per section,

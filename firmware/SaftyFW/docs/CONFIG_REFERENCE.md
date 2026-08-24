@@ -80,6 +80,23 @@ else.** There is no over-current guard (`SAFETY_MODEL.md` §3).
 | `mains_voltage_v` | unset | V | *none* | ⚪ | Nominal. Power goes as V², so a 5 % sag is a 10 % error. Unset ⇒ report `—`, never assume |
 | `power_window_s` | 120 | s | *none* | ⚪ | Conduction-fraction averaging window |
 
+**2026-08-24 note, made true by this date's commit, not before it.** The
+`*none*`/⚪ badges on `k_ct_v_per_a`/`gain`/`mains_voltage_v` were *aspirational*
+until this date: `current_sense_set_cal()` (the function that loads these
+values into `current_sense.c`) was never called anywhere in `src/`, which
+left `k_ct_v_per_a` permanently `0.0f` and, as an unintended side effect,
+silently disabled S3/S9/S11's presence detection too (`current_snapshot_t
+.amps[]`, the only input `current_any_present()` read, is hard-zeroed by
+`cs_counts_to_amps()` whenever `k_ct_v_per_a <= 0.0f`) — i.e. `k_ct_v_per_a`
+WAS affecting guards, just never in the direction anyone intended. The fix
+wires `current_sense_set_cal()` from `config_store` and, separately,
+decouples presence detection from `k_ct_v_per_a` entirely
+(`current_presence_policy.h`) so these three fields are now honestly
+guard-irrelevant, matching the table above. `i_present_a`/`zero_counts`
+above were never affected by this bug — they always had real defaults and
+`current_task_reload_cal()` (`src/tasks/current_task.c`) is the code that
+now actually delivers them to `current_sense.c`.
+
 ## 4. Link and liveness
 
 | Field | Default | Unit | Guard | Risk | Notes |

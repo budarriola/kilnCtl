@@ -1322,16 +1322,18 @@ static void link_task_handle_set_config(const kilnlink_frame_t *frame)
         return;
     }
 
+    // Read-modify-write against the committed record, NOT config_store_
+    // default() -- see link_frame_apply_set_config()'s own header comment
+    // (link_frame.h) for the fleet-affecting bug this replaced: starting
+    // from config_store_default() and only overwriting tc_type/
+    // calibration_missing meant config_store_write()'s no-merge, whole-
+    // record replace silently wiped every OTHER commissioned field on
+    // every SET_CONFIG, including the ones KilnFW's safety_link.c fires
+    // automatically on every link reconnect.
+    config_store_record_t committed;
+    config_store_get_full_record(&committed);
     config_store_record_t rec;
-    config_store_default(&rec);
-    rec.tc_type = msg.tc_type;
-    rec.calibration_missing = true; // a new tc_type invalidates any prior
-                                     // calibration -- see config_store.h's
-                                     // own doc comment on this field; there
-                                     // is no calibration-clearing mechanism
-                                     // yet (TODO.md Phase 9's later bullets),
-                                     // so every SET_CONFIG conservatively
-                                     // re-arms it.
+    link_frame_apply_set_config(&committed, msg.tc_type, &rec);
 
     const char *reason = NULL;
     bool written = config_store_write(&rec, &reason);
@@ -1349,13 +1351,18 @@ static void link_task_handle_set_config(const kilnlink_frame_t *frame)
 // above: decode, validate, log accept/refuse, never ACK on the wire.
 //
 // Read-modify-write: config_store_write() replaces the ENTIRE record, so
-// this fetches every field first (tc_type/calibration_missing/all three
-// ct_cal channels via config_store_get_ct_cal()) and overwrites only the
+// this fetches the FULL committed record via config_store_get_full_record()
+// (link_frame_apply_set_ct_cal(), link_frame.h/.c) and overwrites only the
 // ONE channel this frame named -- setting channel 1 must never disturb
 // channel 0 or 2's stored constants, and must never re-arm calibration_
-// missing or change tc_type, both of which are a SEPARATE commissioning
-// concern (thermocouple, not CT current) that SET_CT_CAL has no business
-// touching.
+// missing, change tc_type, or touch any section 1-5 threshold or fields_set
+// bit, none of which are a SEPARATE commissioning concern (thermocouple/
+// commissioning state, not CT current) that SET_CT_CAL has no business
+// touching. 2026-08-24: this handler previously rebuilt those "leave alone"
+// fields individually off config_store_default() instead of reading the
+// committed record, which silently wiped everything it did not explicitly
+// name (same class of bug as SET_CONFIG's, see link_task_handle_set_config()
+// above) -- fixed by reading the whole record once instead.
 //
 // Two refusal paths, same split as link_task_handle_set_config():
 //   1. `channel` is out of range -- checked here, since kilnlink_set_ct_cal.c
@@ -1379,14 +1386,19 @@ static void link_task_handle_set_ct_cal(const kilnlink_frame_t *frame)
         return;
     }
 
+    // Read-modify-write against the committed record via config_store_
+    // get_full_record(), not the piecemeal getters + config_store_default()
+    // this used to build on -- see link_frame_apply_set_ct_cal()'s own
+    // header comment (link_frame.h) for why: this handler already
+    // preserved tc_type/calibration_missing/ct_cal individually, but still
+    // started from config_store_default() underneath that, so every
+    // section 1-5 threshold and fields_set bit was still silently wiped on
+    // every SET_CT_CAL.
+    config_store_record_t committed;
+    config_store_get_full_record(&committed);
     config_store_record_t rec;
-    config_store_default(&rec);
-    rec.tc_type = config_store_get_tc_type();
-    rec.calibration_missing = config_store_is_calibration_missing();
-    config_store_get_ct_cal(rec.ct_cal);
-    rec.ct_cal[msg.channel].calibrated = (msg.calibrated != 0u);
-    rec.ct_cal[msg.channel].gain = msg.gain;
-    rec.ct_cal[msg.channel].offset = msg.offset;
+    link_frame_apply_set_ct_cal(&committed, msg.channel, (msg.calibrated != 0u), msg.gain,
+                                 msg.offset, &rec);
 
     const char *reason = NULL;
     bool written = config_store_write(&rec, &reason);
@@ -1766,6 +1778,15 @@ static void link_task_handle_commit_config(const kilnlink_frame_t *frame)
     if (written) {
         s_staged_config = to_write; // becomes the new baseline for the next SET_PARAM
         log_task_log(LOG_LEVEL_INFO, "commit_config", "accepted");
+        // Take effect immediately, not after a reboot -- same reasoning as
+        // link_task_handle_set_ct_cal()'s own call to current_task_reload_
+        // ct_cal() just above. COMMIT_CONFIG is the only wire path that can
+        // change i_present_a/zero_counts/k_ct_v_per_a/gain/mains_voltage_v
+        // (SET_PARAM stages them into s_staged_config; this is where they
+        // actually land in config_store), so this is the one call site that
+        // needs current_task_reload_cal() -- current_task_fn()'s own boot
+        // sequence is the only other caller.
+        current_task_reload_cal();
     } else {
         log_task_log(LOG_LEVEL_WARN, "commit_config", reason ? reason : "refused");
         // Not field-specific -- config_store_write()'s own refusal is either

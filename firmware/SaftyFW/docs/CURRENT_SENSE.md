@@ -324,6 +324,29 @@ wrong number on a display and changes nothing else** — which is the whole
 benefit of the scope limit in §0: current accuracy is a display concern, not a
 safety one.
 
+**2026-08-24 note, made true by this date's commit, not before it.** From
+Phase 6 (this file's original commit) until 2026-08-24, this claim was
+*false*: `current_sense_set_cal()` was never called anywhere in `src/`, so
+`k_ct_v_per_a` stayed `0.0f` forever, and `cs_counts_to_amps()` (the ONLY
+producer of `current_snapshot_t.amps[]`, which `current_any_present()` used
+to compare against `i_present_a`) hard-returned `0.0f` whenever
+`k_ct_v_per_a <= 0.0f`. That silently disabled presence detection outright —
+S3, S9, S11, and S6b's current-gated trip could never fire, on any board,
+commissioned or not. The 2026-08-24 fix wires `current_sense_set_cal()` from
+`config_store` (boot, and live on `SAFETY_CMD_COMMIT_CONFIG`,
+`current_task_reload_cal()`) AND decouples presence detection from
+`k_ct_v_per_a` entirely: `current_presence_policy.h`'s
+`current_presence_is_flowing()` compares the raw ADC delta against a
+counts-domain threshold — derived from `i_present_a`/`gain`/`k_ct_v_per_a`
+when `k_ct_v_per_a` IS commissioned (bit-for-bit the old decision), or a
+fixed, deliberately sensitive fallback margin when it is not. `amps[n]`
+itself still reads `0.0f` (honestly) when `k_ct_v_per_a` is uncommissioned —
+that half of this section's claim was always, and still is, true — but
+`current_snapshot_t.present[n]` (what guards actually read via
+`current_any_present()`) no longer depends on it. See that header's own
+comment for the full safe-direction reasoning, including the one guard (S4)
+this fallback's sensitivity trades against.
+
 `I = max(0, (counts − zero_counts)) · vref / 4096 / (0.715 · √2 · k_ct)`
 
 Three points worth stating explicitly:
@@ -409,3 +432,14 @@ built on top would be more likely to nuisance-trip on a healthy idle kiln
 than to miss a real fault, which is the same direction §0 already prefers.
 `current_snapshot_t.calibrated` is `false` throughout this state, which is
 the intended signal that none of this should be trusted yet.
+
+**Superseded 2026-08-24** by the presence-decoupling fix described in §5
+above: `config_store_default()` now ships `i_present_a = 2.0 A` (not `0`),
+and presence detection (`current_snapshot_t.present[n]`,
+`current_presence_policy.h`) no longer derives from `amps[n]`/`k_ct_v_per_a`
+at all, so the "phantom current from noise" mechanism this paragraph
+describes no longer applies to the guard-facing fact — it still applies,
+unchanged, to the reported `amps[n]`/power figures, which remain a display
+concern only. `calibrated` (current_sense_cal_t) is likewise no longer the
+gate on presence — see `current_task_reload_cal()`'s own comment
+(`src/tasks/current_task.c`) for what it gates instead.

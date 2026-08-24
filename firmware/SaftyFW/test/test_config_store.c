@@ -1499,6 +1499,109 @@ static void test_config_params_commit_refused_while_armed(void)
                "refusal above is really about ARMED, not some other property of the record");
 }
 
+// --- tc_type voltage-mode clamp (defense in depth, config_store.h's
+// CONFIG_STORE_TC_TYPE_MAX_REAL) -------------------------------------------
+//
+// max31856_configure() (max31856.c, via max31856_tc_type_policy.h) is the
+// primary enforcement point and already refuses tc_type > MAX31856_TC_TYPE_T
+// outright. This is the second, independent layer: config_store_unpack()
+// must never hand a CALLER (main.c, via config_store_get_tc_type()) a byte
+// that would trip that refusal, even for a record whose CRC validates --
+// e.g. a future writer that forgot to bound the field itself, or a record
+// whose tc_type byte was corrupted in a way that happens to leave the CRC
+// intact. Per this repo's "prove every new check can fail" rule, every one
+// of the eight voltage-mode bytes is tested individually, in both the v2
+// unpack path and the v1 migration path.
+static void test_tc_type_voltage_mode_clamp_v2(void)
+{
+    TEST_SECTION("config_store_unpack (v2) -- tc_type voltage-mode clamp");
+
+    config_store_record_t rec;
+    memset(&rec, 0, sizeof(rec));
+    rec.format_version = CONFIG_STORE_FORMAT_VERSION;
+    rec.seq = 1;
+    rec.calibration_missing = true;
+
+    // Accept direction: every real type (0x00-0x07) round-trips unchanged.
+    for (uint8_t tc_type = 0x00u; tc_type <= 0x07u; tc_type++) {
+        rec.tc_type = tc_type;
+        uint8_t record[CONFIG_STORE_RECORD_LEN];
+        config_store_pack(&rec, record);
+        config_store_record_t back;
+        bool ok = config_store_unpack(record, &back);
+        TEST_CHECK(ok, "record with a real tc_type unpacks");
+        TEST_CHECK(back.tc_type == tc_type, "real tc_type (0x00-0x07) passes through unchanged");
+    }
+
+    // Refuse direction: every voltage-mode byte (0x08-0x0F), individually,
+    // must be clamped to CONFIG_STORE_DEFAULT_TC_TYPE, NOT passed through --
+    // the record itself still unpacks (its CRC is valid), only the tc_type
+    // field is substituted.
+    uint8_t voltage_mode_bytes[8] = { 0x08u, 0x09u, 0x0Au, 0x0Bu, 0x0Cu, 0x0Du, 0x0Eu, 0x0Fu };
+    for (size_t i = 0; i < 8u; i++) {
+        // config_store_pack() writes rec->tc_type verbatim (it does no
+        // validation of its own -- config_store.h's own doc comment) so this
+        // hand-assembles exactly the CRC-valid-but-out-of-range record the
+        // clamp exists to catch, standing in for "something upstream wrote
+        // an out-of-range byte and this module is the last line of defense."
+        rec.tc_type = voltage_mode_bytes[i];
+        uint8_t record[CONFIG_STORE_RECORD_LEN];
+        config_store_pack(&rec, record);
+        config_store_record_t back;
+        bool ok = config_store_unpack(record, &back);
+        TEST_CHECK(ok, "a CRC-valid record with an out-of-range tc_type byte still unpacks "
+                        "(the record itself is not corrupt)");
+        TEST_CHECK(back.tc_type == CONFIG_STORE_DEFAULT_TC_TYPE,
+                   "voltage-mode tc_type byte is clamped to CONFIG_STORE_DEFAULT_TC_TYPE, "
+                   "never passed through to a caller");
+    }
+
+    // A couple of bytes outside the 4-bit field's own range too.
+    uint8_t out_of_range_bytes[3] = { 0xFFu, 0x10u, 0x80u };
+    for (size_t i = 0; i < 3u; i++) {
+        rec.tc_type = out_of_range_bytes[i];
+        uint8_t record[CONFIG_STORE_RECORD_LEN];
+        config_store_pack(&rec, record);
+        config_store_record_t back;
+        bool ok = config_store_unpack(record, &back);
+        TEST_CHECK(ok, "record unpacks even with a wildly out-of-range tc_type byte");
+        TEST_CHECK(back.tc_type == CONFIG_STORE_DEFAULT_TC_TYPE,
+                   "wildly out-of-range tc_type byte also clamped to the safe default");
+    }
+}
+
+static void test_tc_type_voltage_mode_clamp_v1_migration(void)
+{
+    TEST_SECTION("config_store_unpack (v1 migration) -- tc_type voltage-mode clamp");
+
+    config_store_ct_channel_cal_t ct_cal[3];
+    memset(ct_cal, 0, sizeof(ct_cal));
+
+    // Refuse direction on the v1 migration path too -- a legacy record
+    // predates this bound existing at all, so it gets no less scrutiny.
+    uint8_t voltage_mode_bytes[8] = { 0x08u, 0x09u, 0x0Au, 0x0Bu, 0x0Cu, 0x0Du, 0x0Eu, 0x0Fu };
+    for (size_t i = 0; i < 8u; i++) {
+        uint8_t v1_record[CONFIG_STORE_RECORD_LEN];
+        pack_legacy_v1_record(1u, voltage_mode_bytes[i], true, ct_cal, v1_record);
+        config_store_record_t out;
+        bool ok = config_store_unpack(v1_record, &out);
+        TEST_CHECK(ok, "a CRC-valid v1 record with an out-of-range tc_type byte still migrates");
+        TEST_CHECK(out.tc_type == CONFIG_STORE_DEFAULT_TC_TYPE,
+                   "migrated record's voltage-mode tc_type byte is clamped to the safe default, "
+                   "not carried through from v1");
+    }
+
+    // Accept direction, for completeness: a real v1 tc_type still migrates
+    // unchanged (already covered indirectly by test_v1_migration() above,
+    // repeated here so this test file proves both directions on its own).
+    uint8_t v1_record[CONFIG_STORE_RECORD_LEN];
+    pack_legacy_v1_record(2u, 0x03u /* MAX31856_TC_TYPE_K */, true, ct_cal, v1_record);
+    config_store_record_t out;
+    bool ok = config_store_unpack(v1_record, &out);
+    TEST_CHECK(ok, "a v1 record with a real tc_type migrates");
+    TEST_CHECK(out.tc_type == 0x03u, "real v1 tc_type passes through the clamp unchanged");
+}
+
 void run_test_config_store(void)
 {
     test_pack_unpack_roundtrip();
@@ -1517,6 +1620,8 @@ void run_test_config_store(void)
     test_v1_migration();
     test_future_version_refused();
     test_unset_fields_distinguishable_from_zero();
+    test_tc_type_voltage_mode_clamp_v2();
+    test_tc_type_voltage_mode_clamp_v1_migration();
 
     test_config_params_get_set_roundtrip();
     test_config_params_unknown_id_refused();

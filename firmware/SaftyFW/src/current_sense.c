@@ -33,6 +33,7 @@
 #include "hardware/adc.h"
 
 #include "board_pins.h"
+#include "current_presence_policy.h"
 #include "task_priorities.h"
 
 // --- Constants from docs/CURRENT_SENSE.md ----------------------------------
@@ -233,6 +234,18 @@ void current_sense_sample(void)
         bool clipped = (counts_avg >= CS_CLIP_THRESHOLD_COUNTS);
         float amps = cs_counts_to_amps(n, counts_avg);
 
+        // S3/S9/S11/S6b's presence fact, decoupled from k_ct_v_per_a -- see
+        // current_presence_policy.h's header comment. Computed from the
+        // SAME counts_avg/zero_counts this pass already has in hand, using
+        // the caller-resolved gain (mirrors cs_counts_to_amps()'s own
+        // "substitute CS_DEFAULT_GAIN when the cal field is <= 0" rule, so
+        // the two functions never disagree about which gain a commissioned
+        // channel is using).
+        float resolved_gain = (s_cal.gain[n] > 0.0f) ? s_cal.gain[n] : CS_DEFAULT_GAIN;
+        bool present = current_presence_is_flowing(counts_avg, s_cal.zero_counts[n],
+                                                     s_cal.i_present_a, s_cal.k_ct_v_per_a[n],
+                                                     resolved_gain);
+
         // Phase 9: end-to-end CT amps correction (ct_amps_cal.h), applied
         // AFTER the physics-based ADC->amps conversion above, on top of it
         // rather than instead of it -- see current_sense.h's field comment
@@ -245,6 +258,7 @@ void current_sense_sample(void)
 
         snap.amps[n] = amps;
         snap.clipped[n] = clipped;
+        snap.present[n] = present;
 
         // Slow reporting filter, tau=0.5s (section 4). First sample seeds
         // the filter directly rather than ramping up from 0, so a channel

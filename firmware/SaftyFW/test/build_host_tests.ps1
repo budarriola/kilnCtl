@@ -78,7 +78,15 @@ $sources = @(
     (Join-Path $testDir "test_clear_trip_diag_codec.c"),
     (Join-Path $srcDir "watchdog_overdue_diag_codec.c"),
     (Join-Path $testDir "test_watchdog_overdue_diag_codec.c"),
-    (Join-Path $testDir "test_log_task_stack_budget.c")
+    (Join-Path $testDir "test_log_task_stack_budget.c"),
+    (Join-Path $srcDir "max31856_tc_type_policy.c"),
+    (Join-Path $testDir "test_max31856_tc_type_policy.c"),
+    (Join-Path $srcDir "max31856_decode.c"),
+    (Join-Path $testDir "test_max31856_decode.c"),
+    (Join-Path $srcDir "current_presence_policy.c"),
+    (Join-Path $testDir "test_current_presence_policy.c"),
+    (Join-Path $srcDir "discrete_pin_policy.c"),
+    (Join-Path $testDir "test_discrete_pin_policy.c")
 )
 
 $sourceArgs = ($sources | ForEach-Object { '"' + $_ + '"' }) -join " "

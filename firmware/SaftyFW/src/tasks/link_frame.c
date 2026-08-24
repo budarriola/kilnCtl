@@ -222,6 +222,40 @@ link_clear_trip_decision_t link_frame_decide_clear_trip(safety_trip_t current_tr
     return LINK_CLEAR_TRIP_ACCEPT;
 }
 
+void link_frame_apply_set_config(const config_store_record_t *committed, uint8_t tc_type,
+                                  config_store_record_t *out)
+{
+    if (committed == NULL || out == NULL) {
+        return;
+    }
+    *out = *committed;
+    bool tc_type_changed = (committed->tc_type != tc_type);
+    out->tc_type = tc_type;
+    if (tc_type_changed) {
+        out->calibration_missing = true; // see this function's header comment
+                                          // (link_frame.h) -- a REAL type
+                                          // change invalidates any prior
+                                          // calibration.
+    }
+    // else: leave calibration_missing exactly as committed. An idempotent
+    // resend of the already-committed tc_type -- exactly what every
+    // automatic link-reconnect resend is (safety_link.c) -- must not
+    // re-arm it.
+}
+
+void link_frame_apply_set_ct_cal(const config_store_record_t *committed, uint8_t channel,
+                                  bool calibrated, float gain, float offset,
+                                  config_store_record_t *out)
+{
+    if (committed == NULL || out == NULL || channel >= CONFIG_STORE_CT_CAL_NUM_CHANNELS) {
+        return;
+    }
+    *out = *committed;
+    out->ct_cal[channel].calibrated = calibrated;
+    out->ct_cal[channel].gain = gain;
+    out->ct_cal[channel].offset = offset;
+}
+
 bool link_frame_ceiling_is_active(float firing_max_c)
 {
     // isfinite() rejects NaN and +/-Infinity; the strict > 0.0f rejects zero

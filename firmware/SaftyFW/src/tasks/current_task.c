@@ -46,15 +46,26 @@ static void current_task_fn(void *arg)
 
     current_sense_init();
 
-    // Phase 9: load CT amps calibration from config_store (this task's own
-    // glue -- current_sense.c itself must not depend on config_store.h, the
-    // same "sampling/conversion here, commissioning storage elsewhere"
-    // split every other current_sense_cal_t field already respects).
-    // config_store_boot_load() has already run by the time main.c calls
-    // current_task_start() (step 4 runs before step 7 -- see main.c), so
-    // this reads a real record (or a safe all-uncalibrated default, never
-    // uninitialised memory) even on the very first pass through this loop.
-    current_task_reload_ct_cal();
+    // Phase 9 / 2026-08-24: load the FULL current-sense calibration from
+    // config_store (this task's own glue -- current_sense.c itself must not
+    // depend on config_store.h, the same "sampling/conversion here,
+    // commissioning storage elsewhere" split every other current_sense_
+    // cal_t field already respects). current_task_reload_cal() covers
+    // i_present_a/zero_counts/k_ct_v_per_a/gain/mains_voltage_v AND ct_cal
+    // in one call (it reads ct_cal out of the same config_store record), so
+    // this replaces the old ct_cal-only reload here -- current_sense_set_
+    // cal() (unlike current_sense_set_ct_cal()) replaces the WHOLE cal
+    // struct, and until this call landed, current_sense_set_cal() was never
+    // called anywhere in src/: k_ct_v_per_a stayed 0.0f forever, which
+    // silently disabled S3/S9/S11/S6b's presence detection (fixed
+    // separately, current_presence_policy.h, but calibration still needs to
+    // actually reach current_sense.c for the reported amps/power figures to
+    // mean anything). config_store_boot_load() has already run by the time
+    // main.c calls current_task_start() (step 4 runs before step 7 -- see
+    // main.c), so this reads a real record (or a safe all-uncalibrated
+    // default, never uninitialised memory) even on the very first pass
+    // through this loop.
+    current_task_reload_cal();
 
     TickType_t last_wake = xTaskGetTickCount();
 
@@ -128,4 +139,60 @@ void current_task_reload_ct_cal(void)
         table.channels[n].offset = stored[n].offset;
     }
     current_sense_set_ct_cal(&table);
+}
+
+void current_task_reload_cal(void)
+{
+    // ONE call, the whole committed record -- config_store.h deliberately
+    // exposes no per-field getters for i_present_a/zero_counts/k_ct_v_per_a/
+    // gain/mains_voltage_v (see config_store_get_full_record()'s own doc
+    // comment: this is the "read-back must reflect the enforced record"
+    // path, same contract current_task_reload_ct_cal() relies on via
+    // config_store_get_ct_cal()). Before config_store_boot_load() has run,
+    // this already returns config_store_default()'s all-uncalibrated
+    // record (never uninitialised memory) -- same safe-default contract
+    // every other config_store getter documents.
+    config_store_record_t rec;
+    config_store_get_full_record(&rec);
+
+    current_sense_cal_t cal;
+    cal.i_present_a = rec.i_present_a;
+    cal.mains_voltage_v = rec.mains_voltage_v;
+    bool k_ct_all_set = true;
+    for (unsigned n = 0; n < 3u; n++) {
+        cal.zero_counts[n] = rec.zero_counts[n];
+        cal.k_ct_v_per_a[n] = rec.k_ct_v_per_a[n];
+        cal.gain[n] = rec.gain[n];
+        if (rec.k_ct_v_per_a[n] <= 0.0f) {
+            k_ct_all_set = false;
+        }
+    }
+    // `calibrated` gates current_snapshot_t.calibrated / current_sense_
+    // power_t.calibrated (KILNLINK_POWER_FLAG_CALIBRATED on the wire,
+    // link_task.c's link_task_send_power()) -- docs/CONFIG_REFERENCE.md
+    // section 3 scopes k_ct_v_per_a/gain/mains_voltage_v as "power estimate
+    // only, no guard", so this flag answers exactly that question ("is the
+    // reported amps/power number real") and nothing about guard readiness:
+    // S3/S9/S11/S6b's presence detection no longer depends on k_ct_v_per_a
+    // at all (current_presence_policy.h) and does not read this flag.
+    // i_present_a/zero_counts are deliberately NOT part of this condition --
+    // CONFIG_REFERENCE.md section 3 does not list them among the no-safe-
+    // default fields gated by calibration_missing (they ship with real
+    // defaults, 2.0A and 0 respectively), so their absence must not be
+    // reported as "uncalibrated" here.
+    cal.calibrated = k_ct_all_set;
+    // ct_cal converted from the same record -- current_task_reload_ct_cal()
+    // above updates this sub-field IN PLACE (via current_sense_set_ct_cal())
+    // whenever SAFETY_CMD_SET_CT_CAL lands on its own; converting it again
+    // here from the SAME committed record keeps this call self-contained
+    // (a caller does not need to also call reload_ct_cal() for ct_cal to
+    // end up correct) and idempotent -- both paths read the same
+    // config_store record, so they can never disagree.
+    for (unsigned n = 0; n < CT_AMPS_CAL_NUM_CHANNELS; n++) {
+        cal.ct_cal.channels[n].calibrated = rec.ct_cal[n].calibrated;
+        cal.ct_cal.channels[n].gain = rec.ct_cal[n].gain;
+        cal.ct_cal.channels[n].offset = rec.ct_cal[n].offset;
+    }
+
+    current_sense_set_cal(&cal);
 }

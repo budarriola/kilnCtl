@@ -29,6 +29,10 @@ void run_test_safety_core_stack_budget(void);
 void run_test_clear_trip_diag_codec(void);
 void run_test_watchdog_overdue_diag_codec(void);
 void run_test_log_task_stack_budget(void);
+void run_test_max31856_tc_type_policy(void);
+void run_test_max31856_decode(void);
+void run_test_current_presence_policy(void);
+void run_test_discrete_pin_policy(void);
 
 int main(void)
 {
@@ -53,6 +57,10 @@ int main(void)
     run_test_clear_trip_diag_codec();
     run_test_watchdog_overdue_diag_codec();
     run_test_log_task_stack_budget();
+    run_test_max31856_tc_type_policy();
+    run_test_max31856_decode();
+    run_test_current_presence_policy();
+    run_test_discrete_pin_policy();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     if (g_test_failures > 0) {

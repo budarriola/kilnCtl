@@ -47,10 +47,19 @@ typedef struct {
 // section 3b) live in current_sense_power_t (src/current_sense.h)
 // deliberately OUTSIDE this struct, so nothing that reads current_snapshot_t
 // can accidentally end up consuming a delayed value.
+// `present[n]`, added 2026-08-24 alongside the current-sense-calibration-
+// wiring fix: current_sense.c's own current_presence_policy.h computes this
+// DECOUPLED from k_ct_v_per_a (whereas `amps[n]` is 0.0f, honestly, whenever
+// k_ct_v_per_a is not commissioned -- see current_sense.c's cs_counts_to_
+// amps()). current_any_present() below reads `present[n]`, not a
+// recomputed amps-vs-threshold comparison, specifically so S3/S9/S11/S6b's
+// presence fact survives an uncommissioned k_ct_v_per_a -- see current_
+// presence_policy.h's header comment for the full safe-direction reasoning.
 typedef struct {
     uint32_t timestamp_ms;
     float    amps[3];
     bool     clipped[3];
+    bool     present[3];
     bool     calibrated;
 } current_snapshot_t;
 
@@ -189,17 +198,27 @@ static inline void context_reduce_zones(const context_snapshot_t *ctx, float tc_
     }
 }
 
-// S3/S4/S6b's "is the load actually drawing current right now" fact
+// S3/S4/S6b/S11's "is the load actually drawing current right now" fact
 // (SAFETY_MODEL.md section 3: presence/absence only, never a magnitude
-// guard) -- OR across all three channels against `i_present_a`. `cur == NULL`
-// conservatively reads as "no current present", same "unknown means the
-// conservative default" convention every other input in this codebase uses.
-static inline bool current_any_present(const current_snapshot_t *cur, float i_present_a)
+// guard) -- OR across all three channels' precomputed `present[n]`.
+// `cur == NULL` conservatively reads as "no current present", same "unknown
+// means the conservative default" convention every other input in this
+// codebase uses.
+//
+// 2026-08-24: this used to recompute `amps[n] > i_present_a` itself, taking
+// i_present_a as a parameter. Changed to read the already-decided
+// `present[n]` fact instead (current_sense.c computes it via current_
+// presence_policy.h, decoupled from k_ct_v_per_a) so this function no
+// longer needs -- and no longer CAN accidentally reintroduce -- the
+// dependency on k_ct_v_per_a that silently disabled S3/S9/S11/S6b whenever
+// a channel's CT scale factor was never commissioned. See current_
+// presence_policy.h for the full reasoning.
+static inline bool current_any_present(const current_snapshot_t *cur)
 {
     if (cur == NULL) {
         return false;
     }
-    return cur->amps[0] > i_present_a || cur->amps[1] > i_present_a || cur->amps[2] > i_present_a;
+    return cur->present[0] || cur->present[1] || cur->present[2];
 }
 
 // S1's firing-ceiling gate (SAFETY_MODEL.md section 4, S1 /

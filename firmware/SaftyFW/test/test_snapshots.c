@@ -209,51 +209,63 @@ static void test_reduce_zones_overrun_zone_count_clamped(void)
 }
 
 // --- current_any_present ------------------------------------------------------
+// 2026-08-24: current_any_present() used to recompute `amps[n] > i_present_a`
+// itself (taking i_present_a as a parameter). It now just ORs the already-
+// decided `present[n]` fact -- current_sense.c computes that, decoupled
+// from k_ct_v_per_a, via current_presence_policy.h (see test_current_
+// presence_policy.c for that decision's own coverage). These tests now
+// exercise the OR itself, not a threshold comparison.
 
-static void test_current_any_present_all_below_threshold(void)
+static void test_current_any_present_all_false(void)
 {
-    TEST_SECTION("current_any_present -- all three channels below threshold -> false");
+    TEST_SECTION("current_any_present -- all three channels' present[n] false -> false");
 
     current_snapshot_t cur;
     memset(&cur, 0, sizeof(cur));
-    cur.amps[0] = 0.1f;
-    cur.amps[1] = 0.05f;
-    cur.amps[2] = 1.9f;
+    cur.present[0] = false;
+    cur.present[1] = false;
+    cur.present[2] = false;
 
-    TEST_CHECK(!current_any_present(&cur, 2.0f), "0.1/0.05/1.9A, all < 2.0A threshold -> not present");
+    TEST_CHECK(!current_any_present(&cur), "all three present[n] false -> not present");
 }
 
-static void test_current_any_present_one_channel_above(void)
+static void test_current_any_present_one_channel_true(void)
 {
-    TEST_SECTION("current_any_present -- one channel above threshold -> true");
+    TEST_SECTION("current_any_present -- one channel's present[n] true -> true");
 
     current_snapshot_t cur;
     memset(&cur, 0, sizeof(cur));
-    cur.amps[0] = 0.0f;
-    cur.amps[1] = 2.01f; // just above
+    cur.present[0] = false;
+    cur.present[1] = true;
+    cur.present[2] = false;
+
+    TEST_CHECK(current_any_present(&cur), "channel 1 present[1]==true -> present");
+}
+
+static void test_current_any_present_ignores_amps(void)
+{
+    TEST_SECTION("current_any_present -- reads present[n], NOT amps[n] -- this is the whole point "
+                  "of the decoupling fix (2026-08-24): a channel can have a nonzero amps[] and "
+                  "still read not-present if present[n] says so (and vice versa), because amps[]  "
+                  "and present[n] are computed on independent paths in current_sense.c once "
+                  "k_ct_v_per_a is uncommissioned");
+
+    current_snapshot_t cur;
+    memset(&cur, 0, sizeof(cur));
+    cur.amps[0] = 99.0f;   // a large, clearly-"present" amps reading ...
+    cur.present[0] = false; // ... but present[n] says otherwise.
+    cur.amps[1] = 0.0f;
     cur.amps[2] = 0.0f;
 
-    TEST_CHECK(current_any_present(&cur, 2.0f), "channel 1 at 2.01A > 2.0A threshold -> present");
-}
-
-static void test_current_any_present_exactly_at_threshold(void)
-{
-    TEST_SECTION("current_any_present -- exactly at threshold -> false (strictly greater-than)");
-
-    current_snapshot_t cur;
-    memset(&cur, 0, sizeof(cur));
-    cur.amps[0] = 2.0f;
-    cur.amps[1] = 2.0f;
-    cur.amps[2] = 2.0f;
-
-    TEST_CHECK(!current_any_present(&cur, 2.0f), "all three exactly at 2.0A -> not present (> not >=)");
+    TEST_CHECK(!current_any_present(&cur),
+               "amps[0]==99.0 must NOT make this true -- only present[n] is consulted");
 }
 
 static void test_current_any_present_null(void)
 {
     TEST_SECTION("current_any_present -- NULL snapshot -> false (conservative default)");
 
-    TEST_CHECK(!current_any_present(NULL, 2.0f), "NULL -> not present, never a crash");
+    TEST_CHECK(!current_any_present(NULL), "NULL -> not present, never a crash");
 }
 
 // --- link_firing_ceiling_should_apply ---------------------------------------
@@ -303,9 +315,9 @@ void run_test_snapshots(void)
     test_reduce_zones_null_outputs_no_crash();
     test_reduce_zones_overrun_zone_count_clamped();
 
-    test_current_any_present_all_below_threshold();
-    test_current_any_present_one_channel_above();
-    test_current_any_present_exactly_at_threshold();
+    test_current_any_present_all_false();
+    test_current_any_present_one_channel_true();
+    test_current_any_present_ignores_amps();
     test_current_any_present_null();
 
     test_firing_ceiling_should_apply_both_true();

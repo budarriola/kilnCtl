@@ -14,10 +14,17 @@ extern "C" {
 // SAFTYFW_CORE_TRIP_PATH. Returns false if task creation failed.
 bool discrete_task_start(void);
 
-// Debounced reads for safety_core (Phase 4). Both active-low at the pin
-// (docs/HARDWARE.md); these return the logical, already-inverted sense:
-// true == E-stop pressed / mainFault asserted. Safe to call from any task --
-// backed by a single volatile read of a value only discrete_task writes.
+// Debounced reads for safety_core (Phase 4). These return the LOGICAL sense:
+// true == E-stop pressed / mainFault asserted, whatever the pin polarity is.
+//
+// The two pins do NOT share a polarity, and an earlier version of this
+// comment wrongly said they did ("Both active-low at the pin"), which is how
+// discrete_task.c came to invert the E-stop and disable S7 entirely:
+//   GPIO9  estop      -- ACTIVE HIGH for stop (R10 pull-up, normally-closed
+//                         contact to GND_Safty). docs/HARDWARE.md section 5.
+//   GPIO10 mainFault  -- active LOW (U1 collector, R8 pull-up).
+// Safe to call from any task -- backed by a single volatile read of a value
+// only discrete_task writes.
 bool discrete_task_estop_pressed(void);
 bool discrete_task_main_fault(void);
 
