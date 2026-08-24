@@ -365,6 +365,16 @@ what `SaftyFW` assumes.
 asserted**, which is why bring-up needs either the button fitted or a
 deliberate jumper to `GND_Safty`. Checked 2026-08-16: **no jumper is currently
 fitted anywhere on the `estop` net** in the schematic, so an as-built board
+
+**Superseded for the bench board, 2026-08-24:** GPIO9 measured **low** over
+SWD (`pico_gpio_read(9)`), so a contact IS present on the physical bench
+board -- E-stop reads healthy and S7 does not trip there. The schematic note
+above still stands for a freshly built board; check the pin rather than
+assuming either way. This mattered because `discrete_task.c` had the polarity
+inverted until 642dd54, which decoded this healthy low as *pressed* -- masked
+only because S5 (no safety TC fitted) latched first and
+`safety_guards_tick()` early-returns while any trip is latched.
+
 with no switch attached will read STOP until one of the two is added. Do not
 "fix" this by inverting the sense in
 firmware; inverting it makes the broken-wire case read as *healthy*, which
