@@ -94,7 +94,20 @@ foreach ($entry in $required) {
     # _Static_assert at all are load-bearing here, not its exact line
     # breaks.
     $raw = Get-Content -Path $path -Raw
-    $normalized = ($raw -replace '\s+', ' ')
+    # Strip C comments BEFORE matching. This is not hygiene -- it is the
+    # difference between a real check and a vacuous one. This codebase
+    # documents a fixed bug in prose right next to the fixed code, so a
+    # future comment quoting one of these _Static_assert lines (explaining
+    # why it exists, say) would satisfy the search below even if the
+    # assertion itself had been deleted -- the check would then pass on its
+    # own explanation. firmware/SimFW/test/test_i2c_owner_bus_scan_probe_len_
+    # coverage.c and firmware/SaftyFW/test/test_boot_checkin_coverage.c both
+    # strip comments for exactly this reason; the latter's header comment
+    # records that its target file's post-mortem comment really did mention
+    # the searched-for call, and would have defeated a naive scan.
+    $stripped = $raw -replace '(?s)/\*.*?\*/', ' '
+    $stripped = $stripped -replace '(?m)//.*$', ' '
+    $normalized = ($stripped -replace '\s+', ' ')
     foreach ($assertText in $entry.Asserts) {
         $normalizedAssert = ($assertText -replace '\s+', ' ')
         if ($normalized -notmatch [regex]::Escape($normalizedAssert)) {
