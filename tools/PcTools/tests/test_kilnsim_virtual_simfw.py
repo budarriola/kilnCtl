@@ -103,15 +103,28 @@ def test_baseline_firing_end_to_end():
             link.disconnect()
 
     assert report.validity.valid
-    names = {e.name: e.verdict for e in report.expectations}
-    # "never_*" forbid clauses hold trivially with no DUT driving anything.
+    results = {e.name: e for e in report.expectations}
+    names = {n: r.verdict for n, r in results.items()}
+    # "never_*" forbid clauses hold trivially with no DUT driving anything --
+    # except `never_trips`, which targets `guard_trip` (SaftyFW-only, no
+    # sim_event_type_t value exists for it -- kilnsim.protocol.EventType's
+    # own class comment). This run_scenario() call passes no
+    # `guard_observer=`, so kilnsim.runner's own honesty fix applies: that
+    # clause must be BLOCKED, not a spurious vacuous PASS (the exact bug
+    # kilnsim.runner._block_expectations_missing_guard_observer exists to
+    # close -- see that function's own doc comment).
     assert names["never_faults"] == "PASS"
     assert names["never_estops"] == "PASS"
-    assert names["never_trips"] == "PASS"
+    assert names["never_trips"] == "BLOCKED"
+    assert results["never_trips"].blocked_on["phase"] == "runner"
     # The one clause that needs a DUT to actually close a relay must NOT be
     # a spurious PASS -- this is the exact honesty property the fixture
     # exists to prove (a DUT-gated expectation reports as SKIPPED, not PASS).
     assert names["heat_actually_cycles"] == "SKIPPED"
+    # Overall verdict follows report.py's FAIL > BLOCKED > PASS priority: no
+    # FAIL anywhere, but never_trips is BLOCKED, so the whole run is BLOCKED
+    # rather than an unqualified PASS that would hide the missing signal.
+    assert report.verdict == "BLOCKED"
 
 
 def test_tc_stuck_fault_fires_without_a_dut():

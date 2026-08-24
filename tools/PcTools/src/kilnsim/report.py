@@ -125,6 +125,23 @@ class ValidityFlags:
 
     spi_underrun: bool = False
     event_seq_gap: bool = False
+    #: False only when this run's link could not actually serve a real
+    #: spi_underrun_count reading at all -- kilnsim.runner.run_scenario()'s
+    #: own doc comment on why `spi_underrun` must never silently default to
+    #: False when that happens (MockSimLink has no TELEMETRY frame at all;
+    #: a real link on which no TELEMETRY broadcast ever arrived during the
+    #: run is the same situation). Default True preserves every existing
+    #: caller's meaning: a hand-built Report or an evaluate_expectations()
+    #: call that never mentions this parameter is asserting "the signal was
+    #: actually observed" -- the same thing `spi_underrun=False` on its own
+    #: meant before this field existed. Deliberately NOT folded into
+    #: `valid` below: an unavailable signal makes a `forbid: spi_underrun`
+    #: expectation unable to certify anything either way, which is a
+    #: visibility gap to report, not by itself a reason to redden the whole
+    #: run's validity (that would conflate "we didn't check" with "we
+    #: checked and it's bad", the same distinction BLOCKED vs FAIL exists
+    #: to preserve for `expect` clauses).
+    spi_underrun_signal_available: bool = True
 
     @property
     def valid(self) -> bool:
@@ -134,6 +151,7 @@ class ValidityFlags:
         return {
             "spi_underrun": self.spi_underrun,
             "event_seq_gap": self.event_seq_gap,
+            "spi_underrun_signal_available": self.spi_underrun_signal_available,
             "valid": self.valid,
         }
 
@@ -567,6 +585,7 @@ def _apply_blocked_on(clause, result: ExpectationResult) -> ExpectationResult:
 def evaluate_expectations(scenario: Scenario, events: list,
                            telemetry_samples: Optional[list] = None,
                            spi_underrun: bool = False,
+                           spi_underrun_signal_available: bool = True,
                            seed: Optional[int] = None,
                            timescale: Optional[float] = None,
                            start_time: Optional[float] = None,
@@ -608,6 +627,7 @@ def evaluate_expectations(scenario: Scenario, events: list,
     validity = ValidityFlags(
         spi_underrun=spi_underrun,
         event_seq_gap=_check_event_seq_gap(events),
+        spi_underrun_signal_available=spi_underrun_signal_available,
     )
 
     # Overall verdict (DESIGN_NOTES.md sec 8.2, extended this pass for BLOCKED):
@@ -674,6 +694,9 @@ def report_from_dict(data: dict) -> Report:
         validity=ValidityFlags(
             spi_underrun=bool((data.get("validity") or {}).get("spi_underrun", False)),
             event_seq_gap=bool((data.get("validity") or {}).get("event_seq_gap", False)),
+            spi_underrun_signal_available=bool(
+                (data.get("validity") or {}).get("spi_underrun_signal_available", True)
+            ),
         ),
         fw_versions=dict(data.get("fw_versions", {})),
         verdict=data.get("verdict", SKIPPED),
