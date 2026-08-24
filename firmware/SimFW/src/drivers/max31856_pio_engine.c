@@ -563,9 +563,30 @@ bool max31856_pio_engine_init(max31856_pio_bus_t *bus,
     // --- RX program: one shared load, one SM instance per channel ----
     bus->offset_rx = pio_add_program(pio, &max31856_spi_rx_program);
     for (uint8_t i = 0; i < cfg->channel_count; i++) {
-        int sm = pio_claim_unused_sm(pio, true);
+        // required = false, checked explicitly, simfw_fatal() on exhaustion --
+        // the same posture the DMA claims further down already use, and the
+        // one this file's own doctrine states. This used to pass
+        // required = true, which made the `sm < 0` branch below structurally
+        // unreachable: pico-sdk's hw_claim_unused_from_range() (common/
+        // hardware_claim/claim.c) calls panic() unconditionally on exhaustion
+        // when required is set, and never returns a negative value. That was
+        // not merely dead code -- it silently broke two contracts. This
+        // function's own header promises it "returns false ... if the PIO
+        // block cannot supply enough free state machines", which it could
+        // never do for this cause; and, worse, a bare panic() halts ONLY the
+        // calling core, while spi_emu_a/b run pinned to core 1
+        // (vTaskCoreAffinitySet(SIMFW_CORE_RT_PATH), spi_emu_a.c). Core 0
+        // would have kept serving USB and telemetry against a fixture whose
+        // SPI emulation never started -- exactly the "half-alive board still
+        // answering plausibly" failure mode simfw_fatal()'s cross-core halt
+        // exists to prevent (simfw_fatal.h's CROSS-CORE HALT comment).
+        int sm = pio_claim_unused_sm(pio, false);
         if (sm < 0) {
-            return false;
+            simfw_fatal("max31856_pio_engine",
+                         "PIO%u state machine exhausted claiming RX SM for channel %u of %u "
+                         "(docs/HARDWARE.md section 1b.6: PIO0 needs 3 RX + 1 TX for bus A, "
+                         "PIO1 needs 1 RX + 1 TX for bus B)",
+                         (unsigned)pio_get_index(pio), (unsigned)i, (unsigned)cfg->channel_count);
         }
         bus->sm_rx[i] = (uint)sm;
 
@@ -623,9 +644,15 @@ bool max31856_pio_engine_init(max31856_pio_bus_t *bus,
         ? &max31856_spi_tx_b_program
         : &max31856_spi_tx_a_program;
     bus->offset_tx = pio_add_program(pio, tx_program);
-    int tx_sm = pio_claim_unused_sm(pio, true);
+    // required = false + explicit simfw_fatal(), for the same reasons as the
+    // RX claim above -- see that call site's comment for why required = true
+    // was both dead code and a cross-core-halt hazard.
+    int tx_sm = pio_claim_unused_sm(pio, false);
     if (tx_sm < 0) {
-        return false;
+        simfw_fatal("max31856_pio_engine",
+                     "PIO%u state machine exhausted claiming the shared TX SM "
+                     "(%u RX SM(s) already claimed on this bus)",
+                     (unsigned)pio_get_index(pio), (unsigned)cfg->channel_count);
     }
     bus->sm_tx = (uint)tx_sm;
 

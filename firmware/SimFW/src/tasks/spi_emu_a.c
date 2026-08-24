@@ -19,7 +19,16 @@
 #include "sim/sim_snapshot.h"
 #include "sim/tc_fault_state.h"
 
-#define SPI_EMU_A_STACK_WORDS   (configMINIMAL_STACK_SIZE * 2u) // headroom for 3 max31856_channel_t images + the pio_bus_t struct, all task-owned locals
+// 3x (not 2x): a stack-usage audit (2026-08-24, -fstack-usage build) walked
+// the real worst-case call chain and found max31856_pio_engine_init()'s
+// non-panicking-claim-then-simfw_fatal() failure path -- reachable at task
+// startup on DMA/PIO exhaustion, see max31856_pio_engine.c -- costs ~1252 B
+// through simfw_fatal()'s vsnprintf()/_etoa()/_ftoa() chain. 2x
+// (2048 B) left only a ~1.64x margin over that measured figure, i.e. under
+// this project's 2x floor; 3x (3072 B) restores ~2.45x. Headroom is still
+// also needed for 3 max31856_channel_t images + the pio_bus_t struct, all
+// task-owned locals.
+#define SPI_EMU_A_STACK_WORDS   (configMINIMAL_STACK_SIZE * 3u)
 #define SPI_EMU_A_SCAN_DELAY_MS 20u // task-loop cadence, NOT the register update cadence -- see the loop body comment; the actual byte-level SPI response path runs entirely in IRQ context (max31856_pio_engine.c), not this loop
 
 // Bounded retry budget for spi_emu_a_get_reg_image()'s seqlock-style

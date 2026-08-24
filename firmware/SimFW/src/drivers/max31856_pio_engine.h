@@ -231,8 +231,22 @@ typedef struct {
 //
 // Returns false, having claimed nothing it cannot release cleanly, if the
 // config is inconsistent (channel count, pin arithmetic, missing or
-// misaligned image bank) or if the PIO block / DMA cannot supply enough free
-// state machines, program space or channels.
+// misaligned image bank).
+//
+// Resource exhaustion does NOT return false -- it does not return at all.
+// PIO state-machine, PIO program-memory and DMA-channel exhaustion each halt
+// the whole fixture through simfw_fatal() (drivers/simfw_fatal.h), naming the
+// specific resource, rather than degrading into a silently-dead SPI path.
+// That is deliberate: this init runs from spi_emu_a/b, which are pinned to
+// core 1, and simfw_fatal()'s cross-core halt is what stops core 0 continuing
+// to serve USB and telemetry as though the fixture were healthy.
+//
+// This paragraph used to claim false was returned for the exhaustion cases
+// too. It was not: the state-machine claims passed required = true to
+// pico-sdk, which panics internally and never returns, so the guard below it
+// was unreachable and the panic bypassed the cross-core halt. Both claims now
+// pass required = false and route through simfw_fatal() explicitly -- see
+// their call sites in max31856_pio_engine.c.
 bool max31856_pio_engine_init(max31856_pio_bus_t *bus,
                                const max31856_pio_engine_config_t *cfg);
 

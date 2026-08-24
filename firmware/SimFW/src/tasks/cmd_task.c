@@ -52,7 +52,14 @@
 #include "sim/fault_engine.h"
 #include "sim/thermal_model.h"
 
-#define CMD_TASK_STACK_WORDS (configMINIMAL_STACK_SIZE * 2u)
+// 3x (not 2x): a -fstack-usage audit (2026-08-24) walked the real worst-case
+// call chain through cmd_task_dispatch()'s function-pointer handler table
+// (every handle_*() in s_groups[], the largest being handle_fault_schedule()
+// at 448 B of its own frame) and separately through the post-dispatch
+// usb_owner_send_reply() -> usb_owner_encode_and_transmit() TX path (448 B),
+// and measured ~1048 B worst case. 2x (2048 B) left only a ~1.95x margin --
+// under this project's 2x floor. 3x (3072 B) restores ~2.93x.
+#define CMD_TASK_STACK_WORDS (configMINIMAL_STACK_SIZE * 3u)
 
 static TaskHandle_t s_task_handle = NULL;
 static QueueHandle_t s_inbox = NULL;
@@ -1367,6 +1374,37 @@ static void handle_io_dut_power_safety_get(const uint8_t *args, uint8_t args_len
     *out_len = w.len;
 }
 
+// BUS_SCAN (cmd_ids.h SIMFW_CMD_IO_BUS_SCAN, docs/PROTOCOL.md section 5.5):
+// no request args. Reply: [status, configured_addr1, configured_addr2,
+// found_bitmap[14]]. i2c_owner_bus_scan() blocks this task (cmd_task) until
+// i2c_owner's own task finishes the scan -- see i2c_owner.h's comment on why
+// that is the right tradeoff for a command whose whole point is answering in
+// one round trip. The only failure mode is the internal 1 s timeout
+// (i2c_owner wedged/never started), reported as ERR_BUSY -- there is no
+// ERR_BAD_ARGS case since this command takes no arguments.
+static void handle_io_bus_scan(const uint8_t *args, uint8_t args_len, uint8_t *out, uint8_t *out_len,
+                                uint8_t out_cap)
+{
+    (void)args;
+    (void)args_len;
+
+    i2c_owner_bus_scan_result_t result;
+    bool ok = i2c_owner_bus_scan(&result);
+
+    reply_writer_t w;
+    rw_init(&w, out, out_cap);
+    if (!ok) {
+        rw_u8(&w, SIMFW_CMD_STATUS_ERR_BUSY);
+        *out_len = w.len;
+        return;
+    }
+    rw_u8(&w, SIMFW_CMD_STATUS_OK);
+    rw_u8(&w, result.configured_addr1);
+    rw_u8(&w, result.configured_addr2);
+    rw_bytes(&w, result.found_bitmap, (uint8_t)sizeof(result.found_bitmap));
+    *out_len = w.len;
+}
+
 static const cmd_table_entry_t s_io_commands[] = {
     {SIMFW_CMD_IO_SET_DIR, handle_io_set_dir},
     {SIMFW_CMD_IO_WRITE, handle_io_write},
@@ -1378,6 +1416,7 @@ static const cmd_table_entry_t s_io_commands[] = {
     {SIMFW_CMD_IO_DUT_POWER_GET, handle_io_dut_power_get},
     {SIMFW_CMD_IO_DUT_POWER_SAFETY_SET, handle_io_dut_power_safety_set},
     {SIMFW_CMD_IO_DUT_POWER_SAFETY_GET, handle_io_dut_power_safety_get},
+    {SIMFW_CMD_IO_BUS_SCAN, handle_io_bus_scan},
 };
 
 // --- FAULT group handlers (fault_sched.h) -----------------------------------

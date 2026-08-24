@@ -20,7 +20,12 @@
 #include "sim/sim_snapshot.h"
 #include "sim/tc_fault_state.h"
 
-#define SPI_EMU_B_STACK_WORDS   (configMINIMAL_STACK_SIZE * 2u)
+// See spi_emu_a.c's identical constant's comment: a -fstack-usage audit
+// (2026-08-24) measured this task's worst-case call chain (through
+// max31856_pio_engine_init()'s simfw_fatal() failure path) at ~1228 B,
+// leaving only ~1.67x margin over the old 2x (2048 B) budget -- under this
+// project's 2x floor. 3x (3072 B) restores ~2.5x.
+#define SPI_EMU_B_STACK_WORDS   (configMINIMAL_STACK_SIZE * 3u)
 #define SPI_EMU_B_SCAN_DELAY_MS 20u // see spi_emu_a.c's identical constant's comment -- task-loop cadence only, not the register update path
 
 // See spi_emu_a.c's identical constant's comment.
