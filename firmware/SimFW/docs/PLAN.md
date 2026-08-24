@@ -77,13 +77,24 @@ never `[x]`.
 
 ### 0.1 Doable now, in software (no hardware required)
 
-- [ ] **Bridge ACK still precedes dispatch — narrower than it was.** Every
-      unimplemented subcommand's silent-ACK case is now fixed (`c91ed50`: all
-      11 `default:` branches reply `ok=0` with the echoed subcmd). **Still
-      open:** the transport ACKs on inbox delivery, before dispatch, so other
-      failure paths (truncated args, range refusals, ownership refusals) stay
-      silent by documented design; `tools/PcTools/src/kilnctrl` still only
-      checks the transport ACK and would need updating to benefit.
+- [~] **Bridge ACK still precedes dispatch — firmware half now done
+      (`5df2190`).** The transport ACK stays where it is, deliberately: the
+      ACK/NACK/dedup/retry machine lives in the RX task with no application
+      semantics, dispatch can run in a *third* task
+      (`bx_run_on_internal_stack` for NVS writes), and
+      `BRIDGE_REPLY_ACK_TIMEOUT_MS = 200` is sized on the assumption that an
+      ACK is fast. Instead the application-level `{subcmd, ok[, reason]}`
+      reply convention was extended to every rejection that used to fall
+      through silently — truncated args, range refusals, and the relay
+      `ERR_OWNED`/`ERR_SAFETY`/`ERR_UPDATING` refusals, which had been
+      indistinguishable on the wire from a relay that actually switched.
+      **Still open:** `tools/PcTools/src/kilnctrl` still only checks the
+      transport ACK, so mutating-command callers must move to the
+      `_query()`-style pattern before any of this reaches an operator. That
+      is the larger half and is owned by another session. Two reply shapes
+      are flagged in `5df2190`'s message for whoever picks it up:
+      `THERMO_CMD_READ_FAULTS` and `IO_CMD_SX_SCAN` have an empty-success
+      reply that is byte-identical to a reasonless rejection.
 - [ ] **`hardware/UnitTestFixture/` deletion** — `firmware/UnitTestFw` (the
       ESP32-S3 instrument bench firmware) was deleted 2026-08-23
       (`DESIGN_NOTES.md` §12), but its embedded KiCad project,
