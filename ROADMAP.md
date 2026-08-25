@@ -95,6 +95,14 @@ told:
 7. `KilnFW/TODO.md` §10.1 — the twelve stale `display_*` MCP tools: delete
    them, or restore a minimal firmware handler. Now sharper, because
    `display_bridge_task` is confirmed dead code on real hardware.
+8. **Should an uncommissioned safety processor be allowed to grant heating
+   enable?** Newly live as of 2026-08-24, because the board now actually grants
+   it. `calibration_missing` gates nothing today, and S1's absolute ceiling is
+   disabled while `abs_max_temp_c` is unset — so heating is permitted with no
+   absolute temperature limit in force. Making `request_enable` refuse would
+   close it, and would also block every bench test needing enable behind a
+   commissioning pass that requires answers 1-3 above. Both sides are written
+   up in `firmware/SaftyFW/TODO.md`; the trade is yours, not the code's.
 
 **Blocked on hardware that does not exist yet.** All of this is scripted and
 waiting, not unwritten:
@@ -104,9 +112,9 @@ waiting, not unwritten:
   nothing in `firmware/SimFW/` has ever touched a real master.
 - `GUARD_TEST_MATRIX.md` §3's trip rows — every enabled guard's real trip,
   safe-state power-on, sensor open-circuit, current-mapping commissioning.
-- The safety processor's own MAX31856, and any CT. Until those are populated,
-  `safety TC invalid` and `0.00 A` are correct reporting of absent hardware,
-  not defects (M3, M5, M6).
+- ~~The safety processor's own MAX31856~~ — **fitted 2026-08-24 and verified
+  reading 30.2 °C.** Still absent: any CT, so `0.00 A` on all three channels
+  remains correct reporting of absent hardware (M5).
 - S9's welded-contactor escalation, which by definition needs a welded
   contactor.
 - The CT coupling transformer: the part is now selected (Hammond 140QEX) and
@@ -220,8 +228,26 @@ link, so it can run in parallel with M1 and M2 once M0 is out of the way.
 
 - [x] FreeRTOS SMP skeleton, GPIO6 driven low first, watchdog with latched trip
       reason — all done 2026-08-16, build-verified
-- [ ] **The SAFETY processor's MAX31856 is not populated.** Blocks all
-      real-reading work below it.
+- [x] **The SAFETY processor's MAX31856 and thermocouple are now fitted**
+      (2026-08-24, by the user). Verified on hardware the same day:
+      `link up; safety thermocouple valid | 30.20 C (CJ 28.08 C)`, status
+      flags `0x21` = `LINK_UP | TEMP_VALID`. This unblocked the real-reading
+      work below it and immediately changed guard reachability — S5 (sensor
+      invalid) stopped latching, which had been masking every later guard
+      because `safety_guards_tick()` early-returns while any trip is latched.
+      **Bring-up trap worth keeping:** the IC must be present BEFORE the Pico
+      boots, since its SPI init runs once at startup. Fitted under power it
+      reads `safety TC invalid` with nothing pointing at the real cause; a
+      `debug_reset` over SWD is the fix.
+      **And it exposed a decision that needs you** — see
+      `firmware/SaftyFW/TODO.md`, "An uncommissioned safety processor grants
+      heating enable": with the sensor real and the stale S5 latch cleared,
+      the board granted heating enable while still reporting
+      `commissioned: false`, i.e. with S1's absolute temperature ceiling
+      disabled for want of `abs_max_temp_c`
+- [ ] ~~The SAFETY processor's MAX31856 is not populated~~ — superseded by the
+      line above. Kept for one revision so anyone mid-task on the old wording
+      sees why it changed.
       **Read the word "safety" carefully** — this item is about the RP2040's
       own thermocouple, not the main board's. `KilnFW`'s three channels ARE
       fitted and working: verified 2026-08-24 with all three reading ~35 °C,
