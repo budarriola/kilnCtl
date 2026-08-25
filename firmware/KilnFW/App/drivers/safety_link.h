@@ -387,10 +387,37 @@ static inline bool safety_link_is_stale(uint16_t age_ms, uint32_t threshold_ms)
  * ESP-IDF's cache-disable path (esp_task_stack_is_sane_cache_disabled()).
  * See safety_cfg_store.c's deferred-flush mechanism for that fix; this
  * predicate and the ~1.2s-per-call budget it gates were never the problem. */
-static inline bool safety_drain_still_waiting(bool want_ct_cal, bool got_ct_cal, bool want_config_page,
+/* 2026-08-24, round 3: `want_status`/`got_status` added, because the round-1
+ * fix above closed this hole for CT_CAL/CONFIG_PAGE/COMMIT_CONFIG_REJECTED
+ * and left the FOURTH caller -- the ordinary GET_STATUS poll -- with no way
+ * to say what it was waiting for. A plain safety_drain_inbox() passes no
+ * out-params, so every `want_*` was false, this predicate returned false
+ * after the first frame, and the wait degraded to zero exactly as the round-1
+ * bug did. The Pico sends 4 STATUS frames per DIAG and per POWER push on this
+ * same inbox, so whenever a DIAG or POWER arrived first the poll exited with
+ * got_status false and counted stats.timeouts, milliseconds before the STATUS
+ * it had asked for landed.
+ *
+ * Measured on the bench 2026-08-24 (commit 8d1b015, 9600 baud, 500 ms poll):
+ * sent 14471, received 14472, crc/framing errors 0 -- and timeouts 3616,
+ * against diag applied 3618 and power applied 3618. Those three tracking each
+ * other 1:1, on a link with zero CRC errors and a STATUS count equal to the
+ * send count, is the signature: a quarter of all polls were reported as
+ * failures on a link that answered every single request.
+ *
+ * This is NOT a widened deadline. No timeout constant changes; the call's own
+ * declared wait_ms is the same ceiling it always had. It only lets the poll
+ * spend the budget it was already given instead of abandoning it after one
+ * unrelated frame -- the identical argument round 1 made for the other
+ * three. */
+static inline bool safety_drain_still_waiting(bool want_status, bool got_status, bool want_ct_cal,
+                                               bool got_ct_cal, bool want_config_page,
                                                bool got_config_page, bool want_commit_rejected,
                                                bool got_commit_rejected)
 {
+    if (want_status && !got_status) {
+        return true;
+    }
     if (want_ct_cal && !got_ct_cal) {
         return true;
     }

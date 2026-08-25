@@ -1112,7 +1112,7 @@ static void safety_count_cmd_byte(SafetyLinkClass *link, uint8_t cmd, uint8_t le
     safety_unlock(link);
 }
 
-static bool safety_drain_inbox_ex(SafetyLinkClass *link, uint32_t wait_ms,
+static bool safety_drain_inbox_ex(SafetyLinkClass *link, uint32_t wait_ms, bool want_status,
                                    uart_proto_message_t *out_ct_cal, bool *out_got_ct_cal,
                                    uart_proto_message_t *out_config_page, bool *out_got_config_page,
                                    uart_proto_message_t *out_commit_rejected, bool *out_got_commit_rejected)
@@ -1229,7 +1229,8 @@ static bool safety_drain_inbox_ex(SafetyLinkClass *link, uint32_t wait_ms,
          * STORE_REFETCH_BUDGET_MS for the SEPARATE, unrelated fix this one
          * exposed (an NVS write from safety_poll_task's PSRAM stack, not a
          * timing issue in this function). */
-        if (safety_drain_still_waiting(want_ct_cal, want_ct_cal && *out_got_ct_cal, want_config_page,
+        if (safety_drain_still_waiting(want_status, got_status, want_ct_cal,
+                                        want_ct_cal && *out_got_ct_cal, want_config_page,
                                         want_config_page && *out_got_config_page, want_commit_rejected,
                                         want_commit_rejected && *out_got_commit_rejected)) {
             TickType_t elapsed = xTaskGetTickCount() - started; /* wrap-safe unsigned subtraction */
@@ -1241,9 +1242,22 @@ static bool safety_drain_inbox_ex(SafetyLinkClass *link, uint32_t wait_ms,
     return got_status;
 }
 
+/* Opportunistic drain: takes whatever has already arrived and does NOT hold
+ * the call open waiting for a STATUS. Every caller that passes wait_ms 0, or
+ * a short ACK/idle budget, wants exactly this -- see
+ * safety_drain_inbox_for_status() below for the one caller that does not. */
 static bool safety_drain_inbox(SafetyLinkClass *link, uint32_t wait_ms)
 {
-    return safety_drain_inbox_ex(link, wait_ms, NULL, NULL, NULL, NULL, NULL, NULL);
+    return safety_drain_inbox_ex(link, wait_ms, false, NULL, NULL, NULL, NULL, NULL, NULL);
+}
+
+/* The GET_STATUS poll's drain: keeps using its own declared budget until the
+ * STATUS it asked for arrives, instead of giving up the moment an unrelated
+ * DIAG/POWER push lands first. See safety_drain_still_waiting()'s round-3
+ * comment in safety_link.h for the bench measurement behind this. */
+static bool safety_drain_inbox_for_status(SafetyLinkClass *link, uint32_t wait_ms)
+{
+    return safety_drain_inbox_ex(link, wait_ms, true, NULL, NULL, NULL, NULL, NULL, NULL);
 }
 
 /* One complete request/reply exchange, serialized against every other one on
@@ -1301,7 +1315,7 @@ static esp_err_t safety_exchange(SafetyLinkClass *link, const uint8_t *request, 
     }
 
     if (expect_status) {
-        if (!safety_drain_inbox(link, SAFETY_LINK_REPLY_TIMEOUT_MS)) {
+        if (!safety_drain_inbox_for_status(link, SAFETY_LINK_REPLY_TIMEOUT_MS)) {
             /* ACKed but no answer: the peer's protocol layer is alive and its
              * application layer is not. Counted as a timeout, since the result
              * for the caller is the same -- no fresh data. */
@@ -2410,7 +2424,7 @@ esp_err_t safety_link_get_ct_cal(SafetyLinkClass *link, uint8_t *out, size_t out
 
     uart_proto_message_t ct_cal_msg;
     bool got_ct_cal = false;
-    (void)safety_drain_inbox_ex(link, SAFETY_LINK_REPLY_TIMEOUT_MS, &ct_cal_msg, &got_ct_cal, NULL, NULL, NULL,
+    (void)safety_drain_inbox_ex(link, SAFETY_LINK_REPLY_TIMEOUT_MS, false, &ct_cal_msg, &got_ct_cal, NULL, NULL, NULL,
                                  NULL);
 
     if (!got_ct_cal) {
@@ -2595,7 +2609,7 @@ esp_err_t safety_link_send_commit_config(SafetyLinkClass *link, uint16_t *out_pa
          * every accepted commit today (an accepted commit sends nothing). */
         uart_proto_message_t rejected_msg;
         bool got_rejected = false;
-        (void)safety_drain_inbox_ex(link, SAFETY_LINK_REPLY_TIMEOUT_MS, NULL, NULL, NULL, NULL, &rejected_msg,
+        (void)safety_drain_inbox_ex(link, SAFETY_LINK_REPLY_TIMEOUT_MS, false, NULL, NULL, NULL, NULL, &rejected_msg,
                                      &got_rejected);
         if (got_rejected) {
             kilnlink_commit_config_rejected_t rejected;
@@ -2681,7 +2695,7 @@ esp_err_t safety_link_get_config_page(SafetyLinkClass *link, uint8_t page_index,
 
     uart_proto_message_t page_msg;
     bool got_page = false;
-    (void)safety_drain_inbox_ex(link, SAFETY_LINK_REPLY_TIMEOUT_MS, NULL, NULL, &page_msg, &got_page, NULL,
+    (void)safety_drain_inbox_ex(link, SAFETY_LINK_REPLY_TIMEOUT_MS, false, NULL, NULL, &page_msg, &got_page, NULL,
                                  NULL);
 
     if (!got_page) {

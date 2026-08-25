@@ -122,9 +122,9 @@ static void test_drain_wait_not_waiting_for_anything_never_blocks(void)
     // want_* is false at the call site) -- the periodic poll's pre-drain and
     // GET_STATUS wait must keep their original "grab one burst, don't block
     // for more" behaviour untouched by this fix.
-    TEST_CHECK(safety_drain_still_waiting(false, false, false, false, false, false) == false,
+    TEST_CHECK(safety_drain_still_waiting(false, false, false, false, false, false, false, false) == false,
                "nothing wanted, nothing gotten -- never keep blocking");
-    TEST_CHECK(safety_drain_still_waiting(false, true, false, true, false, true) == false,
+    TEST_CHECK(safety_drain_still_waiting(false, false, false, true, false, true, false, true) == false,
                "nothing wanted even if the got_* flags are (implausibly) true -- still never block");
 }
 
@@ -136,7 +136,7 @@ static void test_drain_wait_config_page_wanted_not_yet_captured_keeps_waiting(vo
     // CONFIG_PAGE, an unrelated frame (e.g. DIAG) was just dispatched, and
     // CONFIG_PAGE has not arrived yet. The pre-fix code would abandon the
     // wait here; the fix must not.
-    TEST_CHECK(safety_drain_still_waiting(false, false, /*want_config_page=*/true,
+    TEST_CHECK(safety_drain_still_waiting(false, false, false, false, /*want_config_page=*/true,
                                            /*got_config_page=*/false, false, false) == true,
                "an unrelated frame must not end the wait while CONFIG_PAGE is still outstanding");
 }
@@ -145,7 +145,7 @@ static void test_drain_wait_config_page_captured_stops_waiting(void)
 {
     TEST_SECTION("safety_drain_still_waiting -- CONFIG_PAGE wanted and captured: stop waiting");
 
-    TEST_CHECK(safety_drain_still_waiting(false, false, /*want_config_page=*/true,
+    TEST_CHECK(safety_drain_still_waiting(false, false, false, false, /*want_config_page=*/true,
                                            /*got_config_page=*/true, false, false) == false,
                "once the wanted CONFIG_PAGE reply has been captured, degrade to a zero-wait drain");
 }
@@ -157,17 +157,19 @@ static void test_drain_wait_ct_cal_and_commit_rejected_same_shape(void)
     // safety_link_get_ct_cal() and safety_link_send_commit_config() hit the
     // exact same bug as safety_link_get_config_page() -- same drain loop,
     // same premature-degrade failure mode -- so the fix must cover them too.
-    TEST_CHECK(safety_drain_still_waiting(/*want_ct_cal=*/true, /*got_ct_cal=*/false, false, false, false,
+    TEST_CHECK(safety_drain_still_waiting(false, false, /*want_ct_cal=*/true, /*got_ct_cal=*/false, false, false, false,
                                            false) == true,
                "CT_CAL wanted, not yet captured -- keep waiting (safety_link_get_ct_cal())");
-    TEST_CHECK(safety_drain_still_waiting(/*want_ct_cal=*/true, /*got_ct_cal=*/true, false, false, false,
-                                           false) == false,
+    TEST_CHECK(safety_drain_still_waiting(false, false, /*want_ct_cal=*/true, /*got_ct_cal=*/true, false,
+                                           false, false, false) == false,
                "CT_CAL wanted and captured -- stop waiting");
-    TEST_CHECK(safety_drain_still_waiting(false, false, false, false, /*want_commit_rejected=*/true,
+    TEST_CHECK(safety_drain_still_waiting(false, false, false, false, false, false,
+                                           /*want_commit_rejected=*/true,
                                            /*got_commit_rejected=*/false) == true,
                "COMMIT_CONFIG_REJECTED wanted, not yet captured -- keep waiting "
                "(safety_link_send_commit_config())");
-    TEST_CHECK(safety_drain_still_waiting(false, false, false, false, /*want_commit_rejected=*/true,
+    TEST_CHECK(safety_drain_still_waiting(false, false, false, false, false, false,
+                                           /*want_commit_rejected=*/true,
                                            /*got_commit_rejected=*/true) == false,
                "COMMIT_CONFIG_REJECTED wanted and captured -- stop waiting");
 }
@@ -181,12 +183,69 @@ static void test_drain_wait_only_the_wanted_reply_gates_waiting(void)
     // not accidentally gate on a got_* flag for a type that was never
     // requested (a caller might pass got_ct_cal=false there simply because
     // it never touched that local at all).
-    TEST_CHECK(safety_drain_still_waiting(/*want_ct_cal=*/false, /*got_ct_cal=*/false,
+    TEST_CHECK(safety_drain_still_waiting(/*want_status=*/false, /*got_status=*/false,
+                                           /*want_ct_cal=*/false, /*got_ct_cal=*/false,
                                            /*want_config_page=*/true, /*got_config_page=*/true,
                                            /*want_commit_rejected=*/false,
                                            /*got_commit_rejected=*/false) == false,
                "only CONFIG_PAGE was wanted and it was captured -- the untouched "
                "ct_cal/commit_rejected flags must not force continued waiting");
+}
+
+// --------------------------------------------------------------------------
+// safety_drain_still_waiting() -- round 3, 2026-08-24. The round-1 fix above
+// gave CT_CAL/CONFIG_PAGE/COMMIT_CONFIG_REJECTED a way to say what they were
+// waiting for, and left the FOURTH caller -- the ordinary GET_STATUS poll --
+// with none. A plain safety_drain_inbox() passes no out-params, so every
+// want_* was false, this predicate returned false after the first frame, and
+// the wait degraded to zero exactly as the round-1 bug did. The Pico sends 4
+// STATUS frames per DIAG and per POWER push on the same inbox, so a DIAG or
+// POWER arriving first ended the poll with got_status false and counted a
+// stats.timeouts -- milliseconds before the STATUS it asked for landed.
+//
+// Bench measurement, 2026-08-24, commit 8d1b015 at 9600 baud / 500 ms poll:
+// sent 14471, received 14472, crc/framing errors 0, timeouts 3616, diag
+// applied 3618, power applied 3618. Timeouts tracking the DIAG/POWER pushes
+// 1:1, with zero CRC errors and a STATUS count equal to the send count, is
+// the signature: a quarter of every poll reported as a failure on a link that
+// answered every single request.
+// --------------------------------------------------------------------------
+
+static void test_drain_wait_status_wanted_not_yet_captured_keeps_waiting(void)
+{
+    TEST_SECTION("safety_drain_still_waiting -- STATUS wanted but not yet captured: keep waiting");
+
+    // The round-3 bug itself: the poll wants a STATUS, an unrelated DIAG or
+    // POWER push was just dispatched, and the STATUS has not arrived yet.
+    TEST_CHECK(safety_drain_still_waiting(/*want_status=*/true, /*got_status=*/false, false, false,
+                                           false, false, false, false) == true,
+               "a DIAG/POWER push must not end the poll while its STATUS is still outstanding");
+}
+
+static void test_drain_wait_status_captured_stops_waiting(void)
+{
+    TEST_SECTION("safety_drain_still_waiting -- STATUS wanted and captured: stop waiting");
+
+    TEST_CHECK(safety_drain_still_waiting(/*want_status=*/true, /*got_status=*/true, false, false,
+                                           false, false, false, false) == false,
+               "once the STATUS has been applied, degrade to a zero-wait drain");
+}
+
+static void test_drain_wait_opportunistic_drains_are_unchanged(void)
+{
+    TEST_SECTION("safety_drain_still_waiting -- an opportunistic drain still never blocks for STATUS");
+
+    // safety_drain_inbox() (want_status false) is used by every pre-drain and
+    // by the non-expect_status path, all of which must keep their original
+    // "take what has arrived, do not block" behaviour. This is the assertion
+    // that fails if someone makes want_status default to true for all callers
+    // rather than only the poll.
+    TEST_CHECK(safety_drain_still_waiting(/*want_status=*/false, /*got_status=*/false, false, false,
+                                           false, false, false, false) == false,
+               "want_status false: never keep blocking, whatever arrived");
+    TEST_CHECK(safety_drain_still_waiting(/*want_status=*/false, /*got_status=*/true, false, false,
+                                           false, false, false, false) == false,
+               "want_status false with a status incidentally applied: still never block");
 }
 
 void run_test_safety_link(void)
@@ -197,6 +256,9 @@ void run_test_safety_link(void)
     test_stale_ms_constant_is_1500();
     test_firing_abort_ms_constant_is_30000();
     test_drain_wait_not_waiting_for_anything_never_blocks();
+    test_drain_wait_status_wanted_not_yet_captured_keeps_waiting();
+    test_drain_wait_status_captured_stops_waiting();
+    test_drain_wait_opportunistic_drains_are_unchanged();
     test_drain_wait_config_page_wanted_not_yet_captured_keeps_waiting();
     test_drain_wait_config_page_captured_stops_waiting();
     test_drain_wait_ct_cal_and_commit_rejected_same_shape();

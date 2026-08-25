@@ -17,14 +17,77 @@ $root = Split-Path -Parent $PSScriptRoot
 $failures = @()
 
 # Both rules below match against CODE only, with "//" line comments and
-# "/* */" block comments stripped first. Deliberate: this file's own header
-# comments (and link_task.c's) name "the link" and "the relay" in prose to
-# explain the rule to a human reader -- that prose is the point, not a
-# violation of it. What must never appear is the symbol in actual code: an
-# #include line safety_core.c compiles, or a GPIO6/relay call link_task.c
-# actually executes. Stripping comments first is what lets the check be both
-# strict on real violations and silent on the doc comments describing why
-# they must not happen.
+# "/* */" block comments stripped first, and the CONTENTS of string and
+# character literals blanked. Deliberate: this file's own header comments
+# (and link_task.c's) name "the link" and "the relay" in prose to explain the
+# rule to a human reader -- that prose is the point, not a violation of it.
+# What must never appear is the symbol in actual code: an #include line
+# safety_core.c compiles, or a GPIO6/relay call link_task.c actually
+# executes. Stripping comments first is what lets the check be both strict on
+# real violations and silent on the doc comments describing why they must not
+# happen.
+#
+# 2026-08-24: string literals are blanked for exactly the same reason, after a
+# real false positive. link_task.c compares a rejection reason handed back to
+# it by config_store:
+#
+#   strcmp(reason, "refused: relay is ARMED, config writes are refused while ARMED")
+#
+# `relay` matched the word inside that literal and failed the check. That
+# line never touches GPIO6 or any relay API -- it is wire-protocol text being
+# mapped onto a rejection enum, i.e. prose that happens to live in a string
+# rather than in a comment. Treating it as a violation would have pushed
+# someone toward the worst available fix: renaming the operator-facing message
+# to satisfy a regex.
+#
+# Blanking is applied to every line EXCEPT #include lines, and that exception
+# is load-bearing. Rule 1 matches the header name INSIDE the quotes, so
+# blanking there would turn a genuine violation -- #include "link_task.h" in
+# safety_core.c -- into '#include ""' and pass it. That is not hypothetical:
+# an earlier revision of this file blanked unconditionally, reported "Isolation
+# check passed" against exactly that injected violation, and was caught only
+# by negative-testing BOTH rules rather than the one being fixed.
+#
+# For every other line, blanking cannot weaken rule 2: a relay call or a GPIO6
+# access cannot hide inside a string literal, because a string is data, not
+# something link_task executes. Quote characters are KEPT so a line does not
+# collapse into something unrecognisable; only what is between them goes.
+# Blanks the CONTENTS of double-quoted string and single-quoted character
+# literals, keeping the surrounding quotes. Honours backslash escapes so an
+# embedded \" does not end the literal early. Single-line only, which matches
+# this codebase (no raw/multi-line literals in C); an unterminated literal is
+# treated as running to end of line, which fails safe -- it blanks MORE, and
+# rule 1's #include lines never reach that state.
+function Remove-StringLiteralContents {
+    param([string]$Text)
+    $out = New-Object System.Text.StringBuilder
+    $i = 0
+    while ($i -lt $Text.Length) {
+        $ch = $Text[$i]
+        if ($ch -eq '"' -or $ch -eq "'") {
+            $quote = $ch
+            [void]$out.Append($quote)
+            $i++
+            while ($i -lt $Text.Length) {
+                if ($Text[$i] -eq '') {
+                    $i += 2   # skip the escape and whatever it escapes
+                    continue
+                }
+                if ($Text[$i] -eq $quote) { break }
+                $i++
+            }
+            if ($i -lt $Text.Length) {
+                [void]$out.Append($quote)
+                $i++
+            }
+            continue
+        }
+        [void]$out.Append($ch)
+        $i++
+    }
+    return $out.ToString()
+}
+
 function Get-CodeOnlyLines {
     param([string]$Path)
     $inBlockComment = $false
@@ -58,6 +121,16 @@ function Get-CodeOnlyLines {
                 $inBlockComment = $true
                 break
             }
+        }
+        # NOT on #include lines: rule 1 matches the header NAME inside the
+        # quotes ('^\s*#include\s*["<].*?(uart|link)'), so blanking it would
+        # turn a real violation -- #include "link_task.h" in safety_core.c --
+        # into '#include ""' and pass. That regression was caught by
+        # negative-testing BOTH rules after this change, not by review; an
+        # earlier revision of this file shipped the blanking unconditionally
+        # and silently blinded rule 1 while still passing its own run.
+        if ($code -notmatch '^\s*#\s*include') {
+            $code = Remove-StringLiteralContents -Text $code
         }
         $result += $code
     }
