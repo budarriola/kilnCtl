@@ -40,6 +40,77 @@
 // max31856.c does not leave this multiplier silently out of sync.
 #define THERMO_TASK_DRDY_SILENCE_MULTIPLIER 2u
 
+/* SAFTYFW_THERMO_ASSUME_DRDY -- BENCH-ONLY, and deliberately loud.
+ *
+ * WHAT IT DOES. When set, a DRDY-silence timeout below stops meaning "the
+ * part has stopped converting, publish sensor-invalid" and instead means
+ * "assume a conversion has completed by now and read the burst anyway". The
+ * ~DRDY interrupt path is left completely intact: if a real falling edge
+ * arrives it is used exactly as before, and this fallback never runs. This
+ * only ever changes what happens when the edge does NOT arrive.
+ *
+ * WHY IT EXISTS. On the bench of 2026-08-25 the fixture standing in for the
+ * MAX31856 (firmware/SimFW's PIO slave emulation) has its SPI bus wired but
+ * its ~DRDY line NOT wired -- fixture GP26 to this board's GP12 is simply
+ * absent, confirmed by toggling each signal on one board and reading it on
+ * the other: SCK, MOSI, CS and MISO all follow, ~DRDY does not. With GP12
+ * sitting high on its 10k pull-up (R2) no falling edge can ever occur, so
+ * thermo_task never issues a single read and every snapshot is
+ * sensor-invalid. That blocks all other thermocouple-path work behind one
+ * missing jumper, which is the only reason this switch exists.
+ *
+ * WHY THE EXISTING TIMEOUT IS ALREADY THE RIGHT DELAY, with datasheet
+ * numbers rather than a guessed sleep. The wait below is
+ * max31856_conversion_time_ms() * THERMO_TASK_DRDY_SILENCE_MULTIPLIER. For
+ * this board's fixed configuration -- 60Hz notch, AVGSEL = 4 samples, set in
+ * max31856.c's configure() -- the datasheet gives (p.4 tCONV table, and the
+ * averaging note on p.20):
+ *
+ *   steady state, auto mode conversions 2..n, 60Hz:
+ *       90 ms max + (4-1) * 16.67 ms  = 140 ms
+ *   first conversion after configure(), 60Hz:
+ *       155 ms max + (4-1) * 33.33 ms = 255 ms
+ *
+ * max31856_conversion_time_ms() reports 151 ms (100 + 3*17, already rounded
+ * up from the 140 ms steady-state figure), so the wait is 302 ms. That
+ * exceeds BOTH the 140 ms steady-state worst case and the 255 ms
+ * first-conversion worst case, so by the time this fallback fires a
+ * conversion has certainly completed and the registers hold a real result.
+ * No additional sleep is needed or wanted; adding one would only slow the
+ * sample rate. Sampling lands at about 3.3 Hz, against the roughly 7 Hz a
+ * working ~DRDY would give.
+ *
+ * WHAT IS LOST, stated plainly because it is a safety-relevant reduction.
+ * DRDY silence is a real, hardware-backed staleness detector -- it is how
+ * this firmware notices that the part has died, hung, or been unplugged
+ * while still returning whatever its registers last held. With this option
+ * on that detector is gone: a genuinely dead MAX31856 will be read on a
+ * timer and its stale registers published as though fresh. The part's own
+ * fault bits and the per-type plausibility band still apply, but neither of
+ * them catches "the part stopped converting". That is precisely why this
+ * defaults to OFF, is not something to leave on, and must be removed the
+ * moment the ~DRDY wire is fitted.
+ *
+ * The build-time announcement below is deliberate: it is the tripwire that
+ * stops an enabled configure() from being forgotten in a checked-in build
+ * directory, since a CMake cache persists across rebuilds and nobody reads
+ * configure output twice. It is a #pragma message and NOT a #warning on
+ * purpose -- this project builds with -Werror=cpp, so a #warning here does
+ * not warn, it fails the build outright and makes the option unusable. A
+ * #pragma message prints on every compile of this file without that. The
+ * CMakeLists.txt option also emits a configure-time message(WARNING). */
+#ifndef SAFTYFW_THERMO_ASSUME_DRDY
+#define SAFTYFW_THERMO_ASSUME_DRDY 0
+#endif
+#if SAFTYFW_THERMO_ASSUME_DRDY
+#pragma message("SAFTYFW_THERMO_ASSUME_DRDY is ON: ~DRDY staleness detection is DISABLED (bench-only; turn this off once the ~DRDY wire is fitted)")
+#endif
+
+/* Counts fallback reads taken without a ~DRDY edge. Non-zero is impossible in
+ * a normal build (the branch is compiled out), so this doubles as the
+ * SWD-readable proof of which mode a running board is actually in. */
+static volatile uint32_t s_drdy_assumed_reads = 0;
+
 // Before the MAX31856 is configured (or if it never comes up --
 // docs/ARCHITECTURE.md section 5 step 6: "failure is logged, not fatal"),
 // max31856_conversion_time_ms() returns 0. Wait a bounded, conservative
@@ -256,7 +327,20 @@ static void thermo_task_fn(void *arg)
         thermo_snapshot_t snap;
         snap.timestamp_ms = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
 
+        // SAFTYFW_THERMO_ASSUME_DRDY: treat the elapsed wait as proof that a
+        // conversion finished, rather than as proof the part is dead. See that
+        // macro's comment above for the datasheet arithmetic showing the wait
+        // already exceeds the worst-case conversion time, and for exactly what
+        // detection this gives up.
+        bool assume_ready = false;
+#if SAFTYFW_THERMO_ASSUME_DRDY
         if (notifications == 0) {
+            assume_ready = true;
+            s_drdy_assumed_reads++;
+        }
+#endif
+
+        if (notifications == 0 && !assume_ready) {
             // DRDY silence: no falling edge within ~2x the expected
             // conversion interval. THERMOCOUPLE.md section 1: "the part has
             // stopped converting" -- a real, hardware-backed staleness

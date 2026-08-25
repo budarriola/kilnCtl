@@ -160,6 +160,28 @@ option(SAFTYFW_ENABLE_USB_STDIO "Mirror log_task output to stdio_usb (bench-only
 if(SAFTYFW_ENABLE_USB_STDIO)
     target_compile_definitions(SaftyFW PRIVATE SAFTYFW_ENABLE_USB_STDIO=1)
 endif()
+
+# Same "plain CMake option is this project's Kconfig" pattern as the flag
+# above, and bench-only for a much sharper reason: this one DISABLES a safety
+# detector. See src/tasks/thermo_task.c's SAFTYFW_THERMO_ASSUME_DRDY comment
+# for the datasheet arithmetic and for exactly what is given up -- in short,
+# with it on, a MAX31856 that has died mid-run is read on a timer and its
+# stale registers are published as though fresh, because ~DRDY silence is no
+# longer treated as evidence of anything. It exists only because the bench
+# fixture's ~DRDY wire (fixture GP26 to this board's GP12) is not fitted, and
+# it must go off again the moment that wire is in. The translation unit also
+# raises a #warning on every build when this is on, so an enabled CMake cache
+# cannot quietly outlive the missing jumper.
+option(SAFTYFW_THERMO_ASSUME_DRDY "Read the MAX31856 on a conversion-time timer when no ~DRDY edge arrives (BENCH-ONLY: disables ~DRDY staleness detection)" OFF)
+if(SAFTYFW_THERMO_ASSUME_DRDY)
+    target_compile_definitions(SaftyFW PRIVATE SAFTYFW_THERMO_ASSUME_DRDY=1)
+    message(WARNING
+        "SAFTYFW_THERMO_ASSUME_DRDY=ON: the MAX31856 will be read on a "
+        "conversion-time timer and ~DRDY staleness detection is DISABLED. "
+        "A part that dies mid-run will have its stale registers published as "
+        "though fresh. Bench-only -- turn this off once the fixture's ~DRDY "
+        "wire (fixture GP26 to this board's GP12) is fitted.")
+endif()
 # pico_enable_stdio_usb() itself is called once, below, after
 # target_link_libraries -- see that call site's comment for why it is
 # conditional on this same option rather than a second, separate call here.
@@ -324,6 +346,9 @@ function(saftyfw_add_slot_executable TARGET_NAME FLASH_ORIGIN)
     # whatever value the option was configured with.
     if(SAFTYFW_ENABLE_USB_STDIO)
         target_compile_definitions(${TARGET_NAME} PRIVATE SAFTYFW_ENABLE_USB_STDIO=1)
+    endif()
+    if(SAFTYFW_THERMO_ASSUME_DRDY)
+        target_compile_definitions(${TARGET_NAME} PRIVATE SAFTYFW_THERMO_ASSUME_DRDY=1)
     endif()
 
     target_link_libraries(${TARGET_NAME} PRIVATE
