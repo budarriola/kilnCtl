@@ -861,6 +861,32 @@ typedef struct {
      * cached.trip_event_ever_received is true. */
     TickType_t            trip_event_tick;
 
+    /* Last CONFIG_PAGE (0x1F) frame that arrived while NOBODY was waiting for
+     * one, kept so safety_link_get_config_page() can still find it.
+     *
+     * This is deliberately NOT the config cache -- safety_cfg_store.c still
+     * owns that, and this driver still keeps no decoded config state. It is
+     * one raw frame held for reply PAIRING, which is a transport concern and
+     * so does belong here.
+     *
+     * It exists because every drain on this inbox is shared: the 500 ms
+     * GET_STATUS poll drains the same queue, and a CONFIG_PAGE it happens to
+     * pull was simply discarded (its case only stored the frame when the
+     * current caller had asked for one). With the refetch re-requesting page
+     * 0 on every poll, that races on every single attempt, which is how 69
+     * CONFIG_PAGE frames were dequeued in one window while every fetch still
+     * returned ESP_ERR_TIMEOUT. Stashing costs one memcpy on a path that
+     * previously threw the frame away, and adds no blocking anywhere -- which
+     * matters, because two earlier attempts at this bug extended how long
+     * safety_poll may block and panic-rebooted the ESP.
+     *
+     * Read and written under state_lock. `has_stashed_config_page` is
+     * cleared by whoever consumes it, so a stale page is never handed to a
+     * second caller; the page_index is re-checked by the consumer, since the
+     * stash may hold a page a later caller did not ask for. */
+    uart_proto_message_t stashed_config_page;
+    bool                 has_stashed_config_page;
+
     safety_link_stats_t stats;
     uint16_t            poll_period_ms;
     /* 2026-08-20 congestion fix -- see SAFETY_LINK_BACKOFF_MAX_STREAK's

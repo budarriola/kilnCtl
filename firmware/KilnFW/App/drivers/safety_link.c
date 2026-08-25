@@ -1184,10 +1184,21 @@ static bool safety_drain_inbox_ex(SafetyLinkClass *link, uint32_t wait_ms, bool 
                  * to plausibly be a reply is captured; kilnlink_config_page_
                  * decode() (called by safety_link_get_config_page()) is what
                  * actually validates it byte-for-byte. */
-                if (out_config_page && out_got_config_page &&
-                    msg.length >= KILNLINK_CONFIG_PAGE_HDR_LEN) {
-                    *out_config_page = msg;
-                    *out_got_config_page = true;
+                if (msg.length >= KILNLINK_CONFIG_PAGE_HDR_LEN) {
+                    if (out_config_page && out_got_config_page) {
+                        *out_config_page = msg;
+                        *out_got_config_page = true;
+                    } else if (safety_lock(link)) {
+                        /* Nobody is waiting for this one right now, so stash
+                         * it instead of dropping it -- see
+                         * SafetyLinkClass::stashed_config_page. This is the
+                         * branch that used to silently discard the answer to
+                         * a fetch that was still in flight, because the
+                         * 500 ms GET_STATUS poll drains this same inbox. */
+                        link->stashed_config_page = msg;
+                        link->has_stashed_config_page = true;
+                        safety_unlock(link);
+                    }
                 }
                 break;
             case KILNLINK_COMMIT_CONFIG_REJECTED_CMD:
@@ -1240,6 +1251,26 @@ static bool safety_drain_inbox_ex(SafetyLinkClass *link, uint32_t wait_ms, bool 
         }
     }
     return got_status;
+}
+
+/* Takes the stashed CONFIG_PAGE frame, if there is one, and clears the stash
+ * so it is handed to exactly one caller. Returns false (leaving *out
+ * untouched) when the stash is empty or the state lock could not be taken.
+ * See SafetyLinkClass::stashed_config_page for why the stash exists; the
+ * caller re-checks page_index, since the stashed frame may be a page nobody
+ * asked for. */
+static bool safety_take_stashed_config_page(SafetyLinkClass *link, uart_proto_message_t *out)
+{
+    bool took = false;
+    if (safety_lock(link)) {
+        if (link->has_stashed_config_page) {
+            *out = link->stashed_config_page;
+            link->has_stashed_config_page = false;
+            took = true;
+        }
+        safety_unlock(link);
+    }
+    return took;
 }
 
 /* Opportunistic drain: takes whatever has already arrived and does NOT hold
@@ -2750,23 +2781,26 @@ esp_err_t safety_link_get_config_page(SafetyLinkClass *link, uint8_t page_index,
      * falsifiable: if the count never leaves 0 while page fetches still time
      * out, the mechanism above is NOT what is happening and this comment is
      * wrong. */
-    static uint32_t s_page_adopted_presend;
+    static uint32_t s_page_adopted;
     uart_proto_message_t early_msg;
     bool got_early = false;
     (void)safety_drain_inbox_ex(link, 0, false, NULL, NULL, &early_msg, &got_early, NULL, NULL);
+    if (safety_take_stashed_config_page(link, &early_msg)) {
+        got_early = true; /* prefer the stash: it is the older, already-orphaned frame */
+    }
     if (got_early) {
         kilnlink_config_page_t early_page;
         if (kilnlink_config_page_decode(early_msg.payload, early_msg.length, &early_page) ==
                 KILNLINK_CONFIG_PAGE_OK &&
             early_page.page_index == page_index) {
-            s_page_adopted_presend++;
+            s_page_adopted++;
             xSemaphoreGive(link->xact_lock);
-            ESP_LOGI(TAG, "get_config_page: adopted page %u already in the inbox (%u so far)",
-                     (unsigned)page_index, (unsigned)s_page_adopted_presend);
+            ESP_LOGI(TAG, "get_config_page: adopted an already-arrived page %u (%u so far)",
+                     (unsigned)page_index, (unsigned)s_page_adopted);
             *out = early_page;
             return ESP_OK;
         }
-        ESP_LOGD(TAG, "get_config_page: dropped a queued CONFIG_PAGE that was not page %u",
+        ESP_LOGD(TAG, "get_config_page: discarded a queued CONFIG_PAGE that was not page %u",
                  (unsigned)page_index);
     }
 
@@ -2804,6 +2838,19 @@ esp_err_t safety_link_get_config_page(SafetyLinkClass *link, uint8_t page_index,
     (void)safety_drain_inbox_ex(link, SAFETY_LINK_REPLY_TIMEOUT_MS, false, NULL, NULL, &page_msg, &got_page, NULL,
                                  NULL);
 
+    if (!got_page) {
+        /* Last look at the stash before calling it a timeout: this call's own
+         * reply can have been pulled off the inbox by a concurrent drain --
+         * the 500 ms GET_STATUS poll shares this queue -- in which case it is
+         * sitting in the stash rather than lost. Same no-blocking rule as the
+         * pre-send check; this only reads a flag. */
+        if (safety_take_stashed_config_page(link, &page_msg)) {
+            got_page = true;
+            s_page_adopted++;
+            ESP_LOGI(TAG, "get_config_page: page %u was taken by another drain, recovered from the stash (%u so far)",
+                     (unsigned)page_index, (unsigned)s_page_adopted);
+        }
+    }
     if (!got_page) {
         if (safety_lock(link)) {
             link->stats.timeouts++;
