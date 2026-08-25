@@ -840,16 +840,25 @@ def debug_step(peer: str) -> str:
 
 @_tool()
 def debug_read_memory(peer: str, address: int, count: int = 1, width: int = 32,
-                      leave_halted: bool = False) -> str:
+                      leave_halted: bool = False,
+                      target: str | None = None) -> str:
     """Reads `count` `width`-bit (8/16/32) words from `peer`'s memory starting
     at `address`. Read-only, no guard needed. Halts the core if it wasn't
     already (OpenOCD requires this for a memory read), then resumes it unless
     `leave_halted` is set -- a read that exits without resuming leaves the
     board halted, which reads as "the firmware froze" to everything except a
     debugger. Set `leave_halted` only when several reads must observe the same
-    frozen state."""
+    frozen state.
+
+    `target` picks one core by OpenOCD target name ("rp2040.core0" /
+    "rp2040.core1"), as `debug_read_registers` does. Pass it whenever the
+    address is in the private peripheral bus (0xE0000000-0xE00FFFFF): the NVIC
+    and parts of the SCB are banked per core on the RP2040, so NVIC_ISER
+    (0xE000E100) or VTOR (0xE000ED08) read without naming a core describes
+    core 0 only, whichever core you meant."""
     ok, output = debug_probe.read_memory(peer, address, count, width,
-                                         leave_halted=leave_halted)
+                                         leave_halted=leave_halted,
+                                         target=target)
     if ok:
         return output.strip()
     tail = "\n".join(output.strip().splitlines()[-25:])

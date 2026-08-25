@@ -404,7 +404,8 @@ _RESUME_TCL = (
 
 
 def read_memory(peer: str, address: int, count: int = 1, width: int = 32,
-                leave_halted: bool = False) -> "tuple[bool, str]":
+                leave_halted: bool = False,
+                target: "str | None" = None) -> "tuple[bool, str]":
     """Reads ``count`` ``width``-bit words starting at ``address`` (read-only,
     no ARMED/safety implications). ``count`` is capped at 4096 to stop a
     runaway dump, not as a safety gate.
@@ -416,7 +417,18 @@ def read_memory(peer: str, address: int, count: int = 1, width: int = 32,
     2026-08-18, against the Pico's SIO GPIO_IN register: the call reported
     success (returncode 0, no ``Error:``) with the OpenOCD banner and shutdown
     chatter as its entire output, and nothing that looked like a memory dump.
-    ``puts`` is a plain Tcl stdout write and does not have that problem."""
+    ``puts`` is a plain Tcl stdout write and does not have that problem.
+
+    ``target`` selects one core by its OpenOCD target name, exactly as
+    ``read_registers`` does. It matters for more than tidiness on an SMP chip:
+    the NVIC and parts of the SCB are BANKED PER CORE on the RP2040, so
+    NVIC_ISER (0xE000E100) and VTOR (0xE000ED08) read through core 0 say
+    nothing about core 1's copy. Reading them without naming a core produces an
+    answer that looks definitive and is silently about the wrong core -- which
+    is how "the UART interrupt is enabled" and "the UART interrupt is not being
+    serviced" came to be believed simultaneously on 2026-08-25. Peripheral
+    addresses outside the private peripheral bus (0xE0000000-0xE00FFFFF) are
+    shared, so ``target`` is irrelevant for those."""
     if width not in _MEM_WIDTH_READ_CMDS:
         raise ValueError(f"width must be one of {sorted(_MEM_WIDTH_READ_CMDS)}, got {width!r}")
     if count <= 0:
@@ -432,7 +444,8 @@ def read_memory(peer: str, address: int, count: int = 1, width: int = 32,
         f"[expr {{0x{address:x} + $_kctl_i * {step}}}] $_kctl_arr($_kctl_i)]}}"
     )
     tail = "" if leave_halted else f" {_RESUME_TCL}"
-    tcl = f"{_adapter_prefix(peer_cfg)}init; halt; {dump};{tail} exit"
+    select = f"targets {target}; " if target else ""
+    tcl = f"{_adapter_prefix(peer_cfg)}init; {select}halt; {dump};{tail} exit"
     return _run(peer, tcl)
 
 
@@ -456,8 +469,23 @@ def write_memory(peer: str, address: int, value: int, width: int = 32) -> "tuple
     return _run(peer, tcl)
 
 
+# `primask` and `control` are here for a reason, not for completeness. Without
+# them this dump cannot distinguish the two states that look identical in the
+# 19 core registers above: a core running normally, and a core running with
+# interrupts globally masked. That distinction cost a bench session on
+# 2026-08-25 chasing a SaftyFW bootloader handover where UART1's interrupt was
+# enabled in the NVIC, unmasked in the peripheral (IMSC 0x50), ASSERTED right
+# then (MIS 0x50), with a vector pointing at valid code -- and never taken. The
+# one register that could confirm or kill the obvious explanation was the one
+# register this function did not read.
+#
+# Cortex-M0+ only: `basepri` and `faultmask` do not exist on ARMv6-M and asking
+# OpenOCD for them fails the whole `get_reg` call, so they are deliberately
+# absent rather than forgotten. Anything added here must exist on EVERY peer
+# this function is called for.
 _CORE_REGS = (
-    "r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 sp lr pc xpsr msp psp"
+    "r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 sp lr pc xpsr msp psp "
+    "primask control"
 )
 
 
