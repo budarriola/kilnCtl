@@ -299,8 +299,8 @@ class ProtocolPortDiscoveryTests(unittest.TestCase):
         self.mock_list_ports.comports.return_value = ports
 
     def test_prefers_the_interface_string_when_available(self):
-        console = _fake_port("COM5", hwid="USB VID:PID=2E8A:F00A", interface="SimFW Console")
-        protocol = _fake_port("COM6", hwid="USB VID:PID=2E8A:F00A", interface="SimFW Control")
+        console = _fake_port("COM5", hwid="USB VID:PID=2E8A:F00A", interface=kilnsim_link.SIMFW_CDC_INTERFACE_STRING_CONSOLE)
+        protocol = _fake_port("COM6", hwid="USB VID:PID=2E8A:F00A", interface=kilnsim_link.SIMFW_CDC_INTERFACE_STRING_PROTOCOL)
         self._set_comports([console, protocol])
         self.assertEqual(SerialSimLink.list_protocol_ports(), ["COM6"])
 
@@ -308,7 +308,7 @@ class ProtocolPortDiscoveryTests(unittest.TestCase):
         # Not every OS/pyserial backend populates .interface -- description
         # and product are the other two fields real composite-CDC friendly
         # names commonly carry the interface string in.
-        protocol = _fake_port("COM7", hwid="USB VID:PID=2E8A:F00A", description="SimFW Control (COM7)")
+        protocol = _fake_port("COM7", hwid="USB VID:PID=2E8A:F00A", description=f"{kilnsim_link.SIMFW_CDC_INTERFACE_STRING_PROTOCOL} (COM7)")
         self._set_comports([protocol])
         self.assertEqual(SerialSimLink.list_protocol_ports(), ["COM7"])
 
@@ -338,8 +338,8 @@ class ProtocolPortDiscoveryTests(unittest.TestCase):
         # string too -- so this only passes if the VID:PID gate is applied
         # BEFORE the interface-string match, not because the string match
         # alone happened to prefer the right port.
-        other_device = _fake_port("COM3", hwid="USB VID:PID=1234:5678", interface="SimFW Control")
-        protocol = _fake_port("COM6", hwid="USB VID:PID=2E8A:F00A", interface="SimFW Control")
+        other_device = _fake_port("COM3", hwid="USB VID:PID=1234:5678", interface=kilnsim_link.SIMFW_CDC_INTERFACE_STRING_PROTOCOL)
+        protocol = _fake_port("COM6", hwid="USB VID:PID=2E8A:F00A", interface=kilnsim_link.SIMFW_CDC_INTERFACE_STRING_PROTOCOL)
         self._set_comports([other_device, protocol])
         self.assertEqual(SerialSimLink.list_protocol_ports(), ["COM6"])
 
@@ -348,8 +348,8 @@ class ProtocolPortDiscoveryTests(unittest.TestCase):
         # (kept for backward compatibility / diagnostics) -- it must NOT be
         # narrowed to just the protocol port, or a caller relying on it to
         # see the whole fixture would silently lose visibility into CDC1.
-        console = _fake_port("COM5", hwid="USB VID:PID=2E8A:F00A", interface="SimFW Console")
-        protocol = _fake_port("COM6", hwid="USB VID:PID=2E8A:F00A", interface="SimFW Control")
+        console = _fake_port("COM5", hwid="USB VID:PID=2E8A:F00A", interface=kilnsim_link.SIMFW_CDC_INTERFACE_STRING_CONSOLE)
+        protocol = _fake_port("COM6", hwid="USB VID:PID=2E8A:F00A", interface=kilnsim_link.SIMFW_CDC_INTERFACE_STRING_PROTOCOL)
         self._set_comports([console, protocol])
         self.assertEqual(sorted(SerialSimLink.list_candidate_ports()), ["COM5", "COM6"])
 

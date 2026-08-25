@@ -999,10 +999,28 @@ at the same time.
 | VID | `0x2E8A` | Raspberry Pi's own vendor ID, reused informally (see below) |
 | PID | `0xF00A` | Fixture-specific, chosen for this project |
 | Manufacturer string | `kilnCtl` | `src/tasks/usb_descriptors.c` |
-| Product string | `SimFW Bench Fixture` | `src/tasks/usb_descriptors.c` |
+| Product string | `PiPicoUnitTest` | `src/tasks/usb_descriptors.c` |
 | Serial number | RP2040 flash unique ID, 16 hex chars | `src/tasks/usb_descriptors.c`, via `pico_get_unique_board_id_string()` |
-| CDC0 interface string | `SimFW Control` | `src/tasks/usb_descriptors.c` — the benchproto protocol CDC (`docs/PROTOCOL.md` sec 1) |
-| CDC1 interface string | `SimFW Console` | `src/tasks/usb_descriptors.c` — the console/log CDC, added 2026-08-23 |
+| CDC0 interface string | `PiPicoUnitTest Control` | `src/tasks/usb_descriptors.c` — the benchproto protocol CDC (`docs/PROTOCOL.md` sec 1) |
+| CDC1 interface string | `PiPicoUnitTest Console` | `src/tasks/usb_descriptors.c` — the console/log CDC, added 2026-08-23 |
+
+**Windows does not show any of these strings.** `usbser.sys` writes
+`FriendlyName = "USB Serial Device (COMnn)"` when the device is first
+installed and never revisits it, and Windows caches a composite device's
+strings against its VID/PID/serial at first enumeration — so reflashing new
+descriptors onto a board this PC has already seen changes nothing by itself.
+`tools/rename_fixture_ports.ps1` (elevated) writes the names into the device
+registry: the ports then read `PiPicoUnitTest Control (COM13)` /
+`PiPicoUnitTest Console (COM12)` and the composite parent reads
+`PiPicoUnitTest`. Linux and macOS read the descriptors directly and need
+none of this.
+
+`kilnsim`'s auto-detect does **not** depend on that script having run.
+pyserial's Windows backend leaves `interface` and `product` as `None` and
+strips `MI_xx` out of `hwid`, so the protocol port is resolved by USB
+interface number instead (`link.py`'s `_usb_interface_number`, which falls
+back to the device registry). Interface 0 is the benchproto control CDC,
+interface 2 the console CDC.
 
 **Two CDC-ACM interfaces, one shared VID/PID/serial (2026-08-23):** the
 fixture is a composite USB device with two CDC functions (`src/tasks/
@@ -1057,7 +1075,7 @@ matches on VID:PID (`tools/PcTools/src/kilnsim/link.py`'s `SIMFW_VID_PID =
 without operator help in the common case. For a human checking `lsusb` /
 Windows Device Manager directly:
 
-- **SimFW fixture Pico:** `2E8A:F00A`, product string "SimFW Bench Fixture",
+- **SimFW fixture Pico:** `2E8A:F00A`, product string "PiPicoUnitTest",
   serial = RP2040 flash unique ID.
 - **`spi_test_master` reference Pico:** `2E8A:F00B`, product string
   "spi_test_master (kilnCtl bench)", serial = its own RP2040 flash unique ID

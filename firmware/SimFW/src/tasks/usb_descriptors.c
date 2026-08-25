@@ -102,8 +102,8 @@ enum {
     STRID_MANUFACTURER,
     STRID_PRODUCT,
     STRID_SERIAL,
-    STRID_CDC0_INTERFACE, // "SimFW Control" -- the benchproto protocol CDC
-    STRID_CDC1_INTERFACE, // "SimFW Console" -- the log/console CDC
+    STRID_CDC0_INTERFACE, // "PiPicoUnitTest Control" -- the benchproto protocol CDC
+    STRID_CDC1_INTERFACE, // "PiPicoUnitTest Console" -- the log/console CDC
 };
 
 //--------------------------------------------------------------------+
@@ -187,10 +187,10 @@ uint8_t const *tud_descriptor_configuration_cb(uint8_t index)
 static char const *const string_desc_arr[] = {
     NULL,                      // 0: LANGID, handled specially below
     "kilnCtl",                 // 1: Manufacturer
-    "SimFW Bench Fixture",     // 2: Product
+    "PiPicoUnitTest",          // 2: Product
     NULL,                      // 3: Serial -- filled from the RP2040's unique board id, see below
-    "SimFW Control",           // 4 (STRID_CDC0_INTERFACE): benchproto protocol CDC
-    "SimFW Console",           // 5 (STRID_CDC1_INTERFACE): log/console CDC
+    "PiPicoUnitTest Control",  // 4 (STRID_CDC0_INTERFACE): benchproto protocol CDC
+    "PiPicoUnitTest Console",  // 5 (STRID_CDC1_INTERFACE): log/console CDC
 };
 
 // RP2040's flash unique id is 8 bytes -> 16 hex chars, well under

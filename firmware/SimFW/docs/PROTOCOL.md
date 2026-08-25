@@ -39,7 +39,7 @@ VID/PID `0x2E8A`/`0xF00A` (`src/tasks/usb_descriptors.c` — see that file's
 own header comment for the full reasoning: an informal, never-shipped reuse
 of Raspberry Pi's VID with a fixture-specific PID chosen to avoid every
 documented RPi PID this toolchain's checkout references). Two distinct
-interface string descriptors — `"SimFW Control"` (CDC0) and `"SimFW
+interface string descriptors — `"PiPicoUnitTest Control"` (CDC0) and `"PiPicoUnitTest
 Console"` (CDC1) — let both a human (Device Manager, `ls /dev/serial/by-id`)
 and `kilnsim`'s PC-side port discovery (`tools/PcTools/src/kilnsim/link.py`'s
 `list_protocol_ports()`) tell the fixture's two same-VID/PID COM ports apart;

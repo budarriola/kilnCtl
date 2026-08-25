@@ -33,6 +33,7 @@ from __future__ import annotations
 import abc
 import logging
 import struct
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
@@ -91,8 +92,8 @@ SIMFW_VID_PID = "2E8A:F00A"
 #: it straight from sysfs; Windows composite-CDC friendly names commonly
 #: include it) -- see that function's own doc comment for the fallback chain
 #: when a given OS/backend doesn't expose it.
-SIMFW_CDC_INTERFACE_STRING_PROTOCOL = "SimFW Control"
-SIMFW_CDC_INTERFACE_STRING_CONSOLE = "SimFW Console"
+SIMFW_CDC_INTERFACE_STRING_PROTOCOL = "PiPicoUnitTest Control"
+SIMFW_CDC_INTERFACE_STRING_CONSOLE = "PiPicoUnitTest Console"
 
 DEFAULT_BAUD_RATE = 115200
 DEFAULT_CONNECT_TIMEOUT_S = 2.0
@@ -691,6 +692,93 @@ class SerialSimLink(_FramedSimLink):
             raise SimLinkError("pyserial is not installed -- cannot enumerate serial ports")
         return [p for p in _list_ports.comports() if SIMFW_VID_PID in (p.hwid or "").upper()]
 
+    @staticmethod
+    def _windows_port_interface_numbers() -> dict:
+        """``{"COM13": 0, "COM12": 2}`` -- each COM port's USB interface
+        (function) number, read from Windows' own device registry.
+
+        Exists because the obvious way to do this does not work. pyserial's
+        Windows backend builds ``hwid`` as ``USB VID:PID=... SER=...
+        [LOCATION=...]`` and drops the ``MI_xx`` field entirely, so the
+        earlier ``re.search(r"MI_00", p.hwid)`` fallback -- written
+        specifically for Windows, and documented as Windows' own convention
+        -- could never match on Windows. Measured on this bench 2026-08-24
+        against the real fixture: neither of its two ports' hwid contained
+        ``MI_00``, and only one of them reported ``location`` at all. With
+        the interface strings also unavailable (pyserial does not read
+        ``iInterface`` on this backend), auto-detect fell through to tier 3
+        and returned BOTH ports -- meaning ``kilnsim`` with no ``--port``
+        could hand back the console CDC, which never speaks benchproto and
+        therefore looks exactly like a dead fixture.
+
+        Returns {} on any non-Windows platform or if the registry is
+        unreadable; callers treat that as "no answer", not as "interface 0
+        is absent".
+        """
+        if not sys.platform.startswith("win"):
+            return {}
+        try:
+            import winreg
+        except ImportError:  # pragma: no cover - Windows-only path
+            return {}
+
+        out = {}
+        try:
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                                r"SYSTEM\CurrentControlSet\Enum\USB") as usb:
+                i = 0
+                while True:
+                    try:
+                        dev_id = winreg.EnumKey(usb, i)
+                    except OSError:
+                        break
+                    i += 1
+                    m = _re.search(r"&MI_([0-9A-Fa-f]{2})$", dev_id)
+                    if not m:
+                        continue
+                    iface = int(m.group(1), 16)
+                    try:
+                        with winreg.OpenKey(usb, dev_id) as devkey:
+                            j = 0
+                            while True:
+                                try:
+                                    inst = winreg.EnumKey(devkey, j)
+                                except OSError:
+                                    break
+                                j += 1
+                                try:
+                                    with winreg.OpenKey(devkey,
+                                                        inst + r"\Device Parameters") as params:
+                                        port, _ = winreg.QueryValueEx(params, "PortName")
+                                except OSError:
+                                    continue
+                                if port:
+                                    out[str(port).upper()] = iface
+                    except OSError:
+                        continue
+        except OSError:
+            return {}
+        return out
+
+    @classmethod
+    def _usb_interface_number(cls, p) -> "Optional[int]":
+        """This port's USB interface (function) number, or None if it cannot
+        be determined on this platform.
+
+        Prefers pyserial's own ``location`` (``1-1.4.2:x.2`` -- the ``x.N``
+        suffix is the interface number, populated on Linux and on some
+        Windows entries), and falls back to Windows' device registry, which
+        is the only source that answers for every port on this bench."""
+        loc = getattr(p, "location", None)
+        if loc:
+            m = _re.search(r":x\.(\d+)$", str(loc))
+            if m:
+                return int(m.group(1))
+        mi = _re.search(r"\bMI_([0-9A-Fa-f]{2})\b", (p.hwid or ""))
+        if mi:
+            return int(mi.group(1), 16)
+        return cls._windows_port_interface_numbers().get(str(p.device).upper())
+
     @classmethod
     def list_candidate_ports(cls) -> list:
         """Device paths of every VID:PID match -- BOTH of a fixture's CDC
@@ -712,8 +800,9 @@ class SerialSimLink(_FramedSimLink):
     @classmethod
     def list_protocol_ports(cls) -> list:
         """Of the VID:PID-matching candidates, the ones that are actually
-        the benchproto PROTOCOL CDC (usb_descriptors.c's "SimFW Control"
-        interface string) -- never the console CDC ("SimFW Console"), which
+        the benchproto PROTOCOL CDC (usb_descriptors.c's
+        "PiPicoUnitTest Control" interface string) -- never the console CDC
+        ("PiPicoUnitTest Console"), which
         enumerates as an indistinguishable-by-VID:PID second COM port on the
         same fixture as of the 2026-08-23 dual-CDC firmware
         (firmware/SimFW/docs/PROTOCOL.md sec 1). Connecting to the console
@@ -744,14 +833,13 @@ class SerialSimLink(_FramedSimLink):
         if by_string:
             return [p.device for p in by_string]
 
-        by_mi00 = [p for p in candidates if _re.search(r"\bMI_00\b", (p.hwid or ""), _re.IGNORECASE)]
-        if by_mi00:
+        by_iface0 = [p for p in candidates if cls._usb_interface_number(p) == 0]
+        if by_iface0:
             log.warning(
                 "could not read SimFW's CDC interface strings on this OS/pyserial backend; "
-                "falling back to USB interface/function number 0 (Windows 'MI_00') to identify "
-                "the protocol CDC"
+                "falling back to USB interface/function number 0 to identify the protocol CDC"
             )
-            return [p.device for p in by_mi00]
+            return [p.device for p in by_iface0]
 
         if candidates:
             log.warning(
