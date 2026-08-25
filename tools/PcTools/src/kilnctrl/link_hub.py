@@ -79,6 +79,38 @@ _RPC_TIMEOUT_CONNECT = 10.0
 _RPC_TIMEOUT_SEND = 8.0
 
 
+def hub_diagnosis() -> str:
+    """One sentence saying what to DO about a dead hub socket, appended to the
+    error a failed RPC raises.
+
+    A bare socket errno is not actionable here: "[WinError 10054] An existing
+    connection was forcibly closed by the remote host" is what a caller sees
+    whether the hub process exited, was replaced by a newer one that took the
+    port, or something unrelated is bound to HUB_PORT. Those need different
+    responses, and the difference is one cheap loopback connect away, so make
+    the error say which it is. Written for the case that actually happened on
+    2026-08-25: the hub was simply gone, and three MCP calls were spent
+    rediscovering that from an errno."""
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    probe.settimeout(0.5)
+    try:
+        probe.connect((HUB_HOST, HUB_PORT))
+    except (OSError, socket.timeout):
+        return (
+            f"nothing is accepting connections on {HUB_HOST}:{HUB_PORT}, so the hub is gone "
+            "(whichever process owned the serial port has exited) -- restart it with "
+            "tools/PcTools/scripts/mcp_servers.ps1 restart, then connect() again"
+        )
+    else:
+        return (
+            f"something IS listening on {HUB_HOST}:{HUB_PORT}, so only THIS client's socket is "
+            "dead -- most likely the old hub exited and a new one took the port. Call connect() "
+            "again to re-attach; no restart needed"
+        )
+    finally:
+        probe.close()
+
+
 def _as_device(value: int) -> Device | int:
     try:
         return Device(value)
@@ -450,7 +482,7 @@ class RemoteUartLink:
         except OSError as exc:
             with self._pending_lock:
                 self._pending.pop(rid, None)
-            raise RuntimeError(f"hub connection lost: {exc}") from exc
+            raise RuntimeError(f"hub connection lost: {exc} -- {hub_diagnosis()}") from exc
 
         if not event.wait(rpc_timeout):
             with self._pending_lock:
