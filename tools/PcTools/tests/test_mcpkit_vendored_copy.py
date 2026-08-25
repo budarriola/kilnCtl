@@ -33,8 +33,16 @@ _VENDORED = os.path.join(_REPO_ROOT, "mykicadMcp", "mcpkit_registry.py")
 
 
 def _digest(path: str) -> str:
-    with open(path, "rb") as handle:
-        return hashlib.sha256(handle.read()).hexdigest()
+    """Content hash, line endings normalised.
+
+    The two copies live in two repositories, and git is free to check each out
+    with different line endings (this one warns about LF becoming CRLF on every
+    add). Hashing raw bytes would turn that into a failure that says "drift"
+    while nothing has actually drifted, and a guard that cries wolf gets
+    deleted. Read as text and hash the logical content instead.
+    """
+    with open(path, "r", encoding="utf-8", newline=None) as handle:
+        return hashlib.sha256(handle.read().encode("utf-8")).hexdigest()
 
 
 class VendoredRegistryCopyTests(unittest.TestCase):
