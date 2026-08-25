@@ -273,9 +273,16 @@ link, so it can run in parallel with M1 and M2 once M0 is out of the way.
       four no-default section-1 fields remain unset, which is what keeps
       `commissioned: false` and leaves S1's ceiling disabled
 - [x] 12 of 13 guards (`SAFETY_MODEL.md` §4) implemented as pure functions and
-      host-tested against synthetic inputs (320+/320+ checks) — S8
-      (rate-of-rise) intentionally ships disabled until a real kiln's ramp
-      rate is measured. **Input wiring now complete (2026-08-24):**
+      host-tested against synthetic inputs (320+/320+ checks). **S8
+      (rate-of-rise) is NOT IMPLEMENTED — not merely disabled.** Verified
+      2026-08-24: `safety_guards.c` contains zero references to `S8` or to
+      `max_rate_c_per_min`. The earlier wording here, "intentionally ships
+      disabled until a real kiln's ramp rate is measured", implied the code
+      exists behind a config flag; it does not, so **commissioning
+      `max_rate_c_per_min` would enable nothing**. Whoever writes the
+      commissioning surface needs to know that before an operator is given a
+      field that looks like protection and is not. The 12-of-13 count above
+      is correct; only the reason S8 is absent was mis-stated. **Input wiring now complete (2026-08-24):**
       `safety_core_build_input()` populates every field the guards read —
       `context_valid`, `any_current_present`, `relay_commanded_recently`/
       `_continuously`, `zone_count`, the setpoint/measured reductions,
