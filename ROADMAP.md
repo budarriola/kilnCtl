@@ -124,6 +124,9 @@ now a short list, which is the point:
 - Audit `rules_task`'s callees for flash writes, so its stack can move to
   PSRAM and give back 1024 bytes of internal DRAM (M10).
 - Run the guard scripts automatically instead of by hand (M10).
+- Diagnose the HTTP concurrency reset above — it has a reproducer and two
+  ruled-out mechanisms, so the next step is instrumenting the failing
+  allocation, not more black-box testing.
 - `kilnsim/benchproto_codec.py` duplicates kilnlink's CRC-16/CCITT-FALSE and
   fails `check_no_duplicate_crc.ps1` — share the implementation or justify the
   port on the allowlist, the way `protocol.py` already is.
@@ -632,6 +635,19 @@ Owned by [`firmware/KilnFW/TODO.md`](firmware/KilnFW/TODO.md) §§12–13.
       wide margin. Blocked on the same firing caveat above — resize on a
       measurement taken from an idle board and this project repeats the bug
       class it just spent a day fixing
+- [ ] **HTTP connection resets under concurrency — reproducible, cause NOT
+      established** (`TODO.md` §14, `f8ebfa0`). Eight parallel `/app.js`
+      fetches reset one of them, 9 failures in 80 requests. Needs BOTH high
+      concurrency and a large response: 8 parallel `/status` never fails, 4
+      parallel `/app.js` never fails, sequential fetches never fail. **Do not
+      file this as the known DRAM failure without re-reading the evidence** —
+      `min_free` is untouched by the load and free heap stays flat at ~23 kB,
+      and the failing request is the *fastest* of the eight, which rules out
+      the socket-timeout path too. Leading hypothesis is a largest-contiguous-
+      block bound (`/app.js` is 8589 B gzipped against an 8704 B largest free
+      block), flagged unconfirmed because it rests on two numbers being close.
+      Matters because a browser issues several parallel requests per page,
+      which is exactly how the original "page says loading forever" presents
 - [ ] **Wire the guard scripts into something that runs them.** All of
       `tools/check_*.ps1` and `firmware/*/tools/check_*.ps1` are standalone and
       manual today. Every one of them has been proven able to fail, which is
