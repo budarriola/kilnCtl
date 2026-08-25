@@ -287,6 +287,20 @@ Warn : could not read serial number for device 0x2e8a:0x000c: Pipe error
 Error: unable to find a matching CMSIS-DAP device
 ```
 
+**Contradicted, and unresolved — read before acting on the paragraph above.**
+The claim that this OpenOCD build cannot select by serial was recorded
+2026-08-23; a later note the same day says the opposite, with a quoted log
+line (`Using CMSIS-DAPv2 interface with VID:PID=0x2e8a:0x000c,
+serial=E66540F0A38EA628`) and a successful flash, and says
+`kilnctrl`'s `PeerConfig.adapter_serial` pins the peer correctly. Both
+cannot be true of the same binary. **Neither has been re-verified since**,
+and the cost of the optimistic reading being wrong is flashing the safety
+processor, so treat serial selection as unproven until someone re-runs it
+deliberately with a negative control. BOOTSEL/UF2 needs no probe and has
+been used for every SimFW flash since — including 2026-08-24's, via
+`kilnsim reboot-bootloader --yes`, which needs no physical access to the
+board either.
+
 **Do not work around this by removing the serial filter.** Unfiltered,
 OpenOCD picks a probe on its own and could halt or flash the **safety
 processor** instead of the fixture (or vice versa). The correct responses are
