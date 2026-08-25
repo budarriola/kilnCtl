@@ -167,6 +167,10 @@ class SafetyClient:
         self.last_status: Optional[SafetyStatus] = None
         self._pending: Optional[_Pending] = None
         self._pending_lock = threading.Lock()
+        # Replies that arrived with no request outstanding. See
+        # _send_reject_window()'s docstring: non-zero means a mutating result
+        # from this client may be reporting the previous request's outcome.
+        self.late_replies = 0
         #: Serializes queries so at most one reply is ever outstanding.
         self._query_lock = threading.RLock()
 
@@ -275,6 +279,57 @@ class SafetyClient:
         ``_set_relay_style``: a reply within the window IS the refusal;
         silence means the command went through (at least as far as the ESP
         is concerned).
+
+        KNOWN DEFECT -- the first result after a state change can be the
+        PREVIOUS call's outcome. Do not trust a single call here to describe
+        the state it was issued against; repeat it, or read the state back with
+        the matching query method.
+
+        Measured on the bench 2026-08-25. With the safety processor halted and
+        its cached status 26 seconds stale -- so every request_enable(1) should
+        have been refused -- four identical calls in a row returned:
+
+            ok, refused, refused, refused
+
+        The three refusals are correct. The leading "ok" is this defect: it is
+        the reply to a call issued BEFORE the link went down, arriving after
+        its own window had expired and being adopted by the next call.
+
+        WHY IT HAPPENS. ``_handle_reply`` below matches an incoming reply to the
+        outstanding request by SUBCOMMAND ALONE (plus the request/reply id
+        aliasing in ``_reply_matches_request``). There is no request identity in
+        the match, so a refusal that misses its own window is handed to the next
+        call with the same subcommand, and once that starts it is
+        self-sustaining: every call reports its predecessor's answer. The
+        "nothing outstanding, so this is stale" guard further down only fires
+        when the late reply lands in the GAP between calls; a reply that lands
+        after the next call has already armed is indistinguishable, by
+        subcommand, from that call's own answer.
+
+        WHY IT IS NOT FIXED HERE. There is no correlation key to fix it with.
+        The ESP's ``bridge_reply()`` (KilnFW/App/drivers/uart_bridge.c) sends a
+        fresh frame via ``uart_protocol_send()`` rather than echoing the
+        request's ``msg_index``, so the reply's index is the ESP's own outgoing
+        sequence and says nothing about which request it answers. Filtering on
+        an index high-water mark does not help either, because the offending
+        reply is GENERATED after its own request was sent and merely ARRIVES
+        late, so it is always "newer" than any mark taken at arming time.
+
+        THE REAL FIX is protocol-level: have ``bridge_reply()`` echo the
+        requesting frame's ``msg_index`` and match on it here. That touches the
+        transport shared by every bridge task, not just this one, which is why
+        it is written down rather than done in passing. This is the same
+        reply-pairing bug class already recorded against benchproto's
+        msg_index/dedup handling.
+
+        Ruled out first, because the alternative was much worse: the enable
+        polarity is NOT reversed. ``devices._check_bool_byte`` maps True to 1
+        and False to 0, and ``uart_bridge.c`` reads ``payload[1] != 0``, so a
+        disable request cannot enable. The inversion in the observation above is
+        pairing, not polarity.
+
+        ``late_replies`` counts replies that arrived with nothing outstanding,
+        so this stops being invisible -- see ``_handle_reply``.
         """
         with self._query_lock:
             pending = _Pending(subcommand)
@@ -456,4 +511,21 @@ class SafetyClient:
 
         # Nothing outstanding: a stale reply to a query we already gave up on.
         # Nothing on this task is ever pushed unsolicited.
-        log.debug("ignoring unsolicited SAFETY response 0x%02X", subcommand)
+        #
+        # Counted, not just logged at debug level, because this is the visible
+        # edge of the reply-pairing defect documented on _send_reject_window():
+        # a reply late enough to land here is one that ALSO could have landed on
+        # the next call's pending slot and been reported as that call's answer.
+        # A non-zero late_replies is therefore the signal that any single
+        # mutating result from this client may be describing the previous
+        # request. Left as a counter plus one warning rather than an exception
+        # because a late reply is not itself an error -- the command it belongs
+        # to was still delivered and acted on.
+        self.late_replies += 1
+        log.warning(
+            "SAFETY reply 0x%02X arrived with nothing outstanding (late_replies=%d) -- "
+            "a mutating result reported around now may belong to the previous request; "
+            "see SafetyClient._send_reject_window's docstring",
+            subcommand,
+            self.late_replies,
+        )
