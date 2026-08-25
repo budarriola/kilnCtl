@@ -79,7 +79,36 @@ static const char *TAG = "safety_link";
 #endif
 
 /* Inbox depth. The far side is expected to answer one request at a time; the
- * extra slots absorb an unsolicited push landing next to a poll reply. */
+ * extra slots absorb an unsolicited push landing next to a poll reply.
+ *
+ * DELIBERATELY STILL 4, measured 2026-08-25. This constant looks like the
+ * obvious fix for the `uart_proto: uart1: inbox full for task 7, BROADCAST
+ * dropped` flood -- roughly 2/3 of everything the Pico sends is discarded
+ * here -- and it is not. Two link-stat samples 28 s apart (calibrated against
+ * the 2 Hz poll, so the window is real and not assumed):
+ *
+ *     frames deframed   +280  -> 10.0 /s   what the Pico produces
+ *     dequeued           +76  ->  2.7 /s   what this driver consumes
+ *     broadcast dropped +204  ->  7.3 /s
+ *
+ * That is SUSTAINED 3.7x overproduction, not burstiness. Depth only ever buys
+ * burst tolerance: against a permanent surplus, a deeper queue drops the same
+ * frames a few hundred ms later, having spent PSRAM to do it (these inboxes
+ * moved to PSRAM on 2026-08-20, so the cost is cheap -- cheapness is not the
+ * argument for raising it, futility is the argument against).
+ *
+ * Note also that only ~2.7/s of the 10/s is explained by the cmd histogram's
+ * status+diag+power counts, and the histogram only counts frames that were
+ * actually DEQUEUED. So something is producing ~7 frames/s that nothing ever
+ * consumes, and identifying what is the real work here. The two levers that
+ * would actually help are reducing what the Pico pushes, or draining this
+ * inbox continuously instead of once per 500 ms poll -- NOT this number.
+ *
+ * If you are here because of the drop flood: re-measure those two rates
+ * first. If production still exceeds consumption, raising this cannot help,
+ * and changing it will only make the symptom quieter for one release.
+ * See docs/ and the safety-link congestion notes; the poll-period backoff in
+ * SAFETY_LINK_BACKOFF_MAX_STREAK is a related, separate mitigation. */
 #define SAFETY_INBOX_LEN 4
 
 #define SAFETY_POLL_TASK_STACK    4096
