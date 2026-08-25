@@ -3121,6 +3121,41 @@ def get_pin_config() -> str:
 
 
 @_tool()
+def get_stack_margin() -> str:
+    """Report every instrumented task's stack high-water mark, live.
+
+    This is the bench measurement `KilnFW/TODO.md` section 13 requires before
+    any of the six internal-only task stacks it names may be resized. The
+    figure is `uxTaskGetStackHighWaterMark()`: the SMALLEST free stack ever
+    seen since that task started, not the current free amount -- so it is only
+    as good as the worst path the task has actually taken since boot. Exercise
+    a task's heavy path first (a big POST, an OTA, a config commit), then read
+    this; a number taken from an idle board understates every stack.
+
+    A task shown as "not running" was never created or has been deleted, and
+    reports 0 rather than a stale earlier reading.
+    """
+    try:
+        entries = _info.get_stack_margin()
+    except InfoQueryError as exc:
+        return f"error: {exc}"
+    if not entries:
+        return "device reported no instrumented tasks"
+    lines = []
+    for e in entries:
+        if not e.alive:
+            lines.append(f"{e.name}: not running (configured {e.configured_stack_bytes} B)")
+            continue
+        pct = e.headroom_pct
+        pct_txt = f"{pct:.1f}%" if pct is not None else "n/a"
+        lines.append(
+            f"{e.name}: {e.hwm_bytes} B free at worst of {e.configured_stack_bytes} B "
+            f"({pct_txt} headroom) [{e.level.name}]"
+        )
+    return "\n".join(lines)
+
+
+@_tool()
 def get_fw_version() -> str:
     """Report the running firmware's git commit, dirty flag, build time, and
     whether its UART protocol version matches this copy of pc_tools.

@@ -57,6 +57,7 @@ $sources = @(
     (Join-Path $testDir "test_max31856_codec.c"),
     (Join-Path $testDir "test_owner_slot_pool.c"),
     (Join-Path $testDir "test_dram_margin.c"),
+    (Join-Path $testDir "test_stack_margin.c"),
     (Join-Path $testDir "sim_plant.c"),
     (Join-Path $driversDir "pid.c"),
     (Join-Path $driversDir "thermal_guard.c"),
@@ -203,7 +204,8 @@ New-Item -ItemType Directory -Force -Path $rtObjDir | Out-Null
 $cmd6 = "call `"$vcvars`" x64 >nul && cl /nologo /W3 /EHsc /std:c11 /I`"$stubDir`" /I`"$commonInc`" " +
         "/Fo:`"$rtObjDir\\`" /Fe:`"$exe6`" " +
         "`"$(Join-Path $testDir 'test_rules_task_prestart.c')`" " +
-        "`"$(Join-Path $driversDir 'rules_eval.c')`" `"$(Join-Path $driversDir 'thermo_combine.c')`""
+        "`"$(Join-Path $driversDir 'rules_eval.c')`" `"$(Join-Path $driversDir 'thermo_combine.c')`" " +
+        "`"$(Join-Path $driversDir 'stack_margin.c')`""
 
 cmd.exe /c $cmd6
 if ($LASTEXITCODE -ne 0) {

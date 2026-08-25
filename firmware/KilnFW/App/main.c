@@ -24,6 +24,7 @@
 #include "crash_report.h"
 #include "dashboard_http.h"
 #include "dram_margin.h"
+#include "stack_margin.h"
 #include "diagnostics_http.h"
 #include "backup_http.h"
 #include "settings_http.h"
@@ -1376,6 +1377,21 @@ void app_main(void)
         kiln_enter_safe_state(io_ready ? &kio : NULL, &safety, safety_err == ESP_OK,
                               SAFETY_FAULT_SRC_PC_LINK | SAFETY_FAULT_SRC_APP,
                               "the PC link UART could not be opened");
+    } else {
+        /* TODO.md section 13: these two are internal-only (plain
+         * xTaskCreatePinnedToCore(), no MALLOC_CAP_SPIRAM) and named
+         * candidates for the DRAM-trough investigation. Registering here,
+         * against the SAME &uart_owner.task_handle/&uart_owner.event_task_
+         * handle fields uart_owner_init() just filled in, not a copy -- see
+         * stack_margin.h's registration comment for why that indirection
+         * matters. The safety-link UART also runs this same uart_owner.c
+         * code (safety_link.c's uart_owner_init() call) but is deliberately
+         * NOT registered here: same task names, different instance, and
+         * disambiguating them needs its own naming scheme -- left for
+         * whoever picks that up next rather than silently conflated with
+         * the PC-link pair below. */
+        stack_margin_register("uart_owner_task", &uart_owner.task_handle, UART_OWNER_STACK_SIZE);
+        stack_margin_register("uart_owner_evt_task", &uart_owner.event_task_handle, UART_OWNER_STACK_SIZE);
     }
 
     static uart_protocol_t uart_proto;
@@ -1393,6 +1409,11 @@ void app_main(void)
                                   "the PC link protocol stack could not be started");
         } else {
             pc_link_ready = true;
+            /* TODO.md section 13's third PC-link-side entry -- same
+             * internal-only, plain xTaskCreatePinnedToCore() stack, same
+             * "PC-link instance only, not the safety-link one" caveat as
+             * uart_owner above. */
+            stack_margin_register("uart_proto_rx", &uart_proto.rx_task_handle, UART_PROTOCOL_STACK_SIZE);
         }
     }
 

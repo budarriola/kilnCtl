@@ -19,6 +19,7 @@
 #include "relay_authority.h"
 #include "rules_eval.h"
 #include "rules_http.h"
+#include "stack_margin.h"
 #include "thermo_combine.h"
 #include "zones_http.h"
 
@@ -409,12 +410,47 @@ esp_err_t rules_task_start(SafetyLinkClass *safety)
     s_rules_task.safety = safety;
     s_rules_task.last_tick_us = esp_timer_get_time();
 
-    BaseType_t ok = xTaskCreatePinnedToCore(rules_task_entry, "rules_task", 3072, NULL, 4,
+    /* 3072 -> 4096, 2026-08-24, on a MEASUREMENT rather than a guess -- the
+     * first real uxTaskGetStackHighWaterMark() reading this project has ever
+     * taken (stack_margin.h, TODO.md section 13) reported:
+     *
+     *   rules_task  hwm=336B of 3072B  10.9% headroom  CRITICAL
+     *
+     * i.e. 2736 bytes of this stack had already been touched, on an idle
+     * board, leaving 336. Every other instrumented task sat between 47% and
+     * 82%; this one was the outlier by a wide margin, and it is the rule
+     * evaluator that gates heating -- a FreeRTOS stack overflow here corrupts
+     * kernel state rather than failing cleanly.
+     *
+     * It was invisible until the same session fixed a units bug in the
+     * reporting itself: ESP-IDF's uxTaskGetStackHighWaterMark() returns BYTES,
+     * not the words vanilla FreeRTOS documents, so an inherited *4 was
+     * reporting this task at 1392B / 45.3% / OK. The over-reporting direction
+     * is the dangerous one, and this is exactly what it was concealing.
+     *
+     * 4096 leaves 1360B free at the observed worst point, ~33%. Chosen from
+     * the measurement rather than doubled for comfort, because this costs
+     * 1024 bytes of INTERNAL DRAM on a board whose end-of-boot trough is
+     * already below the documented HTTP-socket-failure figure (dram_margin.h)
+     * -- the trade is worth it here and would not be everywhere.
+     *
+     * STILL TO DO: a high-water mark is only as good as the worst path the
+     * task has actually taken. This reading came from a board that has never
+     * run a real firing, so 2736B is a FLOOR on true usage, not the peak.
+     * Re-read this after a profile run with rules configured before treating
+     * 33% as settled. Moving this stack to PSRAM would cost no internal DRAM
+     * at all, but needs an audit that nothing rules_task calls writes NVS or
+     * flash first -- a flash write from a PSRAM-stack task asserts inside
+     * ESP-IDF's cache-disable path (see safety_cfg_store.c's deferred flush
+     * for that incident). rules_task.c itself makes no nvs_* call; its callees
+     * are unaudited. */
+    BaseType_t ok = xTaskCreatePinnedToCore(rules_task_entry, "rules_task", 4096, NULL, 4,
                                             &s_rules_task.task, tskNO_AFFINITY);
     if (ok != pdPASS) {
         ESP_LOGE(TAG, "xTaskCreatePinnedToCore(rules_task) failed");
         return ESP_ERR_NO_MEM;
     }
+    stack_margin_register("rules_task", &s_rules_task.task, 4096);
 
     /* Independent task (own stack, own priority) so a wedged main tick
      * cannot also wedge its own watchdog -- same reasoning
@@ -431,6 +467,9 @@ esp_err_t rules_task_start(SafetyLinkClass *safety)
          * loses the "wedged tick" cover. Report success anyway so a boot
          * doesn't fail outright over a watchdog task alone; the error above
          * is visible in the log for whoever is debugging a low-memory boot. */
+    } else {
+        /* Same TODO.md section 13 candidate list as rules_task above. */
+        stack_margin_register("rules_watchdog", &s_rules_task.watchdog_task, 2048);
     }
 
     ESP_LOGI(TAG, "rule evaluator task up (safety=%p)", (void *)safety);

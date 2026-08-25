@@ -1112,6 +1112,49 @@
  */
 #define INFO_CMD_GET_WIFI_STATUS 0x03u
 
+/* GET_STACK_MARGIN request payload: just byte0 = INFO_CMD_GET_STACK_MARGIN,
+ * no args. Added 2026-08-24, TODO.md section 13: that investigation found
+ * six internal-only FreeRTOS task stacks (~20.5KB total) that are
+ * candidates to shrink or move to PSRAM, but explicitly forbade resizing
+ * any of them "from the numbers in this entry alone" -- this repo has
+ * already shipped a real stack overflow caused by sizing a stack from a
+ * comment rather than a measurement. This exposes the actual measurement
+ * (uxTaskGetStackHighWaterMark(), stack_margin.c) over the same PC link
+ * used for everything else here, so a bench operator can read it without a
+ * debugger session. Purely additive -- see this file's UART_PROTOCOL_VERSION
+ * bump policy above; a v6-or-earlier PC build simply never sends this
+ * subcommand, and a v7 firmware that has never heard of it (impossible
+ * today, but hypothetically an older firmware than this comment) would hit
+ * the ordinary "unknown subcmd" rejection any INFO query already gets, not
+ * a wire-format break.
+ *
+ * GET_STACK_MARGIN response payload:
+ *   byte0     = count (N), 0 <= N <= 12 (STACK_MARGIN_MAX_TASKS)
+ *   N * entry, each:
+ *     byte[0]     = name_len (Nn)
+ *     Nn bytes    = ASCII task name, not null-terminated (matches the
+ *                   FreeRTOS task name passed to xTaskCreate*, so it can be
+ *                   cross-referenced against a debugger's task list)
+ *     bytes[+0..3]= configured_stack_bytes, u32 LE -- the usStackDepth this
+ *                   task was actually created with, in bytes
+ *     bytes[+4..7]= hwm_bytes, u32 LE -- uxTaskGetStackHighWaterMark()
+ *                   converted from FreeRTOS stack WORDS to bytes (see
+ *                   stack_margin_calc.h's STACK_MARGIN_WORD_BYTES comment
+ *                   for why that conversion, not the raw word count, is
+ *                   what's on the wire); 0 if the task is not alive (see
+ *                   next field)
+ *     byte[+8]    = flags: bit0 alive (0 = never created, creation failed,
+ *                   or already deleted -- hwm_bytes/level are both 0 in
+ *                   that case, not a stale prior reading)
+ *                   bits1-2 level (0 = OK, 1 = LOW, 2 = CRITICAL --
+ *                   stack_margin_level_t, a first-pass triage heuristic
+ *                   against configured_stack_bytes, NOT a measured
+ *                   threshold -- see stack_margin_calc.h)
+ *   Task order matches registration order (main.c/rules_task.c/
+ *   uart_bridge.c's stack_margin_register() call sites), which is fixed at
+ *   build time, not alphabetical or wire-negotiated. */
+#define INFO_CMD_GET_STACK_MARGIN 0x04u
+
 /* --- CONTROL (task_id = UART_TASK_ID_CONTROL) ---
  * Zone configuration and manual relay control -- mirrors zones_http.c's
  * /api/zones (config) and dashboard_http.c's /api/relay (control). Manual

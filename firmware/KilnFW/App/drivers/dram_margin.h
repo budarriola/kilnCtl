@@ -45,9 +45,28 @@
  * the last stage anyone had looked at, and it understates the real minimum by
  * about 1 kB.
  *
- * That correction matters: 11415 is BELOW the 11903 documented failure figure
- * above, so the end of boot is already inside the zone where this exact
+ * That correction matters: the trough is BELOW the 11903 documented failure
+ * figure above, so the end of boot is already inside the zone where this exact
  * failure has happened once -- not comfortably above it.
+ *
+ * UPDATED 2026-08-24, same day, from 11415 to 10015: rules_task's stack went
+ * 3072 -> 4096 after the first real high-water-mark measurement showed it at
+ * 10.9% headroom (rules_task.c has the full reasoning). That deliberately
+ * spent 1400 bytes of this trough to stop the rule evaluator running 336 bytes
+ * from a kernel-corrupting overflow. The alarm below did its job and announced
+ * it with numbers:
+ *
+ *   E app_main: heap stage app_main_done DRAM REGRESSION: largest=7680
+ *     (was 7680) dram_free=10015 (was 11415, WORSE)
+ *
+ * The baseline is updated here, in the SAME change, because the trough
+ * legitimately moved and a regression detector pinned to a stale figure can no
+ * longer detect the NEXT one. This is the documented procedure, not a way to
+ * silence the alarm -- the distinction is that the cause is known, measured,
+ * and written down. Re-verified at the new trough that the failure this alarm
+ * is named after still does not reproduce: /app.js delivered 23737 bytes
+ * complete and byte-identical on 4 consecutive fetches, and /, /status and
+ * /api/safety/commissioning all answered 200.
  *
  * Recorded because `largest` is ALREADY below KILN_DRAM_LARGEST_ALARM_BYTES,
  * so the alarm is a STANDING condition on every boot, not an event.
@@ -67,7 +86,7 @@
  * If a change makes them worse, that is precisely what the alarm is for:
  * do not raise these to silence it. */
 #define KILN_DRAM_LARGEST_KNOWN_BYTES ((size_t)7680)
-#define KILN_DRAM_FREE_KNOWN_BYTES    ((size_t)11415)
+#define KILN_DRAM_FREE_KNOWN_BYTES    ((size_t)10015)
 
 /* Boot-to-boot slack. The figures above are single-boot measurements, and the
  * late stages depend on Wi-Fi association and DHCP timing, so a few hundred

@@ -26,6 +26,7 @@
 #include "ota_http.h" /* ota_http_heat_blocked_by_update() -- same ERR_UPDATING case */
 #include "relay_authority.h"
 #include "settings.h"
+#include "stack_margin.h"
 #include "thermo_owner.h"
 #include "uart_task_ids.h"
 #include "wifi_prov.h"
@@ -2180,11 +2181,20 @@ esp_err_t uart_bridge_start_system_task(uart_protocol_t *proto, uart_owner_t *ow
         return err;
     }
 
-    BaseType_t created = xTaskCreatePinnedToCore(system_bridge_task, "system_uart_bridge", 3072, &ctx, 5, NULL, tskNO_AFFINITY);
+    /* Static, not a local -- stack_margin_register() below keeps this
+     * pointer past this function returning, and reads through it fresh on
+     * every report (see stack_margin.h), so it must outlive the call. */
+    static TaskHandle_t s_system_bridge_task_handle;
+    BaseType_t created = xTaskCreatePinnedToCore(system_bridge_task, "system_uart_bridge", 3072, &ctx, 5,
+                                                  &s_system_bridge_task_handle, tskNO_AFFINITY);
     if (created != pdPASS) {
         uart_protocol_unregister_task(proto, UART_TASK_ID_SYSTEM);
         return ESP_ERR_NO_MEM;
     }
+    /* TODO.md section 13: internal-only (plain xTaskCreatePinnedToCore(), no
+     * MALLOC_CAP_SPIRAM) -- one of the six candidate stacks left unresized
+     * pending a real uxTaskGetStackHighWaterMark() reading. */
+    stack_margin_register("system_uart_bridge", &s_system_bridge_task_handle, 3072);
     return ESP_OK;
 }
 
@@ -2304,6 +2314,60 @@ static size_t build_wifi_status_reply(uint8_t *out)
     return o;
 }
 
+/* byte0=count(N) + N * {name_len(1) + name(<=STACK_MARGIN_NAME_MAX-1) +
+ * configured_stack_bytes(4) + hwm_bytes(4) + flags(1)}. Worst case:
+ * 1 + 12 * (1 + 19 + 4 + 4 + 1) = 1 + 12*29 = 349 -- that would NOT fit
+ * BRIDGE_REPLY_MAX (253), so this is capped defensively at build_stack_
+ * margin_reply()'s own loop below, not just asserted; see that function. */
+static size_t build_stack_margin_reply(uint8_t *out)
+{
+    size_t o = 1; /* count goes in out[0], filled in once the loop below is done */
+    size_t n = 0;
+    size_t total = stack_margin_count();
+
+    for (size_t i = 0; i < total; ++i) {
+        const char *name = NULL;
+        uint32_t configured_bytes = 0, hwm_bytes = 0;
+        stack_margin_level_t level = STACK_MARGIN_LEVEL_OK;
+        bool alive = false;
+        if (!stack_margin_read(i, &name, &configured_bytes, &hwm_bytes, &level, &alive)) {
+            continue; /* index vanished mid-loop -- can't happen (count() is stable), but never fabricate an entry */
+        }
+
+        size_t name_len = strlen(name);
+        if (name_len > STACK_MARGIN_NAME_MAX - 1) {
+            name_len = STACK_MARGIN_NAME_MAX - 1; /* stack_margin_register() already truncates at registration; belt-and-braces here too */
+        }
+        size_t entry_len = 1 + name_len + 4 + 4 + 1;
+        if (o + entry_len > BRIDGE_REPLY_MAX) {
+            /* Would overflow the shared reply buffer -- stop rather than
+             * write past it. Never hit with today's <=6 registered tasks
+             * (6 * 29 + 1 = 175 < 253); guards the buffer directly instead
+             * of trusting that headroom to hold as more tasks register. */
+            ESP_LOGW(TAG, "info: GET_STACK_MARGIN truncated at %u/%u entries -- reply buffer full",
+                     (unsigned)n, (unsigned)total);
+            break;
+        }
+
+        out[o++] = (uint8_t)name_len;
+        memcpy(&out[o], name, name_len);
+        o += name_len;
+        out[o++] = (uint8_t)(configured_bytes & 0xFF);
+        out[o++] = (uint8_t)((configured_bytes >> 8) & 0xFF);
+        out[o++] = (uint8_t)((configured_bytes >> 16) & 0xFF);
+        out[o++] = (uint8_t)((configured_bytes >> 24) & 0xFF);
+        out[o++] = (uint8_t)(hwm_bytes & 0xFF);
+        out[o++] = (uint8_t)((hwm_bytes >> 8) & 0xFF);
+        out[o++] = (uint8_t)((hwm_bytes >> 16) & 0xFF);
+        out[o++] = (uint8_t)((hwm_bytes >> 24) & 0xFF);
+        out[o++] = (uint8_t)((alive ? 0x01u : 0x00u) | (((uint8_t)level & 0x03u) << 1));
+        n++;
+    }
+
+    out[0] = (uint8_t)n;
+    return o;
+}
+
 static void info_bridge_task(void *arg)
 {
     info_bridge_ctx_t *ctx = (info_bridge_ctx_t *)arg;
@@ -2330,6 +2394,9 @@ static void info_bridge_task(void *arg)
                 break;
             case INFO_CMD_GET_WIFI_STATUS:
                 reply_len = build_wifi_status_reply(reply);
+                break;
+            case INFO_CMD_GET_STACK_MARGIN:
+                reply_len = build_stack_margin_reply(reply);
                 break;
             default:
                 ESP_LOGW(TAG, "info: unknown subcmd 0x%02X -- rejected", msg.payload[0]);

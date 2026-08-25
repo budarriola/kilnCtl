@@ -30,10 +30,17 @@ import threading
 from typing import Callable, Optional
 
 from . import devices
-from .devices import FirmwareVersion, InfoResponseError, PinConfigEntry, WifiStatus
+from .devices import (
+    FirmwareVersion,
+    InfoResponseError,
+    PinConfigEntry,
+    StackMarginEntry,
+    WifiStatus,
+)
 from .protocol import (
     INFO_CMD_GET_FW_VERSION,
     INFO_CMD_GET_PIN_CONFIG,
+    INFO_CMD_GET_STACK_MARGIN,
     INFO_CMD_GET_WIFI_STATUS,
     UART_TASK_ID_INFO,
     Device,
@@ -151,6 +158,21 @@ class InfoClient:
     def get_wifi_status(self, timeout: float = DEFAULT_REPLY_TIMEOUT_S) -> WifiStatus:
         """Ask the device whether it's joined a network and, if so, its IP."""
         value = self._query(INFO_CMD_GET_WIFI_STATUS, devices.info_get_wifi_status(), timeout)
+        return value  # type: ignore[return-value]
+
+    def get_stack_margin(
+        self, timeout: float = DEFAULT_REPLY_TIMEOUT_S
+    ) -> list[StackMarginEntry]:
+        """Ask the device for the live uxTaskGetStackHighWaterMark() reading
+        of every task registered with stack_margin.c (App/drivers).
+
+        This is the bench measurement KilnFW TODO.md section 13 needs before
+        any of the six candidate internal-only task stacks it names may be
+        resized -- see stack_margin.h's header comment. Raises
+        :class:`InfoQueryError` on an undelivered request or a missing or
+        malformed reply.
+        """
+        value = self._query(INFO_CMD_GET_STACK_MARGIN, devices.info_get_stack_margin(), timeout)
         return value  # type: ignore[return-value]
 
     def _query(self, subcommand: int, payload: bytes, timeout: float) -> object:

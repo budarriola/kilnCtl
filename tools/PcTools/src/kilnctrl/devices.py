@@ -99,7 +99,9 @@ from .protocol import (
     DISPLAY_NATIVE_WIDTH,
     INFO_CMD_GET_FW_VERSION,
     INFO_CMD_GET_PIN_CONFIG,
+    INFO_CMD_GET_STACK_MARGIN,
     INFO_CMD_GET_WIFI_STATUS,
+    StackMarginLevel,
     IO_CMD_ALL_RELAYS_OFF,
     IO_CMD_READ,
     IO_CMD_SET_AUTO_REPORT,
@@ -3065,6 +3067,17 @@ def info_get_wifi_status() -> bytes:
     return struct.pack("<B", INFO_CMD_GET_WIFI_STATUS)
 
 
+def info_get_stack_margin() -> bytes:
+    """0x04 GET_STACK_MARGIN request: byte0 = subcommand, no args.
+
+    See stack_margin.h (App/drivers) and KilnFW TODO.md section 13 for what
+    this exists to unblock: six internal-only task stacks that must not be
+    resized "from the numbers in this entry alone," pending a real
+    uxTaskGetStackHighWaterMark() reading.
+    """
+    return struct.pack("<B", INFO_CMD_GET_STACK_MARGIN)
+
+
 class InfoResponseError(ValueError):
     """Raised when an INFO response payload does not match its wire layout."""
 
@@ -3173,6 +3186,116 @@ def parse_wifi_status_response(payload: bytes) -> WifiStatus:
     return WifiStatus(connected=bool(connected), ip=ip)
 
 
+@dataclass(frozen=True)
+class StackMarginEntry:
+    """One task's entry from a GET_STACK_MARGIN response
+    (build_stack_margin_reply in uart_bridge.c).
+
+    ``hwm_bytes`` is the SMALLEST amount of stack ever seen free since the
+    task started (uxTaskGetStackHighWaterMark(), converted from FreeRTOS
+    stack words to bytes on the ESP side -- see stack_margin_calc.h's
+    STACK_MARGIN_WORD_BYTES comment), not the current free amount. Both
+    ``hwm_bytes`` and ``level`` are 0/OK when ``alive`` is False -- the task
+    was never created, creation failed, or it has since been deleted --
+    never a stale prior reading.
+    """
+
+    name: str
+    configured_stack_bytes: int
+    hwm_bytes: int
+    alive: bool
+    level: StackMarginLevel
+
+    @property
+    def headroom_pct(self) -> "float | None":
+        """``hwm_bytes`` as a percentage of ``configured_stack_bytes``, or
+        None if not alive or the configured size is somehow 0 (mirrors
+        stack_margin_classify()'s own "0 is never OK" rule -- there is no
+        honest percentage to report against a zero-size stack)."""
+        if not self.alive or self.configured_stack_bytes == 0:
+            return None
+        return 100.0 * self.hwm_bytes / self.configured_stack_bytes
+
+    def describe(self) -> str:
+        """One-line summary, e.g. ``rules_task: 1024/3072 B free (33%) OK``."""
+        if not self.alive:
+            return f"{self.name}: not running"
+        pct = self.headroom_pct
+        pct_str = f"{pct:.0f}%" if pct is not None else "?"
+        return (
+            f"{self.name}: {self.hwm_bytes}/{self.configured_stack_bytes} B free "
+            f"({pct_str}) {self.level.name}"
+        )
+
+
+def parse_stack_margin_response(payload: bytes) -> list[StackMarginEntry]:
+    """Decode a GET_STACK_MARGIN response payload.
+
+    Layout (build_stack_margin_reply)::
+
+        byte0     count (N)
+        N * {
+            u8   name_len (Nn)
+            Nn   ASCII task name, NOT null-terminated
+            u32  configured_stack_bytes, LE
+            u32  hwm_bytes, LE
+            u8   flags: bit0 alive, bits1-2 level (StackMarginLevel)
+        }
+
+    Raises :class:`InfoResponseError` if the length does not match N exactly,
+    any name_len overruns the payload, or a level nibble is out of range.
+    """
+    if len(payload) < 1:
+        raise InfoResponseError("stack margin response is empty")
+    count = payload[0]
+    entries: list[StackMarginEntry] = []
+    offset = 1
+    for _ in range(count):
+        if offset >= len(payload):
+            raise InfoResponseError(
+                f"stack margin response truncated: expected {count} entries, "
+                f"ran out of bytes after {len(entries)}"
+            )
+        name_len = payload[offset]
+        offset += 1
+        name_end = offset + name_len
+        entry_end = name_end + 9  # configured(4) + hwm(4) + flags(1)
+        if entry_end > len(payload):
+            raise InfoResponseError(
+                f"stack margin entry {len(entries)} overruns {len(payload)}-byte "
+                f"payload (name_len={name_len})"
+            )
+        name = payload[offset:name_end].decode("ascii", errors="replace")
+        configured_stack_bytes, hwm_bytes, flags = struct.unpack(
+            "<IIB", payload[name_end:entry_end]
+        )
+        alive = bool(flags & 0x01)
+        level_val = (flags >> 1) & 0x03
+        try:
+            level = StackMarginLevel(level_val)
+        except ValueError as exc:
+            raise InfoResponseError(
+                f"stack margin entry {len(entries)} ('{name}'): unrecognized "
+                f"level {level_val}"
+            ) from exc
+        entries.append(
+            StackMarginEntry(
+                name=name,
+                configured_stack_bytes=configured_stack_bytes,
+                hwm_bytes=hwm_bytes,
+                alive=alive,
+                level=level,
+            )
+        )
+        offset = entry_end
+    if offset != len(payload):
+        raise InfoResponseError(
+            f"stack margin response has {len(payload) - offset} trailing byte(s) "
+            f"after {count} entries"
+        )
+    return entries
+
+
 def parse_pin_config_response(payload: bytes) -> list[PinConfigEntry]:
     """Decode a GET_PIN_CONFIG response payload.
 
@@ -3260,16 +3383,18 @@ def parse_fw_version_response(payload: bytes) -> FirmwareVersion:
 
 def parse_info_response(
     payload: bytes, prefer: int | None = None
-) -> "tuple[int, list[PinConfigEntry] | FirmwareVersion | WifiStatus]":
+) -> "tuple[int, list[PinConfigEntry] | FirmwareVersion | WifiStatus | list[StackMarginEntry]]":
     """Classify and decode an INFO response payload structurally.
 
     Returns ``(subcommand, value)`` where subcommand is
     :data:`~kilnctrl.protocol.INFO_CMD_GET_PIN_CONFIG` (value = list of
     :class:`PinConfigEntry`),
     :data:`~kilnctrl.protocol.INFO_CMD_GET_FW_VERSION` (value =
-    :class:`FirmwareVersion`), or
+    :class:`FirmwareVersion`),
     :data:`~kilnctrl.protocol.INFO_CMD_GET_WIFI_STATUS` (value =
-    :class:`WifiStatus`).
+    :class:`WifiStatus`), or
+    :data:`~kilnctrl.protocol.INFO_CMD_GET_STACK_MARGIN` (value = list of
+    :class:`StackMarginEntry`).
 
     Why this is needed: uart_bridge.c's replies carry *no* subcommand/type
     byte -- ``build_pin_config_reply`` starts with the entry count and
@@ -3280,8 +3405,11 @@ def parse_info_response(
     version reply starts with 2 and is far too short to be a 2-entry pin
     config (which would need 5 bytes and a plausible function id), but the
     caller can pass ``prefer`` -- the subcommand it currently has
-    outstanding -- to settle any tie deterministically. GET_WIFI_STATUS is
-    never sent unsolicited, so it only ever gets classified via ``prefer``.
+    outstanding -- to settle any tie deterministically. GET_WIFI_STATUS and
+    GET_STACK_MARGIN are never sent unsolicited, so they only ever get
+    classified via ``prefer`` -- an empty ``build_stack_margin_reply()``
+    (nothing registered) is the single byte ``00``, byte-identical to an
+    empty ``build_pin_config_reply()``, and only ``prefer`` breaks that tie.
 
     Raises :class:`InfoResponseError` if the payload fits no known layout.
     """
@@ -3289,6 +3417,7 @@ def parse_info_response(
         (INFO_CMD_GET_FW_VERSION, parse_fw_version_response),
         (INFO_CMD_GET_PIN_CONFIG, parse_pin_config_response),
         (INFO_CMD_GET_WIFI_STATUS, parse_wifi_status_response),
+        (INFO_CMD_GET_STACK_MARGIN, parse_stack_margin_response),
     )
     if prefer is not None:
         parsers = tuple(sorted(parsers, key=lambda p: p[0] != prefer))

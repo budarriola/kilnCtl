@@ -1712,3 +1712,51 @@ numbers in this entry alone:
   `App/drivers/uart_bridge.c`) — same two options, same caveat.
 - The ~14KB unattributed gap itself — worth a live coredump/heap-trace pass
   with real hardware rather than further static-analysis guessing.
+
+**2026-08-24 follow-up — the blocker above is now measurable, not yet
+measured.** Added `App/drivers/stack_margin.{h,c}` (registry wrapping
+`uxTaskGetStackHighWaterMark()`, converting FreeRTOS's WORD-granularity
+result to bytes — see `stack_margin_calc.h`'s `STACK_MARGIN_WORD_BYTES`
+comment for why that conversion is called out explicitly and not a bare
+`* 4`) and registered all six task stacks named above against it
+(`uart_owner_task`/`uart_owner_evt_task`/`uart_proto_rx` in `main.c`,
+`rules_task`/`rules_watchdog` in `rules_task.c`, `system_uart_bridge` in
+`uart_bridge.c`). Exposed PC-side as a new, purely additive INFO subcommand,
+`INFO_CMD_GET_STACK_MARGIN` (0x04, `uart_task_ids.h`) — no
+`UART_PROTOCOL_VERSION` bump needed (see that constant's own bump policy: a
+brand-new task_id/subcommand an older peer has never heard of is exactly the
+case the policy says does NOT need one). `tools/PcTools/src/kilnctrl`:
+`devices.parse_stack_margin_response()`/`StackMarginEntry`/
+`StackMarginLevel`, wired into `info.InfoClient.get_stack_margin()` and
+`parse_info_response()`'s structural dispatch. Host-tested both sides
+(`App/test/test_stack_margin.c` for the word→byte conversion and headroom
+classification; `tools/PcTools/tests/test_stack_margin_info.py` for the wire
+decode), each with a negative-test failure demonstrated and reverted (see
+those files' own comments for the exact failing assertions).
+
+**Only the PC-link `uart_owner`/`uart_proto` instance is registered.**
+`safety_link.c` runs the exact same `uart_owner.c`/`uart_protocol.c` code
+for the isolated Pico link, with the same task names — registering both
+under identical names would make the report ambiguous about which link a
+reading belongs to. Left for whoever needs that link's own figures next
+(would need a naming scheme, e.g. a `(pc)`/`(sfty)` suffix at the
+`stack_margin_register()` call site in `safety_link.c`).
+
+**Still true, unchanged by this follow-up: no real high-water-mark figure
+has been read on this board.** Nothing here was flashed or read from
+hardware (bench is in use elsewhere) — this only makes the reading
+possible. The classification bands (`STACK_MARGIN_CRITICAL_PCT`/
+`STACK_MARGIN_LOW_PCT` in `stack_margin_calc.h`, 15%/30%) are an ordinary
+embedded-FreeRTOS triage heuristic, not a figure derived from this board;
+treat a CRITICAL/LOW flag as "look at this one first," not as a proven
+overflow risk. **Next step on the bench**: flash this build, connect
+pc_tools, and call `InfoClient.get_stack_margin()` (or the MCP tool once one
+is wired to it) after the board has been running long enough to have
+exercised its worst-case code paths on each task (a UART burst for
+`uart_owner`/`uart_proto`, a rule evaluation for `rules_task`, a
+SYSTEM command for `system_uart_bridge`) — a high-water mark only reflects
+paths actually taken, so reading it right after boot understates the true
+worst case. Only once real per-task figures exist should any of the six
+stacks above be resized, and the resize should update this entry with the
+measured numbers, the same way `dram_margin.h`'s own thresholds are kept
+current.

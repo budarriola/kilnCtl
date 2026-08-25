@@ -521,6 +521,26 @@ class LogLevel(enum.IntEnum):
 INFO_CMD_GET_PIN_CONFIG = 0x01
 INFO_CMD_GET_FW_VERSION = 0x02
 INFO_CMD_GET_WIFI_STATUS = 0x03
+#: 2026-08-24, TODO.md section 13 (KilnFW): reads uxTaskGetStackHighWaterMark()
+#: for the small, fixed set of tasks registered with stack_margin.c, so the
+#: internal-DRAM investigation's "do not resize any of these six task stacks
+#: without a real measurement" blocker can actually be lifted from the bench.
+#: Purely additive -- see uart_task_ids.h's UART_PROTOCOL_VERSION bump policy.
+INFO_CMD_GET_STACK_MARGIN = 0x04
+
+
+class StackMarginLevel(enum.IntEnum):
+    """Mirrors stack_margin_level_t (App/drivers/stack_margin_calc.h).
+
+    A first-pass triage heuristic against the task's OWN configured stack
+    size, not a measured threshold -- no real high-water-mark reading has
+    been taken on this board yet (KilnFW TODO.md section 13). Treat CRITICAL
+    as "look at this one first", not as a proven overflow risk.
+    """
+
+    OK = 0
+    LOW = 1
+    CRITICAL = 2
 
 
 class PinFunction(enum.IntEnum):

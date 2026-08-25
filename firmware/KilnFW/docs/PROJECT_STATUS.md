@@ -204,6 +204,84 @@ sections above, but move anything with lasting design value out to
 `ARCHITECTURE.md`/`ARCHITECTURE_DECISIONS.md`/`BRINGUP_HAZARDS.md` once it
 lands, rather than letting it grow indefinitely.
 
+### 2026-08-24 — Stack high-water-mark reporting added (the section 13 blocker's measurement, not its fix)
+
+Follow-up to the entry immediately below. That investigation named six
+internal-only task stacks (~20.5KB) as resize/PSRAM candidates but explicitly
+forbade acting on them "from the numbers in this entry alone" — this repo
+has already shipped a real stack overflow caused by sizing a stack from a
+comment rather than a measurement. This pass removes that blocker by making
+`uxTaskGetStackHighWaterMark()` readable from the PC side; it changes no
+stack size and was not run against real hardware (bench in use elsewhere).
+
+**Added**: `App/drivers/stack_margin_calc.h` (pure: FreeRTOS's word-
+granularity high-water mark → bytes, plus a 15%/30% headroom triage
+classification against each task's own configured stack size — a first-pass
+heuristic, not a measured threshold) and `App/drivers/stack_margin.{h,c}`
+(the registry: `uxTaskGetStackHighWaterMark()` wrapper, reading through the
+caller's own `TaskHandle_t*` fresh on every call rather than a snapshot, so
+a torn-down task reports "not alive" instead of a stale reading).
+
+Registered all six stacks named in the entry below: `uart_owner_task`/
+`uart_owner_evt_task`/`uart_proto_rx` (`main.c`, right after
+`uart_owner_init()`/`uart_protocol_init()` succeed — **the PC-link instance
+only**; `safety_link.c` runs the identical code for the isolated Pico link
+under the same task names and is deliberately NOT registered here, to avoid
+conflating the two links' readings under one name), `rules_task`/
+`rules_watchdog` (`rules_task.c`), `system_uart_bridge` (`uart_bridge.c`,
+which also needed its task handle actually captured — the existing call
+site passed `NULL` for it).
+
+**Exposed on the wire** as `INFO_CMD_GET_STACK_MARGIN` (0x04,
+`uart_task_ids.h`) — purely additive, so `UART_PROTOCOL_VERSION` (frozen at
+7 since the same day's earlier entry) was NOT bumped; the bump policy in
+that constant's own doc comment exists precisely to distinguish this case
+("a new subcommand an old peer has never heard of") from a wire-incompatible
+change. `KILNLINK_PROTOCOL_VERSION` (the separate ESP↔Pico link's version)
+is untouched — `tools/check_uart_version_independence.ps1` confirms the two
+never got re-coupled. `tools/check_bridge_reject_reason.ps1` also re-run
+clean (79 `bridge_reply_reject()` calls, all with a reason) — this change
+added none.
+
+**PC side** (`tools/PcTools/src/kilnctrl`): `devices.parse_stack_margin_
+response()` / `StackMarginEntry` / `StackMarginLevel`, `devices.info_get_
+stack_margin()`, wired into `info.InfoClient.get_stack_margin()` and into
+`parse_info_response()`'s structural dispatch (INFO replies carry no
+subcommand byte — an empty `GET_STACK_MARGIN` reply is byte-identical to an
+empty `GET_PIN_CONFIG` reply, both just `0x00`; only the caller's `prefer`
+hint breaks that tie, same mechanism the existing GET_WIFI_STATUS/GET_PIN_
+CONFIG ambiguity already relied on).
+
+**Host-tested both sides, each with a demonstrated negative-test failure**:
+- `App/test/test_stack_margin.c` (13 checks) — word→byte conversion pinned
+  against absolute values (not the constant being tested), classification
+  boundaries. Broke `STACK_MARGIN_WORD_BYTES` (4→1): 3 checks failed
+  (954/957). Broke the CRITICAL/LOW boundary (`<` → `<=`): 1 check failed
+  (956/957). Both reverted, 957/957 green.
+- `tools/PcTools/tests/test_stack_margin_info.py` (17 checks) — wire decode,
+  truncation/overrun handling, the empty-reply disambiguation above. Broke
+  the entry-length constant (9→8 bytes): 6 of 17 failed with a `struct.error`
+  from the resulting misaligned unpack. Reverted, 17/17 green
+  (735 passed + 91 subtests across the full `pytest` run, no other
+  regressions).
+
+**Verification run this pass**: on-target `ninja -j 24` clean (89/89 steps,
+no new warnings); KilnFW host suite 957/957 (baseline 944 + this pass's 13
+new, no failures). `pytest`: 735 passed + 91 subtests, no failures — this
+pass added 17 (`test_stack_margin_info.py`); the stated baseline was 707, so
+the other 11 are from concurrent work elsewhere in this tree (this repo has
+other live sessions committing in parallel — see project memory), not
+attributable to this change. Both `tools/check_uart_version_independence.
+ps1`/`check_bridge_reject_reason.ps1` guards clean.
+
+**Still true, unchanged by this pass**: no real high-water-mark figure has
+been read on this board — everything above only makes that reading
+possible. Next bench step: flash this build, exercise each of the six
+tasks' worst-case code path at least once (a UART burst, a rule evaluation,
+a SYSTEM command), then call `InfoClient.get_stack_margin()` and read the
+actual numbers before resizing or PSRAM-stacking anything. See TODO.md
+section 13's own follow-up note for the same detail.
+
 ### 2026-08-24 — Internal-DRAM boot trough investigated; low-water alarm added
 
 Bench (commit 750dc33) showed `heap stage uart_bridges_1 largest= 7680

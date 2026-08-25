@@ -78,4 +78,17 @@ static inline BaseType_t xTaskCreate(TaskFunction_t task, const char *name, uint
     return pdPASS;
 }
 
+/* 2026-08-24: added for stack_margin.c's host build (linked into
+ * test_rules_task_prestart.c's executable, which #includes rules_task.c
+ * directly and so needs stack_margin_register()/etc. to resolve). Every
+ * xTaskCreate*() stub above always leaves *out_handle == NULL, so
+ * stack_margin_read() never dereferences a non-NULL handle in a host build
+ * and this is never actually called -- it exists purely so the translation
+ * unit links, same reasoning as xTaskGetTickCount()/vTaskDelay() above. */
+static inline UBaseType_t uxTaskGetStackHighWaterMark(TaskHandle_t task)
+{
+    (void)task;
+    return 0;
+}
+
 #endif // TEST_STUB_TASK_H
