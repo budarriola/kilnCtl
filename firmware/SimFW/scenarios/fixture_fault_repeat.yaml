@@ -1,0 +1,49 @@
+name: fixture_fault_repeat
+version: 1
+exercises: []
+# TIER 0 -- fixture alone, no SaftyFW, no ESP. Companion to
+# fixture_fault_lifecycle.yaml; see that file's header for why tier-0
+# scenarios exist at all.
+#
+# Covers the half of the fault engine the lifecycle scenario does not: the
+# REPEAT scheduler. A repeating slot has to re-arm itself after each fire,
+# on the fixture's own sim clock, without drifting and without silently
+# stopping after the first fire -- and "stopped after the first fire" is
+# indistinguishable from "fired once, as asked" unless something explicitly
+# waits for the second one.
+preset: fast_test
+timescale: 1
+seed: 202
+overrides: {}
+dut:
+  profile: none
+faults:
+  - id: blinking_tc
+    type: tc_noise
+    target: tc:0
+    params: [5.0]          # noise sigma, degC -- value is immaterial here;
+                           # this scenario asserts on fire TIMING, not on
+                           # what the fault does to the reading.
+    trigger: { at_sim_time: { t: 8 } }
+    duration: { for: 2 }
+    repeat: { every: { period: 6, n: 3 } }
+expect:
+  - name: fires_again_after_the_repeat_period
+    # The second fire is the whole point. Anchored on the first FAULT_FIRED
+    # and requiring another one a period later, so a scheduler that fires
+    # once and forgets to re-arm fails here rather than passing quietly.
+    event: { type: fault_fired, slot: blinking_tc }
+    then:
+      event: { type: fault_fired, slot: blinking_tc }
+      not_before_s: 4      # a re-arm that fires early is as wrong as one
+                           # that never fires -- jitter is bounded, not free
+      within_s: 10         # MEASURED on real hardware 2026-08-24: the second
+                           # fire lands 8.000s after the first, which is the
+                           # 2s duration plus the 6s period -- the slot
+                           # re-arms after it clears, not from its own fire.
+                           # Window kept a little wider than that so an
+                           # innocent change to either number does not turn
+                           # into a false failure.
+  - name: no_protocol_errors_during_the_run
+    forbid: { event: { type: protocol_error }, before: { sim_end: true } }
+report_keep: [telemetry, events]
