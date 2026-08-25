@@ -29,8 +29,21 @@ server share one physical serial port.
 
 In the editor these are the **MCP Start / Stop / Restart / Status** buttons in
 the status bar, defined in `kilnCtl.code-workspace` (not `/.vscode/`, which is
-gitignored). The `MCP: Start servers` task also runs on workspace open, so the
-servers are usually up before an agent's first tool call.
+gitignored).
+
+Two things start them without being asked, because an HTTP MCP entry simply
+fails to connect if nothing is listening:
+
+* a `SessionStart` hook in `.claude/settings.json`, which covers every session
+  including a plain terminal one
+* the `MCP: Start servers` task in the workspace file, on folder open
+
+Both call the same script, and the script is idempotent — it polls `/health`
+first and does nothing if the servers are already up, so neither one restarts a
+server that is mid-session on a serial link.
+
+`.claude/settings.json` also lists all three in `enabledMcpjsonServers`, so a
+new session connects without stopping to ask for approval.
 
 `mykicadMcp/start_mcp_http_server.ps1` still starts the KiCad server on its own,
 for anyone using that submodule outside this repo. Inside the repo the script

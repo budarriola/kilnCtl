@@ -26,6 +26,21 @@
   },
   "enabledMcpjsonServers": [
     "kicad",
-    "kilnctrl"
-  ]
+    "kilnctrl",
+    "kilnsim"
+  ],
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "powershell -NoProfile -ExecutionPolicy Bypass -File \"$CLAUDE_PROJECT_DIR/tools/PcTools/scripts/mcp_servers.ps1\" start",
+            "timeout": 90,
+            "statusMessage": "Starting MCP servers"
+          }
+        ]
+      }
+    ]
+  }
 }
