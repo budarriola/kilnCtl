@@ -1,6 +1,8 @@
 # kilnCtl Roadmap — both processors
 
 > **Status:** planning · **Last reviewed:** 2026-08-24
+> **Start here:** the [What is actually left](#what-is-actually-left) section
+> immediately below is the short answer; the milestones are the detail.
 > **Keep this file current.** This is the top-level dispatch board: the place to
 > start a task from when you do not already know which plan owns it. It holds
 > *ordering and cross-processor dependencies only* — the detail lives in the
@@ -46,6 +48,7 @@ project rather than two.
 | [`firmware/SaftyFW/docs/BOOTLOADER.md`](firmware/SaftyFW/docs/BOOTLOADER.md) | The RP2040 bootloader, flash layout and recovery mode |
 | [`firmware/SimFW/docs/PLAN.md`](firmware/SimFW/docs/PLAN.md) | Kiln simulator / unit-test fixture (a *third* firmware, a second Pico on the bench): MAX31856 emulation, CT waveforms, relay sensing, thermal model, fault injection, its own MCP/CLI/GUI (`kilnsim`); also owns the `UnitTestFw` decommission. **Running on real silicon since 2026-08-24** — the fixture Pico boots, every command group is hardware-verified, fault injection reaches the emulated MAX31856 registers, and two I/O expanders are attached. Still gated on the SPI-timing proof (M-A, `spi_txn_count` is 0) and on the relay/E-stop/DUT-power harness. `kilnsim testmgr` is the one-command regression entry point; `firmware/SimFW/docs/TEST_MANAGER.md` documents it — see M9 |
 | [`tools/PcTools/TODO.md`](tools/PcTools/TODO.md) | GUI, MCP, GPIO probe, debug and logging for **both** processors |
+| [`firmware/KilnFW/TODO.md`](firmware/KilnFW/TODO.md) §§12–13 | M10's instrumentation: HTTP route-table cap, internal-DRAM low-water alarm, task-stack high-water reporting |
 | [`docs/REPO_LAYOUT.md`](docs/REPO_LAYOUT.md) | The hardware/software reorganisation and its blockers |
 | [`docs/SETUP.md`](docs/SETUP.md) | Fresh-clone setup: what is machine-specific, and how `tools/setup.ps1` handles it |
 
@@ -65,6 +68,72 @@ Four facts set the order. Everything else can be shuffled.
 4. **The liveness rule cuts both ways.** Once the ESP refuses to heat without
    safety telemetry, a main board with no Pico fitted cannot heat either — so
    that switch is thrown deliberately, with a documented bench escape hatch.
+
+---
+
+## What is actually left
+
+The milestones below are the detail. This is the honest short answer, because
+after M0 cleared, "what remains" stopped being a code question and became
+mostly a hardware-and-decisions question. Reviewed 2026-08-24.
+
+**Blocked on you, and nothing else can answer them.** These are not research
+tasks — they are facts about your kiln and your bench that the code has to be
+told:
+
+1. Element power per zone, and the breaker capacity feeding it.
+2. Kiln maximum rated temperature, and the thermocouple's.
+3. Physical zone arrangement (which element is where).
+4. The deferred sanity rate (S8's rate-of-rise ships disabled until a real
+   kiln's ramp is measured).
+5. **What each relay actually drives** — SSR input or contactor coil. K1-K4 are
+   signal relays (2 A, 125 VA), so this sets the duty window and wants a
+   coil-inrush check against those ratings.
+6. `hardware/UnitTestFixture/` — delete it or keep it. `firmware/UnitTestFw`
+   went on 2026-08-23; its embedded KiCad project was out of that change's
+   scope. Board files are off-limits without your say-so.
+7. `KilnFW/TODO.md` §10.1 — the twelve stale `display_*` MCP tools: delete
+   them, or restore a minimal firmware handler. Now sharper, because
+   `display_bridge_task` is confirmed dead code on real hardware.
+
+**Blocked on hardware that does not exist yet.** All of this is scripted and
+waiting, not unwritten:
+
+- The SimFW fixture itself. M-A's SPI-timing proof (Saleae, ≥10k transactions,
+  zero underruns) is the single biggest unretired risk in the project, and
+  nothing in `firmware/SimFW/` has ever touched a real master.
+- `GUARD_TEST_MATRIX.md` §3's trip rows — every enabled guard's real trip,
+  safe-state power-on, sensor open-circuit, current-mapping commissioning.
+- The safety processor's own MAX31856, and any CT. Until those are populated,
+  `safety TC invalid` and `0.00 A` are correct reporting of absent hardware,
+  not defects (M3, M5, M6).
+- S9's welded-contactor escalation, which by definition needs a welded
+  contactor.
+- The CT coupling transformer: the part is now selected (Hammond 140QEX) and
+  ordering is unblocked, but its 10.62 H figure is quoted at 1 kHz and applied
+  at 60 Hz — one look at the PDF before the order goes in.
+- Link-staleness *timing* (the 1.5 s ceiling, the 30 s firing abort). The Pico
+  is on the bench and the code is flashed; nobody has held the link down and
+  timed it.
+
+**Genuinely still software, and doable without you or the fixture.** This is
+now a short list, which is the point:
+
+- Re-read the task stacks after a real firing, then reclaim DRAM from the four
+  with wide margin (M10).
+- Audit `rules_task`'s callees for flash writes, so its stack can move to
+  PSRAM and give back 1024 bytes of internal DRAM (M10).
+- Run the guard scripts automatically instead of by hand (M10).
+- `kilnsim/benchproto_codec.py` duplicates kilnlink's CRC-16/CCITT-FALSE and
+  fails `check_no_duplicate_crc.ps1` — share the implementation or justify the
+  port on the allowlist, the way `protocol.py` already is.
+- `mykicadMcp/` and `pdfMcp/` still need moving under `tools/` (M7).
+
+**What is done and should not be reopened:** the link itself, the wire
+contract and its two independent version numbers, the PC-link acknowledgement
+convention, every guard's input plumbing, and the instrumentation that now
+reports DRAM, stack and link health. See the decisions table at the foot of
+this file before re-litigating any of them.
 
 ---
 
@@ -148,8 +217,17 @@ link, so it can run in parallel with M1 and M2 once M0 is out of the way.
 
 - [x] FreeRTOS SMP skeleton, GPIO6 driven low first, watchdog with latched trip
       reason — all done 2026-08-16, build-verified
-- [ ] **MAX31856 thermocouple ICs not yet connected on the bench.** Blocks all
-      real-reading work below it
+- [ ] **The SAFETY processor's MAX31856 is not populated.** Blocks all
+      real-reading work below it.
+      **Read the word "safety" carefully** — this item is about the RP2040's
+      own thermocouple, not the main board's. `KilnFW`'s three channels ARE
+      fitted and working: verified 2026-08-24 with all three reading ~35 °C,
+      `SR 0x00`, and open-circuit detection confirmed genuinely enabled
+      (`CR0 = 0x90`, so `OCFAULT[1:0] = 01`) — which is what makes "no fault"
+      mean "a thermocouple is attached" rather than "detection is switched
+      off". An absent TC on those channels would fault. The two sets of
+      thermocouples are easy to conflate from this line alone, and doing so
+      leads to "correcting" a true statement
 - [~] MAX31856 driver + config plumbing (tc_type via flash-backed
       `config_store`, commissioned over `SAFETY_CMD_SET_CONFIG`) built and
       wired end-to-end in code (2026-08-19) — **still open**: the part itself
@@ -243,8 +321,10 @@ Owned by [`firmware/SaftyFW/TODO.md`](firmware/SaftyFW/TODO.md) phases 6–8, co
       measurement of the ADC noise floor to confirm the uncommissioned
       presence fallback margin (25 counts) sits above it
 - [x] ESP → Pico context frames (`SAFETY_CMD_PUSH_CONTEXT`, incl.
-      `relay_recent_mask`) built from live board state — 2026-08-18. Not
-      hardware-verified: no Pico on this bench to confirm it decodes correctly
+      `relay_recent_mask`) built from live board state — 2026-08-18.
+      **Hardware-verified 2026-08-24**: the Pico is on the bench, the link is
+      up, and `context_valid` is computed from frames that actually arrive.
+      The "no Pico on this bench" caveat this bullet used to carry is retired
 - [~] Pico → ESP telemetry (status, diagnostics, firmware version, trip events,
       power) — all five frame types have working codecs, send paths, and
       `KilnFW`-side decode/dispatch, plus PC-facing `GET_DIAG`/`GET_TRIP_EVENT`
@@ -285,12 +365,20 @@ because it changes what a bare main board will do.
 - [x] Link staleness → fault at a fixed 1.5 s ceiling, 30 s silence aborts a
       running firing, boot-time `FW_VERSION` request retried until answered,
       and a documented bench escape hatch (`safety_link_fault_on_link_loss`) —
-      all built 2026-08-18/19. Code-verified and flashed; not hardware-timing
-      verified (no Pico on this bench)
+      all built 2026-08-18/19. Code-verified and flashed. **The Pico is now on
+      the bench (2026-08-24) so the "no Pico" caveat is gone, but the TIMING
+      half is still unverified**: nobody has held the link down with a
+      stopwatch to confirm the 1.5 s ceiling and the 30 s firing abort fire
+      when they should. That is a bench procedure, not a code gap
 - [~] GUI (web + LCD) surfaces safety temperature, enclosure temperature, and
       power — built and wired to the same status cache the wire frames land
-      in; reads null/"---" today because no Pico has ever sent the frames on
-      this bench (M0), not because of a code gap
+      in. **The reason for the blanks changed on 2026-08-24 and the
+      distinction matters**: frames now arrive every 500 ms, so this is no
+      longer "no Pico has ever sent them". Safety temperature reads null
+      because the safety MAX31856 is genuinely not populated (M3), and the
+      three current channels read 0.00 A because no CT is fitted. Both are
+      honest reporting of absent hardware, not a code gap and no longer an
+      M0 consequence
 - [ ] **AP-fallback fix unverified end to end** — needs a router with both
       correct and deliberately-wrong static config; see `KilnFW/TODO.md` Wi-Fi
 
@@ -487,6 +575,78 @@ hardware-trip rows, which is why it earns a milestone here.
 
 ---
 
+## M10 — Instrumentation: make the board tell you when it is wrong
+
+Not a feature milestone. This exists because four separate defects in this
+project were invisible for weeks not because they were subtle, but because
+nothing on the board was counting the right thing — and in three of the four,
+something *was* counting and reported the comfortable answer.
+
+Owned by [`firmware/KilnFW/TODO.md`](firmware/KilnFW/TODO.md) §§12–13.
+
+- [x] **HTTP route table silently overflowed.** `max_uri_handlers` was 84
+      against 85 real routes, so `POST /api/safety/commissioning/bench_preset`
+      never registered and 404'd with no visible cause. The cap had fallen
+      behind four times, each time surfacing as "one page is broken"; a comment
+      saying "keep this ahead of the count" had already failed three times.
+      Raised to 95 (44 bytes: `esp_http_server` allocates an array of
+      *pointers*, `httpd_main.c:430`) and made durable by
+      [`tools/check_uri_handler_cap.ps1`](tools/check_uri_handler_cap.ps1),
+      which recounts from source and fails if the cap is lower. Verified over
+      HTTP: the route now answers 200. 2026-08-24
+- [x] **A quarter of every safety poll was logged as a timeout on a healthy
+      link.** `timeouts 3616` against `diag applied 3618` / `power applied
+      3618`, zero CRC errors, STATUS count equal to the send count.
+      `safety_drain_still_waiting()` could speak for CT_CAL, CONFIG_PAGE and
+      COMMIT_CONFIG_REJECTED but not for a STATUS, so the poll abandoned its
+      remaining budget the moment an unrelated push arrived first — the same
+      bug a 2026-08-23 fix had closed for the other three callers, with the
+      fourth left out. **No deadline was widened.** Measured after: 310 polls
+      carrying 77 DIAG and 77 POWER pushes, zero timeouts. `80f473d`
+- [x] **Internal-DRAM low-water alarm**, split into a standing WARN and a
+      `DRAM REGRESSION` ERROR, because an alarm that fires on every boot is
+      one everybody learns to scroll past. Corrected the trough itself while
+      building it: the real minimum is `app_main_done`, ~1 kB below the
+      `uart_bridges_1` figure everyone had been quoting, and it sits *below*
+      the one documented real failure (free=11903, largest=8704 — `/app.js`
+      truncated, pages stuck on "Loading..."). `8d1b015`
+- [x] **First real task-stack measurement this project has ever taken**, and
+      it found `rules_task` — the rule evaluator that gates heating — at 336
+      bytes of 3072, 10.9% headroom, on an idle board. Raised to 4096.
+      It was invisible because the instrumentation had inherited vanilla
+      FreeRTOS's word units; ESP-IDF returns **bytes** (`task.h:1509`), so a
+      stray ×4 reported that task as 45.3% and OK. `d90986c`
+- [ ] **Re-read the stack margins after a real firing.** A high-water mark is
+      only as good as the worst path taken, and this board has never run a
+      profile with rules configured, so `rules_task`'s 2736 bytes is a FLOOR on
+      true usage, not a peak. 33% headroom is provisional until then
+- [ ] **Audit whether anything `rules_task` calls writes NVS or flash.** If
+      nothing does, its stack moves to PSRAM and costs no internal DRAM at all,
+      which would give back the 1024 bytes the resize spent. A flash write from
+      a PSRAM-stack task asserts in ESP-IDF's cache-disable path — the
+      `safety_cfg_store` incident. `rules_task.c` itself makes no `nvs_*` call;
+      its callees are unaudited
+- [ ] **Reclaim internal DRAM from the four healthy stacks.** `uart_owner_task`
+      (77.9%), `uart_owner_evt_task` (82.1%), `system_uart_bridge` (65.8%) and
+      `rules_watchdog` (67.4%) are all internal-only and all measured with
+      wide margin. Blocked on the same firing caveat above — resize on a
+      measurement taken from an idle board and this project repeats the bug
+      class it just spent a day fixing
+- [ ] **Wire the guard scripts into something that runs them.** All of
+      `tools/check_*.ps1` and `firmware/*/tools/check_*.ps1` are standalone and
+      manual today. Every one of them has been proven able to fail, which is
+      the hard part; being run automatically is the easy part nobody has done
+
+**The rule this milestone is really about:** every check added here was made to
+fail on purpose before being trusted. That caught two checks that would
+otherwise have shipped useless — a slack constant expressed in terms of itself,
+and a Python test that could never fail on a C regression — and one that was
+actively dangerous: a string-literal fix to `check_isolation.ps1` that blinded
+its own `#include` rule while still printing "Isolation check passed". A check
+nobody has watched fail is not evidence.
+
+---
+
 ## Future work — KilnFW PC-link command acknowledgement
 
 **Moved out of this file, 2026-08-24.** Per the upkeep rule at the top, the
@@ -498,8 +658,35 @@ each other, and `pc_tools` surfaces the reason instead of decoding it and
 discarding it, which is what it used to do. The rule worth carrying forward is
 recorded in [`firmware/KilnFW/docs/UART_PROTOCOL.md`](firmware/KilnFW/docs/UART_PROTOCOL.md):
 on this hop an ACK means *queued*, not *done*, so a handler that rejects must
-reply for itself. Three narrower instances of the same shape remain open and
-are listed in TODO.md section 11.
+reply for itself.
+
+**Closed out 2026-08-24 (`7b4c087`).** The three narrower instances this
+paragraph used to leave open are done, and the audit behind them found more
+than the item described: twelve IO subcommands plus DISPLAY's writes and three
+TOUCH commands were fire-and-forget on the host side, so a refusal landed with
+nothing pending and was logged at debug as "ignoring unsolicited response";
+AUTOTUNE `ABORT`/`ACCEPT` and four WIFI writes did wait but discarded the
+reason. On the firmware side `display_bridge_task` had never received any of
+the original treatment at all — 13 guard failures replying zero bytes, plus 2
+in TOUCH.
+
+Two things are worth carrying forward rather than rediscovering:
+
+- **A reasonless rejection is not a safe default.** `{subcmd, 0}` was
+  byte-identical to `THERMO_CMD_READ_FAULTS`'s and `IO_CMD_SX_SCAN`'s honest
+  empty-success reply, so "this firmware has never heard of your command"
+  and "we ran it and found nothing" were the same two bytes — on the exact
+  path an older build takes. Every rejection now carries a reason, enforced by
+  [`tools/check_bridge_reject_reason.ps1`](tools/check_bridge_reject_reason.ps1).
+- **The DISPLAY half is correct but unreachable.** `main.c` never starts
+  `display_bridge_task` (LVGL owns the panel), so every DISPLAY frame is NACKed
+  by the transport as "dst task 4 not registered". It changes no observable
+  behaviour until `KilnFW/TODO.md` §10.1 decides between deleting the stale
+  `display_*` tools and restoring a minimal handler. **That decision is open
+  and is one of the few remaining items that needs a human.**
+
+One gap remains open on purpose: `BLIT_DATA` stays raw fire-and-forget, because
+a per-chunk wait would turn a ~1 minute image transfer into ~20 minutes.
 
 This does NOT apply to the ESP↔Pico safety link, whose no-ACK doctrine is
 deliberate and correct: `LINK_PROTOCOL.md` sections 1–2 forbid obliging the
@@ -523,7 +710,7 @@ different things; keep them distinct.
 | **A request and its reply may never share a command id.** Telling them apart by payload length structurally blocks a short refusal reply, which is why SAFETY/DISPLAY/TOUCH's driver-error paths stayed silent. `GET_CT_CAL`/`GET_PARAM`/`GET_CONFIG_PAGE` moved to `0x22`/`0x23`/`0x24`; `GET_FW_VERSION` keeps its shared `0x0B` as the documented exception, being inside the frozen floor where a refusal is never needed. | 2026-08-24 | `firmware/CommonFW/docs/LINK_PROTOCOL.md` |
 | **The two links version independently.** `UART_PROTOCOL_VERSION` (PC↔ESP) was an alias of `KILNLINK_PROTOCOL_VERSION` (ESP↔Pico) behind a hard-equality gate, so an isolated-link bump refused every PC command until pc_tools moved. Bitten three times before being split. | 2026-08-24 | `firmware/KilnFW/App/drivers/uart_task_ids.h` |
 | K4 → line-contactor interlock: J10 pin 1 = NO, pin 2 = COM, pin 3 = NC (read from the K4 symbol's rest position, not silkscreen) — still wants a continuity check against the physical part | 2026-08-16 | `firmware/SaftyFW/docs/HARDWARE.md` §3 |
-| E-stop circuit is normally-closed by design; no jumper fitted on the `estop` net today, so an as-built board reads permanent STOP until one is added | 2026-08-16 | `firmware/SaftyFW/docs/HARDWARE.md` §5 |
+| E-stop circuit is normally-closed by design. ~~No jumper fitted, so an as-built board reads permanent STOP~~ — **corrected 2026-08-24 by measurement**: `pico_gpio_read(9)` reads LOW on this bench, i.e. a contact IS fitted and S7 correctly stays quiet. Do not plan around needing to fit one; measure instead. The stale note also masked a real inversion — `discrete_task.c` had `!gpio_get()` on an active-HIGH pin, so this healthy reading decoded as *pressed*, hidden because S5 latched first and `safety_guards_tick()` early-returns while any trip is latched | 2026-08-16, corrected 2026-08-24 | `firmware/SaftyFW/docs/HARDWARE.md` §5, commit `642dd54` |
 | ESP32-S3 boot-loop (repeating stack overflow in the main task, right after LVGL's boot banner) fixed by raising `CONFIG_ESP_MAIN_TASK_STACK_SIZE` 3584→8192 | 2026-08-19 | `firmware/KilnFW/App/main.c`, `sdkconfig.defaults` |
 | Internal SRAM exhaustion: `xTaskCreatePinnedToCore()` always takes TCB+stack from internal SRAM, and Wi-Fi/lwIP + LVGL had claimed nearly all of it by the time later tasks tried to start (caused the AUTOTUNE/WIFI UART-task registration failures). Fixed at the source — moved LVGL's allocator and the Wi-Fi/lwIP pools to PSRAM — not by shrinking the tasks that were failing | 2026-08-20 | `firmware/KilnFW/TODO.md` §1 |
 | `uart_owner_transfer()` called `xSemaphoreCreateBinary()` (a heap alloc) on every single UART transfer; under real interactive load this exhausted internal SRAM (`ESP_ERR_NO_MEM` bursts every ~40s). Fixed with a static, stack-resident semaphore | 2026-08-18 | `firmware/KilnFW/App/drivers/espInterfaces/uart_owner.c` |
