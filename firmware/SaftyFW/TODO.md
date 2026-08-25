@@ -28,8 +28,8 @@ baud zero frames were ever received. Walking the baud rate down settled on
 the bench (2026-08-23) — see `docs/HARDWARE.md` §1 for the measurement. That
 optocoupler pair was replaced by a non-inverting digital isolator (U6, an
 ADuM1201WT) on 2026-08-25; the 9600 figure was a property of the retired
-parts, not of either firmware, and a fresh baud sweep is in progress — see
-`KILNCTL_SAFETY_BAUD_RATE` in `KilnFW/App/drivers/Kconfig` for the current
+parts, not of either firmware, and the baud sweep is now complete — see
+`KILNCTL_SAFETY_BAUD_RATE` in `KilnFW/App/drivers/Kconfig` for the committed
 value. Items below marked hardware-gated may still be open for their own
 reasons; the link itself is no longer the blocker.
 
@@ -428,9 +428,9 @@ below — and a real end-to-end update crossing the isolated link.
       one for one over minutes and was the committed, hardcoded value on both
       sides for as long as that optocoupler pair was fitted. That pair was
       replaced by a non-inverting digital isolator (U6) on 2026-08-25, so the
-      9600 ceiling no longer applies and a fresh sweep is in progress — see
+      9600 ceiling no longer applies and the sweep is now complete — see
       `KILNCTL_SAFETY_BAUD_RATE` in `KilnFW/App/drivers/Kconfig` for the
-      current value. What remains open is the *update-transfer* error rate at
+      committed value. What remains open is the *update-transfer* error rate at
       whatever the current committed baud is over a sustained multi-megabyte
       run — untested, and a lower baud with any nonzero frame loss turns a
       35 s update at 115200 into something much longer, because retries still

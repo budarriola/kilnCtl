@@ -213,10 +213,18 @@ Both firmwares hardcoded **9600** at the time — `KILNCTL_SAFETY_BAUD_RATE` in
 negotiation, and raising it needed a faster optocoupler or a real line driver
 in place of the TCMT1109/R15 pair. **That constraint belonged to the
 optocoupler pair, not to either UART peripheral, and no longer applies now
-that U6 (an ADuM1201WT digital isolator) has replaced it (2026-08-25).** A
-fresh baud sweep against U6 is in progress; see `KILNCTL_SAFETY_BAUD_RATE` in
-`KilnFW/App/drivers/Kconfig` for the current measured value rather than the
-9600 figure above.
+that U6 (an ADuM1201WT digital isolator) has replaced it (2026-08-25).**
+
+A fresh sweep against U6, 2026-08-25, 60 seconds continuous per rate with
+both sides rebuilt and reflashed for each rate: 921600, 460800 and 230400 all
+passed clean (zero new crc/framing, length-mismatch, crc-mismatch or resync
+counts over the window, status replies still answering every 500 ms poll); a
+negative control (ESP at 230400 against a Pico deliberately left at 115200)
+failed in 3 seconds, proving the test can fail. The chosen value is
+**230400**, two standard steps below the fastest passing rate (921600). See
+`KILNCTL_SAFETY_BAUD_RATE` in `KilnFW/App/drivers/Kconfig` for the full table
+and current value — that file is the single source of truth for this number,
+not this one.
 
 **A static GPIO high/low test across this link passes at any baud rate**,
 because both an optocoupler and a digital isolator carry a DC level perfectly

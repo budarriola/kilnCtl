@@ -209,8 +209,14 @@ firmwares then hardcoded, with no negotiation — `KILNCTL_SAFETY_BAUD_RATE` in
 `KilnFW`, `UART_OWNER_BAUD_RATE` in `SaftyFW`'s `src/tasks/uart_owner.c`. At
 the time, raising it needed a faster part or a line driver in place of the
 optocoupler/pull-up pair; now that U6 is fitted instead, that specific
-constraint is gone, and a fresh baud sweep is in progress — again, see
-`KILNCTL_SAFETY_BAUD_RATE` in Kconfig for the current value, not 9600. **A
+constraint is gone. A fresh sweep against U6 (2026-08-25, 60 s continuous per
+rate, both sides rebuilt/reflashed each time) passed 921600, 460800 and
+230400 clean, and a negative control (230400 against a deliberately
+mismatched 115200 peer) failed in 3 s, proving the test could fail; the
+committed value is **230400**, two standard steps below the fastest passing
+rate. `KILNCTL_SAFETY_BAUD_RATE` in `KilnFW/App/drivers/Kconfig` is the single
+source of truth for this number and carries the full table — see it, not the
+9600 figure above. **A
 static GPIO high/low test across this link passes at any baud rate** —
 both an optocoupler and a digital isolator carry a DC level fine — which is
 why the old optocoupler ceiling was found late: the wiring had already been

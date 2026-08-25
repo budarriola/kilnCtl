@@ -18,9 +18,14 @@
 // transfer and releases it itself, in ota_esp_do_transfer()'s single cleanup
 // block, before the HTTP response is sent.
 //
-// The Pico path cannot work that way: UPDATE_PROTOCOL.md's own honest
-// throughput math puts a full relay at ~35 s minimum (115200 baud, 248 B
-// chunks, stop-and-wait's problems aside), and holding an HTTP worker/socket
+// The Pico path cannot work that way: a full relay takes tens of seconds at
+// best (248 B chunks, stop-and-wait's problems aside -- UPDATE_PROTOCOL.md
+// has the throughput math, keyed to whatever KILNCTL_SAFETY_BAUD_RATE
+// currently is; the "~35 s at 115200" figure that used to be quoted here was
+// stale twice over, first when the link dropped to 9600 and again when it
+// went to 230400). The exact number does not matter to the decision below --
+// any duration in this range is far too long to hold a socket for -- and
+// holding an HTTP worker/socket
 // open that long risks a browser or proxy timeout for no benefit -- the
 // image is already safely staged in flash by the time the relay starts, so
 // there is nothing left that needs the HTTP connection. So:

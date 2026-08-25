@@ -207,6 +207,28 @@ either, so a fault-gated check alone would miss the "already-on relay gets
 stuck on" failure mode). See `TODO.md` section 6A.6 for the implementation
 note.
 
+**`SAFETY_FAULT_SRC_APP` latches forever once guard 9 sets it for a
+transient control-task stall — found on the bench 2026-08-25.** Guard 9
+(`profile_executor.c:1653`) asserts `SAFETY_FAULT_SRC_APP` when the control
+task's tick has been stale longer than `WATCHDOG_TICK_DEAD_MS` (10 s,
+`profile_executor.c:75`). Nothing ever clears it. The only
+`safety_link_set_fault_source(..., false)` call sites in `KilnFW` are
+`profile_executor.c:613` (which only clears the `THERMO`/`THERMAL_SANITY`
+sources tracked in `s_exec.global_fault_source`) and `safety_link.c:2852`
+(`SAFETY_LINK`), plus `uart_bridge.c`'s `PC_LINK` pair — none of them touch
+the bit guard 9 sets. So a control-task stall that fully recovers on its own
+still leaves GPIO6 driven high until the ESP reboots: the safety processor
+keeps seeing a main-processor fault that no longer exists, and optocoupler
+U1's LED — now U6, but the same continuous-drive concern — stays lit
+indefinitely, which is an aging concern the board owner has specifically
+asked about. This is distinct from the boot-time `SAFETY_FAULT_SRC_APP`
+assertions in `kiln_enter_safe_state()` (`App/main.c`), which **are**
+documented as deliberately reboot-latched hard faults (see "4. Boot-time
+fault assertion" above) — the open question is only whether guard 9's
+runtime, self-recovering-stall case was meant to inherit that same
+latch-until-reboot behavior, and it looks like it did so by accident rather
+than by decision.
+
 ## Summary table
 
 | Failure | Detected? | Relay-on blocked? | Existing relays dropped? |

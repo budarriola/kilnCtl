@@ -1,0 +1,55 @@
+# check_safety_baud_sync.ps1 -- the ESP<->RP2040 isolated link baud rate is
+# hardcoded in THREE places that must agree, with no negotiation on the wire.
+# A mismatch does not degrade gracefully: it produces framing errors and
+# nothing else. Measured 2026-08-25 with the ESP at 230400 and the Pico at
+# 115200 -- 121 new crc/framing errors in 3 seconds, zero frames delivered.
+#
+# The three sites:
+#   1. KilnFW      App/drivers/Kconfig            KILNCTL_SAFETY_BAUD_RATE default
+#   2. SaftyFW     src/tasks/uart_owner.c         UART_OWNER_BAUD_RATE
+#   3. SaftyFW     bootloader/main.c              enter_recovery()'s uart_init
+#
+# WHY A SCRIPT AND NOT A _Static_assert: they live in two separate build
+# systems (ESP-IDF/Kconfig and the Pico SDK), so no compile-time assert can
+# see across them. This check exists because the mismatch actually shipped:
+# on 2026-08-25 the Kconfig default was left at 921600 while both SaftyFW
+# sites read 230400. It survived a full commit because KilnFW/sdkconfig --
+# which DID say 230400 -- is gitignored, so the bench was testing a value a
+# fresh clone would never build. The generated config hid the bug from
+# everything except a clean checkout.
+$ErrorActionPreference = 'Stop'
+$repo = Split-Path -Parent $PSScriptRoot
+
+$sites = @()
+
+$kconfigPath = Join-Path $repo 'firmware/KilnFW/App/drivers/Kconfig'
+$kconfig = Get-Content -Raw $kconfigPath
+# Take the `default` on the first line following the config declaration.
+if ($kconfig -notmatch '(?ms)config\s+KILNCTL_SAFETY_BAUD_RATE\b.*?^\s*default\s+(\d+)') {
+    throw "check_safety_baud_sync: could not find KILNCTL_SAFETY_BAUD_RATE's default in $kconfigPath -- the option was renamed or restructured, so this check is now blind. Fix the check, do not delete it."
+}
+$sites += [pscustomobject]@{ Name = 'KilnFW Kconfig default'; Baud = [int]$Matches[1]; Path = $kconfigPath }
+
+$ownerPath = Join-Path $repo 'firmware/SaftyFW/src/tasks/uart_owner.c'
+$owner = Get-Content -Raw $ownerPath
+if ($owner -notmatch '#define\s+UART_OWNER_BAUD_RATE\s+(\d+)u') {
+    throw "check_safety_baud_sync: could not find UART_OWNER_BAUD_RATE in $ownerPath -- fix the check, do not delete it."
+}
+$sites += [pscustomobject]@{ Name = 'SaftyFW UART_OWNER_BAUD_RATE'; Baud = [int]$Matches[1]; Path = $ownerPath }
+
+$blPath = Join-Path $repo 'firmware/SaftyFW/bootloader/main.c'
+$bl = Get-Content -Raw $blPath
+if ($bl -notmatch 'uart_init\(uart1,\s*(\d+)u\)') {
+    throw "check_safety_baud_sync: could not find recovery-mode uart_init(uart1, ...) in $blPath -- fix the check, do not delete it."
+}
+$sites += [pscustomobject]@{ Name = 'SaftyFW bootloader recovery'; Baud = [int]$Matches[1]; Path = $blPath }
+
+$distinct = $sites.Baud | Sort-Object -Unique
+if ($distinct.Count -ne 1) {
+    Write-Host 'Safety-link baud rates DISAGREE:'
+    foreach ($s in $sites) { Write-Host ("  {0,-32} {1}" -f $s.Name, $s.Baud) }
+    throw "check_safety_baud_sync: $($distinct.Count) different baud rates across the three hardcoded sites ($($distinct -join ', ')). They must all match -- the link has no baud negotiation, and a mismatch means framing errors, not slow operation."
+}
+
+Write-Host ("Safety-link baud sync OK: all three sites agree at {0} baud." -f $distinct[0])
+foreach ($s in $sites) { Write-Host ("  {0,-32} {1}" -f $s.Name, $s.Baud) }

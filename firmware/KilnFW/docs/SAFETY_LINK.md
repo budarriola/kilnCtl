@@ -210,12 +210,12 @@ optocoupler-era behaviour above.
 
 ## ESP <-> Pico contract
 
-Transport: ESP32-S3 **UART1**, 8N1, `CONFIG_KILNCTL_SAFETY_BAUD_RATE` (see
-`KilnFW/App/drivers/Kconfig` for the current measured value -- a baud sweep
-against U6 is in progress as of 2026-08-25 and no final number is committed
-here), no line inversion on either end any more (the ADuM1201 in U6 does not
-invert; see Trap 2's history for the inversion this link used to need under
-the retired optocoupler pair). The payload framing is
+Transport: ESP32-S3 **UART1**, 8N1, `CONFIG_KILNCTL_SAFETY_BAUD_RATE`,
+**230400** as of the 2026-08-25 sweep against U6 (see `KilnFW/App/drivers/Kconfig`
+for the full table and the current value), no line inversion on either end
+any more (the ADuM1201 in U6 does not invert; see Trap 2's history for the
+inversion this link used to need under the retired optocoupler pair). The
+payload framing is
 the **same `uart_protocol` stack the PC link uses** — 0x7E-delimited,
 byte-stuffed, CRC16/CCITT-FALSE, indexed DATA frames with ACK/NACK, retried and
 de-duplicated by the protocol layer. See `docs/UART_PROTOCOL.md` for the
@@ -244,8 +244,84 @@ hardcoded to 9600 for this reason; there is still no negotiation, so a change
 to one without the other is a dead link regardless of what number is chosen.
 Raising the rate used to need a faster optocoupler or a real line driver in
 place of the TCMT1109/R15 pair; now that U6 (an ADuM1201WT) is fitted instead,
-that constraint no longer applies, and the current ceiling (if any) is whatever
-the ongoing baud sweep finds — see `KILNCTL_SAFETY_BAUD_RATE` in Kconfig.
+that constraint no longer applies.
+
+### The 2026-08-25 sweep against U6
+
+Walking the rate down again, 60 seconds continuous traffic per rate, both
+sides rebuilt and reflashed for each rate (RP2040 status pushes at the
+500 ms poll period). A rate passes only if none of four counters —
+crc/framing errors, length mismatch, crc mismatch, resync — gain a single
+count during the window, and status replies keep answering every poll.
+`timeouts` and `config_page` are excluded from the verdict: both are
+dominated by the separate open `safety_cfg_store_refetch` defect (page 0
+failed / `ESP_ERR_TIMEOUT`), which climbs identically at every baud rate
+regardless of whether the link itself is healthy.
+
+| Baud | Result |
+|-----:|--------|
+| 921600 | PASS — 0 new crc/framing, 0 length mismatch, 0 crc mismatch, 0 resync; status +124 in 62 s (2.00/s) |
+| 460800 | PASS — 0 new crc/framing, 0 length mismatch, 0 crc mismatch, 0 resync; status +123 in 62 s (2.00/s) |
+| 230400 | PASS — 0 new crc/framing, 0 length mismatch, 0 crc mismatch, 0 resync; status +124 in 62 s (2.01/s) |
+
+**Negative control**, proving the test can fail: ESP at 230400 against a Pico
+deliberately left at 115200 failed in 3 s — crc/framing errors rose
+941 -> 1062 (+121), length mismatch 58 -> 69.
+
+**Chosen value: 230400** (the committed default). Rule used: the fastest
+passing rate was 921600; one standard step down from that is 460800; the
+chosen value is the slower of that step and the requested 230400 — so
+230400, two full standard steps below a rate that soaks clean.
+
+Two methodology points this sweep depends on, because a first attempt at it
+got both wrong:
+
+1. **`sent` and `received` are not a loss metric.** `sent` counts outbound
+   requests of several kinds; `received` counts status replies only, and
+   equals the histogram's `status` count exactly. Comparing the two shows
+   ~50% "loss" at every rate, including the deliberately mismatched
+   negative control — that is the metric being wrong, not the link.
+2. **Flashing resets the Pico while the ESP keeps running**, and that reset
+   throws a genuine burst of framing errors (plus `break condition on
+   uart1` / `frame length mismatch` log lines). The measurement window must
+   start after a settle delay following any flash, or every rate fails on
+   reset residue rather than its own behavior. The first sweep attempt
+   misread exactly this residue as a 921600 failure; 921600 in fact passes
+   cleanly once measured past the reset.
+
+See `KILNCTL_SAFETY_BAUD_RATE` in `KilnFW/App/drivers/Kconfig` for this same
+table kept next to the default it justifies.
+
+### Open defect found after the sweep: `SAFETY_INBOX_LEN` overflows at 230400, and the 60 s soak did not catch it (2026-08-25)
+
+The sweep above passed at 230400 because it only measured the four
+physical-layer counters and status cadence, and those stayed clean for 60 s.
+Left running for three minutes after an ESP reset, the link itself came
+apart: `link_up` flapped (up at 80 s, down 100-140 s, up again at 160 s)
+while `broadcast dropped` climbed continuously at about 2.8/s (78 -> 450 over
+160 s) — with crc/framing, length mismatch, crc mismatch and resync all
+staying at zero new counts the entire time. The bytes are arriving intact;
+something above the wire is failing to keep up with them.
+
+Mechanism: `SAFETY_INBOX_LEN` is 4 (`safety_link.c:83`). `safety_poll_task`
+blocks for seconds at a time inside the failing `safety_cfg_store_refetch()`
+calls documented above (263 `config_page` requests observed, all timing out —
+this is that same pre-existing defect, not a new one). Four inbox slots
+overflow long before the task returns to drain them. At 9600 baud the peer's
+broadcast rate was slow enough that four slots were plenty; at 230400 it
+is not — raising the baud converted a latent, wire-throttled bug into an
+active one that destabilises the link.
+
+**This is why the 60 s soak windows above did not catch it**: they measure
+physical-layer counters and status rate, and both still look healthy inside
+one minute. Anyone re-running this sweep needs a longer window (multiple
+minutes) if they want to see this failure mode.
+
+Candidate directions, not yet implemented: raise `SAFETY_INBOX_LEN` (buys
+headroom, changes no timing), or stop the failing refetch from monopolising
+the transaction lock. **Warning:** two previous attempts to fix the
+`config_page` refetch defect panicked `safety_poll_task` and were reverted —
+that path must not be changed casually.
 
 **A static GPIO high/low test across this link passes at any baud rate**,
 because both an optocoupler and a digital isolator carry a DC level perfectly
@@ -275,6 +351,17 @@ always win. The ESP learns the outcome from `SAFETY_FLAG_ENABLED` in the next
 status. A status frame pushed unsolicited right after a `REQUEST_ENABLE` is
 accepted and refreshes the cache, so a Pico that wants to answer immediately
 may.
+
+**Confirmed on the bench with no Pico present (2026-08-25):** RP2040 halted
+over SWD to simulate an absent safety processor, then `safety_request_enable(True)`
+called via the MCP tool (`tools/PcTools/src/kilnctrl/mcp_server.py:1746`).
+It returned `ok - requested enable=True` — nothing was there to grant it.
+This is the transport-ACK-means-queued-not-done gap the docstring above
+already calls out; this is that gap actually observed, not a new mechanism.
+Everything else about the absent-processor case behaved correctly: `link_up`
+went false, the reported status age grew to its 65534 ms saturation, the
+isolated fault line correctly asserted (`fault line asserted (by us)`, GPIO6
+high), and the ESP's own PC link stayed alive throughout.
 
 There is no `PING` on this wire: `safety_link_ping()` sends a `GET_STATUS`
 right away instead of waiting for the next poll tick. The other `SAFETY_CMD_*`

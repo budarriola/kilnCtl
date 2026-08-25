@@ -161,9 +161,9 @@ Owned by [`firmware/SaftyFW/TODO.md`](firmware/SaftyFW/TODO.md) phase 0.
       `safety_get_status()` returned live telemetry. **That optocoupler pair
       was replaced by a non-inverting digital isolator (U6) on 2026-08-25;
       the 9600 figure was a property of the retired parts, not of either
-      firmware, and a fresh baud sweep is in progress — see
+      firmware, and the baud sweep is now complete — see
       `KILNCTL_SAFETY_BAUD_RATE` in `KilnFW/App/drivers/Kconfig` for the
-      current value.** See `firmware/KilnFW/docs/SAFETY_LINK.md` "Transport"
+      committed value.** See `firmware/KilnFW/docs/SAFETY_LINK.md` "Transport"
       and `firmware/SaftyFW/docs/HARDWARE.md` §1.
 - [x] Tier 0 pin test settles ESP TX/RX by measurement (`HARDWARE.md` §1) —
       moot as a separate step: the Pico is attached and the link carries live

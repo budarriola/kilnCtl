@@ -348,7 +348,7 @@ menu "KilnCtrl Hardware Configuration"
 
         config KILNCTL_SAFETY_BAUD_RATE
             int "Safety link baud rate"
-            default 921600
+            default 230400
             help
                 Must stay equal to SaftyFW's UART_OWNER_BAUD_RATE
                 (src/tasks/uart_owner.c) AND to the bootloader's recovery-mode
@@ -378,9 +378,61 @@ menu "KilnCtrl Hardware Configuration"
                 the same change -- see safety_link.c's comment at
                 uart_owner_init, and uart_owner.c's at uart_owner_init.
 
-                MEASURED SWEEP RESULTS: see the table appended below once the
-                descending 60-second-per-rate sweep has been run. Do not raise
-                this above the value chosen there without re-running it.
+                MEASURED SWEEP RESULTS, against U6, 60 seconds continuous per
+                rate, both sides rebuilt and reflashed for each rate. A rate
+                passes only if NONE of these four counters gain a single count
+                during the window -- crc/framing errors, length mismatch, crc
+                mismatch, resync -- AND status replies keep answering the
+                500 ms poll. `timeouts` and `config_page` are deliberately
+                excluded from the verdict: both are dominated by the separate
+                open safety_cfg_store_refetch defect (page 0 failed /
+                ESP_ERR_TIMEOUT), which climbs identically at every baud rate
+                and would fail all of them for a reason that has nothing to
+                do with baud.
+
+                  921600 -- PASS. 0 new crc/framing, 0 length mismatch,
+                            0 crc mismatch, 0 resync. Status +124 in 62 s
+                            (2.00/s).
+                  460800 -- PASS. 0 new crc/framing, 0 length mismatch,
+                            0 crc mismatch, 0 resync. Status +123 in 62 s
+                            (2.00/s).
+                  230400 -- PASS. 0 new crc/framing, 0 length mismatch,
+                            0 crc mismatch, 0 resync. Status +124 in 62 s
+                            (2.01/s).
+
+                Negative control, proving the test can fail: ESP at 230400
+                against a Pico deliberately left at 115200 failed in 3 s,
+                crc/framing errors rising 941 -> 1062 (+121) and length
+                mismatch 58 -> 69.
+
+                CHOSEN VALUE: 230400, i.e. this default. Rule used: the
+                fastest passing rate was 921600; one standard step down from
+                that is 460800; the chosen value is the slower of that step
+                and the requested 230400 -- so 230400, two full standard
+                steps below a rate that soaks clean.
+
+                Two methodology traps this sweep ran into, worth remembering
+                if it is ever re-run:
+
+                1. `sent` and `received` (from GET_LINK_STATS) are NOT a loss
+                   metric and must never be compared to each other. `sent`
+                   counts outbound requests of several kinds; `received`
+                   counts status replies only, and equals the histogram's
+                   `status` count exactly. Comparing them shows ~50% "loss"
+                   at every rate, including a deliberately mismatched pair --
+                   that is the metric being wrong, not the link.
+                2. Flashing resets the Pico while the ESP keeps running, and
+                   that reset throws a genuine burst of framing errors (plus
+                   `break condition on uart1` / `frame length mismatch` log
+                   lines). The measurement window must start after a settle
+                   delay following any flash, or every rate fails on reset
+                   residue rather than its own behavior -- an earlier sweep
+                   attempt misread exactly this residue as a 921600 failure;
+                   921600 in fact passes cleanly once measured past the
+                   reset.
+
+                Do not raise this above 921600 (the fastest rate measured to
+                pass) without re-running the sweep.
 
                 Still true, and still the trap that hid the opto ceiling for
                 weeks: static GPIO high/low tests pass at ANY baud rate,

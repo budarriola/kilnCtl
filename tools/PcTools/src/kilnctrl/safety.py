@@ -90,11 +90,17 @@ MUTATING_REJECT_WINDOW_S = 0.5
 #: ESP does not answer from a cache -- uart_bridge.c's SAFETY_CMD_GET_CT_CAL
 #: case calls safety_link_get_ct_cal(), a live, blocking round trip across
 #: the isolated link to the Pico (SAFETY_LINK_REPLY_TIMEOUT_MS in
-#: firmware/KilnFW/App/drivers/safety_link.h, ~1.2 s at 9600 baud). This
+#: firmware/KilnFW/App/drivers/safety_link.h -- that constant is DERIVED from
+#: the configured baud rather than fixed, so it shrank from ~1.2 s at the old
+#: 9600 to roughly 146 ms at 230400; see KILNCTL_SAFETY_BAUD_RATE for the
+#: current rate). This
 #: budget must cover that ESP-side wait plus one more PC<->ESP round trip on
 #: top of it, so it is DEFAULT_REPLY_TIMEOUT_S plus a multiple of
 #: safety_link.h's own worst case rather than the same flat 2.0 s every
-#: cache-only query uses.
+#: cache-only query uses. Deliberately NOT retightened alongside the baud
+#: increase: this is a host-side patience budget, and the cost of it being
+#: generous is a slower failure report, while the cost of it being tight is a
+#: spurious timeout on a query that did nothing wrong.
 CT_CAL_REPLY_TIMEOUT_S = 5.0
 
 #: Maps a request id to the DIFFERENT id its successful reply carries, for

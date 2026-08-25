@@ -80,9 +80,9 @@ an RP2040 safety processor (`firmware/SaftyFW`).
   not switch past at 115200 — on top of the pin/inversion fixes above; see
   `docs/SAFETY_LINK.md` "Transport" and `firmware/SaftyFW/docs/HARDWARE.md` §1
   for that historical measurement. That optocoupler pair was replaced with a
-  digital isolator on 2026-08-25 and a new baud sweep is in progress — see
+  digital isolator on 2026-08-25 and the baud sweep is now complete — see
   `CONFIG_KILNCTL_SAFETY_BAUD_RATE` in `KilnFW/App/drivers/Kconfig` for the
-  current measured value, not the 9600 figure above.
+  committed value, not the 9600 figure above.
   The safety thermocouple IC itself is not fitted on this bench unit yet, so
   guard S5 (`SAFETY_TRIP_SENSOR_INVALID`) is expected to trip roughly a
   minute after boot once nothing else trips first — that is "sensor still
