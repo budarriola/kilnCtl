@@ -62,7 +62,57 @@
       "files.insertFinalNewline": false,
       "editor.formatOnSave": false
     },
-    "python.defaultInterpreterPath": "${workspaceFolder:PcTools}/.venv/Scripts/python.exe"
+    "python.defaultInterpreterPath": "${workspaceFolder:PcTools}/.venv/Scripts/python.exe",
+
+    // Status-bar buttons (seunlanlege.action-buttons). These live here, not in
+    // /.vscode/settings.json, for the reason given at the top of this file:
+    // that directory is gitignored, so a button defined there exists only on
+    // the machine that made it. ${workspaceFolder} alone is ambiguous in a
+    // multi-root workspace -- every path below names its folder explicitly.
+    //
+    // The MCP servers are HTTP now (see docs/MCP_SERVERS.md). An HTTP MCP
+    // entry in .mcp.json fails to connect if nothing is listening, so
+    // "MCP Start" is the button that makes the editor's kicad/kilnctrl/kilnsim
+    // tools work at all; the folderOpen task below normally gets there first.
+    // One button covers all three -- mykicadMcp/start_mcp_http_server.ps1 is
+    // still there for using that submodule outside this repo.
+    "actionButtons.commands": [
+      {
+        "name": "$(play) MCP Start",
+        "command": "powershell -NoProfile -ExecutionPolicy Bypass -File ${workspaceFolder:kilnCtl}\\tools\\PcTools\\scripts\\mcp_servers.ps1 start",
+        "color": "lightgreen",
+        "singleInstance": true,
+        "tooltip": "Start the kicad (8766), kilnctrl (8767) and kilnsim (8768) HTTP MCP servers"
+      },
+      {
+        "name": "$(debug-stop) MCP Stop",
+        "command": "powershell -NoProfile -ExecutionPolicy Bypass -File ${workspaceFolder:kilnCtl}\\tools\\PcTools\\scripts\\mcp_servers.ps1 stop",
+        "color": "orange",
+        "singleInstance": true,
+        "tooltip": "Graceful shutdown, so the serial ports are released cleanly"
+      },
+      {
+        "name": "$(refresh) MCP Restart",
+        "command": "powershell -NoProfile -ExecutionPolicy Bypass -File ${workspaceFolder:kilnCtl}\\tools\\PcTools\\scripts\\mcp_servers.ps1 restart",
+        "color": "cyan",
+        "singleInstance": true,
+        "tooltip": "Pick up edits to kicad/kilnctrl/kilnsim server code"
+      },
+      {
+        "name": "$(pulse) MCP Status",
+        "command": "powershell -NoProfile -ExecutionPolicy Bypass -File ${workspaceFolder:kilnCtl}\\tools\\PcTools\\scripts\\mcp_servers.ps1 status",
+        "color": "white",
+        "singleInstance": true,
+        "tooltip": "Which servers are listening, and what each publishes"
+      },
+      {
+        "name": "$(window) KilnCtrl GUI",
+        "command": "${workspaceFolder:PcTools}\\.venv\\Scripts\\kilnctrl-gui.exe",
+        "color": "lightblue",
+        "singleInstance": true,
+        "tooltip": "Open the PC-side control GUI"
+      }
+    ]
   },
 
   "tasks": {
@@ -78,9 +128,41 @@
         "problemMatcher": []
       },
       {
-        "label": "PcTools: Run MCP Server",
+        // Runs on workspace open so the HTTP MCP entries in .mcp.json have
+        // something to connect to before an agent's first tool call. The
+        // script is idempotent -- it checks /health and does nothing if the
+        // servers are already up -- so a reload does not restart them and
+        // does not disturb a link that is mid-session.
+        "label": "MCP: Start servers",
         "type": "shell",
-        "command": "${workspaceFolder:PcTools}/.venv/Scripts/kilnctrl-mcp-server.exe",
+        "command": "powershell",
+        "args": [
+          "-NoProfile", "-ExecutionPolicy", "Bypass",
+          "-File", "${workspaceFolder:kilnCtl}/tools/PcTools/scripts/mcp_servers.ps1", "start"
+        ],
+        "runOptions": { "runOn": "folderOpen" },
+        "presentation": { "reveal": "silent", "panel": "dedicated", "close": true },
+        "problemMatcher": []
+      },
+      {
+        "label": "MCP: Stop servers",
+        "type": "shell",
+        "command": "powershell",
+        "args": [
+          "-NoProfile", "-ExecutionPolicy", "Bypass",
+          "-File", "${workspaceFolder:kilnCtl}/tools/PcTools/scripts/mcp_servers.ps1", "stop"
+        ],
+        "presentation": { "reveal": "always", "panel": "dedicated" },
+        "problemMatcher": []
+      },
+      {
+        "label": "MCP: Status",
+        "type": "shell",
+        "command": "powershell",
+        "args": [
+          "-NoProfile", "-ExecutionPolicy", "Bypass",
+          "-File", "${workspaceFolder:kilnCtl}/tools/PcTools/scripts/mcp_servers.ps1", "status"
+        ],
         "presentation": { "reveal": "always", "panel": "dedicated" },
         "problemMatcher": []
       },
@@ -112,6 +194,7 @@
 
   "extensions": {
     "recommendations": [
+      "seunlanlege.action-buttons",
       "espressif.esp-idf-extension",
       "raspberry-pi.raspberry-pi-pico",
       "marus25.cortex-debug",

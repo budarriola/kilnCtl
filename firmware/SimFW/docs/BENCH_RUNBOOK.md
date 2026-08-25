@@ -335,7 +335,7 @@ dormant, and both are commissioning gaps, not missing producers:**
 |---|---|
 | **S1 (absolute temperature ceiling) never trips no matter how hot the fixture reports.** | `cfg->abs_max_temp_c` has no commissioned value yet (defaults to 0, and 0 means "not commissioned, never trip" by deliberate convention, `safety_guards.h`) — a config gap, not a missing producer. Guard logic itself is fully wired to real `tc_c`. |
 | **S13 (borrowed-zone sample-staleness) never trips or warns.** | Needs a commissioned `borrowed_zone_index` to say which context zone is "the" borrowed channel — that config field does not exist anywhere in the codebase yet (Phase 9, same category as S1). `safety_core_build_input()` deliberately leaves `sample_counter_advancing` false rather than guess a zone index; `safety_guards.c`'s own S13 block is additionally gated on `cfg->tc_source`, which also has no default, so S13 stays correctly dormant either way. |
-| K4 (the safety pilot relay) energizes only when `SAFETY_CMD_REQUEST_ENABLE` is sent AND `relay_owner`'s own interlocks (state machine, GRACE window, any latched trip) allow it — **not automatically at boot.** | This is the real, current behavior, not a gap: `relay_owner_command_energize()` refuses outright while any guard is tripped, and always accepts a disable. Send the enable request (`KilnFW`'s `safety_link_request_enable()` or the equivalent `mcp__kilnctrl__safety_request_enable` tool) and confirm it during step 8/9 rather than assuming K4 stays open forever. |
+| K4 (the safety pilot relay) energizes only when `SAFETY_CMD_REQUEST_ENABLE` is sent AND `relay_owner`'s own interlocks (state machine, GRACE window, any latched trip) allow it — **not automatically at boot.** | This is the real, current behavior, not a gap: `relay_owner_command_energize()` refuses outright while any guard is tripped, and always accepts a disable. Send the enable request (`KilnFW`'s `safety_link_request_enable()` or the equivalent `kiln_call(name="safety_request_enable")`) and confirm it during step 8/9 rather than assuming K4 stays open forever. |
 | Every other guard (S2, S3, S4, S5, S6a, S6b, S7, S9, S10, S11, S12) reacts to fixture-injected faults once its trigger condition is met. | All of their inputs are now populated unconditionally or gated only on `context_valid`/`link_up`, both of which the fixture can actually drive true via a healthy USB link and `PUSH_CONTEXT` traffic — there is no longer a producer-side blocker for these guards. |
 
 **S6b specifically no longer nuisance-trips on a healthy link.** `link_up`
@@ -642,7 +642,7 @@ kilnsim --port COMx preset fast_test
 kilnsim --port COMx state
 ```
 Cross-check on the DUT side with the `kilnctrl` MCP tools already available
-in this environment: `thermo_read` / `thermo_get_reports`.
+in this environment: `kiln_call(name="thermo_read")` / `kiln_call(name="thermo_get_reports")`.
 
 **Pass:** `KilnFW`'s own telemetry (LCD, or `thermo_read`) shows plausible,
 non-zero, non-fault temperatures on all three main-side channels, tracking
@@ -674,7 +674,7 @@ direct GPIO (`docs/DESIGN_NOTES.md` §3.5).
 ```powershell
 kilnsim --port COMx state
 ```
-Cross-check `mcp__kilnctrl__thermo_read` / `mcp__kilnctrl__safety_get_status`
+Cross-check `kiln_call(name="thermo_read")` / `kiln_call(name="safety_get_status")`
 on the DUT side.
 
 **Pass:** the safety Pico's own thermocouple reading tracks the fixture's
@@ -693,15 +693,15 @@ background rather than counting down unconditionally (section 2).
 kilnsim --port COMx relay states
 ```
 Command relays via the existing DUT-side MCP tool
-(`mcp__kilnctrl__io_set_relay`), then re-poll:
+(`kiln_call(name="io_set_relay")`), then re-poll:
 ```powershell
 kilnsim --port COMx relay edges --since-seq 0
 ```
 **Pass:** commanding K1/K2/K3/K5 produces a matching edge in the fixture's
 relay-edge log within one debounce window (~24 ms worst case, per
 `mcp23017.h`). **K4 needs an explicit enable request first** (section 2) —
-`mcp__kilnctrl__io_set_relay` alone does not energize K4; send
-`mcp__kilnctrl__safety_request_enable` (or `KilnFW`'s equivalent
+`kiln_call(name="io_set_relay")` alone does not energize K4; send
+`kiln_call(name="safety_request_enable")` (or `KilnFW`'s equivalent
 `SAFETY_CMD_REQUEST_ENABLE`) and confirm no guard is currently tripped
 before expecting K4's edge to appear. K4 staying open after a real enable
 request, with no guard tripped, is now a real fixture/DUT problem, not
@@ -737,7 +737,7 @@ kilnsim --port COMx power cycle --off-ms 500 --domain main
 kilnsim --port COMx power cycle --off-ms 500 --domain safety
 ```
 **Pass (E-stop):** open/closed produces the expected STOP/healthy transition
-on `mcp__kilnctrl__safety_get_status`.
+on `kiln_call(name="safety_get_status")`.
 **Pass (fault line):** a fault forced on the DUT's `Fault` GPIO shows up in
 `kilnsim io fault-line`'s reading.
 **Pass (DUT power):** each `--domain` cycle reboots only *that* domain's
@@ -782,7 +782,7 @@ something else in the loop sends it, K4 can still stay open through a
 `kilnsim run` and gate a closed-loop firing exactly the old way, just for a
 different, narrower reason (a missing enable call, not a missing wiring
 path). Confirm whether an enable request needs to be issued separately
-(e.g. `mcp__kilnctrl__safety_request_enable`) before or during the run, and
+(e.g. `kiln_call(name="safety_request_enable")`) before or during the run, and
 record which is actually true on this bench session — this is exactly the
 kind of claim this document has gotten wrong before and needs verifying
 against real behavior, not re-asserted from an old note. A BLOCKED/FAIL

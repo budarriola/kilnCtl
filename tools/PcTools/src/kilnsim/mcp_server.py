@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
-"""MCP server (stdio) exposing SimFW's control link as tools.
+"""MCP server exposing SimFW's control link as tools.
 
-``firmware/SimFW/docs/DESIGN_NOTES.md`` section 6.1's tool table. A separate MCP
+Speaks streamable HTTP by default (``--transport stdio`` is still available for
+headless runs) and publishes a five-tool search facade rather than its whole
+surface -- see ``mcpkit/serve.py`` and ``mcpkit/registry.py`` for both
+decisions, and ``docs/MCP_SERVERS.md`` for how the servers get started.
+
+Implements ``firmware/SimFW/docs/DESIGN_NOTES.md`` section 6.1's tool table. A separate MCP
 server from ``kilnctrl``'s (DESIGN_NOTES.md sec 6: "since it is a different device
 with a different port"), following the same registration pattern
 (``mcp.server.mcpserver.MCPServer``, falling back to the pre-2.0
@@ -23,7 +28,9 @@ the whole tool surface without a fixture attached, matching how the CLI's
 
 from __future__ import annotations
 
+import functools
 import itertools
+import json
 import logging
 import threading
 import time
@@ -35,6 +42,11 @@ try:
 except ImportError:  # pragma: no cover - mcp 1.x
     from mcp.server.fastmcp import FastMCP as _McpServer
 
+from mcpkit import workbench
+from mcpkit.registry import collapse
+from mcpkit.serve import serve
+
+from . import mcp_facade
 from .link import MockSimLink, SerialSimLink, SimLink, SimLinkError
 from .protocol import (
     CommandGroup,
@@ -66,6 +78,23 @@ _reports: dict = {}
 _run_id_counter = itertools.count(1)
 
 
+def _dumps(value) -> str:
+    """JSON for a decoded reply, with raw register bytes rendered as hex.
+
+    The MAX31856 emulation returns its register image as ``bytes`` (that is
+    what the DUT actually reads), and ``json.dumps`` refuses it outright --
+    ``tc_get_regs`` failed with "Object of type bytes is not JSON
+    serializable" rather than showing the register image, which is the one
+    thing that tool exists to show.
+    """
+    def encode(item):
+        if isinstance(item, (bytes, bytearray)):
+            return item.hex()
+        raise TypeError(f"{type(item).__name__} is not JSON serializable")
+
+    return json.dumps(value, indent=2, default=encode)
+
+
 def _tool():
     """``mcp.tool()`` registration plus a blanket never-raise guard --
     mirrors kilnctrl.mcp_server._tool(): a bad argument or link failure comes
@@ -74,6 +103,12 @@ def _tool():
     register = mcp.tool()
 
     def decorate(fn):
+        # functools.wraps, not a hand-copied __name__/__doc__ pair: the schema
+        # is built by introspecting this wrapper, so without __wrapped__ every
+        # tool here published `(args: str, kwargs: str)` instead of its real
+        # parameters. That went unnoticed while this server was absent from
+        # .mcp.json and nothing was reading its schemas.
+        @functools.wraps(fn)
         def wrapper(*args, **kwargs):
             try:
                 return fn(*args, **kwargs)
@@ -85,8 +120,6 @@ def _tool():
                 log.exception("unexpected error in tool %s", fn.__name__)
                 return f"error: unexpected {type(exc).__name__}: {exc}"
 
-        wrapper.__name__ = fn.__name__
-        wrapper.__doc__ = fn.__doc__
         return register(wrapper)
 
     return decorate
@@ -120,9 +153,8 @@ def sim_disconnect() -> str:
 @_tool()
 def sim_get_state() -> str:
     """Full telemetry snapshot as JSON (DESIGN_NOTES.md sec 5.3's telemetry frame shape)."""
-    import json
     state = _link.send_command(CommandGroup.SYS, 100)  # kilnsim-local GET_STATE convenience, see link.py
-    return json.dumps(state, indent=2)
+    return _dumps(state)
 
 
 @_tool()
@@ -176,9 +208,8 @@ def sim_set_zone_params(zone: int, params: dict) -> str:
 @_tool()
 def sim_get_zone_params(zone: int) -> str:
     """Current parameters for one zone."""
-    import json
     reply = _link.send_command(CommandGroup.MODEL, ModelCmd.GET_ZONE_PARAMS, {"zone": zone})
-    return json.dumps(reply, indent=2)
+    return _dumps(reply)
 
 
 @_tool()
@@ -203,9 +234,8 @@ def tc_get_regs(channel: int) -> str:
     """Register image + shadow truth for one emulated MAX31856 channel
     (DESIGN_NOTES.md sec 5.2: "the pair is what makes 'the DUT was lied to, this is
     the truth' assertions possible")."""
-    import json
     reply = _link.send_command(CommandGroup.TC, TcCmd.GET_REGS, {"channel": channel})
-    return json.dumps(reply, indent=2)
+    return _dumps(reply)
 
 
 @_tool()
@@ -272,17 +302,15 @@ def ct_set_distortion(channel: int, distortion: dict) -> str:
 @_tool()
 def relay_get_states() -> str:
     """Current sensed state of every relay (K1/K2/K3/K5/K4)."""
-    import json
     reply = _link.send_command(CommandGroup.RELAY, RelayCmd.GET_STATES)
-    return json.dumps(reply, indent=2)
+    return _dumps(reply)
 
 
 @_tool()
 def relay_get_edges(since_seq: Optional[int] = None) -> str:
     """Timestamped relay edge log, optionally only edges after ``since_seq``."""
-    import json
     reply = _link.send_command(CommandGroup.RELAY, RelayCmd.GET_EDGES, {"since_seq": since_seq})
-    return json.dumps(reply, indent=2)
+    return _dumps(reply)
 
 
 # ---------------------------------------------------------------------------
@@ -312,9 +340,8 @@ def dut_power_set(state: str) -> str:
 @_tool()
 def dut_power_get() -> str:
     """Read back the MAIN-domain (J18) DUT power relay's commanded state."""
-    import json
     reply = _link.send_command(CommandGroup.IO, IoCmd.DUT_POWER_GET)
-    return json.dumps(reply, indent=2)
+    return _dumps(reply)
 
 
 @_tool()
@@ -335,17 +362,15 @@ def dut_power_safety_set(state: str) -> str:
 @_tool()
 def dut_power_safety_get() -> str:
     """Read back the SAFETY-domain (J19) DUT power relay's commanded state."""
-    import json
     reply = _link.send_command(CommandGroup.IO, IoCmd.DUT_POWER_SAFETY_GET)
-    return json.dumps(reply, indent=2)
+    return _dumps(reply)
 
 
 @_tool()
 def io_read(pin: Optional[str] = None) -> str:
     """Read discrete I/O levels, one pin or all if omitted."""
-    import json
     reply = _link.send_command(CommandGroup.IO, IoCmd.READ, {"pin": pin})
-    return json.dumps(reply, indent=2)
+    return _dumps(reply)
 
 
 @_tool()
@@ -393,9 +418,8 @@ def fault_cancel(fault_slot: int) -> str:
 @_tool()
 def fault_list() -> str:
     """List all fault slots and their state."""
-    import json
     reply = _link.send_command(CommandGroup.FAULT, FaultCmd.LIST)
-    return json.dumps(reply, indent=2)
+    return _dumps(reply)
 
 
 @_tool()
@@ -476,11 +500,117 @@ def get_test_report(run_id: int) -> str:
 # debug escape hatch
 # ---------------------------------------------------------------------------
 @_tool()
+def sim_selftest() -> str:
+    """Run the fixture's own power-on self-test (the same report
+    ``kilnsim selftest`` prints): I2C expanders present at the configured
+    addresses, relays sensed, CT outputs alive. Run this before blaming a
+    scenario failure on the DUT -- it separates "the fixture is lying" from
+    "the DUT is wrong"."""
+    from . import selftest as _selftest
+    return _selftest.run_selftest(_link).to_text()
+
+
+@_tool()
+def sim_task_stats() -> str:
+    """Per-task FreeRTOS stack allocated / peak-used / headroom / margin for
+    the fixture firmware (SYS GET_TASK_STATS). Tasks under the warn threshold
+    are flagged with a leading ``!``. Stack sizes in this firmware are set by
+    comment rather than by measurement, so one oversized local can overflow a
+    task silently -- this is how that gets caught."""
+    from .cli import _format_task_stats_table
+    reply = _link.send_command(CommandGroup.SYS, SysCmd.GET_TASK_STATS)
+    return _format_task_stats_table(reply)
+
+
+@_tool()
+def ct_get_state(channel: int) -> str:
+    """Full state of one CT channel: mode, commanded amps, phase, distortion
+    knobs, and the readback the DUT would see."""
+    reply = _link.send_command(CommandGroup.CT, CtCmd.GET_STATE, {"channel": channel})
+    return _dumps(reply)
+
+
+@_tool()
+def ct_set_phase(channel: int, phase_deg: float) -> str:
+    """Set a CT channel's phase offset in degrees."""
+    _link.send_command(CommandGroup.CT, CtCmd.SET_PHASE, {"channel": channel, "phase_deg": phase_deg})
+    return f"CT {channel} phase: {phase_deg} deg"
+
+
+@_tool()
+def estop_get() -> str:
+    """Read back the E-stop loop's commanded state (the counterpart to
+    ``estop_set`` -- what the fixture believes it is driving, which is not
+    necessarily what the DUT senses)."""
+    return _dumps(_link.send_command(CommandGroup.IO, IoCmd.ESTOP_GET))
+
+
+@_tool()
+def io_fault_line() -> str:
+    """Read the fault-line sense input -- the DUT's safety processor asserting
+    FAULT at the fixture."""
+    return _dumps(_link.send_command(CommandGroup.IO, IoCmd.FAULT_LINE_GET))
+
+
+@_tool()
+def io_bus_scan() -> str:
+    """Scan the fixture's I2C bus and compare what answers against the two
+    expander addresses the firmware was built for. A mismatch here explains
+    an entire class of "the fixture does nothing" symptoms that otherwise
+    looks like a wiring fault."""
+    reply = _link.send_command(CommandGroup.IO, IoCmd.BUS_SCAN)
+    configured = [reply["configured_addr1"], reply["configured_addr2"]]
+    found = reply.get("found_addresses") or []
+    verdict = "OK" if reply.get("match") else "MISMATCH"
+    return (
+        f"configured {'/'.join(f'0x{a:02X}' for a in configured)}, "
+        f"found {'/'.join(f'0x{a:02X}' for a in found) if found else '(none)'} -- {verdict}\n"
+        + _dumps(reply)
+    )
+
+
+@_tool()
+def run_bench_suite(mock: bool = False, virtual: Optional[str] = None, quick: bool = False,
+                    guards: bool = False, port: Optional[str] = None,
+                    esp_port: Optional[str] = None, scenarios_dir: Optional[str] = None) -> str:
+    """Run the whole tiered bench regression suite and return its report --
+    the one-command form of ``kilnsim testmgr``.
+
+    Builds its own link rather than reusing this server's, because the suite
+    owns connect/disconnect for the run. ``mock=True`` needs no hardware at
+    all; ``virtual="host:port"`` drives the host-compiled ``virtual_simfw``
+    (real simulation code, no real DUT); omit both for the real fixture.
+    ``guards=True`` opens a second link through kilnctrl to a real SaftyFW
+    board and fails loudly if it cannot -- never silently downgrading to a
+    guardless run whose coverage report would then overstate its evidence.
+    """
+    from pathlib import Path
+
+    from . import testmgr as _testmgr
+    from .link import TcpSimLink
+
+    if mock:
+        link: SimLink = MockSimLink()
+    elif virtual:
+        link = TcpSimLink(virtual)
+    else:
+        link = SerialSimLink()
+    try:
+        report = _testmgr.run_suite(
+            link, Path(scenarios_dir) if scenarios_dir else None,
+            quick=quick, mock=mock, virtual=bool(virtual), port=port,
+            esp_port=esp_port, fixture_address=virtual or port, guards=guards,
+        )
+    except _testmgr.GuardObserverUnavailable as exc:
+        return f"error: {exc}"
+    return f"{report.to_text()}\n-- exit_code {report.exit_code} (0 pass, 1 fail, 2 blocked-only)"
+
+
+@_tool()
 def sim_raw_command(group: str, cmd: int, hex_payload: str = "") -> str:
     """Send a raw command by group name (SYS/MODEL/TC/CT/RELAY/IO/FAULT) and
     numeric ``cmd``, with a JSON-encoded hex payload -- debug escape hatch
     for anything not covered by a named tool above."""
-    import json
     try:
         group_enum = CommandGroup[group.upper()]
     except KeyError:
@@ -492,13 +622,49 @@ def sim_raw_command(group: str, cmd: int, hex_payload: str = "") -> str:
         except (ValueError, UnicodeDecodeError) as exc:
             return f"error: could not decode hex_payload as JSON: {exc}"
     reply = _link.send_command(group_enum, cmd, payload)
-    return json.dumps(reply, indent=2)
+    return _dumps(reply)
 
 
-def main() -> None:
-    logging.basicConfig(level=logging.WARNING)
-    mcp.run()
+# ---------------------------------------------------------------------------
+# facade + entry point
+# ---------------------------------------------------------------------------
+workbench.attach(_tool, ("simfw", "common"))
+
+#: Registered last, once every ``@_tool()`` above has run. From here on the
+#: wire carries ``simfw_help`` / ``simfw_find`` / ``simfw_describe`` /
+#: ``simfw_call`` / ``simfw_batch`` (plus ``sim_connect``); everything else in
+#: this module stays a plain importable function and stays reachable through
+#: ``simfw_call``. See ``mcpkit/registry.py`` for why.
+registry = collapse(
+    mcp,
+    prefix=mcp_facade.PREFIX,
+    label=mcp_facade.LABEL,
+    title=mcp_facade.TITLE,
+    group_prefixes=mcp_facade.GROUP_PREFIXES,
+    group_overrides=mcp_facade.GROUP_OVERRIDES,
+    keywords=mcp_facade.KEYWORDS,
+    synonyms=mcp_facade.SYNONYMS,
+    keep=mcp_facade.KEEP,
+    recipes=mcp_facade.RECIPES,
+)
+
+
+def _close() -> None:
+    """Release the fixture's serial port on the way out.
+
+    A COM port left open by a dead process stays unusable on Windows until the
+    device is replugged, and this fixture's CDC interface is already known to
+    wedge if a port is held across a reset -- so this runs on every exit path,
+    not just the clean one.
+    """
+    if _link.is_connected:
+        _link.disconnect()
+
+
+def main() -> int:
+    """Entry point for the ``kilnsim-mcp-server`` console script."""
+    return serve(mcp, name="kilnsim", default_port=mcp_facade.DEFAULT_PORT, on_close=_close)
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

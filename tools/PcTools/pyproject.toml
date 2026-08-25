@@ -7,6 +7,12 @@ requires-python = ">=3.10"
 dependencies = [
     "pyserial>=3.5",
     "mcp>=1.2.0",
+    # The MCP servers serve streamable HTTP by default (docs/MCP_SERVERS.md),
+    # so the ASGI stack is a hard requirement here, not an extra: mcp pulls
+    # both in today, but a transport this project depends on should not be
+    # left to another package's optional dependency.
+    "uvicorn>=0.30",
+    "starlette>=0.37",
     "logic2-automation>=1.0.11",
     # Only used by the display page's "send an image" control (scaling and
     # RGB565 conversion -- see display.py). Imported lazily so the rest of the
@@ -36,4 +42,4 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/kilnctrl", "src/kilnsim"]
+packages = ["src/kilnctrl", "src/kilnsim", "src/mcpkit"]

@@ -1,10 +1,8 @@
 {
   "mcpServers": {
     "kicad": {
-      "command": "mykicadMcp/.venv/Scripts/python.exe",
-      "args": [
-        "mykicadMcp/kicad_mcp_server.py"
-      ]
+      "type": "http",
+      "url": "http://127.0.0.1:8766/"
     },
     "pdf-mcp": {
       "command": "pdfMcp/.venv/Scripts/pdf-mcp.exe"
@@ -29,7 +27,12 @@
       }
     },
     "kilnctrl": {
-      "command": "tools/PcTools/.venv/Scripts/kilnctrl-mcp-server.exe"
+      "type": "http",
+      "url": "http://127.0.0.1:8767/mcp"
+    },
+    "kilnsim": {
+      "type": "http",
+      "url": "http://127.0.0.1:8768/mcp"
     }
   }
 }

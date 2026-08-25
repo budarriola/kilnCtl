@@ -117,7 +117,7 @@ must all land in that state ([`docs/HARDWARE.md`](docs/HARDWARE.md) §3).
 
 **Flash and debug over SWD, and log over the link.** A CMSIS-DAP probe is wired
 to the safety processor's SWD header, and `tools/PcTools/src/kilnctrl/debug_probe.py`
-(`mcp__kilnctrl__debug_program`, `target/rp2040.cfg`, 5000 kHz) programs and
+(`kiln_call(name="debug_program")`, `target/rp2040.cfg`, 5000 kHz) programs and
 debugs it through the same OpenOCD substrate used for ESP flashing — reset,
 halt, step and memory read/write are all exposed to an agent this way. The
 Pico's console reaches the GUI as `kilnlink` LOG frames relayed by the ESP —

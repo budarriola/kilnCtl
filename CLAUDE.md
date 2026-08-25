@@ -17,6 +17,43 @@ gitignored — **edit `templates/`, never the generated output.**
 (`KilnFW` on the ESP32-S3, `SaftyFW` on the RP2040). Start tasks from there; it
 links to the per-area plans that own the detail.
 
+## Tooling: always go through the MCP facade
+
+**Anything involving the boards, the bench fixture, or the KiCad project starts
+with one of these calls.** Do not conclude a capability is missing because you
+cannot see a tool for it — each server publishes about six tools and keeps the
+rest behind a search facade (135 tools for `kilnctrl`, 86 for `kicad`, 45 for
+`kilnsim`).
+
+```
+kiln_help()                      # kilnctrl: main board (ESP32-S3) + RP2040 safety processor
+simfw_help()                     # kilnsim:  the SimFW bench fixture
+kicad_help()                     # kicad:    the schematic, board and sourcing data
+kiln_find(query="read the temperature")
+kiln_call(name="thermo_read")
+kiln_batch(calls=[{"name":"safety_get_status"},{"name":"safety_get_link_stats"}])
+```
+
+`*_batch` is the right form for any sequence of two or more hardware
+operations — one round trip, and it stops at the first failure.
+
+All three speak HTTP (`kicad` on 8766, `kilnctrl` on 8767, `kilnsim` on 8768)
+and must be running. If a call fails to connect:
+
+```powershell
+.\tools\PcTools\scripts\mcp_servers.ps1 status   # or: start | stop | restart
+```
+
+The same four actions are status-bar buttons in `kilnCtl.code-workspace`, and
+the servers auto-start when the workspace opens.
+
+Firmware builds and host tests are tools too — `build_kilnfw`,
+`build_saftyfw_host_tests`, `build_simfw_host_tests`, `run_pctools_tests` — so
+the toolchain invocations do not have to be rediscovered. Flashing is
+`debug_program(peer="esp"|"pico"|"sim")`, always OpenOCD, never esptool.
+
+Full rationale, token measurements, and how to add a tool: **docs/MCP_SERVERS.md**.
+
 ## Project Structure
 
 The tree is split into hardware and software halves. See `docs/REPO_LAYOUT.md`
@@ -68,23 +105,41 @@ board, so a fix found in one project's copy often applies to the other's too.
 - **mykicadMcp/kicad_pcb_tool.py** — Lightweight parser for PCB and netlist files; does not require KiCad runtime
 - **mykicadMcp/kicad_mouser_tool.py** — Mouser Search API sourcing/stock/pricing lookups
 - **mykicadMcp/kicad_ipc_tool.py** — Live-KiCad tools via the IPC API (`kicad-python`); requires a running KiCad session
-- **mykicadMcp/kicad_mcp_server.py** — MCP server that exposes all KiCad tools over stdio or HTTP
+- **mykicadMcp/kicad_mcp_server.py** — MCP server for the KiCad tools; HTTP on 8766 by default,
+  `--transport stdio` still available
+- **mykicadMcp/kicad_facade.py** — search taxonomy (groups, keywords, synonyms) for the facade
+- **mykicadMcp/mcpkit_registry.py** — vendored copy of `tools/PcTools/src/mcpkit/registry.py`;
+  edit the original and re-vendor, never this copy
 - **mykicadMcp/requirements-mcp.txt** — Python dependencies (requires `mcp>=1.0.0`)
 - **mykicadMcp/README.md** — Full setup guide and tool reference for the MCP server
 
 ### MCP Server Tools
-The KiCad MCP server exposes 92 tools across 11 groups (inspection/netlist, schematic data,
-Mouser sourcing, hierarchical groups, layout/placement, PCB groups, label positions, footprint
-flips, live IPC tools, net classes/buses, and autorouter/routing). See **mykicadMcp/README.md** and `mykicadMcp/docs/mcp-tools/` for the full
-reference. The net classes & buses group supports bus detection, net-class proposal/creation,
-trace-cost scoring (with live deviation measurement), bus corridor-area measurement, capacitor voltage auditing, critical-net classification, connector detection, and `pcb_settings.json` management; the autorouter group covers the headline `route_kicad_board` orchestrator, Phase 7.3b detailed routing (windowed A*), zone inspection, plane-island analysis and costing, ratsnest calculation, layer/constraint querying, and undo. See **mykicadMcp/NETCLASS_PLAN.md** for the design doc.
-A few commonly used tools:
-- `inspect_kicad_project` — Get project-wide metrics and status
-- `list_kicad_components` — List all components on the PCB
-- `get_kicad_component` — Details for a specific component (reference, value, footprint)
-- `get_kicad_component_connections` — Nets connected to a component
-- `list_kicad_nets` — List all nets in the design
-- `get_kicad_net` — Details for a specific net (connections, pin list)
+The KiCad MCP server holds 86 tools in 12 groups: inspection/netlist, schematic data, Mouser
+sourcing, audits, hierarchical sheet groups, layout/placement, PCB groups, net classes & buses,
+nets, route templates, live IPC tools, and server control. Like the hardware servers it publishes
+a search facade, not the whole set — start with `kicad_help()` or `kicad_find(query=...)` and
+reach the rest through `kicad_call` / `kicad_batch`:
+
+```
+kicad_help()
+kicad_find(query="is this capacitor rated high enough")
+kicad_call(name="inspect_kicad_project", args={"project_path":"hardware/mainBoard/kiln.kicad_pro"})
+```
+
+`inspect_kicad_project` and `get_kicad_ipc_status` stay directly published. Everything else —
+`list_kicad_components`, `get_kicad_component`, `get_kicad_component_connections`,
+`list_kicad_nets`, `get_kicad_net` and the rest — is one `kicad_call` away. See
+**mykicadMcp/README.md** and `mykicadMcp/docs/mcp-tools/` for the full reference, and
+**mykicadMcp/NETCLASS_PLAN.md** for the net-class design doc.
+
+The net classes & buses group supports bus detection, net-class proposal/creation, trace-cost
+scoring (with live deviation measurement), bus corridor-area measurement, capacitor voltage
+auditing, critical-net classification, connector detection, and `pcb_settings.json` management.
+
+There is **no autorouter**: it was removed (`mykicadMcp` commit "remove autorouter engine, keep
+reference-copy/template tools"). What remains is the reference-copy family —
+`copy_kicad_component_routing`, `apply_kicad_route_template`, `diff_kicad_route_template` — which
+replicates routing already drawn on one instance of a repeated block onto its siblings.
 
 ## Development Setup
 
@@ -138,40 +193,27 @@ kicad hardware\mainBoard\kiln.kicad_pcb
 kicad hardware\mainBoard\kiln.kicad_sch
 ```
 
-### Route the Board
-Use the MCP server `route_kicad_board` tool or the CLI:
-```powershell
-# Dry-run preview (no write)
-python mykicadMcp\kicad_router_tool.py route hardware\mainBoard\kiln.kicad_pro
+### Replicate Routing Across Repeated Blocks
+There is no autorouter in this repo any more -- it was removed from `mykicadMcp`, and
+`kicad_router_tool.py` no longer exists. Route by hand in KiCad, then replicate that work onto the
+sibling instances of a repeated block (the five identical thermocouple channels, for example):
 
-# Apply the routing
-python mykicadMcp\kicad_router_tool.py route hardware\mainBoard\kiln.kicad_pro --write
-
-# Undo (remove autorouter-owned copper)
-python mykicadMcp\kicad_router_tool.py unroute hardware\mainBoard\kiln.kicad_pro --write
-
-# Control effort (quick|balanced|best) and select nets
-python mykicadMcp\kicad_router_tool.py route hardware\mainBoard\kiln.kicad_pro --write --effort best --nets /Power/VBUS /MainControler/CLK
+```
+kicad_call(name="copy_kicad_component_routing", args={
+  "project_path": "hardware/mainBoard/kiln.kicad_pro",
+  "template_reference": "U10", "target_reference": "U11"})
+kicad_call(name="diff_kicad_route_template", args={...})   # preview before applying
+kicad_call(name="apply_kicad_route_template", args={...})
 ```
 
-The `route_kicad_board` orchestrator runs ratsnest → global route → detailed route (windowed A*)
-in one call, with configurable rip-up aggressiveness. Always preview first (`write=false` is
-default). Phase 7.5 (plane-aware), 7.6 (optimizer), and 7.5.6 (stitching) are M4 TODO hooks.
+Always diff before applying. The same template pattern exists for placement
+(`*_layout_template`), reference-designator positions (`*_property_position_template`) and
+footprint flips (`*_flip_template`) -- `kicad_find(query="template")` lists them all.
 
 ### Query Component or Net Information
 Use the MCP server tools or call Python directly:
 ```powershell
 python mykicadMcp\kicad_pcb_tool.py
-```
-
-### Inspect Zones & Plane Islands
-Query copper pours and analyze fill islands:
-```powershell
-# List all zones (copper and keepout)
-python -c "from kicad_router_tool import list_zones; import json; print(json.dumps(list_zones('hardware/mainBoard/kiln.kicad_pro'), indent=2))"
-
-# Audit plane islands, costing, and stitching recommendations
-python -c "from kicad_router_tool import audit_plane_islands; import json; print(json.dumps(audit_plane_islands('hardware/mainBoard/kiln.kicad_pro'), indent=2))"
 ```
 
 ### Update the BOM

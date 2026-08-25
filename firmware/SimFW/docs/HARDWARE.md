@@ -935,7 +935,7 @@ expands this same ten-step order in full.
   Pass: `KilnFW`'s own UI/telemetry shows plausible, non-zero, non-fault
   temperatures on all three main-side channels.
   Command: `kilnsim preset fast_test` then watch via `kilnctrl`'s
-  `mcp__kilnctrl__thermo_read` / `thermo_get_reports` on the DUT side, and
+  `kiln_call(name="thermo_read")` / `kiln_call(name="thermo_get_reports")` on the DUT side, and
   `kilnsim state` on the fixture side to confirm what it believes it is
   reporting.
 
@@ -944,7 +944,7 @@ expands this same ten-step order in full.
   Pass: the safety Pico's own thermocouple reading tracks the fixture's zone
   0 (or configured blend) temperature.
   Command: `kilnsim state` (fixture side) cross-checked against
-  `mcp__kilnctrl__thermo_read` / `mcp__kilnctrl__safety_get_status` (DUT
+  `kiln_call(name="thermo_read")` / `kiln_call(name="safety_get_status")` (DUT
   side).
 
 - [ ] **Step 8 — Relay sense: command relays via existing kilnctrl tools,
@@ -952,7 +952,7 @@ expands this same ten-step order in full.
   Pass: commanding K1/K2/K3/K5/K4 through `kilnctrl` produces a matching edge
   in the fixture's relay-edge log within one debounce window (~24 ms worst
   case, `mcp23017.h`).
-  Commands: `mcp__kilnctrl__io_set_relay` (DUT side) and `kilnsim relay
+  Commands: `kiln_call(name="io_set_relay")` (DUT side) and `kilnsim relay
   states` / `kilnsim relay edges --since-seq N` (fixture side) — the CLI's
   `relay` group now exists.
 

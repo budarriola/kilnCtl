@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""MCP server (stdio) exposing the KilnCtrl board's UART control link as tools.
+"""MCP server exposing the KilnCtrl board's UART control link as tools.
+
+Speaks streamable HTTP by default (``--transport stdio`` is still available for
+headless runs) and publishes a five-tool search facade rather than all 135 tools
+below -- see ``mcpkit/serve.py`` and ``mcpkit/registry.py`` for both decisions,
+and ``docs/MCP_SERVERS.md`` for how the servers get started and stopped.
+
 
 Wraps a single process-wide :class:`~kilnctrl.serial_link.UartLink` so an
 agent can discover the board's USB-UART bridge port, connect, and drive the
@@ -67,7 +73,11 @@ try:
 except ImportError:  # pragma: no cover - mcp 1.x
     from mcp.server.fastmcp import FastMCP as _McpServer
 
-from . import actions, debug_probe, devices, openocd_util, pico_gpio_probe, settings, wifi_credentials
+from mcpkit import workbench
+from mcpkit.registry import collapse
+from mcpkit.serve import serve
+
+from . import actions, debug_probe, devices, mcp_facade, openocd_util, pico_gpio_probe, settings, wifi_credentials
 from .autotune import AutotuneClient, AutotuneQueryError
 from .control import ControlClient, ControlQueryError
 from .device_log import LogClient
@@ -508,9 +518,16 @@ def close_server() -> str:
     The response is sent back before the process actually exits (on a short
     delay, from a background thread) so the caller sees confirmation rather
     than the connection just dropping.
+
+    Since this server is HTTP now, exiting leaves nothing listening on its
+    port: every client's kilnctrl tools stop working until it is started
+    again. That is the right lever for picking up edited server code, but it
+    is not self-healing -- follow it with the editor's "MCP Restart" button,
+    or ``tools\\PcTools\\scripts\\mcp_servers.ps1 restart -Server kilnctrl``.
+    ``POST /shutdown`` is the same stop without going through a tool call.
     """
     def _shutdown() -> None:
-        time.sleep(0.2)  # let the stdio transport flush this tool's reply first
+        time.sleep(0.2)  # let the transport flush this tool's reply first
         for client in (_info, _system, _device_log, _thermo, _io, _display, _touch, _safety, _probe, _wifi,
                        _control, _profiles, _autotune):
             client.close()
@@ -3301,34 +3318,45 @@ def press_button(name: str, params: Optional[dict[str, Any]] = None) -> str:
 
 
 # ---------------------------------------------------------------------------
-# entry point
+# facade + entry point
 # ---------------------------------------------------------------------------
-async def _run() -> None:
-    await mcp.run_stdio_async()
+workbench.attach(_tool, ("dut", "common"))
+
+#: Registered last, once every ``@_tool()`` above has run. From here on the
+#: wire carries ``kiln_help`` / ``kiln_find`` / ``kiln_describe`` /
+#: ``kiln_call`` / ``kiln_batch`` (plus ``connect``); everything else in this
+#: module stays a plain importable function and stays reachable through
+#: ``kiln_call``. See ``mcpkit/registry.py`` for why 200 published schemas was
+#: not a workable default.
+registry = collapse(
+    mcp,
+    prefix=mcp_facade.PREFIX,
+    label=mcp_facade.LABEL,
+    title=mcp_facade.TITLE,
+    group_prefixes=mcp_facade.GROUP_PREFIXES,
+    group_overrides=mcp_facade.GROUP_OVERRIDES,
+    keywords=mcp_facade.KEYWORDS,
+    synonyms=mcp_facade.SYNONYMS,
+    keep=mcp_facade.KEEP,
+    recipes=mcp_facade.RECIPES,
+)
+
+
+def _close() -> None:
+    """Shut the query clients down and let go of the shared link."""
+    for client in (_info, _system, _device_log, _thermo, _io, _display, _touch, _safety, _probe, _wifi,
+                   _control, _profiles, _autotune):
+        client.close()
+    # close(), not disconnect(): this link may be shared with another process
+    # (see link_hub.py) -- exiting shouldn't yank the physical port out from
+    # under it. The disconnect MCP tool is the only thing that should do that.
+    _link.close()
+    _session_log.close()
 
 
 def main() -> int:
     """Sync entry point for the ``kilnctrl-mcp-server`` console script."""
-    logging.basicConfig(
-        level=logging.INFO,
-        stream=sys.stderr,  # stdout is the MCP transport; never log there
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
-    try:
-        asyncio.run(_run())
-    except KeyboardInterrupt:
-        pass
-    finally:
-        for client in (_info, _system, _device_log, _thermo, _io, _display, _touch, _safety, _probe, _wifi,
-                       _control, _profiles, _autotune):
-            client.close()
-        # close(), not disconnect(): this link may be shared with another
-        # process (see link_hub.py) -- exiting shouldn't yank the physical
-        # port out from under it. The disconnect MCP tool is the only thing
-        # that should do that.
-        _link.close()
-        _session_log.close()
-    return 0
+    return serve(mcp, name="kilnctrl", default_port=mcp_facade.DEFAULT_PORT, on_close=_close)
 
 
 if __name__ == "__main__":

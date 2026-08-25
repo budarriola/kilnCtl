@@ -29,13 +29,17 @@ processors, so it is no longer inside either firmware.
 # Tkinter manual-control GUI
 uv run --project tools/PcTools kilnctrl-gui
 
-# MCP server (stdio transport)
+# MCP server (streamable HTTP on 127.0.0.1:8767/mcp; kilnsim's is 8768)
 uv run --project tools/PcTools kilnctrl-mcp-server
 ```
 
 Both are also VS Code tasks — **"PcTools: Open GUI"** and
 **"PcTools: Run MCP Server"**, defined in `kilnCtl.code-workspace` rather than in
-a firmware's `tasks.json`, since neither belongs to one firmware.
+a firmware's `tasks.json`, since neither belongs to one firmware. In practice the
+servers are usually already running (status-bar buttons / workspace auto-start);
+see **[`../../docs/MCP_SERVERS.md`](../../docs/MCP_SERVERS.md)** for how they are
+started and stopped, the six-tool search facade both publish, and
+`--transport stdio` for headless/CI use.
 
 The package still imports as `kilnctrl`: that is the *system's* name, not the
 main board's, so the directory moved and the package did not.
@@ -63,7 +67,7 @@ main board's, so the directory moved and the package did not.
 | `session_log.py` | Per-session log files, semantic rollover, retention setting |
 | `settings.py` | Persisted app settings (`settings.json`): last-used port, log retention |
 | `actions.py` | Named-action registry (one entry per GUI button) backing `press_button` |
-| `mcp_server.py` | MCP tools over stdio, plus the generic `press_button`/`list_buttons` pair |
+| `mcp_server.py` | MCP tools over streamable HTTP, plus the generic `press_button`/`list_buttons` pair |
 | `gui.py` | Tkinter GUI: `manualCtrl`, `Logs` and `About` menus |
 | `logic_capture.py` | Saleae Logic 2 automation-API (gRPC) client: device list, timed digital capture |
 
@@ -222,10 +226,14 @@ Every bespoke tool (`thermo_read`, `io_set_relay`, ...) also has a same-named
 entry in `actions.py`'s registry, reachable generically:
 
 ```
-list_buttons()                          # every action name + params + description
-press_button("IO: Set Relay", {"relay": 1, "on": true})
-press_button("Thermo: Read All")
+kiln_call(name="list_buttons")                          # every action name + params + description
+kiln_call(name="press_button", args={"name": "IO: Set Relay", "params": {"relay": 1, "on": true}})
+kiln_call(name="press_button", args={"name": "Thermo: Read All"})
 ```
+
+(`list_buttons`/`press_button` are, like every other tool below, reachable
+through `kiln_call` — the server no longer publishes them directly. See
+**[`../../docs/MCP_SERVERS.md`](../../docs/MCP_SERVERS.md)**.)
 
 Action names match the GUI's own button/menu-item labels 1:1, so a future GUI
 button gets MCP coverage the moment it's added to `actions.py`, without a

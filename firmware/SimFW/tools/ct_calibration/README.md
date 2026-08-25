@@ -156,7 +156,7 @@ reports (over the existing kilnctrl MCP path or SWD)". Both were checked.
   crosstalk/gain refusal gates, the explicit-uncalibrated path, and
   push+verify (including a caught readback mismatch) against an in-memory
   fake `config_store`.
-- SWD (`debug_probe.py`, `mcp__kilnctrl__debug_read_memory`) was not used.
+- SWD (`debug_probe.py`, `kiln_call(name="debug_read_memory")`) was not used.
   It could, in principle, read `current_sense.c`'s live state directly out
   of RAM, but that means halting the target (or reading racy live memory)
   and coding against internal struct layout instead of the stable wire

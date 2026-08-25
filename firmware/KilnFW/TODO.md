@@ -794,7 +794,8 @@ signature can never double as a rollback authorization).
 ### 9.6a MCP tools (`tools/PcTools`)
 
 DONE — `ota_get_challenge`/`ota_update_esp`/`ota_update_pico`/`ota_status`/
-`ota_rollback_esp` all wrapped as `mcp__kilnctrl__` tools, unit-tested
+`ota_rollback_esp` all wrapped as `kilnctrl` MCP tools (reachable via
+`kiln_call`), unit-tested
 against mocked HTTP. No physical board has ever answered a real request from
 these tools. `image SHA-256` is unbuilt (same gap as 9.5's `ota_record_t`
 note).
