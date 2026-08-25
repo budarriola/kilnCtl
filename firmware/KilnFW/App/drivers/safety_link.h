@@ -1034,10 +1034,28 @@ esp_err_t safety_link_stop(SafetyLinkClass *link);
 esp_err_t safety_link_get_status(SafetyLinkClass *link, safety_link_status_t *out);
 
 /* Asks the safety processor to permit (1) or drop (0) heating. Advisory --
- * the Pico's own interlocks always win. Blocks for the exchange (worst case
- * ~SAFETY_LINK_ACK_TIMEOUT_MS * UART_PROTO_MAX_RETRIES with no peer), so call
- * it from a bridge/app task, not from anything latency-critical. Returns
- * ESP_ERR_TIMEOUT if the far side never ACKed. */
+ * the Pico's own interlocks always win. Blocks for the exchange, so call it
+ * from a bridge/app task, not from anything latency-critical.
+ *
+ * Return values, corrected 2026-08-25. This used to promise ESP_ERR_TIMEOUT
+ * "if the far side never ACKed", which stopped being implementable when this
+ * request moved to the BROADCAST transport: broadcasts are not ACKed, so
+ * there is no ACK to time out on and ESP_OK had degraded to meaning only
+ * "the local UART accepted the bytes" -- returned happily with no peer at
+ * all. Now:
+ *
+ *   enable=1: ESP_ERR_INVALID_STATE, having sent NOTHING, if the cached
+ *             link_up is false (the last SAFETY_LINK_UP_PERIODS polls got no
+ *             status back). ESP_OK does not confirm the peer acted -- nothing
+ *             on this wire can -- but it does now confirm a peer was
+ *             answering when the request went out.
+ *   enable=0: always attempted, link_up or not. Asking a possibly-absent peer
+ *             to STOP heating is the fail-safe direction; refusing it on a
+ *             link that merely looks down is the one refusal that could leave
+ *             heat on.
+ *
+ * Callers that need to know the peer actually changed state must read it back
+ * from safety_link_get_status()'s heating_enabled, as they always had to. */
 esp_err_t safety_link_request_enable(SafetyLinkClass *link, bool enable);
 
 /* Forces a status exchange now instead of waiting for the next poll tick, and

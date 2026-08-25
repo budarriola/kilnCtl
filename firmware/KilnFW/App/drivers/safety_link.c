@@ -1945,6 +1945,57 @@ esp_err_t safety_link_request_enable(SafetyLinkClass *link, bool enable)
     if (!link->initialized) {
         return ESP_ERR_INVALID_STATE;
     }
+
+    /* Refuse when no peer is there, instead of reporting success into the
+     * void.
+     *
+     * REQUEST_ENABLE elicits no reply frame of its own, and since this call
+     * site moved from the ACK'd DATA transport to BROADCAST (see the
+     * "All four of these call sites had the same bug" comment on
+     * safety_link_commit_config() above) there is no ACK either. So
+     * safety_exchange() below now returns ESP_OK the moment the LOCAL UART
+     * accepts the bytes -- with the Pico unpowered, unflashed, or sitting in
+     * its bootloader, this function still answered ESP_OK. Confirmed on the
+     * bench 2026-08-24 with the RP2040 held in reset: safety_request_enable()
+     * reported success every time.
+     *
+     * That is the dangerous direction for this particular call. Every other
+     * function here reports a missing peer honestly (a stale cache with
+     * link_up = 0, per safety_link_get_status()'s contract); this one claimed
+     * the safety processor had been asked to permit heating when nothing had
+     * been asked anything. The header's promise of ESP_ERR_TIMEOUT "if the
+     * far side never ACKed" silently became unimplementable when the ACK went
+     * away, and was not updated with it.
+     *
+     * There is nothing to wait for, so the peer cannot be confirmed
+     * positively. What CAN be checked, without blocking and without sending
+     * anything, is the same cached link_up the rest of the driver already
+     * treats as the authority on "is a safety processor answering": it is
+     * maintained by the poll task from real received status frames and takes
+     * a sustained silence to clear (SAFETY_LINK_UP_PERIODS), so it does not
+     * flap on one dropped reply. Down means the last several polls got
+     * nothing back, which is exactly the case this must not report as
+     * success.
+     *
+     * Deliberately NOT the disable direction's problem too: enable=false is
+     * allowed through regardless. Telling a peer that may or may not be
+     * listening to STOP heating is the fail-safe direction, and refusing it
+     * because the link looks down would be the one refusal that could leave
+     * heat on. */
+    if (enable) {
+        bool peer_answering = false;
+        if (!safety_lock(link)) {
+            return ESP_FAIL;
+        }
+        peer_answering = safety_link_up_locked(link);
+        safety_unlock(link);
+        if (!peer_answering) {
+            ESP_LOGW(TAG, "request_enable(1) refused: no safety processor answering "
+                          "(link down) -- nothing was sent");
+            return ESP_ERR_INVALID_STATE;
+        }
+    }
+
     const uint8_t request[] = { SAFETY_CMD_REQUEST_ENABLE, (uint8_t)(enable ? 1u : 0u) };
     return safety_exchange(link, request, sizeof(request), false);
 }
