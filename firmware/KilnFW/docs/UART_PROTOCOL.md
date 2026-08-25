@@ -21,7 +21,7 @@ halving the frame count roughly halves that. The PC-link baud rate was also
 raised 115200 → 921600 the same day (`KILNCTL_UART_BAUD_RATE`) for the same
 reason, independent of this version bump.
 
-The *same* framing also carries the opto-isolated link between the ESP and the
+The *same* framing also carries the isolated link between the ESP and the
 RP2040 safety processor, on a second UART with `UART_PROTO_DEVICE_SAFETY` as
 the peer — see [`docs/SAFETY_LINK.md`](SAFETY_LINK.md).
 
@@ -190,7 +190,7 @@ their own device (ESP task 1 and HOST task 1 are unrelated).
 | 4 | `UART_TASK_ID_DISPLAY` | ILI9488 480x320 TFT on J2 | [`docs/ILI9488.md`](ILI9488.md) |
 | 5 | `UART_TASK_ID_LOG` | firmware console output (`ESP_LOGx`), forwarded unsolicited | — |
 | 6 | `UART_TASK_ID_SYSTEM` | link-recovery commands (restart) | — |
-| 7 | `UART_TASK_ID_SAFETY` | opto-isolated link to the RP2040 safety processor | [`docs/SAFETY_LINK.md`](SAFETY_LINK.md) |
+| 7 | `UART_TASK_ID_SAFETY` | isolated link to the RP2040 safety processor | [`docs/SAFETY_LINK.md`](SAFETY_LINK.md) |
 | 8 | `UART_TASK_ID_CONTROL` | zone config (PID/model/read-back) + manual relay control | `uart_task_ids.h` |
 | 9 | `UART_TASK_ID_PROFILES` | fire profile CRUD + execution control | `uart_task_ids.h` |
 | 10 | `UART_TASK_ID_AUTOTUNE` | PID autotune (step/relay methods) | `uart_task_ids.h` |
@@ -469,7 +469,7 @@ so it never times out on the PC side.
 
 ### SAFETY (task 7) — `uart_bridge.c: safety_bridge_task`
 
-The PC's window onto the opto-isolated link to the RP2040 safety processor.
+The PC's window onto the isolated link to the RP2040 safety processor.
 The ESP polls the Pico over that link and caches the last good answer;
 `GET_STATUS` returns **the cache**, never a blocking round trip, so a dead
 link shows up as stale/invalid status rather than a hung request. Until the
@@ -609,7 +609,7 @@ N * { u8 gpio, u8 function_id }
 | `0x02` | `I2C_SCL` | `0x0A` | `THERMO_FAULT` (`~FAULT`, active low) |
 | `0x03` | `UART_TX` | `0x0B` | `EXPANDER_IRQ` (SX1509 `~INT`) |
 | `0x04` | `UART_RX` | `0x0C` | `EXPANDER_RST` (SX1509 `~RESET`) |
-| `0x05` | `SPI_SCLK` | `0x0D` | `SAFETY_TX` (isolated, inverted) |
+| `0x05` | `SPI_SCLK` | `0x0D` | `SAFETY_TX` (isolated, non-inverting) |
 | `0x06` | `SPI_MOSI` | `0x0E` | `SAFETY_RX` |
 | `0x07` | `SPI_CS` | `0x0F` | `SAFETY_FAULT` (isolated fault line, output) |
 | `0x08` | `LED_HEARTBEAT` | | |

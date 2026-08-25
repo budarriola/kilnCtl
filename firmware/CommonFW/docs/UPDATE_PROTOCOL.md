@@ -63,7 +63,7 @@ authorisation model, a set of interlocks, and a web page:
 - **ESP32-S3 (`KilnFW`)** — over Wi-Fi, via a POST to its own web server.
   ESP-IDF has native support; the work is partitioning, authentication and
   interlocks.
-- **RP2040 (`SaftyFW`)** — over the opto-isolated UART, relayed by the ESP.
+- **RP2040 (`SaftyFW`)** — over the isolated UART, relayed by the ESP.
   There is no vendor support for this at all: the RP2040 mask ROM boots from
   USB or flash and **has no UART bootloader**, so this needs a bootloader
   written for it. See
@@ -370,30 +370,41 @@ Additive to `LINK_PROTOCOL.md`. All are ESP→Pico except the responses.
 
 ### Throughput, honestly
 
-**The link runs at 9600, not 115200.** Measured 2026-08-23 (`firmware/SaftyFW/docs/HARDWARE.md`
-§1): the TCMT1109 optocouplers and R15's 1k pull-up cannot switch fast enough
-for 115200 or 57600 — zero frames received, ever, at either — and 9600 is the
-fastest rate that tracked sent-to-received one for one over a multi-minute
-run. At 9600 baud a full 253-byte frame is roughly 260 bytes on the wire before
-byte-stuffing, about 270 ms, and the protocol is stop-and-wait with a 200 ms ACK
-timeout. A 200 KB image is about 830 frames — call it several minutes at this
-rate, not the 35 s a 115200 assumption would suggest.
+**HISTORY: the link ran at 9600, not 115200, for as long as the TCMT1109
+optocoupler pair was fitted.** Measured 2026-08-23
+(`firmware/SaftyFW/docs/HARDWARE.md` §1): that pair and R15's 1k pull-up
+could not switch fast enough for 115200 or 57600 — zero frames received,
+ever, at either — and 9600 was the fastest rate that tracked
+sent-to-received one for one over a multi-minute run. At 9600 baud a full
+253-byte frame is roughly 260 bytes on the wire before byte-stuffing, about
+270 ms, and the protocol is stop-and-wait with a 200 ms ACK timeout; a 200 KB
+image at that rate was about 830 frames, several minutes, not the 35 s a
+115200 assumption would suggest. **That optocoupler pair was replaced by a
+non-inverting ADuM1201WT digital isolator (U6) on 2026-08-25, so this ceiling
+no longer applies; see `KILNCTL_SAFETY_BAUD_RATE` in `KilnFW/App/drivers/Kconfig`
+for the current measured baud and recompute the throughput figures above
+against it rather than assuming 9600.**
 
-That makes the retry behaviour matter more, not less: `UART_PROTO_MAX_RETRIES`
-is 10 at a 200 ms timeout, so a single persistently-failing frame costs 2 s, and
-any nonzero frame-loss rate at 9600 stretches an already-slow update
-substantially further. Before building this:
+That makes the retry behaviour matter more, not less, at whatever the
+current baud turns out to be: `UART_PROTO_MAX_RETRIES` is 10 at a 200 ms
+timeout, so a single persistently-failing frame costs 2 s, and any nonzero
+frame-loss rate stretches an already-slow update substantially further.
+Before building this:
 
-- [ ] **Measure the real error rate of the isolated link at 9600** over a
-      sustained multi-megabyte transfer. The per-poll baud-walk measurement
-      (`firmware/SaftyFW/docs/HARDWARE.md` §1) showed received tracking sent
-      one for one over minutes of 500 ms status frames, but that is a much
-      lighter load than a saturated update transfer.
-- [ ] Decide whether to raise the baud rate for the duration of an update, and
-      whether the optocouplers can take it — the measurement above suggests
-      not without a faster part or a line driver in place of the
-      TCMT1109/R15 pair. A negotiated rate in `UPDATE_BEGIN` with an automatic
-      fallback is the flexible option if a faster part is ever fitted.
+- [ ] **Measure the real error rate of the isolated link at its current
+      committed baud** over a sustained multi-megabyte transfer. The per-poll
+      baud-walk measurement (`firmware/SaftyFW/docs/HARDWARE.md` §1) showed
+      received tracking sent one for one over minutes of 500 ms status
+      frames at the old 9600 optocoupler-era rate, but that is a much lighter
+      load than a saturated update transfer, and the barrier itself has since
+      changed.
+- [ ] Decide whether to raise the baud rate for the duration of an update.
+      The old measurement's "not without a faster part or line driver"
+      conclusion was specific to the TCMT1109/R15 pair and does not carry
+      over to U6, the digital isolator that replaced it — re-evaluate against
+      current hardware rather than assuming that limit still holds. A
+      negotiated rate in `UPDATE_BEGIN` with an automatic fallback remains
+      the flexible option either way.
 - [ ] Report progress to the GUI at least every 2 s. A silent 35-second bar is
       indistinguishable from a hang.
 
@@ -767,13 +778,17 @@ and "Pico update" sections below for what each actually covers.
       scope. Not what this item's exact wording ("to `CommonFW`'s codecs")
       envisioned; flagged as a deviation, not silently reinterpreted.
 - [ ] **Isolated-link error rate measured under a sustained update-sized
-      transfer, at the link's real baud of 9600** -- still not measured; this
-      pass built against the documented frame contracts without that
+      transfer, at the link's real committed baud** -- still not measured;
+      this pass built against the documented frame contracts without that
       measurement. The 115200 this item originally named was itself wrong:
-      measured 2026-08-23, the TCMT1109 optocouplers deliver zero frames at
-      115200 or 57600, and 9600 is the committed rate (`firmware/SaftyFW/docs/HARDWARE.md`
-      §1). The sustained-transfer error rate at 9600 is a separate,
-      still-open measurement.
+      measured 2026-08-23, the then-fitted TCMT1109 optocoupler pair
+      delivered zero frames at 115200 or 57600, and 9600 became the
+      committed rate for as long as that pair was fitted
+      (`firmware/SaftyFW/docs/HARDWARE.md` §1). That pair was replaced by a
+      digital isolator (U6) on 2026-08-25 and the baud is being re-measured —
+      see `KILNCTL_SAFETY_BAUD_RATE` in `KilnFW/App/drivers/Kconfig` for the
+      current value, not 9600. The sustained-transfer error rate at whatever
+      that current value is remains a separate, still-open measurement.
 - [x] `UPDATE_DATA` sent unacknowledged; Pico keeps a received-range bitmap
       and emits a gap report every 500 ms (SaftyFW, already frozen);
       **2026-08-17**: the ESP side (`KilnFW/App/drivers/ota_pico_relay.c`)

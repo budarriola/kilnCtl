@@ -195,13 +195,14 @@
 #define UART_PROTOCOL_TASK_PRIORITY  CONFIG_KILNCTL_UART_PROTOCOL_TASK_PRIORITY
 #define UART_PROTOCOL_STACK_SIZE     CONFIG_KILNCTL_UART_PROTOCOL_STACK_SIZE
 
-/* --- Safety processor link (opto-isolated, inverted) ---
- * SAFETY_TX_IO (GPIO5) drives U2's LED through R12 (Pico RX); SAFETY_RX_IO
- * (GPIO4) is U3's collector (Pico TX), pulled up externally by R15 (1k to
- * 3.3V_Main); the internal pull-up is enabled too as belt-and-braces.
- * Both directions are inverted by the optocouplers -- see uart_task_ids.h
- * and docs/HARDWARE.md. SAFETY_FAULT_IO is an OUTPUT: high asserts the
- * isolated fault line into the safety processor. */
+/* --- Safety processor link (isolated via U6, an ADuM1201WT digital isolator) ---
+ * SAFETY_TX_IO (GPIO5) drives U6's VIA input (Pico RX side); SAFETY_RX_IO
+ * (GPIO4) is driven by U6's VOA output (Pico TX side), a push-pull CMOS
+ * output; the internal pull-up is enabled too as belt-and-braces even though
+ * it no longer defines the idle level. Neither direction is inverted -- the
+ * ADuM1201 is non-inverting -- see uart_task_ids.h and docs/HARDWARE.md.
+ * SAFETY_FAULT_IO is an OUTPUT: high asserts the isolated (opto, U1) fault
+ * line into the safety processor. */
 #define SAFETY_UART_PORT_NUM   UART_NUM_1
 #define SAFETY_TX_IO           CONFIG_KILNCTL_SAFETY_TX_IO
 #define SAFETY_RX_IO           CONFIG_KILNCTL_SAFETY_RX_IO

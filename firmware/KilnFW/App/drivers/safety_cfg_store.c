@@ -172,24 +172,30 @@ static uint32_t s_refetch_fail_suppressed = 0;
  *
  * This function runs synchronously inside safety_poll_task, and each page it
  * fetches (safety_link_get_config_page()) can legitimately take up to
- * SAFETY_LINK_REPLY_TIMEOUT_MS (~1.2s at the current 9600 baud) now that that
- * call actually uses its full declared wait instead of abandoning it after
- * the first unrelated frame (safety_link.h's safety_drain_still_waiting(),
- * same date). Without a cap here, a slow-but-answering Pico -- or one that
- * has genuinely gone quiet mid-fetch -- lets a multi-page refetch
- * (CONFIG_REFERENCE.md's ~57 params packs into roughly 2-3 CONFIG_PAGE
- * frames at typical entry sizes) spend several of those ~1.2s budgets back
- * to back, all inside ONE safety_poll_task iteration, on top of that same
- * iteration's own GET_STATUS exchange (which can itself already legitimately
- * spend up to SAFETY_LINK_REPLY_TIMEOUT_MS against a dead link -- that part
- * is unchanged and pre-existing).
+ * SAFETY_LINK_REPLY_TIMEOUT_MS -- ~1.2s back when this link was capped at
+ * 9600 baud by its optocouplers; that ceiling was a property of the (now
+ * removed) optocouplers, not of this timeout, so the real worst case scales
+ * with whatever KILNCTL_SAFETY_BAUD_RATE is currently set to (see
+ * KilnFW/App/drivers/Kconfig) and only gets smaller as the baud goes up --
+ * now that that call actually uses its full declared wait instead of
+ * abandoning it after the first unrelated frame (safety_link.h's
+ * safety_drain_still_waiting(), same date). Without a cap here, a
+ * slow-but-answering Pico -- or one that has genuinely gone quiet mid-fetch
+ * -- lets a multi-page refetch (CONFIG_REFERENCE.md's ~57 params packs into
+ * roughly 2-3 CONFIG_PAGE frames at typical entry sizes) spend several of
+ * those REPLY_TIMEOUT budgets back to back, all inside ONE safety_poll_task
+ * iteration, on top of that same iteration's own GET_STATUS exchange (which
+ * can itself already legitimately spend up to SAFETY_LINK_REPLY_TIMEOUT_MS
+ * against a dead link -- that part is unchanged and pre-existing).
  *
  * 2000 ms here, combined with GET_STATUS's own pre-existing ~1.2s worst case
- * and FW_VERSION's ~50-500ms rare worst case, keeps one safety_poll_task
- * iteration's own worst case around 3.2-3.7s -- comfortably under
- * CONFIG_ESP_TASK_WDT_TIMEOUT_S (5s, sdkconfig.defaults) with well over a
- * second of margin for scheduling jitter and the rest of that iteration's
- * work. If this budget is exhausted mid-fetch, this function aborts exactly
+ * (at the old 9600 ceiling -- smaller now) and FW_VERSION's ~50-500ms rare
+ * worst case, kept one safety_poll_task iteration's own worst case around
+ * 3.2-3.7s at 9600 baud -- comfortably under CONFIG_ESP_TASK_WDT_TIMEOUT_S
+ * (5s, sdkconfig.defaults) with well over a second of margin for scheduling
+ * jitter and the rest of that iteration's work; a higher current baud only
+ * widens that margin. If this budget is exhausted mid-fetch, this function
+ * aborts exactly
  * like a failed page request (cache left unchanged, logged, rate-limited) --
  * nothing is lost: safety_cfg_store_maybe_refetch() re-invokes this from
  * page 0 with a FRESH budget on the next poll for as long as the cached CRC

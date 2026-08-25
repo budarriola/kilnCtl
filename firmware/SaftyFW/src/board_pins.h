@@ -16,11 +16,13 @@
 #define SAFTYFW_PIN_SPI0_SCK    2   // GPIO2, SPI0 SCK
 #define SAFTYFW_PIN_SPI0_MOSI   3   // GPIO3, SPI0 TX
 
-// --- UART1: the opto-isolated link to the ESP (uart_owner / link_task) -----
+// --- UART1: the isolated link to the ESP (uart_owner / link_task) ----------
 // NEVER referenced from safety_core.c or relay_owner.c -- see the CI grep
 // check in tools/check_isolation.ps1.
-#define SAFTYFW_PIN_UART1_TX    4   // GP4, PicoTx -> R7 -> U3 -> ESP RX (GPIO4)
-#define SAFTYFW_PIN_UART1_RX    5   // GP5, PicoRx <- U2 <- R12 <- ESP TX (GPIO5)
+// Isolated via U6 (ADuM1201WT digital isolator, non-inverting) as of
+// 2026-08-25; previously via a TCMT1109 optocoupler pair (U2/U3, R7/R12/R15).
+#define SAFTYFW_PIN_UART1_TX    4   // GP4, PicoTx -> U6 VIB -> U6 VOB -> ESP RX (GPIO4)
+#define SAFTYFW_PIN_UART1_RX    5   // GP5, PicoRx <- U6 VOA <- U6 VIA <- ESP TX (GPIO5)
 
 // --- The safety actuator (relay_owner). The ONLY code that may write this. -
 #define SAFTYFW_PIN_RELAY       6   // GPIO6, saftyRelay -> Q4 gate -> K4 coil. High = energized.

@@ -7,7 +7,7 @@ it (and, incidentally, the owner of the httpd instance every other page on
 this board hangs off — see [`docs/WEB_UI.md`](WEB_UI.md)).
 
 Wi-Fi is the **third** client of this board, alongside the UART PC link and
-the opto-isolated safety-processor link — not a replacement for either.
+the isolated safety-processor link — not a replacement for either.
 TODO.md section 1 is the authoritative design doc and change log; this file
 is the "what does it actually do" companion.
 

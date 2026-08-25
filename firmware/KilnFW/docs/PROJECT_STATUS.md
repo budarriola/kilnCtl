@@ -16,8 +16,9 @@ built.
 KilnCtrl retargets a unit-test-fixture firmware/PC-tools pair onto the real
 kilnCtl main board: an ESP32-S3 driving three MAX31856 thermocouple channels
 (via the daughterboard on J6), an SX1509 I/O expander (relays, digital I/O,
-display control), an ILI9488 TFT on J2, and an opto-isolated link to an
-RP2040 safety processor (`firmware/SaftyFW`).
+display control), an ILI9488 TFT on J2, and an isolated link (an ADuM1201
+digital isolator as of 2026-08-25; previously a TCMT1109 optocoupler pair) to
+an RP2040 safety processor (`firmware/SaftyFW`).
 
 ## Current build/hardware configuration
 
@@ -52,11 +53,13 @@ RP2040 safety processor (`firmware/SaftyFW`).
   swapped in `KilnFW`'s Kconfig defaults relative to the board
   (`DataToSafty`/GPIO5 is the ESP's TX, `DataFromSafty`/GPIO4 is its RX —
   measured on the bench 2026-08-23 after two schematic traces got it wrong in
-  opposite directions; see `docs/SAFETY_LINK.md` "Trap 1"), both
-  isolated data directions are logically inverted by the optocouplers (fixed
-  via `uart_set_line_inverse`; the RP2040 side needs no inversion of its own —
-  see `docs/SAFETY_LINK.md`), and the isolated `Fault` line is an ESP
-  **output**, not an input.
+  opposite directions; see `docs/SAFETY_LINK.md` "Trap 1"), and the isolated
+  `Fault` line is an ESP **output**, not an input. (Historical: both isolated
+  data directions used to be logically inverted by the now-removed TCMT1109
+  optocoupler pair, fixed via `uart_set_line_inverse`/`gpio_set_outover`; as
+  of 2026-08-25 that pair was replaced by U6, an ADuM1201 digital isolator,
+  which does not invert, and both firmwares' inversion has been removed to
+  match — see `docs/SAFETY_LINK.md`.)
 
 ## Hardware present on this bench unit (2026-08-20)
 
@@ -73,9 +76,13 @@ RP2040 safety processor (`firmware/SaftyFW`).
   first time — `safety_get_status()` returns live telemetry (link up, safety
   thermocouple invalid with no sensor fitted, all three currents 0.00 A, a few
   hundred milliseconds old). Getting there needed the UART baud rate dropped
-  to 9600 — the TCMT1109 optocouplers cannot switch fast enough for 115200 —
-  on top of the pin/inversion fixes above; see `docs/SAFETY_LINK.md`
-  "Transport" and `firmware/SaftyFW/docs/HARDWARE.md` §1 for the measurement.
+  to 9600 at the time — a ceiling the TCMT1109 optocouplers then fitted could
+  not switch past at 115200 — on top of the pin/inversion fixes above; see
+  `docs/SAFETY_LINK.md` "Transport" and `firmware/SaftyFW/docs/HARDWARE.md` §1
+  for that historical measurement. That optocoupler pair was replaced with a
+  digital isolator on 2026-08-25 and a new baud sweep is in progress — see
+  `CONFIG_KILNCTL_SAFETY_BAUD_RATE` in `KilnFW/App/drivers/Kconfig` for the
+  current measured value, not the 9600 figure above.
   The safety thermocouple IC itself is not fitted on this bench unit yet, so
   guard S5 (`SAFETY_TRIP_SENSOR_INVALID`) is expected to trip roughly a
   minute after boot once nothing else trips first — that is "sensor still
@@ -125,7 +132,10 @@ RP2040 safety processor (`firmware/SaftyFW`).
 - **The RP2040 safety-processor firmware exists and the link now works.**
   `firmware/SaftyFW` runs on real hardware and the isolated link has carried
   real telemetry end to end (2026-08-23), after the UART baud rate was
-  corrected to 9600 — see `docs/SAFETY_LINK.md`. With no Pico attached the
+  corrected to 9600 at the time — see `docs/SAFETY_LINK.md`. The barrier was
+  reworked from optocouplers to a digital isolator on 2026-08-25 and the baud
+  is being re-measured; see `CONFIG_KILNCTL_SAFETY_BAUD_RATE` in
+  `KilnFW/App/drivers/Kconfig` for the current value. With no Pico attached the
   link still degrades to "no peer" correctly (fail-safe fault assertion, not a
   hang).
 - **Live thermocouple faults gate relays only while a profile is actively

@@ -63,7 +63,7 @@ extern "C" {
 
 /* Who a frame is addressed to / came from. ESP and HOST are the two ends of
  * the PC link. SAFETY is the RP2040 safety processor on the far side of the
- * optocouplers: a *second*, physically separate uart_protocol_t instance runs
+ * digital isolator: a *second*, physically separate uart_protocol_t instance runs
  * on UART1 with own_device = ESP and talks to a peer that identifies as
  * SAFETY, so the same framing, retry and dedup logic covers both links. */
 typedef enum {

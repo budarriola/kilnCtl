@@ -36,7 +36,9 @@ reimplement any of it in either firmware — see `firmware/CommonFW/README.md` f
 transport-vs-contract split.
 
 The wire between the ESP32-S3 (`KilnFW`) and the RP2040 (`SaftyFW`), across
-three optocouplers. This document specifies both ends, because **both ends need
+the isolation barrier (a digital isolator, U6, for the two UART lines as of
+2026-08-25; a TCMT1109 optocoupler, U1, unchanged for the fault line). This
+document specifies both ends, because **both ends need
 changing** — neither firmware currently implements what the system needs.
 
 ---
@@ -134,8 +136,9 @@ The constraint is about **waiting**, not about transmitting, and the hardware is
 why. Only three signals cross the barrier — `DataToSafty`, `DataFromSafty`,
 `Fault`. **There is no RTS/CTS, no flow control of any kind.** A UART
 transmitter with no flow control cannot be backpressured: bytes written to the
-TX FIFO are clocked out by the shift register at the configured baud (9600 —
-see §3) whether or not anything is listening, or is even powered. A frozen ESP
+TX FIFO are clocked out by the shift register at whatever the configured baud
+is (see §3 for the current value) whether or not anything is listening, or is
+even powered. A frozen ESP
 is *physically unable* to stall the Pico's transmitter.
 
 The hang risk is real, but it lives entirely in the software above the
@@ -190,40 +193,52 @@ byte-stuffing implementation anywhere in the tree.
 | Max payload | 253 | `uart_protocol.h:48` |
 | Device ids | ESP = 0, HOST = 1, **SAFETY = 2** | `uart_protocol.h:70-72` |
 | Task id | **7** (`UART_TASK_ID_SAFETY`) | `uart_task_ids.h:60` |
-| Line | 8N1, **9600** baud | `Kconfig:214` |
+| Line | 8N1, see `KILNCTL_SAFETY_BAUD_RATE` in `KilnFW/App/drivers/Kconfig` for the current measured value | `Kconfig:214` |
 
-**The baud rate is capped by the TCMT1109 optocouplers, not by the UART
-peripheral on either side.** Measured 2026-08-23, walking the rate down with
-both ends changed together while the Pico transmitted a status frame every
-500 ms: 115200 and 57600 delivered zero frames, ever; 38400 lost about 20%;
-19200 looked clean over a short window but lost ~10% over a longer one; 9600
-tracked sent-to-received one for one over minutes and is the value both
-firmwares now hardcode, with no negotiation — `KILNCTL_SAFETY_BAUD_RATE` in
-`KilnFW`, `UART_OWNER_BAUD_RATE` in `SaftyFW`'s `src/tasks/uart_owner.c`.
-Raising it again needs a faster part or a line driver in place of the
-optocoupler/pull-up pair, not a config change. **A static GPIO high/low test
-across this link passes at any baud rate** — an optocoupler carries a DC level
-fine — which is why this ceiling was found late: the wiring had already been
+**HISTORY: the baud rate used to be capped by the TCMT1109 optocoupler pair,
+not by the UART peripheral on either side; that pair (U2/U3, with R7/R12/R15)
+was replaced by U6, a non-inverting ADuM1201WT digital isolator, on
+2026-08-25, and this section's 9600 figure and its "needs a faster part"
+conclusion belonged to the retired pair, not to U6 or to either UART
+peripheral.** Measured 2026-08-23, walking the rate down with both ends
+changed together while the Pico transmitted a status frame every 500 ms:
+115200 and 57600 delivered zero frames, ever; 38400 lost about 20%; 19200
+looked clean over a short window but lost ~10% over a longer one; 9600
+tracked sent-to-received one for one over minutes and was the value both
+firmwares then hardcoded, with no negotiation — `KILNCTL_SAFETY_BAUD_RATE` in
+`KilnFW`, `UART_OWNER_BAUD_RATE` in `SaftyFW`'s `src/tasks/uart_owner.c`. At
+the time, raising it needed a faster part or a line driver in place of the
+optocoupler/pull-up pair; now that U6 is fitted instead, that specific
+constraint is gone, and a fresh baud sweep is in progress — again, see
+`KILNCTL_SAFETY_BAUD_RATE` in Kconfig for the current value, not 9600. **A
+static GPIO high/low test across this link passes at any baud rate** —
+both an optocoupler and a digital isolator carry a DC level fine — which is
+why the old optocoupler ceiling was found late: the wiring had already been
 bench-verified that way in both directions, so suspicion fell on framing,
 device/task ids and line inversion instead, all of which were correct. See
 `firmware/KilnFW/docs/SAFETY_LINK.md`'s "Transport" section for the full
-measurement table.
+historical measurement table.
 
-**Polarity: exactly one inversion per direction, but the two directions do not
-invert in the same place.** ESP -> Pico is inverted entirely in the ESP's
-UART peripheral (`TXD_INV` on GPIO5); the Pico's plain hardware UART reads
-that direction at standard polarity with no inversion of its own. Pico -> ESP
-cannot use the same trick, because the RP2040's PL011 UART has no
-line-inversion control — so `SaftyFW` inverts at the GPIO pad instead, via
+**Polarity: no inversion on either direction as of 2026-08-25.** U6 (the
+ADuM1201WT that now carries both UART directions) does not invert, so
+neither firmware applies any line inversion any more.
+**HISTORY:** under the retired U2/U3 optocoupler pair, exactly one inversion
+per direction was required, and the two directions did not invert in the
+same place — ESP -> Pico was inverted entirely in the ESP's UART peripheral
+(`TXD_INV` on GPIO5); the Pico's plain hardware UART read that direction at
+standard polarity with no inversion of its own. Pico -> ESP could not use the
+same trick, because the RP2040's PL011 UART has no line-inversion control —
+so `SaftyFW` inverted at the GPIO pad instead, via
 `gpio_set_outover(SAFTYFW_PIN_UART1_TX, GPIO_OVERRIDE_INVERT)` in
-`uart_owner.c`, and `KilnFW` applies `TXD_INV` only (not `RXD_INV`) on its
-own UART for that direction, since GPIO4 already arrives at the correct
-polarity. This also means both optocouplers now sit dark (LED off) at idle:
-before the pad-override fix, GP4 idled at ordinary UART mark (high), keeping
-U3's LED lit continuously between frames; U2 was already correct. Adding a
-second inversion anywhere in either direction cancels the optocoupler's own
-inversion and the link goes dead. See `firmware/SaftyFW/docs/HARDWARE.md` §1
-and `firmware/KilnFW/docs/SAFETY_LINK.md` "Trap 2" for the full detail.
+`uart_owner.c`, and `KilnFW` applied `TXD_INV` only (not `RXD_INV`) on its
+own UART for that direction, since GPIO4 already arrived at the correct
+polarity. That also meant both optocouplers sat dark (LED off) at idle: before
+the pad-override fix, GP4 idled at ordinary UART mark (high), keeping U3's LED
+lit continuously between frames; U2 was already correct. Both of those
+inversion mechanisms have since been removed; re-adding either now would
+invert an already-correct signal into U6 and break the link. See
+`firmware/SaftyFW/docs/HARDWARE.md` §1 and `firmware/KilnFW/docs/SAFETY_LINK.md`
+"Trap 2" for the full historical detail.
 
 **Pins: `PicoTx` = GP4, `PicoRx` = GP5** (`firmware/SaftyFW/docs/HARDWARE.md` §2). On the ESP
 side these land on **GPIO4 = ESP RX** and **GPIO5 = ESP TX**, matching

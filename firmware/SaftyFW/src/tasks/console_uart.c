@@ -24,9 +24,11 @@ bool console_uart_init(void)
     uart_set_hw_flow(CONSOLE_UART_INSTANCE, false, false);
     uart_set_format(CONSOLE_UART_INSTANCE, 8, 1, UART_PARITY_NONE);
     uart_set_fifo_enabled(CONSOLE_UART_INSTANCE, true);
-    // No inversion here, unlike uart_owner's UART1 -- this pair goes straight
-    // to the debug probe's plain USB-serial bridge, not through an
-    // optocoupler, so standard polarity is correct on both ends.
+    // No inversion here -- this pair goes straight to the debug probe's plain
+    // USB-serial bridge, not through any isolation barrier part, so standard
+    // polarity is correct on both ends. (uart_owner's UART1 also applies no
+    // inversion any more since the 2026-08-25 optocoupler-to-digital-isolator
+    // rework, but for a different reason: U6 doesn't invert either.)
     s_ready = true;
     return true;
 }

@@ -21,7 +21,19 @@ corrected below.
 
 The safety processor is a **Raspberry Pi Pico (RP2040)**, designator **A1**,
 on sheet `/SaftyProcessor/`. It sits in the `GND_Safty` ground domain, which
-shares no connection with `GND_Main` except through three optocouplers.
+shares no connection with `GND_Main` except through the isolation barrier
+below.
+
+> **2026-08-25 update: the barrier is no longer three optocouplers.** The two
+> UART lines (`DataToSafty`/`DataFromSafty`) used to cross through a TCMT1109
+> optocoupler pair, U2/U3 (with R7/R12/R15); that pair has been removed and
+> replaced by **U6, a single ADuM1201WT digital isolator**, non-inverting,
+> with one channel per direction. The fault line is untouched and still
+> crosses through its own TCMT1109 optocoupler, U1. Most of §1 below —
+> the pin-direction measurement, the fault-line behaviour, and the "why two
+> schematic traces both failed" history — still describes the current board.
+> The inversion analysis and the 9600 baud figure describe the *retired*
+> U2/U3 pair and are marked HISTORY below; they no longer apply to U6.
 
 ---
 
@@ -33,23 +45,33 @@ shares no connection with `GND_Main` except through three optocouplers.
 
 | ESP32-S3 GPIO | Net | Direction |
 |---|---|---|
-| **GPIO4** | `DataFromSafty` | ESP **RX** — U3's collector, **R15 1k to 3.3V_Main** on this net |
-| **GPIO5** | `DataToSafty` | ESP **TX** — drives U2's LED through R12 390R |
-| GPIO6 | `Fault` | ESP **output** (this was always right) |
+| **GPIO4** | `DataFromSafty` | ESP **RX** — driven by U6's VOB output (push-pull CMOS, not an open collector). R15 1k to 3.3V_Main is still fitted on this net but no longer defines the idle level by itself |
+| **GPIO5** | `DataToSafty` | ESP **TX** — drives U6's VIB input |
+| GPIO6 | `Fault` | ESP **output** (this was always right; still through U1, unchanged) |
 
 `KilnFW`: `KILNCTL_SAFETY_TX_IO = 5`, `KILNCTL_SAFETY_RX_IO = 4`.
 `SaftyFW`: `SAFTYFW_PIN_UART1_TX = GP4`, `SAFTYFW_PIN_UART1_RX = GP5` —
-unchanged, these were always correct.
+unchanged, these were always correct, and the direction/polarity of each net
+is unchanged by the 2026-08-25 rework — only the part providing the isolation
+is different.
 
-The optocouplers, which nothing about this changes:
+The barrier parts, current as of 2026-08-25:
+
+| Part | Driven by | Output | Therefore |
+|------|----------------|-----------------------|-----------|
+| U1 (opto) | `Fault`, main side, via R11 390R | collector = Pico `mainFault` (GP10) + R8 1k pull-up to 3.3v_Safty; emitter = GND_Safty | ESP **drives** fault into the Pico |
+| U6 (VIA/VOA) | `DataToSafty`, main side | Pico `PicoRx` (GP5) + R9 1k pull-up to 3.3v_Safty | `DataToSafty` = **ESP TX** |
+| U6 (VIB/VOB) | `PicoTx` (Pico GP4), safety side | `DataFromSafty` (ESP GPIO4), main side | `DataFromSafty` = **ESP RX** |
+
+**HISTORY — the table above described U2/U3 (the retired optocoupler pair)
+until 2026-08-25:**
 
 | Opto | Pins 1,2 (LED) | Pins 3,4 (transistor) | Therefore |
 |------|----------------|-----------------------|-----------|
-| U1 | `Fault`, main side, via R11 390R | collector = Pico `mainFault` (GP10) + R8 1k pull-up to 3.3v_Safty; emitter = GND_Safty | ESP **drives** fault into the Pico |
 | U2 | `DataToSafty`, main side, via R12 390R | collector = Pico `PicoRx` (GP5) + R9 1k pull-up to 3.3v_Safty; emitter = GND_Safty | `DataToSafty` = **ESP TX** |
 | U3 | `PicoTx` (Pico GP4), **safety** side, via R7 390R | collector = `DataFromSafty` (ESP GPIO4), main side; emitter = `MainProcessorDataGnd` | `DataFromSafty` = **ESP RX** |
 
-### The measurement (2026-08-23)
+### The measurement (2026-08-23, against the retired U2/U3 pair)
 
 Both boards powered, `gpio_probe` on the ESP over its USB-serial bridge,
 `pico_gpio` on the Pico over SWD — each processor reached by a path that is
@@ -110,60 +132,73 @@ meant to be.** Symbol orientation and net names are weaker still.
 
 ### The rule that does survive tracing
 
-Each optocoupler is unidirectional. A pin wired to an LED anode can only be an
-output; a pin wired to a collector can only be an input. The 390 R / 1 k
-pattern follows from that rather than standing on its own: a 390 R in series
-on the driven side, a 1 k pull-up on the open-collector side, three of each
-across three crossings.
+Each optocoupler channel is unidirectional: a pin wired to an LED anode can
+only be an output, a pin wired to a collector can only be an input. (This
+still governs U1, the surviving fault-line optocoupler. It no longer governs
+the UART pair, which crosses through U6's VIx/VOx pins instead — each of
+U6's channels is unidirectional too, by which pin is a VIx input vs. a VOx
+output, just not by an LED/collector distinction.) The 390 R / 1 k pattern on
+U1 follows from the optocoupler rule rather than standing on its own: a 390 R
+in series on the driven side, a 1 k pull-up on the open-collector side.
 
-### What the docs always got right, and what changed since
+### HISTORY: what the docs always got right about U2/U3, and what changed on 2026-08-23 — none of this applies to U6
 
-The core inversion analysis is unchanged: each direction crosses exactly one
-optocoupler, and an optocoupler is an inverter — the driving side's logic
+**This whole subsection describes the retired optocoupler pair. As of
+2026-08-25, U6 (the ADuM1201WT that replaced U2/U3) does not invert either
+direction, and neither firmware applies any line inversion on this link any
+more — see the current state below the HISTORY block.**
+
+The core inversion analysis under U2/U3 was: each direction crossed exactly
+one optocoupler, and an optocoupler is an inverter — the driving side's logic
 high lights the LED, the receiving side's collector is pulled low. So exactly
-one inversion is needed per direction. What changed on 2026-08-23 is *where*
-that inversion lives for the Pico -> ESP direction.
+one inversion was needed per direction. What changed on 2026-08-23 was *where*
+that inversion lived for the Pico -> ESP direction.
 
-**ESP -> Pico (GPIO5, through U2)** was always correct: `KilnFW` applies
-`UART_SIGNAL_TXD_INV` in the ESP UART peripheral, and the RP2040 side needs
-nothing — its plain hardware UART reads a standard-polarity idle-high on
+**ESP -> Pico (GPIO5, through U2)** was always correct: `KilnFW` applied
+`UART_SIGNAL_TXD_INV` in the ESP UART peripheral, and the RP2040 side needed
+nothing — its plain hardware UART read a standard-polarity idle-high on
 GP5/`PicoRx` with no inversion, no PIO, and no external parts.
 
 **Pico -> ESP (GP4, through U3) used to be wrong.** The RP2040's PL011 UART
-peripheral has no line-inversion control at all — unlike the ESP, there is no
-`uart_set_line_inverse()` equivalent to reach for. For a while `KilnFW`
+peripheral has no line-inversion control at all — unlike the ESP, there was
+no `uart_set_line_inverse()` equivalent to reach for. For a while `KilnFW`
 compensated by also setting `RXD_INV` on its own UART, which produced correct
 *data* (two inversions — U3's and `RXD_INV`'s — cancelling back to the right
 logic level) but left GP4 driving its natural UART idle state, mark (high),
 straight onto U3's LED — so U3 sat lit continuously between frames, not just
 while transmitting.
 
-The fix does not add UART-level inversion (there is none to add); it uses the
-RP2040's GPIO block instead, which does support an output-override, applied
-downstream of the UART peripheral's own signal:
+The 2026-08-23 fix did not add UART-level inversion (there was none to add);
+it used the RP2040's GPIO block instead, which supports an output-override,
+applied downstream of the UART peripheral's own signal:
 
 ```c
 gpio_set_outover(SAFTYFW_PIN_UART1_TX, GPIO_OVERRIDE_INVERT);
 ```
 
-in `src/tasks/uart_owner.c`. This inverts GP4 at the pad, so idle mark now
-reaches U3's LED as low — the LED is dark at idle, not lit — and R15's 1k
-pull-up presents a correct, standard-polarity idle-high on ESP GPIO4.
-Because the correction now happens on the Pico's pad, `KilnFW`'s
-`safety_link.c` applies `UART_SIGNAL_TXD_INV` only, **not** `RXD_INV`; GPIO4
-needs no inversion in the ESP UART peripheral any more. Do not add a second
-inversion on either side — one inversion per direction, applied once, is the
-invariant, whether it happens in the ESP's UART peripheral or the RP2040's
-GPIO pad override.
+in `src/tasks/uart_owner.c`. This inverted GP4 at the pad, so idle mark
+reached U3's LED as low — the LED was dark at idle, not lit — and R15's 1k
+pull-up presented a correct, standard-polarity idle-high on ESP GPIO4.
+Because the correction happened on the Pico's pad, `KilnFW`'s `safety_link.c`
+applied `UART_SIGNAL_TXD_INV` only, **not** `RXD_INV`; GPIO4 needed no
+inversion in the ESP UART peripheral. The invariant at the time was: exactly
+one inversion per direction, applied once, whether in the ESP's UART
+peripheral or the RP2040's GPIO pad override.
 
-### The link now carries real traffic
+**Current state (2026-08-25 on):** U6 is non-inverting on both channels, so
+neither the `gpio_set_outover(..., GPIO_OVERRIDE_INVERT)` call above nor
+`KilnFW`'s `UART_SIGNAL_TXD_INV` applies any more — both have been removed
+from their respective firmwares. Re-adding either would invert an
+already-correct signal and break the link.
+
+### HISTORY: the link's first end-to-end traffic, and the old optocoupler baud ceiling
 
 With the corrected pins flashed, `GET_LINK_STATS` initially still read `sent
 26, received 0, timeouts 26` — the pin map and electrical path were proven,
 but nothing was arriving. The remaining cause was the UART baud rate: the
-TCMT1109 optocouplers and R15's 1k pull-up cannot switch fast enough for
-115200. Measured 2026-08-23, walking the rate down with both sides changed
-together and the Pico transmitting a status frame every 500 ms:
+TCMT1109 optocouplers and R15's 1k pull-up then fitted could not switch fast
+enough for 115200. Measured 2026-08-23, walking the rate down with both sides
+changed together and the Pico transmitting a status frame every 500 ms:
 
 | Baud | Result |
 |-----:|--------|
@@ -171,19 +206,25 @@ together and the Pico transmitting a status frame every 500 ms:
 | 57600 | zero frames received, ever |
 | 38400 | ~80% received (53 of 66), errors climbing |
 | 19200 | clean over a short window (20 of 20), but ~10% lost over a longer one (107/118, then 117/134) |
-| 9600 | received tracks sent one for one over minutes (48/52, then 72/75) — **committed** |
+| 9600 | received tracks sent one for one over minutes (48/52, then 72/75) — the committed value for as long as U2/U3 were fitted |
 
-Both firmwares now hardcode **9600** — `KILNCTL_SAFETY_BAUD_RATE` in `KilnFW`,
-`UART_OWNER_BAUD_RATE` in `src/tasks/uart_owner.c` here — with no negotiation.
-Raising it again needs a faster optocoupler or a real line driver, not a
-config change.
+Both firmwares hardcoded **9600** at the time — `KILNCTL_SAFETY_BAUD_RATE` in
+`KilnFW`, `UART_OWNER_BAUD_RATE` in `src/tasks/uart_owner.c` here — with no
+negotiation, and raising it needed a faster optocoupler or a real line driver
+in place of the TCMT1109/R15 pair. **That constraint belonged to the
+optocoupler pair, not to either UART peripheral, and no longer applies now
+that U6 (an ADuM1201WT digital isolator) has replaced it (2026-08-25).** A
+fresh baud sweep against U6 is in progress; see `KILNCTL_SAFETY_BAUD_RATE` in
+`KilnFW/App/drivers/Kconfig` for the current measured value rather than the
+9600 figure above.
 
 **A static GPIO high/low test across this link passes at any baud rate**,
-because an optocoupler carries a DC level perfectly well; only a bit that
-switches fast enough to matter exposes the ceiling. That is exactly why this
-took so long to find — §1's coordinated drive/read test above had already
-proven the wiring in both directions, so suspicion fell on framing, device/task
-ids and line inversion instead, all of which were in fact already correct.
+because both an optocoupler and a digital isolator carry a DC level perfectly
+well; only a bit that switches fast enough to matter exposes any real
+ceiling. That is exactly why the old optocoupler ceiling took so long to
+find — §1's coordinated drive/read test above had already proven the wiring
+in both directions, so suspicion fell on framing, device/task ids and line
+inversion instead, all of which were in fact already correct.
 
 With the baud corrected, the link works end to end: `safety_get_status()` on
 the ESP side returns real telemetry (link up, safety thermocouple invalid with
@@ -214,8 +255,8 @@ Traced from `kiln.pdf` p.2. This table is authoritative for `SaftyFW`.
 | 2 | GPIO1 | `CS0` | out | MAX31856 `~CS`, active low. **10k pull-up to 3.3v_Safty** |
 | 4 | GPIO2 | `CLK` | out | SPI0 SCK |
 | 5 | GPIO3 | `MOSI` | out | SPI0 TX |
-| 6 | GPIO4 | `PicoTx` | out | UART TX, inverted at the pad via `gpio_set_outover(GPIO_OVERRIDE_INVERT)` in `uart_owner.c` → R7 390R → U3 LED → ESP GPIO4 (`DataFromSafty`). **LED dark at idle** |
-| 7 | GPIO5 | `PicoRx` | in | UART RX ← U2 collector, driven by ESP GPIO5 (`DataToSafty`). **R9 1k pull-up**, idles high |
+| 6 | GPIO4 | `PicoTx` | out | UART TX, no pad inversion (`gpio_set_outover(GPIO_OVERRIDE_INVERT)` was removed 2026-08-25 along with U2/U3) → U6 VIB input → U6 VOB output → ESP GPIO4 (`DataFromSafty`) |
+| 7 | GPIO5 | `PicoRx` | in | UART RX ← U6 VOA output, driven by ESP GPIO5 (`DataToSafty`) into U6 VIA. **R9 1k pull-up**, idles high |
 | 9 | GPIO6 | `saftyRelay` | out | Q4 gate → K4 coil. **High = relay energized** |
 | 10 | GPIO7 | `SDA` | i/o | I2C0 SDA, **R48 2.2k pull-up**, out to J7 pin 6. Nothing answers today |
 | 11 | GPIO8 | `SCL` | out | I2C0 SCL, **R49 2.2k pull-up**, out to J7 pin 8 |
@@ -550,8 +591,9 @@ If the ESP32 is **also** plugged into the same PC, then `GND_Main` and
 `GND_Safty` are bonded through the PC and **the isolation barrier is bypassed
 for the duration.**
 
-The optocouplers still carry the signals, but the thing they exist to provide —
-galvanic separation — is not present while you are debugging. Consequences:
+The isolation barrier parts (U1's optocoupler and U6's digital isolator)
+still carry the signals, but the thing they exist to provide — galvanic
+separation — is not present while you are debugging. Consequences:
 
 - **Never debug the safety domain from a PC with mains-referenced load wiring
   connected.** Bench work only, with the contactor side disconnected.

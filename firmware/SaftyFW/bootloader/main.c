@@ -119,20 +119,26 @@ static void enter_recovery(void) __attribute__((noreturn));
 
 static void enter_recovery(void)
 {
-    // 9600, not 115200: this is the same opto-isolated pair the application
-    // uses, and the TCMT1109 optocouplers cannot switch fast enough for a
-    // 8.7 us bit. Measured on the bench 2026-08-23 -- at 115200 and 57600 not
-    // one frame ever arrived, 38400 lost about a fifth, 9600 is clean. See
-    // the table in KilnFW/App/drivers/Kconfig under
-    // KILNCTL_SAFETY_BAUD_RATE, and keep this equal to the application's
-    // UART_OWNER_BAUD_RATE (src/tasks/uart_owner.c): recovery mode is
-    // useless if the host cannot talk to it.
-    uart_init(uart1, 9600u);
+    // Must equal the application's UART_OWNER_BAUD_RATE
+    // (src/tasks/uart_owner.c) and KilnFW's CONFIG_KILNCTL_SAFETY_BAUD_RATE:
+    // recovery mode is useless if the host cannot talk to it.
+    //
+    // Raised from 9600 on 2026-08-25 along with the application. The 9600
+    // ceiling belonged to the TCMT1109 optocouplers, which are gone -- the
+    // barrier is now one ADuM1201WT digital isolator (U6). The sweep that
+    // chose this rate is recorded in KilnFW/App/drivers/Kconfig under
+    // KILNCTL_SAFETY_BAUD_RATE.
+    uart_init(uart1, 230400u);
     gpio_set_function(SAFTYFW_PIN_UART1_TX, GPIO_FUNC_UART);
     gpio_set_function(SAFTYFW_PIN_UART1_RX, GPIO_FUNC_UART);
-    // Plain hardware UART, no inversion, no PIO -- same as
-    // src/tasks/uart_owner.c's uart_owner_init(); the ESP inverts on its
-    // side.
+    // Plain hardware UART, no inversion, no PIO -- now genuinely the same as
+    // src/tasks/uart_owner.c's uart_owner_init(), which is a change worth
+    // recording: until 2026-08-25 that function applied
+    // gpio_set_outover(GPIO_OVERRIDE_INVERT) to the TX pin and this function
+    // never did, so recovery mode's Pico->ESP polarity was the opposite of
+    // the application's for as long as the optocouplers were fitted. The
+    // comment here claimed they matched; they did not. Neither end inverts
+    // now, because the ADuM1201 does not invert either.
     uart_set_hw_flow(uart1, false, false);
     uart_set_format(uart1, 8, 1, UART_PARITY_NONE);
     uart_set_fifo_enabled(uart1, true);

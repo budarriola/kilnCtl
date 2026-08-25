@@ -20,7 +20,8 @@ The system is two firmwares that must agree with each other:
   silicon**; every guard input is now produced, and what remains is
   commissioning values plus the hardware-gated trip proofs.
 
-They talk over an opto-isolated UART. That link, and the rule that **the safety
+They talk over an isolated UART (a digital isolator, U6, as of 2026-08-25;
+previously an optocoupler pair). That link, and the rule that **the safety
 processor must be alive for the main processor to heat**, is what makes this one
 project rather than two.
 
@@ -154,11 +155,16 @@ Owned by [`firmware/SaftyFW/TODO.md`](firmware/SaftyFW/TODO.md) phase 0.
 
 - [x] **Link confirmed working end-to-end (2026-08-23).** The bench
       measurement found the byte actually died on baud mismatch, not idle
-      level, framing or opto polarity: the TCMT1109 optocouplers cannot switch
-      fast enough for 115200. Walking the rate down settled on 9600, now
-      hardcoded on both sides, and `safety_get_status()` returns live
-      telemetry. See `firmware/KilnFW/docs/SAFETY_LINK.md` "Transport" and
-      `firmware/SaftyFW/docs/HARDWARE.md` §1.
+      level, framing or opto polarity: the TCMT1109 optocoupler pair then
+      fitted could not switch fast enough for 115200. Walking the rate down
+      settled on 9600, hardcoded on both sides at the time, and
+      `safety_get_status()` returned live telemetry. **That optocoupler pair
+      was replaced by a non-inverting digital isolator (U6) on 2026-08-25;
+      the 9600 figure was a property of the retired parts, not of either
+      firmware, and a fresh baud sweep is in progress — see
+      `KILNCTL_SAFETY_BAUD_RATE` in `KilnFW/App/drivers/Kconfig` for the
+      current value.** See `firmware/KilnFW/docs/SAFETY_LINK.md` "Transport"
+      and `firmware/SaftyFW/docs/HARDWARE.md` §1.
 - [x] Tier 0 pin test settles ESP TX/RX by measurement (`HARDWARE.md` §1) —
       moot as a separate step: the Pico is attached and the link carries live
       telemetry both ways (`safety_get_status()` returns fresh frames,
@@ -206,7 +212,9 @@ safety processor (RP2040) still has none fitted.
 
 **Bench state (2026-08-24):** both UARTs work — the two blockers named above
 are cleared. The isolated Pi↔ESP link is up and carrying telemetry at 9600
-(M0), and the PC↔ESP command UART on COM9 is responsive. Both firmwares were
+(M0; that figure was specific to the optocoupler pair fitted at the time and
+does not describe the digital isolator that replaced it on 2026-08-25 — see
+M0's note), and the PC↔ESP command UART on COM9 is responsive. Both firmwares were
 flashed over JTAG/SWD today and verified running.
 
 **Later the same day the safety processor's MAX31856 and thermocouple were
@@ -475,10 +483,14 @@ path. Two facts set the shape of this milestone:
   partition table with two app slots, and a partition table can only be written
   over a cable.
 
-- [x] **Measure the isolated link's real error rate — done, and 115200 does
-      not work at all.** The optocouplers cap the link at 9600 (see M0); the
-      update transfer's error rate at that baud, over a sustained
-      multi-megabyte run, is still unmeasured. Retry cost is still 200 ms × up to 10
+- [x] **Measure the isolated link's real error rate — done, and 115200 did
+      not work at all under the old optocoupler pair.** The optocoupler pair
+      capped the link at 9600 (see M0); that pair was replaced by a digital
+      isolator (U6) on 2026-08-25 and the ceiling no longer applies, so the
+      committed baud is being re-measured (`KILNCTL_SAFETY_BAUD_RATE` in
+      `KilnFW/App/drivers/Kconfig`). The update transfer's error rate at
+      whatever the current baud is, over a sustained multi-megabyte run, is
+      still unmeasured. Retry cost is still 200 ms × up to 10
 - [x] Real flash size established (N16R8, 16 MB/8 MB PSRAM) and declared in
       `sdkconfig` — 2026-08-17. **Both follow-ups are now done**: the
       two-app-slot table exists (`otadata`/`ota_0`/`ota_1`/`factory`/

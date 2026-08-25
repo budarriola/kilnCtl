@@ -23,14 +23,21 @@ either way.
 
 ## The isolation barrier
 
-Three TCMT1109 optocouplers, and nothing else, cross between `GND_Main` and
-`GND_Safty`:
+**2026-08-25 update: the UART pair no longer crosses through an optocoupler.**
+U2 and U3 (the TCMT1109 pair that used to carry `DataToSafty`/`DataFromSafty`,
+along with R7/R12/R15) have been removed and replaced by **U6, a single
+ADuM1201WT digital isolator** with one non-inverting channel per direction.
+The fault line is untouched and still crosses through its own TCMT1109
+optocoupler, U1. Traps 1 and 3 below still describe the current board; Trap 2
+(inversion) and the baud-rate section after it describe the *retired*
+optocoupler pair and no longer apply to the fitted hardware — each is marked
+where it stops applying.
 
-| Part | LED driven by | Collector (output) | Direction |
+| Part | Driven by | Output | Direction |
 |------|---------------|--------------------|-----------|
-| U3 | Pico `PicoTx` (GP4, safety side) via R7 390R | ESP GPIO4, net `DataFromSafty`, R15 1k pull-up | Pico -> ESP data |
-| U2 | ESP GPIO5 via R12 390R, net `DataToSafty` | Pico `PicoRx` (GP5), R9 1k pull-up | ESP -> Pico data |
-| U1 | ESP GPIO6 via R11 390R, net `Fault` | Pico `mainFault` (GPIO10), R8 1k pull-up | ESP -> Pico fault |
+| U6 (VIB/VOB) | Pico `PicoTx` (GP4, safety side) | ESP GPIO4, net `DataFromSafty` | Pico -> ESP data |
+| U6 (VIA/VOA) | ESP GPIO5, net `DataToSafty` | Pico `PicoRx` (GP5), R9 1k pull-up | ESP -> Pico data |
+| U1 (opto) | ESP GPIO6 via R11 390R, net `Fault` | Pico `mainFault` (GPIO10), R8 1k pull-up | ESP -> Pico fault |
 
 There are three traps here, and getting any of them wrong produces a link that
 comes up cleanly and silently never works.
@@ -61,12 +68,24 @@ history is worth keeping because the failure mode repeats:
 Both schematic errors were fixed on 2026-08-22/23 (R15 moved to the GPIO4 net,
 sheet pins uncrossed, labels renamed), and the pin map is now a **bench
 measurement** rather than a trace — see
-[`HARDWARE.md`](HARDWARE.md) §"How this was measured". The rule that survives:
-each optocoupler is unidirectional, so a pin wired to an LED anode can only be
-an output and a pin wired to a collector can only be an input. Everything else
-about symbol orientation is commentary.
+[`HARDWARE.md`](HARDWARE.md) §"How this was measured". That measurement was
+taken against U2/U3, the optocoupler pair since replaced by U6 (each
+optocoupler channel is unidirectional by which pin carries the LED anode vs.
+the collector; each of U6's channels is unidirectional too, by which pin is a
+VIx input vs. a VOx output) — the direction of each net is unchanged by the
+2026-08-25 rework, only the mechanism that fixes it in place is different.
 
-### Trap 2: each direction needs exactly one inversion, and both ends have to supply theirs correctly
+### Trap 2 (HISTORY — applied to U2/U3, retired 2026-08-25): each direction needed exactly one inversion, and both ends had to supply theirs correctly
+
+**This entire trap describes the optocoupler pair that has been removed. As
+of 2026-08-25 the barrier is U6, an ADuM1201WT digital isolator, which does
+NOT invert either direction; both firmwares' inversion (`UART_SIGNAL_TXD_INV`
+in `KilnFW`'s `safety_link.c`, `gpio_set_outover(..., GPIO_OVERRIDE_INVERT)`
+in `SaftyFW`'s `uart_owner.c`) has been removed to match, and re-adding either
+now would invert an already-correct signal and break the link.** The
+narrative below is kept as the record of why the old parts needed exactly one
+inversion per direction, and remains useful if this barrier is ever put back
+on optocouplers.
 
 An optocoupler is not a wire. The driving side's high lights the LED, the
 phototransistor conducts, and the receiving side's collector is pulled **low**.
@@ -167,38 +186,49 @@ LED dark and R8 holding `mainFault` high, which the Pico reads as "the main
 controller is fine". The safety processor must infer a dead main controller
 from UART silence; the fault line cannot tell it.
 
-### Side effect worth knowing about
+### Side effect worth knowing about (HISTORY, U2/U3-era; recheck against U6)
 
-With no Pico attached, U3's LED is never lit, the phototransistor never
-conducts, and R15 plus the internal pull-up hold GPIO4 high. Since GPIO4 no
-longer carries `RXD_INV` (see Trap 2), that high now reaches the UART
-peripheral as an ordinary idle mark, not as a permanent break — the absent
-safety processor simply looks like silence, which is what `link_up = 0` /
-`age = 65535` already expects. Before the 2026-08-23 fix, with `RXD_INV`
-still applied, the same idle-high GPIO4 was inverted into a continuously-low
-internal RX line — a permanent break condition — and the UART event task in
-`uart_owner.c` counted those, so `uart_owner_get_rx_error_count()` for UART1
-(and therefore the CRC/framing counter in `GET_LINK_STATS`) climbed on a
-board with no safety processor fitted. That side effect is gone now that
-GPIO4 needs no software inversion; a board with no Pico fitted should read a
-quiet, non-climbing error counter.
+With no Pico attached and U2/U3 fitted, U3's LED was never lit, the
+phototransistor never conducted, and R15 plus the internal pull-up held
+GPIO4 high. Since GPIO4 no longer carried `RXD_INV` (see Trap 2's history),
+that high reached the UART peripheral as an ordinary idle mark, not as a
+permanent break — the absent safety processor simply looked like silence,
+which is what `link_up = 0` / `age = 65535` already expects. Before the
+2026-08-23 fix, with `RXD_INV` still applied, the same idle-high GPIO4 was
+inverted into a continuously-low internal RX line — a permanent break
+condition — and the UART event task in `uart_owner.c` counted those, so
+`uart_owner_get_rx_error_count()` for UART1 (and therefore the CRC/framing
+counter in `GET_LINK_STATS`) climbed on a board with no safety processor
+fitted.
+
+With U6 now fitted and no software inversion anywhere on this link, GPIO4's
+idle level with no Pico attached depends on how the ADuM1201 behaves with its
+Pico-side supply unpowered (VOB may float rather than idle high the way U3's
+open collector plus R15 did) — this has not yet been re-measured against U6
+and should be confirmed on the bench rather than assumed to match the
+optocoupler-era behaviour above.
 
 ## ESP <-> Pico contract
 
-Transport: ESP32-S3 **UART1**, 8N1, `CONFIG_KILNCTL_SAFETY_BAUD_RATE` (**9600**
-default — see below), inverted per-direction as described in Trap 2 above
-(ESP -> Pico inverted in the ESP UART peripheral, Pico -> ESP inverted at the
-Pico's GPIO pad). The payload framing is
+Transport: ESP32-S3 **UART1**, 8N1, `CONFIG_KILNCTL_SAFETY_BAUD_RATE` (see
+`KilnFW/App/drivers/Kconfig` for the current measured value -- a baud sweep
+against U6 is in progress as of 2026-08-25 and no final number is committed
+here), no line inversion on either end any more (the ADuM1201 in U6 does not
+invert; see Trap 2's history for the inversion this link used to need under
+the retired optocoupler pair). The payload framing is
 the **same `uart_protocol` stack the PC link uses** — 0x7E-delimited,
 byte-stuffed, CRC16/CCITT-FALSE, indexed DATA frames with ACK/NACK, retried and
 de-duplicated by the protocol layer. See `docs/UART_PROTOCOL.md` for the
 envelope; there is deliberately no bespoke framing on this link.
 
-### The baud rate is capped by the optocouplers, not by the UART
+### HISTORY: the baud rate used to be capped by the optocouplers, not by the UART
 
-The TCMT1109s and R15's 1k pull-up cannot switch fast enough for a 115200 bit
-(8.7 us). Measured 2026-08-23, walking the rate down with both sides changed
-together, RP2040 transmitting a status frame every 500 ms:
+**This section documents the retired U2/U3 optocoupler pair. U6, the digital
+isolator that replaced it on 2026-08-25, is not subject to this ceiling; do
+not read the 9600 figure below as current.** The TCMT1109s and R15's 1k
+pull-up could not switch fast enough for a 115200 bit (8.7 us). Measured
+2026-08-23, walking the rate down with both sides changed together, RP2040
+transmitting a status frame every 500 ms:
 
 | Baud | Result |
 |-----:|--------|
@@ -206,19 +236,23 @@ together, RP2040 transmitting a status frame every 500 ms:
 | 57600 | zero frames received, ever |
 | 38400 | ~80% received (53 of 66), errors climbing |
 | 19200 | clean over a short window (20 of 20), but ~10% lost over a longer one (107/118, then 117/134) |
-| 9600 | received tracks sent one for one over minutes (48/52, then 72/75) — **committed** |
+| 9600 | received tracks sent one for one over minutes (48/52, then 72/75) — the committed value for as long as the optocoupler pair was fitted |
 
-`CONFIG_KILNCTL_SAFETY_BAUD_RATE` on this side and `UART_OWNER_BAUD_RATE` in
-`SaftyFW`'s `src/tasks/uart_owner.c` are both hardcoded to 9600; there is no
-negotiation, so a change to one without the other is a dead link. Raising it
-again needs a faster optocoupler or a real line driver in place of the
-TCMT1109/R15 pair, not a config change.
+At the time, `CONFIG_KILNCTL_SAFETY_BAUD_RATE` on this side and
+`UART_OWNER_BAUD_RATE` in `SaftyFW`'s `src/tasks/uart_owner.c` were both
+hardcoded to 9600 for this reason; there is still no negotiation, so a change
+to one without the other is a dead link regardless of what number is chosen.
+Raising the rate used to need a faster optocoupler or a real line driver in
+place of the TCMT1109/R15 pair; now that U6 (an ADuM1201WT) is fitted instead,
+that constraint no longer applies, and the current ceiling (if any) is whatever
+the ongoing baud sweep finds — see `KILNCTL_SAFETY_BAUD_RATE` in Kconfig.
 
-**A static GPIO high/low test across this pair passes at any baud rate**, because
-an optocoupler carries a DC level perfectly well — only a bit that switches
-fast enough to matter exposes the limit. The wiring here had already been
-bench-verified in both directions that way, fault line included, which is
-exactly why the baud ceiling took so long to find: the wire looked proven, so
+**A static GPIO high/low test across this link passes at any baud rate**,
+because both an optocoupler and a digital isolator carry a DC level perfectly
+well — only a bit that switches fast enough to matter exposes any real
+limit. The wiring here had already been bench-verified in both directions
+that way, fault line included, which is exactly why the old optocoupler-era
+baud ceiling took so long to find: the wire looked proven, so
 suspicion fell on framing, device/task ids and line inversion instead, all of
 which were in fact already correct.
 
@@ -315,8 +349,9 @@ size_t safety_link_build_stats_payload(SafetyLinkClass *link, uint8_t *out);  /*
 ```
 
 `safety_link_start()` brings up UART1 on `SAFETY_TX_IO`/`SAFETY_RX_IO` at
-`SAFETY_UART_BAUD_RATE`, applies both line inversions, enables the RX pull-up,
-drives `SAFETY_FAULT_IO` low, attaches the protocol stack, registers
+`SAFETY_UART_BAUD_RATE` with no line inversion (the ADuM1201 in U6 does not
+invert), enables the RX pull-up, drives `SAFETY_FAULT_IO` low, attaches the
+protocol stack, registers
 `UART_TASK_ID_SAFETY` and starts the poll task. It returns `ESP_OK` once the
 *local* side is up; it cannot tell you whether anything is listening. That only
 shows up as `link_up`.
@@ -482,34 +517,27 @@ climbing and `frames_received` pinned at 0. If the warning repeats twice a
 second, the rate limiter is broken; if `age` comes back as anything other than
 65535, something is faking data.
 
-### 2. Loopback with inversion (wire only)
+### 2. Loopback (wire only)
 
-**A direct GPIO5-to-GPIO4 jumper on the ESP side is no longer a clean
-loopback**, now that only one direction is inverted in the ESP's UART
-peripheral. GPIO5 carries `TXD_INV`; GPIO4 carries no inversion at all
-(Trap 2). Tying them together directly feeds an inverted transmit into an
-uninverted receiver, which is exactly the "cancel wrong" failure Trap 2 warns
-about — the loop would not be self-consistent and would not prove anything
-useful.
-
-To loop back on the ESP side alone, jump GPIO5 to GPIO4 through a single
-external inverter (or a spare GPIO configured with `gpio_set_outover(...,
-GPIO_OVERRIDE_INVERT)`, mirroring what `SaftyFW` now does at GP4) so the net
-inversion round the loop is again exactly one. Done that way, the ESP sees
-its own frames back, correctly framed. Every `GET_STATUS` the poll task sends
-therefore arrives at the ESP's own protocol RX task, addressed to
-`(UART_PROTO_DEVICE_SAFETY, task 7)` — a device this end is not, so it is
-dropped rather than answered, and the poll still times out. What this proves
-is the physical path, the baud rate and the ESP-side inversion; watch
+**A direct GPIO5-to-GPIO4 jumper on the ESP side is now a clean loopback.**
+As of the 2026-08-25 rework, neither GPIO5 nor GPIO4 carries any software
+inversion (Trap 2's history describes why that was not true under the
+retired optocoupler pair, where GPIO5 carried `TXD_INV` and GPIO4 did not,
+and a bare jumper would have fed an inverted transmit into an uninverted
+receiver). With both ends non-inverting, tying GPIO5 to GPIO4 directly loops
+the ESP's own frames back at standard polarity: no external inverter, and no
+`gpio_set_outover()` on a spare pin, is needed any more. Every `GET_STATUS`
+the poll task sends therefore arrives at the ESP's own protocol RX task,
+addressed to `(UART_PROTO_DEVICE_SAFETY, task 7)` — a device this end is not,
+so it is dropped rather than answered, and the poll still times out. What
+this proves is the physical path and the baud rate; watch
 `uart_owner_get_rx_error_count()` stay flat and the RX task stop reporting
 framing errors.
 
-A loopback across the *optocouplers* on the safety side (a wire jumped from
-U2's collector, `PicoRx`, back into U3's LED, `PicoTx`) needs no extra
-inverter — each optocoupler already inverts once, and with `SaftyFW`'s GP4
-pad override doing the Pico-side inversion, the round trip is still exactly
-one inversion per direction. This additionally proves the parts, but needs
-the safety-domain 3.3 V rail powered.
+A loopback across the barrier on the safety side (a wire jumped from U6's
+VOA output, `PicoRx`, back into U6's VIB input, `PicoTx`) needs no inverter
+either, since U6 does not invert in either channel. This additionally proves
+the part, but needs the safety-domain 3.3 V rail powered.
 
 For a loopback that actually answers, temporarily register task 7 with
 `own_device` swapped — i.e. bring up a second `uart_protocol_t` with
@@ -521,14 +549,10 @@ end to end without any second processor.
 
 The most useful option once a USB-TTL adapter is to hand. Connect the adapter
 to GPIO4/GPIO5 (adapter TX -> ESP RX GPIO4, adapter RX -> ESP TX GPIO5) with
-the optocouplers out of circuit, and match the ESP side's asymmetric
-inversion per Trap 2 rather than inverting both legs: GPIO4 (ESP RX) carries
-no software inversion any more, so the adapter's TX should idle at ordinary
-UART mark, standard polarity, no inversion needed. GPIO5 (ESP TX) still
-carries `TXD_INV`, so the adapter's RX needs to see an inverted line — either
-an adapter that supports inverted signalling, a small inverter, or accept
-that you must invert that leg in software (in which case you are decoding it
-yourself and the framing layer will not help you).
+the isolator out of circuit; neither GPIO4 nor GPIO5 carries any software
+inversion any more (see Trap 2's history for the asymmetric inversion this
+used to require under the retired optocoupler pair), so the adapter should
+run at ordinary UART mark, standard polarity, on both legs.
 
 Then speak the same `uart_protocol` framing the PC tools already implement
 (`pc_tools/src/kilnctrl/protocol.py`), with `own_device = UART_PROTO_DEVICE_SAFETY`,

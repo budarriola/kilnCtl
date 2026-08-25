@@ -22,12 +22,16 @@ throughout.
 **Hardware-gated, repo-wide, historical**: the ESP32<->RP2040 isolated link
 went unproven for a long time — `link_status` reported `frames_received: 0`
 and the Pico console emitted zero bytes. The cause turned out to be the
-TCMT1109 optocouplers' bandwidth, not the pin map or firmware: at 115200 baud
-zero frames were ever received. Walking the baud rate down settled on 9600,
-which both firmwares now hardcode, and the link has run end to end on the
-bench (2026-08-23) — see `docs/HARDWARE.md` §1 for the measurement. Items
-below marked hardware-gated may still be open for their own reasons; the link
-itself is no longer the blocker.
+TCMT1109 optocoupler pair's bandwidth, not the pin map or firmware: at 115200
+baud zero frames were ever received. Walking the baud rate down settled on
+9600, which both firmwares then hardcoded, and the link has run end to end on
+the bench (2026-08-23) — see `docs/HARDWARE.md` §1 for the measurement. That
+optocoupler pair was replaced by a non-inverting digital isolator (U6, an
+ADuM1201WT) on 2026-08-25; the 9600 figure was a property of the retired
+parts, not of either firmware, and a fresh baud sweep is in progress — see
+`KILNCTL_SAFETY_BAUD_RATE` in `KilnFW/App/drivers/Kconfig` for the current
+value. Items below marked hardware-gated may still be open for their own
+reasons; the link itself is no longer the blocker.
 
 ---
 
@@ -417,15 +421,20 @@ the application *through* the bootloader from a slot — see the open item
 below — and a real end-to-end update crossing the isolated link.
 
 - [x] **10.0 Measure the isolated link's error rate — done 2026-08-23, and
-      it is not 115200.** The TCMT1109 optocouplers turned out to be the
-      bandwidth limit: 115200 and 57600 delivered zero frames, ever; 38400 lost
-      about 20%; 19200 looked clean over a short window but lost ~10% over a
-      longer one; 9600 tracked sent-to-received one for one over minutes and is
-      now the committed, hardcoded value on both sides. What remains open is
-      the *update-transfer* error rate at 9600 over a sustained multi-megabyte
-      run — untested, and at this baud a 5% frame loss turns a 35 s update at
-      115200 into something much longer, because retries still cost 200 ms
-      each up to ten times. Hardware-gated.
+      it was not 115200 at the time.** The TCMT1109 optocoupler pair then
+      fitted turned out to be the bandwidth limit: 115200 and 57600 delivered
+      zero frames, ever; 38400 lost about 20%; 19200 looked clean over a short
+      window but lost ~10% over a longer one; 9600 tracked sent-to-received
+      one for one over minutes and was the committed, hardcoded value on both
+      sides for as long as that optocoupler pair was fitted. That pair was
+      replaced by a non-inverting digital isolator (U6) on 2026-08-25, so the
+      9600 ceiling no longer applies and a fresh sweep is in progress — see
+      `KILNCTL_SAFETY_BAUD_RATE` in `KilnFW/App/drivers/Kconfig` for the
+      current value. What remains open is the *update-transfer* error rate at
+      whatever the current committed baud is over a sustained multi-megabyte
+      run — untested, and a lower baud with any nonzero frame loss turns a
+      35 s update at 115200 into something much longer, because retries still
+      cost 200 ms each up to ten times. Hardware-gated.
 - [ ] Signature/public-key reservation (`BOOTLOADER.md` §6) is designed
       (768 B pubkey slot, `slot[2].signature[64]`, `sig_required`) but not yet
       in code — `flash_layout.h`/`metadata.h` have neither field. Signature

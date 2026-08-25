@@ -660,8 +660,8 @@ dashboard_relay_result_t dashboard_set_relay(uint8_t relay_index, bool on, uint3
  * below hands back in the HTTP body -- the owner's report (TODO.md/ROADMAP.md
  * 2026-08-21 "manual relays refuse silently") was that "blocked by safety
  * fault" alone reads as a dead button, not a safety refusal, and that this
- * board's actual bench condition (safety link never comes up -- the
- * optocouplers are non-functional, so safety_link.c's link_up latches 0
+ * board's actual bench condition (safety link never comes up -- no RP2040
+ * peer answers on the isolated UART, so safety_link.c's link_up latches 0
  * forever and SAFETY_FAULT_SRC_SAFETY_LINK is asserted permanently) needs to
  * be named, not left as a bit an operator has no way to decode. Checked in
  * the same priority relay_authority_on_blocked()'s bit values imply (any bit

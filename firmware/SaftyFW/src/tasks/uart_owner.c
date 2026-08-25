@@ -14,19 +14,23 @@
 #define UART_OWNER_INSTANCE   uart1
 #define UART_OWNER_IRQ        UART1_IRQ
 // Must stay equal to KilnFW's CONFIG_KILNCTL_SAFETY_BAUD_RATE -- both sides
-// hardcode it, there is no negotiation. Lowered from 115200 on 2026-08-23:
-// the opto-isolated pair (TCMT1109 with R15's 1k pull-up) simply cannot
-// switch fast enough for a 8.7 us bit. At 115200 and 57600 not one frame
-// ever arrived; 38400 lost about a fifth of them; 19200 looked clean over a
-// short window but still lost about a tenth over a longer one; 9600 tracks
-// one for one over minutes. See the measurement table in
+// hardcode it, there is no negotiation. Keep the bootloader's recovery-mode
+// uart_init (bootloader/main.c) equal to it as well.
+//
+// RAISED from 9600 on 2026-08-25. The 9600 figure was never a property of
+// either firmware: it was the TCMT1109 optocouplers, which could not switch
+// fast enough for a 8.7 us bit (at 115200 and 57600 not one frame ever
+// arrived, 38400 lost about a fifth, 19200 lost about a tenth over minutes).
+// Those parts are gone -- the barrier is now one ADuM1201WT digital isolator,
+// U6, whose speed grade is orders of magnitude above anything a UART needs
+// here. The measured sweep that chose the value below is recorded in
 // KilnFW/App/drivers/Kconfig under KILNCTL_SAFETY_BAUD_RATE.
 //
-// Worth knowing why this hid for so long: DC level tests pass in both
-// directions at any baud rate, because the opto carries a static level
-// perfectly well. Bench GPIO high/low checks on this pair had already
-// "verified" the wiring.
-#define UART_OWNER_BAUD_RATE  9600u
+// Worth keeping: DC level tests pass in both directions at ANY baud rate,
+// because both an optocoupler and a digital isolator carry a static level
+// perfectly well. A bench GPIO high/low check across this pair proves the
+// wiring and proves nothing whatever about the rate it can carry.
+#define UART_OWNER_BAUD_RATE  230400u
 
 // Sized to hold one worst-case stuffed frame outright --
 // KILNLINK_FRAME_STUFFED_MAX is 528 bytes (header 8 + payload up to 253 + crc
@@ -221,29 +225,27 @@ bool uart_owner_init(void)
     gpio_set_function(SAFTYFW_PIN_UART1_TX, GPIO_FUNC_UART);
     gpio_set_function(SAFTYFW_PIN_UART1_RX, GPIO_FUNC_UART);
 
-    // Invert the TX pin so the isolator sits IDLE-OFF rather than idle-on.
+    // NO line inversion on this pin -- deliberately, and it must stay that
+    // way unless the part on the board changes back.
     //
-    // An ordinary UART idles at mark, i.e. high. Driving U3's LED from a pin
-    // that idles high means the optocoupler conducts continuously whenever
-    // nothing is being sent, which is the whole time: the LED burns current
-    // around the clock, ages faster, and -- the part that actually bit us --
-    // starts every transmission out of deep saturation, so the first edges
-    // come out of a part that has to recover before it can switch cleanly.
+    // Until 2026-08-25 this line carried gpio_set_outover(GPIO_OVERRIDE_INVERT)
+    // so that U3's optocoupler LED sat dark at idle instead of burning current
+    // around the clock. That inversion also happened to cancel the opto's own
+    // inversion, giving exactly one inversion per direction end to end.
     //
-    // The RP2040's PL011 has no line-inversion control of its own, but the
-    // GPIO block does: GPIO_OVERRIDE_INVERT on the pin's outover flips the
-    // peripheral's output on the way to the pad. Idle mark therefore reaches
-    // the pad as low, the LED is dark between frames, and the phototransistor
-    // rests non-conducting with R15 holding the ESP's input high.
+    // The optocouplers (U2/U3, with R7/R12/R15) are gone. The barrier is now
+    // one ADuM1201WT digital isolator, U6, and it does NOT invert: a high at
+    // its input pin is a high at the matching output pin. There is no LED to
+    // keep dark and no inversion to cancel, so inverting here would simply
+    // deliver every byte upside down. With the isolator fitted and this
+    // override still in place the ESP counted 33 framing errors and zero
+    // received frames, and the Pico's own RX pad read low on 2954 of 3000
+    // samples -- a permanent break rather than an idle line.
     //
-    // This must be kept in step with the ESP: because this end now inverts,
-    // safety_link.c applies UART_SIGNAL_TXD_INV only, NOT RXD_INV. Exactly
-    // one inversion per direction. The ESP->Pico direction already worked out
-    // this way -- its TXD_INV means its pin idles low too, so U2 was already
-    // dark at idle; only this direction was wrong.
-    gpio_set_outover(SAFTYFW_PIN_UART1_TX, GPIO_OVERRIDE_INVERT);
-    // Plain hardware UART, no inversion, no PIO -- the ESP inverts on its
-    // side; see this file's header comment.
+    // Kept in step with the ESP: safety_link.c applies neither TXD_INV nor
+    // RXD_INV. Both ends non-inverting, or both inverting -- never one of each.
+    // Plain hardware UART, no inversion, no PIO, and none needed on either
+    // end now; see the comment above.
     uart_set_hw_flow(UART_OWNER_INSTANCE, false, false);
     uart_set_format(UART_OWNER_INSTANCE, 8, 1, UART_PARITY_NONE);
     uart_set_fifo_enabled(UART_OWNER_INSTANCE, true);

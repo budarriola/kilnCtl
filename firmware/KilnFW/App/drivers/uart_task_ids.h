@@ -124,7 +124,7 @@
 #define UART_TASK_ID_DISPLAY  4u  /* ILI9488 TFT on J2 */
 #define UART_TASK_ID_LOG      5u
 #define UART_TASK_ID_SYSTEM   6u
-#define UART_TASK_ID_SAFETY   7u  /* opto-isolated link to the RP2040 safety processor */
+#define UART_TASK_ID_SAFETY   7u  /* isolated link to the RP2040 safety processor */
 #define UART_TASK_ID_CONTROL  8u  /* zone config + live per-zone control status -- mirrors zones_http.c */
 #define UART_TASK_ID_PROFILES 9u  /* fire profile CRUD + execution -- mirrors profiles_http.c/dashboard_http.c */
 #define UART_TASK_ID_AUTOTUNE 10u /* PID autotune -- mirrors dashboard_http.c's /api/autotune* */
@@ -467,27 +467,27 @@
 
 /* --- SAFETY (task_id = UART_TASK_ID_SAFETY) ---
  * The RP2040 safety processor (A1) sits in its own ground domain: the only
- * connections across the barrier are two opto-isolated UART lines and one
- * opto-isolated fault line, all three through TCMT1109 optocouplers. The
- * Pico -- not the ESP -- owns the safety thermocouple board on J7, the three
- * current-sense channels, the E-stop input and the safety relay K4.
+ * connections across the barrier are two UART lines through U6 (an
+ * ADuM1201WT digital isolator) and one fault line through U1, a TCMT1109
+ * optocoupler. The Pico -- not the ESP -- owns the safety thermocouple board
+ * on J7, the three current-sense channels, the E-stop input and the safety
+ * relay K4.
  *
  * Two things about that barrier that are easy to get backwards, both traced
  * from the schematic (see docs/HARDWARE.md for the full trace):
- *   - DataToSafty is the ESP's *TX* (GPIO5, feeding U2's LED through R12,
- *     whose collector is the Pico's RX) and DataFromSafty is the ESP's *RX*
- *     (GPIO4, collector of U3, whose LED is driven by the Pico's TX through
- *     R7). Each optocoupler is unidirectional, so the direction of a pin is
- *     fixed by which side of the barrier carries the LED: a pin wired to an
- *     LED anode can only be an output, a pin wired to a collector can only
- *     be an input.
- *   - Both directions are logically INVERTED. The driving side's LED is on
- *     when its line is high, which pulls the receiving side's collector low,
- *     so an idle-high UART line arrives as idle-low. The firmware fixes this
- *     with uart_set_line_inverse(TXD_INV | RXD_INV) rather than in software.
- *     GPIO4's only external pull-up is R15 (U3's collector has nothing else
- *     on that net besides the ESP); the internal pull-up is enabled too, as
- *     belt-and-braces.
+ *   - DataToSafty is the ESP's *TX* (GPIO5, feeding U6's VIA input, whose VOA
+ *     output is the Pico's RX) and DataFromSafty is the ESP's *RX* (GPIO4,
+ *     driven by U6's VOB output, fed by the Pico's TX into VIB). U6's two
+ *     channels are each unidirectional, so the direction of a pin is fixed
+ *     by which channel it sits on.
+ *   - Neither direction is inverted. The ADuM1201 is non-inverting -- a high
+ *     at a VIx input is a high at the matching VOx output -- so the firmware
+ *     applies no uart_set_line_inverse() flags on either end. (Until
+ *     2026-08-25 this barrier was a TCMT1109 optocoupler pair, U2/U3 with
+ *     R7/R12/R15, which did invert; that pair and its inversion-cancelling
+ *     TXD_INV/RXD_INV flags are gone now that U6 is fitted.) GPIO4's
+ *     internal pull-up is enabled as belt-and-braces, but U6's VOB is a
+ *     push-pull CMOS output and defines the idle level on its own.
  *   - The Fault line (GPIO6) is an ESP *output*: driving it high lights U1's
  *     LED, which pulls the Pico's mainFault input low. There is no hardware
  *     path for the Pico to signal the ESP outside the UART.
@@ -1072,7 +1072,7 @@
 #define PIN_FUNC_THERMO_FAULT   0x0Au /* ~FAULT from a MAX31856, active low */
 #define PIN_FUNC_EXPANDER_IRQ   0x0Bu /* SX1509 ~INT */
 #define PIN_FUNC_EXPANDER_RST   0x0Cu /* SX1509 ~RESET */
-#define PIN_FUNC_SAFETY_TX      0x0Du /* opto-isolated, inverted UART to the RP2040 */
+#define PIN_FUNC_SAFETY_TX      0x0Du /* isolated (ADuM1201, non-inverting) UART to the RP2040 */
 #define PIN_FUNC_SAFETY_RX      0x0Eu
 #define PIN_FUNC_SAFETY_FAULT   0x0Fu /* opto-isolated fault line OUT to the RP2040 */
 

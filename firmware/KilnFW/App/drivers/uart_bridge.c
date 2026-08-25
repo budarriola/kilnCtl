@@ -1816,7 +1816,7 @@ esp_err_t uart_bridge_start_touch_task(uart_protocol_t *proto, screen_idle_t *id
 }
 
 /* --------------------------------------------------------------------------
- * SAFETY (task 7) -- the opto-isolated link to the RP2040
+ * SAFETY (task 7) -- the isolated link to the RP2040
  * ------------------------------------------------------------------------ */
 
 typedef struct {

@@ -1745,56 +1745,56 @@ esp_err_t safety_link_start(SafetyLinkClass *link)
         goto fail_locks;
     }
 
-    /* The one thing that makes this link different from the PC link. Each
-     * TCMT1109 inverts: the driver's high lights the LED, which pulls the
-     * receiver's collector low, so an idle-high UART line arrives idle-low in
-     * both directions. Inverting both signals in the UART peripheral puts the
-     * bits back the right way up for free; doing it in software would mean
-     * hand-decoding the line. Must be after uart_param_config (inside
-     * uart_owner_init), which rewrites the same register block.
+    /* No line inversion on this link any more -- deliberately, on both ends.
      *
-     * This also makes the barrier transparent to the far end: TXD_INV and U2
-     * are two inversions in series, so the Pico's RX sees ordinary polarity,
-     * and U3's inversion of the Pico's ordinary TX is undone by RXD_INV. The
-     * RP2040 therefore needs no PIO UART and no external inverter -- exactly
-     * one end inverts, and it is this one. */
-    /* TXD_INV only -- deliberately NOT RXD_INV any more.
+     * 2026-08-25: the TCMT1109 optocoupler pair (U2/U3, with R7/R12/R15) was
+     * replaced on the board by one ADuM1201WT digital isolator, U6 in
+     * hardware/mainBoard/SaftyProcessor.kicad_sch. Two things about that part
+     * decide this code:
      *
-     * Exactly one inversion per direction, and the requirement that decides
-     * which end does it is that each optocoupler must sit DARK when nothing
-     * is being sent. An ordinary UART idles at mark (high); a pin that idles
-     * high keeps its LED lit around the clock, which wastes current, ages the
-     * part, and makes every transmission start from a saturated
-     * phototransistor that has to recover before it can switch cleanly.
+     *   - It is NON-inverting. Its own truth table is straight positive
+     *     logic: a high at VIx is a high at the matching VOx. An optocoupler
+     *     inverts (driver high lights the LED, which pulls the receiver's
+     *     collector low); the ADuM1201 does not.
+     *   - Each channel is unidirectional, one per direction. Channel B
+     *     carries VIB (pin 3, DataToSafty, this pin) to VOB (pin 6, the
+     *     Pico's RX); channel A carries VIA (pin 7, the Pico's TX) to VOA
+     *     (pin 2, SAFETY_RX_IO).
      *
-     * ESP -> Pico: TXD_INV makes this pin idle LOW, so U2 is dark at idle.
-     * Kept.
+     * So the barrier is transparent in both directions and there is nothing
+     * left for an inversion to cancel. Both ends used to invert their own TX
+     * (UART_SIGNAL_TXD_INV here, gpio_set_outover() in SaftyFW's
+     * uart_owner.c) precisely to cancel one opto inversion each. Keeping
+     * either one now BREAKS the link rather than fixing it: TXD_INV makes
+     * this pin idle low, the isolator passes the low through unchanged, and
+     * the RP2040's RX sits in a permanent break.
      *
-     * Pico -> ESP: the RP2040 now inverts its own TX pin in hardware
-     * (gpio_set_outover(GPIO_OVERRIDE_INVERT) in SaftyFW's uart_owner.c), so
-     * U3 is dark at idle too and the phototransistor rests non-conducting
-     * with R15 pulling GPIO4 high -- which is ordinary mark, already the
-     * right polarity. RXD_INV would now be a second inversion in the same
-     * direction and would break it. Removed.
+     * That is not a prediction, it is what the bench showed with the new
+     * isolator fitted and TXD_INV still in place: sent 18, received 0,
+     * crc/framing errors 33 and climbing, and the Pico's RX pad sampled low
+     * on 2954 of 3000 reads.
      *
-     * These two must change together. If one end is ever reverted, the other
-     * has to be as well. */
-    err = uart_set_line_inverse(SAFETY_UART_PORT_NUM, UART_SIGNAL_TXD_INV);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "uart_set_line_inverse failed: %s", esp_err_to_name(err));
-        goto fail_owner;
-    }
+     * These two must change together -- if one end is ever reverted to
+     * inverting, the other has to be too, and the part on the board decides
+     * which is right. SaftyFW's bootloader recovery mode
+     * (bootloader/main.c's enter_recovery) never inverted at all, so with
+     * this change the application and the bootloader agree for the first
+     * time; under the optocouplers recovery mode had the wrong polarity. */
 
-    /* GPIO4 is the bare collector of U3, on net DataFromSafty -- R15's 1k
-     * pull-up to 3.3V_Main is fitted on this net, and nothing else sits on
-     * it. With the phototransistor off the pin would otherwise float, so the
-     * pull-up is what defines the LED-off level: high at the pad, which is
-     * ordinary mark and exactly the idle this input now expects (see the
-     * inversion comment above -- U3 is dark between frames, so LED-off IS the
-     * idle state rather than an exceptional one). uart_set_pin already asks
-     * for this, but it is restated because it is load-bearing rather than
-     * incidental: without it the link doesn't merely get noisy, it has no
-     * defined idle at all. */
+    /* GPIO4 (net DataFromSafty) is now driven by U6 pin 2, VOA -- a push-pull
+     * CMOS output, not an open collector. U3's phototransistor and R15's 1k
+     * pull-up are both gone from the board, so nothing external defines this
+     * net's level any more; the isolator drives it both ways, and its idle is
+     * ordinary mark because the far end's TX idles mark and the barrier does
+     * not invert.
+     *
+     * The internal pull-up is kept anyway, for the one window where VOA is
+     * NOT driving: if the safety domain (VDD2) is unpowered the ADuM1201's
+     * watchdog forces VOA high, but during the main domain's own power-up
+     * there is a moment before U6 is out of reset. A pull-up makes that
+     * window read as idle mark rather than as a break, which is the harmless
+     * interpretation. It is belt-and-braces now rather than load-bearing --
+     * under the optocouplers it was the only thing defining the level. */
     err = gpio_set_pull_mode((gpio_num_t)SAFETY_RX_IO, GPIO_PULLUP_ONLY);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "rx pull-up on gpio%d failed: %s", SAFETY_RX_IO, esp_err_to_name(err));
@@ -1839,8 +1839,11 @@ esp_err_t safety_link_start(SafetyLinkClass *link)
         goto fail_task;
     }
 
-    ESP_LOGI(TAG, "safety link up on uart%d (tx=%d rx=%d, inverted), fault out=gpio%d, poll=%ums",
-             SAFETY_UART_PORT_NUM, SAFETY_TX_IO, SAFETY_RX_IO, link->fault_io,
+    ESP_LOGI(TAG,
+             "safety link up on uart%d (tx=%d rx=%d, %u baud, non-inverting "
+             "across U6/ADuM1201), fault out=gpio%d, poll=%ums",
+             SAFETY_UART_PORT_NUM, SAFETY_TX_IO, SAFETY_RX_IO,
+             (unsigned)SAFETY_UART_BAUD_RATE, link->fault_io,
              link->poll_period_ms);
     return ESP_OK;
 

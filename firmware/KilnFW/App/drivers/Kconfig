@@ -348,17 +348,18 @@ menu "KilnCtrl Hardware Configuration"
 
         config KILNCTL_SAFETY_BAUD_RATE
             int "Safety link baud rate"
-            default 9600
+            default 921600
             help
-                Optocouplers, not a line driver -- the TCMT1109's switching
-                time is the limit here, so don't push this far without
-                looking at the waveform.
+                Must stay equal to SaftyFW's UART_OWNER_BAUD_RATE
+                (src/tasks/uart_owner.c) AND to the bootloader's recovery-mode
+                uart_init (bootloader/main.c) -- all three hardcode it, there
+                is no negotiation. A mismatch does not degrade, it produces
+                framing errors and nothing else.
 
-                That warning turned out to be exactly right, and 115200 was
-                over the limit. Measured on the bench 2026-08-23, with the
-                RP2040 confirmed transmitting a status frame every 500 ms and
-                the DC levels on both directions of the isolated pair already
-                verified good:
+                HISTORY, because the old number here was widely quoted and is
+                now wrong. Until 2026-08-25 this was 9600, and that ceiling
+                was a property of the TCMT1109 optocouplers, not of either
+                firmware. Measured 2026-08-23 across the opto pair:
 
                   115200 -- zero frames received, ever
                    57600 -- zero frames received, ever
@@ -368,12 +369,24 @@ menu "KilnCtrl Hardware Configuration"
                             134): about 10% of frames still lost
                     9600 -- received tracks sent one for one over minutes
 
-                Static GPIO high/low tests pass at any rate, which is what
-                made this so misleading: the opto path carries DC perfectly
-                and simply cannot switch fast enough for a 8.7 us bit. Raising
-                this needs a faster part or a real line driver, not a config
-                change. Must stay equal to SaftyFW's UART_OWNER_BAUD_RATE
-                (src/tasks/uart_owner.c) -- both sides hardcode it.
+                Those optocouplers were replaced on 2026-08-25 by a single
+                ADuM1201WT digital isolator (U6, hardware/mainBoard/
+                SaftyProcessor.kicad_sch), which is non-inverting, has one
+                unidirectional channel per direction, and is rated far past
+                anything this UART needs. The inversions both firmwares used
+                to apply to cancel the optos' own inversion were removed in
+                the same change -- see safety_link.c's comment at
+                uart_owner_init, and uart_owner.c's at uart_owner_init.
+
+                MEASURED SWEEP RESULTS: see the table appended below once the
+                descending 60-second-per-rate sweep has been run. Do not raise
+                this above the value chosen there without re-running it.
+
+                Still true, and still the trap that hid the opto ceiling for
+                weeks: static GPIO high/low tests pass at ANY baud rate,
+                because both an optocoupler and a digital isolator carry a DC
+                level perfectly. A verified-by-GPIO-test wire proves nothing
+                about the rate it can carry.
 
         config KILNCTL_SAFETY_POLL_PERIOD_MS
             int "Safety processor poll period (ms)"

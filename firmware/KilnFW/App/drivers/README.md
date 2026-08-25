@@ -11,7 +11,7 @@ options in `Kconfig` into the plain names these drivers use.
 | `SX1509.c/.h` | 16-channel I2C I/O expander, U5 at 0x3E | `docs/SX1509.md` |
 | `kiln_io.c/.h` | Board layer over the expander: relays, IO_1..IO_7, ~DRDY, display D/C and ~RESET | `docs/SX1509.md` |
 | `ILI9488.c/.h` | 480x320 SPI TFT on J2 (BIGTREETECH TFT35 SPI V2.1) | `docs/ILI9488.md` |
-| `safety_link.c/.h` | Opto-isolated UART + fault line to the RP2040 safety processor | `docs/SAFETY_LINK.md` |
+| `safety_link.c/.h` | Isolated UART (ADuM1201 digital isolator) + opto-isolated fault line to the RP2040 safety processor | `docs/SAFETY_LINK.md` |
 | `uart_bridge.c/.h` | One task per wire task_id, turning protocol frames into driver calls | `docs/UART_PROTOCOL.md` |
 | `uart_log_bridge.c/.h` | Forwards every `ESP_LOGx` line to the PC over the same link | `docs/UART_PROTOCOL.md` |
 | `i2c_scan.c/.h` | One-shot bus probe at boot | — |

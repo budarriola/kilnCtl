@@ -4195,12 +4195,6 @@
 		(uuid "09641876-0376-48ae-abb5-5be79f43fbf2")
 	)
 	(junction
-		(at 250.19 86.36)
-		(diameter 0)
-		(color 0 0 0 0)
-		(uuid "3c48d82f-b4e8-450d-9bfe-44d20d2d4899")
-	)
-	(junction
 		(at 265.43 208.28)
 		(diameter 0)
 		(color 0 0 0 0)
@@ -4526,7 +4520,7 @@
 	)
 	(wire
 		(pts
-			(xy 218.44 86.36) (xy 250.19 86.36)
+			(xy 218.44 86.36) (xy 238.76 86.36)
 		)
 		(stroke
 			(width 0)
@@ -4633,16 +4627,6 @@
 			(type default)
 		)
 		(uuid "1653a2c7-e105-4524-97aa-08db822f58a8")
-	)
-	(wire
-		(pts
-			(xy 250.19 86.36) (xy 255.27 86.36)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "168a9c3f-ada6-4ea2-adaa-10fd05c4b848")
 	)
 	(wire
 		(pts
@@ -5616,7 +5600,7 @@
 	)
 	(wire
 		(pts
-			(xy 218.44 88.9) (xy 255.27 88.9)
+			(xy 218.44 88.9) (xy 238.76 88.9)
 		)
 		(stroke
 			(width 0)
@@ -6126,7 +6110,7 @@
 	)
 	(wire
 		(pts
-			(xy 218.44 91.44) (xy 255.27 91.44)
+			(xy 218.44 91.44) (xy 238.76 91.44)
 		)
 		(stroke
 			(width 0)
@@ -6466,16 +6450,6 @@
 	)
 	(wire
 		(pts
-			(xy 250.19 74.93) (xy 250.19 76.2)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "df21cf63-2df8-4947-8a15-6aeaf1fb775c")
-	)
-	(wire
-		(pts
 			(xy 228.6 220.98) (xy 228.6 223.52)
 		)
 		(stroke
@@ -6553,16 +6527,6 @@
 			(type default)
 		)
 		(uuid "e5f57a7b-d976-41bf-87c8-a6a07491b757")
-	)
-	(wire
-		(pts
-			(xy 250.19 83.82) (xy 250.19 86.36)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "e6f967df-2ae2-4182-a7a7-28c63e373a96")
 	)
 	(wire
 		(pts
@@ -7608,7 +7572,7 @@
 	)
 	(hierarchical_label "Fault"
 		(shape input)
-		(at 255.27 91.44 0)
+		(at 238.76 91.44 0)
 		(effects
 			(font
 				(size 1.27 1.27)
@@ -7630,7 +7594,7 @@
 	)
 	(hierarchical_label "DataFromSafty"
 		(shape input)
-		(at 255.27 86.36 0)
+		(at 238.76 86.36 0)
 		(effects
 			(font
 				(size 1.27 1.27)
@@ -7652,7 +7616,7 @@
 	)
 	(hierarchical_label "DataToSafty"
 		(shape output)
-		(at 255.27 88.9 0)
+		(at 238.76 88.9 0)
 		(effects
 			(font
 				(size 1.27 1.27)
@@ -8401,151 +8365,6 @@
 			(project "kiln"
 				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524"
 					(reference "R21")
-					(unit 1)
-				)
-			)
-		)
-	)
-	(symbol
-		(lib_id "Device:R")
-		(at 250.19 80.01 180)
-		(unit 1)
-		(body_style 1)
-		(exclude_from_sim no)
-		(in_bom yes)
-		(on_board yes)
-		(in_pos_files yes)
-		(dnp no)
-		(uuid "0b854b1c-3d84-46c8-8f4e-c322016b7997")
-		(property "Reference" "R15"
-			(at 247.904 81.534 90)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Value" "1k"
-			(at 250.19 80.264 90)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Footprint" "Resistor_SMD:R_0402_1005Metric"
-			(at 251.968 80.01 90)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Datasheet" "https://www.mouser.com/en/ProductDetail/Vishay-Draloric/RCS04021K00FKED?qs=NKmfXavxMazECCYilLNNOw%3D%3D"
-			(at 250.19 80.01 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Description" "Resistor"
-			(at 250.19 80.01 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Mouser Part Number" "https://www.mouser.com/en/ProductDetail/Vishay-Draloric/RCS04021K00FKED?qs=NKmfXavxMazECCYilLNNOw%3D%3D"
-			(at 250.19 80.01 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Manufacturer_Part_Number" "RCS04021K00FKED"
-			(at 250.19 80.01 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Manufacturer_Name" "Vishay / Draloric"
-			(at 250.19 80.01 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Sim.Device" ""
-			(at 250.19 80.01 90)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Sim.Pins" ""
-			(at 250.19 80.01 90)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Sim.Type" ""
-			(at 250.19 80.01 90)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(pin "2"
-			(uuid "267ff2ba-9996-4330-a36c-97aa12b6e08e")
-		)
-		(pin "1"
-			(uuid "63f12bb6-1b1e-4212-a279-55799cbd1afa")
-		)
-		(instances
-			(project "kiln"
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524"
-					(reference "R15")
 					(unit 1)
 				)
 			)
@@ -9528,84 +9347,6 @@
 			(project "kiln"
 				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524"
 					(reference "J2")
-					(unit 1)
-				)
-			)
-		)
-	)
-	(symbol
-		(lib_id "power:VPP")
-		(at 250.19 74.93 0)
-		(unit 1)
-		(body_style 1)
-		(exclude_from_sim no)
-		(in_bom yes)
-		(on_board yes)
-		(in_pos_files yes)
-		(dnp no)
-		(uuid "2d3a2bfc-12b5-42de-ad72-e2134bcbed99")
-		(property "Reference" "#PWR052"
-			(at 250.19 78.74 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Value" "3.3V_Main"
-			(at 245.11 70.612 0)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(justify left)
-			)
-		)
-		(property "Footprint" ""
-			(at 250.19 74.93 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Datasheet" ""
-			(at 250.19 74.93 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Description" "Power symbol creates a global label with name \"VPP\""
-			(at 250.19 74.93 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(pin "1"
-			(uuid "ec79fa0c-a790-474d-8a80-b7efac27089d")
-		)
-		(instances
-			(project "kiln"
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524"
-					(reference "#PWR052")
 					(unit 1)
 				)
 			)

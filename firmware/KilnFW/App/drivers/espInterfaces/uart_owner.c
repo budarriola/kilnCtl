@@ -34,7 +34,7 @@ static const char *TAG = "uart_owner";
  *
  * It is a *ruinous* trade on the isolated safety link specifically. That
  * line sits in a break condition whenever the far end is in reset (see
- * safety_link.h), and a peer that reboots -- or any noise on a 3 m opto
+ * safety_link.h), and a peer that reboots -- or any noise on a 3 m isolated
  * link -- produces a line error every cycle, arriving interleaved with the
  * peer's telemetry. Flushing on each one deletes the telemetry, which
  * presents as "frames_received stays 0 forever while the error counters

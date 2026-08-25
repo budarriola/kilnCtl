@@ -15,8 +15,8 @@ ground domain as the safety processor; its firmware lives at
 
 | GPIO | Signal (schematic net) | Direction | What it is |
 |------|------------------------|-----------|------------|
-| 4  | `DataFromSafty`      | in  | Safety link **RX** (U3 collector). Not inverted in software — the Pico inverts at its GPIO pad instead, so this pin sees standard polarity. R15 1k external pull-up. |
-| 5  | `DataToSafty`        | out | Safety link **TX** (drives U2's LED through R12). Inverted (`UART_SIGNAL_TXD_INV`). |
+| 4  | `DataFromSafty`      | in  | Safety link **RX**, driven by U6's VOB output (a push-pull CMOS output, not an open collector). Not inverted in software — U6 does not invert either. R15 1k pull-up still present but no longer what defines the idle level. |
+| 5  | `DataToSafty`        | out | Safety link **TX** (drives U6's VIB input). Not inverted — U6 is non-inverting, and the `UART_SIGNAL_TXD_INV` this pin used to carry (to cancel the old optocoupler's inversion) has been removed. |
 | 6  | `Fault`              | out | Isolated fault line to the safety processor (drives U1's LED). |
 | 7  | `IO_Expander_IRQ`    | in  | SX1509 `~INT`, active low. |
 | 8  | `SDA`                | i/o | I2C data (SX1509, and J2/J6 pass-through). |
@@ -139,72 +139,74 @@ populated.
 
 ## Isolation barrier (main <-> safety)
 
-Three TCMT1109 optocouplers, and nothing else, cross between `GND_Main` and
-`GND_Safty`:
+**As of 2026-08-25, the two UART lines and the fault line no longer share the
+same kind of part.** The UART pair (`DataToSafty`/`DataFromSafty`) used to
+cross through a TCMT1109 optocoupler pair, U2/U3, along with R7/R12/R15; that
+pair has been desoldered and replaced by **U6, a single ADuM1201WT digital
+isolator** with one channel per direction. The fault line is unchanged and
+still crosses through its own TCMT1109 optocoupler, U1:
 
-| Part | LED driven by | Collector (output) | Meaning |
+| Part | Driven by | Output | Meaning |
 |------|---------------|--------------------|---------|
-| U3 | Pico `PicoTx` (GP4, safety side) via R7 390R | ESP GPIO4 (`DataFromSafty`), R15 1k pull-up | Pico -> ESP data |
-| U2 | ESP GPIO5 (`DataToSafty`) via R12 390R | Pico `PicoRx` (GP5), R9 1k pull-up | ESP -> Pico data |
-| U1 | ESP GPIO6 (`Fault`) via R11 390R | Pico `mainFault` (GPIO10), R8 1k pull-up | ESP -> Pico fault assert |
+| U6 (VIB/VOB) | Pico `PicoTx` (GP4, safety side) | ESP GPIO4 (`DataFromSafty`) | Pico -> ESP data |
+| U6 (VIA/VOA) | ESP GPIO5 (`DataToSafty`) | Pico `PicoRx` (GP5), R9 1k pull-up | ESP -> Pico data |
+| U1 (opto) | ESP GPIO6 (`Fault`) via R11 390R | Pico `mainFault` (GPIO10), R8 1k pull-up | ESP -> Pico fault assert |
 
-Three things follow, and all three are easy to get wrong:
+Things that follow from that change:
 
-1. **U3 is drawn mirrored relative to U1/U2**, LED on the *safety* side instead
-   of the *main* side. The net names match the ESP's direction:
-   `DataToSafty` (GPIO5) is TX, `DataFromSafty` (GPIO4) is RX. Do not try to
-   derive this from the symbols — that reasoning produced a wrong answer twice.
-   It is a measurement (see "How this was measured" below), and the direction
-   of any one crossing is fixed by which side of the barrier carries the LED:
-   a pin wired to an LED anode can only be an output, a pin wired to a
-   collector can only be an input.
-2. **Only one direction needs software inversion, and it is not the one you'd
-   guess from the schematic alone.** A high on the driving side lights the
-   LED, which pulls the receiving collector low, so left uncorrected an
-   idle-high UART line would arrive idle-low. ESP -> Pico (GPIO5 through U2)
-   was already handled: the ESP drives that pin with `TXD_INV`, so its idle-high
-   UART level leaves the pin idle-**low**, U2's LED is dark at idle, and R9
-   presents a correct idle-high to the Pico's RX. Pico -> ESP (GP4 through U3)
-   used to be wrong: the RP2040's PL011 UART has no line-inversion control, so
-   `SaftyFW` left GP4 idling at its natural UART mark (high), which kept U3's
-   LED lit continuously between frames. `SaftyFW`'s `uart_owner.c` now inverts
-   at the pad instead, via `gpio_set_outover(SAFTYFW_PIN_UART1_TX,
-   GPIO_OVERRIDE_INVERT)`, so GP4 idles low, U3's LED is dark, and R15's 1k
-   pull-up presents a correct idle-high on ESP GPIO4. Because the far side is
-   now driven correctly, `KilnFW`'s `safety_link.c` applies
-   `UART_SIGNAL_TXD_INV` only — **not** `RXD_INV` — to its own UART
-   peripheral; ESP GPIO4 needs no inversion in software any more, since the
-   inversion already happened on the Pico's pad. Applying `RXD_INV` on top of
-   this would re-invert an already-correct signal and break the link.
-3. **GPIO6 is an output.** The ESP asserts fault *to* the safety processor.
-   There is no hardware path for the Pico to signal the ESP — everything coming
-   back does so over the isolated UART.
+1. **U6's channel assignment matches the ESP's direction directly** —
+   `DataToSafty` (GPIO5) is TX into VIA, `DataFromSafty` (GPIO4) is RX out of
+   VOB. (Historical note: the old optocoupler U3 was drawn mirrored relative
+   to U1/U2, LED on the *safety* side instead of the *main* side, which made
+   the direction easy to get backwards from the symbol alone — see "How this
+   was measured, 2026-08-23" below for that now-retired part and the
+   measurement that caught it. U6 has no such trap: each channel is
+   unidirectional by pin, VIx in on one side, VOx out on the other, with no
+   symbol ambiguity to misread.)
+2. **Neither direction needs software inversion any more.** The ADuM1201 is
+   non-inverting: a high at a VIx input is a high at the matching VOx output.
+   Both firmwares used to invert their own TX to cancel their respective
+   optocoupler's inversion (`UART_SIGNAL_TXD_INV` in `KilnFW`'s
+   `safety_link.c`, `gpio_set_outover(SAFTYFW_PIN_UART1_TX,
+   GPIO_OVERRIDE_INVERT)` in `SaftyFW`'s `uart_owner.c`); both of those have
+   been removed. Re-adding either now would invert an already-correct signal
+   and break the link.
+3. **R15 no longer defines the idle level on ESP GPIO4.** VOB is a push-pull
+   CMOS output, not an open collector, so it drives GPIO4 to a definite level
+   on its own; R15's 1k pull-up to 3.3V_Main is still fitted but is now
+   belt-and-braces only, same role as the ESP's internal pull-up. (Under the
+   old optocoupler, R15 together with U3's collector was the *only* thing
+   defining that level.)
+4. **GPIO6 is still an output.** The ESP asserts fault *to* the safety
+   processor through U1, unchanged by any of the above. There is no hardware
+   path for the Pico to signal the ESP — everything coming back does so over
+   the isolated UART.
 
-R15 (1k to 3.3V_Main) sits on GPIO4, the RX net, not TX — with the ESP in
-reset, GPIO5 (TX) is high-impedance and nothing pulls it, so U2's LED is dark
-and the Pico's RX reads a clean idle-high, not a break (measured: Pico GP5
-high with the ESP held in reset). GPIO4 has no other external pull-up besides
-R15; the driver's internal one is belt-and-braces.
+**The old 9600 baud ceiling was a property of the TCMT1109/R15 pair, not of
+either firmware or the UART peripherals**, and does not apply to U6. A baud
+sweep with U6 fitted is in progress; see `CONFIG_KILNCTL_SAFETY_BAUD_RATE` in
+`KilnFW/App/drivers/Kconfig` for the current measured value rather than
+assuming either the old 9600 figure or any other number quoted elsewhere in
+this repo's history. A static GPIO high/low test across the barrier passes at
+*any* baud rate regardless of which part is fitted — both an optocoupler and
+a digital isolator carry a static DC level perfectly well — so that kind of
+test proves the wiring and nothing about the rate the link can actually
+carry; only a real UART framing exchange does that. See `docs/SAFETY_LINK.md`'s
+"Transport" section for the historical optocoupler measurement table.
 
-4. **The TCMT1109/R15 pair cannot switch fast enough for 115200.** Measured
-   2026-08-23 walking the baud rate down with a Pico transmitting a status
-   frame every 500 ms: 115200 and 57600 delivered zero frames, ever; 38400 lost
-   roughly 20%; 19200 looked clean over a short window but lost ~10% over a
-   longer one; 9600 tracked sent-to-received one for one over minutes and is
-   the committed value on both firmwares (`CONFIG_KILNCTL_SAFETY_BAUD_RATE` in
-   `KilnFW`, `UART_OWNER_BAUD_RATE` in `SaftyFW`'s `src/tasks/uart_owner.c`,
-   both hardcoded with no negotiation). A static GPIO high/low test across the
-   pair passes at any baud rate — an optocoupler carries a DC level fine — so
-   this ceiling is invisible to that test and only shows up once real UART
-   framing is exchanged. See `docs/SAFETY_LINK.md`'s "Transport" section for
-   the full table.
+### How this was measured, 2026-08-23 (applies to the retired optocoupler pair)
 
-### How this was measured (2026-08-23)
+**History — this measurement was taken against U2/U3, the TCMT1109
+optocoupler pair that has since been removed and replaced by U6. It no longer
+describes the polarity of the fitted hardware on the two UART lines; it is
+kept here because it is the record of how the old direction/inversion
+mapping was established, and because the fault-line row (U1) is still
+current.**
 
 Not traced, not inferred from symbols — driven and read on the bench, with the
 PC reaching each processor by a path that is not the link under test (ESP over
-its USB-serial bridge and JTAG, Pico over SWD). Every crossing inverts, as
-predicted:
+its USB-serial bridge and JTAG, Pico over SWD). Every crossing inverted, as
+predicted, back when U2/U3 were fitted:
 
 | Step | Driven | Read | Result |
 |---|---|---|---|
@@ -227,7 +229,8 @@ firmware reports the fault line asserted.
 > polarity check: with the ESP unpowered, in reset, or otherwise dead, U1's LED
 > is dark and R8 holds the Pico's `mainFault` **high**, which reads as "the
 > main controller is fine". The safety processor must infer a dead main
-> controller from UART silence; this line cannot tell it.
+> controller from UART silence; this line cannot tell it. (This row is still
+> current — U1 was not touched by the 2026-08-25 rework.)
 
 The previous version of this section had the two data pins swapped, and so did
 `KilnFW`'s `Kconfig` defaults. See `SAFETY_LINK.md` for how that happened.
@@ -236,7 +239,8 @@ The previous version of this section had the two data pins swapped, and so did
 
 Not driven by this firmware, listed so the isolated protocol has something to
 describe. GPIO0/1/2/3 = MISO/CS0/CLK/MOSI to the safety thermocouple board;
-GP4/GP5 = TX/RX across the barrier (GP4 drives U3's LED, GP5 receives U2); GPIO6 = `saftyRelay` (Q4 -> K4 -> J10);
+GP4/GP5 = TX/RX across the barrier through U6 (GP4 drives U6's VIB input,
+GP5 receives U6's VOA output); GPIO6 = `saftyRelay` (Q4 -> K4 -> J10);
 GPIO7/8 = SDA/SCL; GPIO9 = `estop` (J1 terminal, 1k pull-up, 0.01uF);
 GPIO10 = `mainFault` in from U1; GPIO11/12 = safety `thermoFault`/`thermoDrdy`;
 ADC0/1/2 (GPIO26/27/28) = `Current1..3` from three AD8542 current-sense stages

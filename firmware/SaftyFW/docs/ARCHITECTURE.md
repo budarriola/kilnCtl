@@ -66,10 +66,12 @@ This one *is* runtime-configurable, and should be exposed per-peer in the GUI
 only**, with verbose levels enabled on demand.
 
 The reason to default it quiet is not bandwidth. Even at the link's actual
-baud — **9600**, capped by the TCMT1109 optocouplers, not the 115200 originally
-assumed here (`docs/HARDWARE.md` §1) — the link moves ~960 B/s, and telemetry's
-23-byte frame every 500 ms uses only a small fraction of it, so there is still
-ample room. The reason is the **TX ring**:
+baud (see `KILNCTL_SAFETY_BAUD_RATE` in `KilnFW/App/drivers/Kconfig` for the
+current measured value; historically capped at 9600 by the now-removed
+TCMT1109 optocoupler pair, not the 115200 originally assumed here —
+`docs/HARDWARE.md` §1) — the link moves at least on the order of ~960 B/s, and
+telemetry's 23-byte frame every 500 ms uses only a small fraction of it, so
+there is still ample room. The reason is the **TX ring**:
 
 > **A log frame must never be able to displace a telemetry frame.**
 

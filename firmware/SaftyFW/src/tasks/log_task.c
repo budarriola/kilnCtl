@@ -155,12 +155,14 @@ static void log_task_count_dropped(void)
 // DIAG-frame-went-dark investigation): the paragraph this replaced argued
 // 50% was "comfortably conservative" against a link that "in practice uses
 // roughly 5% of its 115200-baud budget on telemetry". uart_owner.c's baud
-// rate was dropped 115200 -> 9600 on 2026-08-23 (a ~12x cut, TCMT1109
-// optocoupler switching-speed limit, see that file's own comment) and
-// nothing about this fraction was re-derived afterward -- so the number
-// below predates the very budget it now has to operate under, and whether
-// 0.5 is still the right value for a ~960 B/s link is presently unmeasured,
-// not re-confirmed.
+// rate was dropped 115200 -> 9600 on 2026-08-23 (a ~12x cut, then the
+// TCMT1109 optocoupler pair's switching-speed limit, see that file's own
+// comment) and nothing about this fraction was re-derived afterward -- so
+// the number below predates the very budget it now has to operate under.
+// The optocoupler pair was itself replaced by a digital isolator on
+// 2026-08-25 and the baud is being re-measured (uart_owner.c / Kconfig have
+// the current value), so whether 0.5 is still the right value is presently
+// unmeasured at whatever rate this link now actually runs, not re-confirmed.
 //
 // A round-robin reordering of link_task_fn()'s status/diag/power sends was
 // tried and reverted the same investigation day: it was built on the

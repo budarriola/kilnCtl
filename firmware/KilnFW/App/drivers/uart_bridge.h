@@ -68,7 +68,7 @@ esp_err_t uart_bridge_start_display_task(uart_protocol_t *proto, ILI9488Class *d
  * hardware itself. */
 esp_err_t uart_bridge_start_touch_task(uart_protocol_t *proto, screen_idle_t *idle);
 
-/* SAFETY (task 7): the PC's window onto the opto-isolated link to the RP2040.
+/* SAFETY (task 7): the PC's window onto the isolated link to the RP2040.
  * GET_STATUS/GET_LINK_STATS answer out of safety_link's cache, so a dead peer
  * is stale data rather than a hung request. */
 esp_err_t uart_bridge_start_safety_task(uart_protocol_t *proto, SafetyLinkClass *link);

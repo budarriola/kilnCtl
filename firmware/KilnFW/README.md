@@ -2,8 +2,8 @@
 
 ESP32-S3 firmware (ESP-IDF) for the **kilnCtl main board**: three MAX31856
 thermocouple channels, an SX1509 I/O expander driving four relays and seven
-digital I/Os, a 480x320 ILI9488 TFT, and an opto-isolated link to an RP2040
-safety processor — all remotely controllable from a PC over a hardened,
+digital I/Os, a 480x320 ILI9488 TFT, and an isolated link (ADuM1201 digital
+isolator) to an RP2040 safety processor — all remotely controllable from a PC over a hardened,
 reliable UART protocol, plus a Python GUI/MCP server on the PC side to drive
 them.
 

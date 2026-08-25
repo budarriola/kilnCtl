@@ -130,7 +130,7 @@ Not `SaftyFW` config, but changing any of them invalidates a default above.
 | `HEATER_MIN_ON_MS` / `MIN_OFF_MS` | 2000 | `profile_executor.c:28-29` | Minimum conduction burst the current channels must resolve |
 | `PROFILE_EXECUTOR_TICK_MS` | 1000 | `profile_executor.h:174` | Context freshness granularity |
 | `CONFIG_KILNCTL_SAFETY_POLL_PERIOD_MS` | 500 | `Kconfig:222` | Context arrival rate; `context_max_age_s` is 10× it |
-| `CONFIG_KILNCTL_SAFETY_BAUD_RATE` | 9600 | `Kconfig:214` | Must match `SaftyFW`'s `UART_OWNER_BAUD_RATE` exactly — no negotiation. Capped at 9600 by the TCMT1109 optocouplers; 115200 and 57600 deliver zero frames, ever (measured 2026-08-23, `docs/HARDWARE.md` §1) |
+| `CONFIG_KILNCTL_SAFETY_BAUD_RATE` | see `Kconfig:214` for the current measured value | `Kconfig:214` | Must match `SaftyFW`'s `UART_OWNER_BAUD_RATE` exactly — no negotiation. Historically capped at 9600 by the TCMT1109 optocoupler pair (115200 and 57600 delivered zero frames, ever; measured 2026-08-23, `docs/HARDWARE.md` §1); that pair was replaced by a non-inverting ADuM1201 digital isolator on 2026-08-25 and a fresh baud sweep is in progress, so the 9600 figure no longer describes the current ceiling |
 | `SAFETY_LINK_UP_PERIODS` | 3 | `safety_link.h:119` | The ESP's 1.5 s liveness window |
 
 `relay_recent_mask`'s window is **transmitted in the context frame**

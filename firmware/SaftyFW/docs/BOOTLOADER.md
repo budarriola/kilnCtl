@@ -221,7 +221,7 @@ logic was added — everything new here is flash/UART I/O glue around
 already-host-tested pure modules).
 
 **Not verified, honestly**: no real ESP/PC peer has sent real frames over a
-live opto-isolated UART1 link to this code; no real flash-erase/program
+live isolated UART1 link to this code; no real flash-erase/program
 timing has been exercised under this bootloader's specific
 interrupts-disabled window; and recovery mode has never actually been
 entered from a genuinely bad/corrupted application image on real hardware.
@@ -372,13 +372,13 @@ is a bench visit to every board.
       calls `flash_range_erase()`/`flash_range_program()` against
       `BOOTLOADER_METADATA_FLASH_OFFSET`/`_SIZE`.
 - [x] Recovery mode: UART1 only, GPIO6 low, no timeout out, full minimal frame
-      subset — `enter_recovery()` brings up UART1 at 9600 8N1, matching the
-      application's `UART_OWNER_BAUD_RATE`: the TCMT1109 optocouplers cannot
-      switch fast enough for 115200 (`docs/HARDWARE.md` §1), and recovery mode
-      shares the same physical UART1/optocoupler path, so it was updated to
-      9600 along with everything else on this link — confirmed against
-      `bootloader/main.c`'s `enter_recovery()`, which now says so explicitly —
-      then calls
+      subset — `enter_recovery()` brings up UART1 8N1 at the application's
+      `UART_OWNER_BAUD_RATE`, matched so recovery mode and the application
+      always agree on baud (see `enter_recovery()`'s own comment in
+      `bootloader/main.c` for the current value and why the 9600 figure that
+      used to be hardcoded here belonged to the now-removed TCMT1109
+      optocoupler pair, not to this UART or to 115200 being unreachable in
+      general) — then calls
       `recovery_update.c`'s `recovery_update_run()`, which parses
       `kilnlink`-framed `UPDATE_BEGIN`/`UPDATE_DATA`/`UPDATE_END`/
       `UPDATE_ABORT` and emits a real framed `UPDATE_STATUS` every ~1s,

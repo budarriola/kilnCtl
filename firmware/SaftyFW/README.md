@@ -40,7 +40,7 @@ It watches, independently:
 - **three current-sense channels** fed by external current transformers,
 - an **E-stop** input,
 - the main controller's **setpoints, measured temperatures, relay commands and
-  firing ceiling**, received over an opto-isolated link,
+  firing ceiling**, received over an isolated link,
 
 and when something has gone badly wrong it **de-energizes K4**, which opens an
 upstream mechanical line contactor and removes power from the elements — then
@@ -123,7 +123,10 @@ halt, step and memory read/write are all exposed to an agent this way. The
 Pico's console reaches the GUI as `kilnlink` LOG frames relayed by the ESP —
 no extra cable ([`../../tools/PcTools/TODO.md`](../../tools/PcTools/TODO.md)).
 The safety link itself now runs against the ESP (proven 2026-08-23 once the
-baud rate was corrected to 9600 — see `docs/HARDWARE.md` §1), but
+baud rate was corrected to 9600 at the time — see `docs/HARDWARE.md` §1 for
+that history and `KILNCTL_SAFETY_BAUD_RATE` in `KilnFW/App/drivers/Kconfig`
+for the current value, now that the barrier is a digital isolator rather than
+an optocoupler pair), but
 `ota_update_pico` still cannot be used for first-flash bring-up because its
 interlock requires an already-healthy safety link — a chicken-and-egg that SWD
 flashing sidesteps.

@@ -162,7 +162,7 @@ static void handle_raw_frame(uart_protocol_t *proto, const uint8_t *raw, size_t 
     if (len != HEADER_LEN + length + 2u) {
         /* The port number is load-bearing, not decoration. Two independent
          * uart_protocol_t instances run in this firmware -- the PC link and
-         * the opto-isolated link to the safety processor -- and they share
+         * the isolated link to the safety processor -- and they share
          * this TAG, so an unqualified message here is genuinely ambiguous
          * about which wire is misbehaving. That cost a long detour on
          * 2026-08-23: this exact line was read as a fault on the isolated

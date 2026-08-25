@@ -867,7 +867,7 @@ void app_main(void)
 
     heap_stage("display+touch");
 
-    // --- Safety processor link (opto-isolated UART1 + the fault line) ------
+    // --- Safety processor link (isolated UART1 + the opto-isolated fault line) ------
     // Comes up whether or not an RP2040 is answering; a silent far side is
     // link_up = 0, not a startup failure.
     static SafetyLinkClass safety;

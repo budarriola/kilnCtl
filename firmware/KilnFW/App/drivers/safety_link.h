@@ -1,4 +1,5 @@
-// Opto-isolated link to the RP2040 safety processor (A1).
+// Isolated link (ADuM1201WT digital isolator, U6) to the RP2040 safety
+// processor (A1).
 //
 // ===========================================================================
 // THIS IS THE CONTRACT THE PICO MUST IMPLEMENT.
@@ -11,24 +12,23 @@
 // error: nothing here aborts startup because the far side is silent.
 //
 // Transport
-//   ESP32-S3 UART1, 8N1, CONFIG_KILNCTL_SAFETY_BAUD_RATE (115200 by default),
+//   ESP32-S3 UART1, 8N1, CONFIG_KILNCTL_SAFETY_BAUD_RATE (230400 by default),
 //   carrying the *same* uart_protocol framing as the PC link (0x7E-delimited,
 //   byte-stuffed, CRC16/CCITT-FALSE, indexed DATA frames with ACK/NACK). The
 //   ESP identifies itself as UART_PROTO_DEVICE_ESP; the Pico must identify
 //   itself as UART_PROTO_DEVICE_SAFETY (= 2). Both ends register task_id
 //   UART_TASK_ID_SAFETY (= 7); everything below is that task's payload.
 //
-//   Both directions are electrically INVERTED by the TCMT1109 optocouplers and
-//   this side fixes that with uart_set_line_inverse(TXD_INV | RXD_INV) -- see
-//   the "Isolation barrier" section of docs/HARDWARE.md and safety_link.c.
-//
-//   The Pico needs no inversion of its own: each optocoupler is an inverter,
-//   so the ESP's TXD_INV cancels U2 and the Pico's RX sees standard polarity
-//   (idle logical 1 -> GPIO5 low -> LED off -> R9 holds Pico RX high), while
-//   U3 inverts the Pico's ordinary TX and RXD_INV puts it back. The RP2040's
-//   plain hardware UART works unmodified -- no PIO UART, no external inverter.
-//   Exactly ONE end inverts, and it is this one; inverting on the Pico side
-//   too would cancel the optocouplers and break the link.
+//   Neither direction is inverted any more. Until 2026-08-25 this link ran
+//   through a TCMT1109 optocoupler pair (U2/U3, with R7/R12/R15) which
+//   electrically inverted both directions, and this side cancelled that with
+//   uart_set_line_inverse(TXD_INV | RXD_INV) -- see the "Isolation barrier"
+//   section of docs/HARDWARE.md and safety_link.c. That pair was replaced by
+//   U6, an ADuM1201WT digital isolator, which is NON-inverting, so neither
+//   end applies TXD_INV/RXD_INV any more: applying either now would invert
+//   an already-correct signal and break the link. The RP2040's plain
+//   hardware UART works unmodified -- no PIO UART, no external inverter,
+//   and no software inversion on either side.
 //
 // ESP -> Pico requests (payload byte0 = subcommand, from uart_task_ids.h)
 //   0x01 SAFETY_CMD_GET_STATUS      no args. Answer with the status frame
@@ -446,19 +446,22 @@ static inline bool safety_drain_still_waiting(bool want_status, bool got_status,
  *
  * Derived from the configured baud rate rather than fixed, because it stopped
  * working when it was fixed. This was 250 ms flat, chosen when the link ran
- * at 115200, where the longest frame is about 46 ms on the wire. At 9600 --
- * where this link now has to run, because the optocouplers cannot switch any
- * faster (see KILNCTL_SAFETY_BAUD_RATE's help text) -- that same frame takes
- * about 550 ms, so a large reply could never arrive inside the window. The
- * symptom was safety_cfg_store_refetch() timing out forever on a link that
- * was otherwise healthy: the Pico answered every time, just not fast enough
- * for a constant written for a wire eight times quicker.
+ * at 115200, where the longest frame is about 46 ms on the wire. When this
+ * link was capped at 9600 -- a ceiling that belonged to the now-removed
+ * TCMT1109 optocouplers, not to either firmware or the UART peripheral --
+ * that same frame took about 550 ms, so a large reply could never arrive
+ * inside the fixed 250 ms window. The symptom was safety_cfg_store_refetch()
+ * timing out forever on a link that was otherwise healthy: the Pico answered
+ * every time, just not fast enough for a constant written for a wire eight
+ * times quicker.
  *
  * Worst-case wire time is KILNLINK_FRAME_STUFFED_MAX bytes at 10 bits each
  * (8N1 plus start and stop). Doubled, because request and reply both cross
  * the same wire, plus a fixed 100 ms for the Pico's own task latency. That
- * gives ~1.2 s at 9600 and ~190 ms at 115200, so this stays close to the old
- * value at the old baud rate and only grows where it has to. */
+ * gave ~1.2 s at the old 9600 ceiling and ~190 ms at 115200; the formula
+ * scales automatically with whatever KILNCTL_SAFETY_BAUD_RATE is currently
+ * set to (KilnFW/App/drivers/Kconfig has the current measured value) now
+ * that the optocoupler ceiling is gone. */
 #define SAFETY_LINK_REPLY_TIMEOUT_MS \
     ((uint32_t)(((KILNLINK_FRAME_STUFFED_MAX * 10u * 1000u * 2u) \
                  / CONFIG_KILNCTL_SAFETY_BAUD_RATE) + 100u))
@@ -1011,7 +1014,8 @@ typedef struct {
 } SafetyLinkClass;
 
 /* Brings up UART1 on SAFETY_TX_IO/SAFETY_RX_IO at SAFETY_UART_BAUD_RATE with
- * both line inversions and the RX pull-up enabled, drives SAFETY_FAULT_IO low
+ * no line inversion (neither end inverts across the ADuM1201 isolator) and
+ * the RX pull-up enabled, drives SAFETY_FAULT_IO low
  * (de-asserted), attaches a uart_protocol_t, registers UART_TASK_ID_SAFETY and
  * starts the poll task.
  *

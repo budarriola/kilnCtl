@@ -18,6 +18,12 @@
 		(uuid "58524800-a825-4b59-9aea-18cb50b0c42f")
 	)
 	(junction
+		(at 90.17 91.44)
+		(diameter 0)
+		(color 0 0 0 0)
+		(uuid "66e7f059-0834-4d01-b72c-3103557217e7")
+	)
+	(junction
 		(at 147.32 77.47)
 		(diameter 0)
 		(color 0 0 0 0)
@@ -57,7 +63,17 @@
 	)
 	(wire
 		(pts
-			(xy 115.57 107.95) (xy 101.6 107.95)
+			(xy 110.49 91.44) (xy 90.17 91.44)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "18dee109-b9e3-4a86-b795-c269e2073f66")
+	)
+	(wire
+		(pts
+			(xy 115.57 110.49) (xy 104.14 110.49)
 		)
 		(stroke
 			(width 0)
@@ -117,13 +133,23 @@
 	)
 	(wire
 		(pts
-			(xy 115.57 110.49) (xy 107.95 110.49)
+			(xy 115.57 113.03) (xy 107.95 113.03)
 		)
 		(stroke
 			(width 0)
 			(type default)
 		)
 		(uuid "26ede3be-1c48-451c-9ca2-f90802c24f79")
+	)
+	(wire
+		(pts
+			(xy 107.95 102.87) (xy 101.6 102.87)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "2942c95f-c95f-4032-88b2-fa6914fca725")
 	)
 	(wire
 		(pts
@@ -167,7 +193,7 @@
 	)
 	(wire
 		(pts
-			(xy 115.57 102.87) (xy 101.6 102.87)
+			(xy 115.57 105.41) (xy 107.95 105.41)
 		)
 		(stroke
 			(width 0)
@@ -187,6 +213,16 @@
 	)
 	(wire
 		(pts
+			(xy 105.41 107.95) (xy 105.41 105.41)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "60969fb3-cf8f-40dc-9a98-a95c65d8c2f7")
+	)
+	(wire
+		(pts
 			(xy 48.26 58.42) (xy 38.1 58.42)
 		)
 		(stroke
@@ -194,6 +230,16 @@
 			(type default)
 		)
 		(uuid "6600df2b-4d82-425e-8f61-dd9043f208ed")
+	)
+	(wire
+		(pts
+			(xy 104.14 107.95) (xy 101.6 107.95)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "67f6662d-7be0-42a4-830e-56d2ffc37255")
 	)
 	(wire
 		(pts
@@ -217,13 +263,33 @@
 	)
 	(wire
 		(pts
-			(xy 107.95 110.49) (xy 107.95 121.92)
+			(xy 110.49 102.87) (xy 110.49 91.44)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "72fe35af-1307-4d86-aa3e-b6897271d167")
+	)
+	(wire
+		(pts
+			(xy 107.95 113.03) (xy 107.95 121.92)
 		)
 		(stroke
 			(width 0)
 			(type default)
 		)
 		(uuid "78329744-b2e3-452f-9151-be09e345e2c7")
+	)
+	(wire
+		(pts
+			(xy 104.14 110.49) (xy 104.14 107.95)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "7875a055-bcda-4e99-9226-637c5adb4ee1")
 	)
 	(wire
 		(pts
@@ -244,6 +310,16 @@
 			(type default)
 		)
 		(uuid "7d7b2e23-778f-4073-8fa5-a4ac4b7c7601")
+	)
+	(wire
+		(pts
+			(xy 90.17 91.44) (xy 90.17 95.25)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "8321d835-ed55-4ebc-9b96-a113bbaf7d9b")
 	)
 	(wire
 		(pts
@@ -277,7 +353,7 @@
 	)
 	(wire
 		(pts
-			(xy 115.57 105.41) (xy 101.6 105.41)
+			(xy 115.57 107.95) (xy 105.41 107.95)
 		)
 		(stroke
 			(width 0)
@@ -307,7 +383,7 @@
 	)
 	(wire
 		(pts
-			(xy 90.17 86.36) (xy 90.17 95.25)
+			(xy 90.17 86.36) (xy 90.17 91.44)
 		)
 		(stroke
 			(width 0)
@@ -334,6 +410,16 @@
 			(type default)
 		)
 		(uuid "a9de536c-0c81-43ac-b495-fcfda23b4301")
+	)
+	(wire
+		(pts
+			(xy 105.41 105.41) (xy 101.6 105.41)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "ac4937f5-edb4-4c54-90b9-339501025520")
 	)
 	(wire
 		(pts
@@ -397,6 +483,16 @@
 	)
 	(wire
 		(pts
+			(xy 115.57 102.87) (xy 110.49 102.87)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "e0865285-0ac6-4c3c-8d11-399bce9b1bf8")
+	)
+	(wire
+		(pts
 			(xy 76.2 90.17) (xy 73.66 90.17)
 		)
 		(stroke
@@ -444,6 +540,16 @@
 			(type default)
 		)
 		(uuid "efad7739-b5e8-4143-b2ef-60350d627122")
+	)
+	(wire
+		(pts
+			(xy 107.95 105.41) (xy 107.95 102.87)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "f288c53a-3780-4003-92f0-e158ca009e26")
 	)
 	(wire
 		(pts
@@ -952,7 +1058,7 @@
 			)
 		)
 		(pin "DataFromSafty" output
-			(at 115.57 107.95 180)
+			(at 115.57 110.49 180)
 			(uuid "b6e913c0-61d6-4584-a15c-53017d81fcd4")
 			(effects
 				(font
@@ -962,7 +1068,7 @@
 			)
 		)
 		(pin "DataToSafty" input
-			(at 115.57 105.41 180)
+			(at 115.57 107.95 180)
 			(uuid "4ae2049d-1340-4bc2-aa45-fde59d837eb8")
 			(effects
 				(font
@@ -972,7 +1078,7 @@
 			)
 		)
 		(pin "Fault" output
-			(at 115.57 102.87 180)
+			(at 115.57 105.41 180)
 			(uuid "ec681327-6a68-4d51-a0b3-4635442750c4")
 			(effects
 				(font
@@ -1012,7 +1118,7 @@
 			)
 		)
 		(pin "MainProcessorDataGnd" passive
-			(at 115.57 110.49 180)
+			(at 115.57 113.03 180)
 			(uuid "33d45378-18de-48e9-9e9a-cbb4163e3a9b")
 			(effects
 				(font
@@ -1029,6 +1135,16 @@
 					(size 1.27 1.27)
 				)
 				(justify right)
+			)
+		)
+		(pin "MainProcessor_3V3" passive
+			(at 115.57 102.87 180)
+			(uuid "dc547375-f4aa-4b62-9fe0-97def8a2ab06")
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
 			)
 		)
 		(instances

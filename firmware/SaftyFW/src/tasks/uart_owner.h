@@ -42,7 +42,7 @@
 extern "C" {
 #endif
 
-// Brings up UART1 at 115200 8N1 (matching CONFIG_KILNCTL_SAFETY_BAUD_RATE's
+// Brings up UART1 8N1 at UART_OWNER_BAUD_RATE (matching CONFIG_KILNCTL_SAFETY_BAUD_RATE's
 // default on the ESP side), configures GPIO4/5 for UART function, and
 // installs the shared UART1 IRQ handler for both RX collection and TX
 // draining. Must be called once, from main(), before link_task_start() --
