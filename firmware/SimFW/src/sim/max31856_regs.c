@@ -93,6 +93,28 @@ static float cj16_to_c(int16_t raw)
 #define TC_CODE19_MIN (-262144)
 #define TC_CODE19_MAX (262143)
 
+/* DELIBERATE LIMITATION -- TCRANGE (SR bit 6) here is "the register cannot
+ * represent this value" (+-2048.0 degC, the 19-bit code's own numeric
+ * range), NOT the datasheet's actual TC-Range condition. The real part sets
+ * this bit when the *hot-junction* reading falls outside the selected
+ * thermocouple type's rated operating range -- datasheet page 12, Table 1
+ * "Supported Thermocouples and Temperature Ranges" (e.g. type K: -200 degC
+ * to +1372 degC; type B: 250 degC to 1820 degC; each type has its own
+ * bounds), not outside +-2048 degC. This module cannot implement Table 1's
+ * per-type bounds because DESIGN_NOTES.md 3.2's CR1 row already documents that
+ * CR1.TC_TYPE is recorded verbatim (so TC_GET_MASTER_CONFIG can check what
+ * the DUT configured) but does not change how a conversion is computed --
+ * true_tc_c comes straight from the thermal model, never from a simulated
+ * thermocouple voltage run through a type-specific LUT, so there is no
+ * physical quantity here for a type-specific range check to bound. Given
+ * that architecture, +-2048 degC is what "out of range" can mean: it is the
+ * bound of what the register format itself can hold, and this emulator's
+ * TCRANGE will in practice never assert for a plausible kiln temperature
+ * (which never approaches 2048 degC) even where real silicon configured for
+ * type B, T, etc. would assert it well before then. A test that wants to
+ * exercise a DUT's handling of a real TCRANGE fault cannot get one from this
+ * emulator today; that gap is inherited from the CR1.TC_TYPE simplification
+ * above, not introduced here. */
 static int32_t c_to_code19(float c, bool *out_range_fault)
 {
     int32_t code = (int32_t)lrintf(c / MAX31856_TC_TEMP_C_PER_LSB);
@@ -121,8 +143,41 @@ void max31856_regs_init(max31856_channel_t *ch, uint32_t rng_seed)
     ch->regs[MAX31856_REG_CR0] = 0x00u;
     ch->regs[MAX31856_REG_CR1] = 0x03u;
     ch->regs[MAX31856_REG_MASK] = 0xFFu;
-    /* Everything else (thresholds, CJTO, CJTH/L, LTCB, SR) power-on at 0,
-     * matching memset above. */
+    /* The four threshold registers do NOT power on at 0 -- datasheet page 18,
+     * Table 6 "Register Memory Map", FACTORY DEFAULT column. Every one of
+     * them resets to the value that puts that threshold at the extreme edge
+     * of what the register can represent, so the fault it guards can never
+     * trip until a master has actually configured it:
+     *   CJHF   (03h) = 7Fh       -> int8, +127 degC: no real CJ reading is
+     *                               ever above this, so CJHIGH cannot assert.
+     *   CJLF   (04h) = C0h       -> int8, -64 degC: below the part's own CJ
+     *                               clamp floor (-64 degC, register 0Ah's own
+     *                               text), so CJLOW cannot assert either.
+     *   LTHFTH:L (05h/06h) = 7FFFh -> int16 at 0.0625 degC/LSB = +2047.9375
+     *                               degC, far above any representable LTCB
+     *                               value, so TCHIGH cannot assert.
+     *   LTLFTH:L (07h/08h) = 8000h -> int16 at 0.0625 degC/LSB = -2048.0
+     *                               degC, far below any representable LTCB
+     *                               value, so TCLOW cannot assert.
+     * Before this fix these all defaulted to 0 (the plain memset above), so
+     * this emulator would spuriously raise TCHIGH/CJHIGH for the very first
+     * conversion of any channel reporting a positive temperature or CJ --
+     * before the master had written a single threshold register. A DUT that
+     * powers up, reads SR once before it finishes configuring the channel,
+     * and sees a nonzero fault bit would see something the real MAX31856
+     * never produces. test_max31856_regs.c used to work around exactly this
+     * by writing wide-open thresholds before every fault-bit test
+     * (see its old comments); those workarounds are gone now that the
+     * power-on state itself is correct, and test_write_read_verbatim()
+     * pins these six values so this cannot regress silently. */
+    ch->regs[MAX31856_REG_CJHF] = 0x7Fu;
+    ch->regs[MAX31856_REG_CJLF] = 0xC0u;
+    ch->regs[MAX31856_REG_LTHFTH] = 0x7Fu;
+    ch->regs[MAX31856_REG_LTHFTL] = 0xFFu;
+    ch->regs[MAX31856_REG_LTLFTH] = 0x80u;
+    ch->regs[MAX31856_REG_LTLFTL] = 0x00u; /* already 0 from memset; spelled out for completeness against Table 6 */
+    /* Everything else (CJTO, CJTH/L, LTCB, SR) powers on at 0h per the same
+     * table, matching the memset above. */
     ch->rng_state = (rng_seed != 0u) ? rng_seed : 0x9E3779B9u;
 }
 
@@ -150,6 +205,21 @@ static void apply_write_rule(max31856_channel_t *ch, uint8_t addr, uint8_t value
     case MAX31856_REG_LTCBL:
     case MAX31856_REG_SR:
         /* Read-only. Datasheet-silent writes: ignored entirely. */
+        return;
+
+    case MAX31856_REG_CJTL:
+        /* Datasheet page 24, register 0Bh (CJTL) MEMORY ACCESS row: "R/W R/W
+         * R/W R/W R/W R/W R R" for bits 7..0 -- the low two bits (CJTL[1:0])
+         * are read-only even when CR0.CJ_DISABLE hands the rest of this
+         * register to the master for an external cold-junction sensor. The
+         * bit-weight row for those two positions is literally "0 0" (not a
+         * power-of-two weight at all), i.e. they carry no information and
+         * cannot be set by a write. max31856_regs.c's own internal-sensor
+         * path already masks them via c_to_cj16()'s `raw &= ~0x3`; this case
+         * is what makes the master-write path agree instead of silently
+         * accepting garbage into two bits the real part would never let
+         * take any value but 0. */
+        ch->regs[MAX31856_REG_CJTL] = (uint8_t)(value & ~0x03u);
         return;
 
     case MAX31856_REG_CR0: {
@@ -328,6 +398,15 @@ bool max31856_regs_advance_conversion(max31856_channel_t *ch, float true_tc_c, f
         ch->regs[MAX31856_REG_CJTL] = cjl;
         reported_cj_c = cj16_to_c(cj_raw);
     }
+    /* -55..+125 degC matches datasheet page 26 (SR bit 7, CJ Range) and page
+     * 12 Table 1's cold-junction range column for types E/J/K/N/T. This kiln
+     * ships type K exclusively (KilnFW/docs/HARDWARE.md, KilnFW/docs/
+     * MAX31856.md), so the fixed bound is correct for the only type this
+     * fixture ever needs to emulate -- it is wrong for R/S (-50..+125) and B
+     * (0..+125), a DELIBERATE LIMITATION for the same reason c_to_code19()'s
+     * comment above gives for TCRANGE: CR1.TC_TYPE is recorded but does not
+     * change conversion math, so there is no per-type behavior to key this
+     * bound off of even though the register itself is type-agnostic. */
     bool cj_range_fault = (reported_cj_c < -55.0f || reported_cj_c > 125.0f);
 
     /* --- reported TC value: shorted/drift, then noise, then stuck-LTCB

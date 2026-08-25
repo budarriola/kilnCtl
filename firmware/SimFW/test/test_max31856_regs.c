@@ -24,10 +24,40 @@ static void test_write_read_verbatim(void)
     max31856_channel_t ch;
     max31856_regs_init(&ch, 1);
 
-    /* Power-on defaults per datasheet. */
+    /* Power-on defaults per datasheet page 18, Table 6 "Register Memory
+     * Map", FACTORY DEFAULT column. The four threshold registers are the
+     * ones worth double-checking: they do NOT reset to 0 like the rest of
+     * the map, they reset to the extreme value that keeps that threshold
+     * from ever tripping until a master configures it. Getting any of these
+     * six values wrong either breaks configuration readback (CR0/CR1/MASK)
+     * or reintroduces the bug this pass fixed: a spurious TCHIGH/CJHIGH
+     * fault on the very first conversion of a freshly-initialized channel,
+     * before any master has written a single register. */
     TEST_CHECK(ch.regs[MAX31856_REG_CR0] == 0x00u, "power-on CR0 == 00h");
     TEST_CHECK(ch.regs[MAX31856_REG_CR1] == 0x03u, "power-on CR1 == 03h");
     TEST_CHECK(ch.regs[MAX31856_REG_MASK] == 0xFFu, "power-on MASK == FFh");
+    TEST_CHECK(ch.regs[MAX31856_REG_CJHF] == 0x7Fu, "power-on CJHF == 7Fh (+127 degC, never trips)");
+    TEST_CHECK(ch.regs[MAX31856_REG_CJLF] == 0xC0u, "power-on CJLF == C0h (-64 degC, never trips)");
+    TEST_CHECK(ch.regs[MAX31856_REG_LTHFTH] == 0x7Fu, "power-on LTHFTH == 7Fh");
+    TEST_CHECK(ch.regs[MAX31856_REG_LTHFTL] == 0xFFu, "power-on LTHFTL == FFh (7FFFh = +2047.9375 degC, never trips)");
+    TEST_CHECK(ch.regs[MAX31856_REG_LTLFTH] == 0x80u, "power-on LTLFTH == 80h");
+    TEST_CHECK(ch.regs[MAX31856_REG_LTLFTL] == 0x00u, "power-on LTLFTL == 00h (8000h = -2048.0 degC, never trips)");
+    TEST_CHECK(ch.regs[MAX31856_REG_CJTO] == 0x00u, "power-on CJTO == 00h");
+    TEST_CHECK(ch.regs[MAX31856_REG_CJTH] == 0x00u && ch.regs[MAX31856_REG_CJTL] == 0x00u,
+               "power-on CJTH/CJTL == 00h/00h");
+    TEST_CHECK(ch.regs[MAX31856_REG_LTCBH] == 0x00u && ch.regs[MAX31856_REG_LTCBM] == 0x00u &&
+                   ch.regs[MAX31856_REG_LTCBL] == 0x00u,
+               "power-on LTCBH/M/L == 00h/00h/00h");
+    TEST_CHECK(ch.regs[MAX31856_REG_SR] == 0x00u, "power-on SR == 00h");
+
+    /* The whole point of the fix: a freshly-initialized channel reporting a
+     * perfectly ordinary positive kiln temperature and room-temperature CJ,
+     * with NO master configuration at all, must show a clean SR. Before this
+     * pass, the (wrong) all-zero threshold defaults made this fail --
+     * 500.0 > 0.0 tripped TCHIGH and 25.0 > 0.0 tripped CJHIGH immediately. */
+    max31856_regs_advance_conversion(&ch, 500.0f, 25.0f);
+    TEST_CHECK(ch.regs[MAX31856_REG_SR] == 0x00u,
+               "an unconfigured channel reporting a plausible positive temperature has a clean SR");
 
     /* CR1 (TC type + AVGSEL) reads back exactly what was written -- this is
      * the "assert the DUT configured TC type correctly" test point DESIGN_NOTES.md
@@ -330,10 +360,13 @@ static void test_corruption_spurious_fault_pin(void)
 
     max31856_channel_t ch;
     max31856_regs_init(&ch, 9);
-    /* Thresholds default to 0 at power-on -- give them a sane wide band
-     * first so the conversion below produces a genuinely clean SR, not one
-     * that merely happens to be unmasked (MASK also defaults to FFh, fully
-     * masked, which would hide the distinction this test wants to isolate). */
+    /* Thresholds now power on already wide-open (7Fh/C0h/7FFFh/8000h -- see
+     * max31856_regs_init()), so this explicit configuration is no longer
+     * required for a clean SR; it is kept anyway so the test is pinned to
+     * specific, readable threshold values instead of relying on the
+     * power-on constants staying exactly what they are today. MASK also
+     * defaults to FFh (fully masked), which would hide the distinction this
+     * test wants to isolate, so it is unmasked explicitly below regardless. */
     uint8_t hi, lo;
     encode_threshold(200.0f, &hi, &lo);
     max31856_regs_write_burst(&ch, MAX31856_REG_LTHFTH, (const uint8_t[]){hi, lo}, 2);
@@ -442,8 +475,10 @@ static void test_corruption_cj_fault_offset_and_sr_bits(void)
     max31856_regs_init(&ch, 13);
 
     /* Wide-open CJ thresholds first so a clean conversion is genuinely
-     * fault-free (CJHF/CJLF default to 0 at power-on, which would trip
-     * immediately otherwise). */
+     * fault-free. CJHF/CJLF now power on at 7Fh/C0h (see max31856_regs_init()),
+     * already wide enough not to trip on their own, but this test wants
+     * specific, readable numbers rather than depending on exactly what the
+     * power-on constants are. */
     max31856_regs_write_burst(&ch, MAX31856_REG_CJHF, (const uint8_t[]){(uint8_t)100}, 1);
     max31856_regs_write_burst(&ch, MAX31856_REG_CJLF, (const uint8_t[]){(uint8_t)(int8_t)(-20)}, 1);
 
@@ -664,6 +699,116 @@ static void test_drdy_cj_disable_qualifier(void)
                "with the sensor enabled again, a 0Ah/0Bh read releases ~DRDY");
 }
 
+/* --- Datasheet worked examples, including negative values -------------------
+ * Page 13, Table 2 "Reference Junction (Cold-Junction) Temperature Data
+ * Format" and Table 3 "Linearized Thermocouple Temperature Data Format" give
+ * the part vendor's own temperature-to-code pairs. Each one here is checked
+ * two ways: decoding the exact register bytes the vendor's table specifies
+ * (independent of this module, via decode_ltcb_c()/decode_cj_c() -- the same
+ * "don't call into the module under test for its own answer" discipline used
+ * throughout this file), and driving max31856_regs_advance_conversion() with
+ * the table's temperature and checking it PRODUCES those exact bytes. Only
+ * the second direction exercises this module's own encoder; the first is a
+ * sanity check that the decoder used for the second direction is not itself
+ * wrong in a way that would hide an encoder bug. */
+static void test_datasheet_worked_examples_ltcb(void)
+{
+    TEST_SECTION("max31856_regs -- LTCB worked examples from datasheet Table 3 (page 13), including negative");
+
+    max31856_channel_t ch;
+    max31856_regs_init(&ch, 17);
+
+    static const struct {
+        float degc;
+        uint8_t h, m, l;
+        const char *label;
+    } cases[] = {
+        /* Table 3's own rows, MSB..LSB exactly as printed (0110 0100 0000
+         * 0000 0000 0000 etc.), all with the don't-care low 5 bits of LTCBL
+         * already zero in the table itself. */
+        {1600.00f, 0x64u, 0x00u, 0x00u, "+1600.00 degC"},
+        {1000.00f, 0x3Eu, 0x80u, 0x00u, "+1000.00 degC"},
+        {100.9375f, 0x06u, 0x4Fu, 0x00u, "+100.9375 degC"},
+        {25.00f, 0x01u, 0x90u, 0x00u, "+25.00 degC"},
+        {0.0625f, 0x00u, 0x01u, 0x00u, "+0.0625 degC"},
+        {0.00f, 0x00u, 0x00u, 0x00u, "0.00 degC"},
+        /* Negative: two's-complement 24-bit words from the same table. */
+        {-0.0625f, 0xFFu, 0xFFu, 0x00u, "-0.0625 degC"},
+        {-0.25f, 0xFFu, 0xFCu, 0x00u, "-0.25 degC"},
+        {-1.00f, 0xFFu, 0xF0u, 0x00u, "-1.00 degC"},
+        {-250.00f, 0xF0u, 0x60u, 0x00u, "-250.00 degC"},
+    };
+
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        max31856_regs_advance_conversion(&ch, cases[i].degc, 25.0f);
+        TEST_CHECK(ch.regs[MAX31856_REG_LTCBH] == cases[i].h &&
+                       ch.regs[MAX31856_REG_LTCBM] == cases[i].m &&
+                       ch.regs[MAX31856_REG_LTCBL] == cases[i].l,
+                   cases[i].label);
+    }
+}
+
+static void test_datasheet_worked_examples_cj(void)
+{
+    TEST_SECTION("max31856_regs -- CJ worked examples from datasheet Table 2 (page 13), including negative");
+
+    max31856_channel_t ch;
+    max31856_regs_init(&ch, 18);
+    /* Wide-open CJ thresholds and CJTO == 0 so reported_cj_c == true_cj_c
+     * exactly, matching the table's raw sensor readings. */
+    max31856_regs_write_burst(&ch, MAX31856_REG_CJHF, (const uint8_t[]){0x7Fu}, 1);
+    max31856_regs_write_burst(&ch, MAX31856_REG_CJLF, (const uint8_t[]){0xC0u}, 1);
+
+    static const struct {
+        float degc;
+        uint8_t h, l;
+        const char *label;
+    } cases[] = {
+        {127.984375f, 0x7Fu, 0xFCu, "+127.984375 degC (near the CJ clamp ceiling)"},
+        {127.0f, 0x7Fu, 0x00u, "+127 degC"},
+        {64.0f, 0x40u, 0x00u, "+64 degC"},
+        {25.0f, 0x19u, 0x00u, "+25 degC"},
+        {0.015625f, 0x00u, 0x04u, "+0.015625 degC (finest CJ LSB, 2^-6)"},
+        {0.0f, 0x00u, 0x00u, "0 degC"},
+        /* Negative rows from the same table. */
+        {-0.5f, 0xFFu, 0x80u, "-0.5 degC"},
+        {-25.0f, 0xE7u, 0x00u, "-25 degC"},
+        {-55.0f, 0xC9u, 0x00u, "-55 degC"},
+    };
+
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        max31856_regs_advance_conversion(&ch, 500.0f, cases[i].degc);
+        TEST_CHECK(ch.regs[MAX31856_REG_CJTH] == cases[i].h && ch.regs[MAX31856_REG_CJTL] == cases[i].l,
+                   cases[i].label);
+    }
+}
+
+/* Datasheet page 24, register 0Bh (CJTL) MEMORY ACCESS row: bits 1:0 are R
+ * only, even when CR0.CJ_DISABLE hands the rest of the register to the
+ * master for an external cold-junction sensor. */
+static void test_cjtl_low_two_bits_are_never_writable(void)
+{
+    TEST_SECTION("max31856_regs -- CJTL[1:0] stay 0 even when the master writes them (datasheet page 24)");
+
+    max31856_channel_t ch;
+    max31856_regs_init(&ch, 19);
+
+    max31856_regs_write_burst(&ch, MAX31856_REG_CR0, (const uint8_t[]){MAX31856_CR0_CJ_DISABLE}, 1);
+    max31856_regs_write_burst(&ch, MAX31856_REG_CJTH, (const uint8_t[]){0x19u, 0xFFu}, 2); /* CJTL = FFh, all bits set */
+    TEST_CHECK(ch.regs[MAX31856_REG_CJTL] == 0xFCu,
+               "a write of FFh to CJTL lands as FCh -- bits 1:0 are forced to 0, not writable");
+
+    /* Writing all zero must, of course, still land as zero -- this is not a
+     * test that only exercises the mask in one direction. */
+    max31856_regs_write_burst(&ch, MAX31856_REG_CJTL, (const uint8_t[]){0x00u}, 1);
+    TEST_CHECK(ch.regs[MAX31856_REG_CJTL] == 0x00u, "a write of 00h to CJTL lands as 00h");
+
+    /* And a value whose low two bits are already 0 must be preserved
+     * exactly, not just forced to some other constant. */
+    max31856_regs_write_burst(&ch, MAX31856_REG_CJTL, (const uint8_t[]){0xA8u}, 1);
+    TEST_CHECK(ch.regs[MAX31856_REG_CJTL] == 0xA8u, "a write already low-two-bits-clear round-trips exactly");
+}
+
 void run_test_max31856_regs(void)
 {
     test_write_read_verbatim();
@@ -685,4 +830,7 @@ void run_test_max31856_regs(void)
     test_drdy_assert_conditions();
     test_drdy_release_by_read();
     test_drdy_cj_disable_qualifier();
+    test_datasheet_worked_examples_ltcb();
+    test_datasheet_worked_examples_cj();
+    test_cjtl_low_two_bits_are_never_writable();
 }

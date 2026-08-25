@@ -247,8 +247,19 @@ typedef struct {
     bool master_has_written;
 } max31856_channel_t;
 
-/* Seeds regs[] to the part's documented power-on defaults (CR0=00h,
- * CR1=03h, MASK=FFh, everything else 0) and clears corruption/state.
+/* Seeds regs[] to the part's documented power-on defaults (datasheet page
+ * 18, Table 6 "Register Memory Map", FACTORY DEFAULT column) and clears
+ * corruption/state:
+ *   CR0=00h, CR1=03h, MASK=FFh, CJHF=7Fh, CJLF=C0h, LTHFTH=7Fh, LTHFTL=FFh,
+ *   LTLFTH=80h, LTLFTL=00h, CJTO=00h, CJTH=00h, CJTL=00h, LTCBH/M/L=00h,
+ *   SR=00h.
+ * The four threshold registers are NOT zero: each defaults to the extreme
+ * value that keeps its threshold from ever being crossed until a master
+ * configures it (see max31856_regs.c's max31856_regs_init() for the
+ * per-register reasoning) -- getting this wrong makes the emulator raise a
+ * spurious TCHIGH/CJHIGH fault on the very first conversion of any channel
+ * reporting a plausible positive temperature, before the master has written
+ * a single register.
  * rng_seed seeds the deterministic xorshift32 generator used for noise and
  * bit-error injection -- 0 is remapped to a fixed nonzero value internally
  * (xorshift32 cannot recover from an all-zero state). */
@@ -339,7 +350,22 @@ uint8_t max31856_regs_apply_read_corruption(max31856_channel_t *ch, uint8_t byte
 
 /* Current ~FAULT pin level: true = asserted (low). Derived from SR & the
  * effective mask (TCRANGE/CJRANGE always unmaskable, per the datasheet and
- * both real drivers' header comments), OR corruption.spurious_fault_pin. */
+ * both real drivers' header comments), OR corruption.spurious_fault_pin.
+ *
+ * VERIFICATION STATUS (2026-08-25 audit): this function's logic -- MASK bit
+ * layout (datasheet page 21, register 02h: bit0 Open .. bit5 CJ High, bits
+ * 7:6 reserved), SR bit layout (page 25/26, register 0Fh: bit0 OPEN .. bit7
+ * CJ Range), and the "TCRANGE/CJRANGE never maskable" rule (both real
+ * drivers' header comments, and implied by MASK only defining bits 0-5) --
+ * has been checked against the datasheet bit-for-bit and matches. It has NOT
+ * been, and currently cannot be, verified against real silicon on this
+ * bench: the fixture's ~FAULT GPIO is not wired to any DUT input on the
+ * current build, so nothing on the bench can observe this pin's level.
+ * Correct by inspection against the datasheet; unverifiable on hardware
+ * until ~FAULT is wired. This is a different pin from ~DRDY (which IS wired
+ * and IS exercised by real masters today -- see max31856_regs_drdy_asserted()
+ * below, whose release rules the existing host tests and both real drivers'
+ * read patterns already exercise). */
 bool max31856_regs_fault_pin_asserted(const max31856_channel_t *ch);
 
 #ifdef __cplusplus

@@ -110,6 +110,28 @@ static void tx_reset(max31856_pio_bus_t *bus)
     // The underrun counter is derived from the data channel's delivered-word
     // count instead -- see max31856_pio_engine.h's first_byte_late comment.
     bus->pio->fdebug = 1u << (PIO_FDEBUG_TXSTALL_LSB + bus->sm_tx);
+
+    // Put the TX state machine BACK. Everything above deliberately runs with
+    // it disabled -- pio_sm_restart() and the jmp are only well defined on a
+    // stopped SM -- but until 2026-08-25 this function simply returned here
+    // and never re-enabled it, so the FIRST CS-rising edge of the first
+    // transaction killed MISO permanently for the rest of the boot. The only
+    // other pio_sm_set_enabled(sm_tx, true) in this file is the one-time one
+    // in max31856_pio_engine_init(), so nothing downstream repaired it.
+    //
+    // Found on hardware rather than by reading: with the DUT reading
+    // continuously, PIO1_CTRL read 0x00000001 -- exactly one state machine
+    // enabled on a bus that needs two -- and the master read a constant,
+    // exact 0.0 C because a halted SM drives nothing and MISO simply held the
+    // idle OSR value. The RX path immediately below in the CS-rise handler
+    // does the same disable/restart/enable dance and gets it right, which is
+    // what made the asymmetry findable.
+    //
+    // Ordering: this goes last, after the tri-state pindir write, so the SM is
+    // started with MISO already released. The program's first instruction on
+    // both buses is the idle poll, so it re-enters holding MISO tri-stated and
+    // does not contend with another chip on the shared bus-A MISO net.
+    pio_sm_set_enabled(bus->pio, bus->sm_tx, true);
 }
 
 // --- Response-image publication --------------------------------------------
@@ -392,6 +414,123 @@ static void gpio_cs_callback(uint gpio, uint32_t events)
             }
 
             if ((events & GPIO_IRQ_EDGE_RISE) != 0u) {
+                // ORDERING, 2026-08-25 -- read this before touching the order
+                // of the steps below again.
+                //
+                // First real-hardware bench contact (bench evidence relayed
+                // 2026-08-25: SaftyFW vs this fixture at 4 MHz, safety-side
+                // channel, spi_transactions=67, spi_protocol_errors=84 (MORE
+                // than one transaction's worth), spi_first_byte_late=67 (100%
+                // of transactions), and a 3-register write burst intended for
+                // CR0/CR1/MASK instead landing garbage in CR0/CR1/MASK *and*
+                // smearing into CJHF/CJLF, which the master never addressed)
+                // showed this handler corrupting nearly every transaction,
+                // not merely running its response byte a little late.
+                //
+                // Root-cause analysis (no hardware access from this pass --
+                // reasoned from the RP2040 datasheet's IRQ/NVIC semantics and
+                // this file's own DMA/PIO configuration, not measured):
+                // steps 1-2-3-4 below do a meaningful amount of MMIO work --
+                // a DMA abort with a busy-wait (data_stop()), several PIO SM
+                // control-register writes each (tx_reset(), and the RX
+                // restart that used to live here), and the register-model
+                // bookkeeping -- all BEFORE the fixture re-arms the sniff DMA
+                // channel that decides which word of the NEXT transaction is
+                // "the address byte". docs/DESIGN_NOTES.md 3.2.1's timing
+                // analysis carefully budgets the READ response path's first
+                // byte (the ~125-250 ns PIO+DMA-only chain with no CPU
+                // involved) but never budgeted THIS handler's own total
+                // runtime against the master's CS-high gap between back-to-
+                // back transactions (datasheet page 5's tCWH, 400 ns min --
+                // and real masters typically leave much more than that, but
+                // "much more than 400 ns" is not the same guarantee as "more
+                // than however long this handler's busy-wait DMA abort plus
+                // half a dozen PIO register writes take").
+                //
+                // If the master starts clocking the NEXT transaction's
+                // address byte before this handler reaches the old step 6
+                // (sniff_arm()), the RX state machine -- which is entirely
+                // independent of the CPU and keeps sampling MOSI on every
+                // SCLK edge regardless of what this ISR is doing -- pushes
+                // that address word into the RX FIFO with NOBODY armed to
+                // claim it as an address (the sniff DMA channel is not yet
+                // configured, and the RX-FIFO-not-empty IRQ source is still
+                // masked, so poll_bus_rx() will not drain it either). Worse,
+                // if the ISR is slow enough that MORE bytes arrive than the
+                // RX FIFO's depth (4 words, unjoined, pico-sdk default) can
+                // hold before anything drains it, the RX state machine's
+                // autopush stalls mid-byte, which desynchronizes its bit
+                // count from SCLK for the rest of that byte -- garbage data,
+                // not just lateness. When drain_channel_rx() finally runs (at
+                // the START of the NEXT rising-edge callback, step 1) with
+                // txn_open[] still false because handle_load_done() for that
+                // transaction never got the chance to run, every byte it
+                // pulls out is counted as a protocol error instead of being
+                // applied as a register write -- which is exactly the
+                // symptom the bench evidence shows: protocol_errors (84)
+                // exceeding transactions (67), and writes meant for CR0/CR1/
+                // MASK landing as unrelated garbage, including in registers
+                // (CJHF/CJLF) the master never addressed at all.
+                //
+                // THIS IS A TIMING/RACE DEFECT, NOT A BIT-LEVEL FRAMING BUG.
+                // The mode-1 edge selection (RX samples MOSI on SCLK falling,
+                // TX shifts MISO on SCLK rising) was re-derived from first
+                // principles against datasheet Table 5 (page 15) as part of
+                // this same audit and is correct; nothing about shift
+                // direction, byte justification, or the address/data byte
+                // split is wrong at the bit level, and a bit-level bug would
+                // corrupt data at ANY clock rate including a very slow one.
+                // What this defect depends on is the RATIO of "how long this
+                // handler's un-arming-critical work takes" to "how much
+                // CS-high time the master leaves between transactions" -- and
+                // that ratio gets worse as SCLK gets faster (each byte takes
+                // less wall-clock time, so a fixed amount of CPU-side
+                // teardown overhead consumes a larger fraction of the gap).
+                // That is why a clock-rate sweep on real hardware (a separate
+                // pass, not this one) is expected to find a rate below which
+                // the emulator starts working -- and why that would confirm
+                // rather than contradict "timing defect", not "logic bug
+                // that fails at every rate". It also means the fix belongs
+                // entirely in THIS handler's scheduling, never in slowing the
+                // master down: SimFW's whole purpose is to stand in for real
+                // silicon when testing KilnFW/SaftyFW, so meeting the real
+                // part's timing is this emulator's job, not something either
+                // real firmware should have to accommodate.
+                //
+                // THE FIX: re-arm the two things the NEXT transaction's
+                // address-byte capture actually depends on -- the RX state
+                // machine (restarted to a clean byte boundary) and the sniff
+                // DMA channel -- FIRST, immediately after the drain, and only
+                // THEN do the slower response-path teardown (data_stop's
+                // busy-wait, tx_reset, data_arm) and register-model
+                // bookkeeping that used to run first. This is safe to
+                // reorder: the RX SM (sm_rx[ch]) and sniff DMA
+                // (dma_sniff[ch]) touched by the new step 2 share no
+                // hardware resource with the TX SM (sm_tx) or data DMA
+                // (dma_data) touched by the old steps 2-3 (now 3-4), so
+                // there is no register-write ordering hazard between them.
+                // The one thing that COULD be a hazard -- the NEXT
+                // transaction's address byte landing and firing
+                // DMA_IRQ_0/handle_load_done() before THIS handler has
+                // closed the OLD transaction in the register model (the old
+                // step 4, now step 5) -- cannot happen: GPIO0_IRQ/PIO_IRQ and
+                // DMA_IRQ_0 are registered at the SAME (default) NVIC
+                // priority (irq_set_enabled() below never raises either), and
+                // same-priority IRQs on the RP2040's Cortex-M0+ NVIC do not
+                // preempt each other -- a DMA_IRQ_0 that becomes pending
+                // while this GPIO handler is still running stays pending
+                // until this handler returns. So handle_load_done() for the
+                // NEXT transaction is guaranteed to run only after step 5
+                // below has already closed the OLD one, regardless of how
+                // early steps 1-2 re-arm capture for it. This reordering
+                // narrows the vulnerable window from "this handler's entire
+                // runtime" to "step 1's bounded drain plus a few PIO register
+                // writes in step 2" -- it does not, and cannot, prove that
+                // window is now zero; whether it is short enough at 4 MHz is
+                // an empirical question the hardware sweep answers, not
+                // something provable from source alone with no fixture
+                // attached in this environment.
+
                 // 1. Stop the CPU byte stream and collect what is left. Order
                 //    matters: masking first means the bounded drain below sees
                 //    a FIFO nobody else is racing it for.
@@ -400,14 +539,47 @@ static void gpio_cs_callback(uint gpio, uint32_t events)
                                              false);
                 drain_channel_rx(bus, ch);
 
-                // 2. Measure the response stream BEFORE tearing it down. The
+                // 2. Return the RX state machine to a known byte boundary and
+                //    re-supply the image base -- but ONLY if CS really is
+                //    still high. If the next transaction has already begun,
+                //    restarting the SM would corrupt a byte in flight, and the
+                //    SM is already correctly framed anyway (its byte loop is
+                //    self-framing: the image base is preloaded on every byte).
+                //    Then immediately re-arm the address sniffer -- see the
+                //    ORDERING comment above for why this pair now runs before
+                //    the slower response-path teardown rather than after it.
+                //    If a word is already waiting once the sniffer is armed,
+                //    the next transaction's address byte landed while this
+                //    handler was still running (even in its now-shortened
+                //    form), so its first response byte is necessarily late --
+                //    that is a real, countable underrun and the only kind of
+                //    first-byte lateness the fixture can observe in-band.
+                if (gpio_get(gpio) != 0) {
+                    pio_sm_set_enabled(bus->pio, bus->sm_rx[ch], false);
+                    pio_sm_clear_fifos(bus->pio, bus->sm_rx[ch]);
+                    pio_sm_restart(bus->pio, bus->sm_rx[ch]);
+                    pio_sm_exec(bus->pio, bus->sm_rx[ch], pio_encode_jmp(bus->offset_rx));
+                    (void)publish_base(bus, ch, bus->images[ch][bus->live_bank[ch]]);
+                    pio_sm_set_enabled(bus->pio, bus->sm_rx[ch], true);
+                }
+                bool already_waiting = !pio_sm_is_rx_fifo_empty(bus->pio, bus->sm_rx[ch]);
+                sniff_arm(bus, ch);
+                if (already_waiting) {
+                    bus->stats[ch].first_byte_late++;
+                }
+
+                // 3. Measure the response stream BEFORE tearing it down. The
                 //    data channel counts down from MAX31856_PIO_ENGINE_DATA_WORDS,
                 //    so the difference is exactly how many response words it
                 //    handed the TX FIFO. Fewer than the master clocked out is
                 //    an unambiguous starvation -- and, unlike the sticky
                 //    FDEBUG.TXSTALL bit this used to read, it cannot be
                 //    confused with the structural start-of-transaction stall
-                //    (SPI_ACCESS_AUDIT.md D3).
+                //    (SPI_ACCESS_AUDIT.md D3). Reading dma_hw->ch[dma_data] is
+                //    unaffected by step 2 above -- dma_data is the response
+                //    (TX) side, a disjoint resource from the RX SM / sniff
+                //    channel step 2 touches -- so moving step 2 earlier does
+                //    not change what this measurement reads.
                 uint32_t remaining = dma_hw->ch[(uint)bus->dma_data].transfer_count;
                 uint32_t delivered = (remaining <= MAX31856_PIO_ENGINE_DATA_WORDS)
                                           ? (MAX31856_PIO_ENGINE_DATA_WORDS - remaining)
@@ -417,16 +589,20 @@ static void gpio_cs_callback(uint gpio, uint32_t events)
                     bus->stats[ch].first_byte_late++;
                 }
 
-                // 3. Tear the response path down, data channel first so it
+                // 4. Tear the response path down, data channel first so it
                 //    cannot refill the FIFO tx_reset() is about to clear.
                 data_stop(bus);
                 tx_reset(bus);
                 data_arm(bus);
 
-                // 4. Close the transaction in the register model. This is
+                // 5. Close the transaction in the register model. This is
                 //    where ~DRDY is released if the read touched LTCB or (with
                 //    the CJ sensor enabled) CJTH/CJTL -- see
                 //    max31856_regs.h's max31856_regs_drdy_asserted() comment.
+                //    Guaranteed to run before the NEXT transaction's
+                //    handle_load_done() touches this same channel's model
+                //    state -- see the ORDERING comment above for the NVIC
+                //    same-priority/no-preemption argument.
                 if (bus->txn_open[ch]) {
                     max31856_regs_cs_deassert(bus->channels[ch]);
                     bus->txn_open[ch] = false;
@@ -435,33 +611,6 @@ static void gpio_cs_callback(uint gpio, uint32_t events)
                 bus->txn_data_bytes[ch] = 0u;
                 bus->cs_low[ch] = false;
                 drdy_sync(bus, ch);
-
-                // 5. Return the RX state machine to a known byte boundary and
-                //    re-supply the image base -- but ONLY if CS really is
-                //    still high. If the next transaction has already begun,
-                //    restarting the SM would corrupt a byte in flight, and the
-                //    SM is already correctly framed anyway (its byte loop is
-                //    self-framing: the image base is preloaded on every byte).
-                if (gpio_get(gpio) != 0) {
-                    pio_sm_set_enabled(bus->pio, bus->sm_rx[ch], false);
-                    pio_sm_clear_fifos(bus->pio, bus->sm_rx[ch]);
-                    pio_sm_restart(bus->pio, bus->sm_rx[ch]);
-                    pio_sm_exec(bus->pio, bus->sm_rx[ch], pio_encode_jmp(bus->offset_rx));
-                    (void)publish_base(bus, ch, bus->images[ch][bus->live_bank[ch]]);
-                    pio_sm_set_enabled(bus->pio, bus->sm_rx[ch], true);
-                }
-
-                // 6. Re-arm the address sniffer. If a word is already waiting
-                //    when we get here, the next transaction's address byte
-                //    landed while this handler was still running, so its first
-                //    response byte is necessarily late -- that is a real,
-                //    countable underrun and the only kind of first-byte
-                //    lateness the fixture can observe in-band.
-                bool already_waiting = !pio_sm_is_rx_fifo_empty(bus->pio, bus->sm_rx[ch]);
-                sniff_arm(bus, ch);
-                if (already_waiting) {
-                    bus->stats[ch].first_byte_late++;
-                }
             }
             return;
         }
@@ -834,4 +983,42 @@ max31856_pio_stats_t max31856_pio_engine_get_stats(const max31856_pio_bus_t *bus
         return empty;
     }
     return bus->stats[channel];
+}
+
+// See the header for the full rationale. In short: a state machine left
+// disabled by an unbalanced enable/disable pair is invisible from inside this
+// fixture -- the register model, the response image and the shadow truth all
+// keep working, and the only symptom is that the master reads a plausible
+// constant instead of a temperature. This turns that silence into a number.
+bool max31856_pio_engine_check_state_machines(max31856_pio_bus_t *bus)
+{
+    if (bus == NULL || bus->pio == NULL) {
+        return true;
+    }
+
+    // One read of CTRL for the whole bus rather than a per-SM query: the
+    // bottom four bits are the SM_ENABLE mask, so every state machine this bus
+    // owns can be checked against a single snapshot. Taking one snapshot also
+    // means the decision cannot straddle a change made between reads.
+    const uint32_t enabled = bus->pio->ctrl & 0xFu;
+    bool ok = true;
+
+    if ((enabled & (1u << bus->sm_tx)) == 0u) {
+        // The TX SM is shared by every channel on the bus, so this is the one
+        // whose loss takes MISO down for all of them at once -- and it is
+        // exactly the failure that shipped here on 2026-08-25.
+        pio_sm_set_enabled(bus->pio, bus->sm_tx, true);
+        bus->sm_disabled_repairs++;
+        ok = false;
+    }
+
+    for (uint8_t ch = 0; ch < bus->channel_count; ch++) {
+        if ((enabled & (1u << bus->sm_rx[ch])) == 0u) {
+            pio_sm_set_enabled(bus->pio, bus->sm_rx[ch], true);
+            bus->sm_disabled_repairs++;
+            ok = false;
+        }
+    }
+
+    return ok;
 }

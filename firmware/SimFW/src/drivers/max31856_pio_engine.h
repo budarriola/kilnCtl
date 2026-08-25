@@ -202,6 +202,30 @@ typedef struct {
     int dma_load;
     int dma_data;
 
+    /* Robustness counter for the "a state machine got left disabled" bug
+     * class, incremented by max31856_pio_engine_check_state_machines().
+     *
+     * This exists because that class of defect is completely silent from the
+     * inside. On 2026-08-25 tx_reset() disabled the TX state machine and
+     * returned without re-enabling it, which killed MISO permanently on the
+     * first CS-rising edge of the first transaction. Nothing in the fixture
+     * noticed or reported anything: the response image stayed correct, the
+     * shadow truth stayed correct, the register model kept working, and the
+     * only externally visible effect was that the master read a plausible
+     * constant (exactly 0.0 C) instead of a temperature. A fixture whose whole
+     * job is to be trustworthy silicon must not be able to fail that quietly.
+     *
+     * Deliberately a COUNTER AND A REPAIR, not an assert or a fatal: this
+     * module runs a safety processor's only thermocouple on the bench, and
+     * halting the fixture mid-run is worse than continuing with a repaired
+     * state machine and a non-zero count. But the count is the point -- a
+     * repair that left no trace would just be a slower version of the silent
+     * failure it replaces. Non-zero here always means a real bug in this
+     * file's own enable/disable pairing, never a hardware or wiring problem,
+     * so it should be zero forever and any other value is a regression to
+     * chase rather than tolerate. */
+    uint32_t sm_disabled_repairs;
+
     // Written by the sniff DMA channel, read by the CPU in the load channel's
     // completion IRQ. One per bus, not per channel: only one CS on a bus is
     // ever low at a time (that is what SPI means), so there is only ever one
@@ -277,6 +301,26 @@ bool max31856_pio_engine_refresh_image(max31856_pio_bus_t *bus, uint8_t channel)
 // register model. The task-loop side must check this before calling
 // max31856_regs_advance_conversion() or refresh_image() on that channel.
 bool max31856_pio_engine_channel_busy(const max31856_pio_bus_t *bus, uint8_t channel);
+
+/* Verifies the invariant that every state machine this bus owns -- one RX per
+ * channel plus the single shared TX -- is actually enabled, and re-enables any
+ * that is not, counting each repair in bus->sm_disabled_repairs.
+ *
+ * Call it from the owning task's periodic loop, NOT from an interrupt: it
+ * reads PIO CTRL and may call pio_sm_set_enabled(), and it is deliberately
+ * cheap enough (one register read plus a compare per bus) to run at the
+ * task-loop cadence.
+ *
+ * MUST NOT be called while a transaction is in flight. Re-enabling a state
+ * machine mid-byte would corrupt the byte in flight, which is the same reason
+ * the CS-rise handler guards its own RX restart on CS actually being high.
+ * Gate the call on max31856_pio_engine_channel_busy() being false for every
+ * channel, exactly as the image-refresh path already does.
+ *
+ * Returns true if the invariant already held (nothing repaired). See
+ * sm_disabled_repairs' own comment for why this is a counted repair rather
+ * than an assert or a fatal. */
+bool max31856_pio_engine_check_state_machines(max31856_pio_bus_t *bus);
 
 max31856_pio_stats_t max31856_pio_engine_get_stats(const max31856_pio_bus_t *bus, uint8_t channel);
 

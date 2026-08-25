@@ -128,6 +128,18 @@ static void spi_emu_b_task_fn(void *arg)
             // this task's register model to MISO, and it also re-derives
             // ~DRDY.
             (void)max31856_pio_engine_refresh_image(&s_bus, 0);
+
+            // State-machine invariant check, inside the same
+            // channel_busy()-false guard as the refresh above because
+            // re-enabling a state machine mid-byte would corrupt a transfer in
+            // flight. Cheap: one PIO CTRL read plus two compares for this
+            // one-channel bus. See max31856_pio_engine.h's
+            // sm_disabled_repairs comment for why this is a counted repair --
+            // the bug it exists for (tx_reset() leaving the shared TX state
+            // machine disabled, fixed 2026-08-25) produced no error, no fault
+            // bit and no log line, just a master reading a plausible constant
+            // 0.0 C forever.
+            (void)max31856_pio_engine_check_state_machines(&s_bus);
         }
 
         vTaskDelay(pdMS_TO_TICKS(SPI_EMU_B_SCAN_DELAY_MS));
