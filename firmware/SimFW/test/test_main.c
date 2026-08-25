@@ -32,6 +32,7 @@ void run_test_cmd_payload_vectors(void);
 void run_test_usb_owner_session_reset_logic(void);
 void run_test_task_stats_encoding(void);
 void run_test_sim_engine_ring_drain_reset(void);
+void run_test_sim_engine_event_seq_monotonic(void);
 void run_test_virtual_simfw_port_drift_coverage(void);
 
 int main(void)
@@ -59,6 +60,7 @@ int main(void)
     run_test_usb_owner_session_reset_logic();
     run_test_task_stats_encoding();
     run_test_sim_engine_ring_drain_reset();
+    run_test_sim_engine_event_seq_monotonic();
     run_test_virtual_simfw_port_drift_coverage();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);

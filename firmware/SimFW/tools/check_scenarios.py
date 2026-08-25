@@ -82,48 +82,55 @@ VALID_TRIGGER_KINDS = {
 }
 
 # ---------------------------------------------------------------------------
-# YAML fault `type:` string -> firmware/SimFW/src/tasks/fault_sched.h enum
-# value it is meant to compile to. This mapping is scenario-authoring
-# vocabulary, not something the firmware or the PC-side loader encodes
-# anywhere yet (payloads.py currently passes fault_type through as a raw
-# byte, scenario.py's FaultSpec.type is an opaque string) -- so it lives
-# here, and this script's job is to keep it honest against the real enum
-# (see `_load_fault_sched_enum` below) rather than let it silently drift.
+# YAML fault `type:` vocabulary.
+#
+# This is NOT maintained here. It is read from kilnsim.fault_catalog, which
+# is the module that actually encodes a scenario's `type:` string to the wire
+# byte -- so this check accepts exactly what a real run would accept, no more
+# and no less.
+#
+# It used to be a second, hand-written table in this file, added when nothing
+# encoded fault types at all and this was the only place the vocabulary was
+# written down. fault_catalog.py has since become the real encoder, and the
+# copy here drifted: it was missing every alias (`tc_noise`, `welded_relay`,
+# `estop`, ...), so this check FAILED a scenario that runs correctly on
+# hardware -- caught 2026-08-24 by fixture_fault_repeat.yaml. A check that
+# rejects valid input is worse than no check, because the fix people reach
+# for is to change the input.
+#
+# What is still checked here, and could not be before: that
+# fault_catalog.py's numeric ids agree with fault_sched.h's enum ORDER.
+# fault_catalog.py's own docstring says the two "must be kept in sync" by
+# hand, and until now nothing verified that from the Python side.
 # ---------------------------------------------------------------------------
-FAULT_TYPE_TO_ENUM = {
-    "disconnected_tc": "FAULT_SCHED_TYPE_TC_DISCONNECTED",
-    "flaky_noise_tc": "FAULT_SCHED_TYPE_TC_NOISE",
-    "stuck_tc": "FAULT_SCHED_TYPE_TC_STUCK",
-    "dead_tc_ic": "FAULT_SCHED_TYPE_TC_DEAD_IC",
-    "flaky_spi_tc_ic": "FAULT_SCHED_TYPE_TC_FLAKY_SPI",
-    "spurious_fault_pin": "FAULT_SCHED_TYPE_TC_SPURIOUS_FAULT_PIN",
-    "shorted_tc": "FAULT_SCHED_TYPE_TC_SHORTED",
-    "drifting_tc": "FAULT_SCHED_TYPE_TC_DRIFT",
-    "cj_fault": "FAULT_SCHED_TYPE_TC_CJ_FAULT",
-    "main_safety_disagree": "FAULT_SCHED_TYPE_MAIN_SAFETY_DISAGREE",
-    "welded_ssr": "FAULT_SCHED_TYPE_WELDED_RELAY",
-    "stuck_open_relay": "FAULT_SCHED_TYPE_STUCK_OPEN_RELAY",
-    "broken_heater_coil": "FAULT_SCHED_TYPE_BROKEN_ELEMENT",
-    "partial_element_health": "FAULT_SCHED_TYPE_PARTIAL_ELEMENT",
-    "half_wave_ssr": "FAULT_SCHED_TYPE_HALF_WAVE_SSR",
-    "phase_loss": "FAULT_SCHED_TYPE_PHASE_LOSS",
-    "welded_k4_current_persist": "FAULT_SCHED_TYPE_WELDED_K4_CURRENT_PERSIST",
-    "estop_trip": "FAULT_SCHED_TYPE_ESTOP",
-    "runaway_zone": "FAULT_SCHED_TYPE_RUNAWAY_ZONE",
-    "ambient_shift": "FAULT_SCHED_TYPE_AMBIENT_SHIFT",
-    "thermal_mass_surprise": "FAULT_SCHED_TYPE_THERMAL_MASS_SURPRISE",
-    "tc_lag_stress": "FAULT_SCHED_TYPE_TC_LAG_STRESS",
-    "dut_power_cut": "FAULT_SCHED_TYPE_DUT_POWER_CUT",
-}
+try:
+    from kilnsim.fault_catalog import FAULT_TYPE_NAMES
+except Exception as exc:  # pragma: no cover - import guard, same shape as above
+    print(f"check_scenarios.py: could not import kilnsim.fault_catalog: {exc}", file=sys.stderr)
+    sys.exit(2)
+
+VALID_FAULT_TYPES = set(FAULT_TYPE_NAMES)
 
 
-def _load_fault_sched_enum() -> set[str]:
-    """Extract the real FAULT_SCHED_TYPE_* enum member names straight out of
-    fault_sched.h -- read-only, this script never modifies SimFW's src/."""
+def _load_fault_sched_enum_order() -> "list[str]":
+    """FAULT_SCHED_TYPE_* member names in declaration order, straight out of
+    fault_sched.h -- read-only, this script never modifies SimFW's src/.
+
+    Order matters: fault_sched_fault_type_t assigns no explicit values, so a
+    member's position IS its wire byte, and that is what fault_catalog.py's
+    integer constants have to match."""
     if not FAULT_SCHED_H.exists():
         raise SystemExit(f"check_scenarios.py: fault_sched.h not found at {FAULT_SCHED_H}")
     text = FAULT_SCHED_H.read_text(encoding="utf-8")
-    return set(re.findall(r"\bFAULT_SCHED_TYPE_[A-Z0-9_]+\b", text))
+    text = re.sub(r"/\*.*?\*/", " ", text, flags=re.S)
+    text = re.sub(r"//[^\n]*", " ", text)
+    body = re.search(r"typedef\s+enum\s*\{(.*?)\}\s*fault_sched_fault_type_t\s*;", text, re.S)
+    if not body:
+        raise SystemExit("check_scenarios.py: could not find fault_sched_fault_type_t in fault_sched.h")
+    names = re.findall(r"\bFAULT_SCHED_TYPE_[A-Z0-9_]+\b", body.group(1))
+    if not names:
+        raise SystemExit("check_scenarios.py: fault_sched_fault_type_t has no members?")
+    return names
 
 
 def main() -> int:
@@ -131,21 +138,28 @@ def main() -> int:
         print(f"check_scenarios.py: scenarios dir not found at {SCENARIOS_DIR}", file=sys.stderr)
         return 2
 
-    real_enum = _load_fault_sched_enum()
+    enum_order = _load_fault_sched_enum_order()
 
-    # Sanity-check the mapping table itself against the real enum first --
-    # if this table has drifted (stale entry, typo), every scenario using it
-    # would otherwise fail with a confusing "unknown fault type" instead of
-    # pointing at the actual problem: this table.
+    # Check the ENCODER against the real enum first -- if fault_catalog.py's
+    # numeric ids have drifted from fault_sched.h's declaration order, every
+    # scenario is silently compiling to the wrong fault, and a per-scenario
+    # "unknown fault type" message would point at the wrong thing entirely.
     table_failures = []
-    for yaml_name, enum_name in FAULT_TYPE_TO_ENUM.items():
-        if enum_name not in real_enum:
+    if len(enum_order) - 1 != max(FAULT_TYPE_NAMES.values()):
+        table_failures.append(
+            f"fault_sched.h declares {len(enum_order)} fault_sched_fault_type_t members but "
+            f"kilnsim.fault_catalog's highest id is {max(FAULT_TYPE_NAMES.values())} -- one of "
+            f"the two has gained or lost a fault type without the other"
+        )
+    for yaml_name, fault_id in sorted(FAULT_TYPE_NAMES.items()):
+        if fault_id >= len(enum_order):
             table_failures.append(
-                f"FAULT_TYPE_TO_ENUM[{yaml_name!r}] = {enum_name!r}, which is not a real "
-                f"FAULT_SCHED_TYPE_* value in {FAULT_SCHED_H}"
+                f"kilnsim.fault_catalog maps {yaml_name!r} to id {fault_id}, past the end of "
+                f"fault_sched_fault_type_t ({len(enum_order)} members) in {FAULT_SCHED_H}"
             )
     if table_failures:
-        print("check_scenarios.py: fault-type mapping table is stale:", file=sys.stderr)
+        print("check_scenarios.py: fault-type encoding has drifted from the firmware enum:",
+              file=sys.stderr)
         for f in table_failures:
             print(f"  {f}", file=sys.stderr)
         return 1
@@ -204,19 +218,19 @@ def main() -> int:
 
         # --- Layer 2: fault type + trigger kind cross-check ----------------
         for f in scenario.faults:
-            if f.type not in FAULT_TYPE_TO_ENUM:
+            if f.type not in VALID_FAULT_TYPES:
                 failures.append(
-                    f"{rel}: fault {f.id!r} has type {f.type!r}, which is not in this script's "
-                    f"known fault-type vocabulary (FAULT_TYPE_TO_ENUM) -- add it there once "
-                    f"fault_sched.h actually implements it, or fix the typo"
+                    f"{rel}: fault {f.id!r} has type {f.type!r}, which kilnsim.fault_catalog "
+                    f"cannot encode -- a real run would reject this scenario. Add the name to "
+                    f"FAULT_TYPE_NAMES there (once fault_sched.h implements it), or fix the typo"
                 )
-            elif FAULT_TYPE_TO_ENUM[f.type] not in real_enum:
-                # Already caught by the table sanity-check above, but keep
-                # this here too so a per-scenario error message is specific.
-                failures.append(
-                    f"{rel}: fault {f.id!r} type {f.type!r} maps to "
-                    f"{FAULT_TYPE_TO_ENUM[f.type]!r}, which fault_sched.h does not implement"
-                )
+            else:
+                enum_name = enum_order[FAULT_TYPE_NAMES[f.type]]
+                if not enum_name.startswith("FAULT_SCHED_TYPE_"):
+                    failures.append(
+                        f"{rel}: fault {f.id!r} type {f.type!r} encodes to id "
+                        f"{FAULT_TYPE_NAMES[f.type]}, which is not a fault_sched.h fault type"
+                    )
 
             trigger_kind = f.trigger.kind.value if hasattr(f.trigger.kind, "value") else str(f.trigger.kind)
             if trigger_kind not in VALID_TRIGGER_KINDS:

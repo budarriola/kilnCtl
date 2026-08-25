@@ -197,8 +197,15 @@ Today's value is `0x0000003F` (all six bits set).
 Thin decode-then-call wrapper over `sim_engine_reset()` (`sim_engine.h`):
 `keep_params` 1 reinitializes state from the current zone params' `T0`;
 0 reloads the last-selected preset first (DESIGN_NOTES.md 6.1's `sim_reset` tool
-doc: "model to T0"). Resets `sim_time_us` to 0, clears MANUAL overrides, and
-resets the event ring's sequence number to 0 — does **not** clear
+doc: "model to T0"). Resets `sim_time_us` to 0 and clears MANUAL overrides. Does **not** reset
+the event ring's sequence number — that counter is monotonic for the whole
+boot lifetime, so an event's `seq` identifies it uniquely across every run,
+and an EVT frame still in flight when a run ends can be told apart from the
+next run's own events by its number alone. (It **did** restart at 0 per
+reset until 2026-08-24; a straggler was then indistinguishable from a
+genuine same-run event, and could be attributed to a run it was never part
+of. A PC client should record the high-water `seq` at reset and reject
+anything at or below it.) Does **not** clear
 `fault_sched`'s armed/active slots (`FAULT_CANCEL` each explicitly, or send
 fresh `FAULT_SCHEDULE`s, if a run needs a clean fault-slot pool too).
 Queued, same command-queue contract as every `sim_engine.h` MODEL-group

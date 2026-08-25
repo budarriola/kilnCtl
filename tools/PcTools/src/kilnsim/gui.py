@@ -33,7 +33,8 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 from typing import Optional
 
-from .link import MockSimLink, SerialSimLink, SimLink, SimLinkError, TcpSimLink, get_state_snapshot
+from .link import (DEFAULT_VIRTUAL_SIMFW_PORT, MockSimLink, SerialSimLink, SimLink, SimLinkError,
+                   TcpSimLink, get_state_snapshot)
 from .protocol import CommandGroup, CtCmd, FaultCmd, IoCmd, RelayCmd, SysCmd, TcCmd
 from .report import evaluate_expectations
 from .scenario import ScenarioError, load_scenario
@@ -137,7 +138,8 @@ class KilnSimGui:
         from tkinter import simpledialog
 
         address = simpledialog.askstring(
-            "kilnsim", "virtual_simfw address (host:port, blank for 127.0.0.1:8765):", parent=self.root
+            "kilnsim", f"virtual_simfw address (host:port, blank for 127.0.0.1:{DEFAULT_VIRTUAL_SIMFW_PORT}):",
+            parent=self.root
         )
         if address is None:  # Cancel
             return

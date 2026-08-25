@@ -608,17 +608,23 @@ def run_one_scenario(
         # trailing zero-timeout drain -- and this run's first poll would
         # collect it as one of its own. Found on hardware 2026-08-24:
         # fixture_fault_lifecycle saw seqs [0, 1, 7], the 7 belonging to the
-        # scenario before it. Since a wire seq restarts at 0 on every
-        # RESET_SIM, a straggler is indistinguishable from a same-run event
-        # after the fact, so this must be dropped here rather than filtered
-        # later. Fourth defect in this event ring from one family: state
-        # reset on one side of a producer/consumer pair but not the other.
-        dropped = link.discard_buffered_events()
+        # scenario before it. Fourth defect in this event ring from one
+        # family: state reset on one side of a producer/consumer pair but not
+        # the other.
+        #
+        # begin_run_event_boundary() does both halves: flush what has already
+        # arrived, and arm a seq floor for what is still on the wire. The
+        # floor works because the firmware's event seq is now monotonic for
+        # its boot lifetime, so a straggler can never carry a number this run
+        # would produce itself.
+        dropped, floor = link.begin_run_event_boundary()
+        notes = []
         if dropped:
-            reset_note = (f" [{dropped} stale event(s) from a previous run "
-                           "discarded at reset]")
-        else:
-            reset_note = ""
+            notes.append(f"{dropped} stale event(s) from a previous run "
+                          "discarded at reset")
+        if floor is not None:
+            notes.append(f"events at or below seq {floor} rejected as pre-run")
+        reset_note = f" [{'; '.join(notes)}]" if notes else ""
     except SimLinkError as exc:
         return ScenarioOutcome(
             name=scenario.name, path=path, exercises=list(scenario.exercises),
@@ -665,6 +671,7 @@ def run_one_scenario(
                 f"scenario {scenario.name!r}: {exc}"
             ) from exc
 
+    stale_before = getattr(link, "stale_events_dropped", 0)
     t0 = time.monotonic()
     try:
         try:
@@ -703,6 +710,16 @@ def run_one_scenario(
     # something about run pacing, not about this scenario.
     if reset_note:
         detail = f"{detail}{reset_note}" if detail else reset_note.strip()
+    # Same reasoning for the OTHER half of the boundary: an event that was
+    # still on the wire at reset and got rejected by the seq floor mid-run.
+    # The buffer flush cannot see those, so without this they would be
+    # invisible -- and "a previous scenario was still transmitting well into
+    # this one" is exactly the kind of thing that should not be silent.
+    late = getattr(link, "stale_events_dropped", 0) - stale_before
+    if late:
+        late_note = (f"{late} event(s) from a previous run arrived DURING this "
+                      "one and were rejected by the seq floor")
+        detail = f"{detail}; {late_note}" if detail else late_note
     gap_note = describe_runner_gap(req, report.verdict)
     if gap_note:
         detail = f"{detail}; {gap_note}" if detail else gap_note

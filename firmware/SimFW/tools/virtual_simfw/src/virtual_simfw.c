@@ -770,18 +770,15 @@ static void client_register_tasks(client_t *c)
     benchproto_link_register_task(&c->link, SIMFW_TASK_ID_EVT);
 }
 
-// Called whenever the event ring's write sequence resets to 0 (SYS
-// RESET_SIM, MODEL LOAD_PRESET) so every already-connected client's read
-// cursor resets in lockstep with it -- otherwise a client's cursor (e.g.
-// 500) would sit above the freshly-zeroed ring_next_seq and drain_events()
-// would simply stop delivering to it until the ring counter climbed back
-// past its old value.
-static void reset_client_evt_cursors(void)
-{
-    for (unsigned i = 0; i < SIMFW_MAX_CLIENTS; i++) {
-        if (g_clients[i].in_use) g_clients[i].telemetry_next_evt_seq = 0;
-    }
-}
+// The event ring's write sequence used to be zeroed on SYS RESET_SIM and
+// MODEL LOAD_PRESET, which forced every connected client's read cursor to be
+// reset in lockstep (reset_client_evt_cursors(), removed 2026-08-24). It no
+// longer is: ring_next_seq is monotonic for the process lifetime, matching
+// the firmware's own s_ring_next_seq (sim_engine.c apply_reset()). A cursor
+// therefore can never be left sitting above the producer, and an event's seq
+// identifies it uniquely across every run -- so a straggler from a previous
+// run can be rejected by its number alone rather than being renumbered into
+// a plausible member of the next one.
 
 static bool socket_send_all(SOCKET s, const uint8_t *data, size_t len)
 {
@@ -1003,8 +1000,9 @@ static bool dispatch_model(device_t *d, uint8_t cmd, ar_t *r, rw_t *w)
         for (uint8_t z = 0; z < d->params.zone_count; z++) blend += d->safety_weight[z] * d->state.T_zone[z];
         d->safety_tc_state_c = blend;
         d->safety_manual = false;
-        d->ring_next_seq = 0;
-        reset_client_evt_cursors();
+        // No ring bookkeeping here: the real firmware's LOAD_PRESET
+        // (apply_pending_commands(), sim_engine.c) reinitializes the model
+        // inline and never touches the event ring.
         rw_u8(w, SIMFW_CMD_STATUS_OK);
         return true;
     }
@@ -1785,8 +1783,11 @@ static void reset_device(device_t *d, bool keep_params)
     d->safety_tc_state_c = blend;
     d->safety_manual = false;
 
-    d->ring_next_seq = 0;
-    reset_client_evt_cursors();
+    // ring_next_seq is deliberately untouched -- monotonic for the process
+    // lifetime, mirroring sim_engine.c's apply_reset(). It starts at 0
+    // because g_dev is a zero-initialized static, not because reset zeroes
+    // it. The ring's contents are left alone too: an undrained pre-reset
+    // event stays drainable under its original seq.
     d->edge_write_idx = 0;
     d->edge_count = 0;
     d->relay_mask_prev = 0;
@@ -1912,7 +1913,11 @@ static double now_seconds(void)
 
 int main(int argc, char **argv)
 {
-    uint16_t port = 8765;
+    // Must match kilnsim.link.DEFAULT_VIRTUAL_SIMFW_PORT, and must not
+    // collide with kilnctrl.link_hub.HUB_PORT (8765) -- it did until
+    // 2026-08-24, so a running kilnctrl hub made this tool unreachable
+    // while looking like an absent fixture.
+    uint16_t port = 8770;
     uint32_t seed = 0;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--port") == 0 && i + 1 < argc) port = (uint16_t)atoi(argv[++i]);

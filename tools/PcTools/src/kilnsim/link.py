@@ -194,21 +194,84 @@ class SimLink(abc.ABC):
 
         That was not theoretical: it is how ``fixture_fault_lifecycle`` came
         to see seqs [0, 1, 7] under ``kilnsim testmgr`` (2026-08-24), the 7
-        being a straggler from the previous scenario's epoch. And because a
-        wire seq restarts at 0 on every ``SYS/RESET_SIM``, the two are
-        genuinely indistinguishable after the fact -- a stray event can be
-        attributed to a run it did not belong to, which is worse than the
-        sequence gap that happened to expose it here.
-
-        Call this once a run's own RESET_SIM is acknowledged, so what the
-        scenario collects starts empty. A residual race remains, of the few
-        milliseconds between this call and the first scheduling command; it
-        is bounded and documented rather than closed.
+        being a straggler from the previous scenario. At the time the wire
+        seq also restarted at 0 on every ``SYS/RESET_SIM``, which made the
+        two genuinely indistinguishable after the fact -- a stray event could
+        be attributed to a run it did not belong to, which is worse than the
+        sequence gap that happened to expose it here. The firmware's seq is
+        monotonic for its whole boot lifetime now, so that half is closed at
+        the source.
 
         The default drains and drops via :meth:`read_events`, which is
         correct for every SimLink; the framed transports override it to swap
-        the buffer without touching the condition variable."""
+        the buffer without touching the condition variable.
+
+        This is the primitive; :meth:`begin_run_event_boundary` is what a
+        run should actually call, since flushing the buffer alone does not
+        close the in-flight window."""
         return len(self.read_events(timeout=0.0))
+
+    # -- run boundaries --------------------------------------------------------
+    #
+    # A seq floor: every event at or below it belongs to a previous run and is
+    # dropped on the way out of read_events(). ``None`` means no floor armed
+    # (the default -- nothing is filtered until a run asks for it).
+    _evt_seq_floor: Optional[int] = None
+
+    def highest_event_seq_seen(self) -> Optional[int]:
+        """Highest EVT ``seq`` this link has observed on this connection, or
+        None if it has seen no events at all. Overridden per transport --
+        the base class has no event source of its own."""
+        return None
+
+    def begin_run_event_boundary(self) -> tuple:
+        """Draw a line under everything that happened before now. Returns
+        ``(dropped, floor)``: how many buffered events were thrown away, and
+        the seq floor armed (or None if this link has seen no events yet).
+
+        Call once a run's own ``SYS/RESET_SIM`` is acknowledged.
+
+        Flushing the buffer is only half of it. The buffer catches what has
+        already arrived; the floor catches what is still on the wire. Since
+        2026-08-24 the firmware's event seq is monotonic for its whole boot
+        lifetime (``sim_engine.c``'s ``apply_reset()``, PROTOCOL.md's
+        RESET_SIM section), so a straggler can never be renumbered into
+        something the new run would plausibly have produced -- which is what
+        makes a floor able to work at all. Before that the seq restarted at 0
+        per reset and no floor was possible: it would have rejected the
+        genuine post-reset events along with the stale ones.
+
+        This closes the residual race that flushing alone leaves open -- the
+        few milliseconds between the flush and the first scheduling command,
+        during which a previous run's frame can still land."""
+        dropped = self.discard_buffered_events()
+        floor = self.highest_event_seq_seen()
+        self._evt_seq_floor = floor
+        return dropped, floor
+
+    def clear_run_event_boundary(self) -> None:
+        """Disarm the seq floor -- nothing is filtered again until the next
+        :meth:`begin_run_event_boundary`."""
+        self._evt_seq_floor = None
+
+    def _drop_stale_events(self, events: list) -> list:
+        """Apply the armed seq floor, if any. Every concrete transport's
+        :meth:`read_events` runs its output through this."""
+        floor = self._evt_seq_floor
+        if floor is None:
+            return events
+        kept = [e for e in events if e.seq > floor]
+        n = len(events) - len(kept)
+        if n:
+            log.warning("dropped %d event(s) at or below the run's seq floor %d "
+                        "(straggler(s) from a previous run)", n, floor)
+            self.stale_events_dropped += n
+        return kept
+
+    #: Count of events dropped by the seq floor since this link connected.
+    #: Reported rather than swallowed -- a straggler is evidence about the
+    #: link, not noise to hide.
+    stale_events_dropped: int = 0
 
     def send_command_expect_reboot(self, group: CommandGroup, cmd: int, payload: Optional[dict] = None,
                                     timeout: Optional[float] = None) -> Optional[dict]:
@@ -583,7 +646,13 @@ class _FramedSimLink(SimLink):
             if not self._events:
                 self._events_cv.wait(timeout=timeout)
             out, self._events[:] = self._events[:], []
-            return out
+        return self._drop_stale_events(out)
+
+    def highest_event_seq_seen(self) -> Optional[int]:
+        # _last_evt_seq is maintained by the RX thread in _note_evt_seq(),
+        # i.e. it already accounts for frames that arrived and were buffered
+        # but never read by anyone.
+        return self._last_evt_seq
 
     def discard_buffered_events(self) -> int:
         """See :meth:`SimLink.discard_buffered_events`. Swaps the buffer
@@ -734,7 +803,17 @@ class SerialSimLink(_FramedSimLink):
 #: virtual_simfw's default listen port (firmware/SimFW/tools/virtual_simfw/
 #: src/virtual_simfw.c's own `port` default) -- used when TcpSimLink.connect()
 #: is given no explicit "host:port" address.
-DEFAULT_VIRTUAL_SIMFW_PORT = 8765
+#:
+#: MUST NOT collide with kilnctrl.link_hub.HUB_PORT. It did, on 8765, until
+#: 2026-08-24: two different protocols on one default port in one repo. With
+#: a kilnctrl hub running (which is the normal state when anyone is working
+#: on the ESP), `kilnsim --virtual` connected to the HUB, spoke benchproto at
+#: it, had the connection dropped, and reported "SimFW fixture not
+#: reachable" -- which reads as "no fixture is attached", not "you just
+#: talked the wrong protocol to another tool". Every scenario came back
+#: NOT_RUNNABLE and the whole virtual CI path was silently unavailable.
+#: tests/test_kilnsim_port_collision.py keeps the two apart.
+DEFAULT_VIRTUAL_SIMFW_PORT = 8770
 DEFAULT_TCP_CONNECT_TIMEOUT_S = 5.0
 
 
@@ -839,6 +918,7 @@ class MockSimLink(SimLink):
         self._scripts: dict[tuple, list] = {}
         self._history: "list[tuple[CommandGroup, int, dict]]" = []
         self._next_seq = 1
+        self._max_evt_seq: Optional[int] = None
         # FAULT_SCHEDULE/UNTIL_TRIGGER two-frame design (PROTOCOL.md sec
         # 5.6): slot ids with a pending FAULT_SCHEDULE(duration_kind==2)
         # frame 1 that hasn't yet been completed by a FAULT_SET_UNTIL_TRIGGER
@@ -883,6 +963,14 @@ class MockSimLink(SimLink):
     def inject_event(self, event: Event) -> None:
         """Make ``event`` available on the next :meth:`read_events` call."""
         self._events.append(event)
+        if self._max_evt_seq is None or event.seq > self._max_evt_seq:
+            self._max_evt_seq = event.seq
+
+    def highest_event_seq_seen(self) -> Optional[int]:
+        # Tracked over injections rather than read from _next_seq: a test may
+        # inject_event() an Event with a hand-chosen seq that never went
+        # through make_event().
+        return self._max_evt_seq
 
     def make_event(self, event_type: EventType, payload: Optional[dict] = None,
                     sim_time_us: Optional[int] = None) -> Event:
@@ -970,7 +1058,7 @@ class MockSimLink(SimLink):
         # nothing to usefully wait for) -- kept in the signature to match
         # SimLink exactly.
         out, self._events[:] = self._events[:], []
-        return out
+        return self._drop_stale_events(out)
 
     # -- built-in defaults -------------------------------------------------------
     #

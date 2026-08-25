@@ -280,12 +280,41 @@ in this table's sense. Where it matters (M-G/M-H, which talk about scenarios
   built on top of this milestone's own scenario runner/selftest, orchestrating
   presence detection, `kilnsim selftest`, every scenario the attached
   hardware tier supports, and a guard-coverage report against
-  `firmware/SaftyFW/docs/GUARD_TEST_MATRIX.md`'s S1..S13 list. Built and
-  unit-tested against fakes only (`tools/PcTools/tests/test_kilnsim_testmgr.py`);
-  never yet run against real hardware. Full account, including honest known
+  `firmware/SaftyFW/docs/GUARD_TEST_MATRIX.md`'s S1..S13 list. **Now run
+  against the real fixture** (2026-08-24): selftest 13/15 PASS (2
+  NOT_RUNNABLE), the two tier-0 scenarios PASS, exit 0. Every other scenario
+  is correctly NOT_RUNNABLE at tier 0. Full account, including honest known
   limitations (SaftyFW-without-ESP detection not implemented, timed
   `operator_actions` not replayed, the pre-existing `kilnsim.runner`
   guard-event synthesis gap it surfaces but does not fix): `docs/TEST_MANAGER.md`.
+
+  Running it on hardware is what found the defects below, none of which any
+  amount of host testing was going to surface:
+
+  - **A scenario collected the previous scenario's events** (`0ebce3b`, plus
+    the firmware half here). The PC's EVT buffer knows nothing about scenario
+    boundaries, and the firmware's event seq restarted at 0 on every
+    `RESET_SIM` — so a straggler was indistinguishable from a same-run event
+    and could decide a run it was never part of. Fixed on both sides: the
+    seq is now monotonic for the whole boot lifetime
+    (`sim_engine.c`'s `apply_reset()`, `tools/check_event_seq_monotonic.ps1`,
+    `test/test_sim_engine_event_seq_monotonic.c`), and a run draws a real
+    boundary — flush the buffer, then reject anything at or below the
+    high-water seq (`SimLink.begin_run_event_boundary()`). Verified on
+    silicon: seqs 65,66 before a `RESET_SIM`, 68 after.
+  - **`kilnsim`'s virtual_simfw port was `kilnctrl`'s link-hub port**, both
+    8765. With a hub running — the normal state whenever anyone is working
+    on the ESP — `kilnsim --virtual` connected to the *hub*, spoke benchproto
+    at it, and reported "SimFW fixture not reachable". The entire
+    hardware-free CI path was unavailable and the reason looked like absent
+    hardware. Moved to 8770; `tests/test_kilnsim_port_collision.py` keeps
+    the two apart and pins the C default to the Python one.
+  - **`check_scenarios.py` rejected a valid scenario.** Its fault-type
+    vocabulary was a hand-written second copy of `kilnsim.fault_catalog`'s
+    and had drifted, missing every alias. It now reads the real encoder, so
+    it accepts exactly what a run accepts — and additionally pins
+    `fault_catalog`'s numeric ids against `fault_sched.h`'s enum order,
+    which nothing checked from the Python side before.
 - [~] **M-F — Fault engine + scheduler.** Full catalog, trigger spec, slots,
   composition rules.
   **Exit:** same scenario + seed twice ⇒ byte-identical event logs;

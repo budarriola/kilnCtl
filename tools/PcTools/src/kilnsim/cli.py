@@ -26,7 +26,8 @@ from typing import Optional
 
 from . import selftest as _selftest
 from . import testmgr as _testmgr
-from .link import MockSimLink, SerialSimLink, SimLink, SimLinkError, TcpSimLink, get_state_snapshot
+from .link import (DEFAULT_VIRTUAL_SIMFW_PORT, MockSimLink, SerialSimLink, SimLink, SimLinkError,
+                   TcpSimLink, get_state_snapshot)
 from .protocol import (
     CommandGroup,
     CtCmd,
@@ -618,7 +619,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--port", default=None, help="serial port (autodetected if omitted)")
     p.add_argument("--virtual", nargs="?", const="", default=None, metavar="HOST:PORT",
                     help="connect to firmware/SimFW/tools/virtual_simfw over TCP instead of real hardware "
-                         "(default 127.0.0.1:8765 if no address given)")
+                         "(default 127.0.0.1:%d if no address given)" % DEFAULT_VIRTUAL_SIMFW_PORT)
     sub = p.add_subparsers(dest="command", required=True)
 
     sp = sub.add_parser("state", help="print the current telemetry snapshot as JSON")

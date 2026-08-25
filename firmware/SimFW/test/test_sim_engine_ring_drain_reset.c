@@ -32,6 +32,16 @@
 // explicitly on reset; this firmware had no equivalent for its one real
 // consumer.
 //
+// SUPERSEDED IN PART, 2026-08-24, and deliberately kept: apply_reset() no
+// longer zeroes s_ring_next_seq at all (the counter is now monotonic for the
+// whole boot lifetime -- see test_sim_engine_event_seq_monotonic.c and
+// tools/check_event_seq_monotonic.ps1), which removes the only way the
+// stranded-cursor case could arise in ordinary operation. The resync below
+// stays as defence in depth against a future producer reset, and this file
+// stays as its executable description: it is what a silent, permanent
+// consumer stall looks like, and it costs one comparison to keep impossible.
+// The forward-wrap half of the same check is unaffected and still live.
+//
 // THE FIX: sim_event_ring_drain() also resyncs to oldest_available when
 // start_seq > s_ring_next_seq -- only reachable via a producer reset
 // underneath an already-advanced cursor (s_ring_next_seq is otherwise

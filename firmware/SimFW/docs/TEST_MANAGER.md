@@ -1,7 +1,9 @@
 # `kilnsim testmgr` — the bench regression suite
 
-> **Status:** built, unit-tested against fakes, never yet run against real
-> hardware · **Last reviewed:** 2026-08-24
+> **Status:** run against the real fixture (2026-08-24) at tier 0 — selftest
+> 13/15 PASS, both tier-0 scenarios PASS, exit 0. Tiers 1 and 2 are still
+> unexercised: no SaftyFW or ESP has been attached to a suite run.
+> · **Last reviewed:** 2026-08-24
 > **Keep this file current.** If a command below stops matching
 > `tools/PcTools/src/kilnsim/testmgr.py`/`cli.py`, fix this file in the same
 > session — `BENCH_RUNBOOK.md`'s own rule.
@@ -26,10 +28,29 @@ kilnsim testmgr                 # full suite, real hardware, text report
 kilnsim testmgr --quick         # fast subset -- "I just reflashed, is it still sane"
 kilnsim testmgr --json          # machine-readable, for CI
 kilnsim testmgr --mock          # against MockSimLink, no hardware at all (smoke test)
-kilnsim testmgr --port COM11    # explicit fixture port, same convention as every other kilnsim subcommand
+kilnsim testmgr --port COM13    # explicit fixture port, same convention as every other kilnsim subcommand
+                                # (COM numbers move between sessions -- identify the fixture by
+                                #  VID_2E8A/PID_F00A, per BENCH_RUNBOOK.md section 1)
 kilnsim --virtual testmgr --quick                 # against virtual_simfw (real sim code, host-compiled), no real hardware
-kilnsim --virtual=127.0.0.1:8765 testmgr --quick  # explicit host:port (this is virtual_simfw's own default anyway)
+kilnsim --virtual=127.0.0.1:8770 testmgr --quick  # explicit host:port (this is virtual_simfw's own default anyway)
 ```
+
+**The virtual port is 8770, not 8765.** `kilnctrl`'s link hub owns 8765, and
+the two collided until 2026-08-24: with a hub running, `kilnsim --virtual`
+connected to the hub, spoke benchproto at it, and reported "SimFW fixture not
+reachable" — which reads as absent hardware, not as a port conflict.
+`tests/test_kilnsim_port_collision.py` keeps them apart.
+
+**Each scenario draws a real event boundary.** Once a run's own `RESET_SIM`
+is acknowledged, the manager flushes the PC's EVT buffer *and* arms a seq
+floor, rejecting anything at or below the highest seq seen so far
+(`SimLink.begin_run_event_boundary()`). Resetting the device alone was never
+enough: the buffer is filled by the RX thread with no notion of a scenario
+boundary, so the previous run's trailing events were collected by the next
+one. Both halves are reported in the scenario's detail line rather than
+swallowed — a suite where they appear on every row is telling you something
+about run pacing. The floor only works because the firmware's event seq is
+monotonic for its boot lifetime; see `PROTOCOL.md`'s `RESET_SIM` section.
 
 Exit code, same convention as `kilnsim run`:
 
