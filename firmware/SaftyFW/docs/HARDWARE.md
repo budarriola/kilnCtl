@@ -189,6 +189,15 @@ With the baud corrected, the link works end to end: `safety_get_status()` on
 the ESP side returns real telemetry (link up, safety thermocouple invalid with
 no sensor fitted, all three currents 0.00 A, a few hundred milliseconds old).
 
+**Superseded 2026-08-24: the safety MAX31856 and a real thermocouple are now
+physically populated** on `hardware/SaftyThermocoupleBoard/` (§8 below) — the
+"no sensor fitted" reading above was true only through that date. Verified
+live: `link up; heating enable granted; safety thermocouple valid | 30.20 C
+(CJ 28.08 C)`, status flags `0x21` = `LINK_UP | TEMP_VALID`. See §5 below for
+what that changes about S5's masking of every other guard, and `TODO.md`'s
+"An uncommissioned safety processor grants heating enable" for a separate,
+still-open finding from the same bench session.
+
 Saleae capture under real traffic, to prove baud and framing together in one
 trace, is still worth doing (`tools/PcTools/TODO.md` §2) but is no longer
 blocking.
@@ -372,8 +381,18 @@ board -- E-stop reads healthy and S7 does not trip there. The schematic note
 above still stands for a freshly built board; check the pin rather than
 assuming either way. This mattered because `discrete_task.c` had the polarity
 inverted until 642dd54, which decoded this healthy low as *pressed* -- masked
-only because S5 (no safety TC fitted) latched first and
-`safety_guards_tick()` early-returns while any trip is latched.
+only because S5 (no safety TC fitted, at the time this bug was live) latched
+first and `safety_guards_tick()` early-returns while any trip is latched.
+
+**Update, same date, later in the session: the safety MAX31856 and a real
+thermocouple were physically fitted** (§8 below), so "no safety TC fitted"
+above is now a historical statement about the board's state *during* the
+E-stop polarity investigation, not its current state. With a valid reading,
+S5 no longer latches on boot, and the masking this note describes no longer
+applies to any guard checked after S5 in `safety_guards_tick()` — see
+`GUARD_TEST_MATRIX.md` §6a for the full re-derivation of which guards that
+actually un-blocks versus which stay blocked on an unrelated commissioning
+gap.
 
 with no switch attached will read STOP until one of the two is added. Do not
 "fix" this by inverting the sense in
@@ -578,6 +597,12 @@ the Pico's SPI and I2C out to the separate `hardware/SaftyThermocoupleBoard/` pr
 
 The daughterboard is the same design as `hardware/ThermocoupleBoard/` with **one**
 MAX31856 populated, and makes its own analog 3.3 V with an LT1962.
+
+**Confirmed physically fitted and working, 2026-08-24** — this section
+described the intended design from the schematic before that date; §1 and
+§5 above previously recorded the bench with no sensor actually populated
+here. As of 2026-08-24 a real MAX31856 and thermocouple are on this
+connector and reporting valid readings over the link.
 
 Driver consequences (all of which `firmware/KilnFW/docs/MAX31856.md` already documents
 for the identical part — **read it, and port rather than reinvent**):

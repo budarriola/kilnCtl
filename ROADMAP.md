@@ -207,10 +207,18 @@ safety processor (RP2040) still has none fitted.
 **Bench state (2026-08-24):** both UARTs work — the two blockers named above
 are cleared. The isolated Pi↔ESP link is up and carrying telemetry at 9600
 (M0), and the PC↔ESP command UART on COM9 is responsive. Both firmwares were
-flashed over JTAG/SWD today and verified running. The safety processor's own
-MAX31856 is still not populated, so `safety TC invalid` is the expected steady
-state there; the E-stop net measures low (a contact IS fitted, contrary to
-`HARDWARE.md` §5's older note), so S7 correctly stays quiet.
+flashed over JTAG/SWD today and verified running.
+
+**Later the same day the safety processor's MAX31856 and thermocouple were
+fitted** (this paragraph's earlier revision said "still not populated", which
+was true when written and stopped being true a few hours later — the two
+statements are hours apart, not a contradiction). Verified live:
+`safety thermocouple valid | 30.20 C (CJ 28.08 C)`. It required a Pico reset,
+because SPI init runs once at boot. The E-stop net measures low (a contact IS
+fitted, contrary to `HARDWARE.md` §5's older note) and S7 is now genuinely
+evaluated rather than masked by S5 — and correctly stays quiet, which is the
+first real test of the `discrete_task.c` polarity fix (`642dd54`): with the
+old inverted read this healthy board would now be latched on S7.
 
 ## M2 — `CommonFW`, before either firmware depends on it · *done, 2026-08-19*
 
@@ -259,9 +267,11 @@ link, so it can run in parallel with M1 and M2 once M0 is out of the way.
       leads to "correcting" a true statement
 - [~] MAX31856 driver + config plumbing (tc_type via flash-backed
       `config_store`, commissioned over `SAFETY_CMD_SET_CONFIG`) built and
-      wired end-to-end in code (2026-08-19) — **still open**: the part itself
-      is not physically populated on the bench, and there is no LCD/web
-      commissioning surface yet
+      wired end-to-end in code (2026-08-19). ~~The part itself is not
+      physically populated~~ — **fitted 2026-08-24 and reading correctly.**
+      **Still open**: there is no LCD/web commissioning surface yet, and the
+      four no-default section-1 fields remain unset, which is what keeps
+      `commissioned: false` and leaves S1's ceiling disabled
 - [x] 12 of 13 guards (`SAFETY_MODEL.md` §4) implemented as pure functions and
       host-tested against synthetic inputs (320+/320+ checks) — S8
       (rate-of-rise) intentionally ships disabled until a real kiln's ramp
@@ -306,10 +316,19 @@ physically stop a kiln, and the first that can nuisance-trip one.
       2026-08-20 is stale: `safety_core_request_enable()` calls
       `relay_owner_command_energize()` (`safety_core.c`), reached from
       `link_task`'s enable handler, and it refuses ON when the safety
-      thermocouple is declared absent or a trip is latched. **Still not
-      proven on hardware**: K4 has never been observed closing on a real
-      board, and the bench cannot demonstrate a genuine heat-enable until the
-      safety thermocouple is populated (S5 latches without it)
+      thermocouple is declared absent or a trip is latched.
+      **Enable is now GRANTED on real hardware (2026-08-24)** — the
+      thermocouple is fitted, the stale S5 latch cleared, and the board
+      reports `heating enable granted`. ~~The bench cannot demonstrate a
+      genuine heat-enable until the safety thermocouple is populated~~ — that
+      blocker is gone.
+      **Still not proven**: K4 has never been *observed closing* on a real
+      board. "Enable granted" is the safety processor's permission, not
+      evidence that the contact moved; confirming that wants a meter or the
+      relay-status LEDs of M1. And note what granting it exposed —
+      `SaftyFW/TODO.md`'s "An uncommissioned safety processor grants heating
+      enable": permission is given while S1's absolute ceiling is disabled for
+      want of `abs_max_temp_c`
 - [x] Rule engine drives relays through the existing owner arbitration —
       `rules_task.c` claims `RELAY_OWNER_RULE` and never writes the SX1509
       directly, so precedence is PROFILE/AUTOTUNE > RULE > MANUAL. Fails safe

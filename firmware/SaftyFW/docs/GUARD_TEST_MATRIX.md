@@ -527,7 +527,7 @@ individually-verified reason — not "the same reason" repeated:
 | S10 | **Yes** (since `f304392`) | — | Same `context_valid` wiring as S2; `nearest_zone_measured_c` comes from `context_reduce_zones()`'s nearest-match search (never the mean). ~~Same as S2.~~ **And genuinely exercised, both directions**: `main_safety_skew`'s `s10_stays_quiet` (an +80 °C skew must stay under `tc_disagreement_c` = 200 °C) is a real anti-nuisance PASS, and `main_safety_disagree_s10.yaml` (2026-08-21) is the genuine-WARN case at +250 °C: `GUARD_WARN {S10}` measured 294.0 s after the fault fires. S10 is WARN-only (no `SAFETY_TRIP_*` case exists for it), so this is as far as "trip" can mean for this guard. |
 | S11 | **Yes** (since the `heat_commanded` wiring) | — | `heat_commanded` now comes from the same `any_current_present` value S3/S4/S6b already read (`current_task`'s real ADC0/1/2 snapshot via `current_any_present()`), named in `safety_core_build_input()` right after `.main_fault_asserted`. ~~Hardcoded `false` in `safety_core_build_input()` — its own comment: "no current sense yet, Phase 6."~~ Deliberately **not** wired from `relay_commanded_recently`/`_continuously` even though both also approximate "heat commanded": `safety_guards.h`'s own header comment requires this field stay link-independent (no `context_snapshot_t`-derived fact), matching `SAFETY_MODEL.md` §6's own S11/S13 audit note ("S11 reads neither [`link_up` nor `context_valid`]") and S11's place on the "keeps running with authority over K4 even when the main controller is unknown" list (§6) — `current_any_present` is real, independent hardware (its own ADC), never context-gated, exactly like S6b's own unconditional use of the same value. ~~Not yet provokable by `virtual_dut`: `sim_engine.c` gates CT current on K4, which never closes there.~~ **Provoked both directions since 2026-08-21**: `safety_tc_frozen.yaml` (fixed this pass, gained `operator_actions:`) trips for real — `GUARD_TRIP {S11}` measured 664.0 s after the freeze fault, with K4 closed and current flowing continuously from ~61 s onward. `safety_healthy_reading_s11.yaml` (new) is the anti-nuisance control: identical setup, no fault, run for a comparable ~650 s span — S11 never trips, because a live, unfaulted ADC reading is never bit-identical between ticks (measured, not asserted: `virtual_simfw`'s own MAX31856 emulation carries real noise/quantization). |
 | S12 | **Yes** | — | `cj_c` comes from the same real `thermo_task` snapshot as S1/S5/S11, with **no** `context_valid` or `link_up` gating at all — the guard's own code puts it before the context-gated block. ~~Not observed firing … `cj_fault.yaml` has no numeric fault offset~~ — that scenario-file gap was closed (`params: [70.0]`) and S12 has since been observed genuinely warning *and* tripping in `cj_fault`. |
-| S13 | **No** | `in->sample_counter_advancing` + `cfg->tc_source` | ~~Same as S2 (S13 is additionally gated on `cfg->tc_source` …).~~ `context_valid` no longer blocks it, but the two remaining blocks are both **commissioning gaps, not producer gaps** — the same category as S1's row above, and deliberately left that way by `f304392`. Deciding whether a zone's `sample_counter` advanced requires a commissioned `borrowed_zone_index` (0..2) naming *which* context zone is the borrowed channel; that field is documented (`SAFETY_MODEL.md` §3, `CONFIG_REFERENCE.md`) but exists nowhere in the codebase — no `config_store` field, no `safety_guard_cfg_t` field — so `safety_core_build_input()` leaves `sample_counter_advancing` false rather than hardcoding zone 0 and being silently wrong on any installation whose borrowed zone is not zone 0. Independently, `cfg->tc_source` defaults to `OWN_J7`, which `safety_guards.c` gates the whole S13 block on. |
+| S13 | **No** | `in->sample_counter_advancing` + `cfg->tc_source` | ~~Same as S2 (S13 is additionally gated on `cfg->tc_source` …).~~ `context_valid` no longer blocks it, but the two remaining blocks are both **commissioning gaps, not producer gaps** — the same category as S1's row above, and deliberately left that way by `f304392`. Deciding whether a zone's `sample_counter` advanced requires a commissioned `borrowed_zone_index` (0..2) naming *which* context zone is the borrowed channel; that field is documented (`SAFETY_MODEL.md` §3, `CONFIG_REFERENCE.md`) and **does exist in `config_store`** (`config_store.h:355`, `uint8_t borrowed_zone_index`, range-validated 0..2 and gated by `CONFIG_STORE_SET_BORROWED_ZONE_INDEX` in `config_params.c`) — **corrected 2026-08-24; this line previously said it existed nowhere, which would send a reader to build the whole field from scratch.** What is genuinely missing is one plumbing step: it has no `safety_guard_cfg_t` member (`grep borrowed_zone_index safety_guards.h` = 0 hits) and no guard reads it, so `safety_core_build_input()` leaves `sample_counter_advancing` false rather than hardcoding zone 0 and being silently wrong on any installation whose borrowed zone is not zone 0. Independently, `cfg->tc_source` defaults to `OWN_J7`, which `safety_guards.c` gates the whole S13 block on. |
 
 **2026-08-24 caveat on the S3/S9/S11/S6b `any_current_present` rows above:
 their "Yes" verdicts were established through `virtual_dut`, which
@@ -614,3 +614,105 @@ around them. Any future change to `safety_core_build_input()` must be
 mirrored there in the same commit, and any pure helper it gains should live
 in `snapshots.h` (or another SDK-free header) so the fixture can compile the
 real thing instead of copying it.
+
+---
+
+## 6a. The safety thermocouple was physically fitted (2026-08-24) — re-derivation
+
+**This section re-derives §6's table against one new fact, not against any
+code change.** On 2026-08-24 the safety processor's own MAX31856 and a real
+thermocouple were populated on `hardware/SaftyThermocoupleBoard/` for the
+first time and verified live over the link: `link up; heating enable
+granted; safety thermocouple valid | 30.20 C (CJ 28.08 C)`, status flags
+`0x21` = `LINK_UP | TEMP_VALID` (see `TODO.md`'s "An uncommissioned safety
+processor grants heating enable" for the full bench note — that finding is
+a separate, still-open question about `request_enable`/`calibration_
+missing` and is not re-litigated here). Nothing in `safety_guards.c` or
+`safety_core.c` changed on this date.
+
+**The masking mechanism §6 could not see, because it reads source, not
+runtime sequence.** `safety_guards_tick()`'s very first line is
+`if (state->is_tripped) { ... return false; }` — once ANY guard latches,
+every tick thereafter runs *only* the S9 escalation branch; no other
+guard's condition is evaluated again until a `CLEAR_TRIP` succeeds. With no
+safety TC ever physically present, `thermo_task`'s snapshot was permanently
+`tc_valid = false` / `spi_failed = true` from the first tick of every boot,
+so `s5_bad_read_now()` (`safety_guards.c`) was permanently true.
+`cfg.safety_tc_installed` defaults to `1` (installed —
+`config_store_default()`, `config_store.c`) and nothing on this bench had
+ever written it to `0` to declare the sensor absent, so `safety_tc_not_
+installed_declared` was false and the blind-grace escape hatch did **not**
+apply: S5 promoted to a real, permanently latched `SAFETY_TRIP_SENSOR_
+INVALID` roughly `blind_grace_s` (default 60 s) into every boot. **From
+that point on, no guard but S5 and S9 could ever be observed transitioning
+on the physical board** — not because their inputs were unwired (§6 already
+established most of them were), but because the tick function never
+reached their code again once S5 latched. This is the "masked but
+structurally reachable" state, and it is a different fact from "reachable"
+— a guard can be fully wired in source and still have never once run its
+own condition on real hardware.
+
+**`virtual_dut` was never affected by this, and nothing in §5's table
+changes today.** `virtual_simfw.c` always feeds a *simulated* MAX31856 with
+a valid reading unless a scenario explicitly injects a TC fault — it has no
+"sensor never fitted" mode, so it could not have this bug and could not
+have been blocked by it. §5's `virtual_dut` evidence for S2/S3/S4/S6b/S7/
+S9/S10/S11/S12 was always genuine software evidence; today's fix does not
+add to it.
+
+**What today's fix does change: real-hardware `--guards` runs.**
+`firmware/SimFW/docs/TEST_MANAGER.md` §2 describes `kilnsim testmgr
+--guards`, which attaches `kilnsim/guard_observer.py` to poll a real
+`SaftyFW` over `kilnctrl` and can, in principle, credit a guard with
+"hardware evidence obtained" from an actual bench run — not a `virtual_dut`
+simulation. Before today, any such run against this bench would have hit
+the same permanent S5 latch within ~60 s of boot and observed nothing else
+ever transition, regardless of `--guards` being attached correctly. That
+is no longer true: a `--guards` run against this bench can now, for the
+first time, potentially obtain real hardware evidence for S2, S3, S4, S6b,
+S7, S9, S10, S11 and S12 — the same set unmasked below — subject to each
+guard's own remaining gates (a live ESP context for S2/S10, current flowing
+for S3/S4/S9/S11, and so on). This has not been attempted as part of this
+pass (no hardware was touched); it is a now-open door, not a result.
+
+**The reachability table, re-derived:**
+
+| Guard | Masked by S5's permanent latch before today? | Reachable on real hardware now? | Still blocked on |
+|---|---|---|---|
+| S1 | Yes | **No** | `abs_max_temp_c == 0` (uncommissioned) — unrelated to the TC fit; `main_safety_skew`'s S1 clause stays `BLOCKED` in `SCENARIO_RESULTS.md` for exactly this reason |
+| S2 | Yes | **Yes**, given `tc_placement_mode == CHAMBER_AGREED` and a live ESP context with `zone_count > 0` | A live KilnFW context — not a SaftyFW-side gap |
+| S3 | Yes | **Yes**, given live current-sense + relay context | None on SaftyFW's side |
+| S4 | Yes | **Yes** (WARN only) | None |
+| S5 | — (was itself the masker) | **Yes** — now the graduated WARN→TRIP guard it was always designed to be, evaluated against a real reading instead of a permanent fault | None — this is the guard the hardware fit fixed directly |
+| S6a | Yes | Reachable on real hardware (wiring was already correct); still **not provokable through `virtual_dut`** (no I2C-expander/opto Fault-line emulation, §6 above) | A `SimFW` harness gap, unrelated to this fix |
+| S6b | Yes | **Yes** | None |
+| S7 | Yes | **Yes** | None |
+| S9 | Yes | **Yes** | Only meaningful once some other guard trips and K4 is commanded open |
+| S10 | Yes | **Yes**, same context/mode gating as S2 | Same as S2 |
+| S11 | Yes | **Yes**, needs `heat_commanded` (`any_current_present`) true for the full `frozen_window_s` | Current flowing — same as S3/S4/S9 |
+| S12 | Yes | **Yes** — `cj_c` is read ungated by context or link | None |
+| S13 | Yes | **No** | `borrowed_zone_index` IS in `config_store` (`config_store.h:355`, validated 0..2) but is never plumbed into `safety_guard_cfg_t`, so no guard can read it — a one-step plumbing gap, NOT a missing field; `tc_source` defaults to `OWN_J7`. Two independent commissioning gaps, unrelated to the TC fit — `tc_stuck`'s S13 clauses stay `BLOCKED` in `SCENARIO_RESULTS.md` for exactly this reason |
+| S8 | Would have been masked too, had it existed | **N/A — not implemented.** `safety_guards.c` has no S8 code at all (`safety_guards.h`: "NOT implemented here") | `max_rate_c_per_min` defaulting to 0 is a *design* "ships disabled" choice (`SAFETY_MODEL.md` §4, `CONFIG_REFERENCE.md` §2), not a missing wire — needs a measured kiln ramp before it can even be written |
+
+**Checked explicitly: does any other guard share S1's "0 means not
+commissioned, never trip" shape?** No. `safety_guards.c`'s `effective_f()`/
+`effective_u16()` substitute a real, documented default the instant any
+*other* threshold field is 0 — S5/S11/S12/S2/S3/S6b/S9/S10/S13's thresholds
+all do this (see the `_DEFAULT` macros at the top of that file).
+**`max_rate_c_per_min` (S8) is the one other field with the same
+deliberate "0 = disabled" shape**, but it disables an entire guard that has
+no implementation to gate, rather than leaving one threshold inside an
+otherwise-active guard unset. `tc_source` defaulting to `OWN_J7` (S13) and
+`tc_placement_mode` defaulting to `CHAMBER_AGREED` (S2/S10) are enum
+defaults, not the numeric "0/unset" convention, though `tc_source`'s default
+has the same practical effect of leaving S13 keyed to an uncommissioned
+choice.
+
+**Bottom line.** Today's hardware fit changes exactly one guard's behaviour
+(S5, which can now do its job instead of latching at ~60 s into every boot)
+and, as a direct consequence, un-masks eleven others (S2, S3, S4, S6a, S6b,
+S7, S9, S10, S11, S12, and S5 itself) that were always reachable in source
+but had never once run their own condition on this physical board. It
+commissions nothing: S1 and S13 remain exactly as blocked as
+`SCENARIO_RESULTS.md` already recorded, and S8 remains entirely
+unimplemented.
