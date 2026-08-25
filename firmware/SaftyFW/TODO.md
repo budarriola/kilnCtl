@@ -480,3 +480,88 @@ Recorded so these do not get re-proposed as oversights.
 - **No attempt to reconstruct duty cycle from the current signal.** With a 1 s
   peak-hold in front of the ADC the information is not recoverable; that is what
   `relay_recent_mask` is for.
+
+---
+
+## An uncommissioned safety processor grants heating enable
+
+**Found 2026-08-24, on hardware, the first time this board ever granted enable.
+Needs a decision, not a patch — it changes the safety contract, so it is
+written down rather than quietly fixed.**
+
+### What was observed
+
+The safety MAX31856 and its thermocouple were fitted. After a Pico reset (its
+SPI init runs at boot, so the IC has to be present before boot — see the
+bring-up note below), the board reported:
+
+```
+link up; heating enable granted; safety thermocouple valid | 30.20 C (CJ 28.08 C)
+```
+
+Heating enable was granted while the board reports `commissioned: false`.
+
+### Why that is not benign
+
+Three facts, each verified in the source rather than inferred:
+
+1. **`safety_core_request_enable()` never consults commissioning state.** It
+   refuses the ON direction for exactly two reasons: an active update
+   transfer, and `cfg_rec.safety_tc_installed == 0`. `calibration_missing` is
+   not among them (`src/tasks/safety_core.c`).
+2. **S1, the absolute over-temperature guard, is disabled when uncommissioned.**
+   `safety_guards.c` is explicit: *"`abs_max_temp_c == 0` means 'not
+   commissioned' -- never trip, and never accumulate a streak toward one"*.
+   That is deliberate and documented in `SAFETY_MODEL.md` §4, and correct as
+   an anti-nuisance rule in isolation.
+3. **`calibration_missing` gates nothing.** Its only consumer in the whole tree
+   is `KilnFW`'s `safety_cfg_http.c:191`, where it computes the `commissioned`
+   field for a web page. No heat interlock on either processor reads it.
+
+Together: the independent protection layer will permit heating with **no
+absolute temperature ceiling in force**. S8 (rate-of-rise) also ships disabled
+pending a measured ramp, so two of the temperature protections are inactive at
+once. `KilnFW`'s own zone `max_temp_c` (1300 °C) still applies, but that is the
+controller protecting against itself — precisely what the safety processor
+exists to not rely on.
+
+### The decision needed
+
+Should `safety_core_request_enable()` refuse the ON direction while
+`calibration_missing` is set?
+
+**Arguments for:** it is the rule `calibration_missing` appears to have been
+invented for; "uncommissioned means unsafe to heat" is the conservative
+reading; and it closes the gap at the one point that gates everything else.
+
+**Argument against, and it is a real cost:** it would make heating impossible
+on this bench until the four no-default section-1 fields are commissioned, and
+those need values only the kiln's owner can supply (element power, kiln and
+thermocouple maximum ratings, physical zone arrangement). Every bench test that
+needs enable would be blocked behind a commissioning pass. A `bench_preset`
+exists precisely because that trade was already felt once.
+
+**Not implemented either way.** Changing when a safety processor permits
+heating is not a drive-by edit, and the right answer depends on whether the
+bench must stay usable pre-commissioning.
+
+### Secondary finding: contradictory bookkeeping on `abs_max_temp_c`
+
+The commissioning API reports `abs_max_temp_c` as `set: true, value: 0`. The
+guard treats `0` as "not commissioned" regardless of the `set` flag, so
+behaviour is safe — but "set" and "holds the sentinel meaning unset" should not
+both be true of one field. Either the `fields_set` bit should not be set for a
+field still holding 0, or the API should not report a 0-valued
+no-default field as set. As it stands, a reader trusting `set` concludes the
+ceiling is commissioned when it is not.
+
+### Bring-up note worth keeping
+
+The safety MAX31856 must be present **before** the Pico boots: its SPI init
+runs once at startup, so an IC fitted under power reads as `safety TC invalid`
+until the Pico is reset, with no fault indication pointing at the real cause.
+A `debug_reset` over SWD is enough. Also note `watchdog_enable(..., true)` sets
+`pause_on_debug`, so an attached probe suspends the 1000 ms watchdog — a core
+in a fault state will sit there indefinitely under the debugger instead of
+being reset, which makes a debugger session look worse than the real
+untethered behaviour. Both already flagged in `docs/ARCHITECTURE.md` §8.
