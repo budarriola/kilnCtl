@@ -866,6 +866,66 @@ def debug_read_memory(peer: str, address: int, count: int = 1, width: int = 32,
 
 
 @_tool()
+def debug_read_symbol(peer: str, symbol: str, count: Optional[int] = None, width: int = 32,
+                      elf_path: Optional[str] = None, leave_halted: bool = False) -> str:
+    """Reads a named symbol from `peer`'s memory ("esp", "pico", or "sim" --
+    the SimFW bench fixture). Same as debug_read_memory() but resolves the
+    address from the peer's build ELF, so a counter or register image can be
+    read by name without looking up an address by hand.
+
+    `count` defaults to the symbol's whole recorded size at the requested
+    `width` (a 16-byte array reads as 16 bytes with width=8), or one word if
+    the ELF records no size.
+
+    Two caveats worth knowing before trusting the numbers:
+      - A symbol defined at more than one address (file-static objects of the
+        same name in different translation units -- SimFW has two `s_bus`) is
+        refused rather than resolved arbitrarily.
+      - This returns raw bytes and knows nothing about struct layout. Get a
+        member's offset from DWARF (`objdump --dwarf=info`); assuming offset 0
+        is how a correct register image was misread as garbage on 2026-08-25.
+    """
+    try:
+        ok, output = debug_probe.read_symbol(peer, symbol, count=count, width=width,
+                                             elf_path=elf_path, leave_halted=leave_halted)
+    except (ValueError, FileNotFoundError, RuntimeError) as exc:
+        return f"error: {exc}"
+    if ok:
+        return output.strip()
+    tail = "\n".join(output.strip().splitlines()[-25:])
+    return f"error: read_symbol failed for {peer}:\n{tail}"
+
+
+@_tool()
+def debug_list_symbols(peer: str, pattern: str, elf_path: Optional[str] = None, limit: int = 40) -> str:
+    """Lists symbols in `peer`'s build ELF whose name contains `pattern`
+    (case-insensitive substring, not a regex), with address and recorded size.
+    Use it to find what debug_read_symbol() can read -- e.g. pattern="g_dbg"
+    for SimFW's temporary bench counters.
+
+    A symbol shown as "AMBIGUOUS" is defined at several addresses in this ELF
+    and debug_read_symbol() will refuse it by name."""
+    try:
+        table = debug_probe.symbol_table(peer, elf_path)
+    except (ValueError, FileNotFoundError, RuntimeError) as exc:
+        return f"error: {exc}"
+    needle = pattern.lower()
+    hits = sorted(name for name in table if needle in name.lower())
+    if not hits:
+        return f"no symbol name contains {pattern!r}"
+    lines = []
+    for name in hits[:limit]:
+        address, size = table[name]
+        if address < 0:
+            lines.append(f"{name}: AMBIGUOUS (defined at multiple addresses)")
+        else:
+            lines.append(f"0x{address:08x}  size {size:5d}  {name}")
+    if len(hits) > limit:
+        lines.append(f"... and {len(hits) - limit} more (raise limit or narrow the pattern)")
+    return "\n".join(lines)
+
+
+@_tool()
 def debug_write_memory(peer: str, address: int, value: int, width: int = 32, confirm: bool = False) -> str:
     """Writes one `width`-bit (8/16/32) `value` at `address` in `peer`'s
     memory. Live RAM/flash-mapped memory write on a running board -- refused

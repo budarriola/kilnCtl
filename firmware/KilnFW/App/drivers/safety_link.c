@@ -2717,7 +2717,59 @@ esp_err_t safety_link_get_config_page(SafetyLinkClass *link, uint8_t page_index,
         ESP_LOGE(TAG, "get_config_page: timed out waiting for the safety link transaction lock");
         return ESP_ERR_TIMEOUT;
     }
-    (void)safety_drain_inbox(link, 0);
+
+    /* The pre-send drain CAPTURES a CONFIG_PAGE instead of discarding it.
+     *
+     * Every other call site here can safely clear the inbox before sending,
+     * because the reply it waits for is elicited by the request it is about
+     * to make. This one cannot: safety_cfg_store_maybe_refetch() re-issues
+     * GET_CONFIG_PAGE on every poll for as long as the cached CRC disagrees,
+     * so attempt N+1 begins while attempt N's reply is already sitting in the
+     * inbox. A blind drain here threw that reply away, then waited
+     * SAFETY_LINK_REPLY_TIMEOUT_MS for a fresh one and timed out because the
+     * Pico's answer to THIS request lands after the wait -- and was in turn
+     * discarded by attempt N+2. One initial slip becomes self-sustaining:
+     * measured 2026-08-25 as 91 CONFIG_PAGE frames received against 0
+     * successes and ~2 timeouts/s, permanently doubling the link's request
+     * load (sent +240 vs received +120 in 60 s). The Pico is innocent: its
+     * GET_CONFIG_PAGE handler answers in 578 us worst case (link_task.c's
+     * s_page_reply_us_max).
+     *
+     * A page already in the inbox is a reply to our own immediately-preceding
+     * identical request, so adopting it is correct, not stale -- but only if
+     * it is for the page index actually being asked for, hence the
+     * page_index check below. Anything else in the inbox is still drained
+     * (the drain runs to completion either way), and this adds no blocking
+     * at all: wait_ms stays 0. That last point is load-bearing -- two
+     * previous attempts at this bug extended how long safety_poll may block
+     * and put the ESP into a panic-reboot loop (task='safety_poll' at
+     * panic_abort), including one that capped a whole refetch at 2000 ms. Do
+     * not "fix" a residual timeout here by growing a budget.
+     *
+     * s_page_adopted_presend counts adoptions so this explanation stays
+     * falsifiable: if the count never leaves 0 while page fetches still time
+     * out, the mechanism above is NOT what is happening and this comment is
+     * wrong. */
+    static uint32_t s_page_adopted_presend;
+    uart_proto_message_t early_msg;
+    bool got_early = false;
+    (void)safety_drain_inbox_ex(link, 0, false, NULL, NULL, &early_msg, &got_early, NULL, NULL);
+    if (got_early) {
+        kilnlink_config_page_t early_page;
+        if (kilnlink_config_page_decode(early_msg.payload, early_msg.length, &early_page) ==
+                KILNLINK_CONFIG_PAGE_OK &&
+            early_page.page_index == page_index) {
+            s_page_adopted_presend++;
+            xSemaphoreGive(link->xact_lock);
+            ESP_LOGI(TAG, "get_config_page: adopted page %u already in the inbox (%u so far)",
+                     (unsigned)page_index, (unsigned)s_page_adopted_presend);
+            *out = early_page;
+            return ESP_OK;
+        }
+        ESP_LOGD(TAG, "get_config_page: dropped a queued CONFIG_PAGE that was not page %u",
+                 (unsigned)page_index);
+    }
+
     if (safety_lock(link)) {
         link->stats.frames_sent++;
         safety_unlock(link);

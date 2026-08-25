@@ -62,6 +62,11 @@ from . import openocd_util
 
 PEER_ESP = "esp"
 PEER_PICO = "pico"
+#: The SimFW bench fixture RP2040 (docs/BENCH_RUNBOOK.md section 1). A third
+#: peer rather than a mode of PEER_PICO because it is a physically different
+#: board reached through a physically different probe, and confusing the two
+#: means flashing the safety processor with fixture firmware.
+PEER_SIM = "sim"
 
 _MEM_WIDTH_READ_CMDS = {8: "mdb", 16: "mdh", 32: "mdw"}
 _MEM_WIDTH_WRITE_CMDS = {8: "mwb", 16: "mwh", 32: "mww"}
@@ -93,6 +98,14 @@ def _safty_fw_elf() -> str:
     return os.path.join(_safty_fw_root(), "build", "SaftyFW.elf")
 
 
+def _sim_fw_root() -> str:
+    return os.path.join(_repo_root(), "firmware", "SimFW")
+
+
+def _sim_fw_elf() -> str:
+    return os.path.join(_sim_fw_root(), "build", "SimFW.elf")
+
+
 @dataclass
 class PeerConfig:
     cfg_args: "list[str]"
@@ -109,6 +122,10 @@ class PeerConfig:
     # environment variable named in _PROBE_SERIAL_ENV below, for a bench where
     # the probe has been swapped for another unit.
     adapter_serial: Optional[str] = None
+    # `nm` for this peer's toolchain, used by resolve_symbol() to turn a symbol
+    # name into an address. Looked up on PATH; None means this peer has no
+    # symbol lookup wired up.
+    nm_tool: Optional[str] = None
 
 
 _PEERS = {
@@ -133,6 +150,24 @@ _PEERS = {
         # this one to `interface/cmsis-dap.cfg` alone. See adapter_serial's
         # comment on PeerConfig.
         adapter_serial="E66540F0A36C6E21",
+        nm_tool="arm-none-eabi-nm",
+    ),
+    PEER_SIM: PeerConfig(
+        cfg_args=["interface/cmsis-dap.cfg", "target/rp2040.cfg"],
+        default_elf=_sim_fw_elf,
+        adapter_speed_khz=5000,
+        root=_sim_fw_root(),
+        # The SECOND CMSIS-DAP probe on this bench, recorded 2026-08-25 (see
+        # docs/BENCH_RUNBOOK.md section 1 and PEER_PICO's serial just above).
+        # Both probes are the same VID:PID and report the same everything
+        # except this string, so leaving it unpinned would let a fixture flash
+        # land on the safety processor. Verified selectable: OpenOCD logs
+        # "Using CMSIS-DAPv2 interface with VID:PID=0x2e8a:0x000c,
+        # serial=E66540F0A38EA628" -- which settles BENCH_RUNBOOK.md's
+        # unresolved "this build cannot select by serial" note in favour of
+        # the optimistic reading, for this OpenOCD binary.
+        adapter_serial="E66540F0A38EA628",
+        nm_tool="arm-none-eabi-nm",
     ),
 }
 
@@ -140,8 +175,77 @@ _PEERS = {
 def resolve_peer(peer: str) -> PeerConfig:
     cfg = _PEERS.get(peer)
     if cfg is None:
-        raise ValueError(f"unknown peer {peer!r}, must be one of: {PEER_ESP!r}, {PEER_PICO!r}")
+        raise ValueError(
+            f"unknown peer {peer!r}, must be one of: {PEER_ESP!r}, {PEER_PICO!r}, {PEER_SIM!r}"
+        )
     return cfg
+
+
+#: Cache of (elf_path, mtime) -> {symbol: (address, size)}, so a burst of
+#: symbol reads in one debugging pass runs `nm` once instead of once per read.
+#: Keyed on mtime so a rebuild invalidates it automatically.
+_SYMBOL_CACHE: "dict[tuple[str, float], dict[str, tuple[int, int]]]" = {}
+
+
+def symbol_table(peer: str, elf_path: Optional[str] = None) -> "dict[str, tuple[int, int]]":
+    """Returns ``{symbol_name: (address, size_bytes)}`` for ``peer``'s ELF.
+
+    Uses ``nm -S``, so ``size_bytes`` is whatever the ELF records (0 for
+    symbols with no recorded size, which is normal for assembly labels).
+    Later definitions of a duplicated name overwrite earlier ones -- static
+    symbols of the same name in different translation units are genuinely
+    ambiguous here, so ``read_symbol()`` refuses those rather than guessing;
+    see its docstring."""
+    peer_cfg = resolve_peer(peer)
+    if peer_cfg.nm_tool is None:
+        raise ValueError(f"peer {peer!r} has no nm tool configured for symbol lookup")
+    elf = elf_path or peer_cfg.default_elf()
+    if not os.path.isfile(elf):
+        raise FileNotFoundError(f"ELF not found for symbol lookup: {elf}")
+    nm = shutil.which(peer_cfg.nm_tool)
+    if nm is None:
+        raise FileNotFoundError(
+            f"{peer_cfg.nm_tool} not found on PATH -- needed to resolve symbol names for peer {peer!r}"
+        )
+    key = (os.path.abspath(elf), os.path.getmtime(elf))
+    cached = _SYMBOL_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    proc = subprocess.run([nm, "-S", elf], capture_output=True, text=True, check=False)
+    if proc.returncode != 0:
+        raise RuntimeError(f"{peer_cfg.nm_tool} failed on {elf}: {proc.stderr.strip()[:400]}")
+
+    table: "dict[str, tuple[int, int]]" = {}
+    duplicates: "set[str]" = set()
+    for line in proc.stdout.splitlines():
+        parts = line.split()
+        # "addr size type name" (sized) or "addr type name" (unsized);
+        # undefined symbols have no address at all and are skipped.
+        if len(parts) == 4:
+            addr_s, size_s, _type, name = parts
+            size = int(size_s, 16)
+        elif len(parts) == 3:
+            addr_s, _type, name = parts
+            size = 0
+        else:
+            continue
+        try:
+            addr = int(addr_s, 16)
+        except ValueError:
+            continue
+        if name in table and table[name][0] != addr:
+            duplicates.add(name)
+        table[name] = (addr, size)
+    for name in duplicates:
+        # Recorded as an explicit ambiguity marker rather than silently
+        # resolving to whichever definition nm listed last: two file-static
+        # symbols sharing a name (SimFW has two `s_bus`, one per SPI bus) are
+        # different objects, and reading "the" s_bus would otherwise return a
+        # confidently wrong board state.
+        table[name] = (-1, 0)
+    _SYMBOL_CACHE[key] = table
+    return table
 
 
 def _openocd_exe_or_raise() -> str:
@@ -447,6 +551,43 @@ def read_memory(peer: str, address: int, count: int = 1, width: int = 32,
     select = f"targets {target}; " if target else ""
     tcl = f"{_adapter_prefix(peer_cfg)}init; {select}halt; {dump};{tail} exit"
     return _run(peer, tcl)
+
+
+def read_symbol(peer: str, symbol: str, count: Optional[int] = None, width: int = 32,
+                elf_path: Optional[str] = None,
+                leave_halted: bool = False) -> "tuple[bool, str]":
+    """Reads a named symbol out of ``peer``'s memory -- ``read_memory()`` with
+    the address looked up from the ELF instead of hand-computed.
+
+    ``count`` defaults to covering the symbol's whole recorded size at the
+    requested ``width`` (so a 16-byte register image reads as 16 bytes with
+    ``width=8``), or 1 word when the ELF records no size.
+
+    Refuses a symbol name that is defined at more than one address (two
+    file-static objects sharing a name): those are different objects and
+    picking one silently would produce a confidently wrong answer. Pass the
+    address to ``read_memory()`` directly if you know which one you want --
+    ``symbol_table()`` lists them.
+
+    Note this reads the symbol's raw bytes; it does NOT know struct layout. A
+    struct member's offset has to come from DWARF (``objdump --dwarf=info``),
+    not from here -- assuming a member sits at offset 0 is how a healthy
+    register image got misread as garbage on 2026-08-25."""
+    table = symbol_table(peer, elf_path)
+    entry = table.get(symbol)
+    if entry is None:
+        return False, f"symbol {symbol!r} not found in {elf_path or resolve_peer(peer).default_elf()}"
+    address, size = entry
+    if address < 0:
+        return False, (
+            f"symbol {symbol!r} is defined at more than one address in this ELF (file-static "
+            "in several translation units) -- resolve it yourself and call read_memory() with "
+            "the address you mean"
+        )
+    if count is None:
+        step = width // 8
+        count = max(1, size // step) if size else 1
+    return read_memory(peer, address, count=count, width=width, leave_halted=leave_halted)
 
 
 def write_memory(peer: str, address: int, value: int, width: int = 32) -> "tuple[bool, str]":
