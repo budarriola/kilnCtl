@@ -1760,3 +1760,85 @@ worst case. Only once real per-task figures exist should any of the six
 stacks above be resized, and the resize should update this entry with the
 measured numbers, the same way `dram_margin.h`'s own thresholds are kept
 current.
+
+---
+
+## 14. HTTP connection resets under concurrency — reproducible, cause NOT established
+
+**Status: measured, not diagnosed.** Written down because the symptom matches
+a failure this repo has already named, and the obvious attribution appears to
+be wrong. Anyone who assumes "connection reset" means "internal DRAM
+exhaustion" here will chase the wrong thing.
+
+**Reproducer** (board at 192.168.1.156, commit `d90986c`, ~1 hour uptime):
+
+```bash
+for i in $(seq 1 8); do
+  curl -s -o /dev/null -w "%{http_code} " --max-time 30 http://<board>/app.js &
+done; wait
+```
+
+**Measured: 9 failures in 80 requests (11.25%)**, ten rounds of eight, almost
+exactly one per round. The failure is always
+`curl: (56) Recv failure: Connection was reset`.
+
+### What is established
+
+| Observation | Result |
+|---|---|
+| 8 parallel `/app.js` | ~1 in 8 reset, reproducible over 10 rounds |
+| 4 parallel `/app.js` | 0 failures in 5 rounds |
+| 8 parallel `/status` (small response) | 0 failures |
+| Sequential `/app.js`, 6 in a row | 0 failures, all byte-identical, complete |
+| Timing of the failing request | **0.13 s — the FASTEST of the eight**, not the slowest |
+| `heap_internal.free` during the load | 23019–23127, essentially flat |
+| `heap_internal.largest_free_block` | 8704, unchanged under load |
+| `heap_internal.min_free` | 9955, **not moved by the load at all** |
+
+So it needs BOTH high concurrency AND a large response. Small responses at the
+same concurrency are fine; the same large response at half the concurrency is
+fine.
+
+### Two mechanisms RULED OUT
+
+- **Total internal-DRAM exhaustion.** `min_free` (9955) is untouched by the
+  load, and free internal heap stays flat at ~23 kB throughout. Whatever is
+  failing, the load is not driving the heap lower than it already went during
+  boot. This matters because `dram_margin.h` names this exact failure
+  signature, so the temptation to close this as "the known DRAM problem" is
+  strong and, on this evidence, unfounded.
+- **Worker serialisation hitting the 3 s socket timeout.** The failing request
+  fails FASTEST (~0.13 s) while all seven successes complete in 0.20–0.30 s.
+  Nothing is waiting 3 s, so `lru_purge_enable` ageing out a stalled
+  connection does not fit either, despite that being the mechanism
+  `wifi_provision_http.c`'s own socket-sizing comment describes.
+
+### Leading hypothesis, UNCONFIRMED
+
+`/app.js` is **8589 bytes** on the wire (gzip; 23737 decompressed).
+`largest_free_block` is **8704 bytes**. Those are 115 bytes apart. A
+per-connection buffer for that payload needs a contiguous block, and two
+concurrent ones cannot both come out of a single 8704-byte block — which would
+make this a *fragmentation* failure (largest-block bound), not a *total free*
+one, and would explain why only the large response fails and only under
+concurrency.
+
+This is a coincidence of two numbers, not a proof. To confirm or kill it:
+instrument the actual allocation on the send path and log the failing size,
+rather than reasoning from the two figures above.
+
+### Why it matters
+
+A browser loading a page issues several parallel requests, which is exactly
+the 4–8 range where this starts. Losing one asset is precisely how the
+originally-reported symptom ("the page says loading forever") presents. The
+2026-08-20 socket-pool fix raised `max_open_sockets` to 13 specifically to
+survive bursts, and 8 concurrent connections is well inside that — so this is
+not the cap being hit.
+
+### Correction to the record
+
+An earlier note in this session said the documented failure "does not
+reproduce". That was true for SEQUENTIAL fetches and false under concurrency,
+and the distinction was not drawn at the time. Sequential testing is not
+sufficient evidence that this class of failure is gone.
