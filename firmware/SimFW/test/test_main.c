@@ -34,6 +34,7 @@ void run_test_task_stats_encoding(void);
 void run_test_sim_engine_ring_drain_reset(void);
 void run_test_sim_engine_event_seq_monotonic(void);
 void run_test_virtual_simfw_port_drift_coverage(void);
+void run_test_active_channel_logic(void);
 
 int main(void)
 {
@@ -62,6 +63,7 @@ int main(void)
     run_test_sim_engine_ring_drain_reset();
     run_test_sim_engine_event_seq_monotonic();
     run_test_virtual_simfw_port_drift_coverage();
+    run_test_active_channel_logic();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     if (g_test_failures > 0) {

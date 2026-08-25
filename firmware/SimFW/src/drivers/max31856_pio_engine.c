@@ -324,11 +324,89 @@ static void irq_handler_pio1(void)
     poll_bus_rx(s_bus_for_pio_index[1]);
 }
 
-// Which channel on this bus currently has CS low? Exactly one can, which is
-// what SPI means; returns -1 if none does (a transaction that ended before
-// the load channel's IRQ could be serviced).
+// Which channel does the load channel's just-captured address word belong
+// to? Exactly one channel can be mid-transaction at a time, which is what
+// SPI means -- but "mid-transaction" must be judged by SOFTWARE's own
+// bookkeeping (bus->cs_low[]), not by re-reading the live GPIO, and the
+// difference is the root cause of the 2026-08-25 bug where transactions
+// stuck at 0 and register writes landed one register late.
+//
+// THE BUG THIS REPLACES (bench evidence, safety bus / bus B, 4 MHz,
+// continuous master reads): spi_transactions stayed at 0 (occasionally +1)
+// while spi_protocol_errors climbed by hundreds, and a 4-write configure()
+// burst (CR0, CR1, MASK, CR0) landed as CR0=0x10 CR1=0x81 MASK=0x23 instead
+// of CR0=0x90 CR1=0x23 MASK=0xFC -- i.e. write 2's own ADDRESS byte (0x81)
+// ended up applied as DATA to write 1's auto-incremented address, one
+// register late, and writes 3-4 vanished. That is exactly what happens when
+// handle_load_done() bails out via `chan < 0` for the CURRENT transaction: no
+// sniff channel gets armed for it (sniff_arm() lives inside handle_load_done()'s
+// caller only via the CS-rise teardown, but the register-model open/close
+// that makes the address byte MEAN something also lives here), so that
+// transaction's address+data bytes fall through to drain_channel_rx() as
+// plain data, applied at whatever address the model's auto-increment
+// pointer was already sitting on.
+//
+// WHY THE OLD gpio_get() CHECK CAUSED THE BAIL: handle_load_done() runs on
+// DMA_IRQ_0, which the ORDERING comment in gpio_cs_callback's CS-rise branch
+// established shares the SAME NVIC priority as the GPIO CS-edge IRQ and
+// therefore cannot preempt it -- a DMA_IRQ_0 that becomes pending while that
+// GPIO handler is running stays PENDING until the handler returns. That GPIO
+// handler does real, non-trivial MMIO work per CS-rise (data_stop()'s
+// busy-wait DMA abort, several PIO SM control-register writes in tx_reset()).
+// A MAX31856 register write is just two bytes -- about 4 us total at 4 MHz --
+// so a configure() burst of four single-byte writes with tight inter-
+// transaction gaps can easily have transaction N+1's CS already RISEN again
+// on the wire before this handler, still queued behind transaction N's
+// teardown, finally runs. gpio_get() at that point reads the truth as of
+// NOW, not as of when the DMA event fired: it sees CS high, active_channel()
+// returns -1, and this function silently drops a transaction whose address
+// byte the sniff/load DMA chain had already captured correctly. Nothing
+// downstream ever finds out; the CPU-side bookkeeping (txn_open, the
+// register-model's cs_assert()/address pointer, stats[].transactions) simply
+// never runs for that transaction, but its bytes are still sitting in the RX
+// FIFO (the sniff-consumed address byte is gone for good; only the data
+// byte(s) remain) waiting to be misapplied whenever they eventually get
+// drained under a stale, unrelated open/address state.
+//
+// THE FIX: use bus->cs_low[], not the live pin. It is set true at the CS
+// FALLING edge (gpio_cs_callback's fast, non-blocking branch -- nothing slow
+// runs before that flag is set) and cleared only at the end of THAT SAME
+// channel's own CS-rising teardown, step 5, which runs strictly after any
+// handle_load_done() call for that channel's OWN transaction has already had
+// its chance to run (again, the same-priority/no-preemption argument). So
+// unlike the live pin, cs_low[] answers "does software still consider this
+// channel's transaction open", which is exactly what this function needs,
+// and it does not change value out from under a delayed reader the way the
+// physical pin can.
+//
+// Multi-channel buses (bus A) can, in principle, have two candidates: the
+// channel that just ended (cs_low[] not yet cleared by its own delayed
+// teardown) and a channel whose CS has already fallen for a new transaction
+// (cs_low[] just set, promptly, by the quick falling-edge branch). Prefer a
+// candidate whose live pin ALSO reads low -- that disambiguates in favour of
+// whichever transaction is genuinely in flight RIGHT NOW; if none does (the
+// delayed-teardown case this fix targets), fall back to the first cs_low[]
+// candidate, which is what makes the single-channel bus-B case (no
+// ambiguity possible) unconditionally correct. If no channel's cs_low[] is
+// set at all -- the pre-existing "missed the falling edge entirely" case the
+// old code's own comment already anticipated -- fall back to the live pin as
+// a last resort so that belt-and-braces behaviour is not lost.
 static int active_channel(const max31856_pio_bus_t *bus)
 {
+    int fallback = -1;
+    for (uint8_t i = 0; i < bus->channel_count; i++) {
+        if (bus->cs_low[i]) {
+            if (fallback < 0) {
+                fallback = (int)i;
+            }
+            if (gpio_get(bus->cs_gpio[i]) == 0) {
+                return (int)i;
+            }
+        }
+    }
+    if (fallback >= 0) {
+        return fallback;
+    }
     for (uint8_t i = 0; i < bus->channel_count; i++) {
         if (gpio_get(bus->cs_gpio[i]) == 0) {
             return (int)i;
