@@ -601,6 +601,24 @@ def run_one_scenario(
     # thermal/relay state a PREVIOUS scenario left armed.
     try:
         link.send_command(CommandGroup.SYS, SysCmd.RESET_SIM, {"keep_params": False})
+        # Resetting the DEVICE is only half of a known state. The PC's own
+        # EVT buffer is filled by the RX thread the moment a frame arrives
+        # and knows nothing about scenario boundaries, so a frame still in
+        # flight when the previous scenario ended lands there just after its
+        # trailing zero-timeout drain -- and this run's first poll would
+        # collect it as one of its own. Found on hardware 2026-08-24:
+        # fixture_fault_lifecycle saw seqs [0, 1, 7], the 7 belonging to the
+        # scenario before it. Since a wire seq restarts at 0 on every
+        # RESET_SIM, a straggler is indistinguishable from a same-run event
+        # after the fact, so this must be dropped here rather than filtered
+        # later. Fourth defect in this event ring from one family: state
+        # reset on one side of a producer/consumer pair but not the other.
+        dropped = link.discard_buffered_events()
+        if dropped:
+            reset_note = (f" [{dropped} stale event(s) from a previous run "
+                           "discarded at reset]")
+        else:
+            reset_note = ""
     except SimLinkError as exc:
         return ScenarioOutcome(
             name=scenario.name, path=path, exercises=list(scenario.exercises),
@@ -677,6 +695,14 @@ def run_one_scenario(
     duration = time.monotonic() - t0
 
     detail = enable_note
+    # Surface a discarded straggler rather than swallowing it. The discard
+    # itself is correct, but "the previous scenario's events were still
+    # arriving when this one started" is a fact worth seeing in a report --
+    # it is the observable symptom of a scenario whose trailing drain ran
+    # early, and a suite where it appears on every row is telling you
+    # something about run pacing, not about this scenario.
+    if reset_note:
+        detail = f"{detail}{reset_note}" if detail else reset_note.strip()
     gap_note = describe_runner_gap(req, report.verdict)
     if gap_note:
         detail = f"{detail}; {gap_note}" if detail else gap_note

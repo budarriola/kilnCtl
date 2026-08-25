@@ -181,6 +181,35 @@ class SimLink(abc.ABC):
         none are buffered yet. Never blocks longer than that. Returns []
         on timeout, not an error -- "no events yet" is normal."""
 
+    def discard_buffered_events(self) -> int:
+        """Throw away every EVT frame currently buffered, returning how many
+        were dropped, WITHOUT returning them to anyone.
+
+        Exists because EVT frames are buffered by the RX thread the instant
+        they arrive, on a connection-lifetime buffer that knows nothing about
+        scenario boundaries. A scenario's trailing drain is a zero-timeout
+        sweep, so an EVT frame still in flight when a run ends lands in the
+        buffer just after it -- and is then swept up by the NEXT scenario's
+        first poll and reported as one of ITS events.
+
+        That was not theoretical: it is how ``fixture_fault_lifecycle`` came
+        to see seqs [0, 1, 7] under ``kilnsim testmgr`` (2026-08-24), the 7
+        being a straggler from the previous scenario's epoch. And because a
+        wire seq restarts at 0 on every ``SYS/RESET_SIM``, the two are
+        genuinely indistinguishable after the fact -- a stray event can be
+        attributed to a run it did not belong to, which is worse than the
+        sequence gap that happened to expose it here.
+
+        Call this once a run's own RESET_SIM is acknowledged, so what the
+        scenario collects starts empty. A residual race remains, of the few
+        milliseconds between this call and the first scheduling command; it
+        is bounded and documented rather than closed.
+
+        The default drains and drops via :meth:`read_events`, which is
+        correct for every SimLink; the framed transports override it to swap
+        the buffer without touching the condition variable."""
+        return len(self.read_events(timeout=0.0))
+
     def send_command_expect_reboot(self, group: CommandGroup, cmd: int, payload: Optional[dict] = None,
                                     timeout: Optional[float] = None) -> Optional[dict]:
         """For a command whose SUCCESS path never sends a reply at all
@@ -555,6 +584,16 @@ class _FramedSimLink(SimLink):
                 self._events_cv.wait(timeout=timeout)
             out, self._events[:] = self._events[:], []
             return out
+
+    def discard_buffered_events(self) -> int:
+        """See :meth:`SimLink.discard_buffered_events`. Swaps the buffer
+        directly instead of going through read_events(), so this never waits
+        on the condition variable -- discarding is not a read, and must not
+        block for an event that has not arrived."""
+        with self._events_cv:
+            n = len(self._events)
+            self._events[:] = []
+            return n
 
 
 # ---------------------------------------------------------------------------
