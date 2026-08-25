@@ -562,6 +562,7 @@ def cmd_testmgr(args) -> int:
         report = _testmgr.run_suite(
             link, scenarios_dir,
             quick=args.quick, mock=args.mock, virtual=virtual, port=args.port,
+            esp_port=getattr(args, "esp_port", None),
             fixture_address=fixture_address,
             guards=args.guards,
         )
@@ -803,6 +804,16 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--json", action="store_true", help="machine-readable report instead of a text summary")
     sp.add_argument("--scenarios-dir", default=None,
                      help="override the scenario directory (default: firmware/SimFW/scenarios)")
+    sp.add_argument(
+        "--esp-port", default=None,
+        help="serial port of the ESP32-S3 (KilnFW), for the tier-1/tier-2 presence probe. "
+             "This is a DIFFERENT device from the fixture: --port names the SimFW fixture, "
+             "--esp-port names the ESP. Default None lets kilnctrl auto-detect it. Before "
+             "this existed the probe was handed --port, so it tried to open the fixture's "
+             "own port -- which kilnsim already holds -- and every run that passed --port "
+             "reported the ESP absent, naming the wrong device, and could never reach tier "
+             "1 or 2.",
+    )
     sp.add_argument(
         "--guards", action=argparse.BooleanOptionalAction, default=False,
         help="attach a real kilnsim.guard_observer.SafetyGuardObserver to every scenario run "

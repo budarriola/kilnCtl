@@ -1007,6 +1007,7 @@ def run_suite(
     mock: bool = False,
     virtual: bool = False,
     port: Optional[str] = None,
+    esp_port: Optional[str] = None,
     fixture_address: Optional[str] = None,
     fixture_probe: "Optional[Callable[[SimLink, Optional[str]], PresenceResult]]" = None,
     esp_saftyfw_probe: "Optional[Callable[[], tuple[PresenceResult, PresenceResult]]]" = None,
@@ -1131,7 +1132,20 @@ def run_suite(
             )
             esp_saftyfw_probe = lambda: (na, na)  # noqa: E731
         else:
-            esp_saftyfw_probe = lambda: default_esp_and_saftyfw_probe(port)  # noqa: E731
+            # `esp_port`, NOT `port`. Found on real hardware 2026-08-24:
+            # `port` is the FIXTURE's serial port, and handing it to the ESP
+            # probe made it try to open the port kilnsim itself already
+            # holds -- so a real run reported
+            #   ESP: absent -- could not open port 'COM13':
+            #        PermissionError(13, 'Access is denied.')
+            # naming the fixture's own port. Two failures in one: tier 1 and
+            # tier 2 could never be reached on any run that passed --port,
+            # and the stated reason pointed at the wrong device entirely,
+            # which is worse than a bare "absent" because it sends whoever
+            # reads it to debug a cable that was fine. The ESP is a separate
+            # device on a separate port; None lets kilnctrl auto-detect it,
+            # which is what it does everywhere else.
+            esp_saftyfw_probe = lambda: default_esp_and_saftyfw_probe(esp_port)  # noqa: E731
     request_enable_fn_factory = request_enable_fn_factory or make_request_enable_fn
     guard_observer_factory = guard_observer_factory or default_guard_observer_factory
 
