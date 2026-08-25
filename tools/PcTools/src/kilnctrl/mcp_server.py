@@ -758,6 +758,7 @@ def get_openocd_status() -> str:
     for peer, label, elf_fn in (
         (debug_probe.PEER_ESP, "esp (KilnFW)", debug_probe._kiln_fw_elf),
         (debug_probe.PEER_PICO, "pico (SaftyFW)", debug_probe._safty_fw_elf),
+        (debug_probe.PEER_SIM, "sim (SimFW bench fixture)", debug_probe._sim_fw_elf),
     ):
         elf = elf_fn()
         present = "found" if os.path.isfile(elf) else "MISSING -- pass elf_path explicitly or build first"
@@ -767,16 +768,25 @@ def get_openocd_status() -> str:
 
 @_tool()
 def debug_program(peer: str, elf_path: Optional[str] = None, confirm: bool = False) -> str:
-    """Flashes an ELF to `peer` ("esp" or "pico") over OpenOCD and resets it.
+    """Flashes an ELF to `peer` ("esp", "pico", or "sim") over OpenOCD and resets it.
     Writes flash on a live board -- refused unless `confirm=True` is passed
     explicitly (tools/PcTools/TODO.md's "flash writes require an explicit
     confirm" guard rail).
 
-    Uses the peer's default build output (KilnFW/build/KilnCtrl.elf or
-    SaftyFW/build/SaftyFW.elf) unless `elf_path` is given. For the ESP,
-    prefer flash_firmware() instead -- it flashes the full three-image set
-    (bootloader/partition-table/app) this tool does not; this generic path is
-    mainly for the Pico (SaftyFW ships one plain ELF, no bootloader)."""
+    Uses the peer's default build output (KilnFW/build/KilnCtrl.elf,
+    SaftyFW/build/SaftyFW.elf or SimFW/build/SimFW.elf) unless `elf_path` is
+    given. For the ESP, prefer flash_firmware() instead -- it flashes the full
+    three-image set (bootloader/partition-table/app) this tool does not; this
+    generic path is for the two RP2040s, which each ship one plain ELF with no
+    bootloader.
+
+    peer="sim" is the SimFW bench fixture, reached through the SECOND
+    CMSIS-DAP probe on this bench. Both probes are the same VID:PID, so the
+    peer's serial is pinned in debug_probe.py -- that pin is what stops a
+    fixture flash from landing on the safety processor, so do not work around
+    it by unsetting the serial. Note SimFW busy-waits through main.c's 14-stage
+    boot beacon (~40 s) before starting its scheduler, so it is not ready to
+    answer the instant this returns."""
     if not confirm:
         return "error: flash write refused without confirm=True -- this writes flash on a live board"
     ok, output = debug_probe.program(peer, elf_path)
