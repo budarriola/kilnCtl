@@ -558,6 +558,39 @@ static volatile uint32_t s_config_page_pre_broadcast_count = 0;
 // `volatile` for the same reason as the block above (nothing reads these
 // back in firmware, only SWD). Safe to delete once this is settled --
 // purely diagnostic, no effect on behavior.
+/* GET_CONFIG_PAGE service latency, in microseconds, measured 2026-08-25.
+ *
+ * WHY THIS EXISTS. safety_cfg_store_refetch() on the ESP has been failing with
+ * ESP_ERR_TIMEOUT on every attempt for days, and the reason had been recorded
+ * as safety_drain_inbox_ex() collapsing its wait to zero when an unrelated
+ * broadcast arrived first. That bug is real but was FIXED on 2026-08-23, and
+ * the failure outlived the fix, so that explanation is now stale.
+ *
+ * What the bench actually shows is stranger: over a 45 second window the ESP
+ * RECEIVED 91 CONFIG_PAGE frames while reporting a timeout for every single
+ * attempt. So the Pico answers and the ESP discards the answer as late. Its
+ * budget is SAFETY_LINK_REPLY_TIMEOUT_MS, about 146 ms at 230400 baud, of
+ * which the wire time for a 189-byte stuffed frame is only about 8 ms. That
+ * leaves roughly 138 ms unaccounted for, and the only place it can be spent is
+ * on this side.
+ *
+ * These three numbers close that gap with a measurement instead of an
+ * argument. The bracket is around the dispatch of the handler, so it covers
+ * building the page and handing the frame to uart_owner_send() -- i.e. exactly
+ * the part of the latency this firmware owns. It does NOT cover time the
+ * finished frame then spends queued in the TX ring behind other traffic, which
+ * is the other candidate and is governed by log_task.c's
+ * LOG_TX_RESERVE_FRACTION. If these read small, the delay is queueing and that
+ * fraction is the thing to re-derive; if they read large, the handler itself is
+ * slow and the fraction is innocent. Deciding that without measuring is
+ * precisely what LOG_TX_RESERVE_FRACTION's own comment forbids.
+ *
+ * volatile and read only over SWD, same pattern as the diagnostic block below.
+ * Purely observational: no behaviour depends on them. */
+static volatile uint32_t s_page_reply_us_last = 0;
+static volatile uint32_t s_page_reply_us_max = 0;
+static volatile uint32_t s_page_reply_samples = 0;
+
 static volatile uint32_t s_diag_dispatch_accepted_count = 0;
 static volatile uint32_t s_diag_get_config_page_seen_count = 0;
 static volatile uint32_t s_diag_get_config_page_handled_count = 0;
@@ -2047,7 +2080,19 @@ static void link_task_handle_raw_frame(const uint8_t *stuffed, size_t stuffed_le
         s_diag_get_config_page_seen_count++; // 2026-08-23 diagnostic -- counts regardless of length match
         if (frame.length == KILNLINK_GET_CONFIG_PAGE_LEN) {
             s_diag_get_config_page_handled_count++; // 2026-08-23 diagnostic
-            link_task_handle_get_config_page(&frame);
+            // 2026-08-25 measurement, see s_page_reply_us_max's declaration:
+            // brackets the handler so the ESP-observable service latency for
+            // this one command can be read as a number instead of inferred.
+            {
+                uint32_t t0 = time_us_32();
+                link_task_handle_get_config_page(&frame);
+                uint32_t dt = time_us_32() - t0;
+                s_page_reply_us_last = dt;
+                if (dt > s_page_reply_us_max) {
+                    s_page_reply_us_max = dt;
+                }
+                s_page_reply_samples++;
+            }
         }
         break;
     // Phase 10 -- thin dispatch only, matching PUSH_CONTEXT's own one-line
