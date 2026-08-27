@@ -251,6 +251,35 @@ static esp_err_t ota_page_get_handler(httpd_req_t *req)
                             (size_t)(ota_page_html_gz_end - ota_page_html_gz_start));
 }
 
+/* snprintf() returns the length it WOULD have written, not what it did. Passing
+ * that straight to httpd_resp_send() as the body length means that the moment a
+ * response truncates, the server reads past the end of the local buffer and
+ * sends whatever is next on the stack to the client. Every JSON responder in
+ * this file used to do exactly that (TODO.md: "fifteen sites use snprintf's
+ * return unclamped at the high end"), and several of them interpolate strings
+ * that are not this module's own -- a Pico relay's last_error, an image's
+ * version -- so the length is not always something a reader can bound by
+ * inspection.
+ *
+ * Truncating is the right answer rather than 500ing: these are status readouts,
+ * a short one is still useful, and the caller has already decided the operation
+ * succeeded. The log line is there so an undersized buffer surfaces rather than
+ * silently shipping half a document forever. */
+static esp_err_t send_json_clamped(httpd_req_t *req, const char *buf, int n, size_t cap)
+{
+    if (n < 0) {
+        ESP_LOGE(TAG, "response formatting failed");
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "response formatting failed");
+        return ESP_OK;
+    }
+    size_t len = (size_t)n;
+    if (len >= cap) {
+        ESP_LOGE(TAG, "response did not fit in %u bytes -- truncated, raise the buffer", (unsigned)cap);
+        len = cap - 1;
+    }
+    return httpd_resp_send(req, buf, len);
+}
+
 static esp_err_t ota_challenge_get_handler(httpd_req_t *req)
 {
     uint8_t rand_bytes[OTA_AUTH_NONCE_LEN];
@@ -280,7 +309,7 @@ static esp_err_t ota_challenge_get_handler(httpd_req_t *req)
     ESP_LOGI(TAG, "OTA challenge issued to %s", ip);
 
     httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, json, n);
+    send_json_clamped(req, json, n, sizeof(json));
     return ESP_OK;
 }
 
@@ -1095,7 +1124,7 @@ cleanup:
         int n = snprintf(body, sizeof(body), "{\"ok\":true,\"bytes\":%u,\"partition\":\"%s\",\"version\":\"%s\"}",
                           (unsigned)content_len, target->label, version_after);
         httpd_resp_set_type(req, "application/json");
-        httpd_resp_send(req, body, n);
+        send_json_clamped(req, body, n, sizeof(body));
     }
     // On failure, the specific httpd_resp_send_err() call above (at
     // whichever goto fired) has already sent the response -- nothing left
@@ -1369,7 +1398,7 @@ static void ota_pico_do_stage(httpd_req_t *req, const char *ip)
                           (unsigned)written, (unsigned)crc);
         httpd_resp_set_status(req, "202 Accepted");
         httpd_resp_set_type(req, "application/json");
-        httpd_resp_send(req, body, n);
+        send_json_clamped(req, body, n, sizeof(body));
     }
 
 cleanup:
@@ -1570,7 +1599,7 @@ static esp_err_t ota_esp_status_get_handler(httpd_req_t *req)
                       recovery_mode ? "true" : "false");
     }
     httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, body, n);
+    send_json_clamped(req, body, n, sizeof(body));
     return ESP_OK;
 }
 
@@ -1828,7 +1857,7 @@ static esp_err_t ota_esp_rollback_post_handler(httpd_req_t *req)
     int n = snprintf(body, sizeof(body), "{\"ok\":true,\"status\":\"rebooting\",\"version_before\":\"%s\"}",
                       version_before);
     httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, body, n);
+    send_json_clamped(req, body, n, sizeof(body));
 
     // The mutex is intentionally left held across the reboot -- there is no
     // "release it after the transfer" moment here the way ota_esp_do_
@@ -1880,7 +1909,7 @@ static esp_err_t ota_interlock_get_handler(httpd_req_t *req)
                      r == OTA_INTERLOCK_REFUSED_NEEDS_ACK ? "true" : "false");
     }
     httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, body, n);
+    send_json_clamped(req, body, n, sizeof(body));
     return ESP_OK;
 }
 
@@ -1932,7 +1961,7 @@ static esp_err_t ota_pico_status_get_handler(httpd_req_t *req)
                       ota_pico_relay_phase_str(st.phase), (unsigned)st.percent, st.last_error);
     }
     httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, body, n);
+    send_json_clamped(req, body, n, sizeof(body));
     return ESP_OK;
 }
 
