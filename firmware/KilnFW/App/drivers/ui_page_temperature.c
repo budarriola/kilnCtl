@@ -57,6 +57,13 @@ static const char *TAG = "ui_page_temperature";
 
 #define UI_PAGE_TEMPERATURE_REFRESH_MS 1000
 
+/* Relays are numbered from 0 for the operator, matching the thermocouple and
+ * zone numbering used everywhere else on this page and on the web UI -- this
+ * page previously read "Zone 0 / Relay 1", "Zone 1 / Relay 2", two schemes one
+ * line apart. Only the LABEL changes: kiln_io/dashboard_set_relay still take
+ * the 1-based board index, so the conversion happens here and nowhere else. */
+#define UI_RELAY_DISPLAY(one_based) ((unsigned)((one_based) - 1u))
+
 /* UI_PLAN.md section 3, LCD item 2: relay_row used to be LV_SIZE_CONTENT
  * (build_zone_row()'s comment below), so a zone with several relays wrapping
  * onto a second/third button row grew the card's -- and therefore the whole
@@ -238,30 +245,30 @@ static void relay_toggle_cb(lv_event_t *e)
         msg[0] = '\0';
         break;
     case DASHBOARD_RELAY_ERR_NO_BOARD:
-        snprintf(msg, sizeof(msg), "Relay %u: no relay board attached", (unsigned)ctx->relay_index);
+        snprintf(msg, sizeof(msg), "Relay %u: no relay board attached", UI_RELAY_DISPLAY(ctx->relay_index));
         break;
     case DASHBOARD_RELAY_ERR_RANGE:
         /* Should not happen -- ctx->relay_index is always a valid
          * board-wide relay index built from KILN_IO_RELAY_COUNT below --
          * but handled rather than assumed unreachable. */
-        snprintf(msg, sizeof(msg), "Relay %u: out of range", (unsigned)ctx->relay_index);
+        snprintf(msg, sizeof(msg), "Relay %u: out of range", UI_RELAY_DISPLAY(ctx->relay_index));
         break;
     case DASHBOARD_RELAY_ERR_OWNED:
-        snprintf(msg, sizeof(msg), "Relay %u refused -- owned by a running profile", (unsigned)ctx->relay_index);
+        snprintf(msg, sizeof(msg), "Relay %u refused -- owned by a running profile", UI_RELAY_DISPLAY(ctx->relay_index));
         break;
     case DASHBOARD_RELAY_ERR_SAFETY:
-        snprintf(msg, sizeof(msg), "Relay %u refused -- safety fault 0x%02X", (unsigned)ctx->relay_index,
+        snprintf(msg, sizeof(msg), "Relay %u refused -- safety fault 0x%02X", UI_RELAY_DISPLAY(ctx->relay_index),
                  (unsigned)sources);
         break;
     case DASHBOARD_RELAY_ERR_UPDATING:
         /* 2026-08-21: distinct from ERR_SAFETY above -- nothing is faulted,
          * a firmware update is in progress (dashboard_http.h's
          * DASHBOARD_RELAY_ERR_UPDATING comment). */
-        snprintf(msg, sizeof(msg), "Relay %u refused -- firmware update in progress", (unsigned)ctx->relay_index);
+        snprintf(msg, sizeof(msg), "Relay %u refused -- firmware update in progress", UI_RELAY_DISPLAY(ctx->relay_index));
         break;
     case DASHBOARD_RELAY_ERR_IO_FAIL:
     default:
-        snprintf(msg, sizeof(msg), "Relay %u: command failed", (unsigned)ctx->relay_index);
+        snprintf(msg, sizeof(msg), "Relay %u: command failed", UI_RELAY_DISPLAY(ctx->relay_index));
         break;
     }
 
@@ -416,7 +423,7 @@ static void build_zone_row(lv_obj_t *parent, uint8_t zone_index)
             lv_obj_t *dup = lv_label_create(relay_row);
             lv_obj_set_style_text_color(dup, UI_THEME_COLOR_TEXT_SECONDARY, 0);
             char buf[24];
-            snprintf(buf, sizeof(buf), "Relay %u (shared)", (unsigned)(r + 1));
+            snprintf(buf, sizeof(buf), "Relay %u (shared)", (unsigned)r);
             lv_label_set_text(dup, buf);
             continue;
         }

@@ -671,6 +671,19 @@ static esp_err_t provision_post_handler(httpd_req_t *req)
 static esp_err_t captive_portal_404_handler(httpd_req_t *req, httpd_err_code_t err)
 {
     (void)err;
+    /* The captive-portal redirect is for BROWSERS. An unknown /api/ path is a
+     * programmatic client that asked for JSON, and redirecting it to "/"
+     * answered with 200 and 90 kB of dashboard HTML -- so a typo in an
+     * endpoint name looks like a successful request returning unparseable
+     * data, instead of the 404 that would name the mistake. No OS
+     * connectivity probe uses an /api/ path, so exempting the prefix costs
+     * the portal nothing. */
+    if (strncmp(req->uri, "/api/", 5) == 0) {
+        httpd_resp_set_status(req, "404 Not Found");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"no such endpoint\"}");
+        return ESP_OK;
+    }
     httpd_resp_set_status(req, "302 Found");
     httpd_resp_set_hdr(req, "Location", "/");
     httpd_resp_send(req, NULL, 0);

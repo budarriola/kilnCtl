@@ -210,6 +210,16 @@ typedef struct {
 
     bool     faulted;         /* this zone's own per-zone guard trip */
     bool     per_zone_blocked; /* true if this run set relay_authority_set_zone_blocked() for it */
+    /* Last relay_authority_zone_blocked() answer for this zone, refreshed
+     * every tick that wanted heat. Reported over GET /api/profile_exec and
+     * logged on the edge, because a run that is blocked from its very first
+     * tick used to produce no evidence anywhere: apply_relay()'s "forced off"
+     * warning only fires when a relay was ALREADY on, so a firing that never
+     * energized anything sat at duty 0.0, faulted=false, state "running",
+     * with a target climbing convincingly for as long as anyone watched it.
+     * Observed on the bench doing exactly that for two minutes. */
+    bool     heat_blocked;
+    uint32_t heat_blocked_sources;
     char     fault_reason[96];
     thermal_guard_trip_t fault_guard;
 
@@ -456,10 +466,24 @@ static void apply_relay(uint8_t zi, bool want_on)
 
     if (want_on) {
         uint32_t sources = 0;
-        if (relay_authority_zone_blocked(s_exec.safety, zi, &sources)) {
-            if (s_exec.zones[zi].relay_commanded_on) {
-                ESP_LOGW(TAG, "zone %u relay(s) forced off: blocked, sources 0x%02X", zi, (unsigned)sources);
+        bool blocked = relay_authority_zone_blocked(s_exec.safety, zi, &sources);
+        /* Log on the EDGE of the block, not on the edge of an energized relay.
+         * The old condition was `relay_commanded_on`, i.e. "we are turning a
+         * relay off that was on" -- which never fires for a run blocked from
+         * tick one, the case that most needs saying out loud. */
+        if (blocked != s_exec.zones[zi].heat_blocked ||
+            (blocked && sources != s_exec.zones[zi].heat_blocked_sources)) {
+            if (blocked) {
+                ESP_LOGW(TAG, "zone %u WANTS HEAT BUT IS BLOCKED: sources 0x%02X -- no relay will "
+                              "close and the run will otherwise look normal",
+                         zi, (unsigned)sources);
+            } else {
+                ESP_LOGI(TAG, "zone %u heat no longer blocked", zi);
             }
+        }
+        s_exec.zones[zi].heat_blocked = blocked;
+        s_exec.zones[zi].heat_blocked_sources = blocked ? sources : 0u;
+        if (blocked) {
             want_on = false;
         }
     }
@@ -1044,7 +1068,15 @@ static bool reload_zone_config(uint8_t zi)
      * after that logs again instead of staying silently latched. */
     {
         float ceiling = 0.0f;
-        bool have_ceiling = zones_config_get_max_ramp(zi, &ceiling) && ceiling > 0.0f;
+        /* `ceiling > 0.0f` here would mean this one site treats 0 as "no
+         * ceiling", while the start check above, profile_feasibility.c and
+         * profiles_http.c all treat 0 as "every rate is over it". Same value,
+         * opposite policy, inside one feature. Fail-closed is the agreed
+         * reading (an uncommissioned zone should not fire), so this warning
+         * follows it: a zone whose ceiling was zeroed mid-firing is exactly
+         * the case worth shouting about, and skipping it was the quietest
+         * possible response to it. */
+        bool have_ceiling = zones_config_get_max_ramp(zi, &ceiling);
         const profile_segment_t *seg =
             (s_exec.segment_index < s_exec.profile.segment_count)
                 ? &s_exec.profile.segments[s_exec.segment_index]
@@ -1961,9 +1993,22 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
             if (rate > ceiling) {
                 xSemaphoreGive(s_exec.lock);
                 if (err_msg) {
-                    snprintf(err_msg, err_cap,
-                             "segment %u: ramp rate %.1f C/hr exceeds zone %u's current %.1f C/hr ceiling",
-                             i + 1, (double)rate, zi, (double)ceiling);
+                    /* A ceiling of 0 is not a ceiling the operator chose, it
+                     * is a zone that was never commissioned -- every rate is
+                     * "over" it. Quoting "exceeds zone 1's current 0.0 C/hr
+                     * ceiling" sent a bench session looking for a ceiling to
+                     * raise when the actual answer was that zones 1 and 2 had
+                     * never been configured at all. Say which it is. */
+                    if (ceiling <= 0.0f) {
+                        snprintf(err_msg, err_cap,
+                                 "zone %u has no ramp ceiling configured (max_ramp_c_per_hr is 0) -- "
+                                 "commission the zone in Settings > Zones before firing it",
+                                 zi);
+                    } else {
+                        snprintf(err_msg, err_cap,
+                                 "segment %u: ramp rate %.1f C/hr exceeds zone %u's current %.1f C/hr ceiling",
+                                 i + 1, (double)rate, zi, (double)ceiling);
+                    }
                 }
                 return false;
             }
@@ -2013,6 +2058,44 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
         if (p.zone_mask & (1u << zi)) n_active_zones++;
     }
 
+    /* Refuse a firing that cannot heat anything.
+     *
+     * ZONE_CONTROL_MODE_OFF is 0, which is also what an uncommissioned zone
+     * reads as, so "every zone in this profile is OFF" is the DEFAULT state of
+     * a board nobody has configured yet -- not an exotic case. Started in that
+     * state the run was accepted, reported state "running" with a target
+     * ramping convincingly for its full 21 minutes, duty 0.0, faulted false,
+     * heat_blocked false, and no message in the log: every single indicator
+     * said a firing was under way and not one relay would ever close. The
+     * readiness page agreed ("every configured zone has a mode (OFF is a valid
+     * choice)"), which is true of one zone and dangerously incomplete of a
+     * whole profile. Found by running it on the bench and watching nothing
+     * happen for two minutes.
+     *
+     * OFF stays a valid per-zone choice -- a 3-zone kiln fired on 2 zones is
+     * legitimate -- so only the all-OFF case is refused, and the mixed case
+     * gets a log line naming which zones will sit idle. */
+    uint8_t n_heating_zones = 0;
+    for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+        if (!(p.zone_mask & (1u << zi))) continue;
+        zone_control_mode_t m = ZONE_CONTROL_MODE_OFF;
+        zones_config_get_control_mode(zi, &m);
+        if (m != ZONE_CONTROL_MODE_OFF) {
+            n_heating_zones++;
+        } else {
+            ESP_LOGW(TAG, "zone %u is in this profile but its control mode is OFF -- it will not heat", zi);
+        }
+    }
+    if (n_heating_zones == 0) {
+        xSemaphoreGive(s_exec.lock);
+        if (err_msg) {
+            snprintf(err_msg, err_cap,
+                     "every zone in this profile is set to control mode OFF -- nothing would heat. "
+                     "Pick bang-bang or PID in Settings > Zones.");
+        }
+        return false;
+    }
+
     int8_t first_active = -1;
     uint8_t active_rank = 0;
     float baseline_target_c = p.segments[0].target_c;
@@ -2022,7 +2105,11 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
         z->active = true;
         if (first_active < 0) first_active = (int8_t)zi;
 
-        zone_control_mode_t mode = ZONE_CONTROL_MODE_BANGBANG;
+        /* OFF, not BANGBANG, as the fallback if the getter fails: "we could
+         * not read this zone's control mode" must not resolve to "close the
+         * relay". The all-OFF guard above has already refused a run where
+         * every zone lands here. */
+        zone_control_mode_t mode = ZONE_CONTROL_MODE_OFF;
         zones_config_get_control_mode(zi, &mode);
         z->control_mode = mode;
 
@@ -2423,6 +2510,8 @@ void profile_executor_get_status(profile_exec_status_t *out)
             zo->pid_d = z->last_pid_terms.d;
             zo->pid_ff = z->last_pid_terms.ff;
             zo->cooling_limited = z->cooling_limited;
+            zo->heat_blocked = z->heat_blocked;
+            zo->heat_blocked_sources = z->heat_blocked_sources;
         }
 
         if (s_exec.state == PROFILE_EXEC_FAULTED) {

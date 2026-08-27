@@ -212,6 +212,9 @@ void dashboard_get_status(dashboard_status_t *out)
             out->safety_relay_known = true;
             out->safety_relay_energized = (sl.flags & SAFETY_FLAG_RELAY) != 0u;
             out->safety_heating_enabled = (sl.flags & SAFETY_FLAG_ENABLED) != 0u;
+            /* Not from the wire -- this is the ESP's OWN block bitmask, read
+             * straight from the link object. See the field comment. */
+            out->heat_block_sources = safety_link_get_fault_sources(s_dash.safety);
 
             /* ROADMAP.md M5: DIAG (Frame B) / TRIP_EVENT (Frame D) now have a
              * decode path -- see safety_link.h's field comments for what
@@ -557,6 +560,11 @@ static esp_err_t status_get_handler(httpd_req_t *req)
     if (ds.safety_relay_known) {
         APPEND("%s", ds.safety_heating_enabled ? "true" : "false");
     }
+    /* The ESP's own reason for refusing heat -- see dashboard_http.h. Always
+     * present and always an integer: 0 is a real answer ("nothing is blocking
+     * heat"), not an absence, so this one does NOT take the null convention
+     * its neighbours use. */
+    APPEND(",\"heat_block_sources\":%lu", (unsigned long)ds.heat_block_sources);
 
     /* TODO.md 9.0's deferred "GUI names both versions and which one is
      * older" item. self_protocol_version is always known; peer fields are
@@ -1145,21 +1153,24 @@ static size_t append_zone_status_json(char *json, size_t cap, size_t o, const pr
             n = snprintf(json + o, cap - o,
                         "%s{\"zone\":%u,\"control_mode\":%u,\"actual_c\":%.2f,\"actual_valid\":%s,"
                         "\"duty\":%.3f,\"relay_on\":%s,\"pid_p\":%.4f,\"pid_i\":%.4f,\"pid_d\":%.4f,"
-                        "\"pid_ff\":%.4f,\"cooling_limited\":%s,\"faulted\":%s,\"fault_guard\":%u}",
+                        "\"pid_ff\":%.4f,\"cooling_limited\":%s,\"faulted\":%s,\"fault_guard\":%u,"
+                        "\"heat_blocked\":%s,\"heat_blocked_sources\":%lu}",
                         first ? "" : ",", zi, z->control_mode, (double)(z->actual_valid ? z->actual_c : 0.0f),
                         z->actual_valid ? "true" : "false", (double)z->duty,
                         z->relay_commanded_on ? "true" : "false", (double)z->pid_p, (double)z->pid_i,
                         (double)z->pid_d, (double)z->pid_ff, z->cooling_limited ? "true" : "false",
-                        z->faulted ? "true" : "false", z->fault_guard);
+                        z->faulted ? "true" : "false", z->fault_guard,
+                        z->heat_blocked ? "true" : "false", (unsigned long)z->heat_blocked_sources);
         } else {
             n = snprintf(json + o, cap - o,
                         "%s{\"zone\":%u,\"actual_c\":%.2f,\"actual_valid\":%s,\"relay_on\":%s,"
                         "\"duty\":%.3f,\"control_mode\":%u,\"faulted\":%s,\"fault_reason\":\"%s\","
-                        "\"fault_guard\":%u}",
+                        "\"fault_guard\":%u,\"heat_blocked\":%s,\"heat_blocked_sources\":%lu}",
                         first ? "" : ",", zi, (double)(z->actual_valid ? z->actual_c : 0.0f),
                         z->actual_valid ? "true" : "false", z->relay_commanded_on ? "true" : "false",
                         (double)z->duty, z->control_mode, z->faulted ? "true" : "false", reason_escaped,
-                        z->fault_guard);
+                        z->fault_guard, z->heat_blocked ? "true" : "false",
+                        (unsigned long)z->heat_blocked_sources);
         }
         if (n < 0 || (size_t)n >= cap - o) return o;
         o += (size_t)n;

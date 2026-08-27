@@ -17,6 +17,7 @@
 #include "freertos/task.h"
 #include "ILI9488.h" /* ILI9488_PANEL_WIDTH/HEIGHT -- TOUCH_CMD_INJECT bounds check */
 #include "SX1509.h"
+#include "danger_mode.h" /* danger_mode_active() -- link-loss watchdog suppression */
 #include "heat_interlock.h" /* HEAT_INTERLOCK_REASON_MAX -- IO_CMD_SET_RELAY[_MASK]'s ERR_UPDATING case */
 #include "kiln_io.h"
 #include "kiln_io_owner.h"
@@ -2516,6 +2517,9 @@ static void link_watchdog_task(void *arg)
     /* Sticky until a drop actually succeeds, so a failed I2C transfer is
      * retried on the next tick instead of being assumed done. */
     bool relays_confirmed_off = false;
+    /* Impossible as a real mask (only KILN_IO_RELAY_COUNT bits are ever set),
+     * so the first pass always takes the "mask changed" branch below. */
+    uint8_t last_unowned_mask = 0xFFu;
 
     const TickType_t timeout_ticks = pdMS_TO_TICKS(UART_BRIDGE_LINK_TIMEOUT_MS);
 
@@ -2567,11 +2571,67 @@ static void link_watchdog_task(void *arg)
             relays_confirmed_off = false;
         }
 
+        /* Which relays this watchdog actually has authority over.
+         *
+         * This watchdog was written when the PC host was the only thing that
+         * could energize a relay, so "the host stopped talking" and "nobody is
+         * in control" were the same statement and dropping everything was
+         * right. That is no longer true: profile_executor and autotune_engine
+         * run firings autonomously on the board, and danger mode is driven
+         * from the web UI -- none of which involve the serial host at all.
+         *
+         * Left unqualified, the consequences were severe and are not
+         * hypothetical. `up` is gated on s_link_ever_seen, so a board that
+         * boots with no PC attached -- the normal standalone deployment --
+         * counts as link-lost forever and had all four relays forced off every
+         * 250 ms. A firing could not hold a relay on for a single check tick.
+         * With a PC attached but idle it is the same story intermittently:
+         * observed dropping relays roughly every 5 s through a whole bench
+         * session, overriding LCD manual control within seconds each time.
+         * And the profile executor is never told, so it goes on computing duty
+         * for relays something else keeps opening behind it.
+         *
+         * So: still a fail-safe for relays under MANUAL/no ownership, which is
+         * the case this was built for and where host silence really does mean
+         * nobody is watching. Relays claimed by a PROFILE, a RULE or an
+         * AUTOTUNE have an on-board owner that the serial link's health says
+         * nothing about, and are left alone -- that owner has its own
+         * watchdogs (profile_executor's guard 9 and safety-link silence abort)
+         * which are the ones that actually apply to it. Danger mode suppresses
+         * the drop wholesale for its window, since an operator is deliberately
+         * holding relays closed from the browser with no serial traffic at
+         * all. */
+        uint8_t unowned_mask = 0;
+        for (uint8_t relay = 1; relay <= KILN_IO_RELAY_COUNT; relay++) {
+            if (!relay_authority_manual_blocked_by_owner(relay)) {
+                unowned_mask |= (uint8_t)(1u << (relay - 1u));
+            }
+        }
+        if (danger_mode_active()) {
+            unowned_mask = 0;
+        }
+        /* The confirmation is per-mask, not once per outage. A firing that
+         * ends (or a danger-mode window that closes) hands relays back while
+         * the link is still down, and those newly unowned relays must then be
+         * dropped -- a "done" flag latched on the previous, smaller mask would
+         * leave them energized for the rest of the outage, which on this board
+         * is forever when no host ever connects. */
+        if (unowned_mask != last_unowned_mask) {
+            relays_confirmed_off = false;
+            last_unowned_mask = unowned_mask;
+        }
+
         /* Relays first, fault line second. The relays are the thing actually
          * carrying mains to the elements; the fault line is a request to a
          * processor that may or may not be listening. Do the one we control. */
-        if (ctx->io && !relays_confirmed_off) {
-            esp_err_t err = kiln_io_all_relays_off(ctx->io);
+        if (ctx->io && unowned_mask == 0) {
+            /* Nothing here to drop -- everything is under an on-board owner.
+             * Treated as done so this does not spin, and so the next genuine
+             * unowned relay still gets dropped (the flag is cleared on every
+             * up/down transition above). */
+            relays_confirmed_off = true;
+        } else if (ctx->io && !relays_confirmed_off) {
+            esp_err_t err = kiln_io_set_relay_mask(ctx->io, unowned_mask, 0u);
             if (err == ESP_OK) {
                 relays_confirmed_off = true;
             } else {

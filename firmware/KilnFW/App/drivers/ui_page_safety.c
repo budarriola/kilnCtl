@@ -3,6 +3,7 @@
 #include <stdio.h>
 
 #include "dashboard_http.h"
+#include "safety_link.h" /* SAFETY_LINK_DIAG_STATE_*, SAFETY_LINK_STALE_MS */
 #include "safety_trip_words.h"
 #include "ui_theme.h"
 #include "ui_topbar.h"
@@ -101,14 +102,52 @@ static void refresh_cb(lv_timer_t *timer)
      * printing the bare 0x%02X value an operator has no table for. Age is
      * reported in whole seconds; sub-second precision isn't useful once a
      * trip is more than a moment old. */
+    /* 2026-08-27: this row now leads with the CURRENT state, not just the last
+     * trip. A bench walk of this page found it reporting "Last trip: S6a main
+     * ctrl fault, 136s ago" on a board that was armed and perfectly healthy --
+     * every word true, and no way to tell from this page whether the safety
+     * processor was tripped right now. That is the one question an operator
+     * opens this page to answer.
+     *
+     * Folded into the existing row rather than added as a sixth: this page has
+     * a ~264px no-scroll budget (see the header comment) and the state and the
+     * last trip are the same subject. The DIAG warn/trip masks stay off the
+     * page as that comment says; a state word is not a mask.
+     *
+     * Staleness is checked the same way ui_page_home.c's trip strip checks it,
+     * for the same reason: a STALE diag_state == TRIPPED is a silent link, not
+     * a live trip, and showing the two identically is exactly the confusion
+     * this codebase avoids elsewhere. */
+    char trip_tail[40];
     if (!ds.trip_event_ever_received) {
-        lv_label_set_text(s_trip_label, "Last trip: ---");
+        snprintf(trip_tail, sizeof(trip_tail), "no trip recorded");
     } else {
-        char buf[64];
-        snprintf(buf, sizeof(buf), "Last trip: %s, %lus ago",
-                 safety_trip_words_short(ds.trip_reason), (unsigned long)(ds.trip_event_age_ms / 1000u));
-        lv_label_set_text(s_trip_label, buf);
+        snprintf(trip_tail, sizeof(trip_tail), "last %s, %lus ago",
+                 safety_trip_words_short(ds.trip_reason),
+                 (unsigned long)(ds.trip_event_age_ms / 1000u));
     }
+
+    char buf[96];
+    if (!ds.diag_ever_received || ds.diag_age_ms >= SAFETY_LINK_STALE_MS) {
+        snprintf(buf, sizeof(buf), "State: UNKNOWN (no fresh diagnostics) -- %s", trip_tail);
+    } else {
+        const char *state_word;
+        switch (ds.diag_state) {
+        case SAFETY_LINK_DIAG_STATE_INIT:    state_word = "starting up"; break;
+        case SAFETY_LINK_DIAG_STATE_GRACE:   state_word = "startup grace"; break;
+        case SAFETY_LINK_DIAG_STATE_ARMED:   state_word = "ARMED"; break;
+        case SAFETY_LINK_DIAG_STATE_WARN:    state_word = "ARMED (warning)"; break;
+        case SAFETY_LINK_DIAG_STATE_TRIPPED: state_word = "TRIPPED"; break;
+        default:                             state_word = "unrecognised"; break;
+        }
+        if (ds.diag_state == SAFETY_LINK_DIAG_STATE_TRIPPED) {
+            snprintf(buf, sizeof(buf), "State: TRIPPED NOW -- %s",
+                     safety_trip_words_short(ds.diag_trip_reason));
+        } else {
+            snprintf(buf, sizeof(buf), "State: %s -- %s", state_word, trip_tail);
+        }
+    }
+    lv_label_set_text(s_trip_label, buf);
 }
 
 /* Compact stat row -- pad_all trimmed to UI_THEME_PADDING_PX/2 (4px) rather
@@ -168,7 +207,7 @@ lv_obj_t *ui_page_safety_build(void)
     s_enclosure_temp_label = build_stat_label(content, "Enclosure temp: ---");
     s_safety_power_label = build_stat_label(content, "Power: ---");
     s_link_version_label = build_stat_label(content, "Link version: ---");
-    s_trip_label = build_stat_label(content, "Last trip: ---");
+    s_trip_label = build_stat_label(content, "State: ---");
 
     ui_topbar_raise(&tb);
 

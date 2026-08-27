@@ -174,7 +174,27 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
         if (thermo_count == 0) {
             snprintf(detail, sizeof(detail), "set thermocouple count first");
         } else {
-            snprintf(detail, sizeof(detail), "every configured zone has a mode (OFF is a valid choice)");
+            /* Per zone, OFF is a legitimate choice and this item says so. But
+             * if EVERY zone is OFF the board cannot heat at all, and reporting
+             * that as "ok" is what let a bench firing run its full length with
+             * a climbing target and no relay ever closing while this page said
+             * the board was ready. One zone off is a choice; all of them off
+             * is a kiln that does nothing. */
+            uint8_t heating = 0;
+            for (uint8_t i = 0; i < thermo_count; i++) {
+                zone_control_mode_t m = ZONE_CONTROL_MODE_OFF;
+                if (zones_config_get_control_mode(i, &m) && m != ZONE_CONTROL_MODE_OFF) {
+                    heating++;
+                }
+            }
+            if (heating == 0) {
+                st = READY_NOT_DONE;
+                snprintf(detail, sizeof(detail),
+                         "every zone is OFF -- no firing can heat anything");
+            } else {
+                snprintf(detail, sizeof(detail), "%u of %u zones can heat (OFF is a valid choice)",
+                         (unsigned)heating, (unsigned)thermo_count);
+            }
         }
         o = append_item(json, sizeof(json), o, first, "control_mode", "Control mode chosen per zone", st, detail,
                         "/settings/zones");

@@ -315,6 +315,14 @@ typedef struct {
                                * PROFILE_EXEC_FAULTED and every zone shows faulted here. */
     char     fault_reason[96];
     uint8_t  fault_guard;     /* thermal_guard_trip_t, only meaningful when faulted */
+    /* Control wanted heat this tick and relay_authority refused it. NOT a
+     * fault: the run keeps going and every other field looks healthy, which
+     * is exactly why this has to be reported. A firing blocked from its first
+     * tick otherwise shows state "running", a climbing target, duty 0.0 and
+     * faulted false, with nothing anywhere naming the reason. `sources` is a
+     * bitwise OR of safety_fault_source_t (safety_link.h). */
+    bool     heat_blocked;
+    uint32_t heat_blocked_sources;
     /* TODO.md 6A.9's "/api/control... PID term breakdown", per zone.
      * Only meaningful when control_mode == ZONE_CONTROL_MODE_PID. */
     float    pid_p;

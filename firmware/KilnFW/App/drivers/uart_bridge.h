@@ -158,10 +158,27 @@ esp_err_t uart_bridge_start_wifi_task(uart_protocol_t *proto);
  *   an enabled auto-report whose pushes it ACKs -- at least once per window.
  *
  * WHAT HAPPENS ON LOSS, in this order:
- *   1. All four relays are dropped (kiln_io_all_relays_off), and the drop is
- *      retried on every check tick for as long as the link stays down and the
- *      commanded state is not already all-off -- one failed I2C transfer must
+ *   1. Every relay NOT claimed by an on-board owner is dropped, and the drop
+ *      is retried on every check tick for as long as the link stays down and
+ *      the commanded state is not already off -- one failed I2C transfer must
  *      not be what leaves an element energized.
+ *
+ *      "Not claimed by an on-board owner" means relay_authority says the relay
+ *      is NONE or MANUAL. This qualification was added 2026-08-27 and is not
+ *      cosmetic. This watchdog predates the board running firings by itself,
+ *      when the serial host was the only thing that could energize a relay and
+ *      so "the host went quiet" really did mean "nobody is in control".
+ *      profile_executor, autotune_engine and danger mode changed that, and
+ *      because the link counts as lost until a host has EVER spoken, an
+ *      unqualified drop meant a standalone board -- no PC attached, the normal
+ *      deployment -- force-opened all four relays every 250 ms forever, so a
+ *      firing could not hold a relay closed for one check tick. A relay under
+ *      a PROFILE/RULE/AUTOTUNE owner is left alone: the serial link's health
+ *      says nothing about that owner, which has its own watchdogs (guard 9,
+ *      the safety-link 30 s silence abort) that do apply to it. Danger mode
+ *      suppresses the drop entirely for its window, since an operator is
+ *      deliberately holding relays closed from the browser with no serial
+ *      traffic at all.
  *   2. SAFETY_FAULT_SRC_PC_LINK is raised on the isolated fault line, telling
  *      the RP2040 safety processor that the main controller is no longer under
  *      control. That line is a wire, not a message, so it keeps working when
@@ -171,10 +188,12 @@ esp_err_t uart_bridge_start_wifi_task(uart_protocol_t *proto);
  * before the link died" is not a state anything should resume into by itself.
  *
  * BEFORE THE HOST HAS EVER SPOKEN the link counts as lost, so a board that
- * boots with nothing attached sits with the fault line asserted and the relays
- * off. That is the same state as a link that died, which is the point: the
- * fault line reflects "this controller is not being controlled", and at boot
- * it is not.
+ * boots with nothing attached sits with the fault line asserted and its
+ * unowned relays off. That is the same state as a link that died, which is the
+ * point: the fault line reflects "this controller is not being controlled",
+ * and at boot it is not. Note this is the permanent resting state of a
+ * standalone board, which is precisely why item 1 above must not extend to
+ * relays a firing owns.
  *
  * Pass io = NULL if the expander never came up (nothing to drop, but the fault
  * line still gets asserted -- see app_main) or link = NULL if the safety link

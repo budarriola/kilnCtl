@@ -177,6 +177,13 @@ typedef struct {
     bool     safety_relay_known;
     bool     safety_relay_energized;
     bool     safety_heating_enabled;
+    /* The ESP's own heat-block bitmask (safety_link_get_fault_sources(), a
+     * bitwise OR of safety_fault_source_t). Reported because until now NO
+     * interface -- web, LCD or serial -- could answer "why did nothing turn
+     * on?". relay_authority_on_blocked() refuses every relay-ON while any bit
+     * here is set, and a profile run in that state reports itself as running,
+     * unfaulted, at duty 0. 0 means nothing is blocking heat. */
+    uint32_t heat_block_sources;
 
     /* TODO.md 9.0's deferred "GUI names both versions and which one is
      * older" item: this firmware's own KILNLINK_PROTOCOL_VERSION (always
