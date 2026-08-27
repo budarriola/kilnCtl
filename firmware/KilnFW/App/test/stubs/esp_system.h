@@ -25,4 +25,13 @@ static inline esp_reset_reason_t esp_reset_reason(void)
     return ESP_RST_POWERON;
 }
 
+/* Added 2026-08-27 for ota_http.c's/factory_reset.c's host tests
+ * (test_ota_http.c) -- both call the real esp_restart() from a reboot task;
+ * declared here (matching real esp_system.h), defined in whichever test file
+ * first needs it to link, same "declared once, defined per-executable" split
+ * stubs/esp_http_server.h already uses. Never actually invoked by any host
+ * test (the reboot tasks that call it are only ever created via a
+ * FreeRTOS task-creation stub that never runs its argument). */
+void esp_restart(void);
+
 #endif // TEST_STUB_ESP_SYSTEM_H

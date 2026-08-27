@@ -255,6 +255,39 @@ if ($LASTEXITCODE -ne 0) {
 & $exe7
 if ($LASTEXITCODE -ne 0) { $script:failedExes += $exe7 }
 
+# ---- test_ota_http.c: its own EIGHTH, separate executable -----------------
+# ota_http.c/factory_reset.c shipped their security fixes (empty-AP-password
+# refusal, per-context HMAC/lockout separation, auth-before-interlock on
+# POST /api/factory_reset) with no host-test coverage at all -- neither file
+# could compile on the host tree until this pass added the ESP-IDF/PSA-Crypto
+# stub headers below. Same reason as test_zones_http.c/test_profiles_http.c
+# above: this file #includes BOTH ota_http.c and factory_reset.c directly (to
+# reach ota_http.c's file-scope nonce state and factory_reset.c's static
+# reset_post_handler(), neither of which has any other seam), so it must be
+# its own executable -- other host tests already define their OWN fakes for
+# several of the same ESP-IDF/driver symbols this file needs, and both
+# `static const char *TAG` file-scope statics would collide if this were
+# merged into any of them. ota_auth.c/ota_interlock.c/ota_record.c are linked
+# in for REAL (already host-tested elsewhere) rather than faked, since
+# decision 2 (per-context lockout separation) is genuinely exercised through
+# ota_auth.c's real nonce/lockout state machine, not a stand-in for it.
+$exe8 = Join-Path $outDir "kilnctl_host_tests_ota_http.exe"
+$otaObjDir = Join-Path $outDir "ota"
+New-Item -ItemType Directory -Force -Path $otaObjDir | Out-Null
+$cmd8 = "call `"$vcvars`" x64 >nul && cl /nologo /W3 /EHsc /std:c11 /I`"$stubDir`" /I`"$commonInc`" " +
+        "/Fo:`"$otaObjDir\\`" /Fe:`"$exe8`" " +
+        "`"$(Join-Path $testDir 'test_ota_http.c')`" " +
+        "`"$(Join-Path $driversDir 'ota_auth.c')`" `"$(Join-Path $driversDir 'ota_interlock.c')`" " +
+        "`"$(Join-Path $driversDir 'ota_record.c')`""
+
+cmd.exe /c $cmd8
+if ($LASTEXITCODE -ne 0) {
+    throw "ota_http build failed"
+}
+
+& $exe8
+if ($LASTEXITCODE -ne 0) { $script:failedExes += $exe8 }
+
 if ($script:failedExes.Count -gt 0) {
     Write-Host ""
     Write-Host "FAILED executables ($($script:failedExes.Count)):"

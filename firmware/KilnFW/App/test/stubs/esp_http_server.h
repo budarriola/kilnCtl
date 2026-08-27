@@ -35,8 +35,16 @@ typedef enum {
 
 typedef enum {
     HTTPD_400_BAD_REQUEST = 400,
+    HTTPD_403_FORBIDDEN = 403, /* added 2026-08-27 for ota_http.c's host tests */
     HTTPD_500_INTERNAL_SERVER_ERROR = 500,
 } httpd_err_code_t;
+
+/* Real esp_http_server.h's sentinel meaning "buf is a NUL-terminated C
+ * string, compute its length with strlen()" -- added 2026-08-27 for
+ * ota_http.c's host tests (test_ota_http.c), which link ota_http.c for real
+ * and so need this macro to resolve even though the call sites that use it
+ * are never reached by these tests. */
+#define HTTPD_RESP_USE_STRLEN ((long long)-1)
 
 typedef esp_err_t (*httpd_uri_handler_t)(httpd_req_t *req);
 
@@ -64,5 +72,13 @@ int httpd_req_recv(httpd_req_t *r, char *buf, size_t buf_len);
  * "declared once, defined per-executable" split as the rest of this header --
  * see this header's own comment). */
 esp_err_t httpd_resp_sendstr(httpd_req_t *r, const char *s);
+
+/* Added 2026-08-27 for ota_http.c's host tests (test_ota_http.c) -- that
+ * file's get_client_ip()/ota_http_authenticate_request()/ota_esp_post_handler()
+ * etc. read the X-Ota-Mac header and the socket fd. Same "declared once
+ * here, defined once per test file" split as the rest of this header. */
+size_t httpd_req_get_hdr_value_len(httpd_req_t *r, const char *field);
+esp_err_t httpd_req_get_hdr_value_str(httpd_req_t *r, const char *field, char *val, size_t val_size);
+int httpd_req_to_sockfd(httpd_req_t *r);
 
 #endif // TEST_STUB_ESP_HTTP_SERVER_H

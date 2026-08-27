@@ -122,4 +122,46 @@ static inline const char *inet_ntop(int af, const void *src, char *dst, socklen_
     return dst;
 }
 
+/* ---- Added 2026-08-27 for ota_http.c's host tests (test_ota_http.c),
+ * which links ota_http.c for real. get_client_ip()/ota_esp_do_transfer()
+ * need sockaddr_in6/AF_INET6/getpeername()/setsockopt() to compile; a fixed
+ * "no real socket here" failure (getpeername() returning -1, same as
+ * socket() above) is enough -- get_client_ip() already treats that as
+ * "unknown" and every test in this file supplies its own client_ip string
+ * directly rather than depending on socket introspection. */
+struct sockaddr_in6 {
+    uint16_t sin6_family;
+    uint16_t sin6_port;
+    uint32_t sin6_flowinfo;
+    uint8_t sin6_addr[16];
+    uint32_t sin6_scope_id;
+};
+
+#define AF_INET6 10
+#define SOL_SOCKET 1
+#define SO_RCVTIMEO 20
+
+struct timeval {
+    long tv_sec;
+    long tv_usec;
+};
+
+static inline int getpeername(int fd, struct sockaddr *addr, socklen_t *addrlen)
+{
+    (void)fd;
+    (void)addr;
+    (void)addrlen;
+    return -1;
+}
+
+static inline int setsockopt(int fd, int level, int optname, const void *optval, socklen_t optlen)
+{
+    (void)fd;
+    (void)level;
+    (void)optname;
+    (void)optval;
+    (void)optlen;
+    return 0;
+}
+
 #endif // TEST_STUB_LWIP_SOCKETS_H
