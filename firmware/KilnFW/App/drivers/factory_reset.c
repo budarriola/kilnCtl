@@ -11,6 +11,7 @@
 #include "nvs_flash.h"
 
 #include "http_form.h"
+#include "ota_http.h" /* interlocks + challenge/response auth -- see reset_post_handler() */
 #include "profiles_builtin.h"
 #include "wifi_provision_http.h"
 
@@ -151,6 +152,30 @@ esp_err_t factory_reset_execute(factory_reset_scope_t scope)
 
 static esp_err_t reset_post_handler(httpd_req_t *req)
 {
+    /* Refuse while a firing is running/paused or any heater is commanded on
+     * (audit 2026-08-27: this endpoint had NO interlock and NO authentication
+     * at all). It erases the zone config -- relay maps, guard thresholds,
+     * max_temp_c -- and reboots. Doing that mid-firing leaves elements hot
+     * with an executor that has no configuration to control them by, and if
+     * the scope includes wifi, the board also drops off the network, so the
+     * operator cannot reach it to shut anything down.
+     *
+     * ota_http_check_interlocks() is the same gate backup_http.c's restore
+     * and kiln_cfg_http.c's apply already use -- both of which write the very
+     * same zones_cfg_t this erases, and neither of which is as destructive.
+     * ota_http_req_ack_no_safety() carries the same "a board with no safety
+     * processor must still be recoverable" escape hatch those two allow, and
+     * for the same reason: a factory reset is part of how an uncommissioned
+     * board gets commissioned. Every other precondition still refuses. */
+    char interlock_reason[OTA_INTERLOCK_REASON_MAX];
+    ota_interlock_result_t gate = ota_http_check_interlocks(ota_http_req_ack_no_safety(req),
+                                                             interlock_reason,
+                                                             sizeof(interlock_reason));
+    if (gate != OTA_INTERLOCK_OK) {
+        ESP_LOGW(TAG, "factory_reset refused by interlock: %s", interlock_reason);
+        return ota_http_send_interlock_refusal(req, gate, interlock_reason);
+    }
+
     if (req->content_len <= 0 || req->content_len > FACTORY_RESET_BODY_MAX) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body missing or too large");
         return ESP_OK;

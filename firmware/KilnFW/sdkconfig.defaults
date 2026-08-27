@@ -375,3 +375,20 @@ CONFIG_ESP_COREDUMP_MAX_TASKS_NUM=64
 # hang, and raise CONFIG_ESP_TASK_WDT_TIMEOUT_S or bracket that operation
 # with esp_task_wdt_add()/_delete() if one turns up.
 CONFIG_ESP_TASK_WDT_PANIC=y
+
+# --- OTA rollback safety net -------------------------------------------------
+# These were set ONLY in the generated `sdkconfig`, which is gitignored (see
+# .gitignore), so a fresh clone regenerated it from this file and silently
+# built with rollback DISABLED -- found by audit 2026-08-27.
+#
+# With rollback off, esp_ota_mark_app_valid_cancel_rollback() in main.c fails
+# and the whole boot-confirm machinery (boot_guard.c) degrades to a logged
+# no-op: an OTA image that boots but never passes its health check simply
+# keeps running broken forever instead of being rolled back to the previous
+# slot. That is the one mechanism protecting a two-processor kiln controller
+# from a bad update, and it was one clean clone away from not existing.
+#
+# Same class as the sdkconfig-hides-a-mismatch problem already recorded in
+# this project's notes: if a setting matters, it belongs in a tracked file.
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+CONFIG_APP_ROLLBACK_ENABLE=y
