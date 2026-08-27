@@ -220,17 +220,21 @@ severity.
       `append_item` returns the offset unchanged on overflow while `first` is
       set unconditionally, so a failed first item yields `[,{...}`; the closing
       `]}` is skipped on overflow too. ~156 bytes of margin at 12 items.
-- [ ] **`ota_http.c` and `factory_reset.c` have no host-test coverage at
-      all.** `build_host_tests.ps1` cannot compile either (both need ESP-IDF
-      headers -- `esp_http_server.h`, `psa/crypto.h`, FreeRTOS, `wifi_prov.h`
-      -- that the host tree has no stubs for), so the 2026-08-27 auth work
-      (`f58e040`) shipped verified only on hardware and by code reading. That
-      is weaker than this repo's own negative-test rule wants for a security
-      change. Close it by either adding ESP-IDF stubs for `ota_http.c`, or
-      factoring the two new decisions (the `pw_len == 0` refusal and the
-      per-context dispatch) into pure functions in a file that IS host-tested,
-      the way `ota_auth.c`/`ota_interlock.c` already split out the testable
-      half.
+- [x] **`ota_http.c` and `factory_reset.c` have no host-test coverage at
+      all.** DONE 2026-08-27 (`da4918c`) by the first of the two routes this
+      item proposed: `ota_http.c` and `factory_reset.c` now compile on the
+      host and are `#include`d by an 8th executable, `test_ota_http.c` -- so
+      the real decision code is under test, not a restatement of it. The
+      blocking surface (`psa/crypto.h`, `esp_ota_ops.h`, `esp_partition.h`,
+      `esp_app_desc.h` and friends) is stubbed. The HMAC stub is a documented
+      FAKE: it establishes that identical inputs give identical output and
+      different inputs do not, which is all the three decisions under test
+      depend on -- it is NOT evidence that the real crypto is correct, and its
+      header says so. Negative-tested: removing the `pw_len == 0` refusal, and
+      making factory-reset reuse `"esp"`'s context, both go red.
+      **Still uncovered:** the streaming transfer handlers
+      (`ota_esp_do_transfer`, `ota_pico_do_stage`) and the route wrappers
+      around them remain hardware-verified only.
 
 - [x] **`httpd_resp_send(req, json, n)` sites use `snprintf`'s return
       unclamped at the high end** -- a stack over-read that sends adjacent
