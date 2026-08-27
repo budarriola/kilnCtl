@@ -697,16 +697,14 @@ Owned by [`firmware/KilnFW/TODO.md`](firmware/KilnFW/TODO.md) §§12–13.
       instead of a half-document. Negative-tested on the board with the
       buffer cut to 900 bytes -- four items fit and the response carried the
       "Checklist incomplete" entry. 2026-08-26/27, `4e8e1f1`, `88f12e0`
-- [~] **Re-read the stack margins after a real firing.** Done 2026-08-27 for
-      the paths a bench board can take: a PID firing on zone 0 run concurrently
-      with a configured rule (relay 4 rule-driven off a TEMP condition), through
-      a guard-1 trip and the fault escalation that follows. Every margin came
-      back **identical** to the idle reading -- `rules_task` still 1368 B free
-      of 4096 (33.4%). Left open rather than closed because the heaters are
-      disconnected, so the run tripped at 60 s and never reached a segment
-      advance, a hold, or a multi-segment transition; those paths are still
-      unmeasured. What is now retired is the specific worry that the rule
-      evaluator's own path was unmeasured -- it has been walked
+- [x] **Re-read the stack margins after a real firing.** Done 2026-08-27.
+      The first run tripped guard 1 at 60 s and never reached a segment
+      advance, so a second was built to walk the whole state machine WITHOUT
+      heat: a three-segment profile whose targets sit just below ambient, so
+      the executor ramps, reaches temperature, dwells, advances segment,
+      and completes on a board with the heaters disconnected. Rules were
+      configured and driving a relay throughout. Every margin held --
+      `rules_task` 1372 B free of 4096 (33.5%), against 1368 idle
 - [x] **Audit whether anything `rules_task` calls writes NVS or flash.**
       Done 2026-08-27, transitively over every callee: nothing writes NVS or
       flash. The audit did find one real reach, and not the kind this note
@@ -720,16 +718,23 @@ Owned by [`firmware/KilnFW/TODO.md`](firmware/KilnFW/TODO.md) §§12–13.
       at the `uart_bridges_1` trough went 6771 → 10675 and the largest free
       block 4608 → 7680, back to baseline, with no `DRAM REGRESSION` line at
       any stage. `47b004c`
-- [ ] **Reclaim internal DRAM from the four healthy stacks.** `uart_owner_task`
-      (77.9%), `uart_owner_evt_task` (82.1%), `system_uart_bridge` (66.0%) and
-      `rules_watchdog` (67.8%) are all internal-only and all measured with
-      wide margin — and the figures held unchanged through the 2026-08-27
-      firing above, so they are no longer idle-board-only numbers. Still not
-      done, deliberately: the regression that made this urgent is gone, the
-      firing did not reach a hold or a segment advance, and trimming a stack
-      on incomplete coverage for DRAM nobody currently needs is the bug class
-      this milestone exists to avoid. Revisit if internal DRAM gets tight
-      again, or after a firing that runs to completion
+- [x] **Reclaim internal DRAM from the healthy stacks.** Done 2026-08-27
+      (`8ad7d5b`) — and the delay was justified by what the coverage work
+      turned up. `UART_OWNER_STACK_SIZE` sizes **four** tasks, not two:
+      main.c's PC-link `uart_owner` pair was registered for high-water
+      reporting, while `safety_link.c`'s pair — the one carrying the telemetry
+      that gates all heating — was registered by nobody. Trimming on the two
+      visible numbers would have resized two tasks that could not be seen:
+      this project's recurring "two instances, one identifier" trap, the same
+      shape as the shared UART log tags. Both are now registered
+      (`safety_owner_task` / `safety_owner_evt`), the worst of the four had
+      used 904 B of 4096, and the shared size dropped to 3072 — ~70% headroom
+      on all four and **4 kB of internal DRAM back** (free 22471 → 26895).
+      Deliberately not cut closer: a Pico OTA relay transfer streams through
+      the safety-link pair and is still unmeasured, so the margin covers a
+      path the numbers do not. `rules_task`, `rules_watchdog`, `uart_proto_rx`
+      and `system_uart_bridge` are left alone — healthy, and the DRAM they
+      would return is no longer needed
 - [ ] **HTTP connection resets under concurrency — reproducible, cause NOT
       established** (`TODO.md` §14, `f8ebfa0`). Eight parallel `/app.js`
       fetches reset one of them, 9 failures in 80 requests. Needs BOTH high
