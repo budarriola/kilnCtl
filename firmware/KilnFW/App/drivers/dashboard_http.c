@@ -87,6 +87,50 @@ static const char *reset_reason_name(esp_reset_reason_t r)
  * same snapshot this handler serializes, rather than a second reimplementation
  * against kiln_io/MAX31856_read_all/etc. See dashboard_http.h for the struct
  * and the "why not nvs_sections too" note. */
+/* The one-time flash facts /api/status reports. Read through a dedicated
+ * helper, and primed at startup by dashboard_http_start(), for a reason
+ * beyond tidiness: esp_flash_get_size() and esp_image_get_metadata() disable
+ * the cache while they run, which is fatal to any task whose stack lives in
+ * PSRAM. dashboard_get_status() is called by rules_task as well as by the
+ * httpd handler, so leaving this lazy meant "whichever task arrives first
+ * does a flash read" -- a race, not an ordering guarantee, and exactly the
+ * thing that would have to be true-by-accident for rules_task's stack to be
+ * safe to move off internal DRAM (ROADMAP.md M10). Priming it at startup, on
+ * the app_main task, makes that safety a property of the code instead. */
+static bool s_flash_facts_read = false;
+static bool s_flash_size_known = false;
+static uint32_t s_flash_size = 0;
+static uint32_t s_flash_partition_size = 0;
+static bool s_flash_used_known = false;
+static uint32_t s_flash_used = 0;
+
+static void read_flash_facts_once(void)
+{
+    if (s_flash_facts_read) {
+        return;
+    }
+    /* s_flash_facts_read is set LAST, after every static above is filled in
+     * -- Opus review 2026-08-27 caught this set FIRST in an earlier version:
+     * a second task entering between that early set and the reads finishing
+     * would see it already true and copy still-zero statics, reporting a
+     * transient all-unknown flash status for that one response. Worst case
+     * now is a handful of redundant reads if two callers really do race in
+     * together -- no torn or fabricated values either way. */
+    uint32_t flash_size = 0;
+    s_flash_size_known = (esp_flash_get_size(NULL, &flash_size) == ESP_OK);
+    s_flash_size = flash_size;
+
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    if (running) {
+        s_flash_partition_size = running->size;
+        esp_image_metadata_t metadata = { 0 };
+        esp_partition_pos_t part_pos = { .offset = running->address, .size = running->size };
+        s_flash_used_known = (esp_image_get_metadata(&part_pos, &metadata) == ESP_OK);
+        s_flash_used = metadata.image_len;
+    }
+    s_flash_facts_read = true;
+}
+
 void dashboard_get_status(dashboard_status_t *out)
 {
     memset(out, 0, sizeof(*out));
@@ -358,39 +402,7 @@ void dashboard_get_status(dashboard_status_t *out)
      * fails -- chip-size/partition/image-header reads are all "should never
      * fail on real hardware" but none is worth a fabricated number if one
      * ever does. */
-    static bool s_flash_facts_read = false;
-    static bool s_flash_size_known = false;
-    static uint32_t s_flash_size = 0;
-    static uint32_t s_flash_partition_size = 0;
-    static bool s_flash_used_known = false;
-    static uint32_t s_flash_used = 0;
-    if (!s_flash_facts_read) {
-        /* s_flash_facts_read is set LAST, after every static below it is
-         * filled in -- Opus review 2026-08-27 caught this set FIRST in an
-         * earlier version of this function: a second task entering
-         * dashboard_get_status() between that early set and the reads
-         * finishing would see s_flash_facts_read already true and copy
-         * still-zero statics, reporting a transient (self-healing on the
-         * next poll, but still wrong) all-unknown flash status for that one
-         * response. Worst case now is at most a handful of redundant
-         * flash/partition reads if two pollers really do race into this
-         * block together -- no torn or fabricated values either way, since
-         * every out-facing field is copied only after this whole block
-         * (read or skipped) completes. */
-        uint32_t flash_size = 0;
-        s_flash_size_known = (esp_flash_get_size(NULL, &flash_size) == ESP_OK);
-        s_flash_size = flash_size;
-
-        const esp_partition_t *running = esp_ota_get_running_partition();
-        if (running) {
-            s_flash_partition_size = running->size;
-            esp_image_metadata_t metadata = { 0 };
-            esp_partition_pos_t part_pos = { .offset = running->address, .size = running->size };
-            s_flash_used_known = (esp_image_get_metadata(&part_pos, &metadata) == ESP_OK);
-            s_flash_used = metadata.image_len;
-        }
-        s_flash_facts_read = true;
-    }
+    read_flash_facts_once();
     out->flash_size_known = s_flash_size_known;
     out->flash_size = s_flash_size;
     out->flash_partition_size = s_flash_partition_size;
@@ -2170,6 +2182,12 @@ esp_err_t dashboard_http_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_b
         ESP_LOGE(TAG, "httpd_register_uri_handler(/api/unit_pref) failed: %s", esp_err_to_name(err));
         return err;
     }
+
+    /* Prime the flash facts here, on the app_main task, so no later caller
+     * -- least of all rules_task, whose stack is a candidate to move to
+     * PSRAM -- can be the one that performs a cache-disabling flash read.
+     * See read_flash_facts_once()'s own comment. */
+    read_flash_facts_once();
 
     ESP_LOGI(TAG, "dashboard API up (io_ready=%d, thermo_ready=%d, safety_ready=%d)", s_dash.io != NULL,
              s_dash.thermo_bus != NULL && s_dash.thermo_bus->initialized, s_dash.safety != NULL);

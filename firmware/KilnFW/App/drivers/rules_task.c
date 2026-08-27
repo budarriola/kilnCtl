@@ -5,8 +5,10 @@
 
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/idf_additions.h"
 #include "freertos/task.h"
 
+#include "esp_heap_caps.h"
 #include "esp_timer.h"
 
 #include "MAX31856.h"
@@ -438,14 +440,26 @@ esp_err_t rules_task_start(SafetyLinkClass *safety)
      * task has actually taken. This reading came from a board that has never
      * run a real firing, so 2736B is a FLOOR on true usage, not the peak.
      * Re-read this after a profile run with rules configured before treating
-     * 33% as settled. Moving this stack to PSRAM would cost no internal DRAM
-     * at all, but needs an audit that nothing rules_task calls writes NVS or
-     * flash first -- a flash write from a PSRAM-stack task asserts inside
+     * 33% as settled.
+     *
+     * The stack lives in PSRAM (2026-08-27, ROADMAP.md M10), so those 4096
+     * bytes cost no internal DRAM at all. The callee audit that gated this is
+     * done: nothing this task reaches writes NVS or flash, which matters
+     * because a flash operation from a PSRAM-stack task asserts inside
      * ESP-IDF's cache-disable path (see safety_cfg_store.c's deferred flush
-     * for that incident). rules_task.c itself makes no nvs_* call; its callees
-     * are unaudited. */
-    BaseType_t ok = xTaskCreatePinnedToCore(rules_task_entry, "rules_task", 4096, NULL, 4,
-                                            &s_rules_task.task, tskNO_AFFINITY);
+     * for that incident). The audit did find one real reach -- not a write,
+     * but a cache-disabling READ: dashboard_get_status(), which this task
+     * calls every tick, used to perform esp_flash_get_size() and
+     * esp_image_get_metadata() lazily behind a first-caller-wins static. That
+     * made the safety "whichever task happens to arrive first is the httpd
+     * one", which is a race, not a guarantee. Those reads are now primed at
+     * startup on the app_main task (dashboard_http.c's
+     * read_flash_facts_once()), so this task can never be the caller that
+     * performs them. Anything added to this task's call graph later must be
+     * re-audited against the same rule. */
+    BaseType_t ok = xTaskCreatePinnedToCoreWithCaps(rules_task_entry, "rules_task", 4096, NULL, 4,
+                                                    &s_rules_task.task, tskNO_AFFINITY,
+                                                    MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (ok != pdPASS) {
         ESP_LOGE(TAG, "xTaskCreatePinnedToCore(rules_task) failed");
         return ESP_ERR_NO_MEM;
