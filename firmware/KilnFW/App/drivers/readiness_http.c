@@ -60,21 +60,39 @@ static void json_escape(const char *src, char *out, size_t out_cap)
     out[o] = '\0';
 }
 
+/* Bytes held back from the item loop so that, however full the buffer gets,
+ * there is always room for the "list was cut short" item below plus the "]}"
+ * that closes the document. Sized against those two literals with margin, and
+ * asserted against the real thing at the point of use. */
+#define READINESS_TRUNC_RESERVE 288u
+
 /* Appends one checklist item object to *o within cap, returning the new
  * offset (unchanged, i.e. truncated, if it would overflow -- same
  * "stop rather than corrupt" convention as every APPEND macro elsewhere in
  * this codebase, just as a plain function since this file builds the array
- * across many small per-item calls rather than one big format string). */
+ * across many small per-item calls rather than one big format string).
+ *
+ * A dropped item must never be silently dropped: this checklist exists to
+ * tell an operator what is NOT ready, so an item that falls off the end reads
+ * exactly like an item that passed. *dropped is raised on any overflow and
+ * the handler turns it into a visible READY_CANNOT_YET entry. */
 static size_t append_item(char *json, size_t cap, size_t o, bool first, const char *key, const char *label,
-                          readiness_status_t status, const char *detail, const char *fix_url)
+                          readiness_status_t status, const char *detail, const char *fix_url,
+                          bool *dropped)
 {
     char detail_esc[192];
     json_escape(detail, detail_esc, sizeof(detail_esc));
+    if (o >= cap) {
+        *dropped = true;
+        return o;
+    }
     int n = snprintf(json + o, cap - o,
                      "%s{\"key\":\"%s\",\"label\":\"%s\",\"status\":\"%s\",\"detail\":\"%s\","
                      "\"fix_url\":\"%s\"}",
                      first ? "" : ",", key, label, status_name(status), detail_esc, fix_url);
     if (n < 0 || (size_t)n >= cap - o) {
+        json[o] = '\0'; /* drop the partial object snprintf just wrote */
+        *dropped = true;
         return o; /* leave o unchanged -- caller's overflow guard */
     }
     return o + (size_t)n;
@@ -92,6 +110,12 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
     int n = snprintf(json, sizeof(json), "{\"items\":[");
     o = (n < 0 || (size_t)n >= sizeof(json)) ? sizeof(json) - 1 : (size_t)n;
     bool first = true;
+
+    /* The item loop may only use the buffer up to item_cap; the rest is held
+     * for the truncation notice and the closing "]}", so neither can itself be
+     * the thing that gets truncated. */
+    bool dropped = false;
+    const size_t item_cap = sizeof(json) - READINESS_TRUNC_RESERVE;
 
     /* 1. Network configured. AP-only is an explicit, recordable choice
      * (wifi_prov.c's mode model -- "AP only, forever, by user choice"), not
@@ -116,7 +140,7 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
                 snprintf(detail, sizeof(detail), "no network saved yet -- AP-only until one is added");
             }
         }
-        o = append_item(json, sizeof(json), o, first, "network", "Network configured", st, detail, "/wifi");
+        o = append_item(json, item_cap, o, first, "network", "Network configured", st, detail, "/wifi", &dropped);
         first = false;
     }
 
@@ -129,8 +153,8 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
         char detail[64];
         snprintf(detail, sizeof(detail), "%u of %u channels configured", thermo_count,
                  (unsigned)MAX31856_CHANNEL_COUNT);
-        o = append_item(json, sizeof(json), o, first, "thermo_count", "Thermocouple count / zone mapping", st,
-                        detail, "/settings/zones");
+        o = append_item(json, item_cap, o, first, "thermo_count", "Thermocouple count / zone mapping", st,
+                        detail, "/settings/zones", &dropped);
         first = false;
     }
 
@@ -152,8 +176,8 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
             st = (assigned == thermo_count) ? READY_OK : READY_NOT_DONE;
             snprintf(detail, sizeof(detail), "%u of %u zones have a relay assigned", assigned, thermo_count);
         }
-        o = append_item(json, sizeof(json), o, first, "relays_assigned", "Relays assigned to zones", st, detail,
-                        "/settings/zones");
+        o = append_item(json, item_cap, o, first, "relays_assigned", "Relays assigned to zones", st, detail,
+                        "/settings/zones", &dropped);
         first = false;
     }
 
@@ -196,8 +220,8 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
                          (unsigned)heating, (unsigned)thermo_count);
             }
         }
-        o = append_item(json, sizeof(json), o, first, "control_mode", "Control mode chosen per zone", st, detail,
-                        "/settings/zones");
+        o = append_item(json, item_cap, o, first, "control_mode", "Control mode chosen per zone", st, detail,
+                        "/settings/zones", &dropped);
         first = false;
     }
 
@@ -233,8 +257,8 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
                          set_count, thermo_count);
             }
         }
-        o = append_item(json, sizeof(json), o, first, "guard_max_temp", "Guard limits (max_temp_c)", st, detail,
-                        "/settings/zones");
+        o = append_item(json, item_cap, o, first, "guard_max_temp", "Guard limits (max_temp_c)", st, detail,
+                        "/settings/zones", &dropped);
         first = false;
     }
 
@@ -265,8 +289,8 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
                          thermo_count);
             }
         }
-        o = append_item(json, sizeof(json), o, first, "guard_cross_zone", "Cross-zone plausibility guard", st,
-                        detail, "/settings/zones");
+        o = append_item(json, item_cap, o, first, "guard_cross_zone", "Cross-zone plausibility guard", st,
+                        detail, "/settings/zones", &dropped);
         first = false;
     }
 
@@ -319,8 +343,8 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
                          "no offsets applied -- correct if your thermocouples read true");
             }
         }
-        o = append_item(json, sizeof(json), o, first, "calibration", "Thermocouple calibration offsets", st,
-                        detail, "/settings/zones");
+        o = append_item(json, item_cap, o, first, "calibration", "Thermocouple calibration offsets", st,
+                        detail, "/settings/zones", &dropped);
         first = false;
     }
 
@@ -360,8 +384,8 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
                      (unsigned)builtin_visible, builtin_visible == 1 ? "" : "s");
         }
         readiness_status_t st = any ? READY_OK : READY_NOT_DONE;
-        o = append_item(json, sizeof(json), o, first, "profile_saved",
-                        "At least one fire profile available", st, detail, "/profiles");
+        o = append_item(json, item_cap, o, first, "profile_saved",
+                        "At least one fire profile available", st, detail, "/profiles", &dropped);
         first = false;
     }
 
@@ -398,8 +422,8 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
             snprintf(detail, sizeof(detail), "%u of %u zones have gains or an identified model", tuned,
                      thermo_count);
         }
-        o = append_item(json, sizeof(json), o, first, "autotune", "Autotune run per zone (or gains by hand)", st,
-                        detail, "/settings/zones");
+        o = append_item(json, item_cap, o, first, "autotune", "Autotune run per zone (or gains by hand)", st,
+                        detail, "/settings/zones", &dropped);
         first = false;
     }
 
@@ -422,8 +446,8 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
          * /diagnostics/thermo and /safety for the per-subsystem detail this
          * item's own `detail` string already breaks io/thermo/safety out
          * into). */
-        o = append_item(json, sizeof(json), o, first, "hardware", "Hardware present and answering", st, detail,
-                        "/diagnostics");
+        o = append_item(json, item_cap, o, first, "hardware", "Hardware present and answering", st, detail,
+                        "/diagnostics", &dropped);
         first = false;
     }
 
@@ -475,8 +499,8 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
             snprintf(detail, sizeof(detail), "%u of %u safety parameters still have no value", (unsigned)unset,
                      (unsigned)count);
         }
-        o = append_item(json, sizeof(json), o, first, "safety_commissioned", "Safety processor commissioned", st,
-                        detail, "/safety/commissioning");
+        o = append_item(json, item_cap, o, first, "safety_commissioned", "Safety processor commissioned", st,
+                        detail, "/safety/commissioning", &dropped);
         first = false;
     }
 
@@ -504,13 +528,43 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
         } else {
             snprintf(detail, sizeof(detail), "all storage sections mounted, zone config valid");
         }
-        o = append_item(json, sizeof(json), o, first, "storage", "Storage sections compatible", st, detail,
-                        "/settings/zones");
+        o = append_item(json, item_cap, o, first, "storage", "Storage sections compatible", st, detail,
+                        "/settings/zones", &dropped);
         first = false;
     }
 
+    /* An operator reads this list to decide whether it is safe to fire. A
+     * checklist that quietly came back short would show no red crosses and
+     * look like a pass, so a dropped item is reported AS an item -- and as
+     * READY_CANNOT_YET, because what those checks would have said is exactly
+     * what is unknown. */
+    if (dropped) {
+        bool notice_dropped = false;
+        o = append_item(json, sizeof(json), o, first,
+                        "checklist_truncated", "Checklist incomplete", READY_CANNOT_YET,
+                        "the board ran out of room to report every check -- items are missing "
+                        "from this list, so treat it as inconclusive, not as a pass",
+                        "/diagnostics", &notice_dropped);
+        first = false;
+        if (notice_dropped) {
+            /* Would mean READINESS_TRUNC_RESERVE is too small for its own
+             * notice -- a build-time sizing error, not a runtime condition. */
+            ESP_LOGE(TAG, "readiness truncation notice did not fit -- raise READINESS_TRUNC_RESERVE");
+        }
+    }
+
     n = snprintf(json + o, sizeof(json) - o, "]}");
-    o = (n < 0 || (size_t)n >= sizeof(json) - o) ? o : o + (size_t)n;
+    if (n < 0 || (size_t)n >= sizeof(json) - o) {
+        /* Unreachable while the reserve holds, but an unterminated body is
+         * invalid JSON, and the page's fetch would throw and render nothing at
+         * all -- so close the document by force rather than ship a fragment. */
+        o = sizeof(json) - 3;
+        memcpy(json + o, "]}", 2);
+        o += 2;
+        ESP_LOGE(TAG, "readiness JSON had no room to close -- forced terminator");
+    } else {
+        o += (size_t)n;
+    }
 
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_send(req, json, o);
