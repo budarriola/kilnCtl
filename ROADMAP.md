@@ -1,6 +1,6 @@
 # kilnCtl Roadmap — both processors
 
-> **Status:** planning · **Last reviewed:** 2026-08-24
+> **Status:** planning · **Last reviewed:** 2026-08-27
 > **Start here:** the [What is actually left](#what-is-actually-left) section
 > immediately below is the short answer; the milestones are the detail.
 > **Keep this file current.** This is the top-level dispatch board: the place to
@@ -683,6 +683,20 @@ Owned by [`firmware/KilnFW/TODO.md`](firmware/KilnFW/TODO.md) §§12–13.
       It was invisible because the instrumentation had inherited vanilla
       FreeRTOS's word units; ESP-IDF returns **bytes** (`task.h:1509`), so a
       stray ×4 reported that task as 45.3% and OK. `d90986c`
+- [x] **A safety checklist could come back short and look like a pass.**
+      `/api/readiness` appended items with the usual "stop rather than
+      corrupt" overflow rule, so a dropped item was simply absent -- and this
+      is the one endpoint where absent reads as approval, since the list
+      exists to say what is NOT ready before a firing. It could also open the
+      array `[,` from a single dropped first item, and skip its own closing
+      `]}`, both of which are invalid JSON that the page's fetch throws on,
+      leaving an operator on "Loading" with no reason why. Now a reserve is
+      held back for the terminator, `first` only clears when an item really
+      landed, and any drop is reported AS an item. `GET /api/zones` got the
+      matching treatment: a truncated body is now a 500 that names the cause
+      instead of a half-document. Negative-tested on the board with the
+      buffer cut to 900 bytes -- four items fit and the response carried the
+      "Checklist incomplete" entry. 2026-08-26/27, `4e8e1f1`, `88f12e0`
 - [ ] **Re-read the stack margins after a real firing.** A high-water mark is
       only as good as the worst path taken, and this board has never run a
       profile with rules configured, so `rules_task`'s 2736 bytes is a FLOOR on

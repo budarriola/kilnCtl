@@ -75,7 +75,11 @@ static void json_escape(const char *src, char *out, size_t out_cap)
  * A dropped item must never be silently dropped: this checklist exists to
  * tell an operator what is NOT ready, so an item that falls off the end reads
  * exactly like an item that passed. *dropped is raised on any overflow and
- * the handler turns it into a visible READY_CANNOT_YET entry. */
+ * the handler turns it into a visible READY_CANNOT_YET entry.
+ *
+ * Callers must only clear `first` when the offset actually moved. Clearing it
+ * unconditionally meant a dropped FIRST item still armed the separator, and
+ * the array opened `[,{...}` -- invalid JSON from a single overflow. */
 static size_t append_item(char *json, size_t cap, size_t o, bool first, const char *key, const char *label,
                           readiness_status_t status, const char *detail, const char *fix_url,
                           bool *dropped)
@@ -140,8 +144,11 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
                 snprintf(detail, sizeof(detail), "no network saved yet -- AP-only until one is added");
             }
         }
+        size_t before_o = o;
         o = append_item(json, item_cap, o, first, "network", "Network configured", st, detail, "/wifi", &dropped);
-        first = false;
+        if (o != before_o) {
+            first = false;
+        }
     }
 
     /* 2. Thermocouple count / zone mapping. Gates almost everything below --
@@ -153,9 +160,12 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
         char detail[64];
         snprintf(detail, sizeof(detail), "%u of %u channels configured", thermo_count,
                  (unsigned)MAX31856_CHANNEL_COUNT);
+        size_t before_o = o;
         o = append_item(json, item_cap, o, first, "thermo_count", "Thermocouple count / zone mapping", st,
                         detail, "/settings/zones", &dropped);
-        first = false;
+        if (o != before_o) {
+            first = false;
+        }
     }
 
     /* 3. Relays assigned to zones. */
@@ -176,9 +186,12 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
             st = (assigned == thermo_count) ? READY_OK : READY_NOT_DONE;
             snprintf(detail, sizeof(detail), "%u of %u zones have a relay assigned", assigned, thermo_count);
         }
+        size_t before_o = o;
         o = append_item(json, item_cap, o, first, "relays_assigned", "Relays assigned to zones", st, detail,
                         "/settings/zones", &dropped);
-        first = false;
+        if (o != before_o) {
+            first = false;
+        }
     }
 
     /* 4. Control mode chosen per zone. NOTE: zone_control_mode_t's OFF
@@ -220,9 +233,12 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
                          (unsigned)heating, (unsigned)thermo_count);
             }
         }
+        size_t before_o = o;
         o = append_item(json, item_cap, o, first, "control_mode", "Control mode chosen per zone", st, detail,
                         "/settings/zones", &dropped);
-        first = false;
+        if (o != before_o) {
+            first = false;
+        }
     }
 
     /* 5. Guard limits (max_temp_c). 0 == "no ceiling", an explicit,
@@ -257,9 +273,12 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
                          set_count, thermo_count);
             }
         }
+        size_t before_o = o;
         o = append_item(json, item_cap, o, first, "guard_max_temp", "Guard limits (max_temp_c)", st, detail,
                         "/settings/zones", &dropped);
-        first = false;
+        if (o != before_o) {
+            first = false;
+        }
     }
 
     /* 6. Cross-zone plausibility guard (guard 8). Same 0-is-deliberate
@@ -289,9 +308,12 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
                          thermo_count);
             }
         }
+        size_t before_o = o;
         o = append_item(json, item_cap, o, first, "guard_cross_zone", "Cross-zone plausibility guard", st,
                         detail, "/settings/zones", &dropped);
-        first = false;
+        if (o != before_o) {
+            first = false;
+        }
     }
 
     /* 7. Thermocouple calibration offsets. The storage cannot tell "never
@@ -343,9 +365,12 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
                          "no offsets applied -- correct if your thermocouples read true");
             }
         }
+        size_t before_o = o;
         o = append_item(json, item_cap, o, first, "calibration", "Thermocouple calibration offsets", st,
                         detail, "/settings/zones", &dropped);
-        first = false;
+        if (o != before_o) {
+            first = false;
+        }
     }
 
     /* 8. At least one profile available to fire. The 28 shipped schedules
@@ -384,9 +409,12 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
                      (unsigned)builtin_visible, builtin_visible == 1 ? "" : "s");
         }
         readiness_status_t st = any ? READY_OK : READY_NOT_DONE;
+        size_t before_o = o;
         o = append_item(json, item_cap, o, first, "profile_saved",
                         "At least one fire profile available", st, detail, "/profiles", &dropped);
-        first = false;
+        if (o != before_o) {
+            first = false;
+        }
     }
 
     /* 9. Autotune run per zone, or gains entered by hand -- either counts,
@@ -422,9 +450,12 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
             snprintf(detail, sizeof(detail), "%u of %u zones have gains or an identified model", tuned,
                      thermo_count);
         }
+        size_t before_o = o;
         o = append_item(json, item_cap, o, first, "autotune", "Autotune run per zone (or gains by hand)", st,
                         detail, "/settings/zones", &dropped);
-        first = false;
+        if (o != before_o) {
+            first = false;
+        }
     }
 
     /* 10. Hardware present and answering. Mirrors /api/status's io_ready/
@@ -446,9 +477,12 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
          * /diagnostics/thermo and /safety for the per-subsystem detail this
          * item's own `detail` string already breaks io/thermo/safety out
          * into). */
+        size_t before_o = o;
         o = append_item(json, item_cap, o, first, "hardware", "Hardware present and answering", st, detail,
                         "/diagnostics", &dropped);
-        first = false;
+        if (o != before_o) {
+            first = false;
+        }
     }
 
     /* 10a. Safety processor commissioned. Added 2026-08-22: the whole
@@ -499,9 +533,12 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
             snprintf(detail, sizeof(detail), "%u of %u safety parameters still have no value", (unsigned)unset,
                      (unsigned)count);
         }
+        size_t before_o = o;
         o = append_item(json, item_cap, o, first, "safety_commissioned", "Safety processor commissioned", st,
                         detail, "/safety/commissioning", &dropped);
-        first = false;
+        if (o != before_o) {
+            first = false;
+        }
     }
 
     /* 11. Storage sections compatible -- the zones_config_valid flag (TODO.md
@@ -528,9 +565,12 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
         } else {
             snprintf(detail, sizeof(detail), "all storage sections mounted, zone config valid");
         }
+        size_t before_o = o;
         o = append_item(json, item_cap, o, first, "storage", "Storage sections compatible", st, detail,
                         "/settings/zones", &dropped);
-        first = false;
+        if (o != before_o) {
+            first = false;
+        }
     }
 
     /* An operator reads this list to decide whether it is safe to fire. A

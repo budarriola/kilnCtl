@@ -24,22 +24,35 @@ flat trace instead of proposing gains from a zero-gain plant.
 
 Still open from this round:
 
-- [ ] **`guard_wrong_dir_window_s` does not control the guard an operator
-      would think it does.** The per-zone field is exposed in Settings > Zones
+- [x] **`guard_wrong_dir_window_s` does not control the guard an operator
+      would think it does.** DONE 2026-08-26: the field now feeds both
+      branches, and guard 1 additionally gained its own
+      `guard_progress_window_s` (and `guard_progress_duty_min`) on
+      /settings/safety, so the heating-failed case is configurable in its own
+      right rather than borrowing guard 2's field. Bench-confirmed: a dead
+      element tripped at 64 s against a configured 60 s window, where it
+      previously took the hardcoded 300 s. The per-zone field is exposed in Settings > Zones
       and reads as "how long heat may be commanded without a response", but it
       only feeds guard 2 (already at/above setpoint and falling). The
       heating-failed case -- the one that matters when an element dies -- uses
       the hardcoded `PROGRESS_WINDOW_S` (300 s) and cannot be configured at
       all. Either wire the field to both or rename it.
-- [ ] **The frozen-sensor guard cannot fire on real hardware.** It resets its
+- [x] **The frozen-sensor guard cannot fire on real hardware.** DONE
+      2026-08-26: `FROZEN_EPS_C` (0.05 C) epsilon band added, and exposed as
+      the per-zone `guard_frozen_eps_c` override on /settings/safety. It resets its
       window on any change at all (`in->measurement_c != state->frozen_last_c`),
       and a live MAX31856 dithers by 0.01-0.1 C every read, so the 120 s window
       never accumulates. It can only catch a bit-exact frozen value. Needs an
       epsilon band.
-- [ ] **Autotune's relay switching is not counted toward contact wear.**
+- [x] **Autotune's relay switching is not counted toward contact wear.**
+      DONE 2026-08-26; bench-confirmed, the counter moved 9 -> 27 across one
+      step test.
       `relay_cycles` is fed only by profile_executor's accounting, so a long
       relay-feedback autotune ages the contacts invisibly.
-- [ ] **A completed or faulted run never releases its relay ownership**
+- [x] **A completed or faulted run never releases its relay ownership**
+      DONE 2026-08-26 -- `release_profile_relay_claim()` on every path leaving
+      RUNNING; bench-confirmed by a manual relay command succeeding after a
+      faulted run.
       (already tracked below) -- confirmed live this round: relay 1 stays
       RELAY_OWNER_PROFILE after the run ends.
 
@@ -109,7 +122,15 @@ gitignored OTA-rollback setting, and the zones-page error conflation.
 Everything below is **confirmed by code reading and still open**, ordered by
 severity.
 
-- [ ] **A v3/v4 zones blob is adopted as garbage and marked valid.**
+- [x] **A v3/v4 zones blob is adopted as garbage and marked valid.** DONE
+      2026-08-26 (commit 03a3424), exactly as prescribed below. All six
+      historical layouts were recovered from this file's own git history
+      rather than guessed, so every version 1-6 got a real typed converter.
+      The mid-struct insertion was v5's `tc_type`, ahead of `model_k_dc` and
+      `thermo_mask`. `nvs_load_from()` and `zones_config_import_blob()` now
+      share one decoder -- they had each carried a copy of the same bug.
+      Bench-verified: the live blob upconverted with every field identical.
+      **The `profiles_http.c` sibling immediately below is still open.**
       `zones_http.c`'s older-version NVS load path does **no length check** and
       never calls `validate_zones_cfg()`, and the migration assumes the struct
       only ever grew at the tail -- false, since three of four bumps added
@@ -159,7 +180,14 @@ severity.
 - [ ] **`GET /api/profiles` overflows at 8 slots with escape-heavy names**
       (800 bytes needed vs 784 available) producing syntactically invalid JSON.
       Per-entry budget of 96 ignores that a 15-char name escapes to 30.
-- [ ] **`/api/readiness` drops items silently and can emit invalid JSON.**
+- [x] **`/api/readiness` drops items silently and can emit invalid JSON.**
+      DONE 2026-08-26 (commit 4e8e1f1). A reserve is held back so the closing
+      `]}` can never be the thing that overflows; `first` is only cleared when
+      the offset actually moved, so a dropped first item can no longer open
+      the array `[,`; and any drop now appears AS an item
+      (`checklist_truncated`, READY_CANNOT_YET) rather than shortening a list
+      an operator reads as a go/no-go. Negative-tested on the board with the
+      buffer cut to 900 bytes.
       `append_item` returns the offset unchanged on overflow while `first` is
       set unconditionally, so a failed first item yields `[,{...}`; the closing
       `]}` is skipped on overflow too. ~156 bytes of margin at 12 items.
@@ -167,7 +195,9 @@ severity.
       unclamped at the high end** -- a stack over-read that sends adjacent
       stack memory to the client if the format ever exceeds the buffer. Two
       sites pair a 192-byte destination with a 257-byte escaped source.
-- [ ] **PID zones can command heat with no valid reading.** The
+- [x] **PID zones can command heat with no valid reading.** DONE
+      2026-08-26 -- the deferred-on-time payback block moved inside
+      `if (sensor_ok[zi])`, matching bang-bang's refusal. The
       deferred-on-time payback block in `profile_executor.c` runs
       unconditionally, outside the `if (sensor_ok[zi])` that zeroes `duty`, so
       a zone that accrued credit under the load cap and then loses its
@@ -558,12 +588,22 @@ wins — see `docs/GUARD_TEST_MATRIX.md`), lives in that doc, not here.
       "disable thermal protection" affordance exists today, so there's
       nothing to gate yet — but the acknowledged, Kconfig-gated design itself
       isn't built either.
-- [~] **Guard thresholds are per-zone config (done); Kconfig-tunable compile-time
-      defaults are not.** The per-zone-override half closed 2026-08-16 (8
-      threshold fields added to `zone_cfg_t`, `zones_page.html`'s "Advanced
-      guard thresholds" disclosure). Fallback numbers stay `#define`s in
-      `thermal_guard.c` — nothing asked for compile-time tunability, only
-      per-zone at runtime, so this is a scope note, not a gap.
+- [x] **Guard thresholds are per-zone config.** The first eight closed
+      2026-08-16 (`zone_cfg_t`, `zones_page.html`'s "Advanced guard
+      thresholds" disclosure). The rest closed 2026-08-26 at the owner's
+      request ("i dont realy like magic numbers"): guard 1's arming duty and
+      no-progress window, guard 4's drift band, guard 7's frozen epsilon and
+      guard 8's period are now per-zone fields too, alongside the executor's
+      bang-bang band, cooling-limited margin/hold and ramp-lock band, and the
+      one global PC-link abort timeout. Guard 8's period is the notable one:
+      it already existed in `thermal_guard_cfg_t` but was never plumbed to the
+      API and was passed 0 at the only call site, so it was invisible rather
+      than absent. Edited on **/settings/safety**; NVS `ZONES_CFG_VERSION`
+      7 -> 8. Every one keeps the "0 = not configured, the module substitutes
+      its own named `#define`" convention, so the fallback numbers stay in
+      code as the documented defaults and an unconfigured board is unchanged.
+      Kconfig-tunable compile-time defaults were never asked for and remain a
+      scope note, not a gap.
 
 ### 6A.4 PID autotune, for every zone
 
@@ -603,7 +643,10 @@ built. Full detail in `docs/PID_CONTROL.md`.
       what remains is informing the threshold from a measured coupling
       matrix rather than a hand-picked constant, which needs either a real
       matrix (no thermocouple hardware to capture one) or an operator
-      willing to enter a number for their own kiln.
+      willing to enter a number for their own kiln. Its *period* stopped
+      being hardcoded on 2026-08-26 (`guard_cross_zone_period_s`,
+      /settings/safety); the delta that arms the guard is what still needs a
+      measurement.
 - (f) Full MIMO / model-predictive control: **decided out of scope** — the
   benefit over (a)+(d)+(e) doesn't justify the cost on a plant this slow, and
   there's no way to validate it safely on a device that fires unattended.
