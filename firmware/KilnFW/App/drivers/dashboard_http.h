@@ -184,6 +184,12 @@ typedef struct {
      * here is set, and a profile run in that state reports itself as running,
      * unfaulted, at duty 0. 0 means nothing is blocking heat. */
     uint32_t heat_block_sources;
+    /* Bit N set for each zone left latched-blocked by a guard trip
+     * (relay_authority_latched_blocked_mask()). Reported for the same reason
+     * heat_block_sources is: the latch outlives the firing that set it and
+     * refuses heat on that zone until a new firing or an autotune clears it,
+     * and until now nothing displayed it anywhere. */
+    uint8_t  zone_blocked_mask;
 
     /* TODO.md 9.0's deferred "GUI names both versions and which one is
      * older" item: this firmware's own KILNLINK_PROTOCOL_VERSION (always

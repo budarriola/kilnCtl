@@ -38,6 +38,20 @@ bool relay_authority_zone_blocked(SafetyLinkClass *safety, uint8_t zone_index, u
     return false;
 }
 
+bool relay_authority_zone_latched_blocked(uint8_t zone_index)
+{
+    return (zone_index < RELAY_AUTHORITY_MAX_ZONES) && s_zone_blocked[zone_index];
+}
+
+uint8_t relay_authority_latched_blocked_mask(void)
+{
+    uint8_t mask = 0;
+    for (uint8_t i = 0; i < RELAY_AUTHORITY_MAX_ZONES; i++) {
+        if (s_zone_blocked[i]) mask |= (uint8_t)(1u << i);
+    }
+    return mask;
+}
+
 void relay_authority_set_zone_blocked(uint8_t zone_index, bool blocked)
 {
     if (zone_index < RELAY_AUTHORITY_MAX_ZONES) {

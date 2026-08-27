@@ -148,9 +148,22 @@ static void apply_relay(bool want_on)
         s_at.duty = 0.0f;
         return;
     }
+    /* Both outcomes below used to be discarded silently, and between them they
+     * made a step test that never energized anything indistinguishable from
+     * one that did: the engine reported duty 0.50 throughout (s_at.duty is set
+     * from want_relay_on, not from what the relay did), the trace stayed flat
+     * because no heat was ever applied, and the run ended "fit failed:
+     * response too small to fit (trace flat or noise-dominated)" -- an
+     * accusation against the kiln for the engine's own inaction. Observed on
+     * the bench: 293 relay samples over 12 s of stepping, every one open, with
+     * relay_cycles unmoved. profile_executor.c's apply_relay() already logs
+     * both of these; this one did not. */
     if (want_on) {
         uint32_t sources = 0;
         if (relay_authority_zone_blocked(s_at.safety, s_at.zone_index, &sources)) {
+            ESP_LOGW(TAG, "autotune zone %u wants heat but is BLOCKED: sources 0x%02X -- the trace "
+                          "will be flat and the fit will fail for that reason, not the kiln's",
+                     s_at.zone_index, (unsigned)sources);
             want_on = false;
         }
     }
@@ -158,7 +171,15 @@ static void apply_relay(bool want_on)
         /* AUTHORIZED, not the manual gate -- see kiln_io_owner.h's top
          * comment and profile_executor.c's apply_relay() for the identical
          * reasoning (2026-08-19, TODO.md 10.14 Phase 1). */
-        kiln_io_owner_command_set_relay_mask_authorized(mask, want_on ? mask : 0);
+        esp_err_t err = kiln_io_owner_command_set_relay_mask_authorized(mask, want_on ? mask : 0);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "autotune zone %u relay write failed: %s -- relay state is unknown and "
+                          "the trace cannot be trusted",
+                     s_at.zone_index, esp_err_to_name(err));
+        }
+    } else {
+        ESP_LOGW(TAG, "autotune zone %u has no expander handle -- nothing will be energized",
+                 s_at.zone_index);
     }
     sim_backend_note_zone_relay(s_at.zone_index, want_on); /* no-op unless CONFIG_KILNCTL_SIM_PLANT */
 }
@@ -936,6 +957,24 @@ static bool begin_run_locked(uint8_t zone_index, char *err_msg, size_t err_cap)
      * RELAY_OWNER_AUTOTUNE doc comment for why this exists. `mask` was already
      * validated non-zero above (before this function took the lock), so this
      * cannot silently claim nothing. */
+    /* Clear a per-zone block latched by an EARLIER run's guard trip, exactly
+     * as profile_executor.c's clear_this_runs_faults() does when the operator
+     * starts a new firing -- the same gesture ("run heat on this zone") after
+     * the same kind of trip, so it gets the same policy rather than a new one.
+     *
+     * Without this the latch outlived the firing that set it and there was no
+     * way out but a reboot or another firing: a bench guard-1 trip left zone 0
+     * blocked, and the autotune started right afterwards settled for three
+     * minutes, drove the relay 0 times out of 249 samples, and concluded
+     * "response too small to fit (trace flat or noise-dominated)" -- reading
+     * as a verdict on the kiln. Logged loudly because clearing a guard trip is
+     * never a detail. */
+    if (relay_authority_zone_latched_blocked(zone_index)) {
+        ESP_LOGW(TAG, "zone %u was still blocked by an earlier guard trip -- clearing it because the "
+                      "operator asked for an autotune on this zone",
+                 zone_index);
+        relay_authority_set_zone_blocked(zone_index, false);
+    }
     relay_authority_claim_mask(mask, RELAY_OWNER_AUTOTUNE);
     /* Both results are invalidated at the start of every run, whichever method
      * follows: exactly one of them will be filled in, and a stale `valid` from

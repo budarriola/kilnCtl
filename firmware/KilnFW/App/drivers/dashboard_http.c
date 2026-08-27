@@ -401,6 +401,9 @@ void dashboard_get_status(dashboard_status_t *out)
      * dashboard_http.h's field comment. unit_pref_get() is O(1) RAM-only, so
      * this costs nothing extra on either the HTTP or LCD poll path. */
     out->temp_unit = unit_pref_get();
+    /* Local state, always knowable -- deliberately not inside the "did the
+     * safety link answer" block above. See the field comment. */
+    out->zone_blocked_mask = relay_authority_latched_blocked_mask();
 }
 
 /* JSON has no way to spell a NaN or an infinity. printf spells them "nan" and
@@ -565,6 +568,7 @@ static esp_err_t status_get_handler(httpd_req_t *req)
      * heat"), not an absence, so this one does NOT take the null convention
      * its neighbours use. */
     APPEND(",\"heat_block_sources\":%lu", (unsigned long)ds.heat_block_sources);
+    APPEND(",\"zone_blocked_mask\":%u", (unsigned)ds.zone_blocked_mask);
 
     /* TODO.md 9.0's deferred "GUI names both versions and which one is
      * older" item. self_protocol_version is always known; peer fields are

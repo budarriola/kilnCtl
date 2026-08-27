@@ -65,6 +65,20 @@ bool relay_authority_zone_blocked(SafetyLinkClass *safety, uint8_t zone_index, u
  * reboot, same as everything else here). */
 void relay_authority_set_zone_blocked(uint8_t zone_index, bool blocked);
 
+/* The latched per-zone block on its own, without the global fault-source
+ * check relay_authority_zone_blocked() folds in. Needed because the latch
+ * survives the run that set it: profile_executor.c clears it only from
+ * clear_this_runs_faults(), i.e. when the NEXT firing starts and marks that
+ * zone active. Until then the zone silently refuses heat -- an autotune run
+ * on it settled for three minutes, drove nothing, and reported "response too
+ * small to fit (trace flat or noise-dominated)", blaming the kiln for a latch
+ * left behind by an earlier trip. Reboot was the only other way out. */
+bool relay_authority_zone_latched_blocked(uint8_t zone_index);
+
+/* Bit N (0-based zone index) set for each zone currently latched-blocked --
+ * so the block can be SHOWN, which is what it never was. */
+uint8_t relay_authority_latched_blocked_mask(void);
+
 /* Per-relay ownership (TODO.md section 0's "does the web UI's manual relay
  * override fight a running profile over the same relay" decision, closing
  * the open gap TODO.md's "Manual relay control is not blocked during a
