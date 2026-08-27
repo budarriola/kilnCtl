@@ -357,9 +357,30 @@ static const char *check_relay_not_zone_owned(int relay_n)
             continue;
         }
         if ((zone_mask & bit) != 0) {
+            /* Two things this message used to get wrong, both found on the
+             * bench trying to rule-drive relay 2:
+             *
+             * It numbered the zone from 1 while every other surface on this
+             * board -- the JSON, the web pages, and the LCD -- numbers zones
+             * from 0, so it reported "zone 2" for zone index 1 and sent the
+             * reader looking at the wrong zone's settings.
+             *
+             * And it asserted "is controlled by PID" unconditionally, without
+             * ever reading the zone's control mode. Relay 2 belongs to zone 1,
+             * which was set to OFF; the refusal named a mode that zone did not
+             * have. The refusal itself is still correct -- a relay assigned to
+             * a zone stays that zone's relay whatever its mode is today, since
+             * the operator can switch the mode back on at any moment and two
+             * owners would then fight over the same contact -- but it has to
+             * say what is actually true. */
+            zone_control_mode_t zmode = ZONE_CONTROL_MODE_OFF;
+            zones_config_get_control_mode(zi, &zmode);
+            const char *mode_words = (zmode == ZONE_CONTROL_MODE_PID)      ? "PID"
+                                     : (zmode == ZONE_CONTROL_MODE_BANGBANG) ? "bang-bang"
+                                                                             : "OFF";
             snprintf(s_reason, sizeof(s_reason),
-                     "relay %d is assigned to zone %u and is controlled by PID -- it cannot be rule_driven",
-                     relay_n, (unsigned)(zi + 1));
+                     "relay %d is assigned to zone %u (control mode %s) -- it cannot be rule_driven",
+                     relay_n, (unsigned)zi, mode_words);
             return s_reason;
         }
     }
