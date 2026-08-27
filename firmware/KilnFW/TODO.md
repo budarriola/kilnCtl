@@ -152,26 +152,44 @@ severity.
       `profile_t` embeds a `segments[]` array, so the first field ever added to
       `profile_segment_t` reproduces the zones bug exactly. Fix before
       `PROFILE_VERSION` reaches 2.
-- [ ] **`POST /api/factory_reset` is still unauthenticated.** The interlock
+- [x] **`POST /api/factory_reset` is still unauthenticated.** DONE
+      2026-08-27 (`f58e040`), as prescribed: `ota_http_authenticate_request()`
+      exported from `ota_http.c` (the private-header-parsing gap this item
+      named), a new `OTA_HTTP_CONTEXT_FACTORY_RESET` with its own lockout
+      budget, and auth ahead of the interlock so a refusal reason naming a
+      live zone temperature cannot leak to an unauthenticated caller.
+      Bench-verified: no header -> 400, bogus MAC -> 403, config intact. The interlock
       landed; auth did not. It is strictly more destructive than
       `POST /api/ota/esp/rollback`, which *is* challenge-response
       authenticated. Needs a new `ota_http_context_t` plus an exported
       request-verify helper (the header parsing is currently private to
       `ota_http.c`).
-- [ ] **An open AP (empty AP password) reduces OTA auth to nothing.**
+- [x] **An open AP (empty AP password) reduces OTA auth to nothing.** DONE
+      2026-08-27 (`f58e040`) -- refused after the BOOT-button check and
+      before any HMAC math, and surfaced as `ota_auth_disabled` on
+      `/api/status` next to `boot_button_bypass_active`. The physical
+      BOOT-button recovery window is untouched, so an open-AP board is not
+      left unflashable.
       `ota_http.c` HMACs with a zero-length key and does not reject it, so
       anyone who can reach the board can compute a valid MAC from public
       information and flash both processors. Refuse when `pw_len == 0`, and
       surface the condition on `/api/status` next to
       `boot_button_bypass_active` -- the codebase already accepts that "this
       board has no OTA auth right now" must be permanently visible.
-- [ ] **`POST /api/zones` and `POST /api/rules` are not gated on a running
-      firing**, unlike `kiln_cfg_http`'s apply and `backup_http`'s restore,
+- [x] **`POST /api/zones` and `POST /api/rules` are not gated on a running
+      firing** DONE 2026-08-27 -- both now run the same
+      `ota_http_check_interlocks()` gate as `kiln_cfg_http`'s apply and
+      `backup_http`'s restore. Proven both ways on the board: 409 "a profile
+      is running" during a firing, 200 for the identical request when idle., unlike `kiln_cfg_http`'s apply and `backup_http`'s restore,
       which write the same `zones_cfg_t`. Changing `relay_mask` mid-run moves
       the firing onto a different physical relay and leaves the old one
       wherever it was last commanded, with nobody driving it off.
-- [ ] **`/api/status` has ~46 bytes of margin in a 2500-byte buffer, and goes
-      ~120 bytes negative if the build strings need escaping.**
+- [x] **`/api/status` has ~46 bytes of margin in a 2500-byte buffer, and goes
+      ~120 bytes negative if the build strings need escaping.** DONE
+      2026-08-27: overflow is now a 500 with a valid body naming the cause,
+      matching `zones_http.c`, so the endpoint can no longer emit a truncated
+      document however the buffer's margin drifts as fields are added. The
+      hand-sizing itself is no longer load-bearing, which was the point.
       `safety_build_commit`/`datetime` arrive over the link from the RP2040, so
       a corrupt or hostile FW_VERSION frame overflows it deterministically ->
       truncated JSON -> the dashboard's "Loading..." hang. Stop hand-sizing
@@ -191,6 +209,18 @@ severity.
       `append_item` returns the offset unchanged on overflow while `first` is
       set unconditionally, so a failed first item yields `[,{...}`; the closing
       `]}` is skipped on overflow too. ~156 bytes of margin at 12 items.
+- [ ] **`ota_http.c` and `factory_reset.c` have no host-test coverage at
+      all.** `build_host_tests.ps1` cannot compile either (both need ESP-IDF
+      headers -- `esp_http_server.h`, `psa/crypto.h`, FreeRTOS, `wifi_prov.h`
+      -- that the host tree has no stubs for), so the 2026-08-27 auth work
+      (`f58e040`) shipped verified only on hardware and by code reading. That
+      is weaker than this repo's own negative-test rule wants for a security
+      change. Close it by either adding ESP-IDF stubs for `ota_http.c`, or
+      factoring the two new decisions (the `pw_len == 0` refusal and the
+      per-context dispatch) into pure functions in a file that IS host-tested,
+      the way `ota_auth.c`/`ota_interlock.c` already split out the testable
+      half.
+
 - [ ] **Fifteen `httpd_resp_send(req, json, n)` sites use `snprintf`'s return
       unclamped at the high end** -- a stack over-read that sends adjacent
       stack memory to the client if the format ever exceeds the buffer. Two
