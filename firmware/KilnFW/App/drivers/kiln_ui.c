@@ -436,9 +436,28 @@ static void log_tap_targets(lv_obj_t *obj, int depth)
             /* Restored to INFO alongside the keyboard-key case above -- see
              * that comment; the flood is now handled by gating the automatic
              * call site, not by deleting this log level. */
-            ESP_LOGI(TAG, "  tap target%*s (%d,%d)-(%d,%d) centre=(%d,%d) \"%s\"", depth * 2, "",
+            /* Two annotations, both added because their absence actively
+             * misread the screen during a bench sweep:
+             *
+             * "(hidden)" -- LVGL skips a LV_OBJ_FLAG_HIDDEN object for hit
+             * testing *and* for flex layout, so a hidden strip keeps whatever
+             * coordinates it last had and occupies no height. Printed without
+             * the marker it looked like a live, full-width tap target. The
+             * subtree is still walked: knowing where a hidden widget would
+             * appear is the point of this dump.
+             *
+             * "<- child label" -- the caption is borrowed from the first label
+             * grandchild, which is right for a button but wrong for a plain
+             * container, where it reports a sibling's text as if it were the
+             * container's own. The home page's body container borrowing the
+             * hidden safety-trip strip's text read as a live safety trip on a
+             * board whose diag_state was ARMED. */
+            bool hidden = lv_obj_has_flag(child, LV_OBJ_FLAG_HIDDEN);
+            bool borrowed = (text[0] != '\0') && !lv_obj_check_type(child, &lv_button_class);
+            ESP_LOGI(TAG, "  tap target%*s (%d,%d)-(%d,%d) centre=(%d,%d) \"%s\"%s%s", depth * 2, "",
                      (int)area.x1, (int)area.y1, (int)area.x2, (int)area.y2,
-                     (int)((area.x1 + area.x2) / 2), (int)((area.y1 + area.y2) / 2), text);
+                     (int)((area.x1 + area.x2) / 2), (int)((area.y1 + area.y2) / 2), text,
+                     borrowed ? " <- child label" : "", hidden ? " (hidden)" : "");
         }
 
         log_tap_targets(child, depth + 1);

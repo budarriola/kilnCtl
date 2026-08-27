@@ -400,6 +400,33 @@ void dashboard_get_status(dashboard_status_t *out)
     out->temp_unit = unit_pref_get();
 }
 
+/* JSON has no way to spell a NaN or an infinity. printf spells them "nan" and
+ * "inf", which are bare identifiers, so a single non-finite float turns the
+ * whole response into a document JSON.parse() rejects -- and main_page.html's
+ * poll() swallows that in an empty .catch(), leaving the panel on "Loading..."
+ * with no visible error. This is the same failure the buffer-size comment
+ * below describes, reached by a different route.
+ *
+ * Two producers here really do hand us NaN: the safety link initialises
+ * trip_safety_tc_c/trip_deciding_threshold to NAN (safety_link.c), so any trip
+ * whose reason carries no temperature -- S6a, the link/main-controller faults
+ * -- reports one; and MAX31856.c leaves temp_c/cj_c NaN on a faulted or
+ * open-circuit channel, so unplugging a thermocouple did it too.
+ *
+ * Emit null instead, which is what every other "we do not have this reading"
+ * field on this endpoint already emits. */
+static const char *json_f(char *buf, size_t buf_len, const char *fmt, float v)
+{
+    if (!isfinite(v)) {
+        return "null";
+    }
+    int n = snprintf(buf, buf_len, fmt, (double)v);
+    if (n < 0 || (size_t)n >= buf_len) {
+        return "null";
+    }
+    return buf;
+}
+
 static esp_err_t status_get_handler(httpd_req_t *req)
 {
     /* Bumped from 1700 to 2200: at 1700 this handler was silently truncating
@@ -469,10 +496,15 @@ static esp_err_t status_get_handler(httpd_req_t *req)
             } else {
                 snprintf(age_buf, sizeof(age_buf), "%lu", (unsigned long)r->age_ms);
             }
+            char temp_buf[16];
+            char cj_buf[16];
             APPEND(
-                "%s{\"channel\":%u,\"temp_c\":%.2f,\"cj_c\":%.2f,\"valid\":%s,\"fault_status\":%u,"
+                "%s{\"channel\":%u,\"temp_c\":%s,\"cj_c\":%s,\"valid\":%s,\"fault_status\":%u,"
                 "\"spi_failed\":%s,\"stale\":%s,\"age_ms\":%s}",
-                i == 0 ? "" : ",", r->channel, (double)r->temp_c, (double)r->cj_c, r->valid ? "true" : "false",
+                i == 0 ? "" : ",", r->channel,
+                json_f(temp_buf, sizeof(temp_buf), "%.2f", r->temp_c),
+                json_f(cj_buf, sizeof(cj_buf), "%.2f", r->cj_c),
+                r->valid ? "true" : "false",
                 r->fault_status, r->spi_failed ? "true" : "false", r->stale ? "true" : "false",
                 age_buf);
         }
@@ -563,8 +595,12 @@ static esp_err_t status_get_handler(httpd_req_t *req)
     if (ds.trip_event_ever_received) {
         APPEND(",\"trip_reason\":%u", (unsigned)ds.trip_reason);
         APPEND(",\"trip_event_age_ms\":%lu", (unsigned long)ds.trip_event_age_ms);
-        APPEND(",\"trip_safety_tc_c\":%.1f", (double)ds.trip_safety_tc_c);
-        APPEND(",\"trip_deciding_threshold\":%.1f", (double)ds.trip_deciding_threshold);
+        char trip_tc_buf[16];
+        char trip_thr_buf[16];
+        APPEND(",\"trip_safety_tc_c\":%s",
+               json_f(trip_tc_buf, sizeof(trip_tc_buf), "%.1f", ds.trip_safety_tc_c));
+        APPEND(",\"trip_deciding_threshold\":%s",
+               json_f(trip_thr_buf, sizeof(trip_thr_buf), "%.1f", ds.trip_deciding_threshold));
     }
 
     /* TODO.md owner-report item 5: the safety processor's own build identity

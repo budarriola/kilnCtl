@@ -8,6 +8,7 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 
+#include "kiln_io_owner.h"
 #include "profile_executor.h"
 #include "uart_task_ids.h" /* SAFETY_FLAG_RELAY/SAFETY_FLAG_ENABLED */
 
@@ -263,8 +264,17 @@ void danger_mode_stop(const char *source)
         xSemaphoreGive(s_dm.lock);
     }
     if (was_open) {
+        /* Restoring the gate only refuses the NEXT relay-ON; it does nothing
+         * about a relay danger mode already closed. Confirmed on the bench:
+         * energize a relay from the diagnostics page, press Stop, and the
+         * coil stays closed indefinitely -- under a gate that would now
+         * refuse to close it, so nothing on the normal path ever opens it
+         * again either. Exiting the window has to leave the board in the
+         * state it would be in had the window never opened. */
+        (void)kiln_io_owner_command_all_relays_off();
         (void)safety_link_request_enable(s_dm.safety, false);
-        ESP_LOGW(TAG, "danger mode stopped (%s) -- relay gate restored, heat-enable released, no reboot",
+        ESP_LOGW(TAG, "danger mode stopped (%s) -- relays dropped, relay gate restored, "
+                      "heat-enable released, no reboot",
                  src);
     }
 }
@@ -296,9 +306,12 @@ static void danger_mode_task(void *arg)
              * operator-requested exit -- see danger_mode.h's top comment:
              * timeout exits exactly as though the firing this request stood
              * in for had ended, no reboot. */
+            /* Same reason as danger_mode_stop()'s -- and more pressing here,
+             * since a timeout means nobody is watching the page. */
+            (void)kiln_io_owner_command_all_relays_off();
             (void)safety_link_request_enable(s_dm.safety, false);
-            ESP_LOGW(TAG, "danger mode timed out (%lu ms idle) -- heat-enable released, relay gate "
-                          "restored, no reboot",
+            ESP_LOGW(TAG, "danger mode timed out (%lu ms idle) -- relays dropped, heat-enable "
+                          "released, relay gate restored, no reboot",
                      (unsigned long)DANGER_MODE_WINDOW_MS);
         }
     }
