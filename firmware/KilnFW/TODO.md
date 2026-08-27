@@ -5,6 +5,46 @@ this file owns the main-firmware detail. The cross-processor items — the swapp
 safety-UART pins, `CommonFW`, and the safety-liveness gate on heating — are
 sequenced there and tracked in [`../SaftyFW/TODO.md`](../SaftyFW/TODO.md).
 
+## Bench sweep 2026-08-27 -- running profiles and autotunes, no heaters
+
+Heaters disconnected, thermocouples connected and reading ambient. A firing
+and an autotune run back to back on zone 0 -- the sequence an operator
+investigating a bad element would perform. Fixed and committed from this
+round: the all-OFF profile that ran silently, the PC-link watchdog opening
+relays a firing owned, the guard-trip latch that disabled a zone permanently,
+autotune blaming the kiln for its own inaction, and the missing
+heat_block_sources / zone_blocked_mask reporting.
+
+What behaved correctly and is now known-good on hardware: the bang-bang
+control loop (relay closed at the 2 C hysteresis crossing and held for
+minutes); thermal guard 1, which tripped at 296 s of commanded heat with
+"heating but rose only -0.0C in 5.0min (need >=25.0C)", dropped the relay and
+aborted the run; and autotune's fit, which refused to produce a model from a
+flat trace instead of proposing gains from a zero-gain plant.
+
+Still open from this round:
+
+- [ ] **`guard_wrong_dir_window_s` does not control the guard an operator
+      would think it does.** The per-zone field is exposed in Settings > Zones
+      and reads as "how long heat may be commanded without a response", but it
+      only feeds guard 2 (already at/above setpoint and falling). The
+      heating-failed case -- the one that matters when an element dies -- uses
+      the hardcoded `PROGRESS_WINDOW_S` (300 s) and cannot be configured at
+      all. Either wire the field to both or rename it.
+- [ ] **The frozen-sensor guard cannot fire on real hardware.** It resets its
+      window on any change at all (`in->measurement_c != state->frozen_last_c`),
+      and a live MAX31856 dithers by 0.01-0.1 C every read, so the 120 s window
+      never accumulates. It can only catch a bit-exact frozen value. Needs an
+      epsilon band.
+- [ ] **Autotune's relay switching is not counted toward contact wear.**
+      `relay_cycles` is fed only by profile_executor's accounting, so a long
+      relay-feedback autotune ages the contacts invisibly.
+- [ ] **A completed or faulted run never releases its relay ownership**
+      (already tracked below) -- confirmed live this round: relay 1 stays
+      RELAY_OWNER_PROFILE after the run ends.
+
+---
+
 ## Bench sweep 2026-08-27 -- exercising the LCD and web interfaces
 
 Every HTTP endpoint fetched and strict-parsed, every mutating endpoint
