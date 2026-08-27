@@ -29,6 +29,8 @@ import enum
 from dataclasses import dataclass, field
 from typing import Optional
 
+from kilnctrl.crc16 import crc16_ccitt_false
+
 __all__ = [
     "FRAME_MAX_PAYLOAD",
     "FRAME_HEADER_LEN",
@@ -98,21 +100,21 @@ class Frame:
 
 
 # ---------------------------------------------------------------------------
-# Section 3: CRC-16/CCITT-FALSE -- poly 0x1021, init 0xFFFF, no reflection,
-# no xorout. benchproto_crc16_ccitt_false() is its own implementation
-# (BENCHPROTO.md sec 3); this is a third, independent one.
+# Section 3: CRC-16/CCITT-FALSE (see kilnctrl.crc16 for the parameters and
+# the algorithm itself). benchproto_crc16_ccitt_false() (the C side,
+# BENCHPROTO.md sec 3) is its own from-scratch implementation, matching the
+# algorithm but not sharing code with kilnlink's -- that's the "second,
+# independent implementation for cross-checking" this module's docstring
+# describes. The *Python* side is different: kilnctrl.protocol already
+# carries a pure-Python port of the same CRC for the unrelated kilnlink
+# framing layer (justified there because pc_tools can't link the C
+# library). A second, independently-typed Python copy of the same bit-loop
+# would just be the thing tools/check_no_duplicate_crc.ps1 exists to catch
+# -- both codecs are pure Python living side by side under
+# tools/PcTools/src, so they share kilnctrl.crc16.crc16_ccitt_false
+# instead. Re-exported here (see __all__) so existing callers of
+# kilnsim.benchproto_codec.crc16_ccitt_false keep working unchanged.
 # ---------------------------------------------------------------------------
-def crc16_ccitt_false(data: bytes) -> int:
-    crc = 0xFFFF
-    for b in data:
-        crc ^= b << 8
-        for _ in range(8):
-            if crc & 0x8000:
-                crc = ((crc << 1) ^ 0x1021) & 0xFFFF
-            else:
-                crc = (crc << 1) & 0xFFFF
-    return crc & 0xFFFF
-
 
 # Known-answer test embedded in BENCHPROTO.md sec 3 itself.
 assert crc16_ccitt_false(b"123456789") == 0x29B1

@@ -656,23 +656,12 @@ class SafetyFlag(enum.IntFlag):
 # ---------------------------------------------------------------------------
 # CRC
 # ---------------------------------------------------------------------------
-def crc16_ccitt_false(data: bytes) -> int:
-    """CRC-16/CCITT-FALSE: poly 0x1021, init 0xFFFF, no reflection, no xorout.
-
-    Bit-for-bit port of ``crc16_ccitt_false()`` in uart_protocol.c. Pure Python
-    on purpose -- no external crc dependency.
-
-    Check value: crc16_ccitt_false(b"123456789") == 0x29B1.
-    """
-    crc = 0xFFFF
-    for byte in data:
-        crc ^= byte << 8
-        for _ in range(8):
-            if crc & 0x8000:
-                crc = ((crc << 1) ^ 0x1021) & 0xFFFF
-            else:
-                crc = (crc << 1) & 0xFFFF
-    return crc & 0xFFFF
+# crc16_ccitt_false() itself now lives in kilnctrl.crc16 (shared with
+# kilnsim.benchproto_codec, a distinct wire protocol that needs the exact
+# same algorithm -- see that module's docstring for why sharing was chosen
+# over a second allowlisted duplicate). Re-exported here so existing callers
+# of kilnctrl.protocol.crc16_ccitt_false keep working unchanged.
+from .crc16 import crc16_ccitt_false  # noqa: E402,F401
 
 
 # ---------------------------------------------------------------------------

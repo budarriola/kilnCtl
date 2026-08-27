@@ -40,11 +40,20 @@
 # longer has a matching file is dead weight.
 #
 # One duplicate remains allowlisted:
-#   - tools/PcTools/src/kilnctrl/protocol.py
+#   - tools/PcTools/src/kilnctrl/crc16.py
 #     (a deliberate, documented pure-Python port -- see its own docstring,
 #     "Bit-for-bit port of crc16_ccitt_false() in uart_protocol.c" -- since
 #     pc_tools can't link a C library; tracked by the "pc_tools consuming
 #     the same vectors as the third implementation" item)
+#
+#     kilnctrl.protocol used to carry this port directly; it now imports
+#     crc16_ccitt_false from kilnctrl.crc16 and re-exports it, because
+#     kilnsim.benchproto_codec (a distinct wire protocol, tracked
+#     separately in ROADMAP.md's "genuinely still software" list) needed
+#     the identical CRC-16/CCITT-FALSE algorithm and shared Python code was
+#     the honest fix, not a second allowlist entry -- both codecs are pure
+#     Python living side by side under tools/PcTools/src, unlike the
+#     C-vs-Python split that justifies this one port existing at all.
 #
 # DESIGN CHOICE: this check does NOT fail on that known, already-tracked
 # debt today. Making it fail loudly right now would just be a second,
@@ -85,7 +94,7 @@ $excludeDirs = @(
 # Known, already-tracked pre-migration duplicates (see header above).
 # Paths are relative to repo root, forward-slash, case-insensitive compare.
 $allowlist = @(
-    'tools/PcTools/src/kilnctrl/protocol.py'
+    'tools/PcTools/src/kilnctrl/crc16.py'
 )
 
 $searchExtensions = @('*.c', '*.h', '*.cpp', '*.hpp', '*.py')
