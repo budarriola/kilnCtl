@@ -636,17 +636,44 @@ function renderZones() {
 }
 
 function loadCurrent() {
-  fetch('/api/zones').then(function (r) { return r.json(); }).then(function (data) {
-    current = data;
-    document.getElementById('thermoCount').value = data.thermo_count;
-    document.getElementById('relayCount').value = data.relay_count;
-    document.getElementById('maxSimultaneous').value = data.max_simultaneous_relays || 0;
-    document.getElementById('continueOnZoneTrip').checked = !!data.continue_on_zone_trip;
-    document.getElementById('safetyTcType').innerHTML = tcTypeOptionsHtml(data.safety_tc_type);
-    renderZones();
-    populateAutotuneZones();
-  }).catch(function () {
-    document.getElementById('zones').innerHTML = '<p class="empty">Could not load current config.</p>';
+  /* The fetch/parse step and the render step are kept in SEPARATE catch
+     scopes on purpose. They used to share one .catch(), which meant any
+     exception thrown while RENDERING a perfectly good config -- a missing
+     element id, a bad field, any JS error in zoneBlock() -- was reported to
+     the operator as "Could not load current config.", i.e. as if the board
+     had failed to answer or the stored config were unreadable. On a page
+     that configures which thermocouple drives which heater, "your saved
+     config could not be loaded" and "the config loaded fine but this page
+     failed to draw it" are very different claims, and showing the first
+     when the second is true invites exactly the wrong response (re-entering
+     or overwriting a config that was never actually damaged). Each now
+     reports what really happened and logs the underlying error. */
+  fetch('/api/zones').then(function (r) {
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return r.json();
+  }).then(function (data) {
+    try {
+      current = data;
+      document.getElementById('thermoCount').value = data.thermo_count;
+      document.getElementById('relayCount').value = data.relay_count;
+      document.getElementById('maxSimultaneous').value = data.max_simultaneous_relays || 0;
+      document.getElementById('continueOnZoneTrip').checked = !!data.continue_on_zone_trip;
+      document.getElementById('safetyTcType').innerHTML = tcTypeOptionsHtml(data.safety_tc_type);
+      renderZones();
+      populateAutotuneZones();
+    } catch (err) {
+      if (window.console) console.error('zones page render failed', err);
+      document.getElementById('zones').innerHTML =
+        '<p class="empty">The saved config loaded correctly, but this page failed to display it (' +
+        window.kcEscapeHtml(err && err.message ? err.message : String(err)) +
+        '). Your stored configuration has NOT been changed -- reload the page; do not re-enter it.</p>';
+    }
+  }).catch(function (err) {
+    if (window.console) console.error('zones config fetch failed', err);
+    document.getElementById('zones').innerHTML =
+      '<p class="empty">Could not reach the board to read the current config (' +
+      window.kcEscapeHtml(err && err.message ? err.message : String(err)) +
+      '). Nothing has been changed; reload to retry.</p>';
   });
 }
 
