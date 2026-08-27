@@ -11,6 +11,7 @@
 #include "nvs_flash.h"
 
 #include "MAX31856.h"
+#include "ota_http.h" /* ota_http_check_interlocks() -- the shared "not while firing" gate */
 #include "kiln_io.h"
 #include "rules_task.h"
 #include "rules_types.h"
@@ -556,6 +557,32 @@ static const char *parse_line(char *line, rules_cfg_t *cfg, int *current_relay)
 
 static esp_err_t rules_post_handler(httpd_req_t *req)
 {
+    /* Refuse to rewrite rule configuration while a firing is running, the same
+     * gate kiln_cfg_http.c's apply and backup_http.c's restore already put in
+     * front of the very same zones_cfg_t. Without it, changing relay_mask
+     * mid-run moved the firing onto a different physical relay and left the
+     * old one wherever it was last commanded, with nobody driving it off --
+     * a contact that stays closed because the code that owned it stopped
+     * looking at it.
+     *
+     * ota_http_check_interlocks() is that shared gate rather than a private
+     * profile-is-RUNNING check, deliberately: it also covers a hot zone and
+     * a commanded heater, and reads the kiln's ACTUAL current state rather
+     * than profile_executor's own view (see its doc comment for why that
+     * distinction matters). ota_http_req_ack_no_safety() carries the same
+     * per-request operator acknowledgement every other caller passes, so a
+     * board with no safety processor can still be configured -- saving this
+     * page streams nothing over the link, exactly as backup_http's restore
+     * argues for itself. */
+    char interlock_reason[OTA_INTERLOCK_REASON_MAX];
+    interlock_reason[0] = '\0';
+    ota_interlock_result_t gate = ota_http_check_interlocks(ota_http_req_ack_no_safety(req),
+                                                            interlock_reason, sizeof(interlock_reason));
+    if (gate != OTA_INTERLOCK_OK) {
+        ESP_LOGW(TAG, "POST /api/rules refused by interlock: %s", interlock_reason);
+        return ota_http_send_interlock_refusal(req, gate, interlock_reason);
+    }
+
     if (req->content_len <= 0 || req->content_len > RULES_BODY_MAX) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body missing or too large");
         return ESP_OK;

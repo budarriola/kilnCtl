@@ -447,22 +447,25 @@ static const char *json_f(char *buf, size_t buf_len, const char *fmt, float v)
 
 static esp_err_t status_get_handler(httpd_req_t *req)
 {
-    /* Bumped from 1700 to 2200: at 1700 this handler was silently truncating
-     * mid-object (the APPEND overflow guard `goto send`s instead of erroring)
-     * right after "temp_unit", dropping watchdog_panic_disabled and both
-     * boot_button_bypass_* fields plus the closing '}' -- added after the
-     * 1700 sizing comment above was written and never accounted for. That
-     * malformed JSON is what made the web dashboard's #channels panel stick
-     * on "Loading..." forever: fetch().then(r=>r.json()) throws on the
-     * missing brace and main_page.html's poll() swallows it in an empty
-     * .catch(). Measured worst case at 3 zones/channels is ~1690 bytes now;
-     * 2200 leaves real headroom instead of sizing to the last incident. */
-    char json[2500]; /* 2200 -> 2300 (2026-08-27) with ct_current_a: 3 more
-                      * "X.XXX"/null entries, well under the 100 bytes added.
-                      * 2300 -> 2500 (2026-08-27) with safety_relay_energized/
-                      * safety_heating_enabled, heap_internal/heap_spiram's
-                      * new "total" entries, and flash_size/flash_partition_
-                      * size/flash_used -- well under the 200 bytes added. */
+    /* Bumped from 1700 to 2200, then 2300, then 2500 -- see git history for
+     * the field-by-field accounting. TODO.md's "~46 bytes of margin" item:
+     * hand-sizing this buffer to "the last incident plus some" is exactly
+     * the failure mode that keeps recurring, and safety_build_commit/
+     * safety_build_datetime are NOT local data -- they arrive over the
+     * isolated UART from the RP2040 (safety_link.c's FW_VERSION parse), so a
+     * corrupt or hostile peer can escape-inflate those two fields well past
+     * any "normal build string" assumption. Measured worst case at 3
+     * zones/channels with well-formed build strings is ~1690-2300 bytes
+     * depending on which optional sections are populated (see the git
+     * history above for the running tally); 2500 leaves real headroom for
+     * that case, but the APPEND macro below now `goto truncated`s to a
+     * 500-with-valid-JSON-body on any overflow instead of trusting the
+     * buffer to always be big enough -- see the `truncated:` label at the
+     * end of this handler. That is the actual fix for the hostile-peer case;
+     * this buffer's size only has to be "usually enough," never "provably
+     * enough," because the overflow path can no longer emit a truncated
+     * document. */
+    char json[2500];
     size_t o = 0;
     int n;
 
@@ -470,7 +473,7 @@ static esp_err_t status_get_handler(httpd_req_t *req)
     do {                                                                                          \
         n = snprintf(json + o, sizeof(json) - o, __VA_ARGS__);                                   \
         if (n < 0 || (size_t)n >= sizeof(json) - o) {                                             \
-            goto send;                                                                            \
+            goto truncated;                                                                       \
         }                                                                                          \
         o += (size_t)n;                                                                            \
     } while (0)
@@ -736,6 +739,13 @@ static esp_err_t status_get_handler(httpd_req_t *req)
      * OTA password check must say so everywhere this status is read, not
      * only at the moment a request happens to hit the bypassed check. */
     APPEND(",\"boot_button_bypass_active\":%s", boot_button_ota_bypass_active() ? "true" : "false");
+    /* Permanently visible for the same reason boot_button_bypass_active is:
+     * "this board has no OTA auth right now" is a state an operator must be
+     * able to see without going looking. True when the AP password is empty,
+     * which would let anyone in range compute a valid MAC from public
+     * information -- ota_http.c now refuses in that state rather than
+     * HMACing with a zero-length key. */
+    APPEND(",\"ota_auth_disabled\":%s", ota_http_auth_disabled() ? "true" : "false");
     APPEND(",\"boot_button_bypass_remaining_s\":%lu",
            (unsigned long)(boot_button_bypass_remaining_ms() / 1000u));
 
@@ -743,9 +753,30 @@ static esp_err_t status_get_handler(httpd_req_t *req)
 
 #undef APPEND
 
-send:
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_send(req, json, o);
+
+    /* Reached only if `json` is too small for the status it holds -- see
+     * TODO.md's "/api/status has ~46 bytes of margin" item and
+     * zones_http.c's zones_get_handler() truncated: label, whose pattern
+     * this mirrors. safety_build_commit/safety_build_datetime arrive over
+     * the isolated UART from the RP2040 (safety_link.c's FW_VERSION parse),
+     * so a corrupt or hostile peer can inflate the escaped length of those
+     * two fields well past what a "well-formed build string" sizing
+     * assumption would allow -- see json_escape() below, which doubles
+     * every byte that needs a backslash. The old behaviour here was to
+     * `goto send` and emit whatever had been written so far: a truncated,
+     * syntactically invalid document that main_page.html's poll() throws on
+     * and silently swallows, leaving the dashboard on "Loading..." forever
+     * with no visible cause. A 500 with a valid JSON body at least says
+     * what happened instead of hanging silently. */
+truncated:
+    ESP_LOGE(TAG, "GET /api/status did not fit in %u bytes -- raise the buffer", (unsigned)sizeof(json));
+    httpd_resp_set_status(req, "500 Internal Server Error");
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req,
+                              "{\"ok\":false,\"error\":\"status did not fit in the response "
+                              "buffer -- this is a firmware sizing bug, not a bad configuration\"}");
 }
 
 /* See dashboard_http.h -- mirrors status_get_handler()'s io_ready/

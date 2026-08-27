@@ -1722,6 +1722,7 @@ static void safety_update_health(SafetyLinkClass *link)
     bool up = false;
     bool policy = false;
     bool version_mismatch = false;
+    bool version_known = false;
     bool update_in_progress = false;
     uint16_t age = SAFETY_LINK_AGE_NEVER;
 
@@ -1742,6 +1743,7 @@ static void safety_update_health(SafetyLinkClass *link)
          * link_task.c treats an unset peer version as "unknown, therefore
          * too old". Unknown and incompatible now both assert the fault. */
         version_mismatch = !link->peer_version_known || !link->peer_version_compatible;
+        version_known = link->peer_version_known;
         update_in_progress = link->update_in_progress_quiet;
         safety_unlock(link);
     }
@@ -1784,14 +1786,56 @@ static void safety_update_health(SafetyLinkClass *link)
         link->down_log_tick = xTaskGetTickCount();
     }
 
+    /* Both branches of version_mismatch fail closed below, unchanged. What
+     * differs here is only how loudly each is reported.
+     *
+     * "Not heard yet" is the normal state for the first seconds of every
+     * boot: the Pico's FW_VERSION is an unsolicited broadcast, so the link
+     * can be carrying telemetry before the version lands. That was being
+     * logged at ERROR on every healthy boot -- and an alarm that fires every
+     * boot is one an operator learns to scroll past, which is exactly how
+     * the real faults in this project stayed invisible (ROADMAP.md M10). It
+     * is now reported at INFO inside a grace window, and escalates to ERROR
+     * only if the version still has not arrived after
+     * SAFETY_LINK_VERSION_GRACE_MS -- at which point it is no longer a boot
+     * race but a peer that is not answering, which IS worth an error.
+     *
+     * A version that HAS been heard and is incompatible stays an immediate
+     * ERROR: nothing about that resolves by waiting. */
+    if (!version_mismatch) {
+        link->version_unknown_since_valid = false;
+    } else if (!version_known && !link->version_unknown_since_valid) {
+        link->version_unknown_since_tick = (uint32_t)xTaskGetTickCount();
+        link->version_unknown_since_valid = true;
+    }
+
+    bool version_unknown_past_grace =
+        version_mismatch && !version_known && link->version_unknown_since_valid &&
+        safety_elapsed_ms(link->version_unknown_since_tick) >= SAFETY_LINK_VERSION_GRACE_MS;
+    bool want_loud = version_mismatch && (version_known || version_unknown_past_grace);
+
     if (version_mismatch != link->version_mismatch_logged) {
         if (version_mismatch) {
-            ESP_LOGE(TAG, "safety processor protocol version incompatible -- treating link as "
-                          "down (Phase 7b.5, LINK_PROTOCOL.md sec 4)");
+            if (version_known) {
+                ESP_LOGE(TAG, "safety processor protocol version incompatible -- treating link as "
+                              "down (Phase 7b.5, LINK_PROTOCOL.md sec 4)");
+            } else {
+                ESP_LOGI(TAG, "waiting for the safety processor's FW_VERSION broadcast -- heating "
+                              "stays blocked until it arrives (normal for the first seconds of a boot)");
+            }
         } else {
             ESP_LOGI(TAG, "safety processor protocol version now compatible");
         }
         link->version_mismatch_logged = version_mismatch;
+        link->version_loud_logged = want_loud;
+    } else if (want_loud && !link->version_loud_logged) {
+        /* The grace window expired without a FW_VERSION ever arriving. */
+        ESP_LOGE(TAG, "no FW_VERSION from the safety processor after %u ms -- treating the link as "
+                      "down and blocking heat (Phase 7b.5, LINK_PROTOCOL.md sec 4)",
+                 (unsigned)SAFETY_LINK_VERSION_GRACE_MS);
+        link->version_loud_logged = true;
+    } else if (!want_loud) {
+        link->version_loud_logged = false;
     }
 
     if (policy) {

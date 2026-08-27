@@ -64,6 +64,38 @@ const uint8_t zones_page_html_gz_end[1] = { 0 };
 const uint8_t safety_config_page_html_gz_start[1] = { 0 };
 const uint8_t safety_config_page_html_gz_end[1] = { 0 };
 
+// ---- ota_http.c's interlock gate --------------------------------------------
+// zones_http.c's POST handler now refuses to rewrite zone config while a
+// firing is running, through the same ota_http_check_interlocks() gate
+// kiln_cfg_http and backup_http use. None of these is reachable from the
+// tests here (only parse_zone_fields()/the NVS decode path is called
+// directly), but every symbol the file references must resolve at link time.
+// Returns OK so that if a future test ever does drive the handler, it is the
+// handler's own logic under test rather than this stand-in refusing first.
+ota_interlock_result_t ota_http_check_interlocks(bool ack_no_safety_processor, char *reason_out,
+                                                 size_t reason_cap)
+{
+    (void)ack_no_safety_processor;
+    if (reason_out && reason_cap > 0) {
+        reason_out[0] = '\0';
+    }
+    return OTA_INTERLOCK_OK;
+}
+
+bool ota_http_req_ack_no_safety(httpd_req_t *req)
+{
+    (void)req;
+    return false;
+}
+
+esp_err_t ota_http_send_interlock_refusal(httpd_req_t *req, ota_interlock_result_t result,
+                                          const char *reason)
+{
+    (void)req; (void)result; (void)reason;
+    return ESP_OK;
+}
+
+
 // ---- esp_http_server.h stub bodies -----------------------------------------
 // None of these is ever invoked by this file's tests (only parse_zone_fields()
 // is called directly), but every symbol zones_http.c references anywhere in

@@ -529,6 +529,14 @@ static inline bool safety_drain_still_waiting(bool want_status, bool got_status,
  * warning per poll (which at the default period would be two per second). */
 #define SAFETY_LINK_DOWN_LOG_PERIOD_MS 60000u
 
+/* How long the FW_VERSION broadcast may be missing before the quiet
+ * boot-window message escalates to an ERROR. Comfortably longer than the
+ * observed handshake (~7.5 s from reset on the bench board, most of which
+ * is the Pico's own boot), short enough that a peer which never answers is
+ * still reported promptly. Heating is blocked for this whole window either
+ * way -- this constant changes only the log severity, never the gate. */
+#define SAFETY_LINK_VERSION_GRACE_MS 15000u
+
 /* ROADMAP.md M5 / LINK_PROTOCOL.md sec 4: "recent_window_s should be >= 150 s
  * (two heater windows plus decay margin)" -- HEATER_WINDOW_MS is 60000
  * (profile_executor.c), so 2*60 + 60 margin = 180 s clears that floor with
@@ -1060,6 +1068,21 @@ typedef struct {
     bool       update_in_progress_quiet;
     bool       version_mismatch_logged; /* edge-detect for the Phase 7b.5 mismatch log line;
                                           * poll-task-only, same no-lock reasoning as down_logged */
+    /* Separates "we have not heard the peer's FW_VERSION yet" from "we heard
+     * it and it is incompatible". Both fail closed and always have; only the
+     * log severity differs, because the first is the NORMAL state for the
+     * first few seconds of every boot -- the Pico's FW_VERSION is an
+     * unsolicited broadcast, so there is always a window where the link is
+     * carrying telemetry but the version has not landed. Logging that window
+     * at ERROR on every healthy boot is how an operator learns to scroll past
+     * the one message that matters (ROADMAP.md M10's whole premise). Held
+     * poll-task-only, same no-lock reasoning as down_logged. */
+    uint32_t   version_unknown_since_tick;
+    bool       version_unknown_since_valid;
+    bool       version_loud_logged; /* edge-detect for the escalated (ERROR) form, kept separate
+                                      * from version_mismatch_logged so the quiet boot-window
+                                      * message and the loud "still nothing" one cannot collapse
+                                      * into a single edge and hide the second */
     bool       initialized;
 } SafetyLinkClass;
 
