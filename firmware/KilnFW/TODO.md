@@ -221,10 +221,18 @@ severity.
       the way `ota_auth.c`/`ota_interlock.c` already split out the testable
       half.
 
-- [ ] **Fifteen `httpd_resp_send(req, json, n)` sites use `snprintf`'s return
+- [x] **`httpd_resp_send(req, json, n)` sites use `snprintf`'s return
       unclamped at the high end** -- a stack over-read that sends adjacent
-      stack memory to the client if the format ever exceeds the buffer. Two
-      sites pair a 192-byte destination with a 257-byte escaped source.
+      stack memory to the client if the format ever exceeds the buffer. DONE
+      2026-08-27 (`8782c0a`). The count in this item was wrong: a sweep of
+      every `httpd_resp_send(req, buf, count)` in `App/drivers/` found
+      **seven** genuinely unclamped sites, all of them in `ota_http.c`. The
+      rest either accumulate through an `APPEND` macro that already stops on
+      overflow, clamp explicitly (`wifi_provision_http.c`), or pass
+      `HTTPD_RESP_USE_STRLEN`. All seven now go through
+      `send_json_clamped()`. Negative-tested on the board: with
+      `/api/ota/challenge`'s buffer cut to 16 bytes the reply is 15 bytes and
+      the log names the undersized buffer; unclamped it would have sent 76.
 - [x] **PID zones can command heat with no valid reading.** DONE
       2026-08-26 -- the deferred-on-time payback block moved inside
       `if (sensor_ok[zi])`, matching bang-bang's refusal. The
