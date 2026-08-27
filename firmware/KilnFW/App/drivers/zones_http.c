@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "esp_crc.h"
 #include "esp_log.h"
 #include "nvs.h"
 #include "nvs_flash.h"
@@ -65,8 +66,34 @@ static const char *TAG = "zones_http";
  * Deliberately a bitMASK, not a single channel index: the owner's own spec
  * is "current sense probes may be reused across more than one zone", so no
  * exclusivity is enforced here, same as thermo_mask already allows a channel
- * to feed more than one zone. */
-#define ZONES_CFG_VERSION 6
+ * to feed more than one zone.
+ *
+ * 6 -> 7 (2026-08-27, owner-report "saved securely like the others"): added
+ * zones_cfg_t::crc32, and replaced the old load path's "memcpy the old blob
+ * over the new struct, patch in defaults, hope the tail-only-growth
+ * assumption still holds" migration with explicit per-version historical
+ * struct layouts (see zone_cfg_v1_t/zone_cfg_v3_t/zone_cfg_v4_t/
+ * zone_cfg_v5_t and convert_versioned_blob_to_current() below) plus a
+ * per-version expected-length table (expected_len_for_version()) checked
+ * BEFORE anything is copied or interpreted. That old assumption was false:
+ * zone_cfg_t is an ARRAY ELEMENT, and three of the last four bumps before
+ * this one (2->3, 3->4, 4->5) grew zone_cfg_t itself, not just the top-level
+ * zones_cfg_t -- growing an array element displaces every element after the
+ * first, so a v3/v4/v5 blob loaded the old way read zones[1] and zones[2]
+ * (relay_mask, max_temp_c, every guard threshold) from the wrong byte
+ * offsets, as arbitrary floats, and then got flagged VALID. Confirmed by
+ * walking this file's own git history commit-by-commit (b9ecc52 = v1,
+ * c17e80f = 1->2, 915f0fe = 2->3, 0b1674e = 3->4, 638ea87 = 4->5, this file's
+ * own prior state = v6) to recover the EXACT historical field layout at each
+ * version -- not guessed. validate_zones_cfg() (previously only run on the
+ * snapshot-restore path, zones_config_import_blob()) now runs on every
+ * decoded blob, old or current, via the shared decode_zones_blob() helper.
+ * A CRC32 (esp_crc32_le(), already used by crash_report.c -- see that file's
+ * compute_crc()/seal_crc() for the identical "compute over a zeroed-crc-field
+ * copy" convention this follows) covers the current-version blob only: older
+ * versions never had a crc32 field to check, so their integrity gate is the
+ * length-must-match-the-claimed-version check plus validate_zones_cfg(). */
+#define ZONES_CFG_VERSION 7
 
 /* ZONE_CT_CHANNEL_COUNT moved to zones_http.h (2026-08-27, same day it was
  * added) -- backup_http.c's import validation needs it too, for the exact
@@ -266,6 +293,15 @@ typedef struct {
      * re-apply-on-reconnect handling. */
     uint8_t safety_tc_type;
     zone_cfg_t zones[MAX31856_CHANNEL_COUNT];
+    /* 2026-08-27 (ZONES_CFG_VERSION 6->7): CRC32 over this whole struct with
+     * this field itself zeroed, stamped by nvs_save() (see compute_zones_crc())
+     * and checked by decode_zones_blob() on every load of a CURRENT-version
+     * blob. Appended at the true tail -- the one safe place to grow this
+     * struct, unlike zone_cfg_t's own history of insertions mid-array-element
+     * (see ZONES_CFG_VERSION's comment above). Older on-flash versions never
+     * had this field; their integrity gate is the length-must-match-the-
+     * claimed-version check plus validate_zones_cfg(), not a CRC. */
+    uint32_t crc32;
 } zones_cfg_t;
 
 /* application/x-www-form-urlencoded whole-page submit: thermo_count,
@@ -331,7 +367,547 @@ static uint32_t s_config_generation = 1;
 /* ---- NVS ---------------------------------------------------------------- */
 
 static esp_err_t nvs_save(void);
-static void migrate_zones_cfg_v1_to_current(zones_cfg_t *cfg);
+static bool validate_zones_cfg(const zones_cfg_t *cand, const char **err_reason);
+
+/* ---- Historical on-flash layouts (ZONES_CFG_VERSION 1..6) ----------------
+ *
+ * EXACT field-for-field layouts, recovered from this file's own git history
+ * (not guessed): b9ecc52 (v1 introduced), c17e80f (1->2, continue_on_zone_trip),
+ * 915f0fe (2->3, the 8 named guard thresholds -- zone_cfg_t itself grew here,
+ * confirmed by that commit's own message "promote the remaining thermal_guard
+ * thresholds to per-zone config"), 0b1674e (3->4, thermo_mask appended at the
+ * zone_cfg_t tail), 638ea87 (4->5, tc_type inserted into zone_cfg_t BEFORE
+ * the model_* fields and BEFORE thermo_mask -- i.e. NOT at the tail, the
+ * exact insertion that made the old memcpy-and-patch migration wrong), and
+ * this file's own prior state for v6 (5->6, ct_mask appended at the
+ * zone_cfg_t tail). v1 and v2 share an identical zone_cfg_t (only the
+ * top-level continue_on_zone_trip field differs between them).
+ *
+ * Each struct is used ONLY to interpret a raw on-flash blob whose length has
+ * already been checked (expected_len_for_version()) against the size of
+ * EXACTLY this struct before a single byte is copied out of it -- see
+ * decode_zones_blob(). None of these are ever grown, edited, or reused for a
+ * different version; a future version needing a new historical layout gets
+ * its own new struct here, appended, never a change to one of these. */
+
+typedef struct {
+    char name[ZONE_NAME_MAX_LEN + 1];
+    uint8_t relay_mask;
+    float cal_offset_c;
+    float pid_kp;
+    float pid_ki;
+    float pid_kd;
+    float max_ramp_c_per_hr;
+    float sanity_rate_c_per_min;
+    uint8_t control_mode;
+    float max_temp_c;
+    float min_temp_c;
+    float heater_window_ms;
+    float heater_min_on_ms;
+    float heater_min_off_ms;
+    float cross_zone_max_delta_c;
+    float model_k_dc;
+    float model_tau_s;
+    float model_dead_time_s;
+} zone_cfg_v1_t; /* v1 and v2 -- predates the 8 guard thresholds, thermo_mask, tc_type, ct_mask */
+
+typedef struct {
+    char name[ZONE_NAME_MAX_LEN + 1];
+    uint8_t relay_mask;
+    float cal_offset_c;
+    float pid_kp;
+    float pid_ki;
+    float pid_kd;
+    float max_ramp_c_per_hr;
+    float sanity_rate_c_per_min;
+    uint8_t control_mode;
+    float max_temp_c;
+    float min_temp_c;
+    float heater_window_ms;
+    float heater_min_on_ms;
+    float heater_min_off_ms;
+    float guard_wrong_dir_window_s;
+    float guard_wrong_dir_rate_c_per_min;
+    float guard_off_settle_s;
+    float guard_runaway_rate_c_per_min;
+    float guard_runaway_margin_c;
+    float guard_drift_period_s;
+    float guard_sensor_fault_debounce_ticks;
+    float guard_frozen_window_s;
+    float cross_zone_max_delta_c;
+    float model_k_dc;
+    float model_tau_s;
+    float model_dead_time_s;
+} zone_cfg_v3_t; /* v3 -- adds the 8 guard thresholds; predates thermo_mask/tc_type/ct_mask */
+
+typedef struct {
+    char name[ZONE_NAME_MAX_LEN + 1];
+    uint8_t relay_mask;
+    float cal_offset_c;
+    float pid_kp;
+    float pid_ki;
+    float pid_kd;
+    float max_ramp_c_per_hr;
+    float sanity_rate_c_per_min;
+    uint8_t control_mode;
+    float max_temp_c;
+    float min_temp_c;
+    float heater_window_ms;
+    float heater_min_on_ms;
+    float heater_min_off_ms;
+    float guard_wrong_dir_window_s;
+    float guard_wrong_dir_rate_c_per_min;
+    float guard_off_settle_s;
+    float guard_runaway_rate_c_per_min;
+    float guard_runaway_margin_c;
+    float guard_drift_period_s;
+    float guard_sensor_fault_debounce_ticks;
+    float guard_frozen_window_s;
+    float cross_zone_max_delta_c;
+    float model_k_dc;
+    float model_tau_s;
+    float model_dead_time_s;
+    uint8_t thermo_mask; /* appended at the tail -- still safe growth at this point */
+} zone_cfg_v4_t; /* v4 -- adds thermo_mask; predates tc_type/ct_mask */
+
+typedef struct {
+    char name[ZONE_NAME_MAX_LEN + 1];
+    uint8_t relay_mask;
+    float cal_offset_c;
+    float pid_kp;
+    float pid_ki;
+    float pid_kd;
+    float max_ramp_c_per_hr;
+    float sanity_rate_c_per_min;
+    uint8_t control_mode;
+    float max_temp_c;
+    float min_temp_c;
+    float heater_window_ms;
+    float heater_min_on_ms;
+    float heater_min_off_ms;
+    float guard_wrong_dir_window_s;
+    float guard_wrong_dir_rate_c_per_min;
+    float guard_off_settle_s;
+    float guard_runaway_rate_c_per_min;
+    float guard_runaway_margin_c;
+    float guard_drift_period_s;
+    float guard_sensor_fault_debounce_ticks;
+    float guard_frozen_window_s;
+    float cross_zone_max_delta_c;
+    uint8_t tc_type;   /* inserted HERE, before model_k_dc and thermo_mask -- NOT
+                        * at the tail. This is the exact insertion that broke
+                        * the old "grows at the tail only" migration for every
+                        * zone after the first. */
+    float model_k_dc;
+    float model_tau_s;
+    float model_dead_time_s;
+    uint8_t thermo_mask;
+} zone_cfg_v5_t; /* v5 -- adds tc_type (mid-struct); predates ct_mask */
+
+/* zone_cfg_t (already defined above, unchanged by this pass) IS the v6/v7
+ * on-flash zone layout -- ct_mask was already at the tail. No separate
+ * zone_cfg_v6_t needed for the zone array; only the top-level struct differs
+ * (v6 has no crc32). */
+
+typedef struct {
+    uint8_t version;
+    uint8_t thermo_count;
+    uint8_t relay_count;
+    uint8_t max_simultaneous_relays;
+    zone_cfg_v1_t zones[MAX31856_CHANNEL_COUNT];
+} zones_cfg_v1_t; /* v1 -- predates continue_on_zone_trip/safety_tc_type */
+
+typedef struct {
+    uint8_t version;
+    uint8_t thermo_count;
+    uint8_t relay_count;
+    uint8_t max_simultaneous_relays;
+    uint8_t continue_on_zone_trip;
+    zone_cfg_v1_t zones[MAX31856_CHANNEL_COUNT];
+} zones_cfg_v2_t; /* v2 */
+
+typedef struct {
+    uint8_t version;
+    uint8_t thermo_count;
+    uint8_t relay_count;
+    uint8_t max_simultaneous_relays;
+    uint8_t continue_on_zone_trip;
+    zone_cfg_v3_t zones[MAX31856_CHANNEL_COUNT];
+} zones_cfg_v3_t; /* v3 */
+
+typedef struct {
+    uint8_t version;
+    uint8_t thermo_count;
+    uint8_t relay_count;
+    uint8_t max_simultaneous_relays;
+    uint8_t continue_on_zone_trip;
+    zone_cfg_v4_t zones[MAX31856_CHANNEL_COUNT];
+} zones_cfg_v4_t; /* v4 */
+
+typedef struct {
+    uint8_t version;
+    uint8_t thermo_count;
+    uint8_t relay_count;
+    uint8_t max_simultaneous_relays;
+    uint8_t continue_on_zone_trip;
+    uint8_t safety_tc_type;
+    zone_cfg_v5_t zones[MAX31856_CHANNEL_COUNT];
+} zones_cfg_v5_t; /* v5 -- adds safety_tc_type */
+
+typedef struct {
+    uint8_t version;
+    uint8_t thermo_count;
+    uint8_t relay_count;
+    uint8_t max_simultaneous_relays;
+    uint8_t continue_on_zone_trip;
+    uint8_t safety_tc_type;
+    zone_cfg_t zones[MAX31856_CHANNEL_COUNT];
+} zones_cfg_v6_t; /* v6 -- current zone_cfg_t layout, but no crc32 yet */
+
+/* Per-version expected blob length -- checked in decode_zones_blob() BEFORE
+ * a single byte is copied out of a stored blob or interpreted as any field.
+ * A stored blob whose length does not match the size EXACTLY implied by its
+ * own claimed version is corrupt and is rejected outright, never partially
+ * repaired. Returns 0 for a version this build has no known historical (or
+ * current) layout for -- also a rejection, not a guess. */
+static size_t expected_len_for_version(uint8_t version)
+{
+    switch (version) {
+    case 1: return sizeof(zones_cfg_v1_t);
+    case 2: return sizeof(zones_cfg_v2_t);
+    case 3: return sizeof(zones_cfg_v3_t);
+    case 4: return sizeof(zones_cfg_v4_t);
+    case 5: return sizeof(zones_cfg_v5_t);
+    case 6: return sizeof(zones_cfg_v6_t);
+    case ZONES_CFG_VERSION: return sizeof(zones_cfg_t);
+    default: return 0;
+    }
+}
+
+/* Field-by-field converters, one per historical zone_cfg_t layout, each
+ * writing every field of a fresh CURRENT-format zone_cfg_t explicitly --
+ * never a memcpy of one shape over another. Fields the source layout does
+ * not have get the same safe fill-in migrate_zones_cfg_v1_to_current() used
+ * to apply (see ZONES_CFG_VERSION's own comment for why each one is safe):
+ * thermo_mask defaults to the legacy "zone i <-> channel i" mapping
+ * (1u << chan_idx), tc_type/safety_tc_type default to THERMO_TC_K (every
+ * board's actual hardware register was always hardcoded to K until 4->5), and
+ * ct_mask/the 8 guard thresholds default to 0, which is already the correct
+ * "not configured" meaning for every one of them. */
+static void convert_zone_v1(const zone_cfg_v1_t *s, zone_cfg_t *d, uint8_t chan_idx)
+{
+    memset(d, 0, sizeof(*d));
+    memcpy(d->name, s->name, sizeof(d->name));
+    d->relay_mask = s->relay_mask;
+    d->cal_offset_c = s->cal_offset_c;
+    d->pid_kp = s->pid_kp;
+    d->pid_ki = s->pid_ki;
+    d->pid_kd = s->pid_kd;
+    d->max_ramp_c_per_hr = s->max_ramp_c_per_hr;
+    d->sanity_rate_c_per_min = s->sanity_rate_c_per_min;
+    d->control_mode = s->control_mode;
+    d->max_temp_c = s->max_temp_c;
+    d->min_temp_c = s->min_temp_c;
+    d->heater_window_ms = s->heater_window_ms;
+    d->heater_min_on_ms = s->heater_min_on_ms;
+    d->heater_min_off_ms = s->heater_min_off_ms;
+    d->cross_zone_max_delta_c = s->cross_zone_max_delta_c;
+    d->model_k_dc = s->model_k_dc;
+    d->model_tau_s = s->model_tau_s;
+    d->model_dead_time_s = s->model_dead_time_s;
+    /* guard thresholds: predate this layout -- 0 is the documented
+     * "substitute the firmware default" meaning, not a rejection. */
+    d->thermo_mask = (uint8_t)(1u << chan_idx);
+    d->tc_type = THERMO_TC_K;
+}
+
+static void convert_zone_v3(const zone_cfg_v3_t *s, zone_cfg_t *d, uint8_t chan_idx)
+{
+    memset(d, 0, sizeof(*d));
+    memcpy(d->name, s->name, sizeof(d->name));
+    d->relay_mask = s->relay_mask;
+    d->cal_offset_c = s->cal_offset_c;
+    d->pid_kp = s->pid_kp;
+    d->pid_ki = s->pid_ki;
+    d->pid_kd = s->pid_kd;
+    d->max_ramp_c_per_hr = s->max_ramp_c_per_hr;
+    d->sanity_rate_c_per_min = s->sanity_rate_c_per_min;
+    d->control_mode = s->control_mode;
+    d->max_temp_c = s->max_temp_c;
+    d->min_temp_c = s->min_temp_c;
+    d->heater_window_ms = s->heater_window_ms;
+    d->heater_min_on_ms = s->heater_min_on_ms;
+    d->heater_min_off_ms = s->heater_min_off_ms;
+    d->guard_wrong_dir_window_s = s->guard_wrong_dir_window_s;
+    d->guard_wrong_dir_rate_c_per_min = s->guard_wrong_dir_rate_c_per_min;
+    d->guard_off_settle_s = s->guard_off_settle_s;
+    d->guard_runaway_rate_c_per_min = s->guard_runaway_rate_c_per_min;
+    d->guard_runaway_margin_c = s->guard_runaway_margin_c;
+    d->guard_drift_period_s = s->guard_drift_period_s;
+    d->guard_sensor_fault_debounce_ticks = s->guard_sensor_fault_debounce_ticks;
+    d->guard_frozen_window_s = s->guard_frozen_window_s;
+    d->cross_zone_max_delta_c = s->cross_zone_max_delta_c;
+    d->model_k_dc = s->model_k_dc;
+    d->model_tau_s = s->model_tau_s;
+    d->model_dead_time_s = s->model_dead_time_s;
+    d->thermo_mask = (uint8_t)(1u << chan_idx);
+    d->tc_type = THERMO_TC_K;
+}
+
+static void convert_zone_v4(const zone_cfg_v4_t *s, zone_cfg_t *d)
+{
+    memset(d, 0, sizeof(*d));
+    memcpy(d->name, s->name, sizeof(d->name));
+    d->relay_mask = s->relay_mask;
+    d->cal_offset_c = s->cal_offset_c;
+    d->pid_kp = s->pid_kp;
+    d->pid_ki = s->pid_ki;
+    d->pid_kd = s->pid_kd;
+    d->max_ramp_c_per_hr = s->max_ramp_c_per_hr;
+    d->sanity_rate_c_per_min = s->sanity_rate_c_per_min;
+    d->control_mode = s->control_mode;
+    d->max_temp_c = s->max_temp_c;
+    d->min_temp_c = s->min_temp_c;
+    d->heater_window_ms = s->heater_window_ms;
+    d->heater_min_on_ms = s->heater_min_on_ms;
+    d->heater_min_off_ms = s->heater_min_off_ms;
+    d->guard_wrong_dir_window_s = s->guard_wrong_dir_window_s;
+    d->guard_wrong_dir_rate_c_per_min = s->guard_wrong_dir_rate_c_per_min;
+    d->guard_off_settle_s = s->guard_off_settle_s;
+    d->guard_runaway_rate_c_per_min = s->guard_runaway_rate_c_per_min;
+    d->guard_runaway_margin_c = s->guard_runaway_margin_c;
+    d->guard_drift_period_s = s->guard_drift_period_s;
+    d->guard_sensor_fault_debounce_ticks = s->guard_sensor_fault_debounce_ticks;
+    d->guard_frozen_window_s = s->guard_frozen_window_s;
+    d->cross_zone_max_delta_c = s->cross_zone_max_delta_c;
+    d->model_k_dc = s->model_k_dc;
+    d->model_tau_s = s->model_tau_s;
+    d->model_dead_time_s = s->model_dead_time_s;
+    d->thermo_mask = s->thermo_mask; /* real, operator-set value */
+    d->tc_type = THERMO_TC_K;        /* predates this field */
+}
+
+static void convert_zone_v5(const zone_cfg_v5_t *s, zone_cfg_t *d)
+{
+    memset(d, 0, sizeof(*d));
+    memcpy(d->name, s->name, sizeof(d->name));
+    d->relay_mask = s->relay_mask;
+    d->cal_offset_c = s->cal_offset_c;
+    d->pid_kp = s->pid_kp;
+    d->pid_ki = s->pid_ki;
+    d->pid_kd = s->pid_kd;
+    d->max_ramp_c_per_hr = s->max_ramp_c_per_hr;
+    d->sanity_rate_c_per_min = s->sanity_rate_c_per_min;
+    d->control_mode = s->control_mode;
+    d->max_temp_c = s->max_temp_c;
+    d->min_temp_c = s->min_temp_c;
+    d->heater_window_ms = s->heater_window_ms;
+    d->heater_min_on_ms = s->heater_min_on_ms;
+    d->heater_min_off_ms = s->heater_min_off_ms;
+    d->guard_wrong_dir_window_s = s->guard_wrong_dir_window_s;
+    d->guard_wrong_dir_rate_c_per_min = s->guard_wrong_dir_rate_c_per_min;
+    d->guard_off_settle_s = s->guard_off_settle_s;
+    d->guard_runaway_rate_c_per_min = s->guard_runaway_rate_c_per_min;
+    d->guard_runaway_margin_c = s->guard_runaway_margin_c;
+    d->guard_drift_period_s = s->guard_drift_period_s;
+    d->guard_sensor_fault_debounce_ticks = s->guard_sensor_fault_debounce_ticks;
+    d->guard_frozen_window_s = s->guard_frozen_window_s;
+    d->cross_zone_max_delta_c = s->cross_zone_max_delta_c;
+    d->tc_type = s->tc_type; /* real, operator-set value */
+    d->model_k_dc = s->model_k_dc;
+    d->model_tau_s = s->model_tau_s;
+    d->model_dead_time_s = s->model_dead_time_s;
+    d->thermo_mask = s->thermo_mask; /* real, operator-set value */
+}
+
+/* Dispatches to the right typed converter for `version`, filling `out` (a
+ * fresh CURRENT-format zones_cfg_t) field by field -- never a memcpy of one
+ * struct shape over another. Caller (decode_zones_blob()) has already
+ * checked `len` against expected_len_for_version(version), so the memcpy of
+ * `blob` into each local, exactly-sized historical struct below is safe. */
+static bool convert_versioned_blob_to_current(uint8_t version, const void *blob, zones_cfg_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    switch (version) {
+    case 1: {
+        zones_cfg_v1_t src;
+        memcpy(&src, blob, sizeof(src));
+        out->thermo_count = src.thermo_count;
+        out->relay_count = src.relay_count;
+        out->max_simultaneous_relays = src.max_simultaneous_relays;
+        out->continue_on_zone_trip = 0; /* predates this field -- 0 is its documented default */
+        out->safety_tc_type = THERMO_TC_K;
+        for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
+            convert_zone_v1(&src.zones[i], &out->zones[i], i);
+        }
+        return true;
+    }
+    case 2: {
+        zones_cfg_v2_t src;
+        memcpy(&src, blob, sizeof(src));
+        out->thermo_count = src.thermo_count;
+        out->relay_count = src.relay_count;
+        out->max_simultaneous_relays = src.max_simultaneous_relays;
+        out->continue_on_zone_trip = src.continue_on_zone_trip;
+        out->safety_tc_type = THERMO_TC_K;
+        for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
+            convert_zone_v1(&src.zones[i], &out->zones[i], i);
+        }
+        return true;
+    }
+    case 3: {
+        zones_cfg_v3_t src;
+        memcpy(&src, blob, sizeof(src));
+        out->thermo_count = src.thermo_count;
+        out->relay_count = src.relay_count;
+        out->max_simultaneous_relays = src.max_simultaneous_relays;
+        out->continue_on_zone_trip = src.continue_on_zone_trip;
+        out->safety_tc_type = THERMO_TC_K;
+        for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
+            convert_zone_v3(&src.zones[i], &out->zones[i], i);
+        }
+        return true;
+    }
+    case 4: {
+        zones_cfg_v4_t src;
+        memcpy(&src, blob, sizeof(src));
+        out->thermo_count = src.thermo_count;
+        out->relay_count = src.relay_count;
+        out->max_simultaneous_relays = src.max_simultaneous_relays;
+        out->continue_on_zone_trip = src.continue_on_zone_trip;
+        out->safety_tc_type = THERMO_TC_K;
+        for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
+            convert_zone_v4(&src.zones[i], &out->zones[i]);
+        }
+        return true;
+    }
+    case 5: {
+        zones_cfg_v5_t src;
+        memcpy(&src, blob, sizeof(src));
+        out->thermo_count = src.thermo_count;
+        out->relay_count = src.relay_count;
+        out->max_simultaneous_relays = src.max_simultaneous_relays;
+        out->continue_on_zone_trip = src.continue_on_zone_trip;
+        out->safety_tc_type = src.safety_tc_type; /* real value from v5 on */
+        for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
+            convert_zone_v5(&src.zones[i], &out->zones[i]);
+        }
+        return true;
+    }
+    case 6: {
+        zones_cfg_v6_t src;
+        memcpy(&src, blob, sizeof(src));
+        out->thermo_count = src.thermo_count;
+        out->relay_count = src.relay_count;
+        out->max_simultaneous_relays = src.max_simultaneous_relays;
+        out->continue_on_zone_trip = src.continue_on_zone_trip;
+        out->safety_tc_type = src.safety_tc_type;
+        for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
+            out->zones[i] = src.zones[i]; /* identical layout to the current zone_cfg_t */
+        }
+        return true;
+    }
+    default:
+        /* No known historical (or current) layout for this version --
+         * expected_len_for_version() already returned 0 for it and
+         * decode_zones_blob() should never reach here; kept as a defensive
+         * explicit refusal rather than silently guessing. */
+        return false;
+    }
+}
+
+/* esp_crc32_le() (same helper crash_report.c's compute_crc() uses) over the
+ * struct with crc32 itself zeroed -- computed over a local copy so a caller
+ * re-validating an already-loaded cfg's crc32 is never mutated by asking. */
+static uint32_t compute_zones_crc(const zones_cfg_t *cfg)
+{
+    zones_cfg_t tmp = *cfg;
+    tmp.crc32 = 0;
+    return esp_crc32_le(0, (const uint8_t *)&tmp, sizeof(tmp));
+}
+
+typedef enum {
+    ZONES_DECODE_OK,      /* *out is a valid, current-format struct, ready to adopt */
+    ZONES_DECODE_CORRUPT, /* reject outright: wrong length for claimed version, unknown
+                           * version, CRC mismatch, or failed validate_zones_cfg() --
+                           * *out is zeroed, nothing is adopted */
+    ZONES_DECODE_NEWER,   /* version > ZONES_CFG_VERSION -- refuse without guessing;
+                           * *out is zeroed, but the caller must treat the SOURCE bytes
+                           * as real, protected data (see nvs_load_from()'s *out_found) */
+} zones_decode_result_t;
+
+/* The one place a stored zones_cfg blob (from NVS or a kiln_cfg_store import)
+ * is turned into a trustworthy, current-format zones_cfg_t. Implements items
+ * 1-3 of the "saved securely like the others" fix: a length check against the
+ * blob's OWN claimed version before anything is copied or interpreted, typed
+ * per-version conversion (never a memcpy of one struct shape over another),
+ * and validate_zones_cfg() run on every path, not just import. Item 4 (CRC)
+ * is folded in here too, for the current-version case only -- see
+ * zones_cfg_t::crc32's comment for why older versions have no CRC to check. */
+static zones_decode_result_t decode_zones_blob(const void *blob, size_t len, zones_cfg_t *out,
+                                                const char **err_reason)
+{
+    static const char *unused_reason;
+    const char **reason = err_reason ? err_reason : &unused_reason;
+    *reason = "";
+    memset(out, 0, sizeof(*out));
+
+    if (!blob || len < sizeof(((zones_cfg_t *)0)->version)) {
+        *reason = "blob missing or too short to contain a version";
+        return ZONES_DECODE_CORRUPT;
+    }
+    uint8_t version = ((const uint8_t *)blob)[0];
+
+    if (version > ZONES_CFG_VERSION) {
+        /* Firmware-rollback case (TODO.md 8.1) -- this build does not know
+         * that layout and must not guess at it. Deliberately does NOT check
+         * length against anything here: an unknown newer layout could be any
+         * size, and the whole point of this branch is refusing to interpret
+         * it at all. */
+        *reason = "this config was saved by newer firmware -- refusing rather than guessing";
+        return ZONES_DECODE_NEWER;
+    }
+
+    size_t expected = expected_len_for_version(version);
+    if (expected == 0) {
+        *reason = "unknown/unsupported zones_cfg version";
+        return ZONES_DECODE_CORRUPT;
+    }
+    if (len != expected) {
+        *reason = "blob length does not match its claimed version -- treating as corrupt";
+        return ZONES_DECODE_CORRUPT;
+    }
+
+    if (version == ZONES_CFG_VERSION) {
+        memcpy(out, blob, sizeof(*out));
+        uint32_t stored_crc = out->crc32;
+        uint32_t computed_crc = compute_zones_crc(out);
+        if (computed_crc != stored_crc) {
+            memset(out, 0, sizeof(*out));
+            *reason = "CRC mismatch -- treating as corrupt";
+            return ZONES_DECODE_CORRUPT;
+        }
+    } else {
+        if (!convert_versioned_blob_to_current(version, blob, out)) {
+            memset(out, 0, sizeof(*out));
+            *reason = "unable to convert stored version to the current layout";
+            return ZONES_DECODE_CORRUPT;
+        }
+        out->version = ZONES_CFG_VERSION;
+        /* out->crc32 stays 0 here -- a migrated struct has never been saved
+         * in the current format yet, so there is no stored CRC to check
+         * against. nvs_save() stamps a real one the next time this config is
+         * written, current or not. */
+    }
+
+    const char *validate_reason = "invalid stored config";
+    if (!validate_zones_cfg(out, &validate_reason)) {
+        memset(out, 0, sizeof(*out));
+        *reason = validate_reason;
+        return ZONES_DECODE_CORRUPT;
+    }
+    return ZONES_DECODE_OK;
+}
 
 /* Brings up one NVS partition, erasing ONLY that partition if its contents
  * are unusable. Copied/adapted from wifi_prov.c's nvs_partition_init() (see
@@ -354,14 +930,16 @@ static esp_err_t nvs_partition_init(const char *partition)
 }
 
 /* Reads NVS_NAMESPACE/NVS_KEY_ZONES out of `partition` into *out_cfg, applying
- * the three-outcome version handling nvs_load() relies on. *out_found reports
- * whether the key held something WORTH NOT DISTURBING -- true for a
+ * the three-outcome version handling nvs_load() relies on, via the shared
+ * decode_zones_blob() decoder (length check first, typed per-version
+ * conversion, validate_zones_cfg(), CRC on the current-version path). *out_found
+ * reports whether the key held something WORTH NOT DISTURBING -- true for a
  * decoded-and-trustworthy blob (current or migrated-older) AND for a blob
  * refused as newer-than-firmware (a real config this build must not clobber,
- * even though it can't use it), false for genuine corruption (too short, or
- * the wrong size for its claimed version) where there is nothing being
- * protected and a caller is free to look elsewhere. This is what the
- * one-time migration below keys off. */
+ * even though it can't use it), false for genuine corruption (too short,
+ * wrong length for its claimed version, bad CRC, or failed validation) where
+ * there is nothing being protected and a caller is free to look elsewhere.
+ * This is what the one-time migration below keys off. */
 /* out_valid, if non-NULL, reports whether *out_cfg is a real decoded config
  * that later stages (zones_http_start(), zones_config_is_valid()) may treat
  * as trustworthy -- see s_zones_config_valid's comment for the exact rule.
@@ -389,189 +967,67 @@ static esp_err_t nvs_load_from(const char *partition, zones_cfg_t *out_cfg, bool
         return err;
     }
 
-    size_t len = sizeof(*out_cfg);
-    err = nvs_get_blob(h, NVS_KEY_ZONES, out_cfg, &len);
+    /* Raw byte buffer, not out_cfg directly: decode_zones_blob() needs the
+     * blob's ACTUAL on-disk bytes to run the length-vs-claimed-version check
+     * and, for an older version, to reinterpret them through the right
+     * historical struct -- not bytes already reshaped by a direct
+     * nvs_get_blob() into the CURRENT struct's layout (that reshaping is
+     * exactly the bug this pass fixes). Sized to the largest possible
+     * on-flash layout, which by construction is the current one (every
+     * historical struct above is smaller). */
+    uint8_t raw[sizeof(zones_cfg_t)];
+    memset(raw, 0, sizeof(raw));
+    size_t len = sizeof(raw);
+    err = nvs_get_blob(h, NVS_KEY_ZONES, raw, &len);
     nvs_close(h);
     if (err == ESP_ERR_NVS_NOT_FOUND) {
-        memset(out_cfg, 0, sizeof(*out_cfg));
         return ESP_OK;
     }
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "zones_cfg blob read from '%s' failed (%s) -- treating as unreadable",
                  partition, esp_err_to_name(err));
-        memset(out_cfg, 0, sizeof(*out_cfg));
         return ESP_OK;
     }
-    if (out_found) {
-        *out_found = true;
-    }
-    /* BUG FIXED 2026-08-13: this used to reject on `len != sizeof(*out_cfg)`
-     * BEFORE ever looking at `version`, which made the version-based
-     * migration path below dead code for the one case it exists for --
-     * adding a field grows sizeof(zones_cfg_t), so a pre-existing (smaller,
-     * older-version) blob would always fail that check and get wiped
-     * instead of migrated, even though nvs_get_blob() already copied
-     * everything the old blob had (out_cfg was zeroed first, so any new
-     * trailing fields correctly read as their zero default). Only a blob
-     * too short to even contain the `version` byte is unreadable; anything
-     * else is the version check's job now, matching what TODO.md 8.2's
-     * "three outcomes, not two" actually asked for. */
-    if (len < sizeof(out_cfg->version)) {
-        ESP_LOGW(TAG, "zones_cfg blob from '%s' is too short to contain a version -- treating as unreadable",
-                 partition);
-        memset(out_cfg, 0, sizeof(*out_cfg));
-        /* FIX 1: this is genuine corruption, not a rollback refusal -- there
-         * is no real, understandable-by-someone config being protected here,
-         * so unlike the newer-than-firmware case below, this must NOT block
-         * a caller (migrate_from_default_partition() via zones_http_start())
-         * from trying the other partition for something usable. *out_found
-         * reports "nothing worth keeping was found here", matching *out_valid
-         * staying false. */
+
+    const char *reason = "";
+    zones_decode_result_t result = decode_zones_blob(raw, len, out_cfg, &reason);
+    switch (result) {
+    case ZONES_DECODE_OK:
         if (out_found) {
-            *out_found = false;
-        }
-        return ESP_OK;
-    }
-
-    if (out_cfg->version == ZONES_CFG_VERSION) {
-        if (len != sizeof(*out_cfg)) {
-            /* Current version but wrong size can only mean genuine
-             * corruption -- a real current-version blob is always written
-             * at exactly sizeof(*out_cfg). Same "corrupt, not refused"
-             * reasoning as the too-short branch above: *out_found reports
-             * nothing worth keeping was found, so migration is still free to
-             * run. */
-            ESP_LOGW(TAG, "zones_cfg blob from '%s' claims current version but is the wrong size -- "
-                          "treating as unreadable", partition);
-            memset(out_cfg, 0, sizeof(*out_cfg));
-            if (out_found) {
-                *out_found = false;
-            }
-            return ESP_OK;
+            *out_found = true;
         }
         if (out_valid) {
-            *out_valid = true; /* current version -- happy path */
+            *out_valid = true;
+        }
+        ESP_LOGI(TAG, "zones_cfg from '%s' loaded (on-disk version %u) as v%u", partition,
+                 (unsigned)raw[0], (unsigned)ZONES_CFG_VERSION);
+        return ESP_OK;
+    case ZONES_DECODE_NEWER:
+        /* Firmware-rollback case (TODO.md 8.1): leave flash untouched, fall
+         * back to defaults for this boot only. *out_found MUST be true --
+         * this is real, deliberately-protected data (kiln_nvs genuinely has
+         * something), so migrate_from_default_partition() must not treat it
+         * as "nothing here" and overwrite it with a stale pre-split copy. */
+        ESP_LOGW(TAG, "zones_cfg from '%s' is version %u, newer than this firmware's %u -- "
+                      "refusing to load, flash data left untouched",
+                 partition, (unsigned)raw[0], (unsigned)ZONES_CFG_VERSION);
+        if (out_found) {
+            *out_found = true;
         }
         return ESP_OK;
-    }
-    if (out_cfg->version < ZONES_CFG_VERSION) {
-        /* Known older layout -- run it through the migration chain. A v1
-         * blob is shorter than the current struct (it predates
-         * continue_on_zone_trip); nvs_get_blob() already copied everything
-         * it had into a zeroed out_cfg, so the new field reads as 0 --
-         * exactly the "abort the whole firing" default TODO.md 6A.3 asks
-         * for, with no explicit conversion needed. */
-        ESP_LOGI(TAG, "zones_cfg from '%s' is version %u, migrating to %u", partition,
-                 (unsigned)out_cfg->version, (unsigned)ZONES_CFG_VERSION);
-        migrate_zones_cfg_v1_to_current(out_cfg);
-        if (out_valid) {
-            *out_valid = true; /* migrated -- still a real, trustworthy config */
-        }
+    case ZONES_DECODE_CORRUPT:
+    default:
+        /* Genuine corruption (too short, wrong length for the claimed
+         * version, bad CRC, or a decoded config that failed
+         * validate_zones_cfg()) -- loud enough that an operator can see it,
+         * naming the on-disk version and the specific rejection reason.
+         * Nothing worth protecting was found here, so a caller (the
+         * legacy-partition migration) is free to look elsewhere. */
+        ESP_LOGW(TAG, "zones_cfg blob from '%s' (on-disk version %u, %u bytes) REJECTED: %s -- "
+                      "falling back to defaults, NOT adopting this config",
+                 partition, (unsigned)raw[0], (unsigned)len, reason);
         return ESP_OK;
     }
-    /* out_cfg->version > ZONES_CFG_VERSION: the data was written by NEWER
-     * firmware than this build. This is the firmware-rollback case from
-     * TODO.md 8.1 -- an operator rolled back after a bad update, and the data
-     * on flash may use fields/layout this older build doesn't know about.
-     * Wiping it here would destroy config the newer firmware (or a
-     * roll-forward back to it) still needs, so refuse to load instead: leave
-     * flash untouched and fall back to defaults for this boot only. */
-    ESP_LOGW(TAG, "zones_cfg from '%s' is version %u, newer than this firmware's %u -- "
-                  "refusing to load, flash data left untouched",
-             partition, (unsigned)out_cfg->version, (unsigned)ZONES_CFG_VERSION);
-    memset(out_cfg, 0, sizeof(*out_cfg));
-    /* FIX 1 (bug found in review): *out_found must be TRUE here, the
-     * opposite of what this used to do. A refused newer-version blob is a
-     * real, deliberately-protected config -- kiln_nvs genuinely has
-     * something -- so a caller deciding whether it is safe to run the
-     * legacy-partition migration (zones_http_start()) MUST see this as
-     * "found" and skip migration, or it will overwrite the very data this
-     * refusal exists to protect with a stale pre-split copy. This is why
-     * *out_found and *out_valid are reported separately in the first place:
-     * found means "the key existed", valid means "and it's safe to run a
-     * kiln against" -- a refused blob is found-but-not-valid, never treated
-     * as "nothing here" the way genuine corruption (the two branches above)
-     * is. */
-    if (out_found) {
-        *out_found = true;
-    }
-    /* out_valid already false: refused, not trustworthy for this boot. */
-    return ESP_OK;
-}
-
-/* Migrates an older on-flash zones_cfg_t layout forward. v1 -> v2
- * (2026-08-13) added continue_on_zone_trip as a new trailing field; a v1
- * blob is shorter, but nvs_get_blob() already copied it into a zeroed
- * out_cfg before this runs (see nvs_load_from()), so the new field already
- * reads as 0 -- no explicit conversion needed, just the version bump.
- *
- * v3 -> v4 (2026-08-17, TODO.md 10.8) added zone_cfg_t::thermo_mask, and
- * THIS one needs an explicit conversion, unlike every field before it: 0 is
- * not a safe "not configured yet" default here the way it was for
- * continue_on_zone_trip. Every pre-10.8 blob's zones were already reading a
- * real thermocouple, implicitly, through the "zone i <-> channel i" mapping
- * this module used to hard-code (zones_http.h's old scope note) -- if this
- * function left thermo_mask at its zeroed default, every existing zone on
- * every board that has ever saved a config would go dark (thermo_combine.c
- * sees an empty mask, reports zero valid readings, and that's the same
- * "thermocouple invalid" state a real sensor fault produces) the moment
- * this firmware boots, with no operator action and no warning beyond
- * whatever guard 6 eventually trips. Filling in bit i for zone i
- * reproduces the exact mapping every migrated zone was already using, so a
- * migrated board controls off the same channel it always did until an
- * operator explicitly assigns something else. Bounded by
- * MAX31856_CHANNEL_COUNT (the zones[] array size), not thermo_count -- an
- * unconfigured trailing zone slot getting a harmless default bit costs
- * nothing and keeps this loop from needing to know which zones are "real". */
-static void migrate_zones_cfg_v1_to_current(zones_cfg_t *cfg)
-{
-    /* Captured BEFORE the version field is overwritten just below -- every
-     * per-field fill-in in this function must be gated on the blob's
-     * ORIGINAL on-disk version, not unconditionally applied just because
-     * this function ran. Bug fixed 2026-08-27: the tc_type/safety_tc_type
-     * fill-in a few lines down used to run for ANY version < ZONES_CFG_VERSION,
-     * which meant a v5 blob -- one that already legitimately stores whatever
-     * real thermocouple types an operator explicitly picked on the settings
-     * page -- got silently reset to THERMO_TC_K on the 5->6 (ct_mask) bump,
-     * exactly the "relinearize against the wrong type with no warning" harm
-     * that fill-in's own comment says it exists to prevent, just triggered
-     * a version late. Each fill-in below now checks from_version against the
-     * SPECIFIC version boundary it was written for. */
-    uint8_t from_version = cfg->version;
-    cfg->version = ZONES_CFG_VERSION;
-    if (from_version < 4) {
-        for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
-            if (cfg->zones[i].thermo_mask == 0) {
-                cfg->zones[i].thermo_mask = (uint8_t)(1u << i);
-            }
-        }
-    }
-    /* 4 -> 5 (2026-08-21, TODO.md owner-report item 1): every blob older than
-     * version 5 predates zone_cfg_t::tc_type / zones_cfg_t::safety_tc_type
-     * entirely, so both fields arrived here zeroed by nvs_get_blob() reading
-     * into a zeroed out_cfg (see nvs_load_from()). Unlike thermo_mask above,
-     * 0 is NOT a safe "not configured" reading for either field -- 0 decodes
-     * as THERMO_TC_B, a real and different thermocouple type, not an
-     * "unset" sentinel. Every board that has ever saved a zones config was
-     * running with THERMO_TC_K in the actual hardware register the whole
-     * time (MAX31856.c's now-fixed hardcoded default), so filling in
-     * THERMO_TC_K here for every channel -- and for the safety processor's
-     * own setting -- is what keeps a migrated board's thermocouples reading
-     * the same temperatures after this upgrade as they did before it, rather
-     * than silently relinearizing every reading against the wrong type the
-     * moment this firmware boots. An operator who deliberately wants
-     * something else still has to say so explicitly on the page, same as
-     * any first-time use of a brand-new field. */
-    if (from_version < 5) {
-        for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
-            cfg->zones[i].tc_type = THERMO_TC_K;
-        }
-        cfg->safety_tc_type = THERMO_TC_K;
-    }
-    /* 5 -> 6 (2026-08-27) added zone_cfg_t::ct_mask -- no fill-in needed,
-     * see ZONES_CFG_VERSION's own comment: 0 ("no CT probe mapped") is
-     * already the correct, safe value a zeroed-by-nvs_get_blob() field
-     * reads as for a v5-and-older blob. */
 }
 
 /* One-time move of the persisted zones config out of the default partition's
@@ -641,6 +1097,12 @@ static esp_err_t nvs_load(bool *out_found, bool *out_valid)
 static esp_err_t nvs_save(void)
 {
     s_zones.cfg.version = ZONES_CFG_VERSION;
+    /* Stamped last, after every other field is final for this write -- see
+     * compute_zones_crc()/zones_cfg_t::crc32's comments. Any in-RAM edit that
+     * lands here (a setter, a POST commit, an import) gets a fresh, correct
+     * CRC every time this function runs; there is no path that writes the
+     * blob without also re-stamping it. */
+    s_zones.cfg.crc32 = compute_zones_crc(&s_zones.cfg);
 
     nvs_handle_t h;
     esp_err_t err = nvs_open_from_partition(KILN_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
@@ -1444,44 +1906,21 @@ bool zones_config_import_blob(const void *blob, size_t len, char *reason_out, si
     if (reason_out && reason_cap) {
         reason_out[0] = '\0';
     }
-    if (!blob || len < sizeof(((zones_cfg_t *)0)->version)) {
-        if (reason_out && reason_cap) {
-            snprintf(reason_out, reason_cap, "blob missing or too short to contain a version");
-        }
-        return false;
-    }
 
+    /* Same decoder nvs_load_from() uses -- length-vs-claimed-version check
+     * before anything is interpreted, typed per-version conversion (never a
+     * memcpy of one struct shape over another), validate_zones_cfg(), and a
+     * CRC check on the current-version path. This blob may have been saved
+     * years ago by older firmware under looser bounds (kiln_cfg_store.c), so
+     * it gets exactly the same scrutiny a blob read off flash does -- no
+     * separate, looser path for "this one came from a kiln config slot
+     * instead of the live NVS key." */
     zones_cfg_t cand;
-    memset(&cand, 0, sizeof(cand));
-    memcpy(&cand, blob, len < sizeof(cand) ? len : sizeof(cand));
-
-    /* Same three-outcome version handling as nvs_load_from() -- see that
-     * function's comment. current / older-migrated / newer-REFUSED, no
-     * guessing at a layout this build doesn't know. */
-    if (cand.version == ZONES_CFG_VERSION) {
-        if (len != sizeof(cand)) {
-            if (reason_out && reason_cap) {
-                snprintf(reason_out, reason_cap,
-                         "current-version config is the wrong size -- treating as corrupt");
-            }
-            return false;
-        }
-    } else if (cand.version < ZONES_CFG_VERSION) {
-        migrate_zones_cfg_v1_to_current(&cand);
-    } else {
+    const char *reason = "";
+    zones_decode_result_t result = decode_zones_blob(blob, len, &cand, &reason);
+    if (result != ZONES_DECODE_OK) {
         if (reason_out && reason_cap) {
-            snprintf(reason_out, reason_cap,
-                     "this config was saved by newer firmware (zones layout v%u, this build "
-                     "knows v%u) -- refusing rather than guessing",
-                     (unsigned)cand.version, (unsigned)ZONES_CFG_VERSION);
-        }
-        return false;
-    }
-
-    const char *err_reason = "invalid stored config";
-    if (!validate_zones_cfg(&cand, &err_reason)) {
-        if (reason_out && reason_cap) {
-            snprintf(reason_out, reason_cap, "%s", err_reason);
+            snprintf(reason_out, reason_cap, "%s", reason);
         }
         return false;
     }

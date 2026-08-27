@@ -509,13 +509,14 @@ static void test_nvs_load_from_wrong_size_current_version_is_corrupt_not_refused
 
 static void test_nvs_load_from_current_version_happy_path(void)
 {
-    TEST_SECTION("nvs_load_from -- current version, right size: found=true, valid=true");
+    TEST_SECTION("nvs_load_from -- current version, right size, valid CRC: found=true, valid=true");
     nvs_test_enable(true);
     nvs_test_clear();
     zones_cfg_t src;
     memset(&src, 0, sizeof(src));
     src.version = ZONES_CFG_VERSION;
     src.thermo_count = 2;
+    src.crc32 = compute_zones_crc(&src); // CRC now checked on the current-version path (item 4)
     stage_zones_blob(&src, sizeof(src));
 
     zones_cfg_t out_cfg;
@@ -609,6 +610,249 @@ static void test_zones_http_start_refused_newer_blob_not_overwritten(void)
     nvs_test_clear();
 }
 
+// ---------------------------------------------------------------------------
+// "Saved securely like the others" -- the real defect this pass fixes.
+// nvs_load_from()'s old load path (for a stored version OLDER than current)
+// did no length check, never ran validate_zones_cfg(), assumed zone_cfg_t
+// only ever grew at the tail (false: three of the last four bumps before
+// this one grew it mid-struct, an ARRAY ELEMENT, which displaces every zone
+// after the first), and had no CRC at all. Each check below is proven to be
+// able to FAIL, not just proven to pass on a well-formed blob -- see each
+// test's own "confirmed RED" note in this file's accompanying report.
+// ---------------------------------------------------------------------------
+
+// Item 1 -- length-vs-claimed-version check, exercised on an OLDER version:
+// a blob that claims version 4 but is sized like a version-3 blob (one whole
+// zone_cfg_t narrower, since v3->v4 grew every zone_cfg_t array element) must
+// be rejected outright, not partially interpreted.
+static void test_nvs_load_from_old_version_wrong_length_is_rejected(void)
+{
+    TEST_SECTION("nvs_load_from -- item 1: old-version blob whose length doesn't match its "
+                 "claimed version is rejected outright");
+    nvs_test_enable(true);
+    nvs_test_clear();
+
+    zones_cfg_v3_t src3;
+    memset(&src3, 0, sizeof(src3));
+    src3.version = 4; // LIES about being v4 -- actually only a v3-sized blob
+    src3.thermo_count = 3;
+    stage_zones_blob(&src3, sizeof(src3)); // v3-sized, not v4-sized
+
+    zones_cfg_t out_cfg;
+    bool found = true, valid = true;
+    esp_err_t err = nvs_load_from("kiln_nvs", &out_cfg, &found, &valid);
+
+    TEST_CHECK(err == ESP_OK, "a length mismatch is a handled outcome, not an NVS error");
+    TEST_CHECK(!found, "wrong length for the claimed version must be rejected (found=false)");
+    TEST_CHECK(!valid, "must not be trustworthy");
+    TEST_CHECK(out_cfg.version == 0, "out_cfg must come back zeroed, not partially interpreted");
+    TEST_CHECK(out_cfg.thermo_count == 0, "no field may leak through from a rejected blob");
+
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
+// Item 4 -- CRC. A current-version blob with the RIGHT length but a stored
+// CRC that does not match its own bytes must be rejected.
+static void test_nvs_load_from_bad_crc_is_rejected(void)
+{
+    TEST_SECTION("nvs_load_from -- item 4: current-version blob with a bad CRC is rejected");
+    nvs_test_enable(true);
+    nvs_test_clear();
+
+    zones_cfg_t src;
+    memset(&src, 0, sizeof(src));
+    src.version = ZONES_CFG_VERSION;
+    src.thermo_count = 1;
+    src.zones[0].max_temp_c = 1300.0f;
+    src.crc32 = compute_zones_crc(&src) ^ 0x1u; // one bit off from the real CRC
+    stage_zones_blob(&src, sizeof(src));
+
+    zones_cfg_t out_cfg;
+    bool found = true, valid = true;
+    esp_err_t err = nvs_load_from("kiln_nvs", &out_cfg, &found, &valid);
+
+    TEST_CHECK(err == ESP_OK, "a bad CRC is a handled outcome, not an NVS error");
+    TEST_CHECK(!found, "a CRC mismatch must be rejected (found=false)");
+    TEST_CHECK(!valid, "must not be trustworthy");
+    TEST_CHECK(out_cfg.thermo_count == 0, "no field may leak through from a CRC-rejected blob");
+
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
+// Item 3 -- validate_zones_cfg() now runs on the NVS load path too, not just
+// zones_config_import_blob(). A current-version blob with the right length
+// AND a correct CRC (proving the bytes are exactly what was written) but an
+// out-of-range field must still be rejected, not adopted with the valid flag
+// set -- the config was written wrong in the first place, and a correct CRC
+// over wrong data is not a reason to trust it.
+static void test_nvs_load_from_failed_validation_is_rejected(void)
+{
+    TEST_SECTION("nvs_load_from -- item 3: length+CRC correct but validate_zones_cfg() fails "
+                 "-> rejected, not partially adopted");
+    nvs_test_enable(true);
+    nvs_test_clear();
+
+    zones_cfg_t src;
+    memset(&src, 0, sizeof(src));
+    src.version = ZONES_CFG_VERSION;
+    src.thermo_count = 1;
+    src.zones[0].max_temp_c = 999999.0f; // past ZONE_MAX_TEMP_C_MAX -- validate_zones_cfg() must reject
+    src.crc32 = compute_zones_crc(&src); // CRC is genuinely correct for these (bad) bytes
+    stage_zones_blob(&src, sizeof(src));
+
+    zones_cfg_t out_cfg;
+    bool found = true, valid = true;
+    esp_err_t err = nvs_load_from("kiln_nvs", &out_cfg, &found, &valid);
+
+    TEST_CHECK(err == ESP_OK, "a validation failure is a handled outcome, not an NVS error");
+    TEST_CHECK(!found, "a validate_zones_cfg() failure must be rejected (found=false), matching "
+                       "every other corruption case, not partially defaulted");
+    TEST_CHECK(!valid, "must not be trustworthy");
+    TEST_CHECK(out_cfg.thermo_count == 0, "nothing from a validation-rejected blob may leak through");
+
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
+// Round-trip: nvs_save() then nvs_load() (the real save/load pair, not just
+// nvs_load_from() in isolation) must hand back every field identical,
+// including the newly-added crc32-stamping behavior itself.
+static void test_nvs_save_load_round_trip_current_version(void)
+{
+    TEST_SECTION("nvs_save/nvs_load -- round trip: every field identical after save then load back");
+    nvs_test_enable(true);
+    nvs_test_clear();
+
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    s_zones.cfg.thermo_count = 3;
+    s_zones.cfg.relay_count = 4;
+    s_zones.cfg.max_simultaneous_relays = 2;
+    s_zones.cfg.continue_on_zone_trip = 1;
+    s_zones.cfg.safety_tc_type = 3;
+    for (uint8_t i = 0; i < 3; i++) {
+        zone_cfg_t *z = &s_zones.cfg.zones[i];
+        snprintf(z->name, sizeof(z->name), "Z%u", (unsigned)i);
+        z->relay_mask = (uint8_t)(1u << i);
+        z->thermo_mask = (uint8_t)(1u << i);
+        z->ct_mask = (uint8_t)(1u << (i % ZONE_CT_CHANNEL_COUNT));
+        z->tc_type = (uint8_t)(i % 8);
+        z->cal_offset_c = 1.5f + i;
+        z->pid_kp = 2.0f + i;
+        z->max_temp_c = 1200.0f + 10.0f * i;
+        z->model_k_dc = 12.0f + i;
+    }
+    zones_cfg_t saved_copy = s_zones.cfg; // captured before nvs_save() stamps version/crc32 in place
+
+    esp_err_t save_err = nvs_save();
+    TEST_CHECK(save_err == ESP_OK, "nvs_save() must succeed against the stub");
+
+    zones_cfg_t loaded;
+    memset(&loaded, 0, sizeof(loaded));
+    zones_cfg_t *saved_ptr = &s_zones.cfg;
+    memset(saved_ptr, 0, sizeof(*saved_ptr)); // wipe the live struct so nvs_load() must reconstruct it from NVS
+    bool found = false, valid = false;
+    esp_err_t load_err = nvs_load(&found, &valid);
+    loaded = s_zones.cfg;
+
+    TEST_CHECK(load_err == ESP_OK, "nvs_load() must succeed");
+    TEST_CHECK(found && valid, "a freshly saved current-version config must load back found+valid");
+    TEST_CHECK(loaded.thermo_count == saved_copy.thermo_count, "thermo_count round-trips");
+    TEST_CHECK(loaded.relay_count == saved_copy.relay_count, "relay_count round-trips");
+    TEST_CHECK(loaded.continue_on_zone_trip == saved_copy.continue_on_zone_trip, "continue_on_zone_trip round-trips");
+    TEST_CHECK(loaded.safety_tc_type == saved_copy.safety_tc_type, "safety_tc_type round-trips");
+    for (uint8_t i = 0; i < 3; i++) {
+        TEST_CHECK(strcmp(loaded.zones[i].name, saved_copy.zones[i].name) == 0, "zone name round-trips");
+        TEST_CHECK(loaded.zones[i].relay_mask == saved_copy.zones[i].relay_mask, "zone relay_mask round-trips");
+        TEST_CHECK(loaded.zones[i].thermo_mask == saved_copy.zones[i].thermo_mask, "zone thermo_mask round-trips");
+        TEST_CHECK(loaded.zones[i].ct_mask == saved_copy.zones[i].ct_mask, "zone ct_mask round-trips");
+        TEST_CHECK(loaded.zones[i].tc_type == saved_copy.zones[i].tc_type, "zone tc_type round-trips");
+        TEST_CHECK_NEAR(loaded.zones[i].cal_offset_c, saved_copy.zones[i].cal_offset_c, 1e-6, "zone cal_offset_c round-trips");
+        TEST_CHECK_NEAR(loaded.zones[i].pid_kp, saved_copy.zones[i].pid_kp, 1e-6, "zone pid_kp round-trips");
+        TEST_CHECK_NEAR(loaded.zones[i].max_temp_c, saved_copy.zones[i].max_temp_c, 1e-6, "zone max_temp_c round-trips");
+        TEST_CHECK_NEAR(loaded.zones[i].model_k_dc, saved_copy.zones[i].model_k_dc, 1e-6, "zone model_k_dc round-trips");
+    }
+
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
+// Item 2 -- the actual historical bug: an old-version (v5, i.e. the exact
+// "3 -> 4, 4 -> 5 grew zone_cfg_t mid-struct" case the defect report calls
+// out) blob with DISTINCT values on zones[0], zones[1] and zones[2] must land
+// each zone's fields at the RIGHT zone after conversion -- not the old bug's
+// "zones[1]/zones[2] read from the wrong byte offsets, as arbitrary floats,
+// and flagged VALID" behavior. zones[1]/zones[2] specifically, since those
+// are the ones the old memcpy-based migration got wrong (zones[0] happened
+// to always land correctly, which is exactly what let the bug hide).
+static void test_nvs_load_from_v5_blob_upconverts_zones_1_and_2_correctly(void)
+{
+    TEST_SECTION("nvs_load_from -- item 2: an old (v5) blob's zones[1]/zones[2] land at the "
+                 "correct fields after typed conversion, not shifted");
+    nvs_test_enable(true);
+    nvs_test_clear();
+
+    zones_cfg_v5_t src;
+    memset(&src, 0, sizeof(src));
+    src.version = 5;
+    src.thermo_count = 3;
+    src.relay_count = 4;
+    src.continue_on_zone_trip = 1;
+    src.safety_tc_type = 5;
+
+    src.zones[0].relay_mask = 0x01;
+    src.zones[0].max_temp_c = 1100.0f;
+    src.zones[0].tc_type = 1;
+    src.zones[0].guard_runaway_margin_c = 11.0f;
+
+    src.zones[1].relay_mask = 0x02;
+    src.zones[1].max_temp_c = 1200.0f;
+    src.zones[1].tc_type = 2;
+    src.zones[1].guard_runaway_margin_c = 22.0f;
+    src.zones[1].thermo_mask = 0x02;
+
+    src.zones[2].relay_mask = 0x04;
+    src.zones[2].max_temp_c = 1300.0f;
+    src.zones[2].tc_type = 3;
+    src.zones[2].guard_runaway_margin_c = 33.0f;
+    src.zones[2].thermo_mask = 0x04;
+
+    stage_zones_blob(&src, sizeof(src));
+
+    zones_cfg_t out_cfg;
+    bool found = false, valid = false;
+    esp_err_t err = nvs_load_from("kiln_nvs", &out_cfg, &found, &valid);
+
+    TEST_CHECK(err == ESP_OK, "no NVS error");
+    TEST_CHECK(found && valid, "a well-formed v5 blob must migrate to a valid current config");
+    TEST_CHECK(out_cfg.version == ZONES_CFG_VERSION, "migrated config is stamped with the current version");
+    TEST_CHECK(out_cfg.continue_on_zone_trip == 1, "top-level continue_on_zone_trip carried through");
+    TEST_CHECK(out_cfg.safety_tc_type == 5, "top-level safety_tc_type (real v5 value) carried through");
+
+    TEST_CHECK(out_cfg.zones[1].relay_mask == 0x02, "zones[1].relay_mask must NOT be shifted -- "
+                                                    "this is the exact field the old bug misread");
+    TEST_CHECK_NEAR(out_cfg.zones[1].max_temp_c, 1200.0f, 1e-6, "zones[1].max_temp_c must be the real "
+                                                                "value, not an arbitrary float from "
+                                                                "the wrong offset");
+    TEST_CHECK(out_cfg.zones[1].tc_type == 2, "zones[1].tc_type carried through");
+    TEST_CHECK_NEAR(out_cfg.zones[1].guard_runaway_margin_c, 22.0f, 1e-6,
+                    "zones[1].guard_runaway_margin_c -- a thermal guard threshold -- must be the real value");
+    TEST_CHECK(out_cfg.zones[1].thermo_mask == 0x02, "zones[1].thermo_mask (real v5 value) carried through");
+
+    TEST_CHECK(out_cfg.zones[2].relay_mask == 0x04, "zones[2].relay_mask must NOT be shifted");
+    TEST_CHECK_NEAR(out_cfg.zones[2].max_temp_c, 1300.0f, 1e-6, "zones[2].max_temp_c must be the real value");
+    TEST_CHECK(out_cfg.zones[2].tc_type == 3, "zones[2].tc_type carried through");
+    TEST_CHECK_NEAR(out_cfg.zones[2].guard_runaway_margin_c, 33.0f, 1e-6, "zones[2].guard_runaway_margin_c must be the real value");
+    TEST_CHECK(out_cfg.zones[2].thermo_mask == 0x04, "zones[2].thermo_mask (real v5 value) carried through");
+
+    TEST_CHECK(out_cfg.zones[0].relay_mask == 0x01, "zones[0].relay_mask still correct (sanity check)");
+    TEST_CHECK_NEAR(out_cfg.zones[0].max_temp_c, 1100.0f, 1e-6, "zones[0].max_temp_c still correct (sanity check)");
+
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
 void run_test_zones_http(void)
 {
     test_out_of_range_zone_preserves_stored_fields();
@@ -629,6 +873,12 @@ void run_test_zones_http(void)
     test_nvs_load_from_current_version_happy_path();
     test_nvs_load_from_newer_than_firmware_is_found_but_not_valid();
     test_zones_http_start_refused_newer_blob_not_overwritten();
+
+    test_nvs_load_from_old_version_wrong_length_is_rejected();
+    test_nvs_load_from_bad_crc_is_rejected();
+    test_nvs_load_from_failed_validation_is_rejected();
+    test_nvs_save_load_round_trip_current_version();
+    test_nvs_load_from_v5_blob_upconverts_zones_1_and_2_correctly();
 }
 
 int main(void)
