@@ -143,6 +143,21 @@ typedef enum {
  * direction -- and, worse, a *missed*-trip risk if the substituted number
  * were ever accidentally too high. */
 typedef struct {
+    /* tc_placement_valid: false means "nobody has commissioned
+     * tc_placement_mode yet", and every guard that depends on the placement
+     * decision must stay OFF while it is false. This flag exists because the
+     * enum below CANNOT express "unset": SAFETY_TC_CHAMBER_AGREED is 0, which
+     * is also what a zero-initialised config struct holds, and 0 is the value
+     * that ARMS S2 and S10. SAFETY_MODEL.md section 3 is explicit that
+     * "there is no safe default, so there is no default -- until it is set,
+     * S2 and S10 stay off"; without this flag the code did the exact
+     * opposite, arming both against an undeclared sensor on every
+     * uncommissioned board (audit 2026-08-27). Renumbering the enum to add
+     * an UNSET member was rejected: those values are on the wire
+     * (CONFIG_STORE_TC_PLACEMENT_* in config_store.h) and in flash records,
+     * so shifting them would silently reinterpret every already-commissioned
+     * board's stored config. */
+    bool tc_placement_valid;
     safety_tc_placement_mode_t tc_placement_mode;
 
     /* S1. abs_max_temp_c: 0 = not commissioned, guard never trips (see the

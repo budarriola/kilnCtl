@@ -43,6 +43,7 @@ static safety_guard_cfg_t base_cfg(void)
 {
     safety_guard_cfg_t cfg;
     memset(&cfg, 0, sizeof(cfg));
+    cfg.tc_placement_valid = true; /* commissioned -- see safety_guards.h */
     cfg.tc_placement_mode = SAFETY_TC_EXTERNAL_OVERHEAT;
     cfg.abs_max_temp_c = 1300.0f;
     cfg.tc_source = SAFETY_TC_SOURCE_OWN_J7;
@@ -135,6 +136,7 @@ static void test_s1(void)
         safety_guard_state_t s;
         safety_guards_reset(&s);
         safety_guard_cfg_t cfg = base_cfg();
+        cfg.tc_placement_valid = true; /* commissioned -- see safety_guards.h */
         cfg.tc_placement_mode = SAFETY_TC_CHAMBER_AGREED;
         cfg.abs_max_temp_c = 1300.0f;
         cfg.firing_margin_c = 100.0f;
@@ -155,6 +157,7 @@ static void test_s1(void)
         safety_guard_state_t s;
         safety_guards_reset(&s);
         safety_guard_cfg_t cfg = base_cfg();
+        cfg.tc_placement_valid = true; /* commissioned -- see safety_guards.h */
         cfg.tc_placement_mode = SAFETY_TC_CHAMBER_AGREED;
         cfg.abs_max_temp_c = 1300.0f;
         cfg.firing_max_valid = true;
@@ -173,6 +176,7 @@ static void test_s1(void)
         safety_guard_state_t s;
         safety_guards_reset(&s);
         safety_guard_cfg_t cfg = base_cfg();
+        cfg.tc_placement_valid = true; /* commissioned -- see safety_guards.h */
         cfg.tc_placement_mode = SAFETY_TC_EXTERNAL_OVERHEAT;
         cfg.abs_max_temp_c = 1300.0f;
         cfg.firing_max_valid = true;
@@ -785,6 +789,7 @@ static void test_independence_invariant(void)
     safety_guards_reset(&s_a);
     safety_guards_reset(&s_b);
     safety_guard_cfg_t cfg = base_cfg();
+    cfg.tc_placement_valid = true; /* commissioned -- see safety_guards.h */
     cfg.tc_placement_mode = SAFETY_TC_CHAMBER_AGREED;
     cfg.firing_max_valid = true;
     cfg.firing_max_c = 800.0f;
@@ -870,6 +875,7 @@ static void test_tx_independence_representative_sequence(void)
     safety_guards_reset(&s_a);
     safety_guards_reset(&s_b);
     safety_guard_cfg_t cfg = base_cfg();
+    cfg.tc_placement_valid = true; /* commissioned -- see safety_guards.h */
     cfg.tc_placement_mode = SAFETY_TC_CHAMBER_AGREED;
     cfg.firing_max_valid = true;
     cfg.firing_max_c = 1200.0f; /* generous -- this run isn't exercising S1's ceiling-tightening math */
@@ -1016,6 +1022,7 @@ static void test_s2(void)
         safety_guard_state_t s;
         safety_guards_reset(&s);
         safety_guard_cfg_t cfg = base_cfg();
+        cfg.tc_placement_valid = true; /* commissioned -- see safety_guards.h */
         cfg.tc_placement_mode = SAFETY_TC_CHAMBER_AGREED;
         safety_guard_input_t in = base_input();
         in.context_valid = true;
@@ -1037,6 +1044,7 @@ static void test_s2(void)
         safety_guard_state_t s;
         safety_guards_reset(&s);
         safety_guard_cfg_t cfg = base_cfg();
+        cfg.tc_placement_valid = true; /* commissioned -- see safety_guards.h */
         cfg.tc_placement_mode = SAFETY_TC_EXTERNAL_OVERHEAT;
         safety_guard_input_t in = base_input();
         in.context_valid = true;
@@ -1057,6 +1065,7 @@ static void test_s2(void)
         safety_guard_state_t s;
         safety_guards_reset(&s);
         safety_guard_cfg_t cfg = base_cfg();
+        cfg.tc_placement_valid = true; /* commissioned -- see safety_guards.h */
         cfg.tc_placement_mode = SAFETY_TC_CHAMBER_AGREED;
         safety_guard_input_t in = base_input();
         in.context_valid = false;
@@ -1076,6 +1085,7 @@ static void test_s2(void)
         safety_guard_state_t s;
         safety_guards_reset(&s);
         safety_guard_cfg_t cfg = base_cfg();
+        cfg.tc_placement_valid = true; /* commissioned -- see safety_guards.h */
         cfg.tc_placement_mode = SAFETY_TC_CHAMBER_AGREED;
         safety_guard_input_t in = base_input();
         in.context_valid = true;
@@ -1091,11 +1101,40 @@ static void test_s2(void)
         TEST_CHECK(s.reason == SAFETY_TRIP_OVER_SETPOINT, "reason is SAFETY_TRIP_OVER_SETPOINT");
     }
 
+    /* NEGATIVE TEST for tc_placement_valid (audit 2026-08-27). Same inputs as
+     * the S2 trip immediately above -- the ONLY difference is that
+     * tc_placement_mode was never commissioned. SAFETY_MODEL.md section 3:
+     * "there is no safe default, so there is no default -- until it is set,
+     * S2 and S10 stay off." Before tc_placement_valid existed, an unset
+     * placement read as CHAMBER_AGREED (enum value 0 == the zero-init value),
+     * so S2 and S10 were silently ARMED on every uncommissioned board and
+     * this case tripped. If this check ever starts failing, the gate has been
+     * removed and uncommissioned boards are nuisance-tripping again. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.tc_placement_valid = false; /* NOT commissioned */
+        cfg.tc_placement_mode = SAFETY_TC_CHAMBER_AGREED;
+        safety_guard_input_t in = base_input();
+        in.context_valid = true;
+        in.zone_count = 1;
+        in.max_zone_setpoint_c = 900.0f;
+        in.tc_c = 990.0f;
+        in.dt_s = 10.0f;
+        bool tripped = false;
+        for (int i = 0; i < 13 && !tripped; i++) {
+            tripped = safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(!tripped, "S2 stays OFF while tc_placement_mode is uncommissioned");
+    }
+
     /* Nuisance: a brief excursion that drops back down resets the timer. */
     {
         safety_guard_state_t s;
         safety_guards_reset(&s);
         safety_guard_cfg_t cfg = base_cfg();
+        cfg.tc_placement_valid = true; /* commissioned -- see safety_guards.h */
         cfg.tc_placement_mode = SAFETY_TC_CHAMBER_AGREED;
         safety_guard_input_t hot = base_input();
         hot.context_valid = true;
@@ -1124,6 +1163,7 @@ static void test_s2(void)
         safety_guard_state_t s;
         safety_guards_reset(&s);
         safety_guard_cfg_t cfg = base_cfg();
+        cfg.tc_placement_valid = true; /* commissioned -- see safety_guards.h */
         cfg.tc_placement_mode = SAFETY_TC_CHAMBER_AGREED;
         safety_guard_input_t in = base_input();
         in.context_valid = true;
@@ -1138,6 +1178,7 @@ static void test_s2(void)
         safety_guard_state_t s;
         safety_guards_reset(&s);
         safety_guard_cfg_t cfg = base_cfg();
+        cfg.tc_placement_valid = true; /* commissioned -- see safety_guards.h */
         cfg.tc_placement_mode = SAFETY_TC_CHAMBER_AGREED;
         safety_guard_input_t in = base_input();
         in.context_valid = true;
@@ -1772,6 +1813,7 @@ static void test_s10(void)
         safety_guard_state_t s;
         safety_guards_reset(&s);
         safety_guard_cfg_t cfg = base_cfg();
+        cfg.tc_placement_valid = true; /* commissioned -- see safety_guards.h */
         cfg.tc_placement_mode = SAFETY_TC_CHAMBER_AGREED;
         safety_guard_input_t in = base_input();
         in.context_valid = true;
@@ -1794,6 +1836,7 @@ static void test_s10(void)
         safety_guard_state_t s;
         safety_guards_reset(&s);
         safety_guard_cfg_t cfg = base_cfg();
+        cfg.tc_placement_valid = true; /* commissioned -- see safety_guards.h */
         cfg.tc_placement_mode = SAFETY_TC_EXTERNAL_OVERHEAT;
         safety_guard_input_t in = base_input();
         in.context_valid = true;
@@ -1811,6 +1854,7 @@ static void test_s10(void)
         safety_guard_state_t s;
         safety_guards_reset(&s);
         safety_guard_cfg_t cfg = base_cfg();
+        cfg.tc_placement_valid = true; /* commissioned -- see safety_guards.h */
         cfg.tc_placement_mode = SAFETY_TC_CHAMBER_AGREED;
         safety_guard_input_t in = base_input();
         in.context_valid = true;
@@ -2271,6 +2315,7 @@ static void test_s1_ceiling_properties(void)
             safety_guard_state_t s;
             safety_guards_reset(&s);
             safety_guard_cfg_t cfg = base_cfg();
+            cfg.tc_placement_valid = true; /* commissioned -- see safety_guards.h */
             cfg.tc_placement_mode = SAFETY_TC_CHAMBER_AGREED;
             cfg.abs_max_temp_c = 1300.0f;
             cfg.firing_margin_c = 100.0f;
@@ -2296,6 +2341,7 @@ static void test_s1_ceiling_properties(void)
         safety_guard_state_t s;
         safety_guards_reset(&s);
         safety_guard_cfg_t cfg = base_cfg();
+        cfg.tc_placement_valid = true; /* commissioned -- see safety_guards.h */
         cfg.tc_placement_mode = SAFETY_TC_CHAMBER_AGREED;
         cfg.abs_max_temp_c = 1300.0f;
         cfg.firing_margin_c = 100.0f;
@@ -2331,6 +2377,7 @@ static void test_s1_ceiling_properties(void)
         safety_guard_state_t s;
         safety_guards_reset(&s);
         safety_guard_cfg_t cfg = base_cfg();
+        cfg.tc_placement_valid = true; /* commissioned -- see safety_guards.h */
         cfg.tc_placement_mode = SAFETY_TC_CHAMBER_AGREED;
         cfg.abs_max_temp_c = 1300.0f;
         cfg.firing_margin_c = 100.0f;
@@ -2375,6 +2422,7 @@ static void test_context_gating(void)
         safety_guard_state_t s;
         safety_guards_reset(&s);
         safety_guard_cfg_t cfg = base_cfg();
+        cfg.tc_placement_valid = true; /* commissioned -- see safety_guards.h */
         cfg.tc_placement_mode = SAFETY_TC_CHAMBER_AGREED;
         cfg.tc_source = SAFETY_TC_SOURCE_BORROWED_ZONE;
         cfg.abs_max_temp_c = 1300.0f; /* keep S1 well out of range */

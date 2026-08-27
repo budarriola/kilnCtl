@@ -379,7 +379,8 @@ bool safety_guards_tick(safety_guard_state_t *state, const safety_guard_cfg_t *c
      * no default and must be commissioned"). */
     if (cfg->abs_max_temp_c > 0.0f) {
         float ceiling;
-        if (cfg->tc_placement_mode == SAFETY_TC_CHAMBER_AGREED && cfg->firing_max_valid) {
+        if (cfg->tc_placement_valid && cfg->tc_placement_mode == SAFETY_TC_CHAMBER_AGREED &&
+            cfg->firing_max_valid) {
             /* The ceiling can only ever tighten: min() means a hostile or
              * buggy ESP asking for more headroom gets clamped, never
              * obeyed (SAFETY_MODEL.md section 4, S1). */
@@ -494,7 +495,8 @@ bool safety_guards_tick(safety_guard_state_t *state, const safety_guard_cfg_t *c
          * chamber setpoint is meaningless (SAFETY_MODEL.md section 4, S2).
          * zone_count == 0 means "no active zones this tick", same inactive
          * treatment as stale context. */
-        if (cfg->tc_placement_mode == SAFETY_TC_CHAMBER_AGREED && in->zone_count > 0u && in->tc_valid) {
+        if (cfg->tc_placement_valid && cfg->tc_placement_mode == SAFETY_TC_CHAMBER_AGREED &&
+            in->zone_count > 0u && in->tc_valid) {
             float margin = effective_f(cfg->overshoot_margin_c, OVERSHOOT_MARGIN_C_DEFAULT);
             if (in->tc_c > in->max_zone_setpoint_c + margin) {
                 state->s2_over_elapsed_s += in->dt_s;
@@ -541,7 +543,8 @@ bool safety_guards_tick(safety_guard_state_t *state, const safety_guard_cfg_t *c
          * CHAMBER_AGREED only, same reasoning as S2 (SAFETY_MODEL.md section
          * 4, S10). Compares against the caller-supplied *nearest* valid zone
          * reading, never the mean -- kilns stratify. */
-        if (cfg->tc_placement_mode == SAFETY_TC_CHAMBER_AGREED && in->zone_count > 0u && in->tc_valid) {
+        if (cfg->tc_placement_valid && cfg->tc_placement_mode == SAFETY_TC_CHAMBER_AGREED &&
+            in->zone_count > 0u && in->tc_valid) {
             float disagree_c = effective_f(cfg->tc_disagreement_c, TC_DISAGREEMENT_C_DEFAULT);
             float diff = in->tc_c - in->nearest_zone_measured_c;
             if (diff < 0.0f) {

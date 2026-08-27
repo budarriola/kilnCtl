@@ -228,6 +228,88 @@ static TaskHandle_t s_task_handle = NULL;
 static safety_guard_cfg_t s_guard_cfg;
 static safety_guard_state_t s_guard_state;
 
+// Copies every commissioned threshold out of config_store into s_guard_cfg.
+//
+// THIS EXISTS BECAUSE IT DID NOT (audit 2026-08-27). Before this function,
+// the ONLY fields ever written to s_guard_cfg anywhere in the firmware were
+// firing_max_valid/firing_max_c (below, from the link). Every other member --
+// abs_max_temp_c above all -- sat at its zero-initialised value for the life
+// of the board. S1's own gate is `if (cfg->abs_max_temp_c > 0.0f)`, so the
+// absolute over-temperature guard, the one SAFETY_MODEL.md section 4 says
+// would "alone justify the board", could not fire at ANY temperature. Worse,
+// commissioning did not help: SET_PARAM/COMMIT_CONFIG wrote the operator's
+// value to flash and to the config cache, and nothing ever carried it the
+// last few inches into the struct the guards actually read.
+//
+// Called every tick rather than once at start or on a commit hook. The
+// record read is a cheap cached-copy (config_store_flash.c) that this task
+// already performs each tick for safety_tc_installed, so the added cost is a
+// handful of float copies; in exchange there is no way for a COMMIT_CONFIG
+// to leave the guards running on a stale threshold, and no hook to forget to
+// call. firing_max_valid/firing_max_c are deliberately NOT touched here --
+// they are context from the link, written in safety_core_build_input().
+//
+// fields_set gating is honoured exactly as config_store.h documents it: a
+// field whose CONFIG_STORE_SET_* bit is clear is NOT copied, so it keeps the
+// "never commissioned" value the guards already treat as "stay off". That is
+// the difference between a guard that is off because nobody set it and a
+// guard that is off because someone set it to zero, and SAFETY_MODEL.md
+// section 1 is explicit that those must not be conflated.
+static void safety_core_load_guard_cfg(const config_store_record_t *rec)
+{
+    // S1. Left at 0 (never trips) unless explicitly commissioned -- see
+    // SAFETY_MODEL.md section 4, S1: "has no default and must be
+    // commissioned". A substituted ceiling here would be a missed-trip risk
+    // if it were ever too high, which is why this stays gated.
+    s_guard_cfg.abs_max_temp_c =
+        (rec->fields_set & CONFIG_STORE_SET_ABS_MAX_TEMP_C) ? rec->abs_max_temp_c : 0.0f;
+    s_guard_cfg.firing_margin_c = rec->firing_margin_c;
+
+    // tc_placement_mode gates S1's chamber ceiling, S2 and S10. The enum
+    // cannot express "unset" (CHAMBER_AGREED is 0, which is also the
+    // zero-init value AND the value that arms S2/S10), so the validity flag
+    // carries that -- see safety_guards.h's tc_placement_valid comment.
+    s_guard_cfg.tc_placement_valid = (rec->fields_set & CONFIG_STORE_SET_TC_PLACEMENT_MODE) != 0u;
+    s_guard_cfg.tc_placement_mode = (rec->tc_placement_mode == CONFIG_STORE_TC_PLACEMENT_EXTERNAL_OVERHEAT)
+                                         ? SAFETY_TC_EXTERNAL_OVERHEAT
+                                         : SAFETY_TC_CHAMBER_AGREED;
+
+    // tc_source gates S13. OWN_J7 is the conservative uncommissioned reading
+    // (safety_guards.h) -- and note S13's producer (sample_counter_advancing)
+    // is still hardcoded false in safety_core_build_input(), so BORROWED_ZONE/
+    // BOTH must NOT be selected on a real board yet; see that call site.
+    s_guard_cfg.tc_source = SAFETY_TC_SOURCE_OWN_J7;
+    if (rec->fields_set & CONFIG_STORE_SET_TC_SOURCE) {
+        if (rec->tc_source == CONFIG_STORE_TC_SOURCE_BORROWED_ZONE) {
+            s_guard_cfg.tc_source = SAFETY_TC_SOURCE_BORROWED_ZONE;
+        } else if (rec->tc_source == CONFIG_STORE_TC_SOURCE_BOTH) {
+            s_guard_cfg.tc_source = SAFETY_TC_SOURCE_BOTH;
+        }
+    }
+
+    // S5 / S11 / S12 / S13 / S2 / S3 / S6b / S9 / S10 windows and thresholds.
+    // Each of these is a "0 -> documented default" field in safety_guards.c's
+    // own effective_f()/effective_u16(), so copying a genuine 0 through is
+    // correct and keeps that single source of defaults authoritative here.
+    s_guard_cfg.blind_grace_s     = (float)rec->blind_grace_s;
+    s_guard_cfg.frozen_window_s   = (float)rec->frozen_window_s;
+    s_guard_cfg.cj_warn_c         = rec->cj_warn_c;
+    s_guard_cfg.cj_max_c          = rec->cj_max_c;
+    s_guard_cfg.cj_time_s         = (float)rec->cj_time_s;
+    s_guard_cfg.borrowed_stale_s      = (float)rec->borrowed_stale_s;
+    s_guard_cfg.borrowed_stale_trip_s = (float)rec->borrowed_stale_trip_s;
+    s_guard_cfg.overshoot_margin_c    = rec->overshoot_margin_c;
+    s_guard_cfg.overshoot_time_s      = (float)rec->overshoot_time_s;
+    s_guard_cfg.i_present_a           = rec->i_present_a;
+    s_guard_cfg.correlation_window_s  = (float)rec->correlation_window_s;
+    s_guard_cfg.stuck_on_time_s       = (float)rec->stuck_on_time_s;
+    s_guard_cfg.link_timeout_s        = (float)rec->link_timeout_s;
+    s_guard_cfg.link_dead_hard_s      = (float)rec->link_dead_hard_s;
+    s_guard_cfg.trip_verify_s         = (float)rec->trip_verify_s;
+    s_guard_cfg.tc_disagreement_c      = rec->tc_disagreement_c;
+    s_guard_cfg.tc_disagreement_time_s = (float)rec->tc_disagreement_time_s;
+}
+
 // CLEAR_TRIP queue -- see safety_core_request_clear_trip()'s doc comment in
 // safety_core.h for the full "why a queue, not a direct call" reasoning.
 // Small and non-blocking, same convention as relay_owner.h's own command
@@ -553,6 +635,13 @@ static safety_guard_input_t safety_core_build_input(void)
     config_store_record_t cfg_rec;
     config_store_get_full_record(&cfg_rec);
     bool safety_tc_not_installed_declared = (cfg_rec.safety_tc_installed == 0u);
+
+    // Carry every commissioned threshold into s_guard_cfg from the SAME
+    // record read above, on the same tick the guards are about to run
+    // against. Before this call existed, none of them ever arrived and S1
+    // could not fire at any temperature -- see
+    // safety_core_load_guard_cfg()'s own doc comment.
+    safety_core_load_guard_cfg(&cfg_rec);
 
     return (safety_guard_input_t){
         .tc_valid = thermo.valid,
