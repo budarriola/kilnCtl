@@ -529,6 +529,34 @@ static void force_all_relays_off(void)
     }
 }
 
+/* Hands every relay this run ever claimed (claimed_relay_mask, see
+ * apply_relay()'s comment) back to RELAY_OWNER_NONE. profile_executor_halt()
+ * already did this on its own exit path; this is the SAME release, called
+ * from every OTHER path that leaves RUNNING/PAUSED for a state that is not
+ * "still an in-progress run" -- normal completion (DONE), a guard trip
+ * (FAULTED, all three escalate_guard_trip() branches that set it), and the
+ * watchdog's own forced FAULTED transition. Before this existed, only
+ * halt() released the claim, so a run that finished on its own or faulted
+ * kept every relay it touched tagged RELAY_OWNER_PROFILE until an operator
+ * explicitly dismissed it -- confirmed on the bench: a guard-1 fault ended a
+ * firing and relay 1 was still refused to /api/relay, the LCD Temperature
+ * page and the UART bridge as "owned by a running profile" with no profile
+ * running. relay_authority_release_mask() is a plain overwrite (see
+ * relay_authority.c), so calling this and then having halt() call it again
+ * later (an operator dismissing the same FAULTED/DONE run) is harmless --
+ * releasing an already-released mask changes nothing.
+ *
+ * Deliberately NOT called from profile_executor_pause(): a paused run is
+ * still a run in progress by TODO.md section 0's own reasoning (it hands the
+ * claim to RELAY_OWNER_MANUAL instead of releasing it) -- releasing here
+ * would let a manual command fight a firing that is one profile_executor_
+ * resume() away from driving those same relays again. Must be called with
+ * s_exec.lock held. */
+static void release_profile_relay_claim(void)
+{
+    relay_authority_release_mask(s_exec.claimed_relay_mask);
+}
+
 /* Escalation policy (TODO.md 6A.6, "decide which -- see 6A.6"): guards whose
  * failure mode is severe/board-wide (a welded relay, an out-of-range
  * reading, an electrically faulted sensor) assert the GLOBAL fault source,
@@ -572,6 +600,7 @@ static bool escalate_guard_trip(uint8_t zi, thermal_guard_trip_t reason, const c
         strncpy(s_exec.fault_reason, detail, sizeof(s_exec.fault_reason) - 1);
         s_exec.fault_reason[sizeof(s_exec.fault_reason) - 1] = '\0';
         s_exec.fault_guard = reason;
+        release_profile_relay_claim();
         ESP_LOGE(TAG, "GLOBAL thermal guard tripped on zone %u, whole run faulted: %s", zi, detail);
         return true;
     }
@@ -608,6 +637,7 @@ static bool escalate_guard_trip(uint8_t zi, thermal_guard_trip_t reason, const c
         snprintf(s_exec.fault_reason, sizeof(s_exec.fault_reason),
                 "zone %u thermal guard tripped, whole firing aborted per policy: %s", zi, detail);
         s_exec.fault_guard = reason;
+        release_profile_relay_claim();
         ESP_LOGE(TAG, "zone %u per-zone trip abandoned the whole firing (continue_on_zone_trip is off)", zi);
         return true;
     }
@@ -624,6 +654,7 @@ static bool escalate_guard_trip(uint8_t zi, thermal_guard_trip_t reason, const c
         snprintf(s_exec.fault_reason, sizeof(s_exec.fault_reason), "every active zone individually faulted; last: %s",
                 detail);
         s_exec.fault_guard = reason;
+        release_profile_relay_claim();
         ESP_LOGE(TAG, "every active zone faulted -- whole run faulted");
         return true;
     }
@@ -1305,6 +1336,7 @@ static void executor_task_entry(void *arg)
                     if (s_exec.segment_index >= s_exec.profile.segment_count) {
                         s_exec.state = PROFILE_EXEC_DONE;
                         force_all_relays_off();
+                        release_profile_relay_claim();
                         /* A clean end, and it MUST be recorded as one: a
                          * completed firing whose record still says RUNNING
                          * would greet the next boot as an interrupted one and
@@ -1379,7 +1411,28 @@ static void executor_task_entry(void *arg)
                  * boundaries). */
                 float boosted_duty = duty;
                 float credit_ms = 0.0f;
-                if (z->deferred_on_ms > 0.0f && z->heater_cfg.window_ms > 0) {
+                /* sensor_ok[zi] gates this the same as the raw PID compute
+                 * above: without it, a zone that accrued load-cap credit
+                 * (TODO.md 6A.5) and then lost its thermocouple would have
+                 * `duty` correctly held at 0.0f by the `if (sensor_ok[zi])`
+                 * above, but this block ran unconditionally and could still
+                 * boost `boosted_duty` up to 1.0f from the credit alone --
+                 * commanding full output on a dead sensor, the exact case
+                 * the BANGBANG branch below explicitly refuses
+                 * ("want_raw = false; no trustworthy reading -> never
+                 * command heat"). PID had no equivalent until now.
+                 *
+                 * The credit itself is left untouched rather than forfeited:
+                 * it represents on-time this zone was denied by the load cap,
+                 * a bookkeeping fact that has nothing to do with whether the
+                 * thermocouple is currently readable. Discarding it would
+                 * double-penalize the zone -- once for losing its window to
+                 * the cap, again for a sensor fault that is very likely
+                 * transient (TODO.md 6A.3's SPI retry/debounce). Leaving
+                 * deferred_on_ms as-is means the credit is simply not spent
+                 * this tick and is still there to pay back once the sensor
+                 * (and therefore sensor_ok[zi]) recovers. */
+                if (sensor_ok[zi] && z->deferred_on_ms > 0.0f && z->heater_cfg.window_ms > 0) {
                     float window_ms_f = (float)z->heater_cfg.window_ms;
                     credit_ms = z->deferred_on_ms;
                     float max_credit_ms = (1.0f - boosted_duty) * window_ms_f;
@@ -1722,6 +1775,11 @@ static void watchdog_task_entry(void *arg)
             s_exec.state = PROFILE_EXEC_FAULTED;
             strncpy(s_exec.fault_reason, wd_out.fault_reason, sizeof(s_exec.fault_reason) - 1);
             s_exec.fault_reason[sizeof(s_exec.fault_reason) - 1] = '\0';
+            /* Same release as escalate_guard_trip()'s FAULTED branches --
+             * this is guard 9, a second and independent path into FAULTED
+             * (a dead control task, a silent safety link), and it must leave
+             * relay ownership in the same clean state those do. */
+            release_profile_relay_claim();
             wdt_faulted = true;
             break;
         case PROFILE_EXECUTOR_WD_ACTION_RETRY_RELAYS_OFF:

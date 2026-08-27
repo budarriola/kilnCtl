@@ -88,9 +88,21 @@ if ($LASTEXITCODE -ne 0) {
     throw "build failed"
 }
 
+# Every executable RUNS, even after one of them fails.
+#
+# This script used to `exit $LASTEXITCODE` the moment an executable returned
+# non-zero, so a single failing check in the first binary meant the other five
+# never ran and their results were simply unknown -- reported as if the suite
+# had been considered. Found 2026-08-27, when four stale wording assertions in
+# the first executable were hiding whether zones_http, safety_cfg_http, the two
+# prestart suites and rules_task passed at all. A test runner that stops at the
+# first failure hides exactly the failures you most need to see together.
+$script:failedExes = @()
+
+
 & $exe
 if ($LASTEXITCODE -ne 0) {
-    exit $LASTEXITCODE
+    $script:failedExes += $exe
 }
 
 # ---- test_zones_http.c: its own SEPARATE executable ------------------------
@@ -113,7 +125,7 @@ if ($LASTEXITCODE -ne 0) {
 
 & $exe2
 if ($LASTEXITCODE -ne 0) {
-    exit $LASTEXITCODE
+    $script:failedExes += $exe2
 }
 
 # ---- test_safety_cfg_http.c: its own THIRD, separate executable -----------
@@ -135,7 +147,7 @@ if ($LASTEXITCODE -ne 0) {
 
 & $exe3
 if ($LASTEXITCODE -ne 0) {
-    exit $LASTEXITCODE
+    $script:failedExes += $exe3
 }
 
 # ---- test_profile_executor_prestart.c: its own FOURTH, separate executable-
@@ -164,7 +176,7 @@ if ($LASTEXITCODE -ne 0) {
 
 & $exe4
 if ($LASTEXITCODE -ne 0) {
-    exit $LASTEXITCODE
+    $script:failedExes += $exe4
 }
 
 # ---- test_autotune_engine_prestart.c: its own FIFTH, separate executable --
@@ -188,7 +200,7 @@ if ($LASTEXITCODE -ne 0) {
 
 & $exe5
 if ($LASTEXITCODE -ne 0) {
-    exit $LASTEXITCODE
+    $script:failedExes += $exe5
 }
 
 # ---- test_rules_task_prestart.c: its own SIXTH, separate executable -------
@@ -213,4 +225,14 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 & $exe6
-exit $LASTEXITCODE
+if ($LASTEXITCODE -ne 0) { $script:failedExes += "kilnctl_host_tests_rules_task.exe" }
+
+if ($script:failedExes.Count -gt 0) {
+    Write-Host ""
+    Write-Host "FAILED executables ($($script:failedExes.Count)):"
+    foreach ($f in $script:failedExes) { Write-Host "  $f" }
+    exit 1
+}
+Write-Host ""
+Write-Host "all host test executables passed"
+exit 0

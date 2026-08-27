@@ -125,14 +125,37 @@ void relay_authority_set_zone_blocked(uint8_t zone_index, bool blocked)
     (void)zone_index; (void)blocked;
 }
 
+/* Instrumentation for the relay-claim-release tests below (see
+ * test_escalate_guard_trip_*_releases_relay_claim() and
+ * test_pause_keeps_claim_resume_reclaims_it()) -- these record what the real
+ * relay_authority.c would have done instead of doing it, so a test can
+ * assert on the exact mask/owner escalate_guard_trip()/profile_executor_
+ * pause()/resume() handed over. */
+static int g_relay_claim_calls = 0;
+static uint8_t g_last_claim_mask = 0;
+static relay_owner_t g_last_claim_owner = RELAY_OWNER_NONE;
+static int g_relay_release_calls = 0;
+static uint8_t g_last_release_mask = 0;
+
+/* Overridable by test_escalate_guard_trip_all_zones_faulted_releases_relay_
+ * claim() so escalate_guard_trip()'s "continue" branch (TODO.md 6A.3's
+ * opt-in) can be reached without a second fake for the same symbol -- every
+ * other test in this file wants the default (false, "abort the whole
+ * firing"), which is why the initializer matches the existing stub's old
+ * hard-coded `false`. */
+static bool g_continue_on_zone_trip = false;
+
 void relay_authority_claim_mask(uint8_t relay_mask, relay_owner_t owner)
 {
-    (void)relay_mask; (void)owner;
+    g_relay_claim_calls++;
+    g_last_claim_mask = relay_mask;
+    g_last_claim_owner = owner;
 }
 
 void relay_authority_release_mask(uint8_t relay_mask)
 {
-    (void)relay_mask;
+    g_relay_release_calls++;
+    g_last_release_mask = relay_mask;
 }
 
 esp_err_t relay_cycles_init(void)
@@ -201,7 +224,7 @@ uint32_t zones_config_generation(void)
 
 bool zones_config_get_continue_on_zone_trip(void)
 {
-    return false;
+    return g_continue_on_zone_trip;
 }
 
 bool zones_config_get_control_mode(uint8_t zone_index, zone_control_mode_t *out_mode)
@@ -377,6 +400,128 @@ static void test_get_status_reports_well_formed_idle_before_start(void)
     TEST_CHECK(!any_zone_active, "no zone may read active in a pre-start snapshot");
 }
 
+// ---------------------------------------------------------------------------
+// Relay-claim-release tests (defect fix, 2026-08-27) -- see profile_
+// executor.c's release_profile_relay_claim() doc comment.
+//
+// escalate_guard_trip() is a plain static function, not a FreeRTOS task
+// loop, and does not itself check s_exec.lock -- so unlike the guard tested
+// above, it IS reachable directly from a host test without ever calling
+// profile_executor_start(). This is the honest limit of what this harness
+// can prove: the control task's tick loop (executor_task_entry, where the
+// DONE transition and the PID zone/sensor defect both live) and the
+// watchdog task loop (watchdog_task_entry, where the guard-9-forced FAULTED
+// transition lives) are real `for (;;) { vTaskDelay(...); ... }` bodies that
+// would spin forever if called directly -- there is no seam to call just
+// one tick's worth of either without restructuring the module, which this
+// pass was told not to do. escalate_guard_trip() shares the exact same
+// release_profile_relay_claim() call this fix added to those three
+// unreachable sites, so proving it here is the closest honest proxy for all
+// four sites' correctness -- but it is NOT proof that the DONE and
+// watchdog-FAULT call sites are actually wired up; that was checked by
+// reading the diff, not by a test that can reach them.
+//
+// Each test resets the whole s_exec struct and the claim/release spy
+// counters first, so these are independent of each other and of every test
+// above (none of which touches zones[]/claimed_relay_mask).
+static void reset_relay_claim_test_state(void)
+{
+    memset(&s_exec, 0, sizeof(s_exec));
+    g_relay_claim_calls = 0;
+    g_last_claim_mask = 0;
+    g_last_claim_owner = RELAY_OWNER_NONE;
+    g_relay_release_calls = 0;
+    g_last_release_mask = 0;
+    g_continue_on_zone_trip = false;
+}
+
+static void test_escalate_guard_trip_global_releases_relay_claim(void)
+{
+    TEST_SECTION("escalate_guard_trip() GLOBAL trip -- releases the run's relay claim");
+    reset_relay_claim_test_state();
+    s_exec.zones[0].active = true;
+    s_exec.claimed_relay_mask = 0x03;
+
+    bool run_faulted = escalate_guard_trip(0, THERMAL_GUARD_TRIP_MAX_TEMP, "over-temp");
+
+    TEST_CHECK(run_faulted, "a global reason must fault the whole run");
+    TEST_CHECK(s_exec.state == PROFILE_EXEC_FAULTED, "state must be FAULTED");
+    TEST_CHECK(g_relay_release_calls == 1, "relay_authority_release_mask() must be called exactly once");
+    TEST_CHECK(g_last_release_mask == 0x03, "must release exactly claimed_relay_mask, not some other mask");
+}
+
+static void test_escalate_guard_trip_abort_policy_releases_relay_claim(void)
+{
+    TEST_SECTION("escalate_guard_trip() per-zone trip, abort-whole-firing policy -- releases the relay claim");
+    reset_relay_claim_test_state();
+    /* g_continue_on_zone_trip is false (the default, TODO.md 6A.3's "abort
+     * the whole firing" policy), and only zone 0 is active, so a single
+     * per-zone trip takes the abort-policy branch and ends the run. */
+    s_exec.zones[0].active = true;
+    s_exec.claimed_relay_mask = 0x01;
+
+    bool run_faulted = escalate_guard_trip(0, THERMAL_GUARD_TRIP_HEATING_FAILED, "zone 0 guard 1");
+
+    TEST_CHECK(run_faulted, "abort-whole-firing policy must fault the run on a single zone's trip");
+    TEST_CHECK(s_exec.state == PROFILE_EXEC_FAULTED, "state must be FAULTED");
+    TEST_CHECK(g_relay_release_calls == 1, "relay_authority_release_mask() must be called exactly once");
+    TEST_CHECK(g_last_release_mask == 0x01, "must release exactly claimed_relay_mask");
+}
+
+static void test_escalate_guard_trip_all_zones_faulted_releases_relay_claim(void)
+{
+    TEST_SECTION("escalate_guard_trip() per-zone trip, continue-on-trip policy -- "
+                 "releases only once EVERY active zone has faulted");
+    reset_relay_claim_test_state();
+    g_continue_on_zone_trip = true; /* opt-in: the run continues on other active zones */
+    s_exec.zones[0].active = true;
+    s_exec.zones[1].active = true;
+    s_exec.claimed_relay_mask = 0x0F;
+
+    bool run_faulted_after_first = escalate_guard_trip(0, THERMAL_GUARD_TRIP_HEATING_FAILED, "zone 0 guard 1");
+    TEST_CHECK(!run_faulted_after_first, "zone 1 is still healthy -- the run must NOT fault yet");
+    TEST_CHECK(s_exec.state != PROFILE_EXEC_FAULTED, "state must not be FAULTED while zone 1 is still active");
+    TEST_CHECK(g_relay_release_calls == 0,
+              "the claim must NOT be released while the run is still in progress on zone 1 -- "
+              "this is the same 'a paused/still-running run keeps its claim' property the fix must preserve");
+
+    bool run_faulted_after_second = escalate_guard_trip(1, THERMAL_GUARD_TRIP_HEATING_FAILED, "zone 1 guard 1");
+    TEST_CHECK(run_faulted_after_second, "the last active zone faulting must end the run");
+    TEST_CHECK(s_exec.state == PROFILE_EXEC_FAULTED, "state must be FAULTED once every active zone has faulted");
+    TEST_CHECK(g_relay_release_calls == 1, "relay_authority_release_mask() must be called exactly once, on the "
+                                            "trip that actually ends the run");
+    TEST_CHECK(g_last_release_mask == 0x0F, "must release exactly claimed_relay_mask");
+}
+
+static void test_pause_keeps_claim_resume_reclaims_it(void)
+{
+    TEST_SECTION("profile_executor_pause()/resume() -- pause hands the claim to MANUAL (not NONE), "
+                 "resume reclaims PROFILE");
+    reset_relay_claim_test_state();
+    /* Unlike the escalate_guard_trip() tests above, pause()/resume() DO
+     * check s_exec.lock first, so this test needs a real (stub) mutex --
+     * see stubs/freertos/semphr.h's xSemaphoreCreateMutex(), which is safe
+     * to call directly in a single-threaded host test. */
+    s_exec.lock = xSemaphoreCreateMutex();
+    s_exec.state = PROFILE_EXEC_RUNNING;
+    s_exec.claimed_relay_mask = 0x05;
+
+    bool paused = profile_executor_pause();
+    TEST_CHECK(paused, "pause() must succeed from RUNNING");
+    TEST_CHECK(s_exec.state == PROFILE_EXEC_PAUSED, "state must be PAUSED");
+    TEST_CHECK(g_relay_release_calls == 0, "pause() must NEVER release the claim -- a paused run is still a "
+                                            "run in progress (TODO.md section 0)");
+    TEST_CHECK(g_relay_claim_calls == 1 && g_last_claim_owner == RELAY_OWNER_MANUAL && g_last_claim_mask == 0x05,
+              "pause() must hand the claim to RELAY_OWNER_MANUAL, not release it");
+
+    bool resumed = profile_executor_resume();
+    TEST_CHECK(resumed, "resume() must succeed from PAUSED");
+    TEST_CHECK(s_exec.state == PROFILE_EXEC_RUNNING, "state must be back to RUNNING");
+    TEST_CHECK(g_relay_release_calls == 0, "resume() must not release the claim either");
+    TEST_CHECK(g_last_claim_owner == RELAY_OWNER_PROFILE && g_last_claim_mask == 0x05,
+              "resume() must reclaim RELAY_OWNER_PROFILE over the same mask");
+}
+
 void run_test_profile_executor_prestart(void)
 {
     test_run_refuses_before_start();
@@ -385,6 +530,10 @@ void run_test_profile_executor_prestart(void)
     test_zone_is_active_false_before_start();
     test_get_history_empty_before_start();
     test_get_status_reports_well_formed_idle_before_start();
+    test_escalate_guard_trip_global_releases_relay_claim();
+    test_escalate_guard_trip_abort_policy_releases_relay_claim();
+    test_escalate_guard_trip_all_zones_faulted_releases_relay_claim();
+    test_pause_keeps_claim_resume_reclaims_it();
 }
 
 int main(void)

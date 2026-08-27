@@ -52,6 +52,17 @@ esp_err_t safety_link_get_config_page(SafetyLinkClass *link, uint8_t page_index,
     return ESP_OK;
 }
 
+// safety_link_clear_stashed_config_page() stub -- safety_cfg_store_maybe_
+// refetch() calls this after consuming a page (see safety_link.c's comment
+// at safety_link_clear_stashed_config_page()); no stashed-page state exists
+// in this host test's fake link, so there is nothing to do.
+static int s_stub_clear_stashed_config_page_calls = 0;
+void safety_link_clear_stashed_config_page(SafetyLinkClass *link)
+{
+    (void)link;
+    s_stub_clear_stashed_config_page_calls++;
+}
+
 // ---------------------------------------------------------------------------
 // uart_bridge_ext_run_on_flash_worker() stub -- 2026-08-23 panic fix.
 // safety_cfg_store.c no longer calls nvs_save_store() directly; it hands the

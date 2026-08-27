@@ -324,9 +324,21 @@ static void test_reason_words_are_never_a_bare_number(void)
     // (S9) case that main_page.html/safety_page.html give extra emphasis --
     // this table must still name it distinctly, and an unknown code must not
     // crash or render as blank/"0".
-    TEST_CHECK(strcmp(profile_executor_safety_trip_words(1), "overtemp (S1)") == 0, "S1 named");
-    TEST_CHECK(strstr(profile_executor_safety_trip_words(10), "TRIP_INEFFECTIVE") != NULL,
-               "S9/TRIP_INEFFECTIVE is called out by name, not just a number");
+    /* Asserted as REQUIREMENTS, not as exact literals. These two checks
+     * pinned the strings "overtemp (S1)" and "TRIP_INEFFECTIVE", which the
+     * tables have since improved on ("chamber over absolute temperature limit
+     * (S1)", "contactor welded on, trip did NOT cut power (S9)") -- better
+     * operator wording that nonetheless failed an equality check. The drift
+     * went unnoticed for a long time because the host-test suite did not
+     * build at all (a stub missing uart_proto_message_t), so nothing here
+     * ran. What actually matters is what the section name says: the reason
+     * renders in words, names its guard, and is never a bare number. */
+    TEST_CHECK(strstr(profile_executor_safety_trip_words(1), "S1") != NULL &&
+                   strstr(profile_executor_safety_trip_words(1), "temp") != NULL,
+               "S1 is named and described, not rendered as a bare code");
+    TEST_CHECK(strstr(profile_executor_safety_trip_words(10), "S9") != NULL &&
+                   strstr(profile_executor_safety_trip_words(10), "welded") != NULL,
+               "S9 (trip did not cut power) is called out distinctly, not just as a number");
     TEST_CHECK(strcmp(profile_executor_safety_trip_words(255), "unknown guard") == 0,
                "an out-of-range code renders as words, not garbage or a crash");
 }
@@ -342,9 +354,13 @@ static void test_lcd_short_words_are_never_a_bare_number(void)
 {
     TEST_SECTION("safety_trip_words_short -- every known reason renders in words, none as a bare hex byte");
 
-    TEST_CHECK(strcmp(safety_trip_words_short(1), "S1 overtemp") == 0, "S1 named");
-    TEST_CHECK(strstr(safety_trip_words_short(10), "INEFFECTIVE") != NULL,
-               "S9/TRIP_INEFFECTIVE is called out by name on the LCD's short table too");
+    /* Same requirement-not-literal reasoning as the long table above. */
+    TEST_CHECK(strstr(safety_trip_words_short(1), "S1") != NULL &&
+                   strstr(safety_trip_words_short(1), "temp") != NULL,
+               "S1 is named and described on the LCD's short table too");
+    TEST_CHECK(strstr(safety_trip_words_short(10), "S9") != NULL &&
+                   strstr(safety_trip_words_short(10), "welded") != NULL,
+               "S9 is called out distinctly on the LCD's short table too");
     TEST_CHECK(strcmp(safety_trip_words_short(255), "unknown guard") == 0,
                "an out-of-range code renders as words, not garbage or a crash");
     // The actual regression this closes: the old LCD row's format string was

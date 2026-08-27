@@ -16,6 +16,7 @@
 #include "ota_http.h" /* ota_http_heat_blocked_by_update() -- heat_interlock.h's own doc comment */
 #include "profile_executor.h"
 #include "relay_authority.h"
+#include "relay_cycles.h"
 #include "sim_backend.h"
 #include "thermo_combine.h"
 #include "zones_http.h"
@@ -96,6 +97,15 @@ typedef struct {
     thermal_guard_state_t guard_state;
 
     bool  per_zone_blocked;
+    uint32_t global_fault_source; /* 0 = none asserted by this run -- mirrors
+                                    * profile_executor.c's field of the same
+                                    * name; see escalate_and_abort()'s `global`
+                                    * branch and the clearing next to
+                                    * clear_block_if_any() below. */
+    uint32_t cycles_reported; /* high-water mark of heater_state.cycle_count
+                                * already handed to relay_cycles_add() --
+                                * mirrors profile_executor.c's zone field of
+                                * the same name, see the tick's own comment. */
     char  abort_reason[96];
 
     /* Row-indexed by observed zone, not just the zone under test --
@@ -219,6 +229,17 @@ static void escalate_and_abort(thermal_guard_trip_t reason, const char *detail)
         if (s_at.safety) {
             safety_link_set_fault_source(s_at.safety, source, true);
         }
+        /* profile_executor.c's escalate_guard_trip() records the same thing in
+         * global_fault_source so clear_this_runs_faults() knows what to clear
+         * later. Before this, autotune_engine had no such bookkeeping and no
+         * clearing path at all: a global guard trip during an autotune left
+         * this source asserted board-wide until reboot, which
+         * relay_authority_on_blocked() then read as a reason to refuse every
+         * relay-ON everywhere -- other zones, profiles, and later autotunes
+         * alike -- and which also masked whatever different fault came next,
+         * since the mask never returned to clean. See the clearing next to
+         * relay_authority_zone_latched_blocked() in begin_run_locked(). */
+        s_at.global_fault_source = source;
     } else {
         relay_authority_set_zone_blocked(s_at.zone_index, true);
         s_at.per_zone_blocked = true;
@@ -597,6 +618,27 @@ static void autotune_engine_tick_locked(void)
     apply_relay(want_relay_on);
     s_at.duty = want_relay_on ? want_duty : 0.0f;
 
+    /* Contact-cycle accounting -- same high-water-mark pattern as
+     * profile_executor.c's per-zone block (TODO.md 6A.1): hand relay_cycles.c
+     * only what THIS run has switched since the last tick. Before this,
+     * relay_cycles was fed only by profile_executor's cycle accounting, and
+     * autotune_engine switches the same physical relays -- a relay-feedback
+     * test deliberately cycles them many times -- with none of it counted, so
+     * the contacts aged invisibly. Confirmed on the bench: a full step-test
+     * autotune left relay_cycles completely unchanged. cycle_count is a
+     * lifetime counter that survives heater_output_reset() (see that file's
+     * own comment), so cycles_reported is likewise never reset at the start
+     * of a run -- only the delta since the last report is ever added, whether
+     * that run is this one or an earlier one. */
+    uint32_t cycles_now = s_at.heater_state.cycle_count;
+    if (cycles_now != s_at.cycles_reported) {
+        uint8_t cycle_mask = 0;
+        if (zones_config_get_relay_mask(s_at.zone_index, &cycle_mask) && cycle_mask != 0) {
+            relay_cycles_add(cycle_mask, cycles_now - s_at.cycles_reported);
+        }
+        s_at.cycles_reported = cycles_now;
+    }
+
     thermal_guard_input_t gin = {
         .sensor_ok = sensor_ok,
         .measurement_c = raw_c,
@@ -974,6 +1016,29 @@ static bool begin_run_locked(uint8_t zone_index, char *err_msg, size_t err_cap)
                       "operator asked for an autotune on this zone",
                  zone_index);
         relay_authority_set_zone_blocked(zone_index, false);
+    }
+    /* Same gesture, same policy, for a GLOBAL guard trip an earlier run left
+     * asserted -- see escalate_and_abort()'s `global` branch and
+     * global_fault_source's own comment. Unlike the per-zone latch above,
+     * this one is not scoped to `zone_index`: a global trip blocks every
+     * zone's relay-ON board-wide (relay_authority_on_blocked(), not the
+     * per-zone check), so the operator starting ANY autotune after one is
+     * exactly the "run heat again after a trip" gesture profile_executor.c's
+     * clear_this_runs_faults() treats as consent to clear it. Logged loudly
+     * for the same reason the per-zone case is: clearing a guard trip is
+     * never a detail. */
+    if (s_at.global_fault_source != 0) {
+        ESP_LOGW(TAG, "fault source 0x%02X was still asserted by an earlier autotune's guard trip -- "
+                      "clearing it because the operator started a new autotune (zone %u)",
+                 (unsigned)s_at.global_fault_source, zone_index);
+        if (s_at.safety) {
+            esp_err_t err = safety_link_set_fault_source(s_at.safety, s_at.global_fault_source, false);
+            if (err != ESP_OK) {
+                ESP_LOGE(TAG, "clearing fault source 0x%02X failed: %s", (unsigned)s_at.global_fault_source,
+                         esp_err_to_name(err));
+            }
+        }
+        s_at.global_fault_source = 0;
     }
     relay_authority_claim_mask(mask, RELAY_OWNER_AUTOTUNE);
     /* Both results are invalidated at the start of every run, whichever method

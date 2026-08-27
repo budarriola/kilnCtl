@@ -21,6 +21,15 @@
 #define DRIFT_PERIOD_S 600.0f
 #define SENSOR_FAULT_DEBOUNCE_TICKS 3u
 #define FROZEN_WINDOW_S 600.0f
+/* Guard 7's "unchanged" tolerance -- see the guard-7 comment at its call
+ * site for why bit-exact comparison cannot work on real hardware. Chosen
+ * against the ANCHOR (the reading at window-start, not the previous tick):
+ * +/-0.02C alternating dither around a steady anchor can differ from that
+ * anchor by up to 0.04C on either side, so 0.03C alone is not enough
+ * margin -- 0.05C clears that with room, while staying far below any real
+ * thermal movement accumulated over a whole window (even a slow 0.5C/min
+ * drift is >0.05C within about 6s). */
+#define FROZEN_EPS_C 0.05f
 /* Guard 8's window. Only the *period* has a default -- the delta threshold
  * deliberately does not; see thermal_guard_cfg_t.cross_zone_max_delta_c. */
 #define CROSS_ZONE_PERIOD_S_DEFAULT 600.0f
@@ -97,8 +106,16 @@ bool thermal_guard_tick(thermal_guard_state_t *state, const thermal_guard_cfg_t 
     }
 
     /* --- Guard 7: frozen sensor -------------------------------------------- */
+    /* A "stuck" reading must be compared with a tolerance band, not bit-exact
+     * equality: a live MAX31856 in K-type has ~0.0078C ADC resolution but
+     * dithers by 0.01-0.1C read-to-read from thermal/electrical noise even
+     * while the junction is genuinely steady. Bit-exact comparison meant this
+     * guard's window reset almost every tick on real hardware and the 120s
+     * window never completed -- confirmed on the bench: readings moved every
+     * single second for 6 minutes straight. See FROZEN_EPS_C's own comment
+     * above for the exact value and why. */
     if (in->commanded_duty > 0.0f) {
-        if (!state->frozen_window_active || in->measurement_c != state->frozen_last_c) {
+        if (!state->frozen_window_active || fabsf(in->measurement_c - state->frozen_last_c) > FROZEN_EPS_C) {
             state->frozen_window_active = true;
             state->frozen_last_c = in->measurement_c;
             state->frozen_elapsed_s = 0.0f;
@@ -128,7 +145,24 @@ bool thermal_guard_tick(thermal_guard_state_t *state, const thermal_guard_cfg_t 
             state->progress_window_elapsed_s = 0.0f;
         } else {
             state->progress_window_elapsed_s += in->dt_s;
-            float window_s = (error > 0.0f) ? PROGRESS_WINDOW_S : effective_f(cfg->wrong_dir_window_s, WRONG_DIR_WINDOW_S);
+            /* wrong_dir_window_s is exposed to operators (Settings > Zones) as
+             * "how long heat may be commanded without the temperature
+             * responding" -- that description covers BOTH branches below, not
+             * just the falling-while-heating case its name suggests. Applying
+             * it only to the error<=0 branch left guard 1 (the case that
+             * actually matters when a heating element dies) stuck on the
+             * hardcoded PROGRESS_WINDOW_S with no per-zone override at all --
+             * confirmed on the bench: a dead element was only caught after a
+             * fixed 5 minutes regardless of the operator's configured 60s.
+             * Use the same effective_f() substitution for both branches so
+             * the field means what its UI label says. Each branch keeps its
+             * OWN pre-existing fallback (PROGRESS_WINDOW_S=300s for guard 1,
+             * WRONG_DIR_WINDOW_S=120s for guard 2) so an unconfigured zone
+             * (wrong_dir_window_s == 0) behaves exactly as it did before this
+             * fix -- only a zone that has actually set wrong_dir_window_s
+             * sees the new behaviour of it applying to guard 1 too. */
+            float window_s = effective_f(cfg->wrong_dir_window_s,
+                                          (error > 0.0f) ? PROGRESS_WINDOW_S : WRONG_DIR_WINDOW_S);
             if (state->progress_window_elapsed_s >= window_s) {
                 float delta = in->measurement_c - state->progress_window_start_c;
                 float elapsed_min = state->progress_window_elapsed_s / 60.0f;

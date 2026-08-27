@@ -358,6 +358,99 @@ void run_test_thermal_guard(void)
         TEST_CHECK(!tripped || s.reason == THERMAL_GUARD_TRIP_RUNAWAY, "reason is RUNAWAY");
     }
 
+    /* Defect (1) fix: wrong_dir_window_s must control guard 1
+     * (THERMAL_GUARD_TRIP_HEATING_FAILED), not just guard 2. A zone that
+     * configures a short 60s window trips at 60s, not the hardcoded 300s
+     * PROGRESS_WINDOW_S default -- this is exactly the bench failure: a dead
+     * heating element only got caught after a fixed 5 minutes, ignoring the
+     * operator's configured 60s. */
+    {
+        thermal_guard_state_t s;
+        thermal_guard_cfg_t cfg = {.max_temp_c = 1300.0f, .min_temp_c = -20.0f, .sanity_rate_c_per_min = 10.0f,
+                                    .wrong_dir_window_s = 60.0f};
+        thermal_guard_reset(&s);
+        thermal_guard_input_t in = base_input();
+        in.setpoint_c = 500.0f;
+        in.measurement_c = 20.0f;
+        in.commanded_duty = 1.0f; /* dead element: heat commanded, temperature never responds */
+        int trip_tick = -1;
+        for (int i = 0; i < 40; i++) {
+            if (thermal_guard_tick(&s, &cfg, &in)) {
+                trip_tick = i;
+                break;
+            }
+        }
+        TEST_CHECK(trip_tick >= 0, "guard 1 trips a dead element with wrong_dir_window_s configured");
+        TEST_CHECK(s.reason == THERMAL_GUARD_TRIP_HEATING_FAILED, "reason is HEATING_FAILED");
+        /* dt_s=10, so trip_tick*10s must land at the configured 60s window
+         * (tick index 5, i.e. elapsed 60s), not at 300s (tick index 29). */
+        char detail[160];
+        snprintf(detail, sizeof(detail), "trip landed at tick %d (%.0fs) -- expected ~60s, not 300s", trip_tick,
+                 (trip_tick + 1) * 10.0);
+        TEST_CHECK(trip_tick >= 0 && trip_tick <= 6, detail);
+    }
+
+    /* Same scenario, but with wrong_dir_window_s left at 0 ("not configured")
+     * -- must NOT trip at 60s; the 300s PROGRESS_WINDOW_S fallback still
+     * applies, proving the fix didn't change unconfigured-zone behaviour. */
+    {
+        thermal_guard_state_t s;
+        thermal_guard_cfg_t cfg = {.max_temp_c = 1300.0f, .min_temp_c = -20.0f, .sanity_rate_c_per_min = 10.0f};
+        thermal_guard_reset(&s);
+        thermal_guard_input_t in = base_input();
+        in.setpoint_c = 500.0f;
+        in.measurement_c = 20.0f;
+        in.commanded_duty = 1.0f;
+        bool tripped = false;
+        /* 6 ticks x 10s = 60s -- would already have tripped if the 60s
+         * window from the configured-zone test above leaked in here. */
+        for (int i = 0; i < 6; i++) {
+            tripped = thermal_guard_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(!tripped, "unconfigured zone (wrong_dir_window_s==0) does not trip guard 1 at 60s");
+    }
+
+    /* Defect (2) fix: dither of a couple hundredths of a degree -- well
+     * within a real MAX31856's read-to-read noise -- must NOT reset the
+     * frozen-sensor window. This is the exact scenario the bit-exact
+     * comparison got wrong on hardware (readings moved every second for 6
+     * minutes straight and the guard never fired). */
+    {
+        thermal_guard_state_t s;
+        thermal_guard_cfg_t cfg = {.max_temp_c = 1300.0f, .min_temp_c = -20.0f, .sanity_rate_c_per_min = 0.0f};
+        thermal_guard_reset(&s);
+        thermal_guard_input_t in = base_input();
+        in.commanded_duty = 1.0f;
+        in.measurement_c = 300.0f;
+        bool tripped = false;
+        for (int i = 0; i < 65 && !tripped; i++) { /* 65*10s = 650s > FROZEN_WINDOW_S(600) */
+            in.measurement_c = 300.0f + ((i % 2 == 0) ? 0.02f : -0.02f); /* +/-0.02C dither */
+            tripped = thermal_guard_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(tripped, "guard 7 still trips a stuck sensor despite +/-0.02C read-to-read dither");
+        TEST_CHECK(!tripped || s.reason == THERMAL_GUARD_TRIP_FROZEN, "reason is FROZEN");
+    }
+
+    /* Negative case for the epsilon band: a move clearly above the band
+     * (0.1C, well over FROZEN_EPS_C=0.03C) each tick must keep resetting the
+     * window, same as before this fix -- the tolerance must not be so loose
+     * that it swallows a sensor that is actually moving. */
+    {
+        thermal_guard_state_t s;
+        thermal_guard_cfg_t cfg = {.max_temp_c = 1300.0f, .min_temp_c = -20.0f, .sanity_rate_c_per_min = 0.01f};
+        thermal_guard_reset(&s);
+        thermal_guard_input_t in = base_input();
+        in.setpoint_c = 5000.0f; /* keep guard 1 quiet across this loop */
+        in.commanded_duty = 1.0f;
+        in.measurement_c = 300.0f;
+        bool tripped = false;
+        for (int i = 0; i < 65 && !tripped; i++) {
+            in.measurement_c += 0.1f; /* well above FROZEN_EPS_C every tick */
+            tripped = thermal_guard_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(!tripped, "guard 7 does not trip when the reading moves clearly above the epsilon band");
+    }
+
     /* thermal_guard_clear() fully un-latches and resets windows. */
     {
         thermal_guard_state_t s;

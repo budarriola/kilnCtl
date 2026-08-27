@@ -226,6 +226,8 @@ typedef struct {
     uint8_t relay_mask;
     bool set_thermo_mask_called;
     uint8_t thermo_mask;
+    bool set_ct_mask_called;
+    uint8_t ct_mask;
     bool set_cal_called;
     float cal_offset_c;
     bool set_ramp_called;
@@ -321,6 +323,15 @@ bool zones_config_get_thermo_mask(uint8_t zone_index, uint8_t *out_mask)
         return false;
     }
     *out_mask = s_writes[zone_index].thermo_mask;
+    return true;
+}
+
+bool zones_config_get_ct_mask(uint8_t zone_index, uint8_t *out_mask)
+{
+    if (!out_mask || zone_index >= STUB_ZONE_COUNT) {
+        return false;
+    }
+    *out_mask = s_writes[zone_index].ct_mask;
     return true;
 }
 
@@ -457,6 +468,14 @@ bool zones_config_set_thermo_mask(uint8_t zone_index, uint8_t thermo_mask)
     if (zone_index >= STUB_ZONE_COUNT) return false;
     s_writes[zone_index].set_thermo_mask_called = true;
     s_writes[zone_index].thermo_mask = thermo_mask;
+    g_total_write_calls++;
+    return true;
+}
+bool zones_config_set_ct_mask(uint8_t zone_index, uint8_t ct_mask)
+{
+    if (zone_index >= STUB_ZONE_COUNT) return false;
+    s_writes[zone_index].set_ct_mask_called = true;
+    s_writes[zone_index].ct_mask = ct_mask;
     g_total_write_calls++;
     return true;
 }
