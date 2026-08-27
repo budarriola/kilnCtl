@@ -11,6 +11,12 @@
 # real header in an on-target build.
 #
 # Usage: powershell -File App\test\build_host_tests.ps1
+# -OutDir lets a caller build into a private directory instead of the shared
+# App/test/build. Two concurrent runs of this script otherwise compile into
+# the same .obj paths and corrupt each other -- which matters when several
+# agents are working the same checkout at once. Defaults to the old path, so
+# every existing invocation is unchanged.
+param([string]$OutDir = "")
 $ErrorActionPreference = "Stop"
 
 $vcvars = "C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Auxiliary\Build\vcvarsall.bat"
@@ -20,7 +26,7 @@ if (-not (Test-Path $vcvars)) {
 
 $testDir = $PSScriptRoot
 $driversDir = Join-Path $testDir "..\drivers"
-$outDir = Join-Path $testDir "build"
+$outDir = if ($OutDir) { $OutDir } else { Join-Path $testDir "build" }
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 $exe = Join-Path $outDir "kilnctl_host_tests.exe"
 
