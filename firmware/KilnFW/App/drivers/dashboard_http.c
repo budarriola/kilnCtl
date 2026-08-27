@@ -201,7 +201,15 @@ void dashboard_get_status(dashboard_status_t *out)
             out->ct_current_a[1] = sl.current_a[1];
             out->ct_current_a[2] = sl.current_a[2];
 
-            /* K4 -- see dashboard_http.h's field comment. */
+            /* K4 -- see dashboard_http.h's field comment. safety_relay_known
+             * set here (link answered this poll) rather than left to default
+             * true -- Opus review 2026-08-27: these two were the only
+             * safety-link-sourced fields on this endpoint NOT using the
+             * null-until-known convention every other one does, so a caller
+             * that skips checking safety_ready would see a false "de-
+             * energized" for a link that has simply never answered, not a
+             * confirmed-open relay. */
+            out->safety_relay_known = true;
             out->safety_relay_energized = (sl.flags & SAFETY_FLAG_RELAY) != 0u;
             out->safety_heating_enabled = (sl.flags & SAFETY_FLAG_ENABLED) != 0u;
 
@@ -336,23 +344,43 @@ void dashboard_get_status(dashboard_status_t *out)
      * (build_firmware_statics()) -- total chip size from esp_flash_get_size,
      * and how much of the running app image's own OTA slot is actually used
      * (not the slot's fixed capacity) from esp_image_get_metadata(), the
-     * same accessor esp_ota_* uses internally to validate an image. Both
-     * left at their zero-init default (caught by flash_*_known below) on any
-     * failure -- chip-size/partition/image-header reads are all "should
-     * never fail on real hardware" but none is worth a fabricated number if
-     * one ever does. */
-    uint32_t flash_size = 0;
-    out->flash_size_known = (esp_flash_get_size(NULL, &flash_size) == ESP_OK);
-    out->flash_size = flash_size;
+     * same accessor esp_ota_* uses internally to validate an image. All
+     * fixed for the life of this boot (same reasoning ui_page_diagnostics.c's
+     * own build_firmware_statics() doc comment gives for reading these once,
+     * not on every refresh) -- computed once here rather than on every
+     * dashboard_get_status() call (Opus review 2026-08-27: this was walking
+     * the image's segment headers via real flash reads from inside the httpd
+     * handler on every single /api/status poll). Left at their zero-init
+     * default (caught by flash_*_known below) if the one-time read ever
+     * fails -- chip-size/partition/image-header reads are all "should never
+     * fail on real hardware" but none is worth a fabricated number if one
+     * ever does. */
+    static bool s_flash_facts_read = false;
+    static bool s_flash_size_known = false;
+    static uint32_t s_flash_size = 0;
+    static uint32_t s_flash_partition_size = 0;
+    static bool s_flash_used_known = false;
+    static uint32_t s_flash_used = 0;
+    if (!s_flash_facts_read) {
+        s_flash_facts_read = true;
+        uint32_t flash_size = 0;
+        s_flash_size_known = (esp_flash_get_size(NULL, &flash_size) == ESP_OK);
+        s_flash_size = flash_size;
 
-    const esp_partition_t *running = esp_ota_get_running_partition();
-    if (running) {
-        out->flash_partition_size = running->size;
-        esp_image_metadata_t metadata = { 0 };
-        esp_partition_pos_t part_pos = { .offset = running->address, .size = running->size };
-        out->flash_used_known = (esp_image_get_metadata(&part_pos, &metadata) == ESP_OK);
-        out->flash_used = metadata.image_len;
+        const esp_partition_t *running = esp_ota_get_running_partition();
+        if (running) {
+            s_flash_partition_size = running->size;
+            esp_image_metadata_t metadata = { 0 };
+            esp_partition_pos_t part_pos = { .offset = running->address, .size = running->size };
+            s_flash_used_known = (esp_image_get_metadata(&part_pos, &metadata) == ESP_OK);
+            s_flash_used = metadata.image_len;
+        }
     }
+    out->flash_size_known = s_flash_size_known;
+    out->flash_size = s_flash_size;
+    out->flash_partition_size = s_flash_partition_size;
+    out->flash_used_known = s_flash_used_known;
+    out->flash_used = s_flash_used;
 
     /* 2026-08-21: the shared display-unit preference (unit_pref.c) -- see
      * dashboard_http.h's field comment. unit_pref_get() is O(1) RAM-only, so
@@ -474,11 +502,17 @@ static esp_err_t status_get_handler(httpd_req_t *req)
     APPEND("]");
 
     /* K4, the safety processor's own relay -- dashboard_http.h's field
-     * comment. Only meaningful once the safety link has actually answered;
-     * ds.safety_ready already covers "has it" for the front end, same as
-     * every other safety_link-sourced field on this endpoint. */
-    APPEND(",\"safety_relay_energized\":%s", ds.safety_relay_energized ? "true" : "false");
-    APPEND(",\"safety_heating_enabled\":%s", ds.safety_heating_enabled ? "true" : "false");
+     * comment. null (not a fabricated "false") until ds.safety_relay_known
+     * -- same null-until-known convention every other safety_link-sourced
+     * field on this endpoint already uses. */
+    APPEND(",\"safety_relay_energized\":%s", ds.safety_relay_known ? "" : "null");
+    if (ds.safety_relay_known) {
+        APPEND("%s", ds.safety_relay_energized ? "true" : "false");
+    }
+    APPEND(",\"safety_heating_enabled\":%s", ds.safety_relay_known ? "" : "null");
+    if (ds.safety_relay_known) {
+        APPEND("%s", ds.safety_heating_enabled ? "true" : "false");
+    }
 
     /* TODO.md 9.0's deferred "GUI names both versions and which one is
      * older" item. self_protocol_version is always known; peer fields are

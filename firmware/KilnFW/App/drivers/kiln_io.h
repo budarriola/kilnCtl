@@ -31,6 +31,20 @@
 // above. K4 belongs to the RP2040 safety processor, in the other ground domain,
 // and is not reachable from here at all.
 //
+// ** The table above is the SCHEMATIC's wiring, not what kiln_io_set_relay()
+// actually drives any more. ** Bench testing 2026-08-27 found relay 2 and
+// relay 4's physical outputs swapped vs the schematic's own Relay2/Relay4
+// nets -- a real PCB-level miswire, not a numbering mismatch (Relay1/Relay3
+// read correctly). Compensated in kiln_io.c (kiln_relay_logical_to_pin_bit /
+// kiln_io_remap_relay_bits, applied in kiln_io_set_relay_mask()'s write and
+// kiln_io_resync_relay_shadow()'s read-back), so kiln_io_set_relay(io, 2, ...)
+// now actually energizes IO3/K5/J11 and kiln_io_set_relay(io, 4, ...) energizes
+// IO1/K1/J3 -- i.e. this API's relay 2 and relay 4 now correctly land where
+// the panel silkscreen and this header's own callers expect, at the cost of
+// no longer matching the schematic's Relay2/Relay4 net names literally. See
+// hardware/mainBoard/todo.md for the silkscreen-labeling follow-up that would
+// make this indirection visible on the board itself.
+//
 // Relay coils are 12 V (EE2-12NUH) switched low-side by a MOSFET, so an
 // expander pin driven HIGH energizes the relay. That is why boot order matters
 // and why kiln_io_init loads the data register with every relay bit at 0

@@ -21,6 +21,20 @@ typedef struct {
     bool     window_open;
     uint32_t deadline_ms; /* now_ms() value the window closes at; meaningful only if window_open */
     SafetyLinkClass *safety; /* may be NULL -- see danger_mode_init()'s doc comment */
+    /* This module's OWN outstanding request, set only by a successful
+     * danger_mode_set_heat_enable_request(true) and cleared by an explicit
+     * false, danger_mode_stop(), or timeout. NOT the same thing as
+     * SAFETY_FLAG_ENABLED (safety_link_status_t::flags) -- that flag means
+     * "SaftyFW's relay_owner state machine is ARMED / not tripped", which
+     * on a healthy Pico is 1 whether or not anyone ever sent a REQUEST_
+     * ENABLE. Bug found 2026-08-27 (Opus review): the diagnostics page's
+     * "Firing mode" tile used to be driven straight from SAFETY_FLAG_
+     * ENABLED, so it showed ON as soon as the Pico finished its boot grace
+     * period -- with K4 correctly de-energized -- and every click then
+     * computed "!already ON" = off, silently sending REQUEST_ENABLE(false)
+     * forever with no way to actually request true. This field is the
+     * fix: the tile now reflects what THIS module actually asked for. */
+    bool     heat_requested;
 } danger_mode_ctx_t;
 
 static danger_mode_ctx_t s_dm;
@@ -61,6 +75,7 @@ bool danger_mode_request_start(void)
     bool already_open = s_dm.window_open;
     s_dm.window_open = true;
     s_dm.deadline_ms = now_ms() + DANGER_MODE_WINDOW_MS;
+    s_dm.heat_requested = false;
     xSemaphoreGive(s_dm.lock);
 
     /* Does NOT request heat-enable on its own any more (owner request
@@ -88,13 +103,40 @@ bool danger_mode_set_heat_enable_request(bool enable)
         return false;
     }
     /* Same request a real firing sends -- SaftyFW's own guards decide
-     * whether K4 actually closes; see danger_mode.h's top comment. Not
-     * gated on the result: a refusal here just means K4 stays open (or
-     * closed), exactly as intended when a guard disagrees. */
-    (void)safety_link_request_enable(s_dm.safety, enable);
+     * whether K4 actually closes; see danger_mode.h's top comment. UNLIKE
+     * the old code, the result IS checked now: safety_link_request_enable()
+     * returns ESP_ERR_INVALID_STATE for enable=true when the link is down
+     * and sends nothing on the wire (safety_link.c) -- reporting success to
+     * the UI in that case would make heat_requested (and the tile it
+     * drives) claim a request that was never actually sent. A release
+     * (enable=false) still always "succeeds" from this module's point of
+     * view -- see danger_mode_stop()'s own unconditional release, same
+     * reasoning. */
+    esp_err_t err = safety_link_request_enable(s_dm.safety, enable);
+    if (enable && err != ESP_OK) {
+        ESP_LOGW(TAG, "danger mode: heat-enable request NOT sent: %s", esp_err_to_name(err));
+        return false;
+    }
+    if (s_dm.lock && xSemaphoreTake(s_dm.lock, pdMS_TO_TICKS(50)) == pdTRUE) {
+        s_dm.heat_requested = enable;
+        xSemaphoreGive(s_dm.lock);
+    }
     ESP_LOGW(TAG, "danger mode: operator %s heat-enable request", enable ? "sent" : "released");
     danger_mode_touch();
     return true;
+}
+
+bool danger_mode_get_heat_requested(void)
+{
+    if (!s_dm.initialized || !s_dm.lock) {
+        return false;
+    }
+    bool requested = false;
+    if (xSemaphoreTake(s_dm.lock, pdMS_TO_TICKS(50)) == pdTRUE) {
+        requested = s_dm.window_open && s_dm.heat_requested;
+        xSemaphoreGive(s_dm.lock);
+    }
+    return requested;
 }
 
 bool danger_mode_touch(void)
@@ -202,6 +244,7 @@ void danger_mode_stop(const char *source)
     if (xSemaphoreTake(s_dm.lock, pdMS_TO_TICKS(50)) == pdTRUE) {
         was_open = s_dm.window_open;
         s_dm.window_open = false;
+        s_dm.heat_requested = false;
         xSemaphoreGive(s_dm.lock);
     }
     if (was_open) {
@@ -227,6 +270,7 @@ static void danger_mode_task(void *arg)
         if (s_dm.lock && xSemaphoreTake(s_dm.lock, pdMS_TO_TICKS(50)) == pdTRUE) {
             if (s_dm.window_open && (int32_t)(s_dm.deadline_ms - now_ms()) <= 0) {
                 s_dm.window_open = false;
+                s_dm.heat_requested = false;
                 expired = true;
             }
             xSemaphoreGive(s_dm.lock);

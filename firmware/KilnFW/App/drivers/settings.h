@@ -87,8 +87,10 @@
  * These four are the real expander pins wired to each schematic net --
  * DO NOT reorder them to compensate for the "commanding relay 2 moves
  * position 4" panel-numbering swap found on the bench (2026-08-27); that fix
- * belongs in kiln_io.c's relay<->pin lookup (KILN_RELAY_PIN_ORDER), which is
- * the one place the relay-N-means-pin-(N-1) identity actually lives. Renaming
+ * belongs in kiln_io.c's relay<->pin lookup (kiln_relay_logical_to_pin_bit,
+ * applied by kiln_io_remap_relay_bits() in kiln_io_set_relay_mask()'s write
+ * path and kiln_io_resync_relay_shadow()'s read-back), which is the one
+ * place the compensating swap actually lives. Renaming
  * these instead would desync every OTHER consumer of these specific defines
  * (KILN_IO_RELAY_MASK below, gpio_probe.c's pin table, uart_bridge.c's
  * PIN_FUNC map) from the real hardware pins without fixing anything, since

@@ -94,6 +94,17 @@ bool danger_mode_request_start(void);
 // command. Whether K4 actually closes is entirely SaftyFW's own call.
 bool danger_mode_set_heat_enable_request(bool enable);
 
+// This module's OWN outstanding request -- true only after a successful
+// danger_mode_set_heat_enable_request(true), cleared by an explicit false,
+// danger_mode_stop(), or timeout. This is what the diagnostics page's
+// "Firing mode" tile must be driven from, NOT danger_mode_get_relay_status()'s
+// out_heating_enabled -- that reflects SAFETY_FLAG_ENABLED, which means
+// "SaftyFW's relay_owner is ARMED / not tripped" (true on any healthy Pico
+// regardless of any request ever sent), not "K4 was granted." Confusing the
+// two was the 2026-08-27 bug where the tile showed ON with K4 open and every
+// click silently sent the opposite of what it displayed.
+bool danger_mode_get_heat_requested(void);
+
 // Resets the window's deadline to now + DANGER_MODE_WINDOW_MS. Call on every
 // accepted relay command issued through this section (the diagnostics
 // page's own relay endpoint calls this after a successful write) -- this is
@@ -119,10 +130,16 @@ uint32_t danger_mode_remaining_ms(void);
 
 // Reads SaftyFW's own current K4/heat-enable state straight off the safety
 // link's cached status (SAFETY_FLAG_RELAY/SAFETY_FLAG_ENABLED, safety_link.h)
-// -- true iff a link is up and each out-param was written. For the
-// diagnostics page's section: showing whether K4 actually closed (the
-// safety processor's decision) alongside whether this module merely
-// requested it.
+// -- true iff a link is up and each out-param was written.
+//
+// *out_heating_enabled is SAFETY_FLAG_ENABLED, i.e. "SaftyFW's relay_owner
+// state machine is currently ARMED (not tripped)" -- true on any healthy,
+// past-its-grace-period Pico REGARDLESS of whether anyone ever sent
+// REQUEST_ENABLE. It is NOT "was a heat-enable request granted" -- for
+// that, see danger_mode_get_heat_requested() above (this module's own
+// outstanding request) alongside *out_relay_energized here (whether K4
+// actually closed). Mixing this flag up with "granted" was the 2026-08-27
+// bug in the diagnostics page's "Firing mode" tile.
 bool danger_mode_get_relay_status(bool *out_relay_energized, bool *out_heating_enabled);
 
 // Operator-requested early exit: closes the window immediately, sends

@@ -164,14 +164,10 @@ this firmware honestly reporting what arrived, not a bug in this page.</p>
   <div class="row headline"><span class="label">Internal DRAM &mdash; largest free block</span><span class="value" id="heapIntLargest">--</span></div>
   <div class="row"><span class="label">Internal DRAM &mdash; free now</span><span class="value" id="heapIntFree">--</span></div>
   <div class="row"><span class="label">Internal DRAM &mdash; worst-case free</span><span class="value" id="heapIntMin">--</span></div>
-  <div class="row"><span class="label">Internal DRAM &mdash; total</span><span class="value" id="heapIntTotal">--</span></div>
   <div class="row"><span class="label">PSRAM &mdash; free now</span><span class="value" id="heapSpiFree">--</span></div>
   <div class="row"><span class="label">PSRAM &mdash; largest free block</span><span class="value" id="heapSpiLargest">--</span></div>
   <div class="row"><span class="label">PSRAM &mdash; worst-case free</span><span class="value" id="heapSpiMin">--</span></div>
-  <div class="row"><span class="label">PSRAM &mdash; total</span><span class="value" id="heapSpiTotal">--</span></div>
   <div class="row"><span class="label">Flash &mdash; used (running image)</span><span class="value" id="flashUsed">--</span></div>
-  <div class="row"><span class="label">Flash &mdash; running partition size</span><span class="value" id="flashPartitionSize">--</span></div>
-  <div class="row"><span class="label">Flash &mdash; total chip size</span><span class="value" id="flashSize">--</span></div>
 </div>
 <p class="note">"Largest free block" (not "free bytes") is the number that
 matters on this board: internal DRAM is its tight resource, not total heap.
@@ -235,7 +231,7 @@ silently on. Starting a firing while this is disabled requires an extra confirma
   <div id="dangerLive" style="display:none">
     <div class="row"><span class="label">Auto-exit in</span><span class="value danger-timer" id="dangerTimer">--:--</span></div>
     <div class="row"><span class="label">Safety relay (K4, safety-processor owned)</span><span class="value" id="dangerRelayState">--</span></div>
-    <div class="row"><span class="label">Heating enabled (safety processor's own decision)</span><span class="value" id="dangerHeatState">--</span></div>
+    <div class="row"><span class="label">Safety processor armed (not tripped)</span><span class="value" id="dangerHeatState">--</span></div>
     <h2 style="color:#fff">Thermocouples</h2>
     <div id="dangerThermo"></div>
     <h2 style="color:#fff">Relays</h2>
@@ -276,6 +272,15 @@ thermocouple fault registers) lives on their own pages:</p>
   function fmtMB(bytes) {
     if (bytes == null) return 'n/a';
     return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
+  }
+  // "value / total", e.g. "8.5 KB / 280.1 KB" -- owner request 2026-08-27,
+  // total on the same line as every other RAM/flash figure instead of its
+  // own row.
+  function fmtKBOfTotal(bytes, total) {
+    return fmtKB(bytes) + ' / ' + fmtKB(total);
+  }
+  function fmtMBOfTotal(bytes, total) {
+    return fmtMB(bytes) + ' / ' + fmtMB(total);
   }
   function fmtUptime(s) {
     if (s == null) return 'n/a';
@@ -319,18 +324,14 @@ thermocouple fault registers) lives on their own pages:</p>
     set('resetReason', st.reset_reason || 'n/a');
 
     var hi = st.heap_internal || {}, hs = st.heap_spiram || {};
-    set('heapIntFree', fmtKB(hi.free), true);
-    set('heapIntLargest', fmtKB(hi.largest_free_block), true);
-    set('heapIntMin', fmtKB(hi.min_free), true);
-    set('heapIntTotal', fmtKB(hi.total), true);
-    set('heapSpiFree', fmtKB(hs.free), true);
-    set('heapSpiLargest', fmtKB(hs.largest_free_block), true);
-    set('heapSpiMin', fmtKB(hs.min_free), true);
-    set('heapSpiTotal', fmtKB(hs.total), true);
+    set('heapIntFree', fmtKBOfTotal(hi.free, hi.total), true);
+    set('heapIntLargest', fmtKBOfTotal(hi.largest_free_block, hi.total), true);
+    set('heapIntMin', fmtKBOfTotal(hi.min_free, hi.total), true);
+    set('heapSpiFree', fmtKBOfTotal(hs.free, hs.total), true);
+    set('heapSpiLargest', fmtKBOfTotal(hs.largest_free_block, hs.total), true);
+    set('heapSpiMin', fmtKBOfTotal(hs.min_free, hs.total), true);
 
-    set('flashUsed', fmtMB(st.flash_used), true);
-    set('flashPartitionSize', fmtMB(st.flash_partition_size), true);
-    set('flashSize', fmtMB(st.flash_size), true);
+    set('flashUsed', fmtMBOfTotal(st.flash_used, st.flash_size), true);
 
     set('ioReady', st.io_ready ? 'ready' : 'not attached', true);
     set('thermoReady', st.thermo_ready ? 'ready' : 'not attached', true);
@@ -605,10 +606,18 @@ thermocouple fault registers) lives on their own pages:</p>
   }
 
   // Set by dangerRenderStatusFields() (below, from /api/diagnostics/danger's
-  // heating_enabled/heating_enabled_known) -- read here so the "Firing mode"
-  // tile's initial label is right even before its own first poll tick.
-  var dangerHeatEnabledKnown = false;
-  var dangerHeatEnabled = false;
+  // heat_requested) -- read here so the "Firing mode" tile's initial label
+  // is right even before its own first poll tick. Deliberately NOT driven
+  // from heating_enabled (SAFETY_FLAG_ENABLED) -- that means "SaftyFW's
+  // relay_owner is ARMED / not tripped", true on any healthy Pico
+  // regardless of any request ever sent, not "was this request granted".
+  // Confusing the two was the 2026-08-27 bug: the tile showed ON with K4
+  // open, and every click computed "!already ON" = off, silently sending
+  // the opposite of what it displayed with no way to ever request true.
+  // heat_requested is this module's own ESP-local bookkeeping, so unlike
+  // the safety-link-sourced fields elsewhere on this page it is always
+  // known -- no separate "known" flag needed.
+  var dangerHeatRequested = false;
   var dangerHeatBusy = false;
 
   function dangerFiringTileHtml() {
@@ -620,18 +629,15 @@ thermocouple fault registers) lives on their own pages:</p>
     // a request, not a direct relay -- SaftyFW's own guards still decide
     // whether K4 actually closes (see dangerRelayState/dangerHeatState rows
     // above for what it actually did).
-    var label = dangerHeatEnabledKnown
-      ? (dangerHeatEnabled ? 'Firing mode: ON' : 'Firing mode: off')
-      : 'Firing mode: --';
-    return '<button id="dangerFiringBtn" class="' + (dangerHeatEnabled ? 'on' : '') + '">' + label + '</button>';
+    var label = dangerHeatRequested ? 'Firing mode: ON' : 'Firing mode: off';
+    return '<button id="dangerFiringBtn" class="' + (dangerHeatRequested ? 'on' : '') + '">' + label + '</button>';
   }
 
   function renderDangerFiringTile() {
     var btn = document.getElementById('dangerFiringBtn');
     if (!btn) return; // relay grid not rendered yet (no relay board) -- dangerPoll's next tick catches up
-    btn.className = dangerHeatEnabled ? 'on' : '';
-    btn.textContent = dangerHeatEnabledKnown ? (dangerHeatEnabled ? 'Firing mode: ON' : 'Firing mode: off')
-                                              : 'Firing mode: --';
+    btn.className = dangerHeatRequested ? 'on' : '';
+    btn.textContent = dangerHeatRequested ? 'Firing mode: ON' : 'Firing mode: off';
     btn.disabled = dangerHeatBusy;
   }
 
@@ -648,7 +654,7 @@ thermocouple fault registers) lives on their own pages:</p>
       if (typeof result.remaining_ms === 'number') {
         dangerDeadlineWallMs = Date.now() + result.remaining_ms;
       }
-      dangerPoll(); // refresh dangerHeatEnabled from the board, not an optimistic guess
+      dangerPoll(); // refresh dangerHeatRequested from the board, not an optimistic guess
     }).catch(function (err) {
       alert('Firing mode command failed: ' + err.message);
     }).finally(function () { dangerHeatBusy = false; renderDangerFiringTile(); });
@@ -679,7 +685,7 @@ thermocouple fault registers) lives on their own pages:</p>
       })(lastStatus.relays[j]);
     }
     document.getElementById('dangerFiringBtn').addEventListener('click', function () {
-      dangerSendEnable(!dangerHeatEnabled);
+      dangerSendEnable(!dangerHeatRequested);
     });
   }
 
@@ -702,12 +708,16 @@ thermocouple fault registers) lives on their own pages:</p>
       relayEl.textContent = 'unknown -- safety link down';
     }
     if (j.heating_enabled_known) {
+      // "Safety processor armed (not tripped)" -- SAFETY_FLAG_ENABLED, true
+      // on any healthy Pico regardless of any request ever sent. NOT "was
+      // heat granted" -- that's the dangerFiringTile above (this module's
+      // own heat_requested) plus dangerRelayState (whether K4 actually
+      // closed) together.
       heatEl.textContent = j.heating_enabled ? 'yes' : 'no';
     } else {
       heatEl.textContent = 'unknown -- safety link down';
     }
-    dangerHeatEnabledKnown = !!j.heating_enabled_known;
-    dangerHeatEnabled = !!j.heating_enabled;
+    dangerHeatRequested = !!j.heat_requested;
     renderDangerFiringTile();
   }
 

@@ -698,13 +698,31 @@ void app_main(void)
     };
     esp_err_t spi_err = spi_bus_initialize(KILN_SPI_HOST, &spi_config, SPI_DMA_CH_AUTO);
     if (spi_err == ESP_ERR_INVALID_STATE) {
-        /* Bus already up -- normal after a JTAG/OpenOCD soft reset (not a
-         * power cycle), since the host peripheral's "initialized" latch
-         * survives it. Not a fault: the MAX31856/display bring-up below
-         * shares the existing host exactly as it would on a cold boot. Must
-         * not fall into the spi_err != ESP_OK boot-fault check below, or a
-         * harmless soft reset asserts a false thermocouple fault (S6a) on
-         * the isolated line that nothing ever deasserts. */
+        /* Observed repeatedly on the bench after a JTAG/OpenOCD flash+reset
+         * (never after a real power cycle): spi_bus_initialize() returns
+         * ESP_ERR_INVALID_STATE here (bus_ctx[host] already non-NULL,
+         * spi_common.c), yet MAX31856_start_all() right below finds the bus
+         * genuinely healthy and every channel reads real temperatures
+         * immediately after. Treated as benign on that evidence -- NOT
+         * asserting a boot fault here is what stops a harmless soft reset
+         * from latching a false S6a that nothing then deasserts.
+         *
+         * Opus review 2026-08-27 flagged that the underlying mechanism this
+         * comment used to assert ("the host peripheral's initialized latch
+         * survives a soft reset") does not hold up against spi_common.c's
+         * source: bus_ctx[] is a plain static pointer, zeroed by every
+         * reset's normal .bss init same as any other global, JTAG-triggered
+         * or not -- so by that reading this SHOULD be unreachable on a
+         * genuine full reset. The mechanism is not fully understood; what is
+         * verified is the bench outcome above. thermo_bus.initialized right
+         * below is the real safety net regardless -- it is checked
+         * unconditionally and independently asserts SAFETY_FAULT_SRC_THERMO
+         * if no channel actually answers, whatever this branch decided. The
+         * one thing this exemption does NOT cover is the display (no
+         * equivalent boot-fault path exists for it, since it was never
+         * safety-relevant) -- if this branch is ever reached for a reason
+         * OTHER than the benign case above, a misconfigured shared bus could
+         * make ILI9488_start() fail silently instead of loudly. */
         ESP_LOGW(TAG, "spi_bus_initialize: already initialized (soft reset) -- sharing existing bus");
     } else if (spi_err != ESP_OK) {
         ESP_LOGE(TAG, "spi_bus_initialize failed: %s -- thermocouples and display are out",

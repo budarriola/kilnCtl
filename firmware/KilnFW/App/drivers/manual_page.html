@@ -99,6 +99,12 @@ function showRelayError(text) {
 }
 
 function setRelay(relay, on) {
+  // Display-only R0-3 in these two toasts (owner request 2026-08-27, matches
+  // relayRow()'s confirm text below and the thermocouple channels' 0-based
+  // numbering) -- `relay` itself, sent to /api/relay above, stays the real
+  // 1-based API number. Missed in the original pass (Opus review 2026-08-27):
+  // these two said "Relay 3" while the button pressed was labeled "Relay 2".
+  var displayRelay = relay - 1;
   fetch('/api/relay', {
     method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: 'relay=' + relay + '&on=' + (on ? '1' : '0'),
@@ -107,11 +113,11 @@ function setRelay(relay, on) {
       if (resp.ok) {
         showRelayError(null);
       } else {
-        showRelayError('Relay ' + relay + ' ' + (on ? 'ON' : 'OFF') + ' refused: ' + (text || ('HTTP ' + resp.status)));
+        showRelayError('Relay ' + displayRelay + ' ' + (on ? 'ON' : 'OFF') + ' refused: ' + (text || ('HTTP ' + resp.status)));
       }
     });
   }).catch(function () {
-    showRelayError('Relay ' + relay + ' ' + (on ? 'ON' : 'OFF') + ' failed: could not reach the board.');
+    showRelayError('Relay ' + displayRelay + ' ' + (on ? 'ON' : 'OFF') + ' failed: could not reach the board.');
   }).then(poll);
 }
 

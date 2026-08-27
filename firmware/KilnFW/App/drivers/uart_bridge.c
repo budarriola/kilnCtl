@@ -792,6 +792,14 @@ static size_t io_build_read_payload(uint8_t *out)
     }
 
     out[0] = IO_CMD_READ;
+    /* st.data's low 4 bits are the SX1509's raw, PHYSICAL pin order (relay 2
+     * and relay 4 swapped on this board, see kiln_io.c's
+     * kiln_relay_logical_to_pin_bit comment) -- it has to be, it also
+     * carries the other 12 non-relay pins as real hardware bits. out[5]
+     * below (relay_shadow) is the LOGICAL relay-N-means-bit-(N-1) order
+     * every other consumer (dashboard, danger_mode, MCP tools) expects.
+     * A PC-side tool reading both should trust relay_shadow for relay
+     * state, not re-derive it from data's low 4 bits. */
     bridge_put_u16_le(&out[1], st.data);
     bridge_put_u16_le(&out[3], st.dir);
     out[5] = st.relay_shadow;

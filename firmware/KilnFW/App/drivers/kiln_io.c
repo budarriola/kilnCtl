@@ -53,10 +53,19 @@ static const uint8_t kiln_io_pins[KILN_IO_DIGITAL_COUNT] = {
     SX1509_IO5_PIN, SX1509_IO6_PIN, SX1509_IO7_PIN,
 };
 
+/* Rotated the same one position as MAX31856_start_all()'s cs_pins/fault_pins
+ * (MAX31856.c, 2026-08-27 bench fix) and for the same reason: ~DRDY is a
+ * property of a specific MAX31856 chip, and logical channel i now talks to
+ * a different chip than before the CS rotation -- its DRDY line has to
+ * follow. Leaving this array un-rotated would have logical channel i read
+ * CS(i-1 mod 3)'s conversions but DRDY(i)'s ready line (a DIFFERENT chip's),
+ * so a dead channel could read as fresh (neighbour's DRDY still toggling)
+ * and a live one as permanently stale -- exactly what MAX31856_
+ * set_drdy_provider()'s staleness detection exists to prevent. */
 static const uint8_t kiln_io_drdy_pins[KILN_IO_DRDY_COUNT] = {
+    THERMO_DRDY2_EXP_PIN,
     THERMO_DRDY0_EXP_PIN,
     THERMO_DRDY1_EXP_PIN,
-    THERMO_DRDY2_EXP_PIN,
 };
 
 /* Bank B is I/O[15:8], so a pin >= 8 lives at bit (pin - 8) of RegDataB. Both
@@ -122,9 +131,14 @@ static uint8_t kiln_io_remap_relay_bits(uint8_t bits)
  * mismatch and adopt the expander's view. */
 static void kiln_io_resync_relay_shadow(kiln_io_t *io)
 {
-    uint8_t accepted = (uint8_t)(SX1509_get_shadow(io->exp) & (uint16_t)KILN_IO_RELAY_MASK);
+    uint8_t accepted_phys = (uint8_t)(SX1509_get_shadow(io->exp) & (uint16_t)KILN_IO_RELAY_MASK);
+    /* SX1509_get_shadow() reads back real hardware pin bits -- remap into
+     * logical-relay-bit order before comparing against/overwriting
+     * relay_shadow, which is logical everywhere else (kiln_relay_logical_to_
+     * pin_bit's own comment above). */
+    uint8_t accepted = kiln_io_remap_relay_bits(accepted_phys);
     if (accepted != io->relay_shadow) {
-        ESP_LOGE(TAG, "relay shadow mismatch: commanded 0x%X, expander last accepted 0x%X -- "
+        ESP_LOGE(TAG, "relay shadow mismatch: commanded 0x%X, expander last accepted 0x%X (logical) -- "
                       "reporting the expander's value",
                  io->relay_shadow, accepted);
         io->relay_shadow = accepted;
@@ -230,14 +244,19 @@ esp_err_t kiln_io_set_relay_mask(kiln_io_t *io, uint8_t mask, uint8_t value)
     if (!io) return ESP_ERR_INVALID_ARG;
     if (!kiln_io_ready(io)) return ESP_ERR_INVALID_STATE;
 
-    /* Relay N (1-based) is expander pin N-1, so the relay bit order and the
-     * expander bit order are literally the same four low bits -- no shuffling,
-     * just a width change. */
+    /* `mask`/`value` are in LOGICAL relay-bit order (bit N-1 = relay N) --
+     * every caller (kiln_io_set_relay() above, kiln_io_owner.c) works in
+     * that space, and relay_shadow below stays in it too. The actual SX1509
+     * pins differ (kiln_relay_logical_to_pin_bit's own comment, above in
+     * this file) -- translated to physical bit order only for the wire
+     * write, right here, the one place logical meets hardware. */
     mask &= (uint8_t)KILN_IO_RELAY_MASK;
     value &= mask;
     if (mask == 0) return ESP_OK;
 
-    esp_err_t err = SX1509_write_masked(io->exp, (uint16_t)mask, (uint16_t)value);
+    uint8_t phys_mask = kiln_io_remap_relay_bits(mask);
+    uint8_t phys_value = kiln_io_remap_relay_bits(value);
+    esp_err_t err = SX1509_write_masked(io->exp, (uint16_t)phys_mask, (uint16_t)phys_value);
     if (err == ESP_OK) {
         io->relay_shadow = (uint8_t)((io->relay_shadow & (uint8_t)~mask) | value);
         ESP_LOGD(TAG, "relays now 0x%X (mask 0x%X value 0x%X)", io->relay_shadow, mask, value);

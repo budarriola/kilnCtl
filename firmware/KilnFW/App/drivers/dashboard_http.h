@@ -158,11 +158,23 @@ typedef struct {
      * status_t::flags (SAFETY_FLAG_RELAY/SAFETY_FLAG_ENABLED), so the
      * dashboard can show it the same way as the four ESP-owned relays
      * (relayStatusHtml() in main_page.html) instead of leaving the one
-     * relay that actually gates heat invisible next to them. Only
-     * meaningful when safety_link_up was true on the read that populated
-     * it -- dashboard_status_t has no separate validity flag for this pair
-     * because safety_ready already covers it (same convention diag_state
-     * etc. already use above). */
+     * relay that actually gates heat invisible next to them.
+     *
+     * safety_relay_known: false unless this poll's safety_link_get_status()
+     * actually succeeded -- null-until-known, same convention diag_state
+     * etc. above already use (added 2026-08-27, Opus review: without it
+     * memset(out, 0, ...)'s default false read as "confirmed de-energized"
+     * for a link that had simply never answered).
+     *
+     * safety_heating_enabled == SAFETY_FLAG_ENABLED means "SaftyFW's
+     * relay_owner state machine is currently ARMED (not tripped)" -- true
+     * on any healthy, past-its-grace-period Pico REGARDLESS of whether
+     * anyone ever sent SAFETY_CMD_REQUEST_ENABLE. It is NOT "heat was
+     * granted"; do not read it as "was my enable request honored" (that bug
+     * shipped once already in danger_mode.c's diagnostics-page tile,
+     * 2026-08-27 -- see danger_mode.h's doc comments on
+     * danger_mode_get_heat_requested()/danger_mode_get_relay_status()). */
+    bool     safety_relay_known;
     bool     safety_relay_energized;
     bool     safety_heating_enabled;
 

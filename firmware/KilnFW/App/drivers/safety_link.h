@@ -37,8 +37,22 @@
 //   0x02 SAFETY_CMD_REQUEST_ENABLE  byte1 = enable (0/1). Advisory: the Pico
 //                                   may refuse, and its own interlocks always
 //                                   win. A protocol-level ACK is the whole
-//                                   reply; the ESP learns the outcome from
-//                                   SAFETY_FLAG_ENABLED on the next status.
+//                                   reply -- there is no per-request outcome
+//                                   frame. CORRECTION 2026-08-27 (this
+//                                   comment used to claim "the ESP learns the
+//                                   outcome from SAFETY_FLAG_ENABLED on the
+//                                   next status", which is false and shipped
+//                                   a real bug in danger_mode.c's
+//                                   diagnostics-page tile: SAFETY_FLAG_ENABLED
+//                                   means "relay_owner is ARMED / not
+//                                   tripped" (see byte1 bit4 below), true on
+//                                   any healthy Pico regardless of any
+//                                   REQUEST_ENABLE ever sent. The only two
+//                                   real outcome signals are SAFETY_FLAG_RELAY
+//                                   (did K4 actually close) and, ESP-side,
+//                                   whatever this driver's own caller chose
+//                                   to remember it asked for (e.g.
+//                                   danger_mode_get_heat_requested()).
 //                                   A status frame pushed unsolicited right
 //                                   after is accepted and refreshes the cache.
 //   There is no separate PING on the wire: safety_link_ping() sends a
@@ -54,7 +68,12 @@
 //                   bit1 SAFETY_FLAG_FAULT      -- MUST be 0, ESP-owned
 //                   bit2 SAFETY_FLAG_ESTOP      -- estop input asserted
 //                   bit3 SAFETY_FLAG_RELAY      -- safety relay K4 energized
-//                   bit4 SAFETY_FLAG_ENABLED    -- heating currently permitted
+//                   bit4 SAFETY_FLAG_ENABLED    -- relay_owner is ARMED / not
+//                                                  tripped (true on any
+//                                                  healthy Pico regardless of
+//                                                  any REQUEST_ENABLE ever
+//                                                  sent -- NOT "a heat
+//                                                  request was granted")
 //                   bit5 SAFETY_FLAG_TEMP_VALID -- the two temperatures below
 //                                                  are real readings
 //   bytes2..5   = safety thermocouple temperature, f32 LE, degC

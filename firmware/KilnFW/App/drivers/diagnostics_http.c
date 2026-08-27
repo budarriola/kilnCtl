@@ -362,13 +362,21 @@ static esp_err_t danger_get_handler(httpd_req_t *req)
     bool relay_known, relay_energized, heating_known, heating_enabled;
     relay_known = danger_mode_get_relay_status(&relay_energized, &heating_enabled);
     heating_known = relay_known; /* one safety-link read fills both -- see danger_mode.h */
-    char json[160];
+    /* heat_requested is this module's OWN outstanding request (ESP-local,
+     * always known) -- the "Firing mode" tile must be driven from THIS, not
+     * heating_enabled (SAFETY_FLAG_ENABLED, "SaftyFW armed", true on any
+     * healthy Pico regardless of any request -- see danger_mode.h's
+     * doc comments on both). 2026-08-27 bug fix. */
+    bool heat_requested = danger_mode_get_heat_requested();
+    char json[200];
     int n = snprintf(json, sizeof(json),
                      "{\"active\":%s,\"remaining_ms\":%lu,\"safety_relay_known\":%s,"
-                     "\"safety_relay_energized\":%s,\"heating_enabled_known\":%s,\"heating_enabled\":%s}",
+                     "\"safety_relay_energized\":%s,\"heating_enabled_known\":%s,\"heating_enabled\":%s,"
+                     "\"heat_requested\":%s}",
                      active ? "true" : "false", (unsigned long)danger_mode_remaining_ms(),
                      relay_known ? "true" : "false", relay_energized ? "true" : "false",
-                     heating_known ? "true" : "false", heating_enabled ? "true" : "false");
+                     heating_known ? "true" : "false", heating_enabled ? "true" : "false",
+                     heat_requested ? "true" : "false");
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_send(req, json, n < 0 ? 0 : (size_t)n);
 }

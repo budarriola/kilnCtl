@@ -917,16 +917,47 @@ static bool safety_apply_power(SafetyLinkClass *link, const uart_proto_message_t
  * safety_link_mark_boot_clean()'s doc comment (safety_link.h). */
 #define SAFETY_LINK_TRIP_REASON_MAIN_FAULT 6u
 
-/* Set once by safety_link_mark_boot_clean(), consumed once (and only once
- * this boot) by safety_apply_diag() below -- see both functions' doc
- * comments. Single ESP-side safety link instance in this codebase, same
- * "static app-wide flag" precedent as danger_mode.c's s_dm. */
+/* Set once by safety_link_mark_boot_clean(), consumed by safety_apply_diag()
+ * below -- see both functions' doc comments. Single ESP-side safety link
+ * instance in this codebase, same "static app-wide flag" precedent as
+ * danger_mode.c's s_dm.
+ *
+ * Two defects an Opus review found in the original version of this feature
+ * (2026-08-27), both fixed here:
+ *
+ * 1. s_boot_clean never expired, so it stayed true for the ENTIRE boot, not
+ *    just its first few seconds. A boot with no link at power-up (no DIAG
+ *    yet) followed hours later by a genuine runtime S6a, followed by the
+ *    link recovering, would have had that first-ever TRIPPED/MAIN_FAULT
+ *    DIAG frame -- describing a REAL, current trip -- silently cleared.
+ *    Fixed with s_boot_clean_deadline_ms: only frames arriving within
+ *    SAFETY_LINK_BOOT_CLEAN_WINDOW_MS of the mark_boot_clean() call are
+ *    ever eligible, and s_boot_clean itself is force-cleared once that
+ *    deadline passes (belt-and-suspenders with the deadline check itself).
+ *    Also now requires link->fault_sources == 0 at the moment of the
+ *    attempt -- this board's OWN fault-source bits (kiln_enter_safe_state(),
+ *    profile_executor.c, autotune_engine.c, uart_bridge.c's PC-link-lost
+ *    path, ...) can legitimately go non-zero well after boot; the clear
+ *    must never fire while this board itself currently has a reason to be
+ *    asserting the fault line.
+ *
+ * 2. s_boot_clear_attempted was latched BEFORE calling
+ *    safety_link_send_clear_trip(), whose return was discarded -- a locally
+ *    refused send (stale/never-received DIAG age, see that function's own
+ *    doc comment) burned the one-shot with nothing actually sent on the
+ *    wire, leaving a real stale S6a latched for the rest of the boot. Fixed
+ *    by only latching s_boot_clear_attempted on ESP_OK; a refused attempt
+ *    can retry on the next DIAG frame, still bounded by the deadline above. */
+#define SAFETY_LINK_BOOT_CLEAN_WINDOW_MS (30u * 1000u)
 static bool s_boot_clean = false;
 static bool s_boot_clear_attempted = false;
+static uint32_t s_boot_clean_deadline_ms = 0;
 
 void safety_link_mark_boot_clean(void)
 {
     s_boot_clean = true;
+    s_boot_clean_deadline_ms =
+        (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS) + SAFETY_LINK_BOOT_CLEAN_WINDOW_MS;
 }
 
 static bool safety_apply_diag(SafetyLinkClass *link, const uart_proto_message_t *msg)
@@ -959,11 +990,23 @@ static bool safety_apply_diag(SafetyLinkClass *link, const uart_proto_message_t 
     link->cached.diag_ever_received = true;
     link->stats.diag_applied++; /* 2026-08-23: real counter, see its own doc comment (safety_link.h) */
     bool want_boot_clear = false;
-    if (s_boot_clean && !s_boot_clear_attempted &&
-        link->cached.diag_state == SAFETY_LINK_DIAG_STATE_TRIPPED &&
-        link->cached.diag_trip_reason == SAFETY_LINK_TRIP_REASON_MAIN_FAULT) {
-        s_boot_clear_attempted = true;
-        want_boot_clear = true;
+    if (s_boot_clean) {
+        uint32_t now = (uint32_t)(xTaskGetTickCount() * (TickType_t)portTICK_PERIOD_MS);
+        if ((int32_t)(s_boot_clean_deadline_ms - now) <= 0) {
+            /* Window has passed -- never eligible again this boot, whether
+             * or not an attempt ever succeeded. See s_boot_clean's own doc
+             * comment above for the "hours later" real-trip scenario this
+             * closes. */
+            s_boot_clean = false;
+        } else if (!s_boot_clear_attempted && link->fault_sources == 0u &&
+                   link->cached.diag_state == SAFETY_LINK_DIAG_STATE_TRIPPED &&
+                   link->cached.diag_trip_reason == SAFETY_LINK_TRIP_REASON_MAIN_FAULT) {
+            want_boot_clear = true;
+            /* s_boot_clear_attempted is NOT latched here -- only on ESP_OK
+             * from the actual send, below, outside the lock. A locally
+             * refused send (stale diag age, etc.) must be retryable on the
+             * next DIAG frame, still bounded by the deadline above. */
+        }
     }
     safety_unlock(link);
     if (want_boot_clear) {
@@ -972,7 +1015,10 @@ static bool safety_apply_diag(SafetyLinkClass *link, const uart_proto_message_t 
          * safety_link_mark_boot_clean()'s doc comment (safety_link.h). */
         ESP_LOGW(TAG, "boot was clean but a stale S6a (main-controller-fault) trip is still "
                       "latched from before this boot -- sending clear_trip to release it");
-        (void)safety_link_send_clear_trip(link);
+        if (safety_link_send_clear_trip(link) == ESP_OK && safety_lock(link)) {
+            s_boot_clear_attempted = true;
+            safety_unlock(link);
+        }
     }
     return true;
 }
