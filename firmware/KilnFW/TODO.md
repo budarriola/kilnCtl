@@ -5,6 +5,61 @@ this file owns the main-firmware detail. The cross-processor items — the swapp
 safety-UART pins, `CommonFW`, and the safety-liveness gate on heating — are
 sequenced there and tracked in [`../SaftyFW/TODO.md`](../SaftyFW/TODO.md).
 
+## Bench sweep 2026-08-27 -- exercising the LCD and web interfaces
+
+Every HTTP endpoint fetched and strict-parsed, every mutating endpoint
+exercised against the live board (47 checks, heaters powered down), and the
+LCD walked page by page with injected touches. Fixed and committed from this
+sweep: `/api/status` emitting bare `nan`, danger mode leaving relays closed
+on exit, the tap-target dump captioning containers with a hidden child's
+text, and the safety-link config-page hardening. Still open:
+
+- [ ] **Page 1 of a two-page safety config is never received.** The Pico's own
+      counters (read over SWD) show 1195 of 1195 requests seen, handled and
+      broadcast, worst-case service 609 us, last reply 157 bytes; the ESP
+      receives page 0 every time and page 1 never, so the cached mirror of the
+      safety processor's configuration has never converged. Request pacing did
+      not change it. The counter proves the Pico CALLED send_broadcast, not
+      that the bytes reached the wire -- next step is an analyser capture of
+      the page-1 reply, or a TX-completion (not TX-queued) counter on the Pico.
+      Do not add another speculative fix without one of those.
+- [ ] **The PC-link watchdog drops all relays every 5 s of host silence**, and
+      an idle-but-connected MCP session is enough to trigger it repeatedly
+      (observed continuously through this whole sweep). It overrode LCD manual
+      relay control within seconds every time. Check what this does to a
+      running firing before a real one is attempted -- "relays stay off until
+      the host commands them" during a profile would be a silent halt.
+- [ ] **`max_temp_c == 0` and `max_ramp_c_per_hr == 0` mean opposite things**
+      on the same uncommissioned zone: the temperature ceiling fails OPEN (no
+      ceiling at all, already tracked below under guard 5) while the ramp
+      ceiling fails CLOSED (no profile can start -- `/api/profile_exec/start`
+      refuses with "exceeds zone 1's current 0.0 C/hr ceiling"). One unset
+      value, two contradictory policies. `max_simultaneous_relays == 0` is a
+      third instance of the same ambiguity and should be checked too.
+- [ ] **The LCD numbers relays from 1 and zones from 0 on the same page.** The
+      Temperature page shows "Zone 0 / Relay 1", "Zone 1 / Relay 2". The web
+      side was renumbered to R0-R3 to match the thermocouples; the LCD was not.
+- [ ] **The Safety Processor LCD page never shows the current state.** It
+      reports the last trip, temperatures and link version, but not whether
+      the processor is ARMED or TRIPPED right now, nor whether it has been
+      commissioned. That is the page an operator opens to answer exactly that.
+- [ ] **Unknown `/api/*` paths serve the 90 kB dashboard HTML with 200** rather
+      than 404 (the catch-all handler). A client gets a page where it expects
+      JSON and has to guess.
+- [ ] **`Accept-Encoding: identity` gets a 406 for every page.** Correct per
+      the RFC and deliberate (only a gzip representation is stored), but it
+      makes the board unreachable to any plain client that asks for identity
+      -- Python's `urllib` does by default. Worth either storing an identity
+      fallback or documenting it where someone scripting against the board
+      will find it.
+- [ ] **Boot logs an internal-DRAM regression at every stage**: largest free
+      block 4608 (was 7680), free 6179 (was 10015) at `app_main_done`. The
+      firmware's own guard is calling this out as an error on every boot; it
+      is close to the exhaustion that has already caused truncated `/app.js`
+      responses in the past.
+
+---
+
 ## Audit 2026-08-27 -- open items
 
 A six-agent read-only audit of both firmwares. Already fixed and committed: a
