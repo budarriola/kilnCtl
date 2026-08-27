@@ -82,7 +82,17 @@
 /* Expander pin assignments, fixed by the board (see docs/HARDWARE.md). The
  * relay bit order is the schematic's Relay1..Relay4, which is NOT the
  * K-designator order: Relay1->K3/J8, Relay2->K1/J3, Relay3->K2/J4,
- * Relay4->K5/J11. */
+ * Relay4->K5/J11.
+ *
+ * These four are the real expander pins wired to each schematic net --
+ * DO NOT reorder them to compensate for the "commanding relay 2 moves
+ * position 4" panel-numbering swap found on the bench (2026-08-27); that fix
+ * belongs in kiln_io.c's relay<->pin lookup (KILN_RELAY_PIN_ORDER), which is
+ * the one place the relay-N-means-pin-(N-1) identity actually lives. Renaming
+ * these instead would desync every OTHER consumer of these specific defines
+ * (KILN_IO_RELAY_MASK below, gpio_probe.c's pin table, uart_bridge.c's
+ * PIN_FUNC map) from the real hardware pins without fixing anything, since
+ * KILN_IO_RELAY_MASK just ORs them together order-independent. */
 #define SX1509_RELAY1_PIN      0
 #define SX1509_RELAY2_PIN      1
 #define SX1509_RELAY3_PIN      2

@@ -189,20 +189,20 @@ static inline const char *profile_executor_safety_trip_words(uint8_t reason)
 {
     switch (reason) {
     case 0:  return "none";
-    case 1:  return "overtemp (S1)";
-    case 2:  return "over setpoint (S2)";
-    case 3:  return "load stuck on (S3)";
-    case 5:  return "sensor invalid (S5)";
-    case 6:  return "main processor fault (S6a)";
-    case 7:  return "safety link dead (S6b)";
-    case 8:  return "E-stop (S7)";
-    case 9:  return "rate of rise (S8)";
-    case 10: return "TRIP_INEFFECTIVE -- heater still energised (S9)";
-    case 12: return "frozen sensor (S11)";
-    case 13: return "enclosure overtemp (S12)";
-    case 14: return "borrowed data stale (S13)";
-    case 15: return "config corrupt";
-    case 16: return "self-test failure";
+    case 1:  return "chamber over absolute temperature limit (S1)";
+    case 2:  return "chamber over setpoint for too long (S2)";
+    case 3:  return "relay/contactor stuck on, no heat commanded (S3)";
+    case 5:  return "safety thermocouple reading invalid (S5)";
+    case 6:  return "main controller (ESP) reported a fault (S6a)";
+    case 7:  return "safety link to main controller went silent (S6b)";
+    case 8:  return "E-stop pressed (S7)";
+    case 9:  return "rising faster than physically possible (S8)";
+    case 10: return "contactor welded on, trip did NOT cut power (S9)";
+    case 12: return "safety sensor reading frozen, not updating (S11)";
+    case 13: return "enclosure/cold-junction over-temperature (S12)";
+    case 14: return "borrowed zone's TC stopped updating (S13)";
+    case 15: return "safety config corrupt";
+    case 16: return "safety self-test failed";
     default: return "unknown guard";
     }
 }

@@ -22,18 +22,18 @@
 static inline const char *safety_trip_words_short(uint8_t reason)
 {
     switch (reason) {
-    case 1:  return "S1 overtemp";
+    case 1:  return "S1 over-temp limit";
     case 2:  return "S2 over setpoint";
     case 3:  return "S3 relay stuck on";
-    case 5:  return "S5 sensor invalid";
-    case 6:  return "S6a main fault";
+    case 5:  return "S5 TC invalid";
+    case 6:  return "S6a main ctrl fault";
     case 7:  return "S6b link dead";
     case 8:  return "S7 E-stop";
-    case 9:  return "S8 rate of rise";
-    case 10: return "S9 INEFFECTIVE";
-    case 12: return "S11 frozen sensor";
-    case 13: return "S12 enclosure temp";
-    case 14: return "S13 stale data";
+    case 9:  return "S8 rise too fast";
+    case 10: return "S9 contactor welded";
+    case 12: return "S11 sensor frozen";
+    case 13: return "S12 enclosure hot";
+    case 14: return "S13 borrowed TC dead";
     case 15: return "config corrupt";
     case 16: return "self-test fail";
     default: return "unknown guard";

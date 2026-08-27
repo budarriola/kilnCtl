@@ -19,6 +19,7 @@
 
 #include "board_temps.h"
 #include "boot_button.h"
+#include "danger_mode.h"
 #include "boot_guard.h"
 #include "watchdog_cfg.h"
 #include "crash_report.h"
@@ -696,7 +697,16 @@ void app_main(void)
         .max_transfer_sz = ILI9488_SCRATCH_BYTES,
     };
     esp_err_t spi_err = spi_bus_initialize(KILN_SPI_HOST, &spi_config, SPI_DMA_CH_AUTO);
-    if (spi_err != ESP_OK) {
+    if (spi_err == ESP_ERR_INVALID_STATE) {
+        /* Bus already up -- normal after a JTAG/OpenOCD soft reset (not a
+         * power cycle), since the host peripheral's "initialized" latch
+         * survives it. Not a fault: the MAX31856/display bring-up below
+         * shares the existing host exactly as it would on a cold boot. Must
+         * not fall into the spi_err != ESP_OK boot-fault check below, or a
+         * harmless soft reset asserts a false thermocouple fault (S6a) on
+         * the isolated line that nothing ever deasserts. */
+        ESP_LOGW(TAG, "spi_bus_initialize: already initialized (soft reset) -- sharing existing bus");
+    } else if (spi_err != ESP_OK) {
         ESP_LOGE(TAG, "spi_bus_initialize failed: %s -- thermocouples and display are out",
                  esp_err_to_name(spi_err));
     }
@@ -731,11 +741,14 @@ void app_main(void)
         boot_fault_sources |= SAFETY_FAULT_SRC_APP;
 #endif
     }
-    if (spi_err != ESP_OK) {
+    if (spi_err != ESP_OK && spi_err != ESP_ERR_INVALID_STATE) {
         /* No SPI bus means no MAX31856 can be read: the kiln has no temperature
          * measurement on this side of the barrier. Reported as a thermocouple
          * fault because that is exactly what it is from the safety
-         * processor's point of view. */
+         * processor's point of view. ESP_ERR_INVALID_STATE (already
+         * initialized) is excluded -- that is the benign soft-reset case
+         * logged above, and the real coverage for "no channel actually
+         * came up" is the thermo_bus.initialized check right below. */
         boot_fault_sources |= SAFETY_FAULT_SRC_THERMO;
     }
 
@@ -891,7 +904,25 @@ void app_main(void)
             ESP_LOGE(TAG, "isolated fault line asserted at boot, sources 0x%02X",
                      (unsigned)boot_fault_sources);
         }
+    } else {
+        /* This boot's own bring-up found nothing wrong -- tell safety_link so
+         * it can release a stale S6a latch left over from a PREVIOUS boot's
+         * assertion (SaftyFW does not reboot alongside the ESP, so its own
+         * trip latch outlives an ESP-only reflash/reset). See
+         * safety_link_mark_boot_clean()'s doc comment (safety_link.h). */
+        safety_link_mark_boot_clean();
     }
+
+    // danger_mode (diagnostics page's explicit-accept relay-override
+    // section) needs the safety link handle to request/release
+    // SAFETY_CMD_REQUEST_ENABLE -- see danger_mode.h. `&safety` is valid even
+    // when safety_err != ESP_OK (safety_link_request_enable() itself refuses
+    // cleanly on an uninitialized link); must run before kiln_io_owner_start()
+    // below, whose relay_on_blocked() calls danger_mode_active(). Also safe
+    // before profile_executor_start() has run, same guarantee boot_button_
+    // start() already relies on: danger_mode_request_start() only reads
+    // profile_executor_get_status(), which answers cleanly pre-start.
+    danger_mode_init(&safety);
 
     // kiln_io_owner (TODO.md 10.14 Phase 1): the single task that writes
     // relay/expander state from here on -- must start before anything that

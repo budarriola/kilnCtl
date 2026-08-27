@@ -238,9 +238,10 @@ static esp_err_t backup_export_get_handler(httpd_req_t *req)
             zones_config_get_name(zi, name, sizeof(name));
             char name_escaped[ZONE_NAME_MAX_LEN * 2 + 1];
             json_escape(name, name_escaped, sizeof(name_escaped));
-            uint8_t relay_mask = 0, thermo_mask = 0;
+            uint8_t relay_mask = 0, thermo_mask = 0, ct_mask = 0;
             zones_config_get_relay_mask(zi, &relay_mask);
             zones_config_get_thermo_mask(zi, &thermo_mask);
+            zones_config_get_ct_mask(zi, &ct_mask);
             float cal_offset_c = 0.0f;
             zones_config_get_cal_offset(zi, &cal_offset_c);
             float max_ramp_c_per_hr = 0.0f;
@@ -270,8 +271,8 @@ static esp_err_t backup_export_get_handler(httpd_req_t *req)
              * truncated by that function's own overflow clamp rather than
              * erroring, so this is split into several smaller calls instead
              * of one that could quietly drop the tail of a zone's entry. */
-            backup_stream_printf(&s, "\"name\":\"%s\",\"relay_mask\":%u,\"thermo_mask\":%u,",
-                                name_escaped, relay_mask, thermo_mask);
+            backup_stream_printf(&s, "\"name\":\"%s\",\"relay_mask\":%u,\"thermo_mask\":%u,\"ct_mask\":%u,",
+                                name_escaped, relay_mask, thermo_mask, ct_mask);
             backup_stream_printf(&s, "\"cal_offset_c\":%.3f,\"max_ramp_c_per_hr\":%.2f,"
                                 "\"sanity_rate_c_per_min\":%.3f,\"control_mode\":%u,",
                                 (double)cal_offset_c, (double)max_ramp_c_per_hr, (double)sanity_rate_c_per_min,
@@ -762,6 +763,8 @@ static bool backup_import_apply(const char *body, char *err_msg, size_t err_cap)
         uint8_t relay_mask;
         bool has_thermo_mask;
         uint8_t thermo_mask;
+        bool has_ct_mask;
+        uint8_t ct_mask;
         bool has_cal;
         float cal_offset_c;
         bool has_ramp;
@@ -921,6 +924,24 @@ static bool backup_import_apply(const char *body, char *err_msg, size_t err_cap)
             if ((zc->thermo_mask & ~valid_zone_bits) != 0) {
                 snprintf(err_msg, err_cap,
                         "zone tuning entry %u: thermo_mask references an unconfigured thermocouple channel",
+                        (unsigned)zone_candidate_count);
+                return false;
+            }
+        }
+
+        double dct;
+        if (json_field_opt_num(ze, "ct_mask", 0, 255, &dct, &zc->has_ct_mask, "ct_mask", err_msg,
+                               err_cap, (unsigned)zone_candidate_count) == false) {
+            return false;
+        }
+        if (zc->has_ct_mask) {
+            zc->ct_mask = (uint8_t)dct;
+            /* Fixed hardware count, unlike thermo_mask/relay_mask above --
+             * see zones_http.c's ZONE_CT_CHANNEL_COUNT. */
+            uint8_t valid_ct_bits = (uint8_t)((1u << ZONE_CT_CHANNEL_COUNT) - 1u);
+            if ((zc->ct_mask & ~valid_ct_bits) != 0) {
+                snprintf(err_msg, err_cap,
+                        "zone tuning entry %u: ct_mask references an unconfigured current-sense channel",
                         (unsigned)zone_candidate_count);
                 return false;
             }
@@ -1125,6 +1146,11 @@ static bool backup_import_apply(const char *body, char *err_msg, size_t err_cap)
         }
         if (zc->has_thermo_mask && !zones_config_set_thermo_mask(zc->index, zc->thermo_mask)) {
             snprintf(err_msg, err_cap, "zone tuning entry %u (channel %u) rejected at commit setting thermo_mask",
+                    (unsigned)i, zc->index);
+            return false;
+        }
+        if (zc->has_ct_mask && !zones_config_set_ct_mask(zc->index, zc->ct_mask)) {
+            snprintf(err_msg, err_cap, "zone tuning entry %u (channel %u) rejected at commit setting ct_mask",
                     (unsigned)i, zc->index);
             return false;
         }

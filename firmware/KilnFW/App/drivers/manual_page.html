@@ -134,12 +134,15 @@ function relayRow(r) {
     // app.js, loaded via a deferred <script> in <head>; safe to call here
     // because this only runs inside a click handler, which can't fire
     // before app.js has executed.
-    if (turningOn && !kcConfirm('Force relay ' + r.relay + ' ON now, outside any running profile?')) {
+    // Display-only R0-3 in the confirm text (owner request 2026-08-27,
+    // matches the thermocouple channels' 0-based numbering); r.relay itself
+    // (passed to setRelay() below) stays the real 1-based API number.
+    if (turningOn && !kcConfirm('Force relay ' + (r.relay - 1) + ' ON now, outside any running profile?')) {
       return;
     }
     setRelay(r.relay, turningOn);
   });
-  div.innerHTML = '<span>Relay ' + r.relay + '</span>';
+  div.innerHTML = '<span>Relay ' + (r.relay - 1) + '</span>';
   div.appendChild(btn);
   return div;
 }

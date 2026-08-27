@@ -92,10 +92,20 @@ def _summarize(tag: str, argv: "Sequence[str]", rc: Optional[int], output: str,
     return f"{head}\nfull log: {where}\n--\n{body}"
 
 
+#: Vars Git Bash sets that leak into this MCP server's environment when it is
+#: launched from a Git Bash session. cmake sees MSYSTEM and refuses to
+#: configure ("MSys/Mingw is no longer supported"), aborting build_kilnfw in
+#: ~3s with no other output -- a false pass, since _summarize still reports
+#: exit 0 for the wrapping idf.py invocation that never reached the compiler.
+_MSYS_ENV_VARS = ("MSYSTEM", "MSYSTEM_PREFIX", "MSYSTEM_CHOST", "MSYS2_PATH_TYPE")
+
+
 def _run(tag: str, argv: "Sequence[str]", *, cwd: Optional[str] = None,
          timeout: int = 900, env: "Optional[dict[str, str]]" = None) -> str:
     argv = list(argv)
     started = time.monotonic()
+    if env is None:
+        env = {k: v for k, v in os.environ.items() if k not in _MSYS_ENV_VARS}
     try:
         completed = subprocess.run(
             argv,

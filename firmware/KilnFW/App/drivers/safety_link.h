@@ -1157,6 +1157,22 @@ esp_err_t safety_link_set_fault_source(SafetyLinkClass *link, uint32_t source_ma
                                         bool assert_fault);
 uint32_t  safety_link_get_fault_sources(SafetyLinkClass *link);
 
+/* Tells this driver that app_main's own bring-up this boot found nothing
+ * wrong (boot_fault_sources == 0) -- i.e. the isolated fault line was never
+ * asserted this boot. If SaftyFW is still reporting a LATCHED S6a trip
+ * (main-controller-fault) when it is, that latch can only be a leftover from
+ * before this boot (SaftyFW does not reboot alongside the ESP), so this
+ * driver sends one SAFETY_CMD_CLEAR_TRIP the first time it sees that
+ * specific combination. SaftyFW's own link_task_handle_clear_trip() still
+ * decides whether to honor it -- if the guard is genuinely still tripped by
+ * the time the request arrives, it re-latches, same "resend after
+ * conditions change is safe" contract safety_link_send_clear_trip()'s doc
+ * comment already describes. Scoped to S6a only: other guards (welded
+ * contactor, frozen sensor, ...) are not this board's own fault and this
+ * function must not paper over them. Call once, right after computing
+ * boot_fault_sources in app_main -- a no-op if it is ever left uncalled. */
+void safety_link_mark_boot_clean(void);
+
 /* Policy switch for the one source this driver can raise by itself: whether
  * losing *this* link asserts the fault line.
  *

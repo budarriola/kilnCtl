@@ -70,6 +70,17 @@ extern "C" {
 /* zone_cfg_t::name -- the operator-entered per-zone label. */
 #define ZONE_NAME_MAX_LEN 15
 
+/* SaftyFW's fixed count of current-sense channels (safety_link.h's
+ * SAFETY_LINK_POWER_CHANNELS == 3, current_a[3] on the status frame) -- a
+ * hardware fact about the safety processor, not an operator-configured count
+ * like thermo_count/relay_count, so there is no "ct_count" field to keep
+ * this in sync with. Lives here (not a private #define in zones_http.c)
+ * because backup_http.c's import validator needs the exact same bound
+ * zones_http.c's own ct_mask setter/POST-parser/import-validator enforce --
+ * see zones_config_get_ct_mask()'s doc comment below. Bump if the hardware
+ * ever grows a fourth CT channel. */
+#define ZONE_CT_CHANNEL_COUNT 3u
+
 /* zone_cfg_t::cal_offset_c -- degC. */
 #define ZONE_CAL_OFFSET_MIN_C (-50.0f)
 #define ZONE_CAL_OFFSET_MAX_C 50.0f
@@ -260,6 +271,21 @@ bool zones_config_get_thermo_mask(uint8_t zone_index, uint8_t *out_mask);
  * field. thermo_mask is checked against the CURRENTLY configured
  * thermo_count, same bound parse_zone_fields() enforces. */
 bool zones_config_set_thermo_mask(uint8_t zone_index, uint8_t thermo_mask);
+
+/* 2026-08-27: bit N-1 = SaftyFW current-sense channel N feeds this zone's
+ * live-current display, N in 1..ZONE_CT_CHANNEL_COUNT (a fixed hardware
+ * count, unlike relay_mask/thermo_mask which are bounded by the operator-
+ * configured relay_count/thermo_count) -- see zones_http.c's ZONES_CFG_VERSION
+ * 5->6 comment. Purely informational: nothing in the control/guard path reads
+ * this, only the settings page's own readout. Unlike thermo_mask, 0 is
+ * unconditionally "no probe mapped" with no legacy fallback -- there is no
+ * pre-existing single-CT-per-zone convention to preserve. */
+bool zones_config_get_ct_mask(uint8_t zone_index, uint8_t *out_mask);
+
+/* Setter for zones_config_get_ct_mask() above -- same shape as
+ * zones_config_set_thermo_mask(). ct_mask is checked against the fixed
+ * ZONE_CT_CHANNEL_COUNT, not against any operator-configured count. */
+bool zones_config_set_ct_mask(uint8_t zone_index, uint8_t ct_mask);
 
 /* TODO.md 10.3: the operator-chosen name a zone_cfg_t already stores
  * (ZONE_NAME_MAX_LEN, currently 15 chars) but which, until now, had no

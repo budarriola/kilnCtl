@@ -7,13 +7,17 @@
 #include <strings.h> /* strcasecmp -- unit_pref_post_handler's "fahrenheit"/"celsius" match */
 
 #include "esp_app_desc.h"
+#include "esp_flash.h" /* esp_flash_get_size() -- flash_size below, same call as ui_page_diagnostics.c */
 #include "esp_heap_caps.h"
+#include "esp_image_format.h" /* esp_image_get_metadata() -- flash_used below */
 #include "esp_log.h"
+#include "esp_ota_ops.h" /* esp_ota_get_running_partition() -- flash_used below, same as main.c/ota_http.c */
 #include "esp_system.h"
 #include "esp_timer.h"
 
 #include "autotune_engine.h"
 #include "boot_button.h" /* boot_button_ota_bypass_active()/_remaining_ms() -- see the GET /api/status fields below */
+#include "danger_mode.h" /* danger_mode_active() -- profile_exec_start_post_handler()'s mutual-exclusion refusal */
 #include "heat_interlock.h" /* HEAT_INTERLOCK_REASON_MAX -- see the ERR_UPDATING case below */
 #include "http_form.h"
 #include "kiln_io_owner.h"
@@ -190,6 +194,17 @@ void dashboard_get_status(dashboard_status_t *out)
                 out->power_valid = !isnan(sl.power_total_w);
             }
 
+            /* dashboard_http.h's ct_current_a comment -- straight passthrough,
+             * NaN before the first status frame (safety_link.c's init) or
+             * after any single channel's own conversion fails. */
+            out->ct_current_a[0] = sl.current_a[0];
+            out->ct_current_a[1] = sl.current_a[1];
+            out->ct_current_a[2] = sl.current_a[2];
+
+            /* K4 -- see dashboard_http.h's field comment. */
+            out->safety_relay_energized = (sl.flags & SAFETY_FLAG_RELAY) != 0u;
+            out->safety_heating_enabled = (sl.flags & SAFETY_FLAG_ENABLED) != 0u;
+
             /* ROADMAP.md M5: DIAG (Frame B) / TRIP_EVENT (Frame D) now have a
              * decode path -- see safety_link.h's field comments for what
              * each of these means. Straight passthrough, same convention as
@@ -252,6 +267,14 @@ void dashboard_get_status(dashboard_status_t *out)
     } else {
         out->self_protocol_version = (uint16_t)UART_PROTOCOL_VERSION;
     }
+    if (!s_dash.safety || safety_status_err != ESP_OK) {
+        /* memset(out, 0, ...) above would otherwise leave these reading as a
+         * plausible 0.00 A instead of "never arrived" -- same reasoning as
+         * safety_temp_c/enclosure_temp_c's own NaN fallback just below. */
+        out->ct_current_a[0] = NAN;
+        out->ct_current_a[1] = NAN;
+        out->ct_current_a[2] = NAN;
+    }
     if (!out->safety_temp_valid) {
         out->safety_temp_c = NAN;
     }
@@ -298,13 +321,38 @@ void dashboard_get_status(dashboard_status_t *out)
     out->heap_internal_free = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
     out->heap_internal_largest_free_block = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
     out->heap_internal_min_free = heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL);
+    out->heap_internal_total = heap_caps_get_total_size(MALLOC_CAP_INTERNAL);
     /* MALLOC_CAP_SPIRAM reads back as a real 0 (not an error) on a board
      * built without PSRAM enabled -- see dashboard_http.h's field comment
      * and ui_page_diagnostics.c's refresh_cb() for the same call and the
-     * same "0 KB is honest, not invented" reasoning. */
+     * same "0 KB is honest, not invented" reasoning. Same for _total below. */
     out->heap_spiram_free = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
     out->heap_spiram_largest_free_block = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
     out->heap_spiram_min_free = heap_caps_get_minimum_free_size(MALLOC_CAP_SPIRAM);
+    out->heap_spiram_total = heap_caps_get_total_size(MALLOC_CAP_SPIRAM);
+
+    /* Owner request 2026-08-27: flash usage on the dashboard, same facts
+     * ui_page_diagnostics.c's Firmware page already shows on the LCD
+     * (build_firmware_statics()) -- total chip size from esp_flash_get_size,
+     * and how much of the running app image's own OTA slot is actually used
+     * (not the slot's fixed capacity) from esp_image_get_metadata(), the
+     * same accessor esp_ota_* uses internally to validate an image. Both
+     * left at their zero-init default (caught by flash_*_known below) on any
+     * failure -- chip-size/partition/image-header reads are all "should
+     * never fail on real hardware" but none is worth a fabricated number if
+     * one ever does. */
+    uint32_t flash_size = 0;
+    out->flash_size_known = (esp_flash_get_size(NULL, &flash_size) == ESP_OK);
+    out->flash_size = flash_size;
+
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    if (running) {
+        out->flash_partition_size = running->size;
+        esp_image_metadata_t metadata = { 0 };
+        esp_partition_pos_t part_pos = { .offset = running->address, .size = running->size };
+        out->flash_used_known = (esp_image_get_metadata(&part_pos, &metadata) == ESP_OK);
+        out->flash_used = metadata.image_len;
+    }
 
     /* 2026-08-21: the shared display-unit preference (unit_pref.c) -- see
      * dashboard_http.h's field comment. unit_pref_get() is O(1) RAM-only, so
@@ -314,13 +362,22 @@ void dashboard_get_status(dashboard_status_t *out)
 
 static esp_err_t status_get_handler(httpd_req_t *req)
 {
-    /* Bumped from 1400 to make room for the firmware version/build/uptime/
-     * reset-reason/heap block appended below (UI_PLAN.md section 5) --
-     * worst case for that block is under 300 bytes (two ~32-byte escaped
-     * strings plus ~8 numeric fields), so 1400 -> 1700 is comfortably over
-     * the new worst case (~1450 bytes with 3 zones/channels and every
-     * optional block populated) rather than trimmed to the edge. */
-    char json[1700];
+    /* Bumped from 1700 to 2200: at 1700 this handler was silently truncating
+     * mid-object (the APPEND overflow guard `goto send`s instead of erroring)
+     * right after "temp_unit", dropping watchdog_panic_disabled and both
+     * boot_button_bypass_* fields plus the closing '}' -- added after the
+     * 1700 sizing comment above was written and never accounted for. That
+     * malformed JSON is what made the web dashboard's #channels panel stick
+     * on "Loading..." forever: fetch().then(r=>r.json()) throws on the
+     * missing brace and main_page.html's poll() swallows it in an empty
+     * .catch(). Measured worst case at 3 zones/channels is ~1690 bytes now;
+     * 2200 leaves real headroom instead of sizing to the last incident. */
+    char json[2500]; /* 2200 -> 2300 (2026-08-27) with ct_current_a: 3 more
+                      * "X.XXX"/null entries, well under the 100 bytes added.
+                      * 2300 -> 2500 (2026-08-27) with safety_relay_energized/
+                      * safety_heating_enabled, heap_internal/heap_spiram's
+                      * new "total" entries, and flash_size/flash_partition_
+                      * size/flash_used -- well under the 200 bytes added. */
     size_t o = 0;
     int n;
 
@@ -401,6 +458,27 @@ static esp_err_t status_get_handler(httpd_req_t *req)
     if (ds.power_valid) {
         APPEND("%.1f", (double)ds.power_w);
     }
+
+    /* dashboard_http.h's ct_current_a comment -- each of the safety
+     * processor's 3 raw current-sense channels, null (not 0) per-channel on
+     * the same "never a plausible-looking fake reading" convention as
+     * safety_temp_c/power_w above; index i = CT channel i+1. */
+    APPEND(",\"ct_current_a\":[");
+    for (unsigned ci = 0; ci < 3; ci++) {
+        bool ct_valid = !isnan(ds.ct_current_a[ci]);
+        APPEND("%s%s", ci == 0 ? "" : ",", ct_valid ? "" : "null");
+        if (ct_valid) {
+            APPEND("%.3f", (double)ds.ct_current_a[ci]);
+        }
+    }
+    APPEND("]");
+
+    /* K4, the safety processor's own relay -- dashboard_http.h's field
+     * comment. Only meaningful once the safety link has actually answered;
+     * ds.safety_ready already covers "has it" for the front end, same as
+     * every other safety_link-sourced field on this endpoint. */
+    APPEND(",\"safety_relay_energized\":%s", ds.safety_relay_energized ? "true" : "false");
+    APPEND(",\"safety_heating_enabled\":%s", ds.safety_heating_enabled ? "true" : "false");
 
     /* TODO.md 9.0's deferred "GUI names both versions and which one is
      * older" item. self_protocol_version is always known; peer fields are
@@ -506,12 +584,25 @@ static esp_err_t status_get_handler(httpd_req_t *req)
     }
     APPEND(",\"uptime_s\":%lu", (unsigned long)ds.uptime_s);
     APPEND(",\"reset_reason\":\"%s\"", ds.reset_reason);
-    APPEND(",\"heap_internal\":{\"free\":%lu,\"largest_free_block\":%lu,\"min_free\":%lu}",
+    APPEND(",\"heap_internal\":{\"free\":%lu,\"largest_free_block\":%lu,\"min_free\":%lu,\"total\":%lu}",
            (unsigned long)ds.heap_internal_free, (unsigned long)ds.heap_internal_largest_free_block,
-           (unsigned long)ds.heap_internal_min_free);
-    APPEND(",\"heap_spiram\":{\"free\":%lu,\"largest_free_block\":%lu,\"min_free\":%lu}",
+           (unsigned long)ds.heap_internal_min_free, (unsigned long)ds.heap_internal_total);
+    APPEND(",\"heap_spiram\":{\"free\":%lu,\"largest_free_block\":%lu,\"min_free\":%lu,\"total\":%lu}",
            (unsigned long)ds.heap_spiram_free, (unsigned long)ds.heap_spiram_largest_free_block,
-           (unsigned long)ds.heap_spiram_min_free);
+           (unsigned long)ds.heap_spiram_min_free, (unsigned long)ds.heap_spiram_total);
+
+    /* Owner request 2026-08-27 -- see dashboard_http.h's field comment for
+     * what "size" vs "partition_size" vs "used" each mean. null when the
+     * underlying read failed, same convention as safety_temp_c etc. above. */
+    APPEND(",\"flash_size\":%s", ds.flash_size_known ? "" : "null");
+    if (ds.flash_size_known) {
+        APPEND("%lu", (unsigned long)ds.flash_size);
+    }
+    APPEND(",\"flash_partition_size\":%lu", (unsigned long)ds.flash_partition_size);
+    APPEND(",\"flash_used\":%s", ds.flash_used_known ? "" : "null");
+    if (ds.flash_used_known) {
+        APPEND("%lu", (unsigned long)ds.flash_used);
+    }
 
     /* 2026-08-21, ROADMAP.md "a real shared temperature-unit setting":
      * ADDITIVE field -- every field above this line is unchanged, so an
@@ -695,7 +786,7 @@ static void relay_safety_reason(uint32_t sources, char *buf, size_t buf_len)
     } else if (sources & SAFETY_FAULT_SRC_THERMAL_SANITY) {
         snprintf(buf, buf_len, "a zone failed its thermal sanity check");
     } else if (sources & SAFETY_FAULT_SRC_MANUAL) {
-        snprintf(buf, buf_len, "a fault was manually asserted (SAFETY_CMD_SET_FAULT_OUT)");
+        snprintf(buf, buf_len, "a fault was manually asserted from the PC");
     } else if (sources & SAFETY_FAULT_SRC_APP) {
         snprintf(buf, buf_len, "the application asserted a safety fault");
     } else {
@@ -1361,6 +1452,23 @@ static esp_err_t profile_exec_start_post_handler(httpd_req_t *req)
     long id = (id_len > 0) ? strtol(id_val, NULL, 10) : -1;
     if (id_len <= 0 || id < 0 || id > 255) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "id missing or invalid");
+        return ESP_OK;
+    }
+
+    /* danger_mode.h's own refusal is one-directional (refuses to OPEN the
+     * window during a firing) -- this is the other half: refuse to START a
+     * firing while the window is already open. Unlike watchdog_cfg's
+     * log-only bypass just below, this is a hard refusal, not a warning:
+     * danger_mode_active() means kiln_io_owner.c's relay_on_blocked() is
+     * skipping every safety-fault/OTA-update gate on these same four
+     * relays, and the window can auto-expire-and-REBOOT mid-firing with no
+     * warning to whatever profile_executor.c was doing at the time. A
+     * firing must never start into that state; see danger_mode_request_
+     * start()'s own PROFILE_EXEC_RUNNING/PAUSED refusal for the symmetric
+     * check in the other direction. */
+    if (danger_mode_active()) {
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_sendstr(req, "refused -- danger mode is active (diagnostics page); stop it first");
         return ESP_OK;
     }
 

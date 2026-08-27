@@ -51,8 +51,30 @@ static const char *TAG = "zones_http";
  * meaning for a zeroed tc_type), so THIS growth needs the same explicit
  * migration treatment thermo_mask got at 3->4, not the "0 already means the
  * right thing" case continue_on_zone_trip got at 1->2. See
- * migrate_zones_cfg_v1_to_current() below for the fill-in. */
-#define ZONES_CFG_VERSION 5
+ * migrate_zones_cfg_v1_to_current() below for the fill-in.
+ *
+ * 5 -> 6 (2026-08-27): added zone_cfg_t::ct_mask -- which of SaftyFW's
+ * ZONE_CT_CHANNEL_COUNT current-sense channels this zone's readout on the
+ * Thermocouples & Zones page should show. Purely informational (nothing in
+ * profile_executor.c/thermal_guard.c reads it; the safety processor's own
+ * guards already watch every CT channel regardless of any zone mapping), so
+ * -- unlike thermo_mask's 3->4 growth -- a zeroed ct_mask ("no probe mapped
+ * yet") is already the correct, safe meaning for a migrated v5 blob. No
+ * explicit fill-in needed in migrate_zones_cfg_v1_to_current(), same "0
+ * already means the right thing" case continue_on_zone_trip's 1->2 bump was.
+ * Deliberately a bitMASK, not a single channel index: the owner's own spec
+ * is "current sense probes may be reused across more than one zone", so no
+ * exclusivity is enforced here, same as thermo_mask already allows a channel
+ * to feed more than one zone. */
+#define ZONES_CFG_VERSION 6
+
+/* ZONE_CT_CHANNEL_COUNT moved to zones_http.h (2026-08-27, same day it was
+ * added) -- backup_http.c's import validation needs it too, for the exact
+ * same "ct_mask may only reference a channel that exists" bound this file's
+ * own parse_zone_fields()/setter/import-validator enforce, and a second,
+ * independently-defined 3u in backup_http.c would be exactly the kind of
+ * two-copies-that-can-drift this codebase's own conventions warn against
+ * elsewhere (see e.g. relay_authority.c's header comment). */
 
 /* MAX31856 CR1.TC[3:0] nibble values 0x00-0x07 name a real thermocouple type
  * (B/E/J/K/N/R/S/T, uart_task_ids.h's THERMO_TC_* -- THERMO_TC_B is 0, the
@@ -195,6 +217,14 @@ typedef struct {
      * being the kind of silent-wipe field growth TODO.md 6A.1's
      * relay_cycles.c note (section 6A.1, 2026-08-12) warns against. */
     uint8_t thermo_mask;
+    /* 2026-08-27: which of SaftyFW's ZONE_CT_CHANNEL_COUNT current-sense
+     * channels feed this zone's live-current display -- bit N-1 = CT channel
+     * N, same convention as relay_mask/thermo_mask above. See
+     * ZONES_CFG_VERSION's 5->6 comment: purely a display mapping, no
+     * exclusivity, may legitimately overlap another zone's ct_mask (one
+     * physical CT probe clamped around a shared supply line feeding more
+     * than one zone's element). 0 = no probe mapped to this zone yet. */
+    uint8_t ct_mask;
 } zone_cfg_t;
 
 typedef struct {
@@ -254,7 +284,9 @@ typedef struct {
  * under 20 bytes a zone even with its key name -- left inside the existing
  * 4096 without another bump; the three-zone worst case is nowhere near it.
  * z%u_tctype (2026-08-21) and the top-level safety_tc_type are each a
- * single 0-7 u8 field, smaller still -- also left inside the existing 4096. */
+ * single 0-7 u8 field, smaller still -- also left inside the existing 4096.
+ * z%u_ct_mask (2026-08-27) is the same shape as z%u_thermo_mask, similarly
+ * left inside 4096. */
 #define ZONES_BODY_MAX 4096
 
 static struct {
@@ -493,10 +525,25 @@ static esp_err_t nvs_load_from(const char *partition, zones_cfg_t *out_cfg, bool
  * nothing and keeps this loop from needing to know which zones are "real". */
 static void migrate_zones_cfg_v1_to_current(zones_cfg_t *cfg)
 {
+    /* Captured BEFORE the version field is overwritten just below -- every
+     * per-field fill-in in this function must be gated on the blob's
+     * ORIGINAL on-disk version, not unconditionally applied just because
+     * this function ran. Bug fixed 2026-08-27: the tc_type/safety_tc_type
+     * fill-in a few lines down used to run for ANY version < ZONES_CFG_VERSION,
+     * which meant a v5 blob -- one that already legitimately stores whatever
+     * real thermocouple types an operator explicitly picked on the settings
+     * page -- got silently reset to THERMO_TC_K on the 5->6 (ct_mask) bump,
+     * exactly the "relinearize against the wrong type with no warning" harm
+     * that fill-in's own comment says it exists to prevent, just triggered
+     * a version late. Each fill-in below now checks from_version against the
+     * SPECIFIC version boundary it was written for. */
+    uint8_t from_version = cfg->version;
     cfg->version = ZONES_CFG_VERSION;
-    for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
-        if (cfg->zones[i].thermo_mask == 0) {
-            cfg->zones[i].thermo_mask = (uint8_t)(1u << i);
+    if (from_version < 4) {
+        for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
+            if (cfg->zones[i].thermo_mask == 0) {
+                cfg->zones[i].thermo_mask = (uint8_t)(1u << i);
+            }
         }
     }
     /* 4 -> 5 (2026-08-21, TODO.md owner-report item 1): every blob older than
@@ -515,10 +562,16 @@ static void migrate_zones_cfg_v1_to_current(zones_cfg_t *cfg)
      * moment this firmware boots. An operator who deliberately wants
      * something else still has to say so explicitly on the page, same as
      * any first-time use of a brand-new field. */
-    for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
-        cfg->zones[i].tc_type = THERMO_TC_K;
+    if (from_version < 5) {
+        for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
+            cfg->zones[i].tc_type = THERMO_TC_K;
+        }
+        cfg->safety_tc_type = THERMO_TC_K;
     }
-    cfg->safety_tc_type = THERMO_TC_K;
+    /* 5 -> 6 (2026-08-27) added zone_cfg_t::ct_mask -- no fill-in needed,
+     * see ZONES_CFG_VERSION's own comment: 0 ("no CT probe mapped") is
+     * already the correct, safe value a zeroed-by-nvs_get_blob() field
+     * reads as for a v5-and-older blob. */
 }
 
 /* One-time move of the persisted zones config out of the default partition's
@@ -828,6 +881,32 @@ bool zones_config_set_thermo_mask(uint8_t zone_index, uint8_t thermo_mask)
         return false;
     }
     s_zones.cfg.zones[zone_index].thermo_mask = thermo_mask;
+    s_config_generation++;
+    return nvs_save() == ESP_OK;
+}
+
+bool zones_config_get_ct_mask(uint8_t zone_index, uint8_t *out_mask)
+{
+    if (!out_mask || zone_index >= s_zones.cfg.thermo_count) {
+        return false;
+    }
+    *out_mask = s_zones.cfg.zones[zone_index].ct_mask;
+    return true;
+}
+
+/* Same bound parse_zone_fields()'s z%u_ct_mask handling enforces -- ct_mask
+ * may only reference channels 1..ZONE_CT_CHANNEL_COUNT, a fixed hardware
+ * count (not relay_count/thermo_count-relative like the two setters above). */
+bool zones_config_set_ct_mask(uint8_t zone_index, uint8_t ct_mask)
+{
+    if (zone_index >= s_zones.cfg.thermo_count) {
+        return false;
+    }
+    uint8_t valid_bits = (uint8_t)((1u << ZONE_CT_CHANNEL_COUNT) - 1u);
+    if ((ct_mask & ~valid_bits) != 0) {
+        return false;
+    }
+    s_zones.cfg.zones[zone_index].ct_mask = ct_mask;
     s_config_generation++;
     return nvs_save() == ESP_OK;
 }
@@ -1242,6 +1321,13 @@ static bool validate_zones_cfg(const zones_cfg_t *cand, const char **err_reason)
             *err_reason = "zone thermo_mask references an unconfigured thermocouple channel";
             return false;
         }
+        {
+            uint8_t ct_valid_bits = (uint8_t)((1u << ZONE_CT_CHANNEL_COUNT) - 1u);
+            if ((z->ct_mask & ~ct_valid_bits) != 0) {
+                *err_reason = "zone ct_mask references an unconfigured current-sense channel";
+                return false;
+            }
+        }
         if (!isfinite(z->cal_offset_c) || z->cal_offset_c < ZONE_CAL_OFFSET_MIN_C ||
             z->cal_offset_c > ZONE_CAL_OFFSET_MAX_C) {
             *err_reason = "zone cal_offset_c out of range";
@@ -1456,7 +1542,9 @@ static void json_escape(const char *src, char *out, size_t out_cap)
 
 static esp_err_t zones_get_handler(httpd_req_t *req)
 {
-    char json[2688]; /* 1024 -> 1536 with heater_window_ms/min_on_ms/min_off_ms,
+    char json[2816]; /* 2688 -> 2816 (2026-08-27) with ct_mask: one small integer
+                      * key/value per zone, well under the 128 bytes added.
+                      * 1024 -> 1536 with heater_window_ms/min_on_ms/min_off_ms,
                       * 1536 -> 1792 with cross_zone_max_delta_c,
                       * 1792 -> 2048 with the three plant-model fields (their
                       * key names alone are ~50 bytes a zone before values),
@@ -1509,7 +1597,7 @@ static esp_err_t zones_get_handler(httpd_req_t *req)
             /* tc_type is CONFIG, not a live reading, so it deliberately does
              * NOT go anywhere near kc-live-value on the page -- see
              * zones_page.html's rendering of this field. */
-            "\"tc_type\":%u}",
+            "\"tc_type\":%u,\"ct_mask\":%u}",
             i == 0 ? "" : ",", i, name_escaped, z->relay_mask, z->thermo_mask, (double)z->cal_offset_c,
             (double)z->pid_kp, (double)z->pid_ki, (double)z->pid_kd, (double)z->max_ramp_c_per_hr,
             (double)z->sanity_rate_c_per_min, z->control_mode, (double)z->max_temp_c,
@@ -1520,7 +1608,7 @@ static esp_err_t zones_get_handler(httpd_req_t *req)
             (double)z->guard_runaway_margin_c, (double)z->guard_drift_period_s,
             (double)z->guard_sensor_fault_debounce_ticks, (double)z->guard_frozen_window_s,
             (double)z->cross_zone_max_delta_c, (double)z->model_k_dc,
-            (double)z->model_tau_s, (double)z->model_dead_time_s, z->tc_type);
+            (double)z->model_tau_s, (double)z->model_dead_time_s, z->tc_type, z->ct_mask);
     }
     APPEND("]}");
 
@@ -1739,6 +1827,32 @@ static bool parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_count,
             z->thermo_mask = thermo_mask_raw;
         } else {
             z->thermo_mask = (uint8_t)(1u << i);
+        }
+    }
+
+    /* 2026-08-27: purely informational (see ZONES_CFG_VERSION's 5->6
+     * comment), so unlike thermo_mask above there is no legacy single-
+     * channel mapping to preserve -- an omitted field is simply "no CT probe
+     * mapped to this zone", the same safe-zero default a brand-new zone
+     * already gets. Still validated against ZONE_CT_CHANNEL_COUNT (a fixed
+     * hardware count, not relay_count/thermo_count) when present. */
+    snprintf(key, sizeof(key), "z%u_ct_mask", i);
+    {
+        char probe[8];
+        if (http_form_find_field(body, key, probe, sizeof(probe)) > 0) {
+            uint8_t ct_mask_raw;
+            if (!parse_u8_field(body, key, 0, 0xFF, &ct_mask_raw)) {
+                *err_reason = "zone ct_mask missing or invalid";
+                return false;
+            }
+            uint8_t valid_ct_bits = (uint8_t)((1u << ZONE_CT_CHANNEL_COUNT) - 1u);
+            if ((ct_mask_raw & ~valid_ct_bits) != 0) {
+                *err_reason = "zone ct_mask references an unconfigured current-sense channel";
+                return false;
+            }
+            z->ct_mask = ct_mask_raw;
+        } else {
+            z->ct_mask = 0;
         }
     }
 

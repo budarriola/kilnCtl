@@ -912,6 +912,23 @@ static bool safety_apply_power(SafetyLinkClass *link, const uart_proto_message_t
  * Mirrors kilnlink_diag_decode() in firmware/CommonFW/src/kilnlink_diag.c
  * byte-for-byte; see uart_task_ids.h's SAFETY_CMD_DIAG comment for why this
  * driver hand-parses rather than linking that codec. */
+/* SaftyFW src/safety_guards.h SAFETY_TRIP_MAIN_FAULT -- the only trip reason
+ * fed by this board's own isolated fault-out line (GPIO6), see
+ * safety_link_mark_boot_clean()'s doc comment (safety_link.h). */
+#define SAFETY_LINK_TRIP_REASON_MAIN_FAULT 6u
+
+/* Set once by safety_link_mark_boot_clean(), consumed once (and only once
+ * this boot) by safety_apply_diag() below -- see both functions' doc
+ * comments. Single ESP-side safety link instance in this codebase, same
+ * "static app-wide flag" precedent as danger_mode.c's s_dm. */
+static bool s_boot_clean = false;
+static bool s_boot_clear_attempted = false;
+
+void safety_link_mark_boot_clean(void)
+{
+    s_boot_clean = true;
+}
+
 static bool safety_apply_diag(SafetyLinkClass *link, const uart_proto_message_t *msg)
 {
     if (msg->length != SAFETY_LINK_DIAG_FRAME_LEN || msg->payload[0] != SAFETY_CMD_DIAG) {
@@ -941,7 +958,22 @@ static bool safety_apply_diag(SafetyLinkClass *link, const uart_proto_message_t 
     link->cached.diag_flags = p[25];
     link->cached.diag_ever_received = true;
     link->stats.diag_applied++; /* 2026-08-23: real counter, see its own doc comment (safety_link.h) */
+    bool want_boot_clear = false;
+    if (s_boot_clean && !s_boot_clear_attempted &&
+        link->cached.diag_state == SAFETY_LINK_DIAG_STATE_TRIPPED &&
+        link->cached.diag_trip_reason == SAFETY_LINK_TRIP_REASON_MAIN_FAULT) {
+        s_boot_clear_attempted = true;
+        want_boot_clear = true;
+    }
     safety_unlock(link);
+    if (want_boot_clear) {
+        /* This boot's own bring-up asserted nothing, yet SaftyFW still shows
+         * a latched S6a -- leftover from before this boot. See
+         * safety_link_mark_boot_clean()'s doc comment (safety_link.h). */
+        ESP_LOGW(TAG, "boot was clean but a stale S6a (main-controller-fault) trip is still "
+                      "latched from before this boot -- sending clear_trip to release it");
+        (void)safety_link_send_clear_trip(link);
+    }
     return true;
 }
 
@@ -1695,7 +1727,57 @@ static void safety_poll_task(void *arg)
             }
             sleep_ms += backoff_extra;
         }
-        vTaskDelay(pdMS_TO_TICKS(sleep_ms));
+        /* SAFETY_INBOX_LEN's comment (2026-08-25 measurement): the Pico
+         * sustains ~3.7x overproduction against a single per-poll drain, so
+         * this gap used to be one flat vTaskDelay() that left the inbox
+         * unread for up to ~450ms at a time -- long enough for its 4 slots to
+         * fill and start dropping BROADCAST frames well before the next
+         * poll's drain ever ran, which is what made the web/LCD safety-link
+         * indicator flicker between up/down (safety_link_up_locked() reacts
+         * to real missed replies, not a display bug). Chunking the same
+         * total wait into SAFETY_LINK_IDLE_TICK_MS-sized drains is the
+         * "continuous drain" lever that measurement named as the actual fix
+         * -- not a deeper queue, which that commit already showed cannot
+         * help against a sustained-rate mismatch. Total elapsed time is
+         * unchanged: each chunk either drains or plain-delays for the same
+         * duration, exactly like the vTaskDelay it replaces.
+         *
+         * MUST take xact_lock (non-blocking) before draining: link->inbox is
+         * the SAME queue safety_exchange()/safety_link_get_ct_cal()/etc read
+         * from while holding that lock, and this loop runs in the gap AFTER
+         * this task's own locked exchange already released it -- exactly
+         * when another task (an HTTP handler calling, say,
+         * safety_link_get_ct_cal()) can be mid-wait for its own reply. An
+         * unlocked drain here would dequeue that reply first, land on the
+         * `default:` case (nothing here asked for a CT_CAL reply), get
+         * counted as unmatched, and the legitimate caller would time out --
+         * a regression the flat vTaskDelay() this replaces could not cause,
+         * since it never touched the inbox at all. When the lock is busy
+         * (a real exchange IS in progress), skip draining this chunk: that
+         * exchange's own safety_drain_inbox_ex() already drains everything
+         * currently queued on every call, so nothing is lost, only deferred.
+         *
+         * The lock is held only long enough for an OPPORTUNISTIC, non-
+         * blocking drain (wait_ms=0 -- takes whatever is already queued and
+         * returns immediately) rather than for the whole chunk: holding a
+         * mutex across a multi-hundred-ms blocking wait, then immediately
+         * re-taking it next iteration with no other yield point in between,
+         * risks starving another task's xSemaphoreTake(xact_lock, ...) on
+         * the same mutex even though FreeRTOS eventually honors it (its
+         * SAFETY_XACT_LOCK_TIMEOUT_MS budget is 5000ms, generous, but there
+         * is no reason to spend any of it here). vTaskDelay(chunk_ms)
+         * happens AFTER giving the lock back, so the actual pacing/yield is
+         * always unlocked. */
+        uint32_t remaining_ms = sleep_ms;
+        while (remaining_ms > 0u) {
+            uint32_t chunk_ms = (remaining_ms < SAFETY_LINK_IDLE_TICK_MS) ? remaining_ms : SAFETY_LINK_IDLE_TICK_MS;
+            if (xSemaphoreTake(link->xact_lock, 0) == pdTRUE) {
+                (void)safety_drain_inbox(link, 0);
+                xSemaphoreGive(link->xact_lock);
+            }
+            vTaskDelay(pdMS_TO_TICKS(chunk_ms));
+            remaining_ms -= chunk_ms;
+        }
     }
 }
 

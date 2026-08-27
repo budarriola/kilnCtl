@@ -141,6 +141,31 @@ typedef struct {
     bool     power_valid;
     float    power_w;
 
+    /* 2026-08-27: the safety processor's three raw current-sense channels
+     * (safety_link_status_t::current_a, LINK_PROTOCOL.md sec 6 Frame A) --
+     * previously read by kiln_call's own safety_get_status text but never
+     * exposed on this JSON API at all, which is what left the Thermocouples
+     * & Zones page's new per-zone ct_mask (zones_http.h) with no live number
+     * to show next to it. Same NaN-means-never-arrived convention as
+     * safety_temp_c/enclosure_temp_c above -- safety_link.c never gates
+     * these on TEMP_VALID (current sense is independent hardware from the
+     * thermocouple), so each channel is individually valid the instant any
+     * status frame has ever arrived, NaN before that. Index i = CT channel
+     * i+1, matching zone_cfg_t::ct_mask's bit-N-1-is-channel-N convention. */
+    float    ct_current_a[3];
+
+    /* K4, the safety processor's OWN relay -- straight from safety_link_
+     * status_t::flags (SAFETY_FLAG_RELAY/SAFETY_FLAG_ENABLED), so the
+     * dashboard can show it the same way as the four ESP-owned relays
+     * (relayStatusHtml() in main_page.html) instead of leaving the one
+     * relay that actually gates heat invisible next to them. Only
+     * meaningful when safety_link_up was true on the read that populated
+     * it -- dashboard_status_t has no separate validity flag for this pair
+     * because safety_ready already covers it (same convention diag_state
+     * etc. already use above). */
+    bool     safety_relay_energized;
+    bool     safety_heating_enabled;
+
     /* TODO.md 9.0's deferred "GUI names both versions and which one is
      * older" item: this firmware's own KILNLINK_PROTOCOL_VERSION (always
      * known, not link-dependent) plus whatever the Pico last announced via
@@ -245,9 +270,29 @@ typedef struct {
     size_t   heap_internal_free;
     size_t   heap_internal_largest_free_block;
     size_t   heap_internal_min_free;
+    size_t   heap_internal_total;
     size_t   heap_spiram_free;
     size_t   heap_spiram_largest_free_block;
     size_t   heap_spiram_min_free;
+    size_t   heap_spiram_total;
+
+    /* Owner request 2026-08-27: flash usage on the dashboard, mirroring the
+     * LCD Firmware page's facts (ui_page_diagnostics.c's build_firmware_
+     * statics()). flash_size is the whole chip (esp_flash_get_size());
+     * flash_partition_size is the running OTA slot's fixed capacity;
+     * flash_used is how many bytes of that slot the running image actually
+     * occupies (esp_image_get_metadata(), not the slot's capacity) --
+     * "used" means the image, not the partition table's grant. *_known is
+     * false (bare 0 elsewhere) only if the underlying esp_flash_get_size()/
+     * esp_ota_get_running_partition()/esp_image_get_metadata() call itself
+     * failed -- see dashboard_get_status()'s own comment for why that's
+     * treated as "should never happen on real hardware" rather than given a
+     * fabricated fallback number. */
+    bool     flash_size_known;
+    uint32_t flash_size;
+    uint32_t flash_partition_size;
+    bool     flash_used_known;
+    uint32_t flash_used;
 
     /* 2026-08-21, ROADMAP.md "a real shared temperature-unit setting": the
      * device-side source of truth (unit_pref.c), read here so the LCD home

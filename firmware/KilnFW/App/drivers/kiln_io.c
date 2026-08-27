@@ -81,6 +81,37 @@ static inline bool kiln_io_ready(const kiln_io_t *io)
     return io && io->exp && io->initialized;
 }
 
+/* Logical relay N (1-based, what every caller outside this file means --
+ * zone relay_mask, the dashboard, danger_mode, MCP tools, the PC protocol's
+ * relay_shadow byte) vs the actual SX1509 pin it must drive. Confirmed on the
+ * bench 2026-08-27: commanding logical relay 2 was energizing the physical
+ * contactor at panel position 4, and commanding relay 4 was energizing the
+ * one at position 2 -- a real PCB-level swap between those two nets, not a
+ * numbering-convention mismatch (R1/R3 read correctly). settings.h's
+ * SX1509_RELAYn_PIN defines stay the true, undisturbed hardware pins (see
+ * that file's comment for why renaming them there would not have fixed
+ * this); this table is the one and only place the compensating swap lives.
+ * Index i = logical relay (i+1)'s bit position (0-3); value = the SX1509 pin
+ * bit that logical relay actually needs. Self-inverse (swapping 1<->3 twice
+ * is identity), which is why the same table also undoes the swap when
+ * kiln_io_resync_relay_shadow() below reads real hardware bits back into
+ * logical shadow bits. */
+static const uint8_t kiln_relay_logical_to_pin_bit[KILN_IO_RELAY_COUNT] = { 0, 3, 2, 1 };
+
+/* Remaps a 4-bit relay mask/value between logical-relay-bit-order and
+ * physical-SX1509-pin-bit-order using kiln_relay_logical_to_pin_bit above --
+ * same operation either direction since that table is self-inverse. */
+static uint8_t kiln_io_remap_relay_bits(uint8_t bits)
+{
+    uint8_t out = 0;
+    for (uint8_t i = 0; i < KILN_IO_RELAY_COUNT; i++) {
+        if (bits & (uint8_t)(1u << i)) {
+            out |= (uint8_t)(1u << kiln_relay_logical_to_pin_bit[i]);
+        }
+    }
+    return out;
+}
+
 /* Re-derives the commanded relay state from what the expander last *accepted*.
  *
  * SX1509_write_masked updates the chip driver's data shadow as soon as the part

@@ -348,7 +348,17 @@ where they are not.</p>
 </div>
 
 <script>
-var RELAY_NAMES = ['Relay1', 'Relay2', 'Relay3', 'Relay4'];
+// Display labels only -- R0-3, matching the thermocouple channels' 0-based
+// numbering (owner request 2026-08-27). The API/wire relay number these bits
+// map to (relay_mask bit r -> kiln_io "relay" r+1) is unchanged; see
+// relayStatusHtml()/renderDangerRelays() in main_page.html/diagnostics_page.html
+// for the same display-only offset applied there.
+var RELAY_NAMES = ['Relay0', 'Relay1', 'Relay2', 'Relay3'];
+// Mirrors zones_http.h's ZONE_CT_CHANNEL_COUNT -- the safety processor's
+// fixed current-sense channel count, not something this page can read off
+// /api/zones (there is no "ct_count" the way there's a thermo_count/
+// relay_count, per that constant's own comment).
+var ZONE_CT_CHANNEL_COUNT = 3;
 var current = { thermo_count: 0, relay_count: 0, zones: [] };
 
 /* MAX31856 CR1.TC[3:0] 0-7, matching uart_task_ids.h's THERMO_TC_* and
@@ -408,6 +418,20 @@ function zoneBlock(z, i, relayCount, thermoCount) {
     thermoHtml += '<label><input type="checkbox" class="thermobit" data-bit="' + tch + '"' + tchecked + '> ' +
                   'Channel ' + (tch + 1) + '</label>';
   }
+  /* 2026-08-27, zones_http.c's ZONES_CFG_VERSION 5->6: which of the safety
+     processor's fixed 3 current-sense channels feed this zone's live-current
+     readout. Fixed count -- unlike thermobits above, NOT bounded by
+     thermoCount/relayCount -- and, per the owner's explicit spec, a probe may
+     legitimately be checked on more than one zone (one CT clamp shared across
+     zones sharing a supply line), so this offers no exclusivity either, same
+     as thermobits already doesn't enforce. */
+  var ctMask = z.ct_mask || 0;
+  var ctHtml = '';
+  for (var cti = 0; cti < ZONE_CT_CHANNEL_COUNT; cti++) {
+    var ctchecked = (ctMask & (1 << cti)) ? ' checked' : '';
+    ctHtml += '<label><input type="checkbox" class="ctbit" data-bit="' + cti + '"' + ctchecked + '> ' +
+              'CT ' + (cti + 1) + '<span class="ctlive" data-ch="' + cti + '"></span></label>';
+  }
   var mode = z.control_mode || 0;
   var modeHtml = '<select class="mode">' +
     '<option value="0"' + (mode === 0 ? ' selected' : '') + '>Off (never commands heat)</option>' +
@@ -441,6 +465,10 @@ function zoneBlock(z, i, relayCount, thermoCount) {
     '<p class="hint">Checking more than one channel averages their valid readings into this ' +
     'zone\'s control temperature. Leaving all unchecked disables control for this zone, the ' +
     'same as an unplugged/faulted thermocouple.</p>' +
+    '<label>Current-sense probes for this zone</label><div class="thermobits">' + ctHtml + '</div>' +
+    '<p class="hint">Display only -- the safety processor watches every current-sense channel ' +
+    'regardless of this mapping. A probe may be checked on more than one zone if one clamp is ' +
+    'shared across zones on the same supply line.</p>' +
     /* Dynamic per-zone caution line, kept blank/hidden until
      * updateThermoWarnings() (below) fills it in on load and on every
      * checkbox change -- NOT a save-blocking validation: zones_http.c's own
@@ -646,9 +674,14 @@ document.getElementById('saveBtn').addEventListener('click', function () {
     div.querySelectorAll('.thermobit').forEach(function (cb) {
       if (cb.checked) thermoMask |= (1 << parseInt(cb.dataset.bit, 10));
     });
+    var ctMask = 0;
+    div.querySelectorAll('.ctbit').forEach(function (cb) {
+      if (cb.checked) ctMask |= (1 << parseInt(cb.dataset.bit, 10));
+    });
     params.push('z' + i + '_name=' + encodeURIComponent(div.querySelector('.name').value));
     params.push('z' + i + '_relay_mask=' + mask);
     params.push('z' + i + '_thermo_mask=' + thermoMask);
+    params.push('z' + i + '_ct_mask=' + ctMask);
     params.push('z' + i + '_tctype=' + div.querySelector('.tctype').value);
     params.push('z' + i + '_cal=' + div.querySelector('.cal').value);
     params.push('z' + i + '_kp=' + div.querySelector('.kp').value);
@@ -762,6 +795,24 @@ function pollAutotune() {
   }).catch(function () {});
 }
 setInterval(pollAutotune, 3000);
+
+// Live current-sense readout next to each zone's CT checkboxes -- purely
+// display, same "show the safety processor's own number, don't recompute
+// it" rule as everything else this page reads off /api/status rather than
+// re-deriving. Independent small poll loop, same pattern as pollAutotune
+// above, so a slow/failed fetch here never blocks the zone form itself.
+function pollCtCurrents() {
+  fetch('/api/status').then(function (r) { return r.json(); }).then(function (st) {
+    var amps = st.ct_current_a || [];
+    document.querySelectorAll('.ctlive').forEach(function (span) {
+      var ch = parseInt(span.dataset.ch, 10);
+      var a = amps[ch];
+      span.textContent = (typeof a === 'number') ? ' (' + a.toFixed(2) + ' A)' : ' (n/a)';
+    });
+  }).catch(function () {});
+}
+setInterval(pollCtCurrents, 3000);
+pollCtCurrents();
 pollAutotune();
 
 /* Bands the diagonal RGA elements are judged against. These are the numbers

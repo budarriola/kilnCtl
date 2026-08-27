@@ -1,0 +1,271 @@
+#include "danger_mode.h"
+
+#include <string.h>
+
+#include "esp_log.h"
+#include "esp_system.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+#include "freertos/task.h"
+
+#include "profile_executor.h"
+#include "uart_task_ids.h" /* SAFETY_FLAG_RELAY/SAFETY_FLAG_ENABLED */
+
+static const char *TAG = "danger_mode";
+
+#define DANGER_MODE_POLL_MS 1000u
+
+typedef struct {
+    SemaphoreHandle_t lock;
+    bool     initialized;
+    bool     window_open;
+    uint32_t deadline_ms; /* now_ms() value the window closes at; meaningful only if window_open */
+    SafetyLinkClass *safety; /* may be NULL -- see danger_mode_init()'s doc comment */
+} danger_mode_ctx_t;
+
+static danger_mode_ctx_t s_dm;
+
+static uint32_t now_ms(void)
+{
+    return (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+}
+
+static bool state_refuses_start(profile_exec_state_t state)
+{
+    return state == PROFILE_EXEC_RUNNING || state == PROFILE_EXEC_PAUSED;
+}
+
+bool danger_mode_request_start(void)
+{
+    profile_exec_status_t st;
+    profile_executor_get_status(&st);
+    if (state_refuses_start(st.state)) {
+        ESP_LOGW(TAG, "danger mode refused -- a firing is in progress (profile_exec state=%d)",
+                 (int)st.state);
+        return false;
+    }
+    if (!s_dm.initialized) {
+        /* No expiry task exists to ever release/reboot this -- refuse
+         * rather than send a REQUEST_ENABLE(true) that could only ever be
+         * torn down by a full power cycle. Covers both "danger_mode_init()
+         * was never called" and "it was called but xTaskCreate() failed",
+         * same s_dm.initialized flag danger_mode_active()/remaining_ms()
+         * already trust for the same reason. */
+        ESP_LOGE(TAG, "danger mode refused -- not initialized (no expiry/reboot task)");
+        return false;
+    }
+    if (!s_dm.lock || xSemaphoreTake(s_dm.lock, pdMS_TO_TICKS(50)) != pdTRUE) {
+        ESP_LOGE(TAG, "danger mode refused -- could not take the internal lock");
+        return false;
+    }
+    bool already_open = s_dm.window_open;
+    s_dm.window_open = true;
+    s_dm.deadline_ms = now_ms() + DANGER_MODE_WINDOW_MS;
+    xSemaphoreGive(s_dm.lock);
+
+    /* Does NOT request heat-enable on its own any more (owner request
+     * 2026-08-27) -- entering this section only unlocks the ESP's own
+     * four-relay bypass. K4/heat-enable is now a separate, explicit
+     * operator action -- see danger_mode_set_heat_enable_request() below. */
+    if (!already_open) {
+        ESP_LOGW(TAG, "DANGER MODE ENTERED: this board's own gate on its four relays is now "
+                      "bypassed for %lu ms, extended on every command, until an operator stops it "
+                      "or it sits idle long enough to auto-exit. K4/heat-enable is NOT requested by "
+                      "entering this section -- see danger_mode_set_heat_enable_request().",
+                 (unsigned long)DANGER_MODE_WINDOW_MS);
+    }
+    return true;
+}
+
+bool danger_mode_set_heat_enable_request(bool enable)
+{
+    /* Only meaningful, and only allowed, while the window is open -- same
+     * "this section's own actions" gate danger_relay_post_handler()
+     * (diagnostics_http.c) already enforces for the four ESP-owned relays;
+     * K4 gets the identical treatment now that it is its own explicit
+     * action rather than an automatic side effect of entering. */
+    if (!danger_mode_active()) {
+        return false;
+    }
+    /* Same request a real firing sends -- SaftyFW's own guards decide
+     * whether K4 actually closes; see danger_mode.h's top comment. Not
+     * gated on the result: a refusal here just means K4 stays open (or
+     * closed), exactly as intended when a guard disagrees. */
+    (void)safety_link_request_enable(s_dm.safety, enable);
+    ESP_LOGW(TAG, "danger mode: operator %s heat-enable request", enable ? "sent" : "released");
+    danger_mode_touch();
+    return true;
+}
+
+bool danger_mode_touch(void)
+{
+    if (!s_dm.lock || xSemaphoreTake(s_dm.lock, pdMS_TO_TICKS(50)) != pdTRUE) {
+        return false;
+    }
+    bool touched = false;
+    if (s_dm.window_open) {
+        s_dm.deadline_ms = now_ms() + DANGER_MODE_WINDOW_MS;
+        touched = true;
+    }
+    xSemaphoreGive(s_dm.lock);
+    return touched;
+}
+
+bool danger_mode_active(void)
+{
+    if (!s_dm.initialized || !s_dm.lock) {
+        return false;
+    }
+    bool active = false;
+    if (xSemaphoreTake(s_dm.lock, pdMS_TO_TICKS(50)) == pdTRUE) {
+        if (s_dm.window_open) {
+            /* Wraparound-safe, same idiom as boot_button.c/ota_auth.c: a
+             * signed remaining-time compare would misbehave across the
+             * xTaskGetTickCount() wrap; testing "deadline has not yet
+             * arrived" via unsigned subtraction does not.
+             *
+             * Deliberately does NOT clear window_open when this reads false
+             * past the deadline (unlike boot_button_ota_bypass_active()'s
+             * own lazy-close) -- gating callers like kiln_io_owner.c's
+             * relay_on_blocked() still see the bypass end exactly on time
+             * either way, but ONLY danger_mode_task() may ever flip
+             * window_open to false, and only while also performing the
+             * release+reboot that must go with it. This function and
+             * danger_mode_remaining_ms() below are read constantly (every
+             * HTTP status poll, every relay-authority check); if either of
+             * them raced the once-a-second task to clear the flag first,
+             * the task would see window_open already false, skip its
+             * expired branch entirely, and neither SAFETY_CMD_REQUEST_
+             * ENABLE(false) nor the auto-reboot would ever run -- exactly
+             * the silent-stuck-enabled bug a lazy self-close here would
+             * cause. */
+            active = (int32_t)(s_dm.deadline_ms - now_ms()) > 0;
+        }
+        xSemaphoreGive(s_dm.lock);
+    } else {
+        ESP_LOGW(TAG, "danger_mode_active: internal lock timeout, reporting inactive");
+    }
+    return active;
+}
+
+uint32_t danger_mode_remaining_ms(void)
+{
+    if (!s_dm.initialized || !s_dm.lock) {
+        return 0;
+    }
+    uint32_t remaining = 0;
+    if (xSemaphoreTake(s_dm.lock, pdMS_TO_TICKS(50)) == pdTRUE) {
+        if (s_dm.window_open) {
+            /* Same "never self-close here" reasoning as danger_mode_active()
+             * above -- only danger_mode_task() may clear window_open. */
+            int32_t left = (int32_t)(s_dm.deadline_ms - now_ms());
+            if (left > 0) {
+                remaining = (uint32_t)left;
+            }
+        }
+        xSemaphoreGive(s_dm.lock);
+    }
+    return remaining;
+}
+
+bool danger_mode_get_relay_status(bool *out_relay_energized, bool *out_heating_enabled)
+{
+    if (out_relay_energized) {
+        *out_relay_energized = false;
+    }
+    if (out_heating_enabled) {
+        *out_heating_enabled = false;
+    }
+    if (!s_dm.safety) {
+        return false;
+    }
+    safety_link_status_t st;
+    if (safety_link_get_status(s_dm.safety, &st) != ESP_OK || !st.link_up) {
+        return false;
+    }
+    if (out_relay_energized) {
+        *out_relay_energized = (st.flags & SAFETY_FLAG_RELAY) != 0u;
+    }
+    if (out_heating_enabled) {
+        *out_heating_enabled = (st.flags & SAFETY_FLAG_ENABLED) != 0u;
+    }
+    return true;
+}
+
+void danger_mode_stop(const char *source)
+{
+    const char *src = source ? source : "unknown";
+    if (!s_dm.lock) {
+        return;
+    }
+    bool was_open = false;
+    if (xSemaphoreTake(s_dm.lock, pdMS_TO_TICKS(50)) == pdTRUE) {
+        was_open = s_dm.window_open;
+        s_dm.window_open = false;
+        xSemaphoreGive(s_dm.lock);
+    }
+    if (was_open) {
+        (void)safety_link_request_enable(s_dm.safety, false);
+        ESP_LOGW(TAG, "danger mode stopped (%s) -- relay gate restored, heat-enable released, no reboot",
+                 src);
+    }
+}
+
+/* The one task that acts on expiry-by-timeout: reading the flag from many
+ * callers (danger_mode_active()) must never itself perform the release, or a
+ * burst of concurrent HTTP requests right at the deadline could each try to
+ * send it. Polls once a second -- this is a 5-minute window, not a
+ * hard-real-time deadline, so coarse polling costs nothing an operator would
+ * notice. */
+static void danger_mode_task(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        vTaskDelay(pdMS_TO_TICKS(DANGER_MODE_POLL_MS));
+
+        bool expired = false;
+        if (s_dm.lock && xSemaphoreTake(s_dm.lock, pdMS_TO_TICKS(50)) == pdTRUE) {
+            if (s_dm.window_open && (int32_t)(s_dm.deadline_ms - now_ms()) <= 0) {
+                s_dm.window_open = false;
+                expired = true;
+            }
+            xSemaphoreGive(s_dm.lock);
+        }
+
+        if (expired) {
+            /* Same graceful release danger_mode_stop() performs for an
+             * operator-requested exit -- see danger_mode.h's top comment:
+             * timeout exits exactly as though the firing this request stood
+             * in for had ended, no reboot. */
+            (void)safety_link_request_enable(s_dm.safety, false);
+            ESP_LOGW(TAG, "danger mode timed out (%lu ms idle) -- heat-enable released, relay gate "
+                          "restored, no reboot",
+                     (unsigned long)DANGER_MODE_WINDOW_MS);
+        }
+    }
+}
+
+void danger_mode_init(SafetyLinkClass *safety)
+{
+    if (s_dm.initialized) {
+        return; /* safe to call more than once, same convention as boot_button_start() */
+    }
+    s_dm.lock = xSemaphoreCreateMutex();
+    if (!s_dm.lock) {
+        ESP_LOGE(TAG, "xSemaphoreCreateMutex failed -- danger mode will not be available this boot");
+        return;
+    }
+    s_dm.window_open = false;
+    s_dm.safety = safety;
+    s_dm.initialized = true;
+
+    /* Plain xTaskCreate, internal-RAM stack -- this task can call
+     * esp_restart(), and boot_button.c/ota_http.c's own task-creation
+     * comments already establish why a PSRAM-stack task must never be the
+     * one holding a stack frame across a reboot path in this codebase. */
+    if (xTaskCreate(danger_mode_task, "danger_mode", 3072, NULL, tskIDLE_PRIORITY + 1, NULL) != pdPASS) {
+        ESP_LOGE(TAG, "xTaskCreate(danger_mode_task) failed -- danger mode will not be available "
+                      "this boot");
+        s_dm.initialized = false;
+    }
+}

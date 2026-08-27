@@ -8,6 +8,7 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 
+#include "danger_mode.h" /* danger_mode_active() -- see relay_on_blocked() below */
 #include "ota_http.h" /* ota_http_heat_blocked_by_update() -- see relay_on_blocked() below */
 #include "owner_slot_pool.h"
 #include "relay_authority.h"
@@ -170,6 +171,22 @@ static SemaphoreHandle_t s_slot_lock;
  * this, so the default is always a clean false. */
 static bool relay_on_blocked(uint32_t *out_sources, bool *out_updating)
 {
+    /* diagnostics page's explicit-accept danger-mode section (danger_mode.h)
+     * -- an operator who ticked the accept-risk box gets every gate below
+     * skipped, on purpose, so they can bench-test a relay/contactor with
+     * nothing fighting the test. This does NOT touch SaftyFW's own
+     * contactor: that stays entirely outside this ESP's authority (see
+     * danger_mode.h's top comment). Checked first, and logged every time it
+     * actually changes the outcome, so "why did this relay turn on during a
+     * fault" always has an answer in the log, not just silence. */
+    if (danger_mode_active()) {
+        char skipped_reason[HEAT_INTERLOCK_REASON_MAX];
+        if (relay_authority_on_blocked(s_safety, out_sources) ||
+            ota_http_heat_blocked_by_update(skipped_reason, sizeof(skipped_reason))) {
+            ESP_LOGW(TAG, "relay-on: danger mode bypassing a gate that would otherwise have blocked this");
+        }
+        return false;
+    }
     if (relay_authority_on_blocked(s_safety, out_sources)) {
         return true;
     }

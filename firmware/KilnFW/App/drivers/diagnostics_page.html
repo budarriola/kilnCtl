@@ -93,6 +93,28 @@
   .crash-actions button { font: inherit; padding: 0.5em 0.9em; min-height: 32px; box-sizing: border-box;
                 background: var(--button-bg); border: 1px solid var(--border);
                 border-radius: var(--ui-radius); color: var(--fg); cursor: pointer; }
+  /* Danger Zone -- deliberately the loudest thing on this page, same
+     solid-fill treatment main_page.html's safety-trip banner uses (not the
+     border-only .card everything else here gets), so it never reads as just
+     another settings card. */
+  .danger-card { background: var(--warn); color: #fff; border-radius: var(--ui-radius);
+                 padding: 0.8em 1em; margin-bottom: 0.6em; }
+  .danger-card .row { border-bottom-color: rgba(255,255,255,0.35); }
+  .danger-card .row .label, .danger-card .row .value { color: #fff; }
+  .danger-card label.accept { display: flex; align-items: flex-start; gap: 0.6em; margin: 0.6em 0; cursor: pointer; }
+  .danger-card input[type=checkbox] { width: 1.2em; height: 1.2em; flex: none; margin-top: 0.15em; }
+  .danger-actions { display: flex; gap: 0.5em; margin: 0.6em 0 0.2em; flex-wrap: wrap; }
+  .danger-actions button { font: inherit; padding: 0.6em 1em; min-height: 32px; box-sizing: border-box;
+                background: #fff; color: var(--warn); border: none;
+                border-radius: var(--ui-radius); cursor: pointer; font-weight: bold; }
+  .danger-actions button:disabled { opacity: 0.5; cursor: not-allowed; }
+  .danger-actions button.exit { background: transparent; color: #fff; border: 1px solid #fff; }
+  .danger-timer { font-size: 1.4em; font-weight: bold; font-variant-numeric: tabular-nums; }
+  .relay-grid { display: flex; gap: 0.5em; flex-wrap: wrap; margin: 0.5em 0; }
+  .relay-grid button { font: inherit; padding: 0.6em 1em; min-height: 40px; min-width: 4.5em;
+                box-sizing: border-box; border: 1px solid #fff; border-radius: var(--ui-radius);
+                cursor: pointer; font-weight: bold; background: transparent; color: #fff; }
+  .relay-grid button.on { background: #fff; color: var(--warn); }
 </style>
 </head>
 <body>
@@ -142,9 +164,14 @@ this firmware honestly reporting what arrived, not a bug in this page.</p>
   <div class="row headline"><span class="label">Internal DRAM &mdash; largest free block</span><span class="value" id="heapIntLargest">--</span></div>
   <div class="row"><span class="label">Internal DRAM &mdash; free now</span><span class="value" id="heapIntFree">--</span></div>
   <div class="row"><span class="label">Internal DRAM &mdash; worst-case free</span><span class="value" id="heapIntMin">--</span></div>
+  <div class="row"><span class="label">Internal DRAM &mdash; total</span><span class="value" id="heapIntTotal">--</span></div>
   <div class="row"><span class="label">PSRAM &mdash; free now</span><span class="value" id="heapSpiFree">--</span></div>
   <div class="row"><span class="label">PSRAM &mdash; largest free block</span><span class="value" id="heapSpiLargest">--</span></div>
   <div class="row"><span class="label">PSRAM &mdash; worst-case free</span><span class="value" id="heapSpiMin">--</span></div>
+  <div class="row"><span class="label">PSRAM &mdash; total</span><span class="value" id="heapSpiTotal">--</span></div>
+  <div class="row"><span class="label">Flash &mdash; used (running image)</span><span class="value" id="flashUsed">--</span></div>
+  <div class="row"><span class="label">Flash &mdash; running partition size</span><span class="value" id="flashPartitionSize">--</span></div>
+  <div class="row"><span class="label">Flash &mdash; total chip size</span><span class="value" id="flashSize">--</span></div>
 </div>
 <p class="note">"Largest free block" (not "free bytes") is the number that
 matters on this board: internal DRAM is its tight resource, not total heap.
@@ -184,6 +211,39 @@ silently on. Starting a firing while this is disabled requires an extra confirma
   <div class="row"><span class="label">Power draw</span><span class="value" id="powerW">--</span></div>
 </div>
 <div class="card" id="nvsCard"><div class="row"><span class="label">NVS sections</span><span class="value">loading&hellip;</span></div></div>
+<h2>Danger Zone</h2>
+<div class="danger-card" id="dangerCard">
+  <p><strong>Manual relay/heater/thermocouple bench test.</strong> This section
+  turns off this board's own gate on its four heater relays -- you can force
+  any of them on or off directly, for testing a relay, a contactor, or a
+  thermocouple by hand. The safety processor (SaftyFW) is <strong>not</strong>
+  bypassed: entering this mode requests nothing from it on its own. The
+  "Firing mode" tile below the four relays sends it the same enable request a
+  real firing sends -- shown here as one more toggle even though it is not
+  actually one of the four ESP relays -- and its own independent guards
+  (over-temperature, E-stop, current sense, and the rest) decide whether the
+  safety relay actually closes, exactly as they would during a firing,
+  watching over you the whole time.</p>
+  <p>This mode auto-exits after 5 minutes with no activity in this section --
+  heat-enable released and the relay gate restored, same as if the firing it
+  stood in for had ended, no reboot. Every accepted command here resets that
+  5 minutes.</p>
+  <div id="dangerGate">
+    <label class="accept"><input type="checkbox" id="dangerAccept">I understand this bypasses this board's own relay safety gate, and I accept the risk of operating heaters/relays by hand.</label>
+    <div class="danger-actions"><button id="dangerEnterBtn" disabled>Enter Danger Mode</button></div>
+  </div>
+  <div id="dangerLive" style="display:none">
+    <div class="row"><span class="label">Auto-exit in</span><span class="value danger-timer" id="dangerTimer">--:--</span></div>
+    <div class="row"><span class="label">Safety relay (K4, safety-processor owned)</span><span class="value" id="dangerRelayState">--</span></div>
+    <div class="row"><span class="label">Heating enabled (safety processor's own decision)</span><span class="value" id="dangerHeatState">--</span></div>
+    <h2 style="color:#fff">Thermocouples</h2>
+    <div id="dangerThermo"></div>
+    <h2 style="color:#fff">Relays</h2>
+    <div class="relay-grid" id="dangerRelays"></div>
+    <div class="danger-actions"><button class="exit" id="dangerExitBtn">Exit Danger Mode now</button></div>
+  </div>
+</div>
+
 <p class="note">More detail (safety-processor link stats, per-channel
 thermocouple fault registers) lives on their own pages:</p>
 <div class="linklist">
@@ -212,6 +272,10 @@ thermocouple fault registers) lives on their own pages:</p>
   function fmtKB(bytes) {
     if (bytes == null) return 'n/a';
     return (bytes / 1024).toFixed(1) + ' KB';
+  }
+  function fmtMB(bytes) {
+    if (bytes == null) return 'n/a';
+    return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
   }
   function fmtUptime(s) {
     if (s == null) return 'n/a';
@@ -258,9 +322,15 @@ thermocouple fault registers) lives on their own pages:</p>
     set('heapIntFree', fmtKB(hi.free), true);
     set('heapIntLargest', fmtKB(hi.largest_free_block), true);
     set('heapIntMin', fmtKB(hi.min_free), true);
+    set('heapIntTotal', fmtKB(hi.total), true);
     set('heapSpiFree', fmtKB(hs.free), true);
     set('heapSpiLargest', fmtKB(hs.largest_free_block), true);
     set('heapSpiMin', fmtKB(hs.min_free), true);
+    set('heapSpiTotal', fmtKB(hs.total), true);
+
+    set('flashUsed', fmtMB(st.flash_used), true);
+    set('flashPartitionSize', fmtMB(st.flash_partition_size), true);
+    set('flashSize', fmtMB(st.flash_size), true);
 
     set('ioReady', st.io_ready ? 'ready' : 'not attached', true);
     set('thermoReady', st.thermo_ready ? 'ready' : 'not attached', true);
@@ -439,6 +509,7 @@ thermocouple fault registers) lives on their own pages:</p>
       lastStatus = results[0]; lastBoardTemps = results[1];
       renderStatus(lastStatus);
       renderBoardTemps(lastBoardTemps);
+      if (dangerActive) { renderDangerThermo(); renderDangerRelays(); }
       lastGoodAt = Date.now();
       failCount = 0;
       setStale(null);
@@ -474,7 +545,220 @@ thermocouple fault registers) lives on their own pages:</p>
   // new unit immediately on toggle, from the cached last-good payload.
   window.addEventListener('kcunitchange', function () {
     if (lastBoardTemps) renderBoardTemps(lastBoardTemps);
+    if (dangerActive) renderDangerThermo();
   });
+
+  // --- Danger Zone (danger_mode.h) ------------------------------------
+  // Server is the ONLY source of truth for both "is this active" and "how
+  // much time is left" -- fetched fresh on load and every dangerPoll() tick,
+  // so a page refresh (or a second browser tab) always shows the board's
+  // real state, never a client-side guess that could drift from it or
+  // survive past an exit/timeout that happened elsewhere. Between syncs, the
+  // on-screen countdown just interpolates locally off the last server
+  // answer (dangerDeadlineWallMs, a Date.now()-based local deadline) purely
+  // so the seconds tick smoothly instead of jumping once per poll.
+  var dangerActive = false;
+  var dangerDeadlineWallMs = null;
+
+  function fmtCountdown(ms) {
+    if (ms == null || ms < 0) ms = 0;
+    var totalSec = Math.floor(ms / 1000);
+    var m = Math.floor(totalSec / 60), s = totalSec % 60;
+    return m + ':' + (s < 10 ? '0' : '') + s;
+  }
+
+  function renderDangerThermo() {
+    if (!lastStatus) return;
+    var rows = '';
+    var chans = (lastStatus.thermo_ready ? lastStatus.channels : []) || [];
+    for (var i = 0; i < chans.length; i++) {
+      var c = chans[i];
+      var val = (c.valid && !c.spi_failed) ? window.kcUnit.fmt(c.temp_c) : 'fault';
+      rows += '<div class="row"><span class="label">Channel ' + c.channel + '</span><span class="value">' + val + '</span></div>';
+    }
+    var safetyVal = (lastStatus.safety_temp_c != null) ? window.kcUnit.fmt(lastStatus.safety_temp_c) : 'n/a';
+    rows += '<div class="row"><span class="label">Safety processor thermocouple</span><span class="value">' + safetyVal + '</span></div>';
+    document.getElementById('dangerThermo').innerHTML = rows;
+  }
+
+  function dangerSetRelayBusy(relay, busy) {
+    var btn = document.getElementById('dangerRelayBtn' + relay);
+    if (btn) btn.disabled = busy;
+  }
+
+  function dangerSendRelay(relay, on) {
+    dangerSetRelayBusy(relay, true);
+    fetch('/api/diagnostics/danger/relay', {
+      method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: 'relay=' + relay + '&on=' + (on ? '1' : '0'),
+    }).then(function (r) {
+      if (!r.ok) return r.text().then(function (t) { throw new Error(t || ('HTTP ' + r.status)); });
+      return r.json();
+    }).then(function (result) {
+      if (typeof result.remaining_ms === 'number') {
+        dangerDeadlineWallMs = Date.now() + result.remaining_ms;
+      }
+      poll(); // refresh /api/status so the relay grid reflects the new state
+    }).catch(function (err) {
+      alert('Relay command failed: ' + err.message);
+    }).finally(function () { dangerSetRelayBusy(relay, false); });
+  }
+
+  // Set by dangerRenderStatusFields() (below, from /api/diagnostics/danger's
+  // heating_enabled/heating_enabled_known) -- read here so the "Firing mode"
+  // tile's initial label is right even before its own first poll tick.
+  var dangerHeatEnabledKnown = false;
+  var dangerHeatEnabled = false;
+  var dangerHeatBusy = false;
+
+  function dangerFiringTileHtml() {
+    // Owner request 2026-08-27: shown as one more tile in the same grid as
+    // the four ESP relays, even though it isn't actually one of them --
+    // this is the operator's explicit SAFETY_CMD_REQUEST_ENABLE toggle
+    // (danger_mode_set_heat_enable_request()), no longer sent automatically
+    // on entry. Labelled "Firing mode" rather than "K4"/"R?" so it reads as
+    // a request, not a direct relay -- SaftyFW's own guards still decide
+    // whether K4 actually closes (see dangerRelayState/dangerHeatState rows
+    // above for what it actually did).
+    var label = dangerHeatEnabledKnown
+      ? (dangerHeatEnabled ? 'Firing mode: ON' : 'Firing mode: off')
+      : 'Firing mode: --';
+    return '<button id="dangerFiringBtn" class="' + (dangerHeatEnabled ? 'on' : '') + '">' + label + '</button>';
+  }
+
+  function renderDangerFiringTile() {
+    var btn = document.getElementById('dangerFiringBtn');
+    if (!btn) return; // relay grid not rendered yet (no relay board) -- dangerPoll's next tick catches up
+    btn.className = dangerHeatEnabled ? 'on' : '';
+    btn.textContent = dangerHeatEnabledKnown ? (dangerHeatEnabled ? 'Firing mode: ON' : 'Firing mode: off')
+                                              : 'Firing mode: --';
+    btn.disabled = dangerHeatBusy;
+  }
+
+  function dangerSendEnable(on) {
+    dangerHeatBusy = true;
+    renderDangerFiringTile();
+    fetch('/api/diagnostics/danger/enable', {
+      method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: 'on=' + (on ? '1' : '0'),
+    }).then(function (r) {
+      if (!r.ok) return r.text().then(function (t) { throw new Error(t || ('HTTP ' + r.status)); });
+      return r.json();
+    }).then(function (result) {
+      if (typeof result.remaining_ms === 'number') {
+        dangerDeadlineWallMs = Date.now() + result.remaining_ms;
+      }
+      dangerPoll(); // refresh dangerHeatEnabled from the board, not an optimistic guess
+    }).catch(function (err) {
+      alert('Firing mode command failed: ' + err.message);
+    }).finally(function () { dangerHeatBusy = false; renderDangerFiringTile(); });
+  }
+
+  function renderDangerRelays() {
+    if (!lastStatus || !lastStatus.io_ready) {
+      document.getElementById('dangerRelays').innerHTML = '<p style="color:#fff">no relay board attached</p>';
+      return;
+    }
+    var html = '';
+    for (var i = 0; i < lastStatus.relays.length; i++) {
+      var r = lastStatus.relays[i];
+      // Display-only R0-3 (owner request 2026-08-27, matches the
+      // thermocouple channels' 0-based numbering) -- element id and the
+      // click handler below both still use r.relay, the real 1-based
+      // number the API expects.
+      html += '<button id="dangerRelayBtn' + r.relay + '" class="' + (r.on ? 'on' : '') + '">' +
+              'R' + (r.relay - 1) + ': ' + (r.on ? 'ON' : 'off') + '</button>';
+    }
+    html += dangerFiringTileHtml();
+    document.getElementById('dangerRelays').innerHTML = html;
+    for (var j = 0; j < lastStatus.relays.length; j++) {
+      (function (r) {
+        document.getElementById('dangerRelayBtn' + r.relay).addEventListener('click', function () {
+          dangerSendRelay(r.relay, !r.on);
+        });
+      })(lastStatus.relays[j]);
+    }
+    document.getElementById('dangerFiringBtn').addEventListener('click', function () {
+      dangerSendEnable(!dangerHeatEnabled);
+    });
+  }
+
+  function renderDangerLive(active) {
+    dangerActive = active;
+    document.getElementById('dangerGate').style.display = active ? 'none' : '';
+    document.getElementById('dangerLive').style.display = active ? '' : 'none';
+    if (active) {
+      renderDangerThermo();
+      renderDangerRelays();
+    }
+  }
+
+  function dangerRenderStatusFields(j) {
+    var relayEl = document.getElementById('dangerRelayState');
+    var heatEl = document.getElementById('dangerHeatState');
+    if (j.safety_relay_known) {
+      relayEl.textContent = j.safety_relay_energized ? 'ENERGIZED (closed)' : 'de-energized (open)';
+    } else {
+      relayEl.textContent = 'unknown -- safety link down';
+    }
+    if (j.heating_enabled_known) {
+      heatEl.textContent = j.heating_enabled ? 'yes' : 'no';
+    } else {
+      heatEl.textContent = 'unknown -- safety link down';
+    }
+    dangerHeatEnabledKnown = !!j.heating_enabled_known;
+    dangerHeatEnabled = !!j.heating_enabled;
+    renderDangerFiringTile();
+  }
+
+  function dangerPoll() {
+    return fetch('/api/diagnostics/danger').then(function (r) { return r.json(); }).then(function (j) {
+      renderDangerLive(!!j.active);
+      dangerRenderStatusFields(j);
+      if (j.active && typeof j.remaining_ms === 'number') {
+        dangerDeadlineWallMs = Date.now() + j.remaining_ms;
+      } else if (!j.active) {
+        dangerDeadlineWallMs = null;
+      }
+    }).catch(function () {});
+  }
+
+  document.getElementById('dangerAccept').addEventListener('change', function (e) {
+    document.getElementById('dangerEnterBtn').disabled = !e.target.checked;
+  });
+  document.getElementById('dangerEnterBtn').addEventListener('click', function () {
+    if (!window.kcConfirm(
+        'Enter Danger Mode? This board\'s own gate on its four heater relays turns off -- you will be ' +
+        'able to force any of them on or off directly. Nothing is requested from the safety processor ' +
+        'yet -- use the separate "Firing mode" toggle if you also want it to consider closing the ' +
+        'safety relay; its own guards decide either way. This auto-exits after 5 minutes of no ' +
+        'activity here (heat-enable released if it was requested, gate restored, no reboot). Continue?')) {
+      return;
+    }
+    fetch('/api/diagnostics/danger/start', {
+      method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'accept=1',
+    }).then(function (r) {
+      if (!r.ok) return r.text().then(function (t) { throw new Error(t || ('HTTP ' + r.status)); });
+      return r.json();
+    }).then(function () {
+      document.getElementById('dangerAccept').checked = false;
+      document.getElementById('dangerEnterBtn').disabled = true;
+      dangerPoll();
+    }).catch(function (err) { alert('Could not enter danger mode: ' + err.message); });
+  });
+  document.getElementById('dangerExitBtn').addEventListener('click', function () {
+    fetch('/api/diagnostics/danger/stop', { method: 'POST' }).then(dangerPoll).catch(function () {});
+  });
+
+  // 1s local countdown between server syncs; dangerPoll() below resyncs the
+  // real deadline every 3s, so this can never drift far even across a slow
+  // tab or a missed tick.
+  setInterval(function () {
+    if (!dangerActive || dangerDeadlineWallMs == null) return;
+    document.getElementById('dangerTimer').textContent = fmtCountdown(dangerDeadlineWallMs - Date.now());
+  }, 1000);
+  setInterval(dangerPoll, 3000);
+  dangerPoll(); // authoritative state on load/refresh, before any local countdown runs
 })();
 </script>
 </body>

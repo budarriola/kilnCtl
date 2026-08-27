@@ -3,13 +3,17 @@
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "esp_log.h"
 
 #include "MAX31856.h"
 #include "crash_report.h"
+#include "danger_mode.h"
+#include "dashboard_http.h"
 #include "http_form.h"
+#include "kiln_io.h"
 #include "thermo_owner.h"
 #include "watchdog_cfg.h"
 #include "web_encoding.h"
@@ -346,6 +350,208 @@ static esp_err_t watchdog_cfg_post_handler(httpd_req_t *req)
 }
 #undef WATCHDOG_CFG_BODY_MAX
 
+/* --- danger_mode.h's diagnostics-page section: status/start/stop/relay --- */
+
+/* GET /api/diagnostics/danger -- current window state, for the page's own
+ * countdown. Server-computed remaining_ms on every call (danger_mode.h's own
+ * contract) is what makes this survive a page refresh: the page has no
+ * client-side deadline to lose, it just re-asks the board what's left. */
+static esp_err_t danger_get_handler(httpd_req_t *req)
+{
+    bool active = danger_mode_active();
+    bool relay_known, relay_energized, heating_known, heating_enabled;
+    relay_known = danger_mode_get_relay_status(&relay_energized, &heating_enabled);
+    heating_known = relay_known; /* one safety-link read fills both -- see danger_mode.h */
+    char json[160];
+    int n = snprintf(json, sizeof(json),
+                     "{\"active\":%s,\"remaining_ms\":%lu,\"safety_relay_known\":%s,"
+                     "\"safety_relay_energized\":%s,\"heating_enabled_known\":%s,\"heating_enabled\":%s}",
+                     active ? "true" : "false", (unsigned long)danger_mode_remaining_ms(),
+                     relay_known ? "true" : "false", relay_energized ? "true" : "false",
+                     heating_known ? "true" : "false", heating_enabled ? "true" : "false");
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, json, n < 0 ? 0 : (size_t)n);
+}
+
+/* POST /api/diagnostics/danger/start -- body: accept=1 (required, same
+ * belt-and-suspenders convention as watchdog_cfg_post_handler's "disabled"
+ * field above): the page's own accept-risk checkbox already gates showing
+ * this control, but a server-side action this consequential should not fire
+ * off a bare POST with no explicit field naming what was agreed to. */
+#define DANGER_START_BODY_MAX 32
+static esp_err_t danger_start_post_handler(httpd_req_t *req)
+{
+    if (req->content_len <= 0 || req->content_len > DANGER_START_BODY_MAX) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body missing or too large");
+        return ESP_OK;
+    }
+    char body[DANGER_START_BODY_MAX + 1];
+    size_t received = 0;
+    while (received < (size_t)req->content_len) {
+        int ret = httpd_req_recv(req, body + received, req->content_len - received);
+        if (ret <= 0) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body read failed");
+            return ESP_OK;
+        }
+        received += (size_t)ret;
+    }
+    body[received] = '\0';
+
+    char val[4];
+    if (http_form_find_field(body, "accept", val, sizeof(val)) <= 0 || val[0] != '1') {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing \"accept=1\"");
+        return ESP_OK;
+    }
+
+    if (!danger_mode_request_start()) {
+        /* No HTTPD_409_CONFLICT in this esp_http_server's httpd_err_code_t --
+         * same manual-status pattern crash_report_ack_post_handler() above
+         * already uses for its own 409. */
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_sendstr(req, "refused -- a firing is currently running or paused");
+        return ESP_OK;
+    }
+
+    char json[80];
+    int n = snprintf(json, sizeof(json), "{\"ok\":true,\"remaining_ms\":%lu}",
+                     (unsigned long)danger_mode_remaining_ms());
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, json, n < 0 ? 0 : (size_t)n);
+}
+#undef DANGER_START_BODY_MAX
+
+/* POST /api/diagnostics/danger/stop -- operator-requested early exit, no
+ * reboot (danger_mode.h's header comment on why this differs from timeout). */
+static esp_err_t danger_stop_post_handler(httpd_req_t *req)
+{
+    danger_mode_stop("diagnostics page, operator request");
+    return httpd_resp_sendstr(req, "{\"ok\":true}");
+}
+
+/* POST /api/diagnostics/danger/relay -- body: relay=1..KILN_IO_RELAY_COUNT,
+ * on=0|1. Same field convention as dashboard_http.c's relay_post_handler(),
+ * deliberately not reused directly: this endpoint's whole reason to exist is
+ * refusing up front (409) when danger mode is not active, rather than
+ * silently falling through to the normal safety-gated path, so an operator
+ * can never mistake "the section isn't armed" for "the relay refused to
+ * move." The actual write goes through dashboard_set_relay() -- the same
+ * one kiln_io_owner.c's relay_on_blocked() already bypasses for real when
+ * danger_mode_active() is true, so this handler adds no second copy of that
+ * logic, only the up-front check and the touch() that extends the window. */
+#define DANGER_RELAY_BODY_MAX 32
+static esp_err_t danger_relay_post_handler(httpd_req_t *req)
+{
+    if (!danger_mode_active()) {
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_sendstr(req, "danger mode is not active");
+        return ESP_OK;
+    }
+    if (req->content_len <= 0 || req->content_len > DANGER_RELAY_BODY_MAX) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body missing or too large");
+        return ESP_OK;
+    }
+    char body[DANGER_RELAY_BODY_MAX + 1];
+    size_t received = 0;
+    while (received < (size_t)req->content_len) {
+        int ret = httpd_req_recv(req, body + received, req->content_len - received);
+        if (ret <= 0) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body read failed");
+            return ESP_OK;
+        }
+        received += (size_t)ret;
+    }
+    body[received] = '\0';
+
+    char relay_val[4];
+    char on_val[4];
+    int relay_len = http_form_find_field(body, "relay", relay_val, sizeof(relay_val));
+    int on_len = http_form_find_field(body, "on", on_val, sizeof(on_val));
+    if (relay_len <= 0 || on_len <= 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "relay/on missing");
+        return ESP_OK;
+    }
+    long relay = strtol(relay_val, NULL, 10);
+    if (relay < 1 || relay > KILN_IO_RELAY_COUNT) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "relay out of range");
+        return ESP_OK;
+    }
+    bool want_on = on_val[0] == '1';
+
+    uint32_t safety_sources = 0;
+    dashboard_relay_result_t rr = dashboard_set_relay((uint8_t)relay, want_on, &safety_sources);
+    if (rr != DASHBOARD_RELAY_OK) {
+        /* Should not happen while danger mode is active -- relay_on_blocked()
+         * skips every gate that could produce these -- except ERR_NO_BOARD
+         * (no expander at all, unrelated to any gate) and ERR_RANGE (already
+         * checked above, kept here only as defense in depth). Not extending
+         * the window on a refusal: nothing about this section changed. */
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "relay write failed");
+        return ESP_OK;
+    }
+
+    danger_mode_touch();
+    char json[96];
+    int n = snprintf(json, sizeof(json), "{\"ok\":true,\"remaining_ms\":%lu}",
+                     (unsigned long)danger_mode_remaining_ms());
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, json, n < 0 ? 0 : (size_t)n);
+}
+#undef DANGER_RELAY_BODY_MAX
+
+/* POST /api/diagnostics/danger/enable -- body: on=0|1. Owner request
+ * 2026-08-27: entering the section no longer auto-sends
+ * SAFETY_CMD_REQUEST_ENABLE; this is the explicit, separate action that
+ * does, shown in the page as one more tile in the relay grid. Same
+ * up-front-409-when-not-active shape as danger_relay_post_handler() above,
+ * for the same reason. */
+#define DANGER_ENABLE_BODY_MAX 16
+static esp_err_t danger_enable_post_handler(httpd_req_t *req)
+{
+    if (!danger_mode_active()) {
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_sendstr(req, "danger mode is not active");
+        return ESP_OK;
+    }
+    if (req->content_len <= 0 || req->content_len > DANGER_ENABLE_BODY_MAX) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body missing or too large");
+        return ESP_OK;
+    }
+    char body[DANGER_ENABLE_BODY_MAX + 1];
+    size_t received = 0;
+    while (received < (size_t)req->content_len) {
+        int ret = httpd_req_recv(req, body + received, req->content_len - received);
+        if (ret <= 0) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body read failed");
+            return ESP_OK;
+        }
+        received += (size_t)ret;
+    }
+    body[received] = '\0';
+
+    char on_val[4];
+    if (http_form_find_field(body, "on", on_val, sizeof(on_val)) <= 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "on missing");
+        return ESP_OK;
+    }
+    bool want_on = on_val[0] == '1';
+
+    if (!danger_mode_set_heat_enable_request(want_on)) {
+        /* Window closed between the active check above and here (a racing
+         * timeout) -- vanishingly unlikely at 1s poll granularity, but a
+         * real 409 rather than a silently-ignored request either way. */
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_sendstr(req, "danger mode is not active");
+        return ESP_OK;
+    }
+
+    char json[80];
+    int n = snprintf(json, sizeof(json), "{\"ok\":true,\"remaining_ms\":%lu}",
+                     (unsigned long)danger_mode_remaining_ms());
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, json, n < 0 ? 0 : (size_t)n);
+}
+#undef DANGER_ENABLE_BODY_MAX
+
 esp_err_t diagnostics_http_start(void)
 {
     httpd_handle_t server = wifi_provision_http_get_server();
@@ -380,6 +586,21 @@ esp_err_t diagnostics_http_start(void)
     };
     static const httpd_uri_t watchdog_cfg_post_uri = {
         .uri = "/api/watchdog_cfg", .method = HTTP_POST, .handler = watchdog_cfg_post_handler,
+    };
+    static const httpd_uri_t danger_get_uri = {
+        .uri = "/api/diagnostics/danger", .method = HTTP_GET, .handler = danger_get_handler,
+    };
+    static const httpd_uri_t danger_start_uri = {
+        .uri = "/api/diagnostics/danger/start", .method = HTTP_POST, .handler = danger_start_post_handler,
+    };
+    static const httpd_uri_t danger_stop_uri = {
+        .uri = "/api/diagnostics/danger/stop", .method = HTTP_POST, .handler = danger_stop_post_handler,
+    };
+    static const httpd_uri_t danger_relay_uri = {
+        .uri = "/api/diagnostics/danger/relay", .method = HTTP_POST, .handler = danger_relay_post_handler,
+    };
+    static const httpd_uri_t danger_enable_uri = {
+        .uri = "/api/diagnostics/danger/enable", .method = HTTP_POST, .handler = danger_enable_post_handler,
     };
 
     esp_err_t err = httpd_register_uri_handler(server, &diagnostics_uri);
@@ -425,6 +646,31 @@ esp_err_t diagnostics_http_start(void)
     err = httpd_register_uri_handler(server, &watchdog_cfg_post_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_register_uri_handler(POST /api/watchdog_cfg) failed: %s", esp_err_to_name(err));
+        return err;
+    }
+    err = httpd_register_uri_handler(server, &danger_get_uri);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "httpd_register_uri_handler(GET /api/diagnostics/danger) failed: %s", esp_err_to_name(err));
+        return err;
+    }
+    err = httpd_register_uri_handler(server, &danger_start_uri);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "httpd_register_uri_handler(/api/diagnostics/danger/start) failed: %s", esp_err_to_name(err));
+        return err;
+    }
+    err = httpd_register_uri_handler(server, &danger_stop_uri);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "httpd_register_uri_handler(/api/diagnostics/danger/stop) failed: %s", esp_err_to_name(err));
+        return err;
+    }
+    err = httpd_register_uri_handler(server, &danger_relay_uri);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "httpd_register_uri_handler(/api/diagnostics/danger/relay) failed: %s", esp_err_to_name(err));
+        return err;
+    }
+    err = httpd_register_uri_handler(server, &danger_enable_uri);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "httpd_register_uri_handler(/api/diagnostics/danger/enable) failed: %s", esp_err_to_name(err));
         return err;
     }
 

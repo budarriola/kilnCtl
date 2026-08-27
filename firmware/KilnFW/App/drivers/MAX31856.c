@@ -621,11 +621,22 @@ esp_err_t MAX31856_start_all(MAX31856BusClass *bus, MAX31856Class *channels)
         return err;
     }
 
+    /* Rotated one position vs the CS0/CS1/CS2 order HARDWARE.md's J6/J5 pin
+     * table describes: on the physically populated thermocouple daughterboard,
+     * the screw terminal silkscreened "N" is actually wired to the MAX31856
+     * that CS(N+1 mod 3) drives, not CS(N). Confirmed on the bench by
+     * unplugging each terminal in turn and noting which logical channel
+     * faulted (terminal 2 -> ch1 faulted, terminal 1 -> ch0, terminal 0 ->
+     * ch2 -- a fixed rotation, not a random miswire). Rotating this array so
+     * logical channel index i reads the chip actually fed by terminal i
+     * fixes it at the one place every downstream consumer (zone thermo_mask
+     * bits, the dashboard's "Channel N", LCD, MCP tools) reads from --
+     * nothing downstream needs its own compensating remap. */
     static const int cs_pins[MAX31856_CHANNEL_COUNT] = {
-        THERMO_CS0_IO, THERMO_CS1_IO, THERMO_CS2_IO,
+        THERMO_CS2_IO, THERMO_CS0_IO, THERMO_CS1_IO,
     };
     static const int fault_pins[MAX31856_CHANNEL_COUNT] = {
-        THERMO_FAULT0_IO, THERMO_FAULT1_IO, THERMO_FAULT2_IO,
+        THERMO_FAULT2_IO, THERMO_FAULT0_IO, THERMO_FAULT1_IO,
     };
 
     MAX31856Config cfg;

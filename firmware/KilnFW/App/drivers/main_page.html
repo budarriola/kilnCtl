@@ -95,7 +95,13 @@
   .kc-active-tag { font-size: 0.8em; color: var(--on-color); font-weight: bold; margin-left: 0.3em; }
   #kcConfigMsg { font-size: 0.85em; color: var(--muted); margin-top: 0.2em; }
   #kcConfigMsg.kc-error { color: var(--fault-color); }
-  select { flex: 1 1 200px; min-width: 0; box-sizing: border-box; min-height: var(--ui-touch); padding: 0.5em; font-size: 1em;
+  /* Owner request: profile/kiln-config <select> should read the same
+     height as a .card row (the thermocouple channel cards), not theme.css's
+     72px touch minimum -- .card has no min-height of its own, just
+     0.7em/1em padding around one line of text, so match that padding here
+     instead of the shared min-height every other <select>/<button> on this
+     page still gets. */
+  select { flex: 1 1 200px; min-width: 0; box-sizing: border-box; min-height: 0; padding: 0.7em 1em; font-size: 1em;
            background: var(--button-bg); color: var(--fg); border: 1px solid var(--border);
            border-radius: var(--ui-radius); margin-bottom: 0; }
   button.run-btn { padding: 0.6em 1.2em; font-size: 0.95em;
@@ -437,12 +443,16 @@ function relayStatusHtml(channel, relaysData) {
   if (!nums.length) return '';
   var onByRelay = {};
   (relaysData || []).forEach(function (r) { onByRelay[r.relay] = r.on; });
+  // Display-only R0-3 (owner request 2026-08-27, to match the thermocouple
+  // channels' 0-based numbering) -- `n` itself stays the real 1-based
+  // "relay" number the API/wire protocol uses (onByRelay is keyed on it,
+  // same as relaysData/setRelay() elsewhere); only the printed label is n-1.
   var tags = nums.map(function (n) {
     if (!onByRelay.hasOwnProperty(n)) {
-      return '<span class="relay-tag relay-unknown">R' + n + ': n/a</span>';
+      return '<span class="relay-tag relay-unknown">R' + (n - 1) + ': n/a</span>';
     }
     var on = onByRelay[n];
-    return '<span class="relay-tag kc-live-value ' + (on ? 'relay-on' : 'relay-off') + '">R' + n +
+    return '<span class="relay-tag kc-live-value ' + (on ? 'relay-on' : 'relay-off') + '">R' + (n - 1) +
            ': ' + (on ? 'ON' : 'off') + '</span>';
   });
   return '<span class="relay-status">' + tags.join('') + '</span>';
@@ -463,11 +473,38 @@ var WATCHDOG_CFG_FIRING_WARNING_JS =
     'The task-watchdog panic is disabled for debugging. If a task hangs, the board will NOT ' +
     'reboot -- it will sit hung with the relays in whatever state they were last commanded. ' +
     'Start the firing anyway?';
+function renderSafetyCard(data) {
+  // Safety processor's OWN thermocouple + K4 relay -- independent of the
+  // ESP-owned channels/relays rendered below. Shown regardless of
+  // data.thermo_ready (that flag is about the ESP's own MAX31856 board, not
+  // the safety processor) so a disagreement between the two, or K4's real
+  // state, is visible at a glance without opening /diagnostics.
+  if (!data.safety_ready) return null;
+  const div = document.createElement('div');
+  div.className = 'card';
+  const tempHtml = (data.safety_temp_c === null || data.safety_temp_c === undefined)
+    ? '<span class="stale">(no reading yet)</span>'
+    : '<span class="kc-live-value">' + window.kcUnit.fmt(data.safety_temp_c) + '</span>';
+  // Same relay-tag markup/classes as relayStatusHtml() above, so K4 reads
+  // as one of the relay row rather than a differently-styled one-off.
+  const relayHtml = '<span class="relay-status"><span class="relay-tag kc-live-value ' +
+    (data.safety_relay_energized ? 'relay-on' : 'relay-off') + '">K4: ' +
+    (data.safety_relay_energized ? 'ON' : 'off') + '</span></span>';
+  div.innerHTML = '<span>Safety TC</span><span class="temp">' + tempHtml + relayHtml + '</span>';
+  return div;
+}
+
 function renderChannels(data) {
   lastChannelsData = data;
   const el = document.getElementById('channels');
   if (!data.thermo_ready) {
-    el.innerHTML = '<p class="empty">No thermocouple board attached.</p>';
+    el.innerHTML = '';
+    const safetyDiv = renderSafetyCard(data);
+    if (safetyDiv) {
+      el.appendChild(safetyDiv);
+    } else {
+      el.innerHTML = '<p class="empty">No thermocouple board attached.</p>';
+    }
     return;
   }
   el.innerHTML = '';
@@ -505,6 +542,10 @@ function renderChannels(data) {
       ch.channel + '</span><span class="temp">' + detail + '</span>';
     el.appendChild(div);
   });
+  const safetyDiv = renderSafetyCard(data);
+  if (safetyDiv) {
+    el.appendChild(safetyDiv);
+  }
 }
 
 // zonesCache/loadZones stay here (unlike setRelay/relayRow/renderRelays,
@@ -1002,11 +1043,14 @@ function renderProgress(st) {
 // this firmware genuinely has no header to #include here). Keep in sync
 // with that C table and with safety_guards.h's own enum if it changes.
 var SAFETY_TRIP_WORDS = {
-  0: 'none', 1: 'overtemp (S1)', 2: 'over setpoint (S2)', 3: 'load stuck on (S3)',
-  5: 'sensor invalid (S5)', 6: 'main processor fault (S6a)', 7: 'safety link dead (S6b)',
-  8: 'E-stop (S7)', 9: 'rate of rise (S8)', 10: 'TRIP_INEFFECTIVE (S9)',
-  12: 'frozen sensor (S11)', 13: 'enclosure overtemp (S12)', 14: 'borrowed data stale (S13)',
-  15: 'config corrupt', 16: 'self-test failure'
+  0: 'none', 1: 'chamber over absolute temperature limit (S1)',
+  2: 'chamber over setpoint for too long (S2)', 3: 'relay/contactor stuck on, no heat commanded (S3)',
+  5: 'safety thermocouple reading invalid (S5)', 6: 'main controller (ESP) reported a fault (S6a)',
+  7: 'safety link to main controller went silent (S6b)', 8: 'E-stop pressed (S7)',
+  9: 'rising faster than physically possible (S8)', 10: 'contactor welded on, trip did NOT cut power (S9)',
+  12: 'safety sensor reading frozen, not updating (S11)', 13: 'enclosure/cold-junction over-temperature (S12)',
+  14: "borrowed zone's TC stopped updating (S13)",
+  15: 'safety config corrupt', 16: 'safety self-test failed'
 };
 function safetyTripWords(reason) { return SAFETY_TRIP_WORDS[reason] || 'unknown guard'; }
 
