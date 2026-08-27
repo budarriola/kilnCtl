@@ -422,12 +422,16 @@ static void log_tap_targets(lv_obj_t *obj, int depth)
             lv_obj_get_coords(child, &area);
 
             /* A button's caption lives in a child label, so look one level
-             * down for it rather than reporting an anonymous rectangle. */
+             * down for it rather than reporting an anonymous rectangle.
+             * Hidden labels are skipped: a caption nobody can see is not this
+             * object's caption, and taking one was how the home page's body
+             * container came to report the hidden safety-trip strip's text. */
             const char *text = "";
             uint32_t grandchildren = lv_obj_get_child_count(child);
             for (uint32_t j = 0; j < grandchildren; j++) {
                 lv_obj_t *grandchild = lv_obj_get_child(child, j);
-                if (grandchild && lv_obj_check_type(grandchild, &lv_label_class)) {
+                if (grandchild && lv_obj_check_type(grandchild, &lv_label_class) &&
+                    !lv_obj_has_flag(grandchild, LV_OBJ_FLAG_HIDDEN)) {
                     text = lv_label_get_text(grandchild);
                     break;
                 }

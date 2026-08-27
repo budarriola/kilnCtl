@@ -9,6 +9,7 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_random.h"
+#include "esp_timer.h"
 #include "freertos/idf_additions.h"
 #include "settings.h"
 #include "uart_task_ids.h"
@@ -1357,6 +1358,7 @@ static bool safety_drain_inbox_ex(SafetyLinkClass *link, uint32_t wait_ms, bool 
                          * 500 ms GET_STATUS poll drains this same inbox. */
                         link->stashed_config_page = msg;
                         link->has_stashed_config_page = true;
+                        link->stashed_config_page_tick = xTaskGetTickCount();
                         safety_unlock(link);
                     }
                 }
@@ -1413,24 +1415,81 @@ static bool safety_drain_inbox_ex(SafetyLinkClass *link, uint32_t wait_ms, bool 
     return got_status;
 }
 
-/* Takes the stashed CONFIG_PAGE frame, if there is one, and clears the stash
- * so it is handed to exactly one caller. Returns false (leaving *out
- * untouched) when the stash is empty or the state lock could not be taken.
- * See SafetyLinkClass::stashed_config_page for why the stash exists; the
- * caller re-checks page_index, since the stashed frame may be a page nobody
- * asked for. */
-static bool safety_take_stashed_config_page(SafetyLinkClass *link, uart_proto_message_t *out)
+/* How long a stashed CONFIG_PAGE stays worth keeping. Comfortably longer than
+ * the gap between one refetch attempt's page N and the next attempt's page N,
+ * short enough that a page the ESP never asks for again cannot shadow a real
+ * reply indefinitely. */
+/* Deliberately long -- longer than the config store's retry backoff, so a
+ * reply that missed its own wait is still there for the NEXT attempt to adopt.
+ * That cross-attempt adoption is the only thing that lets a multi-page fetch
+ * make progress at all while the reply latency measured on this bench (below)
+ * exceeds SAFETY_LINK_REPLY_TIMEOUT_MS; an earlier, tighter value here (4x the
+ * reply timeout) silently removed it and the fetch stopped converging
+ * entirely.
+ *
+ * What keeps a long-lived stash from going stale is not the age but
+ * safety_link_clear_stashed_config_page(), which safety_cfg_store.c calls
+ * whenever the peer reports a different config CRC -- i.e. whenever a held
+ * page could belong to a configuration that no longer exists. The age is only
+ * a backstop against a page nobody ever asks for again. */
+#define SAFETY_STASHED_PAGE_MAX_AGE_MS 60000u
+
+/* Takes the stashed CONFIG_PAGE frame **only if it is the page being asked
+ * for**, and clears the stash so it is handed to exactly one caller. Returns
+ * false (leaving *out untouched) when the stash is empty, holds a different
+ * page, has aged out, or the state lock could not be taken.
+ *
+ * Matching here rather than in the caller is the point. The caller used to
+ * take unconditionally and then drop a non-matching frame on the floor, which
+ * turned a harmless ordering slip into a self-sustaining one on a multi-page
+ * fetch: the reply to attempt N's page 1 arrives after that attempt gave up
+ * and lands in the stash; attempt N+1 starts at page 0, takes the stash,
+ * finds page 1, discards it; page 0's own reply then arrives late and is
+ * stashed; the page-1 request takes that, finds page 0, discards it -- and so
+ * on, so page 1 times out on every attempt forever while the Pico answers
+ * every single request (its own counters showed 868 requests seen, 868
+ * handled, 868 broadcast). Observed live as a permanent ~2 Hz refetch storm on
+ * the link with the cached safety config never converging.
+ *
+ * Leaving a non-matching page stashed instead means the page is still there
+ * when the fetch loop reaches it, one request later, and is adopted with no
+ * wire traffic at all. */
+static bool safety_take_stashed_config_page(SafetyLinkClass *link, uint8_t want_page_index,
+                                             uart_proto_message_t *out)
 {
     bool took = false;
     if (safety_lock(link)) {
         if (link->has_stashed_config_page) {
-            *out = link->stashed_config_page;
-            link->has_stashed_config_page = false;
-            took = true;
+            if (safety_elapsed_ms(link->stashed_config_page_tick) > SAFETY_STASHED_PAGE_MAX_AGE_MS) {
+                link->has_stashed_config_page = false; /* too old to be anyone's reply */
+            } else {
+                kilnlink_config_page_t peek;
+                if (kilnlink_config_page_decode(link->stashed_config_page.payload,
+                                                 link->stashed_config_page.length,
+                                                 &peek) != KILNLINK_CONFIG_PAGE_OK) {
+                    link->has_stashed_config_page = false; /* undecodable -- never useful */
+                } else if (peek.page_index == want_page_index) {
+                    *out = link->stashed_config_page;
+                    link->has_stashed_config_page = false;
+                    took = true;
+                }
+                /* else: a different page, deliberately LEFT stashed */
+            }
         }
         safety_unlock(link);
     }
     return took;
+}
+
+void safety_link_clear_stashed_config_page(SafetyLinkClass *link)
+{
+    if (!link) {
+        return;
+    }
+    if (safety_lock(link)) {
+        link->has_stashed_config_page = false;
+        safety_unlock(link);
+    }
 }
 
 /* Opportunistic drain: takes whatever has already arrived and does NOT hold
@@ -3007,7 +3066,7 @@ esp_err_t safety_link_get_config_page(SafetyLinkClass *link, uint8_t page_index,
     uart_proto_message_t early_msg;
     bool got_early = false;
     (void)safety_drain_inbox_ex(link, 0, false, NULL, NULL, &early_msg, &got_early, NULL, NULL);
-    if (safety_take_stashed_config_page(link, &early_msg)) {
+    if (safety_take_stashed_config_page(link, page_index, &early_msg)) {
         got_early = true; /* prefer the stash: it is the older, already-orphaned frame */
     }
     if (got_early) {
@@ -3055,10 +3114,73 @@ esp_err_t safety_link_get_config_page(SafetyLinkClass *link, uint8_t page_index,
         return err;
     }
 
+    /* Wait for a CONFIG_PAGE **whose page_index is the one we asked for.**
+     *
+     * The single-shot wait this replaces accepted whatever CONFIG_PAGE landed
+     * first and handed it back as the answer to `page_index`. The pre-send
+     * adoption above already knew better -- it checks early_page.page_index --
+     * but the main receive path did not, and this endpoint is the one call in
+     * the link that routinely has an orphaned reply in flight: the comment
+     * above describes attempt N's answer arriving during attempt N+1, and a
+     * multi-page fetch turns that into attempt-for-page-0's answer arriving
+     * during the wait for page 1.
+     *
+     * Accepting it is not a missed reply, it is a wrong one:
+     * safety_cfg_store_refetch() copies the entries in as though they were the
+     * requested page's, and takes the continue/stop decision from the wrong
+     * page's `more` flag. The result is a mirror of the safety processor's
+     * configuration that is silently shifted by one page and then stamped with
+     * the live CRC, i.e. wrong data that reads as freshly verified -- the same
+     * "stale reading looks fresh" shape this codebase has hit repeatedly, here
+     * landing on the safety config mirror specifically.
+     *
+     * Discarding and continuing to wait (rather than failing outright) is what
+     * actually drains the orphan backlog: each wrong-index frame consumed here
+     * is one fewer left to confuse the next request. The deadline is unchanged
+     * -- SAFETY_LINK_REPLY_TIMEOUT_MS total, not per frame -- because
+     * safety_poll_task's blocking budget is load-bearing (see the pre-send
+     * comment: two earlier attempts to fix this by growing a budget put the
+     * board into a panic-reboot loop). */
     uart_proto_message_t page_msg;
     bool got_page = false;
-    (void)safety_drain_inbox_ex(link, SAFETY_LINK_REPLY_TIMEOUT_MS, false, NULL, NULL, &page_msg, &got_page, NULL,
-                                 NULL);
+    int64_t wait_started_us = esp_timer_get_time();
+    for (;;) {
+        int64_t elapsed_ms = (esp_timer_get_time() - wait_started_us) / 1000;
+        int32_t remaining_ms = (int32_t)SAFETY_LINK_REPLY_TIMEOUT_MS - (int32_t)elapsed_ms;
+        if (remaining_ms < 0) {
+            remaining_ms = 0;
+        }
+        bool got_one = false;
+        (void)safety_drain_inbox_ex(link, (uint32_t)remaining_ms, false, NULL, NULL, &page_msg, &got_one,
+                                     NULL, NULL);
+        if (!got_one) {
+            break;
+        }
+        kilnlink_config_page_t peek;
+        if (kilnlink_config_page_decode(page_msg.payload, page_msg.length, &peek) ==
+                KILNLINK_CONFIG_PAGE_OK &&
+            peek.page_index != page_index) {
+            /* Stashed, not dropped: on a multi-page fetch the page that shows
+             * up here is very often the NEXT one this loop will ask for (the
+             * Pico answers every request; a reply that missed its own wait by
+             * a few ms is early, not garbage). Keeping it means that request
+             * is served from the stash with no wire traffic. */
+            if (safety_lock(link)) {
+                link->stashed_config_page = page_msg;
+                link->has_stashed_config_page = true;
+                link->stashed_config_page_tick = xTaskGetTickCount();
+                safety_unlock(link);
+            }
+            ESP_LOGD(TAG, "get_config_page: stashed a reply for page %u while waiting for page %u",
+                     (unsigned)peek.page_index, (unsigned)page_index);
+            if (remaining_ms == 0) {
+                break;
+            }
+            continue; /* keep waiting for the page actually asked for */
+        }
+        got_page = true;
+        break;
+    }
 
     if (!got_page) {
         /* Last look at the stash before calling it a timeout: this call's own
@@ -3066,7 +3188,7 @@ esp_err_t safety_link_get_config_page(SafetyLinkClass *link, uint8_t page_index,
          * the 500 ms GET_STATUS poll shares this queue -- in which case it is
          * sitting in the stash rather than lost. Same no-blocking rule as the
          * pre-send check; this only reads a flag. */
-        if (safety_take_stashed_config_page(link, &page_msg)) {
+        if (safety_take_stashed_config_page(link, page_index, &page_msg)) {
             got_page = true;
             s_page_adopted++;
             ESP_LOGI(TAG, "get_config_page: page %u was taken by another drain, recovered from the stash (%u so far)",
@@ -3094,6 +3216,15 @@ esp_err_t safety_link_get_config_page(SafetyLinkClass *link, uint8_t page_index,
             link->stats.frame_errors++;
             safety_unlock(link);
         }
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+    /* Belt and braces over the wait loop's own check: the stash-recovery path
+     * above reaches here too, and this is the single place every successful
+     * return passes through. Cheap, and the failure it catches (entries filed
+     * under the wrong page) is silent everywhere else. */
+    if (out->page_index != page_index) {
+        ESP_LOGW(TAG, "get_config_page: reply carried page %u, expected %u -- rejecting",
+                 (unsigned)out->page_index, (unsigned)page_index);
         return ESP_ERR_INVALID_RESPONSE;
     }
     return ESP_OK;

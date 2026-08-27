@@ -905,6 +905,11 @@ typedef struct {
      * stash may hold a page a later caller did not ask for. */
     uart_proto_message_t stashed_config_page;
     bool                 has_stashed_config_page;
+    /* When the stashed frame was captured. The stash is only handed to a
+     * caller asking for that exact page index (safety_take_stashed_config_
+     * page()), so a page nobody goes on to ask for would otherwise sit here
+     * forever; this lets it be aged out instead. */
+    TickType_t           stashed_config_page_tick;
 
     safety_link_stats_t stats;
     uint16_t            poll_period_ms;
@@ -1493,6 +1498,13 @@ esp_err_t safety_link_send_commit_config(SafetyLinkClass *link, uint16_t *out_pa
                                           uint8_t *out_reason, bool *out_rejected);
 esp_err_t safety_link_get_config_page(SafetyLinkClass *link, uint8_t page_index,
                                        kilnlink_config_page_t *out);
+
+/* Drops any CONFIG_PAGE currently held in the stash. Call this when a held
+ * page could no longer belong to the configuration being fetched -- the config
+ * store calls it whenever the peer's reported config CRC changes. The stash is
+ * otherwise long-lived on purpose (SAFETY_STASHED_PAGE_MAX_AGE_MS), so this is
+ * what keeps it from ever serving a page from a configuration that is gone. */
+void safety_link_clear_stashed_config_page(SafetyLinkClass *link);
 
 /* Serializers for the two PC-facing query payloads, so the exact byte layout
  * specified in uart_task_ids.h lives in one place instead of being open-coded

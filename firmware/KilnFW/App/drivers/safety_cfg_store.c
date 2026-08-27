@@ -164,6 +164,10 @@ static int64_t s_fetched_at_us = -1;
  * never go silent, since a real, persistent failure is exactly what an
  * operator needs to see. */
 #define SAFETY_CFG_STORE_REFETCH_LOG_INTERVAL_US 5000000
+
+/* Settle time between one page request and the next -- see the call site in
+ * safety_cfg_store_refetch() for the measurement this comes from. */
+#define SAFETY_CFG_STORE_INTER_PAGE_GAP_MS 40u
 static int64_t s_last_refetch_fail_log_us = 0;
 static uint32_t s_refetch_fail_suppressed = 0;
 
@@ -543,6 +547,35 @@ bool safety_cfg_store_refetch(SafetyLinkClass *link, uint16_t config_crc)
             return false;
         }
 
+        /* Pace consecutive page requests. Page N+1 otherwise goes out the
+         * instant page N is satisfied -- and when page N came from the stash
+         * that is with no wire round trip at all, so the request can leave
+         * while the Pico is still transmitting the previous reply.
+         *
+         * Measured on the bench: the Pico's counters show 1195 requests seen,
+         * 1195 handled and 1195 broadcast, with the last reply 157 bytes
+         * (page 1) -- yet the ESP receives page 0's reply every time and
+         * page 1's never. Two similar frames from the same code path, one
+         * arriving and one not; what differs is that page 1 is asked for
+         * back to back.
+         *
+         * A whole config fetch happens once per config change, so tens of
+         * milliseconds here cost nothing anyone can observe, and the wall
+         * clock budget above still bounds the whole call.
+         *
+         * BE CLEAR ABOUT WHAT THIS DID: pacing did NOT fix the missing page 1.
+         * It is kept because back-to-back requests on a shared link are worth
+         * pacing regardless, but the symptom survived it unchanged, so the
+         * cause is not "the request went out too early". What the Pico's
+         * counters prove is only that it CALLED link_task_send_broadcast() --
+         * not that the bytes reached the wire. Settling this needs either a
+         * scope/analyser capture of the page-1 reply or a TX-completion (not
+         * TX-queued) counter on the Pico side. Do not add another speculative
+         * fix here without one of those. */
+        if (page_index > 0) {
+            vTaskDelay(pdMS_TO_TICKS(SAFETY_CFG_STORE_INTER_PAGE_GAP_MS));
+        }
+
         kilnlink_config_page_t page;
         esp_err_t err = safety_link_get_config_page(link, page_index, &page);
         if (err != ESP_OK) {
@@ -610,10 +643,64 @@ bool safety_cfg_store_refetch(SafetyLinkClass *link, uint16_t config_crc)
     return true;
 }
 
+/* Retry backoff. Without one, a fetch that fails is retried on every single
+ * 500 ms poll for as long as the CRC disagrees -- and on this link that is not
+ * merely noisy, it is self-sustaining.
+ *
+ * Measured on the bench: the Pico's own counters showed it seeing, handling
+ * and broadcasting a reply to 868 of 868 page requests, while the ESP recorded
+ * 158 frames received against 194 timeouts and only 155 CONFIG_PAGE frames for
+ * roughly 340 requests. The replies are real and the wire is fine; they are
+ * being dropped at the ESP's 4-deep inbox, which the refetch storm's own extra
+ * traffic (two requests and two large replies every poll, on top of GET_STATUS
+ * / DIAG / POWER) is what overruns. A failed fetch therefore causes the
+ * congestion that makes the next fetch fail. It ran for hours without
+ * converging.
+ *
+ * Backing off turns that around: the link quiets between attempts, the inbox
+ * drains, and the retry lands with room to succeed. Retrying *is* still the
+ * right behaviour (a Pico that just came back should not need a reboot to be
+ * noticed) -- just not at poll rate. Reset to the floor whenever the peer's
+ * CRC changes, so a real config change is picked up promptly however long the
+ * previous failure had been backing off. */
+#define SAFETY_CFG_STORE_RETRY_MIN_MS 2000u
+#define SAFETY_CFG_STORE_RETRY_MAX_MS 30000u
+static uint32_t s_retry_delay_ms = SAFETY_CFG_STORE_RETRY_MIN_MS;
+static int64_t s_retry_not_before_us = 0;
+static uint16_t s_retry_crc = 0;
+
 bool safety_cfg_store_maybe_refetch(SafetyLinkClass *link, uint16_t live_config_crc)
 {
     if (s_store.config_crc == live_config_crc) {
         return false; /* steady state -- no UART traffic at all, by design */
     }
-    return safety_cfg_store_refetch(link, live_config_crc);
+
+    int64_t now_us = esp_timer_get_time();
+    if (live_config_crc != s_retry_crc) {
+        /* A different config than the one we have been failing to fetch --
+         * treat it as a fresh problem, not a continuation of the old one. */
+        s_retry_crc = live_config_crc;
+        s_retry_delay_ms = SAFETY_CFG_STORE_RETRY_MIN_MS;
+        s_retry_not_before_us = 0;
+        /* Any page held from the previous configuration is now meaningless --
+         * see safety_link_clear_stashed_config_page()'s comment. */
+        safety_link_clear_stashed_config_page(link);
+    } else if (now_us < s_retry_not_before_us) {
+        return false; /* still backing off -- deliberately no UART traffic */
+    }
+
+    if (safety_cfg_store_refetch(link, live_config_crc)) {
+        s_retry_delay_ms = SAFETY_CFG_STORE_RETRY_MIN_MS;
+        s_retry_not_before_us = 0;
+        return true;
+    }
+
+    s_retry_not_before_us = esp_timer_get_time() + (int64_t)s_retry_delay_ms * 1000;
+    if (s_retry_delay_ms < SAFETY_CFG_STORE_RETRY_MAX_MS) {
+        s_retry_delay_ms *= 2u;
+        if (s_retry_delay_ms > SAFETY_CFG_STORE_RETRY_MAX_MS) {
+            s_retry_delay_ms = SAFETY_CFG_STORE_RETRY_MAX_MS;
+        }
+    }
+    return false;
 }
