@@ -117,10 +117,25 @@ bool danger_mode_set_heat_enable_request(bool enable)
         ESP_LOGW(TAG, "danger mode: heat-enable request NOT sent: %s", esp_err_to_name(err));
         return false;
     }
-    if (s_dm.lock && xSemaphoreTake(s_dm.lock, pdMS_TO_TICKS(50)) == pdTRUE) {
-        s_dm.heat_requested = enable;
-        xSemaphoreGive(s_dm.lock);
+    if (!s_dm.lock || xSemaphoreTake(s_dm.lock, pdMS_TO_TICKS(50)) != pdTRUE) {
+        /* The wire request above already went out (or, for enable=false,
+         * there was nothing to send) -- but heat_requested cannot be
+         * updated to match, so the tile would show the OLD state while
+         * reality is the new one. Opus review 2026-08-27: the original code
+         * still returned true here, silently reintroducing this fix's own
+         * failure mode (display disagreeing with what was actually sent) on
+         * the rare lock-contention path instead of the "wrong flag read"
+         * path. Reporting failure here is honest either way: for
+         * enable=true a caller retries as a fresh explicit action; for
+         * enable=false the window's own timeout/stop path still forces a
+         * release+heat_requested=false unconditionally, so nothing is
+         * permanently stuck. */
+        ESP_LOGE(TAG, "danger mode: heat-enable request sent but internal lock timed out -- "
+                      "heat_requested NOT updated, retry");
+        return false;
     }
+    s_dm.heat_requested = enable;
+    xSemaphoreGive(s_dm.lock);
     ESP_LOGW(TAG, "danger mode: operator %s heat-enable request", enable ? "sent" : "released");
     danger_mode_touch();
     return true;

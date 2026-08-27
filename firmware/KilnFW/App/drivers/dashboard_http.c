@@ -362,7 +362,18 @@ void dashboard_get_status(dashboard_status_t *out)
     static bool s_flash_used_known = false;
     static uint32_t s_flash_used = 0;
     if (!s_flash_facts_read) {
-        s_flash_facts_read = true;
+        /* s_flash_facts_read is set LAST, after every static below it is
+         * filled in -- Opus review 2026-08-27 caught this set FIRST in an
+         * earlier version of this function: a second task entering
+         * dashboard_get_status() between that early set and the reads
+         * finishing would see s_flash_facts_read already true and copy
+         * still-zero statics, reporting a transient (self-healing on the
+         * next poll, but still wrong) all-unknown flash status for that one
+         * response. Worst case now is at most a handful of redundant
+         * flash/partition reads if two pollers really do race into this
+         * block together -- no torn or fabricated values either way, since
+         * every out-facing field is copied only after this whole block
+         * (read or skipped) completes. */
         uint32_t flash_size = 0;
         s_flash_size_known = (esp_flash_get_size(NULL, &flash_size) == ESP_OK);
         s_flash_size = flash_size;
@@ -375,6 +386,7 @@ void dashboard_get_status(dashboard_status_t *out)
             s_flash_used_known = (esp_image_get_metadata(&part_pos, &metadata) == ESP_OK);
             s_flash_used = metadata.image_len;
         }
+        s_flash_facts_read = true;
     }
     out->flash_size_known = s_flash_size_known;
     out->flash_size = s_flash_size;
