@@ -10,6 +10,7 @@
 #include "esp_log.h"
 #include "esp_random.h"
 #include "esp_timer.h"
+#include "stack_margin.h"
 #include "freertos/idf_additions.h"
 #include "settings.h"
 #include "uart_task_ids.h"
@@ -2100,6 +2101,25 @@ esp_err_t safety_link_start(SafetyLinkClass *link)
         ESP_LOGE(TAG, "uart_owner_init(uart%d) failed: %s", SAFETY_UART_PORT_NUM, esp_err_to_name(err));
         goto fail_locks;
     }
+
+    /* Register THIS uart_owner's two tasks for stack measurement, under names
+     * that say which link they serve.
+     *
+     * There are two uart_owner instances on this board -- main.c's PC-link one
+     * and this safety-link one -- created from the same
+     * UART_OWNER_STACK_SIZE. Only main.c's pair was ever registered, so
+     * /api/status reported two comfortable margins while their siblings, the
+     * ones carrying the safety telemetry that gates all heating, were
+     * measured by nobody. Anyone resizing that shared Kconfig on the numbers
+     * they could see would have been resizing a task they could not.
+     *
+     * The same "two instances, one identifier" trap this project has already
+     * been bitten by in the shared UART log tags -- so these names carry the
+     * link, not just the role. Kept under STACK_MARGIN_NAME_MAX (20) so
+     * the report does not truncate them into near-identical strings, which
+     * would reintroduce the very ambiguity these names exist to remove. */
+    stack_margin_register("safety_owner_task", &link->owner.task_handle, UART_OWNER_STACK_SIZE);
+    stack_margin_register("safety_owner_evt", &link->owner.event_task_handle, UART_OWNER_STACK_SIZE);
 
     /* No line inversion on this link any more -- deliberately, on both ends.
      *

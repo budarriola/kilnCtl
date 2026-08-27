@@ -513,7 +513,20 @@ menu "KilnCtrl Hardware Configuration"
 
         config KILNCTL_UART_OWNER_STACK_SIZE
             int "uart_owner task stack size (bytes)"
-            default 4096
+            # 4096 -> 3072 (2026-08-27), on measurement rather than by feel.
+            # This one number sizes FOUR tasks: main.c's PC-link uart_owner
+            # pair and safety_link.c's safety-link pair. All four are now
+            # registered for high-water reporting (they were not before -- the
+            # safety pair, the one carrying the telemetry that gates heating,
+            # was measured by nobody), and after a firing that ran to
+            # completion with rules active the worst of the four had used 904
+            # bytes. 3072 leaves 2168 free above that, ~70% headroom.
+            #
+            # Not cut closer on purpose: a Pico OTA relay transfer streams
+            # through the safety-link pair and has never been measured, so the
+            # margin has to cover a path the numbers do not yet include. Re-read
+            # the high-water marks after a real Pico update before going lower.
+            default 3072
 
         config KILNCTL_UART_PROTOCOL_TASK_PRIORITY
             int "uart_protocol RX task priority"
