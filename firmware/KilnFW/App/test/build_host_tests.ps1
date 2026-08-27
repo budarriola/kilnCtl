@@ -233,6 +233,28 @@ if ($LASTEXITCODE -ne 0) {
 & $exe6
 if ($LASTEXITCODE -ne 0) { $script:failedExes += "kilnctl_host_tests_rules_task.exe" }
 
+# ---- test_profiles_http.c: its own SEVENTH, separate executable -----------
+# Same reason as test_zones_http.c above: it #includes profiles_http.c
+# directly to reach decode_profile_blob()/nvs_load_all_from(), both `static`,
+# with no other seam. It also defines its own multi-key NVS stub (a real
+# profiles_http.c load touches a "prof_used" bitmap key plus up to 8 separate
+# "profN" blob keys on one open handle, which stubs/nvs.h's shared
+# single-blob-slot stub cannot model) -- see test_profiles_http.c's own
+# header comment. Own executable so that stub, and this file's fake bodies
+# for zones_http.h/profile_feasibility.h/profiles_builtin.h, never collide
+# with any other test file's definitions of those same symbols.
+$exe7 = Join-Path $outDir "kilnctl_host_tests_profiles_http.exe"
+$cmd7 = "call `"$vcvars`" x64 >nul && cl /nologo /W3 /EHsc /std:c11 /I`"$stubDir`" /I`"$commonInc`" " +
+        "/Fo:`"$outDir\\profiles_`" /Fe:`"$exe7`" `"$(Join-Path $testDir 'test_profiles_http.c')`""
+
+cmd.exe /c $cmd7
+if ($LASTEXITCODE -ne 0) {
+    throw "profiles_http build failed"
+}
+
+& $exe7
+if ($LASTEXITCODE -ne 0) { $script:failedExes += $exe7 }
+
 if ($script:failedExes.Count -gt 0) {
     Write-Host ""
     Write-Host "FAILED executables ($($script:failedExes.Count)):"

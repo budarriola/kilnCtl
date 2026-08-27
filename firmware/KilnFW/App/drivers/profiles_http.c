@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "esp_crc.h"
 #include "esp_log.h"
 #include "nvs.h"
 #include "nvs_flash.h"
@@ -35,9 +36,35 @@ static const char *TAG = "profiles_http";
  * and for firmware rollback. */
 #define PROFILES_NVS_PARTITION "profiles_nvs"
 
-/* Bump whenever the on-flash per-slot layout (profile_persisted_t) changes;
- * see nvs_load_all_from(). */
-#define PROFILE_VERSION 1
+/* Bump whenever the on-flash per-slot layout (profile_persisted_t) changes,
+ * OR whenever profile_t/profile_segment_t itself grows a field -- the latter
+ * is the trap zones_http.c's ZONES_CFG_VERSION 6->7 fix (see that file's
+ * header comment) exists to name explicitly: profile_t embeds
+ * segments[PROFILE_MAX_SEGMENTS], an ARRAY of profile_segment_t, so growing
+ * profile_segment_t itself (not just profile_t's tail) displaces every
+ * element after the first -- the exact same "array element, not just the
+ * struct" bug the zones fix caught. When that happens: add a new
+ * profile_persisted_vN_t snapshot of the OLD layout below (never edit an
+ * existing one), a case in expected_len_for_version(), and a
+ * convert_profile_vN() that writes every field of a fresh current-format
+ * profile_t by name (never a memcpy of one shape over another) -- same
+ * pattern zones_http.c's convert_zone_v*()/convert_versioned_blob_to_current()
+ * use.
+ *
+ * 1 -> 2 (this pass): appended crc32 to profile_persisted_t. This is
+ * genuinely a new on-flash SHAPE -- a real board's existing v1 blobs are
+ * `{uint8_t version; profile_t profile;}`, sizeof(profile_persisted_t)
+ * WITHOUT the crc32 tail, and expected_len_for_version() must keep answering
+ * THAT exact size for version 1 forever, never sizeof(the current struct).
+ * Getting this wrong was caught on real hardware: an earlier draft of this
+ * fix computed expected_len_for_version(1) as sizeof(profile_persisted_t)
+ * (i.e. INCLUDING the new crc32 field), which made every already-saved v1
+ * blob "the wrong length for its claimed version" and silently wiped both of
+ * a bench board's saved profiles on the very firmware meant to protect them
+ * -- see profile_persisted_v1_t/convert_profile_v1() below, the exact same
+ * mistake zones_http.c's ZONES_CFG_VERSION 6->7 comment already documents by
+ * name for zone_cfg_t. */
+#define PROFILE_VERSION 2
 
 /* PROFILES_MAX_COUNT / PROFILE_NAME_MAX_LEN / PROFILE_MAX_SEGMENTS and the
  * profile_t/profile_segment_t layout now live in profiles_http.h --
@@ -86,7 +113,165 @@ static profiles_state_t s_profiles;
 typedef struct {
     uint8_t version;
     profile_t profile;
+    /* esp_crc32_le() (same helper crash_report.c's compute_crc()/zones_http.c's
+     * compute_zones_crc() use) over this whole struct with crc32 itself
+     * zeroed, computed over a local copy so re-validating an already-loaded
+     * slot never mutates it just by asking. Appended at the true tail --
+     * covers the CURRENT-version blob only; there is no older layout yet to
+     * lack one. */
+    uint32_t crc32;
 } profile_persisted_t;
+
+/* EXACT snapshot of what profile_persisted_t was before this pass added
+ * crc32 -- what every already-saved version-1 blob on a real board actually
+ * is on flash today. Used ONLY to interpret a raw blob whose length has
+ * already been checked (expected_len_for_version()) against the size of
+ * EXACTLY this struct before a single byte is copied out of it -- see
+ * decode_profile_blob(). Never grown, edited, or reused for a different
+ * version; the next layout change gets its own new snapshot here, appended,
+ * never a change to this one. Same discipline as zones_http.c's
+ * zone_cfg_v1_t/zones_cfg_v1_t etc. */
+typedef struct {
+    uint8_t version;
+    profile_t profile;
+} profile_persisted_v1_t;
+
+/* Per-version expected blob length, checked in decode_profile_blob() BEFORE a
+ * single byte is copied out of a stored blob or interpreted as any field --
+ * same discipline as zones_http.c's expected_len_for_version(). A stored blob
+ * whose length does not match the size EXACTLY implied by its own claimed
+ * version is corrupt and is rejected outright, never partially repaired.
+ * Returns 0 for a version this build has no known layout for -- 0 itself is
+ * never valid (there is no "version 0" struct, historical or current), so
+ * that value falls straight into the same rejection as any other unknown
+ * version rather than needing a special case.
+ *
+ * version 1 answers sizeof(profile_persisted_v1_t) -- the HISTORICAL
+ * pre-crc32 layout -- not sizeof(profile_persisted_t): a v1 blob on a real
+ * board was written by firmware that never had a crc32 field, and is
+ * genuinely that many bytes shorter. Answering the current struct's size
+ * here would reject every already-saved v1 profile as "wrong length for its
+ * claimed version" and wipe it -- exactly the data-loss regression this
+ * comment exists to prevent a repeat of (found on bench hardware during this
+ * pass; see PROFILE_VERSION's own comment). */
+static size_t expected_len_for_version(uint8_t version)
+{
+    switch (version) {
+    case 1: return sizeof(profile_persisted_v1_t);
+    case PROFILE_VERSION: return sizeof(profile_persisted_t);
+    default: return 0;
+    }
+}
+
+/* Field-by-field converter for the one historical layout: writes every field
+ * of a fresh current-format profile_t from a decoded v1 record. profile_t
+ * itself hasn't changed shape between v1 and v2 (only the persisted WRAPPER
+ * grew a crc32 tail), so this is a straight copy today -- but it exists as
+ * its own named function, not an inline memcpy at the call site, so the day
+ * profile_t/profile_segment_t itself grows or reorders a field this is the
+ * one place that has to change, same reason zones_http.c's convert_zone_v*()
+ * functions are never collapsed into their callers. */
+static void convert_profile_v1(const profile_persisted_v1_t *src, profile_t *out)
+{
+    *out = src->profile;
+}
+
+/* esp_crc32_le() over `p` with crc32 zeroed -- the one place this file
+ * computes a profile slot's CRC, used both to stamp it at save time and to
+ * check it at load time. */
+static uint32_t compute_profile_crc(const profile_persisted_t *p)
+{
+    profile_persisted_t tmp = *p;
+    tmp.crc32 = 0;
+    return esp_crc32_le(0, (const uint8_t *)&tmp, sizeof(tmp));
+}
+
+typedef enum {
+    PROFILE_DECODE_OK,      /* *out is a valid, current-format profile_t, ready to adopt */
+    PROFILE_DECODE_CORRUPT, /* reject outright: version 0, wrong length for the claimed
+                             * version, unknown version, or CRC mismatch -- *out is
+                             * zeroed, nothing is adopted */
+    PROFILE_DECODE_NEWER,   /* version > PROFILE_VERSION -- refuse without guessing;
+                             * *out is zeroed, but the caller must leave the SOURCE
+                             * bytes untouched (see nvs_load_all_from()) */
+} profile_decode_result_t;
+
+/* The one place a stored profile blob is turned into a trustworthy,
+ * current-format profile_t -- mirrors zones_http.c's decode_zones_blob()
+ * field for field: a length check against the blob's OWN claimed version
+ * before anything is copied or interpreted, and a CRC check for the
+ * current-version case. This is also what makes `version == 0` -- the bug
+ * TODO.md calls out, where the old code accepted it "at any length >= 1" and
+ * installed it as a used slot -- impossible to reach ANY installed slot: 0
+ * is neither PROFILE_VERSION nor greater than it, so it falls straight into
+ * the "unknown version" branch below and is rejected before a single byte of
+ * the payload is looked at. */
+static profile_decode_result_t decode_profile_blob(const void *blob, size_t len, profile_t *out,
+                                                    const char **err_reason)
+{
+    static const char *unused_reason;
+    const char **reason = err_reason ? err_reason : &unused_reason;
+    *reason = "";
+    memset(out, 0, sizeof(*out));
+
+    if (!blob || len < sizeof(((profile_persisted_t *)0)->version)) {
+        *reason = "blob missing or too short to contain a version";
+        return PROFILE_DECODE_CORRUPT;
+    }
+    uint8_t version = ((const uint8_t *)blob)[0];
+
+    if (version == 0) {
+        /* The exact bug TODO.md names: version 0 must never be treated as a
+         * usable (if unusual) layout. There has never been, and will never
+         * be, a "version 0" struct -- reject it exactly like any other
+         * version this build doesn't recognize, before anything past this
+         * byte is read. */
+        *reason = "version 0 is never a valid profile layout";
+        return PROFILE_DECODE_CORRUPT;
+    }
+
+    if (version > PROFILE_VERSION) {
+        /* Firmware-rollback case, same as zones_http.c's decode_zones_blob():
+         * this build does not know that layout and must not guess at it.
+         * Deliberately does NOT check length against anything here -- an
+         * unknown newer layout could be any size. */
+        *reason = "this profile was saved by newer firmware -- refusing rather than guessing";
+        return PROFILE_DECODE_NEWER;
+    }
+
+    size_t expected = expected_len_for_version(version);
+    if (expected == 0) {
+        *reason = "unknown/unsupported profile version";
+        return PROFILE_DECODE_CORRUPT;
+    }
+    if (len != expected) {
+        *reason = "blob length does not match its claimed version -- treating as corrupt";
+        return PROFILE_DECODE_CORRUPT;
+    }
+
+    if (version == PROFILE_VERSION) {
+        profile_persisted_t loaded;
+        memcpy(&loaded, blob, sizeof(loaded));
+        uint32_t stored_crc = loaded.crc32;
+        uint32_t computed_crc = compute_profile_crc(&loaded);
+        if (computed_crc != stored_crc) {
+            *reason = "CRC mismatch -- treating as corrupt";
+            return PROFILE_DECODE_CORRUPT;
+        }
+        *out = loaded.profile;
+        return PROFILE_DECODE_OK;
+    }
+
+    /* version == 1 here (the only other case expected_len_for_version()
+     * currently answers non-zero for) -- the historical, pre-crc32 layout.
+     * No CRC to check: v1 blobs never had one, so length-matches-claimed-
+     * version plus this typed conversion IS its integrity gate, same as
+     * zones_http.c's older-than-crc versions. */
+    profile_persisted_v1_t loaded_v1;
+    memcpy(&loaded_v1, blob, sizeof(loaded_v1));
+    convert_profile_v1(&loaded_v1, out);
+    return PROFILE_DECODE_OK;
+}
 
 /* application/x-www-form-urlencoded whole-profile submit: id, name, zone,
  * seg_count, plus 3 fields per segment across up to 12 segments. Generous
@@ -122,21 +307,6 @@ static esp_err_t nvs_partition_init(const char *partition)
         }
     }
     return err;
-}
-
-/* Hook point for migrating an older on-flash profile_persisted_t layout
- * forward. v1 is the first version that has ever shipped, so there is
- * nothing to convert yet -- this is a no-op passthrough that exists purely
- * so the next version bump has somewhere to add real field conversion,
- * rather than inventing the load-time branching from scratch. */
-static void migrate_profile_v1_to_current(profile_persisted_t *slot)
-{
-    static bool logged = false;
-    if (!logged) {
-        ESP_LOGI(TAG, "migrating a profile slot from struct version 1 -- no-op passthrough (v1 is current)");
-        logged = true;
-    }
-    slot->version = PROFILE_VERSION;
 }
 
 /* Loads NVS_NAMESPACE/NVS_KEY_USED + "profN" out of `partition` into *out,
@@ -191,51 +361,34 @@ static esp_err_t nvs_load_all_from(const char *partition, profiles_state_t *out,
             out->used_bitmap &= ~(1u << id);
             continue;
         }
-        /* BUG FIXED (matching zones_http.c's nvs_load_from()): this used to
-         * reject on `len != sizeof(loaded)` BEFORE ever looking at
-         * `version`, which would misclassify an older (smaller,
-         * pre-growth) slot as corruption instead of running it through the
-         * migration chain below. Only a slot too short to even contain the
-         * `version` byte is genuinely ambiguous; everything else is the
-         * version check's job, with the exact-size check applied only to
-         * the current-version case. */
-        if (len < sizeof(loaded.version)) {
-            ESP_LOGW(TAG, "prof%u load from '%s' is too short to contain a version -- marking unused", id,
-                     partition);
+        /* decode_profile_blob() is the ONE place a stored blob is checked
+         * before any byte of it is interpreted -- a length check against the
+         * blob's OWN claimed version, then (for the current version) a CRC
+         * check. This is the fix for the TODO.md bug: `version == 0` used to
+         * be accepted "at any length >= 1" and installed as a used slot; it
+         * now falls into decode_profile_blob()'s explicit "version 0 is
+         * never valid" rejection before anything past that byte is read. A
+         * failed decode marks only THIS slot unused -- one bad slot must
+         * never take any other slot down with it (TODO.md 8.1). The NEWER
+         * case additionally leaves the flash bytes untouched, matching
+         * zones_http.c's decode_zones_blob()/nvs_load_from() convention: a
+         * slot written by newer firmware may hold a layout this build
+         * cannot interpret, and wiping it would destroy data a roll-forward
+         * (or the newer firmware itself) still needs. */
+        profile_t decoded;
+        const char *reason = "";
+        profile_decode_result_t dres = decode_profile_blob(&loaded, len, &decoded, &reason);
+        switch (dres) {
+        case PROFILE_DECODE_OK:
+            out->profiles[id] = decoded;
+            break;
+        case PROFILE_DECODE_NEWER:
+            ESP_LOGW(TAG, "prof%u load from '%s' refused: %s", id, partition, reason);
             out->used_bitmap &= ~(1u << id);
             continue;
-        }
-
-        if (loaded.version == PROFILE_VERSION) {
-            if (len != sizeof(loaded)) {
-                /* Current version but wrong size can only mean genuine
-                 * corruption -- a real current-version slot is always
-                 * written at exactly sizeof(loaded). */
-                ESP_LOGW(TAG, "prof%u claims current version but is the wrong size -- marking unused", id);
-                out->used_bitmap &= ~(1u << id);
-                continue;
-            }
-            out->profiles[id] = loaded.profile; /* current version -- happy path */
-        } else if (loaded.version < PROFILE_VERSION) {
-            /* Known older layout -- run it through the migration chain. */
-            ESP_LOGI(TAG, "prof%u is struct version %u, migrating to %u", id, (unsigned)loaded.version,
-                     (unsigned)PROFILE_VERSION);
-            migrate_profile_v1_to_current(&loaded);
-            out->profiles[id] = loaded.profile;
-        } else {
-            /* loaded.version > PROFILE_VERSION: this slot was written by
-             * NEWER firmware than this build -- the firmware-rollback case
-             * from TODO.md 8.1. Its layout may use fields this older build
-             * doesn't understand, so treating it as corrupt and wiping it
-             * would destroy data a roll-forward (or the newer firmware
-             * itself) still needs. Refuse to load instead: leave the slot's
-             * flash bytes completely untouched and just don't surface it
-             * for this boot -- this is the ONE outcome above that is not a
-             * "bad slot," so it deliberately does not erase or overwrite
-             * anything. */
-            ESP_LOGW(TAG, "prof%u is struct version %u, newer than this firmware's %u -- refusing to load, "
-                          "flash left untouched",
-                     id, (unsigned)loaded.version, (unsigned)PROFILE_VERSION);
+        case PROFILE_DECODE_CORRUPT:
+        default:
+            ESP_LOGW(TAG, "prof%u load from '%s' rejected: %s -- marking unused", id, partition, reason);
             out->used_bitmap &= ~(1u << id);
             continue;
         }
@@ -257,7 +410,9 @@ static esp_err_t nvs_save_slot(uint8_t id)
     profile_persisted_t persisted = {
         .version = PROFILE_VERSION,
         .profile = s_profiles.profiles[id],
+        .crc32 = 0,
     };
+    persisted.crc32 = compute_profile_crc(&persisted);
     err = nvs_set_blob(h, key, &persisted, sizeof(persisted));
     if (err == ESP_OK) {
         err = nvs_set_u8(h, NVS_KEY_USED, s_profiles.used_bitmap);
@@ -757,17 +912,44 @@ static esp_err_t builtin_list_get_handler(httpd_req_t *req)
     return err;
 }
 
+/* Worst-case size of one user-slot entry's JSON, sized against a name that
+ * FULLY escapes -- the TODO.md bug this replaces: the old 96-byte-per-slot
+ * budget was sized off PROFILE_NAME_MAX_LEN's raw 15 chars, but
+ * json_escape() can double every one of them (a `"` or `\` costs two output
+ * bytes), and the fixed text around the name is not free either. Counted
+ * literally: `,{"id":255,"builtin":false,"name":"` (36) + up to
+ * PROFILE_NAME_MAX_LEN*2 (30) escaped name bytes + `","zone_mask":255,`
+ * `"segment_count":12}` (37) = 103; rounded up with slack for the format
+ * rather than re-deriving the exact count if a field ever widens. */
+#define PROFILE_LIST_ENTRY_MAX 160
+
+/* Bytes reserved at the tail of `json` that no per-slot APPEND is ever
+ * allowed to write into -- so the fallback "listing truncated" notice below
+ * always has guaranteed room to land, and the array's own close (sent as a
+ * separate chunk, never through this buffer) is never the thing at risk.
+ * Same discipline as readiness_http.c's append_item() reserve. */
+#define PROFILE_LIST_CLOSE_RESERVE 96
+
 static esp_err_t profiles_list_get_handler(httpd_req_t *req)
 {
-    char json[PROFILES_MAX_COUNT * 96 + 16];
+    char json[PROFILES_MAX_COUNT * PROFILE_LIST_ENTRY_MAX + PROFILE_LIST_CLOSE_RESERVE + 16];
     size_t o = 0;
     int n;
+    bool dropped = false; /* an item didn't fit even the enlarged budget -- report it, don't hide it */
 
+    /* Never writes past sizeof(json) - PROFILE_LIST_CLOSE_RESERVE -- `avail`
+     * is clamped to 0 once `o` reaches that line, so a would-be write past it
+     * is treated exactly like any other overflow (dropped, not truncated
+     * into the reserve). */
 #define APPEND(...)                                                                              \
     do {                                                                                          \
-        n = snprintf(json + o, sizeof(json) - o, __VA_ARGS__);                                   \
-        if (n < 0 || (size_t)n >= sizeof(json) - o) {                                             \
-            goto send;                                                                            \
+        size_t avail = (o + PROFILE_LIST_CLOSE_RESERVE < sizeof(json))                             \
+                           ? sizeof(json) - PROFILE_LIST_CLOSE_RESERVE - o                          \
+                           : 0;                                                                     \
+        n = snprintf(json + o, avail, __VA_ARGS__);                                               \
+        if (n < 0 || (size_t)n >= avail) {                                                         \
+            dropped = true;                                                                        \
+            goto list_done;                                                                        \
         }                                                                                          \
         o += (size_t)n;                                                                            \
     } while (0)
@@ -788,7 +970,26 @@ static esp_err_t profiles_list_get_handler(httpd_req_t *req)
 
 #undef APPEND
 
-send:
+list_done:
+    if (dropped) {
+        /* Guaranteed to fit: PROFILE_LIST_CLOSE_RESERVE bytes at json+o were
+         * never touched by any APPEND above. Reported AS an item -- a
+         * silently shortened list looks exactly like a pass, which is the
+         * failure mode this exists to prevent (same rule readiness_http.c's
+         * append_item() dropped-item notice follows). */
+        int n2 = snprintf(json + o, sizeof(json) - o,
+                          "%s{\"id\":null,\"builtin\":false,\"error\":\"one or more profiles omitted -- "
+                          "listing too large\"}",
+                          first ? "" : ",");
+        if (n2 > 0 && (size_t)n2 < sizeof(json) - o) {
+            o += (size_t)n2;
+            first = false;
+        } else {
+            ESP_LOGE(TAG, "profiles listing: dropped-item notice itself didn't fit -- "
+                         "PROFILE_LIST_CLOSE_RESERVE is too small");
+        }
+    }
+
     /* Chunked, because the visible builtin summaries appended after the user
      * slots would not fit alongside them in one stack buffer -- see the
      * response-size note above builtin_list_get_handler(). Segments are
