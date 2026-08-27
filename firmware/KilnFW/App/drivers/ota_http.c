@@ -114,6 +114,9 @@ static ota_auth_lockout_state_t s_lockout_esp_rollback;
 // Same reasoning again for the recovery-exit route -- see ota_http.h's doc
 // comment on OTA_HTTP_CONTEXT_RECOVERY_EXIT.
 static ota_auth_lockout_state_t s_lockout_recovery_exit;
+// Same reasoning again for POST /api/factory_reset -- see ota_http.h's doc
+// comment on OTA_HTTP_CONTEXT_FACTORY_RESET.
+static ota_auth_lockout_state_t s_lockout_factory_reset;
 
 // The hardware pointers main.c hands to ota_http_start(), same pattern (and
 // same NULL-tolerant meaning) as dashboard_http.c's s_dash struct. Read-only
@@ -290,6 +293,7 @@ ota_http_verify_result_t ota_http_verify_request(ota_http_context_t ctx, const u
         case OTA_HTTP_CONTEXT_ESP:            ctx_str = "esp";          lockout = &s_lockout_esp;          break;
         case OTA_HTTP_CONTEXT_ESP_ROLLBACK:   ctx_str = "esp-rollback"; lockout = &s_lockout_esp_rollback; break;
         case OTA_HTTP_CONTEXT_RECOVERY_EXIT:  ctx_str = "recovery";     lockout = &s_lockout_recovery_exit; break;
+        case OTA_HTTP_CONTEXT_FACTORY_RESET:  ctx_str = "factory-reset"; lockout = &s_lockout_factory_reset; break;
         case OTA_HTTP_CONTEXT_PICO:
         default:                              ctx_str = "pico";         lockout = &s_lockout_pico;         break;
     }
@@ -352,16 +356,42 @@ ota_http_verify_result_t ota_http_verify_request(ota_http_context_t ctx, const u
     const char *ap_password = wifi_prov_get_ap_password();
     size_t pw_len = ap_password ? strlen(ap_password) : 0;
 
+    // An open AP (empty password) means the HMAC key derived below is a
+    // zero-length key -- well-defined, but PUBLIC: anyone who can reach this
+    // endpoint already knows the AP password is empty, so a MAC computed
+    // against it proves nothing. Refuse outright rather than let OTA auth
+    // quietly collapse to "any request with a well-formed header succeeds."
+    // Checked AFTER the BOOT-button bypass above (that physical-presence
+    // override must keep working regardless of AP password state -- it is
+    // the recovery path this refusal leans on) and BEFORE any nonce/HMAC math
+    // runs, since there is no point computing a MAC against a key everyone
+    // already has. Still invalidates the nonce (a stale challenge left lying
+    // around after a refused attempt is no better here than after any other
+    // refusal) and does NOT record a lockout failure -- like a stale nonce,
+    // this is the board's own configuration, not a wrong-password guess.
+    if (pw_len == 0) {
+        ESP_LOGE(TAG, "OTA verify(%s) from %s: REFUSED -- this board's AP password is empty (open "
+                      "AP), so OTA auth would reduce to nothing; set an AP password to update this "
+                      "board over HTTP, or use the physical BOOT-button recovery window (hold BOOT "
+                      "during boot) which does not depend on the AP password",
+                 ctx_str, ip);
+        if (xSemaphoreTake(s_ota_lock, pdMS_TO_TICKS(50)) == pdTRUE) {
+            ota_auth_nonce_invalidate(&s_nonce);
+            xSemaphoreGive(s_ota_lock);
+        }
+        return OTA_HTTP_VERIFY_NO_AP_PASSWORD;
+    }
+
     uint8_t key[32];
     int hmac_rc = hmac_sha256((const uint8_t *)ap_password, pw_len,
                                (const uint8_t *)OTA_HTTP_KDF_CONTEXT, strlen(OTA_HTTP_KDF_CONTEXT),
                                key);
 
     // expected_mac = HMAC-SHA256(key, nonce || context)
-    uint8_t msg[OTA_AUTH_NONCE_LEN + 12]; // "esp" (3), "pico" (4), "esp-rollback" (12), or "recovery"
-                                           // (8) -- 12 covers all four context strings currently in
-                                           // use; if a future context string exceeds 12 chars, widen
-                                           // this buffer AND update this comment
+    uint8_t msg[OTA_AUTH_NONCE_LEN + 13]; // "esp" (3), "pico" (4), "esp-rollback" (12), "recovery" (8),
+                                           // or "factory-reset" (13) -- 13 covers all five context
+                                           // strings currently in use; if a future context string
+                                           // exceeds 13 chars, widen this buffer AND update this comment
     size_t ctx_len = strlen(ctx_str);
     memcpy(msg, nonce_copy, sizeof(nonce_copy));
     memcpy(msg + sizeof(nonce_copy), ctx_str, ctx_len);
@@ -712,8 +742,55 @@ static const char *verify_result_str(ota_http_verify_result_t r)
         case OTA_HTTP_VERIFY_NO_VALID_NONCE:
             return "no valid challenge -- GET /api/ota/challenge first, then POST within 30 s";
         case OTA_HTTP_VERIFY_BAD_MAC: return "wrong password";
+        case OTA_HTTP_VERIFY_NO_AP_PASSWORD:
+            return "this board's AP password is empty -- set an AP password to update it over HTTP, "
+                   "or use the physical BOOT-button recovery window (hold BOOT during boot)";
         default: return "authentication failed";
     }
+}
+
+// See ota_http.h's doc comment above this function's declaration for the
+// full contract. Consolidates the "X-Ota-Mac header well-formed -> hex-decode
+// -> ota_http_verify_request()" sequence every mutating handler below already
+// runs inline, for the first caller OUTSIDE this file (factory_reset.c).
+bool ota_http_authenticate_request(httpd_req_t *req, ota_http_context_t ctx, char ip_out[46])
+{
+    get_client_ip(req, ip_out, 46);
+
+    size_t mac_hex_len = httpd_req_get_hdr_value_len(req, OTA_MAC_HEADER);
+    if (mac_hex_len != 64) {
+        ESP_LOGW(TAG, "OTA authenticate(ctx=%d) from %s: missing or malformed X-Ota-Mac header "
+                      "(len %u, want 64)",
+                 (int)ctx, ip_out, (unsigned)mac_hex_len);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                             "missing or malformed X-Ota-Mac header (want 64 hex chars)");
+        return false;
+    }
+    char mac_hex[65];
+    if (httpd_req_get_hdr_value_str(req, OTA_MAC_HEADER, mac_hex, sizeof(mac_hex)) != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "could not read X-Ota-Mac header");
+        return false;
+    }
+    uint8_t mac[32];
+    if (!hex_decode(mac_hex, 64, mac)) {
+        ESP_LOGW(TAG, "OTA authenticate(ctx=%d) from %s: X-Ota-Mac is not valid hex", (int)ctx, ip_out);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "X-Ota-Mac must be 64 hex characters");
+        return false;
+    }
+
+    ota_http_verify_result_t vr = ota_http_verify_request(ctx, mac, ip_out);
+    if (vr != OTA_HTTP_VERIFY_OK) {
+        httpd_resp_send_err(req, HTTPD_403_FORBIDDEN, verify_result_str(vr));
+        return false;
+    }
+    return true;
+}
+
+// See ota_http.h's doc comment above this function's declaration.
+bool ota_http_auth_disabled(void)
+{
+    const char *ap_password = wifi_prov_get_ap_password();
+    return !ap_password || ap_password[0] == '\0';
 }
 
 // Formats into a comfortably large scratch buffer, then copies (truncating
@@ -1891,6 +1968,7 @@ esp_err_t ota_http_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_bus_or_
      * failure count while the others reset is the kind of asymmetry that
      * only shows up the day someone actually calls ota_http_start() twice. */
     memset(&s_lockout_recovery_exit, 0, sizeof(s_lockout_recovery_exit));
+    memset(&s_lockout_factory_reset, 0, sizeof(s_lockout_factory_reset));
     s_update_claim = OTA_UPDATE_NONE;
 
     httpd_handle_t server = wifi_provision_http_get_server();

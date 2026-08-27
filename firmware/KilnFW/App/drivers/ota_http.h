@@ -91,11 +91,23 @@ esp_err_t ota_http_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_bus_or_
 // signed for one must not double as authorization for another, and repeated
 // wrong-password guesses against this endpoint must not be able to also burn
 // through (or benefit from) the esp/pico/esp-rollback lockout budgets.
+// OTA_HTTP_CONTEXT_FACTORY_RESET is the same story again, for POST
+// /api/factory_reset (factory_reset.c): TODO.md flagged that route as
+// "strictly more destructive than POST /api/ota/esp/rollback, which IS
+// challenge-response authenticated" -- it erases zone config / Wi-Fi
+// credentials / saved profiles and reboots, yet had no authentication of any
+// kind. It gets its own context string ("factory-reset") and its own lockout
+// state for the identical reason every other context above does: a MAC
+// signed for pushing an image, rolling one back, or forcing a recovery-mode
+// reboot must not double as authorization to wipe the board's configuration,
+// and repeated wrong-password guesses against this route must not share (or
+// burn through) any other route's 3-strikes budget.
 typedef enum {
     OTA_HTTP_CONTEXT_ESP = 0,
     OTA_HTTP_CONTEXT_PICO,
     OTA_HTTP_CONTEXT_ESP_ROLLBACK,
     OTA_HTTP_CONTEXT_RECOVERY_EXIT,
+    OTA_HTTP_CONTEXT_FACTORY_RESET,
 } ota_http_context_t;
 
 typedef enum {
@@ -104,6 +116,17 @@ typedef enum {
     OTA_HTTP_VERIFY_NO_VALID_NONCE, // never issued, expired, or already used --
                                      // NOT counted as an auth failure, see .c
     OTA_HTTP_VERIFY_BAD_MAC,
+    // The AP password (wifi_prov_get_ap_password()) is empty -- an open AP.
+    // HMAC-SHA256 with a zero-length key is well-defined and this codebase
+    // used to accept it silently, but a zero-length key is PUBLIC (anyone who
+    // can reach the board already knows it is empty), so the "prove you know
+    // the password" property the whole challenge/response scheme exists for
+    // collapses to nothing. Refused outright rather than treated as "any MAC
+    // matches" or "no MAC matches" -- see ota_http_verify_request()'s .c
+    // comment for why this is checked AFTER the BOOT-button bypass (which
+    // must keep working -- it is the only way to recover an open-AP board)
+    // and BEFORE the nonce/HMAC math runs at all.
+    OTA_HTTP_VERIFY_NO_AP_PASSWORD,
 } ota_http_verify_result_t;
 
 // Verifies a client's claimed MAC against the currently active challenge
@@ -125,6 +148,43 @@ typedef enum {
 // OTA_HTTP_VERIFY_OK.
 ota_http_verify_result_t ota_http_verify_request(ota_http_context_t ctx, const uint8_t mac[32],
                                                   const char *client_ip);
+
+// Exported so a caller OUTSIDE this file can run the exact same
+// "X-Ota-Mac header present and exactly 64 hex chars -> hex-decode ->
+// ota_http_verify_request()" sequence every mutating route in this file
+// already runs, without duplicating that header-parsing logic -- until now
+// it was private to ota_http.c (static hex_decode(), inline header reads
+// repeated in ota_esp_post_handler()/ota_pico_post_handler()/
+// ota_esp_rollback_post_handler()/ota_recovery_exit_post_handler()).
+// factory_reset.c's POST /api/factory_reset is the first such caller (TODO.md:
+// that route is "strictly more destructive than POST /api/ota/esp/rollback,
+// which IS challenge-response authenticated" and had no auth at all).
+//
+// On success (OTA_HTTP_VERIFY_OK), returns true, writes the client's IP into
+// ip_out (must be >= 46 bytes -- same buffer size every handler in this file
+// uses), and sends nothing -- the caller proceeds with its own logic (and can
+// reuse ip_out in its own log lines, matching this file's own convention).
+//
+// On any refusal -- malformed/missing header, bad hex, or any non-OK
+// ota_http_verify_request() result -- returns false, HAS ALREADY SENT the
+// appropriate error response (400 for a malformed header, 403 with
+// verify_result_str()'s message otherwise), and the caller's only remaining
+// job is to return ESP_OK without sending anything else.
+bool ota_http_authenticate_request(httpd_req_t *req, ota_http_context_t ctx, char ip_out[46]);
+
+// True when this board's OTA auth is currently a no-op: the AP password
+// (wifi_prov_get_ap_password()) is empty. Every ota_http_verify_request()
+// call already refuses outright in this state (OTA_HTTP_VERIFY_NO_AP_PASSWORD)
+// -- this accessor exists so the condition can also be surfaced somewhere an
+// operator will actually see it without triggering an OTA attempt first,
+// the same "this board has no OTA auth right now must be permanently
+// visible" reasoning dashboard_http.c's existing boot_button_bypass_active
+// field on GET /api/status already follows for the OTHER way auth can be
+// bypassed (the physical BOOT-button recovery window). dashboard_http.c is
+// out of scope for this pass -- the one line it needs to add is
+// `APPEND(",\"ota_auth_disabled\":%s", ota_http_auth_disabled() ? "true" : "false");`
+// alongside its existing boot_button_bypass_active APPEND() call.
+bool ota_http_auth_disabled(void);
 
 // --- Single cross-processor update mutex (TODO.md 9.4/9.5) ---------------
 //

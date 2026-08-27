@@ -152,6 +152,33 @@ esp_err_t factory_reset_execute(factory_reset_scope_t scope)
 
 static esp_err_t reset_post_handler(httpd_req_t *req)
 {
+    /* Authenticate FIRST, before the interlock check below: TODO.md flagged
+     * this endpoint as "strictly more destructive than POST /api/ota/esp/
+     * rollback, which IS challenge-response authenticated" -- this route
+     * erases zone config / Wi-Fi credentials / saved profiles and reboots,
+     * and until this pass had no authentication at all. It now runs the
+     * identical X-Ota-Mac header -> hex-decode -> challenge/HMAC/lockout
+     * check every other mutating OTA route runs, via
+     * ota_http_authenticate_request() (ota_http.h) -- the header-parsing
+     * helper exported from ota_http.c specifically so this file did not have
+     * to duplicate it. Its own context (OTA_HTTP_CONTEXT_FACTORY_RESET) means
+     * a MAC signed for pushing/rolling back a firmware image cannot double as
+     * authorization to wipe the board's configuration, and a wrong-password
+     * guess here burns only this route's own 3-strikes budget, not any
+     * other's -- same reasoning as every other ota_http_context_t.
+     *
+     * Auth before the interlock check for the same reason ota_http_check_
+     * interlocks()'s own doc comment gives for every other route: an
+     * unauthenticated caller must not be able to use this endpoint's refusal
+     * reason (which can name a live zone temperature) to learn live kiln
+     * telemetry. On refusal, ota_http_authenticate_request() has already sent
+     * the response (400 for a malformed header, 403 otherwise); this handler
+     * has nothing left to do but return. */
+    char ip[46];
+    if (!ota_http_authenticate_request(req, OTA_HTTP_CONTEXT_FACTORY_RESET, ip)) {
+        return ESP_OK;
+    }
+
     /* Refuse while a firing is running/paused or any heater is commanded on
      * (audit 2026-08-27: this endpoint had NO interlock and NO authentication
      * at all). It erases the zone config -- relay maps, guard thresholds,
@@ -172,7 +199,7 @@ static esp_err_t reset_post_handler(httpd_req_t *req)
                                                              interlock_reason,
                                                              sizeof(interlock_reason));
     if (gate != OTA_INTERLOCK_OK) {
-        ESP_LOGW(TAG, "factory_reset refused by interlock: %s", interlock_reason);
+        ESP_LOGW(TAG, "factory_reset from %s: refused by interlock: %s", ip, interlock_reason);
         return ota_http_send_interlock_refusal(req, gate, interlock_reason);
     }
 
@@ -221,6 +248,7 @@ static esp_err_t reset_post_handler(httpd_req_t *req)
         return ESP_OK;
     }
 
+    ESP_LOGW(TAG, "factory_reset from %s: authenticated, scope '%s' accepted", ip, scope->name);
     esp_err_t first_err = execute_scope(scope);
 
     if (first_err != ESP_OK) {
