@@ -19,6 +19,90 @@ board), `docs/CURRENT_SENSE.md` (the analog front end),
 (every tunable) and `docs/GUARD_TEST_MATRIX.md` (how each guard is proven)
 throughout.
 
+---
+
+## Audit 2026-08-27 — open items
+
+A six-agent read-only audit of both firmwares. Fixed and committed already:
+the dead `s_guard_cfg` (S1 unreachable at any temperature), the
+`tc_placement_valid` gate (S2/S10 armed on uncommissioned boards). Everything
+below is **confirmed by code reading and still open**, ordered by severity.
+
+- [ ] **`safety_guards_try_clear()` grants a full re-arm window against a
+      still-present hazard.** `guard_condition_still_immediate()` refuses a
+      clear for S5/S12/S13/S6b only; S2, S3, S9 and S11 fall through to a
+      clear-and-retick that zeroes the accumulator the guard needs. Worst case
+      is S3 (welded SSR): clear is accepted, `relay_owner` re-arms, and it
+      takes another `stuck_on_time_s` (20 s) of mains into a failed-closed
+      element before it can trip again — repeatable indefinitely by
+      re-clearing. S11 is 600 s, S2 is 120 s. Extend the refusal to these four,
+      recomputing each condition from the current tick's input. Needs a
+      negative test per guard proving the refusal can fail.
+- [ ] **`TRIP_INEFFECTIVE` (S9, welded contactor) is clearable.**
+      `ARCHITECTURE.md` §9 and `SAFETY_MODEL.md` §4 both describe it as having
+      "no exit except power removal at the breaker"; in code a `CLEAR_TRIP`
+      wipes `trip_ineffective`, re-arms K4, and silences the one alarm whose
+      required response is *go to the breaker* — while mains may still be
+      flowing through fused contacts. Make it unclearable in firmware, and
+      refuse it in `link_frame_decide_clear_trip()` too.
+- [ ] **A trip during GRACE, once cleared, jumps straight to ARMED and
+      discards the remaining startup grace.** `relay_owner_clear_trip()` is
+      unconditional and `relay_grace_tick()` has no path back into GRACE. An
+      E-stop asserted and cleared 10 s into a boot leaves the board ARMED at
+      t=10 s instead of t=60 s, with rolling windows that have no samples in
+      them yet. Clear should return to GRACE, not ARMED.
+- [ ] **A dropped `relay_owner_command_trip()` silently fails to open K4 and
+      blinds S9 in the same stroke.** The return is discarded, the queue send
+      is non-blocking, and `safety_guards_tick()` returns "newly tripped" only
+      once — so a full queue means the trip command is never re-issued.
+      Compounding: S9's window is driven by `relay_owner_is_energized()`, a
+      software mirror of the *intended* state, so the one failure mode S9
+      cannot see is our own de-energize path failing. Retry until it succeeds,
+      and consider driving S9's window from `is_tripped` as well.
+- [ ] **Guard windows count nominal ticks, not wall-clock.** `dt_s` is a
+      compile-time constant; `clock_health` detects a stalled clock but does
+      not touch `dt_s`. Under sustained scheduling pressure every safety window
+      silently lengthens with nothing reporting it. Compute `dt_s` from
+      successive `now_ms` deltas, clamped, falling back to the constant when
+      the clock is stalled.
+- [ ] **Consumers do not age-check `thermo`/`current` snapshots.**
+      `ARCHITECTURE.md` §6 says staleness is the consumer's job;
+      `safety_core_build_input()` checks context age but never
+      `thermo.timestamp_ms` or `current.timestamp_ms`. A `thermo_task` publish
+      that repeatedly loses its mutex leaves `safety_core` on the last good
+      reading while the task keeps feeding the watchdog — the documented
+      "stale reading looks fresh" class.
+- [ ] **S13's producer does not exist.** `sample_counter_advancing` is
+      hardcoded false. Harmless only because `tc_source` is pinned to `OWN_J7`;
+      **fixing the config wiring without also fixing this turns a dormant
+      guard into a hard brick** (S13 trips unconditionally and correctly
+      refuses every clear). Ordering hazard — see the note in
+      `SAFETY_MODEL.md`'s guard table.
+- [ ] **Config record field ranges are validated on commit but not on load.**
+      `config_params_validate_ranges()` runs only at COMMIT_CONFIG; a
+      CRC-valid record from a *different build* with different semantics loads
+      unvalidated and reaches the guards. Run it in `config_store_unpack()` and
+      fall back to defaults with `calibration_missing` on failure.
+- [ ] **`config_store_get_config_version()` truncates `seq` to 8 bits**, so
+      every 256th commit (and any never-committed board) reports version 0,
+      which `config_store_confirm_crc_ok()` reads as "no valid config" — the
+      updated slot then stays `PENDING_VERIFY` forever and is never promoted.
+- [ ] **`config_store_write()` erases the whole sector then programs.** Power
+      loss in between loses all commissioning (fails safe — heat refused — but
+      total). Ping-pong across two sectors, or at minimum log the wrap loudly.
+- [ ] **Only one trip reason is ever retained.** `ARCHITECTURE.md` §9 promises
+      `trip_mask` is "a bitmask indexed by guard number"; it is a single bit at
+      `reason-1`, and that index diverges from the guard number after S6.
+      Either implement per-guard masks or correct both docs.
+- [ ] **`SAFETY_MODEL.md` §6 lists an E-stop assert/release cycle as a clear
+      path.** No such path exists in code — nothing observes an E-stop release
+      edge. Remove the claim or build it.
+- [ ] **`watchdog_enable(..., pause_on_debug = true)`** with a probe
+      permanently attached means a core halted in a fault state is never reset,
+      disabling the documented fail-safe reboot on every bench board. GPIO6
+      stays low through a halt so this is not an immediate heat-on hazard.
+      Verify on the bench, then decide deliberately.
+
 **Hardware-gated, repo-wide, historical**: the ESP32<->RP2040 isolated link
 went unproven for a long time — `link_status` reported `frames_received: 0`
 and the Pico console emitted zero bytes. The cause turned out to be the

@@ -5,6 +5,134 @@ this file owns the main-firmware detail. The cross-processor items — the swapp
 safety-UART pins, `CommonFW`, and the safety-liveness gate on heating — are
 sequenced there and tracked in [`../SaftyFW/TODO.md`](../SaftyFW/TODO.md).
 
+## Audit 2026-08-27 -- open items
+
+A six-agent read-only audit of both firmwares. Already fixed and committed: a
+stack overflow in `safety_parse_fw_version()`, the unknown-peer-version
+fail-open, the trip-event dedup desync, the factory-reset interlock, the
+gitignored OTA-rollback setting, and the zones-page error conflation.
+Everything below is **confirmed by code reading and still open**, ordered by
+severity.
+
+- [ ] **A v3/v4 zones blob is adopted as garbage and marked valid.**
+      `zones_http.c`'s older-version NVS load path does **no length check** and
+      never calls `validate_zones_cfg()`, and the migration assumes the struct
+      only ever grew at the tail -- false, since three of four bumps added
+      fields to `zone_cfg_t`, which is an *array element*, so `zones[1]` and
+      `zones[2]` are displaced. `tc_type` was also inserted mid-struct.
+      Result: `relay_mask`, `max_temp_c` and all eight guard thresholds on
+      zones 1-2 become reinterpreted float garbage with the config flagged
+      trustworthy. **This is the owner's "did a partial config from an
+      incompatible firmware load?" question, and the answer is yes.** Fix: a
+      per-version expected-length table checked before anything is touched;
+      typed per-version structs with explicit field-by-field upconversion
+      instead of memcpy-and-patch; run `validate_zones_cfg()` on this path too
+      and clear the valid flag rather than partially defaulting; add a CRC.
+      Note the snapshot-restore path has the same memcpy defect but *does*
+      validate afterwards, which is why it usually rejects -- same bug, one has
+      a net.
+- [ ] **`profiles_http.c` accepts `version == 0`** at any length >= 1 and
+      installs it as a used slot. Same structural sibling waiting to happen:
+      `profile_t` embeds a `segments[]` array, so the first field ever added to
+      `profile_segment_t` reproduces the zones bug exactly. Fix before
+      `PROFILE_VERSION` reaches 2.
+- [ ] **`POST /api/factory_reset` is still unauthenticated.** The interlock
+      landed; auth did not. It is strictly more destructive than
+      `POST /api/ota/esp/rollback`, which *is* challenge-response
+      authenticated. Needs a new `ota_http_context_t` plus an exported
+      request-verify helper (the header parsing is currently private to
+      `ota_http.c`).
+- [ ] **An open AP (empty AP password) reduces OTA auth to nothing.**
+      `ota_http.c` HMACs with a zero-length key and does not reject it, so
+      anyone who can reach the board can compute a valid MAC from public
+      information and flash both processors. Refuse when `pw_len == 0`, and
+      surface the condition on `/api/status` next to
+      `boot_button_bypass_active` -- the codebase already accepts that "this
+      board has no OTA auth right now" must be permanently visible.
+- [ ] **`POST /api/zones` and `POST /api/rules` are not gated on a running
+      firing**, unlike `kiln_cfg_http`'s apply and `backup_http`'s restore,
+      which write the same `zones_cfg_t`. Changing `relay_mask` mid-run moves
+      the firing onto a different physical relay and leaves the old one
+      wherever it was last commanded, with nobody driving it off.
+- [ ] **`/api/status` has ~46 bytes of margin in a 2500-byte buffer, and goes
+      ~120 bytes negative if the build strings need escaping.**
+      `safety_build_commit`/`datetime` arrive over the link from the RP2040, so
+      a corrupt or hostile FW_VERSION frame overflows it deterministically ->
+      truncated JSON -> the dashboard's "Loading..." hang. Stop hand-sizing
+      this one: chunk it (as `profiles_http.c` already does) or return 500 on
+      overflow instead of a half-object.
+- [ ] **`GET /api/profiles` overflows at 8 slots with escape-heavy names**
+      (800 bytes needed vs 784 available) producing syntactically invalid JSON.
+      Per-entry budget of 96 ignores that a 15-char name escapes to 30.
+- [ ] **`/api/readiness` drops items silently and can emit invalid JSON.**
+      `append_item` returns the offset unchanged on overflow while `first` is
+      set unconditionally, so a failed first item yields `[,{...}`; the closing
+      `]}` is skipped on overflow too. ~156 bytes of margin at 12 items.
+- [ ] **Fifteen `httpd_resp_send(req, json, n)` sites use `snprintf`'s return
+      unclamped at the high end** -- a stack over-read that sends adjacent
+      stack memory to the client if the format ever exceeds the buffer. Two
+      sites pair a 192-byte destination with a 257-byte escaped source.
+- [ ] **PID zones can command heat with no valid reading.** The
+      deferred-on-time payback block in `profile_executor.c` runs
+      unconditionally, outside the `if (sensor_ok[zi])` that zeroes `duty`, so
+      a zone that accrued credit under the load cap and then loses its
+      thermocouple gets `boosted_duty` up to 1.0. Bang-bang mode explicitly
+      refuses this case; PID has no equivalent. >= 3 s of full duty before
+      guard 6 debounces.
+- [ ] **Danger mode leaves relays energized when its window closes.** Both the
+      timeout and the operator stop release heat-enable and restore the gate,
+      but neither commands the four ESP relays off -- and restoring the gate
+      only blocks *new* ON commands. A relay closed during danger mode stays
+      closed indefinitely under a gate that would now refuse to close it.
+- [ ] **Fault sources asserted by `autotune_engine` and by guard 9 are never
+      deasserted.** Neither has the `global_fault_source` bookkeeping
+      `profile_executor` uses, and nothing else clears an arbitrary source, so
+      one autotune trip or one 10-second executor stall blocks all heat
+      board-wide until reboot -- and masks any later, different fault.
+- [ ] **Guard 5's absolute ceiling is off by default.** `max_temp_c == 0` means
+      "no ceiling", and a zone never saved through `/settings/zones` fires with
+      none -- while `autotune_engine` and `SAFETY_MODEL.md` both already assume
+      the guard is armed. Either substitute a hard ceiling or refuse to start a
+      firing on such a zone.
+- [ ] **A completed run never releases its relay ownership** (only
+      `profile_executor_halt()` does), so after a normal finish every manual
+      relay command is refused as "owned by a profile" when none is running.
+- [ ] **`rules_task` applies zone calibration with a channel index** where the
+      executor correctly combines raw then applies once with the zone index --
+      so a rule threshold means a different temperature than the control loop
+      on any multi-thermocouple zone.
+- [ ] **`IO_CMD_SX_LED_DRIVER` can PWM a relay coil with no safety gate, no
+      ownership gate and no remap**, and never updates `relay_shadow` -- so the
+      dashboard reports the coil off while it is energized. Its two immediate
+      neighbours in the same switch both check `kiln_io_relay_pin_mask()`.
+      `IO_CMD_SX_RESET` and the pullup/opendrain/int-mask setters have related
+      gaps.
+- [ ] **`board_temps.c` labels cold-junction readings by array position**, but
+      `MAX31856_read_all()` compacts over failed channels -- so with channel 0
+      dead, channel 1's reading is displayed as "ch 0" and the dead channel is
+      not the one shown absent. Index by `.channel`, as
+      `ui_page_thermo_faults.c` already does.
+- [ ] **A CJRANGE fault NaNs only the cold junction**, but the hot-junction
+      value is cold-junction-compensated in hardware -- so an out-of-range cold
+      junction yields a wrong hot-junction temperature reported as a plausible
+      number.
+- [ ] **`dashboard_get_status()` calls `kiln_io_read()` from the LVGL task**,
+      bypassing `kiln_io_owner` and consuming the SX1509 interrupt latch that
+      another reader may be waiting for.
+- [ ] **`spi_owner_transfer()` waits `portMAX_DELAY`**, defeating every
+      caller-side timeout above it if the owner task wedges.
+- [ ] **`gpio_probe`'s deny-list omits the three `~FAULT` pins**, so a probe
+      session can drive them high permanently and forge "no fault" at the pin
+      level.
+- [ ] **Docs contradicting code:** `KilnFW/docs/HARDWARE.md` records neither
+      the thermocouple channel rotation nor the relay 2<->4 swap, while
+      `MAX31856.c` cites it as ground truth; `SAFETY_MODEL.md`'s guard-5 row
+      needs a "when configured" qualifier; this file's own claim that a
+      relay-authority block "is final regardless of ownership" is no longer
+      true with danger mode present.
+
+---
+
 This is a planning doc: it tracks work not yet done, plus enough context on
 finished, adjacent work to act on what's left. A finished section is
 collapsed to a short status line pointing at the doc that owns its detail —

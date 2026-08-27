@@ -222,6 +222,19 @@ it wrong breaks guards in opposite directions:
 required commissioning field; until it is set, S2 and S10 stay off and S1 uses
 the fixed limit — the conservative reading of an unanswered question.
 
+> This was **false in the code until 2026-08-27**, and worth recording because
+> the failure was invisible from either side alone. The enum cannot express
+> "unset": `CHAMBER_AGREED` is 0, which is both the zero-initialised value and
+> the value that *arms* S2 and S10. So every uncommissioned board ran both
+> guards against a sensor whose placement had never been declared — the exact
+> opposite of the paragraph above, and a nuisance-trip generator on any board
+> whose safety thermocouple is shell- or exhaust-mounted. The fix is a separate
+> `tc_placement_valid` flag rather than renumbering the enum, because those
+> values are on the wire and in every already-commissioned board's flash
+> record. **When a field has no safe default, the type must be able to say
+> "unset" — a sentinel that collides with a real, guard-arming value is not a
+> sentinel.**
+
 ---
 
 ## 4. The guard suite
@@ -923,22 +936,34 @@ Provocation methods are in [`GUARD_TEST_MATRIX.md`](GUARD_TEST_MATRIX.md).
 
 ### Guards
 
-| | Guard | Class | Built | Host-tested | Hardware-verified |
-|---|---|---|---|---|---|
-| S1 | Absolute over-temperature | TRIP | [x] | [x] | [ ] |
-| S2 | Sustained excess over setpoint | TRIP | [x] | [x] | [ ] |
-| S3 | Load active, no heat commanded | TRIP | [x] | [x] | [ ] |
-| S4 | Heat commanded, load inactive | WARN | [x] | [x] | [ ] |
-| S5 | Safety thermocouple invalid | WARN→TRIP | [x] | [x] | [ ] |
-| S6 | Main controller unhealthy | TRIP | [x] | [x] | [ ] |
-| S7 | E-stop | TRIP | [x] | [x] | [ ] |
-| S8 | Implausible rate of rise | TRIP, off by default | [ ] | [ ] | [ ] |
-| S9 | Trip ineffective / contactor welded | ESCALATE | [x] | [x] | [ ] |
-| S10 | Safety TC vs zone TC disagreement | WARN | [x] | [x] | [ ] |
-| S11 | Frozen safety reading | TRIP | [x] | [x] | [ ] |
-| S12 | Cold junction / enclosure over-temp | WARN→TRIP | [x] | [x] | [ ] |
-| S13 | Borrowed channel not updating | WARN→TRIP | [x] | [x] | [ ] |
-| — | Runtime config integrity | TRIP | [ ] | [ ] | [ ] |
+> **"Built" and "host-tested" describe the pure module in `safety_guards.c`.
+> They do NOT promise the integration hands the guard a threshold it can act
+> on.** An audit on 2026-08-27 found that distinction was load-bearing and
+> undocumented: `s_guard_cfg` in `safety_core.c` was never populated from
+> `config_store`, so **S1 could not fire at any temperature on any board**,
+> commissioned or not, while this table showed it built and host-tested. The
+> pure function was correct and well tested the whole time; the value never
+> arrived. Fixed by `safety_core_load_guard_cfg()`, and the "Integrated"
+> column below now tracks that question separately. When adding a guard, tick
+> Integrated only after confirming a commissioned value actually reaches it
+> on target — a host test cannot see this class of defect.
+
+| | Guard | Class | Built | Host-tested | Integrated | Hardware-verified |
+|---|---|---|---|---|---|---|
+| S1 | Absolute over-temperature | TRIP | [x] | [x] | [x] *(fixed 2026-08-27; was NOT integrated — see note above)* | [ ] |
+| S2 | Sustained excess over setpoint | TRIP | [x] | [x] | [x] *(gated on `tc_placement_valid` since 2026-08-27; previously armed on uncommissioned boards)* | [ ] |
+| S3 | Load active, no heat commanded | TRIP | [x] | [x] | [x] | [ ] |
+| S4 | Heat commanded, load inactive | WARN | [x] | [x] | [x] | [ ] |
+| S5 | Safety thermocouple invalid | WARN→TRIP | [x] | [x] | [x] | [ ] |
+| S6 | Main controller unhealthy | TRIP | [x] | [x] | [x] | [ ] |
+| S7 | E-stop | TRIP | [x] | [x] | [x] | [ ] |
+| S8 | Implausible rate of rise | TRIP, off by default | [ ] | [ ] | [ ] | [ ] |
+| S9 | Trip ineffective / contactor welded | ESCALATE | [x] | [x] | [x] | [ ] |
+| S10 | Safety TC vs zone TC disagreement | WARN | [x] | [x] | [x] *(same `tc_placement_valid` gate as S2)* | [ ] |
+| S11 | Frozen safety reading | TRIP | [x] | [x] | [x] | [ ] |
+| S12 | Cold junction / enclosure over-temp | WARN→TRIP | [x] | [x] | [x] | [ ] |
+| S13 | Borrowed channel not updating | WARN→TRIP | [x] | [x] | [ ] **dormant — `sample_counter_advancing` is hardcoded false in `safety_core.c`; do NOT commission `tc_source` to BORROWED_ZONE/BOTH until a real producer exists, or S13 trips unconditionally** | [ ] |
+| — | Runtime config integrity | TRIP | [ ] | [ ] | [ ] | [ ] |
 
 S2/S3/S4/S6/S9/S10/S13 built and host-tested 2026-08-18: `src/safety_guards.c`
 now implements 12 of 13 guards (everything but S8, which ships disabled by
