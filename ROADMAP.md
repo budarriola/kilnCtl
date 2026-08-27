@@ -697,22 +697,39 @@ Owned by [`firmware/KilnFW/TODO.md`](firmware/KilnFW/TODO.md) §§12–13.
       instead of a half-document. Negative-tested on the board with the
       buffer cut to 900 bytes -- four items fit and the response carried the
       "Checklist incomplete" entry. 2026-08-26/27, `4e8e1f1`, `88f12e0`
-- [ ] **Re-read the stack margins after a real firing.** A high-water mark is
-      only as good as the worst path taken, and this board has never run a
-      profile with rules configured, so `rules_task`'s 2736 bytes is a FLOOR on
-      true usage, not a peak. 33% headroom is provisional until then
-- [ ] **Audit whether anything `rules_task` calls writes NVS or flash.** If
-      nothing does, its stack moves to PSRAM and costs no internal DRAM at all,
-      which would give back the 1024 bytes the resize spent. A flash write from
-      a PSRAM-stack task asserts in ESP-IDF's cache-disable path — the
-      `safety_cfg_store` incident. `rules_task.c` itself makes no `nvs_*` call;
-      its callees are unaudited
+- [~] **Re-read the stack margins after a real firing.** Done 2026-08-27 for
+      the paths a bench board can take: a PID firing on zone 0 run concurrently
+      with a configured rule (relay 4 rule-driven off a TEMP condition), through
+      a guard-1 trip and the fault escalation that follows. Every margin came
+      back **identical** to the idle reading -- `rules_task` still 1368 B free
+      of 4096 (33.4%). Left open rather than closed because the heaters are
+      disconnected, so the run tripped at 60 s and never reached a segment
+      advance, a hold, or a multi-segment transition; those paths are still
+      unmeasured. What is now retired is the specific worry that the rule
+      evaluator's own path was unmeasured -- it has been walked
+- [x] **Audit whether anything `rules_task` calls writes NVS or flash.**
+      Done 2026-08-27, transitively over every callee: nothing writes NVS or
+      flash. The audit did find one real reach, and not the kind this note
+      predicted — not a write but a cache-disabling *read*.
+      `dashboard_get_status()`, called every tick by this task, performed
+      `esp_flash_get_size()` and `esp_image_get_metadata()` lazily behind a
+      first-caller-wins static, so a PSRAM stack was safe only because the
+      httpd task happened to get there first: a race, not a guarantee. Those
+      reads are now primed at startup on the app_main task, and the stack
+      moved to PSRAM. **The standing DRAM regression is gone** — `dram_free`
+      at the `uart_bridges_1` trough went 6771 → 10675 and the largest free
+      block 4608 → 7680, back to baseline, with no `DRAM REGRESSION` line at
+      any stage. `47b004c`
 - [ ] **Reclaim internal DRAM from the four healthy stacks.** `uart_owner_task`
-      (77.9%), `uart_owner_evt_task` (82.1%), `system_uart_bridge` (65.8%) and
-      `rules_watchdog` (67.4%) are all internal-only and all measured with
-      wide margin. Blocked on the same firing caveat above — resize on a
-      measurement taken from an idle board and this project repeats the bug
-      class it just spent a day fixing
+      (77.9%), `uart_owner_evt_task` (82.1%), `system_uart_bridge` (66.0%) and
+      `rules_watchdog` (67.8%) are all internal-only and all measured with
+      wide margin — and the figures held unchanged through the 2026-08-27
+      firing above, so they are no longer idle-board-only numbers. Still not
+      done, deliberately: the regression that made this urgent is gone, the
+      firing did not reach a hold or a segment advance, and trimming a stack
+      on incomplete coverage for DRAM nobody currently needs is the bug class
+      this milestone exists to avoid. Revisit if internal DRAM gets tight
+      again, or after a firing that runs to completion
 - [ ] **HTTP connection resets under concurrency — reproducible, cause NOT
       established** (`TODO.md` §14, `f8ebfa0`). Eight parallel `/app.js`
       fetches reset one of them, 9 failures in 80 requests. Needs BOTH high
