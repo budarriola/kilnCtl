@@ -147,7 +147,15 @@ severity.
       Note the snapshot-restore path has the same memcpy defect but *does*
       validate afterwards, which is why it usually rejects -- same bug, one has
       a net.
-- [ ] **`profiles_http.c` accepts `version == 0`** at any length >= 1 and
+- [x] **`profiles_http.c` accepts `version == 0`** DONE 2026-08-27
+      (`ee38e39`), built to zones_http.c's design and closed BEFORE
+      PROFILE_VERSION reached 2, as this item asked. Note the near-miss: the
+      first version of the fix returned `sizeof(the current struct)` for
+      version 1, which rejected every profile the bench board already had and
+      marked them unused -- it reproduced the data loss it was written to
+      prevent, and only a hardware flash caught it. profiles_http.c now has
+      its own host-test executable (the seventh) so that case is a permanent
+      regression test rather than a scratch harness. at any length >= 1 and
       installs it as a used slot. Same structural sibling waiting to happen:
       `profile_t` embeds a `segments[]` array, so the first field ever added to
       `profile_segment_t` reproduces the zones bug exactly. Fix before
@@ -195,7 +203,10 @@ severity.
       truncated JSON -> the dashboard's "Loading..." hang. Stop hand-sizing
       this one: chunk it (as `profiles_http.c` already does) or return 500 on
       overflow instead of a half-object.
-- [ ] **`GET /api/profiles` overflows at 8 slots with escape-heavy names**
+- [x] **`GET /api/profiles` overflows at 8 slots with escape-heavy names**
+      DONE 2026-08-27 (`ee38e39`): the per-entry budget is sized against a
+      fully-escaped name, a reserve the per-entry writes may not touch keeps
+      the document closable, and a dropped entry is reported as an entry.
       (800 bytes needed vs 784 available) producing syntactically invalid JSON.
       Per-entry budget of 96 ignores that a 15-char name escapes to 30.
 - [x] **`/api/readiness` drops items silently and can emit invalid JSON.**
