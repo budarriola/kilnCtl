@@ -2096,7 +2096,14 @@ SAFETY_FLAG_LABELS: dict[int, str] = {
     SafetyFlag.FAULT: "fault line asserted (by us)",
     SafetyFlag.ESTOP: "E-stop asserted",
     SafetyFlag.RELAY: "safety relay K4 energized",
-    SafetyFlag.ENABLED: "heating enable granted",
+    # NOT "heating enable granted" -- that label shipped a real bug on the ESP
+    # side (fixed 2026-08-27) and was still live here. SaftyFW derives this bit
+    # from relay_owner being in the ARMED state, so it is true on any healthy,
+    # past-its-grace-period safety processor REGARDLESS of whether anyone ever
+    # sent REQUEST_ENABLE. Reading it as "my enable request was granted" is
+    # what produced a control that displayed the opposite of what it did.
+    # Whether heat was actually granted is RELAY (did K4 close) above.
+    SafetyFlag.ENABLED: "SaftyFW armed (relay_owner not tripped)",
     SafetyFlag.TEMP_VALID: "safety thermocouple valid",
 }
 

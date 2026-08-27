@@ -400,9 +400,33 @@ static bool safety_parse_fw_version(const uint8_t *p, uint8_t len, uint16_t *out
     if ((size_t)commit_len + i > (size_t)len) {
         return true; /* truncated commit -- the fields already set stand */
     }
-    memcpy(out_commit, &p[i], commit_len);
-    *out_commit_len = commit_len;
-    i += commit_len;
+    /* STACK OVERFLOW FIX (audit 2026-08-27). The bound above checks only that
+     * the SOURCE read stays inside the frame. commit_len is an untrusted wire
+     * byte (0..255) and out_commit is a 64-byte buffer, so a CRC-valid frame
+     * declaring commit_len=246 wrote 182 bytes past the caller's stack array,
+     * over its saved return address, on safety_poll_task. Reachable from any
+     * peer running mismatched or corrupted firmware -- exactly the case this
+     * link exists to survive. The shared codec (kilnlink_announce.c) always
+     * enforced this cap; only this hand-written parser ever lost it.
+     *
+     * Copy is capped; the PARSE OFFSET still advances by the full wire length,
+     * so the datetime/boot_id/config fields after this one stay correctly
+     * aligned instead of being read from the middle of an over-long commit
+     * string. Truncating rather than rejecting is deliberate: protocol and
+     * min_compatible were already parsed above and are what the compatibility
+     * gate acts on, so a build string too long to store is a cosmetic loss,
+     * not a reason to discard a frame that may be reporting a real version
+     * mismatch. */
+    uint8_t commit_copy = commit_len;
+    if ((size_t)commit_copy > KILNLINK_ANNOUNCE_MAX_COMMIT_LEN) {
+        ESP_LOGW(TAG, "FW_VERSION commit_len %u exceeds the %u-byte maximum -- storing a truncated "
+                      "build string (peer firmware is mismatched or the frame is corrupt)",
+                 (unsigned)commit_len, (unsigned)KILNLINK_ANNOUNCE_MAX_COMMIT_LEN);
+        commit_copy = (uint8_t)KILNLINK_ANNOUNCE_MAX_COMMIT_LEN;
+    }
+    memcpy(out_commit, &p[i], commit_copy);
+    *out_commit_len = commit_copy;
+    i += commit_len; /* full wire length -- see the comment above */
     if (i >= (size_t)len) {
         return true;
     }
@@ -410,9 +434,17 @@ static bool safety_parse_fw_version(const uint8_t *p, uint8_t len, uint16_t *out
     if ((size_t)datetime_len + i > (size_t)len) {
         return true;
     }
-    memcpy(out_datetime, &p[i], datetime_len);
-    *out_datetime_len = datetime_len;
-    i += datetime_len;
+    /* Same cap, same reasoning, same 32-byte destination -- see commit above. */
+    uint8_t datetime_copy = datetime_len;
+    if ((size_t)datetime_copy > KILNLINK_ANNOUNCE_MAX_DATETIME_LEN) {
+        ESP_LOGW(TAG, "FW_VERSION datetime_len %u exceeds the %u-byte maximum -- storing a "
+                      "truncated build datetime",
+                 (unsigned)datetime_len, (unsigned)KILNLINK_ANNOUNCE_MAX_DATETIME_LEN);
+        datetime_copy = (uint8_t)KILNLINK_ANNOUNCE_MAX_DATETIME_LEN;
+    }
+    memcpy(out_datetime, &p[i], datetime_copy);
+    *out_datetime_len = datetime_copy;
+    i += datetime_len; /* full wire length -- see the comment above */
     if (i >= (size_t)len) {
         return true;
     }
@@ -483,6 +515,27 @@ static void safety_apply_fw_version(SafetyLinkClass *link, const uart_proto_mess
         boot_id_changed = (!link->pico_boot_id_known) || (peer_boot_id != link->pico_boot_id);
         link->pico_boot_id = peer_boot_id;
         link->pico_boot_id_known = true;
+        if (boot_id_changed) {
+            /* The Pico restarted, so its trip_seq counter restarted at 0 too
+             * -- forget ours, or the dedup below mistakes the new boot's
+             * first trip for one we have already seen (audit 2026-08-27:
+             * another instance of this repo's recurring "counter reset on
+             * one side of a producer/consumer pair" class). Concretely:
+             * Pico trips with seq=1, watchdog-reboots, the same condition
+             * trips again with seq=1, and safety_apply_trip_event()'s
+             * is_new_event test reads false -- so the "safety processor
+             * TRIPPED" log for a genuine second trip is never emitted,
+             * exactly in the reboot-loop scenario where that record matters
+             * most. The cached trip fields themselves still refresh, so this
+             * costs the human-visible record rather than the trip response.
+             *
+             * Only the dedup bookkeeping is cleared, deliberately NOT the
+             * cached trip DATA: a trip reported just before the reboot is
+             * still the most recent thing that actually happened, and
+             * blanking it would erase evidence rather than refresh it. */
+            link->cached.trip_event_ever_received = false;
+            link->cached.trip_last_seq = 0u;
+        }
     }
     /* TODO.md owner-report item 5: only overwrite the cached build/config
      * identity once a frame actually reached that far -- a truncated reply
@@ -1617,7 +1670,19 @@ static void safety_update_health(SafetyLinkClass *link)
         up = safety_link_up_locked(link);
         age = safety_age_ms_locked(link);
         policy = link->fault_on_link_loss;
-        version_mismatch = link->peer_version_known && !link->peer_version_compatible;
+        /* Fails CLOSED on an unknown peer version (audit 2026-08-27). This
+         * used to be `peer_version_known && !peer_version_compatible`, i.e.
+         * a peer whose version had never been established counted as
+         * compatible and the link fault was cleared -- permitting every
+         * relay-on path against a safety processor we had never actually
+         * handshaken with. That is reachable in normal operation, not just
+         * in theory: `up` is derived purely from telemetry recency, so a
+         * Pico streaming status every 500 ms makes the link look healthy,
+         * while its unsolicited boot FW_VERSION is a no-ACK broadcast that
+         * can simply be missed. The Pico side already gets this right --
+         * link_task.c treats an unset peer version as "unknown, therefore
+         * too old". Unknown and incompatible now both assert the fault. */
+        version_mismatch = !link->peer_version_known || !link->peer_version_compatible;
         update_in_progress = link->update_in_progress_quiet;
         safety_unlock(link);
     }
