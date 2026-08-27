@@ -60,6 +60,7 @@ if(NOT CMAKE_BUILD_EARLY_EXPANSION)
         "settings_page.html" "manual_page.html" "board_temps_page.html" "backup_page.html"
         "settings_display_page.html"
         "safety_commissioning_page.html"
+        "safety_config_page.html"
         "zones_page.html")
     set(KILNCTL_GZIP_ASSET_FILES "")
     foreach(asset ${KILNCTL_GZIP_ASSETS})

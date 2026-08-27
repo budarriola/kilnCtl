@@ -133,6 +133,12 @@ static const char *TAG = "zones_http";
  * budget reasoning that makes gzip the only stored representation). */
 extern const uint8_t zones_page_html_gz_start[] asm("_binary_zones_page_html_gz_start");
 extern const uint8_t zones_page_html_gz_end[] asm("_binary_zones_page_html_gz_end");
+/* The safety-timings page (/settings/safety). Served from this file rather
+ * than a module of its own because it edits the same zones_cfg_t record
+ * through the same /api/zones endpoint -- see the page's own header comment
+ * on why the two pages have to echo each other's fields back. */
+extern const uint8_t safety_config_page_html_gz_start[] asm("_binary_safety_config_page_html_gz_start");
+extern const uint8_t safety_config_page_html_gz_end[] asm("_binary_safety_config_page_html_gz_end");
 
 /* One zone per configured thermocouple channel -- see zones_http.h. Bounded
  * by the hardware, not by anything a client can grow. */
@@ -2211,6 +2217,18 @@ static void json_escape(const char *src, char *out, size_t out_cap)
     out[o] = '\0';
 }
 
+static esp_err_t safety_config_page_get_handler(httpd_req_t *req)
+{
+    if (!web_client_accepts_gzip(req)) {
+        return web_send_gzip_not_acceptable(req, TAG, "safety_config_page.html");
+    }
+    httpd_resp_set_type(req, "text/html");
+    httpd_resp_set_hdr(req, "Content-Encoding", "gzip");
+    web_set_asset_cache_headers(req);
+    return httpd_resp_send(req, (const char *)safety_config_page_html_gz_start,
+                           (size_t)(safety_config_page_html_gz_end - safety_config_page_html_gz_start));
+}
+
 static esp_err_t zones_get_handler(httpd_req_t *req)
 {
     char json[4352]; /* 2816 -> 4352 (2026-08-27) with the nine v8 per-zone
@@ -3181,6 +3199,9 @@ esp_err_t zones_http_start(void)
     static const httpd_uri_t page_uri = {
         .uri = "/settings/zones", .method = HTTP_GET, .handler = page_get_handler,
     };
+    static const httpd_uri_t safety_page_uri = {
+        .uri = "/settings/safety", .method = HTTP_GET, .handler = safety_config_page_get_handler,
+    };
     static const httpd_uri_t get_uri = {
         .uri = "/api/zones", .method = HTTP_GET, .handler = zones_get_handler,
     };
@@ -3190,6 +3211,11 @@ esp_err_t zones_http_start(void)
     err = httpd_register_uri_handler(server, &page_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_register_uri_handler(/settings/zones) failed: %s", esp_err_to_name(err));
+        return err;
+    }
+    err = httpd_register_uri_handler(server, &safety_page_uri);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "httpd_register_uri_handler(/settings/safety) failed: %s", esp_err_to_name(err));
         return err;
     }
     err = httpd_register_uri_handler(server, &get_uri);

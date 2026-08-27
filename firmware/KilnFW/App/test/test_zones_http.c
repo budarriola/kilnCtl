@@ -61,6 +61,8 @@ int g_test_count = 0;
 // must exist for the linker.
 const uint8_t zones_page_html_gz_start[1] = { 0 };
 const uint8_t zones_page_html_gz_end[1] = { 0 };
+const uint8_t safety_config_page_html_gz_start[1] = { 0 };
+const uint8_t safety_config_page_html_gz_end[1] = { 0 };
 
 // ---- esp_http_server.h stub bodies -----------------------------------------
 // None of these is ever invoked by this file's tests (only parse_zone_fields()

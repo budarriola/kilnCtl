@@ -46,6 +46,7 @@
     { href: '/readiness', label: 'Ready to fire? (checklist)' },
     { href: '/settings/zones', label: 'Thermocouples & zones' },
     { href: '/settings/relays', label: 'Relays & rules' },
+    { href: '/settings/safety', label: 'Safety timings' },
     { href: '/settings/manual', label: 'Manual relay control' },
     { href: '/profiles', label: 'Firing profiles' },
     { href: '/wifi', label: 'Network settings' },

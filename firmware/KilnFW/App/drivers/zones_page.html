@@ -451,6 +451,20 @@ function zoneBlock(z, i, relayCount, thermoCount) {
   div.dataset.modelK = k;
   div.dataset.modelTau = tau;
   div.dataset.modelDead = dead;
+  /* Same echo-it-back reasoning as the plant model above, for the nine
+     safety timings this page does not show (they live on /settings/safety).
+     Omitting a field from a whole-page submit sets it to zero, so without
+     these a save here would quietly reset every timing the operator set on
+     that page. */
+  div.dataset.progressDuty = z.guard_progress_duty_min || 0;
+  div.dataset.progressWindow = z.guard_progress_window_s || 0;
+  div.dataset.driftHyst = z.guard_drift_hysteresis_c || 0;
+  div.dataset.frozenEps = z.guard_frozen_eps_c || 0;
+  div.dataset.xzonePeriod = z.guard_cross_zone_period_s || 0;
+  div.dataset.bbHyst = z.bangbang_hysteresis_c || 0;
+  div.dataset.coolMargin = z.cooling_limited_margin_c || 0;
+  div.dataset.coolHold = z.cooling_limited_hold_s || 0;
+  div.dataset.rampLock = z.ramp_lock_band_c || 0;
   var modelHtml = '<label>Identified plant model</label><p class="hint">' +
     (haveModel
       ? 'K = ' + k.toFixed(1) + ' &deg;C/duty, tau = ' + tau.toFixed(0) + ' s, dead time = ' +
@@ -738,6 +752,15 @@ document.getElementById('saveBtn').addEventListener('click', function () {
     params.push('z' + i + '_k=' + div.dataset.modelK);
     params.push('z' + i + '_tau=' + div.dataset.modelTau);
     params.push('z' + i + '_deadtime=' + div.dataset.modelDead);
+    params.push('z' + i + '_progressduty=' + div.dataset.progressDuty);
+    params.push('z' + i + '_progresswindow=' + div.dataset.progressWindow);
+    params.push('z' + i + '_drifthyst=' + div.dataset.driftHyst);
+    params.push('z' + i + '_frozeneps=' + div.dataset.frozenEps);
+    params.push('z' + i + '_xzoneperiod=' + div.dataset.xzonePeriod);
+    params.push('z' + i + '_bbhyst=' + div.dataset.bbHyst);
+    params.push('z' + i + '_coolmargin=' + div.dataset.coolMargin);
+    params.push('z' + i + '_coolhold=' + div.dataset.coolHold);
+    params.push('z' + i + '_ramplock=' + div.dataset.rampLock);
   });
   msg.textContent = 'Saving…';
   fetch('/api/zones', {
