@@ -122,6 +122,22 @@ extern "C" {
  * guard thresholds above). */
 #define ZONE_CROSS_ZONE_DELTA_C_MAX 1000.0f
 
+/* zone_cfg_t's nine v8 per-zone overrides plus the one global
+ * (pc_link_abort_silence_ms), added 2026-08-27 at the owner's request that the
+ * remaining thermal-protection constants stop being magic numbers. Same
+ * convention as the guard thresholds above: 0 = not configured, the module
+ * substitutes its own named firmware default; 0 never disables. Bounds are
+ * sanity ceilings against a typo'd submission.
+ *
+ * The duty bound is 1.0 because it is a duty fraction, not a percentage --
+ * guard 1 arms when commanded duty is at or above it, so a value above 1.0
+ * would arm the guard never and silently switch off the protection. That is
+ * exactly the kind of "configured it into uselessness" the ceiling exists to
+ * refuse. */
+#define ZONE_GUARD_DUTY_MAX 1.0f
+#define ZONE_GUARD_EPS_C_MAX 10.0f
+#define ZONE_PC_LINK_SILENCE_MS_MAX 600000.0f
+
 /* Loads zones_cfg from NVS (namespace "kiln_cfg", key "zones_cfg";
  * ESP_ERR_NVS_NOT_FOUND is not an error -- mirrors wifi_prov.c's nvs_load,
  * defaults to thermo_count/relay_count 0, i.e. nothing configured yet) and
@@ -475,6 +491,23 @@ bool zones_config_get_guard_thresholds(uint8_t zone_index, float *out_wrong_dir_
                                        float *out_runaway_rate_c_per_min, float *out_runaway_margin_c,
                                        float *out_drift_period_s, float *out_sensor_fault_debounce_ticks,
                                        float *out_frozen_window_s);
+
+/* The v8 overrides (2026-08-27), split into the three groups their consumers
+ * actually read: thermal_guard.c's five, profile_executor.c's four per-zone,
+ * and the one global. Every one keeps the "0 = not configured, the consuming
+ * module substitutes its own named default" convention the eight guard
+ * thresholds above use -- these getters report the stored value verbatim and
+ * never substitute, so the default stays documented in exactly one place (the
+ * module that owns it). Return false on a null out-pointer or an out-of-range
+ * zone; the per-zone pair are gated on thermo_count, the global one is not. */
+bool zones_config_get_guard_extra(uint8_t zone_index, float *out_progress_duty_min,
+                                  float *out_progress_window_s, float *out_drift_hysteresis_c,
+                                  float *out_frozen_eps_c, float *out_cross_zone_period_s);
+bool zones_config_get_executor_thresholds(uint8_t zone_index, float *out_bangbang_hysteresis_c,
+                                          float *out_cooling_limited_margin_c,
+                                          float *out_cooling_limited_hold_s,
+                                          float *out_ramp_lock_band_c);
+bool zones_config_get_pc_link_abort_silence_ms(float *out_ms);
 
 /* Setter for the getter above, one bundled call matching
  * zones_config_get_guard_thresholds()'s own "bundle the related group"

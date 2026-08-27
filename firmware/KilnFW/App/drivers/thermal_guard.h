@@ -89,6 +89,17 @@ typedef struct {
      * TODO.md floats as a starting guess, not a validated one. */
     float cross_zone_max_delta_c;
     float cross_zone_period_s;      /* 0 substituted with CROSS_ZONE_PERIOD_S_DEFAULT (600s) */
+    /* 2026-08-27: the four thresholds this module used to hold as firmware
+     * constants with no operator override at all -- the owner's "i dont realy
+     * like magic numbers". Same 0-substitutes-a-default rule as every field
+     * above; 0 does not disable. The named constants stay in thermal_guard.c
+     * as the documented defaults. */
+    float progress_duty_min;   /* guard 1 arms at/above this duty; 0 -> PROGRESS_DUTY_MIN */
+    float progress_window_s;   /* guard 1's window; 0 -> PROGRESS_WINDOW_S. Note
+                                * wrong_dir_window_s, if set, still overrides BOTH
+                                * guards -- see thermal_guard.c's comment there. */
+    float drift_hysteresis_c;  /* guard 4's settle band; 0 -> DRIFT_HYSTERESIS_C */
+    float frozen_eps_c;        /* guard 7's movement epsilon; 0 -> FROZEN_EPS_C */
 } thermal_guard_cfg_t;
 
 /* One call's worth of input. measurement_c must be the RAW (uncalibrated)

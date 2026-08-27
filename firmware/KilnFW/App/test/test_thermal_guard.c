@@ -451,6 +451,153 @@ void run_test_thermal_guard(void)
         TEST_CHECK(!tripped, "guard 7 does not trip when the reading moves clearly above the epsilon band");
     }
 
+
+    /* ---- v8 per-zone overrides (2026-08-27) --------------------------------
+     * The owner asked for the remaining hardcoded thresholds to become
+     * operator settings. Each pair below proves the same two things the eight
+     * older overrides are held to: a configured value actually changes when
+     * the guard fires, and 0 still means the firmware constant, so a board
+     * nobody has configured behaves exactly as it did before. */
+
+    /* progress_duty_min: guard 1 arms above the configured duty. At duty 0.2
+     * the 0.5 default leaves the guard disarmed entirely; an override of 0.1
+     * arms it, and a dead element then trips it. */
+    {
+        thermal_guard_state_t s;
+        thermal_guard_cfg_t cfg = {.max_temp_c = 1300.0f, .min_temp_c = -20.0f, .sanity_rate_c_per_min = 5.0f,
+                                    .wrong_dir_window_s = 30.0f, .progress_duty_min = 0.1f};
+        thermal_guard_reset(&s);
+        thermal_guard_input_t in = base_input();
+        in.commanded_duty = 0.2f;
+        in.setpoint_c = 500.0f;
+        in.measurement_c = 100.0f; /* dead element: never rises */
+        bool tripped = false;
+        for (int i = 0; i < 10 && !tripped; i++) {
+            tripped = thermal_guard_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(tripped, "progress_duty_min override=0.1 arms guard 1 at a duty the 0.5 default ignores");
+        TEST_CHECK(!tripped || s.reason == THERMAL_GUARD_TRIP_HEATING_FAILED, "reason is HEATING_FAILED");
+    }
+    {
+        thermal_guard_state_t s;
+        thermal_guard_cfg_t cfg = {.max_temp_c = 1300.0f, .min_temp_c = -20.0f, .sanity_rate_c_per_min = 5.0f,
+                                    .wrong_dir_window_s = 30.0f, .progress_duty_min = 0.0f};
+        thermal_guard_reset(&s);
+        thermal_guard_input_t in = base_input();
+        in.commanded_duty = 0.2f;
+        in.setpoint_c = 500.0f;
+        in.measurement_c = 100.0f;
+        bool tripped = false;
+        for (int i = 0; i < 10 && !tripped; i++) {
+            tripped = thermal_guard_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(!tripped, "progress_duty_min==0 keeps the 0.5 default, so duty 0.2 leaves guard 1 disarmed");
+    }
+
+    /* progress_window_s: guard 1's own window, separate from guard 2's. With
+     * wrong_dir_window_s left at 0 the heating branch used to be stuck on the
+     * 300s constant; an override of 30s trips inside 4 ticks at dt_s=10. */
+    {
+        thermal_guard_state_t s;
+        thermal_guard_cfg_t cfg = {.max_temp_c = 1300.0f, .min_temp_c = -20.0f, .sanity_rate_c_per_min = 5.0f,
+                                    .progress_window_s = 30.0f};
+        thermal_guard_reset(&s);
+        thermal_guard_input_t in = base_input();
+        in.commanded_duty = 1.0f;
+        in.setpoint_c = 500.0f;
+        in.measurement_c = 100.0f;
+        bool tripped = false;
+        for (int i = 0; i < 6 && !tripped; i++) {
+            tripped = thermal_guard_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(tripped, "progress_window_s override=30 trips guard 1 long before the 300s default");
+        TEST_CHECK(!tripped || s.reason == THERMAL_GUARD_TRIP_HEATING_FAILED, "reason is HEATING_FAILED");
+    }
+    {
+        thermal_guard_state_t s;
+        thermal_guard_cfg_t cfg = {.max_temp_c = 1300.0f, .min_temp_c = -20.0f, .sanity_rate_c_per_min = 5.0f};
+        thermal_guard_reset(&s);
+        thermal_guard_input_t in = base_input();
+        in.commanded_duty = 1.0f;
+        in.setpoint_c = 500.0f;
+        in.measurement_c = 100.0f;
+        bool tripped = false;
+        for (int i = 0; i < 6 && !tripped; i++) {
+            tripped = thermal_guard_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(!tripped, "progress_window_s==0 keeps the 300s default -- 60s of dead element is not yet a trip");
+    }
+
+    /* drift_hysteresis_c: how far out of band counts as drifting. A 5C
+     * override plus a 30s drift period trips on a 10C excursion that the 25C
+     * default treats as still settled. */
+    {
+        thermal_guard_state_t s;
+        thermal_guard_cfg_t cfg = {.max_temp_c = 1300.0f, .min_temp_c = -20.0f, .sanity_rate_c_per_min = 0.0f,
+                                    .drift_period_s = 30.0f, .drift_hysteresis_c = 5.0f};
+        thermal_guard_reset(&s);
+        thermal_guard_input_t in = base_input();
+        in.setpoint_c = 500.0f;
+        in.measurement_c = 500.0f; /* settle first */
+        thermal_guard_tick(&s, &cfg, &in);
+        in.measurement_c = 510.0f; /* 10C out: outside 5C, inside 25C */
+        bool tripped = false;
+        for (int i = 0; i < 6 && !tripped; i++) {
+            tripped = thermal_guard_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(tripped, "drift_hysteresis_c override=5 trips guard 4 on a 10C excursion");
+        TEST_CHECK(!tripped || s.reason == THERMAL_GUARD_TRIP_DRIFT, "reason is DRIFT");
+    }
+    {
+        thermal_guard_state_t s;
+        thermal_guard_cfg_t cfg = {.max_temp_c = 1300.0f, .min_temp_c = -20.0f, .sanity_rate_c_per_min = 0.0f,
+                                    .drift_period_s = 30.0f};
+        thermal_guard_reset(&s);
+        thermal_guard_input_t in = base_input();
+        in.setpoint_c = 500.0f;
+        in.measurement_c = 500.0f;
+        thermal_guard_tick(&s, &cfg, &in);
+        in.measurement_c = 510.0f;
+        bool tripped = false;
+        for (int i = 0; i < 6 && !tripped; i++) {
+            tripped = thermal_guard_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(!tripped, "drift_hysteresis_c==0 keeps the 25C default, so a 10C excursion is still settled");
+    }
+
+    /* frozen_eps_c: how much movement still counts as stuck. A sensor
+     * dithering 0.5C/tick is moving as far as the 0.05C default is concerned;
+     * an override of 1.0C correctly calls it frozen. */
+    {
+        thermal_guard_state_t s;
+        thermal_guard_cfg_t cfg = {.max_temp_c = 1300.0f, .min_temp_c = -20.0f, .sanity_rate_c_per_min = 0.0f,
+                                    .frozen_window_s = 20.0f, .frozen_eps_c = 1.0f};
+        thermal_guard_reset(&s);
+        thermal_guard_input_t in = base_input();
+        in.commanded_duty = 1.0f;
+        bool tripped = false;
+        for (int i = 0; i < 6 && !tripped; i++) {
+            in.measurement_c = 300.0f + ((i % 2) ? 0.5f : 0.0f);
+            tripped = thermal_guard_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(tripped, "frozen_eps_c override=1.0 calls a 0.5C dither frozen");
+        TEST_CHECK(!tripped || s.reason == THERMAL_GUARD_TRIP_FROZEN, "reason is FROZEN");
+    }
+    {
+        thermal_guard_state_t s;
+        thermal_guard_cfg_t cfg = {.max_temp_c = 1300.0f, .min_temp_c = -20.0f, .sanity_rate_c_per_min = 0.0f,
+                                    .frozen_window_s = 20.0f};
+        thermal_guard_reset(&s);
+        thermal_guard_input_t in = base_input();
+        in.commanded_duty = 1.0f;
+        bool tripped = false;
+        for (int i = 0; i < 6 && !tripped; i++) {
+            in.measurement_c = 300.0f + ((i % 2) ? 0.5f : 0.0f);
+            tripped = thermal_guard_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(!tripped, "frozen_eps_c==0 keeps the 0.05C default, so a 0.5C dither reads as movement");
+    }
+
     /* thermal_guard_clear() fully un-latches and resets windows. */
     {
         thermal_guard_state_t s;

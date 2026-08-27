@@ -1068,6 +1068,22 @@ static bool reload_zone_config(uint8_t zi)
             RELOAD_GUARD_FIELD(drift_period_s, drift_period_s, "%.1f")
             RELOAD_GUARD_FIELD(sensor_fault_debounce_ticks, debounce_ticks, "%.0f")
             RELOAD_GUARD_FIELD(frozen_window_s, frozen_window_s, "%.1f")
+            {
+                /* The five v8 overrides reload mid-firing on exactly the same
+                 * terms as the eight above -- an operator who widens a window
+                 * during a run must see it take effect, and must see it
+                 * logged. */
+                float progress_duty_min = 0.0f, progress_window_s = 0.0f, drift_hysteresis_c = 0.0f;
+                float frozen_eps_c = 0.0f, cross_zone_period_s = 0.0f;
+                if (zones_config_get_guard_extra(zi, &progress_duty_min, &progress_window_s,
+                                                 &drift_hysteresis_c, &frozen_eps_c, &cross_zone_period_s)) {
+                    RELOAD_GUARD_FIELD(progress_duty_min, progress_duty_min, "%.3f")
+                    RELOAD_GUARD_FIELD(progress_window_s, progress_window_s, "%.1f")
+                    RELOAD_GUARD_FIELD(drift_hysteresis_c, drift_hysteresis_c, "%.1f")
+                    RELOAD_GUARD_FIELD(frozen_eps_c, frozen_eps_c, "%.3f")
+                    RELOAD_GUARD_FIELD(cross_zone_period_s, cross_zone_period_s, "%.1f")
+                }
+            }
 #undef RELOAD_GUARD_FIELD
         }
     }
@@ -1132,6 +1148,40 @@ static bool reload_zone_config(uint8_t zi)
  * a PAUSED or FAULTED run has no control math to keep bumpless, and picking
  * the edit up when it resumes (via this same path) is both simpler and
  * closer to what the operator expects. */
+/* The four per-zone executor thresholds the owner asked to stop being magic
+ * numbers (v8). Unlike the guard thresholds -- which thermal_guard.c
+ * substitutes for, so its constants stay the single source of the default --
+ * these are this module's own numbers, so the 0 -> named-default substitution
+ * belongs here. A zone that has never been configured, or an index past
+ * thermo_count, reads exactly the constant that was hardcoded before. */
+static float exec_threshold(uint8_t zone_index, int which)
+{
+    float bb = 0.0f, cool_margin = 0.0f, cool_hold = 0.0f, ramp_lock = 0.0f;
+    (void)zones_config_get_executor_thresholds(zone_index, &bb, &cool_margin, &cool_hold, &ramp_lock);
+    switch (which) {
+    case 0: return (bb > 0.0f) ? bb : PROFILE_EXECUTOR_HYSTERESIS_C;
+    case 1: return (cool_margin > 0.0f) ? cool_margin : PROFILE_EXECUTOR_COOLING_LIMITED_MARGIN_C;
+    case 2: return (cool_hold > 0.0f) ? cool_hold : PROFILE_EXECUTOR_COOLING_LIMITED_HOLD_S;
+    default: return (ramp_lock > 0.0f) ? ramp_lock : PROFILE_EXECUTOR_RAMP_LOCK_BAND_C;
+    }
+}
+#define EXEC_BANGBANG_HYSTERESIS_C(zi) exec_threshold((zi), 0)
+#define EXEC_COOLING_MARGIN_C(zi)      exec_threshold((zi), 1)
+#define EXEC_COOLING_HOLD_S(zi)        exec_threshold((zi), 2)
+#define EXEC_RAMP_LOCK_BAND_C(zi)      exec_threshold((zi), 3)
+
+/* How long the PC link may stay silent before a running firing is aborted.
+ * Operator-settable since v8 (one global field, not per-zone -- the link is
+ * one wire to one PC); 0 keeps the constant this was before. */
+static uint32_t pc_link_abort_silence_ms(void)
+{
+    float cfg_ms = 0.0f;
+    if (zones_config_get_pc_link_abort_silence_ms(&cfg_ms) && cfg_ms > 0.0f) {
+        return (uint32_t)cfg_ms;
+    }
+    return PROFILE_EXECUTOR_PC_LINK_ABORT_SILENCE_MS;
+}
+
 static void reload_config_if_changed(void)
 {
     uint32_t gen = zones_config_generation();
@@ -1284,7 +1334,7 @@ static void executor_task_entry(void *arg)
         uint8_t lagging = 0;
         for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
             if (!s_exec.zones[zi].active || s_exec.zones[zi].faulted) continue;
-            if (!sensor_ok[zi] || fabsf(s_exec.zones[zi].actual_c - s_exec.target_c) > PROFILE_EXECUTOR_RAMP_LOCK_BAND_C) {
+            if (!sensor_ok[zi] || fabsf(s_exec.zones[zi].actual_c - s_exec.target_c) > EXEC_RAMP_LOCK_BAND_C(zi)) {
                 lock_ok = false;
                 lagging |= (uint8_t)(1u << zi);
             }
@@ -1395,12 +1445,12 @@ static void executor_task_entry(void *arg)
                  * zone's deferred credit landed here," and boost only ever
                  * makes duty larger, never masks a genuine 0. */
                 if (sensor_ok[zi] && duty <= 0.0f &&
-                    z->actual_c > s_exec.target_c + PROFILE_EXECUTOR_COOLING_LIMITED_MARGIN_C) {
+                    z->actual_c > s_exec.target_c + EXEC_COOLING_MARGIN_C(zi)) {
                     z->cooling_limited_hold_s += dt_s;
                 } else {
                     z->cooling_limited_hold_s = 0.0f;
                 }
-                z->cooling_limited = z->cooling_limited_hold_s >= PROFILE_EXECUTOR_COOLING_LIMITED_HOLD_S;
+                z->cooling_limited = z->cooling_limited_hold_s >= EXEC_COOLING_HOLD_S(zi);
                 /* Pay back any load-cap-deferred on-time as a duty boost --
                  * only actually consumed below if this tick turns out to
                  * open a fresh window (heater_output_duty() only reads the
@@ -1460,9 +1510,9 @@ static void executor_task_entry(void *arg)
             case ZONE_CONTROL_MODE_BANGBANG: {
                 bool want_raw = z->relay_commanded_on;
                 if (sensor_ok[zi]) {
-                    if (z->actual_c < s_exec.target_c - PROFILE_EXECUTOR_HYSTERESIS_C) {
+                    if (z->actual_c < s_exec.target_c - EXEC_BANGBANG_HYSTERESIS_C(zi)) {
                         want_raw = true;
-                    } else if (z->actual_c > s_exec.target_c + PROFILE_EXECUTOR_HYSTERESIS_C) {
+                    } else if (z->actual_c > s_exec.target_c + EXEC_BANGBANG_HYSTERESIS_C(zi)) {
                         want_raw = false;
                     }
                 } else {
@@ -1715,7 +1765,7 @@ static void watchdog_task_entry(void *arg)
         }
         pc_link_was_down = pc_link_now_down;
         bool pc_link_down_sustained = pc_link_now_down &&
-            ticks_to_ms(pc_link_check_now - pc_link_down_since_tick) >= PROFILE_EXECUTOR_PC_LINK_ABORT_SILENCE_MS;
+            ticks_to_ms(pc_link_check_now - pc_link_down_since_tick) >= pc_link_abort_silence_ms();
 
         bool wdt_faulted = false;
         xSemaphoreTake(s_exec.lock, portMAX_DELAY);
@@ -2228,6 +2278,12 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
         float runaway_margin = 0.0f, drift_period_s = 0.0f, debounce_ticks = 0.0f, frozen_window_s = 0.0f;
         zones_config_get_guard_thresholds(zi, &wd_window_s, &wd_rate, &off_settle_s, &runaway_rate,
                                           &runaway_margin, &drift_period_s, &debounce_ticks, &frozen_window_s);
+        /* The five v8 overrides, same raw pass-through: thermal_guard.c owns
+         * every 0->default substitution. */
+        float progress_duty_min = 0.0f, progress_window_s = 0.0f, drift_hysteresis_c = 0.0f;
+        float frozen_eps_c = 0.0f, cross_zone_period_s = 0.0f;
+        zones_config_get_guard_extra(zi, &progress_duty_min, &progress_window_s, &drift_hysteresis_c,
+                                     &frozen_eps_c, &cross_zone_period_s);
         z->guard_cfg = (thermal_guard_cfg_t){
             .max_temp_c = max_temp_c, .min_temp_c = min_temp_c,
             .sanity_rate_c_per_min = (sanity_rate > 0.0f) ? sanity_rate : PROFILE_EXECUTOR_DEFAULT_SANITY_RATE_C_PER_MIN,
@@ -2244,11 +2300,15 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
              * here on purpose -- the number is supposed to come from a
              * measured cross-gain matrix (TODO.md 6A.5's last bullet), so
              * the firmware offers the field rather than inventing a value.
-             * The period stays at thermal_guard.c's CROSS_ZONE_PERIOD_S_
-             * DEFAULT (600 s); one knob is enough to arm the guard, and a
-             * second one is easier to get wrong than to get value from. */
+             * The period is now an operator field too (v8): 0 still means
+             * thermal_guard.c's CROSS_ZONE_PERIOD_S_DEFAULT (600 s), so a
+             * board that never sets it behaves exactly as before. */
             .cross_zone_max_delta_c = cross_zone_delta_c,
-            .cross_zone_period_s = 0.0f,
+            .cross_zone_period_s = cross_zone_period_s,
+            .progress_duty_min = progress_duty_min,
+            .progress_window_s = progress_window_s,
+            .drift_hysteresis_c = drift_hysteresis_c,
+            .frozen_eps_c = frozen_eps_c,
         };
         thermal_guard_reset(&z->guard_state);
 

@@ -853,6 +853,148 @@ static void test_nvs_load_from_v5_blob_upconverts_zones_1_and_2_correctly(void)
     nvs_test_clear();
 }
 
+/* A config that validate_zones_cfg() accepts, so a test can change exactly
+ * one field and attribute the rejection to it. */
+static void make_minimal_valid_cfg(zones_cfg_t *cfg)
+{
+    memset(cfg, 0, sizeof(*cfg));
+    cfg->version = ZONES_CFG_VERSION;
+    cfg->thermo_count = 1;
+    cfg->relay_count = 1;
+    cfg->zones[0].relay_mask = 0x01;
+    cfg->zones[0].thermo_mask = 0x01;
+    cfg->zones[0].max_temp_c = 1300.0f;
+}
+
+static void test_nvs_load_from_v7_blob_upconverts_and_defaults_new_fields(void)
+{
+    TEST_SECTION("nvs_load_from -- a v7 blob upconverts to v8: every zone's existing fields land "
+                 "correctly and the nine new overrides default to 0 (= firmware default)");
+    nvs_test_enable(true);
+    nvs_test_clear();
+
+    zones_cfg_v7_t src;
+    memset(&src, 0, sizeof(src));
+    src.version = 7;
+    src.thermo_count = 3;
+    src.relay_count = 3;
+    src.continue_on_zone_trip = 1;
+    src.safety_tc_type = 3;
+
+    /* Mirrors the bench board's actual live config -- zone 0 is the one that
+     * is really commissioned, zones 1 and 2 carry their own masks. */
+    src.zones[0].relay_mask = 0x01;
+    src.zones[0].thermo_mask = 0x01;
+    src.zones[0].control_mode = 2;
+    src.zones[0].max_temp_c = 1300.0f;
+    src.zones[0].max_ramp_c_per_hr = 900.0f;
+    src.zones[0].guard_wrong_dir_window_s = 60.0f;
+    src.zones[0].tc_type = 3;
+
+    src.zones[1].relay_mask = 0x02;
+    src.zones[1].thermo_mask = 0x02;
+    src.zones[1].guard_runaway_margin_c = 22.0f;
+    src.zones[1].tc_type = 3;
+
+    src.zones[2].relay_mask = 0x04;
+    src.zones[2].thermo_mask = 0x04;
+    src.zones[2].guard_runaway_margin_c = 33.0f;
+    src.zones[2].tc_type = 3;
+
+    src.crc32 = 0; /* v7's own CRC is not checked on the old-version path */
+
+    stage_zones_blob(&src, sizeof(src));
+
+    zones_cfg_t out_cfg;
+    bool found = false, valid = false;
+    esp_err_t err = nvs_load_from("kiln_nvs", &out_cfg, &found, &valid);
+
+    TEST_CHECK(err == ESP_OK, "no NVS error");
+    TEST_CHECK(found && valid, "a well-formed v7 blob must migrate to a valid current config");
+    TEST_CHECK(out_cfg.version == ZONES_CFG_VERSION, "migrated config is stamped v8");
+    TEST_CHECK(out_cfg.thermo_count == 3 && out_cfg.relay_count == 3, "counts carried through");
+    TEST_CHECK(out_cfg.safety_tc_type == 3, "safety_tc_type carried through");
+
+    TEST_CHECK(out_cfg.zones[0].control_mode == 2, "zones[0].control_mode (PID) survives the upgrade");
+    TEST_CHECK_NEAR(out_cfg.zones[0].max_temp_c, 1300.0f, 1e-6, "zones[0].max_temp_c survives");
+    TEST_CHECK_NEAR(out_cfg.zones[0].max_ramp_c_per_hr, 900.0f, 1e-6, "zones[0].max_ramp_c_per_hr survives");
+    TEST_CHECK_NEAR(out_cfg.zones[0].guard_wrong_dir_window_s, 60.0f, 1e-6,
+                    "zones[0]'s configured guard window survives -- the operator's setting, not a default");
+
+    TEST_CHECK(out_cfg.zones[1].relay_mask == 0x02, "zones[1].relay_mask must NOT be shifted");
+    TEST_CHECK(out_cfg.zones[1].thermo_mask == 0x02, "zones[1].thermo_mask must NOT be shifted");
+    TEST_CHECK_NEAR(out_cfg.zones[1].guard_runaway_margin_c, 22.0f, 1e-6, "zones[1] guard threshold correct");
+    TEST_CHECK(out_cfg.zones[2].relay_mask == 0x04, "zones[2].relay_mask must NOT be shifted");
+    TEST_CHECK_NEAR(out_cfg.zones[2].guard_runaway_margin_c, 33.0f, 1e-6, "zones[2] guard threshold correct");
+
+    /* The point of the 0 convention: an upgraded board must behave exactly as
+     * it did, so every new field has to arrive as "not configured". */
+    for (uint8_t i = 0; i < 3; i++) {
+        char msg[96];
+        snprintf(msg, sizeof(msg), "zones[%u]'s new v8 overrides all default to 0 (= firmware default)", i);
+        bool all_zero = out_cfg.zones[i].guard_progress_duty_min == 0.0f &&
+                        out_cfg.zones[i].guard_progress_window_s == 0.0f &&
+                        out_cfg.zones[i].guard_drift_hysteresis_c == 0.0f &&
+                        out_cfg.zones[i].guard_frozen_eps_c == 0.0f &&
+                        out_cfg.zones[i].guard_cross_zone_period_s == 0.0f &&
+                        out_cfg.zones[i].bangbang_hysteresis_c == 0.0f &&
+                        out_cfg.zones[i].cooling_limited_margin_c == 0.0f &&
+                        out_cfg.zones[i].cooling_limited_hold_s == 0.0f &&
+                        out_cfg.zones[i].ramp_lock_band_c == 0.0f;
+        TEST_CHECK(all_zero, msg);
+    }
+    TEST_CHECK(out_cfg.pc_link_abort_silence_ms == 0.0f,
+               "the global pc_link_abort_silence_ms also defaults to 0 on upgrade");
+
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
+static void test_validate_rejects_out_of_range_v8_fields(void)
+{
+    TEST_SECTION("validate_zones_cfg -- the v8 overrides are range-checked like every field before them");
+
+    /* A duty above 1.0 would arm guard 1 never, silently disabling the
+     * heating-failed check -- the exact "configured it into uselessness"
+     * case the ceiling exists to refuse. */
+    {
+        zones_cfg_t cfg;
+        make_minimal_valid_cfg(&cfg);
+        cfg.zones[0].guard_progress_duty_min = 1.5f;
+        const char *reason = NULL;
+        TEST_CHECK(!validate_zones_cfg(&cfg, &reason), "guard_progress_duty_min > 1.0 is rejected");
+    }
+    {
+        zones_cfg_t cfg;
+        make_minimal_valid_cfg(&cfg);
+        cfg.zones[0].guard_progress_window_s = -1.0f;
+        const char *reason = NULL;
+        TEST_CHECK(!validate_zones_cfg(&cfg, &reason), "a negative guard_progress_window_s is rejected");
+    }
+    {
+        zones_cfg_t cfg;
+        make_minimal_valid_cfg(&cfg);
+        cfg.zones[0].ramp_lock_band_c = ZONE_GUARD_MARGIN_C_MAX + 1.0f;
+        const char *reason = NULL;
+        TEST_CHECK(!validate_zones_cfg(&cfg, &reason), "ramp_lock_band_c past its ceiling is rejected");
+    }
+    {
+        zones_cfg_t cfg;
+        make_minimal_valid_cfg(&cfg);
+        cfg.pc_link_abort_silence_ms = ZONE_PC_LINK_SILENCE_MS_MAX + 1.0f;
+        const char *reason = NULL;
+        TEST_CHECK(!validate_zones_cfg(&cfg, &reason), "pc_link_abort_silence_ms past its ceiling is rejected");
+    }
+    /* 0 must stay legal on every one of them -- it is the "use the firmware
+     * default" value, not a missing setting. */
+    {
+        zones_cfg_t cfg;
+        make_minimal_valid_cfg(&cfg);
+        const char *reason = NULL;
+        TEST_CHECK(validate_zones_cfg(&cfg, &reason), "all-zero v8 fields stay valid (0 = firmware default)");
+    }
+}
+
 void run_test_zones_http(void)
 {
     test_out_of_range_zone_preserves_stored_fields();
@@ -879,6 +1021,8 @@ void run_test_zones_http(void)
     test_nvs_load_from_failed_validation_is_rejected();
     test_nvs_save_load_round_trip_current_version();
     test_nvs_load_from_v5_blob_upconverts_zones_1_and_2_correctly();
+    test_nvs_load_from_v7_blob_upconverts_and_defaults_new_fields();
+    test_validate_rejects_out_of_range_v8_fields();
 }
 
 int main(void)

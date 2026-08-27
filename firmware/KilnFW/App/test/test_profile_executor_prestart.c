@@ -250,6 +250,42 @@ bool zones_config_get_guard_thresholds(uint8_t zone_index, float *o1, float *o2,
     return false;
 }
 
+/* v8 overrides. Settable so a test can prove a configured value actually
+ * reaches the control path; defaults to "nothing configured", which is what
+ * every pre-existing test in this file assumes. */
+float g_stub_guard_extra[5] = {0, 0, 0, 0, 0};
+bool g_stub_guard_extra_present = false;
+float g_stub_exec_thresholds[4] = {0, 0, 0, 0};
+bool g_stub_exec_thresholds_present = false;
+float g_stub_pc_link_silence_ms = 0.0f;
+
+bool zones_config_get_guard_extra(uint8_t zone_index, float *o1, float *o2, float *o3, float *o4, float *o5)
+{
+    (void)zone_index;
+    if (o1) *o1 = g_stub_guard_extra[0];
+    if (o2) *o2 = g_stub_guard_extra[1];
+    if (o3) *o3 = g_stub_guard_extra[2];
+    if (o4) *o4 = g_stub_guard_extra[3];
+    if (o5) *o5 = g_stub_guard_extra[4];
+    return g_stub_guard_extra_present;
+}
+
+bool zones_config_get_executor_thresholds(uint8_t zone_index, float *o1, float *o2, float *o3, float *o4)
+{
+    (void)zone_index;
+    if (o1) *o1 = g_stub_exec_thresholds[0];
+    if (o2) *o2 = g_stub_exec_thresholds[1];
+    if (o3) *o3 = g_stub_exec_thresholds[2];
+    if (o4) *o4 = g_stub_exec_thresholds[3];
+    return g_stub_exec_thresholds_present;
+}
+
+bool zones_config_get_pc_link_abort_silence_ms(float *out_ms)
+{
+    if (out_ms) *out_ms = g_stub_pc_link_silence_ms;
+    return true;
+}
+
 bool zones_config_get_heater_cfg(uint8_t zone_index, float *out_window_ms, float *out_min_on_ms, float *out_min_off_ms)
 {
     (void)zone_index;

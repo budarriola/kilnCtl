@@ -93,7 +93,7 @@ static const char *TAG = "zones_http";
  * copy" convention this follows) covers the current-version blob only: older
  * versions never had a crc32 field to check, so their integrity gate is the
  * length-must-match-the-claimed-version check plus validate_zones_cfg(). */
-#define ZONES_CFG_VERSION 7
+#define ZONES_CFG_VERSION 8
 
 /* ZONE_CT_CHANNEL_COUNT moved to zones_http.h (2026-08-27, same day it was
  * added) -- backup_http.c's import validation needs it too, for the exact
@@ -252,6 +252,31 @@ typedef struct {
      * physical CT probe clamped around a shared supply line feeding more
      * than one zone's element). 0 = no probe mapped to this zone yet. */
     uint8_t ct_mask;
+    /* 2026-08-27 (ZONES_CFG_VERSION 7->8), at the owner's request ("i dont
+     * realy like magic numbers"): the last thermal-protection numbers that
+     * were still firmware constants with no operator override. Every one
+     * follows the same "0 = not configured, the module substitutes its own
+     * named default" convention as the eight guard thresholds above -- 0 does
+     * NOT disable any of these, for the same reason: they protect against
+     * failures a kiln can hit with no tuning at all and must stay armed on a
+     * board nobody has configured. (cross_zone_max_delta_c remains the single
+     * exception where 0 disables; see its comment above.)
+     *
+     * The named fallbacks stay in the code as the documented defaults --
+     * thermal_guard.c's PROGRESS_DUTY_MIN/PROGRESS_WINDOW_S/
+     * DRIFT_HYSTERESIS_C/FROZEN_EPS_C/CROSS_ZONE_PERIOD_S_DEFAULT and
+     * profile_executor.h's PROFILE_EXECUTOR_HYSTERESIS_C/
+     * _COOLING_LIMITED_MARGIN_C/_COOLING_LIMITED_HOLD_S/_RAMP_LOCK_BAND_C.
+     * OPTIONAL on POST, same reason the guard thresholds above are. */
+    float guard_progress_duty_min;    /* guard 1 arms above this commanded duty */
+    float guard_progress_window_s;    /* guard 1's no-progress window while heating */
+    float guard_drift_hysteresis_c;   /* guard 4's settle band / drift threshold */
+    float guard_frozen_eps_c;         /* guard 7: reading moves by less than this = frozen */
+    float guard_cross_zone_period_s;  /* guard 8's sustained-disagreement window */
+    float bangbang_hysteresis_c;      /* BANGBANG mode's switching band */
+    float cooling_limited_margin_c;   /* "cannot cool fast enough" detection margin */
+    float cooling_limited_hold_s;     /* ...sustained for this long before it counts */
+    float ramp_lock_band_c;           /* ramp-rate lock engages within this of setpoint */
 } zone_cfg_t;
 
 typedef struct {
@@ -293,6 +318,15 @@ typedef struct {
      * re-apply-on-reconnect handling. */
     uint8_t safety_tc_type;
     zone_cfg_t zones[MAX31856_CHANNEL_COUNT];
+    /* 2026-08-27 (ZONES_CFG_VERSION 7->8): how long the PC link may go silent
+     * before a running firing is aborted. Global rather than per-zone: the
+     * link is one wire to one PC, and its loss is a whole-board condition, not
+     * something one zone experiences and another does not. 0 = not configured,
+     * substituting PROFILE_EXECUTOR_PC_LINK_ABORT_SILENCE_MS. Stored as float
+     * for the same reason heater_window_ms is (see its comment) -- 30000ms
+     * round-trips exactly, and every parse/emit helper in this file is
+     * float-shaped. */
+    float pc_link_abort_silence_ms;
     /* 2026-08-27 (ZONES_CFG_VERSION 6->7): CRC32 over this whole struct with
      * this field itself zeroed, stamped by nvs_save() (see compute_zones_crc())
      * and checked by decode_zones_blob() on every load of a CURRENT-version
@@ -504,10 +538,40 @@ typedef struct {
     uint8_t thermo_mask;
 } zone_cfg_v5_t; /* v5 -- adds tc_type (mid-struct); predates ct_mask */
 
-/* zone_cfg_t (already defined above, unchanged by this pass) IS the v6/v7
- * on-flash zone layout -- ct_mask was already at the tail. No separate
- * zone_cfg_v6_t needed for the zone array; only the top-level struct differs
- * (v6 has no crc32). */
+/* v6/v7 shared the same zone layout, ending at ct_mask. v8 appends nine
+ * per-zone fields after it, so that layout now needs its own snapshot -- this
+ * is what zone_cfg_t looked like before this pass, field for field. */
+typedef struct {
+    char name[ZONE_NAME_MAX_LEN + 1];
+    uint8_t relay_mask;
+    float cal_offset_c;
+    float pid_kp;
+    float pid_ki;
+    float pid_kd;
+    float max_ramp_c_per_hr;
+    float sanity_rate_c_per_min;
+    uint8_t control_mode;
+    float max_temp_c;
+    float min_temp_c;
+    float heater_window_ms;
+    float heater_min_on_ms;
+    float heater_min_off_ms;
+    float guard_wrong_dir_window_s;
+    float guard_wrong_dir_rate_c_per_min;
+    float guard_off_settle_s;
+    float guard_runaway_rate_c_per_min;
+    float guard_runaway_margin_c;
+    float guard_drift_period_s;
+    float guard_sensor_fault_debounce_ticks;
+    float guard_frozen_window_s;
+    float cross_zone_max_delta_c;
+    uint8_t tc_type;
+    float model_k_dc;
+    float model_tau_s;
+    float model_dead_time_s;
+    uint8_t thermo_mask;
+    uint8_t ct_mask;
+} zone_cfg_v7_t; /* v6/v7 -- predates the nine v8 per-zone override fields */
 
 typedef struct {
     uint8_t version;
@@ -561,8 +625,19 @@ typedef struct {
     uint8_t max_simultaneous_relays;
     uint8_t continue_on_zone_trip;
     uint8_t safety_tc_type;
-    zone_cfg_t zones[MAX31856_CHANNEL_COUNT];
-} zones_cfg_v6_t; /* v6 -- current zone_cfg_t layout, but no crc32 yet */
+    zone_cfg_v7_t zones[MAX31856_CHANNEL_COUNT];
+} zones_cfg_v6_t; /* v6 -- v7's zone layout, but no crc32 yet */
+
+typedef struct {
+    uint8_t version;
+    uint8_t thermo_count;
+    uint8_t relay_count;
+    uint8_t max_simultaneous_relays;
+    uint8_t continue_on_zone_trip;
+    uint8_t safety_tc_type;
+    zone_cfg_v7_t zones[MAX31856_CHANNEL_COUNT];
+    uint32_t crc32;
+} zones_cfg_v7_t; /* v7 -- adds crc32; predates the v8 override fields */
 
 /* Per-version expected blob length -- checked in decode_zones_blob() BEFORE
  * a single byte is copied out of a stored blob or interpreted as any field.
@@ -579,6 +654,7 @@ static size_t expected_len_for_version(uint8_t version)
     case 4: return sizeof(zones_cfg_v4_t);
     case 5: return sizeof(zones_cfg_v5_t);
     case 6: return sizeof(zones_cfg_v6_t);
+    case 7: return sizeof(zones_cfg_v7_t);
     case ZONES_CFG_VERSION: return sizeof(zones_cfg_t);
     default: return 0;
     }
@@ -725,6 +801,43 @@ static void convert_zone_v5(const zone_cfg_v5_t *s, zone_cfg_t *d)
  * struct shape over another. Caller (decode_zones_blob()) has already
  * checked `len` against expected_len_for_version(version), so the memcpy of
  * `blob` into each local, exactly-sized historical struct below is safe. */
+/* v6/v7 -> current. Every field the old layout had is copied by name; the nine
+ * v8 additions get 0, which is already their "not configured, use the firmware
+ * default" meaning, so a board upgrading from v7 behaves exactly as it did. */
+static void convert_zone_v7(const zone_cfg_v7_t *s, zone_cfg_t *d)
+{
+    memset(d, 0, sizeof(*d));
+    memcpy(d->name, s->name, sizeof(d->name));
+    d->relay_mask = s->relay_mask;
+    d->cal_offset_c = s->cal_offset_c;
+    d->pid_kp = s->pid_kp;
+    d->pid_ki = s->pid_ki;
+    d->pid_kd = s->pid_kd;
+    d->max_ramp_c_per_hr = s->max_ramp_c_per_hr;
+    d->sanity_rate_c_per_min = s->sanity_rate_c_per_min;
+    d->control_mode = s->control_mode;
+    d->max_temp_c = s->max_temp_c;
+    d->min_temp_c = s->min_temp_c;
+    d->heater_window_ms = s->heater_window_ms;
+    d->heater_min_on_ms = s->heater_min_on_ms;
+    d->heater_min_off_ms = s->heater_min_off_ms;
+    d->guard_wrong_dir_window_s = s->guard_wrong_dir_window_s;
+    d->guard_wrong_dir_rate_c_per_min = s->guard_wrong_dir_rate_c_per_min;
+    d->guard_off_settle_s = s->guard_off_settle_s;
+    d->guard_runaway_rate_c_per_min = s->guard_runaway_rate_c_per_min;
+    d->guard_runaway_margin_c = s->guard_runaway_margin_c;
+    d->guard_drift_period_s = s->guard_drift_period_s;
+    d->guard_sensor_fault_debounce_ticks = s->guard_sensor_fault_debounce_ticks;
+    d->guard_frozen_window_s = s->guard_frozen_window_s;
+    d->cross_zone_max_delta_c = s->cross_zone_max_delta_c;
+    d->tc_type = s->tc_type;
+    d->model_k_dc = s->model_k_dc;
+    d->model_tau_s = s->model_tau_s;
+    d->model_dead_time_s = s->model_dead_time_s;
+    d->thermo_mask = s->thermo_mask;
+    d->ct_mask = s->ct_mask;
+}
+
 static bool convert_versioned_blob_to_current(uint8_t version, const void *blob, zones_cfg_t *out)
 {
     memset(out, 0, sizeof(*out));
@@ -802,9 +915,26 @@ static bool convert_versioned_blob_to_current(uint8_t version, const void *blob,
         out->max_simultaneous_relays = src.max_simultaneous_relays;
         out->continue_on_zone_trip = src.continue_on_zone_trip;
         out->safety_tc_type = src.safety_tc_type;
+        out->pc_link_abort_silence_ms = 0.0f; /* v6 has no such field -- 0 = firmware default */
         for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
-            out->zones[i] = src.zones[i]; /* identical layout to the current zone_cfg_t */
+            convert_zone_v7(&src.zones[i], &out->zones[i]);
         }
+        return true;
+    }
+    case 7: {
+        zones_cfg_v7_t src;
+        memcpy(&src, blob, sizeof(src));
+        out->thermo_count = src.thermo_count;
+        out->relay_count = src.relay_count;
+        out->max_simultaneous_relays = src.max_simultaneous_relays;
+        out->continue_on_zone_trip = src.continue_on_zone_trip;
+        out->safety_tc_type = src.safety_tc_type;
+        out->pc_link_abort_silence_ms = 0.0f; /* v7 has no such field -- 0 = firmware default */
+        for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
+            convert_zone_v7(&src.zones[i], &out->zones[i]);
+        }
+        /* src.crc32 is deliberately NOT carried over: it covered the v7 shape,
+         * and nvs_save() stamps a fresh one over the v8 struct. */
         return true;
     }
     default:
@@ -1580,6 +1710,58 @@ bool zones_config_get_guard_thresholds(uint8_t zone_index, float *out_wrong_dir_
     return true;
 }
 
+/* The five per-zone guard overrides added in v8 (see zone_cfg_t). Bundled for
+ * the same reason the 8 above are: thermal_guard.c reads them as one group
+ * when it builds a thermal_guard_cfg_t. Every one keeps the "0 = use the
+ * module's named default" convention, so this getter reports the stored value
+ * verbatim and the substitution stays where it belongs -- in the module that
+ * owns the default. */
+bool zones_config_get_guard_extra(uint8_t zone_index, float *out_progress_duty_min,
+                                  float *out_progress_window_s, float *out_drift_hysteresis_c,
+                                  float *out_frozen_eps_c, float *out_cross_zone_period_s)
+{
+    if (!out_progress_duty_min || !out_progress_window_s || !out_drift_hysteresis_c ||
+        !out_frozen_eps_c || !out_cross_zone_period_s || zone_index >= s_zones.cfg.thermo_count) {
+        return false;
+    }
+    const zone_cfg_t *z = &s_zones.cfg.zones[zone_index];
+    *out_progress_duty_min = z->guard_progress_duty_min;
+    *out_progress_window_s = z->guard_progress_window_s;
+    *out_drift_hysteresis_c = z->guard_drift_hysteresis_c;
+    *out_frozen_eps_c = z->guard_frozen_eps_c;
+    *out_cross_zone_period_s = z->guard_cross_zone_period_s;
+    return true;
+}
+
+/* The four per-zone executor overrides added in v8 -- profile_executor.c's
+ * side of the same pass. Same 0-means-default convention. */
+bool zones_config_get_executor_thresholds(uint8_t zone_index, float *out_bangbang_hysteresis_c,
+                                          float *out_cooling_limited_margin_c,
+                                          float *out_cooling_limited_hold_s, float *out_ramp_lock_band_c)
+{
+    if (!out_bangbang_hysteresis_c || !out_cooling_limited_margin_c || !out_cooling_limited_hold_s ||
+        !out_ramp_lock_band_c || zone_index >= s_zones.cfg.thermo_count) {
+        return false;
+    }
+    const zone_cfg_t *z = &s_zones.cfg.zones[zone_index];
+    *out_bangbang_hysteresis_c = z->bangbang_hysteresis_c;
+    *out_cooling_limited_margin_c = z->cooling_limited_margin_c;
+    *out_cooling_limited_hold_s = z->cooling_limited_hold_s;
+    *out_ramp_lock_band_c = z->ramp_lock_band_c;
+    return true;
+}
+
+/* The one global v8 override. Not gated on thermo_count -- the PC link exists
+ * whether or not a single zone has been configured. */
+bool zones_config_get_pc_link_abort_silence_ms(float *out_ms)
+{
+    if (!out_ms) {
+        return false;
+    }
+    *out_ms = s_zones.cfg.pc_link_abort_silence_ms;
+    return true;
+}
+
 /* Bundled setter, same "reject nothing half-written" discipline as every
  * bundled setter above. Each of the 8 fields checked against its own
  * independent bound (matching which ceiling parse_zone_fields() applies to
@@ -1760,6 +1942,11 @@ static bool validate_zones_cfg(const zones_cfg_t *cand, const char **err_reason)
         *err_reason = "safety_tc_type out of range";
         return false;
     }
+    if (!isfinite(cand->pc_link_abort_silence_ms) || cand->pc_link_abort_silence_ms < 0.0f ||
+        cand->pc_link_abort_silence_ms > ZONE_PC_LINK_SILENCE_MS_MAX) {
+        *err_reason = "pc_link_abort_silence_ms out of range";
+        return false;
+    }
     uint8_t relay_valid_bits =
         cand->relay_count >= 8 ? 0xFF : (uint8_t)((1u << cand->relay_count) - 1u);
     uint8_t thermo_valid_bits =
@@ -1890,6 +2077,51 @@ static bool validate_zones_cfg(const zones_cfg_t *cand, const char **err_reason)
             *err_reason = "zone cross_zone_max_delta_c out of range";
             return false;
         }
+        if (!isfinite(z->guard_progress_duty_min) || z->guard_progress_duty_min < 0.0f ||
+            z->guard_progress_duty_min > ZONE_GUARD_DUTY_MAX) {
+            *err_reason = "zone guard_progress_duty_min out of range";
+            return false;
+        }
+        if (!isfinite(z->guard_progress_window_s) || z->guard_progress_window_s < 0.0f ||
+            z->guard_progress_window_s > ZONE_GUARD_TIME_S_MAX) {
+            *err_reason = "zone guard_progress_window_s out of range";
+            return false;
+        }
+        if (!isfinite(z->guard_drift_hysteresis_c) || z->guard_drift_hysteresis_c < 0.0f ||
+            z->guard_drift_hysteresis_c > ZONE_GUARD_MARGIN_C_MAX) {
+            *err_reason = "zone guard_drift_hysteresis_c out of range";
+            return false;
+        }
+        if (!isfinite(z->guard_frozen_eps_c) || z->guard_frozen_eps_c < 0.0f ||
+            z->guard_frozen_eps_c > ZONE_GUARD_EPS_C_MAX) {
+            *err_reason = "zone guard_frozen_eps_c out of range";
+            return false;
+        }
+        if (!isfinite(z->guard_cross_zone_period_s) || z->guard_cross_zone_period_s < 0.0f ||
+            z->guard_cross_zone_period_s > ZONE_GUARD_TIME_S_MAX) {
+            *err_reason = "zone guard_cross_zone_period_s out of range";
+            return false;
+        }
+        if (!isfinite(z->bangbang_hysteresis_c) || z->bangbang_hysteresis_c < 0.0f ||
+            z->bangbang_hysteresis_c > ZONE_GUARD_MARGIN_C_MAX) {
+            *err_reason = "zone bangbang_hysteresis_c out of range";
+            return false;
+        }
+        if (!isfinite(z->cooling_limited_margin_c) || z->cooling_limited_margin_c < 0.0f ||
+            z->cooling_limited_margin_c > ZONE_GUARD_MARGIN_C_MAX) {
+            *err_reason = "zone cooling_limited_margin_c out of range";
+            return false;
+        }
+        if (!isfinite(z->cooling_limited_hold_s) || z->cooling_limited_hold_s < 0.0f ||
+            z->cooling_limited_hold_s > ZONE_GUARD_TIME_S_MAX) {
+            *err_reason = "zone cooling_limited_hold_s out of range";
+            return false;
+        }
+        if (!isfinite(z->ramp_lock_band_c) || z->ramp_lock_band_c < 0.0f ||
+            z->ramp_lock_band_c > ZONE_GUARD_MARGIN_C_MAX) {
+            *err_reason = "zone ramp_lock_band_c out of range";
+            return false;
+        }
         if (!isfinite(z->model_k_dc) || !isfinite(z->model_tau_s) || !isfinite(z->model_dead_time_s) ||
             z->model_k_dc < 0.0f || z->model_tau_s < 0.0f || z->model_dead_time_s < 0.0f ||
             z->model_k_dc > ZONE_MODEL_K_MAX || z->model_tau_s > ZONE_MODEL_TIME_MAX_S ||
@@ -1981,7 +2213,10 @@ static void json_escape(const char *src, char *out, size_t out_cap)
 
 static esp_err_t zones_get_handler(httpd_req_t *req)
 {
-    char json[2816]; /* 2688 -> 2816 (2026-08-27) with ct_mask: one small integer
+    char json[4352]; /* 2816 -> 4352 (2026-08-27) with the nine v8 per-zone
+                      * overrides plus one global: nine float keys a zone,
+                      * whose names alone run ~250 bytes before any values.
+                      * 2688 -> 2816 (2026-08-27) with ct_mask: one small integer
                       * key/value per zone, well under the 128 bytes added.
                       * 1024 -> 1536 with heater_window_ms/min_on_ms/min_off_ms,
                       * 1536 -> 1792 with cross_zone_max_delta_c,
@@ -2001,15 +2236,17 @@ static esp_err_t zones_get_handler(httpd_req_t *req)
     do {                                                                                          \
         n = snprintf(json + o, sizeof(json) - o, __VA_ARGS__);                                   \
         if (n < 0 || (size_t)n >= sizeof(json) - o) {                                             \
-            goto send;                                                                            \
+            goto truncated;                                                                            \
         }                                                                                          \
         o += (size_t)n;                                                                            \
     } while (0)
 
     APPEND("{\"thermo_count\":%u,\"relay_count\":%u,\"max_simultaneous_relays\":%u,"
-           "\"continue_on_zone_trip\":%s,\"safety_tc_type\":%u,\"zones\":[",
+           "\"continue_on_zone_trip\":%s,\"safety_tc_type\":%u,"
+           "\"pc_link_abort_silence_ms\":%.0f,\"zones\":[",
            s_zones.cfg.thermo_count, s_zones.cfg.relay_count, s_zones.cfg.max_simultaneous_relays,
-           s_zones.cfg.continue_on_zone_trip ? "true" : "false", s_zones.cfg.safety_tc_type);
+           s_zones.cfg.continue_on_zone_trip ? "true" : "false", s_zones.cfg.safety_tc_type,
+           (double)s_zones.cfg.pc_link_abort_silence_ms);
     for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
         const zone_cfg_t *z = &s_zones.cfg.zones[i];
         char name_escaped[ZONE_NAME_MAX_LEN * 2 + 1];
@@ -2036,7 +2273,16 @@ static esp_err_t zones_get_handler(httpd_req_t *req)
             /* tc_type is CONFIG, not a live reading, so it deliberately does
              * NOT go anywhere near kc-live-value on the page -- see
              * zones_page.html's rendering of this field. */
-            "\"tc_type\":%u,\"ct_mask\":%u}",
+            "\"tc_type\":%u,\"ct_mask\":%u,"
+            /* The nine v8 overrides. Always emitted, same reasoning as the
+             * plant model above: the page reads this back and reposts it, so a
+             * key that appeared only when set would drop the operator's
+             * "leave it at the default" choice on the next submit. */
+            "\"guard_progress_duty_min\":%.3f,\"guard_progress_window_s\":%.1f,"
+            "\"guard_drift_hysteresis_c\":%.1f,\"guard_frozen_eps_c\":%.3f,"
+            "\"guard_cross_zone_period_s\":%.1f,\"bangbang_hysteresis_c\":%.1f,"
+            "\"cooling_limited_margin_c\":%.1f,\"cooling_limited_hold_s\":%.1f,"
+            "\"ramp_lock_band_c\":%.1f}",
             i == 0 ? "" : ",", i, name_escaped, z->relay_mask, z->thermo_mask, (double)z->cal_offset_c,
             (double)z->pid_kp, (double)z->pid_ki, (double)z->pid_kd, (double)z->max_ramp_c_per_hr,
             (double)z->sanity_rate_c_per_min, z->control_mode, (double)z->max_temp_c,
@@ -2047,15 +2293,34 @@ static esp_err_t zones_get_handler(httpd_req_t *req)
             (double)z->guard_runaway_margin_c, (double)z->guard_drift_period_s,
             (double)z->guard_sensor_fault_debounce_ticks, (double)z->guard_frozen_window_s,
             (double)z->cross_zone_max_delta_c, (double)z->model_k_dc,
-            (double)z->model_tau_s, (double)z->model_dead_time_s, z->tc_type, z->ct_mask);
+            (double)z->model_tau_s, (double)z->model_dead_time_s, z->tc_type, z->ct_mask,
+            (double)z->guard_progress_duty_min, (double)z->guard_progress_window_s,
+            (double)z->guard_drift_hysteresis_c, (double)z->guard_frozen_eps_c,
+            (double)z->guard_cross_zone_period_s, (double)z->bangbang_hysteresis_c,
+            (double)z->cooling_limited_margin_c, (double)z->cooling_limited_hold_s,
+            (double)z->ramp_lock_band_c);
     }
     APPEND("]}");
 
 #undef APPEND
 
-send:
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_send(req, json, o);
+
+    /* Reached only if `json` is too small for the config it holds. The old
+     * behaviour was to send what had been written so far, which is a truncated
+     * JSON document: the page's fetch throws on it, and the operator sees a
+     * settings page stuck on "Loading" with no idea their zone config is fine
+     * and only the response was too big. A 500 with a valid body at least says
+     * what happened. Sizing `json` is the actual fix; this is the guard that
+     * makes an undersized buffer visible instead of silent. */
+truncated:
+    ESP_LOGE(TAG, "GET /api/zones did not fit in %u bytes -- raise the buffer", (unsigned)sizeof(json));
+    httpd_resp_set_status(req, "500 Internal Server Error");
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req,
+                              "{\"ok\":false,\"error\":\"zone config did not fit in the response "
+                              "buffer -- this is a firmware sizing bug, not a bad configuration\"}");
 }
 
 /* ---- POST /api/zones ------------------------------------------------------
@@ -2464,6 +2729,99 @@ static bool parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_count,
             }
         }
     }
+    /* The nine v8 overrides. OPTIONAL, same reasoning as z%u_xzone below:
+     * a client that has never heard of them keeps working, and an omitted
+     * field means "leave it at the firmware default". */
+    snprintf(key, sizeof(key), "z%u_progressduty", i);
+    {
+        char probe[16];
+        if (http_form_find_field(body, key, probe, sizeof(probe)) > 0) {
+            if (!parse_float_field(body, key, 0.0f, ZONE_GUARD_DUTY_MAX, &z->guard_progress_duty_min)) {
+                *err_reason = "zone guard_progress_duty_min out of range";
+                return false;
+            }
+        }
+    }
+    snprintf(key, sizeof(key), "z%u_progresswindow", i);
+    {
+        char probe[16];
+        if (http_form_find_field(body, key, probe, sizeof(probe)) > 0) {
+            if (!parse_float_field(body, key, 0.0f, ZONE_GUARD_TIME_S_MAX, &z->guard_progress_window_s)) {
+                *err_reason = "zone guard_progress_window_s out of range";
+                return false;
+            }
+        }
+    }
+    snprintf(key, sizeof(key), "z%u_drifthyst", i);
+    {
+        char probe[16];
+        if (http_form_find_field(body, key, probe, sizeof(probe)) > 0) {
+            if (!parse_float_field(body, key, 0.0f, ZONE_GUARD_MARGIN_C_MAX, &z->guard_drift_hysteresis_c)) {
+                *err_reason = "zone guard_drift_hysteresis_c out of range";
+                return false;
+            }
+        }
+    }
+    snprintf(key, sizeof(key), "z%u_frozeneps", i);
+    {
+        char probe[16];
+        if (http_form_find_field(body, key, probe, sizeof(probe)) > 0) {
+            if (!parse_float_field(body, key, 0.0f, ZONE_GUARD_EPS_C_MAX, &z->guard_frozen_eps_c)) {
+                *err_reason = "zone guard_frozen_eps_c out of range";
+                return false;
+            }
+        }
+    }
+    snprintf(key, sizeof(key), "z%u_xzoneperiod", i);
+    {
+        char probe[16];
+        if (http_form_find_field(body, key, probe, sizeof(probe)) > 0) {
+            if (!parse_float_field(body, key, 0.0f, ZONE_GUARD_TIME_S_MAX, &z->guard_cross_zone_period_s)) {
+                *err_reason = "zone guard_cross_zone_period_s out of range";
+                return false;
+            }
+        }
+    }
+    snprintf(key, sizeof(key), "z%u_bbhyst", i);
+    {
+        char probe[16];
+        if (http_form_find_field(body, key, probe, sizeof(probe)) > 0) {
+            if (!parse_float_field(body, key, 0.0f, ZONE_GUARD_MARGIN_C_MAX, &z->bangbang_hysteresis_c)) {
+                *err_reason = "zone bangbang_hysteresis_c out of range";
+                return false;
+            }
+        }
+    }
+    snprintf(key, sizeof(key), "z%u_coolmargin", i);
+    {
+        char probe[16];
+        if (http_form_find_field(body, key, probe, sizeof(probe)) > 0) {
+            if (!parse_float_field(body, key, 0.0f, ZONE_GUARD_MARGIN_C_MAX, &z->cooling_limited_margin_c)) {
+                *err_reason = "zone cooling_limited_margin_c out of range";
+                return false;
+            }
+        }
+    }
+    snprintf(key, sizeof(key), "z%u_coolhold", i);
+    {
+        char probe[16];
+        if (http_form_find_field(body, key, probe, sizeof(probe)) > 0) {
+            if (!parse_float_field(body, key, 0.0f, ZONE_GUARD_TIME_S_MAX, &z->cooling_limited_hold_s)) {
+                *err_reason = "zone cooling_limited_hold_s out of range";
+                return false;
+            }
+        }
+    }
+    snprintf(key, sizeof(key), "z%u_ramplock", i);
+    {
+        char probe[16];
+        if (http_form_find_field(body, key, probe, sizeof(probe)) > 0) {
+            if (!parse_float_field(body, key, 0.0f, ZONE_GUARD_MARGIN_C_MAX, &z->ramp_lock_band_c)) {
+                *err_reason = "zone ramp_lock_band_c out of range";
+                return false;
+            }
+        }
+    }
     /* Guard 8. OPTIONAL, unlike every field above: a submission that omits
      * it means "leave the guard disabled" (z is zero-initialized by the
      * caller), so older clients -- the MCP/pc_tools path and the test
@@ -2646,6 +3004,26 @@ static esp_err_t zones_post_handler(httpd_req_t *req)
             tmp.safety_tc_type = (uint8_t)v;
         } else {
             tmp.safety_tc_type = s_zones.cfg.safety_tc_type;
+        }
+    }
+
+    /* The one global v8 override. OPTIONAL, and on omit it keeps the CURRENT
+     * live value rather than resetting to 0 -- the same reasoning as
+     * safety_tc_type above: this is a whole-page submit, and an older client
+     * that predates the field must not silently reset how long a firing
+     * tolerates a dead PC link just by saving the zones page. */
+    {
+        char val[16];
+        int len = http_form_find_field(body, "pc_link_abort_silence_ms", val, sizeof(val));
+        if (len > 0) {
+            if (!parse_float_field(body, "pc_link_abort_silence_ms", 0.0f,
+                                   ZONE_PC_LINK_SILENCE_MS_MAX, &tmp.pc_link_abort_silence_ms)) {
+                httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                    "pc_link_abort_silence_ms out of range (0 = firmware default)");
+                return ESP_OK;
+            }
+        } else {
+            tmp.pc_link_abort_silence_ms = s_zones.cfg.pc_link_abort_silence_ms;
         }
     }
 

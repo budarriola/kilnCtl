@@ -115,7 +115,7 @@ bool thermal_guard_tick(thermal_guard_state_t *state, const thermal_guard_cfg_t 
      * single second for 6 minutes straight. See FROZEN_EPS_C's own comment
      * above for the exact value and why. */
     if (in->commanded_duty > 0.0f) {
-        if (!state->frozen_window_active || fabsf(in->measurement_c - state->frozen_last_c) > FROZEN_EPS_C) {
+        if (!state->frozen_window_active || fabsf(in->measurement_c - state->frozen_last_c) > effective_f(cfg->frozen_eps_c, FROZEN_EPS_C)) {
             state->frozen_window_active = true;
             state->frozen_last_c = in->measurement_c;
             state->frozen_elapsed_s = 0.0f;
@@ -137,7 +137,7 @@ bool thermal_guard_tick(thermal_guard_state_t *state, const thermal_guard_cfg_t 
      * Both share one rolling window over "duty is at/above the progress
      * threshold" periods; which guard applies depends on which way the
      * error points. */
-    if (in->commanded_duty >= PROGRESS_DUTY_MIN) {
+    if (in->commanded_duty >= effective_f(cfg->progress_duty_min, PROGRESS_DUTY_MIN)) {
         float error = in->setpoint_c - in->measurement_c;
         if (!state->progress_window_active) {
             state->progress_window_active = true;
@@ -162,7 +162,9 @@ bool thermal_guard_tick(thermal_guard_state_t *state, const thermal_guard_cfg_t 
              * fix -- only a zone that has actually set wrong_dir_window_s
              * sees the new behaviour of it applying to guard 1 too. */
             float window_s = effective_f(cfg->wrong_dir_window_s,
-                                          (error > 0.0f) ? PROGRESS_WINDOW_S : WRONG_DIR_WINDOW_S);
+                                          (error > 0.0f)
+                                              ? effective_f(cfg->progress_window_s, PROGRESS_WINDOW_S)
+                                              : WRONG_DIR_WINDOW_S);
             if (state->progress_window_elapsed_s >= window_s) {
                 float delta = in->measurement_c - state->progress_window_start_c;
                 float elapsed_min = state->progress_window_elapsed_s / 60.0f;
@@ -272,14 +274,15 @@ bool thermal_guard_tick(thermal_guard_state_t *state, const thermal_guard_cfg_t 
      * outside it, which would make this guard fire on completely healthy
      * operation. */
     float abs_error = fabsf(in->setpoint_c - in->measurement_c);
-    if (abs_error <= DRIFT_HYSTERESIS_C) {
+    float drift_band_c = effective_f(cfg->drift_hysteresis_c, DRIFT_HYSTERESIS_C);
+    if (abs_error <= drift_band_c) {
         state->at_setpoint_window_active = true;
         state->at_setpoint_elapsed_s = 0.0f;
     } else if (state->at_setpoint_window_active) {
         state->at_setpoint_elapsed_s += in->dt_s;
         if (state->at_setpoint_elapsed_s >= effective_f(cfg->drift_period_s, DRIFT_PERIOD_S)) {
             trip(state, THERMAL_GUARD_TRIP_DRIFT, "drifted >%.0fC from setpoint for %.0fs after settling",
-                 (double)DRIFT_HYSTERESIS_C, (double)state->at_setpoint_elapsed_s);
+                 (double)drift_band_c, (double)state->at_setpoint_elapsed_s);
             return true;
         }
     }
