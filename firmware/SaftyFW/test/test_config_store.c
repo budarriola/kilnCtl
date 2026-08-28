@@ -1013,6 +1013,104 @@ static void test_unpack_validates_ranges_on_load(void)
                "validation is wired into that path too");
 }
 
+static void test_reject_info_distinguishes_fresh_from_rejected(void)
+{
+    TEST_SECTION("config_store_unpack_ex/find_latest_ex -- fresh board vs. committed-and-"
+                 "rejected are NOT the same outcome");
+
+    // This is the assertion that would have caught the 2026-08-27 fail-open
+    // regression: config_store_find_latest() alone cannot tell "the sector
+    // was empty/corrupt" (ordinary; a fresh board looks exactly like this)
+    // apart from "a committed, CRC-intact record was found and REFUSED"
+    // (never ordinary -- it means the guards are about to run on
+    // config_store_default() instead of a real, previously-approved config).
+    // Both return CONFIG_STORE_NO_SLOT identically; conflating them is
+    // exactly the defect config_store.h's "Load-time rejection diagnostics"
+    // comment and config_store_get_config_crc()'s fix both exist to close.
+    // If a future edit merges the two branches below back into "just check
+    // CONFIG_STORE_NO_SLOT", this test fails on the out_reject.rejected
+    // checks even though CONFIG_STORE_NO_SLOT is still correctly returned in
+    // both cases -- proving the two cases really are being told apart, not
+    // merely proving the existing NO_SLOT behaviour still works.
+
+    // --- Case 1: fresh board, nothing ever committed -- an erased (all-0xFF)
+    // sector. Ordinary; must NOT be reported as rejected.
+    {
+        uint8_t sector[SAFTYFW_CONFIG_STORE_FLASH_SIZE];
+        memset(sector, 0xFF, sizeof(sector));
+
+        config_store_record_t found;
+        config_store_reject_info_t reject_info;
+        memset(&reject_info, 0xAA, sizeof(reject_info)); // poison: must be fully overwritten
+        size_t slot = config_store_find_latest_ex(sector, &found, &reject_info);
+
+        TEST_CHECK(slot == CONFIG_STORE_NO_SLOT, "an erased sector has no valid slot");
+        TEST_CHECK(!reject_info.rejected,
+                   "an erased sector is the ORDINARY fresh-board case -- rejected must be false, "
+                   "never conflated with a record that was found and refused");
+        TEST_CHECK(reject_info.field == NULL && reject_info.rule == NULL && reject_info.seq == 0u,
+                   "the rest of out_reject stays zeroed for the ordinary case, nothing to log");
+    }
+
+    // --- Case 2: a committed, CRC-intact record whose tc_source byte this
+    // build's range table refuses -- config_store_write()'s own seq
+    // convention (first real write is seq 1) is irrelevant here; what
+    // matters is that the record is otherwise well-formed and only fails
+    // config_params_validate_ranges(). Must be reported as rejected, with
+    // the offending field/rule/seq actually populated for the log line.
+    {
+        config_store_record_t rec;
+        config_store_default(&rec);
+        rec.seq = 7u;
+        rec.tc_source = 99u; // out of range -- CONFIG_STORE_TC_SOURCE_BOTH is 2
+
+        uint8_t sector[SAFTYFW_CONFIG_STORE_FLASH_SIZE];
+        memset(sector, 0xFF, sizeof(sector));
+        uint8_t record[CONFIG_STORE_RECORD_LEN];
+        config_store_pack(&rec, record);
+        memcpy(&sector[0], record, CONFIG_STORE_RECORD_LEN);
+        // every other slot stays erased -- no valid fallback slot exists,
+        // matching config_store_find_latest()'s own "no other slot" contract
+        // for this scenario.
+
+        config_store_record_t found;
+        config_store_reject_info_t reject_info;
+        memset(&reject_info, 0, sizeof(reject_info));
+        size_t slot = config_store_find_latest_ex(sector, &found, &reject_info);
+
+        TEST_CHECK(slot == CONFIG_STORE_NO_SLOT,
+                   "the only record in the sector is refused, so no slot survives -- same "
+                   "CONFIG_STORE_NO_SLOT a fresh board would also return");
+        TEST_CHECK(reject_info.rejected,
+                   "unlike case 1, this sector DID hold a committed record -- rejected must be "
+                   "true, this is the distinction case 1's test above proves is not vacuous");
+        TEST_CHECK(reject_info.field != NULL && strcmp(reject_info.field, "tc_source") == 0,
+                   "the specific offending field is named, not just \"validation failed\"");
+        TEST_CHECK(reject_info.rule != NULL && strlen(reject_info.rule) > 0,
+                   "the specific rule text is carried too, for a self-contained log line");
+        TEST_CHECK(reject_info.seq == 7u,
+                   "the rejected record's own seq is carried, so a log line can name WHICH "
+                   "commit was refused");
+    }
+
+    // --- config_store_unpack_ex() directly, one level below find_latest_ex():
+    // confirms the plain "false but not rejected" (bad magic) case also
+    // leaves out_reject cleanly zeroed, not just find_latest_ex()'s
+    // aggregation of it.
+    {
+        uint8_t erased_record[CONFIG_STORE_RECORD_LEN];
+        memset(erased_record, 0xFF, sizeof(erased_record));
+        config_store_record_t out;
+        config_store_reject_info_t reject_info;
+        memset(&reject_info, 0xAA, sizeof(reject_info));
+        TEST_CHECK(!config_store_unpack_ex(erased_record, &out, &reject_info),
+                   "an erased record still fails to unpack");
+        TEST_CHECK(!reject_info.rejected,
+                   "bad magic (erased flash) is case 1, not case 2 -- unpack_ex must not report "
+                   "it as a refused record");
+    }
+}
+
 static void test_seq_to_version(void)
 {
     TEST_SECTION("config_store_seq_to_version -- never lands on 0 for a real commit");
@@ -1804,6 +1902,7 @@ void run_test_config_store(void)
     test_future_version_refused();
     test_unset_fields_distinguishable_from_zero();
     test_unpack_validates_ranges_on_load();
+    test_reject_info_distinguishes_fresh_from_rejected();
     test_seq_to_version();
     test_tc_type_voltage_mode_clamp_v2();
     test_tc_type_voltage_mode_clamp_v1_migration();

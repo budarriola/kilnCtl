@@ -503,6 +503,56 @@ typedef struct {
 // macros defined there); declared here only as documentation that such a
 // check exists.
 
+// --- Load-time rejection diagnostics (2026-08-27 fail-open fix) -----------
+//
+// config_store_unpack()/config_store_find_latest() both collapse two VERY
+// different inputs into the same `false`/CONFIG_STORE_NO_SLOT return:
+//   1. "nothing here" -- bad magic, a CRC mismatch, or an unrecognised
+//      format_version. This is the ordinary shape of a fresh, never-
+//      committed board (an erased sector reads back as all-0xFF, which is
+//      exactly a bad-magic failure) and is not, by itself, news.
+//   2. "something here, and it's wrong" -- magic/CRC/format_version all
+//      checked out (the bytes are provably intact) but
+//      config_params_validate_ranges() refused a field's VALUE. This can
+//      only happen to a record that was actually written and committed at
+//      some point -- by this build, an older build, or bit rot that
+//      happened to preserve the CRC-32 -- and it is the one case where
+//      falling back to config_store_default() is a DOWNGRADE from what the
+//      board was supposed to be running, not a neutral "nothing to load
+//      yet." abs_max_temp_c defaults to 0.0f, which safety_guards.h
+//      documents as "0 = not commissioned, guard never trips" -- silently
+//      substituting that for a real, previously-committed ceiling is a
+//      fail-OPEN of S1, the primary absolute overtemperature guard, and it
+//      must never look the same in a log (or to an operator) as a board
+//      that was simply never commissioned.
+//
+// This struct is how case 2 is reported back out of the _ex() variants
+// below, so config_store_flash.c's config_store_boot_load() can (a) log the
+// specific field/rule/seq a human needs to debug this from a log line alone,
+// and (b) keep the board from claiming "commissioned" -- see
+// config_store_get_config_crc()'s own comment for how that claim is denied.
+typedef struct {
+    bool        rejected; // true iff a magic+CRC(+format_version)-valid
+                           // record was found but config_params_validate_
+                           // ranges() refused one of its fields -- case 2
+                           // above. Left false (with the rest of this struct
+                           // zeroed) for case 1 -- an ordinary "nothing valid
+                           // here", ordinary for a fresh board and not worth
+                           // a log line.
+    const char *field;    // config_params_validate_ranges()'s out_field for
+                           // the rejected record -- a static string, valid
+                           // only when rejected == true.
+    const char *rule;     // config_params_validate_ranges()'s out_rule --
+                           // same validity contract as `field`.
+    uint32_t    seq;      // the rejected record's own seq, so the log line
+                           // names WHICH commit was refused. Also used by
+                           // config_store_find_latest_ex() to prefer the
+                           // highest-seq rejection when more than one slot in
+                           // the sector fails validation, matching the
+                           // "highest seq wins" rule the valid-record path
+                           // already follows.
+} config_store_reject_info_t;
+
 // --- Record pack/unpack ---------------------------------------------------
 
 // Packs `rec` into a CONFIG_STORE_RECORD_LEN-byte record, including the
@@ -535,6 +585,23 @@ void config_store_pack(const config_store_record_t *rec,
 //     refusing it.
 bool config_store_unpack(const uint8_t in[CONFIG_STORE_RECORD_LEN],
                           config_store_record_t *out);
+
+// Same contract as config_store_unpack() above, plus `out_reject` (optional,
+// NULL-safe): on a `false` return, `*out_reject` says WHICH of the two
+// failure shapes this file's "Load-time rejection diagnostics" block comment
+// describes just happened -- bad magic/CRC/format_version (out_reject->
+// rejected left false) versus a structurally-intact record whose field
+// values config_params_validate_ranges() refused (out_reject->rejected true,
+// with ->field/->rule/->seq naming the specific offender). `*out_reject` is
+// left fully zeroed (rejected == false) on a `true` return, and is always
+// written (never left uninitialised) whenever `out_reject != NULL`.
+// config_store_unpack() is a thin wrapper over this with out_reject == NULL,
+// so every existing caller (including test_config_store.c's) is unaffected --
+// same "thin wrapper adds one out-param" pattern config_params_validate_ex()
+// already uses in this codebase.
+bool config_store_unpack_ex(const uint8_t in[CONFIG_STORE_RECORD_LEN],
+                             config_store_record_t *out,
+                             config_store_reject_info_t *out_reject);
 
 // Fills `*out` with the safe, documented default record: format_version
 // current (2), seq 0, fields_set 0 (nothing commissioned), tc_type
@@ -573,6 +640,26 @@ void config_store_default(config_store_record_t *out);
 // bootloader_metadata_find_latest()'s own contract.
 size_t config_store_find_latest(const uint8_t sector[SAFTYFW_CONFIG_STORE_FLASH_SIZE],
                                  config_store_record_t *out_rec);
+
+// Same contract as config_store_find_latest() above, plus `out_reject`
+// (optional, NULL-safe). Only meaningful when this function returns
+// CONFIG_STORE_NO_SLOT: `*out_reject` is then filled with the highest-seq
+// slot in the sector that was found structurally intact (magic/CRC/
+// format_version all valid) but refused by config_params_validate_ranges()
+// -- see config_store_unpack_ex() and this file's "Load-time rejection
+// diagnostics" comment above for why that case (`rejected == true`) must not
+// be reported, logged, or treated the same as an ordinary empty/fresh
+// sector (`rejected == false`, every slot's magic/CRC itself was bad).
+// When a valid slot IS found (return != CONFIG_STORE_NO_SLOT), `*out_reject`
+// is always zeroed (rejected == false) regardless of whether some OTHER,
+// lower-seq slot in the sector was also rejected -- a board that has a real,
+// trustworthy current config is not in the state this diagnostic exists to
+// surface. `*out_reject` is always written (never left uninitialised) when
+// `out_reject != NULL`. config_store_find_latest() is a thin wrapper over
+// this with out_reject == NULL.
+size_t config_store_find_latest_ex(const uint8_t sector[SAFTYFW_CONFIG_STORE_FLASH_SIZE],
+                                    config_store_record_t *out_rec,
+                                    config_store_reject_info_t *out_reject);
 
 // Given the slot index config_store_find_latest() returned (or
 // CONFIG_STORE_NO_SLOT), returns the index the NEXT write should target.
@@ -624,6 +711,23 @@ uint8_t config_store_get_tc_type(void);
 // The cached calibration_missing flag. Returns true (the safe default) if
 // called before config_store_boot_load().
 bool config_store_is_calibration_missing(void);
+
+// True iff config_store_boot_load() found NO valid slot in the sector AND at
+// least one slot it scanned was structurally intact but refused by
+// config_params_validate_ranges() -- case 2 of this file's "Load-time
+// rejection diagnostics" comment. False for every other outcome, including
+// "never called config_store_boot_load() yet" and the ordinary fresh-board
+// case (no slot decodes at all). This is a strictly narrower condition than
+// `config_store_is_calibration_missing()`, which is also true here but is
+// ALSO true for a perfectly ordinary uncommissioned board -- this getter
+// exists because "board is uncommissioned" and "board's committed config was
+// just thrown out for being invalid" call for different operator responses,
+// and calibration_missing alone cannot tell them apart. No consumer is wired
+// to this yet (see config_store_flash.c's config_store_boot_load(), which
+// logs the same condition over the console UART); it is exposed here so a
+// future consumer -- a DIAG bit, a boot-reason report -- does not have to
+// reconstruct the distinction from scratch.
+bool config_store_is_config_rejected(void);
 
 // True iff the cached record's tc_type has actually been commissioned
 // (CONFIG_STORE_SET_TC_TYPE, see that bit's own comment) rather than merely
@@ -709,8 +813,29 @@ uint8_t config_store_seq_to_version(uint32_t seq);
 // A CRC over the cached record's active fields -- what
 // SAFETY_CMD_FW_VERSION's `config_crc` field carries. The low 16 bits of
 // config_store_record_crc() applied to the cached record; returns 0 if
-// called before config_store_boot_load(). Pure/host-testable via
-// config_store_record_crc() itself -- this getter only adds the cache read.
+// called before config_store_boot_load().
+//
+// ALSO returns 0 -- never the default record's own (non-zero) packed CRC --
+// whenever the cached record's `seq` is 0, i.e. whenever config_store_get_
+// config_version() would also read back 0 (see that function's own comment
+// for the two inputs that produce seq == 0: never committed, or committed-
+// then-rejected-at-load). This mirrors config_store_confirm_crc_ok()'s
+// deliberate choice not to distinguish those two cases in the unsafe
+// direction, for a reason specific to THIS getter: KilnFW's safety_page.html
+// and diagnostics_page.html (App/drivers/*.html; not owned by this module)
+// both test `safety_config_crc === 0` as their ONLY "UNCOMMISSIONED" signal
+// -- no calibration_missing check backs it up on those pages. Before this
+// fix, a board running entirely on config_store_default() -- including one
+// whose only committed record was just refused by config_params_validate_
+// ranges() at load, config_store.h's "Load-time rejection diagnostics" case
+// 2 -- still packed and returned the DEFAULT record's own real, non-zero
+// CRC-32 here, so those two pages read a rejected/never-committed board as
+// "commissioned." Returning 0 for seq == 0 closes that: the one operator-
+// visible signal those pages already have now actually fires for both
+// halves of case 2's hazard (never told, AND told the wrong thing), without
+// requiring any KilnFW-side change. Pure/host-testable via config_store_
+// record_crc() and config_store_seq_to_version()'s own seq == 0 handling --
+// this getter only adds the cache read and the same sentinel check.
 uint16_t config_store_get_config_crc(void);
 
 // Pure: packs `rec` (config_store_pack()) and returns the CRC-32 that ends

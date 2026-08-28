@@ -53,16 +53,61 @@
 #     config_store) than the link protocol's CRC16-CCITT framing this item
 #     is about. Allowlisted by path, not by pattern, so they stay visible
 #     rather than silently exempted by a loophole in the regex.
+#   - 2026-08-27: the same "different algorithm/purpose, allowlisted by path
+#     with a written reason" treatment extended to KilnFW's own NVS/flash
+#     record-integrity CRC32s and host-test stub headers, found when this
+#     check ran for the first time via tools/run_all_checks.ps1 and reported
+#     14 hits -- 12 of which turned out to be this class of false positive,
+#     not a from-scratch reimplementation of the LINK's CRC16-CCITT-FALSE:
+#       - firmware/KilnFW/App/drivers/boot_guard.c -- crc32_compute()/
+#         record_crc(): CRC32/0xEDB88320 integrity check over a boot-guard
+#         NVS record (this module's own host tests run off-target with no
+#         ESP-IDF ROM available, hence a local table-less CRC32 instead of
+#         esp_rom_crc32_le() -- see the file's own comment on crc32_compute()).
+#       - firmware/KilnFW/App/drivers/watchdog_cfg.c -- crc32_compute()/
+#         record_crc(): same CRC32/0xEDB88320, same off-target-host-test
+#         reasoning, over a watchdog-config NVS record.
+#       - firmware/KilnFW/App/drivers/crash_report.c -- compute_crc(): CRC32
+#         (via esp_crc32_le()) over a crash-report NVS record.
+#       - firmware/KilnFW/App/drivers/profiles_http.c -- compute_profile_crc():
+#         CRC32 (via esp_crc32_le()) over a saved kiln-profile NVS slot.
+#       - firmware/KilnFW/App/drivers/zones_http.c -- compute_zones_crc():
+#         CRC32 (via esp_crc32_le()) over a zones-config NVS record.
+#       - firmware/KilnFW/App/drivers/safety_cfg_store.c and its header --
+#         safety_cfg_store_cached_crc(): a plain ACCESSOR returning an
+#         already-stored uint16_t field (`s_store.config_crc`), computing
+#         nothing at all. It happens to be named "crc" (the value it returns
+#         IS the safety-config CRC the RP2040 reported) and happens to match
+#         the definition pattern (return type + open paren), but there is no
+#         CRC algorithm anywhere in this function's body to drift.
+#       - firmware/KilnFW/App/test/test_safety_cfg_http.c -- its one-line test
+#         stub of safety_cfg_store_cached_crc() (`{ return 0; }`), for the
+#         same reason as the real accessor just above: a stub returning a
+#         fixed value, not a CRC computation.
+#       - firmware/KilnFW/App/test/stubs/esp_crc.h and esp_rom_crc.h --
+#         host-test STUB headers that re-declare ESP-IDF's own
+#         esp_crc32_le()/esp_rom_crc32_le() ROM functions so off-target host
+#         tests can link. Neither is a link-layer implementation; both exist
+#         solely because ESP-IDF's real ROM functions are unavailable when
+#         building for the host, and both compute the SAME CRC32 the ROM
+#         function they stand in for computes (see each stub's own header
+#         comment), not a from-scratch CRC16-CCITT-FALSE for the framing this
+#         check protects.
+#     None of the nine files above touches the link's CRC16-CCITT-FALSE or its
+#     0x7E byte-stuffing -- all nine are CRC32 (a different polynomial/width
+#     entirely) over NVS/flash records, or plain accessors/stubs that compute
+#     nothing. Allowlisted by path, not by widening the regex, for the same
+#     reason as the bootloader/config_store entries above: an exemption a
+#     reader cannot audit is how a check becomes decorative.
 #
-# What this WILL still flag, on purpose: firmware/KilnFW/App/drivers/
-# espInterfaces/uart_protocol.c (and its host-test twin under
-# firmware/UnitTestFw/) really does still implement its own
-# crc16_ccitt_false()/stuff_and_send() outside CommonFW today -- this is the
-# EXACT, currently-open TODO.md Phase 1 item ("KilnFW's uart_protocol.c
-# delegating framing/CRC... before the old code is deleted") this check
-# exists to close. It is expected to report these two hits until that
-# refactor lands; that is the check doing its job, not a false positive to
-# suppress.
+# uart_protocol.c no longer needs an entry here: as of 2026-08-27 it calls
+# kilnlink_crc16_ccitt_false()/kilnlink_stuff() directly at every use site
+# (see its own header comment) instead of through the two local wrapper
+# functions whose NAMES used to trip this check even though their BODIES were
+# pure pass-throughs. Removing that indirection was proven byte-identical in
+# firmware/KilnFW/App/test/test_uart_protocol_link_delegate.c before it
+# landed -- this closes SaftyFW/TODO.md Phase 1's "KilnFW's uart_protocol.c
+# delegating framing/CRC, proven byte-identical" item.
 #
 # Usage: powershell -File tools\check_link_impl_isolation.ps1
 $ErrorActionPreference = "Stop"
@@ -120,7 +165,32 @@ $allowlistPaths = @(
     (Join-Path $firmwareRoot "SaftyFW\bootloader\crc32.h"),
     (Join-Path $firmwareRoot "SaftyFW\src\config_store.c"),
     (Join-Path $firmwareRoot "SaftyFW\src\config_store.h"),
-    (Join-Path $firmwareRoot "SaftyFW\src\config_store_flash.c")
+    (Join-Path $firmwareRoot "SaftyFW\src\config_store_flash.c"),
+    # 2026-08-27 additions -- see the header comment's dated entry above for
+    # why each of these is a different algorithm/purpose (CRC32 record
+    # integrity, or a plain accessor/stub computing nothing) than the link's
+    # CRC16-CCITT-FALSE, not a from-scratch reimplementation of it.
+    (Join-Path $firmwareRoot "KilnFW\App\drivers\boot_guard.c"),
+    (Join-Path $firmwareRoot "KilnFW\App\drivers\watchdog_cfg.c"),
+    (Join-Path $firmwareRoot "KilnFW\App\drivers\crash_report.c"),
+    (Join-Path $firmwareRoot "KilnFW\App\drivers\profiles_http.c"),
+    (Join-Path $firmwareRoot "KilnFW\App\drivers\zones_http.c"),
+    (Join-Path $firmwareRoot "KilnFW\App\drivers\safety_cfg_store.c"),
+    (Join-Path $firmwareRoot "KilnFW\App\drivers\safety_cfg_store.h"),
+    (Join-Path $firmwareRoot "KilnFW\App\test\test_safety_cfg_http.c"),
+    (Join-Path $firmwareRoot "KilnFW\App\test\stubs\esp_crc.h"),
+    (Join-Path $firmwareRoot "KilnFW\App\test\stubs\esp_rom_crc.h"),
+    # firmware/KilnFW/App/test/test_uart_protocol_link_delegate.c: deliberately
+    # DOES contain a from-scratch old_crc16_ccitt_false()/old_stuff() -- a
+    # verbatim, intentionally-frozen reproduction of the local implementation
+    # uart_protocol.c used to have, kept ONLY so this test can compare it
+    # against kilnlink_crc16_ccitt_false()/kilnlink_stuff() and prove they are
+    # byte-identical (see the file's own header comment). It is test
+    # scaffolding proving isolation, not a second production implementation --
+    # the same reasoning firmware/CommonFW/test/test_uart_protocol_delegate.c
+    # already relies on by living under the \CommonFW\ exclusion above; this
+    # file needs its own path entry because it lives under KilnFW instead.
+    (Join-Path $firmwareRoot "KilnFW\App\test\test_uart_protocol_link_delegate.c")
 )
 
 $candidateFiles = Get-ChildItem -Path $firmwareRoot -Recurse -Include *.c, *.h -File |

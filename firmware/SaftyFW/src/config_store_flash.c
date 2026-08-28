@@ -13,6 +13,7 @@
 // early in main()'s boot sequence, before anything reads the cache.
 #include "config_store.h"
 
+#include <stdio.h>
 #include <string.h>
 
 #include "pico/error.h"
@@ -23,6 +24,7 @@
 
 #include "flash_layout.h" // bootloader/ -- SAFTYFW_CONFIG_STORE_FLASH_OFFSET/_SIZE
 #include "max31856.h"      // MAX31856_TC_TYPE_K -- asserted to match CONFIG_STORE_DEFAULT_TC_TYPE
+#include "tasks/console_uart.h" // console_uart_puts() -- the boot-time "record REJECTED" log line
 #include "tasks/relay_owner.h" // relay_owner_get_state() -- the ARMED check
 
 // Compile-time cross-check: config_store.h's CONFIG_STORE_DEFAULT_TC_TYPE is
@@ -60,12 +62,19 @@ typedef char config_store_flash_rc_insufficient_resources_matches_pico_error
 static config_store_record_t s_cached_record;
 static size_t s_cached_slot = CONFIG_STORE_NO_SLOT;
 static bool s_loaded = false;
+// True iff the sector held a structurally-intact (magic/CRC/format_version
+// all valid) record that config_params_validate_ranges() refused, and no
+// OTHER slot in the sector was good -- config_store.h's "Load-time rejection
+// diagnostics" case 2, distinct from an ordinary never-committed board (case
+// 1, this stays false). See config_store_is_config_rejected()'s own comment.
+static bool s_load_rejected = false;
 
-static size_t read_latest_or_default(config_store_record_t *out_rec)
+static size_t read_latest_or_default(config_store_record_t *out_rec,
+                                      config_store_reject_info_t *out_reject)
 {
     const uint8_t *region =
         (const uint8_t *)(XIP_BASE + SAFTYFW_CONFIG_STORE_FLASH_OFFSET);
-    size_t latest = config_store_find_latest(region, out_rec);
+    size_t latest = config_store_find_latest_ex(region, out_rec, out_reject);
     if (latest == CONFIG_STORE_NO_SLOT) {
         config_store_default(out_rec);
     }
@@ -78,10 +87,64 @@ static size_t read_latest_or_default(config_store_record_t *out_rec)
 // blank or corrupt sector this leaves the cache holding config_store_default()
 // -- "a missing part must not abort boot" (max31856_configure()'s own doc
 // comment) applies to configuration exactly as much as to a missing sensor.
+//
+// 2026-08-27 fail-open fix: that fallback is silent and correct for an
+// ordinary fresh board, but WRONG to leave silent when the sector instead
+// held a committed record that config_params_validate_ranges() just refused
+// -- see config_store.h's "Load-time rejection diagnostics" block comment.
+// That case gets a loud console_uart_puts() line naming the specific field
+// and rule that failed (not just "validation failed" -- someone has to debug
+// this from a log line alone, on a board with no other output channel this
+// early in boot), and s_load_rejected latches so config_store_is_config_
+// rejected() can report it to any later consumer. console_uart_puts() is
+// safe to call here: console_uart_init() already ran (main.c step ~2, well
+// before this function's own call site at step 4) and this is still
+// pre-scheduler, the same context console_uart.h's own header comment
+// documents as safe.
 void config_store_boot_load(void)
 {
-    s_cached_slot = read_latest_or_default(&s_cached_record);
+    config_store_reject_info_t reject_info;
+    memset(&reject_info, 0, sizeof(reject_info));
+
+    s_cached_slot = read_latest_or_default(&s_cached_record, &reject_info);
+    s_load_rejected = (s_cached_slot == CONFIG_STORE_NO_SLOT) && reject_info.rejected;
+
+    if (s_load_rejected) {
+        // Two calls, not one. The single formatted line this replaced did not
+        // fit: -Wformat-truncation proved at compile time that the fixed
+        // consequence text alone needed 167 bytes of a buffer with 111-113
+        // left after the field and rule strings, so the part an operator most
+        // needs -- what the board is now DOING about it -- is exactly the part
+        // that would have been cut off. The consequence text is a constant, so
+        // it does not belong in a format buffer at all.
+        char line[256];
+        // %s on a possibly-NULL field/rule can't happen here: config_store_
+        // unpack_ex() only ever sets rejected == true alongside non-NULL
+        // field/rule (config_store.c's two RANGE-check call sites always
+        // pass real out_field/out_rule pointers to config_params_validate_
+        // ranges()), but "?" is printed instead of trusting that invariant
+        // silently, matching this codebase's general preference for a
+        // defensive fallback over an unverified assumption -- see e.g.
+        // config_store.c's REC_OFF_SAFETY_TC_INSTALLED comment for the same
+        // discipline applied to a wire byte instead of a pointer.
+        snprintf(line, sizeof(line),
+                 "SaftyFW: config_store REJECTED a committed record at load "
+                 "(seq=%lu): field '%s' -- %s\r\n",
+                 (unsigned long)reject_info.seq, reject_info.field ? reject_info.field : "?",
+                 reject_info.rule ? reject_info.rule : "?");
+        console_uart_puts(line);
+        console_uart_puts("SaftyFW: falling back to compiled defaults: "
+                          "abs_max_temp_c=0 (S1 will NOT trip until recommissioned), "
+                          "calibration_missing stays true, config_crc reports 0 "
+                          "(UNCOMMISSIONED).\r\n");
+    }
+
     s_loaded = true;
+}
+
+bool config_store_is_config_rejected(void)
+{
+    return s_loaded && s_load_rejected;
 }
 
 uint8_t config_store_get_tc_type(void)
@@ -163,6 +226,19 @@ uint16_t config_store_get_config_crc(void)
 {
     if (!s_loaded) {
         return 0;
+    }
+    // See config_store.h's own header comment on this function for the full
+    // reasoning: seq == 0 is the same sentinel config_store_get_config_
+    // version() already treats as "no CRC-verified record was ever
+    // committed" (never written, OR committed-then-rejected-at-load), and
+    // this getter must report the same "not confirmed" answer for the same
+    // reason config_store_confirm_crc_ok() does -- KilnFW's safety_page.html/
+    // diagnostics_page.html test THIS field, alone, for "UNCOMMISSIONED".
+    // Returning the default record's own real (non-zero) packed CRC here,
+    // as this function did before this fix, made a never-committed OR
+    // rejected-at-load board read back as commissioned on both pages.
+    if (s_cached_record.seq == 0u) {
+        return 0u;
     }
     return (uint16_t)(config_store_record_crc(&s_cached_record) & 0xFFFFu);
 }

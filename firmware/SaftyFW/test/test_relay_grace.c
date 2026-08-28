@@ -11,6 +11,9 @@
 //     against the original boot-relative grace window (2026-08-27 audit fix)
 //   - relay_trip_command_still_owed(): safety_core_task()'s trip-command
 //     retry-until-it-lands decision (2026-08-27 audit fix item 2)
+//   - relay_clear_command_still_owed(): the same retry-until-it-lands shape
+//     for CLEAR_TRIP, plus the trip-beats-clear precedence when both are
+//     owed at once (2026-08-27 audit fix, this session)
 #include "test_common.h"
 #include "../src/tasks/relay_grace.h"
 
@@ -157,6 +160,29 @@ static void test_trip_command_still_owed(void)
                "function itself must not depend on that discipline to be safe)");
 }
 
+static void test_clear_command_still_owed(void)
+{
+    TEST_SECTION("relay_clear_command_still_owed -- safety_core_task()'s CLEAR_TRIP retry-until-"
+                 "it-lands decision, and the trip-beats-clear precedence when both are owed at "
+                 "once (2026-08-27 audit fix)");
+
+    TEST_CHECK(relay_clear_command_still_owed(false, false) == true,
+               "not tripped, this attempt's send was dropped -- still owed, retry next tick");
+    TEST_CHECK(relay_clear_command_still_owed(false, true) == false,
+               "not tripped, this attempt's send landed -- no longer owed");
+    TEST_CHECK(relay_clear_command_still_owed(true, false) == false,
+               "THE PRECEDENCE CASE: a trip has (re-)latched since this clear was decided "
+               "ACCEPTED -- drop the owed flag rather than re-sending a now-stale clear that "
+               "would let a future energize command re-energize K4 out from under a guard that "
+               "just said it must stay open. SAFE direction (trip) wins, unconditionally, "
+               "regardless of the (unattempted) send result");
+    TEST_CHECK(relay_clear_command_still_owed(true, true) == false,
+               "tripped, and the argument claims the send 'succeeded' anyway -- never owed once "
+               "tripped (the caller should never actually attempt the send in this case, but the "
+               "function itself must not depend on that discipline to be safe -- same defensive "
+               "shape as relay_trip_command_still_owed(false, true))");
+}
+
 static void test_energize_allowed_during_update(void)
 {
     TEST_SECTION("relay_energize_allowed_during_update -- the Pico's own half of the mutual "
@@ -181,5 +207,6 @@ void run_test_relay_grace(void)
     test_clear_trip_uses_original_boot_clock_not_a_fresh_window();
     test_clear_trip_transition_other_states_unchanged();
     test_trip_command_still_owed();
+    test_clear_command_still_owed();
     test_energize_allowed_during_update();
 }

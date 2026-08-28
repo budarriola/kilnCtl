@@ -338,6 +338,39 @@ typedef struct {
     bool relay_commanded_recently;
     bool relay_commanded_continuously;
 
+    /* S9 only (2026-08-27 audit, second pass). True iff the current-sensing
+     * chain behind any_current_present is actually CALIBRATED -- the same
+     * branch current_presence_policy.h's current_presence_is_flowing()
+     * itself takes (k_ct_v_per_a > 0 for the relevant channel(s)), NOT
+     * config_store's calibration_missing record (that flag tracks a
+     * different, broader commissioning checklist -- tc_source/tc_placement_
+     * mode/abs_max_temp_c/ct_channel_map/max_rate_c_per_min/mains_voltage_v/
+     * tc_type via config_params_all_required_set() -- and does not include
+     * k_ct_v_per_a at all, so it cannot answer this question).
+     *
+     * Why S9 alone needs its own trust flag when S3/S4/S6b/S11 read the same
+     * any_current_present without one: current_presence_policy.h's own
+     * header comment documents that an UNCOMMISSIONED k_ct_v_per_a makes
+     * any_current_present run a deliberately sensitive, counts-domain
+     * fallback (delta_counts > a small fixed margin) rather than a real
+     * amps comparison -- "a presence heuristic, not a measurement." That
+     * heuristic is fine for a WARN-class guard (S3/S4) or for merely arming
+     * a check (S11) -- a false positive there costs nothing worse than an
+     * eager watch. It is NOT fine as the sole evidence for S9's
+     * trip_ineffective, which is the one latch in this whole module that is
+     * never clearable by anything short of power removal at the breaker
+     * (SAFETY_MODEL.md section 4, S9). An uncalibrated CT's DC offset floor
+     * reads as "current present" on every tick, forever -- not a transient
+     * a debounce can filter -- so without this flag an uncommissioned board
+     * bricks itself on the first trip of any kind. See safety_guards.c's S9
+     * block for how this is used: it does not silence the finding
+     * (SAFETY_MODEL.md section 4 calls S9 "the single most valuable guard
+     * after S1" specifically because it turns a silent failure into a loud
+     * one), it only gates which RESPONSE CLASS the finding gets -- WARN
+     * (s9_uncommissioned_warn, non-latching, exactly this file's own S4/S10
+     * idiom) while uncommissioned, TRIP-ESCALATE once commissioned. */
+    bool current_sensing_commissioned;
+
     /* S13. sample_counter_advancing is already the caller's comparison of
      * this tick's context frame's per-zone sample_counter against the last
      * one seen (SAFETY_MODEL.md section 4, S13) -- this module has no
@@ -452,6 +485,22 @@ typedef struct {
      * louder, escalation. */
     bool  s9_verify_active;
     float s9_verify_elapsed_s;
+    /* Consecutive-tick counter for any_current_present once
+     * s9_verify_elapsed_s has cleared trip_verify_s -- see
+     * S9_CURRENT_PRESENT_STREAK_TO_TRIP's comment in the .c file. Reset to 0
+     * whenever any_current_present or context_valid is false on a checked
+     * tick, and whenever relay_deenergized itself goes false (the
+     * verification window restarting from scratch). */
+    uint8_t s9_current_present_streak;
+    /* 2026-08-27 audit, second pass: level-tracked, non-latching WARN --
+     * same idiom as s4_warn/s10_warn -- true while the verify window has
+     * cleared trip_verify_s with current present but
+     * in->current_sensing_commissioned is false, i.e. exactly the case this
+     * module cannot trust enough to progress s9_current_present_streak
+     * toward the unclearable trip_ineffective latch. Cleared the instant
+     * the condition stops holding (current present is gone, OR current
+     * sensing becomes commissioned and the streak takes over instead). */
+    bool  s9_uncommissioned_warn;
     bool  trip_ineffective;
 
     /* S10: WARN only, sustained-disagreement timer + level. */

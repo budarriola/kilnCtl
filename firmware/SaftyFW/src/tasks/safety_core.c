@@ -226,6 +226,14 @@ static TaskHandle_t s_task_handle = NULL;
 // all regardless of firing_max_valid -- the min() clamp in safety_guards.c
 // only ever tightens a real abs_max_temp_c, it does not manufacture one.
 static safety_guard_cfg_t s_guard_cfg;
+
+// Cached alongside s_guard_cfg by apply_config_to_guard_cfg(), for the same
+// reason: recomputed only when the commissioned record changes, read every
+// tick. See that function's comment for why S9 needs it. False until a
+// record with all three k_ct_v_per_a channels calibrated is loaded, which is
+// the safe direction -- it downgrades S9 to a warning rather than latching an
+// unclearable trip off a reading nothing has calibrated.
+static bool s_current_sensing_commissioned = false;
 static safety_guard_state_t s_guard_state;
 
 // Copies every commissioned threshold out of config_store into s_guard_cfg.
@@ -308,6 +316,30 @@ static void safety_core_load_guard_cfg(const config_store_record_t *rec)
     s_guard_cfg.trip_verify_s         = (float)rec->trip_verify_s;
     s_guard_cfg.tc_disagreement_c      = rec->tc_disagreement_c;
     s_guard_cfg.tc_disagreement_time_s = (float)rec->tc_disagreement_time_s;
+
+    // S9's gate on whether the current reading is a MEASUREMENT or a
+    // heuristic. 2026-08-27: safety_guards.c gained
+    // in->current_sensing_commissioned so an uncommissioned board cannot latch
+    // the unclearable TRIP_INEFFECTIVE off a phantom reading -- with
+    // zero_counts shipping as 0 (config_store_default()), the op-amp's DC
+    // offset floor is subtracted against nothing and reads as real current on
+    // every tick, forever. That field arrived with no producer, which is the
+    // same shape as S13's sample_counter_advancing sitting hardcoded false:
+    // a guard input that looks wired and is not. Without this line the field
+    // would be false on EVERY board, silently downgrading S9 to a warning
+    // even after commissioning -- the failure that would have been found
+    // months later, by a welded contactor.
+    //
+    // ALL three channels, not any: current_any_present() (snapshots.h) reports
+    // presence across the whole set, so a single uncalibrated channel is
+    // enough to make that answer a heuristic. Mirrors the exact branch
+    // current_presence_is_flowing() itself takes on k_ct_v_per_a > 0.
+    // It lives on safety_guard_input_t, not safety_guard_cfg_t, so it is
+    // cached here and applied per tick in safety_core_build_input() -- the
+    // same shape as the other caller-computed input facts.
+    s_current_sensing_commissioned =
+        (rec->k_ct_v_per_a[0] > 0.0f) && (rec->k_ct_v_per_a[1] > 0.0f) &&
+        (rec->k_ct_v_per_a[2] > 0.0f);
 }
 
 // CLEAR_TRIP queue -- see safety_core_request_clear_trip()'s doc comment in
@@ -365,6 +397,28 @@ static safety_clear_trip_outcome_t s_clear_trip_last_outcome = SAFETY_CLEAR_TRIP
 // codebase's non-blocking producer/consumer pattern, not a bigger queue or
 // a blocking send.
 static bool s_trip_command_owed = false;
+
+// 2026-08-27 audit: the identical hazard as s_trip_command_owed above, one
+// line away and one direction over. relay_owner_clear_trip() posts to the
+// SAME non-blocking 4-deep queue relay_owner_command_trip() does, and
+// commit 4962421 only latched/retried the TRIP direction -- the CLEAR
+// direction was left as a bare (void)-discarded single attempt. A dropped
+// clear send left relay_owner latched in RELAY_OWNER_STATE_TRIPPED forever:
+// s_guard_state had already gone back to "not tripped" and the clear_trip
+// log line had already reported ACCEPTED, so nothing anywhere -- not the
+// guard state, not telemetry, not the log -- ever indicated K4 would refuse
+// every future energize. Set the instant safety_guards_decide_clear_trip_
+// outcome() returns ACCEPTED, cleared only once relay_owner_clear_trip()
+// actually enqueues (checked every tick in the retry loop at the bottom of
+// safety_core_task(), same "retry until it actually succeeds" shape as the
+// trip side, not a bigger queue or a blocking send). See relay_clear_
+// command_still_owed()'s doc comment (relay_grace.h) for how this flag and
+// s_trip_command_owed interact when both are owed at once -- the SAFE
+// (trip) direction always wins, and it is s_guard_state.is_tripped itself
+// (not this flag inspecting s_trip_command_owed directly) that decides it,
+// which is what keeps the two flags from ever being able to deadlock or
+// oscillate against each other.
+static bool s_clear_command_owed = false;
 static uint8_t s_trip_seq = 0;
 static safety_trip_t s_trip_reason = SAFETY_TRIP_NONE;
 static uint32_t s_trip_uptime_ms = 0;
@@ -678,6 +732,7 @@ static safety_guard_input_t safety_core_build_input(void)
         .max_zone_setpoint_c = max_zone_setpoint_c,
         .nearest_zone_measured_c = nearest_zone_measured_c,
         .any_current_present = any_current_present,
+        .current_sensing_commissioned = s_current_sensing_commissioned,
         .relay_commanded_recently = relay_commanded_recently,
         .relay_commanded_continuously = relay_commanded_continuously,
         .sample_counter_advancing = sample_counter_advancing,
@@ -868,7 +923,14 @@ static void safety_core_task(void *arg)
             safety_clear_trip_outcome_t outcome =
                 safety_guards_decide_clear_trip_outcome(was_tripped, try_clear_result);
             if (outcome == SAFETY_CLEAR_TRIP_OUTCOME_ACCEPTED) {
-                (void)relay_owner_clear_trip();
+                // Latch "a clear command is owed" unconditionally, the same
+                // instant the acceptance is decided -- see s_clear_command_
+                // owed's own doc comment for why a bare discarded send here
+                // is exactly the bug 4962421 already fixed on the trip side.
+                // The retry loop at the bottom of this function (which also
+                // runs this same tick, right after this block) makes the
+                // actual attempt.
+                s_clear_command_owed = true;
             }
 
             s_clear_trip_processed++;
@@ -888,6 +950,36 @@ static void safety_core_task(void *arg)
             clear_trip_diag_mark(CLEAR_TRIP_DIAG_STAGE_POST_LOG_TASK, reason_u8, fault_bits_u8,
                                   tc_valid_snapshot, spi_failed_snapshot, tc_c_is_nan_snapshot,
                                   (uint8_t)outcome);
+        }
+
+        // Retry a still-owed clear command every tick -- mirrors the trip
+        // retry loop above exactly, one direction over. relay_owner_clear_
+        // trip() itself never blocks (0-tick xQueueSend, same as the trip
+        // side), so retrying here costs nothing when the queue is healthy
+        // and s_clear_command_owed is already false; when the send was
+        // dropped, this is what keeps re-issuing it every 100ms until
+        // relay_owner actually drains its queue and leaves TRIPPED.
+        //
+        // Gated on !s_guard_state.is_tripped: if a NEW trip has (re-)latched
+        // since this clear was decided ACCEPTED -- either the trip retry
+        // block above just landed one this same tick, or a fresh guard trip
+        // fired on a later tick while this clear was still stuck behind a
+        // full queue -- then re-issuing the now-stale clear would let
+        // relay_owner_command_energize() re-energize K4 out from under a
+        // guard that just said it must stay open, which is exactly
+        // backwards. relay_clear_command_still_owed() (relay_grace.c,
+        // host-tested) is the pure classification of "is_tripped + did this
+        // attempt succeed" into "still owed or not" -- see its doc comment
+        // in relay_grace.h for the full trip-beats-clear reasoning, and for
+        // why reading s_guard_state.is_tripped fresh every tick (rather than
+        // this function consulting s_trip_command_owed directly) is what
+        // keeps the two owed-flags from being able to deadlock or oscillate
+        // against each other.
+        if (s_clear_command_owed) {
+            bool send_succeeded =
+                !s_guard_state.is_tripped ? relay_owner_clear_trip() : false;
+            s_clear_command_owed =
+                relay_clear_command_still_owed(s_guard_state.is_tripped, send_succeeded);
         }
 
         watchdog_task_checkin(WATCHDOG_CHECKIN_SAFETY_CORE);

@@ -440,6 +440,24 @@ static void unpack_v2_fields(const uint8_t *in, config_store_record_t *out)
 bool config_store_unpack(const uint8_t in[CONFIG_STORE_RECORD_LEN],
                           config_store_record_t *out)
 {
+    return config_store_unpack_ex(in, out, NULL);
+}
+
+bool config_store_unpack_ex(const uint8_t in[CONFIG_STORE_RECORD_LEN],
+                             config_store_record_t *out,
+                             config_store_reject_info_t *out_reject)
+{
+    // Written on every path below except the two early NULL-argument guards
+    // (nothing to report -- a caller bug, not a record outcome) -- see this
+    // function's own header comment (config_store.h) for "always written
+    // when non-NULL". Cleared here, up front, so every early `return false`
+    // below (bad magic, bad CRC, bad format_version) leaves it in the
+    // documented "ordinary, not news" shape without having to repeat the
+    // memset at each one.
+    if (out_reject != NULL) {
+        memset(out_reject, 0, sizeof(*out_reject));
+    }
+
     if (in == NULL || out == NULL) {
         return false;
     }
@@ -483,7 +501,23 @@ bool config_store_unpack(const uint8_t in[CONFIG_STORE_RECORD_LEN],
         // config_store_default() with calibration_missing forced true --
         // never to a guard evaluating a threshold nobody in this build's own
         // commissioning flow ever actually approved.
-        if (!config_params_validate_ranges(&scratch, NULL, NULL, NULL)) {
+        // Capture WHICH field and WHY when out_reject was asked for -- this
+        // is the one call site that turns a validation failure into
+        // something a human can actually debug from a log line, rather than
+        // a bare "false" that looks identical to an ordinary erased sector.
+        // See this file's header comment on config_store_unpack_ex() and
+        // config_store.h's "Load-time rejection diagnostics" block for why
+        // this distinction (case 2: structurally-valid-but-refused) must
+        // never be silent.
+        const char *field = NULL;
+        const char *rule = NULL;
+        if (!config_params_validate_ranges(&scratch, &field, &rule, NULL)) {
+            if (out_reject != NULL) {
+                out_reject->rejected = true;
+                out_reject->field = field;
+                out_reject->rule = rule;
+                out_reject->seq = scratch.seq;
+            }
             return false;
         }
         *out = scratch;
@@ -540,7 +574,18 @@ bool config_store_unpack(const uint8_t in[CONFIG_STORE_RECORD_LEN],
         // already clamped above independent of this call (voltage-mode
         // bytes), so this is redundant for that one field specifically, but
         // it is the same backstop every other field on this path deserves.
-        if (!config_params_validate_ranges(&scratch, NULL, NULL, NULL)) {
+        // Same out_reject capture as the v2 branch above, and for the same
+        // reason -- a v1 record that migrates cleanly but then fails this
+        // re-check is just as much a "found and refused" case as a v2 one.
+        const char *field = NULL;
+        const char *rule = NULL;
+        if (!config_params_validate_ranges(&scratch, &field, &rule, NULL)) {
+            if (out_reject != NULL) {
+                out_reject->rejected = true;
+                out_reject->field = field;
+                out_reject->rule = rule;
+                out_reject->seq = scratch.seq;
+            }
             return false;
         }
         *out = scratch;
@@ -658,6 +703,17 @@ void config_store_default(config_store_record_t *out)
 size_t config_store_find_latest(const uint8_t sector[SAFTYFW_CONFIG_STORE_FLASH_SIZE],
                                  config_store_record_t *out_rec)
 {
+    return config_store_find_latest_ex(sector, out_rec, NULL);
+}
+
+size_t config_store_find_latest_ex(const uint8_t sector[SAFTYFW_CONFIG_STORE_FLASH_SIZE],
+                                    config_store_record_t *out_rec,
+                                    config_store_reject_info_t *out_reject)
+{
+    if (out_reject != NULL) {
+        memset(out_reject, 0, sizeof(*out_reject));
+    }
+
     if (sector == NULL || out_rec == NULL) {
         return CONFIG_STORE_NO_SLOT;
     }
@@ -667,11 +723,27 @@ size_t config_store_find_latest(const uint8_t sector[SAFTYFW_CONFIG_STORE_FLASH_
     memset(&best_rec, 0, sizeof(best_rec));
     bool have_best = false;
 
+    // Tracks the highest-seq REJECTED (structurally valid, range-refused)
+    // slot seen so far, independent of `best_rec`/`have_best` above -- a
+    // sector can hold both a good slot and a rejected one (e.g. slot 3 was
+    // committed cleanly, slot 4's write was interrupted by a different
+    // build's bad range, or vice versa in wear-order), and only matters to
+    // report when NO good slot exists anywhere in the sector -- see this
+    // function's own header comment.
+    config_store_reject_info_t best_reject;
+    memset(&best_reject, 0, sizeof(best_reject));
+    bool have_rejected = false;
+
     for (size_t i = 0; i < CONFIG_STORE_SLOTS_PER_SECTOR; i++) {
         const uint8_t *rec_bytes = &sector[i * CONFIG_STORE_RECORD_LEN];
         config_store_record_t candidate;
-        if (!config_store_unpack(rec_bytes, &candidate)) {
-            continue; // erased, corrupt, or too-new-to-trust -- skip, not an error
+        config_store_reject_info_t reject_info;
+        if (!config_store_unpack_ex(rec_bytes, &candidate, &reject_info)) {
+            if (reject_info.rejected && (!have_rejected || reject_info.seq > best_reject.seq)) {
+                best_reject = reject_info;
+                have_rejected = true;
+            }
+            continue; // erased, corrupt, too-new, or range-rejected -- skip, not an error
         }
         if (!have_best || candidate.seq > best_rec.seq) {
             best_rec = candidate;
@@ -681,6 +753,12 @@ size_t config_store_find_latest(const uint8_t sector[SAFTYFW_CONFIG_STORE_FLASH_
     }
 
     if (!have_best) {
+        // Only surface the rejection here -- a caller that DID find a good
+        // slot has a trustworthy config regardless of what else was in the
+        // sector, and out_reject was already zeroed above for that case.
+        if (out_reject != NULL && have_rejected) {
+            *out_reject = best_reject;
+        }
         return CONFIG_STORE_NO_SLOT;
     }
 

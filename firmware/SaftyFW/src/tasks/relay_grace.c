@@ -44,3 +44,11 @@ bool relay_trip_command_still_owed(bool is_tripped, bool send_succeeded)
     }
     return !send_succeeded;
 }
+
+bool relay_clear_command_still_owed(bool is_tripped, bool send_succeeded)
+{
+    if (is_tripped) {
+        return false; // superseded by a (re-)trip -- SAFE direction wins, see relay_grace.h's doc comment
+    }
+    return !send_succeeded;
+}

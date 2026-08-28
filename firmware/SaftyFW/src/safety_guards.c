@@ -32,6 +32,30 @@
 
 #define S1_OVER_CEILING_STREAK_TO_TRIP 3u /* ~300ms at safety_core's 100ms tick */
 
+/* S9. Consecutive ticks of `any_current_present` required, once
+ * trip_verify_s has already elapsed AND in->current_sensing_commissioned is
+ * true, before the (deliberately unclearable) trip_ineffective latch is set.
+ * Matches S1_OVER_CEILING_STREAK_TO_TRIP's idiom and magnitude.
+ *
+ * Scope, precisely (2026-08-27 audit, second pass): this streak defends
+ * against a TRANSIENT spurious sample on an otherwise-trustworthy,
+ * commissioned current-sensing chain -- e.g. one noisy ADC read. It is NOT,
+ * by itself, a defence against an UNCOMMISSIONED channel's DC offset floor,
+ * which current_presence_policy.c's `delta_counts > 25` fallback (active
+ * whenever k_ct_v_per_a <= 0) reads as "current present" on every tick,
+ * forever -- a systematic bias, not noise, that no streak length distinguishes
+ * from a real weld. That case is handled separately, by gating progress of
+ * this very streak on in->current_sensing_commissioned in the S9 block below
+ * -- see that block's comment and safety_guards.h's doc comment on
+ * current_sensing_commissioned for the full reasoning and why a first pass
+ * at this fix (streak alone, no commissioning gate) did not actually close
+ * the hole. 3 ticks (~300ms at the 100ms tick) is long enough that a single
+ * transient sample cannot trigger it, short enough that it adds no
+ * meaningful delay to detecting an actually-welded contactor on a
+ * commissioned board, which will keep reading current every tick
+ * indefinitely. */
+#define S9_CURRENT_PRESENT_STREAK_TO_TRIP 3u
+
 void safety_guards_reset(safety_guard_state_t *state)
 {
     memset(state, 0, sizeof(*state));
@@ -138,9 +162,36 @@ static bool guard_condition_still_immediate(safety_trip_t reason, const safety_g
                                       * state->s11_last_c has not been zeroed yet -- this check
                                       * runs before safety_guards_clear() -- so this is a real
                                       * comparison against the reading in effect at trip time, not
-                                      * a guess against already-cleared state. */
-        return in->tc_valid && in->heat_commanded && state->s11_window_active &&
-               in->tc_c == state->s11_last_c;
+                                      * a guess against already-cleared state.
+                                      *
+                                      * 2026-08-27 audit: this used to also require in->heat_commanded,
+                                      * which safety_core.c wires from any_current_present (see
+                                      * safety_guard_input_t's own comment on heat_commanded). That
+                                      * made the clause "structurally cannot fail" in the
+                                      * false-returning direction -- by the time an operator reaches
+                                      * CLEAR_TRIP after an S11 trip, relay_owner has already
+                                      * de-energized K4 in response to is_tripped, current has
+                                      * stopped, and any_current_present (hence heat_commanded) reads
+                                      * false on every post-trip tick. The clause could never see the
+                                      * one input combination it was written to refuse.
+                                      *
+                                      * heat_commanded cannot be rehabilitated here: it is defined to
+                                      * be false exactly when it needs to matter (post-trip, relay
+                                      * open), so there is no honest way to recompute "heat is still
+                                      * being commanded" from a post-trip input. What DOES survive the
+                                      * trip is the frozen-reading evidence itself -- whether the
+                                      * safety TC is still reporting the identical value it tripped
+                                      * on. That is real, self-resolving evidence: a merely-idle kiln
+                                      * cools once K4 opens, so tc_c drifts away from s11_last_c within
+                                      * a tick or two and the clear is granted; a genuinely stuck
+                                      * sensor keeps reporting the same frozen value and the clear is
+                                      * correctly refused until the reading actually moves (or the
+                                      * sensor is replaced) -- matching SAFETY_MODEL.md's "a
+                                      * genuinely static value ... while energy is going in, does not
+                                      * happen in a real thermal system" reasoning, applied to "does
+                                      * the evidence that caused the trip still hold" rather than to
+                                      * whether heat happens to be commanded on this exact tick. */
+        return in->tc_valid && state->s11_window_active && in->tc_c == state->s11_last_c;
     case SAFETY_TRIP_ENCLOSURE_TEMP: /* S12 -- cj_c still over cj_max_c right now */
         return in->tc_valid && !isnan(in->cj_c) &&
                in->cj_c > effective_f(cfg->cj_max_c, CJ_MAX_C_DEFAULT);
@@ -256,12 +307,78 @@ bool safety_guards_tick(safety_guard_state_t *state, const safety_guard_cfg_t *c
                 state->s9_verify_active = true;
                 state->s9_verify_elapsed_s += in->dt_s;
                 float verify_th = effective_f(cfg->trip_verify_s, TRIP_VERIFY_S_DEFAULT);
-                if (state->s9_verify_elapsed_s >= verify_th && in->any_current_present) {
-                    state->trip_ineffective = true;
-                    trip(state, SAFETY_TRIP_INEFFECTIVE,
-                         "K4 de-energized for %.1fs (>= trip_verify_s %.1fs) but current still present",
-                         (double)state->s9_verify_elapsed_s, (double)verify_th);
-                    return true; /* newly escalated -- caller reacts once, same contract as any new trip */
+                /* Three independent bars, neither alone sufficient (2026-08-27
+                 * audit, regression from commit 4962421 -- and a second pass
+                 * the same day after the first fix was found insufficient):
+                 * trip_verify_s elapsing is necessary but NOT sufficient --
+                 * unlike every other graduated guard in this file (S1's
+                 * streak, S5/S12/S13's count-and-time pairs), the original
+                 * code let a single post-threshold tick with
+                 * any_current_present true latch this unconditionally, with
+                 * no debounce, no context_valid gate, and no check that the
+                 * current measurement itself was trustworthy.
+                 *
+                 * in->context_valid is required (S3, the guard this one most
+                 * resembles -- "current present with nothing that should
+                 * produce it" -- gates on context_valid at this file's
+                 * context block below; S9 must too, since any_current_present
+                 * is the same caller-computed fact S3 trusts).
+                 *
+                 * The debounce streak (S9_CURRENT_PRESENT_STREAK_TO_TRIP
+                 * consecutive ticks, below) catches a TRANSIENT spurious
+                 * reading -- a single noisy sample. It does NOT catch a
+                 * PERSISTENT one: current_presence_policy.h's own header
+                 * comment documents that an uncommissioned k_ct_v_per_a makes
+                 * any_current_present run a deliberately sensitive counts-
+                 * domain fallback that reads a channel's DC offset floor as
+                 * "current present" on every single tick, forever -- a
+                 * systematic bias, not noise, that 3 consecutive ticks (or
+                 * 3000) cannot distinguish from a real weld. That is what
+                 * in->current_sensing_commissioned exists to gate (see its
+                 * own doc comment in safety_guards.h for why
+                 * config_store's calibration_missing cannot answer this):
+                 * only once the current chain is actually calibrated does
+                 * the streak progress toward the unclearable trip_ineffective
+                 * latch. Uncommissioned, the same finding is still reported
+                 * -- loudly, as SAFETY_MODEL.md section 4 insists S9 must be
+                 * ("the single most valuable guard after S1" specifically
+                 * because it converts a silent failure into a loud one) --
+                 * just as a non-latching WARN (s9_uncommissioned_warn, same
+                 * idiom as s4_warn/s10_warn below) instead of a latch neither
+                 * commissioning nor CLEAR_TRIP can ever undo.
+                 *
+                 * None of this makes S9's TRIP_INEFFECTIVE clearable again:
+                 * once latched, it is still refused unconditionally by
+                 * safety_guards_try_clear() and link_frame_decide_clear_trip().
+                 * This only changes what evidence is required to set it. */
+                if (state->s9_verify_elapsed_s >= verify_th && in->context_valid &&
+                    in->any_current_present) {
+                    if (in->current_sensing_commissioned) {
+                        state->s9_uncommissioned_warn = false;
+                        if (state->s9_current_present_streak < UINT8_MAX) {
+                            state->s9_current_present_streak++;
+                        }
+                        if (state->s9_current_present_streak >= S9_CURRENT_PRESENT_STREAK_TO_TRIP) {
+                            state->trip_ineffective = true;
+                            trip(state, SAFETY_TRIP_INEFFECTIVE,
+                                 "K4 de-energized for %.1fs (>= trip_verify_s %.1fs) but current still "
+                                 "present for %u consecutive ticks",
+                                 (double)state->s9_verify_elapsed_s, (double)verify_th,
+                                 (unsigned)state->s9_current_present_streak);
+                            return true; /* newly escalated -- caller reacts once, same contract as any new trip */
+                        }
+                    } else {
+                        /* Uncommissioned current sensing: cannot trust this
+                         * enough to progress toward the unclearable latch,
+                         * but the finding is real evidence and must not be
+                         * silenced -- WARN instead (non-latching, cleared the
+                         * instant the condition stops holding). */
+                        state->s9_uncommissioned_warn = true;
+                        state->s9_current_present_streak = 0;
+                    }
+                } else {
+                    state->s9_current_present_streak = 0;
+                    state->s9_uncommissioned_warn = false;
                 }
             } else {
                 /* relay_owner has not (yet) reported K4 de-energized -- do
@@ -269,6 +386,8 @@ bool safety_guards_tick(safety_guard_state_t *state, const safety_guard_cfg_t *c
                  * actually begun. */
                 state->s9_verify_active = false;
                 state->s9_verify_elapsed_s = 0.0f;
+                state->s9_current_present_streak = 0;
+                state->s9_uncommissioned_warn = false;
             }
         }
         return false; /* already latched -- caller should have de-energized K4 already */
@@ -645,6 +764,8 @@ bool safety_guards_tick(safety_guard_state_t *state, const safety_guard_cfg_t *c
      * cannot leak into a future trip's verification window. */
     state->s9_verify_active = false;
     state->s9_verify_elapsed_s = 0.0f;
+    state->s9_current_present_streak = 0;
+    state->s9_uncommissioned_warn = false;
 
     return false;
 }

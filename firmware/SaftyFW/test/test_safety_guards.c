@@ -8,6 +8,7 @@
 
 #include "test_common.h"
 #include "../src/safety_guards.h"
+#include "../src/current_presence_policy.h"
 
 static safety_guard_input_t base_input(void)
 {
@@ -31,6 +32,10 @@ static safety_guard_input_t base_input(void)
     in.any_current_present = false;
     in.relay_commanded_recently = false;
     in.relay_commanded_continuously = false;
+    /* S9 only. Default to a healthy, commissioned board -- individual S9
+     * tests override this to false to exercise the uncommissioned/WARN
+     * path deliberately. */
+    in.current_sensing_commissioned = true;
     in.sample_counter_advancing = true;
     in.main_fault_asserted = false;
     in.link_up = true;
@@ -957,9 +962,11 @@ static void test_tx_independence_representative_sequence(void)
     for (int i = 0; i < 8; i++) {
         safety_guard_input_t in = base_input();
         in.tc_c = 300.0f;
+        in.context_valid = true; /* genuine sustained weld: context available too */
         in.relay_deenergized = true;
         in.any_current_present = true;
-        in.dt_s = 3.0f; /* 8*3=24s, past trip_verify_s(10s) partway through */
+        in.dt_s = 3.0f; /* 8*3=24s, past trip_verify_s(10s) partway through, with room for the
+                          * S9_CURRENT_PRESENT_STREAK_TO_TRIP(3)-tick debounce to escalate too */
         seq[n++] = in;
     }
 
@@ -1627,11 +1634,13 @@ static void test_s9(void)
         safety_guards_tick(&s, &cfg, &estop);
 
         safety_guard_input_t verify = base_input();
+        verify.context_valid = true; /* genuine sustained weld: context available too */
         verify.relay_deenergized = true;
         verify.any_current_present = true; /* contacts welded shut -- still conducting */
         verify.dt_s = 3.0f;
         bool escalated = false;
-        for (int i = 0; i < 5 && !escalated; i++) { /* 15s > trip_verify_s(10s) */
+        for (int i = 0; i < 8 && !escalated; i++) { /* 24s, well past trip_verify_s(10s) plus the
+                                                       * S9_CURRENT_PRESENT_STREAK_TO_TRIP(3)-tick debounce */
             escalated = safety_guards_tick(&s, &cfg, &verify);
         }
         TEST_CHECK(escalated, "K4 de-energized but current persists past trip_verify_s escalates to S9");
@@ -1672,10 +1681,17 @@ static void test_s9(void)
         safety_guards_tick(&s, &cfg, &estop);
 
         safety_guard_input_t verify = base_input();
+        verify.context_valid = true;
         verify.relay_deenergized = true;
         verify.any_current_present = true;
         verify.dt_s = 15.0f;
-        TEST_CHECK(safety_guards_tick(&s, &cfg, &verify) == true, "first tick past the bar escalates");
+        /* First tick clears trip_verify_s and starts the debounce streak (1
+         * of S9_CURRENT_PRESENT_STREAK_TO_TRIP); it takes
+         * S9_CURRENT_PRESENT_STREAK_TO_TRIP consecutive checked ticks to
+         * actually escalate. */
+        TEST_CHECK(safety_guards_tick(&s, &cfg, &verify) == false, "first over-threshold tick only starts the debounce streak");
+        TEST_CHECK(safety_guards_tick(&s, &cfg, &verify) == false, "second consecutive tick still short of the streak");
+        TEST_CHECK(safety_guards_tick(&s, &cfg, &verify) == true, "third consecutive tick escalates");
         TEST_CHECK(safety_guards_tick(&s, &cfg, &verify) == false, "further ticks do not re-report a new escalation");
         TEST_CHECK(s.trip_ineffective, "trip_ineffective remains latched true");
     }
@@ -1734,6 +1750,7 @@ static void test_s9(void)
 
         const bool relay_owner_energized = false; /* GPIO6 driven low -- K4 open */
         safety_guard_input_t in = base_input();
+        in.context_valid = true;
         in.relay_deenergized = !relay_owner_energized;
         in.any_current_present = true; /* contacts welded shut */
         in.dt_s = 1.0f;
@@ -1800,6 +1817,141 @@ static void test_s9(void)
         TEST_CHECK(!escalated, "K4 open with no current never escalates, however long the window runs");
         TEST_CHECK(!s.trip_ineffective, "trip_ineffective stays false");
         TEST_CHECK(s.reason == SAFETY_TRIP_ESTOP, "the original trip reason survives un-escalated");
+    }
+
+    /* Regression test, 2026-08-27 audit / commit 4962421: a SINGLE post-
+     * threshold tick with any_current_present true (e.g. one op-amp-offset
+     * blip from an uncommissioned CT channel, current_presence_policy.c's
+     * `delta_counts > 25` fallback) must NOT latch trip_ineffective. Before
+     * this fix, this exact single-tick shape latched the guard permanently
+     * on a bench board with no CT fitted, refusing CLEAR_TRIP for the rest
+     * of the power cycle. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t estop = base_input();
+        estop.estop_pressed = true;
+        safety_guards_tick(&s, &cfg, &estop);
+
+        safety_guard_input_t verify = base_input();
+        verify.context_valid = true;
+        verify.relay_deenergized = true;
+        verify.dt_s = 15.0f; /* clears trip_verify_s(10s) on the very first tick */
+        verify.any_current_present = false;
+        TEST_CHECK(safety_guards_tick(&s, &cfg, &verify) == false, "sanity: no escalation with no current");
+
+        /* One single spurious tick of current-present, then it's gone again
+         * -- exactly what a transient op-amp offset blip looks like. */
+        verify.any_current_present = true;
+        bool escalated = safety_guards_tick(&s, &cfg, &verify);
+        TEST_CHECK(!escalated, "a single spurious any_current_present tick does not escalate S9");
+        TEST_CHECK(!s.trip_ineffective, "trip_ineffective stays false after one blip");
+
+        verify.any_current_present = false;
+        escalated = safety_guards_tick(&s, &cfg, &verify);
+        TEST_CHECK(!escalated, "the blip clearing resets the debounce streak, no delayed escalation either");
+        TEST_CHECK(!s.trip_ineffective, "trip_ineffective still false");
+    }
+
+    /* Regression test's other half, mandatory per this repo's negative-test
+     * standard: a GENUINE, SUSTAINED welded-contactor condition on a
+     * COMMISSIONED board -- current present on every tick, for far longer
+     * than S9_CURRENT_PRESENT_STREAK_TO_TRIP -- STILL latches
+     * trip_ineffective. A debounce (or a commissioning gate) that
+     * accidentally disabled the guard entirely would be a worse bug than the
+     * one this fix closes. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t estop = base_input();
+        estop.estop_pressed = true;
+        safety_guards_tick(&s, &cfg, &estop);
+
+        safety_guard_input_t verify = base_input();
+        verify.context_valid = true;
+        verify.relay_deenergized = true;
+        verify.any_current_present = true; /* welded contacts, conducting on EVERY tick */
+        verify.current_sensing_commissioned = true; /* a real, calibrated CT chain */
+        verify.dt_s = 1.0f;
+        bool escalated = false;
+        for (int i = 0; i < 30 && !escalated; i++) { /* 30s, well past trip_verify_s(10s) */
+            escalated = safety_guards_tick(&s, &cfg, &verify);
+        }
+        TEST_CHECK(escalated, "a genuine, sustained welded-contactor condition on a COMMISSIONED "
+                              "board still latches S9");
+        TEST_CHECK(s.trip_ineffective, "trip_ineffective latches");
+        TEST_CHECK(s.reason == SAFETY_TRIP_INEFFECTIVE, "reason escalates to SAFETY_TRIP_INEFFECTIVE");
+        TEST_CHECK(!s.s9_uncommissioned_warn, "the commissioned path never sets the uncommissioned-only WARN");
+    }
+
+    /* 2026-08-27 audit, SECOND pass: the coordinator's own review found the
+     * first fix (the debounce streak above, alone) insufficient -- it
+     * defends against a TRANSIENT spurious sample but not against a
+     * PERSISTENT one, and an uncommissioned CT channel's DC offset floor is
+     * persistent, not transient. This is the owner's actual bench board:
+     * link up (context_valid true), no CT fitted, zero_counts=0 and
+     * k_ct_v_per_a=0 (config_store_default()'s uncommissioned shape,
+     * docs/CURRENT_SENSE.md section 5).
+     *
+     * Driven through the REAL current_presence_policy.h decision, not by
+     * setting any_current_present by hand -- per the coordinator's own
+     * instruction, a hand-set boolean proves nothing about the actual
+     * failure mode. counts_avg is fixed at
+     * CURRENT_PRESENCE_POLICY_FALLBACK_MARGIN_COUNTS + 1 for the whole run,
+     * i.e. a constant ADC reading -- an op-amp offset floor does not move --
+     * which the uncommissioned fallback branch (k_ct_v_per_a <= 0) reads as
+     * "present" on literally every tick, forever, exactly like the bench
+     * board's own symptom.
+     *
+     * Verdict: trip_ineffective must NEVER latch here, however long the run
+     * -- the current chain is not trustworthy enough to justify an
+     * unclearable trip -- but the finding must still be visible, per
+     * SAFETY_MODEL.md section 4's insistence that S9 "converts a silent
+     * failure into a loud one": s9_uncommissioned_warn must go true instead. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t estop = base_input();
+        estop.estop_pressed = true;
+        safety_guards_tick(&s, &cfg, &estop);
+
+        const uint16_t zero_counts = 0u;      /* config_store_default() */
+        const float    k_ct_v_per_a = 0.0f;   /* config_store_default() -- uncommissioned */
+        const float    i_present_a = 2.0f;
+        const float    gain = 0.715f;
+        const uint32_t counts_avg = CURRENT_PRESENCE_POLICY_FALLBACK_MARGIN_COUNTS + 1u; /* constant offset floor */
+        bool phantom_present = current_presence_is_flowing(counts_avg, zero_counts, i_present_a,
+                                                             k_ct_v_per_a, gain);
+        TEST_CHECK(phantom_present, "sanity: the real policy function reads this constant offset as "
+                                    "'present', exactly the bench board's own symptom");
+
+        safety_guard_input_t verify = base_input();
+        verify.context_valid = true;
+        verify.relay_deenergized = true;
+        verify.any_current_present = phantom_present; /* the real function's verdict, not a hand-set bool */
+        verify.current_sensing_commissioned = false;  /* k_ct_v_per_a <= 0: not commissioned */
+        verify.dt_s = 1.0f;
+        bool escalated = false;
+        for (int i = 0; i < 6000 && !escalated; i++) { /* 100 minutes: far past any streak or timer */
+            escalated = safety_guards_tick(&s, &cfg, &verify);
+            /* Also re-derive any_current_present from the real policy every
+             * tick (it would be identical every time for a constant
+             * counts_avg, but this keeps the loop honestly "driven through
+             * the real presence policy" rather than a single call whose
+             * result is then reused by assumption). */
+            verify.any_current_present = current_presence_is_flowing(counts_avg, zero_counts,
+                                                                       i_present_a, k_ct_v_per_a, gain);
+        }
+        TEST_CHECK(!escalated, "an uncommissioned board's permanent phantom current NEVER escalates "
+                               "S9 to the unclearable trip_ineffective latch, however long it runs");
+        TEST_CHECK(!s.trip_ineffective, "trip_ineffective stays false -- the bench board must not brick");
+        TEST_CHECK(s.reason == SAFETY_TRIP_ESTOP, "the original trip reason survives, not overwritten "
+                                                  "to SAFETY_TRIP_INEFFECTIVE");
+        TEST_CHECK(s.s9_uncommissioned_warn, "the finding is NOT silenced -- the non-latching "
+                                             "uncommissioned WARN is set instead");
     }
 }
 
@@ -2332,32 +2484,53 @@ static void test_try_clear(void)
         TEST_CHECK(cleared, "S3 clear succeeds once current is no longer present");
     }
 
-    /* Audit 2026-08-27: S11 (frozen safety reading) -- same shape, the
-     * reading still sitting at exactly the value it tripped on, with heat
-     * still commanded, at clear time. Uses state->s11_last_c (still intact
-     * -- this check runs before safety_guards_clear() zeroes it), not an
-     * accumulator that gets reset. */
+    /* Audit 2026-08-27 (re-audited same day): S11 (frozen safety reading) --
+     * same shape, the reading still sitting at exactly the value it tripped
+     * on, at clear time. Uses state->s11_last_c (still intact -- this check
+     * runs before safety_guards_clear() zeroes it), not an accumulator that
+     * gets reset.
+     *
+     * The trip itself is produced with heat_commanded true throughout (that
+     * IS a real pre-trip input: heat_commanded is wired from
+     * any_current_present, and current genuinely is flowing while the kiln
+     * is heating and the sensor is frozen). The CLEAR-TIME input below,
+     * `frozen`, is deliberately built the way safety_core_build_input()
+     * actually produces one post-trip: K4 has already been de-energized in
+     * response to is_tripped, so any_current_present -- and therefore
+     * heat_commanded -- reads false. This is exactly the combination the
+     * second audit pass found the OLD guard_condition_still_immediate() S11
+     * clause could never see (it required heat_commanded==true at clear
+     * time, which safety_core.c's post-trip relay behaviour makes
+     * structurally impossible), and exactly why the clause no longer reads
+     * heat_commanded at all -- see that clause's own comment in
+     * safety_guards.c. */
     {
         safety_guard_state_t s;
         safety_guards_reset(&s);
         safety_guard_cfg_t cfg = base_cfg();
-        safety_guard_input_t frozen = base_input();
-        frozen.tc_c = 400.0f;
-        frozen.heat_commanded = true;
-        frozen.dt_s = 700.0f; /* first tick only starts the window (elapsed=0); second is past frozen_window_s(600) */
-        safety_guards_tick(&s, &cfg, &frozen);
-        bool tripped = safety_guards_tick(&s, &cfg, &frozen);
+        safety_guard_input_t heating = base_input();
+        heating.tc_c = 400.0f;
+        heating.heat_commanded = true; /* pre-trip: current genuinely flowing */
+        heating.dt_s = 700.0f; /* first tick only starts the window (elapsed=0); second is past frozen_window_s(600) */
+        safety_guards_tick(&s, &cfg, &heating);
+        bool tripped = safety_guards_tick(&s, &cfg, &heating);
         TEST_CHECK(tripped && s.reason == SAFETY_TRIP_FROZEN_SENSOR, "sanity: S11 tripped");
 
+        safety_guard_input_t frozen = base_input();
+        frozen.tc_c = 400.0f;        /* still the exact value that tripped it */
+        frozen.heat_commanded = false; /* post-trip reality: K4 open, any_current_present false */
         bool cleared = safety_guards_try_clear(&s, &cfg, &frozen);
-        TEST_CHECK(!cleared, "S11 clear refused while the reading is STILL frozen at the same value -- audit 2026-08-27");
+        TEST_CHECK(!cleared, "S11 clear refused while the reading is STILL frozen at the same value, "
+                             "even against the realistic post-trip heat_commanded==false input -- "
+                             "audit 2026-08-27 (re-audit)");
         TEST_CHECK(s.is_tripped && s.reason == SAFETY_TRIP_FROZEN_SENSOR, "refused: still latched, same reason");
 
         safety_guard_input_t moved = base_input();
-        moved.tc_c = 401.0f; /* a real, different reading */
-        moved.heat_commanded = true;
+        moved.tc_c = 401.0f; /* a real, different reading -- e.g. the kiln cooling once K4 opened */
+        moved.heat_commanded = false; /* still the realistic post-trip value */
         cleared = safety_guards_try_clear(&s, &cfg, &moved);
-        TEST_CHECK(cleared, "S11 clear succeeds once the reading has actually moved");
+        TEST_CHECK(cleared, "S11 clear succeeds once the reading has actually moved, heat_commanded "
+                            "irrelevant to the decision either way");
     }
 
     /* Audit 2026-08-27: S9 (trip ineffective / welded contactor) is
@@ -2374,10 +2547,14 @@ static void test_try_clear(void)
         safety_guards_tick(&s, &cfg, &estop); /* trip via S7 first */
 
         safety_guard_input_t verify = base_input();
+        verify.context_valid = true; /* genuine sustained weld: context available too */
         verify.relay_deenergized = true;
         verify.any_current_present = true; /* welded contacts, still conducting */
         verify.dt_s = 15.0f; /* > trip_verify_s(10s) in one tick */
-        bool escalated = safety_guards_tick(&s, &cfg, &verify);
+        bool escalated = false;
+        for (int i = 0; i < 5 && !escalated; i++) { /* clears the debounce streak too */
+            escalated = safety_guards_tick(&s, &cfg, &verify);
+        }
         TEST_CHECK(escalated && s.trip_ineffective && s.reason == SAFETY_TRIP_INEFFECTIVE,
                    "sanity: escalated to S9/TRIP_INEFFECTIVE");
 

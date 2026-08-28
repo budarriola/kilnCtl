@@ -129,6 +129,52 @@ bool relay_energize_allowed_during_update(bool update_in_progress);
 // on a state relay_owner would refuse to trip anyway.
 bool relay_trip_command_still_owed(bool is_tripped, bool send_succeeded);
 
+// Pure decision for safety_core_task()'s CLEAR_TRIP retry loop (2026-08-27
+// audit finding: commit 4962421 fixed the identical dropped-command hazard
+// for relay_owner_command_trip() and left relay_owner_clear_trip() -- same
+// non-blocking 4-deep queue, same 0-tick xQueueSend that can fail -- calling
+// (void) on its return and walking away. A dropped clear send left
+// relay_owner latched in TRIPPED forever: telemetry had already reported the
+// clear as ACCEPTED and the guard state as "not tripped", so nothing else in
+// the system had any way to notice K4 would never energize again. This
+// function is relay_trip_command_still_owed()'s mirror image, latched the
+// tick safety_guards_decide_clear_trip_outcome() returns ACCEPTED and
+// re-attempted by safety_core_task() every tick after that while still owed,
+// exactly the same retry shape.
+//
+// THE TRIP/CLEAR INTERACTION (this is the part that is easy to get backwards):
+// a trip and a clear can both be "owed" at the same instant, and they
+// command OPPOSITE things -- one wants K4 open, the other wants it able to
+// energize again. The SAFE direction must always win, so:
+//   - `is_tripped` true: a trip has (re-)latched since this clear was
+//     decided -- either the original trip retry above just landed, or a
+//     brand new guard trip fired on a later tick while the old clear was
+//     still stuck behind a full queue. Either way the clear is now STALE:
+//     sending it would open the door for relay_owner_command_energize() to
+//     re-energize a relay a guard just said should be open. Drop the flag
+//     (false) unconditionally, exactly as relay_trip_command_still_owed()
+//     drops ITS flag when a clear lands out from under a stale trip -- same
+//     rule, opposite direction, and neither caller re-sends after dropping.
+//     `is_tripped` is read fresh from s_guard_state every tick (the single
+//     authoritative truth safety_guards_tick() maintains), never from the
+//     other flag directly, so the two latches never reference each other --
+//     that is what rules out a deadlock (each flag only ever answers to the
+//     shared guard state, so there is no cycle for two "waiting on each
+//     other" flags to get stuck in) and an oscillation (once `is_tripped`
+//     drops a stale clear, that clear is gone for good -- it does not
+//     re-arm itself if `is_tripped` later goes false again; a fresh
+//     CLEAR_TRIP request is what re-arms it, same as any other clear).
+//   - `is_tripped` false: no trip is superseding this clear. Still owed
+//     exactly when the just-attempted send did NOT succeed (`!send_
+//     succeeded`) -- a successful send clears it, a dropped one keeps it
+//     latched so the next tick tries again, same as the trip side.
+// The caller is responsible for only attempting the send while `is_tripped`
+// is false (an attempted send while tripped would be sending a command that
+// is about to be classified stale anyway) -- this function makes the right
+// call either way, but skipping the doomed send avoids asking relay_owner to
+// process a CLEAR_TRIP its own state machine would immediately need undoing.
+bool relay_clear_command_still_owed(bool is_tripped, bool send_succeeded);
+
 #ifdef __cplusplus
 }
 #endif
