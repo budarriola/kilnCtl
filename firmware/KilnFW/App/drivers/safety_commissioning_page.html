@@ -415,9 +415,11 @@ var GROUPS = [
       { id: 791, name: 'ct_cal[1].calibrated', type: 'bool', risk: 'cosmetic', readonly: true, guards: ['(power estimate only)'] },
       { id: 792, name: 'ct_cal[2].calibrated', type: 'bool', risk: 'cosmetic', readonly: true, guards: ['(power estimate only)'] },
       { id: 794, name: 'i_normal_a[0]', type: 'f32', risk: 'nuisance', unit: 'A', readonly: true,
-        guards: ['S14'], note: 'S14 over-current guard (NEW), COMMISSIONING_UX.md sec 3.3 -- ' +
-          'measured by the zones page\'s per-zone energize-one-at-a-time button. A channel with ' +
-          'no measurement is skipped entirely by S14, never treated as 0 A.' },
+        guards: ['S14'], note: 'S14 over-current guard is NOT ARMED on any channel today. The ' +
+          'zones page\'s per-zone current sweep measures and persists a normal-current value, but ' +
+          'nothing yet pushes that measurement to the safety processor as this param -- there is no ' +
+          'writer for 0x031A-0x031C, so i_normal_valid[] is always false and S14 can never warn. ' +
+          'A channel with no measurement here is skipped entirely by S14, never treated as 0 A.' },
       { id: 795, name: 'i_normal_a[1]', type: 'f32', risk: 'nuisance', unit: 'A', readonly: true, guards: ['S14'] },
       { id: 796, name: 'i_normal_a[2]', type: 'f32', risk: 'nuisance', unit: 'A', readonly: true, guards: ['S14'] },
       { id: 797, name: 'overcurrent_pct', type: 'u16', risk: 'nuisance', unit: '%', def: 150, guards: ['S14'],

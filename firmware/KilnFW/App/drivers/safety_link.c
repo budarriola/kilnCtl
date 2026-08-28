@@ -2334,6 +2334,14 @@ esp_err_t safety_link_start(SafetyLinkClass *link)
         err = ESP_ERR_NO_MEM;
         goto fail_task;
     }
+    /* 2026-08-28: measurement, not a fix -- see stack_margin.h's top comment.
+     * safety_poll gained real work today (safety_cfg_store_maybe_refetch()'s
+     * scratch safety_cfg_store_blob_t and kilnlink_config_page_t locals, both
+     * now on this task's own frame) without ever having been registered here,
+     * so nothing on the PC side could read its live high-water mark -- the
+     * exact gap this file's own comment two registrations up (uart_proto_rx)
+     * already flagged for a sibling task. */
+    stack_margin_register("safety_poll", &link->poll_task, SAFETY_POLL_TASK_STACK);
 
     ESP_LOGI(TAG,
              "safety link up on uart%d (tx=%d rx=%d, %u baud, non-inverting "

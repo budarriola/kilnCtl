@@ -454,32 +454,65 @@ static const char *json_f(char *buf, size_t buf_len, const char *fmt, float v)
 
 static esp_err_t status_get_handler(httpd_req_t *req)
 {
-    /* Bumped from 1700 to 2200, then 2300, then 2500 -- see git history for
-     * the field-by-field accounting. TODO.md's "~46 bytes of margin" item:
-     * hand-sizing this buffer to "the last incident plus some" is exactly
-     * the failure mode that keeps recurring, and safety_build_commit/
-     * safety_build_datetime are NOT local data -- they arrive over the
-     * isolated UART from the RP2040 (safety_link.c's FW_VERSION parse), so a
-     * corrupt or hostile peer can escape-inflate those two fields well past
-     * any "normal build string" assumption. Measured worst case at 3
-     * zones/channels with well-formed build strings is ~1690-2300 bytes
-     * depending on which optional sections are populated (see the git
-     * history above for the running tally); 2500 leaves real headroom for
-     * that case, but the APPEND macro below now `goto truncated`s to a
-     * 500-with-valid-JSON-body on any overflow instead of trusting the
-     * buffer to always be big enough -- see the `truncated:` label at the
-     * end of this handler. That is the actual fix for the hostile-peer case;
-     * this buffer's size only has to be "usually enough," never "provably
-     * enough," because the overflow path can no longer emit a truncated
-     * document. */
-    char json[2500];
+    /* 2026-08-28 (live regression, same day as the fault-cause/remedy pass
+     * that caused it): bumped from 1700 to 2200/2300/2500 previously -- see
+     * git history for that running tally -- but the numbered-cause field
+     * added earlier today (trip_reason_cause via safety_trip_words_cause_
+     * numbered(), cause_buf[320] below) plus diag_trip_reason_cause/_remedy,
+     * trip_reason_remedy, heat_block_sources_words and trip_fault_sources_
+     * words were never folded into that accounting, and 2500 was too small
+     * the moment several were populated at once -- confirmed on the bench
+     * (GET /api/status 500, "did not fit in 2500 bytes").
+     *
+     * JSON_BUF_SIZE (4096) is a field-by-field worst-case sum, not a rounder
+     * number picked to make the incident go away: skeleton + numeric fields
+     * (~900B with every counter at its u32/negative-float widest), 3 thermo
+     * channels at their widest (~130B each), diag_trip_reason_cause/_remedy
+     * at their longest table entries (83+112B), trip_reason_cause at its
+     * FULL cause_buf[320]-1 capacity (the dominant term -- see that buffer's
+     * own sizing comment below for why a hostile/uncommissioned current
+     * reading can fill it), trip_reason_remedy (112B), heat_block_sources_
+     * words/trip_fault_sources_words at their own 160-byte buffers' full
+     * capacity (159B each), safety_build_commit/_datetime escaped WORST CASE
+     * (every byte needing a backslash doubles -- 65/33-byte raw fields from
+     * the UNTRUSTED RP2040 peer, so 130/66B), fw_version/fw_build escaped
+     * similarly (62/78B), 3 nvs_sections entries, and generous headroom
+     * >200B on top of the 3866-byte total this exact field list sums to
+     * (verified by a standalone harness mirroring this file's own APPEND
+     * macro against every field above at its documented worst width: fits
+     * at 4096, and provably truncates -- the `goto truncated` path fires --
+     * once the same content is asked to fit in a materially smaller buffer,
+     * proving this is a real bound rather than a round number).
+     *
+     * HEAP, not stack: httpd worker stack high-water mark was measured at
+     * 2348 bytes free of 8192 on this exact endpoint (owner report,
+     * 2026-08-28) -- BEFORE this fix. The old 2500-byte `char json[2500]`
+     * was already stacked alongside cause_buf[320]/hb_words[160]/
+     * tf_words[160]/the escape buffers below (~3.5KB of locals total), which
+     * is consistent with that measurement being this close to the edge.
+     * Growing json to 4096 ON THE STACK would make an already-tight worker
+     * stack worse, not better -- the actual fix for the DRAM-fragmentation
+     * failure mode this file's own ui_page_diagnostics.c comment documents
+     * elsewhere. Heap-allocated instead: freed on every return path below
+     * (success, truncated, and the new malloc-failure path), same
+     * "diagnosable 500, never a hang" property truncated: already has. */
+#define DASHBOARD_STATUS_JSON_BUF_SIZE 4096
+    char *json = malloc(DASHBOARD_STATUS_JSON_BUF_SIZE);
+    if (json == NULL) {
+        ESP_LOGE(TAG, "GET /api/status: malloc(%u) failed for the response buffer",
+                 (unsigned)DASHBOARD_STATUS_JSON_BUF_SIZE);
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_sendstr(req,
+                                  "{\"ok\":false,\"error\":\"out of memory building the response\"}");
+    }
     size_t o = 0;
     int n;
 
 #define APPEND(...)                                                                              \
     do {                                                                                          \
-        n = snprintf(json + o, sizeof(json) - o, __VA_ARGS__);                                   \
-        if (n < 0 || (size_t)n >= sizeof(json) - o) {                                             \
+        n = snprintf(json + o, DASHBOARD_STATUS_JSON_BUF_SIZE - o, __VA_ARGS__);                 \
+        if (n < 0 || (size_t)n >= DASHBOARD_STATUS_JSON_BUF_SIZE - o) {                           \
             goto truncated;                                                                       \
         }                                                                                          \
         o += (size_t)n;                                                                            \
@@ -651,12 +684,15 @@ static esp_err_t status_get_handler(httpd_req_t *req)
             /* 2026-08-28 scope change: the cause line now carries the actual
              * detected numbers where this firmware has them -- see
              * safety_trip_words_cause_numbered()'s header comment for
-             * exactly which guards do/don't. 200: generous against the
-             * longest composed sentence (~150 bytes), not measured to the
-             * byte -- this string is built from bounded %.1f/%.2f numbers,
-             * not copied user text, so -Werror=format-truncation cannot
-             * prove a tight bound anyway. */
-            char cause_buf[200];
+             * exactly which guards do/don't. 320, not 200: the composed S3/S9
+             * sentence prose is ~130 bytes plus four %.2f floats, and a
+             * pathological float magnitude (%.2f of 1e38 is ~45 chars) can
+             * push a single conversion well past the 6-8 bytes a "normal"
+             * amps reading takes -- -Werror=format-truncation cannot catch
+             * this because the values are runtime floats, not literals, so
+             * the buffer is sized for the worst case snprintf can actually
+             * produce, not the common case. */
+            char cause_buf[320];
             APPEND(",\"trip_reason_cause\":\"%s\"",
                    safety_trip_words_cause_numbered(ds.trip_reason, ds.trip_safety_tc_c,
                                                      ds.trip_deciding_threshold,
@@ -845,7 +881,14 @@ static esp_err_t status_get_handler(httpd_req_t *req)
 #undef APPEND
 
     httpd_resp_set_type(req, "application/json");
-    return httpd_resp_send(req, json, o);
+    {
+        /* free() AFTER send completes -- httpd_resp_send() is synchronous
+         * (copies/streams `json` before returning), so this is not a
+         * use-after-free; freeing before the call would be. */
+        esp_err_t send_err = httpd_resp_send(req, json, o);
+        free(json);
+        return send_err;
+    }
 
     /* Reached only if `json` is too small for the status it holds -- see
      * TODO.md's "/api/status has ~46 bytes of margin" item and
@@ -862,7 +905,9 @@ static esp_err_t status_get_handler(httpd_req_t *req)
      * with no visible cause. A 500 with a valid JSON body at least says
      * what happened instead of hanging silently. */
 truncated:
-    ESP_LOGE(TAG, "GET /api/status did not fit in %u bytes -- raise the buffer", (unsigned)sizeof(json));
+    ESP_LOGE(TAG, "GET /api/status did not fit in %u bytes -- raise the buffer",
+             (unsigned)DASHBOARD_STATUS_JSON_BUF_SIZE);
+    free(json);
     httpd_resp_set_status(req, "500 Internal Server Error");
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_sendstr(req,

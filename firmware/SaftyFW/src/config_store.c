@@ -76,7 +76,13 @@
 //               CONFIG_STORE_SET_MAX_EXPECTED_POWER_W, carved out of the
 //               front of the former 299 B reserved block, same convention as
 //               REC_OFF_SAFETY_TC_INSTALLED above
-//    209   295  reserved, 0xFF-filled (headroom for a future field)
+//    209     4  i_normal_a[3][0] -- S14 (COMMISSIONING_UX.md sec 3.3), carved
+//               out of the former 295 B reserved block, same convention as
+//               REC_OFF_MAX_EXPECTED_POWER_W above
+//    213     8  i_normal_a[3][1..2] (f32 LE x2)
+//    221     2  overcurrent_pct (u16 LE)
+//    223     4  overcurrent_time_s (u32 LE)
+//    227   277  reserved, 0xFF-filled (headroom for a future field)
 //    504     4  record_crc32, over bytes [0, 504)
 //    508     4  reserved, 0xFF-filled (pad to CONFIG_STORE_RECORD_LEN)
 //    512  total = CONFIG_STORE_RECORD_LEN
@@ -479,14 +485,27 @@ static void unpack_v2_fields(const uint8_t *in, config_store_record_t *out)
     // config_store.h's struct comment) -- they follow the ordinary
     // "0 means not configured, substitute the default" convention every
     // other DEFAULTED field in this file uses. Unlike those older fields,
-    // though, this offset previously lived inside the RESERVED tail, so a
-    // record written before this pass exists has the erased-flash fill
-    // (0xFFFF/0xFFFFFFFF) here, not a real 0 -- decoded as-is that reads as
-    // "configured to 65535%", the opposite of "not configured". Fold the
-    // erased pattern back to 0 explicitly so an old record migrates to the
-    // documented default (150%/30s), matching COMMISSIONING_UX.md section
-    // 7's migration table ("the new fields default ... 150/30 for the
-    // thresholds").
+    // though, this offset previously lived inside the RESERVED tail.
+    //
+    // What a record written before this pass actually holds here is 0x00,
+    // NOT the erased-flash 0xFF this comment used to claim: this file's own
+    // hardware-confirmed comment at REC_OFF_SAFETY_TC_INSTALLED above proves
+    // the legacy fill is 0x00 -- config_store_pack() memcpy'd rec->reserved,
+    // and config_store_default() memset that array to 0, so every
+    // pre-existing record's reserved tail (including this offset, before it
+    // was carved out of it) was written as zero bytes, not left as raw
+    // erased flash. 0x0000/0x00000000 already decodes to plain 0, which is
+    // exactly "not configured" -- no fold is needed for that case, and the
+    // 0xFFFF/0xFFFFFFFF branch below is therefore structurally unreachable
+    // against every record this firmware has ever actually written (the
+    // same "check that cannot fire" pattern as this repo's other four
+    // instances). It is harmless either way (0xFFFF also folds to the same
+    // 0 that 0x0000 already reads as), and kept here purely as belt-and-
+    // braces against a byte pattern this migration has never observed in
+    // practice -- e.g. a record read from flash that was truly erased and
+    // never packed by any build. Not deleted, because the cost of keeping it
+    // is one dead branch and the cost of being wrong about "never happens"
+    // on a safety config migration is a silent default.
     uint16_t oc_pct_raw = get_u16_le(&in[REC_OFF_OVERCURRENT_PCT]);
     out->overcurrent_pct = (oc_pct_raw == 0xFFFFu) ? 0u : oc_pct_raw;
     uint32_t oc_time_raw = get_u32_le(&in[REC_OFF_OVERCURRENT_TIME_S]);

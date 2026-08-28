@@ -58,6 +58,43 @@ static void test_s3_load_stuck_on_reports_current(void)
     TEST_CHECK(strstr(s, "2.00") != NULL, "S3 cause names the present-current threshold");
 }
 
+static void test_s3_load_stuck_on_falls_back_on_nan_current(void)
+{
+    // P4-A (opus review, 2026-08-28): trip_current_a is a struct array
+    // member at every real call site and can never be NULL, so the old
+    // `trip_current_a != NULL` test was not a real gate -- an uncommissioned
+    // current-sense channel (NAN, same sentinel convention as the other
+    // fields) fell through to the numbered branch anyway and rendered
+    // "nanA/nanA/nanA". This must now fall back to the plain cause instead.
+    char buf[200];
+    const float cur[3] = { NAN, 0.01f, 0.02f }; // ONE nan channel is enough
+    const char *s = safety_trip_words_cause_numbered(3, NAN, 2.0f, cur, 255u, buf, sizeof(buf));
+    TEST_CHECK(strcmp(s, safety_trip_words_cause(3)) == 0,
+               "S3 with a NaN current channel falls back to the plain cause, not a nan sentence");
+    TEST_CHECK(strstr(s, "nan") == NULL && strstr(s, "NAN") == NULL,
+               "S3 fallback text never contains a literal nan/NAN");
+}
+
+static void test_s9_contactor_welded_reports_current(void)
+{
+    char buf[200];
+    const float cur[3] = { 0.03f, 9.87f, 0.04f };
+    const char *s = safety_trip_words_cause_numbered(10, NAN, NAN, cur, 255u, buf, sizeof(buf));
+    TEST_CHECK(strstr(s, "9.87") != NULL, "S9 cause names the offending channel's current");
+}
+
+static void test_s9_contactor_welded_falls_back_on_nan_current(void)
+{
+    // Same NULL-can-never-fire gap as S3 above, for the S9/case-10 branch.
+    char buf[200];
+    const float cur[3] = { NAN, NAN, NAN };
+    const char *s = safety_trip_words_cause_numbered(10, NAN, NAN, cur, 255u, buf, sizeof(buf));
+    TEST_CHECK(strcmp(s, safety_trip_words_cause(10)) == 0,
+               "S9 with NaN current falls back to the plain cause, not a nan sentence");
+    TEST_CHECK(strstr(s, "nan") == NULL && strstr(s, "NAN") == NULL,
+               "S9 fallback text never contains a literal nan/NAN");
+}
+
 static void test_s6b_link_dead_reports_elapsed_time(void)
 {
     char buf[200];
@@ -122,6 +159,9 @@ int main(void)
     test_s1_overtemp_has_numbers();
     test_s1_overtemp_falls_back_without_numbers();
     test_s3_load_stuck_on_reports_current();
+    test_s3_load_stuck_on_falls_back_on_nan_current();
+    test_s9_contactor_welded_reports_current();
+    test_s9_contactor_welded_falls_back_on_nan_current();
     test_s6b_link_dead_reports_elapsed_time();
     test_s6b_link_dead_falls_back_on_sentinel();
     test_s12_enclosure_never_claims_wrong_sensor();

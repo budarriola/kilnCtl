@@ -126,8 +126,10 @@
 //   web-side fold of the same three pages found was "the whole point of the
 //   page" (see this file's own comment on the refresh loop below): losing it
 //   would let an ABSENT channel read as a healthy one. Carried over intact to
-//   the new Thermocouple Faults page (UI_PAGE_DIAGNOSTICS_PAGE_THERMO_FAULTS),
-//   same seen[]/not-seen split, same by-.channel indexing, unchanged.
+//   the new Thermocouple Faults pages (UI_PAGE_DIAGNOSTICS_PAGE_THERMO_FAULTS(ch),
+//   one channel per page as of the 2026-08-28 P4-C split -- see that macro's
+//   own header comment), same seen[]/not-seen split, same by-.channel
+//   indexing, unchanged.
 //
 // FACTS THIS FOLD MUST NOT UNDO (both fixed on the web side earlier the same
 // day this LCD fold was done, both re-verified true here):
@@ -157,7 +159,24 @@ static const char *TAG __attribute__((unused)) = "ui_page_diagnostics";
  * margin. 8192 below is that same LVGL stack-size constant, not a guess. */
 #define UI_PAGE_DIAGNOSTICS_LVGL_TASK_STACK_BYTES 8192
 
-#define UI_PAGE_DIAGNOSTICS_PAGE_COUNT 7
+/* P4-C (opus review, 2026-08-28): a single Thermocouple Faults page holding
+ * all MAX31856_CHANNEL_COUNT (3) channel cards, sharing the ~267px content
+ * budget via flex_grow(1), no longer fits once the per-channel status label
+ * grew from ~48 to up to ~123 chars of prose (dashboard_http.c/
+ * ui_page_diagnostics.c's safety_trip_words_cause_numbered() wording pass
+ * was a different string, but thermo_faults_refresh_cb()'s own status_buf
+ * grew independently the same day) -- worst case per row is title (~20px) +
+ * fault_buf up to ~100 chars (~2 wrapped lines, ~40px) + status_buf up to
+ * ~123 chars (~3 wrapped lines, ~60px) = ~120px, against the ~89px a 3-way
+ * equal flex_grow split actually gives each row (267/3). flex_grow does NOT
+ * grow the SHARE with content, only how leftover space divides among
+ * children of equal weight, so a row whose content exceeds its share is
+ * silently CLIPPED (LVGL's default overflow behavior with LV_OBJ_FLAG_
+ * SCROLLABLE removed) -- worse than scrolling, because a clipped fault
+ * message can hide exactly the wiring detail an operator needs. Fixed the
+ * same way every other over-budget page in this file was fixed: one channel
+ * per page instead of three channels sharing one, so each card gets the
+ * full ~267px budget to itself. */
 #define UI_PAGE_DIAGNOSTICS_PAGE_FIRMWARE 0
 #define UI_PAGE_DIAGNOSTICS_PAGE_INTERNAL_RAM 1
 #define UI_PAGE_DIAGNOSTICS_PAGE_PSRAM_STORAGE 2
@@ -165,7 +184,16 @@ static const char *TAG __attribute__((unused)) = "ui_page_diagnostics";
  * inventory each of these three carries over. */
 #define UI_PAGE_DIAGNOSTICS_PAGE_SAFETY 3
 #define UI_PAGE_DIAGNOSTICS_PAGE_BOARD_HEALTH 4
-#define UI_PAGE_DIAGNOSTICS_PAGE_THERMO_FAULTS 5
+/* One page PER thermocouple channel (see this block's header comment above
+ * for why one page holding all MAX31856_CHANNEL_COUNT channels no longer
+ * fits). UI_PAGE_DIAGNOSTICS_PAGE_THERMO_FAULTS(ch) is the page slot for
+ * channel `ch`; there are MAX31856_CHANNEL_COUNT of them starting right
+ * after Board Health, so every page number from here on is an expression
+ * over MAX31856_CHANNEL_COUNT rather than a literal -- this stays correct
+ * if that constant ever changes, instead of silently under/over-allocating
+ * s_pages[] the way three separately hand-numbered macros would. */
+#define UI_PAGE_DIAGNOSTICS_PAGE_THERMO_FAULTS(ch) \
+    (UI_PAGE_DIAGNOSTICS_PAGE_BOARD_HEALTH + 1 + (ch))
 /* 2026-08-27, owner scope change ("all faults... come with instructions on
  * how to fix them... what was detected wrong"): a dedicated page rather than
  * growing the Safety Processor page's existing 5 rows, which already sit
@@ -175,7 +203,9 @@ static const char *TAG __attribute__((unused)) = "ui_page_diagnostics";
  * build. A new page is the same "grow past budget -> add a page" rule this
  * file's own header comment already documents for the safety/board-health/
  * thermo-fault fold. */
-#define UI_PAGE_DIAGNOSTICS_PAGE_TRIP_DETAIL 6
+#define UI_PAGE_DIAGNOSTICS_PAGE_TRIP_DETAIL \
+    UI_PAGE_DIAGNOSTICS_PAGE_THERMO_FAULTS(MAX31856_CHANNEL_COUNT)
+#define UI_PAGE_DIAGNOSTICS_PAGE_COUNT (UI_PAGE_DIAGNOSTICS_PAGE_TRIP_DETAIL + 1)
 
 static ui_topbar_t s_topbar;
 static lv_obj_t *s_pages[UI_PAGE_DIAGNOSTICS_PAGE_COUNT];
@@ -224,13 +254,14 @@ static lv_obj_t *s_trip_label;
 static lv_obj_t *s_bh_esp32_label;
 static lv_obj_t *s_bh_cj_label[MAX31856_CHANNEL_COUNT];
 
-/* --- Page 6: Thermocouple Faults -- carried over verbatim from
+/* --- Pages 6-8: Thermocouple Faults -- carried over from
  * ui_page_thermo_faults.c, including its ABSENT-vs-FAULTED distinction (see
- * this file's header comment). */
+ * this file's header comment), then split one-channel-per-page 2026-08-28
+ * (P4-C, see UI_PAGE_DIAGNOSTICS_PAGE_THERMO_FAULTS(ch)'s header comment). */
 static lv_obj_t *s_tf_fault_label[MAX31856_CHANNEL_COUNT];
 static lv_obj_t *s_tf_status_label[MAX31856_CHANNEL_COUNT];
 
-/* --- Page 7: Trip Detail -- new, 2026-08-27 (owner scope change, see this
+/* --- Page 9: Trip Detail -- new, 2026-08-27 (owner scope change, see this
  * file's UI_PAGE_DIAGNOSTICS_PAGE_TRIP_DETAIL comment). What was detected,
  * what to do about it, and (S6a only) which of this board's own fault
  * sources actually caused it. */
@@ -244,7 +275,9 @@ static void update_title(void)
 {
     static const char *page_names[UI_PAGE_DIAGNOSTICS_PAGE_COUNT] = {
         "Firmware", "Internal RAM", "PSRAM & storage",
-        "Safety Processor", "Board Health", "Thermocouple Faults", "Trip Detail",
+        "Safety Processor", "Board Health",
+        "Thermocouple Faults: Ch0", "Thermocouple Faults: Ch1", "Thermocouple Faults: Ch2",
+        "Trip Detail",
     };
     char buf[48];
     snprintf(buf, sizeof(buf), "Diagnostics: %s  %u of %u", page_names[s_page_index],
@@ -609,13 +642,18 @@ static void refresh_cb(lv_timer_t *timer)
         lv_label_set_text(s_td_reason_label, td_buf);
 
         /* 2026-08-28: numbered cause (safety_trip_words_cause_numbered()) --
-         * 256, not 112: the longest composed sentence this can produce is
-         * ~150 bytes and this label is not on the tight no-scroll row grid
-         * the stat rows are (it wraps within its own container, same as
+         * inner buffer is 320, not 200: the S3/S9 sentence prose is ~130
+         * bytes plus four %.2f floats, and a pathological runtime magnitude
+         * (%.2f of 1e38 is ~45 chars) can push a single conversion well past
+         * a "normal" amps reading -- -Werror=format-truncation cannot catch
+         * this because the values are runtime floats. Outer buf is 340 (9
+         * bytes of "Detected: " prefix plus the 320 plus NUL, rounded up)
+         * and this label is not on the tight no-scroll row grid the stat
+         * rows are (it wraps within its own container, same as
          * s_td_remedy_label below), so headroom is cheap and correctness
          * against -Werror=format-truncation is not. */
-        char td_cause_num_buf[200];
-        char td_cause_buf[256];
+        char td_cause_num_buf[320];
+        char td_cause_buf[340];
         snprintf(td_cause_buf, sizeof(td_cause_buf), "Detected: %s",
                  safety_trip_words_cause_numbered(ds.trip_reason, ds.trip_safety_tc_c,
                                                    ds.trip_deciding_threshold,
@@ -1038,13 +1076,17 @@ lv_obj_t *ui_page_diagnostics_build(void)
     s_td_source_label = build_full_text_row(trip_detail_page, "Fault source: --");
     s_td_latch_label = build_full_text_row(trip_detail_page, "--");
 
-    /* Page 6: Thermocouple Faults -- folded from ui_page_thermo_faults.c.
-     * MAX31856_CHANNEL_COUNT channel cards sharing the page's remaining
-     * height via flex_grow, same as that page's own `list`. */
-    lv_obj_t *thermo_faults_page = s_pages[UI_PAGE_DIAGNOSTICS_PAGE_THERMO_FAULTS];
+    /* Pages 6-8: Thermocouple Faults -- folded from ui_page_thermo_faults.c,
+     * ONE channel per page (P4-C, opus review 2026-08-28 -- see this file's
+     * UI_PAGE_DIAGNOSTICS_PAGE_THERMO_FAULTS(ch) header comment for why
+     * three channel cards no longer fit sharing a single page's flex_grow
+     * split). Each page's card gets the full page via flex_grow(1) with a
+     * single child, same call as before -- only the page each channel lands
+     * on changed. */
     lv_color_t tf_accents[3] = { UI_THEME_ACCENT_1, UI_THEME_ACCENT_2, UI_THEME_ACCENT_3 };
     for (uint8_t ch = 0; ch < MAX31856_CHANNEL_COUNT; ch++) {
-        build_thermo_fault_row(thermo_faults_page, ch, tf_accents[ch % 3]);
+        lv_obj_t *thermo_fault_page = s_pages[UI_PAGE_DIAGNOSTICS_PAGE_THERMO_FAULTS(ch)];
+        build_thermo_fault_row(thermo_fault_page, ch, tf_accents[ch % 3]);
     }
 
     /* MUST come after content exists -- ui_topbar.h's own usage note: the

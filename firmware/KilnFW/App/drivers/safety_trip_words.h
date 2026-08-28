@@ -117,6 +117,19 @@ static inline const char *safety_trip_words_cause_numbered(uint8_t reason, float
     }
     bool tc_ok = !isnan(trip_safety_tc_c);
     bool thr_ok = !isnan(trip_deciding_threshold);
+    /* trip_current_a is a struct array member at every call site (dashboard_
+     * http.c's ds.trip_current_a, ui_page_diagnostics.c's same field) -- it
+     * decays to a non-NULL pointer unconditionally, so a `trip_current_a !=
+     * NULL` test can never be false and is not a real gate (same "check that
+     * structurally cannot fire" class as this repo's P1-A/config_store.c
+     * finding). What actually varies at runtime is whether the THREE floats
+     * behind that pointer are real readings -- an uncommissioned/never-
+     * received current-sense channel is the caller-supplied NAN sentinel,
+     * same convention as trip_safety_tc_c/trip_deciding_threshold above.
+     * Without this check, S3/S9 on a board with uncommissioned current
+     * sensing rendered "nanA/nanA/nanA" instead of the honest fallback. */
+    bool cur_ok = (trip_current_a != NULL) && !isnan(trip_current_a[0]) &&
+                  !isnan(trip_current_a[1]) && !isnan(trip_current_a[2]);
     switch (reason) {
     case 1: /* S1 overtemp: both numbers are the right sensor/threshold */
         if (tc_ok && thr_ok) {
@@ -139,7 +152,7 @@ static inline const char *safety_trip_words_cause_numbered(uint8_t reason, float
     case 3: /* S3 load stuck on: current-sense channels vs. the present-
              * current threshold. Which physical channel maps to which zone
              * is not resolved here (SAFETY_MODEL.md's channel map). */
-        if (trip_current_a != NULL && thr_ok) {
+        if (cur_ok && thr_ok) {
             snprintf(buf, buf_len,
                       "Current sense reads %.2fA/%.2fA/%.2fA (ch1/2/3) while the relay was "
                       "commanded OFF -- above the %.2fA present-current threshold.",
@@ -161,7 +174,7 @@ static inline const char *safety_trip_words_cause_numbered(uint8_t reason, float
     case 10: /* S9 contactor welded: same current-sense reading as S3, no
               * threshold to quote (it is an escalation, not a fresh
               * crossing). */
-        if (trip_current_a != NULL) {
+        if (cur_ok) {
             snprintf(buf, buf_len,
                       "Current sense still reads %.2fA/%.2fA/%.2fA (ch1/2/3) after the "
                       "contactor was commanded OFF -- may be welded.",

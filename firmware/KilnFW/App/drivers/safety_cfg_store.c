@@ -121,6 +121,12 @@ static const safety_cfg_table_row_t SAFETY_CFG_PARAM_TABLE[SAFETY_CFG_PARAM_COUN
     { 0x0317, KILNLINK_PARAM_TYPE_BOOL, "ct_cal[1].calibrated" },
     { 0x0318, KILNLINK_PARAM_TYPE_BOOL, "ct_cal[2].calibrated" },
     { 0x0319, KILNLINK_PARAM_TYPE_F32, "max_expected_power_w" },
+    /* S14 over-current guard, NEW -- COMMISSIONING_UX.md sec 3.3 */
+    { 0x031A, KILNLINK_PARAM_TYPE_F32, "i_normal_a[0]" },
+    { 0x031B, KILNLINK_PARAM_TYPE_F32, "i_normal_a[1]" },
+    { 0x031C, KILNLINK_PARAM_TYPE_F32, "i_normal_a[2]" },
+    { 0x031D, KILNLINK_PARAM_TYPE_U16, "overcurrent_pct" },
+    { 0x031E, KILNLINK_PARAM_TYPE_U16, "overcurrent_time_s" },
     /* sec 4 -- link and liveness */
     { 0x0401, KILNLINK_PARAM_TYPE_U16, "context_max_age_s" },
     { 0x0402, KILNLINK_PARAM_TYPE_U16, "link_timeout_s" },
