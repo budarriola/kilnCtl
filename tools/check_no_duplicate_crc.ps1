@@ -35,8 +35,9 @@
 # be allowlisted here too, then were removed from the allowlist when
 # `firmware/UnitTestFw` was deleted (the bench-fixture firmware that had
 # replaced it is now gone in turn, and `firmware/UnitTestFw` was restored
-# from history 2026-08-28) -- so this check may report those two files again
-# until they are re-allowlisted or migrated. Not fixed here; restore-only.
+# from history 2026-08-28). Re-allowlisted 2026-08-28 -- see the allowlist
+# entries below for why migrating them instead is not worth doing for a
+# restore-only fixture.
 #
 # One duplicate remains allowlisted:
 #   - tools/PcTools/src/kilnctrl/crc16.py
@@ -100,7 +101,20 @@ $allowlist = @(
     # implementations agree necessarily contains two implementations. Removing
     # this entry means the proof was deleted, which is the thing to ask about
     # -- not a migration finishing.
-    'firmware/KilnFW/App/test/test_uart_protocol_link_delegate.c'
+    'firmware/KilnFW/App/test/test_uart_protocol_link_delegate.c',
+
+    # 2026-08-28: re-entered, not new. See the header's "KNOWN PRE-EXISTING
+    # DEBT" note above -- these two were allowlisted here before, removed
+    # when firmware/UnitTestFw was deleted, and the restore explicitly left
+    # them off the list ("Not fixed here; restore-only"). UnitTestFw is a
+    # standalone legacy fixture restored from git history and deliberately
+    # not built or maintained forward, so migrating its fork of
+    # uart_protocol.c to delegate to kilnlink (the way KilnFW's real one
+    # does) would mean actively maintaining code this project chose not to
+    # carry forward. Deleting either entry is required if UnitTestFw is ever
+    # migrated or removed again, same discipline as every other entry here.
+    'firmware/UnitTestFw/UnitTest/App/drivers/espInterfaces/uart_protocol.c',
+    'firmware/UnitTestFw/UnitTest/pc_tools/src/uart_control/protocol.py'
 )
 
 $searchExtensions = @('*.c', '*.h', '*.cpp', '*.hpp', '*.py')

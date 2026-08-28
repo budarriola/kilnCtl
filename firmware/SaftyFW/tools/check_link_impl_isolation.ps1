@@ -190,7 +190,21 @@ $allowlistPaths = @(
     # the same reasoning firmware/CommonFW/test/test_uart_protocol_delegate.c
     # already relies on by living under the \CommonFW\ exclusion above; this
     # file needs its own path entry because it lives under KilnFW instead.
-    (Join-Path $firmwareRoot "KilnFW\App\test\test_uart_protocol_link_delegate.c")
+    (Join-Path $firmwareRoot "KilnFW\App\test\test_uart_protocol_link_delegate.c"),
+
+    # 2026-08-28: firmware/UnitTestFw is a restored, standalone legacy test
+    # fixture (git history restore, explicitly restore-only -- not built,
+    # not maintained forward). Its uart_protocol.c is a stale fork of
+    # KilnFW's own file FROM BEFORE the 2026-08-23 migration to CommonFW's
+    # kilnlink_crc16_ccitt_false()/kilnlink_stuff(); it was allowlisted here
+    # once already under its previous name before being deleted (when the
+    # bench-fixture firmware that replaced it was itself later deleted in
+    # turn), so this is a re-entry, not a new exception. Migrating it to
+    # delegate like KilnFW did would mean actively maintaining code this
+    # project deliberately chose not to build going forward -- see
+    # tools/check_no_duplicate_crc.ps1's matching allowlist entry for the
+    # same file and its Python mirror.
+    (Join-Path $firmwareRoot "UnitTestFw\UnitTest\App\drivers\espInterfaces\uart_protocol.c")
 )
 
 $candidateFiles = Get-ChildItem -Path $firmwareRoot -Recurse -Include *.c, *.h -File |
