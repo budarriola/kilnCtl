@@ -607,6 +607,23 @@ esp_err_t ota_http_send_interlock_refusal(httpd_req_t *req, ota_interlock_result
 ota_interlock_result_t ota_http_check_interlocks(bool ack_no_safety_processor, char *reason_out,
                                                  size_t reason_cap)
 {
+    /* B2 (opus review, 2026-08-27): a zone current sweep (zones_http.c) is
+     * a relay writer too, and mid-update is one of the worse times for a
+     * relay to be raced -- checked here, before the snapshot below, same
+     * "cheapest and orthogonal to kiln state" reasoning
+     * ota_interlock_check() itself documents for its own mutex check. Kept
+     * as a standalone early return rather than a new ota_interlock_snapshot_t
+     * field so ota_interlock.c -- the pure, host-tested half of this check,
+     * with its own precondition-ordering doc comment and test coverage --
+     * stays untouched; zones_http.h/.c are the only files this pass is
+     * authorized to change. */
+    if (zones_current_sweep_is_active()) {
+        if (reason_out && reason_cap > 0) {
+            snprintf(reason_out, reason_cap, "a zone current sweep is running");
+        }
+        return OTA_INTERLOCK_REFUSED;
+    }
+
     ota_interlock_snapshot_t snap = { 0 };
     snap.operator_ack_no_safety_processor = ack_no_safety_processor;
 

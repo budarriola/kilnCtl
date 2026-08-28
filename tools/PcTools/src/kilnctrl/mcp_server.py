@@ -77,7 +77,7 @@ from mcpkit import workbench
 from mcpkit.registry import collapse
 from mcpkit.serve import serve
 
-from . import actions, config_presets, debug_probe, devices, mcp_facade, openocd_util, pico_gpio_probe, settings, wifi_credentials
+from . import actions, config_presets, debug_probe, devices, mcp_facade, openocd_util, pico_gpio_probe, settings, wifi_credentials, zones_http_client
 from .autotune import AutotuneClient, AutotuneQueryError
 from .control import ControlClient, ControlQueryError
 from .device_log import LogClient
@@ -2552,15 +2552,26 @@ def list_config_presets() -> str:
 
 
 @_tool()
-def load_config_preset(name: str) -> str:
-    """Apply a known-good preset's zone PID/model gains to the live board.
+def load_config_preset(name: str, host: Optional[str] = None) -> str:
+    """Apply a known-good preset's zone config to the live board.
 
-    Read-only against everything this link cannot write: a preset also
-    carries relay_mask/max_temp_c/control_mode/thermo_count/relay_count as
-    reference data (compare against get_board_state's control_zones), but
-    those fields are NOT written back -- the firmware's UART CONTROL task
-    only exposes SET_ZONE_PID/SET_ZONE_MODEL, see config_presets.py's module
-    docstring for why the rest is a documented hook rather than attempted.
+    PID gains and (when the preset carries one) the thermal model go over
+    the UART CONTROL task, same as always. `host` (new): when given, ALSO
+    writes relay_mask/control_mode/max_temp_c/min_temp_c/max_ramp_c_per_hr/
+    thermo_count/relay_count over GET/POST /api/zones -- the fields the UART
+    link has no setter for (zones_http_client.py). That write GETs the live
+    config first and merges the preset onto it (POST /api/zones is a
+    whole-page-submit endpoint: a naive partial POST would zero every field
+    it doesn't mention, including max_temp_c -- see that module's docstring
+    for why this matters with heating elements physically connected), then
+    re-reads the config and confirms it actually landed -- a preset that
+    reports success without confirming is the exact defect class this repo
+    has been fighting elsewhere. Host resolution matches the OTA tools: see
+    `_ota_resolve_host()`.
+
+    `host` omitted (the default): those fields are reported as
+    reference/expected data only, NOT written -- unchanged from before this
+    parameter existed.
 
     Does NOT reset, does NOT touch relays, does NOT request enable.
     """
@@ -2568,10 +2579,13 @@ def load_config_preset(name: str) -> str:
         preset = config_presets.load_preset_data(name)
     except config_presets.ConfigPresetError as exc:
         return f"error: {exc}"
+    resolved = _ota_resolve_host(host) if host else None
     try:
-        result = config_presets.apply_preset(_control, preset)
+        result = config_presets.apply_preset(_control, preset, zones_host=resolved)
     except ControlQueryError as exc:
         return f"error: {exc}"
+    except zones_http_client.ZonesHttpError as exc:
+        return f"error writing zones config over HTTP (host={resolved}): {exc}"
     return result.describe()
 
 
@@ -2582,19 +2596,51 @@ FACTORY_RESET_REBOOT_TIMEOUT_S = 20.0
 
 
 @_tool()
-def factory_default_then_load_preset(name: str, scope: int = FACTORY_RESET_SCOPE_KILN) -> str:
+def factory_default_then_load_preset(name: str, scope: int = FACTORY_RESET_SCOPE_KILN,
+                                      host: Optional[str] = None) -> str:
     """Factory-default the board, then apply a known-good preset -- one
     callable step so a test always starts from the same place.
 
-    ``scope`` defaults to KILN (zones config only; matches the preset's own
-    scope) -- see devices.FACTORY_RESET_SCOPE_* for the other options.
-    FACTORY_RESET reboots the board ~500ms after the ACK (system_factory_
-    reset's own docstring); this waits for the post-reboot firmware-version
-    push before applying the preset, so it isn't racing the boot.
+    ``scope`` picks exactly what gets wiped (firmware/KilnFW/App/drivers/
+    factory_reset.c's ``kScopes``, one ``nvs_flash_erase_partition()`` per
+    partition named -- there is no blanket erase-everything path):
+      * WIFI (0): erases ``wifi_nvs`` only -- Wi-Fi credentials/AP config.
+        Zone config, saved profiles, relay cycle counters are untouched.
+      * KILN (1, the default here -- matches this tool's own "consistent
+        test basis" purpose): erases ``kiln_nvs`` only -- the WHOLE
+        partition, wholesale, not just zones_cfg_t: zone config, relay
+        names, rules, relay-cycle counters, and run_state all live there
+        (see kiln.py 8.1's partition split) and all come back at their
+        firmware defaults. Wi-Fi credentials and saved profiles are
+        untouched, so the board stays reachable and the operator's fire
+        schedules survive.
+      * PROFILES (2): erases ``profiles_nvs`` AND explicitly restores every
+        shipped built-in schedule to visible (``profiles_builtin_restore_
+        all()``) -- "reset fire profiles" means both halves of what the
+        /profiles page shows, not just clearing the user's 8 saved slots.
+      * ALL (3): all three partitions, plus the PROFILES restore above.
+        Drops Wi-Fi too -- the board falls back to its AP address
+        (``ota_http.OTA_AP_DEFAULT_HOST``) until re-provisioned.
+      In every case: FACTORY_RESET reboots the board ~500ms after the ACK
+      (execute_scope()'s reboot_task) -- this call waits for the post-reboot
+      firmware-version push before applying the preset, so it isn't racing
+      the boot. See devices.FACTORY_RESET_SCOPE_* for the numeric values.
+
+    `host` (new, same as load_config_preset()'s): when given, ALSO writes
+    relay_mask/control_mode/max_temp_c/min_temp_c/max_ramp_c_per_hr/
+    thermo_count/relay_count over GET/POST /api/zones after the reboot, with
+    the same GET-merge-POST-then-verify contract load_config_preset()
+    documents. Omitted (the default): those fields are reported as
+    reference data only, matching this tool's pre-existing behavior. The
+    reboot the KILN/ALL scopes trigger drops the board off any Wi-Fi network
+    it was on only if scope includes wifi -- host resolution below still
+    runs `_ota_resolve_host()` after the reboot, at whatever address is
+    live then.
 
     This is the disruptive lever in this module: it reboots the board and
-    then writes PID/model gains. Never invoke it against a bench with a
-    firing in progress or with the safety processor ARMED.
+    then writes PID/model gains (and, with `host`, zones config too). Never
+    invoke it against a bench with a firing in progress or with the safety
+    processor ARMED.
     """
     try:
         preset = config_presets.load_preset_data(name)
@@ -2613,10 +2659,13 @@ def factory_default_then_load_preset(name: str, scope: int = FACTORY_RESET_SCOPE
             f"error: factory reset sent, but the board did not come back up "
             f"within {FACTORY_RESET_REBOOT_TIMEOUT_S}s ({exc}) -- preset NOT applied"
         )
+    resolved = _ota_resolve_host(host) if host else None
     try:
-        result = config_presets.apply_preset(_control, preset)
+        result = config_presets.apply_preset(_control, preset, zones_host=resolved)
     except ControlQueryError as exc:
         return f"factory reset ok, but preset apply failed: {exc}"
+    except zones_http_client.ZonesHttpError as exc:
+        return f"factory reset ok, PID/model applied, but zones config write failed (host={resolved}): {exc}"
     return f"factory reset ok (scope={scope})\n" + result.describe()
 
 

@@ -1,5 +1,6 @@
 #include "ui_page_profile_detail.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -12,10 +13,12 @@
 #include "profiles_builtin.h"
 #include "profiles_http.h"
 #include "ui_confirm.h"
+#include "ui_page_home_graph.h"
 #include "ui_page_profile_builder_zones.h"
 #include "ui_page_profile_segments.h"
 #include "ui_theme.h"
 #include "ui_topbar.h"
+#include "unit_pref.h"
 #include "zones_http.h"
 
 static const char *TAG = "ui_page_profile_detail";
@@ -27,6 +30,8 @@ static const char *TAG = "ui_page_profile_detail";
  *     gap ......................................... 4px
  *     info card (name/family/segments, ~64px) ... ~64px
  *     gap ......................................... 4px
+ *     planned-curve preview chart (fixed) ........ 90px
+ *     gap ......................................... 4px
  *     action row: Segments + Edit + Start,      .. 72px
  *       three flex_grow(1) buttons in one 72px row
  *       (row height is unchanged by adding a third
@@ -35,13 +40,24 @@ static const char *TAG = "ui_page_profile_detail";
  *       width leaves each button comfortably over the
  *       72px touch-width minimum)
  *                                                 ------
- *                                                 ~164px  <= 267px  OK
+ *                                                 ~258px  <= 267px  OK
  *
  * The nav row's Back button moved into the shared top bar (ui_topbar.c) in
  * the 2026-08-21 icon-topbar pass, freeing the 44px + 4px gap it used to
  * cost here.
  *
- * No paging needed -- one profile's summary fits a single screen. */
+ * 2026-08-27: added the preview chart (see build_plan_chart()/refresh_plan_
+ * chart() below) so a SELECTED-but-not-running profile can be previewed on
+ * the LCD the way main_page.html already lets the web owner preview one --
+ * ui_page_home.c:837's IDLE guard on profile_feasibility_plan_curve() stays
+ * exactly as written; this page never reads st.segments/st.run_start_c, it
+ * reads the profile struct already loaded from flash/NVS by load_current()
+ * and (only if this SAME id happens to be the one actually running) the
+ * executor's live run_start_c, matching dashboard_http.c's
+ * profile_plan_get_handler() precedent exactly.
+ *
+ * No paging needed -- one profile's summary + a small preview chart still
+ * fits a single screen. */
 
 static uint8_t s_profile_id;
 /* Back destination is NOT fixed like every other page in this pass -- this
@@ -63,6 +79,155 @@ static lv_obj_t *s_name_label;
 static lv_obj_t *s_segcount_label;
 static lv_obj_t *s_family_label;
 static ui_topbar_t s_tb;
+
+/* ---- Planned-curve preview chart --------------------------------------
+ * A small, planned-only version of ui_page_home.c's compact chart: no
+ * "actual" series (there is nothing running to have recorded actual
+ * readings from), no now-dot, no live refresh timer -- refresh() (called
+ * once per navigation, from ui_page_profile_detail_set_id()) is all this
+ * needs, since the underlying profile only changes via the Edit flow, which
+ * always returns here through set_id() again. Same dashed-purple styling
+ * and axis-label placement as the home chart, reusing ui_page_home_graph.h's
+ * host-tested pure-math helpers -- NOT ui_page_home.c's own static plan_
+ * lookup()/chart_draw_event_cb(), which are file-local there; small enough
+ * to keep a second copy here rather than promote them to a shared header for
+ * two call sites. */
+#define UI_PAGE_PROFILE_DETAIL_CHART_POINTS 20
+#define UI_PAGE_PROFILE_DETAIL_PLAN_COLOR_HEX 0x9966cc /* matches UI_PAGE_HOME_PLAN_COLOR_HEX / main_page.html */
+#define UI_PAGE_PROFILE_DETAIL_PLAN_DASH_WIDTH_PX 6
+#define UI_PAGE_PROFILE_DETAIL_PLAN_DASH_GAP_PX   4
+/* Idle-preview starting temperature -- matches dashboard_http.c's
+ * PROFILE_PLAN_PREVIEW_AMBIENT_C and profile_feasibility.c's
+ * FEASIBILITY_AMBIENT_C exactly (20 C is the shared "idle room" answer);
+ * kept as its own constant per that file's own comment on why each caller
+ * owns its copy rather than sharing one #include. */
+#define UI_PAGE_PROFILE_DETAIL_PLAN_PREVIEW_AMBIENT_C 20.0f
+
+static lv_obj_t *s_plan_chart;
+static lv_chart_series_t *s_plan_series;
+static int32_t s_plan_pts[UI_PAGE_PROFILE_DETAIL_CHART_POINTS];
+static lv_obj_t *s_plan_peak_label; /* top-left: peak setpoint, in unit_pref */
+static lv_obj_t *s_plan_time_label; /* top-right: total planned duration, M:SS */
+
+/* Same dashing trick as ui_page_home.c's chart_draw_event_cb() -- lv_chart
+ * has no per-series dash flag, so this intercepts each line draw task and
+ * dashes the one matching the planned-series colour. */
+static void plan_chart_draw_event_cb(lv_event_t *e)
+{
+    lv_draw_task_t *draw_task = lv_event_get_draw_task(e);
+    lv_draw_line_dsc_t *line_dsc = lv_draw_task_get_line_dsc(draw_task);
+    if (line_dsc == NULL) {
+        return;
+    }
+    lv_color_t plan_color = lv_color_hex(UI_PAGE_PROFILE_DETAIL_PLAN_COLOR_HEX);
+    if (!lv_color_eq(line_dsc->color, plan_color)) {
+        return;
+    }
+    line_dsc->dash_width = UI_PAGE_PROFILE_DETAIL_PLAN_DASH_WIDTH_PX;
+    line_dsc->dash_gap = UI_PAGE_PROFILE_DETAIL_PLAN_DASH_GAP_PX;
+}
+
+/* Piecewise-linear sample of a plan point list -- same algorithm as
+ * ui_page_home.c's file-local plan_lookup(), duplicated here for the same
+ * reason chart_draw_event_cb() is (two small call sites, not worth a shared
+ * header). Returns NAN for an empty list. */
+static float plan_chart_lookup(const profile_plan_point_t *pts, size_t n, float t)
+{
+    if (n == 0) {
+        return NAN;
+    }
+    if (t <= pts[0].t) {
+        return pts[0].c;
+    }
+    for (size_t i = 1; i < n; i++) {
+        if (t <= pts[i].t) {
+            float t0 = pts[i - 1].t, t1 = pts[i].t;
+            float c0 = pts[i - 1].c, c1 = pts[i].c;
+            if (t1 <= t0) {
+                return c1;
+            }
+            float f = (t - t0) / (t1 - t0);
+            return c0 + f * (c1 - c0);
+        }
+    }
+    return pts[n - 1].c;
+}
+
+/* Redraws s_plan_chart from `prof`'s segments. Start temperature: if the
+ * executor is actually RUNNING/PAUSED/DONE/FAULTED on this SAME profile id,
+ * use its real captured run_start_c so the preview matches the live numbers;
+ * otherwise (the ordinary idle-preview case) fall back to
+ * UI_PAGE_PROFILE_DETAIL_PLAN_PREVIEW_AMBIENT_C -- exactly
+ * dashboard_http.c's profile_plan_get_handler() precedent. This performs NO
+ * read of profile_executor_get_status()'s st.segments/st.run_start_c unless
+ * that guard (state != IDLE && matching id) passes, so ui_page_home.c:837's
+ * warning about reading invalid IDLE state is respected: the segments this
+ * function plots always come from `prof` (loaded fresh from flash/NVS by the
+ * caller), never from stale executor state. */
+static void refresh_plan_chart(const profile_t *prof)
+{
+    if (!s_plan_chart) {
+        return; /* not built yet */
+    }
+
+    profile_exec_status_t st;
+    profile_executor_get_status(&st);
+    float start_c = UI_PAGE_PROFILE_DETAIL_PLAN_PREVIEW_AMBIENT_C;
+    if (st.state != PROFILE_EXEC_IDLE && st.profile_id == s_profile_id) {
+        start_c = st.run_start_c;
+    }
+
+    profile_plan_point_t plan_pts[1 + 2 * PROFILE_MAX_SEGMENTS];
+    size_t plan_n = 0;
+    (void)profile_feasibility_plan_curve(prof->segments, prof->segment_count, start_c, plan_pts,
+                                         sizeof(plan_pts) / sizeof(plan_pts[0]), &plan_n);
+
+    if (plan_n == 0) {
+        /* No segments (or curve entirely unknown-duration) -- nothing to
+         * plot. Blank every point and hide the overlay labels rather than
+         * show a stale/empty chart with confident-looking axis text. */
+        for (uint32_t i = 0; i < UI_PAGE_PROFILE_DETAIL_CHART_POINTS; i++) {
+            s_plan_pts[i] = LV_CHART_POINT_NONE;
+        }
+        lv_chart_refresh(s_plan_chart);
+        lv_obj_add_flag(s_plan_peak_label, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_plan_time_label, LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
+
+    float horizon_s = plan_pts[plan_n - 1].t;
+    if (horizon_s < 1.0f) {
+        horizon_s = 1.0f; /* guard div-by-zero below */
+    }
+
+    unit_pref_t unit = unit_pref_get();
+    float peak_c = ui_page_home_plan_peak_c(plan_pts, plan_n);
+    float peak_disp = unit_pref_convert(peak_c, unit, UNIT_PREF_KIND_ABSOLUTE);
+    float zero_disp = unit_pref_convert(0.0f, unit, UNIT_PREF_KIND_ABSOLUTE);
+    int32_t axis_lo = (int32_t)lroundf(zero_disp < peak_disp ? zero_disp : peak_disp - 1.0f);
+    int32_t axis_hi = (int32_t)lroundf(peak_disp > zero_disp ? peak_disp : zero_disp + 1.0f);
+    lv_chart_set_axis_range(s_plan_chart, LV_CHART_AXIS_PRIMARY_Y, axis_lo, axis_hi);
+
+    for (uint32_t i = 0; i < UI_PAGE_PROFILE_DETAIL_CHART_POINTS; i++) {
+        float t_i = (UI_PAGE_PROFILE_DETAIL_CHART_POINTS > 1)
+                        ? (float)i * horizon_s / (float)(UI_PAGE_PROFILE_DETAIL_CHART_POINTS - 1)
+                        : 0.0f;
+        float c = plan_chart_lookup(plan_pts, plan_n, t_i);
+        float disp = unit_pref_convert(c, unit, UNIT_PREF_KIND_ABSOLUTE);
+        s_plan_pts[i] = isnan(disp) ? LV_CHART_POINT_NONE : (int32_t)lroundf(disp);
+    }
+    lv_chart_refresh(s_plan_chart);
+
+    char peak_buf[16];
+    snprintf(peak_buf, sizeof(peak_buf), "peak %d%s", (int)lroundf(peak_disp), unit_pref_suffix(unit));
+    lv_label_set_text(s_plan_peak_label, peak_buf);
+    lv_obj_remove_flag(s_plan_peak_label, LV_OBJ_FLAG_HIDDEN);
+
+    char time_buf[16];
+    ui_page_home_format_mmss((uint32_t)lroundf(horizon_s), time_buf, sizeof(time_buf));
+    lv_label_set_text(s_plan_time_label, time_buf);
+    lv_obj_remove_flag(s_plan_time_label, LV_OBJ_FLAG_HIDDEN);
+}
 
 static bool load_current(profile_t *out, const builtin_profile_t **out_builtin)
 {
@@ -95,6 +260,14 @@ static void refresh(void)
         lv_label_set_text(s_segcount_label, "");
         lv_label_set_text(s_family_label, "");
         lv_obj_set_style_border_width(s_info_card, 0, 0);
+        if (s_plan_chart) {
+            for (uint32_t i = 0; i < UI_PAGE_PROFILE_DETAIL_CHART_POINTS; i++) {
+                s_plan_pts[i] = LV_CHART_POINT_NONE;
+            }
+            lv_chart_refresh(s_plan_chart);
+            lv_obj_add_flag(s_plan_peak_label, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(s_plan_time_label, LV_OBJ_FLAG_HIDDEN);
+        }
         return;
     }
 
@@ -126,6 +299,8 @@ static void refresh(void)
     } else {
         lv_obj_set_style_border_width(s_info_card, 0, 0);
     }
+
+    refresh_plan_chart(&prof);
 }
 
 void ui_page_profile_detail_set_id(uint8_t profile_id, const char *back_page)
@@ -291,6 +466,45 @@ lv_obj_t *ui_page_profile_detail_build(void)
     s_family_label = lv_label_create(s_info_card);
     lv_obj_set_style_text_color(s_family_label, UI_THEME_COLOR_TEXT_SECONDARY, 0);
     lv_label_set_text(s_family_label, "");
+
+    s_plan_chart = lv_chart_create(scr);
+    lv_obj_set_width(s_plan_chart, lv_pct(100));
+    lv_obj_set_height(s_plan_chart, 90);
+    lv_obj_set_style_bg_color(s_plan_chart, UI_THEME_COLOR_CARD, 0);
+    lv_obj_set_style_bg_opa(s_plan_chart, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_plan_chart, 0, 0);
+    lv_obj_set_style_radius(s_plan_chart, UI_THEME_CORNER_RADIUS_PX, 0);
+    lv_obj_set_style_pad_all(s_plan_chart, 2, 0);
+    lv_chart_set_type(s_plan_chart, LV_CHART_TYPE_LINE);
+    lv_chart_set_div_line_count(s_plan_chart, 0, 0); /* see ui_page_home.c's own comment on why 0,0 */
+    lv_chart_set_point_count(s_plan_chart, UI_PAGE_PROFILE_DETAIL_CHART_POINTS);
+    s_plan_series =
+        lv_chart_add_series(s_plan_chart, lv_color_hex(UI_PAGE_PROFILE_DETAIL_PLAN_COLOR_HEX), LV_CHART_AXIS_PRIMARY_Y);
+    lv_obj_add_event_cb(s_plan_chart, plan_chart_draw_event_cb, LV_EVENT_DRAW_TASK_ADDED, NULL);
+    for (uint32_t i = 0; i < UI_PAGE_PROFILE_DETAIL_CHART_POINTS; i++) {
+        s_plan_pts[i] = LV_CHART_POINT_NONE;
+    }
+    lv_chart_set_series_ext_y_array(s_plan_chart, s_plan_series, s_plan_pts);
+    lv_chart_set_axis_range(s_plan_chart, LV_CHART_AXIS_PRIMARY_Y, 0, 100);
+    lv_obj_remove_flag(s_plan_chart, LV_OBJ_FLAG_SCROLLABLE);
+
+    s_plan_peak_label = lv_label_create(s_plan_chart);
+    lv_obj_set_style_text_color(s_plan_peak_label, UI_THEME_COLOR_TEXT_PRIMARY, 0);
+    lv_obj_set_style_bg_color(s_plan_peak_label, UI_THEME_COLOR_BG, 0);
+    lv_obj_set_style_bg_opa(s_plan_peak_label, LV_OPA_70, 0);
+    lv_obj_set_style_pad_hor(s_plan_peak_label, 3, 0);
+    lv_obj_set_style_radius(s_plan_peak_label, 4, 0);
+    lv_obj_align(s_plan_peak_label, LV_ALIGN_TOP_LEFT, 2, 2);
+    lv_obj_add_flag(s_plan_peak_label, LV_OBJ_FLAG_HIDDEN);
+
+    s_plan_time_label = lv_label_create(s_plan_chart);
+    lv_obj_set_style_text_color(s_plan_time_label, UI_THEME_COLOR_TEXT_PRIMARY, 0);
+    lv_obj_set_style_bg_color(s_plan_time_label, UI_THEME_COLOR_BG, 0);
+    lv_obj_set_style_bg_opa(s_plan_time_label, LV_OPA_70, 0);
+    lv_obj_set_style_pad_hor(s_plan_time_label, 3, 0);
+    lv_obj_set_style_radius(s_plan_time_label, 4, 0);
+    lv_obj_align(s_plan_time_label, LV_ALIGN_TOP_RIGHT, -2, 2);
+    lv_obj_add_flag(s_plan_time_label, LV_OBJ_FLAG_HIDDEN);
 
     lv_obj_t *action_row = lv_obj_create(scr);
     lv_obj_set_width(action_row, lv_pct(100));

@@ -122,11 +122,22 @@ bool ota_http_heat_blocked_by_update(char *reason_out, size_t reason_cap)
     return false;
 }
 
+// Settable for B2's negative test below (test_run_refuses_while_zone_sweep_
+// is_active()), which needs profile_executor_run() to get PAST this check
+// and reach the new zones_current_sweep_is_active() gate. Every OTHER test
+// in this file leaves this at its default (false, "no such profile"),
+// matching the old hardcoded behavior exactly.
+static bool s_test_profiles_http_get_ok = false;
+static profile_t s_test_profiles_http_get_out;
 bool profiles_http_get(uint8_t id, profile_t *out)
 {
     (void)id;
-    if (out) memset(out, 0, sizeof(*out));
-    return false;
+    if (!s_test_profiles_http_get_ok) {
+        if (out) memset(out, 0, sizeof(*out));
+        return false;
+    }
+    if (out) *out = s_test_profiles_http_get_out;
+    return true;
 }
 
 bool relay_authority_on_blocked(SafetyLinkClass *safety, uint32_t *out_sources)
@@ -405,9 +416,26 @@ bool zones_config_get_thermo_mask(uint8_t zone_index, uint8_t *out_mask)
     return false;
 }
 
+// Settable for B2's negative test below -- see s_test_profiles_http_get_ok's
+// comment. Default false (matching the old hardcoded behavior) for every
+// other test in this file.
+static bool s_test_zones_config_valid = false;
 bool zones_config_is_valid(void)
 {
-    return false;
+    return s_test_zones_config_valid;
+}
+
+// B2 (opus review, 2026-08-27): profile_executor_run() now refuses to start
+// while a zone current sweep is active -- see zones_current_sweep_is_active()'s
+// doc comment (zones_http.h). Settable so test_run_refuses_while_zone_sweep_
+// is_active() below can exercise the real refusal; every other test in this
+// file leaves it at its default (false), so profile_executor_run() staying
+// unreachable in prestart tests (s_exec.lock == NULL refuses first) is
+// unaffected.
+static bool s_test_sweep_active = false;
+bool zones_current_sweep_is_active(void)
+{
+    return s_test_sweep_active;
 }
 
 // ---------------------------------------------------------------------------
@@ -904,6 +932,50 @@ static void test_io_segs_force_all_off_sweeps_general_io_too(void)
     TEST_CHECK(!s_exec.io_segs[0].active && !s_exec.io_segs[1].active, "both segments end inactive");
 }
 
+// B2 (opus review, 2026-08-27): profile_executor_run() must refuse while a
+// zone current sweep is active. Reachable without profile_executor_start()'s
+// full harness the same way the pause/resume tests above are: a stub mutex
+// in s_exec.lock is enough to get past the "not started" guard, and every
+// check profile_executor_run() makes BEFORE reaching the new B2 gate
+// (profiles_http_get/segment_count/zone_mask/zones_config_is_valid/
+// ota_http_heat_blocked_by_update) is stubbed to pass cleanly above.
+static void test_run_refuses_while_zone_sweep_is_active(void)
+{
+    TEST_SECTION("profile_executor_run() refuses while a zone current sweep is active (B2)");
+    reset_relay_claim_test_state();
+    s_exec.lock = xSemaphoreCreateMutex();
+    s_exec.state = PROFILE_EXEC_IDLE;
+
+    memset(&s_test_profiles_http_get_out, 0, sizeof(s_test_profiles_http_get_out));
+    s_test_profiles_http_get_out.zone_mask = 0x01;
+    s_test_profiles_http_get_out.segment_count = 1;
+    s_test_profiles_http_get_ok = true;
+    s_test_zones_config_valid = true;
+    s_test_sweep_active = true;
+
+    char err[128];
+    err[0] = '\0';
+    bool ok = profile_executor_run(0, err, sizeof(err));
+
+    TEST_CHECK(!ok, "B2: a live zone sweep must refuse the firing, not merely warn");
+    TEST_CHECK(strstr(err, "sweep") != NULL, "the refusal must name the sweep specifically");
+    TEST_CHECK(s_exec.state == PROFILE_EXEC_IDLE, "a refused run must never transition out of IDLE");
+
+    // Control case: with the sweep NOT active, the same setup must NOT be
+    // refused for this reason (it will still fail further down this
+    // function's real logic, which this stub surface does not fully satisfy
+    // -- the point here is only that it is not refused for the SWEEP reason).
+    s_test_sweep_active = false;
+    err[0] = '\0';
+    profile_executor_run(0, err, sizeof(err));
+    TEST_CHECK(strstr(err, "sweep") == NULL,
+              "control: with no sweep active, the refusal (if any) must not claim a sweep is running");
+
+    s_test_profiles_http_get_ok = false;
+    s_test_zones_config_valid = false;
+    s_test_sweep_active = false;
+}
+
 void run_test_profile_executor_prestart(void)
 {
     test_run_refuses_before_start();
@@ -927,6 +999,7 @@ void run_test_profile_executor_prestart(void)
     test_io_seg_finish_default_forces_off_on_done();
     test_io_seg_finish_leave_on_honored_only_on_done();
     test_io_segs_force_all_off_sweeps_general_io_too();
+    test_run_refuses_while_zone_sweep_is_active();
 }
 
 int main(void)

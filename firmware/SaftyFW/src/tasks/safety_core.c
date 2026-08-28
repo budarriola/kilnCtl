@@ -1411,6 +1411,17 @@ bool safety_core_request_enable(bool enable)
         }
     }
 
+    // TODO(ROADMAP.md M12, "An uncommissioned safety processor must refuse
+    // heating enable"): this is the one obvious place to add
+    //   if (enable && !config_store_field_is_set(&cfg_rec.fields_set, CONFIG_STORE_SET_ABS_MAX_TEMP_C)) { return false; }
+    // (widened to `!config_params_all_required_set(&cfg_rec)` if the refusal
+    // should cover every no-safe-default field, not just abs_max_temp_c)
+    // once that refusal is deliberately sequenced in. NOT implemented here on
+    // purpose: M12's own ordering note says land it LAST, after the entry
+    // surface exists and a real commissioning pass has actually succeeded on
+    // the board -- landing it now would lock the bench out of heating before
+    // abs_max_temp_c has ever been given a real value.
+
     // See safety_core.h's doc comment: deliberately a thin forward beyond
     // the check above, no second policy layer duplicating relay_owner's
     // own state machine. relay_owner_command_energize() already refuses

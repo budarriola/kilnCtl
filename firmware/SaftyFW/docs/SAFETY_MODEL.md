@@ -457,6 +457,56 @@ fire unattended from its own LCD/web UI and the PC's absence alone is not a
 hazard. A deployment where the PC link is required equipment can still turn
 that option on to get the old behavior back.
 
+**Clearing an S6a trip.** SaftyFW sees exactly one bit (`mainFault` LOW) and
+by design cannot know why the ESP asserted it — that independence must never
+be compromised by, say, having the ESP tell the safety processor "trust me,
+I'm fine now." The reason lives entirely on the ESP side, as `safety_link.h`'s
+`fault_sources` bitmask (`SAFETY_FAULT_SRC_MANUAL | PC_LINK | THERMO |
+SAFETY_LINK | APP | THERMAL_SANITY`), which the web dashboard and the LCD's
+Diagnostics → Trip Detail page now both decode into words and a suggested
+remedy (`firmware/KilnFW/App/drivers/safety_trip_words.h` — the one shared
+table both surfaces read, so they cannot drift). 2026-08-27: the ESP now also
+snapshots that mask **at the instant the trip latches**
+(`safety_link_status_t.trip_fault_sources`, set in `safety_apply_trip_event()`
+only on a genuinely new `trip_seq`) — distinct from the *live* mask
+(`safety_link_get_fault_sources()`), because a source can assert, cause the
+trip, and release again before anyone looks. Both are shown, separately
+labeled, wherever a trip is reported.
+
+Like every other guard trip in this firmware, S6a **latches**: it does not
+clear on its own, an ESP reboot does not clear it (`safety_link_mark_boot_
+clean()`'s one narrow exception is a *clean* boot finding nothing wrong, not
+a magic auto-clear), and **starting a new firing does not clear it** — the
+GUI banner says so explicitly now. The only way out is an explicit
+`SAFETY_CMD_CLEAR_TRIP`, and `mainFault` is not in `guard_condition_still_
+immediate()`'s list (`safety_guards.c`), so it is **unwindowed**: `safety_
+guards_try_clear()` clears state and immediately re-runs `safety_guards_
+tick()`, and if the GPIO10 line is still LOW on that very tick, S6a re-trips
+before the clear can take effect. In practice this means: **identify the
+asserted source (above), remove it, then Clear Trip** — a clear attempted
+while the line is still LOW is refused. `SAFETY_FAULT_SRC_SAFETY_LINK` is the
+one source an operator standing at the kiln typically cannot act on directly
+(it means this board's own UART link to the safety processor is stale, not a
+firing-side condition) — the GUI says that plainly rather than implying a
+Clear Trip alone will fix it.
+
+**CLEAR_TRIP has no wire-level reply.** `link_task_handle_clear_trip()`
+(`src/tasks/link_task.c`) never ACKs — `LINK_PROTOCOL.md` does not ask it to
+— so `link_frame_decide_clear_trip()`'s named refusal reasons
+(`LINK_CLEAR_TRIP_REFUSE_NOTHING_TRIPPED` / `_MASK_MISMATCH` /
+`_INEFFECTIVE`) only ever reach `log_task_log()`, i.e. SWD/serial, never the
+ESP or the operator's browser/LCD. The ESP's own `/api/safety/clear_trip`
+400 response ("no trip currently latched, or Pico diagnostics are stale") is
+a *different*, purely local check made before sending anything — it does not
+cover, and cannot know about, a still-asserted-line refusal that happens
+after the frame reaches SaftyFW. The operator's only signal that a
+still-asserted-source refusal happened is indirect: the next `/api/status`
+poll still shows `diag_state == TRIPPED` with the live `heat_block_sources`
+matching (or overlapping) `trip_fault_sources` — which is exactly what the
+web banner now surfaces as "Still asserted right now." There is no
+plan-of-record to add a wire ACK for CLEAR_TRIP; this document records the
+gap so it is not rediscovered as a mystery later.
+
 **(b) The link has gone quiet** — no valid frame within `link_timeout_s`.
 
 Here is where a naive design becomes a nuisance generator, and where the doctrine

@@ -920,6 +920,18 @@ static bool begin_run_locked(uint8_t zone_index, char *err_msg, size_t err_cap)
         return false;
     }
 
+    /* B2 (opus review, 2026-08-27): same reverse interlock as
+     * profile_executor.c's identical check -- see
+     * zones_current_sweep_is_active()'s doc comment (zones_http.h). Checked
+     * here, right after the OTA check above, for the same reasoning. */
+    if (zones_current_sweep_is_active()) {
+        if (err_msg) {
+            snprintf(err_msg, err_cap,
+                     "a zone current sweep is running -- autotune cannot run at the same time");
+        }
+        return false;
+    }
+
     /* Refuse up front if heat is blocked at all -- most importantly a safety
      * link that is down or faulted. Every heat command this engine issues is
      * already gated (see apply_duty()'s relay_authority_zone_blocked() call),

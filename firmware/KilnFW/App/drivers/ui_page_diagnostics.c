@@ -157,7 +157,7 @@ static const char *TAG __attribute__((unused)) = "ui_page_diagnostics";
  * margin. 8192 below is that same LVGL stack-size constant, not a guess. */
 #define UI_PAGE_DIAGNOSTICS_LVGL_TASK_STACK_BYTES 8192
 
-#define UI_PAGE_DIAGNOSTICS_PAGE_COUNT 6
+#define UI_PAGE_DIAGNOSTICS_PAGE_COUNT 7
 #define UI_PAGE_DIAGNOSTICS_PAGE_FIRMWARE 0
 #define UI_PAGE_DIAGNOSTICS_PAGE_INTERNAL_RAM 1
 #define UI_PAGE_DIAGNOSTICS_PAGE_PSRAM_STORAGE 2
@@ -166,6 +166,16 @@ static const char *TAG __attribute__((unused)) = "ui_page_diagnostics";
 #define UI_PAGE_DIAGNOSTICS_PAGE_SAFETY 3
 #define UI_PAGE_DIAGNOSTICS_PAGE_BOARD_HEALTH 4
 #define UI_PAGE_DIAGNOSTICS_PAGE_THERMO_FAULTS 5
+/* 2026-08-27, owner scope change ("all faults... come with instructions on
+ * how to fix them... what was detected wrong"): a dedicated page rather than
+ * growing the Safety Processor page's existing 5 rows, which already sit
+ * close to the ~267px no-scroll budget and use variable-height wrapped
+ * labels -- appending a multi-line cause+remedy+source block to one of them
+ * risked clipping content on hardware with no way to notice from a desktop
+ * build. A new page is the same "grow past budget -> add a page" rule this
+ * file's own header comment already documents for the safety/board-health/
+ * thermo-fault fold. */
+#define UI_PAGE_DIAGNOSTICS_PAGE_TRIP_DETAIL 6
 
 static ui_topbar_t s_topbar;
 static lv_obj_t *s_pages[UI_PAGE_DIAGNOSTICS_PAGE_COUNT];
@@ -220,11 +230,21 @@ static lv_obj_t *s_bh_cj_label[MAX31856_CHANNEL_COUNT];
 static lv_obj_t *s_tf_fault_label[MAX31856_CHANNEL_COUNT];
 static lv_obj_t *s_tf_status_label[MAX31856_CHANNEL_COUNT];
 
+/* --- Page 7: Trip Detail -- new, 2026-08-27 (owner scope change, see this
+ * file's UI_PAGE_DIAGNOSTICS_PAGE_TRIP_DETAIL comment). What was detected,
+ * what to do about it, and (S6a only) which of this board's own fault
+ * sources actually caused it. */
+static lv_obj_t *s_td_reason_label;
+static lv_obj_t *s_td_cause_label;
+static lv_obj_t *s_td_remedy_label;
+static lv_obj_t *s_td_source_label;
+static lv_obj_t *s_td_latch_label;
+
 static void update_title(void)
 {
     static const char *page_names[UI_PAGE_DIAGNOSTICS_PAGE_COUNT] = {
         "Firmware", "Internal RAM", "PSRAM & storage",
-        "Safety Processor", "Board Health", "Thermocouple Faults",
+        "Safety Processor", "Board Health", "Thermocouple Faults", "Trip Detail",
     };
     char buf[48];
     snprintf(buf, sizeof(buf), "Diagnostics: %s  %u of %u", page_names[s_page_index],
@@ -568,6 +588,112 @@ static void refresh_cb(lv_timer_t *timer)
     }
     lv_label_set_text(s_trip_label, trip_buf);
 
+    /* ---- Trip Detail (new, 2026-08-27) -----------------------------------
+     * Shows the LATCHED trip's cause/remedy/source, not the live diag state
+     * above -- deliberately: this is "why did it trip and how do I clear
+     * it", answerable long after the underlying condition went away (same
+     * "evidence survives" reasoning as safety_link.h's trip_event_* fields
+     * themselves). "No trip recorded" only means this ESP has never received
+     * a TRIP_EVENT frame this boot's cache lifetime -- NOT that nothing is
+     * currently tripped; the State row on the Safety Processor page is the
+     * live truth for that. */
+    if (!ds.trip_event_ever_received) {
+        lv_label_set_text(s_td_reason_label, "Reason: no trip recorded");
+        lv_label_set_text(s_td_cause_label, "Detected: --");
+        lv_label_set_text(s_td_remedy_label, "To clear: --");
+        lv_label_set_text(s_td_source_label, "Fault source: --");
+        lv_label_set_text(s_td_latch_label, ""); /* N5 fix: no claim of a latch with no trip on record */
+    } else {
+        char td_buf[64];
+        snprintf(td_buf, sizeof(td_buf), "Reason: %s", safety_trip_words_short(ds.trip_reason));
+        lv_label_set_text(s_td_reason_label, td_buf);
+
+        char td_cause_buf[112];
+        snprintf(td_cause_buf, sizeof(td_cause_buf), "Detected: %s",
+                 safety_trip_words_cause(ds.trip_reason));
+        lv_label_set_text(s_td_cause_label, td_cause_buf);
+
+        /* 144, not 112: the longest safety_fault_source_remedy_one() string
+         * is 131 bytes and the longest safety_trip_words_remedy() is 109, so
+         * "To clear: " + either overflows 112 and the target build refuses it
+         * (-Werror=format-truncation). Sized against the tables rather than
+         * rounded up by eye -- if a remedy sentence grows past this the build
+         * fails again, which is the desired outcome: a silently truncated
+         * remedy is a half-instruction to an operator standing at a kiln,
+         * and this whole page exists to stop faults being under-explained.
+         * The MSVC host tests do NOT run -Wformat-truncation; only the
+         * xtensa/arm target builds catch this class. */
+        char td_remedy_buf[144];
+        /* trip_fault_sources_valid is checked here as well as on the "Fault
+         * source (at trip)" line below, and it has to be: without it, an
+         * unwitnessed reboot resend carrying a non-zero but untrustworthy
+         * mask would print one source's specific remedy directly above a
+         * line reading "not captured". Two adjacent labels contradicting
+         * each other is worse than either alone -- an operator acts on the
+         * specific one. Gate both on the same condition or neither. */
+        if (ds.trip_reason == 6u && ds.trip_fault_sources_valid &&
+            ds.trip_fault_sources != 0u) {
+            /* S6a with a captured source: name the FIRST asserted source's
+             * own remedy (safety_fault_source_remedy_one()) rather than the
+             * generic "resolve the fault source named below" -- a multi-bit
+             * mask still shows the rest via s_td_source_label above; row
+             * space here is the LCD no-scroll budget, not a place for a
+             * full per-bit list. */
+            uint32_t first_bit = ds.trip_fault_sources & (~(ds.trip_fault_sources - 1u));
+            snprintf(td_remedy_buf, sizeof(td_remedy_buf), "To clear: %s",
+                     safety_fault_source_remedy_one(first_bit));
+        } else {
+            snprintf(td_remedy_buf, sizeof(td_remedy_buf), "To clear: %s",
+                     safety_trip_words_remedy(ds.trip_reason));
+        }
+        lv_label_set_text(s_td_remedy_label, td_remedy_buf);
+
+        /* S6a only -- every other guard's cause IS the reason text above;
+         * safety_link.h's trip_fault_sources field comment explains why only
+         * S6a needs this second layer of decode.
+         *
+         * 2026-08-28 audit fix (N3/N4): mask==0 here is NEVER a genuine
+         * "none" for a captured S6a trip -- the ESP must have asserted the
+         * isolated fault line to cause the trip at all, so a zero mask means
+         * "released before the frame arrived" or "not captured" (this being
+         * an unwitnessed reboot resend, safety_link.h's trip_fault_sources_
+         * valid), never "no cause". Render that explicitly instead of
+         * falling through to safety_fault_source_words()'s "none", which is
+         * reserved for the LIVE heat_block_sources rendering elsewhere on
+         * this page, where zero genuinely does mean none. */
+        if (ds.trip_reason == 6u) {
+            /* 160, not 80 -- 2026-08-28 audit fix (N6): all six
+             * safety_fault_source_words() strings comma-joined are 141
+             * bytes; three sources alone is already ~70. No overflow (the
+             * helper is runtime-bounded, not a format string), so this class
+             * of truncation is invisible to -Werror=format-truncation --
+             * sizing generously here is the only guard. */
+            char src_words[160];
+            char td_src_buf[192];
+            if (ds.trip_fault_sources_valid && ds.trip_fault_sources != 0u) {
+                safety_fault_source_words(ds.trip_fault_sources, src_words, sizeof(src_words));
+                snprintf(td_src_buf, sizeof(td_src_buf), "Fault source (at trip): %s", src_words);
+            } else {
+                snprintf(td_src_buf, sizeof(td_src_buf),
+                         "Fault source (at trip): not captured -- the source cleared before "
+                         "the trip was reported");
+            }
+            lv_label_set_text(s_td_source_label, td_src_buf);
+        } else {
+            lv_label_set_text(s_td_source_label, "Fault source: n/a for this guard");
+        }
+
+        /* 2026-08-28 audit fix (N5): this used to be set OUTSIDE this
+         * else-branch, so it rendered next to "Reason: no trip recorded"
+         * above -- claiming a latched trip on a board that has never
+         * reported one this boot. Only meaningful once a trip is actually
+         * on record. */
+        lv_label_set_text(s_td_latch_label,
+                           "This trip is LATCHED -- it does not clear on its own, and starting "
+                           "a new firing will NOT clear it. Only Clear Trip does, and it is "
+                           "refused while the cause is still present.");
+    }
+
     /* ---- Board Health (folded from ui_page_board_health.c) -------------- */
     board_temps_t bt2;
     board_temps_get_live(&bt2);
@@ -866,6 +992,16 @@ lv_obj_t *ui_page_diagnostics_build(void)
         }
         s_bh_cj_label[ch] = build_stat_row(board_health_page, name, accent);
     }
+
+    /* Page 7: Trip Detail -- new, 2026-08-27 (see this file's
+     * UI_PAGE_DIAGNOSTICS_PAGE_TRIP_DETAIL comment). 5 wrapped full-text
+     * rows, same shape as the Safety Processor page's own rows. */
+    lv_obj_t *trip_detail_page = s_pages[UI_PAGE_DIAGNOSTICS_PAGE_TRIP_DETAIL];
+    s_td_reason_label = build_full_text_row(trip_detail_page, "Reason: --");
+    s_td_cause_label = build_full_text_row(trip_detail_page, "Detected: --");
+    s_td_remedy_label = build_full_text_row(trip_detail_page, "To clear: --");
+    s_td_source_label = build_full_text_row(trip_detail_page, "Fault source: --");
+    s_td_latch_label = build_full_text_row(trip_detail_page, "--");
 
     /* Page 6: Thermocouple Faults -- folded from ui_page_thermo_faults.c.
      * MAX31856_CHANNEL_COUNT channel cards sharing the page's remaining

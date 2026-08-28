@@ -33,6 +33,9 @@
 #include <stdint.h>
 
 #include "esp_err.h"
+#include "MAX31856.h"
+#include "kiln_io.h"
+#include "safety_link.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -731,6 +734,178 @@ bool zones_config_export_blob(void *out, size_t out_cap);
  * non-zero-length) is filled with a specific, human-readable refusal reason,
  * and nothing was changed. */
 bool zones_config_import_blob(const void *blob, size_t len, char *reason_out, size_t reason_cap);
+
+/* ---- Task 1/2/3 (2026-08-27+2, owner report): normal-current sweep, ------
+ * CT-to-zone mapping check, and read-only safety-processor wiring display.
+ * All three need live hardware -- the per-zone relay/current-sense sweep,
+ * the live current comparison, and the safety link's own status -- which
+ * zones_http_start() deliberately does not take (it is pure config CRUD,
+ * see its own comment). Call this once, any time after zones_http_start(),
+ * with whatever main.c has -- same NULL-tolerant convention as
+ * dashboard_http_start()/ota_http_start(): a NULL pointer here does not
+ * crash anything, it just makes zones_current_sweep_start() refuse with
+ * ZONE_SWEEP_REFUSE_NO_HW and zones_get_safety_wiring()/
+ * zones_ct_mapping_warn_mask() report the safe "link down" defaults. */
+void zones_http_set_hw(kiln_io_t *io_or_null, MAX31856BusClass *thermo_bus_or_null,
+                       SafetyLinkClass *safety_or_null);
+
+/* ---- Task 1: per-zone normal (steady-state) current measurement --------- */
+
+typedef enum {
+    ZONE_SWEEP_REFUSE_OK = 0,
+    ZONE_SWEEP_REFUSE_ALREADY_RUNNING,
+    ZONE_SWEEP_REFUSE_NO_HW,
+    ZONE_SWEEP_REFUSE_CONFIG_INVALID,
+    ZONE_SWEEP_REFUSE_NO_ZONES,
+    ZONE_SWEEP_REFUSE_PROFILE_RUNNING,
+    ZONE_SWEEP_REFUSE_AUTOTUNE_RUNNING,
+    ZONE_SWEEP_REFUSE_LINK_DOWN,
+    ZONE_SWEEP_REFUSE_TRIP_LATCHED,
+    /* N9 (opus review, 2026-08-28): a relay left ON from the dashboard (or a
+     * profile that just ended) before the sweep starts would ride along on
+     * whichever zone's energize write happens to share a CT channel with it,
+     * inflating that zone's measured "normal" permanently. Refuse to start
+     * instead of silently measuring a foreign load. */
+    ZONE_SWEEP_REFUSE_RELAYS_ON,
+} zone_sweep_refusal_t;
+
+/* Human-readable reason for a zone_sweep_refusal_t -- used by the HTTP
+ * handler and safe to call with any enumerator, including
+ * ZONE_SWEEP_REFUSE_OK (returns "ok"). */
+const char *zone_sweep_refusal_str(zone_sweep_refusal_t r);
+
+typedef enum {
+    /* Initial value only, before zones_current_sweep_start() has ever been
+     * called this boot -- NOT a state a finished run returns to.
+     * zones_current_sweep_start()'s own success path always leaves
+     * s_sweep.state at RUNNING immediately, and every terminal state below
+     * (DONE/ABORTED/FAILED) is sticky: nothing in zones_http.c ever writes
+     * IDLE back into s_sweep.state after a run starts, so "reading a
+     * finished run's status returns it to IDLE" (this comment's old wording)
+     * never actually happens -- a finished run's result sits at DONE/
+     * ABORTED/FAILED until the NEXT zones_current_sweep_start() overwrites it
+     * with RUNNING. (LOW, opus review 2026-08-27.) */
+    ZONE_SWEEP_IDLE = 0,
+    ZONE_SWEEP_RUNNING,
+    ZONE_SWEEP_DONE,         /* completed every zone without being aborted or hitting a ceiling */
+    ZONE_SWEEP_ABORTED,      /* zones_current_sweep_abort() was called mid-run */
+    ZONE_SWEEP_FAILED,       /* a zone's ceiling was hit, or the safety link dropped mid-run */
+} zone_sweep_state_t;
+
+/* Attempts to start the sweep as a background task, one zone at a time
+ * (structural, not a convention -- see zones_http.c's zone_sweep_task()).
+ * Returns ZONE_SWEEP_REFUSE_OK and starts the task, or a specific refusal
+ * with NOTHING started -- no relay is ever touched on a refused start.
+ * Refuses while: a sweep is already running; hardware was never registered
+ * via zones_http_set_hw(); the zones config is not zones_config_is_valid();
+ * there are no configured zones; a profile is RUNNING/PAUSED
+ * (profile_executor_get_status()); autotune is active
+ * (autotune_engine_is_active()); the safety link is down
+ * (!safety_link_get_status()->link_up); or a safety trip is latched
+ * (SAFETY_LINK_DIAG_STATE_TRIPPED, or the ESP's own fault_asserted output --
+ * either one means "do not energize anything right now"); or any relay is
+ * already ON per kiln_io_get_relay_shadow() (N9 -- a foreign load left
+ * energized would otherwise ride along on the sweep's measurement). */
+zone_sweep_refusal_t zones_current_sweep_start(void);
+
+/* B2 (opus review, 2026-08-27): the OTHER half of the interlock --
+ * zones_current_sweep_start() already refuses to START a sweep while a
+ * profile/autotune run is active, but nothing outside this file used to stop
+ * a profile or autotune run from starting WHILE a sweep is active, so
+ * starting a sweep and then starting a firing from another tab produced two
+ * uncoordinated drivers of the mains-contactor relays at once. Called from
+ * profile_executor.c's profile_executor_run(), autotune_engine.c's
+ * begin_run_locked(), and ota_http.c's ota_http_check_interlocks() -- each
+ * refuses to start/update while this is true, with a reason naming the
+ * sweep explicitly, the same way they already name each other
+ * (autotune_engine_is_active_on_zone(), ota_http_heat_blocked_by_update()).
+ * True for the whole lifetime between a successful zones_current_sweep_start()
+ * and the sweep task's own terminal state (DONE/ABORTED/FAILED) -- not just
+ * while a relay happens to be energized, since the choke-point-off gap
+ * between zones is not a safe window for something else to start driving
+ * relays either. */
+bool zones_current_sweep_is_active(void);
+
+/* Requests the running sweep stop at its next safe point -- the current
+ * zone's relay(s) are dropped (through the same single choke point every
+ * other exit path uses, zone_sweep_force_relays_off()) before the task
+ * exits. No-op if nothing is running. */
+void zones_current_sweep_abort(void);
+
+typedef struct {
+    zone_sweep_state_t state;
+    uint8_t zone_index;   /* zone currently (or, once finished, last) being measured */
+    uint8_t zones_done;   /* zones with a fresh result so far this run */
+    uint8_t zones_total;  /* zones this run will attempt (thermo_count, capped to the array) */
+    char    reason[64];   /* refusal or failure reason; "" while running/idle/done */
+} zone_sweep_status_t;
+
+void zones_current_sweep_get_status(zone_sweep_status_t *out);
+
+/* Task 1's persisted result -- a SEPARATE NVS blob (zone_normals_cfg, see
+ * zones_http.c), not a field on zones_cfg_t: zones_cfg_t is already 500 of
+ * its 512-byte ZONES_CONFIG_BLOB_MAX_SIZE ceiling (see that macro's own
+ * comment), the same reason relay_names_cfg_t got its own blob. Returns
+ * false (leaving outputs untouched) for an out-of-range zone_index.
+ * *out_measured false means "never measured" -- *out_amps is 0.0f in that
+ * case, but callers (zones_ct_mapping_mismatch() below) must branch on
+ * *out_measured, never infer "never measured" from a zero amps value, since
+ * a real normal current CAN legitimately be very small. */
+bool zones_config_get_normal_current(uint8_t zone_index, float *out_amps, bool *out_measured);
+
+/* ---- Task 2: runtime CT-to-zone mapping check ---------------------------- */
+
+/* Pure predicate: does `live_current_a` (this zone's live current right
+ * now, summed over its ct_mask channels) plausibly match `normal_current_a`
+ * (Task 1's measured normal)? Silent (false) whenever normal_measured is
+ * false -- a zone that was never swept has nothing to compare against, and
+ * this function must not manufacture a warning from an unmeasured zero (see
+ * zones_config_get_normal_current()'s doc comment). A TRUE return is a
+ * WARNING for the caller to surface -- catching a CT physically moved to
+ * the wrong jack (SaftyFW/docs/CURRENT_SENSE.md §5's commissioning step 2).
+ * It is never a trip: that decision belongs to the safety processor, not
+ * this file. See zones_http.c for the tolerance band and its rationale. */
+bool zones_ct_mapping_mismatch(float normal_current_a, bool normal_measured, float live_current_a);
+
+/* Wiring for the predicate above against LIVE hardware: bit N-1 set (N =
+ * zone number, 1-based, same convention as relay_mask/thermo_mask/ct_mask)
+ * for every zone that is (a) configured, (b) currently commanded on
+ * (kiln_io_get_relay_shadow(), via the io pointer zones_http_set_hw() was
+ * given), and (c) mismatching per zones_ct_mapping_mismatch() above, using
+ * safety_link_get_status()'s current_a[] summed over the zone's ct_mask.
+ * Returns 0 (nothing to warn about) if the io or safety pointer is NULL,
+ * the safety link is down, or no zone both qualifies and mismatches. */
+uint8_t zones_ct_mapping_warn_mask(void);
+
+/* ---- Task 3: read-only safety-processor wiring display ------------------- */
+
+/* The safety thermocouple's live reading/fault and the safety relay's (K4)
+ * live energized state, sourced from safety_link_get_status() through the
+ * pointer zones_http_set_hw() was given. Nothing here is settable from this
+ * module: reassigning either is not an operator decision (see this
+ * struct's use in zones_http.c/zones_page.html), and the one safety-
+ * processor value this module DOES own -- safety_tc_type, the configured
+ * thermocouple TYPE -- keeps its existing getter/setter pair above
+ * unchanged; this struct is the LIVE reading, a different thing.
+ *
+ * The path this data travels (SaftyFW -> the isolated link -> safety_link.c)
+ * is being repaired by another pass as of this comment -- link_up is the
+ * one field always trustworthy (it is exactly "did a fresh status frame
+ * arrive"); render every other field as an explicit "UNSET"/dash, never a
+ * fabricated 0/false, whenever its own *_valid flag (or link_up itself) says
+ * not to trust it -- the owner's own ask for this task. Populated even with
+ * no hardware registered (io/safety NULL): link_up reads false and every
+ * other field its safe zeroed default, identical to what a genuinely-down
+ * link reports. */
+typedef struct {
+    bool    link_up;
+    bool    tc_temp_valid;   /* only meaningful if link_up */
+    float   tc_temp_c;
+    uint8_t tc_fault;        /* MAX31856 SR bits; meaningful only if tc_temp_valid */
+    bool    relay_energized; /* SAFETY_FLAG_RELAY; meaningful only if link_up */
+} zone_safety_wiring_t;
+
+void zones_get_safety_wiring(zone_safety_wiring_t *out);
 
 #ifdef __cplusplus
 }

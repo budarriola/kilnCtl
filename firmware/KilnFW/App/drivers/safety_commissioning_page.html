@@ -202,6 +202,9 @@ is answered by the <b>live</b> value only -- the cached value is what these
 form fields were last fetched at, shown purely so a mismatch is visible.</p>
 
 <p id="commissionedLine" class="hint"></p>
+<p id="unsetReliabilityLine" class="hint guard-disabled" hidden>Safety processor firmware is too old
+(or has never reported in) to say which fields below are genuinely unset -- every "set" badge on this
+page is UNKNOWN, not a real confirmation, until it reports a newer build.</p>
 
 <div id="fields"><p class="empty">Loading&hellip;</p></div>
 
@@ -289,7 +292,9 @@ var GROUPS = [
         guards: ['S1'],
         note: 'In CHAMBER_AGREED: what the furniture/elements survive (~1300 for cone 10). ' +
           'In EXTERNAL_OVERHEAT: what that location must never exceed -- unrelated to any ' +
-          'firing temperature.' },
+          'firing temperature. Must be a real positive ceiling -- there is no "no limit" ' +
+          'value any more; 0 is refused by the safety processor at commit exactly like NaN, ' +
+          'never stored as meaning unlimited.' },
       { id: 261, name: 'tc_type', type: 'enum', risk: 'dangerous', noDefault: true,
         guards: ['every guard that reads the safety processor\'s own thermocouple'],
         enumOpts: [ [0,'Type B'], [1,'Type E'], [2,'Type J'], [3,'Type K'], [4,'Type N'],
@@ -379,6 +384,12 @@ var GROUPS = [
           '"--", never assume.' },
       { id: 783, name: 'power_window_s', type: 'u16', risk: 'cosmetic', unit: 's', def: 120,
         guards: ['(power estimate only)'], note: 'Conduction-fraction averaging window.' },
+      { id: 793, name: 'max_expected_power_w', type: 'f32', risk: 'cosmetic', unit: 'W',
+        guards: ['(sanity check only -- no guard trips on this)'],
+        note: 'ROADMAP.md M12: the operator\'s own estimate of the kiln\'s expected power draw, ' +
+          'used only to sanity-check commissioning against wiring/breaker assumptions. ' +
+          'Breakers are assumed sized for the full kiln load at 100% duty -- this is NOT a ' +
+          'derating input and no safety guard reads it.' },
       { id: 784, name: 'ct_cal[0].gain', type: 'f32', risk: 'cosmetic', guards: ['(power estimate only)'] },
       { id: 785, name: 'ct_cal[1].gain', type: 'f32', risk: 'cosmetic', guards: ['(power estimate only)'] },
       { id: 786, name: 'ct_cal[2].gain', type: 'f32', risk: 'cosmetic', guards: ['(power estimate only)'] },
@@ -418,6 +429,57 @@ var GROUPS = [
 ];
 
 var RISK_BADGE = { dangerous: '🔴 dangerous', nuisance: '🟠 nuisance', cosmetic: '⚪ cosmetic' };
+
+/* ---- Thermocouple maximum, INFERRED from tc_type (field 261), never
+ * entered -- ROADMAP.md M12: "the operator should not be asked for a number
+ * that follows from [tc_type] -- and cannot contradict the sensor." Values
+ * are the upper end of the MAX31856's own per-type "TTC" range from its
+ * datasheet (hardware/datasheets/ThermocoupleBoard_Sensor_Temperature/
+ * MAX31856.pdf, page 4, Electrical Characteristics table, the "Thermocouple
+ * Linearity Correction Error" row's CONDITIONS column -- these are the same
+ * limits Table 1 / the Fault Status register's TC Range bit (page 15/26)
+ * describe as the hot-junction out-of-range clamp). Keyed by the SAME
+ * numeric code tc_type's own enumOpts above uses (0=B..7=T per max31856.h's
+ * MAX31856_TC_TYPE_* order), so this table and that one can never disagree
+ * about which code means which letter. */
+var TC_MAX_C_BY_TYPE = {
+  0: 1798, // Type B, TTC 95..1798 C
+  1: 1000, // Type E, TTC -200..1000 C
+  2: 1200, // Type J, TTC -210..1200 C
+  3: 1372, // Type K, TTC -200..1372 C
+  4: 1300, // Type N, TTC -200..1300 C
+  5: 1768, // Type R, TTC -50..1768 C
+  6: 1768, // Type S, TTC -50..1768 C
+  7: 400,  // Type T, TTC -200..400 C
+};
+
+/* ---- M2 (2026-08-27 audit review): TC_MAX_C_BY_TYPE above used to be
+ * defined and never read anywhere else in this file -- a table that LOOKED
+ * like a safety cross-check but did nothing. The actual requirement
+ * (ROADMAP.md M12, this table's own header comment) is "abs_max_temp_c
+ * cannot contradict the sensor [tc_type]": wired here, client-side, same
+ * "advisory-and-enforced on THIS side only for immediacy, NOT the safety
+ * boundary" status applyContradictionRule() above already documents for the
+ * tc_source/tc_placement_mode pair -- the Pico's own COMMIT_CONFIG range
+ * check is what actually enforces abs_max_temp_c (CONFIG_REFERENCE.md sec 1),
+ * this only stops an obviously-contradictory pair from ever being submitted
+ * and catches the mistake immediately, by name, with both numbers, instead
+ * of a generic Pico rejection several seconds later. */
+function checkTcMaxContradiction() {
+  var tcTypeSel = document.querySelector('select[data-id="261"]');   // tc_type
+  var maxInput = document.querySelector('[data-id="260"]');          // abs_max_temp_c
+  if (!tcTypeSel || !maxInput) return null; // fields not rendered -- nothing to check
+  if (tcTypeSel.value === '' || maxInput.value === '') return null;  // neither is being submitted
+  var tcType = parseInt(tcTypeSel.value, 10);
+  var maxVal = parseFloat(maxInput.value);
+  var limit = TC_MAX_C_BY_TYPE[tcType];
+  if (limit === undefined || isNaN(maxVal)) return null; // unrecognised code or unparsable -- let the Pico judge
+  if (maxVal > limit) {
+    return 'abs_max_temp_c (' + maxVal + ' °C) exceeds the selected thermocouple type\'s own maximum ' +
+      '(' + limit + ' °C) -- the kiln ceiling cannot exceed what the sensor itself can report.';
+  }
+  return null;
+}
 
 /* Flat lookup by id, built once, used by both the render pass and the save
  * pass so the two never iterate the GROUPS tree independently and risk
@@ -563,6 +625,14 @@ function renderCrcLine(data) {
     : 'Board reports NOT COMMISSIONED (calibration_missing is set) -- at least one required ' +
       'section-1 field above is unset, or only a bench preset has been applied.';
   commissioned.className = data.commissioned ? 'hint' : 'hint guard-disabled';
+
+  // M1: unset_reporting_reliable is false when the peer is too old (or
+  // unknown) to have ever set KILNLINK_CONFIG_PAGE_UNSET_BIT -- the ESP
+  // itself already forced every "set" below to false in that case
+  // (safety_cfg_http.c's build_commissioning_json()); this banner just makes
+  // that visible instead of the page silently looking like every field is
+  // unset with no explanation.
+  document.getElementById('unsetReliabilityLine').hidden = data.unset_reporting_reliable !== false;
 }
 
 function loadCurrent() {
@@ -608,6 +678,14 @@ function applyContradictionRule() {
 
 document.getElementById('saveBtn').addEventListener('click', function () {
   var msg = document.getElementById('msg');
+  // M2: refuse client-side before ever building the request body -- see
+  // checkTcMaxContradiction()'s own comment for why this is advisory, not
+  // the safety boundary (the Pico's COMMIT_CONFIG still validates for real).
+  var tcMaxProblem = checkTcMaxContradiction();
+  if (tcMaxProblem) {
+    msg.textContent = 'Rejected: ' + tcMaxProblem;
+    return;
+  }
   // id=<n>&value=<v> pairs per COMMISSIONING.md section 3.1 -- one SET_PARAM
   // worth of form fields per param, `commit=1` triggers COMMIT_CONFIG after
   // every SET_PARAM has staged. The exact wire shape (id=<n>&value=<v> pairs,

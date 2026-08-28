@@ -6,6 +6,8 @@
 #include "esp_heap_caps.h" /* esp_ptr_external_ram() -- the wrong-task guard below */
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h" /* s_store_lock -- 2026-08-27 audit fix (H5), see its own comment */
 #include "nvs.h"
 #include "nvs_flash.h"
 
@@ -118,6 +120,7 @@ static const safety_cfg_table_row_t SAFETY_CFG_PARAM_TABLE[SAFETY_CFG_PARAM_COUN
     { 0x0316, KILNLINK_PARAM_TYPE_BOOL, "ct_cal[0].calibrated" },
     { 0x0317, KILNLINK_PARAM_TYPE_BOOL, "ct_cal[1].calibrated" },
     { 0x0318, KILNLINK_PARAM_TYPE_BOOL, "ct_cal[2].calibrated" },
+    { 0x0319, KILNLINK_PARAM_TYPE_F32, "max_expected_power_w" },
     /* sec 4 -- link and liveness */
     { 0x0401, KILNLINK_PARAM_TYPE_U16, "context_max_age_s" },
     { 0x0402, KILNLINK_PARAM_TYPE_U16, "link_timeout_s" },
@@ -143,13 +146,17 @@ typedef struct {
 } safety_cfg_store_blob_t;
 
 static safety_cfg_store_blob_t s_store;
-/* Set at safety_cfg_store_init() (a fresh NVS load counts as "just fetched",
- * same "the cache is only ever as stale as it honestly reports" discipline
- * this header documents) and again on every successful
- * safety_cfg_store_refetch() -- safety_cfg_store_fetched_ms_ago() measures
- * against this, never against anything persisted (a wall-clock timestamp
- * would need a synced RTC this board does not have; esp_timer_get_time()'s
- * monotonic microsecond counter needs none). */
+/* Set ONLY on a successful safety_cfg_store_refetch() -- a real, live round
+ * trip to the Pico. 2026-08-27 audit fix (defect c): safety_cfg_store_init()
+ * used to also stamp this on an ordinary NVS load ("a fresh load counts as
+ * just fetched"), which made safety_cfg_store_fetched_ms_ago() report board
+ * uptime instead of fetch age for any board that boots with a cache already
+ * on flash -- see that function's own init()-time note. safety_cfg_store_
+ * fetched_ms_ago() measures against this, never against anything persisted
+ * (a wall-clock timestamp would need a synced RTC this board does not have;
+ * esp_timer_get_time()'s monotonic microsecond counter needs none) -- which
+ * is exactly why an NVS load, with no live round trip behind it, has nothing
+ * honest to stamp here. */
 static int64_t s_fetched_at_us = -1;
 
 /* Rate-limits the "page N failed" warning below -- same 5 s cadence and
@@ -347,15 +354,50 @@ static esp_err_t nvs_save_store(void)
 /* True once s_store has changed in RAM since it was last successfully
  * persisted to flash. Set by safety_cfg_store_refetch() right after it
  * updates s_store; cleared only by safety_cfg_store_flush_if_dirty() on a
- * successful flush. Not locked: every writer of s_store/s_dirty
- * (safety_cfg_store_refetch(), always on safety_poll_task) runs its own
- * flush call to completion, via bx_flash_worker, before returning -- there
- * is no window where two tasks touch either at once. (Pre-existing note:
- * s_store itself has no lock against concurrent READERS on other tasks
- * either -- e.g. safety_cfg_http.c's commissioning JSON build -- but that is
- * an existing property of this file unrelated to this fix; not introduced
- * or worsened here.) */
+ * successful flush.
+ *
+ * 2026-08-27 audit fix (H5): this used to claim "not locked: every writer of
+ * s_store/s_dirty (safety_cfg_store_refetch(), always on safety_poll_task)
+ * runs its own flush call to completion... there is no window where two
+ * tasks touch either at once." That became FALSE the moment safety_cfg_
+ * http.c's commissioning POST handler started calling safety_cfg_store_
+ * refetch() itself (confirm_commit_landed(), to force a live read-back after
+ * a commit) -- that runs on the httpd worker task, concurrently with
+ * safety_poll_task's own safety_cfg_store_maybe_refetch() every ~500ms.
+ * TWO tasks can now call safety_cfg_store_refetch() at once, racing
+ * s_store/s_dirty/s_fetched_at_us and potentially submitting two concurrent
+ * flush_if_dirty() jobs to the flash worker.
+ *
+ * Fixed by serializing WRITERS: s_store_lock (below) is taken for the whole
+ * body of safety_cfg_store_refetch() (see the safety_cfg_store_refetch_
+ * locked()/safety_cfg_store_refetch() split just below it), so at most one
+ * task is ever inside the scratch-build/commit/flush sequence at a time,
+ * regardless of which task called in. (Pre-existing note, still true and
+ * still out of scope for this fix: s_store itself has no lock against
+ * concurrent READERS on other tasks either -- e.g. safety_cfg_http.c's
+ * commissioning JSON build -- that is an existing property of this file,
+ * not introduced or worsened here.) */
 static bool s_dirty = false;
+
+/* 2026-08-27 audit fix (H5) -- see s_dirty's comment just above for the full
+ * story. Created lazily (ensure_store_lock()) rather than only in
+ * safety_cfg_store_init(): several host tests call safety_cfg_store_
+ * refetch() directly without ever calling init() first (they seed s_store by
+ * hand instead), and this must still be safe there. xSemaphoreTake()'s
+ * return value is deliberately NOT checked -- same convention profile_
+ * executor.c's s_exec.lock already uses (xSemaphoreTake(..., portMAX_DELAY)
+ * blocks until it succeeds on real FreeRTOS; the host-test stub's always-
+ * pdFALSE return is a fidelity gap in the STUB, not a real failure mode, and
+ * every existing caller of a portMAX_DELAY take in this codebase already
+ * ignores it for that reason). */
+static SemaphoreHandle_t s_store_lock = NULL;
+
+static void ensure_store_lock(void)
+{
+    if (!s_store_lock) {
+        s_store_lock = xSemaphoreCreateMutex();
+    }
+}
 
 /* The actual flash write, run ON bx_flash_worker's own internal-RAM stack
  * (see uart_bridge_ext_run_on_flash_worker()'s doc comment) rather than on
@@ -416,6 +458,25 @@ static int index_for_id(uint16_t id)
 
 esp_err_t safety_cfg_store_init(void)
 {
+    /* 2026-08-28 audit fix (H5 lazy-creation race): created here, FIRST, before
+     * any early return below -- not lazily inside safety_cfg_store_refetch()
+     * only. safety_link_start() (main.c) creates safety_poll_task ~434 lines
+     * BEFORE main.c calls this function, so the poll task can reach a refetch
+     * (and therefore ensure_store_lock()) before safety_cfg_store_init() ever
+     * runs. If this were left to lazy check-then-create only, two tasks
+     * racing a NULL s_store_lock could each create their own mutex -- one
+     * handle leaked, and the two tasks would serialize against DIFFERENT
+     * objects, defeating the whole point of s_store_lock. Calling it here,
+     * unconditionally, as the first statement -- before the part_err early
+     * return -- guarantees the mutex exists before safety_link_start() even
+     * runs (this function is called from main.c before that, in every real
+     * boot ordering that matters; the only path that can still race it is a
+     * host test that calls safety_cfg_store_refetch() directly without ever
+     * calling init(), which is exactly why ensure_store_lock() stays, unused
+     * in this path but present, inside refetch() too -- see its own
+     * comment). */
+    ensure_store_lock();
+
     esp_err_t part_err = nvs_partition_init(KILN_NVS_PARTITION);
     if (part_err != ESP_OK) {
         ESP_LOGE(TAG, "NVS init for '%s' failed: %s -- safety commissioning cache will not persist",
@@ -424,23 +485,24 @@ esp_err_t safety_cfg_store_init(void)
         return part_err;
     }
     nvs_load_store();
-    /* A load from NVS counts as "fetched" ONLY if it actually restored a
-     * fetched record. config_crc == 0 is this blob's own documented "never
-     * fetched" marker (see safety_cfg_store_blob_t), which is what a first
-     * boot on new firmware, an erased partition, or a refused-version blob
-     * all leave behind -- and stamping the clock in those cases made
-     * safety_cfg_store_fetched_ms_ago() report a freshness for values that
-     * were never fetched from anywhere. Observed live on the bench
-     * 2026-08-22: a board that had never held a cache reported
-     * "fetched 15 s ago" next to a parameter list that was entirely unset.
-     *
-     * That is the same class of mistake this whole subsystem is built to
-     * avoid -- an honest "unknown" replaced by a plausible-looking number --
-     * and it also made the UINT32_MAX "never" case unreachable in practice,
-     * so the API's documented `"fetched_ms_ago": null` could never appear. */
-    if (s_store.config_crc != 0) {
-        s_fetched_at_us = esp_timer_get_time();
-    }
+    /* 2026-08-27 audit fix (defect c): this used to stamp s_fetched_at_us =
+     * esp_timer_get_time() here whenever the loaded blob's config_crc != 0
+     * ("a load from NVS counts as fetched"). That was a DIFFERENT and worse
+     * lie than the one the 2026-08-22 fix above already closed: it made
+     * fetched_ms_ago report BOARD UPTIME, not fetch age, for any board that
+     * booted with a real cache on flash -- "fetched 10 min ago" for a value
+     * this boot never actually asked the Pico about, potentially loaded off
+     * an image days old and from a Pico that has since been reflashed or
+     * reconfigured. safety_cfg_store_fetched_ms_ago()'s own contract
+     * ("milliseconds since the last successful refetch") is a LIVE claim --
+     * an NVS load is not a fetch, it is a memory of one, and this function
+     * must not manufacture a plausible-looking age for it. s_fetched_at_us
+     * is left at its `-1` ("never fetched this boot") default; only
+     * safety_cfg_store_refetch() below -- an actual live round trip to the
+     * Pico -- is allowed to stamp it. The values themselves are still loaded
+     * and served (config_crc != 0 still means "set" is meaningful per
+     * parameter), only their reported age changes: null/never until this
+     * boot's first real refetch, rather than a fabricated "just now". */
     return ESP_OK;
 }
 
@@ -500,11 +562,14 @@ bool safety_cfg_store_lookup(uint16_t param_id, uint8_t *out_type, const char **
     return true;
 }
 
-bool safety_cfg_store_refetch(SafetyLinkClass *link, uint16_t config_crc)
+/* The actual refetch body -- unchanged in substance from before the H5 fix,
+ * just renamed and made static so safety_cfg_store_refetch() below can wrap
+ * it with s_store_lock. MUST NOT be called directly by anything except that
+ * wrapper -- every early `return false` here is safe only because the
+ * wrapper always pairs its xSemaphoreTake() with an xSemaphoreGive() around
+ * whatever this returns, success or failure. */
+static bool safety_cfg_store_refetch_locked(SafetyLinkClass *link, uint16_t config_crc)
 {
-    if (!link) {
-        return false;
-    }
 
     /* Staged into a scratch copy first -- an interrupted refetch (a page
      * request times out or fails to decode partway through) must leave the
@@ -606,7 +671,19 @@ bool safety_cfg_store_refetch(SafetyLinkClass *link, uint16_t config_crc)
                  * something this cache can show; skipped, not an error. */
                 continue;
             }
-            scratch.entries[idx].set = 1;
+            /* 2026-08-27 audit fix (commissioning-write defect d): this used
+             * to be an unconditional `= 1` -- every entry the Pico sent was
+             * reported set regardless of whether IT considered the field
+             * set, so a genuinely-unset no-safe-default field (abs_max_temp_c
+             * before commissioning, most dangerously) showed up on the
+             * operator page as "{set:true, value:0}" -- 0 on that field means
+             * the overtemperature guard never trips. `e->set` now carries the
+             * Pico's own answer, decoded off KILNLINK_CONFIG_PAGE_UNSET_BIT
+             * (kilnlink_config_page.h's own header comment has the full wire
+             * format and protocol-version-bump reasoning). A pre-fix Pico
+             * never sets that bit, so this degrades to the old (less honest,
+             * but not WRONGLY MORE confident) behavior against one. */
+            scratch.entries[idx].set = e->set ? 1 : 0;
             scratch.entries[idx].value = e->value;
         }
         if (!page.more) {
@@ -641,6 +718,75 @@ bool safety_cfg_store_refetch(SafetyLinkClass *link, uint16_t config_crc)
     }
     ESP_LOGI(TAG, "safety_cfg_store_refetch: refreshed cache, config_crc=0x%04X", (unsigned)config_crc);
     return true;
+}
+
+/* Public entry point -- 2026-08-27 audit fix (H5). Wraps safety_cfg_store_
+ * refetch_locked() in s_store_lock so the two tasks that can now both call
+ * this (safety_poll_task via safety_cfg_store_maybe_refetch(), and the httpd
+ * worker via safety_cfg_http.c's confirm_commit_landed()) can never run the
+ * scratch-build/commit/flush sequence concurrently -- see s_dirty's own
+ * comment above for the full "this used to be single-task, now it isn't"
+ * story. `link` may not be NULL (checked before the lock is even touched, so
+ * a bad call never blocks on it). */
+bool safety_cfg_store_refetch(SafetyLinkClass *link, uint16_t config_crc)
+{
+    if (!link) {
+        return false;
+    }
+    ensure_store_lock();
+    if (s_store_lock) {
+        xSemaphoreTake(s_store_lock, portMAX_DELAY);
+    }
+    bool ok = safety_cfg_store_refetch_locked(link, config_crc);
+    if (s_store_lock) {
+        xSemaphoreGive(s_store_lock);
+    }
+    return ok;
+}
+
+/* Poll-side entry point -- 2026-08-28 audit fix (N2, BLOCKER). Unlike
+ * safety_cfg_store_refetch() above (httpd worker, blocks with portMAX_DELAY),
+ * this is the ONLY path safety_poll_task may take: a non-blocking try on
+ * s_store_lock. If the httpd worker's confirm_commit_landed() is mid-refetch
+ * (holding the lock for up to SAFETY_CFG_STORE_REFETCH_BUDGET_MS, 2s, plus a
+ * synchronous NVS flush), this returns false IMMEDIATELY instead of blocking
+ * safety_poll_task behind it.
+ *
+ * This is safe to just skip: safety_cfg_store_maybe_refetch() re-invokes from
+ * page 0 on the very next poll (~500ms) for as long as the cached CRC still
+ * disagrees with the peer's -- nothing here is lost, only deferred one
+ * iteration, exactly the same "retry next poll, fresh budget" contract the
+ * wall-clock budget abort inside safety_cfg_store_refetch_locked() already
+ * relies on.
+ *
+ * THE RULE THIS SERVES: safety_poll_task's own iteration is already budgeted
+ * up to ~3.2-3.7s (SAFETY_CFG_STORE_REFETCH_BUDGET_MS's comment) against the
+ * 5s task-WDT-adjacent margin, and the Pico's link_timeout_s is watching this
+ * task's cadence for real -- two previous fixes here were reverted for
+ * lengthening that task's blocking (see this file's own history). Blocking
+ * safety_poll_task behind an httpd commissioning POST for up to ~2-2.5s BEFORE
+ * its own iteration even starts is exactly that mistake; this function is the
+ * fix. Do not change safety_poll_task's caller to use safety_cfg_store_
+ * refetch() (portMAX_DELAY) instead of this. */
+static bool safety_cfg_store_refetch_nonblocking(SafetyLinkClass *link, uint16_t config_crc)
+{
+    if (!link) {
+        return false;
+    }
+    ensure_store_lock();
+    if (s_store_lock) {
+        if (xSemaphoreTake(s_store_lock, 0) != pdTRUE) {
+            /* httpd worker holds it right now -- do not wait. Caller
+             * (safety_cfg_store_maybe_refetch()) treats this exactly like a
+             * failed page request: cache left unchanged, retried next poll. */
+            return false;
+        }
+    }
+    bool ok = safety_cfg_store_refetch_locked(link, config_crc);
+    if (s_store_lock) {
+        xSemaphoreGive(s_store_lock);
+    }
+    return ok;
 }
 
 /* Retry backoff. Without one, a fetch that fails is retried on every single
@@ -689,7 +835,7 @@ bool safety_cfg_store_maybe_refetch(SafetyLinkClass *link, uint16_t live_config_
         return false; /* still backing off -- deliberately no UART traffic */
     }
 
-    if (safety_cfg_store_refetch(link, live_config_crc)) {
+    if (safety_cfg_store_refetch_nonblocking(link, live_config_crc)) {
         s_retry_delay_ms = SAFETY_CFG_STORE_RETRY_MIN_MS;
         s_retry_not_before_us = 0;
         return true;

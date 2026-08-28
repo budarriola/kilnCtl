@@ -103,6 +103,17 @@ static safety_cfg_param_t s_stub_params[SAFETY_CFG_PARAM_COUNT];
 static bool s_stub_lookup_result = true;
 static uint8_t s_stub_lookup_type = KILNLINK_PARAM_TYPE_U16;
 static const char *s_stub_lookup_name = "stub_field";
+// LOW fix (2026-08-27 audit): call-numbered controls so a test can make
+// safety_cfg_store_lookup() behave differently on confirm_commit_landed()'s
+// OWN (post-refetch) call than it did during apply_pairs()'s earlier staging
+// call for the very same pair -- the only way to reach the "believed
+// unreachable" branches confirm_commit_landed() now fails on instead of
+// silently skipping. Both default OFF so every pre-existing test (which
+// never sets them) is unaffected.
+static int s_stub_lookup_calls = 0;
+static int s_stub_lookup_fail_at_call = -1;          // -1 = never fail by call number
+static int s_stub_lookup_type_override_call = -1;    // -1 = no override
+static uint8_t s_stub_lookup_type_override_value = 0;
 
 size_t safety_cfg_store_param_count(void) { return SAFETY_CFG_PARAM_COUNT; }
 
@@ -118,17 +129,31 @@ bool safety_cfg_store_get_by_index(size_t index, safety_cfg_param_t *out)
 bool safety_cfg_store_lookup(uint16_t param_id, uint8_t *out_type, const char **out_name)
 {
     (void)param_id;
+    s_stub_lookup_calls++;
     if (!s_stub_lookup_result) {
         return false;
     }
-    if (out_type) *out_type = s_stub_lookup_type;
+    if (s_stub_lookup_fail_at_call == s_stub_lookup_calls) {
+        return false;
+    }
+    if (out_type) {
+        *out_type = (s_stub_lookup_calls == s_stub_lookup_type_override_call) ? s_stub_lookup_type_override_value
+                                                                                : s_stub_lookup_type;
+    }
     if (out_name) *out_name = s_stub_lookup_name;
     return true;
 }
 
 uint16_t safety_cfg_store_cached_crc(void) { return 0; }
 uint32_t safety_cfg_store_fetched_ms_ago(void) { return UINT32_MAX; }
-bool safety_cfg_store_refetch(SafetyLinkClass *link, uint16_t crc) { (void)link; (void)crc; return true; }
+static bool s_stub_refetch_result = true;
+static int s_stub_refetch_calls = 0;
+bool safety_cfg_store_refetch(SafetyLinkClass *link, uint16_t crc)
+{
+    (void)link; (void)crc;
+    s_stub_refetch_calls++;
+    return s_stub_refetch_result;
+}
 bool safety_cfg_store_maybe_refetch(SafetyLinkClass *link, uint16_t crc) { (void)link; (void)crc; return false; }
 esp_err_t safety_cfg_store_init(void) { return ESP_OK; }
 
@@ -181,6 +206,40 @@ esp_err_t safety_link_get_peer_build_status(SafetyLinkClass *link, bool *out_kno
     return ESP_OK;
 }
 
+// M1 (2026-08-27 audit fix): safety_link_get_peer_version_status() stub --
+// controllable peer protocol version, so build_commissioning_json()'s
+// unset_reporting_reliable gating can be exercised without a real link.
+static bool s_stub_peer_version_known = false;
+static bool s_stub_peer_version_compatible = false;
+static uint16_t s_stub_peer_protocol_version = 0;
+
+esp_err_t safety_link_get_peer_version_status(SafetyLinkClass *link, bool *out_known, bool *out_compatible,
+                                               uint16_t *out_peer_protocol, uint16_t *out_peer_min_compatible)
+{
+    (void)link; (void)out_peer_min_compatible;
+    if (out_known) *out_known = s_stub_peer_version_known;
+    if (out_compatible) *out_compatible = s_stub_peer_version_compatible;
+    if (out_peer_protocol) *out_peer_protocol = s_stub_peer_protocol_version;
+    return ESP_OK;
+}
+
+static bool s_stub_late_rejected = false;
+static uint16_t s_stub_late_reject_param_id = KILNLINK_COMMIT_CONFIG_REJECTED_NO_PARAM_ID;
+static uint8_t s_stub_late_reject_reason = KILNLINK_COMMIT_CONFIG_REJECT_RANGE;
+static int s_stub_take_stashed_calls = 0;
+
+bool safety_link_take_stashed_commit_rejected(SafetyLinkClass *link, uint16_t *out_param_id, uint8_t *out_reason)
+{
+    (void)link;
+    s_stub_take_stashed_calls++;
+    if (!s_stub_late_rejected) {
+        return false;
+    }
+    if (out_param_id) *out_param_id = s_stub_late_reject_param_id;
+    if (out_reason) *out_reason = s_stub_late_reject_reason;
+    return true;
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -198,6 +257,19 @@ static void reset_all(void)
     s_stub_commit_rejected = false;
     s_stub_commit_reject_param_id = KILNLINK_COMMIT_CONFIG_REJECTED_NO_PARAM_ID;
     s_stub_commit_reject_reason = KILNLINK_COMMIT_CONFIG_REJECT_RANGE;
+    s_stub_refetch_result = true;
+    s_stub_refetch_calls = 0;
+    s_stub_late_rejected = false;
+    s_stub_late_reject_param_id = KILNLINK_COMMIT_CONFIG_REJECTED_NO_PARAM_ID;
+    s_stub_late_reject_reason = KILNLINK_COMMIT_CONFIG_REJECT_RANGE;
+    s_stub_take_stashed_calls = 0;
+    s_stub_peer_version_known = false;
+    s_stub_peer_version_compatible = false;
+    s_stub_peer_protocol_version = 0;
+    s_stub_lookup_calls = 0;
+    s_stub_lookup_fail_at_call = -1;
+    s_stub_lookup_type_override_call = -1;
+    s_stub_lookup_type_override_value = 0;
 }
 
 static void test_parse_single_pair_no_commit(void)
@@ -298,6 +370,9 @@ static void test_build_json_set_param_includes_value(void)
     s_stub_params[0].value.f32_val = 1300.0f;
 
     safety_cfg_http_snapshot_t snap = {0};
+    snap.unset_reliable = true; // M1: this test is about the set/value rendering itself, not the
+                                 // peer-version gate -- assume a peer new enough to be trusted
+                                 // (test_build_json_forces_unset_when_peer_too_old() covers the gate).
     static char json[SAFETY_CFG_JSON_MAX];
     size_t len = build_commissioning_json(&snap, json, sizeof(json));
     TEST_CHECK(len > 0, "JSON built successfully");
@@ -331,12 +406,225 @@ static void test_apply_pairs_all_succeed_with_commit(void)
         { .param_id = 513, .value_text = "100" },
         { .param_id = 514, .value_text = "75" },
     };
+    // safety_cfg_store_lookup() stubs every id as KILNLINK_PARAM_TYPE_U16 --
+    // the live read-back (confirm_commit_landed()) requires the refetched
+    // cache to report these ids back SET to the exact submitted value, or a
+    // "confirmed success" would still be a lie. This is what a real Pico that
+    // actually wrote the values would report after safety_cfg_store_refetch().
+    s_stub_params[0].param_id = 513;
+    s_stub_params[0].type = KILNLINK_PARAM_TYPE_U16;
+    s_stub_params[0].set = true;
+    s_stub_params[0].value.u16_val = 100;
+    s_stub_params[1].param_id = 514;
+    s_stub_params[1].type = KILNLINK_PARAM_TYPE_U16;
+    s_stub_params[1].set = true;
+    s_stub_params[1].value.u16_val = 75;
     char reason[160];
     bool ok = apply_pairs(&fake_link, pairs, 2, true, reason, sizeof(reason));
     TEST_CHECK(ok == true, "all staged and committed successfully");
     TEST_CHECK(reason[0] == '\0', "no reason text on success");
     TEST_CHECK(s_stub_set_param_calls == 2, "both pairs were staged");
     TEST_CHECK(s_stub_commit_calls == 1, "commit was sent exactly once");
+    TEST_CHECK(s_stub_refetch_calls == 1, "a live read-back was forced after the commit ACKed");
+}
+
+// ---------------------------------------------------------------------------
+// 2026-08-27 audit fix: "ok cannot fail" -- a commit that the Pico's link
+// layer ACKed and that arrived with no REJECTED frame inside the reply
+// window used to be reported as success unconditionally (apply_pairs()
+// returned true straight off safety_link_send_commit_config()'s return
+// value). That is provably not proof of anything: SET_PARAM/COMMIT_CONFIG are
+// both fire-and-forget UART broadcasts (uart_protocol_send_broadcast()
+// reports only "the local UART accepted the bytes"), so ESP_OK+!rejected only
+// ever meant "we didn't SEE a refusal", never "the Pico actually wrote it".
+// confirm_commit_landed() is what turns that into a real proof -- these three
+// tests exercise exactly the three ways a "successful" commit could still be
+// a lie, and prove apply_pairs() now catches every one of them.
+// ---------------------------------------------------------------------------
+
+static void test_apply_pairs_readback_mismatch_fails_even_when_acked_and_not_rejected(void)
+{
+    TEST_SECTION("apply_pairs -- ACKed, not rejected, but the read-back does NOT match -- must FAIL");
+    reset_all();
+    SafetyLinkClass fake_link;
+    memset(&fake_link, 0, sizeof(fake_link));
+    safety_cfg_post_pair_t pairs[1] = { { .param_id = 0x0104u, .value_text = "1300" } }; // abs_max_temp_c
+    // Deliberately leave s_stub_params empty: the "commit" was ACKed
+    // (s_stub_commit_result == ESP_OK) and NOT flagged rejected
+    // (s_stub_commit_rejected == false, both from reset_all()'s defaults) --
+    // this is EXACTLY the live-bench symptom the audit caught: {"ok":true}
+    // three times while live_config_crc never moved and the Pico's own
+    // histogram showed commit_config_rejected=2.
+    char reason[160];
+    bool ok = apply_pairs(&fake_link, pairs, 1, true, reason, sizeof(reason));
+    TEST_CHECK(ok == false, "a commit that ACKed but did not actually land is reported as FAILED");
+    TEST_CHECK(reason[0] != '\0', "a non-empty reason is produced");
+    TEST_CHECK(strstr(reason, "does not read back") != NULL || strstr(reason, "FAILED") != NULL,
+               "the reason explains this is an unconfirmed/failed write, not a generic error");
+    TEST_CHECK(s_stub_refetch_calls == 1, "a live read-back was attempted");
+}
+
+static void test_apply_pairs_refetch_failure_reports_unconfirmed_not_success(void)
+{
+    TEST_SECTION("apply_pairs -- the live read-back itself fails (link trouble) -- reported UNCONFIRMED");
+    reset_all();
+    s_stub_refetch_result = false; // safety_cfg_store_refetch() could not complete
+    SafetyLinkClass fake_link;
+    memset(&fake_link, 0, sizeof(fake_link));
+    safety_cfg_post_pair_t pairs[1] = { { .param_id = 0x0104u, .value_text = "1300" } };
+    char reason[160];
+    bool ok = apply_pairs(&fake_link, pairs, 1, true, reason, sizeof(reason));
+    TEST_CHECK(ok == false, "an unconfirmable commit is never reported as success");
+    TEST_CHECK(strstr(reason, "UNCONFIRMED") != NULL || strstr(reason, "could not read") != NULL,
+               "the reason is honest about not knowing, not a fabricated success or a fabricated field name");
+}
+
+static void test_apply_pairs_late_rejection_attaches_pico_reason_to_confirmed_failure(void)
+{
+    TEST_SECTION("apply_pairs -- a REJECTED frame that missed the reply window still surfaces its reason "
+                 "once the read-back proves the write failed");
+    reset_all();
+    // s_stub_commit_rejected stays false (this simulates the ~144 ms race:
+    // safety_link_send_commit_config()'s own window closed before the
+    // REJECTED frame arrived) but the frame turns up in the stash by the time
+    // confirm_commit_landed() checks it (safety_link_take_stashed_commit_
+    // rejected()) -- see safety_link.c's stashed_commit_rejected field.
+    s_stub_late_rejected = true;
+    s_stub_late_reject_param_id = 0x0104u; // abs_max_temp_c
+    s_stub_late_reject_reason = KILNLINK_COMMIT_CONFIG_REJECT_ARMED;
+    s_stub_lookup_name = "abs_max_temp_c";
+    SafetyLinkClass fake_link;
+    memset(&fake_link, 0, sizeof(fake_link));
+    safety_cfg_post_pair_t pairs[1] = { { .param_id = 0x0104u, .value_text = "1300" } };
+    char reason[160];
+    bool ok = apply_pairs(&fake_link, pairs, 1, true, reason, sizeof(reason));
+    TEST_CHECK(ok == false, "still reported as failed -- the read-back is what decides, and it never matched");
+    TEST_CHECK(strstr(reason, "ARMED") != NULL,
+               "the Pico's OWN late-arriving reason is attached to the failure, not a generic message");
+    TEST_CHECK(s_stub_take_stashed_calls >= 1, "the stash was actually consulted");
+}
+
+// ---------------------------------------------------------------------------
+// 2026-08-27 audit fix (M1): a peer on KILNLINK_PROTOCOL_VERSION < 8 (or one
+// this board has never heard a FW_VERSION frame from at all) never sets
+// KILNLINK_CONFIG_PAGE_UNSET_BIT -- every field decodes "set" regardless of
+// whether the Pico actually holds a value for it. Ungated, that renders an
+// uncommissioned board's abs_max_temp_c as {"set":true,"value":0}, and 0
+// there means the overtemperature guard never trips.
+// ---------------------------------------------------------------------------
+
+static void test_peer_reports_unset_reliably_gates_on_known_and_version(void)
+{
+    TEST_SECTION("peer_reports_unset_reliably -- true only for a KNOWN peer at protocol >= 8");
+    TEST_CHECK(peer_reports_unset_reliably(true, 8) == true, "known, exactly at the floor -- reliable");
+    TEST_CHECK(peer_reports_unset_reliably(true, 9) == true, "known, newer than the floor -- reliable");
+    TEST_CHECK(peer_reports_unset_reliably(true, 7) == false,
+               "known but OLDER than the floor -- the exact v7-Pico scenario the audit caught");
+    TEST_CHECK(peer_reports_unset_reliably(false, 8) == false,
+               "version UNKNOWN (never heard from the peer) is treated as unreliable too, not "
+               "optimistically assumed fine -- this board cannot prove the bit means anything yet");
+    TEST_CHECK(peer_reports_unset_reliably(false, 0) == false, "unknown + version 0 -- still unreliable");
+}
+
+static void test_build_json_forces_unset_when_peer_too_old(void)
+{
+    TEST_SECTION("build_commissioning_json -- a SET cache entry renders set:false when the peer is too "
+                 "old to have meant it (M1)");
+    reset_all();
+    s_stub_params[0].param_id = 0x0104;
+    s_stub_params[0].name = "abs_max_temp_c";
+    s_stub_params[0].type = KILNLINK_PARAM_TYPE_F32;
+    s_stub_params[0].set = true;              // the cache says "set" ...
+    s_stub_params[0].value.f32_val = 0.0f;    // ... to exactly the dangerous "never trips" value
+
+    safety_cfg_http_snapshot_t snap = {0};
+    snap.unset_reliable = false; // peer known-old or unknown -- this is the fix under test
+    static char json[SAFETY_CFG_JSON_MAX];
+    size_t len = build_commissioning_json(&snap, json, sizeof(json));
+    TEST_CHECK(len > 0, "JSON built successfully");
+    TEST_CHECK(strstr(json, "\"unset_reporting_reliable\":false") != NULL,
+               "the page is told outright that set/unset cannot be trusted this fetch");
+    TEST_CHECK(strstr(json, "\"id\":260") != NULL, "abs_max_temp_c still appears in the list");
+    TEST_CHECK(strstr(json, "\"set\":false") != NULL,
+               "forced to set:false even though the cache itself says set:true -- never a lying 0");
+    TEST_CHECK(strstr(json, "\"value\"") == NULL,
+               "value is omitted entirely -- the dangerous 0.0 is never printed at all");
+}
+
+static void test_build_json_still_reports_set_when_peer_reliable(void)
+{
+    TEST_SECTION("build_commissioning_json -- unset_reliable:true still reports a real set:true/value "
+                 "exactly as before M1 (no regression on a peer new enough to be trusted)");
+    reset_all();
+    s_stub_params[0].param_id = 0x0104;
+    s_stub_params[0].name = "abs_max_temp_c";
+    s_stub_params[0].type = KILNLINK_PARAM_TYPE_F32;
+    s_stub_params[0].set = true;
+    s_stub_params[0].value.f32_val = 1300.0f;
+
+    safety_cfg_http_snapshot_t snap = {0};
+    snap.unset_reliable = true;
+    static char json[SAFETY_CFG_JSON_MAX];
+    size_t len = build_commissioning_json(&snap, json, sizeof(json));
+    TEST_CHECK(len > 0, "JSON built successfully");
+    TEST_CHECK(strstr(json, "\"unset_reporting_reliable\":true") != NULL, "reliable flag is true");
+    TEST_CHECK(strstr(json, "\"set\":true") != NULL, "set:true is still reported for a reliable peer");
+    TEST_CHECK(strstr(json, "\"value\":1300") != NULL, "the real value is still present");
+}
+
+// ---------------------------------------------------------------------------
+// LOW (2026-08-27 audit fix): confirm_commit_landed()'s two `continue`s, for
+// a pair whose lookup or value-parse fails on ITS OWN (post-refetch) pass --
+// believed unreachable because apply_pairs() already validated both before
+// ever staging the pair -- used to silently skip verification of that pair
+// and let the OVERALL commit still report success if every OTHER pair
+// checked out. That is the identical failure shape ("ok cannot fail") this
+// whole audit exists to close, just one level deeper. Both must now fail the
+// whole confirmation instead.
+// ---------------------------------------------------------------------------
+
+static void test_confirm_commit_landed_lookup_failure_on_its_own_pass_fails_closed(void)
+{
+    TEST_SECTION("apply_pairs -- if confirm_commit_landed()'s OWN lookup fails for a pair (believed "
+                 "unreachable), the commit is reported FAILED, not silently skipped-and-successful");
+    reset_all();
+    SafetyLinkClass fake_link;
+    memset(&fake_link, 0, sizeof(fake_link));
+    safety_cfg_post_pair_t pairs[1] = { { .param_id = 513, .value_text = "100" } };
+    // Call #1 is apply_pairs()'s own staging-time lookup (must succeed, or
+    // this never reaches confirm_commit_landed() at all). Call #2 is
+    // confirm_commit_landed()'s post-refetch lookup for that SAME pair --
+    // fail exactly that one.
+    s_stub_lookup_fail_at_call = 2;
+    char reason[160];
+    bool ok = apply_pairs(&fake_link, pairs, 1, true, reason, sizeof(reason));
+    TEST_CHECK(ok == false, "a lookup failure inside confirm_commit_landed() fails the whole commit");
+    TEST_CHECK(reason[0] != '\0', "a non-empty reason is produced");
+    TEST_CHECK(strstr(reason, "UNCONFIRMED") != NULL,
+               "the reason is honest about not knowing, not a fabricated success");
+}
+
+static void test_confirm_commit_landed_parse_failure_on_its_own_pass_fails_closed(void)
+{
+    TEST_SECTION("apply_pairs -- if confirm_commit_landed()'s OWN value-parse fails for a pair (believed "
+                 "unreachable), the commit is reported FAILED, not silently skipped-and-successful");
+    reset_all();
+    SafetyLinkClass fake_link;
+    memset(&fake_link, 0, sizeof(fake_link));
+    safety_cfg_post_pair_t pairs[1] = { { .param_id = 513, .value_text = "100" } };
+    // Call #1 (staging) sees the default type (U16) -- "100" parses fine.
+    // Call #2 (confirm_commit_landed()'s own re-lookup for the same pair) is
+    // overridden to report BOOL instead -- "100" is not a legal bool literal
+    // (parse_value_for_type() only accepts "0"/"1"), so THAT call's re-parse
+    // fails even though the original staging parse never did.
+    s_stub_lookup_type_override_call = 2;
+    s_stub_lookup_type_override_value = KILNLINK_PARAM_TYPE_BOOL;
+    char reason[160];
+    bool ok = apply_pairs(&fake_link, pairs, 1, true, reason, sizeof(reason));
+    TEST_CHECK(ok == false, "a re-parse failure inside confirm_commit_landed() fails the whole commit");
+    TEST_CHECK(reason[0] != '\0', "a non-empty reason is produced");
+    TEST_CHECK(strstr(reason, "UNCONFIRMED") != NULL,
+               "the reason is honest about not knowing, not a fabricated success");
 }
 
 static void test_apply_pairs_unknown_id_is_refused_and_named(void)
@@ -421,11 +709,19 @@ int main(void)
     test_parse_value_for_type_bounds();
     test_build_json_unset_param_omits_value();
     test_build_json_set_param_includes_value();
+    test_peer_reports_unset_reliably_gates_on_known_and_version();
+    test_build_json_forces_unset_when_peer_too_old();
+    test_build_json_still_reports_set_when_peer_reliable();
     test_stale_flag_reflects_crc_mismatch();
     test_apply_pairs_all_succeed_with_commit();
     test_apply_pairs_unknown_id_is_refused_and_named();
     test_apply_pairs_refused_commit_surfaces_reason();
     test_apply_pairs_rejected_commit_names_field_and_reason();
+    test_apply_pairs_readback_mismatch_fails_even_when_acked_and_not_rejected();
+    test_apply_pairs_refetch_failure_reports_unconfirmed_not_success();
+    test_apply_pairs_late_rejection_attaches_pico_reason_to_confirmed_failure();
+    test_confirm_commit_landed_lookup_failure_on_its_own_pass_fails_closed();
+    test_confirm_commit_landed_parse_failure_on_its_own_pass_fails_closed();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     if (g_test_failures > 0) {

@@ -1,7 +1,6 @@
 #ifndef UART_BRIDGE_H
 #define UART_BRIDGE_H
 
-#include "ILI9488.h"
 #include "MAX31856.h"
 #include "esp_err.h"
 #include "espInterfaces/uart_protocol.h"
@@ -56,10 +55,11 @@ esp_err_t uart_bridge_start_thermo_task(uart_protocol_t *proto, MAX31856BusClass
  * comments and docs/SAFETY_MODEL.md. */
 esp_err_t uart_bridge_start_io_task(uart_protocol_t *proto, kiln_io_t *io);
 
-/* DISPLAY (task 4): the ILI9488 on J2. Drawing subcommands are fire-and-forget;
- * only READ_ID answers. Note BLIT_BEGIN/DATA/END keep panel state open across
- * frames, so this task must be the only writer to the panel. */
-esp_err_t uart_bridge_start_display_task(uart_protocol_t *proto, ILI9488Class *disp);
+/* DISPLAY (task 4): removed 2026-08-27 as dead code -- uart_bridge_start_display_task()
+ * was never called (LVGL owns the ILI9488 outright now; see TODO.md 10.1).
+ * DISPLAY_CMD_* and UART_TASK_ID_DISPLAY stay in uart_task_ids.h as wire-protocol
+ * constants -- kilnctrl's gui.py/actions.py Display panel still speaks them,
+ * even though nothing on the firmware side answers. */
 
 /* TOUCH (task 13): the PC's window onto screen_idle's touch/idle state --
  * GET_STATE reads it, INJECT feeds it a synthetic touch that resets the idle

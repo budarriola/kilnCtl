@@ -75,7 +75,34 @@ typedef struct {
     uint16_t cached_crc;
     bool commissioned;
     int64_t fetched_ms_ago_or_neg1;
+    bool unset_reliable; /* see peer_reports_unset_reliably()'s comment (M1) */
 } safety_cfg_http_snapshot_t;
+
+/* KILNLINK_CONFIG_PAGE_UNSET_BIT (the per-entry "this field is genuinely
+ * unset" flag GET_CONFIG_PAGE replies carry) was added to the wire at
+ * KILNLINK_PROTOCOL_VERSION 8 (kilnlink_version.h). A peer OLDER than that
+ * never sets the bit at all -- kilnlink_config_page.c:111 decodes
+ * entry_set=true for EVERY field on such a peer regardless of whether it
+ * actually holds a value, and safety_cfg_store.c:refetch() faithfully
+ * records that. Left ungated, an uncommissioned v7 Pico would render
+ * abs_max_temp_c as {"set":true,"value":0} -- the exact "0 means the
+ * overtemperature guard never trips" defect this whole commissioning-write
+ * audit exists to close. */
+#define SAFETY_CFG_MIN_PROTOCOL_FOR_RELIABLE_UNSET 8u
+
+/* 2026-08-27 audit fix (M1). True only when this board actually KNOWS the
+ * peer's protocol version (a FW_VERSION frame has been received at least
+ * once -- safety_link_get_peer_version_status()'s own "known" gate) AND that
+ * version is new enough to have ever set KILNLINK_CONFIG_PAGE_UNSET_BIT.
+ * "Peer version unknown" is deliberately treated the SAME as "known and too
+ * old", not as "assume reliable" -- this board cannot prove the bit means
+ * anything either way until it has actually heard from the peer, and the
+ * failure direction that matters here is never mistaking an unset field for
+ * a real 0. */
+static bool peer_reports_unset_reliably(bool peer_version_known, uint16_t peer_protocol_version)
+{
+    return peer_version_known && peer_protocol_version >= SAFETY_CFG_MIN_PROTOCOL_FOR_RELIABLE_UNSET;
+}
 
 /* COMMISSIONING.md sec 3.1: "stale" means cached_config_crc != live_config_crc
  * -- and, per this file's own header note (never let a caller mistake the
@@ -123,6 +150,14 @@ static size_t build_commissioning_json(const safety_cfg_http_snapshot_t *s, char
     } else {
         APPEND(",\"fetched_ms_ago\":%lld", (long long)s->fetched_ms_ago_or_neg1);
     }
+    /* 2026-08-27 audit fix (M1). false means: the peer is on a protocol
+     * version (or is of unknown version) that never sets KILNLINK_CONFIG_
+     * PAGE_UNSET_BIT, so every entry below is forced to "set":false
+     * regardless of what the cache actually holds -- see peer_reports_
+     * unset_reliably()'s comment. The page uses this to show an explicit
+     * "cannot tell what's really set" banner rather than silently rendering
+     * stale-but-plausible values as confirmed commissioning. */
+    APPEND(",\"unset_reporting_reliable\":%s", s->unset_reliable ? "true" : "false");
     APPEND(",\"params\":[");
 
     size_t count = safety_cfg_store_param_count();
@@ -131,13 +166,16 @@ static size_t build_commissioning_json(const safety_cfg_http_snapshot_t *s, char
         if (!safety_cfg_store_get_by_index(i, &p)) {
             continue; /* cannot happen for i < count, defensive only */
         }
+        bool set = p.set && s->unset_reliable;
         APPEND("%s{\"id\":%u,\"name\":\"%s\",\"type\":\"%s\",\"set\":%s", i == 0 ? "" : ",",
-               (unsigned)p.param_id, p.name, type_name(p.type), p.set ? "true" : "false");
+               (unsigned)p.param_id, p.name, type_name(p.type), set ? "true" : "false");
         /* COMMISSIONING.md sec 3.1: "An unset parameter carries `"set": false`
          * and OMITS `value` entirely rather than sending a zero the page
          * might print." -- the omission happens here, not by printing a
-         * sentinel, so the page literally cannot mistake it for a real 0. */
-        if (p.set) {
+         * sentinel, so the page literally cannot mistake it for a real 0.
+         * M1: also omitted whenever this peer's "set" bit cannot be trusted
+         * at all, even if the cache's own p.set happens to be true. */
+        if (set) {
             switch (p.type) {
             case KILNLINK_PARAM_TYPE_BOOL:
                 APPEND(",\"value\":%s", p.value.bool_val ? "true" : "false");
@@ -196,6 +234,14 @@ static esp_err_t commissioning_get_handler(httpd_req_t *req)
                                                   &peer_crc);
         snap.live_crc_known = peer_known;
         snap.live_crc = peer_crc;
+
+        /* 2026-08-27 audit fix (M1). */
+        bool peer_version_known = false;
+        bool peer_version_compatible = false;
+        uint16_t peer_protocol_version = 0;
+        (void)safety_link_get_peer_version_status(s_link, &peer_version_known, &peer_version_compatible,
+                                                    &peer_protocol_version, NULL);
+        snap.unset_reliable = peer_reports_unset_reliably(peer_version_known, peer_protocol_version);
     }
     snap.cached_crc = safety_cfg_store_cached_crc();
     uint32_t fetched = safety_cfg_store_fetched_ms_ago();
@@ -369,6 +415,148 @@ static bool parse_value_for_type(const char *text, uint8_t type, kilnlink_param_
     }
 }
 
+/* Forward declaration -- confirm_commit_landed() below needs this before its
+ * own definition later in the file (kept where it always lived, right next
+ * to apply_pairs() which is its other caller). */
+static const char *commit_reject_reason_words(uint8_t reason);
+
+/* True if two kilnlink_param_value_t of the same wire `type` hold the same
+ * value. F32 is compared bit-for-bit (memcmp), not with an epsilon -- both
+ * ends of this link encode/decode the identical 4-byte IEEE-754 layout
+ * (kilnlink_param_value.h), so a value that survived SET_PARAM -> COMMIT_CONFIG
+ * -> flash -> GET_CONFIG_PAGE unchanged reads back BIT-IDENTICAL or it did not
+ * survive at all; there is no legitimate case of "close enough" here. */
+static bool param_value_equal(uint8_t type, const kilnlink_param_value_t *a, const kilnlink_param_value_t *b)
+{
+    switch (type) {
+    case KILNLINK_PARAM_TYPE_BOOL: return a->bool_val == b->bool_val;
+    case KILNLINK_PARAM_TYPE_U8:   return a->u8_val == b->u8_val;
+    case KILNLINK_PARAM_TYPE_U16:  return a->u16_val == b->u16_val;
+    case KILNLINK_PARAM_TYPE_F32:  return memcmp(&a->f32_val, &b->f32_val, sizeof(a->f32_val)) == 0;
+    default:                       return false;
+    }
+}
+
+/* Positive confirmation that a commit this function just reported ACKed (and
+ * not rejected within safety_link_send_commit_config()'s own reply window)
+ * actually landed on the Pico's flash, per COMMISSIONING.md/the 2026-08-26
+ * commissioning-write audit: "ok cannot fail" because SET_PARAM/COMMIT_CONFIG
+ * are both fire-and-forget broadcasts (uart_protocol_send_broadcast() reports
+ * only "the local UART accepted the bytes"), and a REJECTED reply that misses
+ * the ~144 ms reply window used to be silently discarded, defining "no
+ * rejection seen" as acceptance.
+ *
+ * This function is what turns that around: it forces a LIVE re-fetch of the
+ * Pico's just-committed record (safety_cfg_store_refetch(), a real blocking
+ * round trip -- never the ESP's own stale NVS cache) and checks that every
+ * field THIS caller just submitted now reads back exactly the value that was
+ * sent. That is strictly stronger than comparing config_crc before/after:
+ * a commit that legitimately writes bytes identical to what was already
+ * committed bumps nothing a CRC could detect, but the read-back still
+ * matches what was sent, so it is correctly reported as success. Only a
+ * field that reads back UNSET, or SET to something other than what was sent,
+ * is reported as a failure -- i.e. the only two ways a "successful" commit
+ * could still be a lie.
+ *
+ * Returns true (reason_out untouched) iff every submitted pair's value is
+ * confirmed. On failure, reason_out names the first mismatching field and, if
+ * a COMMIT_CONFIG_REJECTED frame turns up late in the stash while this
+ * function was busy doing the live re-fetch (safety_link_take_stashed_
+ * commit_rejected()), attaches the Pico's OWN reason instead of a generic
+ * "does not match" message -- the read-back is what DECIDES pass/fail, the
+ * stash only explains WHY when it can. */
+static bool confirm_commit_landed(SafetyLinkClass *link, const safety_cfg_post_pair_t *pairs, int n_pairs,
+                                   char *reason_out, size_t reason_cap)
+{
+    uint16_t best_known_crc = 0;
+    bool peer_known = false;
+    (void)safety_link_get_peer_build_status(link, &peer_known, NULL, NULL, NULL, NULL, NULL, NULL,
+                                             &best_known_crc);
+
+    if (!safety_cfg_store_refetch(link, peer_known ? best_known_crc : 0)) {
+        uint16_t rp = 0;
+        uint8_t rr = 0;
+        if (safety_link_take_stashed_commit_rejected(link, &rp, &rr)) {
+            uint8_t rt = 0;
+            const char *rn = NULL;
+            if (rp != KILNLINK_COMMIT_CONFIG_REJECTED_NO_PARAM_ID && safety_cfg_store_lookup(rp, &rt, &rn)) {
+                snprintf(reason_out, reason_cap,
+                         "commit rejected: %s (id %u) -- %s -- values were staged but NOT written", rn,
+                         (unsigned)rp, commit_reject_reason_words(rr));
+            } else {
+                snprintf(reason_out, reason_cap, "commit rejected: %s -- values were staged but NOT written",
+                         commit_reject_reason_words(rr));
+            }
+        } else {
+            snprintf(reason_out, reason_cap,
+                     "the safety processor accepted the commit but this board could not read the "
+                     "config back to confirm it -- treating the write as UNCONFIRMED, not successful");
+        }
+        return false;
+    }
+
+    for (int i = 0; i < n_pairs; i++) {
+        uint8_t type = 0;
+        const char *name = NULL;
+        if (!safety_cfg_store_lookup(pairs[i].param_id, &type, &name)) {
+            /* 2026-08-27 audit fix (LOW): this used to be `continue`, silently
+             * SKIPPING verification of a pair whose lookup failed -- believed
+             * unreachable (apply_pairs() already refused any unknown id
+             * before staging began), but a skipped verification that then
+             * lets the OVERALL commit report success is exactly the failure
+             * shape this whole audit exists to close. If this branch is ever
+             * actually reached, the honest answer is "could not confirm",
+             * never "confirmed". */
+            snprintf(reason_out, reason_cap,
+                     "internal error: could not verify id %u (%s) after commit -- treating the write "
+                     "as UNCONFIRMED, not successful",
+                     (unsigned)pairs[i].param_id, name ? name : "unknown");
+            return false;
+        }
+        kilnlink_param_value_t sent;
+        if (!parse_value_for_type(pairs[i].value_text, type, &sent)) {
+            /* Same reasoning as the lookup failure just above -- believed
+             * unreachable (apply_pairs() already parsed this value
+             * successfully before staging), same fail-closed answer. */
+            snprintf(reason_out, reason_cap,
+                     "internal error: could not re-verify the value submitted for %s (id %u) after "
+                     "commit -- treating the write as UNCONFIRMED, not successful",
+                     name, (unsigned)pairs[i].param_id);
+            return false;
+        }
+
+        bool found = false;
+        safety_cfg_param_t confirmed = {0};
+        size_t count = safety_cfg_store_param_count();
+        for (size_t j = 0; j < count; j++) {
+            safety_cfg_param_t row;
+            if (safety_cfg_store_get_by_index(j, &row) && row.param_id == pairs[i].param_id) {
+                confirmed = row;
+                found = true;
+                break;
+            }
+        }
+
+        if (!found || !confirmed.set || !param_value_equal(type, &confirmed.value, &sent)) {
+            uint16_t rp = 0;
+            uint8_t rr = 0;
+            if (safety_link_take_stashed_commit_rejected(link, &rp, &rr) &&
+                (rp == pairs[i].param_id || rp == KILNLINK_COMMIT_CONFIG_REJECTED_NO_PARAM_ID)) {
+                snprintf(reason_out, reason_cap,
+                         "commit rejected: %s (id %u) -- %s -- values were staged but NOT written", name,
+                         (unsigned)pairs[i].param_id, commit_reject_reason_words(rr));
+            } else {
+                snprintf(reason_out, reason_cap,
+                         "the safety processor ACKed the commit, but %s (id %u) does not read back "
+                         "as the submitted value -- treating the write as FAILED, not successful",
+                         name, (unsigned)pairs[i].param_id);
+            }
+            return false;
+        }
+    }
+    return true;
+}
+
 /* kilnlink_commit_config_reject_reason_t -> a short human phrase, for
  * apply_pairs()'s rejection message below. Matches the wording
  * config_params.h's config_params_reject_reason_t doc comment and
@@ -466,6 +654,13 @@ static bool apply_pairs(SafetyLinkClass *link, const safety_cfg_post_pair_t *pai
                 snprintf(reason_out, reason_cap, "commit rejected: %s -- values were staged but NOT written",
                          commit_reject_reason_words(reject_reason));
             }
+            return false;
+        }
+        /* ESP_OK and not rejected within the reply window is NOT proof the
+         * write landed (see confirm_commit_landed()'s header comment for the
+         * full audit trail) -- force a live read-back before this function
+         * is allowed to report success. */
+        if (!confirm_commit_landed(link, pairs, n_pairs, reason_out, reason_cap)) {
             return false;
         }
     }

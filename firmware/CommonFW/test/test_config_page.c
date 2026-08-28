@@ -46,12 +46,15 @@ static void test_pack_all_fit_one_page(void)
     entries[0].param_id = 1;
     entries[0].type = KILNLINK_PARAM_TYPE_F32;
     entries[0].value.f32_val = 1300.0f;
+    entries[0].set = true;
     entries[1].param_id = 2;
     entries[1].type = KILNLINK_PARAM_TYPE_U16;
     entries[1].value.u16_val = 3600;
+    entries[1].set = true;
     entries[2].param_id = 3;
     entries[2].type = KILNLINK_PARAM_TYPE_BOOL;
     entries[2].value.bool_val = 1;
+    entries[2].set = true;
 
     uint8_t buf[253];
     size_t packed = 0;
@@ -74,6 +77,8 @@ static void test_pack_all_fit_one_page(void)
           "decode(): entry 1 (U16) round-trips");
     CHECK(decoded.entries[2].param_id == 3 && decoded.entries[2].value.bool_val == 1,
           "decode(): entry 2 (BOOL) round-trips");
+    CHECK(decoded.entries[0].set && decoded.entries[1].set && decoded.entries[2].set,
+          "decode(): a SET entry round-trips set=true");
 }
 
 /* -- packing: overflow into a second page --------------------------------- */
@@ -88,6 +93,7 @@ static void test_pack_overflow_two_pages(void)
         entries[i].param_id = (uint16_t)(100 + i);
         entries[i].type = KILNLINK_PARAM_TYPE_BOOL;
         entries[i].value.bool_val = (uint8_t)(i & 1);
+        entries[i].set = true;
     }
 
     uint8_t buf1[10];
@@ -132,6 +138,7 @@ static void test_vector_single_bool_entry(void)
     entry.param_id = 1;
     entry.type = KILNLINK_PARAM_TYPE_BOOL;
     entry.value.bool_val = 1;
+    entry.set = true; /* type byte 0x00, no KILNLINK_CONFIG_PAGE_UNSET_BIT -- exactly the old, pre-fix bytes */
 
     uint8_t buf[64];
     size_t packed = 0;
@@ -146,6 +153,95 @@ static void test_vector_single_bool_entry(void)
     } else {
         CHECK(1, "vector: bytes match");
     }
+}
+
+/* -- the `set` bit (2026-08-27 audit fix, commissioning-write defect d) --- */
+
+static void test_vector_unset_entry_sets_top_bit(void)
+{
+    /* Same shape as test_vector_single_bool_entry() but set=false -- the
+     * ONLY byte that differs is the type byte, which must carry
+     * KILNLINK_CONFIG_PAGE_UNSET_BIT (0x80) ORed into KILNLINK_PARAM_TYPE_
+     * BOOL (0x00) -> 0x80. */
+    static const uint8_t expected[] = {0x1f, 0x00, 0x01, 0x00, 0x01, 0x00, 0x80, 0x01};
+    kilnlink_config_page_entry_t entry;
+    entry.param_id = 1;
+    entry.type = KILNLINK_PARAM_TYPE_BOOL;
+    entry.value.bool_val = 1; /* a placeholder value -- must still be encoded, per this header's contract */
+    entry.set = false;
+
+    uint8_t buf[64];
+    size_t packed = 0;
+    kilnlink_config_page_status_t status;
+    size_t n = kilnlink_config_page_pack(0, &entry, 1, buf, sizeof(buf), &packed, &status);
+    CHECK(status == KILNLINK_CONFIG_PAGE_OK, "unset vector: pack OK");
+    CHECK(packed == 1, "unset vector: 1 entry packed");
+    if (n != sizeof(expected) || memcmp(buf, expected, sizeof(expected)) != 0) {
+        print_hex("  got     ", buf, n);
+        print_hex("  expected", expected, sizeof(expected));
+        CHECK(0, "unset vector: bytes match (type byte carries 0x80)");
+    } else {
+        CHECK(1, "unset vector: bytes match (type byte carries 0x80)");
+    }
+
+    kilnlink_config_page_t decoded;
+    CHECK(kilnlink_config_page_decode(buf, n, &decoded) == KILNLINK_CONFIG_PAGE_OK,
+          "unset vector: decodes OK (0x80 is not itself an error)");
+    CHECK(decoded.entries[0].set == false, "unset vector: decode() reports set=false");
+    CHECK(decoded.entries[0].type == KILNLINK_PARAM_TYPE_BOOL,
+          "unset vector: the real type (BOOL) is recovered -- the 0x80 bit does NOT leak into `type`");
+}
+
+static void test_pack_mixed_set_and_unset_round_trips_independently(void)
+{
+    /* Directly reproduces the audit's motivating scenario: abs_max_temp_c
+     * (here entry 0, still genuinely unset before commissioning) alongside
+     * an ordinary already-committed threshold (entry 1) in the SAME page --
+     * proves the bit is per-entry, not page-wide. */
+    kilnlink_config_page_entry_t entries[2];
+    entries[0].param_id = 0x0104; /* abs_max_temp_c */
+    entries[0].type = KILNLINK_PARAM_TYPE_F32;
+    entries[0].value.f32_val = 0.0f; /* the exact dangerous placeholder the audit named */
+    entries[0].set = false;
+    entries[1].param_id = 0x0201; /* firing_margin_c -- has a real compiled default, always set */
+    entries[1].type = KILNLINK_PARAM_TYPE_F32;
+    entries[1].value.f32_val = 100.0f;
+    entries[1].set = true;
+
+    uint8_t buf[64];
+    size_t packed = 0;
+    kilnlink_config_page_status_t status;
+    size_t n = kilnlink_config_page_pack(0, entries, 2, buf, sizeof(buf), &packed, &status);
+    CHECK(status == KILNLINK_CONFIG_PAGE_OK && packed == 2, "mixed set/unset: both entries pack");
+
+    kilnlink_config_page_t decoded;
+    CHECK(kilnlink_config_page_decode(buf, n, &decoded) == KILNLINK_CONFIG_PAGE_OK, "mixed set/unset: decodes OK");
+    CHECK(decoded.entries[0].param_id == 0x0104 && decoded.entries[0].set == false,
+          "mixed set/unset: abs_max_temp_c reads back UNSET -- this is the fix: it must NEVER read "
+          "back set=true with a value of 0.0, which would mean the overtemperature guard never trips");
+    CHECK(decoded.entries[1].param_id == 0x0201 && decoded.entries[1].set == true &&
+              decoded.entries[1].value.f32_val == 100.0f,
+          "mixed set/unset: firing_margin_c reads back SET with its real value, unaffected by entry 0's bit");
+}
+
+static void test_decode_a_pre_fix_frame_with_no_unset_bit_defaults_every_entry_set(void)
+{
+    /* A hand-built frame using bytes a pre-2026-08-27 Pico would have sent
+     * (bit 7 of the type byte never touched) -- proves the wire-compatible
+     * direction this header's own comment claims: an OLD sender's frames
+     * still decode, and every entry reads back set=true, matching that
+     * era's actual (if less honest) behavior exactly. */
+    uint8_t buf[KILNLINK_CONFIG_PAGE_HDR_LEN + KILNLINK_CONFIG_PAGE_ENTRY_HDR_LEN + 4u] = {
+        KILNLINK_CONFIG_PAGE_CMD, 0x00, 0x01, 0x00,
+        0x04, 0x01, KILNLINK_PARAM_TYPE_F32, /* param_id=0x0104 (abs_max_temp_c), type F32, bit 7 clear */
+    };
+    /* f32 0.0f = 4 zero bytes, already zero-initialized above. */
+    kilnlink_config_page_t out;
+    CHECK(kilnlink_config_page_decode(buf, sizeof(buf), &out) == KILNLINK_CONFIG_PAGE_OK,
+          "pre-fix frame: decodes OK");
+    CHECK(out.entries[0].set == true,
+          "pre-fix frame (bit 7 never set): decodes as set=true -- the OLD, less-honest-but-not-"
+          "wrong-direction default, never a spurious decode failure against an old peer");
 }
 
 /* -- pack() hostile inputs ------------------------------------------------- */
@@ -263,9 +359,11 @@ static void test_length_sweep(void)
     entries[0].param_id = 1;
     entries[0].type = KILNLINK_PARAM_TYPE_U16;
     entries[0].value.u16_val = 0x1234;
+    entries[0].set = true;
     entries[1].param_id = 2;
     entries[1].type = KILNLINK_PARAM_TYPE_BOOL;
     entries[1].value.bool_val = 1;
+    entries[1].set = true;
 
     uint8_t full[64];
     size_t packed = 0;
@@ -313,6 +411,9 @@ int main(void)
     test_pack_all_fit_one_page();
     test_pack_overflow_two_pages();
     test_vector_single_bool_entry();
+    test_vector_unset_entry_sets_top_bit();
+    test_pack_mixed_set_and_unset_round_trips_independently();
+    test_decode_a_pre_fix_frame_with_no_unset_bit_defaults_every_entry_set();
     test_pack_buffer_too_small_for_header();
     test_pack_bad_type_is_caller_bug();
     test_decode_too_short();

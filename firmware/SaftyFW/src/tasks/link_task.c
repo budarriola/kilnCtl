@@ -1947,6 +1947,15 @@ static void link_task_send_config_page(uint8_t page_index)
         all[i].param_id = id;
         all[i].type = got_type;
         all[i].value = value;
+        // 2026-08-27 audit fix (commissioning-write defect d): this used to
+        // leave `set` unpopulated (implicitly zero-initialized `all[64]` had
+        // no `.set` field to zero at all -- kilnlink_config_page_entry_t
+        // gained one in this same fix), which meant kilnlink_config_page_
+        // pack() sent every field's compiled/staged value with NO way to say
+        // "this one is still unset" -- config_params_is_set() is the ONE
+        // place that actually knows (fields_set-gated ids only; every other
+        // id is always set, see that function's own comment).
+        all[i].set = config_params_is_set(&rec, id);
     }
 
     uint8_t scratch[KILNLINK_FRAME_MAX_PAYLOAD];

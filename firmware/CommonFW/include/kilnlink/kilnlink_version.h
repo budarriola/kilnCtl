@@ -65,8 +65,25 @@
  * codecs (kilnlink_ct_cal.h/kilnlink_param.h/kilnlink_config_page.h) keep
  * their existing ids (0x1A/0x1E/0x1F) unchanged -- only the GET_* request
  * side moved. See docs/LINK_PROTOCOL.md's new "Request/reply ids must never
- * be shared" rule for why this class of change keeps recurring. */
-#define KILNLINK_PROTOCOL_VERSION 7
+ * be shared" rule for why this class of change keeps recurring.
+ *
+ * 7 -> 8 (2026-08-27): CONFIG_PAGE (0x1F reply) entries gained a `set` bit
+ * (KILNLINK_CONFIG_PAGE_UNSET_BIT, bit 7 of the per-entry type byte --
+ * kilnlink_config_page.h's own header comment has the full audit trail,
+ * "the `set` bit"/"ok cannot fail" commissioning-write defect d). This is
+ * BREAKING in one direction only: a NEW Pico's frames still decode cleanly
+ * on an OLD ESP as long as no field is actually unset (bit 7 clear reads
+ * exactly like the old unconditional-set behavior), but the moment a real
+ * no-safe-default field IS unset, the old decoder's closed KILNLINK_PARAM_
+ * TYPE_* check rejects the type byte outright (KILNLINK_CONFIG_PAGE_ERR_
+ * BAD_TYPE) and the WHOLE page decode fails -- not silently misread, but not
+ * silently ignored either; a config fetch that used to succeed (if honestly
+ * wrong about `set`) now visibly fails against a too-old peer. The other
+ * direction (an OLD Pico's frames, which never set bit 7, read by a NEW ESP)
+ * is fully additive and needs no version check at all. Per this file's own
+ * rule ("bump if a peer would break"), the version number moves; see
+ * KILNLINK_MIN_COMPATIBLE below for whether the floor moves with it. */
+#define KILNLINK_PROTOCOL_VERSION 8
 
 /* The oldest peer this build will talk to (docs/LINK_PROTOCOL.md section 4,
  * "What 'compatible' means"). Deliberately NOT bumped alongside the 5 -> 6
@@ -83,7 +100,19 @@
  * cost is real (a board still running 5 or 6 firmware can no longer talk to
  * a 7-built peer at all, not even for the frames that did not change), but
  * it is a known, visible cost paid once at flash time, not an intermittent
- * field failure that looks like a wedged link. */
+ * field failure that looks like a wedged link.
+ *
+ * NOT bumped alongside the 7 -> 8 step above. Unlike the 6 -> 7 break, an old
+ * peer here does not go silently unanswered: the 7 -> 8 comment's own
+ * analysis is that a too-old ESP either decodes a new-Pico page correctly
+ * (nothing was actually unset yet) or gets a loud, visible per-fetch decode
+ * failure it already knows how to retry/back off from (safety_cfg_store.c's
+ * existing retry-with-backoff path) -- it is never "the field arrives, but
+ * silently wrong" the way this whole audit exists to close. Raising the
+ * floor to 8 would instead brick EVERY OTHER frame on the link (GET_STATUS/
+ * DIAG/POWER/TRIP_EVENT/...) against a peer whose only actual gap is one
+ * reply's honesty about an unset field -- a strictly worse outcome than the
+ * targeted, self-diagnosing failure this staying at 7 already produces. */
 #define KILNLINK_MIN_COMPATIBLE 7
 
 #endif /* KILNLINK_VERSION_H */

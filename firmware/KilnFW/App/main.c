@@ -1141,6 +1141,18 @@ void app_main(void)
         ESP_LOGW(TAG, "zones_http_start failed: %s -- no Thermocouples & Zones page this boot",
                  esp_err_to_name(zones_err));
     }
+    // 2026-08-27+2 (Tasks 1/2/3): the per-zone current sweep, the runtime
+    // CT-to-zone mapping check, and the read-only safety-processor wiring
+    // display all need real hardware, which zones_http_start() itself
+    // deliberately does not take (pure config CRUD -- see its own comment).
+    // Same io/thermo_bus/safety pointers as dashboard_http_start()/
+    // ota_http_start() above, same NULL-tolerant convention: called
+    // unconditionally, even if zones_http_start() itself failed to register
+    // its HTTP routes, so the underlying state (sweep refusal, safety
+    // wiring) is still correct for whichever caller (MCP, a future retry)
+    // reaches it.
+    zones_http_set_hw(io_ready ? &kio : NULL, thermo_bus.initialized ? &thermo_bus : NULL,
+                      safety_err == ESP_OK ? &safety : NULL);
     // The shipped Digital Fire schedule catalogue's persisted hidden-mask.
     // Must load before profiles_http_start() registers the read paths that
     // consult it, or the first listing after boot would show hidden entries.
@@ -1482,8 +1494,9 @@ void app_main(void)
     heap_stage("uart_bridges_1");
 
     // Replaces the UART DISPLAY_CMD_* remote-draw path -- LVGL owns the panel
-    // now (TODO.md 10.1). uart_bridge_start_display_task() is no longer
-    // called here; it stays in uart_bridge.c as dead code for now.
+    // now (TODO.md 10.1). uart_bridge_start_display_task() was confirmed dead
+    // (nothing ever called it) and removed 2026-08-27, along with the MCP
+    // display_* tools on the PC side; see TODO.md 10.1.
     // RECOVERY MODE (boot_guard.h): the LCD UI is NOT started. Its pages are
     // built against the control modules recovery mode deliberately skips --
     // ui_page_home.c reads the profile executor and autotune engine as it

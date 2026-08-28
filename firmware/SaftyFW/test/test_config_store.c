@@ -895,35 +895,43 @@ static void test_unset_fields_distinguishable_from_zero(void)
     TEST_CHECK((rec.fields_set & CONFIG_STORE_SET_MAINS_VOLTAGE_V) == 0,
                "default record: mains_voltage_v starts unset");
 
-    // Deliberately commission abs_max_temp_c to exactly 0.0 -- the one value
-    // that would be indistinguishable from "unset" under a sentinel scheme
-    // using 0 as the sentinel.
-    rec.abs_max_temp_c = 0.0f;
-    rec.fields_set |= CONFIG_STORE_SET_ABS_MAX_TEMP_C;
-    // max_rate_c_per_min and mains_voltage_v deliberately left at 0.0f AND
-    // unset, to prove the two "reads as 0.0" cases differ only in the bit.
-    TEST_CHECK(rec.max_rate_c_per_min == 0.0f && (rec.fields_set & CONFIG_STORE_SET_MAX_RATE_C_PER_MIN) == 0,
-               "max_rate_c_per_min: value 0.0 but genuinely unset");
+    // Deliberately commission max_rate_c_per_min to exactly 0.0 -- the one
+    // value that would be indistinguishable from "unset" under a sentinel
+    // scheme using 0 as the sentinel. abs_max_temp_c can no longer stand in
+    // for this demonstration: ROADMAP.md M12's owner ruling ("do not allow
+    // an unlimited max temp with the safety processor") makes a COMMITTED
+    // (bit-set) abs_max_temp_c of 0.0 an outright invalid record -- 0 on
+    // that specific field used to mean "S1's ceiling never trips", which is
+    // exactly the state that is no longer offered (see CHECK_F32_POS /
+    // RANGE_F32_POS in config_params.c). max_rate_c_per_min has no such
+    // "0 is a disabled-guard sentinel" trap, so it is the field that proves
+    // the bit -- not the numeric value -- is what a caller must trust.
+    rec.max_rate_c_per_min = 0.0f;
+    rec.fields_set |= CONFIG_STORE_SET_MAX_RATE_C_PER_MIN;
+    // mains_voltage_v deliberately left at 0.0f AND unset, to prove the two
+    // "reads as 0.0" cases differ only in the bit.
+    TEST_CHECK(rec.mains_voltage_v == 0.0f && (rec.fields_set & CONFIG_STORE_SET_MAINS_VOLTAGE_V) == 0,
+               "mains_voltage_v: value 0.0 but genuinely unset");
 
     uint8_t record[CONFIG_STORE_RECORD_LEN];
     config_store_pack(&rec, record);
     config_store_record_t back;
     TEST_CHECK(config_store_unpack(record, &back), "record with a zero-but-set field unpacks");
 
-    TEST_CHECK((back.fields_set & CONFIG_STORE_SET_ABS_MAX_TEMP_C) != 0,
-               "abs_max_temp_c==0.0-but-SET roundtrips as set");
-    TEST_CHECK(back.abs_max_temp_c == 0.0f, "abs_max_temp_c's value (0.0) roundtrips too");
-    TEST_CHECK((back.fields_set & CONFIG_STORE_SET_MAX_RATE_C_PER_MIN) == 0,
-               "max_rate_c_per_min==0.0-and-UNSET still roundtrips as unset -- proves the bit, "
+    TEST_CHECK((back.fields_set & CONFIG_STORE_SET_MAX_RATE_C_PER_MIN) != 0,
+               "max_rate_c_per_min==0.0-but-SET roundtrips as set");
+    TEST_CHECK(back.max_rate_c_per_min == 0.0f, "max_rate_c_per_min's value (0.0) roundtrips too");
+    TEST_CHECK((back.fields_set & CONFIG_STORE_SET_MAINS_VOLTAGE_V) == 0,
+               "mains_voltage_v==0.0-and-UNSET still roundtrips as unset -- proves the bit, "
                "not the numeric value, is what a caller must trust");
 
     // Prove config_store_field_is_set() itself can fail: flip a bit off and
     // confirm the helper reports not-set; flip it back on and confirm set.
     uint16_t fields_set = back.fields_set;
-    TEST_CHECK(config_store_field_is_set(&fields_set, CONFIG_STORE_SET_ABS_MAX_TEMP_C),
+    TEST_CHECK(config_store_field_is_set(&fields_set, CONFIG_STORE_SET_MAX_RATE_C_PER_MIN),
                "config_store_field_is_set(): true when the bit is present");
-    fields_set = (uint16_t)(fields_set & ~(uint16_t)CONFIG_STORE_SET_ABS_MAX_TEMP_C);
-    TEST_CHECK(!config_store_field_is_set(&fields_set, CONFIG_STORE_SET_ABS_MAX_TEMP_C),
+    fields_set = (uint16_t)(fields_set & ~(uint16_t)CONFIG_STORE_SET_MAX_RATE_C_PER_MIN);
+    TEST_CHECK(!config_store_field_is_set(&fields_set, CONFIG_STORE_SET_MAX_RATE_C_PER_MIN),
                "config_store_field_is_set(): false once the bit is cleared -- proves the "
                "check can actually fail, not just always return true");
 }
@@ -1383,9 +1391,15 @@ static void test_config_params_set_range_validation(void)
     v.f32_val = -1.0f;
     TEST_CHECK(!config_params_set(&rec, 0x0104u, KILNLINK_PARAM_TYPE_F32, v),
                "a negative abs_max_temp_c ceiling is refused");
+    // ROADMAP.md M12 owner ruling: "do not allow an unlimited max temp with
+    // the safety processor" -- 0.0 used to mean "S1's ceiling never trips",
+    // a real reachable no-limit state; that state no longer exists, so 0.0
+    // must be refused exactly like a negative value, not accepted as a
+    // boundary.
     v.f32_val = 0.0f;
-    TEST_CHECK(config_params_set(&rec, 0x0104u, KILNLINK_PARAM_TYPE_F32, v),
-               "abs_max_temp_c = 0.0 (the boundary value) is accepted");
+    TEST_CHECK(!config_params_set(&rec, 0x0104u, KILNLINK_PARAM_TYPE_F32, v),
+               "abs_max_temp_c = 0.0 is refused -- 0 used to mean 'never trips', "
+               "no no-limit state is offered any more (ROADMAP.md M12)");
     v.f32_val = 1305.0f;
     TEST_CHECK(config_params_set(&rec, 0x0104u, KILNLINK_PARAM_TYPE_F32, v),
                "a realistic positive abs_max_temp_c (~cone 10) is accepted");
@@ -1571,6 +1585,74 @@ static void test_config_params_validate_contradiction_rejected(void)
                "tc_source alone (tc_placement_mode still unset) does not trip the contradiction check");
 }
 
+static void test_config_params_validate_abs_max_temp_vs_tc_type_contradiction_rejected(void)
+{
+    TEST_SECTION("config_params_validate -- abs_max_temp_c vs tc_type contradiction rejected (M2, "
+                 "2026-08-28 audit fix)");
+
+    // The live-bench-equivalent defect: a curl posting abs_max_temp_c=1500
+    // with tc_type=7 (Type T, whose own sensor tops out at 400 C per
+    // MAX31856.pdf) used to be accepted by CHECK_F32_POS alone -- S1 would
+    // then guard a threshold the sensor goes physically out of range 1100 C
+    // below. Both fields staged, contradictory: must be rejected.
+    config_store_record_t rec;
+    config_store_default(&rec);
+    rec.abs_max_temp_c = 1500.0f;
+    rec.tc_type = 7u; // Type T, TTC -200..400 C
+    rec.fields_set |= (uint16_t)(CONFIG_STORE_SET_ABS_MAX_TEMP_C | CONFIG_STORE_SET_TC_TYPE);
+
+    const char *field = NULL;
+    const char *rule = NULL;
+    config_params_reject_reason_t reason = CONFIG_PARAMS_REJECT_RANGE; // poison, must be overwritten
+    TEST_CHECK(!config_params_validate_ex(&rec, &field, &rule, &reason),
+               "abs_max_temp_c=1500 with tc_type=Type T (max 400C), both staged, is rejected");
+    TEST_CHECK(field != NULL && strcmp(field, "abs_max_temp_c") == 0, "the offending field is named");
+    TEST_CHECK(rule != NULL && strlen(rule) > 0, "the violated rule is named");
+    TEST_CHECK(reason == CONFIG_PARAMS_REJECT_CONTRADICTION,
+               "reported as CONFIG_PARAMS_REJECT_CONTRADICTION, not RANGE");
+
+    // Prove this check can actually PASS: a value within Type T's own range.
+    rec.abs_max_temp_c = 350.0f;
+    field = NULL;
+    rule = NULL;
+    TEST_CHECK(config_params_validate(&rec, &field, &rule),
+               "abs_max_temp_c=350 with tc_type=Type T (max 400C) validates");
+
+    // Exactly AT the sensor's own maximum is still accepted (inclusive
+    // bound), same convention max31856_tc_range_is_plausible()'s own
+    // boundary tests use elsewhere in this suite.
+    rec.abs_max_temp_c = 400.0f;
+    field = NULL;
+    rule = NULL;
+    TEST_CHECK(config_params_validate(&rec, &field, &rule),
+               "abs_max_temp_c exactly AT the sensor's own maximum (400C for Type T) validates");
+
+    // A wide-range type (Type K, max 1372C) happily accepts the SAME 1500C
+    // that Type T rejected -- proves the check is genuinely per-type, not a
+    // single hard-coded ceiling that happened to catch the Type T case.
+    config_store_default(&rec);
+    rec.abs_max_temp_c = 1500.0f;
+    rec.tc_type = 0u; // Type B, TTC 95..1798 C -- 1500 is well within range
+    rec.fields_set |= (uint16_t)(CONFIG_STORE_SET_ABS_MAX_TEMP_C | CONFIG_STORE_SET_TC_TYPE);
+    field = NULL;
+    rule = NULL;
+    TEST_CHECK(config_params_validate(&rec, &field, &rule),
+               "the SAME abs_max_temp_c=1500 validates against Type B (max 1798C) -- per-type, not a "
+               "single hard-coded ceiling");
+
+    // And prove the check does NOT fire when only ONE of the two fields has
+    // actually been staged -- the field-by-field commissioning case (M2's
+    // finding b): abs_max_temp_c alone, tc_type still at its zero-init
+    // default, must not be blocked by a field the operator has not yet sent.
+    config_store_record_t partial;
+    config_store_default(&partial);
+    partial.abs_max_temp_c = 1500.0f;
+    partial.fields_set |= CONFIG_STORE_SET_ABS_MAX_TEMP_C; // tc_type left UNSET
+    TEST_CHECK(config_params_validate(&partial, &field, &rule),
+               "abs_max_temp_c alone (tc_type still unset) does not trip the contradiction check -- "
+               "this is the field-by-field commissioning case M2 named as the common one");
+}
+
 static void test_config_params_ct_channel_map_two_of_three(void)
 {
     TEST_SECTION("config_params -- ct_channel_map: two of three channels leaves the group bit unset");
@@ -1679,6 +1761,7 @@ static void test_config_params_get_config_page_roundtrip(void)
 
     size_t total = config_params_count();
     kilnlink_config_page_entry_t all[64];
+    memset(all, 0, sizeof(all));
     TEST_CHECK(total <= sizeof(all) / sizeof(all[0]), "id table fits the test's own scratch array");
     for (size_t i = 0; i < total; i++) {
         uint16_t id = 0;
@@ -1691,6 +1774,9 @@ static void test_config_params_get_config_page_roundtrip(void)
         all[i].param_id = id;
         all[i].type = got_type;
         all[i].value = value;
+        // 2026-08-27 audit fix (commissioning-write defect d) -- mirrors
+        // link_task_send_config_page()'s own new call exactly.
+        all[i].set = config_params_is_set(&rec, id);
     }
 
     // Pack and decode every page, page_index 0, 1, 2, ... until more == 0,
@@ -1744,6 +1830,82 @@ static void test_config_params_get_config_page_roundtrip(void)
     TEST_CHECK(seen_firing_margin, "firing_margin_c round-trips through GET_CONFIG_PAGE");
     TEST_CHECK(seen_watchdog, "watchdog_timeout_ms round-trips through GET_CONFIG_PAGE");
     TEST_CHECK(seen_ct_cal2, "ct_cal[2].calibrated round-trips through GET_CONFIG_PAGE");
+}
+
+// 2026-08-27 audit fix (commissioning-write defect d), "ok cannot fail":
+// config_params_is_set() and its one real caller, link_task_send_config_
+// page(), used to not exist at all -- every CONFIG_PAGE entry the Pico sent
+// was reported `set = true` unconditionally, and the ESP's cache
+// (safety_cfg_store.c) then trusted that unconditionally too. This is the
+// exact live-bench defect: abs_max_temp_c UNSET on the Pico (rec.fields_set
+// clear) but rec.abs_max_temp_c still holding a leftover/default 0.0f byte
+// pattern -- the wire must carry "unset", never "{set:true, value:0}", or
+// the overtemperature guard silently never trips. Proves BOTH directions:
+// a genuinely-staged field reads back set=true with its real value, and an
+// untouched no-safe-default field reads back set=false with its placeholder
+// value NEVER trusted.
+static void test_config_params_is_set_through_get_config_page(void)
+{
+    TEST_SECTION("config_params_is_set + GET_CONFIG_PAGE -- an UNSET no-safe-default field reports "
+                 "set=false, never a trusted 0.0 (the exact live-bench defect this closes)");
+
+    config_store_record_t rec;
+    config_store_default(&rec); // fields_set == 0 -- nothing commissioned, matches a fresh board
+    TEST_CHECK(!config_params_is_set(&rec, 0x0104u),
+               "abs_max_temp_c is UNSET on a fresh record (config_params_is_set() agrees with fields_set)");
+    TEST_CHECK(rec.abs_max_temp_c == 0.0f,
+               "setup: the raw struct field is 0.0 -- indistinguishable from a real ceiling of zero "
+               "without the fields_set bit config_params_is_set() actually checks");
+    TEST_CHECK(config_params_is_set(&rec, 0x0201u),
+               "firing_margin_c (a real compiled default, sec 2) is ALWAYS reported set, unlike the "
+               "no-safe-default sec-1 fields");
+
+    // Stage abs_max_temp_c for real via config_params_set(), same path a
+    // genuine SET_PARAM takes -- this is what a real commissioning pass does.
+    kilnlink_param_value_t v;
+    v.f32_val = 1300.0f;
+    TEST_CHECK(config_params_set(&rec, 0x0104u, KILNLINK_PARAM_TYPE_F32, v), "setup: abs_max_temp_c stages");
+    TEST_CHECK(config_params_is_set(&rec, 0x0104u), "abs_max_temp_c now reports SET after config_params_set()");
+
+    // Build entries[] and round-trip through the SAME codec link_task_send_
+    // config_page() uses (KILNLINK_CONFIG_PAGE_UNSET_BIT), for exactly the
+    // two ids of interest.
+    kilnlink_config_page_entry_t entries[2];
+    memset(entries, 0, sizeof(entries));
+    uint8_t got_type = 0;
+    kilnlink_param_value_t got_value;
+    memset(&got_value, 0, sizeof(got_value));
+    TEST_CHECK(config_params_get(&rec, 0x0104u, &got_type, &got_value), "abs_max_temp_c reads back");
+    entries[0].param_id = 0x0104u;
+    entries[0].type = got_type;
+    entries[0].value = got_value;
+    entries[0].set = config_params_is_set(&rec, 0x0104u);
+
+    config_store_record_t rec_unset;
+    config_store_default(&rec_unset); // fresh, nothing staged
+    TEST_CHECK(config_params_get(&rec_unset, 0x0104u, &got_type, &got_value),
+               "an unset abs_max_temp_c STILL reads back a (placeholder) value -- it is `set` that says "
+               "not to trust it, never a missing entry");
+    entries[1].param_id = 0x0105u; // a different id (tc_type) so both entries survive pack() distinctly
+    entries[1].type = KILNLINK_PARAM_TYPE_U8;
+    entries[1].value.u8_val = 0;
+    entries[1].set = config_params_is_set(&rec_unset, 0x0105u);
+
+    uint8_t payload[KILNLINK_CONFIG_PAGE_HDR_LEN + KILNLINK_CONFIG_PAGE_ENTRY_MAX_LEN * 2u];
+    size_t packed = 0;
+    kilnlink_config_page_status_t pack_status;
+    size_t len = kilnlink_config_page_pack(0, entries, 2, payload, sizeof(payload), &packed, &pack_status);
+    TEST_CHECK(len > 0 && packed == 2, "both entries pack");
+
+    kilnlink_config_page_t decoded;
+    TEST_CHECK(kilnlink_config_page_decode(payload, len, &decoded) == KILNLINK_CONFIG_PAGE_OK,
+               "the page decodes cleanly");
+    TEST_CHECK(decoded.entries[0].param_id == 0x0104u && decoded.entries[0].set == true &&
+                   decoded.entries[0].value.f32_val == 1300.0f,
+               "abs_max_temp_c (staged) round-trips SET with its real 1300.0 value");
+    TEST_CHECK(decoded.entries[1].param_id == 0x0105u && decoded.entries[1].set == false,
+               "tc_type (never staged) round-trips UNSET -- this is the fix: an operator-facing page "
+               "must be able to tell this apart from a genuinely-committed value");
 }
 
 // Composed "commit while ARMED refused" check -- link_task_handle_commit_
@@ -1914,9 +2076,11 @@ void run_test_config_store(void)
     test_config_params_validate_range_validation();
     test_config_params_id_table_self_consistent();
     test_config_params_validate_contradiction_rejected();
+    test_config_params_validate_abs_max_temp_vs_tc_type_contradiction_rejected();
     test_config_params_validate_ex_reason_and_id_lookup();
     test_config_params_ct_channel_map_two_of_three();
     test_config_params_all_required_set();
     test_config_params_get_config_page_roundtrip();
+    test_config_params_is_set_through_get_config_page();
     test_config_params_commit_refused_while_armed();
 }

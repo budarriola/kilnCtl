@@ -56,7 +56,7 @@ size_t kilnlink_config_page_pack(uint8_t page_index, const kilnlink_config_page_
         }
 
         kilnlink_put_u16le(out, off, entries[packed].param_id);
-        out[off + 2u] = type;
+        out[off + 2u] = type | (entries[packed].set ? 0u : KILNLINK_CONFIG_PAGE_UNSET_BIT);
         /* vlen was already derived from `type`, which is already known-good
          * here, so this cannot fail. */
         (void)kilnlink_param_value_encode(type, &entries[packed].value, out, off + 3u);
@@ -101,7 +101,14 @@ kilnlink_config_page_status_t kilnlink_config_page_decode(const uint8_t *payload
         }
 
         uint16_t param_id = kilnlink_get_u16le(payload, off);
-        uint8_t type = payload[off + 2u];
+        uint8_t wire_type = payload[off + 2u];
+        /* Mask KILNLINK_CONFIG_PAGE_UNSET_BIT (bit 7) off before validating
+         * against the closed KILNLINK_PARAM_TYPE_* set -- see this header's
+         * "The `set` bit" comment. A pre-fix peer never sets this bit, so
+         * every field it sends decodes with set=true, matching its old
+         * behavior exactly. */
+        uint8_t type = (uint8_t)(wire_type & 0x7Fu); /* clear bit 7 only -- KILNLINK_CONFIG_PAGE_UNSET_BIT */
+        bool entry_set = (wire_type & KILNLINK_CONFIG_PAGE_UNSET_BIT) == 0u;
         size_t vlen = kilnlink_param_value_len(type);
         if (vlen == 0) {
             return KILNLINK_CONFIG_PAGE_ERR_BAD_TYPE;
@@ -116,6 +123,7 @@ kilnlink_config_page_status_t kilnlink_config_page_decode(const uint8_t *payload
 
         out->entries[i].param_id = param_id;
         out->entries[i].type = type;
+        out->entries[i].set = entry_set;
         /* type was already validated above, so this cannot fail. */
         (void)kilnlink_param_value_decode(type, payload, off + 3u, &out->entries[i].value);
 

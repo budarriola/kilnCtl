@@ -1128,6 +1128,21 @@ static bool safety_apply_trip_event(SafetyLinkClass *link, const uart_proto_mess
     }
     bool is_new_event =
         !link->cached.trip_event_ever_received || link->cached.trip_last_seq != trip_seq;
+    /* 2026-08-28 audit fix (N3): "new to this boot" is NOT the same claim as
+     * "genuinely live" -- an ESP reboot with a trip still latched on the Pico
+     * makes the FIRST resend this boot look identical to a real new trip
+     * (trip_event_ever_received was false either way), but link->fault_sources
+     * at that instant reflects THIS boot's fault lines, not whatever was
+     * actually asserted when the trip latched, possibly minutes/boots ago.
+     * Only the SECOND case below -- a trip_seq change witnessed while this
+     * boot was already tracking a previous one -- is something this boot
+     * actually watched happen live, so only that case may claim the snapshot
+     * is trustworthy. See safety_link.h's trip_fault_sources_valid field
+     * comment and ui_page_diagnostics.c/dashboard_http.c's "(at trip)"
+     * renderers, which must show "not captured" rather than a plausible-
+     * looking wrong value when this is false. */
+    bool is_genuinely_live_event = link->cached.trip_event_ever_received &&
+                                    link->cached.trip_last_seq != trip_seq;
 
     link->cached.trip_last_seq = trip_seq;
     link->cached.trip_reason = trip_reason;
@@ -1139,6 +1154,16 @@ static bool safety_apply_trip_event(SafetyLinkClass *link, const uart_proto_mess
     link->cached.trip_current_a[2] = safety_read_f32_le(&p[23]);
     link->cached.trip_relay_recent_mask = p[27];
     link->cached.trip_context_age_100ms = p[28];
+    /* Snapshot THIS board's own fault_sources at the instant a NEW trip_seq
+     * is seen -- see safety_link.h's trip_fault_sources field comment for
+     * why SaftyFW cannot supply this itself and why it is only overwritten
+     * on a genuinely new event, never on a dedup resend of the same one
+     * (that would let heat_block_sources at resend-time silently overwrite
+     * what was actually asserted when the trip first latched). */
+    if (is_new_event) {
+        link->cached.trip_fault_sources = link->fault_sources;
+        link->cached.trip_fault_sources_valid = is_genuinely_live_event;
+    }
     link->cached.trip_event_ever_received = true;
     link->trip_event_tick = xTaskGetTickCount();
     safety_unlock(link);
@@ -1365,10 +1390,20 @@ static bool safety_drain_inbox_ex(SafetyLinkClass *link, uint32_t wait_ms, bool 
                 }
                 break;
             case KILNLINK_COMMIT_CONFIG_REJECTED_CMD:
-                if (out_commit_rejected && out_got_commit_rejected &&
-                    msg.length == KILNLINK_COMMIT_CONFIG_REJECTED_LEN) {
-                    *out_commit_rejected = msg;
-                    *out_got_commit_rejected = true;
+                if (msg.length == KILNLINK_COMMIT_CONFIG_REJECTED_LEN) {
+                    if (out_commit_rejected && out_got_commit_rejected) {
+                        *out_commit_rejected = msg;
+                        *out_got_commit_rejected = true;
+                    } else if (safety_lock(link)) {
+                        /* Nobody is waiting for this one right now -- stash it
+                         * instead of dropping it, same reasoning and same
+                         * pattern as the CONFIG_PAGE stash above. See
+                         * SafetyLinkClass::stashed_commit_rejected. */
+                        link->stashed_commit_rejected = msg;
+                        link->has_stashed_commit_rejected = true;
+                        link->stashed_commit_rejected_tick = xTaskGetTickCount();
+                        safety_unlock(link);
+                    }
                 }
                 break;
             default:
@@ -1482,6 +1517,40 @@ static bool safety_take_stashed_config_page(SafetyLinkClass *link, uint8_t want_
     return took;
 }
 
+/* Takes the stashed COMMIT_CONFIG_REJECTED frame unconditionally (no page
+ * index to match -- see the field's doc comment in safety_link.h). Returns
+ * false (leaving *out untouched) when the stash is empty, has aged out, or
+ * the state lock could not be taken. */
+static bool safety_take_stashed_commit_rejected(SafetyLinkClass *link, uart_proto_message_t *out)
+{
+    bool took = false;
+    if (safety_lock(link)) {
+        if (link->has_stashed_commit_rejected) {
+            if (safety_elapsed_ms(link->stashed_commit_rejected_tick) > SAFETY_STASHED_PAGE_MAX_AGE_MS) {
+                link->has_stashed_commit_rejected = false; /* too old to be anyone's reply */
+            } else {
+                *out = link->stashed_commit_rejected;
+                link->has_stashed_commit_rejected = false;
+                took = true;
+            }
+        }
+        safety_unlock(link);
+    }
+    return took;
+}
+
+/* Drops any stashed COMMIT_CONFIG_REJECTED frame. Called at the top of
+ * safety_link_send_commit_config() so a rejection left over from a PRIOR
+ * commit (already reported to that caller, or abandoned) can never be
+ * mistaken for this commit's own outcome. */
+static void safety_clear_stashed_commit_rejected(SafetyLinkClass *link)
+{
+    if (safety_lock(link)) {
+        link->has_stashed_commit_rejected = false;
+        safety_unlock(link);
+    }
+}
+
 void safety_link_clear_stashed_config_page(SafetyLinkClass *link)
 {
     if (!link) {
@@ -1491,6 +1560,42 @@ void safety_link_clear_stashed_config_page(SafetyLinkClass *link)
         link->has_stashed_config_page = false;
         safety_unlock(link);
     }
+}
+
+/* Public wrapper for callers OUTSIDE this file (safety_cfg_http.c's
+ * apply_pairs()) that want to know whether a COMMIT_CONFIG_REJECTED frame
+ * showed up late -- after safety_link_send_commit_config()'s own
+ * SAFETY_LINK_REPLY_TIMEOUT_MS window already closed and it reported the
+ * commit as accepted by default (see that function's header comment).
+ * apply_pairs() calls this AFTER its own live read-back (safety_cfg_store_
+ * refetch()) already found the write did not land -- the read-back is what
+ * decides pass/fail (COMMISSIONING.md: "a positive read-back is the only
+ * version of this that cannot lie"), this is only consulted to attach the
+ * Pico's OWN reason to a failure already established some other way. Decodes
+ * and consumes whatever is currently stashed; returns false (out-params
+ * untouched) if nothing is stashed, it aged out, or it fails to decode. */
+bool safety_link_take_stashed_commit_rejected(SafetyLinkClass *link, uint16_t *out_param_id,
+                                               uint8_t *out_reason)
+{
+    if (!link) {
+        return false;
+    }
+    uart_proto_message_t msg;
+    if (!safety_take_stashed_commit_rejected(link, &msg)) {
+        return false;
+    }
+    kilnlink_commit_config_rejected_t rejected;
+    if (kilnlink_commit_config_rejected_decode(msg.payload, msg.length, &rejected) !=
+        KILNLINK_COMMIT_CONFIG_REJECTED_OK) {
+        return false;
+    }
+    if (out_param_id) {
+        *out_param_id = rejected.param_id;
+    }
+    if (out_reason) {
+        *out_reason = rejected.reason;
+    }
+    return true;
 }
 
 /* Opportunistic drain: takes whatever has already arrived and does NOT hold
@@ -2183,8 +2288,8 @@ esp_err_t safety_link_start(SafetyLinkClass *link)
         ESP_LOGE(TAG, "uart_protocol_init(uart%d) failed: %s", SAFETY_UART_PORT_NUM,
                  esp_err_to_name(err));
         goto fail_owner;
-    }
-
+    }
+
     /* Same measurement gap the uart_owner pair had: main.c registered its
      * uart_proto_rx and this one went unregistered, so the report showed one
      * comfortable margin for a stack size that sizes two tasks. */
@@ -2993,6 +3098,11 @@ esp_err_t safety_link_send_commit_config(SafetyLinkClass *link, uint16_t *out_pa
     if (!link->initialized) {
         return ESP_ERR_INVALID_STATE;
     }
+
+    /* Discard any rejection stashed by a PRIOR commit (already reported to
+     * that caller, or abandoned) so it can never be mistaken for THIS one's
+     * outcome -- see safety_clear_stashed_commit_rejected()'s doc comment. */
+    safety_clear_stashed_commit_rejected(link);
 
     kilnlink_commit_config_t msg = {0};
     uint8_t payload[KILNLINK_COMMIT_CONFIG_LEN];

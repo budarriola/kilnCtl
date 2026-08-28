@@ -697,6 +697,35 @@ typedef struct {
     float    trip_current_a[SAFETY_LINK_TRIP_EVENT_CHANNELS]; /* current sense 1..3, amps, at trip */
     uint8_t  trip_relay_recent_mask;   /* relay_recent_mask last received from the ESP, at trip */
     uint8_t  trip_context_age_100ms;   /* context_age_100ms at trip */
+    /* NOT part of the wire frame -- SaftyFW sees one bit (mainFault) and
+     * cannot know why, so it cannot put this in Frame D. This is THIS
+     * board's OWN safety_fault_source_t bitmask (safety_link_get_fault_
+     * sources()), snapshotted the moment safety_apply_trip_event() sees a
+     * NEW trip_seq (safety_link.c). Only meaningful when trip_reason ==
+     * SAFETY_LINK_TRIP_REASON_MAIN_FAULT (S6a) -- every other guard's cause
+     * lives entirely on SaftyFW's side and this field is simply whatever
+     * this board's fault line happened to read at that instant, which may be
+     * unrelated. Distinct from heat_block_sources (safety_link_get_fault_
+     * sources(), read live): a source asserted at trip time may since have
+     * been released, so "what tripped it" (this field) and "what's asserted
+     * right now" (heat_block_sources) can legitimately disagree -- callers
+     * that show both must label them separately, never merge them. */
+    uint32_t trip_fault_sources;
+    /* 2026-08-28 audit fix (N3): true only when trip_fault_sources above was
+     * captured on a trip_seq change THIS BOOT ACTUALLY WITNESSED (this boot
+     * was already tracking a previous trip_seq and saw it change) -- false
+     * for the first TRIP_EVENT frame received after an ESP reboot, since that
+     * frame can just as easily be the Pico resending a trip that latched
+     * BEFORE this boot, in which case link->fault_sources at snapshot time
+     * reflects only this boot's current fault lines, not whatever was
+     * actually asserted at the real trip instant (see safety_apply_trip_
+     * event() in safety_link.c for the is_genuinely_live_event logic).
+     * Callers rendering trip_fault_sources (ui_page_diagnostics.c's S6a
+     * "(at trip)" line, dashboard_http.c's trip_fault_sources/_words JSON)
+     * MUST check this first and show "not captured" rather than a
+     * plausible-looking but possibly-wrong value when it is false. Meaningless
+     * (and left false) until trip_event_ever_received is true. */
+    bool     trip_fault_sources_valid;
     /* How long ago this trip event was received, computed the same way
      * age_ms above is (safety_link_get_status() fills this in at read time
      * from a tick recorded when the frame was applied) -- distinct from
@@ -918,6 +947,22 @@ typedef struct {
      * page()), so a page nobody goes on to ask for would otherwise sit here
      * forever; this lets it be aged out instead. */
     TickType_t           stashed_config_page_tick;
+
+    /* Same problem, same fix, for SAFETY_CMD_COMMIT_CONFIG_REJECTED (0x20):
+     * safety_link_send_commit_config() waits only SAFETY_LINK_REPLY_TIMEOUT_MS
+     * for it before releasing xact_lock and reporting "accepted" by default.
+     * On a bench run where the Pico's REJECTED frame arrived after that
+     * window closed, the next drain to pass through this inbox -- typically
+     * the 500 ms GET_STATUS poll, which shares this same queue -- found the
+     * frame with no caller waiting for it and silently discarded it, the same
+     * way an unmatched CONFIG_PAGE used to be discarded before the stash
+     * above existed. Unlike CONFIG_PAGE there is no page index to match: only
+     * one COMMIT_CONFIG can be in flight at a time (serialized by xact_lock),
+     * so any stashed rejection belongs to the most recent commit and is
+     * unconditionally reclaimed by the next call that asks. */
+    uart_proto_message_t stashed_commit_rejected;
+    bool                 has_stashed_commit_rejected;
+    TickType_t           stashed_commit_rejected_tick;
 
     safety_link_stats_t stats;
     uint16_t            poll_period_ms;
@@ -1519,6 +1564,15 @@ esp_err_t safety_link_send_set_param(SafetyLinkClass *link, uint16_t param_id, u
                                       kilnlink_param_value_t value);
 esp_err_t safety_link_send_commit_config(SafetyLinkClass *link, uint16_t *out_param_id,
                                           uint8_t *out_reason, bool *out_rejected);
+
+/* Consumes a COMMIT_CONFIG_REJECTED frame that arrived too late for
+ * safety_link_send_commit_config()'s own reply window and was stashed
+ * instead of dropped (SafetyLinkClass::stashed_commit_rejected). Returns
+ * false (out-params untouched) if nothing is stashed. See
+ * safety_cfg_http.c's apply_pairs() for the intended use: attaching the
+ * Pico's own reason to a failure a live read-back already established. */
+bool safety_link_take_stashed_commit_rejected(SafetyLinkClass *link, uint16_t *out_param_id,
+                                               uint8_t *out_reason);
 esp_err_t safety_link_get_config_page(SafetyLinkClass *link, uint8_t page_index,
                                        kilnlink_config_page_t *out);
 

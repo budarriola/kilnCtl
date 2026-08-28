@@ -15,7 +15,40 @@
 
 #include "esp_err.h"
 
+// 2026-08-28 audit fix (N2): safety_cfg_store.c's poll-side entry point
+// (safety_cfg_store_refetch_nonblocking()) now genuinely checks
+// xSemaphoreTake()'s return value -- stubs/freertos/semphr.h's shared stub
+// deliberately always returns pdFALSE (test_boot_button.c's own header
+// comment), which would make every safety_cfg_store_maybe_refetch() test
+// below dead-end at "lock busy, nothing fetched" instead of reaching the
+// refetch logic under test. Same fix shape test_ota_http.c's own header
+// comment documents for the identical problem: pull in the real freertos/
+// semphr.h first, then macro-redirect xSemaphoreTake to a LOCAL replacement
+// with real single-threaded mutex semantics (always succeeds for a non-NULL
+// handle) for exactly this file's #include of safety_cfg_store.c, restored
+// immediately after so nothing else is affected.
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+#include <assert.h>
+// Controllable, not hard-wired to pdTRUE: a real single-threaded mutex would
+// always succeed, but the whole point of the N2 fix under test is that
+// safety_cfg_store_refetch_nonblocking() reacts correctly to a FAILED
+// non-blocking take (the httpd worker holding the lock right now) by
+// bailing out without touching the wire. test_refetch_nonblocking_when_
+// locked() below flips this to pdFALSE to exercise exactly that path;
+// every other test leaves it at the default (available).
+static BaseType_t s_test_semaphore_take_result = pdTRUE;
+static inline BaseType_t safety_cfg_store_test_xSemaphoreTake(SemaphoreHandle_t sem, TickType_t ticks)
+{
+    assert(sem != NULL && "xSemaphoreTake on a NULL handle -- would assert/panic on real FreeRTOS");
+    (void)ticks;
+    return s_test_semaphore_take_result;
+}
+#define xSemaphoreTake safety_cfg_store_test_xSemaphoreTake
+
 #include "../drivers/safety_cfg_store.c"
+
+#undef xSemaphoreTake
 
 // ---------------------------------------------------------------------------
 // safety_link_get_config_page() stub -- controllable canned pages.
@@ -117,10 +150,27 @@ static void stage_page(size_t page_idx, bool more, const uint16_t *ids, const ui
         p->entries[i].param_id = ids[i];
         p->entries[i].type = KILNLINK_PARAM_TYPE_U16;
         p->entries[i].value.u16_val = vals[i];
+        // 2026-08-27 audit fix (commissioning-write defect d): every entry
+        // this helper stages represents a field the (fake) Pico considers
+        // SET -- matching every existing caller's own assertions (`p.set &&
+        // p.value... == ...`) below. See stage_page_unset() for the OTHER
+        // half: an entry the Pico reports UNSET.
+        p->entries[i].set = true;
     }
     if (page_idx + 1 > s_stub_page_count) {
         s_stub_page_count = page_idx + 1;
     }
+}
+
+// Same as stage_page(), but the ONE entry at `unset_index` (0-based within
+// this page) is staged with set=false -- simulates a Pico reporting a
+// no-safe-default field (e.g. abs_max_temp_c) that has never been
+// commissioned, per kilnlink_config_page.h's KILNLINK_CONFIG_PAGE_UNSET_BIT.
+static void stage_page_with_one_unset(size_t page_idx, bool more, const uint16_t *ids, const uint16_t *vals,
+                                       size_t n, size_t unset_index)
+{
+    stage_page(page_idx, more, ids, vals, n);
+    s_stub_pages[page_idx].entries[unset_index].set = false;
 }
 
 // ---------------------------------------------------------------------------
@@ -137,6 +187,7 @@ static void reset_all(void)
     esp_ptr_external_ram_test_set(false); /* default: called from a normal, internal-RAM stack */
     nvs_test_enable(false); /* every test except the version-refuse one runs without real NVS */
     nvs_test_clear();
+    s_test_semaphore_take_result = pdTRUE; /* default: lock available, same as every real single-owner take */
 }
 
 static void test_index_for_id_finds_known_and_rejects_unknown(void)
@@ -203,6 +254,90 @@ static void test_refetch_when_crc_changes(void)
     TEST_CHECK(safety_cfg_store_get_by_index(0, &p) && !p.set,
                "tc_source (index 0), NOT present in the fetched page, reads back as unset -- "
                "the whole cache was replaced, not merged with the stale entry that used to be there");
+}
+
+// 2026-08-28 audit fix (N2, BLOCKER): safety_poll_task's own entry point
+// (safety_cfg_store_maybe_refetch() -> safety_cfg_store_refetch_nonblocking())
+// must NEVER block behind the httpd worker's confirm_commit_landed() call
+// (safety_cfg_store_refetch(), portMAX_DELAY) -- that call can legitimately
+// hold s_store_lock for up to SAFETY_CFG_STORE_REFETCH_BUDGET_MS (2s) plus a
+// synchronous NVS flush, and blocking safety_poll_task behind it stacks on
+// top of that task's own already-tight ~3.2-3.7s worst case, risking a
+// link_timeout_s nuisance trip mid-firing. Simulated here by making the
+// test's xSemaphoreTake stand-in report "busy" (pdFALSE), the same signal a
+// real mutex gives when another task holds it: the poll-side call must bail
+// out immediately -- no page request at all -- rather than wait.
+static void test_maybe_refetch_does_not_block_when_lock_is_busy(void)
+{
+    TEST_SECTION("safety_cfg_store_maybe_refetch -- lock held elsewhere (httpd worker mid-refetch) -- "
+                 "bails out immediately, touches the wire NOT AT ALL (N2 fix)");
+    reset_all();
+
+    s_store.config_crc = 0x0001; // differs from live -- would normally trigger a fetch
+    uint16_t ids[] = { 0x0203 };
+    uint16_t vals[] = { 99 };
+    stage_page(0, false, ids, vals, 1);
+
+    SafetyLinkClass fake_link;
+    memset(&fake_link, 0, sizeof(fake_link));
+
+    s_test_semaphore_take_result = pdFALSE; // "the httpd worker holds s_store_lock right now"
+    bool refetched = safety_cfg_store_maybe_refetch(&fake_link, 0x0002);
+
+    TEST_CHECK(refetched == false, "lock busy -- maybe_refetch reports nothing changed, does not wait for it");
+    TEST_CHECK(s_stub_get_config_page_calls == 0,
+               "no page request went out at all -- safety_poll_task must not block on a busy lock");
+    TEST_CHECK(safety_cfg_store_cached_crc() == 0x0001, "cache left exactly as it was");
+
+    // RED-then-GREEN companion: the same call with the lock available (the
+    // s_retry_not_before_us backoff from the failed attempt above would
+    // normally suppress an immediate retry, so re-seed retry state as if
+    // this is a fresh attempt, same as reset_all() would give a first call).
+    s_retry_not_before_us = 0;
+    s_test_semaphore_take_result = pdTRUE; // lock now available -- same CRC mismatch as before
+    refetched = safety_cfg_store_maybe_refetch(&fake_link, 0x0002);
+    TEST_CHECK(refetched == true, "same request, lock now available -- fetch actually happens");
+    TEST_CHECK(s_stub_get_config_page_calls == 1, "exactly one page requested once the lock was free");
+}
+
+// 2026-08-27 audit fix (commissioning-write defect d), "ok cannot fail":
+// safety_cfg_store_refetch() used to write `scratch.entries[idx].set = 1`
+// UNCONDITIONALLY for every entry a CONFIG_PAGE reply carried -- regardless
+// of whether the PICO considered that field set. This is the exact live-
+// bench defect: abs_max_temp_c UNSET on the Pico (S1's overtemperature
+// ceiling never commissioned) still showed up on the ESP's cache -- and from
+// there, the operator-facing GET /api/safety/commissioning JSON -- as
+// "{set:true, value:0}", and 0 on that specific field means the guard NEVER
+// TRIPS. Proves the fix: the cache now carries the Pico's OWN per-entry
+// answer (kilnlink_config_page_entry_t::set, decoded off KILNLINK_CONFIG_
+// PAGE_UNSET_BIT) through unchanged.
+static void test_refetch_carries_unset_bit_through_not_unconditional_true(void)
+{
+    TEST_SECTION("safety_cfg_store_refetch -- an UNSET entry from the Pico stays UNSET in the cache, "
+                 "never promoted to set=true (defect d, 2026-08-27 audit)");
+    reset_all();
+
+    uint16_t ids[] = { 0x0203, 0x0205 }; // overshoot_time_s (index 10), rate_window_s (index 12)
+    uint16_t vals[] = { 42, 99 };
+    // index 0 of THIS page (0x0203/overshoot_time_s) is the Pico's answer for
+    // an UNSET no-safe-default field in this test -- the numeric value (42)
+    // is a placeholder exactly like abs_max_temp_c==0.0 on the real bench;
+    // what matters is the bit, not the number, per the audit's own framing.
+    stage_page_with_one_unset(0, false, ids, vals, 2, 0);
+
+    SafetyLinkClass fake_link;
+    memset(&fake_link, 0, sizeof(fake_link));
+
+    bool ok = safety_cfg_store_refetch(&fake_link, 0x0099);
+    TEST_CHECK(ok == true, "the refetch itself succeeds -- an unset entry is not a decode error");
+
+    safety_cfg_param_t p;
+    TEST_CHECK(safety_cfg_store_get_by_index(10, &p) && p.set == false,
+               "the entry the Pico reported UNSET reads back set=false from the ESP cache -- "
+               "NOT unconditionally promoted to true the way it used to be");
+    TEST_CHECK(safety_cfg_store_get_by_index(12, &p) && p.set == true && p.value.u16_val == 99,
+               "the OTHER entry on the same page, which the Pico DID report set, is unaffected -- "
+               "the bit is per-entry, not page-wide");
 }
 
 static void test_refetch_pages_until_more_is_false(void)
@@ -342,6 +477,53 @@ static void test_version_refuse_newer_than_firmware(void)
                "sec 1's own reasoning for the identical rule on the Pico's config_store");
 
     nvs_test_enable(false); // leave the shared stub state as every other test in this binary expects
+}
+
+// ---------------------------------------------------------------------------
+// 2026-08-27 audit fix (defect c): safety_cfg_store_init() used to stamp
+// s_fetched_at_us = esp_timer_get_time() whenever the blob it loaded from NVS
+// had config_crc != 0 -- treating a load off flash as if it were a live fetch
+// that just happened. On a board that boots with a real cache already on
+// flash (the ordinary case after the first commissioning), that made
+// safety_cfg_store_fetched_ms_ago() report ~0 ms -- i.e. board uptime, not
+// fetch age -- for values that might be a stale image days old, off a Pico
+// that has since been reflashed or recommissioned. This test proves the fix:
+// a cache loaded from NVS at boot must report fetched_ms_ago() == UINT32_MAX
+// ("never fetched THIS boot") until a real safety_cfg_store_refetch() runs,
+// even though its VALUES are already being served.
+// ---------------------------------------------------------------------------
+
+static void test_init_does_not_stamp_fetch_time_for_an_nvs_loaded_cache(void)
+{
+    TEST_SECTION("safety_cfg_store_init -- loading a real cache off NVS at boot must NOT "
+                 "count as \"just fetched\" (defect c, 2026-08-27 audit)");
+    reset_all();
+    nvs_test_enable(true);
+
+    // Persist a real, current-version, already-fetched cache -- exactly what
+    // a board that was commissioned on a PREVIOUS boot leaves on flash.
+    s_store.config_crc = 0xBEEF;
+    s_store.entries[0].set = 1;
+    s_store.entries[0].value.u8_val = 3;
+    TEST_CHECK(nvs_save_store() == ESP_OK, "setup: the current-version cache saves successfully");
+
+    // Simulate a fresh boot: in-RAM state reset, clock at 0, nothing fetched
+    // yet this boot -- then safety_cfg_store_init() is the ONLY thing under
+    // test, exactly as it runs during real firmware startup.
+    memset(&s_store, 0, sizeof(s_store));
+    s_fetched_at_us = -1;
+    esp_timer_test_set_now_us(5000ll * 1000ll); // clock has been running 5s since "boot"
+
+    TEST_CHECK(safety_cfg_store_init() == ESP_OK, "init succeeds");
+    TEST_CHECK(s_store.config_crc == 0xBEEF, "the persisted cache WAS loaded -- values are being served");
+    safety_cfg_param_t p;
+    TEST_CHECK(safety_cfg_store_get_by_index(0, &p) && p.set && p.value.u8_val == 3,
+               "the loaded value is real and readable");
+    TEST_CHECK(safety_cfg_store_fetched_ms_ago() == UINT32_MAX,
+               "but its age is honestly UNKNOWN this boot -- UINT32_MAX (\"never\"/null), "
+               "NOT ~0 ms manufactured from an NVS load that never talked to the Pico");
+
+    nvs_test_enable(false);
 }
 
 // ---------------------------------------------------------------------------
@@ -556,6 +738,8 @@ void run_test_safety_cfg_store(void)
     test_index_for_id_finds_known_and_rejects_unknown();
     test_no_refetch_when_crc_unchanged();
     test_refetch_when_crc_changes();
+    test_maybe_refetch_does_not_block_when_lock_is_busy();
+    test_refetch_carries_unset_bit_through_not_unconditional_true();
     test_refetch_pages_until_more_is_false();
     test_refetch_unknown_id_is_skipped_not_fatal();
     test_refetch_failure_leaves_cache_untouched();
@@ -569,4 +753,5 @@ void run_test_safety_cfg_store(void)
     test_unset_param_reports_set_false();
     test_lookup_by_id();
     test_version_refuse_newer_than_firmware();
+    test_init_does_not_stamp_fetch_time_for_an_nvs_loaded_cache();
 }

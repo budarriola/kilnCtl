@@ -15,7 +15,9 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from kilnctrl import config_presets  # noqa: E402
+import unittest.mock
+
+from kilnctrl import config_presets, zones_http_client  # noqa: E402
 from kilnctrl.devices import OkReason  # noqa: E402
 
 
@@ -175,6 +177,50 @@ class ApplyPresetTest(unittest.TestCase):
         self.assertEqual(zone1.pid_detail, "gain out of range")
         self.assertIn("FAILED", result.describe())
         self.assertIn("gain out of range", result.describe())
+
+
+class ApplyPresetZonesHostTest(unittest.TestCase):
+    """apply_preset(..., zones_host=...) -- the new HTTP write path,
+    exercised with zones_http_client.apply_zone_preset() mocked out (its own
+    GET/merge/POST logic is unit-tested in test_zones_http_client.py; this
+    only checks config_presets.py wires it correctly)."""
+
+    def test_zones_host_omitted_keeps_old_not_written_behavior(self):
+        preset = config_presets.load_preset_data("bench_fixture")
+        fake = FakeControl()
+        result = config_presets.apply_preset(fake, preset)
+        self.assertIsNone(result.zones_result)
+        self.assertIn("max_temp_c", result.not_written)
+
+    def test_zones_host_given_calls_zones_http_client_and_clears_not_written(self):
+        preset = config_presets.load_preset_data("bench_fixture")
+        fake = FakeControl()
+        ok_result = zones_http_client.ZonesApplyResult(ok=True, post_response="ok")
+        with unittest.mock.patch.object(zones_http_client, "apply_zone_preset",
+                                         return_value=ok_result) as mock_apply:
+            result = config_presets.apply_preset(fake, preset, zones_host="kiln.local")
+        mock_apply.assert_called_once()
+        called_host = mock_apply.call_args[0][0]
+        self.assertEqual(called_host, "kiln.local")
+        self.assertEqual(result.zones_result, ok_result)
+        self.assertEqual(result.not_written, [])
+        self.assertTrue(result.all_ok)
+
+    def test_zones_write_failure_makes_all_ok_false_even_if_pid_writes_succeeded(self):
+        """NEGATIVE TEST: a PID write can succeed while the zones HTTP write
+        fails its read-back verification -- all_ok must reflect BOTH, not
+        just the UART half."""
+        preset = config_presets.load_preset_data("bench_fixture")
+        fake = FakeControl()
+        failed_result = zones_http_client.ZonesApplyResult(
+            ok=False, mismatches=["zone 0.max_temp_c: expected 80.0, board reports 0.0"],
+            post_response="ok")
+        with unittest.mock.patch.object(zones_http_client, "apply_zone_preset",
+                                         return_value=failed_result):
+            result = config_presets.apply_preset(fake, preset, zones_host="kiln.local")
+        self.assertFalse(result.all_ok)
+        self.assertIn("max_temp_c", result.describe())
+        self.assertIn("FAILED", result.describe())
 
 
 if __name__ == "__main__":

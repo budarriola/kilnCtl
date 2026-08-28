@@ -57,6 +57,28 @@ bool config_params_id_at(size_t index, uint16_t *out_id, uint8_t *out_type);
 bool config_params_get(const config_store_record_t *rec, uint16_t id, uint8_t *out_type,
                         kilnlink_param_value_t *out_value);
 
+// 2026-08-27 audit fix (commissioning-write defect d): whether `id` names a
+// field `rec` currently considers SET. For one of the fields_set-gated ids
+// (config_store.h's CONFIG_STORE_SET_* bits -- tc_source/borrowed_zone_index/
+// tc_placement_mode/abs_max_temp_c/tc_type/ct_channel_map[0..2]/
+// max_rate_c_per_min/mains_voltage_v/max_expected_power_w) this reads the
+// matching bit out of rec->fields_set (config_store_field_is_set()). Every
+// OTHER id in this table has a real compiled-in default and is ALWAYS
+// reported set -- CONFIG_REFERENCE.md secs 2-5's threshold fields are never
+// "unset" in any sense a caller needs to represent; only the no-safe-default
+// fields can be. Returns false (matching config_params_get()'s own contract)
+// for an id this table does not recognise.
+//
+// The one and only intended caller is link_task.c's link_task_send_config_
+// page(), which is what closes the defect this exists for: before this
+// function existed, that sender emitted every field's raw value with no way
+// to say "this one is still unset", and the ESP's cache then marked every
+// entry `set = true` unconditionally (KilnFW/App/drivers/safety_cfg_store.c)
+// -- an operator-facing page could show abs_max_temp_c "{set:true, value:0}"
+// for a field this processor itself considers UNSET, and 0 on that specific
+// field means the overtemperature guard NEVER TRIPS.
+bool config_params_is_set(const config_store_record_t *rec, uint16_t id);
+
 // Stages `value` (already decoded off the wire, `type` already checked
 // against kilnlink_param_value.h's own closed tag set by the SET_PARAM
 // codec) into the field `id` names inside `rec`, updating the corresponding

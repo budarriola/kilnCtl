@@ -319,6 +319,18 @@ bool zones_config_is_valid(void)
     return true;
 }
 
+// B2 (opus review, 2026-08-27): begin_run_locked() now refuses to start
+// while a zone current sweep is active -- see zones_current_sweep_is_active()'s
+// doc comment (zones_http.h). Settable so test_run_refuses_while_zone_sweep_
+// is_active() below can exercise the real refusal; default false so the real
+// STEPPING-loop tests elsewhere in this file, which call begin_run_locked()
+// for real, are unaffected.
+static bool s_test_sweep_active = false;
+bool zones_current_sweep_is_active(void)
+{
+    return s_test_sweep_active;
+}
+
 bool zones_config_set_model(uint8_t zone_index, float k_dc, float tau_s, float dead_time_s)
 {
     (void)zone_index; (void)k_dc; (void)tau_s; (void)dead_time_s;
@@ -770,6 +782,48 @@ static void test_manual_abort_releases_autotune_ownership(void)
     TEST_CHECK(st.state == AUTOTUNE_ENGINE_ABORTED, "sanity: the abort actually landed");
 }
 
+// B2 (opus review, 2026-08-27): begin_run_locked() must refuse while a zone
+// current sweep is active. Same real-mutex-no-real-task pattern
+// start_stepping_run() above uses -- autotune_engine_run() itself, including
+// begin_run_locked()'s real guard_cfg setup, runs for real; only the
+// never-succeeding task spawn is bypassed.
+static void test_run_refuses_while_zone_sweep_is_active(void)
+{
+    TEST_SECTION("autotune_engine_run() refuses while a zone current sweep is active (B2)");
+    static MAX31856BusClass bus;
+    static SafetyLinkClass safety;
+    memset(&s_at, 0, sizeof(s_at));
+    memset(&bus, 0, sizeof(bus));
+    memset(&safety, 0, sizeof(safety));
+    bus.initialized = true;
+    s_at.thermo_bus = &bus;
+    s_at.safety = &safety;
+    s_at.lock = xSemaphoreCreateMutex();
+    TEST_CHECK(s_at.lock != NULL, "test setup: lock must be creatable");
+
+    s_stub_max_temp_c = 500.0f;
+    s_stub_ch0_ok = true;
+    s_test_sweep_active = true;
+
+    char errbuf[96] = {0};
+    bool ok = autotune_engine_run(0, 0.5f, errbuf, sizeof(errbuf));
+
+    TEST_CHECK(!ok, "B2: a live zone sweep must refuse the autotune run, not merely warn");
+    TEST_CHECK(strstr(errbuf, "sweep") != NULL, "the refusal must name the sweep specifically");
+
+    // Control case: with no sweep active, the identical setup succeeds --
+    // proves the refusal above is really about the sweep, not some other
+    // side effect of this test's setup.
+    s_test_sweep_active = false;
+    memset(&s_at, 0, sizeof(s_at));
+    s_at.thermo_bus = &bus;
+    s_at.safety = &safety;
+    s_at.lock = xSemaphoreCreateMutex();
+    errbuf[0] = '\0';
+    ok = autotune_engine_run(0, 0.5f, errbuf, sizeof(errbuf));
+    TEST_CHECK(ok, "control: with no sweep active, the identical setup must succeed");
+}
+
 void run_test_autotune_engine_prestart(void)
 {
     test_run_refuses_before_start();
@@ -804,6 +858,8 @@ void run_test_autotune_engine_prestart(void)
     test_global_guard_trip_asserts_fault_source();
     test_next_autotune_run_clears_prior_global_fault_source();
     test_autotune_relay_switching_is_counted();
+
+    test_run_refuses_while_zone_sweep_is_active();
 }
 
 int main(void)

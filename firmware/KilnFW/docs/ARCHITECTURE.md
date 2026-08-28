@@ -41,7 +41,6 @@ FreeRTOS convention: higher = more urgent.
 | `wifi_prov_owner` | 5 | 4096 | **Single writer** of `s_wifi` — all `esp_wifi_*`/NVS Wi-Fi calls, including the driver's own `on_wifi_event`/`on_ip_event` handlers, routed through the same queue as external callers | `App/drivers/wifi_prov.c:1392` |
 | `thermo_uart_bridge` | 5 | 4096 | UART bridge subsystem task, THERMO command family — dispatches into `thermo_owner` | `App/drivers/uart_bridge.c:521` |
 | `io_uart_bridge` | 5 | 4096 | UART bridge subsystem task, IO command family — dispatches into `kiln_io_owner` | `App/drivers/uart_bridge.c:956` |
-| `display_uart_bridge` | 5 | 4096 | UART bridge subsystem task, DISPLAY command family. **Dead code as of 10.14's Phase 5 note** — `main.c` no longer starts it, the on-device LVGL UI replaced it; not yet deleted | `App/drivers/uart_bridge.c:1171` |
 | `touch_uart_bridge` | 5 | 3072 | UART bridge subsystem task, TOUCH command family | `App/drivers/uart_bridge.c:1268` |
 | `safety_uart_bridge` | 5 | 4096 | UART bridge subsystem task, SAFETY command family (isolated-link cache reads, mostly fire-and-forget) | `App/drivers/uart_bridge.c:1389` |
 | `system_uart_bridge` | 5 | 3072 | UART bridge subsystem task, SYSTEM command family (`FACTORY_RESET` reboots immediately after, so blocking briefly is accepted) | `App/drivers/uart_bridge.c:1476` |
@@ -270,15 +269,15 @@ lands," not a separate phase — it landed piecemeal with Phases 1/2/4:
 - `wifi_provision_http.c` still needs to be confirmed as fully migrated
   onto `wifi_prov_owner`'s queue now that Phase 4 is done (not re-verified
   as part of this document).
-- **`display_uart_bridge`** (`uart_bridge.c`'s `display_bridge_task`,
-  DISPLAY command family) is confirmed dead code — `main.c` no longer calls
-  `uart_bridge_start_display_task()` (function appears only in a comment at
-  main.c:821; the task creation inside `uart_bridge_start_display_task()`
-  body at uart_bridge.c:1155–1171 is never invoked). Replaced by the
-  on-device LVGL UI. See TODO.md section 10.1 for the PC-side decision
-  pending on whether to delete stale MCP tools, restore a handler, or
-  leave as-is. Explicitly out of scope for the owner-task effort per the
-  plan (`moonlit-wishing-brook.md`).
+- **`display_uart_bridge`** (`uart_bridge.c`'s `display_bridge_task`, DISPLAY
+  command family) was confirmed dead code — `main.c` never called
+  `uart_bridge_start_display_task()` — and removed 2026-08-27, along with the
+  twelve-plus stale `display_*` MCP tools on the PC side. Replaced by the
+  on-device LVGL UI. `DISPLAY_CMD_*`/`UART_TASK_ID_DISPLAY` stay defined in
+  `uart_task_ids.h` as wire-protocol constants: kilnctrl's `gui.py`/
+  `actions.py` Display panel still speaks them (a separate, still-live front
+  end left out of that cleanup), even though nothing on the firmware side
+  answers. See TODO.md section 10.1.
 - **OTA handlers** (`ota_http.c`) deliberately stay on the shared HTTP
   worker — they hold a streaming request body open across a whole
   transfer, which is a reason to keep them there by design, not a gap.

@@ -72,7 +72,11 @@
 //               erased flash, this build's own 0x01 "installed" marker,
 //               or any garbage byte) decodes as installed, the safe
 //               default. See unpack_v2_fields()'s comment at this offset.
-//    205   299  reserved, 0xFF-filled (headroom for a future field)
+//    205     4  max_expected_power_w (f32 LE); gated by
+//               CONFIG_STORE_SET_MAX_EXPECTED_POWER_W, carved out of the
+//               front of the former 299 B reserved block, same convention as
+//               REC_OFF_SAFETY_TC_INSTALLED above
+//    209   295  reserved, 0xFF-filled (headroom for a future field)
 //    504     4  record_crc32, over bytes [0, 504)
 //    508     4  reserved, 0xFF-filled (pad to CONFIG_STORE_RECORD_LEN)
 //    512  total = CONFIG_STORE_RECORD_LEN
@@ -126,8 +130,9 @@
 #define REC_CT_CAL_CHANNEL_LEN         9u /* calibrated u8(1) + gain f32(4) + offset f32(4) */
 #define REC_OFF_SAFETY_TC_INSTALLED \
     (REC_OFF_CT_CAL + CONFIG_STORE_CT_CAL_NUM_CHANNELS * REC_CT_CAL_CHANNEL_LEN) /* 204 */
-#define REC_OFF_RESERVED               (REC_OFF_SAFETY_TC_INSTALLED + 1u) /* 205 */
-#define REC_RESERVED_LEN               299u
+#define REC_OFF_MAX_EXPECTED_POWER_W   (REC_OFF_SAFETY_TC_INSTALLED + 1u) /* 205 */
+#define REC_OFF_RESERVED               (REC_OFF_MAX_EXPECTED_POWER_W + 4u) /* 209 */
+#define REC_RESERVED_LEN               295u
 
 // The one byte at REC_OFF_SAFETY_TC_INSTALLED is NOT a 0/1 bool -- see this
 // file's own layout-table comment above for the hardware-confirmed reason:
@@ -326,6 +331,8 @@ void config_store_pack(const config_store_record_t *rec,
                                             ? SAFETY_TC_INSTALLED_MARKER_INSTALLED
                                             : SAFETY_TC_INSTALLED_MARKER_NOT_INSTALLED;
 
+    put_f32_le(&out[REC_OFF_MAX_EXPECTED_POWER_W], rec->max_expected_power_w);
+
     memcpy(&out[REC_OFF_RESERVED], rec->reserved, sizeof(rec->reserved));
     // bytes [REC_OFF_RESERVED + REC_RESERVED_LEN, REC_OFF_CRC) already 0xFF
     // from the initial memset -- further headroom.
@@ -433,6 +440,16 @@ static void unpack_v2_fields(const uint8_t *in, config_store_record_t *out)
     // corrects.
     out->safety_tc_installed =
         (in[REC_OFF_SAFETY_TC_INSTALLED] == SAFETY_TC_INSTALLED_MARKER_NOT_INSTALLED) ? 0u : 1u;
+
+    // Raw decode only -- CONFIG_STORE_SET_MAX_EXPECTED_POWER_W (already read
+    // into out->fields_set above) is what gates whether any caller may trust
+    // this value. A record written before this field existed has whatever
+    // byte the OLD reserved-block fill (0xFF, or an old build's own
+    // memcpy'd rec->reserved) happened to leave here, which can decode as
+    // NaN/Inf/garbage -- exactly why no consumer may read this field without
+    // checking the bit first, same discipline as abs_max_temp_c and the other
+    // fields_set-gated fields.
+    out->max_expected_power_w = get_f32_le(&in[REC_OFF_MAX_EXPECTED_POWER_W]);
 
     memcpy(out->reserved, &in[REC_OFF_RESERVED], sizeof(out->reserved));
 }
@@ -687,6 +704,10 @@ void config_store_default(config_store_record_t *out)
     out->estop_debounce_ms = 50u;
     out->watchdog_timeout_ms = 1000u;
     out->config_check_period_s = 10u;
+
+    // max_expected_power_w left at memset(0) above -- IRRELEVANT, fields_set
+    // gates it (same "zero is never mistaken for a real default" reasoning
+    // as the section 1 fields above).
 
     // ct_cal: left at the memset(0) above -- calibrated == false on every
     // channel, gain/offset == 0 but IGNORED (never read) as a consequence.

@@ -62,11 +62,13 @@ extern "C" {
 
 /* Every CONFIG_REFERENCE.md secs 1-5 tunable, per COMMISSIONING.md sec 2.1's
  * param_id table -- 8 (sec 1) + 16 (sec 2) + 24 (sec 3) + 5 (sec 4) +
- * 4 (sec 5) = 57, plus safety_tc_installed (0x0211, 2026-08-23) = 58. Bump this (and safety_cfg_store.c's SAFETY_CFG_PARAM_TABLE)
- * only when CONFIG_REFERENCE.md itself grows a field -- ids are permanent
- * (COMMISSIONING.md sec 2.1: "a field that is removed leaves its id burned,
- * never reused"), so this count only ever goes up. */
-#define SAFETY_CFG_PARAM_COUNT 58u
+ * 4 (sec 5) = 57, plus safety_tc_installed (0x0211, 2026-08-23) = 58, plus
+ * max_expected_power_w (0x0319, ROADMAP.md M12) = 59. Bump this (and
+ * safety_cfg_store.c's SAFETY_CFG_PARAM_TABLE) only when CONFIG_REFERENCE.md
+ * itself grows a field -- ids are permanent (COMMISSIONING.md sec 2.1: "a
+ * field that is removed leaves its id burned, never reused"), so this count
+ * only ever goes up. */
+#define SAFETY_CFG_PARAM_COUNT 59u
 
 /* One row of safety_cfg_store_get_by_index()'s output -- everything
  * safety_cfg_http.c's GET handler needs to emit one `params[]` entry.
@@ -123,11 +125,19 @@ esp_err_t safety_cfg_store_init(void);
  * comparison itself, since it has no reference to what "live" currently is. */
 uint16_t safety_cfg_store_cached_crc(void);
 
-/* Milliseconds since the last successful refetch, or UINT32_MAX if nothing
- * has ever been fetched this boot (a fresh load from NVS at boot counts as
- * "just fetched" -- see safety_cfg_store_init()'s own note on this -- so this
- * only reads UINT32_MAX before the very first safety_cfg_store_init() call
- * completes, which no caller can observe). */
+/* Milliseconds since the last successful LIVE refetch (safety_cfg_store_
+ * refetch(), an actual round trip to the Pico), or UINT32_MAX if nothing has
+ * been fetched THIS BOOT. 2026-08-27 audit fix (defect c): loading a cache
+ * from NVS at boot does NOT count as "just fetched" -- it never did anything
+ * live, and stamping the clock for it used to make this function report
+ * board uptime instead of fetch age, claiming "fetched 10 min ago" for a
+ * value that could be a stale image days old off a Pico that has since been
+ * reflashed. A board with a real NVS-loaded cache and no refetch yet this
+ * boot correctly reads UINT32_MAX ("never", -> the API's `"fetched_ms_ago":
+ * null`) even though safety_cfg_store_get_by_index() is already serving real
+ * values for it -- "the values are known" and "how stale are they" are
+ * deliberately answered by two different calls, and only the second one may
+ * ever be null. */
 uint32_t safety_cfg_store_fetched_ms_ago(void);
 
 /* How many known parameters this cache tracks -- always SAFETY_CFG_PARAM_COUNT
@@ -164,7 +174,18 @@ bool safety_cfg_store_lookup(uint16_t param_id, uint8_t *out_type, const char **
  * untouched) if any page request fails (timeout, decode error) -- an
  * interrupted refetch must not leave the cache holding a MIX of old and new
  * pages with no way to tell which is which, so nothing is applied until
- * every page has been read successfully. `link` may not be NULL. */
+ * every page has been read successfully. `link` may not be NULL.
+ *
+ * SAFE TO CALL FROM MORE THAN ONE TASK (2026-08-27 audit fix, H5): this used
+ * to be called only from safety_poll_task (via safety_cfg_store_maybe_
+ * refetch()); safety_cfg_http.c's commissioning POST handler now also calls
+ * it directly, from the httpd worker task, to force a live read-back after a
+ * commit. This function takes an internal mutex around its whole body, so
+ * two concurrent callers serialize rather than racing s_store/s_dirty/the
+ * flash-worker flush -- see safety_cfg_store.c's s_store_lock/s_dirty
+ * comments for the full story. A caller on the httpd worker should expect to
+ * occasionally block here for as long as a concurrent safety_poll_task
+ * refetch takes (bounded by SAFETY_CFG_STORE_REFETCH_BUDGET_MS). */
 bool safety_cfg_store_refetch(SafetyLinkClass *link, uint16_t config_crc);
 
 /* The fetch-on-change trigger (COMMISSIONING.md sec 3, this file's own top

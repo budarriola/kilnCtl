@@ -74,6 +74,14 @@
 // Known gaps, documented rather than silently missing:
 // - **Zone names.** zones_http.h exposes no public getter for a zone's
 //   configured name, so each zone row shows "Zone N".
+//
+// 2026-08-27+1 owner request ("the user should be able to assign names to
+// relays not assigned to zones as well"): non-zone-owned relay buttons now
+// show the operator-entered zones_config_get_relay_name() label in place of
+// "Relay N" whenever one has been saved -- see refresh_cb()'s relay-label
+// block below. Zone-owned relays never show a custom name (relay_names_cfg_t
+// is scoped to relays not claimed by any zone), so their "(zone)" label is
+// unchanged.
 
 static const char *TAG = "ui_page_temperature";
 
@@ -236,17 +244,33 @@ static void refresh_cb(lv_timer_t *timer)
          * on why this can never be a build-time-only check. */
         bool zone_owned = relay_is_zone_owned((uint8_t)(r + 1));
 
-        char label_buf[32];
+        char label_buf[48];
         if (!ds.io_ready) {
             snprintf(label_buf, sizeof(label_buf), "Relay %u\nno board", (unsigned)(r + 1));
         } else if (zone_owned) {
             /* Legible reason, not a control that silently does nothing --
              * this file's header comment / the owner's own requirement:
              * "an operator who cannot see the relay state loses information
-             * they have today". */
+             * they have today". Zone-owned relays are never operator-named
+             * (relay_names_cfg_t is scoped to relays NOT claimed by a zone --
+             * see zones_http.h's own header comment on that pair), so this
+             * branch always uses the generic "Relay N" label. */
             snprintf(label_buf, sizeof(label_buf), "Relay %u\n%s (zone)", (unsigned)(r + 1), on ? "ON" : "OFF");
         } else {
-            snprintf(label_buf, sizeof(label_buf), "Relay %u\n%s", (unsigned)(r + 1), on ? "ON" : "OFF");
+            /* Owner request (zones_http.h's relay_names_cfg_t header
+             * comment): "the user should be able to assign names to relays
+             * not assigned to zones as well". zones_config_get_relay_name()
+             * returns true with an empty string for a relay that was never
+             * named -- fall back to the generic "Relay N" label in that
+             * case, same convention every other name getter in this
+             * codebase uses (zones_config_get_name() etc). */
+            char rname[RELAY_NAME_MAX_LEN + 1] = "";
+            (void)zones_config_get_relay_name((uint8_t)(r + 1), rname, sizeof(rname));
+            if (rname[0] != '\0') {
+                snprintf(label_buf, sizeof(label_buf), "%s\n%s", rname, on ? "ON" : "OFF");
+            } else {
+                snprintf(label_buf, sizeof(label_buf), "Relay %u\n%s", (unsigned)(r + 1), on ? "ON" : "OFF");
+            }
         }
         lv_label_set_text(s_relay_label[r], label_buf);
 

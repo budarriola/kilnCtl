@@ -259,6 +259,15 @@ bool run_state_boot_record_interrupted(void) { return false; }
 // temperature/relay state -- only the ORDER interlocks run in relative to
 // auth, decision 3's actual subject).
 uint8_t zones_config_get_thermo_count(void) { return 0; }
+
+// B2 (opus review, 2026-08-27): ota_http_check_interlocks() now refuses
+// early while a zone current sweep is active -- see
+// zones_current_sweep_is_active()'s doc comment (zones_http.h). A settable
+// stub (default false) so this file's existing interlock-ordering tests are
+// unaffected, and test_ota_http_check_interlocks_refuses_during_zone_sweep()
+// below can exercise the new refusal itself.
+static bool s_test_sweep_active = false;
+bool zones_current_sweep_is_active(void) { return s_test_sweep_active; }
 bool zones_config_get_relay_mask(uint8_t zone_index, uint8_t *out_mask)
 { (void)zone_index; if (out_mask) *out_mask = 0; return false; }
 float zones_config_apply_cal(uint8_t zone_index, float raw_c) { (void)zone_index; return raw_c; }
@@ -595,7 +604,8 @@ static void test_missing_auth_header_never_reaches_interlock(void)
     TEST_CHECK(!g_probe_interlock_called,
               "DECISION 3: the interlock check (which can leak a live zone temperature in its refusal "
               "text) must NEVER run for an unauthenticated caller -- profile_executor_get_status() "
-              "(ota_http_check_interlocks()'s first call) must not have been reached");
+              "(the first call once ota_http_check_interlocks() gets past its own zone-sweep-active "
+              "check, B2) must not have been reached");
 }
 
 static void test_authenticated_request_does_reach_interlock(void)
@@ -651,6 +661,45 @@ static void test_authenticated_request_does_reach_interlock(void)
 }
 
 // ---------------------------------------------------------------------------
+// B2 (opus review, 2026-08-27) -- ota_http_check_interlocks() must refuse,
+// specifically because of the sweep and BEFORE ever consulting profile/
+// autotune/link state, while zones_current_sweep_is_active() is true.
+// ---------------------------------------------------------------------------
+
+static void test_check_interlocks_refuses_during_zone_sweep(void)
+{
+    TEST_SECTION("ota_http_check_interlocks() refuses while a zone current sweep is active (B2)");
+    g_probe_interlock_called = false;
+    s_test_sweep_active = true;
+
+    char reason[OTA_INTERLOCK_REASON_MAX];
+    reason[0] = '\0';
+    ota_interlock_result_t r = ota_http_check_interlocks(false, reason, sizeof(reason));
+
+    TEST_CHECK(r == OTA_INTERLOCK_REFUSED, "a live zone sweep must refuse the update, not merely warn");
+    TEST_CHECK(strstr(reason, "sweep") != NULL, "the refusal reason must name the sweep, not a generic message");
+    TEST_CHECK(!g_probe_interlock_called,
+              "the sweep-active check must short-circuit BEFORE profile_executor_get_status() runs -- "
+              "cheapest and orthogonal to kiln state, same reasoning as the update-mutex check");
+
+    s_test_sweep_active = false;
+}
+
+static void test_check_interlocks_ok_when_no_sweep(void)
+{
+    TEST_SECTION("ota_http_check_interlocks() is unaffected when no sweep is running (B2 control case)");
+    g_probe_interlock_called = false;
+    s_test_sweep_active = false;
+
+    char reason[OTA_INTERLOCK_REASON_MAX];
+    reason[0] = '\0';
+    ota_http_check_interlocks(false, reason, sizeof(reason));
+
+    TEST_CHECK(g_probe_interlock_called,
+              "with no sweep active, the check must proceed past the new gate into the real interlock logic");
+}
+
+// ---------------------------------------------------------------------------
 
 void run_test_ota_http(void)
 {
@@ -671,6 +720,9 @@ void run_test_ota_http(void)
 
     test_missing_auth_header_never_reaches_interlock();
     test_authenticated_request_does_reach_interlock();
+
+    test_check_interlocks_refuses_during_zone_sweep();
+    test_check_interlocks_ok_when_no_sweep();
 }
 
 int main(void)

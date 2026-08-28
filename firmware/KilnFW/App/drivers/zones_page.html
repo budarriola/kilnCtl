@@ -256,10 +256,48 @@ is actually wired into IT, not to match a zone; if the two ever disagree, the sa
 processor's temperature cross-check will disagree with the main board for no reason
 other than a wrong setting here.</p>
 
+<!-- 2026-08-27+2 (Task 3): the safety thermocouple/relay's LIVE reading,
+     READ-ONLY -- reassigning either is not an operator decision (they are
+     fixed hardware, K4 and the RP2040's own MAX31856), so there is
+     deliberately no input here, only text. The safety-processor link this
+     data travels over is being repaired by another pass as of this write;
+     "UNSET" (not 0/off) is what a value not yet trustworthy renders as --
+     see zones_http.h's zone_safety_wiring_t doc comment. -->
+<label>Safety processor wiring (read-only)</label>
+<p class="hint">The RP2040 safety processor's own thermocouple and its relay (K4) --
+shown here for the same wiring picture the zones above give, never editable from
+this page.</p>
+<div id="safetyWiring" class="hint"></div>
+
+<!-- 2026-08-27+2 (Task 2): CT-to-zone mapping mismatch warnings, computed
+     from the same GET /api/zones response (ct_warn_mask) -- silent for any
+     zone whose normal current was never measured (Task 1), a WARNING never
+     a trip. See zones_http.h's zones_ct_mapping_mismatch() doc comment. -->
+<div id="ctWarnings"></div>
+
 <div id="zones"><p class="empty">Loading&hellip;</p></div>
 
 <button id="saveBtn" type="button">Save</button>
 <p id="msg"></p>
+
+<!-- 2026-08-27+2 (Task 1): per-zone normal-current measurement sweep.
+     Energizes one zone's relay(s) at a time and records the steady-state
+     current SaftyFW's current-sense channels report -- see
+     zones_http.c's ZONE_SWEEP_SETTLE_MS/ZONE_SWEEP_SAMPLE_MS comment for
+     the timing and its justification. The button itself carries no
+     confirmation dialog beyond the refusal reasons the board already
+     enforces (profile running, autotune running, link down, trip latched,
+     invalid config) -- those are real interlocks; a client-side "are you
+     sure" would only be decoration on top of them. -->
+<h2>Measure Zone Normal Current</h2>
+<p class="hint">Energizes each configured zone's relay(s) ONE AT A TIME, in turn, and
+records its steady-state current -- used by the mismatch warning below the zone list
+to catch a current-transformer plugged into the wrong jack. Refuses to run while a
+profile or autotune is active, while the safety link is down, or while a trip is
+latched. Interruptible with Abort; every exit path leaves every relay off.</p>
+<button id="sweepStartBtn" type="button">Measure Normal Current</button>
+<button id="sweepAbortBtn" type="button" style="display:none;">Abort</button>
+<p id="sweepStatus" class="hint"></p>
 
 <h2>PID Autotune</h2>
 <h3>Step test (start here)</h3>
@@ -730,6 +768,86 @@ function renderZones() {
   renderRelayNames();
 }
 
+/* Task 3: renders data.safety_wiring read-only -- "UNSET" (not 0/off) for
+   anything the link_up/tc_temp_valid flags say is not currently
+   trustworthy, per zone_safety_wiring_t's doc comment (zones_http.h). */
+function renderSafetyWiring(sw) {
+  var el = document.getElementById('safetyWiring');
+  if (!sw || !sw.link_up) {
+    el.textContent = 'Safety link is down -- nothing to show.';
+    return;
+  }
+  var tcText = sw.tc_temp_valid ? (sw.tc_temp_c.toFixed(1) + ' °C') : 'UNSET';
+  var relayText = sw.relay_energized ? 'ENERGIZED' : 'off';
+  el.textContent = 'Safety thermocouple: ' + tcText + (sw.tc_fault ? ' (fault bits 0x' + sw.tc_fault.toString(16) + ')' : '') +
+    '  |  Safety relay (K4): ' + relayText;
+}
+
+/* Task 2: bit N-1 of ct_warn_mask = zone N (1-based) is currently commanded
+   on and its live current mismatches its Task 1 measured normal -- a
+   WARNING, never a trip; see zones_ct_mapping_mismatch()'s doc comment. */
+function renderCtWarnings(ctWarnMask, zones) {
+  var el = document.getElementById('ctWarnings');
+  el.innerHTML = '';
+  if (!ctWarnMask) return;
+  var lines = [];
+  for (var i = 0; i < (zones ? zones.length : 0); i++) {
+    if (ctWarnMask & (1 << i)) {
+      var name = (zones[i] && zones[i].name) ? zones[i].name : ('Zone ' + (i + 1));
+      lines.push(window.kcEscapeHtml(name));
+    }
+  }
+  if (lines.length === 0) return;
+  el.innerHTML = '<p class="hint" style="color:#b00;">CT mapping warning: ' + lines.join(', ') +
+    ' -- the current transformer feeding this zone may be on the wrong jack ' +
+    '(reading does not match its measured normal current). Not a trip -- verify wiring.</p>';
+}
+
+var sweepPollTimer = null;
+
+function renderSweepStatus(st) {
+  var msg = document.getElementById('sweepStatus');
+  var startBtn = document.getElementById('sweepStartBtn');
+  var abortBtn = document.getElementById('sweepAbortBtn');
+  if (!st) { msg.textContent = ''; return; }
+  var running = st.state === 'running';
+  startBtn.disabled = running;
+  abortBtn.style.display = running ? '' : 'none';
+  var text = 'State: ' + st.state;
+  if (running) text += ' -- zone ' + (st.zone_index + 1) + ' (' + st.zones_done + '/' + st.zones_total + ' done)';
+  if (st.reason) text += ' -- ' + st.reason;
+  msg.textContent = text;
+  if (running && !sweepPollTimer) {
+    sweepPollTimer = setTimeout(pollSweepStatus, 1000);
+  } else if (!running && sweepPollTimer) {
+    clearTimeout(sweepPollTimer);
+    sweepPollTimer = null;
+    /* Sweep just finished -- reload the config so the freshly measured
+       normal_current_a/measured fields (and any resulting ct_warn_mask
+       change) show up without a manual page refresh. */
+    loadCurrent();
+  }
+}
+
+function pollSweepStatus() {
+  sweepPollTimer = null;
+  fetch('/api/zones/current_sweep/status').then(function (r) { return r.json(); }).then(renderSweepStatus)
+    .catch(function () { /* transient -- next poll (or the next page load) will retry */ });
+}
+
+document.getElementById('sweepStartBtn').addEventListener('click', function () {
+  fetch('/api/zones/current_sweep/start', { method: 'POST' }).then(function (r) { return r.json(); }).then(function (data) {
+    document.getElementById('sweepStatus').textContent = data.ok ? 'Started.' : ('Refused: ' + data.reason);
+    if (data.ok) pollSweepStatus();
+  }).catch(function (err) {
+    document.getElementById('sweepStatus').textContent = 'Could not reach the board: ' + String(err);
+  });
+});
+document.getElementById('sweepAbortBtn').addEventListener('click', function () {
+  fetch('/api/zones/current_sweep/abort', { method: 'POST' });
+});
+pollSweepStatus(); /* pick up a sweep already in progress from a previous page load */
+
 function loadCurrent() {
   /* The fetch/parse step and the render step are kept in SEPARATE catch
      scopes on purpose. They used to share one .catch(), which meant any
@@ -756,6 +874,8 @@ function loadCurrent() {
       document.getElementById('safetyTcType').innerHTML = tcTypeOptionsHtml(data.safety_tc_type);
       renderZones();
       populateAutotuneZones();
+      renderSafetyWiring(data.safety_wiring);
+      renderCtWarnings(data.ct_warn_mask, data.zones);
     } catch (err) {
       if (window.console) console.error('zones page render failed', err);
       document.getElementById('zones').innerHTML =

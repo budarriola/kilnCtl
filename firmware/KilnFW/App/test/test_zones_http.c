@@ -239,6 +239,108 @@ esp_err_t thermo_owner_command_config_channel(uint8_t channel, uint8_t tc_type, 
     (void)auto_convert;
     return ESP_OK;
 }
+esp_err_t MAX31856_read_all(MAX31856BusClass *bus, MAX31856Reading *out, size_t max_readings,
+                            size_t *out_count)
+{
+    (void)bus;
+    (void)out;
+    (void)max_readings;
+    if (out_count) *out_count = 0;
+    return ESP_OK;
+}
+
+// ---- thermo_combine.h -- only reached from zone_sweep_read_zone_temp(),
+// itself only reached from inside zone_sweep_task(), which the host tests
+// never run (xTaskCreate() is stubbed to never invoke its task function --
+// see stubs/freertos/task.h). Exists purely so the translation unit links.
+float thermo_combine(const float *channel_c, const bool *channel_ok, uint8_t channel_count,
+                     uint8_t thermo_mask, bool *out_valid)
+{
+    (void)channel_c;
+    (void)channel_ok;
+    (void)channel_count;
+    (void)thermo_mask;
+    if (out_valid) *out_valid = false;
+    return NAN;
+}
+
+// ---- kiln_io.h -- Task 1's sweep. kiln_io_set_relay_mask()/
+// kiln_io_all_relays_off() are only reached from inside zone_sweep_task()
+// (never run by these tests, same reasoning as MAX31856_read_all() above);
+// kiln_io_get_relay_shadow() IS reachable from zones_ct_mapping_warn_mask(),
+// which some tests below call directly with a non-NULL io/safety pair, so
+// this returns a fixed, documented value rather than an arbitrary one.
+esp_err_t kiln_io_set_relay_mask(kiln_io_t *io, uint8_t mask, uint8_t value)
+{
+    (void)io;
+    (void)mask;
+    (void)value;
+    return ESP_OK;
+}
+esp_err_t kiln_io_all_relays_off(kiln_io_t *io)
+{
+    (void)io;
+    return ESP_OK;
+}
+static uint8_t s_test_relay_shadow = 0;
+uint8_t kiln_io_get_relay_shadow(const kiln_io_t *io)
+{
+    (void)io;
+    return s_test_relay_shadow;
+}
+
+// ---- kiln_io_owner.h -- B1 fix (opus review, 2026-08-27): the sweep's
+// hardware bindings (zone_sweep_hw_energize()/zone_sweep_hw_force_off() in
+// zones_http.c) now route through the owner module instead of calling
+// kiln_io_set_relay_mask()/kiln_io_all_relays_off() directly. Call counters
+// let test_zone_sweep_hw_bindings_route_through_owner() below prove that
+// wiring directly, not just that the symbols link.
+static int s_test_owner_set_relay_mask_calls = 0;
+static int s_test_owner_all_relays_off_calls = 0;
+static uint8_t s_test_owner_last_mask = 0;
+static uint8_t s_test_owner_last_value = 0;
+kiln_io_owner_relay_result_t kiln_io_owner_command_set_relay_mask(uint8_t mask, uint8_t value,
+                                                                   uint32_t *out_safety_sources)
+{
+    s_test_owner_set_relay_mask_calls++;
+    s_test_owner_last_mask = mask;
+    s_test_owner_last_value = value;
+    if (out_safety_sources) *out_safety_sources = 0;
+    return KILN_IO_OWNER_RELAY_OK;
+}
+esp_err_t kiln_io_owner_command_all_relays_off(void)
+{
+    s_test_owner_all_relays_off_calls++;
+    return ESP_OK;
+}
+
+// ---- profile_executor.h / autotune_engine.h -- zones_current_sweep_start()'s
+// refusal checks. Tests that exercise the refusal path set these through the
+// small setters below rather than linking the real (huge) modules.
+static profile_exec_status_t s_test_profile_status;
+static bool s_test_autotune_active = false;
+void profile_executor_get_status(profile_exec_status_t *out)
+{
+    if (out) *out = s_test_profile_status;
+}
+bool autotune_engine_is_active(void)
+{
+    return s_test_autotune_active;
+}
+
+// ---- safety_link.h -- same reasoning: a small test-controlled stand-in
+// instead of linking the real (hardware-owning) module.
+static bool s_test_safety_link_up = false;
+static safety_link_status_t s_test_safety_status;
+esp_err_t safety_link_get_status(SafetyLinkClass *link, safety_link_status_t *out)
+{
+    (void)link;
+    if (out) {
+        *out = s_test_safety_status;
+        out->link_up = s_test_safety_link_up;
+    }
+    return ESP_OK;
+}
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -1628,6 +1730,1030 @@ static void test_zones_post_relay_name_too_long_rejected_and_commits_nothing(voi
     nvs_test_clear();
 }
 
+// ---------------------------------------------------------------------------
+// Task 1: normal-current sweep -- refusal logic, ceiling predicate, and the
+// persisted-result getter/setter.
+// ---------------------------------------------------------------------------
+
+static void test_zone_sweep_check_refusal_each_reason_fires(void)
+{
+    // Baseline: every input in the "allow" state -- must return OK. This is
+    // what proves the OTHER branches below are actually testing something:
+    // without this, a refusal function that always returned the same
+    // enumerator would pass every "returns X for input X" check trivially.
+    TEST_CHECK(zone_sweep_check_refusal(false, true, true, 1, false, false, true, false, false) == ZONE_SWEEP_REFUSE_OK,
+              "all-clear inputs refuse nothing");
+
+    TEST_CHECK(zone_sweep_check_refusal(true, true, true, 1, false, false, true, false, false) ==
+                  ZONE_SWEEP_REFUSE_ALREADY_RUNNING,
+              "already_running is refused");
+    TEST_CHECK(zone_sweep_check_refusal(false, false, true, 1, false, false, true, false, false) ==
+                  ZONE_SWEEP_REFUSE_NO_HW,
+              "no hardware is refused");
+    TEST_CHECK(zone_sweep_check_refusal(false, true, false, 1, false, false, true, false, false) ==
+                  ZONE_SWEEP_REFUSE_CONFIG_INVALID,
+              "invalid zones config is refused");
+    TEST_CHECK(zone_sweep_check_refusal(false, true, true, 0, false, false, true, false, false) ==
+                  ZONE_SWEEP_REFUSE_NO_ZONES,
+              "thermo_count == 0 is refused");
+    TEST_CHECK(zone_sweep_check_refusal(false, true, true, 1, true, false, true, false, false) ==
+                  ZONE_SWEEP_REFUSE_PROFILE_RUNNING,
+              "a running/paused profile is refused");
+    TEST_CHECK(zone_sweep_check_refusal(false, true, true, 1, false, true, true, false, false) ==
+                  ZONE_SWEEP_REFUSE_AUTOTUNE_RUNNING,
+              "an active autotune is refused");
+    TEST_CHECK(zone_sweep_check_refusal(false, true, true, 1, false, false, false, false, false) ==
+                  ZONE_SWEEP_REFUSE_LINK_DOWN,
+              "a down safety link is refused");
+    TEST_CHECK(zone_sweep_check_refusal(false, true, true, 1, false, false, true, true, false) ==
+                  ZONE_SWEEP_REFUSE_TRIP_LATCHED,
+              "a latched trip is refused");
+    // N9 (opus review, 2026-08-28): a relay already on (dashboard, or a
+    // profile that just ended) must refuse the start outright, not silently
+    // measure a foreign load.
+    TEST_CHECK(zone_sweep_check_refusal(false, true, true, 1, false, false, true, false, true) ==
+                  ZONE_SWEEP_REFUSE_RELAYS_ON,
+              "N9: any relay already on is refused");
+}
+
+static void test_zone_sweep_ceiling_hit(void)
+{
+    TEST_CHECK(!zone_sweep_ceiling_hit(50.0f, false, 80.0f), "an invalid reading never trips the ceiling");
+    TEST_CHECK(!zone_sweep_ceiling_hit(79.9f, true, 80.0f), "below the effective ceiling does not trip");
+    TEST_CHECK(zone_sweep_ceiling_hit(80.0f, true, 80.0f), "at the effective ceiling trips");
+    TEST_CHECK(zone_sweep_ceiling_hit(90.0f, true, 80.0f), "above the effective ceiling trips");
+}
+
+// H2 (2026-08-27 pass, then rejected and refixed 2026-08-28): the ceiling
+// itself is now DERIVED by zone_sweep_effective_ceiling_c(), not hardcoded
+// per call. The 2026-08-27 fallback (OTA_INTERLOCK_TEMP_CEILING_C, 100 C)
+// is gone entirely -- it was picked as a conservative OTA-at-rest precondition,
+// not a sweep-time thermal abort, and this bench's own zones are all capped
+// at 80 C, so a 100 C fallback could never fire on the hardware this sweep
+// actually runs against. Replaced with: the tightest configured ceiling
+// across every zone that has one, or ZONE_SWEEP_UNCOMMISSIONED_CEILING_C
+// (60 C) only when NO zone anywhere has a ceiling configured.
+static void test_zone_sweep_effective_ceiling_c(void)
+{
+    TEST_SECTION("zone_sweep_effective_ceiling_c() (H2, opus review 2026-08-28)");
+
+    // No zones configured at all -- the uncommissioned-board fallback.
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    s_zones.cfg.thermo_count = 0;
+    TEST_CHECK(zone_sweep_effective_ceiling_c() == ZONE_SWEEP_UNCOMMISSIONED_CEILING_C,
+              "H2: no zones at all -> the fixed 60C uncommissioned fallback");
+
+    // Zones exist but none has a ceiling configured (max_temp_c == 0, the
+    // documented "no ceiling" convention and the default on a never-
+    // commissioned zone) -- still the fallback, not a per-zone 0.
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    s_zones.cfg.thermo_count = 3;
+    TEST_CHECK(zone_sweep_effective_ceiling_c() == ZONE_SWEEP_UNCOMMISSIONED_CEILING_C,
+              "H2: zones configured but none has a ceiling -> still the fallback");
+
+    // This bench: every zone capped at 80C. The old defect (H2, 2026-08-27
+    // fallback == 100C) could never fire here -- prove the NEW effective
+    // ceiling actually reflects the tightest real ceiling instead.
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    s_zones.cfg.thermo_count = 2;
+    s_zones.cfg.zones[0].max_temp_c = 80.0f;
+    s_zones.cfg.zones[1].max_temp_c = 80.0f;
+    TEST_CHECK(zone_sweep_effective_ceiling_c() == 80.0f,
+              "H2: every zone ceilinged at 80C -> effective ceiling is 80C, not 100C");
+
+    // Mixed: one zone commissioned (60C), one not (0 -- excluded from the
+    // min). The tightest REAL ceiling wins, not the uncommissioned zone's 0.
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    s_zones.cfg.thermo_count = 2;
+    s_zones.cfg.zones[0].max_temp_c = 500.0f;
+    s_zones.cfg.zones[1].max_temp_c = 0.0f;
+    TEST_CHECK(zone_sweep_effective_ceiling_c() == 500.0f,
+              "H2: one ceilinged zone (500C), one not -> the configured 500C, not the fallback and not 0");
+
+    // Negative test the reviewer specifically asked for: fallback +/- epsilon
+    // around the boundary, driving zone_sweep_ceiling_hit() itself.
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    s_zones.cfg.thermo_count = 0;
+    float eff = zone_sweep_effective_ceiling_c();
+    TEST_CHECK(eff == ZONE_SWEEP_UNCOMMISSIONED_CEILING_C, "sanity: fallback is exactly the named constant");
+    TEST_CHECK(!zone_sweep_ceiling_hit(eff - 0.1f, true, eff),
+              "H2: fallback - epsilon does not trip the ceiling");
+    TEST_CHECK(zone_sweep_ceiling_hit(eff + 0.1f, true, eff),
+              "H2: fallback + epsilon trips the ceiling");
+
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+}
+
+static void test_zone_sweep_timing_predicates(void)
+{
+    TEST_CHECK(!zone_sweep_should_sample(0), "no sampling before settle time has elapsed");
+    TEST_CHECK(!zone_sweep_should_sample(ZONE_SWEEP_SETTLE_MS - 1), "no sampling one tick before settle");
+    TEST_CHECK(zone_sweep_should_sample(ZONE_SWEEP_SETTLE_MS), "sampling begins exactly at settle time");
+    TEST_CHECK(!zone_sweep_zone_done(ZONE_SWEEP_ENERGIZE_MS - 1), "not done one tick early");
+    TEST_CHECK(zone_sweep_zone_done(ZONE_SWEEP_ENERGIZE_MS), "done at the full energize duration");
+}
+
+// ---------------------------------------------------------------------------
+// M3 (opus review, 2026-08-27): zone_sweep_run_one_zone() state-machine
+// coverage, via a fake zone_sweep_zone_deps_t that records call order. Before
+// this extraction the relay on/off sequencing, the choke-point property, the
+// abort path, and the link-loss exit had ZERO test coverage -- xTaskCreate()
+// is stubbed (see this file's header comment), so zone_sweep_task()'s body
+// never ran under test, only the pure predicates around it. This drives the
+// SAME function real hardware runs, dependency-injected.
+// ---------------------------------------------------------------------------
+
+typedef struct {
+    char call_log[256];
+    size_t log_len;
+    bool abort_now;
+    int abort_after_polls;      /* -1 = never via poll count */
+    int ceiling_hit_at_poll;    /* -1 = never */
+    int link_lost_at_poll;      /* -1 = never */
+    int trip_latched_at_poll;   /* -1 = never (N10) */
+    int invalid_temp_from_poll; /* -1 = never; read_temp reports !valid from this poll onward (N1) */
+    int invalid_temp_only_at_poll; /* -1 = never; read_temp reports !valid on EXACTLY this one poll (N1) */
+    int poll_count;
+    kiln_io_owner_relay_result_t energize_result;
+    float sample_value;
+    /* H3: simulates an abort landing BETWEEN the caller's top-of-loop
+     * abort_requested() check and the energize call, by answering false on
+     * the Nth call and true from then on -- abort_true_from_call == 2 means
+     * "the FIRST check (top-of-loop) still sees false, the SECOND check
+     * (immediately before energize) sees true." A caller with only one
+     * check before energizing can never observe this landing in time; a
+     * caller with two (this file's zone_sweep_run_one_zone(), after the H3
+     * fix) does. 0/negative = disabled (abort_now/abort_after_polls decide
+     * instead). */
+    int abort_true_from_call;
+    int abort_requested_calls;
+} fake_sweep_ctx_t;
+
+static void fake_sweep_ctx_reset(fake_sweep_ctx_t *c)
+{
+    memset(c, 0, sizeof(*c));
+    c->abort_after_polls = -1;
+    c->ceiling_hit_at_poll = -1;
+    c->link_lost_at_poll = -1;
+    c->trip_latched_at_poll = -1;
+    c->invalid_temp_from_poll = -1;
+    c->invalid_temp_only_at_poll = -1;
+    c->energize_result = KILN_IO_OWNER_RELAY_OK;
+    c->sample_value = 1.0f;
+    c->abort_true_from_call = -1;
+}
+
+static void fake_sweep_log(fake_sweep_ctx_t *c, const char *op)
+{
+    size_t n = strlen(op);
+    if (c->log_len + n + 2 >= sizeof(c->call_log)) {
+        return; /* test logs are always short -- silently truncating here would hide a bug */
+    }
+    if (c->log_len > 0) {
+        c->call_log[c->log_len++] = ',';
+    }
+    memcpy(c->call_log + c->log_len, op, n);
+    c->log_len += n;
+    c->call_log[c->log_len] = '\0';
+}
+
+static kiln_io_owner_relay_result_t fake_sweep_energize(void *ctx, uint8_t relay_mask, uint32_t *out_safety_sources)
+{
+    (void)relay_mask;
+    fake_sweep_ctx_t *c = (fake_sweep_ctx_t *)ctx;
+    fake_sweep_log(c, "on");
+    if (out_safety_sources) *out_safety_sources = 0;
+    return c->energize_result;
+}
+
+static void fake_sweep_force_off(void *ctx)
+{
+    fake_sweep_log((fake_sweep_ctx_t *)ctx, "off");
+}
+
+static void fake_sweep_read_temp(void *ctx, uint8_t zi, float *out_c, bool *out_valid)
+{
+    (void)zi;
+    fake_sweep_ctx_t *c = (fake_sweep_ctx_t *)ctx;
+    if ((c->invalid_temp_from_poll >= 0 && c->poll_count >= c->invalid_temp_from_poll) ||
+        c->poll_count == c->invalid_temp_only_at_poll) {
+        *out_c = NAN;
+        *out_valid = false;
+        return;
+    }
+    if (c->ceiling_hit_at_poll >= 0 && c->poll_count >= c->ceiling_hit_at_poll) {
+        *out_c = 999.0f;
+    } else {
+        *out_c = 20.0f;
+    }
+    *out_valid = true;
+}
+
+static float fake_sweep_sample_current(void *ctx, uint8_t zi)
+{
+    (void)zi;
+    return ((fake_sweep_ctx_t *)ctx)->sample_value;
+}
+
+static bool fake_sweep_link_up(void *ctx)
+{
+    fake_sweep_ctx_t *c = (fake_sweep_ctx_t *)ctx;
+    if (c->link_lost_at_poll >= 0 && c->poll_count >= c->link_lost_at_poll) {
+        return false;
+    }
+    return true;
+}
+
+static bool fake_sweep_trip_latched(void *ctx)
+{
+    fake_sweep_ctx_t *c = (fake_sweep_ctx_t *)ctx;
+    if (c->trip_latched_at_poll >= 0 && c->poll_count >= c->trip_latched_at_poll) {
+        return true;
+    }
+    return false;
+}
+
+static bool fake_sweep_abort_requested(void *ctx)
+{
+    fake_sweep_ctx_t *c = (fake_sweep_ctx_t *)ctx;
+    c->abort_requested_calls++;
+    if (c->abort_true_from_call >= 0 && c->abort_requested_calls >= c->abort_true_from_call) return true;
+    if (c->abort_now) return true;
+    if (c->abort_after_polls >= 0 && c->poll_count >= c->abort_after_polls) return true;
+    return false;
+}
+
+static void fake_sweep_delay_poll(void *ctx)
+{
+    /* Advances the fake clock -- the real deps->delay_poll() actually sleeps
+     * ZONE_SWEEP_POLL_MS; this just counts polls, which is all the fake
+     * ceiling/link-loss/abort-after-N-polls triggers above need. */
+    ((fake_sweep_ctx_t *)ctx)->poll_count++;
+}
+
+static const zone_sweep_zone_deps_t s_fake_sweep_deps = {
+    .energize = fake_sweep_energize,
+    .force_off = fake_sweep_force_off,
+    .read_temp = fake_sweep_read_temp,
+    .sample_current = fake_sweep_sample_current,
+    .link_up = fake_sweep_link_up,
+    .trip_latched = fake_sweep_trip_latched,
+    .abort_requested = fake_sweep_abort_requested,
+    .delay_poll = fake_sweep_delay_poll,
+    .ctx = NULL, /* set per-test */
+};
+
+static void test_zone_sweep_hw_bindings_route_through_owner(void)
+{
+    // B1 (opus review, 2026-08-27): the REAL hardware bindings
+    // (zone_sweep_hw_energize()/zone_sweep_hw_force_off(), the pair
+    // zone_sweep_task() actually wires up) must call the owner module, not
+    // kiln_io_set_relay_mask()/kiln_io_all_relays_off() directly -- that
+    // bypass is exactly what let the sweep race the other five relay
+    // writers and skip the OTA/safety gate. Calling these two static
+    // functions directly (reachable because this whole translation unit is
+    // #include'd, same as everything else in this file) exercises the real
+    // wiring without ever spinning up zone_sweep_task() itself.
+    TEST_SECTION("zone_sweep_hw_energize()/zone_sweep_hw_force_off() route through kiln_io_owner_* (B1)");
+    static kiln_io_t dummy_io;
+    memset(&dummy_io, 0, sizeof(dummy_io));
+    zones_http_set_hw(&dummy_io, NULL, NULL);
+    s_test_owner_set_relay_mask_calls = 0;
+    s_test_owner_all_relays_off_calls = 0;
+
+    uint32_t sources = 0;
+    kiln_io_owner_relay_result_t rr = zone_sweep_hw_energize(NULL, 0x01, &sources);
+
+    TEST_CHECK(rr == KILN_IO_OWNER_RELAY_OK, "sanity: the stub reports OK");
+    TEST_CHECK(s_test_owner_set_relay_mask_calls == 1,
+              "B1: energizing must call kiln_io_owner_command_set_relay_mask() (MANUAL) exactly once");
+    // N9 (opus review, 2026-08-28): mask must be 0xFF (all relays), not just
+    // the zone's own relay_mask -- this asserts an all-others-off
+    // precondition on every energize write. value is still the zone's own
+    // relay_mask (only ITS relay(s) end up on).
+    TEST_CHECK(s_test_owner_last_mask == 0xFFu,
+              "N9: the energize write's mask must be 0xFF -- every relay outside this zone is forced off, "
+              "not just left however it was");
+    TEST_CHECK(s_test_owner_last_value == 0x01,
+              "N9: the energize write's value is still only this zone's own relay_mask");
+
+    zone_sweep_hw_force_off(NULL);
+    TEST_CHECK(s_test_owner_all_relays_off_calls == 1,
+              "B1: de-energizing must call kiln_io_owner_command_all_relays_off() exactly once");
+
+    zones_http_set_hw(NULL, NULL, NULL);
+}
+
+static void test_zone_sweep_run_one_zone_skips_unwired_zone(void)
+{
+    fake_sweep_ctx_t ctx;
+    fake_sweep_ctx_reset(&ctx);
+    zone_sweep_zone_deps_t deps = s_fake_sweep_deps;
+    deps.ctx = &ctx;
+
+    float avg = NAN;
+    zone_sweep_zone_outcome_t outcome = zone_sweep_run_one_zone(0, /* relay_mask */ 0, &deps, &avg, NULL);
+
+    TEST_CHECK(outcome == ZONE_SWEEP_ZONE_SKIPPED, "relay_mask == 0 -> SKIPPED, nothing measured");
+    TEST_CHECK(strlen(ctx.call_log) == 0, "a skipped zone touches NO relay call at all -- not even an off");
+}
+
+static void test_zone_sweep_run_one_zone_abort_before_energize_never_turns_relay_on(void)
+{
+    fake_sweep_ctx_t ctx;
+    fake_sweep_ctx_reset(&ctx);
+    ctx.abort_now = true;
+    zone_sweep_zone_deps_t deps = s_fake_sweep_deps;
+    deps.ctx = &ctx;
+
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    s_zones.cfg.thermo_count = 1;
+
+    float avg = NAN;
+    zone_sweep_zone_outcome_t outcome = zone_sweep_run_one_zone(0, 0x01, &deps, &avg, NULL);
+
+    TEST_CHECK(outcome == ZONE_SWEEP_ZONE_ABORTED, "abort already requested -> ABORTED");
+    // H3's specific claim: an operator Abort must be able to stop a zone from
+    // EVER energizing, not merely turn it off quickly afterward.
+    TEST_CHECK(strstr(ctx.call_log, "on") == NULL,
+              "H3: relay energize must never be called once abort_requested() is already true "
+              "-- \"aborted\" and \"was briefly on, then off\" are different outcomes");
+}
+
+// H3 (opus review, 2026-08-28): DELETED. The 2026-08-27 pass added a SECOND
+// abort_requested() check immediately before the energize call, claiming it
+// "structurally covers the window kiln_io_owner_command_set_relay_mask()'s
+// bounded wait opens" -- false: that check runs BEFORE the call, not inside
+// or after it, so it observes exactly what the first (top-of-loop) check
+// already observed. The two calls were adjacent with zero code between them
+// -- textbook dead code -- and test_zone_sweep_run_one_zone_h3_recheck_
+// catches_late_abort() (formerly here) only passed because its fake answered
+// false on call #1 and true from call #2 onward, a scenario indistinguishable
+// from "only one check exists" once the duplicate is removed: the while
+// loop's own abort_requested() check, which runs BEFORE delay_poll() and
+// BEFORE anything else on every iteration including the first, already
+// covers a late-landing abort -- it fires on the very first iteration, before
+// any elapsed time is consumed, which is exactly the same window the deleted
+// duplicate falsely claimed to own. Decision: delete the duplicate and its
+// test rather than move a real check after the energize call (the
+// alternative the review offered) -- energize() is synchronous from this
+// function's point of view (it blocks until kiln_io_owner_command_set_relay_
+// mask()'s bounded wait resolves), so there is no "after energize returns
+// OK, but before anything else" window left to check that the while loop's
+// first iteration does not already cover on the very next line.
+
+static void test_zone_sweep_run_one_zone_normal_completion_sequencing(void)
+{
+    fake_sweep_ctx_t ctx;
+    fake_sweep_ctx_reset(&ctx);
+    ctx.sample_value = 2.5f;
+    zone_sweep_zone_deps_t deps = s_fake_sweep_deps;
+    deps.ctx = &ctx;
+
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    s_zones.cfg.thermo_count = 1;
+    s_zones.cfg.zones[0].max_temp_c = 500.0f; /* configured ceiling, far above the fake's 20C/999C readings */
+
+    float avg = NAN;
+    zone_sweep_zone_outcome_t outcome = zone_sweep_run_one_zone(0, 0x01, &deps, &avg, NULL);
+
+    TEST_CHECK(outcome == ZONE_SWEEP_ZONE_OK, "no abort/ceiling/link-loss -> runs to completion, OK");
+    TEST_CHECK(strcmp(ctx.call_log, "on,off") == 0,
+              "the ONLY calls for a normal zone are energize once, then de-energize once, in that order "
+              "-- the exact relay on/off sequencing this finding says had zero coverage");
+    TEST_CHECK(!isnan(avg) && avg > 0.0f, "samples were averaged into a real reading");
+}
+
+static void test_zone_sweep_run_one_zone_abort_mid_run_still_forces_off(void)
+{
+    fake_sweep_ctx_t ctx;
+    fake_sweep_ctx_reset(&ctx);
+    ctx.abort_after_polls = 1; /* abort is seen on the SECOND loop iteration, after one poll */
+    zone_sweep_zone_deps_t deps = s_fake_sweep_deps;
+    deps.ctx = &ctx;
+
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    s_zones.cfg.thermo_count = 1;
+    s_zones.cfg.zones[0].max_temp_c = 500.0f;
+
+    float avg = NAN;
+    zone_sweep_zone_outcome_t outcome = zone_sweep_run_one_zone(0, 0x01, &deps, &avg, NULL);
+
+    TEST_CHECK(outcome == ZONE_SWEEP_ZONE_ABORTED, "abort mid-poll-loop -> ABORTED");
+    TEST_CHECK(strcmp(ctx.call_log, "on,off") == 0,
+              "the CHOKE POINT: a zone that was actually energized always gets de-energized on the way "
+              "out, abort included -- exactly one \"on\", exactly one \"off\", in that order");
+}
+
+static void test_zone_sweep_run_one_zone_ceiling_hit_forces_off(void)
+{
+    fake_sweep_ctx_t ctx;
+    fake_sweep_ctx_reset(&ctx);
+    ctx.ceiling_hit_at_poll = 2;
+    zone_sweep_zone_deps_t deps = s_fake_sweep_deps;
+    deps.ctx = &ctx;
+
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    s_zones.cfg.thermo_count = 1;
+    s_zones.cfg.zones[0].max_temp_c = 500.0f;
+
+    float avg = NAN;
+    zone_sweep_zone_outcome_t outcome = zone_sweep_run_one_zone(0, 0x01, &deps, &avg, NULL);
+
+    TEST_CHECK(outcome == ZONE_SWEEP_ZONE_CEILING_HIT, "reading reaches the ceiling -> CEILING_HIT");
+    TEST_CHECK(strcmp(ctx.call_log, "on,off") == 0, "the ceiling abort is also a choke-point exit: on, then off");
+}
+
+static void test_zone_sweep_run_one_zone_link_loss_forces_off(void)
+{
+    fake_sweep_ctx_t ctx;
+    fake_sweep_ctx_reset(&ctx);
+    ctx.link_lost_at_poll = 1;
+    zone_sweep_zone_deps_t deps = s_fake_sweep_deps;
+    deps.ctx = &ctx;
+
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    s_zones.cfg.thermo_count = 1;
+    s_zones.cfg.zones[0].max_temp_c = 500.0f;
+
+    float avg = NAN;
+    zone_sweep_zone_outcome_t outcome = zone_sweep_run_one_zone(0, 0x01, &deps, &avg, NULL);
+
+    TEST_CHECK(outcome == ZONE_SWEEP_ZONE_LINK_LOST, "the safety link drops mid-poll -> LINK_LOST");
+    TEST_CHECK(strcmp(ctx.call_log, "on,off") == 0, "the link-loss exit is also a choke-point exit: on, then off");
+}
+
+static void test_zone_sweep_run_one_zone_energize_refused_is_a_choke_point_exit_too(void)
+{
+    // B1 (opus review, 2026-08-27): the owner-gated energize call can now be
+    // REFUSED (owned/safety/updating) -- a possibility the original direct
+    // kiln_io_set_relay_mask() call could never report. Prove it is treated
+    // as its own exit path, not silently ignored.
+    fake_sweep_ctx_t ctx;
+    fake_sweep_ctx_reset(&ctx);
+    ctx.energize_result = KILN_IO_OWNER_RELAY_ERR_SAFETY;
+    zone_sweep_zone_deps_t deps = s_fake_sweep_deps;
+    deps.ctx = &ctx;
+
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    s_zones.cfg.thermo_count = 1;
+    s_zones.cfg.zones[0].max_temp_c = 500.0f;
+
+    float avg = NAN;
+    uint32_t refused_sources = 0;
+    zone_sweep_zone_outcome_t outcome = zone_sweep_run_one_zone(0, 0x01, &deps, &avg, &refused_sources);
+
+    TEST_CHECK(outcome == ZONE_SWEEP_ZONE_ENERGIZE_REFUSED,
+              "B1: an owner refusal (e.g. a safety fault asserting mid-sweep) is its own outcome, "
+              "distinct from OK/ABORTED/CEILING_HIT/LINK_LOST");
+    // The refused energize call itself counts as the attempted "on" in the
+    // log -- force_off() still runs afterward (belt-and-suspenders: nothing
+    // was actually left energized, but the choke point is unconditional).
+    TEST_CHECK(strcmp(ctx.call_log, "on,off") == 0,
+              "a refused energize is STILL followed by the choke point -- no path skips it");
+}
+
+// N1 (opus review, 2026-08-28): the ceiling abort is inert while
+// actual_valid is false. If the thermo bus faults mid-sweep every
+// subsequent poll comes back invalid, and without this fix the ceiling
+// abort could never fire for the rest of that zone's 5s energize -- link_up()
+// is the only other in-loop guard and it does not observe temperature.
+static void test_zone_sweep_run_one_zone_temp_lost_forces_off(void)
+{
+    fake_sweep_ctx_t ctx;
+    fake_sweep_ctx_reset(&ctx);
+    ctx.invalid_temp_from_poll = 1; /* every poll from #1 onward reports !valid */
+    zone_sweep_zone_deps_t deps = s_fake_sweep_deps;
+    deps.ctx = &ctx;
+
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    s_zones.cfg.thermo_count = 1;
+    s_zones.cfg.zones[0].max_temp_c = 500.0f;
+
+    float avg = NAN;
+    zone_sweep_zone_outcome_t outcome = zone_sweep_run_one_zone(0, 0x01, &deps, &avg, NULL);
+
+    TEST_CHECK(outcome == ZONE_SWEEP_ZONE_TEMP_LOST,
+              "N1: two consecutive invalid thermocouple reads -> TEMP_LOST, not a silent 5s unsupervised run");
+    TEST_CHECK(strcmp(ctx.call_log, "on,off") == 0, "N1: the temp-lost exit is also a choke-point exit: on, then off");
+}
+
+// N1 negative half: a single dropped/garbled read must NOT abort the zone --
+// one poll of noise tolerance is deliberate (see ZONE_SWEEP_TEMP_LOST_POLLS's
+// doc comment).
+static void test_zone_sweep_run_one_zone_single_invalid_poll_does_not_abort(void)
+{
+    fake_sweep_ctx_t ctx;
+    fake_sweep_ctx_reset(&ctx);
+    ctx.invalid_temp_only_at_poll = 3; /* exactly poll 3 is invalid; every other poll (1,2,4,5,...) is valid --
+                                         * never two consecutive misses, so TEMP_LOST must not fire and the
+                                         * zone must run to a normal OK completion. */
+    zone_sweep_zone_deps_t deps = s_fake_sweep_deps;
+    deps.ctx = &ctx;
+
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    s_zones.cfg.thermo_count = 1;
+    s_zones.cfg.zones[0].max_temp_c = 500.0f;
+
+    float avg = NAN;
+    zone_sweep_zone_outcome_t outcome = zone_sweep_run_one_zone(0, 0x01, &deps, &avg, NULL);
+
+    TEST_CHECK(outcome == ZONE_SWEEP_ZONE_OK,
+              "N1: a single invalid poll surrounded by valid ones must not itself trip TEMP_LOST -- the "
+              "streak resets on the very next valid read, and the zone completes normally, proving one "
+              "poll of noise tolerance is real, not accidental");
+}
+
+// N10 (opus review, 2026-08-28): a safety trip latching mid-zone must end
+// the sweep promptly instead of grinding on for the rest of the dwell.
+static void test_zone_sweep_run_one_zone_trip_latched_forces_off(void)
+{
+    fake_sweep_ctx_t ctx;
+    fake_sweep_ctx_reset(&ctx);
+    ctx.trip_latched_at_poll = 1;
+    zone_sweep_zone_deps_t deps = s_fake_sweep_deps;
+    deps.ctx = &ctx;
+
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    s_zones.cfg.thermo_count = 1;
+    s_zones.cfg.zones[0].max_temp_c = 500.0f;
+
+    float avg = NAN;
+    zone_sweep_zone_outcome_t outcome = zone_sweep_run_one_zone(0, 0x01, &deps, &avg, NULL);
+
+    TEST_CHECK(outcome == ZONE_SWEEP_ZONE_TRIP_LATCHED, "N10: a safety trip latching mid-zone -> TRIP_LATCHED");
+    TEST_CHECK(strcmp(ctx.call_log, "on,off") == 0, "N10: the trip-latched exit is also a choke-point exit: on, then off");
+}
+
+// ---------------------------------------------------------------------------
+// M3 (opus review, 2026-08-28): zone_sweep_run_all_zones() coverage -- the
+// hoisted whole-sweep loop, driven the same way zone_sweep_run_one_zone() is
+// above. Proves the property the file's own comment called "structural, not
+// a convention" (no two zones' relays on at once) against the REAL function,
+// not just by reading it, and covers the OK-with-zero-samples aggregation
+// path that had no coverage before.
+// ---------------------------------------------------------------------------
+
+typedef struct {
+    uint8_t relay_masks[MAX31856_CHANNEL_COUNT];
+    uint8_t zone_index_calls[MAX31856_CHANNEL_COUNT];
+    uint8_t zone_index_call_count;
+    uint8_t recorded_zone[MAX31856_CHANNEL_COUNT];
+    float   recorded_avg[MAX31856_CHANNEL_COUNT];
+    uint8_t record_call_count;
+    uint8_t zone_done_calls;
+} fake_all_ctx_t;
+
+static uint8_t fake_all_relay_mask_for_zone(void *ctx, uint8_t zi)
+{
+    fake_all_ctx_t *c = (fake_all_ctx_t *)ctx;
+    return c->relay_masks[zi];
+}
+
+static void fake_all_set_zone_index(void *ctx, uint8_t zi)
+{
+    fake_all_ctx_t *c = (fake_all_ctx_t *)ctx;
+    if (c->zone_index_call_count < MAX31856_CHANNEL_COUNT) {
+        c->zone_index_calls[c->zone_index_call_count++] = zi;
+    }
+}
+
+static void fake_all_record_normal(void *ctx, uint8_t zi, float avg_a)
+{
+    fake_all_ctx_t *c = (fake_all_ctx_t *)ctx;
+    if (c->record_call_count < MAX31856_CHANNEL_COUNT) {
+        c->recorded_zone[c->record_call_count] = zi;
+        c->recorded_avg[c->record_call_count] = avg_a;
+        c->record_call_count++;
+    }
+}
+
+static void fake_all_zone_done(void *ctx)
+{
+    ((fake_all_ctx_t *)ctx)->zone_done_calls++;
+}
+
+static const zone_sweep_all_hooks_t s_fake_all_hooks = {
+    .relay_mask_for_zone = fake_all_relay_mask_for_zone,
+    .set_zone_index = fake_all_set_zone_index,
+    .record_normal = fake_all_record_normal,
+    .zone_done = fake_all_zone_done,
+    .ctx = NULL, /* set per-test */
+};
+
+/* Fake energize/force_off that would FAIL a real hardware assertion if two
+ * zones were ever both "on" at once -- this is the actual mechanism that
+ * proves the no-two-zones-on-at-once property, not just an observation. */
+static bool s_all_any_relay_on = false;
+static bool s_all_overlap_detected = false;
+
+static kiln_io_owner_relay_result_t fake_all_energize(void *ctx, uint8_t relay_mask, uint32_t *out_safety_sources)
+{
+    (void)ctx;
+    (void)relay_mask;
+    if (out_safety_sources) *out_safety_sources = 0;
+    if (s_all_any_relay_on) {
+        s_all_overlap_detected = true; /* a second zone tried to energize while one was still on */
+    }
+    s_all_any_relay_on = true;
+    return KILN_IO_OWNER_RELAY_OK;
+}
+
+static void fake_all_force_off(void *ctx)
+{
+    (void)ctx;
+    s_all_any_relay_on = false;
+}
+
+static void fake_all_read_temp(void *ctx, uint8_t zi, float *out_c, bool *out_valid)
+{
+    (void)ctx;
+    (void)zi;
+    *out_c = 20.0f;
+    *out_valid = true;
+}
+
+static float fake_all_sample_current(void *ctx, uint8_t zi)
+{
+    (void)ctx;
+    (void)zi;
+    return 1.0f;
+}
+
+static bool fake_all_link_up(void *ctx)
+{
+    (void)ctx;
+    return true;
+}
+
+static bool fake_all_trip_latched(void *ctx)
+{
+    (void)ctx;
+    return false;
+}
+
+static bool fake_all_abort_requested(void *ctx)
+{
+    (void)ctx;
+    return false;
+}
+
+static void fake_all_delay_poll(void *ctx)
+{
+    (void)ctx;
+}
+
+static const zone_sweep_zone_deps_t s_fake_all_zone_deps = {
+    .energize = fake_all_energize,
+    .force_off = fake_all_force_off,
+    .read_temp = fake_all_read_temp,
+    .sample_current = fake_all_sample_current,
+    .link_up = fake_all_link_up,
+    .trip_latched = fake_all_trip_latched,
+    .abort_requested = fake_all_abort_requested,
+    .delay_poll = fake_all_delay_poll,
+    .ctx = NULL,
+};
+
+static void test_zone_sweep_run_all_zones_never_energizes_two_zones_at_once(void)
+{
+    TEST_SECTION("zone_sweep_run_all_zones() -- no two zones' relays on at once (M3, opus review 2026-08-28)");
+    fake_all_ctx_t actx;
+    memset(&actx, 0, sizeof(actx));
+    actx.relay_masks[0] = 0x01;
+    actx.relay_masks[1] = 0x02;
+    actx.relay_masks[2] = 0x04;
+
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    s_zones.cfg.thermo_count = 3;
+    s_zones.cfg.zones[0].max_temp_c = 500.0f;
+    s_zones.cfg.zones[1].max_temp_c = 500.0f;
+    s_zones.cfg.zones[2].max_temp_c = 500.0f;
+
+    zone_sweep_zone_deps_t deps = s_fake_all_zone_deps;
+    deps.ctx = NULL;
+    zone_sweep_all_hooks_t hooks = s_fake_all_hooks;
+    hooks.ctx = &actx;
+
+    s_all_any_relay_on = false;
+    s_all_overlap_detected = false;
+
+    zone_sweep_all_result_t result;
+    zone_sweep_run_all_zones(3, &deps, &hooks, &result);
+
+    TEST_CHECK(result.state == ZONE_SWEEP_DONE, "all three zones complete cleanly");
+    TEST_CHECK(result.zones_done == 3, "all three zones counted as done");
+    TEST_CHECK(!s_all_overlap_detected,
+              "M3: no zone's energize() was ever called while a PRIOR zone's relay was still on -- "
+              "the property the file's comment called structural, now actually exercised");
+    TEST_CHECK(actx.zone_index_call_count == 3 && actx.zone_index_calls[0] == 0 && actx.zone_index_calls[1] == 1 &&
+                  actx.zone_index_calls[2] == 2,
+              "zones are measured strictly in order, one at a time");
+    TEST_CHECK(actx.record_call_count == 3, "all three zones recorded a measured normal");
+
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+}
+
+/* M3: the ZONE_SWEEP_ZONE_OK && samples == 0 path -- zones_done increments
+ * but no normal is recorded. Not reachable through the full timed loop under
+ * today's fixed SETTLE/ENERGIZE_MS constants (settle always elapses before
+ * done), so this drives zone_sweep_run_all_zones()'s aggregation directly
+ * with a zone whose relay_mask is 0 mixed among wired zones -- SKIPPED zones
+ * never sample either, and must not be recorded or double-counted. */
+static void test_zone_sweep_run_all_zones_skipped_zone_records_nothing(void)
+{
+    TEST_SECTION("zone_sweep_run_all_zones() -- a SKIPPED (unwired) zone records no normal and is not "
+                 "counted as done (M3, opus review 2026-08-28)");
+    fake_all_ctx_t actx;
+    memset(&actx, 0, sizeof(actx));
+    actx.relay_masks[0] = 0x01;
+    actx.relay_masks[1] = 0x00; /* unwired -- SKIPPED */
+    actx.relay_masks[2] = 0x04;
+
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    s_zones.cfg.thermo_count = 3;
+    s_zones.cfg.zones[0].max_temp_c = 500.0f;
+    s_zones.cfg.zones[2].max_temp_c = 500.0f;
+
+    zone_sweep_zone_deps_t deps = s_fake_all_zone_deps;
+    zone_sweep_all_hooks_t hooks = s_fake_all_hooks;
+    hooks.ctx = &actx;
+
+    s_all_any_relay_on = false;
+    s_all_overlap_detected = false;
+
+    zone_sweep_all_result_t result;
+    zone_sweep_run_all_zones(3, &deps, &hooks, &result);
+
+    TEST_CHECK(result.state == ZONE_SWEEP_DONE, "sweep completes despite one skipped zone");
+    TEST_CHECK(result.zones_done == 2, "only the two WIRED zones count as done -- the skip is not a done zone");
+    TEST_CHECK(actx.record_call_count == 2, "only the two wired zones ever recorded a normal");
+    TEST_CHECK(actx.zone_index_call_count == 2,
+              "set_zone_index() is never called for the skipped zone -- matches the pre-hoist contract "
+              "(\"only set for a zone actually being measured\")");
+
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+}
+
+static void test_zone_normals_get_set_round_trip(void)
+{
+    memset(&s_zone_normals.cfg, 0, sizeof(s_zone_normals.cfg));
+    nvs_test_enable(true);
+    nvs_test_clear();
+
+    float amps = -1.0f;
+    bool measured = true;
+    TEST_CHECK(zones_config_get_normal_current(0, &amps, &measured), "getter answers for a valid index");
+    TEST_CHECK(!measured, "a never-measured zone reports measured == false");
+    TEST_CHECK(amps == 0.0f, "a never-measured zone reads back 0.0, not garbage");
+
+    TEST_CHECK(zone_normals_set(2, 3.75f), "zone_normals_set persists a measured value");
+    amps = -1.0f;
+    measured = false;
+    TEST_CHECK(zones_config_get_normal_current(2, &amps, &measured), "getter answers after a set");
+    TEST_CHECK(measured, "the swept zone now reports measured == true");
+    TEST_CHECK(amps == 3.75f, "the swept zone's amps round-trips exactly");
+
+    // A DIFFERENT zone must still read "never measured" -- proves
+    // measured_mask is per-zone, not a single sweep-ever-ran flag.
+    amps = -1.0f;
+    measured = true;
+    TEST_CHECK(zones_config_get_normal_current(1, &amps, &measured), "getter answers for the untouched zone");
+    TEST_CHECK(!measured, "an untouched zone is unaffected by another zone's measurement");
+
+    TEST_CHECK(!zone_normals_set(MAX31856_CHANNEL_COUNT, 1.0f), "an out-of-range zone_index is rejected");
+    TEST_CHECK(!zone_normals_set(0, -0.1f), "a negative amps value is rejected");
+    TEST_CHECK(!zone_normals_set(0, NAN), "a non-finite amps value is rejected");
+
+    memset(&s_zone_normals.cfg, 0, sizeof(s_zone_normals.cfg));
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
+// ---------------------------------------------------------------------------
+// Task 2: CT-to-zone mapping mismatch predicate, and its live wiring.
+// ---------------------------------------------------------------------------
+
+static void test_ct_mapping_mismatch_silent_when_never_measured(void)
+{
+    // The one requirement the owner called out explicitly: NEVER warn for a
+    // zone whose normal was never measured, no matter how wild live_current_a
+    // is -- proven here with a live reading that would obviously mismatch
+    // ANY plausible normal, to show the silence isn't an accident of the
+    // numbers chosen.
+    TEST_CHECK(!zones_ct_mapping_mismatch(5.0f, false, 500.0f),
+              "an unmeasured zone never warns, even for a wildly implausible live reading");
+}
+
+static void test_ct_mapping_mismatch_within_band_is_silent(void)
+{
+    TEST_CHECK(!zones_ct_mapping_mismatch(5.0f, true, 5.0f), "an exact match never warns");
+    TEST_CHECK(!zones_ct_mapping_mismatch(5.0f, true, 2.5f), "the low edge of the ratio band does not warn");
+    TEST_CHECK(!zones_ct_mapping_mismatch(5.0f, true, 12.0f), "the high edge of the ratio band does not warn");
+}
+
+static void test_ct_mapping_mismatch_outside_band_warns(void)
+{
+    TEST_CHECK(zones_ct_mapping_mismatch(5.0f, true, 0.0f), "a CT reading zero while its zone is on warns");
+    TEST_CHECK(zones_ct_mapping_mismatch(5.0f, true, 20.0f), "a CT reading far above normal warns");
+}
+
+static void test_ct_mapping_mismatch_tiny_normal_needs_absolute_delta_too(void)
+{
+    // A tiny normal current means the ratio band alone would flag ordinary
+    // measurement noise -- ZONE_CT_MISMATCH_MIN_DELTA_A exists to require a
+    // real absolute difference too, not just a ratio.
+    TEST_CHECK(!zones_ct_mapping_mismatch(0.05f, true, 0.2f),
+              "a small absolute difference on a tiny normal does not warn");
+}
+
+static void test_ct_mapping_warn_mask_wiring(void)
+{
+    static kiln_io_t dummy_io;
+    static SafetyLinkClass dummy_safety;
+    memset(&dummy_io, 0, sizeof(dummy_io));
+    memset(&dummy_safety, 0, sizeof(dummy_safety));
+    zones_http_set_hw(&dummy_io, NULL, &dummy_safety);
+
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    s_zones.cfg.thermo_count = 1;
+    s_zones.cfg.zones[0].relay_mask = 0x01;
+    s_zones.cfg.zones[0].ct_mask = 0x01;
+    memset(&s_zone_normals.cfg, 0, sizeof(s_zone_normals.cfg));
+
+    // No hardware -> silent, regardless of anything else.
+    zones_http_set_hw(NULL, NULL, NULL);
+    TEST_CHECK(zones_ct_mapping_warn_mask() == 0, "no hardware registered -> nothing to warn about");
+    zones_http_set_hw(&dummy_io, NULL, &dummy_safety);
+
+    // Link down -> silent even with a mismatching reading staged.
+    s_test_safety_link_up = false;
+    s_test_relay_shadow = 0x01;
+    s_test_safety_status.current_a[0] = 99.0f;
+    TEST_CHECK(zones_ct_mapping_warn_mask() == 0, "a down safety link produces no warnings");
+
+    // Link up, zone commanded on, but never measured -> silent.
+    s_test_safety_link_up = true;
+    TEST_CHECK(zones_ct_mapping_warn_mask() == 0, "an unmeasured zone stays silent even with a live mismatch");
+
+    // Measure the zone's normal, then feed a live reading inside the band.
+    zone_normals_set(0, 5.0f);
+    s_test_safety_status.current_a[0] = 5.0f;
+    TEST_CHECK(zones_ct_mapping_warn_mask() == 0, "a matching live reading warns for nobody");
+
+    // Now feed a live reading far outside the band -- bit 0 (zone 1) must warn.
+    s_test_safety_status.current_a[0] = 0.0f;
+    TEST_CHECK(zones_ct_mapping_warn_mask() == 0x01, "a mismatching live reading on a commanded-on zone warns");
+
+    // Zone commanded OFF -- must not warn even with the same mismatching reading.
+    s_test_relay_shadow = 0x00;
+    TEST_CHECK(zones_ct_mapping_warn_mask() == 0, "a zone that is not commanded on is never checked");
+
+    zones_http_set_hw(NULL, NULL, NULL);
+    s_test_relay_shadow = 0;
+    s_test_safety_link_up = false;
+    memset(&s_test_safety_status, 0, sizeof(s_test_safety_status));
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    memset(&s_zone_normals.cfg, 0, sizeof(s_zone_normals.cfg));
+}
+
+// ---------------------------------------------------------------------------
+// zones_current_sweep_start(): the wired end-to-end refusal path, proving
+// the real subsystem accessors (profile_executor_get_status()/
+// autotune_engine_is_active()/safety_link_get_status()) are actually
+// consulted, not just the pure zone_sweep_check_refusal() helper above.
+// ---------------------------------------------------------------------------
+
+static void reset_sweep_state_for_test(void)
+{
+    s_sweep.active = false;
+    s_sweep.abort_requested = false;
+    s_sweep.state = ZONE_SWEEP_IDLE;
+    s_sweep.zone_index = 0;
+    s_sweep.zones_done = 0;
+    s_sweep.zones_total = 0;
+    s_sweep.reason[0] = '\0';
+    s_test_profile_status.state = PROFILE_EXEC_IDLE;
+    s_test_autotune_active = false;
+    s_test_safety_link_up = true;
+    memset(&s_test_safety_status, 0, sizeof(s_test_safety_status));
+}
+
+static void test_zones_current_sweep_start_wired_refusals(void)
+{
+    static kiln_io_t dummy_io;
+    static SafetyLinkClass dummy_safety;
+    static MAX31856BusClass dummy_thermo;
+    memset(&dummy_io, 0, sizeof(dummy_io));
+    memset(&dummy_safety, 0, sizeof(dummy_safety));
+    memset(&dummy_thermo, 0, sizeof(dummy_thermo));
+    dummy_thermo.initialized = true;
+
+    reset_sweep_state_for_test();
+    zones_http_set_hw(NULL, NULL, NULL);
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    s_zones_config_valid = true;
+    s_zones.cfg.thermo_count = 1;
+    TEST_CHECK(zones_current_sweep_start() == ZONE_SWEEP_REFUSE_NO_HW,
+              "no hardware registered at all -> the real start function refuses");
+
+    // H1 (opus review, 2026-08-27): relay I/O present but NO thermo bus used
+    // to be accepted -- have_hw was `s_hw_io != NULL` alone, so a sweep could
+    // start and energize real elements with the ceiling abort structurally
+    // incapable of ever firing (zone_sweep_read_zone_temp() early-returns
+    // invalid with no thermo bus, and zone_sweep_ceiling_hit() never trips on
+    // an invalid reading). Prove the fix: relay I/O + safety link present,
+    // thermo bus NULL, must still refuse NO_HW.
+    reset_sweep_state_for_test();
+    zones_http_set_hw(&dummy_io, NULL, &dummy_safety);
+    s_zones_config_valid = true;
+    s_zones.cfg.thermo_count = 1;
+    TEST_CHECK(zones_current_sweep_start() == ZONE_SWEEP_REFUSE_NO_HW,
+              "H1: relay I/O present but no thermo bus -> the real start function refuses NO_HW, "
+              "not just NO relay I/O");
+
+    // Same again, but with a thermo bus struct that itself was never
+    // initialized (attached but `.initialized == false`, e.g. bring-up
+    // failed on this boot) -- must refuse exactly the same way.
+    reset_sweep_state_for_test();
+    {
+        static MAX31856BusClass uninitialized_thermo;
+        memset(&uninitialized_thermo, 0, sizeof(uninitialized_thermo));
+        uninitialized_thermo.initialized = false;
+        zones_http_set_hw(&dummy_io, &uninitialized_thermo, &dummy_safety);
+    }
+    s_zones_config_valid = true;
+    s_zones.cfg.thermo_count = 1;
+    TEST_CHECK(zones_current_sweep_start() == ZONE_SWEEP_REFUSE_NO_HW,
+              "H1: a thermo bus struct that is registered but never initialized -> still refused NO_HW");
+
+    reset_sweep_state_for_test();
+    zones_http_set_hw(&dummy_io, &dummy_thermo, &dummy_safety);
+    s_zones_config_valid = false;
+    TEST_CHECK(zones_current_sweep_start() == ZONE_SWEEP_REFUSE_CONFIG_INVALID,
+              "invalid config -> the real start function refuses");
+
+    reset_sweep_state_for_test();
+    zones_http_set_hw(&dummy_io, &dummy_thermo, &dummy_safety);
+    s_zones_config_valid = true;
+    s_zones.cfg.thermo_count = 1;
+    s_test_profile_status.state = PROFILE_EXEC_RUNNING;
+    TEST_CHECK(zones_current_sweep_start() == ZONE_SWEEP_REFUSE_PROFILE_RUNNING,
+              "profile_executor_get_status() reporting RUNNING -> the real start function refuses");
+
+    reset_sweep_state_for_test();
+    s_zones_config_valid = true;
+    s_zones.cfg.thermo_count = 1;
+    s_test_autotune_active = true;
+    TEST_CHECK(zones_current_sweep_start() == ZONE_SWEEP_REFUSE_AUTOTUNE_RUNNING,
+              "autotune_engine_is_active() true -> the real start function refuses");
+
+    reset_sweep_state_for_test();
+    s_zones_config_valid = true;
+    s_zones.cfg.thermo_count = 1;
+    s_test_safety_link_up = false;
+    TEST_CHECK(zones_current_sweep_start() == ZONE_SWEEP_REFUSE_LINK_DOWN,
+              "safety_link_get_status() reporting link down -> the real start function refuses");
+
+    reset_sweep_state_for_test();
+    s_zones_config_valid = true;
+    s_zones.cfg.thermo_count = 1;
+    s_test_safety_status.fault_asserted = true;
+    TEST_CHECK(zones_current_sweep_start() == ZONE_SWEEP_REFUSE_TRIP_LATCHED,
+              "a latched fault (fault_asserted) -> the real start function refuses");
+
+    // N9 (opus review, 2026-08-28): a relay already on (kiln_io_get_relay_
+    // shadow() non-zero) -- e.g. left on from the dashboard, or by a profile
+    // that just ended -- must refuse the start outright.
+    reset_sweep_state_for_test();
+    s_zones_config_valid = true;
+    s_zones.cfg.thermo_count = 1;
+    s_test_relay_shadow = 0x01;
+    TEST_CHECK(zones_current_sweep_start() == ZONE_SWEEP_REFUSE_RELAYS_ON,
+              "N9: any relay already on (per kiln_io_get_relay_shadow()) -> the real start function refuses, "
+              "so a foreign load can never ride along on the sweep's measurement");
+    s_test_relay_shadow = 0;
+
+    // Now clear every refusal reason -- OK, and starts (xTaskCreate() stub
+    // succeeds without ever running the task body, per stubs/freertos/task.h).
+    reset_sweep_state_for_test();
+    s_zones_config_valid = true;
+    s_zones.cfg.thermo_count = 1;
+    TEST_CHECK(zones_current_sweep_start() == ZONE_SWEEP_REFUSE_OK, "every refusal cleared -> starts cleanly");
+    TEST_CHECK(s_sweep.active, "a started sweep is marked active");
+
+    // And a second start while the first is still (per s_sweep.active)
+    // running must be refused -- proves ALREADY_RUNNING really is checked
+    // by the wired function, not just the pure helper.
+    TEST_CHECK(zones_current_sweep_start() == ZONE_SWEEP_REFUSE_ALREADY_RUNNING,
+              "a second start while one is active is refused");
+
+    reset_sweep_state_for_test();
+    zones_http_set_hw(NULL, NULL, NULL);
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    s_zones_config_valid = false;
+}
+
 void run_test_zones_http(void)
 {
     test_out_of_range_zone_preserves_stored_fields();
@@ -1672,6 +2798,33 @@ void run_test_zones_http(void)
     test_zones_post_relay_name_omitted_preserves_current_value();
     test_zones_post_relay_name_present_updates_value();
     test_zones_post_relay_name_too_long_rejected_and_commits_nothing();
+
+    test_zone_sweep_check_refusal_each_reason_fires();
+    test_zone_sweep_ceiling_hit();
+    test_zone_sweep_effective_ceiling_c();
+    test_zone_sweep_timing_predicates();
+    test_zone_sweep_hw_bindings_route_through_owner();
+    test_zone_sweep_run_one_zone_skips_unwired_zone();
+    test_zone_sweep_run_one_zone_abort_before_energize_never_turns_relay_on();
+    test_zone_sweep_run_one_zone_normal_completion_sequencing();
+    test_zone_sweep_run_one_zone_abort_mid_run_still_forces_off();
+    test_zone_sweep_run_one_zone_ceiling_hit_forces_off();
+    test_zone_sweep_run_one_zone_link_loss_forces_off();
+    test_zone_sweep_run_one_zone_energize_refused_is_a_choke_point_exit_too();
+    test_zone_sweep_run_one_zone_temp_lost_forces_off();
+    test_zone_sweep_run_one_zone_single_invalid_poll_does_not_abort();
+    test_zone_sweep_run_one_zone_trip_latched_forces_off();
+    test_zone_sweep_run_all_zones_never_energizes_two_zones_at_once();
+    test_zone_sweep_run_all_zones_skipped_zone_records_nothing();
+    test_zone_normals_get_set_round_trip();
+
+    test_ct_mapping_mismatch_silent_when_never_measured();
+    test_ct_mapping_mismatch_within_band_is_silent();
+    test_ct_mapping_mismatch_outside_band_warns();
+    test_ct_mapping_mismatch_tiny_normal_needs_absolute_delta_too();
+    test_ct_mapping_warn_mask_wiring();
+
+    test_zones_current_sweep_start_wired_refusals();
 }
 
 int main(void)

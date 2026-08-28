@@ -55,6 +55,8 @@ import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
 
+from . import zones_http_client
+
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from .control import ControlClient
     from .devices import OkReason
@@ -170,9 +172,19 @@ class ZoneApplyResult:
 class PresetApplyResult:
     preset_name: str
     zones: "list[ZoneApplyResult]"
-    #: Fields present in the preset this module has no write path for yet --
-    #: see the module docstring's SCOPE section. Always non-empty today.
+    #: Fields present in the preset with no write path attempted this call --
+    #: either because no ``zones_host`` was given (the whole zones_cfg_t
+    #: group, same as before zones_http_client.py existed) or because a field
+    #: config_presets.py's schema does not carry at all (there are none of
+    #: those today). Empty when ``zones_host`` was given and the write
+    #: succeeded -- see ``zones_result`` for that path's own pass/fail.
     not_written: "list[str]"
+    #: Set only when ``apply_preset()`` was called with ``zones_host`` --
+    #: the GET/merge/POST/read-back-verify result from zones_http_client.py
+    #: for max_temp_c/relay_mask/control_mode/thermo_count/relay_count/etc.
+    #: None means "not attempted this call", not "attempted and unknown" --
+    #: check ``not_written`` to tell the two apart.
+    zones_result: "Optional[zones_http_client.ZonesApplyResult]" = None
 
     def describe(self) -> str:
         lines = [f"preset {self.preset_name!r}:"]
@@ -182,23 +194,62 @@ class PresetApplyResult:
             if z.model_ok is not None:
                 model = "ok" if z.model_ok else f"FAILED ({z.model_detail})"
                 lines.append(f"    model {model}")
+        if self.zones_result is not None:
+            status = "ok" if self.zones_result.ok else "FAILED"
+            lines.append(f"  zones config (relay_mask/max_temp_c/control_mode/...) over HTTP: {status}")
+            if not self.zones_result.ok:
+                for m in self.zones_result.mismatches:
+                    lines.append(f"    {m}")
         if self.not_written:
             lines.append(
-                "  NOT written back (read-only over this link; preset value is "
+                "  NOT written back (no zones_host given this call; preset value is "
                 "reference/expected state only): " + ", ".join(self.not_written)
             )
         return "\n".join(lines)
 
     @property
     def all_ok(self) -> bool:
-        return all(z.pid_ok and (z.model_ok in (None, True)) for z in self.zones)
+        pid_model_ok = all(z.pid_ok and (z.model_ok in (None, True)) for z in self.zones)
+        zones_ok = self.zones_result is None or self.zones_result.ok
+        return pid_model_ok and zones_ok
 
 
-def apply_preset(control: "ControlClient", preset: dict) -> PresetApplyResult:
+#: Zone-level fields this preset schema carries that only zones_http_client's
+#: GET/POST /api/zones path can write -- see that module's docstring for why
+#: the UART CONTROL task has no setter for any of these. Mirrors
+#: zones_http_client._PRESET_ZONE_OVERRIDE_FIELDS; kept as a separate literal
+#: here (rather than importing that private name) so this module's own
+#: not_written accounting doesn't reach into zones_http_client's internals.
+_ZONES_HTTP_ONLY_ZONE_FIELDS = (
+    "relay_mask", "control_mode", "max_temp_c", "min_temp_c", "max_ramp_c_per_hr",
+)
+
+
+def apply_preset(control: "ControlClient", preset: dict,
+                  zones_host: "Optional[str]" = None,
+                  zones_timeout: float = zones_http_client.ZONES_HTTP_TIMEOUT_S,
+                  verify_zones: bool = True) -> PresetApplyResult:
     """Write everything this preset can be written through over the UART
     CONTROL task (PID gains, and the thermal model when the preset carries
-    one) and report the rest as not-written. Never touches relays, never
-    resets, never enables anything -- see the module docstring."""
+    one).
+
+    ``zones_host`` (new): when given, ALSO writes relay_mask/control_mode/
+    max_temp_c/min_temp_c/max_ramp_c_per_hr/thermo_count/relay_count over
+    GET/POST /api/zones via zones_http_client.py -- the fields the UART link
+    has no setter for. That client GETs the board's live config first and
+    merges the preset onto it before POSTing (POST /api/zones is a
+    whole-page-submit endpoint; a naive partial POST would zero every field
+    it doesn't mention, including max_temp_c -- see zones_http_client.py's
+    module docstring), then (unless ``verify_zones=False``) re-reads the
+    config and confirms it actually landed -- see ``zones_result`` on the
+    returned ``PresetApplyResult``. A ZonesHttpError from that path
+    propagates, same as a ControlQueryError from the PID/model calls above.
+
+    When ``zones_host`` is omitted (the default, preserving this function's
+    original behavior), those fields are reported in ``not_written`` as
+    reference/expected data only, exactly as before this parameter existed.
+
+    Never touches relays, never resets, never enables anything."""
     results = []
     for zone in preset["zones"]:
         pid: "OkReason" = control.set_zone_pid(
@@ -221,13 +272,21 @@ def apply_preset(control: "ControlClient", preset: dict) -> PresetApplyResult:
                 model_detail=model_detail,
             )
         )
-    not_written = sorted(
-        {
-            field
-            for zone in preset["zones"]
-            for field in ("relay_mask", "control_mode", "max_temp_c", "min_temp_c", "max_ramp_c_per_hr")
-            if field in zone
-        }
-        | ({"thermo_count", "relay_count"} & preset.keys())
-    )
-    return PresetApplyResult(preset_name=preset["name"], zones=results, not_written=not_written)
+
+    zones_result = None
+    if zones_host:
+        zones_result = zones_http_client.apply_zone_preset(
+            zones_host, preset, timeout=zones_timeout, verify=verify_zones)
+        not_written = []
+    else:
+        not_written = sorted(
+            {
+                field
+                for zone in preset["zones"]
+                for field in _ZONES_HTTP_ONLY_ZONE_FIELDS
+                if field in zone
+            }
+            | ({"thermo_count", "relay_count"} & preset.keys())
+        )
+    return PresetApplyResult(preset_name=preset["name"], zones=results, not_written=not_written,
+                              zones_result=zones_result)

@@ -418,7 +418,15 @@ off in a single register write, then start 250 ms reporting:
 06 FA 00
 ```
 
-### DISPLAY (task 4) — `uart_bridge.c: display_bridge_task`
+### DISPLAY (task 4) — dead on the firmware side (removed 2026-08-27)
+
+`uart_bridge.c`'s `display_bridge_task`/`uart_bridge_start_display_task()`
+were confirmed dead code (never called from `main.c`; LVGL owns the panel
+now) and deleted, along with the PC-side MCP `display_*` tools. The
+subcommand layout below is kept for reference: `DISPLAY_CMD_*` and
+`UART_TASK_ID_DISPLAY` (`uart_task_ids.h`) are still defined and still used
+by kilnctrl's `gui.py`/`actions.py` Display panel, even though nothing on
+this side answers any more — every call just times out.
 
 ILI9488 480x320 SPI TFT on J2. `SCK`/`MOSI`/`MISO` are the shared SPI bus and
 `CS3` is a real GPIO, but D/C and `~RESET` hang off the SX1509 — so every

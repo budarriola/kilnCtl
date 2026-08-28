@@ -1067,6 +1067,15 @@ function safetyTripWords(reason) { return SAFETY_TRIP_WORDS[reason] || 'unknown 
 // "all clear," matching the rest of this page's stale-data convention.
 var SAFETY_LINK_DIAG_STATE_TRIPPED = 4;
 var SAFETY_LINK_STALE_MS = 1500;
+// 2026-08-27 (owner scope change: "all faults... come with instructions on
+// how to fix them... what was detected wrong"). The ESP now decodes cause/
+// remedy/fault-source text itself, off safety_trip_words.h's ONE shared
+// table (dashboard_http.c's GET /api/status handler) -- this banner reads
+// those fields (diag_trip_reason_cause/_remedy, heat_block_sources_words)
+// straight off the JSON rather than keeping a second copy of that logic
+// here, so cause/remedy text cannot drift from the LCD's. safetyTripWords()/
+// SAFETY_TRIP_WORDS above are kept only as an old-firmware fallback for a
+// board that hasn't picked up the new fields yet.
 function renderSafetyTrip(data) {
   var el = document.getElementById('safetyTripBanner');
   var tripped = data.diag_ever_received && data.diag_state === SAFETY_LINK_DIAG_STATE_TRIPPED &&
@@ -1074,14 +1083,61 @@ function renderSafetyTrip(data) {
   if (!tripped) { el.innerHTML = ''; return; }
   var reason = data.diag_trip_reason;
   var ineffective = reason === 10;
-  var words = safetyTripWords(reason);
-  el.innerHTML = '<div class="banner safety-trip">' +
+  var isMainFault = reason === 6; // S6a -- the safety processor sees one bit, ESP knows the source
+  var words = data.diag_trip_reason_words || safetyTripWords(reason);
+  var cause = data.diag_trip_reason_cause || 'Detail not available on this firmware build.';
+  var remedy = data.diag_trip_reason_remedy || 'See firmware/SaftyFW/docs/SAFETY_MODEL.md.';
+  var html = '<div class="banner safety-trip">' +
     '<h3>' + (ineffective ? '!! SAFETY TRIP -- TRIP_INEFFECTIVE !!' : 'SAFETY PROCESSOR TRIPPED') + '</h3>' +
-    '<div class="row"><span>Reason</span><span>' + words + '</span></div>' +
-    '<div class="row"><span>Heat</span><span>relays blocked off by the safety processor</span></div>' +
+    '<div class="row"><span>Reason</span><span>' + window.kcEscapeHtml(words) + '</span></div>' +
+    '<div class="row"><span>Detected</span><span>' + window.kcEscapeHtml(cause) + '</span></div>';
+  if (isMainFault) {
+    // S6a: the "detected" line above is deliberately generic (the safety
+    // processor only sees the resulting bit) -- THIS is the actual reason,
+    // decoded from the ESP's own fault_sources bitmask AT THE MOMENT this
+    // trip latched (trip_fault_sources), not the live heat_block_sources
+    // (which may since have released -- see safety_link.h's field comment
+    // for why the two can legitimately disagree and must stay labeled
+    // separately).
+    // 2026-08-28 audit fix (N3/N4): the backend (dashboard_http.c) now
+    // decides "not captured" for BOTH cases -- an unwitnessed reboot resend
+    // (trip_fault_sources_valid false) and a genuinely-live event whose
+    // source released before the frame arrived (mask == 0) -- so this page
+    // just renders whatever it says rather than re-deciding with its own
+    // (older, narrower) mask check.
+    var srcWords = data.trip_fault_sources_words ||
+      'not captured (older firmware, or the source released before this page loaded)';
+    html += '<div class="row"><span>Fault source (at trip)</span><span>' + window.kcEscapeHtml(srcWords) + '</span></div>';
+    var liveWords = data.heat_block_sources_words;
+    var liveMask = data.heat_block_sources || 0;
+    if (liveMask !== 0 && liveWords !== srcWords) {
+      html += '<div class="row"><span>Still asserted right now</span><span>' + window.kcEscapeHtml(liveWords) + '</span></div>';
+    }
+  }
+  html += '<div class="row"><span>Heat</span><span>relays blocked off by the safety processor</span></div>' +
+    '<div class="row"><span>To clear</span><span>' + window.kcEscapeHtml(remedy) + '</span></div>' +
     (ineffective ? '<p class="note">Power may still be flowing to the load. Go to the breaker, not the kiln.</p>' : '') +
-    '<p class="note">Any firing in progress has been aborted and will not resume. ' +
-    'Clear the trip on the safety processor before starting a new firing.</p></div>';
+    '<p class="note">Any firing in progress has been aborted and will not resume. This trip is LATCHED -- ' +
+    'it does not clear on its own, and starting a new firing will NOT clear it. Only an explicit Clear Trip does, ' +
+    'and it is refused for as long as the cause above is still present.</p>' +
+    (reason !== 10
+      ? '<button class="run-btn" id="clearTripBtn">Clear Trip</button>'
+      : '') +
+    '</div>';
+  el.innerHTML = html;
+  var btn = document.getElementById('clearTripBtn');
+  if (btn) {
+    btn.addEventListener('click', function () {
+      fetch('/api/safety/clear_trip', { method: 'POST' })
+        .then(function (r) { return r.json().catch(function () { return {}; }); })
+        .then(function (j) {
+          if (j && j.ok === false && j.error) {
+            btn.insertAdjacentHTML('afterend', '<div class="row fault">' + window.kcEscapeHtml(j.error) + '</div>');
+          }
+        })
+        .catch(function () {});
+    });
+  }
 }
 
 // boot_button.h -- same solid-fill "safety-trip" visual treatment as

@@ -109,6 +109,9 @@ static const config_param_id_type_t CONFIG_PARAM_TABLE[] = {
     { 0x0316u, KILNLINK_PARAM_TYPE_BOOL }, // ct_cal[0].calibrated
     { 0x0317u, KILNLINK_PARAM_TYPE_BOOL }, // ct_cal[1].calibrated
     { 0x0318u, KILNLINK_PARAM_TYPE_BOOL }, // ct_cal[2].calibrated
+    { 0x0319u, KILNLINK_PARAM_TYPE_F32 }, // max_expected_power_w -- ROADMAP.md
+                                           // M12; next unallocated id after
+                                           // 0x0318 in this section-3 group
     { 0x0401u, KILNLINK_PARAM_TYPE_U16 }, // context_max_age_s
     { 0x0402u, KILNLINK_PARAM_TYPE_U16 }, // link_timeout_s
     { 0x0403u, KILNLINK_PARAM_TYPE_U16 }, // link_dead_hard_s
@@ -206,6 +209,7 @@ bool config_params_get(const config_store_record_t *rec, uint16_t id, uint8_t *o
     case 0x0316u: *out_type = KILNLINK_PARAM_TYPE_BOOL; out_value->bool_val = rec->ct_cal[0].calibrated ? 1u : 0u; return true;
     case 0x0317u: *out_type = KILNLINK_PARAM_TYPE_BOOL; out_value->bool_val = rec->ct_cal[1].calibrated ? 1u : 0u; return true;
     case 0x0318u: *out_type = KILNLINK_PARAM_TYPE_BOOL; out_value->bool_val = rec->ct_cal[2].calibrated ? 1u : 0u; return true;
+    case 0x0319u: *out_type = KILNLINK_PARAM_TYPE_F32; out_value->f32_val = rec->max_expected_power_w; return true;
 
     case 0x0401u: *out_type = KILNLINK_PARAM_TYPE_U16; out_value->u16_val = clamp_u16(rec->context_max_age_s); return true;
     case 0x0402u: *out_type = KILNLINK_PARAM_TYPE_U16; out_value->u16_val = clamp_u16(rec->link_timeout_s); return true;
@@ -220,6 +224,44 @@ bool config_params_get(const config_store_record_t *rec, uint16_t id, uint8_t *o
 
     default:
         return false; // unknown/removed/future id -- see this file's header comment
+    }
+}
+
+bool config_params_is_set(const config_store_record_t *rec, uint16_t id)
+{
+    if (!rec) {
+        return false;
+    }
+    switch (id) {
+    // The eleven fields_set-gated ids (config_store.h's CONFIG_STORE_SET_*
+    // bits) -- ct_channel_map's three wire ids each check their OWN
+    // per-channel bit, not the derived CONFIG_STORE_SET_CT_CHANNEL_MAP group
+    // bit, so an operator can see which specific channel still needs
+    // confirming rather than a page-wide "not commissioned yet" for all
+    // three at once (config_store.h's own comment on why the group bit is
+    // DERIVED, never staged directly).
+    case 0x0101u: return config_store_field_is_set(&rec->fields_set, CONFIG_STORE_SET_TC_SOURCE);
+    case 0x0102u: return config_store_field_is_set(&rec->fields_set, CONFIG_STORE_SET_BORROWED_ZONE_INDEX);
+    case 0x0103u: return config_store_field_is_set(&rec->fields_set, CONFIG_STORE_SET_TC_PLACEMENT_MODE);
+    case 0x0104u: return config_store_field_is_set(&rec->fields_set, CONFIG_STORE_SET_ABS_MAX_TEMP_C);
+    case 0x0105u: return config_store_field_is_set(&rec->fields_set, CONFIG_STORE_SET_TC_TYPE);
+    case 0x0106u: return config_store_field_is_set(&rec->fields_set, CONFIG_STORE_SET_CT_CHANNEL_MAP_0);
+    case 0x0107u: return config_store_field_is_set(&rec->fields_set, CONFIG_STORE_SET_CT_CHANNEL_MAP_1);
+    case 0x0108u: return config_store_field_is_set(&rec->fields_set, CONFIG_STORE_SET_CT_CHANNEL_MAP_2);
+    case 0x0204u: return config_store_field_is_set(&rec->fields_set, CONFIG_STORE_SET_MAX_RATE_C_PER_MIN);
+    case 0x030Eu: return config_store_field_is_set(&rec->fields_set, CONFIG_STORE_SET_MAINS_VOLTAGE_V);
+    case 0x0319u: return config_store_field_is_set(&rec->fields_set, CONFIG_STORE_SET_MAX_EXPECTED_POWER_W);
+    default: {
+        // Every other id in CONFIG_PARAM_TABLE has a real compiled-in
+        // default (CONFIG_REFERENCE.md secs 2-5's threshold fields) --
+        // config_params_get() below returns false only for an id this
+        // table does not recognise at all; any id it accepts here is
+        // "known, and always reported set".
+        uint8_t discard_type = 0;
+        kilnlink_param_value_t discard_value;
+        memset(&discard_value, 0, sizeof(discard_value));
+        return config_params_get(rec, id, &discard_type, &discard_value);
+    }
     }
 }
 
@@ -259,9 +301,23 @@ bool config_params_get(const config_store_record_t *rec, uint16_t id, uint8_t *o
 //     unusual commissioning, not an impossible one), and inventing a bound
 //     the document does not state is exactly the "tight sensible bound"
 //     COMMISSIONING.md's own discipline forbids.
+//   - Strictly-positive floats (CHECK_F32_POS, added ROADMAP.md M12): a
+//     single field, abs_max_temp_c, is stricter still than CHECK_F32_NONNEG.
+//     Before M12 a committed abs_max_temp_c of 0.0 meant "S1 never trips" --
+//     a real, reachable "no limit" state. M12's owner amendment is explicit
+//     that no "no limit" state is offered any more: a kiln maximum
+//     temperature is either UNSET (fields_set clear, the field must not be
+//     trusted by anything that respects the bit) or SET to a real positive
+//     ceiling -- there is no third, "set to no-limit" state, so 0 (and any
+//     negative value) must be refused at SET_PARAM/COMMIT_CONFIG exactly
+//     like a NaN, not merely discouraged. CHECK_F32_NONNEG stays exactly as
+//     it was for i_present_a (0 A is a perfectly normal "no idle load
+//     present" reading, not a disabled-guard sentinel) -- only
+//     abs_max_temp_c moves to CHECK_F32_POS.
 #define CHECK_U8_MAX(maxval) do { if (value.u8_val > (uint8_t)(maxval)) { return false; } } while (0)
 #define CHECK_F32_FINITE() do { if (!isfinite(value.f32_val)) { return false; } } while (0)
 #define CHECK_F32_NONNEG() do { if (!isfinite(value.f32_val) || value.f32_val < 0.0f) { return false; } } while (0)
+#define CHECK_F32_POS() do { if (!isfinite(value.f32_val) || value.f32_val <= 0.0f) { return false; } } while (0)
 
 bool config_params_set(config_store_record_t *rec, uint16_t id, uint8_t type,
                         kilnlink_param_value_t value)
@@ -280,7 +336,7 @@ bool config_params_set(config_store_record_t *rec, uint16_t id, uint8_t type,
     case 0x0101u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U8);  CHECK_U8_MAX(CONFIG_STORE_TC_SOURCE_BOTH); rec->tc_source = value.u8_val; rec->fields_set |= CONFIG_STORE_SET_TC_SOURCE; return true;
     case 0x0102u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U8);  CHECK_U8_MAX(2u); /* CONFIG_REFERENCE.md sec1: "0-2" */ rec->borrowed_zone_index = value.u8_val; rec->fields_set |= CONFIG_STORE_SET_BORROWED_ZONE_INDEX; return true;
     case 0x0103u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U8);  CHECK_U8_MAX(CONFIG_STORE_TC_PLACEMENT_EXTERNAL_OVERHEAT); rec->tc_placement_mode = value.u8_val; rec->fields_set |= CONFIG_STORE_SET_TC_PLACEMENT_MODE; return true;
-    case 0x0104u: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_F32_NONNEG(); rec->abs_max_temp_c = value.f32_val; rec->fields_set |= CONFIG_STORE_SET_ABS_MAX_TEMP_C; return true;
+    case 0x0104u: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_F32_POS(); rec->abs_max_temp_c = value.f32_val; rec->fields_set |= CONFIG_STORE_SET_ABS_MAX_TEMP_C; return true;
     case 0x0105u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U8);  CHECK_U8_MAX(7u); /* MAX31856_TC_TYPE_T (max31856.h); this file stays dependency-free of that header, same reason config_store.h gives -- see this file's own header comment on that isolation */ rec->tc_type = value.u8_val; rec->fields_set |= CONFIG_STORE_SET_TC_TYPE; return true; // 2026-08-24: NOW fields_set-gated too -- tc_type still keeps its own compiled default (config_store.h), the bit exists so a real commissioning write can be told apart from that default (see CONFIG_STORE_SET_TC_TYPE's comment)
     // Per-channel bookkeeping only -- the group bit (CONFIG_STORE_SET_
     // CT_CHANNEL_MAP) is NOT set here. See config_store.h's header comment
@@ -340,7 +396,15 @@ bool config_params_set(config_store_record_t *rec, uint16_t id, uint8_t type,
     case 0x0315u: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_F32_FINITE(); rec->ct_cal[2].offset = value.f32_val; return true;
     case 0x0316u: CHECK_TYPE(KILNLINK_PARAM_TYPE_BOOL); rec->ct_cal[0].calibrated = (value.bool_val != 0u); return true;
     case 0x0317u: CHECK_TYPE(KILNLINK_PARAM_TYPE_BOOL); rec->ct_cal[1].calibrated = (value.bool_val != 0u); return true;
+    // max_expected_power_w: ROADMAP.md M12, sanity/plausibility input only --
+    // no guard reads this (breakers are assumed sized for full load at 100%
+    // duty per the owner). CHECK_F32_NONNEG, not CHECK_F32_POS: unlike
+    // abs_max_temp_c there is no "0 secretly disables a guard" trap here, so
+    // 0 W is merely an unusual entry, not a forbidden one -- still gated by
+    // CONFIG_STORE_SET_MAX_EXPECTED_POWER_W so a stale/garbage byte from an
+    // old record never gets read as a real operator-entered value.
     case 0x0318u: CHECK_TYPE(KILNLINK_PARAM_TYPE_BOOL); rec->ct_cal[2].calibrated = (value.bool_val != 0u); return true;
+    case 0x0319u: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_F32_NONNEG(); rec->max_expected_power_w = value.f32_val; rec->fields_set |= CONFIG_STORE_SET_MAX_EXPECTED_POWER_W; return true;
 
     case 0x0401u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U16); rec->context_max_age_s = value.u16_val; return true;
     case 0x0402u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U16); rec->link_timeout_s = value.u16_val; return true;
@@ -361,6 +425,7 @@ bool config_params_set(config_store_record_t *rec, uint16_t id, uint8_t type,
 #undef CHECK_U8_MAX
 #undef CHECK_F32_FINITE
 #undef CHECK_F32_NONNEG
+#undef CHECK_F32_POS
 }
 
 // Re-checks every bound config_params_set() enforces at SET_PARAM time,
@@ -403,6 +468,11 @@ bool config_params_validate_ranges(const config_store_record_t *rec,
             RANGE_FAIL((field_name), "this field is a physically non-negative quantity"); \
         } \
     } while (0)
+#define RANGE_F32_POS(field, field_name) do { \
+        if (!isfinite(field) || (field) <= 0.0f) { \
+            RANGE_FAIL((field_name), "this field must be a real positive value -- no unlimited/no-limit state exists"); \
+        } \
+    } while (0)
 
     RANGE_U8_MAX(rec->tc_source, CONFIG_STORE_TC_SOURCE_BOTH, "tc_source");
     RANGE_U8_MAX(rec->borrowed_zone_index, 2u, "borrowed_zone_index");
@@ -410,8 +480,47 @@ bool config_params_validate_ranges(const config_store_record_t *rec,
     RANGE_U8_MAX(rec->tc_type, 7u, "tc_type");
     RANGE_U8_MAX(rec->borrowed_type_expected, 7u, "borrowed_type_expected");
 
-    RANGE_F32_NONNEG(rec->abs_max_temp_c, "abs_max_temp_c");
+    // abs_max_temp_c: NaN/Inf is refused UNCONDITIONALLY, bit or no bit.
+    // Unlike max_expected_power_w below, this field is not carved out of a
+    // formerly-reserved block -- it has always been a real, addressed part
+    // of every record layout, so no pre-existing record's bytes here can be
+    // legacy garbage. That means this function's backstop role (this file's
+    // own header comment: catch an impossible value even in a record that
+    // never went through config_params_set(), e.g. hand-built or migrated)
+    // must not be defeated just because nobody has (yet) flipped the
+    // fields_set bit -- a NaN sitting in this field is dangerous whether or
+    // not it is "officially" set.
+    //
+    // Positivity (0 or negative refused) is a SEPARATE, narrower check that
+    // IS guarded by the bit: an untouched default record legitimately holds
+    // 0.0 unset (config_store_default() leaves it at memset(0)), and
+    // RANGE_F32_POS's "no unlimited/no-limit state" refusal (M12's owner
+    // ruling -- see CHECK_F32_POS's header comment above config_params_set())
+    // must not fire on a field the operator has not yet had a chance to
+    // commission. Once the bit IS set, the stored value came only from
+    // CHECK_F32_POS at SET_PARAM time and is re-checked here as full
+    // belt-and-suspenders, same as every other field.
+    RANGE_F32_FINITE(rec->abs_max_temp_c, "abs_max_temp_c");
+    if (config_store_field_is_set(&rec->fields_set, CONFIG_STORE_SET_ABS_MAX_TEMP_C)) {
+        RANGE_F32_POS(rec->abs_max_temp_c, "abs_max_temp_c");
+    }
     RANGE_F32_NONNEG(rec->i_present_a, "i_present_a");
+    // Guarded the same way abs_max_temp_c is just above, but for a DIFFERENT
+    // reason: max_expected_power_w's wire bytes were carved out of the FRONT
+    // of the former reserved block (config_store.c's REC_OFF_MAX_EXPECTED_
+    // POWER_W layout comment), so every record committed before this pass
+    // shipped holds whatever incidental byte pattern used to live there --
+    // typically the 0xFF erased-flash fill, which decodes as NaN or a huge
+    // magnitude float. An unconditional RANGE_F32_NONNEG here would refuse to
+    // LOAD every pre-existing commissioned board purely because of stale
+    // bytes in a field nobody has ever written, exactly the load-time
+    // rejection hazard config_store.h's "Load-time rejection diagnostics"
+    // block warns about. Once the bit IS set, the value came only from
+    // CHECK_F32_NONNEG at SET_PARAM time and is re-checked here as full
+    // belt-and-suspenders, same as abs_max_temp_c.
+    if (config_store_field_is_set(&rec->fields_set, CONFIG_STORE_SET_MAX_EXPECTED_POWER_W)) {
+        RANGE_F32_NONNEG(rec->max_expected_power_w, "max_expected_power_w");
+    }
 
     RANGE_F32_FINITE(rec->firing_margin_c, "firing_margin_c");
     RANGE_F32_FINITE(rec->overshoot_margin_c, "overshoot_margin_c");
@@ -440,6 +549,7 @@ bool config_params_validate_ranges(const config_store_record_t *rec,
 #undef RANGE_U8_MAX
 #undef RANGE_F32_FINITE
 #undef RANGE_F32_NONNEG
+#undef RANGE_F32_POS
 }
 
 bool config_params_validate_ex(const config_store_record_t *rec, const char **out_field,
@@ -492,6 +602,53 @@ bool config_params_validate_ex(const config_store_record_t *rec, const char **ou
         return false;
     }
 
+    // 2026-08-28 audit fix (M2): safety_commissioning_page.html's
+    // checkTcMaxContradiction() enforces "abs_max_temp_c cannot contradict
+    // the sensor [tc_type]" client-side ONLY -- inadequate for a
+    // dangerous-risk field: (a) /safety/commissioning accepts POSTs from
+    // anything that can reach it (a curl with abs_max_temp_c=1500,
+    // tc_type=7/Type T, whose sensor tops out at 400 C, was accepted and
+    // committed with no server-side check at all), and (b) the JS check
+    // returns null unless BOTH fields are in the same submission, so it
+    // cannot fire in the common case of field-by-field commissioning. This
+    // is the backstop -- same fields_set-gating idiom as the tc_source/
+    // tc_placement_mode contradiction just above, and the same values as the
+    // JS table (TC_MAX_C_BY_TYPE, safety_commissioning_page.html), which
+    // must be kept in sync with this table by hand if either changes; both
+    // cite MAX31856.pdf page 4/15/26 as the source of the numbers.
+    bool abs_max_temp_set =
+        config_store_field_is_set(&rec->fields_set, CONFIG_STORE_SET_ABS_MAX_TEMP_C);
+    bool tc_type_set =
+        config_store_field_is_set(&rec->fields_set, CONFIG_STORE_SET_TC_TYPE);
+    if (abs_max_temp_set && tc_type_set) {
+        static const float TC_MAX_C_BY_TYPE[8] = {
+            1798.0f, // 0: Type B, TTC 95..1798 C
+            1000.0f, // 1: Type E, TTC -200..1000 C
+            1200.0f, // 2: Type J, TTC -210..1200 C
+            1372.0f, // 3: Type K, TTC -200..1372 C
+            1300.0f, // 4: Type N, TTC -200..1300 C
+            1768.0f, // 5: Type R, TTC -50..1768 C
+            1768.0f, // 6: Type S, TTC -50..1768 C
+            400.0f,  // 7: Type T, TTC -200..400 C
+        };
+        // rec->tc_type is already RANGE_U8_MAX-checked <= 7 above, so this
+        // index is always in bounds by the time control reaches here.
+        if (rec->abs_max_temp_c > TC_MAX_C_BY_TYPE[rec->tc_type]) {
+            if (out_field) {
+                *out_field = "abs_max_temp_c";
+            }
+            if (out_rule) {
+                *out_rule = "CONFIG_REFERENCE.md sec1 / ROADMAP.md M12: abs_max_temp_c cannot "
+                            "exceed the selected tc_type's own sensor maximum -- the kiln ceiling "
+                            "cannot exceed what the thermocouple itself can report";
+            }
+            if (out_reason) {
+                *out_reason = CONFIG_PARAMS_REJECT_CONTRADICTION;
+            }
+            return false;
+        }
+    }
+
     return true;
 }
 
@@ -520,6 +677,7 @@ static const config_param_name_id_t CONFIG_PARAM_NAME_TABLE[] = {
     { "tc_type", 0x0105u },
     { "borrowed_type_expected", 0x0210u },
     { "i_present_a", 0x0301u },
+    { "max_expected_power_w", 0x0319u },
     { "firing_margin_c", 0x0201u },
     { "overshoot_margin_c", 0x0202u },
     { "max_rate_c_per_min", 0x0204u },

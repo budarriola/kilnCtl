@@ -368,9 +368,13 @@ so advisory-only is the correct behavior, not a shortcut.
 ## LVGL / LCD rendering
 
 - LVGL owns the ILI9488 outright; the old UART-remote-drawn `DISPLAY_CMD_*`
-  path is dead code in firmware (never started from `main.c`). The PC-side
-  MCP `display_*` tools that speak that old protocol are stale — decision
-  on delete vs. restore vs. leave-as-is is still open (TODO.md 10.1).
+  path was dead code in firmware (never started from `main.c`) and
+  `display_bridge_task`/`uart_bridge_start_display_task()` were deleted
+  2026-08-27, along with the PC-side MCP `display_*` tools that spoke that
+  old protocol (TODO.md 10.1, decided: delete). `DISPLAY_CMD_*`/
+  `UART_TASK_ID_DISPLAY` stay defined as wire-protocol constants — kilnctrl's
+  `gui.py`/`actions.py` Display panel still speaks them, even though nothing
+  on the firmware side answers any more.
 - Shared backend rule (10.1a): a page's data access and actions must go
   through the same plain-C functions the HTTP handlers use — one backend,
   two front ends (JSON serialization, LVGL widget updates), never two

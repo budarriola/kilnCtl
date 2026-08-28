@@ -275,6 +275,21 @@ extern "C" {
 // specific wire-visible flag.
 #define CONFIG_STORE_SET_TC_TYPE             (1u << 10)
 
+// max_expected_power_w -- added ROADMAP.md M12 "maximum expected kiln power"
+// pass. Gated for the SAME reason tc_type is (config_store.h header comment
+// above), not the "no safe default" reason the first ten bits exist: there is
+// no guard reading this field today (it is a sanity/plausibility input for
+// the commissioning UI only -- breakers are assumed sized for full load at
+// 100% duty, this is NOT a derating input), so a stale/garbage byte at this
+// offset in a record written before this field existed cannot silently
+// mis-trip anything. It is still bit-gated rather than trusted unconditionally
+// because 0 W (and the NaN/Inf garbage an old record's now-repurposed reserved
+// bytes could otherwise decode as) is a nonsensical value for a real kiln, and
+// this codebase's convention (config_store.h's own header comment) is that an
+// old record's bytes at a newly-added offset are never trustworthy without an
+// explicit bit saying an operator actually wrote them.
+#define CONFIG_STORE_SET_MAX_EXPECTED_POWER_W (1u << 11)
+
 // True iff every bit in `mask` (some OR of CONFIG_STORE_SET_* above) is set
 // in `rec->fields_set`. Small enough to inline; exists so call sites read as
 // "is X commissioned" rather than repeating the `& / ==` bit-test idiom
@@ -485,15 +500,28 @@ typedef struct {
 
     config_store_ct_channel_cal_t ct_cal[CONFIG_STORE_CT_CAL_NUM_CHANNELS];
 
+    // Sanity/plausibility input only, ROADMAP.md M12 "maximum expected kiln
+    // power" -- the operator's own estimate of the kiln's expected power draw
+    // in watts, used only by the KilnFW commissioning UI to sanity-check
+    // itself against wiring/breaker assumptions. Breakers are assumed sized
+    // for full load at 100% duty per the owner's own framing; this is NOT a
+    // derating input and NO SaftyFW guard trips on it -- it is captured and
+    // persisted here only so it round-trips through GET_PARAM/GET_CONFIG_PAGE
+    // like every other commissioning field. Gated by
+    // CONFIG_STORE_SET_MAX_EXPECTED_POWER_W -- see that bit's own comment
+    // above for why a "no guard reads this" field still needs the gate.
+    float    max_expected_power_w;    // W; gated by _SET_MAX_EXPECTED_POWER_W
+
     // Reserved, unused, packed as 0xFF (matches the erased-flash background,
-    // same convention as metadata.h's per-slot reserved bytes). ~299 B of
+    // same convention as metadata.h's per-slot reserved bytes). ~295 B of
     // headroom (config_store.c's REC_OFF_RESERVED..REC_OFF_CRC; one byte of
     // the original 300 was carved off the FRONT of this block for
-    // safety_tc_installed above -- see REC_OFF_SAFETY_TC_INSTALLED in
+    // safety_tc_installed, and 4 more for max_expected_power_w above -- see
+    // REC_OFF_SAFETY_TC_INSTALLED / REC_OFF_MAX_EXPECTED_POWER_W in
     // config_store.c) -- adding a field later is a struct/pack/unpack/
     // host-test change, not a layout change, same as metadata.h's own
     // signature/sig_required reservation.
-    uint8_t  reserved[299];
+    uint8_t  reserved[295];
 } config_store_record_t;
 
 // Compile-time budget check, mirroring bootloader/metadata.c's

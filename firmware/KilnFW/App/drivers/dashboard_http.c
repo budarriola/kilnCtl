@@ -30,6 +30,7 @@
 #include "relay_authority.h"
 #include "relay_cycles.h"
 #include "run_state.h"
+#include "safety_trip_words.h" /* shared cause/remedy/fault-source decode -- see that header's own comment */
 #include "sim_backend.h"
 #include "uart_task_ids.h"
 #include "unit_pref.h"
@@ -280,6 +281,8 @@ void dashboard_get_status(dashboard_status_t *out)
             out->trip_event_age_ms = sl.trip_event_age_ms;
             out->trip_safety_tc_c = sl.trip_safety_tc_c;
             out->trip_deciding_threshold = sl.trip_deciding_threshold;
+            out->trip_fault_sources = sl.trip_fault_sources;
+            out->trip_fault_sources_valid = sl.trip_fault_sources_valid;
         }
         out->safety_ready = dashboard_safety_ready(true, safety_status_err, safety_link_up);
 
@@ -583,6 +586,19 @@ static esp_err_t status_get_handler(httpd_req_t *req)
      * heat"), not an absence, so this one does NOT take the null convention
      * its neighbours use. */
     APPEND(",\"heat_block_sources\":%lu", (unsigned long)ds.heat_block_sources);
+    /* Decoded words for the mask above -- safety_trip_words.h's shared table
+     * (2026-08-27, owner: "all faults... what was detected wrong"), same
+     * function ui_page_diagnostics.c's LCD trip page now calls, so the two
+     * surfaces cannot drift. LIVE state, not what tripped it -- see
+     * safety_link.h's trip_fault_sources comment for why that is a separate
+     * field below. */
+    {
+        /* 160, not 128 -- 2026-08-28 audit fix (N6), same truncation risk as
+         * tf_words below: six comma-joined source strings are 141 bytes. */
+        char hb_words[160];
+        APPEND(",\"heat_block_sources_words\":\"%s\"",
+               safety_fault_source_words(ds.heat_block_sources, hb_words, sizeof(hb_words)));
+    }
     APPEND(",\"zone_blocked_mask\":%u", (unsigned)ds.zone_blocked_mask);
 
     /* TODO.md 9.0's deferred "GUI names both versions and which one is
@@ -602,12 +618,17 @@ static esp_err_t status_get_handler(httpd_req_t *req)
     /* ROADMAP.md M5 -- SAFETY_CMD_DIAG (Frame B) and SAFETY_CMD_TRIP_EVENT
      * (Frame D), same null-until-received convention as everything else on
      * this endpoint. diag_trip_mask/diag_warn_mask are bitmasks (one bit per
-     * guard, SaftyFW's safety_guards.h) -- left as raw integers rather than
-     * decoded here, same as diag_trip_reason/trip_reason, since this
-     * firmware has no guard-name table of its own to decode them against. */
+     * guard, SaftyFW's safety_guards.h) -- left as raw integers, since a
+     * caller needing per-guard names for those iterates the bits itself;
+     * diag_trip_reason/trip_reason are the single "the" reason and now DO
+     * get decoded cause/remedy text below, via safety_trip_words.h's shared
+     * table (2026-08-27 scope change). */
     APPEND(",\"diag_ever_received\":%s", ds.diag_ever_received ? "true" : "false");
     if (ds.diag_ever_received) {
         APPEND(",\"diag_trip_reason\":%u", (unsigned)ds.diag_trip_reason);
+        APPEND(",\"diag_trip_reason_words\":\"%s\"", safety_trip_words_short(ds.diag_trip_reason));
+        APPEND(",\"diag_trip_reason_cause\":\"%s\"", safety_trip_words_cause(ds.diag_trip_reason));
+        APPEND(",\"diag_trip_reason_remedy\":\"%s\"", safety_trip_words_remedy(ds.diag_trip_reason));
         APPEND(",\"diag_warn_mask\":%u", (unsigned)ds.diag_warn_mask);
         APPEND(",\"diag_trip_mask\":%u", (unsigned)ds.diag_trip_mask);
         APPEND(",\"diag_state\":%u", (unsigned)ds.diag_state);
@@ -621,6 +642,9 @@ static esp_err_t status_get_handler(httpd_req_t *req)
     APPEND(",\"trip_event_ever_received\":%s", ds.trip_event_ever_received ? "true" : "false");
     if (ds.trip_event_ever_received) {
         APPEND(",\"trip_reason\":%u", (unsigned)ds.trip_reason);
+        APPEND(",\"trip_reason_words\":\"%s\"", safety_trip_words_short(ds.trip_reason));
+        APPEND(",\"trip_reason_cause\":\"%s\"", safety_trip_words_cause(ds.trip_reason));
+        APPEND(",\"trip_reason_remedy\":\"%s\"", safety_trip_words_remedy(ds.trip_reason));
         APPEND(",\"trip_event_age_ms\":%lu", (unsigned long)ds.trip_event_age_ms);
         char trip_tc_buf[16];
         char trip_thr_buf[16];
@@ -628,6 +652,44 @@ static esp_err_t status_get_handler(httpd_req_t *req)
                json_f(trip_tc_buf, sizeof(trip_tc_buf), "%.1f", ds.trip_safety_tc_c));
         APPEND(",\"trip_deciding_threshold\":%s",
                json_f(trip_thr_buf, sizeof(trip_thr_buf), "%.1f", ds.trip_deciding_threshold));
+        /* S6a only (safety_link.h's trip_fault_sources field comment): THIS
+         * board's own fault_sources bitmask, snapshotted the instant this
+         * trip latched -- distinct from heat_block_sources above, which is
+         * live and may have changed since. Reported for every trip_reason
+         * (harmlessly 0/"none" when the trip wasn't S6a) rather than gated,
+         * so the JSON shape doesn't change per reason.
+         *
+         * 2026-08-28 audit fix (N3): trip_fault_sources_valid gates whether
+         * the mask/words below are trustworthy -- see dashboard_http.h's
+         * field comment. A reboot-time resend of an old, already-latched
+         * trip leaves this false; the mask is still emitted (so the JSON
+         * shape never changes) but words says so explicitly rather than
+         * rendering a plausible-looking wrong cause. */
+        APPEND(",\"trip_fault_sources\":%lu", (unsigned long)ds.trip_fault_sources);
+        APPEND(",\"trip_fault_sources_valid\":%s", ds.trip_fault_sources_valid ? "true" : "false");
+        {
+            /* 2026-08-28 audit fix (N6): 128 truncates a multi-source mask
+             * mid-word -- all six safety_fault_source_words() strings
+             * comma-joined are 141 bytes, and three sources alone is already
+             * ~70. Truncation here is RUNTIME (the helper is bounds-checked,
+             * never a format string), so -Werror=format-truncation can never
+             * catch this class -- sizing generously is the only guard. */
+            char tf_words[160];
+            /* 2026-08-28 audit fix (N4): mask==0 here is NEVER a genuine
+             * "none" the way it is for heat_block_sources above -- S6a is
+             * defined as the ESP having asserted the isolated fault line, so
+             * a captured zero mask means the source cleared before the frame
+             * arrived, not that nothing was wrong. Combined with N3's
+             * validity gate: either reason renders the same "not captured"
+             * message, since an operator cannot act on either differently. */
+            if (ds.trip_fault_sources_valid && ds.trip_fault_sources != 0u) {
+                APPEND(",\"trip_fault_sources_words\":\"%s\"",
+                       safety_fault_source_words(ds.trip_fault_sources, tf_words, sizeof(tf_words)));
+            } else {
+                APPEND(",\"trip_fault_sources_words\":\"not captured -- the source cleared before "
+                       "the trip was reported\"");
+            }
+        }
     }
 
     /* TODO.md owner-report item 5: the safety processor's own build identity

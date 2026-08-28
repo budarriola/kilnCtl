@@ -244,6 +244,24 @@ typedef struct {
     uint32_t trip_event_age_ms;
     float    trip_safety_tc_c;
     float    trip_deciding_threshold;
+    /* safety_link_status_t's trip_fault_sources, straight passthrough --
+     * this board's OWN fault_sources bitmask, snapshotted at the moment the
+     * currently-cached trip latched. Meaningful only when trip_reason == 6
+     * (S6a, main-controller fault) -- see safety_link.h's field comment for
+     * why every other guard's cause lives entirely on SaftyFW's side.
+     * Distinct from heat_block_sources above (that one is LIVE, this one is
+     * frozen at trip time; a source can assert, cause a trip, and release
+     * again, and the two fields will then legitimately disagree). */
+    uint32_t trip_fault_sources;
+    /* 2026-08-28 audit fix (N3): safety_link_status_t's trip_fault_sources_
+     * valid, straight passthrough -- true only when trip_fault_sources above
+     * was captured on a trip_seq change THIS BOOT ACTUALLY WITNESSED. False
+     * after an ESP reboot with a trip still latched on the Pico (the first
+     * resend looks identical to a new trip from here, but the snapshot would
+     * be of THIS boot's fault lines, not the real trip instant's). JSON/LCD
+     * renderers of trip_fault_sources MUST check this and show "not
+     * captured" rather than a plausible-looking wrong value when false. */
+    bool     trip_fault_sources_valid;
 
     /* TODO.md owner-report item 5 (2026-08-21): the safety processor's own
      * build identity and config commissioning state, straight from

@@ -26,8 +26,47 @@ extern "C" {
  *   3      u8   more -- 1 if further pages remain beyond this one, else 0
  *   4..    N * entry, each:
  *            0..1  u16 LE  param_id
- *            2     u8      type (KILNLINK_PARAM_TYPE_*)
+ *            2     u8      type (KILNLINK_PARAM_TYPE_* in bits 0-6) |
+ *                           KILNLINK_CONFIG_PAGE_UNSET_BIT (bit 7)
  *            3..   value, kilnlink_param_value_len(type) bytes (1, 1, 2, or 4)
+ *                           -- present and encoded even when UNSET (as the
+ *                           field's compiled-in/zero default), but MUST NOT
+ *                           be treated as a real value by the reader; see
+ *                           KILNLINK_CONFIG_PAGE_UNSET_BIT below.
+ *
+ * **The `set` bit (2026-08-27 audit fix, "ok cannot fail" commissioning-write
+ * defect d).** Every KILNLINK_PARAM_TYPE_* tag this codec knows about
+ * (BOOL/U8/U16/F32) is 0x00-0x03, so bit 7 of the type byte was always free;
+ * it now carries whether the SENDER considers this entry SET (per
+ * CONFIG_REFERENCE.md's no-safe-default fields, e.g. abs_max_temp_c before
+ * commissioning) or reporting only a placeholder default. Before this bit
+ * existed, an entry's `set`-ness was invented independently by whichever end
+ * read the frame -- SaftyFW/src/tasks/link_task.c's link_task_send_config_
+ * page() emitted every field's raw value with no way to say "this one is
+ * still unset", and KilnFW/App/drivers/safety_cfg_store.c's refetch loop
+ * then set `.set = 1` for every entry it received, unconditionally. The
+ * result: an operator-facing page showed abs_max_temp_c "{set:true,
+ * value:0}" for a field the Pico itself considered UNSET, and 0 on that
+ * specific field means the overtemperature guard NEVER TRIPS -- the single
+ * worst value that field can silently carry.
+ *
+ * WIRE COMPATIBILITY: this is NOT wire-compatible with a pre-fix peer. A
+ * pre-fix encoder never sets bit 7 (every entry it sends reads as `set =
+ * true`, which is exactly its old unconditional behavior -- so a NEW decoder
+ * talking to an OLD Pico degrades gracefully to the old, less-honest
+ * behavior, never a decode failure). But a pre-fix DECODER validates the
+ * whole type byte against its closed KILNLINK_PARAM_TYPE_* set and rejects
+ * anything else as KILNLINK_CONFIG_PAGE_ERR_BAD_TYPE -- so an OLD ESP talking
+ * to a NEW Pico that sends an unset field with bit 7 set would have that
+ * entry's type byte read as 0x80/0x81/0x82/0x83, none of which match any
+ * known tag, and reject the WHOLE PAGE. Per LINK_PROTOCOL.md's "commit as
+ * the code and bump KILNLINK_PROTOCOL_VERSION if a peer would break" rule,
+ * this change bumps KILNLINK_PROTOCOL_VERSION (see kilnlink_protocol_
+ * version.h) -- both ends of this specific link ship together in one
+ * firmware release, so the compatibility floor (KILNLINK_MIN_COMPATIBLE)
+ * does not need to move, but the version number itself must, so a genuine
+ * cross-version mismatch is still detected and logged rather than silently
+ * misdecoded.
  *
  * **Paging scheme.** The 253-byte payload cap (LINK_PROTOCOL.md sec 3) is
  * far too small for CONFIG_REFERENCE.md secs 1-5's whole surface in one
@@ -67,6 +106,10 @@ extern "C" {
 #define KILNLINK_CONFIG_PAGE_ENTRY_HDR_LEN 3u /* param_id u16(2) + type(1), before the value */
 #define KILNLINK_CONFIG_PAGE_ENTRY_MAX_LEN (KILNLINK_CONFIG_PAGE_ENTRY_HDR_LEN + 4u) /* + f32 value */
 #define KILNLINK_CONFIG_PAGE_MAX_ENTRIES 32u
+/* Bit 7 of the on-wire type byte -- see this header's top comment ("The `set`
+ * bit"). Never combine with a KILNLINK_PARAM_TYPE_* tag directly; always go
+ * through kilnlink_config_page_pack()/_decode(), which mask it in/out. */
+#define KILNLINK_CONFIG_PAGE_UNSET_BIT 0x80u
 
 typedef enum {
     KILNLINK_CONFIG_PAGE_OK = 0,
@@ -79,8 +122,15 @@ typedef enum {
 
 typedef struct {
     uint16_t param_id;
-    uint8_t  type; /* KILNLINK_PARAM_TYPE_* */
-    kilnlink_param_value_t value;
+    uint8_t  type; /* KILNLINK_PARAM_TYPE_* -- never carries KILNLINK_CONFIG_PAGE_UNSET_BIT; that bit lives
+                    * only on the wire and in this struct's own separate `set` field below. */
+    kilnlink_param_value_t value; /* meaningless when !set -- caller's job to check `set` first, same
+                                    * "never treat an unset field's value as real" rule
+                                    * safety_cfg_store.h's safety_cfg_param_t documents on the ESP side. */
+    bool set; /* false: the sender considers this field UNSET (CONFIG_REFERENCE.md's no-safe-default
+               * fields before commissioning) -- `value` is a placeholder, not a real reading. true:
+               * a pre-KILNLINK_CONFIG_PAGE_UNSET_BIT peer's frames always decode this true, matching
+               * that era's "every field is set" behavior (see this header's WIRE COMPATIBILITY note). */
 } kilnlink_config_page_entry_t;
 
 typedef struct {

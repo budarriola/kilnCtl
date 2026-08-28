@@ -2456,6 +2456,21 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
     if (ota_http_heat_blocked_by_update(err_msg, err_cap)) {
         return false;
     }
+    /* B2 (opus review, 2026-08-27): zones_http.c's per-zone current sweep is
+     * a sixth writer of the mains-contactor relays, with its own start-time
+     * refusal if a profile is already running/paused -- but that check was
+     * only ever made ONE-DIRECTIONAL: nothing here refused to start a
+     * profile while a sweep was already energizing a zone. See
+     * zones_current_sweep_is_active()'s doc comment (zones_http.h) for the
+     * full picture. Checked here, right after the OTA check above, for the
+     * same "cheap and orthogonal to zone state" reasoning. */
+    if (zones_current_sweep_is_active()) {
+        if (err_msg) {
+            snprintf(err_msg, err_cap,
+                     "a zone current sweep is running -- it cannot run at the same time as a firing");
+        }
+        return false;
+    }
     /* Refuse at the door when heat authority is already blocked -- the same
      * check, in the same words, autotune_engine.c's begin_run_locked() makes.
      * Without it a start on a board whose safety link is down answered
