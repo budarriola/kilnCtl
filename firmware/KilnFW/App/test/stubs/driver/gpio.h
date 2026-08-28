@@ -19,8 +19,8 @@
 typedef int gpio_num_t;
 #define GPIO_NUM_0 0
 
-typedef enum { GPIO_MODE_INPUT = 1 } gpio_mode_t;
-typedef enum { GPIO_PULLUP_DISABLE = 0, GPIO_PULLUP_ENABLE = 1 } gpio_pullup_t;
+typedef enum { GPIO_MODE_INPUT = 1, GPIO_MODE_OUTPUT = 2 } gpio_mode_t;
+typedef enum { GPIO_PULLUP_DISABLE = 0, GPIO_PULLUP_ENABLE = 1, GPIO_PULLUP_ONLY = 2 } gpio_pullup_t;
 typedef enum { GPIO_PULLDOWN_DISABLE = 0, GPIO_PULLDOWN_ENABLE = 1 } gpio_pulldown_t;
 typedef enum { GPIO_INTR_DISABLE = 0 } gpio_int_type_t;
 
@@ -42,6 +42,24 @@ static inline int gpio_get_level(gpio_num_t gpio)
 {
     (void)gpio;
     return 1; /* not pressed (ACTIVE LOW) -- never read by any host test */
+}
+
+/* Added for safety_link.c's host build (App/test/test_safety_link_compile.c)
+ * -- values/behavior here are never asserted against; only "the identifier
+ * exists and the call compiles/links" matters, same convention as the rest
+ * of this file. */
+#define GPIO_IS_VALID_OUTPUT_GPIO(gpio) (1)
+
+static inline esp_err_t gpio_set_level(gpio_num_t gpio, int level)
+{
+    (void)gpio; (void)level;
+    return ESP_OK;
+}
+
+static inline esp_err_t gpio_set_pull_mode(gpio_num_t gpio, gpio_pullup_t pull)
+{
+    (void)gpio; (void)pull;
+    return ESP_OK;
 }
 
 #endif // TEST_STUB_DRIVER_GPIO_H

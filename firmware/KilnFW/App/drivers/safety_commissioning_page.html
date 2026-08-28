@@ -185,6 +185,40 @@
   @media (max-width: 420px) {
     .field-head { flex-direction: column; align-items: flex-start; }
   }
+
+  /* ---- Guided flow (COMMISSIONING_UX.md sec 4): four questions writing six
+     parameters, shown by default; the full 59-field list below moves into
+     an Advanced disclosure. Deliberately reuses the same .field/.card/.hint
+     tokens as the Advanced view so the two do not read as different apps. ---- */
+  .gstepper { display: flex; gap: 0.4em; margin: 0.8em 0; flex-wrap: wrap; }
+  .gstepper span { font-size: 0.75em; padding: 0.2em 0.6em; border-radius: 999px;
+    background: var(--card-bg); border: 1px solid var(--border); color: var(--muted); }
+  .gstepper span.current { border-color: var(--link); color: var(--fg); font-weight: bold; }
+  .gstepper span.done { color: var(--ok); border-color: var(--ok); }
+  .gscreen { background: var(--card-bg); border: 1px solid var(--border); border-radius: var(--ui-radius);
+    padding: 1em 1.2em; margin-bottom: 1em; }
+  .gscreen h3 { margin-top: 0; }
+  .radio-card { display: block; border: 1px solid var(--input-border); border-radius: var(--ui-radius);
+    padding: 0.7em 0.9em; margin: 0.6em 0; cursor: pointer; }
+  .radio-card input { width: 1.2em; height: 1.2em; margin-right: 0.6em; vertical-align: middle; }
+  .radio-card .consequence { display: block; margin: 0.4em 0 0 1.9em; font-size: 0.85em; color: var(--muted); }
+  .radio-card.selected { border-color: var(--link); border-width: 2px; }
+  .radio-card.disabled { opacity: 0.55; cursor: not-allowed; }
+  .radio-card.disabled .consequence { color: var(--bad); font-weight: bold; }
+  .gnav { display: flex; gap: 0.6em; margin-top: 1em; }
+  .gnav button { margin-top: 0; }
+  .review-row { display: flex; justify-content: space-between; gap: 1em; padding: 0.35em 0;
+    border-bottom: 1px dotted var(--border); font-size: 0.92em; }
+  .review-row:last-child { border-bottom: none; }
+  .review-row .rv { font-family: monospace; text-align: right; }
+  .writewindow { border-radius: var(--ui-radius); padding: 0.8em 1em; margin: 0.8em 0; font-weight: bold; }
+  .writewindow.ww-unknown { background: var(--card-bg); border: 1px solid var(--border); color: var(--muted); font-weight: normal; }
+  .writewindow.ww-armed { background: var(--fault-color); color: #fff; }
+  .writewindow.ww-waiting { background: var(--warn); color: #fff; }
+  .writewindow.ww-ok { background: var(--ok); color: #fff; }
+  #guidedMsg { font-weight: bold; margin-top: 0.6em; }
+  details#advancedDetails { margin-top: 1.6em; border-top: 2px solid var(--border); padding-top: 0.6em; }
+  details#advancedDetails > summary { font-size: 1.05em; cursor: pointer; }
 </style>
 </head>
 <body>
@@ -220,11 +254,107 @@ form fields were last fetched at, shown purely so a mismatch is visible.</p>
 (or has never reported in) to say which fields below are genuinely unset -- every "set" badge on this
 page is UNKNOWN, not a real confirmation, until it reports a newer build.</p>
 
+
+<!-- ============================================================
+     Guided flow (COMMISSIONING_UX.md sec 4): four questions writing six
+     parameters (abs_max_temp_c, safety_tc_installed, tc_source,
+     tc_placement_mode, mains_voltage_v, max_expected_power_w). Everything
+     else stays defaulted/derived and is only reachable in Advanced below.
+     ============================================================ -->
+<div id="guided">
+  <div class="gstepper" id="gstepper"></div>
+
+  <div class="gscreen" id="gscreen0">
+    <h3>Before you start</h3>
+    <p id="gPreflightStatus" class="hint">Loading current status&hellip;</p>
+    <!-- F4 fix (opus review): this used to be a static string dressed as
+         live state -- gSetWriteWindowBanner() only ever targeted
+         #gWriteWindow2. It now updates in step with #gWriteWindow2 on every
+         commit attempt (see gSetWriteWindowBanner()); this initial text is
+         only shown before the first attempt. -->
+    <div id="gWriteWindow" class="writewindow ww-unknown">Write window: unknown until you try to save.</div>
+    <p class="hint">Config writes are refused unless the safety processor's relay owner is still
+    in its ~60&nbsp;second boot-grace window. You can fill in every answer below at any time --
+    the values are only staged in this browser tab. The commit step at the end tells you if the
+    write window is closed and walks you through reopening it (power-cycle the safety processor).</p>
+    <p id="gLoadFailedMsg" class="hint guard-disabled" hidden></p>
+    <div class="gnav"><button type="button" id="gStartBtn" onclick="gStart()">Start</button></div>
+  </div>
+
+  <div class="gscreen" id="gscreen1" hidden>
+    <h3>Q1-Q3: This kiln</h3>
+    <label for="gAbsMax">What is the highest temperature this kiln may ever reach?</label>
+    <p class="hint">The highest temperature the kiln's furniture, elements and brick can survive --
+    not the hottest firing you plan to do. Required. No "unlimited" option.</p>
+    <input type="number" step="any" min="0.0001" id="gAbsMax" placeholder="°C, e.g. 1300">
+    <p class="hint" id="gAbsMaxTcHint"></p>
+
+    <label for="gMainsSelect">Mains supply voltage</label>
+    <select id="gMainsSelect"></select>
+    <input type="number" step="any" id="gMainsOther" hidden placeholder="voltage, V">
+
+    <label for="gPower">Roughly how much power does this kiln draw at full output? (optional)</label>
+    <p class="hint">Used only to sanity-check wiring. No guard reads it.</p>
+    <input type="number" step="any" min="0" id="gPower" placeholder="W, e.g. 10900">
+
+    <div class="gnav"><button type="button" onclick="gGoto(0)">Back</button>
+      <button type="button" onclick="gValidateScreen1() &amp;&amp; gGoto(2)">Next</button></div>
+    <p id="g1msg" class="hint"></p>
+  </div>
+
+  <div class="gscreen" id="gscreen2" hidden>
+    <h3>Q4: Where is the safety processor's own thermocouple?</h3>
+    <label class="radio-card" id="gCardNotFitted">
+      <input type="radio" name="gq2" value="not_fitted">Not fitted
+      <span class="consequence">S13 is currently dormant in this firmware build (sample-counter
+      advancing is hard-coded off), so a borrowed-zone reading would trip unconditionally. This
+      option is disabled until that is fixed.</span>
+    </label>
+    <label class="radio-card" id="gCardChamber">
+      <input type="radio" name="gq2" value="chamber">In the kiln chamber
+      <span class="consequence">S2 and S10 active. S1's ceiling may be tightened by the running
+      profile's peak + margin.</span>
+    </label>
+    <label class="radio-card" id="gCardExternal">
+      <input type="radio" name="gq2" value="external">External overheat sensor (shell, exhaust, enclosure)
+      <span class="consequence">S2 and S10 are OFF -- an external sensor has no obligation to agree
+      with the zone readings. S1 uses your kiln maximum as a flat ceiling.</span>
+    </label>
+    <div class="gnav"><button type="button" onclick="gGoto(1)">Back</button>
+      <button type="button" onclick="gValidateScreen2() &amp;&amp; gGoto(3)">Next</button></div>
+    <p id="g2msg" class="hint"></p>
+  </div>
+
+  <div class="gscreen" id="gscreen3" hidden>
+    <h3>Review what you told us</h3>
+    <div id="gReview"></div>
+    <div class="gnav"><button type="button" onclick="gGoto(2)">Back</button>
+      <button type="button" onclick="gGoto(4)">Looks right -- continue</button></div>
+  </div>
+
+  <div class="gscreen" id="gscreen4" hidden>
+    <h3>Save to the safety processor</h3>
+    <p class="hint">This stages all six answered parameters and issues one commit. A write is
+    never assumed to have landed -- it is only reported as saved after a live read-back from the
+    safety processor confirms every value.</p>
+    <button type="button" id="gCommitBtn" onclick="gCommit()">Stage &amp; commit</button>
+    <div id="gWriteWindow2" class="writewindow ww-unknown" hidden></div>
+    <p id="guidedMsg"></p>
+    <div class="gnav"><button type="button" onclick="gGoto(3)">Back</button></div>
+  </div>
+</div>
+
+<details id="advancedDetails">
+<summary>Advanced -- every parameter the safety processor holds</summary>
+<p class="hint">Defaults are documented and safe -- change one only with a measurement in hand.
+The four questions above already cover the fields most commissioning passes need.</p>
+
 <div id="fields"><p class="empty">Loading&hellip;</p></div>
 
 <button id="saveBtn" type="button">Stage &amp; commit changes</button>
 <button id="benchBtn" type="button">Apply bench preset (test values, dev only)</button>
 <p id="msg"></p>
+</details>
 
 <script>
 /* ---- CONFIG_REFERENCE.md sections 1-5, restated here as data so the DOM
@@ -324,6 +454,13 @@ var GROUPS = [
         guards: ['S3', 'S4'], note: 'Same as ct_channel_map[0], for CT1.' },
       { id: 264, name: 'ct_channel_map[2]', type: 'u8', risk: 'dangerous', unit: 'zone/relay id', noDefault: true,
         guards: ['S3', 'S4'], note: 'Same as ct_channel_map[0], for CT2.' },
+      { id: 529, name: 'safety_tc_installed', type: 'bool', risk: 'dangerous', noDefault: true,
+        guards: ['S2', 'S10', 'S13'],
+        note: '0x0211 -- minted after this page was first written (see config_params.c\'s ' +
+          'comment on why it is 0x0211 and not 0x0207). The boolean form of "where is the ' +
+          'safety processor\'s own thermocouple" (COMMISSIONING_UX.md Q2): true whenever ' +
+          'tc_source is OWN_J7 or BOTH, false only for BORROWED_ZONE. Written by the guided ' +
+          'flow\'s Q2, not typed here directly.' },
     ] },
 
   { title: '2. Temperature guards', fields: [
@@ -769,11 +906,24 @@ function renderCrcLine(data) {
 function loadCurrent() {
   fetch('/api/safety/commissioning').then(function (r) { return r.json(); }).then(function (data) {
     latest = data;
+    gLoadFailed = false;
     setBodyFlags(data);
     renderCrcLine(data);
     renderGroups(data);
+    gPrefill(data);
+    if (typeof gRenderPreflight === 'function') gRenderPreflight(data);
+    if (typeof gRenderLoadFailure === 'function') gRenderLoadFailure();
   }).catch(function () {
     document.getElementById('fields').innerHTML = '<p class="empty">Could not load commissioning data.</p>';
+    // F5 fix (opus review): on this failure gPrefill() never runs -- so
+    // #gMainsSelect stays unpopulated (gMainsValue() would return '' for it,
+    // not undefined, which gBuildAnswers() would stage as an empty
+    // mains_voltage_v that gValidateScreen1() does not catch) and the
+    // "Not fitted" radio is reachable with none of gPrefill()'s disabling
+    // logic ever having run. Rather than let the guided flow proceed on data
+    // it never actually has, refuse explicitly -- see gRenderLoadFailure()
+    // and its call from the Start button below.
+    if (typeof gRenderLoadFailure === 'function') { gLoadFailed = true; gRenderLoadFailure(); }
   });
 }
 
@@ -837,11 +987,17 @@ document.getElementById('saveBtn').addEventListener('click', function () {
   }).then(function (r) {
     return r.json().catch(function () { return {}; }).then(function (j) { return { ok: r.ok, j: j }; });
   }).then(function (res) {
-    if (!res.ok) {
+    // F1 fix (opus review, same defect as gCommit()): a REJECTED commit is
+    // HTTP 200 with body {"ok":false,"reason":"..."} -- see safety_cfg_http.c
+    // :703-723. res.ok alone is never enough; the parsed body's own ok field
+    // is the only place a real success is distinguishable from an ARMED
+    // refusal, a RANGE/CONTRADICTION rejection, or a read-back failure.
+    if (!res.ok || !res.j || res.j.ok !== true) {
       // "Names the offending field and the rule it broke" -- COMMISSIONING.md
       // section 2.1/3.1. Rendered verbatim, not paraphrased, so this page
       // never becomes a second place that rule-text can drift from the Pico's.
-      msg.textContent = 'Rejected: ' + (res.j.field ? res.j.field + ' -- ' : '') + (res.j.reason || res.j.error || 'commit failed');
+      msg.textContent = 'Rejected: ' + (res.j && res.j.field ? res.j.field + ' -- ' : '') +
+        ((res.j && (res.j.reason || res.j.error)) || 'commit failed');
     } else {
       msg.textContent = 'Committed.';
       loadCurrent();
@@ -875,6 +1031,392 @@ document.getElementById('benchBtn').addEventListener('click', function () {
     msg.textContent = 'Bench preset failed: ' + e.message;
   });
 });
+
+/* ============================================================
+ * Guided flow (COMMISSIONING_UX.md sec 4): four questions writing six
+ * parameters. This is a thin layer over the same fetch/POST contract the
+ * Advanced view already uses -- it does not talk to the Pico any
+ * differently, it just asks for a smaller, ordered subset of the same
+ * SET_PARAM/COMMIT_CONFIG body and reuses confirm_commit_landed() on the
+ * server for the same read-back guarantee.
+ *
+ * Field ids used here (must match GROUPS above -- kept in one place so a
+ * typo shows up as "field not rendered" instead of a silent wrong id):
+ *   260 abs_max_temp_c        (Q1)
+ *   529 safety_tc_installed   (Q2, 0x0211)
+ *   257 tc_source             (Q2, 0x0101)
+ *   259 tc_placement_mode     (Q2, 0x0103)
+ *   782 mains_voltage_v       (Q3, 0x030E)
+ *   793 max_expected_power_w  (Q4, 0x0319)
+ * ============================================================ */
+var G_IDS = { ABS_MAX: 260, TC_INSTALLED: 529, TC_SOURCE: 257, TC_PLACEMENT: 259,
+              MAINS: 782, POWER: 793 };
+var gCurrentScreen = 0;
+var gPrefilled = false;
+// F5 fix (opus review): true whenever the last /api/safety/commissioning GET
+// failed -- gPrefill() never ran in that case, so #gMainsSelect is
+// unpopulated and "Not fitted" is reachable with none of gPrefill()'s
+// disabling logic applied. gStart() below refuses to leave screen 0 while
+// this is true, rather than let the guided flow proceed on device state it
+// never actually loaded.
+var gLoadFailed = false;
+var gQ2Choice = null; // 'chamber' | 'external' -- 'not_fitted' stays disabled, see radio-card
+var GSTEP_NAMES = ['Start', 'This kiln', 'TC location', 'Review', 'Save'];
+
+function gGoto(n) {
+  for (var i = 0; i <= 4; i++) {
+    var el = document.getElementById('gscreen' + i);
+    if (el) el.hidden = (i !== n);
+  }
+  gCurrentScreen = n;
+  if (n === 3) gRenderReview();
+  gRenderStepper();
+}
+
+// F5 fix (opus review): the Start button's handler, replacing a bare
+// gGoto(1). Refuses to leave screen 0 while gLoadFailed is true -- see
+// gLoadFailed's own comment for why proceeding without a loaded gPrefill()
+// is unsafe, not just cosmetically incomplete.
+function gStart() {
+  if (gLoadFailed) {
+    gRenderLoadFailure();
+    return;
+  }
+  gGoto(1);
+}
+
+function gRenderLoadFailure() {
+  var msg = document.getElementById('gLoadFailedMsg');
+  var btn = document.getElementById('gStartBtn');
+  if (!msg || !btn) return;
+  msg.hidden = !gLoadFailed;
+  btn.disabled = gLoadFailed;
+  if (gLoadFailed) {
+    msg.textContent = 'Could not load the safety processor\'s current configuration -- the guided ' +
+      'flow needs it (for example, to populate the mains-voltage list and the thermocouple-location ' +
+      'options) and will not start until a load succeeds. Check the link and retry.';
+  }
+}
+
+function gRenderStepper() {
+  var el = document.getElementById('gstepper');
+  el.innerHTML = '';
+  GSTEP_NAMES.forEach(function (name, i) {
+    var span = document.createElement('span');
+    span.textContent = (i + 1) + '. ' + name;
+    if (i === gCurrentScreen) span.className = 'current';
+    else if (i < gCurrentScreen) span.className = 'done';
+    el.appendChild(span);
+  });
+}
+
+function gValidateScreen1() {
+  var msg = document.getElementById('g1msg');
+  var v = parseFloat(document.getElementById('gAbsMax').value);
+  if (!isFinite(v) || v <= 0) {
+    msg.textContent = 'Enter the kiln\'s highest survivable temperature -- a positive number, no unlimited option.';
+    return false;
+  }
+  var mainsSel = document.getElementById('gMainsSelect');
+  if (mainsSel.value === 'other' && document.getElementById('gMainsOther').value === '') {
+    msg.textContent = 'Enter the mains voltage, or pick a listed value / "Not set".';
+    return false;
+  }
+  msg.textContent = '';
+  return true;
+}
+
+function gValidateScreen2() {
+  var msg = document.getElementById('g2msg');
+  var checked = document.querySelector('input[name="gq2"]:checked');
+  if (!checked || checked.value === 'not_fitted') {
+    msg.textContent = 'Choose where the safety processor\'s own thermocouple is fitted.';
+    return false;
+  }
+  gQ2Choice = checked.value;
+  msg.textContent = '';
+  return true;
+}
+
+function gMainsValue() {
+  var sel = document.getElementById('gMainsSelect');
+  if (!sel) return undefined;
+  if (sel.value === 'unset') return undefined;
+  if (sel.value === 'other') {
+    var o = document.getElementById('gMainsOther').value;
+    return o === '' ? undefined : o;
+  }
+  return sel.value;
+}
+
+function gBuildAnswers() {
+  var absMax = document.getElementById('gAbsMax').value;
+  var power = document.getElementById('gPower').value;
+  var mains = gMainsValue();
+  var pairs = [];
+  if (absMax !== '') pairs.push({ id: G_IDS.ABS_MAX, value: absMax, label: 'abs_max_temp_c' });
+  if (mains !== undefined) pairs.push({ id: G_IDS.MAINS, value: mains, label: 'mains_voltage_v' });
+  if (power !== '') pairs.push({ id: G_IDS.POWER, value: power, label: 'max_expected_power_w' });
+  if (gQ2Choice === 'chamber') {
+    pairs.push({ id: G_IDS.TC_INSTALLED, value: 1, label: 'safety_tc_installed' });
+    pairs.push({ id: G_IDS.TC_SOURCE, value: 0, label: 'tc_source (OWN_J7)' });
+    pairs.push({ id: G_IDS.TC_PLACEMENT, value: 0, label: 'tc_placement_mode (CHAMBER_AGREED)' });
+  } else if (gQ2Choice === 'external') {
+    pairs.push({ id: G_IDS.TC_INSTALLED, value: 1, label: 'safety_tc_installed' });
+    pairs.push({ id: G_IDS.TC_SOURCE, value: 0, label: 'tc_source (OWN_J7)' });
+    pairs.push({ id: G_IDS.TC_PLACEMENT, value: 1, label: 'tc_placement_mode (EXTERNAL_OVERHEAT)' });
+  }
+  return pairs;
+}
+
+// F4 fix (opus review): #gAbsMaxTcHint was rendered on screen 1 but never
+// assigned any text. Populates it with the same currently-configured
+// thermocouple type's own ceiling that gRenderReview()'s warning and
+// gCommit()'s hard block (via checkTcMaxContradiction()) both use, so the
+// operator sees the constraint on screen 1 -- while filling the field in --
+// instead of only finding out about it on the review screen or at commit
+// time. tc_type itself is not one of the four guided questions, so this is
+// informational only; nothing here is the enforcement path.
+function gUpdateAbsMaxTcHint() {
+  var el = document.getElementById('gAbsMaxTcHint');
+  if (!el) return;
+  var tcTypeParam = latest && (latest.params || []).filter(function (p) { return p.id === 261; })[0];
+  if (!tcTypeParam || !tcTypeParam.set) {
+    el.textContent = '';
+    return;
+  }
+  var limit = TC_MAX_C_BY_TYPE[Number(tcTypeParam.value)];
+  el.textContent = (limit !== undefined)
+    ? ('The currently-configured thermocouple type tops out at ' + limit + ' °C -- ' +
+       'this value cannot exceed that.')
+    : '';
+}
+
+function gRenderReview() {
+  var el = document.getElementById('gReview');
+  var pairs = gBuildAnswers();
+  var html = '';
+  pairs.forEach(function (p) {
+    html += '<div class="review-row"><span>' + window.kcEscapeHtml(p.label) + '</span>' +
+      '<span class="rv">' + window.kcEscapeHtml(String(p.value)) + '</span></div>';
+  });
+  if (!html) html = '<p class="empty">Nothing answered yet -- go back and fill in the questions.</p>';
+  // Same tc_type cross-check the Advanced view enforces server-side too
+  // (checkTcMaxContradiction's comment) -- shown here as information, not
+  // as a blocker, since tc_type itself is not one of the four questions.
+  var tcTypeParam = latest && (latest.params || []).filter(function (p) { return p.id === 261; })[0];
+  var absMaxVal = parseFloat(document.getElementById('gAbsMax').value);
+  if (tcTypeParam && tcTypeParam.set && isFinite(absMaxVal)) {
+    var limit = TC_MAX_C_BY_TYPE[Number(tcTypeParam.value)];
+    if (limit !== undefined && absMaxVal > limit) {
+      html += '<p class="note guard-disabled">Warning: ' + absMaxVal + ' °C exceeds the ' +
+        'currently-configured thermocouple type\'s own maximum (' + limit + ' °C) -- the kiln ' +
+        'ceiling cannot exceed what the sensor can report. Fix this before committing.</p>';
+    }
+  }
+  el.innerHTML = html;
+}
+
+function gPrefill(data) {
+  if (gPrefilled) return;
+  gPrefilled = true;
+  var byId = {};
+  (data.params || []).forEach(function (p) { byId[p.id] = p; });
+
+  var absMax = byId[G_IDS.ABS_MAX];
+  if (absMax && absMax.set) document.getElementById('gAbsMax').value = absMax.value;
+  gUpdateAbsMaxTcHint();
+  document.getElementById('gAbsMax').addEventListener('input', gUpdateAbsMaxTcHint);
+
+  var mainsSel = document.getElementById('gMainsSelect');
+  mainsSel.innerHTML = '<option value="unset">-- Not set --</option>';
+  MAINS_VOLTAGE_OPTIONS.forEach(function (opt) {
+    mainsSel.innerHTML += '<option value="' + opt[0] + '">' + window.kcEscapeHtml(opt[1]) + '</option>';
+  });
+  mainsSel.innerHTML += '<option value="other">Other&hellip;</option>';
+  var mains = byId[G_IDS.MAINS];
+  var knownValues = MAINS_VOLTAGE_OPTIONS.map(function (o) { return o[0]; });
+  if (mains && mains.set && knownValues.indexOf(Number(mains.value)) !== -1) {
+    mainsSel.value = String(mains.value);
+  } else if (mains && mains.set) {
+    mainsSel.value = 'other';
+    document.getElementById('gMainsOther').hidden = false;
+    document.getElementById('gMainsOther').value = mains.value;
+  }
+  mainsSel.addEventListener('change', function () {
+    document.getElementById('gMainsOther').hidden = (mainsSel.value !== 'other');
+  });
+
+  var power = byId[G_IDS.POWER];
+  if (power && power.set) document.getElementById('gPower').value = power.value;
+
+  var tcInstalled = byId[G_IDS.TC_INSTALLED];
+  var tcSource = byId[G_IDS.TC_SOURCE];
+  var tcPlacement = byId[G_IDS.TC_PLACEMENT];
+  // "Not fitted" stays disabled -- S13 dormant, per spec section 2.4/OQ7 --
+  // shown-disabled below via .disabled/[disabled], not a separate reachability
+  // flag (F4 fix, opus review: notFittedReachable used to be assigned here
+  // and never read by anything).
+  document.getElementById('gCardNotFitted').classList.add('disabled');
+  document.querySelector('#gCardNotFitted input').disabled = true;
+  if (tcInstalled && tcInstalled.set && tcSource && tcSource.set && tcPlacement && tcPlacement.set) {
+    if (Number(tcInstalled.value) === 1 && Number(tcPlacement.value) === 0) {
+      gQ2Choice = 'chamber';
+      document.querySelector('#gCardChamber input').checked = true;
+    } else if (Number(tcInstalled.value) === 1 && Number(tcPlacement.value) === 1) {
+      gQ2Choice = 'external';
+      document.querySelector('#gCardExternal input').checked = true;
+    }
+  }
+  document.querySelectorAll('input[name="gq2"]').forEach(function (r) {
+    r.addEventListener('change', function () {
+      document.querySelectorAll('.radio-card').forEach(function (c) { c.classList.remove('selected'); });
+      if (r.checked) r.closest('.radio-card').classList.add('selected');
+    });
+  });
+
+  gRenderPreflight(data);
+}
+
+function gRenderPreflight(data) {
+  var status = document.getElementById('gPreflightStatus');
+  var lines = [];
+  lines.push(data.link_up ? 'Safety processor: LINK UP' : 'Safety processor: LINK DOWN');
+  lines.push(data.commissioned ? 'Commissioned: YES' : 'Commissioned: NO');
+  status.textContent = lines.join(' · ');
+}
+
+/* ---- The write window (COMMISSIONING_UX.md sec 5): config_store_write()
+ * refuses whenever the relay owner is ARMED, which is the steady state
+ * ~startup_grace_s (default 60s) after Pico boot; GRACE is only the FIRST
+ * ~startup_grace_s after Pico boot. Nothing before this screen ever talks to
+ * the Pico (every prior screen is browser-local), and there is no telemetry
+ * field today that reports GRACE seconds-remaining or boot time, so this can
+ * only detect ARMED by trying the real commit and reading
+ * KILNLINK_COMMIT_CONFIG_REJECT_ARMED back (commit_reject_reason_words() in
+ * safety_cfg_http.c already renders it as "relay is ARMED -- config writes
+ * are refused while ARMED").
+ *
+ * F2 fix (opus review): this used to wait the FULL startup_grace_s duration
+ * (default 60s) before retrying once -- since GRACE is the first ~60s after
+ * boot, that single retry fired exactly when the window was closing, not
+ * while it was open. There is no way from here to know how much of GRACE (if
+ * any) is left, or whether a power-cycle has even happened yet, so instead of
+ * asserting a countdown this cannot back up, retry promptly and repeatedly
+ * (every GRETRY_INTERVAL_S seconds, up to GRETRY_MAX_ATTEMPTS times) so that
+ * whenever the operator does power-cycle the processor, a retry lands inside
+ * the window rather than after it. The banner states only what is actually
+ * known -- the write was refused because the processor is ARMED, the
+ * operator needs to power-cycle it, and retries are in progress -- never a
+ * countdown of a window this code cannot observe opening or closing. */
+var gRetryTimer = null;
+var gRetryCount = 0;
+var GRETRY_INTERVAL_S = 3;
+var GRETRY_MAX_ATTEMPTS = 15; // 15 * 3s = 45s of retrying, comfortably inside a 60s-default GRACE
+
+// F4 fix (opus review): #gWriteWindow on screen 0 carried the same
+// ww-unknown/armed/waiting/ok class vocabulary as #gWriteWindow2 but this
+// function only ever targeted #gWriteWindow2 -- screen 0's copy was a static
+// string dressed up as live state. Both elements now track the same commit
+// attempt's outcome; #gWriteWindow2 also starts hidden (only meaningful once
+// a commit has actually been tried) while #gWriteWindow is always visible.
+function gSetWriteWindowBanner(cls, text) {
+  ['gWriteWindow', 'gWriteWindow2'].forEach(function (id) {
+    var el = document.getElementById(id);
+    if (!el) return;
+    el.hidden = false;
+    el.className = 'writewindow ' + cls;
+    el.textContent = text;
+  });
+}
+
+function gCommit() {
+  var msg = document.getElementById('guidedMsg');
+  var btn = document.getElementById('gCommitBtn');
+  // F3 fix (opus review): saveBtn's Advanced handler hard-blocks on this same
+  // check (~line 948); the guided flow only ever rendered it as advisory text
+  // on the review screen (gRenderReview()) and never re-checked here, so a
+  // contradictory pair could be committed straight past the warning. Enforce
+  // it the same way the Advanced flow does.
+  var tcMaxProblem = checkTcMaxContradiction();
+  if (tcMaxProblem) {
+    msg.textContent = 'Rejected: ' + tcMaxProblem;
+    return;
+  }
+  var pairs = gBuildAnswers();
+  if (gRetryTimer) { clearTimeout(gRetryTimer); gRetryTimer = null; }
+  btn.disabled = true;
+  msg.textContent = 'Staging and committing…';
+  gSetWriteWindowBanner('ww-unknown', 'Attempting commit…');
+
+  var body = pairs.map(function (p) { return 'id=' + encodeURIComponent(p.id) + '&value=' + encodeURIComponent(p.value); });
+  body.push('commit=1');
+  fetch('/api/safety/commissioning', {
+    method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: body.join('&'),
+  }).then(function (r) {
+    return r.json().catch(function () { return {}; }).then(function (j) { return { ok: r.ok, j: j }; });
+  }).then(function (res) {
+    btn.disabled = false;
+    // F1 fix (opus review): POST /api/safety/commissioning answers a
+    // REJECTED commit with HTTP 200 and body {"ok":false,"reason":"..."} --
+    // see safety_cfg_http.c:703-723, which calls httpd_resp_send() with no
+    // httpd_resp_set_status(). Only four malformed-body cases are non-200.
+    // So HTTP status alone (res.ok) can never distinguish an ARMED refusal, a
+    // RANGE/CONTRADICTION rejection, or a confirm_commit_landed() read-back
+    // failure from a real success -- the parsed body's own ok field is the
+    // only place that guarantee lives, and it must be checked too.
+    if (res.ok && res.j && res.j.ok === true) {
+      msg.textContent = 'Committed and confirmed by read-back.';
+      gSetWriteWindowBanner('ww-ok', 'Write window was open -- saved.');
+      gRetryCount = 0;
+      loadCurrent();
+      return;
+    }
+    var reason = (res.j && res.j.field ? res.j.field + ' -- ' : '') +
+      ((res.j && (res.j.reason || res.j.error)) || 'commit failed');
+    if (/ARMED/i.test(reason)) {
+      gStartWriteWindowRetry(reason);
+    } else {
+      msg.textContent = 'Rejected: ' + reason;
+      gSetWriteWindowBanner('ww-armed', 'Commit refused (not a write-window problem): ' + reason);
+    }
+  }).catch(function (e) {
+    btn.disabled = false;
+    msg.textContent = 'Save failed: ' + e.message;
+  });
+}
+
+function gStartWriteWindowRetry(reason) {
+  var msg = document.getElementById('guidedMsg');
+  gRetryCount++;
+  if (gRetryCount > GRETRY_MAX_ATTEMPTS) {
+    msg.textContent = 'Still refused after ' + GRETRY_MAX_ATTEMPTS + ' attempts: ' + reason +
+      '. If the safety processor has not been power-cycled, do so now, then press ' +
+      '"Stage & commit" again once it has finished booting.';
+    gSetWriteWindowBanner('ww-armed', 'Write window closed -- ' + reason);
+    gRetryCount = 0;
+    return;
+  }
+  // F2 fix (opus review): no countdown here -- this code cannot see whether
+  // GRACE is open, closed, or has not started yet (no power-cycle so far).
+  // State only what is known: the write was refused because the processor is
+  // ARMED, and retries are being attempted in case the operator power-cycles
+  // it (or already has, and GRACE just hasn't caught this attempt yet).
+  msg.textContent = 'Refused: ' + reason + '. Power-cycle the safety processor now if you have not ' +
+    'already -- retrying automatically (attempt ' + gRetryCount + '/' + GRETRY_MAX_ATTEMPTS + ').';
+  gSetWriteWindowBanner('ww-waiting', 'Refused (ARMED) -- retrying every ' + GRETRY_INTERVAL_S +
+    's, attempt ' + gRetryCount + '/' + GRETRY_MAX_ATTEMPTS + '. Power-cycle the safety processor ' +
+    'if you have not already.');
+  if (gRetryTimer) clearTimeout(gRetryTimer);
+  gRetryTimer = setTimeout(function () {
+    gRetryTimer = null;
+    gSetWriteWindowBanner('ww-waiting', 'Retrying commit now…');
+    gCommit();
+  }, GRETRY_INTERVAL_S * 1000);
+}
+
+gGoto(0);
 
 loadCurrent();
 // Refetch periodically so a `stale` flag that clears on its own (the ESP's

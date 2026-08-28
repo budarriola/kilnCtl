@@ -10,4 +10,7 @@
 
 typedef int uart_port_t;
 
+/* Added for safety_link.c's host build -- value never asserted against. */
+#define UART_NUM_1 1
+
 #endif // TEST_STUB_DRIVER_UART_H

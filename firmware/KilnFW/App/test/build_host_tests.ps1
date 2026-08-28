@@ -358,15 +358,19 @@ if ($LASTEXITCODE -ne 0) { $script:failedExes += $exe12 }
 
 # ---- test_safety_trip_decision.c: its own THIRTEENTH, separate executable
 # 2026-08-28 opus review: safety_apply_trip_event()'s trip_fault_sources_
-# valid logic (safety_link.c) had no automated test because no host harness
-# links safety_link.c -- it is ~3900 lines pulling in driver/gpio.h,
-# driver/uart.h, esp_heap_caps.h, a dozen kilnlink/* codecs, and
-# safety_cfg_store.h. The decision itself is now factored into
+# valid logic (safety_link.c) had no automated test because at the time no
+# host harness linked safety_link.c -- it is ~3900 lines pulling in
+# driver/gpio.h, driver/uart.h, esp_heap_caps.h, a dozen kilnlink/* codecs,
+# and safety_cfg_store.h. The decision itself was factored into
 # safety_trip_decision.c, a pure, dependency-free (stdbool/stdint only)
 # translation unit safety_link.c calls into -- links the real .c (not a
 # stub) since there is nothing in it to stub. Own executable per this file's
 # usual per-purpose convention, though the true reason here is simpler: it
 # needs no stub headers, unlike every test file above it.
+#
+# ROADMAP.md M13 TASK 2 (below, exe14) is what actually gets safety_link.c
+# ITSELF compiling and linking off-target -- this executable stays as the
+# smaller, dependency-free harness for the three-line decision alone.
 $exe13 = Join-Path $outDir "kilnctl_host_tests_safety_trip_decision.exe"
 $stdObjDir = Join-Path $outDir "std"
 New-Item -ItemType Directory -Force -Path $stdObjDir | Out-Null
@@ -381,6 +385,55 @@ if ($LASTEXITCODE -ne 0) {
 
 & $exe13
 if ($LASTEXITCODE -ne 0) { $script:failedExes += $exe13 }
+
+# ---- test_safety_link_compile.c: its own FOURTEENTH, separate executable --
+# ROADMAP.md M13 TASK 2: safety_link.c itself now compiles and links off-
+# target, following the same precedent as ota_http.c/factory_reset.c
+# (commit da4918c) and zones_http.c/profile_executor.c/profiles_http.c
+# before it -- #includes the real safety_link.c directly (its own header
+# comment lists which static functions have no other seam) rather than
+# restate its logic somewhere host-friendly.
+#
+# The stub surface needed (App/test/stubs/{driver/gpio.h, driver/uart.h,
+# sdkconfig.h, esp_err.h, esp_random.h, uart_owner.h, uart_protocol.h}) was
+# smaller than expected -- safety_link.c's own real-firmware dependencies
+# (MAX31856.h/kiln_io.h/profile_executor.h/thermo_owner.h/zones_http.h/
+# safety_cfg_store.h) already compile off-target cleanly, since other host
+# tests link them for real. Only ~10 external functions from those headers
+# and the uart_owner_*/uart_protocol_* hardware-driving calls needed FAKE
+# bodies (this test file's own header comment lists them and what they
+# don't cover: safety_link_start()'s real hardware init path, safety_poll_
+# task()'s scheduling/timing, and safety_exchange()'s blocking request/
+# reply cycle are all still untested off-target -- only the two static wire-
+# decode decisions this file targets are exercised). Needs the same
+# kilnlink_*.c set as test_safety_cfg_http.c/test_uart_protocol_link_
+# delegate.c above, plus stack_margin.c and safety_trip_decision.c (both
+# real, already host-tested elsewhere) -- own executable to keep its
+# xSemaphoreTake() redirect (same precedent as test_ota_http.c/test_safety_
+# cfg_store.c) and its uart_owner_*/uart_protocol_* fakes from colliding
+# with any other test file's definitions of those same symbols.
+$exe14 = Join-Path $outDir "kilnctl_host_tests_safety_link.exe"
+$slObjDir = Join-Path $outDir "sl"
+New-Item -ItemType Directory -Force -Path $slObjDir | Out-Null
+$slExtra = @("kilnlink_config_page.c", "kilnlink_announce.c", "kilnlink_announce_reboot.c",
+             "kilnlink_clear_trip.c", "kilnlink_commit_config.c", "kilnlink_commit_config_rejected.c",
+             "kilnlink_context.c", "kilnlink_get_config_page.c", "kilnlink_get_ct_cal.c",
+             "kilnlink_rollback.c", "kilnlink_set_config.c", "kilnlink_set_ct_cal.c",
+             "kilnlink_set_log_level.c", "kilnlink_set_param.c", "kilnlink_frame.c", "kilnlink_crc.c",
+             "kilnlink_param.c", "kilnlink_param_value.c") | ForEach-Object { "`"$(Join-Path $commonSrc $_)`"" }
+$cmd14 = "call `"$vcvars`" x64 >nul && cl /nologo /W3 /EHsc /std:c11 /I`"$driversDir`" /I`"$stubDir`" /I`"$commonInc`" " +
+        "/Fo:`"$slObjDir\\`" /Fe:`"$exe14`" " +
+        "`"$(Join-Path $testDir 'test_safety_link_compile.c')`" " +
+        "`"$(Join-Path $driversDir 'stack_margin.c')`" `"$(Join-Path $driversDir 'safety_trip_decision.c')`" " +
+        "$($slExtra -join ' ')"
+
+cmd.exe /c $cmd14
+if ($LASTEXITCODE -ne 0) {
+    throw "safety_link build failed"
+}
+
+& $exe14
+if ($LASTEXITCODE -ne 0) { $script:failedExes += $exe14 }
 
 if ($script:failedExes.Count -gt 0) {
     Write-Host ""

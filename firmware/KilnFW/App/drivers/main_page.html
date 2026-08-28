@@ -1054,21 +1054,15 @@ var SAFETY_TRIP_WORDS = {
 };
 function safetyTripWords(reason) { return SAFETY_TRIP_WORDS[reason] || 'unknown guard'; }
 
-// Mirrors App/drivers/thermal_guard.h's thermal_guard_trip_t enum, same
-// mirrored-not-shared reasoning as SAFETY_TRIP_WORDS just above (and
-// diagnostics_page.html's own copy of this same table -- keep all three in
-// sync with thermal_guard.h if that enum changes). 2026-08-28: the last-run
-// banner below used to print lr.fault_guard as a bare number next to the
-// word "Fault" -- an undecoded enum, exactly the offender ROADMAP.md M13
-// calls out.
-var THERMAL_GUARD_WORDS = {
-  0: 'none', 1: 'heating commanded but temperature not rising',
-  2: 'temperature moving the wrong direction', 3: 'runaway heating (welded contact / shorted SSR?)',
-  4: 'drifted from setpoint after settling', 5: 'over absolute max temperature',
-  6: 'under absolute min temperature', 7: 'sensor reading invalid',
-  8: 'reading frozen while duty > 0', 9: 'cross-zone plausibility check failed'
-};
-function thermalGuardWords(guard) { return THERMAL_GUARD_WORDS[guard] || ('guard ' + guard); }
+// thermal_guard_trip_t decode now lives once, in app.js's
+// window.thermalGuardWords -- both this page and diagnostics_page.html call
+// that shared copy instead of keeping their own table, so the two pages
+// cannot drift apart the way SAFETY_TRIP_WORDS above still can (that one
+// mirrors a C header; this one only ever mirrored itself across two JS
+// files, so centralizing it removed the duplication instead of documenting
+// it). 2026-08-28: the last-run banner below used to print lr.fault_guard as
+// a bare number next to the word "Fault" -- an undecoded enum, exactly the
+// offender ROADMAP.md M13 calls out.
 
 // The gap this closes: relay_authority already blocks new relay-on while the
 // safety processor reports a trip, but until this pass nothing on this page
@@ -1210,7 +1204,7 @@ function renderLastRun(st) {
     '<div class="row"><span>Recorded at</span><span>' + fmtDuration(lr.uptime_at_write_s) +
       ' into that boot</span></div>';
   if (lr.fault_reason) {
-    html += '<div class="row fault"><span>Fault (' + window.kcEscapeHtml(thermalGuardWords(lr.fault_guard)) +
+    html += '<div class="row fault"><span>Fault (' + window.kcEscapeHtml(window.thermalGuardWords(lr.fault_guard)) +
             ')</span><span>' + window.kcEscapeHtml(lr.fault_reason) + '</span></div>';
   }
   html += '<p class="note">' + (lr.interrupted

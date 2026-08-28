@@ -26,4 +26,18 @@
 #define CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0 1
 #define CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1 1
 
+/* Added for safety_link.c's host build -- values arbitrary test defaults,
+ * same convention as the WIFI_AP_* block above; nothing asserts against
+ * them, only that safety_link.c's init/poll paths compile and link. */
+#define CONFIG_KILNCTL_SAFETY_POLL_PERIOD_MS 100
+#define CONFIG_KILNCTL_SAFETY_BAUD_RATE 230400
+#define CONFIG_KILNCTL_SAFETY_FAULT_IO 4
+#define CONFIG_KILNCTL_SAFETY_TX_IO 17
+#define CONFIG_KILNCTL_SAFETY_RX_IO 18
+#define CONFIG_KILNCTL_UART_OWNER_QUEUE_LEN 16
+#define CONFIG_KILNCTL_UART_OWNER_TASK_PRIORITY 5
+#define CONFIG_KILNCTL_UART_OWNER_STACK_SIZE 4096
+#define CONFIG_KILNCTL_UART_PROTOCOL_TASK_PRIORITY 5
+#define CONFIG_KILNCTL_UART_PROTOCOL_STACK_SIZE 4096
+
 #endif // TEST_STUB_SDKCONFIG_H

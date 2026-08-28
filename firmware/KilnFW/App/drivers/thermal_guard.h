@@ -42,10 +42,10 @@ typedef enum {
     THERMAL_GUARD_TRIP_RUNAWAY,        /* guard 3 -- welded contact / shorted SSR */
     THERMAL_GUARD_TRIP_DRIFT,          /* guard 4 */
     THERMAL_GUARD_TRIP_MAX_TEMP,       /* guard 5 */
-    THERMAL_GUARD_TRIP_MIN_TEMP,       /* guard 5 */
-    THERMAL_GUARD_TRIP_SENSOR_INVALID, /* guard 6 */
-    THERMAL_GUARD_TRIP_FROZEN,         /* guard 7 */
-    THERMAL_GUARD_TRIP_CROSS_ZONE,     /* guard 8 */
+    THERMAL_GUARD_TRIP_MIN_TEMP,       /* guard 6 */
+    THERMAL_GUARD_TRIP_SENSOR_INVALID, /* guard 7 */
+    THERMAL_GUARD_TRIP_FROZEN,         /* guard 8 */
+    THERMAL_GUARD_TRIP_CROSS_ZONE,     /* guard 9 */
 } thermal_guard_trip_t;
 
 /* Per-zone thresholds. max_temp_c/min_temp_c come from zone_cfg_t

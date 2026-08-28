@@ -33,6 +33,8 @@ typedef int esp_err_t;
 #define ESP_ERR_WIFI_MODE 0x3009
 #define ESP_ERR_ESP_NETIF_DHCP_ALREADY_STOPPED 0x5001
 #define ESP_ERR_ESP_NETIF_DHCP_ALREADY_STARTED 0x5002
+/* Added for safety_link.c's host build. */
+#define ESP_ERR_INVALID_RESPONSE 0x108
 
 static inline const char *esp_err_to_name(esp_err_t e)
 {

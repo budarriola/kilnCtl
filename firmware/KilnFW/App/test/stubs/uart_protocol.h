@@ -15,8 +15,18 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "esp_err.h"
+#include "freertos/task.h"
+#include "freertos/queue.h"
+#include "driver/uart.h"
+#include "uart_owner.h"
+
+/* rx_task_handle added for safety_link.c's host build, same reasoning as
+ * uart_owner.h's task_handle/event_task_handle -- safety_link.c reads it
+ * directly. */
 typedef struct {
     int _unused;
+    TaskHandle_t rx_task_handle;
 } uart_protocol_t;
 
 #define UART_PROTO_MAX_PAYLOAD 253
@@ -34,5 +44,31 @@ typedef struct {
     uint8_t length;
     uint8_t payload[UART_PROTO_MAX_PAYLOAD];
 } uart_proto_message_t;
+
+/* Declarations only, for safety_link.c's host build -- App/test/
+ * test_safety_link_compile.c supplies fake bodies, since the real
+ * espInterfaces/uart_protocol.c drives an actual UART owner and cannot
+ * run/link off-target. Signatures mirror the real header. */
+esp_err_t uart_protocol_init(uart_protocol_t *proto, uart_owner_t *owner,
+                              uart_proto_device_t own_device, unsigned task_priority,
+                              uint32_t stack_depth, int core_id);
+esp_err_t uart_protocol_deinit(uart_protocol_t *proto);
+esp_err_t uart_protocol_register_task(uart_protocol_t *proto, uint8_t task_id,
+                                       unsigned inbox_len, QueueHandle_t *out_inbox);
+esp_err_t uart_protocol_unregister_task(uart_protocol_t *proto, uint8_t task_id);
+esp_err_t uart_protocol_get_task_broadcast_dropped(uart_protocol_t *proto, uint8_t task_id,
+                                                    uint32_t *out);
+esp_err_t uart_protocol_get_deframe_stats(uart_protocol_t *proto, uint32_t *out_frames_deframed,
+                                          uint32_t *out_frames_routed_nowhere,
+                                          uint32_t *out_frame_length_mismatch,
+                                          uint32_t *out_frame_crc_mismatch,
+                                          uint32_t *out_frame_resync);
+esp_err_t uart_protocol_receive(QueueHandle_t inbox, uart_proto_message_t *out_msg, TickType_t wait_ticks);
+esp_err_t uart_protocol_send(uart_protocol_t *proto, uart_proto_device_t dst_device,
+                              uint8_t dst_task, uint8_t src_task, const uint8_t *payload,
+                              size_t length, uint32_t ack_timeout_ms);
+esp_err_t uart_protocol_send_broadcast(uart_protocol_t *proto, uart_proto_device_t dst_device,
+                                        uint8_t dst_task, uint8_t src_task,
+                                        const uint8_t *payload, size_t length);
 
 #endif // TEST_STUB_UART_PROTOCOL_H

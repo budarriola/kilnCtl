@@ -46,6 +46,24 @@
       .replace(/'/g, '&#39;');
   };
 
+  // ---- thermalGuardWords -----------------------------------------------
+  //
+  // Single shared decode table for thermal_guard_trip_t (thermal_guard.h),
+  // the fault_guard byte that profile_exec_status_t / run_state carry
+  // alongside fault_reason. main_page.html and diagnostics_page.html used
+  // to each keep their own copy of this table -- exactly the LCD-vs-web
+  // drift that safety_trip_words.h was written to stop on the safety side.
+  // Keep this table's wording in sync with thermal_guard.h's
+  // THERMAL_GUARD_TRIP_* enum comments; add new entries here, not in a page.
+  var THERMAL_GUARD_WORDS = {
+    0: 'none', 1: 'heating commanded but temperature not rising',
+    2: 'temperature moving the wrong direction', 3: 'runaway heating (welded contact / shorted SSR?)',
+    4: 'drifted from setpoint after settling', 5: 'over absolute max temperature',
+    6: 'under absolute min temperature', 7: 'sensor reading invalid',
+    8: 'reading frozen while duty > 0', 9: 'cross-zone plausibility check failed'
+  };
+  window.thermalGuardWords = function (guard) { return THERMAL_GUARD_WORDS[guard] || ('guard ' + guard); };
+
   // ---- kcConfirm -----------------------------------------------------
   //
   // A single named seam for "ask before doing something destructive"
