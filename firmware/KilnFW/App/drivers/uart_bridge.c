@@ -2416,7 +2416,37 @@ static void link_watchdog_task(void *arg)
              * up/down transition above). */
             relays_confirmed_off = true;
         } else if (ctx->io && !relays_confirmed_off) {
-            esp_err_t err = kiln_io_set_relay_mask(ctx->io, unowned_mask, 0u);
+            /* Routed through kiln_io_owner (AUTHORIZED producer) rather than
+             * calling kiln_io_set_relay_mask() directly, 2026-08-28.
+             * kiln_io_owner.h's top comment explains why a direct call is
+             * unsafe: kiln_io_set_relay_mask() is a read-modify-write
+             * against the SX1509's data register, and SX1509.c's own mutex
+             * only serializes each individual I2C transaction -- it does not
+             * stop this watchdog's write from racing owner_task's, each
+             * computing its new byte from a stale read of the other's most
+             * recent change (a lost update reachable on the exact code path
+             * that energizes mains contactors). Unlike
+             * kiln_io_all_relays_off() (kiln_io_owner.h:75-89's one
+             * documented direct-call exception), this write only ever
+             * touches `unowned_mask` -- a strict subset of the register --
+             * so it cannot claim that call's "unconditional, all relays,
+             * only ever OFF" reasoning: a race here can silently revert an
+             * owner-controlled relay's bit that owner_task set in the same
+             * window, in either direction.
+             *
+             * Safe to route through the queue: owner_task (kiln_io_owner.c)
+             * waits only on its own command queue and the SX1509 I2C mutex,
+             * never on uart_protocol_send()/the PC link/any bridge task, so
+             * it keeps running when every bridge task is wedged waiting on a
+             * departed host -- exactly the condition this watchdog exists
+             * for. kiln_io_owner_command_set_relay_mask_authorized() also
+             * needs no additional ownership/safety gate here: unowned_mask
+             * above already excludes every PROFILE/RULE/AUTOTUNE-owned
+             * relay, and a mask paired with value=0 can only ever turn
+             * relays off, which relay_authority's "on" gate was never meant
+             * to block anyway. See tools/check_relay_writes_through_owner.ps1
+             * for the guard that enforces this repo-wide. */
+            esp_err_t err = kiln_io_owner_command_set_relay_mask_authorized(unowned_mask, 0u);
             if (err == ESP_OK) {
                 relays_confirmed_off = true;
             } else {

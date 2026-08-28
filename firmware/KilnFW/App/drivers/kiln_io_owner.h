@@ -43,6 +43,22 @@
 //     writers above through the same queue -- it does not change who is
 //     allowed to command what, only who is allowed to do the writing.
 //
+//     2026-08-28: uart_bridge.c's link-loss watchdog is a third caller, for
+//     the same "no additional gate needed" reason but a different proof --
+//     it isn't a relay owner, it computes `unowned_mask` (relays NOT under a
+//     PROFILE/RULE/AUTOTUNE) and only ever pairs it with value=0, so there is
+//     nothing left for an ownership or "turns something on" safety check to
+//     catch. This one is NOT exempted from routing through the queue the way
+//     kiln_io_all_relays_off() is (see the "explicitly NOT covered" note
+//     below): unlike that unconditional all-relays/always-OFF call, this
+//     write touches only a subset of the register, so a stale-read race with
+//     owner_task can revert either side's bit -- exactly the read-modify-
+//     write hazard this module exists to close. Confirmed safe to queue:
+//     owner_task blocks only on its own command queue and the SX1509 I2C
+//     mutex, never on the PC link or any bridge task, so it keeps running in
+//     the exact "every bridge task is wedged" condition the watchdog exists
+//     for.
+//
 // Every producer is a bounded, non-blocking POST (xQueueSend with 0 ticks)
 // followed by a bounded WAIT on a per-call result -- callers here are the
 // UART bridge task, the HTTP worker task, lvgl_port_task (a single I2C
@@ -172,10 +188,11 @@ kiln_io_owner_relay_result_t kiln_io_owner_command_set_relay(uint8_t relay, bool
 kiln_io_owner_relay_result_t kiln_io_owner_command_set_relay_mask(uint8_t mask, uint8_t value,
                                                                    uint32_t *out_safety_sources);
 
-/* ---- AUTHORIZED producer -- profile_executor.c/autotune_engine.c only.
- * See this header's top comment for why this one skips the gate the MANUAL
- * functions apply. Returns the raw kiln_io_set_relay_mask() esp_err_t (or
- * ESP_ERR_TIMEOUT/ESP_ERR_INVALID_STATE if the owner task isn't up) so
+/* ---- AUTHORIZED producer -- profile_executor.c/autotune_engine.c, and
+ * (2026-08-28) uart_bridge.c's link-loss watchdog for its unowned-relay
+ * drop. See this header's top comment for why each skips the gate the
+ * MANUAL functions apply. Returns the raw kiln_io_set_relay_mask() esp_err_t
+ * (or ESP_ERR_TIMEOUT/ESP_ERR_INVALID_STATE if the owner task isn't up) so
  * existing callers' "if (err != ESP_OK) log and continue" shape is
  * unchanged. */
 esp_err_t kiln_io_owner_command_set_relay_mask_authorized(uint8_t mask, uint8_t value);

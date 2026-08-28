@@ -59,15 +59,66 @@ import logging
 import queue
 import socket
 import threading
+import time
 from typing import Optional
 
-from .protocol import DEFAULT_BAUD_RATE, Device, Frame, MsgType
+from .protocol import (
+    DEFAULT_BAUD_RATE,
+    SYSTEM_CMD_GET_WATCHDOG_PANIC_DISABLED,
+    UART_TASK_ID_SYSTEM,
+    Device,
+    Frame,
+    MsgType,
+)
 from .serial_link import SendResult, UartLink
 
 log = logging.getLogger(__name__)
 
 HUB_HOST = "127.0.0.1"
 HUB_PORT = 8765
+
+#: uart_bridge.h's link watchdog (UART_BRIDGE_LINK_TIMEOUT_MS, 5000ms) counts
+#: the link lost the instant 5s pass with no frame delivered to a bridge task
+#: and no reply ACKed -- see that header's long "PC link watchdog" comment,
+#: which spells out that this is "a heartbeat requirement on the host". Every
+#: PC-side tool before this fix only spoke when a human or a script called
+#: one: an MCP session sitting idle between tool calls, or the GUI open with
+#: nothing clicked, produced exactly the silence the firmware cannot tell
+#: apart from a pulled cable -- so it dropped every unowned relay and (with
+#: CONFIG_KILNCTL_PC_LINK_LOSS_ASSERTS_FAULT on) asserted the isolated fault
+#: line, forever, on a healthy link. Confirmed live on the bench 2026-08-28:
+#: "PC link lost" / "PC link back" every ~10-20s with the MCP server
+#: connected and idle, and firmware's own link_watchdog_task comment already
+#: documented this exact failure ("observed dropping relays roughly every 5s
+#: through a whole bench session").
+#:
+#: The fix belongs on the host, not the firmware: uart_bridge.h's contract
+#: already says the host must keep talking, this module just never did. The
+#: hub is the single place all of gui.py/mcp_server.py's traffic funnels
+#: through (see the module docstring), so one heartbeat thread here covers
+#: every PC-side client without each of them needing its own.
+#:
+#: Comfortably under UART_BRIDGE_LINK_TIMEOUT_MS/2 so a single dropped/slow
+#: heartbeat still leaves room for a retry before the firmware's 5s window
+#: closes.
+_HEARTBEAT_INTERVAL_S = 1.5
+
+#: A short per-attempt ACK budget: a heartbeat that is still waiting on one
+#: attempt when the next interval fires would just pile up sends against the
+#: link's tx_lock, and a heartbeat exists to prove the link is fast, not to
+#: patiently wait out a slow one -- a real command from a client gets the
+#: link's normal (longer, retried) timeout regardless.
+_HEARTBEAT_ACK_TIMEOUT_S = 0.5
+
+#: task_id the heartbeat sends as and listens on. Deliberately outside
+#: 0-13 (every real UART_TASK_ID_* the firmware or any PC client ever
+#: registers -- see protocol.py), so this can never collide with a genuine
+#: subscriber's inbox (device_log.py holds task LOG open permanently, the
+#: GUI's system panel opens/closes task SYSTEM around real queries, etc.):
+#: this task id is never claimed by anything but the heartbeat itself, and
+#: the reply the firmware sends back is drained and discarded here rather
+#: than fanned out to any client.
+_HEARTBEAT_TASK_ID = 200
 
 #: How long a client waits for the hub's response to a given op. connect()
 #: gets its own longer budget (port open can be slow); send() gets a budget
@@ -235,9 +286,46 @@ class LinkHub:
         #: task_id -> (inbox queue, drain thread, stop event); created lazily
         #: on first subscriber, torn down when the last one unsubscribes.
         self._drains: "dict[int, tuple[queue.Queue, threading.Thread, threading.Event]]" = {}
+        #: Registered for the life of the hub, not lazily like _drains --
+        #: the heartbeat has to run (and therefore needs its inbox open)
+        #: whether or not any real client has ever subscribed to anything.
+        self._heartbeat_inbox = self.link.register_task(_HEARTBEAT_TASK_ID)
 
     def start(self) -> None:
         threading.Thread(target=self._accept_loop, daemon=True, name="link-hub-accept").start()
+        threading.Thread(target=self._heartbeat_loop, daemon=True, name="link-hub-heartbeat").start()
+
+    def _heartbeat_loop(self) -> None:
+        """Keep uart_bridge.c's link watchdog fed while the port is open and
+        no client happens to be talking -- see _HEARTBEAT_INTERVAL_S above
+        for why this exists at all.
+
+        Fire-and-forget: the outcome isn't checked. A dropped or NACKed
+        heartbeat means nothing (the next one is 1.5s away, well inside the
+        firmware's 5s window), and blocking here on retries would itself
+        delay the next tick. Any reply frame that comes back is drained
+        below so it never fills the dedicated inbox and trips the firmware's
+        "inbox full, withholding ACK" path on some later heartbeat.
+        """
+        payload = bytes([SYSTEM_CMD_GET_WATCHDOG_PANIC_DISABLED])
+        while True:
+            time.sleep(_HEARTBEAT_INTERVAL_S)
+            if self.link.is_connected:
+                try:
+                    self.link.send(
+                        dst_task=UART_TASK_ID_SYSTEM,
+                        src_task=_HEARTBEAT_TASK_ID,
+                        payload=payload,
+                        dst_device=Device.ESP,
+                        timeout=_HEARTBEAT_ACK_TIMEOUT_S,
+                    )
+                except Exception:  # pragma: no cover - never kill the heartbeat
+                    log.debug("heartbeat send failed", exc_info=True)
+            while True:
+                try:
+                    self._heartbeat_inbox.get_nowait()
+                except queue.Empty:
+                    break
 
     def _accept_loop(self) -> None:
         while True:
