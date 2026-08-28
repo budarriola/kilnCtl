@@ -64,7 +64,6 @@ What is still genuinely open is short:
 |---|---|---|
 | M | **S14 cannot be armed until something maps CT channels to zones.** The sweep measures per-zone with a relay mask; `ct_channel_map` is per-CT-channel and has no other consumer, defaulting to `0xFF`. Derive it from the energize sweep rather than asking the operator to type it | M12 |
 | L | **The HTTP reset is not a heap failure** — proven, not argued. Remaining candidates are lwIP or `esp_http_server`'s accept/select loop under `max_open_sockets=13`, which needs a different instrumentation surface | M10 |
-| S | The cross-language PC-tool heartbeat contract remains uncovered by any guard — a Python sender with no C-side check can't be caught by `check_guard_input_producers.ps1` or `check_unused_setters.ps1`, both C-only. Verified 2026-08-28: `sample_counter_advancing` and `i_normal_a`, the two other named instances, are already correctly wired (`i_normal_a` copies from the config record gated by its `fields_set` bits; `sample_counter_advancing`'s hardcoded `false` is documented, deliberate S13-dormant state, not a missing producer) — `check_guard_input_producers.ps1` passes 25/25 today | M10 |
 | M | `mykicadMcp/` and `pdfMcp/` moved under `tools/` | M7 |
 | L | **HTTP connection resets under concurrency.** TCP-layer instrumentation built and live; 188 requests across varied burst sizes reproduced nothing (rate appears lower than the original 9/80 measurement, unconfirmed why). Still unreproduced under instrumentation, not root-caused, not closed — an absence of failure is not a fix, see M10 for the honest accounting | M10 |
 | M | Mains voltage as a dropdown; safety thermocouple and relay config shown read-only in the zones config | M12 |
@@ -1128,6 +1127,24 @@ Owned by [`firmware/KilnFW/TODO.md`](firmware/KilnFW/TODO.md) §§12–13.
       path the numbers do not. `rules_task`, `rules_watchdog`, `uart_proto_rx`
       and `system_uart_bridge` are left alone — healthy, and the DRAM they
       would return is no longer needed
+- [x] **The cross-language PC-tool heartbeat contract had no guard.** 2026-08-28,
+      `tools/check_heartbeat_contract.ps1`. Every existing "consumer with no
+      producer" guard (`check_guard_input_producers.ps1`,
+      `check_unused_setters.ps1`) is C-only, and this pair's producer
+      (`link_hub.py`'s `_heartbeat_loop`) is Python — invisible to both. This
+      is the fourth instance of that class this project has shipped
+      (`current_sense_set_cal`, `sample_counter_advancing`, `i_normal_a`, and
+      the heartbeat itself, `e3e8ec6`); the other three now have guards, this
+      is the heartbeat's. Regex-over-source across both files, checking three
+      things a future edit could break without either language's compiler
+      noticing: the producer call site (`LinkHub.start()` actually starting
+      the thread, not commented out), the timing margin (interval + ack
+      timeout must stay under `UART_BRIDGE_LINK_TIMEOUT_MS/2`, the bound
+      `link_hub.py`'s own comment already promises), and task-id isolation
+      (`_HEARTBEAT_TASK_ID` must not collide with a real `UART_TASK_ID_*`).
+      Negative-tested by inducing each of the three failures in turn on the
+      real files (commented-out start call, interval widened 1.5s→3.0s,
+      task id collided with 14/UI_TEST) and reverting — all three caught
 - [ ] **HTTP connection resets under concurrency — rate dropped sharply since
       the original characterization; still not root-caused.** 2026-08-28:
       built `GET /api/debug/lwip_stats` (`diagnostics_http.c`,
