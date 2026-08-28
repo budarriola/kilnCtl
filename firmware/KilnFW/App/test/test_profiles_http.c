@@ -366,6 +366,19 @@ bool zones_config_get_max_ramp(uint8_t zone_index, float *out_c_per_hr)
     return true;
 }
 
+// Controllable by test_validate_io_segment_zone_ownership() -- bit N-1 of
+// this mask set means "zone 0 owns relay N", matching zone_cfg_t::relay_mask's
+// own bit convention. Every other zone (1-7) always reports "no mask", same
+// as the fixed thermo_count=8 above being a "generous stand-in, not exercised
+// further" choice for every test that isn't specifically about relay
+// ownership.
+static uint8_t g_zone_relay_mask_zone0 = 0x00;
+bool zones_config_get_relay_mask(uint8_t zone_index, uint8_t *out_mask)
+{
+    if (out_mask) *out_mask = (zone_index == 0) ? g_zone_relay_mask_zone0 : 0x00;
+    return true;
+}
+
 // ---- profile_feasibility.h -- only reached from the JSON GET handlers'
 // per-entry feasibility annotation, never asserted on by these tests.
 profile_seg_verdict_t profile_feasibility_profile_mask(uint8_t zone_mask, const profile_t *p,
@@ -465,6 +478,28 @@ static profile_t make_stored_profile(void)
     return p;
 }
 
+// profile_persisted_v1_t/profile_persisted_v2_t hold the OLD (pre-relay/IO,
+// 2026-08-27) profile_t_v2 payload, not today's profile_t -- see
+// profiles_http.c's PROFILE_VERSION comment for exactly why a bare struct
+// assignment across that shape change is the bug this whole file exists to
+// catch. This is the field-by-field down-converter these tests need to build
+// a historical blob at all; note it deliberately does NOT round-trip the new
+// seg_kind/io_* fields (there is nothing on the v1/v2 side to carry them).
+static profile_t_v2 to_v2(const profile_t *src)
+{
+    profile_t_v2 v2;
+    memset(&v2, 0, sizeof(v2));
+    strncpy(v2.name, src->name, sizeof(v2.name) - 1);
+    v2.zone_mask = src->zone_mask;
+    v2.segment_count = src->segment_count;
+    for (uint8_t i = 0; i < src->segment_count && i < PROFILE_MAX_SEGMENTS; i++) {
+        v2.segments[i].target_c = src->segments[i].target_c;
+        v2.segments[i].ramp_c_per_hr = src->segments[i].ramp_c_per_hr;
+        v2.segments[i].dwell_min = src->segments[i].dwell_min;
+    }
+    return v2;
+}
+
 static void assert_profiles_equal(const profile_t *a, const profile_t *b, const char *ctx)
 {
     char msg[128];
@@ -499,7 +534,7 @@ static void test_v1_blob_loads_and_preserves_all_fields(void)
     profile_t src = make_stored_profile();
     profile_persisted_v1_t v1;
     v1.version = 1;
-    v1.profile = src;
+    v1.profile = to_v2(&src);
     stage_profile_blob(0, &v1, sizeof(v1));
     stage_bitmap(0x01);
 
@@ -526,7 +561,7 @@ static void test_version_zero_rejected(void)
     profile_t src = make_stored_profile();
     profile_persisted_v1_t blob;
     blob.version = 0; /* the exact "version 0 accepted at any length" historical bug */
-    blob.profile = src;
+    blob.profile = to_v2(&src);
     stage_profile_blob(0, &blob, sizeof(blob));
     stage_bitmap(0x01);
 
@@ -556,7 +591,7 @@ static void test_length_mismatch_rejected(void)
     profile_t src = make_stored_profile();
     profile_persisted_v1_t v1;
     v1.version = 1;
-    v1.profile = src;
+    v1.profile = to_v2(&src);
     stage_profile_blob(0, &v1, sizeof(v1) - 1); /* one byte short */
     stage_bitmap(0x01);
 
@@ -784,6 +819,119 @@ static void test_profiles_list_json_valid_with_escape_heavy_names(void)
 }
 
 // ---------------------------------------------------------------------------
+// Test 4b -- THE mandatory regression test for THIS pass's own shape change
+// (PROFILE_VERSION 2->3, profile_segment_t growing the relay/IO fields): a
+// real v2 blob with DISTINCT values in SEVERAL segments -- not just segment
+// 0, since profile_t embeds segments[] BY VALUE and the displacement bug
+// this guards against only shows from element 1 onward -- loads and every
+// segment survives intact, with the four new fields landing on the safe
+// "always was a temperature segment" defaults. This is the test that would
+// have caught the v1->v2 data-loss bug one version earlier, applied to the
+// identical hazard one version later.
+// ---------------------------------------------------------------------------
+static void test_v2_blob_migrates_distinct_multi_segment_values(void)
+{
+    TEST_SECTION("nvs_load_all_from -- v2->v3: a v2 blob with distinct values in segments 0-3 migrates losslessly");
+
+    nvs_stub_reset();
+    profile_t src = make_stored_profile(); /* already gives segments 0-2 distinct values */
+    src.segment_count = 4;
+    src.segments[3].target_c = 999.5f;
+    src.segments[3].ramp_c_per_hr = 42.0f;
+    src.segments[3].dwell_min = 7;
+
+    profile_persisted_v2_t v2;
+    memset(&v2, 0, sizeof(v2));
+    v2.version = 2;
+    v2.profile = to_v2(&src);
+    v2.crc32 = esp_crc32_le(0, (const uint8_t *)&v2, sizeof(v2)); /* crc32 field is still 0 here */
+    stage_profile_blob(0, &v2, sizeof(v2));
+    stage_bitmap(0x01);
+
+    profiles_state_t out;
+    bool any_found = false;
+    esp_err_t err = nvs_load_all_from(PROFILES_NVS_PARTITION, &out, &any_found);
+
+    TEST_CHECK(err == ESP_OK, "no NVS error");
+    TEST_CHECK((out.used_bitmap & 0x01) != 0, "a v2 blob must migrate to a used slot, not be dropped");
+    assert_profiles_equal(&out.profiles[0], &src, "v2->v3 migration");
+    for (uint8_t i = 0; i < out.profiles[0].segment_count; i++) {
+        char msg[112];
+        snprintf(msg, sizeof(msg), "segment %u: migrated seg_kind defaults to ZONE_RAMP (never RELAY_IO)", i);
+        TEST_CHECK(out.profiles[0].segments[i].seg_kind == PROFILE_SEG_KIND_ZONE_RAMP, msg);
+        snprintf(msg, sizeof(msg), "segment %u: migrated io_leave_on_at_end defaults to 0 (fail-off)", i);
+        TEST_CHECK(out.profiles[0].segments[i].io_leave_on_at_end == 0, msg);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Test 5 -- validate_io_segment(): a zone-assigned relay is REFUSED as a
+// segment target, and a genuinely unassigned one is ACCEPTED. Both
+// directions on purpose -- a gate that refuses everything is not a fix.
+// ---------------------------------------------------------------------------
+static void test_validate_io_segment_zone_ownership(void)
+{
+    TEST_SECTION("validate_io_segment -- zone-owned relay refused, unassigned relay accepted");
+
+    profile_segment_t seg;
+    memset(&seg, 0, sizeof(seg));
+    seg.seg_kind = PROFILE_SEG_KIND_RELAY_IO;
+    seg.io_target = 1; /* relay 1 */
+    seg.io_state = 1;
+    seg.io_blocking = 1;
+    char err_msg[128];
+
+    g_zone_relay_mask_zone0 = 0x01; /* zone 0 owns relay 1 */
+    bool ok_owned = validate_io_segment(&seg, 1, err_msg, sizeof(err_msg));
+    TEST_CHECK(!ok_owned, "a relay assigned to a zone must be refused as a segment target");
+    TEST_CHECK(strstr(err_msg, "assigned to zone") != NULL, "the refusal names the owning zone");
+
+    g_zone_relay_mask_zone0 = 0x00; /* nothing owns relay 1 now */
+    bool ok_free = validate_io_segment(&seg, 1, err_msg, sizeof(err_msg));
+    TEST_CHECK(ok_free, "a relay owned by no zone must be ACCEPTED as a segment target "
+                        "(a gate that refuses everything is not a fix)");
+}
+
+// ---------------------------------------------------------------------------
+// Test 6 -- validate_io_segment(): the encoding gap between the relay range
+// (1-4) and the IO range (11-17) -- where a ~DRDY or LCD pin would have to
+// be encoded if this gate did not exist -- is refused, and the two legal
+// ranges' own boundary values are accepted.
+// ---------------------------------------------------------------------------
+static void test_validate_io_segment_drdy_lcd_gap_refused(void)
+{
+    TEST_SECTION("validate_io_segment -- the dead encoding gap (would-be ~DRDY/LCD) is refused");
+
+    profile_segment_t seg;
+    char err_msg[128];
+
+    memset(&seg, 0, sizeof(seg));
+    seg.seg_kind = PROFILE_SEG_KIND_RELAY_IO;
+    seg.io_state = 1;
+    seg.io_blocking = 1;
+
+    seg.io_target = 8; /* squarely inside the 5..10 dead gap */
+    TEST_CHECK(!validate_io_segment(&seg, 1, err_msg, sizeof(err_msg)),
+              "a target in the dead gap between the relay and IO ranges must be refused");
+
+    seg.io_target = 0; /* PROFILE_IO_TARGET_NONE */
+    TEST_CHECK(!validate_io_segment(&seg, 1, err_msg, sizeof(err_msg)), "io_target 0 (NONE) must be refused");
+
+    seg.io_target = 18; /* one past the IO range's top (17 = IO_7) */
+    TEST_CHECK(!validate_io_segment(&seg, 1, err_msg, sizeof(err_msg)),
+              "one past the top of the legal IO range must be refused");
+
+    seg.io_target = 4; /* Relay4, top of the legal relay range -- positive control */
+    TEST_CHECK(validate_io_segment(&seg, 1, err_msg, sizeof(err_msg)),
+              "the relay range's own top boundary (4) must be ACCEPTED -- the gate must not overreach "
+              "into refusing valid targets");
+
+    seg.io_target = 17; /* IO_7, top of the legal IO range -- positive control */
+    TEST_CHECK(validate_io_segment(&seg, 1, err_msg, sizeof(err_msg)),
+              "the IO range's own top boundary (17 = IO_7) must be ACCEPTED");
+}
+
+// ---------------------------------------------------------------------------
 
 void run_test_profiles_http(void)
 {
@@ -791,9 +939,12 @@ void run_test_profiles_http(void)
     test_version_zero_rejected();
     test_length_mismatch_rejected();
     test_bad_crc_rejected();
+    test_v2_blob_migrates_distinct_multi_segment_values();
     test_newer_version_refused_not_wiped();
     test_one_bad_slot_does_not_affect_others();
     test_profiles_list_json_valid_with_escape_heavy_names();
+    test_validate_io_segment_zone_ownership();
+    test_validate_io_segment_drdy_lcd_gap_refused();
 }
 
 int main(void)

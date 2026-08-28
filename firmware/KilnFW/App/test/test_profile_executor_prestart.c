@@ -80,9 +80,32 @@ bool autotune_engine_is_active_on_zone(uint8_t zone_index)
     return false;
 }
 
+/* Instrumentation for the leave-on-at-end tests below -- records every
+ * relay/IO write instead of just swallowing it, so a test can assert on
+ * whether a force-off write actually happened (or, for the leave-on case,
+ * that it deliberately did NOT). */
+static int g_relay_write_calls = 0;
+static uint8_t g_last_relay_write_mask = 0;
+static uint8_t g_last_relay_write_value = 0;
 esp_err_t kiln_io_owner_command_set_relay_mask_authorized(uint8_t mask, uint8_t value)
 {
-    (void)mask; (void)value;
+    g_relay_write_calls++;
+    g_last_relay_write_mask = mask;
+    g_last_relay_write_value = value;
+    return ESP_OK;
+}
+
+/* TODO relay/IO segments: io_seg_start()/io_seg_finish() call this for a
+ * general-purpose IO_1..7 segment target, same as the relay stub just
+ * above's role for a relay target. */
+static int g_io_write_calls = 0;
+static uint8_t g_last_io_write_index = 0;
+static bool g_last_io_write_level = false;
+esp_err_t kiln_io_owner_command_set_io(uint8_t index, bool level)
+{
+    g_io_write_calls++;
+    g_last_io_write_index = index;
+    g_last_io_write_level = level;
     return ESP_OK;
 }
 
@@ -762,6 +785,125 @@ static void test_profile_zones_have_ceiling_still_refuses_on_zero_when_off_zone_
     TEST_CHECK(missing_zone == 1, "must name zone 1, the actual offender");
 }
 
+// ---------------------------------------------------------------------------
+// TODO relay/IO segments -- mandatory negative test #4: a non-blocking
+// segment with "leave on" UNSET really is forced off at run end, on the
+// DONE path AND on a fault/halt path. Plus the positive case (leave_on_at_end
+// SET is honored ONLY on the DONE/honor_leave_on=true path) and the
+// io_segs_force_all_off() sweep used by every FAULTED/HALT/watchdog call
+// site, which must reach general-purpose IO_1..7 too (kiln_io_all_relays_off()
+// alone never does).
+// ---------------------------------------------------------------------------
+
+static void reset_io_seg_test_state(void)
+{
+    memset(&s_exec, 0, sizeof(s_exec));
+    s_exec.io = (kiln_io_t *)0x1; /* non-NULL dummy -- these two stubs ignore it entirely */
+    g_relay_write_calls = 0;
+    g_last_relay_write_mask = 0;
+    g_last_relay_write_value = 0;
+    g_io_write_calls = 0;
+    g_last_io_write_index = 0;
+    g_last_io_write_level = false;
+    g_relay_claim_calls = 0;
+    g_relay_release_calls = 0;
+}
+
+static void test_io_seg_finish_default_forces_off_on_done(void)
+{
+    TEST_SECTION("io_seg_finish -- leave_on_at_end UNSET (the mandatory default) is forced off even on the "
+                 "honor_leave_on=true (DONE) path");
+    reset_io_seg_test_state();
+
+    profile_segment_t seg;
+    memset(&seg, 0, sizeof(seg));
+    seg.seg_kind = PROFILE_SEG_KIND_RELAY_IO;
+    seg.io_target = 2; /* relay 2 */
+    seg.io_state = 1;  /* ON */
+    seg.io_blocking = 0;
+    seg.io_leave_on_at_end = 0; /* the mandatory default -- see profiles_http.h */
+    seg.dwell_min = 5;
+
+    io_seg_start(0, &seg);
+    TEST_CHECK(g_relay_write_calls == 1, "starting the segment writes the relay ON once");
+    TEST_CHECK(g_last_relay_write_value != 0, "the write commanded it ON");
+
+    /* Simulate the run reaching its clean DONE end while this segment is
+     * still active -- exactly the segment-stepping block's io_segs_force_
+     * all_off(true) call site. */
+    io_seg_finish(0, /*honor_leave_on=*/true);
+
+    TEST_CHECK(g_relay_write_calls == 2, "DONE with leave_on_at_end UNSET must still force the relay OFF");
+    TEST_CHECK(g_last_relay_write_value == 0, "the force-off write commands it OFF, not left as-is");
+    TEST_CHECK(!s_exec.io_segs[0].active, "the segment is no longer tracked as active");
+}
+
+static void test_io_seg_finish_leave_on_honored_only_on_done(void)
+{
+    TEST_SECTION("io_seg_finish -- leave_on_at_end SET is honored on the DONE path, forced off on every "
+                 "other (FAULT/HALT-style) path");
+    reset_io_seg_test_state();
+
+    profile_segment_t seg;
+    memset(&seg, 0, sizeof(seg));
+    seg.seg_kind = PROFILE_SEG_KIND_RELAY_IO;
+    seg.io_target = 3; /* relay 3 */
+    seg.io_state = 1;
+    seg.io_blocking = 0;
+    seg.io_leave_on_at_end = 1;
+    seg.dwell_min = 5;
+
+    io_seg_start(0, &seg);
+    TEST_CHECK(g_relay_write_calls == 1, "starting the segment writes the relay ON once");
+
+    io_seg_finish(0, true); /* the DONE path */
+    TEST_CHECK(g_relay_write_calls == 1, "DONE path with leave_on_at_end SET must NOT write the relay off");
+    TEST_CHECK(!s_exec.io_segs[0].active, "still marked finished/handed off, even though left energized");
+    TEST_CHECK(g_relay_release_calls >= 1, "ownership is released so the relay becomes manually reachable, "
+                                          "not stranded as unowned-but-still-PROFILE-claimed");
+
+    reset_io_seg_test_state();
+    io_seg_start(0, &seg); /* same segment, same leave_on_at_end=1 */
+    TEST_CHECK(g_relay_write_calls == 1, "starting the segment writes the relay ON once (second setup)");
+    io_seg_finish(0, false); /* every FAULTED/HALT/watchdog call site passes honor_leave_on=false */
+    TEST_CHECK(g_relay_write_calls == 2, "a FAULT/HALT-style finish forces the relay off regardless of "
+                                        "leave_on_at_end -- the safe default wins over the segment's own "
+                                        "preference on an abnormal stop");
+    TEST_CHECK(g_last_relay_write_value == 0, "the force-off write commands it OFF");
+}
+
+static void test_io_segs_force_all_off_sweeps_general_io_too(void)
+{
+    TEST_SECTION("io_segs_force_all_off -- a FAULTED/HALT sweep forces off every active relay/IO segment, "
+                 "general-purpose IO_1..7 included (kiln_io_all_relays_off() alone never reaches those pins)");
+    reset_io_seg_test_state();
+
+    profile_segment_t seg_relay, seg_io;
+    memset(&seg_relay, 0, sizeof(seg_relay));
+    seg_relay.seg_kind = PROFILE_SEG_KIND_RELAY_IO;
+    seg_relay.io_target = 1;
+    seg_relay.io_state = 1;
+    seg_relay.io_leave_on_at_end = 1; /* even set, an abnormal-stop sweep must ignore it */
+
+    memset(&seg_io, 0, sizeof(seg_io));
+    seg_io.seg_kind = PROFILE_SEG_KIND_RELAY_IO;
+    seg_io.io_target = PROFILE_IO_TARGET_IO_BASE; /* IO_1 */
+    seg_io.io_state = 1;
+    seg_io.io_leave_on_at_end = 1;
+
+    io_seg_start(0, &seg_relay);
+    io_seg_start(1, &seg_io);
+    TEST_CHECK(g_relay_write_calls == 1 && g_io_write_calls == 1, "both segments applied their ON command");
+
+    io_segs_force_all_off(false); /* the HALT/FAULTED/watchdog call */
+
+    TEST_CHECK(g_relay_write_calls == 2, "the relay segment was force-off written");
+    TEST_CHECK(g_last_relay_write_value == 0, "...commanding it OFF");
+    TEST_CHECK(g_io_write_calls == 2, "the general-purpose IO segment was ALSO force-off written");
+    TEST_CHECK(!g_last_io_write_level, "...commanding it OFF");
+    TEST_CHECK(!s_exec.io_segs[0].active && !s_exec.io_segs[1].active, "both segments end inactive");
+}
+
 void run_test_profile_executor_prestart(void)
 {
     test_run_refuses_before_start();
@@ -782,6 +924,9 @@ void run_test_profile_executor_prestart(void)
     test_profile_zones_have_ceiling_ignores_inactive_zones();
     test_profile_zones_have_ceiling_ignores_off_zones_in_mask();
     test_profile_zones_have_ceiling_still_refuses_on_zero_when_off_zone_is_healthy();
+    test_io_seg_finish_default_forces_off_on_done();
+    test_io_seg_finish_leave_on_honored_only_on_done();
+    test_io_segs_force_all_off_sweeps_general_io_too();
 }
 
 int main(void)

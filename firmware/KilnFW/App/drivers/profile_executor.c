@@ -230,6 +230,28 @@ typedef struct {
     bool     max_ramp_warned;
 } zone_runtime_t;
 
+/* TODO relay/IO segments: per-segment runtime tracking, one slot per
+ * profile_segment_t index. See s_exec_state_t.io_segs's own doc comment for
+ * why this has to be its own array rather than folded into segment_index. */
+typedef struct {
+    bool active;      /* this segment has been started (io_seg_start()) and not yet finished
+                        * (io_seg_finish()) -- false for every ZONE_RAMP segment always */
+    bool is_relay;    /* true = kiln relay 1-4 (relay_authority-gated, sweep_unowned_relays()-
+                        * visible); false = general-purpose IO_1..IO_7 (kiln_io_set_io(), no
+                        * ownership/sweep concept -- see kiln_io.h) */
+    uint8_t target;   /* relay 1-4 or IO_1..7 index, already validated at save time
+                        * (profiles_http.c's validate_io_segment()) and re-validated at run
+                        * start (relay_io_target_is_zone_owned() below) */
+    bool blocking;    /* copy of profile_segment_t.io_blocking, decoded once at start so
+                        * io_segs_tick() doesn't need the profile segment back */
+    bool state_on;    /* what this segment commanded */
+    bool leave_on_at_end; /* copy of profile_segment_t.io_leave_on_at_end -- see
+                            * io_seg_finish()'s doc comment for exactly when this is honored */
+    float remaining_s;    /* counts down from dwell_min*60 while active && !blocking;
+                            * meaningless for a blocking segment, which is finished by the
+                            * segment-stepping block itself, not by io_segs_tick() */
+} io_seg_runtime_t;
+
 typedef struct {
     kiln_io_t *io;
     MAX31856BusClass *thermo_bus;
@@ -315,6 +337,18 @@ typedef struct {
      * ever opens contacts this run itself put in play and can no longer name --
      * see sweep_unowned_relays(). */
     uint8_t claimed_relay_mask;
+
+    /* TODO relay/IO segments (owner's request, see profiles_http.h's
+     * profile_seg_kind_t doc comment): independent per-segment tracking
+     * alongside the single segment_index/dwelling ramp-machine above.
+     * "Alongside" is the operative word -- a non-blocking segment is applied
+     * and the shared schedule advances PAST it on the same tick (see the
+     * segment-stepping block's PROFILE_SEG_KIND_RELAY_IO branch), so by the
+     * time its own hold time is still counting down, segment_index no longer
+     * points at it at all. This array is the only place that knows such a
+     * segment is still live. Indexed by segment number (0..segment_count-1),
+     * reset to all-inactive at the start of every profile_executor_run(). */
+    io_seg_runtime_t io_segs[PROFILE_MAX_SEGMENTS];
 
     /* Which GLOBAL fault this run asserted, if any -- so halt() clears
      * exactly that and nothing another caller may have separately asserted. */
@@ -557,6 +591,179 @@ static void release_profile_relay_claim(void)
     relay_authority_release_mask(s_exec.claimed_relay_mask);
 }
 
+/* ---- TODO relay/IO segments (owner's request, profiles_http.h's
+ * profile_seg_kind_t doc comment) ---------------------------------------
+ *
+ * These four functions are the executor-side half of the feature: applying
+ * a segment's command, and force-releasing it on every path that leaves
+ * RUNNING. All four must be called with s_exec.lock held, same as every
+ * other s_exec-touching static in this file. */
+
+/* Second, independent zone-ownership check (the storage-side one is
+ * profiles_http.c's profile_relay_is_zone_owned(), run at save time) -- a
+ * relay can be reassigned to a zone AFTER a profile was saved, same
+ * reload-time hazard zones_http.c's relay_mask comment and rules_task.c's
+ * compute_heater_relay_mask() both already document for the rule engine,
+ * and the exact reason the ramp-ceiling feasibility check just above this
+ * function's call site is ALSO re-run at start rather than trusted from
+ * save time. relay_1_4 is 1-based. */
+static bool relay_io_target_is_zone_owned(uint8_t relay_1_4, uint8_t *out_zone_index)
+{
+    uint8_t bit = (uint8_t)(1u << (relay_1_4 - 1u));
+    uint8_t zone_count = zones_config_get_thermo_count();
+    for (uint8_t zi = 0; zi < zone_count; zi++) {
+        uint8_t zone_mask = 0;
+        if (zones_config_get_relay_mask(zi, &zone_mask) && (zone_mask & bit) != 0) {
+            if (out_zone_index) *out_zone_index = zi;
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Applies segment `idx`'s command once and starts tracking it. Called the
+ * first tick segment_index reaches a RELAY_IO segment (see the
+ * segment-stepping block) -- never re-applied on later ticks while the same
+ * segment is still current, so a manual override of a NON-BLOCKING segment's
+ * relay in between is possible but is also exactly what relay_authority's
+ * ownership claim below exists to prevent for the blocking/relay case. */
+static void io_seg_start(uint8_t idx, const profile_segment_t *seg)
+{
+    io_seg_runtime_t *r = &s_exec.io_segs[idx];
+    memset(r, 0, sizeof(*r));
+    r->active = true;
+    r->is_relay = (seg->io_target >= PROFILE_IO_TARGET_RELAY_BASE) &&
+                  (seg->io_target < PROFILE_IO_TARGET_RELAY_BASE + KILN_IO_RELAY_COUNT);
+    r->target = seg->io_target;
+    r->blocking = seg->io_blocking != 0;
+    r->state_on = seg->io_state != 0;
+    r->leave_on_at_end = seg->io_leave_on_at_end != 0;
+    r->remaining_s = (float)(seg->dwell_min * 60u);
+
+    if (r->is_relay) {
+        uint8_t bit = (uint8_t)(1u << (r->target - PROFILE_IO_TARGET_RELAY_BASE));
+        /* Same claim-before-write discipline apply_relay() uses: claimed the
+         * moment this run can name the bit, in both directions, so the sweep
+         * below can always account for it even if the write itself fails. */
+        s_exec.claimed_relay_mask |= bit;
+        relay_authority_claim_mask(bit, RELAY_OWNER_PROFILE);
+        if (s_exec.io) {
+            esp_err_t err = kiln_io_owner_command_set_relay_mask_authorized(bit, r->state_on ? bit : 0);
+            if (err != ESP_OK) {
+                ESP_LOGW(TAG, "relay/IO segment %u: relay %u write failed: %s -- state is unknown",
+                         idx + 1, r->target, esp_err_to_name(err));
+            }
+        }
+    } else if (s_exec.io) {
+        esp_err_t err = kiln_io_owner_command_set_io(r->target - PROFILE_IO_TARGET_IO_BASE + 1u, r->state_on);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "relay/IO segment %u: IO_%u write failed: %s -- state is unknown",
+                     idx + 1, r->target - PROFILE_IO_TARGET_IO_BASE + 1u, esp_err_to_name(err));
+        }
+    }
+    ESP_LOGI(TAG, "relay/IO segment %u: %s %u %s (%s, %lus hold)", idx + 1,
+             r->is_relay ? "relay" : "IO_", r->is_relay ? r->target : (uint8_t)(r->target - PROFILE_IO_TARGET_IO_BASE + 1u),
+             r->state_on ? "ON" : "OFF", r->blocking ? "blocking" : "non-blocking",
+             (unsigned long)seg->dwell_min * 60u);
+}
+
+/* Ends segment `idx`'s command -- either commanding it off, or (only when
+ * honor_leave_on is true AND the segment itself asked for it via
+ * leave_on_at_end) leaving it exactly as last commanded and handing
+ * ownership back to NONE so it becomes an ordinary, manually-reachable
+ * relay/IO from this point on, same as if an operator had always owned it.
+ *
+ * honor_leave_on is true ONLY on the clean DONE path (see the
+ * segment-stepping block and force_all_relays_off()'s caller in the main
+ * tick loop). It is deliberately FALSE on every other path that can call
+ * this -- profile_executor_halt(), a global or per-zone guard trip
+ * escalating to FAULTED, and the guard-9/watchdog stale-tick and safety-trip
+ * force-offs -- because those are all abnormal-stop paths where the safe
+ * default (relay actually goes off) must win over a per-segment convenience
+ * preference, regardless of what the segment asked for. Only a clean,
+ * intentional "the schedule finished exactly as planned" end honors the
+ * owner's flag; every other ending is treated the same as the flag's own
+ * default (off). A natural mid-run timeout (io_segs_tick() below) also
+ * always passes false: the segment finished on its own, which is not "the
+ * profile ended while it was still running" at all. */
+static void io_seg_finish(uint8_t idx, bool honor_leave_on)
+{
+    io_seg_runtime_t *r = &s_exec.io_segs[idx];
+    if (!r->active) {
+        return;
+    }
+    bool leave_on = honor_leave_on && r->leave_on_at_end && r->state_on;
+
+    if (r->is_relay) {
+        uint8_t bit = (uint8_t)(1u << (r->target - PROFILE_IO_TARGET_RELAY_BASE));
+        if (!leave_on && s_exec.io) {
+            esp_err_t err = kiln_io_owner_command_set_relay_mask_authorized(bit, 0);
+            if (err != ESP_OK) {
+                ESP_LOGE(TAG, "relay/IO segment %u: force-off of relay %u failed: %s -- sweep_unowned_relays() "
+                              "will keep retrying",
+                         idx + 1, r->target, esp_err_to_name(err));
+            }
+        }
+        /* Either way this run is done naming this bit: on the off path
+         * nothing more needs it; on the leave-on path an unowned energized
+         * relay is intentional (the owner's explicit opt-in) and must NOT be
+         * reported by sweep_unowned_relays() as a stray -- see that
+         * function's own doc comment on claimed_relay_mask. Releasing the
+         * relay_authority claim in both cases means the relay is reachable
+         * from /api/relay and the UART bridge again either way, exactly as
+         * if no profile had ever touched it. */
+        s_exec.claimed_relay_mask &= (uint8_t)~bit;
+        relay_authority_release_mask(bit);
+    } else if (!leave_on && s_exec.io) {
+        esp_err_t err = kiln_io_owner_command_set_io(r->target - PROFILE_IO_TARGET_IO_BASE + 1u, false);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "relay/IO segment %u: force-off of IO_%u failed: %s", idx + 1,
+                     r->target - PROFILE_IO_TARGET_IO_BASE + 1u, esp_err_to_name(err));
+        }
+    }
+    if (leave_on) {
+        ESP_LOGW(TAG, "relay/IO segment %u left ON at run end (leave_on_at_end) -- now unowned, reachable "
+                      "manually",
+                 idx + 1);
+    }
+    r->active = false;
+}
+
+/* Sweeps every segment this run has ever started -- the DONE/FAULTED/HALT/
+ * stale-tick backstop, analogous to force_all_relays_off() for zone relays.
+ * Safe to call every tick regardless of state: io_seg_finish() is a no-op
+ * for a segment that is already inactive, so repeated calls (e.g. every tick
+ * of a PAUSED or FAULTED run, or every tick after DONE) cost nothing once
+ * the sweep has actually finished. */
+static void io_segs_force_all_off(bool honor_leave_on)
+{
+    for (uint8_t i = 0; i < PROFILE_MAX_SEGMENTS; i++) {
+        io_seg_finish(i, honor_leave_on);
+    }
+}
+
+/* Ticks every ACTIVE, NON-BLOCKING segment's own hold timer, independent of
+ * which ramp/dwell segment segment_index currently points at -- this is what
+ * "runs alongside the next segment" actually means at 1Hz: the timer keeps
+ * counting down no matter how many other segments the shared schedule moves
+ * through while it does. A natural (in-run) expiry always force-offs
+ * (honor_leave_on=false) -- see io_seg_finish()'s doc comment for why that is
+ * correct and not merely the safe default. Must be called once per RUNNING
+ * tick, with s_exec.lock held. */
+static void io_segs_tick(float dt_s)
+{
+    for (uint8_t i = 0; i < PROFILE_MAX_SEGMENTS; i++) {
+        io_seg_runtime_t *r = &s_exec.io_segs[i];
+        if (!r->active || r->blocking) {
+            continue; /* a blocking segment is finished by the segment-stepping block itself */
+        }
+        r->remaining_s -= dt_s;
+        if (r->remaining_s <= 0.0f) {
+            io_seg_finish(i, false);
+        }
+    }
+}
+
 /* Escalation policy (TODO.md 6A.6, "decide which -- see 6A.6"): guards whose
  * failure mode is severe/board-wide (a welded relay, an out-of-range
  * reading, an electrically faulted sensor) assert the GLOBAL fault source,
@@ -600,6 +807,10 @@ static bool escalate_guard_trip(uint8_t zi, thermal_guard_trip_t reason, const c
         strncpy(s_exec.fault_reason, detail, sizeof(s_exec.fault_reason) - 1);
         s_exec.fault_reason[sizeof(s_exec.fault_reason) - 1] = '\0';
         s_exec.fault_guard = reason;
+        /* Abnormal stop: force off regardless of any segment's
+         * leave_on_at_end -- see io_seg_finish()'s doc comment for why a
+         * guard trip never honors it. */
+        io_segs_force_all_off(false);
         release_profile_relay_claim();
         ESP_LOGE(TAG, "GLOBAL thermal guard tripped on zone %u, whole run faulted: %s", zi, detail);
         return true;
@@ -637,6 +848,7 @@ static bool escalate_guard_trip(uint8_t zi, thermal_guard_trip_t reason, const c
         snprintf(s_exec.fault_reason, sizeof(s_exec.fault_reason),
                 "zone %u thermal guard tripped, whole firing aborted per policy: %s", zi, detail);
         s_exec.fault_guard = reason;
+        io_segs_force_all_off(false); /* abnormal stop -- see the GLOBAL branch above */
         release_profile_relay_claim();
         ESP_LOGE(TAG, "zone %u per-zone trip abandoned the whole firing (continue_on_zone_trip is off)", zi);
         return true;
@@ -654,6 +866,7 @@ static bool escalate_guard_trip(uint8_t zi, thermal_guard_trip_t reason, const c
         snprintf(s_exec.fault_reason, sizeof(s_exec.fault_reason), "every active zone individually faulted; last: %s",
                 detail);
         s_exec.fault_guard = reason;
+        io_segs_force_all_off(false); /* abnormal stop -- see the GLOBAL branch above */
         release_profile_relay_claim();
         ESP_LOGE(TAG, "every active zone faulted -- whole run faulted");
         return true;
@@ -1254,6 +1467,13 @@ static void executor_task_entry(void *arg)
 
         if (s_exec.state != PROFILE_EXEC_RUNNING) {
             force_all_relays_off();
+            /* honor_leave_on=false unconditionally: PAUSED, FAULTED and every
+             * post-DONE tick land here, and none of those is the one clean
+             * ending (segment-stepping's DONE branch below) that is allowed
+             * to honor a segment's leave_on_at_end -- see io_seg_finish()'s
+             * doc comment. A segment already finished (DONE already swept
+             * it, or it never started) costs nothing extra here. */
+            io_segs_force_all_off(false);
             xSemaphoreGive(s_exec.lock);
             continue;
         }
@@ -1270,6 +1490,11 @@ static void executor_task_entry(void *arg)
          * PAUSED, since this whole block is skipped then. See
          * profile_exec_status_t.total_elapsed_s. */
         s_exec.total_elapsed_s += (uint32_t)(dt_s + 0.5f);
+
+        /* TODO relay/IO segments: tick every active NON-BLOCKING segment's
+         * own hold timer, independent of whichever ramp/dwell segment is
+         * current below -- see io_segs_tick()'s doc comment. */
+        io_segs_tick(dt_s);
 
         /* --- Read every physical channel (raw), then combine per zone
          * (TODO.md 10.8) into that zone's control temperature ------------
@@ -1382,7 +1607,65 @@ static void executor_task_entry(void *arg)
          * would push duty up on exactly the zones the lock is waiting for the
          * laggards to catch up with. */
         s_exec.target_rate_c_per_s = 0.0f;
-        if (lock_ok) {
+        if (seg->seg_kind == PROFILE_SEG_KIND_RELAY_IO) {
+            /* Owner's request, verbatim (profiles_http.h): a relay/IO segment
+             * is not a temperature step at all, so none of the ramp-lock
+             * machinery above (which exists solely to keep the shared
+             * SETPOINT from outrunning a lagging zone) applies to it -- it
+             * always advances on wall-clock time, lock_ok or not. target_c/
+             * dwelling/segment_elapsed_s (the ZONE_RAMP machine's own state)
+             * are deliberately left untouched here. */
+            if (!s_exec.io_segs[s_exec.segment_index].active) {
+                io_seg_start(s_exec.segment_index, seg); /* first tick this segment is current */
+            }
+            bool ready_to_advance;
+            if (seg->io_blocking) {
+                /* Behaves exactly like a dwell: the shared schedule does not
+                 * move to the next segment until this one's own hold time has
+                 * elapsed -- "blocking... before the next segment", the
+                 * owner's own wording. Reuses segment_elapsed_s (this
+                 * segment owns it exclusively while current, same as a
+                 * ZONE_RAMP dwell does) rather than the per-segment
+                 * remaining_s a non-blocking segment uses, since a blocking
+                 * segment's timer IS the schedule's timer. */
+                s_exec.segment_elapsed_s += (uint32_t)(dt_s + 0.5f);
+                ready_to_advance = s_exec.segment_elapsed_s >= seg->dwell_min * 60u;
+            } else {
+                /* "Runs WITH the next segment": advance on the very same tick
+                 * it starts. Its own on/off state keeps running afterward,
+                 * independent of segment_index -- see io_segs_tick() above. */
+                ready_to_advance = true;
+            }
+            if (ready_to_advance) {
+                if (seg->io_blocking) {
+                    /* A blocking segment's own command always ends the moment
+                     * the schedule moves past it -- there is nothing else
+                     * still "running alongside" it for leave_on_at_end to
+                     * apply to (validate_io_segment() already refuses that
+                     * flag on a blocking segment at save time; this is belt
+                     * and braces, not a second decision point). */
+                    io_seg_finish(s_exec.segment_index, false);
+                }
+                s_exec.segment_index++;
+                s_exec.segment_elapsed_s = 0;
+                segment_changed = true;
+                if (s_exec.segment_index >= s_exec.profile.segment_count) {
+                    s_exec.state = PROFILE_EXEC_DONE;
+                    force_all_relays_off();
+                    /* The one path allowed to honor leave_on_at_end: the
+                     * schedule reached its own natural end with every
+                     * segment accounted for, exactly as planned. */
+                    io_segs_force_all_off(true);
+                    release_profile_relay_claim();
+                    run_snapshot_buf_t done_snap;
+                    capture_run_snapshot(&done_snap);
+                    xSemaphoreGive(s_exec.lock);
+                    run_state_note(RUN_STATE_PHASE_DONE, &done_snap.snap);
+                    continue;
+                }
+                seg = &s_exec.profile.segments[s_exec.segment_index];
+            }
+        } else if (lock_ok) {
             s_exec.segment_elapsed_s += (uint32_t)(dt_s + 0.5f);
             if (!s_exec.dwelling) {
                 float new_target;
@@ -1415,6 +1698,15 @@ static void executor_task_entry(void *arg)
                     if (s_exec.segment_index >= s_exec.profile.segment_count) {
                         s_exec.state = PROFILE_EXEC_DONE;
                         force_all_relays_off();
+                        /* This is ALSO a clean end -- the run's LAST segment
+                         * happened to be a ZONE_RAMP dwell, but an earlier
+                         * non-blocking relay/IO segment may still be active
+                         * and running alongside it (that's the whole point of
+                         * non-blocking). Same one path allowed to honor
+                         * leave_on_at_end as the RELAY_IO branch's own DONE
+                         * transition above -- see io_seg_finish()'s doc
+                         * comment. */
+                        io_segs_force_all_off(true);
                         release_profile_relay_claim();
                         /* A clean end, and it MUST be recorded as one: a
                          * completed firing whose record still says RUNNING
@@ -1813,6 +2105,17 @@ static void watchdog_task_entry(void *arg)
             if (s_exec.io) {
                 kiln_io_all_relays_off(s_exec.io);
             }
+            /* kiln_io_all_relays_off() only touches relay bits 1-4; a
+             * relay/IO segment's general-purpose IO_1..7 line needs its own
+             * explicit force-off, and this replaces rules_watchdog_entry's
+             * force-release-and-off for the segment machinery (rules_task.c
+             * is untouched by this pass and is deleted later -- see
+             * profiles_http.h's profile_seg_kind_t comment -- so THIS is now
+             * the one place a stalled control task still gets a relay/IO
+             * segment's contacts open). Unconditional off, same as the relay
+             * call just above: a control task that has stopped ticking gets
+             * no leave_on_at_end exception. */
+            io_segs_force_all_off(false);
             /* See guard9_assert_stale_tick_fault()'s own doc comment for why
              * this is now a helper rather than the bare safety_link_set_
              * fault_source() call this used to be, and what defect that
@@ -1853,6 +2156,7 @@ static void watchdog_task_entry(void *arg)
             if (s_exec.io) {
                 kiln_io_all_relays_off(s_exec.io);
             }
+            io_segs_force_all_off(false); /* abnormal stop -- see escalate_guard_trip()'s branches */
             s_exec.state = PROFILE_EXEC_FAULTED;
             strncpy(s_exec.fault_reason, wd_out.fault_reason, sizeof(s_exec.fault_reason) - 1);
             s_exec.fault_reason[sizeof(s_exec.fault_reason) - 1] = '\0';
@@ -1873,6 +2177,7 @@ static void watchdog_task_entry(void *arg)
             if (s_exec.io) {
                 kiln_io_all_relays_off(s_exec.io);
             }
+            io_segs_force_all_off(false); /* keep retrying, same as the relay-off retry above */
             break;
         case PROFILE_EXECUTOR_WD_ACTION_LOG_IDLE_TRIP:
             /* Edge-triggered (s_idle_trip_logged just below) so a trip that
@@ -2231,6 +2536,34 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
         }
     }
 
+    /* TODO relay/IO segments' SECOND, independent zone-ownership re-check
+     * (the storage-side one is profiles_http.c's profile_relay_is_zone_owned(),
+     * enforced at save time by validate_io_segment()) -- see this function's
+     * own re-run of the ramp-ceiling feasibility check just above for the
+     * identical reasoning: a relay can be assigned to a zone AFTER a profile
+     * was saved, and this run must not energize a contact a zone now owns. */
+    for (uint8_t i = 0; i < p.segment_count; i++) {
+        if (p.segments[i].seg_kind != PROFILE_SEG_KIND_RELAY_IO) {
+            continue;
+        }
+        uint8_t t = p.segments[i].io_target;
+        bool is_relay = (t >= PROFILE_IO_TARGET_RELAY_BASE) && (t < PROFILE_IO_TARGET_RELAY_BASE + KILN_IO_RELAY_COUNT);
+        if (!is_relay) {
+            continue; /* general-purpose IO_1..7 has no zone-ownership concept */
+        }
+        uint8_t owning_zone = 0;
+        if (relay_io_target_is_zone_owned(t, &owning_zone)) {
+            xSemaphoreGive(s_exec.lock);
+            if (err_msg) {
+                snprintf(err_msg, err_cap,
+                         "segment %u: relay %u is now assigned to zone %u -- this profile cannot run "
+                         "until that segment's target is changed",
+                         i + 1, t, owning_zone);
+            }
+            return false;
+        }
+    }
+
     /* Guard 5's absolute ceiling, refused the same way the ramp ceiling just
      * above is: TODO.md's 2026-08-27 audit ("Guard 5's absolute ceiling is
      * off by default") found that max_temp_c == 0 means "no ceiling" in
@@ -2286,6 +2619,11 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
      * operator has since taken over manually. Each run starts owing nothing
      * and claims what it touches (see s_exec_state_t.claimed_relay_mask). */
     s_exec.claimed_relay_mask = 0;
+    /* Same "starts owing nothing" reasoning as claimed_relay_mask just above,
+     * for the relay/IO segment machinery: a previous run's io_segs[] state
+     * (which segment was active, what its remaining_s countdown was) has no
+     * meaning against a freshly (re)started schedule. */
+    memset(s_exec.io_segs, 0, sizeof(s_exec.io_segs));
     /* Feedforward inputs start from their safe values: no ramp commanded yet,
      * and the fallback ambient until a cold junction actually answers below. */
     s_exec.target_rate_c_per_s = 0.0f;
@@ -2584,6 +2922,11 @@ void profile_executor_halt(void)
         return;
     }
     force_all_relays_off();
+    /* An operator halt is an abnormal stop for the segment machinery too --
+     * force off regardless of leave_on_at_end, same as a guard trip. An
+     * operator stopping a firing on purpose is not the "reached its own
+     * planned end" case that flag exists for. */
+    io_segs_force_all_off(false);
     /* Hand every relay this run ever claimed back to unowned -- a halted run
      * owns nothing, and the next run (or a manual command) starts clean. */
     relay_authority_release_mask(s_exec.claimed_relay_mask);

@@ -74,6 +74,31 @@ void lvgl_port_get_last_raw_touch(uint16_t *raw_x, uint16_t *raw_y, uint16_t *z1
  * completed calibration takes effect immediately, no reboot needed. */
 void lvgl_port_reload_touch_cal(void);
 
+/* True once a real per-board calibration is loaded and touch_read_cb() is
+ * running touch_cal_apply() against it; false while it is still on the
+ * Kconfig swap/invert bootstrap guess (see touch_read_cb()'s "else" branch,
+ * lvgl_port.c). That guess is known-inaccurate and was only ever meant to
+ * get a finger onto ui_page_touch_cal.c's full-screen "any press counts"
+ * capture during the forced first-run flow -- small edge controls (the
+ * topbar back/home icons, 35x25 px in the corner) are exactly what misses
+ * first under it while big central buttons still roughly land, so a board
+ * stuck uncalibrated reads to an operator as "some buttons are dead", not
+ * as "touch is uncalibrated". 2026-08-27: this state was previously visible
+ * nowhere except one INFO log line inside lvgl_port_reload_touch_cal(),
+ * itself only reachable by finishing a calibration run -- a board that had
+ * NEVER been calibrated logged nothing about it, ever. This getter plus its
+ * boot-time log line and /api/status field close that hole; see
+ * lvgl_port.c's s_touch_cal declaration comment for the mirrored detail.
+ *
+ * Thread safety: matches lvgl_port_get_last_raw_touch() above -- s_touch_cal
+ * is written only from lvgl_port_task (lvgl_port_start() at boot,
+ * lvgl_port_reload_touch_cal() after a calibration run, both on that task),
+ * so reading the single bool here from another task (dashboard_http's HTTP
+ * task, in particular) is safe: worst case is one stale read behind the
+ * most recent write, same staleness any other pull-based status field in
+ * this codebase accepts. */
+bool lvgl_port_touch_is_calibrated(void);
+
 /* Ignores every touch while disabled -- kiln_ui.c wraps a page switch in
  * this (disable, load + force a synchronous render/flush, re-enable) so a
  * tap landing during the switch can't be read against the outgoing screen's

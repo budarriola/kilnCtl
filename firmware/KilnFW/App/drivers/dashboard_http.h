@@ -336,9 +336,13 @@ typedef struct {
 void dashboard_get_status(dashboard_status_t *out);
 
 /* Outcome of dashboard_set_relay() below -- one variant per distinct refusal
- * reason relay_post_handler's HTTP status codes already distinguished
- * (400 for a missing board or an out-of-range relay, 403 for the two
- * relay_authority.h refusals, 500 for a kiln_io write failure), kept as an
+ * reason its HTTP-facing callers' status codes distinguish (diagnostics_http.c's
+ * danger_relay_post_handler() today; formerly also dashboard_http.c's
+ * relay_post_handler() for POST /api/relay, removed 2026-08-27 with
+ * manual_page.html, its only caller -- see this file's removal comment near
+ * dashboard_set_relay()): 400 for a missing board or an out-of-range relay,
+ * 403 for the two relay_authority.h refusals, 500 for a kiln_io write
+ * failure, kept as an
  * enum instead of a bool+err_msg pair (profile_executor_run()'s style)
  * because the caller needs to pick between four *different* HTTP status
  * codes / user-facing messages, not just show one string. */
@@ -367,8 +371,9 @@ typedef enum {
     DASHBOARD_RELAY_ERR_UPDATING,
 } dashboard_relay_result_t;
 
-/* TODO.md 10.1a's shared-backend seam, extracted from relay_post_handler()
- * (POST /api/relay) the same way dashboard_get_status() was pulled out of
+/* TODO.md 10.1a's shared-backend seam, extracted from the old POST /api/relay
+ * handler (removed 2026-08-27 -- see this file's dashboard_relay_result_t
+ * comment) the same way dashboard_get_status() was pulled out of
  * status_get_handler() -- so ui_page_temperature.c's per-zone manual relay
  * toggle goes through the exact same ownership/safety-fault gating the web
  * dashboard's manual override does (relay_authority_manual_blocked_by_owner(),

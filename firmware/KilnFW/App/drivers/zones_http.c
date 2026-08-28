@@ -1263,9 +1263,19 @@ static bool convert_versioned_blob_to_current(uint8_t version, const void *blob,
              * "Zone 2"/"Zone 3" fits with room to spare and is still a name an
              * operator recognizes: each of these profiles came from exactly
              * one zone's own v8 values. */
+            /* The digit is written as a single char rather than with %u so
+             * the compiler can see the output length. "Zone %u" against a
+             * 7-char name is fine for any real channel count, but %u's widest
+             * expansion is ten digits, which the target build's
+             * -Werror=format-truncation rejects on a bound it cannot prove.
+             * The static assert is what actually keeps this honest: it fails
+             * the build if the channel count ever reaches double digits,
+             * rather than letting the name silently lose its digit. */
+            _Static_assert(MAX31856_CHANNEL_COUNT <= 9,
+                           "single-digit zone naming below assumes at most 9 channels");
             for (uint8_t p = 0; p < profile_count; p++) {
                 snprintf(out->timing_profiles[p].name, sizeof(out->timing_profiles[p].name),
-                         "Zone %u", (unsigned)(p + 1));
+                         "Zone %c", (char)('0' + p + 1));
             }
         }
         /* profile_count is always >= 1 here: MAX31856_CHANNEL_COUNT (the

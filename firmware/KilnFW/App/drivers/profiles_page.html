@@ -57,9 +57,20 @@
   .card { background: var(--card-bg); border: 1px solid var(--border); border-radius: var(--ui-radius);
           padding: 0.6em 1em; margin-bottom: 0.5em; display: flex; justify-content: space-between;
           align-items: center; }
-  .seg { display: flex; gap: 0.5em; align-items: flex-end; margin-top: 0.5em; }
-  .seg > div { flex: 1; }
+  /* Owner's request (2026-08-27): relay/IO segments live alongside ramp/dwell
+     ones now, each row picking its own kind -- so a row is no longer a fixed
+     3-field strip, it is a kind selector plus a variable field set
+     (.fields), rebuilt whenever the kind changes (see segmentRow()/
+     renderSegFields() below). */
+  .seg { border-bottom: 1px dashed var(--border); padding-bottom: 0.6em; margin-top: 0.7em; }
+  .seg .seg-head { display: flex; gap: 0.5em; align-items: flex-end; }
+  .seg .seg-head > div:first-child { flex: 1; }
+  .seg .fields { display: flex; flex-wrap: wrap; gap: 0.5em; margin-top: 0.4em; }
+  .seg .fields > div { flex: 1 1 130px; min-width: 130px; }
+  .seg .fields > .io-leave-wrap { flex-basis: 100%; }
   .seg label { font-size: 0.75em; margin-top: 0; }
+  .seg .io-leave-wrap label { font-weight: normal; display: flex; align-items: center; gap: 0.4em; }
+  .seg .io-leave-wrap input[type=checkbox] { width: auto; }
   /* min-height now shared via theme.css's `button {}` rule (UI_PLAN.md
      Web item 2). */
   button { padding: 0.6em 1.2em; font-size: 0.95em;
@@ -209,10 +220,31 @@ var zoneCeilings = []; // max_ramp_c_per_hr per zone, parallel to `zones`; 0 = u
 var RAMP_WARN_FRACTION = 0.8; // mirrors PROFILE_RAMP_WARN_FRACTION in profiles_http.c
 var MAX_SEGMENTS = 12;
 
+// Owner's request (2026-08-27): relay/IO segments. relayNames/relayOwnedMask
+// come from /api/zones ("relay_names" is dense over KILN_IO_RELAY_COUNT,
+// index r == relay r+1; "relay_zone_owned_mask" bit N-1 set iff relay N is
+// currently claimed by some zone's heater output -- see zones_http.c's
+// zones_get_handler comment). Only relays NOT in this mask may be offered as
+// a segment target: a relay a zone already drives must never also be
+// reachable from a profile segment, or the two would fight over the same
+// contact (profiles_http.c's validate_io_segment() refuses it server-side
+// too; this is the client-side half so the dropdown never even offers the
+// choice). relayOwnedMask/relayNames are refetched every time a row needs
+// them (see refreshZonesFor() below) rather than cached from page load,
+// because a relay can be reassigned to a zone at any time from the
+// Thermocouples & Zones page while this one stays open.
+var relayNames = [];
+var relayOwnedMask = 0;
+var relayCount = 4;
+var IO_DIGITAL_COUNT = 7; // KILN_IO_DIGITAL_COUNT (kiln_io.h); no live count in /api/zones today
+
 function loadZones() {
   return fetch('/api/zones').then(function (r) { return r.json(); }).then(function (data) {
     zones = [];
     zoneCeilings = [];
+    relayNames = data.relay_names || [];
+    relayOwnedMask = data.relay_zone_owned_mask || 0;
+    relayCount = data.relay_count || 4;
     for (var i = 0; i < data.thermo_count; i++) {
       zones.push(data.zones[i].name || ('Zone ' + i));
       zoneCeilings.push(data.zones[i].max_ramp_c_per_hr || 0);
@@ -321,25 +353,149 @@ function checkRamp(input) {
 // silently double-apply a °F/°C error into a real firing setpoint -- exactly
 // the hazard the task called out. The label spells out "&deg;C" explicitly
 // so an operator with the toggle set to °F still knows what unit to type.
+// Ramp/dwell fields -- unchanged from before this pass, just factored out so
+// segmentRow() can pick between this and ioFieldsHtml() by kind.
+function rampFieldsHtml(seg) {
+  return '<div><label>Target &deg;C</label><input type="number" step="1" class="s-target" value="' + (seg.target_c || 0) + '"></div>' +
+    '<div><label>Ramp &deg;C/hr (0=none)</label><input type="number" step="1" class="s-ramp" value="' + (seg.ramp_c_per_hr || 0) + '"></div>' +
+    '<div><label>Dwell min</label><input type="number" step="1" class="s-dwell" value="' + (seg.dwell_min || 0) + '"></div>';
+}
+
+// Builds the <option>s for the relay/IO target <select>. `selected` is the
+// io_target value to preselect (0 = none yet). A relay currently owned by a
+// zone is left OUT of the normal choices (item 2 of the brief) -- except
+// when it is the value already saved on this segment, in which case it is
+// still shown so editing an existing segment doesn't silently jump to a
+// different relay, but disabled and labelled so the operator can see why it
+// needs to change (profiles_http.c's validate_io_segment() would refuse a
+// save with it anyway).
+function ioTargetOptionsHtml(selected) {
+  var html = '<optgroup label="Relay">';
+  for (var r = 1; r <= relayCount; r++) {
+    var owned = (relayOwnedMask & (1 << (r - 1))) !== 0;
+    if (owned && r !== selected) continue;
+    var label = window.kcEscapeHtml(relayNames[r - 1] || ('Relay ' + r));
+    if (owned) label += ' (assigned to a zone -- pick another)';
+    html += '<option value="' + r + '"' + (r === selected ? ' selected' : '') +
+            (owned ? ' disabled' : '') + '>' + label + '</option>';
+  }
+  html += '</optgroup><optgroup label="IO">';
+  for (var d = 1; d <= IO_DIGITAL_COUNT; d++) {
+    var v = 10 + d; // PROFILE_IO_TARGET_IO_BASE == 11
+    html += '<option value="' + v + '"' + (v === selected ? ' selected' : '') + '>IO_' + d + '</option>';
+  }
+  html += '</optgroup>';
+  return html;
+}
+
+// Relay/IO fields. "Timing" spells out the owner's own words ("runs with the
+// next segment or before") rather than a bare "blocking" checkbox (brief
+// item 4), and the leave-on-at-end control states its consequence in plain
+// language (item 5) since the default is force-off and the heaters are live
+// hardware. io_blocking defaults to 1 (blocking) here to match the
+// firmware's own "missing = blocking, the safer default" rule
+// (profiles_http.c's POST handler comment on seg%u_io_blocking).
+function ioFieldsHtml(seg) {
+  var target = seg.io_target || 0;
+  var state = seg.io_state ? 1 : 0;
+  var blocking = seg.io_blocking === 0 ? 0 : 1;
+  var leave = seg.io_leave_on_at_end ? 1 : 0;
+  return '<div><label>Relay / IO</label><select class="io-target">' + ioTargetOptionsHtml(target) + '</select></div>' +
+    '<div><label>Command</label><select class="io-state">' +
+      '<option value="1"' + (state ? ' selected' : '') + '>Turn ON</option>' +
+      '<option value="0"' + (!state ? ' selected' : '') + '>Turn OFF</option>' +
+    '</select></div>' +
+    '<div><label>Hold minutes</label><input type="number" step="1" class="io-dwell" value="' + (seg.dwell_min || 0) + '"></div>' +
+    '<div><label>Timing</label><select class="io-blocking">' +
+      '<option value="1"' + (blocking ? ' selected' : '') + '>Blocking -- profile waits here, runs BEFORE the next segment</option>' +
+      '<option value="0"' + (!blocking ? ' selected' : '') + '>Non-blocking -- runs WITH (alongside) the next segment</option>' +
+    '</select></div>' +
+    '<div class="io-leave-wrap"><label><input type="checkbox" class="io-leave"' + (leave ? ' checked' : '') + '>' +
+      ' Leave it in this state when the run ends</label>' +
+      '<p class="hint">Default: forced OFF like every other relay/IO when a run ends. Checking this ' +
+      'leaves it energized in its last commanded state instead -- only usable for a non-blocking ' +
+      'segment commanding ON, and only honored if the run finishes cleanly (a fault, halt or pause ' +
+      'still forces off). The heating elements on this board are live.</p></div>';
+}
+
+// Enforces the same combination validate_io_segment() enforces server-side
+// (io_leave_on_at_end only makes sense for a non-blocking, ON segment) --
+// disables and unchecks the checkbox rather than letting the operator set a
+// combination that would just be refused at save time.
+function updateIoLeaveEnabled(fields) {
+  var blocking = fields.querySelector('.io-blocking').value !== '0';
+  var isOn = fields.querySelector('.io-state').value !== '0';
+  var leave = fields.querySelector('.io-leave');
+  var eligible = !blocking && isOn;
+  leave.disabled = !eligible;
+  if (!eligible) leave.checked = false;
+}
+
+// Renders the field set for `kind` (0 = ramp/dwell, 1 = relay/IO) into
+// `fields`, replacing whatever was there. Called on initial row build AND on
+// every kind switch -- rebuilding from scratch (rather than hiding/showing
+// both sets) is what keeps a switched row from ever POSTing stale values
+// left over from the other kind: the other kind's inputs simply don't exist
+// in the DOM to be read back out (see the save handler below, which only
+// ever queries the classes the CURRENT kind's fields use).
+function renderSegFields(fields, kind, seg) {
+  if (kind === 1) {
+    fields.innerHTML = ioFieldsHtml(seg);
+    var blockingSel = fields.querySelector('.io-blocking');
+    var stateSel = fields.querySelector('.io-state');
+    blockingSel.addEventListener('change', function () { updateIoLeaveEnabled(fields); });
+    stateSel.addEventListener('change', function () { updateIoLeaveEnabled(fields); });
+    updateIoLeaveEnabled(fields);
+  } else {
+    fields.innerHTML = rampFieldsHtml(seg);
+    var rampInput = fields.querySelector('.s-ramp');
+    rampInput.addEventListener('input', function () { checkRamp(rampInput); });
+    checkRamp(rampInput);
+  }
+}
+
 function segmentRow(seg) {
   var div = document.createElement('div');
   div.className = 'seg';
+  var kind = seg.seg_kind ? 1 : 0;
   div.innerHTML =
-    '<div><label>Target &deg;C</label><input type="number" step="1" class="s-target" value="' + (seg.target_c || 0) + '"></div>' +
-    '<div><label>Ramp &deg;C/hr (0=none)</label><input type="number" step="1" class="s-ramp" value="' + (seg.ramp_c_per_hr || 0) + '"></div>' +
-    '<div><label>Dwell min</label><input type="number" step="1" class="s-dwell" value="' + (seg.dwell_min || 0) + '"></div>' +
-    '<button type="button" class="small remove">&times;</button>';
+    '<div class="seg-head">' +
+      '<div><label>Segment type</label><select class="seg-kind">' +
+        '<option value="0"' + (kind === 0 ? ' selected' : '') + '>Temperature ramp/dwell</option>' +
+        '<option value="1"' + (kind === 1 ? ' selected' : '') + '>Relay / IO</option>' +
+      '</select></div>' +
+      '<button type="button" class="small remove">&times;</button>' +
+    '</div>' +
+    '<div class="fields"></div>';
   div.querySelector('.remove').addEventListener('click', function () { div.remove(); });
-  var rampInput = div.querySelector('.s-ramp');
-  rampInput.addEventListener('input', function () { checkRamp(rampInput); });
-  checkRamp(rampInput);
+  var fields = div.querySelector('.fields');
+  renderSegFields(fields, kind, seg);
+  div.querySelector('.seg-kind').addEventListener('change', function (ev) {
+    var newKind = parseInt(ev.target.value, 10);
+    // Owner didn't ask for cross-kind value carryover, and there's no sane
+    // mapping from "ramp to 950C over 3hr" to "hold Relay2 on for 3min" --
+    // switching kind starts that row's fields blank/default rather than
+    // guessing. Relay ownership can have changed since this row (or the
+    // page) was last loaded, so refetch it live before offering the
+    // relay/IO dropdown (brief item 2's "compute that live" requirement).
+    if (newKind === 1) {
+      loadZones().then(function () { renderSegFields(fields, newKind, {}); });
+    } else {
+      renderSegFields(fields, newKind, {});
+    }
+  });
   return div;
 }
 
+// Segment rows are appended interactively (this button) as well as rebuilt
+// wholesale when loading a profile into the editor (loadIntoEditor()/
+// editProfile() below) -- both paths refresh zone/relay data first so a
+// freshly-added relay segment's dropdown reflects the CURRENT zone
+// assignments, not whatever was true when the page loaded (brief item 2).
 document.getElementById('addSegBtn').addEventListener('click', function () {
   var container = document.getElementById('segments');
   if (container.children.length >= MAX_SEGMENTS) return;
-  container.appendChild(segmentRow({}));
+  loadZones().then(function () { container.appendChild(segmentRow({})); });
 });
 
 function resetEditor() {
@@ -576,7 +732,12 @@ function loadIntoEditor(p) {
   document.getElementById('pname').value = p.name;
   var container = document.getElementById('segments');
   container.innerHTML = '';
-  p.segments.forEach(function (seg) { container.appendChild(segmentRow(seg)); });
+  // Refresh relay ownership live before building any relay/IO rows (brief
+  // item 2) -- builtin catalogue schedules are ramp/dwell-only today, but
+  // this keeps the same guarantee if that ever changes.
+  loadZones().then(function () {
+    p.segments.forEach(function (seg) { container.appendChild(segmentRow(seg)); });
+  });
   window.scrollTo(0, document.body.scrollHeight);
 }
 
@@ -593,7 +754,14 @@ document.getElementById('restoreBtn').addEventListener('click', function () {
 });
 
 function editProfile(id) {
-  fetch('/api/profile?id=' + id).then(function (r) { return r.json(); }).then(function (p) {
+  // Fetch the profile and a fresh zone/relay snapshot together -- a saved
+  // relay segment's target dropdown must reflect CURRENT zone ownership, not
+  // whatever was true when this page first loaded (brief item 2).
+  Promise.all([
+    fetch('/api/profile?id=' + id).then(function (r) { return r.json(); }),
+    loadZones(),
+  ]).then(function (results) {
+    var p = results[0];
     editingId = id;
     document.getElementById('editorTitle').textContent = 'Edit: ' + p.name;
     document.getElementById('pname').value = p.name;
@@ -604,6 +772,8 @@ function editProfile(id) {
     p.segments.forEach(function (seg) { container.appendChild(segmentRow(seg)); });
     document.getElementById('msg').innerHTML = '';
     window.scrollTo(0, document.body.scrollHeight);
+  }).catch(function () {
+    document.getElementById('msg').innerHTML = '<span class="err">Could not load that profile.</span>';
   });
 }
 
@@ -632,10 +802,25 @@ document.getElementById('saveBtn').addEventListener('click', function () {
   }
   params.push('zone_mask=' + zoneMask);
   params.push('seg_count=' + rows.length);
+  // Each row is serialized purely from the fields its CURRENT kind rendered
+  // (renderSegFields() tears down the other kind's inputs on every switch --
+  // see segmentRow() above), so there is never a stale ramp/target value
+  // sitting in the DOM to leak into a relay/IO segment's POST, or vice
+  // versa: the field simply doesn't exist to be read.
   rows.forEach(function (row, i) {
-    params.push('seg' + i + '_target=' + row.querySelector('.s-target').value);
-    params.push('seg' + i + '_ramp=' + row.querySelector('.s-ramp').value);
-    params.push('seg' + i + '_dwell=' + row.querySelector('.s-dwell').value);
+    var kind = row.querySelector('.seg-kind').value;
+    params.push('seg' + i + '_kind=' + kind);
+    if (kind === '1') {
+      params.push('seg' + i + '_io_target=' + row.querySelector('.io-target').value);
+      params.push('seg' + i + '_io_state=' + row.querySelector('.io-state').value);
+      params.push('seg' + i + '_io_blocking=' + row.querySelector('.io-blocking').value);
+      params.push('seg' + i + '_io_leave_on=' + (row.querySelector('.io-leave').checked ? '1' : '0'));
+      params.push('seg' + i + '_dwell=' + row.querySelector('.io-dwell').value);
+    } else {
+      params.push('seg' + i + '_target=' + row.querySelector('.s-target').value);
+      params.push('seg' + i + '_ramp=' + row.querySelector('.s-ramp').value);
+      params.push('seg' + i + '_dwell=' + row.querySelector('.s-dwell').value);
+    }
   });
   msg.textContent = 'Saving…';
   fetch('/api/profile', {

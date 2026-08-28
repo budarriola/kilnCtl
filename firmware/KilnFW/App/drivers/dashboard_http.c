@@ -17,6 +17,7 @@
 
 #include "autotune_engine.h"
 #include "boot_button.h" /* boot_button_ota_bypass_active()/_remaining_ms() -- see the GET /api/status fields below */
+#include "lvgl_port.h" /* lvgl_port_touch_is_calibrated() -- see the "touch_calibrated" /api/status field below */
 #include "danger_mode.h" /* danger_mode_active() -- profile_exec_start_post_handler()'s mutual-exclusion refusal */
 #include "heat_interlock.h" /* HEAT_INTERLOCK_REASON_MAX -- see the ERR_UPDATING case below */
 #include "http_form.h"
@@ -42,7 +43,6 @@ static const char *TAG = "dashboard_http";
  * reasoning as wifi_provision_http.c's PROV_BODY_MAX: bounded well above
  * what a legitimate request needs, checked against Content-Length before a
  * single byte is read. */
-#define RELAY_BODY_MAX 64
 
 static struct {
     kiln_io_t *io;
@@ -749,6 +749,16 @@ static esp_err_t status_get_handler(httpd_req_t *req)
     APPEND(",\"boot_button_bypass_remaining_s\":%lu",
            (unsigned long)(boot_button_bypass_remaining_ms() / 1000u));
 
+    /* lvgl_port.h -- same always-visible-in-status reasoning as
+     * watchdog_panic_disabled and ota_auth_disabled above: a board still
+     * running the known-inaccurate touch bootstrap guess (no per-board
+     * calibration ever completed) must say so everywhere this status is
+     * read, not only in a boot log an operator has probably already
+     * scrolled past. false here is the actionable case -- small controls
+     * (topbar back/home icons) may not register touches until a
+     * calibration run completes. */
+    APPEND(",\"touch_calibrated\":%s", lvgl_port_touch_is_calibrated() ? "true" : "false");
+
     APPEND("}");
 
 #undef APPEND
@@ -883,149 +893,20 @@ dashboard_relay_result_t dashboard_set_relay(uint8_t relay_index, bool on, uint3
     }
 }
 
-/* Turns a DASHBOARD_RELAY_ERR_SAFETY refusal's raw SAFETY_FAULT_SRC_* bitmask
- * (safety_link.h) into the specific, actionable sentence relay_post_handler()
- * below hands back in the HTTP body -- the owner's report (TODO.md/ROADMAP.md
- * 2026-08-21 "manual relays refuse silently") was that "blocked by safety
- * fault" alone reads as a dead button, not a safety refusal, and that this
- * board's actual bench condition (safety link never comes up -- no RP2040
- * peer answers on the isolated UART, so safety_link.c's link_up latches 0
- * forever and SAFETY_FAULT_SRC_SAFETY_LINK is asserted permanently) needs to
- * be named, not left as a bit an operator has no way to decode. Checked in
- * the same priority relay_authority_on_blocked()'s bit values imply (any bit
- * set blocks -- see that function) but SAFETY_LINK is called out first and by
- * name because it is the chronic, expected-on-this-bench condition every
- * other bit is a rarer, acute one; a caller with more than one bit set still
- * gets a truthful single sentence rather than every bit spelled out, matching
- * this file's other one-reason-at-a-time refusal messages (ERR_UPDATING
- * above).
- *
- * Deliberately does NOT suggest disabling CONFIG_KILNCTL_SX1509_RELAYS_OFF_
- * ON_LINK_LOSS -- that Kconfig default (Kconfig: "Drop all relays when the
- * PC link goes away") exists specifically so a crashed/unplugged controller
- * can never leave a kiln element energised, and turning it off is a
- * deliberate bench-only escape hatch the owner has not asked for here. This
- * message names it only so the operator understands WHY relays keep bouncing
- * back off if they were ever momentarily forced on some other way, not as an
- * invitation to flip it. */
-static void relay_safety_reason(uint32_t sources, char *buf, size_t buf_len)
-{
-    if (sources & SAFETY_FAULT_SRC_SAFETY_LINK) {
-        snprintf(buf, buf_len,
-                 "safety link is down (no safety processor has ever answered on this board) -- "
-                 "manual relay-ON is refused while the link is down, and "
-                 "CONFIG_KILNCTL_SX1509_RELAYS_OFF_ON_LINK_LOSS additionally forces every relay "
-                 "off on this same condition so a crashed controller can never leave an element on");
-    } else if (sources & SAFETY_FAULT_SRC_PC_LINK) {
-        snprintf(buf, buf_len, "PC control link is down");
-    } else if (sources & SAFETY_FAULT_SRC_THERMO) {
-        snprintf(buf, buf_len, "a thermocouple has faulted");
-    } else if (sources & SAFETY_FAULT_SRC_THERMAL_SANITY) {
-        snprintf(buf, buf_len, "a zone failed its thermal sanity check");
-    } else if (sources & SAFETY_FAULT_SRC_MANUAL) {
-        snprintf(buf, buf_len, "a fault was manually asserted from the PC");
-    } else if (sources & SAFETY_FAULT_SRC_APP) {
-        snprintf(buf, buf_len, "the application asserted a safety fault");
-    } else {
-        /* Should not happen -- ERR_SAFETY is only returned when
-         * relay_authority_on_blocked() found at least one bit set -- but
-         * still an honest, non-empty sentence rather than a blank body if it
-         * somehow does. */
-        snprintf(buf, buf_len, "blocked by an unspecified safety fault (sources=0x%02X)", (unsigned)sources);
-    }
-}
-
-static esp_err_t relay_post_handler(httpd_req_t *req)
-{
-    if (!s_dash.io) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "no relay board attached");
-        return ESP_OK;
-    }
-    if (req->content_len <= 0 || req->content_len > RELAY_BODY_MAX) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body missing or too large");
-        return ESP_OK;
-    }
-
-    char body[RELAY_BODY_MAX + 1];
-    size_t received = 0;
-    while (received < (size_t)req->content_len) {
-        int ret = httpd_req_recv(req, body + received, req->content_len - received);
-        if (ret <= 0) {
-            ESP_LOGW(TAG, "relay body read failed/short: %d", ret);
-            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body read failed");
-            return ESP_OK;
-        }
-        received += (size_t)ret;
-    }
-    body[received] = '\0';
-
-    char relay_val[4];
-    char on_val[4];
-    int relay_len = http_form_find_field(body, "relay", relay_val, sizeof(relay_val));
-    int on_len = http_form_find_field(body, "on", on_val, sizeof(on_val));
-    if (relay_len <= 0 || on_len <= 0) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "relay/on missing");
-        return ESP_OK;
-    }
-
-    long relay = strtol(relay_val, NULL, 10);
-    if (relay < 1 || relay > KILN_IO_RELAY_COUNT) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "relay out of range");
-        return ESP_OK;
-    }
-    bool want_on = on_val[0] == '1';
-
-    /* dashboard_set_relay() -- see this file's definition above and
-     * dashboard_http.h's doc comment -- is now the one place the
-     * ownership/safety gate and the kiln_io write happen; this handler only
-     * translates its result to an HTTP status. out_safety_sources is a real
-     * pointer (not NULL, as this used to pass) so a DASHBOARD_RELAY_ERR_SAFETY
-     * result below can be decoded into the specific reason relay_safety_reason()
-     * builds, instead of the flat "blocked by safety fault" text that read as
-     * a dead button to an operator who has no way to tell a refusal from a
-     * silently-ignored click (2026-08-21 owner report). */
-    uint32_t safety_sources = 0;
-    switch (dashboard_set_relay((uint8_t)relay, want_on, &safety_sources)) {
-    case DASHBOARD_RELAY_OK:
-        return httpd_resp_sendstr(req, "ok");
-    case DASHBOARD_RELAY_ERR_NO_BOARD:
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "no relay board attached");
-        return ESP_OK;
-    case DASHBOARD_RELAY_ERR_RANGE:
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "relay out of range");
-        return ESP_OK;
-    case DASHBOARD_RELAY_ERR_OWNED:
-        httpd_resp_send_err(req, HTTPD_403_FORBIDDEN, "relay owned by a running profile");
-        return ESP_OK;
-    case DASHBOARD_RELAY_ERR_SAFETY:
-        {
-            char reason[320];
-            relay_safety_reason(safety_sources, reason, sizeof(reason));
-            httpd_resp_send_err(req, HTTPD_403_FORBIDDEN, reason);
-        }
-        return ESP_OK;
-    case DASHBOARD_RELAY_ERR_UPDATING:
-        /* 2026-08-21: distinct wording from ERR_SAFETY above -- see
-         * dashboard_http.h's DASHBOARD_RELAY_ERR_UPDATING comment. Re-derive
-         * the specific reason (which processor is updating) the same way
-         * dashboard_set_relay()'s own ERR_UPDATING case does, rather than a
-         * flat string, so a dashboard operator sees the same detail the
-         * server log already recorded. */
-        {
-            char reason[HEAT_INTERLOCK_REASON_MAX];
-            if (ota_http_heat_blocked_by_update(reason, sizeof(reason))) {
-                httpd_resp_send_err(req, HTTPD_403_FORBIDDEN, reason);
-            } else {
-                httpd_resp_send_err(req, HTTPD_403_FORBIDDEN, "firmware update in progress");
-            }
-        }
-        return ESP_OK;
-    case DASHBOARD_RELAY_ERR_IO_FAIL:
-    default:
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "relay command failed");
-        return ESP_OK;
-    }
-}
+/* relay_safety_reason() and relay_post_handler() (POST /api/relay) removed
+ * 2026-08-27: the endpoint's only caller was manual_page.html
+ * (/settings/manual), removed the same day at the owner's request -- "the
+ * danger zone in the diagnostics page covers it fine" -- now that the
+ * kiln's heating elements are actually wired to this board. Confirmed by
+ * grep across the whole repo (firmware/, tools/, docs/, mykicadMcp/) that
+ * nothing else -- not the LCD, not PcTools, not either MCP server -- ever
+ * called POST /api/relay; diagnostics_http.c's Danger Zone posts to the
+ * separate /api/diagnostics/danger/relay instead. dashboard_set_relay()
+ * above (the actual ownership/safety gate + kiln_io write) is UNTOUCHED and
+ * stays exactly as shared as before: diagnostics_http.c's
+ * danger_relay_post_handler() and ui_page_temperature.c's LCD relay control
+ * both still call it directly, so removing the one dead HTTP door does not
+ * touch the gate itself or either surviving caller. */
 
 /* ---- Unit preference (ROADMAP.md, 2026-08-21) -----------------------------
  * POST /api/unit_pref -- the write side of the shared display-unit setting
@@ -2056,9 +1937,6 @@ esp_err_t dashboard_http_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_b
     static const httpd_uri_t status_uri = {
         .uri = "/api/status", .method = HTTP_GET, .handler = status_get_handler,
     };
-    static const httpd_uri_t relay_uri = {
-        .uri = "/api/relay", .method = HTTP_POST, .handler = relay_post_handler,
-    };
     static const httpd_uri_t exec_status_uri = {
         .uri = "/api/profile_exec", .method = HTTP_GET, .handler = profile_exec_status_get_handler,
     };
@@ -2117,11 +1995,6 @@ esp_err_t dashboard_http_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_b
     esp_err_t err = httpd_register_uri_handler(server, &status_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_register_uri_handler(/api/status) failed: %s", esp_err_to_name(err));
-        return err;
-    }
-    err = httpd_register_uri_handler(server, &relay_uri);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "httpd_register_uri_handler(/api/relay) failed: %s", esp_err_to_name(err));
         return err;
     }
     err = httpd_register_uri_handler(server, &exec_status_uri);

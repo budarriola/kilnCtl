@@ -12,6 +12,7 @@
 
 #include "MAX31856.h"
 #include "http_form.h"
+#include "kiln_io.h"
 #include "profile_feasibility.h"
 #include "profiles_builtin.h"
 #include "web_encoding.h"
@@ -51,8 +52,8 @@ static const char *TAG = "profiles_http";
  * pattern zones_http.c's convert_zone_v*()/convert_versioned_blob_to_current()
  * use.
  *
- * 1 -> 2 (this pass): appended crc32 to profile_persisted_t. This is
- * genuinely a new on-flash SHAPE -- a real board's existing v1 blobs are
+ * 1 -> 2: appended crc32 to profile_persisted_t. This is genuinely a new
+ * on-flash SHAPE -- a real board's existing v1 blobs are
  * `{uint8_t version; profile_t profile;}`, sizeof(profile_persisted_t)
  * WITHOUT the crc32 tail, and expected_len_for_version() must keep answering
  * THAT exact size for version 1 forever, never sizeof(the current struct).
@@ -63,8 +64,30 @@ static const char *TAG = "profiles_http";
  * a bench board's saved profiles on the very firmware meant to protect them
  * -- see profile_persisted_v1_t/convert_profile_v1() below, the exact same
  * mistake zones_http.c's ZONES_CFG_VERSION 6->7 comment already documents by
- * name for zone_cfg_t. */
-#define PROFILE_VERSION 2
+ * name for zone_cfg_t.
+ *
+ * 2 -> 3 (this pass, TODO relay/IO segments -- see profiles_http.h's
+ * profile_seg_kind_t doc comment for the owner's request that drove this):
+ * profile_segment_t itself grew four uint8_t fields (seg_kind/io_target/
+ * io_state/io_blocking/io_leave_on_at_end). THIS is the exact trap this
+ * comment has been warning about since v1->v2: profile_t embeds
+ * segments[PROFILE_MAX_SEGMENTS] BY VALUE, so growing profile_segment_t
+ * displaces every element after segment 0, not just the tail of the struct.
+ * A real board's existing v1 AND v2 blobs both used the OLD, 12-byte
+ * profile_segment_t (profile_t did not change shape between v1 and v2 --
+ * only the persisted WRAPPER grew a crc32 tail then) -- so both frozen
+ * snapshots below now point at profile_t_v2 (the old segment shape), NOT at
+ * today's profile_t. Reusing today's profile_t for profile_persisted_v1_t,
+ * the way the v1->v2 pass did (profile_t "hasn't changed shape between v1
+ * and v2" was true THEN), would silently misinterpret every field of every
+ * segment from element 1 onward on a real board's already-saved profiles --
+ * exactly the "one struct assignment, wrong shape" data loss this file's own
+ * header comment names as the hazard, just one version later than where it
+ * was first caught. convert_profile_v1()/convert_profile_v2() below walk
+ * every segment field-by-field for exactly this reason -- a struct
+ * assignment or memcpy across the shape change is never safe again from this
+ * version forward. */
+#define PROFILE_VERSION 3
 
 /* PROFILES_MAX_COUNT / PROFILE_NAME_MAX_LEN / PROFILE_MAX_SEGMENTS and the
  * profile_t/profile_segment_t layout now live in profiles_http.h --
@@ -122,19 +145,45 @@ typedef struct {
     uint32_t crc32;
 } profile_persisted_t;
 
-/* EXACT snapshot of what profile_persisted_t was before this pass added
- * crc32 -- what every already-saved version-1 blob on a real board actually
- * is on flash today. Used ONLY to interpret a raw blob whose length has
- * already been checked (expected_len_for_version()) against the size of
- * EXACTLY this struct before a single byte is copied out of it -- see
- * decode_profile_blob(). Never grown, edited, or reused for a different
- * version; the next layout change gets its own new snapshot here, appended,
+/* EXACT snapshot of profile_segment_t / profile_t as they were BEFORE this
+ * pass (2026-08-27) added the relay/IO segment fields -- what every
+ * already-saved version-1 AND version-2 blob on a real board actually is on
+ * flash today, since profile_t did not change shape between v1 and v2 (only
+ * the persisted WRAPPER grew a crc32 tail then). Used ONLY to interpret a raw
+ * blob whose length has already been checked (expected_len_for_version())
+ * against the size of EXACTLY the matching persisted_vN struct below, before
+ * a single byte is copied out of it or a field is read by name -- see
+ * decode_profile_blob(). Never grown, edited, or reused for a later version;
+ * the NEXT layout change gets its own new snapshot appended after this one,
  * never a change to this one. Same discipline as zones_http.c's
  * zone_cfg_v1_t/zones_cfg_v1_t etc. */
 typedef struct {
+    float target_c;
+    float ramp_c_per_hr;
+    uint32_t dwell_min;
+} profile_segment_v2_t;
+
+typedef struct {
+    char name[PROFILE_NAME_MAX_LEN + 1];
+    uint8_t zone_mask;
+    uint8_t segment_count;
+    profile_segment_v2_t segments[PROFILE_MAX_SEGMENTS];
+} profile_t_v2;
+
+typedef struct {
     uint8_t version;
-    profile_t profile;
-} profile_persisted_v1_t;
+    profile_t_v2 profile;
+} profile_persisted_v1_t; /* v1: no crc32 tail, OLD (pre-relay/IO) segment shape */
+
+typedef struct {
+    uint8_t version;
+    profile_t_v2 profile;
+    uint32_t crc32;
+} profile_persisted_v2_t; /* v2: crc32 tail, but STILL the OLD segment shape --
+                            * this is the struct the v1->v2 pass called
+                            * profile_persisted_t; frozen here under its own
+                            * name now that a real current-format profile_t
+                            * exists and is a different size. */
 
 /* Per-version expected blob length, checked in decode_profile_blob() BEFORE a
  * single byte is copied out of a stored blob or interpreted as any field --
@@ -158,22 +207,62 @@ static size_t expected_len_for_version(uint8_t version)
 {
     switch (version) {
     case 1: return sizeof(profile_persisted_v1_t);
+    case 2: return sizeof(profile_persisted_v2_t);
     case PROFILE_VERSION: return sizeof(profile_persisted_t);
     default: return 0;
     }
 }
 
-/* Field-by-field converter for the one historical layout: writes every field
- * of a fresh current-format profile_t from a decoded v1 record. profile_t
- * itself hasn't changed shape between v1 and v2 (only the persisted WRAPPER
- * grew a crc32 tail), so this is a straight copy today -- but it exists as
- * its own named function, not an inline memcpy at the call site, so the day
- * profile_t/profile_segment_t itself grows or reorders a field this is the
- * one place that has to change, same reason zones_http.c's convert_zone_v*()
- * functions are never collapsed into their callers. */
+/* Field-by-field converter, OLD (v1/v2, pre-relay/IO) segment shape ->
+ * current profile_t. Deliberately walks every one of the up to
+ * PROFILE_MAX_SEGMENTS elements by name rather than a struct assignment or
+ * memcpy: profile_t embeds segments[] BY VALUE, so a bulk copy across the
+ * v2_t -> current shape change would silently misinterpret every segment
+ * from element 1 onward (see PROFILE_VERSION's own comment for the data-loss
+ * this exact mistake caused on a real board, one version earlier). The four
+ * new fields are given their SAFE, "this was always a temperature segment"
+ * defaults -- an old profile never had a relay/IO segment in it, so
+ * PROFILE_SEG_KIND_ZONE_RAMP with everything else zeroed reproduces its old
+ * behavior exactly, and io_leave_on_at_end's default of 0 is the same
+ * fail-off default a brand new segment gets. */
+static void convert_profile_v2_segments(const profile_segment_v2_t *src, uint8_t count, profile_t *out)
+{
+    for (uint8_t i = 0; i < count && i < PROFILE_MAX_SEGMENTS; i++) {
+        out->segments[i].target_c = src[i].target_c;
+        out->segments[i].ramp_c_per_hr = src[i].ramp_c_per_hr;
+        out->segments[i].dwell_min = src[i].dwell_min;
+        out->segments[i].seg_kind = PROFILE_SEG_KIND_ZONE_RAMP;
+        out->segments[i].io_target = PROFILE_IO_TARGET_NONE;
+        out->segments[i].io_state = 0;
+        out->segments[i].io_blocking = 0;
+        out->segments[i].io_leave_on_at_end = 0; /* fail-off default, never inherited as "on" */
+    }
+}
+
 static void convert_profile_v1(const profile_persisted_v1_t *src, profile_t *out)
 {
-    *out = src->profile;
+    memset(out, 0, sizeof(*out));
+    strncpy(out->name, src->profile.name, sizeof(out->name) - 1);
+    out->zone_mask = src->profile.zone_mask;
+    out->segment_count = src->profile.segment_count;
+    convert_profile_v2_segments(src->profile.segments, src->profile.segment_count, out);
+}
+
+/* Same shape conversion as convert_profile_v1() above -- v1 and v2 share the
+ * identical profile_t_v2 payload (only the persisted WRAPPER differs, by the
+ * crc32 tail), so this is convert_profile_v1() in every respect except which
+ * persisted_vN_t it reads from. Kept as its own named function rather than
+ * folded into the v1 one anyway, same reasoning zones_http.c's
+ * convert_zone_v*() functions are never collapsed into each other: the day
+ * v2's payload diverges from v1's (it hasn't yet) this is the one place that
+ * has to change without touching the v1 path. */
+static void convert_profile_v2(const profile_persisted_v2_t *src, profile_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    strncpy(out->name, src->profile.name, sizeof(out->name) - 1);
+    out->zone_mask = src->profile.zone_mask;
+    out->segment_count = src->profile.segment_count;
+    convert_profile_v2_segments(src->profile.segments, src->profile.segment_count, out);
 }
 
 /* esp_crc32_le() over `p` with crc32 zeroed -- the one place this file
@@ -259,6 +348,26 @@ static profile_decode_result_t decode_profile_blob(const void *blob, size_t len,
             return PROFILE_DECODE_CORRUPT;
         }
         *out = loaded.profile;
+        return PROFILE_DECODE_OK;
+    }
+
+    if (version == 2) {
+        /* Historical, pre-crc32-tail-but-has-one, pre-relay/IO-segments
+         * layout. v2 DOES have a crc32 (unlike v1), so check it the same way
+         * the current-version branch above does -- there is no reason a v2
+         * blob deserves a weaker integrity gate than v3 just because it is
+         * older. */
+        profile_persisted_v2_t loaded_v2;
+        memcpy(&loaded_v2, blob, sizeof(loaded_v2));
+        uint32_t stored_crc = loaded_v2.crc32;
+        profile_persisted_v2_t tmp = loaded_v2;
+        tmp.crc32 = 0;
+        uint32_t computed_crc = esp_crc32_le(0, (const uint8_t *)&tmp, sizeof(tmp));
+        if (computed_crc != stored_crc) {
+            *reason = "CRC mismatch -- treating as corrupt";
+            return PROFILE_DECODE_CORRUPT;
+        }
+        convert_profile_v2(&loaded_v2, out);
         return PROFILE_DECODE_OK;
     }
 
@@ -580,6 +689,97 @@ bool profiles_http_get(uint8_t id, profile_t *out)
  * side already hands over a decoded profile_t -- everything downstream of
  * that parse is shared. */
 
+/* Owner's design rule, the exact one rules_http.c's check_relay_not_zone_owned()
+ * already enforces for RULE-driven relays (that file is untouched by this pass
+ * -- see profiles_http.h's profile_seg_kind_t comment): a relay already
+ * assigned to a zone's heater output must never ALSO be reachable as a
+ * profile segment target -- a segment turning it on/off would fight (or
+ * silently lose to) that zone's own PID/bang-bang control of the same
+ * contact. This is an independent copy of the same check, not a shared call
+ * into rules_http.c: this file owns profile validation and rules_http.c owns
+ * rule validation, and neither may depend on the other (rules_*.* is deleted
+ * in a later task; this file must keep working the day that happens, same as
+ * rules_http.c's own comment already notes about zones_config_get_relay_mask()
+ * being read fresh every check, never cached, since a relay can be
+ * (re)assigned to a zone at any time from the Thermocouples & Zones page).
+ * relay_1_4 is 1-based, matching kiln_io_set_relay()'s convention. Returns
+ * true (refuse) if ANY configured zone currently claims this relay. */
+static bool profile_relay_is_zone_owned(uint8_t relay_1_4, uint8_t *out_zone_index)
+{
+    uint8_t bit = (uint8_t)(1u << (relay_1_4 - 1u));
+    uint8_t zone_count = zones_config_get_thermo_count();
+    for (uint8_t zi = 0; zi < zone_count; zi++) {
+        uint8_t zone_mask = 0;
+        if (!zones_config_get_relay_mask(zi, &zone_mask)) {
+            continue;
+        }
+        if ((zone_mask & bit) != 0) {
+            if (out_zone_index) *out_zone_index = zi;
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Validates one RELAY_IO segment's target/flags -- the SAVE-TIME half of the
+ * "two independent checks, deliberately" the owner's IO-side gate needs. The
+ * second is profile_executor.c's own re-check at run start (relay_io_target_
+ * is_zone_owned() in that file), for the same reason profile_post_handler's
+ * feasibility check is re-run at run start too: a relay can be reassigned to
+ * a zone AFTER a profile was saved, same reload-time hazard zones_http.c's
+ * relay_mask comment and rules_task.c's compute_heater_relay_mask() both
+ * already document. Only meaningful for seg->seg_kind ==
+ * PROFILE_SEG_KIND_RELAY_IO -- callers check the kind first. */
+static bool validate_io_segment(const profile_segment_t *seg, uint8_t seg_num, char *err_msg, size_t err_cap)
+{
+    uint8_t t = seg->io_target;
+    bool is_relay = (t >= PROFILE_IO_TARGET_RELAY_BASE) && (t < PROFILE_IO_TARGET_RELAY_BASE + KILN_IO_RELAY_COUNT);
+    bool is_io = (t >= PROFILE_IO_TARGET_IO_BASE) && (t < PROFILE_IO_TARGET_IO_BASE + KILN_IO_DIGITAL_COUNT);
+    if (!is_relay && !is_io) {
+        /* Covers PROFILE_IO_TARGET_NONE, the deliberate dead gap between the
+         * two ranges (would-be DRDY/LCD encodings -- see profiles_http.h),
+         * and anything past either range -- all rejected the same way,
+         * before this value is ever turned into a kiln_io call. This is the
+         * refusal the investigation found missing: kiln_io_set_io()'s own
+         * index parameter structurally can't reach IO8-10 (~DRDY) or IO14-15
+         * (LCD_IORQ/LCD_Reset) either (it only accepts 1-7), but that
+         * structural limit lives in a driver two layers away from a saved
+         * profile and must not be the ONLY thing standing between a bad
+         * io_target value and those lines -- this gate is the explicit,
+         * named one, checked before a value is ever handed to that driver. */
+        snprintf(err_msg, err_cap,
+                "segment %u: io_target %u is not a valid relay (1-%u) or IO (%u-%u) target",
+                seg_num, t, (unsigned)KILN_IO_RELAY_COUNT, (unsigned)PROFILE_IO_TARGET_IO_BASE,
+                (unsigned)(PROFILE_IO_TARGET_IO_BASE + KILN_IO_DIGITAL_COUNT - 1u));
+        return false;
+    }
+    if (is_relay) {
+        uint8_t owning_zone = 0;
+        if (profile_relay_is_zone_owned(t, &owning_zone)) {
+            snprintf(err_msg, err_cap,
+                    "segment %u: relay %u is assigned to zone %u -- only relays not owned by any "
+                    "zone can be a segment target",
+                    seg_num, t, owning_zone);
+            return false;
+        }
+    }
+    if (seg->io_leave_on_at_end && (seg->io_blocking || !seg->io_state)) {
+        /* "Leave it on at run end" is nonsensical for a segment that isn't
+         * commanding the relay/IO ON in the first place, and for a BLOCKING
+         * segment the schedule has already waited for it and moved past it
+         * by the time the run could possibly end mid-segment -- there is no
+         * "still running when the profile ends" case for a blocking segment
+         * to leave anything in. Rejected rather than silently ignored, same
+         * as every other malformed-combination gate in this file. */
+        snprintf(err_msg, err_cap,
+                "segment %u: leave-on-at-end only applies to a non-blocking segment commanding the "
+                "relay/IO ON",
+                seg_num);
+        return false;
+    }
+    return true;
+}
+
 bool profiles_http_save(uint8_t requested_id, const profile_t *candidate, uint8_t *out_id,
                         uint8_t *out_warning_count, char *err_msg, size_t err_cap)
 {
@@ -600,6 +800,16 @@ bool profiles_http_save(uint8_t requested_id, const profile_t *candidate, uint8_
     }
     for (uint8_t i = 0; i < candidate->segment_count; i++) {
         const profile_segment_t *seg = &candidate->segments[i];
+        if (seg->seg_kind == PROFILE_SEG_KIND_RELAY_IO) {
+            if (!validate_io_segment(seg, i + 1, err_msg, err_cap)) {
+                return false;
+            }
+            continue; /* target_c/ramp_c_per_hr are not meaningful for this kind */
+        }
+        if (seg->seg_kind != PROFILE_SEG_KIND_ZONE_RAMP) {
+            snprintf(err_msg, err_cap, "segment %u: unknown segment kind %u", i + 1, seg->seg_kind);
+            return false;
+        }
         if (isnan(seg->target_c) || seg->target_c < PROFILE_TARGET_C_MIN || seg->target_c > PROFILE_TARGET_C_MAX) {
             snprintf(err_msg, err_cap, "segment %u: target_c out of range (0-1400)", i + 1);
             return false;
@@ -646,6 +856,9 @@ bool profiles_http_save(uint8_t requested_id, const profile_t *candidate, uint8_
      * every ramped segment, or the whole submission is rejected. */
     uint8_t warn_count = 0;
     for (uint8_t i = 0; i < candidate->segment_count; i++) {
+        if (candidate->segments[i].seg_kind != PROFILE_SEG_KIND_ZONE_RAMP) {
+            continue; /* a relay/IO segment has no ramp rate to check against a zone's ceiling */
+        }
         float rate = candidate->segments[i].ramp_c_per_hr;
         if (rate <= 0.0f) {
             continue;
@@ -1052,9 +1265,11 @@ static esp_err_t profile_detail_get_handler(httpd_req_t *req)
     }
 
     const profile_t *p = &s_profiles.profiles[id];
-    /* Sized for the per-segment "feasibility":"unreachable" field added
-     * alongside the three numeric ones -- ~112 bytes per segment worst case. */
-    char json[224 + PROFILE_MAX_SEGMENTS * 112];
+    /* Sized for the per-segment "feasibility":"unreachable" field plus the
+     * seg_kind/io_target/io_state/io_blocking/io_leave_on_at_end fields added
+     * below (relay/IO segment support) -- worst case measured at 170 bytes
+     * per segment, rounded up. */
+    char json[224 + PROFILE_MAX_SEGMENTS * 192];
     size_t o = 0;
     int n;
 
@@ -1085,9 +1300,23 @@ static esp_err_t profile_detail_get_handler(httpd_req_t *req)
            profile_feasibility_verdict_str(rollup));
     for (uint8_t i = 0; i < p->segment_count; i++) {
         const profile_segment_t *s = &p->segments[i];
-        APPEND("%s{\"target_c\":%.2f,\"ramp_c_per_hr\":%.2f,\"dwell_min\":%lu,\"feasibility\":\"%s\"}",
-               i == 0 ? "" : ",", (double)s->target_c, (double)s->ramp_c_per_hr,
-               (unsigned long)s->dwell_min, profile_feasibility_verdict_str(per_seg[i]));
+        /* Genuine firmware defect found while wiring the editor UI to this
+         * endpoint (owner's relay/IO segment request, profiles_http.h's
+         * profile_seg_kind_t comment): this response used to emit only the
+         * three ZONE_RAMP fields, so GETting a profile that has a RELAY_IO
+         * segment silently dropped seg_kind/io_target/io_state/io_blocking/
+         * io_leave_on_at_end -- editProfile() in profiles_page.html loads a
+         * profile through exactly this call and repopulates the editor from
+         * it, so without these fields every "Edit" of a saved relay segment
+         * would reload it as target_c 0 / ramp 0 / dwell <whatever dwell_min
+         * held>, i.e. a bogus ZONE_RAMP row, discarding the relay config on
+         * the very next save. Added rather than routed around client-side. */
+        APPEND("%s{\"seg_kind\":%u,\"target_c\":%.2f,\"ramp_c_per_hr\":%.2f,\"dwell_min\":%lu,"
+               "\"io_target\":%u,\"io_state\":%u,\"io_blocking\":%u,\"io_leave_on_at_end\":%u,"
+               "\"feasibility\":\"%s\"}",
+               i == 0 ? "" : ",", s->seg_kind, (double)s->target_c, (double)s->ramp_c_per_hr,
+               (unsigned long)s->dwell_min, s->io_target, s->io_state, s->io_blocking,
+               s->io_leave_on_at_end, profile_feasibility_verdict_str(per_seg[i]));
     }
     APPEND("]}");
 
@@ -1157,13 +1386,87 @@ static bool parse_profile_fields(const char *body, profile_t *p, char *err_msg, 
     p->segment_count = (uint8_t)seg_count;
 
     for (uint8_t i = 0; i < p->segment_count; i++) {
-        char key[16];
+        /* 24, not 16. The longest key built here is "seg%u_io_blocking", and
+         * at the last segment index that is "seg11_io_blocking" -- 17
+         * characters plus the terminator, which does not fit 16. The MSVC
+         * host build does not run -Wformat-truncation, so this compiled and
+         * passed every host test; only the target build (-Werror=format-
+         * truncation) caught it. A truncated key would not have failed
+         * loudly either: http_form_find_field() would simply not find
+         * "seg11_io_blockin", and the field would silently read as absent,
+         * taking its default. 2026-08-28. */
+        char key[24];
         profile_segment_t *seg = &p->segments[i];
+        memset(seg, 0, sizeof(*seg));
 
-        snprintf(key, sizeof(key), "seg%u_target", i);
+        /* seg%u_kind is OPTIONAL and defaults to PROFILE_SEG_KIND_ZONE_RAMP
+         * (0) when absent -- every existing caller of this endpoint (the
+         * profiles_page.html editor as it stands today, and any UART/scripted
+         * submission written before this pass) never sends it and must keep
+         * producing exactly the temperature-ramp segment it always has. */
+        snprintf(key, sizeof(key), "seg%u_kind", i);
         char val[24];
         int len = http_form_find_field(body, key, val, sizeof(val));
         char *fend = NULL;
+        long kind = len > 0 ? strtol(val, &fend, 10) : PROFILE_SEG_KIND_ZONE_RAMP;
+        if (len > 0 && fend == val) {
+            kind = PROFILE_SEG_KIND_ZONE_RAMP;
+        }
+        if (kind != PROFILE_SEG_KIND_ZONE_RAMP && kind != PROFILE_SEG_KIND_RELAY_IO) {
+            snprintf(err_msg, err_cap, "segment %u: unknown segment kind %ld", i + 1, kind);
+            return false;
+        }
+        seg->seg_kind = (uint8_t)kind;
+
+        if (seg->seg_kind == PROFILE_SEG_KIND_RELAY_IO) {
+            snprintf(key, sizeof(key), "seg%u_io_target", i);
+            len = http_form_find_field(body, key, val, sizeof(val));
+            end = NULL;
+            long io_target = len > 0 ? strtol(val, &end, 10) : -1;
+            if (len <= 0 || end == val || io_target < 0 || io_target > 255) {
+                snprintf(err_msg, err_cap, "segment %u: io_target missing or out of range", i + 1);
+                return false;
+            }
+            seg->io_target = (uint8_t)io_target;
+
+            snprintf(key, sizeof(key), "seg%u_io_state", i);
+            len = http_form_find_field(body, key, val, sizeof(val));
+            seg->io_state = (len > 0 && val[0] != '0') ? 1 : 0;
+
+            snprintf(key, sizeof(key), "seg%u_io_blocking", i);
+            len = http_form_find_field(body, key, val, sizeof(val));
+            /* Missing defaults to BLOCKING (1) -- the safer of the two: a
+             * segment nobody said was non-blocking should still hold up the
+             * schedule and get an explicit force-off at its own end, rather
+             * than silently running loose in the background. */
+            seg->io_blocking = (len <= 0 || val[0] != '0') ? 1 : 0;
+
+            snprintf(key, sizeof(key), "seg%u_io_leave_on", i);
+            len = http_form_find_field(body, key, val, sizeof(val));
+            /* Owner's explicit instruction: "Default must be OFF (force it
+             * off)". Missing, empty, or "0" all mean off -- only an explicit
+             * nonzero value turns this on. */
+            seg->io_leave_on_at_end = (len > 0 && val[0] != '0') ? 1 : 0;
+
+            snprintf(key, sizeof(key), "seg%u_dwell", i);
+            len = http_form_find_field(body, key, val, sizeof(val));
+            end = NULL;
+            long dwell = len > 0 ? strtol(val, &end, 10) : 0; /* missing = 0, same as "no hold" */
+            if (len > 0 && (end == val || dwell < 0 || dwell > (long)PROFILE_DWELL_MIN_MAX)) {
+                snprintf(err_msg, err_cap, "segment %u: dwell_min out of range (0-1440)", i + 1);
+                return false;
+            }
+            seg->dwell_min = (uint32_t)(dwell < 0 ? 0 : dwell);
+
+            if (!validate_io_segment(seg, (uint8_t)(i + 1), err_msg, err_cap)) {
+                return false;
+            }
+            continue;
+        }
+
+        snprintf(key, sizeof(key), "seg%u_target", i);
+        len = http_form_find_field(body, key, val, sizeof(val));
+        fend = NULL;
         float target = len > 0 ? strtof(val, &fend) : NAN;
         if (len <= 0 || fend == val || isnan(target) || target < PROFILE_TARGET_C_MIN ||
             target > PROFILE_TARGET_C_MAX) {
@@ -1286,6 +1589,9 @@ static esp_err_t profile_post_handler(httpd_req_t *req)
      * profile that's infeasible for even one zone would just always be
      * ramp-locked against that zone forever. */
     for (uint8_t i = 0; i < tmp.segment_count; i++) {
+        if (tmp.segments[i].seg_kind != PROFILE_SEG_KIND_ZONE_RAMP) {
+            continue; /* a relay/IO segment has no ramp rate to check against a zone's ceiling */
+        }
         float rate = tmp.segments[i].ramp_c_per_hr;
         if (rate <= 0.0f) {
             continue;

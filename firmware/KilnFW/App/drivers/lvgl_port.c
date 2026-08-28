@@ -640,6 +640,28 @@ esp_err_t lvgl_port_start(ILI9488Class *display, NS2009Class *touch, screen_idle
 
     ESP_LOGI(TAG, "LVGL up: %ux%u, %u-row PSRAM buffers, touch %s, idle-integration %s", width,
              height, (unsigned)LVGL_BUF_ROWS, touch ? "on" : "off", idle ? "on" : "off");
+
+    /* 2026-08-27: the touch-calibration state was previously logged only
+     * inside lvgl_port_reload_touch_cal(), reachable exclusively by
+     * finishing a calibration run -- a board that had NEVER been
+     * calibrated said nothing about it, ever, at boot or otherwise. That
+     * silence is exactly what let a board run for weeks on the
+     * known-inaccurate Kconfig swap/invert bootstrap guess (see
+     * touch_read_cb()'s "else" branch above) while its owner filed the
+     * symptom -- small edge controls like the topbar back/home icons not
+     * responding -- as a UI bug rather than an uncalibrated board. Log it
+     * once here, every boot, loud enough (WARN) to be seen when it matters:
+     * an operator staring at a boot log for an unrelated reason should not
+     * be able to miss "touch is unreliable right now". */
+    if (touch && !s_touch_cal.calibrated) {
+        ESP_LOGW(TAG, "touch NOT calibrated -- running the known-inaccurate Kconfig "
+                       "swap/invert bootstrap mapping; small controls (e.g. the topbar "
+                       "back/home icons) may not respond to touch until a calibration run "
+                       "completes");
+    } else if (touch) {
+        ESP_LOGI(TAG, "touch calibrated -- using the per-board touch_cal_apply() fit");
+    }
+
     return ESP_OK;
 }
 
@@ -654,6 +676,11 @@ void lvgl_port_reload_touch_cal(void)
 {
     touch_cal_store_load(&s_touch_cal);
     ESP_LOGI(TAG, "touch calibration reloaded: calibrated=%d", (int)s_touch_cal.calibrated);
+}
+
+bool lvgl_port_touch_is_calibrated(void)
+{
+    return s_touch_cal.calibrated;
 }
 
 void lvgl_port_set_input_enabled(bool enabled)
