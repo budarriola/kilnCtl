@@ -75,6 +75,7 @@ What is still genuinely open is short:
 | M | Mains voltage as a dropdown; safety thermocouple and relay config shown read-only in the zones config | M12 |
 | M | An over-current guard paired with the under-current guard, as a percentage of measured normal | M12 |
 | L | **Make the commissioning page simple.** 58 raw parameters classified DERIVED / ASKED / DEFAULTED; the ASKED list is the score | M12 |
+| L | **Every fault says what was detected and what to do** — a standing rule, not a closing milestone. S6a was the example: the cause was measured and held on the ESP and simply never shown next to the trip | M13 |
 | S | Thermocouple maximum inferred from thermocouple type rather than entered | M12 |
 | M | Kiln maximum temperature and maximum expected kiln power, entered on the safety page | M12 |
 | L | Per-zone current measurement (energize one zone at a time, record normal current) and a runtime check that each CT is on the zone it is configured for | M12 |
@@ -993,6 +994,51 @@ be rated for 100% duty cycle and inrush is negligible — the board is designed
 for it, so the SSR-vs-contactor-coil question and the 2 A/125 VA duty-window
 check are both settled and need no further hardware answer. Breaker capacity is
 assumed sufficient for the full kiln load at 100% duty.
+
+## M13 — Every fault says what was detected, and what to do · *opened 2026-08-28*
+
+A standing requirement from the repo owner, not a one-off fix: **"all faults
+reported to the user should come with instructions on how to fix them or more
+importantly what was detected wrong."** Note which half he called more
+important — the cause, not the remedy. Treat this as a rule that applies to
+every fault surface added from here on, not a milestone that closes.
+
+It came from S6a, which is the worst case and therefore the right example. S6a
+is `mainFault` (GPIO10) LOW, debounced 200 ms. The safety processor sees ONE
+BIT and cannot know why — that independence is deliberate and is not to be
+traded away. But the ESP does know: `fault_sources` is a bitmask of MANUAL /
+PC_LINK / THERMO / SAFETY_LINK / APP / THERMAL_SANITY (`safety_link.h:139-142`),
+and `dashboard_http.c:261` already reads it. So the cause was measured, held,
+and simply never shown next to the trip.
+
+- [ ] Decode the fault-source bitmask wherever an S6a trip is reported — web,
+      diagnostics, LCD. Through a shared table: `safety_trip_words.h` exists
+      because the LCD and web had already drifted into showing different things
+      for the same trip, and a second copy of the names would repeat that
+- [ ] Distinguish "asserted right now" from "this is what tripped it". The
+      sources are the ESP's CURRENT state; the trip is a LATCHED past event, so
+      a source released after the latch would otherwise misreport the cause.
+      Capturing the mask at trip time is part of this
+- [ ] Give every `safety_trip_t` reason (S1–S13) a real cause line **with the
+      numbers the firmware has** — the temperature and the ceiling it passed,
+      the current and its threshold, the elapsed time and the window — plus a
+      real remedy line. Where the firmware cannot currently say what was
+      detected, record that rather than filling the slot with a vague sentence
+- [ ] Cover the KilnFW-side faults too. A thermocouple reporting a raw SR
+      bitmask is the same defect as a bare S6a
+- [ ] Say plainly when a fault is NOT operator-clearable. S9 means a possibly
+      welded contactor and the required response is "remove power at the
+      breaker" — offering a Clear button that will refuse is worse than saying so
+
+**The clearing semantics, recorded here because they were only discoverable by
+reading `safety_guards.c`:** an S6a trip LATCHES. It does not clear on its own,
+a new firing does not clear it, and an ESP reboot does not. Only an explicit
+CLEAR_TRIP does — and that clear is REFUSED while the cause persists, because
+`safety_guards_try_clear()` (`safety_guards.c:209`) clears the state and
+immediately re-runs the guard, and an unwindowed guard with the line still LOW
+re-trips on that same tick. So the operator sequence is: identify the source,
+remove it, then clear. None of that is currently told to the operator, and the
+owner had to ask.
 
 ## M10 — Instrumentation: make the board tell you when it is wrong
 
