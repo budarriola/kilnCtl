@@ -534,7 +534,27 @@ menu "KilnCtrl Hardware Configuration"
 
         config KILNCTL_UART_PROTOCOL_STACK_SIZE
             int "uart_protocol RX task stack size (bytes)"
-            default 4096
+            default 6144
+            help
+                Raised 4096 -> 6144 on 2026-08-28. uart_protocol_rx_task's
+                chunk[] buffer grew from 32 bytes to STUFFED_FRAME_MAX
+                (~530) to fix a live commissioning defect -- page 1 of a
+                CONFIG_PAGE fetch timed out on every attempt because
+                assembling it took 5-8 scheduler round trips. That buffer
+                plus raw[] (~265) lives on this task's stack, and the stack
+                did not move with them: stack_margin then measured
+                safety_proto_rx at 1024 B free of 4096 (25%, LOW) -- the
+                thinnest margin on the board.
+
+                This is the same shape as the safety_poll crash the same
+                day: locals grew, the stack did not, and nothing was
+                watching until the task died with IllegalInstruction. Fixed
+                before the crash rather than after it.
+
+                NOTE this default is only what a FRESH clone gets --
+                sdkconfig is gitignored and wins over it (see the build's
+                own "Kconfig defaults policy: use sdkconfig" note), so an
+                existing checkout needs its sdkconfig updated too.
     endmenu
 
     menu "Wi-Fi Provisioning"
