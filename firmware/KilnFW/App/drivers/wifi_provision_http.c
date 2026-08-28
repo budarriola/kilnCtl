@@ -5,10 +5,13 @@
 
 #include "esp_log.h"
 #include "esp_http_server.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 #include "http_form.h"
 #include "web_encoding.h"
 #include "wifi_prov.h"
+#include "stack_margin.h"
 
 static const char *TAG = "wifi_prov_http";
 
@@ -871,6 +874,29 @@ esp_err_t wifi_provision_http_start(void)
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_start failed: %s", esp_err_to_name(err));
         return err;
+    }
+
+    /* TODO.md section 13/14: the httpd worker's own stack margin under the
+     * 8192-byte config.stack_size above was arithmetic ("~900 bytes of
+     * confirm_commit_landed() stack against 8192 bytes of headroom"), never
+     * measured. esp_http_server doesn't hand back its worker's TaskHandle_t
+     * (no such field on httpd_handle_t, no getter in esp_http_server.h), but
+     * it names that task "httpd" unconditionally (httpd_main.c's
+     * httpd_os_thread_create() call), so it is reachable the same way any
+     * other FreeRTOS task would be looked up by name. xTaskGetHandle() is
+     * called once, right after the task exists, and the resulting handle is
+     * stored in a static slot that stack_margin_register() reads through at
+     * report time -- same indirection contract every other registration in
+     * this file's sibling call sites (main.c) already uses, so a future
+     * httpd_stop()/httpd_start() cycle re-resolving the handle is a matter of
+     * calling this again, not of changing the registry's contract. */
+    static TaskHandle_t s_httpd_task_handle;
+    s_httpd_task_handle = xTaskGetHandle("httpd");
+    if (s_httpd_task_handle == NULL) {
+        ESP_LOGW(TAG, "could not resolve httpd worker task handle for stack_margin "
+                      "registration -- httpd worker stack headroom will not be reported");
+    } else {
+        stack_margin_register("httpd_worker", &s_httpd_task_handle, (uint32_t)config.stack_size);
     }
 
     static const httpd_uri_t index_uri = {

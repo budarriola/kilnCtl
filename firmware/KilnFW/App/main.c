@@ -272,6 +272,31 @@ static void ota_rollback_confirm_task(void *arg)
     }
 }
 
+/* TODO.md section 14: the HTTP-connection-reset investigation has a
+ * reproducer (8 parallel /app.js, ~1 in 8 reset) and a fragmentation
+ * hypothesis (largest_free_block 8704B vs. the 8589-byte gzip payload) that
+ * was reasoned from two numbers, not from watching an allocation actually
+ * fail. This is that watch: heap_caps_register_failed_alloc_callback() fires
+ * synchronously, in the failing task's own context, on ANY heap_caps
+ * allocation failure anywhere in the system (MALLOC_CAP_INTERNAL or
+ * otherwise) -- so a reproducer run either lands a line here naming the
+ * task, size and caps of the allocation that actually returned NULL, or it
+ * does not, which is itself evidence: no line here during a reproduced reset
+ * means the reset is not caused by any heap_caps_* allocation failing, and
+ * the fragmentation hypothesis above needs to be dropped rather than
+ * refined. Logged at ERROR for the same reason heap_stage()'s regression
+ * line is ERROR, not WARNING -- see uart_log_bridge.c's priority note a few
+ * lines up in this file: ERROR lines survive the boot-burst queue, WARNING
+ * lines can be dropped, and this is exactly the kind of one-shot event that
+ * must not be lost to that queue filling during a concurrent-request burst. */
+static void alloc_fail_trace_cb(size_t size, uint32_t caps, const char *function_name)
+{
+    ESP_LOGE(TAG, "ALLOC FAILED: task=%s size=%u caps=0x%08lx fn=%s largest_int=%u free_int=%u",
+             pcTaskGetName(NULL), (unsigned)size, (unsigned long)caps, function_name,
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+}
+
 /* Boot-stage internal-DRAM probe.
  *
  * The largest contiguous 8-bit internal block is 163840 bytes early in boot
@@ -390,6 +415,14 @@ void app_main(void)
     // no uart_protocol_t until further down); see uart_log_bridge_start()
     // below for when the backlog actually flushes.
     uart_log_bridge_early_init();
+
+    // TODO.md section 14 instrumentation: catch the actual failing
+    // allocation (see alloc_fail_trace_cb() above) rather than continuing to
+    // reason from largest_free_block/dram_free snapshots that don't move
+    // under the failing load. Registered before any driver bring-up so a
+    // failure during boot itself is caught too, not just during the HTTP
+    // reproducer.
+    heap_caps_register_failed_alloc_callback(alloc_fail_trace_cb);
 
     // --- Boot-time log budget, 2026-08-20 -------------------------------
     // The ESP-IDF Wi-Fi driver emits ~40 INFO lines during init ("Init
