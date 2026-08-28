@@ -42,8 +42,8 @@ $LogDir = Join-Path $PcTools "logs"
 # other two, which is what lets one script drive all three.
 $Servers = @(
     @{ Name = "kilnctrl"; Port = 8767; Venv = $PcTools; Exe = "kilnctrl-mcp-server.exe"; Module = "kilnctrl.mcp_server" }
-    @{ Name = "kicad";    Port = 8766; Venv = (Join-Path $RepoRoot "mykicadMcp"); Exe = $null;
-       Script = (Join-Path $RepoRoot "mykicadMcp\kicad_mcp_server.py") }
+    @{ Name = "kicad";    Port = 8766; Venv = (Join-Path $RepoRoot "tools\mykicadMcp"); Exe = $null;
+       Script = (Join-Path $RepoRoot "tools\mykicadMcp\kicad_mcp_server.py") }
 )
 
 function Select-Servers {

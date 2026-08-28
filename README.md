@@ -43,9 +43,7 @@ tools/      PcTools - GUI and MCP server for both processors
 docs/       System-level documents that span hardware and firmware
 ```
 
-`mykicadMcp/` is still at the root pending its own move under `tools/` (a live
-submodule, needs its own dedicated pass — see docs/REPO_LAYOUT.md). `pdfMcp/`
-moved under `tools/` 2026-08-28.
+`mykicadMcp/` and `pdfMcp/` both moved under `tools/` 2026-08-28.
 The rationale for the split, and what broke during it, is
 [docs/REPO_LAYOUT.md](docs/REPO_LAYOUT.md).
 

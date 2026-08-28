@@ -44,7 +44,7 @@ server that is mid-session on a serial link.
 `.claude/settings.json` also lists both in `enabledMcpjsonServers`, so a
 new session connects without stopping to ask for approval.
 
-`mykicadMcp/start_mcp_http_server.ps1` still starts the KiCad server on its own,
+`tools/mykicadMcp/start_mcp_http_server.ps1` still starts the KiCad server on its own,
 for anyone using that submodule outside this repo. Inside the repo the script
 above is the one to use — same server, plus stop and status.
 
@@ -123,7 +123,7 @@ names, groups, curated keywords, summaries and parameter names, with a synonym
 table that bridges the words a caller uses to the words the code uses
 (`temperature` → `thermo`, `relay` → `io`/`expander`, `swd` → `debug`). The
 tables live in `kilnctrl/mcp_facade.py` and
-`mykicadMcp/kicad_facade.py`. Query stopwords ("what", "how", "the") are dropped
+`tools/mykicadMcp/kicad_facade.py`. Query stopwords ("what", "how", "the") are dropped
 before scoring, so a question-shaped query ranks on its nouns.
 
 ### The KiCad server is plumbed differently
@@ -137,7 +137,7 @@ different adapter.
 
 Because that submodule is published on its own and must work outside this
 checkout, it cannot import `mcpkit`. It carries a byte-for-byte copy at
-`mykicadMcp/mcpkit_registry.py`. Edit the PcTools original and copy it over;
+`tools/mykicadMcp/mcpkit_registry.py`. Edit the PcTools original and copy it over;
 `tools/PcTools/tests/test_mcpkit_vendored_copy.py` fails if the two drift.
 
 ## Build and test tools
@@ -172,7 +172,7 @@ For `kilnctrl`, write it in the server module with the existing
 `@_tool()` decorator; for `kicad`, add an entry to `self.tools` as before.
 Registration did not change on either. Then, if the tool's name does not make it
 findable, add a keyword row to that server's facade module
-(`kilnctrl/mcp_facade.py`, `mykicadMcp/kicad_facade.py`)
+(`kilnctrl/mcp_facade.py`, `tools/mykicadMcp/kicad_facade.py`)
 and, for `kicad`, a `GROUP_OVERRIDES` row so it does not land in a junk group.
 That is the whole change; the facade picks it up at import.
 

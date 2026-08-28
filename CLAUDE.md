@@ -65,14 +65,14 @@ tools/      PcTools (GUI + MCP for BOTH processors)
 docs/       System-level documents spanning both halves
 ```
 
-`mykicadMcp/` is still at the repo root: it's a live git submodule backing the
-running `kicad` MCP server and needs its own dedicated pass (stop the server,
-remount the submodule, walk `.claude/settings.json`'s allowlist entries one by
-one) rather than a bulk move. `pdfMcp/` moved to `tools/pdfMcp/` 2026-08-28 —
-its own running server process couldn't be moved out from under itself
-mid-session, so the directory was copied rather than renamed; the stale
-root-level copy is cleaned up on the next session restart, once that old
-process exits. Paths in this file reflect where things are **now**.
+`mykicadMcp/` moved to `tools/mykicadMcp/` 2026-08-28 (its own dedicated pass:
+server stopped, submodule remounted at the new `.gitmodules` path, every
+`.claude/settings.json` allowlist entry walked one at a time rather than bulk-
+edited). `pdfMcp/` moved to `tools/pdfMcp/` the same day — its own running
+server process couldn't be moved out from under itself mid-session, so that
+directory was copied rather than renamed; the stale root-level copy cleans up
+on the next session restart, once that old process exits. Paths in this file
+reflect where things are **now**.
 
 All main-board KiCad project files live under **hardware/mainBoard/** (paths below are relative to that
 directory unless noted). A second, independent board — the 5-channel thermocouple daughterboard —
@@ -103,17 +103,17 @@ board, so a fix found in one project's copy often applies to the other's too.
 - **hardware/mainBoard/fp-lib-table** — Footprint library table
 
 ### Python Tools
-`mykicadMcp/` is a separate git submodule (github.com/budarriola/mykicadMcp) holding the MCP server and its supporting tools:
-- **mykicadMcp/kicad_pcb_tool.py** — Lightweight parser for PCB and netlist files; does not require KiCad runtime
-- **mykicadMcp/kicad_mouser_tool.py** — Mouser Search API sourcing/stock/pricing lookups
-- **mykicadMcp/kicad_ipc_tool.py** — Live-KiCad tools via the IPC API (`kicad-python`); requires a running KiCad session
-- **mykicadMcp/kicad_mcp_server.py** — MCP server for the KiCad tools; HTTP on 8766 by default,
+`tools/mykicadMcp/` is a separate git submodule (github.com/budarriola/mykicadMcp) holding the MCP server and its supporting tools:
+- **tools/mykicadMcp/kicad_pcb_tool.py** — Lightweight parser for PCB and netlist files; does not require KiCad runtime
+- **tools/mykicadMcp/kicad_mouser_tool.py** — Mouser Search API sourcing/stock/pricing lookups
+- **tools/mykicadMcp/kicad_ipc_tool.py** — Live-KiCad tools via the IPC API (`kicad-python`); requires a running KiCad session
+- **tools/mykicadMcp/kicad_mcp_server.py** — MCP server for the KiCad tools; HTTP on 8766 by default,
   `--transport stdio` still available
-- **mykicadMcp/kicad_facade.py** — search taxonomy (groups, keywords, synonyms) for the facade
-- **mykicadMcp/mcpkit_registry.py** — vendored copy of `tools/PcTools/src/mcpkit/registry.py`;
+- **tools/mykicadMcp/kicad_facade.py** — search taxonomy (groups, keywords, synonyms) for the facade
+- **tools/mykicadMcp/mcpkit_registry.py** — vendored copy of `tools/PcTools/src/mcpkit/registry.py`;
   edit the original and re-vendor, never this copy
-- **mykicadMcp/requirements-mcp.txt** — Python dependencies (requires `mcp>=1.0.0`)
-- **mykicadMcp/README.md** — Full setup guide and tool reference for the MCP server
+- **tools/mykicadMcp/requirements-mcp.txt** — Python dependencies (requires `mcp>=1.0.0`)
+- **tools/mykicadMcp/README.md** — Full setup guide and tool reference for the MCP server
 
 ### MCP Server Tools
 The KiCad MCP server holds 86 tools in 12 groups: inspection/netlist, schematic data, Mouser
@@ -131,8 +131,8 @@ kicad_call(name="inspect_kicad_project", args={"project_path":"hardware/mainBoar
 `inspect_kicad_project` and `get_kicad_ipc_status` stay directly published. Everything else —
 `list_kicad_components`, `get_kicad_component`, `get_kicad_component_connections`,
 `list_kicad_nets`, `get_kicad_net` and the rest — is one `kicad_call` away. See
-**mykicadMcp/README.md** and `mykicadMcp/docs/mcp-tools/` for the full reference, and
-**mykicadMcp/NETCLASS_PLAN.md** for the net-class design doc.
+**tools/mykicadMcp/README.md** and `tools/mykicadMcp/docs/mcp-tools/` for the full reference, and
+**tools/mykicadMcp/NETCLASS_PLAN.md** for the net-class design doc.
 
 The net classes & buses group supports bus detection, net-class proposal/creation, trace-cost
 scoring (with live deviation measurement), bus corridor-area measurement, capacitor voltage
@@ -149,19 +149,19 @@ replicates routing already drawn on one instance of a repeated block onto its si
 1. Ensure Python 3 is installed and in `PATH`
 2. Activate the virtual environment:
    ```powershell
-   mykicadMcp\.venv\Scripts\Activate.ps1
+   tools\mykicadMcp\.venv\Scripts\Activate.ps1
    ```
 3. Install dependencies (if needed):
    ```powershell
-   pip install -r mykicadMcp\requirements-mcp.txt
+   pip install -r tools\mykicadMcp\requirements-mcp.txt
    ```
 4. Test the MCP server:
    ```powershell
-   python mykicadMcp\kicad_mcp_server.py
+   python tools\mykicadMcp\kicad_mcp_server.py
    ```
 
 ### Using MCP with Claude Code
-- Configure MCP in your editor using the server path: `python mykicadMcp\kicad_mcp_server.py`
+- Configure MCP in your editor using the server path: `python tools\mykicadMcp\kicad_mcp_server.py`
 - Example tools: "List the components on the PCB", "Show me component R1 and its connections", "Provide details for net /MainControler/CLK"
 
 ## Key Architecture Notes
@@ -215,7 +215,7 @@ footprint flips (`*_flip_template`) -- `kicad_find(query="template")` lists them
 ### Query Component or Net Information
 Use the MCP server tools or call Python directly:
 ```powershell
-python mykicadMcp\kicad_pcb_tool.py
+python tools\mykicadMcp\kicad_pcb_tool.py
 ```
 
 ### Update the BOM

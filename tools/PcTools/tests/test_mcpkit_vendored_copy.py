@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Guards the vendored copy of ``mcpkit/registry.py`` against drift.
 
-``mykicadMcp`` is a separate git submodule, published on its own and expected to
-work outside this checkout, so it cannot import ``mcpkit`` from
-``tools/PcTools/src``. It carries a byte-for-byte copy at
-``mykicadMcp/mcpkit_registry.py`` instead.
+``mykicadMcp`` (``tools/mykicadMcp`` since 2026-08-28) is a separate git
+submodule, published on its own and expected to work outside this checkout,
+so it cannot import ``mcpkit`` from ``tools/PcTools/src``. It carries a
+byte-for-byte copy at ``tools/mykicadMcp/mcpkit_registry.py`` instead.
 
 Vendoring is a deliberate trade -- two copies of one file is a real cost -- and
 it is only safe while the two stay identical. The failure this test exists to
@@ -29,7 +29,7 @@ import unittest
 
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 _SOURCE = os.path.join(_REPO_ROOT, "tools", "PcTools", "src", "mcpkit", "registry.py")
-_VENDORED = os.path.join(_REPO_ROOT, "mykicadMcp", "mcpkit_registry.py")
+_VENDORED = os.path.join(_REPO_ROOT, "tools", "mykicadMcp", "mcpkit_registry.py")
 
 
 def _digest(path: str) -> str:
@@ -55,7 +55,7 @@ class VendoredRegistryCopyTests(unittest.TestCase):
         self.assertEqual(
             _digest(_VENDORED),
             _digest(_SOURCE),
-            "mykicadMcp/mcpkit_registry.py has drifted from "
+            "tools/mykicadMcp/mcpkit_registry.py has drifted from "
             "tools/PcTools/src/mcpkit/registry.py -- re-vendor by copying the "
             "PcTools file over it, then commit the submodule.",
         )

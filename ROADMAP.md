@@ -63,7 +63,6 @@ What is still genuinely open is short:
 | Size | Item | Where |
 |---|---|---|
 | L | **The HTTP reset is not a heap failure** — proven, not argued. Remaining candidates are lwIP or `esp_http_server`'s accept/select loop under `max_open_sockets=13`, which needs a different instrumentation surface | M10 |
-| M | `mykicadMcp/` moved under `tools/` — own dedicated pass, live submodule + settings.json allowlist | M7 |
 | L | **HTTP connection resets under concurrency.** TCP-layer instrumentation built and live; 188 requests across varied burst sizes reproduced nothing (rate appears lower than the original 9/80 measurement, unconfirmed why). Still unreproduced under instrumentation, not root-caused, not closed — an absence of failure is not a fix, see M10 for the honest accounting | M10 |
 | L | **Every fault says what was detected and what to do** — a standing rule, not a closing milestone. S6a was the example: the cause was measured and held on the ESP and simply never shown next to the trip | M13 |
 | M | Runtime check that each CT is on the zone it is configured for (the sweep and the guard both exist; this is the live comparison) | M12 |
@@ -223,7 +222,6 @@ now a short list, which is the point:
 - Diagnose the HTTP concurrency reset above — it has a reproducer and two
   ruled-out mechanisms, so the next step is instrumenting the failing
   allocation, not more black-box testing.
-- `mykicadMcp/` still needs moving under `tools/` (M7) — `pdfMcp/` moved 2026-08-28.
 - A guard that every `src/**.c` is in its CMakeLists or explicitly excluded.
   `tick_timing.c` was added to the host-test list and not to
   `SaftyFW/CMakeLists.txt` on 2026-08-28: the host suite compiled it happily
@@ -579,15 +577,27 @@ fixed, fresh-clone `mainBoard` open confirmed 2026-08-19.
       `tools/pdfMcp/` is a copy, not a move; `.mcp.json` updated to the new
       path. The stale root-level copy cleans up on the next session restart,
       once nothing holds it open
-- [ ] `mykicadMcp/` moved under `tools/` — investigated 2026-08-28, deferred as
-      riskier than it looks: a live git submodule backing the running `kicad`
-      MCP server, and `.claude/settings.json`'s permission allowlist has a
-      dozen-plus entries hardcoding absolute paths through `mykicadMcp\...`,
-      accumulated over many sessions. A bulk path edit there risks silently
-      narrowing or widening what a future session is allowed to run. Do this
-      as its own dedicated pass: stop the server first, remount the submodule
-      properly, and go through the allowlist entries one by one rather than a
-      bulk edit
+- [x] `mykicadMcp/` moved under `tools/` — 2026-08-28, as its own dedicated pass
+      per the plan above: stopped the `kicad` server (`mcp_servers.ps1 stop
+      -Server kicad`), moved the submodule (a directory-rename `git mv` hit
+      the same "Permission denied" this repo's original hardware/firmware
+      split ran into — worked around the documented way, pre-creating the
+      destination and moving children individually; one stale abandoned
+      `.claude/worktrees/` leftover from an unrelated old session couldn't be
+      moved and was left behind, harmless debris, not part of the submodule's
+      tracked content), fixed the submodule's own `.git` gitdir pointer and
+      `core.worktree` for its new depth (the actual cause of a first attempt
+      silently re-adding it as 43 individual file blobs instead of one
+      gitlink — caught by `git ls-files -s` showing `100644` entries instead
+      of a single `160000`, not assumed away), updated `.gitmodules`,
+      `mcp_servers.ps1`, and all 8 of the 9 `.claude/settings.json` allowlist
+      entries with an unambiguous path (the 9th, `../mykicadMcp/...`, has no
+      recoverable original working directory to translate against and was
+      left to simply stop matching — the safe direction, a future prompt
+      rather than a silently wrong grant). Verified: `git submodule status`
+      resolves all three submodules, the `kicad` server restarted clean from
+      the new path and answered a real `kicad_call`, and the submodule's own
+      110-test suite passed unchanged from its new location
 - [ ] `hardware/UnitTestFixture` KiCad project still unopened (the other three
       projects were confirmed clean 2026-08-16)
 
