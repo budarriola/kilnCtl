@@ -82,7 +82,11 @@ static void test_bench_figures_are_not_a_regression(void)
     // meaning anything, which is the exact failure the split exists to avoid.
     dram_margin_result_t r = dram_margin_check(KILN_DRAM_LARGEST_KNOWN_BYTES,
                                                KILN_DRAM_FREE_KNOWN_BYTES);
-    TEST_CHECK(r.tripped, "the known trough is still inside the documented failure zone");
+    // 2026-08-27: the trough climbed clear of the failure zone (13824/22123
+    // against alarms of 8704/11903), so this no longer trips. That is the
+    // point of the change, not a weakened test -- the regression half below
+    // is what this case exists to pin, and it still holds.
+    TEST_CHECK(!r.tripped, "the known trough is now ABOVE the documented failure zone");
     TEST_CHECK(!r.regressed, "the known trough is NOT a regression against itself");
     TEST_CHECK(!r.largest_regressed, "largest exactly at the known trough: not a regression");
     TEST_CHECK(!r.free_regressed, "free exactly at the known trough: not a regression");
@@ -147,19 +151,48 @@ static void test_slack_cannot_be_widened_into_uselessness(void)
     TEST_CHECK(r2.regressed, "a starved board also reports a regression");
 }
 
-static void test_measured_trough_is_below_the_documented_failure_figure(void)
+static void test_measured_trough_clears_the_documented_failure_figure(void)
 {
-    // Pins the finding that corrected this investigation's framing: the real
-    // end-of-boot trough (app_main_done, dram_free=11415) is BELOW the 11903
-    // figure from the one real failure, not ~500 bytes above it as the
-    // uart_bridges_1 reading suggested. If someone later "improves" the
-    // baseline constant without a measurement, this fails and says why.
-    TEST_CHECK(KILN_DRAM_FREE_KNOWN_BYTES < KILN_DRAM_FREE_ALARM_BYTES,
-               "the measured end-of-boot trough is inside the documented failure zone");
+    // The original form of this case pinned the finding that corrected the
+    // investigation's framing: the real end-of-boot trough (app_main_done)
+    // was BELOW the 11903 figure from the one real failure, not above it as
+    // the uart_bridges_1 reading suggested. That framing still matters --
+    // app_main_done is still the stage to measure, and quoting
+    // uart_bridges_1 is still the mistake to avoid (the first draft of the
+    // 2026-08-27 baseline update made exactly that error and used 23111
+    // instead of 22123).
+    //
+    // What changed is the answer: moving four task stacks off internal DRAM
+    // lifted the trough clear of both alarm figures. So this now pins the
+    // opposite fact, and pins the FLOOR as the thing standing between the
+    // trough and that failure zone.
+    TEST_CHECK(KILN_DRAM_FREE_KNOWN_BYTES > KILN_DRAM_FREE_ALARM_BYTES,
+               "the measured end-of-boot trough now clears the documented failure zone");
+    TEST_CHECK(KILN_DRAM_FREE_KNOWN_BYTES >= KILN_DRAM_FREE_FLOOR_BYTES,
+               "the measured trough is at or above the owner's 20 kB operating floor");
+    TEST_CHECK(KILN_DRAM_FREE_FLOOR_BYTES > KILN_DRAM_FREE_ALARM_BYTES,
+               "the floor must sit ABOVE the evidence-based failure figure -- it is the early "
+               "warning for it, and below it the warning would arrive too late to be one");
     dram_margin_result_t r =
         dram_margin_check(KILN_DRAM_LARGEST_KNOWN_BYTES, KILN_DRAM_FREE_KNOWN_BYTES);
-    TEST_CHECK(r.free_low, "free_low set at the measured trough");
-    TEST_CHECK(r.largest_low, "largest_low set at the measured trough");
+    TEST_CHECK(!r.free_low, "free_low clear at the measured trough");
+    TEST_CHECK(!r.largest_low, "largest_low clear at the measured trough");
+    TEST_CHECK(!r.below_floor, "the measured trough is not below the floor");
+}
+
+static void test_floor_catches_a_dip_the_failure_alarm_would_miss(void)
+{
+    // The floor's whole reason to exist: a free figure between the failure
+    // figure and the floor is invisible to the failure alarm but is exactly
+    // the state worth reporting -- the margin has been spent while there is
+    // still room to act.
+    dram_margin_result_t r = dram_margin_check(KILN_DRAM_LARGEST_KNOWN_BYTES,
+                                               KILN_DRAM_FREE_FLOOR_BYTES - 1u);
+    TEST_CHECK(r.below_floor, "one byte under the floor reports below_floor");
+    TEST_CHECK(!r.free_low, "...while still clear of the documented failure figure");
+    dram_margin_result_t ok = dram_margin_check(KILN_DRAM_LARGEST_KNOWN_BYTES,
+                                                KILN_DRAM_FREE_FLOOR_BYTES);
+    TEST_CHECK(!ok.below_floor, "exactly at the floor is not below it");
 }
 
 static void test_healthy_figures_are_neither(void)
@@ -183,6 +216,7 @@ void run_test_dram_margin(void)
     test_within_slack_is_not_a_regression();
     test_beyond_slack_is_a_regression();
     test_slack_cannot_be_widened_into_uselessness();
-    test_measured_trough_is_below_the_documented_failure_figure();
+    test_measured_trough_clears_the_documented_failure_figure();
+    test_floor_catches_a_dip_the_failure_alarm_would_miss();
     test_healthy_figures_are_neither();
 }

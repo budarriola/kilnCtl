@@ -79,14 +79,30 @@
  * true today and expected, and "you are worse than this firmware has ever
  * been", which is news and is the line worth acting on.
  *
- * KEEP THESE CURRENT. If a change legitimately improves the trough, lower
- * them, in the same commit, with the new measured figures -- otherwise the
+ * KEEP THESE CURRENT. If a change legitimately improves the trough, move
+ * them to the new measured figures in the SAME commit -- otherwise the
  * regression check silently stops being able to detect anything, which is
  * the same vacuous-check failure this repo has already shipped three times.
  * If a change makes them worse, that is precisely what the alarm is for:
- * do not raise these to silence it. */
-#define KILN_DRAM_LARGEST_KNOWN_BYTES ((size_t)7680)
-#define KILN_DRAM_FREE_KNOWN_BYTES    ((size_t)10015)
+ * do not move these to silence it.
+ *
+ * (This paragraph used to say "lower them" for an improvement. That was
+ * backwards: these are low-water marks, so a trough that improves means the
+ * numbers go UP. Corrected 2026-08-27 while doing exactly that.)
+ *
+ * 2026-08-27: 7680/10015 -> 13824/22123. Measured at app_main_done, which is
+ * the real minimum -- uart_bridges_1 reads ~1 kB higher (23111) and is the
+ * figure that gets quoted by mistake, including by the first draft of this
+ * very change. The floor check below caught that: raising it temporarily to
+ * prove it fires reported lvgl_start, uart_bridges_2 and app_main_done as
+ * lower still, which is how the wrong baseline surfaced. The gain is four task stacks moved off
+ * internal DRAM -- both uart_protocol RX tasks (4 kB each) -- plus the
+ * uart_owner quartet resized 4096 -> 3072 on measurement. Note that `largest`
+ * is now ABOVE KILN_DRAM_LARGEST_ALARM_BYTES for the first time, so the
+ * standing alarm below stops being a standing condition; if it ever fires
+ * again it is an event, which is what it was always meant to be. */
+#define KILN_DRAM_LARGEST_KNOWN_BYTES ((size_t)13824)
+#define KILN_DRAM_FREE_KNOWN_BYTES    ((size_t)22123)
 
 /* Boot-to-boot slack. The figures above are single-boot measurements, and the
  * late stages depend on Wi-Fi association and DHCP timing, so a few hundred
@@ -101,6 +117,22 @@
  * by feel. */
 #define KILN_DRAM_REGRESSION_SLACK_BYTES ((size_t)512)
 
+/* The owner's requested operating floor for free internal DRAM (2026-08-27:
+ * "i would also like to see us maintain about 20k of free dram").
+ *
+ * Deliberately a SEPARATE figure from KILN_DRAM_FREE_ALARM_BYTES above. That
+ * one is evidence: the measured free size at which HTTP sockets actually
+ * reset and /app.js actually arrived truncated. This one is policy: the
+ * margin we have chosen to keep above that evidence. Conflating them would
+ * lose the distinction between "we are in the zone where the failure has been
+ * observed" and "we have eaten into the buffer we said we would keep", and
+ * the second is supposed to be the early warning for the first.
+ *
+ * 20480, against a measured trough of 23111 -- about 2.6 kB of room. If a
+ * future change pushes below this the boot log says so while there is still
+ * evidence-backed headroom left to spend. */
+#define KILN_DRAM_FREE_FLOOR_BYTES ((size_t)20480)
+
 typedef struct {
     bool tripped;      /* either alarm condition below is true */
     bool largest_low;  /* largest contiguous internal 8-bit block < alarm */
@@ -108,6 +140,7 @@ typedef struct {
     bool regressed;    /* worse than the known-current trough -- the NEW news */
     bool largest_regressed;
     bool free_regressed;
+    bool below_floor;  /* below the owner's 20 kB operating floor (policy, not evidence) */
 } dram_margin_result_t;
 
 /* Pure decision function -- no I/O, no ESP-IDF calls. Takes the same two
@@ -128,6 +161,9 @@ static inline dram_margin_result_t dram_margin_check(size_t largest_free_bytes, 
     r.free_regressed =
         total_free_bytes + KILN_DRAM_REGRESSION_SLACK_BYTES < KILN_DRAM_FREE_KNOWN_BYTES;
     r.regressed = r.largest_regressed || r.free_regressed;
+    /* No slack on the floor: it is a round number we chose with room to
+     * spare, not a measurement with jitter to absorb. */
+    r.below_floor = total_free_bytes < KILN_DRAM_FREE_FLOOR_BYTES;
     return r;
 }
 

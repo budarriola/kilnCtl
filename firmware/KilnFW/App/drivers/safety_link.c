@@ -2183,7 +2183,12 @@ esp_err_t safety_link_start(SafetyLinkClass *link)
         ESP_LOGE(TAG, "uart_protocol_init(uart%d) failed: %s", SAFETY_UART_PORT_NUM,
                  esp_err_to_name(err));
         goto fail_owner;
-    }
+    }
+
+    /* Same measurement gap the uart_owner pair had: main.c registered its
+     * uart_proto_rx and this one went unregistered, so the report showed one
+     * comfortable margin for a stack size that sizes two tasks. */
+    stack_margin_register("safety_proto_rx", &link->proto.rx_task_handle, UART_PROTOCOL_STACK_SIZE);
 
     /* Registered on *this* protocol instance (the isolated link), not on the
      * PC link's -- same task_id, two separate address spaces. This is the

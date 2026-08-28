@@ -393,13 +393,30 @@ esp_err_t uart_protocol_init(uart_protocol_t *proto,
         return ESP_ERR_NO_MEM;
     }
 
-    BaseType_t created = xTaskCreatePinnedToCore(uart_protocol_rx_task,
-                                                  "uart_proto_rx",
-                                                  stack_depth,
-                                                  proto,
-                                                  task_priority,
-                                                  &proto->rx_task_handle,
-                                                  core_id);
+    /* PSRAM stack (2026-08-27). This task's whole call graph is
+     * uart_read_bytes() plus handle_raw_frame() -- CRC, dedup, memcpy, and a
+     * control-frame reply. It touches no NVS and no flash, which is the rule
+     * that governs a PSRAM stack: a flash operation from one asserts inside
+     * ESP-IDF's cache-disable path (see safety_cfg_store.c's deferred flush
+     * for that incident). Every consumer that DOES write flash reads its
+     * frames out of an inbox on its own task, not on this one.
+     *
+     * Worth stating for the safety-link instance in particular, since this
+     * task carries the telemetry that gates all heating: a PSRAM stack does
+     * NOT make it less able to run while flash is being written. Ordinary
+     * code lives in flash and is equally unrunnable with the cache off
+     * whatever the stack is made of; the only thing that changes is where the
+     * frame bytes are staged. What it does change is 4 kB of internal DRAM
+     * per instance -- and there are two instances, the PC link and the safety
+     * link. */
+    BaseType_t created = xTaskCreatePinnedToCoreWithCaps(uart_protocol_rx_task,
+                                                         "uart_proto_rx",
+                                                         stack_depth,
+                                                         proto,
+                                                         task_priority,
+                                                         &proto->rx_task_handle,
+                                                         core_id,
+                                                         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (created != pdPASS) {
         ESP_LOGE(TAG, "failed to create rx task");
         uart_protocol_deinit(proto);

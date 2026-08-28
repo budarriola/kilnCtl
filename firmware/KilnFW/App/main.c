@@ -311,6 +311,20 @@ static void heap_stage(const char *stage)
      * regression announces itself in the boot log instead of only showing up
      * later as an unrelated-looking front-end bug report. */
     dram_margin_result_t margin = dram_margin_check(largest, free8);
+    /* The owner's 20 kB floor. Checked before the two below and reported on
+     * its own line, because it answers a different question: not "are we in
+     * the zone where the failure was observed" (the standing alarm) nor "is
+     * this build worse than any before it" (the regression line), but "have
+     * we spent the margin we said we would keep". It is the early warning for
+     * the other two, so it must not be folded into either. */
+    if (margin.below_floor) {
+        ESP_LOGE(TAG,
+                 "heap stage %-18s BELOW THE 20K DRAM FLOOR: dram_free=%u (floor %u) -- "
+                 "still above the measured HTTP-failure figure (%u), so this is the warning "
+                 "shot, not the failure. Find what grew before it reaches it",
+                 stage, (unsigned)free8, (unsigned)KILN_DRAM_FREE_FLOOR_BYTES,
+                 (unsigned)KILN_DRAM_FREE_ALARM_BYTES);
+    }
     if (margin.regressed) {
         /* The line that is actually news: worse than this firmware has ever
          * measured. Distinct wording from the standing alarm below on purpose
