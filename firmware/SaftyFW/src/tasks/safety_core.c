@@ -351,6 +351,20 @@ static safety_clear_trip_outcome_t s_clear_trip_last_outcome = SAFETY_CLEAR_TRIP
 // sequence number the "never tripped" state would have, which is an
 // acceptable, undocumented edge this shares with any other wrapping counter
 // in this codebase (e.g. link_task's own s_msg_index).
+// 2026-08-27 audit: relay_owner_command_trip() posts to a 4-deep queue and
+// never blocks (relay_owner must never block -- ARCHITECTURE.md section 1),
+// so a full queue silently drops the trip command: K4 stays energized and
+// S9 (driven by relay_owner_is_energized(), the software mirror of the
+// INTENDED state) has no way to notice its own de-energize path failed.
+// safety_guards_tick() only reports "newly tripped" for the ONE tick the
+// trip is decided -- without this latch a dropped command would simply
+// never be retried. Set the instant a trip is decided, cleared only once
+// relay_owner_command_trip() actually enqueues (checked every tick,
+// independent of newly_tripped, in the retry loop in safety_core_task()
+// below) -- "retry until it actually succeeds" is the shape that fits this
+// codebase's non-blocking producer/consumer pattern, not a bigger queue or
+// a blocking send.
+static bool s_trip_command_owed = false;
 static uint8_t s_trip_seq = 0;
 static safety_trip_t s_trip_reason = SAFETY_TRIP_NONE;
 static uint32_t s_trip_uptime_ms = 0;
@@ -720,8 +734,14 @@ static void safety_core_task(void *arg)
             // FreeRTOS preempts this task to service that command before
             // execution returns to the line below -- see relay_owner.h's
             // doc comment on relay_owner_command_trip() for why that
-            // ordering is real and not just hoped for.
-            (void)relay_owner_command_trip(s_guard_state.reason);
+            // ordering is real and not just hoped for. That ordering says
+            // nothing about whether the SEND itself lands, though: latch
+            // "a trip command is owed" first, unconditionally, then let the
+            // retry loop below (which also runs this same tick, before
+            // anything else touches K4) make the actual attempt -- see
+            // s_trip_command_owed's own doc comment for why a dropped send
+            // must not be a one-shot fire-and-forget.
+            s_trip_command_owed = true;
             boot_reason_latch_trip((uint32_t)s_guard_state.reason);
 
             // Capture Frame D's "at the instant of the trip" values right
@@ -743,6 +763,33 @@ static void safety_core_task(void *arg)
             // here -- log_task now exists (see the CLEAR_TRIP drain right
             // below, which does use it), but wiring the ORIGINAL trip event
             // to it is separate, later work, not this pass's.
+        }
+
+        // Retry a still-owed trip command every tick, independent of
+        // newly_tripped (which is only ever true the ONE tick the trip is
+        // decided -- see s_trip_command_owed's doc comment). relay_owner_
+        // command_trip() itself never blocks (it is a 0-tick xQueueSend),
+        // so retrying here costs nothing when the queue is healthy and
+        // s_trip_command_owed is already false; when the first send was
+        // dropped, this is what keeps re-issuing it every 100ms until
+        // relay_owner actually drains its queue and de-energizes K4 --
+        // K4 and S9's `relay_owner_is_energized()` mirror stay wrong
+        // together for as long as this retry keeps failing, but never
+        // silently forever the way a single fire-and-forget send would.
+        // Gated on s_guard_state.is_tripped too: if a CLEAR_TRIP lands
+        // (below) while the very first send is still stuck in the queue,
+        // the guard state has already gone back to "not tripped" and
+        // relay_owner itself was never actually commanded into TRIPPED (the
+        // send never landed) -- re-issuing a now-stale trip command after a
+        // legitimate clear would re-trip a relay that was correctly cleared,
+        // which is exactly backwards. relay_trip_command_still_owed()
+        // (relay_grace.c, host-tested) is the pure classification of
+        // "is_tripped + did this attempt succeed" into "still owed or not".
+        if (s_trip_command_owed) {
+            bool send_succeeded =
+                s_guard_state.is_tripped ? relay_owner_command_trip(s_guard_state.reason) : false;
+            s_trip_command_owed =
+                relay_trip_command_still_owed(s_guard_state.is_tripped, send_succeeded);
         }
 
         // CLEAR_TRIP: drain at most one queued request per tick. Must run

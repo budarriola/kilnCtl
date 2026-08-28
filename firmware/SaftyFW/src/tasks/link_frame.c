@@ -215,6 +215,9 @@ link_clear_trip_decision_t link_frame_decide_clear_trip(safety_trip_t current_tr
     if (current_trip_reason == SAFETY_TRIP_NONE) {
         return LINK_CLEAR_TRIP_REFUSE_NOTHING_TRIPPED;
     }
+    if (current_trip_reason == SAFETY_TRIP_INEFFECTIVE) {
+        return LINK_CLEAR_TRIP_REFUSE_INEFFECTIVE;
+    }
     uint16_t current_mask = link_frame_trip_mask_for_reason(current_trip_reason);
     if (wire_trip_mask != current_mask) {
         return LINK_CLEAR_TRIP_REFUSE_MASK_MISMATCH;

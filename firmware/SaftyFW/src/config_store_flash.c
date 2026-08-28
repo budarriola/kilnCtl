@@ -152,7 +152,11 @@ uint8_t config_store_get_config_version(void)
     if (!s_loaded) {
         return 0;
     }
-    return (uint8_t)(s_cached_record.seq & 0xFFu);
+    // config_store_seq_to_version() (config_store.c, pure/host-tested) is
+    // the actual mapping -- see its own header comment in config_store.h for
+    // why this can no longer be a bare truncating `& 0xFFu`: that collided
+    // with the "never loaded" sentinel (0) every 256th commit.
+    return config_store_seq_to_version(s_cached_record.seq);
 }
 
 uint16_t config_store_get_config_crc(void)

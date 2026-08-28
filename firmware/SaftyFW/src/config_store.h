@@ -667,13 +667,44 @@ void config_store_get_full_record(config_store_record_t *out);
 // link_task_handle_set_config() (src/tasks/link_task.c).
 bool config_store_write(const config_store_record_t *rec, const char **out_reason);
 
-// The cached record's `seq`, truncated to a u8 -- what
-// SAFETY_CMD_FW_VERSION's `config_version` byte carries (LINK_PROTOCOL.md
-// sec 4). Bumped by every accepted config_store_write(), so a GUI watching
-// FW_VERSION can tell a commissioning write actually landed. Returns 0
-// (config_store_default()'s own seq) if called before
-// config_store_boot_load().
+// The cached record's `seq`, mapped through config_store_seq_to_version()
+// below -- what SAFETY_CMD_FW_VERSION's `config_version` byte carries
+// (LINK_PROTOCOL.md sec 4). Bumped by every accepted config_store_write(),
+// so a GUI watching FW_VERSION can tell a commissioning write actually
+// landed. Returns 0 (config_store_default()'s own seq, mapped: see
+// config_store_seq_to_version()'s own comment for why 0 maps to 0) if called
+// before config_store_boot_load().
 uint8_t config_store_get_config_version(void);
+
+// Pure mapping from the cached record's `seq` (a uint32_t log counter -- one
+// commit can run for the life of a board, so it must never wrap back onto a
+// meaningful value in any human timeframe) to the u8 byte SAFETY_CMD_
+// FW_VERSION's `config_version` field actually carries on the wire.
+// config_store_get_config_version() above is just this function applied to
+// the cache; exposed separately so it is pure/host-testable on its own,
+// matching config_store_record_crc()'s split for the same reason.
+//
+// `config_version` is a FROZEN u8 field (LINK_PROTOCOL.md sec 4; see
+// link_frame.c's link_frame_build_fw_version()/safety_link.c's frame C
+// parser, both of which read/write exactly one byte at this position) --
+// widening it to u16/u32 is a wire-format change this module cannot make
+// unilaterally, so the fix for a truncating map has to be a different map,
+// not a wider field.
+//
+// The old `(uint8_t)(seq & 0xFFu)` truncation could report 0 for a real,
+// committed config -- every 256th commit (seq == 256, 512, 768, ...) landed
+// back on the one value config_store_confirm_crc_ok() treats as "no valid
+// config was ever loaded" (see that function's own header comment). This
+// mapping keeps seq == 0 (config_store_default()'s own seq -- a board that
+// never committed, or booted with a blank/corrupt sector) at 0, exactly as
+// before, and folds every seq >= 1 into {1, ..., 255} instead of {0, ...,
+// 255}: a 255-wide range that, by construction, can never land back on 0.
+// This does not give every seq a globally unique byte forever (impossible in
+// 8 bits regardless of the mapping) -- it only has to, and does, keep every
+// REAL commit's byte out of the one reserved "unloaded" value, which is the
+// entire property config_store_confirm_crc_ok() and update_task.c's
+// PENDING_VERIFY -> VALID gate depend on.
+uint8_t config_store_seq_to_version(uint32_t seq);
 
 // A CRC over the cached record's active fields -- what
 // SAFETY_CMD_FW_VERSION's `config_crc` field carries. The low 16 bits of

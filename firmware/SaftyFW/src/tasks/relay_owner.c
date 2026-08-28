@@ -122,13 +122,23 @@ static void relay_owner_task(void *arg)
                 break;
 
             case RELAY_OWNER_CMD_CLEAR_TRIP:
-                // Unconditional TRIPPED -> ARMED if called -- see
-                // relay_owner.h's doc comment on relay_owner_clear_trip():
-                // the "refused while the condition still holds" check does
-                // not belong here and nothing calls this yet.
-                if (s_state == RELAY_OWNER_STATE_TRIPPED) {
-                    s_state = RELAY_OWNER_STATE_ARMED;
-                }
+                // TRIPPED -> GRACE-or-ARMED, per the ORIGINAL boot-relative
+                // clock (grace_start, captured once above, never reset by a
+                // trip or a clear) -- see relay_grace.h's doc comment on
+                // relay_clear_trip_transition() for why resuming the
+                // original window (rather than granting a fresh one) is the
+                // deliberate choice here. Any state other than TRIPPED is
+                // returned unchanged by that function, so this is safe to
+                // call even though the caller-side checks in
+                // relay_owner_clear_trip() already gate on TRIPPED too --
+                // same defensive-recheck pattern the ENERGIZE case above
+                // uses against the same caller/task race. The "refused
+                // while the tripping condition still holds" check still
+                // does not belong here -- see relay_owner.h's doc comment
+                // on relay_owner_clear_trip().
+                s_state = relay_clear_trip_transition(
+                    s_state, (uint32_t)(xTaskGetTickCount() - grace_start),
+                    (uint32_t)pdMS_TO_TICKS(SAFTYFW_STARTUP_GRACE_MS));
                 break;
             }
         }

@@ -27,6 +27,7 @@ GROUP_OVERRIDES = {
     "sim_disconnect": "link",
     "sim_raw_command": "link",
     "run_pctools_tests": "build",
+    "run_repo_checks": "build",
 }
 
 KEYWORDS = {

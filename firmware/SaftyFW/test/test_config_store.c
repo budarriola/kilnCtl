@@ -928,6 +928,135 @@ static void test_unset_fields_distinguishable_from_zero(void)
                "check can actually fail, not just always return true");
 }
 
+static void test_unpack_validates_ranges_on_load(void)
+{
+    TEST_SECTION("config_store_unpack -- range-validates on LOAD, not only at COMMIT_CONFIG");
+
+    // Build a record that is CRC-valid (this build's own config_store_pack()
+    // computed a correct CRC over it) but whose tc_source byte is a value no
+    // enum in this table names -- exactly the "CRC-valid record from a
+    // different build with different semantics" scenario TODO.md's audit
+    // item describes: the CRC proves the bytes are intact, it says nothing
+    // about whether tc_source == 99 means anything to THIS build.
+    config_store_record_t rec;
+    config_store_default(&rec);
+    rec.seq = 41u;
+    rec.tc_source = 99u; // CONFIG_STORE_TC_SOURCE_BOTH is 2 -- 99 is out of range
+    // fields_set left at 0 -- irrelevant to this check: config_params_
+    // validate_ranges() re-checks every field's OWN value unconditionally,
+    // it does not gate on whether the field was ever "set" (that gating is
+    // config_params_validate_ex()'s separate cross-field contradiction
+    // check, deliberately NOT run here -- see config_params.h's header
+    // comment on config_params_validate_ranges()).
+
+    uint8_t record[CONFIG_STORE_RECORD_LEN];
+    config_store_pack(&rec, record);
+
+    config_store_record_t sentinel;
+    memset(&sentinel, 0xAA, sizeof(sentinel));
+    config_store_record_t out = sentinel;
+    TEST_CHECK(!config_store_unpack(record, &out),
+               "a CRC-valid v2 record with an out-of-range tc_source is refused at LOAD time, "
+               "not merely accepted and left for a guard to misinterpret");
+    TEST_CHECK(memcmp(&out, &sentinel, sizeof(out)) == 0,
+               "*out is left completely untouched when load-time range validation refuses "
+               "the record -- same contract as a bad magic/CRC/format_version");
+
+    // The same check must also gate config_store_find_latest()'s sector
+    // scan: an out-of-range slot is skipped in favour of the next-best
+    // valid one, exactly like a corrupt or too-new slot.
+    uint8_t sector[SAFTYFW_CONFIG_STORE_FLASH_SIZE];
+    memset(sector, 0xFF, sizeof(sector));
+    memcpy(&sector[0], record, CONFIG_STORE_RECORD_LEN); // slot 0: seq 41, out-of-range tc_source
+
+    config_store_record_t older;
+    config_store_default(&older);
+    older.seq = 3u; // in range, lower seq
+    uint8_t older_record[CONFIG_STORE_RECORD_LEN];
+    config_store_pack(&older, older_record);
+    memcpy(&sector[1 * CONFIG_STORE_RECORD_LEN], older_record, CONFIG_STORE_RECORD_LEN);
+
+    config_store_record_t found;
+    size_t slot = config_store_find_latest(sector, &found);
+    TEST_CHECK(slot == 1, "the higher-seq but out-of-range slot is skipped; the valid slot wins");
+    TEST_CHECK(found.seq == 3u, "find_latest() returns the in-range record's contents");
+
+    // A NaN float anywhere in this table must be refused too -- the single
+    // most dangerous value this surface can carry (config_params.c's own
+    // header comment on CHECK_F32_FINITE explains why: every `x > threshold`
+    // guard comparison against a NaN threshold is silently false).
+    config_store_record_t rec_nan;
+    config_store_default(&rec_nan);
+    rec_nan.seq = 42u;
+    rec_nan.firing_margin_c = NAN;
+    uint8_t record_nan[CONFIG_STORE_RECORD_LEN];
+    config_store_pack(&rec_nan, record_nan);
+    out = sentinel;
+    TEST_CHECK(!config_store_unpack(record_nan, &out),
+               "a CRC-valid v2 record with a NaN float field is refused at LOAD time");
+
+    // Prove the same load-time check applies to the v1 migration path, not
+    // only the v2 one: a legacy record whose preserved tc_type byte is
+    // already handled by the separate voltage-mode clamp, but whose
+    // migration path shares the same config_params_validate_ranges() call --
+    // this reuses test_v1_migration()'s own ct_cal fixture and confirms a
+    // WELL-FORMED v1 record (nothing here is out of range) still migrates
+    // successfully, i.e. that wiring the check into this path did not break
+    // the ordinary case.
+    config_store_ct_channel_cal_t ct_cal[3];
+    memset(ct_cal, 0, sizeof(ct_cal));
+    uint8_t v1_record[CONFIG_STORE_RECORD_LEN];
+    pack_legacy_v1_record(9u, 0x03u, true, ct_cal, v1_record);
+    config_store_record_t v1_out;
+    TEST_CHECK(config_store_unpack(v1_record, &v1_out),
+               "an in-range v1 record still migrates successfully once load-time range "
+               "validation is wired into that path too");
+}
+
+static void test_seq_to_version(void)
+{
+    TEST_SECTION("config_store_seq_to_version -- never lands on 0 for a real commit");
+
+    // seq == 0 is config_store_default()'s own seq -- a board that has never
+    // committed a real config. It MUST keep mapping to 0: that is the
+    // sentinel config_store_confirm_crc_ok() reads as "no valid config was
+    // ever loaded". Getting this direction wrong (seq 0 mapping to a
+    // non-zero byte) would be a worse bug than the one this function fixes.
+    TEST_CHECK(config_store_seq_to_version(0u) == 0u,
+               "seq 0 (never committed) maps to version 0, the 'unloaded' sentinel");
+
+    // The first real commit (config_store_write() always assigns
+    // cached_seq + 1u, and the cache starts at seq 0) is seq == 1, and must
+    // map to a non-zero byte.
+    TEST_CHECK(config_store_seq_to_version(1u) != 0u,
+               "seq 1 (first real commit) never reports version 0");
+    TEST_CHECK(config_store_seq_to_version(1u) == 1u, "seq 1 maps to version 1");
+
+    // The specific values that broke the old `(uint8_t)(seq & 0xFFu)`
+    // truncation: seq == 256 is the 256th commit, and every further multiple
+    // of 256. Every one of these must now come back non-zero.
+    TEST_CHECK(config_store_seq_to_version(256u) != 0u,
+               "seq 256 -- collided with 0 under the old 8-bit truncation -- no longer does");
+    TEST_CHECK(config_store_seq_to_version(512u) != 0u, "seq 512 also never reports 0");
+    TEST_CHECK(config_store_seq_to_version(768u) != 0u, "seq 768 also never reports 0");
+    TEST_CHECK(config_store_seq_to_version(0xFFFFFFFFu) != 0u,
+               "the largest possible seq (uint32_t max) never reports 0 either");
+
+    // Exhaustive-ish sweep: no seq in a wide range should ever map to 0,
+    // except seq == 0 itself. This is the property update_task.c's
+    // PENDING_VERIFY -> VALID gate actually depends on.
+    bool any_unexpected_zero = false;
+    for (uint32_t seq = 1u; seq <= 2000u; seq++) {
+        if (config_store_seq_to_version(seq) == 0u) {
+            any_unexpected_zero = true;
+            break;
+        }
+    }
+    TEST_CHECK(!any_unexpected_zero,
+               "no seq in [1, 2000] (covering several full 255-wide rotations) ever maps to "
+               "version 0");
+}
+
 // --- config_params.c: SET_PARAM/GET_PARAM/COMMIT_CONFIG/GET_CONFIG_PAGE's
 // pure id<->field mapping, cross-field validation, and the ct_channel_map
 // group-bit derivation (docs/COMMISSIONING.md section 2/2.1).
@@ -1674,6 +1803,8 @@ void run_test_config_store(void)
     test_v1_migration();
     test_future_version_refused();
     test_unset_fields_distinguishable_from_zero();
+    test_unpack_validates_ranges_on_load();
+    test_seq_to_version();
     test_tc_type_voltage_mode_clamp_v2();
     test_tc_type_voltage_mode_clamp_v1_migration();
 

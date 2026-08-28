@@ -378,9 +378,9 @@ bool config_params_set(config_store_record_t *rec, uint16_t id, uint8_t type,
 // config_params_set() above -- see that function's own header comment for
 // which CONFIG_REFERENCE.md line justifies each one; this function does not
 // repeat that justification, only the check.
-static bool config_params_validate_ranges(const config_store_record_t *rec,
-                                           const char **out_field, const char **out_rule,
-                                           config_params_reject_reason_t *out_reason)
+bool config_params_validate_ranges(const config_store_record_t *rec,
+                                    const char **out_field, const char **out_rule,
+                                    config_params_reject_reason_t *out_reason)
 {
 #define RANGE_FAIL(field_name, rule_text) do { \
         if (out_field) *out_field = (field_name); \

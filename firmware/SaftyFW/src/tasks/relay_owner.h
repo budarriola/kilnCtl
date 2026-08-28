@@ -80,7 +80,13 @@ bool relay_owner_command_energize(bool energize);
 // this function itself does not retry.
 bool relay_owner_command_trip(safety_trip_t reason);
 
-// Clears a latched trip, unconditionally, IF called: TRIPPED -> ARMED.
+// Clears a latched trip, unconditionally, IF called: TRIPPED -> GRACE or
+// ARMED, whichever the ORIGINAL boot-relative startup-grace window says is
+// current right now (2026-08-27 audit fix -- see relay_grace.h's doc
+// comment on relay_clear_trip_transition() for the two-shapes-considered
+// reasoning). A trip asserted and cleared partway through GRACE lands back
+// in GRACE with the boot clock still running, not a fresh 60s window and
+// not a discarded one.
 //
 // Deliberately does NOT check whether the tripping condition has actually
 // gone away -- SAFETY_MODEL.md section 6's "a clear is refused while the

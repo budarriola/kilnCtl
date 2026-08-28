@@ -491,12 +491,19 @@ bool safety_guards_tick(safety_guard_state_t *state, const safety_guard_cfg_t *c
 // only guards whose trip condition fires from a single tick's raw input with
 // no accumulation window (S6a mainFault, S7 estop, S6b's hard backstop tier)
 // are guaranteed to be caught here if their triggering condition is still
-// present. Every graduated/windowed guard (S1/S2/S3/S5/S9/S11/S12/S13) has
-// its elapsed-time accumulator reset to zero by safety_guards_clear() along
-// with everything else -- if the underlying condition is still present, it
-// will re-trip again once its window re-accumulates on its own normal
-// timescale, not necessarily on this exact call. That is not a safety hole
-// (the guard still does its job), it is a scope limit of THIS function.
+// present -- PLUS, as of the 2026-08-27 audit, S2/S3/S5/S11/S12/S13, whose
+// conditions guard_condition_still_immediate() (safety_guards.c) recomputes
+// directly from `in` (and, for S11, from `state` before it gets zeroed
+// below) rather than trusting an accumulator that safety_guards_clear() is
+// about to reset. S9/TRIP_INEFFECTIVE is refused unconditionally, before
+// either of those checks runs -- see this function's own S9 comment; it has
+// no "still present" condition to recompute because it is simply never
+// clearable. S1 remains a genuine scope limit: it is a 3-tick debounce with
+// no single-tick "value itself is disqualifying" test short of the trip
+// condition itself, so if it is still over ceiling, it will re-trip again
+// once its debounce re-accumulates on its own normal timescale, not
+// necessarily on this exact call. That is not a safety hole (the guard
+// still does its job), it is a scope limit of THIS function.
 bool safety_guards_try_clear(safety_guard_state_t *state, const safety_guard_cfg_t *cfg,
                               const safety_guard_input_t *in);
 

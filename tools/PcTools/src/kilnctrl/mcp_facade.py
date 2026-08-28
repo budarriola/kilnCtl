@@ -104,6 +104,7 @@ KEYWORDS = {
     "build_kilnfw": ("esp32", "idf", "compile", "ninja"),
     "build_saftyfw_host_tests": ("unit", "msvc", "offtarget", "pytest"),
     "run_pctools_tests": ("pytest", "unit", "python", "regression"),
+    "run_repo_checks": ("lint", "guard", "invariant", "ci", "grep", "audit"),
 }
 
 #: Query word -> tokens to also score against. One-way on purpose: expanding

@@ -93,26 +93,54 @@ static bool s5_bad_read_now(const safety_guard_input_t *in)
  * PERMITTED, not just "trip not yet re-confirmed", while the immediate,
  * single-tick-checkable condition is still true.
  *
- * Deliberately narrow: only the four guards below have a trip condition that
- * is fully decidable from THIS tick's raw input alone (a level, not
- * something that itself needs a window) -- S1/S2/S3/S9/S11 are graduated
- * guards too, but do NOT have that property (S1 is a 3-tick debounce with
- * no single-tick "the value itself is disqualifying" test short of the
- * trip condition itself; S2/S3 need the ESP's already-windowed relay-
- * correlation facts, which are just as reconstructable this tick as S5's
- * bad-read test, but were not part of the reported hardware finding and are
- * flagged, not fixed, here rather than guessed at under this pass's time
- * budget; S11 requires comparing against last tick's value, which
- * safety_guards_clear() also zeroes, so "is it frozen right now" is not
- * even well-defined immediately after a clear). Returning false for any
- * other reason leaves safety_guards_try_clear()'s existing one-tick-retest
- * behaviour completely unchanged for every guard not listed here. */
+ * Audit 2026-08-27 widened this from four guards to seven: S2, S3 and S11
+ * were flagged above (in the original 2026-08-23 comment) as "reconstructable
+ * this tick" or excluded only because their supporting value gets zeroed by
+ * safety_guards_clear() -- neither reason survives inspection. S2/S3 read
+ * nothing this function can't also read straight from `in`/`cfg` (the same
+ * caller-reduced facts safety_guards_tick() itself uses), and S11's
+ * seemingly-disqualifying "last tick's value" is `state->s11_last_c`, which
+ * is still intact at THIS point in safety_guards_try_clear() -- this check
+ * runs BEFORE safety_guards_clear() zeroes it, so "is the reading still
+ * frozen at the value it tripped on" is answerable without trusting anything
+ * that has been reset. Worst case before this widening was S3 (welded SSR):
+ * a clear was accepted, relay_owner re-armed, and it took another full
+ * stuck_on_time_s (20s default) of mains into a failed-closed element before
+ * the guard could trip again -- repeatable indefinitely by re-clearing. S9
+ * is the eighth graduated guard on the original list and is NOT handled here
+ * even though it would otherwise qualify (trip_ineffective is a plain latch,
+ * trivially "still true" every time) -- see safety_guards_try_clear()'s own
+ * comment: S9/TRIP_INEFFECTIVE is refused unconditionally, before this
+ * function is ever consulted, so recomputing its condition here would be
+ * dead code guarding an unreachable branch.
+ *
+ * S1 remains excluded: it is a 3-tick debounce with no single-tick "the
+ * value itself is disqualifying" test short of the trip condition itself,
+ * so there is nothing to recompute that isn't just re-running the debounce
+ * from scratch. Returning false for any other reason leaves
+ * safety_guards_try_clear()'s existing one-tick-retest behaviour completely
+ * unchanged for every guard not listed here. */
 static bool guard_condition_still_immediate(safety_trip_t reason, const safety_guard_cfg_t *cfg,
-                                             const safety_guard_input_t *in)
+                                             const safety_guard_input_t *in,
+                                             const safety_guard_state_t *state)
 {
     switch (reason) {
     case SAFETY_TRIP_SENSOR_INVALID: /* S5 */
         return s5_bad_read_now(in);
+    case SAFETY_TRIP_OVER_SETPOINT: /* S2 -- still over max zone setpoint + margin right now */
+        return in->context_valid && cfg->tc_placement_valid &&
+               cfg->tc_placement_mode == SAFETY_TC_CHAMBER_AGREED && in->zone_count > 0u &&
+               in->tc_valid &&
+               in->tc_c > in->max_zone_setpoint_c + effective_f(cfg->overshoot_margin_c, OVERSHOOT_MARGIN_C_DEFAULT);
+    case SAFETY_TRIP_LOAD_STUCK_ON: /* S3 -- current still present with nothing commanded on */
+        return in->context_valid && in->any_current_present && !in->relay_commanded_recently;
+    case SAFETY_TRIP_FROZEN_SENSOR: /* S11 -- reading still sitting at the value that tripped it.
+                                      * state->s11_last_c has not been zeroed yet -- this check
+                                      * runs before safety_guards_clear() -- so this is a real
+                                      * comparison against the reading in effect at trip time, not
+                                      * a guess against already-cleared state. */
+        return in->tc_valid && in->heat_commanded && state->s11_window_active &&
+               in->tc_c == state->s11_last_c;
     case SAFETY_TRIP_ENCLOSURE_TEMP: /* S12 -- cj_c still over cj_max_c right now */
         return in->tc_valid && !isnan(in->cj_c) &&
                in->cj_c > effective_f(cfg->cj_max_c, CJ_MAX_C_DEFAULT);
@@ -130,15 +158,34 @@ static bool guard_condition_still_immediate(safety_trip_t reason, const safety_g
 bool safety_guards_try_clear(safety_guard_state_t *state, const safety_guard_cfg_t *cfg,
                               const safety_guard_input_t *in)
 {
-    /* Refuse before touching any accumulator at all, for the four guards
-     * whose trip condition is a plain level this tick's `in` already answers
-     * -- see guard_condition_still_immediate()'s own comment for why only
-     * these four and why this check has to run BEFORE safety_guards_clear()
-     * zeroes the state that would otherwise mask it. `state` is left
-     * completely untouched here (still is_tripped, same reason, same
-     * accumulators it had on entry) -- a refused clear must look exactly
-     * like a clear that was never attempted. */
-    if (state->is_tripped && guard_condition_still_immediate(state->reason, cfg, in)) {
+    /* S9/TRIP_INEFFECTIVE: unconditional refusal, no recompute needed.
+     * ARCHITECTURE.md section 9 and SAFETY_MODEL.md section 4 both describe
+     * this trip as having "no exit except power removal at the breaker" --
+     * it means K4 was told to open and current is STILL flowing, i.e. the
+     * contactor is welded and mains may be live on fused contacts regardless
+     * of anything this firmware commands. A CLEAR_TRIP here would wipe
+     * trip_ineffective, re-arm K4, and silence the one alarm whose required
+     * response is "go to the breaker", while doing nothing about the welded
+     * contacts themselves. Checked here, ahead of and independent of
+     * guard_condition_still_immediate(), so it can never be bypassed by that
+     * function's guard-specific logic; also enforced at the wire layer by
+     * link_frame_decide_clear_trip() (audit 2026-08-27) so the refusal is
+     * visible with a reason before this function is even reached, not just
+     * failing silently here. */
+    if (state->is_tripped && state->trip_ineffective) {
+        return false;
+    }
+
+    /* Refuse before touching any accumulator at all, for the guards whose
+     * trip condition is a plain level this tick's `in` (and, for S11, the
+     * not-yet-zeroed `state`) already answers -- see
+     * guard_condition_still_immediate()'s own comment for which guards and
+     * why this check has to run BEFORE safety_guards_clear() zeroes the
+     * state that would otherwise mask it. `state` is left completely
+     * untouched here (still is_tripped, same reason, same accumulators it
+     * had on entry) -- a refused clear must look exactly like a clear that
+     * was never attempted. */
+    if (state->is_tripped && guard_condition_still_immediate(state->reason, cfg, in, state)) {
         return false;
     }
     safety_guards_clear(state);

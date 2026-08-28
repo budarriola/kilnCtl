@@ -147,6 +147,27 @@ typedef enum {
 bool config_params_validate_ex(const config_store_record_t *rec, const char **out_field,
                                 const char **out_rule, config_params_reject_reason_t *out_reason);
 
+// The range/finiteness half of config_params_validate_ex() above, exposed on
+// its own (config_params.c keeps it `static` no longer) so config_store.c's
+// config_store_unpack() can run it at LOAD time too, not only at
+// COMMIT_CONFIG. Deliberately NOT the cross-field tc_source/tc_placement_mode
+// contradiction check -- that rule is about what an OPERATOR staged in one
+// sitting (COMMISSIONING.md section 2), meaningless to re-litigate against
+// bytes a totally different build already decided were internally
+// consistent; only "is every field's own value inside the range this build
+// can safely act on" is a property flash-load-time integrity, not
+// commissioning-session intent, needs re-checked. See config_store.c's
+// unpack_v2_fields() caller for why a CRC-valid record from a DIFFERENT
+// BUILD still needs this: the CRC only proves the bytes were not corrupted
+// in flash, never that this build's field semantics (units, enum meanings,
+// valid ranges) are the ones whoever/whatever wrote the record intended --
+// a record written by firmware with a wider tc_source enum, for instance,
+// could be CRC-valid and byte-identical-looking while still handing this
+// build a tc_source value it has no defined behaviour for.
+bool config_params_validate_ranges(const config_store_record_t *rec, const char **out_field,
+                                    const char **out_rule,
+                                    config_params_reject_reason_t *out_reason);
+
 // Maps a config_params_validate()/config_params_validate_ex() out_field
 // string to its COMMISSIONING.md sec 2.1 wire param_id, for building a
 // SAFETY_CMD_COMMIT_CONFIG_REJECTED (0x20) reply (link_task.c). Returns

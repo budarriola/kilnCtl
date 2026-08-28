@@ -391,6 +391,23 @@ static void test_decide_clear_trip(void)
     TEST_CHECK(link_frame_decide_clear_trip(SAFETY_TRIP_ESTOP, (uint16_t)(1u << 7)) ==
                    LINK_CLEAR_TRIP_ACCEPT,
                "tripped ESTOP, wire mask matches exactly -> ACCEPT");
+
+    /* Audit 2026-08-27: SAFETY_TRIP_INEFFECTIVE (S9, welded contactor) is
+     * unclearable -- ARCHITECTURE.md section 9 / SAFETY_MODEL.md section 4's
+     * "no exit except power removal at the breaker" -- and that refusal has
+     * to be visible at the wire layer with its own reason code, not just
+     * fail silently once safety_core_request_clear_trip() is reached. Checked
+     * even with a wire_trip_mask that matches S9's own mask exactly, proving
+     * this is not reachable through the ACCEPT path by any mask coincidence. */
+    TEST_CHECK(link_frame_decide_clear_trip(SAFETY_TRIP_INEFFECTIVE,
+                                             link_frame_trip_mask_for_reason(SAFETY_TRIP_INEFFECTIVE)) ==
+                   LINK_CLEAR_TRIP_REFUSE_INEFFECTIVE,
+               "tripped INEFFECTIVE (S9), wire mask matches exactly -> still REFUSE_INEFFECTIVE, "
+               "never ACCEPT");
+    TEST_CHECK(link_frame_decide_clear_trip(SAFETY_TRIP_INEFFECTIVE, 0u) ==
+                   LINK_CLEAR_TRIP_REFUSE_INEFFECTIVE,
+               "tripped INEFFECTIVE (S9), wire mask 0 -> REFUSE_INEFFECTIVE, not REFUSE_MASK_MISMATCH "
+               "(checked before the mask comparison, same ordering as NOTHING_TRIPPED)");
 }
 
 // --- link_frame_ceiling_is_active (SET_FIRING_CEILING bounds check) --------

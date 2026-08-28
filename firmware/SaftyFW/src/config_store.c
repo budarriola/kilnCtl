@@ -3,6 +3,7 @@
 
 #include <string.h>
 
+#include "config_params.h" // config_params_validate_ranges() -- load-time re-check, see config_store_unpack()
 #include "crc32.h" // bootloader/ -- same CRC-32 used for metadata records
 
 // --- v2 byte layout (little-endian, same convention as bootloader/metadata.c)
@@ -456,7 +457,36 @@ bool config_store_unpack(const uint8_t in[CONFIG_STORE_RECORD_LEN],
         if (stored_crc != computed_crc) {
             return false; // corrupted, or a torn write caught mid-program
         }
-        unpack_v2_fields(in, out);
+        // Unpack into a local scratch record, not directly into `*out`, so
+        // the range-check below can still refuse the record wholesale
+        // without violating this function's own documented contract that
+        // `*out` is left COMPLETELY untouched on any false return (see this
+        // file's header comment). `*out` is assigned only once every check
+        // has already passed.
+        config_store_record_t scratch;
+        unpack_v2_fields(in, &scratch);
+        // A valid CRC proves these bytes were not corrupted in flash -- it
+        // says NOTHING about whether they mean what THIS build thinks they
+        // mean. config_params_validate_ranges() previously ran only at
+        // COMMIT_CONFIG, on a record this build itself just staged one
+        // field at a time through config_params_set() (which already
+        // range-checks each field as it arrives); it never ran here, on a
+        // record that reached RAM by a completely different path -- e.g. a
+        // record written by a different firmware build whose tc_source enum
+        // grew a member this build does not recognise, or whose bytes rotted
+        // into an in-range-looking-but-wrong value that still happens to sum
+        // to the same CRC-32 as something valid. Re-running the same range/
+        // finiteness check here, on every load, closes that gap: an
+        // out-of-range field now makes THIS SLOT invalid (config_store_
+        // find_latest() skips it, same as a bad magic/CRC/format_version),
+        // so the caller falls back to the next-best slot or, if none, to
+        // config_store_default() with calibration_missing forced true --
+        // never to a guard evaluating a threshold nobody in this build's own
+        // commissioning flow ever actually approved.
+        if (!config_params_validate_ranges(&scratch, NULL, NULL, NULL)) {
+            return false;
+        }
+        *out = scratch;
         return true;
     }
 
@@ -472,31 +502,48 @@ bool config_store_unpack(const uint8_t in[CONFIG_STORE_RECORD_LEN],
             return false; // corrupted, or a torn write caught mid-program
         }
 
-        // Migrate forward: start from the safe v2 default (every new field
+        // Migrate forward into a local scratch record, not directly into
+        // `*out` -- same "*out untouched on false" reasoning as the v2
+        // branch above: start from the safe v2 default (every new field
         // gets its documented default, fields_set is 0 -- nothing the v1
         // record never had a chance to commission reads back as set), then
         // overlay exactly what v1 actually held.
-        config_store_default(out);
-        out->seq = get_u32_le(&in[REC_V1_OFF_SEQ]);
+        config_store_record_t scratch;
+        config_store_default(&scratch);
+        scratch.seq = get_u32_le(&in[REC_V1_OFF_SEQ]);
         // Same voltage-mode clamp as unpack_v2_fields() above -- a v1 record
         // predates this bound existing at all, so its tc_type byte gets no
         // less scrutiny than a v2 one.
         uint8_t v1_tc_type_byte = in[REC_V1_OFF_TC_TYPE];
-        out->tc_type = (v1_tc_type_byte <= CONFIG_STORE_TC_TYPE_MAX_REAL)
-                            ? v1_tc_type_byte
-                            : CONFIG_STORE_DEFAULT_TC_TYPE;
-        unpack_ct_cal(&in[REC_V1_OFF_CT_CAL], out->ct_cal, REC_V1_CT_CAL_CHANNEL_LEN);
+        scratch.tc_type = (v1_tc_type_byte <= CONFIG_STORE_TC_TYPE_MAX_REAL)
+                               ? v1_tc_type_byte
+                               : CONFIG_STORE_DEFAULT_TC_TYPE;
+        unpack_ct_cal(&in[REC_V1_OFF_CT_CAL], scratch.ct_cal, REC_V1_CT_CAL_CHANNEL_LEN);
         // calibration_missing is FORCED true regardless of what the v1
         // record held -- see this file's header comment (config_store.h)
         // for why: a migrated record was never commissioned against the
         // fields this pass added, so it must not be trusted as "fully
         // commissioned" just because v1's own narrower surface was.
-        out->calibration_missing = true;
+        scratch.calibration_missing = true;
         // The record is now v2-shaped in RAM; a caller inspecting *out has
         // no way to tell "loaded as v2" from "migrated from v1" except via
         // calibration_missing above, which is the only distinction that
         // actually matters to any guard.
-        out->format_version = CONFIG_STORE_FORMAT_VERSION;
+        scratch.format_version = CONFIG_STORE_FORMAT_VERSION;
+        // Same load-time re-check as the v2 branch above, and for the same
+        // reason: v1's own table never validated these bytes (v1 predates
+        // this table entirely), and the migrated tc_type/ct_cal bytes came
+        // from real, possibly-ancient flash -- a CRC-valid v1 record whose
+        // preserved ct_cal gain/offset floats rotted into NaN/Inf, or whose
+        // migration path someday grows to carry another field through
+        // un-clamped, must not reach a guard either. tc_type itself is
+        // already clamped above independent of this call (voltage-mode
+        // bytes), so this is redundant for that one field specifically, but
+        // it is the same backstop every other field on this path deserves.
+        if (!config_params_validate_ranges(&scratch, NULL, NULL, NULL)) {
+            return false;
+        }
+        *out = scratch;
         return true;
     }
 
@@ -683,6 +730,32 @@ const char *config_store_write_decision_reason(config_store_write_decision_t dec
         default:
             return "unknown";
     }
+}
+
+uint8_t config_store_seq_to_version(uint32_t seq)
+{
+    // See config_store.h's header comment on this function for the full
+    // reasoning. seq == 0 is config_store_default()'s own seq -- the ONE
+    // input that must keep mapping to 0, since that is what a board which
+    // has never committed a real config (or booted with a blank/corrupt
+    // sector) actually holds, and 0 is the sentinel config_store_confirm_
+    // crc_ok() reads as "no valid config". Getting this direction wrong --
+    // e.g. having seq == 0 map to some non-zero byte -- would be worse than
+    // the bug this function fixes: it would make an UNCOMMITTED board's
+    // config_version read back as "confirmed."
+    //
+    // Every seq >= 1 (config_store_write() always assigns cached_seq + 1u,
+    // so the first real write is already seq == 1) maps into [1, 255]:
+    // `(seq - 1u) % 255u` folds the wider counter down to [0, 254], and
+    // `+ 1u` shifts that up to [1, 255] -- a range that, by construction,
+    // can never be 0. Deliberately NOT `(uint8_t)(seq & 0xFFu)` (the old
+    // truncation): that 256-wide mapping included 0 itself, so seq == 256,
+    // 512, 768, ... (and any other multiple of 256) collided with the
+    // "never loaded" sentinel above.
+    if (seq == 0u) {
+        return 0u;
+    }
+    return (uint8_t)(((seq - 1u) % 255u) + 1u);
 }
 
 bool config_store_confirm_crc_ok(uint8_t config_version)

@@ -235,6 +235,33 @@ def run_pctools_tests(pattern: Optional[str] = None) -> str:
     return _run("pctools-tests", argv, timeout=600)
 
 
+def run_repo_checks(list_only: bool = False) -> str:
+    """Run every standing guard script in the repository (``tools/run_all_checks.ps1``).
+
+    These are the ``check_*.ps1`` scripts that enforce invariants no compiler
+    can: the HTTP route-table cap recounted from source, one CRC implementation
+    only, the safety baud rate matching on both sides, the two protocol versions
+    staying independent, ``safety_core.c`` never including the link header.
+
+    ROADMAP.md M10 carried "wire the guard scripts into something that runs
+    them" as open for weeks: each script had been proven able to fail, which is
+    the hard part, and then nothing ran them. This is that something. The
+    aggregator discovers the scripts by globbing rather than from a list, and
+    fails loudly if it finds implausibly few -- a runner that silently finds
+    nothing reports a green that means the opposite of what it looks like.
+
+    ``list_only`` prints what would run without running it.
+    """
+    root = repo_root()
+    script = os.path.join(root, "tools", "run_all_checks.ps1")
+    if not os.path.isfile(script):
+        return f"repo-checks: error: {script} not found"
+    argv = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script]
+    if list_only:
+        argv.append("-ListOnly")
+    return _run("repo-checks", argv, timeout=900)
+
+
 #: Tool name -> function, grouped by which server should carry it. Both servers
 #: get the PC test suite; each gets the firmware it is the counterpart to, and
 #: nothing gets registered twice on the same server.
@@ -250,6 +277,7 @@ BUNDLES: "dict[str, dict[str, Callable[..., str]]]" = {
     },
     "common": {
         "run_pctools_tests": run_pctools_tests,
+        "run_repo_checks": run_repo_checks,
     },
 }
 

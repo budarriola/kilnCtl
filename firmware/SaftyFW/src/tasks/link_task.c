@@ -1302,13 +1302,39 @@ static void link_task_handle_clear_trip(const kilnlink_frame_t *frame)
     // host-tested extraction of the two refusal checks documented above --
     // this function only acts on its verdict now.
     link_clear_trip_decision_t decision = link_frame_decide_clear_trip(trip_reason, msg.trip_mask);
-    if (decision == LINK_CLEAR_TRIP_REFUSE_NOTHING_TRIPPED) {
+
+    // A switch with no default, deliberately. This was an if-chain that tested
+    // the two refusal values it knew about and let everything else fall
+    // through to the accept path below -- so 2026-08-27's new
+    // LINK_CLEAR_TRIP_REFUSE_INEFFECTIVE (S9, welded contactor: the one alarm
+    // whose required response is to go to the breaker) arrived and was
+    // silently ACCEPTED here. It happened to be refused anyway, deeper down in
+    // safety_guards_try_clear(), which is precisely what makes the shape
+    // dangerous: the defence that saved it was somewhere else, and nothing
+    // here would have said so. Enumerating every case without a default means
+    // the next value added to link_clear_trip_decision_t is a -Wswitch
+    // compile error at this line instead of a permissive fall-through.
+    switch (decision) {
+    case LINK_CLEAR_TRIP_REFUSE_NOTHING_TRIPPED:
         log_task_log(LOG_LEVEL_INFO, "clear_trip", "ignored, nothing tripped");
         return;
-    }
-    if (decision == LINK_CLEAR_TRIP_REFUSE_MASK_MISMATCH) {
+    case LINK_CLEAR_TRIP_REFUSE_MASK_MISMATCH:
         log_task_log(LOG_LEVEL_WARN, "clear_trip", "refused, trip_mask mismatch");
         return;
+    case LINK_CLEAR_TRIP_REFUSE_INEFFECTIVE:
+        // ERROR, not WARN: every other refusal here means "your request did not
+        // apply". This one means mains may still be flowing through fused
+        // contacts and the operator is at the wrong end of the building trying
+        // to clear it from a screen. ARCHITECTURE.md sec 9 and SAFETY_MODEL.md
+        // sec 4 both say this trip has no exit except power removal at the
+        // breaker; the log line has to say that too, since it is the only
+        // thing the person clicking Clear will see.
+        log_task_log(LOG_LEVEL_ERROR, "clear_trip",
+                     "REFUSED: trip ineffective (S9) -- contactor may be welded, "
+                     "remove power at the breaker; not clearable from here");
+        return;
+    case LINK_CLEAR_TRIP_ACCEPT:
+        break;
     }
 
     bool queued = safety_core_request_clear_trip();

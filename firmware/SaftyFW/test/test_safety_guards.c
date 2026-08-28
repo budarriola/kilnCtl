@@ -2256,6 +2256,142 @@ static void test_try_clear(void)
         cleared = safety_guards_try_clear(&s, &cfg, &up);
         TEST_CHECK(cleared, "S6b clear succeeds once the link is back up");
     }
+
+    /* Audit 2026-08-27: S2 (sustained excess over setpoint) -- same shape,
+     * tc_c still over max_zone_setpoint_c + overshoot_margin_c at clear time.
+     * Before this pass, s2_over_elapsed_s got zeroed by safety_guards_clear()
+     * and the single retick could never rebuild 120s of accumulated excess in
+     * one tick -- the clear held, relay_owner re-armed, and it took another
+     * full overshoot_time_s to re-trip. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.tc_placement_valid = true;
+        cfg.tc_placement_mode = SAFETY_TC_CHAMBER_AGREED;
+        safety_guard_input_t over = base_input();
+        over.context_valid = true;
+        over.zone_count = 1;
+        over.max_zone_setpoint_c = 900.0f;
+        over.tc_c = 1000.0f; /* 100C over, past overshoot_margin_c default (75) */
+        over.dt_s = 15.0f; /* accumulated over multiple ticks, deliberately NOT a single-tick
+                             * trip -- a single retick's own dt_s alone must not be able to
+                             * rebuild 120s of excess, so this only passes if
+                             * guard_condition_still_immediate() is what is doing the refusing,
+                             * not a coincidental single-tick retrip. */
+        bool tripped = false;
+        for (int i = 0; i < 9 && !tripped; i++) { /* 9*15s = 135s > overshoot_time_s(120) */
+            tripped = safety_guards_tick(&s, &cfg, &over);
+        }
+        TEST_CHECK(tripped && s.reason == SAFETY_TRIP_OVER_SETPOINT, "sanity: S2 tripped");
+
+        bool cleared = safety_guards_try_clear(&s, &cfg, &over);
+        TEST_CHECK(!cleared, "S2 clear refused while tc_c is STILL over setpoint+margin -- audit 2026-08-27");
+        TEST_CHECK(s.is_tripped && s.reason == SAFETY_TRIP_OVER_SETPOINT, "refused: still latched, same reason");
+
+        safety_guard_input_t back_in_range = base_input();
+        back_in_range.context_valid = true;
+        back_in_range.zone_count = 1;
+        back_in_range.max_zone_setpoint_c = 900.0f;
+        back_in_range.tc_c = 920.0f; /* 20C over, well within margin */
+        cleared = safety_guards_try_clear(&s, &cfg, &back_in_range);
+        TEST_CHECK(cleared, "S2 clear succeeds once tc_c is back within overshoot_margin_c");
+    }
+
+    /* Audit 2026-08-27: S3 (load stuck on, welded SSR) -- same shape,
+     * current still present with nothing recently commanded at clear time.
+     * This is the worst case named in the audit: stuck_on_time_s defaults to
+     * only 20s, so a refused-in-name-only clear here is the fastest of the
+     * four to grant a repeatable re-arm window against mains flowing through
+     * a failed-closed element. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t stuck = base_input();
+        stuck.context_valid = true;
+        stuck.any_current_present = true;
+        stuck.relay_commanded_recently = false;
+        stuck.dt_s = 3.0f; /* accumulated over multiple ticks, same "not a single-tick
+                             * retrip" reasoning as the S2 block above -- a lone retick's
+                             * 3s cannot rebuild stuck_on_time_s(20s) on its own. */
+        bool tripped = false;
+        for (int i = 0; i < 8 && !tripped; i++) { /* 8*3s = 24s > stuck_on_time_s(20) */
+            tripped = safety_guards_tick(&s, &cfg, &stuck);
+        }
+        TEST_CHECK(tripped && s.reason == SAFETY_TRIP_LOAD_STUCK_ON, "sanity: S3 tripped");
+
+        bool cleared = safety_guards_try_clear(&s, &cfg, &stuck);
+        TEST_CHECK(!cleared, "S3 clear refused while current is STILL present with nothing commanded -- audit 2026-08-27");
+        TEST_CHECK(s.is_tripped && s.reason == SAFETY_TRIP_LOAD_STUCK_ON, "refused: still latched, same reason");
+
+        safety_guard_input_t no_current = base_input();
+        no_current.context_valid = true;
+        no_current.any_current_present = false;
+        cleared = safety_guards_try_clear(&s, &cfg, &no_current);
+        TEST_CHECK(cleared, "S3 clear succeeds once current is no longer present");
+    }
+
+    /* Audit 2026-08-27: S11 (frozen safety reading) -- same shape, the
+     * reading still sitting at exactly the value it tripped on, with heat
+     * still commanded, at clear time. Uses state->s11_last_c (still intact
+     * -- this check runs before safety_guards_clear() zeroes it), not an
+     * accumulator that gets reset. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t frozen = base_input();
+        frozen.tc_c = 400.0f;
+        frozen.heat_commanded = true;
+        frozen.dt_s = 700.0f; /* first tick only starts the window (elapsed=0); second is past frozen_window_s(600) */
+        safety_guards_tick(&s, &cfg, &frozen);
+        bool tripped = safety_guards_tick(&s, &cfg, &frozen);
+        TEST_CHECK(tripped && s.reason == SAFETY_TRIP_FROZEN_SENSOR, "sanity: S11 tripped");
+
+        bool cleared = safety_guards_try_clear(&s, &cfg, &frozen);
+        TEST_CHECK(!cleared, "S11 clear refused while the reading is STILL frozen at the same value -- audit 2026-08-27");
+        TEST_CHECK(s.is_tripped && s.reason == SAFETY_TRIP_FROZEN_SENSOR, "refused: still latched, same reason");
+
+        safety_guard_input_t moved = base_input();
+        moved.tc_c = 401.0f; /* a real, different reading */
+        moved.heat_commanded = true;
+        cleared = safety_guards_try_clear(&s, &cfg, &moved);
+        TEST_CHECK(cleared, "S11 clear succeeds once the reading has actually moved");
+    }
+
+    /* Audit 2026-08-27: S9 (trip ineffective / welded contactor) is
+     * unclearable, unconditionally -- ARCHITECTURE.md section 9 / SAFETY_
+     * MODEL.md section 4's "no exit except power removal at the breaker".
+     * Unlike S2/S3/S5/S11/S12/S13 above, there is no "condition clears"
+     * input to hand it that would ever make this succeed. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t estop = base_input();
+        estop.estop_pressed = true;
+        safety_guards_tick(&s, &cfg, &estop); /* trip via S7 first */
+
+        safety_guard_input_t verify = base_input();
+        verify.relay_deenergized = true;
+        verify.any_current_present = true; /* welded contacts, still conducting */
+        verify.dt_s = 15.0f; /* > trip_verify_s(10s) in one tick */
+        bool escalated = safety_guards_tick(&s, &cfg, &verify);
+        TEST_CHECK(escalated && s.trip_ineffective && s.reason == SAFETY_TRIP_INEFFECTIVE,
+                   "sanity: escalated to S9/TRIP_INEFFECTIVE");
+
+        /* Even a fully benign input (no current, relay confirmed open) must
+         * not clear it -- there is no "condition still true" test to pass or
+         * fail here at all; the refusal does not depend on `in`. */
+        safety_guard_input_t benign = base_input();
+        benign.relay_deenergized = true;
+        benign.any_current_present = false;
+        bool cleared = safety_guards_try_clear(&s, &cfg, &benign);
+        TEST_CHECK(!cleared, "S9/TRIP_INEFFECTIVE clear refused unconditionally, even against a fully benign input");
+        TEST_CHECK(s.is_tripped && s.trip_ineffective && s.reason == SAFETY_TRIP_INEFFECTIVE,
+                   "refused: still latched, still escalated, reason unchanged");
+    }
 }
 
 /* 2026-08-23 reboot-on-clear-trip investigation: safety_core_task's queue-

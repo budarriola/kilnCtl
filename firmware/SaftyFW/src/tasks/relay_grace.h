@@ -55,6 +55,39 @@ relay_owner_state_t relay_grace_tick(relay_owner_state_t state, uint32_t elapsed
 // trip further" guard might look more defensive).
 relay_owner_state_t relay_trip_transition(relay_owner_state_t state);
 
+// TRIPPED -> GRACE-or-ARMED, on a clear. 2026-08-27 audit fix: a bare
+// unconditional TRIPPED -> ARMED (the previous behaviour, still visible in
+// relay_owner_clear_trip()'s own doc comment history) let a trip asserted
+// and cleared partway through the 60s startup GRACE window jump straight to
+// ARMED with the remaining grace simply discarded -- an E-stop asserted and
+// cleared 10s into a boot left the board ARMED at t=10s instead of t=60s,
+// with the S3/S4/etc rolling windows relay_owner_is_energized()/S9 depend on
+// still empty. A clear during GRACE must land back in GRACE, not ARMED.
+//
+// DELIBERATE CHOICE, spelled out because there are two plausible shapes and
+// they behave very differently under repeated trip/clear cycling:
+//   (a) grant a FRESH full grace_ticks window on every clear, or
+//   (b) resume the ORIGINAL boot-relative window, unmoved by the trip/clear.
+// This function implements (b). `elapsed_ticks`/`grace_ticks` are computed
+// from THE SAME boot-relative clock relay_grace_tick() already uses (the
+// caller passes xTaskGetTickCount() minus the one grace_start captured at
+// task entry -- see relay_owner.c -- never a clock restarted at the clear),
+// so nothing here resets it. (a) was rejected on purpose: an adversary or a
+// flaky sensor that can assert-then-clear a trip on a ~1s cadence would
+// otherwise be able to hold the board in GRACE (never-armed) indefinitely by
+// repeating that cycle forever, which is strictly worse than the bug this
+// fix closes -- GRACE refuses every energize, so "stuck in GRACE forever"
+// reads as safe locally but is actually an availability attack against a
+// kiln that may need to hold temperature. Under (b), each clear can only
+// ever land in GRACE if the ORIGINAL boot-relative window has not yet
+// elapsed, so the state machine provably reaches ARMED (or TRIPPED again, on
+// a real fault) no later than t = grace_ticks after boot, regardless of how
+// many trip/clear cycles happen before then. Any state other than TRIPPED is
+// returned unchanged, matching relay_trip_transition()'s own convention --
+// this is not a general "tick the whole machine" function either.
+relay_owner_state_t relay_clear_trip_transition(relay_owner_state_t state, uint32_t elapsed_ticks,
+                                                  uint32_t grace_ticks);
+
 // The Pico's OWN half of the mutual "heating is not allowed during updates"
 // interlock (ROADMAP.md M8): whether a request to newly ENERGIZE the relay
 // should be honoured given whether an update transfer is currently active on
@@ -71,6 +104,30 @@ relay_owner_state_t relay_trip_transition(relay_owner_state_t state);
 // states the identical rule for the same reason -- the safe direction must
 // always be reachable).
 bool relay_energize_allowed_during_update(bool update_in_progress);
+
+// Pure decision for safety_core_task()'s trip-command retry loop (2026-08-27
+// audit fix item 2: a dropped relay_owner_command_trip() must not silently
+// fail to open K4). safety_core_task() latches "a trip command is owed"
+// (s_trip_command_owed) the tick a trip is decided, then every tick after
+// that -- while still owed -- attempts relay_owner_command_trip() again and
+// calls this function with the outcome to decide whether the flag should
+// stay set:
+//   - `is_tripped` false: the guard state has already gone back to "not
+//     tripped" (a CLEAR_TRIP landed while the very first send was still
+//     stuck behind a full queue). Nothing was ever actually sent in that
+//     case -- see safety_core.c's own comment at the call site for why
+//     re-sending a now-stale trip command after a legitimate clear would be
+//     exactly backwards -- so the flag is dropped (false) regardless of
+//     `send_succeeded`.
+//   - `is_tripped` true: still owed exactly when the just-attempted send
+//     did NOT succeed (`!send_succeeded`) -- a successful send clears it, a
+//     dropped one keeps it latched so the very next tick tries again.
+// The caller (safety_core.c) is responsible for only attempting the send
+// (and thus having a meaningful `send_succeeded` to pass) while `is_tripped`
+// is true -- this function makes the right call either way, but skipping
+// the doomed send when not tripped avoids calling relay_owner_command_trip()
+// on a state relay_owner would refuse to trip anyway.
+bool relay_trip_command_still_owed(bool is_tripped, bool send_succeeded);
 
 #ifdef __cplusplus
 }

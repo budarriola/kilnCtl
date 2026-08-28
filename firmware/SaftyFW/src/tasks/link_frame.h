@@ -389,6 +389,8 @@ typedef enum {
     LINK_CLEAR_TRIP_ACCEPT = 0,             // proceed to safety_core_request_clear_trip()
     LINK_CLEAR_TRIP_REFUSE_NOTHING_TRIPPED, // current_trip_reason == SAFETY_TRIP_NONE
     LINK_CLEAR_TRIP_REFUSE_MASK_MISMATCH,   // wire_trip_mask doesn't match the latched reason's mask
+    LINK_CLEAR_TRIP_REFUSE_INEFFECTIVE,     // current_trip_reason == SAFETY_TRIP_INEFFECTIVE (S9) --
+                                             // unclearable, see this function's own comment
 } link_clear_trip_decision_t;
 
 // `current_trip_reason` is read fresh from safety_core_get_diag_status()
@@ -401,6 +403,18 @@ typedef enum {
 // trip's mask by construction, see link_frame_trip_mask_for_reason()), so this
 // preserves the original code's distinct log line rather than merging the two
 // into one bucket by chance of the math working out.
+//
+// Audit 2026-08-27: SAFETY_TRIP_INEFFECTIVE (S9, welded contactor) is checked
+// before the mask-mismatch comparison, for the same reason NOTHING_TRIPPED is
+// checked before it -- without this, a wire_trip_mask that happens to match
+// S9's mask would fall through to LINK_CLEAR_TRIP_ACCEPT and reach
+// safety_core_request_clear_trip() at all, relying entirely on
+// safety_guards_try_clear()'s own unconditional S9 refusal (safety_guards.c)
+// to fail it silently deeper in the stack. ARCHITECTURE.md section 9 and
+// SAFETY_MODEL.md section 4 both call S9 "no exit except power removal at the
+// breaker" -- that has to be visible here, at the wire layer, with its own
+// reason code the ESP can log and surface to the operator, not just a refusal
+// that looks identical to any other still-tripped guard.
 link_clear_trip_decision_t link_frame_decide_clear_trip(safety_trip_t current_trip_reason,
                                                           uint16_t wire_trip_mask);
 

@@ -2,7 +2,14 @@
 # entirely off-target -- no pico-sdk, no FreeRTOS, no hardware. Mirrors
 # firmware/KilnFW/App/test/build_host_tests.ps1's pattern. TODO.md Phase 4.
 #
-# Usage: powershell -File test\build_host_tests.ps1
+# Usage: powershell -File test\build_host_tests.ps1 [-OutDir <path>]
+#
+# -OutDir exists because concurrent runs of this script share one build
+# directory: the .obj files carry fixed names, so two agents compiling at once
+# corrupt each other's objects and produce a link error that looks like a code
+# defect. Give each concurrent run its own directory. Mirrors the same
+# parameter on KilnFW/App/test/build_host_tests.ps1.
+param([string]$OutDir = "")
 $ErrorActionPreference = "Stop"
 
 $vcvars = "C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Auxiliary\Build\vcvarsall.bat"
@@ -16,7 +23,7 @@ $bootDir = Join-Path $testDir "..\bootloader"
 $updateDir = Join-Path $testDir "..\src\update"
 $commonSrcDir = Join-Path $testDir "..\..\CommonFW\src"
 $commonIncDir = Join-Path $testDir "..\..\CommonFW\include"
-$outDir = Join-Path $testDir "build"
+$outDir = if ($OutDir) { $OutDir } else { Join-Path $testDir "build" }
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 $exe = Join-Path $outDir "saftyfw_host_tests.exe"
 
