@@ -1110,6 +1110,27 @@ setInterval(pollCtCurrents, 3000);
 pollCtCurrents();
 pollAutotune();
 
+// ROADMAP M12: the mismatch warning above (renderCtWarnings) was previously
+// only ever re-evaluated at page load -- accurate for an operator who just
+// opened the page, stale for the rest of an unattended, hours-long firing.
+// The board itself already recomputes ct_warn_mask fresh on every GET
+// /api/zones (zones_http.c's zones_ct_mapping_warn_mask(), against LIVE
+// current, not the sweep snapshot); this is the missing client-side half.
+// Deliberately does NOT reuse the full /api/zones load-and-render path
+// above: that path overwrites thermoCount/relayCount/every zone's form
+// fields from the response, which would stomp an operator's in-progress
+// edits on an interval. This only ever touches #ctWarnings. `current.zones`
+// (populated by the one real load, refreshed after Save) is close enough
+// for zone names/count between saves -- if a zone's identity changes
+// mid-poll the warning briefly mislabels it, not fails silently, and the
+// next full reload or save corrects it.
+function pollCtMapping() {
+  fetch('/api/zones').then(function (r) { return r.json(); }).then(function (data) {
+    renderCtWarnings(data.ct_warn_mask, (current && current.zones) ? current.zones : data.zones);
+  }).catch(function () {});
+}
+setInterval(pollCtMapping, 5000);
+
 /* Bands the diagonal RGA elements are judged against. These are the numbers
  * the prose above promises, kept here as one definition so the wording, the
  * cell colouring and the verdict line can never drift apart:
