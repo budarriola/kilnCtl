@@ -1,6 +1,7 @@
 # kilnCtl Roadmap — both processors
 
-> **Status:** planning · **Last reviewed:** 2026-08-28
+> **Status:** planning · **Last reviewed:** 2026-08-28 (M11 closed but for the
+> LCD work; M12 opened from the owner's commissioning answers)
 > **Start here:** the [What is actually left](#what-is-actually-left) section
 > immediately below is the short answer; the milestones are the detail.
 > **Keep this file current.** This is the top-level dispatch board: the place to
@@ -24,6 +25,75 @@ They talk over an isolated UART (a digital isolator, U6, as of 2026-08-25;
 previously an optocoupler pair). That link, and the rule that **the safety
 processor must be alive for the main processor to heat**, is what makes this one
 project rather than two.
+
+---
+
+## Index of what is left, by complexity
+
+Every open item in this file, in one table, so the size of the remaining work
+is visible without reading 1000 lines. **This is an index, not a second copy of
+the plan** — each row points at the milestone that owns the detail, and when
+the two disagree the milestone is right. Complexity is effort *once the item is
+unblocked*; an XL that is blocked on a decision is still one sentence of your
+time away from being startable.
+
+| Size | Means |
+|---|---|
+| **S** | An hour or less. One file, or one number, or one question answered |
+| **M** | A session. Several files, or a bench procedure with a known script |
+| **L** | Multiple sessions. Touches persisted data, or a subsystem, or needs its own test pass |
+| **XL** | A project. New hardware in the loop, or an unretired risk with no reproducer yet |
+
+### Blocked on you — nothing in the code can answer these
+
+| Size | Item | Where |
+|---|---|---|
+Six of the nine questions in this section were answered on 2026-08-28 and have
+become work rather than questions — see [M12](#m12--commissioning-the-operator-can-actually-do--opened-2026-08-28).
+What is still genuinely open is short:
+
+| Size | Item | Where |
+|---|---|---|
+| S | Physical zone arrangement — which element is where | [What is actually left](#what-is-actually-left) |
+| S | The deferred sanity rate for S8 — and note S8 is **not implemented**, so commissioning that field today enables nothing | M3 |
+| S | `hardware/UnitTestFixture/` — delete or keep | M7 |
+
+### Software, doable now — no hardware, no decisions
+
+| Size | Item | Where |
+|---|---|---|
+| S | LCD: temperature page stops offering a manual toggle for **zone-assigned** relays, keeps it for the others | M11 |
+| S | A guard that every `src/**.c` is in its CMakeLists or explicitly excluded — `tick_timing.c` passed host tests and failed the target link | [What is actually left](#what-is-actually-left) |
+| S | Remove the 80 °C fixture ceilings before a real kiln — a concrete instance of `SaftyFW/TODO.md` phase 9's "confirm no test threshold was left in place" | ibid. |
+| M | **LCD back buttons do not work.** Reported 2026-08-28; the board reports `touch_calibrated: true`, so the obvious explanation is ruled out and the cause is unknown | M11 |
+| M | `mykicadMcp/` and `pdfMcp/` moved under `tools/` | M7 |
+| L | LCD consolidation: safety-processor / board-health / thermocouple-fault pages folded into LCD diagnostics and removed; kiln setup, thermocouple types and kiln config removed; profiles to the top-left and the whole menu on one page | M11 |
+| L | **HTTP connection resets under concurrency.** Has a reproducer and two ruled-out mechanisms, so the next step is instrumenting the failing allocation, not more black-box testing | M10 |
+| S | Delete the twelve stale `display_*` MCP tools (owner left the choice to me; `display_bridge_task` is confirmed dead on hardware, so there is nothing to restore them onto) | M12 |
+| S | Thermocouple maximum inferred from thermocouple type rather than entered | M12 |
+| M | Kiln maximum temperature and maximum expected kiln power, entered on the safety page | M12 |
+| L | Per-zone current measurement (energize one zone at a time, record normal current) and a runtime check that each CT is on the zone it is configured for | M12 |
+| L | **An uncommissioned safety processor must refuse heating enable.** Do this LAST — see M12's ordering note, it can lock the bench out of heating | M12 |
+
+### Blocked on hardware that does not exist yet
+
+| Size | Item | Where |
+|---|---|---|
+| S | The CT coupling transformer (Hammond 140QEX): one look at the PDF before ordering — 10.62 H is quoted at 1 kHz and applied at 60 Hz | M5 |
+| S | Time the link-staleness ceiling (1.5 s) and the firing abort (30 s) with a stopwatch. Code is flashed; nobody has held the link down | M6 |
+| S | Observe K4 physically closing. "Enable granted" is permission, not evidence the contact moved | M4 |
+| M | S9's welded-contactor escalation — by definition needs a welded contactor | M4 |
+| M | AP-fallback verified end to end (needs a router with correct *and* deliberately-wrong static config) | M6 |
+| M | Per-channel CT-to-jack commissioning, plus a bench measurement of the ADC noise floor under the 25-count presence fallback | M5 |
+| M | **HW changes:** LCD backlight control (no GPIO/PWM path exists), relay status LEDs for K1–K4/S9, distinct connector types for the thermocouple daughterboards | M1 |
+| M | DEBUG header and GP16/GP17 access before A1 is soldered down | M0 |
+| L | Field updates exercised against real hardware: Pico bootloader over a live UART1, an actual OTA into `ota_0`/`ota_1` (a JTAG flash boots `factory` and never runs the rollback machinery), a real version mismatch | M8 |
+| L | `GUARD_TEST_MATRIX.md` §3 — every enabled guard's real trip, safe-state power-on, sensor open-circuit, current-mapping commissioning | M4/M9 |
+| XL | **SimFW M-A's SPI-timing proof** (Saleae, ≥10k transactions, zero underruns). `spi_txn_count` is 0 — the PIO MAX31856 emulation has never been clocked by any master. The single biggest unretired risk in the project | M9 |
+
+Two SimFW items are owned by that firmware's own sessions and are not counted
+above as this project's work queue: `testmgr` attaching no observer on its own
+runs, and CT amplitude calibration still being an identity placeholder.
 
 ---
 
@@ -101,32 +171,38 @@ Two consequences that need to be read together:
   it, `commissioned`, says `false`. Setting a Pico-side ceiling is offered and
   awaiting the owner's number.
 
-**Blocked on you, and nothing else can answer them.** These are not research
-tasks — they are facts about your kiln and your bench that the code has to be
-told:
+**Blocked on you — mostly answered on 2026-08-28.** Six of the nine questions
+that stood here were answered in one message, and the answers were largely
+*"the operator should be able to enter that"*, which converted them from
+questions into [M12](#m12--commissioning-the-operator-can-actually-do--opened-2026-08-28).
+Summarised, because the answers matter beyond the milestone that implements
+them:
 
-1. Element power per zone, and the breaker capacity feeding it.
-2. Kiln maximum rated temperature, and the thermocouple's.
-3. Physical zone arrangement (which element is where).
-4. The deferred sanity rate (S8's rate-of-rise ships disabled until a real
-   kiln's ramp is measured).
-5. **What each relay actually drives** — SSR input or contactor coil. K1-K4 are
-   signal relays (2 A, 125 VA), so this sets the duty window and wants a
-   coil-inrush check against those ratings.
-6. `hardware/UnitTestFixture/` — delete it or keep it. `firmware/UnitTestFw`
+- **An uncommissioned safety processor must NOT grant heating enable.**
+  Unqualified NO. It grants it today, which is the only reason the bench can
+  heat, so M12 lands this one **last** — see that milestone's ordering note.
+- **Kiln maximum temperature** is entered on a safety web page, and feeds
+  `abs_max_temp_c`. **Thermocouple maximum is inferred from the thermocouple
+  type**, not asked for.
+- **Every relay is rated for 100% duty and inrush is negligible — the board is
+  designed for it.** This closes the SSR-vs-contactor-coil question and the
+  2 A/125 VA duty-window check outright.
+- **Breakers are assumed sized for the full kiln load at 100% duty.** Instead
+  of per-zone element power, the operator enters maximum expected kiln power
+  on the safety page, and the zones page gets a button that measures each
+  zone's normal current by energizing them one at a time. That measurement is
+  then used at runtime to check each CT is on the zone it is configured for,
+  and to warn when it is not.
+- The twelve stale `display_*` MCP tools were left to my judgement: delete.
+
+Still genuinely unanswerable by the code:
+
+1. Physical zone arrangement (which element is where).
+2. The deferred sanity rate (S8's rate-of-rise ships disabled until a real
+   kiln's ramp is measured — and note S8 is not implemented at all).
+3. `hardware/UnitTestFixture/` — delete it or keep it. `firmware/UnitTestFw`
    went on 2026-08-23; its embedded KiCad project was out of that change's
    scope. Board files are off-limits without your say-so.
-7. `KilnFW/TODO.md` §10.1 — the twelve stale `display_*` MCP tools: delete
-   them, or restore a minimal firmware handler. Now sharper, because
-   `display_bridge_task` is confirmed dead code on real hardware.
-8. **Should an uncommissioned safety processor be allowed to grant heating
-   enable?** Newly live as of 2026-08-24, because the board now actually grants
-   it. `calibration_missing` gates nothing today, and S1's absolute ceiling is
-   disabled while `abs_max_temp_c` is unset — so heating is permitted with no
-   absolute temperature limit in force. Making `request_enable` refuse would
-   close it, and would also block every bench test needing enable behind a
-   commissioning pass that requires answers 1-3 above. Both sides are written
-   up in `firmware/SaftyFW/TODO.md`; the trade is yours, not the code's.
 
 **Blocked on hardware that does not exist yet.** All of this is scripted and
 waiting, not unwritten:
@@ -151,9 +227,14 @@ waiting, not unwritten:
 **Genuinely still software, and doable without you or the fixture.** This is
 now a short list, which is the point:
 
-- **M11's remaining items** — relay/IO profile segments, deleting the rules
-  engine, relay names, and the LCD consolidation. This is now the bulk of the
-  open software work.
+- **M11's remaining items are now the LCD consolidation only.** Relay/IO
+  profile segments, the rules-engine deletion and relay names all landed
+  2026-08-28 and are flash-verified on the owner's board.
+- **The LCD back buttons do not work** (owner-reported 2026-08-28). The
+  obvious explanation is ruled out — the board reports `touch_calibrated:
+  true` — so this is an open bug with no theory, not a configuration
+  question. `lvgl_port_get_last_raw_touch()` exists and is not exposed over
+  MCP; doing so would say exactly where a tap lands.
 - Diagnose the HTTP concurrency reset above — it has a reproducer and two
   ruled-out mechanisms, so the next step is instrumenting the failing
   allocation, not more black-box testing.
@@ -382,7 +463,12 @@ physically stop a kiln, and the first that can nuisance-trip one.
       watchdog. **Rules may never command a zone-assigned (PID/thermocouple)
       relay** — owner's scope rule, enforced in the evaluator, the task and
       the POST handler; heater relays stay readable as rule conditions.
-      2026-08-22, verified on hardware before the bench was disassembled
+      2026-08-22, verified on hardware before the bench was disassembled.
+      **The rules engine was deleted on 2026-08-28 (M11)** — this bullet is
+      kept because the arbitration it describes is still live and is what
+      firing-profile relay/IO segments now claim through. The owner's scope
+      rule survived the deletion intact: a segment may not command a
+      zone-assigned relay either
 - [x] Dashboard/readiness no longer report the safety link as up merely
       because the driver object exists — both call sites now consult the real
       staleness-gated `link_up`. This was a live false positive: the board
@@ -701,16 +787,26 @@ spreading one subject across several pages.**
       into named profiles that zones point at, so identical zones are
       configured once. `ZONES_CFG_VERSION` 8→9, lossless migration that
       de-duplicates identical value sets into one shared profile
-- [ ] **Relay/IO segments in firing profiles**, blocking or non-blocking, with
+- [x] **Relay/IO segments in firing profiles**, blocking or non-blocking, with
       a per-segment choice of whether the relay is left in its last state at
-      run end. `PROFILE_VERSION` 2→3
-- [ ] **Delete the rules engine** once segments land — `rules_http.c`,
-      `rules_task.c`, `rules_page.html` and their tests. Sequenced deliberately
-      AFTER segments so there is never a window with no way to drive a non-zone
-      relay. Note what goes with it: `rules_task` has its own watchdog that
-      force-releases and force-offs its relays on a stale tick, and that
-      protection has to be replaced, not merely dropped
-- [ ] Names for relays not assigned to a zone
+      run end. `PROFILE_VERSION` 2→3 (`73c03c0`). Migration verified against
+      the owner's live board: both saved profiles came back byte-identical
+      with the five new fields defaulting to the old ramp behaviour
+- [x] **Rules engine deleted** (`56dfa07`) — `rules_http.c`, `rules_task.c`,
+      `rules_eval.c`, `rules_page.html` and their two test files, plus
+      PcTools' "Relay Rules (HTTP)" popup, which would have 404'd on first
+      use. Sequenced deliberately AFTER segments so there was never a window
+      with no way to drive a non-zone relay. The one thing that had to be
+      *replaced* rather than dropped is `rules_task`'s own watchdog:
+      `profile_executor.c`'s guard-9 watchdog now force-offs every segment via
+      `io_segs_force_all_off(false)`, where the `false` means a segment's
+      `leave_on_at_end` is ignored and the contacts always open.
+      `RELAY_OWNER_RULE` stays in the enum unrenumbered and marked retired, and
+      the stored `rules_cfg` NVS blob is left orphaned — both so a stale value
+      is never silently reinterpreted as something else. Flash-verified: relay
+      4, which rule R0 had been holding closed at ambient, came up open
+- [x] Names for relays not assigned to a zone (`bc3f7ad`) — a separate NVS key
+      rather than more bytes in `zones_cfg_t`, which had none to give
 - [ ] LCD: temperature page stops offering a manual toggle for zone-assigned
       relays (visible, not hidden — removing the control, not the reading),
       keeps it for non-zone relays
@@ -735,6 +831,60 @@ old layout and a field-by-field walk. `profiles_http.c` has already shipped
 the version of this that returns `sizeof` the *current* struct for the *old*
 version — it rejected every profile on the owner's board and marked them
 unused, and only a hardware flash caught it.
+
+## M12 — Commissioning the operator can actually do · *opened 2026-08-28*
+
+The owner answered six of the standing blocked-on-you questions in one message
+on 2026-08-28. Most of the answers were not values to paste into a config —
+they were *"the operator should be able to enter that"*, which turns a set of
+questions into a milestone.
+
+**The ordering constraint, and it is the important part of this milestone.**
+The last item below makes an uncommissioned safety processor refuse heating
+enable. Today the board grants enable while `commissioned: false`, and that is
+the only reason the bench can heat at all. Land the refusal first and the bench
+is locked out of heating until a full commissioning pass succeeds — including
+`abs_max_temp_c`, which has no value yet. So the refusal goes **last**, after
+the entry surface exists and a real commissioning pass has been completed on
+the board. That is a sequencing decision, not a reason to soften the refusal.
+
+- [ ] **Kiln maximum temperature entered on the safety page**, and used to set
+      `abs_max_temp_c` on the safety processor. This is the field whose absence
+      currently leaves S1's absolute ceiling disabled. Note the existing trap
+      it has to avoid: 0 must never reach that field meaning "no limit" —
+      "unset" and "no limit" have to be distinguishable in the UI and on the
+      wire
+- [ ] **Thermocouple maximum inferred from the thermocouple type**, not
+      entered. The type is already commissioned (`tc_type`), so the operator
+      should not be asked for a number that follows from it — and cannot
+      contradict the sensor
+- [ ] **Maximum expected kiln power entered on the safety page.** Breakers are
+      to be assumed sized for the full kiln load at 100% duty, so this is a
+      sanity/plausibility input, not a derating input
+- [ ] **Per-zone current measurement, from the zones page.** A button that
+      energizes each zone one at a time and records its normal current.
+      **This produces heat with the elements connected** — it has to respect
+      the zone ceilings, bound how long it energizes, and refuse to run while a
+      profile is firing
+- [ ] **Runtime CT-to-zone mapping check.** Compare measured current against
+      the recorded per-zone normal and warn when a current transformer is not
+      on the zone it is configured for. This is the check that catches a CT
+      moved to the wrong jack, which is exactly the mistake
+      `CONFIG_REFERENCE.md` says a wrong `k_ct_v_per_a` cannot be distinguished
+      from today
+- [ ] **Delete the twelve stale `display_*` MCP tools.** The owner left the
+      choice open; deleting wins because `display_bridge_task` is confirmed
+      dead code on real hardware, so "restore a minimal firmware handler" means
+      writing a new consumer for tools nobody uses, not repairing a broken one
+- [ ] **An uncommissioned safety processor refuses heating enable** — the
+      owner's answer was an unqualified NO. **Last**, per the ordering note
+      above
+
+**Answered and closed, recorded so they are not re-asked:** every relay is to
+be rated for 100% duty cycle and inrush is negligible — the board is designed
+for it, so the SSR-vs-contactor-coil question and the 2 A/125 VA duty-window
+check are both settled and need no further hardware answer. Breaker capacity is
+assumed sufficient for the full kiln load at 100% duty.
 
 ## M10 — Instrumentation: make the board tell you when it is wrong
 
