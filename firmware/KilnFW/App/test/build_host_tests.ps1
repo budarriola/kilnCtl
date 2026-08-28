@@ -288,6 +288,50 @@ if ($LASTEXITCODE -ne 0) {
 & $exe8
 if ($LASTEXITCODE -ne 0) { $script:failedExes += $exe8 }
 
+# ---- test_uart_protocol_link_delegate.c: its own NINTH, separate executable
+# SaftyFW/TODO.md Phase 1's "KilnFW's uart_protocol.c delegating framing/CRC,
+# proven byte-identical" item -- see that file's own header comment. Needs
+# CommonFW's kilnlink_frame.c/kilnlink_crc.c linked in directly (the only host
+# test that does), which no other executable here needs, so it gets its own
+# build command rather than joining $sources above.
+$exe9 = Join-Path $outDir "kilnctl_host_tests_uart_protocol_link_delegate.exe"
+$commonSrc = Join-Path $testDir "..\..\..\CommonFW\src"
+$linkObjDir = Join-Path $outDir "link"
+New-Item -ItemType Directory -Force -Path $linkObjDir | Out-Null
+$cmd9 = "call `"$vcvars`" x64 >nul && cl /nologo /W3 /EHsc /std:c11 /I`"$stubDir`" /I`"$commonInc`" " +
+        "/Fo:`"$linkObjDir\\`" /Fe:`"$exe9`" " +
+        "`"$(Join-Path $testDir 'test_uart_protocol_link_delegate.c')`" " +
+        "`"$(Join-Path $commonSrc 'kilnlink_frame.c')`" `"$(Join-Path $commonSrc 'kilnlink_crc.c')`""
+
+cmd.exe /c $cmd9
+if ($LASTEXITCODE -ne 0) {
+    throw "uart_protocol_link_delegate build failed"
+}
+
+& $exe9
+if ($LASTEXITCODE -ne 0) { $script:failedExes += $exe9 }
+
+# ---- test_board_temps.c: its own TENTH, separate executable --------------
+# Same reason as test_zones_http.c above: it #includes board_temps.c
+# directly to reach board_temps_get() (the pure half of that file, no other
+# seam), which needs driver/temperature_sensor.h's stub -- own executable so
+# that stub's temperature_sensor_*() bodies, defined in test_board_temps.c
+# itself, never collide with any other test file's definitions of those
+# same symbols.
+$exe10 = Join-Path $outDir "kilnctl_host_tests_board_temps.exe"
+$btObjDir = Join-Path $outDir "bt"
+New-Item -ItemType Directory -Force -Path $btObjDir | Out-Null
+$cmd10 = "call `"$vcvars`" x64 >nul && cl /nologo /W3 /EHsc /std:c11 /I`"$stubDir`" /I`"$commonInc`" " +
+        "/Fo:`"$btObjDir\\`" /Fe:`"$exe10`" `"$(Join-Path $testDir 'test_board_temps.c')`""
+
+cmd.exe /c $cmd10
+if ($LASTEXITCODE -ne 0) {
+    throw "board_temps build failed"
+}
+
+& $exe10
+if ($LASTEXITCODE -ne 0) { $script:failedExes += $exe10 }
+
 if ($script:failedExes.Count -gt 0) {
     Write-Host ""
     Write-Host "FAILED executables ($($script:failedExes.Count)):"

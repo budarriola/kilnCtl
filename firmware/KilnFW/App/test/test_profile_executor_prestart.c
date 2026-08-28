@@ -199,9 +199,18 @@ esp_err_t safety_link_get_status(SafetyLinkClass *link, safety_link_status_t *ou
     return ESP_FAIL;
 }
 
+/* Spy state for the guard9_assert_stale_tick_fault() tests below (audit
+ * 2026-08-27 item 2) -- every other test in this file leaves these unread. */
+static int      g_set_fault_source_calls = 0;
+static uint32_t g_last_fault_source_mask = 0;
+static bool     g_last_fault_source_assert = false;
+
 esp_err_t safety_link_set_fault_source(SafetyLinkClass *link, uint32_t source_mask, bool assert_fault)
 {
-    (void)link; (void)source_mask; (void)assert_fault;
+    (void)link;
+    g_set_fault_source_calls++;
+    g_last_fault_source_mask = source_mask;
+    g_last_fault_source_assert = assert_fault;
     return ESP_OK;
 }
 
@@ -558,6 +567,73 @@ static void test_pause_keeps_claim_resume_reclaims_it(void)
               "resume() must reclaim RELAY_OWNER_PROFILE over the same mask");
 }
 
+// guard9_assert_stale_tick_fault() tests (audit 2026-08-27 item 2) --
+// guard9_assert_stale_tick_fault() is a plain static function, same
+// "reachable without a real task loop" case as escalate_guard_trip() above
+// (see that block's comment); watchdog_task_entry() itself is the
+// unreachable for(;;) loop this was factored out of.
+static void test_guard9_asserts_and_ors_global_fault_source(void)
+{
+    TEST_SECTION("guard9_assert_stale_tick_fault() -- asserts SAFETY_FAULT_SRC_APP and OR's it into "
+                 "global_fault_source");
+    reset_relay_claim_test_state();
+    /* Non-NULL just to take the `if (s_exec.safety)` branch -- the stub
+     * safety_link_set_fault_source() above never dereferences it. */
+    s_exec.safety = (SafetyLinkClass *)0x1;
+    g_set_fault_source_calls = 0;
+
+    guard9_assert_stale_tick_fault();
+
+    TEST_CHECK(g_set_fault_source_calls == 1, "must call safety_link_set_fault_source() exactly once");
+    TEST_CHECK(g_last_fault_source_mask == SAFETY_FAULT_SRC_APP, "must assert exactly SAFETY_FAULT_SRC_APP");
+    TEST_CHECK(g_last_fault_source_assert == true, "must assert (true), not clear");
+    TEST_CHECK(s_exec.global_fault_source == SAFETY_FAULT_SRC_APP,
+              "must record the bit in global_fault_source, same bookkeeping escalate_guard_trip() uses, "
+              "so clear_this_runs_faults() (profile_executor_halt()) knows to release it -- the defect "
+              "this fixes: nothing ever deasserted SAFETY_FAULT_SRC_APP before, latching heat off board-wide "
+              "until reboot");
+}
+
+static void test_guard9_ors_without_clobbering_an_earlier_global_trip(void)
+{
+    TEST_SECTION("guard9_assert_stale_tick_fault() -- OR's into an existing global_fault_source instead of "
+                 "overwriting it");
+    reset_relay_claim_test_state();
+    s_exec.safety = (SafetyLinkClass *)0x1;
+    /* A global guard trip (e.g. THERMAL_SANITY) already asserted before the
+     * control task's tick went stale -- both bits must still be present
+     * afterwards, or clear_this_runs_faults() would only ever clear whichever
+     * one this function last wrote, permanently losing the other. */
+    s_exec.global_fault_source = SAFETY_FAULT_SRC_THERMAL_SANITY;
+
+    guard9_assert_stale_tick_fault();
+
+    TEST_CHECK(s_exec.global_fault_source == (SAFETY_FAULT_SRC_THERMAL_SANITY | SAFETY_FAULT_SRC_APP),
+              "both the earlier trip's bit and SAFETY_FAULT_SRC_APP must survive");
+}
+
+static void test_guard9_fault_source_cleared_on_halt(void)
+{
+    TEST_SECTION("guard9_assert_stale_tick_fault() then profile_executor_halt() -- the operator's halt "
+                 "deasserts SAFETY_FAULT_SRC_APP, closing the loop this defect left open");
+    reset_relay_claim_test_state();
+    s_exec.lock = xSemaphoreCreateMutex();
+    s_exec.safety = (SafetyLinkClass *)0x1;
+    s_exec.state = PROFILE_EXEC_FAULTED; /* watchdog's own WD_ACTION_FAULT transition */
+    s_exec.claimed_relay_mask = 0x0F;
+
+    guard9_assert_stale_tick_fault();
+    TEST_CHECK(s_exec.global_fault_source == SAFETY_FAULT_SRC_APP, "sanity: the assert above landed");
+
+    g_set_fault_source_calls = 0;
+    profile_executor_halt();
+
+    TEST_CHECK(g_set_fault_source_calls == 1, "halt() must call safety_link_set_fault_source() to clear it");
+    TEST_CHECK(g_last_fault_source_mask == SAFETY_FAULT_SRC_APP, "must clear exactly the mask that was asserted");
+    TEST_CHECK(g_last_fault_source_assert == false, "must clear (false), not assert again");
+    TEST_CHECK(s_exec.global_fault_source == 0, "global_fault_source must be back to 0 after halt()");
+}
+
 void run_test_profile_executor_prestart(void)
 {
     test_run_refuses_before_start();
@@ -570,6 +646,9 @@ void run_test_profile_executor_prestart(void)
     test_escalate_guard_trip_abort_policy_releases_relay_claim();
     test_escalate_guard_trip_all_zones_faulted_releases_relay_claim();
     test_pause_keeps_claim_resume_reclaims_it();
+    test_guard9_asserts_and_ors_global_fault_source();
+    test_guard9_ors_without_clobbering_an_earlier_global_trip();
+    test_guard9_fault_source_cleared_on_halt();
 }
 
 int main(void)

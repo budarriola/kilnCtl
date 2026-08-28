@@ -105,18 +105,39 @@ esp_err_t board_temps_get(board_temps_t *out, const MAX31856Reading *readings, s
     }
 
     if (readings && count > 0) {
+        /* 2026-08-27 fix, found in the TODO.md audit: MAX31856_read_all()
+         * fills readings[0..out_count) for *initialized* channels only,
+         * packed by array POSITION, not by channel number (MAX31856.h's own
+         * doc comment on that function) -- so with channel 0 dead,
+         * readings[0] holds channel 1's reading, readings[1] holds channel
+         * 2's, and so on. Indexing thermo_cj_valid[]/thermo_cj_c[] by the
+         * loop position `i` (the old code here) therefore mislabeled every
+         * channel above the first dead one AND never reported the dead
+         * channel itself as absent -- it just silently disappeared instead
+         * of showing up missing. ui_page_thermo_faults.c already gets this
+         * right (see that file's header comment); this now follows the same
+         * rule: index by MAX31856Reading::channel, never by array position.
+         *
+         * thermo_count is therefore always the full channel count when any
+         * readings were supplied, not however many entries `readings`
+         * happened to carry -- a channel the bus did not answer this poll is
+         * left at its memset-zero default (thermo_cj_valid[ch] = false),
+         * which is what "reported as absent" means for this struct. */
+        out->thermo_count = MAX31856_CHANNEL_COUNT;
         size_t n = count < MAX31856_CHANNEL_COUNT ? count : MAX31856_CHANNEL_COUNT;
         for (size_t i = 0; i < n; i++) {
             const MAX31856Reading *r = &readings[i];
+            if (r->channel >= MAX31856_CHANNEL_COUNT) {
+                continue; /* defensive; channel is always 0..2 on this board */
+            }
             /* Same validity test dashboard_http.c applies to tc_temperature_c:
              * a transport failure or a CJRANGE fault leaves cj_temperature_c
              * as NaN (MAX31856.h's MAX31856Reading doc comment), so both are
              * checked rather than trusting spi_failed alone. */
             bool valid = !r->spi_failed && !isnan(r->cj_temperature_c);
-            out->thermo_cj_valid[i] = valid;
-            out->thermo_cj_c[i] = valid ? r->cj_temperature_c : 0.0f;
+            out->thermo_cj_valid[r->channel] = valid;
+            out->thermo_cj_c[r->channel] = valid ? r->cj_temperature_c : 0.0f;
         }
-        out->thermo_count = n;
     }
 
     return ESP_OK;

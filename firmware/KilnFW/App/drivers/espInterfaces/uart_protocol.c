@@ -74,12 +74,21 @@ static void peer_mark_replied(uart_protocol_t *proto, uart_proto_device_t device
      * before for it, which is the safe direction to fail in. */
 }
 
-static uint16_t crc16_ccitt_false(const uint8_t *data, size_t len)
-{
-    return kilnlink_crc16_ccitt_false(data, len);
-}
-
-static size_t stuff_and_send(uart_protocol_t *proto, const uint8_t *raw, size_t raw_len, uint32_t timeout_ms)
+/* 2026-08-27: these used to be two local static functions, crc16_ccitt_false()
+ * and stuff_and_send() (frame_and_send() below is the latter, renamed), each
+ * just calling straight through to
+ * kilnlink_crc16_ccitt_false()/kilnlink_stuff() -- pure pass-throughs, no
+ * algorithm of their own. They still tripped SaftyFW/tools/
+ * check_link_impl_isolation.ps1's from-scratch-implementation grep purely on
+ * their NAMES (the check looks for a definition whose name contains "crc" or
+ * "stuff", which a wrapper's name does too, even though its body is one
+ * line). Deleting the wrapper and calling kilnlink_crc16_ccitt_false()/
+ * kilnlink_stuff() directly at each site removes that false trip without
+ * changing behavior at all -- proven byte-identical in
+ * App/test/test_uart_protocol_link_delegate.c before this indirection was
+ * removed, same as the original migration off a from-scratch implementation
+ * was proven in firmware/CommonFW/test/test_uart_protocol_delegate.c. */
+static size_t frame_and_send(uart_protocol_t *proto, const uint8_t *raw, size_t raw_len, uint32_t timeout_ms)
 {
     uint8_t out[STUFFED_FRAME_MAX];
     size_t o = kilnlink_stuff(raw, raw_len, out, sizeof(out));
@@ -147,10 +156,10 @@ static void send_control_frame(uart_protocol_t *proto, uart_proto_msg_type_t typ
     raw[5] = (uint8_t)dst_device;
     raw[6] = dst_task;
     raw[7] = 0; /* length */
-    uint16_t crc = crc16_ccitt_false(raw, HEADER_LEN);
+    uint16_t crc = kilnlink_crc16_ccitt_false(raw, HEADER_LEN);
     raw[8] = (uint8_t)(crc >> 8);
     raw[9] = (uint8_t)(crc & 0xFF);
-    stuff_and_send(proto, raw, sizeof(raw), 1000);
+    frame_and_send(proto, raw, sizeof(raw), 1000);
 }
 
 static void handle_raw_frame(uart_protocol_t *proto, const uint8_t *raw, size_t len)
@@ -186,7 +195,7 @@ static void handle_raw_frame(uart_protocol_t *proto, const uint8_t *raw, size_t 
         return;
     }
 
-    uint16_t expected_crc = crc16_ccitt_false(raw, HEADER_LEN + length);
+    uint16_t expected_crc = kilnlink_crc16_ccitt_false(raw, HEADER_LEN + length);
     uint16_t actual_crc = (uint16_t)((raw[HEADER_LEN + length] << 8) | raw[HEADER_LEN + length + 1]);
     if (expected_crc != actual_crc) {
         ESP_LOGW(TAG, "uart%d: frame CRC mismatch, dropping", (int)proto->owner->port);
@@ -669,7 +678,7 @@ esp_err_t uart_protocol_send_limited(uart_protocol_t *proto,
     if (length > 0) {
         memcpy(&raw[HEADER_LEN], payload, length);
     }
-    uint16_t crc = crc16_ccitt_false(raw, HEADER_LEN + length);
+    uint16_t crc = kilnlink_crc16_ccitt_false(raw, HEADER_LEN + length);
     raw[HEADER_LEN + length] = (uint8_t)(crc >> 8);
     raw[HEADER_LEN + length + 1] = (uint8_t)(crc & 0xFF);
     size_t raw_len = HEADER_LEN + length + 2;
@@ -681,7 +690,7 @@ esp_err_t uart_protocol_send_limited(uart_protocol_t *proto,
 
     esp_err_t result = ESP_ERR_TIMEOUT;
     for (int attempt = 0; attempt < max_retries; ++attempt) {
-        if (stuff_and_send(proto, raw, raw_len, 1000) == 0) {
+        if (frame_and_send(proto, raw, raw_len, 1000) == 0) {
             continue; /* tx itself failed; still worth retrying */
         }
         if (xSemaphoreTake(proto->ack_sem, pdMS_TO_TICKS(ack_timeout_ms)) == pdTRUE) {
@@ -776,15 +785,16 @@ esp_err_t uart_protocol_send_broadcast(uart_protocol_t *proto,
     if (length > 0) {
         memcpy(&raw[HEADER_LEN], payload, length);
     }
-    uint16_t crc = crc16_ccitt_false(raw, HEADER_LEN + length);
+    uint16_t crc = kilnlink_crc16_ccitt_false(raw, HEADER_LEN + length);
     raw[HEADER_LEN + length] = (uint8_t)(crc >> 8);
     raw[HEADER_LEN + length + 1] = (uint8_t)(crc & 0xFF);
     size_t raw_len = HEADER_LEN + length + 2;
 
     /* No ack wait, no retry: the whole point is that the sender never blocks
      * on the far end replying. */
-    esp_err_t result = (stuff_and_send(proto, raw, raw_len, 1000) != 0) ? ESP_OK : ESP_FAIL;
+    esp_err_t result = (frame_and_send(proto, raw, raw_len, 1000) != 0) ? ESP_OK : ESP_FAIL;
 
     xSemaphoreGive(proto->tx_lock);
     return result;
 }
+

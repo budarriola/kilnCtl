@@ -661,6 +661,35 @@ static bool escalate_guard_trip(uint8_t zi, thermal_guard_trip_t reason, const c
     return false;
 }
 
+/* Guard 9's own fault-assertion step, factored out of watchdog_task_entry()'s
+ * for(;;) loop body so a host test can call it directly -- the loop itself
+ * cannot be, same "no seam without restructuring the module" limit as
+ * executor_task_entry() (see test_profile_executor_prestart.c's relay-claim
+ * test block comment), but this one function has no such limit: it is a
+ * plain static function taking s_exec.lock as a precondition, exactly like
+ * escalate_guard_trip() above.
+ *
+ * Audit 2026-08-27 item 2: this used to only call safety_link_set_fault_
+ * source(..., true) and stop there -- nothing ever deasserted it, so a
+ * single stale control-task tick left SAFETY_FAULT_SRC_APP latched
+ * board-wide until reboot, blocking every relay-ON everywhere (including any
+ * later, different fault, since relay_authority_on_blocked() only reports
+ * "blocked", not which bit) -- the same class of bug escalate_guard_trip()'s
+ * global branch already avoids via global_fault_source/clear_this_runs_
+ * faults(). OR'd in, not assigned: an earlier global guard trip may already
+ * be sitting in global_fault_source, and clear_this_runs_faults() clears the
+ * whole mask in one safety_link_set_fault_source() call -- overwriting here
+ * would silently drop that other source from ever being cleared.
+ *
+ * Must be called with s_exec.lock held. */
+static void guard9_assert_stale_tick_fault(void)
+{
+    if (s_exec.safety) {
+        safety_link_set_fault_source(s_exec.safety, SAFETY_FAULT_SRC_APP, true);
+    }
+    s_exec.global_fault_source |= SAFETY_FAULT_SRC_APP;
+}
+
 /* Must be called with s_exec.lock held. */
 static void clear_this_runs_faults(void)
 {
@@ -1784,9 +1813,11 @@ static void watchdog_task_entry(void *arg)
             if (s_exec.io) {
                 kiln_io_all_relays_off(s_exec.io);
             }
-            if (s_exec.safety) {
-                safety_link_set_fault_source(s_exec.safety, SAFETY_FAULT_SRC_APP, true);
-            }
+            /* See guard9_assert_stale_tick_fault()'s own doc comment for why
+             * this is now a helper rather than the bare safety_link_set_
+             * fault_source() call this used to be, and what defect that
+             * fixes (audit 2026-08-27 item 2). */
+            guard9_assert_stale_tick_fault();
         }
 
         /* profile_executor_wd_decide() (profile_executor.h) is the pure

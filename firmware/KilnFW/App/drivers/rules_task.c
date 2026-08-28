@@ -178,13 +178,26 @@ static void gather_inputs(rules_eval_inputs_t *in, bool *out_relay_commanded_on 
      * dashboard and the control loop use, so a rule threshold means the same
      * temperature the operator reads on the page. Comparing an operator's
      * "open the vent at 200C" against an uncalibrated number would be a
-     * quiet, dangerous disagreement. */
+     * quiet, dangerous disagreement.
+     *
+     * 2026-08-27 fix: that calibration call must happen ONCE PER ZONE, after
+     * combining, with the ZONE index -- not once per physical channel, with
+     * the channel index, before combining. zones_config_apply_cal()'s
+     * argument is a ZONE index (see zones_http.h's doc comment on that
+     * function); this file used to pass the CHANNEL index `ci` into it here,
+     * which is a different config row whenever a zone's thermo_mask isn't
+     * the trivial one-channel-per-zone identity mapping. profile_executor.c
+     * gets this right (see its combine-then-calibrate block: thermo_combine()
+     * over raw channel readings first, THEN zones_config_apply_cal(zi, ...)
+     * once per zone) -- this now matches it, so a rule threshold and the
+     * control loop mean the same temperature on any multi-thermocouple zone,
+     * not just a single-thermocouple one. */
     MAX31856Reading readings[MAX31856_CHANNEL_COUNT];
     size_t n_read = 0;
     memset(readings, 0, sizeof(readings));
     (void)thermo_owner_command_read_all(readings, MAX31856_CHANNEL_COUNT, &n_read);
 
-    float ch_c[MAX31856_CHANNEL_COUNT];
+    float ch_raw_c[MAX31856_CHANNEL_COUNT];
     bool ch_ok[MAX31856_CHANNEL_COUNT];
     for (uint8_t ci = 0; ci < MAX31856_CHANNEL_COUNT; ci++) {
         /* Freshness judged by age_ms against KILN_TEMP_STALE_AGE_MS, the same
@@ -195,7 +208,13 @@ static void gather_inputs(rules_eval_inputs_t *in, bool *out_relay_commanded_on 
                     !isnan(readings[ci].tc_temperature_c) &&
                     readings[ci].age_ms != MAX31856_READING_AGE_UNKNOWN &&
                     readings[ci].age_ms < KILN_TEMP_STALE_AGE_MS;
-        ch_c[ci] = have ? zones_config_apply_cal(ci, readings[ci].tc_temperature_c) : 0.0f;
+        /* RAW reading only -- no calibration here. Calibration is per-ZONE
+         * and is applied once below, after thermo_combine(), the same order
+         * profile_executor.c uses. */
+        /* RAW reading only -- no calibration here. Calibration is per-ZONE
+         * and is applied once below, after thermo_combine(), the same order
+         * profile_executor.c uses. */
+        ch_raw_c[ci] = have ? readings[ci].tc_temperature_c : 0.0f;
         ch_ok[ci] = have;
     }
 
@@ -219,12 +238,16 @@ static void gather_inputs(rules_eval_inputs_t *in, bool *out_relay_commanded_on 
         }
         uint8_t thermo_mask = 0;
         bool combined_valid = false;
-        float combined_c = 0.0f;
+        float combined_raw_c = 0.0f;
         if (zi < zones_config_get_thermo_count() && zones_config_get_thermo_mask(zi, &thermo_mask)) {
-            combined_c = thermo_combine(ch_c, ch_ok, MAX31856_CHANNEL_COUNT, thermo_mask, &combined_valid);
+            combined_raw_c = thermo_combine(ch_raw_c, ch_ok, MAX31856_CHANNEL_COUNT, thermo_mask, &combined_valid);
         }
+        /* Calibration applied here, once, with the ZONE index -- see this
+         * function's 2026-08-27 fix comment above. */
+        /* Calibration applied here, once, with the ZONE index -- see this
+         * function's 2026-08-27 fix comment above. */
         in->zone_temp_valid[zi] = combined_valid;
-        in->zone_temp_c[zi] = combined_valid ? combined_c : 0.0f;
+        in->zone_temp_c[zi] = combined_valid ? zones_config_apply_cal(zi, combined_raw_c) : 0.0f;
     }
 
     /* Current commanded relay state, for COND_RELAY conditions. A read

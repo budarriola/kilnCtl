@@ -61,12 +61,25 @@ typedef struct {
                                                   * failed, or was never called) */
     float esp32_c;                             /* ESP32-S3 internal die temp, degC;
                                                   * only meaningful if esp32_valid */
-    bool thermo_cj_valid[MAX31856_CHANNEL_COUNT];
+    bool thermo_cj_valid[MAX31856_CHANNEL_COUNT]; /* indexed by MAX31856Reading::channel,
+                                                  * NEVER by array position -- see
+                                                  * board_temps_get()'s 2026-08-27 fix
+                                                  * comment. A channel the bus did not
+                                                  * answer this poll reads false here,
+                                                  * at ITS OWN index, not some other
+                                                  * channel's. */
     float thermo_cj_c[MAX31856_CHANNEL_COUNT]; /* per-channel MAX31856 cold-junction
                                                   * temp, degC; only meaningful where
                                                   * the matching *_valid entry is true */
-    size_t thermo_count;                       /* how many of the two arrays above
-                                                  * are populated (<= MAX31856_CHANNEL_COUNT) */
+    size_t thermo_count;                       /* MAX31856_CHANNEL_COUNT whenever any
+                                                  * readings were supplied to
+                                                  * board_temps_get() (0 only if
+                                                  * readings/count were NULL/0) -- NOT
+                                                  * "how many entries were populated";
+                                                  * a missing channel is represented by
+                                                  * thermo_cj_valid[that channel] being
+                                                  * false, at its own index, not by a
+                                                  * shorter count. */
 } board_temps_t;
 
 /* Installs and enables the ESP32-S3's internal temperature_sensor peripheral,

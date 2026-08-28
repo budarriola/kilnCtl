@@ -194,8 +194,17 @@ typedef struct {
  * (open input bias, a pre-fault value frozen when conversions were suspended,
  * or a reading past the linearization range), so tc_temperature_c is reported
  * as NaN with fault_status saying why. CJRANGE does the same to
- * cj_temperature_c. spi_failed stays false in those cases -- the bus worked,
- * the sensor did not. */
+ * cj_temperature_c -- AND to tc_temperature_c (2026-08-27 fix): LTCB is the
+ * LINEARIZED, cold-junction-COMPENSATED hot-junction temperature, computed in
+ * hardware from whatever the cold junction measured, fault or not, so an
+ * out-of-range cold junction taints the hot-junction number by an unknown
+ * compensation error rather than leaving it merely stale. A plausible WRONG
+ * number is worse than a NaN here -- every consumer already handles an
+ * invalid reading, none can detect a quietly wrong one -- so CJRANGE NaNs
+ * both temperatures, not just its own. See max31856_codec.h's
+ * max31856_fault_invalidates_tc()/_cj(), which this contract is now pinned
+ * to. spi_failed stays false in all of these cases -- the bus worked, the
+ * sensor did not. */
 typedef struct {
     uint8_t channel;
     float tc_temperature_c;   /* linearized, cold-junction-compensated; NaN if invalid */

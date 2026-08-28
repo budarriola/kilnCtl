@@ -151,4 +151,51 @@ void run_test_max31856_codec(void)
             TEST_CHECK_NEAR(back, t, half_lsb, msg);
         }
     }
+
+    /* --- Fault invalidation: which SR bits NaN which temperature --- */
+    /* 2026-08-27: CJRANGE must invalidate BOTH temperatures, not just its  */
+    /* own -- LTCB is cold-junction-compensated in hardware, so an          */
+    /* out-of-range cold junction taints the hot-junction number too. See   */
+    /* max31856_codec.h's max31856_fault_invalidates_tc() doc comment.      */
+    {
+        TEST_CHECK(!max31856_fault_invalidates_tc(0x00u),
+                    "no fault bits -> TC not invalidated");
+        TEST_CHECK(!max31856_fault_invalidates_cj(0x00u),
+                    "no fault bits -> CJ not invalidated");
+
+        TEST_CHECK(max31856_fault_invalidates_tc(MAX31856_CODEC_FAULT_OPEN),
+                    "OPEN alone -> TC invalidated");
+        TEST_CHECK(!max31856_fault_invalidates_cj(MAX31856_CODEC_FAULT_OPEN),
+                    "OPEN alone -> CJ NOT invalidated (cold junction is unaffected)");
+
+        TEST_CHECK(max31856_fault_invalidates_tc(MAX31856_CODEC_FAULT_OVUV),
+                    "OVUV alone -> TC invalidated");
+        TEST_CHECK(max31856_fault_invalidates_tc(MAX31856_CODEC_FAULT_TCRANGE),
+                    "TCRANGE alone -> TC invalidated");
+
+        /* THE regression guard for this fix: CJRANGE set BY ITSELF (no OPEN/
+         * OVUV/TCRANGE) must still invalidate tc_temperature_c, because the
+         * part's own hot-junction linearization is CJ-compensated. Before
+         * this fix, only cj_temperature_c was NaN'd here and tc_temperature_c
+         * was reported as a plausible-looking but wrong number. */
+        TEST_CHECK(max31856_fault_invalidates_tc(MAX31856_CODEC_FAULT_CJRANGE),
+                    "CJRANGE alone -> TC invalidated too (hot junction is CJ-compensated in hardware)");
+        TEST_CHECK(max31856_fault_invalidates_cj(MAX31856_CODEC_FAULT_CJRANGE),
+                    "CJRANGE alone -> CJ invalidated (the fault is directly about the CJ reading)");
+
+        /* A threshold fault (TCLOW/TCHIGH/CJLOW/CJHIGH) invalidates neither
+         * temperature -- those are operator-configured limits on an
+         * otherwise-good reading, not a "this number is meaningless" signal. */
+        TEST_CHECK(!max31856_fault_invalidates_tc(0x08u /* TCHIGH */),
+                    "TCHIGH threshold fault alone -> TC not invalidated");
+        TEST_CHECK(!max31856_fault_invalidates_cj(0x20u /* CJHIGH */),
+                    "CJHIGH threshold fault alone -> CJ not invalidated");
+
+        /* Combined faults still work as a bitwise OR of the individual
+         * decisions -- OPEN plus CJRANGE together invalidate both. */
+        TEST_CHECK(max31856_fault_invalidates_tc((uint8_t)(MAX31856_CODEC_FAULT_OPEN | MAX31856_CODEC_FAULT_CJRANGE)),
+                    "OPEN | CJRANGE -> TC invalidated");
+        TEST_CHECK(max31856_fault_invalidates_cj((uint8_t)(MAX31856_CODEC_FAULT_OPEN | MAX31856_CODEC_FAULT_CJRANGE)),
+                    "OPEN | CJRANGE -> CJ invalidated");
+    }
 }

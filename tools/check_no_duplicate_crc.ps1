@@ -94,7 +94,20 @@ $excludeDirs = @(
 # Known, already-tracked pre-migration duplicates (see header above).
 # Paths are relative to repo root, forward-slash, case-insensitive compare.
 $allowlist = @(
-    'tools/PcTools/src/kilnctrl/crc16.py'
+    'tools/PcTools/src/kilnctrl/crc16.py',
+
+    # 2026-08-27. This one is a deliberate, permanent second implementation,
+    # and it is the opposite of the hazard this check exists for. The file is
+    # the byte-identity proof for uart_protocol.c's delegation to CommonFW: it
+    # embeds a frozen copy of the CRC/stuffing code that used to live in
+    # uart_protocol.c and diffs it byte-for-byte against
+    # kilnlink_crc16_ccitt_false()/kilnlink_stuff() over the payloads that
+    # actually distinguish framing implementations (empty, containing 0x7E,
+    # containing 0x7D, both adjacent, maximum length). A test that proves two
+    # implementations agree necessarily contains two implementations. Removing
+    # this entry means the proof was deleted, which is the thing to ask about
+    # -- not a migration finishing.
+    'firmware/KilnFW/App/test/test_uart_protocol_link_delegate.c'
 )
 
 $searchExtensions = @('*.c', '*.h', '*.cpp', '*.hpp', '*.py')

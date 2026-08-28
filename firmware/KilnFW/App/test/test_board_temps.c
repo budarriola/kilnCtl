@@ -1,0 +1,254 @@
+// Host test for App/drivers/board_temps.c's board_temps_get(), added
+// 2026-08-27 for the array-position-vs-channel-number indexing defect found
+// by the sensor-correctness audit (TODO.md): MAX31856_read_all() fills
+// readings[0..out_count) for *initialized* channels only, packed by array
+// POSITION, not by channel number (MAX31856.h's own doc comment on that
+// function) -- so with channel 0 dead, readings[0] holds channel 1's
+// reading, readings[1] holds channel 2's, and so on.
+//
+// board_temps_get()'s ORIGINAL code indexed thermo_cj_valid[]/thermo_cj_c[]
+// by the loop position `i`, which -- with a dead channel anywhere but the
+// last slot -- mislabeled every channel above the first dead one AND never
+// reported the dead channel itself as absent (it just silently vanished
+// instead of showing up missing). The fix indexes by
+// MAX31856Reading::channel instead. A test that only ever exercises an
+// identity mapping (channel i always at readings[i]) cannot tell these two
+// implementations apart, which is why the case below deliberately puts a
+// NON-ZERO channel first: channel 0 dead, channels 1 and 2 alive, so the
+// buggy code and the fixed code disagree on every checked field.
+//
+// This is its own SEPARATE host-test executable (own main(), not merged
+// into test_main.c/kilnctl_host_tests.exe), same convention as
+// test_zones_http.c/test_backup_import.c/test_kiln_cfg_store.c: it
+// #includes board_temps.c directly to reach board_temps_get(), the only
+// pure-logic half of that file (the other half -- the HTTP handlers, the
+// gzip-embedded page -- has no seam worth testing on the host and would
+// drag in a full esp_http_server/wifi_provision_http stub surface for no
+// benefit). Kept separate rather than folding into the main executable
+// because board_temps.c pulls in driver/temperature_sensor.h, whose stub
+// (stubs/driver/temperature_sensor.h) declares symbols this file alone
+// defines -- linking it alongside another translation unit that also
+// defines them would be a multiple-definition error, same reasoning as
+// every other *_http.c-direct-include test here.
+#include <math.h>
+#include <stdio.h>
+#include <string.h>
+
+int g_test_failures = 0;
+int g_test_count = 0;
+
+#include "test_common.h"
+
+// asm("_binary_...") is a GCC/binutils extension (EMBED_TXTFILES,
+// CMakeLists.txt) with no MSVC equivalent -- #define it away to nothing so
+// `extern const uint8_t X[] asm("...");` parses as plain
+// `extern const uint8_t X[];`. Real (empty) definitions follow the include,
+// same convention the scratch harness that proved this fix used.
+#define asm(x)
+
+#include "../drivers/board_temps.c"
+
+#undef asm
+
+// ---- Embedded-page symbols board_temps_page_get_handler() references ------
+// Never actually sent by these tests (that handler is never called), but
+// must exist for the linker.
+const uint8_t board_temps_page_html_gz_start[1] = { 0 };
+const uint8_t board_temps_page_html_gz_end[1] = { 0 };
+
+// ---- link-time stub bodies for board_temps.c's non-pure half --------------
+// None of these is reachable from board_temps_get() (the only function
+// under test here), but every symbol the file references must resolve at
+// link time -- same "wider stub surface than the test itself touches"
+// reasoning test_zones_http.c/test_backup_import.c already document.
+httpd_handle_t wifi_provision_http_get_server(void) { return (httpd_handle_t)1; }
+esp_err_t httpd_register_uri_handler(httpd_handle_t handle, const httpd_uri_t *uri)
+{
+    (void)handle; (void)uri; return ESP_OK;
+}
+esp_err_t httpd_resp_set_type(httpd_req_t *r, const char *type) { (void)r; (void)type; return ESP_OK; }
+esp_err_t httpd_resp_set_hdr(httpd_req_t *r, const char *field, const char *value)
+{
+    (void)r; (void)field; (void)value; return ESP_OK;
+}
+esp_err_t httpd_resp_send(httpd_req_t *r, const char *buf, long long buf_len)
+{
+    (void)r; (void)buf; (void)buf_len; return ESP_OK;
+}
+bool web_client_accepts_gzip(httpd_req_t *req) { (void)req; return true; }
+esp_err_t web_send_gzip_not_acceptable(httpd_req_t *req, const char *tag, const char *page)
+{
+    (void)req; (void)tag; (void)page; return ESP_OK;
+}
+void web_set_asset_cache_headers(httpd_req_t *req) { (void)req; }
+
+// board_temps_get_live() calls this, but no test here calls
+// board_temps_get_live() -- only board_temps_get() directly, with a
+// caller-supplied readings[] array, same as the scratch harness that
+// originally proved this fix. Stubbed only so the file links.
+esp_err_t MAX31856_read_all(MAX31856BusClass *bus, MAX31856Reading *out, size_t max_readings,
+                            size_t *out_count)
+{
+    (void)bus; (void)out; (void)max_readings;
+    if (out_count) {
+        *out_count = 0;
+    }
+    return ESP_FAIL;
+}
+
+// ---- driver/temperature_sensor.h stub bodies -------------------------------
+// board_temps_start() is never called by these tests (s_tsens_ready stays
+// false, so board_temps_get() takes its esp32_valid = false path), but the
+// symbols still need bodies to link.
+esp_err_t temperature_sensor_install(const temperature_sensor_config_t *cfg, temperature_sensor_handle_t *out)
+{
+    (void)cfg; (void)out; return ESP_FAIL;
+}
+esp_err_t temperature_sensor_enable(temperature_sensor_handle_t h) { (void)h; return ESP_OK; }
+esp_err_t temperature_sensor_disable(temperature_sensor_handle_t h) { (void)h; return ESP_OK; }
+esp_err_t temperature_sensor_uninstall(temperature_sensor_handle_t h) { (void)h; return ESP_OK; }
+esp_err_t temperature_sensor_get_celsius(temperature_sensor_handle_t h, float *out_c)
+{
+    (void)h; if (out_c) { *out_c = 0.0f; } return ESP_OK;
+}
+
+static void test_dead_first_channel_indexes_by_channel_number(void)
+{
+    // THE regression case: channel 0 is dead (never initialized), so
+    // MAX31856_read_all() would have compacted its result down to two
+    // entries -- readings[0] holding channel 1's data, readings[1] holding
+    // channel 2's -- with channel 0 simply absent from the array, not
+    // represented by a failed entry at position 0. This is deliberately NOT
+    // an identity mapping (readings[i].channel != i): the old
+    // array-position-indexed code and the fixed channel-indexed code only
+    // disagree when the dead channel isn't the last one.
+    MAX31856Reading readings[2];
+    memset(readings, 0, sizeof(readings));
+    readings[0].channel = 1;
+    readings[0].tc_temperature_c = 111.0f;
+    readings[0].cj_temperature_c = 21.0f;
+    readings[0].spi_failed = false;
+    readings[1].channel = 2;
+    readings[1].tc_temperature_c = 222.0f;
+    readings[1].cj_temperature_c = 22.0f;
+    readings[1].spi_failed = false;
+
+    board_temps_t out;
+    memset(&out, 0xAA, sizeof(out));
+    esp_err_t err = board_temps_get(&out, readings, 2);
+    TEST_CHECK(err == ESP_OK, "board_temps_get() returns ESP_OK");
+
+    TEST_CHECK(out.thermo_count == MAX31856_CHANNEL_COUNT,
+               "thermo_count is the full channel count, not the readings[] length");
+
+    // Dead channel 0 must show up as ABSENT, not silently vanish.
+    TEST_CHECK(out.thermo_cj_valid[0] == false,
+               "channel 0 (dead, never in readings[]) reports invalid at ITS OWN index");
+
+    // Channel 1's reading must land at index 1, not index 0 (the old
+    // array-position bug would have put it at thermo_cj_valid[0]/
+    // thermo_cj_c[0] instead, since it was readings[0]).
+    TEST_CHECK(out.thermo_cj_valid[1] == true, "channel 1's reading reports valid at index 1");
+    TEST_CHECK_NEAR(out.thermo_cj_c[1], 21.0, 0.001,
+                     "channel 1's cold-junction value (21.0) lands at thermo_cj_c[1], not thermo_cj_c[0]");
+
+    // Channel 2's reading must land at index 2, not index 1.
+    TEST_CHECK(out.thermo_cj_valid[2] == true, "channel 2's reading reports valid at index 2");
+    TEST_CHECK_NEAR(out.thermo_cj_c[2], 22.0, 0.001,
+                     "channel 2's cold-junction value (22.0) lands at thermo_cj_c[2], not thermo_cj_c[1]");
+}
+
+static void test_all_channels_alive_identity_case_still_correct(void)
+{
+    // Sanity companion to the regression case above: when nothing is dead,
+    // readings[i].channel == i for every i, so a buggy array-position
+    // implementation would ALSO pass this one -- it proves nothing about the
+    // bug by itself, but does confirm the fix didn't break the common case.
+    MAX31856Reading readings[MAX31856_CHANNEL_COUNT];
+    memset(readings, 0, sizeof(readings));
+    for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
+        readings[i].channel = i;
+        readings[i].tc_temperature_c = 100.0f + (float)i;
+        readings[i].cj_temperature_c = 20.0f + (float)i;
+        readings[i].spi_failed = false;
+    }
+
+    board_temps_t out;
+    memset(&out, 0xAA, sizeof(out));
+    esp_err_t err = board_temps_get(&out, readings, MAX31856_CHANNEL_COUNT);
+    TEST_CHECK(err == ESP_OK, "board_temps_get() returns ESP_OK (all channels alive)");
+    for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
+        char msg[96];
+        snprintf(msg, sizeof(msg), "channel %u valid at its own index (all-alive case)", i);
+        TEST_CHECK(out.thermo_cj_valid[i] == true, msg);
+        snprintf(msg, sizeof(msg), "channel %u cold-junction value at its own index (all-alive case)", i);
+        TEST_CHECK_NEAR(out.thermo_cj_c[i], 20.0 + (double)i, 0.001, msg);
+    }
+}
+
+static void test_spi_failed_channel_reports_invalid_at_its_own_index(void)
+{
+    // A channel that IS in readings[] but whose transfer failed must report
+    // invalid at its own channel index too, not just a dead (absent)
+    // channel -- board_temps_get()'s validity test checks spi_failed and
+    // isnan(cj_temperature_c) together, same convention dashboard_http.c
+    // applies to tc_temperature_c.
+    MAX31856Reading readings[2];
+    memset(readings, 0, sizeof(readings));
+    readings[0].channel = 0;
+    readings[0].tc_temperature_c = 50.0f;
+    readings[0].cj_temperature_c = 19.0f;
+    readings[0].spi_failed = false;
+    readings[1].channel = 2;
+    readings[1].tc_temperature_c = NAN;
+    readings[1].cj_temperature_c = NAN;
+    readings[1].spi_failed = true;
+
+    board_temps_t out;
+    memset(&out, 0xAA, sizeof(out));
+    esp_err_t err = board_temps_get(&out, readings, 2);
+    TEST_CHECK(err == ESP_OK, "board_temps_get() returns ESP_OK (one channel spi_failed)");
+
+    TEST_CHECK(out.thermo_cj_valid[0] == true, "channel 0's good reading reports valid at index 0");
+    TEST_CHECK_NEAR(out.thermo_cj_c[0], 19.0, 0.001, "channel 0's cold-junction value lands at index 0");
+
+    // Channel 1 was never in readings[] at all (bus never answered it this
+    // poll) -- absent, same as the dead-channel case above.
+    TEST_CHECK(out.thermo_cj_valid[1] == false, "channel 1 (absent from readings[]) reports invalid");
+
+    // Channel 2 WAS in readings[], but spi_failed -- must still be invalid,
+    // at its own index (2), not index 1 (its array position).
+    TEST_CHECK(out.thermo_cj_valid[2] == false, "channel 2 (spi_failed) reports invalid at its own index");
+    TEST_CHECK(out.thermo_cj_c[2] == 0.0f, "channel 2's cold-junction value reports 0.0, not the NaN reading");
+}
+
+static void test_null_readings_reports_all_absent(void)
+{
+    // readings/count NULL/0 (no thermo_bus this boot, board_temps.h's own
+    // doc comment) -- thermo_count comes back 0 and every thermo_cj_valid[]
+    // entry stays at its memset-zero default (false), not left as whatever
+    // 0xAA garbage the caller's struct started with.
+    board_temps_t out;
+    memset(&out, 0xAA, sizeof(out));
+    esp_err_t err = board_temps_get(&out, NULL, 0);
+    TEST_CHECK(err == ESP_OK, "board_temps_get() returns ESP_OK with readings=NULL");
+    TEST_CHECK(out.thermo_count == 0, "thermo_count is 0 when readings/count are NULL/0");
+    for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
+        char msg[64];
+        snprintf(msg, sizeof(msg), "channel %u invalid when readings is NULL", i);
+        TEST_CHECK(out.thermo_cj_valid[i] == false, msg);
+    }
+}
+
+int main(void)
+{
+    TEST_SECTION("board_temps");
+
+    test_dead_first_channel_indexes_by_channel_number();
+    test_all_channels_alive_identity_case_still_correct();
+    test_spi_failed_channel_reports_invalid_at_its_own_index();
+    test_null_readings_reports_all_absent();
+
+    printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
+    return g_test_failures > 0 ? 1 : 0;
+}

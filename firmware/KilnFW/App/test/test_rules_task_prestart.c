@@ -21,6 +21,7 @@
 // real rules_task_get_status() are under test, not a hand-rolled copy. Own
 // executable for the same "defines real zones_config_*()/etc bodies, would
 // multiply-define against other host tests' fakes" reason.
+#include <math.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
@@ -43,6 +44,30 @@ int g_test_count = 0;
 // rules_task_get_status() itself calls nothing -- but the whole translation
 // unit must still link.
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Controllable state for the calibration-order test below (see
+// test_gather_inputs_applies_calibration_per_zone_after_combine()). Every
+// stub function reads from these instead of a fixed value, but defaults to
+// exactly the fixed behavior the ORIGINAL stubs below had (thermo_count=0,
+// zero mask, raw_c passed through unchanged, read_all fails with count=0) --
+// so test_get_status_reports_well_formed_inert_before_start() above, which
+// never touches any of this, is unaffected.
+// ---------------------------------------------------------------------------
+static uint8_t s_test_thermo_count = 0;
+static uint8_t s_test_thermo_mask[8];
+static float s_test_cal_offset[8];
+static MAX31856Reading s_test_readings[MAX31856_CHANNEL_COUNT];
+static size_t s_test_reading_count = 0;
+
+static void reset_gather_inputs_test_state(void)
+{
+    s_test_thermo_count = 0;
+    memset(s_test_thermo_mask, 0, sizeof(s_test_thermo_mask));
+    memset(s_test_cal_offset, 0, sizeof(s_test_cal_offset));
+    memset(s_test_readings, 0, sizeof(s_test_readings));
+    s_test_reading_count = 0;
+}
 
 esp_err_t kiln_io_owner_command_read(kiln_io_state_t *out)
 {
@@ -97,15 +122,30 @@ void rules_http_get_cfg(rules_cfg_t *out)
 
 esp_err_t thermo_owner_command_read_all(MAX31856Reading *out, size_t max_readings, size_t *out_count)
 {
-    (void)out; (void)max_readings;
-    if (out_count) *out_count = 0;
-    return ESP_FAIL;
+    if (s_test_reading_count == 0) {
+        /* Original stub behavior: no test has armed s_test_readings, fail
+         * closed exactly as before. */
+        if (out_count) *out_count = 0;
+        return ESP_FAIL;
+    }
+    size_t n = s_test_reading_count < max_readings ? s_test_reading_count : max_readings;
+    if (out) memcpy(out, s_test_readings, n * sizeof(*out));
+    if (out_count) *out_count = n;
+    return ESP_OK;
 }
 
 float zones_config_apply_cal(uint8_t zone_index, float raw_c)
 {
-    (void)zone_index;
-    return raw_c;
+    /* Mirrors the real zones_config_apply_cal()'s documented contract
+     * (zones_http.h): NaN and an out-of-range index pass through unchanged.
+     * Otherwise adds this test's per-index offset -- deliberately DIFFERENT
+     * per index (see reset_gather_inputs_test_state() callers) so a call
+     * keyed by the wrong index (channel instead of zone) produces a
+     * different, wrong number instead of accidentally matching. */
+    if (isnan(raw_c) || zone_index >= (uint8_t)(sizeof(s_test_cal_offset) / sizeof(s_test_cal_offset[0]))) {
+        return raw_c;
+    }
+    return raw_c + s_test_cal_offset[zone_index];
 }
 
 bool zones_config_get_relay_mask(uint8_t zone_index, uint8_t *out_mask)
@@ -117,14 +157,17 @@ bool zones_config_get_relay_mask(uint8_t zone_index, uint8_t *out_mask)
 
 uint8_t zones_config_get_thermo_count(void)
 {
-    return 0;
+    return s_test_thermo_count;
 }
 
 bool zones_config_get_thermo_mask(uint8_t zone_index, uint8_t *out_mask)
 {
-    (void)zone_index;
-    if (out_mask) *out_mask = 0;
-    return false;
+    if (zone_index >= s_test_thermo_count) {
+        if (out_mask) *out_mask = 0;
+        return false;
+    }
+    if (out_mask) *out_mask = s_test_thermo_mask[zone_index];
+    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -156,9 +199,67 @@ static void test_get_status_reports_well_formed_inert_before_start(void)
     }
 }
 
+// ---------------------------------------------------------------------------
+// TODO.md "Audit 2026-08-27" item 3: rules_task.c must combine each zone's
+// RAW channel readings first, then apply zones_config_apply_cal() ONCE with
+// the ZONE index -- the same order profile_executor.c uses (see that file's
+// combine-then-calibrate block) -- not apply cal per CHANNEL index before
+// combining. gather_inputs() is `static` in rules_task.c, reached here only
+// because this file #includes rules_task.c directly (see this file's own
+// header comment).
+// ---------------------------------------------------------------------------
+static void test_gather_inputs_applies_calibration_per_zone_after_combine(void)
+{
+    TEST_SECTION("gather_inputs() calibrates per ZONE, after thermo_combine() -- not per channel, before it");
+
+    reset_gather_inputs_test_state();
+
+    // Zone 0 is the only configured zone, combining channels 0 and 1
+    // (thermo_mask 0x03). Cal offsets are deliberately DIFFERENT per index
+    // so a call keyed by the wrong index produces a provably wrong answer
+    // rather than an accidental match.
+    s_test_thermo_count = 1;
+    s_test_thermo_mask[0] = 0x03u; /* channels 0 and 1 */
+    s_test_cal_offset[0] = 10.0f;  /* zone 0's offset -- the correct one to apply */
+    s_test_cal_offset[1] = 20.0f;  /* channel 1's offset, if wrongly used as a "zone" index */
+
+    s_test_readings[0].channel = 0;
+    s_test_readings[0].tc_temperature_c = 100.0f;
+    s_test_readings[0].cj_temperature_c = 25.0f;
+    s_test_readings[0].spi_failed = false;
+    s_test_readings[0].age_ms = 0;
+    s_test_readings[1].channel = 1;
+    s_test_readings[1].tc_temperature_c = 200.0f;
+    s_test_readings[1].cj_temperature_c = 25.0f;
+    s_test_readings[1].spi_failed = false;
+    s_test_readings[1].age_ms = 0;
+    s_test_reading_count = 2;
+
+    rules_eval_inputs_t in;
+    bool relay_commanded_on[RULES_EVAL_RELAY_COUNT];
+    memset(&in, 0xAA, sizeof(in));
+    gather_inputs(&in, relay_commanded_on);
+
+    TEST_CHECK(in.zone_temp_valid[0], "zone 0: both assigned channels read valid -> zone_temp_valid[0] true");
+    // Correct order: thermo_combine(100, 200) = 150 (plain mean, no cal
+    // involved), THEN zones_config_apply_cal(zone_index=0, 150) = 150 + 10
+    // = 160. The bug this guards against (calibrating ch_c[0]/ch_c[1] with
+    // the CHANNEL index before combining -- apply_cal(0,100)=110,
+    // apply_cal(1,200)=220 -- then averaging those) would instead produce
+    // mean(110,220) = 165. 160 != 165, so this check tells the two apart.
+    TEST_CHECK_NEAR(in.zone_temp_c[0], 160.0f, 1e-4,
+                     "zone 0 temp == combine-raw-then-calibrate-once(100,200,+10) == 160, "
+                     "not calibrate-per-channel-then-combine's 165");
+
+    for (uint8_t zi = 1; zi < RULES_EVAL_ZONE_COUNT; zi++) {
+        TEST_CHECK(!in.zone_temp_valid[zi], "unconfigured zone stays invalid");
+    }
+}
+
 void run_test_rules_task_prestart(void)
 {
     test_get_status_reports_well_formed_inert_before_start();
+    test_gather_inputs_applies_calibration_per_zone_after_combine();
 }
 
 int main(void)

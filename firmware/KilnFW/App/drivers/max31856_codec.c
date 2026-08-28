@@ -35,3 +35,14 @@ int16_t max31856_encode_tc_threshold(float temperature_c)
     }
     return (int16_t)lsbs;
 }
+
+bool max31856_fault_invalidates_tc(uint8_t fault_status)
+{
+    return (fault_status & (MAX31856_CODEC_FAULT_OPEN | MAX31856_CODEC_FAULT_OVUV |
+                             MAX31856_CODEC_FAULT_TCRANGE | MAX31856_CODEC_FAULT_CJRANGE)) != 0;
+}
+
+bool max31856_fault_invalidates_cj(uint8_t fault_status)
+{
+    return (fault_status & MAX31856_CODEC_FAULT_CJRANGE) != 0;
+}

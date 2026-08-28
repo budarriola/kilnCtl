@@ -79,15 +79,21 @@ _Static_assert(THERMO_SPI_CLOCK_HZ <= MAX31856_SPI_MAX_CLOCK_HZ,
 #define MAX31856_LOGGED_FAULTS \
     ((uint8_t)(THERMO_FAULT_OPEN | THERMO_FAULT_OVUV | THERMO_FAULT_TCRANGE | THERMO_FAULT_CJRANGE))
 
-/* Faults that make the linearized hot-junction number meaningless rather than
- * merely interesting: an open thermocouple leaves the input amplifier reading
- * whatever the bias network settles at, and with an over/undervoltage fault
- * the part explicitly suspends conversions, so LTCB holds a value from before
- * the fault. Either way the register still contains a perfectly plausible
- * temperature -- which is exactly the failure this driver exists to not make.
- * See MAX31856_read(). */
-#define MAX31856_TC_INVALIDATING_FAULTS \
-    ((uint8_t)(THERMO_FAULT_OPEN | THERMO_FAULT_OVUV | THERMO_FAULT_TCRANGE))
+/* Which faults invalidate tc_temperature_c/cj_temperature_c now lives in
+ * max31856_codec.h's max31856_fault_invalidates_tc()/_cj() -- pulled out as a
+ * pure, host-tested decision (see that header's comment) rather than kept as
+ * a macro here. This _Static_assert pins uart_task_ids.h's THERMO_FAULT_*
+ * bit names (used everywhere else in this driver and by
+ * ui_page_thermo_faults.c) to the codec's literal values, so the two headers
+ * can never silently drift apart -- see max31856_codec.h's
+ * MAX31856_CODEC_FAULT_* comment. */
+_Static_assert(THERMO_FAULT_OPEN == MAX31856_CODEC_FAULT_OPEN &&
+               THERMO_FAULT_OVUV == MAX31856_CODEC_FAULT_OVUV &&
+               THERMO_FAULT_TCRANGE == MAX31856_CODEC_FAULT_TCRANGE &&
+               THERMO_FAULT_CJRANGE == MAX31856_CODEC_FAULT_CJRANGE,
+               "MAX31856.h's THERMO_FAULT_* bit positions drifted from "
+               "max31856_codec.h's MAX31856_CODEC_FAULT_* -- they must name "
+               "the same SR register bits");
 
 /* How long any caller will wait for another caller's register sequence. The
  * longest thing held under the channel mutex is a handful of bounded SPI
@@ -1064,16 +1070,19 @@ esp_err_t MAX31856_read(MAX31856Class *ch, MAX31856Reading *out)
 
     /* The transfer succeeded, which says nothing about whether the number it
      * carried means anything. An open thermocouple, an over/undervoltage input
-     * (conversions suspended, so LTCB still holds the pre-fault value) or a
-     * hot junction outside the type's linearization range all leave a
-     * perfectly plausible temperature in the register. Report NaN for those,
-     * per the contract in MAX31856.h: the fault bits say why, and no caller can
-     * mistake a NaN for a cold kiln. The same reasoning applies to CJRANGE and
-     * the cold-junction reading. */
-    if (out->fault_status & MAX31856_TC_INVALIDATING_FAULTS) {
+     * (conversions suspended, so LTCB still holds the pre-fault value), a hot
+     * junction outside the type's linearization range, OR an out-of-range
+     * cold junction (LTCB is cold-junction-COMPENSATED in hardware, so a bad
+     * CJ reading taints the hot-junction number too -- see
+     * max31856_fault_invalidates_tc()'s 2026-08-27 doc comment) all leave a
+     * perfectly plausible-looking but meaningless temperature in the
+     * register. Report NaN for those: the fault bits say why, and no caller
+     * can mistake a NaN for a cold kiln, nor a plausible-but-wrong number for
+     * a real one. */
+    if (max31856_fault_invalidates_tc(out->fault_status)) {
         out->tc_temperature_c = NAN;
     }
-    if (out->fault_status & THERMO_FAULT_CJRANGE) {
+    if (max31856_fault_invalidates_cj(out->fault_status)) {
         out->cj_temperature_c = NAN;
     }
     /* A decode that produced a non-finite float has no business being reported
