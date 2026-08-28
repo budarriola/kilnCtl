@@ -66,7 +66,6 @@ What is still genuinely open is short:
 | M | `mykicadMcp/` moved under `tools/` — own dedicated pass, live submodule + settings.json allowlist | M7 |
 | L | **HTTP connection resets under concurrency.** TCP-layer instrumentation built and live; 188 requests across varied burst sizes reproduced nothing (rate appears lower than the original 9/80 measurement, unconfirmed why). Still unreproduced under instrumentation, not root-caused, not closed — an absence of failure is not a fix, see M10 for the honest accounting | M10 |
 | L | **Every fault says what was detected and what to do** — a standing rule, not a closing milestone. S6a was the example: the cause was measured and held on the ESP and simply never shown next to the trip | M13 |
-| S | Thermocouple maximum inferred from thermocouple type rather than entered — `TC_MAX_C_BY_TYPE` exists but only warns on contradiction, doesn't set the value | M12 |
 | M | Runtime check that each CT is on the zone it is configured for (the sweep and the guard both exist; this is the live comparison) | M12 |
 | L | **An uncommissioned safety processor must refuse heating enable.** Do this LAST — see M12's ordering note, it can lock the bench out of heating | M12 |
 
