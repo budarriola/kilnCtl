@@ -69,7 +69,12 @@ What is still genuinely open is short:
 | M | `mykicadMcp/` and `pdfMcp/` moved under `tools/` | M7 |
 | L | LCD consolidation: safety-processor / board-health / thermocouple-fault pages folded into LCD diagnostics and removed; kiln setup, thermocouple types and kiln config removed; profiles to the top-left and the whole menu on one page | M11 |
 | L | **HTTP connection resets under concurrency.** Has a reproducer and two ruled-out mechanisms, so the next step is instrumenting the failing allocation, not more black-box testing | M10 |
+| L | **M12a: the commissioning surface reports writes that never landed**, and displays values that did not come from the safety processor. Verified live 2026-08-28. Highest-consequence open item in the repo — S1's absolute ceiling cannot be commissioned at all today | M12a |
 | S | Delete the twelve stale `display_*` MCP tools (owner left the choice to me; `display_bridge_task` is confirmed dead on hardware, so there is nothing to restore them onto) | M12 |
+| M | Known-good config presets: factory-default then load, so tests start from the same board every time | M1 |
+| M | Mains voltage as a dropdown; safety thermocouple and relay config shown read-only in the zones config | M12 |
+| M | An over-current guard paired with the under-current guard, as a percentage of measured normal | M12 |
+| L | **Make the commissioning page simple.** 58 raw parameters classified DERIVED / ASKED / DEFAULTED; the ASKED list is the score | M12 |
 | S | Thermocouple maximum inferred from thermocouple type rather than entered | M12 |
 | M | Kiln maximum temperature and maximum expected kiln power, entered on the safety page | M12 |
 | L | Per-zone current measurement (energize one zone at a time, record normal current) and a runtime check that each CT is on the zone it is configured for | M12 |
@@ -85,7 +90,7 @@ What is still genuinely open is short:
 | M | S9's welded-contactor escalation — by definition needs a welded contactor | M4 |
 | M | AP-fallback verified end to end (needs a router with correct *and* deliberately-wrong static config) | M6 |
 | M | Per-channel CT-to-jack commissioning, plus a bench measurement of the ADC noise floor under the 25-count presence fallback | M5 |
-| M | **HW changes:** LCD backlight control (no GPIO/PWM path exists), relay status LEDs for K1–K4/S9, distinct connector types for the thermocouple daughterboards | M1 |
+| M | **HW changes:** LCD backlight control (no GPIO/PWM path exists), relay status LEDs for K1–K4/S9, distinct connector types for the thermocouple daughterboards, I2C broken out on an expansion connector | M1 |
 | M | DEBUG header and GP16/GP17 access before A1 is soldered down | M0 |
 | L | Field updates exercised against real hardware: Pico bootloader over a live UART1, an actual OTA into `ota_0`/`ota_1` (a JTAG flash boots `factory` and never runs the rollback machinery), a real version mismatch | M8 |
 | L | `GUARD_TEST_MATRIX.md` §3 — every enabled guard's real trip, safe-state power-on, sensor open-circuit, current-mapping commissioning | M4/M9 |
@@ -297,6 +302,14 @@ Owned by [`tools/PcTools/TODO.md`](tools/PcTools/TODO.md). Worth doing early pre
 because it is what turns later hardware questions into a script instead of a
 soldering session.
 
+- [ ] **Known-good config presets, so a test always starts from the same
+      board** (owner request, 2026-08-28): factory-default then load a named
+      config as one step, so a run is reproducible instead of depending on
+      whatever the last session left behind. Presets live as DATA under
+      `tools/`, never compiled into firmware — the bench fixture's 80 °C
+      ceilings must never be capable of being left behind in a real kiln build.
+      Scoped to KilnFW-side config until M12a makes safety-parameter writes
+      trustworthy
 - [x] `pc_tools` moved to `tools/PcTools/`; GPIO probes built for both chips
       (ESP: deny-list incl. GPIO6; Pico: over SWD, GPIO6 read-only). **Pico
       probe bench-tested 2026-08-19, PASS.** ESP probe bench-tested 2026-08-19
@@ -316,6 +329,12 @@ soldering session.
 - [ ] **HW change: relay status LEDs** for K1–K4, S9
 - [ ] **HW change: distinct connector types** for the thermocouple daughterboards
       vs. main-board connectors
+- [ ] **HW change: I2C broken out on an expansion connector** (owner request,
+      2026-08-28). For a future board revision, not the current one. Worth
+      deciding alongside it: whether the expansion header carries power and at
+      what rail, and whether the bus is the same one the SX1509 and the
+      MCP23017 expanders sit on or a separate segment — an expansion connector
+      that shares the relay expander's bus lets an add-on wedge relay control
 
 **Bench state (2026-08-20):** ILI9488 LCD, ESP32-S3 JTAG, and Pico SWD all
 verified working. Three MAX31856 ICs + thermocouples now fitted on the ESP32-S3
@@ -832,6 +851,71 @@ the version of this that returns `sizeof` the *current* struct for the *old*
 version — it rejected every profile on the owner's board and marked them
 unused, and only a hardware flash caught it.
 
+## M12a — The commissioning surface currently lies · *opened 2026-08-28, URGENT*
+
+Found by an opus audit on 2026-08-28, triggered by a routine attempt to set
+`abs_max_temp_c = 80` on the bench. **Three `POST /api/safety/commissioning`
+requests returned `{"ok":true}` and not one value changed**, including a control
+write to a harmless parameter. This is not a UI defect. It means the safety
+processor's commissioning surface reports success it has not earned, while
+displaying values that did not come from the safety processor.
+
+The decisive evidence, all live: `live_config_crc` never moved (a successful
+`config_store_write()` bumps `seq` and therefore the CRC, so **nothing was
+written**), while the Pico's own histogram read `commit_config_rejected=2` —
+it refused, it said so, and the ESP discarded the refusal.
+
+Four defects, each verified against source:
+
+1. **`ok` cannot fail.** `apply_pairs()` returns true when the send returns
+   `ESP_OK` (`safety_cfg_http.c:434/446/472`), but SET_PARAM and COMMIT_CONFIG
+   both go out as broadcasts (`safety_link.c:2944/3027`) and
+   `uart_protocol.c:795` returns `ESP_OK` for "the local UART accepted the
+   bytes" — its own comment says "No ack wait, no retry". The doc comment above
+   `safety_link_send_commit_config()` still claims `ESP_OK` means the Pico
+   ACKed; that has been untrue since the broadcast change.
+2. **The rejection is caught in a ~144 ms race and then thrown away.**
+   `safety_link.c:3045-3059` waits `SAFETY_LINK_REPLY_TIMEOUT_MS`; a late
+   REJECTED frame reaches `safety_drain_inbox_ex()` (`:1367-1373`) and is
+   counted and dropped. `CONFIG_PAGE`, two cases above (`:1353-1364`), stashes
+   an unclaimed frame — REJECTED has no stash. **Silence is currently defined
+   as acceptance** (`:3044`).
+3. **The GET is an ESP-local NVS cache presented as current.** Refreshed only
+   when the CRCs disagree (`safety_cfg_store.c:674-675`); they agree, so there
+   were zero fetches this boot (`cmd_config_page_count: 0`). `fetched_ms_ago`
+   is board uptime, not fetch age (`:441-443`) — it says "fetched 10 minutes
+   ago" about bytes read off flash, possibly written by a different Pico image
+   days earlier.
+4. **`"set": true` is unconditional** — the Pico emits every field without
+   consulting `rec.fields_set` and the ESP sets `set = 1` for every entry
+   received (`safety_cfg_store.c:609`). So `abs_max_temp_c {set:true,
+   value:0}` is the page asserting a *commissioned ceiling of 0 °C* for a field
+   the Pico has never had set, and 0 on that field means NEVER TRIP. This makes
+   `safety_cfg_http.c:136-139`'s deliberate "omit the value rather than print a
+   misleading zero" branch unreachable. **Fifth instance** of a report that
+   structurally cannot be false.
+
+- [ ] Stash an unclaimed REJECTED frame the way CONFIG_PAGE is stashed
+- [ ] **Confirm commits positively by reading `config_crc` back.** The audit is
+      explicit that the stash alone still leaves `ok` meaning "no rejection
+      seen"; a read-back is the only version of this that cannot lie
+- [ ] Refetch after commit and report the CONFIRMED value, not the sent one
+- [ ] Carry `fields_set` through the CONFIG_PAGE codec so `set` can be false
+- [ ] Fix or delete `fetched_ms_ago` — a field that always lies is worse than
+      no field
+- [ ] Surface the ARMED/GRACE write window (below) in the page itself
+
+**And the constraint this uncovered, which shapes M12's whole design:** config
+writes are refused whenever the relay owner is `ARMED` (`config_store_flash.c:279`),
+and ARMED is the steady state ~60 s after boot. **The only write window is the
+boot GRACE period.** Commissioning today means resetting the Pico and
+committing within 60 seconds, and nothing in the UI, the API, or the error text
+says so. That is not a workflow an operator can be handed.
+
+**Net effect: S1's absolute overtemperature ceiling cannot be commissioned
+through the shipping web surface**, and every attempt outside the window
+reports success. The heating elements are physically connected to this bench.
+
 ## M12 — Commissioning the operator can actually do · *opened 2026-08-28*
 
 The owner answered six of the standing blocked-on-you questions in one message
@@ -879,6 +963,30 @@ the board. That is a sequencing decision, not a reason to soften the refusal.
 - [ ] **An uncommissioned safety processor refuses heating enable** — the
       owner's answer was an unqualified NO. **Last**, per the ordering note
       above
+
+Added 2026-08-28, same conversation — these are about making the commissioning
+surface usable rather than merely correct:
+
+- [ ] **The commissioning page is far too complex** (owner's words). It exposes
+      58 raw safety parameters as a flat id/value form. Every parameter is to be
+      classified DERIVED (computable from what the operator already told us),
+      ASKED (genuinely needs a human), or DEFAULTED (has a safe documented
+      default they never see). The measure of success is how short the ASKED
+      list is. Spec in progress at `firmware/KilnFW/docs/COMMISSIONING_UX.md`
+- [ ] **Mains voltage becomes a dropdown** — 120, 240, 380, 460 and any other
+      distinct standard worth offering. `CONFIG_REFERENCE.md` §3 says unset
+      means "report --, never assume", so an explicit unset option survives
+- [ ] **Current-monitor calibration comes from the zones config**, not from the
+      commissioning page — it consumes the per-zone normal-current measurement
+      rather than asking for numbers
+- [ ] **The safety thermocouple and safety relay configuration move into the
+      zones config, shown but NOT reassignable.** Visible where the rest of the
+      zone wiring is described, read-only because reassigning them is not an
+      operator decision
+- [ ] **An over-current guard to pair with the under-current guard**, set as a
+      PERCENTAGE of the measured normal current. Specified symmetrically with
+      the existing S3/S4/S11 family, and it must NOT trip on a zone whose
+      normal has never been measured
 
 **Answered and closed, recorded so they are not re-asked:** every relay is to
 be rated for 100% duty cycle and inrush is negligible — the board is designed
