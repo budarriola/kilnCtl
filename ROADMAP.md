@@ -1,7 +1,7 @@
 # kilnCtl Roadmap — both processors
 
-> **Status:** planning · **Last reviewed:** 2026-08-28 (M11 closed but for the
-> LCD work; M12 opened from the owner's commissioning answers)
+> **Status:** planning · **Last reviewed:** 2026-08-28 (M11 closed; M12a opened
+> and closed the same day; M12/M13 in progress)
 > **Start here:** the [What is actually left](#what-is-actually-left) section
 > immediately below is the short answer; the milestones are the detail.
 > **Keep this file current.** This is the top-level dispatch board: the place to
@@ -62,14 +62,14 @@ What is still genuinely open is short:
 
 | Size | Item | Where |
 |---|---|---|
-| S | LCD: temperature page stops offering a manual toggle for **zone-assigned** relays, keeps it for the others | M11 |
 | S | A guard that every `src/**.c` is in its CMakeLists or explicitly excluded — `tick_timing.c` passed host tests and failed the target link | [What is actually left](#what-is-actually-left) |
 | S | Remove the 80 °C fixture ceilings before a real kiln — a concrete instance of `SaftyFW/TODO.md` phase 9's "confirm no test threshold was left in place" | ibid. |
-| M | **LCD back buttons do not work.** Reported 2026-08-28; the board reports `touch_calibrated: true`, so the obvious explanation is ruled out and the cause is unknown | M11 |
+| M | **LCD back buttons do not work.** Reported 2026-08-28; the board reports `touch_calibrated: true`, so the obvious explanation is ruled out and the cause is unknown. Still open — an investigation ruled out the z-order trap, the shared `nav_cb`, and per-visit rebuild, without finding it | M11 |
+| M | **The PC-link bridge drops every few seconds** (`PC link lost — dropping all relays`) and recovers. Fail-safe direction and it deliberately does not assert the isolated fault line, but it wants understanding before a real firing | M10 |
+| S | A host harness that can link `safety_link.c`. `trip_fault_sources_valid` decides whether an operator is told the cause of a trip or "not captured", and it has no automated test because nothing links that file off-target | M13 |
+| M | One shared heat claim replacing three racy pairwise interlocks between the profile executor, autotune and the zone sweep — check-then-start is atomic on none of them | M12 |
 | M | `mykicadMcp/` and `pdfMcp/` moved under `tools/` | M7 |
-| L | LCD consolidation: safety-processor / board-health / thermocouple-fault pages folded into LCD diagnostics and removed; kiln setup, thermocouple types and kiln config removed; profiles to the top-left and the whole menu on one page | M11 |
 | L | **HTTP connection resets under concurrency.** Has a reproducer and two ruled-out mechanisms, so the next step is instrumenting the failing allocation, not more black-box testing | M10 |
-| L | **M12a: the commissioning surface reports writes that never landed**, and displays values that did not come from the safety processor. Verified live 2026-08-28. Highest-consequence open item in the repo — S1's absolute ceiling cannot be commissioned at all today | M12a |
 | S | Delete the twelve stale `display_*` MCP tools (owner left the choice to me; `display_bridge_task` is confirmed dead on hardware, so there is nothing to restore them onto) | M12 |
 | M | Known-good config presets: factory-default then load, so tests start from the same board every time | M1 |
 | M | Mains voltage as a dropdown; safety thermocouple and relay config shown read-only in the zones config | M12 |
@@ -827,13 +827,21 @@ spreading one subject across several pages.**
       4, which rule R0 had been holding closed at ambient, came up open
 - [x] Names for relays not assigned to a zone (`bc3f7ad`) — a separate NVS key
       rather than more bytes in `zones_cfg_t`, which had none to give
-- [ ] LCD: temperature page stops offering a manual toggle for zone-assigned
+- [x] LCD: temperature page stops offering a manual toggle for zone-assigned
       relays (visible, not hidden — removing the control, not the reading),
       keeps it for non-zone relays
-- [ ] LCD: safety-processor, board-health and thermocouple-fault pages folded
+- [x] LCD: safety-processor, board-health and thermocouple-fault pages folded
       into the LCD diagnostics page and removed; kiln setup, thermocouple types
       and kiln config pages removed; profiles moved to the top-left of the main
-      menu and the whole menu scaled to one page
+      menu and the whole menu scaled to one page. Diagnostics is now six
+      Prev/Next-paged screens under one nav item — the honest way to combine
+      three pages' content without scrolling or silently dropping any of it
+- [x] LCD: a planned-profile preview. The LCD could only draw a planned curve
+      for a profile ALREADY RUNNING (`ui_page_home.c:843` gates it on
+      `state != IDLE`), so a profile could never be previewed before firing it
+      the way `/profiles` allows on the web. The preview went on the
+      profile-detail page rather than the home chart, which stays coupled to the
+      running executor's snapshot and keeps its IDLE guard intact
 
 **The constraint that shapes most of this**: `zones_cfg_t` is 500 bytes
 against a hard 512-byte `ZONES_CONFIG_BLOB_MAX_SIZE`, and the timing-profile
@@ -852,7 +860,7 @@ the version of this that returns `sizeof` the *current* struct for the *old*
 version — it rejected every profile on the owner's board and marked them
 unused, and only a hardware flash caught it.
 
-## M12a — The commissioning surface currently lies · *opened 2026-08-28, URGENT*
+## M12a — The commissioning surface lied · *opened and closed 2026-08-28*
 
 Found by an opus audit on 2026-08-28, triggered by a routine attempt to set
 `abs_max_temp_c = 80` on the bench. **Three `POST /api/safety/commissioning`
@@ -896,15 +904,43 @@ Four defects, each verified against source:
    misleading zero" branch unreachable. **Fifth instance** of a report that
    structurally cannot be false.
 
-- [ ] Stash an unclaimed REJECTED frame the way CONFIG_PAGE is stashed
-- [ ] **Confirm commits positively by reading `config_crc` back.** The audit is
-      explicit that the stash alone still leaves `ok` meaning "no rejection
-      seen"; a read-back is the only version of this that cannot lie
-- [ ] Refetch after commit and report the CONFIRMED value, not the sent one
-- [ ] Carry `fields_set` through the CONFIG_PAGE codec so `set` can be false
-- [ ] Fix or delete `fetched_ms_ago` — a field that always lies is worse than
-      no field
-- [ ] Surface the ARMED/GRACE write window (below) in the page itself
+- [x] Stash an unclaimed REJECTED frame the way CONFIG_PAGE is stashed
+- [x] **Confirm commits positively by reading `config_crc` back.** The audit was
+      right that a stash alone leaves `ok` meaning "no rejection seen"; the
+      read-back compares every submitted field against what the Pico returns
+- [x] Refetch after commit and report the CONFIRMED value, not the sent one
+- [x] Carry `fields_set` through the CONFIG_PAGE codec so `set` can be false —
+      protocol 7→8, floor held at 7, and the ESP now refuses to call anything
+      "set" when the peer is older than 8 **or its version is unknown**
+- [x] `fetched_ms_ago` reports real fetch age; an NVS load no longer stamps it
+- [x] Surface the ARMED/GRACE write window in the page itself
+
+**Closed 2026-08-28, verified on hardware (`ddbd024`, `3149393`).** The page now
+reports `abs_max_temp_c {set: false}` where it used to report a commissioned
+0 °C, `cached_config_crc == live_config_crc` with `stale: false`, and a refused
+write says so instead of returning `{"ok":true}`.
+
+**And fixing it immediately exposed an older defect it had been hiding.** With
+the read-back real for the first time, page 0 of the config fetch arrived and
+**page 1 timed out on every attempt** — so the processor still could not be
+commissioned. `cmd_config_page` had been **0** for the life of this project:
+the ESP had never once fetched a page, so a page-1 timeout had nothing to
+surface through. The cause was not the Pico, which answered in under 1 ms and
+dropped no frame: `uart_protocol_rx_task` read UART bytes 32 at a time, so a
+~157-253 byte CONFIG_PAGE needed 5-8 scheduler round trips against a ~145 ms
+budget while the small STATUS/DIAG/POWER frames that always worked needed 1-2.
+Fixed by reading a whole frame in one go and giving the reply 300 ms of margin
+— the 2000 ms multi-page ceiling is untouched, because growing *that* is what
+caused an earlier panic-reboot regression. Two more bugs surfaced in the same
+instrumentation: `link_task` polled its RX ring once per 100 ms (now 10), and
+the pre-send drain discarded a CONFIG_PAGE for the wrong index instead of
+stashing it, so a late page-1 reply could never be rescued.
+
+**`abs_max_temp_c = 80` is now committed and confirmed on the bench — S1's
+absolute ceiling is armed for the first time in this project.** The board still
+reports `commissioned: false`, honestly: `tc_source`, `borrowed_zone_index` and
+`tc_placement_mode` remain unset. The dangerous half is closed; the descriptive
+half is what M12's four-question flow collects.
 
 **And the constraint this uncovered, which shapes M12's whole design:** config
 writes are refused whenever the relay owner is `ARMED` (`config_store_flash.c:279`),
