@@ -65,7 +65,6 @@ What is still genuinely open is short:
 | L | **The HTTP reset is not a heap failure** — proven, not argued. Remaining candidates are lwIP or `esp_http_server`'s accept/select loop under `max_open_sockets=13`, which needs a different instrumentation surface | M10 |
 | M | `mykicadMcp/` and `pdfMcp/` moved under `tools/` | M7 |
 | L | **HTTP connection resets under concurrency.** TCP-layer instrumentation built and live; 188 requests across varied burst sizes reproduced nothing (rate appears lower than the original 9/80 measurement, unconfirmed why). Still unreproduced under instrumentation, not root-caused, not closed — an absence of failure is not a fix, see M10 for the honest accounting | M10 |
-| L | **Make the commissioning page simple.** 58 raw parameters classified DERIVED / ASKED / DEFAULTED; the ASKED list is the score | M12 |
 | L | **Every fault says what was detected and what to do** — a standing rule, not a closing milestone. S6a was the example: the cause was measured and held on the ESP and simply never shown next to the trip | M13 |
 | S | Thermocouple maximum inferred from thermocouple type rather than entered — `TC_MAX_C_BY_TYPE` exists but only warns on contradiction, doesn't set the value | M12 |
 | M | Runtime check that each CT is on the zone it is configured for (the sweep and the guard both exist; this is the live comparison) | M12 |
@@ -915,12 +914,16 @@ the board. That is a sequencing decision, not a reason to soften the refusal.
 Added 2026-08-28, same conversation — these are about making the commissioning
 surface usable rather than merely correct:
 
-- [ ] **The commissioning page is far too complex** (owner's words). It exposes
-      58 raw safety parameters as a flat id/value form. Every parameter is to be
-      classified DERIVED (computable from what the operator already told us),
-      ASKED (genuinely needs a human), or DEFAULTED (has a safe documented
-      default they never see). The measure of success is how short the ASKED
-      list is. Spec in progress at `firmware/KilnFW/docs/COMMISSIONING_UX.md`
+- [x] **The commissioning page is far too complex** (owner's words). Shipped
+      2026-08-28 (`64d0a8e`): the page now asks four questions (kiln maximum
+      temperature, where the safety thermocouple sits, mains voltage,
+      expected power), writing six parameters — the ones nothing else can
+      derive. The full 58-parameter list stays reachable under a closed-by-
+      default `<details>` Advanced view for anyone who needs it, but the
+      guided four-question flow is what a landing operator sees.
+      `firmware/KilnFW/docs/COMMISSIONING_UX.md` tracks the field-by-field
+      DERIVED/ASKED/DEFAULTED classification and is kept in sync with the
+      real page, not left as a stale proposal
 - [x] **Mains voltage becomes a dropdown** — 120, 240, 380, 460 and any other
       distinct standard worth offering. `CONFIG_REFERENCE.md` §3 says unset
       means "report --, never assume", so an explicit unset option survives.

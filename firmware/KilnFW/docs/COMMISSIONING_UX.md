@@ -1,11 +1,17 @@
 # Commissioning UX — deriving the safety configuration instead of asking for it
 
-> **Status:** design · **Written:** 2026-08-27 · **Owner request:** *"look at all
+> **Status:** implemented · **Written:** 2026-08-27, guided flow shipped
+> 2026-08-28 (`64d0a8e`), `ct_channel_map`/thermocouple-max derivation shipped
+> 2026-08-28 (`069f05e`) · **Owner request:** *"look at all
 > of the settings in the safety commissioning page, and think if there is a user
 > friendly way to derive these settings. this page is far too complex."*
 >
-> This is a **specification, not an implementation**. No code was changed to
-> write it.
+> This started as a specification with no code behind it (2026-08-27). It is
+> now the reference this repo keeps in sync with what's actually shipped —
+> the guided flow, the derivations, and the field classifications below
+> describe the real page, not a proposal for one. Anything still marked
+> **NEW** or **CHANGE** below is the remaining gap between this doc and the
+> code.
 >
 > **Authorities this file answers to, and does not override:**
 > `SaftyFW/docs/CONFIG_REFERENCE.md` (what each field is, its default, its risk
