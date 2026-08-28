@@ -1,0 +1,65 @@
+{
+  "_comment": [
+    "kilnCtl bench-fixture known-good config preset. DATA ONLY -- never",
+    "compiled into any firmware image (see JOB 2 in the task that created",
+    "this file / tools/PcTools/README.md 'Config presets'). This describes",
+    "THIS test bench, not a real kiln.",
+    "",
+    "max_temp_c = 80.0 on every zone is a FIXTURE ceiling, not a kiln limit.",
+    "It exists because the bench's heating elements and enclosure are only",
+    "rated/instrumented for bench testing at low temperature -- see",
+    "firmware/KilnFW/TODO.md 2026-08-28 section ('THE HEATING ELEMENTS ARE",
+    "NOW PHYSICALLY CONNECTED') and SaftyFW/TODO.md phase 9 'confirm no",
+    "test threshold was left in place'. This 80C value MUST NOT be carried",
+    "into a real kiln build/config -- a real kiln's max_temp_c belongs to",
+    "that kiln's own commissioning data, not this file.",
+    "",
+    "Captured 2026-08-27 by reading the live bench board with",
+    "kiln_call(name='get_board_state') (read-only) and copying its",
+    "control_zones section verbatim, per the owner's request. Reflects: 3",
+    "zones, 3 thermocouples, 4 relays with relays 1-3 zone-owned (masks",
+    "0x1/0x2/0x4) and relay 4 (mask 0x8) free/unassigned."
+  ],
+  "name": "bench_fixture",
+  "description": "This bench's known-good starting config: 3 zones, 80C fixture ceiling on all zones, current relay map (relays 1-3 zone-owned, relay 4 free), 3 thermocouples.",
+  "thermo_count": 3,
+  "relay_count": 4,
+  "zones": [
+    {
+      "index": 0,
+      "relay_mask": 1,
+      "control_mode": 2,
+      "cal_offset_c": 0.0,
+      "pid_kp": 2.0,
+      "pid_ki": 0.1,
+      "pid_kd": 1.0,
+      "max_ramp_c_per_hr": 900.0,
+      "max_temp_c": 80.0,
+      "min_temp_c": 0.0
+    },
+    {
+      "index": 1,
+      "relay_mask": 2,
+      "control_mode": 0,
+      "cal_offset_c": 0.0,
+      "pid_kp": 0.0,
+      "pid_ki": 0.0,
+      "pid_kd": 0.0,
+      "max_ramp_c_per_hr": 0.0,
+      "max_temp_c": 80.0,
+      "min_temp_c": 0.0
+    },
+    {
+      "index": 2,
+      "relay_mask": 4,
+      "control_mode": 0,
+      "cal_offset_c": 0.0,
+      "pid_kp": 0.0,
+      "pid_ki": 0.0,
+      "pid_kd": 0.0,
+      "max_ramp_c_per_hr": 0.0,
+      "max_temp_c": 80.0,
+      "min_temp_c": 0.0
+    }
+  ]
+}

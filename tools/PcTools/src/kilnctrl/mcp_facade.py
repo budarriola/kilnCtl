@@ -26,7 +26,6 @@ GROUP_PREFIXES = (
     ("thermo_", "thermo"),
     ("io_", "io"),
     ("expander_", "io"),
-    ("display_", "display"),
     ("touch_", "touch"),
     ("safety_", "safety"),
     ("ota_", "ota"),
@@ -69,6 +68,10 @@ GROUP_OVERRIDES = {
     # LVGL page interaction.
     "list_buttons": "ui",
     "press_button": "ui",
+    # Known-good config presets -- a consistent starting point for tests.
+    "list_config_presets": "presets",
+    "load_config_preset": "presets",
+    "factory_default_then_load_preset": "presets",
 }
 
 #: Extra search tokens for tools whose names hide what they are for.
@@ -92,8 +95,7 @@ KEYWORDS = {
     "debug_read_registers": ("pc", "sp", "primask", "core", "cpu"),
     "flash_firmware": ("esp32", "jtag", "openocd", "program"),
     "saleae_capture": ("logic", "analyzer", "trace", "waveform", "timing"),
-    "display_send_image": ("picture", "bitmap", "png", "screen"),
-    "touch_inject": ("tap", "press", "click", "simulate"),
+    "touch_inject": ("tap", "press", "click", "simulate", "screen"),
     "press_button": ("lvgl", "ui", "tap", "screen", "page"),
     "profiles_start": ("firing", "ramp", "soak", "cone", "schedule"),
     "autotune_start": ("pid", "tuning", "relay", "ziegler"),
@@ -105,6 +107,9 @@ KEYWORDS = {
     "build_saftyfw_host_tests": ("unit", "msvc", "offtarget", "pytest"),
     "run_pctools_tests": ("pytest", "unit", "python", "regression"),
     "run_repo_checks": ("lint", "guard", "invariant", "ci", "grep", "audit"),
+    "list_config_presets": ("bench", "fixture", "known", "good", "default", "json"),
+    "load_config_preset": ("bench", "fixture", "known", "good", "default", "consistent", "zones"),
+    "factory_default_then_load_preset": ("factory", "reset", "consistent", "baseline", "bench", "fixture"),
 }
 
 #: Query word -> tokens to also score against. One-way on purpose: expanding
@@ -116,9 +121,6 @@ SYNONYMS = {
     "thermocouple": ("thermo", "max31856"),
     "hot": ("thermo", "temperature"),
     "relay": ("io", "expander", "sx1509"),
-    "screen": ("display", "lcd", "tft"),
-    "lcd": ("display",),
-    "tft": ("display",),
     "flash": ("program", "debug", "openocd", "firmware"),
     "program": ("debug", "flash", "openocd"),
     "jtag": ("debug", "openocd"),
@@ -143,6 +145,9 @@ SYNONYMS = {
     "pin": ("gpio", "config"),
     "memory": ("debug", "read"),
     "register": ("reg",),
+    "preset": ("presets",),
+    "default": ("presets",),
+    "baseline": ("presets",),
 }
 
 #: The sequences that are actually run on this bench, spelled out so the first

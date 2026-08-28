@@ -45,7 +45,7 @@ Important limitation: ``ok`` only means the frame was delivered to the ESP
 task's inbox. uart_bridge.c ACKs at the protocol layer and never sends an
 application-level status frame back for a command, so there is no way from the
 PC to learn whether e.g. the I2C write to the SX1509 actually succeeded. The
-*query* tools (thermo_read, io_read, display_read_id, safety_get_status,
+*query* tools (thermo_read, io_read, safety_get_status,
 get_pin_config, get_fw_version) are the exception -- those return real device
 data.
 """
@@ -77,7 +77,7 @@ from mcpkit import workbench
 from mcpkit.registry import collapse
 from mcpkit.serve import serve
 
-from . import actions, debug_probe, devices, mcp_facade, openocd_util, pico_gpio_probe, settings, wifi_credentials
+from . import actions, config_presets, debug_probe, devices, mcp_facade, openocd_util, pico_gpio_probe, settings, wifi_credentials
 from .autotune import AutotuneClient, AutotuneQueryError
 from .control import ControlClient, ControlQueryError
 from .device_log import LogClient
@@ -90,6 +90,7 @@ from .io_expander import IoClient, IoQueryError
 from .link_hub import get_shared_link
 from .profiles import ProfilesClient, ProfilesQueryError
 from .protocol import (
+    FACTORY_RESET_SCOPE_KILN,
     PROFILES_SAVE_ID_NEW,
     profile_id_is_builtin,
     THERMO_CHANNEL_ALL,
@@ -1489,45 +1490,19 @@ def expander_reset(hard: bool = False) -> str:
     return _io_mutating(f"SX1509 {'hard' if hard else 'soft'} reset", lambda: _io.sx_reset(hard))
 
 
-# ---------------------------------------------------------------------------
-# DISPLAY -- ILI9488 480x320 on J2 (task 4)
-#
-# D/C and ~RESET are on the expander, so every command/data transition costs
-# an I2C transfer -- full-screen work goes through fill_rect or a blit, never
-# repeated small writes. Colors are RGB565 u16; build one with
-# display_rgb565() if you think in 8-bit RGB.
-# ---------------------------------------------------------------------------
-@_tool()
-def display_read_id() -> str:
-    """Read the panel's RDDID bytes and its current (rotated) width/height.
-
-    A query, and the only way to distinguish a wired-up panel from every
-    drawing command vanishing into an unconnected connector.
-    """
-    try:
-        ident = _display.read_id()
-    except DisplayQueryError as exc:
-        return f"error: {exc}"
-    return ident.describe()
-
-
-@_tool()
-def display_rgb565(r: int, g: int, b: int) -> str:
-    """Convert 8-bit R/G/B into the RGB565 integer the other display tools take.
-
-    Host-side only -- no device round trip.
-    """
-    try:
-        color = devices.rgb565(r, g, b)
-    except ValueError as exc:
-        return f"error: {exc}"
-    return f"{color} (0x{color:04X})"
-
-
 def _touch_mutating(label: str, call: "Callable[[], devices.OkReason]") -> str:
     """Run one TOUCH write (INJECT/SET_TAP_DUMP/LOG_TAP_TARGETS) and format
-    its :class:`OkReason` -- same shape as :func:`_display_mutating`, see
-    TouchClient._write()."""
+    its :class:`OkReason` -- see TouchClient._write().
+
+    (Used to say "same shape as :func:`_display_mutating`" -- that helper and
+    the twelve-plus ``display_*`` MCP tools it backed were removed as stale:
+    the firmware's ``display_bridge_task`` is intentionally dead code now that
+    LVGL owns the ILI9488 outright. See firmware/KilnFW/TODO.md sec 10.1.
+    ``_display`` (the :class:`DisplayClient` instance) stays -- it still
+    backs the generic ``press_button``/``list_buttons`` DISPLAY actions in
+    ``actions.py``, which also drive ``gui.py``'s Display panel and were left
+    out of this cleanup as a separate, still-referenced front end.)
+    """
     try:
         result = call()
     except TouchQueryError as exc:
@@ -1536,167 +1511,6 @@ def _touch_mutating(label: str, call: "Callable[[], devices.OkReason]") -> str:
         return f"ok - {label}"
     detail = f": {result.reason}" if result.reason else ""
     return f"refused - {label}{detail}"
-
-
-def _display_mutating(label: str, call: "Callable[[], devices.OkReason]") -> str:
-    """Run one DISPLAY one-shot write and format its :class:`OkReason`.
-
-    Same shape as thermo_config_channel()/safety_request_enable() etc: a
-    refusal (driver-error reply) is a normal return, not an exception --
-    only a delivery failure (no transport ACK) raises. Before this, every
-    DISPLAY write below went through the bare fire-and-forget ``_send()``,
-    which cannot see a refusal at all -- see display.py's DisplayClient._write.
-    """
-    try:
-        result = call()
-    except DisplayQueryError as exc:
-        return f"error: {exc}"
-    if result.ok:
-        return f"ok - {label}"
-    detail = f": {result.reason}" if result.reason else ""
-    return f"refused - {label}{detail}"
-
-
-@_tool()
-def display_reset(hard: bool = False) -> str:
-    """Reset the panel: software reset command, or pulse ~RESET via the expander."""
-    return _display_mutating("panel reset", lambda: _display.reset(hard))
-
-
-@_tool()
-def display_set_power(on: bool) -> str:
-    """Turn the panel on, or off (display-off + sleep-in)."""
-    return _display_mutating(f"power {'on' if on else 'off'}", lambda: _display.set_power(on))
-
-
-@_tool()
-def display_set_rotation(rotation: int) -> str:
-    """Set MADCTL rotation 0-3: 0/2 portrait 320x480, 1/3 landscape 480x320."""
-    return _display_mutating(f"rotation {rotation}", lambda: _display.set_rotation(rotation))
-
-
-@_tool()
-def display_set_invert(invert: bool) -> str:
-    """Invert (or restore) the panel's display polarity."""
-    return _display_mutating(
-        f"invert {'on' if invert else 'off'}", lambda: _display.set_invert(invert)
-    )
-
-
-@_tool()
-def display_clear(color: int = 0x0000) -> str:
-    """Fill the whole screen with one RGB565 color (default black)."""
-    return _display_mutating(f"clear to 0x{color:04X}", lambda: _display.clear(color))
-
-
-@_tool()
-def display_fill_rect(x: int, y: int, w: int, h: int, color: int) -> str:
-    """Fill a rectangle with an RGB565 color."""
-    return _display_mutating(
-        f"fill_rect ({x},{y} {w}x{h})", lambda: _display.fill_rect(x, y, w, h, color)
-    )
-
-
-@_tool()
-def display_draw_rect(x: int, y: int, w: int, h: int, color: int) -> str:
-    """Draw a 1px rectangle outline in an RGB565 color."""
-    return _display_mutating(
-        f"draw_rect ({x},{y} {w}x{h})", lambda: _display.draw_rect(x, y, w, h, color)
-    )
-
-
-@_tool()
-def display_draw_line(x0: int, y0: int, x1: int, y1: int, color: int) -> str:
-    """Draw a line from (x0,y0) to (x1,y1) in an RGB565 color."""
-    return _display_mutating(
-        f"draw_line ({x0},{y0})-({x1},{y1})",
-        lambda: _display.draw_line(x0, y0, x1, y1, color),
-    )
-
-
-@_tool()
-def display_set_text_cursor(x: int, y: int) -> str:
-    """Move the text cursor to a pixel position (top-left of the next glyph)."""
-    return _display_mutating(
-        f"text cursor ({x},{y})", lambda: _display.set_text_cursor(x, y)
-    )
-
-
-@_tool()
-def display_set_text_style(
-    fg: int, bg: int = 0x0000, size: int = 1, opaque_background: bool = True
-) -> str:
-    """Set text colors (RGB565), integer scale 1-8, and background opacity."""
-    return _display_mutating(
-        "text style set",
-        lambda: _display.set_text_style(fg, bg, size, opaque_background),
-    )
-
-
-@_tool()
-def display_print(text: str) -> str:
-    """Draw ASCII text at the cursor, which advances and wraps at the right edge."""
-    return _display_mutating("text printed", lambda: _display.print_text(text))
-
-
-@_tool()
-def display_send_image(
-    path: str,
-    x: int = 0,
-    y: int = 0,
-    width: int = devices.DISPLAY_NATIVE_WIDTH,
-    height: int = devices.DISPLAY_NATIVE_HEIGHT,
-    fit: bool = True,
-) -> str:
-    """Load an image file, scale it, and stream it to the panel.
-
-    Uses BLIT_BEGIN/BLIT_DATA/BLIT_END. `fit` letterboxes to preserve aspect
-    ratio; fit=false stretches to exactly width x height. Requires Pillow.
-
-    This is slow by construction: RGB565 at 115200 baud is roughly 63 pixels
-    per protocol frame, so a full 480x320 image is ~2440 frames and takes on
-    the order of a minute, filling the panel top-to-bottom as it arrives.
-    """
-    if _info.compatible is not True:
-        return "error: refused - firmware version not confirmed (call get_fw_version first)"
-    from .display import image_to_rgb565
-
-    try:
-        pixels, out_w, out_h = image_to_rgb565(path, width, height, fit=fit)
-    except RuntimeError as exc:  # Pillow missing -- carries the install hint
-        return f"error: {exc}"
-    except (OSError, ValueError) as exc:
-        return f"error: could not load {path}: {exc}"
-    try:
-        frames = _display.blit(x, y, out_w, out_h, pixels)
-    except (BlitError, ValueError) as exc:
-        return f"error: {exc}"
-    return f"ok - streamed {out_w}x{out_h} at ({x},{y}) in {frames} frames"
-
-
-@_tool()
-def display_test_pattern(
-    x: int = 0,
-    y: int = 0,
-    width: int = devices.DISPLAY_NATIVE_WIDTH,
-    height: int = devices.DISPLAY_NATIVE_HEIGHT,
-) -> str:
-    """Stream colour bars plus a grey ramp to the panel.
-
-    Exercises the whole blit path with no image file and no Pillow: the
-    saturated bars make a swapped or truncated colour channel obvious, and the
-    ramp catches an RGB565->RGB666 expansion that has lost its low bits.
-    """
-    if _info.compatible is not True:
-        return "error: refused - firmware version not confirmed (call get_fw_version first)"
-    from .display import test_pattern_rgb565
-
-    try:
-        pixels = test_pattern_rgb565(width, height)
-        frames = _display.blit(x, y, width, height, pixels)
-    except (BlitError, ValueError) as exc:
-        return f"error: {exc}"
-    return f"ok - streamed {width}x{height} test pattern in {frames} frames"
 
 
 # ---------------------------------------------------------------------------
@@ -2714,6 +2528,96 @@ def control_set_zone_model(zone: int, k_dc: float, tau_s: float, dead_time_s: fl
         return f"ok - zone {zone} model set"
     detail = f": {result.reason}" if result.reason else ""
     return f"refused - could not set zone {zone} model{detail}"
+
+
+# ---------------------------------------------------------------------------
+# CONFIG PRESETS -- known-good starting configs for a consistent test basis.
+# Data-driven (tools/PcTools/config_presets/*.json), never compiled into
+# firmware -- see config_presets.py's module docstring for the full SCOPE
+# rationale (only PID/model are written; relay_mask/max_temp_c/control_mode
+# are read-only over this link today, hook documented there).
+# ---------------------------------------------------------------------------
+@_tool()
+def list_config_presets() -> str:
+    """List every known-good config preset (name + description).
+
+    Presets live as JSON under ``tools/PcTools/config_presets/`` -- never
+    compiled into firmware, so a bench-only setting (like a fixture's
+    lowered temperature ceiling) can never leak into a real kiln build.
+    """
+    presets = config_presets.list_presets()
+    if not presets:
+        return f"no presets found under {config_presets.presets_dir()}"
+    return "\n".join(f"{p['name']}: {p['description']}" for p in presets)
+
+
+@_tool()
+def load_config_preset(name: str) -> str:
+    """Apply a known-good preset's zone PID/model gains to the live board.
+
+    Read-only against everything this link cannot write: a preset also
+    carries relay_mask/max_temp_c/control_mode/thermo_count/relay_count as
+    reference data (compare against get_board_state's control_zones), but
+    those fields are NOT written back -- the firmware's UART CONTROL task
+    only exposes SET_ZONE_PID/SET_ZONE_MODEL, see config_presets.py's module
+    docstring for why the rest is a documented hook rather than attempted.
+
+    Does NOT reset, does NOT touch relays, does NOT request enable.
+    """
+    try:
+        preset = config_presets.load_preset_data(name)
+    except config_presets.ConfigPresetError as exc:
+        return f"error: {exc}"
+    try:
+        result = config_presets.apply_preset(_control, preset)
+    except ControlQueryError as exc:
+        return f"error: {exc}"
+    return result.describe()
+
+
+#: FACTORY_RESET reboots ~500ms after the ACK; ESP32-S3 boot to first
+#: GET_FW_VERSION push is normally a few seconds. Generous on purpose --
+#: this only runs when a caller explicitly asked for a reboot.
+FACTORY_RESET_REBOOT_TIMEOUT_S = 20.0
+
+
+@_tool()
+def factory_default_then_load_preset(name: str, scope: int = FACTORY_RESET_SCOPE_KILN) -> str:
+    """Factory-default the board, then apply a known-good preset -- one
+    callable step so a test always starts from the same place.
+
+    ``scope`` defaults to KILN (zones config only; matches the preset's own
+    scope) -- see devices.FACTORY_RESET_SCOPE_* for the other options.
+    FACTORY_RESET reboots the board ~500ms after the ACK (system_factory_
+    reset's own docstring); this waits for the post-reboot firmware-version
+    push before applying the preset, so it isn't racing the boot.
+
+    This is the disruptive lever in this module: it reboots the board and
+    then writes PID/model gains. Never invoke it against a bench with a
+    firing in progress or with the safety processor ARMED.
+    """
+    try:
+        preset = config_presets.load_preset_data(name)
+    except config_presets.ConfigPresetError as exc:
+        return f"error: {exc}"
+    send_result = _link.send(
+        dst_task=UART_TASK_ID_SYSTEM, src_task=UART_TASK_ID_SYSTEM,
+        payload=devices.system_factory_reset(scope), dst_device=Device.ESP,
+    )
+    if not send_result.ok:
+        return f"error: factory reset request was not ACKed ({send_result})"
+    try:
+        _info.get_fw_version(timeout=FACTORY_RESET_REBOOT_TIMEOUT_S)
+    except InfoQueryError as exc:
+        return (
+            f"error: factory reset sent, but the board did not come back up "
+            f"within {FACTORY_RESET_REBOOT_TIMEOUT_S}s ({exc}) -- preset NOT applied"
+        )
+    try:
+        result = config_presets.apply_preset(_control, preset)
+    except ControlQueryError as exc:
+        return f"factory reset ok, but preset apply failed: {exc}"
+    return f"factory reset ok (scope={scope})\n" + result.describe()
 
 
 # ---------------------------------------------------------------------------
