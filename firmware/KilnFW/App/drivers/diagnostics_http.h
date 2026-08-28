@@ -5,31 +5,39 @@
 // detail). UI_PLAN.md's 2026-08-20 decision record explicitly merges the
 // LCD's diagnostics + board-health split into ONE web page ("the web can
 // scroll, so the ~264px split that forced them apart on the panel doesn't
-// apply") while keeping thermo-faults separate, so this module registers
-// three routes, not four:
+// apply"); the thermo-faults detail originally got its own route
+// (/diagnostics/thermo) instead, but the owner asked 2026-08-27 for it to be
+// folded into /diagnostics too ("most of the information is there anyway"),
+// so this module now registers two page routes, not three:
 //
 //   GET /diagnostics          -- ui_page_diagnostics.c + ui_page_board_health.c
-//   GET /diagnostics/thermo   -- ui_page_thermo_faults.c
+//                                 + ui_page_thermo_faults.c (folded in 2026-08-27)
 //   GET /safety               -- ui_page_safety.c, plus the DIAG/TRIP_EVENT
 //                                 detail the LCD's ~264px budget had no room
 //                                 for (already on GET /api/status, per
 //                                 UI_PLAN.md section 5)
-//   GET /api/thermo/faults    -- per-channel MAX31856 fault/CJ/timeout data
-//                                 for /diagnostics/thermo, added 2026-08-21
-//                                 (see diagnostics_http.c's
+//   GET /api/thermo/faults    -- per-channel MAX31856 fault/CJ/timeout data,
+//                                 added 2026-08-21 (see diagnostics_http.c's
 //                                 thermo_faults_get_handler() doc comment for
-//                                 the full root-cause writeup)
+//                                 the full root-cause writeup). Still its own
+//                                 endpoint after the 2026-08-27 page fold --
+//                                 only the PAGE that used to live at
+//                                 /diagnostics/thermo was removed; the route
+//                                 that route rendered is now served from
+//                                 /diagnostics's own "Thermocouple faults"
+//                                 section instead.
 //
 // /diagnostics and /safety are pure static pages with no server-side data
 // gathering of their own -- every number they show comes from GET /api/status
-// (dashboard_http.c) and GET /api/board_temps (board_temps.c), same
-// "one reader, existing owner" shape as readiness_page.html reading GET
-// /api/readiness. /diagnostics/thermo is the one exception: it used to lean
-// on GET /api/status too, but that endpoint answers every field (relays,
-// safety link, heap, thermocouples, everything) in one HTTP response built
-// from one MAX31856_read_all() call, so a single wedged channel could leave
-// the whole response -- and the thermo-faults page's "Loading..." -- stuck
-// forever. GET /api/thermo/faults exists so this page can query each channel
+// (dashboard_http.c), GET /api/board_temps (board_temps.c) and GET
+// /api/thermo/faults, same "one reader, existing owner" shape as
+// readiness_page.html reading GET /api/readiness. The thermo-faults section
+// is the one exception: it used to lean on GET /api/status too (before it had
+// its own route), but that endpoint answers every field (relays, safety
+// link, heap, thermocouples, everything) in one HTTP response built from one
+// MAX31856_read_all() call, so a single wedged channel could leave the whole
+// response -- and this section's "Loading..." -- stuck forever. GET
+// /api/thermo/faults exists so this section can query each channel
 // independently through thermo_owner, which bounds every channel's answer to
 // THERMO_OWNER_WAIT_MS regardless of what any other channel is doing.
 #ifndef DIAGNOSTICS_HTTP_H

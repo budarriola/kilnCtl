@@ -70,6 +70,35 @@ extern "C" {
 /* zone_cfg_t::name -- the operator-entered per-zone label. */
 #define ZONE_NAME_MAX_LEN 15
 
+/* relay_names_cfg_t::names[] -- the operator-entered label for a relay that
+ * is NOT currently claimed by any zone (owner report, 2026-08-27+1: "the
+ * user should be able to assign names to relays not assigned to zones as
+ * well" -- the heating elements were just physically wired, and a coming
+ * firing-profile feature lets a segment drive a bare relay directly, where
+ * an operator picking "relay 3" off a dropdown should be picking "Vent
+ * fan"). Same length as ZONE_NAME_MAX_LEN, deliberately NOT shortened the
+ * way TIMING_PROFILE_NAME_MAX_LEN was: that cut was to buy back bytes inside
+ * zones_cfg_t's 512-byte ZONES_CONFIG_BLOB_MAX_SIZE ceiling, and relay names
+ * live in a SEPARATE NVS blob of their own (see zones_http.c's relay-names
+ * section header comment) that never touches that ceiling at all -- there is
+ * no budget pressure here motivating a shorter label than a zone gets. */
+#define RELAY_NAME_MAX_LEN 15
+
+
+/* zone_timing_profile_t::name -- the operator-entered label for a named
+ * safety-timing profile (2026-08-27, ZONES_CFG_VERSION 8->9, owner's request:
+ * "make it so that i can have diffrent Safety timings and assign the zones to
+ * them ... that way i dont need to copy the data multipal times"). Deliberately
+ * SHORTER than ZONE_NAME_MAX_LEN, not equal to it: zones_cfg_t now carries a
+ * whole extra MAX31856_CHANNEL_COUNT-sized array (timing_profiles[]) that a
+ * pre-timing-profiles board never had, and every byte this name field does not
+ * use is a byte of headroom under ZONES_CONFIG_BLOB_MAX_SIZE (zones_http.c's
+ * _Static_assert enforces the ceiling; see its own comment for the exact
+ * budget). 7 is enough for "Default", "Bisque", "Glaze" and similar
+ * short operator labels -- a profile name is chosen from a much smaller,
+ * more repetitive vocabulary than a zone's free-form name. */
+#define TIMING_PROFILE_NAME_MAX_LEN 7
+
 /* SaftyFW's fixed count of current-sense channels (safety_link.h's
  * SAFETY_LINK_POWER_CHANNELS == 3, current_a[3] on the status frame) -- a
  * hardware fact about the safety processor, not an operator-configured count
@@ -122,12 +151,19 @@ extern "C" {
  * guard thresholds above). */
 #define ZONE_CROSS_ZONE_DELTA_C_MAX 1000.0f
 
-/* zone_cfg_t's nine v8 per-zone overrides plus the one global
+/* The nine v8 thermal-timing overrides plus the one global
  * (pc_link_abort_silence_ms), added 2026-08-27 at the owner's request that the
- * remaining thermal-protection constants stop being magic numbers. Same
- * convention as the guard thresholds above: 0 = not configured, the module
- * substitutes its own named firmware default; 0 never disables. Bounds are
- * sanity ceilings against a typo'd submission.
+ * remaining thermal-protection constants stop being magic numbers. As of
+ * ZONES_CFG_VERSION 9 (same day, follow-up owner request: "make it so that i
+ * can have diffrent Safety timings and assign the zones to them ... that way i
+ * dont need to copy the data multipal times") the nine live on
+ * zone_timing_profile_t -- a NAMED profile a zone points at via
+ * zone_cfg_t::timing_profile -- rather than being duplicated on every
+ * zone_cfg_t; pc_link_abort_silence_ms stays a single top-level field, since
+ * it describes one PC link, not something a zone experiences. Same convention
+ * as the guard thresholds above: 0 = not configured, the module substitutes
+ * its own named firmware default; 0 never disables. Bounds are sanity
+ * ceilings against a typo'd submission.
  *
  * The duty bound is 1.0 because it is a duty fraction, not a percentage --
  * guard 1 arms when commanded duty is at or above it, so a value above 1.0
@@ -328,6 +364,36 @@ bool zones_config_get_name(uint8_t zone_index, char *out, size_t out_cap);
  * zone's name), matching a POST that omits z%u_name. */
 bool zones_config_set_name(uint8_t zone_index, const char *name);
 
+/* Owner report 2026-08-27+1 ("the user should be able to assign names to
+ * relays not assigned to zones as well"): the operator-entered name for one
+ * physical relay, stored INDEPENDENTLY of zone assignment -- see
+ * zones_http.c's relay-names section header comment for why this lives in
+ * its own NVS blob rather than as a field on zone_cfg_t/zones_cfg_t, and for
+ * the "name survives its relay becoming zone-owned" decision.
+ *
+ * relay_n is 1-based (kiln_io.h's Relay1..KILN_IO_RELAY_COUNT numbering,
+ * matching zones_config_get_relay_mask()'s bit convention -- bit N-1 there
+ * is "relay N" here). Returns false (leaving *out untouched) for an
+ * out-of-range relay_n or a NULL/zero-capacity out buffer, same "cannot
+ * answer" convention as zones_config_get_name(). A TRUE return with an
+ * empty string is a real, different case: a relay that has never been
+ * named. Deliberately does NOT report whether relay_n is currently
+ * zone-owned -- that is a live computation over the CURRENT zone config
+ * (zone assignment can change at any time), which callers make themselves
+ * the same way rules_task.c's compute_heater_relay_mask() / rules_http.c's
+ * check_relay_not_zone_owned() already do, not something baked into this
+ * getter's answer. */
+bool zones_config_get_relay_name(uint8_t relay_n, char *out, size_t out_cap);
+
+/* Setter for the getter above. Rejects (without writing anything) a name
+ * longer than RELAY_NAME_MAX_LEN. Does NOT check zone ownership -- storage
+ * is unconditional; see this pair's header comment and zones_http.c's
+ * relay-names section for why a name is kept, not cleared, when its relay
+ * becomes zone-owned. name may be NULL, treated as an empty string (clears
+ * the name), matching zones_config_set_name()'s own convention. */
+bool zones_config_set_relay_name(uint8_t relay_n, const char *name);
+
+
 bool zones_config_get_pid(uint8_t zone_index, float *out_kp, float *out_ki, float *out_kd);
 
 /* Writer for pid_autotune's results-acceptance flow (TODO.md 6A.4:
@@ -523,7 +589,17 @@ bool zones_config_get_guard_thresholds(uint8_t zone_index, float *out_wrong_dir_
  * thresholds above use -- these getters report the stored value verbatim and
  * never substitute, so the default stays documented in exactly one place (the
  * module that owns it). Return false on a null out-pointer or an out-of-range
- * zone; the per-zone pair are gated on thermo_count, the global one is not. */
+ * zone; the per-zone pair are gated on thermo_count, the global one is not.
+ *
+ * SIGNATURE UNCHANGED by ZONES_CFG_VERSION 9 (2026-08-27, timing profiles):
+ * these two still take a zone_index and hand back nine plain floats -- neither
+ * caller (profile_executor.c, thermal_guard.c indirectly through it) needed to
+ * change at all. What changed is only WHERE zones_http.c reads the nine values
+ * from internally: zone_index now resolves to zone_cfg_t::timing_profile, then
+ * to that slot in zones_cfg_t::timing_profiles[], instead of to nine fields
+ * that used to live directly on zone_cfg_t. A caller asking "what are this
+ * zone's timing thresholds" gets the same answer either way, whether three
+ * zones share one profile or each has its own. */
 bool zones_config_get_guard_extra(uint8_t zone_index, float *out_progress_duty_min,
                                   float *out_progress_window_s, float *out_drift_hysteresis_c,
                                   float *out_frozen_eps_c, float *out_cross_zone_period_s);

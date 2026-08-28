@@ -32,17 +32,22 @@ const PAGES = [
   ['/readiness', 'Readiness'],
   ['/settings/zones', 'Zones'],
   ['/settings/relays', 'Relays'],
-  ['/settings/manual', 'Manual'],
+  // '/settings/manual' removed 2026-08-27 with the page itself -- see
+  // nav.js's removal comment.
   ['/profiles', 'Profiles'],
   ['/wifi', 'WiFi'],
   ['/ota', 'OTA'],
+  // '/diagnostics/thermo' and '/board_temps' removed 2026-08-27, folded into
+  // /diagnostics (owner request: "the board health page should be folded
+  // into the diagnostics page" / "Thermocouple Faults should also be
+  // combined into the diagnostic page") -- see nav.js's 2026-08-27 comment
+  // and diagnostics_page.html's new "Board health"/"Thermocouple faults"
+  // sections. The one /diagnostics entry above already sweeps that content.
   ['/diagnostics', 'Diagnostics'],
-  ['/diagnostics/thermo', 'ThermoFaults'],
   ['/safety', 'Safety'],
   ['/safety/commissioning', 'Commissioning'],
   ['/settings/backup', 'Backup'],
   ['/settings', 'Settings'],
-  ['/board_temps', 'BoardTemps'],
 ];
 
 // Never click these, by accessible name (case-insensitive substring).

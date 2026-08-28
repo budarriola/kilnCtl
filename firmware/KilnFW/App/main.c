@@ -1234,7 +1234,7 @@ void app_main(void)
     // it for the same reason (no ordering dependency on anything below).
     esp_err_t settings_err = settings_http_start();
     if (settings_err != ESP_OK) {
-        ESP_LOGW(TAG, "settings_http_start failed: %s -- no /settings, /settings/manual, or "
+        ESP_LOGW(TAG, "settings_http_start failed: %s -- no /settings or "
                       "/settings/display page this boot", esp_err_to_name(settings_err));
     }
 

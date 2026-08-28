@@ -27,8 +27,6 @@ static const char *TAG = "diagnostics_http";
  * budget reasoning that makes gzip the only stored representation). */
 extern const uint8_t diagnostics_page_html_gz_start[] asm("_binary_diagnostics_page_html_gz_start");
 extern const uint8_t diagnostics_page_html_gz_end[] asm("_binary_diagnostics_page_html_gz_end");
-extern const uint8_t thermo_faults_page_html_gz_start[] asm("_binary_thermo_faults_page_html_gz_start");
-extern const uint8_t thermo_faults_page_html_gz_end[] asm("_binary_thermo_faults_page_html_gz_end");
 extern const uint8_t safety_page_html_gz_start[] asm("_binary_safety_page_html_gz_start");
 extern const uint8_t safety_page_html_gz_end[] asm("_binary_safety_page_html_gz_end");
 
@@ -53,12 +51,6 @@ static esp_err_t send_gz_page(httpd_req_t *req, const char *page_name, const uin
 static esp_err_t diagnostics_page_get_handler(httpd_req_t *req)
 {
     return send_gz_page(req, "diagnostics_page.html", diagnostics_page_html_gz_start, diagnostics_page_html_gz_end);
-}
-
-static esp_err_t thermo_faults_page_get_handler(httpd_req_t *req)
-{
-    return send_gz_page(req, "thermo_faults_page.html", thermo_faults_page_html_gz_start,
-                        thermo_faults_page_html_gz_end);
 }
 
 static esp_err_t safety_page_get_handler(httpd_req_t *req)
@@ -437,8 +429,10 @@ static esp_err_t danger_stop_post_handler(httpd_req_t *req)
 }
 
 /* POST /api/diagnostics/danger/relay -- body: relay=1..KILN_IO_RELAY_COUNT,
- * on=0|1. Same field convention as dashboard_http.c's relay_post_handler(),
- * deliberately not reused directly: this endpoint's whole reason to exist is
+ * on=0|1. Same field convention the old dashboard_http.c POST /api/relay
+ * handler used (removed 2026-08-27 with manual_page.html, its only caller --
+ * see dashboard_http.h's dashboard_relay_result_t comment), deliberately not
+ * reused directly: this endpoint's whole reason to exist is
  * refusing up front (409) when danger mode is not active, rather than
  * silently falling through to the normal safety-gated path, so an operator
  * can never mistake "the section isn't armed" for "the relay refused to
@@ -571,9 +565,6 @@ esp_err_t diagnostics_http_start(void)
     static const httpd_uri_t diagnostics_uri = {
         .uri = "/diagnostics", .method = HTTP_GET, .handler = diagnostics_page_get_handler,
     };
-    static const httpd_uri_t thermo_faults_uri = {
-        .uri = "/diagnostics/thermo", .method = HTTP_GET, .handler = thermo_faults_page_get_handler,
-    };
     static const httpd_uri_t safety_uri = {
         .uri = "/safety", .method = HTTP_GET, .handler = safety_page_get_handler,
     };
@@ -614,11 +605,6 @@ esp_err_t diagnostics_http_start(void)
     esp_err_t err = httpd_register_uri_handler(server, &diagnostics_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_register_uri_handler(/diagnostics) failed: %s", esp_err_to_name(err));
-        return err;
-    }
-    err = httpd_register_uri_handler(server, &thermo_faults_uri);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "httpd_register_uri_handler(/diagnostics/thermo) failed: %s", esp_err_to_name(err));
         return err;
     }
     err = httpd_register_uri_handler(server, &safety_uri);
@@ -682,6 +668,6 @@ esp_err_t diagnostics_http_start(void)
         return err;
     }
 
-    ESP_LOGI(TAG, "diagnostics/safety/thermo-faults pages up");
+    ESP_LOGI(TAG, "diagnostics/safety pages up (thermo-faults API still served, its page folded into /diagnostics)");
     return ESP_OK;
 }

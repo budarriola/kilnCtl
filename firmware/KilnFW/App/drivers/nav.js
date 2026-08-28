@@ -42,28 +42,56 @@
 (function () {
   'use strict';
 
+  // 2026-08-27 rework (owner's four verbatim requests, applied in one pass):
+  //
+  //   (a) "the board health page should be folded into the diagnostics page.
+  //        most of the information is there anyway" -- /board_temps is gone
+  //        (diagnostics_http.c/board_temps.c); its content lives in
+  //        diagnostics_page.html's existing "Board health" card, which
+  //        already read the identical GET /api/board_temps data this menu
+  //        item pointed at, so no menu entry for it survives either.
+  //   (b) "safty timeings, safty commitioning and safty pages should be sub
+  //        menu items under a heading of safty. the menu should just show
+  //        them as sub items when the main safty item is opened not a
+  //        seprate page to hold the 3 page links" -- an EXPANDING group, not
+  //        a landing page: see the `children` array below and
+  //        buildMenuOverlay()'s handling of it (a <details>/<summary>
+  //        disclosure, expanding in place inside the drop-down itself).
+  //   (c) "fireing profiles should be the top menu item" -- /profiles is now
+  //        NAV_LINKS[0].
+  //   (d) "Thermocouple Faults should also be combined into the diagnostic
+  //        page" -- /diagnostics/thermo is gone (diagnostics_http.c); its
+  //        content is diagnostics_page.html's new "Thermocouple faults"
+  //        section, reading the same GET /api/thermo/faults this menu item
+  //        used to send an operator to a second page for.
+  //
+  // A plain entry is `{ href, label }`, same shape as before. A group entry
+  // is `{ label, children: [...] }` -- no href of its own, since (b) is
+  // explicit that opening "Safety" must never navigate anywhere, only reveal
+  // its children in place.
   var NAV_LINKS = [
+    { href: '/profiles', label: 'Firing profiles' },
     { href: '/readiness', label: 'Ready to fire? (checklist)' },
     { href: '/settings/zones', label: 'Thermocouples & zones' },
     { href: '/settings/relays', label: 'Relays & rules' },
-    { href: '/settings/safety', label: 'Safety timings' },
-    { href: '/settings/manual', label: 'Manual relay control' },
-    { href: '/profiles', label: 'Firing profiles' },
+    // 'Manual relay control' (/settings/manual) removed 2026-08-27: the
+    // owner's call once the kiln's heating elements were actually wired to
+    // this board -- "the danger zone in the diagnostics page covers it
+    // fine." Diagnostics' Danger Zone (diagnostics_page.html, POST
+    // /api/diagnostics/danger/relay) is the one sanctioned place left to
+    // move a relay by hand; it carries its own explicit accept-the-risk
+    // gate and auto-exit timer, which the removed page did not.
     { href: '/wifi', label: 'Network settings' },
     { href: '/ota', label: 'Firmware update' },
     { href: '/diagnostics', label: 'Diagnostics' },
-    // 2026-08-22: board_temps.c has served /board_temps since it was written,
-    // but nothing ever linked to it -- the page was reachable only by typing
-    // the URL. Found while sweeping every route in a headless browser: the
-    // sweep list said "/board", which is not a route, and unknown paths 302
-    // to "/" (the captive-portal catch-all every route on this server
-    // inherits), so the sweep was silently testing the dashboard twice and
-    // reporting it as the board page. That redirect is why a missing page is
-    // invisible from a browser -- it looks like a working link, not a 404.
-    { href: '/board_temps', label: 'Board health (ESP + cold junctions)' },
-    { href: '/diagnostics/thermo', label: 'Thermocouple faults' },
-    { href: '/safety', label: 'Safety processor' },
-    { href: '/safety/commissioning', label: 'Safety commissioning' },
+    {
+      label: 'Safety',
+      children: [
+        { href: '/settings/safety', label: 'Safety timings' },
+        { href: '/safety', label: 'Safety processor' },
+        { href: '/safety/commissioning', label: 'Safety commissioning' },
+      ],
+    },
     { href: '/settings/backup', label: 'Backup & restore' },
     // 2026-08-21: /settings gained a Display section (theme + °C/°F, moved
     // off the topbar at the owner's request), so it needs a way in that is
@@ -98,6 +126,40 @@
 
     var here = currentPath();
     NAV_LINKS.forEach(function (link) {
+      if (link.children) {
+        // Expanding group (owner's (b): "the menu should just show them as
+        // sub items when the main safty item is opened not a seprate page
+        // to hold the 3 page links"). <details>/<summary> is the native
+        // disclosure widget -- no click-handler JS needed to expand/collapse
+        // it, no new page, and it never navigates on its own: exactly the
+        // "reveal in place" shape the request asks for, and it costs no
+        // extra flash-budget asset (web_encoding.h) the way a hand-rolled
+        // JS toggle plus icon would.
+        var details = document.createElement('details');
+        details.className = 'kc-menu-group';
+        // Open by default when the current page is one of this group's
+        // children, so landing on e.g. /safety/commissioning from a
+        // bookmark or a refresh shows the group already expanded around the
+        // active item instead of hiding it behind a collapsed heading.
+        var hasActiveChild = link.children.some(function (c) { return c.href === here; });
+        if (hasActiveChild) {
+          details.setAttribute('open', '');
+        }
+        var summary = document.createElement('summary');
+        summary.textContent = link.label;
+        details.appendChild(summary);
+        link.children.forEach(function (child) {
+          var a = document.createElement('a');
+          a.href = child.href;
+          a.textContent = child.label;
+          if (child.href === here) {
+            a.className = 'kc-menu-active';
+          }
+          details.appendChild(a);
+        });
+        panel.appendChild(details);
+        return;
+      }
       var a = document.createElement('a');
       a.href = link.href;
       a.textContent = link.label;

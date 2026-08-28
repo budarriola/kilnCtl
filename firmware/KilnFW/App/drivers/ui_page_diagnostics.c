@@ -13,7 +13,14 @@
 #include "nvs.h"
 #include "nvs_flash.h"
 
+#include <string.h>
+
+#include "MAX31856.h"
 #include "board_temps.h"
+#include "dashboard_http.h"
+#include "safety_link.h" /* SAFETY_LINK_DIAG_STATE_*, SAFETY_LINK_STALE_MS */
+#include "safety_trip_words.h"
+#include "thermo_owner.h"
 #include "unit_pref.h"
 #include "kiln_ui.h"
 #include "ui_theme.h"
@@ -66,6 +73,75 @@
 // What IS shown instead -- the running partition's own label/size and the
 // OTA image state -- is honest because each is a well-defined per-partition
 // fact, not an invented rollup across partitions that don't share a purpose.
+//
+// 2026-08-27 FOLD (owner request, verbatim: "the diagnostics pages should
+// also contain the safty processor page, the board health, and thermocouple
+// fault page's info. remove the other 3 lcd pages when you combine the
+// info"). Three more pages join Firmware/Internal RAM/PSRAM & storage above,
+// using the SAME Prev/Next-paged, one-topbar-per-screen pattern this file
+// already had -- there was no way to fit three more pages' worth of content
+// onto the three that existed (see UI_THEME_PAGE_CONTENT_BUDGET_PX's ~267px
+// ceiling and this file's own per-page row arithmetic above) without either
+// silently dropping content or silently scrolling, both of which this
+// codebase's standing no-scroll rule forbids. Six paged screens under one
+// "Diagnostics" nav item, Prev/Next-reachable exactly like the first three
+// already were, is the honest way to combine three pages' worth of
+// content into "the diagnostics pages" without losing any of it.
+//
+// PER-PAGE CONTENT INVENTORY -- what each removed page showed, and where it
+// landed:
+//
+//   ui_page_safety.c ("Safety Processor", 5 rows): safety temp, enclosure
+//   temp, power (W), link version (ESP/Pico, compatible or not), and a
+//   combined current-state + last-trip line (2026-08-27: "State: TRIPPED NOW
+//   -- ..." or "State: ARMED -- last <reason>, <age>s ago"). ALL FIVE rows
+//   carried over verbatim to the new Safety Processor diagnostics page
+//   (UI_PAGE_DIAGNOSTICS_PAGE_SAFETY) -- refresh_cb()'s safety block below is
+//   a straight copy of that file's own refresh_cb(), same
+//   dashboard_get_status() read, same staleness/trip-word handling. Nothing
+//   was unique-but-dropped; nothing here already existed on the old
+//   Firmware/RAM/PSRAM pages.
+//
+//   ui_page_board_health.c ("Board Health", 1 + MAX31856_CHANNEL_COUNT
+//   rows): ESP32-S3 die temperature, plus one cold-junction row per
+//   MAX31856 channel. ALL rows carried over to the new Board Health page
+//   (UI_PAGE_DIAGNOSTICS_PAGE_BOARD_HEALTH). The ESP32 die temp is the one
+//   piece of overlap with content this file already had: the PSRAM & storage
+//   page's own "ESP32-S3 die temp" row (s_esp32_temp_label, unchanged) --
+//   that pre-existing row is left as-is rather than duplicated a second
+//   time; Board Health's row is the MAX31856 cold-junction detail that page
+//   never had.
+//
+//   ui_page_thermo_faults.c ("Thermocouple Faults", MAX31856_CHANNEL_COUNT
+//   channel cards): per-channel SR fault-bit summary (OPEN/OVUV/TCLOW/
+//   TCHIGH/CJLOW/CJHIGH/TCRANGE/CJRANGE, or "OK") and a FAULT-pin/SPI status
+//   line, sourced from thermo_owner_command_read_all() and indexed by each
+//   reading's OWN .channel field -- never by array position, because
+//   MAX31856_read_all() (thermo_owner_command_read_all()'s underlying call)
+//   packs its output array over failed channels, so position and channel
+//   number diverge exactly when a channel is unhealthy. A channel this page
+//   never saw in that readback (thermo_bus down, or never initialized) is
+//   shown as "no data" / "channel not initialized", DISTINCT from a channel
+//   that reported and is faulted -- this distinction is the one a parallel
+//   web-side fold of the same three pages found was "the whole point of the
+//   page" (see this file's own comment on the refresh loop below): losing it
+//   would let an ABSENT channel read as a healthy one. Carried over intact to
+//   the new Thermocouple Faults page (UI_PAGE_DIAGNOSTICS_PAGE_THERMO_FAULTS),
+//   same seen[]/not-seen split, same by-.channel indexing, unchanged.
+//
+// FACTS THIS FOLD MUST NOT UNDO (both fixed on the web side earlier the same
+// day this LCD fold was done, both re-verified true here):
+//   - Cold-junction readings are indexed by MAX31856Reading::channel, never
+//     by array position -- MAX31856_read_all() compacts its output over
+//     failed channels, so position != channel number the moment any channel
+//     is unhealthy. thermo_faults_refresh_cb() below reads readings[i].channel
+//     exactly as ui_page_thermo_faults.c's own refresh_cb() did.
+//   - A CJRANGE fault invalidates the HOT junction too, not just the
+//     cold-junction reading -- board_temps.h's board_temps_get()/
+//     board_temps_get_live() already bake this into thermo_cj_valid[], which
+//     board_health_refresh_cb() below reads through unchanged (same getter,
+//     same validity bit ui_page_board_health.c always used); this page does
+//     not re-derive validity from the raw fault bits a second time.
 static const char *TAG __attribute__((unused)) = "ui_page_diagnostics";
 
 #define UI_PAGE_DIAGNOSTICS_REFRESH_MS 2000
@@ -81,10 +157,15 @@ static const char *TAG __attribute__((unused)) = "ui_page_diagnostics";
  * margin. 8192 below is that same LVGL stack-size constant, not a guess. */
 #define UI_PAGE_DIAGNOSTICS_LVGL_TASK_STACK_BYTES 8192
 
-#define UI_PAGE_DIAGNOSTICS_PAGE_COUNT 3
+#define UI_PAGE_DIAGNOSTICS_PAGE_COUNT 6
 #define UI_PAGE_DIAGNOSTICS_PAGE_FIRMWARE 0
 #define UI_PAGE_DIAGNOSTICS_PAGE_INTERNAL_RAM 1
 #define UI_PAGE_DIAGNOSTICS_PAGE_PSRAM_STORAGE 2
+/* 2026-08-27 fold -- see this file's header comment for the content
+ * inventory each of these three carries over. */
+#define UI_PAGE_DIAGNOSTICS_PAGE_SAFETY 3
+#define UI_PAGE_DIAGNOSTICS_PAGE_BOARD_HEALTH 4
+#define UI_PAGE_DIAGNOSTICS_PAGE_THERMO_FAULTS 5
 
 static ui_topbar_t s_topbar;
 static lv_obj_t *s_pages[UI_PAGE_DIAGNOSTICS_PAGE_COUNT];
@@ -118,10 +199,32 @@ static lv_obj_t *s_psram_total_label;
 static lv_obj_t *s_nvs_stats_label;
 static lv_obj_t *s_esp32_temp_label;
 
+/* --- Page 4: Safety Processor -- carried over verbatim from
+ * ui_page_safety.c (see this file's header comment's content inventory). */
+static lv_obj_t *s_safety_temp_label;
+static lv_obj_t *s_enclosure_temp_label;
+static lv_obj_t *s_safety_power_label;
+static lv_obj_t *s_link_version_label;
+static lv_obj_t *s_trip_label;
+
+/* --- Page 5: Board Health -- carried over verbatim from
+ * ui_page_board_health.c. s_esp32_temp_label above (PSRAM & storage page) is
+ * a DIFFERENT label showing the same underlying fact; this page's own
+ * cold-junction rows are what that page never had. */
+static lv_obj_t *s_bh_esp32_label;
+static lv_obj_t *s_bh_cj_label[MAX31856_CHANNEL_COUNT];
+
+/* --- Page 6: Thermocouple Faults -- carried over verbatim from
+ * ui_page_thermo_faults.c, including its ABSENT-vs-FAULTED distinction (see
+ * this file's header comment). */
+static lv_obj_t *s_tf_fault_label[MAX31856_CHANNEL_COUNT];
+static lv_obj_t *s_tf_status_label[MAX31856_CHANNEL_COUNT];
+
 static void update_title(void)
 {
     static const char *page_names[UI_PAGE_DIAGNOSTICS_PAGE_COUNT] = {
         "Firmware", "Internal RAM", "PSRAM & storage",
+        "Safety Processor", "Board Health", "Thermocouple Faults",
     };
     char buf[48];
     snprintf(buf, sizeof(buf), "Diagnostics: %s  %u of %u", page_names[s_page_index],
@@ -309,6 +412,12 @@ static void refresh_cb(lv_timer_t *timer)
 
     char buf[48];
 
+    /* Shared by the Safety Processor block below -- same plain-C getter
+     * dashboard_http.c's GET /api/status handler and every other live-data
+     * page call (TODO.md 10.1a). */
+    dashboard_status_t ds;
+    dashboard_get_status(&ds);
+
     /* Uptime -- Firmware page's one live value. */
     format_uptime(buf, sizeof(buf));
     lv_label_set_text(s_uptime_label, buf);
@@ -389,6 +498,169 @@ static void refresh_cb(lv_timer_t *timer)
         lv_obj_set_style_text_color(s_esp32_temp_label, UI_THEME_COLOR_TEXT_SECONDARY, 0);
     }
     lv_label_set_text(s_esp32_temp_label, buf);
+
+    /* ---- Safety Processor (folded from ui_page_safety.c) ---------------- */
+    if (ds.safety_temp_valid) {
+        snprintf(buf, sizeof(buf), "Safety temp: %.1f %s",
+                 (double)unit_pref_convert(ds.safety_temp_c, ds.temp_unit, UNIT_PREF_KIND_ABSOLUTE),
+                 unit_pref_suffix(ds.temp_unit));
+        lv_label_set_text(s_safety_temp_label, buf);
+    } else {
+        lv_label_set_text(s_safety_temp_label, "Safety temp: ---");
+    }
+    if (ds.enclosure_temp_valid) {
+        snprintf(buf, sizeof(buf), "Enclosure temp: %.1f %s",
+                 (double)unit_pref_convert(ds.enclosure_temp_c, ds.temp_unit, UNIT_PREF_KIND_ABSOLUTE),
+                 unit_pref_suffix(ds.temp_unit));
+        lv_label_set_text(s_enclosure_temp_label, buf);
+    } else {
+        lv_label_set_text(s_enclosure_temp_label, "Enclosure temp: ---");
+    }
+    if (ds.power_valid) {
+        snprintf(buf, sizeof(buf), "Power: %.0f W", (double)ds.power_w);
+        lv_label_set_text(s_safety_power_label, buf);
+    } else {
+        lv_label_set_text(s_safety_power_label, "Power: ---");
+    }
+    if (!ds.link_version_known) {
+        lv_label_set_text(s_link_version_label, "Link version: ---");
+    } else if (ds.link_version_compatible) {
+        snprintf(buf, sizeof(buf), "Link version: ESP %u / Pico %u (OK)",
+                 (unsigned)ds.self_protocol_version, (unsigned)ds.peer_protocol_version);
+        lv_label_set_text(s_link_version_label, buf);
+    } else {
+        char vbuf[112];
+        const char *older = (ds.peer_protocol_version < ds.self_protocol_version) ? "Pico"
+                            : (ds.peer_protocol_version > ds.self_protocol_version) ? "ESP"
+                                                                                     : "neither";
+        snprintf(vbuf, sizeof(vbuf),
+                 "Link version: ESP %u / Pico %u -- INCOMPATIBLE, %s is older. Update ESP first.",
+                 (unsigned)ds.self_protocol_version, (unsigned)ds.peer_protocol_version, older);
+        lv_label_set_text(s_link_version_label, vbuf);
+    }
+    char trip_tail[40];
+    if (!ds.trip_event_ever_received) {
+        snprintf(trip_tail, sizeof(trip_tail), "no trip recorded");
+    } else {
+        snprintf(trip_tail, sizeof(trip_tail), "last %s, %lus ago",
+                 safety_trip_words_short(ds.trip_reason),
+                 (unsigned long)(ds.trip_event_age_ms / 1000u));
+    }
+    char trip_buf[96];
+    if (!ds.diag_ever_received || ds.diag_age_ms >= SAFETY_LINK_STALE_MS) {
+        snprintf(trip_buf, sizeof(trip_buf), "State: UNKNOWN (no fresh diagnostics) -- %s", trip_tail);
+    } else {
+        const char *state_word;
+        switch (ds.diag_state) {
+        case SAFETY_LINK_DIAG_STATE_INIT:    state_word = "starting up"; break;
+        case SAFETY_LINK_DIAG_STATE_GRACE:   state_word = "startup grace"; break;
+        case SAFETY_LINK_DIAG_STATE_ARMED:   state_word = "ARMED"; break;
+        case SAFETY_LINK_DIAG_STATE_WARN:    state_word = "ARMED (warning)"; break;
+        case SAFETY_LINK_DIAG_STATE_TRIPPED: state_word = "TRIPPED"; break;
+        default:                             state_word = "unrecognised"; break;
+        }
+        if (ds.diag_state == SAFETY_LINK_DIAG_STATE_TRIPPED) {
+            snprintf(trip_buf, sizeof(trip_buf), "State: TRIPPED NOW -- %s",
+                     safety_trip_words_short(ds.diag_trip_reason));
+        } else {
+            snprintf(trip_buf, sizeof(trip_buf), "State: %s -- %s", state_word, trip_tail);
+        }
+    }
+    lv_label_set_text(s_trip_label, trip_buf);
+
+    /* ---- Board Health (folded from ui_page_board_health.c) -------------- */
+    board_temps_t bt2;
+    board_temps_get_live(&bt2);
+    if (bt2.esp32_valid) {
+        snprintf(buf, sizeof(buf), "%.1f %s", (double)unit_pref_convert(bt2.esp32_c, unit_pref_get(), UNIT_PREF_KIND_ABSOLUTE),
+                 unit_pref_suffix(unit_pref_get()));
+        lv_obj_set_style_text_color(s_bh_esp32_label, UI_THEME_COLOR_TEXT_PRIMARY, 0);
+    } else {
+        snprintf(buf, sizeof(buf), "n/a");
+        lv_obj_set_style_text_color(s_bh_esp32_label, UI_THEME_COLOR_TEXT_SECONDARY, 0);
+    }
+    lv_label_set_text(s_bh_esp32_label, buf);
+    for (uint8_t ch = 0; ch < MAX31856_CHANNEL_COUNT; ch++) {
+        bool valid = (ch < bt2.thermo_count) && bt2.thermo_cj_valid[ch];
+        if (valid) {
+            snprintf(buf, sizeof(buf), "%.1f %s",
+                     (double)unit_pref_convert(bt2.thermo_cj_c[ch], unit_pref_get(), UNIT_PREF_KIND_ABSOLUTE),
+                     unit_pref_suffix(unit_pref_get()));
+            lv_obj_set_style_text_color(s_bh_cj_label[ch], UI_THEME_COLOR_TEXT_PRIMARY, 0);
+        } else {
+            snprintf(buf, sizeof(buf), "n/a");
+            lv_obj_set_style_text_color(s_bh_cj_label[ch], UI_THEME_COLOR_TEXT_SECONDARY, 0);
+        }
+        lv_label_set_text(s_bh_cj_label[ch], buf);
+    }
+
+    /* ---- Thermocouple Faults (folded from ui_page_thermo_faults.c) -----
+     * Not-present-in-this-read-back default: a channel that never came up
+     * is left as "no data" rather than silently showing stale/zeroed OK
+     * text -- see this file's header comment for why this distinction
+     * (ABSENT vs FAULTED) must survive the fold intact.
+     *
+     * MAX31856_read_all() (thermo_owner_command_read_all()'s underlying
+     * call) packs readings[] by POSITION over only the channels that
+     * actually initialized -- it compacts over failed channels, so index i
+     * is not channel i the moment any channel is unhealthy. Every reading
+     * is therefore filed by its own readings[i].channel field below, never
+     * by array position -- the exact bug this comment exists to prevent. */
+    MAX31856Reading readings[MAX31856_CHANNEL_COUNT];
+    size_t reading_count = 0;
+    memset(readings, 0, sizeof(readings));
+    (void)thermo_owner_command_read_all(readings, MAX31856_CHANNEL_COUNT, &reading_count);
+
+    bool seen[MAX31856_CHANNEL_COUNT] = { false };
+    for (size_t i = 0; i < reading_count && i < MAX31856_CHANNEL_COUNT; i++) {
+        uint8_t ch = readings[i].channel;
+        if (ch >= MAX31856_CHANNEL_COUNT) {
+            continue; /* defensive; channel is always in range on this board */
+        }
+        seen[ch] = true;
+
+        char fault_buf[80];
+        static const struct { uint8_t mask; const char *name; } bits[] = {
+            { MAX31856_MASK_OPEN,    "OPEN" },   { MAX31856_MASK_OVUV,   "OVUV" },
+            { MAX31856_MASK_TCLOW,   "TCLOW" },  { MAX31856_MASK_TCHIGH, "TCHIGH" },
+            { MAX31856_MASK_CJLOW,   "CJLOW" },  { MAX31856_MASK_CJHIGH, "CJHIGH" },
+            { MAX31856_FAULT_TCRANGE, "TCRANGE" }, { MAX31856_FAULT_CJRANGE, "CJRANGE" },
+        };
+        uint8_t fs = readings[i].fault_status;
+        if (fs == 0) {
+            snprintf(fault_buf, sizeof(fault_buf), "OK");
+        } else {
+            fault_buf[0] = '\0';
+            bool first = true;
+            for (size_t b = 0; b < sizeof(bits) / sizeof(bits[0]); b++) {
+                if (fs & bits[b].mask) {
+                    size_t used = strlen(fault_buf);
+                    snprintf(fault_buf + used, sizeof(fault_buf) - used, "%s%s", first ? "" : ", ", bits[b].name);
+                    first = false;
+                }
+            }
+        }
+        bool faulted = (fs != 0) || readings[i].spi_failed;
+        lv_label_set_text(s_tf_fault_label[ch], fault_buf);
+        lv_obj_set_style_text_color(s_tf_fault_label[ch],
+                                     faulted ? UI_THEME_ACCENT_5 : UI_THEME_COLOR_TEXT_PRIMARY, 0);
+
+        char status_buf[48];
+        snprintf(status_buf, sizeof(status_buf), "FAULT pin: %s   SPI: %s",
+                 readings[i].fault_pin_asserted ? "yes" : "no",
+                 readings[i].spi_failed ? "FAILED" : "ok");
+        lv_label_set_text(s_tf_status_label[ch], status_buf);
+        lv_obj_set_style_text_color(s_tf_status_label[ch],
+                                     readings[i].spi_failed ? UI_THEME_ACCENT_5 : UI_THEME_COLOR_TEXT_SECONDARY, 0);
+    }
+    for (uint8_t ch = 0; ch < MAX31856_CHANNEL_COUNT; ch++) {
+        if (!seen[ch]) {
+            lv_label_set_text(s_tf_fault_label[ch], "no data");
+            lv_obj_set_style_text_color(s_tf_fault_label[ch], UI_THEME_COLOR_TEXT_SECONDARY, 0);
+            lv_label_set_text(s_tf_status_label[ch], "channel not initialized");
+            lv_obj_set_style_text_color(s_tf_status_label[ch], UI_THEME_COLOR_TEXT_SECONDARY, 0);
+        }
+    }
 }
 
 static lv_obj_t *build_stat_row(lv_obj_t *parent, const char *name, lv_color_t accent)
@@ -416,6 +688,74 @@ static lv_obj_t *build_stat_row(lv_obj_t *parent, const char *name, lv_color_t a
     lv_label_set_text(value, "--");
 
     return value;
+}
+
+/* Full-width single-label row -- same shape ui_page_safety.c's
+ * build_stat_label() used (one combined "name: value" string per row rather
+ * than build_stat_row()'s separate name/value pair), reused here verbatim
+ * for the folded Safety Processor page since its rows are already
+ * pre-formatted sentences ("Link version: ESP 3 / Pico 3 (OK)"), not a
+ * clean name/value split. */
+static lv_obj_t *build_full_text_row(lv_obj_t *parent, const char *initial_text)
+{
+    lv_obj_t *row = lv_obj_create(parent);
+    lv_obj_set_width(row, lv_pct(100));
+    lv_obj_set_height(row, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_color(row, UI_THEME_COLOR_CARD, 0);
+    lv_obj_set_style_bg_opa(row, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(row, UI_THEME_CORNER_RADIUS_PX, 0);
+    lv_obj_set_style_pad_all(row, UI_THEME_PADDING_PX / 2, 0);
+    lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *label = lv_label_create(row);
+    lv_obj_set_width(label, lv_pct(100));
+    lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_color(label, UI_THEME_COLOR_TEXT_PRIMARY, 0);
+    lv_label_set_text(label, initial_text);
+    return label;
+}
+
+/* One fixed-share channel card for the folded Thermocouple Faults page --
+ * same shape ui_page_thermo_faults.c's build_channel_row() used: title,
+ * fault summary (wraps), status line, each row sharing the page's remaining
+ * height via flex_grow rather than a hard-coded per-row height (that file's
+ * own header comment: three fixed 72px rows once overflowed and hid the
+ * third channel). */
+static void build_thermo_fault_row(lv_obj_t *parent, uint8_t channel, lv_color_t accent)
+{
+    lv_obj_t *row = lv_obj_create(parent);
+    lv_obj_set_width(row, lv_pct(100));
+    lv_obj_set_flex_grow(row, 1);
+    lv_obj_set_style_bg_color(row, UI_THEME_COLOR_CARD, 0);
+    lv_obj_set_style_bg_opa(row, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(row, UI_THEME_CORNER_RADIUS_PX, 0);
+    lv_obj_set_style_pad_all(row, UI_THEME_PADDING_PX / 2, 0);
+    lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_border_width(row, 3, 0);
+    lv_obj_set_style_border_side(row, LV_BORDER_SIDE_LEFT, 0);
+    lv_obj_set_style_border_color(row, accent, 0);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+
+    lv_obj_t *title = lv_label_create(row);
+    lv_obj_set_style_text_color(title, UI_THEME_COLOR_TEXT_PRIMARY, 0);
+    char title_buf[24];
+    snprintf(title_buf, sizeof(title_buf), "Channel %u", (unsigned)channel);
+    lv_label_set_text(title, title_buf);
+
+    lv_obj_t *fault_label = lv_label_create(row);
+    lv_obj_set_width(fault_label, lv_pct(100));
+    lv_label_set_long_mode(fault_label, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_color(fault_label, UI_THEME_COLOR_TEXT_PRIMARY, 0);
+    lv_label_set_text(fault_label, "--");
+    s_tf_fault_label[channel] = fault_label;
+
+    lv_obj_t *status_label = lv_label_create(row);
+    lv_obj_set_width(status_label, lv_pct(100));
+    lv_label_set_long_mode(status_label, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_color(status_label, UI_THEME_COLOR_TEXT_SECONDARY, 0);
+    lv_label_set_text(status_label, "--");
+    s_tf_status_label[channel] = status_label;
 }
 
 /* One page: a non-scrollable flex column of stat rows, sized to fill
@@ -498,6 +838,43 @@ lv_obj_t *ui_page_diagnostics_build(void)
     s_psram_total_label = build_stat_row(psram_page, "PSRAM total", UI_THEME_ACCENT_4);
     s_nvs_stats_label = build_stat_row(psram_page, "NVS entries (used/free/total)", UI_THEME_ACCENT_1);
     s_esp32_temp_label = build_stat_row(psram_page, "ESP32-S3 die temp", UI_THEME_ACCENT_2);
+
+    /* Page 4: Safety Processor -- folded from ui_page_safety.c (2026-08-27,
+     * see this file's header comment's content inventory). 5 rows, same
+     * count/shape that page always had, well inside the ~267px budget. */
+    lv_obj_t *safety_page = s_pages[UI_PAGE_DIAGNOSTICS_PAGE_SAFETY];
+    s_safety_temp_label = build_full_text_row(safety_page, "Safety temp: ---");
+    s_enclosure_temp_label = build_full_text_row(safety_page, "Enclosure temp: ---");
+    s_safety_power_label = build_full_text_row(safety_page, "Power: ---");
+    s_link_version_label = build_full_text_row(safety_page, "Link version: ---");
+    s_trip_label = build_full_text_row(safety_page, "State: ---");
+
+    /* Page 5: Board Health -- folded from ui_page_board_health.c. 1 +
+     * MAX31856_CHANNEL_COUNT rows (4 on this board), same as that page. */
+    lv_obj_t *board_health_page = s_pages[UI_PAGE_DIAGNOSTICS_PAGE_BOARD_HEALTH];
+    s_bh_esp32_label = build_stat_row(board_health_page, "ESP32-S3 die temp", UI_THEME_ACCENT_1);
+    for (uint8_t ch = 0; ch < MAX31856_CHANNEL_COUNT; ch++) {
+        char name[40];
+        snprintf(name, sizeof(name), "MAX31856 ch %u cold-junction", (unsigned)ch);
+        lv_color_t accent;
+        switch (ch % 5) {
+        case 0: accent = UI_THEME_ACCENT_2; break;
+        case 1: accent = UI_THEME_ACCENT_3; break;
+        case 2: accent = UI_THEME_ACCENT_4; break;
+        case 3: accent = UI_THEME_ACCENT_1; break;
+        default: accent = UI_THEME_ACCENT_2; break;
+        }
+        s_bh_cj_label[ch] = build_stat_row(board_health_page, name, accent);
+    }
+
+    /* Page 6: Thermocouple Faults -- folded from ui_page_thermo_faults.c.
+     * MAX31856_CHANNEL_COUNT channel cards sharing the page's remaining
+     * height via flex_grow, same as that page's own `list`. */
+    lv_obj_t *thermo_faults_page = s_pages[UI_PAGE_DIAGNOSTICS_PAGE_THERMO_FAULTS];
+    lv_color_t tf_accents[3] = { UI_THEME_ACCENT_1, UI_THEME_ACCENT_2, UI_THEME_ACCENT_3 };
+    for (uint8_t ch = 0; ch < MAX31856_CHANNEL_COUNT; ch++) {
+        build_thermo_fault_row(thermo_faults_page, ch, tf_accents[ch % 3]);
+    }
 
     /* MUST come after content exists -- ui_topbar.h's own usage note: the
      * icon proxy overlaps whatever's beneath it, and LVGL resolves

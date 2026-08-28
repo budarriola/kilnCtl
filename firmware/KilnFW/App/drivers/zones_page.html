@@ -209,6 +209,23 @@ skipped a tick keeps its lost on-time and makes it up on its own next window rat
 just losing it (PID mode only -- bang-bang mode has no window to make it up in)</label>
 <input type="number" id="maxSimultaneous" min="0" max="4" value="0">
 
+<!-- 2026-08-27+1, owner report: "the user should be able to assign names to
+     relays not assigned to zones as well". A relay claimed by a zone above
+     (see .relaybits checkboxes in each zone card) takes its identity from
+     that zone -- naming it separately here would just be a second, possibly
+     contradicting label for the same physical contact. A relay nobody has
+     claimed yet has nothing else to call it, and a coming firing-profile
+     feature ("drive this relay directly as its own segment", not built yet)
+     needs something better on its dropdown than "relay 3". renderRelayNames()
+     below fills this in and re-fills it every time a relay checkbox above
+     changes zone assignment, so it never shows an editable box for a relay
+     that just became zone-owned. -->
+<label>Names for relays not assigned to any zone</label>
+<p class="hint">A relay checked into a zone above is named by that zone instead --
+its own name here is kept, not lost, and comes back if you ever uncheck it from
+every zone.</p>
+<div id="relayNames"></div>
+
 <!-- inline-flex with a 32px floor: the label is the hit area for the
      checkbox inside it. As an inline label it measured 480x19 on a tablet
      (only 35 on a phone because the text happened to wrap to two lines),
@@ -451,20 +468,15 @@ function zoneBlock(z, i, relayCount, thermoCount) {
   div.dataset.modelK = k;
   div.dataset.modelTau = tau;
   div.dataset.modelDead = dead;
-  /* Same echo-it-back reasoning as the plant model above, for the nine
-     safety timings this page does not show (they live on /settings/safety).
-     Omitting a field from a whole-page submit sets it to zero, so without
-     these a save here would quietly reset every timing the operator set on
-     that page. */
-  div.dataset.progressDuty = z.guard_progress_duty_min || 0;
-  div.dataset.progressWindow = z.guard_progress_window_s || 0;
-  div.dataset.driftHyst = z.guard_drift_hysteresis_c || 0;
-  div.dataset.frozenEps = z.guard_frozen_eps_c || 0;
-  div.dataset.xzonePeriod = z.guard_cross_zone_period_s || 0;
-  div.dataset.bbHyst = z.bangbang_hysteresis_c || 0;
-  div.dataset.coolMargin = z.cooling_limited_margin_c || 0;
-  div.dataset.coolHold = z.cooling_limited_hold_s || 0;
-  div.dataset.rampLock = z.ramp_lock_band_c || 0;
+  /* Same echo-it-back reasoning as the plant model above, for which timing
+     profile this zone is assigned to (the nine safety-timing NUMBERS
+     themselves moved off the zone entirely in the 2026-08-27 rework -- they
+     now live once per PROFILE, not once per zone -- and are owned/rendered
+     by /settings/safety, not here; see saveAll()'s tp<N>_* echo below for
+     the other half of this same defence). Omitting a field from a
+     whole-page submit sets it to zero, so without this a save here would
+     quietly reassign the zone to profile 0. */
+  div.dataset.timingProfile = z.timing_profile || 0;
   var modelHtml = '<label>Identified plant model</label><p class="hint">' +
     (haveModel
       ? 'K = ' + k.toFixed(1) + ' &deg;C/duty, tau = ' + tau.toFixed(0) + ' s, dead time = ' +
@@ -626,7 +638,69 @@ function updateThermoWarnings() {
 }
 document.getElementById('zones').addEventListener('change', function (e) {
   if (e.target.classList.contains('thermobit')) updateThermoWarnings();
+  if (e.target.classList.contains('relaybit')) renderRelayNames();
 });
+
+/* Union of every zone card's currently-CHECKED relay checkboxes -- bit r set
+ * iff relay r+1 is claimed by some zone card as rendered RIGHT NOW, including
+ * an edit the operator just made and has not saved yet. This is the "compute
+ * it live" half of the owner's spec: the server's own relay_zone_owned_mask
+ * (in the last GET response) is a snapshot from load time and goes stale the
+ * instant a relaybit checkbox changes, so renderRelayNames() below reads
+ * THIS, not current.relay_zone_owned_mask, every time it (re)draws. */
+function clientOwnedRelayMask() {
+  var mask = 0;
+  document.querySelectorAll('#zones .zone').forEach(function (div) {
+    div.querySelectorAll('.relaybit').forEach(function (cb) {
+      if (cb.checked) mask |= (1 << parseInt(cb.dataset.bit, 10));
+    });
+  });
+  return mask;
+}
+
+/* Renders one row per configured relay (relayCount above): an editable text
+ * input for a relay no zone currently claims, or -- for a zone-owned relay --
+ * a note saying so plus a HIDDEN input carrying the stored name unchanged.
+ * The hidden input matters: /api/zones is a whole-page submit, and while
+ * relay<N>_name is OPTIONAL server-side (omitted means "keep the current
+ * value", not "clear it" -- see zones_http.c's POST handler comment on this
+ * field), sending it explicitly here is the more direct defence and matches
+ * how this page already echoes the plant model / timing profile fields it
+ * doesn't let the operator edit either. relay_names[] comes from the last
+ * GET, dense over every relay slot the board has (regardless of relayCount),
+ * indexed the same 0-based way RELAY_NAMES/relay_mask bits are. */
+function renderRelayNames() {
+  var relayCount = parseInt(document.getElementById('relayCount').value, 10) || 0;
+  var ownedMask = clientOwnedRelayMask();
+  var names = current.relay_names || [];
+  var el = document.getElementById('relayNames');
+  el.innerHTML = '';
+  if (relayCount === 0) {
+    el.innerHTML = '<p class="empty">No relays configured -- set the count above.</p>';
+    return;
+  }
+  for (var r = 0; r < relayCount; r++) {
+    var owned = (ownedMask & (1 << r)) !== 0;
+    var storedName = names[r] || '';
+    var div = document.createElement('div');
+    div.className = 'relayname';
+    div.dataset.relay = r; /* 0-based bit; relay r+1 on the wire (relay<N>_name) */
+    if (owned) {
+      div.innerHTML =
+        '<label>' + RELAY_NAMES[r] + '</label>' +
+        '<p class="hint">Assigned to a zone above -- named by that zone instead' +
+        (storedName ? ' (its own stored name, "' + window.kcEscapeHtml(storedName) +
+          '", is kept and returns here if you unassign it)' : '') + '.</p>' +
+        '<input type="hidden" class="relaynameinput" value="' + window.kcEscapeHtml(storedName) + '">';
+    } else {
+      div.innerHTML =
+        '<label>' + RELAY_NAMES[r] + ' name</label>' +
+        '<input type="text" class="relaynameinput" maxlength="15" value="' +
+        window.kcEscapeHtml(storedName) + '">';
+    }
+    el.appendChild(div);
+  }
+}
 
 function renderZones() {
   var thermoCount = parseInt(document.getElementById('thermoCount').value, 10) || 0;
@@ -635,6 +709,9 @@ function renderZones() {
   el.innerHTML = '';
   if (thermoCount === 0) {
     el.innerHTML = '<p class="empty">No thermocouples configured -- set the count above.</p>';
+    /* No zone cards means no relay can be zone-owned -- every configured
+       relay is nameable. */
+    renderRelayNames();
     return;
   }
   for (var i = 0; i < thermoCount; i++) {
@@ -643,10 +720,14 @@ function renderZones() {
      * a zone that has never been explicitly configured -- "zone i reads
      * channel i" -- so a freshly grown thermoCount starts a new zone off
      * reading a real channel instead of nothing. */
-    var z = current.zones[i] || { name: '', relay_mask: 0, thermo_mask: (1 << i), cal_offset_c: 0, pid_kp: 0, pid_ki: 0, pid_kd: 0, max_ramp_c_per_hr: 0, sanity_rate_c_per_min: 0, control_mode: 0, max_temp_c: 0, min_temp_c: -20, heater_window_ms: 0, heater_min_on_ms: 0, heater_min_off_ms: 0, cross_zone_max_delta_c: 0, model_k_dc: 0, model_tau_s: 0, model_dead_time_s: 0, guard_wrong_dir_window_s: 0, guard_wrong_dir_rate_c_per_min: 0, guard_off_settle_s: 0, guard_runaway_rate_c_per_min: 0, guard_runaway_margin_c: 0, guard_drift_period_s: 0, guard_sensor_fault_debounce_ticks: 0, guard_frozen_window_s: 0, tc_type: 3 /* Type K, matching MAX31856.c's/the NVS migration's default */ };
+    var z = current.zones[i] || { name: '', relay_mask: 0, thermo_mask: (1 << i), cal_offset_c: 0, pid_kp: 0, pid_ki: 0, pid_kd: 0, max_ramp_c_per_hr: 0, sanity_rate_c_per_min: 0, control_mode: 0, max_temp_c: 0, min_temp_c: -20, heater_window_ms: 0, heater_min_on_ms: 0, heater_min_off_ms: 0, cross_zone_max_delta_c: 0, model_k_dc: 0, model_tau_s: 0, model_dead_time_s: 0, guard_wrong_dir_window_s: 0, guard_wrong_dir_rate_c_per_min: 0, guard_off_settle_s: 0, guard_runaway_rate_c_per_min: 0, guard_runaway_margin_c: 0, guard_drift_period_s: 0, guard_sensor_fault_debounce_ticks: 0, guard_frozen_window_s: 0, timing_profile: 0, tc_type: 3 /* Type K, matching MAX31856.c's/the NVS migration's default */ };
     el.appendChild(zoneBlock(z, i, relayCount, thermoCount));
   }
   updateThermoWarnings();
+  /* Relay-ownership can only be evaluated once the zone cards (and their
+     relaybit checkboxes) above actually exist in the DOM -- see
+     clientOwnedRelayMask(). */
+  renderRelayNames();
 }
 
 function loadCurrent() {
@@ -752,15 +833,39 @@ document.getElementById('saveBtn').addEventListener('click', function () {
     params.push('z' + i + '_k=' + div.dataset.modelK);
     params.push('z' + i + '_tau=' + div.dataset.modelTau);
     params.push('z' + i + '_deadtime=' + div.dataset.modelDead);
-    params.push('z' + i + '_progressduty=' + div.dataset.progressDuty);
-    params.push('z' + i + '_progresswindow=' + div.dataset.progressWindow);
-    params.push('z' + i + '_drifthyst=' + div.dataset.driftHyst);
-    params.push('z' + i + '_frozeneps=' + div.dataset.frozenEps);
-    params.push('z' + i + '_xzoneperiod=' + div.dataset.xzonePeriod);
-    params.push('z' + i + '_bbhyst=' + div.dataset.bbHyst);
-    params.push('z' + i + '_coolmargin=' + div.dataset.coolMargin);
-    params.push('z' + i + '_coolhold=' + div.dataset.coolHold);
-    params.push('z' + i + '_ramplock=' + div.dataset.rampLock);
+    params.push('z' + i + '_timingprofile=' + div.dataset.timingProfile);
+  });
+  /* Echo every timing profile back unchanged. This page shows none of their
+     fields, but /api/zones is a whole-page submit -- without this, saving a
+     relay checkbox here would omit tp0_name/tp0_progressduty/etc and the
+     server would read that as "set this profile's name to '' and every
+     number in it to 0", wiping out every profile /settings/safety manages
+     the instant an operator touches THIS page. Values come straight from
+     the last GET, never from an input on this page. */
+  (current.timing_profiles || []).forEach(function (p) {
+    var idx = p.index;
+    params.push('tp' + idx + '_name=' + encodeURIComponent(p.name || ''));
+    params.push('tp' + idx + '_progressduty=' + (p.guard_progress_duty_min || 0));
+    params.push('tp' + idx + '_progresswindow=' + (p.guard_progress_window_s || 0));
+    params.push('tp' + idx + '_drifthyst=' + (p.guard_drift_hysteresis_c || 0));
+    params.push('tp' + idx + '_frozeneps=' + (p.guard_frozen_eps_c || 0));
+    params.push('tp' + idx + '_xzoneperiod=' + (p.guard_cross_zone_period_s || 0));
+    params.push('tp' + idx + '_bbhyst=' + (p.bangbang_hysteresis_c || 0));
+    params.push('tp' + idx + '_coolmargin=' + (p.cooling_limited_margin_c || 0));
+    params.push('tp' + idx + '_coolhold=' + (p.cooling_limited_hold_s || 0));
+    params.push('tp' + idx + '_ramplock=' + (p.ramp_lock_band_c || 0));
+  });
+  /* One relay<N>_name per row renderRelayNames() drew -- editable text input
+     for an unowned relay, hidden-but-present input echoing the stored value
+     for a zone-owned one (see that function's comment). A relay past
+     relayCount was never given a row at all and so is correctly omitted
+     here too; the server's own "omitted keeps the current value" convention
+     for this field (zones_http.c's POST handler) means that is safe, not a
+     silent wipe. */
+  document.querySelectorAll('#relayNames .relayname').forEach(function (div) {
+    var r = parseInt(div.dataset.relay, 10);
+    var val = div.querySelector('.relaynameinput').value;
+    params.push('relay' + (r + 1) + '_name=' + encodeURIComponent(val));
   });
   msg.textContent = 'Saving…';
   fetch('/api/zones', {

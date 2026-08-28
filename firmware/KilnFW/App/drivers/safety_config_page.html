@@ -6,18 +6,27 @@
 <title>kilnCtl - Safety Timings</title>
 <link rel="stylesheet" href="/theme.css">
 <script>(function(){var t=localStorage.getItem('kilnctl-theme');if(t)document.documentElement.setAttribute('data-theme',t);})();</script>
-<!-- The owner's request: "these gurad trip times should probably be
-     configurable in the web gui under a safty config page". The thresholds
+<!-- The owner's request, 2026-08-26 rework: "make it so that i can have
+     diffrent Safety timings and assign the zones to them. that way i dont
+     need to copy the data multipal times". Before this change the nine guard
+     timing fields were rendered and posted once PER ZONE, so three zones run
+     the same way meant typing the same nine numbers three times. Now the
+     nine fields live on named "timing profiles" (this page owns their
+     content) and each zone just picks one from a dropdown. The thresholds
      that decide WHETHER a guard fires (max_temp_c, the runaway rate, the
      cross-zone delta) stay on /settings/zones next to the rest of the zone
      setup; what lives here is how long each guard waits before it acts, plus
-     the bands that decide when it is watching at all.
+     the bands that decide when it is watching at all -- now shared across
+     however many zones point at the same profile.
 
      This page and /settings/zones edit the SAME record through the same
      whole-page endpoint, where an omitted field means "set it to zero". So
      each page echoes back the fields the other one owns (see saveAll() below
      and zones_page.html's dataset.* block) -- otherwise saving one would
-     silently wipe the other's work. -->
+     silently wipe the other's work. That now includes the profiles
+     themselves: zones_page.html has to echo every tp<N>_* field too, or
+     saving a zone's relay mask would wipe every timing profile on the
+     board. -->
 <script defer src="/nav.js"></script>
 <script defer src="/app.js"></script>
 <style>
@@ -48,6 +57,10 @@
   label { display: block; font-weight: bold; font-size: 0.9em; margin-top: 0.7em; }
   input[type="number"] { width: 9em; padding: 0.3em; background: var(--bg);
                          color: var(--fg); border: 1px solid var(--border); border-radius: 3px; }
+  input[type="text"] { width: 100%; max-width: 20em; padding: 0.3em; background: var(--bg);
+                       color: var(--fg); border: 1px solid var(--border); border-radius: 3px; }
+  select { padding: 0.3em; background: var(--bg); color: var(--fg);
+           border: 1px solid var(--border); border-radius: 3px; }
   button { padding: 0.5em 1.1em; background: var(--button-bg); color: var(--fg);
            border: 1px solid var(--border); border-radius: 4px; cursor: pointer; }
   #msg { margin-left: 0.8em; }
@@ -66,6 +79,13 @@ temperature, runaway rate, cross-zone difference &mdash; are on
 <a href="/settings/zones">Thermocouples &amp; zones</a> with the rest of the
 zone setup.</p>
 
+<h2>Timing profiles</h2>
+<p>Name each profile once, set its nine timings, then assign zones to it below.
+Zones sharing a profile share these numbers automatically &mdash; edit the
+profile once instead of every zone that uses it.</p>
+<div id="profiles"></div>
+
+<h2>Zones</h2>
 <div id="zones"></div>
 
 <h2>Whole board</h2>
@@ -102,11 +122,13 @@ zone setup.</p>
 var current = null;
 var msg = document.getElementById('msg');
 
-/* One row per editable field: the CSS class used to find its input, the key
-   it has in the GET response, the form key it posts as, the label, the step,
-   and the default the firmware substitutes when it is 0. Keeping the default
-   in the label matters -- a box showing 0 otherwise reads as "no protection",
-   when it actually means the firmware's own number is in force. */
+/* One row per editable timing field, now on a PROFILE rather than a zone: the
+   CSS class used to find its input, the key it has in the GET response's
+   timing_profiles[] entries, the tp<N>_ form key it posts as, the label, the
+   step, and the default the firmware substitutes when it is 0. Keeping the
+   default in the label matters -- a box showing 0 otherwise reads as "no
+   protection", when it actually means the firmware's own number is in
+   force. */
 var FIELDS = [
   ['pduty', 'guard_progress_duty_min', 'progressduty',
    'Guard 1 arms above this commanded duty (0-1)', '0.05', '0.5'],
@@ -130,7 +152,10 @@ var FIELDS = [
 
 /* Fields this page does NOT show but must repost unchanged, or the server's
    whole-page semantics would zero them. Same defence zones_page.html runs in
-   the other direction. */
+   the other direction. This list no longer includes the nine timing fields
+   above -- those moved to the profile, not the zone -- but it gains
+   'timing_profile' being handled separately below since it now comes from a
+   <select> this page owns, not a passthrough. */
 var PASSTHROUGH = [
   ['name', 'name', true], ['relay_mask', 'relay_mask', false], ['thermo_mask', 'thermo_mask', false],
   ['ct_mask', 'ct_mask', false], ['tctype', 'tc_type', false], ['cal', 'cal_offset_c', false],
@@ -155,7 +180,53 @@ function esc(s) {
                   .replace(/"/g, '&quot;');
 }
 
-function render() {
+function renderProfiles() {
+  var host = document.getElementById('profiles');
+  host.innerHTML = '';
+  var profiles = current.timing_profiles || [];
+  if (profiles.length === 0) {
+    host.innerHTML = '<p>No timing profiles reported by the board.</p>';
+    return;
+  }
+  profiles.forEach(function (p, idx) {
+    var div = document.createElement('div');
+    div.className = 'zone';
+    div.dataset.index = idx;
+    var html = '<h3>Profile ' + idx + '</h3>' +
+               '<label>Name</label>' +
+               /* maxlength MUST match TIMING_PROFILE_NAME_MAX_LEN in
+                  zones_http.h (7). It is 7, not 15, because zones_cfg_t is
+                  500 bytes against a 512-byte blob cap -- the profile array
+                  is what spent the budget. zones_http.c strncpy()s to that
+                  length, so a longer name here is not refused, it is silently
+                  truncated on save: the operator types "Fast bisque", presses
+                  Save, and the box comes back reading "Fast bi". Two copies
+                  of one number, and this is the copy the operator sees. */
+               '<input type="text" class="tpname" maxlength="7" value="' + esc(p.name || '') + '">';
+    FIELDS.forEach(function (f) {
+      html += '<label>' + f[3] + '</label>' +
+              '<input type="number" step="' + f[4] + '" min="0" class="' + f[0] +
+              '" value="' + (p[f[1]] || 0) + '">' +
+              '<p class="hint">0 = firmware default (' + f[5] + ')</p>';
+    });
+    div.innerHTML = html;
+    host.appendChild(div);
+  });
+}
+
+/* One <option> per profile, labelled with its (escaped) name so an operator
+   picks "Bisque" rather than having to remember what index 2 means. */
+function profileOptionsHtml(selectedIndex) {
+  var profiles = current.timing_profiles || [];
+  var html = '';
+  profiles.forEach(function (p) {
+    var sel = (p.index === selectedIndex) ? ' selected' : '';
+    html += '<option value="' + p.index + '"' + sel + '>' + p.index + ': ' + esc(p.name || '(unnamed)') + '</option>';
+  });
+  return html;
+}
+
+function renderZones() {
   var host = document.getElementById('zones');
   host.innerHTML = '';
   var count = current.thermo_count || 0;
@@ -169,16 +240,17 @@ function render() {
     var div = document.createElement('div');
     div.className = 'zone';
     div.dataset.index = i;
-    var html = '<h3>Zone ' + i + (z.name ? ' &mdash; ' + esc(z.name) : '') + '</h3>';
-    FIELDS.forEach(function (f) {
-      html += '<label>' + f[3] + '</label>' +
-              '<input type="number" step="' + f[4] + '" min="0" class="' + f[0] +
-              '" value="' + (z[f[1]] || 0) + '">' +
-              '<p class="hint">0 = firmware default (' + f[5] + ')</p>';
-    });
+    var html = '<h3>Zone ' + i + (z.name ? ' &mdash; ' + esc(z.name) : '') + '</h3>' +
+               '<label>Timing profile</label>' +
+               '<select class="tprofile">' + profileOptionsHtml(z.timing_profile || 0) + '</select>';
     div.innerHTML = html;
     host.appendChild(div);
   }
+}
+
+function render() {
+  renderProfiles();
+  renderZones();
 }
 
 function loadCurrent() {
@@ -207,8 +279,33 @@ document.getElementById('save').addEventListener('click', function () {
   params.push('safety_tc_type=' + (current.safety_tc_type || 0));
   if (current.continue_on_zone_trip) params.push('continue_on_zone_trip=1');
   params.push('pc_link_abort_silence_ms=' + document.getElementById('pcLink').value);
+  /* 2026-08-27+1, owner report ("name relays not assigned to a zone"):
+     relay<N>_name lives in the same whole-page record this endpoint edits.
+     This page has no UI for it -- naming an unassigned relay is
+     /settings/zones's job -- but /api/zones treats an omitted field for
+     THIS one as "keep the current value" (see zones_http.c's POST handler),
+     not as "clear it", so this echo is defense in depth rather than the
+     only thing standing between an operator and a wiped relay name. Same
+     "echo what was loaded, unconditionally" style as safety_tc_type/
+     pc_link_abort_silence_ms above. */
+  (current.relay_names || []).forEach(function (name, idx) {
+    params.push('relay' + (idx + 1) + '_name=' + encodeURIComponent(name || ''));
+  });
 
   var ok = true;
+
+  document.querySelectorAll('#profiles .zone').forEach(function (div) {
+    var idx = parseInt(div.dataset.index, 10);
+    var nameEl = div.querySelector('.tpname');
+    params.push('tp' + idx + '_name=' + encodeURIComponent(nameEl.value));
+    FIELDS.forEach(function (f) {
+      var el = div.querySelector('.' + f[0]);
+      var v = parseFloat(el.value);
+      if (!isFinite(v) || v < 0) { ok = false; }
+      params.push('tp' + idx + '_' + f[2] + '=' + el.value);
+    });
+  });
+
   document.querySelectorAll('#zones .zone').forEach(function (div) {
     var i = parseInt(div.dataset.index, 10);
     var z = current.zones[i] || {};
@@ -217,14 +314,11 @@ document.getElementById('save').addEventListener('click', function () {
       if (v === undefined || v === null) v = p[2] ? '' : 0;
       params.push('z' + i + '_' + p[0] + '=' + encodeURIComponent(v));
     });
-    FIELDS.forEach(function (f) {
-      var el = div.querySelector('.' + f[0]);
-      var v = parseFloat(el.value);
-      if (!isFinite(v) || v < 0) { ok = false; }
-      params.push('z' + i + '_' + f[2] + '=' + el.value);
-    });
+    var profileSel = div.querySelector('.tprofile');
+    params.push('z' + i + '_timingprofile=' + profileSel.value);
   });
-  if (!ok) { msg.textContent = 'Every box must be a number of 0 or more.'; return; }
+
+  if (!ok) { msg.textContent = 'Every timing box must be a number of 0 or more.'; return; }
 
   msg.textContent = 'Saving…';
   fetch('/api/zones', {

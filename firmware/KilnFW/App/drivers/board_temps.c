@@ -13,12 +13,6 @@
 
 static const char *TAG = "board_temps";
 
-/* Embedded via EMBED_TXTFILES, pre-gzipped at configure time by
- * App/drivers/CMakeLists.txt's KILNCTL_GZIP_ASSETS list -- same convention as
- * every other *_page.html in this component (diagnostics_http.c). */
-extern const uint8_t board_temps_page_html_gz_start[] asm("_binary_board_temps_page_html_gz_start");
-extern const uint8_t board_temps_page_html_gz_end[] asm("_binary_board_temps_page_html_gz_end");
-
 /* Install-once/enable-once handle. NULL until board_temps_start() succeeds --
  * same init-once/read-many split as every other driver here (NS2009_start
  * vs NS2009_read, MAX31856_start_all vs MAX31856_read_all). */
@@ -216,22 +210,6 @@ send:
     return httpd_resp_send(req, json, o);
 }
 
-/* Same content-negotiation shape as diagnostics_http.c's send_gz_page(): a
- * pure static page, no server-side data gathering of its own -- it polls
- * GET /api/board_temps client-side, same as diagnostics_page.html's own
- * "Board health" card. */
-static esp_err_t board_temps_page_get_handler(httpd_req_t *req)
-{
-    if (!web_client_accepts_gzip(req)) {
-        return web_send_gzip_not_acceptable(req, TAG, "board_temps_page.html");
-    }
-    httpd_resp_set_type(req, "text/html");
-    httpd_resp_set_hdr(req, "Content-Encoding", "gzip");
-    web_set_asset_cache_headers(req);
-    return httpd_resp_send(req, (const char *)board_temps_page_html_gz_start,
-                            (size_t)(board_temps_page_html_gz_end - board_temps_page_html_gz_start));
-}
-
 esp_err_t board_temps_http_start(MAX31856BusClass *thermo_bus_or_null)
 {
     httpd_handle_t server = wifi_provision_http_get_server();
@@ -251,15 +229,16 @@ esp_err_t board_temps_http_start(MAX31856BusClass *thermo_bus_or_null)
         return err;
     }
 
-    static const httpd_uri_t page_uri = {
-        .uri = "/board_temps", .method = HTTP_GET, .handler = board_temps_page_get_handler,
-    };
-    err = httpd_register_uri_handler(server, &page_uri);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "httpd_register_uri_handler(/board_temps) failed: %s", esp_err_to_name(err));
-        return err;
-    }
+    /* No standalone /board_temps page any more (owner request, 2026-08-27:
+     * "the board health page should be folded into the diagnostics page.
+     * most of the information is there anyway") -- it was already a byte-
+     * for-byte duplicate of diagnostics_page.html's own "Board health" card
+     * (both read this same GET /api/board_temps endpoint and render the
+     * identical esp32Temp + per-channel cold-junction rows), so folding it
+     * in dropped nothing operator-visible. The API stays: diagnostics_page's
+     * card is its only web consumer now, plus ui_page_board_health.c (LCD)
+     * via board_temps_get_live() directly, never through HTTP. */
 
-    ESP_LOGI(TAG, "board_temps API and page up");
+    ESP_LOGI(TAG, "board_temps API up (/board_temps page removed, folded into /diagnostics)");
     return ESP_OK;
 }

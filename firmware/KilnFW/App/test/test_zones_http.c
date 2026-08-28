@@ -295,8 +295,11 @@ static void test_out_of_range_zone_preserves_stored_fields(void)
 
     const uint8_t thermo_count = 1; // zone index 1 is past this -- the defect's exact trigger
     const uint8_t relay_count = 4;
+    const uint8_t timing_profile_count = 1; // zone 1 is past thermo_count -- the early-return
+                                            // preserve path never reaches z1_timingprofile's parse
     const char *err_reason = "unset";
-    bool ok = parse_zone_fields(body, /*i=*/1, thermo_count, relay_count, &current, &out, &err_reason);
+    bool ok = parse_zone_fields(body, /*i=*/1, thermo_count, relay_count, timing_profile_count,
+                                &current, &out, &err_reason);
 
     TEST_CHECK(ok, "a body silent on zone 1 (past thermo_count) must still be accepted, not refused");
     TEST_CHECK(out.relay_mask == current.relay_mask,
@@ -339,11 +342,12 @@ static void test_in_range_zone_thermo_mask_legacy_fallback_unchanged(void)
     memset(&out, 0, sizeof(out));
 
     // No z0_thermo_mask key at all, but zone 0 IS in range (thermo_count=2).
-    const char *body = "z0_name=Top&z0_tctype=2&z0_relay_mask=1&"
+    const char *body = "z0_name=Top&z0_tctype=2&z0_relay_mask=1&z0_timingprofile=0&"
                         "z0_cal=0&z0_kp=1&z0_ki=0&z0_kd=0&z0_ramp=100&z0_sanity=0&z0_mode=0&"
                         "z0_maxtemp=1300&z0_mintemp=-20&z0_window=1000&z0_minon=0&z0_minoff=0";
     const char *err_reason = "unset";
-    bool ok = parse_zone_fields(body, /*i=*/0, /*thermo_count=*/2, /*relay_count=*/4, &current, &out, &err_reason);
+    bool ok = parse_zone_fields(body, /*i=*/0, /*thermo_count=*/2, /*relay_count=*/4,
+                                /*timing_profile_count=*/1, &current, &out, &err_reason);
 
     TEST_CHECK(ok, "in-range zone with every REQUIRED field present must still be accepted");
     TEST_CHECK(out.thermo_mask == (1u << 0), "omitted thermo_mask on an in-range zone falls back to legacy 1<<i, "
@@ -461,18 +465,31 @@ static void test_zones_post_max_simultaneous_relays_rejects_trailing_garbage(voi
               "error message should name the offending field");
 }
 
+// A single minimal-but-complete timing profile (tp0_*), all nine fields at
+// their legal 0 ("use the firmware default") -- the minimum every whole-page
+// submit must carry as of ZONES_CFG_VERSION 9 (see zones_post_handler()'s own
+// comment: timing_profile_count must never be 0). Reused by every test below
+// that needs zones_post_handler() to reach past the profile-parsing block.
+#define MINIMAL_TIMING_PROFILE_BODY \
+    "tp0_name=Default&tp0_progressduty=0&tp0_progresswindow=0&tp0_drifthyst=0&" \
+    "tp0_frozeneps=0&tp0_xzoneperiod=0&tp0_bbhyst=0&tp0_coolmargin=0&tp0_coolhold=0&tp0_ramplock=0"
+
 static void test_zones_post_safety_tc_type_rejects_trailing_garbage(void)
 {
     TEST_SECTION("zones_post_handler -- safety_tc_type trailing garbage rejected (FIX 2, inline strtol site 2)");
-    run_zones_post("thermo_count=0&relay_count=0&safety_tc_type=3Q");
+    run_zones_post("thermo_count=0&relay_count=0&" MINIMAL_TIMING_PROFILE_BODY "&safety_tc_type=3Q");
     TEST_CHECK(s_test_err_called, "\"3Q\" must be rejected, not silently accepted as 3");
     TEST_CHECK(!s_test_ok_called, "must not report success for a rejected submission");
+    TEST_CHECK(strstr(s_test_err_msg, "safety_tc_type") != NULL,
+              "must be rejected FOR safety_tc_type specifically, not for an unrelated missing "
+              "timing profile -- proves this test still exercises the code path it claims to");
 }
 
 static void test_zones_post_accepts_clean_minimal_body(void)
 {
     TEST_SECTION("zones_post_handler -- positive control: clean values on the same two fields are still accepted");
-    run_zones_post("thermo_count=0&relay_count=0&max_simultaneous_relays=2&safety_tc_type=3");
+    run_zones_post("thermo_count=0&relay_count=0&" MINIMAL_TIMING_PROFILE_BODY
+                   "&max_simultaneous_relays=2&safety_tc_type=3");
     TEST_CHECK(!s_test_err_called, "a clean submission must not be rejected");
     TEST_CHECK(s_test_ok_called, "a clean submission must report success");
 }
@@ -550,6 +567,7 @@ static void test_nvs_load_from_current_version_happy_path(void)
     memset(&src, 0, sizeof(src));
     src.version = ZONES_CFG_VERSION;
     src.thermo_count = 2;
+    src.timing_profile_count = 1; // must never be 0 in a config validate_zones_cfg() accepts
     src.crc32 = compute_zones_crc(&src); // CRC now checked on the current-version path (item 4)
     stage_zones_blob(&src, sizeof(src));
 
@@ -765,6 +783,13 @@ static void test_nvs_save_load_round_trip_current_version(void)
     s_zones.cfg.max_simultaneous_relays = 2;
     s_zones.cfg.continue_on_zone_trip = 1;
     s_zones.cfg.safety_tc_type = 3;
+    s_zones.cfg.timing_profile_count = 2;
+    strncpy(s_zones.cfg.timing_profiles[0].name, "Default", TIMING_PROFILE_NAME_MAX_LEN);
+    s_zones.cfg.timing_profiles[0].guard_progress_duty_min = 0.1f;
+    s_zones.cfg.timing_profiles[0].ramp_lock_band_c = 3.0f;
+    strncpy(s_zones.cfg.timing_profiles[1].name, "Fast", TIMING_PROFILE_NAME_MAX_LEN);
+    s_zones.cfg.timing_profiles[1].guard_progress_duty_min = 0.2f;
+    s_zones.cfg.timing_profiles[1].ramp_lock_band_c = 5.0f;
     for (uint8_t i = 0; i < 3; i++) {
         zone_cfg_t *z = &s_zones.cfg.zones[i];
         snprintf(z->name, sizeof(z->name), "Z%u", (unsigned)i);
@@ -776,6 +801,7 @@ static void test_nvs_save_load_round_trip_current_version(void)
         z->pid_kp = 2.0f + i;
         z->max_temp_c = 1200.0f + 10.0f * i;
         z->model_k_dc = 12.0f + i;
+        z->timing_profile = (uint8_t)(i % 2); // exercise both profiles, not just 0
     }
     zones_cfg_t saved_copy = s_zones.cfg; // captured before nvs_save() stamps version/crc32 in place
 
@@ -806,6 +832,19 @@ static void test_nvs_save_load_round_trip_current_version(void)
         TEST_CHECK_NEAR(loaded.zones[i].pid_kp, saved_copy.zones[i].pid_kp, 1e-6, "zone pid_kp round-trips");
         TEST_CHECK_NEAR(loaded.zones[i].max_temp_c, saved_copy.zones[i].max_temp_c, 1e-6, "zone max_temp_c round-trips");
         TEST_CHECK_NEAR(loaded.zones[i].model_k_dc, saved_copy.zones[i].model_k_dc, 1e-6, "zone model_k_dc round-trips");
+        TEST_CHECK(loaded.zones[i].timing_profile == saved_copy.zones[i].timing_profile,
+                  "zone timing_profile round-trips");
+    }
+    TEST_CHECK(loaded.timing_profile_count == saved_copy.timing_profile_count, "timing_profile_count round-trips");
+    for (uint8_t p = 0; p < 2; p++) {
+        TEST_CHECK(strcmp(loaded.timing_profiles[p].name, saved_copy.timing_profiles[p].name) == 0,
+                  "timing profile name round-trips");
+        TEST_CHECK_NEAR(loaded.timing_profiles[p].guard_progress_duty_min,
+                        saved_copy.timing_profiles[p].guard_progress_duty_min, 1e-6,
+                        "timing profile guard_progress_duty_min round-trips");
+        TEST_CHECK_NEAR(loaded.timing_profiles[p].ramp_lock_band_c,
+                        saved_copy.timing_profiles[p].ramp_lock_band_c, 1e-6,
+                        "timing profile ramp_lock_band_c round-trips");
     }
 
     nvs_test_enable(false);
@@ -898,6 +937,11 @@ static void make_minimal_valid_cfg(zones_cfg_t *cfg)
     cfg->zones[0].relay_mask = 0x01;
     cfg->zones[0].thermo_mask = 0x01;
     cfg->zones[0].max_temp_c = 1300.0f;
+    /* zone[0].timing_profile stays 0 from the memset above, and that must
+     * resolve to a REAL profile for validate_zones_cfg() to accept this --
+     * see zones_cfg_t::timing_profile_count's own comment. */
+    cfg->timing_profile_count = 1;
+    strncpy(cfg->timing_profiles[0].name, "Default", TIMING_PROFILE_NAME_MAX_LEN);
 }
 
 static void test_nvs_load_from_v7_blob_upconverts_and_defaults_new_fields(void)
@@ -945,7 +989,7 @@ static void test_nvs_load_from_v7_blob_upconverts_and_defaults_new_fields(void)
 
     TEST_CHECK(err == ESP_OK, "no NVS error");
     TEST_CHECK(found && valid, "a well-formed v7 blob must migrate to a valid current config");
-    TEST_CHECK(out_cfg.version == ZONES_CFG_VERSION, "migrated config is stamped v8");
+    TEST_CHECK(out_cfg.version == ZONES_CFG_VERSION, "migrated config is stamped the current version");
     TEST_CHECK(out_cfg.thermo_count == 3 && out_cfg.relay_count == 3, "counts carried through");
     TEST_CHECK(out_cfg.safety_tc_type == 3, "safety_tc_type carried through");
 
@@ -961,22 +1005,27 @@ static void test_nvs_load_from_v7_blob_upconverts_and_defaults_new_fields(void)
     TEST_CHECK(out_cfg.zones[2].relay_mask == 0x04, "zones[2].relay_mask must NOT be shifted");
     TEST_CHECK_NEAR(out_cfg.zones[2].guard_runaway_margin_c, 33.0f, 1e-6, "zones[2] guard threshold correct");
 
-    /* The point of the 0 convention: an upgraded board must behave exactly as
-     * it did, so every new field has to arrive as "not configured". */
+    /* v7 predates the nine timing overrides entirely (ZONES_CFG_VERSION 8->9)
+     * -- there is nothing to migrate, so every zone is pointed at ONE
+     * synthesized "Default" profile, and that profile's nine fields are all
+     * 0 (= firmware default), matching exactly how a v7 board already
+     * behaved. */
+    TEST_CHECK(out_cfg.timing_profile_count == 1,
+              "a v7 board -- no per-zone timing data to migrate -- collapses to one shared profile");
+    TEST_CHECK(strcmp(out_cfg.timing_profiles[0].name, "Default") == 0,
+              "the synthesized profile is named \"Default\"");
     for (uint8_t i = 0; i < 3; i++) {
         char msg[96];
-        snprintf(msg, sizeof(msg), "zones[%u]'s new v8 overrides all default to 0 (= firmware default)", i);
-        bool all_zero = out_cfg.zones[i].guard_progress_duty_min == 0.0f &&
-                        out_cfg.zones[i].guard_progress_window_s == 0.0f &&
-                        out_cfg.zones[i].guard_drift_hysteresis_c == 0.0f &&
-                        out_cfg.zones[i].guard_frozen_eps_c == 0.0f &&
-                        out_cfg.zones[i].guard_cross_zone_period_s == 0.0f &&
-                        out_cfg.zones[i].bangbang_hysteresis_c == 0.0f &&
-                        out_cfg.zones[i].cooling_limited_margin_c == 0.0f &&
-                        out_cfg.zones[i].cooling_limited_hold_s == 0.0f &&
-                        out_cfg.zones[i].ramp_lock_band_c == 0.0f;
-        TEST_CHECK(all_zero, msg);
+        snprintf(msg, sizeof(msg), "zones[%u] points at the shared Default profile (index 0)", i);
+        TEST_CHECK(out_cfg.zones[i].timing_profile == 0, msg);
     }
+    const zone_timing_profile_t *tp0 = &out_cfg.timing_profiles[0];
+    bool all_zero = tp0->guard_progress_duty_min == 0.0f && tp0->guard_progress_window_s == 0.0f &&
+                    tp0->guard_drift_hysteresis_c == 0.0f && tp0->guard_frozen_eps_c == 0.0f &&
+                    tp0->guard_cross_zone_period_s == 0.0f && tp0->bangbang_hysteresis_c == 0.0f &&
+                    tp0->cooling_limited_margin_c == 0.0f && tp0->cooling_limited_hold_s == 0.0f &&
+                    tp0->ramp_lock_band_c == 0.0f;
+    TEST_CHECK(all_zero, "the synthesized Default profile's nine fields are all 0 (= firmware default)");
     TEST_CHECK(out_cfg.pc_link_abort_silence_ms == 0.0f,
                "the global pc_link_abort_silence_ms also defaults to 0 on upgrade");
 
@@ -984,9 +1033,190 @@ static void test_nvs_load_from_v7_blob_upconverts_and_defaults_new_fields(void)
     nvs_test_clear();
 }
 
+// THE test this whole pass is about (task instructions: "the migration needs
+// a test that would FAIL if v8 data were misread -- build a real v8 blob with
+// DISTINCT non-zero values per zone, load it, and assert every zone still
+// resolves to its original nine values through the new profile indirection").
+// Reproduces the exact profiles_http.c disaster shape: a wrong expected-length
+// (sizeof the CURRENT struct instead of the frozen v8 snapshot) would make
+// this blob either get rejected outright (wrong length) or, worse, silently
+// misread -- this test would catch either failure mode.
+static void test_nvs_load_from_v8_blob_with_distinct_zone_values_migrates_losslessly(void)
+{
+    TEST_SECTION("nvs_load_from -- a v8 blob with DISTINCT per-zone timing overrides migrates "
+                 "losslessly: each zone gets its own profile with its exact original nine values");
+    nvs_test_enable(true);
+    nvs_test_clear();
+
+    zones_cfg_v8_t src;
+    memset(&src, 0, sizeof(src));
+    src.version = 8;
+    src.thermo_count = 3;
+    src.relay_count = 3;
+    src.continue_on_zone_trip = 1;
+    src.safety_tc_type = 3;
+    src.pc_link_abort_silence_ms = 45000.0f;
+
+    src.zones[0].relay_mask = 0x01;
+    src.zones[0].thermo_mask = 0x01;
+    src.zones[0].tc_type = 3;
+    src.zones[0].guard_progress_duty_min = 0.10f;
+    src.zones[0].guard_progress_window_s = 100.0f;
+    src.zones[0].guard_drift_hysteresis_c = 1.0f;
+    src.zones[0].guard_frozen_eps_c = 0.10f;
+    src.zones[0].guard_cross_zone_period_s = 10.0f;
+    src.zones[0].bangbang_hysteresis_c = 2.0f;
+    src.zones[0].cooling_limited_margin_c = 5.0f;
+    src.zones[0].cooling_limited_hold_s = 60.0f;
+    src.zones[0].ramp_lock_band_c = 3.0f;
+
+    src.zones[1].relay_mask = 0x02;
+    src.zones[1].thermo_mask = 0x02;
+    src.zones[1].tc_type = 3;
+    src.zones[1].guard_progress_duty_min = 0.20f;
+    src.zones[1].guard_progress_window_s = 200.0f;
+    src.zones[1].guard_drift_hysteresis_c = 2.0f;
+    src.zones[1].guard_frozen_eps_c = 0.20f;
+    src.zones[1].guard_cross_zone_period_s = 20.0f;
+    src.zones[1].bangbang_hysteresis_c = 4.0f;
+    src.zones[1].cooling_limited_margin_c = 6.0f;
+    src.zones[1].cooling_limited_hold_s = 70.0f;
+    src.zones[1].ramp_lock_band_c = 4.0f;
+
+    src.zones[2].relay_mask = 0x04;
+    src.zones[2].thermo_mask = 0x04;
+    src.zones[2].tc_type = 3;
+    src.zones[2].guard_progress_duty_min = 0.30f;
+    src.zones[2].guard_progress_window_s = 300.0f;
+    src.zones[2].guard_drift_hysteresis_c = 3.0f;
+    src.zones[2].guard_frozen_eps_c = 0.30f;
+    src.zones[2].guard_cross_zone_period_s = 30.0f;
+    src.zones[2].bangbang_hysteresis_c = 6.0f;
+    src.zones[2].cooling_limited_margin_c = 7.0f;
+    src.zones[2].cooling_limited_hold_s = 80.0f;
+    src.zones[2].ramp_lock_band_c = 5.0f;
+
+    src.crc32 = 0; /* v8's own CRC is not checked on the old-version path */
+
+    stage_zones_blob(&src, sizeof(src));
+
+    zones_cfg_t out_cfg;
+    bool found = false, valid = false;
+    esp_err_t err = nvs_load_from("kiln_nvs", &out_cfg, &found, &valid);
+
+    TEST_CHECK(err == ESP_OK, "no NVS error");
+    TEST_CHECK(found && valid, "a well-formed v8 blob with distinct zone values must migrate to a "
+                              "valid current config -- NOT be rejected as corrupt");
+    TEST_CHECK(out_cfg.version == ZONES_CFG_VERSION, "migrated config is stamped the current version");
+    TEST_CHECK_NEAR((double)out_cfg.pc_link_abort_silence_ms, 45000.0, 1e-6,
+                    "the global pc_link_abort_silence_ms (real v8 value) carried through");
+
+    /* THE lossless-migration proof: three distinct zones -> three distinct
+     * profiles, each zone pointed at its OWN profile, none shared. If
+     * expected_len_for_version(8) had returned sizeof(the CURRENT struct)
+     * (the exact profiles_http.c mistake this pass's instructions warn
+     * about) instead of sizeof(zones_cfg_v8_t), this blob would either fail
+     * the length check outright (found && valid would be false, caught
+     * above) or -- had the sizes happened to coincide -- be misread field-by-
+     * field-wrong, and the checks below would catch that: a byte-shifted
+     * read would not reproduce these exact numbers at these exact zones. */
+    TEST_CHECK(out_cfg.timing_profile_count == 3,
+              "three distinct zones must produce three distinct profiles, not a collapsed shared one");
+    TEST_CHECK(out_cfg.zones[0].timing_profile != out_cfg.zones[1].timing_profile &&
+              out_cfg.zones[1].timing_profile != out_cfg.zones[2].timing_profile &&
+              out_cfg.zones[0].timing_profile != out_cfg.zones[2].timing_profile,
+              "every zone's assigned profile index must be distinct from every other zone's");
+
+    struct { float duty, window, drift, eps, xzone, bb, coolmargin, coolhold, ramplock; } expect[3] = {
+        {0.10f, 100.0f, 1.0f, 0.10f, 10.0f, 2.0f, 5.0f, 60.0f, 3.0f},
+        {0.20f, 200.0f, 2.0f, 0.20f, 20.0f, 4.0f, 6.0f, 70.0f, 4.0f},
+        {0.30f, 300.0f, 3.0f, 0.30f, 30.0f, 6.0f, 7.0f, 80.0f, 5.0f},
+    };
+    for (uint8_t i = 0; i < 3; i++) {
+        char msg[128];
+        uint8_t p = out_cfg.zones[i].timing_profile;
+        TEST_CHECK(p < out_cfg.timing_profile_count, "zone's profile index must be in range");
+        const zone_timing_profile_t *tp = &out_cfg.timing_profiles[p];
+        snprintf(msg, sizeof(msg), "zone %u's profile guard_progress_duty_min is its OWN original v8 value", i);
+        TEST_CHECK_NEAR((double)tp->guard_progress_duty_min, (double)expect[i].duty, 1e-6, msg);
+        snprintf(msg, sizeof(msg), "zone %u's profile guard_progress_window_s is its OWN original v8 value", i);
+        TEST_CHECK_NEAR((double)tp->guard_progress_window_s, (double)expect[i].window, 1e-6, msg);
+        snprintf(msg, sizeof(msg), "zone %u's profile guard_drift_hysteresis_c is its OWN original v8 value", i);
+        TEST_CHECK_NEAR((double)tp->guard_drift_hysteresis_c, (double)expect[i].drift, 1e-6, msg);
+        snprintf(msg, sizeof(msg), "zone %u's profile guard_frozen_eps_c is its OWN original v8 value", i);
+        TEST_CHECK_NEAR((double)tp->guard_frozen_eps_c, (double)expect[i].eps, 1e-6, msg);
+        snprintf(msg, sizeof(msg), "zone %u's profile guard_cross_zone_period_s is its OWN original v8 value", i);
+        TEST_CHECK_NEAR((double)tp->guard_cross_zone_period_s, (double)expect[i].xzone, 1e-6, msg);
+        snprintf(msg, sizeof(msg), "zone %u's profile bangbang_hysteresis_c is its OWN original v8 value", i);
+        TEST_CHECK_NEAR((double)tp->bangbang_hysteresis_c, (double)expect[i].bb, 1e-6, msg);
+        snprintf(msg, sizeof(msg), "zone %u's profile cooling_limited_margin_c is its OWN original v8 value", i);
+        TEST_CHECK_NEAR((double)tp->cooling_limited_margin_c, (double)expect[i].coolmargin, 1e-6, msg);
+        snprintf(msg, sizeof(msg), "zone %u's profile cooling_limited_hold_s is its OWN original v8 value", i);
+        TEST_CHECK_NEAR((double)tp->cooling_limited_hold_s, (double)expect[i].coolhold, 1e-6, msg);
+        snprintf(msg, sizeof(msg), "zone %u's profile ramp_lock_band_c is its OWN original v8 value", i);
+        TEST_CHECK_NEAR((double)tp->ramp_lock_band_c, (double)expect[i].ramplock, 1e-6, msg);
+    }
+
+    /* The other zone fields (untouched by this pass) must also have survived
+     * the v8->v9 conversion, same discipline as the v5/v7 lossless-migration
+     * tests above -- a bug in convert_zone_v8() could plausibly leave the
+     * TIMING fields correct while breaking something else it touches. */
+    TEST_CHECK(out_cfg.zones[1].relay_mask == 0x02, "zones[1].relay_mask must NOT be shifted");
+    TEST_CHECK(out_cfg.zones[2].relay_mask == 0x04, "zones[2].relay_mask must NOT be shifted");
+    TEST_CHECK(out_cfg.zones[1].tc_type == 3, "zones[1].tc_type carried through");
+
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
+// The degenerate case explicitly called out by this pass's instructions:
+// "Today's board has all-zero values on every zone, which should collapse to
+// a single shared profile -- verify that is what your converter does."
+// Distinct from the v7 test above (v7 has no per-zone timing fields AT ALL to
+// even be zero); this one is a v8 blob whose zones DO carry the nine fields,
+// every one of them still at the default 0 -- proving the dedup logic
+// collapses "all zero" to ONE profile, not the "no such fields exist" case.
+static void test_nvs_load_from_v8_blob_upconverts_to_shared_default_profile(void)
+{
+    TEST_SECTION("nvs_load_from -- a v8 blob where every zone's nine overrides are still all-zero "
+                 "(the owner's actual board today) collapses to ONE shared \"Default\" profile");
+    nvs_test_enable(true);
+    nvs_test_clear();
+
+    zones_cfg_v8_t src;
+    memset(&src, 0, sizeof(src)); /* every zone's nine timing fields at their 0 default */
+    src.version = 8;
+    src.thermo_count = 3;
+    src.relay_count = 3;
+    src.zones[0].relay_mask = 0x01;
+    src.zones[1].relay_mask = 0x02;
+    src.zones[2].relay_mask = 0x04;
+
+    stage_zones_blob(&src, sizeof(src));
+
+    zones_cfg_t out_cfg;
+    bool found = false, valid = false;
+    esp_err_t err = nvs_load_from("kiln_nvs", &out_cfg, &found, &valid);
+
+    TEST_CHECK(err == ESP_OK, "no NVS error");
+    TEST_CHECK(found && valid, "an all-zero-timing v8 blob must migrate to a valid current config");
+    TEST_CHECK(out_cfg.timing_profile_count == 1,
+              "three zones, all identical (all-zero) timing values, collapse to exactly one profile");
+    TEST_CHECK(strcmp(out_cfg.timing_profiles[0].name, "Default") == 0,
+              "the single shared profile is named \"Default\", not \"Zone 1\"");
+    TEST_CHECK(out_cfg.zones[0].timing_profile == 0 && out_cfg.zones[1].timing_profile == 0 &&
+              out_cfg.zones[2].timing_profile == 0,
+              "every zone points at the same shared profile 0");
+
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
 static void test_validate_rejects_out_of_range_v8_fields(void)
 {
-    TEST_SECTION("validate_zones_cfg -- the v8 overrides are range-checked like every field before them");
+    TEST_SECTION("validate_zones_cfg -- the nine timing-profile overrides are range-checked like "
+                 "every field before them (now on timing_profiles[], not zones[] -- see "
+                 "ZONES_CFG_VERSION's 8->9 comment)");
 
     /* A duty above 1.0 would arm guard 1 never, silently disabling the
      * heating-failed check -- the exact "configured it into uselessness"
@@ -994,21 +1224,21 @@ static void test_validate_rejects_out_of_range_v8_fields(void)
     {
         zones_cfg_t cfg;
         make_minimal_valid_cfg(&cfg);
-        cfg.zones[0].guard_progress_duty_min = 1.5f;
+        cfg.timing_profiles[0].guard_progress_duty_min = 1.5f;
         const char *reason = NULL;
         TEST_CHECK(!validate_zones_cfg(&cfg, &reason), "guard_progress_duty_min > 1.0 is rejected");
     }
     {
         zones_cfg_t cfg;
         make_minimal_valid_cfg(&cfg);
-        cfg.zones[0].guard_progress_window_s = -1.0f;
+        cfg.timing_profiles[0].guard_progress_window_s = -1.0f;
         const char *reason = NULL;
         TEST_CHECK(!validate_zones_cfg(&cfg, &reason), "a negative guard_progress_window_s is rejected");
     }
     {
         zones_cfg_t cfg;
         make_minimal_valid_cfg(&cfg);
-        cfg.zones[0].ramp_lock_band_c = ZONE_GUARD_MARGIN_C_MAX + 1.0f;
+        cfg.timing_profiles[0].ramp_lock_band_c = ZONE_GUARD_MARGIN_C_MAX + 1.0f;
         const char *reason = NULL;
         TEST_CHECK(!validate_zones_cfg(&cfg, &reason), "ramp_lock_band_c past its ceiling is rejected");
     }
@@ -1025,8 +1255,377 @@ static void test_validate_rejects_out_of_range_v8_fields(void)
         zones_cfg_t cfg;
         make_minimal_valid_cfg(&cfg);
         const char *reason = NULL;
-        TEST_CHECK(validate_zones_cfg(&cfg, &reason), "all-zero v8 fields stay valid (0 = firmware default)");
+        TEST_CHECK(validate_zones_cfg(&cfg, &reason), "all-zero timing profile fields stay valid (0 = firmware default)");
     }
+    /* timing_profile_count itself: 0 is illegal (zone[0].timing_profile == 0
+     * from a fresh config must always resolve to something real), and a
+     * count past MAX31856_CHANNEL_COUNT is illegal (the array's fixed
+     * capacity). */
+    {
+        zones_cfg_t cfg;
+        make_minimal_valid_cfg(&cfg);
+        cfg.timing_profile_count = 0;
+        const char *reason = NULL;
+        TEST_CHECK(!validate_zones_cfg(&cfg, &reason), "timing_profile_count == 0 is rejected");
+    }
+    {
+        zones_cfg_t cfg;
+        make_minimal_valid_cfg(&cfg);
+        cfg.timing_profile_count = MAX31856_CHANNEL_COUNT + 1;
+        const char *reason = NULL;
+        TEST_CHECK(!validate_zones_cfg(&cfg, &reason), "timing_profile_count past MAX31856_CHANNEL_COUNT is rejected");
+    }
+    /* zone_cfg_t::timing_profile: must reference a profile that actually
+     * exists in THIS candidate -- the owner's whole feature ("assign the
+     * zones to them") is meaningless if a zone can point past the end of
+     * timing_profiles[]. */
+    {
+        zones_cfg_t cfg;
+        make_minimal_valid_cfg(&cfg);
+        cfg.zones[0].timing_profile = 1; /* timing_profile_count is 1 -- only index 0 exists */
+        const char *reason = NULL;
+        TEST_CHECK(!validate_zones_cfg(&cfg, &reason),
+                  "a zone's timing_profile referencing a profile past timing_profile_count is rejected");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Relay names (owner report 2026-08-27+1: "the user should be able to assign
+// names to relays not assigned to zones as well"). Separate NVS blob from
+// zones_cfg_t -- see zones_http.c's relay-names section header comment for
+// the design decision and the byte arithmetic behind it. Same nvs_test_enable
+// single-blob-slot stub the zones_cfg_t tests above use; each test that
+// touches NVS enables/clears it and disables it again when done, same
+// discipline as every test in this file.
+// ---------------------------------------------------------------------------
+
+static void reset_relay_names(void)
+{
+    memset(&s_relay_names.cfg, 0, sizeof(s_relay_names.cfg));
+}
+
+static void stage_relay_names_blob(const void *data, size_t len)
+{
+    nvs_handle_t h;
+    esp_err_t err = nvs_open_from_partition("whatever", NVS_NAMESPACE, NVS_READWRITE, &h);
+    (void)err; // the stub always succeeds once nvs_test_enable(true) is set
+    nvs_set_blob(h, NVS_KEY_RELAY_NAMES, data, len);
+    nvs_close(h);
+}
+
+/* zones_config_set_relay_name() persists via relay_names_save(), which opens
+ * an NVS handle the same way every other setter's nvs_save() call does --
+ * with the stub's default (nvs_test_enable(false)) that open fails closed
+ * (ESP_ERR_NVS_NOT_FOUND), so the setter would report false even though the
+ * in-RAM write it makes BEFORE calling relay_names_save() is fine. Every test
+ * below that calls the setter enables the stub first, same as
+ * test_nvs_save_load_round_trip_current_version() does for
+ * zones_config_set_name()'s equivalent. */
+
+static void test_relay_name_get_set_round_trip(void)
+{
+    TEST_SECTION("zones_config_get/set_relay_name -- basic round trip");
+    nvs_test_enable(true);
+    nvs_test_clear();
+    reset_relay_names();
+
+    TEST_CHECK(zones_config_set_relay_name(3, "Vent fan"), "set on an in-range relay must succeed");
+    char out[RELAY_NAME_MAX_LEN + 1];
+    TEST_CHECK(zones_config_get_relay_name(3, out, sizeof(out)), "get on an in-range relay must succeed");
+    TEST_CHECK(strcmp(out, "Vent fan") == 0, "the exact string set must come back out");
+
+    /* A relay never named must read back as a real (true), empty string --
+     * not a getter failure, same "false means cannot answer, not answer is
+     * empty" convention every other named getter in zones_http.c uses. */
+    TEST_CHECK(zones_config_get_relay_name(1, out, sizeof(out)), "get on a never-named relay must still succeed");
+    TEST_CHECK(out[0] == '\0', "a never-named relay reads back as an empty string");
+
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
+static void test_relay_name_setter_rejects_out_of_range_relay(void)
+{
+    TEST_SECTION("zones_config_set_relay_name -- relay_n out of range is rejected");
+    reset_relay_names();
+    TEST_CHECK(!zones_config_set_relay_name(0, "x"), "relay 0 does not exist (1-based numbering)");
+    TEST_CHECK(!zones_config_set_relay_name((uint8_t)(KILN_IO_RELAY_COUNT + 1), "x"),
+              "a relay past KILN_IO_RELAY_COUNT does not exist");
+    char out[RELAY_NAME_MAX_LEN + 1];
+    TEST_CHECK(!zones_config_get_relay_name(0, out, sizeof(out)), "getter must reject relay 0 too");
+    TEST_CHECK(!zones_config_get_relay_name((uint8_t)(KILN_IO_RELAY_COUNT + 1), out, sizeof(out)),
+              "getter must reject a relay past KILN_IO_RELAY_COUNT too");
+}
+
+static void test_relay_name_setter_rejects_overlong_name(void)
+{
+    TEST_SECTION("zones_config_set_relay_name -- a name longer than RELAY_NAME_MAX_LEN is rejected, "
+                 "and nothing is written (matches zones_config_set_name()'s own z%u_name rejection)");
+    nvs_test_enable(true);
+    nvs_test_clear();
+    reset_relay_names();
+    TEST_CHECK(zones_config_set_relay_name(2, "short"), "seed a known-good value first");
+
+    char overlong[RELAY_NAME_MAX_LEN + 2];
+    memset(overlong, 'x', sizeof(overlong) - 1);
+    overlong[sizeof(overlong) - 1] = '\0';
+    TEST_CHECK(!zones_config_set_relay_name(2, overlong), "a name one char over the limit is rejected");
+
+    char out[RELAY_NAME_MAX_LEN + 1];
+    TEST_CHECK(zones_config_get_relay_name(2, out, sizeof(out)), "getter still works after the rejection");
+    TEST_CHECK(strcmp(out, "short") == 0, "the rejected write must not have touched the stored value");
+
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
+static void test_relay_name_setter_null_clears(void)
+{
+    TEST_SECTION("zones_config_set_relay_name -- NULL clears the name, matching zones_config_set_name()'s convention");
+    nvs_test_enable(true);
+    nvs_test_clear();
+    reset_relay_names();
+    TEST_CHECK(zones_config_set_relay_name(4, "Kiln light"), "seed a name");
+    TEST_CHECK(zones_config_set_relay_name(4, NULL), "NULL must be accepted (treated as empty)");
+    char out[RELAY_NAME_MAX_LEN + 1];
+    TEST_CHECK(zones_config_get_relay_name(4, out, sizeof(out)), "getter still works");
+    TEST_CHECK(out[0] == '\0', "the name must now be empty");
+
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
+static void test_relay_name_survives_relay_becoming_zone_owned(void)
+{
+    TEST_SECTION("a relay's stored name is KEPT, not cleared, when the relay becomes zone-owned "
+                 "(design decision -- see zones_http.c's relay-names section header comment)");
+    nvs_test_enable(true);
+    nvs_test_clear();
+    reset_relay_names();
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+
+    TEST_CHECK(zones_config_set_relay_name(1, "Vent fan"), "name relay 1 while it belongs to no zone");
+
+    /* Now claim relay 1 (bit 0) into zone 0 -- the getter must still answer
+     * with the same string; nothing about zone assignment touches storage. */
+    s_zones.cfg.thermo_count = 1;
+    s_zones.cfg.zones[0].relay_mask = 0x01;
+    TEST_CHECK((zone_owned_relay_mask(&s_zones.cfg) & 0x01) != 0, "sanity: relay 1 now reads as zone-owned");
+
+    char out[RELAY_NAME_MAX_LEN + 1];
+    TEST_CHECK(zones_config_get_relay_name(1, out, sizeof(out)), "getter still works once zone-owned");
+    TEST_CHECK(strcmp(out, "Vent fan") == 0, "the name must still be there, unmodified");
+
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
+static void test_zone_owned_relay_mask_is_union_of_zone_relay_masks(void)
+{
+    TEST_SECTION("zone_owned_relay_mask -- union of every configured zone's relay_mask, matching "
+                 "rules_task.c's compute_heater_relay_mask()/rules_http.c's check_relay_not_zone_owned() rule");
+    zones_cfg_t cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.thermo_count = 2;
+    cfg.zones[0].relay_mask = 0x01; /* relay 1 */
+    cfg.zones[1].relay_mask = 0x06; /* relays 2 and 3 */
+    /* zones[2] is past thermo_count and must not contribute even though it
+       has a nonzero relay_mask left over from some earlier state. */
+    cfg.zones[2].relay_mask = 0x08; /* relay 4 -- must be IGNORED */
+
+    TEST_CHECK(zone_owned_relay_mask(&cfg) == 0x07, "mask must be the union of only the in-range zones' bits "
+                                                     "(0x01 | 0x06 = 0x07), not including the past-thermo_count zone");
+}
+
+static void test_relay_names_load_wrong_length_blob_is_rejected(void)
+{
+    TEST_SECTION("relay_names_load -- a blob of the wrong length for relay_names_cfg_t is discarded "
+                 "(names reset to blank), same length-before-interpretation discipline as the zones blob");
+    nvs_test_enable(true);
+    nvs_test_clear();
+    relay_names_cfg_t src;
+    memset(&src, 0, sizeof(src));
+    src.version = RELAY_NAMES_CFG_VERSION;
+    src.crc32 = compute_relay_names_crc(&src);
+    stage_relay_names_blob(&src, sizeof(src) - 1); /* one byte short */
+
+    reset_relay_names();
+    strcpy(s_relay_names.cfg.names[0], "pre-existing junk"); /* proves load() actually clears, not just "leaves 0" */
+    relay_names_load();
+    TEST_CHECK(s_relay_names.cfg.names[0][0] == '\0', "a wrong-length blob must reset names to blank");
+
+    nvs_test_enable(false);
+    nvs_test_clear();
+    reset_relay_names();
+}
+
+static void test_relay_names_load_wrong_version_is_rejected(void)
+{
+    TEST_SECTION("relay_names_load -- an unrecognized version is discarded, never guessed at "
+                 "(same NEWER-refuses-to-load discipline as decode_zones_blob())");
+    nvs_test_enable(true);
+    nvs_test_clear();
+    relay_names_cfg_t src;
+    memset(&src, 0, sizeof(src));
+    src.version = (uint8_t)(RELAY_NAMES_CFG_VERSION + 1);
+    strcpy(src.names[0], "should never surface");
+    src.crc32 = compute_relay_names_crc(&src);
+    stage_relay_names_blob(&src, sizeof(src));
+
+    reset_relay_names();
+    relay_names_load();
+    TEST_CHECK(s_relay_names.cfg.names[0][0] == '\0',
+              "an unrecognized version's names must never reach s_relay_names.cfg");
+
+    nvs_test_enable(false);
+    nvs_test_clear();
+    reset_relay_names();
+}
+
+static void test_relay_names_load_bad_crc_is_rejected(void)
+{
+    TEST_SECTION("relay_names_load -- a CRC mismatch is discarded, same integrity gate as the zones blob's crc32");
+    nvs_test_enable(true);
+    nvs_test_clear();
+    relay_names_cfg_t src;
+    memset(&src, 0, sizeof(src));
+    src.version = RELAY_NAMES_CFG_VERSION;
+    strcpy(src.names[0], "should never surface");
+    src.crc32 = compute_relay_names_crc(&src) ^ 0xFFFFFFFFu; /* deliberately wrong */
+    stage_relay_names_blob(&src, sizeof(src));
+
+    reset_relay_names();
+    relay_names_load();
+    TEST_CHECK(s_relay_names.cfg.names[0][0] == '\0', "a bad-CRC blob's names must never reach s_relay_names.cfg");
+
+    nvs_test_enable(false);
+    nvs_test_clear();
+    reset_relay_names();
+}
+
+/* THE migration-style test the owner's report specifically calls for: build a
+ * real on-flash blob with DISTINCT values in every slot, load it through the
+ * real relay_names_load() path, and assert every one of them survives. This
+ * is the shape of test that would have caught profiles_http.c's
+ * sizeof(current struct)-for-an-old-version data-loss bug -- if
+ * relay_names_load() ever starts checking length/version/CRC against the
+ * wrong struct, or silently drops one slot, this goes red immediately. */
+static void test_relay_names_save_load_round_trip_preserves_distinct_values(void)
+{
+    TEST_SECTION("relay_names_load -- a real, valid blob with distinct per-relay names survives the "
+                 "full save->load round trip losslessly (the profiles_http.c-class data-loss check)");
+    nvs_test_enable(true);
+    nvs_test_clear();
+    reset_relay_names();
+
+    TEST_CHECK(zones_config_set_relay_name(1, "Vent fan"), "seed relay 1");
+    TEST_CHECK(zones_config_set_relay_name(2, "Bottom element"), "seed relay 2");
+    TEST_CHECK(zones_config_set_relay_name(3, "Top element"), "seed relay 3");
+    TEST_CHECK(zones_config_set_relay_name(4, ""), "seed relay 4 as deliberately blank");
+
+    /* Simulate a reboot: wipe the in-RAM copy and reload from the "flash"
+       the setters above actually wrote to (via nvs_set_blob, since
+       nvs_test_enable(true) makes it a real round trip, not a no-op). */
+    reset_relay_names();
+    relay_names_load();
+
+    char out[RELAY_NAME_MAX_LEN + 1];
+    TEST_CHECK(zones_config_get_relay_name(1, out, sizeof(out)) && strcmp(out, "Vent fan") == 0,
+              "relay 1's name must survive the round trip exactly");
+    TEST_CHECK(zones_config_get_relay_name(2, out, sizeof(out)) && strcmp(out, "Bottom element") == 0,
+              "relay 2's name must survive the round trip exactly");
+    TEST_CHECK(zones_config_get_relay_name(3, out, sizeof(out)) && strcmp(out, "Top element") == 0,
+              "relay 3's name must survive the round trip exactly");
+    TEST_CHECK(zones_config_get_relay_name(4, out, sizeof(out)) && out[0] == '\0',
+              "relay 4's deliberate blank must survive as blank, not as some other slot's leftover value");
+
+    nvs_test_enable(false);
+    nvs_test_clear();
+    reset_relay_names();
+}
+
+static void test_zones_post_relay_name_omitted_preserves_current_value(void)
+{
+    TEST_SECTION("zones_post_handler -- an omitted relay<N>_name PRESERVES the current stored name "
+                 "(global-field convention, like safety_tc_type/pc_link_abort_silence_ms), it does NOT "
+                 "zero it the way an omitted PER-ZONE field does -- this is the exact whole-page-submit "
+                 "trap the task brief calls out: safety_config_page.html never renders a relay-name "
+                 "input at all, so a save FROM THAT PAGE must not wipe every relay name");
+    nvs_test_enable(true);
+    nvs_test_clear();
+    reset_relay_names();
+    TEST_CHECK(zones_config_set_relay_name(1, "Vent fan"), "seed relay 1's name before the POST under test");
+
+    /* A minimal, otherwise-valid body that says nothing at all about
+       relay1_name -- exactly what safety_config_page.html's saveAll() sent
+       before this pass added its relay-names echo, and exactly what any
+       future third client that has never heard of this field will send. */
+    run_zones_post("thermo_count=0&relay_count=0&" MINIMAL_TIMING_PROFILE_BODY);
+    TEST_CHECK(!s_test_err_called, "an otherwise-clean submission must not be rejected");
+    TEST_CHECK(s_test_ok_called, "an otherwise-clean submission must report success");
+
+    char out[RELAY_NAME_MAX_LEN + 1];
+    TEST_CHECK(zones_config_get_relay_name(1, out, sizeof(out)) && strcmp(out, "Vent fan") == 0,
+              "relay 1's name must be UNCHANGED after a submission that never mentioned it");
+
+    reset_relay_names();
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
+static void test_zones_post_relay_name_present_updates_value(void)
+{
+    TEST_SECTION("zones_post_handler -- a present relay<N>_name field DOES update the stored name");
+    nvs_test_enable(true);
+    nvs_test_clear();
+    reset_relay_names();
+    TEST_CHECK(zones_config_set_relay_name(2, "old name"), "seed relay 2's name");
+
+    run_zones_post("thermo_count=0&relay_count=0&" MINIMAL_TIMING_PROFILE_BODY "&relay2_name=Vent+fan");
+    TEST_CHECK(!s_test_err_called, "a clean submission with a relay name must not be rejected");
+    TEST_CHECK(s_test_ok_called, "a clean submission with a relay name must report success");
+
+    char out[RELAY_NAME_MAX_LEN + 1];
+    TEST_CHECK(zones_config_get_relay_name(2, out, sizeof(out)) && strcmp(out, "Vent fan") == 0,
+              "relay 2's name must be updated to the submitted value");
+
+    reset_relay_names();
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
+static void test_zones_post_relay_name_too_long_rejected_and_commits_nothing(void)
+{
+    TEST_SECTION("zones_post_handler -- an overlong relay<N>_name is rejected outright, and the "
+                 "WHOLE submission is refused (nothing committed), same all-or-nothing discipline "
+                 "as every other field this handler validates");
+    nvs_test_enable(true);
+    nvs_test_clear();
+    reset_relay_names();
+    TEST_CHECK(zones_config_set_relay_name(3, "kept"), "seed a name that must survive the rejected submission");
+    s_zones.cfg.relay_count = 0; /* known value the rejected submission must not have changed */
+
+    char overlong_body[256];
+    snprintf(overlong_body, sizeof(overlong_body),
+             "thermo_count=0&relay_count=2&%s&relay3_name=%s",
+             MINIMAL_TIMING_PROFILE_BODY, "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" /* > RELAY_NAME_MAX_LEN */);
+    run_zones_post(overlong_body);
+    TEST_CHECK(s_test_err_called, "an overlong relay name must be rejected");
+    TEST_CHECK(!s_test_ok_called, "must not report success for a rejected submission");
+    TEST_CHECK(strstr(s_test_err_msg, "relay name") != NULL, "error message should name the offending field");
+
+    TEST_CHECK(s_zones.cfg.relay_count == 0, "a rejected submission must not have committed relay_count=2 either "
+                                             "-- the relay-name check runs before the commit point, same as "
+                                             "every field parsed earlier in this handler");
+    char out[RELAY_NAME_MAX_LEN + 1];
+    TEST_CHECK(zones_config_get_relay_name(3, out, sizeof(out)) && strcmp(out, "kept") == 0,
+              "relay 3's pre-existing name must be untouched by the rejected submission");
+
+    reset_relay_names();
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    nvs_test_enable(false);
+    nvs_test_clear();
 }
 
 void run_test_zones_http(void)
@@ -1056,7 +1655,23 @@ void run_test_zones_http(void)
     test_nvs_save_load_round_trip_current_version();
     test_nvs_load_from_v5_blob_upconverts_zones_1_and_2_correctly();
     test_nvs_load_from_v7_blob_upconverts_and_defaults_new_fields();
+    test_nvs_load_from_v8_blob_with_distinct_zone_values_migrates_losslessly();
+    test_nvs_load_from_v8_blob_upconverts_to_shared_default_profile();
     test_validate_rejects_out_of_range_v8_fields();
+
+    test_relay_name_get_set_round_trip();
+    test_relay_name_setter_rejects_out_of_range_relay();
+    test_relay_name_setter_rejects_overlong_name();
+    test_relay_name_setter_null_clears();
+    test_relay_name_survives_relay_becoming_zone_owned();
+    test_zone_owned_relay_mask_is_union_of_zone_relay_masks();
+    test_relay_names_load_wrong_length_blob_is_rejected();
+    test_relay_names_load_wrong_version_is_rejected();
+    test_relay_names_load_bad_crc_is_rejected();
+    test_relay_names_save_load_round_trip_preserves_distinct_values();
+    test_zones_post_relay_name_omitted_preserves_current_value();
+    test_zones_post_relay_name_present_updates_value();
+    test_zones_post_relay_name_too_long_rejected_and_commits_nothing();
 }
 
 int main(void)

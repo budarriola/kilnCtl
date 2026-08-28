@@ -5,12 +5,9 @@
 
 #include "esp_log.h"
 
-#include "ui_page_board_health.h"
 #include "ui_page_config.h"
 #include "ui_page_diagnostics.h"
 #include "ui_page_home.h"
-#include "ui_page_kiln_cfg_setup.h"
-#include "ui_page_kiln_setup.h"
 #include "ui_page_network.h"
 #include "ui_page_network_manage.h"
 #include "ui_page_profile_builder_review.h"
@@ -22,10 +19,7 @@
 #include "ui_page_profiles_builtin_list.h"
 #include "ui_page_profiles_family.h"
 #include "ui_page_profiles_mine.h"
-#include "ui_page_safety.h"
-#include "ui_page_tc_types.h"
 #include "ui_page_temperature.h"
-#include "ui_page_thermo_faults.h"
 #include "ui_page_touch_cal.h"
 #include "ui_page_touch_test.h"
 #include "touch_cal_store.h"
@@ -61,10 +55,15 @@ static const char *TAG = "kiln_ui";
  * the old 24-page cap otherwise.
  *
  * 2026-08-22: "zones", "zones_detail", and "history" were removed (owner
- * request -- see this file's registration comments), freeing 3 slots. Left
- * at 26 rather than lowered to 23: the array is tiny (a few dozen bytes per
- * slot) and a future page addition should not have to re-derive this
- * arithmetic from scratch the next time the count changes. */
+ * request -- see this file's registration comments), freeing 3 slots.
+ *
+ * 2026-08-27: "board_health", "safety", "thermo_faults", "tc_types",
+ * "kiln_setup", and "kiln_cfg_setup" were removed (three folded into
+ * "diagnostics", three deleted outright -- see this file's registration
+ * comments and ui_page_diagnostics.c's header comment), freeing 6 more
+ * slots. Left at 26 rather than lowered further: the array is tiny (a few
+ * dozen bytes per slot) and a future page addition should not have to
+ * re-derive this arithmetic from scratch the next time the count changes. */
 #define KILN_UI_MAX_PAGES 26
 
 typedef struct {
@@ -143,15 +142,12 @@ esp_err_t kiln_ui_init(void)
     err = kiln_ui_register_page("temperature", ui_page_temperature_build);
     if (err != ESP_OK) return err;
 
-    /* TODO.md 10.7's LCD-side board-health nav item, linked from
-     * ui_page_config.c's "Board Health" button (kiln_ui_show("board_health")).
-     * Registration was the one piece left undone when the pass that built
-     * ui_page_board_health.c was cut off mid-task (session limit) -- without
-     * this, that nav button would fail soft (kiln_ui_show() logs
-     * ESP_ERR_NOT_FOUND and does nothing) rather than crash, but the page
-     * would never actually be reachable. */
-    err = kiln_ui_register_page("board_health", ui_page_board_health_build);
-    if (err != ESP_OK) return err;
+    /* "board_health" (ui_page_board_health.c) was REMOVED 2026-08-27 --
+     * folded into "diagnostics" below (owner request: "the diagnostics pages
+     * should also contain the safty processor page, the board health, and
+     * thermocouple fault page's info. remove the other 3 lcd pages when you
+     * combine the info"). See ui_page_diagnostics.c's header comment for the
+     * full content inventory of what moved where. */
 
     /* TODO.md 10.9's LCD-side Wi-Fi settings page, linked from
      * ui_page_config.c's "Network / Wi-Fi" nav item (previously a
@@ -167,61 +163,39 @@ esp_err_t kiln_ui_init(void)
     err = kiln_ui_register_page("network_manage", ui_page_network_manage_build);
     if (err != ESP_OK) return err;
 
-    /* 2026-08-18 no-scroll rewrite -- ui_page_home.c's Safety Processor card
-     * moved to its own page (no room left in home's ~264px content budget
-     * once zones/run-state/action row were sized to fit), reachable from
-     * ui_page_config.c's nav hub. See ui_page_safety.c's header comment.
-     * The temperature-history chart moved off THIS page the same pass, to
-     * "history"/ui_page_history.c -- that page (and its "Temperature
-     * History" nav item) was REMOVED outright 2026-08-22 per owner request
-     * ("tempiture history page can go away on the lcd too"); the compact
-     * chart that later came back to ui_page_home.c is now the LCD's only
-     * trend chart, so there is no separate destination to register here any
-     * more. */
-    err = kiln_ui_register_page("safety", ui_page_safety_build);
-    if (err != ESP_OK) return err;
+    /* "safety" (ui_page_safety.c) was REMOVED 2026-08-27 -- folded into
+     * "diagnostics" below, same owner request as "board_health" above. See
+     * ui_page_diagnostics.c's header comment for the content inventory. */
 
-    /* TODO.md's "Diagnostics / System info page" item, ESP-only half
-     * (firmware version, uptime, heap, ESP32-S3 die temp) -- see
-     * ui_page_diagnostics.c's header comment for what's deliberately still
-     * missing (safety-link stats, blocked on M5). Linked from
-     * ui_page_config.c's nav hub like every other diagnostic/settings
-     * page; the grid there is a fixed-height, internally scrollable
-     * container (LCD work-queue item 5), so a 9th entry costs no
-     * no-scroll budget the way the older stale comment on "touch_test"
-     * below once worried a 9th grid item would. */
+    /* TODO.md's "Diagnostics / System info page" item -- ESP-only system
+     * info (firmware version, uptime, heap, ESP32-S3 die temp) plus, since
+     * 2026-08-27, the folded-in Safety Processor, Board Health, and
+     * Thermocouple Faults content (see ui_page_diagnostics.c's header
+     * comment for the full per-page inventory and the six-page paging this
+     * now uses). Linked from ui_page_config.c's nav hub like every other
+     * diagnostic/settings page. */
     err = kiln_ui_register_page("diagnostics", ui_page_diagnostics_build);
     if (err != ESP_OK) return err;
 
-    /* MAX31856 fault/status page (per-channel SR fault bits, ~FAULT pin,
-     * SPI-transfer health) -- a separate page from "diagnostics" above,
-     * which is the ESP-only half and never touches the thermocouple ICs.
-     * See ui_page_thermo_faults.c's header comment. Linked from
-     * ui_page_config.c's nav hub like every other diagnostic page. */
-    err = kiln_ui_register_page("thermo_faults", ui_page_thermo_faults_build);
-    if (err != ESP_OK) return err;
+    /* "thermo_faults" (ui_page_thermo_faults.c) and "tc_types"
+     * (ui_page_tc_types.c) were REMOVED 2026-08-27. thermo_faults folded
+     * into "diagnostics" above (same owner request as "board_health"/
+     * "safety"); tc_types was deleted outright, no destination replaces it
+     * (owner request: "remove the kiln setup and thermocouple types pages
+     * from the lcd includeing the kiln config page" -- thermocouple TYPE
+     * selection is settings, not live status, and the web GUI's zones page
+     * already covers it). */
 
-    /* 2026-08-21, LCD item 1: per-channel/safety-processor thermocouple TYPE
-     * selection (Type B/E/J/K/N/R/S/T) -- see ui_page_tc_types.c's header
-     * comment for why this is its own page rather than folded into
-     * "thermo_faults" above. Linked from ui_page_config.c's nav hub's new
-     * third page (that file's UI_CONFIG_HUB_PAGE_COUNT went 2 -> 3 because
-     * both existing pages were already full -- see its own header comment). */
-    err = kiln_ui_register_page("tc_types", ui_page_tc_types_build);
-    if (err != ESP_OK) return err;
-
-    /* 2026-08-21 owner request: "save kiln profiles with different relay,
-     * thermocouple, and PID configs" -- named a KILN CONFIG in code/on
-     * screen (never "profile", which already means a firing SCHEDULE here),
-     * per kiln_cfg_store.h's header comment. "kiln_setup" is the two-cell
-     * hub (Firing Profile -> the existing "profiles" tree; Kiln Config ->
-     * the new management screen below), linked from ui_page_config.c's nav
-     * hub's page 3. See ui_page_kiln_setup.c/ui_page_kiln_cfg_setup.c's own
-     * header comments for the full tree and safety UX. */
-    err = kiln_ui_register_page("kiln_setup", ui_page_kiln_setup_build);
-    if (err != ESP_OK) return err;
-    err = kiln_ui_register_page("kiln_cfg_setup", ui_page_kiln_cfg_setup_build);
-    if (err != ESP_OK) return err;
+    /* "kiln_setup" (ui_page_kiln_setup.c) and "kiln_cfg_setup"
+     * (ui_page_kiln_cfg_setup.c) were REMOVED 2026-08-27, same owner request
+     * as "tc_types" above -- deleted outright, no destination replaces
+     * either. "Firing Profile", the other half of the old kiln_setup hub,
+     * is unaffected: it always pointed straight at the existing "profiles"
+     * tree (ui_page_kiln_setup.c's own header comment, git history), which
+     * is now reached directly from ui_page_config.c's hub instead of via
+     * this now-deleted intermediate hub -- see that file's header comment
+     * for request (c), "move the profiles menu item to the top left of the
+     * first page". */
 
     /* "zones"/"zones_detail" (ui_page_zones.c, the LCD equivalent of the web
      * zones page's per-zone thermo_mask/relay_mask/cal_offset_c/temp_limits

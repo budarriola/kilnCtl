@@ -194,6 +194,34 @@ button { min-height: var(--ui-touch); }
                     box-sizing: border-box; display: flex; align-items: center; }
 .kc-menu-panel a:last-child { border-bottom: none; }
 .kc-menu-panel a.kc-menu-active { font-weight: bold; color: var(--ui-accent-3); }
+/* Expanding "Safety" group (nav.js's NAV_LINKS `children` shape, owner
+   request 2026-08-27: "the menu should just show them as sub items when the
+   main safty item is opened not a seprate page to hold the 3 page links").
+   <details>/<summary> is the native disclosure widget nav.js builds this
+   from -- these rules make it read as part of the same list every plain
+   <a> sits in, not a visually distinct control. */
+.kc-menu-panel details.kc-menu-group { border-bottom: 1px solid var(--border); }
+.kc-menu-panel details.kc-menu-group:last-child { border-bottom: none; }
+/* Same padding/min-height/typography as a plain .kc-menu-panel a, so the
+   group heading is indistinguishable from any other top-level item until
+   it's opened -- the owner's complaint that prompted this rework was a
+   landing page with three links, not a menu item that looks different from
+   its siblings. list-style: none removes the default disclosure triangle
+   only on WebKit/Blink (::-webkit-details-marker below handles that engine
+   family separately); a plain +/- glyph is added instead so there is still
+   an affordance that this item expands, on every engine, without pulling in
+   an icon asset (web_encoding.h's flash-budget rule). */
+.kc-menu-panel summary { display: flex; align-items: center; justify-content: space-between;
+                          padding: 0.9em 1.2em; min-height: var(--ui-touch); box-sizing: border-box;
+                          color: var(--fg); cursor: pointer; list-style: none; }
+.kc-menu-panel summary::-webkit-details-marker { display: none; }
+.kc-menu-panel summary::after { content: '+'; color: var(--muted); font-size: 1.1em; }
+.kc-menu-panel details[open] summary::after { content: '\2212'; } /* U+2212 minus sign */
+/* Children indent slightly so the hierarchy reads at a glance, but keep the
+   same border-bottom-separated-row look as every top-level entry -- this is
+   "reveal in place", not a visually different sub-panel. */
+.kc-menu-panel details.kc-menu-group a { padding-left: 2.2em; border-bottom: 1px solid var(--border); }
+.kc-menu-panel details.kc-menu-group a:last-child { border-bottom: none; }
 
 /* .kc-bottom-nav / .kc-bottom-nav-item deleted outright (2026-08-21 rework
    item 1) along with nav.js's buildBottomNav() -- the Dashboard/Profiles/
@@ -293,27 +321,15 @@ a.button { display: inline-flex; align-items: center; min-height: var(--ui-touch
    element's display -- which is what every caller of it already assumes. */
 [hidden] { display: none !important; }
 
-/* Manual relay toggles (manual_page.html) -- grouped by zone, same
-   zone-group / relay-toggle markup and rules main_page.html used before
-   this pass moved the whole "Relays" section off the dashboard (UI_PLAN.md:
-   "moved off the dashboard ... a phone in a pocket can brush a screen in a
-   way a panel mounted on a kiln cannot"). --on-color/--off-color are each
-   page's own :root tokens, same convention as --bg/--fg above. */
-.zone-group { border: 1px solid var(--border); border-radius: var(--ui-radius); margin-bottom: 0.7em;
-              overflow: hidden; }
-.zone-group h3 { margin: 0; padding: 0.5em 1em; font-size: 0.9em;
-                  background: var(--card-bg); border-bottom: 1px solid var(--border); }
-.zone-group .card { border: none; border-radius: 0; border-bottom: 1px solid var(--border);
-                     margin-bottom: 0;
-                     /* The one-row layout that used to sit on bare .card --
-                        see that rule's comment. This IS a single row (relay
-                        name left, toggle right), so it opts in explicitly. */
-                     display: flex; justify-content: space-between; align-items: center; }
-.zone-group .card:last-child { border-bottom: none; }
-.zone-group:nth-of-type(4n+1) h3 { color: var(--ui-accent-1); }
-.zone-group:nth-of-type(4n+2) h3 { color: var(--ui-accent-2); }
-.zone-group:nth-of-type(4n+3) h3 { color: var(--ui-accent-3); }
-.zone-group:nth-of-type(4n+4) h3 { color: var(--ui-accent-4); }
+/* .zone-group / .zone-group h3 / .zone-group .card rules deleted 2026-08-27:
+   manual_page.html was their only consumer, and another agent removed that
+   page today (owner request, once the kiln's relays were wired and
+   diagnostics_page.html's Danger Zone took over manual relay control -- see
+   nav.js's "Manual relay control removed" comment). Verified dead with
+   `grep -rn "zone-group" *.html *.js` over this directory after that removal
+   -- zero matches outside this file. button.relay-toggle/.relay-on/.relay-off
+   below stay: main_page.html still uses them for the dashboard's own relay
+   tiles, a separate (surviving) consumer. */
 button.relay-toggle { min-width: var(--ui-touch); padding: 0.4em 1em;
                        font-size: 0.9em; border-radius: var(--ui-radius);
                        border: 1px solid var(--border); cursor: pointer; }
