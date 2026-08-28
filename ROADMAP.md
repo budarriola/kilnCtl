@@ -66,7 +66,7 @@ What is still genuinely open is short:
 | L | **The HTTP reset is not a heap failure** — proven, not argued. Remaining candidates are lwIP or `esp_http_server`'s accept/select loop under `max_open_sockets=13`, which needs a different instrumentation surface | M10 |
 | S | The cross-language PC-tool heartbeat contract remains uncovered by any guard — a Python sender with no C-side check can't be caught by `check_guard_input_producers.ps1` or `check_unused_setters.ps1`, both C-only. Verified 2026-08-28: `sample_counter_advancing` and `i_normal_a`, the two other named instances, are already correctly wired (`i_normal_a` copies from the config record gated by its `fields_set` bits; `sample_counter_advancing`'s hardcoded `false` is documented, deliberate S13-dormant state, not a missing producer) — `check_guard_input_producers.ps1` passes 25/25 today | M10 |
 | M | `mykicadMcp/` and `pdfMcp/` moved under `tools/` | M7 |
-| L | **HTTP connection resets under concurrency.** Has a reproducer and two ruled-out mechanisms, so the next step is instrumenting the failing allocation, not more black-box testing | M10 |
+| L | **HTTP connection resets under concurrency.** TCP-layer instrumentation built and live; 188 requests across varied burst sizes reproduced nothing (rate appears lower than the original 9/80 measurement, unconfirmed why). Still unreproduced under instrumentation, not root-caused, not closed — an absence of failure is not a fix, see M10 for the honest accounting | M10 |
 | M | Mains voltage as a dropdown; safety thermocouple and relay config shown read-only in the zones config | M12 |
 | M | An over-current guard paired with the under-current guard, as a percentage of measured normal | M12 |
 | L | **Make the commissioning page simple.** 58 raw parameters classified DERIVED / ASKED / DEFAULTED; the ASKED list is the score | M12 |
@@ -1128,19 +1128,40 @@ Owned by [`firmware/KilnFW/TODO.md`](firmware/KilnFW/TODO.md) §§12–13.
       path the numbers do not. `rules_task`, `rules_watchdog`, `uart_proto_rx`
       and `system_uart_bridge` are left alone — healthy, and the DRAM they
       would return is no longer needed
-- [ ] **HTTP connection resets under concurrency — reproducible, cause NOT
-      established** (`TODO.md` §14, `f8ebfa0`). Eight parallel `/app.js`
-      fetches reset one of them, 9 failures in 80 requests. Needs BOTH high
-      concurrency and a large response: 8 parallel `/status` never fails, 4
-      parallel `/app.js` never fails, sequential fetches never fail. **Do not
-      file this as the known DRAM failure without re-reading the evidence** —
-      `min_free` is untouched by the load and free heap stays flat at ~23 kB,
-      and the failing request is the *fastest* of the eight, which rules out
-      the socket-timeout path too. Leading hypothesis is a largest-contiguous-
-      block bound (`/app.js` is 8589 B gzipped against an 8704 B largest free
-      block), flagged unconfirmed because it rests on two numbers being close.
-      Matters because a browser issues several parallel requests per page,
-      which is exactly how the original "page says loading forever" presents
+- [ ] **HTTP connection resets under concurrency — rate dropped sharply since
+      the original characterization; still not root-caused.** 2026-08-28:
+      built `GET /api/debug/lwip_stats` (`diagnostics_http.c`,
+      `CONFIG_LWIP_STATS=y`) to read lwIP's own TCP-layer counters
+      (drop/memerr/err) from a live burst without a JTAG halt that would
+      perturb the timing. Two dead ends on the way, kept in the code's own
+      comments so the next pass doesn't re-walk them: `stats_display()`'s
+      output routes through a bare `printf()` to the console UART unless
+      `CONFIG_LWIP_DEBUG_ESP_LOG` is also on, which entirely bypasses
+      `uart_log_bridge` (the thing `get_device_log()` reads) — and even with
+      that on, the call is hardcoded to `ESP_LOG_DEBUG`, stripped at compile
+      time by this project's `CONFIG_LOG_MAXIMUM_LEVEL=3` (INFO). Reading
+      `lwip_stats.tcp` fields directly into the JSON response sidesteps both.
+      `lwip_stats.mem` does not exist on this port at all — `MEM_STATS` is
+      unconditionally 0 whenever `MEM_LIBC_MALLOC == 1`, which ESP-IDF's
+      lwipopts.h sets, so there is no separate lwIP heap arena here to have a
+      counter for (found by the build refusing to compile it, not assumed).
+      With this live: **188 requests, 8/12/20-way parallel, both near-boot
+      and steady-state, zero failures**, `tcp.drop`/`memerr`/`err` all held
+      at 0 throughout. The one failure seen this session (2/8, the very
+      first burst) ran during a window this session's own Pico-recovery
+      sequence was generating "PC link lost" churn on the isolated UART — a
+      real confound, not present in any of the 180 clean follow-up requests.
+      Most likely explanation for the drop: the DRAM-reclaim work already
+      landed this session (`c8e10f0`/`8ad7d5b`/`47b004c`) moved the
+      fragmentation trough from 8704 → 13824 bytes, clear of `/app.js`'s
+      ~9490 B, which is exactly the largest-contiguous-block hypothesis this
+      item's previous text flagged as resting on two numbers being close —
+      those two numbers no longer are. **Not closing this**: absence of
+      failure across 188 requests is evidence the rate dropped, not proof
+      the mechanism is gone or was ever confirmed; the original 9/80 rate
+      was measured before that DRAM work, and there is no green run of the
+      *original* reproducer script to compare against directly. If it
+      resurfaces, `/api/debug/lwip_stats` is now in place to catch it live
 - [x] **Wire the guard scripts into something that runs them.** Done
       2026-08-27: `tools/run_all_checks.ps1`, plus a `run_repo_checks` tool on
       both MCP servers. Discovery is by glob rather than a list, because a list

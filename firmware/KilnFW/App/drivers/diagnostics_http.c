@@ -19,6 +19,10 @@
 #include "web_encoding.h"
 #include "wifi_provision_http.h"
 
+#if CONFIG_LWIP_STATS
+#include "lwip/stats.h"
+#endif
+
 static const char *TAG = "diagnostics_http";
 
 /* Embedded via EMBED_TXTFILES, pre-gzipped at configure time by
@@ -277,6 +281,61 @@ static esp_err_t crash_report_clear_post_handler(httpd_req_t *req)
     }
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_send(req, json, (n > 0) ? (size_t)n : 0);
+}
+
+/* GET /api/debug/lwip_stats -- ROADMAP.md M10's open item, "HTTP connection
+ * resets under concurrency": a burst of 8 parallel /app.js fetches resets
+ * one of them, and two mechanisms (heap exhaustion, socket-timeout) are
+ * already ruled out. This is not a permanent diagnostics surface -- it
+ * exists to let this specific investigation read lwIP's own pool/error
+ * counters ("add this to your debugger's watchlist" is literally
+ * lwip/stats.h's own comment on lwip_stats) from a live burst without a
+ * JTAG halt, which would perturb the very timing being measured.
+ *
+ * Deliberately does NOT call stats_display(): that macro
+ * (LWIP_PLATFORM_DIAG, port/esp32xx/include/arch/cc.h) only routes through
+ * ESP_LOG at all when CONFIG_LWIP_DEBUG_ESP_LOG is on, and even then the
+ * call it makes is hardcoded to ESP_LOG_LEVEL(ESP_LOG_DEBUG, ...) --
+ * stripped at COMPILE time by this project's CONFIG_LOG_MAXIMUM_LEVEL=3
+ * (INFO). Raising that globally to see one investigation's output would
+ * compile debug-level logging into every other subsystem in the tree for
+ * no reason. Reading lwip_stats.tcp straight into the JSON response
+ * sidesteps both the DIAG macro and the log-level cap entirely, and cannot
+ * be dropped by uart_log_bridge's queue the way a burst of printed lines
+ * could be.
+ *
+ * lwip_stats.mem does NOT exist on this port and is not read here: MEM_STATS
+ * (lwip/opt.h) is unconditionally 0 whenever MEM_LIBC_MALLOC == 1, which
+ * ESP-IDF's lwipopts.h sets -- this platform routes lwIP's allocations
+ * through the C library / ESP heap rather than lwIP's own arena, so there
+ * is no separate lwIP heap pool to have a counter for. Found by the build
+ * itself refusing to compile a member that does not exist, not assumed.
+ *
+ * Compiles to a 501 when CONFIG_LWIP_STATS is off (the normal build), so
+ * this route costs nothing and reveals nothing outside this investigation. */
+static esp_err_t lwip_stats_get_handler(httpd_req_t *req)
+{
+#if CONFIG_LWIP_STATS
+    char json[256];
+    int n = snprintf(json, sizeof(json),
+                      "{\"ok\":true,"
+                      "\"tcp\":{\"xmit\":%lu,\"recv\":%lu,\"drop\":%lu,\"chkerr\":%lu,\"lenerr\":%lu,"
+                      "\"memerr\":%lu,\"rterr\":%lu,\"proterr\":%lu,\"opterr\":%lu,\"err\":%lu}}",
+                      (unsigned long)lwip_stats.tcp.xmit,
+                      (unsigned long)lwip_stats.tcp.recv, (unsigned long)lwip_stats.tcp.drop,
+                      (unsigned long)lwip_stats.tcp.chkerr, (unsigned long)lwip_stats.tcp.lenerr,
+                      (unsigned long)lwip_stats.tcp.memerr, (unsigned long)lwip_stats.tcp.rterr,
+                      (unsigned long)lwip_stats.tcp.proterr, (unsigned long)lwip_stats.tcp.opterr,
+                      (unsigned long)lwip_stats.tcp.err);
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, json, (n > 0 && (size_t)n < sizeof(json)) ? (size_t)n : 0);
+#else
+    (void)req;
+    const char *json = "{\"ok\":false,\"error\":\"CONFIG_LWIP_STATS not built\"}";
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_status(req, "501 Not Implemented");
+    return httpd_resp_send(req, json, strlen(json));
+#endif
 }
 
 /* GET /api/watchdog_cfg -- current state of the dev-only task-watchdog-panic
@@ -580,6 +639,9 @@ esp_err_t diagnostics_http_start(void)
     static const httpd_uri_t crash_report_clear_uri = {
         .uri = "/api/crash_report/clear", .method = HTTP_POST, .handler = crash_report_clear_post_handler,
     };
+    static const httpd_uri_t lwip_stats_get_uri = {
+        .uri = "/api/debug/lwip_stats", .method = HTTP_GET, .handler = lwip_stats_get_handler,
+    };
     static const httpd_uri_t watchdog_cfg_get_uri = {
         .uri = "/api/watchdog_cfg", .method = HTTP_GET, .handler = watchdog_cfg_get_handler,
     };
@@ -620,6 +682,11 @@ esp_err_t diagnostics_http_start(void)
     err = httpd_register_uri_handler(server, &crash_report_api_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_register_uri_handler(/api/crash_report) failed: %s", esp_err_to_name(err));
+        return err;
+    }
+    err = httpd_register_uri_handler(server, &lwip_stats_get_uri);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "httpd_register_uri_handler(/api/debug/lwip_stats) failed: %s", esp_err_to_name(err));
         return err;
     }
     err = httpd_register_uri_handler(server, &crash_report_ack_uri);

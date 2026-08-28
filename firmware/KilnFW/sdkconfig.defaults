@@ -143,6 +143,26 @@ CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 # burst documented there), or the server will fail to start on next boot.
 CONFIG_LWIP_MAX_SOCKETS=16
 
+# CONFIG_LWIP_STATS: on, 2026-08-28, for ROADMAP.md M10's open item -- an
+# 8-parallel-fetch /app.js burst resets one connection, and two mechanisms
+# (heap exhaustion, socket-timeout) are already ruled out by measurement.
+# This turns on lwIP's own pool/error counters (mem does NOT actually exist
+# on this port -- see diagnostics_http.c's lwip_stats_get_handler() comment
+# for why, found by the build refusing to compile it). tcp is read directly
+# into GET /api/debug/lwip_stats' JSON response (diagnostics_http.c) without
+# a JTAG halt that would perturb the timing being measured, and without
+# stats_display() -- that macro only routes through ESP_LOG when
+# CONFIG_LWIP_DEBUG_ESP_LOG is also on, and even then is hardcoded to
+# ESP_LOG_DEBUG, stripped at compile time by CONFIG_LOG_MAXIMUM_LEVEL=3
+# elsewhere in this file. Small, fixed RAM cost (the counter fields
+# themselves, always-allocated struct members, not a pool) and no CPU cost
+# outside a STATS_INC() per event lwIP already does the surrounding work for
+# -- left on rather than toggled per-investigation because a counter nobody
+# is reading is exactly this project's recurring "instrumentation existed
+# and nobody looked" shape (see M10's own opening paragraph). Revisit only
+# if a real DRAM-budget reason to remove it shows up; none has so far.
+CONFIG_LWIP_STATS=y
+
 # CONFIG_SPIRAM and friends: found the hard way 2026-08-20, same audit pass
 # as CONFIG_LWIP_MAX_SOCKETS above and for the identical reason -- this
 # board's octal PSRAM is enabled only in the gitignored, machine-local
