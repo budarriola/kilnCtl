@@ -114,7 +114,28 @@ static const char *TAG = "safety_link";
  * SAFETY_LINK_BACKOFF_MAX_STREAK is a related, separate mitigation. */
 #define SAFETY_INBOX_LEN 4
 
-#define SAFETY_POLL_TASK_STACK    4096
+/* 2026-08-28: measured, not guessed -- stack_margin_register("safety_poll",
+ * ...) below now reports this task's real uxTaskGetStackHighWaterMark(). At
+ * 4096 the live reading was 1192 B free (29.1% headroom, [LOW]) under
+ * ordinary bench traffic -- no commissioning POST, no LCD interaction, just
+ * the routine GET_STATUS/DIAG/POWER poll plus an occasional config refetch.
+ * The task's own crash record (crash_report.c, decoded via
+ * xtensa-esp32s3-elf-addr2line) shows exc_task='safety_poll',
+ * cause=IllegalInstruction, pc inside panic_abort/esp_system_abort, reached
+ * through vTaskSwitchContext/_frxt_dispatch/_frxt_int_exit -- exactly
+ * FreeRTOS's CONFIG_FREERTOS_CHECK_STACKOVERFLOW_CANARY check at a
+ * tick-driven context switch (sdkconfig: CONFIG_FREERTOS_CHECK_STACKOVERFLOW_
+ * CANARY=y), not a task-WDT timeout (that fires from a timer ISR, not this
+ * call chain) -- and the backtrace is flagged corrupted past that point,
+ * which is what unwinding into stack-overflow-scrambled memory looks like.
+ * This is a plain size increase, nothing about timing or blocking -- the one
+ * kind of change this task's own history (this file's "two previous attempts
+ * ... put the ESP into a panic-reboot loop" comment, a few hundred lines
+ * below) does NOT warn against; only extending safety_poll's blocking budget
+ * is off limits. PSRAM-backed (MALLOC_CAP_SPIRAM below), so the extra 4 KB
+ * costs none of the ~205 KB of scarce internal DRAM this board is already
+ * short on -- only external RAM, of which ~8 MB was free. */
+#define SAFETY_POLL_TASK_STACK    8192
 #define SAFETY_POLL_TASK_PRIORITY 5
 
 /* Every fault source this driver recognizes. A caller may only set or clear
