@@ -102,7 +102,7 @@ exist, see §3).
 
 | Parameter | Id | Risk | Formula / source |
 |---|---|---|---|
-| `tc_type` | `0x0105` | 🔴 | **= Z `zones_config_get_safety_tc_type()`.** This field already exists on the ESP as a dedicated global (zones blob v5, *"the RP2040 safety processor's OWN"* — see `zones_http.c`'s version comment) and `safety_link.c` already resyncs it to the Pico. The commissioning page must **display it read-only** and link to zones. See §2.3. |
+| `tc_type` | `0x0105` | 🔴 | **Stored as Z `zones_config_get_safety_tc_type()`** — a dedicated ESP global (zones blob v5, *"the RP2040 safety processor's OWN"* — see `zones_http.c`'s version comment), resynced to the Pico by `safety_link.c`. **Not derived: it is ASKED, on the commissioning page** (field `tc_type`), because it states which physical probe is fitted to J7. The **zones page displays it read-only** and links here. See §2.3. |
 | `borrowed_zone_index` | `0x0102` | 🔴 | **= Z**, the index of the zone the operator picked as the borrowed source *on the zones page*. Only reachable when Q2 = *Not fitted* (see §2.4). Constrained by the picker to zones the ESP actually reports, satisfying `CONFIG_REFERENCE.md` §1's "must name a zone the ESP actually reports" without a validation message. |
 | `borrowed_type_expected` | `0x0210` | 🟠 | **= Z `zones_config_get_tc_type(borrowed_zone_index)`.** It is by definition the type of the zone channel being borrowed; asking for it separately only creates a way for the two to disagree. |
 | `ct_channel_map[0..2]` | `0x0106`–`0x0108` | 🔴🟠 | **= M, from the zone current-sweep.** **SHIPPED** (`zones_http.c`, M12). The sweep on the zones page energizes one zone's relay(s) at a time with every other relay forced off, and records all three CT channels separately for that window; the channel that both carries real load (≥ 2 A, the same order as `i_present_a`) and dominates the other two by 4× is that zone's channel. Note this is a *measurement*, not the `ct_mask` inversion this row originally specified — `ct_mask` is an operator-entered field, so inverting it would only restate what was already typed, and the doc's own condition already required M's one-zone-at-a-time energize to confirm it. **Nothing is derived unless the derivation is unambiguous:** two channels within the dominance factor (a shared CT, which `ct_mask` explicitly permits), two zones resolving to the same channel, a zone whose `relay_mask` is not exactly its own relay bit (the zone-id-equals-relay-id identity `safety_core.c` indexes `relay_now_mask` with), or a sweep that aborted — each leaves the channel unset and says so on both pages, and the three ASK-in-Advanced fields stay available. Written over the same `SET_PARAM`/`COMMIT_CONFIG` path a typed value uses, so the Pico's own `config_params_finalize_ct_channel_map()` marks the group commissioned once all three land. |
@@ -158,11 +158,12 @@ of which the operator sees **four**.
 
 ### 1.4 The four 🔴 fields nobody may derive from a guess
 
-`abs_max_temp_c`, `tc_source`, `tc_placement_mode`, `tc_type`. Three of the four
-are Q1/Q2 above. The fourth, `tc_type`, is derived — but from a value the
-operator **explicitly entered on the zones page** against the physical probe,
-not from a guess, and it is displayed on the commissioning review screen so the
-derivation is visible rather than silent. `ct_channel_map` is the fifth 🔴 and is
+`abs_max_temp_c`, `tc_source`, `tc_placement_mode`, `tc_type`. All four are
+ASKED, on the commissioning page — `tc_type` is not derived from anything.
+2026-08-28: it moved from an editable field on the zones page to read-only
+there (`zones_page.html`'s `renderSafetyTcType()`), pointing at the safety
+commissioning page as the one place it can actually be set — see §1.3/§2.3.
+`ct_channel_map` is the fifth 🔴 and is
 derived only under the unambiguity + measurement condition in §1.2 — shipped as
 described there.
 
@@ -229,23 +230,25 @@ with a link to the zones page and **no editable control**. A channel with no
 measurement is the honest, expected state on a fresh board and must read as
 "not measured", never as `0.0 A`.
 
-### 2.3 Safety thermocouple and safety relay configuration move to zones — read-only there
+### 2.3 Safety thermocouple and safety relay configuration — read-only on the zones page
 
 **Exactly which parameters move**, and where each surfaces:
 
 | Parameter | Id | Owned and edited on | Displayed read-only on |
 |---|---|---|---|
-| `tc_type` (the safety processor's own probe type) | `0x0105` | **Zones page**, via the already-existing `zones_config_set_safety_tc_type()` / `zones_config_get_safety_tc_type()` (zones blob v5) | Commissioning review screen, and the zones page's safety row |
+| `tc_type` (the safety processor's own probe type) | `0x0105` | **Commissioning page** — it names the probe physically fitted to J7, not a zone-layout choice. Stored in the zones blob v5 global (`zones_config_set_safety_tc_type()` / `zones_config_get_safety_tc_type()`) | **Zones page**, in the safety row, with a link to the commissioning page |
 | `borrowed_zone_index` | `0x0102` | **Zones page** — the zone picker, only enabled when Q2 = *Not fitted* | Commissioning review screen |
 | `borrowed_type_expected` | `0x0210` | **Nowhere** — always mirrors the picked zone's `tc_type` | Zones page (next to the borrowed zone), commissioning review screen |
 | `ct_channel_map[0..2]` (the safety relay/CT mapping) | `0x0106`–`0x0108` | **Zones page**, measured by the current sweep (§1.2) and written to the Pico when it completes | Zones page, per zone, as a derived "safety CT" line; commissioning review screen as the three-row table in §2.2 |
 | `i_normal_a[0..2]` **NEW** | `0x031A`–`0x031C` | **Zones page**, written only by the M12 measurement button | Both pages |
 
 "Displayed but not reassignable" means, concretely: the commissioning page
-renders these as `<output>`-style rows with the value, the source ("from zones
-configuration"), and a link — no `<input>`, no `<select>`, no participation in
-the page's POST body. The **zones** page is where a change is made, and a change
-there triggers the same stage-and-commit path described in §5.
+renders each row it does not own as an `<output>`-style row with the value, its
+source, and a link — no `<input>`, no `<select>`, no participation in the page's
+POST body. The zones page gives `tc_type` exactly that treatment (as of M12 it
+is text plus a link, and is no longer submitted in the zones POST body); the
+zone-owned rows above are still edited there, and a change on either page
+triggers the same stage-and-commit path described in §5.
 
 ### 2.4 Q2's three answers → three parameters
 
@@ -433,9 +436,11 @@ The screen that makes derivation trustworthy: everything derived, with its
 source named.
 
 ```
-From the zones configuration
-  Safety thermocouple type      Type K              → zones page
+Asked, on this page (Advanced)
+  Safety thermocouple type      Type K              → Advanced
   Thermocouple maximum          1372 °C             inferred from Type K (MAX31856 datasheet)
+
+From the zones configuration
   CT0 → Zone 1 "Bottom"         normal 11.4 A       measured 2026-08-27 14:02
   CT1 → Zone 2 "Middle"         normal 11.1 A       measured 2026-08-27 14:05
   CT2 → not mapped              ⚠ S3/S4 and the over-current guard inactive on CT2

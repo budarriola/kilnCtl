@@ -81,11 +81,11 @@
      horizontal-overflow bug, not a cosmetic one, since it means the whole
      page (not just this control) gets sideways-scrollable on a phone. Root
      cause: a bare <select> was never in the width-constraining rule above
-     (only input[type=text]/input[type=number] were), so #safetyTcType and
-     #atRule below defaulted to CSS's normal shrink-to-fit-content sizing for
-     a <select> -- i.e. wide enough for their single WIDEST <option> string
-     (safetyTcType's longest is 'Type B (0 to 1820°C) -- highest range; no CJ
-     compensation below ~50°C', atRule's is the Tyreus-Luyben option), which
+     (only input[type=text]/input[type=number] were), so the per-zone tc-type
+     selects and #atRule below defaulted to CSS's normal shrink-to-fit-content
+     sizing for a <select> -- i.e. wide enough for their single WIDEST <option>
+     string (a tc type's longest is 'Type B (0 to 1820°C) -- highest range; no
+     CJ compensation below ~50°C', atRule's is the Tyreus-Luyben option), which
      drags the select, and with it the whole document, past the viewport.
      The option text itself is left completely unshortened (thermocouple
      ranges/notes are real information the task this page serves cares
@@ -240,21 +240,19 @@ independent per-zone firings that don't take each other down.</p>
 
 <!-- 2026-08-21, TODO.md owner-report item 3: the RP2040 safety processor has
      its OWN, physically separate MAX31856 thermocouple -- not one of the
-     channels listed under each zone below -- and needs its type set
-     independently so it agrees with what the main board is measuring (an
-     independent cross-check that disagrees about thermocouple type
-     disagrees about temperature too, which defeats the whole point of it).
-     zones_http.c mirrors this to the Pico automatically (safety_link.c's
-     safety_sync_tc_type()) whenever the link is up; if it's down when you
-     save, the setting still persists here and gets pushed the moment the
-     link reconnects -- it is never silently dropped. -->
-<label for="safetyTcType">Safety processor's thermocouple type</label>
-<select id="safetyTcType"></select>
+     channels listed under each zone below -- so its type is a separate
+     setting from any zone's.
+     ROADMAP M12: it is SHOWN here (this is the page that gives the wiring
+     picture) but assigned only on the safety commissioning page. Which
+     sensor the safety processor watches is a commissioning decision about
+     physical hardware, not a zone-layout decision, and an operator
+     rearranging zones must not be able to change it in passing. -->
+<label>Safety processor's thermocouple type (read-only)</label>
+<div id="safetyTcType" class="hint"></div>
 <p class="hint">The RP2040 safety processor reads its own, independent thermocouple --
-a different physical sensor from any of the channels below. Set this to whatever type
-is actually wired into IT, not to match a zone; if the two ever disagree, the safety
-processor's temperature cross-check will disagree with the main board for no reason
-other than a wrong setting here.</p>
+a different physical sensor from any of the channels below, so this never follows a zone.
+Change it on the <a href="/safety/commissioning">safety commissioning page</a>, under
+Advanced -- it is not one of that page's four guided questions.</p>
 
 <!-- 2026-08-27+2 (Task 3): the safety thermocouple/relay's LIVE reading,
      READ-ONLY -- reassigning either is not an operator decision (they are
@@ -768,6 +766,15 @@ function renderZones() {
   renderRelayNames();
 }
 
+/* M12: data.safety_tc_type read-only -- assigned on the safety commissioning
+   page, only displayed here. */
+function renderSafetyTcType(code) {
+  var el = document.getElementById('safetyTcType');
+  var t = null;
+  TC_TYPES.forEach(function (x) { if (x.code === code) t = x; });
+  el.textContent = t ? (t.name + ' (' + t.range + ') -- ' + t.note) : 'UNSET';
+}
+
 /* Task 3: renders data.safety_wiring read-only -- "UNSET" (not 0/off) for
    anything the link_up/tc_temp_valid flags say is not currently
    trustworthy, per zone_safety_wiring_t's doc comment (zones_http.h). */
@@ -885,7 +892,7 @@ function loadCurrent() {
       document.getElementById('relayCount').value = data.relay_count;
       document.getElementById('maxSimultaneous').value = data.max_simultaneous_relays || 0;
       document.getElementById('continueOnZoneTrip').checked = !!data.continue_on_zone_trip;
-      document.getElementById('safetyTcType').innerHTML = tcTypeOptionsHtml(data.safety_tc_type);
+      renderSafetyTcType(data.safety_tc_type);
       renderZones();
       populateAutotuneZones();
       renderSafetyWiring(data.safety_wiring);
@@ -917,8 +924,7 @@ document.getElementById('saveBtn').addEventListener('click', function () {
   var continueOnZoneTrip = document.getElementById('continueOnZoneTrip').checked ? 1 : 0;
   var params = ['thermo_count=' + thermoCount, 'relay_count=' + relayCount,
                  'max_simultaneous_relays=' + maxSimultaneous,
-                 'continue_on_zone_trip=' + continueOnZoneTrip,
-                 'safety_tc_type=' + document.getElementById('safetyTcType').value];
+                 'continue_on_zone_trip=' + continueOnZoneTrip];
   var blocks = document.getElementById('zones').querySelectorAll('.zone');
   blocks.forEach(function (div) {
     var i = div.dataset.index;
