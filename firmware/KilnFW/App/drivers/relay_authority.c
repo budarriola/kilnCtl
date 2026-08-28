@@ -1,5 +1,8 @@
 #include "relay_authority.h"
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/portmacro.h"
+
 /* Deliberately not MAX31856_CHANNEL_COUNT -- this module stays free of a
  * MAX31856.h dependency (see relay_authority.h's minimal-include
  * philosophy); 3 is that constant's actual value today and the bound is
@@ -91,4 +94,70 @@ bool relay_authority_manual_blocked_by_owner(uint8_t relay_index)
 {
     relay_owner_t owner = relay_authority_get_owner(relay_index);
     return owner == RELAY_OWNER_PROFILE || owner == RELAY_OWNER_RULE || owner == RELAY_OWNER_AUTOTUNE;
+}
+
+/* ---- The single shared heat claim -- see relay_authority.h's doc comment
+ * above relay_heat_zone_claimant_t for the full "why". A portMUX spinlock,
+ * not a FreeRTOS mutex: every critical section below is a handful of plain
+ * bool reads/writes with no blocking call inside, exactly the case
+ * portENTER_CRITICAL/portEXIT_CRITICAL exist for, and it needs no create/
+ * destroy lifecycle -- this module already has none (s_zone_blocked/
+ * s_relay_owner above are plain statics), so a static portMUX_INITIALIZER_
+ * UNLOCKED fits its existing "no init function" shape instead of adding
+ * one just for this. */
+static portMUX_TYPE s_heat_claim_mux = portMUX_INITIALIZER_UNLOCKED;
+static bool s_heat_profile_active = false;
+static bool s_heat_autotune_active = false;
+static bool s_heat_sweep_active = false;
+
+bool relay_authority_heat_zone_claim_begin(relay_heat_zone_claimant_t who)
+{
+    bool ok;
+    portENTER_CRITICAL(&s_heat_claim_mux);
+    if (s_heat_sweep_active) {
+        ok = false;
+    } else {
+        if (who == RELAY_HEAT_ZONE_CLAIM_AUTOTUNE) {
+            s_heat_autotune_active = true;
+        } else {
+            s_heat_profile_active = true;
+        }
+        ok = true;
+    }
+    portEXIT_CRITICAL(&s_heat_claim_mux);
+    return ok;
+}
+
+void relay_authority_heat_zone_claim_end(relay_heat_zone_claimant_t who)
+{
+    portENTER_CRITICAL(&s_heat_claim_mux);
+    if (who == RELAY_HEAT_ZONE_CLAIM_AUTOTUNE) {
+        s_heat_autotune_active = false;
+    } else {
+        s_heat_profile_active = false;
+    }
+    portEXIT_CRITICAL(&s_heat_claim_mux);
+}
+
+relay_heat_sweep_claim_result_t relay_authority_heat_sweep_claim_begin(void)
+{
+    relay_heat_sweep_claim_result_t result;
+    portENTER_CRITICAL(&s_heat_claim_mux);
+    if (s_heat_profile_active) {
+        result = RELAY_HEAT_SWEEP_CLAIM_REFUSE_PROFILE;
+    } else if (s_heat_autotune_active) {
+        result = RELAY_HEAT_SWEEP_CLAIM_REFUSE_AUTOTUNE;
+    } else {
+        s_heat_sweep_active = true;
+        result = RELAY_HEAT_SWEEP_CLAIM_OK;
+    }
+    portEXIT_CRITICAL(&s_heat_claim_mux);
+    return result;
+}
+
+void relay_authority_heat_sweep_claim_end(void)
+{
+    portENTER_CRITICAL(&s_heat_claim_mux);
+    s_heat_sweep_active = false;
+    portEXIT_CRITICAL(&s_heat_claim_mux);
 }

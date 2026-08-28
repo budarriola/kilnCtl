@@ -235,6 +235,22 @@ typedef struct {
      * tc_disagreement_time_s=300.0s. */
     float tc_disagreement_c;
     float tc_disagreement_time_s;
+
+    /* S14. Per-channel measured "normal" current (0x031A-0x031C,
+     * i_normal_a[0..2]) and its own presence flag -- unlike every other
+     * field in this struct, 0.0f is NOT "not configured, substitute a
+     * default": a channel's normal current is a real measurement with no
+     * safe firmware-invented fallback (COMMISSIONING_UX.md section 3.2,
+     * "a channel whose i_normal_a has no fields_set bit is skipped
+     * entirely"), so the caller must say explicitly, per channel, whether a
+     * measurement exists. i_normal_valid[ch] == false means S14 is inactive
+     * for that channel -- no accumulation, no warn, ever -- regardless of
+     * what amps[ch] reads. overcurrent_pct: 0 -> 150 (%). overcurrent_time_s:
+     * 0 -> 30.0s. */
+    bool  i_normal_valid[3];
+    float i_normal_a[3];
+    uint16_t overcurrent_pct;
+    float    overcurrent_time_s;
 } safety_guard_cfg_t;
 
 /* One call's worth of input. tc_c/cj_c/fault_bits/spi_failed follow
@@ -422,6 +438,19 @@ typedef struct {
      * actually respond", which only the caller (relay_owner) can know. */
     bool relay_deenergized;
 
+    /* S14. Per-channel current magnitude, its own validity flag, and
+     * whether that channel's mapped relay (ct_channel_map[ch]) is commanded
+     * on right now. Flattened scalars with their own validity, matching this
+     * struct's existing convention (any_current_present etc.) and keeping
+     * this module link-header-free -- safety_core does the ct_channel_map
+     * lookup and hands over three plain per-channel facts, not the map
+     * itself. amps_valid[ch] == false means "no reading this tick", which
+     * (like i_normal_valid above) leaves the channel inactive rather than
+     * defaulting the reading to 0.0f and reading 0 < i_normal_a as fine. */
+    float amps[3];
+    bool  amps_valid[3];
+    bool  relay_commanded_now_for_ct[3];
+
     float dt_s;
 } safety_guard_input_t;
 
@@ -511,6 +540,13 @@ typedef struct {
      * sample_counter_advancing last went true. */
     float s13_stale_elapsed_s;
     bool  s13_warn;
+
+    /* S14: per-channel sustained-over-normal timer + level, WARN only.
+     * Reset in the same !in->context_valid block as s3/s4 above -- S14
+     * needs ct_channel_map (via relay_commanded_now_for_ct) and the
+     * commanded-relay fact, both of which are context. */
+    float s14_over_elapsed_s[3];
+    bool  s14_warn[3];
 } safety_guard_state_t;
 
 void safety_guards_reset(safety_guard_state_t *state);

@@ -356,6 +356,23 @@ static void safety_core_load_guard_cfg(const config_store_record_t *rec)
     s_guard_cfg.tc_disagreement_c      = rec->tc_disagreement_c;
     s_guard_cfg.tc_disagreement_time_s = (float)rec->tc_disagreement_time_s;
 
+    // S14 (COMMISSIONING_UX.md section 3.3). Per-channel i_normal_a is
+    // fields_set-gated INDIVIDUALLY (three separate bits, not one group
+    // bit -- config_store.h's own comment on why) -- a channel whose bit is
+    // clear must reach safety_guards.c with i_normal_valid[ch] == false so
+    // it is skipped entirely, never evaluated against a stale/zero value.
+    // This is the exact wiring step the 2026-08-27 audit found missing for
+    // S1 ("a host test cannot see a value that never arrives") applied to a
+    // brand-new guard instead of an existing one.
+    s_guard_cfg.i_normal_valid[0] = (rec->fields_set & CONFIG_STORE_SET_I_NORMAL_A_0) != 0u;
+    s_guard_cfg.i_normal_valid[1] = (rec->fields_set & CONFIG_STORE_SET_I_NORMAL_A_1) != 0u;
+    s_guard_cfg.i_normal_valid[2] = (rec->fields_set & CONFIG_STORE_SET_I_NORMAL_A_2) != 0u;
+    s_guard_cfg.i_normal_a[0] = s_guard_cfg.i_normal_valid[0] ? rec->i_normal_a[0] : 0.0f;
+    s_guard_cfg.i_normal_a[1] = s_guard_cfg.i_normal_valid[1] ? rec->i_normal_a[1] : 0.0f;
+    s_guard_cfg.i_normal_a[2] = s_guard_cfg.i_normal_valid[2] ? rec->i_normal_a[2] : 0.0f;
+    s_guard_cfg.overcurrent_pct    = (uint16_t)rec->overcurrent_pct;
+    s_guard_cfg.overcurrent_time_s = (float)rec->overcurrent_time_s;
+
     // S9's gate on whether the current reading is a MEASUREMENT or a
     // heuristic. 2026-08-27: safety_guards.c gained
     // in->current_sensing_commissioned so an uncommissioned board cannot latch
@@ -923,6 +940,38 @@ static safety_guard_input_t safety_core_build_input(void)
     // safety_core_load_guard_cfg()'s own doc comment.
     safety_core_load_guard_cfg(&cfg_rec);
 
+    // S14 (COMMISSIONING_UX.md section 3.3). amps[ch] comes straight from
+    // current_snapshot_t, gated by the SAME freshness fact any_current_
+    // present already uses (current_fresh) -- a stale amps[] reading must
+    // not be allowed to arm or clear S14 any more than it may arm/clear
+    // S3/S4/S9 above. relay_commanded_now_for_ct[ch] answers "is THIS
+    // channel's own mapped relay commanded on right now", read from
+    // ctx.relay_now_mask at bit ct_channel_map[ch] -- zone/relay ids and
+    // relay_now_mask bit positions are both 0-2 for the three heated zones
+    // (config_store.h's own "zone/relay id" comment on ct_channel_map;
+    // relay_now_mask's bits 0-3 cover relays 1-4, of which relays 1-3 are
+    // the three zone heaters this guard cares about). Requires the whole
+    // ct_channel_map group to be commissioned (CONFIG_STORE_SET_CT_CHANNEL_
+    // MAP) as well as context_valid -- an uncommissioned map has nothing
+    // meaningful to index relay_now_mask with.
+    float amps_for_ct[3] = { 0.0f, 0.0f, 0.0f };
+    bool  amps_valid_for_ct[3] = { false, false, false };
+    bool  relay_commanded_now_for_ct[3] = { false, false, false };
+    if (current_fresh) {
+        for (unsigned ch = 0; ch < 3; ch++) {
+            amps_for_ct[ch] = current.amps[ch];
+            amps_valid_for_ct[ch] = true;
+        }
+    }
+    if (context_valid && (cfg_rec.fields_set & CONFIG_STORE_SET_CT_CHANNEL_MAP) != 0u) {
+        for (unsigned ch = 0; ch < 3; ch++) {
+            uint8_t relay_id = cfg_rec.ct_channel_map[ch];
+            if (relay_id < 3u) {
+                relay_commanded_now_for_ct[ch] = (ctx.relay_now_mask & (1u << relay_id)) != 0u;
+            }
+        }
+    }
+
     return (safety_guard_input_t){
         // 2026-08-27 audit item 2: thermo.valid alone is not enough -- a
         // thermo_task that keeps losing its publish mutex leaves this struct
@@ -990,6 +1039,12 @@ static safety_guard_input_t safety_core_build_input(void)
         // is still running; suppressing it there would blind the one guard
         // whose entire job is to distrust the trip that just happened.
         .relay_deenergized = !relay_owner_is_energized(),
+        // S14 -- see this function's own comment above the array prep for
+        // what these come from and why current_fresh/context_valid gate them.
+        .amps = { amps_for_ct[0], amps_for_ct[1], amps_for_ct[2] },
+        .amps_valid = { amps_valid_for_ct[0], amps_valid_for_ct[1], amps_valid_for_ct[2] },
+        .relay_commanded_now_for_ct = { relay_commanded_now_for_ct[0], relay_commanded_now_for_ct[1],
+                                         relay_commanded_now_for_ct[2] },
         // 2026-08-27 audit item 1: measured (clamped, fallback-safe) dt_s,
         // computed above via tick_dt_compute_s() -- no longer the raw
         // compile-time SAFTYFW_PERIOD_SAFETY_CORE_MS constant. See that call

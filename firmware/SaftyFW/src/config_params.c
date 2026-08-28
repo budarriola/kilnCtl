@@ -112,6 +112,11 @@ static const config_param_id_type_t CONFIG_PARAM_TABLE[] = {
     { 0x0319u, KILNLINK_PARAM_TYPE_F32 }, // max_expected_power_w -- ROADMAP.md
                                            // M12; next unallocated id after
                                            // 0x0318 in this section-3 group
+    { 0x031Au, KILNLINK_PARAM_TYPE_F32 }, // i_normal_a[0] -- S14, NEW, COMMISSIONING_UX.md sec 3.3
+    { 0x031Bu, KILNLINK_PARAM_TYPE_F32 }, // i_normal_a[1] -- S14, NEW
+    { 0x031Cu, KILNLINK_PARAM_TYPE_F32 }, // i_normal_a[2] -- S14, NEW
+    { 0x031Du, KILNLINK_PARAM_TYPE_U16 }, // overcurrent_pct -- S14, NEW
+    { 0x031Eu, KILNLINK_PARAM_TYPE_U16 }, // overcurrent_time_s -- S14, NEW
     { 0x0401u, KILNLINK_PARAM_TYPE_U16 }, // context_max_age_s
     { 0x0402u, KILNLINK_PARAM_TYPE_U16 }, // link_timeout_s
     { 0x0403u, KILNLINK_PARAM_TYPE_U16 }, // link_dead_hard_s
@@ -211,6 +216,12 @@ bool config_params_get(const config_store_record_t *rec, uint16_t id, uint8_t *o
     case 0x0318u: *out_type = KILNLINK_PARAM_TYPE_BOOL; out_value->bool_val = rec->ct_cal[2].calibrated ? 1u : 0u; return true;
     case 0x0319u: *out_type = KILNLINK_PARAM_TYPE_F32; out_value->f32_val = rec->max_expected_power_w; return true;
 
+    case 0x031Au: *out_type = KILNLINK_PARAM_TYPE_F32; out_value->f32_val = rec->i_normal_a[0]; return true;
+    case 0x031Bu: *out_type = KILNLINK_PARAM_TYPE_F32; out_value->f32_val = rec->i_normal_a[1]; return true;
+    case 0x031Cu: *out_type = KILNLINK_PARAM_TYPE_F32; out_value->f32_val = rec->i_normal_a[2]; return true;
+    case 0x031Du: *out_type = KILNLINK_PARAM_TYPE_U16; out_value->u16_val = clamp_u16(rec->overcurrent_pct); return true;
+    case 0x031Eu: *out_type = KILNLINK_PARAM_TYPE_U16; out_value->u16_val = clamp_u16(rec->overcurrent_time_s); return true;
+
     case 0x0401u: *out_type = KILNLINK_PARAM_TYPE_U16; out_value->u16_val = clamp_u16(rec->context_max_age_s); return true;
     case 0x0402u: *out_type = KILNLINK_PARAM_TYPE_U16; out_value->u16_val = clamp_u16(rec->link_timeout_s); return true;
     case 0x0403u: *out_type = KILNLINK_PARAM_TYPE_U16; out_value->u16_val = clamp_u16(rec->link_dead_hard_s); return true;
@@ -251,6 +262,9 @@ bool config_params_is_set(const config_store_record_t *rec, uint16_t id)
     case 0x0204u: return config_store_field_is_set(&rec->fields_set, CONFIG_STORE_SET_MAX_RATE_C_PER_MIN);
     case 0x030Eu: return config_store_field_is_set(&rec->fields_set, CONFIG_STORE_SET_MAINS_VOLTAGE_V);
     case 0x0319u: return config_store_field_is_set(&rec->fields_set, CONFIG_STORE_SET_MAX_EXPECTED_POWER_W);
+    case 0x031Au: return config_store_field_is_set(&rec->fields_set, CONFIG_STORE_SET_I_NORMAL_A_0);
+    case 0x031Bu: return config_store_field_is_set(&rec->fields_set, CONFIG_STORE_SET_I_NORMAL_A_1);
+    case 0x031Cu: return config_store_field_is_set(&rec->fields_set, CONFIG_STORE_SET_I_NORMAL_A_2);
     default: {
         // Every other id in CONFIG_PARAM_TABLE has a real compiled-in
         // default (CONFIG_REFERENCE.md secs 2-5's threshold fields) --
@@ -406,6 +420,18 @@ bool config_params_set(config_store_record_t *rec, uint16_t id, uint8_t type,
     case 0x0318u: CHECK_TYPE(KILNLINK_PARAM_TYPE_BOOL); rec->ct_cal[2].calibrated = (value.bool_val != 0u); return true;
     case 0x0319u: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_F32_NONNEG(); rec->max_expected_power_w = value.f32_val; rec->fields_set |= CONFIG_STORE_SET_MAX_EXPECTED_POWER_W; return true;
 
+    // i_normal_a[0..2]: S14 (COMMISSIONING_UX.md sec 3.3), the measured
+    // per-channel "normal" current the M12 zones-page button records.
+    // CHECK_F32_NONNEG, not POS: a channel could genuinely measure ~0A on a
+    // zone with no load wired yet -- 0 is a legitimate reading, distinct
+    // from "not measured" (which is fields_set == unset, checked separately
+    // by S14 itself, never by this range check).
+    case 0x031Au: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_F32_NONNEG(); rec->i_normal_a[0] = value.f32_val; rec->fields_set |= CONFIG_STORE_SET_I_NORMAL_A_0; return true;
+    case 0x031Bu: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_F32_NONNEG(); rec->i_normal_a[1] = value.f32_val; rec->fields_set |= CONFIG_STORE_SET_I_NORMAL_A_1; return true;
+    case 0x031Cu: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_F32_NONNEG(); rec->i_normal_a[2] = value.f32_val; rec->fields_set |= CONFIG_STORE_SET_I_NORMAL_A_2; return true;
+    case 0x031Du: CHECK_TYPE(KILNLINK_PARAM_TYPE_U16); rec->overcurrent_pct = value.u16_val; return true;
+    case 0x031Eu: CHECK_TYPE(KILNLINK_PARAM_TYPE_U16); rec->overcurrent_time_s = value.u16_val; return true;
+
     case 0x0401u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U16); rec->context_max_age_s = value.u16_val; return true;
     case 0x0402u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U16); rec->link_timeout_s = value.u16_val; return true;
     case 0x0403u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U16); rec->link_dead_hard_s = value.u16_val; return true;
@@ -521,6 +547,26 @@ bool config_params_validate_ranges(const config_store_record_t *rec,
     if (config_store_field_is_set(&rec->fields_set, CONFIG_STORE_SET_MAX_EXPECTED_POWER_W)) {
         RANGE_F32_NONNEG(rec->max_expected_power_w, "max_expected_power_w");
     }
+
+    // i_normal_a[0..2]: same "carved out of the former reserved block" hazard
+    // as max_expected_power_w just above -- a record committed before S14
+    // shipped holds the old reserved region's incidental bytes here, so the
+    // range check is gated on each channel's own fields_set bit, never
+    // unconditional.
+    if (config_store_field_is_set(&rec->fields_set, CONFIG_STORE_SET_I_NORMAL_A_0)) {
+        RANGE_F32_NONNEG(rec->i_normal_a[0], "i_normal_a[0]");
+    }
+    if (config_store_field_is_set(&rec->fields_set, CONFIG_STORE_SET_I_NORMAL_A_1)) {
+        RANGE_F32_NONNEG(rec->i_normal_a[1], "i_normal_a[1]");
+    }
+    if (config_store_field_is_set(&rec->fields_set, CONFIG_STORE_SET_I_NORMAL_A_2)) {
+        RANGE_F32_NONNEG(rec->i_normal_a[2], "i_normal_a[2]");
+    }
+    // overcurrent_pct/overcurrent_time_s are unpack()-normalized (erased-fill
+    // 0xFFFF/0xFFFFFFFF -> 0) before this function ever sees them -- see
+    // config_store.c's unpack_v2_fields() comment -- so no NaN/huge-magnitude
+    // hazard reaches here the way it does for the two f32 fields above; U16
+    // wire values have no NaN representation to guard against.
 
     RANGE_F32_FINITE(rec->firing_margin_c, "firing_margin_c");
     RANGE_F32_FINITE(rec->overshoot_margin_c, "overshoot_margin_c");
@@ -678,6 +724,11 @@ static const config_param_name_id_t CONFIG_PARAM_NAME_TABLE[] = {
     { "borrowed_type_expected", 0x0210u },
     { "i_present_a", 0x0301u },
     { "max_expected_power_w", 0x0319u },
+    { "i_normal_a[0]", 0x031Au },
+    { "i_normal_a[1]", 0x031Bu },
+    { "i_normal_a[2]", 0x031Cu },
+    { "overcurrent_pct", 0x031Du },
+    { "overcurrent_time_s", 0x031Eu },
     { "firing_margin_c", 0x0201u },
     { "overshoot_margin_c", 0x0202u },
     { "max_rate_c_per_min", 0x0204u },

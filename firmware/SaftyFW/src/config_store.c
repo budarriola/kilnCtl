@@ -131,8 +131,15 @@
 #define REC_OFF_SAFETY_TC_INSTALLED \
     (REC_OFF_CT_CAL + CONFIG_STORE_CT_CAL_NUM_CHANNELS * REC_CT_CAL_CHANNEL_LEN) /* 204 */
 #define REC_OFF_MAX_EXPECTED_POWER_W   (REC_OFF_SAFETY_TC_INSTALLED + 1u) /* 205 */
-#define REC_OFF_RESERVED               (REC_OFF_MAX_EXPECTED_POWER_W + 4u) /* 209 */
-#define REC_RESERVED_LEN               295u
+// S14 (COMMISSIONING_UX.md section 3.3), carved out of the reserved tail --
+// OQ2 resolved: 16 B fit comfortably inside the 295 B reserved block with no
+// format_version bump, so every already-committed v2 record keeps loading
+// exactly as it did (calibration_missing untouched by this addition).
+#define REC_OFF_I_NORMAL_A             (REC_OFF_MAX_EXPECTED_POWER_W + 4u) /* 209 */
+#define REC_OFF_OVERCURRENT_PCT        (REC_OFF_I_NORMAL_A + 3u * 4u)      /* 221 */
+#define REC_OFF_OVERCURRENT_TIME_S     (REC_OFF_OVERCURRENT_PCT + 2u)      /* 223 */
+#define REC_OFF_RESERVED               (REC_OFF_OVERCURRENT_TIME_S + 4u)  /* 227 */
+#define REC_RESERVED_LEN               277u
 
 // The one byte at REC_OFF_SAFETY_TC_INSTALLED is NOT a 0/1 bool -- see this
 // file's own layout-table comment above for the hardware-confirmed reason:
@@ -333,6 +340,12 @@ void config_store_pack(const config_store_record_t *rec,
 
     put_f32_le(&out[REC_OFF_MAX_EXPECTED_POWER_W], rec->max_expected_power_w);
 
+    for (unsigned ch = 0; ch < 3; ch++) {
+        put_f32_le(&out[REC_OFF_I_NORMAL_A + ch * 4u], rec->i_normal_a[ch]);
+    }
+    put_u16_le(&out[REC_OFF_OVERCURRENT_PCT], rec->overcurrent_pct);
+    put_u32_le(&out[REC_OFF_OVERCURRENT_TIME_S], rec->overcurrent_time_s);
+
     memcpy(&out[REC_OFF_RESERVED], rec->reserved, sizeof(rec->reserved));
     // bytes [REC_OFF_RESERVED + REC_RESERVED_LEN, REC_OFF_CRC) already 0xFF
     // from the initial memset -- further headroom.
@@ -450,6 +463,34 @@ static void unpack_v2_fields(const uint8_t *in, config_store_record_t *out)
     // checking the bit first, same discipline as abs_max_temp_c and the other
     // fields_set-gated fields.
     out->max_expected_power_w = get_f32_le(&in[REC_OFF_MAX_EXPECTED_POWER_W]);
+
+    // S14 (COMMISSIONING_UX.md section 3.3). i_normal_a[ch] is gated by
+    // CONFIG_STORE_SET_I_NORMAL_A_0/_1/_2 (already read into out->fields_set
+    // above) exactly like max_expected_power_w above -- raw decode only,
+    // callers must check the bit. A record written before this field
+    // existed has whatever this offset's old reserved-fill byte happened to
+    // be (0xFF, erased flash) here, which decodes as NaN/Inf/garbage; that
+    // is fine precisely because the bit that would be required to trust it
+    // cannot be set on such a record (it did not exist to set).
+    for (unsigned ch = 0; ch < 3; ch++) {
+        out->i_normal_a[ch] = get_f32_le(&in[REC_OFF_I_NORMAL_A + ch * 4u]);
+    }
+    // overcurrent_pct/overcurrent_time_s are NOT fields_set-gated (see
+    // config_store.h's struct comment) -- they follow the ordinary
+    // "0 means not configured, substitute the default" convention every
+    // other DEFAULTED field in this file uses. Unlike those older fields,
+    // though, this offset previously lived inside the RESERVED tail, so a
+    // record written before this pass exists has the erased-flash fill
+    // (0xFFFF/0xFFFFFFFF) here, not a real 0 -- decoded as-is that reads as
+    // "configured to 65535%", the opposite of "not configured". Fold the
+    // erased pattern back to 0 explicitly so an old record migrates to the
+    // documented default (150%/30s), matching COMMISSIONING_UX.md section
+    // 7's migration table ("the new fields default ... 150/30 for the
+    // thresholds").
+    uint16_t oc_pct_raw = get_u16_le(&in[REC_OFF_OVERCURRENT_PCT]);
+    out->overcurrent_pct = (oc_pct_raw == 0xFFFFu) ? 0u : oc_pct_raw;
+    uint32_t oc_time_raw = get_u32_le(&in[REC_OFF_OVERCURRENT_TIME_S]);
+    out->overcurrent_time_s = (oc_time_raw == 0xFFFFFFFFu) ? 0u : oc_time_raw;
 
     memcpy(out->reserved, &in[REC_OFF_RESERVED], sizeof(out->reserved));
 }
@@ -708,6 +749,15 @@ void config_store_default(config_store_record_t *out)
     // max_expected_power_w left at memset(0) above -- IRRELEVANT, fields_set
     // gates it (same "zero is never mistaken for a real default" reasoning
     // as the section 1 fields above).
+
+    // S14: i_normal_a[0..2] left at memset(0) above -- IRRELEVANT, gated by
+    // CONFIG_STORE_SET_I_NORMAL_A_0/_1/_2, same reasoning as
+    // max_expected_power_w. overcurrent_pct/overcurrent_time_s left at
+    // memset(0) too -- genuinely "use the default", per this file's
+    // effective_u16()/effective_f() substitution (150%/30s) -- deliberately
+    // NOT written here explicitly, unlike i_present_a etc. above, so a
+    // fresh record and a migrated-forward legacy record produce the exact
+    // same in-RAM 0 for these two fields.
 
     // ct_cal: left at the memset(0) above -- calibrated == false on every
     // channel, gain/offset == 0 but IGNORED (never read) as a consequence.

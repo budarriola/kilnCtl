@@ -281,6 +281,10 @@ void dashboard_get_status(dashboard_status_t *out)
             out->trip_event_age_ms = sl.trip_event_age_ms;
             out->trip_safety_tc_c = sl.trip_safety_tc_c;
             out->trip_deciding_threshold = sl.trip_deciding_threshold;
+            out->trip_current_a[0] = sl.trip_current_a[0];
+            out->trip_current_a[1] = sl.trip_current_a[1];
+            out->trip_current_a[2] = sl.trip_current_a[2];
+            out->trip_context_age_100ms = sl.trip_context_age_100ms;
             out->trip_fault_sources = sl.trip_fault_sources;
             out->trip_fault_sources_valid = sl.trip_fault_sources_valid;
         }
@@ -643,7 +647,22 @@ static esp_err_t status_get_handler(httpd_req_t *req)
     if (ds.trip_event_ever_received) {
         APPEND(",\"trip_reason\":%u", (unsigned)ds.trip_reason);
         APPEND(",\"trip_reason_words\":\"%s\"", safety_trip_words_short(ds.trip_reason));
-        APPEND(",\"trip_reason_cause\":\"%s\"", safety_trip_words_cause(ds.trip_reason));
+        {
+            /* 2026-08-28 scope change: the cause line now carries the actual
+             * detected numbers where this firmware has them -- see
+             * safety_trip_words_cause_numbered()'s header comment for
+             * exactly which guards do/don't. 200: generous against the
+             * longest composed sentence (~150 bytes), not measured to the
+             * byte -- this string is built from bounded %.1f/%.2f numbers,
+             * not copied user text, so -Werror=format-truncation cannot
+             * prove a tight bound anyway. */
+            char cause_buf[200];
+            APPEND(",\"trip_reason_cause\":\"%s\"",
+                   safety_trip_words_cause_numbered(ds.trip_reason, ds.trip_safety_tc_c,
+                                                     ds.trip_deciding_threshold,
+                                                     ds.trip_current_a, ds.trip_context_age_100ms,
+                                                     cause_buf, sizeof(cause_buf)));
+        }
         APPEND(",\"trip_reason_remedy\":\"%s\"", safety_trip_words_remedy(ds.trip_reason));
         APPEND(",\"trip_event_age_ms\":%lu", (unsigned long)ds.trip_event_age_ms);
         char trip_tc_buf[16];

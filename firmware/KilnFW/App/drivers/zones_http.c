@@ -25,6 +25,10 @@
                              * zone_sweep_effective_ceiling_c() */
 #include "kiln_io.h"
 #include "profile_executor.h"
+#include "relay_authority.h" /* the single shared heat claim -- see its doc comment
+                               * above relay_heat_zone_claimant_t. Closes the race
+                               * this file's own s_sweep.active check alone cannot:
+                               * see zones_current_sweep_start()'s atomic gate. */
 #include "thermo_combine.h"
 #include "thermo_owner.h"
 #include "uart_task_ids.h" /* SAFETY_FLAG_* for zones_get_safety_wiring() */
@@ -4730,6 +4734,14 @@ static void zone_sweep_task(void *arg)
         s_sweep.state = ZONE_SWEEP_DONE;
         s_sweep.reason[0] = '\0';
     }
+    /* Release the heat claim taken in zones_current_sweep_start() -- must
+     * happen before s_sweep.active goes false, not after: the moment
+     * s_sweep.active reads false, a waiting profile/autotune start can
+     * observe it and attempt its own heat-zone claim; releasing first means
+     * that claim is genuinely free the instant this sweep stops being
+     * reachable, instead of leaving a window where the sweep looks finished
+     * but still (briefly) holds exclusivity. */
+    relay_authority_heat_sweep_claim_end();
     s_sweep.active = false;
     s_sweep.task = NULL;
     vTaskDelete(NULL);
@@ -4781,6 +4793,23 @@ zone_sweep_refusal_t zones_current_sweep_start(void)
         return refusal;
     }
 
+    /* The atomic gate (relay_authority.h's heat-claim doc comment): every
+     * check above, including profile_running_or_paused/autotune_active just
+     * fed into zone_sweep_check_refusal(), is a plain read of another
+     * module's state with no lock spanning the read and this function's own
+     * commit just below -- exactly the TOCTOU a reviewer found bounded but
+     * not correct-by-construction. This call is the last possible moment
+     * before that commit, and it is a single mutex-protected test-and-set
+     * against profile_executor.c's/autotune_engine.c's matching gate, so
+     * whichever of the two commits first is the one that actually wins --
+     * the loser is refused here with the SAME reason the informational
+     * check above already reports for the common (non-race) case. */
+    relay_heat_sweep_claim_result_t heat_claim = relay_authority_heat_sweep_claim_begin();
+    if (heat_claim != RELAY_HEAT_SWEEP_CLAIM_OK) {
+        return (heat_claim == RELAY_HEAT_SWEEP_CLAIM_REFUSE_PROFILE) ? ZONE_SWEEP_REFUSE_PROFILE_RUNNING
+                                                                      : ZONE_SWEEP_REFUSE_AUTOTUNE_RUNNING;
+    }
+
     s_sweep.active = true;
     s_sweep.abort_requested = false;
     s_sweep.state = ZONE_SWEEP_RUNNING;
@@ -4794,6 +4823,7 @@ zone_sweep_refusal_t zones_current_sweep_start(void)
 
     BaseType_t created = xTaskCreate(zone_sweep_task, "zone_sweep", 4096, NULL, tskIDLE_PRIORITY + 2, &s_sweep.task);
     if (created != pdPASS) {
+        relay_authority_heat_sweep_claim_end(); /* task never started -- give the claim back */
         s_sweep.active = false;
         s_sweep.state = ZONE_SWEEP_FAILED;
         snprintf((char *)s_sweep.reason, sizeof(s_sweep.reason), "failed to start sweep task");

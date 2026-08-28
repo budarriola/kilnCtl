@@ -643,6 +643,22 @@ here:</p>
   // THAT channel alone -- "timeout"/"absent" on one channel never blocks the
   // others from showing their own state, because GET /api/thermo/faults
   // already queried them independently (see the handler's doc comment).
+  // Mirrors App/drivers/thermal_guard.h's thermal_guard_trip_t enum, in
+  // words -- same mirrored-not-shared reasoning as main_page.html's
+  // SAFETY_TRIP_WORDS table just above it (this firmware genuinely has no
+  // header to #include here; keep in sync with thermal_guard.h if that enum
+  // changes). 2026-08-28: this used to be printed as a bare number
+  // (zone.fault_guard straight into the page) -- an undecoded enum, exactly
+  // the offender ROADMAP.md M13 calls out.
+  var THERMAL_GUARD_WORDS = {
+    0: 'none', 1: 'heating commanded but temperature not rising',
+    2: 'temperature moving the wrong direction', 3: 'runaway heating (welded contact / shorted SSR?)',
+    4: 'drifted from setpoint after settling', 5: 'over absolute max temperature',
+    6: 'under absolute min temperature', 7: 'sensor reading invalid',
+    8: 'reading frozen while duty > 0', 9: 'cross-zone plausibility check failed'
+  };
+  function thermalGuardWords(guard) { return THERMAL_GUARD_WORDS[guard] || ('guard ' + guard); }
+
   var lastFaults = null, lastExecSt = null;
   function renderThermoFaults(faultsResp, execSt) {
     lastFaults = faultsResp; lastExecSt = execSt;
@@ -700,8 +716,11 @@ here:</p>
                 '  &middot;  Stale: ' + (c.stale ? '<span class="bad">yes</span>' : 'no') +
                 '  &middot;  CJ: ' + window.kcUnit.fmt(c.cj_c) + '</div>';
       }
-      html += (zone ? '<div class="subrow">Control fault_guard: ' +
-                     (zone.faulted ? '<span class="bad">' + window.kcEscapeHtml(zone.fault_guard) + '</span>' : 'none') +
+      html += (zone ? '<div class="subrow">Control fault: ' +
+                     (zone.faulted
+                       ? '<span class="bad">' + window.kcEscapeHtml(thermalGuardWords(zone.fault_guard)) +
+                         ' -- ' + window.kcEscapeHtml(zone.fault_reason || 'no detail reported') + '</span>'
+                       : 'none') +
                      '</div>' : '') +
               '</div>';
     }

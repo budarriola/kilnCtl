@@ -1289,6 +1289,146 @@ static void test_s3_s4(void)
     }
 }
 
+static void test_s14(void)
+{
+    TEST_SECTION("S14 -- zone current above its measured normal (context, WARN only)");
+
+    /* Nuisance: current at or just under 150% of normal never warns, no
+     * matter how long it persists. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.i_normal_valid[0] = true;
+        cfg.i_normal_a[0] = 10.0f;
+        safety_guard_input_t in = base_input();
+        in.context_valid = true;
+        in.amps_valid[0] = true;
+        in.amps[0] = 14.9f; /* < 150% of 10.0A */
+        in.relay_commanded_now_for_ct[0] = true;
+        in.dt_s = 5.0f;
+        bool tripped = false;
+        for (int i = 0; i < 20 && !tripped; i++) {
+            tripped = safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(!tripped, "S14 never trips (WARN only)");
+        TEST_CHECK(!s.s14_warn[0], "current just under 150% of normal never warns S14");
+    }
+
+    /* Nuisance / negative test: a channel whose normal has NEVER been
+     * measured (i_normal_valid[ch] == false) must be skipped entirely --
+     * COMMISSIONING_UX.md section 3.2's required negative test. A huge
+     * current, sustained well past overcurrent_time_s, on an unmeasured
+     * channel must produce no warn and no accumulation whatsoever. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.i_normal_valid[1] = false; /* explicitly unmeasured */
+        cfg.i_normal_a[1] = 0.0f;
+        safety_guard_input_t in = base_input();
+        in.context_valid = true;
+        in.amps_valid[1] = true;
+        in.amps[1] = 1000.0f; /* absurdly high -- would trivially warn if evaluated */
+        in.relay_commanded_now_for_ct[1] = true;
+        in.dt_s = 5.0f;
+        bool tripped = false;
+        for (int i = 0; i < 100 && !tripped; i++) {
+            tripped = safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(!tripped, "S14 never trips on an unmeasured channel");
+        TEST_CHECK(!s.s14_warn[1], "an unmeasured channel (i_normal_valid==false) never warns, no matter the current");
+        TEST_CHECK(s.s14_over_elapsed_s[1] == 0.0f, "an unmeasured channel accumulates no elapsed time at all");
+    }
+
+    /* Nuisance: relay not commanded -- even huge current on a measured
+     * channel does not warn (S14 only fires while that channel's relay is
+     * actively commanded on). */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.i_normal_valid[2] = true;
+        cfg.i_normal_a[2] = 5.0f;
+        safety_guard_input_t in = base_input();
+        in.context_valid = true;
+        in.amps_valid[2] = true;
+        in.amps[2] = 50.0f;
+        in.relay_commanded_now_for_ct[2] = false; /* not commanded */
+        in.dt_s = 5.0f;
+        for (int i = 0; i < 20; i++) {
+            safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(!s.s14_warn[2], "S14 does not warn while the mapped relay is not commanded on");
+    }
+
+    /* Trip (warn): current sustained above 150% of normal for
+     * overcurrent_time_s (30s default) on a measured, commanded channel. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.i_normal_valid[0] = true;
+        cfg.i_normal_a[0] = 10.0f; /* threshold = 15.0A */
+        safety_guard_input_t in = base_input();
+        in.context_valid = true;
+        in.amps_valid[0] = true;
+        in.amps[0] = 17.1f; /* > 150% of 10.0A, matches the spec's worked example */
+        in.relay_commanded_now_for_ct[0] = true;
+        in.dt_s = 5.0f;
+        for (int i = 0; i < 6; i++) { /* 6*5s = 30s == overcurrent_time_s */
+            safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(s.s14_warn[0], "current sustained above 150% of normal for overcurrent_time_s warns S14");
+        bool tripped = safety_guards_tick(&s, &cfg, &in);
+        TEST_CHECK(!tripped, "S14's warn never escalates to a trip, no matter how long it persists");
+    }
+
+    /* Channel independence: CT0 over its normal does not warn CT1. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.i_normal_valid[0] = true;
+        cfg.i_normal_a[0] = 10.0f;
+        cfg.i_normal_valid[1] = true;
+        cfg.i_normal_a[1] = 10.0f;
+        safety_guard_input_t in = base_input();
+        in.context_valid = true;
+        in.amps_valid[0] = true;
+        in.amps[0] = 17.1f;
+        in.relay_commanded_now_for_ct[0] = true;
+        in.amps_valid[1] = true;
+        in.amps[1] = 5.0f; /* healthy */
+        in.relay_commanded_now_for_ct[1] = true;
+        in.dt_s = 5.0f;
+        for (int i = 0; i < 8; i++) {
+            safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(s.s14_warn[0], "CT0 over its own normal warns");
+        TEST_CHECK(!s.s14_warn[1], "CT1, healthy relative to its own normal, stays quiet while CT0 warns");
+    }
+
+    /* Stale context makes S14 inactive even with an over-threshold reading. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.i_normal_valid[0] = true;
+        cfg.i_normal_a[0] = 10.0f;
+        safety_guard_input_t in = base_input();
+        in.context_valid = false;
+        in.amps_valid[0] = true;
+        in.amps[0] = 100.0f;
+        in.relay_commanded_now_for_ct[0] = true;
+        in.dt_s = 5.0f;
+        for (int i = 0; i < 20; i++) {
+            safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(!s.s14_warn[0], "context_valid==false makes S14 inactive, not pessimistic");
+    }
+}
+
 static void test_s6(void)
 {
     TEST_SECTION("S6 -- main controller unhealthy");
@@ -2839,6 +2979,7 @@ void run_test_safety_guards(void)
     test_s12();
     test_s2();
     test_s3_s4();
+    test_s14();
     test_s6();
     test_s6b_reboot_grace();
     test_s9();

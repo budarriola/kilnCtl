@@ -68,8 +68,10 @@ default (K) rather than shipping disabled, but is *also* required for
 
 ## 3. Current channels
 
-Remember the scope limit: **load-active detection and a power estimate, nothing
-else.** There is no over-current guard (`SAFETY_MODEL.md` §3).
+Remember the scope limit: **load-active detection and a power estimate,
+plus (2026-08-28) a per-channel magnitude WARN against the channel's own
+measured normal.** There is still no *tripping* over-current guard, and
+breakers remain the electrical protection (`SAFETY_MODEL.md` §3/§4 S14/§7).
 
 | Field | Default | Unit | Guard | Risk | Notes |
 |---|---|---|---|---|---|
@@ -82,6 +84,9 @@ else.** There is no over-current guard (`SAFETY_MODEL.md` §3).
 | `gain[3]` | 0.715 | — | *none* | ⚪ | R46/R43; refine only if the resistors are not 1 % |
 | `mains_voltage_v` | unset | V | *none* | ⚪ | Nominal. Power goes as V², so a 5 % sag is a 10 % error. Unset ⇒ report `—`, never assume |
 | `power_window_s` | 120 | s | *none* | ⚪ | Conduction-fraction averaging window |
+| `i_normal_a[3]` **NEW** | unset | A | **S14** | 🟠 | Per-zone measured normal (energize-one-zone-at-a-time, ROADMAP M12/zones page). Individually gated — a channel with no measurement is skipped by S14 entirely, never treated as 0 A |
+| `overcurrent_pct` **NEW** | 150 | % | **S14** | 🟠 | WARN threshold, as a percentage of that channel's own `i_normal_a` |
+| `overcurrent_time_s` **NEW** | 30 | s | **S14** | 🟠 | Sustained-above-threshold window before WARN |
 
 **2026-08-24 note, made true by this date's commit, not before it.** The
 `*none*`/⚪ badges on `k_ct_v_per_a`/`gain`/`mains_voltage_v` were *aspirational*

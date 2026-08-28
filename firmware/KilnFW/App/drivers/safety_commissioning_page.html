@@ -104,6 +104,20 @@
   .field .note { font-size: 0.8em; color: var(--muted); margin: 0.3em 0 0; }
   .field .guardnames { font-size: 0.78em; color: var(--muted); margin: 0.2em 0 0; }
 
+  /* ---- Task 3 (COMMISSIONING_UX.md sec 2.2): current-monitor calibration,
+     displayed but not reassignable -- an <output> row, styled to read as
+     inert data rather than an editable box, with the "from zones" note
+     immediately under it. ---- */
+  .field-readonly { opacity: 0.85; }
+  .readonly-field { display: block; padding: 0.3em 0.5em; border-radius: 6px;
+    background: var(--card-bg-alt, var(--border)); font-family: monospace; }
+
+  /* Task 2 (COMMISSIONING_UX.md sec 2.1): the mains-voltage dropdown and its
+     hidden "Other..." number box share the field row the same way any other
+     single-field input would. */
+  .voltage-select { width: 100%; }
+  .voltage-other { width: 100%; margin-top: 0.3em; }
+
   /* ---- UNSET rendering (COMMISSIONING.md section 4 / CONFIG_REFERENCE.md
      section 7: "an unset field renders as unset, never as a plausible
      zero"). The whole card gets a visibly different treatment, not just the
@@ -360,11 +374,11 @@ var GROUPS = [
       { id: 769, name: 'i_present_a', type: 'f32', risk: 'nuisance', unit: 'A', def: 2.0,
         guards: ['S3', 'S4', 'S9'], note: 'A load-active threshold -- only has to separate noise ' +
           'from a conducting element.' },
-      { id: 770, name: 'zero_counts[0]', type: 'u16', risk: 'nuisance', unit: 'ADC counts',
+      { id: 770, name: 'zero_counts[0]', type: 'u16', risk: 'nuisance', unit: 'ADC counts', readonly: true,
         guards: ['S3', 'S4', 'S9'], note: 'Re-measured at runtime after >=5 min idle. Not zero -- ' +
           'single-supply offset.' },
-      { id: 771, name: 'zero_counts[1]', type: 'u16', risk: 'nuisance', unit: 'ADC counts', guards: ['S3', 'S4', 'S9'] },
-      { id: 772, name: 'zero_counts[2]', type: 'u16', risk: 'nuisance', unit: 'ADC counts', guards: ['S3', 'S4', 'S9'] },
+      { id: 771, name: 'zero_counts[1]', type: 'u16', risk: 'nuisance', unit: 'ADC counts', readonly: true, guards: ['S3', 'S4', 'S9'] },
+      { id: 772, name: 'zero_counts[2]', type: 'u16', risk: 'nuisance', unit: 'ADC counts', readonly: true, guards: ['S3', 'S4', 'S9'] },
       { id: 773, name: 'correlation_window_s', type: 'u16', risk: 'nuisance', unit: 's', def: 150,
         guards: ['S3', 'S4'], note: '>= 2x the ESP\'s 60s heater window + decay. Shortening this ' +
           'is the fastest way to make S4 fire on every healthy low-duty firing.' },
@@ -372,16 +386,17 @@ var GROUPS = [
       { id: 775, name: 'trip_verify_s', type: 'u16', risk: 'dangerous', unit: 's', def: 10,
         guards: ['S9'], note: 'Past the 1s peak-hold decay and the contactor\'s drop-out. Too ' +
           'short -> false "trip ineffective"; too long -> delayed alarm on a genuinely live kiln.' },
-      { id: 776, name: 'k_ct_v_per_a[0]', type: 'f32', risk: 'cosmetic', unit: 'V/A', guards: ['(power estimate only)'] },
-      { id: 777, name: 'k_ct_v_per_a[1]', type: 'f32', risk: 'cosmetic', unit: 'V/A', guards: ['(power estimate only)'] },
-      { id: 778, name: 'k_ct_v_per_a[2]', type: 'f32', risk: 'cosmetic', unit: 'V/A', guards: ['(power estimate only)'] },
-      { id: 779, name: 'gain[0]', type: 'f32', risk: 'cosmetic', def: 0.715, guards: ['(power estimate only)'],
+      { id: 776, name: 'k_ct_v_per_a[0]', type: 'f32', risk: 'cosmetic', unit: 'V/A', readonly: true, guards: ['(power estimate only)'] },
+      { id: 777, name: 'k_ct_v_per_a[1]', type: 'f32', risk: 'cosmetic', unit: 'V/A', readonly: true, guards: ['(power estimate only)'] },
+      { id: 778, name: 'k_ct_v_per_a[2]', type: 'f32', risk: 'cosmetic', unit: 'V/A', readonly: true, guards: ['(power estimate only)'] },
+      { id: 779, name: 'gain[0]', type: 'f32', risk: 'cosmetic', def: 0.715, readonly: true, guards: ['(power estimate only)'],
         note: 'R46/R43; refine only if the resistors are not 1%.' },
-      { id: 780, name: 'gain[1]', type: 'f32', risk: 'cosmetic', def: 0.715, guards: ['(power estimate only)'] },
-      { id: 781, name: 'gain[2]', type: 'f32', risk: 'cosmetic', def: 0.715, guards: ['(power estimate only)'] },
-      { id: 782, name: 'mains_voltage_v', type: 'f32', risk: 'cosmetic', unit: 'V', guards: ['(power estimate only)'],
+      { id: 780, name: 'gain[1]', type: 'f32', risk: 'cosmetic', def: 0.715, readonly: true, guards: ['(power estimate only)'] },
+      { id: 781, name: 'gain[2]', type: 'f32', risk: 'cosmetic', def: 0.715, readonly: true, guards: ['(power estimate only)'] },
+      { id: 782, name: 'mains_voltage_v', type: 'voltage', risk: 'cosmetic', unit: 'V', guards: ['(power estimate only)'],
         note: 'Nominal. Power goes as V^2, so a 5% sag is a 10% error. Unset means report ' +
-          '"--", never assume.' },
+          '"--", never assume. "Not set" stays selectable at any time -- picking it is a ' +
+          'clear, not merely a one-way door reachable only before the first commit.' },
       { id: 783, name: 'power_window_s', type: 'u16', risk: 'cosmetic', unit: 's', def: 120,
         guards: ['(power estimate only)'], note: 'Conduction-fraction averaging window.' },
       { id: 793, name: 'max_expected_power_w', type: 'f32', risk: 'cosmetic', unit: 'W',
@@ -390,15 +405,27 @@ var GROUPS = [
           'used only to sanity-check commissioning against wiring/breaker assumptions. ' +
           'Breakers are assumed sized for the full kiln load at 100% duty -- this is NOT a ' +
           'derating input and no safety guard reads it.' },
-      { id: 784, name: 'ct_cal[0].gain', type: 'f32', risk: 'cosmetic', guards: ['(power estimate only)'] },
-      { id: 785, name: 'ct_cal[1].gain', type: 'f32', risk: 'cosmetic', guards: ['(power estimate only)'] },
-      { id: 786, name: 'ct_cal[2].gain', type: 'f32', risk: 'cosmetic', guards: ['(power estimate only)'] },
-      { id: 787, name: 'ct_cal[0].offset', type: 'f32', risk: 'cosmetic', guards: ['(power estimate only)'] },
-      { id: 788, name: 'ct_cal[1].offset', type: 'f32', risk: 'cosmetic', guards: ['(power estimate only)'] },
-      { id: 789, name: 'ct_cal[2].offset', type: 'f32', risk: 'cosmetic', guards: ['(power estimate only)'] },
-      { id: 790, name: 'ct_cal[0].calibrated', type: 'bool', risk: 'cosmetic', guards: ['(power estimate only)'] },
-      { id: 791, name: 'ct_cal[1].calibrated', type: 'bool', risk: 'cosmetic', guards: ['(power estimate only)'] },
-      { id: 792, name: 'ct_cal[2].calibrated', type: 'bool', risk: 'cosmetic', guards: ['(power estimate only)'] },
+      { id: 784, name: 'ct_cal[0].gain', type: 'f32', risk: 'cosmetic', readonly: true, guards: ['(power estimate only)'] },
+      { id: 785, name: 'ct_cal[1].gain', type: 'f32', risk: 'cosmetic', readonly: true, guards: ['(power estimate only)'] },
+      { id: 786, name: 'ct_cal[2].gain', type: 'f32', risk: 'cosmetic', readonly: true, guards: ['(power estimate only)'] },
+      { id: 787, name: 'ct_cal[0].offset', type: 'f32', risk: 'cosmetic', readonly: true, guards: ['(power estimate only)'] },
+      { id: 788, name: 'ct_cal[1].offset', type: 'f32', risk: 'cosmetic', readonly: true, guards: ['(power estimate only)'] },
+      { id: 789, name: 'ct_cal[2].offset', type: 'f32', risk: 'cosmetic', readonly: true, guards: ['(power estimate only)'] },
+      { id: 790, name: 'ct_cal[0].calibrated', type: 'bool', risk: 'cosmetic', readonly: true, guards: ['(power estimate only)'] },
+      { id: 791, name: 'ct_cal[1].calibrated', type: 'bool', risk: 'cosmetic', readonly: true, guards: ['(power estimate only)'] },
+      { id: 792, name: 'ct_cal[2].calibrated', type: 'bool', risk: 'cosmetic', readonly: true, guards: ['(power estimate only)'] },
+      { id: 794, name: 'i_normal_a[0]', type: 'f32', risk: 'nuisance', unit: 'A', readonly: true,
+        guards: ['S14'], note: 'S14 over-current guard (NEW), COMMISSIONING_UX.md sec 3.3 -- ' +
+          'measured by the zones page\'s per-zone energize-one-at-a-time button. A channel with ' +
+          'no measurement is skipped entirely by S14, never treated as 0 A.' },
+      { id: 795, name: 'i_normal_a[1]', type: 'f32', risk: 'nuisance', unit: 'A', readonly: true, guards: ['S14'] },
+      { id: 796, name: 'i_normal_a[2]', type: 'f32', risk: 'nuisance', unit: 'A', readonly: true, guards: ['S14'] },
+      { id: 797, name: 'overcurrent_pct', type: 'u16', risk: 'nuisance', unit: '%', def: 150, guards: ['S14'],
+        note: 'S14 (NEW, WARN only): a channel\'s current above this percentage of its own ' +
+          'measured normal, sustained for overcurrent_time_s, warns -- never trips. Over-current ' +
+          'protection remains the breakers\' job by design (SAFETY_MODEL.md sec 3/7); this guard ' +
+          'exists to catch a CT on the wrong jack or an element/wiring change.' },
+      { id: 798, name: 'overcurrent_time_s', type: 'u16', risk: 'nuisance', unit: 's', def: 30, guards: ['S14'] },
     ] },
 
   { title: '4. Link and liveness', fields: [
@@ -489,10 +516,74 @@ GROUPS.forEach(function (g) { g.fields.forEach(function (f) { FIELD_BY_ID[f.id] 
 
 var latest = null; // last /api/safety/commissioning response, kept for the save pass
 
+// Standard mains voltages, COMMISSIONING_UX.md section 2.1's table --
+// distinct entries for 400V/415V (a 4% difference is an 8% power error,
+// both in current use) and for 208V (the three-phase line-to-line voltage
+// most likely to be mistaken for 240V -- 13% lower, which at power ~ V^2 is
+// a 25% power error). Value -1 is the sentinel for "Other..." (reveals the
+// free-number fallback); it is never written to the wire -- see the
+// fieldInputHtml voltage branch below.
+var MAINS_VOLTAGE_OPTIONS = [
+  [120, '120 V'], [208, '208 V (3-phase line-to-line)'], [240, '240 V'],
+  [277, '277 V'], [380, '380 V'], [400, '400 V'], [415, '415 V'], [460, '460 V'],
+];
+
 function fieldInputHtml(f, paramsById) {
   var p = paramsById[f.id];
   var isSet = !!(p && p.set);
   var val = isSet ? p.value : undefined;
+  // Task 3 (COMMISSIONING_UX.md sec 2.2): current-monitor calibration is
+  // read-only here, sourced from the zones page's per-zone measurement --
+  // an <output>-style row with no data-id, so it can never appear in the
+  // save pass's `#fields [data-id]` walk and can never be typed over.
+  if (f.readonly) {
+    var text;
+    if (!isSet) {
+      text = 'not measured';
+    } else if (f.type === 'bool') {
+      text = val ? 'true' : 'false';
+    } else {
+      text = window.kcEscapeHtml(val) + (f.unit ? ' ' + window.kcEscapeHtml(f.unit) : '');
+    }
+    return '<output class="readonly-field">' + text + '</output>' +
+      '<p class="note">From the zones configuration -- set on the ' +
+      '<a href="/zones.html">zones page</a>, not here.</p>';
+  }
+  // Task 2 (COMMISSIONING_UX.md sec 2.1): mains_voltage_v is a dropdown, not
+  // a number box, with "Not set" as a first-class, reachable, initially-
+  // selected option (CONFIG_REFERENCE.md sec 3: unset => report "--", never
+  // assume) and an "Other..." escape hatch for a voltage not on the list.
+  if (f.type === 'voltage') {
+    var knownValues = MAINS_VOLTAGE_OPTIONS.map(function (o) { return o[0]; });
+    var isKnown = isSet && knownValues.indexOf(Number(val)) !== -1;
+    var isOther = isSet && !isKnown;
+    // The <select> itself carries NO data-id -- it is a UI-only picker.
+    // The actual wire field (f32, id unchanged) lives entirely on the
+    // <input> below, which IS the element the save pass's `[data-id]` walk
+    // finds -- exactly one SET_PARAM candidate for this id no matter which
+    // path (known voltage vs "Other...") was used. wireVoltageSelects()
+    // (called after every render, same as applyContradictionRule()) keeps
+    // the input's value in sync with the select and toggles its visibility.
+    var html = '<select class="voltage-select" data-voltage-for="' + f.id + '">';
+    html += '<option value="unset"' + (!isSet ? ' selected' : '') + '>-- Not set --</option>';
+    MAINS_VOLTAGE_OPTIONS.forEach(function (opt) {
+      var sel = (isKnown && Number(val) === opt[0]) ? ' selected' : '';
+      html += '<option value="' + opt[0] + '"' + sel + '>' + window.kcEscapeHtml(opt[1]) + '</option>';
+    });
+    html += '<option value="other"' + (isOther ? ' selected' : '') + '>Other…</option>';
+    html += '</select>';
+    // "Not set" leaves this input's value empty, so the save pass's
+    // `el.value === ''` check skips it entirely, same as every other
+    // genuinely-unset numeric field on this page -- see OQ3 in
+    // COMMISSIONING_UX.md for the still-open "how do you CLEAR an
+    // already-set field" question this does not attempt to solve.
+    var otherValueAttr = isSet ? (' value="' + window.kcEscapeHtml(val) + '"') : '';
+    html += '<input type="number" step="any" class="voltage-other"' +
+      (isOther ? '' : ' hidden') +
+      ' data-id="' + f.id + '" data-type="f32"' + otherValueAttr +
+      ' placeholder="voltage, V">';
+    return html;
+  }
   if (f.type === 'enum') {
     var html = '<select data-id="' + f.id + '" data-type="' + f.type + '">';
     if (!isSet) html += '<option value="" selected disabled>-- not set --</option>';
@@ -527,8 +618,18 @@ function fieldBlock(f, paramsById) {
   var unsetHere = f.noDefault && !isSet;
 
   var div = document.createElement('div');
-  div.className = 'field' + (unsetHere ? ' unset' : '');
-  div.dataset.id = f.id;
+  div.className = 'field' + (unsetHere ? ' unset' : '') + (f.readonly ? ' field-readonly' : '');
+  // Read-only rows (Task 3, COMMISSIONING_UX.md sec 2.2) deliberately do NOT
+  // carry data-id on the wrapper -- the save pass below walks
+  // `#fields [data-id]`, which (being a descendant selector with no tag
+  // restriction) would otherwise pick up this wrapper itself alongside any
+  // real input/select inside it. A read-only row has no input/select at all
+  // (fieldInputHtml's readonly branch returns a plain <output>), so leaving
+  // data-id off here is what actually delivers "no participation in the
+  // page's POST body" rather than merely rendering that way.
+  if (!f.readonly) {
+    div.dataset.id = f.id;
+  }
 
   // bool fields: the label WRAPS the checkbox (fieldInputHtml still builds
   // the <input> itself) so the entire name+unit row is the hit target, not
@@ -538,7 +639,7 @@ function fieldBlock(f, paramsById) {
   // page's small-target problem.
   var headHtml;
   var bodyHtml;
-  if (f.type === 'bool') {
+  if (f.type === 'bool' && !f.readonly) {
     headHtml = '<label class="bool-label">' + fieldInputHtml(f, paramsById) +
       '<span>' + window.kcEscapeHtml(f.name) +
       (f.unit ? ' <span class="hint">(' + window.kcEscapeHtml(f.unit) + ')</span>' : '') +
@@ -598,6 +699,34 @@ function renderGroups(data) {
     });
   });
   applyContradictionRule();
+  wireVoltageSelects();
+}
+
+// Task 2 (COMMISSIONING_UX.md sec 2.1): wires every mains-voltage <select>
+// (there is exactly one, mains_voltage_v, but this walks all of them the
+// same way applyContradictionRule() above walks a fixed pair, in case a
+// second voltage-typed field is ever added) to its own hidden numeric
+// input -- picking a known voltage writes that number into the input and
+// hides it; picking "Other..." reveals it empty (or keeps whatever it
+// already held) for free entry; picking "Not set" clears it, which is what
+// makes the save pass skip this id entirely (fieldInputHtml's own comment).
+function wireVoltageSelects() {
+  document.querySelectorAll('.voltage-select').forEach(function (sel) {
+    var input = document.querySelector('input[data-id="' + sel.dataset.voltageFor + '"]');
+    if (!input) return;
+    sel.addEventListener('change', function () {
+      if (sel.value === 'unset') {
+        input.hidden = true;
+        input.value = '';
+      } else if (sel.value === 'other') {
+        input.hidden = false;
+        input.focus();
+      } else {
+        input.hidden = true;
+        input.value = sel.value;
+      }
+    });
+  });
 }
 
 function setBodyFlags(data) {

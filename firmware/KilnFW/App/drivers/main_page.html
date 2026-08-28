@@ -1054,6 +1054,22 @@ var SAFETY_TRIP_WORDS = {
 };
 function safetyTripWords(reason) { return SAFETY_TRIP_WORDS[reason] || 'unknown guard'; }
 
+// Mirrors App/drivers/thermal_guard.h's thermal_guard_trip_t enum, same
+// mirrored-not-shared reasoning as SAFETY_TRIP_WORDS just above (and
+// diagnostics_page.html's own copy of this same table -- keep all three in
+// sync with thermal_guard.h if that enum changes). 2026-08-28: the last-run
+// banner below used to print lr.fault_guard as a bare number next to the
+// word "Fault" -- an undecoded enum, exactly the offender ROADMAP.md M13
+// calls out.
+var THERMAL_GUARD_WORDS = {
+  0: 'none', 1: 'heating commanded but temperature not rising',
+  2: 'temperature moving the wrong direction', 3: 'runaway heating (welded contact / shorted SSR?)',
+  4: 'drifted from setpoint after settling', 5: 'over absolute max temperature',
+  6: 'under absolute min temperature', 7: 'sensor reading invalid',
+  8: 'reading frozen while duty > 0', 9: 'cross-zone plausibility check failed'
+};
+function thermalGuardWords(guard) { return THERMAL_GUARD_WORDS[guard] || ('guard ' + guard); }
+
 // The gap this closes: relay_authority already blocks new relay-on while the
 // safety processor reports a trip, but until this pass nothing on this page
 // ever looked at diag_state, so a live trip looked exactly like an ordinary
@@ -1085,7 +1101,19 @@ function renderSafetyTrip(data) {
   var ineffective = reason === 10;
   var isMainFault = reason === 6; // S6a -- the safety processor sees one bit, ESP knows the source
   var words = data.diag_trip_reason_words || safetyTripWords(reason);
-  var cause = data.diag_trip_reason_cause || 'Detail not available on this firmware build.';
+  // 2026-08-28: diag_trip_reason_cause (Frame B, the LIVE trip state) never
+  // carries numbers -- Frame B has no room for the trip snapshot fields, so
+  // dashboard_http.c can only decode it generically. trip_reason_cause
+  // (Frame D, TRIP_EVENT) DOES carry them (safety_trip_words_cause_numbered()
+  // on the ESP side) whenever the latched trip is this same trip -- which it
+  // is, for as long as this banner is showing a live TRIPPED state, since
+  // nothing else can produce a fresh TRIP_EVENT in between. Prefer it when
+  // the reasons agree; fall back to the generic live text otherwise (a
+  // stale/absent TRIP_EVENT, or the rare disagreement window right at a
+  // fresh trip before Frame D has arrived).
+  var cause = (data.trip_event_ever_received && data.trip_reason === reason && data.trip_reason_cause)
+    ? data.trip_reason_cause
+    : (data.diag_trip_reason_cause || 'Detail not available on this firmware build.');
   var remedy = data.diag_trip_reason_remedy || 'See firmware/SaftyFW/docs/SAFETY_MODEL.md.';
   var html = '<div class="banner safety-trip">' +
     '<h3>' + (ineffective ? '!! SAFETY TRIP -- TRIP_INEFFECTIVE !!' : 'SAFETY PROCESSOR TRIPPED') + '</h3>' +
@@ -1182,8 +1210,8 @@ function renderLastRun(st) {
     '<div class="row"><span>Recorded at</span><span>' + fmtDuration(lr.uptime_at_write_s) +
       ' into that boot</span></div>';
   if (lr.fault_reason) {
-    html += '<div class="row fault"><span>Fault ' + window.kcEscapeHtml(lr.fault_guard) + '</span><span>' +
-            window.kcEscapeHtml(lr.fault_reason) + '</span></div>';
+    html += '<div class="row fault"><span>Fault (' + window.kcEscapeHtml(thermalGuardWords(lr.fault_guard)) +
+            ')</span><span>' + window.kcEscapeHtml(lr.fault_reason) + '</span></div>';
   }
   html += '<p class="note">' + (lr.interrupted
     ? 'Nothing was restarted. Relays came up off and stay off until you start a firing.'

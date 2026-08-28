@@ -244,6 +244,17 @@ typedef struct {
     uint32_t trip_event_age_ms;
     float    trip_safety_tc_c;
     float    trip_deciding_threshold;
+    /* safety_link_status_t's trip_current_a[3] and trip_context_age_100ms,
+     * straight passthrough -- both already arrive on Frame D (TRIP_EVENT)
+     * and were simply not copied into this struct before. current_a[] is
+     * the deciding number for S3 (load stuck on) and S9 (contactor still
+     * shows current after being commanded off); context_age_100ms is the
+     * deciding number for S6b (link went silent for longer than its
+     * timeout) -- see safety_trip_words_cause_numbered()'s call sites for
+     * exactly which guard uses which. Both NAN/255 (never/unknown) until a
+     * real TRIP_EVENT is received, same convention as the two floats above. */
+    float    trip_current_a[3];
+    uint8_t  trip_context_age_100ms;
     /* safety_link_status_t's trip_fault_sources, straight passthrough --
      * this board's OWN fault_sources bitmask, snapshotted at the moment the
      * currently-cached trip latched. Meaningful only when trip_reason == 6

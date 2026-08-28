@@ -192,6 +192,32 @@ void relay_authority_release_mask(uint8_t relay_mask)
     g_last_release_mask = relay_mask;
 }
 
+/* The shared heat claim (relay_authority.h) -- profile_executor_run() now
+ * takes this atomically right before its final commit, on top of (not
+ * instead of) the early, non-atomic zones_current_sweep_is_active() check
+ * this file already stubs above. Default succeeds (false = "not blocked by
+ * a sweep") so every existing test's control-path/full-real-path behavior
+ * is unchanged; s_test_heat_zone_claim_refused lets
+ * test_run_refuses_at_atomic_heat_claim_gate() below prove the LATE gate is
+ * independently load-bearing, not just decorative alongside the early one. */
+static bool s_test_heat_zone_claim_refused = false;
+static int g_heat_zone_claim_begin_calls = 0;
+static int g_heat_zone_claim_end_calls = 0;
+static relay_heat_zone_claimant_t g_last_heat_zone_claimant = RELAY_HEAT_ZONE_CLAIM_PROFILE;
+
+bool relay_authority_heat_zone_claim_begin(relay_heat_zone_claimant_t who)
+{
+    g_heat_zone_claim_begin_calls++;
+    g_last_heat_zone_claimant = who;
+    return !s_test_heat_zone_claim_refused;
+}
+
+void relay_authority_heat_zone_claim_end(relay_heat_zone_claimant_t who)
+{
+    g_heat_zone_claim_end_calls++;
+    g_last_heat_zone_claimant = who;
+}
+
 esp_err_t relay_cycles_init(void)
 {
     return ESP_OK;
@@ -543,6 +569,9 @@ static void reset_relay_claim_test_state(void)
     g_relay_release_calls = 0;
     g_last_release_mask = 0;
     g_continue_on_zone_trip = false;
+    g_heat_zone_claim_begin_calls = 0;
+    g_heat_zone_claim_end_calls = 0;
+    g_last_heat_zone_claimant = RELAY_HEAT_ZONE_CLAIM_PROFILE;
 }
 
 static void test_escalate_guard_trip_global_releases_relay_claim(void)
@@ -976,6 +1005,78 @@ static void test_run_refuses_while_zone_sweep_is_active(void)
     s_test_sweep_active = false;
 }
 
+// The shared heat claim's atomic gate (relay_authority.h) -- proves the LATE
+// gate right before the final commit is independently load-bearing, not
+// merely decorative alongside the early, non-atomic
+// zones_current_sweep_is_active() check test_run_refuses_while_zone_sweep_
+// is_active() above already covers. Drives profile_executor_run() all the
+// way to its real final commit (unlike every other test in this file, which
+// the header comment on test_run_refuses_while_zone_sweep_is_active()
+// explicitly notes cannot reach that far): zone 0 gets a real 1300C ceiling
+// and PID control mode so profile_zones_have_ceiling()/the n_heating_zones
+// guard both pass for real, and the single segment is a zero-ramp
+// PROFILE_SEG_KIND_ZONE_RAMP dwell (the zero-initialized default) so the
+// ramp-ceiling loop's "rate <= 0 -> skip" branch takes it out of play
+// without needing zones_config_get_max_ramp() (stubbed to always report a
+// 0 C/hr ceiling) to cooperate.
+static void test_run_refuses_at_atomic_heat_claim_gate(void)
+{
+    TEST_SECTION("profile_executor_run() -- the LATE atomic heat-claim gate refuses even when the EARLY "
+                 "zones_current_sweep_is_active() check passed (the race window the claim exists to close)");
+    reset_relay_claim_test_state();
+    s_exec.lock = xSemaphoreCreateMutex();
+    s_exec.state = PROFILE_EXEC_IDLE;
+
+    memset(&s_test_profiles_http_get_out, 0, sizeof(s_test_profiles_http_get_out));
+    s_test_profiles_http_get_out.zone_mask = 0x01;
+    s_test_profiles_http_get_out.segment_count = 1;
+    s_test_profiles_http_get_out.segments[0].seg_kind = PROFILE_SEG_KIND_ZONE_RAMP;
+    s_test_profiles_http_get_out.segments[0].ramp_c_per_hr = 0.0f; /* dwell -- skips the ramp-ceiling check */
+    s_test_profiles_http_get_out.segments[0].target_c = 100.0f;
+    s_test_profiles_http_get_ok = true;
+    s_test_zones_config_valid = true;
+    s_test_sweep_active = false; /* the EARLY check passes -- this is the race window itself */
+
+    memset(g_stub_max_temp_c, 0, sizeof(g_stub_max_temp_c));
+    memset(g_stub_control_mode, 0, sizeof(g_stub_control_mode));
+    g_stub_max_temp_c[0] = 1300.0f;
+    g_stub_control_mode[0] = ZONE_CONTROL_MODE_PID;
+
+    // RED: force the atomic gate itself to refuse, simulating a sweep that
+    // won the race and claimed exclusivity in the window between the early
+    // check above and this call.
+    s_test_heat_zone_claim_refused = true;
+    char err[128];
+    err[0] = '\0';
+    bool ok = profile_executor_run(0, err, sizeof(err));
+
+    TEST_CHECK(!ok, "the atomic gate alone must be able to refuse a run the early check let through");
+    TEST_CHECK(strstr(err, "sweep") != NULL, "the refusal must still name the sweep specifically");
+    TEST_CHECK(s_exec.state == PROFILE_EXEC_IDLE, "a run refused at the atomic gate must never reach RUNNING");
+    TEST_CHECK(g_relay_claim_calls == 0, "relay_authority_claim_mask() (the actual relay ownership grab) "
+                                        "must never be reached when the atomic gate refuses");
+
+    // GREEN: same setup, atomic gate now allows it -- proves the RED result
+    // above was really the gate, not some other stub failing closed.
+    s_test_heat_zone_claim_refused = false;
+    s_exec.state = PROFILE_EXEC_IDLE;
+    err[0] = '\0';
+    ok = profile_executor_run(0, err, sizeof(err));
+
+    TEST_CHECK(ok, "with the atomic gate allowing it, the identical setup must succeed");
+    TEST_CHECK(s_exec.state == PROFILE_EXEC_RUNNING, "a successful run must reach RUNNING");
+    TEST_CHECK(g_heat_zone_claim_begin_calls == 2, "the gate is attempted exactly once per profile_executor_run() call");
+    TEST_CHECK(g_last_heat_zone_claimant == RELAY_HEAT_ZONE_CLAIM_PROFILE,
+              "profile_executor_run() must claim as PROFILE, not AUTOTUNE");
+
+    profile_executor_halt();
+    TEST_CHECK(g_heat_zone_claim_end_calls >= 1, "halt() must release the heat claim it just took");
+
+    s_test_profiles_http_get_ok = false;
+    s_test_zones_config_valid = false;
+    s_test_heat_zone_claim_refused = false;
+}
+
 void run_test_profile_executor_prestart(void)
 {
     test_run_refuses_before_start();
@@ -1000,6 +1101,7 @@ void run_test_profile_executor_prestart(void)
     test_io_seg_finish_leave_on_honored_only_on_done();
     test_io_segs_force_all_off_sweeps_general_io_too();
     test_run_refuses_while_zone_sweep_is_active();
+    test_run_refuses_at_atomic_heat_claim_gate();
 }
 
 int main(void)

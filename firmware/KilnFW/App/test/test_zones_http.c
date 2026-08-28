@@ -328,6 +328,27 @@ bool autotune_engine_is_active(void)
     return s_test_autotune_active;
 }
 
+// ---- relay_authority.h -- the single shared heat claim.
+// zones_current_sweep_start() takes this atomically right before its own
+// commit (s_sweep.active = true), on top of (not instead of) the early,
+// non-atomic profile_executor_get_status()/autotune_engine_is_active()
+// reads above. Default OK so every existing wired-refusal test's success
+// path is unchanged; s_test_heat_sweep_claim_result lets
+// test_zones_current_sweep_start_atomic_gate_closes_the_race() below prove
+// the LATE gate is independently load-bearing.
+static relay_heat_sweep_claim_result_t s_test_heat_sweep_claim_result = RELAY_HEAT_SWEEP_CLAIM_OK;
+static int s_test_heat_sweep_claim_begin_calls = 0;
+static int s_test_heat_sweep_claim_end_calls = 0;
+relay_heat_sweep_claim_result_t relay_authority_heat_sweep_claim_begin(void)
+{
+    s_test_heat_sweep_claim_begin_calls++;
+    return s_test_heat_sweep_claim_result;
+}
+void relay_authority_heat_sweep_claim_end(void)
+{
+    s_test_heat_sweep_claim_end_calls++;
+}
+
 // ---- safety_link.h -- same reasoning: a small test-controlled stand-in
 // instead of linking the real (hardware-owning) module.
 static bool s_test_safety_link_up = false;
@@ -2637,6 +2658,9 @@ static void reset_sweep_state_for_test(void)
     s_test_autotune_active = false;
     s_test_safety_link_up = true;
     memset(&s_test_safety_status, 0, sizeof(s_test_safety_status));
+    s_test_heat_sweep_claim_result = RELAY_HEAT_SWEEP_CLAIM_OK;
+    s_test_heat_sweep_claim_begin_calls = 0;
+    s_test_heat_sweep_claim_end_calls = 0;
 }
 
 static void test_zones_current_sweep_start_wired_refusals(void)
@@ -2754,6 +2778,69 @@ static void test_zones_current_sweep_start_wired_refusals(void)
     s_zones_config_valid = false;
 }
 
+// The shared heat claim's atomic gate (relay_authority.h) -- proves the LATE
+// gate right before s_sweep.active = true is independently load-bearing,
+// not merely decorative alongside the early profile_executor_get_status()/
+// autotune_engine_is_active() reads
+// test_zones_current_sweep_start_wired_refusals() above already covers.
+// Sets those EARLY reads to report "nothing running" (the race window
+// itself: a profile or autotune could commit in the gap between that read
+// and this call) and forces the atomic gate to refuse anyway, simulating
+// the other side winning the race.
+static void test_zones_current_sweep_start_atomic_gate_closes_the_race(void)
+{
+    static kiln_io_t dummy_io;
+    static SafetyLinkClass dummy_safety;
+    static MAX31856BusClass dummy_thermo;
+    memset(&dummy_io, 0, sizeof(dummy_io));
+    memset(&dummy_safety, 0, sizeof(dummy_safety));
+    memset(&dummy_thermo, 0, sizeof(dummy_thermo));
+    dummy_thermo.initialized = true;
+
+    // RED: every early/informational check reports clean (profile IDLE,
+    // autotune not active, link up, no trip, no relay on) -- yet the atomic
+    // gate itself refuses, exactly as it would if a profile won the race in
+    // the window right after those reads.
+    reset_sweep_state_for_test();
+    zones_http_set_hw(&dummy_io, &dummy_thermo, &dummy_safety);
+    s_zones_config_valid = true;
+    s_zones.cfg.thermo_count = 1;
+    s_test_heat_sweep_claim_result = RELAY_HEAT_SWEEP_CLAIM_REFUSE_PROFILE;
+    TEST_CHECK(zones_current_sweep_start() == ZONE_SWEEP_REFUSE_PROFILE_RUNNING,
+              "the atomic gate alone must be able to produce PROFILE_RUNNING even when the early "
+              "profile_executor_get_status() read saw IDLE");
+    TEST_CHECK(!s_sweep.active, "a run refused at the atomic gate must never mark the sweep active");
+    TEST_CHECK(s_sweep.task == NULL, "a refused start must never have spawned the sweep task");
+
+    reset_sweep_state_for_test();
+    zones_http_set_hw(&dummy_io, &dummy_thermo, &dummy_safety);
+    s_zones_config_valid = true;
+    s_zones.cfg.thermo_count = 1;
+    s_test_heat_sweep_claim_result = RELAY_HEAT_SWEEP_CLAIM_REFUSE_AUTOTUNE;
+    TEST_CHECK(zones_current_sweep_start() == ZONE_SWEEP_REFUSE_AUTOTUNE_RUNNING,
+              "the atomic gate alone must be able to produce AUTOTUNE_RUNNING even when the early "
+              "autotune_engine_is_active() read saw false");
+    TEST_CHECK(!s_sweep.active, "a run refused at the atomic gate must never mark the sweep active");
+
+    // GREEN: identical setup, atomic gate now allows it -- proves the RED
+    // results above were really the gate, not some other stub failing
+    // closed.
+    reset_sweep_state_for_test();
+    zones_http_set_hw(&dummy_io, &dummy_thermo, &dummy_safety);
+    s_zones_config_valid = true;
+    s_zones.cfg.thermo_count = 1;
+    TEST_CHECK(zones_current_sweep_start() == ZONE_SWEEP_REFUSE_OK,
+              "with the atomic gate allowing it, the identical setup must start cleanly");
+    TEST_CHECK(s_sweep.active, "a started sweep is marked active");
+    TEST_CHECK(s_test_heat_sweep_claim_begin_calls == 1, "the gate is attempted exactly once per "
+                                                         "zones_current_sweep_start() call");
+
+    reset_sweep_state_for_test();
+    zones_http_set_hw(NULL, NULL, NULL);
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    s_zones_config_valid = false;
+}
+
 void run_test_zones_http(void)
 {
     test_out_of_range_zone_preserves_stored_fields();
@@ -2825,6 +2912,7 @@ void run_test_zones_http(void)
     test_ct_mapping_warn_mask_wiring();
 
     test_zones_current_sweep_start_wired_refusals();
+    test_zones_current_sweep_start_atomic_gate_closes_the_race();
 }
 
 int main(void)

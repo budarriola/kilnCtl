@@ -1,4 +1,5 @@
 #include "safety_link.h"
+#include "safety_trip_decision.h"
 
 #include <inttypes.h>
 #include <math.h>
@@ -1126,23 +1127,32 @@ static bool safety_apply_trip_event(SafetyLinkClass *link, const uart_proto_mess
     if (!safety_lock(link)) {
         return false;
     }
-    bool is_new_event =
-        !link->cached.trip_event_ever_received || link->cached.trip_last_seq != trip_seq;
     /* 2026-08-28 audit fix (N3): "new to this boot" is NOT the same claim as
      * "genuinely live" -- an ESP reboot with a trip still latched on the Pico
      * makes the FIRST resend this boot look identical to a real new trip
      * (trip_event_ever_received was false either way), but link->fault_sources
      * at that instant reflects THIS boot's fault lines, not whatever was
      * actually asserted when the trip latched, possibly minutes/boots ago.
-     * Only the SECOND case below -- a trip_seq change witnessed while this
-     * boot was already tracking a previous one -- is something this boot
-     * actually watched happen live, so only that case may claim the snapshot
-     * is trustworthy. See safety_link.h's trip_fault_sources_valid field
-     * comment and ui_page_diagnostics.c/dashboard_http.c's "(at trip)"
-     * renderers, which must show "not captured" rather than a plausible-
-     * looking wrong value when this is false. */
-    bool is_genuinely_live_event = link->cached.trip_event_ever_received &&
-                                    link->cached.trip_last_seq != trip_seq;
+     * Only a trip_seq change witnessed while this boot was already tracking a
+     * previous one is something this boot actually watched happen live, so
+     * only that case may claim the snapshot is trustworthy. See
+     * safety_link.h's trip_fault_sources_valid field comment and
+     * ui_page_diagnostics.c/dashboard_http.c's "(at trip)" renderers, which
+     * must show "not captured" rather than a plausible-looking wrong value
+     * when this is false.
+     *
+     * The actual decision is factored into safety_trip_decision.c (2026-08-28
+     * opus review: "no automated test touches this" -- see that file's doc
+     * comment for why it lives in its own dependency-free translation unit
+     * and firmware/KilnFW/App/test/test_safety_trip_decision.c for the host
+     * test that now drives it directly). */
+    safety_trip_decision_t trip_decision = safety_trip_decide_event((safety_trip_decision_input_t){
+        .trip_event_ever_received_before = link->cached.trip_event_ever_received,
+        .cached_trip_last_seq = link->cached.trip_last_seq,
+        .incoming_trip_seq = trip_seq,
+    });
+    bool is_new_event = trip_decision.is_new_event;
+    bool is_genuinely_live_event = trip_decision.fault_sources_valid;
 
     link->cached.trip_last_seq = trip_seq;
     link->cached.trip_reason = trip_reason;

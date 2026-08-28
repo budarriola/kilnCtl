@@ -782,6 +782,54 @@ Three different faults, three different fixes, and collapsing them into one
 immediately** (feeding S5), not merely warned about — it is not a slightly-old
 number, it is a number of unknown age.
 
+### S14 — Zone current above its measured normal · **WARN only** · *needs context* · NEW, 2026-08-28
+
+The owner asked for "an over current guard to go with the under current guard,
+use a percentage of the normal to set this." This is that guard, and it does
+**not** contradict §2/§3/§7's over-current position below — see "Scope" at the
+end of this section for why.
+
+```
+for each CT channel ch in 0..2:
+  i_normal_a[ch] is measured (i_normal_a fields_set bit for ch is set)
+    AND that channel's mapped relay is commanded on right now
+    AND amps[ch] > i_normal_a[ch] * overcurrent_pct / 100
+      continuously for overcurrent_time_s               →  WARN
+```
+
+Defaults: `overcurrent_pct` = **150 %**, `overcurrent_time_s` = **30 s**.
+
+**Per-channel, and never guessed.** `i_normal_a[ch]` is the current recorded
+while that channel's zone was the only one energized (the same per-zone
+measurement `CURRENT_SENSE.md` §5 step 2 already requires, ROADMAP M12). A
+channel whose normal has never been measured is **skipped entirely** — no
+accumulation, no WARN, reported inactive, exactly like a context-dependent
+guard with no context. `0` is never substituted for a missing normal: this is
+a magnitude comparison against a real measurement, or it does not run at all.
+
+**WARN, never TRIP**, for three reasons:
+
+1. §2's rule: the default for a new guard is WARN. Promoting one to TRIP needs
+   a written argument about what physical harm it prevents, and none is made
+   here.
+2. It does not change §3's or §7's position (below): breakers, sized for full
+   load at 100 % duty, remain the over-current protection. S14's job is
+   different — catching a CT on the wrong jack, or an element/wiring change
+   that shifted a zone's draw — which is a *commissioning-integrity* check, not
+   an electrical-protection one.
+3. The measurement chain (a 12-bit ADC behind a 1 s peak-hold, calibrated by a
+   self-service zones-page button) is not yet evidence anyone should open a
+   contactor on.
+
+**Scope, precisely:** this guard compares a channel's current against *its own
+measured normal*, as a percentage, never against an absolute amp figure and
+never against another channel — three zones on one kiln can legitimately
+differ 2× in element draw, so a shared absolute threshold would be either
+useless or a nuisance generator. It exists alongside S3/S4 (presence/absence)
+without changing their scope statement below: S3/S4 still never look at
+magnitude, and S14 still never protects against a short or a genuine
+over-current fault — see §3/§7.
+
 ### Runtime configuration integrity · continuous
 
 Not a guard, a background check: the in-RAM threshold/calibration set is
@@ -927,7 +975,7 @@ S11 frozen reading and S12 cold junction all keep running and keep authority
 over K4. Those are the guards that matter when the main controller is an unknown
 quantity, and they need nothing from it.
 
-The context-dependent guards — S2, S3, S4, S10, S13 — report as **disabled**,
+The context-dependent guards — S2, S3, S4, S10, S13, S14 — report as **disabled**,
 never as passing. A guard that cannot evaluate must not look like a guard that
 evaluated and found nothing wrong; that distinction is the difference between a
 safety case and a green light.
@@ -972,7 +1020,7 @@ case.
 | Main controller commanding nonsense | **Yes** — S1, S2 |
 | Main controller absent, unprogrammed, or dead at boot | **Yes** — the ESP refuses to heat without Pico telemetry, and the Pico refuses to arm without context |
 | Safety TC fallen out of the chamber / wrong port / drifted | **Only in `CHAMBER_AGREED`** — S10 detects it (WARN); S8 and S11 catch some cases in both modes. In `EXTERNAL_OVERHEAT` there is no cross-check at all |
-| Element short / over-current | **No, by design.** Fuses and breakers own this — see §3 |
+| Element short / over-current | **No, by design.** Fuses and breakers own this — see §3. S14 (§4, added 2026-08-28) WARNs on a channel drawing well above its own measured normal, but that is a commissioning-integrity check (wrong CT jack, changed element), not electrical protection, and it never trips |
 | Safety TC frozen at a plausible value | **Yes** — S11 |
 | Enclosure overheating / CJ out of spec | **Yes** — S12 |
 | Corrupted safety threshold in RAM | **Yes** — periodic CRC check |

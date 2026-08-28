@@ -213,6 +213,11 @@ static void force_relays_off(void)
     if (zones_config_get_relay_mask(s_at.zone_index, &owned_mask) && owned_mask != 0) {
         relay_authority_release_mask(owned_mask);
     }
+    /* The shared heat claim (relay_authority.h) taken atomically in
+     * begin_run_locked(), right after state_is_running() confirmed this was
+     * a genuine start. Safe unconditionally: a no-op if this run never
+     * actually reached that point (refused earlier). */
+    relay_authority_heat_zone_claim_end(RELAY_HEAT_ZONE_CLAIM_AUTOTUNE);
 }
 
 /* Same escalation split as profile_executor.c's escalate_guard_trip() --
@@ -997,6 +1002,27 @@ static bool begin_run_locked(uint8_t zone_index, char *err_msg, size_t err_cap)
     if (state_is_running(s_at.state)) {
         xSemaphoreGive(s_at.lock);
         if (err_msg) snprintf(err_msg, err_cap, "autotune already running on zone %u", s_at.zone_index);
+        return false;
+    }
+
+    /* The atomic gate (relay_authority.h's heat-claim doc comment): the
+     * zones_current_sweep_is_active() check above is a plain, non-atomic
+     * read made before s_at.lock was even taken -- a sweep can start in the
+     * window between that read and this function's commit. This is the last
+     * possible moment before the commit: s_at.lock has been held
+     * continuously since state_is_running() just above confirmed this is a
+     * genuine start, not a reentrant call on an already-running instance
+     * (see relay_heat_zone_claimant_t's doc comment for why that ordering is
+     * what makes force_relays_off()'s unconditional _end() call safe), and
+     * it is a single mutex-protected test-and-set against zones_http.c's/
+     * profile_executor.c's matching gates. Refused with the SAME message
+     * the early check already reports for the common (non-race) case. */
+    if (!relay_authority_heat_zone_claim_begin(RELAY_HEAT_ZONE_CLAIM_AUTOTUNE)) {
+        xSemaphoreGive(s_at.lock);
+        if (err_msg) {
+            snprintf(err_msg, err_cap,
+                     "a zone current sweep is running -- autotune cannot run at the same time");
+        }
         return false;
     }
 

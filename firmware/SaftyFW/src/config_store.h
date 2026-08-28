@@ -290,6 +290,17 @@ extern "C" {
 // explicit bit saying an operator actually wrote them.
 #define CONFIG_STORE_SET_MAX_EXPECTED_POWER_W (1u << 11)
 
+// i_normal_a[0..2] -- COMMISSIONING_UX.md section 3.3, S14 over-current
+// guard. THREE separate bits, deliberately NOT one group bit like
+// CT_CHANNEL_MAP -- see that field's own comment and i_normal_a's struct
+// comment above for why the two cases are opposite: a half-populated set of
+// normals is a strictly correct partial result (the guard is honestly
+// active on the channels measured so far), not an unsafe subset like a
+// half-populated CT map would be.
+#define CONFIG_STORE_SET_I_NORMAL_A_0         (1u << 12)
+#define CONFIG_STORE_SET_I_NORMAL_A_1         (1u << 13)
+#define CONFIG_STORE_SET_I_NORMAL_A_2         (1u << 14)
+
 // True iff every bit in `mask` (some OR of CONFIG_STORE_SET_* above) is set
 // in `rec->fields_set`. Small enough to inline; exists so call sites read as
 // "is X commissioned" rather than repeating the `& / ==` bit-test idiom
@@ -512,16 +523,38 @@ typedef struct {
     // above for why a "no guard reads this" field still needs the gate.
     float    max_expected_power_w;    // W; gated by _SET_MAX_EXPECTED_POWER_W
 
+    // --- COMMISSIONING_UX.md section 3.3: S14 over-current guard (NEW) ------
+    // i_normal_a[ch]: A, the per-channel current measured while that
+    // channel's zone was the only one energized (ROADMAP M12's per-zone
+    // measurement, zones_http.c). Individually fields_set-gated --
+    // CONFIG_STORE_SET_I_NORMAL_A_0/_1/_2, deliberately THREE separate bits
+    // rather than one group bit like CT_CHANNEL_MAP: a half-populated set of
+    // normals is a strictly correct partial result (S14 active on the
+    // channels measured so far, inactive on the rest), unlike a
+    // half-populated CT map (which would be a guard watching a channel
+    // nobody confirmed). 0.0f with the bit clear means "never measured" --
+    // S14 must skip that channel entirely, never treat 0 as a real normal.
+    float    i_normal_a[3];
+    // overcurrent_pct/overcurrent_time_s: NOT fields_set-gated -- both have
+    // real, documented defaults (150%, 30s) and follow the same "0 means
+    // not configured, substitute the default" convention as gain[]/
+    // power_window_s above, not the no-safe-default convention i_normal_a
+    // uses.
+    uint16_t overcurrent_pct;         // %, 0 -> 150 default
+    uint32_t overcurrent_time_s;      // s, 0 -> 30 default
+
     // Reserved, unused, packed as 0xFF (matches the erased-flash background,
-    // same convention as metadata.h's per-slot reserved bytes). ~295 B of
+    // same convention as metadata.h's per-slot reserved bytes). ~277 B of
     // headroom (config_store.c's REC_OFF_RESERVED..REC_OFF_CRC; one byte of
     // the original 300 was carved off the FRONT of this block for
-    // safety_tc_installed, and 4 more for max_expected_power_w above -- see
-    // REC_OFF_SAFETY_TC_INSTALLED / REC_OFF_MAX_EXPECTED_POWER_W in
-    // config_store.c) -- adding a field later is a struct/pack/unpack/
-    // host-test change, not a layout change, same as metadata.h's own
-    // signature/sig_required reservation.
-    uint8_t  reserved[295];
+    // safety_tc_installed, 4 more for max_expected_power_w, and 16 more
+    // (3xF32 i_normal_a + U16 overcurrent_pct + U32-on-wire-but-U16-tagged
+    // overcurrent_time_s) for S14 above -- see REC_OFF_SAFETY_TC_INSTALLED /
+    // REC_OFF_MAX_EXPECTED_POWER_W / REC_OFF_I_NORMAL_A in config_store.c)
+    // -- adding a field later is a struct/pack/unpack/host-test change, not
+    // a layout change, same as metadata.h's own signature/sig_required
+    // reservation.
+    uint8_t  reserved[277];
 } config_store_record_t;
 
 // Compile-time budget check, mirroring bootloader/metadata.c's

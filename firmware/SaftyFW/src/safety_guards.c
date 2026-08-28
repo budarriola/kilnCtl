@@ -29,6 +29,8 @@
 #define TRIP_VERIFY_S_DEFAULT         10.0f   /* S9 */
 #define TC_DISAGREEMENT_C_DEFAULT     200.0f  /* S10 */
 #define TC_DISAGREEMENT_TIME_S_DEFAULT 300.0f /* S10 */
+#define OVERCURRENT_PCT_DEFAULT       150u    /* S14 */
+#define OVERCURRENT_TIME_S_DEFAULT    30.0f   /* S14 */
 
 #define S1_OVER_CEILING_STREAK_TO_TRIP 3u /* ~300ms at safety_core's 100ms tick */
 
@@ -655,6 +657,10 @@ bool safety_guards_tick(safety_guard_state_t *state, const safety_guard_cfg_t *c
         state->s10_disagree_elapsed_s = 0.0f;
         state->s13_stale_elapsed_s = 0.0f;
         state->s13_warn = false;
+        for (int ch = 0; ch < 3; ch++) {
+            state->s14_over_elapsed_s[ch] = 0.0f;
+            state->s14_warn[ch] = false;
+        }
     } else {
         /* --- S2: sustained excess over setpoint --------------------------------
          * CHAMBER_AGREED only -- comparing a shell/exhaust reading against a
@@ -755,6 +761,42 @@ bool safety_guards_tick(safety_guard_state_t *state, const safety_guard_cfg_t *c
         } else {
             state->s13_stale_elapsed_s = 0.0f;
             state->s13_warn = false;
+        }
+
+        /* --- S14: zone current above its measured normal -- WARN only ---------
+         * COMMISSIONING_UX.md section 3.2. Per channel: the channel's own
+         * i_normal_a must actually be measured (i_normal_valid[ch]) -- a
+         * channel that has never been measured is SKIPPED ENTIRELY, no
+         * accumulation, no warn, reports inactive (s14_warn[ch] stays false,
+         * s14_over_elapsed_s[ch] stays 0) -- never treated as "passing",
+         * matching S6a/S6b's DEGRADED_NO_CONTEXT "inactive, not pessimistic,
+         * not optimistic" rule applied per channel instead of per guard.
+         * WARN, never TRIP (SAFETY_MODEL.md section 2's "WARN is the default
+         * for a new guard"; over-current is the breakers' job by design,
+         * section 3/7) -- this guard exists to catch a CT on the wrong jack
+         * or an element/wiring change, not to protect against element
+         * failure. Magnitude is a PERCENTAGE of the channel's own recorded
+         * normal, never an absolute figure and never compared across
+         * channels -- three zones on one kiln can legitimately differ 2x in
+         * draw. */
+        for (int ch = 0; ch < 3; ch++) {
+            bool active = cfg->i_normal_valid[ch] && cfg->i_normal_a[ch] > 0.0f &&
+                          in->amps_valid[ch] && in->relay_commanded_now_for_ct[ch];
+            if (!active) {
+                state->s14_over_elapsed_s[ch] = 0.0f;
+                state->s14_warn[ch] = false;
+                continue;
+            }
+            uint16_t pct = effective_u16(cfg->overcurrent_pct, OVERCURRENT_PCT_DEFAULT);
+            float threshold_a = cfg->i_normal_a[ch] * (float)pct / 100.0f;
+            if (in->amps[ch] > threshold_a) {
+                state->s14_over_elapsed_s[ch] += in->dt_s;
+                float time_th = effective_f(cfg->overcurrent_time_s, OVERCURRENT_TIME_S_DEFAULT);
+                state->s14_warn[ch] = (state->s14_over_elapsed_s[ch] >= time_th);
+            } else {
+                state->s14_over_elapsed_s[ch] = 0.0f;
+                state->s14_warn[ch] = false;
+            }
         }
     }
 

@@ -1,6 +1,7 @@
 #ifndef SAFETY_TRIP_WORDS_H
 #define SAFETY_TRIP_WORDS_H
 
+#include <math.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -76,6 +77,136 @@ static inline const char *safety_trip_words_cause(uint8_t reason)
     case 16: return "Safety processor self-test failed at boot";
     default: return "Unrecognised guard code";
     }
+}
+
+/* CAUSE, WITH NUMBERS -- 2026-08-28 scope change ("all faults... should come
+ * with... what was detected wrong", numbers not a generic sentence). Takes
+ * the trip snapshot fields safety_link_status_t already carries off Frame D
+ * (TRIP_EVENT) and, where THIS guard's deciding number is actually among
+ * them, folds it into the sentence. Falls back to plain
+ * safety_trip_words_cause(reason) -- verbatim, no placeholder appended --
+ * for every guard/field combination this firmware genuinely cannot number:
+ *   S5 (dual count+time threshold, no single magnitude -- SaftyFW's
+ *       safety_guards_deciding_threshold_c() default case), S6a (the
+ *       fault-source list IS its number, see safety_fault_source_words()),
+ *       S7/S8 (boolean conditions), S8-rate (ships disabled, never trips),
+ *       S12 (the number that trips it is the enclosure/cold-junction
+ *       reading, but Frame D's trip_safety_tc_c is the SAFETY thermocouple,
+ *       a different sensor -- SaftyFW's safety_core.c always captures
+ *       input.tc_c regardless of which guard tripped, so this field is
+ *       simply the wrong sensor for S12 and using it would be worse than
+ *       the honest fallback; the true CJ reading at trip time is not on
+ *       the wire at all today), S13 (the elapsed-stale-time number is not
+ *       on the wire, only the threshold it was judged against is, via
+ *       trip_deciding_threshold -- said as "over Ns" rather than invented).
+ * trip_current_a[3] is amps on current-sense channels 1..3 (not
+ * per-relay -- SAFETY_MODEL.md's channel map), trip_context_age_100ms is
+ * hundredths of a second, both "at trip" snapshots, both left at their
+ * caller-supplied sentinel (NAN / 255) when a real TRIP_EVENT has never
+ * been received -- callers must gate on trip_event_ever_received same as
+ * every other trip_* field, this function does not check it itself. Writes
+ * into buf (buf_len bytes, always NUL-terminated); returns buf. */
+static inline const char *safety_trip_words_cause_numbered(uint8_t reason, float trip_safety_tc_c,
+                                                             float trip_deciding_threshold,
+                                                             const float trip_current_a[3],
+                                                             uint8_t trip_context_age_100ms,
+                                                             char *buf, size_t buf_len)
+{
+    if (buf == NULL || buf_len == 0) {
+        return buf;
+    }
+    bool tc_ok = !isnan(trip_safety_tc_c);
+    bool thr_ok = !isnan(trip_deciding_threshold);
+    switch (reason) {
+    case 1: /* S1 overtemp: both numbers are the right sensor/threshold */
+        if (tc_ok && thr_ok) {
+            snprintf(buf, buf_len, "Chamber reached %.1fC, above the %.1fC over-temp limit.",
+                      (double)trip_safety_tc_c, (double)trip_deciding_threshold);
+            return buf;
+        }
+        break;
+    case 2: /* S2 over-setpoint: threshold here is the overshoot MARGIN, not
+             * an absolute setpoint -- the setpoint itself is not on this
+             * frame, so it is deliberately not claimed. */
+        if (tc_ok && thr_ok) {
+            snprintf(buf, buf_len,
+                      "Chamber reached %.1fC, more than %.1fC above setpoint for longer than "
+                      "the over-setpoint window allows.",
+                      (double)trip_safety_tc_c, (double)trip_deciding_threshold);
+            return buf;
+        }
+        break;
+    case 3: /* S3 load stuck on: current-sense channels vs. the present-
+             * current threshold. Which physical channel maps to which zone
+             * is not resolved here (SAFETY_MODEL.md's channel map). */
+        if (trip_current_a != NULL && thr_ok) {
+            snprintf(buf, buf_len,
+                      "Current sense reads %.2fA/%.2fA/%.2fA (ch1/2/3) while the relay was "
+                      "commanded OFF -- above the %.2fA present-current threshold.",
+                      (double)trip_current_a[0], (double)trip_current_a[1],
+                      (double)trip_current_a[2], (double)trip_deciding_threshold);
+            return buf;
+        }
+        break;
+    case 7: /* S6b link dead: the deciding number is how long the link had
+             * been silent, not a temperature -- trip_context_age_100ms. */
+        if (trip_context_age_100ms != 255u) {
+            snprintf(buf, buf_len,
+                      "The safety link had not been heard from for %.1fs when this guard "
+                      "tripped.",
+                      (double)trip_context_age_100ms / 10.0);
+            return buf;
+        }
+        break;
+    case 10: /* S9 contactor welded: same current-sense reading as S3, no
+              * threshold to quote (it is an escalation, not a fresh
+              * crossing). */
+        if (trip_current_a != NULL) {
+            snprintf(buf, buf_len,
+                      "Current sense still reads %.2fA/%.2fA/%.2fA (ch1/2/3) after the "
+                      "contactor was commanded OFF -- may be welded.",
+                      (double)trip_current_a[0], (double)trip_current_a[1],
+                      (double)trip_current_a[2]);
+            return buf;
+        }
+        break;
+    case 12: /* S11 frozen sensor: reading (trip_safety_tc_c) plus the
+              * frozen-window threshold it was judged against. */
+        if (tc_ok && thr_ok) {
+            snprintf(buf, buf_len,
+                      "A safety sensor held at %.1fC without changing for longer than the "
+                      "%.0fs frozen-window threshold.",
+                      (double)trip_safety_tc_c, (double)trip_deciding_threshold);
+            return buf;
+        }
+        break;
+    case 13: /* S12 enclosure temp: see this function's header comment --
+              * trip_safety_tc_c is the wrong sensor for this guard, so only
+              * the threshold (the number that IS right) is quoted, and the
+              * missing reading is said plainly rather than guessed. */
+        if (thr_ok) {
+            snprintf(buf, buf_len,
+                      "Enclosure/cold-junction temperature exceeded its %.1fC limit "
+                      "(this firmware does not currently carry the exact reading at trip).",
+                      (double)trip_deciding_threshold);
+            return buf;
+        }
+        break;
+    case 14: /* S13 borrowed TC stale: threshold (seconds) is on the wire,
+              * the actual elapsed-stale time at trip is not. */
+        if (thr_ok) {
+            snprintf(buf, buf_len,
+                      "A borrowed zone's thermocouple stopped updating for longer than the "
+                      "%.0fs threshold (exact elapsed time at trip not carried on this link).",
+                      (double)trip_deciding_threshold);
+            return buf;
+        }
+        break;
+    default:
+        break;
+    }
+    snprintf(buf, buf_len, "%s", safety_trip_words_cause(reason));
+    return buf;
 }
 
 /* REMEDY: what an operator standing at the kiln should actually do. Written

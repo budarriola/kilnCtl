@@ -132,6 +132,95 @@ void relay_authority_release_mask(uint8_t relay_mask);
  * profile (or an in-progress autotune test), or both. */
 bool relay_authority_manual_blocked_by_owner(uint8_t relay_index);
 
+/* ---- The single shared heat claim (opus reviews, 2026-08-28) ----
+ *
+ * Three subsystems can drive the mains-contactor relays: profile_executor.c,
+ * autotune_engine.c, and zones_http.c's per-zone current sweep. Each already
+ * REFUSES to start while it observes one of the others is active
+ * (zones_current_sweep_is_active(), autotune_engine_is_active_on_zone(),
+ * profile_executor_zone_is_active()) -- but every one of those is a plain
+ * read of another module's state, with no lock spanning the read and the
+ * reader's own commit. check-then-start is atomic on none of them, and they
+ * run on genuinely different tasks (LVGL UI, the httpd worker, the UART
+ * bridge task, and their own control tasks), so a start on one can land in
+ * the window between another's check and its commit: bounded (the losing
+ * side's own watchdog/force-off eventually wins) but not correct-by-
+ * construction -- both sets of relays can be live at once for the length of
+ * that window, and the loser's terminal all-relays-off can drop the
+ * winner's relays for a control tick.
+ *
+ * This is the fix: one mutex-protected (portMUX, see relay_authority.c)
+ * claim that all three test-and-set under, so "is someone else already
+ * heating" and "I am now the one heating" happen as a single atomic step
+ * instead of two reads and a write racing across tasks. It is layered IN
+ * FRONT of everything else in this file -- kiln_io_owner.c's per-command
+ * ERR_OWNED check, relay_authority_claim_mask()'s per-relay ownership tags,
+ * relay_authority_on_blocked()'s safety-fault gate -- none of which this
+ * replaces: those still arbitrate who owns which RELAY once a subsystem is
+ * legitimately running. This claim only answers "may a subsystem legitimately
+ * START running heat at all right now," at the coarser whole-engine-instance
+ * granularity the three subsystems' mutual refusals already operate at.
+ *
+ * Deliberately NOT a single 3-way mutex: profile_executor.c and
+ * autotune_engine.c are legitimately concurrent with each other (a firing on
+ * one zone alongside an autotune run on a different zone,
+ * profile_executor_zone_is_active()'s per-zone arbitration already allows
+ * and this claim must not break) -- only the sweep is mutually exclusive
+ * against BOTH of them, since it is a whole-board commissioning operation
+ * that assumes nothing else is driving any relay. So there are two claim
+ * families sharing one lock: zone-heat claims (PROFILE, AUTOTUNE -- either or
+ * both may hold theirs at once) and the sweep's own exclusive claim (refused
+ * whenever either zone-heat claim is held, and blocks both from being taken
+ * while it holds its own).
+ *
+ * Each subsystem calls _begin() at the point it has already decided, under
+ * its OWN lock (s_exec.lock / s_at.lock), that it is not already running --
+ * so a _begin() call is always a genuine first acquisition, never a
+ * reentrant one, and the matching _end() is safe to call unconditionally
+ * from that subsystem's single centralized "this run is over" cleanup
+ * (release_profile_relay_claim() / force_relays_off() / the sweep task's own
+ * completion) without a separate "did I actually hold it" bookkeeping bit. */
+typedef enum {
+    RELAY_HEAT_ZONE_CLAIM_PROFILE = 0,
+    RELAY_HEAT_ZONE_CLAIM_AUTOTUNE,
+} relay_heat_zone_claimant_t;
+
+/* Claims zone-heat authority for `who`. Fails (returns false) only while the
+ * sweep's exclusive claim is held; profile and autotune never refuse each
+ * other here (see this header's doc comment above -- that arbitration is
+ * per-zone and already handled by profile_executor_zone_is_active()/
+ * autotune_engine_is_active_on_zone()). Call only once state has already been
+ * confirmed (under the caller's own lock) to be a genuine start, not a
+ * reentrant call on an already-running instance -- see this header's doc
+ * comment for why that makes the matching _end() safe to call
+ * unconditionally. */
+bool relay_authority_heat_zone_claim_begin(relay_heat_zone_claimant_t who);
+
+/* Releases `who`'s zone-heat claim. Safe to call even if `who` never held
+ * it (a no-op in that case) -- callers are expected to call this
+ * unconditionally from their single "run is over" cleanup path. */
+void relay_authority_heat_zone_claim_end(relay_heat_zone_claimant_t who);
+
+typedef enum {
+    RELAY_HEAT_SWEEP_CLAIM_OK = 0,
+    RELAY_HEAT_SWEEP_CLAIM_REFUSE_PROFILE, /* a profile currently holds a zone-heat claim */
+    RELAY_HEAT_SWEEP_CLAIM_REFUSE_AUTOTUNE, /* autotune currently holds a zone-heat claim */
+} relay_heat_sweep_claim_result_t;
+
+/* Claims the sweep's exclusive claim. Fails if either zone-heat claim above
+ * is currently held, naming which one so the caller can report the SAME
+ * specific refusal reason (ZONE_SWEEP_REFUSE_PROFILE_RUNNING /
+ * ZONE_SWEEP_REFUSE_AUTOTUNE_RUNNING) its own earlier, non-atomic,
+ * informational check already produces for the common (non-race) case --
+ * this call is the last-moment atomic re-check that actually closes the
+ * race, not a replacement for that earlier check's operator-facing
+ * message. */
+relay_heat_sweep_claim_result_t relay_authority_heat_sweep_claim_begin(void);
+
+/* Releases the sweep's exclusive claim. Safe to call even if the sweep
+ * never held it. */
+void relay_authority_heat_sweep_claim_end(void);
+
 #ifdef __cplusplus
 }
 #endif

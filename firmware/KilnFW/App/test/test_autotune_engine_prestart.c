@@ -158,6 +158,32 @@ void relay_authority_release_mask(uint8_t relay_mask)
     s_release_last_mask = relay_mask;
 }
 
+/* The shared heat claim (relay_authority.h) -- begin_run_locked() now takes
+ * this atomically right after state_is_running() confirms a genuine start,
+ * on top of (not instead of) the early, non-atomic
+ * zones_current_sweep_is_active() check this file already stubs above.
+ * Default succeeds so every existing test's real STEPPING-loop path is
+ * unchanged; s_test_heat_zone_claim_refused lets
+ * test_run_refuses_at_atomic_heat_claim_gate() below prove the LATE gate is
+ * independently load-bearing. */
+static bool s_test_heat_zone_claim_refused = false;
+static int s_heat_zone_claim_begin_calls = 0;
+static int s_heat_zone_claim_end_calls = 0;
+static relay_heat_zone_claimant_t s_last_heat_zone_claimant = RELAY_HEAT_ZONE_CLAIM_PROFILE;
+
+bool relay_authority_heat_zone_claim_begin(relay_heat_zone_claimant_t who)
+{
+    s_heat_zone_claim_begin_calls++;
+    s_last_heat_zone_claimant = who;
+    return !s_test_heat_zone_claim_refused;
+}
+
+void relay_authority_heat_zone_claim_end(relay_heat_zone_claimant_t who)
+{
+    s_heat_zone_claim_end_calls++;
+    s_last_heat_zone_claimant = who;
+}
+
 // Recorded (not a bare no-op) so the global-fault-source clearing tests
 // below can prove BOTH halves of the bug fix: the trip actually asserts the
 // source, and starting a new run actually clears it -- not just "did not
@@ -824,6 +850,67 @@ static void test_run_refuses_while_zone_sweep_is_active(void)
     TEST_CHECK(ok, "control: with no sweep active, the identical setup must succeed");
 }
 
+// The shared heat claim's atomic gate (relay_authority.h) -- proves the LATE
+// gate right before begin_run_locked()'s commit is independently
+// load-bearing, not merely decorative alongside the early
+// zones_current_sweep_is_active() check test_run_refuses_while_zone_sweep_
+// is_active() above already covers. Same real-full-path setup as that
+// test's control case, which is known to reach the actual commit.
+static void test_run_refuses_at_atomic_heat_claim_gate(void)
+{
+    TEST_SECTION("autotune_engine_run() -- the LATE atomic heat-claim gate refuses even when the EARLY "
+                 "zones_current_sweep_is_active() check passed (the race window the claim exists to close)");
+    static MAX31856BusClass bus;
+    static SafetyLinkClass safety;
+    memset(&s_at, 0, sizeof(s_at));
+    memset(&bus, 0, sizeof(bus));
+    memset(&safety, 0, sizeof(safety));
+    bus.initialized = true;
+    s_at.thermo_bus = &bus;
+    s_at.safety = &safety;
+    s_at.lock = xSemaphoreCreateMutex();
+    TEST_CHECK(s_at.lock != NULL, "test setup: lock must be creatable");
+
+    s_stub_max_temp_c = 500.0f;
+    s_stub_ch0_ok = true;
+    s_test_sweep_active = false; /* the EARLY check passes -- this is the race window itself */
+    reset_owner_recorder();
+    s_heat_zone_claim_begin_calls = 0;
+    s_heat_zone_claim_end_calls = 0;
+
+    // RED: force the atomic gate itself to refuse, simulating a sweep that
+    // won the race and claimed exclusivity in the window between the early
+    // check above and this call.
+    s_test_heat_zone_claim_refused = true;
+    char errbuf[96] = {0};
+    bool ok = autotune_engine_run(0, 0.5f, errbuf, sizeof(errbuf));
+
+    TEST_CHECK(!ok, "the atomic gate alone must be able to refuse a run the early check let through");
+    TEST_CHECK(strstr(errbuf, "sweep") != NULL, "the refusal must still name the sweep specifically");
+    TEST_CHECK(s_claim_calls == 0, "relay_authority_claim_mask() (the actual relay ownership grab) "
+                                   "must never be reached when the atomic gate refuses");
+
+    // GREEN: same setup, atomic gate now allows it -- proves the RED result
+    // above was really the gate, not some other stub failing closed.
+    s_test_heat_zone_claim_refused = false;
+    memset(&s_at, 0, sizeof(s_at));
+    s_at.thermo_bus = &bus;
+    s_at.safety = &safety;
+    s_at.lock = xSemaphoreCreateMutex();
+    errbuf[0] = '\0';
+    ok = autotune_engine_run(0, 0.5f, errbuf, sizeof(errbuf));
+
+    TEST_CHECK(ok, "with the atomic gate allowing it, the identical setup must succeed");
+    TEST_CHECK(s_heat_zone_claim_begin_calls == 2, "the gate is attempted exactly once per autotune_engine_run() call");
+    TEST_CHECK(s_last_heat_zone_claimant == RELAY_HEAT_ZONE_CLAIM_AUTOTUNE,
+              "autotune_engine_run() must claim as AUTOTUNE, not PROFILE");
+
+    autotune_engine_abort("test cleanup");
+    TEST_CHECK(s_heat_zone_claim_end_calls >= 1, "abort must release the heat claim it just took");
+
+    s_test_heat_zone_claim_refused = false;
+}
+
 void run_test_autotune_engine_prestart(void)
 {
     test_run_refuses_before_start();
@@ -860,6 +947,7 @@ void run_test_autotune_engine_prestart(void)
     test_autotune_relay_switching_is_counted();
 
     test_run_refuses_while_zone_sweep_is_active();
+    test_run_refuses_at_atomic_heat_claim_gate();
 }
 
 int main(void)

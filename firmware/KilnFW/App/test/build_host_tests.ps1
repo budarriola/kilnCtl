@@ -338,6 +338,50 @@ if ($LASTEXITCODE -ne 0) {
 & $exe11
 if ($LASTEXITCODE -ne 0) { $script:failedExes += $exe11 }
 
+# ---- test_safety_trip_words.c: its own TWELFTH, separate executable ------
+# Header-only (safety_trip_words.h is static inline, no .c) -- see the test
+# file's own header comment. No shared-symbol collision risk, but every
+# other single-purpose test here gets its own exe, so this follows suit.
+$exe12 = Join-Path $outDir "kilnctl_host_tests_safety_trip_words.exe"
+$stwObjDir = Join-Path $outDir "stw"
+New-Item -ItemType Directory -Force -Path $stwObjDir | Out-Null
+$cmd12 = "call `"$vcvars`" x64 >nul && cl /nologo /W3 /EHsc /std:c11 /I`"$stubDir`" /I`"$commonInc`" " +
+        "/Fo:`"$stwObjDir\\`" /Fe:`"$exe12`" `"$(Join-Path $testDir 'test_safety_trip_words.c')`""
+
+cmd.exe /c $cmd12
+if ($LASTEXITCODE -ne 0) {
+    throw "safety_trip_words build failed"
+}
+
+& $exe12
+if ($LASTEXITCODE -ne 0) { $script:failedExes += $exe12 }
+
+# ---- test_safety_trip_decision.c: its own THIRTEENTH, separate executable
+# 2026-08-28 opus review: safety_apply_trip_event()'s trip_fault_sources_
+# valid logic (safety_link.c) had no automated test because no host harness
+# links safety_link.c -- it is ~3900 lines pulling in driver/gpio.h,
+# driver/uart.h, esp_heap_caps.h, a dozen kilnlink/* codecs, and
+# safety_cfg_store.h. The decision itself is now factored into
+# safety_trip_decision.c, a pure, dependency-free (stdbool/stdint only)
+# translation unit safety_link.c calls into -- links the real .c (not a
+# stub) since there is nothing in it to stub. Own executable per this file's
+# usual per-purpose convention, though the true reason here is simpler: it
+# needs no stub headers, unlike every test file above it.
+$exe13 = Join-Path $outDir "kilnctl_host_tests_safety_trip_decision.exe"
+$stdObjDir = Join-Path $outDir "std"
+New-Item -ItemType Directory -Force -Path $stdObjDir | Out-Null
+$cmd13 = "call `"$vcvars`" x64 >nul && cl /nologo /W3 /EHsc /std:c11 /I`"$driversDir`" " +
+        "/Fo:`"$stdObjDir\\`" /Fe:`"$exe13`" " +
+        "`"$(Join-Path $testDir 'test_safety_trip_decision.c')`" `"$(Join-Path $driversDir 'safety_trip_decision.c')`""
+
+cmd.exe /c $cmd13
+if ($LASTEXITCODE -ne 0) {
+    throw "safety_trip_decision build failed"
+}
+
+& $exe13
+if ($LASTEXITCODE -ne 0) { $script:failedExes += $exe13 }
+
 if ($script:failedExes.Count -gt 0) {
     Write-Host ""
     Write-Host "FAILED executables ($($script:failedExes.Count)):"

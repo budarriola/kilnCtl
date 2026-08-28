@@ -589,6 +589,16 @@ static void force_all_relays_off(void)
 static void release_profile_relay_claim(void)
 {
     relay_authority_release_mask(s_exec.claimed_relay_mask);
+    /* The shared heat claim (relay_authority.h) taken atomically right
+     * before this run's s_exec.state was set to RUNNING -- see
+     * profile_executor_run()'s own comment at that call site. Safe to call
+     * unconditionally: relay_authority_heat_zone_claim_end() is a no-op if
+     * this run never actually held it (refused before reaching that point).
+     * Every path that leaves RUNNING/PAUSED for good funnels through this
+     * function except profile_executor_halt(), which releases it directly
+     * alongside its own relay_authority_release_mask() call for the same
+     * reason it doesn't call this whole function (see halt()'s comment). */
+    relay_authority_heat_zone_claim_end(RELAY_HEAT_ZONE_CLAIM_PROFILE);
 }
 
 /* ---- TODO relay/IO segments (owner's request, profiles_http.h's
@@ -2903,6 +2913,29 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
     s_exec.history_count = 0;
     s_exec.history_head = 0;
 
+    /* The atomic gate (relay_authority.h's heat-claim doc comment): this
+     * function's own zones_current_sweep_is_active() check far above is a
+     * plain, non-atomic read of zones_http.c's state, made before s_exec.lock
+     * was even taken -- a sweep can start in the window between that read
+     * and this commit. This call is the last possible moment before the
+     * commit, s_exec.lock has been held continuously since the "already
+     * running"/"faulted" checks confirmed this is a genuine start (not a
+     * reentrant call on an already-RUNNING instance -- see
+     * relay_heat_zone_claimant_t's doc comment for why that ordering is what
+     * makes release_profile_relay_claim()'s unconditional _end() call safe),
+     * and it is a single mutex-protected test-and-set against
+     * zones_http.c's/autotune_engine.c's matching gates. Refused with the
+     * SAME message the early check already reports for the common
+     * (non-race) case. */
+    if (!relay_authority_heat_zone_claim_begin(RELAY_HEAT_ZONE_CLAIM_PROFILE)) {
+        xSemaphoreGive(s_exec.lock);
+        if (err_msg) {
+            snprintf(err_msg, err_cap,
+                     "a zone current sweep is running -- it cannot run at the same time as a firing");
+        }
+        return false;
+    }
+
     /* TODO.md section 0's ownership decision, closing the "manual relay
      * control is not blocked during a firing" gap: claim every relay this
      * run touches so /api/relay and the UART SET_RELAY* commands refuse a
@@ -2945,6 +2978,17 @@ void profile_executor_halt(void)
     /* Hand every relay this run ever claimed back to unowned -- a halted run
      * owns nothing, and the next run (or a manual command) starts clean. */
     relay_authority_release_mask(s_exec.claimed_relay_mask);
+    /* ...and give back the shared heat claim too (relay_authority.h) -- a
+     * halt from RUNNING or PAUSED must free the whole-board sweep to start,
+     * not just this run's relays. Not routed through release_profile_relay_
+     * claim() (unlike every OTHER terminal transition) because that
+     * function's single relay_authority_release_mask() call is this one's
+     * near-duplicate, not something halt() can share without also pulling
+     * in its own separate lock-held/state-transition assumptions -- calling
+     * both here inline keeps halt() self-contained the way it already is.
+     * Safe unconditionally, same no-op-if-never-held reasoning as
+     * release_profile_relay_claim()'s call. */
+    relay_authority_heat_zone_claim_end(RELAY_HEAT_ZONE_CLAIM_PROFILE);
     /* Captured BEFORE the fault fields are cleared below: if this halt is the
      * operator acknowledging a trip, the reason for that trip is the most
      * useful thing the breadcrumb can carry, and clearing it first would

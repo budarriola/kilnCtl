@@ -608,9 +608,19 @@ static void refresh_cb(lv_timer_t *timer)
         snprintf(td_buf, sizeof(td_buf), "Reason: %s", safety_trip_words_short(ds.trip_reason));
         lv_label_set_text(s_td_reason_label, td_buf);
 
-        char td_cause_buf[112];
+        /* 2026-08-28: numbered cause (safety_trip_words_cause_numbered()) --
+         * 256, not 112: the longest composed sentence this can produce is
+         * ~150 bytes and this label is not on the tight no-scroll row grid
+         * the stat rows are (it wraps within its own container, same as
+         * s_td_remedy_label below), so headroom is cheap and correctness
+         * against -Werror=format-truncation is not. */
+        char td_cause_num_buf[200];
+        char td_cause_buf[256];
         snprintf(td_cause_buf, sizeof(td_cause_buf), "Detected: %s",
-                 safety_trip_words_cause(ds.trip_reason));
+                 safety_trip_words_cause_numbered(ds.trip_reason, ds.trip_safety_tc_c,
+                                                   ds.trip_deciding_threshold,
+                                                   ds.trip_current_a, ds.trip_context_age_100ms,
+                                                   td_cause_num_buf, sizeof(td_cause_num_buf)));
         lv_label_set_text(s_td_cause_label, td_cause_buf);
 
         /* 144, not 112: the longest safety_fault_source_remedy_one() string
@@ -745,12 +755,20 @@ static void refresh_cb(lv_timer_t *timer)
         }
         seen[ch] = true;
 
-        char fault_buf[80];
-        static const struct { uint8_t mask; const char *name; } bits[] = {
-            { MAX31856_MASK_OPEN,    "OPEN" },   { MAX31856_MASK_OVUV,   "OVUV" },
-            { MAX31856_MASK_TCLOW,   "TCLOW" },  { MAX31856_MASK_TCHIGH, "TCHIGH" },
-            { MAX31856_MASK_CJLOW,   "CJLOW" },  { MAX31856_MASK_CJHIGH, "CJHIGH" },
-            { MAX31856_FAULT_TCRANGE, "TCRANGE" }, { MAX31856_FAULT_CJRANGE, "CJRANGE" },
+        /* 2026-08-28: this used to print raw abbreviations (OPEN, TCLOW...)
+         * -- a code, not an explanation, exactly the offender ROADMAP.md
+         * M13 calls out ("what was detected wrong", not a bare flag). Words
+         * match main_page.html's FAULT_BITS table verbatim (same reasoning
+         * as safety_trip_words.h's own header comment: two independently
+         * maintained copies, C and JS, kept in sync by hand since this
+         * firmware cannot #include a C header into a web page) plus a
+         * remedy line the web page did not have either. */
+        char fault_buf[160];
+        static const struct { uint8_t mask; const char *word; } bits[] = {
+            { MAX31856_MASK_OPEN,     "open circuit" },   { MAX31856_MASK_OVUV,   "over/under voltage" },
+            { MAX31856_MASK_TCLOW,    "TC low" },         { MAX31856_MASK_TCHIGH, "TC high" },
+            { MAX31856_MASK_CJLOW,    "CJ low" },         { MAX31856_MASK_CJHIGH, "CJ high" },
+            { MAX31856_FAULT_TCRANGE, "TC out of range" }, { MAX31856_FAULT_CJRANGE, "CJ out of range" },
         };
         uint8_t fs = readings[i].fault_status;
         if (fs == 0) {
@@ -761,7 +779,7 @@ static void refresh_cb(lv_timer_t *timer)
             for (size_t b = 0; b < sizeof(bits) / sizeof(bits[0]); b++) {
                 if (fs & bits[b].mask) {
                     size_t used = strlen(fault_buf);
-                    snprintf(fault_buf + used, sizeof(fault_buf) - used, "%s%s", first ? "" : ", ", bits[b].name);
+                    snprintf(fault_buf + used, sizeof(fault_buf) - used, "%s%s", first ? "" : ", ", bits[b].word);
                     first = false;
                 }
             }
@@ -771,10 +789,27 @@ static void refresh_cb(lv_timer_t *timer)
         lv_obj_set_style_text_color(s_tf_fault_label[ch],
                                      faulted ? UI_THEME_ACCENT_5 : UI_THEME_COLOR_TEXT_PRIMARY, 0);
 
-        char status_buf[48];
-        snprintf(status_buf, sizeof(status_buf), "FAULT pin: %s   SPI: %s",
-                 readings[i].fault_pin_asserted ? "yes" : "no",
-                 readings[i].spi_failed ? "FAILED" : "ok");
+        char status_buf[160];
+        if (readings[i].spi_failed) {
+            /* Not a reading at all -- the SPI transaction itself failed, so
+             * this is NOT the same thing as a decoded SR fault bit above
+             * (ABSENT vs FAULTED, per this pass's own instructions: a
+             * channel that never reported is not a healthy channel, and
+             * must not be worded like one that reported and found a
+             * problem). */
+            snprintf(status_buf, sizeof(status_buf),
+                     "FAULT pin: %s   SPI: FAILED -- check wiring/power to this MAX31856, not the "
+                     "thermocouple itself.",
+                     readings[i].fault_pin_asserted ? "yes" : "no");
+        } else if (fs != 0) {
+            snprintf(status_buf, sizeof(status_buf),
+                     "FAULT pin: %s   SPI: ok -- check the thermocouple and its wiring for this "
+                     "channel, then the fault should clear on its own.",
+                     readings[i].fault_pin_asserted ? "yes" : "no");
+        } else {
+            snprintf(status_buf, sizeof(status_buf), "FAULT pin: %s   SPI: ok",
+                     readings[i].fault_pin_asserted ? "yes" : "no");
+        }
         lv_label_set_text(s_tf_status_label[ch], status_buf);
         lv_obj_set_style_text_color(s_tf_status_label[ch],
                                      readings[i].spi_failed ? UI_THEME_ACCENT_5 : UI_THEME_COLOR_TEXT_SECONDARY, 0);
