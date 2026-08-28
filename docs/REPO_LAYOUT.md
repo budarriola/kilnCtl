@@ -1,6 +1,6 @@
 # Repository Layout — hardware / software split
 
-> **Status:** executed 2026-08-16, two items outstanding · **Last reviewed:** 2026-08-19
+> **Status:** executed 2026-08-16, one item outstanding · **Last reviewed:** 2026-08-28
 > **Keep this file current.** Tick the checklist as steps complete, and record
 > what actually happened rather than what was planned — the two differed in
 > several places and the differences are the useful part.
@@ -9,13 +9,23 @@ This was a proposal; the move has now been made. The tree is split into
 `hardware/`, `firmware/`, `tools/` and `docs/`. What remains is recorded in the
 completion checklist at the bottom.
 
-**Still outstanding:** `mykicadMcp/` and `pdfMcp/` are at the repo root rather
-than under `tools/`. **Audit 2026-08-19:** pdfMcp is actively blocked by two
-running `pdf-mcp.exe` processes; mykicadMcp has no active processes but is a
-git submodule (requires `git mv` + `.gitmodules` update, not a plain directory
-move). Both moves additionally blocked by `.mcp.json` having hardcoded relative
-paths that must be updated: `mykicadMcp/.venv/Scripts/python.exe` and
-`pdfMcp/.venv/Scripts/pdf-mcp.exe` → their new `tools/…` locations.
+**Still outstanding:** `mykicadMcp/` is at the repo root rather than under
+`tools/`. It has no active processes of its own but is a git submodule
+(requires `git mv` + `.gitmodules` update, not a plain directory move) backing
+the running `kicad` MCP server, and `.claude/settings.json`'s permission
+allowlist has a dozen-plus entries hardcoding its current path — needs its own
+dedicated pass (stop the server, remount the submodule, walk the allowlist
+entries one by one), not a bulk edit alongside anything else.
+
+**`pdfMcp/` moved 2026-08-28.** Its own running `pdf-mcp.exe` process (the
+same class of blocker documented below) meant a plain rename failed exactly
+as `mykicadMcp/`'s would — `tools/pdfMcp/` is a COPY, not a move, made while
+the old process kept running against the original `pdfMcp/` at the repo root.
+`.mcp.json`'s `pdf-mcp` entry now points at
+`tools/pdfMcp/.venv/Scripts/pdf-mcp.exe`; a fresh session picks that up, the
+old process exits with the session that had it open, and the stale root-level
+`pdfMcp/` (untracked, gitignored, safe to delete once nothing holds it open)
+can be removed then.
 
 ### What the move taught that the plan did not anticipate
 
@@ -91,13 +101,13 @@ kilnCtl/
 |  |- SaftyFW/                    <- RP2040 safety processor
 |  \- UnitTestFw/                 <- from UnitTest/UnitTestFw/
 |- tools/
-|  \- PcTools/                    <- was KilnFW/pc_tools/ - GUI + MCP for BOTH processors
+|  |- PcTools/                    <- was KilnFW/pc_tools/ - GUI + MCP for BOTH processors
+|  \- pdfMcp/                     <- moved 2026-08-28; a copy, see the note above
 |- docs/                          <- system-level, spans both halves
 |  |- SYSTEM_ARCHITECTURE.md      <- TODO
 |  |- SAFETY_CASE.md              <- TODO
 |  \- REPO_LAYOUT.md              <- this file
 |- mykicadMcp/                    <- submodule, still to move under tools/
-|- pdfMcp/                        <- local-only, still to move under tools/
 |- CLAUDE.md
 |- ROADMAP.md
 \- README.md                      <- TODO: there is still no root README
@@ -194,9 +204,10 @@ Anything that derives paths from `__file__` or `${KIPRJMOD}` — the `PcTools`
 modules and the KiCad library tables — is independent of the working directory
 by construction. That was worth doing for its own sake and it pays off here.
 
-The outstanding `mykicadMcp/` and `pdfMcp/` move is unaffected and still worth
-finishing: `.mcp.json` refers to both by root-relative path, so the move is a
-two-line edit there once the directories can be renamed.
+The outstanding `mykicadMcp/` move is unaffected and still worth finishing:
+`.mcp.json` refers to it by root-relative path, so the move is a one-line
+edit there once the submodule can be remounted at the new path (`pdfMcp/`'s
+own entry was updated the same way when it moved).
 
 ---
 
@@ -394,10 +405,13 @@ model paths. `.gitignore` moved into commit 1 for the reason given above.
 - [x] `mcp_server._kiln_fw_root()` and `pinout_reference.HARDWARE_MD_PATH`, which
       both derived paths from `__file__` and silently pointed at `tools/`
 - [x] 3D model paths in 17 `.kicad_mod` files repointed
-- [ ] `mykicadMcp/` and `pdfMcp/` moved under `tools/` — **blocked** (2026-08-19):
-      pdfMcp held by active pdf-mcp.exe processes; mykicadMcp is a submodule
-      (requires `git mv` + `.gitmodules` sync); both need `.mcp.json` update.
-      See the top of this file for full details
+- [x] `pdfMcp/` moved under `tools/` — 2026-08-28, as a copy (its own running
+      process blocked a rename the same way `mykicadMcp/`'s does); `.mcp.json`
+      updated. Old root-level copy cleans up on the next session restart
+- [ ] `mykicadMcp/` moved under `tools/` — **blocked**: a live submodule
+      (requires `git mv` + `.gitmodules` sync) backing the running `kicad` MCP
+      server, plus a dozen-plus `.claude/settings.json` allowlist entries
+      hardcoding its current path. See the top of this file for full details
 
 **Working from the repository root** (see the section above)
 - [ ] `kilnCtl.code-workspace` written, or a root `.vscode/` chosen instead

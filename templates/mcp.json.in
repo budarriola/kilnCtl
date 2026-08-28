@@ -5,7 +5,7 @@
       "url": "http://127.0.0.1:8766/"
     },
     "pdf-mcp": {
-      "command": "pdfMcp/.venv/Scripts/pdf-mcp.exe"
+      "command": "tools/pdfMcp/.venv/Scripts/pdf-mcp.exe"
     },
     "saleae": {
       "type": "http",

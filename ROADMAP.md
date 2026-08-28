@@ -63,7 +63,7 @@ What is still genuinely open is short:
 | Size | Item | Where |
 |---|---|---|
 | L | **The HTTP reset is not a heap failure** — proven, not argued. Remaining candidates are lwIP or `esp_http_server`'s accept/select loop under `max_open_sockets=13`, which needs a different instrumentation surface | M10 |
-| M | `mykicadMcp/` and `pdfMcp/` moved under `tools/` | M7 |
+| M | `mykicadMcp/` moved under `tools/` — own dedicated pass, live submodule + settings.json allowlist | M7 |
 | L | **HTTP connection resets under concurrency.** TCP-layer instrumentation built and live; 188 requests across varied burst sizes reproduced nothing (rate appears lower than the original 9/80 measurement, unconfirmed why). Still unreproduced under instrumentation, not root-caused, not closed — an absence of failure is not a fix, see M10 for the honest accounting | M10 |
 | L | **Every fault says what was detected and what to do** — a standing rule, not a closing milestone. S6a was the example: the cause was measured and held on the ESP and simply never shown next to the trip | M13 |
 | S | Thermocouple maximum inferred from thermocouple type rather than entered — `TC_MAX_C_BY_TYPE` exists but only warns on contradiction, doesn't set the value | M12 |
@@ -224,7 +224,7 @@ now a short list, which is the point:
 - Diagnose the HTTP concurrency reset above — it has a reproducer and two
   ruled-out mechanisms, so the next step is instrumenting the failing
   allocation, not more black-box testing.
-- `mykicadMcp/` and `pdfMcp/` still need moving under `tools/` (M7).
+- `mykicadMcp/` still needs moving under `tools/` (M7) — `pdfMcp/` moved 2026-08-28.
 - A guard that every `src/**.c` is in its CMakeLists or explicitly excluded.
   `tick_timing.c` was added to the host-test list and not to
   `SaftyFW/CMakeLists.txt` on 2026-08-28: the host suite compiled it happily
@@ -575,17 +575,20 @@ Owned by [`docs/REPO_LAYOUT.md`](docs/REPO_LAYOUT.md). Tree split into
 `hardware/`/`firmware/`/`tools/`/`docs/`, library tables and submodule paths
 fixed, fresh-clone `mainBoard` open confirmed 2026-08-19.
 
-- [ ] `mykicadMcp/` and `pdfMcp/` moved under `tools/` — investigated
-      2026-08-28, deferred as riskier than it looks: `mykicadMcp` is a live git
-      submodule backing the running `kicad` MCP server, and
-      `.claude/settings.json`'s permission allowlist has a dozen-plus entries
-      hardcoding absolute paths through `mykicadMcp\...`, accumulated over many
-      sessions. A bulk path edit there risks silently narrowing or widening
-      what a future session is allowed to run. `pdfMcp` alone is safe to move
-      any time — it is untracked/gitignored, no submodule or allowlist risk.
-      Do the `mykicadMcp` half as its own dedicated pass: stop the server
-      first, remount the submodule properly, and go through the allowlist
-      entries one by one rather than a bulk edit
+- [x] `pdfMcp/` moved under `tools/` — 2026-08-28. Its own running `pdf-mcp.exe`
+      process blocked a plain rename the same way `mykicadMcp`'s would, so
+      `tools/pdfMcp/` is a copy, not a move; `.mcp.json` updated to the new
+      path. The stale root-level copy cleans up on the next session restart,
+      once nothing holds it open
+- [ ] `mykicadMcp/` moved under `tools/` — investigated 2026-08-28, deferred as
+      riskier than it looks: a live git submodule backing the running `kicad`
+      MCP server, and `.claude/settings.json`'s permission allowlist has a
+      dozen-plus entries hardcoding absolute paths through `mykicadMcp\...`,
+      accumulated over many sessions. A bulk path edit there risks silently
+      narrowing or widening what a future session is allowed to run. Do this
+      as its own dedicated pass: stop the server first, remount the submodule
+      properly, and go through the allowlist entries one by one rather than a
+      bulk edit
 - [ ] `hardware/UnitTestFixture` KiCad project still unopened (the other three
       projects were confirmed clean 2026-08-16)
 

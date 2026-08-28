@@ -65,9 +65,14 @@ tools/      PcTools (GUI + MCP for BOTH processors)
 docs/       System-level documents spanning both halves
 ```
 
-`mykicadMcp/` and `pdfMcp/` are still at the repo root: both had running MCP
-server processes holding the directories open when the move was done, and they
-belong under `tools/`. Paths in this file reflect where things are **now**.
+`mykicadMcp/` is still at the repo root: it's a live git submodule backing the
+running `kicad` MCP server and needs its own dedicated pass (stop the server,
+remount the submodule, walk `.claude/settings.json`'s allowlist entries one by
+one) rather than a bulk move. `pdfMcp/` moved to `tools/pdfMcp/` 2026-08-28 —
+its own running server process couldn't be moved out from under itself
+mid-session, so the directory was copied rather than renamed; the stale
+root-level copy is cleaned up on the next session restart, once that old
+process exits. Paths in this file reflect where things are **now**.
 
 All main-board KiCad project files live under **hardware/mainBoard/** (paths below are relative to that
 directory unless noted). A second, independent board — the 5-channel thermocouple daughterboard —
