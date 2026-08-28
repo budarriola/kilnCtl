@@ -1,6 +1,6 @@
 # kilnCtl Roadmap — both processors
 
-> **Status:** planning · **Last reviewed:** 2026-08-27
+> **Status:** planning · **Last reviewed:** 2026-08-28
 > **Start here:** the [What is actually left](#what-is-actually-left) section
 > immediately below is the short answer; the milestones are the detail.
 > **Keep this file current.** This is the top-level dispatch board: the place to
@@ -76,7 +76,30 @@ Four facts set the order. Everything else can be shuffled.
 
 The milestones below are the detail. This is the honest short answer, because
 after M0 cleared, "what remains" stopped being a code question and became
-mostly a hardware-and-decisions question. Reviewed 2026-08-24.
+mostly a hardware-and-decisions question. Reviewed 2026-08-28.
+
+**The bench changed on 2026-08-28 and several long-standing "theoretical"
+items became live.** The heating elements are now PHYSICALLY CONNECTED. Every
+statement anywhere in this repo that reasons from "relays may be activated but
+nothing will get warm" is now false, and that assumption is load-bearing in
+more places than it looks.
+
+Two consequences that need to be read together:
+
+- **The fixture is limited to 80 °C, and that is a property of the FIXTURE,
+  not of the kiln.** It is currently enforced by `max_temp_c = 80` on all
+  three zones (set live over `/api/zones`, previous config saved). This is a
+  TEST THRESHOLD and must come out before a real kiln — `SaftyFW/TODO.md`
+  phase 9 already carries "confirm no test threshold was left in place", and
+  this is now a concrete instance of it, not a hypothetical.
+- **Only ONE processor is enforcing that limit.** The safety processor's
+  `abs_max_temp_c` reads `set: true, value: 0`, and 0 on that field means
+  *never trip*. So the independent overtemperature guard is not armed, and the
+  ceiling is enforced by the same processor that commands the heat. Note the
+  reporting trap that hid this: `/api/readiness` says "all 58 safety
+  parameters have values", which counts a zero as a value — the field next to
+  it, `commissioned`, says `false`. Setting a Pico-side ceiling is offered and
+  awaiting the owner's number.
 
 **Blocked on you, and nothing else can answer them.** These are not research
 tasks — they are facts about your kiln and your bench that the code has to be
@@ -128,18 +151,26 @@ waiting, not unwritten:
 **Genuinely still software, and doable without you or the fixture.** This is
 now a short list, which is the point:
 
-- Re-read the task stacks after a real firing, then reclaim DRAM from the four
-  with wide margin (M10).
-- Audit `rules_task`'s callees for flash writes, so its stack can move to
-  PSRAM and give back 1024 bytes of internal DRAM (M10).
-- Run the guard scripts automatically instead of by hand (M10).
+- **M11's remaining items** — relay/IO profile segments, deleting the rules
+  engine, relay names, and the LCD consolidation. This is now the bulk of the
+  open software work.
 - Diagnose the HTTP concurrency reset above — it has a reproducer and two
   ruled-out mechanisms, so the next step is instrumenting the failing
   allocation, not more black-box testing.
-- `kilnsim/benchproto_codec.py` duplicates kilnlink's CRC-16/CCITT-FALSE and
-  fails `check_no_duplicate_crc.ps1` — share the implementation or justify the
-  port on the allowlist, the way `protocol.py` already is.
 - `mykicadMcp/` and `pdfMcp/` still need moving under `tools/` (M7).
+- A guard that every `src/**.c` is in its CMakeLists or explicitly excluded.
+  `tick_timing.c` was added to the host-test list and not to
+  `SaftyFW/CMakeLists.txt` on 2026-08-28: the host suite compiled it happily
+  and the target link failed on it. Host tests cannot see this class of
+  mistake, and it will recur.
+
+**Closed 2026-08-27/28, no longer open:** the task stacks were re-read after a
+real firing and 4 kB of internal DRAM reclaimed; `rules_task`'s callees were
+audited (nothing writes flash — the real finding was a cache-disabling *read*
+via `dashboard_get_status()`) and its stack moved to PSRAM; the guard scripts
+now run from `tools/run_all_checks.ps1` and the `run_repo_checks` MCP tool;
+and `kilnsim/benchproto_codec.py`'s duplicate CRC is shared through
+`tools/PcTools/src/kilnctrl/crc16.py`.
 
 **What is done and should not be reopened:** the link itself, the wire
 contract and its two independent version numbers, the PC-link acknowledgement
@@ -642,6 +673,69 @@ hardware-trip rows, which is why it earns a milestone here.
 
 ---
 
+## M11 — The UI the owner actually asked for · *opened 2026-08-28*
+
+Owned by [`firmware/KilnFW/TODO.md`](firmware/KilnFW/TODO.md) and
+[`firmware/KilnFW/docs/UI_PLAN.md`](firmware/KilnFW/docs/UI_PLAN.md). A batch of
+direct requests from the repository owner, recorded here because several of
+them change data structures and one of them deletes a subsystem — this is not
+cosmetic work and should not be filed as such.
+
+The through-line: **stop making the operator repeat themselves, and stop
+spreading one subject across several pages.**
+
+- [x] Manual relay-control web page removed; the diagnostics Danger Zone is
+      the sanctioned hand-control. `POST /api/relay` went with it — grep found
+      the page was its only caller, and both the LCD and the Danger Zone call
+      `dashboard_set_relay()` in-process, so the shared ownership/safety gate
+      is untouched
+- [x] Board health and Thermocouple faults folded into `/diagnostics`; both
+      standalone routes deleted. Board health turned out to be a byte-for-byte
+      duplicate of a card already there; the thermocouple-fault content was
+      entirely unique and was carried over whole, including the
+      ABSENT-vs-FAULTED distinction that is the entire point of that page
+- [x] Safety timings / Safety processor / Safety commissioning are now an
+      expanding nav group, not three flat entries and not a landing page
+- [x] Firing profiles is the first menu item
+- [x] Shared **safety timing profiles**: the nine per-zone timing fields moved
+      into named profiles that zones point at, so identical zones are
+      configured once. `ZONES_CFG_VERSION` 8→9, lossless migration that
+      de-duplicates identical value sets into one shared profile
+- [ ] **Relay/IO segments in firing profiles**, blocking or non-blocking, with
+      a per-segment choice of whether the relay is left in its last state at
+      run end. `PROFILE_VERSION` 2→3
+- [ ] **Delete the rules engine** once segments land — `rules_http.c`,
+      `rules_task.c`, `rules_page.html` and their tests. Sequenced deliberately
+      AFTER segments so there is never a window with no way to drive a non-zone
+      relay. Note what goes with it: `rules_task` has its own watchdog that
+      force-releases and force-offs its relays on a stale tick, and that
+      protection has to be replaced, not merely dropped
+- [ ] Names for relays not assigned to a zone
+- [ ] LCD: temperature page stops offering a manual toggle for zone-assigned
+      relays (visible, not hidden — removing the control, not the reading),
+      keeps it for non-zone relays
+- [ ] LCD: safety-processor, board-health and thermocouple-fault pages folded
+      into the LCD diagnostics page and removed; kiln setup, thermocouple types
+      and kiln config pages removed; profiles moved to the top-left of the main
+      menu and the whole menu scaled to one page
+
+**The constraint that shapes most of this**: `zones_cfg_t` is 500 bytes
+against a hard 512-byte `ZONES_CONFIG_BLOB_MAX_SIZE`, and the timing-profile
+work spent the slack getting there (it had to reorder `zone_cfg_t` to kill
+alignment padding and cut the profile-name length to 7). Anything that wants
+to persist more per-zone or per-relay state now has to find the bytes or take
+its own NVS key. That cap is also `kiln_cfg_store.c`'s buffer size, so it is
+not a free knob.
+
+**And the hazard every item here shares**: these structs are persisted, and
+two of them embed arrays by value (`zones_cfg_t.zones[]`,
+`profile_t.segments[]`), so adding one field to an element displaces every
+element after the first. Each migration needs a FROZEN snapshot struct of the
+old layout and a field-by-field walk. `profiles_http.c` has already shipped
+the version of this that returns `sizeof` the *current* struct for the *old*
+version — it rejected every profile on the owner's board and marked them
+unused, and only a hardware flash caught it.
+
 ## M10 — Instrumentation: make the board tell you when it is wrong
 
 Not a feature milestone. This exists because four separate defects in this
@@ -748,10 +842,16 @@ Owned by [`firmware/KilnFW/TODO.md`](firmware/KilnFW/TODO.md) §§12–13.
       block), flagged unconfirmed because it rests on two numbers being close.
       Matters because a browser issues several parallel requests per page,
       which is exactly how the original "page says loading forever" presents
-- [ ] **Wire the guard scripts into something that runs them.** All of
-      `tools/check_*.ps1` and `firmware/*/tools/check_*.ps1` are standalone and
-      manual today. Every one of them has been proven able to fail, which is
-      the hard part; being run automatically is the easy part nobody has done
+- [x] **Wire the guard scripts into something that runs them.** Done
+      2026-08-27: `tools/run_all_checks.ps1`, plus a `run_repo_checks` tool on
+      both MCP servers. Discovery is by glob rather than a list, because a list
+      that falls behind is this repository's single most repeated defect; the
+      floor below which it refuses to report success exists because the
+      opposite trap — a glob matching nothing and reporting green — looks
+      exactly like a pass. Its first run found 24 scripts where the repo has
+      12, because `.claude/worktrees/` holds abandoned full-tree copies, and
+      found `check_link_impl_isolation.ps1` red on twelve false positives plus
+      one real hit. Twelve checks, all green
 
 **The rule this milestone is really about:** every check added here was made to
 fail on purpose before being trusted. That caught two checks that would

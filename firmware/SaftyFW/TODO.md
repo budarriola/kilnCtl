@@ -21,6 +21,36 @@ throughout.
 
 ---
 
+## 2026-08-28 -- the elements are connected, and S1 is not armed
+
+**THE KILN'S HEATING ELEMENTS ARE NOW PHYSICALLY CONNECTED to the main board.**
+This processor's guards stopped being a bench exercise today.
+
+**S1 is disabled on the live board.** `abs_max_temp_c` reads
+`set: true, value: 0` and 0 there means never trip, so the only temperature
+ceiling in force is `KilnFW`'s guard 5 -- running on the processor that
+commands the heat, which is the arrangement this whole firmware exists to not
+depend on. `commissioned` reports `false`. Note the reporting trap that hid
+this from the coordinator for several hours: `KilnFW`'s `/api/readiness` says
+"all 58 safety parameters have values", and a zero IS a value. Setting a
+Pico-side ceiling (90 C was proposed, deliberately above the fixture's 80 C so
+the primary acts first) is offered and awaiting the owner's number.
+
+**The 80 C fixture cap is a TEST THRESHOLD.** Phase 9's "confirm no test
+threshold was left in place" now has a concrete instance to check: `max_temp_c`
+= 80 on all three KilnFW zones, and whatever `abs_max_temp_c` ends up as here.
+Both are properties of the bench fixture, not of any kiln.
+
+**Consequence of today's S9 change, restated because the bench changed under
+it:** S9's unclearable `trip_ineffective` escalation now requires commissioned
+current sensing, because an uncommissioned CT chain reads the op-amp offset
+floor as permanent current and would brick the board. No CT is fitted, so **a
+genuinely welded contactor raises a warning and nothing more.** That was an
+acceptable trade while nothing could get warm. It is a real gap now, and
+commissioning the CT channels is what closes it.
+
+---
+
 ## Audit 2026-08-27 — open items
 
 A six-agent read-only audit of both firmwares. Fixed and committed already:

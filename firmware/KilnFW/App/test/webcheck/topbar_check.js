@@ -16,9 +16,19 @@ const { chromium } = require('playwright');
 
 // Board address: override with KILN_BASE when the board is not on its usual IP.
 const BASE = process.env.KILN_BASE || 'http://192.168.1.156';
+// 2026-08-28: /diagnostics/thermo and /board_temps were removed -- both pages
+// were folded into /diagnostics at the owner's request ("the board health page
+// should be folded into the diagnostics page", "Thermocouple Faults should also
+// be combined into the diagnostic page"). /settings/manual went the same day
+// ("you can remove the manual relay controle page from the web gui").
+//
+// A sweep that keeps requesting a deleted route does not fail -- it just
+// records a 404 page as having no misaligned topbar, which is true and
+// useless. That is the shape this repo keeps hitting: a check whose subject
+// disappeared, still reporting success. Kept as a list of LIVE routes only.
 const pages = ['/settings/zones','/wifi','/readiness','/safety','/diagnostics','/profiles',
                '/settings','/settings/display','/settings/backup','/ota','/rules',
-               '/safety/commissioning','/diagnostics/thermo','/board_temps'];
+               '/safety/commissioning','/settings/safety'];
 (async () => {
   const b = await chromium.launch();
   const p = await b.newPage({viewport:{width:520,height:800}});

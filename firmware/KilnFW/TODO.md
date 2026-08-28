@@ -113,6 +113,69 @@ text, and the safety-link config-page hardening. Still open:
 
 ---
 
+## 2026-08-28 -- the bench changed, and a batch of owner requests
+
+**THE HEATING ELEMENTS ARE NOW PHYSICALLY CONNECTED.** Every note in this file
+that reasons from "relays may be activated but nothing will get warm" is now
+false. Read anything about relay behaviour with that in mind.
+
+- The test fixture is capped at **80 C**, enforced today by `max_temp_c = 80`
+  on all three zones, set live over `/api/zones`. **This is a fixture
+  threshold, not a kiln limit** -- it must come out before a real kiln, and it
+  is a concrete instance of `SaftyFW/TODO.md` phase 9's "confirm no test
+  threshold was left in place".
+- **The safety processor is NOT enforcing it.** Its `abs_max_temp_c` reads
+  `set: true, value: 0`, and 0 there means never trip -- so the only ceiling in
+  force runs on the same processor that commands the heat. `/api/readiness`
+  reporting "all 58 safety parameters have values" is what hid this: it counts
+  a zero as a value, while `commissioned` right beside it says `false`.
+- Relay 4 is currently held closed by rule `R0 (TEMP zone0 >= 25)`, a leftover
+  bench rule whose condition is satisfied at ambient. Deleting the rules engine
+  (below) will open it.
+
+### Owner requests, 2026-08-28
+
+Done: manual relay page removed (and `POST /api/relay` with it -- the page was
+its only caller); board health and thermocouple faults folded into
+`/diagnostics` and their routes deleted; safety pages became an expanding nav
+group; firing profiles moved to the top of the menu; shared **safety timing
+profiles** landed (`ZONES_CFG_VERSION` 8->9, lossless, de-duplicating).
+
+Open:
+
+- [ ] **Relay/IO segments in firing profiles**, blocking or non-blocking, each
+      segment choosing whether its relay is left in its last state at run end
+      (default off). `PROFILE_VERSION` 2->3.
+- [ ] **Delete the rules engine** afterwards, never before -- otherwise there
+      is a window with no way to drive a non-zone relay. `rules_task`'s own
+      watchdog force-releases and force-offs its relays on a stale tick; that
+      protection must be replaced, not merely deleted.
+- [ ] **Names for relays not assigned to a zone.**
+- [ ] **LCD**: no manual toggling of zone-assigned relays on the temperature
+      page (visible, not hidden); safety-processor / board-health /
+      thermocouple-fault pages folded into LCD diagnostics and removed; kiln
+      setup, thermocouple types and kiln config pages removed; profiles to the
+      top-left of the main menu, whole menu on one page.
+
+### Two constraints that now bind everything here
+
+**Bytes.** `zones_cfg_t` is 500 of a hard 512
+(`ZONES_CONFIG_BLOB_MAX_SIZE`, which also sizes `kiln_cfg_store.c`'s buffer).
+The timing-profile work spent the slack getting there -- it reordered
+`zone_cfg_t` to kill alignment padding and cut the profile name to 7
+characters. Anything new that wants to persist per-zone or per-relay state must
+find bytes or take its own NVS key.
+
+**Arrays by value.** `zones_cfg_t.zones[]` and `profile_t.segments[]` are
+embedded arrays, so one new field in an element displaces every element after
+the first. Every migration needs a FROZEN snapshot struct of the old layout and
+a field-by-field walk. `profiles_http.c` already shipped the version that
+returns `sizeof` the *current* struct for the *old* version: it rejected every
+profile on the owner's board and marked them unused, and only a hardware flash
+caught it.
+
+---
+
 ## Audit 2026-08-27 -- open items
 
 A six-agent read-only audit of both firmwares. Already fixed and committed: a
