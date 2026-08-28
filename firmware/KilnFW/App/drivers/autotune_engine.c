@@ -17,6 +17,8 @@
 #include "profile_executor.h"
 #include "relay_authority.h"
 #include "relay_cycles.h"
+#include "safety_trip_words.h" /* safety_fault_source_words() -- ROADMAP.md M13, decode the
+                                 * fault-source mask for the operator instead of a bare hex value */
 #include "sim_backend.h"
 #include "thermo_combine.h"
 #include "zones_http.h"
@@ -955,11 +957,23 @@ static bool begin_run_locked(uint8_t zone_index, char *err_msg, size_t err_cap)
             if (err_msg) {
                 /* Kept under 128 chars: dashboard_http.c's autotune handler
                  * passes a char[128], and the first draft of this message was
-                 * truncated mid-word on the page ("...so it w"). */
+                 * truncated mid-word on the page ("...so it w"). ROADMAP.md
+                 * M13: decode the mask instead of showing a bare hex value --
+                 * same shortening (first source + "(+more)") zones_http.c's
+                 * ZONE_SWEEP_ZONE_ENERGIZE_REFUSED case already uses, since
+                 * the full comma-joined safety_fault_source_words() sentence
+                 * can run to 141 bytes on its own. */
+                char src_words[160];
+                safety_fault_source_words(sources, src_words, sizeof(src_words));
+                char *comma = strchr(src_words, ',');
+                bool more = (comma != NULL);
+                if (comma != NULL) {
+                    *comma = '\0';
+                }
                 snprintf(err_msg, err_cap,
-                         "heat is blocked (fault sources 0x%02X, usually the safety link down) -- "
+                         "heat is blocked (%.32s%s, usually the safety link down) -- "
                          "autotune cannot drive the element",
-                         (unsigned)sources);
+                         src_words, more ? " (+more)" : "");
             }
             return false;
         }

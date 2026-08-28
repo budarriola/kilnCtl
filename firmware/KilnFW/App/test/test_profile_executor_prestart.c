@@ -140,11 +140,16 @@ bool profiles_http_get(uint8_t id, profile_t *out)
     return true;
 }
 
+// Settable for the M13 fault-source-decode negative test below -- see
+// s_test_profiles_http_get_ok's comment for the pattern. Default false
+// (matching the old hardcoded behavior) for every other test in this file.
+static bool s_test_relay_authority_blocked = false;
+static uint32_t s_test_relay_authority_blocked_sources = 0;
 bool relay_authority_on_blocked(SafetyLinkClass *safety, uint32_t *out_sources)
 {
     (void)safety;
-    if (out_sources) *out_sources = 0;
-    return false;
+    if (out_sources) *out_sources = s_test_relay_authority_blocked ? s_test_relay_authority_blocked_sources : 0;
+    return s_test_relay_authority_blocked;
 }
 
 bool relay_authority_zone_blocked(SafetyLinkClass *safety, uint8_t zone_index, uint32_t *out_sources)
@@ -1005,6 +1010,42 @@ static void test_run_refuses_while_zone_sweep_is_active(void)
     s_test_sweep_active = false;
 }
 
+// ROADMAP.md M13: the "heat is blocked" refusal used to show the operator a
+// bare fault-source hex value (0x%02X) instead of naming what tripped it --
+// the same defect class S6a was the motivating example for. Proves the fix
+// is real: relay_authority_on_blocked() returning a real mask must produce a
+// message containing an actual decoded source name, never the literal "0x"
+// a hex format specifier would leave behind.
+static void test_run_decodes_fault_sources_instead_of_hex(void)
+{
+    TEST_SECTION("profile_executor_run() decodes fault sources for the operator (M13)");
+    reset_relay_claim_test_state();
+    s_exec.lock = xSemaphoreCreateMutex();
+    s_exec.state = PROFILE_EXEC_IDLE;
+
+    memset(&s_test_profiles_http_get_out, 0, sizeof(s_test_profiles_http_get_out));
+    s_test_profiles_http_get_out.zone_mask = 0x01;
+    s_test_profiles_http_get_out.segment_count = 1;
+    s_test_profiles_http_get_ok = true;
+    s_test_zones_config_valid = true;
+    s_test_relay_authority_blocked = true;
+    s_test_relay_authority_blocked_sources = 0x02u; // "PC control link lost" -- safety_trip_words.h bit 0x02
+
+    char err[128];
+    err[0] = '\0';
+    bool ok = profile_executor_run(0, err, sizeof(err));
+
+    TEST_CHECK(!ok, "a blocked relay authority must refuse the run");
+    TEST_CHECK(strstr(err, "0x") == NULL, "M13: the message must not fall back to a bare hex value");
+    TEST_CHECK(strstr(err, "PC control link lost") != NULL,
+              "the message must name the actual source, not just say something is blocked");
+
+    s_test_profiles_http_get_ok = false;
+    s_test_zones_config_valid = false;
+    s_test_relay_authority_blocked = false;
+    s_test_relay_authority_blocked_sources = 0;
+}
+
 // The shared heat claim's atomic gate (relay_authority.h) -- proves the LATE
 // gate right before the final commit is independently load-bearing, not
 // merely decorative alongside the early, non-atomic
@@ -1101,6 +1142,7 @@ void run_test_profile_executor_prestart(void)
     test_io_seg_finish_leave_on_honored_only_on_done();
     test_io_segs_force_all_off_sweeps_general_io_too();
     test_run_refuses_while_zone_sweep_is_active();
+    test_run_decodes_fault_sources_instead_of_hex();
     test_run_refuses_at_atomic_heat_claim_gate();
 }
 

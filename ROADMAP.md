@@ -64,7 +64,7 @@ What is still genuinely open is short:
 |---|---|---|
 | L | **The HTTP reset is not a heap failure** — proven, not argued. Remaining candidates are lwIP or `esp_http_server`'s accept/select loop under `max_open_sockets=13`, which needs a different instrumentation surface | M10 |
 | L | **HTTP connection resets under concurrency.** TCP-layer instrumentation built and live; 188 requests across varied burst sizes reproduced nothing (rate appears lower than the original 9/80 measurement, unconfirmed why). Still unreproduced under instrumentation, not root-caused, not closed — an absence of failure is not a fix, see M10 for the honest accounting | M10 |
-| L | **Every fault says what was detected and what to do** — a standing rule, not a closing milestone. S6a was the example: the cause was measured and held on the ESP and simply never shown next to the trip | M13 |
+| L | **Every fault says what was detected and what to do** — a standing rule, not a closing milestone, so it never fully closes: applies to every fault surface added from here on. All of S6a's own checklist items landed 2026-08-28 | M13 |
 | L | **An uncommissioned safety processor must refuse heating enable.** Do this LAST — see M12's ordering note, it can lock the bench out of heating | M12 |
 
 ### Blocked on hardware that does not exist yet
@@ -999,24 +999,35 @@ PC_LINK / THERMO / SAFETY_LINK / APP / THERMAL_SANITY (`safety_link.h:139-142`),
 and `dashboard_http.c:261` already reads it. So the cause was measured, held,
 and simply never shown next to the trip.
 
-- [ ] Decode the fault-source bitmask wherever an S6a trip is reported — web,
+- [x] Decode the fault-source bitmask wherever an S6a trip is reported — web,
       diagnostics, LCD. Through a shared table: `safety_trip_words.h` exists
       because the LCD and web had already drifted into showing different things
-      for the same trip, and a second copy of the names would repeat that
-- [ ] Distinguish "asserted right now" from "this is what tripped it". The
+      for the same trip, and a second copy of the names would repeat that.
+      Verified 2026-08-28 by reading both surfaces directly rather than
+      trusting the landed list below: `dashboard_http.c:741-744` (web) and
+      `ui_page_diagnostics.c:675-722` (LCD, `ds.trip_reason == 6u` branch)
+      both decode via `safety_fault_source_words()`
+- [x] Distinguish "asserted right now" from "this is what tripped it". The
       sources are the ESP's CURRENT state; the trip is a LATCHED past event, so
       a source released after the latch would otherwise misreport the cause.
-      Capturing the mask at trip time is part of this
-- [ ] Give every `safety_trip_t` reason (S1–S13) a real cause line **with the
+      Capturing the mask at trip time is part of this — see the landed item
+      below ("captured AT TRIP TIME")
+- [x] Give every `safety_trip_t` reason (S1–S13) a real cause line **with the
       numbers the firmware has** — the temperature and the ceiling it passed,
       the current and its threshold, the elapsed time and the window — plus a
       real remedy line. Where the firmware cannot currently say what was
-      detected, record that rather than filling the slot with a vague sentence
-- [ ] Cover the KilnFW-side faults too. A thermocouple reporting a raw SR
-      bitmask is the same defect as a bare S6a
-- [ ] Say plainly when a fault is NOT operator-clearable. S9 means a possibly
+      detected, record that rather than filling the slot with a vague sentence.
+      See the landed item below ("Cause lines carry the NUMBERS")
+- [x] Cover the KilnFW-side faults too. A thermocouple reporting a raw SR
+      bitmask is the same defect as a bare S6a. See the landed items below —
+      closed further 2026-08-28 by the two `fault sources 0x%02X` refusals
+      the original sweep missed (autotune/profile-executor "heat is blocked")
+- [x] Say plainly when a fault is NOT operator-clearable. S9 means a possibly
       welded contactor and the required response is "remove power at the
-      breaker" — offering a Clear button that will refuse is worse than saying so
+      breaker" — offering a Clear button that will refuse is worse than saying
+      so. Verified 2026-08-28: `safety_trip_words.h:244` (S9/case 10) reads
+      "NOT clearable from here. Remove power at the breaker and inspect the
+      contactor before touching anything else."
 
 **The clearing semantics, recorded here because they were only discoverable by
 reading `safety_guards.c`:** an S6a trip LATCHES. It does not clear on its own,
@@ -1057,6 +1068,24 @@ owner had to ask.
       (`test_safety_link_compile.c`, 23/23): `SAFETY_FLAG_TEMP_VALID` as sole
       NaN authority and peer-sent LINK_UP/FAULT bits being dropped are both
       pinned against the real file, not a stub
+- [x] **Two more operator-facing raw hex values, missed by the earlier
+      `reason 0x%02X` sweep because these read `fault sources 0x%02X`, a
+      different phrase.** 2026-08-28: `autotune_engine.c`'s and
+      `profile_executor.c`'s "heat is blocked" refusals — the message a
+      `POST /api/autotune/start` or `POST /api/profile_exec/start` returns
+      when the safety link is down — now decode via
+      `safety_fault_source_words()`, same first-source-plus-"(+more)"
+      shortening `zones_http.c`'s zone-sweep refusal already uses. Verified a
+      repo-wide grep for `0x%02X` in `firmware/KilnFW/App/drivers/*.c`:
+      everything remaining is an `ESP_LOGW`/`ESP_LOGE`/`ESP_LOGI` line
+      (`profile_executor.c`'s stray-relay and config-reload-generation logs,
+      `uart_bridge.c`'s IO-refusal logs) or a genuinely unrelated code —
+      `ota_http.c`'s bad-image-magic byte, `profile_executor.c`'s
+      claimed-relay-mask value — not a fault-source mask. Negative-tested:
+      reverted the fix, confirmed the new
+      `test_run_decodes_fault_sources_instead_of_hex` host test fails with
+      exactly the "must not fall back to a bare hex value" message, then
+      restored it
 
 ## M14 — Verification you can trust · *opened and largely closed 2026-08-28*
 
