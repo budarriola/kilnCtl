@@ -64,10 +64,10 @@ What is still genuinely open is short:
 |---|---|---|
 | S | A guard that every `src/**.c` is in its CMakeLists or explicitly excluded — `tick_timing.c` passed host tests and failed the target link | [What is actually left](#what-is-actually-left) |
 | S | Remove the 80 °C fixture ceilings before a real kiln — a concrete instance of `SaftyFW/TODO.md` phase 9's "confirm no test threshold was left in place" | ibid. |
-| M | **LCD back buttons do not work.** Reported 2026-08-28; the board reports `touch_calibrated: true`, so the obvious explanation is ruled out and the cause is unknown. Still open — an investigation ruled out the z-order trap, the shared `nav_cb`, and per-visit rebuild, without finding it | M11 |
-| M | **The PC-link bridge drops every few seconds** (`PC link lost — dropping all relays`) and recovers. Fail-safe direction and it deliberately does not assert the isolated fault line, but it wants understanding before a real firing | M10 |
-| S | A host harness that can link `safety_link.c`. `trip_fault_sources_valid` decides whether an operator is told the cause of a trip or "not captured", and it has no automated test because nothing links that file off-target | M13 |
-| M | One shared heat claim replacing three racy pairwise interlocks between the profile executor, autotune and the zone sweep — check-then-start is atomic on none of them | M12 |
+| M | **`safety_poll` crashed twice with `IllegalInstruction`** and self-recovered by rebooting (2026-08-28). That task sees the safety processor, and link staleness gates heating. Under investigation — two earlier fixes panicked this same task and were reverted | M10 |
+| M | **S14 cannot be armed until something maps CT channels to zones.** The sweep measures per-zone with a relay mask; `ct_channel_map` is per-CT-channel and has no other consumer, defaulting to `0xFF`. Derive it from the energize sweep rather than asking the operator to type it | M12 |
+| L | **The HTTP reset is not a heap failure** — proven, not argued. Remaining candidates are lwIP or `esp_http_server`'s accept/select loop under `max_open_sockets=13`, which needs a different instrumentation surface | M10 |
+| S | A guard for the "consumer exists, producer does not" class. Four instances now: `current_sense_set_cal()`, `sample_counter_advancing`, `i_normal_a`, and a documented heartbeat contract nothing sent | M10 |
 | M | `mykicadMcp/` and `pdfMcp/` moved under `tools/` | M7 |
 | L | **HTTP connection resets under concurrency.** Has a reproducer and two ruled-out mechanisms, so the next step is instrumenting the failing allocation, not more black-box testing | M10 |
 | S | Delete the twelve stale `display_*` MCP tools (owner left the choice to me; `display_bridge_task` is confirmed dead on hardware, so there is nothing to restore them onto) | M12 |
@@ -1075,6 +1075,29 @@ immediately re-runs the guard, and an unwindowed guard with the line still LOW
 re-trips on that same tick. So the operator sequence is: identify the source,
 remove it, then clear. None of that is currently told to the operator, and the
 owner had to ask.
+
+## M13 landed so far · *2026-08-28*
+
+- [x] S6a decodes its fault source, captured AT TRIP TIME and flagged invalid
+      when it cannot be trusted — an ESP reboot with a trip still latched would
+      otherwise present this boot's sources as the cause of an older trip. An
+      empty mask reads "not captured", never "none": for S6a a zero mask is
+      impossible if capture worked
+- [x] Cause lines carry the NUMBERS — S1's temperature and the ceiling it
+      passed, S3's three channel currents and threshold, S6b's elapsed silence,
+      S11's reading and window. **No wire format widened**: the values were
+      already arriving on Frame D and were simply never copied
+- [x] Where a number does not exist the sentence says so. The negative test
+      caught S12 about to print the safety thermocouple where the enclosure
+      reading belongs — a different sensor, and entirely plausible-looking
+- [x] The thermocouple SR bitmask, the web last-run banner and the per-zone
+      diagnostics subrow stopped printing bare codes
+- [x] The trip decision moved to its own translation unit so it can be
+      host-tested; nothing could link `safety_link.c` off-target
+- [ ] The remaining bare-code surfaces: `profile_executor`'s `fault_guard` on
+      every path, and a sweep for any `reason 0x%02X` left anywhere
+- [ ] A host harness that links `safety_link.c` itself, rather than only the
+      extracted decision
 
 ## M10 — Instrumentation: make the board tell you when it is wrong
 
