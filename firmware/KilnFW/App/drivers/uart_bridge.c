@@ -1124,7 +1124,19 @@ static void io_bridge_task(void *arg)
                     rejected = true;
                     break;
                 }
-                err = kiln_io_owner_command_sx_set_pullup(bridge_u16_le(&msg.payload[1]));
+                {
+                    uint16_t mask = bridge_u16_le(&msg.payload[1]);
+                    kiln_io_owner_sx_result_t sr = kiln_io_owner_command_sx_set_pullup(mask);
+                    if (sr == KILN_IO_OWNER_SX_REFUSED_RELAY) {
+                        ESP_LOGW(TAG, "io: SX_SET_PULLUP mask 0x%04X refused -- would reconfigure a "
+                                      "relay pin's pull-up (relay pins are always plain push-pull "
+                                      "outputs, see kiln_io.h)", mask);
+                        bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_IO, subcmd, "safety");
+                        rejected = true;
+                        break;
+                    }
+                    err = (sr == KILN_IO_OWNER_SX_OK) ? ESP_OK : ESP_FAIL;
+                }
                 break;
             }
             case IO_CMD_SX_SET_OPENDRAIN: {
@@ -1133,7 +1145,19 @@ static void io_bridge_task(void *arg)
                     rejected = true;
                     break;
                 }
-                err = kiln_io_owner_command_sx_set_opendrain(bridge_u16_le(&msg.payload[1]));
+                {
+                    uint16_t mask = bridge_u16_le(&msg.payload[1]);
+                    kiln_io_owner_sx_result_t sr = kiln_io_owner_command_sx_set_opendrain(mask);
+                    if (sr == KILN_IO_OWNER_SX_REFUSED_RELAY) {
+                        ESP_LOGW(TAG, "io: SX_SET_OPENDRAIN mask 0x%04X refused -- would let a relay "
+                                      "pin's commanded HIGH float instead of drive (relay pins are "
+                                      "always push-pull, see kiln_io.h)", mask);
+                        bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_IO, subcmd, "safety");
+                        rejected = true;
+                        break;
+                    }
+                    err = (sr == KILN_IO_OWNER_SX_OK) ? ESP_OK : ESP_FAIL;
+                }
                 break;
             }
             case IO_CMD_SX_SET_DEBOUNCE: {
@@ -1157,8 +1181,20 @@ static void io_bridge_task(void *arg)
                     rejected = true;
                     break;
                 }
-                err = kiln_io_owner_command_sx_set_int_mask(
-                    bridge_u16_le(&msg.payload[1]), io_expand_sense(bridge_u16_le(&msg.payload[3])));
+                {
+                    uint16_t mask = bridge_u16_le(&msg.payload[1]);
+                    uint32_t sense = io_expand_sense(bridge_u16_le(&msg.payload[3]));
+                    kiln_io_owner_sx_result_t sr = kiln_io_owner_command_sx_set_int_mask(mask, sense);
+                    if (sr == KILN_IO_OWNER_SX_REFUSED_RELAY) {
+                        ESP_LOGW(TAG, "io: SX_SET_INT_MASK mask 0x%04X refused -- would enable "
+                                      "interrupts on a relay pin (relay pins are always outputs, "
+                                      "see kiln_io.h)", mask);
+                        bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_IO, subcmd, "safety");
+                        rejected = true;
+                        break;
+                    }
+                    err = (sr == KILN_IO_OWNER_SX_OK) ? ESP_OK : ESP_FAIL;
+                }
                 break;
             }
             case IO_CMD_SX_LED_DRIVER: {
@@ -1173,8 +1209,26 @@ static void io_bridge_task(void *arg)
                     rejected = true;
                     break;
                 }
-                err = kiln_io_owner_command_sx_led_driver(msg.payload[1], msg.payload[2] != 0,
-                                                          msg.payload[3]);
+                {
+                    uint8_t pin = msg.payload[1];
+                    kiln_io_owner_sx_result_t sr = kiln_io_owner_command_sx_led_driver(
+                        pin, msg.payload[2] != 0, msg.payload[3]);
+                    if (sr == KILN_IO_OWNER_SX_REFUSED_RELAY) {
+                        /* Audit item, TODO.md "Audit 2026-08-27 -- open items": this used to reach
+                         * kiln_io_owner_command_sx_led_driver() unconditionally -- no safety gate, no
+                         * ownership gate, no Relay2<->Relay4 remap, and no relay_shadow update, unlike
+                         * its two neighbours (SX_WRITE_REG/SX_SET_DIR just above, both correct). Fixed
+                         * by refusing entirely on a relay pin (see kiln_io_owner.c's
+                         * sx_led_driver_touches_relay() doc comment for why total refusal, not gating,
+                         * is the right call here) rather than trying to retrofit all four. */
+                        ESP_LOGW(TAG, "io: SX_LED_DRIVER pin %u refused -- would PWM a relay pin "
+                                      "(mechanical coils are on/off only, see kiln_io.h)", pin);
+                        bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_IO, subcmd, "safety");
+                        rejected = true;
+                        break;
+                    }
+                    err = (sr == KILN_IO_OWNER_SX_OK) ? ESP_OK : ESP_FAIL;
+                }
                 break;
             }
             case IO_CMD_SX_RESET: {

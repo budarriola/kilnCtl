@@ -418,9 +418,33 @@ bool zones_config_get_control_mode(uint8_t zone_index, zone_control_mode_t *out_
  * is rejected, matching the POST handler's "out of range (0-2)" error. */
 bool zones_config_set_control_mode(uint8_t zone_index, zone_control_mode_t mode);
 
-/* Guard 5's absolute limits (TODO.md 6A.3). max_temp_c == 0 means "not set,
- * treated as no ceiling" -- matches the safe-default-vs-configured-zero
- * convention every other zone field uses (max_ramp_c_per_hr, sanity_rate).
+/* Guard 5's absolute limits (TODO.md 6A.3). max_temp_c == 0 still means
+ * "not set" here, at the storage/getter layer this function lives at --
+ * thermal_guard.c's guard 5 continues to read 0 as "no ceiling" and stays a
+ * no-op on that zone (this is deliberately unchanged: autotune_engine.c's
+ * step-test method relies on exactly this to run an unattended-but-brief,
+ * operator-watched probe on a not-yet-commissioned zone -- see its
+ * STEP_TEST_GUARD_HEADROOM_C comment).
+ *
+ * The 2026-08-27 audit ("Guard 5's absolute ceiling is off by default")
+ * found this file's OWN doc comment previously claimed max_temp_c == 0
+ * followed the same convention as max_ramp_c_per_hr/sanity_rate -- false,
+ * and dangerously so for the one field of the three that gates the absolute
+ * temperature ceiling. sanity_rate_c_per_min == 0 makes its consumer
+ * substitute a firmware default that keeps the check ARMED; max_temp_c == 0
+ * makes guard 5 go permanently quiet, the opposite policy wearing an
+ * identical "0 = not configured" label. profile_executor.c's
+ * profile_executor_run() is what actually closes this gap for a real
+ * firing: it now refuses to start whenever an active zone's max_temp_c is 0,
+ * matching max_ramp_c_per_hr's existing "0 = uncommissioned, refuse" policy
+ * (see that function's guard-5 refusal, added the same date) rather than
+ * matching sanity_rate's "0 = substitute a default" policy -- there is no
+ * repo-established safe absolute-temperature default to substitute
+ * (ZONE_MAX_TEMP_C_MAX below is a 1400C input-sanity bound borrowed from
+ * profiles_http.c, not a safe ceiling for an arbitrary kiln). Getters below
+ * still faithfully report the stored 0; only the firing-start path treats it
+ * as a refusal.
+ *
  * min_temp_c has no such special case -- the page's input defaults to -20C
  * (a plausible "colder than any kiln room" floor) so a saved zone always
  * carries a real value. */

@@ -226,9 +226,48 @@ static bool sx_write_reg_touches_relay_on(uint8_t reg, uint8_t new_byte, uint32_
     return relay_on_blocked(out_sources, NULL);
 }
 
-static bool sx_set_dir_touches_relay(uint16_t dir_mask)
+/* Generalized from the direction-only sx_set_dir_touches_relay() this
+ * replaced (audit item, TODO.md "Audit 2026-08-27 -- open items"): SET_DIR
+ * was the only one of the "reconfigure a pin's electrical personality"
+ * subcommands that actually checked kiln_io_relay_pin_mask() before this
+ * fix -- SET_PULLUP, SET_OPENDRAIN and SET_INT_MASK all reached the
+ * expander unchecked. None of those three can set RegData (the output
+ * latch) high by themselves, so none can directly energize a coil the way
+ * SX_WRITE_REG can -- but a relay pin is a dedicated push-pull output
+ * (kiln_io.h's top comment) and kiln_io_set_relay_mask()'s whole contract
+ * assumes that stays true: switching one to open-drain lets a commanded
+ * HIGH float instead of drive, and enabling its interrupt/pull-up fights
+ * kiln_io_init's own input-conditioning step for a pin that is never
+ * supposed to be an input again. There is no legitimate reason for any of
+ * these debug subcommands to touch a relay pin's config, so -- like
+ * SET_DIR before it -- the refusal here is unconditional: it does not
+ * depend on danger_mode_active() or a safety fault, unlike relay_on_
+ * blocked()'s gate on an actual relay-ON command. */
+static bool sx_mask_touches_relay(uint16_t mask)
 {
-    return (dir_mask & kiln_io_relay_pin_mask()) != 0;
+    return (mask & kiln_io_relay_pin_mask()) != 0;
+}
+
+/* Same unconditional refusal, for IO_CMD_SX_LED_DRIVER (audit item, TODO.md
+ * "Audit 2026-08-27 -- open items"). This subcommand PWMs an SX1509 pin --
+ * it reprograms the pin's whole output stage (input buffer off, pull-up
+ * off, direction=output, then a variable-duty-cycle drive from the part's
+ * internal oscillator, see SX1509_led_driver()'s sequence comment) which is
+ * meaningless for a mechanical relay coil (EE2-12NUH pilot relays,
+ * docs/HARDWARE.md / ROADMAP.md -- on/off only, nothing downstream expects
+ * or can use a duty cycle) and, worse, silently takes the pin's drive away
+ * from kiln_io_set_relay_mask()'s simple push-pull write. Before this fix
+ * this path had FOUR compounding gaps the two neighbouring subcommands
+ * (SX_WRITE_REG/SX_SET_DIR, both correct) did not: no safety gate, no
+ * ownership gate, no Relay2<->Relay4 remap, and it never updated
+ * relay_shadow -- so the dashboard/LCD would keep reporting a coil OFF
+ * while the LED driver silently drove it. Refusing entirely on a relay pin
+ * (rather than gating it the way an ordinary relay-ON command is gated)
+ * makes all four moot at once: there is no relay-shadow update to forget
+ * and no remap to apply when the command never reaches a relay pin. */
+static bool sx_led_driver_touches_relay(uint8_t pin)
+{
+    return (kiln_io_relay_pin_mask() & (uint16_t)(1u << pin)) != 0;
 }
 
 /* ---- Owner task -- the only code that ever calls kiln_io_ or SX1509_ functions below ---- */
@@ -337,7 +376,7 @@ static void owner_task(void *arg)
             r.err = SX1509_read_regs(s_io->exp, cmd.args.sx_read_reg.reg, r.sx_buf, r.sx_len);
             break;
         case CMD_SX_SET_DIR:
-            if (sx_set_dir_touches_relay(cmd.args.sx_mask16.mask)) {
+            if (sx_mask_touches_relay(cmd.args.sx_mask16.mask)) {
                 r.sx_result = KILN_IO_OWNER_SX_REFUSED_RELAY;
                 break;
             }
@@ -345,25 +384,68 @@ static void owner_task(void *arg)
             r.sx_result = (r.err == ESP_OK) ? KILN_IO_OWNER_SX_OK : KILN_IO_OWNER_SX_IO_FAIL;
             break;
         case CMD_SX_SET_PULLUP:
+            if (sx_mask_touches_relay(cmd.args.sx_mask16.mask)) {
+                r.sx_result = KILN_IO_OWNER_SX_REFUSED_RELAY;
+                break;
+            }
             r.err = SX1509_set_pullup(s_io->exp, cmd.args.sx_mask16.mask);
+            r.sx_result = (r.err == ESP_OK) ? KILN_IO_OWNER_SX_OK : KILN_IO_OWNER_SX_IO_FAIL;
             break;
         case CMD_SX_SET_OPENDRAIN:
+            if (sx_mask_touches_relay(cmd.args.sx_mask16.mask)) {
+                r.sx_result = KILN_IO_OWNER_SX_REFUSED_RELAY;
+                break;
+            }
             r.err = SX1509_set_open_drain(s_io->exp, cmd.args.sx_mask16.mask);
+            r.sx_result = (r.err == ESP_OK) ? KILN_IO_OWNER_SX_OK : KILN_IO_OWNER_SX_IO_FAIL;
             break;
         case CMD_SX_SET_DEBOUNCE:
+            /* Not part of this audit item -- debounce is purely input-edge
+             * timing config, meaningless (and inert) on a pin configured as
+             * an output, so it cannot affect a relay pin's drive state even
+             * when aimed at one. Left ungated on purpose, unlike its three
+             * siblings above. */
             r.err = SX1509_set_debounce(s_io->exp, cmd.args.sx_set_debounce.mask,
                                         cmd.args.sx_set_debounce.config);
             break;
         case CMD_SX_SET_INT_MASK:
+            if (sx_mask_touches_relay(cmd.args.sx_set_int_mask.mask)) {
+                r.sx_result = KILN_IO_OWNER_SX_REFUSED_RELAY;
+                break;
+            }
             r.err = SX1509_set_interrupt(s_io->exp, cmd.args.sx_set_int_mask.mask,
                                          cmd.args.sx_set_int_mask.sense);
+            r.sx_result = (r.err == ESP_OK) ? KILN_IO_OWNER_SX_OK : KILN_IO_OWNER_SX_IO_FAIL;
             break;
         case CMD_SX_LED_DRIVER:
+            if (sx_led_driver_touches_relay(cmd.args.sx_led_driver.pin)) {
+                r.sx_result = KILN_IO_OWNER_SX_REFUSED_RELAY;
+                break;
+            }
             r.err = SX1509_led_driver(s_io->exp, cmd.args.sx_led_driver.pin, cmd.args.sx_led_driver.enable,
                                       cmd.args.sx_led_driver.intensity);
+            r.sx_result = (r.err == ESP_OK) ? KILN_IO_OWNER_SX_OK : KILN_IO_OWNER_SX_IO_FAIL;
             break;
         case CMD_SX_RESET:
             r.err = SX1509_reset(s_io->exp, cmd.args.sx_reset.hard);
+            if (r.err == ESP_OK) {
+                /* A reset -- soft OR hard, SX1509_reset()'s own comment --
+                 * is a POR: every one of the 16 pins goes back to being an
+                 * input, which de-energizes every relay coil exactly the
+                 * way kiln_io_init()'s step-1 comment describes for the
+                 * boot-time case. This is the runtime equivalent, reached
+                 * from uart_bridge.c's IO_CMD_SX_RESET debug subcommand, and
+                 * it was leaving relay_shadow claiming whatever it last
+                 * said -- coils reading ON on the dashboard/LCD after they
+                 * had actually just been silently floated off. No
+                 * safety/ownership gate is needed here (same as
+                 * CMD_ALL_RELAYS_OFF above): a reset can only ever turn
+                 * relays OFF, never on, so there is nothing for those gates
+                 * to protect against. */
+                s_io->relay_shadow = 0;
+                ESP_LOGI(TAG, "io: SX_RESET (%s) -- expander POR, all relay pins now inputs, "
+                              "relay_shadow cleared to match", cmd.args.sx_reset.hard ? "hard" : "soft");
+            }
             break;
         case CMD_SX_SCAN: {
             uint8_t found[SX1509_ADDR_COUNT];
@@ -642,24 +724,24 @@ kiln_io_owner_sx_result_t kiln_io_owner_command_sx_set_dir(uint16_t dir_mask)
     return r.sx_result;
 }
 
-esp_err_t kiln_io_owner_command_sx_set_pullup(uint16_t mask)
+kiln_io_owner_sx_result_t kiln_io_owner_command_sx_set_pullup(uint16_t mask)
 {
     owner_cmd_t cmd = { .type = CMD_SX_SET_PULLUP, .args.sx_mask16 = { .mask = mask } };
     owner_result_t r;
     if (!post_and_wait(&cmd, &r)) {
-        return ESP_ERR_TIMEOUT;
+        return KILN_IO_OWNER_SX_TIMEOUT;
     }
-    return r.err;
+    return r.sx_result;
 }
 
-esp_err_t kiln_io_owner_command_sx_set_opendrain(uint16_t mask)
+kiln_io_owner_sx_result_t kiln_io_owner_command_sx_set_opendrain(uint16_t mask)
 {
     owner_cmd_t cmd = { .type = CMD_SX_SET_OPENDRAIN, .args.sx_mask16 = { .mask = mask } };
     owner_result_t r;
     if (!post_and_wait(&cmd, &r)) {
-        return ESP_ERR_TIMEOUT;
+        return KILN_IO_OWNER_SX_TIMEOUT;
     }
-    return r.err;
+    return r.sx_result;
 }
 
 esp_err_t kiln_io_owner_command_sx_set_debounce(uint16_t mask, uint8_t config)
@@ -673,26 +755,26 @@ esp_err_t kiln_io_owner_command_sx_set_debounce(uint16_t mask, uint8_t config)
     return r.err;
 }
 
-esp_err_t kiln_io_owner_command_sx_set_int_mask(uint16_t mask, uint32_t sense)
+kiln_io_owner_sx_result_t kiln_io_owner_command_sx_set_int_mask(uint16_t mask, uint32_t sense)
 {
     owner_cmd_t cmd = { .type = CMD_SX_SET_INT_MASK,
                         .args.sx_set_int_mask = { .mask = mask, .sense = sense } };
     owner_result_t r;
     if (!post_and_wait(&cmd, &r)) {
-        return ESP_ERR_TIMEOUT;
+        return KILN_IO_OWNER_SX_TIMEOUT;
     }
-    return r.err;
+    return r.sx_result;
 }
 
-esp_err_t kiln_io_owner_command_sx_led_driver(uint8_t pin, bool enable, uint8_t intensity)
+kiln_io_owner_sx_result_t kiln_io_owner_command_sx_led_driver(uint8_t pin, bool enable, uint8_t intensity)
 {
     owner_cmd_t cmd = { .type = CMD_SX_LED_DRIVER,
                         .args.sx_led_driver = { .pin = pin, .enable = enable, .intensity = intensity } };
     owner_result_t r;
     if (!post_and_wait(&cmd, &r)) {
-        return ESP_ERR_TIMEOUT;
+        return KILN_IO_OWNER_SX_TIMEOUT;
     }
-    return r.err;
+    return r.sx_result;
 }
 
 esp_err_t kiln_io_owner_command_sx_reset(bool hard)

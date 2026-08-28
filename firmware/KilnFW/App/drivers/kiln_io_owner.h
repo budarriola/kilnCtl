@@ -209,11 +209,42 @@ esp_err_t kiln_io_owner_command_sx_read_reg(uint8_t reg, uint8_t *out_buf, size_
  * dir_mask would set any relay pin's bit to 1 (input). */
 kiln_io_owner_sx_result_t kiln_io_owner_command_sx_set_dir(uint16_t dir_mask);
 
-esp_err_t kiln_io_owner_command_sx_set_pullup(uint16_t mask);
-esp_err_t kiln_io_owner_command_sx_set_opendrain(uint16_t mask);
+/* Unconditionally refused (SX_REFUSED_RELAY) if mask touches a relay pin --
+ * see kiln_io_owner.c's sx_mask_touches_relay() doc comment (audit item,
+ * TODO.md "Audit 2026-08-27 -- open items"). None of these three can move
+ * RegData (the output latch) by themselves, so none can directly energize
+ * a coil, but they can silently change how a relay pin behaves once it IS
+ * driven (open-drain lets a commanded HIGH float; an enabled interrupt/
+ * pull-up fights a pin that must stay a plain push-pull output), so they
+ * are refused just like SX_SET_DIR rather than left open on the theory
+ * that only RegData matters. */
+kiln_io_owner_sx_result_t kiln_io_owner_command_sx_set_pullup(uint16_t mask);
+kiln_io_owner_sx_result_t kiln_io_owner_command_sx_set_opendrain(uint16_t mask);
+
+/* Not gated -- debounce is input-edge timing, inert on an output pin, see
+ * kiln_io_owner.c's CMD_SX_SET_DEBOUNCE case comment. */
 esp_err_t kiln_io_owner_command_sx_set_debounce(uint16_t mask, uint8_t config);
-esp_err_t kiln_io_owner_command_sx_set_int_mask(uint16_t mask, uint32_t sense);
-esp_err_t kiln_io_owner_command_sx_led_driver(uint8_t pin, bool enable, uint8_t intensity);
+
+kiln_io_owner_sx_result_t kiln_io_owner_command_sx_set_int_mask(uint16_t mask, uint32_t sense);
+
+/* Unconditionally refused (SX_REFUSED_RELAY) if pin is a relay pin (audit
+ * item, TODO.md "Audit 2026-08-27 -- open items"). PWMing a mechanical
+ * relay coil is not a normal operation -- see kiln_io_owner.c's
+ * sx_led_driver_touches_relay() doc comment for the full reasoning and for
+ * why this is refused entirely rather than gated the way an ordinary
+ * relay-ON command is (relay_on_blocked()/relay_authority_manual_blocked_
+ * by_owner()): there is no legitimate LED-driver use of a relay pin to let
+ * through in the first place, so there is nothing for a conditional gate
+ * to usefully allow. */
+kiln_io_owner_sx_result_t kiln_io_owner_command_sx_led_driver(uint8_t pin, bool enable, uint8_t intensity);
+
+/* Not gated -- a reset can only ever turn relays OFF (every pin becomes an
+ * input), never on, so the safety/ownership gates that protect relay-ON
+ * commands have nothing to protect against here, same reasoning as
+ * kiln_io_owner_command_all_relays_off() above. On success it clears the
+ * relay_shadow the SX_READ_REG/READ paths and the dashboard report from,
+ * since the reset just silently dropped every coil -- see
+ * kiln_io_owner.c's CMD_SX_RESET case comment. */
 esp_err_t kiln_io_owner_command_sx_reset(bool hard);
 esp_err_t kiln_io_owner_command_sx_scan(uint8_t *out_found, size_t max_found, size_t *out_count);
 

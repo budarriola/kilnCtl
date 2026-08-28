@@ -80,6 +80,8 @@ $sources = @(
     (Join-Path $testDir "test_uart_owner_tx_policy.c"),
     (Join-Path $srcDir "tasks\clock_health.c"),
     (Join-Path $testDir "test_clock_health.c"),
+    (Join-Path $srcDir "tasks\tick_timing.c"),
+    (Join-Path $testDir "test_tick_timing.c"),
     (Join-Path $testDir "test_safety_core_stack_budget.c"),
     (Join-Path $srcDir "clear_trip_diag_codec.c"),
     (Join-Path $testDir "test_clear_trip_diag_codec.c"),

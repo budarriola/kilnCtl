@@ -332,6 +332,32 @@ if ($LASTEXITCODE -ne 0) {
 & $exe10
 if ($LASTEXITCODE -ne 0) { $script:failedExes += $exe10 }
 
+# ---- test_kiln_io_owner.c: its own ELEVENTH, separate executable ----------
+# Audit item, TODO.md "Audit 2026-08-27 -- open items" (IO_CMD_SX_LED_DRIVER's
+# missing relay-pin gate). Same reason as test_board_temps.c above: it
+# #includes kiln_io_owner.c directly to reach its `static`
+# sx_mask_touches_relay()/sx_led_driver_touches_relay() predicates, the only
+# seam onto the actual decision the fix hinges on. Links the real kiln_io.c
+# (for the genuine kiln_io_relay_pin_mask() these predicates call) and
+# provides its own SX1509/danger_mode/ota_http/relay_authority stub bodies,
+# so it must be its own executable to avoid colliding with any other test
+# file's fakes of those same symbols.
+$exe11 = Join-Path $outDir "kilnctl_host_tests_kiln_io_owner.exe"
+$kioObjDir = Join-Path $outDir "kio"
+New-Item -ItemType Directory -Force -Path $kioObjDir | Out-Null
+$cmd11 = "call `"$vcvars`" x64 >nul && cl /nologo /W3 /EHsc /std:c11 /I`"$stubDir`" /I`"$commonInc`" " +
+        "/Fo:`"$kioObjDir\\`" /Fe:`"$exe11`" " +
+        "`"$(Join-Path $testDir 'test_kiln_io_owner.c')`" `"$(Join-Path $driversDir 'kiln_io.c')`" " +
+        "`"$(Join-Path $driversDir 'owner_slot_pool.c')`""
+
+cmd.exe /c $cmd11
+if ($LASTEXITCODE -ne 0) {
+    throw "kiln_io_owner build failed"
+}
+
+& $exe11
+if ($LASTEXITCODE -ne 0) { $script:failedExes += $exe11 }
+
 if ($script:failedExes.Count -gt 0) {
     Write-Host ""
     Write-Host "FAILED executables ($($script:failedExes.Count)):"

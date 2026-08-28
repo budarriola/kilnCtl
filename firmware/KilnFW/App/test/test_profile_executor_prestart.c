@@ -236,10 +236,19 @@ bool zones_config_get_continue_on_zone_trip(void)
     return g_continue_on_zone_trip;
 }
 
+/* Per-zone control mode, settable by test_profile_zones_have_ceiling_* below
+ * (audit 2026-08-27, revised after the owner's live board reply) -- defaults
+ * to all-OFF (zero-initialized, ZONE_CONTROL_MODE_OFF == 0), which matches
+ * every pre-existing test in this file's assumption before this array
+ * existed (this stub used to unconditionally return OFF). */
+static zone_control_mode_t g_stub_control_mode[MAX31856_CHANNEL_COUNT];
+
 bool zones_config_get_control_mode(uint8_t zone_index, zone_control_mode_t *out_mode)
 {
-    (void)zone_index;
-    if (out_mode) *out_mode = ZONE_CONTROL_MODE_OFF;
+    if (out_mode) {
+        *out_mode = (zone_index < MAX31856_CHANNEL_COUNT) ? g_stub_control_mode[zone_index]
+                                                            : ZONE_CONTROL_MODE_OFF;
+    }
     return false;
 }
 
@@ -348,10 +357,15 @@ bool zones_config_get_sanity_rate(uint8_t zone_index, float *out_c_per_min)
     return false;
 }
 
+/* Per-zone max_temp_c, settable by test_profile_zones_have_ceiling_* below
+ * (audit 2026-08-27 item 1/2) -- defaults to all-zero, which is what every
+ * pre-existing test in this file that never touches this array assumes
+ * (an unconfigured zone, guard 5's "no ceiling" reading). */
+static float g_stub_max_temp_c[MAX31856_CHANNEL_COUNT];
+
 bool zones_config_get_temp_limits(uint8_t zone_index, float *out_max_temp_c, float *out_min_temp_c)
 {
-    (void)zone_index;
-    if (out_max_temp_c) *out_max_temp_c = 0.0f;
+    if (out_max_temp_c) *out_max_temp_c = (zone_index < MAX31856_CHANNEL_COUNT) ? g_stub_max_temp_c[zone_index] : 0.0f;
     if (out_min_temp_c) *out_min_temp_c = 0.0f;
     return false;
 }
@@ -634,6 +648,120 @@ static void test_guard9_fault_source_cleared_on_halt(void)
     TEST_CHECK(s_exec.global_fault_source == 0, "global_fault_source must be back to 0 after halt()");
 }
 
+// profile_zones_have_ceiling() tests (audit 2026-08-27 items 1/2: "Guard 5's
+// absolute ceiling is off by default" / "max_temp_c == 0 and
+// max_ramp_c_per_hr == 0 mean opposite things"). This is a plain static
+// function over a profile_t and the zones_config_get_temp_limits() stub
+// above -- reachable without profile_executor_start()'s full harness, same
+// "factor the check out so a host test can drive it directly" reasoning as
+// escalate_guard_trip()/guard9_assert_stale_tick_fault() elsewhere in this
+// file.
+static void test_profile_zones_have_ceiling_refuses_on_zero(void)
+{
+    TEST_SECTION("profile_zones_have_ceiling() -- refuses when a zone that CAN heat has max_temp_c == 0 "
+                 "(the exact defect the 2026-08-27 audit named: guard 5 permanently a no-op)");
+    memset(g_stub_max_temp_c, 0, sizeof(g_stub_max_temp_c));
+    memset(g_stub_control_mode, 0, sizeof(g_stub_control_mode));
+    g_stub_control_mode[0] = ZONE_CONTROL_MODE_BANGBANG; /* zone 0 CAN command heat */
+    profile_t p;
+    memset(&p, 0, sizeof(p));
+    p.zone_mask = 0x01; /* zone 0 only */
+
+    uint8_t missing_zone = 0xFF;
+    bool ok = profile_zones_have_ceiling(&p, &missing_zone);
+
+    TEST_CHECK(!ok, "must refuse -- zone 0 can heat and its max_temp_c is 0 (never commissioned)");
+    TEST_CHECK(missing_zone == 0, "must name zone 0 as the offender");
+}
+
+static void test_profile_zones_have_ceiling_passes_when_configured(void)
+{
+    TEST_SECTION("profile_zones_have_ceiling() -- a heating zone with a real ceiling fires exactly as "
+                 "before (a change that blocks every firing is not a fix). Mirrors the owner's live "
+                 "board read (GET /api/zones, 2026-08-27): zone0 max_temp_c=1300, control_mode=2 (PID)");
+    memset(g_stub_max_temp_c, 0, sizeof(g_stub_max_temp_c));
+    memset(g_stub_control_mode, 0, sizeof(g_stub_control_mode));
+    g_stub_max_temp_c[0] = 1300.0f; /* operator commissioned zone 0 with a real ceiling */
+    g_stub_control_mode[0] = ZONE_CONTROL_MODE_PID;
+    profile_t p;
+    memset(&p, 0, sizeof(p));
+    p.zone_mask = 0x01;
+
+    uint8_t missing_zone = 0xFF;
+    bool ok = profile_zones_have_ceiling(&p, &missing_zone);
+
+    TEST_CHECK(ok, "must NOT refuse -- zone 0 has a real, operator-set 1300C ceiling");
+    TEST_CHECK(missing_zone == 0xFF, "out_missing_zone must be left untouched on success");
+}
+
+static void test_profile_zones_have_ceiling_ignores_inactive_zones(void)
+{
+    TEST_SECTION("profile_zones_have_ceiling() -- a zone NOT in zone_mask never blocks the firing, "
+                 "even with max_temp_c == 0 and a mode that could heat");
+    memset(g_stub_max_temp_c, 0, sizeof(g_stub_max_temp_c));
+    memset(g_stub_control_mode, 0, sizeof(g_stub_control_mode));
+    g_stub_max_temp_c[0] = 1200.0f;
+    g_stub_control_mode[0] = ZONE_CONTROL_MODE_BANGBANG;
+    /* g_stub_max_temp_c[1] stays 0 and g_stub_control_mode[1] stays OFF, but the point of THIS test
+     * is that zone 1 is excluded from the mask -- see the next test for the OFF-but-in-mask case. */
+    profile_t p;
+    memset(&p, 0, sizeof(p));
+    p.zone_mask = 0x01; /* zone 0 only -- zone 1 excluded */
+
+    uint8_t missing_zone = 0xFF;
+    bool ok = profile_zones_have_ceiling(&p, &missing_zone);
+
+    TEST_CHECK(ok, "must NOT refuse -- the only active zone (0) has a real ceiling");
+}
+
+static void test_profile_zones_have_ceiling_ignores_off_zones_in_mask(void)
+{
+    TEST_SECTION("profile_zones_have_ceiling() -- a zone IN zone_mask but control_mode OFF never "
+                 "blocks the firing even with max_temp_c == 0: OFF cannot command a relay "
+                 "(zones_http.h's ZONE_CONTROL_MODE_OFF doc comment, confirmed against "
+                 "heater_output_duty()'s switch), so guard 5 has nothing to protect on that zone. "
+                 "Reproduces the owner's live board exactly (GET /api/zones, 2026-08-27): zone1 and "
+                 "zone2 both read max_temp_c=0.0, control_mode=0 (OFF) -- refusing over either of "
+                 "them would be a nuisance refusal SAFETY_MODEL.md's doctrine warns against, on a "
+                 "board where the only zone that actually heats (zone0) already has a ceiling");
+    memset(g_stub_max_temp_c, 0, sizeof(g_stub_max_temp_c));
+    memset(g_stub_control_mode, 0, sizeof(g_stub_control_mode));
+    g_stub_max_temp_c[0] = 1300.0f;
+    g_stub_control_mode[0] = ZONE_CONTROL_MODE_PID;
+    /* zone1/zone2: max_temp_c 0, control_mode OFF (both arrays' zero-init default) -- IN the mask. */
+    profile_t p;
+    memset(&p, 0, sizeof(p));
+    p.zone_mask = 0x07; /* zones 0, 1, 2 -- matches the owner's 3-zone board */
+
+    uint8_t missing_zone = 0xFF;
+    bool ok = profile_zones_have_ceiling(&p, &missing_zone);
+
+    TEST_CHECK(ok, "must NOT refuse -- zones 1/2 are OFF and cannot heat, zone 0 (the only zone that "
+                   "can) has a real ceiling");
+    TEST_CHECK(missing_zone == 0xFF, "out_missing_zone must be left untouched on success");
+}
+
+static void test_profile_zones_have_ceiling_still_refuses_on_zero_when_off_zone_is_healthy(void)
+{
+    TEST_SECTION("profile_zones_have_ceiling() -- the OFF carve-out does not blind the check to a "
+                 "DIFFERENT zone that CAN heat and has no ceiling (proves the two zones are checked "
+                 "independently, not that the function just gave up refusing)");
+    memset(g_stub_max_temp_c, 0, sizeof(g_stub_max_temp_c));
+    memset(g_stub_control_mode, 0, sizeof(g_stub_control_mode));
+    /* zone0: OFF, no ceiling -- fine, cannot heat. */
+    /* zone1: CAN heat (BANGBANG), no ceiling -- must still refuse. */
+    g_stub_control_mode[1] = ZONE_CONTROL_MODE_BANGBANG;
+    profile_t p;
+    memset(&p, 0, sizeof(p));
+    p.zone_mask = 0x03; /* zones 0 and 1 */
+
+    uint8_t missing_zone = 0xFF;
+    bool ok = profile_zones_have_ceiling(&p, &missing_zone);
+
+    TEST_CHECK(!ok, "must refuse -- zone 1 can heat and has no ceiling, regardless of zone 0's OFF state");
+    TEST_CHECK(missing_zone == 1, "must name zone 1, the actual offender");
+}
+
 void run_test_profile_executor_prestart(void)
 {
     test_run_refuses_before_start();
@@ -649,6 +777,11 @@ void run_test_profile_executor_prestart(void)
     test_guard9_asserts_and_ors_global_fault_source();
     test_guard9_ors_without_clobbering_an_earlier_global_trip();
     test_guard9_fault_source_cleared_on_halt();
+    test_profile_zones_have_ceiling_refuses_on_zero();
+    test_profile_zones_have_ceiling_passes_when_configured();
+    test_profile_zones_have_ceiling_ignores_inactive_zones();
+    test_profile_zones_have_ceiling_ignores_off_zones_in_mask();
+    test_profile_zones_have_ceiling_still_refuses_on_zero_when_off_zone_is_healthy();
 }
 
 int main(void)

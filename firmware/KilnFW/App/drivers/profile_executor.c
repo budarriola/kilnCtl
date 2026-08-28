@@ -2006,6 +2006,83 @@ esp_err_t profile_executor_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo
     return ESP_OK;
 }
 
+/* Guard 5's absolute ceiling, checked BEFORE a firing is allowed to start.
+ * TODO.md's 2026-08-27 audit ("Guard 5's absolute ceiling is off by
+ * default") found that max_temp_c == 0 means "no ceiling" in
+ * thermal_guard.c, so a zone that was never saved through /settings/zones
+ * fires with guard 5 permanently a no-op -- every OTHER per-zone threshold
+ * in this repo's convention treats 0 as "not configured, substitute a
+ * firmware default that still protects" (see zones_http.h's field-by-field
+ * doc comments), but max_temp_c is the one field where 0 was instead wired
+ * to mean "disabled". That is backwards for the single most dangerous field
+ * on the page: a substituted number would have to be invented (there is no
+ * physically-meaningful default temperature anywhere in this repo --
+ * ZONE_MAX_TEMP_C_MAX is a 1400C INPUT-validation sanity bound mirrored
+ * from profiles_http.c's PROFILE_TARGET_C_MAX, not a safe ceiling for an
+ * arbitrary owner's kiln), and a wrong invented ceiling either does nothing
+ * (too high) or nags a correctly-configured kiln (too low). Refusing
+ * instead cannot be silently wrong, matches the ramp-ceiling refusal in
+ * profile_executor_run() (same field-is-zero-means-uncommissioned
+ * reasoning, same message shape), and matches autotune_engine_run_relay()'s
+ * own guard-5 refusal for the identical reason (autotune_engine.c ~line
+ * 1164, this task's FILES YOU OWN excludes that file so it is read-only
+ * precedent here, not touched). autotune_engine_run() (the step-test path)
+ * is the one place in the repo that deliberately tolerates max_temp_c == 0
+ * -- see its STEP_TEST_GUARD_HEADROOM_C comment -- because a step test is a
+ * short, operator-watched open-loop probe, not an unattended multi-hour
+ * firing; that carve-out does not apply here.
+ *
+ * Pulled out to its own function (rather than left inline in
+ * profile_executor_run()) purely so a host test can drive it directly
+ * against a profile_t without needing profile_executor_start()'s full
+ * FreeRTOS/relay/thermocouple harness -- see
+ * test_profile_executor_prestart.c's test_profile_zones_have_ceiling_*.
+ *
+ * Checked against zones that can actually command heat, not merely against
+ * p->zone_mask (2026-08-27, revised after the owner's live board reply:
+ * heaters are now physically wired, and a real GET /api/zones read back
+ * zone1/zone2 at max_temp_c==0, control_mode==0/OFF, never assigned to any
+ * profile that actually drives them -- exactly the case this carve-out
+ * exists for). ZONE_CONTROL_MODE_OFF (zones_http.h) "never commands heat" --
+ * confirmed by reading heater_output_duty()'s switch in this file, which has
+ * no case that can assert a relay for an OFF zone. Guard 5 exists to catch a
+ * runaway zone that IS being driven; a zone this profile targets but that
+ * cannot physically command a relay has nothing for guard 5 to protect
+ * against, so refusing the whole firing over it would be a nuisance refusal
+ * of exactly the kind SAFETY_MODEL.md's doctrine warns against, and the
+ * fastest way to get this check disabled by whoever hits it. This mirrors
+ * profile_executor_run()'s own n_heating_zones logic just below (same
+ * "OFF stays a valid per-zone choice" reasoning, same zones_config_get_
+ * control_mode() call, same OFF-is-the-safe-fallback-on-read-failure
+ * default). Returns false and, if out_missing_zone is non-NULL, the first
+ * (lowest-index) offending zone the instant any zone that CAN heat reads
+ * max_temp_c == 0; returns true when every zone this profile can actually
+ * drive has a real ceiling (including the case where none of them can heat
+ * at all -- profile_executor_run()'s separate all-OFF refusal owns that
+ * case, not this function). */
+static bool profile_zones_have_ceiling(const profile_t *p, uint8_t *out_missing_zone)
+{
+    for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+        if (!(p->zone_mask & (1u << zi))) continue;
+
+        /* OFF, not BANGBANG, as the fallback if the getter fails -- same
+         * fail-safe default profile_executor_run()'s n_heating_zones loop
+         * uses: "we could not read this zone's control mode" must not be
+         * read as "assume it can heat, and gate a real firing on it". */
+        zone_control_mode_t mode = ZONE_CONTROL_MODE_OFF;
+        zones_config_get_control_mode(zi, &mode);
+        if (mode == ZONE_CONTROL_MODE_OFF) continue;
+
+        float max_temp_c = 0.0f, min_temp_c = 0.0f;
+        zones_config_get_temp_limits(zi, &max_temp_c, &min_temp_c);
+        if (!(max_temp_c > 0.0f)) {
+            if (out_missing_zone) *out_missing_zone = zi;
+            return false;
+        }
+    }
+    return true;
+}
+
 bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
 {
     /* Recovery mode (boot_guard.h) deliberately skips profile_executor_start()
@@ -2151,6 +2228,46 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
                 }
                 return false;
             }
+        }
+    }
+
+    /* Guard 5's absolute ceiling, refused the same way the ramp ceiling just
+     * above is: TODO.md's 2026-08-27 audit ("Guard 5's absolute ceiling is
+     * off by default") found that max_temp_c == 0 means "no ceiling" in
+     * thermal_guard.c, so a zone that was never saved through
+     * /settings/zones fires with guard 5 permanently a no-op -- every OTHER
+     * per-zone threshold in this repo's convention treats 0 as "not
+     * configured, substitute a firmware default that still protects" (see
+     * zones_http.h's field-by-field doc comments), but max_temp_c is the one
+     * field where 0 was instead wired to mean "disabled". That is backwards
+     * for the single most dangerous field on the page: a substituted number
+     * would have to be invented (there is no physically-meaningful default
+     * temperature anywhere in this repo -- ZONE_MAX_TEMP_C_MAX below is a
+     * 1400C INPUT-validation sanity bound mirrored from profiles_http.c's
+     * PROFILE_TARGET_C_MAX, not a safe ceiling for an arbitrary owner's
+     * kiln), and a wrong invented ceiling either does nothing (too high) or
+     * nags a correctly-configured kiln (too low). Refusing instead cannot be
+     * silently wrong, matches the ramp-ceiling refusal immediately above
+     * (same field-is-zero-means-uncommissioned reasoning, same message
+     * shape), and matches autotune_engine_run_relay()'s own guard-5 refusal
+     * for the identical reason (autotune_engine.c ~line 1164, this task's
+     * FILES YOU OWN excludes that file so it is read-only precedent here,
+     * not touched). autotune_engine_run() (the step-test path) is the one
+     * place in the repo that deliberately tolerates max_temp_c == 0 -- see
+     * its STEP_TEST_GUARD_HEADROOM_C comment -- because a step test is a
+     * short, operator-watched open-loop probe, not an unattended multi-hour
+     * firing; that carve-out does not apply here. */
+    {
+        uint8_t missing_zone = 0;
+        if (!profile_zones_have_ceiling(&p, &missing_zone)) {
+            xSemaphoreGive(s_exec.lock);
+            if (err_msg) {
+                snprintf(err_msg, err_cap,
+                         "zone %u has no absolute temperature ceiling configured (max_temp_c is 0) -- "
+                         "set Max Temp (C) for this zone in Settings > Zones before firing it",
+                         missing_zone);
+            }
+            return false;
         }
     }
 

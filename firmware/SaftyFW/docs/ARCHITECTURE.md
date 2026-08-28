@@ -536,9 +536,50 @@ historical record. Same reasoning `uart_task_ids.h` gives for never reusing a
 task id lightly. **Guards may still be renumbered freely until the first
 release** — nothing is built yet.
 
-`trip_mask` in the diagnostic frame is a **bitmask indexed by guard number**, not
-by this enum — several guards can be tripped at once, and the enum only names
-the *first* one that fired.
+**Correction, 2026-08-27 audit:** `trip_mask` in the diagnostic frame is NOT a
+bitmask indexed by guard number, despite the wire layout's field name and the
+16 bits `LINK_PROTOCOL.md` sec "Frame B" gives it (room enough for every guard
+1-13). It is a single bit at `reason - 1`, synthesized from the one latched
+`safety_trip_t` by `link_frame_trip_mask_for_reason()`
+(`src/tasks/link_frame.c:204`) — see that function's own comment, which
+already calls this "a single-bit degraded approximation" of the wire field's
+documented meaning (echoed at `src/tasks/link_task.c:886-901`). Two facts
+make "bitmask indexed by guard number" actively wrong, not just imprecise:
+
+1. **Only one trip reason is ever latched.** `safety_guards_tick()`
+   (`src/safety_guards.c`) early-returns `false` on entry whenever
+   `state->is_tripped` is already true (`safety_guards.c:294`, "already
+   latched -- caller should have de-energized K4 already") — every guard
+   below S9's escalation block simply never runs again once one guard has
+   tripped. A board can have two simultaneous faults (e.g. S1 over-temp and
+   S12 enclosure over-temp at once) and this module will report only
+   whichever one crossed its threshold first; the second is never evaluated,
+   never mind latched into a second bit. This is deliberate — SAFETY_MODEL.md
+   sec 2's "latching is not auto-recovery" already treats one trip as
+   sufficient to de-energize K4 and stop mattering which guard trips next —
+   but it means there is no *set* of tripped guards for a bitmask to name,
+   only ever one.
+2. **The bit position is not the guard number.** `reason - 1` only equals the
+   guard number for S1-S3 (reasons 1-3, `SAFETY_TRIP_OVERTEMP` ==
+   `SAFETY_TRIP_LOAD_STUCK_ON` numerically adjacent to guard number). From S5
+   onward the enum leaves gaps for the two WARN-only guards (4 for S4, 11 for
+   S10 — see the enum above), so `reason - 1` diverges from the guard number:
+   S6a is `SAFETY_TRIP_MAIN_FAULT = 6`, bit 5, not bit 6; S11
+   (`SAFETY_TRIP_FROZEN_SENSOR = 12`) sets bit 11, not bit 11-matching-guard-
+   11 (that would be S10, which is WARN-only and never sets a trip bit at
+   all). A reader who took "bitmask indexed by guard number" literally and
+   inspected bit 10 expecting S10 evidence would be looking at nothing —
+   S10 cannot appear in this field under any circumstance — while genuine S11
+   evidence sits one bit lower than the guard number would suggest.
+
+The corrected reading: `trip_mask` is a single latched reason, wire-encoded
+as one set bit for compatibility with a future real bitmask, not currently
+one. `SAFETY_CMD_DIAG`'s `trip_reason` byte (`LINK_PROTOCOL.md` offset 1) is
+the authoritative field for "which guard tripped" — `trip_mask` adds nothing
+`trip_reason` does not already say, until/unless a future change makes
+`safety_guards_tick()` itself accumulate more than one guard's trip per tick,
+which is a real architecture change (removing or narrowing the early-return
+above), not a wire-format one.
 
 ---
 

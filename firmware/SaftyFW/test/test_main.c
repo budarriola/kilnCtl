@@ -25,6 +25,7 @@ void run_test_watchdog_gate(void);
 void run_test_kilnlink_inject_tc(void);
 void run_test_uart_owner_tx_policy(void);
 void run_test_clock_health(void);
+void run_test_tick_timing(void);
 void run_test_safety_core_stack_budget(void);
 void run_test_clear_trip_diag_codec(void);
 void run_test_watchdog_overdue_diag_codec(void);
@@ -55,6 +56,7 @@ int main(void)
     run_test_kilnlink_inject_tc();
     run_test_uart_owner_tx_policy();
     run_test_clock_health();
+    run_test_tick_timing();
     run_test_safety_core_stack_budget();
     run_test_clear_trip_diag_codec();
     run_test_watchdog_overdue_diag_codec();

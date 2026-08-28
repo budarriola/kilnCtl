@@ -43,6 +43,7 @@
 
 #include "boot_reason.h"
 #include "clock_health.h" // 2026-08-23 stalled-get_absolute_time() detector, see its own header comment
+#include "tick_timing.h" // 2026-08-27 audit items 1/2: measured dt_s and snapshot freshness -- see its own header comment
 #include "clear_trip_diag.h" // 2026-08-23 round 4, CLEAR_TRIP crash checkpoints that survive the reboot -- see its own header comment
 #include "config_store.h" // safety_tc_installed (param 0x0211) -- read directly here, every tick,
                            // rather than routed through s_guard_cfg: s_guard_cfg is not yet wired to
@@ -177,6 +178,44 @@
 // above: a documented software default from SAFETY_MODEL.md, not an
 // invented one.
 #define CONTEXT_MAX_AGE_MS 5000u
+
+// 2026-08-27 audit item 2: ARCHITECTURE.md section 6, "Staleness is checked
+// by the consumer, not the producer" -- applied here to thermo_snapshot_t/
+// current_snapshot_t the same way CONTEXT_MAX_AGE_MS above already applies it
+// to context_snapshot_t. See tick_timing.h's own header comment on
+// snapshot_is_fresh() for why the check itself is a separate host-tested
+// pure function even though context_valid's identical-shaped check stays
+// inline just below.
+//
+// THERMO_MAX_AGE_MS: thermo_task publishes roughly once per MAX31856
+// conversion (max31856_conversion_time_ms(), ~151ms at this board's default
+// mode/filter settings -- thermo_task.c's own THERMO_TASK_DRDY_SILENCE_
+// MULTIPLIER comment) -- and thermo_task ALREADY declares itself blind
+// (tc_valid = false) if no ~DRDY edge arrives within 2x that, ~300ms
+// (thermo_task.c). This constant is deliberately independent of, and
+// generous relative to, that ~300ms internal detector: it exists for the
+// DIFFERENT failure this audit item targets -- thermo_task's own detector
+// working fine (correctly declaring itself blind or fresh) but the PUBLISH
+// of that verdict getting stuck behind a held mutex, so
+// thermo_task_get_snapshot() keeps returning an old, increasingly stale
+// struct while thermo_task itself still feeds the watchdog. ~13x the nominal
+// publish interval leaves wide margin over ordinary scheduling jitter (this
+// is a WORSE, not tighter, bound than the internal ~300ms one -- it is not
+// meant to fire before that detector would) while still being caught well
+// inside S5's blind_grace_s default of 60.0s (safety_guards.c
+// BLIND_GRACE_S_DEFAULT) -- see this file's own comment where tc_valid is
+// set for what tripping tc_valid = false actually does.
+#define THERMO_MAX_AGE_MS 2000u
+
+// CURRENT_MAX_AGE_MS: current_task publishes every SAFTYFW_PERIOD_CURRENT_
+// TASK_MS = 50ms (task_priorities.h). 2000ms mirrors update_task.c's own
+// UPDATE_TASK_ADC_FRESH_MS -- the SAME producer, the SAME "generous relative
+// to its own period so this is never the flaky part of the check" reasoning
+// that constant's own comment already gives (40x its 50ms period) -- reusing
+// the already-reviewed number rather than inventing a second one for the
+// identical fact. See this file's own comment at the any_current_present
+// computation for what a stale current reading is made to mean.
+#define CURRENT_MAX_AGE_MS 2000u
 
 // Mirrors safety_guards.c's own CORRELATION_WINDOW_S_DEFAULT (safety_
 // guards.h's cfg field doc comment: "0 -> correlation_window_s=150.0s") --
@@ -433,6 +472,58 @@ static float s_trip_deciding_threshold = 0.0f; // never reports these until a re
 // matching clock_health.h's own "zero-initialise before first use" contract.
 static clock_health_state_t s_clock_health;
 
+// 2026-08-27 audit item 1: previous tick's clock reading, single-writer
+// (safety_core_build_input()'s one call site, same status as s_clock_health
+// just above), used to MEASURE dt_s via tick_dt_compute_s() instead of
+// trusting the compile-time SAFTYFW_PERIOD_SAFETY_CORE_MS constant. Zero-
+// initialised: s_dt_have_prev_now_ms starts false, matching tick_dt_
+// compute_s()'s own "first tick" fallback contract -- there is no previous
+// reading to diff against yet, so the very first call correctly falls back
+// to nominal_dt_s rather than measuring against a garbage 0.
+static uint32_t s_dt_prev_now_ms;
+static bool     s_dt_have_prev_now_ms;
+
+// SWD-readable diagnostics for safety_core_get_dt_diag() (safety_core.h) --
+// same status/pattern as s_clear_trip_pre_*/s_clear_trip_post_call_count
+// below: not on any link frame (those are frozen), single-writer from this
+// file's one call site, read through a getter. See that function's own doc
+// comment for what each field means.
+static volatile float    s_dt_last_measured_s;
+static volatile uint32_t s_dt_clamped_high_count;
+static volatile uint32_t s_dt_clamped_low_count;
+
+// dt_s clamp bounds -- see tick_timing.h's tick_dt_compute_s() doc comment
+// for the full nuisance-trip-storm-vs-under-integration reasoning behind
+// each bound; this is only where the two numbers are chosen for THIS tick
+// rate (SAFTYFW_PERIOD_SAFETY_CORE_MS = 100ms).
+//   - Upper: 10x nominal (1.0s). Caps the worst single-tick credit any one
+//     guard's accumulator can receive to 1.0s -- below even S5's bad_read_
+//     time_s default of 5.0s, the SHORTEST documented graduated-guard
+//     duration bar in this codebase (safety_guards.c BAD_READ_TIME_S_
+//     DEFAULT), so one maximally-clamped tick can never by itself satisfy
+//     any trip's duration requirement.
+//   - Lower: 0.5x nominal (50ms), the same "half of nominal" fraction
+//     clock_health.c's own CLOCK_HEALTH_STALL_DEBOUNCE healthy/stalled
+//     threshold already uses for the identical clock, reused rather than
+//     inventing a second arbitrary fraction.
+#define SAFETY_CORE_DT_NOMINAL_S ((float)SAFTYFW_PERIOD_SAFETY_CORE_MS / 1000.0f)
+#define SAFETY_CORE_DT_MIN_S     (SAFETY_CORE_DT_NOMINAL_S * 0.5f)
+#define SAFETY_CORE_DT_MAX_S     (SAFETY_CORE_DT_NOMINAL_S * 10.0f)
+
+void safety_core_get_dt_diag(float *out_last_measured_dt_s, uint32_t *out_clamped_high_count,
+                              uint32_t *out_clamped_low_count)
+{
+    if (out_last_measured_dt_s) {
+        *out_last_measured_dt_s = s_dt_last_measured_s;
+    }
+    if (out_clamped_high_count) {
+        *out_clamped_high_count = s_dt_clamped_high_count;
+    }
+    if (out_clamped_low_count) {
+        *out_clamped_low_count = s_dt_clamped_low_count;
+    }
+}
+
 // 2026-08-23, round 3 of the CLEAR_TRIP investigation: the differential
 // (S6a clear accepted and survives; S5 clear refused and crashes) rules out
 // stack depth for THIS branch specifically -- the refusal path
@@ -538,14 +629,83 @@ static safety_guard_input_t safety_core_build_input(void)
     // exact read, not inferred. main.c now clears TIMER_DBGPAUSE at boot so
     // this should not happen on this hardware any more (see that fix's own
     // comment for the full mechanism) -- this check does not trust that it
-    // took. dt_s is the same fixed, tick-paced constant used elsewhere in
-    // this function (this function is single-call-site, see s_clock_health's
-    // own declaration comment), so clock_health_observe() is comparing this
-    // read against a genuinely reliable "how much wall-clock time really
-    // passed."
+    // took. clock_health_observe() is deliberately called with the NOMINAL
+    // constant here, not the measured dt_s computed just below: it needs an
+    // independent, reliable "how much time SHOULD have passed" to compare
+    // the clock's own advancement against, and the whole point of dt_s below
+    // is that it is derived FROM this same clock -- feeding a clock-derived
+    // number back into its own stall detector would make a stalled clock
+    // measure itself as healthy (dt_s would stall right alongside now_ms).
     uint32_t now_ms = to_ms_since_boot(get_absolute_time());
     bool clock_stalled =
-        clock_health_observe(&s_clock_health, now_ms, (float)SAFTYFW_PERIOD_SAFETY_CORE_MS / 1000.0f);
+        clock_health_observe(&s_clock_health, now_ms, SAFETY_CORE_DT_NOMINAL_S);
+
+    // 2026-08-27 audit item 1: measured, clamped dt_s -- see tick_timing.h's
+    // tick_dt_compute_s() doc comment for the full fallback/clamp reasoning,
+    // and this file's SAFETY_CORE_DT_MIN_S/MAX_S doc comment for why THESE
+    // two bounds. prev_now_ms/have_prev_now_ms are snapshotted into locals
+    // BEFORE either static is updated below, both because tick_dt_compute_s()
+    // needs the PREVIOUS tick's values (not this tick's, which do not exist
+    // yet) and because the diagnostics block just below needs the same
+    // pre-update values to compute the raw (pre-clamp) measurement for the
+    // clamp-hit counters -- reading the statics twice, before and after their
+    // own update, would have silently used the just-written new value the
+    // second time.
+    uint32_t prev_now_ms      = s_dt_prev_now_ms;
+    bool     have_prev_now_ms = s_dt_have_prev_now_ms;
+    float dt_s = tick_dt_compute_s(now_ms, prev_now_ms, have_prev_now_ms, clock_stalled,
+                                    SAFETY_CORE_DT_NOMINAL_S, SAFETY_CORE_DT_MIN_S,
+                                    SAFETY_CORE_DT_MAX_S);
+
+    // State update for the NEXT call. clock_stalled == true deliberately
+    // clears s_dt_have_prev_now_ms rather than storing now_ms as the new
+    // baseline: now_ms is exactly the frozen/unreliable reading clock_
+    // health_observe() just distrusted, and s_dt_prev_now_ms must never be
+    // set from a reading already known to be bad. This is what makes "any
+    // tick after the clock-stalled fallback has no valid previous
+    // timestamp" (tick_timing.h's own requirement) true -- the tick right
+    // after recovery sees have_prev_now_ms == false and falls back to
+    // nominal_dt_s too, same as the very first tick after boot; only the
+    // tick after THAT resumes measuring real dt against a freshly-
+    // established baseline, never against a timestamp spanning the stall
+    // itself.
+    if (clock_stalled) {
+        s_dt_have_prev_now_ms = false;
+    } else {
+        s_dt_prev_now_ms = now_ms;
+        s_dt_have_prev_now_ms = true;
+    }
+
+    // Diagnostics (safety_core_get_dt_diag(), safety_core.h) -- SWD-visible
+    // record of what just happened, not link-frame content. Clamp-hit
+    // counters only increment when a real measurement (not a nominal_dt_s
+    // fallback tick -- have_prev_now_ms/clock_stalled guard that the same way
+    // tick_dt_compute_s() itself does) needed clamping; recomputing the raw
+    // pre-clamp value here from the SAME pre-update locals used for the call
+    // above, rather than threading a third output out of tick_dt_compute_s(),
+    // keeps that function's signature to exactly the inputs/output this
+    // file's own negative tests need to prove.
+    s_dt_last_measured_s = dt_s;
+    if (have_prev_now_ms && !clock_stalled) {
+        uint32_t raw_elapsed_ms = now_ms - prev_now_ms; // wraparound-safe, same reasoning as above
+        float    raw_measured_s = (float)raw_elapsed_ms / 1000.0f;
+        if (raw_measured_s > SAFETY_CORE_DT_MAX_S) {
+            s_dt_clamped_high_count++;
+        } else if (raw_measured_s < SAFETY_CORE_DT_MIN_S) {
+            s_dt_clamped_low_count++;
+        }
+    }
+
+    // 2026-08-27 audit item 2: "stale reading looks fresh" -- ARCHITECTURE.md
+    // section 6, "Staleness is checked by the consumer, not the producer."
+    // Same treatment context_valid already gets a few lines below, applied
+    // here to the thermo snapshot pulled above. Gated on !clock_stalled for
+    // the identical reason context_valid is: an age computed against a
+    // frozen now_ms reads as ~0 forever, which is the exact "dead producer
+    // reads as fresh" failure this check exists to catch, not a case it is
+    // allowed to fall silent on.
+    bool thermo_fresh =
+        !clock_stalled && snapshot_is_fresh(now_ms, thermo.timestamp_ms, THERMO_MAX_AGE_MS);
 
     // SAFETY_CMD_ANNOUNCE_REBOOT grace window: this is the ONE place that
     // does the announced-timestamp-to-now arithmetic -- safety_guards.c
@@ -656,7 +816,59 @@ static safety_guard_input_t safety_core_build_input(void)
     // already computed -- via current_presence_policy.h, decoupled from
     // k_ct_v_per_a -- using config_store's i_present_a internally (see
     // current_task_reload_cal(), current_task.c).
-    bool any_current_present = current_any_present(&current);
+    //
+    // 2026-08-27 audit item 2: same "stale reading looks fresh" treatment as
+    // thermo above, applied here too. current_snapshot_t has no per-channel
+    // `valid` bit the way thermo_snapshot_t does (ARCHITECTURE.md section 6),
+    // so unlike thermo there is no separate producer-honesty field being
+    // combined with freshness -- current_fresh alone gates whether this tick
+    // trusts the reading at all.
+    //
+    // DELIBERATE CHOICE (there is no S-current-invalid trip the way S5 exists
+    // for thermo, so this needed its own answer, not a copy of thermo's):
+    // a stale current snapshot makes any_current_present read FALSE, the
+    // same "unknown collapses to the input's own safe-inactive default"
+    // treatment context_valid, zone_count, and firing_max_valid already get a
+    // few lines above and below in this same function -- SAFETY_MODEL.md
+    // section 5's documented language for exactly this shape of unknown is
+    // "goes inactive, not pessimistic," which is "reads as absent," not
+    // "reads as present."
+    //   - S3 (load stuck on, TRIP-capable): any_current_present && !relay_
+    //     commanded_recently. Forcing false during staleness means a stale
+    //     current reading can NEVER by itself cause an S3 TRIP -- the
+    //     dangerous direction (an under-detected weld) would be forcing
+    //     TRUE instead, which risks the opposite hazard of accumulating
+    //     s3_stuck_elapsed_s against data that is not actually evidence of
+    //     anything happening right now. Bounded exposure: this only matters
+    //     for the CURRENT_MAX_AGE_MS (2s) window itself -- current_task
+    //     resuming normal publishes immediately resumes real S3 coverage,
+    //     and a current sensor that is stale for LONGER than that (the
+    //     thermo-style repeated-mutex-loss failure) leaves any_current_
+    //     present pinned false, which S4's existing WARN
+    //     ("relay_commanded_continuously && !any_current_present") already
+    //     surfaces as an operator-visible symptom rather than a silent gap
+    //     -- a permanently "absent" current reading on a relay that is
+    //     genuinely, continuously commanded on is exactly S4's trigger
+    //     condition, so this failure does not go unnoticed even though it
+    //     produces no NEW trip path of its own.
+    //   - S9 (contactor welded, the post-trip "K4 open but current still
+    //     flowing" check): also reads any_current_present, so a stale
+    //     reading cannot manufacture evidence of a weld it does not actually
+    //     have -- correct, since "current_sensing_commissioned == false"
+    //     already downgrades S9 to WARN whenever the fact cannot be trusted
+    //     (see safety_core_load_guard_cfg()'s own comment on that field);
+    //     staleness is one more way the fact cannot be trusted this tick,
+    //     and collapsing to false is consistent with that existing gate
+    //     rather than inventing a second one.
+    //   - S4 (WARN only, never TRIP by SAFETY_MODEL.md section 4's own
+    //     design) is the one guard this pushes toward FIRING more readily
+    //     during staleness (relay commanded, no current seen) -- accepted:
+    //     S4 cannot trip, and per the paragraph above, a current sensor
+    //     stuck stale long enough to matter is a real, distinct fault worth
+    //     that WARN surfacing anyway.
+    bool current_fresh =
+        !clock_stalled && snapshot_is_fresh(now_ms, current.timestamp_ms, CURRENT_MAX_AGE_MS);
+    bool any_current_present = current_any_present(&current) && current_fresh;
 
     // S3/S4's relay-correlation facts (SAFETY_MODEL.md section 4) -- both
     // derived from context, so both collapse to false whenever context_valid
@@ -712,7 +924,24 @@ static safety_guard_input_t safety_core_build_input(void)
     safety_core_load_guard_cfg(&cfg_rec);
 
     return (safety_guard_input_t){
-        .tc_valid = thermo.valid,
+        // 2026-08-27 audit item 2: thermo.valid alone is not enough -- a
+        // thermo_task that keeps losing its publish mutex leaves this struct
+        // permanently valid == true off the last successful read.
+        // thermo_fresh (computed above, alongside clock_stalled) closes that:
+        // a stale-but-was-valid reading now collapses to tc_valid == false
+        // here, which s5_bad_read_now() (safety_guards.c) already treats as
+        // a bad read -- CONFIRMED by reading that function directly (`!in->
+        // tc_valid` is one of its four OR'd terms) and by this file's own
+        // negative test (test_tick_timing.c) exercising the same s5_bad_
+        // read_now() logic against a stale-vs-fresh input. This is the
+        // correct fail-safe direction: S5 is graduated (BAD_READ_TIME_S_
+        // DEFAULT = 5.0s consecutive-bad AND BLIND_GRACE_S_DEFAULT = 60.0s
+        // accumulated before it TRIPS, WARN only before that), so a single
+        // merely-slow tick (or even several) cannot nuisance-trip it -- only
+        // a genuinely stuck publish, sustained for tens of seconds, does,
+        // which is exactly the hazard ("safety processor blind and does not
+        // know it") this item exists to make visible instead of silent.
+        .tc_valid = thermo.valid && thermo_fresh,
         .tc_c = thermo.tc_c,
         .cj_c = thermo.cj_c,
         .fault_bits = thermo.fault_bits,
@@ -761,7 +990,11 @@ static safety_guard_input_t safety_core_build_input(void)
         // is still running; suppressing it there would blind the one guard
         // whose entire job is to distrust the trip that just happened.
         .relay_deenergized = !relay_owner_is_energized(),
-        .dt_s = (float)SAFTYFW_PERIOD_SAFETY_CORE_MS / 1000.0f,
+        // 2026-08-27 audit item 1: measured (clamped, fallback-safe) dt_s,
+        // computed above via tick_dt_compute_s() -- no longer the raw
+        // compile-time SAFTYFW_PERIOD_SAFETY_CORE_MS constant. See that call
+        // site's own comment block for the full reasoning.
+        .dt_s = dt_s,
     };
 }
 

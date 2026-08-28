@@ -99,6 +99,7 @@ set(SAFTYFW_APP_SOURCES
     src/tasks/watchdog_task.c
     src/tasks/watchdog_gate.c
     src/tasks/clock_health.c
+    src/tasks/tick_timing.c
     src/tasks/safety_core.c
     # Pure GPIO-level-to-logical-meaning mapping for E-stop/mainFault, split
     # out of discrete_task.c so it is host-testable (test/test_discrete_pin_

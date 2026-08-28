@@ -223,6 +223,36 @@ bool safety_core_get_trip_event(uint8_t *out_trip_seq, safety_trip_t *out_trip_r
 // relay_owner_is_energized() for that).
 bool safety_core_request_enable(bool enable);
 
+// SWD/debug-only diagnostics for the 2026-08-27 audit item 1 fix (measured,
+// not compile-time-constant, dt_s -- see safety_core.c's own comment at its
+// tick_dt_compute_s() call site and tick_timing.h's header comment for the
+// full reasoning). Deliberately NOT part of any link frame: CommonFW/docs/
+// LINK_PROTOCOL.md's frames are frozen, and this is exactly the "observable
+// rather than silent, but not a new wire field" surface safety_core.c's own
+// s_clear_trip_pre_*/s_clear_trip_post_call_count statics (added for the
+// 2026-08-23 CLEAR_TRIP investigation) already established the precedent
+// for -- SWD-readable single-writer statics, safety_core_task's tick the
+// only writer, read here through a getter any task may call, same as those.
+//
+//   out_last_measured_dt_s: the most recent tick's dt_s AFTER clamping (what
+//     the guards actually integrated this tick) -- nominal_dt_s on a fallback
+//     tick (first tick / clock stalled / the tick right after a stall), a
+//     real measurement otherwise.
+//   out_clamped_high_count: how many ticks since boot needed the upper clamp
+//     (a measured dt_s that exceeded max_dt_s) -- a nonzero, growing count
+//     here is direct evidence of the sustained scheduling pressure this fix
+//     exists to surface (ARCHITECTURE.md section 8's flash-write stall,
+//     above all), the exact condition that used to be completely silent.
+//   out_clamped_low_count: the mirror image, ticks needing the lower clamp
+//     (a spuriously tiny measured dt_s) -- expected to stay at 0 in normal
+//     operation; a nonzero count here means something is measuring faster
+//     ticks than vTaskDelayUntil() should ever produce, worth investigating
+//     on its own.
+//
+// Any output pointer may be NULL. Safe to call from any task.
+void safety_core_get_dt_diag(float *out_last_measured_dt_s, uint32_t *out_clamped_high_count,
+                              uint32_t *out_clamped_low_count);
+
 #ifdef __cplusplus
 }
 #endif

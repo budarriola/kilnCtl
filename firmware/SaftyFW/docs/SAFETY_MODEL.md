@@ -782,10 +782,42 @@ latched — it is advisory and the Pico's interlocks always win, which
 `firmware/KilnFW/docs/SAFETY_LINK.md` already documents and the ESP already handles.
 
 **Clearing requires a deliberate operator act**: `SAFETY_CMD_CLEAR_TRIP` (0x0A)
-over the link, or an E-stop assert-then-release cycle (a physical action, at the
-machine, by someone who has looked at the kiln). A clear is refused while the
-tripping condition is still true — otherwise "clear" becomes a way to spam past
-a real fault.
+over the link. **Correction, 2026-08-27 audit:** an earlier version of this
+section additionally claimed "an E-stop assert-then-release cycle (a physical
+action, at the machine, by someone who has looked at the kiln)" as a second,
+independent clear path. No such path exists in code — `discrete_task.c`
+publishes `estop_pressed` as a plain debounced level
+(`discrete_task_estop_pressed()`), nothing anywhere tracks its previous value,
+and `safety_core.c` has no code path that clears a trip on its own initiative;
+the only way a trip's `is_tripped` ever goes back to false is through
+`safety_guards_try_clear()`, and the only caller of that function is
+`link_task.c`'s handling of an incoming `CLEAR_TRIP` frame
+(`link_task.c:1304`). Releasing the E-stop button changes nothing about
+`is_tripped` by itself.
+
+What releasing the E-stop *does* do, for an S7 trip specifically: it is a
+**precondition** the operator must satisfy before `CLEAR_TRIP` will succeed,
+not a substitute for sending it. `safety_guards_try_clear()` resets the guard
+state and re-evaluates one tick against the current input
+(`safety_guards.c:242-243`); `safety_guards_tick()` checks the live
+`in->estop_pressed` level unconditionally near the top of every tick
+(`safety_guards.c:461-464`, "the fastest guard in the set", checked before
+any windowed guard). If the button is still pressed, that recheck re-trips
+within the same call and the clear is refused; only once the button has
+actually been released does the recheck pass. So in practice an operator
+does still have to walk to the machine, look at it, and release the E-stop —
+but they *also* have to send `CLEAR_TRIP` afterward. Silence after release
+leaves the trip latched forever, matching §2's "latching is not
+auto-recovery": there is no timer, no edge watcher, and no code that decides
+on its own that a released button means it is safe to re-arm K4.
+
+A clear is refused while the tripping condition is still true — otherwise
+"clear" becomes a way to spam past a real fault.
+
+**What an operator should actually do to recover from an E-stop trip:**
+release the physical E-stop, confirm the kiln is actually safe, then issue
+`SAFETY_CMD_CLEAR_TRIP` (0x0A) from the ESP UI / `kiln_call`. Both steps are
+required; neither alone clears the trip.
 
 `CLEAR_TRIP` is code-complete on both sides of the check as of 2026-08-19:
 `link_task.c` decodes the frame, refuses locally (never calling into
@@ -1005,7 +1037,9 @@ on a later tick). 378/378 host checks pass.
 - [ ] WARN is the default class; each TRIP has a written argument here
 - [ ] Trips latch; no condition-cleared auto-reset anywhere
 - [ ] `CLEAR_TRIP` refused while the condition holds, and on a `trip_mask` mismatch
-- [ ] E-stop assert/release cycle works as the physical clear path
+- [ ] E-stop release is honored as a *precondition* for `CLEAR_TRIP` to
+      succeed on an S7 trip (release alone does not clear it -- see section 6's
+      2026-08-27 correction)
 - [ ] GRACE state evaluates and reports but never energizes K4
 - [ ] Context-consuming guards go **inactive** on stale context, never pessimistic
 - [ ] `boot_id` change resets every correlation window
