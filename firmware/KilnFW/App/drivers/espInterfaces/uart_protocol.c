@@ -328,7 +328,29 @@ static void handle_raw_frame(uart_protocol_t *proto, const uint8_t *raw, size_t 
 static void uart_protocol_rx_task(void *arg)
 {
     uart_protocol_t *proto = (uart_protocol_t *)arg;
-    uint8_t chunk[32];
+    /* RAISED from 32 to STUFFED_FRAME_MAX (2026-08-28, live-hardware
+     * commissioning defect): at 32 this task needed ~5-8 separate
+     * uart_read_bytes() calls to assemble one CONFIG_PAGE reply (157-253 raw
+     * bytes, ~300-528 stuffed) versus 1-2 for the small, fast-succeeding
+     * STATUS/DIAG/POWER frames -- and every one of those calls is a real
+     * scheduler round trip on a task that runs at UART_PROTOCOL_TASK_PRIORITY
+     * (6), well below WiFi's. Each extra call is another chance for this task
+     * to be preempted and made to wait its turn, and KilnFW's
+     * SAFETY_LINK_REPLY_TIMEOUT_MS budget (safety_link.h, ~144ms at 230400)
+     * has no slack to spend on that: it derives from wire time plus a fixed
+     * 100ms for the PICO's own task latency, not the ESP's own RX-assembly
+     * overhead. Measured live: GET_CONFIG_PAGE page 1 (the bigger of the two
+     * pages, 27 entries/~157 raw bytes) timed out on essentially every fetch
+     * attempt while STATUS kept succeeding -- exactly the asymmetry this
+     * chunk size explains and a Pico-side fix (LINK_TASK_POLL_MS, link_task.c)
+     * did not touch. Reading a whole worst-case frame in one call removes
+     * that per-chunk scheduling tax entirely; the underlying UART ring
+     * buffer is 4096 bytes (uart_owner.c's UART_OWNER_RX_RING_BUF_SIZE), so
+     * this never asks uart_read_bytes() for more than the driver already
+     * buffers. This buffer lives on this task's own stack, which is PSRAM
+     * (see this file's stack-depth comment below) -- the extra ~500 bytes
+     * costs nothing budgeted against internal DRAM. */
+    uint8_t chunk[STUFFED_FRAME_MAX];
     uint8_t raw[RAW_FRAME_MAX];
     size_t raw_len = 0;
     bool in_frame = false;

@@ -86,7 +86,7 @@ static const uint32_t s_checkin_deadline_ms[WATCHDOG_CHECKIN_COUNT] = {
     [WATCHDOG_CHECKIN_DISCRETE_TASK]   =  10u * WATCHDOG_DEADLINE_MARGIN_MULTIPLE,  // SAFTYFW_PERIOD_DISCRETE_TASK_MS, task_priorities.h   (30 ms)
     [WATCHDOG_CHECKIN_THERMO_TASK]     = WATCHDOG_DEADLINE_CAP_MS,                  // THERMO_TASK_UNCONFIGURED_WAIT_MS, thermo_task.c: 500 ms * 3 = 1500 ms, capped (see comment above)
     [WATCHDOG_CHECKIN_CURRENT_TASK]    =  50u * WATCHDOG_DEADLINE_MARGIN_MULTIPLE,  // SAFTYFW_PERIOD_CURRENT_TASK_MS, task_priorities.h    (150 ms)
-    [WATCHDOG_CHECKIN_LINK_TASK]       = 100u * WATCHDOG_DEADLINE_MARGIN_MULTIPLE,  // LINK_TASK_POLL_MS, link_task.c                       (300 ms)
+    [WATCHDOG_CHECKIN_LINK_TASK]       =  10u * WATCHDOG_DEADLINE_MARGIN_MULTIPLE,  // LINK_TASK_POLL_MS, link_task.c (lowered 100->10 2026-08-28, see that constant's own comment) (30 ms)
     [WATCHDOG_CHECKIN_LOG_TASK]        = WATCHDOG_DEADLINE_CAP_MS,                  // LOG_TASK_POLL_MS, log_task.c: 500 ms * 3 = 1500 ms, capped (see comment above)
     [WATCHDOG_CHECKIN_UPDATE_TASK]     = 100u * WATCHDOG_DEADLINE_MARGIN_MULTIPLE,  // UPDATE_TASK_POLL_MS, update_task.c                   (300 ms)
 };

@@ -135,7 +135,31 @@
 // Bounded wait, not a blocking read: this task also owns the 500 ms TX
 // cadence and must check in with watchdog_task, so it polls uart_owner's RX
 // ring on a short period rather than blocking on a queue receive.
-#define LINK_TASK_POLL_MS          100
+//
+// LOWERED from 100 to 10 (2026-08-28, live-hardware commissioning defect).
+// This period gates how long a request byte sitting in uart_owner's RX ring
+// can wait before link_task_fn() even LOOKS at it -- uart_owner_h's own
+// header comment says so explicitly ("link_task drains it by polling...
+// rather than blocking on a queue receive"). KilnFW's SAFETY_LINK_REPLY_
+// TIMEOUT_MS (safety_link.h) budgets for exactly this behaviour with "a
+// fixed 100 ms for the Pico's own task latency" -- a number that assumed
+// this constant's OLD value and left zero slack for anything else (wire
+// time for the actual small request/reply frames, FreeRTOS scheduling
+// jitter, the ESP's own dispatch). At 100/100 the two constants raced to a
+// photo finish that the Pico's own polling almost always lost: measured live
+// with commit ddbd024 flashed, GET_CONFIG_PAGE page 1 timed out on
+// essentially every fetch attempt (safety_get_link_stats(): sent 60,
+// timeouts 54) while page 0 only ever arrived via the ESP's own stash-
+// adoption of a reply that missed its own window -- both symptoms of a
+// reply that is consistently, not randomly, late by an amount close to this
+// constant's old value. Every other producer/consumer this task owns (the
+// 500 ms status cadence, the trip-event burst, watchdog_task_checkin) stays
+// correct at the faster period -- they all key off elapsed-tick comparisons
+// against periods far longer than 10 ms, not off this constant's absolute
+// value. Do not raise this back toward 100 without re-deriving KilnFW's
+// SAFETY_LINK_REPLY_TIMEOUT_MS margin at the same time -- the two are
+// coupled even though they live in separate firmware trees.
+#define LINK_TASK_POLL_MS          10
 #define LINK_STATUS_TX_PERIOD_MS   500
 // Frame B (SAFETY_CMD_DIAG) cadence: slower than Frame A, deliberately.
 // LINK_PROTOCOL.md's own text on Frame B: "additive... can ship before the
@@ -518,6 +542,14 @@ static volatile uint32_t s_power_encode_len = 0;
 static volatile uint8_t  s_power_encode_status = 0;
 static volatile uint32_t s_power_pre_broadcast_count = 0;
 
+// 2026-08-28 diagnostic -- which page_index was actually requested and what
+// page_index the OUTGOING reply's header actually carries, for the MOST
+// RECENT link_task_send_config_page() call. Read over SWD (no firmware
+// consumer) to settle whether the ESP genuinely never gets a page 1 REQUEST
+// dispatched to this function, or gets one but the reply's own header ends
+// up carrying the wrong index.
+static volatile uint32_t s_last_config_page_requested_index = 0xFFu;
+static volatile uint32_t s_last_config_page_reply_index = 0xFFu;
 static volatile uint32_t s_config_page_send_entry_count = 0;
 static volatile uint32_t s_config_page_encode_len = 0;
 static volatile uint8_t  s_config_page_encode_status = 0;
@@ -1922,6 +1954,7 @@ static void link_task_handle_get_param(const kilnlink_frame_t *frame)
 // bytes, keeping only how many entries each replayed page consumed.
 static void link_task_send_config_page(uint8_t page_index)
 {
+    s_last_config_page_requested_index = page_index; // 2026-08-28 diagnostic
     s_config_page_send_entry_count++; // 2026-08-23 call-path diagnostic, checkpoint 1
 
     config_store_record_t rec;
@@ -1986,6 +2019,8 @@ static void link_task_send_config_page(uint8_t page_index)
     // the early-return can act on it.
     s_config_page_encode_len = (uint32_t)len;
     s_config_page_encode_status = (uint8_t)status;
+    // offset 1 = page_index per kilnlink_config_page.h's wire layout comment
+    s_last_config_page_reply_index = (len > 1) ? payload[1] : 0xFFu; // 2026-08-28 diagnostic
     if (len == 0) {
         s_diag_page_last_outcome = DIAG_PAGE_OUTCOME_PACK_FAILED; // 2026-08-23 diagnostic
         return; // can't happen -- payload is sized to the wire's own payload cap
@@ -2197,7 +2232,7 @@ static void link_task_rx_process_byte(uint8_t b)
 
 // --- Frame D (TRIP_EVENT) polling -------------------------------------------
 
-// Called once per link_task_fn() loop iteration (~100ms, LINK_TASK_POLL_MS).
+// Called once per link_task_fn() loop iteration (~10ms, LINK_TASK_POLL_MS).
 // Two independent jobs:
 //   1. Notice a NEW trip (safety_core_get_trip_event()'s trip_seq advanced
 //      past what this task has already started a burst for) and, if so,
@@ -2232,7 +2267,7 @@ static void link_task_poll_trip_event(TickType_t now)
         // ESP-context data in this build -- see that struct's field
         // comments) -- the best this task can honestly do is pull them here,
         // "at detection time" rather than the literal trip tick, which is at
-        // most one LINK_TASK_POLL_MS (~100ms) late. Documented here rather
+        // most one LINK_TASK_POLL_MS (~10ms) late. Documented here rather
         // than silently presented as exact.
         current_snapshot_t cur;
         current_task_get_snapshot(&cur);

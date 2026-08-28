@@ -3244,6 +3244,40 @@ esp_err_t safety_link_get_config_page(SafetyLinkClass *link, uint8_t page_index,
     static uint32_t s_page_adopted;
     uart_proto_message_t early_msg;
     bool got_early = false;
+    /* 2026-08-28 ROOT CAUSE FIX (live commissioning defect: page 1 timed out
+     * on essentially every fetch attempt, forever, while page 0 always
+     * eventually succeeded via adoption).
+     *
+     * This drain passes out_config_page=&early_msg, which -- unlike the
+     * NULL passed everywhere else a CONFIG_PAGE might arrive unsolicited --
+     * makes safety_drain_inbox_ex() hand back ANY CONFIG_PAGE frame it finds
+     * sitting in the live inbox rather than stashing it (its own switch-case
+     * for KILNLINK_CONFIG_PAGE_CMD: capture into *out_config_page when a
+     * caller supplied one, stash only when nobody did). So when THIS page's
+     * own late reply (from a previous attempt that already gave up) happens
+     * to be sitting in the inbox when the ESP starts asking for a DIFFERENT
+     * page, this drain captures it here -- and the mismatch handling below
+     * used to just log it (ESP_LOGD) and let it fall out of scope,
+     * discarding the one frame the LATER request for that same page needed
+     * to find in the stash. Concretely: attempt N's page 1 reply arrives
+     * late; attempt N+1 starts, its own pre-send drain for page 0 happens to
+     * run while that late page-1 reply is still sitting in the inbox,
+     * captures it here (since it captures indiscriminately), finds it does
+     * not match page 0, and used to throw it away -- so page 1 could NEVER
+     * be recovered by the stash, no matter how many attempts ran, even
+     * though the stash mechanism exists specifically to rescue exactly this
+     * kind of late arrival (safety_take_stashed_config_page()'s own doc
+     * comment). Verified live: s_page_adopted only ever climbed for page 0
+     * ("adopted an already-arrived page 0 (N so far)"); "page 1" never once
+     * appeared in that log line across many fetch attempts.
+     *
+     * Fix: a mismatch here gets the SAME treatment the main wait loop below
+     * already gives a mismatch (see its own comment) -- stash it instead of
+     * dropping it, so whichever page it actually belongs to can still adopt
+     * it later. Overwriting whatever was already stashed is the same
+     * trade-off safety_drain_inbox_ex()'s own stash branch already makes
+     * (single slot, newest wins) -- unchanged here, just applied on this
+     * path too instead of skipped. */
     (void)safety_drain_inbox_ex(link, 0, false, NULL, NULL, &early_msg, &got_early, NULL, NULL);
     if (safety_take_stashed_config_page(link, page_index, &early_msg)) {
         got_early = true; /* prefer the stash: it is the older, already-orphaned frame */
@@ -3260,7 +3294,13 @@ esp_err_t safety_link_get_config_page(SafetyLinkClass *link, uint8_t page_index,
             *out = early_page;
             return ESP_OK;
         }
-        ESP_LOGD(TAG, "get_config_page: discarded a queued CONFIG_PAGE that was not page %u",
+        if (safety_lock(link)) {
+            link->stashed_config_page = early_msg;
+            link->has_stashed_config_page = true;
+            link->stashed_config_page_tick = xTaskGetTickCount();
+            safety_unlock(link);
+        }
+        ESP_LOGD(TAG, "get_config_page: stashed a queued CONFIG_PAGE that was not page %u",
                  (unsigned)page_index);
     }
 

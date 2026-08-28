@@ -14,7 +14,8 @@
 // this backwards on either side kills the link.
 //
 // RX is IRQ-driven into a small ring buffer; link_task drains it by polling
-// (LINK_TASK_POLL_MS elsewhere) rather than blocking on a queue receive --
+// (LINK_TASK_POLL_MS elsewhere, 10 ms as of 2026-08-28 -- see that constant's
+// own comment for why it moved off 100) rather than blocking on a queue receive --
 // link_task also has to run its own 500 ms TX cadence and check in with
 // watchdog_task, so "poll a ring that an IRQ fills" fits its existing loop
 // shape better than an RX callback that would need its own synchronisation

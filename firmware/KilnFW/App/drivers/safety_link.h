@@ -476,14 +476,45 @@ static inline bool safety_drain_still_waiting(bool want_status, bool got_status,
  *
  * Worst-case wire time is KILNLINK_FRAME_STUFFED_MAX bytes at 10 bits each
  * (8N1 plus start and stop). Doubled, because request and reply both cross
- * the same wire, plus a fixed 100 ms for the Pico's own task latency. That
+ * the same wire, plus a fixed margin for latency neither wire-time term
+ * covers (see the note appended just below this comment for why it is now
+ * 300, not the original 100). That
  * gave ~1.2 s at the old 9600 ceiling and ~190 ms at 115200; the formula
  * scales automatically with whatever KILNCTL_SAFETY_BAUD_RATE is currently
  * set to (KilnFW/App/drivers/Kconfig has the current measured value) now
- * that the optocoupler ceiling is gone. */
+ * that the optocoupler ceiling is gone.
+ *
+ * RAISED from 100 to 300 (2026-08-28, live-hardware commissioning defect).
+ * The 100 ms figure was labelled "for the Pico's own task latency", but the
+ * Pico's OWN measurement of that latency (SaftyFW's link_task.c,
+ * s_page_reply_us_max, decode-to-send-return) never exceeded ~900 us live --
+ * the 100 ms was never actually being spent there. What the margin has to
+ * cover, and what the old value left zero slack for, is everything AFTER the
+ * Pico hands bytes to its own TX ISR: physical wire time for the ACTUAL
+ * (usually much smaller than worst-case) frame, this side's own RX task
+ * reassembling it a chunk at a time (espInterfaces/uart_protocol.c's
+ * uart_protocol_rx_task, itself raised off a 32-byte chunk the same day --
+ * see that change's own comment), and ordinary FreeRTOS scheduling jitter on
+ * a board also running WiFi and LVGL. At 100 ms fixed, GET_CONFIG_PAGE page 1
+ * (the bigger of the safety config's two pages) timed out on essentially
+ * every live fetch attempt (safety_get_link_stats(): sent 60, timeouts 54)
+ * while page 0 only ever converged via safety_link.c's own stash-adoption of
+ * a reply that had already missed its window -- not randomly, but on a
+ * consistent margin too tight for ordinary jitter to survive.
+ *
+ * The overall multi-page wall-clock ceiling (safety_cfg_store.c's
+ * SAFETY_CFG_STORE_REFETCH_BUDGET_MS, 2000 ms) is UNCHANGED by this -- it
+ * still independently bounds how long safety_cfg_store_refetch_locked() may
+ * block regardless of this constant, which is what keeps this a bounded,
+ * contained change rather than a repeat of the two prior budget-growing
+ * attempts that put the board into a panic-reboot loop
+ * (safety_link_get_config_page()'s own comment): even at this new value, two
+ * page fetches back to back cost at most ~700 ms (2 * ~345 ms + the 40 ms
+ * inter-page pacing), comfortably inside that 2000 ms ceiling in a single
+ * poll iteration rather than needing several. */
 #define SAFETY_LINK_REPLY_TIMEOUT_MS \
     ((uint32_t)(((KILNLINK_FRAME_STUFFED_MAX * 10u * 1000u * 2u) \
-                 / CONFIG_KILNCTL_SAFETY_BAUD_RATE) + 100u))
+                 / CONFIG_KILNCTL_SAFETY_BAUD_RATE) + 300u))
 
 /* Floor on the sleep between polls, so a link whose requests already burn
  * most of the period (see SAFETY_LINK_ACK_TIMEOUT_MS) still yields. */
