@@ -24,15 +24,28 @@ static void nav_cb(lv_event_t *e)
  * not possible for a page built DETACHED (kiln_ui.c builds a page before it
  * is ever shown, and geometry read before the first render is all zero).
  *
- * ui_theme_apply_touch_area(btn, false) is the non-compact case: it extends
- * the effective click area outward toward UI_THEME_MIN_TOUCH_TARGET_PX
- * rather than applying the small capped extension dense grids get. That is
- * the right choice here because nothing else is adjacent inside the bar
- * except the neighbouring icons, whose own centres are
- * UI_TOPBAR_ICON_W_PX + UI_TOPBAR_ICON_GAP_PX apart -- overlapping extended
- * boxes resolve by child order, so the worst case is a tap in the gap
- * landing on one of the two icons the user was aiming between, never on
- * something unrelated. */
+ * ui_theme_apply_touch_area(btn, true) -- COMPACT, not the sparse case this
+ * comment used to argue for. That earlier reasoning ("nothing else is
+ * adjacent... the worst case is a tap in the gap landing on one of the two
+ * icons the user was aiming between") was never checked against hardware
+ * and was wrong: measured live on the panel, the non-compact extension
+ * (toward UI_THEME_MIN_TOUCH_TARGET_PX=72px, i.e. ~24px past each 36x26
+ * icon's own edge) is many times wider than the UI_TOPBAR_ICON_GAP_PX=4px
+ * gap between icons. A tap dead-center on an icon's OWN drawn rectangle
+ * still lands inside a LATER-BUILT neighbour's expanded box, and LVGL's
+ * z-order-first-match hit test (see ui_theme.h) hands it to that neighbour,
+ * not the icon under the finger. Icons are built left-to-right (Back, Home,
+ * Prev, Next, Gear -- see ui_topbar_create() below), so every icon except
+ * the last in a row was shadowed by whichever came after it: Back was
+ * ALWAYS shadowed (something always follows it -- Home at minimum), which
+ * is exactly the reported "none of the back buttons work". Compact caps the
+ * extension at UI_THEME_PADDING_PX/2 either side, small enough that
+ * adjacent icons' expanded boxes no longer swallow each other -- see
+ * ui_theme_apply_touch_area()'s own comment for why compact is capped that
+ * way. ui_topbar_create() below additionally registers the whole icon row
+ * as a touch group (ui_theme_register_touch_group()) so that even the thin
+ * sliver where two icons' compact-expanded boxes still meet resolves by
+ * nearest real center instead of z-order, as defense in depth. */
 static lv_obj_t *build_icon(lv_obj_t *parent, const char *symbol, lv_event_cb_t cb, void *user_data)
 {
     lv_obj_t *btn = lv_button_create(parent);
@@ -48,7 +61,7 @@ static lv_obj_t *build_icon(lv_obj_t *parent, const char *symbol, lv_event_cb_t 
     lv_obj_center(label);
 
     lv_obj_update_layout(btn);
-    ui_theme_apply_touch_area(btn, false);
+    ui_theme_apply_touch_area(btn, true);
     return btn;
 }
 
@@ -148,6 +161,31 @@ void ui_topbar_create(lv_obj_t *scr, const ui_topbar_cfg_t *cfg, ui_topbar_t *ou
         }
         if (cfg->gear_cb) {
             out->gear_btn = build_icon(icons, LV_SYMBOL_SETTINGS, cfg->gear_cb, NULL);
+        }
+
+        /* Every icon here got its click area extended toward
+         * UI_THEME_MIN_TOUCH_TARGET_PX (72px) by ui_theme_apply_touch_area()
+         * above, but each icon is only UI_TOPBAR_ICON_W_PX (36px) wide with
+         * a UI_TOPBAR_ICON_GAP_PX (4px) gap to its neighbor -- the expanded
+         * boxes overlap by a wide margin. Measured on hardware: with no
+         * arbitration, LVGL's z-order-first-match hit test (see
+         * ui_theme.h's touch-group block comment) always resolves that
+         * overlap to whichever icon was BUILT LATER (higher z), so every
+         * icon except the last in the row was untappable -- Back, built
+         * first, was shadowed by Home/Prev/Next/Gear on every page that had
+         * any of them, which is exactly "none of the back buttons work".
+         * Registering the whole row as one touch group switches overlap
+         * resolution to nearest-center instead of z-order, using the
+         * arbiter ui_theme.c already provides for exactly this case. */
+        lv_obj_t *members[5];
+        size_t member_count = 0;
+        if (out->back_btn) members[member_count++] = out->back_btn;
+        if (out->home_btn) members[member_count++] = out->home_btn;
+        if (out->prev_btn) members[member_count++] = out->prev_btn;
+        if (out->next_btn) members[member_count++] = out->next_btn;
+        if (out->gear_btn) members[member_count++] = out->gear_btn;
+        if (member_count >= 2) {
+            ui_theme_register_touch_group(members, member_count);
         }
     }
 

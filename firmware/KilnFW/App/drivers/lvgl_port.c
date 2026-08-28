@@ -276,6 +276,34 @@ static int32_t touch_raw_to_px(uint16_t raw, uint16_t panel_extent, bool invert)
     return (int32_t)px;
 }
 
+/* Shared by both the physical-touch and injected-touch paths below --
+ * originally this lived only in the physical path, which meant
+ * touch_inject() (and therefore touch_log_tap_targets()/this whole tool
+ * chain) could never exercise or verify it: TOUCH_CMD_INJECT's early
+ * `return` in touch_read_cb() skipped straight past it. That made the
+ * back-button overlap bug (adjacent topbar icons' extended click areas
+ * overlapping, resolved by LVGL's z-order instead of nearest-center)
+ * invisible to synthetic taps even after ui_topbar.c started registering
+ * the icon row as a touch group -- a real finger got the fix, an injected
+ * tap at the same coordinate did not. Factored out and called from both
+ * places so injected touches see exactly the same arbitration a physical
+ * touch does. */
+static void apply_touch_group_arbitration(lv_indev_data_t *data)
+{
+    if (!ui_theme_touch_groups_active()) {
+        return;
+    }
+    lv_point_t raw_point = { .x = data->point.x, .y = data->point.y };
+    lv_obj_t *default_hit = lv_indev_search_obj(lv_screen_active(), &raw_point);
+    lv_obj_t *target = ui_theme_resolve_touch_target(default_hit, raw_point);
+    if (target && target != default_hit) {
+        lv_area_t coords;
+        lv_obj_get_coords(target, &coords);
+        data->point.x = (coords.x1 + coords.x2) / 2;
+        data->point.y = (coords.y1 + coords.y2) / 2;
+    }
+}
+
 static void touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
 {
     /* Pull-based replacement for the old one-shot "first call reached" log
@@ -353,6 +381,9 @@ static void touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
             if (p->idle) {
                 screen_idle_inject_touch(p->idle, (uint16_t)inject_x, (uint16_t)inject_y, inject_pressed);
             }
+            if (inject_pressed) {
+                apply_touch_group_arbitration(data);
+            }
             return;
         }
     }
@@ -415,17 +446,7 @@ static void touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
      * point through the same public search path -- so rewriting the point
      * here is sufficient to redirect the press; nothing about LVGL's own
      * press/release/drag state machine needs to be touched or duplicated. */
-    if (ui_theme_touch_groups_active()) {
-        lv_point_t raw_point = { .x = px, .y = py };
-        lv_obj_t *default_hit = lv_indev_search_obj(lv_screen_active(), &raw_point);
-        lv_obj_t *target = ui_theme_resolve_touch_target(default_hit, raw_point);
-        if (target && target != default_hit) {
-            lv_area_t coords;
-            lv_obj_get_coords(target, &coords);
-            data->point.x = (coords.x1 + coords.x2) / 2;
-            data->point.y = (coords.y1 + coords.y2) / 2;
-        }
-    }
+    apply_touch_group_arbitration(data);
 
     if (p->idle) {
         screen_idle_inject_touch(p->idle, (uint16_t)px, (uint16_t)py, true);
