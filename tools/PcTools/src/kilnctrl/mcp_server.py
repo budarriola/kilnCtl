@@ -77,7 +77,7 @@ from mcpkit import workbench
 from mcpkit.registry import collapse
 from mcpkit.serve import serve
 
-from . import actions, config_presets, debug_probe, devices, mcp_facade, openocd_util, pico_gpio_probe, settings, wifi_credentials, zones_http_client
+from . import actions, config_presets, debug_probe, devices, mcp_facade, openocd_util, pico_gpio_probe, settings, stale_check, wifi_credentials, zones_http_client
 from .autotune import AutotuneClient, AutotuneQueryError
 from .control import ControlClient, ControlQueryError
 from .device_log import LogClient
@@ -647,7 +647,7 @@ def kill_openocd_sessions() -> str:
 
 
 @_tool()
-def flash_firmware(board_cfg: str = "board/esp32s3-builtin.cfg", retry_once: bool = True) -> str:
+def flash_firmware(board_cfg: str = "board/esp32s3-builtin.cfg", retry_once: bool = True, allow_stale: bool = False) -> str:
     """Flashes KilnFW/build/{bootloader,partition_table,KilnCtrl}.bin to the
     board over JTAG via OpenOCD -- the ONLY sanctioned way to flash this
     board (never esptool/`idf.py flash`, per CLAUDE.md). Always writes all
@@ -658,6 +658,16 @@ def flash_firmware(board_cfg: str = "board/esp32s3-builtin.cfg", retry_once: boo
 
     Requires `idf.py build` to have already produced KilnFW/build/*.bin --
     this tool does not build, only flashes.
+
+    Before flashing, refuses if KilnCtrl.bin looks stale relative to the
+    current source tree (see stale_check.py's module docstring for the full
+    mechanism: it compares the git commit recorded in build_info.h at build
+    time against current HEAD, and -- if the tree has uncommitted changes in
+    firmware/KilnFW or firmware/CommonFW -- whether any of those changed
+    files are newer than the binary). This catches flashing a binary built
+    before the commit/edit it claims to be. Pass allow_stale=True to flash
+    anyway (deliberate reflash-the-existing-image or flash-without-rebuild
+    cases) -- the refusal message is still returned as a warning line first.
 
     A single "Verify Failed" on the very first attempt is a known, benign,
     environment-specific quirk (documented in docs/PROJECT_STATUS.md) that
@@ -682,6 +692,16 @@ def flash_firmware(board_cfg: str = "board/esp32s3-builtin.cfg", retry_once: boo
     if missing:
         return "error: missing build output(s), run `idf.py build` first: " + ", ".join(missing)
 
+    stale = stale_check.check_kilnfw_stale(kiln_fw_root)
+    if stale.stale:
+        _session_log.warning("flash_firmware: stale binary detected: %s", stale.reason)
+        if not allow_stale:
+            return (
+                "error: refusing to flash a stale binary -- " + stale.reason + "\n\n"
+                "Rebuild with build_kilnfw first, or pass allow_stale=True to flash "
+                "this binary anyway."
+            )
+
     kill_openocd_sessions()  # a stale session holding the JTAG interface looks identical to a flash failure
 
     tcl = (
@@ -689,9 +709,11 @@ def flash_firmware(board_cfg: str = "board/esp32s3-builtin.cfg", retry_once: boo
         "program_esp build/partition_table/partition-table.bin 0x8000 verify; "
         "program_esp build/KilnCtrl.bin 0x810000 verify reset exit"
     )
+    stale_prefix = f"WARNING: flashed a stale binary anyway ({stale.reason})\n" if (stale.stale and allow_stale) else ""
+
     ok, output = _run_openocd(openocd_exe, board_cfg, tcl, cwd=kiln_fw_root, timeout_s=90)
     if ok:
-        return "flashed and verified OK (bootloader + partition table + app), board reset and running"
+        return stale_prefix + "flashed and verified OK (bootloader + partition table + app), board reset and running"
 
     if retry_once:
         _session_log.warning("flash_firmware: first attempt failed, retrying once (known benign quirk)")
@@ -768,7 +790,7 @@ def get_openocd_status() -> str:
 
 
 @_tool()
-def debug_program(peer: str, elf_path: Optional[str] = None, confirm: bool = False) -> str:
+def debug_program(peer: str, elf_path: Optional[str] = None, confirm: bool = False, allow_stale: bool = False) -> str:
     """Flashes an ELF to `peer` ("esp", "pico", or "sim") over OpenOCD and resets it.
     Writes flash on a live board -- refused unless `confirm=True` is passed
     explicitly (tools/PcTools/TODO.md's "flash writes require an explicit
@@ -781,6 +803,14 @@ def debug_program(peer: str, elf_path: Optional[str] = None, confirm: bool = Fal
     generic path is for the two RP2040s, which each ship one plain ELF with no
     bootloader.
 
+    For peer="pico" (SaftyFW), same staleness refusal as flash_firmware(): the
+    ELF's build-identity header (saftyfw_build_info.h) is checked against
+    current HEAD and, if firmware/SaftyFW or firmware/CommonFW have
+    uncommitted changes, against those changed files' mtimes -- see
+    stale_check.py. Pass allow_stale=True to flash anyway. Only checked when
+    using the peer's default ELF and default build-info location; an explicit
+    elf_path bypasses the check (nothing to compare it against).
+
     peer="sim" is the SimFW bench fixture, reached through the SECOND
     CMSIS-DAP probe on this bench. Both probes are the same VID:PID, so the
     peer's serial is pinned in debug_probe.py -- that pin is what stops a
@@ -790,10 +820,24 @@ def debug_program(peer: str, elf_path: Optional[str] = None, confirm: bool = Fal
     answer the instant this returns."""
     if not confirm:
         return "error: flash write refused without confirm=True -- this writes flash on a live board"
+
+    stale_prefix = ""
+    if peer == debug_probe.PEER_PICO and elf_path is None:
+        stale = stale_check.check_saftyfw_stale(debug_probe._safty_fw_root())
+        if stale.stale:
+            _session_log.warning("debug_program: stale ELF detected for peer=%s: %s", peer, stale.reason)
+            if not allow_stale:
+                return (
+                    "error: refusing to flash a stale ELF -- " + stale.reason + "\n\n"
+                    "Rebuild with build_saftyfw_host_tests/the SaftyFW build first, or pass "
+                    "allow_stale=True to flash this ELF anyway."
+                )
+            stale_prefix = f"WARNING: flashed a stale binary anyway ({stale.reason})\n"
+
     ok, output = debug_probe.program(peer, elf_path)
     _session_log.warning("debug_program: %s peer=%s ok=%s", "programmed" if ok else "FAILED to program", peer, ok)
     if ok:
-        return f"programmed {peer} OK, reset and running"
+        return stale_prefix + f"programmed {peer} OK, reset and running"
     tail = "\n".join(output.strip().splitlines()[-25:])
     return f"error: program failed for {peer}:\n{tail}"
 
