@@ -1099,6 +1099,45 @@ owner had to ask.
 - [ ] A host harness that links `safety_link.c` itself, rather than only the
       extracted decision
 
+## M14 — Verification you can trust · *opened and largely closed 2026-08-28*
+
+Not a feature milestone. It exists because on 2026-08-28 the sentence "tests
+pass, build clean, flashed and verified" could be true and worthless, and
+almost every defect found that day was something reporting success it had not
+earned.
+
+- [x] **`build_kilnfw` reported OK for builds that failed.** PowerShell does not
+      propagate a native command's exit code as its own without an explicit
+      `exit $LASTEXITCODE`, so `powershell.exe` returned 0 whatever ninja did.
+      Caught live: "OK in 4.8s" printed over a log containing
+      `ninja: build stopped: subcommand failed`. **The most expensive instance
+      of the structurally-unfailable check in this repo, because it sat above
+      all the others** — every guard script, host suite and review funnelled
+      through a tool that could not say no. Every sibling tool was checked
+      rather than assumed to share the bug; only this one used `-Command`
+- [x] **`flash_firmware` would flash a stale binary and report success.** It
+      checked only that the `.bin` files existed. Composed with the above into
+      something worse than either: edit, build, flash, then verify behaviour
+      that had nothing to do with the edit. Now compares the RECORDED build
+      commit against HEAD — exact, and right in the case timestamps get wrong
+      (a dirty worktree flashing a clean-tree binary). It caught a real
+      staleness on its first run, and refused a flash minutes later
+- [x] **Two stack overflows, one after it crashed and one before.**
+      `safety_poll` died twice with `IllegalInstruction` — a canary trip, not a
+      watchdog — holding 1192 B of 4096 because the config refetch put ~1070 B
+      of locals on its frame this week and the stack did not move.
+      `safety_proto_rx` was then found at 25% by *reading the margins* rather
+      than by a second crash, having lost ~500 B to the enlarged RX chunk the
+      same day. Both tasks were unregistered with `stack_margin`: the
+      measurement existed, the tasks were not in it
+- [x] Two new guard scripts (12 → 14): every `src/**.c` in its CMakeLists, and
+      no relay write outside `kiln_io_owner`. **Both found real violations on
+      their first run**, one of which three rounds of opus review had read past
+      because reviews read the diff and it was not in the diff
+- [ ] A guard for the "consumer exists, producer does not" class — four
+      instances now, and the existing guard checks only that a struct field has
+      *an assignment*, not that the assignment carries a real measurement
+
 ## M10 — Instrumentation: make the board tell you when it is wrong
 
 Not a feature milestone. This exists because four separate defects in this
