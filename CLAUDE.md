@@ -19,15 +19,13 @@ links to the per-area plans that own the detail.
 
 ## Tooling: always go through the MCP facade
 
-**Anything involving the boards, the bench fixture, or the KiCad project starts
+**Anything involving the boards or the KiCad project starts
 with one of these calls.** Do not conclude a capability is missing because you
 cannot see a tool for it — each server publishes about six tools and keeps the
-rest behind a search facade (135 tools for `kilnctrl`, 86 for `kicad`, 45 for
-`kilnsim`).
+rest behind a search facade (135 tools for `kilnctrl`, 86 for `kicad`).
 
 ```
 kiln_help()                      # kilnctrl: main board (ESP32-S3) + RP2040 safety processor
-simfw_help()                     # kilnsim:  the SimFW bench fixture
 kicad_help()                     # kicad:    the schematic, board and sourcing data
 kiln_find(query="read the temperature")
 kiln_call(name="thermo_read")
@@ -37,7 +35,7 @@ kiln_batch(calls=[{"name":"safety_get_status"},{"name":"safety_get_link_stats"}]
 `*_batch` is the right form for any sequence of two or more hardware
 operations — one round trip, and it stops at the first failure.
 
-All three speak HTTP (`kicad` on 8766, `kilnctrl` on 8767, `kilnsim` on 8768)
+Both speak HTTP (`kicad` on 8766, `kilnctrl` on 8767)
 and must be running. If a call fails to connect:
 
 ```powershell
@@ -48,9 +46,9 @@ The same four actions are status-bar buttons in `kilnCtl.code-workspace`, and
 the servers auto-start when the workspace opens.
 
 Firmware builds and host tests are tools too — `build_kilnfw`,
-`build_saftyfw_host_tests`, `build_simfw_host_tests`, `run_pctools_tests` — so
+`build_saftyfw_host_tests`, `run_pctools_tests` — so
 the toolchain invocations do not have to be rediscovered. Flashing is
-`debug_program(peer="esp"|"pico"|"sim")`, always OpenOCD, never esptool.
+`debug_program(peer="esp"|"pico")`, always OpenOCD, never esptool.
 
 Full rationale, token measurements, and how to add a tool: **docs/MCP_SERVERS.md**.
 
@@ -62,8 +60,7 @@ for the rationale and the move history.
 ```
 hardware/   KiCad projects (mainBoard, ThermocoupleBoard, SaftyThermocoupleBoard,
             UnitTestFixture), shared lib/, datasheets/, simulation/, sourcing/
-firmware/   KilnFW (ESP32-S3), SaftyFW (RP2040), CommonFW (shared link code),
-            SimFW (RP2040 bench-test fixture)
+firmware/   KilnFW (ESP32-S3), SaftyFW (RP2040), CommonFW (shared link code)
 tools/      PcTools (GUI + MCP for BOTH processors)
 docs/       System-level documents spanning both halves
 ```

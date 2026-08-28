@@ -137,19 +137,6 @@ def _powershell(script: str, extra: "Sequence[str]" = ()) -> "list[str]":
 # ---------------------------------------------------------------------------
 # the tools themselves
 # ---------------------------------------------------------------------------
-def build_simfw_host_tests() -> str:
-    """Build and run SimFW's off-target host unit tests (MSVC, no hardware).
-
-    ``firmware/SimFW/test/build_host_tests.ps1`` -- everything under
-    ``src/sim/`` is pure C and runs on the PC. This is the fastest check that a
-    change to the thermal model, the fault engine, or the MAX31856 register
-    emulation still holds; it needs no fixture attached.
-    """
-    root = repo_root()
-    return _run("simfw-host-tests",
-                _powershell(os.path.join(root, "firmware", "SimFW", "test", "build_host_tests.ps1")))
-
-
 def build_saftyfw_host_tests() -> str:
     """Build and run SaftyFW's off-target host unit tests (MSVC, no hardware).
 
@@ -161,16 +148,6 @@ def build_saftyfw_host_tests() -> str:
     root = repo_root()
     return _run("saftyfw-host-tests",
                 _powershell(os.path.join(root, "firmware", "SaftyFW", "test", "build_host_tests.ps1")))
-
-
-def build_simfw(jobs: int = 0) -> str:
-    """Build the SimFW fixture firmware (``firmware/SimFW/build``, ninja).
-
-    Produces ``SimFW.elf``, which ``debug_program(peer="sim")`` flashes to the
-    fixture over SWD. Requires the build directory to have been configured with
-    CMake once; this only rebuilds.
-    """
-    return _cmake_build("simfw", os.path.join(repo_root(), "firmware", "SimFW", "build"), jobs)
 
 
 def build_saftyfw(jobs: int = 0) -> str:
@@ -230,9 +207,8 @@ def build_kilnfw(target: str = "build", jobs: int = 0) -> str:
 def run_pctools_tests(pattern: Optional[str] = None) -> str:
     """Run the PC-side pytest suite (``tools/PcTools/tests``).
 
-    ``pattern`` is passed to pytest's ``-k``, so ``pattern="kilnsim"`` runs only
-    the fixture-side tests. This is the suite that covers the protocol codecs,
-    the scenario runner, and these MCP servers themselves.
+    ``pattern`` is passed to pytest's ``-k`` to scope the run. This is the
+    suite that covers the protocol codecs and these MCP servers themselves.
     """
     root = repo_root()
     argv = [sys.executable, "-m", "pytest", os.path.join(root, "tools", "PcTools", "tests"), "-q"]
@@ -272,10 +248,6 @@ def run_repo_checks(list_only: bool = False) -> str:
 #: get the PC test suite; each gets the firmware it is the counterpart to, and
 #: nothing gets registered twice on the same server.
 BUNDLES: "dict[str, dict[str, Callable[..., str]]]" = {
-    "simfw": {
-        "build_simfw_host_tests": build_simfw_host_tests,
-        "build_simfw": build_simfw,
-    },
     "dut": {
         "build_saftyfw_host_tests": build_saftyfw_host_tests,
         "build_saftyfw": build_saftyfw,

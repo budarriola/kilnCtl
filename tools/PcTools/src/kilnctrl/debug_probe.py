@@ -62,11 +62,6 @@ from . import openocd_util
 
 PEER_ESP = "esp"
 PEER_PICO = "pico"
-#: The SimFW bench fixture RP2040 (docs/BENCH_RUNBOOK.md section 1). A third
-#: peer rather than a mode of PEER_PICO because it is a physically different
-#: board reached through a physically different probe, and confusing the two
-#: means flashing the safety processor with fixture firmware.
-PEER_SIM = "sim"
 
 _MEM_WIDTH_READ_CMDS = {8: "mdb", 16: "mdh", 32: "mdw"}
 _MEM_WIDTH_WRITE_CMDS = {8: "mwb", 16: "mwh", 32: "mww"}
@@ -96,14 +91,6 @@ def _kiln_fw_elf() -> str:
 
 def _safty_fw_elf() -> str:
     return os.path.join(_safty_fw_root(), "build", "SaftyFW.elf")
-
-
-def _sim_fw_root() -> str:
-    return os.path.join(_repo_root(), "firmware", "SimFW")
-
-
-def _sim_fw_elf() -> str:
-    return os.path.join(_sim_fw_root(), "build", "SimFW.elf")
 
 
 @dataclass
@@ -152,23 +139,6 @@ _PEERS = {
         adapter_serial="E66540F0A36C6E21",
         nm_tool="arm-none-eabi-nm",
     ),
-    PEER_SIM: PeerConfig(
-        cfg_args=["interface/cmsis-dap.cfg", "target/rp2040.cfg"],
-        default_elf=_sim_fw_elf,
-        adapter_speed_khz=5000,
-        root=_sim_fw_root(),
-        # The SECOND CMSIS-DAP probe on this bench, recorded 2026-08-25 (see
-        # docs/BENCH_RUNBOOK.md section 1 and PEER_PICO's serial just above).
-        # Both probes are the same VID:PID and report the same everything
-        # except this string, so leaving it unpinned would let a fixture flash
-        # land on the safety processor. Verified selectable: OpenOCD logs
-        # "Using CMSIS-DAPv2 interface with VID:PID=0x2e8a:0x000c,
-        # serial=E66540F0A38EA628" -- which settles BENCH_RUNBOOK.md's
-        # unresolved "this build cannot select by serial" note in favour of
-        # the optimistic reading, for this OpenOCD binary.
-        adapter_serial="E66540F0A38EA628",
-        nm_tool="arm-none-eabi-nm",
-    ),
 }
 
 
@@ -176,7 +146,7 @@ def resolve_peer(peer: str) -> PeerConfig:
     cfg = _PEERS.get(peer)
     if cfg is None:
         raise ValueError(
-            f"unknown peer {peer!r}, must be one of: {PEER_ESP!r}, {PEER_PICO!r}, {PEER_SIM!r}"
+            f"unknown peer {peer!r}, must be one of: {PEER_ESP!r}, {PEER_PICO!r}"
         )
     return cfg
 
@@ -240,9 +210,8 @@ def symbol_table(peer: str, elf_path: Optional[str] = None) -> "dict[str, tuple[
     for name in duplicates:
         # Recorded as an explicit ambiguity marker rather than silently
         # resolving to whichever definition nm listed last: two file-static
-        # symbols sharing a name (SimFW has two `s_bus`, one per SPI bus) are
-        # different objects, and reading "the" s_bus would otherwise return a
-        # confidently wrong board state.
+        # symbols sharing a name are different objects, and reading "the"
+        # one would otherwise return a confidently wrong board state.
         table[name] = (-1, 0)
     _SYMBOL_CACHE[key] = table
     return table

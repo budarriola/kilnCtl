@@ -299,160 +299,11 @@ should say so rather than being listed as coverage.
 
 ---
 
-## 5. SimFW scenario cross-reference (added 2026-08-20)
-
-`firmware/SimFW` is a bench-fixture firmware — a second Raspberry Pi Pico
-that plugs into the main board in place of the real thermocouple
-daughterboard and the rest of the kiln, driven from a PC by `kilnsim`
-(`tools/PcTools/src/kilnsim/`). Its owning plan is
-`firmware/SimFW/docs/DESIGN_NOTES.md`; section 8 there defines a 17-scenario
-standard test library (`firmware/SimFW/scenarios/*.yaml`), and each scenario
-file declares an `exercises:` list of the guard IDs it is meant to provoke.
-This section is that cross-reference in the other direction — guard → the
-scenario(s) that exercise it — so anyone working this matrix's §3 rows can
-find the automated test that corresponds to a given guard.
-
-**Read this table's claim carefully: it says a scenario file exists that
-targets this guard, nothing more.** `SimFW`'s software is complete and
-host-tested (`firmware/SimFW/docs/PLAN.md` section 10), but **no fixture
-hardware has ever been built**, so **none of these scenarios has ever run
-against a real `SaftyFW` board** — a scenario existing, or even loading
-cleanly through `kilnsim`'s scenario loader (which all 17 do, pytest-
-verified), is not the same as it having been run, and it is absolutely not
-the same as passing on hardware. Every §3 row above stays exactly as
-unverified as its own checkbox says until a real run happens and gets
-recorded per section 4's convention.
-
-| Guard | Scenario(s) that declare `exercises: [<guard>]` |
-|---|---|
-| S1 | `main_safety_skew`, `tc_noise_storm` |
-| S2 | `tc_noise_storm`, `s2_setpoint_overshoot` |
-| S3 | `runaway_zone`, `welded_contactor_s9`, `welded_ssr_midfire`, `stuck_load_no_command_s3`, `enabled_firing_healthy` |
-| S4 | `broken_element`, `welded_ssr_midfire`, `commanded_no_current_s4`, `enabled_firing_healthy` |
-| S5 | `cj_fault`, `spi_flaky_tc_ic`, `tc_disconnect_ramp`, `tc_disconnect_soak`, `tc_flaky` |
-| S6a | `mainfault_tc_disconnect` |
-| S6b | `power_blip` |
-| S7 | `estop_at_boot`, `estop_midfire` |
-| S8 | `runaway_zone` (S8 itself ships disabled per `SAFETY_MODEL.md`; this scenario documents expected *current* behavior, ready for when S8 gets a measured threshold — `DESIGN_NOTES.md` section 8 item 12) |
-| S9 | `welded_contactor_s9` |
-| S10 | `main_safety_skew`, `tc_noise_storm`, `main_safety_disagree_s10` |
-| S11 | `safety_tc_frozen`, `safety_healthy_reading_s11` |
-| S12 | `cj_fault` |
-| S13 | `tc_stuck` |
-
-**Read the table below as host-software evidence, not hardware evidence.**
-Every "Yes"/trip-time cell comes from `virtual_dut` (see
-`firmware/SimFW/tools/virtual_dut/README.md`) compiling `safety_guards.c` for
-the host and driving it from a simulated fixture — real guard logic, no real
-SaftyFW board. Running the *same* scenario for real, through `kilnsim run` or
-`kilnsim testmgr` against an actual attached SimFW+SaftyFW bench, currently
-cannot reproduce any of this table's evidence at all:
-`kilnsim.protocol.EventType.GUARD_TRIP`/`GUARD_WARN`/`LINK_UP`/
-`TRIP_INEFFECTIVE_LATCHED` have no wire producer, `kilnsim.runner` never
-synthesizes them from real hardware, and every `guard_trip`/`guard_warn`
-`expect:` clause in these 25 scenario files SKIPS (not fails) against real
-hardware today, which can leave an overall run looking like a clean PASS.
-`kilnsim run`/`kilnsim testmgr` both now print an explicit
-`WARNING: ... do not read this run's overall verdict ... as hardware
-evidence that a guard fired` whenever that happens
-(`kilnsim.testmgr.describe_runner_gap`, `firmware/SimFW/docs/TEST_MANAGER.md`
-§2/§9) — read that warning as confirmation this table's "Yes" is a
-`virtual_dut` finding, not a bench one, until someone teaches `kilnsim.runner`
-to observe real SaftyFW guard state (tracked in TEST_MANAGER.md §9, not done).
-
-**2026-08-21 update: which of the above actually PROVOKE their guard today,
-not merely declare it (25 scenario files now, `virtual_dut` re-run against
-all of them).** The table above answers "does a scenario targeting this
-guard exist"; it does not say whether that scenario's own `expect:` clauses
-actually pass against present-day SaftyFW through this fixture. That
-distinction matters enough that it gets its own accounting:
-
-| Guard | Fires for real in `virtual_dut` today? | Which scenario, and how |
-|---|---|---|
-| S1 | No | Blocked on `abs_max_temp_c` commissioning (see §6) — `main_safety_skew`'s S1 clause is `BLOCKED`, not evaluable regardless of the fixture. |
-| S2 | **Yes** | `s2_setpoint_overshoot` (new this pass): `GUARD_TRIP {S2}` at 267.0s after K4 closes. `tc_noise_storm`'s S2 citation is still not provoked — that file declares no `setpoint_c`, so S2 stays structurally inactive there (not "quiet because healthy"). |
-| S3 | **Yes** | `stuck_load_no_command_s3` (genuine trip, 19.4s after the weld), `welded_contactor_s9` (initiating trip, 19.4s), `welded_ssr_midfire` (mid-fire trip after the 150s correlation window, 179.0s), `enabled_firing_healthy` (genuine anti-nuisance: current commanded, S3 stays quiet for the whole run). `runaway_zone` still cannot reach it — see §6. |
-| S4 | **Yes** | `commanded_no_current_s4` (genuine WARN, 150.8s after K1 closes, K4 stays closed — the WARN-only property proven positively) and `enabled_firing_healthy` (genuine anti-nuisance). `broken_element`/`welded_ssr_midfire`'s own S4 clauses remain `BLOCKED` (no `operator_actions:` in those specific files). |
-| S5 | **Yes** | `tc_flaky`'s `no_warn_storm`, `cj_fault`'s `s5_never_trips_on_cj_alone` — no `context_valid`/K4 gating at all on this guard. |
-| S6a | **No — see §6, not provokable through this harness at all** | `mainfault_tc_disconnect`'s two S6a clauses are both `BLOCKED` on a fixture-level gap, not a SaftyFW gap. |
-| S6b | Only the anti-nuisance half | `power_blip`'s `mainfault_reads_healthy_during_blip` PASSes; its trip-side clause (`s6b_stays_at_warn_not_trip`) stays `BLOCKED` for an unrelated K4-boot-open reason (see the scenario file). |
-| S7 | **Yes, but see the 2026-08-24 polarity note** | `estop_at_boot`/`estop_midfire` both PASS on their observable clauses -- and both PASSED throughout the entire period S7 was inverted in firmware and could not trip on real hardware at all. These scenarios feed `dut_core` a synthesized `estop_pressed` boolean; they never exercise the GPIO9 read in `discrete_task.c`, so no polarity error in that read is observable through this harness. Treat these two PASSes as covering the guard's decision logic only, never its input. |
-| S9 | **Yes** | `welded_contactor_s9`: `TRIP_INEFFECTIVE_LATCHED` 9.6s after K4 opens, current genuinely persists through the open contact (`contactor_weld_engages_on_k4_open` PASSes via a `forbid …/after:` clause form). |
-| S10 | **Yes** | `main_safety_disagree_s10` (new this pass): genuine `GUARD_WARN {S10}` at 294.0s after a +250°C skew, with `main_safety_skew`'s 80°C sub-threshold skew as the standing anti-nuisance control (`s10_stays_quiet`, unchanged, still PASSing). |
-| S11 | **Yes, both directions** | `safety_tc_frozen` (fixed this pass): genuine `GUARD_TRIP {S11}` at 664.0s after the freeze fault, with `operator_actions:` now supplying the closed K4 + current the guard's `heat_commanded` gate needs. `safety_healthy_reading_s11` (new this pass): the same operator actions, no fault, run for a comparable ~650s span — S11 never trips, because a live ADC reading is never bit-identical tick to tick. |
-| S12 | **Yes** | `cj_fault`'s own history (see the "2026-08-20 follow-up" note above) already established this; unchanged this pass. |
-| S13 | No | Blocked on two commissioning gaps (`borrowed_zone_index`, `tc_source`) — see §6. `tc_stuck`'s clauses stay `BLOCKED`. |
-
-Full detail, measured numbers, and exact `blocked_on:` reasoning for every
-non-PASS clause: `firmware/SimFW/tools/virtual_dut/results/SCENARIO_RESULTS.md`.
-
-Two scenarios (`baseline_firing`, `partial_element`) declare an empty
-`exercises: []` — they are regression/behavior baselines (no-fault firing,
-partial-power ramp handling), not guard-provocation tests, and are listed
-here for completeness rather than omitted silently.
-
-**Notes and gaps found while building this table:**
-- `power_blip.yaml` declares `exercises: [S6]`, not `[S6a]`/`[S6b]`
-  separately, even though this matrix and `safety_guards.c` treat S6a
-  (`mainFault`) and S6b (link-silence backstop) as distinct guards with
-  distinct provocation rows above. Recorded as-is rather than silently
-  reinterpreted — resolve which sub-guard (or both) `power_blip` actually
-  targets before treating it as S6a or S6b coverage specifically.
-- **S11 has no corresponding scenario.** Every other guard in
-  `SAFETY_MODEL.md` section 4 has at least one scenario file; S11 (frozen
-  reading, six-hour cold-idle nuisance case per section 1's table above) does
-  not. Not something this pass can fix (scenario files are outside this
-  document's ownership), but worth flagging so it does not go unnoticed the
-  next time the SimFW scenario library is extended.
-- This table was built by reading each scenario file's `exercises:` line
-  directly (`firmware/SimFW/scenarios/*.yaml`, 17 files) — not by asking
-  `SimFW`'s own plan to summarize itself — so it reflects the scenarios as
-  written on 2026-08-20, not an aspirational mapping.
-
-**2026-08-20 follow-up: both gaps above closed, 19 scenario files now.**
-- `power_blip.yaml`'s `exercises:` was corrected from generic `S6` to the
-  specific `S6b` it actually exercises: `safety_guards.c`'s S6a block reads
-  only `in->main_fault_asserted`, and an unpowered ESP (R8 pulling GPIO10
-  high) has no way to set that true — confirmed against the code, not just
-  re-asserting the scenario file's own prior comment. S6a genuinely cannot
-  be provoked by an unannounced DUT power cut, by design (SAFETY_MODEL.md
-  §4 S6: "`mainFault` cannot detect a dead ESP").
-- A new scenario, `mainfault_tc_disconnect.yaml`, closes the resulting S6a
-  gap: it disconnects a **main-side** TC channel (`tc:0`) while a KilnFW
-  profile is actively running that zone, which (per
-  `firmware/KilnFW/docs/SAFETY_MODEL.md` and `App/drivers/safety_link.h`)
-  makes KilnFW's own guard 6 assert a live `SAFETY_FAULT_SRC_THERMO`,
-  pulling the Pico's `mainFault` input low and tripping S6a — the only path
-  this fixture has to provoke S6a at all, since the `Fault` line is
-  ESP-driven and the fixture only senses it (DESIGN_NOTES.md §3.4).
-- A new scenario, `safety_tc_frozen.yaml`, closes the S11 gap: it freezes
-  the safety-side channel (`tc:safety`) via the existing `stuck_tc` fault
-  type and expects a trip once `frozen_window_s` (600s default) elapses
-  with heat commanded throughout. Its own `manual_checks` flag a real,
-  separate finding made while writing it: `firmware/SaftyFW/src/tasks/
-  safety_core.c` currently hardcodes `heat_commanded = false` when building
-  `safety_guard_input_t` ("no current sense yet, Phase 6" per its own
-  comment), so **S11 cannot actually trip against present-day SaftyFW
-  regardless of what any fixture does** — the guard logic and this
-  scenario's provocation both match the documented design; what's missing
-  is the Phase-6 current-sense wiring already flagged as future work at
-  that call site. This is a SaftyFW-side wiring gap, not a scenario-writing
-  or fixture-capability gap, and is recorded here rather than papered over.
-- Both new scenarios pass `firmware/SimFW/tools/check_scenarios.py`
-  (schema, guard-ID, and fault-type/trigger-kind validation) and load
-  cleanly through `kilnsim`'s scenario loader, same as the other 17 — see
-  this repo's commit history for the exact check output. As with every
-  other row in this table, **a scenario existing and loading is not the
-  same as it having run against hardware**; none of the 19 have.
-
----
-
 ## 6. Guard reachability in current SaftyFW (added 2026-08-20)
 
-**This section answers a different question from §5 above.** §5 says which
-scenario *targets* each guard. This section says whether the guard can
-*actually fire at all* against today's shipping `SaftyFW`, independent of
-any scenario or fixture — because a guard's pure logic being implemented and
+**This section asks whether the guard can actually fire at all** against
+today's shipping `SaftyFW`, independent of any scenario or fixture —
+because a guard's pure logic being implemented and
 host-tested (section 2 above) says nothing about whether the caller
 (`safety_core.c`) ever populates the input fields that logic depends on.
 
@@ -590,30 +441,13 @@ the only way to exercise it. See
 `firmware/SimFW/tools/virtual_dut/results/SCENARIO_RESULTS.md` for the exact
 measured numbers behind every "provoked" claim above.
 
-**Re-checking this table:** re-run `firmware/SimFW/tools/virtual_dut/
-run_dut_scenarios.py` against all scenarios (25 as of 2026-08-21) any time
-`link_task` (Phase 7) or `current_task` (Phase 6) wiring changes in
-`safety_core.c`, or any time a scenario's own `operator_actions:`/
-`zone_setpoints:` change — newly-reachable/newly-provoked guards will show
-real `guard_warn`/`guard_trip` events in `results/SCENARIO_RESULTS.md` where
-they previously showed none. Update this table's "Reachable today?" column
-in the same change, per this file's own "keep this file current" rule at
-the top.
-
-**And re-check the fixture itself in the same pass.** `f304392` is the
-cautionary case: it changed `safety_core_build_input()` but not
-`virtual_dut/dut_core/main.c`, which is an *independent hand-written
-stand-in* for that function (the real one is FreeRTOS-shaped and cannot be
-host-compiled). The re-run produced byte-identical verdicts and was briefly
-recorded as "no delta", when in fact the fixture was simply still mirroring
-the pre-fix code. `dut_core/main.c` now `#include`s
-`firmware/SaftyFW/src/snapshots.h` and calls the **real**
-`context_reduce_zones()`/`current_any_present()` rather than reimplementing
-them, so that class of silent drift is limited to the FreeRTOS-shaped glue
-around them. Any future change to `safety_core_build_input()` must be
-mirrored there in the same commit, and any pure helper it gains should live
-in `snapshots.h` (or another SDK-free header) so the fixture can compile the
-real thing instead of copying it.
+**Re-checking this table:** the `virtual_dut` host cross-check this table's
+"Yes"/"No" verdicts cite was part of the SimFW bench-fixture tooling, which
+has been removed from this repo. Re-establish reachability by direct source
+reading (method 1 above) any time `link_task`/`current_task` wiring changes
+in `safety_core.c`, or any time a guard's own inputs change, and update this
+table's "Reachable today?" column in the same change, per this file's own
+"keep this file current" rule at the top.
 
 ---
 
@@ -652,23 +486,10 @@ structurally reachable" state, and it is a different fact from "reachable"
 — a guard can be fully wired in source and still have never once run its
 own condition on real hardware.
 
-**`virtual_dut` was never affected by this, and nothing in §5's table
-changes today.** `virtual_simfw.c` always feeds a *simulated* MAX31856 with
-a valid reading unless a scenario explicitly injects a TC fault — it has no
-"sensor never fitted" mode, so it could not have this bug and could not
-have been blocked by it. §5's `virtual_dut` evidence for S2/S3/S4/S6b/S7/
-S9/S10/S11/S12 was always genuine software evidence; today's fix does not
-add to it.
-
-**What today's fix does change: real-hardware `--guards` runs.**
-`firmware/SimFW/docs/TEST_MANAGER.md` §2 describes `kilnsim testmgr
---guards`, which attaches `kilnsim/guard_observer.py` to poll a real
-`SaftyFW` over `kilnctrl` and can, in principle, credit a guard with
-"hardware evidence obtained" from an actual bench run — not a `virtual_dut`
-simulation. Before today, any such run against this bench would have hit
-the same permanent S5 latch within ~60 s of boot and observed nothing else
-ever transition, regardless of `--guards` being attached correctly. That
-is no longer true: a `--guards` run against this bench can now, for the
+**What today's fix does change: real-hardware guard evidence becomes
+obtainable.** Before today, any bench run would have hit the same permanent
+S5 latch within ~60 s of boot and observed nothing else ever transition. That
+is no longer true: a real bench run against this hardware can now, for the
 first time, potentially obtain real hardware evidence for S2, S3, S4, S6b,
 S7, S9, S10, S11 and S12 — the same set unmasked below — subject to each
 guard's own remaining gates (a live ESP context for S2/S10, current flowing

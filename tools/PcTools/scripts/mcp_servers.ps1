@@ -1,4 +1,4 @@
-# Start / stop / inspect the PcTools MCP servers (kilnctrl, kilnsim).
+# Start / stop / inspect the PcTools MCP servers (kilnctrl, kicad).
 #
 # These servers moved from stdio to HTTP so their lifetime stops being tied to
 # whichever editor happened to launch them: one process owns the serial port,
@@ -8,7 +8,7 @@
 #
 #   .\mcp_servers.ps1 start            # both, if not already up
 #   .\mcp_servers.ps1 status           # what is listening, and what it publishes
-#   .\mcp_servers.ps1 stop  -Server kilnsim
+#   .\mcp_servers.ps1 stop  -Server kilnctrl
 #   .\mcp_servers.ps1 restart          # after editing server code
 #
 # Stopping goes through the server's own POST /shutdown so it can release its
@@ -22,7 +22,7 @@ param(
     [ValidateSet("start", "stop", "restart", "status")]
     [string]$Action = "status",
 
-    [ValidateSet("all", "kilnctrl", "kilnsim", "kicad")]
+    [ValidateSet("all", "kilnctrl", "kicad")]
     [string]$Server = "all",
 
     # Seconds to wait for a freshly started server to answer /health.
@@ -42,7 +42,6 @@ $LogDir = Join-Path $PcTools "logs"
 # other two, which is what lets one script drive all three.
 $Servers = @(
     @{ Name = "kilnctrl"; Port = 8767; Venv = $PcTools; Exe = "kilnctrl-mcp-server.exe"; Module = "kilnctrl.mcp_server" }
-    @{ Name = "kilnsim";  Port = 8768; Venv = $PcTools; Exe = "kilnsim-mcp-server.exe";  Module = "kilnsim.mcp_server" }
     @{ Name = "kicad";    Port = 8766; Venv = (Join-Path $RepoRoot "mykicadMcp"); Exe = $null;
        Script = (Join-Path $RepoRoot "mykicadMcp\kicad_mcp_server.py") }
 )

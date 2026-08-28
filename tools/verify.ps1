@@ -1,7 +1,7 @@
 # One command that answers "is the tree good?" -- and one short answer.
 #
-# Before this, verifying a change meant five separate invocations (KilnFW host
-# tests, SaftyFW host tests, SimFW host tests, run_all_checks, lint_pages),
+# Before this, verifying a change meant four separate invocations (KilnFW host
+# tests, SaftyFW host tests, run_all_checks, lint_pages),
 # each printing hundreds of lines that a human or an agent then had to skim for
 # a verdict. That skimming is where this repository has repeatedly gone wrong:
 # a build tool reported "OK in 4.8s" over a log containing "ninja: build
@@ -68,16 +68,6 @@ $Stages = [ordered]@{
         # contained the word FAULT and hid the real 15 failures below it.
         Decisive = '^\s*FAIL |FAILURE\(S\)|FAILED executables|error:'
         Cwd      = "$repoRoot\firmware\SaftyFW\test"
-    }
-    "simfw"   = @{
-        Desc     = "SimFW host tests"
-        Exe      = "powershell"
-        Args     = @("-ExecutionPolicy", "Bypass", "-File", "$repoRoot\firmware\SimFW\test\build_host_tests.ps1")
-        # Anchored on a leading "FAIL " so a test's NAME cannot match: the
-        # first run of this script pointed at a banner line that merely
-        # contained the word FAULT and hid the real 15 failures below it.
-        Decisive = '^\s*FAIL |FAILURE\(S\)|FAILED executables|error:'
-        Cwd      = "$repoRoot\firmware\SimFW\test"
     }
     "checks"  = @{
         Desc     = "Guard scripts (run_all_checks)"

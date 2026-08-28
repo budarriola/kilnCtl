@@ -214,9 +214,10 @@ gating items are:
       (`crc16_ccitt_false()`/`stuff_and_send()`), the un-done delegation item
       above. That is the check working, not a false positive — it goes green
       when the item above lands. Its `UnitTestFw` host-test twin used to add
-      a second hit here; `firmware/UnitTestFw` was decommissioned and deleted
-      wholesale (2026-08-23, SimFW is its replacement), so that hit is gone
-      with the file, not because it was fixed.
+      a second hit here; `firmware/UnitTestFw` was restored 2026-08-28 (the
+      bench-fixture firmware that had replaced it was removed), so that
+      second hit may be back too — re-run the check rather than assuming it
+      is still one hit.
 
 ## Phase 2 — Skeleton
 
@@ -490,9 +491,6 @@ been exercised against real RP2040 hardware.**
 - [ ] **Provoke each enabled guard on real hardware and record the result.**
       A guard that has only ever passed a host test is not commissioned.
       Hardware-gated.
-- [ ] No PC-side sender yet for `SET_CT_CAL`/`GET_CT_CAL` — `tools/PcTools`
-      has no MCP tool calling these frames; `firmware/SimFW/tools/ct_calibration/`
-      still only writes a local JSON file.
 - [ ] Board-change proposals for the next revision:
   - [ ] **Contactor mirror/feedback contact** into a spare Pico GPIO — the only
         way to detect a welded contactor, currently an unclosable gap

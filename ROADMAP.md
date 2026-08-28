@@ -94,12 +94,7 @@ What is still genuinely open is short:
 | M | **HW changes:** LCD backlight control (no GPIO/PWM path exists), relay status LEDs for K1–K4/S9, distinct connector types for the thermocouple daughterboards, I2C broken out on an expansion connector | M1 |
 | M | DEBUG header and GP16/GP17 access before A1 is soldered down | M0 |
 | L | Field updates exercised against real hardware: Pico bootloader over a live UART1, an actual OTA into `ota_0`/`ota_1` (a JTAG flash boots `factory` and never runs the rollback machinery), a real version mismatch | M8 |
-| L | `GUARD_TEST_MATRIX.md` §3 — every enabled guard's real trip, safe-state power-on, sensor open-circuit, current-mapping commissioning | M4/M9 |
-| XL | **SimFW M-A's SPI-timing proof** (Saleae, ≥10k transactions, zero underruns). `spi_txn_count` is 0 — the PIO MAX31856 emulation has never been clocked by any master. The single biggest unretired risk in the project | M9 |
-
-Two SimFW items are owned by that firmware's own sessions and are not counted
-above as this project's work queue: `testmgr` attaching no observer on its own
-runs, and CT amplitude calibration still being an identity placeholder.
+| L | `GUARD_TEST_MATRIX.md` §3 — every enabled guard's real trip, safe-state power-on, sensor open-circuit, current-mapping commissioning | M4 |
 
 ---
 
@@ -123,7 +118,6 @@ runs, and CT amplitude calibration still being an identity placeholder.
 | [`firmware/CommonFW/docs/LINK_PROTOCOL.md`](firmware/CommonFW/docs/LINK_PROTOCOL.md) | The wire, both ends — the contract neither side may break alone |
 | [`firmware/CommonFW/docs/UPDATE_PROTOCOL.md`](firmware/CommonFW/docs/UPDATE_PROTOCOL.md) | Field updates for both processors: interlocks, one-password auth, ESP OTA partitioning |
 | [`firmware/SaftyFW/docs/BOOTLOADER.md`](firmware/SaftyFW/docs/BOOTLOADER.md) | The RP2040 bootloader, flash layout and recovery mode |
-| [`firmware/SimFW/docs/PLAN.md`](firmware/SimFW/docs/PLAN.md) | Kiln simulator / unit-test fixture (a *third* firmware, a second Pico on the bench): MAX31856 emulation, CT waveforms, relay sensing, thermal model, fault injection, its own MCP/CLI/GUI (`kilnsim`); also owns the `UnitTestFw` decommission. **Running on real silicon since 2026-08-24** — the fixture Pico boots, every command group is hardware-verified, fault injection reaches the emulated MAX31856 registers, and two I/O expanders are attached. Still gated on the SPI-timing proof (M-A, `spi_txn_count` is 0) and on the relay/E-stop/DUT-power harness. `kilnsim testmgr` is the one-command regression entry point; `firmware/SimFW/docs/TEST_MANAGER.md` documents it — see M9 |
 | [`tools/PcTools/TODO.md`](tools/PcTools/TODO.md) | GUI, MCP, GPIO probe, debug and logging for **both** processors |
 | [`firmware/KilnFW/TODO.md`](firmware/KilnFW/TODO.md) §§12–13 | M10's instrumentation: HTTP route-table cap, internal-DRAM low-water alarm, task-stack high-water reporting |
 | [`docs/REPO_LAYOUT.md`](docs/REPO_LAYOUT.md) | The hardware/software reorganisation and its blockers |
@@ -213,9 +207,6 @@ Still genuinely unanswerable by the code:
 **Blocked on hardware that does not exist yet.** All of this is scripted and
 waiting, not unwritten:
 
-- The SimFW fixture itself. M-A's SPI-timing proof (Saleae, ≥10k transactions,
-  zero underruns) is the single biggest unretired risk in the project, and
-  nothing in `firmware/SimFW/` has ever touched a real master.
 - `GUARD_TEST_MATRIX.md` §3's trip rows — every enabled guard's real trip,
   safe-state power-on, sensor open-circuit, current-mapping commissioning.
 - ~~The safety processor's own MAX31856~~ — **fitted 2026-08-24 and verified
@@ -255,9 +246,7 @@ now a short list, which is the point:
 real firing and 4 kB of internal DRAM reclaimed; `rules_task`'s callees were
 audited (nothing writes flash — the real finding was a cache-disabling *read*
 via `dashboard_get_status()`) and its stack moved to PSRAM; the guard scripts
-now run from `tools/run_all_checks.ps1` and the `run_repo_checks` MCP tool;
-and `kilnsim/benchproto_codec.py`'s duplicate CRC is shared through
-`tools/PcTools/src/kilnctrl/crc16.py`.
+now run from `tools/run_all_checks.ps1` and the `run_repo_checks` MCP tool.
 
 **What is done and should not be reopened:** the link itself, the wire
 contract and its two independent version numbers, the PC-link acknowledgement
@@ -436,8 +425,8 @@ link, so it can run in parallel with M1 and M2 once M0 is out of the way.
       (S7 could not fire) and `current_sense_set_cal()` was never called, so
       `any_current_present` was permanently false (S3/S9/S11 and S6b's
       current-gated trip could not fire). **The reachability count in
-      `GUARD_TEST_MATRIX.md` predates both fixes; re-run M9's `virtual_dut`
-      to re-establish it rather than trusting the old number.**
+      `GUARD_TEST_MATRIX.md` predates both fixes; re-establish it rather than
+      trusting the old number.**
 - [x] CI grep: `safety_core.c` never includes the link header — 2026-08-16,
       `firmware/SaftyFW/tools/check_isolation.ps1`
 
@@ -673,111 +662,6 @@ path. Two facts set the shape of this milestone:
       firmware update doesn't trip S6(b) — 20 s grace window, host-tested;
       not hardware-verified (no board attached to confirm a real reboot
       suppresses the trip)
-
-## M9 — SimFW: the bench fixture that finally unblocks hardware verification
-
-Owned by [`firmware/SimFW/docs/PLAN.md`](firmware/SimFW/docs/PLAN.md). A *third*
-firmware — a second Pico that plugs into the main board's connectors in place
-of the real thermocouple daughterboard and the rest of the kiln, so guards,
-faults, and control loops in both other firmwares can be exercised repeatably
-from a PC script instead of a real kiln. Not on the `KilnFW`↔`SaftyFW`
-dependency spine, but it directly gates `GUARD_TEST_MATRIX.md` §3's
-hardware-trip rows, which is why it earns a milestone here.
-
-- [x] **Software complete: every task, every `src/sim/` module, every driver,
-      the 19-scenario test library, and the `kilnsim` PC toolset (CLI/GUI/MCP)
-      — no stubs remain** (2026-08-20, commit `c891b72`). Also extracted
-      `UnitTestFw`'s UART protocol into `firmware/CommonFW` as `benchproto`.
-      Detail and per-module verification numbers in `docs/PLAN.md`
-- [x] `docs/HARDWARE.md` written — fixture pin map reconciled across four
-      driver files, zero GPIO collisions. Surfaced two real open questions,
-      tracked in `docs/PLAN.md` §11:
-      - `KilnFW`'s and `SaftyFW`'s own `HARDWARE.md` docs disagree on whether
-        J7 pin 1 is no-connect or `3.3v_Safty` — needs a continuity check
-        before the fixture's isolated-side power feed is wired
-      - the DUT-power relay (a single MCP23017 bit) can only brown out one of
-        the main board's two independent 12 V inputs unless the bench
-        operator deliberately commons them downstream of that relay
-- [~] **First silicon: the fixture Pico now runs on the bench** (2026-08-24).
-      `SimFW` boots, enumerates, and every command group (SYS/MODEL/TC/CT/
-      RELAY/IO/FAULT) is verified against the real board. Fault injection
-      works end to end — a PC-side `TC_DISCONNECTED` flips the emulated
-      MAX31856's open-circuit flag and clears on cancel. Two MCP23017
-      expanders are attached and pass six selftest checks. Link soaked at 960
-      commands over six reconnects with zero anomalies. `kilnsim testmgr`
-      gives a one-command tiered regression verdict; `kilnsim tasks` reports
-      per-task stack high-water marks, and `kilnsim selftest` now fails below
-      a 2x margin.
-
-      Getting there took four real firmware defects, all fixed: a
-      `sim_engine` stack overflow that stopped the board booting at all; a
-      cross-core-halt design that would have panicked at every scheduler
-      start; a msg_index/dedup lifetime mismatch that silently returned a
-      *stale reply from a different command* after every reconnect; and a
-      `pio_claim_unused_sm(..., true)` whose own error guard was unreachable
-      and which would have halted only core 1, leaving core 0 answering as if
-      healthy.
-- [ ] **Still hardware-gated** — M-A's SPI-timing exit criterion (Saleae
-      capture, ≥10k transactions, zero underruns) remains unmet and is still
-      the single biggest unproven risk: `spi_txn_count` is 0, so the PIO
-      MAX31856 emulation has never been clocked by any master. It needs a
-      second Pico as reference master (`tools/spi_test_master/` builds clean,
-      but its checked-in `build/` is stale — rebuild before flashing). Most of
-      M-A is achievable without a Saleae; the analyzer is only needed for the
-      electrical timing margin, not functional correctness. CT amplitude
-      calibration is still an identity placeholder (M-D). Relay sense, E-stop,
-      fault line and DUT power are unwired, so no scenario has yet run against
-      a real `KilnFW`+`SaftyFW` pair.
-- [~] **Guard assertions in the scenario suite were vacuous** (found
-      2026-08-24, half fixed the same day by the SimFW-owning session).
-      `kilnsim`'s `EventType` defines `GUARD_TRIP`/`GUARD_WARN`/`LINK_UP`/
-      `TRIP_INEFFECTIVE_LATCHED`; `runner.py` synthesized none of them, so the
-      clause in 25 of 27 scenarios could not fail and the suite's guard
-      coverage was nominal rather than real. `runner.py` now synthesizes them
-      (`6f1cbbf`, recorded in `686a8d0`), and guard-typed clauses come back
-      **BLOCKED** rather than vacuously PASS — the honest outcome. **Still
-      open, owned by SimFW:** `testmgr` attaches no observer on its own runs,
-      and the `SafetyClient` polling shape is unconfirmed against a real
-      board.
-- [x] **`UnitTestFw` deleted** (2026-08-23) — the old ESP32-S3 instrument
-      bench tree (App, pc_tools, docs, embedded KiCad files) removed from the
-      repo along with every stale reference, ahead of the M-B hardware-proof
-      gate `docs/PLAN.md` originally called for, by explicit decision
-      (SimFW is the replacement; not re-litigated). Detail in
-      `firmware/SimFW/docs/DESIGN_NOTES.md` §12
-- [x] **A hardware-free CI path that is worth trusting** (2026-08-24,
-      `2bfce93`/`925cdee`). `kilnsim --virtual testmgr` runs the whole tiered
-      suite against `virtual_simfw` — the real SimFW simulation code compiled
-      for the host — instead of `MockSimLink`, which proves close to nothing.
-      A virtual run reports SaftyFW and ESP absent with a `--virtual`-specific
-      reason and caps at tier 0, so it cannot claim hardware tiers it does not
-      have, and every saved report now stamps `link_kind` (serial/virtual/
-      mock), which it never did before: a mock run's JSON used to be
-      indistinguishable from a real-hardware one after the fact. Exit code 0
-      against a fresh `virtual_simfw` with `command_groups_reachable` passing.
-      **This does not move any hardware-gated milestone below** — it is the
-      cheapest layer of `PLAN.md` §13's four, not a substitute for the ones
-      that name silicon.
-- [ ] **Dependency this milestone exists to unblock**: `GUARD_TEST_MATRIX.md`
-      §3's hardware-trip rows (safe-state power-on, sensor open-circuit,
-      current-mapping commissioning, every enabled guard's real trip) stay
-      blocked on "no bench hardware" until the fixture physically exists.
-      Each scenario already declares which guard(s) it exercises, so the
-      moment hardware exists there is a concrete script to run instead of
-      nothing
-- [x] **`virtual_simfw`/`virtual_dut`: a software-only cross-check that
-      compiles `SimFW`'s and `SaftyFW`'s own unmodified guard code for the
-      host and ticks real guard logic against simulated data** (2026-08-20).
-      Not hardware verification and doesn't claim to be — no real SPI/relay/
-      link/FreeRTOS jitter — but it empirically established that **only S5,
-      S6b, S7, S12 can structurally fire in today's shipping `SaftyFW`**; the
-      other nine are blocked on specific unpopulated inputs (see M3/M4/M5
-      above for the per-guard detail, `GUARD_TEST_MATRIX.md`'s reachability
-      section for the full table). Re-runnable: re-run after Phase 6/7 lands
-      to see which guards newly become reachable, without needing bench
-      hardware
-
----
 
 ## M11 — The UI the owner actually asked for · *opened 2026-08-28*
 
@@ -1332,16 +1216,8 @@ different things; keep them distinct.
 | ESP32-S3 boot-loop (repeating stack overflow in the main task, right after LVGL's boot banner) fixed by raising `CONFIG_ESP_MAIN_TASK_STACK_SIZE` 3584→8192 | 2026-08-19 | `firmware/KilnFW/App/main.c`, `sdkconfig.defaults` |
 | Internal SRAM exhaustion: `xTaskCreatePinnedToCore()` always takes TCB+stack from internal SRAM, and Wi-Fi/lwIP + LVGL had claimed nearly all of it by the time later tasks tried to start (caused the AUTOTUNE/WIFI UART-task registration failures). Fixed at the source — moved LVGL's allocator and the Wi-Fi/lwIP pools to PSRAM — not by shrinking the tasks that were failing | 2026-08-20 | `firmware/KilnFW/TODO.md` §1 |
 | `uart_owner_transfer()` called `xSemaphoreCreateBinary()` (a heap alloc) on every single UART transfer; under real interactive load this exhausted internal SRAM (`ESP_ERR_NO_MEM` bursts every ~40s). Fixed with a static, stack-resident semaphore | 2026-08-18 | `firmware/KilnFW/App/drivers/espInterfaces/uart_owner.c` |
-| SimFW's PIO SPI-slave engine originally sampled/shifted on the wrong clock edges (mode 0, despite being labeled mode 1); corrected to match the MAX31856 datasheet's Table 5 (CPOL=0) and both real masters' actual config | 2026-08-20 | `firmware/SimFW/src/drivers/max31856_spi_slave.pio`, `docs/DESIGN_NOTES.md` §3.2.1 |
 | LVGL hit-testing cannot escape a parent that doesn't contain the touch point, and a non-`LV_OBJ_FLAG_FLOATING` child of a flex column silently joins the flow and eats the page's content budget | 2026-08-20 | `firmware/KilnFW/App/drivers/ui_topbar.h` |
-| SimFW would not boot at all: `sim_engine`'s 2048-byte stack against a measured 2328-byte chain, caused by one non-static local (`fault_event_t[64]`, 1536 B). Third instance of this species after `telemetry` and `wave_owner`. Note the chain crosses a module boundary — `fault_sched`'s per-tick work runs on `sim_engine`'s stack while its own task idles — so neither file looks wrong read alone | 2026-08-24 | `firmware/SimFW/src/tasks/sim_engine.c` |
-| SimFW's cross-core halt used the SIO inter-core FIFO, which is FreeRTOS's own SMP doorbell — it would have `hard_assert`ed at every `vTaskStartScheduler()`, and sharing the handler would not have helped since FreeRTOS drains that FIFO without inspecting it. Moved to a dedicated hardware timer alarm | 2026-08-23 | `firmware/SimFW/src/drivers/simfw_fatal.c` |
-| benchproto returned a **stale reply from a different command** after every PC reconnect: the host's `msg_index` restarts at 0 per connection while the firmware's dedup ring and per-task ACK cache live for the MCU's boot lifetime. `FAULT_LIST` reported "0 faults" while 8 were armed — a clean-decoding wrong answer, diagnosed by reply *length* (3 bytes is `FAULT_SCHEDULE`'s shape, not an empty list's 2). Fixed with a `SYS_SESSION_RESET` handshake that must itself bypass dedup | 2026-08-23 | `firmware/CommonFW/src/benchproto_link.c`, `firmware/SimFW/src/tasks/usb_owner.c` |
-| `pio_claim_unused_sm(pio, true)` panics internally and never returns, making the `if (sm < 0)` guard after it dead code — and a bare `panic()` halts only the calling core, while `spi_emu_a/b` are pinned to core 1, so core 0 would have kept serving USB against a fixture whose SPI emulation never started. Fourth structurally-unfailable check shipped in this repo | 2026-08-24 | `firmware/SimFW/src/drivers/max31856_pio_engine.c` |
-| A 0-byte `i2c_write_blocking()` reports **every** address as present: pico-sdk guards `len == 0` with `invalid_params_if`, a no-op in release builds, so the transfer loop never runs and the address phase is never driven. Caught while writing a bus scanner, before it produced a wrong answer | 2026-08-24 | `firmware/SimFW/src/tasks/i2c_owner.c` |
-| SimFW's relay-sense inputs were configured with pull-ups **off** while the sense lines are active-low, and the read path did not invert. Each defect masked the other, so the code looked self-consistent | 2026-08-24 | `firmware/SimFW/src/tasks/i2c_owner.c` |
-| `RESET_SIM` / `LOAD_PRESET` zeroed the event ring's producer sequence but not the consumer cursor, which is only initialised at boot. The cursor was stranded *above* the producer and the drain returned 0 **forever**. Every health counter stayed clean (`evt_seq_gap_count: 0`, `evt_send_drop_count: 0`) precisely because nothing downstream of the stuck drain ever ran — the clean counters were evidence *of* the bug | 2026-08-24 | `firmware/SimFW/src/tasks/sim_engine.c` |
-| `SET_SEED` stored the seed but never reseeded the PRNG — `fault_engine_init(&s_engine, 0)` runs once at boot with a hardcoded 0. Every scenario's `seed:` was cosmetic: stored, echoed in telemetry, returned by `sim_engine_get_seed()`, and ignored by the actual randomness, so the fixture's own replayability contract (`DESIGN_NOTES.md` §7.2) was not held. Hidden by the event-ring bug above, which had starved `determinism_spot_check` into a permanent SKIP — fixing one unmasked the next | 2026-08-24 | `firmware/SimFW/src/sim/fault_engine.c`, `src/tasks/fault_sched.c` |
+| benchproto returned a **stale reply from a different command** after every PC reconnect: the host's `msg_index` restarts at 0 per connection while the firmware's dedup ring and per-task ACK cache live for the MCU's boot lifetime. `FAULT_LIST` reported "0 faults" while 8 were armed — a clean-decoding wrong answer, diagnosed by reply *length* (3 bytes is `FAULT_SCHEDULE`'s shape, not an empty list's 2). Fixed with a `SYS_SESSION_RESET` handshake that must itself bypass dedup | 2026-08-23 | `firmware/CommonFW/src/benchproto_link.c` |
 
 ---
 

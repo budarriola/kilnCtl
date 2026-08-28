@@ -9,16 +9,6 @@ own docstring, "Bit-for-bit port of crc16_ccitt_false() in
 uart_protocol.c") -- that port is the allowlisted, justified duplicate
 tracked in tools/check_no_duplicate_crc.ps1.
 
-kilnsim's benchproto (the bench-fixture <-> PC protocol, a distinct wire
-format from kilnlink) needs the exact same CRC-16/CCITT-FALSE algorithm.
-Unlike the kilnlink port, there is no cross-language linking barrier here:
-both kilnctrl.protocol and kilnsim.benchproto_codec are pure Python living
-side by side under tools/PcTools/src, and kilnsim already imports from
-kilnctrl freely (see e.g. kilnsim.guard_observer, kilnsim.testmgr). A
-second, independently-typed copy of a CRC is exactly the kind of thing that
-silently diverges, so this module exists to give both codecs one
-implementation instead of two.
-
 Check value: crc16_ccitt_false(b"123456789") == 0x29B1.
 """
 

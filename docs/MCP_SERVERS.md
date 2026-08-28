@@ -1,13 +1,12 @@
 # MCP servers
 
-Four MCP servers serve this repo. Three of them — `kilnctrl`, `kilnsim` and
+Three MCP servers serve this repo. Two of them — `kilnctrl` and
 `kicad` — are this project's own and were rebuilt around two decisions worth
 understanding before using them.
 
 | server     | transport | port | endpoint | what it drives                                      |
 |------------|-----------|------|----------|-----------------------------------------------------|
 | `kilnctrl` | HTTP      | 8767 | `/mcp`   | the main board (ESP32-S3) + RP2040 safety processor  |
-| `kilnsim`  | HTTP      | 8768 | `/mcp`   | the SimFW bench fixture (RP2040)                     |
 | `kicad`    | HTTP      | 8766 | `/`      | the KiCad project, via the `mykicadMcp` submodule    |
 | `pdf-mcp`  | stdio     | —    | —        | datasheet reading                                    |
 
@@ -21,10 +20,10 @@ server share one physical serial port.
 ## Starting and stopping
 
 ```powershell
-.\tools\PcTools\scripts\mcp_servers.ps1 start      # all three; no-op if already up
+.\tools\PcTools\scripts\mcp_servers.ps1 start      # both; no-op if already up
 .\tools\PcTools\scripts\mcp_servers.ps1 status     # what is listening
 .\tools\PcTools\scripts\mcp_servers.ps1 restart    # after editing server code
-.\tools\PcTools\scripts\mcp_servers.ps1 stop  -Server kilnsim   # or kilnctrl, or kicad
+.\tools\PcTools\scripts\mcp_servers.ps1 stop  -Server kilnctrl   # or kicad
 ```
 
 In the editor these are the **MCP Start / Stop / Restart / Status** buttons in
@@ -42,7 +41,7 @@ Both call the same script, and the script is idempotent — it polls `/health`
 first and does nothing if the servers are already up, so neither one restarts a
 server that is mid-session on a serial link.
 
-`.claude/settings.json` also lists all three in `enabledMcpjsonServers`, so a
+`.claude/settings.json` also lists both in `enabledMcpjsonServers`, so a
 new session connects without stopping to ask for approval.
 
 `mykicadMcp/start_mcp_http_server.ps1` still starts the KiCad server on its own,
@@ -60,8 +59,7 @@ already reach the MCP endpoint, which can flash firmware — a token on
 
 Stopping through `/shutdown` rather than killing the process matters: a COM port
 left open by a dead process stays unusable on Windows until the device is
-replugged, and SimFW's CDC interface is already known to wedge if a port is held
-across a reset.
+replugged.
 
 ### Decision 1 — HTTP instead of stdio
 
@@ -75,12 +73,12 @@ protocol it is currently blocked on.
 disposable server with no port to collide on:
 
 ```powershell
-tools\PcTools\.venv\Scripts\python.exe -m kilnsim.mcp_server --transport stdio
+tools\PcTools\.venv\Scripts\python.exe -m kilnctrl.mcp_server --transport stdio
 ```
 
-### Decision 2 — a search facade instead of 266 published tools
+### Decision 2 — a search facade instead of 221 published tools
 
-`kilnctrl` registers 135 tools, `kicad` 86, and `kilnsim` 45. Published as MCP
+`kilnctrl` registers 135 tools and `kicad` 86. Published as MCP
 schemas that is roughly 20,000 tokens each for `kilnctrl` and `kicad`, spent in
 *every* context window before the model has read a word of the request.
 
@@ -96,8 +94,8 @@ and importable — only their advertisement is withdrawn.
 | `<p>batch(calls, stop_on_error)` | invoke several in one round trip |
 | the `KEEP` set | kept published — always the first call of a session |
 
-`<p>` is `kiln_` for kilnctrl, `simfw_` for kilnsim, `kicad_` for kicad. The
-`KEEP` set is `connect` / `sim_connect` / (`inspect_kicad_project`,
+`<p>` is `kiln_` for kilnctrl, `kicad_` for kicad. The
+`KEEP` set is `connect` / (`inspect_kicad_project`,
 `get_kicad_ipc_status`).
 
 Measured manifest cost:
@@ -106,7 +104,6 @@ Measured manifest cost:
 |--------|--------|-------|-------|
 | `kilnctrl` | ~20,160 tokens | ~697 | 96.5% |
 | `kicad` | ~20,237 tokens | ~799 | 96.1% |
-| `kilnsim` | ~4,654 tokens | ~738 | 84.1% |
 
 The obvious risk of a dispatcher is that indirection costs reliability — a model
 has to guess a name it has never seen a schema for. Everything in
@@ -125,14 +122,14 @@ Search is a small weighted BM25-style index built once at startup over tool
 names, groups, curated keywords, summaries and parameter names, with a synonym
 table that bridges the words a caller uses to the words the code uses
 (`temperature` → `thermo`, `relay` → `io`/`expander`, `swd` → `debug`). The
-tables live in `kilnctrl/mcp_facade.py`, `kilnsim/mcp_facade.py` and
+tables live in `kilnctrl/mcp_facade.py` and
 `mykicadMcp/kicad_facade.py`. Query stopwords ("what", "how", "the") are dropped
 before scoring, so a question-shaped query ranks on its nouns.
 
 ### The KiCad server is plumbed differently
 
-`kilnctrl` and `kilnsim` are `MCPServer` (FastMCP) applications, so
-`mcpkit.registry.collapse()` withdraws their tools from the framework's tool
+`kilnctrl` is an `MCPServer` (FastMCP) application, so
+`mcpkit.registry.collapse()` withdraws its tools from the framework's tool
 manager. `mykicadMcp` hand-rolls its own JSON-RPC loop over a plain
 `{name: {description, inputSchema, handler}}` dict, so it uses
 `collapse_table()` instead — same registry, same five facade implementations,
@@ -145,7 +142,7 @@ checkout, it cannot import `mcpkit`. It carries a byte-for-byte copy at
 
 ## Build and test tools
 
-The two PcTools servers also carry the build steps this repo's agents were
+The PcTools server also carries the build steps this repo's agents were
 re-deriving by hand every session (`mcpkit/workbench.py`, group `build`). The
 KiCad server has no equivalent -- there is nothing to compile there:
 
@@ -154,9 +151,7 @@ KiCad server has no equivalent -- there is nothing to compile there:
 | `build_kilnfw(target, jobs)` | kilnctrl | sources the Espressif PowerShell profile; `jobs>0` calls ninja directly because idf.py rejects `-- -j N` |
 | `build_saftyfw(jobs)` | kilnctrl | ninja in `firmware/SaftyFW/build` |
 | `build_saftyfw_host_tests()` | kilnctrl | off-target MSVC unit tests |
-| `build_simfw(jobs)` | kilnsim | ninja in `firmware/SimFW/build` |
-| `build_simfw_host_tests()` | kilnsim | off-target MSVC unit tests |
-| `run_pctools_tests(pattern)` | both | the pytest suite |
+| `run_pctools_tests(pattern)` | kilnctrl | the pytest suite |
 
 They run their PowerShell scripts through `subprocess`, deliberately. Those
 scripts set `$ErrorActionPreference = "Stop"` and `vcvarsall.bat` writes a
@@ -168,16 +163,16 @@ Output is summarized, never echoed whole: exit status, the diagnostic lines, and
 a path to the full log under the system temp directory.
 
 Flashing is not in this table on purpose. It already exists as
-`debug_program(peer=...)` with `esp` / `pico` / `sim` peers, each pinned to the
+`debug_program(peer=...)` with `esp` / `pico` peers, each pinned to the
 right probe serial (`kilnctrl/debug_probe.py`).
 
 ## Adding a tool
 
-For `kilnctrl` or `kilnsim`, write it in the server module with the existing
+For `kilnctrl`, write it in the server module with the existing
 `@_tool()` decorator; for `kicad`, add an entry to `self.tools` as before.
 Registration did not change on either. Then, if the tool's name does not make it
 findable, add a keyword row to that server's facade module
-(`kilnctrl/mcp_facade.py`, `kilnsim/mcp_facade.py`, `mykicadMcp/kicad_facade.py`)
+(`kilnctrl/mcp_facade.py`, `mykicadMcp/kicad_facade.py`)
 and, for `kicad`, a `GROUP_OVERRIDES` row so it does not land in a junk group.
 That is the whole change; the facade picks it up at import.
 

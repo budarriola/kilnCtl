@@ -19,7 +19,6 @@ dependencies = [
     # package still works if the wheel is missing, and the About window's
     # pinout PNG deliberately uses tk.PhotoImage instead.
     "pillow>=10.0",
-    # kilnsim's scenario.py (firmware/SimFW/docs/DESIGN_NOTES.md sec 8.1) loader.
     "pyyaml>=6.0",
 ]
 
@@ -33,13 +32,10 @@ kilnctrl-gui = "kilnctrl.gui:main"
 kilnctrl-mcp-server = "kilnctrl.mcp_server:main"
 saleae-capture = "kilnctrl.logic_capture:main"
 kilnctrl-console-capture = "kilnctrl.console_capture:main"
-kilnsim = "kilnsim.cli:main"
-kilnsim-gui = "kilnsim.gui:main"
-kilnsim-mcp-server = "kilnsim.mcp_server:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/kilnctrl", "src/kilnsim", "src/mcpkit"]
+packages = ["src/kilnctrl", "src/mcpkit"]

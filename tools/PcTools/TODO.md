@@ -155,10 +155,6 @@ not boot into either app slot or its own bootloader at all.
 - [ ] `ota_status()` reports **both** processors' protocol version and
       `min_compatible`, and says plainly whether they are compatible and which
       side is older
-- [ ] No PC-side sender yet for `SAFETY_CMD_SET_CT_CAL`/`GET_CT_CAL` — the
-      codecs and firmware-side handling exist (`firmware/SaftyFW/TODO.md`
-      Phase 9), but no MCP tool or script calls them yet;
-      `firmware/SimFW/tools/ct_calibration/` still only writes a local JSON file.
 
 ## What this does not become
 

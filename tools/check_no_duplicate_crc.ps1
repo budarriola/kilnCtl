@@ -32,12 +32,11 @@
 # firmware/UnitTestFw/UnitTest/App/drivers/espInterfaces/uart_protocol.c (a
 # stale fork of the KilnFW file, never migrated) and its pc_tools mirror
 # firmware/UnitTestFw/UnitTest/pc_tools/src/uart_control/protocol.py used to
-# be allowlisted here too. Both are gone: `firmware/UnitTestFw` was decommissioned
-# and deleted wholesale (SimFW is its replacement -- see
-# firmware/SimFW/docs/DESIGN_NOTES.md sec 12), so their grep hits disappeared
-# with the files rather than through a CRC migration. Their allowlist entries
-# are removed below per this script's own rule: an allowlist entry that no
-# longer has a matching file is dead weight.
+# be allowlisted here too, then were removed from the allowlist when
+# `firmware/UnitTestFw` was deleted (the bench-fixture firmware that had
+# replaced it is now gone in turn, and `firmware/UnitTestFw` was restored
+# from history 2026-08-28) -- so this check may report those two files again
+# until they are re-allowlisted or migrated. Not fixed here; restore-only.
 #
 # One duplicate remains allowlisted:
 #   - tools/PcTools/src/kilnctrl/crc16.py
@@ -47,13 +46,7 @@
 #     the same vectors as the third implementation" item)
 #
 #     kilnctrl.protocol used to carry this port directly; it now imports
-#     crc16_ccitt_false from kilnctrl.crc16 and re-exports it, because
-#     kilnsim.benchproto_codec (a distinct wire protocol, tracked
-#     separately in ROADMAP.md's "genuinely still software" list) needed
-#     the identical CRC-16/CCITT-FALSE algorithm and shared Python code was
-#     the honest fix, not a second allowlist entry -- both codecs are pure
-#     Python living side by side under tools/PcTools/src, unlike the
-#     C-vs-Python split that justifies this one port existing at all.
+#     crc16_ccitt_false from kilnctrl.crc16 and re-exports it.
 #
 # DESIGN CHOICE: this check does NOT fail on that known, already-tracked
 # debt today. Making it fail loudly right now would just be a second,

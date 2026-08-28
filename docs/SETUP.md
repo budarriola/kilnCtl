@@ -134,7 +134,7 @@ shows up as missing footprints rather than as an error.
 | `import kilnctrl` fails | `uv sync --project tools/PcTools` has not run |
 | KiCad reports missing footprints | Submodules not initialised, or a library table has picked up an absolute path again — `docs/REPO_LAYOUT.md` B1 |
 | MCP servers missing | `.mcp.json` not generated; re-run the setup script |
-| MCP tool call fails to connect | `kilnctrl`/`kilnsim` are separate long-running HTTP servers, not spawned by the client — see `docs/MCP_SERVERS.md` for how to start/stop/check them |
+| MCP tool call fails to connect | `kilnctrl` is a separate long-running HTTP server, not spawned by the client — see `docs/MCP_SERVERS.md` for how to start/stop/check it |
 | `git submodule status` exits 128 | A gitlink is tracked with no `.gitmodules` entry. `git rm --cached <path>` it. This happened once already, when four Claude Code agent worktrees were swept in by a `git add -A` |
 
 ## Completion checklist

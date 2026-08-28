@@ -72,9 +72,9 @@
     //
     // The MCP servers are HTTP now (see docs/MCP_SERVERS.md). An HTTP MCP
     // entry in .mcp.json fails to connect if nothing is listening, so
-    // "MCP Start" is the button that makes the editor's kicad/kilnctrl/kilnsim
+    // "MCP Start" is the button that makes the editor's kicad/kilnctrl
     // tools work at all; the folderOpen task below normally gets there first.
-    // One button covers all three -- mykicadMcp/start_mcp_http_server.ps1 is
+    // One button covers both -- mykicadMcp/start_mcp_http_server.ps1 is
     // still there for using that submodule outside this repo.
     "actionButtons.commands": [
       {
@@ -82,7 +82,7 @@
         "command": "powershell -NoProfile -ExecutionPolicy Bypass -File ${workspaceFolder:kilnCtl}\\tools\\PcTools\\scripts\\mcp_servers.ps1 start",
         "color": "lightgreen",
         "singleInstance": true,
-        "tooltip": "Start the kicad (8766), kilnctrl (8767) and kilnsim (8768) HTTP MCP servers"
+        "tooltip": "Start the kicad (8766) and kilnctrl (8767) HTTP MCP servers"
       },
       {
         "name": "$(debug-stop) MCP Stop",
@@ -96,7 +96,7 @@
         "command": "powershell -NoProfile -ExecutionPolicy Bypass -File ${workspaceFolder:kilnCtl}\\tools\\PcTools\\scripts\\mcp_servers.ps1 restart",
         "color": "cyan",
         "singleInstance": true,
-        "tooltip": "Pick up edits to kicad/kilnctrl/kilnsim server code"
+        "tooltip": "Pick up edits to kicad/kilnctrl server code"
       },
       {
         "name": "$(pulse) MCP Status",

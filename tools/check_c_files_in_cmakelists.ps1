@@ -32,11 +32,6 @@
 #     CMakeLists.txt and is out of scope here, same as this check's own
 #     charter: firmware/SaftyFW/src/, not the whole firmware tree)
 #
-# firmware/SimFW is owned by a different, concurrently-running work stream
-# (see MEMORY.md's SimFW notes) and is deliberately NOT covered -- adding it
-# risks a false failure against work in flight that this check did not
-# design for, which is worse than not covering it yet.
-#
 # CMakeLists.txt source lists in this repo appear in two different, both
 # legal, CMake syntaxes: double-quoted (App/CMakeLists.txt's
 # `SRCS "main.c" "monitor_task.c"`, App/drivers/CMakeLists.txt's

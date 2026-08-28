@@ -656,11 +656,9 @@ class SafetyFlag(enum.IntFlag):
 # ---------------------------------------------------------------------------
 # CRC
 # ---------------------------------------------------------------------------
-# crc16_ccitt_false() itself now lives in kilnctrl.crc16 (shared with
-# kilnsim.benchproto_codec, a distinct wire protocol that needs the exact
-# same algorithm -- see that module's docstring for why sharing was chosen
-# over a second allowlisted duplicate). Re-exported here so existing callers
-# of kilnctrl.protocol.crc16_ccitt_false keep working unchanged.
+# crc16_ccitt_false() itself now lives in kilnctrl.crc16. Re-exported here so
+# existing callers of kilnctrl.protocol.crc16_ccitt_false keep working
+# unchanged.
 from .crc16 import crc16_ccitt_false  # noqa: E402,F401
 
 

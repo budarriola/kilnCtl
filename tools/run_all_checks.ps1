@@ -58,12 +58,12 @@ $checks = Get-ChildItem -Path $repoRoot -Filter "check_*.ps1" -Recurse -File |
     } |
     Sort-Object FullName
 
-# As of 2026-08-27 there are 8: five under tools/, two under
-# firmware/SaftyFW/tools/, three under firmware/SimFW/tools/ -- ten, and the
-# floor is set below the real count on purpose. It exists to catch "the glob
-# found nothing", not to assert an exact inventory; setting it equal to the
-# count would turn every legitimate deletion into a failure and teach people to
-# edit this number, which is how the route cap got into trouble.
+# As of 2026-08-28 there are several: some under tools/, two under
+# firmware/SaftyFW/tools/, and the floor is set below the real count on
+# purpose. It exists to catch "the glob found nothing", not to assert an
+# exact inventory; setting it equal to the count would turn every legitimate
+# deletion into a failure and teach people to edit this number, which is how
+# the route cap got into trouble.
 $MinimumChecks = 5
 
 if ($checks.Count -lt $MinimumChecks -and -not $AllowFewerChecks) {

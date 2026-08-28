@@ -781,7 +781,6 @@ def get_openocd_status() -> str:
     for peer, label, elf_fn in (
         (debug_probe.PEER_ESP, "esp (KilnFW)", debug_probe._kiln_fw_elf),
         (debug_probe.PEER_PICO, "pico (SaftyFW)", debug_probe._safty_fw_elf),
-        (debug_probe.PEER_SIM, "sim (SimFW bench fixture)", debug_probe._sim_fw_elf),
     ):
         elf = elf_fn()
         present = "found" if os.path.isfile(elf) else "MISSING -- pass elf_path explicitly or build first"
@@ -791,17 +790,16 @@ def get_openocd_status() -> str:
 
 @_tool()
 def debug_program(peer: str, elf_path: Optional[str] = None, confirm: bool = False, allow_stale: bool = False) -> str:
-    """Flashes an ELF to `peer` ("esp", "pico", or "sim") over OpenOCD and resets it.
+    """Flashes an ELF to `peer` ("esp" or "pico") over OpenOCD and resets it.
     Writes flash on a live board -- refused unless `confirm=True` is passed
     explicitly (tools/PcTools/TODO.md's "flash writes require an explicit
     confirm" guard rail).
 
-    Uses the peer's default build output (KilnFW/build/KilnCtrl.elf,
-    SaftyFW/build/SaftyFW.elf or SimFW/build/SimFW.elf) unless `elf_path` is
-    given. For the ESP, prefer flash_firmware() instead -- it flashes the full
-    three-image set (bootloader/partition-table/app) this tool does not; this
-    generic path is for the two RP2040s, which each ship one plain ELF with no
-    bootloader.
+    Uses the peer's default build output (KilnFW/build/KilnCtrl.elf or
+    SaftyFW/build/SaftyFW.elf) unless `elf_path` is given. For the ESP, prefer
+    flash_firmware() instead -- it flashes the full three-image set
+    (bootloader/partition-table/app) this tool does not; this generic path is
+    for the RP2040, which ships one plain ELF with no bootloader.
 
     For peer="pico" (SaftyFW), same staleness refusal as flash_firmware(): the
     ELF's build-identity header (saftyfw_build_info.h) is checked against
@@ -809,15 +807,7 @@ def debug_program(peer: str, elf_path: Optional[str] = None, confirm: bool = Fal
     uncommitted changes, against those changed files' mtimes -- see
     stale_check.py. Pass allow_stale=True to flash anyway. Only checked when
     using the peer's default ELF and default build-info location; an explicit
-    elf_path bypasses the check (nothing to compare it against).
-
-    peer="sim" is the SimFW bench fixture, reached through the SECOND
-    CMSIS-DAP probe on this bench. Both probes are the same VID:PID, so the
-    peer's serial is pinned in debug_probe.py -- that pin is what stops a
-    fixture flash from landing on the safety processor, so do not work around
-    it by unsetting the serial. Note SimFW busy-waits through main.c's 14-stage
-    boot beacon (~40 s) before starting its scheduler, so it is not ready to
-    answer the instant this returns."""
+    elf_path bypasses the check (nothing to compare it against)."""
     if not confirm:
         return "error: flash write refused without confirm=True -- this writes flash on a live board"
 
@@ -940,10 +930,10 @@ def debug_read_memory(peer: str, address: int, count: int = 1, width: int = 32,
 @_tool()
 def debug_read_symbol(peer: str, symbol: str, count: Optional[int] = None, width: int = 32,
                       elf_path: Optional[str] = None, leave_halted: bool = False) -> str:
-    """Reads a named symbol from `peer`'s memory ("esp", "pico", or "sim" --
-    the SimFW bench fixture). Same as debug_read_memory() but resolves the
-    address from the peer's build ELF, so a counter or register image can be
-    read by name without looking up an address by hand.
+    """Reads a named symbol from `peer`'s memory ("esp" or "pico"). Same as
+    debug_read_memory() but resolves the address from the peer's build ELF,
+    so a counter or register image can be read by name without looking up an
+    address by hand.
 
     `count` defaults to the symbol's whole recorded size at the requested
     `width` (a 16-byte array reads as 16 bytes with width=8), or one word if
@@ -951,7 +941,7 @@ def debug_read_symbol(peer: str, symbol: str, count: Optional[int] = None, width
 
     Two caveats worth knowing before trusting the numbers:
       - A symbol defined at more than one address (file-static objects of the
-        same name in different translation units -- SimFW has two `s_bus`) is
+        same name in different translation units) is
         refused rather than resolved arbitrarily.
       - This returns raw bytes and knows nothing about struct layout. Get a
         member's offset from DWARF (`objdump --dwarf=info`); assuming offset 0
@@ -973,7 +963,7 @@ def debug_list_symbols(peer: str, pattern: str, elf_path: Optional[str] = None, 
     """Lists symbols in `peer`'s build ELF whose name contains `pattern`
     (case-insensitive substring, not a regex), with address and recorded size.
     Use it to find what debug_read_symbol() can read -- e.g. pattern="g_dbg"
-    for SimFW's temporary bench counters.
+    for temporary bench counters.
 
     A symbol shown as "AMBIGUOUS" is defined at several addresses in this ELF
     and debug_read_symbol() will refuse it by name."""
@@ -1801,10 +1791,9 @@ def safety_set_ct_cal(channel: int, calibrated: bool, gain: float, offset: float
     calibration (config_store.h's ct_cal record).
 
     `channel` is 0-2 (one of the three current-sense channels), `gain`/
-    `offset` are the linear-fit constants a bench calibration run produces
-    (firmware/SimFW/tools/ct_calibration/calibrate_ct.py). Only one channel
-    is written per call -- writing channel 0 never touches channel 1/2's
-    stored constants.
+    `offset` are the linear-fit constants a bench calibration run produces.
+    Only one channel is written per call -- writing channel 0 never touches
+    channel 1/2's stored constants.
 
     Fire-and-forget, like safety_clear_trip/safety_set_tc_type: there is no
     reply on the wire. Refused on the Pico side (relay currently ARMED, or an

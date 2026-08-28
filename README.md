@@ -38,7 +38,7 @@ a path argument: `idf.py -C firmware/KilnFW build`,
 
 ```
 hardware/   KiCad projects, shared library, datasheets, LTspice, sourcing
-firmware/   KilnFW (ESP32-S3), SaftyFW (RP2040), CommonFW (shared), SimFW (bench fixture)
+firmware/   KilnFW (ESP32-S3), SaftyFW (RP2040), CommonFW (shared)
 tools/      PcTools - GUI and MCP server for both processors
 docs/       System-level documents that span hardware and firmware
 ```

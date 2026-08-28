@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Tests for mcpkit.registry -- the five-tool search/batch facade that both
-the kilnctrl and kilnsim MCP servers collapse their real tool surface into.
+"""Tests for mcpkit.registry -- the five-tool search/batch facade that the
+kilnctrl MCP server collapses its real tool surface into.
 
 Why this test exists: ``collapse()`` is a single choke point that both
 production servers run through at import time, so a defect here is silent
@@ -39,9 +39,9 @@ def _facade_names(prefix: str) -> "list[str]":
 
 
 def _build_server(*, prefix: str = "x_", keep=(), synonyms=None):
-    """A small synthetic server standing in for kilnctrl/kilnsim's real,
-    much larger tool sets. Three tools are enough to exercise grouping,
-    search relevance, and argument coercion without depending on either
+    """A small synthetic server standing in for kilnctrl's real,
+    much larger tool set. Three tools are enough to exercise grouping,
+    search relevance, and argument coercion without depending on the
     production server's actual surface (which would make this test brittle
     against their unrelated changes)."""
     mcp = MCPServer("probe")

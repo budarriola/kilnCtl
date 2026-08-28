@@ -29,7 +29,7 @@ processors, so it is no longer inside either firmware.
 # Tkinter manual-control GUI
 uv run --project tools/PcTools kilnctrl-gui
 
-# MCP server (streamable HTTP on 127.0.0.1:8767/mcp; kilnsim's is 8768)
+# MCP server (streamable HTTP on 127.0.0.1:8767/mcp)
 uv run --project tools/PcTools kilnctrl-mcp-server
 ```
 

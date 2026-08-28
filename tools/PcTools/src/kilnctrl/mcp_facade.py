@@ -161,7 +161,6 @@ RECIPES = """\
   tail the firmware log:  kiln_call(name="get_device_log", args={"n":80})
   flash the ESP32-S3:     kiln_call(name="flash_firmware")           (JTAG/OpenOCD, never esptool)
   flash the RP2040:       kiln_call(name="debug_program", args={"peer":"pico","confirm":true})
-  flash the SimFW rig:    kiln_call(name="debug_program", args={"peer":"sim","confirm":true})
   read a firmware global: kiln_call(name="debug_read_symbol", args={"peer":"pico","symbol":"s_tc_type_verified"})
   everything off, now:    kiln_call(name="io_all_relays_off")
   host tests before hw:   kiln_call(name="build_saftyfw_host_tests")

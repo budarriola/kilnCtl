@@ -1,10 +1,9 @@
 """Shared MCP facade toolkit for the PcTools servers.
 
-Both ``kilnctrl`` and ``kilnsim`` register a large flat tool surface (~200 and
-~40 tools respectively). Exposing all of them over MCP costs 200-500 tokens of
-JSON schema *each*, spent in every context window before the model has read a
-single line of the user's request -- for kilnctrl that is roughly 60k tokens of
-pure preamble.
+``kilnctrl`` registers a large flat tool surface (~135 tools). Exposing all of
+them over MCP costs 200-500 tokens of JSON schema *each*, spent in every
+context window before the model has read a single line of the user's request
+-- roughly 20k tokens of pure preamble.
 
 :func:`mcpkit.registry.collapse` replaces that surface with five facade tools
 (``help`` / ``find`` / ``describe`` / ``call`` / ``batch``). The full tool set
