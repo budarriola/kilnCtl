@@ -2367,11 +2367,21 @@ static const zone_sweep_all_hooks_t s_fake_all_hooks = {
  * proves the no-two-zones-on-at-once property, not just an observation. */
 static bool s_all_any_relay_on = false;
 static bool s_all_overlap_detected = false;
+/* Set by test_zone_sweep_run_all_zones_energize_refused_reason_decodes_fault_words()
+ * below to make the energize call refuse with a known safety-source mask,
+ * driving zone_sweep_run_all_zones()'s ZONE_SWEEP_ZONE_ENERGIZE_REFUSED ->
+ * out->reason build path (the actual call site being tested). */
+static bool s_all_refuse_with_safety = false;
+static uint32_t s_all_refuse_sources = 0;
 
 static kiln_io_owner_relay_result_t fake_all_energize(void *ctx, uint8_t relay_mask, uint32_t *out_safety_sources)
 {
     (void)ctx;
     (void)relay_mask;
+    if (s_all_refuse_with_safety) {
+        if (out_safety_sources) *out_safety_sources = s_all_refuse_sources;
+        return KILN_IO_OWNER_RELAY_ERR_SAFETY;
+    }
     if (out_safety_sources) *out_safety_sources = 0;
     if (s_all_any_relay_on) {
         s_all_overlap_detected = true; /* a second zone tried to energize while one was still on */
@@ -2512,6 +2522,54 @@ static void test_zone_sweep_run_all_zones_skipped_zone_records_nothing(void)
     TEST_CHECK(actx.zone_index_call_count == 2,
               "set_zone_index() is never called for the skipped zone -- matches the pre-hoist contract "
               "(\"only set for a zone actually being measured\")");
+
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+}
+
+/* ROADMAP.md M13 ("every fault... what was detected wrong"): the
+ * ZONE_SWEEP_ZONE_ENERGIZE_REFUSED case in zone_sweep_run_all_zones() used to
+ * render out->reason as "zone %u energize refused (0x%02X)" -- a bare hex
+ * mask. This drives that exact call site (not safety_fault_source_words() in
+ * isolation, which already works) and asserts the decoded source name is in
+ * the operator-facing reason string, not a hex byte. */
+static void test_zone_sweep_run_all_zones_energize_refused_reason_decodes_fault_words(void)
+{
+    TEST_SECTION("zone_sweep_run_all_zones() -- ENERGIZE_REFUSED reason decodes the safety fault-source "
+                 "mask instead of showing a bare hex value (ROADMAP.md M13)");
+    fake_all_ctx_t actx;
+    memset(&actx, 0, sizeof(actx));
+    actx.relay_masks[0] = 0x01;
+
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    s_zones.cfg.thermo_count = 1;
+    s_zones.cfg.zones[0].max_temp_c = 500.0f;
+
+    zone_sweep_zone_deps_t deps = s_fake_all_zone_deps;
+    zone_sweep_all_hooks_t hooks = s_fake_all_hooks;
+    hooks.ctx = &actx;
+
+    s_all_any_relay_on = false;
+    s_all_overlap_detected = false;
+    s_all_refuse_with_safety = true;
+    s_all_refuse_sources = 0x04u; /* main-board thermocouple fault, per safety_link.h */
+
+    zone_sweep_all_result_t result;
+    zone_sweep_run_all_zones(1, &deps, &hooks, &result);
+
+    s_all_refuse_with_safety = false;
+    s_all_refuse_sources = 0;
+
+    TEST_CHECK(result.state == ZONE_SWEEP_FAILED, "an owner safety refusal fails the sweep");
+    TEST_CHECK(strstr(result.reason, "0x") == NULL,
+              "RED before this fix: the old format string put a bare \"0x04\" hex mask in the reason -- "
+              "this must be gone now that the call site decodes the mask instead");
+    /* The call site caps the decoded word at 16 bytes (see its comment) so
+     * -Werror=format-truncation can prove out->reason never overflows --
+     * "main-board thermocouple fault" is cut to "main-board therm" at that
+     * width, so assert on the prefix that survives, not the full word. */
+    TEST_CHECK(strstr(result.reason, "main-board") != NULL,
+              "the decoded fault-source word (\"main-board...\", from safety_fault_source_words()) is in "
+              "the reason string, not just the raw mask");
 
     memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
 }
@@ -2903,6 +2961,7 @@ void run_test_zones_http(void)
     test_zone_sweep_run_one_zone_trip_latched_forces_off();
     test_zone_sweep_run_all_zones_never_energizes_two_zones_at_once();
     test_zone_sweep_run_all_zones_skipped_zone_records_nothing();
+    test_zone_sweep_run_all_zones_energize_refused_reason_decodes_fault_words();
     test_zone_normals_get_set_round_trip();
 
     test_ct_mapping_mismatch_silent_when_never_measured();

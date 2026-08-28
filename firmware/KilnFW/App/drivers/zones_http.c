@@ -25,6 +25,9 @@
                              * zone_sweep_effective_ceiling_c() */
 #include "kiln_io.h"
 #include "profile_executor.h"
+#include "safety_trip_words.h" /* safety_fault_source_words() -- decode the safety fault-source
+                                 * mask instead of showing the operator a bare hex value
+                                 * (ROADMAP.md M13). */
 #include "relay_authority.h" /* the single shared heat claim -- see its doc comment
                                * above relay_heat_zone_claimant_t. Closes the race
                                * this file's own s_sweep.active check alone cannot:
@@ -4635,13 +4638,33 @@ static void zone_sweep_run_all_zones(uint8_t zones_total, const zone_sweep_zone_
              * update started mid-sweep (ERR_UPDATING) or a safety fault
              * asserted mid-sweep (ERR_SAFETY), the exact gap the direct
              * kiln_io_set_relay_mask() call used to have no way to see. */
-            /* Kept short and unconditionally non-truncating: out->reason is
-             * char[64] (matching zones_http.h's zone_sweep_status_t), and
-             * -Werror=format-truncation flags any snprintf() into it that
-             * COULD truncate even if this specific zi/refused_sources pair
-             * never would. */
-            snprintf(out->reason, sizeof(out->reason), "zone %u energize refused (0x%02X)", zi,
-                     (unsigned)refused_sources);
+            /* ROADMAP.md M13: decode the fault-source mask instead of
+             * showing a bare hex value. out->reason is char[64] (matching
+             * zones_http.h's zone_sweep_status_t), and the full comma-joined
+             * safety_fault_source_words() sentence can run to 141 bytes (see
+             * safety_trip_words.h's comment), so the full decode does not
+             * fit here -- take just the first asserted source's name and
+             * note "(+more)" if others are also set, same shortening
+             * ui_page_temperature.c's relay-refusal message uses.
+             *
+             * Kept short and unconditionally non-truncating: zi is uint8_t
+             * (max 3 digits), and the "%.16s" precision (not just a big
+             * buffer) is what lets -Werror=format-truncation prove this can
+             * never overflow out->reason regardless of how long the decoded
+             * word actually is: "zone " + 3 + " energize refused: " + 16 +
+             * " (+more)" = 5 + 3 + 19 + 16 + 8 = 51 bytes, plus the NUL,
+             * fits in 64. */
+            {
+                char src_words[160];
+                safety_fault_source_words(refused_sources, src_words, sizeof(src_words));
+                char *comma = strchr(src_words, ',');
+                bool more = (comma != NULL);
+                if (comma != NULL) {
+                    *comma = '\0';
+                }
+                snprintf(out->reason, sizeof(out->reason), "zone %u energize refused: %.16s%s", zi, src_words,
+                         more ? " (+more)" : "");
+            }
             out->state = ZONE_SWEEP_FAILED;
             return;
         case ZONE_SWEEP_ZONE_OK:

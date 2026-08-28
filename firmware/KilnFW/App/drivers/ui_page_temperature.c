@@ -8,6 +8,9 @@
 #include "MAX31856.h"
 #include "dashboard_http.h"
 #include "kiln_io.h"
+#include "safety_trip_words.h" /* safety_fault_source_words() -- decode the safety fault-source
+                                 * mask instead of showing the operator a bare hex value
+                                 * (ROADMAP.md M13). */
 #include "ui_theme.h"
 #include "ui_topbar.h"
 #include "zones_http.h"
@@ -340,10 +343,30 @@ static void relay_toggle_cb(lv_event_t *e)
     case DASHBOARD_RELAY_ERR_OWNED:
         snprintf(msg, sizeof(msg), "Relay %u refused -- owned by a running profile", UI_RELAY_DISPLAY(ctx->relay_index));
         break;
-    case DASHBOARD_RELAY_ERR_SAFETY:
-        snprintf(msg, sizeof(msg), "Relay %u refused -- safety fault 0x%02X", UI_RELAY_DISPLAY(ctx->relay_index),
-                 (unsigned)sources);
+    case DASHBOARD_RELAY_ERR_SAFETY: {
+        /* ROADMAP.md M13: decode the fault-source mask instead of showing a
+         * bare hex value. msg is only char[64] (shared by every case in this
+         * switch), and the full comma-joined safety_fault_source_words()
+         * sentence can run to 141 bytes (see safety_trip_words.h's comment),
+         * so the full decode does not fit here -- take just the first
+         * asserted source's name and note "(+more)" if others are also set,
+         * same reasoning ui_page_diagnostics.c uses for its unwrappable LCD
+         * line. The "%.16s" precision (not just a big buffer) is what lets
+         * -Werror=format-truncation prove this can never overflow msg,
+         * regardless of how long the decoded word actually is:
+         * "Relay " + up to 10 digits + " refused -- safety: " + 16 + " (+more)"
+         * = 6 + 10 + 20 + 16 + 8 = 60 bytes, plus the NUL, fits in 64. */
+        char src_words[160];
+        safety_fault_source_words(sources, src_words, sizeof(src_words));
+        char *comma = strchr(src_words, ',');
+        bool more = (comma != NULL);
+        if (comma != NULL) {
+            *comma = '\0';
+        }
+        snprintf(msg, sizeof(msg), "Relay %u refused -- safety: %.16s%s", UI_RELAY_DISPLAY(ctx->relay_index),
+                 src_words, more ? " (+more)" : "");
         break;
+    }
     case DASHBOARD_RELAY_ERR_UPDATING:
         snprintf(msg, sizeof(msg), "Relay %u refused -- firmware update in progress", UI_RELAY_DISPLAY(ctx->relay_index));
         break;

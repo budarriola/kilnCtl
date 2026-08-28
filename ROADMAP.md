@@ -62,16 +62,12 @@ What is still genuinely open is short:
 
 | Size | Item | Where |
 |---|---|---|
-| S | A guard that every `src/**.c` is in its CMakeLists or explicitly excluded — `tick_timing.c` passed host tests and failed the target link | [What is actually left](#what-is-actually-left) |
-| S | Remove the 80 °C fixture ceilings before a real kiln — a concrete instance of `SaftyFW/TODO.md` phase 9's "confirm no test threshold was left in place" | ibid. |
 | M | **`safety_poll` crashed twice with `IllegalInstruction`** and self-recovered by rebooting (2026-08-28). That task sees the safety processor, and link staleness gates heating. Under investigation — two earlier fixes panicked this same task and were reverted | M10 |
 | M | **S14 cannot be armed until something maps CT channels to zones.** The sweep measures per-zone with a relay mask; `ct_channel_map` is per-CT-channel and has no other consumer, defaulting to `0xFF`. Derive it from the energize sweep rather than asking the operator to type it | M12 |
 | L | **The HTTP reset is not a heap failure** — proven, not argued. Remaining candidates are lwIP or `esp_http_server`'s accept/select loop under `max_open_sockets=13`, which needs a different instrumentation surface | M10 |
-| S | A guard for the "consumer exists, producer does not" class. Four instances now: `current_sense_set_cal()`, `sample_counter_advancing`, `i_normal_a`, and a documented heartbeat contract nothing sent | M10 |
+| S | The cross-language PC-tool heartbeat contract remains uncovered by any guard — a Python sender with no C-side check can't be caught by `check_guard_input_producers.ps1` or `check_unused_setters.ps1`, both C-only. Verified 2026-08-28: `sample_counter_advancing` and `i_normal_a`, the two other named instances, are already correctly wired (`i_normal_a` copies from the config record gated by its `fields_set` bits; `sample_counter_advancing`'s hardcoded `false` is documented, deliberate S13-dormant state, not a missing producer) — `check_guard_input_producers.ps1` passes 25/25 today | M10 |
 | M | `mykicadMcp/` and `pdfMcp/` moved under `tools/` | M7 |
 | L | **HTTP connection resets under concurrency.** Has a reproducer and two ruled-out mechanisms, so the next step is instrumenting the failing allocation, not more black-box testing | M10 |
-| S | Delete the twelve stale `display_*` MCP tools (owner left the choice to me; `display_bridge_task` is confirmed dead on hardware, so there is nothing to restore them onto) | M12 |
-| M | Known-good config presets: factory-default then load, so tests start from the same board every time | M1 |
 | M | Mains voltage as a dropdown; safety thermocouple and relay config shown read-only in the zones config | M12 |
 | M | An over-current guard paired with the under-current guard, as a percentage of measured normal | M12 |
 | L | **Make the commissioning page simple.** 58 raw parameters classified DERIVED / ASKED / DEFAULTED; the ASKED list is the score | M12 |
@@ -586,9 +582,17 @@ Owned by [`docs/REPO_LAYOUT.md`](docs/REPO_LAYOUT.md). Tree split into
 `hardware/`/`firmware/`/`tools/`/`docs/`, library tables and submodule paths
 fixed, fresh-clone `mainBoard` open confirmed 2026-08-19.
 
-- [ ] `mykicadMcp/` and `pdfMcp/` moved under `tools/` — blocked by running
-      processes holding the directories open, plus `.mcp.json` hardcoded paths
-      that need updating first
+- [ ] `mykicadMcp/` and `pdfMcp/` moved under `tools/` — investigated
+      2026-08-28, deferred as riskier than it looks: `mykicadMcp` is a live git
+      submodule backing the running `kicad` MCP server, and
+      `.claude/settings.json`'s permission allowlist has a dozen-plus entries
+      hardcoding absolute paths through `mykicadMcp\...`, accumulated over many
+      sessions. A bulk path edit there risks silently narrowing or widening
+      what a future session is allowed to run. `pdfMcp` alone is safe to move
+      any time — it is untracked/gitignored, no submodule or allowlist risk.
+      Do the `mykicadMcp` half as its own dedicated pass: stop the server
+      first, remount the submodule properly, and go through the allowlist
+      entries one by one rather than a bulk edit
 - [ ] `hardware/UnitTestFixture` KiCad project still unopened (the other three
       projects were confirmed clean 2026-08-16)
 
@@ -978,10 +982,17 @@ owner had to ask.
       diagnostics subrow stopped printing bare codes
 - [x] The trip decision moved to its own translation unit so it can be
       host-tested; nothing could link `safety_link.c` off-target
-- [ ] The remaining bare-code surfaces: `profile_executor`'s `fault_guard` on
-      every path, and a sweep for any `reason 0x%02X` left anywhere
-- [ ] A host harness that links `safety_link.c` itself, rather than only the
-      extracted decision
+- [x] `profile_executor`'s `fault_guard` swept: every emission is consumed
+      only by already-decoded call sites. A repo-wide `reason 0x%02X` sweep
+      found the remaining hex-coded surfaces were all `ESP_LOGW`/`ESP_LOGE`
+      serial log lines, except two operator-facing ones missed by the first
+      pass — `ui_page_temperature.c`'s relay-refusal LCD message and
+      `zones_http.c`'s zone-sweep refusal reason — fixed in the same push as
+      this checkbox
+- [x] A host harness that links `safety_link.c` itself
+      (`test_safety_link_compile.c`, 23/23): `SAFETY_FLAG_TEMP_VALID` as sole
+      NaN authority and peer-sent LINK_UP/FAULT bits being dropped are both
+      pinned against the real file, not a stub
 
 ## M14 — Verification you can trust · *opened and largely closed 2026-08-28*
 
@@ -1018,9 +1029,12 @@ earned.
       no relay write outside `kiln_io_owner`. **Both found real violations on
       their first run**, one of which three rounds of opus review had read past
       because reviews read the diff and it was not in the diff
-- [ ] A guard for the "consumer exists, producer does not" class — four
-      instances now, and the existing guard checks only that a struct field has
-      *an assignment*, not that the assignment carries a real measurement
+- [x] A guard for the "setter with no caller" shape of this class —
+      `check_unused_setters.ps1` (2026-08-28), which caught its own first
+      version blind to multi-line prototypes before it ever ran for real. The
+      wider class isn't closed: see M10's heartbeat-contract item for what's
+      still uncovered, and `check_guard_input_producers.ps1` still only proves
+      a field is assigned, not that the assignment carries a real measurement
 
 ## M10 — Instrumentation: make the board tell you when it is wrong
 
