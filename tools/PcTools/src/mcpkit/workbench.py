@@ -215,7 +215,13 @@ def build_kilnfw(target: str = "build", jobs: int = 0) -> str:
         inner = f"cd '{os.path.join(root, 'firmware', 'KilnFW', 'build')}'; ninja -j {jobs}"
     else:
         inner = f"idf.py -C '{os.path.join(root, 'firmware', 'KilnFW')}' {target}"
-    command = f"& '{_IDF_PROFILE}' *>&1 | Out-Null; {inner}"
+    # powershell.exe does NOT propagate a native command's exit code as its own
+    # process exit code unless the script explicitly does so -- without the
+    # trailing `exit $LASTEXITCODE`, this always returned 0 even when idf.py
+    # or ninja failed, which is exactly the false-pass bug this wrapper exists
+    # to avoid. See _MSYS_ENV_VARS above for the sibling false-pass this same
+    # command is also guarding against.
+    command = f"& '{_IDF_PROFILE}' *>&1 | Out-Null; {inner}; exit $LASTEXITCODE"
     return _run(f"kilnfw-{target}",
                 ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
                 timeout=1800)
