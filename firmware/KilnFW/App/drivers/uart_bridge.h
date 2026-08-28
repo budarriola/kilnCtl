@@ -68,6 +68,14 @@ esp_err_t uart_bridge_start_io_task(uart_protocol_t *proto, kiln_io_t *io);
  * hardware itself. */
 esp_err_t uart_bridge_start_touch_task(uart_protocol_t *proto, screen_idle_t *idle);
 
+/* UI_TEST (task 14): the PC's window onto kiln_ui.c for a UI regression
+ * harness -- GET_CURRENT_PAGE, LIST_TAP_TARGETS (structured form of
+ * TOUCH_CMD_LOG_TAP_TARGETS' log dump) and CLICK_BY_NAME (resolve a target's
+ * name to its centre and inject a press+release there). Owns no hardware
+ * itself, same as TOUCH above; needs no idle handle because it only calls
+ * kiln_ui_* entry points. */
+esp_err_t uart_bridge_start_ui_test_task(uart_protocol_t *proto);
+
 /* SAFETY (task 7): the PC's window onto the isolated link to the RP2040.
  * GET_STATUS/GET_LINK_STATS answer out of safety_link's cache, so a dead peer
  * is stale data rather than a hung request. */

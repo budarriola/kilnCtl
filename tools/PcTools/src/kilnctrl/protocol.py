@@ -107,6 +107,10 @@ DEFAULT_BAUD_RATE = 921600
 #: against this version or the mismatched id gets no reply at all. Same
 #: same-number-moves-together reasoning as version 6's own bump.
 #:
+#: Version 8 (2026-08-28): one new task_id, UI_TEST (14), for LVGL
+#: tap-target introspection/click-by-name -- see uart_task_ids.h's own
+#: UI_TEST doc comment and ui_test_client.py.
+#:
 #: 2026-08-24, SaftyFW/TODO.md "Shared ids split out of uart_task_ids.h;
 #: PC-link ids left behind": the alias described above is gone.
 #: uart_task_ids.h's C-side UART_PROTOCOL_VERSION is once again its own,
@@ -118,7 +122,7 @@ DEFAULT_BAUD_RATE = 921600
 #: of kilnlink's version from here on: bump it only when THIS protocol's own
 #: contract changes, never merely because the isolated ESP<->Pico link's
 #: number moved.
-UART_PROTOCOL_VERSION = 7
+UART_PROTOCOL_VERSION = 8
 
 
 class Device(enum.IntEnum):
@@ -158,6 +162,22 @@ UART_TASK_ID_AUTOTUNE = 10  # PID autotune (step/relay methods)
 UART_TASK_ID_WIFI = 11  # Wi-Fi status/scan/provision/forget
 UART_TASK_ID_GPIO_PROBE = 12  # raw ESP32 GPIO probe -- CONFIG_KILNCTL_ENABLE_GPIO_PROBE, default off
 UART_TASK_ID_TOUCH = 13  # NS2009 touch controller on the display panel (J2)
+UART_TASK_ID_UI_TEST = 14  # LCD UI regression-test probe: page id, tap-target dump, click-by-name
+
+# --- UI_TEST subcommands (task_id = UART_TASK_ID_UI_TEST) -------------------
+#
+# All three are queries: the request DATA frame is ACKed for delivery only
+# and the answer arrives as a separate DATA frame back to the requester, same
+# convention as TOUCH's GET_STATE.
+UI_TEST_CMD_GET_CURRENT_PAGE = 0x01
+UI_TEST_CMD_LIST_TAP_TARGETS = 0x02
+UI_TEST_CMD_CLICK_BY_NAME = 0x03
+
+#: CLICK_BY_NAME result byte.
+UI_TEST_CLICK_OK = 0
+UI_TEST_CLICK_NOT_FOUND = 1
+UI_TEST_CLICK_AMBIGUOUS = 2
+UI_TEST_CLICK_HIDDEN = 3
 
 # SYSTEM subcommands. RESTART_UART is deliberately RX-only on the firmware
 # side (see uart_task_ids.h) -- it flushes the stuck/garbage bytes a wedged

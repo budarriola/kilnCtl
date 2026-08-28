@@ -111,18 +111,18 @@ def test_pc_tools_uart_protocol_version_is_a_plain_literal():
     assert isinstance(protocol.UART_PROTOCOL_VERSION, int)
 
 
-def test_wire_no_op_both_sides_currently_report_7():
-    """This whole refactor is documented as a wire no-op: the firmware's
-    C-side constant and pc_tools' Python-side constant must still be the
-    same number (7) they were before the split, even though they are no
-    longer textually related. If this ever fails, something changed a wire
-    value as part of what was supposed to be a pure decoupling refactor."""
+def test_wire_version_matches_on_both_sides():
+    """The firmware's C-side constant and pc_tools' Python-side constant must
+    stay the same number, even though they are no longer textually related --
+    a real wire change (like the UART_TASK_ID_UI_TEST addition that bumped
+    this to 8) must be applied to both sides by hand, and this test is what
+    catches a one-sided miss."""
     code = _strip_comments(_UART_TASK_IDS_H.read_text(encoding="utf-8"))
     value_side = _find_define_value(code, "UART_PROTOCOL_VERSION")
-    # The value is `((uint16_t)7)` -- pull the literal that follows the cast,
+    # The value is `((uint16_t)8)` -- pull the literal that follows the cast,
     # not the "16" inside "uint16_t" itself (a bare r"\d+" search would find
     # that first and silently check the wrong number).
     firmware_literal = re.search(r"\(uint16_t\)\s*(\d+)", value_side)
     assert firmware_literal is not None, value_side
-    assert int(firmware_literal.group(1)) == 7
-    assert protocol.UART_PROTOCOL_VERSION == 7
+    assert int(firmware_literal.group(1)) == 8
+    assert protocol.UART_PROTOCOL_VERSION == 8

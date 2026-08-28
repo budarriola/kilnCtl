@@ -1564,6 +1564,13 @@ void app_main(void)
         if (screen_idle_ready && uart_bridge_start_touch_task(&uart_proto, &screen_idle) != ESP_OK) {
             ESP_LOGE(TAG, "Failed to start touch uart bridge task");
         }
+        /* Gated the same way lvgl_port_start() above is (display_ready,
+         * !recovery_mode): every kiln_ui_* call this task makes walks the
+         * live LVGL widget tree, which only exists once that call has
+         * actually succeeded. */
+        if (!recovery_mode && display_ready && uart_bridge_start_ui_test_task(&uart_proto) != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to start UI test uart bridge task");
+        }
         if (safety_err == ESP_OK &&
             uart_bridge_start_safety_task(&uart_proto, &safety) != ESP_OK) {
             ESP_LOGE(TAG, "Failed to start safety uart bridge task");

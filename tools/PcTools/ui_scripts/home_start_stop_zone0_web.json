@@ -1,0 +1,11 @@
+{
+  "name": "home_start_stop_zone0_web",
+  "description": "Web dashboard home page: confirm the run/stop controls render, zone 0 config baseline.",
+  "backend": "web",
+  "preset": "ui_test_baseline",
+  "steps": [
+    {"action": "goto", "target": "/"},
+    {"action": "wait_for", "target": "runBtn", "timeout_ms": 3000},
+    {"action": "assert_text", "target": "runBtn", "contains": "Start"}
+  ]
+}

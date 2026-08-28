@@ -1,7 +1,11 @@
 #include "kiln_ui.h"
 
 #include <stdbool.h>
+#include <stdio.h>
 #include <string.h>
+
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 #include "esp_log.h"
 
@@ -287,6 +291,36 @@ esp_err_t kiln_ui_register_page(const char *name, kiln_ui_page_build_fn build)
     return ESP_OK;
 }
 
+/* Shared state for one tap-target walk, threaded through the recursion below
+ * instead of a growing parameter list. `do_log` keeps the ESP_LOGI dump
+ * (kiln_ui_log_tap_targets() / the auto-dump in kiln_ui_show()) working
+ * exactly as before; `out` (may be NULL) is the array half added for
+ * kiln_ui_collect_tap_targets() -- both can be active at once, though today
+ * no caller asks for that. */
+typedef struct {
+    bool do_log;
+    kiln_ui_tap_target_t *out;
+    size_t max;
+    size_t count;
+    bool truncated;
+} tap_walk_ctx_t;
+
+static void tap_walk_add(tap_walk_ctx_t *ctx, const char *name, int cx, int cy, bool hidden)
+{
+    if (!ctx->out) {
+        return;
+    }
+    if (ctx->count >= ctx->max) {
+        ctx->truncated = true;
+        return;
+    }
+    kiln_ui_tap_target_t *t = &ctx->out[ctx->count++];
+    snprintf(t->name, sizeof(t->name), "%s", name ? name : "");
+    t->cx = (int16_t)cx;
+    t->cy = (int16_t)cy;
+    t->hidden = hidden;
+}
+
 /* Recursive half of the tap-target dump called at the end of kiln_ui_show()
  * -- see the comment at that call site for why this exists. Reports each
  * clickable widget's post-layout rectangle plus its centre point, which is
@@ -294,7 +328,7 @@ esp_err_t kiln_ui_register_page(const char *name, kiln_ui_page_build_fn build)
  * label text where it has one so targets are identifiable by name rather
  * than by position alone. Depth is carried only to indent nested targets
  * (a scrollable container's children), keeping the dump readable. */
-static void log_tap_targets(lv_obj_t *obj, int depth)
+static void log_tap_targets(lv_obj_t *obj, int depth, tap_walk_ctx_t *ctx)
 {
     if (!obj || depth > 6) {
         /* Depth cap is a guard against a pathological tree, not a real
@@ -379,9 +413,16 @@ static void log_tap_targets(lv_obj_t *obj, int depth)
                      * below instead of by deleting the log level. The
                      * explicit kiln_ui_log_tap_targets() call (and this
                      * function under it) always logs at INFO. */
-                    ESP_LOGI(TAG, "  tap target%*s key[%u] (%d,%d)-(%d,%d) centre=(%d,%d) \"%s\"",
-                             depth * 2, "", (unsigned)k, x1, y1, x2, y2,
-                             (x1 + x2) / 2, (y1 + y2) / 2, key_text);
+                    if (ctx->do_log) {
+                        ESP_LOGI(TAG, "  tap target%*s key[%u] (%d,%d)-(%d,%d) centre=(%d,%d) \"%s\"",
+                                 depth * 2, "", (unsigned)k, x1, y1, x2, y2,
+                                 (x1 + x2) / 2, (y1 + y2) / 2, key_text);
+                    }
+                    /* A buttonmatrix key is never itself HIDDEN-flagged (its
+                     * whole widget was already filtered by the subtree skip
+                     * above if hidden) -- always false, matching every key
+                     * this walk can ever reach. */
+                    tap_walk_add(ctx, key_text, (x1 + x2) / 2, (y1 + y2) / 2, false);
                 }
             }
 
@@ -432,13 +473,17 @@ static void log_tap_targets(lv_obj_t *obj, int depth)
              * board whose diag_state was ARMED. */
             bool hidden = lv_obj_has_flag(child, LV_OBJ_FLAG_HIDDEN);
             bool borrowed = (text[0] != '\0') && !lv_obj_check_type(child, &lv_button_class);
-            ESP_LOGI(TAG, "  tap target%*s (%d,%d)-(%d,%d) centre=(%d,%d) \"%s\"%s%s", depth * 2, "",
-                     (int)area.x1, (int)area.y1, (int)area.x2, (int)area.y2,
-                     (int)((area.x1 + area.x2) / 2), (int)((area.y1 + area.y2) / 2), text,
-                     borrowed ? " <- child label" : "", hidden ? " (hidden)" : "");
+            if (ctx->do_log) {
+                ESP_LOGI(TAG, "  tap target%*s (%d,%d)-(%d,%d) centre=(%d,%d) \"%s\"%s%s", depth * 2, "",
+                         (int)area.x1, (int)area.y1, (int)area.x2, (int)area.y2,
+                         (int)((area.x1 + area.x2) / 2), (int)((area.y1 + area.y2) / 2), text,
+                         borrowed ? " <- child label" : "", hidden ? " (hidden)" : "");
+            }
+            tap_walk_add(ctx, text, (int)((area.x1 + area.x2) / 2),
+                         (int)((area.y1 + area.y2) / 2), hidden);
         }
 
-        log_tap_targets(child, depth + 1);
+        log_tap_targets(child, depth + 1, ctx);
     }
 }
 
@@ -456,22 +501,26 @@ static void log_tap_targets(lv_obj_t *obj, int depth)
  * this codebase uses it yet -- it's the same kind of screen-independent
  * layer lv_layer_top() is, so a future toast/system overlay put there gets
  * the same treatment for free. */
-static void log_all_tap_targets(lv_obj_t *screen)
+static void log_all_tap_targets(lv_obj_t *screen, tap_walk_ctx_t *ctx)
 {
     if (screen) {
-        log_tap_targets(screen, 0);
+        log_tap_targets(screen, 0, ctx);
     }
 
     lv_obj_t *top = lv_layer_top();
     if (top && lv_obj_get_child_count(top) > 0) {
-        ESP_LOGI(TAG, "  -- top-layer --");
-        log_tap_targets(top, 0);
+        if (ctx->do_log) {
+            ESP_LOGI(TAG, "  -- top-layer --");
+        }
+        log_tap_targets(top, 0, ctx);
     }
 
     lv_obj_t *sys = lv_layer_sys();
     if (sys && lv_obj_get_child_count(sys) > 0) {
-        ESP_LOGI(TAG, "  -- sys-layer --");
-        log_tap_targets(sys, 0);
+        if (ctx->do_log) {
+            ESP_LOGI(TAG, "  -- sys-layer --");
+        }
+        log_tap_targets(sys, 0, ctx);
     }
 }
 
@@ -569,7 +618,8 @@ esp_err_t kiln_ui_show(const char *name)
      * switches pages a lot. The explicit kiln_ui_log_tap_targets() call below
      * is unconditional -- ask for the dump when actually aiming a tap. */
     if (s_auto_tap_dump) {
-        log_all_tap_targets(page->screen);
+        tap_walk_ctx_t ctx = { .do_log = true };
+        log_all_tap_targets(page->screen, &ctx);
     }
 
     lvgl_port_set_input_enabled(true);
@@ -586,10 +636,95 @@ void kiln_ui_get_show_diag(uint32_t *show_entries, uint32_t *show_exits)
 void kiln_ui_log_tap_targets(void)
 {
     lv_obj_t *screen = lv_screen_active();
-    log_all_tap_targets(screen);
+    tap_walk_ctx_t ctx = { .do_log = true };
+    log_all_tap_targets(screen, &ctx);
 }
 
 const char *kiln_ui_current_page(void)
 {
     return s_current_page_name;
+}
+
+size_t kiln_ui_collect_tap_targets(kiln_ui_tap_target_t *out, size_t max, bool *truncated)
+{
+    tap_walk_ctx_t ctx = { .out = out, .max = max };
+    lv_obj_t *screen = lv_screen_active();
+    log_all_tap_targets(screen, &ctx);
+    if (truncated) {
+        *truncated = ctx.truncated;
+    }
+    return ctx.count;
+}
+
+kiln_ui_click_result_t kiln_ui_click_by_name(const char *name, int16_t *out_cx, int16_t *out_cy)
+{
+    if (!name) {
+        return KILN_UI_CLICK_NOT_FOUND;
+    }
+
+    /* Sized well past this UI's real per-screen target count (the busiest
+     * page here, the numeric keypad, tops out around 30 keys) -- a stack
+     * array is fine for a call that never recurses and never runs
+     * concurrently with itself (one UART bridge task, one command at a
+     * time). */
+    kiln_ui_tap_target_t targets[32];
+    size_t n = kiln_ui_collect_tap_targets(targets, sizeof(targets) / sizeof(targets[0]), NULL);
+
+    /* Prefer a visible match over a hidden one: a page that show/hides
+     * sibling buttons with the same name (a modal's own trigger button,
+     * for example) has exactly one *tappable* target even when the tree
+     * still contains a hidden one earlier in traversal order. Only fall
+     * back to a hidden match when nothing visible matched at all, so the
+     * caller still gets HIDDEN rather than a false NOT_FOUND. */
+    int match = -1;
+    int hidden_match = -1;
+    int visible_matches = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (strcmp(targets[i].name, name) != 0) {
+            continue;
+        }
+        if (!targets[i].hidden) {
+            if (match < 0) {
+                match = (int)i;
+            }
+            visible_matches++;
+        } else if (hidden_match < 0) {
+            hidden_match = (int)i;
+        }
+    }
+    if (match < 0) {
+        match = hidden_match;
+    }
+
+    if (match < 0) {
+        return KILN_UI_CLICK_NOT_FOUND;
+    }
+    if (out_cx) {
+        *out_cx = targets[match].cx;
+    }
+    if (out_cy) {
+        *out_cy = targets[match].cy;
+    }
+    if (targets[match].hidden) {
+        return KILN_UI_CLICK_HIDDEN;
+    }
+    if (visible_matches > 1) {
+        return KILN_UI_CLICK_AMBIGUOUS;
+    }
+
+    /* Same lvgl_port_inject_touch() path TOUCH_CMD_INJECT drives -- see that
+     * function's header comment (lvgl_port.h) for the coordinate space
+     * (already screen pixels) and the press/release latch it implements.
+     * Unlike TOUCH_CMD_INJECT, which lets the PC pace its own press/release
+     * pair however it likes, this is one call synthesizing both halves of a
+     * tap -- the delay between them is required, not cosmetic: touch_read_cb()
+     * only samples the latched state on its own ~30ms LVGL poll, so a release
+     * written before any poll has sampled the press would overwrite it
+     * unseen and no click would ever fire. */
+    uint16_t cx = (uint16_t)targets[match].cx;
+    uint16_t cy = (uint16_t)targets[match].cy;
+    lvgl_port_inject_touch(cx, cy, true);
+    vTaskDelay(pdMS_TO_TICKS(50));
+    lvgl_port_inject_touch(cx, cy, false);
+    return KILN_UI_CLICK_OK;
 }

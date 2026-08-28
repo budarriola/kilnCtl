@@ -115,8 +115,17 @@
  * even though that other link's own contract never moved.
  * tools/check_uart_version_independence.ps1 (repo root) greps for this
  * define being re-aliased to a KILNLINK_* symbol and fails CI if it ever is
- * again -- see that script for why a comment alone was judged too weak. */
-#define UART_PROTOCOL_VERSION ((uint16_t)7)
+ * again -- see that script for why a comment alone was judged too weak.
+ *
+ * Version 8 (2026-08-28): one new task_id, UI_TEST=14, for LVGL tap-target
+ * introspection/click-by-name (see UART_TASK_ID_UI_TEST's own doc comment
+ * above) -- a PC-side UI regression harness's structured alternative to
+ * hand-parsing TOUCH_CMD_LOG_TAP_TARGETS' ESP_LOGI dump. Existing task_ids
+ * 1-13 and their payloads are UNCHANGED; bumped for the same reason Version
+ * 4/5 were -- an old PC build that has never heard of task_id 14 would
+ * otherwise report a false "compatible" against firmware whose new command
+ * it cannot use. */
+#define UART_PROTOCOL_VERSION ((uint16_t)8)
 
 #define UART_TASK_ID_THERMO   1u  /* MAX31856 x3 on the thermocouple board (J6) */
 #define UART_TASK_ID_IO       2u  /* SX1509 expander: relays, digital I/O, DRDY */
@@ -131,6 +140,7 @@
 #define UART_TASK_ID_WIFI     11u /* Wi-Fi status/scan/provision -- mirrors wifi_provision_http.c */
 #define UART_TASK_ID_GPIO_PROBE 12u /* raw ESP32 GPIO probe -- CONFIG_KILNCTL_ENABLE_GPIO_PROBE, default off */
 #define UART_TASK_ID_TOUCH    13u  /* NS2009 touch controller on the display panel (J2) */
+#define UART_TASK_ID_UI_TEST  14u  /* LVGL tap-target introspection/click-by-name for a PC-side UI regression harness -- kiln_ui.c */
 
 /* --- THERMO (task_id = UART_TASK_ID_THERMO) ---
  * Three MAX31856 cold-junction-compensated thermocouple front ends living on
@@ -464,6 +474,62 @@
 #define TOUCH_CMD_INJECT        0x02u
 #define TOUCH_CMD_SET_TAP_DUMP  0x03u
 #define TOUCH_CMD_LOG_TAP_TARGETS 0x04u
+
+/* --- UI_TEST (task_id = UART_TASK_ID_UI_TEST) ---
+ * The PC-side UI regression harness's window onto kiln_ui.c, added
+ * 2026-08-28. TOUCH_CMD_INJECT/LOG_TAP_TARGETS (above) already let a test
+ * script inject a raw coordinate and read the tap-target dump off the log,
+ * but that means every test script hand-parses ESP_LOGI lines pulled over
+ * uart_log_bridge and re-derives a target's centre itself before it can tap
+ * anything -- workable for a human at the bench, brittle for an automated
+ * suite (log lines can interleave with anything else logging, and a test
+ * step has no positive confirmation it landed on the target it meant to hit,
+ * only that SOME injection was accepted). This task answers both gaps
+ * directly on the wire: a structured tap-target list (no log parsing) and a
+ * click-by-name that resolves the name to a centre point and reports
+ * exactly why it didn't fire when it can't (ambiguous, hidden, not found)
+ * rather than silently tapping empty space or the wrong widget.
+ *
+ * byte0 = subcommand:
+ *   0x01 GET_CURRENT_PAGE  (no args) -- QUERY, see below
+ *   0x02 LIST_TAP_TARGETS  (no args) -- QUERY, see below
+ *   0x03 CLICK_BY_NAME     bytes1..(length-1) = ASCII target name, NOT
+ *                          null-terminated -- QUERY, see below
+ *
+ * GET_CURRENT_PAGE response payload:
+ *   byte0 = UI_TEST_CMD_GET_CURRENT_PAGE (0x01)
+ *   byte1 = name_len (N)   N bytes = current page name, ASCII
+ *   (N = 0, no name bytes follow, if kiln_ui_current_page() is still NULL --
+ *   nothing has been shown yet)
+ *
+ * LIST_TAP_TARGETS response payload (kiln_ui_collect_tap_targets(), same
+ * walk TOUCH_CMD_LOG_TAP_TARGETS logs):
+ *   byte0 = UI_TEST_CMD_LIST_TAP_TARGETS (0x02)
+ *   byte1 = count (N)
+ *   byte2 = truncated (0/1 -- more targets existed than fit BRIDGE_REPLY_MAX;
+ *           the first N are still valid, just not the whole screen)
+ *   N * variable: name_len(1) name(name_len bytes) cx(i16 LE) cy(i16 LE)
+ *                 hidden(u8, 0/1)
+ *
+ * CLICK_BY_NAME response payload:
+ *   byte0 = UI_TEST_CMD_CLICK_BY_NAME (0x03)
+ *   byte1 = result (UI_TEST_CLICK_* below, mirrors kiln_ui_click_result_t)
+ *   bytes2..3 = cx, i16 LE
+ *   bytes4..5 = cy, i16 LE
+ *   (cx/cy are the matched target's centre for OK/AMBIGUOUS/HIDDEN --
+ *   kiln_ui_click_by_name() fills them even when it refuses to inject -- and
+ *   0/0 for NOT_FOUND, where there was no match to report a centre for) */
+#define UI_TEST_CMD_GET_CURRENT_PAGE 0x01u
+#define UI_TEST_CMD_LIST_TAP_TARGETS 0x02u
+#define UI_TEST_CMD_CLICK_BY_NAME    0x03u
+
+/* Mirrors kiln_ui_click_result_t (kiln_ui.h) byte-for-byte -- kept as its own
+ * wire enum here rather than casting the C enum directly so a future reorder
+ * of the C enum can't silently renumber the wire value underneath it. */
+#define UI_TEST_CLICK_OK         0x00u
+#define UI_TEST_CLICK_NOT_FOUND  0x01u
+#define UI_TEST_CLICK_AMBIGUOUS  0x02u
+#define UI_TEST_CLICK_HIDDEN     0x03u
 
 /* --- SAFETY (task_id = UART_TASK_ID_SAFETY) ---
  * The RP2040 safety processor (A1) sits in its own ground domain: the only

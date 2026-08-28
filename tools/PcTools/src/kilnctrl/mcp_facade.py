@@ -27,6 +27,7 @@ GROUP_PREFIXES = (
     ("io_", "io"),
     ("expander_", "io"),
     ("touch_", "touch"),
+    ("ui_", "ui_test"),
     ("safety_", "safety"),
     ("ota_", "ota"),
     ("gpio_probe_", "gpio"),
@@ -110,6 +111,9 @@ KEYWORDS = {
     "list_config_presets": ("bench", "fixture", "known", "good", "default", "json"),
     "load_config_preset": ("bench", "fixture", "known", "good", "default", "consistent", "zones"),
     "factory_default_then_load_preset": ("factory", "reset", "consistent", "baseline", "bench", "fixture"),
+    "ui_list_scripts": ("regression", "script", "test", "lcd", "web", "json"),
+    "ui_run_script": ("regression", "script", "click", "tap-target", "wait", "assert", "lcd", "web"),
+    "ui_step": ("regression", "click", "tap-target", "wait", "assert", "debug", "single", "step"),
 }
 
 #: Query word -> tokens to also score against. One-way on purpose: expanding

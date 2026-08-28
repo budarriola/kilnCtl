@@ -100,6 +100,58 @@ void kiln_ui_set_auto_tap_dump(bool enable);
  * task). Either argument may be NULL. */
 void kiln_ui_get_show_diag(uint32_t *show_entries, uint32_t *show_exits);
 
+/* One entry from a kiln_ui_collect_tap_targets() walk -- the same data
+ * log_tap_targets()/log_all_tap_targets() (kiln_ui.c) already print, just
+ * captured into an array instead of (or in addition to) ESP_LOGI, for
+ * UART_TASK_ID_UI_TEST (uart_bridge.c) to hand a PC-side test harness. `name`
+ * is the nearest child label text (a button's caption, or a buttonmatrix
+ * key's text), truncated to fit; "" if the target has none. `cx`/`cy` are the
+ * post-layout centre point an injected touch should aim at. `hidden` mirrors
+ * the LV_OBJ_FLAG_HIDDEN check the log walk already applies. */
+typedef struct {
+    char name[32];
+    int16_t cx;
+    int16_t cy;
+    bool hidden;
+} kiln_ui_tap_target_t;
+
+/* Walks the same tree log_all_tap_targets() does (active screen + top/sys
+ * layers) and fills `out` with up to `max` targets, returning the number
+ * written. If the walk finds more than `max` targets, `*truncated` (may be
+ * NULL) is set true and the rest are dropped -- callers sizing `out` for a
+ * wire reply should check it rather than assume `out` saw everything.
+ * Read-only tree walk, so -- like kiln_ui_log_tap_targets() it wraps -- it is
+ * called directly from the UART bridge task (uart_bridge.c), not marshalled
+ * onto lvgl_port_task. */
+size_t kiln_ui_collect_tap_targets(kiln_ui_tap_target_t *out, size_t max, bool *truncated);
+
+typedef enum {
+    KILN_UI_CLICK_OK,
+    KILN_UI_CLICK_NOT_FOUND,
+    KILN_UI_CLICK_AMBIGUOUS,
+    KILN_UI_CLICK_HIDDEN,
+} kiln_ui_click_result_t;
+
+/* Finds the tap target whose name exactly matches `name` (kiln_ui_collect_
+ * tap_targets() above) and, on a clean single visible match, injects a
+ * press then a release at its centre through the same lvgl_port_inject_
+ * touch() path UART_TASK_ID_TOUCH's INJECT subcommand uses (uart_bridge.c) --
+ * so a click-by-name test step exercises exactly the same LVGL input pipeline
+ * a coordinate-based injection does, not a shortcut around it.
+ *
+ * `out_cx`/`out_cy` (either may be NULL) are always filled with the first
+ * match's centre when one is found, even for a non-OK result, so a caller
+ * can report where the ambiguous/hidden match actually is:
+ *   KILN_UI_CLICK_NOT_FOUND  -- no target has this name; out_cx/out_cy unset
+ *   KILN_UI_CLICK_AMBIGUOUS -- more than one VISIBLE target has this name;
+ *                              nothing is injected
+ *   KILN_UI_CLICK_HIDDEN    -- the (first) match is hidden; nothing injected
+ *   KILN_UI_CLICK_OK        -- exactly one visible match; press+release sent
+ * Called directly from the UART bridge task, same as lvgl_port_inject_
+ * touch() itself and TOUCH_CMD_INJECT's handler -- see that function's
+ * thread-safety note (lvgl_port.h). */
+kiln_ui_click_result_t kiln_ui_click_by_name(const char *name, int16_t *out_cx, int16_t *out_cy);
+
 #ifdef __cplusplus
 }
 #endif

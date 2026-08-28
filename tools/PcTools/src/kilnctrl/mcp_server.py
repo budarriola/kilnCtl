@@ -77,13 +77,15 @@ from mcpkit import workbench
 from mcpkit.registry import collapse
 from mcpkit.serve import serve
 
-from . import actions, config_presets, debug_probe, devices, mcp_facade, openocd_util, pico_gpio_probe, settings, stale_check, wifi_credentials, zones_http_client
+from . import actions, config_presets, debug_probe, devices, mcp_facade, openocd_util, pico_gpio_probe, settings, stale_check, ui_test_runner, wifi_credentials, zones_http_client
 from .autotune import AutotuneClient, AutotuneQueryError
 from .control import ControlClient, ControlQueryError
 from .device_log import LogClient
 from .devices import LogLine
 from .display import BlitError, DisplayClient, DisplayQueryError
 from .touch import TouchClient, TouchQueryError
+from .ui_test_client import UiTestClient, UiTestQueryError
+from .web_ui_client import WebUiClient
 from .info import InfoClient, InfoQueryError
 from .system import SystemClient, SystemQueryError
 from .io_expander import IoClient, IoQueryError
@@ -246,6 +248,10 @@ _display = DisplayClient(_link)
 #: that lets an MCP caller send synthetic touches, indistinguishable from a
 #: real press to the firmware's idle timer and wake logic.
 _touch = TouchClient(_link)
+#: Task 14 -- LCD UI regression-test probe (current page / tap targets /
+#: click-by-name). See ui_test_client.py; the web half of the same
+#: framework (WebUiClient) needs no persistent client, just a base_url.
+_ui_test = UiTestClient(_link)
 _safety = SafetyClient(_link)
 #: Task 12 -- only answered on a firmware built with
 #: CONFIG_KILNCTL_ENABLE_GPIO_PROBE (default off). Registered unconditionally
@@ -2620,6 +2626,71 @@ def load_config_preset(name: str, host: Optional[str] = None) -> str:
     except zones_http_client.ZonesHttpError as exc:
         return f"error writing zones config over HTTP (host={resolved}): {exc}"
     return result.describe()
+
+
+# ---------------------------------------------------------------------------
+# UI regression-test scripts -- LCD (task 14, UiTestClient) + web (HTTP
+# dashboard, WebUiClient) halves of the same framework. Scripts are DATA
+# under tools/PcTools/ui_scripts/*.json, same "never compiled into firmware"
+# reasoning as config_presets.py.
+# ---------------------------------------------------------------------------
+@_tool()
+def ui_list_scripts() -> str:
+    """List every UI regression-test script (name + description + backend).
+
+    Scripts live as JSON under ``tools/PcTools/ui_scripts/``.
+    """
+    scripts = ui_test_runner.list_ui_scripts()
+    if not scripts:
+        return f"no ui scripts found under {ui_test_runner.ui_scripts_dir()}"
+    return "\n".join(f"{s['name']} ({s['backend']}): {s['description']}" for s in scripts)
+
+
+@_tool()
+def ui_run_script(name: str, zones_host: Optional[str] = None, apply_preset: bool = True) -> str:
+    """Run one UI regression-test script end to end and report a compact
+    pass/fail per step.
+
+    ``zones_host``/``apply_preset``: same meaning as load_config_preset()'s
+    -- forwarded to config_presets.apply_preset() when the script names a
+    ``preset``. The web backend resolves its base_url the same way OTA does
+    (see ``_ota_resolve_host``); the lcd backend drives the already-connected
+    board over task 14.
+    """
+    try:
+        script = ui_test_runner.load_ui_script(name)
+    except ui_test_runner.UiScriptError as exc:
+        return f"error: {exc}"
+    web_client = None
+    if script["backend"] == "web":
+        web_client = WebUiClient(f"http://{_ota_resolve_host(zones_host)}")
+    try:
+        result = ui_test_runner.run_ui_script(
+            name, ui_test_client=_ui_test, web_client=web_client,
+            zones_host=zones_host, apply_preset=apply_preset,
+        )
+    except (ui_test_runner.UiScriptError, config_presets.ConfigPresetError) as exc:
+        return f"error: {exc}"
+    return json.dumps(result)
+
+
+@_tool()
+def ui_step(backend: str, action: str, target: str, timeout_ms: int = 3000,
+            contains: Optional[str] = None, value: Optional[str] = None) -> str:
+    """Run a single UI step directly -- the debug entry point for trying one
+    action without a whole script (see ui_test_runner.run_ui_step()).
+    """
+    step = {"action": action, "target": target, "timeout_ms": timeout_ms}
+    if contains is not None:
+        step["contains"] = contains
+    if value is not None:
+        step["value"] = value
+    web_client = WebUiClient(f"http://{_ota_resolve_host(None)}") if backend == "web" else None
+    try:
+        result = ui_test_runner.run_ui_step(backend, _ui_test, web_client, step)
+    except ui_test_runner.UiScriptError as exc:
+        return f"error: {exc}"
+    return json.dumps(result)
 
 
 #: FACTORY_RESET reboots ~500ms after the ACK; ESP32-S3 boot to first
