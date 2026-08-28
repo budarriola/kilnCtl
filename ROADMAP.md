@@ -62,7 +62,6 @@ What is still genuinely open is short:
 
 | Size | Item | Where |
 |---|---|---|
-| M | **`safety_poll` crashed twice with `IllegalInstruction`** and self-recovered by rebooting (2026-08-28). That task sees the safety processor, and link staleness gates heating. Under investigation — two earlier fixes panicked this same task and were reverted | M10 |
 | M | **S14 cannot be armed until something maps CT channels to zones.** The sweep measures per-zone with a relay mask; `ct_channel_map` is per-CT-channel and has no other consumer, defaulting to `0xFF`. Derive it from the energize sweep rather than asking the operator to type it | M12 |
 | L | **The HTTP reset is not a heap failure** — proven, not argued. Remaining candidates are lwIP or `esp_http_server`'s accept/select loop under `max_open_sockets=13`, which needs a different instrumentation surface | M10 |
 | S | The cross-language PC-tool heartbeat contract remains uncovered by any guard — a Python sender with no C-side check can't be caught by `check_guard_input_producers.ps1` or `check_unused_setters.ps1`, both C-only. Verified 2026-08-28: `sample_counter_advancing` and `i_normal_a`, the two other named instances, are already correctly wired (`i_normal_a` copies from the config record gated by its `fields_set` bits; `sample_counter_advancing`'s hardcoded `false` is documented, deliberate S13-dormant state, not a missing producer) — `check_guard_input_producers.ps1` passes 25/25 today | M10 |
@@ -1152,8 +1151,19 @@ Owned by [`firmware/KilnFW/TODO.md`](firmware/KilnFW/TODO.md) §§12–13.
       12, because `.claude/worktrees/` holds abandoned full-tree copies, and
       found `check_link_impl_isolation.ps1` red on twelve false positives plus
       one real hit. Twelve checks, all green
-
-**The rule this milestone is really about:** every check added here was made to
+- [x] **`safety_poll` crashed twice with `IllegalInstruction`, self-recovered
+      by rebooting.** `c8e10f0`, 2026-08-28. Root cause was a real stack
+      overflow, not the timing/blocking shape of the two earlier reverted
+      attempts (checked before changing anything, not assumed from the
+      symptom): `safety_cfg_store_maybe_refetch()`'s scratch (~680 B) and page
+      (~390 B) locals landed on this task's frame the week the refetch became
+      real, and the stack was never resized with it — measured at 1192 B free
+      of 4096 under ordinary traffic. Raised to 8192, PSRAM-backed, and
+      registered with `stack_margin` for the first time (why 29% headroom had
+      looked fine for weeks: nobody was reading it). Confirmed live on
+      hardware after this session's own commissioning-flow test — which
+      exercises exactly the refetch path that crashed it — with no panic:
+      4336 B free of 8192 (52.9% headroom) every check added here was made to
 fail on purpose before being trusted. That caught two checks that would
 otherwise have shipped useless — a slack constant expressed in terms of itself,
 and a Python test that could never fail on a C regression — and one that was
