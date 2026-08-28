@@ -363,6 +363,57 @@ esp_err_t safety_link_get_status(SafetyLinkClass *link, safety_link_status_t *ou
     return ESP_OK;
 }
 
+// M12: zone_sweep_push_ct_channel_map() stages the derived map over these
+// two, so zones_http.c now references them. Test-controlled stand-ins for
+// the same reason safety_link_get_status() above is one -- nothing here
+// exercises the wire, only the decision that leads to it.
+esp_err_t safety_link_send_set_param(SafetyLinkClass *link, uint16_t param_id, uint8_t type,
+                                      kilnlink_param_value_t value)
+{
+    (void)link; (void)param_id; (void)type; (void)value;
+    return ESP_OK;
+}
+esp_err_t safety_link_send_commit_config(SafetyLinkClass *link, uint16_t *out_param_id,
+                                          uint8_t *out_reason, bool *out_rejected)
+{
+    (void)link;
+    if (out_param_id) *out_param_id = 0;
+    if (out_reason) *out_reason = 0;
+    if (out_rejected) *out_rejected = false;
+    return ESP_OK;
+}
+
+// H1 fix (opus review, 2026-08-28): zone_sweep_confirm_ct_map_landed() forces
+// a LIVE re-fetch of the Pico's record and re-reads it, so zones_http.c now
+// references safety_cfg_store's read side and safety_link_get_peer_build_
+// status(). Same test-controlled stand-in reasoning as the two link senders
+// above -- nothing here drives the push, only the decisions that feed it.
+esp_err_t safety_link_get_peer_build_status(SafetyLinkClass *link, bool *out_known, bool *out_dirty,
+                                             uint8_t *commit_buf, uint8_t *out_commit_len,
+                                             uint8_t *datetime_buf, uint8_t *out_datetime_len,
+                                             uint8_t *out_config_version, uint16_t *out_config_crc)
+{
+    (void)link; (void)out_dirty; (void)commit_buf; (void)out_commit_len;
+    (void)datetime_buf; (void)out_datetime_len; (void)out_config_version;
+    if (out_known) *out_known = false;
+    if (out_config_crc) *out_config_crc = 0;
+    return ESP_OK;
+}
+bool safety_cfg_store_refetch(SafetyLinkClass *link, uint16_t config_crc)
+{
+    (void)link; (void)config_crc;
+    return true;
+}
+size_t safety_cfg_store_param_count(void)
+{
+    return 0;
+}
+bool safety_cfg_store_get_by_index(size_t index, safety_cfg_param_t *out)
+{
+    (void)index; (void)out;
+    return false;
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -2073,7 +2124,7 @@ static void test_zone_sweep_run_one_zone_skips_unwired_zone(void)
     deps.ctx = &ctx;
 
     float avg = NAN;
-    zone_sweep_zone_outcome_t outcome = zone_sweep_run_one_zone(0, /* relay_mask */ 0, &deps, &avg, NULL);
+    zone_sweep_zone_outcome_t outcome = zone_sweep_run_one_zone(0, /* relay_mask */ 0, &deps, &avg, NULL, NULL);
 
     TEST_CHECK(outcome == ZONE_SWEEP_ZONE_SKIPPED, "relay_mask == 0 -> SKIPPED, nothing measured");
     TEST_CHECK(strlen(ctx.call_log) == 0, "a skipped zone touches NO relay call at all -- not even an off");
@@ -2091,7 +2142,7 @@ static void test_zone_sweep_run_one_zone_abort_before_energize_never_turns_relay
     s_zones.cfg.thermo_count = 1;
 
     float avg = NAN;
-    zone_sweep_zone_outcome_t outcome = zone_sweep_run_one_zone(0, 0x01, &deps, &avg, NULL);
+    zone_sweep_zone_outcome_t outcome = zone_sweep_run_one_zone(0, 0x01, &deps, &avg, NULL, NULL);
 
     TEST_CHECK(outcome == ZONE_SWEEP_ZONE_ABORTED, "abort already requested -> ABORTED");
     // H3's specific claim: an operator Abort must be able to stop a zone from
@@ -2136,7 +2187,7 @@ static void test_zone_sweep_run_one_zone_normal_completion_sequencing(void)
     s_zones.cfg.zones[0].max_temp_c = 500.0f; /* configured ceiling, far above the fake's 20C/999C readings */
 
     float avg = NAN;
-    zone_sweep_zone_outcome_t outcome = zone_sweep_run_one_zone(0, 0x01, &deps, &avg, NULL);
+    zone_sweep_zone_outcome_t outcome = zone_sweep_run_one_zone(0, 0x01, &deps, &avg, NULL, NULL);
 
     TEST_CHECK(outcome == ZONE_SWEEP_ZONE_OK, "no abort/ceiling/link-loss -> runs to completion, OK");
     TEST_CHECK(strcmp(ctx.call_log, "on,off") == 0,
@@ -2158,7 +2209,7 @@ static void test_zone_sweep_run_one_zone_abort_mid_run_still_forces_off(void)
     s_zones.cfg.zones[0].max_temp_c = 500.0f;
 
     float avg = NAN;
-    zone_sweep_zone_outcome_t outcome = zone_sweep_run_one_zone(0, 0x01, &deps, &avg, NULL);
+    zone_sweep_zone_outcome_t outcome = zone_sweep_run_one_zone(0, 0x01, &deps, &avg, NULL, NULL);
 
     TEST_CHECK(outcome == ZONE_SWEEP_ZONE_ABORTED, "abort mid-poll-loop -> ABORTED");
     TEST_CHECK(strcmp(ctx.call_log, "on,off") == 0,
@@ -2179,7 +2230,7 @@ static void test_zone_sweep_run_one_zone_ceiling_hit_forces_off(void)
     s_zones.cfg.zones[0].max_temp_c = 500.0f;
 
     float avg = NAN;
-    zone_sweep_zone_outcome_t outcome = zone_sweep_run_one_zone(0, 0x01, &deps, &avg, NULL);
+    zone_sweep_zone_outcome_t outcome = zone_sweep_run_one_zone(0, 0x01, &deps, &avg, NULL, NULL);
 
     TEST_CHECK(outcome == ZONE_SWEEP_ZONE_CEILING_HIT, "reading reaches the ceiling -> CEILING_HIT");
     TEST_CHECK(strcmp(ctx.call_log, "on,off") == 0, "the ceiling abort is also a choke-point exit: on, then off");
@@ -2198,7 +2249,7 @@ static void test_zone_sweep_run_one_zone_link_loss_forces_off(void)
     s_zones.cfg.zones[0].max_temp_c = 500.0f;
 
     float avg = NAN;
-    zone_sweep_zone_outcome_t outcome = zone_sweep_run_one_zone(0, 0x01, &deps, &avg, NULL);
+    zone_sweep_zone_outcome_t outcome = zone_sweep_run_one_zone(0, 0x01, &deps, &avg, NULL, NULL);
 
     TEST_CHECK(outcome == ZONE_SWEEP_ZONE_LINK_LOST, "the safety link drops mid-poll -> LINK_LOST");
     TEST_CHECK(strcmp(ctx.call_log, "on,off") == 0, "the link-loss exit is also a choke-point exit: on, then off");
@@ -2222,7 +2273,7 @@ static void test_zone_sweep_run_one_zone_energize_refused_is_a_choke_point_exit_
 
     float avg = NAN;
     uint32_t refused_sources = 0;
-    zone_sweep_zone_outcome_t outcome = zone_sweep_run_one_zone(0, 0x01, &deps, &avg, &refused_sources);
+    zone_sweep_zone_outcome_t outcome = zone_sweep_run_one_zone(0, 0x01, &deps, &avg, NULL, &refused_sources);
 
     TEST_CHECK(outcome == ZONE_SWEEP_ZONE_ENERGIZE_REFUSED,
               "B1: an owner refusal (e.g. a safety fault asserting mid-sweep) is its own outcome, "
@@ -2252,7 +2303,7 @@ static void test_zone_sweep_run_one_zone_temp_lost_forces_off(void)
     s_zones.cfg.zones[0].max_temp_c = 500.0f;
 
     float avg = NAN;
-    zone_sweep_zone_outcome_t outcome = zone_sweep_run_one_zone(0, 0x01, &deps, &avg, NULL);
+    zone_sweep_zone_outcome_t outcome = zone_sweep_run_one_zone(0, 0x01, &deps, &avg, NULL, NULL);
 
     TEST_CHECK(outcome == ZONE_SWEEP_ZONE_TEMP_LOST,
               "N1: two consecutive invalid thermocouple reads -> TEMP_LOST, not a silent 5s unsupervised run");
@@ -2277,7 +2328,7 @@ static void test_zone_sweep_run_one_zone_single_invalid_poll_does_not_abort(void
     s_zones.cfg.zones[0].max_temp_c = 500.0f;
 
     float avg = NAN;
-    zone_sweep_zone_outcome_t outcome = zone_sweep_run_one_zone(0, 0x01, &deps, &avg, NULL);
+    zone_sweep_zone_outcome_t outcome = zone_sweep_run_one_zone(0, 0x01, &deps, &avg, NULL, NULL);
 
     TEST_CHECK(outcome == ZONE_SWEEP_ZONE_OK,
               "N1: a single invalid poll surrounded by valid ones must not itself trip TEMP_LOST -- the "
@@ -2287,6 +2338,117 @@ static void test_zone_sweep_run_one_zone_single_invalid_poll_does_not_abort(void
 
 // N10 (opus review, 2026-08-28): a safety trip latching mid-zone must end
 // the sweep promptly instead of grinding on for the rest of the dwell.
+// M12: zone_sweep_derive_ct_channel() -- the unambiguity condition
+// COMMISSIONING_UX.md sec 1.2 requires before ct_channel_map may be derived
+// at all. Each negative case below is a mapping this MUST refuse to produce:
+// a check that cannot fail would let the sweep write a guessed value into a
+// field S3/S4/S14 then trust.
+static void test_zone_sweep_derive_ct_channel_picks_the_dominant_channel(void)
+{
+    float per_ch[ZONE_CT_CHANNEL_COUNT] = { 0.1f, 14.0f, 0.2f };
+    uint8_t ch = 0xFF;
+    TEST_CHECK(zone_sweep_derive_ct_channel(per_ch, &ch), "one channel far above the rest resolves");
+    TEST_CHECK(ch == 1, "the resolved channel is the one that carried the current");
+}
+
+static void test_zone_sweep_derive_ct_channel_refuses_below_the_load_threshold(void)
+{
+    // Nothing conducted -- a CT not fitted, or a zone whose relay closed onto
+    // a dead element. Noise must never be read as "this channel is zone 0's".
+    float per_ch[ZONE_CT_CHANNEL_COUNT] = { 0.3f, 0.05f, 0.0f };
+    uint8_t ch = 0xFF;
+    TEST_CHECK(!zone_sweep_derive_ct_channel(per_ch, &ch), "sub-threshold current resolves nothing");
+}
+
+static void test_zone_sweep_derive_ct_channel_refuses_a_shared_ct(void)
+{
+    // Two channels within the dominance factor: ct_mask explicitly permits
+    // one CT feeding more than one zone, and that case is not invertible.
+    float per_ch[ZONE_CT_CHANNEL_COUNT] = { 10.0f, 8.0f, 0.0f };
+    uint8_t ch = 0xFF;
+    TEST_CHECK(!zone_sweep_derive_ct_channel(per_ch, &ch), "two comparable channels resolve nothing");
+}
+
+static void test_zone_sweep_derive_ct_channel_refuses_nan(void)
+{
+    // No per-channel sampler, or a link read that failed mid-window: NaN
+    // must read as "cannot tell", never as 0 A on that channel.
+    float per_ch[ZONE_CT_CHANNEL_COUNT] = { 12.0f, NAN, 0.0f };
+    uint8_t ch = 0xFF;
+    TEST_CHECK(!zone_sweep_derive_ct_channel(per_ch, &ch), "a NaN channel resolves nothing");
+}
+
+// M12 / opus review 2026-08-28: zone_sweep_derive_ct_channel() above is only
+// HALF the derivation. zone_sweep_task_record_ct_channels() is the other
+// half, and it owns the two refusals nothing above can express -- the
+// zone-id/relay-id identity precondition, and the two-zones-one-channel
+// conflict. Both were untested; both write (or decline to write) the field
+// S14 aims the over-current guard with. These two exercise them directly.
+static void test_zone_sweep_record_ct_refuses_a_zone_whose_relay_is_not_its_own_bit(void)
+{
+    // ct_channel_map[] is indexed straight into the Pico's relay_now_mask, so
+    // the derived value is only meaningful while zone id == relay id. Zone 0
+    // wired to relay bit 1 (or to two relays at once) breaks that: the sweep
+    // measured real, unambiguous current, and it STILL must not map it --
+    // writing the zone index would point S14 at somebody else's relay.
+    memset(&s_ct_derive, 0, sizeof(s_ct_derive));
+    float per_ch[ZONE_CT_CHANNEL_COUNT] = { 0.1f, 14.0f, 0.2f };
+
+    zone_sweep_task_record_ct_channels(NULL, 0, 0x02, per_ch);       /* zone 0, relay bit 1 */
+    zone_sweep_task_record_ct_channels(NULL, 1, 0x03, per_ch);       /* zone 1, TWO relays */
+
+    TEST_CHECK(s_ct_derive.derived_mask == 0,
+              "a zone whose relay_mask is not exactly its own bit must derive NOTHING -- the same "
+              "current that would map cleanly for a zone/relay-identity board must be refused here");
+    TEST_CHECK((s_ct_derive.unresolved_zone_mask & 0x03u) == 0x03u,
+              "both refused zones must land in unresolved_zone_mask so the page asks for them by "
+              "hand, rather than the refusal being silent");
+
+    // Negative half: the SAME current, on a zone that does satisfy the
+    // identity, maps -- proving the refusal above is the relay_mask check
+    // and not the measurement failing to resolve.
+    memset(&s_ct_derive, 0, sizeof(s_ct_derive));
+    zone_sweep_task_record_ct_channels(NULL, 0, 0x01, per_ch);
+    TEST_CHECK(s_ct_derive.derived_mask == 0x02u && s_ct_derive.zone_for_ch[1] == 0,
+              "control: relay_mask == 1<<zone_index maps that same measurement to CT1");
+}
+
+static void test_zone_sweep_record_ct_refuses_two_zones_claiming_one_channel(void)
+{
+    // Each zone looked perfectly unambiguous on its own -- the conflict is
+    // only visible ACROSS zones, which is exactly why no per-zone check can
+    // catch it. COMMISSIONING_UX.md sec 1.2 requires a one-to-one inversion:
+    // neither claimant may win, and a third claimant must not revive it.
+    memset(&s_ct_derive, 0, sizeof(s_ct_derive));
+    float per_ch[ZONE_CT_CHANNEL_COUNT] = { 0.1f, 14.0f, 0.2f };
+
+    zone_sweep_task_record_ct_channels(NULL, 0, 0x01, per_ch);
+    TEST_CHECK(s_ct_derive.derived_mask == 0x02u, "zone 0 alone resolves CT1 (setup)");
+
+    zone_sweep_task_record_ct_channels(NULL, 1, 0x02, per_ch);
+    TEST_CHECK((s_ct_derive.derived_mask & 0x02u) == 0,
+              "a second zone dominating the SAME CT must drop that channel entirely -- not let the "
+              "first claimant stand, and not let the last one win");
+    TEST_CHECK((s_ct_derive.conflict_mask & 0x02u) != 0,
+              "the dropped channel must be recorded as a conflict, so the operator is told two zones "
+              "share one CT rather than just seeing a missing row");
+
+    zone_sweep_task_record_ct_channels(NULL, 2, 0x04, per_ch);
+    TEST_CHECK((s_ct_derive.derived_mask & 0x02u) == 0,
+              "a third claimant must not resurrect a channel an earlier conflict disqualified");
+
+    // A DIFFERENT channel, claimed by exactly one zone, still maps -- the
+    // conflict must poison only the contested channel.
+    float per_ch0[ZONE_CT_CHANNEL_COUNT] = { 14.0f, 0.1f, 0.2f };
+    memset(&s_ct_derive, 0, sizeof(s_ct_derive));
+    zone_sweep_task_record_ct_channels(NULL, 0, 0x01, per_ch);   /* -> CT1 */
+    zone_sweep_task_record_ct_channels(NULL, 1, 0x02, per_ch);   /* -> CT1, conflict */
+    zone_sweep_task_record_ct_channels(NULL, 2, 0x04, per_ch0);  /* -> CT0, uncontested */
+    TEST_CHECK(s_ct_derive.derived_mask == 0x01u && s_ct_derive.zone_for_ch[0] == 2,
+              "an uncontested channel in the same run still maps -- the conflict poisons only the "
+              "channel two zones actually claimed");
+}
+
 static void test_zone_sweep_run_one_zone_trip_latched_forces_off(void)
 {
     fake_sweep_ctx_t ctx;
@@ -2300,7 +2462,7 @@ static void test_zone_sweep_run_one_zone_trip_latched_forces_off(void)
     s_zones.cfg.zones[0].max_temp_c = 500.0f;
 
     float avg = NAN;
-    zone_sweep_zone_outcome_t outcome = zone_sweep_run_one_zone(0, 0x01, &deps, &avg, NULL);
+    zone_sweep_zone_outcome_t outcome = zone_sweep_run_one_zone(0, 0x01, &deps, &avg, NULL, NULL);
 
     TEST_CHECK(outcome == ZONE_SWEEP_ZONE_TRIP_LATCHED, "N10: a safety trip latching mid-zone -> TRIP_LATCHED");
     TEST_CHECK(strcmp(ctx.call_log, "on,off") == 0, "N10: the trip-latched exit is also a choke-point exit: on, then off");
@@ -2959,6 +3121,12 @@ void run_test_zones_http(void)
     test_zone_sweep_run_one_zone_temp_lost_forces_off();
     test_zone_sweep_run_one_zone_single_invalid_poll_does_not_abort();
     test_zone_sweep_run_one_zone_trip_latched_forces_off();
+    test_zone_sweep_derive_ct_channel_picks_the_dominant_channel();
+    test_zone_sweep_derive_ct_channel_refuses_below_the_load_threshold();
+    test_zone_sweep_derive_ct_channel_refuses_a_shared_ct();
+    test_zone_sweep_derive_ct_channel_refuses_nan();
+    test_zone_sweep_record_ct_refuses_a_zone_whose_relay_is_not_its_own_bit();
+    test_zone_sweep_record_ct_refuses_two_zones_claiming_one_channel();
     test_zone_sweep_run_all_zones_never_energizes_two_zones_at_once();
     test_zone_sweep_run_all_zones_skipped_zone_records_nothing();
     test_zone_sweep_run_all_zones_energize_refused_reason_decodes_fault_words();

@@ -71,7 +71,7 @@ firmware measures it (a DERIVE whose input is an instrument, not the operator).
 
 | # | Question shown to the operator | Parameter(s) written | Id(s) | Risk | Why it cannot be derived |
 |---|---|---|---|---|---|
-| Q1 | **"What is the highest temperature this kiln may ever reach?"** °C, required, positive, no unlimited option | `abs_max_temp_c` | `0x0104` | 🔴 | It is a property of the kiln's furniture, elements and brick — physically outside anything the firmware can see. `SAFETY_MODEL.md` §4/S1 and `CONFIG_REFERENCE.md` §1 both say it has no default. Deriving it from the hottest saved profile would set the ceiling from the thing the ceiling exists to catch. **ROADMAP M12 names this the field whose absence leaves S1's ceiling disabled.** |
+| Q1 | **"What is the highest temperature this kiln may ever reach?"** °C, required, positive, no unlimited option | `abs_max_temp_c` | `0x0104` | 🔴 | It is a property of the kiln's furniture, elements and brick — physically outside anything the firmware can see. `SAFETY_MODEL.md` §4/S1 and `CONFIG_REFERENCE.md` §1 both say it has no default. Deriving it from the hottest saved profile would set the ceiling from the thing the ceiling exists to catch. **ROADMAP M12 names this the field whose absence leaves S1's ceiling disabled.** M12 also *suggests* the selected `tc_type`'s datasheet maximum in the box (as a `placeholder`, never a `value` — see §1.4) and caps the field there: a starting number the operator lowers to what this kiln survives, still ASKED, and never committed unless they actually enter it. |
 | Q2 | **"Where is the safety processor's own thermocouple?"** — three radio options: *Not fitted* / *In the kiln chamber* / *External overheat sensor (shell, exhaust, enclosure)* | `safety_tc_installed`, `tc_source`, `tc_placement_mode` | `0x0211`, `0x0101`, `0x0103` | 🔴 | A statement about physical reality (`SAFETY_MODEL.md` §3: *"not a tuning knob"*). Nothing on either board can see whether J7 has a probe in it or where that probe is mounted, and getting it wrong breaks S2/S10 in opposite directions. One question, three parameters — see §2.4 for the mapping. |
 | Q3 | **"Mains supply voltage"** — dropdown, see §2.1 | `mains_voltage_v` | `0x030E` | ⚪ | Installation fact. A dropdown, not a number box, and **"Not set"** stays a first-class option (`CONFIG_REFERENCE.md` §3: unset ⇒ report `—`, never assume). |
 | Q4 | **"Roughly how much power does this kiln draw at full output?"** kW, optional | `max_expected_power_w` | `0x0319` | ⚪ | ROADMAP M12 asks for it explicitly. Sanity check only; no guard reads it. Optional because it fails safe when absent. |
@@ -105,7 +105,7 @@ exist, see §3).
 | `tc_type` | `0x0105` | 🔴 | **= Z `zones_config_get_safety_tc_type()`.** This field already exists on the ESP as a dedicated global (zones blob v5, *"the RP2040 safety processor's OWN"* — see `zones_http.c`'s version comment) and `safety_link.c` already resyncs it to the Pico. The commissioning page must **display it read-only** and link to zones. See §2.3. |
 | `borrowed_zone_index` | `0x0102` | 🔴 | **= Z**, the index of the zone the operator picked as the borrowed source *on the zones page*. Only reachable when Q2 = *Not fitted* (see §2.4). Constrained by the picker to zones the ESP actually reports, satisfying `CONFIG_REFERENCE.md` §1's "must name a zone the ESP actually reports" without a validation message. |
 | `borrowed_type_expected` | `0x0210` | 🟠 | **= Z `zones_config_get_tc_type(borrowed_zone_index)`.** It is by definition the type of the zone channel being borrowed; asking for it separately only creates a way for the two to disagree. |
-| `ct_channel_map[0..2]` | `0x0106`–`0x0108` | 🔴🟠 | **= Z, inverted from `ct_mask`.** Each zone carries `ct_mask` (zones blob v6) naming which of the three SaftyFW CT channels read that zone. `ct_channel_map[i]` is the zone/relay id of the single zone whose `ct_mask` has bit *i* set. **Refuse to derive, and fall back to ASK-in-Advanced, when the inversion is not one-to-one** — `ct_mask` explicitly permits a CT feeding more than one zone (`zones_http.c`'s 5→6 comment). This is 🔴 and the derivation's wrongness is dangerous, so it is derived only when the mapping is unambiguous **and** confirmed by M's one-zone-at-a-time energize (which is the same check `CURRENT_SENSE.md` §5 step 2 already requires). |
+| `ct_channel_map[0..2]` | `0x0106`–`0x0108` | 🔴🟠 | **= M, from the zone current-sweep.** **SHIPPED** (`zones_http.c`, M12). The sweep on the zones page energizes one zone's relay(s) at a time with every other relay forced off, and records all three CT channels separately for that window; the channel that both carries real load (≥ 2 A, the same order as `i_present_a`) and dominates the other two by 4× is that zone's channel. Note this is a *measurement*, not the `ct_mask` inversion this row originally specified — `ct_mask` is an operator-entered field, so inverting it would only restate what was already typed, and the doc's own condition already required M's one-zone-at-a-time energize to confirm it. **Nothing is derived unless the derivation is unambiguous:** two channels within the dominance factor (a shared CT, which `ct_mask` explicitly permits), two zones resolving to the same channel, a zone whose `relay_mask` is not exactly its own relay bit (the zone-id-equals-relay-id identity `safety_core.c` indexes `relay_now_mask` with), or a sweep that aborted — each leaves the channel unset and says so on both pages, and the three ASK-in-Advanced fields stay available. Written over the same `SET_PARAM`/`COMMIT_CONFIG` path a typed value uses, so the Pico's own `config_params_finalize_ct_channel_map()` marks the group commissioned once all three land. |
 | `i_normal_a[0..2]` **NEW** | `0x031A`–`0x031C` | 🟠 | **= M**, directly: the current recorded while that channel's zone was the only one energized. §3. |
 | `zero_counts[0..2]` | `0x0302`–`0x0304` | 🟠 | **MEASURE.** Already re-measured at runtime after ≥5 min idle (`CONFIG_REFERENCE.md` §3). The page shows the live value and a *"re-zero now"* button; it is never typed. |
 | `ct_cal[0..2].gain` / `.offset` / `.calibrated` | `0x0310`–`0x0318` | ⚪ | **= M.** `gain` = `i_normal_a[ch] / measured_counts_span`, `offset` = the zero from `zero_counts[ch]`, `calibrated` = true once M has completed for that channel. Before M runs they stay unset and `calibrated` = false. |
@@ -163,7 +163,26 @@ are Q1/Q2 above. The fourth, `tc_type`, is derived — but from a value the
 operator **explicitly entered on the zones page** against the physical probe,
 not from a guess, and it is displayed on the commissioning review screen so the
 derivation is visible rather than silent. `ct_channel_map` is the fifth 🔴 and is
-derived only under the unambiguity + measurement condition in §1.2.
+derived only under the unambiguity + measurement condition in §1.2 — shipped as
+described there.
+
+`abs_max_temp_c` stays ASKED, and the M12 suggestion does not change that:
+selecting a `tc_type` shows that type's own datasheet maximum in the field and caps
+the field there (`max` attribute plus `checkTcMaxContradiction()`'s existing hard
+block on commit). The number almost always wants lowering — a kiln's furniture and
+brick usually give out well below what the sensor can report.
+
+**The suggestion is a `placeholder`, never a `value`** (opus review, 2026-08-28),
+in both the Advanced form (`fieldInputHtml()`) and the guided flow (`gPrefill()`).
+Rendered as a `value` it was indistinguishable from a typed answer: the Advanced
+form's save pass posts every non-empty input, so saving any *other* field on the
+page committed the suggestion, and `gBuildAnswers()` put it in the guided commit
+body for the same reason. As a placeholder the input stays genuinely empty, is
+skipped by both, and is visible to the operator all the same — so nothing commits
+it on the operator's behalf, and a value the operator did type, or one already
+committed on the Pico, still renders as a real `value` and saves normally. In the
+guided flow Q1 remains *required*: `gValidateScreen1()` refuses to advance past an
+empty field, so the effect is a prompt, never a silent default.
 
 ---
 
@@ -219,7 +238,7 @@ measurement is the honest, expected state on a fresh board and must read as
 | `tc_type` (the safety processor's own probe type) | `0x0105` | **Zones page**, via the already-existing `zones_config_set_safety_tc_type()` / `zones_config_get_safety_tc_type()` (zones blob v5) | Commissioning review screen, and the zones page's safety row |
 | `borrowed_zone_index` | `0x0102` | **Zones page** — the zone picker, only enabled when Q2 = *Not fitted* | Commissioning review screen |
 | `borrowed_type_expected` | `0x0210` | **Nowhere** — always mirrors the picked zone's `tc_type` | Zones page (next to the borrowed zone), commissioning review screen |
-| `ct_channel_map[0..2]` (the safety relay/CT mapping) | `0x0106`–`0x0108` | **Zones page**, via each zone's existing `ct_mask` (zones blob v6) plus `relay_mask` | Zones page, per zone, as a derived "safety CT" line; commissioning review screen as the three-row table in §2.2 |
+| `ct_channel_map[0..2]` (the safety relay/CT mapping) | `0x0106`–`0x0108` | **Zones page**, measured by the current sweep (§1.2) and written to the Pico when it completes | Zones page, per zone, as a derived "safety CT" line; commissioning review screen as the three-row table in §2.2 |
 | `i_normal_a[0..2]` **NEW** | `0x031A`–`0x031C` | **Zones page**, written only by the M12 measurement button | Both pages |
 
 "Displayed but not reassignable" means, concretely: the commissioning page

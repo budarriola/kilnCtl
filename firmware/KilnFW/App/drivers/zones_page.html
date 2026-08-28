@@ -816,6 +816,20 @@ function renderSweepStatus(st) {
   var text = 'State: ' + st.state;
   if (running) text += ' -- zone ' + (st.zone_index + 1) + ' (' + st.zones_done + '/' + st.zones_total + ' done)';
   if (st.reason) text += ' -- ' + st.reason;
+  /* M12: the sweep also derives which CT channel watches which zone and
+     writes it to the safety processor's ct_channel_map (the S3/S4/S14
+     input that previously had no producer but three hand-typed fields).
+     Reported here rather than only on the commissioning page, because THIS
+     is the run that either resolved it or could not -- and "could not" is
+     the case an operator has to act on, by entering those channels by hand. */
+  if (st.state === 'done' && typeof st.ct_map_derived_mask === 'number') {
+    var chans = [];
+    for (var c = 0; c < 3; c++) { if (st.ct_map_derived_mask & (1 << c)) chans.push('CT' + c); }
+    text += chans.length
+      ? ' -- safety CT map derived for ' + chans.join(', ')
+      : ' -- safety CT map NOT derived';
+    if (st.ct_map_reason) text += ' (' + st.ct_map_reason + ')';
+  }
   msg.textContent = text;
   if (running && !sweepPollTimer) {
     sweepPollTimer = setTimeout(pollSweepStatus, 1000);

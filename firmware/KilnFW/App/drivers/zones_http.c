@@ -32,6 +32,11 @@
                                * above relay_heat_zone_claimant_t. Closes the race
                                * this file's own s_sweep.active check alone cannot:
                                * see zones_current_sweep_start()'s atomic gate. */
+#include "safety_cfg_store.h" /* the ESP-side cache of the Pico's commissioning record --
+                                * zone_sweep_confirm_ct_map_landed() forces a LIVE re-fetch
+                                * through it, the same proof safety_cfg_http.c's
+                                * confirm_commit_landed() demands before calling a commit a
+                                * success. */
 #include "thermo_combine.h"
 #include "thermo_owner.h"
 #include "uart_task_ids.h" /* SAFETY_FLAG_* for zones_get_safety_wiring() */
@@ -1803,13 +1808,28 @@ static esp_err_t relay_names_save(void)
  * thermal record. Also not safety-critical -- nothing on the guard/control
  * path reads it, only Task 2's WARNING predicate above -- so it has no
  * business sharing a version/CRC/load transaction with data that is. */
-#define ZONE_NORMALS_CFG_VERSION 1
+/* 1 -> 2 (M12): the sweep now also derives which CT channel watches which
+ * zone (ct_map_*, see zone_sweep_derive_ct_channel() below) and that record
+ * has to outlive the sweep task -- the commissioning page reads it on a
+ * later page load to decide whether ct_channel_map[0..2] renders as DERIVED
+ * or as a manual-entry field. A v1 blob is discarded by the version check
+ * below rather than migrated: the whole blob is re-measured by one button
+ * press, and the alternative (reading a short struct and zero-filling the
+ * tail) is a migration path worth writing only for data that cannot simply
+ * be measured again. */
+#define ZONE_NORMALS_CFG_VERSION 2
 #define NVS_KEY_ZONE_NORMALS "zone_normals_cfg"
 
 typedef struct {
     uint8_t  version;
     uint8_t  measured_mask; /* bit i = zone i has a measured normal current */
     float    normal_current_a[MAX31856_CHANNEL_COUNT];
+    /* v2: the derived CT-channel -> zone mapping. bit c of
+     * ct_map_derived_mask set means ct_map_zone[c] is a zone index the sweep
+     * derived UNAMBIGUOUSLY (COMMISSIONING_UX.md sec 1.2's condition); a
+     * clear bit means "never derived", and ct_map_zone[c] is meaningless. */
+    uint8_t  ct_map_derived_mask;
+    uint8_t  ct_map_zone[ZONE_CT_CHANNEL_COUNT];
     uint32_t crc32;
 } zone_normals_cfg_t;
 
@@ -1905,6 +1925,44 @@ static bool zone_normals_set(uint8_t zone_index, float amps)
     s_zone_normals.cfg.normal_current_a[zone_index] = amps;
     s_zone_normals.cfg.measured_mask |= (uint8_t)(1u << zone_index);
     return zone_normals_save() == ESP_OK;
+}
+
+/* Same "the sweep is the only legitimate writer" rule zone_normals_set()
+ * above states, applied to the derived CT map: this is measured data, and
+ * an operator who wants to say it by hand says it on the commissioning page
+ * (which writes the Pico's ct_channel_map directly), never here. Clearing
+ * the whole record at the START of a sweep is deliberate -- a re-sweep of
+ * rewired hardware must not leave a channel's stale "derived" claim behind
+ * to be shown as current. */
+static void zone_ct_map_clear(void)
+{
+    s_zone_normals.cfg.ct_map_derived_mask = 0;
+    memset(s_zone_normals.cfg.ct_map_zone, 0, sizeof(s_zone_normals.cfg.ct_map_zone));
+    /* Persisted immediately, not left for the first zone_ct_map_set() to
+     * flush: a sweep that clears the map and then fails outright never
+     * reaches a set(), and leaving the old map in NVS would resurrect it on
+     * the next boot as though it were still current. */
+    (void)zone_normals_save();
+}
+
+static bool zone_ct_map_set(uint8_t ct_channel, uint8_t zone_index)
+{
+    if (ct_channel >= ZONE_CT_CHANNEL_COUNT || zone_index >= MAX31856_CHANNEL_COUNT) {
+        return false;
+    }
+    s_zone_normals.cfg.ct_map_zone[ct_channel] = zone_index;
+    s_zone_normals.cfg.ct_map_derived_mask |= (uint8_t)(1u << ct_channel);
+    return zone_normals_save() == ESP_OK;
+}
+
+void zones_ct_channel_map_derived(uint8_t *out_derived_mask, uint8_t *out_zone_for_ch)
+{
+    if (out_derived_mask) {
+        *out_derived_mask = s_zone_normals.cfg.ct_map_derived_mask;
+    }
+    if (out_zone_for_ch) {
+        memcpy(out_zone_for_ch, s_zone_normals.cfg.ct_map_zone, ZONE_CT_CHANNEL_COUNT);
+    }
 }
 
 /* Union of every currently-configured zone's relay_mask -- bit N-1 set iff
@@ -4081,6 +4139,67 @@ static esp_err_t zones_post_handler(httpd_req_t *req)
 #define ZONE_SWEEP_ENERGIZE_MS (ZONE_SWEEP_SETTLE_MS + ZONE_SWEEP_SAMPLE_MS)
 #define ZONE_SWEEP_POLL_MS 500u /* matches safety_link.h's poll_period_ms */
 
+/* ---- M12: deriving ct_channel_map from this sweep ------------------------
+ * COMMISSIONING_UX.md sec 1.2 permits ct_channel_map[0..2] to be derived
+ * "only when the mapping is unambiguous AND confirmed by the one-zone-at-a-
+ * time energize (CURRENT_SENSE.md sec 5 step 2)". This sweep IS that
+ * energize -- one zone's relay(s) on, every other relay forced off for the
+ * whole 5s window (zone_sweep_hw_energize()'s 0xFF mask) -- so it is the
+ * only place on this board that can honestly claim both halves. Before
+ * this, the only producer of ct_channel_map was three hand-typed fields on
+ * the commissioning page, which means S14 (and the mapping half of S3/S4)
+ * armed only if somebody typed the right three numbers.
+ *
+ * A channel is taken to have responded to the zone under test only if:
+ *   - it is carrying real load current (>= ZONE_SWEEP_CT_RESPOND_A), and
+ *   - it dominates every other channel by ZONE_SWEEP_CT_DOMINANCE.
+ * The threshold is the same order as SaftyFW's i_present_a load-active
+ * default (2.0 A) on purpose: this only has to separate a conducting
+ * element from measurement noise, and CURRENT_SENSE.md sec 0 already scopes
+ * the current chain's accuracy as "within a factor of ~2" -- a tighter
+ * number would be promising precision the hardware does not have. The
+ * dominance factor is what refuses the genuinely ambiguous cases: ct_mask
+ * explicitly permits one CT feeding more than one zone (zones_http.c's 5->6
+ * comment), and two channels reading within 4x of each other during one
+ * zone's window is exactly that shared-CT case, or a foreign load. Neither
+ * is derivable, so nothing is written and the operator is told which zone
+ * could not be resolved -- guessing here writes a wrong value into a red
+ * field that S3/S4/S14 then trust. */
+#define ZONE_SWEEP_CT_RESPOND_A 2.0f
+#define ZONE_SWEEP_CT_DOMINANCE 4.0f
+
+/* Pure decision for the rule above. `per_ch_a` is ZONE_CT_CHANNEL_COUNT
+ * averaged per-channel currents from one zone's sample window; a NaN entry
+ * (no per-channel sampler wired) makes the whole call ambiguous rather than
+ * being treated as 0 A. */
+static bool zone_sweep_derive_ct_channel(const float *per_ch_a, uint8_t *out_ch)
+{
+    uint8_t best = 0;
+    float best_a = -1.0f, second_a = -1.0f;
+    for (uint8_t c = 0; c < ZONE_CT_CHANNEL_COUNT; c++) {
+        if (!isfinite(per_ch_a[c])) {
+            return false;
+        }
+        if (per_ch_a[c] > best_a) {
+            second_a = best_a;
+            best_a = per_ch_a[c];
+            best = c;
+        } else if (per_ch_a[c] > second_a) {
+            second_a = per_ch_a[c];
+        }
+    }
+    if (best_a < ZONE_SWEEP_CT_RESPOND_A) {
+        return false; /* nothing conducted -- CT not fitted, or the zone drew no current */
+    }
+    if (second_a > 0.0f && best_a < second_a * ZONE_SWEEP_CT_DOMINANCE) {
+        return false; /* two channels saw this zone -- shared CT or foreign load */
+    }
+    if (out_ch) {
+        *out_ch = best;
+    }
+    return true;
+}
+
 const char *zone_sweep_refusal_str(zone_sweep_refusal_t r)
 {
     switch (r) {
@@ -4234,6 +4353,13 @@ typedef struct {
     volatile uint8_t            zones_done;
     volatile uint8_t            zones_total;
     volatile char                reason[64];
+    /* M12: what this run made of the CT map. ct_map_derived_mask is the set
+     * of channels resolved AND written to the safety processor;
+     * ct_map_reason is "" only when every swept zone resolved and the write
+     * landed -- a sweep that measured every normal current perfectly but
+     * could not resolve a CT must not read as an unqualified success. */
+    volatile uint8_t             ct_map_derived_mask;
+    volatile char                ct_map_reason[96];
     TaskHandle_t                 task;
 } zone_sweep_ctx_t;
 
@@ -4332,6 +4458,12 @@ typedef struct {
     void (*force_off)(void *ctx);              /* the choke point */
     void (*read_temp)(void *ctx, uint8_t zi, float *out_c, bool *out_valid);
     float (*sample_current)(void *ctx, uint8_t zi); /* already-summed live_a for zi's ct_mask */
+    /* M12: the same instant's reading split PER CT CHANNEL, unfiltered by
+     * any ct_mask -- the ct_mask is precisely the thing being derived here,
+     * so summing through it first would only ever confirm what was already
+     * configured. Optional: NULL leaves the per-channel averages NaN, which
+     * zone_sweep_derive_ct_channel() treats as "cannot tell", never as 0 A. */
+    void (*sample_channels)(void *ctx, float *out_a); /* ZONE_CT_CHANNEL_COUNT entries */
     bool (*link_up)(void *ctx);
     bool (*trip_latched)(void *ctx);            /* N10: fault_asserted || diag TRIPPED */
     bool (*abort_requested)(void *ctx);
@@ -4381,6 +4513,7 @@ typedef enum {
 static zone_sweep_zone_outcome_t zone_sweep_run_one_zone(uint8_t zi, uint8_t relay_mask,
                                                           const zone_sweep_zone_deps_t *deps,
                                                           float *out_avg_current_a,
+                                                          float *out_per_ch_avg_a,
                                                           uint32_t *out_energize_refused_sources)
 {
     if (relay_mask == 0) {
@@ -4400,6 +4533,7 @@ static zone_sweep_zone_outcome_t zone_sweep_run_one_zone(uint8_t zi, uint8_t rel
     uint32_t elapsed = 0;
     float sum_a = 0.0f;
     uint32_t samples = 0;
+    float ch_sum_a[ZONE_CT_CHANNEL_COUNT] = {0};
     uint32_t invalid_streak = 0;
     float effective_ceiling_c = zone_sweep_effective_ceiling_c();
     zone_sweep_zone_outcome_t outcome = ZONE_SWEEP_ZONE_OK;
@@ -4442,6 +4576,13 @@ static zone_sweep_zone_outcome_t zone_sweep_run_one_zone(uint8_t zi, uint8_t rel
 
         if (zone_sweep_should_sample(elapsed)) {
             sum_a += deps->sample_current(deps->ctx, zi);
+            if (deps->sample_channels) {
+                float ch_a[ZONE_CT_CHANNEL_COUNT];
+                deps->sample_channels(deps->ctx, ch_a);
+                for (uint8_t c = 0; c < ZONE_CT_CHANNEL_COUNT; c++) {
+                    ch_sum_a[c] += ch_a[c];
+                }
+            }
             samples++;
         }
     }
@@ -4450,6 +4591,16 @@ static zone_sweep_zone_outcome_t zone_sweep_run_one_zone(uint8_t zi, uint8_t rel
 
     if (outcome == ZONE_SWEEP_ZONE_OK && samples > 0 && out_avg_current_a) {
         *out_avg_current_a = sum_a / (float)samples;
+    }
+    /* M12: NaN, not 0, whenever there is nothing real to report -- a zone
+     * that aborted, took no samples, or ran without a per-channel sampler
+     * must read as "cannot tell" to zone_sweep_derive_ct_channel(), never as
+     * three channels that all measured zero. */
+    if (out_per_ch_avg_a) {
+        bool have = (outcome == ZONE_SWEEP_ZONE_OK) && samples > 0 && deps->sample_channels != NULL;
+        for (uint8_t c = 0; c < ZONE_CT_CHANNEL_COUNT; c++) {
+            out_per_ch_avg_a[c] = have ? (ch_sum_a[c] / (float)samples) : NAN;
+        }
     }
     return outcome;
 }
@@ -4524,6 +4675,22 @@ static float zone_sweep_hw_sample_current(void *ctx, uint8_t zi)
     return live_a;
 }
 
+/* M12: the same safety_link_get_status() snapshot zone_sweep_hw_sample_
+ * current() reads, handed over WITHOUT the ct_mask summing -- see
+ * zone_sweep_zone_deps_t::sample_channels for why the mask must not be
+ * applied here. A link read that fails leaves every channel NaN, which
+ * zone_sweep_derive_ct_channel() reads as "cannot tell". */
+static void zone_sweep_hw_sample_channels(void *ctx, float *out_a)
+{
+    (void)ctx;
+    safety_link_status_t st;
+    memset(&st, 0, sizeof(st));
+    bool ok = s_hw_safety && safety_link_get_status(s_hw_safety, &st) == ESP_OK;
+    for (uint8_t c = 0; c < ZONE_CT_CHANNEL_COUNT; c++) {
+        out_a[c] = ok ? st.current_a[c] : NAN;
+    }
+}
+
 static bool zone_sweep_hw_link_up(void *ctx)
 {
     (void)ctx;
@@ -4577,6 +4744,11 @@ typedef struct {
     uint8_t (*relay_mask_for_zone)(void *ctx, uint8_t zi);
     void (*set_zone_index)(void *ctx, uint8_t zi);      /* only for a zone actually being measured */
     void (*record_normal)(void *ctx, uint8_t zi, float avg_a); /* only when avg_a is a real sample */
+    /* M12: this zone's per-CT-channel averages, handed over for every zone
+     * that completed -- including the ambiguous ones, so the hook can say
+     * WHICH zone it could not resolve rather than the sweep silently ending
+     * with fewer channels mapped than zones swept. */
+    void (*record_ct_channels)(void *ctx, uint8_t zi, uint8_t relay_mask, const float *per_ch_avg_a);
     void (*zone_done)(void *ctx);                        /* once per ZONE_SWEEP_ZONE_OK zone, live */
     void *ctx;
 } zone_sweep_all_hooks_t;
@@ -4601,9 +4773,10 @@ static void zone_sweep_run_all_zones(uint8_t zones_total, const zone_sweep_zone_
         }
 
         float avg_a = NAN; /* stays NaN unless zone_sweep_run_one_zone() got >=1 sample */
+        float per_ch_avg_a[ZONE_CT_CHANNEL_COUNT];
         uint32_t refused_sources = 0;
         zone_sweep_zone_outcome_t outcome =
-            zone_sweep_run_one_zone(zi, relay_mask, deps, &avg_a, &refused_sources);
+            zone_sweep_run_one_zone(zi, relay_mask, deps, &avg_a, per_ch_avg_a, &refused_sources);
 
         switch (outcome) {
         case ZONE_SWEEP_ZONE_SKIPPED:
@@ -4680,6 +4853,9 @@ static void zone_sweep_run_all_zones(uint8_t zones_total, const zone_sweep_zone_
             if (!isnan(avg_a) && hooks->record_normal) {
                 hooks->record_normal(hooks->ctx, zi, avg_a);
             }
+            if (hooks->record_ct_channels) {
+                hooks->record_ct_channels(hooks->ctx, zi, relay_mask, per_ch_avg_a);
+            }
             out->zones_done++;
             if (hooks->zone_done) {
                 hooks->zone_done(hooks->ctx);
@@ -4707,6 +4883,307 @@ static void zone_sweep_task_record_normal(void *ctx, uint8_t zi, float avg_a)
     zone_normals_set(zi, avg_a);
 }
 
+/* ---- M12: the derived CT map, accumulated across one sweep run ------------
+ * Written only by the sweep task (one at a time, enforced by s_sweep.active
+ * and the heat claim), read only by zone_sweep_push_ct_channel_map() on that
+ * same task, so unlike s_sweep this needs no volatile. Reset by
+ * zone_sweep_task() before the loop starts. */
+static struct {
+    uint8_t zone_for_ch[ZONE_CT_CHANNEL_COUNT];
+    uint8_t derived_mask;      /* channels resolved unambiguously this run */
+    uint8_t conflict_mask;     /* channels TWO zones both claimed -- see below */
+    uint8_t unresolved_zone_mask;
+} s_ct_derive;
+
+static void zone_sweep_task_record_ct_channels(void *ctx, uint8_t zi, uint8_t relay_mask,
+                                                const float *per_ch_avg_a)
+{
+    (void)ctx;
+    uint8_t ch = 0;
+    /* ct_channel_map[] is indexed into the Pico's relay_now_mask directly
+     * (safety_core.c: `ctx.relay_now_mask & (1u << ct_channel_map[ch])`), so
+     * the value written has to be a RELAY bit position, and the whole
+     * mapping is only meaningful while zone id and relay id are the same
+     * number -- which is what config_store.h's "zone/relay id" comment
+     * assumes and what a stock three-zone board actually is. Refuse to
+     * derive for any zone where that identity does not hold (more than one
+     * relay, or a relay outside bits 0-2): the sweep genuinely cannot say
+     * which single relay a channel's current belongs to, and writing the
+     * zone index anyway would point S14 at some other zone's relay. */
+    if (relay_mask != (uint8_t)(1u << zi) || zi >= 3u) {
+        if (zi < 8) {
+            s_ct_derive.unresolved_zone_mask |= (uint8_t)(1u << zi);
+        }
+        return;
+    }
+    if (!zone_sweep_derive_ct_channel(per_ch_avg_a, &ch)) {
+        if (zi < 8) {
+            s_ct_derive.unresolved_zone_mask |= (uint8_t)(1u << zi);
+        }
+        return;
+    }
+    /* Two zones dominating the SAME channel is not a mapping -- it is the
+     * one-to-one inversion COMMISSIONING_UX.md sec 1.2 requires failing, and
+     * it fails in a direction no per-zone check can see (each zone looked
+     * perfectly unambiguous on its own). Drop the channel entirely rather
+     * than letting whichever zone swept last win. */
+    if ((s_ct_derive.derived_mask & (1u << ch)) != 0 && s_ct_derive.zone_for_ch[ch] != zi) {
+        s_ct_derive.derived_mask &= (uint8_t)~(1u << ch);
+        s_ct_derive.conflict_mask |= (uint8_t)(1u << ch);
+        return;
+    }
+    if ((s_ct_derive.conflict_mask & (1u << ch)) != 0) {
+        return; /* already disqualified by an earlier zone -- a third claimant changes nothing */
+    }
+    s_ct_derive.zone_for_ch[ch] = zi;
+    s_ct_derive.derived_mask |= (uint8_t)(1u << ch);
+}
+
+/* The wire id of ct_channel_map[ch] -- one place, so the staging, the
+ * unstaging and the read-back can never drift apart. */
+#define ZONE_CT_MAP_PARAM_ID(ch) ((uint16_t)(0x0106u + (ch)))
+
+/* config_store.c seeds an uncommissioned record's ct_channel_map[] with
+ * 0xFF, "a visibly implausible relay/zone id" -- S14 compares
+ * `relay_now_mask & (1u << ct_channel_map[ch])`, and no relay bit 255
+ * exists, so a channel left holding this can never point the over-current
+ * guard at somebody else's relay. It is the only value this file is allowed
+ * to invent, and only ever as a repair for a channel that had no committed
+ * value to restore. */
+#define ZONE_CT_MAP_IMPLAUSIBLE 0xFFu
+
+/* The value the Pico has actually COMMITTED for ct_channel_map[ch],
+ * according to the ESP's cache of its record. False when the cache has never
+ * seen that field set (an uncommissioned board), in which case there is no
+ * prior value to restore. */
+static bool zone_ct_map_committed_value(uint8_t ch, uint8_t *out)
+{
+    size_t count = safety_cfg_store_param_count();
+    for (size_t i = 0; i < count; i++) {
+        safety_cfg_param_t row;
+        memset(&row, 0, sizeof(row));
+        if (!safety_cfg_store_get_by_index(i, &row) || row.param_id != ZONE_CT_MAP_PARAM_ID(ch)) {
+            continue;
+        }
+        if (!row.set) {
+            return false;
+        }
+        if (out) {
+            *out = row.value.u8_val;
+        }
+        return true;
+    }
+    return false;
+}
+
+/* H3 fix (opus review, 2026-08-28): a SET_PARAM that fails PART WAY through
+ * the three-channel push used to just `break`, which leaves the Pico's
+ * link_task.c s_staged_config holding whatever channels DID stage. That
+ * buffer is a persistent baseline -- seeded once from the committed record
+ * and only re-seeded by a SUCCESSFUL COMMIT_CONFIG or a reboot
+ * (link_task.c's s_staged_config_init, reset only at task start) -- so the
+ * next unrelated COMMIT_CONFIG, e.g. the operator saving one field on the
+ * commissioning page, would have carried this abandoned sweep's leftover
+ * ct_channel_map[] into flash as though it had been commissioned.
+ *
+ * The link protocol has no "discard staged config" command (uart_task_ids.h
+ * enumerates every subcommand on this wire; SET_CONFIG/SET_CT_CAL/COMMIT are
+ * all it offers for the config record), and inventing a new wire command for
+ * a failure path is not worth a protocol change. So the leftovers are
+ * OVERWRITTEN instead: each channel that staged is re-staged back to the
+ * value the Pico has actually committed, and, for a channel that has never
+ * been committed at all, to config_store.c's own 0xFF placeholder. Either
+ * way the staged buffer ends up holding a record that is safe to commit --
+ * which is the only property that matters, since this code cannot stop
+ * somebody else committing it.
+ *
+ * Best-effort by construction: this runs because the link already failed
+ * once. A repair send that fails too is reported in `note` rather than
+ * retried -- the caller has already decided this sweep derived nothing. */
+static void zone_sweep_unstage_ct_channels(uint8_t staged_mask, char *note, size_t note_cap)
+{
+    if (staged_mask == 0 || !s_hw_safety) {
+        return;
+    }
+    for (uint8_t c = 0; c < ZONE_CT_CHANNEL_COUNT; c++) {
+        if ((staged_mask & (1u << c)) == 0) {
+            continue;
+        }
+        uint8_t restore = ZONE_CT_MAP_IMPLAUSIBLE;
+        (void)zone_ct_map_committed_value(c, &restore);
+        kilnlink_param_value_t v;
+        memset(&v, 0, sizeof(v));
+        v.u8_val = restore;
+        if (safety_link_send_set_param(s_hw_safety, ZONE_CT_MAP_PARAM_ID(c),
+                                       KILNLINK_PARAM_TYPE_U8, v) != ESP_OK) {
+            snprintf(note, note_cap,
+                     "CT map staging failed and could NOT be backed out -- re-run the sweep "
+                     "before saving again");
+            return;
+        }
+    }
+}
+
+/* H1 fix (opus review, 2026-08-28): an ACKed, un-rejected COMMIT_CONFIG is
+ * NOT proof the Pico stored anything -- SET_PARAM/COMMIT_CONFIG are both
+ * fire-and-forget broadcasts and a late REJECTED frame can miss the reply
+ * window, which is exactly why safety_cfg_http.c's confirm_commit_landed()
+ * exists for the hand-typed path. That function is static to its own file
+ * (and takes safety_cfg_post_pair_t text pairs this caller has none of), so
+ * its VERIFICATION is reproduced here rather than shared: force a live
+ * re-fetch of the Pico's record -- never the ESP's own cache as it stands --
+ * and require every channel this push claims to have written to read back
+ * exactly the zone index that was sent. Anything else (unreadable, unset, or
+ * set to something different) is reported as unconfirmed, and the caller
+ * then reports the map as NOT derived, so the field falls back to manual
+ * entry exactly as it does when no sweep has run. */
+static bool zone_sweep_confirm_ct_map_landed(uint8_t mask, char *reason, size_t reason_cap)
+{
+    uint16_t best_known_crc = 0;
+    bool peer_known = false;
+    (void)safety_link_get_peer_build_status(s_hw_safety, &peer_known, NULL, NULL, NULL, NULL, NULL,
+                                             NULL, &best_known_crc);
+    if (!safety_cfg_store_refetch(s_hw_safety, peer_known ? best_known_crc : 0)) {
+        snprintf(reason, reason_cap,
+                 "the CT map commit could not be read back to confirm it -- treated as "
+                 "NOT written");
+        return false;
+    }
+    for (uint8_t c = 0; c < ZONE_CT_CHANNEL_COUNT; c++) {
+        if ((mask & (1u << c)) == 0) {
+            continue;
+        }
+        uint8_t committed = 0;
+        if (!zone_ct_map_committed_value(c, &committed) || committed != s_ct_derive.zone_for_ch[c]) {
+            snprintf(reason, reason_cap,
+                     "ct_channel_map[%u] does not read back as zone %u -- treated as "
+                     "NOT written",
+                     (unsigned)c, (unsigned)s_ct_derive.zone_for_ch[c]);
+            return false;
+        }
+    }
+    return true;
+}
+
+/* Stages every channel this run resolved as SET_PARAM 0x0106+ch (u8, the
+ * zone index) and commits, exactly the path safety_cfg_http.c's apply_pairs()
+ * uses for a hand-typed value -- the Pico cannot and must not tell the
+ * difference between a derived write and a typed one. The Pico's own
+ * config_params_finalize_ct_channel_map() runs inside its COMMIT_CONFIG
+ * handler (link_task.c) and is what marks the group commissioned once all
+ * three per-channel bits are present, so there is deliberately nothing here
+ * that waits for a complete triple before sending: a partial derivation
+ * stages the channels it actually confirmed and leaves the group bit unset,
+ * which is exactly what that function already does with two of three.
+ *
+ * Only ever called after the sweep's relays are off and the run has ended --
+ * safety_link_send_set_param()/_commit_config() both block for a link round
+ * trip, and this must not sit inside a window where a relay is energized. */
+static void zone_sweep_push_ct_channel_map(void)
+{
+    char note[sizeof(s_sweep.ct_map_reason)];
+    note[0] = '\0';
+    /* Scoped to the whole function, not just the staging loop below: every
+     * failure arm past the loop (commit unacked, commit rejected, commit
+     * acked but the read-back doesn't confirm it landed) still needs to know
+     * which channels made it into the Pico's staged buffer, so it can back
+     * them out the same way a staging failure already does -- see H3's
+     * comment on zone_sweep_unstage_ct_channels() above. Left at 0 (a no-op
+     * for that function) on every path that never reaches the loop. */
+    uint8_t staged_mask = 0;
+
+    if (s_ct_derive.derived_mask == 0) {
+        snprintf(note, sizeof(note), "no CT channel could be identified -- map not changed");
+    } else if (!s_hw_safety) {
+        snprintf(note, sizeof(note), "safety link not available -- CT map not written");
+        s_ct_derive.derived_mask = 0;
+    } else {
+        for (uint8_t c = 0; c < ZONE_CT_CHANNEL_COUNT; c++) {
+            if ((s_ct_derive.derived_mask & (1u << c)) == 0) {
+                continue;
+            }
+            kilnlink_param_value_t v;
+            memset(&v, 0, sizeof(v));
+            v.u8_val = s_ct_derive.zone_for_ch[c];
+            esp_err_t err = safety_link_send_set_param(s_hw_safety, ZONE_CT_MAP_PARAM_ID(c),
+                                                       KILNLINK_PARAM_TYPE_U8, v);
+            if (err != ESP_OK) {
+                /* %.24s, not a bare %s, for the same reason the ambiguity
+                 * note below uses one -- see its comment. */
+                snprintf(note, sizeof(note), "staging ct_channel_map[%u] failed: %.24s", c,
+                         esp_err_to_name(err));
+                /* H3: whatever already staged must not be left sitting in the
+                 * Pico's staged record for an unrelated commit to pick up. */
+                zone_sweep_unstage_ct_channels(staged_mask, note, sizeof(note));
+                s_ct_derive.derived_mask = 0;
+                break;
+            }
+            staged_mask |= (uint8_t)(1u << c);
+        }
+    }
+
+    if (s_ct_derive.derived_mask != 0) {
+        uint16_t reject_param_id = 0;
+        uint8_t reject_reason = 0;
+        bool rejected = false;
+        esp_err_t err = safety_link_send_commit_config(s_hw_safety, &reject_param_id, &reject_reason,
+                                                        &rejected);
+        if (err != ESP_OK) {
+            snprintf(note, sizeof(note), "CT map staged but the commit was not "
+                                          "acknowledged (%.24s)", esp_err_to_name(err));
+            /* An unacked commit's fate on the Pico is unknown -- it may not
+             * have applied, in which case the staged buffer this loop wrote
+             * is still sitting there for an unrelated later commit to pick
+             * up. Same H3 exposure as a staging-loop failure, so the same
+             * repair. */
+            zone_sweep_unstage_ct_channels(staged_mask, note, sizeof(note));
+            s_ct_derive.derived_mask = 0;
+        } else if (rejected) {
+            /* Expected and legitimate when the relay is ARMED -- config
+             * writes are refused outright then (CONFIG_REFERENCE.md). Say so
+             * rather than leaving the operator to infer it from a map that
+             * silently did not change. A rejected commit leaves the staged
+             * buffer exactly as staged (rejection means nothing was
+             * applied), so it still needs backing out. */
+            snprintf(note, sizeof(note), "the safety processor rejected the CT map commit "
+                                          "(id 0x%04X, reason %u)", (unsigned)reject_param_id,
+                     (unsigned)reject_reason);
+            zone_sweep_unstage_ct_channels(staged_mask, note, sizeof(note));
+            s_ct_derive.derived_mask = 0;
+        } else if (!zone_sweep_confirm_ct_map_landed(s_ct_derive.derived_mask, note, sizeof(note))) {
+            /* H1: ACKed and not rejected is not proof. Nothing is persisted
+             * and no channel is reported as derived -- the operator sees the
+             * reason and enters the map by hand, exactly as they would if the
+             * sweep had never run. The read-back disagreeing is exactly the
+             * case H3 exists for too: back the staged buffer out rather than
+             * leave a value known not to match what was intended sitting
+             * there for the next commit. */
+            zone_sweep_unstage_ct_channels(staged_mask, note, sizeof(note));
+            s_ct_derive.derived_mask = 0;
+        } else {
+            for (uint8_t c = 0; c < ZONE_CT_CHANNEL_COUNT; c++) {
+                if ((s_ct_derive.derived_mask & (1u << c)) != 0) {
+                    zone_ct_map_set(c, s_ct_derive.zone_for_ch[c]);
+                }
+            }
+        }
+    }
+
+    /* An ambiguity note never overwrites a hard failure above -- the failure
+     * is the more actionable of the two -- but it is reported whenever the
+     * write itself was fine and some zone still could not be resolved. */
+    if (note[0] == '\0' && (s_ct_derive.unresolved_zone_mask != 0 || s_ct_derive.conflict_mask != 0)) {
+        /* %.24s, not a bare %s, so -Werror=format-truncation can prove this
+         * fits note[] whatever the two literals grow into later. */
+        snprintf(note, sizeof(note), "CT map incomplete (%.24s) -- enter the rest by hand",
+                 s_ct_derive.conflict_mask != 0 ? "two zones share one CT" : "a zone was ambiguous");
+    }
+
+    s_sweep.ct_map_derived_mask = s_ct_derive.derived_mask;
+    strncpy((char *)s_sweep.ct_map_reason, note, sizeof(s_sweep.ct_map_reason) - 1);
+    s_sweep.ct_map_reason[sizeof(s_sweep.ct_map_reason) - 1] = '\0';
+}
+
 static void zone_sweep_task_zone_done(void *ctx)
 {
     (void)ctx;
@@ -4731,6 +5208,7 @@ static void zone_sweep_task(void *arg)
         .force_off = zone_sweep_hw_force_off,
         .read_temp = zone_sweep_hw_read_temp,
         .sample_current = zone_sweep_hw_sample_current,
+        .sample_channels = zone_sweep_hw_sample_channels,
         .link_up = zone_sweep_hw_link_up,
         .trip_latched = zone_sweep_hw_trip_latched,
         .abort_requested = zone_sweep_hw_abort_requested,
@@ -4741,21 +5219,44 @@ static void zone_sweep_task(void *arg)
         .relay_mask_for_zone = zone_sweep_task_relay_mask_for_zone,
         .set_zone_index = zone_sweep_task_set_zone_index,
         .record_normal = zone_sweep_task_record_normal,
+        .record_ct_channels = zone_sweep_task_record_ct_channels,
         .zone_done = zone_sweep_task_zone_done,
         .ctx = NULL,
     };
 
+    memset(&s_ct_derive, 0, sizeof(s_ct_derive));
+    zone_ct_map_clear(); /* a re-sweep must not leave a stale channel claim visible as current */
+
     zone_sweep_all_result_t result;
     zone_sweep_run_all_zones(s_sweep.zones_total, &hw_deps, &hw_hooks, &result);
 
-    s_sweep.state = result.state;
+    /* DELIBERATELY not `s_sweep.state = result.state` for a successful run:
+     * DONE is published below, only once zone_sweep_push_ct_channel_map()
+     * has finished (see that call's comment). A failed/aborted run publishes
+     * immediately -- it derives nothing, so there is nothing to wait for. */
+    if (result.state != ZONE_SWEEP_DONE) {
+        s_sweep.state = result.state;
+    }
     strncpy((char *)s_sweep.reason, result.reason, sizeof(s_sweep.reason) - 1);
     s_sweep.reason[sizeof(s_sweep.reason) - 1] = '\0';
 
     zone_sweep_force_relays_off(); /* final choke point -- covers normal completion too */
     if (s_sweep.state != ZONE_SWEEP_ABORTED && s_sweep.state != ZONE_SWEEP_FAILED) {
-        s_sweep.state = ZONE_SWEEP_DONE;
         s_sweep.reason[0] = '\0';
+        /* M12: only a run that finished every zone gets to write the CT map.
+         * An aborted or failed sweep has measured some zones and not others,
+         * and a partial pass cannot see the two-zones-one-channel conflict
+         * that is the whole reason the one-to-one check exists -- deriving
+         * from it would write a map that looks confirmed and is not. */
+        zone_sweep_push_ct_channel_map();
+        /* DONE goes up only AFTER the push has finished (opus review,
+         * 2026-08-28). Setting it first left a window two link round trips
+         * wide in which a status poll saw state=done with
+         * ct_map_derived_mask still 0 and rendered a permanent "not
+         * derived" -- the page never re-reads a sweep it has already seen
+         * finish. The push runs entirely with the relays off either way; it
+         * is only the moment the page is TOLD the run is over that moves. */
+        s_sweep.state = ZONE_SWEEP_DONE;
     }
     /* Release the heat claim taken in zones_current_sweep_start() -- must
      * happen before s_sweep.active goes false, not after: the moment
@@ -4843,6 +5344,8 @@ zone_sweep_refusal_t zones_current_sweep_start(void)
         s_sweep.zones_total = MAX31856_CHANNEL_COUNT;
     }
     s_sweep.reason[0] = '\0';
+    s_sweep.ct_map_derived_mask = 0;
+    s_sweep.ct_map_reason[0] = '\0';
 
     BaseType_t created = xTaskCreate(zone_sweep_task, "zone_sweep", 4096, NULL, tskIDLE_PRIORITY + 2, &s_sweep.task);
     if (created != pdPASS) {
@@ -4879,6 +5382,9 @@ void zones_current_sweep_get_status(zone_sweep_status_t *out)
     out->zones_total = s_sweep.zones_total;
     strncpy(out->reason, (const char *)s_sweep.reason, sizeof(out->reason) - 1);
     out->reason[sizeof(out->reason) - 1] = '\0';
+    out->ct_map_derived_mask = s_sweep.ct_map_derived_mask;
+    strncpy(out->ct_map_reason, (const char *)s_sweep.ct_map_reason, sizeof(out->ct_map_reason) - 1);
+    out->ct_map_reason[sizeof(out->ct_map_reason) - 1] = '\0';
 }
 
 /* ---- Task 2: runtime CT-to-zone mapping check ----------------------------- */
@@ -5011,14 +5517,41 @@ static esp_err_t sweep_status_get_handler(httpd_req_t *req)
     zones_current_sweep_get_status(&st);
     char reason_escaped[sizeof(st.reason) * 2 + 1];
     json_escape(st.reason, reason_escaped, sizeof(reason_escaped));
-    char json[320];
+    char ct_reason_escaped[sizeof(st.ct_map_reason) * 2 + 1];
+    json_escape(st.ct_map_reason, ct_reason_escaped, sizeof(ct_reason_escaped));
+    char json[640];
     int n = snprintf(json, sizeof(json),
                      "{\"state\":\"%s\",\"zone_index\":%u,\"zones_done\":%u,\"zones_total\":%u,"
-                     "\"reason\":\"%s\"}",
+                     "\"reason\":\"%s\",\"ct_map_derived_mask\":%u,\"ct_map_reason\":\"%s\"}",
                      zone_sweep_state_str(st.state), st.zone_index, st.zones_done, st.zones_total,
-                     reason_escaped);
+                     reason_escaped, st.ct_map_derived_mask, ct_reason_escaped);
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_send(req, json, n > 0 ? (size_t)n : 0);
+}
+
+/* M12: the persisted derivation record, for the commissioning page. Kept a
+ * separate tiny endpoint rather than folded into /api/safety/commissioning:
+ * that response is built by safety_cfg_http.c's PURE build_commissioning_
+ * json(), whose whole point (and its host test's) is that it touches no NVS
+ * and no other module -- reaching into zones NVS from there would cost that
+ * property for one extra field the page can just as easily fetch itself. */
+static esp_err_t ct_channel_map_get_handler(httpd_req_t *req)
+{
+    uint8_t mask = 0;
+    uint8_t zone_for_ch[ZONE_CT_CHANNEL_COUNT];
+    zones_ct_channel_map_derived(&mask, zone_for_ch);
+
+    char json[128];
+    int o = snprintf(json, sizeof(json), "{\"mask\":%u,\"zone\":[", (unsigned)mask);
+    for (unsigned c = 0; c < ZONE_CT_CHANNEL_COUNT && o > 0 && (size_t)o < sizeof(json); c++) {
+        o += snprintf(json + o, sizeof(json) - (size_t)o, "%s%u", c == 0 ? "" : ",",
+                      (unsigned)zone_for_ch[c]);
+    }
+    if (o > 0 && (size_t)o < sizeof(json)) {
+        o += snprintf(json + o, sizeof(json) - (size_t)o, "]}");
+    }
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, json, (o > 0 && (size_t)o < sizeof(json)) ? (size_t)o : 0);
 }
 
 esp_err_t zones_http_start(void)
@@ -5179,6 +5712,9 @@ esp_err_t zones_http_start(void)
     static const httpd_uri_t sweep_status_uri = {
         .uri = "/api/zones/current_sweep/status", .method = HTTP_GET, .handler = sweep_status_get_handler,
     };
+    static const httpd_uri_t ct_map_uri = {
+        .uri = "/api/zones/ct_channel_map", .method = HTTP_GET, .handler = ct_channel_map_get_handler,
+    };
     err = httpd_register_uri_handler(server, &page_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_register_uri_handler(/settings/zones) failed: %s", esp_err_to_name(err));
@@ -5212,6 +5748,11 @@ esp_err_t zones_http_start(void)
     err = httpd_register_uri_handler(server, &sweep_status_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_register_uri_handler(GET current_sweep/status) failed: %s", esp_err_to_name(err));
+        return err;
+    }
+    err = httpd_register_uri_handler(server, &ct_map_uri);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "httpd_register_uri_handler(GET ct_channel_map) failed: %s", esp_err_to_name(err));
         return err;
     }
 

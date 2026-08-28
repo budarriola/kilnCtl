@@ -838,6 +838,15 @@ typedef struct {
     uint8_t zones_done;   /* zones with a fresh result so far this run */
     uint8_t zones_total;  /* zones this run will attempt (thermo_count, capped to the array) */
     char    reason[64];   /* refusal or failure reason; "" while running/idle/done */
+    /* M12: what the last completed run made of the CT-channel -> zone map.
+     * ct_map_derived_mask has bit c set for every CT channel that run
+     * resolved unambiguously AND wrote to the safety processor;
+     * ct_map_reason is "" only when nothing needs saying -- an ambiguous
+     * zone, a rejected commit or a down link each put their own sentence
+     * here, because a sweep that measured every normal current and still
+     * could not map a CT must not read as an unqualified success. */
+    uint8_t ct_map_derived_mask;
+    char    ct_map_reason[96];
 } zone_sweep_status_t;
 
 void zones_current_sweep_get_status(zone_sweep_status_t *out);
@@ -852,6 +861,20 @@ void zones_current_sweep_get_status(zone_sweep_status_t *out);
  * *out_measured, never infer "never measured" from a zero amps value, since
  * a real normal current CAN legitimately be very small. */
 bool zones_config_get_normal_current(uint8_t zone_index, float *out_amps, bool *out_measured);
+
+/* ---- M12: the CT-channel -> zone mapping the sweep derived ----------------
+ * Persisted alongside the measured normals (same NVS blob, v2) so it
+ * survives the reboot between running the sweep on the zones page and
+ * looking at the commissioning page. *out_derived_mask has bit c set iff
+ * out_zone_for_ch[c] is a zone index this board derived from a completed
+ * sweep under COMMISSIONING_UX.md sec 1.2's unambiguity condition -- a clear
+ * bit means "never derived here", NOT "channel unused", and says nothing
+ * about whether the safety processor's own ct_channel_map[c] is set: an
+ * operator may always have typed it in by hand instead, and this record has
+ * no way to see that. out_zone_for_ch must have room for
+ * ZONE_CT_CHANNEL_COUNT bytes; entries whose mask bit is clear are
+ * meaningless, never a real zone index. */
+void zones_ct_channel_map_derived(uint8_t *out_derived_mask, uint8_t *out_zone_for_ch);
 
 /* ---- Task 2: runtime CT-to-zone mapping check ---------------------------- */
 

@@ -62,17 +62,14 @@ What is still genuinely open is short:
 
 | Size | Item | Where |
 |---|---|---|
-| M | **S14 cannot be armed until something maps CT channels to zones.** The sweep measures per-zone with a relay mask; `ct_channel_map` is per-CT-channel and has no other consumer, defaulting to `0xFF`. Derive it from the energize sweep rather than asking the operator to type it | M12 |
 | L | **The HTTP reset is not a heap failure** — proven, not argued. Remaining candidates are lwIP or `esp_http_server`'s accept/select loop under `max_open_sockets=13`, which needs a different instrumentation surface | M10 |
 | M | `mykicadMcp/` and `pdfMcp/` moved under `tools/` | M7 |
 | L | **HTTP connection resets under concurrency.** TCP-layer instrumentation built and live; 188 requests across varied burst sizes reproduced nothing (rate appears lower than the original 9/80 measurement, unconfirmed why). Still unreproduced under instrumentation, not root-caused, not closed — an absence of failure is not a fix, see M10 for the honest accounting | M10 |
-| M | Mains voltage as a dropdown; safety thermocouple and relay config shown read-only in the zones config | M12 |
-| M | An over-current guard paired with the under-current guard, as a percentage of measured normal | M12 |
+| M | Safety thermocouple and relay config shown read-only in the zones config — currently a live editable `<select>` on the zones page, submitted on Save | M12 |
 | L | **Make the commissioning page simple.** 58 raw parameters classified DERIVED / ASKED / DEFAULTED; the ASKED list is the score | M12 |
 | L | **Every fault says what was detected and what to do** — a standing rule, not a closing milestone. S6a was the example: the cause was measured and held on the ESP and simply never shown next to the trip | M13 |
-| S | Thermocouple maximum inferred from thermocouple type rather than entered | M12 |
-| M | Kiln maximum temperature and maximum expected kiln power, entered on the safety page | M12 |
-| L | Per-zone current measurement (energize one zone at a time, record normal current) and a runtime check that each CT is on the zone it is configured for | M12 |
+| S | Thermocouple maximum inferred from thermocouple type rather than entered — `TC_MAX_C_BY_TYPE` exists but only warns on contradiction, doesn't set the value | M12 |
+| M | Runtime check that each CT is on the zone it is configured for (the sweep and the guard both exist; this is the live comparison) | M12 |
 | L | **An uncommissioned safety processor must refuse heating enable.** Do this LAST — see M12's ordering note, it can lock the bench out of heating | M12 |
 
 ### Blocked on hardware that does not exist yet
@@ -855,24 +852,53 @@ is locked out of heating until a full commissioning pass succeeds — including
 the entry surface exists and a real commissioning pass has been completed on
 the board. That is a sequencing decision, not a reason to soften the refusal.
 
-- [ ] **Kiln maximum temperature entered on the safety page**, and used to set
-      `abs_max_temp_c` on the safety processor. This is the field whose absence
-      currently leaves S1's absolute ceiling disabled. Note the existing trap
-      it has to avoid: 0 must never reach that field meaning "no limit" —
-      "unset" and "no limit" have to be distinguishable in the UI and on the
-      wire
-- [ ] **Thermocouple maximum inferred from the thermocouple type**, not
-      entered. The type is already commissioned (`tc_type`), so the operator
-      should not be asked for a number that follows from it — and cannot
-      contradict the sensor
-- [ ] **Maximum expected kiln power entered on the safety page.** Breakers are
-      to be assumed sized for the full kiln load at 100% duty, so this is a
-      sanity/plausibility input, not a derating input
-- [ ] **Per-zone current measurement, from the zones page.** A button that
-      energizes each zone one at a time and records its normal current.
-      **This produces heat with the elements connected** — it has to respect
-      the zone ceilings, bound how long it energizes, and refuse to run while a
-      profile is firing
+- [x] **Kiln maximum temperature entered on the safety page**, and used to set
+      `abs_max_temp_c` on the safety processor. Already landed — field id 260
+      on `safety_commissioning_page.html`, `noDefault: true` so unset never
+      reads as 0/no-limit (the M12a fix). Checkbox was stale; verified
+      2026-08-28 by re-reading the page rather than re-implementing
+- [x] **Thermocouple maximum inferred from the thermocouple type**, not
+      entered. 2026-08-28: selecting `tc_type` now pre-fills `abs_max_temp_c`
+      from `TC_MAX_C_BY_TYPE`, via `placeholder` rather than `.value` so the
+      pre-fill is visible but never silently saved/committed on the
+      operator's behalf — a real review finding on the first pass fixed
+      before landing. `abs_max_temp_c` stays ASKED and independently
+      editable per the spec (it's the kiln's own ceiling, not purely the
+      sensor's); `checkTcMaxContradiction()`'s existing hard block (gates
+      both Save and guided-flow commit) still prevents committing above the
+      type's table max. One drifted row found between this table and
+      SaftyFW's own `TC_RANGES` (type B: 1798 here vs 1820 there, two
+      different datasheet pages) — noted in code, the lower/more
+      conservative number kept on purpose
+- [x] **Maximum expected kiln power entered on the safety page.** Already
+      landed — `max_expected_power_w` (id 793, param 0x0319) on
+      `safety_commissioning_page.html`. Checkbox was stale; verified
+      2026-08-28
+- [x] **Per-zone current measurement, from the zones page.** Already landed
+      (`zones_page.html`'s "Measure Zone Normal Current" sweep,
+      `zones_http.c`'s `ZONE_SWEEP_*` implementation) — one zone at a time,
+      refuses during a running profile/autotune/link-down/trip-latched,
+      Abort leaves every relay off. Checkbox was stale; verified 2026-08-28.
+      **What it does NOT do**: write SaftyFW's per-CT-channel `ct_channel_map`/
+      `i_normal_a[]` — it stores a per-ZONE result on the ESP side only
+- [x] **`ct_channel_map` derived from the zone-normal-current sweep**, so S14
+      can actually be armed. 2026-08-28. The sweep now samples all three CT
+      channels separately per zone (not summed through `ct_mask`, which is
+      the thing being derived); a channel is only accepted when it clears an
+      absolute floor AND beats the runner-up by 4x, and a zone whose
+      `relay_mask` isn't exactly its own relay bit, or that ties with another
+      zone for the same channel, is refused rather than guessed — both
+      refusal paths are host-tested. The commit is verified LIVE, not
+      trusted from the ACK: the same class of bug `ddbd024` fixed for the
+      commissioning page's own writes was caught by review here too — an
+      ACKed, un-rejected COMMIT_CONFIG is not proof the Pico stored
+      anything, so this reads the value back over the wire before persisting
+      or reporting a channel as derived. A failed/rejected/unconfirmed
+      commit also backs out anything already staged, so an unrelated later
+      commit can't pick up a leftover partial map. `safety_commissioning_page.html`'s
+      three manual-entry fields now show the derived value read-only with an
+      explicit override, falling through to manual entry when the sweep
+      hasn't run or was ambiguous
 - [ ] **Runtime CT-to-zone mapping check.** Compare measured current against
       the recorded per-zone normal and warn when a current transformer is not
       on the zone it is configured for. This is the check that catches a CT
@@ -896,20 +922,32 @@ surface usable rather than merely correct:
       ASKED (genuinely needs a human), or DEFAULTED (has a safe documented
       default they never see). The measure of success is how short the ASKED
       list is. Spec in progress at `firmware/KilnFW/docs/COMMISSIONING_UX.md`
-- [ ] **Mains voltage becomes a dropdown** — 120, 240, 380, 460 and any other
+- [x] **Mains voltage becomes a dropdown** — 120, 240, 380, 460 and any other
       distinct standard worth offering. `CONFIG_REFERENCE.md` §3 says unset
-      means "report --, never assume", so an explicit unset option survives
+      means "report --, never assume", so an explicit unset option survives.
+      Already landed — `MAINS_VOLTAGE_OPTIONS` on
+      `safety_commissioning_page.html` (120/208/240/277/380/400/415/460V,
+      `-1` "Other..." fallback, explicit unset). Checkbox was stale; verified
+      2026-08-28
 - [ ] **Current-monitor calibration comes from the zones config**, not from the
       commissioning page — it consumes the per-zone normal-current measurement
       rather than asking for numbers
 - [ ] **The safety thermocouple and safety relay configuration move into the
       zones config, shown but NOT reassignable.** Visible where the rest of the
       zone wiring is described, read-only because reassigning them is not an
-      operator decision
-- [ ] **An over-current guard to pair with the under-current guard**, set as a
+      operator decision. **Not yet true**: `zones_page.html`'s `safetyTcType`
+      is a live editable `<select>` submitted back on Save — the opposite of
+      read-only
+- [x] **An over-current guard to pair with the under-current guard**, set as a
       PERCENTAGE of the measured normal current. Specified symmetrically with
       the existing S3/S4/S11 family, and it must NOT trip on a zone whose
-      normal has never been measured
+      normal has never been measured. Already landed — S14
+      (`safety_guards.c:781-798`), `overcurrent_pct`/`overcurrent_time_s`,
+      WARN-only, per-channel `i_normal_valid` gate so an unmeasured channel is
+      skipped rather than tripped. `build_saftyfw_host_tests` passes 1891/1891
+      including its coverage. Checkbox was stale; verified 2026-08-28. **Not
+      the same as arming it**: S14 still can't be armed until `ct_channel_map`
+      has a real producer — see the item above
 
 **Answered and closed, recorded so they are not re-asked:** every relay is to
 be rated for 100% duty cycle and inrush is negligible — the board is designed

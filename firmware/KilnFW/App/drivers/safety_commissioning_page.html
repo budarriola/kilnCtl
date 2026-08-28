@@ -433,12 +433,17 @@ var GROUPS = [
           'BORROWED_ZONE (enforced client-side below AND independently by the Pico at ' +
           'commit -- see the contradiction-check comment near the bottom of this script).' },
       { id: 260, name: 'abs_max_temp_c', type: 'f32', risk: 'dangerous', unit: '°C', noDefault: true,
-        guards: ['S1'],
+        guards: ['S1'], prefillFromTcMax: true,
         note: 'In CHAMBER_AGREED: what the furniture/elements survive (~1300 for cone 10). ' +
           'In EXTERNAL_OVERHEAT: what that location must never exceed -- unrelated to any ' +
           'firing temperature. Must be a real positive ceiling -- there is no "no limit" ' +
           'value any more; 0 is refused by the safety processor at commit exactly like NaN, ' +
-          'never stored as meaning unlimited.' },
+          'never stored as meaning unlimited. ROADMAP.md M12 pre-fills this from the selected ' +
+          'the selected tc_type maximum as a STARTING POINT, not a derivation -- it is one of ' +
+          'the four fields nobody may derive from a guess (COMMISSIONING_UX.md section 1.4), ' +
+          'because a kiln physical ceiling is usually well below what the sensor can report. ' +
+          'Lower it to what this kiln furniture and elements actually survive; raising it above ' +
+          'the sensor maximum is refused.' },
       { id: 261, name: 'tc_type', type: 'enum', risk: 'dangerous', noDefault: true,
         guards: ['every guard that reads the safety processor\'s own thermocouple'],
         enumOpts: [ [0,'Type B'], [1,'Type E'], [2,'Type J'], [3,'Type K'], [4,'Type N'],
@@ -447,13 +452,16 @@ var GROUPS = [
           'a different, physically separate sensor from any zone thermocouple on the main ' +
           'board. A mismatch reads plausible and wrong, usually low.' },
       { id: 262, name: 'ct_channel_map[0]', type: 'u8', risk: 'dangerous', unit: 'zone/relay id', noDefault: true,
-        guards: ['S3', 'S4'],
-        note: 'Which relay CT0 actually watches. Confirmed by the one-relay-at-a-time ' +
-          'check in CURRENT_SENSE.md section 5 step 2.' },
+        guards: ['S3', 'S4', 'S14'], derivedCt: 0,
+        note: 'Which relay CT0 actually watches. Derived by the ' +
+          '"Measure Zone Normal Current" sweep on the zones page -- that sweep IS the one-relay-at-a-time ' +
+          'check CURRENT_SENSE.md section 5 step 2 asks for, so it is the one thing on this ' +
+          'board that can confirm the mapping rather than restate it. Typed here only when ' +
+          'the sweep has not been run, or could not tell which channel responded.' },
       { id: 263, name: 'ct_channel_map[1]', type: 'u8', risk: 'dangerous', unit: 'zone/relay id', noDefault: true,
-        guards: ['S3', 'S4'], note: 'Same as ct_channel_map[0], for CT1.' },
+        guards: ['S3', 'S4', 'S14'], derivedCt: 1, note: 'Same as ct_channel_map[0], for CT1.' },
       { id: 264, name: 'ct_channel_map[2]', type: 'u8', risk: 'dangerous', unit: 'zone/relay id', noDefault: true,
-        guards: ['S3', 'S4'], note: 'Same as ct_channel_map[0], for CT2.' },
+        guards: ['S3', 'S4', 'S14'], derivedCt: 2, note: 'Same as ct_channel_map[0], for CT2.' },
       { id: 529, name: 'safety_tc_installed', type: 'bool', risk: 'dangerous', noDefault: true,
         guards: ['S2', 'S10', 'S13'],
         note: '0x0211 -- minted after this page was first written (see config_params.c\'s ' +
@@ -608,6 +616,17 @@ var RISK_BADGE = { dangerous: '🔴 dangerous', nuisance: '🟠 nuisance', cosme
  * numeric code tc_type's own enumOpts above uses (0=B..7=T per max31856.h's
  * MAX31856_TC_TYPE_* order), so this table and that one can never disagree
  * about which code means which letter. */
+/* SECOND SOURCE, deliberately not unified: SaftyFW/src/max31856_tc_range_
+ * policy.c's TC_RANGES holds the same eight per-type ceilings, host-tested,
+ * and is what S5's plausibility check actually enforces. Unifying the two
+ * would mean generating this table from that C file across two languages and
+ * two build systems for eight numbers -- out of proportion to the risk. They
+ * agree on seven of eight rows. They DIVERGE on type B: 1798 here vs 1820
+ * there, because the two cite different pages of the same datasheet (page
+ * 4's TTC linearity-correction range vs page 12's Table 1 temperature
+ * range). This page keeps the lower, stricter number on purpose -- it is a
+ * client-side pre-check whose only failure mode should be refusing a value
+ * the Pico would have accepted, never the reverse. */
 var TC_MAX_C_BY_TYPE = {
   0: 1798, // Type B, TTC 95..1798 C
   1: 1000, // Type E, TTC -200..1000 C
@@ -655,6 +674,17 @@ GROUPS.forEach(function (g) { g.fields.forEach(function (f) { FIELD_BY_ID[f.id] 
 
 var latest = null; // last /api/safety/commissioning response, kept for the save pass
 
+// M12: what the zones page's current sweep derived, from
+// GET /api/zones/ct_channel_map (zones_http.c). The commissioning wire
+// carries only ct_channel_map's VALUES, never their provenance -- a number
+// somebody typed and a number the sweep measured look identical coming back
+// from the Pico -- so this separate, ESP-side record is the only thing that
+// can tell the two apart, and it is what decides whether the three fields
+// below render as DERIVED or as manual entry. Defaults to "nothing derived"
+// so a failed fetch degrades to the manual-entry form this page has always
+// had, never to a blank row with no way to set the field.
+var ctMapDerived = { mask: 0, zone: [0, 0, 0] };
+
 // Standard mains voltages, COMMISSIONING_UX.md section 2.1's table --
 // distinct entries for 400V/415V (a 4% difference is an 8% power error,
 // both in current use) and for 208V (the three-phase line-to-line voltage
@@ -666,6 +696,17 @@ var MAINS_VOLTAGE_OPTIONS = [
   [120, '120 V'], [208, '208 V (3-phase line-to-line)'], [240, '240 V'],
   [277, '277 V'], [380, '380 V'], [400, '400 V'], [415, '415 V'], [460, '460 V'],
 ];
+
+// M12: the selected thermocouple type's own ceiling, or undefined when
+// tc_type is unset/unrecognised. Reads the SERVER's tc_type rather than the
+// live <select>, because this runs during the render pass that builds that
+// select -- keeping the pre-fill a function of committed state means a page
+// reload never silently changes a number the operator already looked at.
+function tcTypeMaxFor(paramsById) {
+  var p = paramsById[261];
+  if (!p || !p.set) return undefined;
+  return TC_MAX_C_BY_TYPE[Number(p.value)];
+}
 
 function fieldInputHtml(f, paramsById) {
   var p = paramsById[f.id];
@@ -723,6 +764,38 @@ function fieldInputHtml(f, paramsById) {
       ' placeholder="voltage, V">';
     return html;
   }
+  // M12: ct_channel_map[0..2] -- DERIVED from the zones page's current
+  // sweep once that sweep has run and resolved this channel unambiguously
+  // (COMMISSIONING_UX.md sec 1.2's condition, enforced on the board in
+  // zones_http.c's zone_sweep_derive_ct_channel()). Rendered read-only in
+  // that case, because a measured mapping being retyped by hand is how a
+  // confirmed value gets quietly replaced by a remembered one -- but the
+  // manual path is NOT removed: an un-run or ambiguous sweep falls straight
+  // through to the ordinary number input below, and even a derived channel
+  // keeps an explicit override, since a fixture the sweep cannot resolve
+  // (two zones sharing a CT) still has to be commissionable.
+  if (f.derivedCt !== undefined && (ctMapDerived.mask & (1 << f.derivedCt)) !== 0) {
+    var dz = ctMapDerived.zone[f.derivedCt];
+    var h = '<output class="readonly-field">' + window.kcEscapeHtml(dz) + '</output>';
+    h += '<p class="note">DERIVED from the zone current-sweep on the ' +
+      '<a href="/zones.html">zones page</a>: CT' + f.derivedCt + ' was the only channel ' +
+      'carrying load while zone ' + (dz + 1) + ' was energized, and that value was written ' +
+      'to the safety processor at the end of the sweep.';
+    if (isSet && Number(val) !== dz) {
+      h += ' <b>The safety processor currently holds ' + window.kcEscapeHtml(val) +
+        ', which disagrees with what the sweep measured -- re-run the sweep, or override below.</b>';
+    }
+    h += '</p>';
+    // The input carries the data-id (so it, and only it, is what the save
+    // pass finds) but starts EMPTY, which is exactly what makes the save
+    // pass skip this id while the override is unchecked -- the same
+    // empty-means-skip rule the mains-voltage "Not set" path relies on.
+    h += '<label class="bool-label"><input type="checkbox" class="ct-manual" data-ct-for="' +
+      f.id + '"><span>Override and enter by hand</span></label>';
+    h += '<input type="number" step="1" hidden data-id="' + f.id + '" data-type="' + f.type +
+      '" placeholder="zone/relay id, 0-2">';
+    return h;
+  }
   if (f.type === 'enum') {
     var html = '<select data-id="' + f.id + '" data-type="' + f.type + '">';
     if (!isSet) html += '<option value="" selected disabled>-- not set --</option>';
@@ -746,9 +819,34 @@ function fieldInputHtml(f, paramsById) {
   // field cannot be mistaken for, or accidentally saved as, a real zero --
   // COMMISSIONING.md section 3.1 / CONFIG_REFERENCE.md section 7.
   var step = (f.type === 'f32') ? 'any' : '1';
+  // M12: abs_max_temp_c is SUGGESTED from the selected thermocouple type's
+  // own ceiling when nothing is stored yet, and carries that ceiling as a
+  // `max` so the browser refuses a higher one before checkTcMaxContradiction()
+  // ever has to. This is a starting number for a field COMMISSIONING_UX.md
+  // sec 1.4 explicitly forbids deriving, and the number that matters -- what
+  // this kiln's furniture and elements survive -- is almost always LOWER than
+  // what the sensor can report.
+  //
+  // It is a PLACEHOLDER, never a `value` (opus review, 2026-08-28). As a
+  // value it was indistinguishable from something the operator had typed:
+  // the save pass below walks `#fields input[data-id]` and posts every non-empty
+  // one, so pressing Save for some OTHER field on this page silently
+  // committed the suggestion as an operator-confirmed absolute maximum --
+  // precisely what "nothing commits it on the operator's behalf" forbids. A
+  // placeholder is visible and is not a value: the input stays genuinely
+  // empty, and the same empty-means-skip rule the mains-voltage "Not set"
+  // path relies on keeps it out of the POST body until somebody types a
+  // number. A value already committed (isSet) renders as a real value and
+  // saves normally, exactly as before.
+  var tcMax = f.prefillFromTcMax ? tcTypeMaxFor(paramsById) : undefined;
   var valueAttr = isSet ? (' value="' + window.kcEscapeHtml(val) + '"') : '';
-  var placeholder = isSet ? '' : (' placeholder="not set' + (f.def !== undefined ? ' -- firmware default ' + f.def : '') + '"');
-  return '<input type="number" step="' + step + '" data-id="' + f.id + '" data-type="' + f.type + '"' + valueAttr + placeholder + '>';
+  var maxAttr = (tcMax !== undefined) ? (' max="' + tcMax + '"') : '';
+  var placeholder = isSet ? ''
+    : (tcMax !== undefined
+        ? (' placeholder="not set -- ' + tcMax + ' is the selected thermocouple\'s own limit"')
+        : (' placeholder="not set' + (f.def !== undefined ? ' -- firmware default ' + f.def : '') + '"'));
+  return '<input type="number" step="' + step + '" data-id="' + f.id + '" data-type="' + f.type + '"' +
+    valueAttr + maxAttr + placeholder + '>';
 }
 
 function fieldBlock(f, paramsById) {
@@ -759,13 +857,14 @@ function fieldBlock(f, paramsById) {
   var div = document.createElement('div');
   div.className = 'field' + (unsetHere ? ' unset' : '') + (f.readonly ? ' field-readonly' : '');
   // Read-only rows (Task 3, COMMISSIONING_UX.md sec 2.2) deliberately do NOT
-  // carry data-id on the wrapper -- the save pass below walks
-  // `#fields [data-id]`, which (being a descendant selector with no tag
-  // restriction) would otherwise pick up this wrapper itself alongside any
-  // real input/select inside it. A read-only row has no input/select at all
-  // (fieldInputHtml's readonly branch returns a plain <output>), so leaving
-  // data-id off here is what actually delivers "no participation in the
-  // page's POST body" rather than merely rendering that way.
+  // carry data-id on the wrapper. The save pass below is now tag-restricted
+  // (`#fields input[data-id], #fields select[data-id]`), so a wrapper's
+  // data-id can no longer be swept up by it the way the earlier bare
+  // `#fields [data-id]` descendant selector did -- but a read-only row has
+  // no input/select at all (fieldInputHtml's readonly branch returns a plain
+  // <output>), and leaving data-id off the wrapper too keeps "no
+  // participation in the page's POST body" true of the ROW as a whole rather
+  // than resting on the selector alone.
   if (!f.readonly) {
     div.dataset.id = f.id;
   }
@@ -839,6 +938,25 @@ function renderGroups(data) {
   });
   applyContradictionRule();
   wireVoltageSelects();
+  wireCtManualToggles();
+}
+
+// M12: the override on a DERIVED ct_channel_map row. Unchecked, the number
+// input stays hidden AND empty, which is what makes the save pass skip the
+// id entirely (same empty-means-skip rule as the mains-voltage "Not set"
+// path) so a derived value is never restaged as if it had been typed.
+// Checked, it becomes an ordinary manual field again -- the fallback
+// COMMISSIONING_UX.md sec 1.2 requires for a mapping the sweep refused to
+// derive, kept reachable even after a successful derivation.
+function wireCtManualToggles() {
+  document.querySelectorAll('.ct-manual').forEach(function (cb) {
+    var input = document.querySelector('input[type="number"][data-id="' + cb.dataset.ctFor + '"]');
+    if (!input) return;
+    cb.addEventListener('change', function () {
+      input.hidden = !cb.checked;
+      if (!cb.checked) { input.value = ''; } else { input.focus(); }
+    });
+  });
 }
 
 // Task 2 (COMMISSIONING_UX.md sec 2.1): wires every mains-voltage <select>
@@ -904,6 +1022,17 @@ function renderCrcLine(data) {
 }
 
 function loadCurrent() {
+  // Sequenced, not parallel: renderGroups() reads ctMapDerived synchronously,
+  // so the map has to be in hand before the commissioning response is
+  // rendered. A failed/absent CT-map fetch is not fatal -- it just leaves
+  // ctMapDerived at "nothing derived" (see its own comment).
+  fetch('/api/zones/ct_channel_map').then(function (r) { return r.json(); }).then(function (m) {
+    if (m && typeof m.mask === 'number' && m.zone && m.zone.length === 3) ctMapDerived = m;
+  }).catch(function () { /* leave ctMapDerived alone -- manual entry stays available */ })
+    .then(loadCommissioning);
+}
+
+function loadCommissioning() {
   fetch('/api/safety/commissioning').then(function (r) { return r.json(); }).then(function (data) {
     latest = data;
     gLoadFailed = false;
@@ -972,7 +1101,12 @@ document.getElementById('saveBtn').addEventListener('click', function () {
   // every SET_PARAM has staged. The exact wire shape (id=<n>&value=<v> pairs,
   // not id/value arrays) is spelled out in that section; this just builds it.
   var body = [];
-  document.querySelectorAll('#fields [data-id]').forEach(function (el) {
+  // The wrapper <div> fieldBlock() builds also carries data-id (it is what
+  // the unset/guard-off styling keys off), so a bare `[data-id]` walk
+  // matched it too and pushed `value=undefined` for every rendered field.
+  // Restricted to the actual widgets, which are the only elements that were
+  // ever meant to be found here.
+  document.querySelectorAll('#fields input[data-id], #fields select[data-id]').forEach(function (el) {
     var id = el.dataset.id, type = el.dataset.type, v;
     if (type === 'bool') { v = el.checked ? 1 : 0; }
     else if (el.value === '') { return; }
@@ -1224,7 +1358,30 @@ function gPrefill(data) {
   (data.params || []).forEach(function (p) { byId[p.id] = p; });
 
   var absMax = byId[G_IDS.ABS_MAX];
-  if (absMax && absMax.set) document.getElementById('gAbsMax').value = absMax.value;
+  var gAbsMaxEl = document.getElementById('gAbsMax');
+  var tcMax = tcTypeMaxFor(byId);
+  // M12: same suggestion the Advanced form's field 260 makes, for the same
+  // reason and with the same limits -- a starting number the operator lowers
+  // to what this kiln survives, never a derivation (COMMISSIONING_UX.md sec
+  // 1.4 lists abs_max_temp_c among the four fields nobody may derive). A
+  // committed value always wins over it; `max` blocks raising it past the
+  // sensor's ceiling before gCommit()'s checkTcMaxContradiction() has to.
+  //
+  // As in the Advanced form, the suggestion is a PLACEHOLDER, never a
+  // `value` (opus review, 2026-08-28): gBuildAnswers() commits abs_max_temp_c
+  // whenever the field is non-empty, so a pre-filled value made "Commit" on
+  // the review screen write a number nobody had chosen. Empty-and-suggested
+  // instead means the guided flow simply carries no abs_max_temp_c pair
+  // until the operator types one -- and this being a REQUIRED question,
+  // gValidateScreen1()'s own "a positive number" check is what then stops
+  // them skipping it (screen 1 will not advance on an empty field),
+  // rather than a silent default sliding through.
+  if (tcMax !== undefined) gAbsMaxEl.max = tcMax;
+  if (absMax && absMax.set) {
+    gAbsMaxEl.value = absMax.value;
+  } else if (tcMax !== undefined) {
+    gAbsMaxEl.placeholder = '°C -- ' + tcMax + ' is the selected thermocouple\'s own limit';
+  }
   gUpdateAbsMaxTcHint();
   document.getElementById('gAbsMax').addEventListener('input', gUpdateAbsMaxTcHint);
 
