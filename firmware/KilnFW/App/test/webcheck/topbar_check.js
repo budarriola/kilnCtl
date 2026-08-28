@@ -27,7 +27,7 @@ const BASE = process.env.KILN_BASE || 'http://192.168.1.156';
 // useless. That is the shape this repo keeps hitting: a check whose subject
 // disappeared, still reporting success. Kept as a list of LIVE routes only.
 const pages = ['/settings/zones','/wifi','/readiness','/safety','/diagnostics','/profiles',
-               '/settings','/settings/display','/settings/backup','/ota','/rules',
+               '/settings','/settings/display','/settings/backup','/ota',
                '/safety/commissioning','/settings/safety'];
 (async () => {
   const b = await chromium.launch();

@@ -54,7 +54,7 @@ if(NOT CMAKE_BUILD_EARLY_EXPANSION)
 
     set(KILNCTL_GZIP_ASSETS
         "wifi_provision_page.html" "main_page.html"
-        "rules_page.html" "profiles_page.html" "readiness_page.html" "theme.css"
+        "profiles_page.html" "readiness_page.html" "theme.css"
         "ota_page.html" "nav.js" "app.js"
         "diagnostics_page.html" "safety_page.html"
         "settings_page.html" "backup_page.html"
@@ -161,9 +161,13 @@ idf_component_register(SRCS "MAX31856.c"
                        "kiln_cfg_http.c"
                        "safety_cfg_store.c"
                        "safety_cfg_http.c"
-                       "rules_http.c"
-                       "rules_eval.c"
-                       "rules_task.c"
+                       # rules_http.c/rules_eval.c/rules_task.c (the "Relays &
+                       # Rules" engine) were deleted 2026-08-27: relay/IO
+                       # control moved into firing profiles as segments (see
+                       # profile_executor.c's io_seg_* machinery) per the
+                       # owner's request. See relay_authority.h's
+                       # RELAY_OWNER_RULE comment for why that enumerator is
+                       # still here even though nothing claims it any more.
                        "profiles_http.c"
                        # profiles_builtin.c is hand-written and #includes the
                        # machine-generated profiles_builtin_table.inc, which is

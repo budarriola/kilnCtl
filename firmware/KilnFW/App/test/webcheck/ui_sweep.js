@@ -31,7 +31,8 @@ const PAGES = [
   ['/', 'Dashboard'],
   ['/readiness', 'Readiness'],
   ['/settings/zones', 'Zones'],
-  ['/settings/relays', 'Relays'],
+  // '/settings/relays' removed 2026-08-27 with the page itself -- the rule
+  // engine was deleted; relay/IO control is now a firing profile segment.
   // '/settings/manual' removed 2026-08-27 with the page itself -- see
   // nav.js's removal comment.
   ['/profiles', 'Profiles'],

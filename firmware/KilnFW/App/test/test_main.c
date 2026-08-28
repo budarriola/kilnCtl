@@ -29,7 +29,6 @@ void run_test_dashboard_safety_ready(void);
 void run_test_readiness_commissioning(void);
 void run_test_kiln_cfg_store(void);
 void run_test_safety_cfg_store(void);
-void run_test_rules_eval(void);
 void run_test_boot_guard(void);
 void run_test_boot_button(void);
 void run_test_crash_report(void);
@@ -73,7 +72,6 @@ int main(void)
     run_test_readiness_commissioning();
     run_test_kiln_cfg_store();
     run_test_safety_cfg_store();
-    run_test_rules_eval();
     run_test_boot_guard();
     run_test_boot_button();
     run_test_crash_report();

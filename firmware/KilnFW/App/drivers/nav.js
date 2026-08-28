@@ -73,7 +73,11 @@
     { href: '/profiles', label: 'Firing profiles' },
     { href: '/readiness', label: 'Ready to fire? (checklist)' },
     { href: '/settings/zones', label: 'Thermocouples & zones' },
-    { href: '/settings/relays', label: 'Relays & rules' },
+    // 'Relays & rules' (/settings/relays) removed 2026-08-27: the rule
+    // engine was deleted -- relay/IO control is now a firing profile
+    // segment (see profile_executor.c's io_seg_* machinery) per the
+    // owner's "instead of the relays and rules section I want them to be
+    // part of the profile" request.
     // 'Manual relay control' (/settings/manual) removed 2026-08-27: the
     // owner's call once the kiln's heating elements were actually wired to
     // this board -- "the danger zone in the diagnostics page covers it

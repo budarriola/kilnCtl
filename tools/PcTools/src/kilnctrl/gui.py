@@ -287,7 +287,6 @@ class KilnCtrlApp:
         manual.add_command(label="Zones / PID (UART)...", command=self.open_zones_popup)
         manual.add_command(label="Fire Profiles (UART)...", command=self.open_profiles_popup)
         manual.add_command(label="Autotune (UART)...", command=self.open_autotune_popup)
-        manual.add_command(label="Relay Rules (HTTP)...", command=self.open_rules_popup)
         manual.add_separator()
         manual.add_command(label="Wi-Fi Settings...", command=self.open_wifi_settings_popup)
         manual.add_command(label="Firing Status (PID/Autotune)...", command=self.open_firing_status_popup)
@@ -1312,7 +1311,7 @@ class KilnCtrlApp:
         self.danger_scope_var = tk.StringVar(value="wifi")
         for value, label in (
             ("wifi", "Wi-Fi only (saved networks, AP identity)"),
-            ("kiln", "Kiln config only (zones, PID, relay rules)"),
+            ("kiln", "Kiln config only (zones, PID)"),
             ("profiles", "Fire profiles only"),
             ("all", "ALL of the above"),
         ):
@@ -1423,95 +1422,6 @@ class KilnCtrlApp:
             f"Factory reset ({scope_name}) sent. Device will erase and reboot "
             "~500ms after the ACK -- watch the Device Console / FW version line."
         )
-
-    # ======================================================================
-    # Relay Rules panel (HTTP only -- GET/POST /api/rules; free-form DSL text
-    # with no fixed-size encoding, no UART mirror -- see docs/UART_PROTOCOL.md)
-    # ======================================================================
-    def open_rules_popup(self) -> None:
-        self._popup("rules", "Relay Rules (HTTP)", self._build_rules_popup)
-        self.rules_refresh_async()
-
-    def _build_rules_popup(self, top: tk.Toplevel) -> None:
-        top.geometry("560x480")
-        host_row = ttk.Frame(top)
-        host_row.pack(fill="x", padx=8, pady=(8, 4))
-        ttk.Label(host_row, text="Device host/IP:").pack(side="left")
-        self.rules_host_var = tk.StringVar(value=self._wifi_default_host())
-        ttk.Entry(host_row, textvariable=self.rules_host_var, width=16).pack(
-            side="left", padx=(6, 6)
-        )
-        ttk.Button(host_row, text="Refresh", command=self.rules_refresh_async).pack(side="left")
-
-        self.rules_status_var = tk.StringVar(value="Not queried yet.")
-        ttk.Label(top, textvariable=self.rules_status_var, anchor="w").pack(
-            fill="x", padx=8, pady=(0, 4)
-        )
-
-        self.rules_text = scrolledtext.ScrolledText(top, wrap="none")
-        self.rules_text.pack(fill="both", expand=True, padx=8, pady=4)
-
-        ttk.Button(top, text="Save (POST /api/rules)", command=self.rules_save_async).pack(
-            anchor="w", padx=8, pady=(0, 8)
-        )
-
-    def _rules_host(self) -> str:
-        var = getattr(self, "rules_host_var", None)
-        if var is not None:
-            host = var.get().strip()
-            if host:
-                return host
-        return self._wifi_default_host()
-
-    def rules_refresh_async(self) -> None:
-        if not self._is_open("rules"):
-            return
-        host = self._rules_host()
-        self.rules_status_var.set(f"Querying {host}...")
-
-        def worker() -> None:
-            url = f"http://{host}/api/rules"
-            try:
-                with urllib.request.urlopen(url, timeout=_WIFI_HTTP_TIMEOUT_S) as resp:
-                    text = resp.read().decode("utf-8", errors="replace")
-            except Exception as exc:  # pragma: no cover - network/device dependent
-                err = self._wifi_http_error_text(exc)
-                self.post(lambda: self.rules_status_var.set(f"Query failed: {err}"))
-                return
-            self.post(lambda: self._apply_rules_text(text))
-
-        threading.Thread(target=worker, name="rules-http-get", daemon=True).start()
-
-    def _apply_rules_text(self, text: str) -> None:
-        if not self._is_open("rules"):
-            return
-        self.rules_text.delete("1.0", "end")
-        self.rules_text.insert("1.0", text)
-        self.rules_status_var.set("Loaded.")
-
-    def rules_save_async(self) -> None:
-        if not self._is_open("rules"):
-            return
-        host = self._rules_host()
-        body = self.rules_text.get("1.0", "end")
-        self.rules_status_var.set(f"Saving to {host}...")
-
-        def worker() -> None:
-            url = f"http://{host}/api/rules"
-            req = urllib.request.Request(
-                url, data=body.encode("utf-8"), method="POST",
-                headers={"Content-Type": "text/plain; charset=utf-8"},
-            )
-            try:
-                with urllib.request.urlopen(req, timeout=_WIFI_HTTP_TIMEOUT_S) as resp:
-                    resp.read()
-            except Exception as exc:  # pragma: no cover - network/device dependent
-                err = self._wifi_http_error_text(exc)
-                self.post(lambda: self.rules_status_var.set(f"Save failed: {err}"))
-                return
-            self.post(lambda: self.rules_status_var.set("Saved."))
-
-        threading.Thread(target=worker, name="rules-http-post", daemon=True).start()
 
     # -- Wi-Fi settings popup ------------------------------------------------
     # Talks straight HTTP to wifi_provision_http.c's routes (/status, /scan,

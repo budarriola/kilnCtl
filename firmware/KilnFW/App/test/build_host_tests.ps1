@@ -54,7 +54,6 @@ $sources = @(
     (Join-Path $testDir "test_readiness_commissioning.c"),
     (Join-Path $testDir "test_kiln_cfg_store.c"),
     (Join-Path $testDir "test_safety_cfg_store.c"),
-    (Join-Path $testDir "test_rules_eval.c"),
     (Join-Path $testDir "test_boot_guard.c"),
     (Join-Path $testDir "test_boot_button.c"),
     (Join-Path $testDir "test_crash_report.c"),
@@ -75,7 +74,6 @@ $sources = @(
     (Join-Path $driversDir "heat_interlock.c"),
     (Join-Path $driversDir "thermo_combine.c"),
     (Join-Path $driversDir "profile_feasibility.c"),
-    (Join-Path $driversDir "rules_eval.c"),
     (Join-Path $driversDir "ui_page_home_graph.c"),
     (Join-Path $driversDir "max31856_codec.c"),
     (Join-Path $driversDir "owner_slot_pool.c")
@@ -100,9 +98,9 @@ if ($LASTEXITCODE -ne 0) {
 # non-zero, so a single failing check in the first binary meant the other five
 # never ran and their results were simply unknown -- reported as if the suite
 # had been considered. Found 2026-08-27, when four stale wording assertions in
-# the first executable were hiding whether zones_http, safety_cfg_http, the two
-# prestart suites and rules_task passed at all. A test runner that stops at the
-# first failure hides exactly the failures you most need to see together.
+# the first executable were hiding whether zones_http, safety_cfg_http, and the
+# two prestart suites passed at all. A test runner that stops at the first
+# failure hides exactly the failures you most need to see together.
 $script:failedExes = @()
 
 
@@ -209,29 +207,11 @@ if ($LASTEXITCODE -ne 0) {
     $script:failedExes += $exe5
 }
 
-# ---- test_rules_task_prestart.c: its own SIXTH, separate executable -------
-# rules_task.c turns out to need no pre-start guard at all -- it holds no
-# FreeRTOS mutex, and rules_task_get_status() only ever copies the
-# zero-initialized static status struct (see this file's header comment).
-# This #includes rules_task.c directly to prove that claim against the real
-# code rather than a hand-rolled copy, same convention as the two prestart
-# executables above; own executable for the same fake-body collision reason.
-$exe6 = Join-Path $outDir "kilnctl_host_tests_rules_task.exe"
-$rtObjDir = Join-Path $outDir "rt"
-New-Item -ItemType Directory -Force -Path $rtObjDir | Out-Null
-$cmd6 = "call `"$vcvars`" x64 >nul && cl /nologo /W3 /EHsc /std:c11 /I`"$stubDir`" /I`"$commonInc`" " +
-        "/Fo:`"$rtObjDir\\`" /Fe:`"$exe6`" " +
-        "`"$(Join-Path $testDir 'test_rules_task_prestart.c')`" " +
-        "`"$(Join-Path $driversDir 'rules_eval.c')`" `"$(Join-Path $driversDir 'thermo_combine.c')`" " +
-        "`"$(Join-Path $driversDir 'stack_margin.c')`""
-
-cmd.exe /c $cmd6
-if ($LASTEXITCODE -ne 0) {
-    throw "rules_task prestart build failed"
-}
-
-& $exe6
-if ($LASTEXITCODE -ne 0) { $script:failedExes += "kilnctl_host_tests_rules_task.exe" }
+# rules_task.c/test_rules_task_prestart.c (the SIXTH executable this script
+# used to build) were deleted 2026-08-27 along with the rest of the rule
+# engine -- see relay_authority.h's RELAY_OWNER_RULE comment. Executable
+# numbering below (SEVENTH, EIGHTH, ...) is kept as-is rather than renumbered,
+# to avoid an unrelated diff on every comment in this file.
 
 # ---- test_profiles_http.c: its own SEVENTH, separate executable -----------
 # Same reason as test_zones_http.c above: it #includes profiles_http.c

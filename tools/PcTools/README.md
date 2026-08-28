@@ -193,12 +193,6 @@ accept. The cross-zone coupling matrix and the trace/history CSV dumps stay
 HTTP-only (Open Web Dashboard) -- bulk/table data that doesn't fit one
 253-byte frame and has no honest truncated form.
 
-### Relay Rules -- HTTP only (`manualCtrl -> Relay Rules (HTTP)`)
-
-Plain-text editor over `GET`/`POST /api/rules`. The rules DSL is free-form
-text with no fixed-size wire encoding, so this one page is HTTP-only by
-design -- see docs/UART_PROTOCOL.md.
-
 ### Danger Zone -- factory reset (`manualCtrl -> Danger Zone (Factory Reset)`)
 
 Scope-selectable factory reset (Wi-Fi only / kiln config only / profiles only

@@ -52,8 +52,6 @@
 #include "readiness_http.h"
 #include "relay_cycles.h"
 #include "rtc_watchdog.h"
-#include "rules_http.h"
-#include "rules_task.h"
 #include "safety_link.h"
 #include "settings.h"
 #include "sim_backend.h"
@@ -650,7 +648,7 @@ void app_main(void)
     //   - boot_guard_init() increments the persisted "unconfirmed boot"
     //     counter and decides THIS boot's recovery_mode -- see boot_guard.h.
     //     Read once into a local further down, right before the decision
-    //     of whether to start profile_executor/autotune/rules_task.
+    //     of whether to start profile_executor/autotune.
     //   - rtc_watchdog_start() arms the hardware RTC watchdog as the
     //     independent-of-the-scheduler last resort -- see rtc_watchdog.h.
     //     Fed from monitor_task.c's existing heartbeat cadence.
@@ -668,7 +666,7 @@ void app_main(void)
     // boot_button.h: the "I lost the AP password" long-press recovery hatch.
     // Started in BOTH a normal boot and a recovery-mode boot -- deliberately
     // NOT gated by `recovery_mode` the way profile_executor_start()/
-    // autotune_engine_start()/rules_task_start() further below are. Recovery
+    // autotune_engine_start() further below are. Recovery
     // mode is exactly the situation an operator locked out of OTA auth is
     // most likely to be stuck in (a boot loop already forced the board into
     // Wi-Fi+OTA-only mode), so refusing to start this hatch there would
@@ -1024,8 +1022,8 @@ void app_main(void)
     // RECOVERY MODE (boot_guard.h): skipped entirely. boot_guard_is_recovery_mode()
     // was true because prior boots never reached "healthy" -- see
     // boot_confirm_is_healthy() -- so this boot deliberately withholds every
-    // control-loop entry point (profile executor, autotune, and rules_task
-    // further below) and starts only Wi-Fi + the OTA HTTP routes + read-only
+    // control-loop entry point (profile executor and autotune) and starts
+    // only Wi-Fi + the OTA HTTP routes + read-only
     // pages, so an operator can flash a fix instead of the board silently
     // reset-looping under a kiln nobody is watching.
     esp_err_t exec_err = ESP_ERR_INVALID_STATE;
@@ -1143,23 +1141,6 @@ void app_main(void)
         ESP_LOGW(TAG, "zones_http_start failed: %s -- no Thermocouples & Zones page this boot",
                  esp_err_to_name(zones_err));
     }
-    esp_err_t rules_err = rules_http_start();
-    if (rules_err != ESP_OK) {
-        ESP_LOGW(TAG, "rules_http_start failed: %s -- no Relays & Rules page this boot",
-                 esp_err_to_name(rules_err));
-    }
-    // TODO.md section 6's rule evaluator (previously just a config store with
-    // a disclaimer on the page saying so). Started after rules_http_start()
-    // (reads its config every tick via rules_http_get_cfg()), and relies on
-    // kiln_io_owner_start()/profile_executor_start() already having run above
-    // -- it is only ever a PRODUCER into kiln_io_owner's queue, and it must
-    // see whatever ownership profile_executor has already claimed before its
-    // own first tick tries to claim RELAY_OWNER_RULE. `safety` may be NULL
-    // (safety_link_start() failed this boot) -- same fail-closed convention
-    // as kiln_io_owner_start() above: every rule-driven relay-ON decision is
-    // refused until a live link exists.
-    // MOVED below ota_http_start() (2026-08-22): see the rules_task_start()
-    // call there for why. Starting it here boot-looped the board.
     // The shipped Digital Fire schedule catalogue's persisted hidden-mask.
     // Must load before profiles_http_start() registers the read paths that
     // consult it, or the first listing after boot would show hidden entries.
@@ -1188,7 +1169,7 @@ void app_main(void)
 
     // TODO.md 8.2's boot-time report: capture AFTER every module above that
     // owns an NVS partition (wifi_prov_start() far above, relay_cycles_init(),
-    // zones/rules/profiles_http_start() just above) has already run its own
+    // zones/profiles_http_start() just above) has already run its own
     // nvs_partition_init() -- this only observes what those calls established,
     // it does not itself mount or erase anything.
     nvs_report_capture();
@@ -1298,36 +1279,12 @@ void app_main(void)
         }
     }
 
-    // Rule evaluator. Deliberately started AFTER ota_http_start() above: its
-    // 1 Hz fail-safe gate calls ota_http_heat_blocked_by_update(), which
-    // takes a mutex that ota_http_start() creates. Started before it, that
-    // call asserts inside FreeRTOS on the NULL handle and panics -- this
-    // exact ordering mistake boot-looped the board on every boot until it
-    // was found in the backtrace (rules_task_entry -> ota_http_heat_blocked_
-    // by_update -> xQueueSemaphoreTake -> __assert_func). ota_http.c now also
-    // guards the NULL handle defensively, but the correct fix is this order.
-    //
-    // Everything else it needs is already up by here: rules_http_start()
-    // (config it reads every tick), kiln_io_owner_start() (the queue it is
-    // only ever a PRODUCER into) and profile_executor_start() (whose relay
-    // ownership its first tick must see before claiming RELAY_OWNER_RULE).
-    // `safety` may be NULL if safety_link_start() failed this boot -- same
-    // fail-closed convention as kiln_io_owner_start(): every rule-driven
-    // relay-ON decision is refused until a live link exists.
-    // RECOVERY MODE: skipped, same reasoning as profile_executor_start()/
-    // autotune_engine_start() above -- rules_task is a relay-commanding
-    // control loop same as those two.
-    esp_err_t rules_task_err = ESP_ERR_INVALID_STATE;
-    if (!recovery_mode) {
-        rules_task_err = rules_task_start(safety_err == ESP_OK ? &safety : NULL);
-        if (rules_task_err != ESP_OK) {
-            ESP_LOGE(TAG, "rules_task_start failed: %s -- saved rules will NOT be evaluated this boot "
-                          "(config storage/editing is unaffected)",
-                     esp_err_to_name(rules_task_err));
-        }
-    } else {
-        ESP_LOGW(TAG, "RECOVERY MODE: rules_task_start() skipped -- saved rules will NOT be evaluated this boot");
-    }
+    // Rule evaluator (rules_task.c/rules_http.c) was deleted 2026-08-27:
+    // relay/IO control moved into firing profiles as segments (see
+    // profile_executor.c's io_seg_* machinery and its guard-9 watchdog,
+    // which now covers the stale-tick force-off this task used to do) per
+    // the owner's "instead of the relays and rules section I want them to be
+    // part of the profile" request.
 
     // Owner-report (2026-08-21 follow-up): saved "kiln config" slots --
     // whole-zones-config snapshots, named, cloneable, switchable -- that

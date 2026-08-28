@@ -92,6 +92,17 @@ typedef enum {
     RELAY_OWNER_NONE = 0,
     RELAY_OWNER_MANUAL,
     RELAY_OWNER_PROFILE,
+    /* RETIRED 2026-08-27: rules_task.c/rules_http.c (the "Relays & Rules"
+     * engine) were deleted -- relay/IO control moved into firing profiles as
+     * segments (profile_executor.c's io_seg_* machinery), per the owner's
+     * "instead of the relays and rules section I want them to be part of the
+     * profile" request. Nothing claims this tag any more. The enumerator is
+     * kept in place, unrenumbered, rather than removed: a stale
+     * RELAY_OWNER_RULE value already written to NVS or sent over a wire
+     * before this change must not be silently reinterpreted as a different
+     * owner (e.g. AUTOTUNE below) after a firmware update. Safe to actually
+     * delete only once nothing on a live board can still be holding an old
+     * value -- not this pass. */
     RELAY_OWNER_RULE,
     /* TODO.md 6A.6 (2026-08-21): claimed by autotune_engine.c for the
      * duration of a running step-test/relay-test (begin_run_locked() through
