@@ -537,3 +537,58 @@ but had never once run their own condition on this physical board. It
 commissions nothing: S1 and S13 remain exactly as blocked as
 `SCENARIO_RESULTS.md` already recorded, and S8 remains entirely
 unimplemented.
+
+
+## 8. The commissioning interlock (2026-08-28)
+
+Not a guard in `safety_guards.c` — an **interlock on the energize path**,
+alongside the update interlock and the `safety_tc_installed` refusal, all
+three inside `safety_core_request_enable()` (`src/tasks/safety_core.c`) and
+all three refusing only the ON direction.
+
+**What it does.** An uncommissioned safety processor refuses heating enable.
+`SAFETY_CMD_REQUEST_ENABLE` (0x02) with `enable = 1` never reaches
+`relay_owner_command_energize()`; a disable request is never gated.
+
+**What "commissioned" means.** `commissioning_gate_is_commissioned()`
+(`src/commissioning_gate.c`, pure, host-tested) requires **both** facts, and
+they must agree:
+
+1. `rec->calibration_missing == false` — the verdict `COMMIT_CONFIG`'s
+   handler persisted when a real commissioning pass succeeded.
+2. `config_params_all_required_set(rec)` recomputed **now** from
+   `rec->fields_set` — the eight `CONFIG_STORE_SET_*` bits for the
+   no-safe-default fields (`tc_source`, `borrowed_zone_index`,
+   `tc_placement_mode`, `abs_max_temp_c`, `ct_channel_map`,
+   `max_rate_c_per_min`, `mains_voltage_v`, `tc_type`).
+
+A disagreement in **either** direction refuses: a stored flag claiming
+commissioned that `fields_set` does not back up (garbled byte, a writer that
+forgot to recompute), and a v1→v2-migrated record whose flag is forced true
+even though the bits look complete. Plausible-looking values are never
+enough — only an explicit `SET_PARAM` + `COMMIT_CONFIG` write sets a bit, so
+a defaulted board is uncommissioned however sensible its numbers read.
+
+**Why it closes a real hole.** §6's reachability table already records S1 as
+unreachable on an uncommissioned board (`abs_max_temp_c == 0` means "never
+trip", `SAFETY_MODEL.md` §4) and S8 as shipping disabled. Before this
+interlock, the board would grant heat in exactly that state: the independent
+protection layer permitting a firing with **no absolute temperature ceiling
+in force**. That is the bench finding written up in `TODO.md`'s "An
+uncommissioned safety processor grants heating enable", now resolved.
+
+**How the operator sees it.** No new fault source, trip code or wire field.
+The condition already travels end to end as Frame B
+(`SAFETY_CMD_DIAG`)'s `KILNLINK_DIAG_FLAG_CALIBRATION_MISSING`, which KilnFW
+renders as `commissioned:false` on `/safety/commissioning` and as the FAIL of
+the "Safety processor commissioned" readiness item — the item a firing start
+is already blocked on. SaftyFW additionally logs
+`request_enable: refused: safety processor not commissioned` (WARN).
+
+**Tests.** `test/test_commissioning_gate.c`: uncommissioned refuses ON and
+still allows OFF; a NULL record refuses ON; a full `SET_PARAM`-per-id +
+`COMMIT_CONFIG` sequence then allows ON; a one-field partial commit still
+refuses; and both flag/`fields_set` disagreement directions refuse. All six
+refusal checks were negative-tested — the guard was broken three ways (whole
+decision stubbed `true`, flag half removed, `fields_set` half removed) and
+each break was caught by the tests that cover it, then restored.

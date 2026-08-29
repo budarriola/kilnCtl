@@ -99,7 +99,9 @@ $sources = @(
     (Join-Path $srcDir "current_presence_policy.c"),
     (Join-Path $testDir "test_current_presence_policy.c"),
     (Join-Path $srcDir "discrete_pin_policy.c"),
-    (Join-Path $testDir "test_discrete_pin_policy.c")
+    (Join-Path $testDir "test_discrete_pin_policy.c"),
+    (Join-Path $srcDir "commissioning_gate.c"),
+    (Join-Path $testDir "test_commissioning_gate.c")
 )
 
 $sourceArgs = ($sources | ForEach-Object { '"' + $_ + '"' }) -join " "

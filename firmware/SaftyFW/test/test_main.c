@@ -36,6 +36,7 @@ void run_test_max31856_tc_range_policy(void);
 void run_test_link_diag_flags(void);
 void run_test_current_presence_policy(void);
 void run_test_discrete_pin_policy(void);
+void run_test_commissioning_gate(void);
 
 int main(void)
 {
@@ -67,6 +68,7 @@ int main(void)
     run_test_link_diag_flags();
     run_test_current_presence_policy();
     run_test_discrete_pin_policy();
+    run_test_commissioning_gate();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     if (g_test_failures > 0) {

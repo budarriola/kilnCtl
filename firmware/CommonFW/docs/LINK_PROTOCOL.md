@@ -680,6 +680,17 @@ win, which `firmware/KilnFW/docs/SAFETY_LINK.md` already documents and the ESP a
 handles. In practice it is now redundant with `HEAT_REQUESTED` in the context
 frame; keep it for one release, then retire it.
 
+**The Pico's interlocks on the ON direction (2026-08-28).** `enable = 1` is
+refused outright — never forwarded to the relay — when an update transfer is
+active, when `safety_tc_installed == 0`, or when the board is **not
+commissioned** (`commissioning_gate.h`: `calibration_missing` clear AND every
+no-safe-default `fields_set` bit set, the two agreeing). `enable = 0` is never
+gated. No reply frame reports the refusal and none is added: the
+commissioning case is already visible as Frame B (`SAFETY_CMD_DIAG`)'s
+`KILNLINK_DIAG_FLAG_CALIBRATION_MISSING` bit, which is what the ESP renders as
+`commissioned: false`. There is no new fault source, reject reason or trip
+code for this.
+
 ### `SAFETY_CMD_GET_STATUS` = `0x01` (existing) — no longer a poll
 
 The Pico pushes status unsolicited every 500 ms (§6), so the ESP does not need

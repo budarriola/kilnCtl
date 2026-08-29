@@ -45,6 +45,7 @@
 #include "clock_health.h" // 2026-08-23 stalled-get_absolute_time() detector, see its own header comment
 #include "tick_timing.h" // 2026-08-27 audit items 1/2: measured dt_s and snapshot freshness -- see its own header comment
 #include "clear_trip_diag.h" // 2026-08-23 round 4, CLEAR_TRIP crash checkpoints that survive the reboot -- see its own header comment
+#include "commissioning_gate.h" // ROADMAP.md M12 -- uncommissioned boards refuse heating enable
 #include "config_store.h" // safety_tc_installed (param 0x0211) -- read directly here, every tick,
                            // rather than routed through s_guard_cfg: s_guard_cfg is not yet wired to
                            // config_store at all (see this file's own header comment on that Phase 9
@@ -1464,18 +1465,32 @@ bool safety_core_request_enable(bool enable)
         if (cfg_rec.safety_tc_installed == 0u) {
             return false;
         }
-    }
 
-    // TODO(ROADMAP.md M12, "An uncommissioned safety processor must refuse
-    // heating enable"): this is the one obvious place to add
-    //   if (enable && !config_store_field_is_set(&cfg_rec.fields_set, CONFIG_STORE_SET_ABS_MAX_TEMP_C)) { return false; }
-    // (widened to `!config_params_all_required_set(&cfg_rec)` if the refusal
-    // should cover every no-safe-default field, not just abs_max_temp_c)
-    // once that refusal is deliberately sequenced in. NOT implemented here on
-    // purpose: M12's own ordering note says land it LAST, after the entry
-    // surface exists and a real commissioning pass has actually succeeded on
-    // the board -- landing it now would lock the bench out of heating before
-    // abs_max_temp_c has ever been given a real value.
+        // ROADMAP.md M12, "An uncommissioned safety processor refuses
+        // heating enable" -- the owner's answer was an unqualified NO, and
+        // this is that refusal. Same ON-direction-only shape as the two
+        // interlocks above: a board that cannot honestly claim to have been
+        // commissioned must still be able to DE-energize on command.
+        //
+        // "Commissioned" is commissioning_gate.h's two-part definition (the
+        // stored calibration_missing verdict AND config_params_all_required_
+        // set() recomputed from fields_set, which must agree) -- not "the
+        // numbers look plausible". An uncommissioned board's abs_max_temp_c
+        // is 0, which S1 correctly reads as "never trip" (safety_guards.h);
+        // granting heat under a ceiling that can never fire is precisely
+        // the state this refusal exists to make unreachable.
+        //
+        // The TODO that used to sit here warned this must land LAST, after
+        // a real commissioning pass had succeeded on the board -- it has
+        // (the four-question commissioning page, 64d0a8e), so the refusal
+        // is now sequenced in. A bench board that has never been
+        // commissioned will refuse heat until it is; that is the intent.
+        if (!commissioning_gate_energize_allowed(enable, &cfg_rec)) {
+            log_task_log(LOG_LEVEL_WARN, "request_enable",
+                         "refused: safety processor not commissioned");
+            return false;
+        }
+    }
 
     // See safety_core.h's doc comment: deliberately a thin forward beyond
     // the check above, no second policy layer duplicating relay_owner's

@@ -604,11 +604,33 @@ Recorded so these do not get re-proposed as oversights.
 
 ---
 
-## An uncommissioned safety processor grants heating enable
+## An uncommissioned safety processor grants heating enable — RESOLVED 2026-08-28
 
 **Found 2026-08-24, on hardware, the first time this board ever granted enable.
-Needs a decision, not a patch — it changes the safety contract, so it is
+Needed a decision, not a patch — it changes the safety contract, so it was
 written down rather than quietly fixed.**
+
+**The owner's answer was an unqualified NO: an uncommissioned safety processor
+must refuse heating enable.** Shipped 2026-08-28. `src/commissioning_gate.c`
+(pure, host-tested in `test/test_commissioning_gate.c`) defines commissioned as
+BOTH `!rec->calibration_missing` AND `config_params_all_required_set(rec)`
+recomputed from `fields_set` — the two must agree, and any disagreement in
+either direction refuses. `safety_core_request_enable()` consults it on the ON
+direction only, alongside the update interlock and the `safety_tc_installed`
+refusal; de-energizing is never gated. No new fault source or wire field: the
+refusal is already reported end to end as Frame B's
+`KILNLINK_DIAG_FLAG_CALIBRATION_MISSING` → KilnFW's `commissioned:false` and
+the "Safety processor commissioned" readiness item, plus a
+`request_enable: refused: safety processor not commissioned` log line.
+
+**The cost named below is real and was accepted**: a bench board that has never
+been commissioned now cannot close K4 until a real `COMMIT_CONFIG` pass lands
+the eight required fields. That is the intent — an uncommissioned board has
+`abs_max_temp_c == 0`, so S1 can never trip, and heating under a ceiling that
+can never fire is exactly the state this refusal makes unreachable.
+
+The original write-up is kept below unchanged, because it is the reasoning the
+decision was made against.
 
 ### What was observed
 

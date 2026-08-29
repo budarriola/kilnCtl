@@ -207,8 +207,14 @@ bool safety_core_get_trip_event(uint8_t *out_trip_seq, safety_trip_t *out_trip_r
 // relay at all), so this is the one legal path for an ESP energize/disable
 // request to reach it.
 //
-// A thin forward to relay_owner_command_energize(enable), not a second
-// policy layer: relay_owner's own state machine already refuses while
+// A thin forward to relay_owner_command_energize(enable) BEYOND three
+// ON-direction-only interlocks this function owns itself -- the update
+// interlock (relay_energize_allowed_during_update(), ROADMAP.md M8), the
+// safety_tc_installed refusal (config param 0x0211), and the commissioning
+// refusal (commissioning_gate_energize_allowed(), ROADMAP.md M12: an
+// uncommissioned safety processor refuses heating enable). All three refuse
+// only `enable == true`; a disable request is never gated. Beyond those it
+// is not a second policy layer: relay_owner's own state machine already refuses while
 // TRIPPED, accepts-but-never-applies during GRACE, and only actually drives
 // GPIO6 high while ARMED (relay_owner.c's RELAY_OWNER_CMD_ENERGIZE case) --
 // every refusal SAFETY_MODEL.md requires is already enforced there, and

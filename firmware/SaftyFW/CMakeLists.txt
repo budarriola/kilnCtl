@@ -94,6 +94,7 @@ set(SAFTYFW_APP_SOURCES
     # field table plus cross-field COMMIT_CONFIG validation. Pure, host-tested
     # (test/test_config_store.c) same as config_store.c itself.
     src/config_params.c
+    src/commissioning_gate.c
     src/tasks/relay_owner.c
     src/tasks/relay_grace.c
     src/tasks/watchdog_task.c
