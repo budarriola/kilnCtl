@@ -2,7 +2,7 @@
 """MCP server exposing the KilnCtrl board's UART control link as tools.
 
 Speaks streamable HTTP by default (``--transport stdio`` is still available for
-headless runs) and publishes a five-tool search facade rather than all 135 tools
+headless runs) and publishes a five-tool search facade rather than all 127 tools
 below -- see ``mcpkit/serve.py`` and ``mcpkit/registry.py`` for both decisions,
 and ``docs/MCP_SERVERS.md`` for how the servers get started and stopped.
 

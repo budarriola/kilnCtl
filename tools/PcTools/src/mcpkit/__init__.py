@@ -1,6 +1,6 @@
 """Shared MCP facade toolkit for the PcTools servers.
 
-``kilnctrl`` registers a large flat tool surface (~135 tools). Exposing all of
+``kilnctrl`` registers a large flat tool surface (~127 tools). Exposing all of
 them over MCP costs 200-500 tokens of JSON schema *each*, spent in every
 context window before the model has read a single line of the user's request
 -- roughly 20k tokens of pure preamble.

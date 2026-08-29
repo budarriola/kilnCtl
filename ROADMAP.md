@@ -923,10 +923,21 @@ the board. That is a sequencing decision, not a reason to soften the refusal.
       says a wrong `k_ct_v_per_a` cannot be distinguished from otherwise.
       Never a trip — `zones_http.h`'s own doc comment is explicit that this
       decision belongs to the safety processor, not this file
-- [ ] **Delete the twelve stale `display_*` MCP tools.** The owner left the
+- [x] **Delete the twelve stale `display_*` MCP tools.** The owner left the
       choice open; deleting wins because `display_bridge_task` is confirmed
       dead code on real hardware, so "restore a minimal firmware handler" means
-      writing a new consumer for tools nobody uses, not repairing a broken one
+      writing a new consumer for tools nobody uses, not repairing a broken one.
+      Shipped 2026-08-28: the removal itself rode in with `9838399` — fifteen
+      tools in the end (`display_read_id`, `display_rgb565`, `display_reset`,
+      `_set_power`, `_set_rotation`, `_set_invert`, `_clear`, `_fill_rect`,
+      `_draw_rect`, `_draw_line`, `_set_text_cursor`, `_set_text_style`,
+      `_print`, `_send_image`, `_test_pattern`) plus their `_display_mutating`
+      helper. Deliberately kept: `devices.display_*` frame builders,
+      `DisplayClient`, `actions.py`'s DISPLAY entries and `gui.py`'s Display
+      panel — all still reached by the generic `press_button`/`list_buttons`
+      path, which is a live front end, not part of this cleanup. This pass
+      corrected the stale registered-tool counts left behind (135 -> 127 in
+      `CLAUDE.md`, `docs/MCP_SERVERS.md`, `mcp_server.py`, `mcpkit/__init__.py`)
 - [ ] **An uncommissioned safety processor refuses heating enable** — the
       owner's answer was an unqualified NO. **Last**, per the ordering note
       above

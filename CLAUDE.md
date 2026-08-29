@@ -22,7 +22,7 @@ links to the per-area plans that own the detail.
 **Anything involving the boards or the KiCad project starts
 with one of these calls.** Do not conclude a capability is missing because you
 cannot see a tool for it — each server publishes about six tools and keeps the
-rest behind a search facade (135 tools for `kilnctrl`, 86 for `kicad`).
+rest behind a search facade (127 tools for `kilnctrl`, 86 for `kicad`).
 
 ```
 kiln_help()                      # kilnctrl: main board (ESP32-S3) + RP2040 safety processor
