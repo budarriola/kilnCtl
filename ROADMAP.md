@@ -340,9 +340,14 @@ soldering session.
       too small to fit" verdict was correct about the trace and said nothing
       about why it was flat. With the window at 60 s the same run measures
       relay 1 closing for **24.0 s of a 60.9 s period (duty 0.394 against a
-      commanded 0.40)** and PV climbing ~2 °C/min. This bullet's "what it
-      proves today" describes the old, heat-refused behaviour and should be
-      re-measured against a run that actually heats. The relay-feedback method is
+      commanded 0.40)** and PV climbing ~2 °C/min — and the step **completed
+      with a model for the first time**: `state=done`, `model_valid=true`
+      after 390 s / 39 samples, PV 31.9 → 45.0 °C, fitted `K = 32.95
+      °C/duty`, `tau = 166.9 s`, `dead time = 36.9 s`, SIMC proposal
+      `kp = 0.0343 / ki = 0.000206 / kd = 0.633`. The gains were **not**
+      accepted, on this bullet's own rule. This bullet's "what it proves
+      today" describes the old, heat-refused behaviour and is superseded by
+      the run above. The relay-feedback method is
       **not runnable on this fixture at all** —
       `AUTOTUNE_RELAY_SETPOINT_HEADROOM_C` (50 °C) under an 80 °C ceiling
       admits only setpoints below the bench's own 35 °C ambient

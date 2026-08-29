@@ -156,6 +156,29 @@ behind `App/drivers/sim_backend.c` (see below).
   asserts the preset satisfies the same rule the firmware enforces — a preset
   that did not would be rejected on apply, which is a worse way to find out.
 
+  **Measured on the bench, 2026-08-29, immediately after the fix.** Relay 1
+  under a commanded `step_duty` of 0.40 in a 60 s window, sampled at 1 s:
+
+  | Edge | t | On-time | Period |
+  | --- | --- | --- | --- |
+  | ON | 12.4 s | | |
+  | OFF | 36.4 s | 24.0 s | |
+  | ON | 73.3 s | | 60.9 s |
+  | OFF | 96.6 s | 23.3 s | |
+  | ON | 132.4 s | | 59.1 s |
+
+  Mean duty 0.394 against a commanded 0.40, on a 60.0 s mean period. Before
+  the fix the same command produced **zero** relay transitions.
+
+  And the autotune that had never once fit a model completed: `state=done`,
+  `model_valid=true` after 390 s and 39 samples, PV 31.9 → 45.0 °C (peak
+  45.04 °C, against a 75 °C test-side abort and the 80 °C fixture ceiling).
+  Fitted FOPDT `K = 32.95 °C/duty`, `tau = 166.9 s`, `dead time = 36.9 s`;
+  SIMC proposal `kp = 0.0343`, `ki = 0.000206`, `kd = 0.633`, predicted max
+  ramp 425.7 °C/hr. **The gains were not accepted** — `/api/autotune/accept`
+  was deliberately not posted, on the same rule the live-bench regression
+  tests hold: a verification run must not retune the bench.
+
   New tests, each negative-tested: `test_heater_output.c` pins the predicate,
   reproduces the 2000 ms window rendering duty 0.4 as zero relay transitions
   across ten whole windows, and shows a 30 s window rendering that same duty
