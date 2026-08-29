@@ -417,6 +417,11 @@ class BenchSession:
                 "hottest_c": hottest,
                 "relays_on": [r["relay"] for r in status["relays"] if r["on"]],
                 "safety_heating_enabled": status["safety_heating_enabled"],
+                # K4 -- the contact that decides whether any element current
+                # flows. Sampled alongside the ARMED flag because the two are
+                # routinely confused, and only this one answers "is heat
+                # actually getting through".
+                "safety_relay_energized": status["safety_relay_energized"],
                 "heat_block_sources_words": status.get("heat_block_sources_words"),
                 "exec_state": exec_st.get("state"),
                 "target_c": exec_st.get("target_c"),

@@ -185,7 +185,16 @@ def test_bounded_profile_start_against_commissioning_gate(bench, capsys):
             assert [r["relay"] for r in status["relays"] if r["on"]] == [], (
                 "heat is NOT permitted by the safety processor "
                 f"({why}) yet a relay energized: {status['relays']}")
-            assert status["safety_heating_enabled"] is False, status
+            # safety_RELAY_energized, not safety_heating_enabled. The same
+            # correction test_dashboard_status_consistent_with_known_config()
+            # above already carries: SAFETY_FLAG_ENABLED means "SaftyFW's
+            # relay_owner is ARMED", which is true on any healthy Pico
+            # whether or not heat was ever asked for or granted. This branch
+            # asserted the wrong one, and would have started failing the day
+            # the link got reliable enough for a STATUS frame to arrive --
+            # for a reason that has nothing to do with the gate it is
+            # testing. K4 (safety_relay_energized) is the contact.
+            assert status["safety_relay_energized"] is False, status
             assert bench.hottest_channel_c() <= FIXTURE_MAX_TEMP_C
             samples += 1
             time.sleep(1.0)
@@ -244,6 +253,14 @@ def test_bounded_profile_start_against_commissioning_gate(bench, capsys):
     ever_running = False
     aborted_reason = ""
     hottest_seen = start_c
+    # THE assertion this file was missing until 2026-08-29, and the reason
+    # every "the bench barely heats" observation before that date was
+    # measuring nothing: profile_executor.c never sent
+    # SAFETY_CMD_REQUEST_ENABLE, so K4 on the safety processor stayed OPEN
+    # for the whole firing while K1 on this board closed and the run looked
+    # completely normal. Nothing here, or anywhere else in the suite, could
+    # tell that apart from a slow kiln. K4 closing is now checked directly.
+    k4_closed = False
     deadline = time.monotonic() + HEAT_OBSERVE_S
     while time.monotonic() < deadline:
         ex = bench.exec_status()
@@ -262,6 +279,8 @@ def test_bounded_profile_start_against_commissioning_gate(bench, capsys):
                     "heat is permitted by the safety processor, yet the zone reports "
                     f"heat_blocked with sources {z.get('heat_blocked_sources')}: {z}")
                 commanded = True
+        if bench.status()["safety_relay_energized"]:
+            k4_closed = True
         hottest_seen = max(hottest_seen, bench.hottest_channel_c())
         assert hottest_seen <= FIXTURE_MAX_TEMP_C, (
             f"hottest channel {hottest_seen} C exceeded the {FIXTURE_MAX_TEMP_C} C ceiling")
@@ -271,7 +290,7 @@ def test_bounded_profile_start_against_commissioning_gate(bench, capsys):
         time.sleep(0.2)
 
     assert ever_running, "the executor never reported `running` after an accepted start"
-    print(f"[live] heat commanded: {commanded}; "
+    print(f"[live] heat commanded: {commanded}; K4 closed: {k4_closed}; "
           f"temp {start_c:.2f} -> {hottest_seen:.2f} C; "
           f"run ended as: {aborted_reason or 'still running'}")
 
@@ -295,6 +314,16 @@ def test_bounded_profile_start_against_commissioning_gate(bench, capsys):
     assert not blocked_seen, (
         "the safety processor reports heat permitted, yet a zone reported heat_blocked "
         f"during the run: {blocked_seen}")
+
+    # (1b) -- K4. Unlike a zone's relay_on/duty, this is not a transient a
+    # poll can miss: the request stands for the whole run and is only
+    # released on an exit path, so any poll during a running firing should
+    # see it closed. A run that commands heat with K4 open is a run that
+    # heats nothing, however healthy every other field looks.
+    assert k4_closed, (
+        "the executor ran with heat permitted, yet the safety processor's K4 never closed "
+        "-- no element current flowed. This is the defect of 2026-08-29: the firing path "
+        "never sent SAFETY_CMD_REQUEST_ENABLE at all (see heat_enable.h).")
 
     # (2) -- observation only. See the block comment above for why.
     if aborted_reason:

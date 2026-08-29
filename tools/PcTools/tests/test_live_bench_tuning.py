@@ -202,7 +202,11 @@ def test_closed_loop_setpoint_step_response(bench, capsys):
         assert all(r["relays_on"] == [] for r in rows), (
             f"heat is NOT permitted ({why}) yet a relay closed during the step: "
             + _describe(rows))
-        assert all(r["safety_heating_enabled"] is False for r in rows), _describe(rows)
+        # safety_RELAY_energized (K4), not safety_heating_enabled -- see
+        # test_live_bench_firing.py's identical correction.
+        # SAFETY_FLAG_ENABLED is "relay_owner is ARMED", true on any healthy
+        # Pico regardless of whether heat was requested or granted.
+        assert all(r["safety_relay_energized"] is False for r in rows), _describe(rows)
         # Flat within sensor noise. 1.0 C is generous against type-K noise of
         # a few tenths and against the bench's own ambient drift over a
         # minute; anything larger would be heat, and heat is what the gate
@@ -344,7 +348,7 @@ def test_step_autotune_runs_and_reports_a_sane_result(bench, capsys):
               f"abort_reason={final['abort_reason']!r}")
 
         status = bench.status()
-        assert status["safety_heating_enabled"] is False or permitted, status
+        assert status["safety_relay_energized"] is False or permitted, status
         if not permitted:
             assert [r["relay"] for r in status["relays"] if r["on"]] == [], (
                 f"heat is NOT permitted ({why}) yet a relay is closed during autotune: "
