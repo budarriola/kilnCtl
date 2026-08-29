@@ -324,6 +324,17 @@ _PRESET_ZONE_OVERRIDE_FIELDS = {
     "relay_mask", "control_mode", "cal_offset_c",
     "pid_kp", "pid_ki", "pid_kd", "max_ramp_c_per_hr",
     "max_temp_c", "min_temp_c",
+    # 2026-08-28: heater_min_on_ms became a per-zone hardware-protection
+    # setting with a 10 s floor (HEATER_MIN_ON_MS_FLOOR), so a preset that
+    # pins a bench's relay timing has to be able to carry it. Every field
+    # here has ALWAYS round-tripped through _ZONE_FIELD_FORM_KEY -- this set
+    # is only about what a preset may OVERRIDE, and a preset that omits the
+    # field still echoes whatever the board reported. It is deliberately NOT
+    # in config_presets.py's _REQUIRED_ZONE_FIELDS: making it required would
+    # invalidate every existing preset for a value they are all happy to
+    # inherit. A preset that DOES set it below 10000 is refused by the board,
+    # by design -- see zones_http.h's ZONE_HEATER_MIN_ON_MS_FLOOR.
+    "heater_min_on_ms",
 }
 
 

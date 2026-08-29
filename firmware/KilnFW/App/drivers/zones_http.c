@@ -1360,6 +1360,36 @@ typedef enum {
                            * as real, protected data (see nvs_load_from()'s *out_found) */
 } zones_decode_result_t;
 
+/* Raises any stored, configured (non-zero) heater_min_on_ms up to
+ * ZONE_HEATER_MIN_ON_MS_FLOOR as the blob comes off flash.
+ *
+ * Without this, the floor added on 2026-08-28 would make previously-saved
+ * configs un-round-trippable: a board carrying the old 2000 ms default would
+ * report 2000 from GET /api/zones, and the very next POST of what was just
+ * read -- which is exactly what the web page and zones_http_client.py both do
+ * -- would be refused for a value the operator never chose. Raising on load
+ * means the refusal only ever fires on a number a human actually typed.
+ *
+ * Deliberately not a blob-version migration: it applies on EVERY load,
+ * whatever version the blob claimed, so it also catches a config restored
+ * from an old backup or written by a rolled-back firmware. It only writes
+ * back to flash when a later nvs_save() happens for some other reason; the
+ * in-RAM value is what heater_output_duty() and GET both see, and that is
+ * the property that matters. Zero is left alone -- 0 means "not configured",
+ * and the default it selects is the floor already. */
+static void raise_min_on_to_floor(zones_cfg_t *cfg)
+{
+    for (size_t zi = 0; zi < sizeof(cfg->zones) / sizeof(cfg->zones[0]); ++zi) {
+        float v = cfg->zones[zi].heater_min_on_ms;
+        if (isfinite(v) && v > 0.0f && v < ZONE_HEATER_MIN_ON_MS_FLOOR) {
+            ESP_LOGW(TAG, "zone %u heater_min_on_ms %.0f ms is below the %.0f ms relay-protection "
+                          "floor -- raising it (stored config predates the floor)",
+                     (unsigned)zi, (double)v, (double)ZONE_HEATER_MIN_ON_MS_FLOOR);
+            cfg->zones[zi].heater_min_on_ms = ZONE_HEATER_MIN_ON_MS_FLOOR;
+        }
+    }
+}
+
 /* The one place a stored zones_cfg blob (from NVS or a kiln_cfg_store import)
  * is turned into a trustworthy, current-format zones_cfg_t. Implements items
  * 1-3 of the "saved securely like the others" fix: a length check against the
@@ -1423,6 +1453,16 @@ static zones_decode_result_t decode_zones_blob(const void *blob, size_t len, zon
          * against. nvs_save() stamps a real one the next time this config is
          * written, current or not. */
     }
+
+    /* Before validate_zones_cfg(), not after: validate_zones_cfg() now
+     * refuses a sub-floor heater_min_on_ms, and every blob written before
+     * 2026-08-28 could legally carry one (2000 ms was the old default).
+     * Raising here covers BOTH decode callers -- nvs_load_from() and
+     * zones_config_import_blob() -- so neither a reboot nor restoring an old
+     * kiln-config slot can be refused for a number no operator ever typed,
+     * while a number an operator DOES type still goes through
+     * parse_zone_fields()'s refusal. */
+    raise_min_on_to_floor(out);
 
     const char *validate_reason = "invalid stored config";
     if (!validate_zones_cfg(out, &validate_reason)) {
@@ -2484,6 +2524,12 @@ bool zones_config_set_heater_cfg(uint8_t zone_index, float window_ms, float min_
     if (!isfinite(min_on_ms) || min_on_ms < 0.0f || min_on_ms > ZONE_HEATER_MIN_ON_OFF_MS_MAX) {
         return false;
     }
+    /* Same disjoint rule parse_zone_fields() enforces -- this setter is a
+     * second door into the same field (it is reachable without going through
+     * a POST body) and must not be the loose one. */
+    if (min_on_ms > 0.0f && min_on_ms < ZONE_HEATER_MIN_ON_MS_FLOOR) {
+        return false;
+    }
     if (!isfinite(min_off_ms) || min_off_ms < 0.0f || min_off_ms > ZONE_HEATER_MIN_ON_OFF_MS_MAX) {
         return false;
     }
@@ -2923,6 +2969,10 @@ static bool validate_zones_cfg(const zones_cfg_t *cand, const char **err_reason)
         if (!isfinite(z->heater_min_on_ms) || z->heater_min_on_ms < 0.0f ||
             z->heater_min_on_ms > ZONE_HEATER_MIN_ON_OFF_MS_MAX) {
             *err_reason = "zone heater_min_on_ms out of range";
+            return false;
+        }
+        if (z->heater_min_on_ms > 0.0f && z->heater_min_on_ms < ZONE_HEATER_MIN_ON_MS_FLOOR) {
+            *err_reason = "zone heater_min_on_ms below the 10000 ms relay-protection floor";
             return false;
         }
         if (!isfinite(z->heater_min_off_ms) || z->heater_min_off_ms < 0.0f ||
@@ -3615,6 +3665,16 @@ static bool parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_count,
     snprintf(key, sizeof(key), "z%u_minon", i);
     if (!parse_float_field(body, key, 0.0f, ZONE_HEATER_MIN_ON_OFF_MS_MAX, &z->heater_min_on_ms)) {
         *err_reason = "zone heater_min_on_ms missing or out of range";
+        return false;
+    }
+    /* The one heater field with a LOWER bound too, and the only reason it
+     * cannot just be another parse_float_field() range: the accepted set is
+     * disjoint (0, or >= the floor), not an interval. See
+     * ZONE_HEATER_MIN_ON_MS_FLOOR in zones_http.h for why this is refused
+     * rather than quietly raised. */
+    if (z->heater_min_on_ms > 0.0f && z->heater_min_on_ms < ZONE_HEATER_MIN_ON_MS_FLOOR) {
+        *err_reason = "zone heater_min_on_ms below the 10000 ms relay-protection floor "
+                      "(use 0 for the firmware default)";
         return false;
     }
     snprintf(key, sizeof(key), "z%u_minoff", i);

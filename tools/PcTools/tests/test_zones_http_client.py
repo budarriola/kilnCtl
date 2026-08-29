@@ -134,6 +134,26 @@ class BuildPostBodyTest(unittest.TestCase):
         self.assertEqual(form["z0_maxtemp"], repr(80.0))
         self.assertEqual(form["z2_maxtemp"], repr(80.0))
 
+    def test_heater_min_on_ms_is_echoed_and_preset_overridable(self):
+        """heater_min_on_ms became a real per-zone setting on 2026-08-28 (a
+        10 s hardware-protection floor, HEATER_MIN_ON_MS_FLOOR), so a preset
+        has to be able to pin it -- and a preset that does NOT mention it must
+        still echo whatever the board reported rather than zeroing it, since
+        POST /api/zones is a whole-page submit."""
+        current = _sample_get_response()
+        current["zones"][0]["heater_min_on_ms"] = 15000.0
+        current["zones"][2]["heater_min_on_ms"] = 15000.0
+
+        # Not mentioned by the preset -> echoed, not zeroed.
+        form = _decode_body(zh.build_post_body(current, {"name": "p", "zones": []}))
+        self.assertEqual(form["z0_minon"], repr(15000.0))
+
+        # Mentioned -> overridden, and only on the named zone.
+        preset = {"name": "p", "zones": [{"index": 0, "heater_min_on_ms": 12000.0}]}
+        form = _decode_body(zh.build_post_body(current, preset))
+        self.assertEqual(form["z0_minon"], repr(12000.0))
+        self.assertEqual(form["z2_minon"], repr(15000.0))
+
     def test_thermo_count_relay_count_overridable_by_preset(self):
         current = _sample_get_response()
         preset = {"name": "p", "thermo_count": 2, "relay_count": 2, "zones": []}

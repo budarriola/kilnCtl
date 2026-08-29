@@ -574,13 +574,21 @@ function zoneBlock(z, i, relayCount, thermoCount) {
       '<div><label>Min temp &deg;C -- below this reads as a broken/disconnected sensor</label>' +
       '<input type="number" step="1" class="mintemp" value="' + z.min_temp_c + '"></div>' +
     '</div>' +
-    '<label>Relay timing (ms, 0 = use firmware default: 60000/2000/2000) -- how this zone\'s ' +
+    '<label>Relay timing (ms, 0 = use firmware default: 60000/10000/2000) -- how this zone\'s ' +
     'relay(s) are switched in PID mode, and the on/off debounce in both PID and bang-bang mode</label>' +
     '<div class="row2">' +
       '<div><label>Window</label><input type="number" step="1000" class="window" value="' + (z.heater_window_ms || 0) + '"></div>' +
-      '<div><label>Min on</label><input type="number" step="100" class="minon" value="' + (z.heater_min_on_ms || 0) + '"></div>' +
+      '<div><label>Min on (&ge; 10000)</label><input type="number" step="1000" min="10000" class="minon" value="' + (z.heater_min_on_ms || 0) + '"></div>' +
       '<div><label>Min off</label><input type="number" step="100" class="minoff" value="' + (z.heater_min_off_ms || 0) + '"></div>' +
     '</div>' +
+    '<p class="hint"><b>Min on is a hardware-protection minimum, not a tuning knob.</b> ' +
+    'Once the PID closes the relay for this zone it stays closed for at least <b>10000 ms ' +
+    '(10 s)</b>, so the downstream contactor is not cycled to death. Anything between 1 ' +
+    'and 9999 is <b>rejected</b> when you save -- this page shows you the error rather ' +
+    'than accepting a number the kiln would not actually use. Enter 0 for the firmware ' +
+    'default (which is the 10 s floor itself), or any value from 10000 up. A safety trip, ' +
+    'halt, pause or stop still opens the relay immediately -- the minimum never delays a ' +
+    'de-energize.</p>' +
     '<label>Cross-zone plausibility (&deg;C, 0 = disabled) -- trips if this zone disagrees ' +
     'with another zone by more than this for 10 minutes, catching a thermocouple that fell ' +
     'out of the chamber. Needs 2+ zones. Leave at 0 until you have measured how far this ' +

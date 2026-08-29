@@ -34,6 +34,8 @@
 
 #include "esp_err.h"
 #include "MAX31856.h"
+#include "heater_output.h" /* HEATER_MIN_ON_MS_FLOOR -- the relay-protection floor this
+                             * file's ZONE_HEATER_MIN_ON_MS_FLOOR must not disagree with */
 #include "kiln_io.h"
 #include "safety_link.h"
 
@@ -137,6 +139,36 @@ extern "C" {
  * configured (caller substitutes PROFILE_EXECUTOR_DEFAULT_*_MS). */
 #define ZONE_HEATER_WINDOW_MS_MAX 600000.0f
 #define ZONE_HEATER_MIN_ON_OFF_MS_MAX 60000.0f
+
+/* heater_min_on_ms is the ONE heater timing field with a lower bound as well
+ * as an upper one, and the bound is a hardware-protection minimum rather than
+ * a sanity ceiling: HEATER_MIN_ON_MS_FLOOR (heater_output.h, 10 s, set by the
+ * owner 2026-08-28) is how long the PID relay must stay closed once it has
+ * been commanded on, so the downstream contactor is not cycled to death.
+ *
+ * Accepted values are therefore DISJOINT, not a range: 0 ("not configured" --
+ * the caller substitutes HEATER_DEFAULT_MIN_ON_MS, which IS the floor), or
+ * anything from the floor up to ZONE_HEATER_MIN_ON_OFF_MS_MAX. A submission
+ * strictly between the two is REFUSED, with an error naming the floor, rather
+ * than silently stored.
+ *
+ * Refusing rather than clamping is a deliberate choice for this field, and it
+ * is the opposite of what the rest of this file does with an out-of-range
+ * number (every other field is bounded by parse_float_field() and a
+ * submission outside its bounds is likewise refused -- so this is actually
+ * CONSISTENT with them; nothing in zones_http.c silently clamps). The reason
+ * it matters more here: heater_output_duty() would go on running such a zone
+ * perfectly safely, at 10 s, while /api/zones read back 3000 -- an operator
+ * would be looking at a number the kiln is not using. The refusal is the only
+ * way the web UI can be honest about it.
+ *
+ * heater_output_duty()'s own floor stays regardless, as defense in depth:
+ * this check guards the HTTP door, not the only door (backup import, an older
+ * NVS blob written before the floor existed, a future caller of
+ * zones_config_set_heater_cfg()). Stored blobs written before 2026-08-28 are
+ * raised to the floor on load -- see raise_min_on_to_floor() in zones_http.c
+ * -- so a GET never reports a sub-floor value that a POST would then bounce. */
+#define ZONE_HEATER_MIN_ON_MS_FLOOR ((float)HEATER_MIN_ON_MS_FLOOR)
 
 /* zone_cfg_t's 8 named guard-threshold overrides (TODO.md 6A.3) -- 0
  * substitutes thermal_guard.c's own firmware default for every one of these,

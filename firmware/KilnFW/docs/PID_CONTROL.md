@@ -80,6 +80,34 @@ behind `App/drivers/sim_backend.c` (see below).
   protect contact life would trade a safety property for a wear property, and
   `test_heater_output.c` carries an explicit test for it.
 
+  **Where the floor is enforced (2026-08-28, second pass).** `min_on_ms` is an
+  editable per-zone field on the zones web page ("Min on", posted as
+  `z%u_minon` to `POST /api/zones`), so the floor cannot live only at the point
+  of use — an operator would otherwise type 3000, get an ACK, and watch
+  `GET /api/zones` read back a number the kiln is not using. Four gates now,
+  and the last of them is the one that must never be removed:
+
+  | Gate | Where | Behavior below 10 s |
+  | --- | --- | --- |
+  | HTTP submission | `parse_zone_fields()` (`zones_http.c`) | **Refused**, with an error naming the field and the floor. The page shows it. |
+  | Any stored/imported blob | `validate_zones_cfg()` | Refused. |
+  | Load from NVS or a kiln-config slot | `raise_min_on_to_floor()`, called by `decode_zones_blob()` | **Raised** to the floor. |
+  | Point of use | `heater_output_duty()` | Raised to the floor + the running hold. Defense in depth. |
+
+  Refusing at the HTTP door and raising on load are deliberately different,
+  and the split is what makes both honest. A refusal must only ever fire on a
+  number a **human typed**: a board configured before this floor existed
+  legally carries the old 2000 ms default, and since the web page saves by
+  posting back what it just read, refusing that on load would make an
+  unrelated save fail on a value nobody chose. Raising it as it comes off
+  flash means `GET /api/zones` never reports a sub-floor value in the first
+  place. `0` still means "not configured" everywhere and is left alone — the
+  default it selects (`HEATER_DEFAULT_MIN_ON_MS`) *is* the floor.
+
+  All four gates are covered by tests, and each was negative-tested by being
+  broken in turn: `test_zones_http.c` for the first three,
+  `test_heater_output.c` for the last.
+
 PID form: positional, derivative-on-measurement (not on-error — a profile's
 ramp steps the setpoint every tick, and derivative-on-error would spike on
 every step) with a 30s low-pass filter, conditional-integration +

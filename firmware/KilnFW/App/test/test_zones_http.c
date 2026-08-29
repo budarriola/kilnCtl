@@ -3514,6 +3514,154 @@ static void test_zone_sweep_push_k_ct_backout_restores_the_uncommissioned_zero(v
     s_hw_safety = NULL;
 }
 
+// ---------------------------------------------------------------------------
+// heater_min_on_ms and HEATER_MIN_ON_MS_FLOOR (10 s, set by the owner
+// 2026-08-28).
+//
+// The floor is enforced in four places; this block covers three of them (the
+// fourth, heater_output_duty()'s own quantization + running hold, is
+// test_heater_output.c's and stays there as defense in depth):
+//   1. parse_zone_fields()  -- the POST /api/zones door an operator types at;
+//   2. validate_zones_cfg() -- every stored or imported blob;
+//   3. raise_min_on_to_floor(), via decode_zones_blob() -- a pre-floor stored
+//      value is raised on load, so a GET can never report a number the very
+//      next POST would bounce.
+//
+// The HTTP layer REFUSES rather than clamps. A clamped-and-stored value would
+// leave /api/zones reporting a number the kiln is not actually using, which
+// is the dishonesty this page's other read-only/derived labelling exists to
+// avoid. See ZONE_HEATER_MIN_ON_MS_FLOOR's comment in zones_http.h.
+// ---------------------------------------------------------------------------
+
+/* Set by post_body_with_minon() on the accept path so a caller can assert on
+ * the value that actually LANDED, not merely on the accept/refuse verdict --
+ * "accepted" alone would not catch a clamp. */
+static float s_last_parsed_minon = -1.0f;
+
+/* One clean body with only z0_minon varied, so any difference in the verdict
+ * can only be that one field. */
+static bool post_body_with_minon(const char *minon_literal, const char **err_reason_out)
+{
+    char body[512];
+    snprintf(body, sizeof(body),
+             "z0_name=Top&z0_tctype=2&z0_relay_mask=1&z0_thermo_mask=1&"
+             "z0_cal=0&z0_kp=1&z0_ki=0&z0_kd=0&z0_ramp=100&z0_sanity=0&z0_mode=0&"
+             "z0_maxtemp=1300&z0_mintemp=-20&z0_window=60000&z0_minon=%s&z0_minoff=2000&"
+             "z0_timingprofile=0",
+             minon_literal);
+
+    zone_cfg_t current = make_stored_zone();
+    current.heater_min_on_ms = (float)HEATER_MIN_ON_MS_FLOOR; /* a legal stored value */
+    zone_cfg_t out;
+    memset(&out, 0, sizeof(out));
+    const char *err_reason = "unset";
+    bool ok = parse_zone_fields(body, /*i=*/0, /*thermo_count=*/1, /*relay_count=*/4,
+                                /*timing_profile_count=*/1, &current, &out, &err_reason);
+    if (err_reason_out) {
+        *err_reason_out = err_reason;
+    }
+    s_last_parsed_minon = ok ? out.heater_min_on_ms : -1.0f;
+    return ok;
+}
+
+static void test_post_minon_below_floor_is_refused(void)
+{
+    TEST_SECTION("parse_zone_fields -- heater_min_on_ms below the 10 s floor is REFUSED, not clamped");
+
+    const char *reason = "unset";
+    TEST_CHECK(!post_body_with_minon("3000", &reason),
+               "z0_minon=3000 must be refused outright, never stored and silently run at 10000");
+    TEST_CHECK(reason && strstr(reason, "heater_min_on_ms") != NULL,
+               "the refusal names the field, so the page can tell the operator which one");
+    TEST_CHECK(reason && strstr(reason, "10000") != NULL,
+               "the refusal names the floor itself, not just 'out of range'");
+
+    /* One millisecond under. If the comparison were a >= where it should be a
+     * <, nothing else in this suite would notice. */
+    TEST_CHECK(!post_body_with_minon("9999", &reason),
+               "9999 ms -- one under the floor -- must also be refused");
+}
+
+static void test_post_minon_zero_and_at_or_above_floor_are_accepted(void)
+{
+    TEST_SECTION("parse_zone_fields -- 0 and >= floor accepted, and a value above the floor is "
+                 "honored EXACTLY");
+
+    const char *reason = "unset";
+    TEST_CHECK(post_body_with_minon("0", &reason),
+               "0 means 'not configured' (the default it selects IS the floor) and stays accepted");
+    TEST_CHECK_NEAR(s_last_parsed_minon, 0.0f, 1e-6,
+                    "0 is stored as 0, not rewritten to 10000 -- 'use the default' must stay "
+                    "distinguishable from 'the operator chose 10000'");
+
+    TEST_CHECK(post_body_with_minon("10000", &reason),
+               "exactly the floor is accepted -- the boundary is inclusive");
+    TEST_CHECK_NEAR(s_last_parsed_minon, 10000.0f, 1e-6, "the floor value round-trips exactly");
+
+    /* The failure mode of a clamp written as an assignment instead of a
+     * comparison: it would clobber a legitimately longer configured value. */
+    TEST_CHECK(post_body_with_minon("15000", &reason),
+               "15000 ms (above the floor) is accepted");
+    TEST_CHECK_NEAR(s_last_parsed_minon, 15000.0f, 1e-6,
+                    "15000 is honored EXACTLY -- the floor raises, it never lowers");
+}
+
+static void test_validate_rejects_sub_floor_min_on(void)
+{
+    TEST_SECTION("validate_zones_cfg -- a sub-floor heater_min_on_ms is rejected (the import door)");
+
+    {
+        zones_cfg_t cfg;
+        make_minimal_valid_cfg(&cfg);
+        cfg.zones[0].heater_min_on_ms = 3000.0f;
+        const char *reason = NULL;
+        TEST_CHECK(!validate_zones_cfg(&cfg, &reason),
+                   "a config carrying 3000 ms does not validate, whichever door it came through");
+        TEST_CHECK(reason && strstr(reason, "heater_min_on_ms") != NULL, "the reason names the field");
+    }
+    {
+        zones_cfg_t cfg;
+        make_minimal_valid_cfg(&cfg);
+        cfg.zones[0].heater_min_on_ms = 15000.0f;
+        const char *reason = NULL;
+        TEST_CHECK(validate_zones_cfg(&cfg, &reason),
+                   "15000 ms still validates -- the check must not have become 'must equal 10000'");
+    }
+}
+
+static void test_stored_pre_floor_blob_is_raised_on_load_not_rejected(void)
+{
+    TEST_SECTION("decode_zones_blob -- a pre-floor stored heater_min_on_ms is RAISED on load, "
+                 "not rejected");
+
+    /* A board configured before 2026-08-28 legally carries 2000 ms (the old
+     * HEATER_DEFAULT_MIN_ON_MS). Rejecting it at load would wipe that board's
+     * config on the next boot; reporting it verbatim would make the very next
+     * whole-page save fail -- the page posts back what GET returned -- on a
+     * number the operator never typed. Raising on load makes both
+     * impossible, and leaves the refusal above firing only on human input. */
+    zones_cfg_t stored;
+    make_minimal_valid_cfg(&stored);
+    stored.zones[0].heater_min_on_ms = 2000.0f;
+    stored.zones[1].heater_min_on_ms = 0.0f;
+    stored.zones[2].heater_min_on_ms = 15000.0f;
+    stored.crc32 = 0;
+    stored.crc32 = compute_zones_crc(&stored);
+
+    zones_cfg_t out;
+    const char *reason = "unset";
+    zones_decode_result_t r = decode_zones_blob(&stored, sizeof(stored), &out, &reason);
+
+    TEST_CHECK(r == ZONES_DECODE_OK,
+               "a pre-floor blob still decodes -- it must not be called corrupt");
+    TEST_CHECK_NEAR(out.zones[0].heater_min_on_ms, (float)HEATER_MIN_ON_MS_FLOOR, 1e-6,
+                    "2000 ms is raised to the 10000 ms floor on load");
+    TEST_CHECK_NEAR(out.zones[1].heater_min_on_ms, 0.0f, 1e-6,
+                    "0 ('not configured') is left alone -- the default it selects IS the floor");
+    TEST_CHECK_NEAR(out.zones[2].heater_min_on_ms, 15000.0f, 1e-6,
+                    "a longer configured value is untouched by the raise");
+}
+
 void run_test_zones_http(void)
 {
     test_out_of_range_zone_preserves_stored_fields();
@@ -3544,6 +3692,11 @@ void run_test_zones_http(void)
     test_nvs_load_from_v8_blob_with_distinct_zone_values_migrates_losslessly();
     test_nvs_load_from_v8_blob_upconverts_to_shared_default_profile();
     test_validate_rejects_out_of_range_v8_fields();
+
+    test_post_minon_below_floor_is_refused();
+    test_post_minon_zero_and_at_or_above_floor_are_accepted();
+    test_validate_rejects_sub_floor_min_on();
+    test_stored_pre_floor_blob_is_raised_on_load_not_rejected();
 
     test_relay_name_get_set_round_trip();
     test_relay_name_setter_rejects_out_of_range_relay();
