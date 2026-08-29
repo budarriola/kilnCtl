@@ -277,14 +277,29 @@ Owned by [`tools/PcTools/TODO.md`](tools/PcTools/TODO.md). Worth doing early pre
 because it is what turns later hardware questions into a script instead of a
 soldering session.
 
-- [ ] **Known-good config presets, so a test always starts from the same
+- [~] **Known-good config presets, so a test always starts from the same
       board** (owner request, 2026-08-28): factory-default then load a named
       config as one step, so a run is reproducible instead of depending on
       whatever the last session left behind. Presets live as DATA under
       `tools/`, never compiled into firmware — the bench fixture's 80 °C
       ceilings must never be capable of being left behind in a real kiln build.
-      Scoped to KilnFW-side config until M12a makes safety-parameter writes
-      trustworthy
+      **No longer scoped to KilnFW-side config:** the safety-parameter write
+      path is trustworthy now (SET_PARAM/COMMIT_CONFIG confirmed by a live
+      read-back), so a preset carries a `"safety"` section written over
+      `POST /api/safety/commissioning` by `safety_cfg_http_client.py`, with
+      `load_config_preset(safety_host=...)` reaching it. Applied for real to
+      the bench 2026-08-28: `tc_source`, `tc_placement_mode`,
+      `abs_max_temp_c`, `mains_voltage_v`, `tc_type`, `max_rate_c_per_min`,
+      `borrowed_zone_index` all committed and confirmed by read-back.
+      **What is left is hardware, not software:** `ct_channel_map[0..2]`
+      states which relay each CT is clamped around, and no CT is fitted on
+      this bench (M5), so it has no measured truth. Committing a guess would
+      clear `calibration_missing` and make the safety processor report itself
+      COMMISSIONED on a mapping nobody verified, so the assumed identity map
+      sits in a separate `"safety_ct_channel_map_backup"` preset section that
+      applies only on an explicit `use_ct_map_backup=True`. Readiness still
+      reports "Safety processor commissioned" as not-done, correctly, until
+      the CTs are fitted and the zone current-sweep derives the real map
 - [x] `pc_tools` moved to `tools/PcTools/`; GPIO probes built for both chips
       (ESP: deny-list incl. GPIO6; Pico: over SWD, GPIO6 read-only). **Pico
       probe bench-tested 2026-08-19, PASS.** ESP probe bench-tested 2026-08-19

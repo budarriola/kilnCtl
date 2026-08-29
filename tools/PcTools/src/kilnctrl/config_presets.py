@@ -7,6 +7,41 @@ test." This module is the data-driven half of that -- ``mcp_server.py``
 wires its three functions up as MCP tools (``list_config_presets``,
 ``load_config_preset``, ``factory_default_then_load_preset``).
 
+SCOPE, and why: presets are applied over three write paths, each with its
+own reason for existing.
+
+  * PID gains and the thermal model go over the firmware's UART CONTROL task
+    (task 8) -- SET_ZONE_PID / SET_ZONE_MODEL (``control.py``). Always
+    attempted.
+  * The rest of ``zones_cfg_t`` (max_temp_c, relay_mask, control_mode,
+    thermo_count/relay_count, ...) has no UART setter at all; its only write
+    path is ``POST /api/zones`` in ``zones_http.c``, a whole-page-submit
+    handler that would ZERO every field a naive partial POST omitted.
+    ``zones_http_client.py`` is the GET-merge-POST-verify client that makes
+    that safe, and ``apply_preset(zones_host=...)`` is what reaches it.
+  * SAFETY-PROCESSOR parameters (SaftyFW, ``safety_cfg_http.c``) go over
+    ``POST /api/safety/commissioning`` via ``safety_cfg_http_client.py``,
+    reached with ``apply_preset(safety_host=...)``. THIS WAS PREVIOUSLY OUT
+    OF SCOPE and this docstring said so: those writes reported success
+    without landing, and were refused while ARMED. That is fixed --
+    SET_PARAM/COMMIT_CONFIG now confirm by a live read-back on the firmware
+    side (``confirm_commit_landed()``), and the client re-reads and compares
+    again on top of that. A preset's ``"safety"`` section is written and
+    verified like any other.
+
+ONE SAFETY FIELD IS STILL GATED ON HARDWARE, and not by a software gap:
+``ct_channel_map[0..2]`` records which relay each current transformer is
+physically clamped around. Its only honest producer is the zone
+current-sweep (``zone_sweep_push_ct_channel_map()`` in ``zones_http.c``),
+which needs a CT to exist. On a bench with no CT fitted there is nothing
+for that map to be true about, and committing a guess would clear
+``calibration_missing`` -- making the safety processor report itself
+COMMISSIONED, and grant heat, on the strength of a mapping nobody measured.
+So a preset keeps any assumed map in a SEPARATE ``"safety_ct_channel_map_
+backup"`` section that is applied only when a caller passes
+``use_ct_map_backup=True`` knowingly. See ``config_presets/
+bench_fixture.json`` for the worked example.
+
 Presets are DATA under ``tools/PcTools/config_presets/*.json``, never
 compiled into any firmware image. That is deliberate, not incidental: a
 value baked into firmware ships to every board that runs it, including a
@@ -14,38 +49,6 @@ real kiln; a value read from a JSON file on the PC running the test tooling
 cannot reach a board unless something on the PC side chooses to send it.
 See ``config_presets/bench_fixture.json`` for why that distinction matters
 here specifically (its 80C ceiling is a fixture limit, never a kiln one).
-
-SCOPE, and why: this only writes what the firmware's UART CONTROL task
-(task 8) actually exposes a setter for -- SET_ZONE_PID and SET_ZONE_MODEL
-(``control.py``). ``zones_cfg_t`` carries a great deal more (max_temp_c,
-relay_mask, control_mode, thermo_count/relay_count, timing profiles, ...),
-but the only write path for those is the ESP's HTTP form handler
-(``POST /api/zones`` in ``zones_http.c``), which requires a dense repost of
-the *entire* config (every zone, every timing profile, by form field name)
-and has no PC-side client in this repo yet. Building one untested against
-real hardware risked silently mismatching that ~4000-line handler's
-required-field contract and corrupting a board's NVS zones config -- worse
-than the fixture-consistency problem this tool exists to solve. So those
-fields are captured in the preset (for a human/future tool to read and
-compare against ``get_board_state``) and reported as "not written back:
-read-only over this link" rather than attempted.
-
-THE HOOK for finishing this: a ``zones_http_client.py`` alongside
-``ota_http_client.py`` (same mocked-``urllib`` test pattern -- see
-``tests/test_ota_http_client.py``) that GETs the live ``zones_cfg_t`` JSON
-from ``GET /api/zones``, applies the preset's fields onto it (preserving
-every field the preset doesn't mention, especially the timing-profile
-block), and POSTs the merged form body back. That client would let
-``load_config_preset`` write the full preset, not just PID/model. It is not
-built here.
-
-Safety-processor parameters (``safety_cfg_http.c`` / SaftyFW) are out of
-scope for a second, independent reason: those config writes are currently
-broken (report success without landing, refused while ARMED) and are being
-fixed by another agent. Once that path is trustworthy, its hook is a second
-preset section (e.g. ``"safety"``) alongside ``"zones"`` in the JSON, applied
-by a ``load_config_preset`` step added next to the zones one here -- not
-built now.
 """
 
 from __future__ import annotations
@@ -55,7 +58,7 @@ import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
 
-from . import zones_http_client
+from . import safety_cfg_http_client, zones_http_client
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from .control import ControlClient
@@ -157,6 +160,49 @@ def _validate(name: str, data: object) -> None:
         if idx in seen_index:
             raise ConfigPresetError(f"preset {name!r}: duplicate zone index {idx}")
         seen_index.add(idx)
+    _validate_safety_sections(name, data)
+
+
+#: Safety param names a preset's "safety" section may NEVER carry. These are
+#: the three ct_channel_map ids: committing all three is what makes the
+#: Pico's config_params_finalize_ct_channel_map() set the group bit, which
+#: clears calibration_missing, which lets commissioning_gate.c grant heat.
+#: They belong in the opt-in-only backup section (or nowhere), so that a
+#: routine "load the bench preset" can never silently declare a board
+#: commissioned on an unmeasured CT map -- see this module's docstring.
+_CT_MAP_FIELDS = ("ct_channel_map[0]", "ct_channel_map[1]", "ct_channel_map[2]")
+
+
+def _validate_safety_sections(name: str, data: dict) -> None:
+    """Both safety sections must be flat ``{param_name: number}`` maps, and
+    the ct_channel_map fields must appear ONLY in the backup section. The
+    param NAMES themselves are deliberately not validated against a list
+    here -- the live board's own parameter table is the authority, and
+    safety_cfg_http_client.build_post_body() refuses an unknown name against
+    that table rather than against a copy of it that could go stale."""
+    for section in (safety_cfg_http_client.SAFETY_SECTION,
+                    safety_cfg_http_client.SAFETY_CT_MAP_BACKUP_SECTION):
+        if section not in data:
+            continue
+        values = data[section]
+        if not isinstance(values, dict):
+            raise ConfigPresetError(f"preset {name!r}: {section!r} must be a JSON object")
+        for key, value in values.items():
+            if not isinstance(key, str):
+                raise ConfigPresetError(f"preset {name!r}: {section!r} has a non-string key {key!r}")
+            if isinstance(value, bool):
+                continue
+            if not isinstance(value, (int, float)):
+                raise ConfigPresetError(
+                    f"preset {name!r}: {section}[{key!r}] must be a number or bool, got {value!r}")
+    for field_name in _CT_MAP_FIELDS:
+        if field_name in (data.get(safety_cfg_http_client.SAFETY_SECTION) or {}):
+            raise ConfigPresetError(
+                f"preset {name!r}: {field_name!r} may not appear in the "
+                f"{safety_cfg_http_client.SAFETY_SECTION!r} section -- an unmeasured CT map that "
+                "applies by default would let a board report itself commissioned on a mapping "
+                "nobody verified; put it in "
+                f"{safety_cfg_http_client.SAFETY_CT_MAP_BACKUP_SECTION!r} instead")
 
 
 @dataclass(frozen=True)
@@ -185,6 +231,10 @@ class PresetApplyResult:
     #: None means "not attempted this call", not "attempted and unknown" --
     #: check ``not_written`` to tell the two apart.
     zones_result: "Optional[zones_http_client.ZonesApplyResult]" = None
+    #: Set only when ``apply_preset()`` was called with ``safety_host`` --
+    #: the POST/read-back-verify result for the preset's "safety" section
+    #: (safety_cfg_http_client.py). None means "not attempted this call".
+    safety_result: "Optional[safety_cfg_http_client.SafetyApplyResult]" = None
 
     def describe(self) -> str:
         lines = [f"preset {self.preset_name!r}:"]
@@ -200,6 +250,9 @@ class PresetApplyResult:
             if not self.zones_result.ok:
                 for m in self.zones_result.mismatches:
                     lines.append(f"    {m}")
+        if self.safety_result is not None:
+            for line in self.safety_result.describe().splitlines():
+                lines.append("  " + line)
         if self.not_written:
             lines.append(
                 "  NOT written back (no zones_host given this call; preset value is "
@@ -211,7 +264,8 @@ class PresetApplyResult:
     def all_ok(self) -> bool:
         pid_model_ok = all(z.pid_ok and (z.model_ok in (None, True)) for z in self.zones)
         zones_ok = self.zones_result is None or self.zones_result.ok
-        return pid_model_ok and zones_ok
+        safety_ok = self.safety_result is None or self.safety_result.ok
+        return pid_model_ok and zones_ok and safety_ok
 
 
 #: Zone-level fields this preset schema carries that only zones_http_client's
@@ -228,7 +282,11 @@ _ZONES_HTTP_ONLY_ZONE_FIELDS = (
 def apply_preset(control: "ControlClient", preset: dict,
                   zones_host: "Optional[str]" = None,
                   zones_timeout: float = zones_http_client.ZONES_HTTP_TIMEOUT_S,
-                  verify_zones: bool = True) -> PresetApplyResult:
+                  verify_zones: bool = True,
+                  safety_host: "Optional[str]" = None,
+                  safety_timeout: float = safety_cfg_http_client.SAFETY_CFG_HTTP_TIMEOUT_S,
+                  verify_safety: bool = True,
+                  use_ct_map_backup: bool = False) -> PresetApplyResult:
     """Write everything this preset can be written through over the UART
     CONTROL task (PID gains, and the thermal model when the preset carries
     one).
@@ -248,6 +306,23 @@ def apply_preset(control: "ControlClient", preset: dict,
     When ``zones_host`` is omitted (the default, preserving this function's
     original behavior), those fields are reported in ``not_written`` as
     reference/expected data only, exactly as before this parameter existed.
+
+    ``safety_host`` (new): when given, ALSO writes the preset's ``"safety"``
+    section -- the SaftyFW commissioning parameters -- over
+    POST /api/safety/commissioning via safety_cfg_http_client.py, then
+    re-reads and confirms each field actually landed (see ``safety_result``
+    on the returned ``PresetApplyResult``, and that module's docstring for
+    why an ACK is not proof on this link). Almost always the SAME host as
+    ``zones_host``: both endpoints are served by the same ESP32, which is
+    the only thing that can talk to the Pico at all. A SafetyCfgHttpError
+    propagates, same as the other two paths' errors.
+
+    ``use_ct_map_backup`` (default False): additionally writes the preset's
+    ``"safety_ct_channel_map_backup"`` section -- an ASSUMED, UNMEASURED
+    CT-to-zone map. Committing it clears ``calibration_missing`` and so lets
+    the safety processor grant heat; do not pass it to get a green
+    commissioning check on a bench whose CTs are not fitted. See this
+    module's docstring.
 
     Never touches relays, never resets, never enables anything."""
     results = []
@@ -288,5 +363,14 @@ def apply_preset(control: "ControlClient", preset: dict,
             }
             | ({"thermo_count", "relay_count"} & preset.keys())
         )
+    safety_result = None
+    if safety_host:
+        safety_result = safety_cfg_http_client.apply_safety_preset(
+            safety_host, preset, timeout=safety_timeout, verify=verify_safety,
+            use_ct_map_backup=use_ct_map_backup)
+    elif preset.get(safety_cfg_http_client.SAFETY_SECTION):
+        not_written = sorted(set(not_written) | {
+            f"safety.{k}" for k in preset[safety_cfg_http_client.SAFETY_SECTION]})
+
     return PresetApplyResult(preset_name=preset["name"], zones=results, not_written=not_written,
-                              zones_result=zones_result)
+                              zones_result=zones_result, safety_result=safety_result)

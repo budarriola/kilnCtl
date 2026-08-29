@@ -214,6 +214,44 @@ joined a network, when there's no HTTP path to it yet. AP-identity editing
 (`SET_AP_IDENTITY`) stays HTTP-only in this pass. The read-only Firing Status
 popup is unchanged.
 
+## Config presets
+
+A named, known-good starting config, so a test run begins from the same board
+twice. Presets are **DATA** under `config_presets/*.json`, never compiled into
+firmware -- the bench fixture's 80 °C ceilings must not be capable of riding
+into a real kiln build.
+
+```
+kiln_call(name="list_config_presets")
+kiln_call(name="load_config_preset", args={"name": "bench_fixture",
+                                            "host": "192.168.1.156",
+                                            "safety_host": "192.168.1.156"})
+kiln_call(name="factory_default_then_load_preset", args={"name": "bench_fixture"})
+```
+
+A preset is applied over three write paths, each verified by an independent
+read-back (an ACK is never accepted as proof that a value landed):
+
+| Section | Path | Reached with |
+|---|---|---|
+| `zones[].pid_*` / model | UART CONTROL task (`control.py`) | always |
+| the rest of `zones_cfg_t` | `GET`/`POST /api/zones` (`zones_http_client.py`) | `host=` |
+| `"safety"` | `POST /api/safety/commissioning` (`safety_cfg_http_client.py`) | `safety_host=` |
+
+`host` and `safety_host` are normally the **same address**: both endpoints are
+served by the ESP32, which is the only thing that can talk to the RP2040 at
+all. Omit either and that section is reported as reference data, not written.
+
+**The `"safety_ct_channel_map_backup"` section is never applied by default.**
+`ct_channel_map[0..2]` states which relay each current transformer is
+physically clamped around; committing all three makes the safety processor
+clear `calibration_missing` and therefore grant heat. On a bench with no CT
+fitted there is nothing for that map to be true about, so the assumed identity
+map lives in its own section and is written only when a caller knowingly
+passes `use_ct_map_backup=True` (a host-test scenario, or a deliberate
+exercise of `commissioning_gate.c`'s accept path). The real map comes from the
+zone current-sweep on the zones page once CTs exist.
+
 ## Generic button press (MCP)
 
 Every bespoke tool (`thermo_read`, `io_set_relay`, ...) also has a same-named

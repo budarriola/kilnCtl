@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import unittest.mock
 
-from kilnctrl import config_presets, zones_http_client  # noqa: E402
+from kilnctrl import config_presets, safety_cfg_http_client, zones_http_client  # noqa: E402
 from kilnctrl.devices import OkReason  # noqa: E402
 
 
@@ -203,7 +203,10 @@ class ApplyPresetZonesHostTest(unittest.TestCase):
         called_host = mock_apply.call_args[0][0]
         self.assertEqual(called_host, "kiln.local")
         self.assertEqual(result.zones_result, ok_result)
-        self.assertEqual(result.not_written, [])
+        # Every ZONE field is now written; what remains in not_written is the
+        # safety section, which needs its own safety_host (see
+        # SafetySectionTest below).
+        self.assertEqual([f for f in result.not_written if not f.startswith("safety.")], [])
         self.assertTrue(result.all_ok)
 
     def test_zones_write_failure_makes_all_ok_false_even_if_pid_writes_succeeded(self):
@@ -221,6 +224,87 @@ class ApplyPresetZonesHostTest(unittest.TestCase):
         self.assertFalse(result.all_ok)
         self.assertIn("max_temp_c", result.describe())
         self.assertIn("FAILED", result.describe())
+
+
+class SafetySectionTest(unittest.TestCase):
+    """The "safety" preset section -- the SaftyFW commissioning parameters
+    config_presets.py's docstring used to call out of scope."""
+
+    def test_bench_fixture_carries_a_safety_section(self):
+        preset = config_presets.load_preset_data("bench_fixture")
+        safety = preset["safety"]
+        # The values this bench can actually vouch for -- see the preset's
+        # own _safety_comment for where each one came from.
+        self.assertEqual(safety["tc_type"], 3)          # type K, from safety_tc_type
+        self.assertEqual(safety["max_rate_c_per_min"], 0.0)  # S8 ships disabled
+        self.assertEqual(safety["borrowed_zone_index"], 0)
+
+    def test_ct_map_lives_only_in_the_backup_section(self):
+        preset = config_presets.load_preset_data("bench_fixture")
+        for ch in range(3):
+            self.assertNotIn(f"ct_channel_map[{ch}]", preset["safety"])
+            self.assertIn(f"ct_channel_map[{ch}]", preset["safety_ct_channel_map_backup"])
+
+    def test_ct_map_in_the_safety_section_is_rejected(self):
+        """NEGATIVE TEST. A ct_channel_map that applied by default would let
+        a routine preset load clear calibration_missing on an unmeasured
+        map, i.e. declare a board commissioned on a fiction."""
+        with self.assertRaises(config_presets.ConfigPresetError) as ctx:
+            config_presets._validate_safety_sections(
+                "t", {"safety": {"ct_channel_map[0]": 0}})
+        self.assertIn("ct_channel_map[0]", str(ctx.exception))
+
+    def test_non_numeric_safety_value_is_rejected(self):
+        with self.assertRaises(config_presets.ConfigPresetError):
+            config_presets._validate_safety_sections("t", {"safety": {"tc_type": "K"}})
+
+    def test_safety_section_must_be_an_object(self):
+        with self.assertRaises(config_presets.ConfigPresetError):
+            config_presets._validate_safety_sections("t", {"safety": [1, 2, 3]})
+
+    def test_safety_host_omitted_reports_the_fields_as_not_written(self):
+        preset = config_presets.load_preset_data("bench_fixture")
+        result = config_presets.apply_preset(FakeControl(), preset)
+        self.assertIsNone(result.safety_result)
+        self.assertIn("safety.tc_type", result.not_written)
+
+    def test_safety_host_given_calls_the_safety_client(self):
+        preset = config_presets.load_preset_data("bench_fixture")
+        ok = safety_cfg_http_client.SafetyApplyResult(
+            ok=True, confirmed=["tc_type"], commissioned_after=False,
+            still_unset=["ct_channel_map[0]"])
+        with unittest.mock.patch.object(safety_cfg_http_client, "apply_safety_preset",
+                                         return_value=ok) as mock_apply:
+            result = config_presets.apply_preset(
+                FakeControl(), preset, safety_host="kiln.local")
+        mock_apply.assert_called_once()
+        self.assertEqual(mock_apply.call_args[0][0], "kiln.local")
+        self.assertIs(mock_apply.call_args.kwargs["use_ct_map_backup"], False)
+        self.assertIs(result.safety_result, ok)
+        self.assertIn("still UNSET", result.describe())
+
+    def test_ct_map_backup_opt_in_is_forwarded(self):
+        preset = config_presets.load_preset_data("bench_fixture")
+        ok = safety_cfg_http_client.SafetyApplyResult(ok=True)
+        with unittest.mock.patch.object(safety_cfg_http_client, "apply_safety_preset",
+                                         return_value=ok) as mock_apply:
+            config_presets.apply_preset(FakeControl(), preset, safety_host="kiln.local",
+                                         use_ct_map_backup=True)
+        self.assertIs(mock_apply.call_args.kwargs["use_ct_map_backup"], True)
+
+    def test_safety_write_failure_makes_all_ok_false(self):
+        """NEGATIVE TEST: the PID writes can all succeed while the safety
+        commit is refused (relay ARMED, the real live-bench case) -- all_ok
+        must reflect that too."""
+        preset = config_presets.load_preset_data("bench_fixture")
+        failed = safety_cfg_http_client.SafetyApplyResult(
+            ok=False, mismatches=["tc_type: reads back UNSET after the commit"],
+            post_reason="commit rejected: relay is ARMED")
+        with unittest.mock.patch.object(safety_cfg_http_client, "apply_safety_preset",
+                                         return_value=failed):
+            result = config_presets.apply_preset(FakeControl(), preset, safety_host="kiln.local")
+        self.assertFalse(result.all_ok)
+        self.assertIn("ARMED", result.describe())
 
 
 if __name__ == "__main__":

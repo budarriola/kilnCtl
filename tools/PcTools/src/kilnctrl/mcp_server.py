@@ -77,7 +77,7 @@ from mcpkit import workbench
 from mcpkit.registry import collapse
 from mcpkit.serve import serve
 
-from . import actions, config_presets, debug_probe, devices, mcp_facade, openocd_util, pico_gpio_probe, settings, stale_check, ui_test_runner, wifi_credentials, zones_http_client
+from . import actions, config_presets, debug_probe, devices, mcp_facade, openocd_util, pico_gpio_probe, safety_cfg_http_client, settings, stale_check, ui_test_runner, wifi_credentials, zones_http_client
 from .autotune import AutotuneClient, AutotuneQueryError
 from .control import ControlClient, ControlQueryError
 from .device_log import LogClient
@@ -2591,7 +2591,9 @@ def list_config_presets() -> str:
 
 
 @_tool()
-def load_config_preset(name: str, host: Optional[str] = None) -> str:
+def load_config_preset(name: str, host: Optional[str] = None,
+                        safety_host: Optional[str] = None,
+                        use_ct_map_backup: bool = False) -> str:
     """Apply a known-good preset's zone config to the live board.
 
     PID gains and (when the preset carries one) the thermal model go over
@@ -2612,6 +2614,25 @@ def load_config_preset(name: str, host: Optional[str] = None) -> str:
     reference/expected data only, NOT written -- unchanged from before this
     parameter existed.
 
+    `safety_host` (new): when given, ALSO writes the preset's "safety"
+    section -- the SAFETY PROCESSOR's commissioning parameters (tc_type,
+    abs_max_temp_c, mains_voltage_v, ...) -- over
+    POST /api/safety/commissioning, staged as SET_PARAM and committed with
+    COMMIT_CONFIG, then re-read and confirmed field by field. This is the
+    SAME ESP as `host` in practice: both endpoints are served by the ESP32,
+    which is the only thing that can talk to the Pico. Pass the same address
+    to both. Omitted: the preset's safety values are reported as
+    reference/expected data only, not written.
+
+    `use_ct_map_backup` (default False): also writes the preset's
+    "safety_ct_channel_map_backup" section -- an ASSUMED, UNMEASURED
+    CT-to-zone map. Committing it clears calibration_missing, which is what
+    lets the safety processor grant heat, so a bench whose CTs are not
+    fitted would start reporting itself COMMISSIONED on a mapping nobody
+    measured. Only pass this when you specifically want that (a host-test
+    scenario, or a deliberate exercise of the commissioning gate's accept
+    path) and know the map is fabricated.
+
     Does NOT reset, does NOT touch relays, does NOT request enable.
     """
     try:
@@ -2619,12 +2640,17 @@ def load_config_preset(name: str, host: Optional[str] = None) -> str:
     except config_presets.ConfigPresetError as exc:
         return f"error: {exc}"
     resolved = _ota_resolve_host(host) if host else None
+    resolved_safety = _ota_resolve_host(safety_host) if safety_host else None
     try:
-        result = config_presets.apply_preset(_control, preset, zones_host=resolved)
+        result = config_presets.apply_preset(
+            _control, preset, zones_host=resolved, safety_host=resolved_safety,
+            use_ct_map_backup=use_ct_map_backup)
     except ControlQueryError as exc:
         return f"error: {exc}"
     except zones_http_client.ZonesHttpError as exc:
         return f"error writing zones config over HTTP (host={resolved}): {exc}"
+    except safety_cfg_http_client.SafetyCfgHttpError as exc:
+        return f"error writing safety config over HTTP (host={resolved_safety}): {exc}"
     return result.describe()
 
 
@@ -2701,7 +2727,9 @@ FACTORY_RESET_REBOOT_TIMEOUT_S = 20.0
 
 @_tool()
 def factory_default_then_load_preset(name: str, scope: int = FACTORY_RESET_SCOPE_KILN,
-                                      host: Optional[str] = None) -> str:
+                                      host: Optional[str] = None,
+                                      safety_host: Optional[str] = None,
+                                      use_ct_map_backup: bool = False) -> str:
     """Factory-default the board, then apply a known-good preset -- one
     callable step so a test always starts from the same place.
 
@@ -2741,6 +2769,14 @@ def factory_default_then_load_preset(name: str, scope: int = FACTORY_RESET_SCOPE
     runs `_ota_resolve_host()` after the reboot, at whatever address is
     live then.
 
+    `safety_host`/`use_ct_map_backup` (new): same meaning as
+    load_config_preset()'s -- the preset's safety-processor section, written
+    and read-back-verified over POST /api/safety/commissioning after the
+    reboot. Note the factory-reset scopes above erase ESP NVS partitions
+    only; the Pico's own config record is NOT wiped by any of them, so a
+    safety section is a re-commit of the same values rather than a restore
+    from blank.
+
     This is the disruptive lever in this module: it reboots the board and
     then writes PID/model gains (and, with `host`, zones config too). Never
     invoke it against a bench with a firing in progress or with the safety
@@ -2764,12 +2800,18 @@ def factory_default_then_load_preset(name: str, scope: int = FACTORY_RESET_SCOPE
             f"within {FACTORY_RESET_REBOOT_TIMEOUT_S}s ({exc}) -- preset NOT applied"
         )
     resolved = _ota_resolve_host(host) if host else None
+    resolved_safety = _ota_resolve_host(safety_host) if safety_host else None
     try:
-        result = config_presets.apply_preset(_control, preset, zones_host=resolved)
+        result = config_presets.apply_preset(
+            _control, preset, zones_host=resolved, safety_host=resolved_safety,
+            use_ct_map_backup=use_ct_map_backup)
     except ControlQueryError as exc:
         return f"factory reset ok, but preset apply failed: {exc}"
     except zones_http_client.ZonesHttpError as exc:
         return f"factory reset ok, PID/model applied, but zones config write failed (host={resolved}): {exc}"
+    except safety_cfg_http_client.SafetyCfgHttpError as exc:
+        return ("factory reset ok, PID/model applied, but safety config write failed "
+                f"(host={resolved_safety}): {exc}")
     return f"factory reset ok (scope={scope})\n" + result.describe()
 
 
