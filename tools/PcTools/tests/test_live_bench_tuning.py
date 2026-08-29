@@ -77,6 +77,23 @@ STEP_TARGET_C = 45.0
 #: a 2 s poll, which is the question this test asks.
 STEP_OBSERVE_S = float(os.environ.get("KILNCTRL_BENCH_STEP_OBSERVE_S", "60"))
 
+#: Poll period for the PV trace. 2 s is right for the 60 s default sweep. A
+#: real long-duration run (KILNCTRL_BENCH_STEP_OBSERVE_S=2400) wants 15-30 s
+#: instead: this jig's time constant is in MINUTES, so a 2 s poll buys no
+#: extra information and spends 1200 request pairs of the board's httpd on
+#: saying "still 31.4 C".
+STEP_POLL_S = float(os.environ.get("KILNCTRL_BENCH_STEP_POLL_S", "2"))
+
+#: Guard-1 precondition. thermal_guard.c's dead-element check requires the
+#: zone to rise at least sanity_rate_c_per_min per minute while heat is
+#: commanded below setpoint, or the run is FAULTED and the trace ends there.
+#: This bench carried 5.0 (a real kiln's figure) and every step died at
+#: t=62s on "rose only 0.0C in 1.0min (need >=5.0C)" -- a config problem
+#: that looked exactly like a broken step test. bench_fixture.json now
+#: commissions 0.2. Asserted, not assumed: a step test on a board whose
+#: guard cannot physically be satisfied is not measuring the plant.
+STEP_MAX_USABLE_SANITY_RATE_C_PER_MIN = 1.0
+
 #: Autotune budget. AUTOTUNE_ENGINE_SETTLE_S is 180 s of baseline hold before
 #: the step is applied, so anything under ~200 s could only ever observe
 #: "settling" and would prove nothing about the step. 300 s reaches STEPPING
@@ -141,6 +158,18 @@ def test_closed_loop_setpoint_step_response(bench, capsys):
         the fixture ceiling.
     """
     hottest = bench.assert_within_fixture_ceiling()
+
+    # Guard 1 first: on a jig that heats in minutes, a kiln-sized
+    # sanity_rate_c_per_min ends every run at the first window boundary and
+    # the trace below would be a fault log, not a step response.
+    zone_cfg = bench.zones()["zones"][TUNE_ZONE]
+    rate = zone_cfg["sanity_rate_c_per_min"]
+    assert 0.0 < rate <= STEP_MAX_USABLE_SANITY_RATE_C_PER_MIN, (
+        f"zone {TUNE_ZONE} sanity_rate_c_per_min is {rate} C/min. thermal_guard.c guard 1 will "
+        f"fault this zone at the first window boundary unless the jig can really rise that fast; "
+        f"bench_fixture.json commissions 0.2. (0 is also refused here: it would select the "
+        f"firmware default 0.5, which is a number nobody chose for this rig.)")
+
     permitted, why = heat_is_permitted(bench)
     baseline = bench.status()["channels"][TUNE_ZONE]["temp_c"]
     print(f"\n[live] step test: baseline {baseline:.2f} C, hottest {hottest:.2f} C, "
@@ -157,7 +186,7 @@ def test_closed_loop_setpoint_step_response(bench, capsys):
     print(f"[live] POST /api/profile_exec/start -> {code} {body.strip()[:120]}")
     assert code == 200, (code, body)
 
-    rows = bench.sample_response(STEP_OBSERVE_S, period_s=2.0, zone_index=TUNE_ZONE)
+    rows = bench.sample_response(STEP_OBSERVE_S, period_s=STEP_POLL_S, zone_index=TUNE_ZONE)
     print(f"[live] PV trace: {_describe(rows)}")
     print("[live] first/last rows: " + repr((rows[0], rows[-1])))
 
@@ -242,9 +271,18 @@ def test_closed_loop_setpoint_step_response(bench, capsys):
         print(f"[live] NOTE: heat was PERMITTED (no heat block on any of {len(rows)} samples) "
               f"but no sustained heat resulted: PV moved {moved:+.2f} C, exec states {aborts}. "
               "The S6a / SAFETY_FAULT_SRC_SAFETY_LINK abort is FIXED (63cc741) and the "
-              "executor stayed running for the whole sweep -- asserted above. What is "
-              "left is physical: no heating element is fitted to the zone-0 relay. "
-              "NOT a commissioning failure and no longer a link failure.")
+              "executor stayed running for the whole sweep -- asserted above. "
+              "MEASURED 2026-08-29 over a 40-minute dwell with guard 1 deliberately held "
+              "open (rate 0.01 C/min, window 1800 s) so nothing but the plant could end "
+              "the run: relay 1 closed continuously for 39.8 min and zone 0 rose +0.67 C, "
+              "a mean of 0.017 C/min, with the WORST 5-minute window actually NEGATIVE "
+              "(-0.016 C/min) -- i.e. indistinguishable from ambient drift. The heat "
+              "path to zone 0's thermocouple delivers essentially nothing. That is a "
+              "PHYSICAL finding and no guard threshold can be tuned around it: guard 1 "
+              "requires rise >= rate x elapsed, so a longer window does not rescue a "
+              "rate shortfall, and even the commissioned 0.2 C/min is 12x more than this "
+              "jig produces. Autotune agrees, on its own terms: "
+              "'response too small to fit (trace flat or noise-dominated)'.")
 
 
 def test_step_autotune_runs_and_reports_a_sane_result(bench, capsys):

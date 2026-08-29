@@ -139,6 +139,16 @@ aborted) — no auto-recovery when the underlying condition clears.
 
 Escalation policy (TODO.md 6A.6, decided during this build since the design
 doc left it open): guards 3/5/6 assert a **global** `safety_link` fault
+**Guard 1's rate is per-zone config** (`sanity_rate_c_per_min`, Settings >
+Zones, `z%u_sanity` on `POST /api/zones`, range 0–20 °C/min, 0 = the firmware
+default 0.5). It is the one guard threshold whose right value is a property of
+the *rig* rather than of kilns in general: too high false-trips a slow but
+genuinely heating system, too low lets a real dead element run longer. The
+bench fixture ran 5.0 (a kiln's figure) and killed every step-response and
+autotune run at t=62 s until it was commissioned to 0.2 — see
+`tools/PcTools/config_presets/bench_fixture.json`. Lowering it does not slow
+guards 2–5; each reads its own threshold.
+
 (blocks every zone, `SAFETY_FAULT_SRC_THERMAL_SANITY` for 3/5,
 `SAFETY_FAULT_SRC_THERMO` for 6) — their failure modes are board-wide
 (welded contact, sensor electrically faulted). Guards 1/2/4/7/8 only block
