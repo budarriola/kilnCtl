@@ -208,6 +208,36 @@ esp_err_t safety_link_set_fault_source(SafetyLinkClass *link, uint32_t source_ma
     return ESP_OK;
 }
 
+/* Spy for the heat-enable (K4) wiring tests below. autotune_engine.c now
+ * calls heat_enable_acquire()/heat_enable_release() (heat_enable.h), and
+ * heat_enable.c is linked into this executable for real, so the fake goes
+ * one layer down: safety_link.c's own request_enable. Its real contract --
+ * enable=true refused, and NOTHING sent, on a down link; enable=false always
+ * attempted -- is reproduced exactly, because the honest handling of a down
+ * link is half of what these tests are for. */
+static int  s_req_enable_true_calls = 0;
+static int  s_req_enable_false_calls = 0;
+static bool s_req_enable_link_up = true;
+
+esp_err_t safety_link_request_enable(SafetyLinkClass *link, bool enable)
+{
+    (void)link;
+    if (enable) {
+        s_req_enable_true_calls++;
+        return s_req_enable_link_up ? ESP_OK : ESP_ERR_INVALID_STATE;
+    }
+    s_req_enable_false_calls++;
+    return ESP_OK;
+}
+
+static void reset_heat_enable_recorder(bool link_up)
+{
+    s_req_enable_link_up = link_up;
+    heat_enable_init((SafetyLinkClass *)0x1);
+    s_req_enable_true_calls = 0;
+    s_req_enable_false_calls = 0;
+}
+
 // Recorded the same way, for the relay-cycle-accounting tests below: proves
 // autotune's own relay switching reaches relay_cycles.c, not just that the
 // call compiles/links. reset_cycles_recorder() clears these between tests.
@@ -911,6 +941,81 @@ static void test_run_refuses_at_atomic_heat_claim_gate(void)
     s_test_heat_zone_claim_refused = false;
 }
 
+
+// ---------------------------------------------------------------------------
+// Heat-enable (K4) wiring -- the 2026-08-29 fix.
+//
+// autotune_engine.c never asked the safety processor to permit heating: it
+// drove its own zone relay against an open K4, so the element carried no
+// current and every fit was made against the trace of a kiln that was never
+// heated ("response too small to fit" was the engine describing its own
+// inaction, again). These tests pin both halves -- the request at the start
+// of a run, and the release on every terminal path -- through the same
+// begin_run_locked()/force_relays_off() seams the ownership tests above use.
+// ---------------------------------------------------------------------------
+
+static void test_autotune_start_requests_heat_enable_once(void)
+{
+    TEST_SECTION("autotune start -- asks the safety processor to permit heating (K4), exactly once");
+    reset_heat_enable_recorder(true);
+    start_stepping_run(/*max_temp_c=*/0.0f, /*step_duty=*/1.0f);
+
+    TEST_CHECK(s_req_enable_true_calls == 1,
+               "begin_run_locked() must send exactly one REQUEST_ENABLE(true) -- without it the relay "
+               "closes on this board and K4 stays open, which is the whole bug");
+    TEST_CHECK(heat_enable_is_granted(), "and the request must be recorded as granted");
+    TEST_CHECK(heat_enable_is_held(HEAT_ENABLE_CLAIMANT_AUTOTUNE), "held by the autotune claimant");
+    TEST_CHECK(s_req_enable_false_calls == 0, "and nothing released it on the way in");
+}
+
+static void test_autotune_guard_trip_releases_heat_enable(void)
+{
+    TEST_SECTION("autotune guard trip -- gives K4 back");
+    reset_heat_enable_recorder(true);
+    start_stepping_run(/*max_temp_c=*/0.0f, /*step_duty=*/1.0f);
+    s_req_enable_false_calls = 0;
+
+    run_bad_sensor_ticks(/*n_ticks=*/10);
+
+    TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_ABORTED, "sanity: the trip landed");
+    TEST_CHECK(s_req_enable_false_calls == 1,
+               "escalate_and_abort() -> force_relays_off() must send exactly one REQUEST_ENABLE(false)");
+    TEST_CHECK(!heat_enable_is_granted(), "no heat request may outlive a tripped run");
+}
+
+static void test_autotune_manual_abort_releases_heat_enable(void)
+{
+    TEST_SECTION("autotune_engine_abort() (operator Abort) -- gives K4 back");
+    reset_heat_enable_recorder(true);
+    start_stepping_run(/*max_temp_c=*/0.0f, /*step_duty=*/1.0f);
+    s_req_enable_false_calls = 0;
+
+    autotune_engine_abort("operator cancelled");
+
+    TEST_CHECK(s_req_enable_false_calls == 1, "abort_locked() -> force_relays_off() must release it");
+    TEST_CHECK(!heat_enable_is_granted(), "nothing left standing");
+
+    /* The engine's task loop calls heat_enable_release() on every tick it
+     * spends in a non-running state, as a backstop. That must not put a
+     * frame on the wire per tick. */
+    heat_enable_release(HEAT_ENABLE_CLAIMANT_AUTOTUNE);
+    heat_enable_release(HEAT_ENABLE_CLAIMANT_AUTOTUNE);
+    TEST_CHECK(s_req_enable_false_calls == 1, "the per-tick backstop is free after the first release");
+}
+
+static void test_autotune_start_on_a_down_link_does_not_claim_heat(void)
+{
+    TEST_SECTION("autotune start with the safety link down -- never claims a request it did not send");
+    reset_heat_enable_recorder(false);
+    start_stepping_run(/*max_temp_c=*/0.0f, /*step_duty=*/1.0f);
+
+    TEST_CHECK(s_req_enable_true_calls == 1, "the request is attempted");
+    TEST_CHECK(!heat_enable_is_granted(),
+               "but NOT recorded as granted -- reporting success into the void is the exact bug "
+               "danger_mode.c had to be fixed for");
+    TEST_CHECK(heat_enable_retry_pending(), "it is visible as pending instead, and retried by the watchdog");
+}
+
 void run_test_autotune_engine_prestart(void)
 {
     test_run_refuses_before_start();
@@ -948,6 +1053,14 @@ void run_test_autotune_engine_prestart(void)
 
     test_run_refuses_while_zone_sweep_is_active();
     test_run_refuses_at_atomic_heat_claim_gate();
+
+    // Heat-enable (K4) wiring -- each starts from its own
+    // start_stepping_run(), so order-independent relative to everything
+    // above.
+    test_autotune_start_requests_heat_enable_once();
+    test_autotune_guard_trip_releases_heat_enable();
+    test_autotune_manual_abort_releases_heat_enable();
+    test_autotune_start_on_a_down_link_does_not_claim_heat();
 }
 
 int main(void)

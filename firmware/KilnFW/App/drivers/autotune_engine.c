@@ -11,6 +11,7 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 
+#include "heat_enable.h"
 #include "heater_output.h"
 #include "kiln_io_owner.h"
 #include "ota_http.h" /* ota_http_heat_blocked_by_update() -- heat_interlock.h's own doc comment */
@@ -220,6 +221,15 @@ static void force_relays_off(void)
      * a genuine start. Safe unconditionally: a no-op if this run never
      * actually reached that point (refused earlier). */
     relay_authority_heat_zone_claim_end(RELAY_HEAT_ZONE_CLAIM_AUTOTUNE);
+    /* ...and give K4 back (heat_enable.h). Same single-funnel reasoning as
+     * the two releases above: finalize_fit(), finalize_relay_fit(),
+     * escalate_and_abort() and abort_locked() all call this function before
+     * leaving a running state, so this is the one place the autotune's
+     * heat-enable request is torn down. Deliberately AFTER apply_relay(false)
+     * at the top of this function -- dropping the zone relay is never gated
+     * on giving K4 back. Idempotent, so a path that never acquired (a
+     * refused start) sends nothing. */
+    heat_enable_release(HEAT_ENABLE_CLAIMANT_AUTOTUNE);
 }
 
 /* Same escalation split as profile_executor.c's escalate_guard_trip() --
@@ -833,6 +843,13 @@ static void task_entry(void *arg)
 
         xSemaphoreTake(s_at.lock, portMAX_DELAY);
         if (!state_is_running(s_at.state)) {
+            /* Backstop, same shape and reasoning as profile_executor.c's in
+             * its own not-RUNNING branch: a state that is not running must
+             * not be holding the safety processor's permission to heat,
+             * whether or not the transition that got here remembered to
+             * release it. Sends at most one frame -- heat_enable_release()
+             * only puts anything on the wire on the last-claimant edge. */
+            heat_enable_release(HEAT_ENABLE_CLAIMANT_AUTOTUNE);
             xSemaphoreGive(s_at.lock);
             continue;
         }
@@ -1136,6 +1153,22 @@ static bool begin_run_locked(uint8_t zone_index, char *err_msg, size_t err_cap)
         .frozen_window_s = frozen_window_s,
     };
     thermal_guard_reset(&s_at.guard_state);
+
+    /* Ask the safety processor to permit heating -- i.e. close K4. Missing
+     * until 2026-08-29 (see heat_enable.h): every autotune this firmware has
+     * ever run drove its own zone relay against an open K4, so the element
+     * never carried current and every fit was made against a trace of a kiln
+     * that was never heated. Placed here, at the end of begin_run_locked(),
+     * because every refusal above has already returned and both callers
+     * (autotune_engine_run/_run_relay) go straight from here to setting a
+     * running state.
+     *
+     * The return is not checked, and that is not the danger_mode.c mistake
+     * repeated: the ONLY failure is a down safety link, which
+     * relay_authority_on_blocked() above already refused this start over, and
+     * heat_enable_reconcile() (profile_executor.c's watchdog task) retries a
+     * link that drops and returns mid-run. heat_enable.c logs it loudly. */
+    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_AUTOTUNE);
 
     TickType_t now = xTaskGetTickCount();
     s_at.phase_start_tick = now;
