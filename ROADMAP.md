@@ -938,9 +938,34 @@ the board. That is a sequencing decision, not a reason to soften the refusal.
       path, which is a live front end, not part of this cleanup. This pass
       corrected the stale registered-tool counts left behind (135 -> 127 in
       `CLAUDE.md`, `docs/MCP_SERVERS.md`, `mcp_server.py`, `mcpkit/__init__.py`)
-- [ ] **An uncommissioned safety processor refuses heating enable** — the
-      owner's answer was an unqualified NO. **Last**, per the ordering note
-      above
+- [x] **An uncommissioned safety processor refuses heating enable** — the
+      owner's answer was an unqualified NO. Shipped 2026-08-28 (`5cd56b6`),
+      last, per the ordering note above. **Commissioned** now means two
+      facts that must agree: the `calibration_missing` verdict `COMMIT_CONFIG`
+      persisted, AND `config_params_all_required_set()` recomputed from
+      `fields_set` (the eight no-safe-default fields — `tc_source`,
+      `borrowed_zone_index`, `tc_placement_mode`, `abs_max_temp_c`,
+      `ct_channel_map`, `max_rate_c_per_min`, `mains_voltage_v`, `tc_type`).
+      Any disagreement, in either direction, refuses — a stored flag the bits
+      do not back up, or a v1→v2-migrated record whose flag is forced true.
+      Plausible values never count: only an explicit `SET_PARAM` +
+      `COMMIT_CONFIG` sets a bit. **The guard lives on the safety processor**,
+      not in the KilnFW UI: `firmware/SaftyFW/src/commissioning_gate.c` (pure,
+      host-tested) consulted by `safety_core_request_enable()` on the ON
+      direction only, beside the update interlock and the `safety_tc_installed`
+      refusal — `SAFETY_CMD_REQUEST_ENABLE(1)` never reaches
+      `relay_owner_command_energize()`, while de-energizing is never gated.
+      This closes the 2026-08-24 bench finding: an uncommissioned board has
+      `abs_max_temp_c == 0`, so S1 can never trip, and S8 ships disabled —
+      heat was being granted with no absolute ceiling in force. **No new fault
+      source or wire field**: the condition already travels as Frame B's
+      `CALIBRATION_MISSING` bit, which KilnFW shows as `commissioned:false` on
+      the commissioning page and as the FAIL of the "Safety processor
+      commissioned" readiness item a firing start is already blocked on; the
+      Pico logs `request_enable: refused: safety processor not commissioned`.
+      Accepted cost, exactly as `SaftyFW/TODO.md` predicted: a never-
+      commissioned bench board cannot close K4 until a real commissioning pass
+      lands
 
 Added 2026-08-28, same conversation — these are about making the commissioning
 surface usable rather than merely correct:
