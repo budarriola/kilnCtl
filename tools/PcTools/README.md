@@ -252,6 +252,76 @@ passes `use_ct_map_backup=True` (a host-test scenario, or a deliberate
 exercise of `commissioning_gate.c`'s accept path). The real map comes from the
 zone current-sweep on the zones page once CTs exist.
 
+## Live-bench test harness (pytest)
+
+`tests/bench_fixture_session.py` is the reusable precondition the live tests
+were missing: **"the board is sitting on `config_presets/bench_fixture.json`,
+and that has been read back and confirmed."** `tests/conftest.py` exposes it
+as pytest fixtures, so the next live test that needs a known starting config
+(zone PID behavior, autotune, dashboard reporting) takes one argument instead
+of re-deriving what the board was configured with.
+
+```
+# host-only, the default -- no hardware, nothing skipped silently
+python -m pytest tools/PcTools/tests -q
+
+# including the live-bench tests
+KILNCTRL_BENCH_HOST=192.168.1.156 python -m pytest tools/PcTools/tests -q -s
+```
+
+Without `KILNCTRL_BENCH_HOST` every live test **skips**; there is no mock
+standing in for the board.
+
+| Fixture | Scope | What it gives you |
+|---|---|---|
+| `bench_host_addr` | session | the address, or a skip |
+| `bench_session` | session | a `BenchSession` whose zones + safety config were written **and verified** once |
+| `bench` | function | the same session plus a `finally` teardown that force-stops the executor and asserts every relay is off |
+
+Writes go over HTTP (`/api/zones`, `/api/safety/commissioning`) reusing the
+same read-back-verifying clients `load_config_preset` uses -- no second,
+weaker verifier lives in the harness. PID gains and the thermal model have no
+HTTP setter, so they are written only when the COM port happens to be free;
+the MCP server normally owns it, and `BenchSession.uart_available` /
+`uart_detail` record which happened rather than letting a test believe it
+applied gains it never wrote. A true from-blank reset is still the MCP tool
+`factory_default_then_load_preset` (`POST /api/factory_reset` is
+challenge-response authenticated); this harness is the apply-and-verify step
+that follows it.
+
+**Everything is bounded to 80 °C by four independent checks**: the preset's
+own `max_temp_c`/`abs_max_temp_c`, `_assert_preset_is_bench_safe()` refusing a
+preset edit that raised either, `put_profile()` refusing to author a segment
+above the ceiling, and `assert_within_fixture_ceiling()` reading live
+temperatures before anything that could add heat. Each was proven capable of
+failing before being trusted.
+
+### `tests/test_live_bench_firing.py`
+
+The firing-adjacent regression test. It authors a bounded 45 °C / 1-minute
+profile into user slot 7, starts it through **the same
+`POST /api/profile_exec/start` the dashboard's Start button posts to**, and
+branches on the board's own live commissioning verdict
+(`heat_is_permitted()`), never on a hardcoded expectation:
+
+* **Heat not permitted (today** -- no CT is fitted, `ct_channel_map[0..2]` is
+  uncommitted, so `commissioning_gate.c` reports `calibration_missing`**)**:
+  the start endpoint itself is *accepted* -- measured, not assumed; the gate
+  is downstream of `profile_executor.c` -- so the test asserts the stronger
+  thing: for the whole time the executor believes it is firing, **no relay
+  ever energizes and `safety_heating_enabled` stays false**. That is a
+  regression test for the gate working, not for it existing.
+* **Heat permitted** (after the CTs are fitted and the zone current-sweep
+  commits a *measured* map): the same test runs the profile, checks the
+  setpoint stays inside the ceiling, stops it, and confirms relays return to
+  off. **No edit to this file is needed on that day.**
+
+Also here: `test_known_good_config_landed` (config verified against a fresh
+read of the live board, not against the writer's own say-so) and
+`test_dashboard_status_consistent_with_known_config` (`/api/status` must agree
+with the config that was just confirmed -- the "consumer without a producer"
+defect class caught from outside).
+
 ## Generic button press (MCP)
 
 Every bespoke tool (`thermo_read`, `io_set_relay`, ...) also has a same-named

@@ -300,6 +300,22 @@ soldering session.
       applies only on an explicit `use_ct_map_backup=True`. Readiness still
       reports "Safety processor commissioned" as not-done, correctly, until
       the CTs are fitted and the zone current-sweep derives the real map
+- [~] **Live-bench regression suite built on that preset** (2026-08-28):
+      `tools/PcTools/tests/bench_fixture_session.py` +
+      `tests/conftest.py` turn "start from `bench_fixture.json`, confirmed
+      loaded" into a pytest fixture, and
+      `tests/test_live_bench_firing.py` runs a real, bounded (45 °C, ≤80 °C
+      ceiling checked four independent ways) firing attempt through the same
+      `POST /api/profile_exec/start` the dashboard's Start button uses. Ran
+      green against the live bench 2026-08-28, 4/4. **What it proves today:**
+      the start endpoint accepts (the gate is downstream of
+      `profile_executor.c`), and with the safety processor not commissioned
+      no relay ever energizes and `safety_heating_enabled` stays false — a
+      regression test for `commissioning_gate.c` working, not for it
+      existing. The test branches on the board's own live verdict, so the day
+      the CTs are fitted and the sweep commits a measured `ct_channel_map` it
+      begins exercising the real heat path with no edit. Skips entirely
+      unless `KILNCTRL_BENCH_HOST` is set; no mock stands in for the board
 - [x] `pc_tools` moved to `tools/PcTools/`; GPIO probes built for both chips
       (ESP: deny-list incl. GPIO6; Pico: over SWD, GPIO6 read-only). **Pico
       probe bench-tested 2026-08-19, PASS.** ESP probe bench-tested 2026-08-19
