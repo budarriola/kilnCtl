@@ -276,6 +276,9 @@ class PresetApplyResult:
 #: not_written accounting doesn't reach into zones_http_client's internals.
 _ZONES_HTTP_ONLY_ZONE_FIELDS = (
     "relay_mask", "control_mode", "max_temp_c", "min_temp_c", "max_ramp_c_per_hr",
+    # 2026-08-29: the guard-1 minimum rise rate. HTTP-only, like the rest --
+    # the UART CONTROL task has no setter for it either.
+    "sanity_rate_c_per_min",
 )
 
 

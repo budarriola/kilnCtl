@@ -57,6 +57,36 @@ class LoadPresetDataTest(unittest.TestCase):
         for zone in preset["zones"]:
             self.assertEqual(zone["max_temp_c"], 80.0)
 
+    def test_bench_fixture_carries_the_slow_jig_dead_element_rate(self):
+        """thermal_guard.c guard 1's minimum rise rate, per zone.
+
+        The board shipped with 5.0 C/min on zone 0 -- a real kiln's figure --
+        and every bench firing died at t=62s on "rose only 0.0C in 1.0min
+        (need >=5.0C)" while the jig was genuinely, slowly heating. 0.2 is
+        this fixture's commissioned value. It must be present on EVERY zone
+        (a zone left out silently keeps whatever the board had) and must stay
+        above 0, because 0 would mean "use the firmware default 0.5" and put
+        the same false trip back.
+        """
+        preset = config_presets.load_preset_data("bench_fixture")
+        for zone in preset["zones"]:
+            self.assertEqual(zone["sanity_rate_c_per_min"], 0.2,
+                             f"zone {zone['index']} must carry the jig's 0.2 C/min")
+            self.assertGreater(zone["sanity_rate_c_per_min"], 0.0)
+
+    def test_sanity_rate_is_a_postable_zone_field(self):
+        """...and the preset applier can actually write it: a preset field
+        with no entry in zones_http_client's form-key map is REFUSED by
+        build_post_body(), not silently dropped, so this is the check that
+        the preset value reaches the board at all."""
+        self.assertIn("sanity_rate_c_per_min", zones_http_client._ZONE_FIELD_FORM_KEY)
+        body = zones_http_client.build_post_body(
+            {"thermo_count": 3, "relay_count": 3,
+             "timing_profiles": [{"index": 0, "name": "Default"}],
+             "zones": [{"index": 0, "sanity_rate_c_per_min": 5.0}]},
+            {"zones": [{"index": 0, "sanity_rate_c_per_min": 0.2}]})
+        self.assertIn("z0_sanity=0.2", body)
+
     def test_missing_preset_raises(self):
         with self.assertRaises(config_presets.ConfigPresetError):
             config_presets.load_preset_data("does_not_exist")

@@ -335,6 +335,14 @@ _PRESET_ZONE_OVERRIDE_FIELDS = {
     # inherit. A preset that DOES set it below 10000 is refused by the board,
     # by design -- see zones_http.h's ZONE_HEATER_MIN_ON_MS_FLOOR.
     "heater_min_on_ms",
+    # 2026-08-29: sanity_rate_c_per_min, thermal_guard.c guard 1's minimum
+    # rise rate (the dead-element check). Same reasoning as heater_min_on_ms
+    # above: it is a per-bench physical property -- how fast THIS jig can
+    # actually heat -- so a preset that pins a bench has to carry it, and
+    # this bench's 5.0 C/min (a real kiln's figure) killed every firing at
+    # t=62s. Also deliberately not in _REQUIRED_ZONE_FIELDS: a preset that
+    # omits it still echoes the board's value back unchanged.
+    "sanity_rate_c_per_min",
 }
 
 
