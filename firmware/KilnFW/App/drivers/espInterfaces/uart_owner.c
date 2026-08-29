@@ -10,7 +10,19 @@ static const char *TAG = "uart_owner";
  * unstuffed, up to ~2x that if every byte happened to need escaping) so a
  * burst -- e.g. the uart_log_bridge boot-time backlog, or many DATA/ACK
  * frames arriving back-to-back -- can't overrun the driver's ring buffer
- * before the owner/protocol tasks get a chance to drain it. */
+ * before the owner/protocol tasks get a chance to drain it.
+ *
+ * NOT the same thing as UART_PROTOCOL_RX_CHUNK_BYTES (2048), and deliberately
+ * not equal to it. This ring is filled by the ESP-IDF driver's own ISR and
+ * emptied by uart_protocol_rx_task(); it must be big enough to absorb
+ * everything that can arrive while that task is descheduled, so it is sized
+ * against SCHEDULING DELAY at a priority below WiFi's. The chunk buffer is
+ * sized against how much of that backlog ONE wakeup should hand up, so it is
+ * sized against frame size. Keeping the ring at 2x the chunk means a single
+ * read can never be the thing that empties it while more is still landing;
+ * lowering it to 2048 to "match" would only shrink the overrun margin the
+ * comment above is about, and buy nothing. Reviewed 2026-08-28 when the chunk
+ * moved 528 -> 2048; left at 4096 on purpose. */
 #define UART_OWNER_RX_RING_BUF_SIZE 4096
 #define UART_OWNER_TX_RING_BUF_SIZE 4096
 #define UART_OWNER_EVENT_QUEUE_LEN  16

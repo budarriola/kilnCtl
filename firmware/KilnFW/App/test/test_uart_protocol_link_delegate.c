@@ -31,6 +31,12 @@
 
 #include "kilnlink/kilnlink_frame.h"
 
+/* The RX read-buffer sizing constant, from the REAL header (the stub
+ * uart_protocol.h in test/stubs/ is a different file and is not what the
+ * firmware compiles). Included here rather than in a new executable because
+ * this file is already the one that owns uart_protocol.c's framing sizes. */
+#include "../drivers/espInterfaces/uart_protocol.h"
+
 static int g_failures = 0;
 
 #define CHECK(cond, msg)                                                    \
@@ -172,10 +178,38 @@ static void test_known_frame_wire_bytes(void)
     }
 }
 
+/* The RX buffer must always hold at least one worst-case stuffed frame, and
+ * -- since 2026-08-28, at the owner's request -- a whole 2 kB of read
+ * headroom above that. Recomputed here from the wire constants rather than
+ * copied, so shrinking UART_PROTO_MAX_PAYLOAD's ceiling or changing the
+ * header length can never quietly make the buffer too small for one frame.
+ *
+ * This pins a NUMBER, which is only meaningful next to the invariant that
+ * makes the number safe: the read must never wait on this buffer filling
+ * (LINK_PROTOCOL.md, "Never wait on a receive buffer filling"). A host test
+ * cannot assert the shape of an ESP-IDF read, so that half stays a
+ * documented rule plus a comment at the call site -- but if someone shrinks
+ * the buffer back toward one frame, they will trip this and read that rule
+ * on the way past. */
+static void test_rx_chunk_sizing(void)
+{
+    const unsigned raw_max = KILNLINK_FRAME_HEADER_LEN + 253u + 2u;
+    const unsigned stuffed_max = raw_max * 2u + 2u;
+
+    CHECK(stuffed_max == 528u, "worst-case stuffed frame is still 528 bytes");
+    CHECK(UART_PROTOCOL_RX_CHUNK_BYTES >= stuffed_max,
+          "RX chunk holds at least one worst-case stuffed frame");
+    CHECK(UART_PROTOCOL_RX_CHUNK_BYTES == 2048u,
+          "RX chunk is the 2 kB the owner asked for (2026-08-28)");
+    CHECK(UART_PROTOCOL_RX_CHUNK_BYTES / stuffed_max >= 3u,
+          "RX chunk carries several back-to-back frames per wakeup");
+}
+
 int main(void)
 {
     test_required_cases();
     test_known_frame_wire_bytes();
+    test_rx_chunk_sizing();
 
     if (g_failures == 0) {
         printf("ALL PASS: uart_protocol.c's deleted CRC/framing wrappers == "

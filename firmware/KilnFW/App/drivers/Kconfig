@@ -534,8 +534,16 @@ menu "KilnCtrl Hardware Configuration"
 
         config KILNCTL_UART_PROTOCOL_STACK_SIZE
             int "uart_protocol RX task stack size (bytes)"
-            default 6144
+            default 8192
             help
+                Raised 6144 -> 8192 on 2026-08-28, second move the same
+                day: chunk[] grew again, STUFFED_FRAME_MAX (528) ->
+                UART_PROTOCOL_RX_CHUNK_BYTES (2048), at the owner's
+                request. That is +1520 bytes of stack, and the whole point
+                of the 6144 note below is that the stack must move WITH the
+                locals rather than after the crash. 8192 restores roughly
+                the ~3 kB free the 6144 bump bought.
+
                 Raised 4096 -> 6144 on 2026-08-28. uart_protocol_rx_task's
                 chunk[] buffer grew from 32 bytes to STUFFED_FRAME_MAX
                 (~530) to fix a live commissioning defect -- page 1 of a

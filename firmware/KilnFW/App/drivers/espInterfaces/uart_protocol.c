@@ -32,6 +32,12 @@ static const char *TAG = "uart_proto";
 /* Stuffing can at most double the bytes, plus two delimiters. */
 #define STUFFED_FRAME_MAX (RAW_FRAME_MAX * 2u + 2u)
 
+/* The RX read buffer is deliberately LARGER than one worst-case frame (see
+ * UART_PROTOCOL_RX_CHUNK_BYTES in uart_protocol.h), but it may never be
+ * smaller, or a single frame could need two reads purely for want of room. */
+_Static_assert(UART_PROTOCOL_RX_CHUNK_BYTES >= STUFFED_FRAME_MAX,
+               "RX chunk must hold at least one worst-case stuffed frame");
+
 /* One no-reply warning per 5s per protocol instance (see uart_protocol.h). */
 #define RETRY_LOG_INTERVAL_US 5000000
 
@@ -361,12 +367,18 @@ static void uart_protocol_rx_task(void *arg)
      *     timeout, so the bound is a shutdown-noticing tick, not added
      *     latency.
      *
+     * 2026-08-28 (third pass): the buffer was raised again, 528 ->
+     * UART_PROTOCOL_RX_CHUNK_BYTES (2048), at the owner's request. That is
+     * headroom, not a fix -- with the read shape below, capacity only sets
+     * how many bytes ONE wakeup may carry (now up to ~4 back-to-back frames
+     * instead of one), and never how long an arrived byte waits.
+     *
      * Read latency is therefore governed by arrival, not by capacity, which
      * is the invariant to preserve if this loop is ever reworked again (DMA
      * included): a receiver may schedule against a buffer far larger than the
      * frame it is about to get, but it must never wait on that buffer
      * filling. */
-    uint8_t chunk[STUFFED_FRAME_MAX];
+    uint8_t chunk[UART_PROTOCOL_RX_CHUNK_BYTES];
     uint8_t raw[RAW_FRAME_MAX];
     size_t raw_len = 0;
     bool in_frame = false;

@@ -56,6 +56,29 @@ extern "C" {
  * the worst case if uart_get_buffered_data_len() ever under-reports. See that
  * function's own comment for the live incident that fixed the read shape. */
 #define UART_PROTOCOL_RX_IDLE_POLL_MS 100u
+
+/* Capacity of uart_protocol_rx_task()'s read buffer. RAISED 528
+ * (STUFFED_FRAME_MAX, the worst-case stuffed frame) -> 2048 on 2026-08-28 at
+ * the owner's request, as headroom rather than as a fix for anything.
+ *
+ * This is safe to grow ONLY because the read no longer waits on it filling
+ * (see uart_protocol_rx_task()'s comment and LINK_PROTOCOL.md's "Never wait
+ * on a receive buffer filling"): the task asks uart_get_buffered_data_len()
+ * first and reads min(buffered, capacity) with a ZERO timeout, so latency is
+ * governed by arrival and capacity only sets how many bytes one wakeup may
+ * carry. At 528 that was already a whole frame per read; at 2048 it is up to
+ * ~4 back-to-back frames, which is what a burst after a scheduling delay
+ * actually looks like. If this loop is ever reworked so the buffer size and
+ * the wait are coupled again, this constant becomes a latency bug -- that
+ * coupling, not the number, is the thing to police.
+ *
+ * MUST stay >= STUFFED_FRAME_MAX (uart_protocol.c static-asserts it), so one
+ * frame can never be split across reads purely for want of capacity.
+ *
+ * It lives on the RX task's stack, which is why
+ * CONFIG_KILNCTL_UART_PROTOCOL_STACK_SIZE moved with it (App/drivers/Kconfig
+ * and sdkconfig both -- sdkconfig is gitignored and wins). */
+#define UART_PROTOCOL_RX_CHUNK_BYTES 2048u
 #define UART_PROTO_DEFAULT_ACK_TIMEOUT_MS 200
 /* Raised 8 -> 16 (2026-08-13) when uart_task_ids.h grew task_ids 8-11
  * (CONTROL/PROFILES/AUTOTUNE/WIFI): this board's own ESP-side registrations

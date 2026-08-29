@@ -284,6 +284,20 @@ no resync, no drop, just late frames.
   by `UART_PROTOCOL_RX_IDLE_POLL_MS` (100 ms) — so the wait ends on the next
   frame's first byte, and the bound is a shutdown-noticing tick rather than
   added latency.
+
+**The ESP side has two buffers, sized for different things.** They are not
+interchangeable and neither number should be "matched" to the other:
+
+| Buffer | Size | Sized against |
+| --- | --- | --- |
+| `UART_OWNER_RX_RING_BUF_SIZE` (`uart_owner.c`, the `uart_driver_install()` ring) | 4096 | **Scheduling delay.** The IDF driver's ISR fills it; `uart_protocol_rx_task()` runs at priority 6, below WiFi. It must absorb everything that can land while that task is descheduled. |
+| `UART_PROTOCOL_RX_CHUNK_BYTES` (`uart_protocol.h`, the task's stack buffer) | 2048 | **Frame size.** How much of the backlog one wakeup hands up. Must be ≥ one worst-case stuffed frame (528); above that it is headroom, ~4 back-to-back frames. |
+
+Raised 528 → 2048 on 2026-08-28 at the owner's request. Growing it is only
+safe because of the rule above — with the read decoupled from the buffer
+filling, capacity sets how many bytes a wakeup may carry and never how long
+an arrived byte waits. It lives on the RX task's stack, so
+`CONFIG_KILNCTL_UART_PROTOCOL_STACK_SIZE` moved with it (6144 → 8192).
 - **Pico (`SaftyFW`, `tasks/uart_owner.c` + `tasks/link_task.c`)** — the RX
   interrupt drains the UART FIFO into a fixed ring on every character, and
   `link_task` polls that ring every `LINK_TASK_POLL_MS` (10 ms). The buffer
