@@ -173,6 +173,26 @@ static void stage_page_with_one_unset(size_t page_idx, bool more, const uint16_t
     s_stub_pages[page_idx].entries[unset_index].set = false;
 }
 
+// Table POSITION of a param id, resolved at run time rather than hardcoded.
+// 2026-08-29 fix: every test below used to name overshoot_time_s (0x0203) as
+// "index 10" and rate_window_s (0x0205) as "index 12" -- true when they were
+// written, and silently wrong from commit babbfdd on, which inserted
+// ct_installed (0x0109) in the middle of SAFETY_CFG_PARAM_TABLE and pushed
+// both down by one. Five checks in this file then failed for the whole time
+// that went unfixed. Asking the table where a field lives, instead of
+// restating a number that only the table actually owns, makes these tests
+// survive the next insertion -- and index_for_id() itself is pinned
+// independently by test_index_for_id_finds_known_and_rejects_unknown().
+static size_t idx_of(uint16_t param_id)
+{
+    int idx = index_for_id(param_id);
+    assert(idx >= 0 && "test names a param id SAFETY_CFG_PARAM_TABLE does not carry");
+    return (size_t)idx;
+}
+
+#define IDX_OVERSHOOT_TIME_S idx_of(0x0203)
+#define IDX_RATE_WINDOW_S    idx_of(0x0205)
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -234,7 +254,7 @@ static void test_refetch_when_crc_changes(void)
     uint16_t ids[] = { 0x0101 };  // tc_source, table index 0, but table row is U8 -- value ignored by
                                   // this stub page (U16-only helper); use a U16 field instead below.
     (void)ids;
-    uint16_t ids2[] = { 0x0203 }; // overshoot_time_s (U16), table index 10
+    uint16_t ids2[] = { 0x0203 }; // overshoot_time_s (U16)
     uint16_t vals2[] = { 42 };
     stage_page(0, false, ids2, vals2, 1);
 
@@ -249,8 +269,8 @@ static void test_refetch_when_crc_changes(void)
     TEST_CHECK(safety_cfg_store_cached_crc() == 0x0002, "cached_crc now matches the fetched live CRC");
 
     safety_cfg_param_t p;
-    TEST_CHECK(safety_cfg_store_get_by_index(10, &p) && p.set && p.value.u16_val == 42,
-               "overshoot_time_s (index 10) picked up the fetched value");
+    TEST_CHECK(safety_cfg_store_get_by_index(IDX_OVERSHOOT_TIME_S, &p) && p.set && p.value.u16_val == 42,
+               "overshoot_time_s picked up the fetched value");
     TEST_CHECK(safety_cfg_store_get_by_index(0, &p) && !p.set,
                "tc_source (index 0), NOT present in the fetched page, reads back as unset -- "
                "the whole cache was replaced, not merged with the stale entry that used to be there");
@@ -317,7 +337,7 @@ static void test_refetch_carries_unset_bit_through_not_unconditional_true(void)
                  "never promoted to set=true (defect d, 2026-08-27 audit)");
     reset_all();
 
-    uint16_t ids[] = { 0x0203, 0x0205 }; // overshoot_time_s (index 10), rate_window_s (index 12)
+    uint16_t ids[] = { 0x0203, 0x0205 }; // overshoot_time_s, rate_window_s
     uint16_t vals[] = { 42, 99 };
     // index 0 of THIS page (0x0203/overshoot_time_s) is the Pico's answer for
     // an UNSET no-safe-default field in this test -- the numeric value (42)
@@ -332,10 +352,10 @@ static void test_refetch_carries_unset_bit_through_not_unconditional_true(void)
     TEST_CHECK(ok == true, "the refetch itself succeeds -- an unset entry is not a decode error");
 
     safety_cfg_param_t p;
-    TEST_CHECK(safety_cfg_store_get_by_index(10, &p) && p.set == false,
+    TEST_CHECK(safety_cfg_store_get_by_index(IDX_OVERSHOOT_TIME_S, &p) && p.set == false,
                "the entry the Pico reported UNSET reads back set=false from the ESP cache -- "
                "NOT unconditionally promoted to true the way it used to be");
-    TEST_CHECK(safety_cfg_store_get_by_index(12, &p) && p.set == true && p.value.u16_val == 99,
+    TEST_CHECK(safety_cfg_store_get_by_index(IDX_RATE_WINDOW_S, &p) && p.set == true && p.value.u16_val == 99,
                "the OTHER entry on the same page, which the Pico DID report set, is unaffected -- "
                "the bit is per-entry, not page-wide");
 }
@@ -361,10 +381,10 @@ static void test_refetch_pages_until_more_is_false(void)
     TEST_CHECK(ok == true, "a two-page fetch with more=1 then more=0 succeeds");
     TEST_CHECK(s_stub_get_config_page_calls == 2, "exactly two pages were requested, not more, not fewer");
     safety_cfg_param_t p;
-    TEST_CHECK(safety_cfg_store_get_by_index(10, &p) && p.set && p.value.u16_val == 100,
+    TEST_CHECK(safety_cfg_store_get_by_index(IDX_OVERSHOOT_TIME_S, &p) && p.set && p.value.u16_val == 100,
                "page 0's entry landed");
-    TEST_CHECK(safety_cfg_store_get_by_index(12, &p) && p.set && p.value.u16_val == 200,
-               "page 1's entry landed too (index 12 == rate_window_s, 0x0205)");
+    TEST_CHECK(safety_cfg_store_get_by_index(IDX_RATE_WINDOW_S, &p) && p.set && p.value.u16_val == 200,
+               "page 1's entry landed too (rate_window_s, 0x0205)");
 }
 
 static void test_refetch_unknown_id_is_skipped_not_fatal(void)
@@ -384,7 +404,7 @@ static void test_refetch_unknown_id_is_skipped_not_fatal(void)
     TEST_CHECK(ok == true, "an unrecognised id in the page does not fail the whole refetch "
                            "(COMMISSIONING.md sec 2's version-tolerance)");
     safety_cfg_param_t p;
-    TEST_CHECK(safety_cfg_store_get_by_index(10, &p) && p.set && p.value.u16_val == 7,
+    TEST_CHECK(safety_cfg_store_get_by_index(IDX_OVERSHOOT_TIME_S, &p) && p.set && p.value.u16_val == 7,
                "the recognised id in the same page still landed");
 }
 
@@ -395,8 +415,8 @@ static void test_refetch_failure_leaves_cache_untouched(void)
 
     // Seed a "previous, good" cache.
     s_store.config_crc = 0x00AA;
-    s_store.entries[10].set = 1;
-    s_store.entries[10].value.u16_val = 111;
+    s_store.entries[IDX_OVERSHOOT_TIME_S].set = 1;
+    s_store.entries[IDX_OVERSHOOT_TIME_S].value.u16_val = 111;
 
     s_stub_fail_at_page = 0;
     s_stub_page_err = ESP_ERR_TIMEOUT;
@@ -411,7 +431,7 @@ static void test_refetch_failure_leaves_cache_untouched(void)
                "cached_crc is UNCHANGED -- an interrupted refetch must never leave a half-updated "
                "cache with no way to tell old data from new");
     safety_cfg_param_t p;
-    TEST_CHECK(safety_cfg_store_get_by_index(10, &p) && p.set && p.value.u16_val == 111,
+    TEST_CHECK(safety_cfg_store_get_by_index(IDX_OVERSHOOT_TIME_S, &p) && p.set && p.value.u16_val == 111,
                "the previously-cached value at index 10 is still exactly what it was");
 }
 
@@ -557,8 +577,8 @@ static void test_refetch_aborts_when_wall_clock_budget_exhausted(void)
     // Seed a previous good cache so a "left unchanged" claim is actually
     // checked, not vacuously true because the cache started empty.
     s_store.config_crc = 0x00AA;
-    s_store.entries[10].set = 1;
-    s_store.entries[10].value.u16_val = 111;
+    s_store.entries[IDX_OVERSHOOT_TIME_S].set = 1;
+    s_store.entries[IDX_OVERSHOOT_TIME_S].value.u16_val = 111;
 
     // Each simulated page "costs" 1.3s of wall clock -- comfortably inside
     // SAFETY_LINK_REPLY_TIMEOUT_MS's real ~1.2s worst case (this is what a
@@ -581,7 +601,7 @@ static void test_refetch_aborts_when_wall_clock_budget_exhausted(void)
                "the previous cache is untouched by an aborted-for-budget refetch, same as any "
                "other failed refetch");
     safety_cfg_param_t p;
-    TEST_CHECK(safety_cfg_store_get_by_index(10, &p) && p.set && p.value.u16_val == 111,
+    TEST_CHECK(safety_cfg_store_get_by_index(IDX_OVERSHOOT_TIME_S, &p) && p.set && p.value.u16_val == 111,
                "the previously-cached value survives the aborted refetch intact");
 }
 
@@ -733,6 +753,54 @@ static void test_nvs_save_store_proceeds_normally_on_an_internal_ram_stack(void)
     nvs_test_enable(false); // leave the shared stub state as every other test in this binary expects
 }
 
+// 2026-08-29 fix. SAFETY_CFG_PARAM_TABLE's row order IS the on-flash layout
+// (entries[] is indexed by table position), so an id inserted anywhere but the
+// very bottom shifts every row below it and remaps each already-persisted
+// value onto the wrong field. Commit babbfdd did exactly that with
+// ct_installed (0x0109) at the end of sec 1 and left SAFETY_CFG_STORE_VERSION
+// at 1. Bumping it to 2 is what makes nvs_load_store() refuse the old layout
+// for its real reason rather than incidentally (that commit also changed the
+// blob's SIZE, which the length check happened to catch -- an insertion that
+// replaced a row instead of adding one would not have been caught at all).
+// This must be able to FAIL: against VERSION==1 the v1 blob below is
+// "current version, right size" and loads, and the last two checks go red.
+static void test_version_refuse_older_layout_without_a_migration(void)
+{
+    TEST_SECTION("nvs_load_store -- a blob from the PRE-ct_installed table layout is refused, "
+                 "not loaded one slot out of register");
+    reset_all();
+    nvs_test_enable(true);
+
+    // A v1 blob, hand-built: same struct shape (only one layout has ever
+    // shipped), version byte stamped 1, carrying a value in the slot that
+    // WAS overshoot_time_s before 0x0109 pushed the whole tail down by one.
+    safety_cfg_store_blob_t v1;
+    memset(&v1, 0, sizeof(v1));
+    v1.version = 1u;
+    v1.config_crc = 0x4321;
+    size_t stale_slot = IDX_OVERSHOOT_TIME_S - 1; // where v1 kept overshoot_time_s
+    v1.entries[stale_slot].set = 1;
+    v1.entries[stale_slot].value.u16_val = 321;
+    memcpy(s_stub_nvs_blob, &v1, sizeof(v1));
+    s_stub_nvs_blob_len = sizeof(v1);
+    s_stub_nvs_has_blob = true;
+
+    TEST_CHECK(SAFETY_CFG_STORE_VERSION > 1u,
+               "the table-order change that moved overshoot_time_s bumped the on-flash version -- "
+               "without this, the blob below is indistinguishable from a current one");
+
+    nvs_load_store();
+
+    TEST_CHECK(s_store.config_crc == 0,
+               "the pre-insert blob was refused wholesale -- an empty cache, refilled by the next "
+               "refetch from the Pico, beats a full one whose every sec 2-5 value names the wrong field");
+    safety_cfg_param_t p;
+    TEST_CHECK(safety_cfg_store_get_by_index(stale_slot, &p) && !p.set,
+               "nothing from the old layout leaked in at its old slot either");
+
+    nvs_test_enable(false);
+}
+
 void run_test_safety_cfg_store(void)
 {
     test_index_for_id_finds_known_and_rejects_unknown();
@@ -753,5 +821,6 @@ void run_test_safety_cfg_store(void)
     test_unset_param_reports_set_false();
     test_lookup_by_id();
     test_version_refuse_newer_than_firmware();
+    test_version_refuse_older_layout_without_a_migration();
     test_init_does_not_stamp_fetch_time_for_an_nvs_loaded_cache();
 }

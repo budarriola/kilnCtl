@@ -41,8 +41,31 @@ static const char *TAG = "safety_cfg_store";
 #define NVS_KEY_SAFETY_CFG "safetycfg"
 
 /* Bump whenever safety_cfg_store_blob_t's on-flash layout changes -- mirrors
- * ZONES_CFG_VERSION/KILN_CFG_STORE_VERSION's role in their own files. */
-#define SAFETY_CFG_STORE_VERSION 1u
+ * ZONES_CFG_VERSION/KILN_CFG_STORE_VERSION's role in their own files.
+ *
+ * SAFETY_CFG_PARAM_TABLE's ROW ORDER is part of that layout, not merely a
+ * display order: entries[] is indexed by table position, so inserting a row
+ * anywhere but the very end shifts every row after it and silently remaps
+ * each already-persisted value onto the WRONG field on the next load -- the
+ * exact hazard that table's own header comment warns about.
+ *
+ * 1 -> 2 (2026-08-29): commit babbfdd inserted ct_installed (0x0109) at the
+ * end of sec 1, i.e. in the MIDDLE of the array, without bumping this. Every
+ * v1 blob on flash therefore describes sec 2-5 (firing_margin_c onward) one
+ * slot below where this build's table looks for it.
+ *
+ * BE PRECISE ABOUT WHAT SAVED US: that same commit also took
+ * SAFETY_CFG_PARAM_COUNT 64 -> 65, so a v1 blob is a different SIZE, and
+ * nvs_load_store()'s `len != sizeof(loaded)` check already refused it as
+ * unreadable -- no board has actually served remapped values. That is luck,
+ * not design: an insertion that REPLACED a row (count unchanged) would have
+ * the identical remap with a byte-identical size and would sail straight
+ * through. This bump makes the refusal principled rather than incidental --
+ * nvs_load_store()'s "older version, no migration path" branch now rejects
+ * v1 for the actual reason it is unusable, and the next
+ * safety_cfg_store_refetch() refills the empty cache from the Pico, which is
+ * the authority on every one of these values anyway. */
+#define SAFETY_CFG_STORE_VERSION 2u
 
 /* CONFIG_REFERENCE.md secs 1-5 / COMMISSIONING.md sec 2.1's param_id table,
  * in that document's own order -- table POSITION is what
@@ -50,7 +73,13 @@ static const char *TAG = "safety_cfg_store";
  * entries[] array is indexed by, so this order must never be reshuffled
  * (only ever appended to) once any board has saved a cache against it: doing
  * so would silently remap every already-cached value to the WRONG field on
- * next load. Ids themselves are the permanent identity on the wire
+ * next load. "Only ever appended to" means appended to the END OF THE ARRAY,
+ * not to the end of a SECTION: adding an id at the tail of sec 1 to keep the
+ * numeric grouping tidy is still a mid-array insert, and is exactly how
+ * SAFETY_CFG_STORE_VERSION came to need its 1 -> 2 bump (see that constant).
+ * If a new id must be grouped with an existing section for readability, it
+ * goes at the bottom of this table anyway and the version gets bumped. Ids
+ * themselves are the permanent identity on the wire
  * (COMMISSIONING.md sec 2.1: "ids are permanent"); this table's row order is
  * this cache's OWN, separate permanence rule for the identical reason. */
 typedef struct {
