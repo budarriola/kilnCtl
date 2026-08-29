@@ -116,7 +116,7 @@
      there for all six pages -- halving to 36px directly contradicts it, and
      that conflict is real, not a rule I can quietly route around. Scoped to
      #runBtn only (not .run-btn generally, which would also shrink Pause/
-     Resume/Stop in the exec card -- not asked for and not done here), and
+     Resume in the exec card -- not asked for and not done here), and
      kept out of theme.css entirely so the other five pages' plain `button`
      rule and every other button on THIS page are unaffected. To claw back
      some of the lost tap area without growing the visible button back
@@ -269,7 +269,7 @@
      ui_page_home.c's own ordering (profile summary before zone rows -- see
      that file's header comment on what stayed on the LCD's home page and in
      what order). The history graph in between has no LCD equivalent to
-     match: ui_page_home.c's own header comment says the desired-vs-actual
+     match: ui_page_home.c's own header comment says the target-vs-actual
      chart was moved OFF the LCD's home page entirely, to ui_page_history.c,
      because it didn't fit that screen's 264px no-scroll budget -- the web
      dashboard has no such budget, so item 9 places it here explicitly
@@ -854,9 +854,13 @@ function renderChartMeta(mode, opts) {
   var items = [];
   if (mode === 'running') {
     items.push(chartLegendItem('#e63', 'actual'));
-    items.push(chartLegendItem('#888', 'desired'));
+    // 2026-08-29: ONE target series, not two. What used to be a separate
+    // grey "desired" row (the recorded commanded setpoint, trailing) and a
+    // purple "planned" row (the forward preview) are now the same line --
+    // solid over elapsed time, dashed ahead of now. Only one legend row, and
+    // its label says which half is which when there is a future half.
+    items.push(chartLegendItem('#96c', opts.planShown ? 'planned (dashed ahead of now)' : 'planned'));
     items.push(chartLegendItem('#3a9', 'duty'));
-    if (opts.planShown) items.push(chartLegendItem('#96c', 'planned', true));
     if (opts.guardShown) items.push(chartLegendItem('#c22', 'guard trip'));
     if (opts.freezingShown) items.push(chartLegendItem(opts.faultColor || '#b00', 'freezing (0°C)', true));
     // tMin/actualMaxT are exactly the domain x() maps rows over below --
@@ -931,15 +935,25 @@ function zoneName(zi) {
   return window.kcEscapeHtml(raw);
 }
 
-// -- Planned-profile curve (the third chart series) ----------------------
+// -- Planned-profile curve (the chart's single target series) ------------
 //
 // /api/profile_plan?id=N returns the profile's STRAIGHT-LINE plan
 // (total_planned_s + points[{t,c}], celsius, t = seconds from a
-// hypothetical run start at 0) -- distinct from the "desired" series
-// drawHistoryChart already draws from history.csv, which is the RECORDED
-// setpoint sample-by-sample and only ever traces behind the run. This is
-// the planned curve, drawn ahead of and through the run so the operator can
-// see where the profile is headed, not just where it has been.
+// hypothetical run start at 0).
+//
+// SUPERSEDED 2026-08-29 (owner: "drop desired and modify planned; planned
+// should be the displayed target for that time"). This used to be the third
+// chart series, drawn alongside a separate grey "desired" line taken from
+// history.csv's recorded setpoint column. The two were conceptually
+// distinct -- recorded-commanded vs idealised-plan -- but reading them side
+// by side was just redundant. They are now ONE series labelled "planned":
+// over time already elapsed it plots the RECORDED commanded setpoint (what
+// "desired" used to show, which is the real target at that moment and can
+// legitimately sit behind the idealised plan when ramp-lock holds
+// s_exec.target_c back -- see profile_executor.c's ramp-lock branch), and
+// beyond the last recorded sample it continues with this plan's own points
+// as the preview. Only the future half of the line is dashed, so "recorded"
+// and "projected" stay distinguishable without a second legend row.
 //
 // Cached per profile id (a profile's plan does not change while the page is
 // open -- editing one happens on /profiles, a full page navigation away)
@@ -1303,9 +1317,14 @@ function renderExec(st) {
   } else if (st.state === 'paused') {
     html += '<button class="run-btn primary" id="resumeBtn">Resume</button>';
   }
-  if (st.state === 'running' || st.state === 'paused' || st.state === 'faulted' || st.state === 'done') {
-    html += '<button class="run-btn" id="stopBtn">Stop</button>';
-  }
+  // No Stop button here (removed 2026-08-29, owner: "there is also an extra
+  // start button above the graph that should not be there" -- it renders as
+  // "Stop" while a firing is stoppable). app.js's sticky STOP FIRING bar is
+  // fixed to the bottom of EVERY page and covers exactly the same
+  // running/paused/faulted/done states (its STOPPABLE_STATES) with the same
+  // confirm text and the same POST /api/profile_exec/stop, so this in-card
+  // copy was a second control for one action sitting right above the chart.
+  // Pause/Resume stay: the sticky bar has no equivalent for those.
   html += '</div>';
 
   card.innerHTML = html;
@@ -1313,11 +1332,6 @@ function renderExec(st) {
   if (pauseBtn) pauseBtn.addEventListener('click', function () { execAction('pause'); });
   const resumeBtn = document.getElementById('resumeBtn');
   if (resumeBtn) resumeBtn.addEventListener('click', function () { execAction('resume'); });
-  const stopBtn = document.getElementById('stopBtn');
-  if (stopBtn) stopBtn.addEventListener('click', function () {
-    if (!confirm('Stop this firing now? This aborts the run in progress and cannot be resumed.')) return;
-    execAction('stop');
-  });
 }
 
 function execAction(action) {
@@ -1375,7 +1389,12 @@ function parseHistoryCsv(text) {
     var f = lines[i].split(',');
     if (f.length < 5) continue;
     rows.push({
-      t: parseFloat(f[0]), actual: parseFloat(f[1]), desired: parseFloat(f[2]),
+      // f[2] is history.csv's desired_c column: the setpoint the executor
+      // actually commanded at that sample. Named `target` here because the
+      // chart no longer has a separate "desired" series -- it is the elapsed
+      // half of the single "planned" line. The CSV column keeps its name
+      // (dashboard_http.c) so the downloadable file stays compatible.
+      t: parseFloat(f[0]), actual: parseFloat(f[1]), target: parseFloat(f[2]),
       duty: parseFloat(f[3]), guard: parseInt(f[4], 10),
     });
   }
@@ -1557,12 +1576,12 @@ function drawHistoryChart(rows) {
   var tMin = rows[0].t, tMax = rows[rows.length - 1].t;
   // Planned curve (activePlan, set by pollExec's lastExecPlanId switch keyed
   // off st.profile_id): extend tMax to cover the plan's own future points so
-  // the dashed line draws AHEAD of the run, not just clipped to however far
-  // history.csv has recorded so far -- that's the whole point of showing it
-  // separately from the recorded-desired trace, which only ever traces
-  // behind. planPts is empty if there's no active plan, or the fetch
-  // 404'd/failed (older firmware) -- both collapse to "just draw the usual
-  // two series" further down.
+  // the dashed half of the target line draws AHEAD of the run, not just
+  // clipped to however far history.csv has recorded so far -- that forward
+  // half is the only part of the target line the plan supplies; the elapsed
+  // half comes from the recorded samples. planPts is empty if there's no
+  // active plan, or the fetch 404'd/failed (older firmware) -- both collapse
+  // to "target line stops at now, no dashed preview" further down.
   var planPts = (activePlan && activePlan.points) || [];
   if (planPts.length) {
     var planMaxT = planPts[planPts.length - 1].t;
@@ -1574,7 +1593,7 @@ function drawHistoryChart(rows) {
   var actualVals = []; // genuine sensor readings only -- see freezing-clamp comment below
   rows.forEach(function (r) {
     if (!isNaN(r.actual)) { tempVals.push(r.actual); actualVals.push(r.actual); }
-    if (!isNaN(r.desired)) tempVals.push(r.desired);
+    if (!isNaN(r.target)) tempVals.push(r.target);
   });
   planPts.forEach(function (p) { tempVals.push(p.c); });
   var tMinV = tempVals.length ? Math.min.apply(null, tempVals) : 0;
@@ -1585,7 +1604,7 @@ function drawHistoryChart(rows) {
   // Same freezing-axis-floor clamp as drawIdleDots (see that function's
   // comment for the full reasoning): only the recorded ACTUAL trace counts as
   // "a real reading" for deciding whether the axis is allowed to dip below
-  // 0degC -- the desired/duty/planned series are config/plan, not sensor
+  // 0degC -- the planned/duty series are config/plan, not sensor
   // data, and must never be what forces (or excuses clamping away) a
   // below-freezing axis.
   var belowFreezing = actualVals.length > 0 && Math.min.apply(null, actualVals) < CHART_FREEZING_C;
@@ -1612,22 +1631,49 @@ function drawHistoryChart(rows) {
     });
     ctx.strokeStyle = color; ctx.lineWidth = 1.5; ctx.stroke();
   }
-  drawLine('desired', yTemp, '#888');
   drawLine('duty', yDuty, '#3a9');
   drawLine('actual', yTemp, '#e63');
 
-  // Planned curve: dashed + a colour (#96c) shared with no other series (and
-  // with the idle preview above, so it reads as "the same kind of thing" in
-  // both chart modes), drawn last so it sits on top of the solid duty line
-  // it may cross. Straight lines between consecutive points, per the API's
-  // own contract ("Straight lines between consecutive points is the correct
+  // The single target series ("planned"), in #96c, drawn last so it sits on
+  // top of the solid duty line it may cross:
+  //
+  //   solid  over [tMin .. last recorded sample] -- r.target, the setpoint
+  //          the executor really commanded at each of those samples. This is
+  //          what the old grey "desired" line drew, and it is kept rather
+  //          than replaced by the idealised plan because the two genuinely
+  //          differ whenever ramp-lock holds the commanded setpoint behind
+  //          the profile; the chart must show the target that was actually
+  //          in force at time t, not the one the profile wished for.
+  //   dashed from that last recorded point onward through the plan's future
+  //          points -- the preview. It starts at the recorded point, not at
+  //          the plan's own value for "now", so any ramp-lock lag shows up
+  //          as the visible offset it is instead of a silent jump.
+  //
+  // Straight lines between consecutive plan points, per the API's own
+  // contract ("Straight lines between consecutive points is the correct
   // rendering").
-  if (planPts.length >= 2) {
+  var lastTargetPt = null;
+  ctx.beginPath();
+  var tStarted = false;
+  rows.forEach(function (r) {
+    if (isNaN(r.target)) { tStarted = false; return; }
+    var px = x(r.t), py = yTemp(r.target);
+    if (!tStarted) { ctx.moveTo(px, py); tStarted = true; } else { ctx.lineTo(px, py); }
+    lastTargetPt = { t: r.t, c: r.target };
+  });
+  ctx.strokeStyle = '#96c'; ctx.lineWidth = 1.5; ctx.stroke();
+
+  var futurePts = planPts.filter(function (p) {
+    return !lastTargetPt || p.t > lastTargetPt.t;
+  });
+  var planShown = futurePts.length > 0;
+  if (planShown) {
+    var seq = lastTargetPt ? [lastTargetPt].concat(futurePts) : futurePts;
     ctx.save();
     ctx.setLineDash([6, 4]);
     ctx.strokeStyle = '#96c'; ctx.lineWidth = 1.5;
     ctx.beginPath();
-    planPts.forEach(function (p, i) {
+    seq.forEach(function (p, i) {
       var ppx = x(p.t), ppy = yTemp(p.c);
       if (i === 0) ctx.moveTo(ppx, ppy); else ctx.lineTo(ppx, ppy);
     });
@@ -1651,7 +1697,7 @@ function drawHistoryChart(rows) {
   renderChartMeta('running', {
     tMin: tMin, actualMaxT: actualMaxT,
     totalPlannedS: (activePlan && activePlan.total_planned_s !== undefined) ? activePlan.total_planned_s : null,
-    planShown: planPts.length >= 2, guardShown: guardShown,
+    planShown: planShown, guardShown: guardShown,
     freezingShown: belowFreezing, faultColor: g.fault,
   });
 }
