@@ -29,15 +29,25 @@ start, a ceiling assertion on EVERY sample taken during a run
 force-stops the executor AND aborts the autotune. Nothing here raises a
 ceiling, requests heat enable, or drives a relay directly.
 
-WHAT IT PROVES TODAY, AND WHAT CHANGES LATER. Same branch as the firing test:
-``heat_is_permitted()`` is the board's own live verdict. Today it is False
-(no CT fitted, ``ct_channel_map[0..2]`` uncommitted, commissioning_gate.c
-reports calibration_missing), so the assertions are the "gate holds" ones --
-the engine runs, believes it is stepping, and NO relay ever closes, so the PV
-trace is flat. That is a real assertion about the gate, and it is exactly
-what makes the flat trace legible rather than mysterious. When the CTs are
-fitted and the sweep commits a measured map, the same tests take their
-heat-permitted branches with no edit here.
+WHICH BRANCH RUNS. Same as the firing test: ``heat_is_permitted()`` is the
+board's own live verdict, never a hardcoded expectation. Both branches are
+real assertions.
+
+  * heat NOT permitted -- the gate-holds branch. The engine runs, believes
+    it is stepping, and NO relay closes, so the PV trace is flat, and that
+    flatness is asserted rather than merely observed.
+  * heat permitted -- the branch this bench takes since ``ct_installed = 0``
+    made a CT-less board commissionable (2026-08-28). Since 2026-08-29 it
+    asserts the PLANT, not just the gate: relay 1 closes, K4 closes and
+    stays closed, and zone 0 rises at a real, bounded rate.
+
+STALE NARRATIVE REMOVED, 2026-08-29. Earlier versions of this file carried a
+long note concluding "the heat path to zone 0 delivers essentially nothing",
+from a 40-minute observation of +0.67 C. That observation was real and the
+conclusion was wrong: ``profile_executor.c`` never sent
+SAFETY_CMD_REQUEST_ENABLE, so K4 was open for all 40 minutes while K1 closed
+and every status field looked normal (see ``heat_enable.h``). With that fixed
+the same jig rises 2.8-3.8 C/min.
 """
 from __future__ import annotations
 
@@ -71,18 +81,56 @@ STEP_PROFILE_NAME = "step45"
 #: tenths of a degree), and 35 C clear of the fixture ceiling.
 STEP_TARGET_C = 45.0
 
-#: Seconds of PV sampled after the step is commanded. Not a settling time --
-#: a kiln's time constant is far longer than this. It is long enough to see
-#: whether the loop is ACTUATING (relays closing, PV leaving its baseline) at
-#: a 2 s poll, which is the question this test asks.
-STEP_OBSERVE_S = float(os.environ.get("KILNCTRL_BENCH_STEP_OBSERVE_S", "60"))
+#: Seconds of PV sampled after the step is commanded.
+#:
+#: RAISED 2026-08-29 from 60 s. 60 s was chosen when the only question was
+#: "is the loop actuating at all", and it cannot answer the question this
+#: test now asks: the measured dead time on this jig is 37 s, and the heater
+#: window is 60 s, so a 60 s sweep is barely one duty cycle past the plant's
+#: own transport delay. 480 s covers the dead time, several windows, and --
+#: at 2.8-3.8 C/min from a ~34 C ambient toward a 45 C setpoint -- the
+#: arrival and the first minutes of settling.
+STEP_OBSERVE_S = float(os.environ.get("KILNCTRL_BENCH_STEP_OBSERVE_S", "480"))
 
-#: Poll period for the PV trace. 2 s is right for the 60 s default sweep. A
-#: real long-duration run (KILNCTRL_BENCH_STEP_OBSERVE_S=2400) wants 15-30 s
-#: instead: this jig's time constant is in MINUTES, so a 2 s poll buys no
-#: extra information and spends 1200 request pairs of the board's httpd on
-#: saying "still 31.4 C".
-STEP_POLL_S = float(os.environ.get("KILNCTRL_BENCH_STEP_POLL_S", "2"))
+#: Poll period for the PV trace. This jig's time constant is ~167 s, so a 2 s
+#: poll buys no extra information and spends hundreds of request pairs of the
+#: board's httpd on saying "still 31.4 C". 10 s gives ~48 samples over the
+#: default sweep, which is ample for a rate fit.
+STEP_POLL_S = float(os.environ.get("KILNCTRL_BENCH_STEP_POLL_S", "10"))
+
+#: The step-response rise this bench must produce, in C/min, measured over
+#: the stretch where the loop is still driving hard (PV more than
+#: STEP_SETTLE_BAND_C below setpoint).
+#:
+#: MEASURED on this jig at full duty, 2026-08-29, once the K4 defect was
+#: fixed: 3.8 C/min over the fastest sampled stretch and 2.8 C/min over the
+#: slowest. 1.5 is deliberately well under the slowest of those -- the
+#: assertion's job is to catch "the heat path delivers nothing" (the 0.017
+#: C/min an open K4 produced, 170x smaller), not to re-measure the plant to
+#: three digits and go red on a warm afternoon.
+STEP_MIN_RISE_C_PER_MIN = 1.5
+
+#: How close to setpoint counts as "arrived", for both the rise-rate window
+#: above and the settle assertion below. Wider than the 60 s window's own
+#: ripple (under 2 C at full duty on this jig, per bench_fixture.json's
+#: heater-timing comment) so a normal duty cycle is not read as a miss.
+STEP_SETTLE_BAND_C = 3.0
+
+#: Dwell for the step profile, in minutes -- DERIVED from the observation
+#: window, never a constant.
+#:
+#: BUG FOUND 2026-08-29, and it invalidated the first long step run of the
+#: day. The profile was authored with dwell_min=1 against a 900 C/hr ramp, so
+#: the SETPOINT reached 45 C in ~45 s and the one-minute dwell expired at
+#: ~105 s -- the executor reported `complete` and dropped the heat while the
+#: PV was still at 38.6 C and climbing. The remaining ~380 s of the sweep
+#: sampled a jig that was cooling, and the whole trace read as "rose 3.06 C
+#: in 483 s = 0.38 C/min", four times too slow and for a reason that has
+#: nothing to do with the plant. A dwell shorter than the observation is a
+#: measurement of the dwell timer.
+#:
+#: The dwell must outlast the sweep, hence +2 minutes of margin over it.
+STEP_DWELL_MIN = int(STEP_OBSERVE_S // 60) + 2
 
 #: Guard-1 precondition. thermal_guard.c's dead-element check requires the
 #: zone to rise at least sanity_rate_c_per_min per minute while heat is
@@ -100,7 +148,12 @@ STEP_MAX_USABLE_SANITY_RATE_C_PER_MIN = 1.0
 #: and then watches ~2 minutes of it. The engine's OWN budget is 4 h
 #: (AUTOTUNE_ENGINE_DEFAULT_MAX_DURATION_S); this test aborts long before
 #: that rather than blocking a suite for hours, and says so.
-AUTOTUNE_BUDGET_S = float(os.environ.get("KILNCTRL_BENCH_AUTOTUNE_BUDGET_S", "300"))
+#: RAISED 2026-08-29 from 300 s. The first run this board ever fit a model to
+#: reached DONE at elapsed_s=390 -- 180 s of settle plus ~210 s of step --
+#: so a 300 s budget could only ever have aborted it and reported
+#: "inconclusive". A budget shorter than the thing being measured is not a
+#: bounded test, it is a guaranteed non-result.
+AUTOTUNE_BUDGET_S = float(os.environ.get("KILNCTRL_BENCH_AUTOTUNE_BUDGET_S", "900"))
 
 #: Open-loop step amplitude. 0.5 duty is autotune_start_post_handler()'s own
 #: default and sits inside the 0.15/0.85 band the engine's guard reasoning
@@ -143,7 +196,7 @@ def test_preset_pid_gains_are_live_on_the_board(bench_session):
     assert model["tau_s"] >= 0.0 and model["dead_time_s"] >= 0.0, model
 
 
-def test_closed_loop_setpoint_step_response(bench, capsys):
+def test_closed_loop_setpoint_step_response(cold_bench, capsys):
     """CLOSED-LOOP STEP. Author a single-segment profile that steps zone 0's
     setpoint to 45 C at the zone's own max ramp, start it through the
     dashboard's endpoint, and record the PV trace by polling.
@@ -156,7 +209,13 @@ def test_closed_loop_setpoint_step_response(bench, capsys):
         an element past a gate that says it did not.
       * heat permitted: PV must move toward the setpoint and never overshoot
         the fixture ceiling.
+
+    Takes ``cold_bench``, not ``bench``: the rise rate asserted at the end is
+    only a measurement of the plant if the plant started at ambient. Run
+    straight after another firing it would read low -- and read low for a
+    reason that looks exactly like a dead element.
     """
+    bench = cold_bench
     hottest = bench.assert_within_fixture_ceiling()
 
     # Guard 1 first: on a jig that heats in minutes, a kiln-sized
@@ -180,7 +239,8 @@ def test_closed_loop_setpoint_step_response(bench, capsys):
         # ramp 0 = "as fast as the zone allows" is NOT assumed; the zone's own
         # max_ramp_c_per_hr (900) is used explicitly so the commanded step is
         # a documented number rather than whatever the firmware defaults to.
-        segments=[{"target_c": STEP_TARGET_C, "ramp_c_per_hr": 900.0, "dwell_min": 1}])
+        segments=[{"target_c": STEP_TARGET_C, "ramp_c_per_hr": 900.0,
+                   "dwell_min": STEP_DWELL_MIN}])
 
     code, body = bench.start_profile(STEP_PROFILE_SLOT)
     print(f"[live] POST /api/profile_exec/start -> {code} {body.strip()[:120]}")
@@ -239,14 +299,12 @@ def test_closed_loop_setpoint_step_response(bench, capsys):
     # this test now holds `exec_state == running` with no heat block for the
     # full 60 s sweep.
     #
-    # What remains is PHYSICAL, not firmware: relay 1 closes and the
-    # executor keeps running, but PV does not move, because this bench has
-    # no heating element on the zone-0 relay. So the PV-rise assertion still
-    # cannot be forced here -- for a hardware reason now, not a link one.
-    # What IS asserted is the level signal that answers the commissioning
-    # question: no zone ever reported a heat block, and (new, and only
-    # meaningful now that the abort is gone) the executor stays running for
-    # the whole sweep instead of dying in the first second.
+    # UPDATE 2026-08-29, second correction. What this comment used to say
+    # next -- "PV does not move, because this bench has no heating element on
+    # the zone-0 relay" -- was wrong twice over. The elements ARE fitted, and
+    # the reason PV did not move was K4: nothing in the firing path ever
+    # asked the safety processor to close it (heat_enable.h). Fixed, and the
+    # PV-rise assertion is now made unconditionally below.
     blocked = [r for r in rows if r.get("heat_block_sources_words") not in (None, "", "none")]
     assert not blocked, (
         "heat is permitted by the safety processor, yet a sample reported a heat block: "
@@ -258,38 +316,83 @@ def test_closed_loop_setpoint_step_response(bench, capsys):
     # what would break first if the RX latency defect ever came back.
     not_running = [r for r in rows if r["exec_state"] != "running"]
     assert not not_running, (
-        "the executor left 'running' during the sweep -- this is the S6a abort "
-        "(SAFETY_FAULT_SRC_SAFETY_LINK) returning: " + repr(not_running[:3]))
+        "the executor left 'running' during the sweep. Two causes have been seen: the S6a "
+        "abort (SAFETY_FAULT_SRC_SAFETY_LINK, fixed by 63cc741) if the state is 'faulted', "
+        "and -- if the state is 'done'/'complete' -- a dwell shorter than the sweep, which "
+        "means the run ENDED normally and everything after that point is a cooling curve. "
+        "STEP_DWELL_MIN exists to make the second impossible: "
+        + repr(not_running[:3]))
 
-    if any(r["relays_on"] for r in rows) and moved > 0.5:
-        # The good day. Reached once a heating element is actually fitted to
-        # the zone-0 relay; the link half of this is already fixed.
-        half = len(rows) // 2
-        first_mean = sum(r["zone_c"] for r in rows[:half]) / half
-        second_mean = sum(r["zone_c"] for r in rows[half:]) / (len(rows) - half)
-        assert second_mean >= first_mean, _describe(rows)
-        assert max(r["zone_c"] for r in rows) <= STEP_TARGET_C + 5.0, _describe(rows)
-        print("[live] step response measured: PV rose %+.2f C" % moved)
+    # ---- the step response itself, asserted ---------------------------
+    #
+    # HARDENED 2026-08-29. Everything below used to be an `if it happened,
+    # check it; otherwise print a paragraph` -- and the paragraph it printed
+    # ("the heat path to zone 0 delivers essentially nothing") was a
+    # conclusion about the plant drawn from a firmware defect: profile_
+    # executor.c never sent SAFETY_CMD_REQUEST_ENABLE, so K4 was open for
+    # the whole 40-minute observation it cited. With that fixed (7769856 ..
+    # 7b7699a) the same jig rises 2.8-3.8 C/min, and a test that tolerates
+    # a flat trace cannot tell the fix from its own regression. So the flat
+    # case is now a FAILURE, not a note.
+    assert any(1 in r["relays_on"] for r in rows), (
+        "the executor ran with heat permitted and no heat block, yet zone 0's relay 1 was "
+        "never observed closed across the whole sweep: " + _describe(rows))
+
+    # K4 -- the safety processor's contact, the one that decides whether any
+    # element current flows at all. Unlike relay 1 this is not a transient:
+    # heat_enable holds the request for the whole run.
+    k4_samples = [r for r in rows if r["safety_relay_energized"]]
+    assert len(k4_samples) >= len(rows) // 2, (
+        f"K4 was closed on only {len(k4_samples)}/{len(rows)} samples. The request stands for "
+        "the duration of a run (heat_enable.h), so a mostly-open K4 during a running firing "
+        "means the request is being dropped or refused: " + _describe(rows))
+
+    # Rise rate, over the stretch where the loop is still driving hard.
+    # Restricting to PV below (setpoint - band) is what makes this a
+    # measurement of the PLANT rather than of the controller backing off:
+    # once PV arrives, duty falls and a low rate there is correct behaviour.
+    driving = [r for r in rows if r["zone_c"] < STEP_TARGET_C - STEP_SETTLE_BAND_C]
+    assert len(driving) >= 3, (
+        "PV started within the settle band of the setpoint, so no rise rate could be measured "
+        "-- the bench did not start cold: " + _describe(rows))
+    span_min = (driving[-1]["t_s"] - driving[0]["t_s"]) / 60.0
+    rise_c = driving[-1]["zone_c"] - driving[0]["zone_c"]
+    rate = rise_c / span_min if span_min > 0 else 0.0
+    print(f"[live] driving-phase rise: {rise_c:+.2f} C over {span_min:.2f} min "
+          f"= {rate:.2f} C/min (min required {STEP_MIN_RISE_C_PER_MIN})")
+    assert rate >= STEP_MIN_RISE_C_PER_MIN, (
+        f"zone 0 rose {rate:.3f} C/min while the loop was driving below setpoint. This jig "
+        f"measures 2.8-3.8 C/min at full duty; 0.017 C/min is what it produced with K4 open. "
+        "A rate this low means no element current is flowing: " + _describe(rows))
+
+    # Bounded above, twice: the profile's own setpoint and the fixture's.
+    peak = max(r["zone_c"] for r in rows)
+    assert peak <= STEP_TARGET_C + 5.0, (
+        f"zone 0 overshot to {peak:.2f} C against a {STEP_TARGET_C} C setpoint: "
+        + _describe(rows))
+    assert peak <= FIXTURE_MAX_TEMP_C, _describe(rows)
+
+    # CLOSED-LOOP SETTLE. Only asserted if PV actually arrived within the
+    # sweep -- on a short KILNCTRL_BENCH_STEP_OBSERVE_S it legitimately may
+    # not, and asserting arrival would make the budget, not the loop, the
+    # subject. When it does arrive, it must STAY: a loop that reaches
+    # setpoint and then runs away is the failure this checks for.
+    arrived = [r for r in rows if r["zone_c"] >= STEP_TARGET_C - STEP_SETTLE_BAND_C]
+    if arrived:
+        after = [r for r in rows if r["t_s"] >= arrived[0]["t_s"]]
+        worst = max(abs(r["zone_c"] - STEP_TARGET_C) for r in after)
+        print(f"[live] arrived at t={arrived[0]['t_s']:.0f}s; over the {len(after)} samples "
+              f"after arrival the worst deviation from setpoint was {worst:.2f} C")
+        assert worst <= 2.0 * STEP_SETTLE_BAND_C, (
+            f"PID reached setpoint then deviated by {worst:.2f} C -- that is not settling: "
+            + _describe(rows))
     else:
-        aborts = sorted({r["exec_state"] for r in rows})
-        print(f"[live] NOTE: heat was PERMITTED (no heat block on any of {len(rows)} samples) "
-              f"but no sustained heat resulted: PV moved {moved:+.2f} C, exec states {aborts}. "
-              "The S6a / SAFETY_FAULT_SRC_SAFETY_LINK abort is FIXED (63cc741) and the "
-              "executor stayed running for the whole sweep -- asserted above. "
-              "MEASURED 2026-08-29 over a 40-minute dwell with guard 1 deliberately held "
-              "open (rate 0.01 C/min, window 1800 s) so nothing but the plant could end "
-              "the run: relay 1 closed continuously for 39.8 min and zone 0 rose +0.67 C, "
-              "a mean of 0.017 C/min, with the WORST 5-minute window actually NEGATIVE "
-              "(-0.016 C/min) -- i.e. indistinguishable from ambient drift. The heat "
-              "path to zone 0's thermocouple delivers essentially nothing. That is a "
-              "PHYSICAL finding and no guard threshold can be tuned around it: guard 1 "
-              "requires rise >= rate x elapsed, so a longer window does not rescue a "
-              "rate shortfall, and even the commissioned 0.2 C/min is 12x more than this "
-              "jig produces. Autotune agrees, on its own terms: "
-              "'response too small to fit (trace flat or noise-dominated)'.")
+        print(f"[live] PV did not reach the settle band within {STEP_OBSERVE_S:.0f}s "
+              "(rise asserted above; raise KILNCTRL_BENCH_STEP_OBSERVE_S to see the settle)")
+    print("[live] step response measured: PV rose %+.2f C over the sweep" % moved)
 
 
-def test_step_autotune_runs_and_reports_a_sane_result(bench, capsys):
+def test_step_autotune_runs_and_reports_a_sane_result(cold_bench, capsys):
     """PID TUNING. Start the step autotune on zone 0 and follow it for a
     bounded budget, then assert on what the engine actually reports.
 
@@ -310,7 +413,11 @@ def test_step_autotune_runs_and_reports_a_sane_result(bench, capsys):
     In every case the run must have reached STEPPING (past the 180 s settle)
     or explained itself, no relay may close while heat is refused, and the
     fixture ceiling holds throughout.
+
+    Takes ``cold_bench``: an open-loop step fit from a hot start reports a
+    smaller K and a shorter tau, and nothing in the result says so.
     """
+    bench = cold_bench
     hottest = bench.assert_within_fixture_ceiling()
     permitted, why = heat_is_permitted(bench)
     print(f"\n[live] autotune: hottest {hottest:.2f} C, heat permitted: {permitted} ({why})")
