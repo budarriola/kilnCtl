@@ -192,27 +192,45 @@ def test_closed_loop_setpoint_step_response(bench, capsys):
     # not be edited into pretending otherwise:
     #
     #   The gate opens -- `heat_block_sources_words` reads "none" on every
-    #   sample and the executor reaches `running`. But the run aborts within
-    #   about a second, every time, on **S6a** ("main controller reported a
-    #   fault"). The source is `SAFETY_FAULT_SRC_SAFETY_LINK` (measured:
-    #   `trip_fault_sources` reads 8 even before a run is started): the
-    #   isolated link times out on roughly 20% of polls (136 in 681 frames),
-    #   `safety_link.c` raises the fault on that staleness, and SaftyFW trips.
-    #   No sustained heat is possible on this bench until that is fixed.
+    #   sample and the executor reaches `running`.
     #
-    # So the PV-rise and relay-closed assertions cannot hold here, and forcing
-    # them would only produce a red test that says "commissioning" while
-    # meaning "the UART link drops frames". What IS asserted is the level
-    # signal that answers the commissioning question without racing a ~1 s
-    # abort at a 2 s sample interval: no zone ever reported a heat block.
+    # UPDATE 2026-08-29 (63cc741). The S6a abort described here is FIXED and
+    # this comment's original diagnosis is superseded. The run used to abort
+    # within about a second, every time, on S6a ("main controller reported a
+    # fault") from `SAFETY_FAULT_SRC_SAFETY_LINK`, because the isolated link
+    # timed out on ~20% of polls (and, by the time it was characterised, on
+    # 100% of them). That was not the wire and not the Pico: KilnFW's
+    # `uart_protocol_rx_task` blocked each read until a 528-byte buffer
+    # filled, on a link whose frames are ~40 bytes, so every frame was
+    # delivered up to 200 ms late. Measured after the fix: 0 timeouts, and
+    # this test now holds `exec_state == running` with no heat block for the
+    # full 60 s sweep.
+    #
+    # What remains is PHYSICAL, not firmware: relay 1 closes and the
+    # executor keeps running, but PV does not move, because this bench has
+    # no heating element on the zone-0 relay. So the PV-rise assertion still
+    # cannot be forced here -- for a hardware reason now, not a link one.
+    # What IS asserted is the level signal that answers the commissioning
+    # question: no zone ever reported a heat block, and (new, and only
+    # meaningful now that the abort is gone) the executor stays running for
+    # the whole sweep instead of dying in the first second.
     blocked = [r for r in rows if r.get("heat_block_sources_words") not in (None, "", "none")]
     assert not blocked, (
         "heat is permitted by the safety processor, yet a sample reported a heat block: "
         + repr(blocked[:3]))
 
+    # The S6a regression test. Before 63cc741 the executor left `running`
+    # within ~1 s of the start and every later sample read an aborted state;
+    # this asserts it does not, which is exactly what the link fix bought and
+    # what would break first if the RX latency defect ever came back.
+    not_running = [r for r in rows if r["exec_state"] != "running"]
+    assert not not_running, (
+        "the executor left 'running' during the sweep -- this is the S6a abort "
+        "(SAFETY_FAULT_SRC_SAFETY_LINK) returning: " + repr(not_running[:3]))
+
     if any(r["relays_on"] for r in rows) and moved > 0.5:
-        # The good day. If the link fault is ever fixed this branch starts
-        # running, and the original response-shape assertions apply again.
+        # The good day. Reached once a heating element is actually fitted to
+        # the zone-0 relay; the link half of this is already fixed.
         half = len(rows) // 2
         first_mean = sum(r["zone_c"] for r in rows[:half]) / half
         second_mean = sum(r["zone_c"] for r in rows[half:]) / (len(rows) - half)
@@ -223,8 +241,10 @@ def test_closed_loop_setpoint_step_response(bench, capsys):
         aborts = sorted({r["exec_state"] for r in rows})
         print(f"[live] NOTE: heat was PERMITTED (no heat block on any of {len(rows)} samples) "
               f"but no sustained heat resulted: PV moved {moved:+.2f} C, exec states {aborts}. "
-              "This is the S6a / SAFETY_FAULT_SRC_SAFETY_LINK finding -- see this "
-              "block's comment. NOT a commissioning failure.")
+              "The S6a / SAFETY_FAULT_SRC_SAFETY_LINK abort is FIXED (63cc741) and the "
+              "executor stayed running for the whole sweep -- asserted above. What is "
+              "left is physical: no heating element is fitted to the zone-0 relay. "
+              "NOT a commissioning failure and no longer a link failure.")
 
 
 def test_step_autotune_runs_and_reports_a_sane_result(bench, capsys):

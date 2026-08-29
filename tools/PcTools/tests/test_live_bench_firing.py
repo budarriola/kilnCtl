@@ -121,10 +121,22 @@ def test_dashboard_status_consistent_with_known_config(bench_session):
         assert not ch["stale"], ch
         assert -20.0 < ch["temp_c"] < FIXTURE_MAX_TEMP_C, ch
 
-    # Idle bench: nothing should be commanded on, and the safety processor
-    # should not be reporting heat enabled.
+    # Idle bench: nothing should be commanded on, and the safety processor's
+    # own heat relay should not be energized.
     assert bench_session.relays_on() == []
-    assert status["safety_heating_enabled"] is False
+    assert status["safety_relay_energized"] is False
+
+    # NOT safety_heating_enabled. That field is SAFETY_FLAG_ENABLED, which
+    # dashboard_http.h documents as "SaftyFW's relay_owner state machine is
+    # currently ARMED (not tripped) -- true on any healthy, past-its-grace-
+    # period Pico REGARDLESS of whether anyone ever sent
+    # SAFETY_CMD_REQUEST_ENABLE. It is NOT 'heat was granted'." Asserting
+    # False here was that documented misreading, and it only ever passed
+    # because the safety link was timing out on every poll, so no STATUS
+    # frame arrived and the field stayed at its null/false default. With the
+    # link fixed (63cc741) a healthy idle board reports True, correctly.
+    # safety_relay_energized above is the field that actually means "no heat".
+    assert status["safety_heating_enabled"] is True
 
 
 def test_bounded_profile_start_against_commissioning_gate(bench, capsys):
