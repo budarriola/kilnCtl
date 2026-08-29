@@ -987,9 +987,33 @@ surface usable rather than merely correct:
       `safety_commissioning_page.html` (120/208/240/277/380/400/415/460V,
       `-1` "Other..." fallback, explicit unset). Checkbox was stale; verified
       2026-08-28
-- [ ] **Current-monitor calibration comes from the zones config**, not from the
+- [x] **Current-monitor calibration comes from the zones config**, not from the
       commissioning page — it consumes the per-zone normal-current measurement
-      rather than asking for numbers
+      rather than asking for numbers. 2026-08-28, `17ae4d9`. The 16 read-only
+      current-sense rows already mirrored the zones config; the one that did
+      not have a producer was `k_ct_v_per_a[0..2]`, which asked for a CT
+      datasheet figure nobody had (`COMMISSIONING_UX.md` OQ4) and so stayed at
+      `config_store.c`'s `memset(0)` — not cosmetic, since
+      `current_presence_policy.c` then abandons the configured `i_present_a`
+      for a fixed counts-domain margin. The zone current-sweep now calibrates
+      it: it already energizes one zone at a time with every other relay
+      forced off, so summing each zone's dominant CT channel gives the
+      whole-kiln current at full output, and `max_expected_power_w /
+      mains_voltage_v` (Q4/Q3, both already answered) gives what it should be.
+      Amps are inversely proportional to `k_ct`, so the correction is one
+      scale factor, `k_new[c] = k_old[c] · (measured / expected)`. Refuses
+      outright — with the reason on both pages — on an unresolved or
+      shared-CT zone (the total would be short by that zone's share), an unset
+      Q3/Q4, a `k_old` still at 0 (the link carries amps, not counts, so every
+      reading was `0.0 A`), a total under 2 A, a correction outside 0.2×–5×,
+      or a result outside 0.0005–0.5 V/A. Written over the same
+      `SET_PARAM`/`COMMIT_CONFIG` path a typed value uses, confirmed by a live
+      bit-exact read-back, and backed out of the Pico's staged buffer on every
+      failure arm — the same discipline as `zone_sweep_push_ct_channel_map()`,
+      and it refuses to run at all if that push left the shared staged buffer
+      unrepaired. A clamp-meter override stays behind a checkbox on the
+      commissioning page. `zones_http.c`, 14 new host tests, each guard
+      re-run stubbed out to prove it fails without it
 - [x] **The safety thermocouple and safety relay configuration shown on the
       zones config, NOT reassignable there.** 2026-08-28. `safetyTcType` on
       `zones_page.html` was a live editable `<select>` submitted back on
