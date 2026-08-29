@@ -57,21 +57,34 @@ class LoadPresetDataTest(unittest.TestCase):
         for zone in preset["zones"]:
             self.assertEqual(zone["max_temp_c"], 80.0)
 
-    def test_bench_fixture_carries_the_slow_jig_dead_element_rate(self):
+    def test_bench_fixture_carries_the_measured_dead_element_rate(self):
         """thermal_guard.c guard 1's minimum rise rate, per zone.
 
-        The board shipped with 5.0 C/min on zone 0 -- a real kiln's figure --
-        and every bench firing died at t=62s on "rose only 0.0C in 1.0min
-        (need >=5.0C)" while the jig was genuinely, slowly heating. 0.2 is
-        this fixture's commissioned value. It must be present on EVERY zone
-        (a zone left out silently keeps whatever the board had) and must stay
-        above 0, because 0 would mean "use the firmware default 0.5" and put
-        the same false trip back.
+        Two earlier values here were measuring a defect rather than a jig.
+        5.0 C/min (a real kiln's figure) killed every bench firing at t=62s.
+        It was replaced by 0.2, which the preset's own comment then had to
+        record as ASPIRATIONAL: with guard 1 held open the rig had managed
+        0.017 C/min over 39.8 minutes, and the conclusion drawn was that the
+        heat path delivered about nothing.
+
+        The heat path was fine. profile_executor.c never asked the safety
+        processor to permit heating, so K4 was open for all 39.8 of those
+        minutes (heat_enable.h, 2026-08-29). With that fixed, the same rig on
+        the same profile went 32.1 -> 47.5 C, rising 3.8 C/min at full duty
+        and 2.8 C/min over the slowest sampled stretch.
+
+        0.5 C/min is set from those measurements: ~6x below the slowest
+        measured full-duty rise, ~30x above what a non-heating path produces.
+        It must be present on EVERY zone (a zone left out silently keeps
+        whatever the board had) and must stay above 0 -- 0 does not mean
+        "off", it means "substitute the firmware default", which is a
+        different fact from an explicitly commissioned value even when the
+        two numbers coincide.
         """
         preset = config_presets.load_preset_data("bench_fixture")
         for zone in preset["zones"]:
-            self.assertEqual(zone["sanity_rate_c_per_min"], 0.2,
-                             f"zone {zone['index']} must carry the jig's 0.2 C/min")
+            self.assertEqual(zone["sanity_rate_c_per_min"], 0.5,
+                             f"zone {zone['index']} must carry the measured 0.5 C/min")
             self.assertGreater(zone["sanity_rate_c_per_min"], 0.0)
 
     def test_sanity_rate_is_a_postable_zone_field(self):
