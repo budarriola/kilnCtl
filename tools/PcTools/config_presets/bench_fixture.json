@@ -69,6 +69,39 @@
     "assumption. If either is ever switched on, measure it before trusting",
     "this value there."
   ],
+
+  "_heater_timing_comment": [
+    "heater_window_ms = 60000, heater_min_on_ms = 10000, heater_min_off_ms =",
+    "2000 on every zone. PINNED 2026-08-29, after this bench's zone 0 was",
+    "found carrying a 2000 ms window.",
+    "",
+    "These two numbers are not independent, and that is the whole point of",
+    "pinning them together here. heater_min_on_ms is a hardware-protection",
+    "floor: once the PID closes the relay it stays closed 10 s. The window is",
+    "the period the duty is spread over. If the window is not comfortably",
+    "longer than the minimum on-time, every on-time the PID computes lands",
+    "under the floor and heater_output_duty() renders it as fully OFF.",
+    "",
+    "At 2000 ms against the 10 s floor, EVERY duty below ~1.0 was",
+    "unrenderable. 0.4 * 2000 = 800 ms; 0.9 * 2000 = 1800 ms; both under",
+    "10000. Zone 0 was configured as a PID zone, reported itself as one, and",
+    "was physically incapable of being one. The autotune step method",
+    "commanded duty 0.4 and the relay never closed once.",
+    "",
+    "The firmware now refuses a window shorter than 3x the effective minimum",
+    "on-time (zones_http.h, ZONE_HEATER_WINDOW_MIN_MULTIPLE), so 30000 is the",
+    "lowest value this preset could carry. 60000 is chosen instead -- the",
+    "firmware default -- because the bound is the point at which control",
+    "becomes possible, not the point at which it becomes good: at 30000 the",
+    "smallest expressible duty is 0.33, at 60000 it is 0.17. This jig rises",
+    "2.8-3.8 C/min at full duty, so a 60 s window puts under 2 C of ripple on",
+    "a full-duty cycle, which is well inside what an autotune step or a PID",
+    "loop on an 80 C fixture can tolerate.",
+    "",
+    "ZONES 1 AND 2 carry the same values on the same-jig assumption; both are",
+    "control_mode 0 (OFF) and neither has ever time-proportioned anything."
+  ],
+
   "name": "bench_fixture",
   "description": "This bench's known-good starting config: 3 zones, 80C fixture ceiling on all zones, relays 1-3 zone-owned, 3 thermocouples, plus the safety-processor commissioning values this bench can actually vouch for.",
   "thermo_count": 3,
@@ -84,6 +117,8 @@
       "pid_kd": 1.0,
       "max_ramp_c_per_hr": 900.0,
       "sanity_rate_c_per_min": 0.5,
+      "heater_window_ms": 60000.0,
+      "heater_min_on_ms": 10000.0,
       "max_temp_c": 80.0,
       "min_temp_c": 0.0
     },
@@ -97,6 +132,8 @@
       "pid_kd": 0.0,
       "max_ramp_c_per_hr": 0.0,
       "sanity_rate_c_per_min": 0.5,
+      "heater_window_ms": 60000.0,
+      "heater_min_on_ms": 10000.0,
       "max_temp_c": 80.0,
       "min_temp_c": 0.0
     },
@@ -110,6 +147,8 @@
       "pid_kd": 0.0,
       "max_ramp_c_per_hr": 0.0,
       "sanity_rate_c_per_min": 0.5,
+      "heater_window_ms": 60000.0,
+      "heater_min_on_ms": 10000.0,
       "max_temp_c": 80.0,
       "min_temp_c": 0.0
     }

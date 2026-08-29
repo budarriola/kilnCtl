@@ -100,6 +100,51 @@ class LoadPresetDataTest(unittest.TestCase):
             {"zones": [{"index": 0, "sanity_rate_c_per_min": 0.2}]})
         self.assertIn("z0_sanity=0.2", body)
 
+    def test_heater_window_is_at_least_3x_the_min_on_time(self):
+        """The window/min-on RELATIONSHIP, on every zone.
+
+        Both numbers can be individually sensible and jointly useless, which
+        is exactly what happened here: zone 0 carried a 2000 ms window
+        against the 10 s minimum on-time, so every on-time the PID could
+        compute (0.4 * 2000 = 800 ms) fell under the minimum and
+        heater_output_duty() rendered it as fully OFF. The zone reported
+        itself as a PID zone and was physically a bang-bang one; an autotune
+        step at duty 0.4 commanded heat for 40 minutes without closing the
+        relay once.
+
+        The firmware refuses window < 3x the effective minimum on-time
+        (zones_http.h, ZONE_HEATER_WINDOW_MIN_MULTIPLE). This asserts the
+        preset satisfies the same rule -- a preset that did not would simply
+        be rejected by the board on apply, which is a worse way to find out.
+        """
+        preset = config_presets.load_preset_data("bench_fixture")
+        for zone in preset["zones"]:
+            window = zone["heater_window_ms"]
+            min_on = zone["heater_min_on_ms"]
+            effective_min_on = max(min_on, 10000.0)  # HEATER_MIN_ON_MS_FLOOR
+            self.assertGreaterEqual(
+                window, 3.0 * effective_min_on,
+                f"zone {zone['index']}: a {window} ms window against a {effective_min_on} ms "
+                f"minimum on-time cannot render a fractional duty")
+            self.assertGreaterEqual(min_on, 10000.0,
+                                    f"zone {zone['index']}: min-on is a 10 s hardware floor")
+
+    def test_heater_timing_fields_are_postable(self):
+        """...and both halves of the pair can actually be written. A preset
+        field with no entry in zones_http_client's form-key map is REFUSED by
+        build_post_body(); a field not in _PRESET_ZONE_OVERRIDE_FIELDS is
+        silently ignored in favour of whatever the board already had, which
+        for THIS pair would mean the 2000 ms window survives the apply."""
+        self.assertIn("heater_window_ms", zones_http_client._ZONE_FIELD_FORM_KEY)
+        self.assertIn("heater_window_ms", zones_http_client._PRESET_ZONE_OVERRIDE_FIELDS)
+        body = zones_http_client.build_post_body(
+            {"thermo_count": 3, "relay_count": 3,
+             "timing_profiles": [{"index": 0, "name": "Default"}],
+             "zones": [{"index": 0, "heater_window_ms": 2000.0}]},
+            {"zones": [{"index": 0, "heater_window_ms": 60000.0}]})
+        self.assertIn("z0_window=60000", body)
+        self.assertNotIn("z0_window=2000", body)
+
     def test_missing_preset_raises(self):
         with self.assertRaises(config_presets.ConfigPresetError):
             config_presets.load_preset_data("does_not_exist")

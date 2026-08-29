@@ -335,6 +335,18 @@ _PRESET_ZONE_OVERRIDE_FIELDS = {
     # inherit. A preset that DOES set it below 10000 is refused by the board,
     # by design -- see zones_http.h's ZONE_HEATER_MIN_ON_MS_FLOOR.
     "heater_min_on_ms",
+    # 2026-08-29: heater_window_ms, for the same reason and now with a
+    # constraint that TIES it to heater_min_on_ms -- the window must be at
+    # least 3x the effective minimum on-time or no fractional duty can be
+    # rendered in it at all (zones_http.h's ZONE_HEATER_WINDOW_MIN_MULTIPLE).
+    # This bench carried a 2000 ms window against the 10 s minimum, which
+    # made zone 0 a bang-bang output that reported itself as a PID one: an
+    # autotune step at duty 0.4 commanded heat for 40 minutes and never
+    # closed the relay. A preset that pins a bench's relay timing has to be
+    # able to carry the window as well as the minimum, or the pair it is
+    # trying to pin is only half pinned. Not in _REQUIRED_ZONE_FIELDS, same
+    # reasoning as the two below it.
+    "heater_window_ms",
     # 2026-08-29: sanity_rate_c_per_min, thermal_guard.c guard 1's minimum
     # rise rate (the dead-element check). Same reasoning as heater_min_on_ms
     # above: it is a per-bench physical property -- how fast THIS jig can

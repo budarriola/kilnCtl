@@ -279,6 +279,9 @@ _ZONES_HTTP_ONLY_ZONE_FIELDS = (
     # 2026-08-29: the guard-1 minimum rise rate. HTTP-only, like the rest --
     # the UART CONTROL task has no setter for it either.
     "sanity_rate_c_per_min",
+    # 2026-08-29: the relay timing pair. Also HTTP-only.
+    "heater_window_ms",
+    "heater_min_on_ms",
 )
 
 
