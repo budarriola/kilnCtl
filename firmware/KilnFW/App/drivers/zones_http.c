@@ -5511,9 +5511,14 @@ static uint8_t zone_sweep_plan_k_ct(float *out_k, char *note, size_t note_cap)
      * direction that makes every later reading read LOW. Same reason the map
      * push refuses to derive anything from a partial run. */
     if (s_ct_derive.unresolved_zone_mask != 0 || s_ct_derive.conflict_mask != 0) {
+        /* Kept to 94 chars + NUL so it fits k_ct_reason[96] -- the longer
+         * wording this replaced was 111 bytes and broke the build under
+         * -Werror=format-truncation, which is the compiler correctly
+         * refusing to let a reason string be silently cut in half on the
+         * status page. Same meaning, no truncation. */
         snprintf(note, note_cap,
-                 "not every zone resolved to a CT -- the whole-kiln total would be "
-                 "incomplete, so the CT scale was not calibrated");
+                 "not every zone resolved to a CT -- an incomplete total would scale k_ct low, "
+                 "so it was not set");
         return 0;
     }
     if (s_ct_derive.map_push_failed) {

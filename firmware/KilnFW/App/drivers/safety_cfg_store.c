@@ -69,6 +69,7 @@ static const safety_cfg_table_row_t SAFETY_CFG_PARAM_TABLE[SAFETY_CFG_PARAM_COUN
     { 0x0106, KILNLINK_PARAM_TYPE_U8, "ct_channel_map[0]" },
     { 0x0107, KILNLINK_PARAM_TYPE_U8, "ct_channel_map[1]" },
     { 0x0108, KILNLINK_PARAM_TYPE_U8, "ct_channel_map[2]" },
+    { 0x0109, KILNLINK_PARAM_TYPE_U8, "ct_installed" },
     /* sec 2 -- temperature guards */
     { 0x0201, KILNLINK_PARAM_TYPE_F32, "firing_margin_c" },
     { 0x0202, KILNLINK_PARAM_TYPE_F32, "overshoot_margin_c" },

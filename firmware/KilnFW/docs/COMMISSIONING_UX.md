@@ -81,9 +81,11 @@ firmware measures it (a DERIVE whose input is an instrument, not the operator).
 | Q2 | **"Where is the safety processor's own thermocouple?"** — three radio options: *Not fitted* / *In the kiln chamber* / *External overheat sensor (shell, exhaust, enclosure)* | `safety_tc_installed`, `tc_source`, `tc_placement_mode` | `0x0211`, `0x0101`, `0x0103` | 🔴 | A statement about physical reality (`SAFETY_MODEL.md` §3: *"not a tuning knob"*). Nothing on either board can see whether J7 has a probe in it or where that probe is mounted, and getting it wrong breaks S2/S10 in opposite directions. One question, three parameters — see §2.4 for the mapping. |
 | Q3 | **"Mains supply voltage"** — dropdown, see §2.1 | `mains_voltage_v` | `0x030E` | ⚪ | Installation fact. A dropdown, not a number box, and **"Not set"** stays a first-class option (`CONFIG_REFERENCE.md` §3: unset ⇒ report `—`, never assume). |
 | Q4 | **"Roughly how much power does this kiln draw at full output?"** kW, optional | `max_expected_power_w` | `0x0319` | ⚪ | ROADMAP M12 asks for it explicitly. Sanity check only; no guard reads it. Optional because it fails safe when absent. |
+| Q5 **NEW** | **"Are current transformers (CTs) fitted to this board?"** — two options: *Yes, CTs are fitted* / *No, this board has no CTs*. Required, no default. | `ct_installed` | `0x0109` | 🔴 | Whether a CT is clamped around an element feed is a physical fact no firmware can observe, and **both** wrong answers are bad in different directions. Answering *yes* on a CT-less board leaves `ct_channel_map` required forever, so the board can never be commissioned and can never heat — and worse, an uncalibrated channel's op-amp offset floor reads as "current present" on every tick, which trips **S3** (`LOAD_STUCK_ON`) on a perfectly healthy board. Answering *no* on a board that **does** have CTs silently disarms S3/S4/S9/S14. So it cannot be defaulted either way and it cannot be derived: a zero reading is exactly what an absent CT and an idle fitted CT both produce. Answering *no* switches S3/S4/S9/S14 off **and reports them off** (`safety_guard_state_t::ct_guards_disabled`), and drops `ct_channel_map[0..2]` from the required list. Leaving it unanswered keeps the strict, pre-existing behaviour in every respect. See `SaftyFW/docs/CURRENT_SENSE.md` §0.1 for what running without CTs costs. |
 
-**That is the entire ASKED list: four questions, four screens' worth of one
-control each.** Q4 is skippable. Everything below this line is invisible in the
+**That is the entire ASKED list: five questions, five screens' worth of one
+control each.** Q4 is skippable; Q5 is not (an unanswered Q5 leaves the board
+uncommissioned, deliberately — see its row above). Everything below this line is invisible in the
 default flow.
 
 Two fields sit one step outside this list and are deliberately *not* asked:
@@ -157,10 +159,17 @@ All values are `CONFIG_REFERENCE.md`'s, not invented.
 | `overcurrent_pct` **NEW** | `0x031D` | 150 % | 🟠 |
 | `overcurrent_time_s` **NEW** | `0x031E` | 30 s | 🟠 |
 
-**Tally:** 4 ASKED questions writing 6 parameters · 20 DERIVED/MEASURED ·
+**Tally:** 5 ASKED questions writing 7 parameters · 20 DERIVED/MEASURED ·
 29 DEFAULTED · 3 NEW derived (`i_normal_a[0..2]`) · 2 NEW defaulted
-(`overcurrent_pct`, `overcurrent_time_s`) = 59 existing + 5 new = 64 parameters,
-of which the operator sees **four**.
+(`overcurrent_pct`, `overcurrent_time_s`) · 1 NEW asked (`ct_installed`)
+= 59 existing + 6 new = 65 parameters, of which the operator sees **five**.
+
+`ct_channel_map[0..2]` is the one entry on the DERIVED list whose *requirement*
+is now conditional: it is required exactly when Q5 is answered *yes* or is
+unanswered, and not required when Q5 is answered *no*. The commissioning page
+strikes those three rows out and clears their inputs in that case, so a stale
+typed value cannot be restaged under an answer of "no CTs" — the failure the
+retired `safety_ct_channel_map_backup` preset section used to invite.
 
 ### 1.4 The four 🔴 fields nobody may derive from a guess
 

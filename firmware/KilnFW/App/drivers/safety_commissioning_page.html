@@ -123,6 +123,9 @@
      zero"). The whole card gets a visibly different treatment, not just the
      input box, since the guard-disabled statement below the input is just
      as important as the blank value itself. ---- */
+.field.ct-not-applicable { opacity: .45; }
+.field.ct-not-applicable label, .field.ct-not-applicable .note { text-decoration: line-through; }
+.field.ct-not-applicable .ct-na-note { text-decoration: none; font-weight: bold; opacity: 1; }
   .field.unset { border-color: var(--warn); border-width: 2px; }
   .field.unset .field-head::after { content: 'NOT SET'; font-size: 0.72em; font-weight: bold;
     color: var(--warn); border: 1px solid var(--warn); border-radius: 4px; padding: 0.05em 0.4em; }
@@ -451,6 +454,19 @@ var GROUPS = [
         note: 'Must match the thermocouple physically fitted to J7 on the safety board -- ' +
           'a different, physically separate sensor from any zone thermocouple on the main ' +
           'board. A mismatch reads plausible and wrong, usually low.' },
+      { id: 265, name: 'ct_installed', type: 'enum', risk: 'dangerous', noDefault: true,
+        guards: ['S3', 'S4', 'S9', 'S14'],
+        enumOpts: [ [1, 'Yes -- current transformers are fitted'],
+                    [0, 'No -- this board has no CTs'] ],
+        note: '0x0109. Are current transformers physically clamped around the element ' +
+          'feeds on this board? Deliberately an explicit question with no default: the ' +
+          'firmware cannot see whether a CT is fitted, and BOTH wrong answers are bad. ' +
+          'Answer "No" and S3/S4/S9/S14 are switched OFF and reported off -- the three ' +
+          'ct_channel_map rows below stop being required, and the board can be ' +
+          'commissioned and can heat without them. Answer "Yes" and the mapping below is ' +
+          'required before this board will grant heat, exactly as before. Leaving it ' +
+          'unanswered is the same as "Yes" for safety purposes, but the board stays ' +
+          'uncommissioned until you answer.' },
       { id: 262, name: 'ct_channel_map[0]', type: 'u8', risk: 'dangerous', unit: 'zone/relay id', noDefault: true,
         guards: ['S3', 'S4', 'S14'], derivedCt: 0,
         note: 'Which relay CT0 actually watches. Derived by the ' +
@@ -983,6 +999,53 @@ function renderGroups(data) {
   applyContradictionRule();
   wireVoltageSelects();
   wireCtManualToggles();
+  wireCtInstalledToggle();
+}
+
+// ROADMAP.md M12, "CTs are optional hardware". ct_installed (0x0109) answered
+// "No" makes the three ct_channel_map rows below it meaningless -- they are
+// not merely optional then, they are unanswerable, since there is no CT to
+// map. Leaving them looking like ordinary blank required fields is exactly
+// the "a page that asks a question the hardware cannot answer" confusion this
+// pass exists to remove, so they are visibly struck out and their inputs
+// disabled.
+//
+// Disabling the inputs is not enough on its own: the save pass's
+// `#fields input[data-id], #fields select[data-id]` walk matches a disabled
+// element too. So the inputs are additionally CLEARED here, which is what
+// makes that pass's empty-means-skip rule drop them. Both, deliberately -- a
+// stale typed value
+// silently restaged under an answer of "no CTs" would write a mapping nobody
+// confirmed, the precise failure the backup-map mechanism was retired for.
+var CT_MAP_FIELD_IDS = [262, 263, 264];
+function wireCtInstalledToggle() {
+  var sel = document.querySelector('#fields select[data-id="265"]');
+  if (!sel) return;
+  function apply() {
+    var absent = (sel.value === '0');
+    CT_MAP_FIELD_IDS.forEach(function (id) {
+      var row = document.querySelector('#fields div.field[data-id="' + id + '"]');
+      if (!row) return;
+      row.classList.toggle('ct-not-applicable', absent);
+      row.querySelectorAll('input, select').forEach(function (el) {
+        el.disabled = absent;
+        if (absent && el.type !== 'checkbox') { el.value = ''; }
+        if (absent && el.type === 'checkbox') { el.checked = false; }
+      });
+      var banner = row.querySelector('.ct-na-note');
+      if (absent && !banner) {
+        var pnode = document.createElement('p');
+        pnode.className = 'note ct-na-note';
+        pnode.textContent = 'Not applicable -- CTs are declared absent on this board, so ' +
+          'S3, S4, S9 and S14 are switched off and this mapping is not required.';
+        row.appendChild(pnode);
+      } else if (!absent && banner) {
+        banner.remove();
+      }
+    });
+  }
+  sel.addEventListener('change', apply);
+  apply();
 }
 
 // M12: the override on a DERIVED ct_channel_map row. Unchecked, the number
