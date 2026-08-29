@@ -13,6 +13,15 @@
 #define PROGRESS_DUTY_MIN 0.5f
 #define PROGRESS_WINDOW_S 300.0f
 #define WRONG_DIR_RATE_C_PER_MIN 1.0f
+/* Guard 1's arrival band -- see thermal_guard_cfg_t.progress_band_c for the
+ * full reasoning. 3 C is chosen against the two things that have to fit
+ * inside it: a time-proportioning window's own ripple (under 2 C on this
+ * bench at a 60 s window and full duty) and a PID's steady-state offset. It
+ * is deliberately small, because everything inside the band is a degree of
+ * dead-element detection traded for a firing that does not abort itself: a
+ * ramp presents errors of tens of degrees, so a dead element on the way up
+ * is still caught exactly as before. */
+#define PROGRESS_BAND_C 3.0f
 #define WRONG_DIR_WINDOW_S 120.0f
 #define OFF_SETTLE_S 120.0f
 #define RUNAWAY_RATE_C_PER_MIN 1.0f
@@ -161,14 +170,33 @@ bool thermal_guard_tick(thermal_guard_state_t *state, const thermal_guard_cfg_t 
              * (wrong_dir_window_s == 0) behaves exactly as it did before this
              * fix -- only a zone that has actually set wrong_dir_window_s
              * sees the new behaviour of it applying to guard 1 too. */
+            /* THE ARRIVAL BAND, added 2026-08-29. `error > 0` is not the
+             * same question as "is this zone still climbing toward
+             * setpoint", and treating it as such is what aborted a healthy
+             * three-segment firing on this bench mid-dwell: zone 0 was
+             * holding 50.7 C against a 52.0 C setpoint at full duty --
+             * settled, 1.3 C of steady-state offset, exactly as a PID
+             * should -- and guard 1 read "duty high, below setpoint, not
+             * rising" and tripped with "rose only -0.2C in 1min". Demanding
+             * a rise from a loop that has already arrived is demanding that
+             * it overshoot.
+             *
+             * So the rise test now applies only OUTSIDE the band. Inside it
+             * the zone still has to answer for itself -- it must not FALL --
+             * which is the shape a dead element takes once the plant is hot,
+             * and is guard 2's existing test applied to a case that
+             * previously had no test at all. See
+             * thermal_guard_cfg_t.progress_band_c. */
+            float band_c = effective_f(cfg->progress_band_c, PROGRESS_BAND_C);
+            bool climbing = (error > band_c);
             float window_s = effective_f(cfg->wrong_dir_window_s,
-                                          (error > 0.0f)
+                                          climbing
                                               ? effective_f(cfg->progress_window_s, PROGRESS_WINDOW_S)
                                               : WRONG_DIR_WINDOW_S);
             if (state->progress_window_elapsed_s >= window_s) {
                 float delta = in->measurement_c - state->progress_window_start_c;
                 float elapsed_min = state->progress_window_elapsed_s / 60.0f;
-                if (error > 0.0f) {
+                if (climbing) {
                     /* Guard 1: heating, below setpoint, must be rising. */
                     float expected = rate_cfg * elapsed_min;
                     if (delta < expected) {
@@ -178,10 +206,11 @@ bool thermal_guard_tick(thermal_guard_state_t *state, const thermal_guard_cfg_t 
                         return true;
                     }
                 } else {
-                    /* Guard 2: heating while already at/above setpoint and
-                     * falling faster than the wrong-direction threshold --
-                     * a miswired zone driving full output making things
-                     * worse. */
+                    /* Guard 2: heating while at, above, or within the arrival
+                     * band of setpoint, and falling faster than the
+                     * wrong-direction threshold -- a miswired zone driving
+                     * full output and making things worse, or an element that
+                     * has died during a dwell. */
                     float falling_c_per_min = -delta / elapsed_min;
                     if (falling_c_per_min > effective_f(cfg->wrong_dir_rate_c_per_min, WRONG_DIR_RATE_C_PER_MIN)) {
                         trip(state, THERMAL_GUARD_TRIP_WRONG_DIRECTION,

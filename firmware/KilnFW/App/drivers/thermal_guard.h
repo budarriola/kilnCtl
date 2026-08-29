@@ -100,6 +100,25 @@ typedef struct {
                                 * guards -- see thermal_guard.c's comment there. */
     float drift_hysteresis_c;  /* guard 4's settle band; 0 -> DRIFT_HYSTERESIS_C */
     float frozen_eps_c;        /* guard 7's movement epsilon; 0 -> FROZEN_EPS_C */
+    /* Guard 1's ARRIVAL BAND -- added 2026-08-29 after guard 1 aborted a real
+     * multi-segment firing in the middle of a healthy dwell. 0 -> PROGRESS_BAND_C.
+     *
+     * Guard 1 asks "heat is commanded and the zone is below setpoint, so is it
+     * rising?". That question is only meaningful while the zone is still
+     * CLIMBING TOWARD setpoint. Once a PID loop has arrived, it sits a little
+     * below setpoint by construction (the steady-state offset a finite gain
+     * leaves) and holds there at whatever duty the losses demand -- which on a
+     * well-insulated kiln is easily above progress_duty_min. So a settled,
+     * perfectly healthy dwell presents guard 1 with exactly its trip
+     * condition: duty high, error positive, temperature not rising. Not rising
+     * is the CORRECT behaviour there; it is what "settled" means.
+     *
+     * Within this many degrees of setpoint the guard therefore stops
+     * demanding a rise and demands only that the zone does not FALL (guard
+     * 2's falling-rate test, which is the shape a dead element actually takes
+     * once the plant is already hot). Outside the band -- a ramp, a cold
+     * start, a genuinely lagging zone -- guard 1 is unchanged. */
+    float progress_band_c;
 } thermal_guard_cfg_t;
 
 /* One call's worth of input. measurement_c must be the RAW (uncalibrated)

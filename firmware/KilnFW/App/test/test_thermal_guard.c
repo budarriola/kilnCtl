@@ -691,6 +691,137 @@ void run_test_thermal_guard(void)
                                "dead-element floor does not delay overheat detection");
     }
 
+
+    /* ------------------------------------------------------------------
+     * Guard 1's ARRIVAL BAND (progress_band_c), added 2026-08-29.
+     *
+     * Found by a real three-segment firing on the bench: zone 0 was holding
+     * 50.7 C against a 52.0 C setpoint at full duty -- settled, 1.3 C of
+     * steady-state offset, exactly what a PID with finite gain does -- and
+     * guard 1 aborted the whole firing with "heating but rose only -0.2C in
+     * 1min". Demanding a rise from a loop that has arrived is demanding that
+     * it overshoot.
+     * ------------------------------------------------------------------ */
+
+    /* THE REGRESSION. A settled dwell inside the band, at full duty, with the
+     * temperature flat: must NOT trip. This is the exact bench scenario. */
+    {
+        thermal_guard_state_t s;
+        thermal_guard_cfg_t cfg = {.max_temp_c = 1300.0f, .min_temp_c = -20.0f,
+                                   .sanity_rate_c_per_min = 0.5f, .wrong_dir_window_s = 60.0f};
+        thermal_guard_reset(&s);
+        thermal_guard_input_t in = base_input();
+        in.setpoint_c = 52.0f;
+        in.commanded_duty = 1.0f;   /* holding hard against the losses */
+        bool tripped = false;
+        for (int i = 0; i < 200 && !tripped; i++) {
+            /* Dithering by 0.1 C, not held bit-exact. A real settled junction
+             * moves this much read to read, and holding it perfectly still
+             * would trip guard 7 (FROZEN) instead -- which would make this
+             * test pass or fail for a reason that has nothing to do with the
+             * arrival band. 0.1 C exceeds FROZEN_EPS_C (0.05) so guard 7's
+             * window keeps resetting, exactly as it does on hardware. */
+            in.measurement_c = (i % 2) ? 50.8f : 50.7f;
+            tripped = thermal_guard_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(!tripped, "a settled dwell 1.3C below setpoint at full duty does not trip guard 1 "
+                             "-- not rising is what 'settled' MEANS");
+    }
+
+    /* NEGATIVE TEST for the band -- prove it can still fail. Same duty, same
+     * flat temperature, but now genuinely far below setpoint: this is a
+     * ramp with a dead element, and it MUST still trip. Without this, the
+     * band above could have been implemented as "guard 1 never fires" and
+     * the regression test would not have noticed. */
+    {
+        thermal_guard_state_t s;
+        thermal_guard_cfg_t cfg = {.max_temp_c = 1300.0f, .min_temp_c = -20.0f,
+                                   .sanity_rate_c_per_min = 0.5f, .wrong_dir_window_s = 60.0f};
+        thermal_guard_reset(&s);
+        thermal_guard_input_t in = base_input();
+        in.setpoint_c = 500.0f;
+        in.measurement_c = 50.7f;   /* 449 C below setpoint -- unambiguously climbing */
+        in.commanded_duty = 1.0f;
+        bool tripped = false;
+        for (int i = 0; i < 200 && !tripped; i++) {
+            tripped = thermal_guard_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(tripped, "a dead element on a RAMP still trips guard 1 -- the band did not "
+                            "disable the guard, it scoped it");
+        TEST_CHECK(!tripped || s.reason == THERMAL_GUARD_TRIP_HEATING_FAILED, "reason is HEATING_FAILED");
+    }
+
+    /* The band's edge, from the outside. Error just OUTSIDE the default 3 C
+     * band still demands a rise -- so the boundary is where the comment says
+     * it is, not several degrees away. */
+    {
+        thermal_guard_state_t s;
+        thermal_guard_cfg_t cfg = {.max_temp_c = 1300.0f, .min_temp_c = -20.0f,
+                                   .sanity_rate_c_per_min = 0.5f, .wrong_dir_window_s = 60.0f};
+        thermal_guard_reset(&s);
+        thermal_guard_input_t in = base_input();
+        in.setpoint_c = 52.0f;
+        in.measurement_c = 48.0f;   /* 4 C below setpoint -- outside the 3 C band */
+        in.commanded_duty = 1.0f;
+        bool tripped = false;
+        for (int i = 0; i < 200 && !tripped; i++) {
+            tripped = thermal_guard_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(tripped, "4 C below setpoint is outside the 3 C band, so guard 1 still demands a rise");
+    }
+
+    /* Inside the band is NOT a free pass: a zone that is FALLING while heat
+     * is commanded is still caught, by guard 2's rate test. This is the case
+     * that previously had no test at all -- before this change, 0 < error <=
+     * band went to guard 1's rise check, and after it the falling check has
+     * to be the thing that covers a dead element during a dwell. */
+    {
+        thermal_guard_state_t s;
+        thermal_guard_cfg_t cfg = {.max_temp_c = 1300.0f, .min_temp_c = -20.0f,
+                                   .sanity_rate_c_per_min = 0.5f, .wrong_dir_window_s = 60.0f,
+                                   .wrong_dir_rate_c_per_min = 0.3f};
+        thermal_guard_reset(&s);
+        thermal_guard_input_t in = base_input();
+        in.setpoint_c = 52.0f;
+        in.measurement_c = 51.0f;   /* inside the band */
+        in.commanded_duty = 1.0f;
+        bool tripped = false;
+        for (int i = 0; i < 200 && !tripped; i++) {
+            /* 0.1 C per 10 s tick = 0.6 C/min. Deliberately slow: the zone
+             * has to still be INSIDE the band when the 60 s window closes,
+             * or it leaves the band on the way down and guard 1's rise check
+             * catches it instead -- which would prove nothing about the
+             * falling branch this case exists for. */
+            in.measurement_c -= 0.1f;
+            tripped = thermal_guard_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(tripped, "an element dying DURING a dwell still trips -- inside the band the zone "
+                            "must not fall, even though it need not rise");
+        TEST_CHECK(!tripped || s.reason == THERMAL_GUARD_TRIP_WRONG_DIRECTION, "reason is WRONG_DIRECTION");
+    }
+
+    /* progress_band_c is configurable on the same 0-means-default rule as
+     * every other field, and a widened band really does widen. */
+    {
+        thermal_guard_state_t s;
+        thermal_guard_cfg_t cfg = {.max_temp_c = 1300.0f, .min_temp_c = -20.0f,
+                                   .sanity_rate_c_per_min = 0.5f, .wrong_dir_window_s = 60.0f,
+                                   .progress_band_c = 10.0f};
+        thermal_guard_reset(&s);
+        thermal_guard_input_t in = base_input();
+        in.setpoint_c = 52.0f;
+        in.commanded_duty = 1.0f;
+        bool tripped = false;
+        for (int i = 0; i < 200 && !tripped; i++) {
+            /* 8 C below setpoint: outside the 3 C default band, inside a
+             * configured 10 C one. Dithered for the same guard-7 reason as
+             * the settled-dwell case above. */
+            in.measurement_c = (i % 2) ? 44.1f : 44.0f;
+            tripped = thermal_guard_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(!tripped, "progress_band_c=10 puts an 8 C error inside the band, so no rise is demanded");
+    }
+
     /* thermal_guard_clear() fully un-latches and resets windows. */
     {
         thermal_guard_state_t s;
