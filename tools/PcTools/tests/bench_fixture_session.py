@@ -70,9 +70,62 @@ FIXTURE_MAX_TEMP_C = 80.0
 
 HTTP_TIMEOUT_S = 8.0
 
+#: Cooldown-wait defaults. The TOLERANCE, not the target, is the tunable
+#: number here: the target itself is derived from a live ambient reading on
+#: every call (see BenchSession.wait_for_cooldown). 3 C is about 4x this
+#: bench's type-K + cold-junction noise, so it is reachable without being so
+#: loose that a genuinely warm zone passes as cold.
+COOLDOWN_DEFAULT_TOLERANCE_C = 3.0
+#: 45 minutes. This jig rises 2.8-3.8 C/min under full duty and falls far
+#: more slowly than that, so the budget has to be generous or the gate
+#: becomes a coin flip. It is still a BUDGET: exceeding it raises rather
+#: than proceeding onto residual heat.
+COOLDOWN_DEFAULT_TIMEOUT_S = 2700.0
+#: Poll period. The plant's time constant is ~167 s (measured on this bench,
+#: 2026-08-29), so nothing is learned by asking more often, and every poll is
+#: an HTTP round trip on a board that is also running a control loop.
+COOLDOWN_DEFAULT_POLL_S = 20.0
+
 
 class BenchSessionError(RuntimeError):
     """The bench could not be put into, or confirmed in, the known-good state."""
+
+
+def cooldown_target_c(ambient_c: float, explicit_target_c: "Optional[float]",
+                      tolerance_c: float) -> float:
+    """The temperature a cooldown wait is waiting FOR -- pure, so the policy
+    is host-testable without a board.
+
+    An explicit target wins outright and is returned unchanged, INCLUDING a
+    target below ambient. A caller who asks to wait for 20 C in a 34 C room
+    gets exactly the wait -- and the eventual timeout -- they asked for; this
+    function must not quietly substitute a reachable number for an
+    unreachable requested one, because that substitution would be invisible
+    in the result.
+
+    Otherwise the target is ambient + tolerance. A non-finite ambient means
+    the board reported no usable cold junction, so there is no honest target
+    to compute and this refuses rather than falling back to a constant. That
+    constant is precisely the failure this whole helper replaces: a
+    hardcoded 25 C gate is unreachable in a room the owner reports at ~100 F.
+    """
+    if explicit_target_c is not None:
+        return float(explicit_target_c)
+    if ambient_c != ambient_c or ambient_c in (float("inf"), float("-inf")):
+        raise BenchSessionError(
+            "no valid cold-junction reading, so no ambient-relative cooldown target can be "
+            "computed -- pass an explicit target_c if that is really what you want")
+    if tolerance_c < 0.0:
+        raise BenchSessionError(f"cooldown tolerance {tolerance_c} C is negative")
+    return float(ambient_c) + float(tolerance_c)
+
+
+def cooldown_reached(hottest_c: float, target_c: float) -> bool:
+    """Has the bench cooled to the target? NaN is NOT cool -- a channel that
+    stopped reporting must not read as a bench that finished cooling."""
+    if hottest_c != hottest_c:
+        return False
+    return hottest_c <= target_c
 
 
 def bench_host() -> Optional[str]:
@@ -149,6 +202,109 @@ class BenchSession:
                 f"bench is at {hottest:.1f} C, above the {FIXTURE_MAX_TEMP_C} C fixture "
                 "ceiling -- refusing to run a heat-adjacent test")
         return hottest
+
+    # -- ambient reference and the cooldown gate ---------------------------
+    def channel_readings(self) -> "list[dict]":
+        """Every VALID thermocouple channel as ``{channel, temp_c, cj_c}``.
+
+        ``cj_c`` is the MAX31856's cold junction -- the die temperature of
+        the converter on the thermocouple board. It is the only ambient
+        reference this board publishes, and unlike a hardcoded room
+        temperature it moves with the room: this bench sits at ~34 C cold
+        junction while the owner reports ~100 F ambient.
+        """
+        out: "list[dict]" = []
+        for ch in self.status().get("channels", []):
+            if not ch.get("valid"):
+                continue
+            cj = ch.get("cj_c")
+            out.append({"channel": ch.get("channel"), "temp_c": float(ch["temp_c"]),
+                        "cj_c": None if cj is None else float(cj)})
+        return out
+
+    def ambient_reference_c(self) -> float:
+        """The board's own "how warm is the room" number, read at call time.
+
+        The MINIMUM valid cold junction, not the mean: a converter whose own
+        channel has just been driven hot picks some of that heat up through
+        the board, so the coolest cold junction is the least-contaminated
+        estimate of the room. NaN when nothing valid is reporting, which
+        callers must treat as "no target can be computed", never as 0.
+        """
+        cjs = [r["cj_c"] for r in self.channel_readings() if r["cj_c"] is not None]
+        return min(cjs) if cjs else float("nan")
+
+    def wait_for_cooldown(self, target_c: "Optional[float]" = None,
+                          tolerance_c: float = COOLDOWN_DEFAULT_TOLERANCE_C,
+                          timeout_s: float = COOLDOWN_DEFAULT_TIMEOUT_S,
+                          poll_s: float = COOLDOWN_DEFAULT_POLL_S,
+                          channels: "Optional[list[int]]" = None) -> dict:
+        """Block until the bench has shed the previous test's heat.
+
+        WHY THIS EXISTS. Every thermal measurement in this suite -- a step
+        rise rate, an autotune fit, a cross-zone coupling gain -- measures a
+        plant starting from somewhere. Run back to back with no gate, the
+        second test starts on top of the first one's residual heat and
+        reports a smaller step, a smaller gain and a shorter dead time: all
+        wrong in the same direction, and none of them visibly so.
+
+        WHAT "COOL" MEANS. Not a fixed number. ``target_c`` defaults to
+        ``ambient_reference_c() + tolerance_c``, read at the moment of the
+        call, so the gate is "this zone has come back to the room" -- which
+        is the real precondition, and one that stays correct on a 100 F day.
+        An explicit ``target_c`` overrides that entirely.
+
+        HOT JUNCTION vs COLD JUNCTION, and why both appear. The cold junction
+        supplies the REFERENCE (what is the room doing); the hot junctions
+        supply the SUBJECT (has the element's heat dissipated). Judging each
+        hot junction only against its OWN cold junction would be tighter in
+        principle, but on this jig both sit on the same small board, so the
+        cold junction lags the room upward during a firing and that
+        comparison closes early -- exactly when it should not. Reference from
+        the coolest cold junction; judge the hot junctions against it.
+
+        NEVER SILENT. On timeout this raises, with the temperatures actually
+        reached. A helper that returned "close enough" once its budget
+        expired would hand the next test a hot start and a green tick.
+
+        Batching note: this deliberately lives here and not behind
+        ``kiln_call``. A multi-minute blocking wait does not belong in a
+        ``kiln_batch`` round trip -- that tool's contract is one request, in
+        order, stopping at the first failure. As a session method it composes
+        the way a precondition should: a test (or a pytest fixture) calls it
+        before the batch of hardware operations that needs a cold start.
+        """
+        deadline = time.monotonic() + timeout_s
+        t0 = time.monotonic()
+        readings = self.channel_readings()
+        if not readings:
+            raise BenchSessionError("no valid thermocouple channel -- cannot judge cooldown")
+        ambient = self.ambient_reference_c()
+        goal = cooldown_target_c(ambient, target_c, tolerance_c)
+        history: "list[dict]" = []
+        while True:
+            watched = [r for r in readings if channels is None or r["channel"] in channels]
+            if not watched:
+                raise BenchSessionError(
+                    f"none of channels {channels} are reporting valid readings")
+            hottest = max(r["temp_c"] for r in watched)
+            history.append({"t_s": round(time.monotonic() - t0, 1), "hottest_c": hottest})
+            if hottest > FIXTURE_MAX_TEMP_C:
+                raise BenchSessionError(
+                    f"bench is at {hottest:.1f} C, above the {FIXTURE_MAX_TEMP_C} C fixture "
+                    "ceiling, while waiting for it to cool")
+            if cooldown_reached(hottest, goal):
+                return {"reached": True, "hottest_c": hottest, "target_c": goal,
+                        "ambient_c": ambient, "waited_s": round(time.monotonic() - t0, 1),
+                        "samples": len(history), "history": history}
+            if time.monotonic() >= deadline:
+                raise BenchSessionError(
+                    f"cooldown budget of {timeout_s:.0f} s expired with the bench still at "
+                    f"{hottest:.2f} C, above the {goal:.2f} C target (ambient reference "
+                    f"{ambient:.2f} C + {tolerance_c:.2f} C tolerance). Refusing to start a "
+                    f"thermal test on residual heat; last samples: {history[-6:]}")
+            time.sleep(poll_s)
+            readings = self.channel_readings()
 
     # -- the precondition --------------------------------------------------
     def apply_known_good(self, try_uart: bool = True) -> "BenchSession":
@@ -326,6 +482,22 @@ class BenchSession:
             raise BenchSessionError(f"GET /api/autotune -> {code}: {text[:200]}")
         return json.loads(text)
 
+    def autotune_matrix(self) -> dict:
+        """GET /api/autotune/matrix -- the cross-zone coupling matrix K, plus
+        the Relative Gain Array derived from it in the same response.
+
+        This is the board's OWN "zone interaction measurement", and it is not
+        a thing a test can fake up from temperature samples: cell K[i][j] is
+        the FOPDT fit of zone j's response to a duty step on zone i, and a
+        row is filled only when an autotune run on zone i finishes with a
+        valid fit. So an n x n RGA needs n zones autotuned, in the same power
+        cycle -- the matrix lives in the engine's RAM, not in NVS.
+        """
+        code, text = _http(self.host, "/api/autotune/matrix")
+        if code != 200:
+            raise BenchSessionError(f"GET /api/autotune/matrix -> {code}: {text[:200]}")
+        return json.loads(text)
+
     def start_autotune_step(self, zone_index: int, step_duty: float) -> "tuple[int, str]":
         """Start the OPEN-LOOP STEP test (autotune_engine.c's
         AUTOTUNE_METHOD_STEP), never the relay method.
@@ -404,7 +576,14 @@ class BenchSession:
         t0 = time.monotonic()
         while True:
             status = self.status()
-            temps = [c["temp_c"] for c in status.get("channels", []) if c.get("valid")]
+            # Keyed by the channel's OWN index, not by position in a filtered
+            # list. The two differ the moment any channel reports invalid,
+            # and the positional form silently relabels every channel after
+            # the gap -- which on a cross-zone measurement would attribute
+            # zone 2's rise to zone 1.
+            chan_c = {int(c["channel"]): float(c["temp_c"])
+                      for c in status.get("channels", []) if c.get("valid")}
+            temps = list(chan_c.values())
             hottest = max(temps) if temps else float("nan")
             if hottest == hottest and hottest > FIXTURE_MAX_TEMP_C:
                 raise BenchSessionError(
@@ -413,7 +592,12 @@ class BenchSession:
             exec_st = self.exec_status()
             rows.append({
                 "t_s": round(time.monotonic() - t0, 2),
-                "zone_c": temps[zone_index] if zone_index < len(temps) else float("nan"),
+                "zone_c": chan_c.get(zone_index, float("nan")),
+                # EVERY zone's reading on every sample. Free (one /api/status
+                # already carries them all) and it is the raw material of a
+                # cross-zone coupling measurement, which cannot be
+                # reconstructed afterwards from the zone-under-test alone.
+                "channels_c": chan_c,
                 "hottest_c": hottest,
                 "relays_on": [r["relay"] for r in status["relays"] if r["on"]],
                 "safety_heating_enabled": status["safety_heating_enabled"],

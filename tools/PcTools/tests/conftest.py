@@ -75,3 +75,37 @@ def bench(bench_session) -> BenchSession:
         detail = bench_session.force_all_stop()
         relays = detail.get("relays_on")
         assert relays == [], f"relays still on after teardown: {detail}"
+
+
+@pytest.fixture()
+def cold_bench(bench):
+    """``bench``, plus the guarantee that it STARTED cold.
+
+    Thermal tests do not compose without this. Back to back, the second one
+    begins on the first one's residual heat and measures a smaller step, a
+    smaller gain and a shorter dead time -- all wrong in the same direction,
+    and none of it visible in the result. The target is derived from the
+    board's own cold junction at call time (BenchSession.wait_for_cooldown),
+    so it tracks a room the owner reports at around 100 F rather than a
+    hardcoded 25 C that would never be reached.
+
+    The wait happens BEFORE the test body and the stop-everything teardown
+    still happens after it: a test that asks for a cold start also gets the
+    hard stop, because `bench` is what this wraps.
+
+    KILNCTRL_BENCH_COOLDOWN_TARGET_C overrides the derived target for a
+    session that wants an absolute gate; KILNCTRL_BENCH_COOLDOWN_TIMEOUT_S
+    overrides the budget. Neither is needed for a normal run.
+    """
+    target = os.environ.get("KILNCTRL_BENCH_COOLDOWN_TARGET_C")
+    timeout = os.environ.get("KILNCTRL_BENCH_COOLDOWN_TIMEOUT_S")
+    kwargs = {}
+    if target:
+        kwargs["target_c"] = float(target)
+    if timeout:
+        kwargs["timeout_s"] = float(timeout)
+    report = bench.wait_for_cooldown(**kwargs)
+    print(f"\n[live] cold start: {report['hottest_c']:.2f} C "
+          f"(target {report['target_c']:.2f} C, ambient ref {report['ambient_c']:.2f} C) "
+          f"after {report['waited_s']:.0f} s")
+    yield bench
