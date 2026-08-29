@@ -328,28 +328,44 @@ static void handle_raw_frame(uart_protocol_t *proto, const uint8_t *raw, size_t 
 static void uart_protocol_rx_task(void *arg)
 {
     uart_protocol_t *proto = (uart_protocol_t *)arg;
-    /* RAISED from 32 to STUFFED_FRAME_MAX (2026-08-28, live-hardware
-     * commissioning defect): at 32 this task needed ~5-8 separate
-     * uart_read_bytes() calls to assemble one CONFIG_PAGE reply (157-253 raw
-     * bytes, ~300-528 stuffed) versus 1-2 for the small, fast-succeeding
-     * STATUS/DIAG/POWER frames -- and every one of those calls is a real
-     * scheduler round trip on a task that runs at UART_PROTOCOL_TASK_PRIORITY
-     * (6), well below WiFi's. Each extra call is another chance for this task
-     * to be preempted and made to wait its turn, and KilnFW's
-     * SAFETY_LINK_REPLY_TIMEOUT_MS budget (safety_link.h, ~144ms at 230400)
-     * has no slack to spend on that: it derives from wire time plus a fixed
-     * 100ms for the PICO's own task latency, not the ESP's own RX-assembly
-     * overhead. Measured live: GET_CONFIG_PAGE page 1 (the bigger of the two
-     * pages, 27 entries/~157 raw bytes) timed out on essentially every fetch
-     * attempt while STATUS kept succeeding -- exactly the asymmetry this
-     * chunk size explains and a Pico-side fix (LINK_TASK_POLL_MS, link_task.c)
-     * did not touch. Reading a whole worst-case frame in one call removes
-     * that per-chunk scheduling tax entirely; the underlying UART ring
-     * buffer is 4096 bytes (uart_owner.c's UART_OWNER_RX_RING_BUF_SIZE), so
-     * this never asks uart_read_bytes() for more than the driver already
-     * buffers. This buffer lives on this task's own stack, which is PSRAM
-     * (see this file's stack-depth comment below) -- the extra ~500 bytes
-     * costs nothing budgeted against internal DRAM. */
+    /* A whole worst-case frame of capacity, but NEVER waited on as a whole.
+     *
+     * 2026-08-28 (second pass, live bench): 3149393 raised this buffer from
+     * 32 to STUFFED_FRAME_MAX to cut the number of scheduler round trips
+     * needed to assemble a big CONFIG_PAGE -- and left the read itself as
+     * uart_read_bytes(port, chunk, sizeof(chunk), 200ms). That call does not
+     * return early with whatever has arrived: ESP-IDF's uart_read_bytes()
+     * keeps consuming and re-blocking until it has `length` bytes or the
+     * ticks_to_wait budget is gone. Asking for 528 bytes on a link whose
+     * frames are ~40 bytes and whose busiest moment is ~10 frames/s means the
+     * length is never satisfied, so every read holds its bytes for the FULL
+     * 200 ms before handing them up. The safety poll's whole reply budget is
+     * SAFETY_LINK_REPLY_TIMEOUT_MS (~345 ms), and it does not survive a
+     * receiver that quantises delivery into 200 ms buckets on a peer that is
+     * answering every request: measured live on the bench afterwards as 42
+     * timeouts in 42 polls -- 100% -- while 423 STATUS frames arrived in the
+     * same window with zero CRC errors, zero resyncs and zero drops. That is
+     * SAFETY_FAULT_SRC_SAFETY_LINK asserting continuously, which blocks all
+     * heating. The bytes were never lost; they were only ever late.
+     *
+     * The buffer size was not the mistake -- coupling it to the wait was.
+     * Keep the large buffer (a big frame still arrives in one or two reads,
+     * which is what 3149393 wanted) but never block for it to fill:
+     *
+     *   - if the driver already has bytes buffered, take up to a bufferful of
+     *     exactly what is there, with a ZERO timeout -- a short frame is
+     *     handed up the instant it lands, whatever the buffer's capacity;
+     *   - only when nothing is buffered, block for a single byte, bounded by
+     *     UART_PROTOCOL_RX_IDLE_POLL_MS. Asking for one byte means the wait
+     *     ends on the first byte of the next frame rather than on the
+     *     timeout, so the bound is a shutdown-noticing tick, not added
+     *     latency.
+     *
+     * Read latency is therefore governed by arrival, not by capacity, which
+     * is the invariant to preserve if this loop is ever reworked again (DMA
+     * included): a receiver may schedule against a buffer far larger than the
+     * frame it is about to get, but it must never wait on that buffer
+     * filling. */
     uint8_t chunk[STUFFED_FRAME_MAX];
     uint8_t raw[RAW_FRAME_MAX];
     size_t raw_len = 0;
@@ -357,7 +373,16 @@ static void uart_protocol_rx_task(void *arg)
     bool escaped = false;
 
     while (!proto->shutdown_requested) {
-        int n = uart_read_bytes(proto->owner->port, chunk, sizeof(chunk), pdMS_TO_TICKS(200));
+        int n = 0;
+        size_t buffered = 0;
+        if (uart_get_buffered_data_len(proto->owner->port, &buffered) == ESP_OK && buffered > 0) {
+            size_t want = (buffered > sizeof(chunk)) ? sizeof(chunk) : buffered;
+            n = uart_read_bytes(proto->owner->port, chunk, want, 0);
+        } else {
+            /* Nothing buffered: block on the FIRST byte only. */
+            n = uart_read_bytes(proto->owner->port, chunk, 1,
+                                pdMS_TO_TICKS(UART_PROTOCOL_RX_IDLE_POLL_MS));
+        }
         if (n <= 0) {
             continue; /* timeout is just a poll interval, lets us notice shutdown */
         }

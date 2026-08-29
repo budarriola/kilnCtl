@@ -267,6 +267,49 @@ carry noise, half-frames from an ESP mid-reset, and a continuous break. It must:
   double-buffered snapshot; if the consumer has not read the last one, overwrite
   it. Newer context is strictly more useful than older context.
 
+### Never wait on a receive buffer filling
+
+Both ends read into a buffer sized for the **worst-case** frame, because
+neither knows a frame's length before it arrives. Neither end may make the
+delivery of what has *already* arrived wait on that buffer being filled.
+This is a transport rule, not a protocol one, but it is stated here because
+violating it breaks the timing contract every command in this document
+depends on, while leaving the wire itself completely clean — no CRC error,
+no resync, no drop, just late frames.
+
+- **ESP (`KilnFW`, `espInterfaces/uart_protocol.c`)** —
+  `uart_protocol_rx_task()` asks `uart_get_buffered_data_len()` first and
+  reads only what is actually buffered, with a **zero** timeout. Only when
+  nothing is buffered does it block, and then for a **single byte** bounded
+  by `UART_PROTOCOL_RX_IDLE_POLL_MS` (100 ms) — so the wait ends on the next
+  frame's first byte, and the bound is a shutdown-noticing tick rather than
+  added latency.
+- **Pico (`SaftyFW`, `tasks/uart_owner.c` + `tasks/link_task.c`)** — the RX
+  interrupt drains the UART FIFO into a fixed ring on every character, and
+  `link_task` polls that ring every `LINK_TASK_POLL_MS` (10 ms). The buffer
+  is large and the poll is bounded and independent of it, which is the same
+  property by a different mechanism.
+
+Neither side uses DMA for this link. It was considered (2026-08-28) and is
+not what the latency problem was: on the ESP the standard ESP-IDF UART driver
+already stages bytes into a 4096-byte ring from its own ISR and exposes no
+DMA mode, and on the Pico the per-character ISR is far below the link's
+budget. What matters is the rule above, not the mechanism that satisfies it —
+and a DMA rewrite would satisfy it no better while carrying the fault-line
+risk of replacing the transport under a safety-critical link.
+
+> **The incident this rule was written from (2026-08-28).** The ESP's read was
+> `uart_read_bytes(port, chunk, sizeof(chunk), 200 ms)` with `chunk` sized to
+> the worst-case stuffed frame (528 bytes). `uart_read_bytes()` does not
+> return early with a partial read — it re-blocks until `length` bytes have
+> arrived or the timeout expires. On a link whose frames are ~40 bytes and
+> which is busiest at ~10 frames/s, 528 bytes never arrive, so **every** read
+> held its bytes for the full 200 ms. Measured live: **42 timeouts in 42
+> polls (100%)** against 423 STATUS frames received in the same window, with
+> zero CRC errors, zero resyncs and zero drops. That is
+> `SAFETY_FAULT_SRC_SAFETY_LINK` asserted continuously, which blocks all
+> heating.
+
 ---
 
 ## 4. ESP → Pico: the context broadcast

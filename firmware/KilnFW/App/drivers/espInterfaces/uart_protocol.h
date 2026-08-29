@@ -47,6 +47,15 @@ extern "C" {
  * change even though the frame layout itself didn't move. */
 #define UART_PROTO_MAX_PAYLOAD   253
 #define UART_PROTO_MAX_RETRIES   10
+
+/* Upper bound on how long uart_protocol_rx_task() may sit in one read while
+ * the wire is IDLE. It is not a delivery latency: the idle wait asks for a
+ * single byte, so it ends on the first byte of the next frame, and a read
+ * issued while bytes are already buffered uses a zero timeout. It only bounds
+ * how long the task can go without noticing shutdown_requested, and bounds
+ * the worst case if uart_get_buffered_data_len() ever under-reports. See that
+ * function's own comment for the live incident that fixed the read shape. */
+#define UART_PROTOCOL_RX_IDLE_POLL_MS 100u
 #define UART_PROTO_DEFAULT_ACK_TIMEOUT_MS 200
 /* Raised 8 -> 16 (2026-08-13) when uart_task_ids.h grew task_ids 8-11
  * (CONTROL/PROFILES/AUTOTUNE/WIFI): this board's own ESP-side registrations
