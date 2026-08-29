@@ -74,7 +74,6 @@ What is still genuinely open is short:
 |---|---|---|
 | S | The CT coupling transformer (Hammond 140QEX): one look at the PDF before ordering — 10.62 H is quoted at 1 kHz and applied at 60 Hz | M5 |
 | S | Time the link-staleness ceiling (1.5 s) and the firing abort (30 s) with a stopwatch. Code is flashed; nobody has held the link down | M6 |
-| S | Observe K4 physically closing. "Enable granted" is permission, not evidence the contact moved | M4 |
 | M | S9's welded-contactor escalation — by definition needs a welded contactor | M4 |
 | M | AP-fallback verified end to end (needs a router with correct *and* deliberately-wrong static config) | M6 |
 | M | Per-channel CT-to-jack commissioning, plus a bench measurement of the ADC noise floor under the 25-count presence fallback | M5 |
@@ -492,10 +491,20 @@ physically stop a kiln, and the first that can nuisance-trip one.
       reports `heating enable granted`. ~~The bench cannot demonstrate a
       genuine heat-enable until the safety thermocouple is populated~~ — that
       blocker is gone.
-      **Still not proven**: K4 has never been *observed closing* on a real
-      board. "Enable granted" is the safety processor's permission, not
-      evidence that the contact moved; confirming that wants a meter or the
-      relay-status LEDs of M1. And note what granting it exposed —
+      **Observed closing, 2026-08-29.** Not with a meter and not with an LED
+      — with the element. Until this date nothing in the normal firing path
+      ever sent `SAFETY_CMD_REQUEST_ENABLE` at all: `profile_executor.c` and
+      `autotune_engine.c` had *zero* calls to `safety_link_request_enable()`,
+      so every firing and every autotune this firmware ever ran closed K1 and
+      left K4 open. That is what "40 minutes of commanded heat moved this jig
+      0.67 C" was actually measuring. With `heat_enable.c` wired in, the same
+      jig on the same profile went 32.1 → 47.5 C, `safety_relay_energized`
+      true on every poll of the run and false again the moment it stopped.
+      A contact that passes enough current to move a thermocouple 15 C is
+      closed. What is still unobserved is the *mechanical* state under a
+      fault — a welded contact reading closed while the request is released
+      — which is M1's LEDs, not this.
+      And note what granting it exposed —
       `SaftyFW/TODO.md`'s "An uncommissioned safety processor grants heating
       enable": permission is given while S1's absolute ceiling is disabled for
       want of `abs_max_temp_c`
