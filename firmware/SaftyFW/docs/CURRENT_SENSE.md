@@ -122,7 +122,9 @@ Converting to amps requires the CT's volts-per-amp figure:
 I_rms  =  V_adc / (0.715 · √2 · k_ct)        [k_ct in V_rms per A_rms]
 ```
 
-`k_ct` is **not derivable from anything in this repository.**
+`k_ct` is **not derivable from anything in this repository** — but it *is*
+derivable, on a live installation, from two numbers the operator already gives
+the commissioning flow. See §5.1.
 
 ### The CT is not on the BOM
 
@@ -315,7 +317,7 @@ Per channel, stored in flash, all **measured**:
 |---|---|---|---|
 | `zero_counts` | **both** | Mean ADC reading with the CT fitted and **no primary current**, over ≥ 10 s | small positive; op-amp Vos and D14 leakage, *not* 0 |
 | `i_present_a` | **guards** | Set between the noise floor and a conducting element. Coarse by design | 2.0 A |
-| `k_ct_v_per_a` | power estimate only | CT datasheet, then confirmed against a clamp meter | e.g. 0.0333 V/A for a 1 V/30 A CT |
+| `k_ct_v_per_a` | power estimate, **and the presence threshold's domain conversion** | **Calibrated by the ESP's zone current-sweep (§5.1)**; CT datasheet or a clamp meter as the manual override | e.g. 0.0333 V/A for a 1 V/30 A CT |
 | `gain` | power estimate only | 0.715 nominal, refined if the resistors are not 1 % | 0.715 |
 | `mains_voltage_v` | power estimate only | The installation's nominal supply voltage | 240 |
 
@@ -376,13 +378,73 @@ Before any threshold is trusted, run this and record the results:
    discover a CT plugged into the wrong jack*, and a swapped CT silently
    destroys the correlation guards S3/S4.
 3. With that relay on, compare the computed amps against a clamp meter on the
-   same conductor. Adjust `k_ct_v_per_a` to match. **This step only affects the
-   power estimate** — skipping it leaves every guard fully functional and the
-   GUI's wattage wrong.
+   same conductor. Adjust `k_ct_v_per_a` to match. **On a board driven by
+   KilnFW this step is now automatic** — see §5.1; the clamp meter is the
+   override, not the procedure. Skipping it leaves every guard fully functional
+   and the GUI's wattage wrong.
 4. Command the relay off and record the decay. Confirm it reaches < 5 % within
    ~4 s. A much slower decay means C57 or R77 is wrong; a much faster one means
    something is loading the hold node.
 5. Repeat for channels 2 and 3.
+
+### 5.1 `k_ct_v_per_a` is calibrated by the ESP, not typed (2026-08-28, KilnFW M12b)
+
+Step 3 above asks for a number nobody has at commissioning time, on a page that
+asked for it in V/A. In practice it was never entered: `k_ct_v_per_a` stayed at
+`config_store.c`'s `memset(0)` on every board. That is **not** the harmless
+outcome §5's table used to imply — with `k_ct_v_per_a <= 0`,
+`current_presence_policy.c` falls back to a fixed counts-domain margin instead
+of converting the operator's own `i_present_a`, and every reported amps/watts
+figure reads `0.0`.
+
+KilnFW's zone current-sweep (`App/drivers/zones_http.c`) now calibrates it. That
+sweep is already this section's step 2, run automatically: one zone's relay(s)
+on, every other relay forced off, all three channels recorded separately. It
+therefore has both halves of a calibration nobody has to type:
+
+- **Expected**, from the two commissioning answers already collected
+  (`COMMISSIONING_UX.md` Q3/Q4): `I_expected = max_expected_power_w /
+  mains_voltage_v` — the whole kiln's current at full output.
+- **Measured**, as the sum over every zone of that zone's own dominant CT
+  channel. One zone at a time summed is the same total a simultaneous
+  full-output firing would draw, and it is the only version of that total a
+  fixture can measure without ever energizing two zones at once.
+
+Since §2's transfer function makes the reported amps inversely proportional to
+`k_ct`, the correction is a single scale factor applied to each resolved
+channel's own committed value:
+
+```
+k_new[c]  =  k_old[c] · (I_measured_total / I_expected_total)
+```
+
+**The dependence on a prior `k_old` is inherent, not a shortcut.** The ESP↔Pico
+link carries amps, never raw counts, so a `k_old` still at `0.0` makes every
+channel read `0.0 A` and there is nothing to scale — the sweep refuses and says
+so rather than inventing a starting value. (The CT-*map* derivation already had
+the same dependence: it needs ≥ 2 A on a channel to resolve anything.)
+
+Every one of these refuses the whole calibration, with a reason shown on both
+the zones and commissioning pages:
+
+| Refusal | Why it is not a scale error |
+|---|---|
+| A zone that did not resolve to a CT, or two zones sharing one | The whole-kiln total is short by that zone's share, and `k` would be scaled **down** by exactly that much, silently |
+| `mains_voltage_v` or `max_expected_power_w` unset | There is no expected current to compare against — and an *unset* answer is not a zero |
+| `k_old <= 0` | Uncommissioned: every reading was `0.0 A` |
+| Measured total < 2 A | Below a conducting element, the ratio is noise |
+| Correction outside 0.2×–5× | §0 scopes this chain to "within a factor of ~2"; a bigger disagreement is a nameplate in the wrong units, a CT on the wrong conductor, or a current-output CT fitted where a voltage-output one belongs — scaling `k` would make the amps *look* right while moving the presence threshold to match the error |
+| Result outside 0.0005–0.5 V/A | Not a CT |
+| The `ct_channel_map` push failed | Both writes stage into the same buffer on the Pico; committing on top of an abandoned staging would carry its leftovers into flash |
+
+The write itself goes over the ordinary `SET_PARAM`/`COMMIT_CONFIG` path — the
+Pico cannot and must not tell a calibrated write from a typed one — and carries
+the same discipline as the `ct_channel_map` push: an ACKed, un-rejected commit
+is **not** proof, so the record is re-fetched live and every channel must read
+back bit-exactly; and every failure arm re-stages the affected channels back to
+whatever the Pico has actually committed (or to `0.0`, the uncommissioned value,
+for a channel that never had one — which is the *safe* side of
+`current_presence_policy.c`'s branch).
 
 **Step 2 is the one that gates the guards.** Until it passes on all three
 channels, **S3 and S4 must be left disabled** (`TODO.md` phase 5). A correlation

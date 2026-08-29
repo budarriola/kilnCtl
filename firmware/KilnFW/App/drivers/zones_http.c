@@ -1817,7 +1817,13 @@ static esp_err_t relay_names_save(void)
  * press, and the alternative (reading a short struct and zero-filling the
  * tail) is a migration path worth writing only for data that cannot simply
  * be measured again. */
-#define ZONE_NORMALS_CFG_VERSION 2
+/* 2 -> 3 (M12b): the sweep now also derives k_ct_v_per_a[0..2] from the
+ * nameplate power the operator already answered (COMMISSIONING_UX.md Q3/Q4)
+ * and this run's own measured current, and the commissioning page has to be
+ * able to say DERIVED on a later page load for that field too. A v2 blob is
+ * discarded rather than migrated, for exactly the reason v1 was: one button
+ * press re-measures the whole thing. */
+#define ZONE_NORMALS_CFG_VERSION 3
 #define NVS_KEY_ZONE_NORMALS "zone_normals_cfg"
 
 typedef struct {
@@ -1830,6 +1836,14 @@ typedef struct {
      * clear bit means "never derived", and ct_map_zone[c] is meaningless. */
     uint8_t  ct_map_derived_mask;
     uint8_t  ct_map_zone[ZONE_CT_CHANNEL_COUNT];
+    /* v3: the derived CT volts-per-amp scale. bit c of k_ct_derived_mask set
+     * means k_ct_v_per_a[c] is a value this board CALIBRATED from a complete
+     * sweep and confirmed written to the safety processor; a clear bit means
+     * "never derived here" and k_ct_v_per_a[c] is meaningless -- it says
+     * nothing about whether the Pico's own k_ct_v_per_a[c] is set, which an
+     * operator may always have entered by hand. */
+    uint8_t  k_ct_derived_mask;
+    float    k_ct_v_per_a[ZONE_CT_CHANNEL_COUNT];
     uint32_t crc32;
 } zone_normals_cfg_t;
 
@@ -1953,6 +1967,38 @@ static bool zone_ct_map_set(uint8_t ct_channel, uint8_t zone_index)
     s_zone_normals.cfg.ct_map_zone[ct_channel] = zone_index;
     s_zone_normals.cfg.ct_map_derived_mask |= (uint8_t)(1u << ct_channel);
     return zone_normals_save() == ESP_OK;
+}
+
+/* M12b: same discipline as zone_ct_map_clear()/zone_ct_map_set() just above
+ * -- this record is provenance ONLY. The value the guards and the power
+ * estimate actually use lives on the Pico and is written by
+ * zone_sweep_push_k_ct_v_per_a(); nothing here is ever read back as a
+ * calibration. */
+static void zone_k_ct_clear(void)
+{
+    s_zone_normals.cfg.k_ct_derived_mask = 0;
+    memset(s_zone_normals.cfg.k_ct_v_per_a, 0, sizeof(s_zone_normals.cfg.k_ct_v_per_a));
+    (void)zone_normals_save();
+}
+
+static bool zone_k_ct_set(uint8_t ct_channel, float k_v_per_a)
+{
+    if (ct_channel >= ZONE_CT_CHANNEL_COUNT || !isfinite(k_v_per_a) || k_v_per_a <= 0.0f) {
+        return false;
+    }
+    s_zone_normals.cfg.k_ct_v_per_a[ct_channel] = k_v_per_a;
+    s_zone_normals.cfg.k_ct_derived_mask |= (uint8_t)(1u << ct_channel);
+    return zone_normals_save() == ESP_OK;
+}
+
+void zones_ct_k_v_per_a_derived(uint8_t *out_derived_mask, float *out_k_v_per_a)
+{
+    if (out_derived_mask) {
+        *out_derived_mask = s_zone_normals.cfg.k_ct_derived_mask;
+    }
+    if (out_k_v_per_a) {
+        memcpy(out_k_v_per_a, s_zone_normals.cfg.k_ct_v_per_a, sizeof(s_zone_normals.cfg.k_ct_v_per_a));
+    }
 }
 
 void zones_ct_channel_map_derived(uint8_t *out_derived_mask, uint8_t *out_zone_for_ch)
@@ -4200,6 +4246,126 @@ static bool zone_sweep_derive_ct_channel(const float *per_ch_a, uint8_t *out_ch)
     return true;
 }
 
+/* ---- M12b: calibrating k_ct_v_per_a from the same sweep -------------------
+ * CURRENT_SENSE.md sec 5 step 3 used to be the only producer of
+ * k_ct_v_per_a: "compare the computed amps against a clamp meter and adjust
+ * k_ct_v_per_a to match". That is a number nobody has at commissioning time,
+ * on a page that then asked for it in V/A -- so in practice it stayed at
+ * config_store.c's memset(0) placeholder, which is NOT harmless: with
+ * k_ct_v_per_a <= 0 current_presence_policy.c falls back to a fixed
+ * counts-domain margin rather than the i_present_a the operator configured
+ * (that header's own comment), and every reported amps/watts figure reads 0.
+ *
+ * The sweep already has both halves of a calibration the operator does not
+ * have to type:
+ *   - the EXPECTED whole-kiln current at full output, from the two figures
+ *     the guided commissioning flow already collects (COMMISSIONING_UX.md
+ *     Q3 mains_voltage_v 0x030E, Q4 max_expected_power_w 0x0319):
+ *     I_expected = P / V.
+ *   - the MEASURED whole-kiln current, as the sum of each zone's dominant
+ *     CT channel over a run that energized every zone exactly once with all
+ *     other relays forced off (zone_sweep_hw_energize()'s 0xFF mask). Summing
+ *     the one-zone-at-a-time readings is the same total a simultaneous
+ *     full-output firing would draw, and it is the only version of that total
+ *     this fixture can measure without ever having two zones on at once.
+ *
+ * Since amps are computed on the Pico as I = V_adc / (gain * sqrt2 * k_ct),
+ * the measurement is inversely proportional to k_ct, so the whole calibration
+ * is one scale factor:
+ *
+ *     k_new[c] = k_old[c] * (I_measured_total / I_expected_total)
+ *
+ * with k_old[c] the value the Pico has actually COMMITTED. That dependence on
+ * a prior k_old is not a weakness of this derivation, it is inherent: the
+ * link carries amps, never raw counts (safety_link_status_t has current_a[3]
+ * and nothing else), so an uncommissioned k_old makes every channel read
+ * 0.0 A and there is no measurement to scale. The same is already true of
+ * the CT-MAP derivation above -- zone_sweep_derive_ct_channel() needs
+ * >= 2.0 A to resolve anything -- so a board that can derive the map can
+ * always derive this too, and one that cannot is refused here with a reason
+ * rather than being given an invented number. */
+
+/* The correction this is willing to apply. CURRENT_SENSE.md sec 0 scopes the
+ * whole current chain's accuracy as "within a factor of ~2", so a correction
+ * inside this band is a plausible calibration of a plausible starting value.
+ * Outside it, the disagreement is not a scale error at all -- a nameplate in
+ * the wrong units, a CT on the wrong conductor, a current-output CT fitted
+ * where a voltage-output one belongs (CURRENT_SENSE.md's "wiring error the
+ * firmware cannot detect") -- and quietly scaling k_ct to paper over it would
+ * make the reported amps look right while the presence threshold this same
+ * constant feeds moved to match a lie. Refuse and say so. */
+#define ZONE_KCT_RATIO_MIN 0.2f
+#define ZONE_KCT_RATIO_MAX 5.0f
+
+/* The absolute band a self-burdened voltage-output CT can plausibly land in:
+ * an SCT-013-030 is 0.0333 V/A (CURRENT_SENSE.md sec 5), a 1 V/100 A part is
+ * 0.01, and a burdened part with R72 fitted is higher still. Two decades
+ * either side of that spread is generous; anything outside is not a CT. */
+#define ZONE_KCT_MIN_V_PER_A 0.0005f
+#define ZONE_KCT_MAX_V_PER_A 0.5f
+
+/* The measured total below which no calibration is attempted. Same order and
+ * same reasoning as ZONE_SWEEP_CT_RESPOND_A: below a conducting element's
+ * current the ratio is dominated by measurement noise, and a scale factor
+ * computed from noise is worse than no scale factor. */
+#define ZONE_KCT_MIN_MEASURED_A ZONE_SWEEP_CT_RESPOND_A
+
+typedef enum {
+    ZONE_KCT_DERIVE_OK = 0,
+    ZONE_KCT_DERIVE_NO_NAMEPLATE,   /* mains_voltage_v / max_expected_power_w not both usable */
+    ZONE_KCT_DERIVE_NO_MEASUREMENT, /* this run measured no usable total current */
+    ZONE_KCT_DERIVE_NO_PRIOR_K,     /* k_ct_v_per_a uncommissioned -- amps carry no scale */
+    ZONE_KCT_DERIVE_IMPLAUSIBLE,    /* the correction is outside the bands above */
+} zone_kct_derive_t;
+
+/* Pure decision for the rule above -- every input is a plain number the
+ * caller gathers, so the whole calibration is host-testable off-target.
+ * *out_k is written ONLY on ZONE_KCT_DERIVE_OK. */
+static zone_kct_derive_t zone_sweep_derive_k_ct(float measured_total_a, float expected_power_w,
+                                                 float mains_voltage_v, float k_old, float *out_k)
+{
+    if (!isfinite(expected_power_w) || expected_power_w <= 0.0f || !isfinite(mains_voltage_v) ||
+        mains_voltage_v <= 0.0f) {
+        return ZONE_KCT_DERIVE_NO_NAMEPLATE;
+    }
+    if (!isfinite(measured_total_a) || measured_total_a < ZONE_KCT_MIN_MEASURED_A) {
+        return ZONE_KCT_DERIVE_NO_MEASUREMENT;
+    }
+    if (!isfinite(k_old) || k_old <= 0.0f) {
+        return ZONE_KCT_DERIVE_NO_PRIOR_K;
+    }
+    float expected_a = expected_power_w / mains_voltage_v;
+    if (!isfinite(expected_a) || expected_a <= 0.0f) {
+        return ZONE_KCT_DERIVE_NO_NAMEPLATE; /* P/V overflowed or underflowed to nothing usable */
+    }
+    float ratio = measured_total_a / expected_a;
+    if (!isfinite(ratio) || ratio < ZONE_KCT_RATIO_MIN || ratio > ZONE_KCT_RATIO_MAX) {
+        return ZONE_KCT_DERIVE_IMPLAUSIBLE;
+    }
+    float k_new = k_old * ratio;
+    if (!isfinite(k_new) || k_new < ZONE_KCT_MIN_V_PER_A || k_new > ZONE_KCT_MAX_V_PER_A) {
+        return ZONE_KCT_DERIVE_IMPLAUSIBLE;
+    }
+    if (out_k) {
+        *out_k = k_new;
+    }
+    return ZONE_KCT_DERIVE_OK;
+}
+
+static const char *zone_kct_derive_str(zone_kct_derive_t r)
+{
+    switch (r) {
+    case ZONE_KCT_DERIVE_OK: return "ok";
+    case ZONE_KCT_DERIVE_NO_NAMEPLATE:
+        return "answer the mains voltage and full-output power questions first";
+    case ZONE_KCT_DERIVE_NO_MEASUREMENT: return "the sweep measured no load current";
+    case ZONE_KCT_DERIVE_NO_PRIOR_K: return "k_ct_v_per_a has never been set, so amps read zero";
+    case ZONE_KCT_DERIVE_IMPLAUSIBLE:
+        return "measured and nameplate current disagree too far to be a scale error";
+    default: return "unknown";
+    }
+}
+
 const char *zone_sweep_refusal_str(zone_sweep_refusal_t r)
 {
     switch (r) {
@@ -4360,6 +4526,12 @@ typedef struct {
      * could not resolve a CT must not read as an unqualified success. */
     volatile uint8_t             ct_map_derived_mask;
     volatile char                ct_map_reason[96];
+    /* M12b: the same pair for the k_ct_v_per_a calibration -- separate from
+     * ct_map_* on purpose, since the two derivations fail independently (a
+     * perfectly mapped board with no nameplate answer derives one and not
+     * the other) and a single shared reason string could only report one. */
+    volatile uint8_t             k_ct_derived_mask;
+    volatile char                k_ct_reason[96];
     TaskHandle_t                 task;
 } zone_sweep_ctx_t;
 
@@ -4893,6 +5065,19 @@ static struct {
     uint8_t derived_mask;      /* channels resolved unambiguously this run */
     uint8_t conflict_mask;     /* channels TWO zones both claimed -- see below */
     uint8_t unresolved_zone_mask;
+    /* M12b: the measured half of the k_ct calibration -- the sum, over every
+     * zone this run resolved, of that zone's dominant CT channel reading.
+     * Accumulated here (not recomputed later) because the per-zone
+     * per-channel averages exist only for the length of one
+     * zone_sweep_run_all_zones() iteration. */
+    float   measured_total_a;
+    /* M12b: whether zone_sweep_push_ct_channel_map() ended in a failure it
+     * could not fully back out. The k_ct push must not run after one: both
+     * write through the SAME staged-config buffer on the Pico, so committing
+     * k_ct on top of a staged buffer known to hold ct_channel_map values
+     * that were meant to be discarded would commit exactly the leftovers
+     * that function's H3 repair exists to prevent. */
+    bool    map_push_failed;
 } s_ct_derive;
 
 static void zone_sweep_task_record_ct_channels(void *ctx, uint8_t zi, uint8_t relay_mask,
@@ -4937,6 +5122,12 @@ static void zone_sweep_task_record_ct_channels(void *ctx, uint8_t zi, uint8_t re
     }
     s_ct_derive.zone_for_ch[ch] = zi;
     s_ct_derive.derived_mask |= (uint8_t)(1u << ch);
+    /* M12b: this zone's contribution to the whole-kiln total. Added only on
+     * the unambiguous path -- a zone whose channel could not be resolved is
+     * a hole in the total, and zone_sweep_push_k_ct_v_per_a() refuses to
+     * calibrate from an incomplete one rather than under-counting the kiln
+     * and scaling k_ct down to match. */
+    s_ct_derive.measured_total_a += per_ch_avg_a[ch];
 }
 
 /* The wire id of ct_channel_map[ch] -- one place, so the staging, the
@@ -5097,6 +5288,9 @@ static void zone_sweep_push_ct_channel_map(void)
     } else if (!s_hw_safety) {
         snprintf(note, sizeof(note), "safety link not available -- CT map not written");
         s_ct_derive.derived_mask = 0;
+        /* Nothing staged, so nothing to back out -- but there is also no
+         * link for the k_ct push to use, and its own !s_hw_safety arm says
+         * so. Not flagged as a push FAILURE: the staged buffer is untouched. */
     } else {
         for (uint8_t c = 0; c < ZONE_CT_CHANNEL_COUNT; c++) {
             if ((s_ct_derive.derived_mask & (1u << c)) == 0) {
@@ -5116,6 +5310,7 @@ static void zone_sweep_push_ct_channel_map(void)
                  * Pico's staged record for an unrelated commit to pick up. */
                 zone_sweep_unstage_ct_channels(staged_mask, note, sizeof(note));
                 s_ct_derive.derived_mask = 0;
+                s_ct_derive.map_push_failed = true;
                 break;
             }
             staged_mask |= (uint8_t)(1u << c);
@@ -5138,6 +5333,7 @@ static void zone_sweep_push_ct_channel_map(void)
              * repair. */
             zone_sweep_unstage_ct_channels(staged_mask, note, sizeof(note));
             s_ct_derive.derived_mask = 0;
+            s_ct_derive.map_push_failed = true;
         } else if (rejected) {
             /* Expected and legitimate when the relay is ARMED -- config
              * writes are refused outright then (CONFIG_REFERENCE.md). Say so
@@ -5150,6 +5346,7 @@ static void zone_sweep_push_ct_channel_map(void)
                      (unsigned)reject_reason);
             zone_sweep_unstage_ct_channels(staged_mask, note, sizeof(note));
             s_ct_derive.derived_mask = 0;
+            s_ct_derive.map_push_failed = true;
         } else if (!zone_sweep_confirm_ct_map_landed(s_ct_derive.derived_mask, note, sizeof(note))) {
             /* H1: ACKed and not rejected is not proof. Nothing is persisted
              * and no channel is reported as derived -- the operator sees the
@@ -5160,6 +5357,7 @@ static void zone_sweep_push_ct_channel_map(void)
              * there for the next commit. */
             zone_sweep_unstage_ct_channels(staged_mask, note, sizeof(note));
             s_ct_derive.derived_mask = 0;
+            s_ct_derive.map_push_failed = true;
         } else {
             for (uint8_t c = 0; c < ZONE_CT_CHANNEL_COUNT; c++) {
                 if ((s_ct_derive.derived_mask & (1u << c)) != 0) {
@@ -5182,6 +5380,255 @@ static void zone_sweep_push_ct_channel_map(void)
     s_sweep.ct_map_derived_mask = s_ct_derive.derived_mask;
     strncpy((char *)s_sweep.ct_map_reason, note, sizeof(s_sweep.ct_map_reason) - 1);
     s_sweep.ct_map_reason[sizeof(s_sweep.ct_map_reason) - 1] = '\0';
+}
+
+/* ---- M12b: pushing the derived k_ct_v_per_a ------------------------------
+ * Deliberately a MIRROR of the ct_channel_map push above rather than a
+ * generalisation of it: the two share a shape (stage / commit / read-back /
+ * back out) but not a single decision -- different param ids, a different
+ * wire type, a different restore placeholder, a different definition of
+ * "landed", and a completely different rule for what may be derived at all.
+ * Folding them into one parameterised routine would mean every future change
+ * to one has to be argued for the other, which is exactly the coupling the
+ * CT-map push's own H1/H3 comments were written to avoid. */
+#define ZONE_KCT_PARAM_ID(ch) ((uint16_t)(0x0308u + (ch)))
+
+/* The two commissioning answers this calibration reads (COMMISSIONING_UX.md
+ * sec 2, Q3 and Q4). Both are F32 on the wire. */
+#define ZONE_MAINS_VOLTAGE_PARAM_ID  ((uint16_t)0x030Eu)
+#define ZONE_MAX_POWER_PARAM_ID      ((uint16_t)0x0319u)
+
+/* config_store.c leaves k_ct_v_per_a at its memset(0) -- the uncommissioned
+ * value (that file's own comment at the seed). Unlike ct_channel_map's 0xFF,
+ * 0.0f is not merely implausible but actively meaningful downstream:
+ * current_presence_policy.c branches on k_ct_v_per_a <= 0.0f and falls back
+ * to its deliberately sensitive counts-domain margin. Restoring 0.0f for a
+ * channel that has never been committed therefore puts the Pico back on the
+ * SAFE side of that branch, which is the right direction for a repair. */
+#define ZONE_KCT_UNCOMMISSIONED 0.0f
+
+/* The F32 value the Pico has actually COMMITTED for `param_id`, according to
+ * the ESP's cache of its record -- the f32 twin of
+ * zone_ct_map_committed_value() above, and it answers false in the same two
+ * cases (no such row, or a row the Pico has never had set). */
+static bool zone_cfg_committed_f32(uint16_t param_id, float *out)
+{
+    size_t count = safety_cfg_store_param_count();
+    for (size_t i = 0; i < count; i++) {
+        safety_cfg_param_t row;
+        memset(&row, 0, sizeof(row));
+        if (!safety_cfg_store_get_by_index(i, &row) || row.param_id != param_id) {
+            continue;
+        }
+        if (!row.set) {
+            return false;
+        }
+        if (out) {
+            *out = row.value.f32_val;
+        }
+        return true;
+    }
+    return false;
+}
+
+/* H3's repair, for this push -- see zone_sweep_unstage_ct_channels()'s own
+ * comment for the full reasoning about why leftovers in the Pico's staged
+ * buffer are a real hazard and why overwriting is the only available
+ * remedy. Best-effort by construction, for the same reason. */
+static void zone_sweep_unstage_k_ct(uint8_t staged_mask, char *note, size_t note_cap)
+{
+    if (staged_mask == 0 || !s_hw_safety) {
+        return;
+    }
+    for (uint8_t c = 0; c < ZONE_CT_CHANNEL_COUNT; c++) {
+        if ((staged_mask & (1u << c)) == 0) {
+            continue;
+        }
+        float restore = ZONE_KCT_UNCOMMISSIONED;
+        (void)zone_cfg_committed_f32(ZONE_KCT_PARAM_ID(c), &restore);
+        kilnlink_param_value_t v;
+        memset(&v, 0, sizeof(v));
+        v.f32_val = restore;
+        if (safety_link_send_set_param(s_hw_safety, ZONE_KCT_PARAM_ID(c),
+                                       KILNLINK_PARAM_TYPE_F32, v) != ESP_OK) {
+            snprintf(note, note_cap,
+                     "CT scale staging failed and could NOT be backed out -- re-run the "
+                     "sweep before saving again");
+            return;
+        }
+    }
+}
+
+/* H1's verification, for this push. An ACKed, un-rejected COMMIT_CONFIG is
+ * not proof anything was stored (zone_sweep_confirm_ct_map_landed()'s
+ * comment) -- force a LIVE re-fetch and require every channel written to
+ * read back as exactly the float that was sent. Exact equality is right
+ * here, not a tolerance: the wire, config_store's record and this cache all
+ * carry the identical IEEE-754 f32, so anything other than bit-equality
+ * means the value did not land, not that it landed imprecisely. */
+static bool zone_sweep_confirm_k_ct_landed(uint8_t mask, const float *k_new, char *reason,
+                                            size_t reason_cap)
+{
+    uint16_t best_known_crc = 0;
+    bool peer_known = false;
+    (void)safety_link_get_peer_build_status(s_hw_safety, &peer_known, NULL, NULL, NULL, NULL, NULL,
+                                             NULL, &best_known_crc);
+    if (!safety_cfg_store_refetch(s_hw_safety, peer_known ? best_known_crc : 0)) {
+        snprintf(reason, reason_cap,
+                 "the CT scale commit could not be read back to confirm it -- treated as "
+                 "NOT written");
+        return false;
+    }
+    for (uint8_t c = 0; c < ZONE_CT_CHANNEL_COUNT; c++) {
+        if ((mask & (1u << c)) == 0) {
+            continue;
+        }
+        float committed = 0.0f;
+        if (!zone_cfg_committed_f32(ZONE_KCT_PARAM_ID(c), &committed) || committed != k_new[c]) {
+            snprintf(reason, reason_cap,
+                     "k_ct_v_per_a[%u] does not read back as written -- treated as NOT written",
+                     (unsigned)c);
+            return false;
+        }
+    }
+    return true;
+}
+
+/* Decides what this run may calibrate, ahead of touching the link at all --
+ * separated from the staging below so the whole decision (including every
+ * refusal) is reachable from a host test without a fake link. Returns the
+ * mask of channels to write, filling out_k[] for each, and `note` with the
+ * reason whenever that mask comes back 0. */
+static uint8_t zone_sweep_plan_k_ct(float *out_k, char *note, size_t note_cap)
+{
+    if (s_ct_derive.derived_mask == 0) {
+        snprintf(note, note_cap, "no CT channel was identified -- CT scale not calibrated");
+        return 0;
+    }
+    /* An incomplete pass cannot be summed into a whole-kiln total: a zone
+     * that did not resolve still drew its current, so its absence would drag
+     * the measured total down and scale k_ct with it -- silently, and in the
+     * direction that makes every later reading read LOW. Same reason the map
+     * push refuses to derive anything from a partial run. */
+    if (s_ct_derive.unresolved_zone_mask != 0 || s_ct_derive.conflict_mask != 0) {
+        snprintf(note, note_cap,
+                 "not every zone resolved to a CT -- the whole-kiln total would be "
+                 "incomplete, so the CT scale was not calibrated");
+        return 0;
+    }
+    if (s_ct_derive.map_push_failed) {
+        snprintf(note, note_cap, "the CT map write failed -- CT scale not calibrated");
+        return 0;
+    }
+    float mains_v = 0.0f, power_w = 0.0f;
+    if (!zone_cfg_committed_f32(ZONE_MAINS_VOLTAGE_PARAM_ID, &mains_v) ||
+        !zone_cfg_committed_f32(ZONE_MAX_POWER_PARAM_ID, &power_w)) {
+        snprintf(note, note_cap, "CT scale not calibrated: %.72s",
+                 zone_kct_derive_str(ZONE_KCT_DERIVE_NO_NAMEPLATE));
+        return 0;
+    }
+    uint8_t plan_mask = 0;
+    for (uint8_t c = 0; c < ZONE_CT_CHANNEL_COUNT; c++) {
+        if ((s_ct_derive.derived_mask & (1u << c)) == 0) {
+            continue;
+        }
+        float k_old = 0.0f;
+        if (!zone_cfg_committed_f32(ZONE_KCT_PARAM_ID(c), &k_old)) {
+            k_old = 0.0f; /* never committed -- zone_sweep_derive_k_ct() refuses on it */
+        }
+        float k_new = 0.0f;
+        zone_kct_derive_t r =
+            zone_sweep_derive_k_ct(s_ct_derive.measured_total_a, power_w, mains_v, k_old, &k_new);
+        if (r != ZONE_KCT_DERIVE_OK) {
+            /* One channel's refusal ends the whole calibration rather than
+             * calibrating the others: the scale factor is a property of the
+             * measurement, not of a channel, so a channel that cannot take
+             * it means this run's own inputs are unusable. Writing the rest
+             * would leave the three channels on different scales with
+             * nothing recording that they disagree. */
+            snprintf(note, note_cap, "CT scale not calibrated: %.72s", zone_kct_derive_str(r));
+            return 0;
+        }
+        out_k[c] = k_new;
+        plan_mask |= (uint8_t)(1u << c);
+    }
+    return plan_mask;
+}
+
+/* Stages every planned channel as SET_PARAM 0x0308+c (f32) and commits --
+ * the same path a hand-typed value takes through safety_cfg_http.c, since
+ * the Pico must not be able to tell a derived write from a typed one.
+ *
+ * Called only from zone_sweep_task(), immediately after
+ * zone_sweep_push_ct_channel_map(), with every relay already off: both
+ * senders block for a link round trip and neither may sit inside a window
+ * where an element is energized. */
+static void zone_sweep_push_k_ct_v_per_a(void)
+{
+    char note[sizeof(s_sweep.k_ct_reason)];
+    note[0] = '\0';
+    float k_new[ZONE_CT_CHANNEL_COUNT] = {0};
+    uint8_t staged_mask = 0;
+
+    uint8_t plan_mask = zone_sweep_plan_k_ct(k_new, note, sizeof(note));
+    if (plan_mask != 0 && !s_hw_safety) {
+        snprintf(note, sizeof(note), "safety link not available -- CT scale not written");
+        plan_mask = 0;
+    }
+
+    if (plan_mask != 0) {
+        for (uint8_t c = 0; c < ZONE_CT_CHANNEL_COUNT; c++) {
+            if ((plan_mask & (1u << c)) == 0) {
+                continue;
+            }
+            kilnlink_param_value_t v;
+            memset(&v, 0, sizeof(v));
+            v.f32_val = k_new[c];
+            esp_err_t err = safety_link_send_set_param(s_hw_safety, ZONE_KCT_PARAM_ID(c),
+                                                       KILNLINK_PARAM_TYPE_F32, v);
+            if (err != ESP_OK) {
+                snprintf(note, sizeof(note), "staging k_ct_v_per_a[%u] failed: %.24s", c,
+                         esp_err_to_name(err));
+                zone_sweep_unstage_k_ct(staged_mask, note, sizeof(note));
+                plan_mask = 0;
+                break;
+            }
+            staged_mask |= (uint8_t)(1u << c);
+        }
+    }
+
+    if (plan_mask != 0) {
+        uint16_t reject_param_id = 0;
+        uint8_t reject_reason = 0;
+        bool rejected = false;
+        esp_err_t err = safety_link_send_commit_config(s_hw_safety, &reject_param_id, &reject_reason,
+                                                        &rejected);
+        if (err != ESP_OK) {
+            snprintf(note, sizeof(note), "CT scale staged but the commit was not "
+                                          "acknowledged (%.24s)", esp_err_to_name(err));
+            zone_sweep_unstage_k_ct(staged_mask, note, sizeof(note));
+            plan_mask = 0;
+        } else if (rejected) {
+            snprintf(note, sizeof(note), "the safety processor rejected the CT scale commit "
+                                          "(id 0x%04X, reason %u)", (unsigned)reject_param_id,
+                     (unsigned)reject_reason);
+            zone_sweep_unstage_k_ct(staged_mask, note, sizeof(note));
+            plan_mask = 0;
+        } else if (!zone_sweep_confirm_k_ct_landed(plan_mask, k_new, note, sizeof(note))) {
+            zone_sweep_unstage_k_ct(staged_mask, note, sizeof(note));
+            plan_mask = 0;
+        } else {
+            for (uint8_t c = 0; c < ZONE_CT_CHANNEL_COUNT; c++) {
+                if ((plan_mask & (1u << c)) != 0) {
+                    (void)zone_k_ct_set(c, k_new[c]);
+                }
+            }
+        }
+    }
+
+    s_sweep.k_ct_derived_mask = plan_mask;
+    strncpy((char *)s_sweep.k_ct_reason, note, sizeof(s_sweep.k_ct_reason) - 1);
+    s_sweep.k_ct_reason[sizeof(s_sweep.k_ct_reason) - 1] = '\0';
 }
 
 static void zone_sweep_task_zone_done(void *ctx)
@@ -5226,6 +5673,7 @@ static void zone_sweep_task(void *arg)
 
     memset(&s_ct_derive, 0, sizeof(s_ct_derive));
     zone_ct_map_clear(); /* a re-sweep must not leave a stale channel claim visible as current */
+    zone_k_ct_clear();   /* M12b: same reasoning, for the derived CT scale */
 
     zone_sweep_all_result_t result;
     zone_sweep_run_all_zones(s_sweep.zones_total, &hw_deps, &hw_hooks, &result);
@@ -5249,6 +5697,13 @@ static void zone_sweep_task(void *arg)
          * that is the whole reason the one-to-one check exists -- deriving
          * from it would write a map that looks confirmed and is not. */
         zone_sweep_push_ct_channel_map();
+        /* M12b: strictly AFTER the map push, never before or interleaved.
+         * Both stage into the SAME staged-config buffer on the Pico and each
+         * ends with its own COMMIT_CONFIG, so they have to be two complete
+         * transactions in sequence; zone_sweep_plan_k_ct() additionally
+         * refuses outright if the map push left that buffer in a state it
+         * could not repair. */
+        zone_sweep_push_k_ct_v_per_a();
         /* DONE goes up only AFTER the push has finished (opus review,
          * 2026-08-28). Setting it first left a window two link round trips
          * wide in which a status poll saw state=done with
@@ -5346,6 +5801,8 @@ zone_sweep_refusal_t zones_current_sweep_start(void)
     s_sweep.reason[0] = '\0';
     s_sweep.ct_map_derived_mask = 0;
     s_sweep.ct_map_reason[0] = '\0';
+    s_sweep.k_ct_derived_mask = 0;
+    s_sweep.k_ct_reason[0] = '\0';
 
     BaseType_t created = xTaskCreate(zone_sweep_task, "zone_sweep", 4096, NULL, tskIDLE_PRIORITY + 2, &s_sweep.task);
     if (created != pdPASS) {
@@ -5385,6 +5842,9 @@ void zones_current_sweep_get_status(zone_sweep_status_t *out)
     out->ct_map_derived_mask = s_sweep.ct_map_derived_mask;
     strncpy(out->ct_map_reason, (const char *)s_sweep.ct_map_reason, sizeof(out->ct_map_reason) - 1);
     out->ct_map_reason[sizeof(out->ct_map_reason) - 1] = '\0';
+    out->k_ct_derived_mask = s_sweep.k_ct_derived_mask;
+    strncpy(out->k_ct_reason, (const char *)s_sweep.k_ct_reason, sizeof(out->k_ct_reason) - 1);
+    out->k_ct_reason[sizeof(out->k_ct_reason) - 1] = '\0';
 }
 
 /* ---- Task 2: runtime CT-to-zone mapping check ----------------------------- */
@@ -5519,12 +5979,18 @@ static esp_err_t sweep_status_get_handler(httpd_req_t *req)
     json_escape(st.reason, reason_escaped, sizeof(reason_escaped));
     char ct_reason_escaped[sizeof(st.ct_map_reason) * 2 + 1];
     json_escape(st.ct_map_reason, ct_reason_escaped, sizeof(ct_reason_escaped));
-    char json[640];
+    /* M12b: the CT-scale derivation reports separately -- see
+     * zone_sweep_status_t's own comment for why the two share no field. */
+    char k_reason_escaped[sizeof(st.k_ct_reason) * 2 + 1];
+    json_escape(st.k_ct_reason, k_reason_escaped, sizeof(k_reason_escaped));
+    char json[1024];
     int n = snprintf(json, sizeof(json),
                      "{\"state\":\"%s\",\"zone_index\":%u,\"zones_done\":%u,\"zones_total\":%u,"
-                     "\"reason\":\"%s\",\"ct_map_derived_mask\":%u,\"ct_map_reason\":\"%s\"}",
+                     "\"reason\":\"%s\",\"ct_map_derived_mask\":%u,\"ct_map_reason\":\"%s\","
+                     "\"k_ct_derived_mask\":%u,\"k_ct_reason\":\"%s\"}",
                      zone_sweep_state_str(st.state), st.zone_index, st.zones_done, st.zones_total,
-                     reason_escaped, st.ct_map_derived_mask, ct_reason_escaped);
+                     reason_escaped, st.ct_map_derived_mask, ct_reason_escaped,
+                     st.k_ct_derived_mask, k_reason_escaped);
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_send(req, json, n > 0 ? (size_t)n : 0);
 }
@@ -5540,12 +6006,33 @@ static esp_err_t ct_channel_map_get_handler(httpd_req_t *req)
     uint8_t mask = 0;
     uint8_t zone_for_ch[ZONE_CT_CHANNEL_COUNT];
     zones_ct_channel_map_derived(&mask, zone_for_ch);
+    /* M12b: the derived CT scale rides the SAME endpoint rather than getting
+     * one of its own -- it is the same question ("what did the sweep derive,
+     * and is this field still a manual-entry field?") asked about a second
+     * field, produced by the same run, read by the same page at the same
+     * moment. A second endpoint would only add a second fetch that can fail
+     * independently of the first. */
+    uint8_t k_mask = 0;
+    float k_v_per_a[ZONE_CT_CHANNEL_COUNT];
+    zones_ct_k_v_per_a_derived(&k_mask, k_v_per_a);
 
-    char json[128];
+    char json[256];
     int o = snprintf(json, sizeof(json), "{\"mask\":%u,\"zone\":[", (unsigned)mask);
     for (unsigned c = 0; c < ZONE_CT_CHANNEL_COUNT && o > 0 && (size_t)o < sizeof(json); c++) {
         o += snprintf(json + o, sizeof(json) - (size_t)o, "%s%u", c == 0 ? "" : ",",
                       (unsigned)zone_for_ch[c]);
+    }
+    if (o > 0 && (size_t)o < sizeof(json)) {
+        o += snprintf(json + o, sizeof(json) - (size_t)o, "],\"k_mask\":%u,\"k\":[",
+                      (unsigned)k_mask);
+    }
+    for (unsigned c = 0; c < ZONE_CT_CHANNEL_COUNT && o > 0 && (size_t)o < sizeof(json); c++) {
+        /* %.6g, never %f: these are ~0.03 V/A values, and a fixed-point
+         * format would report a real calibration as 0.000000. A channel
+         * whose k_mask bit is clear prints 0 and means nothing -- the page
+         * must branch on k_mask, exactly as it already does on mask. */
+        o += snprintf(json + o, sizeof(json) - (size_t)o, "%s%.6g", c == 0 ? "" : ",",
+                      isfinite(k_v_per_a[c]) ? (double)k_v_per_a[c] : 0.0);
     }
     if (o > 0 && (size_t)o < sizeof(json)) {
         o += snprintf(json + o, sizeof(json) - (size_t)o, "]}");

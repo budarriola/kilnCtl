@@ -2,7 +2,7 @@
 
 > **Status:** implemented · **Written:** 2026-08-27, guided flow shipped
 > 2026-08-28 (`64d0a8e`), `ct_channel_map`/thermocouple-max derivation shipped
-> 2026-08-28 (`069f05e`) · **Owner request:** *"look at all
+> 2026-08-28 (`069f05e`), `k_ct_v_per_a` calibration shipped 2026-08-28 · **Owner request:** *"look at all
 > of the settings in the safety commissioning page, and think if there is a user
 > friendly way to derive these settings. this page is far too complex."*
 >
@@ -115,7 +115,7 @@ exist, see §3).
 | `i_normal_a[0..2]` **NEW** | `0x031A`–`0x031C` | 🟠 | **= M**, directly: the current recorded while that channel's zone was the only one energized. §3. |
 | `zero_counts[0..2]` | `0x0302`–`0x0304` | 🟠 | **MEASURE.** Already re-measured at runtime after ≥5 min idle (`CONFIG_REFERENCE.md` §3). The page shows the live value and a *"re-zero now"* button; it is never typed. |
 | `ct_cal[0..2].gain` / `.offset` / `.calibrated` | `0x0310`–`0x0318` | ⚪ | **= M.** `gain` = `i_normal_a[ch] / measured_counts_span`, `offset` = the zero from `zero_counts[ch]`, `calibrated` = true once M has completed for that channel. Before M runs they stay unset and `calibrated` = false. |
-| `k_ct_v_per_a[0..2]` | `0x0308`–`0x030A` | ⚪ | **= HW**, from the fitted CT's nameplate: `k = R_burden / N_turns`. ⟨inferred⟩ — the value is a property of the CT part on `hardware/mainBoard`, not something an operator measures, but I did not find it written down as a constant anywhere; **open question OQ4**. Power estimate only, and since 2026-08-24 provably guard-irrelevant (`CONFIG_REFERENCE.md` §3's dated note). |
+| `k_ct_v_per_a[0..2]` | `0x0308`–`0x030A` | ⚪ | **= K, from the zone current-sweep and the operator's own Q3/Q4 answers.** **SHIPPED** (`zones_http.c`, M12b) — this row previously said ⟨inferred⟩ from the CT's nameplate (`R_burden / N_turns`), which **OQ4** recorded as not written down anywhere, so in practice the field stayed at `config_store.c`'s `memset(0)`. The same sweep that derives `ct_channel_map` already measures each zone's own CT current with all other relays forced off; summing the resolved channels gives the whole-kiln current at full output, and `max_expected_power_w / mains_voltage_v` (Q4 / Q3) gives what that current should be. Since the Pico computes amps as `I = V_adc / (gain · √2 · k_ct)`, the whole calibration is one scale factor: **`k_new[c] = k_old[c] · (I_measured / I_expected)`**. **Nothing is calibrated unless the whole run is honest about itself:** any zone that did not resolve to a CT (the total would be short by that zone's share, and the scale dragged down with it), a shared-CT conflict, an unset Q3 or Q4, a `k_old` still at its uncommissioned `0.0` (the link carries amps, not counts — an uncalibrated `k_old` makes every reading `0.0 A`, so there is no measurement to scale), a measured total below the 2 A load threshold, a correction outside 0.2×–5×, or a result outside 0.0005–0.5 V/A each refuse the whole calibration and say why on both pages. Written over the same `SET_PARAM`/`COMMIT_CONFIG` path a typed value uses, then **confirmed by a live read-back** and backed out of the Pico's staged buffer on every failure arm, exactly as `ct_channel_map` is. The commissioning row keeps a clamp-meter override (`CURRENT_SENSE.md` §5 step 3) behind a checkbox. Not guard-irrelevant in the way this row used to claim: `current_presence_policy.c` uses `k_ct_v_per_a` to put `i_present_a` into the counts domain **when it is commissioned**, so calibrating it moves presence detection off the fixed fallback margin and onto the configured threshold. |
 | `firing_margin_c` | `0x0201` | 🟠 | Stays at its default 100 °C, but shown **as an outcome of Q1**, not as an input: the review screen prints the actual ceiling S1 will enforce — `min(Q1, firing_max_c + 100)` in `CHAMBER_AGREED`, `Q1` flat in `EXTERNAL_OVERHEAT` — so the operator sees the number the guard uses rather than a margin they must reason about. |
 | `correlation_window_s` | `0x0305` | 🟠 | **= 2 × `HEATER_WINDOW_MS`/1000 + decay ⇒ 150 s.** `CONFIG_REFERENCE.md` §6 makes this a hard cross-repo dependency on `profile_executor.c:27`. Because the ESP *knows* `HEATER_WINDOW_MS` at compile time, the page must compute and display it rather than let an operator shorten it — §6 calls shortening it "the fastest way to make S4 fire on every healthy low-duty firing". **CHANGE: make this read-only outside Advanced, with the deriving constant named on screen.** |
 | `telemetry_period_ms` | `0x0405` | 🔴 | **= HW/ESP constant.** `CONFIG_REFERENCE.md` §4: the ESP's 1.5 s liveness window (`SAFETY_LINK_UP_PERIODS` × this) keys on it. It is half of a two-sided constant and must never be an operator field. **CHANGE: read-only, Advanced only, with the coupling stated.** |
@@ -236,6 +236,20 @@ with a link to the zones page and **no editable control**. A channel with no
 measurement is the honest, expected state on a fresh board and must read as
 "not measured", never as `0.0 A`.
 
+**`k_ct_v_per_a[0..2]` is the one row in this block that is now more than a
+mirror (M12b, shipped 2026-08-28).** It is no longer "read-only because the
+zones config owns it" — it is *calibrated* by the same sweep, from the operator's
+Q3/Q4 answers, by the scale-factor derivation in §1.2. Its row renders exactly
+like a derived `ct_channel_map` row: the calibrated value as an `<output>`, a
+sentence naming where it came from, a warning if what the Pico currently holds
+disagrees with what the sweep calibrated, and a **"Override with a clamp-meter
+measurement"** checkbox that reveals a plain number input. Unchecked, that input
+stays empty and the save pass skips the id entirely, so a calibrated value can
+never be restaged as though it had been typed. A channel the sweep did not
+calibrate falls straight back to the read-only presentation above — the change
+only ever adds provenance and an escape hatch, never removes a way to set the
+field.
+
 ### 2.3 Safety thermocouple and safety relay configuration — read-only on the zones page
 
 **Exactly which parameters move**, and where each surfaces:
@@ -247,6 +261,7 @@ measurement is the honest, expected state on a fresh board and must read as
 | `borrowed_type_expected` | `0x0210` | **Nowhere** — always mirrors the picked zone's `tc_type` | Zones page (next to the borrowed zone), commissioning review screen |
 | `ct_channel_map[0..2]` (the safety relay/CT mapping) | `0x0106`–`0x0108` | **Zones page**, measured by the current sweep (§1.2) and written to the Pico when it completes | Zones page, per zone, as a derived "safety CT" line; commissioning review screen as the three-row table in §2.2 |
 | `i_normal_a[0..2]` **NEW** | `0x031A`–`0x031C` | **Zones page**, written only by the M12 measurement button | Both pages |
+| `k_ct_v_per_a[0..2]` (the CT volts-per-amp scale) | `0x0308`–`0x030A` | **Zones page**, calibrated by the current sweep against Q3/Q4 (§1.2) and written to the Pico when it completes, with a clamp-meter override on the commissioning page | Zones page, in the sweep result line; commissioning page, as a derived row |
 
 "Displayed but not reassignable" means, concretely: the commissioning page
 renders each row it does not own as an `<output>`-style row with the value, its
@@ -605,7 +620,7 @@ page. Each step is shippable and reversible on its own:
 | **OQ1** | **S14 as WARN, or TRIP?** This spec says WARN, because `SAFETY_MODEL.md` §2 makes WARN the default for a new guard and §3/§7 currently state, twice, that over-current is the breakers' job by design. Promoting it to TRIP is a safety-model change with a written argument, not a threshold edit. | Determines whether §3's *"There is no over-current guard"* becomes "there is a warning" or "there is a trip", and whether a new `SAFETY_TRIP_*` reason is minted. |
 | **OQ2** | Does `config_store_record_t`'s reserved tail have room for 5 more parameters (3×F32 + 2×U16 = 16 B) without a format-version bump? | A bump forces `calibration_missing` back on for every already-commissioned board (§7). |
 | **OQ3** | Is there a wire representation for **clearing** a parameter back to unset? `SET_PARAM` sets; nothing observed clears. Selecting "Not set" on the mains dropdown of an already-set board needs one. | Without it, "Not set" is a one-way door — reachable only before the first commit — and `CONFIG_REFERENCE.md` §3's unset semantics become unreachable in practice. |
-| **OQ4** | What is `k_ct_v_per_a` for the CTs actually fitted? `R_burden / N_turns` from the part, ⟨inferred⟩ — I did not find it recorded. Power estimate only (⚪), so it does not block, but it is the difference between a real kW figure and a fiction. | Screen 3's "estimated full power" row is meaningless without it. |
+| **OQ4** | ~~What is `k_ct_v_per_a` for the CTs actually fitted?~~ **CLOSED 2026-08-28 (M12b).** Nobody has to know: the zone current-sweep calibrates it against the Q3/Q4 answers rather than against a part number (§1.2). The nameplate figure is still what a clamp-meter override would be compared to, but it is no longer required to get a real kW figure. | — |
 | **OQ5** | Accept `REQUEST_CONFIG_WINDOW` (§5 mode c) as the end state, or live with the reboot-into-GRACE approach (mode b)? | Mode (c) is a two-sided wire change; mode (b) reboots a safety processor to make it writable. |
 | **OQ6** | Confirm the enum codes for `tc_source` and `tc_placement_mode` against `config_store.c`. Both this spec and the existing page are guessing (`OWN_J7`=0 / `BORROWED_ZONE`=1 / `BOTH`=2; `CHAMBER_AGREED`=0 / `EXTERNAL_OVERHEAT`=1). | A wrong code writes a 🔴 field to a plausible wrong value with no error anywhere. |
 | **OQ7** | S13 is dormant (`sample_counter_advancing` hardcoded false in `safety_core.c`), so `BORROWED_ZONE`/`BOTH` trips unconditionally. Should Q2's *Not fitted* option be **hidden**, **shown-disabled with the reason**, or **allowed with a warning**? This spec assumes shown-disabled. | It is the only Q2 answer available to a board built without the J7 daughterboard. |

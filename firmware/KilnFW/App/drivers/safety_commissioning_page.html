@@ -531,9 +531,14 @@ var GROUPS = [
       { id: 775, name: 'trip_verify_s', type: 'u16', risk: 'dangerous', unit: 's', def: 10,
         guards: ['S9'], note: 'Past the 1s peak-hold decay and the contactor\'s drop-out. Too ' +
           'short -> false "trip ineffective"; too long -> delayed alarm on a genuinely live kiln.' },
-      { id: 776, name: 'k_ct_v_per_a[0]', type: 'f32', risk: 'cosmetic', unit: 'V/A', readonly: true, guards: ['(power estimate only)'] },
-      { id: 777, name: 'k_ct_v_per_a[1]', type: 'f32', risk: 'cosmetic', unit: 'V/A', readonly: true, guards: ['(power estimate only)'] },
-      { id: 778, name: 'k_ct_v_per_a[2]', type: 'f32', risk: 'cosmetic', unit: 'V/A', readonly: true, guards: ['(power estimate only)'] },
+      { id: 776, name: 'k_ct_v_per_a[0]', type: 'f32', risk: 'cosmetic', unit: 'V/A', readonly: true,
+        guards: ['(power estimate only)'], derivedK: 0,
+        note: 'M12b: CALIBRATED by the zone current-sweep, from the mains voltage and ' +
+              'full-output power already answered above -- not typed in V/A.' },
+      { id: 777, name: 'k_ct_v_per_a[1]', type: 'f32', risk: 'cosmetic', unit: 'V/A', readonly: true,
+        guards: ['(power estimate only)'], derivedK: 1, note: 'Same as k_ct_v_per_a[0], for CT1.' },
+      { id: 778, name: 'k_ct_v_per_a[2]', type: 'f32', risk: 'cosmetic', unit: 'V/A', readonly: true,
+        guards: ['(power estimate only)'], derivedK: 2, note: 'Same as k_ct_v_per_a[0], for CT2.' },
       { id: 779, name: 'gain[0]', type: 'f32', risk: 'cosmetic', def: 0.715, readonly: true, guards: ['(power estimate only)'],
         note: 'R46/R43; refine only if the resistors are not 1%.' },
       { id: 780, name: 'gain[1]', type: 'f32', risk: 'cosmetic', def: 0.715, readonly: true, guards: ['(power estimate only)'] },
@@ -685,6 +690,14 @@ var latest = null; // last /api/safety/commissioning response, kept for the save
 // had, never to a blank row with no way to set the field.
 var ctMapDerived = { mask: 0, zone: [0, 0, 0] };
 
+// M12b: the CT volts-per-amp scale the same sweep calibrated, from the same
+// endpoint and for exactly the same reason as ctMapDerived above -- the wire
+// carries k_ct_v_per_a's VALUE and nothing about where it came from, so this
+// ESP-side record is the only thing that can say "the sweep measured this"
+// rather than "somebody typed this". Defaults to "nothing derived", which
+// leaves the field rendering exactly as it did before this existed.
+var ctKDerived = { k_mask: 0, k: [0, 0, 0] };
+
 // Standard mains voltages, COMMISSIONING_UX.md section 2.1's table --
 // distinct entries for 400V/415V (a 4% difference is an 8% power error,
 // both in current use) and for 208V (the three-phase line-to-line voltage
@@ -716,6 +729,37 @@ function fieldInputHtml(f, paramsById) {
   // read-only here, sourced from the zones page's per-zone measurement --
   // an <output>-style row with no data-id, so it can never appear in the
   // save pass's `#fields [data-id]` walk and can never be typed over.
+  // M12b: k_ct_v_per_a[0..2] -- CALIBRATED by that same sweep whenever it
+  // ran to completion and the operator had already answered the mains
+  // voltage and full-output power questions (zones_http.c's
+  // zone_sweep_derive_k_ct()). This branch sits AHEAD of the readonly one
+  // below on purpose: an uncalibrated channel keeps the old read-only
+  // presentation exactly as it was, and a calibrated one gains both its
+  // provenance and the hand-entry escape hatch CURRENT_SENSE.md sec 5 step 3
+  // describes (compare against a clamp meter and adjust), which a purely
+  // read-only field never had.
+  if (f.derivedK !== undefined && (ctKDerived.k_mask & (1 << f.derivedK)) !== 0) {
+    var dk = ctKDerived.k[f.derivedK];
+    var kh = '<output class="readonly-field">' + window.kcEscapeHtml(dk) + ' V/A</output>';
+    kh += '<p class="note">DERIVED by the zone current-sweep on the ' +
+      '<a href="/zones.html">zones page</a>: the whole-kiln current it measured was ' +
+      'compared against the nameplate current implied by the mains voltage and ' +
+      'full-output power answered above, and CT' + f.derivedK + '’s scale was corrected by ' +
+      'that ratio and written to the safety processor.';
+    if (isSet && Number(val) !== Number(dk)) {
+      kh += ' <b>The safety processor currently holds ' + window.kcEscapeHtml(val) +
+        ', which disagrees with what the sweep calibrated -- re-run the sweep, or override below.</b>';
+    }
+    kh += '</p>';
+    // Same empty-means-skip contract as the ct_channel_map override: the
+    // input carries the data-id but starts empty, so the save pass leaves
+    // this id alone until somebody actually types a clamp-meter figure.
+    kh += '<label class="bool-label"><input type="checkbox" class="ct-manual" data-ct-for="' +
+      f.id + '"><span>Override with a clamp-meter measurement</span></label>';
+    kh += '<input type="number" step="any" hidden data-id="' + f.id + '" data-type="' + f.type +
+      '" placeholder="V per A">';
+    return kh;
+  }
   if (f.readonly) {
     var text;
     if (!isSet) {
@@ -1028,6 +1072,10 @@ function loadCurrent() {
   // ctMapDerived at "nothing derived" (see its own comment).
   fetch('/api/zones/ct_channel_map').then(function (r) { return r.json(); }).then(function (m) {
     if (m && typeof m.mask === 'number' && m.zone && m.zone.length === 3) ctMapDerived = m;
+    // M12b: the CT scale rides the same response, and is validated
+    // independently -- an older board that predates it answers with no
+    // k_mask at all, and must keep rendering the map half normally.
+    if (m && typeof m.k_mask === 'number' && m.k && m.k.length === 3) ctKDerived = m;
   }).catch(function () { /* leave ctMapDerived alone -- manual entry stays available */ })
     .then(loadCommissioning);
 }

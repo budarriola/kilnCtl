@@ -847,6 +847,16 @@ typedef struct {
      * could not map a CT must not read as an unqualified success. */
     uint8_t ct_map_derived_mask;
     char    ct_map_reason[96];
+    /* M12b: the same pair for the CT volts-per-amp scale this run
+     * calibrated. Separate from ct_map_* because the two derivations fail
+     * independently -- a board whose CTs map perfectly but whose operator
+     * has not yet answered the mains-voltage/full-output-power questions
+     * derives the map and not the scale -- and one shared reason string
+     * could only ever report one of the two. k_ct_derived_mask has bit c
+     * set for every channel this run calibrated AND confirmed written to
+     * the safety processor. */
+    uint8_t k_ct_derived_mask;
+    char    k_ct_reason[96];
 } zone_sweep_status_t;
 
 void zones_current_sweep_get_status(zone_sweep_status_t *out);
@@ -875,6 +885,21 @@ bool zones_config_get_normal_current(uint8_t zone_index, float *out_amps, bool *
  * ZONE_CT_CHANNEL_COUNT bytes; entries whose mask bit is clear are
  * meaningless, never a real zone index. */
 void zones_ct_channel_map_derived(uint8_t *out_derived_mask, uint8_t *out_zone_for_ch);
+
+/* ---- M12b: the CT volts-per-amp scale the sweep calibrated ----------------
+ * Persisted in the same NVS blob (v3) and for the same reason as the CT map
+ * above: the commissioning page has to be able to say DERIVED on a page load
+ * that happens long after the sweep ran. *out_derived_mask has bit c set iff
+ * out_k_v_per_a[c] is a value this board CALIBRATED from a complete sweep,
+ * against the operator's own mains-voltage and full-output-power answers,
+ * and then confirmed by reading it back off the safety processor. A clear
+ * bit means "never derived here" -- NOT "channel uncalibrated": an operator
+ * may always have typed a clamp-meter figure in by hand, and this record has
+ * no way to see that. out_k_v_per_a must have room for ZONE_CT_CHANNEL_COUNT
+ * floats; entries whose mask bit is clear are meaningless, never a real
+ * calibration. This is PROVENANCE only -- the value the safety processor
+ * actually uses lives in its own config record, never here. */
+void zones_ct_k_v_per_a_derived(uint8_t *out_derived_mask, float *out_k_v_per_a);
 
 /* ---- Task 2: runtime CT-to-zone mapping check ---------------------------- */
 

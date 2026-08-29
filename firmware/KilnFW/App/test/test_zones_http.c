@@ -367,20 +367,60 @@ esp_err_t safety_link_get_status(SafetyLinkClass *link, safety_link_status_t *ou
 // two, so zones_http.c now references them. Test-controlled stand-ins for
 // the same reason safety_link_get_status() above is one -- nothing here
 // exercises the wire, only the decision that leads to it.
+//
+// M12b: the CT-scale push (zone_sweep_push_k_ct_v_per_a()) needs more than a
+// fixed "always succeeds" answer -- its whole safety argument is what it does
+// when a stage fails, a commit is rejected, or the read-back disagrees, and
+// none of those arms is reachable while the stubs can only succeed. So these
+// now RECORD every SET_PARAM and can be told to fail; defaults are exactly
+// the old fixed behaviour, so every pre-existing test is unaffected.
+#define TEST_SETPARAM_LOG_MAX 32
+typedef struct {
+    uint16_t param_id;
+    uint8_t  type;
+    kilnlink_param_value_t value;
+} test_setparam_call_t;
+
+static test_setparam_call_t s_setparam_log[TEST_SETPARAM_LOG_MAX];
+static int s_setparam_count = 0;
+// Fail the Nth (0-based) SET_PARAM of the run; -1 fails none.
+static int s_setparam_fail_at = -1;
+static esp_err_t s_commit_err = ESP_OK;
+static bool s_commit_rejected = false;
+static int s_commit_count = 0;
+
+static void test_link_reset(void)
+{
+    s_setparam_count = 0;
+    s_setparam_fail_at = -1;
+    s_commit_err = ESP_OK;
+    s_commit_rejected = false;
+    s_commit_count = 0;
+    memset(s_setparam_log, 0, sizeof(s_setparam_log));
+}
+
 esp_err_t safety_link_send_set_param(SafetyLinkClass *link, uint16_t param_id, uint8_t type,
                                       kilnlink_param_value_t value)
 {
-    (void)link; (void)param_id; (void)type; (void)value;
-    return ESP_OK;
+    (void)link;
+    bool fail = (s_setparam_fail_at >= 0 && s_setparam_count == s_setparam_fail_at);
+    if (s_setparam_count < TEST_SETPARAM_LOG_MAX) {
+        s_setparam_log[s_setparam_count].param_id = param_id;
+        s_setparam_log[s_setparam_count].type = type;
+        s_setparam_log[s_setparam_count].value = value;
+    }
+    s_setparam_count++;
+    return fail ? ESP_FAIL : ESP_OK;
 }
 esp_err_t safety_link_send_commit_config(SafetyLinkClass *link, uint16_t *out_param_id,
                                           uint8_t *out_reason, bool *out_rejected)
 {
     (void)link;
-    if (out_param_id) *out_param_id = 0;
-    if (out_reason) *out_reason = 0;
-    if (out_rejected) *out_rejected = false;
-    return ESP_OK;
+    s_commit_count++;
+    if (out_param_id) *out_param_id = 0x0308;
+    if (out_reason) *out_reason = 3;
+    if (out_rejected) *out_rejected = s_commit_rejected;
+    return s_commit_err;
 }
 
 // H1 fix (opus review, 2026-08-28): zone_sweep_confirm_ct_map_landed() forces
@@ -399,19 +439,81 @@ esp_err_t safety_link_get_peer_build_status(SafetyLinkClass *link, bool *out_kno
     if (out_config_crc) *out_config_crc = 0;
     return ESP_OK;
 }
+
+// M12b: a programmable stand-in for the ESP's cache of the Pico's committed
+// record. Empty by default (safety_cfg_store_param_count() == 0), which is
+// byte-for-byte the old fixed stub -- a test that wants the committed side of
+// a read-back or a nameplate answer populates it explicitly.
+#define TEST_CFG_ROWS_MAX 16
+static safety_cfg_param_t s_cfg_rows[TEST_CFG_ROWS_MAX];
+static size_t s_cfg_row_count = 0;
+static bool s_cfg_refetch_ok = true;
+// Set true to make refetch() re-point the store at whatever the pushes have
+// staged -- i.e. model a Pico that really did commit what it was sent.
+static bool s_cfg_refetch_applies_staged = false;
+
+static void test_cfg_rows_reset(void)
+{
+    memset(s_cfg_rows, 0, sizeof(s_cfg_rows));
+    s_cfg_row_count = 0;
+    s_cfg_refetch_ok = true;
+    s_cfg_refetch_applies_staged = false;
+}
+
+static void test_cfg_set_f32(uint16_t param_id, float v, bool is_set)
+{
+    for (size_t i = 0; i < s_cfg_row_count; i++) {
+        if (s_cfg_rows[i].param_id == param_id) {
+            s_cfg_rows[i].value.f32_val = v;
+            s_cfg_rows[i].set = is_set;
+            return;
+        }
+    }
+    TEST_CHECK(s_cfg_row_count < TEST_CFG_ROWS_MAX, "test config row table has room");
+    if (s_cfg_row_count >= TEST_CFG_ROWS_MAX) {
+        return;
+    }
+    s_cfg_rows[s_cfg_row_count].param_id = param_id;
+    s_cfg_rows[s_cfg_row_count].type = KILNLINK_PARAM_TYPE_F32;
+    s_cfg_rows[s_cfg_row_count].value.f32_val = v;
+    s_cfg_rows[s_cfg_row_count].set = is_set;
+    s_cfg_row_count++;
+}
+
 bool safety_cfg_store_refetch(SafetyLinkClass *link, uint16_t config_crc)
 {
     (void)link; (void)config_crc;
+    if (!s_cfg_refetch_ok) {
+        return false;
+    }
+    if (s_cfg_refetch_applies_staged) {
+        // Every SET_PARAM this run sent, now "committed" -- the read-back a
+        // Pico that genuinely applied the commit would answer with.
+        // Only the f32 CT-scale ids: the map push stages u8 values into the
+        // same union, and copying one of those back as an f32 would answer
+        // zone_ct_map_committed_value() with a reinterpreted float.
+        for (int i = 0; i < s_setparam_count && i < TEST_SETPARAM_LOG_MAX; i++) {
+            uint16_t id = s_setparam_log[i].param_id;
+            if (id >= 0x0308u && id <= 0x030Au) {
+                test_cfg_set_f32(id, s_setparam_log[i].value.f32_val, true);
+            }
+        }
+    }
     return true;
 }
 size_t safety_cfg_store_param_count(void)
 {
-    return 0;
+    return s_cfg_row_count;
 }
 bool safety_cfg_store_get_by_index(size_t index, safety_cfg_param_t *out)
 {
-    (void)index; (void)out;
-    return false;
+    if (index >= s_cfg_row_count) {
+        return false;
+    }
+    if (out) {
+        *out = s_cfg_rows[index];
+    }
+    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -3061,6 +3163,357 @@ static void test_zones_current_sweep_start_atomic_gate_closes_the_race(void)
     s_zones_config_valid = false;
 }
 
+// ---------------------------------------------------------------------------
+// M12b: calibrating k_ct_v_per_a from the sweep
+// ---------------------------------------------------------------------------
+// The pure decision first. Every refusal below is a NEGATIVE test in the
+// sense this repo means it: it is exercised by breaking the input the guard
+// exists to catch, and each one is paired with the same call made valid, so a
+// guard that had been deleted would show up as a passing "refuses" check
+// only if the OK case also stopped resolving -- which it does not.
+
+static void test_zone_sweep_derive_k_ct_scales_by_the_measured_over_expected_ratio(void)
+{
+    TEST_SECTION("zone_sweep_derive_k_ct -- k_new = k_old * (measured / nameplate) amps");
+
+    float k = 0.0f;
+    // 7.2 kW at 240 V is 30 A expected; the sweep measured exactly that, so
+    // the existing k is already right and must come back unchanged.
+    TEST_CHECK(zone_sweep_derive_k_ct(30.0f, 7200.0f, 240.0f, 0.0333f, &k) == ZONE_KCT_DERIVE_OK,
+               "a measurement that matches the nameplate derives");
+    TEST_CHECK(fabsf(k - 0.0333f) < 1e-6f, "an exact match leaves k_ct_v_per_a unchanged");
+
+    // Reading HALF the nameplate current means the board is under-reporting,
+    // which happens when k_ct is set too small -- so k must come down, not up.
+    TEST_CHECK(zone_sweep_derive_k_ct(15.0f, 7200.0f, 240.0f, 0.0333f, &k) == ZONE_KCT_DERIVE_OK,
+               "a half-scale measurement derives");
+    TEST_CHECK(fabsf(k - 0.01665f) < 1e-6f, "reading half the nameplate halves k_ct_v_per_a");
+
+    // And the other direction -- the sign of the correction is the half of
+    // this that a transposed formula would get exactly backwards.
+    TEST_CHECK(zone_sweep_derive_k_ct(60.0f, 7200.0f, 240.0f, 0.0333f, &k) == ZONE_KCT_DERIVE_OK,
+               "a double-scale measurement derives");
+    TEST_CHECK(k > 0.0333f, "reading twice the nameplate RAISES k_ct_v_per_a, never lowers it");
+}
+
+static void test_zone_sweep_derive_k_ct_refuses_without_the_nameplate_answers(void)
+{
+    TEST_SECTION("zone_sweep_derive_k_ct -- refuses unless BOTH commissioning answers are real");
+
+    float k = 0.0f;
+    TEST_CHECK(zone_sweep_derive_k_ct(30.0f, 0.0f, 240.0f, 0.0333f, &k) == ZONE_KCT_DERIVE_NO_NAMEPLATE,
+               "no full-output power answer derives nothing");
+    TEST_CHECK(zone_sweep_derive_k_ct(30.0f, 7200.0f, 0.0f, 0.0333f, &k) == ZONE_KCT_DERIVE_NO_NAMEPLATE,
+               "no mains voltage answer derives nothing");
+    TEST_CHECK(zone_sweep_derive_k_ct(30.0f, NAN, 240.0f, 0.0333f, &k) == ZONE_KCT_DERIVE_NO_NAMEPLATE,
+               "a NaN power answer derives nothing");
+    TEST_CHECK(zone_sweep_derive_k_ct(30.0f, 7200.0f, -240.0f, 0.0333f, &k) == ZONE_KCT_DERIVE_NO_NAMEPLATE,
+               "a negative mains voltage derives nothing");
+}
+
+static void test_zone_sweep_derive_k_ct_refuses_without_a_measurement(void)
+{
+    TEST_SECTION("zone_sweep_derive_k_ct -- refuses a total that is noise, or no total at all");
+
+    float k = 0.0f;
+    TEST_CHECK(zone_sweep_derive_k_ct(0.0f, 7200.0f, 240.0f, 0.0333f, &k) == ZONE_KCT_DERIVE_NO_MEASUREMENT,
+               "a zero measured total derives nothing");
+    TEST_CHECK(zone_sweep_derive_k_ct(1.9f, 7200.0f, 240.0f, 0.0333f, &k) == ZONE_KCT_DERIVE_NO_MEASUREMENT,
+               "a total below the load threshold derives nothing");
+    TEST_CHECK(zone_sweep_derive_k_ct(NAN, 7200.0f, 240.0f, 0.0333f, &k) == ZONE_KCT_DERIVE_NO_MEASUREMENT,
+               "a NaN total derives nothing");
+}
+
+static void test_zone_sweep_derive_k_ct_refuses_an_uncommissioned_prior_k(void)
+{
+    TEST_SECTION("zone_sweep_derive_k_ct -- an uncommissioned k_old carries no scale to correct");
+
+    // The link reports AMPS, not counts, and the Pico computes those amps
+    // with k_ct_v_per_a -- so k_old == 0 means every reading was 0.0 A and
+    // there is nothing to scale. Inventing a starting value here is exactly
+    // what this refusal exists to prevent.
+    float k = 0.0f;
+    TEST_CHECK(zone_sweep_derive_k_ct(30.0f, 7200.0f, 240.0f, 0.0f, &k) == ZONE_KCT_DERIVE_NO_PRIOR_K,
+               "k_ct_v_per_a at its uncommissioned 0.0 derives nothing");
+    TEST_CHECK(zone_sweep_derive_k_ct(30.0f, 7200.0f, 240.0f, -0.03f, &k) == ZONE_KCT_DERIVE_NO_PRIOR_K,
+               "a negative k_ct_v_per_a derives nothing");
+    TEST_CHECK(zone_sweep_derive_k_ct(30.0f, 7200.0f, 240.0f, NAN, &k) == ZONE_KCT_DERIVE_NO_PRIOR_K,
+               "a NaN k_ct_v_per_a derives nothing");
+}
+
+static void test_zone_sweep_derive_k_ct_refuses_an_implausible_correction(void)
+{
+    TEST_SECTION("zone_sweep_derive_k_ct -- a disagreement too large to be a scale error is refused");
+
+    float k = 0.0f;
+    // 300 A measured against a 30 A nameplate is not a mis-scaled CT, it is a
+    // wiring or units error -- and scaling k_ct by 10 would make the amps
+    // read right while moving the presence threshold to match the error.
+    TEST_CHECK(zone_sweep_derive_k_ct(300.0f, 7200.0f, 240.0f, 0.0333f, &k) == ZONE_KCT_DERIVE_IMPLAUSIBLE,
+               "measuring 10x the nameplate derives nothing");
+    TEST_CHECK(zone_sweep_derive_k_ct(3.0f, 7200.0f, 240.0f, 0.0333f, &k) == ZONE_KCT_DERIVE_IMPLAUSIBLE,
+               "measuring a tenth of the nameplate derives nothing");
+    // The absolute band is a separate guard from the ratio band: this ratio
+    // (2x) is perfectly acceptable, but the k it produces is not a CT.
+    TEST_CHECK(zone_sweep_derive_k_ct(60.0f, 7200.0f, 240.0f, 0.4f, &k) == ZONE_KCT_DERIVE_IMPLAUSIBLE,
+               "an in-band ratio that lands k outside the plausible CT band derives nothing");
+    // ...and the same in-band ratio on a plausible k_old still derives, so
+    // the check above is the absolute band talking, not the ratio band.
+    TEST_CHECK(zone_sweep_derive_k_ct(60.0f, 7200.0f, 240.0f, 0.0333f, &k) == ZONE_KCT_DERIVE_OK,
+               "the same 2x ratio on a plausible k_old is accepted");
+}
+
+// ---- the plan, which is where the run's own completeness is judged ---------
+
+// Puts s_ct_derive and the fake committed record into the state a clean
+// three-zone sweep leaves behind: every channel resolved, both nameplate
+// answers present, all three k_ct_v_per_a committed at the CT's datasheet
+// figure, and a measured total that exactly matches the nameplate.
+static void kct_setup_clean_run(void)
+{
+    test_link_reset();
+    test_cfg_rows_reset();
+    memset(&s_ct_derive, 0, sizeof(s_ct_derive));
+    zone_k_ct_clear(); // no test may inherit an earlier test's provenance record
+    s_ct_derive.derived_mask = 0x07;
+    s_ct_derive.zone_for_ch[0] = 0;
+    s_ct_derive.zone_for_ch[1] = 1;
+    s_ct_derive.zone_for_ch[2] = 2;
+    s_ct_derive.measured_total_a = 30.0f;
+    test_cfg_set_f32(ZONE_MAINS_VOLTAGE_PARAM_ID, 240.0f, true);
+    test_cfg_set_f32(ZONE_MAX_POWER_PARAM_ID, 7200.0f, true);
+    for (uint8_t c = 0; c < ZONE_CT_CHANNEL_COUNT; c++) {
+        test_cfg_set_f32(ZONE_KCT_PARAM_ID(c), 0.0333f, true);
+    }
+}
+
+static void test_zone_sweep_plan_k_ct_clean_run_plans_every_derived_channel(void)
+{
+    TEST_SECTION("zone_sweep_plan_k_ct -- a complete run with both answers plans all three channels");
+
+    kct_setup_clean_run();
+    float k[ZONE_CT_CHANNEL_COUNT] = {0};
+    char note[96] = "";
+    TEST_CHECK(zone_sweep_plan_k_ct(k, note, sizeof(note)) == 0x07,
+               "every channel the map resolved is calibrated");
+    TEST_CHECK(note[0] == '\0', "a clean plan says nothing");
+    TEST_CHECK(fabsf(k[1] - 0.0333f) < 1e-6f, "a matching measurement leaves the scale where it was");
+}
+
+static void test_zone_sweep_plan_k_ct_refuses_an_incomplete_run(void)
+{
+    TEST_SECTION("zone_sweep_plan_k_ct -- a zone that did not resolve makes the kiln total a lie");
+
+    // The guard being proved: an unresolved zone still drew current, so the
+    // total is short by that zone's share and the derived scale would be
+    // dragged DOWN by exactly that much -- silently.
+    kct_setup_clean_run();
+    s_ct_derive.unresolved_zone_mask = 0x04;
+    float k[ZONE_CT_CHANNEL_COUNT] = {0};
+    char note[96] = "";
+    TEST_CHECK(zone_sweep_plan_k_ct(k, note, sizeof(note)) == 0,
+               "an unresolved zone calibrates nothing");
+    TEST_CHECK(strstr(note, "incomplete") != NULL, "and the operator is told why");
+
+    // The same run with that zone resolved plans normally -- so the refusal
+    // above is the completeness check, not some other failure.
+    s_ct_derive.unresolved_zone_mask = 0;
+    TEST_CHECK(zone_sweep_plan_k_ct(k, note, sizeof(note)) == 0x07,
+               "clearing the unresolved zone lets the same run calibrate");
+
+    // A two-zones-one-channel conflict is the same hole seen from the other
+    // side, and must refuse identically.
+    s_ct_derive.conflict_mask = 0x02;
+    TEST_CHECK(zone_sweep_plan_k_ct(k, note, sizeof(note)) == 0,
+               "a shared-CT conflict calibrates nothing either");
+}
+
+static void test_zone_sweep_plan_k_ct_refuses_after_a_failed_map_push(void)
+{
+    TEST_SECTION("zone_sweep_plan_k_ct -- never commits on top of a staged buffer the map push abandoned");
+
+    // Both pushes stage into the SAME buffer on the Pico and each ends with
+    // its own COMMIT_CONFIG. If the map push failed and could not fully back
+    // its staging out, this commit would carry those leftovers into flash --
+    // which is precisely the hazard the map push's own H3 repair exists for.
+    kct_setup_clean_run();
+    s_ct_derive.map_push_failed = true;
+    float k[ZONE_CT_CHANNEL_COUNT] = {0};
+    char note[96] = "";
+    TEST_CHECK(zone_sweep_plan_k_ct(k, note, sizeof(note)) == 0,
+               "a failed CT-map push blocks the CT-scale commit outright");
+    TEST_CHECK(strstr(note, "CT map write failed") != NULL, "and says so");
+
+    s_ct_derive.map_push_failed = false;
+    TEST_CHECK(zone_sweep_plan_k_ct(k, note, sizeof(note)) == 0x07,
+               "with the map push clean the same run calibrates");
+}
+
+static void test_zone_sweep_plan_k_ct_refuses_an_unanswered_nameplate(void)
+{
+    TEST_SECTION("zone_sweep_plan_k_ct -- an UNSET commissioning answer is not a zero");
+
+    kct_setup_clean_run();
+    // Present in the record but never set -- the case a plain "read the
+    // value" would turn into 0.0 W and the derivation would then have to
+    // catch as a nameplate refusal one layer later.
+    test_cfg_set_f32(ZONE_MAX_POWER_PARAM_ID, 7200.0f, false);
+    float k[ZONE_CT_CHANNEL_COUNT] = {0};
+    char note[96] = "";
+    TEST_CHECK(zone_sweep_plan_k_ct(k, note, sizeof(note)) == 0,
+               "an unset full-output power answer calibrates nothing");
+    TEST_CHECK(strstr(note, "mains voltage") != NULL, "and asks for the missing answers");
+
+    test_cfg_set_f32(ZONE_MAX_POWER_PARAM_ID, 7200.0f, true);
+    TEST_CHECK(zone_sweep_plan_k_ct(k, note, sizeof(note)) == 0x07,
+               "answering it lets the same run calibrate");
+}
+
+// ---- the push, and every way it can fail after something has been staged ---
+
+static int kct_setparam_count_for(uint16_t param_id)
+{
+    int n = 0;
+    for (int i = 0; i < s_setparam_count && i < TEST_SETPARAM_LOG_MAX; i++) {
+        if (s_setparam_log[i].param_id == param_id) {
+            n++;
+        }
+    }
+    return n;
+}
+
+static void test_zone_sweep_push_k_ct_happy_path_writes_and_confirms(void)
+{
+    TEST_SECTION("zone_sweep_push_k_ct_v_per_a -- stages, commits, and confirms by read-back");
+
+    kct_setup_clean_run();
+    s_ct_derive.measured_total_a = 60.0f; // 2x the nameplate -> a real correction to write
+    s_cfg_refetch_applies_staged = true;  // a Pico that genuinely applied the commit
+    s_hw_safety = (SafetyLinkClass *)1;
+
+    zone_sweep_push_k_ct_v_per_a();
+
+    TEST_CHECK(s_sweep.k_ct_derived_mask == 0x07, "all three channels report as derived");
+    TEST_CHECK(s_sweep.k_ct_reason[0] == '\0', "a confirmed write says nothing");
+    TEST_CHECK(s_setparam_count == 3, "exactly one SET_PARAM per channel, no repair writes");
+    TEST_CHECK(s_commit_count == 1, "one COMMIT_CONFIG");
+    TEST_CHECK(fabsf(s_setparam_log[0].value.f32_val - 0.0666f) < 1e-5f,
+               "the value staged is the corrected scale, not the old one");
+    uint8_t dm = 0;
+    float persisted[ZONE_CT_CHANNEL_COUNT] = {0};
+    zones_ct_k_v_per_a_derived(&dm, persisted);
+    TEST_CHECK(dm == 0x07, "the provenance record says all three were derived here");
+    TEST_CHECK(fabsf(persisted[2] - 0.0666f) < 1e-5f, "and remembers the value it wrote");
+    s_hw_safety = NULL;
+}
+
+static void test_zone_sweep_push_k_ct_unconfirmed_readback_derives_nothing_and_backs_out(void)
+{
+    TEST_SECTION("zone_sweep_push_k_ct_v_per_a -- an ACKed commit that does not read back is NOT written");
+
+    // H1, for this push: SET_PARAM/COMMIT_CONFIG are fire-and-forget, so an
+    // un-rejected commit proves nothing. Here the Pico "acks" but the record
+    // still reads the OLD value -- the push must report nothing derived AND
+    // put the staged buffer back, or the next unrelated commit carries this
+    // run's abandoned scale into flash.
+    kct_setup_clean_run();
+    s_ct_derive.measured_total_a = 60.0f;
+    s_cfg_refetch_applies_staged = false; // the record never changes -> read-back disagrees
+    s_hw_safety = (SafetyLinkClass *)1;
+
+    zone_sweep_push_k_ct_v_per_a();
+
+    TEST_CHECK(s_sweep.k_ct_derived_mask == 0, "an unconfirmed write derives nothing");
+    TEST_CHECK(strstr((const char *)s_sweep.k_ct_reason, "NOT written") != NULL,
+               "and says the value was not written");
+    TEST_CHECK(s_setparam_count == 6, "every staged channel is re-staged back (3 writes + 3 repairs)");
+    for (uint8_t c = 0; c < ZONE_CT_CHANNEL_COUNT; c++) {
+        TEST_CHECK(kct_setparam_count_for(ZONE_KCT_PARAM_ID(c)) == 2,
+                   "each channel was both staged and backed out");
+        TEST_CHECK(fabsf(s_setparam_log[3 + c].value.f32_val - 0.0333f) < 1e-6f,
+                   "the backout restores the value the Pico has actually committed");
+    }
+    uint8_t dm = 0xFF;
+    zones_ct_k_v_per_a_derived(&dm, NULL);
+    TEST_CHECK(dm == 0, "and nothing is persisted as derived");
+    s_hw_safety = NULL;
+}
+
+static void test_zone_sweep_push_k_ct_rejected_commit_backs_the_staging_out(void)
+{
+    TEST_SECTION("zone_sweep_push_k_ct_v_per_a -- a REJECTED commit still leaves staging to back out");
+
+    kct_setup_clean_run();
+    s_ct_derive.measured_total_a = 60.0f;
+    s_commit_rejected = true; // the Pico refuses config writes while armed
+    s_hw_safety = (SafetyLinkClass *)1;
+
+    zone_sweep_push_k_ct_v_per_a();
+
+    TEST_CHECK(s_sweep.k_ct_derived_mask == 0, "a rejected commit derives nothing");
+    TEST_CHECK(strstr((const char *)s_sweep.k_ct_reason, "rejected") != NULL,
+               "and the rejection is reported rather than inferred from an unchanged value");
+    TEST_CHECK(s_setparam_count == 6, "the three staged channels are all backed out");
+    s_hw_safety = NULL;
+}
+
+static void test_zone_sweep_push_k_ct_partial_staging_failure_backs_out_what_staged(void)
+{
+    TEST_SECTION("zone_sweep_push_k_ct_v_per_a -- a mid-loop staging failure backs out the earlier writes");
+
+    // H3, for this push: the failure arrives on channel 1, so channel 0 is
+    // already sitting in the Pico's staged buffer. It must be overwritten
+    // with the committed value, and no COMMIT_CONFIG may be sent at all.
+    kct_setup_clean_run();
+    s_ct_derive.measured_total_a = 60.0f;
+    s_setparam_fail_at = 1;
+    s_hw_safety = (SafetyLinkClass *)1;
+
+    zone_sweep_push_k_ct_v_per_a();
+
+    TEST_CHECK(s_sweep.k_ct_derived_mask == 0, "a failed stage derives nothing");
+    TEST_CHECK(s_commit_count == 0, "and nothing is committed");
+    TEST_CHECK(kct_setparam_count_for(ZONE_KCT_PARAM_ID(0)) == 2,
+               "the channel that DID stage is written back");
+    TEST_CHECK(kct_setparam_count_for(ZONE_KCT_PARAM_ID(2)) == 0,
+               "and the channel the loop never reached is left alone");
+    s_hw_safety = NULL;
+}
+
+static void test_zone_sweep_push_k_ct_backout_restores_the_uncommissioned_zero(void)
+{
+    TEST_SECTION("zone_sweep_push_k_ct_v_per_a -- backing out a never-committed channel restores 0.0");
+
+    // A channel with no committed value has nothing to restore, so the
+    // repair writes config_store's own uncommissioned 0.0f -- which puts the
+    // Pico back on the SAFE side of current_presence_policy's branch rather
+    // than leaving this run's abandoned scale staged.
+    kct_setup_clean_run();
+    s_ct_derive.derived_mask = 0x01; // only channel 0
+    s_ct_derive.measured_total_a = 60.0f;
+    test_cfg_set_f32(ZONE_KCT_PARAM_ID(0), 0.0333f, true); // usable as k_old...
+    s_commit_rejected = true;
+    s_hw_safety = (SafetyLinkClass *)1;
+    zone_sweep_push_k_ct_v_per_a();
+    TEST_CHECK(s_setparam_count == 2 && fabsf(s_setparam_log[1].value.f32_val - 0.0333f) < 1e-6f,
+               "a committed channel is restored to its committed value");
+
+    // ...and now the same channel with the row marked never-set.
+    kct_setup_clean_run();
+    s_ct_derive.derived_mask = 0x01;
+    s_ct_derive.measured_total_a = 60.0f;
+    s_commit_rejected = true;
+    // k_old must still be readable for the DERIVATION, so this test drives
+    // the restore path directly rather than through a plan that would refuse.
+    uint8_t staged_only_ch0 = 0x01;
+    test_cfg_set_f32(ZONE_KCT_PARAM_ID(0), 0.0333f, false); // present but never set
+    char note[96] = "";
+    zone_sweep_unstage_k_ct(staged_only_ch0, note, sizeof(note));
+    TEST_CHECK(s_setparam_count == 1 && s_setparam_log[0].value.f32_val == 0.0f,
+               "a never-committed channel is restored to the uncommissioned 0.0");
+    s_hw_safety = NULL;
+}
+
 void run_test_zones_http(void)
 {
     test_out_of_range_zone_preserves_stored_fields();
@@ -3131,6 +3584,21 @@ void run_test_zones_http(void)
     test_zone_sweep_run_all_zones_skipped_zone_records_nothing();
     test_zone_sweep_run_all_zones_energize_refused_reason_decodes_fault_words();
     test_zone_normals_get_set_round_trip();
+
+    test_zone_sweep_derive_k_ct_scales_by_the_measured_over_expected_ratio();
+    test_zone_sweep_derive_k_ct_refuses_without_the_nameplate_answers();
+    test_zone_sweep_derive_k_ct_refuses_without_a_measurement();
+    test_zone_sweep_derive_k_ct_refuses_an_uncommissioned_prior_k();
+    test_zone_sweep_derive_k_ct_refuses_an_implausible_correction();
+    test_zone_sweep_plan_k_ct_clean_run_plans_every_derived_channel();
+    test_zone_sweep_plan_k_ct_refuses_an_incomplete_run();
+    test_zone_sweep_plan_k_ct_refuses_after_a_failed_map_push();
+    test_zone_sweep_plan_k_ct_refuses_an_unanswered_nameplate();
+    test_zone_sweep_push_k_ct_happy_path_writes_and_confirms();
+    test_zone_sweep_push_k_ct_unconfirmed_readback_derives_nothing_and_backs_out();
+    test_zone_sweep_push_k_ct_rejected_commit_backs_the_staging_out();
+    test_zone_sweep_push_k_ct_partial_staging_failure_backs_out_what_staged();
+    test_zone_sweep_push_k_ct_backout_restores_the_uncommissioned_zero();
 
     test_ct_mapping_mismatch_silent_when_never_measured();
     test_ct_mapping_mismatch_within_band_is_silent();

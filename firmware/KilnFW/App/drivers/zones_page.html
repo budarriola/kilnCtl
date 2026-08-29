@@ -837,6 +837,19 @@ function renderSweepStatus(st) {
       : ' -- safety CT map NOT derived';
     if (st.ct_map_reason) text += ' (' + st.ct_map_reason + ')';
   }
+  /* M12b: and the CT volts-per-amp scale the same run calibrated, from the
+     mains-voltage/full-output-power answers. Reported separately because it
+     fails separately -- a board whose CTs mapped perfectly still derives no
+     scale until those two commissioning questions are answered, and that is
+     an action for the operator, not a silent no-op. */
+  if (st.state === 'done' && typeof st.k_ct_derived_mask === 'number') {
+    var kchans = [];
+    for (var kc = 0; kc < 3; kc++) { if (st.k_ct_derived_mask & (1 << kc)) kchans.push('CT' + kc); }
+    text += kchans.length
+      ? ' -- CT scale calibrated for ' + kchans.join(', ')
+      : ' -- CT scale NOT calibrated';
+    if (st.k_ct_reason) text += ' (' + st.k_ct_reason + ')';
+  }
   msg.textContent = text;
   if (running && !sweepPollTimer) {
     sweepPollTimer = setTimeout(pollSweepStatus, 1000);
