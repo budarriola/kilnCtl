@@ -277,6 +277,56 @@ standing in for the board.
 | `bench_host_addr` | session | the address, or a skip |
 | `bench_session` | session | a `BenchSession` whose zones + safety config were written **and verified** once |
 | `bench` | function | the same session plus a `finally` teardown that force-stops the executor and asserts every relay is off |
+| `cold_bench` | function | `bench`, plus the guarantee that the bench **started cold** — see below |
+
+### Waiting for the bench to cool (`wait_for_cooldown`)
+
+Thermal tests do not compose without a cooldown gate. Run back to back, the
+second test starts on the first one's residual heat and reports a smaller
+step, a smaller gain and a shorter dead time — all wrong in the same
+direction, and none of it visible in the result.
+
+`BenchSession.wait_for_cooldown(target_c=None, tolerance_c=3.0,
+timeout_s=2700, poll_s=20, channels=None)` polls `/api/status` until the
+hottest watched thermocouple is at or below a target, and **raises** if its
+budget expires, naming the temperature actually reached. It never returns
+"close enough".
+
+The target is not a constant. By default it is
+**`ambient_reference_c() + tolerance_c`**, read at the moment of the call,
+where `ambient_reference_c()` is the *lowest valid cold-junction* (`cj_c`)
+reading on the board. Two reasons:
+
+* **The cold junction is the only ambient reference this board publishes**,
+  and it moves with the room. This bench sits at ~34 °C cold junction while
+  the room runs around 100 °F; a hardcoded 25 °C gate would simply never
+  open.
+* **Lowest, not mean** — a converter whose channel has just been driven hot
+  picks some of that heat up through the board, so the coolest cold junction
+  is the least-contaminated estimate of the room.
+
+Hot junction vs cold junction: the cold junction supplies the *reference*
+(what is the room doing), the hot junctions supply the *subject* (has the
+element's heat dissipated). Judging each hot junction only against its own
+cold junction would be tighter in principle, but on this jig both sit on the
+same small board, so the cold junction lags the room upward during a firing
+and that comparison closes early — exactly when it should not.
+
+The decision logic is split out as two pure functions, `cooldown_target_c()`
+and `cooldown_reached()`, and host-tested in
+`tests/test_cooldown_policy.py` — including the negative cases: no
+cold-junction reading **refuses** rather than defaulting to a constant, a
+negative tolerance is refused at the call rather than 45 minutes later at the
+timeout, an explicit target is never second-guessed even when unreachable,
+and **NaN is not cool** (a dropped-out thermocouple must not open the gate).
+
+**Why it is not an MCP tool.** A multi-minute blocking wait does not belong
+in a `kiln_batch` round trip — that tool's contract is one request, in order,
+stopping at the first failure. As a session method it composes the way a
+precondition should: a test, or the `cold_bench` fixture, calls it *before*
+the batch of hardware operations that needs a cold start.
+`KILNCTRL_BENCH_COOLDOWN_TARGET_C` / `_TIMEOUT_S` override the fixture's
+derived target and budget for a session that wants an absolute gate.
 
 Writes go over HTTP (`/api/zones`, `/api/safety/commissioning`) reusing the
 same read-back-verifying clients `load_config_preset` uses -- no second,
@@ -345,16 +395,88 @@ a teardown):
   FOPDT model to NVS, and a regression test must not retune the bench; the
   test asserts the gains and model are byte-identical afterwards.
 
-Measured on the live bench 2026-08-28 (heat refused, no CT fitted): the step
-start is accepted, the executor runs, **PV moves −0.03 °C over 61 s with no
-relay ever closing**, and the autotune aborts itself after 120 s and 12
-samples with *"fit failed: response too small to fit (trace flat or
-noise-dominated)"*. That flat trace is the gate working, and the test says so
-in those words instead of leaving a mystery. Both branch on
-`heat_is_permitted()`, so they start exercising real step response and a real
-fit the day the CTs are fitted — **no edit to the file**.
+**Superseded 2026-08-29 — both tests now assert the plant, not just the
+gate.** The 2026-08-28 measurement recorded here (PV flat, autotune aborting
+with *"response too small to fit"*) was correct about the trace and wrong
+about what it meant: `profile_executor.c`/`autotune_engine.c` never requested
+heat enable, so **K4 was open for every firing this board had ever run**
+(`heat_enable.h`), and zone 0's 2 s time-proportioning window could not render
+any duty against the 10 s minimum on-time. With both fixed:
 
-The **relay-feedback** method is deliberately unreachable from the harness:
+* the closed-loop step asserts **relay 1 closes, K4 is closed on at least half
+  the samples, and zone 0 rises at ≥ 1.5 °C/min** while the loop is driving
+  below setpoint (measured on this jig: 2.8–3.8 °C/min at full duty; 0.017
+  °C/min was what an open K4 produced), plus overshoot and settle bounds;
+* the open-loop autotune asserts it **converges** — `state=done`,
+  `model_valid`, physical K/τ/L.
+
+Two harness bugs were found by turning those observations into assertions,
+and both are fixed here:
+
+* **The step profile's dwell was shorter than the observation window.** A
+  900 °C/h ramp with `dwell_min=1` put the setpoint at 45 °C in ~45 s and
+  ended the run at ~105 s, with PV still at 38.6 °C and climbing. The
+  remaining ~380 s of the sweep sampled a *cooling* jig, and the trace read
+  as 0.38 °C/min — four times too slow, for a reason that has nothing to do
+  with the plant. `STEP_DWELL_MIN` is now derived from `STEP_OBSERVE_S`.
+* **`sample_response()` indexed channels positionally** in a list already
+  filtered to valid ones, so a single invalid channel silently relabelled
+  every channel after the gap. It is keyed by the channel's own index now,
+  and each row carries `channels_c` for *every* zone — which is what makes
+  the cross-zone measurement below possible at all.
+
+Both tests take the `cold_bench` fixture: an open-loop fit or a rise rate
+measured from a hot start comes out smaller, and nothing in the result says
+so.
+
+### `tests/test_live_bench_zone_interaction.py`
+
+**"Auto zone interaction measurement."** The phrase could mean two things and
+they are not the same feature, so the file says which it tests and why:
+
+* **The coupling matrix and its RGA** — `autotune_engine.c`'s
+  `autotune_coupling_matrix_t` (K[i][j] = zone j's FOPDT response to a duty
+  step on zone i, filled a *row at a time* as autotune runs complete) and
+  `pid_autotune_rga()`, served together at **`GET /api/autotune/matrix`**.
+  This is the feature this repo actually built and named, and until now it had
+  **never run on real data** — `autotune_engine.h` says so in as many words.
+  The test fills two rows with real cold-start autotune runs (zones 0 and 1,
+  same power cycle — the matrix lives in RAM, not NVS) and then asserts
+  Bristol's identity on the result: **every row and column of Λ sums to 1**,
+  for any invertible K. That is a property of the math, so it holds whatever
+  this jig's coupling turns out to be — a real test of the firmware's
+  implementation on measured data rather than a test of a number someone
+  typed. A negative diagonal element fails: it means closing the other zones'
+  loops *reverses* this zone's gain, i.e. per-zone PID is the wrong
+  architecture for this plant.
+* **Raw thermal coupling** — how much of zone 0's heat leaks into zones 1 and
+  2 in this small shared enclosure. Reported in degrees, and as a fraction of
+  the fired zone's own rise, from the `channels_c` field every sample now
+  carries. *Reported*, not tightly asserted: a coupling figure is a property
+  of the enclosure, not a pass/fail criterion. The assertion on it is the
+  safety one — no unfired zone may exceed 60 °C.
+
+`ramp_lock_lagging_mask` was considered as a third reading of the phrase and
+rejected as the *primary* subject: it is a setpoint-coordination mechanism
+(hold the shared ramp while a participating zone lags by more than
+`PROFILE_EXECUTOR_RAMP_LOCK_BAND_C`), not an interaction measurement. It is
+checked by the full-profile test instead, which is where it belongs.
+
+### The full multi-segment profile (`test_live_bench_firing.py`)
+
+Everything else in the suite fires a *single* segment, which cannot answer the
+questions a real firing is made of. `test_full_multi_segment_profile_runs_to_
+completion` runs a three-segment schedule (42 °C dwell 6 min → 52 °C dwell
+6 min → a **down-ramp** to 46 °C) through `POST /api/profile_exec/start` and
+asserts: every segment entered **in order**, every segment actually
+**dwelled**, the peak reached within 3 °C of the top target (a profile that
+completes on the clock while cold is not a firing), K4 closed for a real
+fraction of the run, **no heat commanded during the down-ramp** while already
+above the descending setpoint, ramp-lock never engaging on a single-zone
+profile, and — at the end — every relay off **and K4 released** by the
+completion path rather than by the test's own teardown.
+
+The **relay-feedback** autotune method is deliberately unreachable from the harness:
 `AUTOTUNE_RELAY_SETPOINT_HEADROOM_C` (50 °C) refuses any setpoint within
 50 °C of `max_temp_c`, which under this fixture's 80 °C ceiling admits only
 setpoints below the bench's own 35 °C ambient. A test for it would be testing

@@ -351,6 +351,39 @@ soldering session.
       **not runnable on this fixture at all** —
       `AUTOTUNE_RELAY_SETPOINT_HEADROOM_C` (50 °C) under an 80 °C ceiling
       admits only setpoints below the bench's own 35 °C ambient
+- [x] **Live-bench verification pass, 2026-08-29** — step tuning, PID tuning,
+      zone interaction and a full profile firing, each turned from an
+      observation into an assertion, plus the cooldown gate that lets them run
+      back to back honestly.
+      **The gate:** `BenchSession.wait_for_cooldown()` +
+      the `cold_bench` pytest fixture. The target is derived from the board's
+      **lowest live cold-junction reading** plus a tolerance, not hardcoded —
+      the room here runs around 100 °F and a 25 °C gate would never open. It
+      raises on budget expiry rather than proceeding onto residual heat, and
+      its policy is split into two pure functions with negative tests
+      (`tests/test_cooldown_policy.py`): no cold junction refuses rather than
+      defaulting, and **NaN is not cool**. Deliberately *not* an MCP tool — a
+      multi-minute blocking wait does not fit `kiln_batch`'s one-round-trip
+      contract. Measured in use: 50.4 → 37.5 °C in 646 s.
+      **Two harness defects found by asserting instead of observing.** The
+      step test's profile carried a 1-minute dwell against a 900 °C/h ramp, so
+      the run ended at ~105 s with PV at 38.6 °C and the remaining ~380 s of
+      the sweep sampled a *cooling* jig — the trace read 0.38 °C/min, four
+      times too slow, for a reason that is not the plant. And
+      `sample_response()` indexed channels positionally in a list already
+      filtered to valid ones, which would have relabelled every channel after
+      a gap — the exact failure that turns a cross-zone measurement into
+      fiction. Both fixed; every sample now carries `channels_c` for all
+      zones.
+      **Results.** Step response from an enforced cold start: PV
+      37.51 → 44.37 °C over 487 s, executor `running` throughout, relay 1 and
+      K4 closed, **driving-phase rise 1.82 °C/min**, arrival at t=135 s,
+      worst post-arrival deviation 4.48 °C. Autotune: `state=done` at 450 s,
+      **K = 31.36 °C/duty, τ = 184.7 s, L = 46.1 s**, SIMC
+      `kp = 0.03196 / ki = 0.00017 / kd = 0.73614` — an independent second fit
+      agreeing with the first (32.95 / 166.9 / 36.9) to within 5 % on K, which
+      is the first time this board's plant model has been *reproduced* rather
+      than merely measured. Gains still not accepted.
 - [x] `pc_tools` moved to `tools/PcTools/`; GPIO probes built for both chips
       (ESP: deny-list incl. GPIO6; Pico: over SWD, GPIO6 read-only). **Pico
       probe bench-tested 2026-08-19, PASS.** ESP probe bench-tested 2026-08-19
