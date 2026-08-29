@@ -69,10 +69,7 @@ behind `App/drivers/sim_backend.c` (see below).
   rounded up to a minimum pulse, which is how a relay ends up chattering at low
   demand), and (2) a running hold: once the relay is on, an off decision is
   deferred until 10 s of *continuous* on-time has accumulated, across window
-  boundaries if the window is shorter than 10 s. A window shorter than the
-  floor is not treated as a config error and does not clamp the zone dead —
-  the quantization uses at most the window length there, so a high duty still
-  renders a full-window ON that the hold then extends to 10 s.
+  boundaries if the window is shorter than 10 s.
 
   The floor never applies to a de-energize: every trip, halt, pause and stop
   goes through `heater_output_force_off()`, which drops the relay on the tick
@@ -91,7 +88,7 @@ behind `App/drivers/sim_backend.c` (see below).
   | --- | --- | --- |
   | HTTP submission | `parse_zone_fields()` (`zones_http.c`) | **Refused**, with an error naming the field and the floor. The page shows it. |
   | Any stored/imported blob | `validate_zones_cfg()` | Refused. |
-  | Load from NVS or a kiln-config slot | `raise_min_on_to_floor()`, called by `decode_zones_blob()` | **Raised** to the floor. |
+  | Load from NVS or a kiln-config slot | `raise_heater_timing_to_floors()`, called by `decode_zones_blob()` | **Raised** to the floor. |
   | Point of use | `heater_output_duty()` | Raised to the floor + the running hold. Defense in depth. |
 
   Refusing at the HTTP door and raising on load are deliberately different,
@@ -107,6 +104,64 @@ behind `App/drivers/sim_backend.c` (see below).
   All four gates are covered by tests, and each was negative-tested by being
   broken in turn: `test_zones_http.c` for the first three,
   `test_heater_output.c` for the last.
+
+  **The window and the minimum on-time are not independent (2026-08-29).**
+  The paragraph above used to end by saying a window shorter than the floor
+  "is not treated as a config error and does not clamp the zone dead". That
+  was wrong, and it was wrong on this bench for a day.
+
+  Zone 0 carried `heater_window_ms = 2000` against the 10 s floor. Every
+  on-time a duty could compute in a 2 s window — `0.4 * 2000 = 800 ms`,
+  `0.9 * 2000 = 1800 ms` — is below 10 s, so gate (1) rendered every one of
+  them as OFF. The running hold never got a chance to extend anything,
+  because the relay never closed in the first place. The zone was configured
+  as a PID zone, reported itself as a PID zone through `GET /api/zones`, and
+  was incapable of being one. The autotune step method commanded `step_duty
+  0.4` and the relay did not close once in the whole run.
+
+  Both numbers were inside their own ranges. Only their *ratio* was wrong,
+  which is the class of mistake a per-field range check cannot catch — and
+  every check in `zones_http.c` was a per-field range check.
+
+  The rule now enforced is
+
+  ```
+  heater_window_ms >= HEATER_MIN_WINDOW_MULTIPLE * max(heater_min_on_ms, HEATER_MIN_ON_MS_FLOOR)
+  ```
+
+  with `HEATER_MIN_WINDOW_MULTIPLE = 3` (`heater_output.h`). Equivalently: the
+  smallest duty a zone can render is `1 / 3`. Three is a practical floor, not
+  a control-theory optimum — it is the point at which a zone can express
+  roughly a third, two thirds and full duty, which is enough for a PID loop to
+  modulate and for an autotune step to produce a real thermal response. Real
+  windows sit well above it: the 60 s default against the 10 s floor is a
+  ratio of 6, giving duty steps of about 0.17.
+
+  It is enforced at the same four gates, in the same shapes, for the same
+  reasons:
+
+  | Gate | Where | Behavior below 3x the min-on |
+  | --- | --- | --- |
+  | HTTP submission | `parse_zone_fields()` (`zones_http.c`) | **Refused**, with an error naming `heater_window_ms` and the relationship. |
+  | Any stored/imported blob | `validate_zones_cfg()`, and `zones_config_set_heater_cfg()` (backup import's door) | Refused. |
+  | Load from NVS or a kiln-config slot | `raise_heater_timing_to_floors()` | **Raised** to `3x` the *already-raised* min-on. Order matters: the bound is computed from the raised value, never the stored sub-floor one. |
+  | Point of use | `heater_output_cfg_expressible()` | Reports the pairing unusable. `heater_output_duty()`'s own behaviour is unchanged and now unreachable from any policed path. |
+
+  `heater_window_ms` was already an editable field on the zones page
+  ("Window"); it now carries a `min` attribute and a hint explaining the
+  relationship, because an operator who can type one half of a pair can
+  misconfigure the pair. The bench preset
+  (`tools/PcTools/config_presets/bench_fixture.json`) pins both halves
+  explicitly rather than leaving either at 0, and `test_config_presets.py`
+  asserts the preset satisfies the same rule the firmware enforces — a preset
+  that did not would be rejected on apply, which is a worse way to find out.
+
+  New tests, each negative-tested: `test_heater_output.c` pins the predicate,
+  reproduces the 2000 ms window rendering duty 0.4 as zero relay transitions
+  across ten whole windows, and shows a 30 s window rendering that same duty
+  as a real 12 s-on / 18 s-off cycle. `test_zones_http.c` covers the three
+  config gates including the on-load raise computing its bound from the raised
+  min-on.
 
 PID form: positional, derivative-on-measurement (not on-error — a profile's
 ramp steps the setpoint every tick, and derivative-on-error would spike on

@@ -1377,7 +1377,7 @@ typedef enum {
  * in-RAM value is what heater_output_duty() and GET both see, and that is
  * the property that matters. Zero is left alone -- 0 means "not configured",
  * and the default it selects is the floor already. */
-static void raise_min_on_to_floor(zones_cfg_t *cfg)
+static void raise_heater_timing_to_floors(zones_cfg_t *cfg)
 {
     for (size_t zi = 0; zi < sizeof(cfg->zones) / sizeof(cfg->zones[0]); ++zi) {
         float v = cfg->zones[zi].heater_min_on_ms;
@@ -1386,6 +1386,23 @@ static void raise_min_on_to_floor(zones_cfg_t *cfg)
                           "floor -- raising it (stored config predates the floor)",
                      (unsigned)zi, (double)v, (double)ZONE_HEATER_MIN_ON_MS_FLOOR);
             cfg->zones[zi].heater_min_on_ms = ZONE_HEATER_MIN_ON_MS_FLOOR;
+        }
+        /* Then the window, against the min_on just settled above. Same
+         * round-trip argument, and one more reason of its own: a stored
+         * window this short does not merely read back a number the kiln is
+         * not using, it makes the zone unable to heat at any duty under
+         * ~1.0 (2026-08-29, found on this bench's zone 0 at 2000 ms). Order
+         * matters -- the required window is computed from the raised
+         * min_on, never the sub-floor one. */
+        float w = cfg->zones[zi].heater_window_ms;
+        float need = zone_required_window_ms(cfg->zones[zi].heater_min_on_ms);
+        if (isfinite(w) && w > 0.0f && w < need) {
+            ESP_LOGW(TAG, "zone %u heater_window_ms %.0f ms is shorter than %.0f ms (%.0fx its "
+                          "%.0f ms minimum on-time) -- raising it; no fractional duty could be "
+                          "rendered in a window that short",
+                     (unsigned)zi, (double)w, (double)need, (double)ZONE_HEATER_WINDOW_MIN_MULTIPLE,
+                     (double)cfg->zones[zi].heater_min_on_ms);
+            cfg->zones[zi].heater_window_ms = need;
         }
     }
 }
@@ -1462,7 +1479,7 @@ static zones_decode_result_t decode_zones_blob(const void *blob, size_t len, zon
      * kiln-config slot can be refused for a number no operator ever typed,
      * while a number an operator DOES type still goes through
      * parse_zone_fields()'s refusal. */
-    raise_min_on_to_floor(out);
+    raise_heater_timing_to_floors(out);
 
     const char *validate_reason = "invalid stored config";
     if (!validate_zones_cfg(out, &validate_reason)) {
@@ -2533,6 +2550,12 @@ bool zones_config_set_heater_cfg(uint8_t zone_index, float window_ms, float min_
     if (!isfinite(min_off_ms) || min_off_ms < 0.0f || min_off_ms > ZONE_HEATER_MIN_ON_OFF_MS_MAX) {
         return false;
     }
+    /* Window-vs-min-on relationship, same disjoint rule parse_zone_fields()
+     * enforces. This setter is the door backup import comes through, and a
+     * backup written before 2026-08-29 can easily carry a 2000 ms window. */
+    if (window_ms > 0.0f && window_ms < zone_required_window_ms(min_on_ms)) {
+        return false;
+    }
     zone_cfg_t *z = &s_zones.cfg.zones[zone_index];
     z->heater_window_ms = window_ms;
     z->heater_min_on_ms = min_on_ms;
@@ -2978,6 +3001,10 @@ static bool validate_zones_cfg(const zones_cfg_t *cand, const char **err_reason)
         if (!isfinite(z->heater_min_off_ms) || z->heater_min_off_ms < 0.0f ||
             z->heater_min_off_ms > ZONE_HEATER_MIN_ON_OFF_MS_MAX) {
             *err_reason = "zone heater_min_off_ms out of range";
+            return false;
+        }
+        if (z->heater_window_ms > 0.0f && z->heater_window_ms < zone_required_window_ms(z->heater_min_on_ms)) {
+            *err_reason = "zone heater_window_ms shorter than 3x its heater_min_on_ms";
             return false;
         }
         if (!isfinite(z->guard_wrong_dir_window_s) || z->guard_wrong_dir_window_s < 0.0f ||
@@ -3674,6 +3701,17 @@ static bool parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_count,
      * rather than quietly raised. */
     if (z->heater_min_on_ms > 0.0f && z->heater_min_on_ms < ZONE_HEATER_MIN_ON_MS_FLOOR) {
         *err_reason = "zone heater_min_on_ms below the 10000 ms relay-protection floor "
+                      "(use 0 for the firmware default)";
+        return false;
+    }
+    /* The window-vs-min-on RELATIONSHIP (2026-08-29). Checked here, after
+     * both fields are parsed, because it is the only check in this function
+     * that needs two of them at once. A window that passes its own range but
+     * fails this cannot render a fractional duty at all -- see
+     * ZONE_HEATER_WINDOW_MIN_MULTIPLE in zones_http.h. */
+    if (z->heater_window_ms > 0.0f && z->heater_window_ms < zone_required_window_ms(z->heater_min_on_ms)) {
+        *err_reason = "zone heater_window_ms too short for its heater_min_on_ms: the window must be at "
+                      "least 3x the minimum on-time or no fractional duty can be rendered "
                       "(use 0 for the firmware default)";
         return false;
     }

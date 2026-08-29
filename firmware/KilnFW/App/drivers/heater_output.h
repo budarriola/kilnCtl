@@ -48,6 +48,36 @@ extern "C" {
  * debounce is the caller's to choose -- this is the PID relay's floor. */
 #define HEATER_MIN_ON_MS_FLOOR 10000u
 
+/* How many times the effective min-on-time the time-proportioning window has
+ * to be before a real fractional duty can be rendered in it (2026-08-29).
+ *
+ * The floor above and window_ms below are not independent numbers, and
+ * treating them as if they were is what broke this board's zone 0. With a
+ * 2000 ms window and the 10 s floor, EVERY on-time a duty could compute --
+ * 0.4*2000 = 800 ms, 0.9*2000 = 1800 ms -- is below the floor, so
+ * heater_output_duty()'s quantization renders every one of them as OFF. The
+ * zone is not a slow proportional controller at that point, it is a dead
+ * one: autotune's step at duty 0.4 commanded heat for 40 minutes and the
+ * relay never closed once. The reverse case is just as bad -- a window only
+ * slightly longer than the floor can express nothing between "off" and
+ * "almost always on".
+ *
+ * The rule enforced at config time is therefore
+ *
+ *     window_ms >= HEATER_MIN_WINDOW_MULTIPLE * max(min_on_ms, floor)
+ *
+ * which is the same thing as saying the smallest duty this zone can render
+ * is 1/HEATER_MIN_WINDOW_MULTIPLE. At 3 that is 0.333: a zone can always
+ * express roughly a third, two thirds and full duty, which is enough
+ * resolution for a PID loop and for an autotune step to produce a real
+ * thermal response. Below 3 the controller degenerates towards bang-bang
+ * without anything telling the operator it has.
+ *
+ * 3 is a practical floor, not a control-theory optimum. Real windows are
+ * much longer than the minimum it implies -- HEATER_DEFAULT_WINDOW_MS is
+ * 60 s against a 10 s floor, a ratio of 6, giving duty steps of ~0.17. */
+#define HEATER_MIN_WINDOW_MULTIPLE 3u
+
 /* Firmware defaults used when a zone has no per-zone heater timing
  * configured (0 = not configured). Single home for the values that
  * profile_executor.c and autotune_engine.c both substitute. */
@@ -118,6 +148,23 @@ bool heater_output_bangbang(heater_output_state_t *state, const heater_output_cf
  * Returns the relay state to actually command this tick. */
 bool heater_output_duty(heater_output_state_t *state, const heater_output_cfg_t *cfg, float duty,
                         uint32_t dt_ms);
+
+/* The shortest window_ms that can render a real fractional duty against the
+ * given configured min_on_ms: HEATER_MIN_WINDOW_MULTIPLE * the EFFECTIVE
+ * min-on, i.e. max(min_on_ms, HEATER_MIN_ON_MS_FLOOR). Config validation
+ * (zones_http.c) and the on-load raise both compute the bound from here so
+ * there is one definition of it. */
+uint32_t heater_output_required_window_ms(uint32_t min_on_ms);
+
+/* False when cfg->window_ms is non-zero but shorter than
+ * heater_output_required_window_ms(cfg->min_on_ms) -- i.e. this zone cannot
+ * express a real fractional duty and heater_output_duty() will only ever
+ * render all-or-nothing on it. Defense in depth behind the config-layer
+ * refusal: a caller that builds a heater_output_cfg_t from somewhere
+ * zones_http.c does not police can check this and say so, rather than
+ * silently running a bang-bang controller an operator asked to be a PID one.
+ * A window_ms of 0 is "caller substitutes the default" and reports true. */
+bool heater_output_cfg_expressible(const heater_output_cfg_t *cfg);
 
 /* TODO.md 6A.5's load-staggering item: call once right after
  * heater_output_reset(), before the first heater_output_duty() call, to

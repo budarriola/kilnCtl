@@ -539,7 +539,7 @@ static zone_cfg_t make_stored_zone(void)
     z.control_mode = 2;
     z.max_temp_c = 1300.0f;
     z.min_temp_c = -10.0f;
-    z.heater_window_ms = 2000.0f;
+    z.heater_window_ms = 60000.0f;
     z.heater_min_on_ms = 100.0f;
     z.heater_min_off_ms = 100.0f;
     z.cross_zone_max_delta_c = 40.0f;
@@ -567,7 +567,7 @@ static void test_out_of_range_zone_preserves_stored_fields(void)
     // thermo_count set to 1.
     const char *body = "z0_name=Top&z0_tctype=2&z0_relay_mask=1&z0_thermo_mask=1&"
                         "z0_cal=0&z0_kp=1&z0_ki=0&z0_kd=0&z0_ramp=100&z0_sanity=0&z0_mode=0&"
-                        "z0_maxtemp=1300&z0_mintemp=-20&z0_window=1000&z0_minon=0&z0_minoff=0";
+                        "z0_maxtemp=1300&z0_mintemp=-20&z0_window=60000&z0_minon=0&z0_minoff=0";
 
     const uint8_t thermo_count = 1; // zone index 1 is past this -- the defect's exact trigger
     const uint8_t relay_count = 4;
@@ -620,7 +620,7 @@ static void test_in_range_zone_thermo_mask_legacy_fallback_unchanged(void)
     // No z0_thermo_mask key at all, but zone 0 IS in range (thermo_count=2).
     const char *body = "z0_name=Top&z0_tctype=2&z0_relay_mask=1&z0_timingprofile=0&"
                         "z0_cal=0&z0_kp=1&z0_ki=0&z0_kd=0&z0_ramp=100&z0_sanity=0&z0_mode=0&"
-                        "z0_maxtemp=1300&z0_mintemp=-20&z0_window=1000&z0_minon=0&z0_minoff=0";
+                        "z0_maxtemp=1300&z0_mintemp=-20&z0_window=60000&z0_minon=0&z0_minoff=0";
     const char *err_reason = "unset";
     bool ok = parse_zone_fields(body, /*i=*/0, /*thermo_count=*/2, /*relay_count=*/4,
                                 /*timing_profile_count=*/1, &current, &out, &err_reason);
@@ -3523,7 +3523,7 @@ static void test_zone_sweep_push_k_ct_backout_restores_the_uncommissioned_zero(v
 // test_heater_output.c's and stays there as defense in depth):
 //   1. parse_zone_fields()  -- the POST /api/zones door an operator types at;
 //   2. validate_zones_cfg() -- every stored or imported blob;
-//   3. raise_min_on_to_floor(), via decode_zones_blob() -- a pre-floor stored
+//   3. raise_heater_timing_to_floors(), via decode_zones_blob() -- a pre-floor stored
 //      value is raised on load, so a GET can never report a number the very
 //      next POST would bounce.
 //
@@ -3662,6 +3662,166 @@ static void test_stored_pre_floor_blob_is_raised_on_load_not_rejected(void)
                     "a longer configured value is untouched by the raise");
 }
 
+// ---------------------------------------------------------------------------
+// heater_window_ms vs heater_min_on_ms (2026-08-29).
+//
+// The relationship, not either number. This bench's zone 0 carried
+// window=2000 ms with the 10 s min-on floor: both values passed their own
+// range checks, and together they made the zone incapable of rendering ANY
+// fractional duty -- 0.4*2000 = 800 ms is under the floor, so
+// heater_output_duty() quantized every window to OFF. An autotune step at
+// duty 0.4 commanded heat for 40 minutes and never closed the relay once.
+//
+// Enforced the same four places the min-on floor is (refuse at the POST door,
+// refuse in the setter backup import uses, refuse in validate_zones_cfg(),
+// raise on load), with heater_output_cfg_expressible() as the point-of-use
+// check. These tests negative-test the rule at each door -- a check nothing
+// can fail is not a check.
+// ---------------------------------------------------------------------------
+
+static float s_last_parsed_window = -1.0f;
+
+static bool post_body_with_window(const char *window_literal, const char *minon_literal,
+                                  const char **err_reason_out)
+{
+    char body[512];
+    snprintf(body, sizeof(body),
+             "z0_name=Top&z0_tctype=2&z0_relay_mask=1&z0_thermo_mask=1&"
+             "z0_cal=0&z0_kp=1&z0_ki=0&z0_kd=0&z0_ramp=100&z0_sanity=0&z0_mode=0&"
+             "z0_maxtemp=1300&z0_mintemp=-20&z0_window=%s&z0_minon=%s&z0_minoff=2000&"
+             "z0_timingprofile=0",
+             window_literal, minon_literal);
+
+    zone_cfg_t current = make_stored_zone();
+    zone_cfg_t out;
+    memset(&out, 0, sizeof(out));
+    const char *err_reason = "unset";
+    bool ok = parse_zone_fields(body, /*i=*/0, /*thermo_count=*/1, /*relay_count=*/4,
+                                /*timing_profile_count=*/1, &current, &out, &err_reason);
+    if (err_reason_out) {
+        *err_reason_out = err_reason;
+    }
+    s_last_parsed_window = ok ? out.heater_window_ms : -1.0f;
+    return ok;
+}
+
+static void test_post_window_too_short_for_min_on_is_refused(void)
+{
+    TEST_SECTION("parse_zone_fields -- heater_window_ms shorter than 3x the min-on is REFUSED");
+
+    const char *reason = "unset";
+
+    /* The exact configuration that was on this bench. */
+    TEST_CHECK(!post_body_with_window("2000", "0", &reason),
+               "the bench's own window=2000 with the default 10 s min-on must now be refused");
+    TEST_CHECK(reason && strstr(reason, "heater_window_ms") != NULL,
+               "the refusal names the field, so the page can point at it");
+    TEST_CHECK(reason && strstr(reason, "min") != NULL,
+               "the refusal explains it is about the minimum on-time, not a plain range");
+
+    /* One millisecond under the bound: catches a >= written as a >. */
+    TEST_CHECK(!post_body_with_window("29999", "0", &reason),
+               "29999 ms -- one under 3x the 10 s floor -- is refused too");
+
+    /* The bound tracks the ZONE's own min_on, it is not the constant 30000.
+     * With min_on=20000 the requirement is 60000, so 45000 must fail even
+     * though it comfortably clears the default-case bound. */
+    TEST_CHECK(!post_body_with_window("45000", "20000", &reason),
+               "the bound is 3x THIS zone's min-on (60000), not a fixed 30000");
+}
+
+static void test_post_window_at_or_above_the_bound_is_accepted_exactly(void)
+{
+    TEST_SECTION("parse_zone_fields -- a window at or above 3x the min-on is accepted, unaltered");
+
+    const char *reason = "unset";
+
+    TEST_CHECK(post_body_with_window("30000", "0", &reason),
+               "exactly 3x the 10 s floor is accepted -- the boundary is inclusive");
+    TEST_CHECK_NEAR(s_last_parsed_window, 30000.0f, 1e-6, "30000 round-trips exactly, not raised");
+
+    TEST_CHECK(post_body_with_window("60000", "0", &reason),
+               "the 60 s firmware default is accepted");
+    TEST_CHECK_NEAR(s_last_parsed_window, 60000.0f, 1e-6, "60000 is honored exactly");
+
+    TEST_CHECK(post_body_with_window("0", "0", &reason),
+               "0 means 'not configured' and stays accepted -- the default it selects satisfies the rule");
+    TEST_CHECK_NEAR(s_last_parsed_window, 0.0f, 1e-6,
+                    "0 stays 0 -- 'use the default' must stay distinguishable from 'chose 60000'");
+
+    TEST_CHECK(post_body_with_window("60000", "20000", &reason),
+               "a longer min-on with a window that still clears 3x it is accepted");
+}
+
+static void test_setter_and_validate_reject_short_window(void)
+{
+    TEST_SECTION("zones_config_set_heater_cfg / validate_zones_cfg -- the non-HTTP doors refuse too");
+
+    {
+        zones_cfg_t cfg;
+        make_minimal_valid_cfg(&cfg);
+        cfg.zones[0].heater_window_ms = 2000.0f;
+        cfg.zones[0].heater_min_on_ms = 0.0f;
+        const char *reason = NULL;
+        TEST_CHECK(!validate_zones_cfg(&cfg, &reason),
+                   "a stored/imported config with a 2000 ms window does not validate");
+        TEST_CHECK(reason && strstr(reason, "heater_window_ms") != NULL, "the reason names the field");
+    }
+    {
+        zones_cfg_t cfg;
+        make_minimal_valid_cfg(&cfg);
+        cfg.zones[0].heater_window_ms = 30000.0f;
+        cfg.zones[0].heater_min_on_ms = 0.0f;
+        const char *reason = NULL;
+        TEST_CHECK(validate_zones_cfg(&cfg, &reason),
+                   "30000 still validates -- the check must not reject everything");
+    }
+    /* The setter backup import comes through. Its refusal is the reason a
+     * restore of a pre-2026-08-29 backup cannot re-install the trap. */
+    TEST_CHECK(!zones_config_set_heater_cfg(0, 2000.0f, 0.0f, 2000.0f),
+               "zones_config_set_heater_cfg refuses a 2000 ms window -- backup import's door");
+    TEST_CHECK(!zones_config_set_heater_cfg(0, 45000.0f, 20000.0f, 2000.0f),
+               "and it computes the bound from the min_on it was handed, not a constant");
+}
+
+static void test_stored_short_window_is_raised_on_load(void)
+{
+    TEST_SECTION("decode_zones_blob -- a stored too-short heater_window_ms is RAISED on load");
+
+    /* Exactly this bench's flash. Rejecting the blob would wipe the board's
+     * whole config on the next boot; reporting 2000 verbatim would make the
+     * next whole-page save fail on a number the operator never typed. */
+    zones_cfg_t stored;
+    make_minimal_valid_cfg(&stored);
+    stored.zones[0].heater_window_ms = 2000.0f;
+    stored.zones[0].heater_min_on_ms = 0.0f;
+    stored.zones[1].heater_window_ms = 0.0f;
+    stored.zones[1].heater_min_on_ms = 0.0f;
+    /* min_on itself sub-floor: the window bound must be computed from the
+     * RAISED min_on (10000 -> needs 30000), not the stored 2000. */
+    stored.zones[2].heater_window_ms = 20000.0f;
+    stored.zones[2].heater_min_on_ms = 2000.0f;
+    stored.crc32 = 0;
+    stored.crc32 = compute_zones_crc(&stored);
+
+    zones_cfg_t out;
+    const char *reason = "unset";
+    zones_decode_result_t r = decode_zones_blob(&stored, sizeof(stored), &out, &reason);
+
+    TEST_CHECK(r == ZONES_DECODE_OK, "the blob still decodes -- it must not be called corrupt");
+    TEST_CHECK_NEAR(out.zones[0].heater_window_ms, 30000.0f, 1e-6,
+                    "2000 ms is raised to 3x the 10 s floor on load");
+    TEST_CHECK_NEAR(out.zones[1].heater_window_ms, 0.0f, 1e-6,
+                    "0 ('not configured') is left alone");
+    TEST_CHECK_NEAR(out.zones[2].heater_min_on_ms, 10000.0f, 1e-6, "min_on raised first");
+    TEST_CHECK_NEAR(out.zones[2].heater_window_ms, 30000.0f, 1e-6,
+                    "and the window bound is computed from the RAISED min_on, not the stored 2000");
+
+    /* And what came out must now pass the very validation that rejects the
+     * input -- the whole point of raising rather than refusing at load. */
+    TEST_CHECK(validate_zones_cfg(&out, &reason), "the raised config validates");
+}
+
 /* ------------------------------------------------------------------------
  * sanity_rate_c_per_min -- thermal_guard.c guard 1's minimum rise rate, the
  * dead-element check, editable per zone on the Zones page as z%u_sanity.
@@ -3793,6 +3953,10 @@ void run_test_zones_http(void)
     test_post_minon_below_floor_is_refused();
     test_post_minon_zero_and_at_or_above_floor_are_accepted();
     test_validate_rejects_sub_floor_min_on();
+    test_post_window_too_short_for_min_on_is_refused();
+    test_post_window_at_or_above_the_bound_is_accepted_exactly();
+    test_setter_and_validate_reject_short_window();
+    test_stored_short_window_is_raised_on_load();
     test_stored_pre_floor_blob_is_raised_on_load_not_rejected();
 
     test_relay_name_get_set_round_trip();

@@ -62,13 +62,17 @@ bool heater_output_duty(heater_output_state_t *state, const heater_output_cfg_t 
         min_on_ms = HEATER_MIN_ON_MS_FLOOR;
     }
     /* A window shorter than the floor is a configuration the two constraints
-     * cannot both satisfy inside one window. Rather than silently refusing to
-     * heat at all -- which is what an un-clamped floor would do to a window
-     * of, say, 4 s, since no on-time in it could ever reach 10 s -- the
-     * quantization uses at most the window length, so a high duty still
-     * renders as a full-window ON. The running hold below then keeps that ON
-     * across as many consecutive windows as it takes to reach 10 s, so the
-     * floor is honoured even though the window alone cannot express it. */
+     * cannot both satisfy inside one window. Since 2026-08-29 the config
+     * layer refuses to store one (window_ms >= HEATER_MIN_WINDOW_MULTIPLE *
+     * effective min_on -- see heater_output_cfg_expressible() and
+     * ZONE_HEATER_WINDOW_MIN_MULTIPLE in zones_http.h), so this branch is
+     * unreachable from any policed path and exists only so a cfg built
+     * outside that policing still behaves predictably rather than
+     * unpredictably: the quantization uses at most the window length, so a
+     * high duty renders as a full-window ON and the running hold below keeps
+     * it ON across as many consecutive windows as it takes to reach 10 s.
+     * What it CANNOT do is render a low duty -- that is the degradation the
+     * config-layer rule now prevents rather than papers over. */
     if (min_on_ms > cfg->window_ms) {
         min_on_ms = cfg->window_ms;
     }
@@ -132,4 +136,18 @@ void heater_output_force_off(heater_output_state_t *state)
     state->last_commanded_on = false;
     state->since_last_change_ms = 0;
     state->on_elapsed_ms = 0;
+}
+
+uint32_t heater_output_required_window_ms(uint32_t min_on_ms)
+{
+    uint32_t effective = (min_on_ms < HEATER_MIN_ON_MS_FLOOR) ? HEATER_MIN_ON_MS_FLOOR : min_on_ms;
+    return effective * HEATER_MIN_WINDOW_MULTIPLE;
+}
+
+bool heater_output_cfg_expressible(const heater_output_cfg_t *cfg)
+{
+    if (!cfg || cfg->window_ms == 0) {
+        return true; /* 0 = caller substitutes HEATER_DEFAULT_WINDOW_MS */
+    }
+    return cfg->window_ms >= heater_output_required_window_ms(cfg->min_on_ms);
 }

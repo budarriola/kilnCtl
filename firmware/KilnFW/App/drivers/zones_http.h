@@ -166,9 +166,46 @@ extern "C" {
  * this check guards the HTTP door, not the only door (backup import, an older
  * NVS blob written before the floor existed, a future caller of
  * zones_config_set_heater_cfg()). Stored blobs written before 2026-08-28 are
- * raised to the floor on load -- see raise_min_on_to_floor() in zones_http.c
+ * raised to the floor on load -- see raise_heater_timing_to_floors() in zones_http.c
  * -- so a GET never reports a sub-floor value that a POST would then bounce. */
 #define ZONE_HEATER_MIN_ON_MS_FLOOR ((float)HEATER_MIN_ON_MS_FLOOR)
+
+/* heater_window_ms's lower bound, and the second of this file's two
+ * disjoint-set heater rules (2026-08-29). Accepted values are 0 ("not
+ * configured" -- the caller substitutes HEATER_DEFAULT_WINDOW_MS, 60 s,
+ * which satisfies the rule) or anything from
+ *
+ *     ZONE_HEATER_WINDOW_MIN_MULTIPLE * max(heater_min_on_ms, floor)
+ *
+ * up to ZONE_HEATER_WINDOW_MS_MAX. Unlike every other bound in this file
+ * this one is not a constant: it depends on the SAME zone's
+ * heater_min_on_ms, because what it protects is the relationship between
+ * the two, not either number on its own.
+ *
+ * Why it exists: a window shorter than the min-on floor cannot express any
+ * fractional duty at all -- see HEATER_MIN_WINDOW_MULTIPLE in
+ * heater_output.h for the zone-0 failure that produced this rule. Both
+ * numbers were individually inside their own ranges and individually
+ * sensible; only their ratio was wrong, which is exactly the class of
+ * mistake a per-field range check cannot catch.
+ *
+ * Enforced the same four places heater_min_on_ms's floor is: refused by
+ * parse_zone_fields() (HTTP), refused by zones_config_set_heater_cfg()
+ * (backup import and any other non-HTTP door), refused by
+ * validate_zones_cfg(), and RAISED on load by raise_heater_timing_to_floors()
+ * so a board configured before this rule existed still round-trips a GET
+ * into a POST. heater_output_cfg_expressible() is the point-of-use check
+ * behind all of them. */
+#define ZONE_HEATER_WINDOW_MIN_MULTIPLE ((float)HEATER_MIN_WINDOW_MULTIPLE)
+
+/* The smallest heater_window_ms acceptable for a zone whose heater_min_on_ms
+ * is min_on_ms (0 = not configured, i.e. the floor). Mirrors
+ * heater_output_required_window_ms() in float. */
+static inline float zone_required_window_ms(float min_on_ms)
+{
+    float effective = (min_on_ms > ZONE_HEATER_MIN_ON_MS_FLOOR) ? min_on_ms : ZONE_HEATER_MIN_ON_MS_FLOOR;
+    return effective * ZONE_HEATER_WINDOW_MIN_MULTIPLE;
+}
 
 /* zone_cfg_t's 8 named guard-threshold overrides (TODO.md 6A.3) -- 0
  * substitutes thermal_guard.c's own firmware default for every one of these,

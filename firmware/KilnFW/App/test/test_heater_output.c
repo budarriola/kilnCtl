@@ -222,4 +222,78 @@ void run_test_heater_output(void)
         TEST_CHECK(r == false, "a 4000ms on-time is below the 10s floor even though cfg->min_on_ms is 100");
         TEST_CHECK(s.on_ms_this_window == 0, "sub-floor on-time renders as OFF for the window, not rounded up");
     }
+
+    /* ------------------------------------------------------------------
+     * The window-vs-min-on relationship (2026-08-29).
+     *
+     * This board's zone 0 was configured window_ms=2000 against the 10 s
+     * floor. Both numbers were inside their own ranges; together they made
+     * every fractional duty unrenderable, and an autotune step at duty 0.4
+     * commanded heat for 40 minutes without the relay ever closing. The
+     * config layer now refuses that pairing; these cases pin down both the
+     * predicate it uses and the behaviour it protects.
+     * ------------------------------------------------------------------ */
+
+    /* The predicate. Negative-tested first -- a check nothing can fail is
+     * not a check. */
+    {
+        TEST_CHECK(heater_output_required_window_ms(0) == 30000u,
+                   "an unconfigured min_on uses the 10 s floor: required window is 30000 ms");
+        TEST_CHECK(heater_output_required_window_ms(2000) == 30000u,
+                   "a sub-floor min_on is raised before the multiple is applied, not multiplied as-is");
+        TEST_CHECK(heater_output_required_window_ms(20000) == 60000u,
+                   "the bound tracks a longer configured min_on -- it is not the constant 30000");
+
+        heater_output_cfg_t bad = {.window_ms = 2000, .min_on_ms = 0, .min_off_ms = 100};
+        TEST_CHECK(!heater_output_cfg_expressible(&bad),
+                   "the bench's own 2000 ms window is reported unexpressible");
+        heater_output_cfg_t edge_lo = {.window_ms = 29999, .min_on_ms = 0, .min_off_ms = 100};
+        TEST_CHECK(!heater_output_cfg_expressible(&edge_lo),
+                   "one millisecond under the bound still fails -- catches a > written for a >=");
+        heater_output_cfg_t edge_ok = {.window_ms = 30000, .min_on_ms = 0, .min_off_ms = 100};
+        TEST_CHECK(heater_output_cfg_expressible(&edge_ok), "exactly the bound passes: inclusive");
+        heater_output_cfg_t deflt = {.window_ms = 0, .min_on_ms = 0, .min_off_ms = 0};
+        TEST_CHECK(heater_output_cfg_expressible(&deflt),
+                   "window_ms 0 means 'caller substitutes the 60 s default', which satisfies the rule");
+        heater_output_cfg_t long_on = {.window_ms = 45000, .min_on_ms = 20000, .min_off_ms = 100};
+        TEST_CHECK(!heater_output_cfg_expressible(&long_on),
+                   "45 s against a 20 s min-on fails -- the bound is 3x THIS cfg's min-on");
+    }
+
+    /* The behaviour the rule protects: the bench's broken pairing renders a
+     * real commanded duty as nothing at all. This is the bug, pinned. */
+    {
+        heater_output_state_t s = {0};
+        heater_output_cfg_t cfg = {.window_ms = 2000, .min_on_ms = 0, .min_off_ms = 100};
+        heater_output_reset(&s);
+        bool ever_on = false;
+        for (int i = 0; i < 100; ++i) { /* 20 s of ticks, ten whole windows */
+            ever_on |= heater_output_duty(&s, &cfg, 0.4f, 200);
+        }
+        TEST_CHECK(!ever_on,
+                   "duty 0.4 in a 2000 ms window never closes the relay -- the zone-0 defect, reproduced");
+        TEST_CHECK(s.cycle_count == 0, "not one relay transition in ten windows of commanded heat");
+    }
+
+    /* And a correctly sized window renders that same duty as a real
+     * fractional on-time: ~12 s on, ~18 s off in a 30 s window. */
+    {
+        heater_output_state_t s = {0};
+        heater_output_cfg_t cfg = {.window_ms = 30000, .min_on_ms = 0, .min_off_ms = 100};
+        heater_output_reset(&s);
+        TEST_CHECK(heater_output_cfg_expressible(&cfg), "sanity: this cfg satisfies the rule");
+
+        uint32_t on_ticks = 0;
+        for (int i = 0; i < 300; ++i) { /* 30 s at 100 ms, exactly one window */
+            if (heater_output_duty(&s, &cfg, 0.4f, 100)) {
+                on_ticks++;
+            }
+        }
+        TEST_CHECK(s.on_ms_this_window == 12000u,
+                   "0.4 * 30000 = 12000 ms of on-time is computed for the window, not quantized to 0");
+        TEST_CHECK(on_ticks == 120u, "and 120 of the 300 ticks are actually energized: 12 s on, 18 s off");
+        TEST_CHECK(on_ticks * 100u > HEATER_MIN_ON_MS_FLOOR,
+                   "the rendered pulse clears the 10 s floor, which is the whole point of the 3x rule");
+        TEST_CHECK(s.cycle_count == 2, "one ON and one OFF transition -- a real duty cycle, not bang-bang");
+    }
 }
