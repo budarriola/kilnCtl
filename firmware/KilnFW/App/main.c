@@ -20,6 +20,7 @@
 #include "board_temps.h"
 #include "boot_button.h"
 #include "danger_mode.h"
+#include "heat_enable.h"
 #include "boot_guard.h"
 #include "watchdog_cfg.h"
 #include "crash_report.h"
@@ -986,6 +987,16 @@ void app_main(void)
     // start() already relies on: danger_mode_request_start() only reads
     // profile_executor_get_status(), which answers cleanly pre-start.
     danger_mode_init(&safety);
+
+    // heat_enable (heat_enable.h): the shared, refcounted holder of the
+    // SAFETY_CMD_REQUEST_ENABLE request that profile_executor.c and
+    // autotune_engine.c now make on every real run -- the fix for both of
+    // them having never made it at all, so a firing closed K1 and left K4
+    // open. Same handle and the same "valid even when safety_err != ESP_OK"
+    // reasoning as danger_mode_init() immediately above, and for the same
+    // reason it must run before anything that can start a firing or an
+    // autotune (profile_executor_start()/autotune_engine_start(), below).
+    heat_enable_init(&safety);
 
     // kiln_io_owner (TODO.md 10.14 Phase 1): the single task that writes
     // relay/expander state from here on -- must start before anything that

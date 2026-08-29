@@ -41,6 +41,7 @@ $sources = @(
     (Join-Path $testDir "test_ota_auth.c"),
     (Join-Path $testDir "test_ota_interlock.c"),
     (Join-Path $testDir "test_heat_interlock.c"),
+    (Join-Path $testDir "test_heat_enable.c"),
     (Join-Path $testDir "test_thermo_combine.c"),
     (Join-Path $testDir "test_profile_feasibility.c"),
     (Join-Path $testDir "test_profile_plan_curve.c"),
@@ -72,6 +73,7 @@ $sources = @(
     (Join-Path $driversDir "ota_interlock.c"),
     (Join-Path $driversDir "ota_record.c"),
     (Join-Path $driversDir "heat_interlock.c"),
+    (Join-Path $driversDir "heat_enable.c"),
     (Join-Path $driversDir "thermo_combine.c"),
     (Join-Path $driversDir "profile_feasibility.c"),
     (Join-Path $driversDir "ui_page_home_graph.c"),
@@ -171,7 +173,8 @@ $cmd4 = "call `"$vcvars`" x64 >nul && cl /nologo /W3 /EHsc /I`"$stubDir`" /I`"$c
         "/Fo:`"$peObjDir\\`" /Fe:`"$exe4`" " +
         "`"$(Join-Path $testDir 'test_profile_executor_prestart.c')`" " +
         "`"$(Join-Path $driversDir 'pid.c')`" `"$(Join-Path $driversDir 'thermal_guard.c')`" " +
-        "`"$(Join-Path $driversDir 'heater_output.c')`" `"$(Join-Path $driversDir 'thermo_combine.c')`""
+        "`"$(Join-Path $driversDir 'heater_output.c')`" `"$(Join-Path $driversDir 'thermo_combine.c')`" " +
+        "`"$(Join-Path $driversDir 'heat_enable.c')`""
 
 cmd.exe /c $cmd4
 if ($LASTEXITCODE -ne 0) {
@@ -195,7 +198,8 @@ $cmd5 = "call `"$vcvars`" x64 >nul && cl /nologo /W3 /EHsc /I`"$stubDir`" /I`"$c
         "/Fo:`"$aeObjDir\\`" /Fe:`"$exe5`" " +
         "`"$(Join-Path $testDir 'test_autotune_engine_prestart.c')`" " +
         "`"$(Join-Path $driversDir 'thermal_guard.c')`" `"$(Join-Path $driversDir 'heater_output.c')`" " +
-        "`"$(Join-Path $driversDir 'thermo_combine.c')`" `"$(Join-Path $driversDir 'pid_autotune.c')`""
+        "`"$(Join-Path $driversDir 'thermo_combine.c')`" `"$(Join-Path $driversDir 'pid_autotune.c')`" " +
+        "`"$(Join-Path $driversDir 'heat_enable.c')`""
 
 cmd.exe /c $cmd5
 if ($LASTEXITCODE -ne 0) {

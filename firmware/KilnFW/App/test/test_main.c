@@ -16,6 +16,7 @@ void run_test_sim_kiln(void);
 void run_test_ota_auth(void);
 void run_test_ota_interlock(void);
 void run_test_heat_interlock(void);
+void run_test_heat_enable(void);
 void run_test_thermo_combine(void);
 void run_test_profile_feasibility(void);
 void run_test_profile_plan_curve(void);
@@ -59,6 +60,7 @@ int main(void)
     run_test_ota_auth();
     run_test_ota_interlock();
     run_test_heat_interlock();
+    run_test_heat_enable();
     run_test_thermo_combine();
     run_test_profile_feasibility();
     run_test_profile_plan_curve();
