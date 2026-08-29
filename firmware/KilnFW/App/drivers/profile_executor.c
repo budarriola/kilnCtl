@@ -46,9 +46,9 @@ static const char *TAG = "profile_executor";
  * hasn't configured its own via zones_config_get_heater_cfg() (6A.9). 60s
  * matches the doc's "mechanical relay" default (the open question about SSR
  * vs. direct element drive is still open per TODO.md 6A.0). */
-#define HEATER_WINDOW_MS 60000u
-#define HEATER_MIN_ON_MS 2000u
-#define HEATER_MIN_OFF_MS 2000u
+#define HEATER_WINDOW_MS HEATER_DEFAULT_WINDOW_MS
+#define HEATER_MIN_ON_MS HEATER_DEFAULT_MIN_ON_MS
+#define HEATER_MIN_OFF_MS HEATER_DEFAULT_MIN_OFF_MS
 
 /* PID defaults (TODO.md 6A.2) -- not yet per-zone/per-band configurable
  * beyond Kp/Ki/Kd themselves. Gain scheduling by temperature band (6A.4) is

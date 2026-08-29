@@ -55,8 +55,30 @@ behind `App/drivers/sim_backend.c` (see below).
   hasn't run or a zone's tuning is bad.
 - **PID** — `pid_update()`'s `u ∈ [0,1]` rendered onto the relay by
   `heater_output_duty()` as a 60s time-proportioning window (default;
-  `HEATER_WINDOW_MS`/`HEATER_MIN_ON_MS`/`HEATER_MIN_OFF_MS` in
-  `profile_executor.c`, not yet per-relay configurable — TODO.md 6A.9).
+  `HEATER_DEFAULT_WINDOW_MS`/`HEATER_DEFAULT_MIN_ON_MS`/
+  `HEATER_DEFAULT_MIN_OFF_MS` in `heater_output.h`, per-zone overridable via
+  `zones_config_set_heater_cfg()` — TODO.md 6A.9).
+
+  **Minimum on-time: 10 s (`HEATER_MIN_ON_MS_FLOOR`, owner request
+  2026-08-28).** Once the PID path energizes the relay it stays energized for
+  at least 10 s. This is a floor, not a default: `heater_output_duty()` raises
+  any smaller configured `min_on_ms` to it, so no per-zone edit, HTTP write or
+  backup import can schedule a shorter on-pulse. It is enforced in two places,
+  because window quantization alone does not cover every case — (1) a window's
+  computed on-time below the floor renders as OFF for that whole window (never
+  rounded up to a minimum pulse, which is how a relay ends up chattering at low
+  demand), and (2) a running hold: once the relay is on, an off decision is
+  deferred until 10 s of *continuous* on-time has accumulated, across window
+  boundaries if the window is shorter than 10 s. A window shorter than the
+  floor is not treated as a config error and does not clamp the zone dead —
+  the quantization uses at most the window length there, so a high duty still
+  renders a full-window ON that the hold then extends to 10 s.
+
+  The floor never applies to a de-energize: every trip, halt, pause and stop
+  goes through `heater_output_force_off()`, which drops the relay on the tick
+  it happens and clears the hold accumulator. Delaying a safety shutoff to
+  protect contact life would trade a safety property for a wear property, and
+  `test_heater_output.c` carries an explicit test for it.
 
 PID form: positional, derivative-on-measurement (not on-error — a profile's
 ramp steps the setpoint every tick, and derivative-on-error would spike on

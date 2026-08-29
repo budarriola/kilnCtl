@@ -40,9 +40,9 @@ static const char *TAG = "autotune_engine";
  * boot says everything a reader needs; the hundredth copy says nothing. */
 #define LOG_PRESTART_ONCE(msg)                                                                       do {                                                                                                  static bool s_warned_once = false;                                                                if (!s_warned_once) {                                                                                 s_warned_once = true;                                                                             ESP_LOGW(TAG, msg " (further occurrences this boot are suppressed)");                         }                                                                                              } while (0)
 
-#define HEATER_WINDOW_MS 60000u
-#define HEATER_MIN_ON_MS 2000u
-#define HEATER_MIN_OFF_MS 2000u
+#define HEATER_WINDOW_MS HEATER_DEFAULT_WINDOW_MS
+#define HEATER_MIN_ON_MS HEATER_DEFAULT_MIN_ON_MS
+#define HEATER_MIN_OFF_MS HEATER_DEFAULT_MIN_OFF_MS
 
 /* "Reached steady state" heuristic for ending STEPPING early (TODO.md 6A.4
  * doesn't mandate a specific detector -- the two-point fit itself is what

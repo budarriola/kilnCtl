@@ -26,8 +26,37 @@
 extern "C" {
 #endif
 
+/* Minimum time the relay must stay energized once the time-proportioned
+ * (PID) path has commanded it ON -- 10 s, set by the owner 2026-08-28.
+ *
+ * This is a FLOOR, not a default: heater_output_duty() raises any
+ * cfg->min_on_ms below it up to it, so no per-zone configuration, backup
+ * import or HTTP edit can schedule an on-pulse shorter than this. It is
+ * enforced twice, because the window quantization alone is not enough:
+ *   1. when a window's on-time is computed, an on-time below the floor
+ *      renders as OFF for that window (the pre-existing min_on_ms rule);
+ *   2. as a running hold -- once the relay is actually ON, an off decision
+ *      is deferred until 10 s of continuous on-time has accumulated. This
+ *      is what covers a window_ms shorter than the floor, and a duty that
+ *      collapses between one window and the next.
+ *
+ * It deliberately does NOT apply to heater_output_force_off(), which is the
+ * path every safety trip, halt, pause and stop uses. A trip must open the
+ * contacts on the tick it happens; delaying a de-energize to protect relay
+ * contacts would trade a safety property for a wear property. Nor does it
+ * apply to heater_output_bangbang(), whose own min_on_ms/min_off_ms
+ * debounce is the caller's to choose -- this is the PID relay's floor. */
+#define HEATER_MIN_ON_MS_FLOOR 10000u
+
+/* Firmware defaults used when a zone has no per-zone heater timing
+ * configured (0 = not configured). Single home for the values that
+ * profile_executor.c and autotune_engine.c both substitute. */
+#define HEATER_DEFAULT_WINDOW_MS  60000u
+#define HEATER_DEFAULT_MIN_ON_MS  HEATER_MIN_ON_MS_FLOOR
+#define HEATER_DEFAULT_MIN_OFF_MS 2000u
+
 typedef struct {
-    /* time-proportioning window; default 60000.
+    /* time-proportioning window; default HEATER_DEFAULT_WINDOW_MS (60000).
      *
      * The old justification for 60 s -- "(mechanical relay)", meaning the
      * on-board relay's contact life -- is WRONG and was retired 2026-08-24.
@@ -47,8 +76,11 @@ typedef struct {
      * already. Revisit once TODO.md 6A.0's downstream question is answered;
      * it is a per-zone setting, so a bench can lower it without a rebuild. */
     uint32_t window_ms;
-    uint32_t min_on_ms;   /* default 2000 */
-    uint32_t min_off_ms;  /* default 2000 */
+    /* Minimum on-time. In heater_output_duty() this is raised to at least
+     * HEATER_MIN_ON_MS_FLOOR (10 s); a smaller configured value has no
+     * effect there. Default HEATER_DEFAULT_MIN_ON_MS. */
+    uint32_t min_on_ms;
+    uint32_t min_off_ms;  /* default HEATER_DEFAULT_MIN_OFF_MS (2000) */
 } heater_output_cfg_t;
 
 typedef struct {
@@ -58,6 +90,7 @@ typedef struct {
     uint32_t on_ms_this_window; /* time-proportioned mode: on-time computed for the current window */
     bool     last_commanded_on; /* bang-bang mode: for min-on/min-off debounce */
     uint32_t since_last_change_ms;
+    uint32_t on_elapsed_ms; /* time-proportioned mode: continuous on-time, for the HEATER_MIN_ON_MS_FLOOR hold */
     uint32_t cycle_count; /* relay ON->OFF or OFF->ON transitions, for contact-life accounting (6A.1) */
 } heater_output_state_t;
 
@@ -78,7 +111,10 @@ bool heater_output_bangbang(heater_output_state_t *state, const heater_output_cf
  * whole window (TODO.md 6A.1 -- not rounded up to min_on_ms, since that is
  * how a relay ends up chattering at low demand) and a computed off-time
  * below min_off_ms (i.e. duty very close to 1) renders as on for the whole
- * window instead. dt_ms is the elapsed time since the previous call.
+ * window instead. The effective min-on is max(cfg->min_on_ms,
+ * HEATER_MIN_ON_MS_FLOOR), and once the relay is on an off decision is
+ * additionally held until HEATER_MIN_ON_MS_FLOOR of continuous on-time has
+ * accumulated. dt_ms is the elapsed time since the previous call.
  * Returns the relay state to actually command this tick. */
 bool heater_output_duty(heater_output_state_t *state, const heater_output_cfg_t *cfg, float duty,
                         uint32_t dt_ms);
@@ -99,7 +135,8 @@ void heater_output_seed_phase(heater_output_state_t *state, uint32_t window_ms, 
 /* Forces the relay off right now (a safety trip, a pause, a stop) and
  * resets window/debounce timing -- the next heater_output_* call after this
  * starts a clean window rather than resuming mid-window against stale
- * timing. Does NOT reset cycle_count (that's a lifetime counter). Counts a
+ * timing. Bypasses HEATER_MIN_ON_MS_FLOOR's hold by design -- a safety
+ * de-energize is never delayed for contact wear. Does NOT reset cycle_count (that's a lifetime counter). Counts a
  * transition if the relay was on. */
 void heater_output_force_off(heater_output_state_t *state);
 

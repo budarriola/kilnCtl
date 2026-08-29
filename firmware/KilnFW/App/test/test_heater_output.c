@@ -147,4 +147,79 @@ void run_test_heater_output(void)
         TEST_CHECK(s.cycle_count == cycles, "reset() preserves the lifetime cycle_count");
         TEST_CHECK(s.relay_on == false, "reset() clears relay_on");
     }
+
+    /* HEATER_MIN_ON_MS_FLOOR (10 s), owner request 2026-08-28. A duty whose
+     * on-time is long enough to start but which then collapses must not
+     * open the contacts before 10 s of continuous on-time. */
+    {
+        heater_output_state_t s = {0};
+        heater_output_cfg_t cfg = {.window_ms = 20000, .min_on_ms = 100, .min_off_ms = 100};
+        heater_output_reset(&s);
+        /* Window 1: duty 0.6 -> 12000ms on, above the floor, so it runs. */
+        bool r = heater_output_duty(&s, &cfg, 0.6f, 0);
+        TEST_CHECK(r == true, "min-on floor: window opens ON at duty 0.6");
+        /* Demand collapses to 0 immediately -- but the window's on-time was
+         * already fixed, so this exercises the running hold at the boundary
+         * of the next window, below. First walk to just under 10 s. */
+        r = heater_output_duty(&s, &cfg, 0.0f, 9999);
+        TEST_CHECK(r == true, "still ON at 9999ms -- inside the 10s floor");
+        r = heater_output_duty(&s, &cfg, 0.0f, 1);
+        TEST_CHECK(r == true, "at exactly 10000ms the window's own 12000ms on-time still holds it ON");
+    }
+
+    /* The case the floor exists for: a window SHORTER than 10 s. A
+     * full-window ON must be held across window boundaries until 10 s. */
+    {
+        heater_output_state_t s = {0};
+        heater_output_cfg_t cfg = {.window_ms = 4000, .min_on_ms = 100, .min_off_ms = 100};
+        heater_output_reset(&s);
+        bool r = heater_output_duty(&s, &cfg, 1.0f, 0);
+        TEST_CHECK(r == true, "4s window at duty 1.0 still heats -- the floor does not clamp the zone dead");
+        TEST_CHECK(s.on_ms_this_window == cfg.window_ms, "short window: on-time is the whole window");
+        /* Demand drops to zero from here on. Window 2 (t=4000) computes an
+         * on-time of 0, so without the running hold the relay would open at
+         * 4000ms -- 6s short of the floor. */
+        r = heater_output_duty(&s, &cfg, 0.0f, 4000);
+        TEST_CHECK(r == true, "held ON across the window boundary at 4000ms -- only 4s of on-time so far");
+        TEST_CHECK(s.on_ms_this_window == 0, "the new window did compute an on-time of 0 -- it is the hold keeping it on");
+        r = heater_output_duty(&s, &cfg, 0.0f, 3000);
+        TEST_CHECK(r == true, "still held at 7000ms of continuous on-time");
+        r = heater_output_duty(&s, &cfg, 0.0f, 2999);
+        TEST_CHECK(r == true, "still held at 9999ms -- one millisecond short of the floor");
+        r = heater_output_duty(&s, &cfg, 0.0f, 1);
+        TEST_CHECK(r == false, "10000ms of continuous on-time reached: the deferred OFF is applied, not earlier");
+    }
+
+    /* THE SAFETY TEST. A trip/halt/stop calls heater_output_force_off(),
+     * which must de-energize on the tick it happens even with the 10s
+     * min-on hold still pending. If this ever fails, the min-on logic has
+     * been wired into the safety path and is delaying a real shutdown. */
+    {
+        heater_output_state_t s = {0};
+        heater_output_cfg_t cfg = {.window_ms = 4000, .min_on_ms = 100, .min_off_ms = 100};
+        heater_output_reset(&s);
+        bool r = heater_output_duty(&s, &cfg, 1.0f, 0);
+        TEST_CHECK(r == true, "sanity: relay ON");
+        r = heater_output_duty(&s, &cfg, 0.0f, 1500);
+        TEST_CHECK(r == true, "sanity: 1500ms in, the min-on hold is pending");
+        heater_output_force_off(&s); /* safety trip */
+        TEST_CHECK(s.relay_on == false, "a safety force_off de-energizes IMMEDIATELY, 8.5s inside the min-on hold");
+        TEST_CHECK(s.on_elapsed_ms == 0, "force_off clears the min-on accumulator -- the hold cannot resurrect the relay");
+        /* And the very next control tick must not re-close the contacts
+         * just because the hold was pending when the trip landed. */
+        r = heater_output_duty(&s, &cfg, 0.0f, 10);
+        TEST_CHECK(r == false, "the tick after a trip stays OFF at duty 0");
+    }
+
+    /* A configured min_on_ms below the floor is raised to it, not honoured
+     * as-is: 0.2 duty of a 20s window is 4000ms, which cfg->min_on_ms=100
+     * would allow but the 10s floor rejects for the window. */
+    {
+        heater_output_state_t s = {0};
+        heater_output_cfg_t cfg = {.window_ms = 20000, .min_on_ms = 100, .min_off_ms = 100};
+        heater_output_reset(&s);
+        bool r = heater_output_duty(&s, &cfg, 0.2f, 0);
+        TEST_CHECK(r == false, "a 4000ms on-time is below the 10s floor even though cfg->min_on_ms is 100");
+        TEST_CHECK(s.on_ms_this_window == 0, "sub-floor on-time renders as OFF for the window, not rounded up");
+    }
 }

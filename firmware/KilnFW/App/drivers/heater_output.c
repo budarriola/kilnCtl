@@ -54,6 +54,25 @@ bool heater_output_duty(heater_output_state_t *state, const heater_output_cfg_t 
         duty = 1.0f;
     }
 
+    /* The floor the owner set (2026-08-28): a configured min_on_ms below
+     * HEATER_MIN_ON_MS_FLOOR is raised to it here rather than at the config
+     * layer, so every caller and every stored config gets it. */
+    uint32_t min_on_ms = cfg->min_on_ms;
+    if (min_on_ms < HEATER_MIN_ON_MS_FLOOR) {
+        min_on_ms = HEATER_MIN_ON_MS_FLOOR;
+    }
+    /* A window shorter than the floor is a configuration the two constraints
+     * cannot both satisfy inside one window. Rather than silently refusing to
+     * heat at all -- which is what an un-clamped floor would do to a window
+     * of, say, 4 s, since no on-time in it could ever reach 10 s -- the
+     * quantization uses at most the window length, so a high duty still
+     * renders as a full-window ON. The running hold below then keeps that ON
+     * across as many consecutive windows as it takes to reach 10 s, so the
+     * floor is honoured even though the window alone cannot express it. */
+    if (min_on_ms > cfg->window_ms) {
+        min_on_ms = cfg->window_ms;
+    }
+
     state->window_elapsed_ms += dt_ms;
     if (!state->window_started || state->window_elapsed_ms >= cfg->window_ms) {
         /* New window (or the very first call): compute this window's
@@ -62,7 +81,7 @@ bool heater_output_duty(heater_output_state_t *state, const heater_output_cfg_t 
         state->window_started = true;
         state->window_elapsed_ms = 0;
         uint32_t on_ms = (uint32_t)(duty * (float)cfg->window_ms);
-        if (on_ms < cfg->min_on_ms) {
+        if (on_ms < min_on_ms) {
             on_ms = 0; /* unachievably short -- render as off, not rounded up */
         } else if (cfg->window_ms - on_ms < cfg->min_off_ms) {
             on_ms = cfg->window_ms; /* symmetric case: duty near 1 */
@@ -71,6 +90,25 @@ bool heater_output_duty(heater_output_state_t *state, const heater_output_cfg_t 
     }
 
     bool want_on = state->window_elapsed_ms < state->on_ms_this_window;
+
+    /* Running min-on hold. The window quantization above cannot cover every
+     * case on its own: a window_ms shorter than the floor, or a duty that
+     * drops to 0 in the window after an on-pulse started, would still let a
+     * sub-floor pulse reach the contacts. Once the relay is actually on, an
+     * off decision waits until HEATER_MIN_ON_MS_FLOOR of continuous on-time
+     * has accumulated -- across window boundaries if need be.
+     *
+     * Only routine PID cycling passes through here. A trip, halt, pause or
+     * stop calls heater_output_force_off(), which does not consult this. */
+    if (state->relay_on) {
+        state->on_elapsed_ms += dt_ms;
+        if (!want_on && state->on_elapsed_ms < HEATER_MIN_ON_MS_FLOOR) {
+            want_on = true;
+        }
+    } else if (want_on) {
+        state->on_elapsed_ms = 0;
+    }
+
     note_transition(state, want_on);
     return state->relay_on;
 }
@@ -93,4 +131,5 @@ void heater_output_force_off(heater_output_state_t *state)
     state->on_ms_this_window = 0;
     state->last_commanded_on = false;
     state->since_last_change_ms = 0;
+    state->on_elapsed_ms = 0;
 }
