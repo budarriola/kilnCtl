@@ -239,11 +239,19 @@ class SafetySectionTest(unittest.TestCase):
         self.assertEqual(safety["max_rate_c_per_min"], 0.0)  # S8 ships disabled
         self.assertEqual(safety["borrowed_zone_index"], 0)
 
-    def test_ct_map_lives_only_in_the_backup_section(self):
+    def test_bench_preset_declares_no_cts_instead_of_assuming_a_map(self):
+        """The bench_fixture preset used to carry an UNVERIFIED identity CT map
+        in an opt-in `safety_ct_channel_map_backup` section, because a CT-less
+        board could not otherwise be commissioned at all. `ct_installed = 0`
+        (param 0x0109) is the honest replacement: it states an absence anyone
+        can confirm by looking at the board, instead of a mapping nobody
+        measured. The backup section is retired -- and its absence is asserted,
+        not merely un-asserted, so it cannot quietly come back."""
         preset = config_presets.load_preset_data("bench_fixture")
         for ch in range(3):
             self.assertNotIn(f"ct_channel_map[{ch}]", preset["safety"])
-            self.assertIn(f"ct_channel_map[{ch}]", preset["safety_ct_channel_map_backup"])
+        self.assertNotIn("safety_ct_channel_map_backup", preset)
+        self.assertEqual(preset["safety"]["ct_installed"], 0)
 
     def test_ct_map_in_the_safety_section_is_rejected(self):
         """NEGATIVE TEST. A ct_channel_map that applied by default would let

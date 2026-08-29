@@ -60,6 +60,7 @@ def _sample_get(commissioned: bool = False, reliable: bool = True, **set_values)
         {"id": 262, "name": "ct_channel_map[0]", "type": "u8"},
         {"id": 263, "name": "ct_channel_map[1]", "type": "u8"},
         {"id": 264, "name": "ct_channel_map[2]", "type": "u8"},
+        {"id": 265, "name": "ct_installed", "type": "u8"},
         {"id": 516, "name": "max_rate_c_per_min", "type": "f32"},
         {"id": 782, "name": "mains_voltage_v", "type": "f32"},
         {"id": 790, "name": "ct_cal[0].calibrated", "type": "bool"},
@@ -175,15 +176,34 @@ class RequiredFieldsTest(unittest.TestCase):
     def test_reports_exactly_the_unset_required_fields(self):
         current = _sample_get(tc_source=0, tc_placement_mode=0, abs_max_temp_c=80.0,
                               mains_voltage_v=240.0, tc_type=3, max_rate_c_per_min=0.0,
-                              borrowed_zone_index=0)
+                              borrowed_zone_index=0, ct_installed=1)
         self.assertEqual(
             sc.unset_required_fields(current),
             ["ct_channel_map[0]", "ct_channel_map[1]", "ct_channel_map[2]"])
 
+    def test_ct_installed_unanswered_keeps_the_map_required(self):
+        """NEGATIVE. The relaxation must need an explicit answer -- an absent
+        ct_installed leaves the strict, pre-existing list in force."""
+        current = _sample_get(tc_source=0, tc_placement_mode=0, abs_max_temp_c=80.0,
+                              mains_voltage_v=240.0, tc_type=3, max_rate_c_per_min=0.0,
+                              borrowed_zone_index=0)
+        missing = sc.unset_required_fields(current)
+        self.assertIn("ct_installed", missing)
+        for ch in range(3):
+            self.assertIn(f"ct_channel_map[{ch}]", missing)
+
+    def test_ct_installed_zero_drops_the_map_from_the_required_list(self):
+        current = _sample_get(tc_source=0, tc_placement_mode=0, abs_max_temp_c=80.0,
+                              mains_voltage_v=240.0, tc_type=3, max_rate_c_per_min=0.0,
+                              borrowed_zone_index=0, ct_installed=0)
+        self.assertEqual(sc.unset_required_fields(current), [])
+
     def test_unreliable_reporting_means_everything_is_unset(self):
-        current = _sample_get(reliable=False, tc_source=0, tc_type=3)
+        current = _sample_get(reliable=False, tc_source=0, tc_type=3, ct_installed=0)
         self.assertEqual(len(sc.unset_required_fields(current)),
-                          len(sc.REQUIRED_FOR_COMMISSIONING))
+                          len(sc.REQUIRED_FOR_COMMISSIONING),
+                          "unreliable unset-reporting must NOT let ct_installed=0 relax the "
+                          "CT-map requirement -- an unreliable 0 is not an answer")
 
 
 class ApplyTest(unittest.TestCase):

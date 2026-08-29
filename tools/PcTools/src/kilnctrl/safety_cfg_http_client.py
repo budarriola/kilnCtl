@@ -296,8 +296,17 @@ class SafetyApplyResult:
 #: writes a field just because it appears on this list.
 REQUIRED_FOR_COMMISSIONING = (
     "tc_source", "borrowed_zone_index", "tc_placement_mode", "abs_max_temp_c",
-    "tc_type", "ct_channel_map[0]", "ct_channel_map[1]", "ct_channel_map[2]",
+    "tc_type", "ct_installed",
+    "ct_channel_map[0]", "ct_channel_map[1]", "ct_channel_map[2]",
     "max_rate_c_per_min", "mains_voltage_v",
+)
+
+#: The three ids that stop being required once ``ct_installed`` is answered
+#: "no CTs fitted" -- see SaftyFW's config_params_all_required_set(), which
+#: makes exactly this group conditional and nothing else. ``ct_installed``
+#: ITSELF is never conditional: an unanswered question keeps the strict rule.
+CT_MAP_FIELDS_CONDITIONAL_ON_CT_INSTALLED = (
+    "ct_channel_map[0]", "ct_channel_map[1]", "ct_channel_map[2]",
 )
 
 
@@ -310,8 +319,23 @@ def unset_required_fields(current: dict) -> "list[str]":
     commissioned value from a defaulted one."""
     known = params_by_name(current)
     reliable = bool(current.get("unset_reporting_reliable"))
+
+    # Mirror config_params_all_required_set()'s ONE conditional branch. The
+    # CT map drops off the list only on an EXPLICIT, committed answer of "no
+    # CTs fitted" -- `set` true AND value 0. An unset ct_installed, a missing
+    # ct_installed (older firmware), or unreliable unset-reporting all leave
+    # the strict list in force, which is the same order-independence the Pico
+    # itself has: there is no state in which an unanswered question relaxes a
+    # requirement.
+    ct = known.get("ct_installed")
+    cts_absent = bool(
+        reliable and ct is not None and ct.get("set") and int(ct.get("value", 1)) == 0
+    )
+
     out = []
     for name in REQUIRED_FOR_COMMISSIONING:
+        if cts_absent and name in CT_MAP_FIELDS_CONDITIONAL_ON_CT_INSTALLED:
+            continue
         entry = known.get(name)
         if entry is None:
             continue  # a field this firmware does not carry; not this module's to invent
