@@ -1737,8 +1737,168 @@ static void test_config_params_all_required_set(void)
                                               // check is that committing it explicitly
                                               // is what flips the bit, not the value
     config_params_set(&rec, 0x0105u, KILNLINK_PARAM_TYPE_U8, v); // tc_type
+
+    // ct_installed (0x0109) joined the required mask on the "CTs are optional
+    // hardware" pass, for the SAME "prove the bit is consulted, not vacuously
+    // set" reason tc_type was checked above: the record already holds
+    // ct_installed == 1 by default, so only an explicit write can flip the
+    // bit, and until it does the record is not commissioned no matter how
+    // complete the rest of it looks.
+    TEST_CHECK(!config_params_all_required_set(&rec),
+               "every field set INCLUDING the full CT map, but ct_installed never answered: "
+               "still NOT fully commissioned");
+
+    v.u8_val = 1u; // installed -- the same value the record already defaults to
+    config_params_set(&rec, 0x0109u, KILNLINK_PARAM_TYPE_U8, v); // ct_installed
     TEST_CHECK(config_params_all_required_set(&rec),
-               "every no-safe-default field now set, tc_type included: fully commissioned");
+               "every no-safe-default field now set, tc_type and ct_installed included: "
+               "fully commissioned");
+}
+
+// REC_OFF_CT_INSTALLED, mirrored from config_store.c's private layout table.
+// Deliberately a literal here rather than an exported constant: the offset is
+// part of the on-flash FORMAT, so a test that would silently follow the .c
+// file if someone moved the byte would prove nothing about compatibility with
+// records already written to real boards.
+#define CT_INSTALLED_TEST_OFFSET 227u
+
+// Recomputes the trailing CRC after a test has poked a raw byte -- otherwise
+// unpack rejects the record for the wrong reason and the check below passes
+// vacuously.
+static void repack_crc_for_test(uint8_t *record)
+{
+    uint32_t crc = bootloader_crc32(record, 504u);
+    record[504] = (uint8_t)(crc & 0xFFu);
+    record[505] = (uint8_t)((crc >> 8) & 0xFFu);
+    record[506] = (uint8_t)((crc >> 16) & 0xFFu);
+    record[507] = (uint8_t)((crc >> 24) & 0xFFu);
+}
+
+// --- ct_installed: "no CTs fitted" as a first-class commissioning state -----
+// The whole point of the field. The two NEGATIVE cases are what make the two
+// positive ones mean anything.
+static void test_ct_installed_gates_the_channel_map(void)
+{
+    TEST_SECTION("ct_installed -- declaring no CTs fitted drops the ct_channel_map requirement");
+
+    kilnlink_param_value_t v;
+
+    // A record with every required field EXCEPT the CT map -- exactly the
+    // bench board this pass was written for (no CT physically fitted, so
+    // nothing can honestly confirm which relay each channel watches).
+    config_store_record_t base;
+    config_store_default(&base);
+    v.u8_val = CONFIG_STORE_TC_SOURCE_OWN_J7;
+    config_params_set(&base, 0x0101u, KILNLINK_PARAM_TYPE_U8, v);
+    v.u8_val = 0u;
+    config_params_set(&base, 0x0102u, KILNLINK_PARAM_TYPE_U8, v);
+    v.u8_val = CONFIG_STORE_TC_PLACEMENT_CHAMBER_AGREED;
+    config_params_set(&base, 0x0103u, KILNLINK_PARAM_TYPE_U8, v);
+    v.f32_val = 1300.0f;
+    config_params_set(&base, 0x0104u, KILNLINK_PARAM_TYPE_F32, v);
+    v.u8_val = CONFIG_STORE_DEFAULT_TC_TYPE;
+    config_params_set(&base, 0x0105u, KILNLINK_PARAM_TYPE_U8, v);
+    v.f32_val = 5.0f;
+    config_params_set(&base, 0x0204u, KILNLINK_PARAM_TYPE_F32, v);
+    v.f32_val = 240.0f;
+    config_params_set(&base, 0x030Eu, KILNLINK_PARAM_TYPE_F32, v);
+    config_params_finalize_ct_channel_map(&base);
+
+    // NEGATIVE 1: the question was never asked. This is the state every
+    // record was in before this field existed, and it must behave EXACTLY as
+    // it did then -- strict.
+    TEST_CHECK(!config_params_all_required_set(&base),
+               "no CT map and ct_installed never answered: NOT commissioned (unchanged behaviour)");
+
+    // NEGATIVE 2: the operator answered "yes, CTs are fitted". The map is
+    // still genuinely required -- the case that proves the new field is not a
+    // blanket escape hatch.
+    config_store_record_t installed = base;
+    v.u8_val = 1u;
+    config_params_set(&installed, 0x0109u, KILNLINK_PARAM_TYPE_U8, v);
+    TEST_CHECK(!config_params_all_required_set(&installed),
+               "ct_installed=1 with no CT map: still NOT commissioned, the map is still required");
+
+    // POSITIVE 1: the operator answered "no CTs fitted". Commissioning now
+    // completes with no ct_channel_map at all.
+    config_store_record_t absent = base;
+    v.u8_val = 0u;
+    config_params_set(&absent, 0x0109u, KILNLINK_PARAM_TYPE_U8, v);
+    TEST_CHECK(config_params_all_required_set(&absent),
+               "ct_installed=0: commissioned WITHOUT a ct_channel_map");
+
+    // POSITIVE 2: answering "yes" AFTER "no" re-arms the requirement. The
+    // relaxation must not be sticky -- fitting CTs to a board later must put
+    // the map back on the checklist.
+    config_store_record_t reinstalled = absent;
+    v.u8_val = 1u;
+    config_params_set(&reinstalled, 0x0109u, KILNLINK_PARAM_TYPE_U8, v);
+    TEST_CHECK(!config_params_all_required_set(&reinstalled),
+               "answering ct_installed=1 after =0 puts the ct_channel_map requirement BACK");
+
+    v.u8_val = 0u; config_params_set(&reinstalled, 0x0106u, KILNLINK_PARAM_TYPE_U8, v);
+    v.u8_val = 1u; config_params_set(&reinstalled, 0x0107u, KILNLINK_PARAM_TYPE_U8, v);
+    v.u8_val = 2u; config_params_set(&reinstalled, 0x0108u, KILNLINK_PARAM_TYPE_U8, v);
+    config_params_finalize_ct_channel_map(&reinstalled);
+    TEST_CHECK(config_params_all_required_set(&reinstalled),
+               "ct_installed=1 WITH a full CT map: commissioned");
+}
+
+// The record must survive a flash round trip with the answer intact, and --
+// the safety-critical half -- a record that never carried this byte must
+// decode to the STRICT state, never to "CTs disabled".
+static void test_ct_installed_round_trip_and_legacy_decode(void)
+{
+    TEST_SECTION("ct_installed -- pack/unpack round trip, and legacy bytes decode STRICT");
+
+    uint8_t buf[CONFIG_STORE_RECORD_LEN];
+    config_store_record_t rec, back;
+
+    config_store_default(&rec);
+    TEST_CHECK(rec.ct_installed == 1u,
+               "config_store_default(): ct_installed defaults to INSTALLED (strict)");
+
+    rec.ct_installed = 0u;
+    rec.fields_set |= CONFIG_STORE_SET_CT_INSTALLED;
+    config_store_pack(&rec, buf);
+    TEST_CHECK(config_store_unpack(buf, &back),
+               "a record declaring no CTs packs and unpacks");
+    TEST_CHECK(back.ct_installed == 0u, "ct_installed=0 survives the round trip");
+    TEST_CHECK((back.fields_set & CONFIG_STORE_SET_CT_INSTALLED) != 0u,
+               "the CONFIG_STORE_SET_CT_INSTALLED bit survives the round trip");
+
+    rec.ct_installed = 1u;
+    config_store_pack(&rec, buf);
+    TEST_CHECK(config_store_unpack(buf, &back) && back.ct_installed == 1u,
+               "ct_installed=1 survives the round trip");
+
+    // NEGATIVE: every byte value that is NOT the explicit "not installed"
+    // sentinel must decode as installed. 0x00 is what a legacy record's
+    // zeroed reserved byte holds; 0xFF is erased flash and the current
+    // reserved fill. If either ever decoded as "no CTs", an old board would
+    // silently disarm S3/S4/S9/S14 on its next boot.
+    static const uint8_t legacy_bytes[] = { 0x00u, 0xFFu, 0x01u, 0x5Au, 0x42u };
+    for (size_t i = 0; i < sizeof(legacy_bytes) / sizeof(legacy_bytes[0]); i++) {
+        config_store_record_t plain;
+        config_store_default(&plain);
+        plain.ct_installed = 1u;
+        config_store_pack(&plain, buf);
+        buf[CT_INSTALLED_TEST_OFFSET] = legacy_bytes[i];
+        repack_crc_for_test(buf);
+        TEST_CHECK(config_store_unpack(buf, &back) && back.ct_installed == 1u,
+                   "a non-sentinel byte at REC_OFF_CT_INSTALLED decodes as INSTALLED (strict)");
+    }
+
+    // ...and the one byte that does mean it, does mean it. Without this the
+    // loop above would pass vacuously if the decoder simply always returned 1.
+    config_store_record_t plain;
+    config_store_default(&plain);
+    plain.ct_installed = 1u;
+    config_store_pack(&plain, buf);
+    buf[CT_INSTALLED_TEST_OFFSET] = 0xA5u; // CT_INSTALLED_MARKER_NOT_INSTALLED
+    repack_crc_for_test(buf);
+    TEST_CHECK(config_store_unpack(buf, &back) && back.ct_installed == 0u,
+               "the 0xA5 sentinel at REC_OFF_CT_INSTALLED really does decode as NOT installed");
 }
 
 // GET_CONFIG_PAGE round trip: mirrors link_task_send_config_page()'s own
@@ -1760,7 +1920,7 @@ static void test_config_params_get_config_page_roundtrip(void)
     rec.ct_cal[2].gain = 1.1f;
 
     size_t total = config_params_count();
-    kilnlink_config_page_entry_t all[64];
+    kilnlink_config_page_entry_t all[72];
     memset(all, 0, sizeof(all));
     TEST_CHECK(total <= sizeof(all) / sizeof(all[0]), "id table fits the test's own scratch array");
     for (size_t i = 0; i < total; i++) {
@@ -2068,6 +2228,9 @@ void run_test_config_store(void)
     test_seq_to_version();
     test_tc_type_voltage_mode_clamp_v2();
     test_tc_type_voltage_mode_clamp_v1_migration();
+
+    test_ct_installed_gates_the_channel_map();
+    test_ct_installed_round_trip_and_legacy_decode();
 
     test_config_params_get_set_roundtrip();
     test_config_params_unknown_id_refused();

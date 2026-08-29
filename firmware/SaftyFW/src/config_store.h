@@ -301,6 +301,24 @@ extern "C" {
 #define CONFIG_STORE_SET_I_NORMAL_A_1         (1u << 13)
 #define CONFIG_STORE_SET_I_NORMAL_A_2         (1u << 14)
 
+// ct_installed -- ROADMAP.md M12 "CTs are optional hardware" pass. ASKED
+// (COMMISSIONING_UX.md section 3): required by config_params_all_required_set()
+// like the no-safe-default fields, but for a different reason than either
+// group above. ct_installed HAS a safe compiled default (1, installed) and
+// every guard keeps working unchanged at that default -- what it does not
+// have is a way for the firmware to observe the truth. Silently defaulting
+// to "installed" would leave every CT-less board permanently uncommissionable
+// (the state this pass exists to fix); silently defaulting to "not installed"
+// would disarm S3/S9/S14 on a board that really does have CTs, which is far
+// worse. So the question must be ANSWERED, not defaulted, and the bit is what
+// records that an answer was given.
+//
+// THIS IS THE LAST FREE BIT of the uint16_t fields_set. A future field needs
+// fields_set widened to uint32_t, which is a record-layout change
+// (REC_OFF_FIELDS_SET is 2 bytes) and therefore a format_version bump --
+// not a drop-in the way bits 11-15 were.
+#define CONFIG_STORE_SET_CT_INSTALLED         (1u << 15)
+
 // True iff every bit in `mask` (some OR of CONFIG_STORE_SET_* above) is set
 // in `rec->fields_set`. Small enough to inline; exists so call sites read as
 // "is X commissioned" rather than repeating the `& / ==` bit-test idiom
@@ -403,6 +421,32 @@ typedef struct {
                                    // every call site already does.
     uint8_t  ct_channel_map[3];   // zone/relay id watched by each CT channel;
                                    // gated by _SET_CT_CHANNEL_MAP as a whole
+    uint8_t  ct_installed;        // 0/1, param 0x0109 -- "are current
+                                   // transformers physically fitted to this
+                                   // board." Modelled on safety_tc_installed
+                                   // above (same 0/1 shape, same "unknown
+                                   // decodes to the strict state" marker
+                                   // encoding in config_store.c) with ONE
+                                   // deliberate difference: this one IS
+                                   // fields_set-gated (_SET_CT_INSTALLED),
+                                   // because COMMISSIONING_UX.md classifies
+                                   // it ASKED -- whether a CT is bolted
+                                   // around a wire is a hardware fact only
+                                   // the person commissioning the board
+                                   // knows, and neither answer is safe to
+                                   // assume. The VALUE's default is 1
+                                   // (installed = strict: ct_channel_map
+                                   // stays required, every CT-fed guard
+                                   // stays armed), so a record that never
+                                   // answers behaves exactly as builds
+                                   // before this field did.
+                                   //
+                                   // Only an EXPLICIT 0 (bit set AND value
+                                   // 0) disables the CT-fed guards. See
+                                   // safety_guard_input_t::current_sensing_
+                                   // disabled for what "disabled" does to
+                                   // S3/S4/S9/S14, and what it deliberately
+                                   // does NOT do to S6b.
     uint8_t  safety_tc_installed; // 0/1, param 0x0211 -- "is the Pico's own
                                    // safety thermocouple physically wired
                                    // up." Default 1 (installed): the safe
@@ -544,17 +588,17 @@ typedef struct {
     uint32_t overcurrent_time_s;      // s, 0 -> 30 default
 
     // Reserved, unused, packed as 0xFF (matches the erased-flash background,
-    // same convention as metadata.h's per-slot reserved bytes). ~277 B of
+    // same convention as metadata.h's per-slot reserved bytes). ~276 B of
     // headroom (config_store.c's REC_OFF_RESERVED..REC_OFF_CRC; one byte of
     // the original 300 was carved off the FRONT of this block for
     // safety_tc_installed, 4 more for max_expected_power_w, and 16 more
     // (3xF32 i_normal_a + U16 overcurrent_pct + U32-on-wire-but-U16-tagged
-    // overcurrent_time_s) for S14 above -- see REC_OFF_SAFETY_TC_INSTALLED /
+    // overcurrent_time_s) for S14, and 1 more for ct_installed -- see REC_OFF_SAFETY_TC_INSTALLED /
     // REC_OFF_MAX_EXPECTED_POWER_W / REC_OFF_I_NORMAL_A in config_store.c)
     // -- adding a field later is a struct/pack/unpack/host-test change, not
     // a layout change, same as metadata.h's own signature/sig_required
     // reservation.
-    uint8_t  reserved[277];
+    uint8_t  reserved[276];
 } config_store_record_t;
 
 // Compile-time budget check, mirroring bootloader/metadata.c's

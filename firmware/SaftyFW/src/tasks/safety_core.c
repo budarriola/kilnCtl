@@ -941,6 +941,30 @@ static safety_guard_input_t safety_core_build_input(void)
     // safety_core_load_guard_cfg()'s own doc comment.
     safety_core_load_guard_cfg(&cfg_rec);
 
+    // "CTs are optional hardware" pass. cts_disabled is true ONLY on the
+    // explicit answer -- the CONFIG_STORE_SET_CT_INSTALLED bit present AND
+    // the value 0. An unanswered question leaves every CT-fed guard armed,
+    // exactly as before this field existed.
+    //
+    // Read from cfg_rec every tick rather than cached in the config-applied
+    // path above, for the same reason safety_tc_installed is read that way
+    // (this file's comment at that read): it is a structural fact about the
+    // board that must not be able to sit stale across a COMMIT_CONFIG.
+    //
+    // Everything downstream of the sensor is forced to its no-information
+    // state here, at the producer, rather than each guard being asked to
+    // remember to ignore its input: any_current_present false, amps_valid
+    // false. safety_guards.c ADDITIONALLY branches on the flag itself, which
+    // is deliberate redundancy -- forcing the inputs alone would make S3/S9
+    // silently "pass" and S4 permanently warn, and the flag alone would leave
+    // the raw floor reading reachable. Both halves are required; neither is
+    // sufficient.
+    bool cts_disabled = ((cfg_rec.fields_set & CONFIG_STORE_SET_CT_INSTALLED) != 0u) &&
+                        (cfg_rec.ct_installed == 0u);
+    if (cts_disabled) {
+        any_current_present = false;
+    }
+
     // S14 (COMMISSIONING_UX.md section 3.3). amps[ch] comes straight from
     // current_snapshot_t, gated by the SAME freshness fact any_current_
     // present already uses (current_fresh) -- a stale amps[] reading must
@@ -958,7 +982,7 @@ static safety_guard_input_t safety_core_build_input(void)
     float amps_for_ct[3] = { 0.0f, 0.0f, 0.0f };
     bool  amps_valid_for_ct[3] = { false, false, false };
     bool  relay_commanded_now_for_ct[3] = { false, false, false };
-    if (current_fresh) {
+    if (current_fresh && !cts_disabled) {
         for (unsigned ch = 0; ch < 3; ch++) {
             amps_for_ct[ch] = current.amps[ch];
             amps_valid_for_ct[ch] = true;
@@ -1012,6 +1036,7 @@ static safety_guard_input_t safety_core_build_input(void)
         .nearest_zone_measured_c = nearest_zone_measured_c,
         .any_current_present = any_current_present,
         .current_sensing_commissioned = s_current_sensing_commissioned,
+        .current_sensing_disabled = cts_disabled,
         .relay_commanded_recently = relay_commanded_recently,
         .relay_commanded_continuously = relay_commanded_continuously,
         .sample_counter_advancing = sample_counter_advancing,

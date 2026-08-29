@@ -57,6 +57,10 @@ static const config_param_id_type_t CONFIG_PARAM_TABLE[] = {
     { 0x0106u, KILNLINK_PARAM_TYPE_U8 },  // ct_channel_map[0]
     { 0x0107u, KILNLINK_PARAM_TYPE_U8 },  // ct_channel_map[1]
     { 0x0108u, KILNLINK_PARAM_TYPE_U8 },  // ct_channel_map[2]
+    { 0x0109u, KILNLINK_PARAM_TYPE_U8 },  // ct_installed -- next unallocated id
+                                           // in this section-1 group, deliberately
+                                           // adjacent to the three ct_channel_map
+                                           // ids it gates
     { 0x0201u, KILNLINK_PARAM_TYPE_F32 }, // firing_margin_c
     { 0x0202u, KILNLINK_PARAM_TYPE_F32 }, // overshoot_margin_c
     { 0x0203u, KILNLINK_PARAM_TYPE_U16 }, // overshoot_time_s
@@ -130,11 +134,15 @@ static const config_param_id_type_t CONFIG_PARAM_TABLE[] = {
 #define CONFIG_PARAM_TABLE_LEN (sizeof(CONFIG_PARAM_TABLE) / sizeof(CONFIG_PARAM_TABLE[0]))
 
 // Compile-time bound: link_task.c's GET_CONFIG_PAGE handler sizes a fixed
-// stack array at 64 entries (comfortably above this table's real size) --
-// if this table ever grows past that, the build must fail loudly here
-// rather than that array silently truncating the last few ids off every
-// page dump.
-typedef char config_params_table_fits_64 [(CONFIG_PARAM_TABLE_LEN <= 64u) ? 1 : -1];
+// stack array to match (comfortably above this table's real size) -- if this
+// table ever grows past that, the build must fail loudly here rather than
+// that array silently truncating the last few ids off every page dump.
+//
+// Raised 64 -> 72 by the ct_installed (0x0109) addition, which took the table
+// to exactly 65 entries and tripped this assert -- working as designed. The
+// paired array in link_task.c was raised in the same edit; the two numbers
+// are not independent and must never be changed apart.
+typedef char config_params_table_fits_72 [(CONFIG_PARAM_TABLE_LEN <= 72u) ? 1 : -1];
 
 size_t config_params_count(void)
 {
@@ -168,6 +176,7 @@ bool config_params_get(const config_store_record_t *rec, uint16_t id, uint8_t *o
     case 0x0103u: *out_type = KILNLINK_PARAM_TYPE_U8;  out_value->u8_val = rec->tc_placement_mode; return true;
     case 0x0104u: *out_type = KILNLINK_PARAM_TYPE_F32; out_value->f32_val = rec->abs_max_temp_c; return true;
     case 0x0105u: *out_type = KILNLINK_PARAM_TYPE_U8;  out_value->u8_val = rec->tc_type; return true;
+    case 0x0109u: *out_type = KILNLINK_PARAM_TYPE_U8;  out_value->u8_val = rec->ct_installed; return true;
     case 0x0106u: *out_type = KILNLINK_PARAM_TYPE_U8;  out_value->u8_val = rec->ct_channel_map[0]; return true;
     case 0x0107u: *out_type = KILNLINK_PARAM_TYPE_U8;  out_value->u8_val = rec->ct_channel_map[1]; return true;
     case 0x0108u: *out_type = KILNLINK_PARAM_TYPE_U8;  out_value->u8_val = rec->ct_channel_map[2]; return true;
@@ -256,6 +265,7 @@ bool config_params_is_set(const config_store_record_t *rec, uint16_t id)
     case 0x0103u: return config_store_field_is_set(&rec->fields_set, CONFIG_STORE_SET_TC_PLACEMENT_MODE);
     case 0x0104u: return config_store_field_is_set(&rec->fields_set, CONFIG_STORE_SET_ABS_MAX_TEMP_C);
     case 0x0105u: return config_store_field_is_set(&rec->fields_set, CONFIG_STORE_SET_TC_TYPE);
+    case 0x0109u: return config_store_field_is_set(&rec->fields_set, CONFIG_STORE_SET_CT_INSTALLED);
     case 0x0106u: return config_store_field_is_set(&rec->fields_set, CONFIG_STORE_SET_CT_CHANNEL_MAP_0);
     case 0x0107u: return config_store_field_is_set(&rec->fields_set, CONFIG_STORE_SET_CT_CHANNEL_MAP_1);
     case 0x0108u: return config_store_field_is_set(&rec->fields_set, CONFIG_STORE_SET_CT_CHANNEL_MAP_2);
@@ -360,6 +370,15 @@ bool config_params_set(config_store_record_t *rec, uint16_t id, uint8_t type,
     case 0x0106u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U8);  rec->ct_channel_map[0] = value.u8_val; rec->fields_set |= CONFIG_STORE_SET_CT_CHANNEL_MAP_0; return true;
     case 0x0107u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U8);  rec->ct_channel_map[1] = value.u8_val; rec->fields_set |= CONFIG_STORE_SET_CT_CHANNEL_MAP_1; return true;
     case 0x0108u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U8);  rec->ct_channel_map[2] = value.u8_val; rec->fields_set |= CONFIG_STORE_SET_CT_CHANNEL_MAP_2; return true;
+    // ct_installed: 0/1 only, and fields_set-gated -- the ONE place this
+    // field differs from safety_tc_installed (0x0211 below). Setting the bit
+    // here, at SET_PARAM time rather than deriving it at COMMIT like
+    // ct_channel_map's group bit, is correct because unlike that map this is
+    // a single indivisible answer: there is no partial state to guard
+    // against. Monotonic like every other bit -- answering "installed" after
+    // "not installed" changes the VALUE (and so re-arms the guards and
+    // re-requires ct_channel_map) but never un-answers the question.
+    case 0x0109u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U8);  CHECK_U8_MAX(1u); rec->ct_installed = value.u8_val; rec->fields_set |= CONFIG_STORE_SET_CT_INSTALLED; return true;
 
     case 0x0201u: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_F32_FINITE(); rec->firing_margin_c = value.f32_val; return true;
     case 0x0202u: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_F32_FINITE(); rec->overshoot_margin_c = value.f32_val; return true;
@@ -808,9 +827,33 @@ bool config_params_all_required_set(const config_store_record_t *rec)
     // every other field but never touched tc_type now correctly still reads
     // back as NOT fully commissioned, exactly as if abs_max_temp_c itself
     // were still 0.
+    //
+    // CONFIG_STORE_SET_CT_INSTALLED joined this mask on the "CTs are optional
+    // hardware" pass, and it is the one bit here that is required
+    // UNCONDITIONALLY while the bit it gates -- CT_CHANNEL_MAP -- became
+    // CONDITIONAL. The asymmetry is the whole point:
+    //
+    //   * "Are CTs fitted?" must always be answered. Defaulting it either way
+    //     is a silent claim about this board's hardware that the firmware has
+    //     no way to check (config_store.h's comment on the bit).
+    //   * "Which relay does each CT watch?" is only a meaningful question on a
+    //     board that HAS CTs. Requiring it on a CT-less board made that board
+    //     permanently uncommissionable and therefore permanently unable to
+    //     heat -- correct while "no CT" was not a state this firmware could
+    //     represent, wrong now that it is.
+    //
+    // Note the order-independence: if the CT_INSTALLED bit is clear, the value
+    // of rec->ct_installed is not trustworthy, but the strict branch is taken
+    // anyway (`!= 0` on a record defaulting to 1) AND the missing bit fails
+    // the check on its own. There is no bit pattern in which an unanswered
+    // question relaxes a requirement.
     uint16_t required = (uint16_t)(CONFIG_STORE_SET_TC_SOURCE | CONFIG_STORE_SET_BORROWED_ZONE_INDEX |
                                     CONFIG_STORE_SET_TC_PLACEMENT_MODE | CONFIG_STORE_SET_ABS_MAX_TEMP_C |
-                                    CONFIG_STORE_SET_CT_CHANNEL_MAP | CONFIG_STORE_SET_MAX_RATE_C_PER_MIN |
-                                    CONFIG_STORE_SET_MAINS_VOLTAGE_V | CONFIG_STORE_SET_TC_TYPE);
+                                    CONFIG_STORE_SET_MAX_RATE_C_PER_MIN |
+                                    CONFIG_STORE_SET_MAINS_VOLTAGE_V | CONFIG_STORE_SET_TC_TYPE |
+                                    CONFIG_STORE_SET_CT_INSTALLED);
+    if (rec->ct_installed != 0u) {
+        required = (uint16_t)(required | CONFIG_STORE_SET_CT_CHANNEL_MAP);
+    }
     return config_store_field_is_set(&rec->fields_set, required);
 }

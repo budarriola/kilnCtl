@@ -592,3 +592,64 @@ refuses; and both flag/`fields_set` disagreement directions refuse. All six
 refusal checks were negative-tested — the guard was broken three ways (whole
 decision stubbed `true`, flag half removed, `fields_set` half removed) and
 each break was caught by the tests that cover it, then restored.
+
+---
+
+## 9. Running without current transformers (2026-08-28)
+
+`ct_installed` (`0x0109`, `CONFIG_STORE_SET_CT_INSTALLED`) is an ASKED
+commissioning field: *"are current transformers fitted to this board?"*
+Answering **no** — explicitly, with the bit set and the value 0 — is now a
+first-class state, distinct from "CTs fitted but not yet mapped".
+
+**What it changes at the gate.** `config_params_all_required_set()` requires
+`ct_installed` unconditionally and requires `ct_channel_map` only when the
+answer is *yes* or absent. A CT-less board can therefore complete
+commissioning and be granted heat. Unanswered behaves exactly as every build
+before this field did: strict.
+
+**What it changes at the guards.** `safety_core_build_input()` forces the
+sensor's outputs to their no-information state (`any_current_present` false,
+`amps_valid[ch]` false, `relay_commanded_now_for_ct[ch]` false) **and** raises
+`safety_guard_input_t::current_sensing_disabled`. `safety_guards.c` then
+branches on the flag itself. Both halves are required and neither is
+sufficient — forcing the inputs alone would make S3/S9 silently *pass* and S4
+warn permanently; the flag alone would leave the raw offset-floor reading
+reachable.
+
+| Guard | Class | With CTs declared absent |
+|---|---|---|
+| S3 `LOAD_STUCK_ON` | TRIP | **Inert.** Accumulator held at zero. Without this the board trips within `stuck_on_time_s` of boot: an uncalibrated channel's AD8542 offset floor reads as "current present" on every tick forever (`current_presence_policy.h`), with nothing commanded on. Not merely unprotected — actively unsafe by nuisance. |
+| S4 load-inactive | WARN | **Inert.** Otherwise it asserts on every firing, and a warning that is always on trains an operator to ignore warnings. |
+| S9 `TRIP_INEFFECTIVE` | TRIP (unclearable) | **Inert, and distinctly so.** Already gated by `current_sensing_commissioned`, but that gate reports `s9_uncommissioned_warn` — *"finish commissioning and this comes back"* — which is a lie on a board with no sensor to commission. The disabled flag takes precedence and suppresses that warn. |
+| S14 over-current | WARN | **Inert per channel.** Accumulator held at zero. |
+| S6b `LINK_DEAD` | TRIP | **Degraded, deliberately.** The soft, current-keyed tier (`link_timeout_s`) becomes unreachable; the unconditional `link_dead_hard_s` backstop still fires. **This is the known, accepted cost of running without CTs.** The only local substitute for "is heat on" that does not need the (by definition dead) link is SaftyFW's own K4 energization state, and re-keying a TRIP-class guard onto a different input changes what S6b *means* — a `SAFETY_MODEL.md` §4 decision, not this pass's. |
+| everything else | — | Unchanged. S7 (E-stop) is the check that would notice a flag accidentally wired into the shared context block, since it sits before it. |
+
+**Inactive is reported, never silent.** `safety_guard_state_t::ct_guards_disabled`
+is set on **every** path through `safety_guards_tick()`, including the
+already-tripped one, so "these four guards did not fire" stays distinguishable
+from "these four guards are not watching".
+
+**Tests.** `test/test_safety_guards.c::test_ct_disabled_guards()` — every
+check is a **pair**: the same tick evaluated once armed and once disabled. The
+armed halves prove S3 really does trip, S4 really does warn, S9 really does
+raise its uncommissioned warn, and S14 really does warn on the same inputs, so
+the disabled halves are not passing vacuously. `test/test_config_store.c` adds
+the gate's four cases (unanswered ⇒ strict; *yes* + no map ⇒ still refused;
+*no* ⇒ commissioned without a map; *yes* after *no* ⇒ the map requirement comes
+back) plus the pack/unpack round trip and the legacy-byte decode (every byte
+except the `0xA5` sentinel decodes as INSTALLED — with the sentinel itself
+checked so the loop cannot pass by the decoder simply always returning 1).
+`test/test_commissioning_gate.c` states the same thing end to end at the gate.
+
+**Negative-tested.** Eight breaks were introduced one at a time and each was
+caught by the tests that cover it, then restored: S3's inert branch, S4's
+inert term, S9's disabled precedence, S14's inert term, `ct_installed` being
+required, the CT-map relaxation in both directions, and the legacy-byte
+decode. **One gap, recorded honestly:** breaking `safety_core.c`'s forcing of
+`any_current_present` is **not** caught — `safety_core.c` is RTOS/target-only
+and is not in the host-test build, the same coverage boundary every other
+`safety_core` producer already sits behind. The redundant branch inside
+`safety_guards.c` is what makes that gap non-fatal rather than merely
+unmeasured.

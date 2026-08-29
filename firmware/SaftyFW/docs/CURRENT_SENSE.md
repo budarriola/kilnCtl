@@ -34,6 +34,38 @@ reading through a 1 s peak-hold, an operator-supplied CT ratio and an
 unregulated ADC reference could not match that, and its existence would imply a
 guarantee the hardware cannot back.
 
+### 0.1 A board with no CTs at all
+
+CTs are **optional hardware**, and since 2026-08-28 that is a state the
+firmware can represent rather than one it merely tolerates: the commissioning
+field `ct_installed` (`0x0109`, `SaftyFW/src/config_params.c`) asks the
+question outright, and answering *no* is what makes a CT-less board
+commissionable.
+
+It has to be **asked**, not defaulted or inferred, because nothing on either
+board can see whether a CT is clamped around a wire, and a zero reading is
+exactly what an absent CT and an idle fitted CT both produce. Both wrong
+answers are bad in opposite directions:
+
+- **Answering *yes* on a board with no CTs** leaves `ct_channel_map` required,
+  so the board never commissions and never heats — *and* the uncalibrated
+  channel's offset floor (§1's rectifier output with nothing driving it) reads
+  as "current present" on every tick through
+  `current_presence_policy.c`'s counts-domain fallback, which trips **S3**
+  (`LOAD_STUCK_ON`) on a perfectly healthy board.
+- **Answering *no* on a board that does have CTs** silently disarms S3, S4, S9
+  and S14.
+
+Answering *no* switches those four guards off **and reports them off**
+(`safety_guard_state_t::ct_guards_disabled`) rather than letting them read as
+quietly passing. One guard is genuinely degraded rather than disabled: **S6b**
+keeps its unconditional `link_dead_hard_s` backstop but loses its faster,
+current-keyed tier, because "is heat on" has no local answer without a
+sensor. `docs/GUARD_TEST_MATRIX.md` §9 is the per-guard table and the
+reasoning.
+
+---
+
 This scope limit makes the calibration burden much lighter than it first
 appears, and the two jobs have very different accuracy needs:
 

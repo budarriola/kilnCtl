@@ -91,7 +91,8 @@ Staged in RAM, then committed as one record:
 | `0x1D` | `COMMIT_CONFIG` | ESP → Pico | Validate the staged set as a whole, write one record, bump `config_crc` |
 | `0x23` | `GET_PARAM` | ESP → Pico | Request one parameter. **Was `0x1E`, shared with its own reply until 2026-08-24** |
 | `0x1E` | `PARAM` | Pico → ESP | The reply, carrying the value and a `found` byte |
-| `0x24` | `GET_CONFIG_PAGE` | ESP → Pico | Bulk read request, one page at a time. **Was `0x1F`, shared with its own reply until 2026-08-24** |
+| `0x24` | `GET_CONFIG_PAGE` | ESP → Pico | Bulk read request, one page at a time. **Was `0x1F`, shared with its own reply until 2026-08-24** |
+
 | `0x1F` | `CONFIG_PAGE` | Pico → ESP | Packed `(id, value)` pairs, one page per frame, so the ESP can fetch the whole set in a few frames |
 | `0x20` | `COMMIT_CONFIG_REJECTED` | Pico → ESP | Sent only when a `COMMIT_CONFIG` is refused: names the offending `param_id` (or a "not field-specific" sentinel) and a coarse reason code (range / contradiction / ARMED / storage). Closes the gap section 3.1 used to describe as a known limitation |
 
@@ -151,6 +152,7 @@ value in the wrong field with the right type tag and no error anywhere.
 | `0x0104` | `abs_max_temp_c` | F32 |
 | `0x0105` | `tc_type` | U8 |
 | `0x0106`–`0x0108` | `ct_channel_map[0..2]` | U8 |
+| `0x0109` | `ct_installed` | U8 |
 | `0x0201` | `firing_margin_c` | F32 |
 | `0x0202` | `overshoot_margin_c` | F32 |
 | `0x0203` | `overshoot_time_s` | U16 |
@@ -188,6 +190,13 @@ value in the wrong field with the right type tag and no error anywhere.
 | `0x0502` | `estop_debounce_ms` | U16 |
 | `0x0503` | `watchdog_timeout_ms` | U16 |
 | `0x0504` | `config_check_period_s` | U16 |
+
+`0x0109` `ct_installed` (added 2026-08-28) is 0/1 and ASKED
+(`KilnFW/docs/COMMISSIONING_UX.md` §1.1 Q5): *"are current transformers fitted
+to this board?"*. It is required for commissioning **unconditionally**, and
+`0x0106`–`0x0108` (`ct_channel_map`) are required only while it is 1 or
+unanswered. Answering 0 switches S3/S4/S9/S14 off **and reports them off** —
+see `docs/GUARD_TEST_MATRIX.md` §9 and `docs/CURRENT_SENSE.md` §0.1.
 
 **`tc_type` (`0x0105`) gained a `fields_set` bit (`CONFIG_STORE_SET_TC_TYPE`)
 on 2026-08-24.** Unlike the other bits in this table, it is not a "no safe

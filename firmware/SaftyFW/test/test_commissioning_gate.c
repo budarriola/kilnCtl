@@ -45,8 +45,38 @@ static void stage_full_commissioning(config_store_record_t *rec)
     v.f32_val = 240.0f;
     config_params_set(rec, 0x030Eu, KILNLINK_PARAM_TYPE_F32, v); // mains_voltage_v
     config_params_finalize_ct_channel_map(rec);
+    v.u8_val = 1u;
+    config_params_set(rec, 0x0109u, KILNLINK_PARAM_TYPE_U8, v); // ct_installed = yes,
+                                                                 // the strict answer --
+                                                                 // this helper stages the
+                                                                 // FULL, CT-fitted board
     // What link_task.c's COMMIT_CONFIG handler writes into the record:
     //   to_write.calibration_missing = !config_params_all_required_set(&to_write);
+    rec->calibration_missing = !config_params_all_required_set(rec);
+}
+
+// Everything stage_full_commissioning() stages EXCEPT the three
+// ct_channel_map ids and the ct_installed answer -- the real bench board this
+// pass was written for, where no CT is physically fitted and so nothing can
+// honestly confirm which relay a channel watches.
+static void stage_full_commissioning_except_ct_map(config_store_record_t *rec)
+{
+    kilnlink_param_value_t v;
+    v.u8_val = CONFIG_STORE_TC_SOURCE_OWN_J7;
+    config_params_set(rec, 0x0101u, KILNLINK_PARAM_TYPE_U8, v);
+    v.u8_val = 0u;
+    config_params_set(rec, 0x0102u, KILNLINK_PARAM_TYPE_U8, v);
+    v.u8_val = CONFIG_STORE_TC_PLACEMENT_CHAMBER_AGREED;
+    config_params_set(rec, 0x0103u, KILNLINK_PARAM_TYPE_U8, v);
+    v.f32_val = 1300.0f;
+    config_params_set(rec, 0x0104u, KILNLINK_PARAM_TYPE_F32, v);
+    v.u8_val = CONFIG_STORE_DEFAULT_TC_TYPE;
+    config_params_set(rec, 0x0105u, KILNLINK_PARAM_TYPE_U8, v);
+    v.f32_val = 5.0f;
+    config_params_set(rec, 0x0204u, KILNLINK_PARAM_TYPE_F32, v);
+    v.f32_val = 240.0f;
+    config_params_set(rec, 0x030Eu, KILNLINK_PARAM_TYPE_F32, v);
+    config_params_finalize_ct_channel_map(rec); // a no-op here: nothing staged
     rec->calibration_missing = !config_params_all_required_set(rec);
 }
 
@@ -125,4 +155,40 @@ void run_test_commissioning_gate(void)
                "stored calibration_missing still set: NOT commissioned, whatever fields_set says");
     TEST_CHECK(commissioning_gate_energize_allowed(true, &flagged) == false,
                "migrated/forced-flag record: an ON request is REFUSED");
+
+    // --- The CT-less board (ROADMAP.md M12, "CTs are optional hardware") ----
+    // The gate itself is unchanged -- it delegates to
+    // config_params_all_required_set() -- but this is the end-to-end
+    // statement of the behaviour the change exists to deliver, and the
+    // negative half below is what stops it being a blanket escape hatch.
+    TEST_SECTION("commissioning_gate -- a board with no CTs fitted can be commissioned");
+
+    config_store_record_t no_ct;
+    config_store_default(&no_ct);
+    stage_full_commissioning_except_ct_map(&no_ct);
+
+    // Negative first: same record, ct_installed never answered.
+    TEST_CHECK(commissioning_gate_energize_allowed(true, &no_ct) == false,
+               "no CT map and the CT question unanswered: an ON request is still REFUSED");
+
+    kilnlink_param_value_t ctv;
+    config_store_record_t claims_ct = no_ct;
+    ctv.u8_val = 1u;
+    config_params_set(&claims_ct, 0x0109u, KILNLINK_PARAM_TYPE_U8, ctv);
+    claims_ct.calibration_missing = !config_params_all_required_set(&claims_ct);
+    TEST_CHECK(commissioning_gate_energize_allowed(true, &claims_ct) == false,
+               "CTs declared FITTED but never mapped: an ON request is still REFUSED");
+
+    // Positive: the declared-absent board commissions and may heat.
+    ctv.u8_val = 0u;
+    config_params_set(&no_ct, 0x0109u, KILNLINK_PARAM_TYPE_U8, ctv);
+    no_ct.calibration_missing = !config_params_all_required_set(&no_ct);
+    TEST_CHECK(!no_ct.calibration_missing,
+               "declaring no CTs fitted clears calibration_missing with no ct_channel_map");
+    TEST_CHECK(commissioning_gate_is_commissioned(&no_ct),
+               "a CT-less board IS commissioned once the CT question is answered 'no'");
+    TEST_CHECK(commissioning_gate_energize_allowed(true, &no_ct) == true,
+               "CTs declared absent: an ON (heating enable) request is ALLOWED");
+    TEST_CHECK(commissioning_gate_energize_allowed(false, &no_ct) == true,
+               "CTs declared absent: an OFF request is allowed, as always");
 }

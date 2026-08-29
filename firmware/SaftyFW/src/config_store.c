@@ -82,7 +82,18 @@
 //    213     8  i_normal_a[3][1..2] (f32 LE x2)
 //    221     2  overcurrent_pct (u16 LE)
 //    223     4  overcurrent_time_s (u32 LE)
-//    227   277  reserved, 0xFF-filled (headroom for a future field)
+//    227     1  ct_installed_marker (u8) -- same positive-assertion marker
+//               convention as safety_tc_installed_marker at 204: only the
+//               explicit CT_INSTALLED_MARKER_NOT_INSTALLED (0xA5) byte
+//               decodes as "no CTs fitted"; 0x00 (a legacy record's zeroed
+//               reserved byte), 0xFF (erased flash / the reserved fill) and
+//               anything else decode as INSTALLED, the strict state. Unlike
+//               safety_tc_installed this field is additionally gated by
+//               CONFIG_STORE_SET_CT_INSTALLED, so a legacy record cannot
+//               even reach the value -- the marker convention is belt and
+//               braces, deliberately, because the consequence of a
+//               mis-decode here is three disarmed guards.
+//    228   276  reserved, 0xFF-filled (headroom for a future field)
 //    504     4  record_crc32, over bytes [0, 504)
 //    508     4  reserved, 0xFF-filled (pad to CONFIG_STORE_RECORD_LEN)
 //    512  total = CONFIG_STORE_RECORD_LEN
@@ -144,8 +155,9 @@
 #define REC_OFF_I_NORMAL_A             (REC_OFF_MAX_EXPECTED_POWER_W + 4u) /* 209 */
 #define REC_OFF_OVERCURRENT_PCT        (REC_OFF_I_NORMAL_A + 3u * 4u)      /* 221 */
 #define REC_OFF_OVERCURRENT_TIME_S     (REC_OFF_OVERCURRENT_PCT + 2u)      /* 223 */
-#define REC_OFF_RESERVED               (REC_OFF_OVERCURRENT_TIME_S + 4u)  /* 227 */
-#define REC_RESERVED_LEN               277u
+#define REC_OFF_CT_INSTALLED           (REC_OFF_OVERCURRENT_TIME_S + 4u)  /* 227 */
+#define REC_OFF_RESERVED               (REC_OFF_CT_INSTALLED + 1u)        /* 228 */
+#define REC_RESERVED_LEN               276u
 
 // The one byte at REC_OFF_SAFETY_TC_INSTALLED is NOT a 0/1 bool -- see this
 // file's own layout-table comment above for the hardware-confirmed reason:
@@ -159,6 +171,14 @@
 // decoder actually depends on).
 #define SAFETY_TC_INSTALLED_MARKER_INSTALLED     0x01u
 #define SAFETY_TC_INSTALLED_MARKER_NOT_INSTALLED 0xA5u
+
+// ct_installed uses the identical encoding, for the identical reason -- see
+// REC_OFF_CT_INSTALLED in this file's layout table. Same two byte values on
+// purpose: two different meanings for 0xA5 at two different offsets is one
+// fewer magic number to remember than two different sentinels would be, and
+// the offsets are what disambiguate them.
+#define CT_INSTALLED_MARKER_INSTALLED            0x01u
+#define CT_INSTALLED_MARKER_NOT_INSTALLED        0xA5u
 #define REC_OFF_CRC                    504u
 
 // --- v1 (legacy) byte layout -- kept ONLY for config_store_unpack()'s
@@ -344,6 +364,9 @@ void config_store_pack(const config_store_record_t *rec,
                                             ? SAFETY_TC_INSTALLED_MARKER_INSTALLED
                                             : SAFETY_TC_INSTALLED_MARKER_NOT_INSTALLED;
 
+    out[REC_OFF_CT_INSTALLED] = rec->ct_installed ? CT_INSTALLED_MARKER_INSTALLED
+                                                  : CT_INSTALLED_MARKER_NOT_INSTALLED;
+
     put_f32_le(&out[REC_OFF_MAX_EXPECTED_POWER_W], rec->max_expected_power_w);
 
     for (unsigned ch = 0; ch < 3; ch++) {
@@ -459,6 +482,16 @@ static void unpack_v2_fields(const uint8_t *in, config_store_record_t *out)
     // corrects.
     out->safety_tc_installed =
         (in[REC_OFF_SAFETY_TC_INSTALLED] == SAFETY_TC_INSTALLED_MARKER_NOT_INSTALLED) ? 0u : 1u;
+
+    // ct_installed -- identical decode, identical safe-direction reasoning:
+    // every byte except the one explicit "not installed" sentinel means
+    // INSTALLED, i.e. the state in which ct_channel_map stays required and
+    // S3/S4/S9/S14 stay armed. Callers must additionally check
+    // CONFIG_STORE_SET_CT_INSTALLED before treating a 0 here as an operator's
+    // answer rather than a decode artefact (safety_core.c and
+    // config_params_all_required_set() both do).
+    out->ct_installed =
+        (in[REC_OFF_CT_INSTALLED] == CT_INSTALLED_MARKER_NOT_INSTALLED) ? 0u : 1u;
 
     // Raw decode only -- CONFIG_STORE_SET_MAX_EXPECTED_POWER_W (already read
     // into out->fields_set above) is what gates whether any caller may trust
@@ -710,6 +743,12 @@ void config_store_default(config_store_record_t *out)
                                       // pass clears it -- see config_store.h
     out->safety_tc_installed = 1u;   // default: installed -- see config_store.h's
                                       // header comment on this field
+    out->ct_installed = 1u;          // default: installed = STRICT. The value
+                                      // is only reachable once
+                                      // CONFIG_STORE_SET_CT_INSTALLED is set
+                                      // (it is ASKED, not defaulted), but if
+                                      // anything ever does read it unguarded
+                                      // it must read as the armed state.
 
     // Section 2: temperature guards -- CONFIG_REFERENCE.md section 2 defaults.
     out->firing_margin_c = 100.0f;

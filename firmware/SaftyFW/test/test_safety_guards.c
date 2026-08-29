@@ -2968,6 +2968,206 @@ static void test_deciding_threshold(void)
                "SAFETY_TRIP_NONE: NaN (no trip to describe)");
 }
 
+
+/* --- CTs declared absent: S3/S4/S9/S14 go INERT, not silently "passing" -----
+ *
+ * ROADMAP.md M12, "CTs are optional hardware". Every check here is written as
+ * a PAIR: the same tick, evaluated once with current_sensing_disabled false
+ * and once with it true. The false half is what makes the true half mean
+ * something -- a test that only asserted "disabled: no trip" would pass just
+ * as well against a guard that never worked at all.
+ */
+static void test_ct_disabled_guards(void)
+{
+    TEST_SECTION("CTs declared absent -- S3/S4/S9/S14 report inactive, and the armed case still fires");
+
+    safety_guard_cfg_t cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.stuck_on_time_s = 20.0f;
+    cfg.trip_verify_s = 10.0f;
+    cfg.correlation_window_s = 150.0f;
+    cfg.overcurrent_pct = 150u;
+    cfg.overcurrent_time_s = 30.0f;
+    cfg.i_normal_valid[0] = true;
+    cfg.i_normal_a[0] = 10.0f;
+
+    /* --- S3 (TRIP): current present, nothing commanded on ----------------- */
+    {
+        /* ARMED. This is the exact tick shape a CT-less board produces all by
+         * itself: current_presence_policy.c's uncalibrated counts fallback
+         * reads the AD8542's offset floor as "present" forever, and nothing
+         * is commanded on. Left alone it TRIPS -- which is the whole reason
+         * the disable flag cannot just be "ignore the reading". */
+        safety_guard_state_t st;
+        safety_guards_reset(&st);
+        safety_guard_input_t in = base_input();
+        in.context_valid = true;
+        in.any_current_present = true;
+        in.relay_commanded_recently = false;
+        bool tripped = false;
+        for (int i = 0; i < 250 && !tripped; i++) { /* 25 s > stuck_on_time_s */
+            tripped = safety_guards_tick(&st, &cfg, &in);
+        }
+        TEST_CHECK(tripped && st.reason == SAFETY_TRIP_LOAD_STUCK_ON,
+                   "S3 ARMED: sustained current with nothing commanded TRIPS (the bug the flag prevents)");
+        TEST_CHECK(!st.ct_guards_disabled,
+                   "S3 ARMED: ct_guards_disabled reports false -- the guards ARE watching");
+    }
+    {
+        /* DISABLED: identical input, plus the declaration. */
+        safety_guard_state_t st;
+        safety_guards_reset(&st);
+        safety_guard_input_t in = base_input();
+        in.context_valid = true;
+        in.any_current_present = true;
+        in.relay_commanded_recently = false;
+        in.current_sensing_disabled = true;
+        bool tripped = false;
+        for (int i = 0; i < 600 && !tripped; i++) { /* 60 s, 3x stuck_on_time_s */
+            tripped = safety_guards_tick(&st, &cfg, &in);
+        }
+        TEST_CHECK(!tripped, "S3 DISABLED: no trip, however long the phantom reading persists");
+        TEST_CHECK(st.s3_stuck_elapsed_s == 0.0f,
+                   "S3 DISABLED: the accumulator is held at zero, not merely under threshold");
+        TEST_CHECK(st.ct_guards_disabled,
+                   "S3 DISABLED: ct_guards_disabled is TRUE -- inactive is REPORTED, not silent");
+    }
+
+    /* --- S4 (WARN): heat commanded, no current seen ----------------------- */
+    {
+        safety_guard_state_t st;
+        safety_guards_reset(&st);
+        safety_guard_input_t in = base_input();
+        in.context_valid = true;
+        in.relay_commanded_continuously = true;
+        in.any_current_present = false;
+        safety_guards_tick(&st, &cfg, &in);
+        TEST_CHECK(st.s4_warn, "S4 ARMED: relay commanded with no current WARNs");
+
+        in.current_sensing_disabled = true;
+        safety_guards_tick(&st, &cfg, &in);
+        TEST_CHECK(!st.s4_warn,
+                   "S4 DISABLED: no warn -- otherwise every firing on a CT-less board warns forever");
+    }
+
+    /* --- S9 (unclearable TRIP_INEFFECTIVE): must not latch, and must not
+     *     claim the fix is 'finish commissioning' -------------------------- */
+    {
+        safety_guard_state_t st;
+        safety_guards_reset(&st);
+        safety_guard_input_t in = base_input();
+        in.context_valid = true;
+        in.any_current_present = true;
+        in.relay_deenergized = true;
+        in.current_sensing_commissioned = false; /* true of any CT-less board:
+                                                  * k_ct_v_per_a is 0 */
+        in.estop_pressed = true;                 /* force a trip so S9's window opens */
+        safety_guards_tick(&st, &cfg, &in);
+        in.estop_pressed = false;
+        for (int i = 0; i < 300; i++) { /* 30 s > trip_verify_s */
+            safety_guards_tick(&st, &cfg, &in);
+        }
+        TEST_CHECK(!st.trip_ineffective,
+                   "S9 uncommissioned: does not latch trip_ineffective (pre-existing gate)");
+        TEST_CHECK(st.s9_uncommissioned_warn,
+                   "S9 uncommissioned: DOES raise the 'commission the chain' warn");
+
+        /* Now the same board, with the CT question answered 'none fitted'.
+         * The warn must go away: telling an operator to commission a current
+         * chain that has no sensor is advice they cannot act on. */
+        safety_guard_state_t st2;
+        safety_guards_reset(&st2);
+        safety_guard_input_t in2 = in;
+        in2.current_sensing_disabled = true;
+        in2.estop_pressed = true;
+        safety_guards_tick(&st2, &cfg, &in2);
+        in2.estop_pressed = false;
+        for (int i = 0; i < 300; i++) {
+            safety_guards_tick(&st2, &cfg, &in2);
+        }
+        TEST_CHECK(!st2.trip_ineffective, "S9 DISABLED: still does not latch trip_ineffective");
+        TEST_CHECK(!st2.s9_uncommissioned_warn,
+                   "S9 DISABLED: the 'finish commissioning' warn is suppressed -- it is not the truth here");
+        TEST_CHECK(st2.ct_guards_disabled,
+                   "S9 DISABLED: ct_guards_disabled survives the already-tripped path too");
+    }
+
+    /* --- S14 (WARN): per-channel over-normal current ---------------------- */
+    {
+        safety_guard_state_t st;
+        safety_guards_reset(&st);
+        safety_guard_input_t in = base_input();
+        in.context_valid = true;
+        in.amps_valid[0] = true;
+        in.amps[0] = 30.0f; /* 300% of the 10 A normal */
+        in.relay_commanded_now_for_ct[0] = true;
+        for (int i = 0; i < 400; i++) { /* 40 s > overcurrent_time_s */
+            safety_guards_tick(&st, &cfg, &in);
+        }
+        TEST_CHECK(st.s14_warn[0], "S14 ARMED: sustained 300%-of-normal current WARNs");
+
+        safety_guard_state_t st2;
+        safety_guards_reset(&st2);
+        safety_guard_input_t in2 = in;
+        in2.current_sensing_disabled = true;
+        for (int i = 0; i < 400; i++) {
+            safety_guards_tick(&st2, &cfg, &in2);
+        }
+        TEST_CHECK(!st2.s14_warn[0], "S14 DISABLED: no warn");
+        TEST_CHECK(st2.s14_over_elapsed_s[0] == 0.0f,
+                   "S14 DISABLED: the accumulator is held at zero, not merely under threshold");
+    }
+
+    /* --- The guards that must be UNAFFECTED -------------------------------
+     * The declaration disarms four CT-fed guards and nothing else. S7
+     * (E-stop) is the check that would notice a flag accidentally wired into
+     * the shared context block, since it sits before it. */
+    {
+        safety_guard_state_t st;
+        safety_guards_reset(&st);
+        safety_guard_input_t in = base_input();
+        in.current_sensing_disabled = true;
+        in.estop_pressed = true;
+        TEST_CHECK(safety_guards_tick(&st, &cfg, &in) && st.reason == SAFETY_TRIP_ESTOP,
+                   "S7 still trips with CTs declared absent -- the flag disarms four guards, not the module");
+    }
+    {
+        /* S6b's UNCONDITIONAL hard backstop still fires. Its soft,
+         * current-keyed tier does not -- the known, documented degradation of
+         * running without CTs (safety_guard_input_t::current_sensing_disabled). */
+        safety_guard_cfg_t lcfg = cfg;
+        lcfg.link_timeout_s = 10.0f;
+        lcfg.link_dead_hard_s = 120.0f;
+
+        safety_guard_state_t soft;
+        safety_guards_reset(&soft);
+        safety_guard_input_t in = base_input();
+        in.link_up = false;
+        /* any_current_present FALSE alongside the declaration, because that
+         * is the pair safety_core.c actually produces: it forces the reading
+         * to its no-information state at the producer (see its cts_disabled
+         * block). safety_guards.c itself does NOT special-case S6b -- this
+         * check documents the resulting end-to-end behaviour, and the fact
+         * that it is the producer, not this module, that closes the soft
+         * tier. Setting any_current_present true here alongside the flag
+         * would trip at the soft threshold, which is exactly why the two must
+         * be forced together upstream. */
+        in.any_current_present = false;
+        in.current_sensing_disabled = true;
+        bool tripped = false;
+        for (int i = 0; i < 500 && !tripped; i++) { /* 50 s: past soft, short of hard */
+            tripped = safety_guards_tick(&soft, &lcfg, &in);
+        }
+        TEST_CHECK(!tripped,
+                   "S6b DISABLED: the soft current-keyed tier is unreachable -- the accepted degradation");
+        for (int i = 0; i < 800 && !tripped; i++) { /* on to 130 s */
+            tripped = safety_guards_tick(&soft, &lcfg, &in);
+        }
+        TEST_CHECK(tripped && soft.reason == SAFETY_TRIP_LINK_DEAD,
+                   "S6b DISABLED: the unconditional hard backstop STILL fires -- protection is degraded, not gone");
+    }
+}
+
 void run_test_safety_guards(void)
 {
     test_s1();
@@ -2992,4 +3192,5 @@ void run_test_safety_guards(void)
     test_try_clear();
     test_decide_clear_trip_outcome();
     test_deciding_threshold();
+    test_ct_disabled_guards();
 }

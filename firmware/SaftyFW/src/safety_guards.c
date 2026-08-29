@@ -293,6 +293,13 @@ float safety_guards_deciding_threshold_c(safety_trip_t reason, const safety_guar
 bool safety_guards_tick(safety_guard_state_t *state, const safety_guard_cfg_t *cfg,
                          const safety_guard_input_t *in)
 {
+    /* Level-tracked, non-latching, evaluated before anything else and on
+     * EVERY path through this function including the already-tripped one --
+     * "the CT-fed guards are not watching" is a fact about this board, not
+     * about this tick's outcome, so it must not disappear the moment
+     * something trips. See safety_guard_input_t::current_sensing_disabled. */
+    state->ct_guards_disabled = in->current_sensing_disabled;
+
     if (state->is_tripped) {
         /* --- S9: trip ineffective / contactor welded -------------------------
          * The one guard that must keep evaluating after a trip -- everything
@@ -355,7 +362,19 @@ bool safety_guards_tick(safety_guard_state_t *state, const safety_guard_cfg_t *c
                  * This only changes what evidence is required to set it. */
                 if (state->s9_verify_elapsed_s >= verify_th && in->context_valid &&
                     in->any_current_present) {
-                    if (in->current_sensing_commissioned) {
+                    if (in->current_sensing_disabled) {
+                        /* No CT is fitted. any_current_present here is the
+                         * op-amp offset floor read through an uncalibrated
+                         * chain, not evidence that K4 failed to open. Do not
+                         * progress the streak, and do NOT raise
+                         * s9_uncommissioned_warn -- that warn's meaning is
+                         * "commission the current chain and S9 comes back",
+                         * which is not true on a board that has no sensor to
+                         * commission. state->ct_guards_disabled (set at the
+                         * top of this function) is the honest report. */
+                        state->s9_current_present_streak = 0;
+                        state->s9_uncommissioned_warn = false;
+                    } else if (in->current_sensing_commissioned) {
                         state->s9_uncommissioned_warn = false;
                         if (state->s9_current_present_streak < UINT8_MAX) {
                             state->s9_current_present_streak++;
@@ -693,7 +712,13 @@ bool safety_guards_tick(safety_guard_state_t *state, const safety_guard_cfg_t *c
          * relay_recent_mask-derived "was anything commanded on in the last
          * correlation_window_s" fact -- this module trusts it as a
          * caller-computed input the same way it trusts context_valid. */
-        if (in->any_current_present && !in->relay_commanded_recently) {
+        if (in->current_sensing_disabled) {
+            /* INERT, not passing. Without this branch a CT-less board trips
+             * SAFETY_TRIP_LOAD_STUCK_ON within stuck_on_time_s of boot, off
+             * the uncalibrated presence heuristic -- see
+             * safety_guard_input_t::current_sensing_disabled. */
+            state->s3_stuck_elapsed_s = 0.0f;
+        } else if (in->any_current_present && !in->relay_commanded_recently) {
             state->s3_stuck_elapsed_s += in->dt_s;
             float stuck_th = effective_f(cfg->stuck_on_time_s, STUCK_ON_TIME_S_DEFAULT);
             if (state->s3_stuck_elapsed_s >= stuck_th) {
@@ -709,7 +734,8 @@ bool safety_guards_tick(safety_guard_state_t *state, const safety_guard_cfg_t *c
         /* --- S4: heat commanded but load inactive -- WARN only, never TRIP -----
          * A design decision, not an oversight (SAFETY_MODEL.md section 4,
          * S4): a dead element ruins a firing, it does not start one. */
-        state->s4_warn = in->relay_commanded_continuously && !in->any_current_present;
+        state->s4_warn = !in->current_sensing_disabled && in->relay_commanded_continuously &&
+                          !in->any_current_present;
 
         /* --- S10: safety TC disagrees with every zone TC -- WARN only ----------
          * CHAMBER_AGREED only, same reasoning as S2 (SAFETY_MODEL.md section
@@ -780,7 +806,8 @@ bool safety_guards_tick(safety_guard_state_t *state, const safety_guard_cfg_t *c
          * channels -- three zones on one kiln can legitimately differ 2x in
          * draw. */
         for (int ch = 0; ch < 3; ch++) {
-            bool active = cfg->i_normal_valid[ch] && cfg->i_normal_a[ch] > 0.0f &&
+            bool active = !in->current_sensing_disabled && cfg->i_normal_valid[ch] &&
+                          cfg->i_normal_a[ch] > 0.0f &&
                           in->amps_valid[ch] && in->relay_commanded_now_for_ct[ch];
             if (!active) {
                 state->s14_over_elapsed_s[ch] = 0.0f;

@@ -1960,10 +1960,11 @@ static void link_task_send_config_page(uint8_t page_index)
     config_store_record_t rec;
     config_store_get_full_record(&rec);
 
-    // 64 is config_params.c's own compile-time upper bound on its id table
-    // (config_params_table_fits_64) -- comfortably above its real size
-    // today, checked there so this array can never silently truncate.
-    kilnlink_config_page_entry_t all[64];
+    // 72 is config_params.c's own compile-time upper bound on its id table
+    // (config_params_table_fits_72) -- comfortably above its real size
+    // today (65 after ct_installed/0x0109), checked there so this array can
+    // never silently truncate. Change the two together, never one alone.
+    kilnlink_config_page_entry_t all[72];
     size_t all_cap = sizeof(all) / sizeof(all[0]);
     size_t total = config_params_count();
     if (total > all_cap) {

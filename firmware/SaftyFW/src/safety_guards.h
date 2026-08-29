@@ -387,6 +387,62 @@ typedef struct {
      * idiom) while uncommissioned, TRIP-ESCALATE once commissioned. */
     bool current_sensing_commissioned;
 
+    /* S3/S4/S9/S14. True iff the operator has EXPLICITLY declared that this
+     * board has no current transformers fitted (config_store.h's
+     * ct_installed == 0 *with* CONFIG_STORE_SET_CT_INSTALLED set -- an
+     * unanswered question is never "disabled").
+     *
+     * Named with the INVERTED sense, the same choice and for the same reason
+     * as safety_tc_not_installed_declared above: false is the fully-armed
+     * state, so a zero-initialised input struct -- every existing host test,
+     * every future caller that forgets this field -- keeps the normal guard
+     * behaviour, and only a deliberate positive assertion disarms anything.
+     *
+     * What it MEANS, precisely: `any_current_present` and `amps[]` carry no
+     * information at all on this board. Not "no current" -- NO SENSOR. The
+     * ADC channels still read a number (the AD8542's DC offset floor,
+     * CURRENT_SENSE.md section 1), and current_presence_policy.c's
+     * uncalibrated counts-domain fallback reads that floor as "current
+     * present" on every tick forever. Left alone, that would make S3 (a
+     * TRIP) fire on a healthy CT-less board within stuck_on_time_s. So this
+     * flag is not a convenience: without it, "no CT fitted" is not merely
+     * unprotected, it is actively unsafe-by-nuisance.
+     *
+     * What each guard does with it (safety_guards.c has the per-guard
+     * detail):
+     *
+     *   S3  LOAD_STUCK_ON (TRIP)  -> INERT. Reports inactive, never
+     *                               "passing": there is no evidence either
+     *                               way about a welded SSR on this board.
+     *   S4  load-inactive (WARN)  -> INERT. Otherwise it would assert
+     *                               permanently on every firing, which is
+     *                               worse than silence: a warning that is
+     *                               always on trains an operator to ignore
+     *                               warnings.
+     *   S9  TRIP_INEFFECTIVE      -> INERT, and distinctly so. Already
+     *                               gated by current_sensing_commissioned
+     *                               (k_ct_v_per_a == 0 on a CT-less board),
+     *                               but that gate reports
+     *                               s9_uncommissioned_warn -- "finish
+     *                               commissioning and this comes back",
+     *                               which on a CT-less board is a lie. This
+     *                               flag takes precedence and reports
+     *                               ct_guards_disabled instead.
+     *   S14 over-current (WARN)   -> INERT per channel.
+     *
+     * What it deliberately does NOT do: S6b. That guard's SOFT (link_timeout_s)
+     * trip is keyed on any_current_present, so on a CT-less board it becomes
+     * unreachable and S6b degrades to its unconditional link_dead_hard_s
+     * backstop alone. This is a REAL loss of protection and it is left in
+     * place rather than papered over, because the only local substitute for
+     * "is heat on" that does not require the (by definition dead) link is
+     * SaftyFW's own K4 energization state, and re-keying a TRIP-class guard
+     * onto a different input is a change to what S6b MEANS -- SAFETY_MODEL.md
+     * section 4's decision, not this pass's. Recorded in
+     * docs/GUARD_TEST_MATRIX.md as the known, accepted degradation of
+     * running without CTs. */
+    bool current_sensing_disabled;
+
     /* S13. sample_counter_advancing is already the caller's comparison of
      * this tick's context frame's per-zone sample_counter against the last
      * one seen (SAFETY_MODEL.md section 4, S13) -- this module has no
@@ -530,6 +586,13 @@ typedef struct {
      * the condition stops holding (current present is gone, OR current
      * sensing becomes commissioned and the streak takes over instead). */
     bool  s9_uncommissioned_warn;
+    /* True on any tick evaluated with in->current_sensing_disabled set.
+     * Purely a REPORTING field -- nothing in this module reads it back. It
+     * exists so "S3/S4/S9/S14 did not fire" is distinguishable, at the
+     * caller and on the wire, from "S3/S4/S9/S14 are not watching", which is
+     * the whole difference between a guard passing and a guard being absent.
+     * Non-latching, like every other *_warn level in this struct. */
+    bool  ct_guards_disabled;
     bool  trip_ineffective;
 
     /* S10: WARN only, sustained-disagreement timer + level. */
