@@ -18,11 +18,12 @@ own refusal to author a segment above 80 C
 (assert_within_fixture_ceiling). No test in this file ever raises a ceiling
 or requests heat enable directly.
 
-WHAT IT PROVES TODAY, AND WHAT CHANGES LATER. No current transformer is
-fitted to this bench, so ``ct_channel_map[0..2]`` is uncommitted, SaftyFW's
-commissioning_gate.c reports calibration_missing, and heat is refused. The
-firing test therefore branches on ``heat_is_permitted()`` -- the board's own
-live verdict, never a hardcoded expectation:
+WHICH BRANCH RUNS. Every firing test here branches on
+``heat_is_permitted()`` -- the board's own live verdict, never a hardcoded
+expectation. Since ``ct_installed = 0`` made this CT-less bench commissionable
+(2026-08-28) the answer is True and the heat-permitted branches are the ones
+that run; the refusal branches remain, asserted, for a board that is not
+commissioned:
 
   * heat refused (today): the start endpoint itself ACCEPTS (measured, not
     assumed -- the gate is downstream of profile_executor.c), so the
@@ -346,3 +347,209 @@ def test_uart_pid_half_reported(bench_session):
     assert bench_session.uart_detail != "not attempted"
     print(f"\n[live] UART PID half: available={bench_session.uart_available} "
           f"({bench_session.uart_detail})")
+
+
+# ---------------------------------------------------------------------------
+# FULL MULTI-SEGMENT PROFILE
+# ---------------------------------------------------------------------------
+#
+# Everything above fires a SINGLE segment. That answers "does the gate open"
+# and "does heat flow", and it cannot answer the questions a real firing is
+# made of: does the executor advance from one segment to the next, does a
+# dwell hold, does a DOWN-ramp behave (heat off, PV falls, no fault), and
+# does the run reach `complete` on its own with every relay released and K4
+# given back -- rather than being stopped by the test's own teardown.
+#
+# Slot and shape. The same user slot 7 the other tests use, so the bench's
+# authored profiles stay untouched. Three segments, chosen against MEASURED
+# numbers rather than round ones: this jig rises 2.8-3.8 C/min at full duty,
+# so a 180 C/hr (3.0 C/min) ramp is achievable without saturating for the
+# whole segment, and the 10 C steps take a few minutes each.
+
+FULL_PROFILE_SLOT = 7
+FULL_PROFILE_NAME = "multi3"
+#: (target_c, ramp_c_per_hr, dwell_min). Peak 52 C -- 28 C of margin under
+#: the 80 C fixture ceiling, and the harness refuses any segment above it
+#: independently (BenchSession.put_profile).
+#
+#: RAMP AND DWELL ARE CHOSEN AGAINST THE PLANT, not for tidiness. A dwell is
+#: timed from the SETPOINT arriving, not the PV, so a profile whose ramp
+#: outruns the jig completes with the PV still climbing -- and then reads as
+#: a firing that never got hot. (Exactly that bug was found the same day in
+#: the step test's own profile: a 900 C/hr ramp with a 1-minute dwell ended
+#: the run at 105 s with PV at 38.6 C.) 150 C/hr is 2.5 C/min, comfortably
+#: inside this jig's measured 2.8-3.8 C/min, so the PV tracks the setpoint
+#: instead of chasing it; the 6-minute dwells then give it time to close any
+#: remaining lag before the next segment starts.
+FULL_PROFILE_SEGMENTS = [
+    {"target_c": 42.0, "ramp_c_per_hr": 150.0, "dwell_min": 6},
+    {"target_c": 52.0, "ramp_c_per_hr": 150.0, "dwell_min": 6},
+    # The down-ramp. No cooling hardware exists, so this segment is
+    # satisfied by the executor holding heat OFF and letting the jig fall --
+    # which is exactly the behaviour worth checking, because a controller
+    # that keeps driving into a descending setpoint is one that overshoots
+    # every real cooling ramp.
+    {"target_c": 46.0, "ramp_c_per_hr": 600.0, "dwell_min": 1},
+]
+#: Total budget. Ramp+dwell is ~8 minutes per rising segment; the passive
+#: down-ramp is the slow one (this jig sheds heat far more slowly than it
+#: gains it). 45 minutes is generous against a ~30 minute expectation, and
+#: it is a BUDGET: exceeding it fails, naming the state it was stuck in.
+FULL_PROFILE_BUDGET_S = float(os.environ.get("KILNCTRL_BENCH_PROFILE_BUDGET_S", "2700"))
+FULL_PROFILE_POLL_S = 10.0
+
+
+def test_full_multi_segment_profile_runs_to_completion(cold_bench, capsys):
+    """Run a real three-segment firing end to end and assert on every stage.
+
+    Takes ``cold_bench``: segment 0's ramp is only meaningful from ambient,
+    and starting on a previous test's residual heat would let the executor
+    walk straight into the dwell without ever ramping.
+    """
+    bench = cold_bench
+    permitted, why = heat_is_permitted(bench)
+    if not permitted:
+        pytest.skip(f"heat is not permitted on this bench ({why}); a full profile firing "
+                    "cannot be verified without it")
+
+    start_c = bench.hottest_channel_c()
+    print(f"\n[live] full profile: starting at {start_c:.2f} C")
+    assert start_c < FULL_PROFILE_SEGMENTS[0]["target_c"] - 2.0, (
+        f"the bench is already at {start_c:.2f} C, at or above segment 0's "
+        f"{FULL_PROFILE_SEGMENTS[0]['target_c']} C target -- there is no ramp to observe")
+
+    bench.put_profile(FULL_PROFILE_SLOT, FULL_PROFILE_NAME, zone_mask=0x1,
+                      segments=FULL_PROFILE_SEGMENTS)
+    code, body = bench.start_profile(FULL_PROFILE_SLOT)
+    print(f"[live] POST /api/profile_exec/start -> {code} {body.strip()[:160]}")
+    assert code == 200 and '"ok":true' in body.replace(" ", ""), (code, body)
+
+    running = bench.wait_for_exec_state(("running",), timeout_s=20.0)
+    assert running["state"] == "running", running
+
+    # ---- follow the whole run ------------------------------------------
+    rows = []
+    segments_seen = []
+    dwelled = set()
+    k4_samples = 0
+    peak_c = start_c
+    deadline = time.monotonic() + FULL_PROFILE_BUDGET_S
+    t0 = time.monotonic()
+    final = running
+    while True:
+        ex = bench.exec_status()
+        status = bench.status()
+        temps = {int(c["channel"]): float(c["temp_c"])
+                 for c in status["channels"] if c.get("valid")}
+        zone_c = temps.get(0, float("nan"))
+        peak_c = max(peak_c, max(temps.values()) if temps else peak_c)
+        row = {"t_s": round(time.monotonic() - t0, 1), "state": ex.get("state"),
+               "seg": ex.get("segment_index"), "dwelling": ex.get("dwelling"),
+               "target_c": ex.get("target_c"), "zone_c": zone_c,
+               "relays_on": [r["relay"] for r in status["relays"] if r["on"]],
+               "k4": status["safety_relay_energized"],
+               "ramp_lock_held": ex.get("ramp_lock_held"),
+               "ramp_lock_lagging_mask": ex.get("ramp_lock_lagging_mask")}
+        rows.append(row)
+        if row["k4"]:
+            k4_samples += 1
+        if row["state"] == "running" and row["seg"] is not None and (
+                not segments_seen or segments_seen[-1] != row["seg"]):
+            segments_seen.append(row["seg"])
+            print(f"[live] t={row['t_s']:.0f}s entering segment {row['seg']} "
+                  f"(target {row['target_c']}, PV {zone_c:.2f} C)")
+        if row["dwelling"] and row["seg"] is not None:
+            dwelled.add(row["seg"])
+
+        # Ceiling, on every sample, from the test side as well as the board's.
+        assert peak_c <= FIXTURE_MAX_TEMP_C, (f"peak {peak_c:.2f} C", row)
+        assert (row["target_c"] or 0.0) <= FIXTURE_MAX_TEMP_C, row
+
+        if row["state"] != "running":
+            final = ex
+            break
+        if time.monotonic() >= deadline:
+            final = ex
+            break
+        time.sleep(FULL_PROFILE_POLL_S)
+
+    elapsed = time.monotonic() - t0
+    print(f"[live] run ended after {elapsed:.0f}s in state {final.get('state')!r} "
+          f"(fault_reason={final.get('fault_reason')!r}); peak {peak_c:.2f} C; "
+          f"segments seen {segments_seen}; dwelled in {sorted(dwelled)}; "
+          f"K4 closed on {k4_samples}/{len(rows)} samples")
+
+    # ---- assertions ----------------------------------------------------
+    # "done", not "complete" -- dashboard_http.c's exec_state_name() maps
+    # PROFILE_EXEC_DONE to "done", and that is the string a client sees. The
+    # first version of this assertion guessed "complete" and failed a run that
+    # had in fact finished perfectly, which is its own small lesson about
+    # asserting on a wire format from memory.
+    assert final.get("state") == "done", (
+        f"the profile did not complete: state={final.get('state')!r}, "
+        f"fault_reason={final.get('fault_reason')!r}, last rows {rows[-3:]}")
+
+    # Every segment was entered, in order. A profile that jumps a segment
+    # completes just as cleanly as one that ran it.
+    assert segments_seen == list(range(len(FULL_PROFILE_SEGMENTS))), (
+        f"segments were not entered in order: {segments_seen}")
+    # And every one of them actually dwelled -- a dwell that is skipped is
+    # the difference between a firing schedule and a list of temperatures.
+    # Superset, not equality: on the final tick the executor has already
+    # advanced segment_index past the last segment (to segment_count) while
+    # `dwelling` is still set from the segment that just ended, so a
+    # one-past-the-end index legitimately appears in this set.
+    assert dwelled >= set(range(len(FULL_PROFILE_SEGMENTS))), (
+        f"some segments never reported dwelling: saw {sorted(dwelled)}")
+
+    # The rising segments really did rise, and the peak got near the top
+    # target rather than the profile completing on a timer while cold.
+    top = max(s["target_c"] for s in FULL_PROFILE_SEGMENTS)
+    assert peak_c >= top - 3.0, (
+        f"the profile completed but the bench only reached {peak_c:.2f} C against a "
+        f"{top} C peak target -- it ran the clock, not the schedule")
+
+    # K4 was closed for a real fraction of the run. Not "every sample": the
+    # down-ramp segment is supposed to release heat, and a dwell at
+    # temperature cycles. A run with K4 closed on almost nothing is the
+    # 2026-08-29 defect returning (heat_enable.h).
+    assert k4_samples >= len(rows) // 4, (
+        f"K4 was closed on only {k4_samples} of {len(rows)} samples across the whole firing")
+
+    # The down-ramp: heat must actually have been released. Segment 2's
+    # target is BELOW segment 1's, so a controller still driving there would
+    # show relay 1 closed while PV sits above target.
+    seg2 = [r for r in rows if r["seg"] == 2 and r["state"] == "running"]
+    driving_over_target = [r for r in seg2
+                           if r["relays_on"] and r["zone_c"] > (r["target_c"] or 0.0) + 1.0]
+    assert not driving_over_target, (
+        "the executor kept commanding heat during the DOWN-ramp while already above its "
+        f"descending setpoint: {driving_over_target[:3]}")
+    if seg2:
+        print(f"[live] down-ramp: PV {seg2[0]['zone_c']:.2f} -> {seg2[-1]['zone_c']:.2f} C "
+              f"over {seg2[-1]['t_s'] - seg2[0]['t_s']:.0f}s with relays "
+              f"{sorted({x for r in seg2 for x in r['relays_on']})}")
+
+    # RAMP LOCK. This profile is single-zone (zone_mask 0x1), so the lock can
+    # never legitimately engage: profile_executor.c holds the shared setpoint
+    # only while a PARTICIPATING zone lags by more than
+    # PROFILE_EXECUTOR_RAMP_LOCK_BAND_C, and with one participant the lagging
+    # mask has nothing to hold for. Asserting it stayed clear is therefore a
+    # real check on the mask's bookkeeping -- a lagging bit set for a zone
+    # that is not in the profile would show up here and nowhere else.
+    #
+    # NOT a test of multi-zone ramp-lock coordination. That needs two zones
+    # in closed-loop control, and this bench runs zones 1 and 2 at
+    # control_mode 0 with zero gains (bench_fixture.json). Said plainly here
+    # rather than implied, so nobody reads this assertion as covering it.
+    stuck = [r for r in rows if r["ramp_lock_held"] or r["ramp_lock_lagging_mask"]]
+    assert not stuck, (
+        "ramp lock engaged during a SINGLE-zone profile, where no zone can lag another: "
+        + repr(stuck[:3]))
+
+    # ---- the board is left safe ----------------------------------------
+    after = bench.status()
+    assert [r["relay"] for r in after["relays"] if r["on"]] == [], after["relays"]
+    assert after["safety_relay_energized"] is False, (
+        "the run completed but K4 is still energized -- heat_enable's release did not run "
+        "on the completion path")

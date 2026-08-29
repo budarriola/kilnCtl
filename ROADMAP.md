@@ -384,6 +384,42 @@ soldering session.
       agreeing with the first (32.95 / 166.9 / 36.9) to within 5 % on K, which
       is the first time this board's plant model has been *reproduced* rather
       than merely measured. Gains still not accepted.
+      **Zone interaction — the RGA's first run on real data.**
+      `autotune_engine.h` said "no input cell has ever been filled on hardware
+      ... this has never run on measured data"; it has now. Two cold-start
+      autotune runs (zones 0 and 1, same power cycle — the matrix is RAM-only)
+      filled `K = [[30.181, 5.519], [11.822, 23.266]]`, and the board computed
+      `Λ = [[+1.1024, −0.1024], [−0.1024, +1.1024]]`, det 636.9. Every row and
+      column sums to 1.0000 — Bristol's identity, which is what the test
+      asserts, so it is a check on the implementation rather than on a number
+      someone typed. **Verdict: the loops interact mildly and independent
+      per-zone PID is legitimate on this jig.** Raw thermal coupling, measured
+      alongside and **asymmetric**: firing zone 0 raises ch1 by 17.5 % and ch2
+      by 8.7 % of its own rise; firing zone 1 raises ch0 by **43.5 %** and ch2
+      by 17.7 %. Zone 1 leaks into zone 0 about 2.5× as hard as the reverse,
+      which matters for any multi-zone schedule on this enclosure.
+      **Full multi-segment profile.** 42 °C dwell 6 → 52 °C dwell 6 → down-ramp
+      to 46 °C, run end to end through `POST /api/profile_exec/start`: all
+      three segments entered in order, all dwelled, peak 56.30 °C, K4 closed on
+      **112/113 samples**, no heat commanded during the down-ramp (PV
+      56.16 → 54.18 °C with relays open), ramp-lock never engaged, and every
+      relay plus K4 released by the completion path rather than by teardown.
+      *(NOT a test of multi-zone ramp-lock coordination — that needs two zones
+      in closed-loop control, and zones 1/2 are `control_mode 0` here.)*
+- [x] **Guard 1 aborted a healthy firing for settling.** Found by the profile
+      run above, on its second dwell: zone 0 holding 50.7 °C against a 52.0 °C
+      setpoint at full duty — the steady-state offset any finite-gain PID
+      leaves — and `thermal_guard.c` tripped with *"heating but rose only
+      −0.2C in 1min"*, aborting the whole firing. Guard 1 treated `error > 0`
+      as "still climbing toward setpoint"; those are different questions, and
+      once a loop arrives, high duty + positive error + not rising **is** the
+      correct state. Every sufficiently long dwell on a sufficiently lossy
+      zone would eventually abort. Fixed with an arrival band
+      (`progress_band_c`, default 3 °C): outside it guard 1 is unchanged, so a
+      dead element on a ramp — errors of tens of degrees — is still caught;
+      inside it the zone must not *fall*, which is guard 2's rate test applied
+      to a case that previously had no test at all. Five host tests, proven
+      load-bearing by forcing the band to 0 (two fail, both pass at 3).
 - [x] `pc_tools` moved to `tools/PcTools/`; GPIO probes built for both chips
       (ESP: deny-list incl. GPIO6; Pico: over SWD, GPIO6 read-only). **Pico
       probe bench-tested 2026-08-19, PASS.** ESP probe bench-tested 2026-08-19
