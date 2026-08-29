@@ -598,6 +598,99 @@ void run_test_thermal_guard(void)
         TEST_CHECK(!tripped, "frozen_eps_c==0 keeps the 0.05C default, so a 0.5C dither reads as movement");
     }
 
+    /* Guard 1's verdict follows the CONFIGURED rate, on one identical trace.
+     * 2026-08-29, the bench's real failure: zone 0 carried
+     * sanity_rate_c_per_min = 5.0 (a real kiln's figure) with a 60s window,
+     * and every firing died at t=62s on "rose only 0.0C in 1.0min (need
+     * >=5.0C)" -- while the jig genuinely was heating, just at well under
+     * 1C/min. The fix was config, not code, so what needs proving is that
+     * the number really is what decides: the SAME trace must fail at 5.0 and
+     * pass at 0.2. A guard that had quietly hardcoded either value would
+     * pass one of these two blocks and fail the other. */
+    {
+        /* 0.5C/min: a plausible slow-jig rise (0.0833C per 10s tick), run
+         * for 5 windows' worth so a sliding window cannot hide the verdict. */
+        const float rise_per_tick_c = 0.0833f; /* ~0.5 C/min at dt_s=10 */
+        struct { float rate; bool expect_trip; const char *what; } cases[] = {
+            {5.0f, true,  "5.0 C/min (the kiln figure this bench had) trips on a 0.5C/min rise"},
+            {0.2f, false, "0.2 C/min (the jig figure) passes the very same rise"},
+        };
+        for (unsigned c = 0; c < sizeof(cases) / sizeof(cases[0]); c++) {
+            thermal_guard_state_t s;
+            thermal_guard_cfg_t cfg = {.max_temp_c = 1300.0f, .min_temp_c = -20.0f,
+                                       .sanity_rate_c_per_min = cases[c].rate,
+                                       .wrong_dir_window_s = 60.0f};
+            thermal_guard_reset(&s);
+            thermal_guard_input_t in = base_input();
+            in.setpoint_c = 500.0f;
+            in.measurement_c = 20.0f;
+            in.commanded_duty = 1.0f;
+            bool tripped = false;
+            for (int i = 0; i < 30 && !tripped; i++) { /* 300s = 5 x 60s window */
+                in.measurement_c += rise_per_tick_c;
+                tripped = thermal_guard_tick(&s, &cfg, &in);
+            }
+            TEST_CHECK(tripped == cases[c].expect_trip, cases[c].what);
+            if (cases[c].expect_trip) {
+                TEST_CHECK(!tripped || s.reason == THERMAL_GUARD_TRIP_HEATING_FAILED,
+                           "and the reason is HEATING_FAILED, not some other guard");
+            }
+        }
+    }
+
+    /* ...and 0.2 C/min is still a real dead-element check, not a disable.
+     * The whole point of keeping the floor above zero: an element that has
+     * actually died produces ~no rise, and must still be caught. */
+    {
+        thermal_guard_state_t s;
+        thermal_guard_cfg_t cfg = {.max_temp_c = 1300.0f, .min_temp_c = -20.0f,
+                                   .sanity_rate_c_per_min = 0.2f,
+                                   .wrong_dir_window_s = 60.0f};
+        thermal_guard_reset(&s);
+        thermal_guard_input_t in = base_input();
+        in.setpoint_c = 500.0f;
+        in.measurement_c = 20.0f;
+        in.commanded_duty = 1.0f;
+        bool tripped = false;
+        for (int i = 0; i < 30 && !tripped; i++) {
+            in.measurement_c += 0.001f; /* dead element: sensor noise, no heat */
+            tripped = thermal_guard_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(tripped, "a dead element still trips guard 1 at the jig's 0.2 C/min");
+        TEST_CHECK(!tripped || s.reason == THERMAL_GUARD_TRIP_HEATING_FAILED, "reason is HEATING_FAILED");
+    }
+
+    /* The slow rate must NOT slow the runaway side of the same module.
+     * Guard 3 reads runaway_rate_c_per_min / runaway_margin_c, never
+     * sanity_rate_c_per_min -- assert that, so nobody later "simplifies"
+     * the two rates into one field and makes a relaxed dead-element floor
+     * mean a relaxed overheat reaction. */
+    {
+        thermal_guard_state_t s;
+        thermal_guard_cfg_t cfg = {.max_temp_c = 1300.0f, .min_temp_c = -20.0f,
+                                   .sanity_rate_c_per_min = 0.2f,
+                                   .off_settle_s = 30.0f,
+                                   .runaway_rate_c_per_min = 10.0f,
+                                   .runaway_margin_c = 25.0f};
+        thermal_guard_reset(&s);
+        thermal_guard_input_t in = base_input();
+        in.setpoint_c = 100.0f;
+        in.measurement_c = 100.0f;
+        in.commanded_duty = 0.0f; /* heat OFF, and still climbing -- welded contact */
+        bool tripped = false;
+        int ticks = 0;
+        for (; ticks < 40 && !tripped; ticks++) {
+            in.measurement_c += 3.0f; /* 18C/min, past runaway_rate_c_per_min */
+            tripped = thermal_guard_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(tripped, "guard 3 still trips with sanity_rate_c_per_min at 0.2");
+        TEST_CHECK(!tripped || s.reason == THERMAL_GUARD_TRIP_RUNAWAY, "reason is RUNAWAY");
+        /* Reaction speed, not just eventual detection: off_settle_s(30s) + one
+         * more tick is the earliest this can fire, and it must still be that. */
+        TEST_CHECK(ticks <= 6, "and it fires as soon as the settle window allows -- the slow "
+                               "dead-element floor does not delay overheat detection");
+    }
+
     /* thermal_guard_clear() fully un-latches and resets windows. */
     {
         thermal_guard_state_t s;

@@ -77,12 +77,27 @@ the field a human should actually read.
 
 ## The matrix
 
-Thresholds are the firmware-wide defaults at the top of
-`App/drivers/thermal_guard.c` (only `max_temp_c`, `min_temp_c` and
-`sanity_rate_c_per_min` and — since 2026-08-12 — guard 8's
-`cross_zone_max_delta_c` are per-zone config; `cross_zone_period_s` stayed a
-firmware constant at 600 s, and `cross_zone_max_delta_c` defaults to 0, which
-disables the guard).
+Thresholds below are the firmware-wide **defaults** at the top of
+`App/drivers/thermal_guard.c`. Since 2026-08-16/08-27 essentially every one of
+them is per-zone config instead (Settings > Zones, `GET/POST /api/zones`), and
+a configured zone uses its own number, not the default quoted here — read the
+zone's config before concluding a guard "should have" fired at the time in this
+table. The 0-means-not-configured convention applies throughout: 0 selects the
+firmware default, it does **not** disable the guard. The one exception is guard
+8's `cross_zone_max_delta_c`, where 0 genuinely disables the check and is the
+shipped default.
+
+**Guard 1's `sanity_rate_c_per_min` is the one that bites on a slow rig.** It
+is the minimum rise rate, in °C/min, that commanded heat must produce; too
+high a value false-trips a system that is genuinely — just slowly — heating,
+too low a value lets a genuinely dead element run unnoticed for longer. The
+bench fixture carried 5.0 (a real kiln's figure) with a 60 s
+`guard_wrong_dir_window_s` and every firing died at t=62 s on `heating but rose
+only 0.0C in 1.0min (need >=5.0C)`; it now runs **0.2** °C/min, commissioned
+via `tools/PcTools/config_presets/bench_fixture.json`. The accepted range is
+0..`ZONE_SANITY_RATE_MAX_C_PER_MIN` (20), enforced in `parse_zone_fields()`
+and `validate_zones_cfg()`. Lowering it does not slow guards 2/3/4/5 — they
+read their own separate thresholds (asserted in `test_thermal_guard.c`).
 "Expected time to trip"
 assumes the executor's control tick, i.e. one `thermal_guard_tick()` per tick
 with `dt_s` equal to the tick period; the host tests use `dt_s = 10s`.

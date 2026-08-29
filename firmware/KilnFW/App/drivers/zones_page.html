@@ -564,10 +564,14 @@ function zoneBlock(z, i, relayCount, thermoCount) {
     '</div>' +
     '<label>Max ramp rate (&deg;C/hr) -- user-entered feasibility ceiling for the Profiles page</label>' +
     '<input type="number" step="1" class="ramp" value="' + z.max_ramp_c_per_hr + '">' +
-    '<label>Sanity-check rate (&deg;C/min, 0 = use default) -- while the profile executor is ' +
-    'driving this zone, its reading must move at least this much in the commanded direction ' +
-    'or it flags a possible detached thermocouple</label>' +
-    '<input type="number" step="0.1" class="sanity" value="' + (z.sanity_rate_c_per_min || 0) + '">' +
+    '<label>Minimum rise rate (&deg;C/min, 0 = firmware default 0.5) -- the dead-element check. ' +
+    'While the executor drives this zone below setpoint, its reading must rise at least this ' +
+    'much per minute over the window below, or the zone trips as a detached thermocouple / ' +
+    'dead element / open relay. Too HIGH false-trips a slow, well-insulated or lightly-loaded ' +
+    'kiln that is genuinely heating; too LOW lets a genuinely dead element go unnoticed for ' +
+    'longer. Range 0-20. This bench jig runs 0.2. It does not affect the runaway, drift or ' +
+    'frozen-sensor guards, which have their own thresholds.</label>' +
+    '<input type="number" step="0.05" min="0" max="20" class="sanity" value="' + (z.sanity_rate_c_per_min || 0) + '">' +
     '<div class="row2">' +
       '<div><label>Max temp &deg;C (0 = no ceiling) -- hard safety trip, no debounce</label>' +
       '<input type="number" step="1" class="maxtemp" value="' + (z.max_temp_c || 0) + '"></div>' +

@@ -3662,6 +3662,100 @@ static void test_stored_pre_floor_blob_is_raised_on_load_not_rejected(void)
                     "a longer configured value is untouched by the raise");
 }
 
+/* ------------------------------------------------------------------------
+ * sanity_rate_c_per_min -- thermal_guard.c guard 1's minimum rise rate, the
+ * dead-element check, editable per zone on the Zones page as z%u_sanity.
+ * 2026-08-29: this bench's zone 0 carried 5.0 C/min (a real kiln's figure)
+ * and every firing died at t=62s on "rose only 0.0C in 1.0min (need >=5.0C)"
+ * while the jig was genuinely -- just slowly -- heating. The number is
+ * operator config and always was; what was missing was a test that the door
+ * it comes through actually enforces its bounds, and that the guard's verdict
+ * really follows the configured number rather than any constant.
+ * ------------------------------------------------------------------------ */
+static float s_last_parsed_sanity = -1.0f;
+
+static bool post_body_with_sanity(const char *sanity_literal, const char **err_reason_out)
+{
+    char body[512];
+    snprintf(body, sizeof(body),
+             "z0_name=Top&z0_tctype=2&z0_relay_mask=1&z0_thermo_mask=1&"
+             "z0_cal=0&z0_kp=1&z0_ki=0&z0_kd=0&z0_ramp=100&z0_sanity=%s&z0_mode=0&"
+             "z0_maxtemp=1300&z0_mintemp=-20&z0_window=60000&z0_minon=10000&z0_minoff=2000&"
+             "z0_timingprofile=0",
+             sanity_literal);
+
+    zone_cfg_t current = make_stored_zone();
+    current.sanity_rate_c_per_min = 5.0f; /* a legal stored value, and the one this bench had */
+    zone_cfg_t out;
+    memset(&out, 0, sizeof(out));
+    const char *err_reason = "unset";
+    bool ok = parse_zone_fields(body, /*i=*/0, /*thermo_count=*/1, /*relay_count=*/4,
+                                /*timing_profile_count=*/1, &current, &out, &err_reason);
+    if (err_reason_out) {
+        *err_reason_out = err_reason;
+    }
+    s_last_parsed_sanity = ok ? out.sanity_rate_c_per_min : -1.0f;
+    return ok;
+}
+
+static void test_post_sanity_rate_bounds(void)
+{
+    TEST_SECTION("parse_zone_fields -- z0_sanity is bounded 0..ZONE_SANITY_RATE_MAX_C_PER_MIN");
+
+    const char *reason = "unset";
+
+    /* Negative-test the validation itself: each of these MUST be refused, or
+     * the bound is decorative. */
+    TEST_CHECK(!post_body_with_sanity("-0.2", &reason),
+               "a negative minimum rise rate is meaningless and must be refused");
+    TEST_CHECK(reason && strstr(reason, "sanity_rate_c_per_min") != NULL,
+               "the refusal names the field, so the page can say which one");
+    TEST_CHECK(!post_body_with_sanity("20.1", &reason),
+               "above the 20 C/min ceiling is refused -- a rate no kiln sustains would trip everything");
+    TEST_CHECK(!post_body_with_sanity("0.2C", &reason),
+               "a unit suffix is refused, not silently parsed as 0.2");
+    TEST_CHECK(!post_body_with_sanity("", &reason),
+               "an empty field is refused rather than read as 0");
+
+    /* And the accept path, with the value landing EXACTLY -- "accepted" alone
+     * would not catch a clamp or a rounding to the old 5.0. */
+    TEST_CHECK(post_body_with_sanity("0.2", &reason), "0.2 C/min -- this bench's jig value -- is accepted");
+    TEST_CHECK_NEAR(s_last_parsed_sanity, 0.2f, 1e-6, "0.2 round-trips exactly, not clamped upward");
+
+    TEST_CHECK(post_body_with_sanity("0", &reason),
+               "0 stays legal: it means 'use the firmware default', NOT 'disable the guard'");
+    TEST_CHECK_NEAR(s_last_parsed_sanity, 0.0f, 1e-6,
+                    "0 is stored as 0 -- 'use the default' must stay distinguishable from a chosen 0.5");
+
+    TEST_CHECK(post_body_with_sanity("20", &reason), "exactly the ceiling is accepted -- inclusive bound");
+    TEST_CHECK_NEAR(s_last_parsed_sanity, 20.0f, 1e-6, "the ceiling value round-trips exactly");
+}
+
+static void test_validate_rejects_out_of_range_sanity_rate(void)
+{
+    TEST_SECTION("validate_zones_cfg -- an out-of-range sanity_rate_c_per_min is rejected at the "
+                 "import door too");
+
+    {
+        zones_cfg_t cfg;
+        make_minimal_valid_cfg(&cfg);
+        cfg.zones[0].sanity_rate_c_per_min = 500.0f;
+        const char *reason = NULL;
+        TEST_CHECK(!validate_zones_cfg(&cfg, &reason),
+                   "500 C/min does not validate, whichever door it came through");
+        TEST_CHECK(reason && strstr(reason, "sanity_rate_c_per_min") != NULL,
+                   "the reason names the field");
+    }
+    {
+        zones_cfg_t cfg;
+        make_minimal_valid_cfg(&cfg);
+        cfg.zones[0].sanity_rate_c_per_min = 0.2f;
+        const char *reason = NULL;
+        TEST_CHECK(validate_zones_cfg(&cfg, &reason),
+                   "0.2 C/min validates -- the slow-jig value must not be collateral damage");
+    }
+}
+
 void run_test_zones_http(void)
 {
     test_out_of_range_zone_preserves_stored_fields();
@@ -3692,6 +3786,9 @@ void run_test_zones_http(void)
     test_nvs_load_from_v8_blob_with_distinct_zone_values_migrates_losslessly();
     test_nvs_load_from_v8_blob_upconverts_to_shared_default_profile();
     test_validate_rejects_out_of_range_v8_fields();
+
+    test_post_sanity_rate_bounds();
+    test_validate_rejects_out_of_range_sanity_rate();
 
     test_post_minon_below_floor_is_refused();
     test_post_minon_zero_and_at_or_above_floor_are_accepted();
