@@ -285,6 +285,41 @@ uint32_t safety_link_get_fault_sources(SafetyLinkClass *link)
     return 0;
 }
 
+/* Spy for the heat-enable (K4) wiring tests below -- profile_executor.c now
+ * calls heat_enable_acquire()/heat_enable_release() (heat_enable.h), and
+ * heat_enable.c is linked into this executable for real rather than faked, so
+ * the fake goes at the bottom of that stack: safety_link.c's own
+ * request_enable, whose real contract is "enable=true is refused, and sends
+ * nothing, on a down link; enable=false is always attempted". */
+static int  g_request_enable_true_calls = 0;
+static int  g_request_enable_false_calls = 0;
+static bool g_request_enable_link_up = true;
+
+esp_err_t safety_link_request_enable(SafetyLinkClass *link, bool enable)
+{
+    (void)link;
+    if (enable) {
+        g_request_enable_true_calls++;
+        return g_request_enable_link_up ? ESP_OK : ESP_ERR_INVALID_STATE;
+    }
+    g_request_enable_false_calls++;
+    return ESP_OK;
+}
+
+/* Puts heat_enable back in the state a RUNNING firing leaves it in: this
+ * run holds a granted K4 request. The tests below drive profile_executor's
+ * exit paths directly (they set s_exec.state by hand rather than going
+ * through profile_executor_run(), which needs a whole task harness), so the
+ * acquire that a real start would have done is done here instead. */
+static void arm_heat_enable_as_if_running(void)
+{
+    g_request_enable_link_up = true;
+    heat_enable_init((SafetyLinkClass *)0x1);
+    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
+    g_request_enable_true_calls = 0;
+    g_request_enable_false_calls = 0;
+}
+
 float zones_config_apply_cal(uint8_t zone_index, float raw_c)
 {
     (void)zone_index;
@@ -1118,6 +1153,105 @@ static void test_run_refuses_at_atomic_heat_claim_gate(void)
     s_test_heat_zone_claim_refused = false;
 }
 
+
+// ---------------------------------------------------------------------------
+// Heat-enable (K4) wiring -- the 2026-08-29 fix.
+//
+// profile_executor.c never asked the safety processor to permit heating at
+// all: it closed its own zone relay and left K4 open, so no element current
+// ever flowed on a normal firing. These tests pin the RELEASE half of the
+// fix at the three exit paths this file can actually drive (a guard trip, an
+// operator halt, a pause), because a release that a fault path bypasses is
+// how heat gets left permitted with no run to permit it for.
+//
+// COVERAGE GAP, stated honestly: the ACQUIRE half lives in
+// profile_executor_run(), past a full task/config/thermocouple harness this
+// file deliberately never builds (see its header comment), so it is not
+// exercised here. It is covered instead by test_heat_enable.c's
+// exactly-once/refcount tests over the module itself, by
+// check_heat_enable_wiring.ps1's source-level assertion that the call is
+// present at the commit point, and by the live bench run. Same disclosure
+// style as the rest of this file's "reachable without a real task loop"
+// notes.
+// ---------------------------------------------------------------------------
+
+static void test_guard_trip_releases_heat_enable(void)
+{
+    TEST_SECTION("escalate_guard_trip() GLOBAL trip -- also gives K4 back (heat_enable release)");
+    reset_relay_claim_test_state();
+    arm_heat_enable_as_if_running();
+    s_exec.zones[0].active = true;
+    s_exec.claimed_relay_mask = 0x03;
+
+    (void)escalate_guard_trip(0, THERMAL_GUARD_TRIP_MAX_TEMP, "over-temp");
+
+    TEST_CHECK(g_request_enable_false_calls == 1,
+               "a guard trip must send exactly one REQUEST_ENABLE(false) -- a fault path that skips "
+               "this leaves the safety processor permitting heat for a run that no longer exists");
+    TEST_CHECK(g_request_enable_true_calls == 0, "and must not ask for heat on the way out");
+    TEST_CHECK(!heat_enable_is_granted(), "no heat request may be left standing after a trip");
+}
+
+static void test_halt_releases_heat_enable(void)
+{
+    TEST_SECTION("profile_executor_halt() -- gives K4 back (heat_enable release)");
+    reset_relay_claim_test_state();
+    arm_heat_enable_as_if_running();
+    s_exec.lock = xSemaphoreCreateMutex();
+    s_exec.state = PROFILE_EXEC_RUNNING;
+    s_exec.claimed_relay_mask = 0x0F;
+
+    profile_executor_halt();
+
+    TEST_CHECK(g_request_enable_false_calls == 1, "an operator halt must release the heat-enable request");
+    TEST_CHECK(!heat_enable_is_granted(), "nothing left standing");
+
+    /* halt() is also how a DONE/FAULTED run is dismissed, and dismissing one
+     * twice must not put a second frame on the wire. */
+    profile_executor_halt();
+    TEST_CHECK(g_request_enable_false_calls == 1, "a second halt sends nothing more");
+}
+
+static void test_pause_releases_heat_enable_and_resume_reacquires(void)
+{
+    TEST_SECTION("profile_executor_pause()/resume() -- pause gives K4 back, resume asks again");
+    reset_relay_claim_test_state();
+    arm_heat_enable_as_if_running();
+    s_exec.lock = xSemaphoreCreateMutex();
+    s_exec.state = PROFILE_EXEC_RUNNING;
+    s_exec.claimed_relay_mask = 0x05;
+
+    TEST_CHECK(profile_executor_pause(), "sanity: pause() succeeds from RUNNING");
+    TEST_CHECK(g_request_enable_false_calls == 1,
+               "pause must release K4 -- unlike the relay claim, which pause deliberately KEEPS "
+               "(handed to MANUAL), leaving the safety processor permitting heat across a pause of "
+               "unknown length holds open the one interlock between a stuck relay and a live element");
+    TEST_CHECK(!heat_enable_is_granted(), "not granted while paused");
+
+    TEST_CHECK(profile_executor_resume(), "sanity: resume() succeeds from PAUSED");
+    TEST_CHECK(g_request_enable_true_calls == 1, "resume must ask for K4 again, exactly once");
+    TEST_CHECK(heat_enable_is_granted(), "granted again after resume");
+}
+
+static void test_heat_enable_release_survives_a_down_link(void)
+{
+    TEST_SECTION("profile_executor_halt() -- releases K4 even when the safety link is down");
+    reset_relay_claim_test_state();
+    arm_heat_enable_as_if_running();
+    /* The link drops mid-firing. enable=false is the fail-safe direction and
+     * safety_link.c attempts it regardless -- refusing it because the link
+     * looks down is the one refusal that could leave heat permitted. */
+    g_request_enable_link_up = false;
+    s_exec.lock = xSemaphoreCreateMutex();
+    s_exec.state = PROFILE_EXEC_RUNNING;
+    s_exec.claimed_relay_mask = 0x01;
+
+    profile_executor_halt();
+
+    TEST_CHECK(g_request_enable_false_calls == 1, "the release is still attempted on a down link");
+    TEST_CHECK(!heat_enable_is_granted(), "and the request is not left standing");
+}
+
 void run_test_profile_executor_prestart(void)
 {
     test_run_refuses_before_start();
@@ -1144,6 +1278,10 @@ void run_test_profile_executor_prestart(void)
     test_run_refuses_while_zone_sweep_is_active();
     test_run_decodes_fault_sources_instead_of_hex();
     test_run_refuses_at_atomic_heat_claim_gate();
+    test_guard_trip_releases_heat_enable();
+    test_halt_releases_heat_enable();
+    test_pause_releases_heat_enable_and_resume_reacquires();
+    test_heat_enable_release_survives_a_down_link();
 }
 
 int main(void)

@@ -12,6 +12,7 @@
 #include "freertos/task.h"
 
 #include "autotune_engine.h"
+#include "heat_enable.h"
 #include "heater_output.h"
 #include "kiln_io_owner.h"
 #include "ota_http.h" /* ota_http_heat_blocked_by_update() -- heat_interlock.h's own doc comment */
@@ -601,6 +602,18 @@ static void release_profile_relay_claim(void)
      * alongside its own relay_authority_release_mask() call for the same
      * reason it doesn't call this whole function (see halt()'s comment). */
     relay_authority_heat_zone_claim_end(RELAY_HEAT_ZONE_CLAIM_PROFILE);
+    /* ...and give K4 back too. Every terminal transition out of RUNNING/
+     * PAUSED except profile_executor_halt() (which does it inline, alongside
+     * its own duplicate of the two calls above, for the reason its comment
+     * gives) funnels through here -- normal completion, all three
+     * escalate_guard_trip() branches, and the watchdog's forced FAULTED
+     * transition -- so this is the single release point for the firing's
+     * heat-enable request. Called AFTER force_all_relays_off()/
+     * force_zone_relay_off() at every one of those sites: dropping the zone
+     * relay is never gated on, or delayed by, giving K4 back
+     * (heat_enable.h's ordering rule). Idempotent, so calling it on a path
+     * that never acquired costs nothing. */
+    heat_enable_release(HEAT_ENABLE_CLAIMANT_PROFILE);
 }
 
 /* ---- TODO relay/IO segments (owner's request, profiles_http.h's
@@ -1486,6 +1499,15 @@ static void executor_task_entry(void *arg)
              * doc comment. A segment already finished (DONE already swept
              * it, or it never started) costs nothing extra here. */
             io_segs_force_all_off(false);
+            /* Backstop for K4, the same shape as the force-off above it: any
+             * state that is not RUNNING must not be holding the safety
+             * processor's permission to heat, whether or not the transition
+             * that got here remembered to release it. Sends at most one
+             * frame -- heat_enable_release() only puts anything on the wire
+             * on the last-claimant edge, so every tick after the first is
+             * free rather than a release frame per tick. PAUSED lands here too, which is what a pause is
+             * supposed to mean -- see profile_executor_pause(). */
+            heat_enable_release(HEAT_ENABLE_CLAIMANT_PROFILE);
             xSemaphoreGive(s_exec.lock);
             continue;
         }
@@ -2034,6 +2056,16 @@ static void watchdog_task_entry(void *arg)
     TickType_t pc_link_down_since_tick = 0;
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(WATCHDOG_CHECK_PERIOD_MS));
+
+        /* Retry a heat-enable request that never landed (heat_enable.h). A
+         * no-op unless a run is holding a claim whose REQUEST_ENABLE was
+         * refused -- which is exactly the "started while the safety link was
+         * down, link came back mid-run" case that would otherwise leave a
+         * firing running to completion with K4 open. This task, not the
+         * control task: it is the one that already runs at a slow fixed
+         * period and does not hold s_exec.lock here, and a blocking link
+         * exchange must not sit inside the control tick. */
+        heat_enable_reconcile();
 
         /* LINK_PROTOCOL.md sec 8 / ROADMAP.md M6: "30 s silence aborts a
          * firing" -- distinct from, and much larger than, the 1.5 s
@@ -2955,6 +2987,21 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
      * manual command against it until pause/halt hands it back. */
     relay_authority_claim_mask(s_exec.claimed_relay_mask, RELAY_OWNER_PROFILE);
 
+    /* Ask the safety processor to permit heating -- i.e. close K4. THE fix
+     * of 2026-08-29: this call did not exist, so every firing this firmware
+     * has ever run closed its own zone relay (K1) and left K4 open, and no
+     * element current ever flowed on the normal path. See heat_enable.h.
+     *
+     * Placed here, at the commit point, and not earlier: every refusal above
+     * returns without having asked for anything, and from this statement on
+     * the run is RUNNING and will command heat. A false return is NOT a
+     * reason to refuse the run -- the only way it can fail is a safety link
+     * that is down, which apply_relay()'s relay_authority_zone_blocked()
+     * check already reports per zone through heat_blocked/
+     * heat_blocked_sources and which heat_enable_reconcile() (called from
+     * the watchdog task) retries. heat_enable.c logs the failure loudly. */
+    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
+
     s_exec.state = PROFILE_EXEC_RUNNING;
     run_snapshot_buf_t start_snap;
     capture_run_snapshot(&start_snap);
@@ -3002,6 +3049,10 @@ void profile_executor_halt(void)
      * Safe unconditionally, same no-op-if-never-held reasoning as
      * release_profile_relay_claim()'s call. */
     relay_authority_heat_zone_claim_end(RELAY_HEAT_ZONE_CLAIM_PROFILE);
+    /* ...and K4, inline for the same reason the two calls above are inline
+     * rather than routed through release_profile_relay_claim(). After
+     * force_all_relays_off() above, never before it. */
+    heat_enable_release(HEAT_ENABLE_CLAIMANT_PROFILE);
     /* Captured BEFORE the fault fields are cleared below: if this halt is the
      * operator acknowledging a trip, the reason for that trip is the most
      * useful thing the breadcrumb can carry, and clearing it first would
@@ -3054,6 +3105,18 @@ bool profile_executor_pause(void)
         return false;
     }
     force_all_relays_off();
+    /* A pause gives K4 back, even though the relay claim is only handed to
+     * MANUAL rather than released (see the comment just below). The two are
+     * not the same question: keeping this run's relays reserved for a resume
+     * costs nothing, whereas leaving the safety processor permitting heat
+     * across a pause of unknown length -- possibly forever, if nobody ever
+     * resumes -- means the ONE interlock that stands between a stuck relay
+     * and a live element is held open by a firing that is not driving
+     * anything. profile_executor_resume() re-acquires; heat_enable_acquire()
+     * is a single frame, so nothing about that is expensive. Also consistent
+     * with heater_output_force_off()'s own treatment of a pause as a full
+     * de-energize that bypasses the min-on-time hold. */
+    heat_enable_release(HEAT_ENABLE_CLAIMANT_PROFILE);
     /* TODO.md section 0: pausing is the one explicit way to hand a
      * PROFILE-owned relay back to MANUAL (not NONE -- a paused firing still
      * "belongs" to the operator's session, it's just not driving right now;
@@ -3089,6 +3152,9 @@ bool profile_executor_resume(void)
     /* Reclaim PROFILE ownership handed to MANUAL on pause -- see
      * profile_executor_pause()'s comment. */
     relay_authority_claim_mask(s_exec.claimed_relay_mask, RELAY_OWNER_PROFILE);
+    /* Re-ask for K4, released on pause -- see profile_executor_pause()'s
+     * comment. Same "not a reason to refuse" handling as the start path. */
+    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
     /* Shared ramp/dwell state (target_c, segment_elapsed_s) is untouched by
      * pause -- the control task simply doesn't tick it while PAUSED, so
      * there's nothing to un-shift on resume (unlike the old tick-delta-
