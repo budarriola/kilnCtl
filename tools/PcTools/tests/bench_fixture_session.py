@@ -266,21 +266,164 @@ class BenchSession:
         return _http(self.host, "/api/profile_exec/start", f"id={slot}")
 
     def force_all_stop(self) -> dict:
-        """Stop the executor, acknowledge any completed/faulted run, and
-        report the relay state afterwards. Safe to call when nothing is
-        running (both endpoints are idempotent) -- which is the point: tests
-        call it from ``finally``."""
+        """Stop the executor, abort any autotune, acknowledge any
+        completed/faulted run, and report the relay state afterwards. Safe to
+        call when nothing is running (every endpoint here is idempotent) --
+        which is the point: tests call it from ``finally``.
+
+        The autotune abort is here rather than only in the tuning test
+        because the two heat owners are peers: ``profile_executor.c`` and
+        ``autotune_engine.c`` each claim a zone's relays through
+        relay_authority, and a teardown that stopped only one of them would
+        assert "relays off" while the other was still free to close them.
+        POST /api/autotune/abort answers "ok" whether or not a run is live,
+        so calling it unconditionally costs one request and removes the
+        "which heat owner was it this time?" question from every teardown.
+        """
         detail: "dict[str, Any]" = {}
         try:
             detail["stop"] = _http(self.host, "/api/profile_exec/stop", "")
+            detail["autotune_abort"] = _http(self.host, "/api/autotune/abort", "")
             detail["ack"] = _http(self.host, "/api/profile_exec/ack_last_run", "")
         finally:
             try:
                 detail["relays_on"] = self.relays_on()
                 detail["state"] = self.exec_status().get("state")
+                detail["autotune_state"] = self.autotune_status().get("state")
             except BenchSessionError as exc:
                 detail["relays_on"] = f"unreadable: {exc}"
         return detail
+
+    # -- PID gains / thermal model / autotune -----------------------------
+    #
+    # All four read over HTTP. The module docstring's "PID gains have no HTTP
+    # setter" is about config_presets.py's UART CONTROL path; GET/POST
+    # /api/zones does carry kp/ki/kd and the model triple
+    # (zones_http_client._PRESET_ZONE_OVERRIDE_FIELDS), which is how
+    # apply_known_good() gets the preset's gains onto the board. So a test
+    # CAN read back the gains it just wrote without the COM port -- and must,
+    # because "did the autotune change them?" is a question about the value
+    # on the board, not about the value in the preset.
+
+    def zone_pid(self, index: int) -> "dict[str, float]":
+        for zone in self.zones()["zones"]:
+            if zone["index"] == index:
+                return {k: float(zone[f"pid_{k}"]) for k in ("kp", "ki", "kd")}
+        raise BenchSessionError(f"no zone {index} in GET /api/zones")
+
+    def zone_model(self, index: int) -> "dict[str, float]":
+        """The FOPDT model a step autotune writes on accept: k_dc, tau_s,
+        dead_time_s. All zero on a board that has never had a fit accepted --
+        which is a fact worth asserting, not a reason to skip reading it."""
+        for zone in self.zones()["zones"]:
+            if zone["index"] == index:
+                return {k: float(zone[f"model_{k}"]) for k in ("k_dc", "tau_s", "dead_time_s")}
+        raise BenchSessionError(f"no zone {index} in GET /api/zones")
+
+    def autotune_status(self) -> dict:
+        code, text = _http(self.host, "/api/autotune")
+        if code != 200:
+            raise BenchSessionError(f"GET /api/autotune -> {code}: {text[:200]}")
+        return json.loads(text)
+
+    def start_autotune_step(self, zone_index: int, step_duty: float) -> "tuple[int, str]":
+        """Start the OPEN-LOOP STEP test (autotune_engine.c's
+        AUTOTUNE_METHOD_STEP), never the relay method.
+
+        The relay method is not reachable from this harness on purpose. It
+        requires ``setpoint_c`` and refuses any setpoint within
+        AUTOTUNE_RELAY_SETPOINT_HEADROOM_C (50 C) of the zone's max_temp_c;
+        with the fixture ceiling at 80 C that leaves setpoints below 30 C,
+        which is under this bench's own ambient. The relay method is
+        therefore not runnable here at all, and a helper that offered it
+        would only produce a refusal that looks like a bug.
+
+        Live temperatures are checked before the request, exactly as
+        start_profile() does: this endpoint commands real duty.
+        """
+        if not 0.0 < step_duty <= 1.0:
+            raise BenchSessionError(f"step_duty {step_duty} outside (0, 1]")
+        self.assert_within_fixture_ceiling()
+        return _http(self.host, "/api/autotune/start",
+                     f"zone={zone_index}&method=step&step_duty={step_duty}")
+
+    def abort_autotune(self) -> "tuple[int, str]":
+        return _http(self.host, "/api/autotune/abort", "")
+
+    def wait_for_autotune_state(self, states: "tuple[str, ...]", timeout_s: float,
+                                poll_s: float = 2.0) -> dict:
+        """Bounded wait. Returns the LAST status either way -- a timeout is
+        an outcome a tuning test asserts on (an engine that never leaves
+        'settling' is the failure this bench has seen before), not an
+        exception that hides which state it was stuck in."""
+        deadline = time.monotonic() + timeout_s
+        last = self.autotune_status()
+        while last.get("state") not in states:
+            if time.monotonic() >= deadline:
+                return last
+            time.sleep(poll_s)
+            last = self.autotune_status()
+            hottest = self.hottest_channel_c()
+            if hottest == hottest and hottest > FIXTURE_MAX_TEMP_C:
+                raise BenchSessionError(
+                    f"live temperature {hottest:.1f} C breached the {FIXTURE_MAX_TEMP_C} C "
+                    "fixture ceiling while waiting for autotune state")
+        return last
+
+    def autotune_trace(self) -> "list[tuple[float, float]]":
+        """The engine's own recorded trace (elapsed_s, measurement_c). Empty
+        until the run is STEPPING -- the settle phase records nothing."""
+        code, text = _http(self.host, "/api/autotune/trace.csv")
+        if code != 200:
+            raise BenchSessionError(f"GET /api/autotune/trace.csv -> {code}: {text[:200]}")
+        rows = []
+        for line in text.splitlines()[1:]:
+            parts = line.split(",")
+            if len(parts) >= 2:
+                rows.append((float(parts[0]), float(parts[1])))
+        return rows
+
+    # -- step-response sampling -------------------------------------------
+    def sample_response(self, duration_s: float, period_s: float = 2.0,
+                        zone_index: int = 0) -> "list[dict]":
+        """Poll the board for ``duration_s`` and return one row per poll.
+
+        This is the PV trace a step test is actually about, taken from the
+        board's own /api/status and /api/profile_exec rather than from any
+        model: measured temperature, which relays are closed, whether the
+        safety processor says heating is enabled, and what the executor
+        thinks its setpoint is.
+
+        The fixture ceiling is asserted on EVERY sample, not once at the end
+        -- the whole point of sampling during a heat-adjacent operation is to
+        catch the excursion while it is happening. A breach raises, which
+        puts the caller into its ``finally`` and force_all_stop().
+        """
+        rows: "list[dict]" = []
+        deadline = time.monotonic() + duration_s
+        t0 = time.monotonic()
+        while True:
+            status = self.status()
+            temps = [c["temp_c"] for c in status.get("channels", []) if c.get("valid")]
+            hottest = max(temps) if temps else float("nan")
+            if hottest == hottest and hottest > FIXTURE_MAX_TEMP_C:
+                raise BenchSessionError(
+                    f"live temperature {hottest:.1f} C breached the {FIXTURE_MAX_TEMP_C} C "
+                    "fixture ceiling during sampling")
+            exec_st = self.exec_status()
+            rows.append({
+                "t_s": round(time.monotonic() - t0, 2),
+                "zone_c": temps[zone_index] if zone_index < len(temps) else float("nan"),
+                "hottest_c": hottest,
+                "relays_on": [r["relay"] for r in status["relays"] if r["on"]],
+                "safety_heating_enabled": status["safety_heating_enabled"],
+                "heat_block_sources_words": status.get("heat_block_sources_words"),
+                "exec_state": exec_st.get("state"),
+                "target_c": exec_st.get("target_c"),
+            })
+            if time.monotonic() >= deadline:
+                return rows
+            time.sleep(period_s)
 
     def wait_for_exec_state(self, states: "tuple[str, ...]", timeout_s: float = 10.0,
                             poll_s: float = 0.5) -> dict:

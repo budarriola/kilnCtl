@@ -322,6 +322,44 @@ read of the live board, not against the writer's own say-so) and
 with the config that was just confirmed -- the "consumer without a producer"
 defect class caught from outside).
 
+### `tests/test_live_bench_tuning.py`
+
+The **step and PID-tuning** tests, on the same harness. Two things, both
+bounded by the same 80 °C ceiling and the same `finally` teardown (which now
+also POSTs `/api/autotune/abort`, because `profile_executor.c` and
+`autotune_engine.c` are peer heat owners and stopping only one of them is not
+a teardown):
+
+* **Closed-loop step** — a single-segment 45 °C profile on zone 0 at the
+  zone's own 900 °C/h ramp, started through the dashboard's endpoint, with
+  the PV trace sampled every 2 s by `BenchSession.sample_response()` (which
+  asserts the ceiling on *every* sample, not once at the end).
+* **Open-loop step autotune** — `autotune_engine.c`'s `AUTOTUNE_METHOD_STEP`
+  driven end to end through `/api/autotune/start`, followed under a 300 s
+  budget (the engine's own budget is 4 h), with the trace read from
+  `/api/autotune/trace.csv`. Every terminal state is asserted differently:
+  a `done` fit must be *physical* (τ > 0, K > 0, gains finite and
+  non-negative), an `aborted` run must **say why**, and still-running at the
+  budget is reported as inconclusive and aborted rather than passing quietly.
+  **`/api/autotune/accept` is never posted** — accepting writes gains and the
+  FOPDT model to NVS, and a regression test must not retune the bench; the
+  test asserts the gains and model are byte-identical afterwards.
+
+Measured on the live bench 2026-08-28 (heat refused, no CT fitted): the step
+start is accepted, the executor runs, **PV moves −0.03 °C over 61 s with no
+relay ever closing**, and the autotune aborts itself after 120 s and 12
+samples with *"fit failed: response too small to fit (trace flat or
+noise-dominated)"*. That flat trace is the gate working, and the test says so
+in those words instead of leaving a mystery. Both branch on
+`heat_is_permitted()`, so they start exercising real step response and a real
+fit the day the CTs are fitted — **no edit to the file**.
+
+The **relay-feedback** method is deliberately unreachable from the harness:
+`AUTOTUNE_RELAY_SETPOINT_HEADROOM_C` (50 °C) refuses any setpoint within
+50 °C of `max_temp_c`, which under this fixture's 80 °C ceiling admits only
+setpoints below the bench's own 35 °C ambient. A test for it would be testing
+a parameter refusal, not a tune.
+
 ## Generic button press (MCP)
 
 Every bespoke tool (`thermo_read`, `io_set_relay`, ...) also has a same-named

@@ -316,6 +316,23 @@ soldering session.
       the CTs are fitted and the sweep commits a measured `ct_channel_map` it
       begins exercising the real heat path with no edit. Skips entirely
       unless `KILNCTRL_BENCH_HOST` is set; no mock stands in for the board
+- [x] Live-bench **step and PID-tuning** regression tests
+      (`tools/PcTools/tests/test_live_bench_tuning.py`), on the same harness —
+      green against the live bench 2026-08-28, 4/4 in 6m10s. A closed-loop
+      setpoint step (35 → 45 °C on zone 0) with the PV trace sampled at 2 s,
+      and the open-loop step autotune (`autotune_engine.c`'s
+      `AUTOTUNE_METHOD_STEP`) driven end to end through
+      `/api/autotune/{start,abort}` under a 300 s budget. **What it proves
+      today:** the start is accepted, the engine steps, and with heat refused
+      PV is flat (−0.03 °C over 61 s, no relay ever closed) and the engine
+      aborts itself with *"response too small to fit (trace flat or
+      noise-dominated)"* — the correct verdict, said out loud. Also a
+      negative test that a second concurrent autotune is refused
+      (`begin_run_locked()`). `/api/autotune/accept` is never posted: a
+      regression test must not retune the bench. The relay-feedback method is
+      **not runnable on this fixture at all** —
+      `AUTOTUNE_RELAY_SETPOINT_HEADROOM_C` (50 °C) under an 80 °C ceiling
+      admits only setpoints below the bench's own 35 °C ambient
 - [x] `pc_tools` moved to `tools/PcTools/`; GPIO probes built for both chips
       (ESP: deny-list incl. GPIO6; Pico: over SWD, GPIO6 read-only). **Pico
       probe bench-tested 2026-08-19, PASS.** ESP probe bench-tested 2026-08-19
