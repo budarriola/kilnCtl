@@ -137,7 +137,7 @@
 <div id="homeSection">
   <h2>Networks</h2>
   <button id="scanBtn" type="button">Scan</button>
-  <ul id="networks"></ul>
+  <ul id="networks"><li>Press Scan to list nearby networks.</li></ul>
 
   <div id="connectSection">
     <label for="ssid">Network name (SSID)</label>
@@ -789,6 +789,19 @@ document.getElementById('ipModeStaticBtn').addEventListener('click', function ()
 
 let polling = false;
 let lastMode = null;
+/* Page-load auto-scan is decided ONCE, from the FIRST /status response --
+ * not fired blind at load (the old behaviour), and not re-evaluated on
+ * every subsequent poll() (poll() re-runs itself every 2s while
+ * state is connecting/reconnecting). On the ESP32 a Wi-Fi scan shares the
+ * radio with the STA connection, so scanning while already connected can
+ * briefly disrupt the very link the operator is viewing this page over --
+ * only auto-scan when we're on the home network and NOT connected, where
+ * there's nothing running on the radio to disrupt. AP mode never
+ * auto-scans either: a scan is unavailable from AP mode (see fetchNetworks'
+ * catch handler) so it would just be a guaranteed-useless fetch. If
+ * /status fails outright, fail closed -- an unknown state is not
+ * "disconnected". */
+let autoScanDecided = false;
 /* Whether this page holds the AP's REAL password (it only does when the
  * request came in over the AP itself -- see the poll() handler). Starts
  * false so a Save that somehow beats the first poll omits the field and
@@ -848,6 +861,12 @@ function poll() {
       document.getElementById('staticGateway').value = s.static_gateway || '';
     }
     document.getElementById('mainLink').style.display = s.sta_connected ? '' : 'none';
+    if (!autoScanDecided) {
+      autoScanDecided = true;
+      if (s.mode === 'home' && !s.sta_connected) {
+        fetchNetworks();
+      }
+    }
     if (s.state === 'connecting' || s.state === 'reconnecting') {
       if (!polling) { polling = true; }
       setTimeout(poll, 2000);
@@ -1026,7 +1045,6 @@ document.getElementById('modeHomeBtn').addEventListener('click', function () { p
 document.getElementById('modeApBtn').addEventListener('click', function () { postMode('ap'); });
 
 poll();
-fetchNetworks();
 
 (function () {
   var btn = document.getElementById('themeBtn');
