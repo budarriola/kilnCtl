@@ -226,6 +226,253 @@ def evaluate_spread(per_sample_spreads: "list[float]", thresholds: TrackingThres
 
 
 # ---------------------------------------------------------------------------
+# Retry policy for transient HTTP failures.
+#
+# WHY. A run costs an hour of real heating. The harness used to treat every
+# HTTP error the same way -- one urlopen timeout during /api/autotune killed
+# an otherwise-healthy run. That specific instance turned out to be a real
+# firmware panic, so aborting was correct THAT time; but a transient timeout,
+# a momentary mDNS hiccup, or one slow response must not get the same
+# treatment. This section is deliberately split into small pure pieces so
+# each half of "retry the blip, abort the crash" can be proven independently:
+# retry_backoff_s / call_with_retry / is_transient_http_error cover the
+# retry half, detect_board_restart / BoardHealthTracker cover the "but not
+# past a dead board" half.
+# ---------------------------------------------------------------------------
+
+#: Retries beyond the first attempt. 4 retries (5 attempts total) survives a
+#: multi-second mDNS re-resolve or a couple of slow control-loop ticks
+#: without turning a genuinely dead board into a long silent hang.
+DEFAULT_MAX_RETRIES = 4
+#: First retry waits this long.
+DEFAULT_RETRY_BACKOFF_S = 3.0
+#: Exponential growth per subsequent retry.
+DEFAULT_RETRY_BACKOFF_MULTIPLIER = 2.0
+#: Backoff ceiling -- with the defaults above, uncapped growth would reach
+#: 3 * 2**3 = 24s by the 4th retry already; the cap exists so a caller who
+#: raises max_retries doesn't end up sleeping for minutes between attempts.
+DEFAULT_RETRY_BACKOFF_MAX_S = 30.0
+
+
+@dataclass
+class RetryPolicy:
+    """Command-line-configurable retry policy. See the module-level
+    DEFAULT_* constants for the defaults and their rationale."""
+    max_retries: int = DEFAULT_MAX_RETRIES
+    backoff_s: float = DEFAULT_RETRY_BACKOFF_S
+    backoff_multiplier: float = DEFAULT_RETRY_BACKOFF_MULTIPLIER
+    backoff_max_s: float = DEFAULT_RETRY_BACKOFF_MAX_S
+
+
+def retry_backoff_s(attempt: int, policy: "RetryPolicy") -> float:
+    """Delay before retry attempt number ``attempt`` (1-based: ``attempt=1``
+    is the wait after the FIRST failure, before the first retry).
+    Exponential, capped at ``policy.backoff_max_s``.
+
+    NEGATIVE TEST target: an uncapped implementation would keep growing
+    without bound -- this must visibly top out instead.
+    """
+    if attempt < 1:
+        raise ValueError(f"attempt must be >= 1, got {attempt}")
+    raw = policy.backoff_s * (policy.backoff_multiplier ** (attempt - 1))
+    return min(raw, policy.backoff_max_s)
+
+
+#: Substring markers (lower-cased) that indicate a TRANSIENT network problem
+#: rather than a real failure worth aborting for. Matched against the str()
+#: of the exception -- this project's BenchSessionError wraps urllib's own
+#: OSError/URLError text verbatim (see bench_fixture_session._http), so
+#: these are the phrases that actually land here on a timeout, a refused/
+#: reset connection, or an mDNS resolution hiccup.
+TRANSIENT_HTTP_MARKERS = (
+    "timed out", "connection refused", "connection reset",
+    "connection aborted", "temporarily unavailable", "network is unreachable",
+    "no route to host", "name or service not known", "getaddrinfo failed",
+    "econnreset", "econnrefused",
+    # Windows (this platform) phrases urllib's OSError text completely
+    # differently from the Linux/glibc strings above -- these are what a
+    # rebooting-then-refusing / reset-mid-request ESP32 actually produces
+    # here, verified empirically (see the B2 fix writeup). Kept alongside,
+    # not instead of, the Linux markers: this must work on both.
+    "winerror 10061", "actively refused",       # WSAECONNREFUSED
+    "winerror 10054", "forcibly closed",         # WSAECONNRESET
+    "winerror 10060", "did not properly respond",  # WSAETIMEDOUT
+)
+#: Deliberately NOT a marker: a bare "timeout" substring would match any
+#: non-200 response body text that happens to mention the word (e.g. a
+#: BenchSessionError wrapping "GET ... -> 500: profile timeout warning"),
+#: which is not a network-transport problem at all. "timed out" above is
+#: the actual urllib/OS phrasing and is specific enough to keep.
+
+
+def is_transient_http_error(exc: BaseException) -> bool:
+    """True when ``exc`` looks like a transient network blip worth retrying.
+
+    Deliberately narrow: an exception whose message matches none of
+    ``TRANSIENT_HTTP_MARKERS`` is NOT transient. Treating every unrecognized
+    exception as retryable is exactly the "silently retry past a dead
+    board" failure mode this whole mechanism exists to avoid -- an unknown
+    error must fall through to an abort, not a retry loop.
+    """
+    msg = str(exc).lower()
+    return any(marker in msg for marker in TRANSIENT_HTTP_MARKERS)
+
+
+class RetryExhausted(RuntimeError):
+    """Raised by :func:`call_with_retry` when every retry was itself a
+    transient failure. Always fatal -- callers must abort loudly, never
+    treat this as a pass."""
+
+    def __init__(self, attempts: int, last_error: BaseException) -> None:
+        super().__init__(
+            f"exhausted {attempts} attempt(s), last error: {last_error}")
+        self.attempts = attempts
+        self.last_error = last_error
+
+
+def call_with_retry(fn, *, policy: "RetryPolicy", is_transient=is_transient_http_error,
+                     on_retry=None, sleep_fn=time.sleep):
+    """Call ``fn()`` (no arguments), retrying on exceptions ``is_transient``
+    classifies as transient, up to ``policy.max_retries`` times.
+
+    * A non-transient exception is re-raised IMMEDIATELY, unretried -- this
+      is what keeps a real crash from being retried past.
+    * A transient exception, once retries are exhausted, is re-raised
+      wrapped in :class:`RetryExhausted` so callers can tell "gave up after
+      N attempts" apart from "failed on the first try".
+    * ``on_retry(attempt, wait_s, exc)`` -- if given -- fires before each
+      sleep, so a caller can log/record what happened without this function
+      knowing anything about reports or logging.
+    * ``sleep_fn`` is injectable so tests exercise the real backoff
+      schedule without actually sleeping.
+    """
+    attempt = 0
+    while True:
+        try:
+            return fn()
+        except Exception as exc:  # noqa: BLE001 - reclassified below
+            if not is_transient(exc):
+                raise
+            attempt += 1
+            if attempt > policy.max_retries:
+                raise RetryExhausted(attempt - 1, exc) from exc
+            wait_s = retry_backoff_s(attempt, policy)
+            if on_retry is not None:
+                on_retry(attempt, wait_s, exc)
+            sleep_fn(wait_s)
+
+
+@dataclass
+class RetryEvent:
+    """One retried attempt, recorded so the run report shows every retry
+    that happened -- a run that "passed" after 30 retries must be visibly
+    different from one that passed cleanly."""
+    stage: str
+    operation: str
+    attempt: int
+    wait_s: float
+    error: str
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+# ---------------------------------------------------------------------------
+# Distinguishing a transient blip from a dead/rebooted board.
+# ---------------------------------------------------------------------------
+
+#: reset_reason strings (see dashboard_http.c's reset_reason_name) that name
+#: a crash-class reboot rather than a deliberate/benign one. A board that
+#: rebooted for one of these reasons must never be reported as having
+#: survived a "transient" HTTP blip.
+PANIC_RESET_REASONS = frozenset({
+    "panic/exception", "interrupt watchdog", "task watchdog", "other watchdog",
+    "brownout",
+})
+
+
+class BoardRestartDetected(RuntimeError):
+    """The board evidently rebooted mid-run. Always fatal."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+def detect_board_restart(prev_uptime_s: "Optional[float]", prev_reset_reason: "Optional[str]",
+                          status: dict) -> "Optional[str]":
+    """Pure decision: does ``status`` (a fresh ``/api/status`` snapshot) show
+    evidence the board rebooted since ``prev_uptime_s``/``prev_reset_reason``
+    were last observed? Returns the (loud, human-readable) reason string, or
+    ``None`` when nothing indicates a restart.
+
+    Two independent signals, either is sufficient:
+
+    * ``uptime_s`` went backwards -- the clearest possible proof of a
+      reboot, independent of whether ``reset_reason`` names anything
+      recognizable.
+    * ``reset_reason`` CHANGED to a panic/watchdog/brownout-class value --
+      catches a reboot fast enough that uptime hasn't visibly moved
+      backwards relative to the last observation (e.g. a request landed
+      just after boot).
+
+    ``prev_reset_reason`` matters, not just membership in
+    :data:`PANIC_RESET_REASONS`: a board can have a panic in its OWN
+    history from before this run started, and that stale fact must not
+    trip an abort on the first observation of a run -- only a reason that
+    *changed* to a panic class mid-run is evidence something just crashed.
+    """
+    new_uptime = status.get("uptime_s")
+    if new_uptime is not None:
+        try:
+            new_uptime = float(new_uptime)
+        except (TypeError, ValueError):
+            # A non-numeric uptime is a malformed/garbled response, not
+            # proof of anything -- treat it as absent rather than letting a
+            # bare comparison below raise TypeError past this function's
+            # callers as an "unhandled exception".
+            new_uptime = None
+    reset_reason = status.get("reset_reason")
+    if prev_uptime_s is not None and new_uptime is not None and new_uptime < prev_uptime_s:
+        return (f"board uptime went backwards ({prev_uptime_s:.0f}s -> {new_uptime:.0f}s) -- "
+                f"the board restarted; reset_reason={reset_reason!r}")
+    if (reset_reason in PANIC_RESET_REASONS and prev_reset_reason is not None
+            and reset_reason != prev_reset_reason):
+        return (f"board reset_reason changed to {reset_reason!r} (was {prev_reset_reason!r}) -- "
+                f"the board crashed and rebooted")
+    return None
+
+
+@dataclass
+class BoardHealthTracker:
+    """Stateful wrapper around :func:`detect_board_restart` for the harness's
+    retry loop: remembers the last-observed uptime/reset_reason and updates
+    on every call, so callers don't have to thread that state through by
+    hand. Call :meth:`observe` with each fresh ``/api/status`` snapshot;
+    the FIRST call ever establishes the baseline and never itself reports a
+    restart (there is nothing to compare against yet)."""
+    last_uptime_s: "Optional[float]" = None
+    last_reset_reason: "Optional[str]" = None
+
+    def observe(self, status: dict) -> "Optional[str]":
+        reason = detect_board_restart(self.last_uptime_s, self.last_reset_reason, status)
+        # Coerce the same way detect_board_restart does, and keep the last
+        # KNOWN-GOOD baseline on a missing/non-numeric uptime rather than
+        # overwriting it with None -- an absent reading must not silently
+        # disable restart detection for every observation after it.
+        raw_uptime = status.get("uptime_s")
+        if raw_uptime is not None:
+            try:
+                self.last_uptime_s = float(raw_uptime)
+            except (TypeError, ValueError):
+                pass
+        reset_reason = status.get("reset_reason")
+        if reset_reason is not None:
+            self.last_reset_reason = reset_reason
+        return reason
+
+
+# ---------------------------------------------------------------------------
 # Autotune refusal / acceptance
 # ---------------------------------------------------------------------------
 
@@ -328,6 +575,10 @@ class RunReport:
     finished_at: "Optional[str]" = None
     aborted: bool = False
     abort_reason: "Optional[str]" = None
+    #: Every retried attempt across the whole run (see RetryEvent) -- so a
+    #: run that "passed" after 30 retries is visibly not the same as one
+    #: that passed cleanly.
+    retries: "list[RetryEvent]" = field(default_factory=list)
 
     @property
     def passed(self) -> bool:
@@ -348,6 +599,8 @@ class RunReport:
             "aborted": self.aborted, "abort_reason": self.abort_reason,
             "overall_passed": self.passed,
             "stages": [s.to_dict() for s in self.stages],
+            "retries": [r.to_dict() for r in self.retries],
+            "retry_count": len(self.retries),
         }
         return d
 
@@ -362,6 +615,12 @@ class RunReport:
         ]
         if self.aborted:
             lines.append(f"  ABORTED: {self.abort_reason}")
+        if self.retries:
+            lines.append(f"  RETRIES: {len(self.retries)} transient-error retr"
+                          f"{'y' if len(self.retries) == 1 else 'ies'} occurred during this run")
+            for r in self.retries:
+                lines.append(f"         [retry] {r.stage}.{r.operation} attempt {r.attempt} "
+                              f"(waited {r.wait_s:.1f}s): {r.error}")
         for s in self.stages:
             if s.skipped:
                 lines.append(f"  [SKIP] {s.name}")
@@ -388,4 +647,9 @@ __all__ = [
     "TrackingThresholds", "CheckResult", "evaluate_zone_tracking", "evaluate_spread",
     "autotune_refusal_reason", "diff_backup_zones",
     "StageReport", "RunReport", "now_iso",
+    "DEFAULT_MAX_RETRIES", "DEFAULT_RETRY_BACKOFF_S", "DEFAULT_RETRY_BACKOFF_MULTIPLIER",
+    "DEFAULT_RETRY_BACKOFF_MAX_S", "RetryPolicy", "retry_backoff_s",
+    "TRANSIENT_HTTP_MARKERS", "is_transient_http_error", "RetryExhausted",
+    "call_with_retry", "RetryEvent",
+    "PANIC_RESET_REASONS", "BoardRestartDetected", "detect_board_restart", "BoardHealthTracker",
 ]

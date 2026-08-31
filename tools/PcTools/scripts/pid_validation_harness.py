@@ -107,12 +107,74 @@ class Aborted(Exception):
     """Raised by a stage to unwind the whole run through the finally block."""
 
 
-def _guard(session, limit_c: float, where: str) -> None:
-    hottest = session.hottest_channel_c()
+def _guard(session, args, limit_c: float, where: str) -> None:
+    # Routed through _retrying() rather than calling session.hottest_channel_c()
+    # directly: this both (a) survives a transient blip on the pre-tune
+    # temperature read instead of aborting the whole run over it, and (b)
+    # gets a board-health observation on every guard point via _retrying's
+    # own health check -- see B1 in the retry-hardening review.
+    hottest = _retrying(session, args, "guard", where, session.hottest_channel_c)
     try:
         pv.check_hard_max(hottest, limit_c, where)
     except pv.HardMaxExceeded as exc:
         raise Aborted(str(exc)) from exc
+
+
+# ---------------------------------------------------------------------------
+# Retry wiring. See pid_validation.call_with_retry / detect_board_restart for
+# the actual policy -- this is just the glue that (a) threads a RetryPolicy
+# built from CLI args through every HTTP-touching stage call, (b) records
+# every retry onto args._retry_events so the final report shows them, and
+# (c) checks the board's own /api/status after a retry recovers, aborting
+# loudly instead of reporting a pass if the board evidently rebooted.
+# ---------------------------------------------------------------------------
+
+def _retry_policy(args) -> pv.RetryPolicy:
+    return pv.RetryPolicy(max_retries=args.max_retries, backoff_s=args.retry_backoff_s,
+                          backoff_multiplier=args.retry_backoff_multiplier,
+                          backoff_max_s=args.retry_backoff_max_s)
+
+
+def _retrying(session, args, stage_name: str, operation: str, fn):
+    """Call ``fn()`` under the run's retry policy. Transient HTTP errors are
+    retried with backoff; EVERY call -- not just one that actually retried
+    -- is followed by a board health check (uptime/reset_reason). This is
+    the fix for B1: a mid-run reboot fast enough that the very next call
+    lands on the rebooted board with no exception at all (no retry, no
+    error) must still be caught here, not just the case where a retry
+    visibly fired. Exhausted retries, or a detected restart, unwind the run
+    via Aborted -- the same path a hard-max breach takes."""
+    policy = _retry_policy(args)
+    events: "list[pv.RetryEvent]" = []
+
+    def on_retry(attempt, wait_s, exc):
+        ev = pv.RetryEvent(stage=stage_name, operation=operation, attempt=attempt,
+                           wait_s=wait_s, error=str(exc))
+        events.append(ev)
+        log.warning("transient error in %s.%s (attempt %d/%d, retrying in %.1fs): %s",
+                    stage_name, operation, attempt, policy.max_retries, wait_s, exc)
+
+    try:
+        result = pv.call_with_retry(fn, policy=policy, is_transient=pv.is_transient_http_error,
+                                    on_retry=on_retry)
+    except Exception as exc:
+        args._retry_events.extend(events)
+        raise Aborted(
+            f"{stage_name}.{operation}: gave up after {len(events)} retry attempt(s) "
+            f"(max_retries={policy.max_retries}) -- last error: {exc}") from exc
+
+    args._retry_events.extend(events)
+    # Observe board health unconditionally -- see the docstring above for
+    # why this must not be gated on ``if events``.
+    try:
+        status = session.status()
+    except BenchSessionError:
+        status = None
+    if status is not None:
+        restart_reason = args._health.observe(status)
+        if restart_reason:
+            raise Aborted(f"{stage_name}.{operation}: {restart_reason}")
+    return result
 
 
 def stage_cooldown(session, args) -> pv.StageReport:
@@ -137,15 +199,29 @@ def stage_tune_all_zones(session, args) -> pv.StageReport:
     detail: "dict[str, Any]" = {"zones": {}}
     passed = True
     for zone in args.zones:
-        _guard(session, args.max_temp_c, f"tune zone {zone}")
-        code, body = session.start_autotune_step(zone, args.tune_duty)
+        _guard(session, args, args.max_temp_c, f"tune zone {zone}")
+        code, body = _retrying(session, args, "tune_all_zones", f"zone{zone}.start_autotune_step",
+                               lambda z=zone: session.start_autotune_step(z, args.tune_duty))
         if code != 200:
             checks.append(pv.CheckResult(name=f"zone{zone}.start", passed=False,
                                          actual=f"{code}: {body[:200]}", threshold="200"))
             passed = False
             continue
-        status = session.wait_for_autotune_state(("done", "aborted"), args.tune_timeout_s,
-                                                  poll_s=args.tune_poll_s)
+        # B3 fix: wait_for_autotune_state is itself a bounded polling loop
+        # (up to args.tune_timeout_s, e.g. 3600s by default). Retrying the
+        # WHOLE call on a transient blip must not hand it a fresh
+        # tune_timeout_s budget each attempt -- worst case that is
+        # (max_retries + 1) x tune_timeout_s of driven heat for one zone.
+        # Instead compute one absolute wall-clock deadline before the first
+        # attempt and pass each retry only the time remaining until it, so
+        # a retry can never extend the total time this zone is allowed to
+        # run past what a single clean attempt would have taken.
+        zone_tune_deadline = time.monotonic() + args.tune_timeout_s
+        status = _retrying(
+            session, args, "tune_all_zones", f"zone{zone}.wait_for_autotune_state",
+            lambda: session.wait_for_autotune_state(
+                ("done", "aborted"), max(0.0, zone_tune_deadline - time.monotonic()),
+                poll_s=args.tune_poll_s))
         reason = pv.autotune_refusal_reason(status)
         checks.append(pv.CheckResult(name=f"zone{zone}.refusal", passed=reason is None,
                                      actual=status.get("refusal"), threshold="ok", detail=reason or ""))
@@ -158,7 +234,8 @@ def stage_tune_all_zones(session, args) -> pv.StageReport:
             # refused tune looked exactly like a successful one" bug class
             # this repo has already hit once (see commit 813ad90).
             continue
-        ok, body = session.autotune_accept()
+        ok, body = _retrying(session, args, "tune_all_zones", f"zone{zone}.autotune_accept",
+                             session.autotune_accept)
         checks.append(pv.CheckResult(name=f"zone{zone}.accept", passed=ok,
                                      actual=body[:200], threshold="ok"))
         passed = passed and ok
@@ -181,7 +258,7 @@ def stage_tune_all_zones(session, args) -> pv.StageReport:
 def stage_coupling_matrix(session, args) -> pv.StageReport:
     t0 = time.monotonic()
     try:
-        matrix = session.autotune_matrix()
+        matrix = _retrying(session, args, "coupling_matrix", "autotune_matrix", session.autotune_matrix)
     except BenchSessionError as exc:
         return pv.StageReport(name="coupling_matrix", passed=False, error=str(exc),
                               duration_s=time.monotonic() - t0)
@@ -207,7 +284,7 @@ def stage_coupling_matrix(session, args) -> pv.StageReport:
 def stage_backup_roundtrip(session, args) -> pv.StageReport:
     t0 = time.monotonic()
     try:
-        exported = session.backup_export()
+        exported = _retrying(session, args, "backup_roundtrip", "backup_export", session.backup_export)
     except BenchSessionError as exc:
         return pv.StageReport(name="backup_roundtrip", passed=False, error=str(exc),
                               duration_s=time.monotonic() - t0)
@@ -215,13 +292,14 @@ def stage_backup_roundtrip(session, args) -> pv.StageReport:
         os.makedirs(os.path.dirname(args.backup_path) or ".", exist_ok=True)
         with open(args.backup_path, "w", encoding="utf-8") as fh:
             json.dump(exported, fh, indent=2)
-    ok, body = session.backup_import(exported)
+    ok, body = _retrying(session, args, "backup_roundtrip", "backup_import",
+                         lambda: session.backup_import(exported))
     if not ok:
         return pv.StageReport(
             name="backup_roundtrip", passed=False,
             error=f"import refused: {body[:300]}", duration_s=time.monotonic() - t0)
     try:
-        reimported = session.backup_export()
+        reimported = _retrying(session, args, "backup_roundtrip", "backup_export_2", session.backup_export)
     except BenchSessionError as exc:
         return pv.StageReport(name="backup_roundtrip", passed=False, error=str(exc),
                               duration_s=time.monotonic() - t0)
@@ -252,12 +330,25 @@ def stage_profile_tracking(session, args) -> pv.StageReport:
     try:
         zone_mask = sum(1 << z for z in args.zones)
         segments = _profile_segments_c_to_80(args.tracking_peak1_c, args.tracking_peak2_c)
-        session.put_profile(args.tracking_slot, "pid_validation_tracking", zone_mask, segments)
-        code, body = session.start_profile(args.tracking_slot)
+        _retrying(session, args, "profile_tracking", "put_profile",
+                 lambda: session.put_profile(args.tracking_slot, "pid_validation_tracking",
+                                              zone_mask, segments))
+        code, body = _retrying(session, args, "profile_tracking", "start_profile",
+                               lambda: session.start_profile(args.tracking_slot))
         if code != 200:
             return pv.StageReport(name="profile_tracking", passed=False,
                                   error=f"start refused: {code}: {body[:300]}",
                                   duration_s=time.monotonic() - t0)
+        # B4: deliberately NOT run through _retrying(). sample_response()
+        # polls and accumulates rows over the whole tracking_duration_s
+        # while the profile keeps executing on the board -- it is not
+        # idempotent. Retrying the whole call would throw away every row
+        # already collected and re-sample for a fresh full duration starting
+        # mid-profile, producing a time-shifted trace compared against
+        # expectations for the ORIGINAL start time: a spurious FAIL, or a
+        # PASS on data that never covered the ramp. A transient error here
+        # must surface as a stage failure (via the BenchSessionError catch
+        # below), not be silently retried past.
         raw_rows = session.sample_response(
             args.tracking_duration_s, period_s=args.tracking_period_s, zone_index=args.zones[0])
     except BenchSessionError as exc:
@@ -349,6 +440,12 @@ class FakeSession:
 
     def hottest_channel_c(self) -> float:
         return self._t
+
+    def status(self) -> dict:
+        # Healthy, monotonically-increasing uptime and a benign reset
+        # reason by default -- FakeSession never crashes on its own.
+        self._uptime = getattr(self, "_uptime", 0.0) + 1.0
+        return {"uptime_s": self._uptime, "reset_reason": getattr(self, "_reset_reason", "power-on")}
 
     def wait_for_cooldown(self, target_c=None, tolerance_c=3.0, timeout_s=2700.0, poll_s=20.0):
         self._t = (target_c if target_c is not None else 33.0)
@@ -445,6 +542,22 @@ def _run(session, args) -> pv.RunReport:
         "cooldown": args.skip_cooldown, "tune": args.skip_tune, "matrix": args.skip_matrix,
         "backup": args.skip_backup, "tracking": args.skip_tracking,
     }
+    # Retry/board-health state threaded through every stage via _retrying().
+    # Seeded with a best-effort initial status BEFORE any stage runs, so a
+    # panic-class reset_reason already present on the board at run start is
+    # recorded as the baseline (not itself flagged) -- only a CHANGE to a
+    # panic reason, or uptime going backwards, mid-run counts as a restart.
+    args._retry_events = []
+    args._health = pv.BoardHealthTracker()
+    try:
+        args._health.observe(session.status())
+    except Exception:  # noqa: BLE001 - best-effort baseline, never fatal here
+        # WARNING, not DEBUG: if this fails, the run has NO baseline and the
+        # earliest crash in the run can never be flagged by uptime/reset
+        # comparison until some later observation succeeds -- an operator
+        # watching the log needs to see that up front, not only by passing
+        # -v after the fact.
+        log.warning("could not seed board-health baseline before the run", exc_info=True)
     try:
         for name, fn in STAGES:
             if skip[name]:
@@ -481,6 +594,7 @@ def _run(session, args) -> pv.RunReport:
             report.abort_reason = (report.abort_reason or "") + f"; teardown failed: {exc!r}"
             log.exception("force_all_stop failed during teardown")
         report.finished_at = pv.now_iso()
+        report.retries = list(args._retry_events)
     return report
 
 
@@ -508,6 +622,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    help=f"harness's own hard abort ceiling (default: {pv.DEFAULT_HARD_MAX_TEMP_C})")
     p.add_argument("--stop-on-first-failure", action="store_true",
                    help="stop after the first FAILED stage instead of running every stage regardless")
+
+    g = p.add_argument_group("transient-error retry")
+    g.add_argument("--max-retries", type=int, default=pv.DEFAULT_MAX_RETRIES,
+                   help=f"retries per HTTP call on a transient error, e.g. timeout/refused/reset "
+                        f"(default: {pv.DEFAULT_MAX_RETRIES})")
+    g.add_argument("--retry-backoff-s", type=float, default=pv.DEFAULT_RETRY_BACKOFF_S,
+                   help=f"wait before the first retry, seconds (default: {pv.DEFAULT_RETRY_BACKOFF_S})")
+    g.add_argument("--retry-backoff-multiplier", type=float, default=pv.DEFAULT_RETRY_BACKOFF_MULTIPLIER,
+                   help=f"exponential growth per subsequent retry "
+                        f"(default: {pv.DEFAULT_RETRY_BACKOFF_MULTIPLIER})")
+    g.add_argument("--retry-backoff-max-s", type=float, default=pv.DEFAULT_RETRY_BACKOFF_MAX_S,
+                   help=f"backoff cap, seconds (default: {pv.DEFAULT_RETRY_BACKOFF_MAX_S})")
 
     p.add_argument("--skip-cooldown", action="store_true")
     p.add_argument("--skip-tune", action="store_true")

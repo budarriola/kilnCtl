@@ -78,3 +78,8 @@ nul
 
 # Vendor LCD module datasheets/demo code -- reference only, not built
 firmware/KilnFW/Datasheets/4.0inch_SPI_Module_ST7796_MSP4030_MSP4031_V1.0/
+
+# pid_validation_harness.py --dry-run artifact (its stage_backup_roundtrip
+# writes here by default even with no board) -- a test-run byproduct, not a
+# tracked config preset.
+/tools/PcTools/config_presets/pid_validation_backup.json
