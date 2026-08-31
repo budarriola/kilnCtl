@@ -144,9 +144,11 @@ fopdt_model_t pid_autotune_fit_fopdt(const autotune_sample_t *samples, int sampl
 
     /* One two-point fit at a given rise estimate; shared by the initial fit
      * and every refinement iteration below so the two paths cannot drift
-     * apart. Returns false (leaving *out_tau/*out_dead untouched) if the
-     * crossings this rise estimate implies aren't reached by the trace --
-     * an overshot candidate the data cannot support. */
+     * apart. On failure (the crossings this rise estimate implies aren't
+     * reached by the trace -- an overshot candidate the data cannot
+     * support), tau and dead_time below are left unset by this block; every
+     * caller returns invalid_model() before either is ever read in that
+     * case. */
     float tau, dead_time;
     {
         float target28 = baseline_c + 0.283f * raw_rise;

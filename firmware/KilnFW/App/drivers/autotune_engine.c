@@ -661,10 +661,20 @@ static void finalize_fit(void)
     if (observed_rise_c < min_rise_c) {
         force_relays_off();
         s_at.state = AUTOTUNE_ENGINE_ABORTED;
+        /* Kept short and to the point (both required numbers -- the
+         * actual rise and the minimum -- no prose padding): s_at.
+         * abort_reason is a fixed 96-byte buffer shared by every refusal
+         * in this function, and a wordier 4-substitution version of this
+         * message (baseline_c and step_duty included) tripped -Werror=
+         * format-truncation on the ESP32 target build -- GCC's worst-case
+         * bound for four %f substitutions exceeds 96 bytes even though no
+         * real value ever gets close, the same class of problem
+         * autotune_engine_accept()'s reasons[] buffer was widened for
+         * above. Two substitutions is what the physical-plausibility
+         * refusal just below already proved safe (see ITS OWN comment). */
         snprintf(s_at.abort_reason, sizeof(s_at.abort_reason),
-                 "fit failed: rise of %.2fC over the step is below the %.1fC minimum needed to trust the "
-                 "identification (baseline %.1fC, step duty %.2f)",
-                 (double)observed_rise_c, (double)min_rise_c, (double)baseline_c, (double)s_at.step_duty);
+                 "fit failed: rise %.2fC is below the %.1fC minimum needed to trust the identification",
+                 (double)observed_rise_c, (double)min_rise_c);
         ESP_LOGW(TAG, "autotune zone %u: %s", s_at.zone_index, s_at.abort_reason);
         return;
     }
