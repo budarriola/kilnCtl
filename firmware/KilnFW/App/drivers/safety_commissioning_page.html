@@ -309,9 +309,14 @@ page is UNKNOWN, not a real confirmation, until it reports a newer build.</p>
     <h3>Q4: Where is the safety processor's own thermocouple?</h3>
     <label class="radio-card" id="gCardNotFitted">
       <input type="radio" name="gq2" value="not_fitted">Not fitted
-      <span class="consequence">S13 is currently dormant in this firmware build (sample-counter
-      advancing is hard-coded off), so a borrowed-zone reading would trip unconditionally. This
-      option is disabled until that is fixed.</span>
+      <span class="consequence">Borrows one zone's own thermocouple reading instead (`tc_source`
+      BORROWED_ZONE) -- this trades away the sensor independence S13 exists to protect: if that
+      zone's channel ever goes bad, the safety processor loses its only temperature reading too.
+      `tc_placement_mode` is forced to CHAMBER_AGREED (S2/S10 active, same as the chamber option).
+      S13 watches the borrowed zone's own sample counter and trips if it stops advancing.</span>
+      <select id="gBorrowedZoneSelect" hidden>
+        <option value="">-- Choose the zone to borrow --</option>
+      </select>
     </label>
     <label class="radio-card" id="gCardChamber">
       <input type="radio" name="gq2" value="chamber">In the kiln chamber
@@ -1140,7 +1145,21 @@ function loadCurrent() {
     // k_mask at all, and must keep rendering the map half normally.
     if (m && typeof m.k_mask === 'number' && m.k && m.k.length === 3) ctKDerived = m;
   }).catch(function () { /* leave ctMapDerived alone -- manual entry stays available */ })
+    .then(loadZoneNames)
     .then(loadCommissioning);
+}
+
+// Names for the "Not fitted" zone picker (gCardNotFitted's <select>),
+// indices 0-2 only -- see gZoneNames's own comment on why. A failed fetch
+// (or an older firmware predating GET /api/zones) is not fatal: gPrefill()
+// falls back to "Zone N" placeholders, same "manual entry stays available"
+// degrade-gracefully rule loadCurrent()'s CT-map fetch already follows.
+function loadZoneNames() {
+  return fetch('/api/zones').then(function (r) { return r.json(); }).then(function (z) {
+    if (z && Array.isArray(z.zones)) {
+      gZoneNames = z.zones.slice(0, 3).map(function (zz) { return zz.name; });
+    }
+  }).catch(function () { /* leave gZoneNames empty -- gPrefill() falls back to "Zone N" */ });
 }
 
 function loadCommissioning() {
@@ -1290,12 +1309,13 @@ document.getElementById('benchBtn').addEventListener('click', function () {
  *   260 abs_max_temp_c        (Q1)
  *   529 safety_tc_installed   (Q2, 0x0211)
  *   257 tc_source             (Q2, 0x0101)
+ *   258 borrowed_zone_index   (Q2, 0x0102 -- "Not fitted" branch only)
  *   259 tc_placement_mode     (Q2, 0x0103)
  *   782 mains_voltage_v       (Q3, 0x030E)
  *   793 max_expected_power_w  (Q4, 0x0319)
  * ============================================================ */
 var G_IDS = { ABS_MAX: 260, TC_INSTALLED: 529, TC_SOURCE: 257, TC_PLACEMENT: 259,
-              MAINS: 782, POWER: 793 };
+              BORROWED_ZONE_INDEX: 258, MAINS: 782, POWER: 793 };
 var gCurrentScreen = 0;
 var gPrefilled = false;
 // F5 fix (opus review): true whenever the last /api/safety/commissioning GET
@@ -1305,7 +1325,15 @@ var gPrefilled = false;
 // this is true, rather than let the guided flow proceed on device state it
 // never actually loaded.
 var gLoadFailed = false;
-var gQ2Choice = null; // 'chamber' | 'external' -- 'not_fitted' stays disabled, see radio-card
+var gQ2Choice = null; // 'chamber' | 'external' | 'not_fitted'
+// Populated from GET /api/zones (zones_http.c) -- name-by-index for the
+// "Not fitted" zone picker. borrowed_zone_index is validated 0-2 server-side
+// (config_params.c CHECK_U8_MAX(2u)), matching CONTEXT_SNAPSHOT_MAX_ZONES
+// (SaftyFW's snapshots.h) -- the safety link's context frame only ever
+// carries the three heated zones, regardless of how many thermocouple
+// channels this board has configured -- so only indices 0-2 are ever
+// offered here even on a 5-channel board.
+var gZoneNames = [];
 var GSTEP_NAMES = ['Start', 'This kiln', 'TC location', 'Review', 'Save'];
 
 function gGoto(n) {
@@ -1374,8 +1402,12 @@ function gValidateScreen1() {
 function gValidateScreen2() {
   var msg = document.getElementById('g2msg');
   var checked = document.querySelector('input[name="gq2"]:checked');
-  if (!checked || checked.value === 'not_fitted') {
+  if (!checked) {
     msg.textContent = 'Choose where the safety processor\'s own thermocouple is fitted.';
+    return false;
+  }
+  if (checked.value === 'not_fitted' && document.getElementById('gBorrowedZoneSelect').value === '') {
+    msg.textContent = 'Choose which zone\'s thermocouple to borrow.';
     return false;
   }
   gQ2Choice = checked.value;
@@ -1410,6 +1442,13 @@ function gBuildAnswers() {
     pairs.push({ id: G_IDS.TC_INSTALLED, value: 1, label: 'safety_tc_installed' });
     pairs.push({ id: G_IDS.TC_SOURCE, value: 0, label: 'tc_source (OWN_J7)' });
     pairs.push({ id: G_IDS.TC_PLACEMENT, value: 1, label: 'tc_placement_mode (EXTERNAL_OVERHEAT)' });
+  } else if (gQ2Choice === 'not_fitted') {
+    var zoneIdx = document.getElementById('gBorrowedZoneSelect').value;
+    var zoneLabel = gZoneNames[Number(zoneIdx)] || ('Zone ' + Number(zoneIdx));
+    pairs.push({ id: G_IDS.TC_INSTALLED, value: 0, label: 'safety_tc_installed' });
+    pairs.push({ id: G_IDS.TC_SOURCE, value: 1, label: 'tc_source (BORROWED_ZONE)' });
+    pairs.push({ id: G_IDS.TC_PLACEMENT, value: 0, label: 'tc_placement_mode (forced CHAMBER_AGREED)' });
+    pairs.push({ id: G_IDS.BORROWED_ZONE_INDEX, value: zoneIdx, label: 'borrowed_zone_index (' + zoneLabel + ')' });
   }
   return pairs;
 }
@@ -1521,14 +1560,36 @@ function gPrefill(data) {
   var tcInstalled = byId[G_IDS.TC_INSTALLED];
   var tcSource = byId[G_IDS.TC_SOURCE];
   var tcPlacement = byId[G_IDS.TC_PLACEMENT];
-  // "Not fitted" stays disabled -- S13 dormant, per spec section 2.4/OQ7 --
-  // shown-disabled below via .disabled/[disabled], not a separate reachability
-  // flag (F4 fix, opus review: notFittedReachable used to be assigned here
-  // and never read by anything).
-  document.getElementById('gCardNotFitted').classList.add('disabled');
-  document.querySelector('#gCardNotFitted input').disabled = true;
+  var borrowedZone = byId[G_IDS.BORROWED_ZONE_INDEX];
+
+  // "Not fitted" zone picker -- populated from gZoneNames (loadZoneNames(),
+  // GET /api/zones), falling back to a plain "Zone N" label if that fetch
+  // failed or predates this firmware. 2026-08-30: this option used to be
+  // shown-disabled ("S13 is dormant, sample_counter_advancing is hardcoded
+  // false") per spec section 2.4/OQ7 -- now that safety_core_build_input()
+  // has a real producer for it (see SAFETY_MODEL.md's guard table), the
+  // option is reachable like the other two.
+  var zoneSel = document.getElementById('gBorrowedZoneSelect');
+  for (var zi = 0; zi < 3; zi++) {
+    var opt = document.createElement('option');
+    opt.value = String(zi);
+    opt.textContent = gZoneNames[zi] || ('Zone ' + zi);
+    zoneSel.appendChild(opt);
+  }
+
   if (tcInstalled && tcInstalled.set && tcSource && tcSource.set && tcPlacement && tcPlacement.set) {
-    if (Number(tcInstalled.value) === 1 && Number(tcPlacement.value) === 0) {
+    if (Number(tcInstalled.value) === 0) {
+      // safety_tc_installed==0 is Q2's "Not fitted" branch (COMMISSIONING_UX.md
+      // section 2.4) regardless of tc_source/tc_placement's own values -- those
+      // two are FORCED (BORROWED_ZONE / CHAMBER_AGREED) by this branch, not
+      // independently meaningful facts to re-derive the choice from.
+      gQ2Choice = 'not_fitted';
+      document.querySelector('#gCardNotFitted input').checked = true;
+      zoneSel.hidden = false;
+      if (borrowedZone && borrowedZone.set) {
+        zoneSel.value = String(borrowedZone.value);
+      }
+    } else if (Number(tcInstalled.value) === 1 && Number(tcPlacement.value) === 0) {
       gQ2Choice = 'chamber';
       document.querySelector('#gCardChamber input').checked = true;
     } else if (Number(tcInstalled.value) === 1 && Number(tcPlacement.value) === 1) {
@@ -1540,6 +1601,10 @@ function gPrefill(data) {
     r.addEventListener('change', function () {
       document.querySelectorAll('.radio-card').forEach(function (c) { c.classList.remove('selected'); });
       if (r.checked) r.closest('.radio-card').classList.add('selected');
+      // Zone picker is only meaningful for the "Not fitted" branch -- shown
+      // exactly while that radio is the checked one, same discipline
+      // #gMainsOther's own change handler uses for "Other..." mains voltage.
+      zoneSel.hidden = !(r.checked && r.value === 'not_fitted');
     });
   });
 

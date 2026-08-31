@@ -428,6 +428,22 @@ function relayNumbersForChannel(channel) {
   return nums;
 }
 
+// Which zone (if any) claims this channel via thermo_mask, for the channel
+// row's label (renderChannels below). Same mask/bit convention as
+// relayNumbersForChannel above. If more than one zone's thermo_mask claims
+// the same channel (overlapping masks are possible, not validated against
+// here), the lowest zone index wins -- deterministic and matches the order
+// zonesCache.zones is already indexed in, rather than concatenating names.
+// Returns null (not '') when no zone claims the channel, or zonesCache
+// hasn't loaded yet, so callers fall back to "Channel N".
+function zoneIndexForChannel(channel) {
+  var zones = zonesCache.zones || [];
+  for (var zi = 0; zi < zones.length; zi++) {
+    if (zones[zi] && (zones[zi].thermo_mask & (1 << channel))) return zi;
+  }
+  return null;
+}
+
 // relaysData is /api/status's "relays" array ({relay, on}), present only
 // when ds.io_ready (dashboard_http.c) -- absent entirely on a board with no
 // IO expander, same as today. Relay ON/OFF IS a live device reading (unlike
@@ -557,8 +573,21 @@ function renderChannels(data) {
       detail = '<span class="kc-live-value">' + window.kcUnit.fmt(ch.temp_c) + '</span>' + staleTag +
                relayStatusHtml(ch.channel, data.relays);
     }
-    div.innerHTML = '<span><span class="ch-swatch" style="background:' + chColor(ch.channel) + '"></span>Channel ' +
-      ch.channel + '</span><span class="temp">' + detail + '</span>';
+    // Label the row with its zone name (operator-set on Thermocouples &
+    // Zones) when one claims this channel; otherwise fall back to
+    // "Channel N", same as before this change (zonesCache not loaded yet,
+    // or a wired-but-unassigned channel, are both real states, not errors).
+    // zoneName() itself already falls back to "Zone N" for an empty name
+    // string ('' is falsy, so its `||` fallback fires) and HTML-escapes.
+    // The channel number stays visible either way -- as a title tooltip
+    // when a zone name is shown, inline when it isn't -- so an operator
+    // diagnosing wiring can still tell which physical channel is which.
+    var zi = zoneIndexForChannel(ch.channel);
+    var label = (zi === null)
+      ? 'Channel ' + ch.channel
+      : '<span title="Channel ' + ch.channel + '">' + zoneName(zi) + '</span>';
+    div.innerHTML = '<span><span class="ch-swatch" style="background:' + chColor(ch.channel) + '"></span>' +
+      label + '</span><span class="temp">' + detail + '</span>';
     el.appendChild(div);
   });
   const safetyDiv = renderSafetyCard(data);
@@ -909,6 +938,24 @@ function drawChartAxis(g, x, yTemp, tMin, tMax) {
     var lx = Math.max(0, Math.min(g.cssW - tw, tx - tw / 2));
     ctx.fillStyle = g.muted;
     ctx.fillText(label, lx, g.cssH - 4);
+  }
+}
+
+// Owner request: the y-axis (temp) should always carry 10 markings, not
+// just a top/bottom label. Evenly spaced across [minV, maxV] regardless of
+// how that range was derived (live-reading pad, history pad, or the
+// freezing-floor clamp) -- shared by drawIdleDots and drawHistoryChart so
+// both charts read the same way.
+function drawYAxis(g, yTemp, minV, maxV) {
+  var ctx = g.ctx, tickCount = 10;
+  ctx.font = '10px sans-serif';
+  for (var vi = 0; vi <= tickCount; vi++) {
+    var vv = minV + (maxV - minV) * vi / tickCount;
+    var vy = yTemp(vv);
+    ctx.strokeStyle = g.border;
+    ctx.beginPath(); ctx.moveTo(g.padL - 3, vy); ctx.lineTo(g.padL, vy); ctx.stroke();
+    ctx.fillStyle = g.muted;
+    ctx.fillText(window.kcUnit.toDisplay(vv).toFixed(0) + window.kcUnit.label(), 2, vy + 3);
   }
 }
 
@@ -1311,12 +1358,6 @@ function renderExec(st) {
   }
   html += '</div>';
 
-  html += '<div style="margin-top:0.5em">';
-  if (st.state === 'running') {
-    html += '<button class="run-btn" id="pauseBtn">Pause</button>';
-  } else if (st.state === 'paused') {
-    html += '<button class="run-btn primary" id="resumeBtn">Resume</button>';
-  }
   // No Stop button here (removed 2026-08-29, owner: "there is also an extra
   // start button above the graph that should not be there" -- it renders as
   // "Stop" while a firing is stoppable). app.js's sticky STOP FIRING bar is
@@ -1324,19 +1365,13 @@ function renderExec(st) {
   // running/paused/faulted/done states (its STOPPABLE_STATES) with the same
   // confirm text and the same POST /api/profile_exec/stop, so this in-card
   // copy was a second control for one action sitting right above the chart.
-  // Pause/Resume stay: the sticky bar has no equivalent for those.
-  html += '</div>';
+  // Pause/Resume moved to that same sticky bar 2026-08-30 (owner: one
+  // toggling button, next to Stop, on every page) -- no in-card control for
+  // either one any more.
 
   card.innerHTML = html;
-  const pauseBtn = document.getElementById('pauseBtn');
-  if (pauseBtn) pauseBtn.addEventListener('click', function () { execAction('pause'); });
-  const resumeBtn = document.getElementById('resumeBtn');
-  if (resumeBtn) resumeBtn.addEventListener('click', function () { execAction('resume'); });
 }
 
-function execAction(action) {
-  fetch('/api/profile_exec/' + action, { method: 'POST' }).then(pollExec).catch(pollExec);
-}
 
 // If a start attempt fails, decide whether it failed because the BOARD
 // isn't ready (missing zones, no thermocouple board, safety link down, ...)
@@ -1503,9 +1538,7 @@ function drawIdleDots(data) {
   function yTemp(v) { return g.padT + g.plotH - (v - minV) / (maxV - minV) * g.plotH; }
   var dotX = g.padL + 10; // pinned to the left edge, never marches across the plot
 
-  g.ctx.fillStyle = g.muted; g.ctx.font = '10px sans-serif';
-  g.ctx.fillText(window.kcUnit.toDisplay(maxV).toFixed(0) + window.kcUnit.label(), 2, g.padT + 8);
-  g.ctx.fillText(window.kcUnit.toDisplay(minV).toFixed(0) + window.kcUnit.label(), 2, g.padT + g.plotH);
+  drawYAxis(g, yTemp, minV, maxV);
 
   // Planned-curve preview drawn BEFORE the dots so the dots (this instant's
   // real readings) stay on top and are never occluded by the dashed line.
@@ -1614,9 +1647,8 @@ function drawHistoryChart(rows) {
   function yTemp(v) { return padT + plotH - (v - tMinV) / (tMaxV - tMinV) * plotH; }
   function yDuty(d) { return padT + plotH - d * plotH; }
 
+  drawYAxis(g, yTemp, tMinV, tMaxV);
   ctx.fillStyle = muted; ctx.font = '10px sans-serif';
-  ctx.fillText(window.kcUnit.toDisplay(tMaxV).toFixed(0) + window.kcUnit.label(), 2, padT + 8);
-  ctx.fillText(window.kcUnit.toDisplay(tMinV).toFixed(0) + window.kcUnit.label(), 2, padT + plotH);
   ctx.fillText('1.0', cssW - padR + 4, padT + 8);
   ctx.fillText('0.0', cssW - padR + 4, padT + plotH);
 

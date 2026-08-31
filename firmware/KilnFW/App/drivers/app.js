@@ -388,10 +388,28 @@
   var STOPPABLE_STATES = { running: true, paused: true, faulted: true, done: true };
 
   var stopBarEl = null;
+  var pauseResumeBtnEl = null;
   function buildStopBar() {
     var el = document.createElement('div');
     el.className = 'kc-stop-bar';
     el.setAttribute('hidden', '');
+
+    // Owner request: Pause/Resume is one toggling button (not two), living
+    // on the same sticky bottom bar as Stop rather than main_page.html's own
+    // exec-card -- same reasoning as the Stop button's own move to this bar:
+    // it must be reachable from every page, not just the dashboard.
+    var pauseBtn = document.createElement('button');
+    pauseBtn.type = 'button';
+    pauseBtn.className = 'kc-pause-btn';
+    pauseBtn.setAttribute('hidden', '');
+    pauseBtn.addEventListener('click', function () {
+      var action = pauseBtn.textContent === 'Resume' ? 'resume' : 'pause';
+      pauseBtn.disabled = true;
+      fetch('/api/profile_exec/' + action, { method: 'POST' })
+        .then(function () { pauseBtn.disabled = false; })
+        .catch(function () { pauseBtn.disabled = false; });
+    });
+    pauseResumeBtnEl = pauseBtn;
 
     var btn = document.createElement('button');
     btn.type = 'button';
@@ -407,9 +425,25 @@
         .catch(function () { btn.disabled = false; });
     });
 
+    el.appendChild(pauseBtn);
     el.appendChild(btn);
     document.body.appendChild(el);
     return el;
+  }
+
+  // Shown only for running/paused -- faulted/done can still be Stopped
+  // (to clear the card) but cannot be paused or resumed.
+  function setPauseResumeState(state) {
+    if (!pauseResumeBtnEl) return;
+    if (state === 'running') {
+      pauseResumeBtnEl.textContent = 'Pause';
+      pauseResumeBtnEl.removeAttribute('hidden');
+    } else if (state === 'paused') {
+      pauseResumeBtnEl.textContent = 'Resume';
+      pauseResumeBtnEl.removeAttribute('hidden');
+    } else {
+      pauseResumeBtnEl.setAttribute('hidden', '');
+    }
   }
 
   function setStopBarVisible(visible) {
@@ -491,6 +525,7 @@
         hideBanner();
         lastExecState = st && st.state;
         setStopBarVisible(!!(lastExecState && STOPPABLE_STATES[lastExecState]));
+        setPauseResumeState(lastExecState);
         scheduleNext(HEARTBEAT_MIN_MS);
       })
       .catch(function () {

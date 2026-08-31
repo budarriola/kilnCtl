@@ -22,11 +22,14 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <time.h>
 
 #include "esp_err.h"
 #include "kiln_io.h"
 #include "MAX31856.h"
+#include "profile_executor.h"
 #include "safety_link.h"
+#include "time_sync_tz.h" /* TIME_SYNC_TZ_MAX_LEN -- see time_tz below */
 #include "unit_pref.h"
 
 #ifdef __cplusplus
@@ -360,9 +363,37 @@ typedef struct {
      * the point it formats a label, which is the actual "convert at the
      * boundary" this preference's header comment asks for. */
     unit_pref_t temp_unit;
+
+    /* 2026-08-30, PROFILES.md "Scheduled start + candling": time_sync.c's
+     * wall-clock status, for display/scheduling-intent only -- see that
+     * module's header comment for the hard boundary (never a duration/
+     * control source). time_synced false means the board has not completed
+     * an SNTP sync since boot; time_now_epoch/time_last_sync_epoch are both
+     * 0 in that case, same "0 is honest, not invented" convention as
+     * flash_size_known above, since an un-synced RTC's raw epoch is
+     * meaningless free-run noise. time_tz is always a valid, non-empty,
+     * NUL-terminated string (time_sync_tz_effective()'s guarantee) even
+     * when time_synced is false -- the configured TZ is knowable and
+     * displayable independent of whether a sync has ever landed. */
+    bool   time_synced;
+    time_t time_now_epoch;
+    time_t time_last_sync_epoch;
+    char   time_tz[TIME_SYNC_TZ_MAX_LEN + 1];
 } dashboard_status_t;
 
 void dashboard_get_status(dashboard_status_t *out);
+
+/* TODO.md 10.1a shared-backend seam: the same total_planned_s/elapsed_s/
+ * remaining_s/remaining_is_estimate math GET /api/profile_exec serializes,
+ * pulled out so ui_page_home.c's LCD progress bar reads identical numbers to
+ * main_page.html's web one instead of a second implementation of this
+ * switch. See dashboard_http.c's own doc comment on the function body for
+ * the per-state rules (IDLE/DONE/FAULTED/RUNNING/PAUSED). out_total_planned_s
+ * is -1 (unknown, e.g. IDLE or an unknowable ramp duration), out_remaining_s
+ * is -1 (unknown) or 0 (DONE) or >0; out_elapsed_s is always a real count of
+ * seconds (0 while IDLE). */
+void dashboard_plan_exec_fields(const profile_exec_status_t *st, int64_t *out_total_planned_s,
+                                uint32_t *out_elapsed_s, int64_t *out_remaining_s, bool *out_remaining_is_estimate);
 
 /* Outcome of dashboard_set_relay() below -- one variant per distinct refusal
  * reason its HTTP-facing callers' status codes distinguish (diagnostics_http.c's

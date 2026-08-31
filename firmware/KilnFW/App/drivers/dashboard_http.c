@@ -28,6 +28,7 @@
 #include "profile_feasibility.h" /* profile_feasibility_plan_curve() -- the duration model, see below */
 #include "profiles_http.h" /* profiles_http_get() -- /api/profile_plan, see that handler below */
 #include "relay_authority.h"
+#include "time_sync.h" /* time_sync_get_status() -- see the time_synced/time_now_epoch/etc fields below */
 #include "relay_cycles.h"
 #include "run_state.h"
 #include "safety_trip_words.h" /* shared cause/remedy/fault-source decode -- see that header's own comment */
@@ -423,6 +424,17 @@ void dashboard_get_status(dashboard_status_t *out)
     /* Local state, always knowable -- deliberately not inside the "did the
      * safety link answer" block above. See the field comment. */
     out->zone_blocked_mask = relay_authority_latched_blocked_mask();
+
+    /* 2026-08-30, PROFILES.md "Scheduled start + candling": time_sync.c's
+     * wall-clock status. See dashboard_http.h's field comments for the
+     * 0-means-never-synced convention. */
+    time_sync_status_t ts;
+    time_sync_get_status(&ts);
+    out->time_synced = ts.ever_synced;
+    out->time_now_epoch = ts.now_epoch;
+    out->time_last_sync_epoch = ts.last_sync_epoch;
+    strncpy(out->time_tz, ts.tz, sizeof(out->time_tz) - 1);
+    out->time_tz[sizeof(out->time_tz) - 1] = '\0';
 }
 
 /* JSON has no way to spell a NaN or an infinity. printf spells them "nan" and
@@ -595,7 +607,11 @@ static esp_err_t status_get_handler(httpd_req_t *req)
     /* dashboard_http.h's ct_current_a comment -- each of the safety
      * processor's 3 raw current-sense channels, null (not 0) per-channel on
      * the same "never a plausible-looking fake reading" convention as
-     * safety_temp_c/power_w above; index i = CT channel i+1. */
+     * safety_temp_c/power_w above; array index i IS CT channel i -- this
+     * comment used to say "channel i+1", which disagreed with every
+     * operator-facing CT label (2026-08-30: the whole UI is 0-based for
+     * zones, relays, thermocouples and CTs). The array itself never
+     * changed; only the comment was wrong. */
     APPEND(",\"ct_current_a\":[");
     for (unsigned ci = 0; ci < 3; ci++) {
         bool ct_valid = !isnan(ds.ct_current_a[ci]);
@@ -842,6 +858,20 @@ static esp_err_t status_get_handler(httpd_req_t *req)
      * field, the same boundary point unit_pref_convert() enforces on the LCD
      * side. */
     APPEND(",\"temp_unit\":\"%s\"", unit_pref_suffix(ds.temp_unit));
+
+    /* 2026-08-30, PROFILES.md "Scheduled start + candling": ADDITIVE fields,
+     * same "older client just never heard of these keys" reasoning as
+     * temp_unit above. time_tz is already guaranteed printable-ASCII by
+     * time_sync_tz_is_valid()/time_sync_tz_effective() (settings_http.c's
+     * setter and time_sync.c's NVS load both refuse anything else), so no
+     * json_escape() call is needed here -- unlike the untrusted-peer string
+     * fields elsewhere in this handler. DISPLAY/SCHEDULING-INTENT ONLY: see
+     * time_sync.h's header comment -- nothing in this firmware may use
+     * these two epoch fields to measure a duration or drive control logic. */
+    APPEND(",\"time_synced\":%s", ds.time_synced ? "true" : "false");
+    APPEND(",\"time_now_epoch\":%lld", (long long)ds.time_now_epoch);
+    APPEND(",\"time_last_sync_epoch\":%lld", (long long)ds.time_last_sync_epoch);
+    APPEND(",\"time_tz\":\"%s\"", ds.time_tz);
 
     /* watchdog_cfg.h -- a board running with this safety default disabled
      * must say so somewhere always visible, not only at the moment of
@@ -1303,9 +1333,15 @@ static size_t append_last_run_json(char *json, size_t cap, size_t o)
  * unconditionally whenever the total is known at all: ramp-lock can always
  * overrun the plan if a zone lags, and this module does not attempt to
  * correct for observed lag (see the report this task asked for) -- it is a
- * plan-only estimate, every time, not just when a lag is currently visible. */
-static void plan_exec_fields(const profile_exec_status_t *st, int64_t *out_total_planned_s,
-                             uint32_t *out_elapsed_s, int64_t *out_remaining_s, bool *out_remaining_is_estimate)
+ * plan-only estimate, every time, not just when a lag is currently visible.
+ *
+ * Exported (2026-08-30, TODO.md 10.1a shared-backend rule) so ui_page_home.c's
+ * LCD progress bar reads the exact same numbers /api/profile_exec's
+ * total_planned_s/elapsed_s/remaining_s/remaining_is_estimate report on the
+ * web dashboard, instead of a second copy of this switch drifting apart from
+ * it. Declared in dashboard_http.h. */
+void dashboard_plan_exec_fields(const profile_exec_status_t *st, int64_t *out_total_planned_s,
+                                uint32_t *out_elapsed_s, int64_t *out_remaining_s, bool *out_remaining_is_estimate)
 {
     *out_elapsed_s = 0;
     *out_total_planned_s = -1;
@@ -1355,7 +1391,7 @@ static esp_err_t profile_exec_status_get_handler(httpd_req_t *req)
     int64_t total_planned_s, remaining_s;
     uint32_t elapsed_s;
     bool remaining_is_estimate;
-    plan_exec_fields(&st, &total_planned_s, &elapsed_s, &remaining_s, &remaining_is_estimate);
+    dashboard_plan_exec_fields(&st, &total_planned_s, &elapsed_s, &remaining_s, &remaining_is_estimate);
     char total_planned_buf[24], remaining_buf[24];
     if (total_planned_s < 0) {
         snprintf(total_planned_buf, sizeof(total_planned_buf), "null");
@@ -1743,6 +1779,24 @@ static const char *autotune_rule_name(autotune_rule_t r)
     case AUTOTUNE_RULE_SIMC: return "simc";
     case AUTOTUNE_RULE_ZIEGLER_NICHOLS: return "ziegler-nichols";
     case AUTOTUNE_RULE_TYREUS_LUYBEN: return "tyreus-luyben";
+    case AUTOTUNE_RULE_COHEN_COON: return "cohen-coon";
+    default: return "unknown";
+    }
+}
+
+/* Same reasoning as autotune_rule_name() above: PID_EXPANSION_PLAN.md Phase 1
+ * added this enum specifically so a refusal is distinguishable from every
+ * other refusal (and from success) rather than collapsing to the same silent
+ * kp=ki=kd=0 -- so the page gets the code by name, not just the number. */
+static const char *autotune_refusal_name(autotune_refusal_t r)
+{
+    switch (r) {
+    case AUTOTUNE_REFUSAL_OK: return "ok";
+    case AUTOTUNE_REFUSAL_INVALID_MODEL: return "invalid_model";
+    case AUTOTUNE_REFUSAL_RULE_NOT_ON_THIS_PATH: return "rule_not_on_this_path";
+    case AUTOTUNE_REFUSAL_DEAD_TIME_TOO_SMALL: return "dead_time_too_small";
+    case AUTOTUNE_REFUSAL_NONPOSITIVE_TAU: return "nonpositive_tau";
+    case AUTOTUNE_REFUSAL_NONPOSITIVE_GAIN: return "nonpositive_gain";
     default: return "unknown";
     }
 }
@@ -1762,12 +1816,20 @@ static esp_err_t autotune_status_get_handler(httpd_req_t *req)
     char relay_reason_escaped[sizeof(st.relay.invalid_reason) * 2 + 1];
     json_escape(st.relay.invalid_reason, relay_reason_escaped, sizeof(relay_reason_escaped));
 
-    char json[900];
+    /* proposed_gains is a zero-initialized struct whenever no tune has run
+     * yet (state IDLE), so refusal/refusal_reason read AUTOTUNE_REFUSAL_OK /
+     * "" in that case too -- exactly "empty string, not stale", since there
+     * is no previous run's reason left lying around to leak. */
+    char refusal_reason_escaped[sizeof(st.proposed_gains.refusal_reason) * 2 + 1];
+    json_escape(st.proposed_gains.refusal_reason, refusal_reason_escaped, sizeof(refusal_reason_escaped));
+
+    char json[1100];
     int n = snprintf(json, sizeof(json),
         "{\"state\":\"%s\",\"method\":\"%s\",\"zone\":%u,\"elapsed_s\":%lu,\"sample_count\":%u,"
         "\"actual_c\":%.2f,\"actual_valid\":%s,\"duty\":%.3f,\"abort_reason\":\"%s\","
         "\"model_valid\":%s,\"k_gain_c_per_duty\":%.3f,\"tau_s\":%.1f,\"dead_time_s\":%.1f,"
         "\"proposed_kp\":%.5f,\"proposed_ki\":%.5f,\"proposed_kd\":%.5f,\"rule\":\"%s\","
+        "\"refusal\":\"%s\",\"refusal_reason\":\"%s\","
         "\"predicted_max_ramp_c_per_hr\":%.1f,"
         "\"relay_setpoint_c\":%.1f,\"relay_d\":%.3f,\"relay_h_c\":%.2f,"
         "\"relay_cycles_seen\":%u,\"relay_cycles_target\":%u,"
@@ -1779,7 +1841,9 @@ static esp_err_t autotune_status_get_handler(httpd_req_t *req)
         reason_escaped, st.model.valid ? "true" : "false", (double)st.model.k_gain_c_per_duty,
         (double)st.model.tau_s, (double)st.model.dead_time_s, (double)st.proposed_gains.kp,
         (double)st.proposed_gains.ki, (double)st.proposed_gains.kd,
-        autotune_rule_name(st.proposed_gains.rule), (double)st.predicted_max_ramp_c_per_hr,
+        autotune_rule_name(st.proposed_gains.rule),
+        autotune_refusal_name(st.proposed_gains.refusal), refusal_reason_escaped,
+        (double)st.predicted_max_ramp_c_per_hr,
         (double)st.relay_setpoint_c, (double)st.relay_amplitude_duty, (double)st.relay_hysteresis_c,
         st.relay_cycles_seen, st.relay_cycles_target,
         st.relay.valid ? "true" : "false", (double)st.relay.ku, (double)st.relay.tu_s,
@@ -1975,7 +2039,27 @@ static esp_err_t autotune_start_post_handler(httpd_req_t *req)
                                                 sizeof(err_msg));
         }
     } else if (params_ok) {
-        started = autotune_engine_run((uint8_t)zone, step_duty, err_msg, sizeof(err_msg));
+        /* rule is optional on the step path too, and SIMC is the default --
+         * an omitted field, or an older client (PC tools, MCP autotune_start,
+         * test harnesses) that has never heard of this parameter, must get
+         * exactly today's behavior. Only "simc" and "cohen-coon" are valid
+         * here: ZN and Tyreus-Luyben are relay-only and are refused at this
+         * door rather than let through to autotune_engine_run(), which would
+         * refuse them anyway but only after the caller thinks the request was
+         * accepted -- see PID_EXPANSION_PLAN.md Phase 1 and §2a for why
+         * Cohen-Coon must stay opt-in, never the default, on a kiln. */
+        int step_rule_len = http_form_find_field(body, "rule", rule_val, sizeof(rule_val));
+        autotune_rule_t step_rule = AUTOTUNE_RULE_SIMC;
+        if (step_rule_len > 0 && strcmp(rule_val, "cohen-coon") == 0) {
+            step_rule = AUTOTUNE_RULE_COHEN_COON;
+        } else if (step_rule_len > 0 && strcmp(rule_val, "simc") != 0) {
+            params_ok = false;
+            snprintf(err_msg, sizeof(err_msg), "rule must be \"simc\" or \"cohen-coon\" on the step-test path "
+                                                "(zn/tl are relay-only)");
+        }
+        if (params_ok) {
+            started = autotune_engine_run((uint8_t)zone, step_duty, step_rule, err_msg, sizeof(err_msg));
+        }
     }
 
     if (!started) {

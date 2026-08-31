@@ -57,3 +57,18 @@ size_t ui_page_home_now_bucket_index(float horizon_s, float elapsed_s, size_t po
     }
     return (size_t)idx;
 }
+
+bool ui_page_home_build_x_label(float horizon_s, bool has_span, char *out, size_t out_cap)
+{
+    if (!has_span) {
+        return false;
+    }
+    float ticks[4];
+    ui_page_home_x_ticks(horizon_s, ticks);
+    char t1_buf[16], t2_buf[16], t3_buf[16];
+    ui_page_home_format_mmss((uint32_t)lroundf(ticks[1]), t1_buf, sizeof(t1_buf));
+    ui_page_home_format_mmss((uint32_t)lroundf(ticks[2]), t2_buf, sizeof(t2_buf));
+    ui_page_home_format_mmss((uint32_t)lroundf(ticks[3]), t3_buf, sizeof(t3_buf));
+    snprintf(out, out_cap, "0:00|%s|%s|%s", t1_buf, t2_buf, t3_buf);
+    return true;
+}

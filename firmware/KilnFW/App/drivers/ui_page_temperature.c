@@ -249,7 +249,7 @@ static void refresh_cb(lv_timer_t *timer)
 
         char label_buf[48];
         if (!ds.io_ready) {
-            snprintf(label_buf, sizeof(label_buf), "Relay %u\nno board", (unsigned)(r + 1));
+            snprintf(label_buf, sizeof(label_buf), "Relay %u\nno board", (unsigned)r);
         } else if (zone_owned) {
             /* Legible reason, not a control that silently does nothing --
              * this file's header comment / the owner's own requirement:
@@ -258,7 +258,7 @@ static void refresh_cb(lv_timer_t *timer)
              * (relay_names_cfg_t is scoped to relays NOT claimed by a zone --
              * see zones_http.h's own header comment on that pair), so this
              * branch always uses the generic "Relay N" label. */
-            snprintf(label_buf, sizeof(label_buf), "Relay %u\n%s (zone)", (unsigned)(r + 1), on ? "ON" : "OFF");
+            snprintf(label_buf, sizeof(label_buf), "Relay %u\n%s (zone)", (unsigned)r, on ? "ON" : "OFF");
         } else {
             /* Owner request (zones_http.h's relay_names_cfg_t header
              * comment): "the user should be able to assign names to relays
@@ -272,7 +272,7 @@ static void refresh_cb(lv_timer_t *timer)
             if (rname[0] != '\0') {
                 snprintf(label_buf, sizeof(label_buf), "%s\n%s", rname, on ? "ON" : "OFF");
             } else {
-                snprintf(label_buf, sizeof(label_buf), "Relay %u\n%s", (unsigned)(r + 1), on ? "ON" : "OFF");
+                snprintf(label_buf, sizeof(label_buf), "Relay %u\n%s", (unsigned)r, on ? "ON" : "OFF");
             }
         }
         lv_label_set_text(s_relay_label[r], label_buf);
@@ -472,7 +472,7 @@ static void build_relays_section(lv_obj_t *parent)
         lv_obj_set_style_text_color(label, UI_THEME_COLOR_TEXT_PRIMARY, 0);
         lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
         char label_buf[24];
-        snprintf(label_buf, sizeof(label_buf), "Relay %u\n--", (unsigned)(r + 1));
+        snprintf(label_buf, sizeof(label_buf), "Relay %u\n--", (unsigned)r);
         lv_label_set_text(label, label_buf);
         lv_obj_center(label);
 

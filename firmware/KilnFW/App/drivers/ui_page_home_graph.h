@@ -20,6 +20,7 @@
  * inline in refresh_cb(), where they cannot be unit tested without dragging
  * in LVGL/esp_log stubs. */
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -74,6 +75,37 @@ float ui_page_home_plan_peak_c(const profile_plan_point_t *pts, size_t n);
  * horizon_s <= 0 returns 0 (the single valid index, or a safe default when
  * there is no meaningful span to place a dot along). */
 size_t ui_page_home_now_bucket_index(float horizon_s, float elapsed_s, size_t point_count);
+
+/* 2026-08-30 owner request ("the LCD chart should always show the same
+ * markers as the web page"): main_page.html's drawChartAxis() draws a
+ * four-label tick row (tickCount=3: 0, 1/3, 2/3, full span) UNCONDITIONALLY
+ * whenever it has a real [tMin, tMax] to span -- both the running chart
+ * (drawHistoryChart, spanning recorded history + any planned preview) and
+ * the idle-with-history case (same function, rows.length>0) get one; only
+ * the idle-with-NO-history "single dot" state has no span to label (see that
+ * state's own comment at ui_page_home.c's idle branch -- a static dot is a
+ * single instant, not a series, and main_page.html's drawIdleDots() agrees:
+ * it only calls drawChartAxis() when there's an active plan preview, which
+ * this page has no equivalent data for while IDLE --
+ * profile_executor_state_t's segments/run_start_c are only meaningful once
+ * state != PROFILE_EXEC_IDLE, so there is nothing to preview).
+ *
+ * This is the shared tick-label builder for both spanned states (a live
+ * plan's whole-run horizon, or idle's retained-history window) -- same four-
+ * tick M:SS shape either way, since both really are "0 .. horizon_s of real,
+ * already-computed span", never a fabricated one (see this file's other
+ * functions' own honesty comments; horizon_s here must already be a genuine
+ * span, not a div-by-zero guard value). has_span selects whether a label is
+ * produced at all -- pass false (idle, no history) and the function writes
+ * nothing and returns false, so the caller's existing "hide the label"
+ * behaviour for that state stays a single, obvious branch instead of a
+ * scattered "is this string still valid" check.
+ *
+ * out_cap must be at least 64: worst case four "%lu:%02lu" ticks (up to 10
+ * bytes each for a uint32_t seconds count near UINT32_MAX/60) + 3 "|"
+ * separators + NUL = 43 max, rounded up with margin, same discipline as this
+ * file's other snprintf-into-fixed-buffer callers. */
+bool ui_page_home_build_x_label(float horizon_s, bool has_span, char *out, size_t out_cap);
 
 #ifdef __cplusplus
 }

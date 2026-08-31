@@ -86,4 +86,38 @@ void run_test_ui_page_home_graph(void)
         TEST_CHECK(ui_page_home_now_bucket_index(900.0f, 10.0f, 1) == 0, "point_count<2 -> 0");
         TEST_CHECK(ui_page_home_now_bucket_index(900.0f, 10.0f, 0) == 0, "point_count==0 -> 0");
     }
+
+    TEST_SECTION("ui_page_home_graph: build_x_label");
+    {
+        char buf[64];
+
+        // has_span == false (idle, no history / a plan that came back empty):
+        // no label written, buffer left untouched, function reports "no
+        // label" -- this is the case that must stay hidden on the LCD.
+        memset(buf, 0x7A, sizeof(buf));
+        bool wrote = ui_page_home_build_x_label(300.0f, false, buf, sizeof(buf));
+        TEST_CHECK(!wrote, "has_span=false -> no label produced");
+        TEST_CHECK(buf[0] == (char)0x7A, "has_span=false -> out buffer untouched");
+
+        // has_span == true, matches the running-profile case (0..horizon_s,
+        // four M:SS ticks) -- same numbers ui_page_home_x_ticks() itself
+        // returns for horizon 300.
+        wrote = ui_page_home_build_x_label(300.0f, true, buf, sizeof(buf));
+        TEST_CHECK(wrote, "has_span=true -> label produced");
+        TEST_CHECK(strcmp(buf, "0:00|1:40|3:20|5:00") == 0, "horizon 300 -> 0:00|1:40|3:20|5:00");
+
+        // has_span == true also covers idle-with-history: same shape, driven
+        // by whatever the caller's own (different) horizon_s span is --
+        // proves the function does not special-case a "running" value.
+        wrote = ui_page_home_build_x_label(90.0f, true, buf, sizeof(buf));
+        TEST_CHECK(wrote, "history span -> label produced");
+        TEST_CHECK(strcmp(buf, "0:00|0:30|1:00|1:30") == 0, "horizon 90 -> 0:00|0:30|1:00|1:30");
+
+        // A too-small out buffer must never overflow -- snprintf-backed
+        // truncation, same discipline as ui_page_home_format_mmss().
+        char tiny[6];
+        wrote = ui_page_home_build_x_label(300.0f, true, tiny, sizeof(tiny));
+        TEST_CHECK(wrote, "truncated buffer still reports a label was produced");
+        TEST_CHECK(strlen(tiny) == sizeof(tiny) - 1, "truncated buffer is NUL-terminated within its capacity");
+    }
 }

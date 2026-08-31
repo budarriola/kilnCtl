@@ -286,8 +286,35 @@ static int32_t s_chart_planned_pts[UI_PAGE_HOME_CHART_POINTS];
  * action-row comment's arithmetic). Small semi-opaque background chips (not
  * fully transparent) so the digits stay legible against whichever part of
  * the actual/planned traces happens to be under that corner. */
-static lv_obj_t *s_chart_y_hi_label; /* top-left: current Y-axis max, in the user's unit_pref */
-static lv_obj_t *s_chart_y_lo_label; /* bottom-left: current Y-axis min, in the user's unit_pref */
+/* 2026-08-30 owner decision (UI_PLAN.md 5.3, "option 3"): all 11 web-matching
+ * Y-axis ticks, labelled, with a smaller font if needed -- NOT the previous
+ * two-corner (hi/lo only) overlay, and NOT lv_chart_set_div_line_count()
+ * (see that call site's own long comment for why div lines were reverted).
+ * main_page.html's drawYAxis() draws tickCount=10 -> 11 evenly spaced
+ * positions from axis min to axis max, each a numeric label plus a short
+ * tick mark just outside the plot; this mirrors that count and spacing.
+ * Static array, built ONCE (11 lv_label children of s_chart, never created
+ * or destroyed per refresh -- see this file's own "watch memory" framing
+ * elsewhere), and every refresh_cb() tick only rewrites their text/position
+ * from the SAME axis_lo/axis_hi just handed to lv_chart_set_axis_range()
+ * (chart_set_y_ticks() below), same "written from the same values, never
+ * read back" discipline the old two-label version used -- see the header
+ * comment above (near the static declarations) for why plain labels were
+ * chosen over lv_scale in the first place; that reasoning is unchanged by
+ * going from 2 to 11 of them, just repeated 11 times instead of 2. No
+ * they use montserrat_10, enabled via CONFIG_LV_FONT_MONTSERRAT_10 in the
+ * tracked sdkconfig.defaults -- see the build() comment for why that had to
+ * go in sdkconfig.defaults and not sdkconfig, and why a render-time
+ * transform_scale on montserrat_14 was tried first and rejected. */
+#define UI_PAGE_HOME_Y_TICK_COUNT 11
+static lv_obj_t *s_chart_y_tick_labels[UI_PAGE_HOME_Y_TICK_COUNT];
+/* Current axis range, mirrored here so the draw-event tick-mark hook
+ * (chart_y_tick_draw_event_cb(), fires on every LVGL render pass, not just
+ * refresh_cb()'s 1 Hz tick) can recompute pixel positions without a second
+ * per-tick pixel cache -- always in sync with the labels because both are
+ * driven from the same lv_chart_set_axis_range() call. */
+static int32_t s_chart_axis_lo, s_chart_axis_hi;
+static bool s_chart_y_ticks_visible; /* false hides labels AND tick marks */
 static lv_obj_t *s_chart_x_label;    /* top-right: the plotted window's time span, "0:00-MM:SS" */
 
 /* 2026-08-23 owner request ("the LCD profile graph should look like the web
@@ -301,6 +328,25 @@ static lv_obj_t *s_chart_x_label;    /* top-right: the plotted window's time spa
  * whenever there is no live run to mark a position on (idle, or no plan
  * points), same discipline as the Y/X overlay labels above. */
 static lv_obj_t *s_chart_now_dot;
+
+/* Progress bar, under the chart -- owner request 2026-08-30: "add a
+ * progress bar to the lcd under the graph like what exists on the web
+ * page" (main_page.html's #progressWrap/renderProgress()). Reads the exact
+ * same numbers via dashboard_plan_exec_fields() (dashboard_http.h,
+ * TODO.md 10.1a shared-backend seam factored out of that function for this
+ * purpose) rather than a second implementation of the elapsed/remaining
+ * math. This re-introduces the vertical space the 2026-08-22 "chart fills
+ * the page" pass reclaimed (see this file's header comment on that removal)
+ * -- s_progress_wrap has a fixed content height (no flex_grow), so it comes
+ * back out of the chart's flex_grow(1) budget, not out of the Start/Stop
+ * button's fixed row. Built HIDDEN and only shown for RUNNING/PAUSED/
+ * FAULTED/DONE (same STOPPABLE-ish gate main_page.html's renderProgress()
+ * uses), so it costs zero height in the far-more-common IDLE state, same
+ * "hidden = zero flex height" discipline as s_trip_strip above. */
+static lv_obj_t *s_progress_wrap;
+static lv_obj_t *s_progress_track;
+static lv_obj_t *s_progress_fill;
+static lv_obj_t *s_progress_label;
 
 /* Web-match purple for the planned-profile curve -- main_page.html's own
  * planned-curve stroke is `ctx.strokeStyle = '#96c'` (CSS 3-digit shorthand,
@@ -320,6 +366,8 @@ static lv_obj_t *s_chart_now_dot;
 
 static lv_obj_t *s_fire_btn;      /* merged Start/Stop button */
 static lv_obj_t *s_fire_btn_label;
+static lv_obj_t *s_pause_btn;      /* merged Pause/Resume button -- see pause_resume_btn_cb() */
+static lv_obj_t *s_pause_btn_label;
 static ui_topbar_t s_topbar;       /* Menu gear icon, shared chrome -- see ui_topbar.h */
 
 /* WiFi/IP/mDNS status readout, in the status bar. Text comes from
@@ -571,6 +619,24 @@ static void fire_btn_cb(lv_event_t *e)
     }
 }
 
+/* Merged Pause/Resume button -- owner request 2026-08-30: mirrors app.js's
+ * sticky-bar toggle on the web dashboard (one button, label/action flips
+ * with state) rather than two separate buttons. Reads state at click time
+ * for the same stale-tap reason fire_btn_cb() does. No confirmation dialog
+ * -- neither web surface asks before pausing or resuming, only before
+ * Start/Stop. */
+static void pause_resume_btn_cb(lv_event_t *e)
+{
+    (void)e;
+    profile_exec_status_t st;
+    profile_executor_get_status(&st);
+    if (st.state == PROFILE_EXEC_RUNNING) {
+        profile_executor_pause();
+    } else if (st.state == PROFILE_EXEC_PAUSED) {
+        profile_executor_resume();
+    }
+}
+
 static void menu_nav_cb(lv_event_t *e)
 {
     (void)e;
@@ -690,6 +756,107 @@ static void chart_draw_event_cb(lv_event_t *e)
     line_dsc->dash_gap = UI_PAGE_HOME_PLAN_DASH_GAP_PX;
 }
 
+/* LV_EVENT_DRAW_POST hook on s_chart -- draws the 11 short tick marks that
+ * accompany s_chart_y_tick_labels[], matching main_page.html's drawYAxis()
+ * (`moveTo(padL - 3, vy) -> lineTo(padL, vy)`, a 3px stroke just outside the
+ * plot in the border color). This chart's own pad_all is only 2px, so a
+ * literal "3px further left" would sit past the card's own edge and risk
+ * being clipped by the parent flex row; each tick is instead drawn 4px INTO
+ * the plot's own left edge, in the same muted color as the labels (this
+ * theme has no separate border token to mirror the web's g.border vs.
+ * g.muted split -- see chart_set_y_ticks()'s comment). Draw-event hook
+ * chosen over 11 more lv_obj children for the same reason
+ * chart_draw_event_cb() (the dashed planned-line hook, above) uses one: no
+ * per-tick lv_obj allocation, and it fires every render pass so it can never
+ * drift out of sync with the label positions even if a stray extra layout
+ * pass runs between refresh_cb() ticks. */
+static void chart_y_tick_draw_event_cb(lv_event_t *e)
+{
+    if (!s_chart_y_ticks_visible || s_chart_axis_hi <= s_chart_axis_lo) {
+        return;
+    }
+    lv_layer_t *layer = lv_event_get_layer(e);
+    lv_area_t content;
+    lv_obj_get_content_coords(s_chart, &content);
+    int32_t height = content.y2 - content.y1;
+    if (height <= 0) {
+        return;
+    }
+    lv_draw_line_dsc_t dsc;
+    lv_draw_line_dsc_init(&dsc);
+    dsc.color = UI_THEME_COLOR_TEXT_SECONDARY;
+    dsc.width = 1;
+    dsc.opa = LV_OPA_70;
+    for (int k = 0; k < UI_PAGE_HOME_Y_TICK_COUNT; k++) {
+        float frac = (float)k / (float)(UI_PAGE_HOME_Y_TICK_COUNT - 1);
+        int32_t y = content.y2 - (int32_t)lroundf(frac * (float)height);
+        dsc.p1 = (lv_point_precise_t){ content.x1, y };
+        dsc.p2 = (lv_point_precise_t){ content.x1 + 4, y };
+        lv_draw_line(layer, &dsc);
+    }
+}
+
+/* Rewrites all 11 Y-tick labels' text and position from axis_lo/axis_hi --
+ * the SAME two values just passed to lv_chart_set_axis_range() at each call
+ * site below, never read back from the chart, for the reason this file's
+ * header comment on s_chart_y_tick_labels gives. Also stashes them into
+ * s_chart_axis_lo/hi for chart_y_tick_draw_event_cb() above. Static array
+ * of lv_obj*, so this only ever calls lv_label_set_text()/lv_obj_set_pos()
+ * on objects built once in ui_page_home_build() -- no allocation here, per
+ * this task's "never allocate inside the refresh callback" requirement. */
+static void chart_set_y_ticks(int32_t axis_lo, int32_t axis_hi, unit_pref_t unit)
+{
+    s_chart_axis_lo = axis_lo;
+    s_chart_axis_hi = axis_hi;
+    s_chart_y_ticks_visible = (axis_hi > axis_lo);
+    if (!s_chart_y_ticks_visible) {
+        for (int k = 0; k < UI_PAGE_HOME_Y_TICK_COUNT; k++) {
+            lv_obj_add_flag(s_chart_y_tick_labels[k], LV_OBJ_FLAG_HIDDEN);
+        }
+        return;
+    }
+
+    /* Layout must be resolved before content coords mean anything -- same
+     * guard ui_page_home_build()'s status-label width computation uses for
+     * the analogous "page built detached" problem. Cheap to call every tick
+     * (LVGL no-ops an already-clean layout). */
+    lv_obj_update_layout(s_chart);
+    lv_area_t content;
+    lv_obj_get_content_coords(s_chart, &content);
+    lv_area_t chart_coords;
+    lv_obj_get_coords(s_chart, &chart_coords);
+    int32_t content_top_local = content.y1 - chart_coords.y1;
+    int32_t height = content.y2 - content.y1;
+
+    for (int k = 0; k < UI_PAGE_HOME_Y_TICK_COUNT; k++) {
+        float frac = (float)k / (float)(UI_PAGE_HOME_Y_TICK_COUNT - 1);
+        int32_t value = (int32_t)lroundf((float)axis_lo + frac * (float)(axis_hi - axis_lo));
+
+        char buf[16];
+        snprintf(buf, sizeof(buf), "%d%s", (int)value, unit_pref_suffix(unit));
+        lv_obj_t *label = s_chart_y_tick_labels[k];
+        lv_label_set_text(label, buf);
+        lv_obj_remove_flag(label, LV_OBJ_FLAG_HIDDEN);
+
+        /* k=0 is the BOTTOM tick (axis_lo), k=10 the TOP (axis_hi) -- same
+         * orientation as main_page.html's vi loop (vy computed from a yTemp()
+         * that maps minV to the bottom). content_top_local + height*(1-frac)
+         * places it accordingly; the label's own font-scaled half-height is
+         * subtracted so the text is vertically centred ON the tick rather
+         * than hanging below it. */
+        int32_t y_local = content_top_local + (int32_t)lroundf((1.0f - frac) * (float)height);
+        lv_obj_set_pos(label, 2, y_local - 5);
+    }
+}
+
+static void chart_hide_y_ticks(void)
+{
+    /* axis_hi left <= axis_lo (0,0) so chart_y_tick_draw_event_cb() also
+     * skips drawing -- one flag, not two independent "don't draw" states to
+     * keep in sync. */
+    chart_set_y_ticks(0, 0, UNIT_PREF_CELSIUS);
+}
+
 static void refresh_cb(lv_timer_t *timer)
 {
     (void)timer;
@@ -709,6 +876,58 @@ static void refresh_cb(lv_timer_t *timer)
     dashboard_get_status(&ds);
     profile_exec_status_t st;
     profile_executor_get_status(&st);
+
+    /* Progress bar -- see s_progress_wrap's own static-declaration comment.
+     * dashboard_plan_exec_fields() reports elapsed 0 / total -1 for IDLE, so
+     * the "running" gate below matches main_page.html's renderProgress()
+     * (RUNNING/PAUSED/FAULTED/DONE only) without a separate state check
+     * here. */
+    {
+        int64_t total_planned_s, remaining_s;
+        uint32_t elapsed_s;
+        bool remaining_is_estimate;
+        dashboard_plan_exec_fields(&st, &total_planned_s, &elapsed_s, &remaining_s, &remaining_is_estimate);
+
+        bool bar_running = (st.state == PROFILE_EXEC_RUNNING || st.state == PROFILE_EXEC_PAUSED ||
+                            st.state == PROFILE_EXEC_FAULTED || st.state == PROFILE_EXEC_DONE);
+        if (!bar_running) {
+            lv_obj_add_flag(s_progress_wrap, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_remove_flag(s_progress_wrap, LV_OBJ_FLAG_HIDDEN);
+
+            char elapsed_buf[16];
+            char label_buf[64];
+            format_duration(elapsed_s, elapsed_buf, sizeof(elapsed_buf));
+
+            if (total_planned_s < 0) {
+                /* No denominator -- elapsed only, no fill at all (matches
+                 * renderProgress()'s total_planned_s==null branch). */
+                lv_obj_set_width(s_progress_fill, 0);
+                lv_obj_set_style_bg_color(s_progress_fill, UI_THEME_ACCENT_1, 0);
+                snprintf(label_buf, sizeof(label_buf), "Elapsed %s", elapsed_buf);
+            } else if (remaining_s < 0) {
+                /* Unknown remaining (a zero/negative ramp segment) -- full
+                 * track in a muted color stands in for the web's animated
+                 * indeterminate stripe (see s_progress_fill's own comment). */
+                lv_obj_set_width(s_progress_fill, lv_pct(100));
+                lv_obj_set_style_bg_color(s_progress_fill, UI_THEME_COLOR_TEXT_SECONDARY, 0);
+                snprintf(label_buf, sizeof(label_buf), "Elapsed %s -- time remaining unknown", elapsed_buf);
+            } else {
+                int32_t pct = total_planned_s > 0
+                                  ? (int32_t)((100 * (int64_t)elapsed_s) / total_planned_s)
+                                  : 100;
+                if (pct < 0) pct = 0;
+                if (pct > 100) pct = 100;
+                lv_obj_set_width(s_progress_fill, lv_pct(pct));
+                lv_obj_set_style_bg_color(s_progress_fill, UI_THEME_ACCENT_1, 0);
+                char remaining_buf[16];
+                format_duration((uint32_t)remaining_s, remaining_buf, sizeof(remaining_buf));
+                snprintf(label_buf, sizeof(label_buf), "Elapsed %s -- %s left%s", elapsed_buf, remaining_buf,
+                         remaining_is_estimate ? " (estimate)" : "");
+            }
+            lv_label_set_text(s_progress_label, label_buf);
+        }
+    }
 
     /* Safety-trip strip. Same gate the removed state-card banner used, kept
      * verbatim on purpose: diag_age_ms < SAFETY_LINK_STALE_MS, because a
@@ -811,21 +1030,14 @@ static void refresh_cb(lv_timer_t *timer)
                 axis_lo = floor_i;
             }
             lv_chart_set_axis_range(s_chart, LV_CHART_AXIS_PRIMARY_Y, axis_lo, axis_hi);
-            char hi_buf[16], lo_buf[16];
-            snprintf(hi_buf, sizeof(hi_buf), "%d%s", (int)axis_hi, unit_pref_suffix(ds.temp_unit));
-            snprintf(lo_buf, sizeof(lo_buf), "%d%s", (int)axis_lo, unit_pref_suffix(ds.temp_unit));
-            lv_label_set_text(s_chart_y_hi_label, hi_buf);
-            lv_label_set_text(s_chart_y_lo_label, lo_buf);
-            lv_obj_remove_flag(s_chart_y_hi_label, LV_OBJ_FLAG_HIDDEN);
-            lv_obj_remove_flag(s_chart_y_lo_label, LV_OBJ_FLAG_HIDDEN);
+            chart_set_y_ticks(axis_lo, axis_hi, ds.temp_unit);
         } else {
             s_chart_actual_pts[0] = LV_CHART_POINT_NONE;
             /* No reading at all -- the axis range above is untouched (stays
              * whatever it last was), so a Y label here would describe a
              * range that's no longer being drawn. Hide rather than show a
              * stale number. */
-            lv_obj_add_flag(s_chart_y_hi_label, LV_OBJ_FLAG_HIDDEN);
-            lv_obj_add_flag(s_chart_y_lo_label, LV_OBJ_FLAG_HIDDEN);
+            chart_hide_y_ticks();
         }
         lv_chart_refresh(s_chart);
     } else {
@@ -949,16 +1161,9 @@ static void refresh_cb(lv_timer_t *timer)
                     axis_hi = axis_lo + 1; /* guard a degenerate/zero-peak profile */
                 }
                 lv_chart_set_axis_range(s_chart, LV_CHART_AXIS_PRIMARY_Y, axis_lo, axis_hi);
-                char hi_buf[16], lo_buf[16];
-                snprintf(hi_buf, sizeof(hi_buf), "%d%s", (int)axis_hi, unit_pref_suffix(unit));
-                snprintf(lo_buf, sizeof(lo_buf), "%d%s", (int)axis_lo, unit_pref_suffix(unit));
-                lv_label_set_text(s_chart_y_hi_label, hi_buf);
-                lv_label_set_text(s_chart_y_lo_label, lo_buf);
-                lv_obj_remove_flag(s_chart_y_hi_label, LV_OBJ_FLAG_HIDDEN);
-                lv_obj_remove_flag(s_chart_y_lo_label, LV_OBJ_FLAG_HIDDEN);
+                chart_set_y_ticks(axis_lo, axis_hi, unit);
             } else {
-                lv_obj_add_flag(s_chart_y_hi_label, LV_OBJ_FLAG_HIDDEN);
-                lv_obj_add_flag(s_chart_y_lo_label, LV_OBJ_FLAG_HIDDEN);
+                chart_hide_y_ticks();
             }
         } else if (have_range) {
             float range = hi - lo;
@@ -977,7 +1182,7 @@ static void refresh_cb(lv_timer_t *timer)
                 axis_lo = floor_i;
             }
             lv_chart_set_axis_range(s_chart, LV_CHART_AXIS_PRIMARY_Y, axis_lo, axis_hi);
-            /* Y labels written from the SAME axis_lo/axis_hi just handed to
+            /* Y ticks written from the SAME axis_lo/axis_hi just handed to
              * lv_chart_set_axis_range(), not read back from the chart --
              * that is what keeps them from ever drifting out of sync with a
              * range that changes every tick (see this file's header comment
@@ -985,25 +1190,23 @@ static void refresh_cb(lv_timer_t *timer)
              * the same unit_pref_get() result planned_disp/actual disp were
              * already converted through above, so the suffix can never
              * disagree with the plotted numbers. */
-            char hi_buf[16], lo_buf[16];
-            snprintf(hi_buf, sizeof(hi_buf), "%d%s", (int)axis_hi, unit_pref_suffix(unit));
-            snprintf(lo_buf, sizeof(lo_buf), "%d%s", (int)axis_lo, unit_pref_suffix(unit));
-            lv_label_set_text(s_chart_y_hi_label, hi_buf);
-            lv_label_set_text(s_chart_y_lo_label, lo_buf);
-            lv_obj_remove_flag(s_chart_y_hi_label, LV_OBJ_FLAG_HIDDEN);
-            lv_obj_remove_flag(s_chart_y_lo_label, LV_OBJ_FLAG_HIDDEN);
+            chart_set_y_ticks(axis_lo, axis_hi, unit);
         } else {
             /* No actual and no planned point converted this tick -- nothing
              * to show a range for; leave the previous axis range alone (same
              * as before this change) but don't label it, same honesty rule
              * as the idle branch's "no reading" case above. */
-            lv_obj_add_flag(s_chart_y_hi_label, LV_OBJ_FLAG_HIDDEN);
-            lv_obj_add_flag(s_chart_y_lo_label, LV_OBJ_FLAG_HIDDEN);
+            chart_hide_y_ticks();
         }
         /* X (time) label -- a real scale, not just a single span string
          * (2026-08-21 owner request: "I want a time scale on the LCD
-         * chart"). Three points -- start, an intermediate tick at the
-         * midpoint, and the end -- honest per branch:
+         * chart"). 2026-08-30 owner request ("the LCD chart should always
+         * show the same markers as the web page"): both spanned states below
+         * now share ui_page_home_build_x_label() -- main_page.html's
+         * drawChartAxis() four-tick shape (tickCount=3: 0, 1/3, 2/3, full
+         * span) -- honest per branch about WHAT it is spanning, matching
+         * main_page.html's own choice of what gets an axis at all (see that
+         * function's header comment in ui_page_home_graph.h):
          *   - state_active: the chart's horizontal axis is the WHOLE-RUN
          *     PLANNED horizon (0..horizon_s) from profile_feasibility_
          *     plan_curve(), NOT a trailing "last N samples" window (this
@@ -1018,39 +1221,32 @@ static void refresh_cb(lv_timer_t *timer)
          *   - !state_active (idle, leftover history): there is no planned
          *     run to span -- horizon_s here is the RECENT-HISTORY window
          *     actually being plotted (oldest retained sample to now, see
-         *     its own comment above), so the label says exactly that instead
-         *     of implying a schedule that does not exist. Gated on count > 1
-         *     (need at least two samples for a non-zero span to be honest
-         *     about); a single leftover sample has no span to show a scale
-         *     for. */
-        /* 48: worst case "hist -" (6) + up to 15 bytes of one duration + "|-"
-         * (2) + up to 15 bytes of a second duration + "|now" (4) + NUL = 43
-         * max -- rounded up with margin, same discipline the other
-         * snprintf-into-fixed-buffer call sites in this file already use. */
-        /* 64: worst case four "%lu:%02lu" ticks (up to 10 bytes each for a
-         * uint32_t seconds count near UINT32_MAX / 60) + 3 "|" separators +
-         * NUL -- rounded up with margin. 2026-08-23: state_active's four
-         * ticks now use ui_page_home_x_ticks()/ui_page_home_format_mmss()
-         * (0, h/3, 2h/3, h in total-elapsed M:SS, no hour rollover) to match
-         * main_page.html's own four-tick x-axis exactly, instead of this
-         * page's earlier three-point 0/mid/end using format_duration()'s
-         * hh:mm:ss-beyond-an-hour shape. The idle-with-history branch below
-         * is UNCHANGED (still three points, still format_duration()) --
-         * main_page.html's four-tick spec is for the PLANNED-profile axis,
-         * which idle-with-history has none of (see this branch's own
-         * comment above). */
-        char span_buf[64];
-        if (state_active && plan_n > 0) {
-            float ticks[4];
-            ui_page_home_x_ticks(horizon_s, ticks);
-            char t1_buf[16], t2_buf[16], t3_buf[16];
-            ui_page_home_format_mmss((uint32_t)lroundf(ticks[1]), t1_buf, sizeof(t1_buf));
-            ui_page_home_format_mmss((uint32_t)lroundf(ticks[2]), t2_buf, sizeof(t2_buf));
-            ui_page_home_format_mmss((uint32_t)lroundf(ticks[3]), t3_buf, sizeof(t3_buf));
-            snprintf(span_buf, sizeof(span_buf), "0:00|%s|%s|%s", t1_buf, t2_buf, t3_buf);
+         *     its own comment above), a genuine span exactly like
+         *     main_page.html's drawHistoryChart() draws one over for its own
+         *     idle-with-history case (rows.length>0 there too). Gated on
+         *     count > 1 (need at least two samples for a non-zero span to be
+         *     honest about); a single leftover sample has no span to show a
+         *     scale for.
+         *   - idle, NO history (handled entirely in the outer `if` above,
+         *     not this else-branch): deliberately still gets no axis. A
+         *     static per-channel dot is a single instant, not a series, to
+         *     put a time scale on -- main_page.html's own equivalent state
+         *     (drawIdleDots()) agrees: it only calls drawChartAxis() when
+         *     there is an active plan PREVIEW (a profile picked but not yet
+         *     started), and this page has no equivalent preview data to draw
+         *     one from while IDLE (profile_executor_state_t's segments/
+         *     run_start_c are only meaningful once state != IDLE, see
+         *     profile_executor.h). Inventing a span here would be exactly the
+         *     "confident wrong number" this task warns against, so it stays
+         *     hidden -- see that branch's own comment. */
+        char span_buf[64]; /* sized by ui_page_home_build_x_label()'s own out_cap contract */
+        bool has_span = (state_active && plan_n > 0) || (!state_active && count > 1);
+        if (has_span) {
+            ui_page_home_build_x_label(horizon_s, true, span_buf, sizeof(span_buf));
             lv_label_set_text(s_chart_x_label, span_buf);
             lv_obj_remove_flag(s_chart_x_label, LV_OBJ_FLAG_HIDDEN);
-
+        }
+        if (state_active && plan_n > 0) {
             /* Current-position dot -- see its own static declaration comment.
              * Only meaningful here (a live plan with a real horizon to place
              * a position along); positioned on the ACTUAL series when a real
@@ -1081,16 +1277,18 @@ static void refresh_cb(lv_timer_t *timer)
                 lv_obj_add_flag(s_chart_now_dot, LV_OBJ_FLAG_HIDDEN);
             }
         } else if (!state_active && count > 1) {
-            char mid_buf[16], end_buf[16];
-            format_duration((uint32_t)lroundf(horizon_s / 2.0f), mid_buf, sizeof(mid_buf));
-            format_duration((uint32_t)lroundf(horizon_s), end_buf, sizeof(end_buf));
-            snprintf(span_buf, sizeof(span_buf), "hist -%s|-%s|now", end_buf, mid_buf);
-            lv_label_set_text(s_chart_x_label, span_buf);
-            lv_obj_remove_flag(s_chart_x_label, LV_OBJ_FLAG_HIDDEN);
-            /* No live plan in this branch (idle with leftover history) --
+            /* Idle with leftover history: span_buf/s_chart_x_label were
+             * already written by the shared has_span block above (0..
+             * horizon_s of retained history, same four-tick M:SS shape as
+             * the running case). No live plan in this branch, so there is
              * nothing to mark a "current position along the curve" on. */
             lv_obj_add_flag(s_chart_now_dot, LV_OBJ_FLAG_HIDDEN);
         } else {
+            /* !has_span: idle with no history (a single static dot, not a
+             * series -- see the block comment above) or a running state
+             * whose plan curve came back empty. Nothing was written to
+             * span_buf/s_chart_x_label in either case, so hide it rather
+             * than show whatever text happened to be there before. */
             lv_obj_add_flag(s_chart_x_label, LV_OBJ_FLAG_HIDDEN);
             lv_obj_add_flag(s_chart_now_dot, LV_OBJ_FLAG_HIDDEN);
         }
@@ -1125,6 +1323,24 @@ static void refresh_cb(lv_timer_t *timer)
     } else {
         lv_label_set_text(s_fire_btn_label, "Start");
         lv_obj_set_style_bg_color(s_fire_btn, UI_THEME_ACCENT_4, 0);
+    }
+
+    /* Pause/Resume -- owner request 2026-08-30: "should show on the main
+     * page of the lcd like it does on the web page" (app.js's sticky-bar
+     * toggle button, next to Stop). Same toggle shape: one button whose
+     * label/action flips with state, hidden (zero flex-row width, same
+     * discipline as s_trip_strip/s_progress_wrap above) outside RUNNING/
+     * PAUSED -- there is nothing to pause or resume in any other state.
+     * No confirmation dialog, matching the web button exactly (only
+     * Start/Stop confirm on either surface). */
+    if (st.state == PROFILE_EXEC_RUNNING) {
+        lv_label_set_text(s_pause_btn_label, "Pause");
+        lv_obj_remove_flag(s_pause_btn, LV_OBJ_FLAG_HIDDEN);
+    } else if (st.state == PROFILE_EXEC_PAUSED) {
+        lv_label_set_text(s_pause_btn_label, "Resume");
+        lv_obj_remove_flag(s_pause_btn, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(s_pause_btn, LV_OBJ_FLAG_HIDDEN);
     }
 }
 
@@ -1302,19 +1518,44 @@ lv_obj_t *ui_page_home_build(void)
     /* Owner report 2026-08-22: "the LCD has 3 sections in the graph, it
      * should only be one", confirmed against a photo of the screen.
      *
-     * Both counts are 0. The culprit was the VERTICAL count, which was 4:
-     * LVGL draws vertical division lines INCLUDING one at each edge of the
-     * plot area, so 4 lines are drawn at 0, 1/3, 2/3 and 1 of the width --
-     * two of them land in the middle and cut the plot into exactly the three
-     * columns the report describes. It reads as three separate panels, not
-     * as gridlines, because the line color has as much contrast against the
-     * card background as the trace itself does.
+     * Both counts were zeroed at the time. The culprit was the VERTICAL
+     * count, which was 4: LVGL draws division lines INCLUDING one at each
+     * edge of the plot area, so 4 vertical lines are drawn at 0, 1/3, 2/3
+     * and 1 of the width -- two of them land in the middle and cut the plot
+     * into exactly the three columns the report describes. It read as three
+     * separate panels, not as gridlines, because the line color had as much
+     * contrast against the card background as the trace itself did -- the
+     * counts were not the only problem, the default LV_PART_MAIN line style
+     * was too.
      *
      * (A first attempt zeroed only the HORIZONTAL count, on the assumption
      * that 2 horizontal lines making 3 stacked bands was the "3 sections".
      * It was not -- the photo shows the divisions running vertically. Noted
      * so the next person does not re-add either count reasoning that "the
-     * other one was the problem".) */
+     * other one was the problem".)
+     *
+     * 2026-08-30: an attempt to satisfy the owner's "show 10 vertical
+     * markers like the web GUI" by setting hdiv=11/vdiv=4 here was made and
+     * REVERTED the same day, because the premise was wrong. The web chart
+     * has no gridlines at all. main_page.html's drawYAxis() strokes
+     * moveTo(padL - 3, vy) -> lineTo(padL, vy): a 3px TICK MARK just
+     * outside the plot, next to a numeric label at x=2. drawChartAxis()
+     * does the same below the plot. The only full-width strokes inside the
+     * web's plot area are its border rect and drawFreezingRef()'s dashed
+     * 0 degC reference line. So "10 markers" means ten labelled ticks
+     * outside the plot, and lv_chart div lines -- which are full-width
+     * lines THROUGH it -- are the wrong primitive: hdiv=11/vdiv=4 puts back
+     * the exact vdiv=4 geometry (lines at 0, 1/3, 2/3, 1) that produced the
+     * 2026-08-22 "three sections" report, plus ten more cuts.
+     *
+     * Matching the web properly needs tick marks and labels OUTSIDE the plot
+     * (lv_scale, or extending the s_chart_y_hi/lo_label overlay pattern to
+     * more positions), not div lines. Note the density problem before
+     * trying: this chart is flex_grow residual height on a 480px page --
+     * order 120-160px -- so 11 numeric temperature labels will not fit
+     * legibly the way they do on the web's much taller canvas. Deciding
+     * how many labels this display can actually carry is an open question,
+     * not something to guess at. */
     lv_chart_set_div_line_count(s_chart, 0, 0);
     lv_chart_set_point_count(s_chart, UI_PAGE_HOME_CHART_POINTS);
     /* Same "desired" accent color the now-removed ui_page_history.c used
@@ -1345,30 +1586,45 @@ lv_obj_t *ui_page_home_build(void)
     lv_chart_set_axis_range(s_chart, LV_CHART_AXIS_PRIMARY_Y, 0, 100);
     lv_obj_remove_flag(s_chart, LV_OBJ_FLAG_SCROLLABLE);
 
-    /* Temp/time scale overlay widgets -- see s_chart_y_hi_label's own comment
-     * (near the static declarations above) for why these are plain labels
-     * overlaid on the chart's own corners rather than an lv_scale widget.
-     * Small semi-opaque chips so digits stay legible over the plotted lines;
-     * built HIDDEN, refresh_cb() (called once at the bottom of this function)
-     * un-hides whichever ones have real data before the page is ever shown,
-     * so there is no visible flash of an unset "0" label on first paint. */
-    s_chart_y_hi_label = lv_label_create(s_chart);
-    lv_obj_set_style_text_color(s_chart_y_hi_label, UI_THEME_COLOR_TEXT_PRIMARY, 0);
-    lv_obj_set_style_bg_color(s_chart_y_hi_label, UI_THEME_COLOR_BG, 0);
-    lv_obj_set_style_bg_opa(s_chart_y_hi_label, LV_OPA_70, 0);
-    lv_obj_set_style_pad_hor(s_chart_y_hi_label, 3, 0);
-    lv_obj_set_style_radius(s_chart_y_hi_label, 4, 0);
-    lv_obj_align(s_chart_y_hi_label, LV_ALIGN_TOP_LEFT, 2, 2);
-    lv_obj_add_flag(s_chart_y_hi_label, LV_OBJ_FLAG_HIDDEN);
-
-    s_chart_y_lo_label = lv_label_create(s_chart);
-    lv_obj_set_style_text_color(s_chart_y_lo_label, UI_THEME_COLOR_TEXT_PRIMARY, 0);
-    lv_obj_set_style_bg_color(s_chart_y_lo_label, UI_THEME_COLOR_BG, 0);
-    lv_obj_set_style_bg_opa(s_chart_y_lo_label, LV_OPA_70, 0);
-    lv_obj_set_style_pad_hor(s_chart_y_lo_label, 3, 0);
-    lv_obj_set_style_radius(s_chart_y_lo_label, 4, 0);
-    lv_obj_align(s_chart_y_lo_label, LV_ALIGN_BOTTOM_LEFT, 2, -2);
-    lv_obj_add_flag(s_chart_y_lo_label, LV_OBJ_FLAG_HIDDEN);
+    /* Temp/time scale overlay widgets -- see s_chart_y_tick_labels' own
+     * comment (near the static declarations above) for why these are plain
+     * labels overlaid on the chart's own plot rather than an lv_scale
+     * widget, and for the UI_PLAN.md 5.3 "all 11 ticks" decision this array
+     * implements. No background chip on the tick labels (unlike the old
+     * hi/lo pair, and unlike s_chart_x_label below) -- 11 opaque chips
+     * stacked down the left edge would themselves start to read as a solid
+     * bar over the plot; a scaled-down, plain-text label in the muted
+     * secondary color (matching main_page.html's g.muted) is legible enough
+     * against this theme's dark card background without one. Built HIDDEN;
+     * refresh_cb() (called once at the bottom of this function, via
+     * chart_set_y_ticks()/chart_hide_y_ticks()) un-hides whichever have real
+     * data before the page is ever shown, so there is no visible flash of
+     * an unset "0" label on first paint -- same discipline the old hi/lo
+     * pair used.
+     *
+     * montserrat_10 is the "smaller font" the owner decision asks for
+     * (UI_PLAN.md 5.3). A first pass instead faked it with
+     * lv_obj_set_style_transform_scale(154/256) because only montserrat_14
+     * was compiled in -- but that scales an already-rendered 14px bitmap,
+     * which aliases badly at ~60% on a real panel, and 11 stacked labels is
+     * exactly where that would show. CONFIG_LV_FONT_MONTSERRAT_10 is now
+     * enabled in the tracked sdkconfig.defaults (NOT in sdkconfig, which is
+     * gitignored -- a font left only there means a clean clone silently
+     * falls back to the 14px face and the labels overlap). */
+    for (int i = 0; i < UI_PAGE_HOME_Y_TICK_COUNT; i++) {
+        lv_obj_t *label = lv_label_create(s_chart);
+        lv_obj_set_style_text_color(label, UI_THEME_COLOR_TEXT_SECONDARY, 0);
+        lv_obj_set_style_bg_opa(label, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_text_font(label, &lv_font_montserrat_10, 0);
+        lv_obj_add_flag(label, LV_OBJ_FLAG_HIDDEN);
+        s_chart_y_tick_labels[i] = label;
+    }
+    /* chart_y_tick_draw_event_cb()'s own comment explains the short tick
+     * marks this hook draws to go with the labels above -- DRAW_POST so they
+     * paint over the finished plot (matching main_page.html drawing its
+     * ticks after the trace), same ordering the dashed-planned-line hook
+     * below uses relative to its own draw phase. */
+    lv_obj_add_event_cb(s_chart, chart_y_tick_draw_event_cb, LV_EVENT_DRAW_POST, NULL);
 
     s_chart_x_label = lv_label_create(s_chart);
     lv_obj_set_style_text_color(s_chart_x_label, UI_THEME_COLOR_TEXT_PRIMARY, 0);
@@ -1395,6 +1651,67 @@ lv_obj_t *ui_page_home_build(void)
     lv_obj_set_style_border_width(s_chart_now_dot, 0, 0);
     lv_obj_set_style_pad_all(s_chart_now_dot, 0, 0);
     lv_obj_add_flag(s_chart_now_dot, LV_OBJ_FLAG_HIDDEN);
+
+    /* Progress bar -- see s_progress_wrap's own static-declaration comment.
+     * Sits directly under the chart, above action_row (the Start/Stop
+     * button, still the LAST child / still pinned to the bottom). Built
+     * hidden; refresh_cb() un-hides it once there's a real run to report on. */
+    s_progress_wrap = lv_obj_create(content);
+    lv_obj_remove_flag(s_progress_wrap, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_width(s_progress_wrap, lv_pct(100));
+    lv_obj_set_height(s_progress_wrap, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_opa(s_progress_wrap, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(s_progress_wrap, 0, 0);
+    lv_obj_set_style_pad_all(s_progress_wrap, 0, 0);
+    lv_obj_set_style_pad_top(s_progress_wrap, UI_THEME_PADDING_PX / 2, 0);
+    lv_obj_set_flex_flow(s_progress_wrap, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_gap(s_progress_wrap, 2, 0);
+    lv_obj_add_flag(s_progress_wrap, LV_OBJ_FLAG_HIDDEN);
+
+    /* Track -- matches main_page.html's .progress-track (10px, rounded,
+     * bordered). UI_THEME_COLOR_CARD (not a plain black) so it reads
+     * against this page's dark background the same way the chart's own
+     * card background does. */
+    s_progress_track = lv_obj_create(s_progress_wrap);
+    lv_obj_remove_flag(s_progress_track, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_width(s_progress_track, lv_pct(100));
+    lv_obj_set_height(s_progress_track, 8);
+    lv_obj_set_style_bg_color(s_progress_track, UI_THEME_COLOR_CARD, 0);
+    lv_obj_set_style_bg_opa(s_progress_track, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_progress_track, 0, 0);
+    lv_obj_set_style_radius(s_progress_track, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_pad_all(s_progress_track, 0, 0);
+
+    /* Fill -- a child positioned at the track's left edge, width set every
+     * refresh_cb() tick as a fraction of the track's own width (0-100%, or
+     * pinned to 100% in a distinct muted color for the "indeterminate"
+     * case -- this page has no spare cycles for the web's animated stripe,
+     * so "we don't know" is communicated by color instead of motion). */
+    s_progress_fill = lv_obj_create(s_progress_track);
+    lv_obj_remove_flag(s_progress_fill, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_pos(s_progress_fill, 0, 0);
+    lv_obj_set_height(s_progress_fill, lv_pct(100));
+    lv_obj_set_width(s_progress_fill, 0);
+    lv_obj_set_style_bg_color(s_progress_fill, UI_THEME_ACCENT_1, 0);
+    lv_obj_set_style_bg_opa(s_progress_fill, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_progress_fill, 0, 0);
+    lv_obj_set_style_radius(s_progress_fill, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_pad_all(s_progress_fill, 0, 0);
+
+    /* Elapsed/remaining text -- one line ("Elapsed 12:34    3:45 left
+     * (estimate)"), unlike main_page.html's two-span flex row: this page's
+     * ~320px width has no room to spare for a second column, and one label
+     * updated wholesale each tick is simpler than two kept in sync. */
+    s_progress_label = lv_label_create(s_progress_wrap);
+    lv_obj_set_width(s_progress_label, lv_pct(100));
+    lv_label_set_long_mode(s_progress_label, LV_LABEL_LONG_DOT);
+    /* No explicit font: LV_FONT_MONTSERRAT_12 is not confirmed enabled in
+     * this build's lv_conf (only checked-in for CI/example configs, not this
+     * app's), so this stays on LV_FONT_DEFAULT (montserrat_14, ui_theme.h)
+     * like every other label on this page rather than risk a missing-glyph
+     * fallback. */
+    lv_obj_set_style_text_color(s_progress_label, UI_THEME_COLOR_TEXT_SECONDARY, 0);
+    lv_label_set_text(s_progress_label, "");
 
     /* 2026-08-21 owner request: "remove the zone [] section" -- no zone row
      * widgets are built on this page any more (see s_zone_count's own comment
@@ -1452,6 +1769,17 @@ lv_obj_t *ui_page_home_build(void)
     lv_obj_set_flex_flow(action_row, LV_FLEX_FLOW_ROW);
     lv_obj_set_style_pad_gap(action_row, UI_THEME_PADDING_PX / 2, 0);
     lv_obj_remove_flag(action_row, LV_OBJ_FLAG_SCROLLABLE);
+    /* Pause/Resume -- built BEFORE the fire button, matching app.js's sticky
+     * bar ordering (pause/resume, then stop). Built hidden; refresh_cb()
+     * un-hides it for RUNNING/PAUSED only, at which point it shares
+     * action_row's width evenly with the fire button (both flex_grow(1) via
+     * build_button()) -- hidden costs zero row width, same discipline as
+     * s_trip_strip/s_progress_wrap elsewhere on this page, so a hidden pause
+     * button never leaves the Start/Stop button looking off-center. */
+    s_pause_btn = build_button(action_row, "Pause", UI_THEME_ACCENT_1, pause_resume_btn_cb, 36,
+                                &s_pause_btn_label);
+    lv_obj_add_flag(s_pause_btn, LV_OBJ_FLAG_HIDDEN);
+
     s_fire_btn = build_button(action_row, "Start", UI_THEME_ACCENT_4, fire_btn_cb, 36, &s_fire_btn_label);
 
     /* Pages are never torn down (kiln_ui.h's header comment), so a timer

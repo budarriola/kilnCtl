@@ -243,12 +243,19 @@ button { min-height: var(--ui-touch); }
    --ui-accent-5 in dark mode) so Stop reads as the same "this is the
    serious one" colour everywhere. */
 .kc-stop-bar { position: fixed; left: 0; right: 0; bottom: 0; z-index: 899;
-               padding: 0.4em 0.6em; background: var(--bg); border-top: 1px solid var(--ui-accent-5); }
+               padding: 0.4em 0.6em; background: var(--bg); border-top: 1px solid var(--ui-accent-5);
+               display: flex; gap: 0.5em; }
 .kc-stop-bar[hidden] { display: none; }
-.kc-stop-btn { display: block; width: 100%; box-sizing: border-box; min-height: var(--ui-touch);
-               background: var(--ui-accent-5); color: #fff; border: none; border-radius: var(--ui-radius);
+.kc-stop-btn, .kc-pause-btn { display: block; flex: 1; box-sizing: border-box; min-height: var(--ui-touch);
+               border: none; border-radius: var(--ui-radius);
                font-size: 1em; font-weight: bold; cursor: pointer; }
-.kc-stop-btn:disabled { opacity: 0.6; }
+.kc-stop-btn { background: var(--ui-accent-5); color: #fff; }
+.kc-stop-btn:disabled, .kc-pause-btn:disabled { opacity: 0.6; }
+/* Pause/Resume is the one non-destructive control on the bar -- kept off the
+   Stop button's accent-5 (the "serious, aborts the run" colour) so it never
+   reads as equally dangerous. */
+.kc-pause-btn { background: var(--ui-accent-1, #468); color: #fff; }
+.kc-pause-btn[hidden] { display: none; }
 
 /* Connection-lost banner (UI_PLAN.md item 4). Not fixed -- it sits in-flow
    right after the topbar, so it pushes content down rather than overlapping
