@@ -153,25 +153,38 @@ extern "C" {
 
 /* zone_cfg_t::coupling_coeff[j] (PID_EXPANSION_PLAN.md section 2c's
  * cross-zone feedforward coefficients, one per neighbor since ZONES_CFG_
- * VERSION 10->11) -- each a measured, non-negative scalar the feedforward
- * term's additive `-coupling_coeff[j] * (T_j - T_j_setpoint)` contribution
- * is scaled by (Phase 3b, a later pass; this file only stores the
- * coefficients). 0 = "no coupling measured against that neighbor", which is
- * both the safe default and the degrade-to-today behavior -- the plan's own
- * words. This ceiling is a typo/garbage filter like ZONE_MODEL_K_MAX, not a
- * physics bound: nothing about a kiln's radiative coupling has been
- * measured yet to derive a tighter one from.
+ * VERSION 10->11) -- each a measured, non-negative scalar in degC PER UNIT
+ * DUTY AT ZONE j'S HEATER, the exact same convention as model_k_dc/ff_k_dc
+ * (NOT a dimensionless ratio). zones[i].coupling_coeff[j] is ROW i, COLUMN
+ * j: zone i's (the affected zone's) response to zone j's (the stepped
+ * zone's) heater. Do not transpose -- the row is always the zone whose
+ * feedforward is being computed.
+ *
+ * A plain `-coupling_coeff[j] * (T_j - T_j_setpoint)` is dimensionally
+ * wrong -- it mixes degC_i/duty_j with degC_j and is NOT what shipped.
+ * zone_feedforward() (profile_executor.c, Phase 3b) instead computes the
+ * standard measured-disturbance feedforward, dividing by neighbor j's own
+ * k_dc to first recover the dimensionless disturbance gain and then by this
+ * zone's own k_dc to convert into this zone's duty:
+ *
+ *     -(coupling_coeff[j] / (k_dc_j * ff_k_dc_own)) * (T_j - T_j_setpoint)
+ *
+ * 0 = "no coupling measured against that neighbor", which is both the safe
+ * default and the degrade-to-today behavior -- the plan's own words. This
+ * ceiling is a typo/garbage filter like ZONE_MODEL_K_MAX, not a physics
+ * bound: nothing about a kiln's radiative coupling has been measured yet to
+ * derive a tighter one from.
  *
  * DELIBERATELY still non-negative, even after the 10->11 widening to a full
- * directed row: the feedforward's own `-coupling_coeff[j] * (...)` minus
- * sign already carries the direction (a hotter-than-setpoint neighbor always
- * pulls this zone's feedforward down, a colder one pushes it up), so an
- * independently-signed coefficient would be redundant at best, a
- * double-negative bug at worst. Every coefficient measured on the bench so
- * far is a positive cross-heating gain; nothing today needs a negative
- * (cooling) coupling to be representable. Revisit this if that ever
- * changes, but do not silently relax it -- see zone_cfg_t::coupling_coeff's
- * own doc comment in zones_http.c for the full reasoning. */
+ * directed row: the feedforward's own leading minus sign already carries
+ * the direction (a hotter-than-setpoint neighbor always pulls this zone's
+ * feedforward down, a colder one pushes it up), so an independently-signed
+ * coefficient would be redundant at best, a double-negative bug at worst.
+ * Every coefficient measured on the bench so far is a positive cross-
+ * heating gain; nothing today needs a negative (cooling) coupling to be
+ * representable. Revisit this if that ever changes, but do not silently
+ * relax it -- see zone_cfg_t::coupling_coeff's own doc comment in
+ * zones_http.c for the full reasoning. */
 #define ZONE_COUPLING_COEFF_MAX 100.0f
 
 /* zone_cfg_t::settings_source (PID_EXPANSION_PLAN.md section 3.5's "Same as
@@ -605,8 +618,36 @@ bool zones_config_get_settings_source(uint8_t zone_index, uint8_t *out_settings_
  * z%u_settings_source enforces: either ZONE_SETTINGS_SOURCE_CUSTOM (0xFF) or a
  * real zone index < MAX31856_CHANNEL_COUNT other than zone_index itself
  * (self-reference is the degenerate inheritance cycle -- refused here, not
- * left for a later pass to unwind). */
+ * left for a later pass to unwind). ALSO refused: any settings_source that
+ * would close a LONGER cycle through some other zone's already-stored link
+ * (2-zone, 3-zone, ...) -- checked against the live stored config, so this
+ * catches everything a single-zone write can create. A whole-page or
+ * multi-entry-import write that changes several zones' links AT ONCE, none
+ * of which cycles alone against the pre-write config but which cycle
+ * together, is NOT caught by this per-call check -- callers doing that (the
+ * zones POST handler, backup_http.c's importer) must re-walk the full
+ * proposed set themselves before calling this in a commit loop; see
+ * zones_config_settings_source_import_has_cycle() for that case. */
 bool zones_config_set_settings_source(uint8_t zone_index, uint8_t settings_source);
+
+/* Cross-entry pass-1 check for a multi-zone import/whole-page write:
+ * `has_override[z]` true means zone z's proposed NEW settings_source is
+ * `override_source[z]`; false means zone z keeps its current LIVE value.
+ * Walks every zone's resulting chain (live values everywhere no override is
+ * given) and reports whether ANY of them cycles -- catching the case a
+ * single zones_config_set_settings_source() call cannot: several zones'
+ * links changing in the same import, none of which is a cycle against the
+ * old live config alone, but which close one together (e.g. zone 0 -> zone
+ * 1 and zone 1 -> zone 0 both newly set in the same import). Returns false
+ * (no cycle) with *out_cycle_zone untouched if out_cycle_zone is NULL or no
+ * cycle exists; otherwise returns true and, if out_cycle_zone is non-NULL,
+ * names one zone that sits on a cycle. Read-only -- never writes to the live
+ * config; callers still run their commit loop (calling
+ * zones_config_set_settings_source() per entry) only after this returns
+ * false. */
+bool zones_config_settings_source_import_has_cycle(const bool has_override[MAX31856_CHANNEL_COUNT],
+                                                    const uint8_t override_source[MAX31856_CHANNEL_COUNT],
+                                                    uint8_t *out_cycle_zone);
 
 /* Direction/rate sanity monitor threshold (TODO.md section 6's "reasonable
  * rate ... I will determine later" item) -- degC/minute a zone's actual

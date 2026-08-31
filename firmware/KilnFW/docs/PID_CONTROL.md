@@ -525,6 +525,61 @@ coupling logging during a run (TODO.md 6A.5(b)) is now built — see the
 Module layout table above and TODO.md 6A.5(b) for what it does and doesn't
 cover (no real hardware has exercised it yet).
 
+## Cross-zone coupling feedforward (`zone_feedforward()`, PID_EXPANSION_PLAN.md §2c/§4 Phase 3b), built 2026-08-31
+
+Additive term inside the existing feedforward clamp, not a new control loop:
+
+    u_ff += -(coupling_coeff[j] / (k_dc_j * ff_k_dc_own)) * (T_j - setpoint_j)
+
+summed over every neighbor `j`. `coupling_coeff[j]` (`zones_http.h`) is
+degC-per-unit-duty-at-neighbor-`j`'s-heater, the same convention as
+`model_k_dc`/`ff_k_dc` — dividing by neighbor `j`'s own `k_dc` first recovers
+the dimensionless disturbance gain `Gd_ij`, then dividing by this zone's own
+`ff_k_dc` converts it into this zone's duty (`u_ff_d = -(Gd/Gu)*d`, the
+standard measured-disturbance feedforward). The plan's original
+`-c_ij*(T_j - sp_j)` (PID_EXPANSION_PLAN.md §2c) was dimensionally
+incomplete — it mixes `degC_i/duty_j` with `degC_j` — and was corrected to
+the form above before shipping. `zones[i].coupling_coeff[j]` is row `i`
+(affected zone), column `j` (stepped zone); do not transpose.
+
+A neighbor only contributes when `zone_qualifies_as_coupling_neighbor()`
+holds: active, valid reading, PID-family control mode, not faulted, not
+authority-blocked. `active` alone is not enough — it means "in this firing's
+zone_mask", not "being driven" — and a zone left OFF at a 900 °C setpoint
+was computing a +4.0 duty correction on its neighbor before this gate was
+added. The neighbor's deviation is the low-pass-filtered temperature
+(`coupling_filtered_c`, same filter cadence as the control loop tick),
+clamped to that neighbor's own `pid_range_c` — both borrowed from `pid.c`
+rather than invented, so the same threshold that already gates linear vs.
+full on/off PID also bounds how far this term can react. With every
+`coupling_coeff` at 0 (the state all three zones are in until a tune is
+accepted) the output is bit-identical to before this feature.
+
+Autotune (`autotune_engine.c`) now persists measured cross-gains via
+`zones_config_set_coupling()` instead of leaving them RAM-only (previously
+lost every reboot).
+
+**Hardware panic on the first real run (2026-08-31).** The persist call sat
+directly in the autotune task, whose stack is PSRAM-backed; a flash write
+disables the cache, PSRAM becomes unreachable mid-write, and
+`esp_task_stack_is_sane_cache_disabled()` asserted — 100% reproducible the
+moment a real coefficient reached storage. Fixed by routing the write
+through `uart_bridge_ext_run_on_flash_worker()`. Host tests cannot catch
+this class (no PSRAM, no cache in the host build); the hazard was already
+documented at that helper's own definition and at a call site in
+`profile_executor.c` — the new call site was simply never audited against
+it before this run.
+
+**Open question, not yet fixed.** At `k_dc` ~21 degC/duty (this rig's
+measured range), the pre-existing `hold` term alone saturates `u_ff` at
+roughly a 41 degC setpoint. Above that, `u_ff` clamps at 1.0 and the coupling
+term cannot act; below it, a single neighbor deviation can span the whole
+duty range. A kiln that fires to 1000 degC is therefore either running on
+`k_dc` fits that are wrong, or running with feedforward saturated by design
+across essentially its whole useful range — the bench rig's 0..80 degC
+ceiling is why this has not surfaced yet. Predates Phase 3b; the coupling
+term inherits it rather than causes it.
+
 ## Fuzzy adjustment (`pid_fuzzy.c`, PID_EXPANSION_PLAN.md §2b/§4 Phase 3)
 
 An optional second control mode layered over classic PID: a fixed,

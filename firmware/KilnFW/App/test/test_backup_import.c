@@ -41,6 +41,7 @@
 // test_profile_feasibility.c for exactly this cross-file sharing.
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "test_common.h"
@@ -110,11 +111,48 @@ esp_err_t httpd_resp_send(httpd_req_t *r, const char *buf, long long buf_len)
     (void)buf_len;
     return ESP_OK;
 }
+/* Export-side capture: backup_export_get_handler() streams its JSON out
+ * through httpd_resp_send_chunk() (see backup_stream_flush()), never
+ * httpd_resp_send() -- every prior test in this file only ever calls
+ * backup_import_apply() directly, so this stayed a no-op. The export tests
+ * below need to see what was actually streamed, so this appends every
+ * chunk (including the final buf==NULL/buf_len==0 terminator, which appends
+ * nothing) into a growing heap buffer a test can inspect via
+ * test_export_capture_reset()/s_export_body. */
+static char *s_export_body;
+static size_t s_export_len;
+static size_t s_export_cap;
+
+static void test_export_capture_reset(void)
+{
+    free(s_export_body);
+    s_export_body = NULL;
+    s_export_len = 0;
+    s_export_cap = 0;
+}
+
 esp_err_t httpd_resp_send_chunk(httpd_req_t *r, const char *buf, size_t buf_len)
 {
     (void)r;
-    (void)buf;
-    (void)buf_len;
+    if (!buf || buf_len == 0) {
+        return ESP_OK; /* the chunked-terminator call */
+    }
+    size_t need = s_export_len + buf_len + 1;
+    if (need > s_export_cap) {
+        size_t new_cap = s_export_cap ? s_export_cap * 2 : 1024;
+        while (new_cap < need) {
+            new_cap *= 2;
+        }
+        char *grown = realloc(s_export_body, new_cap);
+        if (!grown) {
+            return ESP_FAIL;
+        }
+        s_export_body = grown;
+        s_export_cap = new_cap;
+    }
+    memcpy(s_export_body + s_export_len, buf, buf_len);
+    s_export_len += buf_len;
+    s_export_body[s_export_len] = '\0';
     return ESP_OK;
 }
 esp_err_t httpd_resp_send_err(httpd_req_t *r, httpd_err_code_t error, const char *msg)
@@ -267,9 +305,29 @@ static int g_profile_save_calls;
 static uint8_t g_last_saved_profile_id;
 static profile_t g_last_saved_profile;
 
+// profiles_http_get()'s backing store -- defined here (not down in the
+// "profiles_http.h stubs" section below) so reset_stub_state() can clear it;
+// see that section for profiles_http_get()/test_stub_profiles_set().
+static bool s_profile_present[PROFILES_MAX_COUNT];
+static profile_t s_profile_slots[PROFILES_MAX_COUNT];
+
 static void reset_stub_state(void)
 {
     memset(s_writes, 0, sizeof(s_writes));
+    /* Real decoded zones configs never leave a zone's settings_source at raw
+     * 0 unintentionally -- zones_http.c's convert_zone_v9() etc. explicitly
+     * seed ZONE_SETTINGS_SOURCE_CUSTOM for anything not actually configured
+     * ("NEVER 0", see that function's own comment); 0 is a REAL, DIFFERENT
+     * value ("copy zone 0's settings"), not a "not set" sentinel. The plain
+     * memset(0) above would otherwise leave every stub zone looking like it
+     * explicitly links to zone 0 -- indistinguishable, for zone 0 itself,
+     * from a self-reference -- which is not a state real firmware ever
+     * produces and would make zones_config_settings_source_import_has_cycle()
+     * below manufacture a false cycle out of zones no test ever actually
+     * linked. */
+    for (uint8_t i = 0; i < STUB_ZONE_COUNT; i++) {
+        s_writes[i].settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
+    }
     s_relay_count = 4;
     s_safety_tc_set = false;
     s_safety_tc_type = 0;
@@ -277,6 +335,8 @@ static void reset_stub_state(void)
     g_profile_save_calls = 0;
     g_last_saved_profile_id = 0;
     memset(&g_last_saved_profile, 0, sizeof(g_last_saved_profile));
+    memset(s_profile_present, 0, sizeof(s_profile_present));
+    memset(s_profile_slots, 0, sizeof(s_profile_slots));
     test_stub_zones_set_thermo_count(3);
     for (uint8_t i = 0; i < STUB_ZONE_COUNT; i++) {
         test_stub_zones_set_max_ramp(i, true, 1000.0f);
@@ -659,6 +719,57 @@ bool zones_config_set_settings_source(uint8_t zone_index, uint8_t settings_sourc
     g_total_write_calls++;
     return true;
 }
+/* Stub for zones_http.c's real zones_config_settings_source_import_has_cycle()
+ * (zones_http.h) -- backup_http.c's pass-1 cross-entry cycle check calls
+ * this. Same bounded chain-walk the real implementation runs, against this
+ * file's own s_writes[] stub state (merged with the caller's proposed
+ * overrides) instead of s_zones.cfg, and bounded by
+ * zones_config_get_thermo_count() the same "unused trailing slot" way the
+ * real one is -- see that function's own header comment for why the bound
+ * matters (an unconfigured slot's settings_source == 0 is real data, not a
+ * "not set" marker, and must not be walked as if it were a deliberate
+ * link). */
+bool zones_config_settings_source_import_has_cycle(const bool has_override[MAX31856_CHANNEL_COUNT],
+                                                    const uint8_t override_source[MAX31856_CHANNEL_COUNT],
+                                                    uint8_t *out_cycle_zone)
+{
+    uint8_t chain[STUB_ZONE_COUNT];
+    for (uint8_t i = 0; i < STUB_ZONE_COUNT; i++) {
+        chain[i] = has_override[i] ? override_source[i] : s_writes[i].settings_source;
+    }
+    uint8_t thermo_count = zones_config_get_thermo_count();
+    if (thermo_count > STUB_ZONE_COUNT) {
+        thermo_count = STUB_ZONE_COUNT;
+    }
+    for (uint8_t start = 0; start < thermo_count; start++) {
+        bool visited[STUB_ZONE_COUNT] = {0};
+        visited[start] = true;
+        uint8_t cur = start;
+        bool terminated = false; /* hit CUSTOM or an out-of-range/unused link -- no cycle */
+        bool cycle = true;       /* default: hop cap exceeded without terminating */
+        for (uint8_t hop = 0; hop < STUB_ZONE_COUNT; hop++) {
+            uint8_t src = chain[cur];
+            if (src == ZONE_SETTINGS_SOURCE_CUSTOM || src >= thermo_count) {
+                terminated = true;
+                cycle = false;
+                break;
+            }
+            if (visited[src]) {
+                cycle = true;
+                break;
+            }
+            visited[src] = true;
+            cur = src;
+        }
+        (void)terminated;
+        if (cycle) {
+            if (out_cycle_zone) *out_cycle_zone = start;
+            return true;
+        }
+    }
+    return false;
+}
+
 bool zones_config_set_safety_tc_type(uint8_t tc_type)
 {
     s_safety_tc_set = true;
@@ -669,11 +780,30 @@ bool zones_config_set_safety_tc_type(uint8_t tc_type)
 
 // ---- profiles_http.h stubs -------------------------------------------------
 
+// Export-side control: backup_export_get_handler() reads every profile slot
+// through this getter. Every earlier test in this file only ever drives
+// backup_import_apply(), which never calls it -- "false for every id" was
+// fine for them. The export tests below need at least one real slot to
+// answer, so this is now driven by the small settable table declared above
+// (s_profile_present/s_profile_slots) rather than a flat refusal;
+// reset_stub_state() clears it back to "nothing saved" so import-only tests
+// are unaffected.
+static void test_stub_profiles_set(uint8_t id, const profile_t *p)
+{
+    if (id >= PROFILES_MAX_COUNT) {
+        return;
+    }
+    s_profile_present[id] = true;
+    s_profile_slots[id] = *p;
+}
+
 bool profiles_http_get(uint8_t id, profile_t *out)
 {
-    (void)id;
-    (void)out;
-    return false; // export path only, never exercised by these tests
+    if (id >= PROFILES_MAX_COUNT || !s_profile_present[id]) {
+        return false;
+    }
+    if (out) *out = s_profile_slots[id];
+    return true;
 }
 
 bool profiles_http_save(uint8_t requested_id, const profile_t *candidate, uint8_t *out_id,
@@ -1151,6 +1281,274 @@ static void test_v3_settings_source_self_reference_rejected(void)
     TEST_CHECK(g_total_write_calls == 0, "nothing written for the whole entry");
 }
 
+// Cross-entry cycle: neither zone's own settings_source entry is a
+// self-reference, and neither cycles against the LIVE config on its own
+// (both start Custom, per reset_stub_state()) -- the cycle only exists
+// because BOTH entries close it TOGETHER, in the same import. Each entry's
+// own per-entry checks (self-reference, range) have nothing to catch here;
+// this is exactly the "hand-edited backup" gap the task brief calls out --
+// without the pass-1 cross-entry check, zone 0's entry would commit first
+// (a plain 0 -> 1 link, legal against the pre-import Custom/Custom live
+// config), and only zone 1's entry, arriving second in pass 2's commit
+// loop, would discover the cycle -- at zones_config_set_settings_source()
+// itself, AFTER zone 0 was already written live. That is precisely the
+// half-applied-import failure mode this file's two-pass split exists to
+// prevent (see this function's own header comment, and the self-reference
+// test above, which the same reasoning already protects against for the
+// single-entry case).
+static void test_settings_source_cross_entry_cycle_rejected_before_any_commit(void)
+{
+    TEST_SECTION("backup_import_apply -- two zone tuning entries that only close a settings_source "
+                 "cycle TOGETHER (neither is a self-reference, neither cycles against the live config "
+                 "alone) are refused in pass 1, before either is committed");
+    reset_stub_state();
+
+    const char *body =
+        "{\"kind\":\"kilnctl_backup\",\"version\":3,\"profiles\":[],"
+        "\"zones\":["
+        "{\"index\":0,\"pid_kp\":1,\"pid_ki\":0,\"pid_kd\":0,\"settings_source\":1},"
+        "{\"index\":1,\"pid_kp\":1,\"pid_ki\":0,\"pid_kd\":0,\"settings_source\":0}]}";
+    char err[160];
+    bool ok = backup_import_apply(body, err, sizeof(err));
+
+    TEST_CHECK(!ok, "a 2-zone settings_source cycle spanning two entries in the same import must be "
+              "refused");
+    TEST_CHECK(strstr(err, "settings_source") != NULL, "the refusal names the field");
+    TEST_CHECK(strstr(err, "cycle") != NULL, "and calls out the cycle specifically");
+    TEST_CHECK(g_total_write_calls == 0,
+              "NOTHING was written for either zone -- zone 0's individually-legal entry must not have "
+              "been committed before zone 1's entry closed the cycle, and must not be committed at all "
+              "once the whole import is refused");
+    uint8_t s0 = 0xAA, s1 = 0xAA;
+    TEST_CHECK(zones_config_get_settings_source(0, &s0) && s0 == ZONE_SETTINGS_SOURCE_CUSTOM &&
+              zones_config_get_settings_source(1, &s1) && s1 == ZONE_SETTINGS_SOURCE_CUSTOM,
+              "the live (stub) config is untouched -- still Custom/Custom, exactly as reset_stub_state() "
+              "left it");
+}
+
+// Positive control for the cross-entry check above: a legal chain spanning
+// two entries in the SAME import (zone 0 -> zone 1, zone 1 -> Custom) must
+// still import cleanly -- proves the guard refuses only a genuine cycle,
+// not any multi-entry settings_source import.
+static void test_settings_source_cross_entry_legal_chain_still_imports(void)
+{
+    TEST_SECTION("backup_import_apply -- a legal (acyclic) settings_source chain spanning two entries "
+                 "in the same import is still accepted");
+    reset_stub_state();
+
+    const char *body =
+        "{\"kind\":\"kilnctl_backup\",\"version\":3,\"profiles\":[],"
+        "\"zones\":["
+        "{\"index\":0,\"pid_kp\":1,\"pid_ki\":0,\"pid_kd\":0,\"settings_source\":1},"
+        "{\"index\":1,\"pid_kp\":1,\"pid_ki\":0,\"pid_kd\":0,\"settings_source\":255}]}";
+    char err[160];
+    bool ok = backup_import_apply(body, err, sizeof(err));
+
+    TEST_CHECK(ok, "a legal two-entry chain (0 -> 1 -> Custom) must import cleanly");
+    uint8_t s0 = 0xAA, s1 = 0xAA;
+    TEST_CHECK(zones_config_get_settings_source(0, &s0) && s0 == 1, "zone 0's link committed as 1");
+    TEST_CHECK(zones_config_get_settings_source(1, &s1) && s1 == ZONE_SETTINGS_SOURCE_CUSTOM,
+              "zone 1's link committed as Custom");
+}
+
+// ---------------------------------------------------------------------------
+// Export coverage (PID_EXPANSION_PLAN.md line ~715): backup_export_get_
+// handler() was completely untested before this -- a silent no-op or a
+// malformed field would have passed every test above, none of which ever
+// call it. These drive the real handler (through the #include of
+// backup_http.c above, same as backup_import_apply()) with httpd_resp_send_
+// chunk() captured into s_export_body by the stub above, and check the
+// emitted JSON shape directly, then round-trip it back through
+// backup_import_apply() to prove export and import agree on the wire format.
+// ---------------------------------------------------------------------------
+
+static esp_err_t run_export(void)
+{
+    test_export_capture_reset();
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    return backup_export_get_handler(&req);
+}
+
+static void test_export_emits_expected_keys_and_values_for_a_known_config(void)
+{
+    TEST_SECTION("backup_export_get_handler -- emits the expected top-level shape, a known profile, "
+                 "and a known zone with all v2-v4 fields, exact values");
+    reset_stub_state();
+
+    profile_t p;
+    memset(&p, 0, sizeof(p));
+    strncpy(p.name, "Cone6", PROFILE_NAME_MAX_LEN);
+    p.zone_mask = 0x03;
+    p.segment_count = 1;
+    p.segments[0].target_c = 1200.0f;
+    p.segments[0].ramp_c_per_hr = 100.0f;
+    p.segments[0].dwell_min = 10;
+    test_stub_profiles_set(0, &p);
+
+    TEST_CHECK(zones_config_set_pid(1, 5.0f, 0.6f, 0.02f), "seed zone 1 pid");
+    TEST_CHECK(zones_config_set_tc_type(1, 4), "seed zone 1 tc_type");
+    TEST_CHECK(zones_config_set_name(1, "Mid"), "seed zone 1 name");
+    TEST_CHECK(zones_config_set_relay_mask(1, 0x02), "seed zone 1 relay_mask");
+    TEST_CHECK(zones_config_set_thermo_mask(1, 0x02), "seed zone 1 thermo_mask");
+    TEST_CHECK(zones_config_set_ct_mask(1, 0x02), "seed zone 1 ct_mask");
+    TEST_CHECK(zones_config_set_cal_offset(1, 0.75f), "seed zone 1 cal_offset_c");
+    test_stub_zones_set_max_ramp(1, true, 150.0f); /* export's get_max_ramp is this hook, not the setter below */
+    TEST_CHECK(zones_config_set_sanity_rate(1, 2.5f), "seed zone 1 sanity_rate_c_per_min");
+    TEST_CHECK(zones_config_set_control_mode(1, 3), "seed zone 1 control_mode (PID_FUZZY)");
+    TEST_CHECK(zones_config_set_temp_limits(1, 1250.0f, -15.0f), "seed zone 1 temp limits");
+    TEST_CHECK(zones_config_set_heater_cfg(1, 60000.0f, 200.0f, 200.0f), "seed zone 1 heater cfg");
+    TEST_CHECK(zones_config_set_fuzzy_strength_pct(1, 42.25f), "seed zone 1 fuzzy_strength_pct");
+    TEST_CHECK(zones_config_set_coupling_cell(1, 0, 10.5f), "seed zone 1 coupling cell (1,0)");
+    TEST_CHECK(zones_config_set_coupling_cell(1, 2, 3.25f), "seed zone 1 coupling cell (1,2)");
+    TEST_CHECK(zones_config_set_settings_source(1, 2), "seed zone 1 settings_source (copies zone 2)");
+
+    /* Model is the one field this stub setup cannot control from this file
+     * (zones_config_get_model() is defined in test_profile_feasibility.c,
+     * against its OWN backing array -- see this file's header comment on why
+     * that split exists). Read the real answer the export handler will get,
+     * so this test proves export forwards it correctly without guessing or
+     * depending on run order. */
+    float exp_k_dc = 0, exp_tau_s = 0, exp_dead_time_s = 0;
+    bool have_model = zones_config_get_model(1, &exp_k_dc, &exp_tau_s, &exp_dead_time_s);
+
+    esp_err_t err = run_export();
+    TEST_CHECK(err == ESP_OK, "backup_export_get_handler must return ESP_OK");
+    TEST_CHECK(s_export_body != NULL && s_export_len > 0, "the handler must have streamed something");
+
+    TEST_CHECK(strstr(s_export_body, "\"kind\":\"kilnctl_backup\"") != NULL, "top-level kind key");
+    TEST_CHECK(strstr(s_export_body, "\"version\":4") != NULL, "top-level version is the CURRENT BACKUP_FORMAT_VERSION (4)");
+
+    TEST_CHECK(strstr(s_export_body, "\"id\":0,\"name\":\"Cone6\",\"zone_mask\":3") != NULL,
+              "the seeded profile's id/name/zone_mask are emitted exactly");
+    TEST_CHECK(strstr(s_export_body, "\"target_c\":1200.00,\"ramp_c_per_hr\":100.00,\"dwell_min\":10") != NULL,
+              "the seeded profile's one segment is emitted exactly");
+
+    TEST_CHECK(strstr(s_export_body, "\"index\":1,\"pid_kp\":5.0000,\"pid_ki\":0.6000,\"pid_kd\":0.0200") != NULL,
+              "zone 1's pid gains are emitted exactly");
+    TEST_CHECK(strstr(s_export_body, "\"tc_type\":4") != NULL, "zone 1's tc_type is emitted");
+    TEST_CHECK(strstr(s_export_body, "\"name\":\"Mid\"") != NULL, "zone 1's name is emitted");
+    TEST_CHECK(strstr(s_export_body, "\"relay_mask\":2,\"thermo_mask\":2,\"ct_mask\":2") != NULL,
+              "zone 1's masks are emitted exactly");
+    TEST_CHECK(strstr(s_export_body, "\"cal_offset_c\":0.750") != NULL, "zone 1's cal_offset_c is emitted exactly");
+    TEST_CHECK(strstr(s_export_body, "\"max_ramp_c_per_hr\":150.00") != NULL,
+              "zone 1's max_ramp_c_per_hr is emitted exactly");
+    TEST_CHECK(strstr(s_export_body, "\"sanity_rate_c_per_min\":2.500") != NULL,
+              "zone 1's sanity_rate_c_per_min is emitted exactly");
+    TEST_CHECK(strstr(s_export_body, "\"control_mode\":3") != NULL, "zone 1's control_mode is emitted exactly");
+    TEST_CHECK(strstr(s_export_body, "\"max_temp_c\":1250.0,\"min_temp_c\":-15.0") != NULL,
+              "zone 1's temp limits are emitted exactly");
+    TEST_CHECK(strstr(s_export_body, "\"heater_window_ms\":60000,\"heater_min_on_ms\":200,\"heater_min_off_ms\":200") != NULL,
+              "zone 1's heater cfg is emitted exactly");
+    /* The three newer fields the task brief specifically calls out. */
+    TEST_CHECK(strstr(s_export_body, "\"fuzzy_strength_pct\":42.25") != NULL,
+              "fuzzy_strength_pct is emitted exactly (Phase 2/4 field)");
+    TEST_CHECK(strstr(s_export_body, "\"coupling_c0\":10.5000") != NULL,
+              "coupling_c0 (indexed key, version 4) is emitted exactly");
+    TEST_CHECK(strstr(s_export_body, "\"coupling_c1\":0.0000") != NULL,
+              "the diagonal cell coupling_c1 (zone 1's own index) is emitted as 0, never omitted");
+    TEST_CHECK(strstr(s_export_body, "\"coupling_c2\":3.2500") != NULL,
+              "coupling_c2 is emitted exactly, DISTINCT from coupling_c0");
+    TEST_CHECK(strstr(s_export_body, "\"settings_source\":2") != NULL,
+              "settings_source is emitted exactly");
+
+    char model_needle[96];
+    if (have_model) {
+        snprintf(model_needle, sizeof(model_needle), "\"model_k_dc\":%.4f,\"model_tau_s\":%.1f,\"model_dead_time_s\":%.1f",
+                 (double)exp_k_dc, (double)exp_tau_s, (double)exp_dead_time_s);
+        TEST_CHECK(strstr(s_export_body, model_needle) != NULL,
+                  "when the model getter answers, export emits its exact values");
+    } else {
+        TEST_CHECK(strstr(s_export_body, "\"model_k_dc\"") == NULL,
+                  "when the model getter cannot answer, export must skip the key entirely, not emit zeros");
+    }
+}
+
+// The round trip: export a known config, then feed the SAME emitted JSON
+// back into backup_import_apply() (real handler, real reader, same as any
+// other test in this file) against a DIFFERENT starting state, and check the
+// result matches what was exported bit for bit on every field the export
+// test above already pinned down -- including the version-4 fields
+// (fuzzy_strength_pct, the indexed coupling_c%u keys, settings_source,
+// control_mode) the task brief calls out by name.
+static void test_export_round_trips_through_import_to_identical_config(void)
+{
+    TEST_SECTION("backup_export_get_handler -> backup_import_apply -- round trip reproduces the exact config");
+    reset_stub_state();
+
+    profile_t p;
+    memset(&p, 0, sizeof(p));
+    strncpy(p.name, "Cone6", PROFILE_NAME_MAX_LEN);
+    p.zone_mask = 0x03;
+    p.segment_count = 1;
+    p.segments[0].target_c = 1200.0f;
+    p.segments[0].ramp_c_per_hr = 100.0f;
+    p.segments[0].dwell_min = 10;
+    test_stub_profiles_set(0, &p);
+
+    zones_config_set_pid(1, 5.0f, 0.6f, 0.02f);
+    zones_config_set_tc_type(1, 4);
+    zones_config_set_name(1, "Mid");
+    zones_config_set_relay_mask(1, 0x02);
+    zones_config_set_thermo_mask(1, 0x02);
+    zones_config_set_ct_mask(1, 0x02);
+    zones_config_set_cal_offset(1, 0.75f);
+    test_stub_zones_set_max_ramp(1, true, 150.0f);
+    zones_config_set_sanity_rate(1, 2.5f);
+    zones_config_set_control_mode(1, 3);
+    zones_config_set_temp_limits(1, 1250.0f, -15.0f);
+    zones_config_set_heater_cfg(1, 60000.0f, 200.0f, 200.0f);
+    zones_config_set_fuzzy_strength_pct(1, 42.25f);
+    zones_config_set_coupling_cell(1, 0, 10.5f);
+    zones_config_set_coupling_cell(1, 2, 3.25f);
+    zones_config_set_settings_source(1, 2);
+
+    esp_err_t err = run_export();
+    TEST_CHECK(err == ESP_OK, "export must succeed");
+    TEST_CHECK(s_export_body != NULL && s_export_len > 0, "export must have produced a body to import back");
+
+    /* Reset to a DIFFERENT state (not all-zero, not the exported values) so
+     * a re-import that silently no-ops would be caught by every field below
+     * still reading the wrong, pre-import value rather than accidentally
+     * matching by coincidence. */
+    reset_stub_state();
+    zones_config_set_pid(1, 1.0f, 1.0f, 1.0f);
+    zones_config_set_settings_source(1, 0);
+    g_total_write_calls = 0;
+
+    char import_err[256];
+    bool ok = backup_import_apply(s_export_body, import_err, sizeof(import_err));
+    TEST_CHECK(ok, "re-importing exactly what was just exported must succeed");
+
+    TEST_CHECK_NEAR(s_writes[1].kp, 5.0, 1e-6, "pid_kp round-trips through export->import");
+    TEST_CHECK_NEAR(s_writes[1].ki, 0.6, 1e-6, "pid_ki round-trips through export->import");
+    TEST_CHECK_NEAR(s_writes[1].kd, 0.02, 1e-6, "pid_kd round-trips through export->import");
+    TEST_CHECK(s_writes[1].tc_type == 4, "tc_type round-trips");
+    TEST_CHECK(strcmp(s_writes[1].name, "Mid") == 0, "name round-trips");
+    TEST_CHECK(s_writes[1].relay_mask == 0x02 && s_writes[1].thermo_mask == 0x02 && s_writes[1].ct_mask == 0x02,
+              "masks round-trip");
+    TEST_CHECK_NEAR(s_writes[1].cal_offset_c, 0.75, 1e-6, "cal_offset_c round-trips");
+    TEST_CHECK_NEAR(s_writes[1].sanity_rate_c_per_min, 2.5, 1e-6, "sanity_rate_c_per_min round-trips");
+    TEST_CHECK(s_writes[1].control_mode == 3, "control_mode round-trips");
+    TEST_CHECK_NEAR(s_writes[1].max_temp_c, 1250.0, 1e-6, "max_temp_c round-trips");
+    TEST_CHECK_NEAR(s_writes[1].min_temp_c, -15.0, 1e-6, "min_temp_c round-trips");
+    TEST_CHECK_NEAR(s_writes[1].heater_window_ms, 60000.0, 1e-6, "heater_window_ms round-trips");
+    TEST_CHECK_NEAR(s_writes[1].fuzzy_strength_pct, 42.25, 1e-6, "fuzzy_strength_pct round-trips");
+    TEST_CHECK_NEAR(s_writes[1].coupling_coeff[0], 10.5, 1e-3, "coupling_c0 round-trips (through the .4f/.4f wire format)");
+    TEST_CHECK_NEAR(s_writes[1].coupling_coeff[2], 3.25, 1e-3, "coupling_c2 round-trips, DISTINCT from coupling_c0");
+    TEST_CHECK(s_writes[1].coupling_coeff[1] == 0.0f, "the diagonal cell round-trips as 0");
+    TEST_CHECK(s_writes[1].settings_source == 2, "settings_source round-trips (NOT the 0 left over from the "
+              "pre-import poison state above, proving import actually ran, not a no-op that left it alone)");
+
+    TEST_CHECK(g_profile_save_calls == 1, "the one exported profile was re-committed");
+    TEST_CHECK(strcmp(g_last_saved_profile.name, "Cone6") == 0, "profile name round-trips");
+    TEST_CHECK(g_last_saved_profile.zone_mask == 0x03, "profile zone_mask round-trips");
+    TEST_CHECK(g_last_saved_profile.segment_count == 1, "profile segment_count round-trips");
+    TEST_CHECK_NEAR(g_last_saved_profile.segments[0].target_c, 1200.0, 1e-6, "profile segment target_c round-trips");
+    TEST_CHECK_NEAR(g_last_saved_profile.segments[0].ramp_c_per_hr, 100.0, 1e-6, "profile segment ramp_c_per_hr round-trips");
+    TEST_CHECK(g_last_saved_profile.segments[0].dwell_min == 10, "profile segment dwell_min round-trips");
+}
+
 void run_test_backup_import(void)
 {
     test_malformed_body_writes_nothing();
@@ -1173,4 +1571,9 @@ void run_test_backup_import(void)
     test_v4_key_wins_over_legacy_pair_for_the_same_cell();
     test_v4_coupling_diagonal_rejected();
     test_v3_settings_source_self_reference_rejected();
+    test_settings_source_cross_entry_cycle_rejected_before_any_commit();
+    test_settings_source_cross_entry_legal_chain_still_imports();
+
+    test_export_emits_expected_keys_and_values_for_a_known_config();
+    test_export_round_trips_through_import_to_identical_config();
 }

@@ -697,6 +697,9 @@ void zones_http_set_hw(kiln_io_t *io_or_null, MAX31856BusClass *thermo_bus_or_nu
 
 static esp_err_t nvs_save(void);
 static bool validate_zones_cfg(const zones_cfg_t *cand, const char **err_reason);
+static bool settings_source_chain_has_cycle(const zone_cfg_t zones[MAX31856_CHANNEL_COUNT], uint8_t start,
+                                            uint8_t thermo_count);
+static void normalize_settings_source_cycles(zones_cfg_t *cfg, const char *partition);
 
 
 /* ---- Historical on-flash layouts (ZONES_CFG_VERSION 1..6) ----------------
@@ -2035,6 +2038,12 @@ static esp_err_t nvs_load_from(const char *partition, zones_cfg_t *out_cfg, bool
     zones_decode_result_t result = decode_zones_blob(raw, len, out_cfg, &reason);
     switch (result) {
     case ZONES_DECODE_OK:
+        /* LOAD path only -- collapse, never reject, a pre-existing stored
+         * cycle. See normalize_settings_source_cycles()'s own comment for
+         * why this runs here and NOT inside decode_zones_blob() (which
+         * zones_config_import_blob() also calls, and that path must reject
+         * instead). */
+        normalize_settings_source_cycles(out_cfg, partition);
         if (out_found) {
             *out_found = true;
         }
@@ -2997,6 +3006,95 @@ bool zones_config_set_coupling_cell(uint8_t zone_index, uint8_t neighbor_index, 
     return nvs_save() == ESP_OK;
 }
 
+/* Bounded chain walk starting at `start`, following settings_source links
+ * through `zones[]` (MAX31856_CHANNEL_COUNT-sized, indexed exactly like
+ * zones_cfg_t::zones). Returns true if the chain revisits a zone already on
+ * it -- a genuine inheritance cycle -- and false if it terminates cleanly at
+ * ZONE_SETTINGS_SOURCE_CUSTOM or at a link landing on or past `thermo_count`.
+ *
+ * `thermo_count` bounds which zones this walk treats as "live": a link
+ * pointing at index >= thermo_count is treated as terminal (no cycle via
+ * that path), the SAME "unused trailing slot" discipline validate_zones_cfg()
+ * and parse_zone_fields()'s own `i >= thermo_count` early return already
+ * apply to those slots elsewhere in this file. This matters because a slot
+ * never explicitly configured reads back as settings_source == 0 (0 is a
+ * REAL, DIFFERENT value here -- see ZONE_SETTINGS_SOURCE_CUSTOM's doc
+ * comment -- never a "not set" sentinel), which for zone 0 itself is
+ * indistinguishable from an explicit self-reference; without this bound, an
+ * unrelated unconfigured trailing zone's raw-zero byte would read as a link
+ * back to zone 0 and could manufacture a false cycle out of two slots
+ * neither caller ever actually linked. Every zone this file's decode/
+ * migration path actually produces sets an unconfigured zone's
+ * settings_source to ZONE_SETTINGS_SOURCE_CUSTOM explicitly (never leaves it
+ * at raw 0 -- see convert_zone_v9()'s own "NEVER 0" comment), so in a
+ * real, decoded config this bound is close to a no-op; it only matters for
+ * the zero-initialized slack past thermo_count.
+ *
+ * Capped at MAX31856_CHANNEL_COUNT hops so this terminates even walking an
+ * already-corrupt stored config (e.g. loaded off flash before this guard
+ * existed) -- there are only MAX31856_CHANNEL_COUNT distinct zones, so any
+ * chain that has not hit CUSTOM, a >=thermo_count link, or a repeat within
+ * that many hops is, by the pigeonhole principle, about to repeat on the
+ * very next hop; treating "hit the cap" as a cycle is exact, not a
+ * conservative over-refusal. Self-reference (start's own link pointing back
+ * at start) is caught on the very first hop, same as every other repeat --
+ * this function does not special-case it, callers that want a distinct
+ * error message for self-reference check that separately, first. */
+static bool settings_source_chain_has_cycle(const zone_cfg_t zones[MAX31856_CHANNEL_COUNT], uint8_t start,
+                                            uint8_t thermo_count)
+{
+    bool visited[MAX31856_CHANNEL_COUNT] = {0};
+    visited[start] = true;
+    uint8_t cur = start;
+    for (uint8_t hop = 0; hop < MAX31856_CHANNEL_COUNT; hop++) {
+        uint8_t src = zones[cur].settings_source;
+        if (src == ZONE_SETTINGS_SOURCE_CUSTOM) {
+            return false;
+        }
+        if (src >= thermo_count) {
+            return false; /* out-of-range, or an unused trailing slot -- not a real link to follow */
+        }
+        if (visited[src]) {
+            return true;
+        }
+        visited[src] = true;
+        cur = src;
+    }
+    return true; /* exceeded the hop cap without terminating -- see comment above */
+}
+
+/* Every-load fixup, LOAD PATH ONLY (nvs_load_from() -- never
+ * zones_config_import_blob(), which shares decode_zones_blob() with the
+ * load path but must REJECT a cycle in pass 1 instead, per this file's own
+ * two-pass-import discipline -- see that function's own comment). A cycle
+ * could only reach flash by loading through firmware that predates the
+ * chain-walk guards above, or by direct NVS tampering -- either way, a
+ * config that was valid before this pass shipped must keep booting, not get
+ * wiped: validate_zones_cfg() rejecting on this path would drive
+ * decode_zones_blob() to the CORRUPT/wipe outcome and destroy an entire
+ * commissioned config over one stale UI-only provenance link (this repo has
+ * lost configs to exactly that shape of overreaction twice already -- see
+ * raise_heater_timing_to_floors()'s neighboring precedent). So: collapse,
+ * don't reject. Any zone whose chain cycles gets its OWN link reset to
+ * ZONE_SETTINGS_SOURCE_CUSTOM (the same "collapse to Custom" resolution
+ * zones_page.html's client-side resolveTerminal() already performs on a
+ * stale page load) and a loud log line naming it, then re-checked --
+ * breaking one link at a time is guaranteed to terminate within
+ * MAX31856_CHANNEL_COUNT passes since each pass strictly shrinks the number
+ * of zones still mid-chain. */
+static void normalize_settings_source_cycles(zones_cfg_t *cfg, const char *partition)
+{
+    uint8_t thermo_count = cfg->thermo_count > MAX31856_CHANNEL_COUNT ? MAX31856_CHANNEL_COUNT : cfg->thermo_count;
+    for (uint8_t i = 0; i < thermo_count; i++) {
+        if (settings_source_chain_has_cycle(cfg->zones, i, thermo_count)) {
+            ESP_LOGW(TAG, "zones_cfg from '%s': zone %u's settings_source chain forms a cycle -- "
+                          "collapsing zone %u to Custom (was %u)",
+                     partition, (unsigned)i, (unsigned)i, (unsigned)cfg->zones[i].settings_source);
+            cfg->zones[i].settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
+        }
+    }
+}
+
 bool zones_config_get_settings_source(uint8_t zone_index, uint8_t *out_settings_source)
 {
     if (!out_settings_source || zone_index >= s_zones.cfg.thermo_count) {
@@ -3010,7 +3108,13 @@ bool zones_config_get_settings_source(uint8_t zone_index, uint8_t *out_settings_
  * z%u_settings_source enforces: either ZONE_SETTINGS_SOURCE_CUSTOM (0xFF) or
  * a real zone index < MAX31856_CHANNEL_COUNT that is NOT zone_index itself
  * (self-reference is the degenerate inheritance cycle, refused here for the
- * identical reason parse_zone_fields() refuses it). */
+ * identical reason parse_zone_fields() refuses it) -- AND, past that, does
+ * not close a longer cycle through any OTHER zone's already-stored link
+ * (settings_source_chain_has_cycle() on a probe copy with this one link
+ * applied). Only this one link changes here, so a cycle can only be newly
+ * created running THROUGH zone_index -- walking the chain starting there,
+ * against every other zone's live stored value, is sufficient; it does not
+ * need to check every zone. */
 bool zones_config_set_settings_source(uint8_t zone_index, uint8_t settings_source)
 {
     if (zone_index >= s_zones.cfg.thermo_count) {
@@ -3022,9 +3126,39 @@ bool zones_config_set_settings_source(uint8_t zone_index, uint8_t settings_sourc
     if (settings_source == zone_index) {
         return false;
     }
+    zone_cfg_t probe[MAX31856_CHANNEL_COUNT];
+    memcpy(probe, s_zones.cfg.zones, sizeof(probe));
+    probe[zone_index].settings_source = settings_source;
+    if (settings_source_chain_has_cycle(probe, zone_index, s_zones.cfg.thermo_count)) {
+        return false;
+    }
     s_zones.cfg.zones[zone_index].settings_source = settings_source;
     s_config_generation++;
     return nvs_save() == ESP_OK;
+}
+
+bool zones_config_settings_source_import_has_cycle(const bool has_override[MAX31856_CHANNEL_COUNT],
+                                                    const uint8_t override_source[MAX31856_CHANNEL_COUNT],
+                                                    uint8_t *out_cycle_zone)
+{
+    zone_cfg_t probe[MAX31856_CHANNEL_COUNT];
+    memcpy(probe, s_zones.cfg.zones, sizeof(probe));
+    for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
+        if (has_override[i]) {
+            probe[i].settings_source = override_source[i];
+        }
+    }
+    uint8_t thermo_count = s_zones.cfg.thermo_count > MAX31856_CHANNEL_COUNT ? MAX31856_CHANNEL_COUNT
+                                                                             : s_zones.cfg.thermo_count;
+    for (uint8_t i = 0; i < thermo_count; i++) {
+        if (settings_source_chain_has_cycle(probe, i, thermo_count)) {
+            if (out_cycle_zone) {
+                *out_cycle_zone = i;
+            }
+            return true;
+        }
+    }
+    return false;
 }
 
 bool zones_config_get_sanity_rate(uint8_t zone_index, float *out_c_per_min)
@@ -3722,6 +3856,30 @@ bool zones_config_import_blob(const void *blob, size_t len, char *reason_out, si
             snprintf(reason_out, reason_cap, "%s", reason);
         }
         return false;
+    }
+
+    /* Pass 1 for settings_source: decode_zones_blob()/validate_zones_cfg()
+     * do not check for an inheritance cycle (they're shared with the LOAD
+     * path, which must collapse rather than reject one -- see
+     * normalize_settings_source_cycles()'s comment). The import path is
+     * different: there is a live client on the other end of this call
+     * (backup_http.c's importer) who can be handed a clear reason, so this
+     * is refused HERE, before the commit point below, matching this file's
+     * own two-pass-import discipline (reject in pass 1, never fail
+     * mid-commit) rather than silently rewriting a hand-edited backup's
+     * cycle to Custom underneath the operator. */
+    {
+    uint8_t import_thermo_count = cand.thermo_count > MAX31856_CHANNEL_COUNT ? MAX31856_CHANNEL_COUNT
+                                                                             : cand.thermo_count;
+    for (uint8_t i = 0; i < import_thermo_count; i++) {
+        if (settings_source_chain_has_cycle(cand.zones, i, import_thermo_count)) {
+            if (reason_out && reason_cap) {
+                snprintf(reason_out, reason_cap,
+                         "zone %u's settings_source forms an inheritance cycle", (unsigned)i);
+            }
+            return false;
+        }
+    }
     }
 
     /* Commit point -- everything above only touched `cand`, a local scratch
@@ -4643,6 +4801,27 @@ static bool parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_count,
                 *err_reason = "zone settings_source cannot point at itself";
                 return false;
             }
+            /* Longer cycle (2-zone, 3-zone, ...): same chain-walk
+             * zones_config_set_settings_source() runs, against the live
+             * s_zones.cfg for every OTHER zone -- this is a single-zone
+             * write (only slot i's link is changing here), so any NEW cycle
+             * must run through zone i; walking from i against everyone
+             * else's live value is sufficient, matching the setter's own
+             * reasoning. A whole-page POST that changes several zones'
+             * links AT ONCE in a way that only cycles once every change is
+             * applied is caught by the zones-POST handler's own re-walk of
+             * every zone's chain across the fully-assembled tmp.zones[],
+             * right after this function's call site's loop and before that
+             * handler's commit point -- see the comment there. */
+            {
+                zone_cfg_t probe[MAX31856_CHANNEL_COUNT];
+                memcpy(probe, s_zones.cfg.zones, sizeof(probe));
+                probe[i].settings_source = src_raw;
+                if (settings_source_chain_has_cycle(probe, i, thermo_count)) {
+                    *err_reason = "zone settings_source would create an inheritance cycle";
+                    return false;
+                }
+            }
             z->settings_source = src_raw;
         } else {
             z->settings_source = current_z->settings_source;
@@ -4881,6 +5060,33 @@ static esp_err_t zones_post_handler(httpd_req_t *req)
         if (!parse_zone_fields(body, i, tmp.thermo_count, tmp.relay_count, tmp.timing_profile_count,
                                &s_zones.cfg.zones[i], &tmp.zones[i], &err_reason)) {
             httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, err_reason);
+            return ESP_OK;
+        }
+    }
+    /* parse_zone_fields()'s own per-zone chain-walk (above, inside that
+     * function) only ever sees ONE zone's link changing at a time -- it
+     * checks the new link for zone i against every OTHER zone's LIVE stored
+     * value, which is correct for that single write but blind to a
+     * whole-page POST that changes SEVERAL zones' links in the same
+     * request, none of which is a cycle by itself against the old live
+     * config, but which together close one (e.g. z0_settings_source=1 and
+     * z1_settings_source=0 in the same POST when neither zone pointed
+     * anywhere before). tmp.zones[] now holds every zone's fully-assembled
+     * NEW link, so re-walk every zone's chain against THAT -- before the
+     * commit point below, so a rejection here still leaves s_zones
+     * untouched, same "never partially apply" discipline the rest of this
+     * handler follows. Bounded by tmp.thermo_count, same "unused trailing
+     * slot" discipline settings_source_chain_has_cycle()'s own comment
+     * explains -- a slot past this submission's own thermo_count was never
+     * rendered, never posted to, and reads back at its zero-initialized
+     * default (0, which is a REAL settings_source value, not a "not set"
+     * marker), so walking through it as if it were a real link would
+     * manufacture a cycle out of two zones neither this request nor any
+     * prior commissioning step ever actually linked. */
+    for (uint8_t i = 0; i < tmp.thermo_count && i < MAX31856_CHANNEL_COUNT; i++) {
+        if (settings_source_chain_has_cycle(tmp.zones, i, tmp.thermo_count)) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                "zone settings_source would create an inheritance cycle");
             return ESP_OK;
         }
     }

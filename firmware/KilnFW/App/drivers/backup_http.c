@@ -1291,6 +1291,37 @@ static bool backup_import_apply(const char *body, char *err_msg, size_t err_cap)
         zone_candidate_count++;
     }
 
+    /* Cross-entry pass 1 for settings_source: each candidate's own
+     * self-reference/range checks above only ever look at THAT entry, same
+     * gap the runtime defect test documents for parse_zone_fields() and
+     * zones_config_set_settings_source() individually -- a hand-edited
+     * backup that gives two (or more) zones links that only close a cycle
+     * TOGETHER (e.g. zone 0's entry sets settings_source=1 and zone 1's
+     * entry sets settings_source=0, neither of which cycles against the
+     * live config alone) would sail through every check above and only
+     * start failing partway through pass 2's commit loop below --
+     * committing zone 0's link and THEN discovering zone 1's closes a
+     * cycle, exactly the half-applied-import failure mode this file's
+     * two-pass split exists to prevent (see this function's own header
+     * comment and the self-reference check above, which cites the identical
+     * reasoning). Checked here, before pass 2 starts, against every
+     * candidate's proposed NEW value at once. */
+    {
+        bool has_override[MAX31856_CHANNEL_COUNT] = {0};
+        uint8_t override_source[MAX31856_CHANNEL_COUNT] = {0};
+        for (size_t i = 0; i < zone_candidate_count; i++) {
+            has_override[zone_candidates[i].index] = true;
+            override_source[zone_candidates[i].index] = zone_candidates[i].settings_source;
+        }
+        uint8_t cycle_zone = 0;
+        if (zones_config_settings_source_import_has_cycle(has_override, override_source, &cycle_zone)) {
+            snprintf(err_msg, err_cap,
+                    "zone %u's settings_source forms an inheritance cycle with this import applied",
+                    (unsigned)cycle_zone);
+            return false;
+        }
+    }
+
     double dsafety;
     bool has_safety_tc = json_field_num(body, "safety_tc_type", &dsafety);
     if (has_safety_tc && (dsafety < 0 || dsafety > 7)) {

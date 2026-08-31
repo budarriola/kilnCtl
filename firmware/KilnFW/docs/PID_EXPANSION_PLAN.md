@@ -1,12 +1,14 @@
 # PID Expansion Plan — control-algorithm choice per zone/firing
 
-> **Status:** Phases 1, 2, 3 and 4 are landed and wired end to end — `pid_fuzzy`
-> is called from `profile_executor.c` every tick a zone runs in PID_FUZZY
-> mode, and the mode is selectable from `zones_page.html`. **Not** landed:
-> Phase 3b (coupling feedforward — nothing persists the matrix and no
-> coupling term exists in the control loop yet) and parts of Phase 5 (the
+> **Status:** Phases 1, 2, 3, 3b and 4 are landed and wired end to end —
+> `pid_fuzzy` is called from `profile_executor.c` every tick a zone runs in
+> PID_FUZZY mode, the mode is selectable from `zones_page.html`, and
+> cross-zone coupling feedforward runs in `zone_feedforward()` with measured
+> coefficients persisted by autotune. **Not** landed: parts of Phase 5 (the
 > zone-settings-inheritance UI has no negative tests yet; backup export of
-> the four new fields has no test). See §4 for exact status per item.
+> the four new fields has no test). See §4 for exact status per item, and
+> `PID_CONTROL.md`'s "Cross-zone coupling feedforward" section for what
+> Phase 3b actually built.
 > Companion to `PID_CONTROL.md` (what is built today) and
 > `COMMISSIONING_UX.md` (the UI-design conventions this plan follows: ask
 > only what cannot be derived, show provenance, never silently overwrite a
@@ -826,73 +828,37 @@ shipping:**
   how it already behaves for bang-bang zones (autotune is always available,
   its acceptance just changes what number a mode later reads).
 
-### Phase 3b — cross-zone coupling feedforward (§2c) — NOT STARTED, schema question open
+### Phase 3b — cross-zone coupling feedforward (§2c) — DONE
 
-Sequenced after, not blocked by, the coupling measurement. The rig can
-produce the data (see Phase 0) — the ordering rule is only that the
-coefficient must be **measured before it is trusted**, never guessed. Build
-the persist path and the tests first; they are what make the measurement
-usable. Do not ship the feedforward contribution enabled by default until a
-real matrix exists for the installation.
+Implemented, reviewed and committed. Full detail — formula, orientation,
+neighbor-qualification gate, deviation clamp/filter, the 2026-08-31 hardware
+panic and its fix, and the open `k_dc` saturation question — lives in
+`PID_CONTROL.md`'s "Cross-zone coupling feedforward" section; this entry is
+the plan-tracking record only.
 
-**Findings from this pass (2026-08-30), verified against the current tree:**
-
-1. **Nothing persists the matrix.** `autotune_engine.c:358-380` fills
-   `s_at.coupling` in RAM only during a step test. `zones_config_set_coupling()`
-   is never called from `autotune_engine.c` — grep confirms its only callers
-   are `zones_http.c` (the setter itself) and `backup_http.c:1359` (backup
-   import). So a measured matrix dies at reboot unless an operator manually
-   re-enters it through backup import; the autotune-to-storage path does not
-   exist yet.
-2. **No coupling term exists in the feedforward.** `zone_feedforward()`
-   (`profile_executor.c:468-482`) computes `hold + climb` only.
-   `coupling_coeff` has zero references anywhere in `profile_executor.c`.
-3. **The schema cannot hold the data as currently shaped.** `zone_cfg_t` has
-   ONE `coupling_coeff` + ONE `coupling_neighbor_zone` per zone. Asymmetry IS
-   representable today — the coefficient is stored per *source* zone, so
-   c(1->0)=10.887 and c(0->1)=5.863 coexist in the measured Phase 0 data — but
-   **multiplicity is not**: zone 1 cannot store c(1->2)=3.332 alongside
-   c(1->0)=10.887 in the current one-neighbor-per-zone shape. Discarding N-2
-   neighbors is a real limitation once a kiln has 3+ zones. Fixing it means a
-   directed NxN set — `float coupling_coeff[MAX31856_CHANNEL_COUNT]` per zone
-   — which changes `sizeof(zone_cfg_t)` and therefore needs the same
-   discipline that just prevented two config-destroying bugs this session
-   (§Phase 2's post-review repairs): a frozen `zone_cfg_v10_t`, a static
-   assert pinning its size, `ZONES_CFG_VERSION` 10->11, a migration function,
-   and possibly a `KILN_CFG_STORE_VERSION` bump if the wider blob no longer
-   fits the existing ceiling. This is the same change class that caused two
-   config-destroying bugs on 2026-08-30 (the v9 struct layout bug and the
-   `ZONES_CONFIG_BLOB_MAX_SIZE` widening bug, both under Phase 2) — treat any
-   future edit here with that history in mind.
-4. **Sign convention question, currently unresolved.** `coupling_coeff` is
-   validated non-negative both at the door (`zones_http.c:2712`,
-   `zones_config_set_coupling()`) and in blob validation (`zones_http.c:3398`).
-   §2c's design is `-c_ij*(T_j - sp_j)` — the *term* carries its own sign via
-   `(T_j - sp_j)`, and `c_ij` itself is meant to be a non-negative magnitude,
-   so the current non-negative validation matches the design as written in
-   §2c and is very likely intentional, not a bug — but this has not been
-   explicitly confirmed against an implementation, since none exists yet.
-   Flag this for whoever writes Phase 3b's feedforward code: confirm the sign
-   lives entirely in `(T_j - sp_j)` before assuming the validator needs
-   loosening.
-
-- [x] Configure zones 1 and 2 and run a step test with cross-zone sampling,
-      to produce the first real coupling matrix (Phase 0) — full 3x3 matrix
-      and RGA recorded above (2026-08-30).
-
-- [ ] Decide and design the schema change in finding 3 above before writing
-      any persistence code — this is the highest-risk step in this phase.
-- [ ] `autotune_engine.c`: persist the per-pair coupling coefficient the step
-      test already measures, instead of only reporting it — this is the
-      measurement path that exists but currently feeds nothing.
-- [ ] Feedforward term gains the additive `-c_ij * (T_j - T_j_setpoint)`
-      contribution for the strongest-coupled neighbor, inside the existing
-      clamp on the summed duty (not a separate clamp).
-- [ ] Host test proving `c_ij = 0` reproduces today's feedforward output
-      bit-for-bit (the negative test for this feature).
-- [ ] Host test for sign correctness: neighbor hot subtracts duty, neighbor
-      cold adds it. A sign error here actively drives zones apart, so this is
-      the one test that must exist before this ships anywhere near hardware.
+- The plan's original `-c_ij*(T_j - sp_j)` (this section, as first written)
+  was dimensionally incomplete — `c_ij` is degC-per-duty, not a dimensionless
+  ratio, so that form silently mixed units. Shipped as
+  `-(coupling_coeff[j] / (k_dc_j * ff_k_dc_own)) * (T_j - T_j_setpoint)`
+  instead — divide by the neighbor's own `k_dc` to get a dimensionless
+  disturbance gain, then by this zone's own `k_dc` to get duty.
+- Schema question (finding 3, prior revision of this section) resolved: the
+  10->11 `ZONES_CFG_VERSION` bump landed, widening `coupling_coeff` to a full
+  directed `float[MAX31856_CHANNEL_COUNT]` row per zone, with the frozen
+  `zone_cfg_v10_t` / static-assert / migration discipline Phase 2's
+  post-review repairs established.
+- Sign convention (finding 4) confirmed as designed: `coupling_coeff` stays
+  non-negative, the term's leading minus sign carries direction.
+- Neighbors only count when genuinely under closed-loop control on the
+  shared setpoint (PID-family mode, not faulted, not authority-blocked) —
+  `active` alone was insufficient, see `PID_CONTROL.md` for the concrete
+  failure this gate fixes.
+- With every `coupling_coeff` at 0 (all three zones today, until a tune is
+  accepted) the output is bit-identical to pre-Phase-3b.
+- Autotune persists measured cross-gains (`zones_config_set_coupling()`),
+  previously RAM-only and lost at reboot.
+- Both host tests from the original checklist (zero-coefficient parity, sign
+  correctness) exist; see Phase 6.
 
 ### Phase 4 — HTTP endpoints — DONE
 
@@ -970,9 +936,8 @@ Following this repo's own "negative-test every check" rule
       the actual production `pid_fuzzy_prepare_gains()` and diffs its output
       against a direct `pid_fuzzy_adjust()` call — confirmed present in the
       tree, not just claimed.
-- [ ] The two §2c coupling tests from Phase 3b (zero-coefficient parity, and
-      sign correctness) — **not started**, blocked on Phase 3b's feedforward
-      code not existing yet (see Phase 3b above).
+- [x] The two §2c coupling tests from Phase 3b (zero-coefficient parity, and
+      sign correctness) — landed alongside Phase 3b's feedforward code.
 - [x] Negative tests exist proving several of the checks above can actually
       fail — e.g. `test_pid.c`'s "sanity: an UN-rescaled Ki cut... really does
       step duty" and `test_closed_loop.c`'s strength_pct=100 divergence check
