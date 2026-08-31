@@ -412,3 +412,16 @@ CONFIG_ESP_TASK_WDT_PANIC=y
 # this project's notes: if a setting matters, it belongs in a tracked file.
 CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 CONFIG_APP_ROLLBACK_ENABLE=y
+
+# LVGL small font, for the home chart's 11 temperature-axis tick labels
+# (UI_PLAN.md 5.3 -- owner asked for all 11 labelled, "smaller font if
+# needed"). Only MONTSERRAT_14 was compiled in, so the first implementation
+# faked a smaller font with lv_obj_set_style_transform_scale(), which scales
+# the already-rendered 14px bitmap and aliases badly at ~60% on a real panel.
+# Enabling the real 10px face costs a few KB of flash and renders cleanly.
+#
+# In sdkconfig.defaults rather than sdkconfig for the reason the rollback
+# block above spells out: sdkconfig is gitignored, so a setting left only
+# there means a clean clone builds a different binary -- here, one whose
+# chart labels silently fall back to the 14px font and overlap.
+CONFIG_LV_FONT_MONTSERRAT_10=y

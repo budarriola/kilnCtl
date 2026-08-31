@@ -57,6 +57,7 @@
 #include "settings.h"
 #include "sim_backend.h"
 #include "gpio_probe.h"
+#include "time_sync.h"
 #include "uart_bridge.h"
 #include "uart_log_bridge.h"
 #include "uart_owner.h"
@@ -573,6 +574,21 @@ void app_main(void)
     if (board_temps_err != ESP_OK) {
         ESP_LOGW(TAG, "board_temps_start failed: %s -- no ESP32-S3 die temp this boot",
                  esp_err_to_name(board_temps_err));
+    }
+
+    // time_sync_start() (SNTP + persisted TZ, time_sync.h) must run before
+    // wifi_prov_start() below: wifi_prov.c's do_ev_got_ip() calls
+    // time_sync_notify_got_ip() the moment station join reaches GOT_IP,
+    // which can happen on the Wi-Fi driver's own event-loop task almost
+    // immediately after wifi_prov_start() returns -- time_sync_start() has
+    // to have already loaded/applied the TZ and prepared (unstarted) the
+    // SNTP client before that race is even possible. Non-fatal like every
+    // other _start() here: a failure here just means no network time this
+    // boot, same "board still boots" convention as unit_pref_start() below.
+    esp_err_t time_sync_err = time_sync_start();
+    if (time_sync_err != ESP_OK) {
+        ESP_LOGW(TAG, "time_sync_start failed: %s -- no network time this boot",
+                 esp_err_to_name(time_sync_err));
     }
 
     // --- Wi-Fi (station "home" mode / AP mode, see wifi_prov.h) -------------
