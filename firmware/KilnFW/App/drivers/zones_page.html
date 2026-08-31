@@ -144,7 +144,7 @@
   table.coupling td.rga-warn { color: var(--warn); }
   table.coupling td.rga-bad { color: var(--bad); }
   p.verdict-ok { color: var(--ok); }
-  p.verdict-warn { color: var(--warn); }
+  p.verdict-warn, div.verdict-warn { color: var(--warn); }
   p.verdict-bad { color: var(--bad); }
   /* 2026-08-22: root cause of the "input.offsettle overlaps button#saveBtn"
      bug a headless-Chromium sweep found at 1280px (measured: 69x35px of
@@ -301,8 +301,9 @@ latched. Interruptible with Abort; every exit path leaves every relay off.</p>
 <h3>Step test (start here)</h3>
 <p>Runs an open-loop step test on one zone: holds heat off to settle, then
 applies a fixed duty and records the response until it looks settled or 4
-hours pass. Fits a plant model from the response and proposes Kp/Ki/Kd
-(SIMC rule) -- nothing is written to the zone above until you click Accept.
+hours pass. Fits a plant model from the response and proposes Kp/Ki/Kd using
+the tuning rule picked below -- nothing is written to the zone above until
+you click Accept.
 Owns that zone's relay(s) while running; refuses to start while a firing
 profile is running, and a firing profile refuses to start while this is
 running. Guard suite is fully armed during the test. This is a real heat
@@ -311,6 +312,12 @@ test, not a simulation -- only run it with the kiln empty and attended.</p>
 <select id="atZone"></select>
 <label for="atDuty">Step duty (0-1, e.g. 0.5)</label>
 <input type="number" id="atDuty" min="0.05" max="1" step="0.05" value="0.5">
+<label for="atStepRule">Tuning rule</label>
+<select id="atStepRule">
+  <option value="simc" selected>SIMC (conservative -- recommended)</option>
+  <option value="cohen-coon">Cohen-Coon (aggressive -- faster disturbance rejection, less tolerant of model error)</option>
+</select>
+<p id="atStepRuleDesc" class="hint"></p>
 <button id="atStartBtn" type="button">Start step test</button>
 
 <h3>Relay-feedback test (Åström–Hägglund) -- read this first</h3>
@@ -364,6 +371,12 @@ across a band twice this wide)</label>
      result still came from the board and a disconnect still means it can't
      be refreshed/re-verified right now. -->
 <p id="atStatus" class="hint kc-live-value">Idle.</p>
+<!-- Refusal is a separate element, not folded into #atStatus's line, so it
+     can use textContent (no escaping to get wrong) and a distinct
+     verdict-bad style regardless of which branch below built the status
+     line. Hidden/empty whenever refusal is absent or "ok" -- a tune that
+     never refused should show nothing extra here. -->
+<p id="atRefusal" class="verdict-bad" style="display:none;"></p>
 
 <h3>Cross-zone coupling matrix</h3>
 <p class="hint">Filled in one row at a time: when zone i's autotune step test
@@ -449,6 +462,52 @@ function tcTypeSelectHtml(className, selected) {
   return '<select class="' + className + '">' + tcTypeOptionsHtml(selected) + '</select>';
 }
 
+// PID_EXPANSION_PLAN.md 3.2 -- operator-facing copy, verbatim, one entry per
+// control_mode value. Shown as a hint under the mode select rather than
+// packed into the <option> text itself (matching this page's existing
+// pattern of short option labels plus a longer .hint paragraph below).
+var MODE_DESC = [
+  'Never turns this zone’s heater on. Use for a zone with nothing loaded this firing.',
+  'Turns the heater fully on below your target and fully off above it, like a household oven. ' +
+    'Simple and reliable, but the temperature will wobble a few degrees around the target.',
+  'Smoothly adjusts how hard the heater runs instead of just on/off, for a steadier climb and ' +
+    'fewer overshoots. Needs tuning numbers for this kiln and load — use the Autotune button ' +
+    'below, or enter numbers from a previous firing with a similar load.',
+  'Same smooth control as classic PID, but nudges its own settings up or down while firing, so ' +
+    'one set of tuning numbers works across the whole temperature range instead of only near ' +
+    'where it was measured. Best for long firings that climb a long way from where Autotune ran, ' +
+    'or a zone whose elements have aged since it was last tuned. Still needs an initial Autotune ' +
+    'first — this mode adjusts around that starting point, it does not replace it.'
+];
+
+// PID_EXPANSION_PLAN.md line 660 -- tuning-rule choice for the STEP test
+// path (separate from #atRule, which picks the RELAY test's TL/ZN rule and
+// is refused by the step path). Keyed by <option value>, same pattern as
+// MODE_DESC above.
+var STEP_RULE_DESC = {
+  simc: 'The conservative default. Robust on high-dead-time plants like a kiln -- prefer it ' +
+    'unless you have a specific reason not to.',
+  'cohen-coon': 'More aggressive than SIMC: faster disturbance rejection, but less tolerant of ' +
+    'model error. Not the right default for a kiln -- pick it deliberately, not by habit.'
+};
+
+// PID_EXPANSION_PLAN.md 3.3's "read-only 3x3 rule-strength summary" -- source
+// of truth is pid_fuzzy.h's own header-comment table; this mirrors it, not
+// the numeric membership-function constants in pid_fuzzy.c. Kept as one
+// shared constant string (built once) since the table is a firmware-wide
+// constant, not per-zone data.
+var FUZZY_RULE_TABLE_HTML =
+  '<label>How the fuzzy layer nudges each gain (read-only)</label>' +
+  '<div class="table-scroll"><table class="coupling fuzzyrules">' +
+  '<tr><th>error \\ error rate</th><th>falling</th><th>steady</th><th>rising</th></tr>' +
+  '<tr><th>far positive (running cold)</th><td>Kp&darr; Ki&uarr; Kd&darr;</td>' +
+  '<td>Kp&uarr; Ki= Kd=</td><td>Kp&uarr; Ki&darr; Kd&uarr;</td></tr>' +
+  '<tr><th>near target</th><td>Kp&darr; Ki&darr; Kd&uarr;</td>' +
+  '<td>Kp&darr; Ki&uarr; Kd&darr;</td><td>Kp&uarr; Ki&darr; Kd&uarr;</td></tr>' +
+  '<tr><th>far negative (running hot)</th><td>Kp&uarr; Ki&darr; Kd&uarr;</td>' +
+  '<td>Kp&uarr; Ki= Kd=</td><td>Kp&darr; Ki&uarr; Kd&darr;</td></tr>' +
+  '</table></div>';
+
 function zoneBlock(z, i, relayCount, thermoCount) {
   var div = document.createElement('div');
   div.className = 'zone';
@@ -469,7 +528,7 @@ function zoneBlock(z, i, relayCount, thermoCount) {
   for (var tch = 0; tch < thermoCount; tch++) {
     var tchecked = (thermoMask & (1 << tch)) ? ' checked' : '';
     thermoHtml += '<label><input type="checkbox" class="thermobit" data-bit="' + tch + '"' + tchecked + '> ' +
-                  'Channel ' + (tch + 1) + '</label>';
+                  'Channel ' + tch + '</label>';
   }
   /* 2026-08-27, zones_http.c's ZONES_CFG_VERSION 5->6: which of the safety
      processor's fixed 3 current-sense channels feed this zone's live-current
@@ -483,13 +542,14 @@ function zoneBlock(z, i, relayCount, thermoCount) {
   for (var cti = 0; cti < ZONE_CT_CHANNEL_COUNT; cti++) {
     var ctchecked = (ctMask & (1 << cti)) ? ' checked' : '';
     ctHtml += '<label><input type="checkbox" class="ctbit" data-bit="' + cti + '"' + ctchecked + '> ' +
-              'CT ' + (cti + 1) + '<span class="ctlive" data-ch="' + cti + '"></span></label>';
+              'CT ' + cti + '<span class="ctlive" data-ch="' + cti + '"></span></label>';
   }
   var mode = z.control_mode || 0;
   var modeHtml = '<select class="mode">' +
     '<option value="0"' + (mode === 0 ? ' selected' : '') + '>Off (never commands heat)</option>' +
     '<option value="1"' + (mode === 1 ? ' selected' : '') + '>Bang-bang (on/off with hysteresis)</option>' +
-    '<option value="2"' + (mode === 2 ? ' selected' : '') + '>PID (time-proportioned)</option>' +
+    '<option value="2"' + (mode === 2 ? ' selected' : '') + '>PID — classic (time-proportioned)</option>' +
+    '<option value="3"' + (mode === 3 ? ' selected' : '') + '>PID — fuzzy-adjusted</option>' +
     '</select>';
   /* Read-only on purpose: these three come out of an autotune step test, not
      out of an operator's head, so there is nothing sensible to type here.
@@ -513,36 +573,48 @@ function zoneBlock(z, i, relayCount, thermoCount) {
      whole-page submit sets it to zero, so without this a save here would
      quietly reassign the zone to profile 0. */
   div.dataset.timingProfile = z.timing_profile || 0;
+  /* coupling_coeff/coupling_neighbor_zone: same echo-it-back reasoning as
+   * modelK/Tau/Dead above -- these are MEASURED (by autotune, PID_EXPANSION_
+   * PLAN.md 2c), not inherited from another zone's settings (3.5's "still not
+   * covered" list is about wiring; coupling is closer kin to the model, not
+   * to Kp/Ki/Kd), and not editable here, so a whole-page save must carry them
+   * back unchanged or an unrelated edit silently erases a measured value. */
+  div.dataset.couplingCoeff = z.coupling_coeff || 0;
+  div.dataset.couplingNeighbor = (z.coupling_neighbor_zone != null) ? z.coupling_neighbor_zone : 0;
   var modelHtml = '<label>Identified plant model</label><p class="hint">' +
     (haveModel
       ? 'K = ' + k.toFixed(1) + ' &deg;C/duty, tau = ' + tau.toFixed(0) + ' s, dead time = ' +
         dead.toFixed(0) + ' s'
       : 'not identified yet -- run Autotune below and accept the result') +
     '</p>';
-  div.innerHTML =
-    '<h2>Zone ' + i + '</h2>' +
-    '<label>Name</label><input type="text" class="name" maxlength="15" value="' + window.kcEscapeHtml(z.name || '') + '">' +
-    '<label>Relays in this zone</label><div class="relaybits">' + relayHtml + '</div>' +
-    '<label>Thermocouples feeding this zone</label><div class="thermobits">' + thermoHtml + '</div>' +
-    '<p class="hint">Checking more than one channel averages their valid readings into this ' +
-    'zone\'s control temperature. Leaving all unchecked disables control for this zone, the ' +
-    'same as an unplugged/faulted thermocouple.</p>' +
-    '<label>Current-sense probes for this zone</label><div class="thermobits">' + ctHtml + '</div>' +
-    '<p class="hint">Display only -- the safety processor watches every current-sense channel ' +
-    'regardless of this mapping. A probe may be checked on more than one zone if one clamp is ' +
-    'shared across zones on the same supply line.</p>' +
-    /* Dynamic per-zone caution line, kept blank/hidden until
-     * updateThermoWarnings() (below) fills it in on load and on every
-     * checkbox change -- NOT a save-blocking validation: zones_http.c's own
-     * POST handler allows an explicit zero thermo_mask (it is the documented
-     * "deliberately clearing a zone's thermocouple" case, see
-     * parse_zone_fields()'s comment) and does not forbid the same channel
-     * feeding two zones either (thermo_combine.c reads a mask per zone with
-     * no notion of exclusivity). Both are legal states this page must not
-     * silently hide -- an operator who fat-fingered a checkbox should see it
-     * before saving, not discover it later as a zone that mysteriously never
-     * reaches temperature. */
-    '<p class="thermowarn hint" style="display:none"></p>' +
+  var fuzzyStrength = (z.fuzzy_strength_pct != null) ? z.fuzzy_strength_pct : 30;
+  var pidGainsLabel = (mode === 3) ? 'Base gains (from Autotune)' : 'Kp / Ki / Kd';
+  var pidPanelHtml =
+    '<div class="pidPanel">' +
+      '<label class="pidgainslabel">' + pidGainsLabel + '</label>' +
+      '<div class="row2">' +
+        '<div><label>Kp</label><input type="number" step="0.01" class="kp" value="' + z.pid_kp + '"></div>' +
+        '<div><label>Ki</label><input type="number" step="0.01" class="ki" value="' + z.pid_ki + '"></div>' +
+        '<div><label>Kd</label><input type="number" step="0.01" class="kd" value="' + z.pid_kd + '"></div>' +
+      '</div>' +
+      modelHtml +
+      '<div class="fuzzyPanel">' +
+        FUZZY_RULE_TABLE_HTML +
+        '<label>Adjustment strength (0-100%) -- how far the fuzzy layer may move Kp/Ki/Kd ' +
+        'away from the base gains above; 0 = fuzzy layer has no effect (must reproduce the ' +
+        'base gains exactly)</label>' +
+        '<input type="number" class="fuzzystrength" min="0" max="100" step="1" value="' + fuzzyStrength + '">' +
+      '</div>' +
+    '</div>';
+  /* PID_EXPANSION_PLAN.md 3.5 -- the "thermocouple type downward" stack
+   * (tc_type, control mode, cal offset, Kp/Ki/Kd/fuzzy strength, ramp, min
+   * rise rate, max/min temp, timing/guards) that zones 1..N-1 can inherit
+   * from another enabled zone instead of retyping. Built as one HTML blob so
+   * it can be rendered either directly (zone 0, always its own settings) or
+   * inside a zone's .customStack (any zone in "Custom" mode) -- the two
+   * cases must be byte-identical or a zone's "custom" values could visibly
+   * differ depending on how it got there. */
+  var settingsStackHtml =
     /* 2026-08-21, TODO.md owner-report item 1/2 -- the owner's actual
        complaint: "in the thermocouples settings page i dont see anywhere i
        can select my thermocouple type." This is CONFIG, not a live sensor
@@ -552,16 +624,15 @@ function zoneBlock(z, i, relayCount, thermoCount) {
        ' + i + '" -- see zone_cfg_t::tc_type's comment in zones_http.c: a
        zone can combine several channels via the checkboxes above, but each
        physical channel still has exactly one real thermocouple wired to it
-       with exactly one type. */
+       with exactly one type. When this zone's settings are inherited
+       (3.5), the inherited tc_type is written through to every channel in
+       THIS zone's thermo_mask on save -- see saveBtn's channel-type pass. */
     '<label>Thermocouple type wired to channel ' + i + '</label>' +
     tcTypeSelectHtml('tctype', z.tc_type) +
     '<label>Control mode</label>' + modeHtml +
+    '<p class="modehint hint">' + (MODE_DESC[mode] || MODE_DESC[0]) + '</p>' +
     '<label>Calibration offset (&deg;C)</label><input type="number" step="0.1" class="cal" value="' + z.cal_offset_c + '">' +
-    '<div class="row2">' +
-      '<div><label>Kp</label><input type="number" step="0.01" class="kp" value="' + z.pid_kp + '"></div>' +
-      '<div><label>Ki</label><input type="number" step="0.01" class="ki" value="' + z.pid_ki + '"></div>' +
-      '<div><label>Kd</label><input type="number" step="0.01" class="kd" value="' + z.pid_kd + '"></div>' +
-    '</div>' +
+    pidPanelHtml +
     '<label>Max ramp rate (&deg;C/hr) -- user-entered feasibility ceiling for the Profiles page</label>' +
     '<input type="number" step="1" class="ramp" value="' + z.max_ramp_c_per_hr + '">' +
     '<label>Minimum rise rate (&deg;C/min, 0 = firmware default 0.5) -- the dead-element check. ' +
@@ -635,8 +706,53 @@ function zoneBlock(z, i, relayCount, thermoCount) {
         '<div><label>Frozen-sensor window (s)</label>' +
         '<input type="number" step="10" class="frozenwindow" value="' + (z.guard_frozen_window_s || 0) + '"></div>' +
       '</div>' +
-    '</details>' +
-    modelHtml;
+    '</details>';
+
+  var bodyHtml =
+    '<h2>Zone ' + i + '</h2>' +
+    '<label>Name</label><input type="text" class="name" maxlength="15" value="' + window.kcEscapeHtml(z.name || '') + '">' +
+    '<label>Relays in this zone</label><div class="relaybits">' + relayHtml + '</div>' +
+    '<label>Thermocouples feeding this zone</label><div class="thermobits">' + thermoHtml + '</div>' +
+    '<p class="hint">Checking more than one channel averages their valid readings into this ' +
+    'zone\'s control temperature. Leaving all unchecked disables control for this zone, the ' +
+    'same as an unplugged/faulted thermocouple.</p>' +
+    '<label>Current-sense probes for this zone</label><div class="thermobits">' + ctHtml + '</div>' +
+    '<p class="hint">Display only -- the safety processor watches every current-sense channel ' +
+    'regardless of this mapping. A probe may be checked on more than one zone if one clamp is ' +
+    'shared across zones on the same supply line.</p>' +
+    /* Dynamic per-zone caution line, kept blank/hidden until
+     * updateThermoWarnings() (below) fills it in on load and on every
+     * checkbox change -- NOT a save-blocking validation: zones_http.c's own
+     * POST handler allows an explicit zero thermo_mask (it is the documented
+     * "deliberately clearing a zone's thermocouple" case, see
+     * parse_zone_fields()'s comment) and does not forbid the same channel
+     * feeding two zones either (thermo_combine.c reads a mask per zone with
+     * no notion of exclusivity). Both are legal states this page must not
+     * silently hide -- an operator who fat-fingered a checkbox should see it
+     * before saving, not discover it later as a zone that mysteriously never
+     * reaches temperature. */
+    '<p class="thermowarn hint" style="display:none"></p>';
+
+  if (i === 0) {
+    /* PID_EXPANSION_PLAN.md 3.5: "Only the first zone shows the settings
+     * stack expanded." Zone 0 is always the potential source of "same as",
+     * never itself a follower -- no dropdown, its .customStack is always
+     * visible, and it always saves as settings_source=CUSTOM (see saveBtn). */
+    bodyHtml += '<div class="customStack">' + settingsStackHtml + '</div>';
+  } else {
+    /* Same-as-another-zone dropdown + read-only inherited summary + the
+     * (initially hidden) full stack pre-filled with what it was inheriting,
+     * per 3.5. updateInheritance() (below, called once all zone divs exist)
+     * fills in the option list, the selected value and the summary text --
+     * it needs every zone's div in the DOM first, which zoneBlock() alone
+     * cannot guarantee while still building this one. */
+    bodyHtml +=
+      '<label>Thermocouple type + settings</label>' +
+      '<select class="settingssrc"></select>' +
+      '<div class="inheritedSummary hint"></div>' +
+      '<div class="customStack" style="display:none">' + settingsStackHtml + '</div>';
+  }
+  div.innerHTML = bodyHtml;
   return div;
 }
 
@@ -694,9 +810,232 @@ function updateThermoWarnings() {
     }
   });
 }
+// PID_EXPANSION_PLAN.md 3.3: swap the per-mode tuning panel (no panel for
+// Off/Bang-bang, Kp/Ki/Kd+model for classic PID, the same plus the rule
+// table and Adjustment strength for fuzzy) by toggling visibility on the
+// .customStack the mode select lives in -- zone 0's is always that stack;
+// any other zone's is only relevant while it is in "Custom" mode, but is
+// kept in sync regardless so it's already correct if the operator switches
+// to Custom later.
+function updateZonePanel(div) {
+  if (!div) return;
+  var stack = div.querySelector('.customStack');
+  var modeSel = stack && stack.querySelector('.mode');
+  if (!modeSel) return;
+  var mode = parseInt(modeSel.value, 10);
+  var pidPanel = stack.querySelector('.pidPanel');
+  var fuzzyPanel = stack.querySelector('.fuzzyPanel');
+  var label = stack.querySelector('.pidgainslabel');
+  var modehint = stack.querySelector('.modehint');
+  if (pidPanel) pidPanel.style.display = (mode === 2 || mode === 3) ? '' : 'none';
+  if (fuzzyPanel) fuzzyPanel.style.display = (mode === 3) ? '' : 'none';
+  if (label) label.textContent = (mode === 3) ? 'Base gains (from Autotune)' : 'Kp / Ki / Kd';
+  if (modehint) modehint.textContent = MODE_DESC[mode] || MODE_DESC[0];
+}
+
+function zoneDiv(k) {
+  return document.querySelector('#zones .zone[data-index="' + k + '"]');
+}
+
+// PID_EXPANSION_PLAN.md 3.5: dropdown options, "same as zone N" for every
+// OTHER enabled zone (not just zone 0), Custom last -- matching the order
+// shown in the plan's own worked example.
+function settingsSourceOptionsHtml(i, thermoCount, zones) {
+  var html = '';
+  for (var k = 0; k < thermoCount; k++) {
+    if (k === i) continue;
+    var nm = (zones[k] && zones[k].name) ? ' (' + window.kcEscapeHtml(zones[k].name) + ')' : '';
+    html += '<option value="' + k + '">Same as zone ' + k + nm + '</option>';
+  }
+  html += '<option value="255">Custom settings for this zone</option>';
+  return html;
+}
+
+// The select's own <option> list only spans 0..thermoCount-1 plus CUSTOM, so
+// a stored settings_source pointing past thermoCount (a zone disabled since
+// this was set) has no matching <option> -- parked on data-stored-invalid so
+// resolveTerminal() below can still see the true stored value and correctly
+// collapse it to Custom, instead of the <select> silently normalizing it to
+// whatever option happens to be first.
+function settingsSourceOf(k) {
+  if (k === 0) return 255; /* zone 0 has no dropdown -- always the source, never a follower */
+  var div = zoneDiv(k);
+  var sel = div && div.querySelector('.settingssrc');
+  if (!sel) return 255;
+  if (sel.dataset.storedInvalid !== undefined) return parseInt(sel.dataset.storedInvalid, 10);
+  var v = parseInt(sel.value, 10);
+  return isNaN(v) ? 255 : v;
+}
+
+// Walks a zone's settings_source chain to the zone whose OWN values are
+// authoritative (255/CUSTOM, or zone 0). thermoCount bounds a cycle can only
+// occur within, so a plain visited-set is enough. `forced` is true when the
+// chain had to be broken because it pointed at a disabled zone, itself, or a
+// cycle -- PID_EXPANSION_PLAN.md 3.5's "collapse to custom rather than
+// resolve to nothing".
+function resolveTerminal(k, thermoCount) {
+  var visited = {};
+  var cur = k;
+  while (true) {
+    if (visited[cur]) return { terminal: cur, forced: true };
+    visited[cur] = true;
+    if (cur === 0) return { terminal: 0, forced: false };
+    var src = settingsSourceOf(cur);
+    if (src === 255 || src === cur || src < 0 || src >= thermoCount) {
+      return { terminal: cur, forced: (src !== 255) };
+    }
+    cur = src;
+  }
+}
+
+var MODE_NAMES = ['Off', 'Bang-bang', 'PID — classic', 'PID — fuzzy-adjusted'];
+
+function renderInheritedSummaryText(div, terminalIdx, directSrcIdx) {
+  var tdiv = zoneDiv(terminalIdx);
+  var stack = tdiv && tdiv.querySelector('.customStack');
+  var summary = div.querySelector('.inheritedSummary');
+  if (!stack) { summary.textContent = ''; return; }
+  var modeVal = parseInt(stack.querySelector('.mode').value, 10);
+  var kp = stack.querySelector('.kp').value, ki = stack.querySelector('.ki').value, kd = stack.querySelector('.kd').value;
+  var tct = parseInt(stack.querySelector('.tctype').value, 10);
+  var tcName = '?';
+  TC_TYPES.forEach(function (t) { if (t.code === tct) tcName = t.name; });
+  var chainNote = (terminalIdx !== directSrcIdx) ? (' (zone ' + directSrcIdx + ' itself follows zone ' + terminalIdx + ')') : '';
+  summary.textContent = 'Inherited from zone ' + directSrcIdx + chainNote + ': ' + tcName + ', ' +
+    (MODE_NAMES[modeVal] || modeVal) + ', Kp=' + kp + ' Ki=' + ki + ' Kd=' + kd +
+    '. Read-only here -- edit it on zone ' + terminalIdx + ', or switch this zone to Custom below.';
+}
+
+// Shows/hides the read-only summary vs the editable .customStack for zone k
+// (k>=1) based on its .settingssrc select, resolving the chain and
+// collapsing an invalid one to Custom in place (PID_EXPANSION_PLAN.md 3.5).
+function updateInheritance(k) {
+  var thermoCount = parseInt(document.getElementById('thermoCount').value, 10) || 0;
+  var div = zoneDiv(k);
+  if (!div) return;
+  var sel = div.querySelector('.settingssrc');
+  if (!sel) return;
+  var stack = div.querySelector('.customStack');
+  var summary = div.querySelector('.inheritedSummary');
+  var srcVal = settingsSourceOf(k);
+  if (srcVal === 255) {
+    stack.style.display = '';
+    summary.style.display = 'none';
+    summary.textContent = '';
+    updateZonePanel(div);
+    return false;
+  }
+  var result = resolveTerminal(k, thermoCount);
+  if (result.forced) {
+    /* Collapse to Custom in place: fix the select, drop the stale
+       out-of-range marker, and say why so this isn't a silent change. */
+    delete sel.dataset.storedInvalid;
+    sel.value = '255';
+    stack.style.display = '';
+    summary.style.display = '';
+    summary.className = 'inheritedSummary hint verdict-warn';
+    summary.textContent = 'This zone\'s settings source pointed at a disabled zone or formed a cycle -- ' +
+      'collapsed to Custom. Review the values below before saving.';
+    updateZonePanel(div);
+    return true;
+  }
+  stack.style.display = 'none';
+  summary.style.display = '';
+  summary.className = 'inheritedSummary hint';
+  renderInheritedSummaryText(div, result.terminal, srcVal);
+  updateZonePanel(zoneDiv(result.terminal));
+  /* Remembered so a later switch to Custom (see the settingssrc change
+     handler below) knows what this zone was actually showing a moment ago
+     and can pre-fill from it, per PID_EXPANSION_PLAN.md 3.5 ("pre-filled
+     with the values it was inheriting"), rather than from whatever stale
+     numbers sat in the hidden .customStack since render time. */
+  sel.dataset.lastTerminal = String(result.terminal);
+  return false;
+}
+
+// Copies every field's value from one zone's .customStack into another's,
+// matching on the field's own class name (kp, ki, tctype, ...) -- the two
+// stacks are byte-identical markup (see settingsStackHtml's own comment), so
+// a plain per-class copy is exact and needs no per-field enumeration.
+function copyCustomStackValues(srcStack, dstStack) {
+  if (!srcStack || !dstStack) return;
+  srcStack.querySelectorAll('input, select').forEach(function (srcEl) {
+    var cls = srcEl.className.split(' ')[0];
+    if (!cls) return;
+    var dstEl = dstStack.querySelector('.' + cls);
+    if (dstEl) dstEl.value = srcEl.value;
+  });
+}
+
+// Two passes when any zone collapses in place: a forced collapse (disabled
+// zone / cycle) rewrites that zone's OWN select, which can flip an earlier
+// zone's chain from "forced" to valid (e.g. zone1->zone2->[disabled zone3]:
+// zone2 collapsing to Custom makes zone1->zone2 a perfectly good link, but
+// the first pass already resolved zone1 against zone2's pre-collapse state).
+// Re-running once after any collapse re-resolves every zone against the
+// now-settled selects; collapsing to Custom is terminal (a zone can't need
+// to re-collapse on the second pass), so one extra pass is enough -- no
+// unbounded recursion.
+function refreshAllInheritance() {
+  var thermoCount = parseInt(document.getElementById('thermoCount').value, 10) || 0;
+  var anyCollapsed = false;
+  for (var k = 1; k < thermoCount; k++) {
+    if (updateInheritance(k)) anyCollapsed = true;
+  }
+  if (anyCollapsed) {
+    for (var k2 = 1; k2 < thermoCount; k2++) updateInheritance(k2);
+  }
+}
+
+// Populates every non-zone-0 zone's "same as / custom" dropdown from its
+// stored settings_source (default: same as zone 0, per 3.5) and resolves
+// every zone's initial displayed state. Needs every zone div already in the
+// DOM (option lists reference other zones' names), so this runs once after
+// renderZones()'s loop, not from inside zoneBlock().
+function initInheritanceControls() {
+  var thermoCount = parseInt(document.getElementById('thermoCount').value, 10) || 0;
+  for (var k = 1; k < thermoCount; k++) {
+    var div = zoneDiv(k);
+    var sel = div && div.querySelector('.settingssrc');
+    if (!sel) continue;
+    var z = current.zones[k] || {};
+    var stored = (z.settings_source != null) ? z.settings_source : 0;
+    sel.innerHTML = settingsSourceOptionsHtml(k, thermoCount, current.zones || []);
+    var optionExists = false;
+    Array.prototype.forEach.call(sel.options, function (o) { if (parseInt(o.value, 10) === stored) optionExists = true; });
+    if (optionExists) {
+      delete sel.dataset.storedInvalid;
+      sel.value = String(stored);
+    } else {
+      sel.dataset.storedInvalid = stored;
+    }
+  }
+  refreshAllInheritance();
+  updateZonePanel(zoneDiv(0));
+}
+
 document.getElementById('zones').addEventListener('change', function (e) {
   if (e.target.classList.contains('thermobit')) updateThermoWarnings();
   if (e.target.classList.contains('relaybit')) renderRelayNames();
+  if (e.target.classList.contains('mode')) updateZonePanel(e.target.closest('.zone'));
+  if (e.target.classList.contains('settingssrc') && e.target.value === '255') {
+    /* PID_EXPANSION_PLAN.md 3.5: switching to Custom must start from what
+       this zone was inheriting, not from the pre-edit numbers that have sat
+       untouched in its hidden .customStack since render time. lastTerminal
+       was captured the last time this zone was shown as inherited (just
+       before this very change), so it still names the right source. */
+    var zdiv = e.target.closest('.zone');
+    var fromTerminal = e.target.dataset.lastTerminal;
+    if (zdiv && fromTerminal !== undefined) {
+      copyCustomStackValues(zoneDiv(parseInt(fromTerminal, 10)).querySelector('.customStack'), zdiv.querySelector('.customStack'));
+    }
+  }
+  if (e.target.classList.contains('settingssrc') || e.target.classList.contains('mode') ||
+      e.target.classList.contains('kp') || e.target.classList.contains('ki') ||
+      e.target.classList.contains('kd') || e.target.classList.contains('tctype') ||
+      e.target.classList.contains('cal')) {
+    refreshAllInheritance();
+  }
 });
 
 /* Union of every zone card's currently-CHECKED relay checkboxes -- bit r set
@@ -778,7 +1117,9 @@ function renderZones() {
      * a zone that has never been explicitly configured -- "zone i reads
      * channel i" -- so a freshly grown thermoCount starts a new zone off
      * reading a real channel instead of nothing. */
-    var z = current.zones[i] || { name: '', relay_mask: 0, thermo_mask: (1 << i), cal_offset_c: 0, pid_kp: 0, pid_ki: 0, pid_kd: 0, max_ramp_c_per_hr: 0, sanity_rate_c_per_min: 0, control_mode: 0, max_temp_c: 0, min_temp_c: -20, heater_window_ms: 0, heater_min_on_ms: 0, heater_min_off_ms: 0, cross_zone_max_delta_c: 0, model_k_dc: 0, model_tau_s: 0, model_dead_time_s: 0, guard_wrong_dir_window_s: 0, guard_wrong_dir_rate_c_per_min: 0, guard_off_settle_s: 0, guard_runaway_rate_c_per_min: 0, guard_runaway_margin_c: 0, guard_drift_period_s: 0, guard_sensor_fault_debounce_ticks: 0, guard_frozen_window_s: 0, timing_profile: 0, tc_type: 3 /* Type K, matching MAX31856.c's/the NVS migration's default */ };
+    var z = current.zones[i] || { name: '', relay_mask: 0, thermo_mask: (1 << i), cal_offset_c: 0, pid_kp: 0, pid_ki: 0, pid_kd: 0, max_ramp_c_per_hr: 0, sanity_rate_c_per_min: 0, control_mode: 0, max_temp_c: 0, min_temp_c: -20, heater_window_ms: 0, heater_min_on_ms: 0, heater_min_off_ms: 0, cross_zone_max_delta_c: 0, model_k_dc: 0, model_tau_s: 0, model_dead_time_s: 0, guard_wrong_dir_window_s: 0, guard_wrong_dir_rate_c_per_min: 0, guard_off_settle_s: 0, guard_runaway_rate_c_per_min: 0, guard_runaway_margin_c: 0, guard_drift_period_s: 0, guard_sensor_fault_debounce_ticks: 0, guard_frozen_window_s: 0, timing_profile: 0, tc_type: 3 /* Type K, matching MAX31856.c's/the NVS migration's default */,
+      fuzzy_strength_pct: 30, coupling_coeff: 0, coupling_neighbor_zone: 0,
+      settings_source: (i === 0 ? 255 : 0) /* zones_http.c's ZONE_SETTINGS_SOURCE_CUSTOM; PID_EXPANSION_PLAN.md 3.5's "default same as zone 0" */ };
     el.appendChild(zoneBlock(z, i, relayCount, thermoCount));
   }
   updateThermoWarnings();
@@ -786,6 +1127,9 @@ function renderZones() {
      relaybit checkboxes) above actually exist in the DOM -- see
      clientOwnedRelayMask(). */
   renderRelayNames();
+  /* Same reasoning as renderRelayNames() above: settings-source resolution
+     needs every zone div already in the DOM. */
+  initInheritanceControls();
 }
 
 /* M12: data.safety_tc_type read-only -- assigned on the safety commissioning
@@ -822,7 +1166,7 @@ function renderCtWarnings(ctWarnMask, zones) {
   var lines = [];
   for (var i = 0; i < (zones ? zones.length : 0); i++) {
     if (ctWarnMask & (1 << i)) {
-      var name = (zones[i] && zones[i].name) ? zones[i].name : ('Zone ' + (i + 1));
+      var name = (zones[i] && zones[i].name) ? zones[i].name : ('Zone ' + i);
       lines.push(window.kcEscapeHtml(name));
     }
   }
@@ -961,8 +1305,19 @@ document.getElementById('saveBtn').addEventListener('click', function () {
                  'max_simultaneous_relays=' + maxSimultaneous,
                  'continue_on_zone_trip=' + continueOnZoneTrip];
   var blocks = document.getElementById('zones').querySelectorAll('.zone');
+  /* PID_EXPANSION_PLAN.md 3.5: the firmware stores one flat config per zone
+     and knows nothing about "same as" -- so a zone in inherited mode must
+     have its settings resolved into ITS OWN fields here, re-resolving
+     through whatever it currently points at (which may itself have changed
+     this same edit) rather than trusting anything computed at load time.
+     zoneInfo collects each zone's thermo_mask and resolved terminal zone so
+     the per-channel tc_type pass below (a separate addressing space --
+     zones_http.c's zone_cfg_t::tc_type is per CHANNEL, not per zone) can run
+     after every zone's own fields are queued. */
+  var dependents = [];
+  var zoneInfo = [];
   blocks.forEach(function (div) {
-    var i = div.dataset.index;
+    var i = parseInt(div.dataset.index, 10);
     var mask = 0;
     div.querySelectorAll('.relaybit').forEach(function (cb) {
       if (cb.checked) mask |= (1 << parseInt(cb.dataset.bit, 10));
@@ -975,41 +1330,108 @@ document.getElementById('saveBtn').addEventListener('click', function () {
     div.querySelectorAll('.ctbit').forEach(function (cb) {
       if (cb.checked) ctMask |= (1 << parseInt(cb.dataset.bit, 10));
     });
+    var srcVal = settingsSourceOf(i);
+    var terminal = resolveTerminal(i, thermoCount).terminal;
+    var tdiv = zoneDiv(terminal);
+    var tstack = tdiv.querySelector('.customStack');
+    if (srcVal !== 255) dependents.push(i);
+
+    /* Wiring -- always this zone's own, never inherited (3.5's "still not
+       covered" list: name/relay/thermo/ct masks). */
     params.push('z' + i + '_name=' + encodeURIComponent(div.querySelector('.name').value));
     params.push('z' + i + '_relay_mask=' + mask);
     params.push('z' + i + '_thermo_mask=' + thermoMask);
     params.push('z' + i + '_ct_mask=' + ctMask);
-    params.push('z' + i + '_tctype=' + div.querySelector('.tctype').value);
-    params.push('z' + i + '_cal=' + div.querySelector('.cal').value);
-    params.push('z' + i + '_kp=' + div.querySelector('.kp').value);
-    params.push('z' + i + '_ki=' + div.querySelector('.ki').value);
-    params.push('z' + i + '_kd=' + div.querySelector('.kd').value);
-    params.push('z' + i + '_ramp=' + div.querySelector('.ramp').value);
-    params.push('z' + i + '_sanity=' + div.querySelector('.sanity').value);
-    params.push('z' + i + '_mode=' + div.querySelector('.mode').value);
-    params.push('z' + i + '_maxtemp=' + div.querySelector('.maxtemp').value);
-    params.push('z' + i + '_mintemp=' + div.querySelector('.mintemp').value);
-    params.push('z' + i + '_window=' + div.querySelector('.window').value);
-    params.push('z' + i + '_minon=' + div.querySelector('.minon').value);
-    params.push('z' + i + '_minoff=' + div.querySelector('.minoff').value);
-    params.push('z' + i + '_xzone=' + div.querySelector('.xzone').value);
-    params.push('z' + i + '_wrongdirwindow=' + div.querySelector('.wdwindow').value);
-    params.push('z' + i + '_wrongdirrate=' + div.querySelector('.wdrate').value);
-    params.push('z' + i + '_offsettle=' + div.querySelector('.offsettle').value);
-    params.push('z' + i + '_runawayrate=' + div.querySelector('.runrate').value);
-    params.push('z' + i + '_runawaymargin=' + div.querySelector('.runmargin').value);
-    params.push('z' + i + '_driftperiod=' + div.querySelector('.driftperiod').value);
-    params.push('z' + i + '_debounce=' + div.querySelector('.debounce').value);
-    params.push('z' + i + '_frozenwindow=' + div.querySelector('.frozenwindow').value);
-    /* Echoed back exactly as loaded. There is no input for these -- this is
-       purely to stop a whole-page save from clearing a stored model, since
-       the server treats an omitted field as "set it to zero" and zero is
-       the "no model identified" encoding. */
+
+    /* The rest of the "thermocouple type downward" stack -- resolved from
+       the terminal zone's (own or inherited-from) .customStack inputs.
+       tc_type is deliberately excluded here; see the channel-type pass
+       below. */
+    params.push('z' + i + '_cal=' + tstack.querySelector('.cal').value);
+    params.push('z' + i + '_kp=' + tstack.querySelector('.kp').value);
+    params.push('z' + i + '_ki=' + tstack.querySelector('.ki').value);
+    params.push('z' + i + '_kd=' + tstack.querySelector('.kd').value);
+    params.push('z' + i + '_ramp=' + tstack.querySelector('.ramp').value);
+    params.push('z' + i + '_sanity=' + tstack.querySelector('.sanity').value);
+    params.push('z' + i + '_mode=' + tstack.querySelector('.mode').value);
+    params.push('z' + i + '_maxtemp=' + tstack.querySelector('.maxtemp').value);
+    params.push('z' + i + '_mintemp=' + tstack.querySelector('.mintemp').value);
+    params.push('z' + i + '_window=' + tstack.querySelector('.window').value);
+    params.push('z' + i + '_minon=' + tstack.querySelector('.minon').value);
+    params.push('z' + i + '_minoff=' + tstack.querySelector('.minoff').value);
+    params.push('z' + i + '_xzone=' + tstack.querySelector('.xzone').value);
+    params.push('z' + i + '_wrongdirwindow=' + tstack.querySelector('.wdwindow').value);
+    params.push('z' + i + '_wrongdirrate=' + tstack.querySelector('.wdrate').value);
+    params.push('z' + i + '_offsettle=' + tstack.querySelector('.offsettle').value);
+    params.push('z' + i + '_runawayrate=' + tstack.querySelector('.runrate').value);
+    params.push('z' + i + '_runawaymargin=' + tstack.querySelector('.runmargin').value);
+    params.push('z' + i + '_driftperiod=' + tstack.querySelector('.driftperiod').value);
+    params.push('z' + i + '_debounce=' + tstack.querySelector('.debounce').value);
+    params.push('z' + i + '_frozenwindow=' + tstack.querySelector('.frozenwindow').value);
+    params.push('z' + i + '_fuzzy_strength=' + tstack.querySelector('.fuzzystrength').value);
+    /* Timing profile: no input on this page either way (see zoneBlock's own
+       comment on div.dataset.timingProfile) -- resolved from the terminal
+       zone's OWN stored assignment, same as every other inherited field. */
+    params.push('z' + i + '_timingprofile=' + tdiv.dataset.timingProfile);
+
+    /* Echoed back exactly as loaded -- MEASURED per zone (autotune's plant
+       model, PID_EXPANSION_PLAN.md 2c's coupling coefficient), never part of
+       the inherited stack, so always this zone's own, not the terminal's. */
     params.push('z' + i + '_k=' + div.dataset.modelK);
     params.push('z' + i + '_tau=' + div.dataset.modelTau);
     params.push('z' + i + '_deadtime=' + div.dataset.modelDead);
-    params.push('z' + i + '_timingprofile=' + div.dataset.timingProfile);
+    params.push('z' + i + '_coupling_coeff=' + div.dataset.couplingCoeff);
+    params.push('z' + i + '_coupling_neighbor=' + div.dataset.couplingNeighbor);
+    /* settings_source itself: this zone's OWN dropdown choice (255/CUSTOM
+       for zone 0, which has no dropdown) -- always sent explicitly, per
+       zones_http.c's comment that an omission here must NOT be read as
+       "keep the current value" the way the fields above are. */
+    params.push('z' + i + '_settings_source=' + srcVal);
+
+    zoneInfo.push({ i: i, thermoMask: thermoMask, terminal: terminal });
   });
+
+  /* zone_cfg_t::tc_type is per CHANNEL (zones_http.c), not per zone -- a
+     zone that reads more than one channel via thermo_mask, or a channel fed
+     by more than one zone, means this can't be resolved inside the loop
+     above. One pass, zone index ascending, deciding per zone HOW its select
+     addresses storage (PID_EXPANSION_PLAN.md 3.5, corrected 2026-08-30):
+     - A zone that is its OWN terminal (Custom, or zone 0) is the identity
+       case the select has always been -- "Thermocouple type wired to
+       channel i" -- so it writes straight to channel i, never fanned out
+       over thermo_mask. Fanning it out here is exactly the bug 3.5 warns
+       about: whenever thermo_mask != (1<<i) it silently re-types some OTHER
+       channel, and a mask of 0 would drop the edit entirely.
+     - A zone that is INHERITING a different zone's settings has no type of
+       its own to write -- "copy the terminal's type onto the channels this
+       zone actually reads" is the fan-out, and is the only case it's the
+       right thing to do.
+     A later zone sharing a channel with an earlier one wins
+     (PID_EXPANSION_PLAN.md 3.5's documented "last-write-wins is acceptable,
+     but the page must show the resulting type on both zones" -- true after
+     the reload below, since both then read the one shared storage slot).
+     Channels no zone currently claims are echoed back unchanged so an edit
+     elsewhere can't clear them. */
+  var channelType = {};
+  zoneInfo.forEach(function (info) {
+    var tstack = zoneDiv(info.terminal).querySelector('.customStack');
+    var typeVal = tstack.querySelector('.tctype').value;
+    if (info.terminal === info.i) {
+      channelType[info.i] = typeVal;
+    } else {
+      for (var c = 0; c < thermoCount; c++) {
+        if (info.thermoMask & (1 << c)) channelType[c] = typeVal;
+      }
+    }
+  });
+  for (var c2 = 0; c2 < thermoCount; c2++) {
+    if (channelType[c2] !== undefined) {
+      params.push('z' + c2 + '_tctype=' + channelType[c2]);
+    } else {
+      var storedType = (current.zones[c2] && current.zones[c2].tc_type != null) ? current.zones[c2].tc_type : 3;
+      params.push('z' + c2 + '_tctype=' + storedType);
+    }
+  }
   /* Echo every timing profile back unchanged. This page shows none of their
      fields, but /api/zones is a whole-page submit -- without this, saving a
      relay checkbox here would omit tp0_name/tp0_progressduty/etc and the
@@ -1047,7 +1469,14 @@ document.getElementById('saveBtn').addEventListener('click', function () {
     method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: params.join('&'),
   }).then(function (r) {
     if (!r.ok) return r.text().then(function (t) { throw new Error(t); });
-    msg.textContent = 'Saved.';
+    /* 3.5: an inheriting zone was just re-resolved from its source above,
+       whether or not that source's own values changed this edit -- say so,
+       since "saved" alone would not tell an operator that zones they didn't
+       touch were rewritten too. */
+    msg.textContent = 'Saved.' + (dependents.length
+      ? ' Also updated zone' + (dependents.length > 1 ? 's' : '') + ' ' + dependents.join(', ') +
+        ' from ' + (dependents.length > 1 ? 'their' : 'its') + ' settings source.'
+      : '');
     loadCurrent();
   }).catch(function (e) {
     msg.textContent = 'Save failed: ' + e.message;
@@ -1081,6 +1510,22 @@ function pollAutotune() {
   fetch('/api/autotune').then(function (r) { return r.json(); }).then(function (s) {
     var el = document.getElementById('atStatus');
     var acceptBtn = document.getElementById('atAcceptBtn');
+    var refusalEl = document.getElementById('atRefusal');
+    /* refusal is "ok" on a healthy tune; absent entirely on older firmware
+       that predates this field. Either case means nothing to show. A present
+       non-"ok" refusal means the fit ran but produced nothing usable --
+       refusal_reason is the human-readable text, but it can itself be an
+       empty string, so fall back to the enum name rather than print nothing
+       (or the literal word "undefined"). */
+    var refused = !!(s.refusal && s.refusal !== 'ok');
+    if (refused) {
+      var reasonTxt = (s.refusal_reason && s.refusal_reason.length > 0) ? s.refusal_reason : s.refusal;
+      refusalEl.textContent = 'Tune refused (' + reasonTxt + ') -- the proposed gains below are not usable.';
+      refusalEl.style.display = '';
+    } else {
+      refusalEl.textContent = '';
+      refusalEl.style.display = 'none';
+    }
     var line = (AT_STATE_NAMES[s.state] || s.state) + ' zone ' + s.zone + ', ' + s.elapsed_s + 's elapsed, ' +
                s.sample_count + ' samples' + (s.actual_valid ? ', ' + window.kcUnit.fmt(s.actual_c) + ' now' : '') + '.';
     /* Cycle progress is the only honest progress bar a relay run has: the
@@ -1108,7 +1553,7 @@ function pollAutotune() {
               '. No plant model measured -- accepting writes gains only. ' +
               '<a href="/api/autotune/trace.csv">Download trace CSV</a>';
       el.innerHTML = line;
-      acceptBtn.disabled = false;
+      acceptBtn.disabled = refused;
       return;
     }
     if (s.state === 'done' && s.model_valid) {
@@ -1121,7 +1566,7 @@ function pollAutotune() {
     } else {
       el.textContent = line;
     }
-    acceptBtn.disabled = !(s.state === 'done' && s.model_valid);
+    acceptBtn.disabled = !(s.state === 'done' && s.model_valid) || refused;
   }).catch(function () {});
 }
 setInterval(pollAutotune, 3000);
@@ -1297,13 +1742,21 @@ function pollCouplingMatrix() {
 setInterval(pollCouplingMatrix, 5000);
 pollCouplingMatrix();
 
+function updateStepRuleDesc() {
+  var rule = document.getElementById('atStepRule').value;
+  document.getElementById('atStepRuleDesc').textContent = STEP_RULE_DESC[rule] || '';
+}
+document.getElementById('atStepRule').addEventListener('change', updateStepRuleDesc);
+updateStepRuleDesc();
+
 document.getElementById('atStartBtn').addEventListener('click', function () {
   var zone = document.getElementById('atZone').value;
   var duty = document.getElementById('atDuty').value;
+  var rule = document.getElementById('atStepRule').value;
   if (zone === '') { document.getElementById('atStatus').textContent = 'No zone configured/selected.'; return; }
   fetch('/api/autotune/start', {
     method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: 'zone=' + zone + '&step_duty=' + duty,
+    body: 'zone=' + zone + '&step_duty=' + duty + '&rule=' + encodeURIComponent(rule),
   }).then(function (r) { return r.json(); }).then(function (j) {
     if (!j.ok) document.getElementById('atStatus').textContent = 'Start failed: ' + j.error;
     else pollAutotune();
