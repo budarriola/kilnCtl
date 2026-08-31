@@ -940,6 +940,140 @@ def test_validate_profile_payload_rejects_dwell_out_of_range():
 
 
 # ---------------------------------------------------------------------------
+# Zone commissioning pre-flight (check_zones_commissioned et al.)
+# ---------------------------------------------------------------------------
+
+#: A profile matching the real bug report: 120 C/hr ramps up to 70 C.
+_TRACKING_SEGMENTS = [
+    {"target_c": 50.0, "ramp_c_per_hr": 120.0, "dwell_min": 8},
+    {"target_c": 70.0, "ramp_c_per_hr": 120.0, "dwell_min": 8},
+]
+
+#: Zone 0 from the bug report: fully commissioned.
+_ZONE0_COMMISSIONED = {"index": 0, "max_ramp_c_per_hr": 900.0, "max_temp_c": 80.0,
+                        "cross_zone_max_delta_c": 50.0}
+#: Zones 1 and 2 from the bug report: autotune wrote gains but the guard-limit
+#: fields were left at their post-flash 0.0.
+_ZONE_UNCOMMISSIONED = {"index": 1, "max_ramp_c_per_hr": 0.0, "max_temp_c": 0.0,
+                         "cross_zone_max_delta_c": 0.0}
+
+
+def test_profile_commissioning_requirements_takes_steepest_ramp_and_highest_target():
+    reqs = pv.profile_commissioning_requirements([0, 1], _TRACKING_SEGMENTS)
+    assert reqs[0].steepest_ramp_c_per_hr == 120.0
+    assert reqs[0].highest_target_c == 70.0
+    # identical requirement handed to every zone in the profile
+    assert reqs[1].steepest_ramp_c_per_hr == 120.0
+    assert reqs[1].highest_target_c == 70.0
+
+
+def test_profile_commissioning_requirements_ignores_dwell_only_segments():
+    """NEGATIVE-TEST-ADJACENT: a segment with ramp_c_per_hr 0/absent (a pure
+    dwell) must not count toward the ramp requirement, or a profile that is
+    ENTIRELY dwells would wrongly demand a nonzero ceiling."""
+    dwell_only = [{"target_c": 40.0, "ramp_c_per_hr": 0.0, "dwell_min": 5}]
+    reqs = pv.profile_commissioning_requirements([0], dwell_only)
+    assert reqs[0].steepest_ramp_c_per_hr == 0.0
+    assert reqs[0].highest_target_c == 40.0
+
+
+def test_check_zone_commissioned_accepts_a_properly_commissioned_zone():
+    req = pv.profile_commissioning_requirements([0], _TRACKING_SEGMENTS)[0]
+    assert pv.check_zone_commissioned(req, _ZONE0_COMMISSIONED) is None
+
+
+def test_check_zone_commissioned_rejects_zero_ceiling_zone():
+    """NEGATIVE TEST. Reproduces the actual bug: a zone whose
+    max_ramp_c_per_hr/max_temp_c/cross_zone_max_delta_c are all still 0.0
+    (never commissioned) must fail, and the message must name the zone and
+    the field."""
+    req = pv.profile_commissioning_requirements([1], _TRACKING_SEGMENTS)[1]
+    reason = pv.check_zone_commissioned(req, _ZONE_UNCOMMISSIONED)
+    assert reason is not None
+    assert "zone 1" in reason
+    assert "max_ramp_c_per_hr" in reason
+    # restore: the same zone commissioned like zone 0 passes
+    fixed = dict(_ZONE_UNCOMMISSIONED, max_ramp_c_per_hr=900.0, max_temp_c=80.0,
+                 cross_zone_max_delta_c=50.0)
+    assert pv.check_zone_commissioned(req, fixed) is None
+
+
+def test_check_zone_commissioned_rejects_ceiling_too_low_for_this_profile_distinctly():
+    """NEGATIVE TEST. A zone that IS commissioned (nonzero fields) but whose
+    ramp ceiling is merely too low for THIS profile's steepest segment must
+    fail with a message distinct from the "never configured" (0.0) case --
+    the operator needs to know whether to commission the zone at all, or
+    just raise an existing number."""
+    req = pv.profile_commissioning_requirements([1], _TRACKING_SEGMENTS)[1]
+    too_low = {"index": 1, "max_ramp_c_per_hr": 60.0, "max_temp_c": 80.0,
+               "cross_zone_max_delta_c": 50.0}
+    reason = pv.check_zone_commissioned(req, too_low)
+    assert reason is not None
+    assert "below this profile" in reason
+    assert "never" not in reason  # not the uncommissioned-zone message
+    # restore: raising the ceiling to cover the profile passes
+    fixed = dict(too_low, max_ramp_c_per_hr=120.0)
+    assert pv.check_zone_commissioned(req, fixed) is None
+
+
+def test_check_zone_commissioned_rejects_zero_max_temp_c_even_with_ramp_ok():
+    """NEGATIVE TEST. max_temp_c==0.0 disables guard 5 entirely
+    (thermal_guard.c:106) -- a zone with a fine ramp ceiling but max_temp_c
+    still at 0 must still fail, distinctly, naming max_temp_c."""
+    req = pv.profile_commissioning_requirements([1], _TRACKING_SEGMENTS)[1]
+    zero_temp = {"index": 1, "max_ramp_c_per_hr": 900.0, "max_temp_c": 0.0,
+                 "cross_zone_max_delta_c": 50.0}
+    reason = pv.check_zone_commissioned(req, zero_temp)
+    assert reason is not None
+    assert "max_temp_c" in reason
+    fixed = dict(zero_temp, max_temp_c=80.0)
+    assert pv.check_zone_commissioned(req, fixed) is None
+
+
+def test_check_zone_commissioned_rejects_zero_cross_zone_delta_even_with_others_ok():
+    """NEGATIVE TEST. cross_zone_max_delta_c==0.0 disables guard 8 entirely
+    (thermal_guard.c:331) -- the opposite convention from max_ramp_c_per_hr.
+    A zone with ramp+temp both fine but cross_zone_max_delta_c still at 0
+    must fail, naming that field specifically, proving the check does not
+    mistakenly treat 0 there as "maximally strict and therefore fine"."""
+    req = pv.profile_commissioning_requirements([1], _TRACKING_SEGMENTS)[1]
+    zero_xzone = {"index": 1, "max_ramp_c_per_hr": 900.0, "max_temp_c": 80.0,
+                  "cross_zone_max_delta_c": 0.0}
+    reason = pv.check_zone_commissioned(req, zero_xzone)
+    assert reason is not None
+    assert "cross_zone_max_delta_c" in reason
+    fixed = dict(zero_xzone, cross_zone_max_delta_c=50.0)
+    assert pv.check_zone_commissioned(req, fixed) is None
+
+
+def test_check_zones_commissioned_raises_naming_every_failing_zone():
+    """NEGATIVE TEST. zone_configs matching the actual bug report (zone 0
+    fine, zones 1 and 2 uncommissioned) must raise, and the exception's
+    ``failures`` must name both zone 1 and zone 2."""
+    zone_configs = {
+        0: _ZONE0_COMMISSIONED,
+        1: dict(_ZONE_UNCOMMISSIONED, index=1),
+        2: dict(_ZONE_UNCOMMISSIONED, index=2),
+    }
+    with pytest.raises(pv.ZoneNotCommissionedError) as excinfo:
+        pv.check_zones_commissioned([0, 1, 2], zone_configs, _TRACKING_SEGMENTS)
+    failures = excinfo.value.failures
+    assert any("zone 1" in f for f in failures)
+    assert any("zone 2" in f for f in failures)
+    assert not any("zone 0" in f for f in failures)
+    # restore: all three commissioned like zone 0 passes cleanly
+    all_ok = {i: dict(_ZONE0_COMMISSIONED, index=i) for i in (0, 1, 2)}
+    pv.check_zones_commissioned([0, 1, 2], all_ok, _TRACKING_SEGMENTS)
+
+
+def test_check_zones_commissioned_reports_missing_zone_config():
+    """NEGATIVE TEST. A zone the harness intends to drive but that GET
+    /api/zones never reported at all must fail loudly (not KeyError)."""
+    with pytest.raises(pv.ZoneNotCommissionedError, match="zone 2"):
+        pv.check_zones_commissioned([0, 2], {0: _ZONE0_COMMISSIONED}, _TRACKING_SEGMENTS)
+
+
+# ---------------------------------------------------------------------------
 # stage_profile_tracking wiring: pre-flight rejection + PID-mode enforcement
 # ---------------------------------------------------------------------------
 
@@ -986,3 +1120,103 @@ def test_dry_run_profile_tracking_aborts_locally_when_zone_not_in_pid_mode(harne
     zone1_check = next(c for c in tracking["checks"] if c["name"] == "zone1.control_mode_pid")
     assert zone1_check["passed"] is False
     assert zone1_check["actual"] == 0
+
+
+def test_dry_run_profile_tracking_aborts_locally_when_zone_not_commissioned(harness, tmp_path, monkeypatch):
+    """NEGATIVE TEST reproducing the actual bug report: zone 1's guard-limit
+    fields are still at their post-flash 0.0. Confirm the stage refuses to
+    start (never reaches put_profile) and reports the requirement -- not a
+    bare 400 discovered after the cooldown gate already ran."""
+    put_profile_called = []
+
+    def _fake_get_zones(self):
+        return {"zones": [
+            {"index": 0, "max_ramp_c_per_hr": 900.0, "max_temp_c": 80.0, "cross_zone_max_delta_c": 50.0},
+            {"index": 1, "max_ramp_c_per_hr": 0.0, "max_temp_c": 0.0, "cross_zone_max_delta_c": 0.0},
+            {"index": 2, "max_ramp_c_per_hr": 0.0, "max_temp_c": 0.0, "cross_zone_max_delta_c": 0.0},
+        ]}
+
+    def _fake_put_profile(self, slot, name, zone_mask, segments):
+        put_profile_called.append(True)
+
+    monkeypatch.setattr(harness.FakeSession, "get_zones", _fake_get_zones)
+    monkeypatch.setattr(harness.FakeSession, "put_profile", _fake_put_profile)
+
+    rc = harness.main([
+        "--dry-run", "--report-dir", str(tmp_path), "--skip-cooldown", "--skip-tune",
+        "--skip-matrix", "--skip-backup"])
+    assert rc != 0
+    assert not put_profile_called, "must not start the profile against uncommissioned zones"
+    jsons = sorted(tmp_path.glob("pid_validation_*.json"), key=lambda p: p.stat().st_mtime)
+    doc = json.loads(jsons[-1].read_text(encoding="utf-8"))
+    tracking = next(s for s in doc["stages"] if s["name"] == "profile_tracking")
+    assert tracking["passed"] is False
+    assert "zone 1" in tracking["error"] and "zone 2" in tracking["error"]
+    assert "max_ramp_c_per_hr" in tracking["error"]
+
+
+def test_dry_run_profile_tracking_commission_zones_flag_writes_only_deficient_fields(
+        harness, tmp_path, monkeypatch):
+    """--commission-zones is opt-in: with it passed, a zone missing ramp/temp
+    coverage gets exactly those fields written (never cross_zone_max_delta_c,
+    which has no safe default) and the run proceeds."""
+    written = []
+
+    def _fake_get_zones(self):
+        zones = getattr(self, "_zones", None)
+        if zones is None:
+            zones = {
+                0: {"index": 0, "max_ramp_c_per_hr": 900.0, "max_temp_c": 80.0,
+                    "cross_zone_max_delta_c": 50.0},
+                1: {"index": 1, "max_ramp_c_per_hr": 0.0, "max_temp_c": 0.0,
+                    "cross_zone_max_delta_c": 50.0},
+            }
+            self._zones = zones
+        return {"zones": list(zones.values())}
+
+    def _fake_commission_zones(self, current, preset):
+        for entry in preset["zones"]:
+            written.append(dict(entry))
+            self._zones[entry["index"]].update(entry)
+
+    monkeypatch.setattr(harness.FakeSession, "get_zones", _fake_get_zones)
+    monkeypatch.setattr(harness.FakeSession, "commission_zones", _fake_commission_zones)
+
+    rc = harness.main([
+        "--dry-run", "--report-dir", str(tmp_path), "--skip-cooldown", "--skip-tune",
+        "--skip-matrix", "--skip-backup", "--zones", "0,1", "--commission-zones"])
+    assert rc == 0
+    assert len(written) == 1
+    assert written[0]["index"] == 1
+    assert "cross_zone_max_delta_c" not in written[0], \
+        "must never auto-write cross_zone_max_delta_c, even under --commission-zones"
+    assert written[0]["max_ramp_c_per_hr"] == 120.0
+    assert written[0]["max_temp_c"] == 70.0
+
+
+def test_dry_run_profile_tracking_commission_zones_flag_still_refuses_missing_cross_zone(
+        harness, tmp_path, monkeypatch):
+    """NEGATIVE TEST: even with --commission-zones, a zone whose ONLY
+    deficiency is cross_zone_max_delta_c==0 must still abort the stage --
+    that field is never auto-written, so re-checking after the (partial)
+    commission must still fail."""
+    def _fake_get_zones(self):
+        return {"zones": [
+            {"index": 0, "max_ramp_c_per_hr": 900.0, "max_temp_c": 80.0, "cross_zone_max_delta_c": 0.0},
+        ]}
+
+    def _fake_commission_zones(self, current, preset):
+        pytest.fail("must not be called when there is nothing safe to auto-write")
+
+    monkeypatch.setattr(harness.FakeSession, "get_zones", _fake_get_zones)
+    monkeypatch.setattr(harness.FakeSession, "commission_zones", _fake_commission_zones)
+
+    rc = harness.main([
+        "--dry-run", "--report-dir", str(tmp_path), "--skip-cooldown", "--skip-tune",
+        "--skip-matrix", "--skip-backup", "--zones", "0", "--commission-zones"])
+    assert rc != 0
+    jsons = sorted(tmp_path.glob("pid_validation_*.json"), key=lambda p: p.stat().st_mtime)
+    doc = json.loads(jsons[-1].read_text(encoding="utf-8"))
+    tracking = next(s for s in doc["stages"] if s["name"] == "profile_tracking")
+    assert tracking["passed"] is False
+    assert "cross_zone_max_delta_c" in tracking["error"]

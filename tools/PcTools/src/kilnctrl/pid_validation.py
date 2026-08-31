@@ -181,6 +181,161 @@ def validate_profile_payload(slot: int, name: str, zone_mask: int, segments: "li
 
 
 # ---------------------------------------------------------------------------
+# Zone commissioning pre-flight.
+#
+# WHY. Stage 5 (profile tracking) discovered, via a bare 400 AFTER the
+# cooldown gate had already run, that zones 1 and 2 were never commissioned:
+# autotune had written gains and a fitted model to them, but the separate
+# guard-limit fields (max_ramp_c_per_hr, max_temp_c, cross_zone_max_delta_c)
+# stayed at their post-flash 0.0. This section checks those fields against
+# the profile the harness is about to run, BEFORE it posts anything, so an
+# uncommissioned zone fails locally with a message naming the zone, the
+# field, the required value and the actual value -- not a 400 an hour into
+# a heating run.
+#
+# The three fields do NOT share one "0 means X" convention -- verified by
+# reading the firmware, not assumed:
+#
+#   * max_ramp_c_per_hr: 0.0 means "never configured", and the firmware
+#     treats that as a ceiling of zero -- every nonzero ramp rate is
+#     rejected. profiles_http.c:1573-1580 (the comment at the /api/profile
+#     PUT handler), enforced at profiles_http.c:870-876 and :1603-1610
+#     ("segment %u: ramp rate ... exceeds zone %u's ... ceiling" -- the
+#     exact 400 that started this). zones_http.c:344 carries the same "0 =
+#     never configured" convention on the struct field itself.
+#
+#   * max_temp_c: 0.0 means "not set, no ceiling" and DISABLES guard 5
+#     (the over-temperature trip) entirely -- thermal_guard.c:106,
+#     `cfg->max_temp_c > 0.0f && in->measurement_c >= cfg->max_temp_c`. A
+#     zone with max_temp_c == 0.0 is not "unlimited but still checked", the
+#     check itself does not run. zones_http.c:347 documents the field the
+#     same way ("guard 5; 0 = not set, no ceiling").
+#
+#   * cross_zone_max_delta_c: 0.0 DISABLES guard 8 (cross-zone plausibility)
+#     entirely -- thermal_guard.c:331, `cfg->cross_zone_max_delta_c > 0.0f
+#     && in->peer_c && in->peer_count > 0`. zones_http.c:381-389 spells out
+#     the asymmetry explicitly in its own doc comment: "0 = 'not
+#     configured', which DISABLES the guard rather than substituting a
+#     default -- the opposite convention to sanity_rate_c_per_min above".
+#
+# So max_ramp_c_per_hr at 0 is the MOST restrictive state (nothing is
+# feasible), while max_temp_c and cross_zone_max_delta_c at 0 are the LEAST
+# restrictive state (the guard is off). Getting this backwards for
+# cross_zone_max_delta_c in particular -- treating 0 as "maximally strict"
+# instead of "interlock disabled" -- would silently run a multi-zone
+# profile with guard 8 switched off while looking commissioned. This
+# module's check therefore requires all three fields to be explicitly
+# nonzero (and, where meaningful, to actually cover the profile) before
+# calling a zone commissioned; it never infers "0 is fine because it's
+# permissive" for any of them.
+#
+# This module NEVER writes these fields -- see the harness's
+# --commission-zones flag (scripts/pid_validation_harness.py) for the only,
+# explicitly opt-in, path that does.
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ZoneCommissioningRequirement:
+    """What a profile demands of one zone: the steepest ramp rate and
+    highest target temperature among ITS OWN segments -- computed once from
+    the profile and applied identically to every zone the profile drives,
+    since ramp-lock holds every zone's setpoint to the profile's shared
+    schedule regardless of which zone is slowest."""
+    zone: int
+    steepest_ramp_c_per_hr: float
+    highest_target_c: float
+
+
+class ZoneNotCommissionedError(RuntimeError):
+    """One or more zones cannot safely run the intended profile. Raised by
+    :func:`check_zones_commissioned` BEFORE any HTTP call -- callers must
+    report this to the operator, never auto-widen the offending limit (see
+    this section's module-level docstring)."""
+
+    def __init__(self, failures: "list[str]") -> None:
+        super().__init__("; ".join(failures))
+        self.failures = list(failures)
+
+
+def profile_commissioning_requirements(zones: "list[int]", segments: "list[dict]"
+                                        ) -> "dict[int, ZoneCommissioningRequirement]":
+    """Steepest ``ramp_c_per_hr`` and highest ``target_c`` across
+    ``segments`` (a dwell segment with ``ramp_c_per_hr`` 0/None does not
+    count toward the ramp requirement), applied to every zone in ``zones``.
+    """
+    ramps = [float(s["ramp_c_per_hr"]) for s in segments
+             if s.get("ramp_c_per_hr")]
+    steepest = max(ramps) if ramps else 0.0
+    targets = [float(s["target_c"]) for s in segments if s.get("target_c") is not None]
+    highest = max(targets) if targets else 0.0
+    return {z: ZoneCommissioningRequirement(zone=z, steepest_ramp_c_per_hr=steepest,
+                                            highest_target_c=highest)
+            for z in zones}
+
+
+def check_zone_commissioned(req: ZoneCommissioningRequirement, zone_cfg: dict) -> "Optional[str]":
+    """None when ``zone_cfg`` (one zone's config as returned by GET
+    /api/zones) is commissioned to run ``req`` safely; otherwise a message
+    naming the zone, the offending field, the required value and the
+    actual value. See this section's module docstring for the zero-
+    semantics citations behind each branch below.
+    """
+    zone = req.zone
+    max_ramp = zone_cfg.get("max_ramp_c_per_hr")
+    max_temp = zone_cfg.get("max_temp_c")
+    cross_zone = zone_cfg.get("cross_zone_max_delta_c")
+
+    if max_ramp is None or max_ramp <= 0.0:
+        return (f"zone {zone}: max_ramp_c_per_hr={max_ramp!r} -- 0/unset means 'never "
+                f"configured', which the firmware treats as a ceiling of zero and rejects "
+                f"every nonzero ramp rate against (profiles_http.c:1576-1580); needs "
+                f">= {req.steepest_ramp_c_per_hr:.1f} C/hr for this profile's steepest segment")
+    if req.steepest_ramp_c_per_hr > max_ramp:
+        return (f"zone {zone}: max_ramp_c_per_hr={max_ramp:.1f} C/hr is below this "
+                f"profile's steepest segment ({req.steepest_ramp_c_per_hr:.1f} C/hr required)")
+
+    if max_temp is None or max_temp <= 0.0:
+        return (f"zone {zone}: max_temp_c={max_temp!r} -- 0/unset DISABLES guard 5's "
+                f"over-temperature trip entirely (thermal_guard.c:106), it does not mean "
+                f"'no limit but still checked'; needs >= {req.highest_target_c:.1f} C for "
+                f"this profile's highest target")
+    if req.highest_target_c > max_temp:
+        return (f"zone {zone}: max_temp_c={max_temp:.1f} C is below this profile's "
+                f"highest target ({req.highest_target_c:.1f} C required)")
+
+    if cross_zone is None or cross_zone <= 0.0:
+        return (f"zone {zone}: cross_zone_max_delta_c={cross_zone!r} -- 0/unset DISABLES "
+                f"guard 8's cross-zone plausibility interlock entirely (thermal_guard.c:331, "
+                f"zones_http.c:383-389), the opposite convention from max_ramp_c_per_hr; must "
+                f"be set to a nonzero value before running a multi-zone profile against this zone")
+    return None
+
+
+def check_zones_commissioned(zones: "list[int]", zone_configs: "dict[int, dict]",
+                              segments: "list[dict]") -> None:
+    """Raises :class:`ZoneNotCommissionedError` (naming every zone/field/
+    required/actual mismatch found) if any zone in ``zones`` is not
+    commissioned to run ``segments`` safely. ``zone_configs`` is
+    ``{zone_index: zone_dict}`` from an already-fetched GET /api/zones --
+    this function makes no HTTP calls of its own and never mutates
+    anything; a caller with a zone missing from ``zone_configs`` gets a
+    failure naming that zone rather than a KeyError.
+    """
+    reqs = profile_commissioning_requirements(zones, segments)
+    failures: "list[str]" = []
+    for zone in zones:
+        cfg = zone_configs.get(zone)
+        if cfg is None:
+            failures.append(f"zone {zone}: no zone config returned by the board")
+            continue
+        reason = check_zone_commissioned(reqs[zone], cfg)
+        if reason:
+            failures.append(reason)
+    if failures:
+        raise ZoneNotCommissionedError(failures)
+
+
+# ---------------------------------------------------------------------------
 # Spread across zones
 # ---------------------------------------------------------------------------
 
@@ -758,6 +913,8 @@ __all__ = [
     "PROFILE_FW_RAMP_C_PER_HR_MIN", "PROFILE_FW_RAMP_C_PER_HR_MAX",
     "PROFILE_FW_DWELL_MIN_MAX", "PROFILE_FW_ZONE_MASK_MAX",
     "ProfilePayloadError", "build_tracking_profile_name", "validate_profile_payload",
+    "ZoneCommissioningRequirement", "ZoneNotCommissionedError",
+    "profile_commissioning_requirements", "check_zone_commissioned", "check_zones_commissioned",
     "compute_spread_c", "TrackingSample", "ZoneTrackingStats", "tracking_stats",
     "TrackingThresholds", "CheckResult", "evaluate_zone_tracking", "evaluate_spread",
     "autotune_refusal_reason", "diff_backup_zones",

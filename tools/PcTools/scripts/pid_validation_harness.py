@@ -101,6 +101,15 @@ def _bs_backup_import(self, doc: dict) -> "tuple[bool, str]":
     return code == 200, text
 
 
+def _bs_get_zones(self) -> dict:
+    return zones_http_client.get_zones(self.host, timeout=HTTP_TIMEOUT_S)
+
+
+def _bs_commission_zones(self, current: dict, preset: dict) -> None:
+    body = zones_http_client.build_post_body(current, preset)
+    zones_http_client.post_zones(self.host, body, timeout=HTTP_TIMEOUT_S)
+
+
 def _bs_ensure_pid_mode(self, zones: "list[int]") -> "dict[int, int]":
     """Make sure every zone in ``zones`` is in PID mode (2), and READ IT
     BACK to confirm the write actually took -- accepting a 200 from POST
@@ -132,6 +141,8 @@ BenchSession.autotune_accept = _bs_autotune_accept
 BenchSession.backup_export = _bs_backup_export
 BenchSession.backup_import = _bs_backup_import
 BenchSession.ensure_pid_mode = _bs_ensure_pid_mode
+BenchSession.get_zones = _bs_get_zones
+BenchSession.commission_zones = _bs_commission_zones
 
 
 # ---------------------------------------------------------------------------
@@ -387,6 +398,72 @@ def stage_profile_tracking(session, args) -> pv.StageReport:
 
         zone_mask = sum(1 << z for z in args.zones)
         segments = _profile_segments_c_to_80(args.tracking_peak1_c, args.tracking_peak2_c)
+
+        # Zone commissioning pre-flight (see pv.check_zones_commissioned's
+        # docstring for the full "0 means what, on which field" citations).
+        # This is what would have caught "zone 1 and 2 were never
+        # commissioned" locally, before the cooldown gate ran, instead of
+        # as a bare 400 an hour in. Never auto-corrects: an uncommissioned
+        # zone is reported to the operator, not silently widened, unless
+        # --commission-zones was explicitly passed (see below).
+        current_zones = _retrying(session, args, "profile_tracking", "get_zones_preflight",
+                                  session.get_zones)
+        zone_configs = {z["index"]: z for z in current_zones.get("zones", [])}
+        try:
+            pv.check_zones_commissioned(args.zones, zone_configs, segments)
+        except pv.ZoneNotCommissionedError as exc:
+            if not args.commission_zones:
+                return pv.StageReport(
+                    name="profile_tracking", passed=False,
+                    error="one or more zones are not commissioned for this profile, refusing "
+                          "to start it (pass --commission-zones to have the OPERATOR-reviewed "
+                          "values below written first): " + "; ".join(exc.failures),
+                    detail={"commissioning_failures": exc.failures},
+                    duration_s=time.monotonic() - t0)
+            # --commission-zones: an explicit, opt-in override. Loudly logged
+            # (this widens safety guard ceilings) and limited to the fields
+            # this run's pre-flight actually found deficient -- never a bulk
+            # "reset everything to some default" write.
+            log.warning("COMMISSIONING ZONES (--commission-zones was passed): %s",
+                        "; ".join(exc.failures))
+            reqs = pv.profile_commissioning_requirements(args.zones, segments)
+            commission_preset = {"zones": []}
+            for zone in args.zones:
+                req = reqs[zone]
+                cfg = zone_configs.get(zone, {})
+                zentry = {"index": zone}
+                if not cfg.get("max_ramp_c_per_hr") or cfg["max_ramp_c_per_hr"] < req.steepest_ramp_c_per_hr:
+                    zentry["max_ramp_c_per_hr"] = req.steepest_ramp_c_per_hr
+                if not cfg.get("max_temp_c") or cfg["max_temp_c"] < req.highest_target_c:
+                    zentry["max_temp_c"] = req.highest_target_c
+                if len(zentry) > 1:
+                    commission_preset["zones"].append(zentry)
+                    log.warning("  zone %d: writing %s", zone,
+                               {k: v for k, v in zentry.items() if k != "index"})
+            if commission_preset["zones"]:
+                _retrying(session, args, "profile_tracking", "commission_zones",
+                         lambda: session.commission_zones(current_zones, commission_preset))
+            # cross_zone_max_delta_c is NEVER auto-written, even under
+            # --commission-zones -- see pv.check_zones_commissioned's
+            # docstring: there is no correct default, it depends on how
+            # strongly this specific kiln's zones couple, and a wrong guess
+            # either nuisance-trips or catches nothing. If that was the
+            # (only) remaining failure, re-raise instead of silently
+            # proceeding with guard 8 disabled.
+            refreshed = _retrying(session, args, "profile_tracking", "get_zones_postcommission",
+                                  session.get_zones)
+            refreshed_cfgs = {z["index"]: z for z in refreshed.get("zones", [])}
+            try:
+                pv.check_zones_commissioned(args.zones, refreshed_cfgs, segments)
+            except pv.ZoneNotCommissionedError as exc2:
+                return pv.StageReport(
+                    name="profile_tracking", passed=False,
+                    error="--commission-zones could not fully commission every zone (fields "
+                          "it never auto-writes, e.g. cross_zone_max_delta_c, still need an "
+                          "operator-chosen value): " + "; ".join(exc2.failures),
+                    detail={"commissioning_failures": exc2.failures},
+                    duration_s=time.monotonic() - t0)
+
         # Build a name that fits the firmware's PROFILE_NAME_MAX_LEN (15
         # chars, profiles_http.h:29) while still embedding a timestamp so
         # the run is identifiable in the slot afterwards -- see
@@ -572,6 +649,28 @@ class FakeSession:
         # Fake board: every zone is already in PID mode, no write needed --
         # exercises the "already correct, nothing to POST" path.
         return {z: ZONE_CONTROL_MODE_PID for z in zones}
+
+    def get_zones(self) -> dict:
+        # Fake board: every zone is already commissioned generously (mirrors
+        # zone 0's real-hardware values from the bug report) so a dry run
+        # exercises the "already commissioned, pre-flight passes" path by
+        # default -- see test_pid_validation.py for the failing-path tests,
+        # which feed pv.check_zones_commissioned synthetic configs directly
+        # rather than going through FakeSession.
+        zones = getattr(self, "_zone_cfgs", None)
+        if zones is None:
+            zones = {z: {"index": z, "max_ramp_c_per_hr": 900.0, "max_temp_c": 80.0,
+                          "cross_zone_max_delta_c": 50.0} for z in range(3)}
+            self._zone_cfgs = zones
+        return {"zones": list(zones.values())}
+
+    def commission_zones(self, current: dict, preset: dict) -> None:
+        zones = getattr(self, "_zone_cfgs", None)
+        if zones is None:
+            self.get_zones()
+            zones = self._zone_cfgs
+        for entry in preset.get("zones", []):
+            zones[entry["index"]].update(entry)
 
     def put_profile(self, slot, name, zone_mask, segments):
         return None
@@ -765,6 +864,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    help="tracking threshold: mean signed error during holds (default: 1.5)")
     g.add_argument("--spread-c", type=float, default=2.0,
                    help="tracking threshold: worst cross-zone spread (default: 2.0)")
+    g.add_argument("--commission-zones", action="store_true",
+                   help="OPT-IN, off by default: if the profile-tracking pre-flight finds a "
+                        "zone missing max_ramp_c_per_hr/max_temp_c coverage for this profile, "
+                        "write ONLY the deficient fields (never cross_zone_max_delta_c, which "
+                        "has no safe default) and log loudly what changed, instead of aborting "
+                        "the stage. Default behaviour without this flag is to report the "
+                        "requirement and refuse to start -- this harness never silently widens "
+                        "a safety guard ceiling.")
 
     p.add_argument("--report-dir", default=DEFAULT_REPORT_DIR,
                    help=f"where to write timestamped reports (default: {DEFAULT_REPORT_DIR})")
