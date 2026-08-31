@@ -56,6 +56,81 @@ typedef struct {
     float tau_s;             /* time constant */
     float dead_time_s;       /* L: transport delay before the response starts moving */
     bool  valid;             /* false if the trace didn't support a fit (see .c for reasons) */
+    /* True only when the caller's own settle detector declared genuine
+     * steady state before the trace was handed here -- this file has no way
+     * to know that on its own, so it always defaults false and the caller
+     * (autotune_engine.c) sets it explicitly right after a successful fit.
+     * false means the trace was cut off by a time budget or an abort
+     * instead: the two-point fit can still succeed on such a trace (nothing
+     * here requires the *final* sample to be at steady state), but K/tau/L
+     * from it are lower-confidence than one that genuinely settled -- see
+     * autotune_engine.c's finalize_fit() for how that distinction is
+     * surfaced. */
+    bool  settled;
+    /* 2026-09-02 round-3 review, item 4: the asymptote-extrapolation loop
+     * (pid_autotune_fit_fopdt(), see its own comment) corrects
+     * k_gain_c_per_duty from the trace's raw last-sample rise toward its
+     * true steady-state value, and normally re-fits tau_s/dead_time_s from
+     * that same corrected rise so all three stay mutually consistent. Two
+     * things can go wrong with that, independently, and both are recorded
+     * here rather than silently absorbed:
+     *
+     *   tau_consistent_with_gain: false means the loop had to stop because
+     *   re-fitting tau_s/dead_time_s at the LAST accepted k_gain_c_per_duty
+     *   failed (the implied 28.3%/63.2% crossing levels are past what the
+     *   trace actually reached) -- tau_s/dead_time_s then reflect an
+     *   EARLIER, less-corrected rise estimate than k_gain_c_per_duty does.
+     *   A caller that cares about tau/L specifically (Cohen-Coon's L-heavy
+     *   formula, the dead-time floor check) should treat them as stale
+     *   when this is false; k_gain_c_per_duty itself is unaffected.
+     *
+     *   extrapolation_converged: false means MAX_EXTRAPOLATION_ITERATIONS
+     *   was reached (or the loop stopped for a reason other than eps-
+     *   convergence, e.g. the MAX_EXTRAPOLATION_RATIO ceiling) without the
+     *   rise estimate settling to within EXTRAPOLATION_CONVERGE_EPS_C --
+     *   k_gain_c_per_duty is still the best available estimate (the
+     *   iteration ran, it just didn't provably stabilize), not a fit
+     *   failure, but a caller surfacing confidence to an operator should
+     *   not present it as equivalent to a converged one.
+     *
+     * Both read true in the common case, for two DIFFERENT reasons that a
+     * caller does not need to distinguish (either one means "trust this
+     * fit"): (1) no extrapolation loop ran at all -- the trace was too
+     * short to compute an end-of-trace slope -- so there was nothing to be
+     * inconsistent or unconverged about; or (2) the loop ran but its very
+     * first candidate already showed no further correction was warranted
+     * (the trace's tail was flat or trending back toward baseline, exactly
+     * what a genuinely settled plant's own sensor-quantization noise looks
+     * like) -- see pid_autotune_fit_fopdt()'s sign-check break for why this
+     * is counted the same as (1), not as a failure to converge.
+     *
+     * RESIDUAL ACCURACY GAP (round-3 review judgement call, answered
+     * explicitly rather than left silent -- and now WIRED, round-3
+     * follow-up): measured at a 50%-of-asymptote truncation (right at the
+     * MAX_EXTRAPOLATION_RATIO cap boundary -- see that constant's
+     * comment), the iterated fit still recovers K only ~17.6% low. That is
+     * the SAME low-K/over-driven-feedforward direction as the original
+     * overshoot defect this whole pass exists to fix, at roughly a quarter
+     * the magnitude -- NOT considered acceptable as a fully resolved case,
+     * only a large improvement on the ~33% (single-pass) or effectively
+     * unbounded (pre-fix) bias that preceded it.
+     *
+     * These two flags are now folded into autotune_engine_accept()'s
+     * ack_unsettled gate alongside fopdt_model_t::settled (autotune_
+     * engine.c/.h, "2026-09-01 review fix, extended 2026-09-02"): a fit
+     * whose STEPPING detector genuinely fired but whose extrapolation
+     * capped out (extrapolation_converged==false and/or tau_consistent_
+     * with_gain==false) can still reach DONE, but acceptance -- and
+     * finalize_fit()'s cross-gain coupling persist, gated the same way --
+     * is refused until the operator explicitly acknowledges it, the same
+     * as a max-duration-backstop fit. The 17.6% residual itself is
+     * unchanged by this -- it is now surfaced and gate-able rather than
+     * silent, not eliminated. Longer term, a proper least-squares
+     * two-parameter (K, tau) fit would degrade more gracefully on
+     * truncated data than this two-point method does at any iteration
+     * count. */
+    bool  tau_consistent_with_gain;
+    bool  extrapolation_converged;
     char  invalid_reason[64];
 } fopdt_model_t;
 

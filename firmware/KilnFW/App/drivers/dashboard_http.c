@@ -1827,7 +1827,8 @@ static esp_err_t autotune_status_get_handler(httpd_req_t *req)
     int n = snprintf(json, sizeof(json),
         "{\"state\":\"%s\",\"method\":\"%s\",\"zone\":%u,\"elapsed_s\":%lu,\"sample_count\":%u,"
         "\"actual_c\":%.2f,\"actual_valid\":%s,\"duty\":%.3f,\"abort_reason\":\"%s\","
-        "\"model_valid\":%s,\"k_gain_c_per_duty\":%.3f,\"tau_s\":%.1f,\"dead_time_s\":%.1f,"
+        "\"model_valid\":%s,\"model_settled\":%s,\"model_extrapolation_converged\":%s,"
+        "\"model_tau_consistent\":%s,\"k_gain_c_per_duty\":%.3f,\"tau_s\":%.1f,\"dead_time_s\":%.1f,"
         "\"proposed_kp\":%.5f,\"proposed_ki\":%.5f,\"proposed_kd\":%.5f,\"rule\":\"%s\","
         "\"refusal\":\"%s\",\"refusal_reason\":\"%s\","
         "\"predicted_max_ramp_c_per_hr\":%.1f,"
@@ -1838,7 +1839,9 @@ static esp_err_t autotune_status_get_handler(httpd_req_t *req)
         autotune_state_name(st.state), st.method == AUTOTUNE_METHOD_RELAY ? "relay" : "step", st.zone_index,
         (unsigned long)st.elapsed_s, st.sample_count,
         (double)(st.actual_valid ? st.actual_c : 0.0f), st.actual_valid ? "true" : "false", (double)st.duty,
-        reason_escaped, st.model.valid ? "true" : "false", (double)st.model.k_gain_c_per_duty,
+        reason_escaped, st.model.valid ? "true" : "false", st.model.settled ? "true" : "false",
+        st.model.extrapolation_converged ? "true" : "false", st.model.tau_consistent_with_gain ? "true" : "false",
+        (double)st.model.k_gain_c_per_duty,
         (double)st.model.tau_s, (double)st.model.dead_time_s, (double)st.proposed_gains.kp,
         (double)st.proposed_gains.ki, (double)st.proposed_gains.kd,
         autotune_rule_name(st.proposed_gains.rule),
@@ -2082,8 +2085,48 @@ static esp_err_t autotune_abort_post_handler(httpd_req_t *req)
 
 static esp_err_t autotune_accept_post_handler(httpd_req_t *req)
 {
-    if (!autotune_engine_accept()) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "no completed autotune result to accept");
+    /* ack_unsettled is optional and defaults false -- an omitted body, or an
+     * older client that has never heard of this field, gets exactly the
+     * refuse-a-low-confidence-fit behavior autotune_engine_accept()'s own
+     * comment documents; only an explicit "1" opts in to persisting a fit
+     * that never genuinely settled. Same http_form_find_field() body-parse
+     * pattern autotune_start_post_handler() above already uses, not a new
+     * one. A body is optional here (the common case, accepting a genuinely
+     * settled fit, needs none), so a missing/empty body is not an error. */
+    bool ack_unsettled = false;
+    if (req->content_len > 0 && req->content_len < 64) {
+        char body[64];
+        size_t received = 0;
+        bool read_ok = true;
+        while (received < (size_t)req->content_len) {
+            int ret = httpd_req_recv(req, body + received, req->content_len - received);
+            if (ret <= 0) {
+                read_ok = false;
+                break;
+            }
+            received += (size_t)ret;
+        }
+        if (read_ok) {
+            body[received] = '\0';
+            char ack_val[4];
+            int ack_len = http_form_find_field(body, "ack_unsettled", ack_val, sizeof(ack_val));
+            ack_unsettled = (ack_len > 0) && (strcmp(ack_val, "1") == 0 || strcmp(ack_val, "true") == 0);
+        }
+    }
+
+    if (!autotune_engine_accept(ack_unsettled)) {
+        /* The specific reason (never settled / extrapolation didn't
+         * converge / tau inconsistent with the corrected gain) is in the
+         * ESP_LOGW autotune_engine_accept() itself already emitted -- see
+         * that function's own comment. This HTTP error stays generic
+         * because the page's own /api/autotune poll already shows the
+         * operator all three flags distinctly (model_settled/
+         * model_extrapolation_converged/model_tau_consistent) BEFORE they
+         * click Accept, which is the more useful place for that detail. */
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                            "no completed autotune result to accept, or it is not fully trustworthy "
+                            "yet (see the page for which condition) and needs ack_unsettled=1 to "
+                            "accept anyway");
         return ESP_OK;
     }
     return httpd_resp_sendstr(req, "ok");

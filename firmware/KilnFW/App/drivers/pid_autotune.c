@@ -36,6 +36,95 @@ static bool find_crossing_time(const autotune_sample_t *samples, int n, float ta
     return false;
 }
 
+/* How many trailing samples the end-of-trace slope estimate (used by the
+ * asymptote extrapolation below) averages over. Final review fix: the
+ * comment here used to claim this "uses a first-to-last-of-window rate over
+ * several samples instead of adjacent-sample differencing" to avoid "the
+ * noise-amplified two-point estimator the settle detector's review
+ * flagged" -- that was FALSE. The code computed exactly a first-to-last
+ * TWO-POINT difference across the window (samples[window_last] minus
+ * samples[window_first]), which means one anomalous final sample fully
+ * determines both the magnitude AND the sign of slope_end, identical in
+ * kind to the step_peak_slope_c_per_s defect this comment claimed to have
+ * learned from. Fixed for real below: slope_end is now a least-squares fit
+ * over every sample in the window, so a single outlier sample is one of
+ * ASYMPTOTE_SLOPE_WINDOW_SAMPLES points pulling on the fit, not the entire
+ * measurement. Clamped to sample_count when the trace is shorter than
+ * this. */
+#define ASYMPTOTE_SLOPE_WINDOW_SAMPLES 6
+
+/* The firmware trace's packed resolution -- unpack_zone_trace() (autotune_
+ * engine.c) stores each sample as (float)dc/10.0f, i.e. this file receives
+ * measurement_c already quantized to 0.1 degC steps. Used below (the
+ * sign-check break in the asymptote-extrapolation loop) to size a
+ * quantization-noise threshold from first principles rather than a
+ * hardcoded number -- see that break's own comment. */
+#define TRACE_QUANTUM_C 0.1f
+
+/* Round-2 review, items 1/6: bounds on the iterative asymptote refinement
+ * below. MAX_EXTRAPOLATION_RATIO caps how far a single fit is allowed to
+ * correct itself: 2.0 means rise_inf can never exceed 2x the RAW
+ * (last-sample) rise, which is exactly the correction a trace truncated at
+ * the 50% mark of its true asymptote needs (rise_raw = 0.5*K =>
+ * rise_inf/rise_raw = 2.0) -- the worst case this fix is willing to trust.
+ * Below 50%, the two-point crossing times themselves become numerically
+ * unreliable (t28/t63 sit close together relative to noise), so capping
+ * there instead of trying to correct further is deliberate conservatism:
+ * an UNDER-corrected K (the old bug, bounded) is safer than an
+ * unboundedly OVER-corrected one (a new, different bug) -- see the review's
+ * own defeat case (a noisy trace inflating tau to thousands of seconds and
+ * nearly tripling K) for exactly the failure this bound exists to stop.
+ * MAX_EXTRAPOLATION_ITERATIONS bounds the iterative refinement below; 5 is
+ * generous for a process that converges geometrically once it converges at
+ * all (see that loop's own comment) and cheap even on this board's tightest
+ * stack budget (a few float ops per pass, no allocation). */
+#define MAX_EXTRAPOLATION_RATIO 2.0f
+#define MAX_EXTRAPOLATION_ITERATIONS 5
+#define EXTRAPOLATION_CONVERGE_EPS_C 0.02f
+
+/* 2026-08-31 bias fix, iterated per round-2 review (item 6) -- root cause of
+ * the overshoot defect this whole pass exists to close. The two-point
+ * method (28.3%/63.2% crossing times) needs the trace's TRUE steady-state
+ * rise to place its target crossings; using samples[n-1].measurement_c -
+ * baseline_c instead assumes the LAST sample already IS steady state. On
+ * any trace that ends mid-transient -- which includes every fit this engine
+ * ever produces from a genuinely honest settle detector (criterion 1 only
+ * requires the recent slope to have decayed to a few percent of its peak,
+ * not to exactly zero) and, far more severely, any fit that reaches here
+ * via the max-duration backstop -- that assumption is false and the fitted
+ * K is biased LOW by construction, by however much of the exponential's
+ * tail was never reached. Measured on real traces: the two prior overshoot
+ * incidents' k_dc values (21.74, 31.96 degC/duty) were low by exactly this
+ * mechanism.
+ *
+ * Fix: extrapolate to the asymptote using the FOPDT relation itself. For a
+ * clean single-exponential rise (after dead time), rise(t) obeys
+ *   d(rise)/dt = (rise_inf - rise(t)) / tau
+ * at every t past the dead time -- not just at t=inf -- so measuring the
+ * slope near the end of the trace and combining it with tau recovers
+ * rise_inf directly:
+ *   rise_inf = rise(t_end) + tau * slope(t_end)
+ *
+ * ITERATED, not single-pass (round-2 review, item 6): the FIRST version of
+ * this fix used the tau fitted from the RAW (still-biased) rise's 28.3%/
+ * 63.2% crossings -- circular, since those targets are themselves fractions
+ * of the very rise being corrected, so the tau feeding the correction was
+ * itself biased (measured: ~3% low at 86.5% of asymptote reached, but ~64%
+ * low at 25%, nowhere close to the "within 5%" the first version's test
+ * happened to check at one truncation point only). Fixed by RE-FITTING
+ * t28/t63/tau/dead_time from each successive rise_inf estimate and
+ * repeating until the estimate stops moving (or MAX_EXTRAPOLATION_
+ * ITERATIONS is hit, or a refit's crossing times fail -- an overshot
+ * candidate the trace cannot support, at which point the PREVIOUS
+ * iteration's values are kept rather than accepting a fit the data does not
+ * actually reach). tau_s/dead_time_s are therefore also corrected now, not
+ * left at their original biased values while only k_gain_c_per_duty moved
+ * -- both feed pid_autotune_tune_from_fopdt() and were equally wrong
+ * before.
+ *
+ * A trace that genuinely reached steady state has slope(t_end) ~= 0, so the
+ * very first candidate already equals the raw rise and the loop converges
+ * immediately -- this fix is a no-op on a fully-settled trace. */
 fopdt_model_t pid_autotune_fit_fopdt(const autotune_sample_t *samples, int sample_count, float baseline_c,
                                      float duty_step)
 {
@@ -47,37 +136,254 @@ fopdt_model_t pid_autotune_fit_fopdt(const autotune_sample_t *samples, int sampl
     }
 
     float final_c = samples[sample_count - 1].measurement_c;
-    float rise = final_c - baseline_c;
-    if (fabsf(rise) < 0.5f) {
+    float raw_rise = final_c - baseline_c;
+    if (fabsf(raw_rise) < 0.5f) {
         return invalid_model("response too small to fit (trace flat or noise-dominated)");
     }
-    float rise_sign = (rise > 0.0f) ? 1.0f : -1.0f;
+    float rise_sign = (raw_rise > 0.0f) ? 1.0f : -1.0f;
 
-    float target28 = baseline_c + 0.283f * rise;
-    float target63 = baseline_c + 0.632f * rise;
+    /* One two-point fit at a given rise estimate; shared by the initial fit
+     * and every refinement iteration below so the two paths cannot drift
+     * apart. Returns false (leaving *out_tau/*out_dead untouched) if the
+     * crossings this rise estimate implies aren't reached by the trace --
+     * an overshot candidate the data cannot support. */
+    float tau, dead_time;
+    {
+        float target28 = baseline_c + 0.283f * raw_rise;
+        float target63 = baseline_c + 0.632f * raw_rise;
+        float t28, t63;
+        if (!find_crossing_time(samples, sample_count, target28, rise_sign, &t28)) {
+            return invalid_model("trace never reaches 28.3% of the total rise");
+        }
+        if (!find_crossing_time(samples, sample_count, target63, rise_sign, &t63)) {
+            return invalid_model(
+                "trace never reaches 63.2% of the total rise -- run longer or closer to steady state");
+        }
+        tau = 1.5f * (t63 - t28);
+        dead_time = t63 - tau;
+        if (dead_time < 0.0f) {
+            dead_time = 0.0f; /* noise can push this slightly negative; a real plant's L can't be */
+        }
+        if (tau <= 0.0f) {
+            return invalid_model("fitted tau <= 0 -- t28/t63 crossing times out of order, trace likely too noisy");
+        }
+    }
 
-    float t28, t63;
-    if (!find_crossing_time(samples, sample_count, target28, rise_sign, &t28)) {
-        return invalid_model("trace never reaches 28.3% of the total rise");
-    }
-    if (!find_crossing_time(samples, sample_count, target63, rise_sign, &t63)) {
-        return invalid_model("trace never reaches 63.2% of the total rise -- run longer or closer to steady state");
+    /* End-of-trace slope estimate -- purely data-derived, computed ONCE
+     * (unlike tau/dead_time it does not depend on the rise estimate, so
+     * re-deriving it inside the iteration loop would be wasted work, not a
+     * correctness issue either way). window_first/window_last bound a
+     * trailing window; slope_end is the LEAST-SQUARES slope of every
+     * sample in that window (see ASYMPTOTE_SLOPE_WINDOW_SAMPLES's own
+     * comment for why this replaced a first-to-last two-point difference),
+     * standing in for slope(t_end). window_span_s (the window's total time
+     * extent) is also used by the sign-check break below to size its
+     * quantization-noise threshold -- computed here alongside the fit so
+     * both readers agree on exactly what "the window" spans. A window
+     * narrower than 2 samples, or one whose samples share a single
+     * timestamp (should not happen with real trace data, but guarded
+     * anyway), has no slope to measure. */
+    float slope_end = 0.0f;
+    float window_span_s = 0.0f;
+    bool have_slope_end = false;
+    {
+        int window_span = (sample_count < ASYMPTOTE_SLOPE_WINDOW_SAMPLES) ? sample_count
+                                                                           : ASYMPTOTE_SLOPE_WINDOW_SAMPLES;
+        if (window_span >= 2) {
+            int window_first = sample_count - window_span;
+            int window_last = sample_count - 1;
+            float span_s = samples[window_last].t_s - samples[window_first].t_s;
+            if (span_s > 1e-6f) {
+                /* Ordinary least-squares slope: slope = Sxy / Sxx, both
+                 * accumulated relative to the window's own mean time (not
+                 * absolute t_s, which can be large after a multi-hour run
+                 * and would cost float precision squaring it directly). */
+                float t_mean = 0.0f, y_mean = 0.0f;
+                for (int i = window_first; i <= window_last; i++) {
+                    t_mean += samples[i].t_s;
+                    y_mean += samples[i].measurement_c;
+                }
+                t_mean /= (float)window_span;
+                y_mean /= (float)window_span;
+                float sxy = 0.0f, sxx = 0.0f;
+                for (int i = window_first; i <= window_last; i++) {
+                    float dt_i = samples[i].t_s - t_mean;
+                    sxy += dt_i * (samples[i].measurement_c - y_mean);
+                    sxx += dt_i * dt_i;
+                }
+                if (sxx > 1e-6f) {
+                    slope_end = sxy / sxx;
+                    window_span_s = span_s;
+                    have_slope_end = true;
+                }
+            }
+        }
     }
 
-    float tau = 1.5f * (t63 - t28);
-    float dead_time = t63 - tau;
-    if (dead_time < 0.0f) {
-        dead_time = 0.0f; /* noise can push this slightly negative; a real plant's L can't be */
-    }
-    if (tau <= 0.0f) {
-        return invalid_model("fitted tau <= 0 -- t28/t63 crossing times out of order, trace likely too noisy");
+    float rise_inf = raw_rise;
+    float max_rise_c = MAX_EXTRAPOLATION_RATIO * fabsf(raw_rise); /* upper bound -- see its own comment */
+    /* Round-3 review, item 4: both flags default true (no correction ran,
+     * or the one that did stayed fully self-consistent and converged) --
+     * see fopdt_model_t's own doc comment for what each means and why they
+     * are separate concepts (a capped-but-refit correction can be
+     * tau-consistent yet not "converged" in the eps sense, and vice versa
+     * is NOT possible by construction below: an iteration is never counted
+     * converged unless its refit also succeeded this same pass). */
+    bool tau_consistent_with_gain = true;
+    bool extrapolation_converged = true;
+    if (have_slope_end) {
+        /* Fixed-point iteration: each pass recomputes the candidate from
+         * raw_rise (the actual data) and the LATEST tau estimate --
+         * candidate = raw_rise + tau_k*slope_end -- rather than compounding
+         * onto the previous candidate. Compounding was tried first and
+         * diverges: a larger rise_inf pushes target63 further out, which
+         * can genuinely increase the refitted tau (63.2% of a bigger
+         * asymptote needs more elapsed time to reach on the same trace),
+         * and adding tau_k*slope_end AGAIN on top of an already-corrected
+         * estimate double-counts that growth every pass. Recomputing from
+         * raw_rise each time is the textbook fixed-point form and is what
+         * actually converges (or hits the MAX_EXTRAPOLATION_RATIO ceiling /
+         * iteration cap, both handled below, instead of diverging). */
+        /* Reset to false pessimistically while iterating, then set back to
+         * true on whichever exit below actually represents "the correction
+         * is done and trustworthy": either no correction was needed at all
+         * (the sign-check break -- candidate <= raw_rise, so the trace was
+         * already at or past its asymptote and there was nothing to
+         * extrapolate) or the loop reached genuine eps convergence. It
+         * stays false only on the three exits that are NOT one of those:
+         * pinned at the MAX_EXTRAPOLATION_RATIO ceiling, a refit the trace
+         * could not support, or exhausting MAX_EXTRAPOLATION_ITERATIONS
+         * without settling. Final review fix: the sign-check break used to
+         * leave this false, which is wrong -- see that break's own comment
+         * for the measured on-target impact (a ~50% nondeterministic
+         * refusal rate on trace-quantization noise alone). */
+        extrapolation_converged = false;
+        for (int iter = 0; iter < MAX_EXTRAPOLATION_ITERATIONS; iter++) {
+            float candidate = raw_rise + tau * slope_end;
+            /* Sanity floor: the extrapolated rise must not reverse sign (a
+             * slope opposite the overall rise -- e.g. thermal noise right
+             * at the end of a genuinely flat trace -- would otherwise
+             * produce a nonsensical negative correction) and must not be
+             * SMALLER in magnitude than the raw observation (extrapolating
+             * forward in time on a monotonic rise can only add more rise,
+             * never take it away; a candidate that shrinks it means
+             * slope_end's sign disagreed with the rise direction, i.e.
+             * noise, not signal). Sanity ceiling: MAX_EXTRAPOLATION_RATIO's
+             * own comment above -- this is what defeats the review's "tau
+             * inflated to thousands of seconds nearly triples K" case, by
+             * refusing to let ANY iteration correct past a 2x multiple of
+             * the raw observation regardless of what a noisy tau claims. */
+            if ((candidate * rise_sign) < (raw_rise * rise_sign)) {
+                /* Second final-review fix: sign alone is not enough to call
+                 * this "no correction needed". The FIRST fix (see the
+                 * unconditional `extrapolation_converged = true` this
+                 * replaced) treated EVERY shrink-or-reverse candidate as
+                 * trivially converged, on the reasoning that quantization
+                 * noise can flip slope_end's sign on a genuinely settled
+                 * trace -- true, but the reviewer then measured this same
+                 * branch reporting converged=1 on trace shapes that are
+                 * NOT settled at all (a real cooling/reversing response,
+                 * and truncated-response traces with a trailing dip),
+                 * every one of them biased low, i.e. the exact original
+                 * overshoot-defect direction:
+                 *   rise then cooling/reversing          K=9.3  (true 30, -69%)
+                 *   truncated 50% + 2.0C last-sample dip K=12.9 (-57%)
+                 *   truncated 70% + 1.0C dip              K=20.0 (-33%)
+                 *   truncated 85% + 1.0C dip              K=24.4 (-19%)
+                 *   truncated 95% + 0.3C dip               K=28.2  (-6%)
+                 * Those are only safe on-target because autotune_engine.c's
+                 * settled gate independently rejects them on absolute
+                 * slope -- correct in composition, wrong in isolation,
+                 * which is the same lesson this whole incident has been
+                 * teaching one layer at a time.
+                 *
+                 * Fixed by making the break MAGNITUDE-aware: a shrink is
+                 * still called converged only when it is within about ONE
+                 * QUANTIZATION STEP of raw_rise, derived from the actual
+                 * trace quantum and this window's own span rather than a
+                 * hardcoded constant -- TRACE_QUANTUM_C (0.1 degC, the
+                 * firmware's packed trace resolution, unpack_zone_trace's
+                 * own (float)dc/10.0f) turns into a SLOPE quantum of
+                 * TRACE_QUANTUM_C/window_span_s over this window, and
+                 * multiplying by tau converts that slope quantum into the
+                 * RISE-magnitude one quantum's worth of slope_end would
+                 * have implied via candidate = raw_rise + tau*slope_end --
+                 * i.e. exactly the scale a single quantization tick can
+                 * move `candidate` by. At tau=600s and a 50s window that
+                 * threshold works out to ~1.2 degC: it accepts the +/-0.1
+                 * degC dither case (a genuine single quantization tick) and
+                 * rejects every row of the table above (each shrinks
+                 * raw_rise by several to tens of degrees, orders of
+                 * magnitude past one tick) on ITS OWN merits, without
+                 * leaning on the settled gate. A shrink past this threshold
+                 * is a real reversal or disturbance, not noise, and
+                 * extrapolation_converged stays at its pessimistic false
+                 * (tau/dead_time still keep the previous iteration's
+                 * values, unaffected either way -- this only changes the
+                 * CONFIDENCE flag, never k_gain_c_per_duty itself). */
+                float quantization_threshold_c = TRACE_QUANTUM_C * tau / window_span_s;
+                float shrink_c = fabsf(raw_rise - candidate);
+                extrapolation_converged = (shrink_c <= quantization_threshold_c);
+                break; /* would shrink or reverse -- keep the current estimate, already tau-consistent */
+            }
+            bool capped = false;
+            if (fabsf(candidate) > max_rise_c) {
+                candidate = max_rise_c * rise_sign;
+                capped = true;
+            }
+            float delta = fabsf(candidate - rise_inf);
+            rise_inf = candidate;
+            /* Round-3 review fix: refit is now attempted for EVERY accepted
+             * candidate BEFORE deciding whether to stop, including one that
+             * just got capped or is about to be accepted as converged --
+             * the first version of this loop skipped straight to a `break`
+             * on those two paths, leaving tau_s/dead_time_s one iteration
+             * stale relative to the rise_inf/k_gain_c_per_duty just
+             * committed to (a smaller, uncorrected tau paired with an up-
+             * to-2x-corrected K). A refit the trace cannot support (target
+             * levels past what was actually measured) is the one case that
+             * genuinely cannot be fixed by refitting -- tau_consistent_
+             * with_gain is set false there and the loop stops, keeping the
+             * last tau/dead_time that DID fit successfully. */
+            float target28 = baseline_c + 0.283f * rise_inf;
+            float target63 = baseline_c + 0.632f * rise_inf;
+            float t28, t63;
+            bool refit_ok = false;
+            if (find_crossing_time(samples, sample_count, target28, rise_sign, &t28) &&
+                find_crossing_time(samples, sample_count, target63, rise_sign, &t63)) {
+                float refit_tau = 1.5f * (t63 - t28);
+                float refit_dead = t63 - refit_tau;
+                if (refit_dead < 0.0f) {
+                    refit_dead = 0.0f;
+                }
+                if (refit_tau > 0.0f) {
+                    tau = refit_tau;
+                    dead_time = refit_dead;
+                    refit_ok = true;
+                }
+            }
+            if (!refit_ok) {
+                tau_consistent_with_gain = false;
+                break; /* rise_inf/k_gain moved but tau/dead_time could not follow -- flagged, not silent */
+            }
+            if (delta < EXTRAPOLATION_CONVERGE_EPS_C) {
+                extrapolation_converged = true;
+                break; /* converged -- tau/dead_time already refit to match this rise_inf, above */
+            }
+            if (capped) {
+                break; /* pinned at the ceiling -- refit above already matches this capped rise_inf */
+            }
+        }
     }
 
     fopdt_model_t m;
-    m.k_gain_c_per_duty = rise / duty_step;
+    m.k_gain_c_per_duty = rise_inf / duty_step;
     m.tau_s = tau;
     m.dead_time_s = dead_time;
     m.valid = true;
+    m.settled = false; /* caller's to set -- see fopdt_model_t's own comment */
+    m.tau_consistent_with_gain = tau_consistent_with_gain;
+    m.extrapolation_converged = extrapolation_converged;
     m.invalid_reason[0] = '\0';
     return m;
 }

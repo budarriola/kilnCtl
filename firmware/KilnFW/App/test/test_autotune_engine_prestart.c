@@ -467,10 +467,17 @@ bool zones_config_set_model(uint8_t zone_index, float k_dc, float tau_s, float d
     return false;
 }
 
+/* Configurable (default false, this stub's original hardcoded behavior --
+ * same convention as s_stub_max_temp_c/s_test_sweep_active above) so
+ * test_autotune_engine_accept_gates_on_settled() below can exercise
+ * autotune_engine_accept()'s real success path, not just its early refusals
+ * (every other test in this file only reaches the "before start" or
+ * "no DONE result" refusals, which never call this stub at all). */
+static bool s_stub_set_pid_result = false;
 bool zones_config_set_pid(uint8_t zone_index, float kp, float ki, float kd)
 {
     (void)zone_index; (void)kp; (void)ki; (void)kd;
-    return false;
+    return s_stub_set_pid_result;
 }
 
 // ---------------------------------------------------------------------------
@@ -514,7 +521,7 @@ static void test_abort_is_a_silent_noop_before_start(void)
 static void test_accept_refuses_before_start(void)
 {
     TEST_SECTION("autotune_engine_accept() before start() -- refused, no crash");
-    TEST_CHECK(!autotune_engine_accept(), "accept must return false, not crash");
+    TEST_CHECK(!autotune_engine_accept(false), "accept must return false, not crash");
 }
 
 static void test_is_active_false_before_start(void)
@@ -786,6 +793,18 @@ static void write_synthetic_fopdt_trace_for_zone(uint8_t zone, float baseline_c,
     s_at.zone_baseline_valid[zone] = true;
     s_at.step_duty = duty_step;
     s_at.trace_count = n_samples;
+    /* Default ambient == baseline (the "run started cold" case) for the
+     * zone under test -- this helper bypasses the real SETTLING->STEPPING
+     * transition entirely (see this file's own header comment), which is
+     * the only place s_at.step_ambient_c is normally set, so tests that
+     * don't care about the ambient-vs-baseline distinction (added
+     * 2026-09-01, see finalize_fit()'s physical-plausibility comment) get
+     * the old baseline-referenced behavior by default. A test that DOES
+     * care (a hot-start scenario) overrides s_at.step_ambient_c itself,
+     * after calling this helper. */
+    if (zone == s_at.zone_index) {
+        s_at.step_ambient_c = baseline_c;
+    }
     for (uint16_t i = 0; i < n_samples; i++) {
         float t_s = (float)(i * AUTOTUNE_ENGINE_SAMPLE_PERIOD_S);
         float rise = (t_s <= dead_time_s)
@@ -801,17 +820,167 @@ static void write_synthetic_fopdt_trace(float baseline_c, float k_gain_c_per_dut
     write_synthetic_fopdt_trace_for_zone(0, baseline_c, k_gain_c_per_duty, tau_s, dead_time_s, duty_step, n_samples);
 }
 
+/* Same construction as test_pid_autotune.c's pid_autotune_fit_fopdt()
+ * defeat-case trace (see that file's own comment for the review's original
+ * example): a fast early rise crosses 28.3% of a 20C target almost
+ * immediately, then an unrealistically slow creep delays the 63.2%
+ * crossing deep into the trace (inflating tau into the hundreds-to-
+ * thousands of seconds), then a steeper ~0.011 degC/s tail (noise, not
+ * signal) pushes the raw last-sample rise to 20C. Feeding this through the
+ * REAL finalize_fit() -> pid_autotune_fit_fopdt() path (not hand-setting
+ * s_at.model fields, which finalize_fit() would overwrite anyway) reliably
+ * produces extrapolation_converged==false and/or tau_consistent_with_
+ * gain==false via the actual iteration/cap logic, for
+ * test_finalize_fit_skips_coupling_persist_when_extrapolation_did_not_
+ * converge() below to exercise the coupling-persist gate's real OR
+ * condition, not a hand-poked field. */
+static void write_defeat_case_trace_for_zone(uint8_t zone, float baseline_c, float duty_step)
+{
+    s_at.zone_baseline_c[zone] = baseline_c;
+    s_at.zone_baseline_valid[zone] = true;
+    s_at.step_duty = duty_step;
+    if (zone == s_at.zone_index) {
+        s_at.step_ambient_c = baseline_c;
+    }
+    float v = baseline_c + 1.0f;
+    uint16_t i = 0;
+    s_at.zone_trace[zone][i++] = (int16_t)lroundf(v * 10.0f); /* t=10s: below target28 (5.66+baseline) */
+    v = baseline_c + 6.0f;
+    s_at.zone_trace[zone][i++] = (int16_t)lroundf(v * 10.0f); /* t=20s: crosses target28 */
+    int creep_samples = 460;
+    float creep_end_v = baseline_c + 19.0f;
+    for (int k = 0; k < creep_samples; k++) {
+        float frac = (float)(k + 1) / (float)creep_samples;
+        v = (baseline_c + 6.0f) + frac * (creep_end_v - (baseline_c + 6.0f));
+        s_at.zone_trace[zone][i++] = (int16_t)lroundf(v * 10.0f);
+    }
+    for (int k = 0; k < 10; k++) {
+        v += 0.11f;
+        s_at.zone_trace[zone][i++] = (int16_t)lroundf(v * 10.0f);
+    }
+    s_at.trace_count = i;
+}
+
+/* FINAL REVIEW REQUIRED TEST -- the gap that let both wire defects and
+ * blocker 1 (extrapolation_converged wrongly false on the sign-check
+ * break) through 1385 green checks: every "clean fit is not blocked" test
+ * up to this point hand-assigns s_at.model.settled/extrapolation_converged/
+ * tau_consistent_with_gain = true directly, and the one test that derives
+ * the flags from real data (test_pid_autotune.c) feeds sim_plant's
+ * UNQUANTIZED, strictly monotonic float samples, which can never produce a
+ * negative slope_end -- so neither test category could ever exercise the
+ * quantization-noise sign flip the reviewer found.
+ *
+ * This test drives the ACTUAL firmware path end to end: a quantized
+ * synthetic trace (int16 tenths-of-a-degree, exactly what record_trace_
+ * sample()/unpack_zone_trace() produce on real hardware) through
+ * finalize_fit() (which calls the real pid_autotune_fit_fopdt()) and then
+ * through the real autotune_engine_accept(false) -- no field is hand-set.
+ * The trace is a clean K=100/tau=200/L=20 response run for 8*tau (1600s,
+ * matching the reviewer's own repro), quantized-flat at the end, with the
+ * FINAL sample dithered by -0.1, 0.0 and +0.1 degC in turn (the exact
+ * quantization noise a real MAX31856 reading rounds to). All three must
+ * ACCEPT WITHOUT ack_unsettled -- a well-converged 8-tau fit is never
+ * low-confidence regardless of which way its last quantization tick fell.
+ *
+ * Confirmed to FAIL on the -0.1 case against the pre-fix code (the sign-
+ * check break at pid_autotune.c's `(candidate * rise_sign) < (raw_rise *
+ * rise_sign)` left extrapolation_converged at its pessimistic `false`
+ * default): see this file's own build log for the exact failing output.
+ * Restoring the fix (extrapolation_converged = true on that break) makes
+ * all three dithers pass. */
+static void run_one_dither_case_end_to_end(float dither_c, const char *label)
+{
+    static MAX31856BusClass bus;
+    static SafetyLinkClass safety;
+    memset(&s_at, 0, sizeof(s_at));
+    memset(&bus, 0, sizeof(bus));
+    memset(&safety, 0, sizeof(safety));
+    s_at.lock = xSemaphoreCreateMutex();
+    TEST_CHECK(s_at.lock != NULL, "test setup: lock must be creatable");
+    s_at.zone_index = 0;
+    s_at.step_rule = AUTOTUNE_RULE_SIMC;
+    s_at.step_settled = true; /* the STEPPING-phase detector genuinely fired -- isolates the
+                               * extrapolation-flag defect from the settled gate entirely */
+
+    const float baseline_c = 25.0f;
+    const float k_gain_c_per_duty = 100.0f;
+    const float tau_s = 200.0f;
+    const float dead_time_s = 20.0f;
+    const float duty_step = 1.0f;
+    const uint16_t n_samples = (uint16_t)((8.0f * tau_s) / (float)AUTOTUNE_ENGINE_SAMPLE_PERIOD_S); /* 8*tau */
+
+    write_synthetic_fopdt_trace_for_zone(0, baseline_c, k_gain_c_per_duty, tau_s, dead_time_s, duty_step,
+                                         n_samples);
+    /* Flatten the trailing ASYMPTOTE_SLOPE_WINDOW_SAMPLES (10, generous
+     * margin over pid_autotune.c's own 6) samples to a SINGLE quantized
+     * value before dithering -- the reviewer's own repro ("settled 8tau,
+     * flat end") and the exact case a real settled kiln's near-zero
+     * residual slope quantizes down to. Without this, the natural
+     * synthetic exponential's own tiny (sub-quantum at 8*tau, but not
+     * exactly zero) residual slope can itself already be positive, which
+     * masks the sign-check branch entirely -- a first version of this test
+     * made exactly that mistake: it dithered the last sample of the RAW
+     * exponential tail, which still had enough natural upward drift in the
+     * window that slope_end never actually went negative, so the test
+     * passed identically with and without blocker 1's fix (a worthless
+     * negative test -- see this function's own investigation in the
+     * session transcript that led to this fix). Flattening first, then
+     * dithering ONLY the last sample, is what actually isolates the sign
+     * flip the reviewer measured. */
+    int16_t flat_value = s_at.zone_trace[0][n_samples - 11];
+    for (uint16_t k = n_samples - 10; k < n_samples; k++) {
+        s_at.zone_trace[0][k] = flat_value;
+    }
+    /* Dither ONLY the final (already-flattened) sample by the requested
+     * amount, in the same 0.1 degC integer units record_trace_sample()
+     * itself packs -- this is exactly the quantization-noise tick the
+     * reviewer's repro isolates, not a synthetic rewrite of the whole
+     * trace. */
+    s_at.zone_trace[0][n_samples - 1] = flat_value + (int16_t)lroundf(dither_c * 10.0f);
+
+    finalize_fit();
+
+    char msg[128];
+    snprintf(msg, sizeof(msg), "%s: the direct fit must succeed (a clean 8*tau trace)", label);
+    TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_DONE, msg);
+    if (s_at.state != AUTOTUNE_ENGINE_DONE) {
+        return;
+    }
+    snprintf(msg, sizeof(msg), "%s: sanity -- this run is genuinely settled (isolating the "
+                              "extrapolation flags)", label);
+    TEST_CHECK(s_at.model.settled, msg);
+
+    s_stub_set_pid_result = true;
+    bool accepted = autotune_engine_accept(false);
+    snprintf(msg, sizeof(msg),
+            "%s: a well-converged 8*tau fit must ACCEPT WITHOUT ack_unsettled (converged=%d "
+            "tau_ok=%d) -- quantization noise on the last sample must not gate acceptance",
+            label, (int)s_at.model.extrapolation_converged, (int)s_at.model.tau_consistent_with_gain);
+    TEST_CHECK(accepted, msg);
+    s_stub_set_pid_result = false;
+}
+
+static void test_accept_succeeds_end_to_end_regardless_of_last_sample_quantization_dither(void)
+{
+    TEST_SECTION("FINAL REVIEW: autotune_engine_accept(false) must succeed end-to-end on a clean "
+                 "8*tau fit whether the last (quantized) sample dithers -0.1, 0.0, or +0.1 degC");
+    run_one_dither_case_end_to_end(-0.1f, "dither -0.1C");
+    run_one_dither_case_end_to_end(0.0f, "dither 0.0C");
+    run_one_dither_case_end_to_end(+0.1f, "dither +0.1C");
+}
+
 static void test_finalize_fit_uses_the_requested_rule(void)
 {
     TEST_SECTION("finalize_fit() uses s_at.step_rule, not a hardcoded SIMC -- PID_EXPANSION_PLAN.md Phase 1");
-    // K=2 degC/duty, tau=200s, L=20s (well above
+    // K=50 degC/duty, tau=200s, L=20s (well above
     // AUTOTUNE_COHEN_COON_MIN_DEAD_TIME_S so Cohen-Coon does not refuse on
     // dead time), 60 samples * 10s/sample = 600s -- comfortably past 5*tau
     // so both the two-point crossing fit AND the settle band would succeed.
     memset(&s_at, 0, sizeof(s_at));
     s_at.zone_index = 0;
     s_at.step_rule = AUTOTUNE_RULE_SIMC;
-    write_synthetic_fopdt_trace(/*baseline_c=*/25.0f, /*k_gain_c_per_duty=*/2.0f, /*tau_s=*/200.0f,
+    write_synthetic_fopdt_trace(/*baseline_c=*/25.0f, /*k_gain_c_per_duty=*/50.0f, /*tau_s=*/200.0f,
                                 /*dead_time_s=*/20.0f, /*duty_step=*/1.0f, /*n_samples=*/60);
     finalize_fit();
     TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_DONE, "a well-formed trace must fit");
@@ -830,7 +999,7 @@ static void test_finalize_fit_uses_the_requested_rule(void)
     memset(&s_at, 0, sizeof(s_at));
     s_at.zone_index = 0;
     s_at.step_rule = AUTOTUNE_RULE_COHEN_COON;
-    write_synthetic_fopdt_trace(/*baseline_c=*/25.0f, /*k_gain_c_per_duty=*/2.0f, /*tau_s=*/200.0f,
+    write_synthetic_fopdt_trace(/*baseline_c=*/25.0f, /*k_gain_c_per_duty=*/50.0f, /*tau_s=*/200.0f,
                                 /*dead_time_s=*/20.0f, /*duty_step=*/1.0f, /*n_samples=*/60);
     finalize_fit();
     TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_DONE, "the same trace must fit again");
@@ -863,10 +1032,15 @@ static void test_finalize_fit_persists_valid_cross_gain_cells(void)
     s_stub_thermo_count = 3;
     s_at.zone_index = 1; // the zone under test -- the STEPPED zone
     s_at.step_rule = AUTOTUNE_RULE_SIMC;
+    // 2026-09-02 review fix (item 4): coupling persist is now gated on
+    // model.settled (s_at.step_settled) -- this test is about the persist
+    // MECHANISM (right cell, right value, diagonal untouched), not about
+    // that gate, so simulate the honest detector having genuinely fired.
+    s_at.step_settled = true;
 
-    // Zone 1 (self): K=2, tau=200s, L=20s -- the direct fit finalize_fit()
+    // Zone 1 (self): K=50, tau=200s, L=20s -- the direct fit finalize_fit()
     // needs to succeed before it ever reaches the cross-zone loop.
-    write_synthetic_fopdt_trace_for_zone(1, /*baseline_c=*/25.0f, /*k_gain_c_per_duty=*/2.0f, /*tau_s=*/200.0f,
+    write_synthetic_fopdt_trace_for_zone(1, /*baseline_c=*/25.0f, /*k_gain_c_per_duty=*/50.0f, /*tau_s=*/200.0f,
                                          /*dead_time_s=*/20.0f, /*duty_step=*/1.0f, /*n_samples=*/60);
     // Zone 0: a real, fittable cross-gain, K=0.5 (well inside
     // ZONE_COUPLING_COEFF_MAX) -- this is what must land in
@@ -917,8 +1091,11 @@ static void test_finalize_fit_routes_persist_through_flash_worker(void)
     s_stub_thermo_count = 3;
     s_at.zone_index = 1;
     s_at.step_rule = AUTOTUNE_RULE_SIMC;
+    // See test_finalize_fit_persists_valid_cross_gain_cells()'s own comment:
+    // this test is about the flash-worker ROUTING, not the settled gate.
+    s_at.step_settled = true;
 
-    write_synthetic_fopdt_trace_for_zone(1, /*baseline_c=*/25.0f, /*k_gain_c_per_duty=*/2.0f, /*tau_s=*/200.0f,
+    write_synthetic_fopdt_trace_for_zone(1, /*baseline_c=*/25.0f, /*k_gain_c_per_duty=*/50.0f, /*tau_s=*/200.0f,
                                          /*dead_time_s=*/20.0f, /*duty_step=*/1.0f, /*n_samples=*/60);
     // Two fittable peers (zone 0 and zone 2) so a per-cell submission count
     // (wrong) is distinguishable from a per-run submission count (right):
@@ -940,6 +1117,86 @@ static void test_finalize_fit_routes_persist_through_flash_worker(void)
               "this guards against)");
 
     s_stub_thermo_count = 0; // restore this file's original hardcoded default for every other test
+}
+
+/* Item (4), round-2 review: coupling-cell persistence used to run
+ * unconditionally on every DONE run, INCLUDING one that reached DONE via
+ * the max-duration backstop with model.settled==false -- the same
+ * low-confidence peer traces the (B)/(C) refusals guard on the direct fit,
+ * persisted to flash before the operator ever sees an Accept button. Same
+ * trace shape as test_finalize_fit_persists_valid_cross_gain_cells() above,
+ * but WITHOUT setting s_at.step_settled -- must persist NOTHING. */
+static void test_finalize_fit_skips_coupling_persist_when_unsettled(void)
+{
+    TEST_SECTION("(4) finalize_fit() does NOT persist cross-gain coupling cells when the fit never "
+                 "genuinely settled -- the same fits used to slip past this gate entirely");
+    memset(&s_at, 0, sizeof(s_at));
+    reset_coupling_cell_calls();
+    g_flash_worker_submit_calls = 0;
+    s_stub_thermo_count = 3;
+    s_at.zone_index = 1;
+    s_at.step_rule = AUTOTUNE_RULE_SIMC;
+    s_at.step_settled = false; /* the case under test -- max-duration backstop */
+
+    write_synthetic_fopdt_trace_for_zone(1, /*baseline_c=*/25.0f, /*k_gain_c_per_duty=*/50.0f, /*tau_s=*/200.0f,
+                                         /*dead_time_s=*/20.0f, /*duty_step=*/1.0f, /*n_samples=*/60);
+    write_synthetic_fopdt_trace_for_zone(0, /*baseline_c=*/22.0f, /*k_gain_c_per_duty=*/0.5f, /*tau_s=*/150.0f,
+                                         /*dead_time_s=*/15.0f, /*duty_step=*/1.0f, /*n_samples=*/60);
+
+    finalize_fit();
+    TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_DONE, "the direct fit itself still succeeds -- settled gates "
+                                                    "persistence, not the fit");
+    TEST_CHECK(!s_at.model.settled, "sanity: this run really is unsettled");
+    TEST_CHECK(!s_coupling_cell_calls[0][1].called,
+              "zone 0's cross-gain cell must NOT be persisted when the run never settled");
+    TEST_CHECK(g_flash_worker_submit_calls == 0,
+              "no job at all must reach the flash worker for an unsettled run's coupling cells");
+
+    s_stub_thermo_count = 0;
+}
+
+/* Round-3 follow-up: the coupling-persist gate was extended to require
+ * extrapolation_converged AND tau_consistent_with_gain too, not just
+ * settled (see finalize_fit()'s own "Argued explicitly" comment for why).
+ * Drives the REAL pid_autotune_fit_fopdt() through a defeat-case trace
+ * (write_defeat_case_trace_for_zone(), same construction as test_pid_
+ * autotune.c's own defeat case) on the DIRECT zone, with step_settled=true
+ * so settled alone would NOT have blocked persistence -- only the
+ * extension is under test here. Confirmed to FAIL (coupling persisted
+ * anyway) when finalize_fit()'s coupling-persist condition is temporarily
+ * stubbed back to `if (s_at.model.settled)` (the round-2-only gate) --
+ * restoring the three-flag condition makes it pass again. */
+static void test_finalize_fit_skips_coupling_persist_when_extrapolation_did_not_converge(void)
+{
+    TEST_SECTION("(round-3) finalize_fit() does NOT persist cross-gain coupling cells when the "
+                 "direct fit's extrapolation did not converge / tau is inconsistent, even though "
+                 "the run itself settled");
+    memset(&s_at, 0, sizeof(s_at));
+    reset_coupling_cell_calls();
+    g_flash_worker_submit_calls = 0;
+    s_stub_thermo_count = 2;
+    s_at.zone_index = 1;
+    s_at.step_rule = AUTOTUNE_RULE_SIMC;
+    s_at.step_settled = true; /* isolates the extension: settled alone must NOT be enough here */
+
+    write_defeat_case_trace_for_zone(1, /*baseline_c=*/25.0f, /*duty_step=*/1.0f);
+    write_synthetic_fopdt_trace_for_zone(0, /*baseline_c=*/22.0f, /*k_gain_c_per_duty=*/0.5f, /*tau_s=*/150.0f,
+                                         /*dead_time_s=*/15.0f, /*duty_step=*/1.0f,
+                                         /*n_samples=*/s_at.trace_count);
+
+    finalize_fit();
+    TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_DONE, "the direct fit itself still succeeds");
+    TEST_CHECK(s_at.model.settled, "sanity: settled is true -- isolating the NEW conditions specifically");
+    TEST_CHECK(!s_at.model.extrapolation_converged || !s_at.model.tau_consistent_with_gain,
+              "sanity: the defeat-case trace really does produce an unconverged/tau-inconsistent "
+              "fit -- if this fails, the trace doesn't reproduce the defeat case");
+    TEST_CHECK(!s_coupling_cell_calls[0][1].called,
+              "zone 0's cross-gain cell must NOT be persisted when the direct fit's extrapolation "
+              "is not fully trustworthy, even though the run settled");
+    TEST_CHECK(g_flash_worker_submit_calls == 0,
+              "no job at all must reach the flash worker for this run's coupling cells");
+
+    s_stub_thermo_count = 0;
 }
 
 // 2026-08-31 defect fix: finalize_fit()'s own isfinite/range guard (~line
@@ -966,7 +1223,7 @@ static void test_finalize_fit_skips_a_valid_fit_with_out_of_range_gain(void)
     s_at.zone_index = 1;
     s_at.step_rule = AUTOTUNE_RULE_SIMC;
 
-    write_synthetic_fopdt_trace_for_zone(1, /*baseline_c=*/25.0f, /*k_gain_c_per_duty=*/2.0f, /*tau_s=*/200.0f,
+    write_synthetic_fopdt_trace_for_zone(1, /*baseline_c=*/25.0f, /*k_gain_c_per_duty=*/50.0f, /*tau_s=*/200.0f,
                                          /*dead_time_s=*/20.0f, /*duty_step=*/1.0f, /*n_samples=*/60);
     // Zone 0: a fittable but WAY out-of-range gain -- ZONE_COUPLING_COEFF_MAX
     // is 100.0, this trace recovers something far past it.
@@ -1457,6 +1714,691 @@ static void test_autotune_start_on_a_down_link_does_not_claim_heat(void)
     TEST_CHECK(heat_enable_retry_pending(), "it is visible as pending instead, and retried by the watchdog");
 }
 
+// ---------------------------------------------------------------------------
+// 2026-08-31/2026-09-01: honest settle detection (A), minimum-excursion (B)
+// and physical-plausibility (C) tests -- the overshoot fix and its
+// 2026-09-01 review-fix follow-up (asymptote extrapolation, the settled
+// flag actually gating accept(), criterion 2's removal, filtered/early-
+// region-only peak-slope tracking, a re-derived noise floor, span-scaled
+// minimum excursion, an honest guard-headroom justification, ambient- not
+// baseline-referenced plausibility, and the AUTOTUNE_ENGINE_MAX_SAMPLES
+// latent defect). See autotune_engine.c's SETTLE_RELATIVE_SLOPE_FRAC/
+// AUTOTUNE_MIN_RISE_FRACTION_OF_SPAN comments and finalize_fit()'s/
+// pid_autotune_fit_fopdt()'s own comments for the full defect and fix.
+// ---------------------------------------------------------------------------
+
+/* Deliberate, clearly-labelled REPLICA of the pre-fix fixed-band detector
+ * (its constant, SETTLE_CHECK_BAND_C, no longer exists in production code --
+ * this is NOT a call into any real function) used only to prove the
+ * negative half of test_settle_detector_rejects_a_slow_constant_ramp_the_
+ * old_one_accepted() below: that the OLD logic really would have declared
+ * the test's synthetic ramp settled, so the new detector's refusal is a
+ * genuine behavior change and not a test that would have passed either way. */
+#define OLD_SETTLE_CHECK_BAND_C 1.0f
+static bool old_fixed_band_would_settle(uint8_t zone, uint16_t trace_count)
+{
+    if (trace_count < MIN_STEPPING_SAMPLES_BEFORE_SETTLE_CHECK || trace_count < SETTLE_CHECK_SAMPLES) {
+        return false;
+    }
+    float lo = 1e9f, hi = -1e9f;
+    for (uint16_t i = trace_count - SETTLE_CHECK_SAMPLES; i < trace_count; i++) {
+        int16_t dc = s_at.zone_trace[zone][i];
+        if (dc == AUTOTUNE_TRACE_TEMP_INVALID) continue;
+        float v = (float)dc / 10.0f;
+        if (v < lo) lo = v;
+        if (v > hi) hi = v;
+    }
+    return (hi - lo) <= OLD_SETTLE_CHECK_BAND_C;
+}
+
+// Drives step_settle_check_locked() (the real production seam, see its own
+// comment in autotune_engine.c for why this is called directly rather than
+// through 1000+ real ticks) one synthetic sample at a time over a slow,
+// CONSTANT-rate ramp: flat within 1.0C over any 60s (6-sample) window, but
+// unmistakably still climbing over the run as a whole (30C of rise by the
+// end). This is exactly the shape of trace a kiln's true multi-minute time
+// constant produces early on, and exactly what the fixed 1.0C absolute band
+// mistook for steady state.
+static void test_settle_detector_rejects_a_slow_constant_ramp_the_old_one_accepted(void)
+{
+    TEST_SECTION("(A) settle detector -- a slow constant-rate ramp, flat within 1.0C over any 60s "
+                 "window but still clearly rising overall, must be REJECTED by the new relative-slope "
+                 "detector even though the OLD fixed-band detector would have accepted it");
+    memset(&s_at, 0, sizeof(s_at));
+    s_at.zone_index = 0;
+    s_at.zone_baseline_c[0] = 25.0f;
+    s_at.zone_baseline_valid[0] = true;
+
+    const float baseline_c = 25.0f;
+    const float rate_c_per_s = 0.015f; /* 0.15C/10s sample -> 0.75C over the 50s (6-sample) settle window */
+    const uint16_t n_samples = 200;    /* 2000s of stepping -- rise reaches 30C, unmistakably still climbing */
+
+    bool new_detector_ever_fired = false;
+    bool old_detector_would_have_fired = false;
+    uint16_t old_detector_first_fired_at = 0;
+
+    for (uint16_t i = 0; i < n_samples; i++) {
+        float t_s = (float)i * (float)AUTOTUNE_ENGINE_SAMPLE_PERIOD_S;
+        float v = baseline_c + rate_c_per_s * t_s;
+        s_at.zone_trace[0][i] = (int16_t)lroundf(v * 10.0f);
+        s_at.trace_count = i + 1;
+        s_at.elapsed_s = (uint32_t)t_s;
+
+        if (!old_detector_would_have_fired && old_fixed_band_would_settle(0, s_at.trace_count)) {
+            old_detector_would_have_fired = true;
+            old_detector_first_fired_at = s_at.trace_count;
+        }
+        if (step_settle_check_locked()) {
+            new_detector_ever_fired = true;
+        }
+    }
+
+    TEST_CHECK(old_detector_would_have_fired,
+              "sanity: the OLD fixed-band detector really would have accepted this ramp as settled -- "
+              "if this fails, the test trace doesn't reproduce the defect");
+    TEST_CHECK(old_detector_first_fired_at == MIN_STEPPING_SAMPLES_BEFORE_SETTLE_CHECK,
+              "sanity: the old detector fired at the earliest possible sample (120s in), i.e. deep mid-transient");
+    TEST_CHECK(!new_detector_ever_fired,
+              "the new relative-slope detector must NEVER declare this constant-rate ramp settled over "
+              "the whole 2000s run -- its recent slope never decays relative to its own peak, so "
+              "criterion 1 never holds");
+}
+
+/* MANDATORY per review: a POSITIVE test that the detector actually fires on
+ * a genuine clean FOPDT step response (K=100, tau=200s, L=20s -- the same
+ * shape write_synthetic_fopdt_trace_for_zone() builds, but driven sample by
+ * sample through the real step_settle_check_locked() seam here since that
+ * helper only writes the whole array at once and this test needs to watch
+ * WHEN it first fires). Confirmed to FAIL (never fires) when step_settle_
+ * check_locked()'s body is temporarily replaced with a bare `return false;`
+ * -- restoring the real body makes it pass again; see this test's own
+ * TEST_CHECK for the exact assertion that flips. */
+static void test_settle_detector_fires_on_a_clean_exponential_no_earlier_than_3tau(void)
+{
+    TEST_SECTION("(A) settle detector -- POSITIVE: fires on a genuine clean FOPDT step response, "
+                 "no earlier than ~3*tau past dead time");
+    memset(&s_at, 0, sizeof(s_at));
+    s_at.zone_index = 0;
+
+    const float baseline_c = 25.0f;
+    const float k_gain_c_per_duty = 100.0f;
+    const float tau_s = 200.0f;
+    const float dead_time_s = 20.0f;
+    const float duty_step = 1.0f;
+    const uint16_t n_samples = 120; /* 1200s -- comfortably past dead_time + 3*tau (=620s) */
+
+    int32_t fired_at_sample = -1;
+    for (uint16_t i = 0; i < n_samples; i++) {
+        float t_s = (float)i * (float)AUTOTUNE_ENGINE_SAMPLE_PERIOD_S;
+        float rise = (t_s <= dead_time_s)
+                         ? 0.0f
+                         : k_gain_c_per_duty * duty_step * (1.0f - expf(-(t_s - dead_time_s) / tau_s));
+        s_at.zone_trace[0][i] = (int16_t)lroundf((baseline_c + rise) * 10.0f);
+        s_at.trace_count = i + 1;
+        s_at.elapsed_s = (uint32_t)t_s;
+        if (fired_at_sample < 0 && step_settle_check_locked()) {
+            fired_at_sample = (int32_t)i;
+        }
+    }
+
+    TEST_CHECK(fired_at_sample >= 0,
+              "the detector must fire at some point on a trace that genuinely reaches steady state -- "
+              "if this fails with the real (non-stubbed) detector body, something is badly wrong, not "
+              "just the review's specific complaints");
+    if (fired_at_sample >= 0) {
+        float fired_at_t_s = (float)fired_at_sample * (float)AUTOTUNE_ENGINE_SAMPLE_PERIOD_S;
+        TEST_CHECK(fired_at_t_s >= dead_time_s + 3.0f * tau_s,
+                  "must not fire earlier than dead_time + 3*tau (620s) -- firing on a genuine "
+                  "exponential before the response has actually decayed enough would be exactly the "
+                  "original mid-transient-settle defect, just with a real trace instead of a ramp");
+    }
+}
+
+/* Covers the early "peak never cleared the noise floor" gate (bails out
+ * before any ratio/floor comparison at all): a perfectly flat trace (a
+ * sensor that never moved, or heat that never actually applied) must never
+ * be declared settled, however long it runs -- there is nothing here for
+ * "settled" to mean. */
+static void test_settle_detector_never_fires_on_a_perfectly_flat_trace(void)
+{
+    TEST_SECTION("(A) settle detector -- a perfectly flat trace (peak slope never clears the noise "
+                 "floor) must never fire, however long it runs");
+    memset(&s_at, 0, sizeof(s_at));
+    s_at.zone_index = 0;
+    const uint16_t n_samples = 60;
+    for (uint16_t i = 0; i < n_samples; i++) {
+        s_at.zone_trace[0][i] = (int16_t)lroundf(25.0f * 10.0f); /* bit-identical every sample */
+        s_at.trace_count = i + 1;
+        s_at.elapsed_s = (uint32_t)i * AUTOTUNE_ENGINE_SAMPLE_PERIOD_S;
+        TEST_CHECK(!step_settle_check_locked(),
+                  "a trace that has never moved at all must never be declared settled");
+    }
+}
+
+/* Item (5) -- the re-derived noise floor. Constructs a trace whose PEAK
+ * slope (0.01 C/s, set in the first PEAK_SLOPE_WINDOW_SAMPLES) clears the
+ * floor easily, but whose RECENT slope settles to exactly one trace
+ * quantization step over the recent-slope window (0.1C / 50s = 0.002 C/s)
+ * -- deliberately too small a ratio to peak (0.002 / 0.01 = 20%, well above
+ * SETTLE_RELATIVE_SLOPE_FRAC=4%) for criterion 1's ratio arm to fire, so
+ * ONLY the absolute-floor arm can settle this trace. The OLD floor (0.0008)
+ * is SMALLER than this 0.002 quantum and would never have caught it; the
+ * NEW floor (0.003) is LARGER and does. Confirmed to FAIL when
+ * SETTLE_ABS_SLOPE_FLOOR_C_PER_S is temporarily reverted to 0.0008f --
+ * restoring 0.003f makes it pass again; see the TEST_CHECK below. */
+static void test_settle_detector_floor_arm_reachable_at_one_quantum(void)
+{
+    TEST_SECTION("(A) settle detector -- item (5): the re-derived absolute floor must be reachable by "
+                 "a real (if minimal) one-quantum recent slope, unlike the old 0.0008 constant");
+    TEST_CHECK(SETTLE_ABS_SLOPE_FLOOR_C_PER_S > 0.1f / (float)((SETTLE_CHECK_SAMPLES - 1) * AUTOTUNE_ENGINE_SAMPLE_PERIOD_S),
+              "sanity: the floor constant itself must exceed one trace-quantization step over the "
+              "recent-slope window, or the arithmetic in this test's own header comment is wrong");
+
+    memset(&s_at, 0, sizeof(s_at));
+    s_at.zone_index = 0;
+    float v = 25.0f;
+    uint16_t i = 0;
+    /* Peak-setting segment: +0.1C every sample for 5 steps (6 samples,
+     * PEAK_SLOPE_WINDOW_SAMPLES) -> 0.5C over 50s = 0.01 C/s peak, captured
+     * within the early PEAK_SLOPE_SEARCH_SAMPLES region. */
+    for (; i < PEAK_SLOPE_WINDOW_SAMPLES; i++) {
+        s_at.zone_trace[0][i] = (int16_t)lroundf(v * 10.0f);
+        v += 0.1f;
+        s_at.trace_count = i + 1;
+        s_at.elapsed_s = (uint32_t)i * AUTOTUNE_ENGINE_SAMPLE_PERIOD_S;
+        (void)step_settle_check_locked();
+    }
+    /* Continuation segment: +0.02C every sample (0.002 C/s = one recent-
+     * slope-window quantum) for the rest of the trace. */
+    bool fired = false;
+    for (; i < 60; i++) {
+        s_at.zone_trace[0][i] = (int16_t)lroundf(v * 10.0f);
+        v += 0.02f;
+        s_at.trace_count = i + 1;
+        s_at.elapsed_s = (uint32_t)i * AUTOTUNE_ENGINE_SAMPLE_PERIOD_S;
+        if (step_settle_check_locked()) {
+            fired = true;
+        }
+    }
+    TEST_CHECK(fired,
+              "must fire once the recent-slope window is entirely inside the 0.002 C/s continuation -- "
+              "the ratio arm (4% of the 0.01 C/s peak = 0.0004) cannot reach this, so only a floor "
+              "big enough to cover one real quantization step can");
+}
+
+/* Item (9) -- the AUTOTUNE_ENGINE_MAX_SAMPLES latent defect. Simulates a
+ * trace that hit the buffer cap: trace_count pinned at AUTOTUNE_ENGINE_
+ * MAX_SAMPLES with the trailing window frozen (bit-identical samples, since
+ * record_trace_sample() stopped appending -- see that function's own
+ * comment). Without the explicit guard this would read recent_slope==0 and
+ * fire true on a trace that may still have been climbing the instant it was
+ * truncated; WITH the guard it must return false unconditionally so the
+ * max-duration backstop handles it (and finalize_fit() marks it unsettled).
+ * Confirmed to FAIL (fires true) when the `trace_count >=
+ * AUTOTUNE_ENGINE_MAX_SAMPLES` guard is temporarily removed from step_
+ * settle_check_locked() -- restoring it makes this pass again. */
+static void test_settle_detector_refuses_a_frozen_full_trace(void)
+{
+    TEST_SECTION("(A) settle detector -- item (9): a trace pinned at AUTOTUNE_ENGINE_MAX_SAMPLES with a "
+                 "frozen trailing window must NOT be declared settled just because recent_slope reads 0");
+    memset(&s_at, 0, sizeof(s_at));
+    s_at.zone_index = 0;
+    s_at.trace_count = AUTOTUNE_ENGINE_MAX_SAMPLES;
+    /* A real peak earlier in the (never-recorded, out of window) trace --
+     * doesn't matter for this test since the guard must bail before this is
+     * even read, but set it anyway so a broken guard would fall through to
+     * a realistic (not degenerate-zero-peak) settle evaluation, making a
+     * regression here fail for the RIGHT reason (fires true) rather than an
+     * unrelated one (peak==0 gate). */
+    s_at.step_peak_slope_c_per_s = 0.5f;
+    s_at.step_peak_slope_at_s = 100u;
+    s_at.elapsed_s = 14400u; /* well past the peak, plausible late-run value */
+    for (uint16_t i = AUTOTUNE_ENGINE_MAX_SAMPLES - SETTLE_CHECK_SAMPLES; i < AUTOTUNE_ENGINE_MAX_SAMPLES; i++) {
+        s_at.zone_trace[0][i] = (int16_t)lroundf(180.0f * 10.0f); /* identical, frozen value */
+    }
+    TEST_CHECK(!step_settle_check_locked(),
+              "a full, frozen trace must never be declared settled -- recent_slope==0 here means the "
+              "buffer stopped recording, not that the plant stopped moving");
+}
+
+/* Item (5), round-2 review: dead time > 300s (PEAK_SLOPE_SEARCH_SAMPLES*
+ * AUTOTUNE_ENGINE_SAMPLE_PERIOD_S, the OLD fixed search-window cutoff) used
+ * to permanently disable the peak gate -- the response never got a chance
+ * to be recorded as the peak, so step_peak_slope_c_per_s stayed ~0 and the
+ * detector could never fire, however cleanly the plant went on to settle.
+ * This trace has a 400s dead time (dead_time_s=400 > 300) followed by a
+ * clean K=100/tau=100 response; the detector MUST still eventually fire,
+ * proving onset anchoring (not a fixed sample-count cutoff) is what
+ * actually gates the peak search now. Confirmed to FAIL (never fires) when
+ * step_onset_seen's own gate is temporarily stubbed to require trace_count
+ * <= PEAK_SLOPE_SEARCH_SAMPLES (the old fixed-window behavior) instead of
+ * the onset-relative window -- restoring the real onset-anchored gate makes
+ * it pass again; see the TEST_CHECK below. */
+static void test_settle_detector_fires_with_dead_time_over_300s(void)
+{
+    TEST_SECTION("(5) settle detector -- a dead time > 300s (the old fixed peak-search cutoff) must "
+                 "NOT permanently disable the detector; it must still fire once the response starts");
+    memset(&s_at, 0, sizeof(s_at));
+    s_at.zone_index = 0;
+
+    const float baseline_c = 25.0f;
+    const float k_gain_c_per_duty = 100.0f;
+    const float tau_s = 100.0f;
+    const float dead_time_s = 400.0f; /* > PEAK_SLOPE_SEARCH_SAMPLES*10s=300s -- the whole point */
+    const float duty_step = 1.0f;
+    const uint16_t n_samples = 120; /* 1200s -- dead_time(400) + ~3*tau(300) = 700s, comfortable margin */
+
+    int32_t fired_at_sample = -1;
+    for (uint16_t i = 0; i < n_samples; i++) {
+        float t_s = (float)i * (float)AUTOTUNE_ENGINE_SAMPLE_PERIOD_S;
+        float rise = (t_s <= dead_time_s)
+                         ? 0.0f
+                         : k_gain_c_per_duty * duty_step * (1.0f - expf(-(t_s - dead_time_s) / tau_s));
+        s_at.zone_trace[0][i] = (int16_t)lroundf((baseline_c + rise) * 10.0f);
+        s_at.trace_count = i + 1;
+        s_at.elapsed_s = (uint32_t)t_s;
+        if (fired_at_sample < 0 && step_settle_check_locked()) {
+            fired_at_sample = (int32_t)i;
+        }
+    }
+
+    TEST_CHECK(fired_at_sample >= 0,
+              "must eventually fire despite a 400s dead time -- the OLD fixed-30-sample search window "
+              "would leave step_peak_slope_c_per_s at 0 forever and this would never fire");
+    TEST_CHECK(s_at.step_onset_seen, "response onset must have been detected at all");
+    if (s_at.step_onset_seen) {
+        TEST_CHECK(s_at.step_onset_trace_count > PEAK_SLOPE_SEARCH_SAMPLES,
+                  "sanity: onset really did occur past sample 30 (the old fixed cutoff) -- if this "
+                  "fails, the trace's dead time isn't actually exercising the >300s case");
+    }
+}
+
+/* Item (5) sub-case, round-2 review: two coincidental quantization ticks
+ * (0.1 + 0.1 degC) landing inside one PEAK_SLOPE_WINDOW_SAMPLES window
+ * DURING dead time give a windowed slope of 0.2/50=0.004 degC/s -- above
+ * the OLD-style bare noise floor (0.003) but must NOT be mistaken for
+ * response onset (RESPONSE_ONSET_SLOPE_C_PER_S=0.009 is specifically 3x the
+ * floor so this case falls short). Confirmed to FAIL (onset falsely
+ * latches) when RESPONSE_ONSET_SLOPE_C_PER_S is temporarily stubbed down to
+ * SETTLE_ABS_SLOPE_FLOOR_C_PER_S (1x instead of 3x) -- restoring the real
+ * 3x margin makes it pass again; see the TEST_CHECK below. */
+static void test_settle_detector_ignores_two_quantum_dead_time_noise(void)
+{
+    TEST_SECTION("(5) settle detector -- two coincidental quantization ticks during dead time must "
+                 "NOT be mistaken for response onset");
+    memset(&s_at, 0, sizeof(s_at));
+    s_at.zone_index = 0;
+
+    float v = 25.0f;
+    uint16_t i = 0;
+    /* Flat for a while (well past MIN_STEPPING_SAMPLES_BEFORE_SETTLE_CHECK),
+     * simulating dead time. */
+    for (; i < 20; i++) {
+        s_at.zone_trace[0][i] = (int16_t)lroundf(v * 10.0f);
+        s_at.trace_count = i + 1;
+        s_at.elapsed_s = (uint32_t)i * AUTOTUNE_ENGINE_SAMPLE_PERIOD_S;
+        (void)step_settle_check_locked();
+    }
+    /* Two quantization ticks (+0.1C each) landing within the next
+     * PEAK_SLOPE_WINDOW_SAMPLES-sample window, then flat again -- 0.2C
+     * total over the 6-sample/50s window = 0.004 degC/s. */
+    v += 0.1f;
+    s_at.zone_trace[0][i] = (int16_t)lroundf(v * 10.0f);
+    s_at.trace_count = ++i;
+    s_at.elapsed_s = (uint32_t)(i - 1) * AUTOTUNE_ENGINE_SAMPLE_PERIOD_S;
+    (void)step_settle_check_locked();
+    v += 0.1f;
+    s_at.zone_trace[0][i] = (int16_t)lroundf(v * 10.0f);
+    s_at.trace_count = ++i;
+    s_at.elapsed_s = (uint32_t)(i - 1) * AUTOTUNE_ENGINE_SAMPLE_PERIOD_S;
+    (void)step_settle_check_locked();
+    for (; i < 30; i++) {
+        s_at.zone_trace[0][i] = (int16_t)lroundf(v * 10.0f); /* flat again */
+        s_at.trace_count = i + 1;
+        s_at.elapsed_s = (uint32_t)i * AUTOTUNE_ENGINE_SAMPLE_PERIOD_S;
+        (void)step_settle_check_locked();
+    }
+
+    TEST_CHECK(!s_at.step_onset_seen,
+              "two coincidental quantization ticks (0.004 degC/s) must NOT clear "
+              "RESPONSE_ONSET_SLOPE_C_PER_S (0.009 degC/s) -- a false onset here is exactly the "
+              "spurious mid-dead-time settle this sub-case guards against");
+}
+
+/* Item (2) -- autotune_engine_accept()'s new ack_unsettled gate. Constructs
+ * a DONE, STEP-method result whose model.settled is false (as if finalize_
+ * fit() had reached DONE via the max-duration backstop) and proves accept()
+ * refuses it without an explicit ack, then accepts it with one. Confirmed
+ * to FAIL (both calls return true) when the `!s_at.model.settled &&
+ * !ack_unsettled` gate is temporarily stubbed to `if (0)` in autotune_
+ * engine.c -- restoring the real gate makes this pass again. */
+static void test_autotune_engine_accept_gates_on_settled(void)
+{
+    TEST_SECTION("(2) autotune_engine_accept() refuses an UNSETTLED fit without ack_unsettled=true, "
+                 "and accepts it with one");
+    static MAX31856BusClass bus;
+    static SafetyLinkClass safety;
+    memset(&s_at, 0, sizeof(s_at));
+    memset(&bus, 0, sizeof(bus));
+    memset(&safety, 0, sizeof(safety));
+    s_at.lock = xSemaphoreCreateMutex();
+    TEST_CHECK(s_at.lock != NULL, "test setup: lock must be creatable");
+    s_at.state = AUTOTUNE_ENGINE_DONE;
+    s_at.method = AUTOTUNE_METHOD_STEP;
+    s_at.zone_index = 0;
+    s_at.model.valid = true;
+    s_at.model.settled = false; /* the case under test -- isolated: the other two read true */
+    s_at.model.extrapolation_converged = true;
+    s_at.model.tau_consistent_with_gain = true;
+    s_at.model.k_gain_c_per_duty = 10.0f;
+    s_at.model.tau_s = 100.0f;
+    s_at.model.dead_time_s = 5.0f;
+
+    s_stub_set_pid_result = true; /* so a would-be-successful accept has something to report */
+    bool refused = autotune_engine_accept(false);
+    TEST_CHECK(!refused, "an unsettled STEP result must be refused without ack_unsettled");
+    TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_DONE, "a refused accept must not have reset the engine to IDLE");
+
+    bool accepted = autotune_engine_accept(true);
+    TEST_CHECK(accepted, "the SAME unsettled result must be accepted once ack_unsettled=true");
+    TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_IDLE, "a successful accept resets the engine to IDLE");
+    s_stub_set_pid_result = false; /* restore this file's default for every other test */
+}
+
+/* Round-3 follow-up: the SAME gate, isolating extrapolation_converged ==
+ * false (settled and tau_consistent both true) -- proves the gate was
+ * genuinely EXTENDED to this flag, not left checking settled alone.
+ * Confirmed to FAIL (both calls return true) when the `!converged` half of
+ * the gate's OR is temporarily stubbed to `false` in autotune_engine.c --
+ * restoring it makes this pass again. */
+static void test_autotune_engine_accept_gates_on_extrapolation_converged(void)
+{
+    TEST_SECTION("(round-3) autotune_engine_accept() refuses a fit whose extrapolation did not "
+                 "converge, without ack_unsettled=true, and accepts it with one");
+    static MAX31856BusClass bus;
+    static SafetyLinkClass safety;
+    memset(&s_at, 0, sizeof(s_at));
+    memset(&bus, 0, sizeof(bus));
+    memset(&safety, 0, sizeof(safety));
+    s_at.lock = xSemaphoreCreateMutex();
+    TEST_CHECK(s_at.lock != NULL, "test setup: lock must be creatable");
+    s_at.state = AUTOTUNE_ENGINE_DONE;
+    s_at.method = AUTOTUNE_METHOD_STEP;
+    s_at.zone_index = 0;
+    s_at.model.valid = true;
+    s_at.model.settled = true;
+    s_at.model.extrapolation_converged = false; /* the case under test -- isolated */
+    s_at.model.tau_consistent_with_gain = true;
+    s_at.model.k_gain_c_per_duty = 10.0f;
+    s_at.model.tau_s = 100.0f;
+    s_at.model.dead_time_s = 5.0f;
+
+    s_stub_set_pid_result = true;
+    bool refused = autotune_engine_accept(false);
+    TEST_CHECK(!refused, "an unconverged extrapolation must be refused without ack_unsettled, even "
+                         "though settled and tau_consistent are both true");
+    TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_DONE, "a refused accept must not have reset the engine to IDLE");
+
+    bool accepted = autotune_engine_accept(true);
+    TEST_CHECK(accepted, "the SAME result must be accepted once ack_unsettled=true");
+    TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_IDLE, "a successful accept resets the engine to IDLE");
+    s_stub_set_pid_result = false;
+}
+
+/* Round-3 follow-up: the SAME gate, isolating tau_consistent_with_gain ==
+ * false (settled and extrapolation_converged both true). Confirmed to FAIL
+ * (both calls return true) when the `!tau_ok` half of the gate's OR is
+ * temporarily stubbed to `false` in autotune_engine.c -- restoring it makes
+ * this pass again. */
+static void test_autotune_engine_accept_gates_on_tau_consistent(void)
+{
+    TEST_SECTION("(round-3) autotune_engine_accept() refuses a fit whose tau is inconsistent with "
+                 "the corrected gain, without ack_unsettled=true, and accepts it with one");
+    static MAX31856BusClass bus;
+    static SafetyLinkClass safety;
+    memset(&s_at, 0, sizeof(s_at));
+    memset(&bus, 0, sizeof(bus));
+    memset(&safety, 0, sizeof(safety));
+    s_at.lock = xSemaphoreCreateMutex();
+    TEST_CHECK(s_at.lock != NULL, "test setup: lock must be creatable");
+    s_at.state = AUTOTUNE_ENGINE_DONE;
+    s_at.method = AUTOTUNE_METHOD_STEP;
+    s_at.zone_index = 0;
+    s_at.model.valid = true;
+    s_at.model.settled = true;
+    s_at.model.extrapolation_converged = true;
+    s_at.model.tau_consistent_with_gain = false; /* the case under test -- isolated */
+    s_at.model.k_gain_c_per_duty = 10.0f;
+    s_at.model.tau_s = 100.0f;
+    s_at.model.dead_time_s = 5.0f;
+
+    s_stub_set_pid_result = true;
+    bool refused = autotune_engine_accept(false);
+    TEST_CHECK(!refused, "a tau-inconsistent fit must be refused without ack_unsettled, even though "
+                         "settled and extrapolation_converged are both true");
+    TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_DONE, "a refused accept must not have reset the engine to IDLE");
+
+    bool accepted = autotune_engine_accept(true);
+    TEST_CHECK(accepted, "the SAME result must be accepted once ack_unsettled=true");
+    TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_IDLE, "a successful accept resets the engine to IDLE");
+    s_stub_set_pid_result = false;
+}
+
+/* MANDATORY positive case (explicitly requested): a fully clean result --
+ * settled, converged, AND tau-consistent, all true -- must be accepted
+ * WITHOUT ack_unsettled at all. The failure mode a gate like this must
+ * never have is "nobody can open it even when they shouldn't need to";
+ * this is the test that would catch a gate accidentally left requiring
+ * ack_unsettled unconditionally (e.g. an `||` that should have been `&&`,
+ * or a stray `!` on one of the three conditions). */
+static void test_autotune_engine_accept_does_not_block_a_fully_clean_fit(void)
+{
+    TEST_SECTION("(round-3) autotune_engine_accept() must NOT require ack_unsettled for a fit that "
+                 "is settled, converged, AND tau-consistent -- a gate nobody can open is worse than "
+                 "no gate");
+    static MAX31856BusClass bus;
+    static SafetyLinkClass safety;
+    memset(&s_at, 0, sizeof(s_at));
+    memset(&bus, 0, sizeof(bus));
+    memset(&safety, 0, sizeof(safety));
+    s_at.lock = xSemaphoreCreateMutex();
+    TEST_CHECK(s_at.lock != NULL, "test setup: lock must be creatable");
+    s_at.state = AUTOTUNE_ENGINE_DONE;
+    s_at.method = AUTOTUNE_METHOD_STEP;
+    s_at.zone_index = 0;
+    s_at.model.valid = true;
+    s_at.model.settled = true;
+    s_at.model.extrapolation_converged = true;
+    s_at.model.tau_consistent_with_gain = true;
+    s_at.model.k_gain_c_per_duty = 10.0f;
+    s_at.model.tau_s = 100.0f;
+    s_at.model.dead_time_s = 5.0f;
+
+    s_stub_set_pid_result = true;
+    bool accepted = autotune_engine_accept(false);
+    TEST_CHECK(accepted, "a fully clean fit must be accepted with ack_unsettled=false -- the common, "
+                         "healthy path must never require the acknowledgement checkbox");
+    TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_IDLE, "a successful accept resets the engine to IDLE");
+    s_stub_set_pid_result = false;
+}
+
+static void test_min_excursion_refuses_a_fit_below_the_rise_floor(void)
+{
+    TEST_SECTION("(B) minimum-excursion requirement -- a fit whose total rise is below the "
+                 "(now span-scaled) minimum must be refused, through the existing abort-reason channel");
+
+    /* No-ceiling case: threshold is the bare AUTOTUNE_MIN_RISE_NO_CEILING_C
+     * fallback (40.0C). K=1.0, duty=1.0 -> rise=1.0C: comfortably above
+     * pid_autotune_fit_fopdt()'s OWN 0.5C noise floor (the two-point fit
+     * itself succeeds), but far below the fallback. */
+    memset(&s_at, 0, sizeof(s_at));
+    s_at.zone_index = 0;
+    s_at.step_rule = AUTOTUNE_RULE_SIMC;
+    s_at.guard_cfg.max_temp_c = 0.0f;
+    write_synthetic_fopdt_trace_for_zone(0, /*baseline_c=*/25.0f, /*k_gain_c_per_duty=*/1.0f, /*tau_s=*/200.0f,
+                                         /*dead_time_s=*/20.0f, /*duty_step=*/1.0f, /*n_samples=*/60);
+    finalize_fit();
+    TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_ABORTED, "a below-floor rise must abort the run, not accept the fit");
+    TEST_CHECK(strstr(s_at.abort_reason, "rise") != NULL,
+              "the refusal is surfaced through the existing abort_reason channel with a specific reason "
+              "mentioning the rise");
+
+    /* Span-scaled case -- the whole point of item (6): a 22C rise (one of
+     * the TWO REAL incidents this pass exists to fix, k_dc=21.74 -- see
+     * this file's autotune_engine.c AUTOTUNE_MIN_RISE_FRACTION_OF_SPAN
+     * comment) must be refused when the configured max_temp_c gives it a
+     * large headroom (1200C nameplate, 25C baseline -> headroom 1175C,
+     * 15% of that is 176.25C -- 22C is nowhere close). The OLD bare 3.0C
+     * constant would have accepted this rise outright; this is exactly the
+     * regression the reviewer's audit caught. */
+    memset(&s_at, 0, sizeof(s_at));
+    s_at.zone_index = 0;
+    s_at.step_rule = AUTOTUNE_RULE_SIMC;
+    s_at.guard_cfg.max_temp_c = 1200.0f;
+    write_synthetic_fopdt_trace_for_zone(0, /*baseline_c=*/25.0f, /*k_gain_c_per_duty=*/22.0f, /*tau_s=*/200.0f,
+                                         /*dead_time_s=*/20.0f, /*duty_step=*/1.0f, /*n_samples=*/60);
+    finalize_fit();
+    TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_ABORTED,
+              "a 22C rise (one of the two real incident gains) must be refused against a 1200C-ceiling "
+              "zone's scaled threshold -- the old bare 3.0C floor would have accepted it");
+    TEST_CHECK(strstr(s_at.abort_reason, "rise") != NULL, "refusal reason mentions the rise, same channel");
+
+    /* Positive control: a rise comfortably above the SAME zone's scaled
+     * (B) threshold (176.25C) AND large enough that ambient(25C) + K also
+     * clears the (C) plausibility check against the same 1200C ceiling
+     * (K=1200 -> implied max 1225C) -- proves (B)'s threshold is a real,
+     * fraction-scaled minimum, not a disguised blanket refusal, without
+     * accidentally exercising (C)'s unrelated check instead. */
+    memset(&s_at, 0, sizeof(s_at));
+    s_at.zone_index = 0;
+    s_at.step_rule = AUTOTUNE_RULE_SIMC;
+    s_at.guard_cfg.max_temp_c = 1200.0f;
+    write_synthetic_fopdt_trace_for_zone(0, /*baseline_c=*/25.0f, /*k_gain_c_per_duty=*/1200.0f, /*tau_s=*/200.0f,
+                                         /*dead_time_s=*/20.0f, /*duty_step=*/1.0f, /*n_samples=*/60);
+    finalize_fit();
+    TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_DONE,
+              "positive control: a 1200C rise against the same 1200C-ceiling zone clears both the "
+              "scaled (B) threshold and the (C) plausibility check, and must still fit");
+}
+
+static void test_physical_plausibility_refuses_gain_implying_ceiling_below_max_temp(void)
+{
+    TEST_SECTION("(C) physical plausibility -- a fitted gain implying less than max_temp_c at full "
+                 "duty must be refused, naming both numbers; max_temp_c==0 (guard DISABLED, not a "
+                 "0-degree ceiling) must NOT trigger the check");
+    /* Case 1: implausible -- K~=100, baseline=25=ambient (this helper
+     * defaults ambient to baseline -- see write_synthetic_fopdt_trace_for_
+     * zone()'s own comment; a dedicated hot-start test below covers the
+     * ambient-vs-baseline distinction itself) -> implied max ~=125C, but the
+     * zone's configured ceiling is 500C. K raised from the original 5.0 to
+     * 100.0 so this trace also clears (B)'s now-scaled minimum-excursion
+     * floor (0.15 * (500-25) = 71.25C) and reaches the (C) check under test
+     * at all. The two-point fit's recovered K is not bit-exact to the
+     * synthetic K fed in (discrete 10s sampling + linear crossing
+     * interpolation), so the expected implied-max string is built from the
+     * SAME trace's actual fitted model (obtained with the check disarmed via
+     * max_temp_c=0 below) rather than hardcoded, so this test cannot flake
+     * on fit-precision noise. */
+    memset(&s_at, 0, sizeof(s_at));
+    s_at.zone_index = 0;
+    s_at.step_rule = AUTOTUNE_RULE_SIMC;
+    s_at.guard_cfg.max_temp_c = 0.0f;
+    write_synthetic_fopdt_trace_for_zone(0, /*baseline_c=*/25.0f, /*k_gain_c_per_duty=*/100.0f, /*tau_s=*/200.0f,
+                                         /*dead_time_s=*/20.0f, /*duty_step=*/1.0f, /*n_samples=*/60);
+    finalize_fit();
+    TEST_CHECK(s_at.model.valid, "sanity: the fit itself must succeed before the plausibility case matters");
+    float implied_max_c = 25.0f + s_at.model.k_gain_c_per_duty;
+    char expect_implied[32], expect_limit[32];
+    snprintf(expect_implied, sizeof(expect_implied), "%.1fC", (double)implied_max_c);
+    snprintf(expect_limit, sizeof(expect_limit), "%.1fC", 500.0);
+
+    memset(&s_at, 0, sizeof(s_at));
+    s_at.zone_index = 0;
+    s_at.step_rule = AUTOTUNE_RULE_SIMC;
+    s_at.guard_cfg.max_temp_c = 500.0f;
+    write_synthetic_fopdt_trace_for_zone(0, /*baseline_c=*/25.0f, /*k_gain_c_per_duty=*/100.0f, /*tau_s=*/200.0f,
+                                         /*dead_time_s=*/20.0f, /*duty_step=*/1.0f, /*n_samples=*/60);
+    finalize_fit();
+    TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_ABORTED, "an implausible gain must refuse, not accept the fit");
+    TEST_CHECK(strstr(s_at.abort_reason, expect_implied) != NULL, "abort reason names the implied ceiling");
+    TEST_CHECK(strstr(s_at.abort_reason, expect_limit) != NULL, "abort reason names the configured max_temp_c (500.0C)");
+
+    /* Case 2: the ZERO-SEMANTICS TRAP -- max_temp_c == 0 means the guard is
+     * DISABLED, not "a ceiling of zero degrees". The IDENTICAL implausible
+     * gain must NOT be refused by this check when no ceiling is configured. */
+    memset(&s_at, 0, sizeof(s_at));
+    s_at.zone_index = 0;
+    s_at.step_rule = AUTOTUNE_RULE_SIMC;
+    s_at.guard_cfg.max_temp_c = 0.0f;
+    write_synthetic_fopdt_trace_for_zone(0, /*baseline_c=*/25.0f, /*k_gain_c_per_duty=*/100.0f, /*tau_s=*/200.0f,
+                                         /*dead_time_s=*/20.0f, /*duty_step=*/1.0f, /*n_samples=*/60);
+    finalize_fit();
+    TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_DONE,
+              "max_temp_c == 0 (guard disabled) must NOT trigger the plausibility refusal");
+    TEST_CHECK(s_at.model.valid, "the fit itself is unaffected by the check being skipped");
+}
+
+/* (8) 2026-09-01 review fix: implied_max_c must be referenced to AMBIENT,
+ * not to baseline_c -- a hot-start re-tune (the zone was already partway up
+ * a firing when the step test began) makes baseline_c >> true ambient, and
+ * a BASELINE-referenced check inflates implied_max_c by exactly that gap,
+ * letting a bad (too-low) fit slip through plausible-looking. This trace is
+ * constructed so the two references disagree about the verdict: baseline
+ * (200C, a hot start) + K (100C) = 300C, ABOVE the 250C configured ceiling
+ * (would PASS, wrongly); ambient (25C, the true room temperature captured
+ * at SETTLING->STEPPING) + K (100C) = 125C, BELOW the ceiling (correctly
+ * ABORTS). */
+static void test_physical_plausibility_uses_ambient_not_baseline_on_a_hot_start(void)
+{
+    TEST_SECTION("(C) physical plausibility is referenced to ambient, not baseline_c -- a hot-start "
+                 "re-tune must not let a bad fit through just because the zone was already warm");
+    memset(&s_at, 0, sizeof(s_at));
+    s_at.zone_index = 0;
+    s_at.step_rule = AUTOTUNE_RULE_SIMC;
+    s_at.guard_cfg.max_temp_c = 250.0f;
+    write_synthetic_fopdt_trace_for_zone(0, /*baseline_c=*/200.0f, /*k_gain_c_per_duty=*/100.0f, /*tau_s=*/200.0f,
+                                         /*dead_time_s=*/20.0f, /*duty_step=*/1.0f, /*n_samples=*/60);
+    /* Override the helper's default (ambient == baseline) with a genuine
+     * cold ambient reading -- exactly what the real SETTLING->STEPPING
+     * transition captures via cj_c when a run starts mid-firing. */
+    s_at.step_ambient_c = 25.0f;
+    finalize_fit();
+
+    TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_ABORTED,
+              "ambient (25C) + K (100C) = 125C is below the 250C ceiling -- must refuse. A "
+              "baseline-referenced check (200C + 100C = 300C) would have wrongly accepted this fit");
+    /* "zone limit" (not "max_temp_c" literally -- see the real message in
+     * finalize_fit()'s (C) block) is unique to THIS check's abort message,
+     * distinguishing it from (B)'s "minimum needed to trust" refusal. */
+    TEST_CHECK(strstr(s_at.abort_reason, "zone limit") != NULL, "refused through the same (C) channel");
+}
+
+static void test_model_settled_flag_reflects_step_settled(void)
+{
+    TEST_SECTION("finalize_fit() sets fopdt_model_t.settled from s_at.step_settled -- a fit that "
+                 "reached finalize_fit() via the max-duration backstop (step_settled never set by the "
+                 "detector) must NOT be silently reported as steady state");
+    memset(&s_at, 0, sizeof(s_at));
+    s_at.zone_index = 0;
+    s_at.step_rule = AUTOTUNE_RULE_SIMC;
+    s_at.step_settled = false; /* simulates the AUTOTUNE_ENGINE_DEFAULT_MAX_DURATION_S backstop path */
+    write_synthetic_fopdt_trace_for_zone(0, /*baseline_c=*/25.0f, /*k_gain_c_per_duty=*/50.0f, /*tau_s=*/200.0f,
+                                         /*dead_time_s=*/20.0f, /*duty_step=*/1.0f, /*n_samples=*/60);
+    finalize_fit();
+    TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_DONE, "the fit itself still succeeds -- settled is a flag, not a gate");
+    TEST_CHECK(!s_at.model.settled, "settled must read false -- this run never satisfied the detector");
+
+    memset(&s_at, 0, sizeof(s_at));
+    s_at.zone_index = 0;
+    s_at.step_rule = AUTOTUNE_RULE_SIMC;
+    s_at.step_settled = true; /* simulates the honest detector having genuinely fired */
+    write_synthetic_fopdt_trace_for_zone(0, /*baseline_c=*/25.0f, /*k_gain_c_per_duty=*/50.0f, /*tau_s=*/200.0f,
+                                         /*dead_time_s=*/20.0f, /*duty_step=*/1.0f, /*n_samples=*/60);
+    finalize_fit();
+    TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_DONE, "the fit succeeds here too");
+    TEST_CHECK(s_at.model.settled, "settled must read true -- carried through from s_at.step_settled");
+}
+
 void run_test_autotune_engine_prestart(void)
 {
     test_run_refuses_before_start();
@@ -1473,11 +2415,29 @@ void run_test_autotune_engine_prestart(void)
     // would invalidate the "before start" premise of everything above it.
     test_run_rejects_relay_only_rules_on_step_path();
     test_step_run_accepts_simc_and_cohen_coon_and_stores_the_rule();
+    test_accept_succeeds_end_to_end_regardless_of_last_sample_quantization_dither();
     test_finalize_fit_uses_the_requested_rule();
     test_finalize_fit_persists_valid_cross_gain_cells();
     test_finalize_fit_routes_persist_through_flash_worker();
+    test_finalize_fit_skips_coupling_persist_when_unsettled();
+    test_finalize_fit_skips_coupling_persist_when_extrapolation_did_not_converge();
     test_finalize_fit_skips_a_valid_fit_with_out_of_range_gain();
     test_finalize_fit_persists_nothing_on_an_invalid_direct_fit();
+    test_settle_detector_rejects_a_slow_constant_ramp_the_old_one_accepted();
+    test_settle_detector_fires_on_a_clean_exponential_no_earlier_than_3tau();
+    test_settle_detector_never_fires_on_a_perfectly_flat_trace();
+    test_settle_detector_floor_arm_reachable_at_one_quantum();
+    test_settle_detector_refuses_a_frozen_full_trace();
+    test_settle_detector_fires_with_dead_time_over_300s();
+    test_settle_detector_ignores_two_quantum_dead_time_noise();
+    test_autotune_engine_accept_gates_on_settled();
+    test_autotune_engine_accept_gates_on_extrapolation_converged();
+    test_autotune_engine_accept_gates_on_tau_consistent();
+    test_autotune_engine_accept_does_not_block_a_fully_clean_fit();
+    test_min_excursion_refuses_a_fit_below_the_rise_floor();
+    test_physical_plausibility_refuses_gain_implying_ceiling_below_max_temp();
+    test_physical_plausibility_uses_ambient_not_baseline_on_a_hot_start();
+    test_model_settled_flag_reflects_step_settled();
     test_next_run_clears_prior_runs_refusal();
     test_step_no_ceiling_flat_reading_trips_guard1();
     test_step_max_temp_configured_flat_reading_still_trips_guard1();

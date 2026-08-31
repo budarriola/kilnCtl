@@ -124,8 +124,39 @@
  * 1-13 and their payloads are UNCHANGED; bumped for the same reason Version
  * 4/5 were -- an old PC build that has never heard of task_id 14 would
  * otherwise report a false "compatible" against firmware whose new command
- * it cannot use. */
-#define UART_PROTOCOL_VERSION ((uint16_t)8)
+ * it cannot use.
+ *
+ * Version 9 (2026-09-02): AUTOTUNE_CMD_GET_STATUS's reply (uart_bridge_ext.c
+ * autotune_build_status()) grows one trailing byte (model_settled, appended
+ * genuinely AFTER the existing length-prefixed abort_reason string, never
+ * before it -- see that function's own comment for the CORRUPTION this
+ * fixes: an earlier draft of this same change inserted the byte before
+ * abort_reason instead, silently shifting its length-prefix offset and
+ * corrupting every abort reason this frame carries). AUTOTUNE_CMD_ACCEPT's
+ * request also grows one optional trailing byte (ack_unsettled). This is a
+ * LAYOUT change to two existing frames, not even additive the way Version
+ * 4/5/8's new task_ids were -- bumped for the same reason those were, more
+ * urgently: an old PC build reading a new GET_STATUS reply under the OLD
+ * layout would not even hit this new byte (harmless), but a NEW PC build
+ * reading an OLD (v8) firmware's reply would read one byte past the actual
+ * frame end for model_settled -- exactly what the exact-match version gate
+ * exists to refuse before either side tries to parse anything.
+ *
+ * Version 10 (2026-09-02, same day, round-3 follow-up): AUTOTUNE_CMD_
+ * GET_STATUS's reply grows TWO more trailing bytes -- extrapolation_
+ * converged and tau_consistent_with_gain (fopdt_model_t's own fields,
+ * pid_autotune.h) -- genuinely appended after model_settled, itself already
+ * after abort_reason's length-prefixed string, same append-only discipline
+ * Version 9 established. These fold into autotune_engine_accept()'s
+ * ack_unsettled gate alongside settled (autotune_engine.h's own comment on
+ * that function), so a PC-side caller needs all three, distinctly, to tell
+ * an operator WHICH condition is unmet before they acknowledge it -- not
+ * collapsed into the one settled bit. A second layout change to the same
+ * frame in one day is exactly why this constant exists as a plain,
+ * hand-bumped literal rather than something inferred from "did the byte
+ * count change": the safe default is bump-on-every-layout-change, not
+ * bump-once-per-day. */
+#define UART_PROTOCOL_VERSION ((uint16_t)10)
 
 #define UART_TASK_ID_THERMO   1u  /* MAX31856 x3 on the thermocouple board (J6) */
 #define UART_TASK_ID_IO       2u  /* SX1509 expander: relays, digital I/O, DRDY */

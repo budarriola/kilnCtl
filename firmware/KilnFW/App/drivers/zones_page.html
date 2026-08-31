@@ -366,6 +366,22 @@ across a band twice this wide)</label>
 
 <h3>Run status</h3>
 <button id="atAbortBtn" type="button">Abort</button>
+<!-- Shown only when a DONE step-test result never genuinely settled (it
+     ended via the 4h max-duration backstop, not a real steady-state read --
+     see fopdt_model_t::settled's own comment on the firmware side). Accept
+     refuses such a fit unless this box is checked, which is sent as the
+     POST body's ack_unsettled=1 -- a deliberate operator choice, not the
+     default, same reasoning as the firmware-side gate this mirrors. -->
+<label id="atUnsettledLabel" class="verdict-bad" style="display:none;">
+  <input type="checkbox" id="atAckUnsettled"/>
+  <!-- span, not the label's own textContent: pollAutotune() rewrites this
+       span's text every poll to say WHICH condition(s) are unmet (settled/
+       extrapolation_converged/tau_consistent -- see that function's own
+       comment), and textContent on the LABEL itself would silently delete
+       the checkbox above (a child node), disabling the accept flow with no
+       visible error. -->
+  <span id="atUnsettledReason">This fit is not fully trustworthy -- accept it anyway?</span>
+</label>
 <button id="atAcceptBtn" type="button" disabled>Accept proposed gains</button>
 <!-- kc-live-value on the whole paragraph rather than per-field spans: while
      a test is running this line IS the live status (elapsed time, sample
@@ -1548,10 +1564,32 @@ var AT_STATE_NAMES = { idle: 'Idle.', settling: 'Settling at zero duty before st
   relay_cycling: 'Relay test: oscillating around the setpoint and recording…',
   done: 'Done -- gains proposed below.', aborted: 'Aborted.' };
 
+/* Single source of truth for whether Accept may be clicked -- read by BOTH
+   pollAutotune() (after every 3s status refresh) and the ack-checkbox's own
+   change handler (so ticking/unticking the box takes effect immediately,
+   not on the next poll). Before this, the checkbox handler set
+   acceptBtn.disabled = !this.checked directly, which ignored state/
+   model_valid/refused entirely -- ticking the box on ANY finished run
+   (including a DONE-but-refused-by-the-tuning-rule fit, e.g. "dead time
+   below what Cohen-Coon needs") enabled Accept regardless of whether the
+   underlying fit was usable at all. These three booleans are the same
+   condition acceptBtn.disabled is set to below; a settled fit is never
+   blocked here (atLastUnsettled stays false), so this can never make
+   Accept MORE restrictive than before, only prevent it from being
+   incorrectly unblocked. */
+var atLastDoneModelValid = false;
+var atLastRefused = false;
+var atLastUnsettled = false;
+function updateAcceptButtonEnabled() {
+  var acceptBtn = document.getElementById('atAcceptBtn');
+  var ackBox = document.getElementById('atAckUnsettled');
+  acceptBtn.disabled = !atLastDoneModelValid || atLastRefused ||
+                        (atLastUnsettled && !ackBox.checked);
+}
+
 function pollAutotune() {
   fetch('/api/autotune').then(function (r) { return r.json(); }).then(function (s) {
     var el = document.getElementById('atStatus');
-    var acceptBtn = document.getElementById('atAcceptBtn');
     var refusalEl = document.getElementById('atRefusal');
     /* refusal is "ok" on a healthy tune; absent entirely on older firmware
        that predates this field. Either case means nothing to show. A present
@@ -1581,6 +1619,63 @@ function pollAutotune() {
     if (s.state === 'aborted' && s.abort_reason) {
       line += ' Reason: ' + s.abort_reason;
     }
+    var unsettledLabel = document.getElementById('atUnsettledLabel');
+    var ackBox = document.getElementById('atAckUnsettled');
+    // model_settled/model_extrapolation_converged/model_tau_consistent are
+    // only meaningful for a DONE step-test model_valid result -- absent
+    // entirely on older firmware (predates these fields, same "field
+    // missing means nothing to show" convention as `refusal` above), and
+    // False by default in every other state, which must NOT be read as a
+    // real failure (there is no fit yet to judge). Evaluated (and the
+    // label hidden/shown) BEFORE the relay-DONE early return below -- a
+    // relay result is never `unsettled` (method !== 'relay' already
+    // excludes it), but the label/checkbox still need resetting on the
+    // FIRST poll that reports a relay run, or a checkbox left visible+
+    // checked from a PRIOR step run would stay stuck on screen (and its
+    // change handler would still be live) through the early return.
+    //
+    // Three independent conditions, same ack_unsettled acknowledgement
+    // (autotune_engine_accept()'s own comment -- ONE gate, not three) --
+    // named individually here so the operator can tell WHICH one is unmet,
+    // not just that something is, matching what the wire status/JSON now
+    // surface distinctly rather than collapsing into one bit.
+    var isStepDone = (s.state === 'done' && s.model_valid && s.method !== 'relay');
+    var unmetReasons = [];
+    if (isStepDone && s.model_settled === false) {
+      unmetReasons.push('never reached steady state (ended by the 4-hour time limit)');
+    }
+    if (isStepDone && s.model_extrapolation_converged === false) {
+      unmetReasons.push('the gain correction did not fully converge');
+    }
+    if (isStepDone && s.model_tau_consistent === false) {
+      unmetReasons.push('tau/dead-time could not be matched to the corrected gain');
+    }
+    var unsettled = unmetReasons.length > 0;
+    if (unsettled) {
+      document.getElementById('atUnsettledReason').textContent =
+        'This fit is not fully trustworthy: ' + unmetReasons.join('; ') + '. Accept it anyway?';
+      unsettledLabel.style.display = '';
+    } else {
+      unsettledLabel.style.display = 'none';
+      ackBox.checked = false;
+    }
+    // finalize_relay_fit() (autotune_engine.c) never sets s_at.model.valid
+    // -- a relay run measures no plant model at all (see that function's
+    // own comment: "no K, no tau, no L"), so model_valid stays false for
+    // EVERY relay result, forever. The firmware's own accept() gate already
+    // exempts relay entirely (autotune_engine_accept() only applies its
+    // three-flag check `if (s_at.method == AUTOTUNE_METHOD_STEP)`), so this
+    // condition must check relay_valid for a relay run and model_valid for
+    // a step run, not model_valid unconditionally -- the latter made
+    // Accept permanently unclickable for every relay autotune (final review
+    // finding). unsettled is unaffected: it is already gated to
+    // `s.method !== 'relay'` above, so a relay result is never held back by
+    // the ack_unsettled checkbox either.
+    atLastDoneModelValid = (s.state === 'done') &&
+                           (s.method === 'relay' ? s.relay_valid : s.model_valid);
+    atLastRefused = refused;
+    atLastUnsettled = unsettled;
+
     if (s.state === 'done' && s.method === 'relay' && s.relay_valid) {
       // relay_h_c is a hysteresis HALF-WIDTH (a delta/span, like the ramp
       // rates elsewhere), not an absolute temperature reading, so it is left
@@ -1595,7 +1690,7 @@ function pollAutotune() {
               '. No plant model measured -- accepting writes gains only. ' +
               '<a href="/api/autotune/trace.csv">Download trace CSV</a>';
       el.innerHTML = line;
-      acceptBtn.disabled = refused;
+      updateAcceptButtonEnabled();
       return;
     }
     if (s.state === 'done' && s.model_valid) {
@@ -1608,7 +1703,7 @@ function pollAutotune() {
     } else {
       el.textContent = line;
     }
-    acceptBtn.disabled = !(s.state === 'done' && s.model_valid) || refused;
+    updateAcceptButtonEnabled();
   }).catch(function () {});
 }
 setInterval(pollAutotune, 3000);
@@ -1840,8 +1935,26 @@ document.getElementById('atRelayStartBtn').addEventListener('click', function ()
 document.getElementById('atAbortBtn').addEventListener('click', function () {
   fetch('/api/autotune/abort', { method: 'POST' }).then(pollAutotune).catch(function () {});
 });
+document.getElementById('atAckUnsettled').addEventListener('change', function () {
+  // Re-evaluate the FULL enable condition immediately on a checkbox toggle
+  // instead of waiting for the next 3s poll -- the operator just made the
+  // decision this checkbox exists to require, and the button should
+  // reflect it now. Reuses updateAcceptButtonEnabled() (the SAME
+  // state/model_valid/refused/unsettled condition pollAutotune() sets
+  // after every status refresh) rather than setting `disabled` from
+  // `this.checked` alone -- doing that unconditionally ENABLED Accept on
+  // tick regardless of state, model_valid or a tuning-rule refusal, which
+  // let a click within the next poll window persist gains the firmware
+  // itself had already flagged unusable (round-three review finding 2).
+  updateAcceptButtonEnabled();
+});
 document.getElementById('atAcceptBtn').addEventListener('click', function () {
-  fetch('/api/autotune/accept', { method: 'POST' }).then(function (r) {
+  var ackUnsettled = document.getElementById('atAckUnsettled').checked;
+  fetch('/api/autotune/accept', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: 'ack_unsettled=' + (ackUnsettled ? '1' : '0'),
+  }).then(function (r) {
     if (r.ok) { loadCurrent(); pollAutotune(); }
     else document.getElementById('atStatus').textContent = 'Accept failed.';
   }).catch(function () {});

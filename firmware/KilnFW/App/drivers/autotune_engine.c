@@ -63,11 +63,199 @@ static const char *TAG = "autotune_engine";
 
 /* "Reached steady state" heuristic for ending STEPPING early (TODO.md 6A.4
  * doesn't mandate a specific detector -- the two-point fit itself is what
- * validates the trace is usable): the last SETTLE_CHECK_SAMPLES samples all
- * within SETTLE_CHECK_BAND_C of each other. */
+ * validates the trace is usable).
+ *
+ * 2026-08-31 FIX -- the original detector declared settled once the last
+ * SETTLE_CHECK_SAMPLES samples all fell within a fixed SETTLE_CHECK_BAND_C
+ * (1.0 degC) of each other. That band is absolute, but a kiln's rate of
+ * climb is not: a slow ramp with a time constant of tens of minutes moves
+ * comfortably less than 1.0 degC in the 50s window (SETTLE_CHECK_SAMPLES-1)
+ * 10s-samples span *while still rising*, so the old detector fired
+ * mid-transient every time, at the earliest possible moment
+ * (MIN_STEPPING_SAMPLES_BEFORE_SETTLE_CHECK * 10s = 120s in). finalize_fit()
+ * then fit a FOPDT model against a trace that never got near its asymptote,
+ * producing a k_gain_c_per_duty that massively underestimates the plant's
+ * real static gain -- confirmed on real traces (21.74 and 31.96 degC/duty,
+ * implying a ~42-52 degC ceiling on a kiln that reaches hundreds).
+ * Downstream, zone_feedforward() divides by that gain and saturates at full
+ * duty just above the implied ceiling, which is the 10 degC overshoot this
+ * whole fix exists to close. (pid_autotune_fit_fopdt() ALSO now extrapolates
+ * to the asymptote rather than trusting the last sample -- see that
+ * function's own comment -- so this detector's job is narrower than it used
+ * to be: it only decides when a fit is trustworthy enough to STOP the run
+ * early, not whether the resulting K is biased.)
+ *
+ * Replacement: settled is now relative to THIS RUN's own observed dynamics,
+ * not a fixed band. autotune_engine_tick_locked() tracks the peak slope
+ * (degC/s) seen so far this STEPPING phase (s_at.step_peak_slope_c_per_s)
+ * and declares settled once the recent slope (trailing SETTLE_CHECK_SAMPLES
+ * window) has fallen to SETTLE_RELATIVE_SLOPE_FRAC or less of that peak.
+ *
+ * 2026-09-02 review fix -- BE HONEST ABOUT WHAT THIS ACTUALLY DOES: the
+ * paragraph above is true in principle but misleading in practice at
+ * realistic kiln slopes. recent_slope is quantized to the trace's 0.1 degC
+ * packing over a 50s window, i.e. multiples of 0.002 degC/s. The relative
+ * arm (recent_slope <= SETTLE_RELATIVE_SLOPE_FRAC*peak, 4%) can only ever
+ * admit ONE quantum step when peak >= 0.002/0.04 = 0.05 degC/s (180 degC/hr)
+ * and only beats SETTLE_ABS_SLOPE_FLOOR_C_PER_S (0.003) outright when peak >
+ * 0.075 degC/s (270 degC/hr). A realistic kiln's peak slope right after
+ * dead time is more often in the ~0.03 degC/s range -- below both of those
+ * thresholds -- so in practice the relative arm reduces to `recent_slope ==
+ * 0` exactly (the trailing window reads bit-identical across its 6
+ * samples), and SETTLE_ABS_SLOPE_FLOOR_C_PER_S is the operative criterion
+ * doing the actual work, not the "relative to peak" ratio the name and the
+ * paragraph above suggest. This is still a real, large improvement over the
+ * old fixed 1.0 degC/60s band (roughly a 10x tighter bar, and the
+ * comparison is now against THIS run's own noise floor rather than an
+ * arbitrary absolute degree count) and it is conservative in the safe
+ * direction (harder to satisfy than the name implies, not easier), so it is
+ * being KEPT as-is rather than re-tuned -- but a reader relying on "decays
+ * to 4% of peak" as a precise description of on-target behavior would be
+ * wrong; "decays to bit-exact flat, or to 4% of an unusually fast peak" is
+ * the honest version.
+ *
+ * 2026-09-01 review fixes (three defects found in the first version of this
+ * detector, each independently capable of reproducing the original bug):
+ *
+ *   (3) A second "criterion 2" (elapsed stepping time >= SETTLE_MIN_TAU_
+ *       MULTIPLE * an online tau estimate derived from peak/recent slope)
+ *       was removed. It looked like an independent check but wasn't: the
+ *       online tau estimate is ALGEBRAICALLY DERIVED from the same
+ *       peak/recent ratio criterion 1 already tests (tau_estimate =
+ *       time_since_peak / ln(peak/recent)), so "elapsed >= MULTIPLE *
+ *       tau_estimate" reduces to a restatement of criterion 1's ratio bound
+ *       in different units -- with SETTLE_RELATIVE_SLOPE_FRAC=0.04 (ratio
+ *       >= 25, ln >= 3.219) and the old MULTIPLE=3.0, criterion 2 was
+ *       provably true whenever criterion 1 was, for any peak that occurred
+ *       in the first 93% of the elapsed run -- i.e. essentially always. A
+ *       single-criterion detector that says what it does is more honest
+ *       than a two-criterion one where the second criterion is vacuous
+ *       dead weight; if a genuine SECOND signal is wanted later, it needs
+ *       to come from something criterion 1 doesn't already encode (e.g. an
+ *       independent trace-shape check), not another function of the same
+ *       peak/recent ratio.
+ *
+ *   (4) step_peak_slope_c_per_s was tracked from raw adjacent-sample
+ *       differences (a single 10s interval) with no restriction on WHEN in
+ *       the run it could be set. That is the most noise-amplified slope
+ *       estimator available, and letting it run for the whole STEPPING
+ *       phase means one 1-2 degC noise spike anywhere -- not just near the
+ *       true dead-time-adjacent peak -- inflates "peak" and, because
+ *       criterion 1 divides by it, makes the detector fire EASIER, i.e.
+ *       reproduces the original mid-transient-settle bug through a
+ *       different door. Fixed: the peak is now measured the same way
+ *       "recent slope" is (a first-to-last-of-window rate over
+ *       PEAK_SLOPE_WINDOW_SAMPLES samples, not a raw 2-point difference).
+ *
+ *   (4b) 2026-09-02 review fix -- the first version of (4)'s fix restricted
+ *       the peak search to a FIXED PEAK_SLOPE_SEARCH_SAMPLES (30) from the
+ *       start of STEPPING, on the assumption that dead time is always
+ *       short relative to that window. It is not: a zone whose dead time
+ *       exceeds 300s never sees its peak recorded at all (stays ~0
+ *       forever), which permanently fails the peak-floor gate below and
+ *       burns the full AUTOTUNE_ENGINE_DEFAULT_MAX_DURATION_S budget
+ *       marked unsettled, however cleanly the plant actually responded.
+ *       Worse, a coincidental pair of quantization ticks landing in one
+ *       window DURING that same dead time (0.1+0.1 degC / 50s = 0.004,
+ *       just over the old-style floor) could latch a spurious tiny "peak"
+ *       and let the detector declare settled while still inside dead time,
+ *       producing a spurious "response too small to fit" abort from
+ *       pid_autotune's own noise floor.
+ *
+ *       Fixed by anchoring the search window to DETECTED response onset
+ *       instead of a fixed sample count from run start: the peak is not
+ *       tracked at all until the windowed slope first clears
+ *       RESPONSE_ONSET_SLOPE_C_PER_S (a margin comfortably above the noise
+ *       floor -- see that constant's own comment for why 2 coincidental
+ *       quantization ticks cannot trigger it), at which point s_at.step_
+ *       onset_seen latches and s_at.step_onset_trace_count records when.
+ *       The peak search window (PEAK_SLOPE_SEARCH_SAMPLES, unchanged at 30)
+ *       then runs from THAT sample, not sample 0 -- so a 1000s dead time is
+ *       handled exactly the same as a 20s one; only the ELAPSED budget
+ *       (AUTOTUNE_ENGINE_DEFAULT_MAX_DURATION_S) bounds how long onset
+ *       itself can be waited for, which is the correct backstop (a plant
+ *       that truly never responds should end up marked unsettled and
+ *       refused, not spin forever).
+ *
+ *   (5) SETTLE_ABS_SLOPE_FLOOR_C_PER_S (the absolute noise floor, meant to
+ *       stop a plant that starts almost perfectly flat from satisfying
+ *       criterion 1 on noise alone) was smaller than the quantization noise
+ *       of the very quantity it floors: the trace is packed to 0.1 degC
+ *       (record_trace_sample()) and "recent slope" spans (SETTLE_CHECK_
+ *       SAMPLES-1)*AUTOTUNE_ENGINE_SAMPLE_PERIOD_S = 50s, so ONE quantum of
+ *       trace noise over that window is 0.1/50 = 0.002 degC/s -- 2.5x
+ *       LARGER than the old floor of 0.0008. The floor was therefore
+ *       unreachable except at exactly recent_slope==0 (already handled by
+ *       the peak-clearing gate below), making it decorative. Re-derived
+ *       below from that same quantization arithmetic with headroom.
+ *
+ * A trace whose slope never decays relative to its own peak -- a synthetic
+ * constant-rate ramp, or a genuinely still-climbing kiln -- never satisfies
+ * criterion 1, so this detector never fires early on one; it falls through
+ * to the AUTOTUNE_ENGINE_DEFAULT_MAX_DURATION_S backstop instead, and
+ * finalize_fit() marks that fit NOT settled (fopdt_model_t::settled) rather
+ * than accepting it as steady state -- see finalize_fit()'s own comment. */
 #define SETTLE_CHECK_SAMPLES 6u
-#define SETTLE_CHECK_BAND_C 1.0f
+#define SETTLE_RELATIVE_SLOPE_FRAC 0.04f       /* recent slope <= 4% of this run's peak slope */
+/* 0.1 degC trace quantum / 50s recent-slope window = 0.002 degC/s per
+ * quantum step; 1.5x that margin makes a single quantum step over the
+ * window (a real, if minimal, floor-clearing event) actually reachable,
+ * where the old 0.0008 constant never was -- see item (5) above. */
+#define SETTLE_ABS_SLOPE_FLOOR_C_PER_S 0.003f
 #define MIN_STEPPING_SAMPLES_BEFORE_SETTLE_CHECK 12u /* don't even look until well past the dead-time region */
+/* Peak-slope search window and its onset anchor -- see item (4b) above.
+ * PEAK_SLOPE_WINDOW_SAMPLES-sized window (same filtering as "recent slope",
+ * not a raw 2-point difference); the search now runs for
+ * PEAK_SLOPE_SEARCH_SAMPLES samples starting from DETECTED onset (see
+ * RESPONSE_ONSET_SLOPE_C_PER_S), not from the start of STEPPING -- 30
+ * samples (300s) is comfortably past the dead-time-adjacent peak of even a
+ * slow kiln relative to its own tens-of-minutes tau, while still being
+ * short enough that a late noise spike (deep into the exponential's decay)
+ * cannot be mistaken for the true peak once onset has already located
+ * where "early" actually is for THIS run. */
+#define PEAK_SLOPE_WINDOW_SAMPLES 6u
+#define PEAK_SLOPE_SEARCH_SAMPLES 30u
+/* Response-onset threshold: the windowed slope must clear this before the
+ * peak search window even starts. Set to 3x SETTLE_ABS_SLOPE_FLOOR_C_PER_S
+ * (0.009 degC/s) specifically so that TWO coincidental quantization ticks
+ * landing in one PEAK_SLOPE_WINDOW_SAMPLES window during dead time (0.1+0.1
+ * degC / 50s = 0.004 degC/s -- the exact sub-case item (4b) names) cannot
+ * false-trigger onset: 0.004 < 0.009 with margin to spare. A genuine FOPDT
+ * response's slope right after dead time is expected to be far larger than
+ * this on any kiln zone with a working element (see AUTOTUNE_MIN_RISE_*'s
+ * own reasoning for the scale of rise this whole detector is built around),
+ * so this threshold is conservative in the direction of NOT missing a real
+ * onset, while still ruling out a 2-tick noise coincidence specifically. */
+#define RESPONSE_ONSET_SLOPE_C_PER_S (3.0f * SETTLE_ABS_SLOPE_FLOOR_C_PER_S)
+
+/* (B) Minimum-excursion requirement -- a fit is refused (same abort-reason
+ * channel as every other finalize_fit() refusal, see that function) if the
+ * total rise implied by the fitted gain (k_gain_c_per_duty * step_duty) is
+ * below a threshold computed at the point of use -- see
+ * autotune_min_rise_c() below for why this is no longer a bare constant.
+ *
+ * 2026-09-01 review fix: a bare 3.0 degC floor is exactly
+ * |k_gain_c_per_duty * duty_step| = |final_c - baseline_c|, i.e. a
+ * restatement of pid_autotune_fit_fopdt()'s own 0.5 degC noise floor with a
+ * bigger number -- it says nothing about whether 3 degC of rise is enough
+ * to trust a GAIN meant to predict behavior over a span of hundreds of
+ * degrees. The two real incidents this whole pass exists to fix had rises
+ * of 22 and 32 degC and would have sailed through a flat 3.0 threshold
+ * unchallenged. Identifiability is a fraction-of-span question, not an
+ * absolute-degrees one: AUTOTUNE_MIN_RISE_FRACTION_OF_SPAN of the zone's
+ * configured headroom (max_temp_c - baseline_c) when a ceiling is
+ * configured (max_temp_c > 0 -- the zero-means-disabled convention, same as
+ * every other max_temp_c check in this file), with AUTOTUNE_MIN_RISE_FLOOR_C
+ * as an absolute floor under that fraction so a zone with very little
+ * headroom left still gets a meaningful minimum. AUTOTUNE_MIN_RISE_
+ * NO_CEILING_C is the fallback when no ceiling is configured at all -- a
+ * kiln's typical high-fire span is many hundreds of degrees, so a large
+ * fallback (40 degC, the midpoint of the reviewer's suggested 30-50 range)
+ * is far more defensible than the old 3.0 for a zone that could be
+ * anywhere from a hobby kiln (~350C) to an industrial one (~1300C). */
+#define AUTOTUNE_MIN_RISE_FRACTION_OF_SPAN 0.15f
+#define AUTOTUNE_MIN_RISE_FLOOR_C 3.0f
+#define AUTOTUNE_MIN_RISE_NO_CEILING_C 40.0f
 
 /* Step-test guards 1/2 fallback headroom -- see the thermal_guard_input_t
  * comment at its use site below for the full defect this fixes. Any strictly
@@ -77,8 +265,30 @@ static const char *TAG = "autotune_engine";
  * Kept comfortably under thermal_guard.c's DRIFT_HYSTERESIS_C (25.0f) so
  * guard 4 reads this fallback the same way it always has when no ceiling is
  * configured -- "at setpoint" (abs_error <= hysteresis), i.e. still dormant,
- * not a new false trip. */
+ * not a new false trip.
+ *
+ * 2026-09-01 review fix: this was raised 5.0f -> 20.0f on 2026-08-31 with a
+ * justification that does not hold up -- checked directly against
+ * thermal_guard.c: guard 1's actual trip condition (progress delta < an
+ * expected-rise threshold derived from sanity_rate_c_per_min, NOT from
+ * setpoint_c's magnitude) never reads error's size, only whether commanded
+ * heat produced enough real temperature delta, and this fallback is
+ * recomputed from the CURRENT raw reading every tick (see this run's
+ * thermal_guard_input_t construction below), which pins error at exactly
+ * the headroom constant on every tick regardless of its value -- 5.0 and
+ * 20.0 are behaviorally IDENTICAL to guard 1. The only thing the 20.0 value
+ * changed was guard 4's margin against DRIFT_HYSTERESIS_C (25.0f,
+ * per-zone-overridable), which it narrowed from 20 degC to 5 degC for no
+ * corresponding benefit. Reverted to 5.0f. */
 #define STEP_TEST_GUARD_HEADROOM_C 5.0f
+
+/* (C) physical-plausibility check's ambient reference -- see finalize_fit()
+ * and the SETTLING->STEPPING transition's own comments. Same value and
+ * meaning as profile_executor.c's FALLBACK_AMBIENT_C (20.0f): a reasonable
+ * room-temperature default for when no cold-junction reading was available
+ * to capture at all. Not #include-shared with profile_executor.c because
+ * that constant is `static`/file-local there, same as this one is here. */
+#define AUTOTUNE_FALLBACK_AMBIENT_C 20.0f
 
 typedef struct {
     kiln_io_t *io;
@@ -147,6 +357,26 @@ typedef struct {
     float actual_c;
     bool  actual_valid;
     float duty;
+
+    /* STEPPING-only settle-detector state (A) -- reset at the SETTLING->
+     * STEPPING transition, read/written only from autotune_engine_tick_
+     * locked() while STEPPING. See SETTLE_RELATIVE_SLOPE_FRAC's comment for
+     * what these drive. */
+    float    step_peak_slope_c_per_s;    /* max |slope| seen so far this STEPPING phase */
+    uint32_t step_peak_slope_at_s;       /* elapsed_s at which that peak was recorded */
+    bool     step_settled;               /* true only if the detector genuinely fired -- see finalize_fit() */
+    /* Response-onset anchor (item 5, 2026-09-02 review fix) -- see
+     * PEAK_SLOPE_SEARCH_SAMPLES's own comment for why the peak-slope search
+     * window is anchored to DETECTED onset rather than a fixed sample count
+     * from the start of STEPPING. */
+    bool     step_onset_seen;            /* true once a real (not noise) response has been detected */
+    uint16_t step_onset_trace_count;     /* trace_count at the sample onset was first detected */
+    /* Cold-junction reference captured at the SETTLING->STEPPING transition
+     * (or AUTOTUNE_FALLBACK_AMBIENT_C if no cj reading was available) --
+     * see finalize_fit()'s physical-plausibility check for why this, not
+     * zone_baseline_c, is the right reference for "can this zone reach
+     * max_temp_c at all". */
+    float    step_ambient_c;
 
     fopdt_model_t    model;
     autotune_gains_t proposed_gains;
@@ -393,6 +623,106 @@ static void finalize_fit(void)
         ESP_LOGW(TAG, "autotune zone %u: %s", s_at.zone_index, s_at.abort_reason);
         return;
     }
+    /* (A) fopdt_model_t::settled defaults false; only the honest settle
+     * detector in autotune_engine_tick_locked() is allowed to set it true.
+     * A fit that reached here via the AUTOTUNE_ENGINE_DEFAULT_MAX_DURATION_S
+     * backstop (s_at.step_settled never set) is therefore marked low-
+     * confidence rather than silently accepted as steady state -- logged
+     * below, and readable by any caller of autotune_engine_get_status()
+     * through status.model.settled. */
+    s_at.model.settled = s_at.step_settled;
+    if (!s_at.model.settled) {
+        ESP_LOGW(TAG, "autotune zone %u: fit accepted from an UNSETTLED trace (ended by the %us max-"
+                      "duration backstop, not genuine settling) -- treat K=%.2f tau=%.1fs L=%.1fs as "
+                      "low-confidence",
+                 s_at.zone_index, (unsigned)AUTOTUNE_ENGINE_DEFAULT_MAX_DURATION_S,
+                 (double)s_at.model.k_gain_c_per_duty, (double)s_at.model.tau_s, (double)s_at.model.dead_time_s);
+    }
+
+    /* (B) Minimum-excursion requirement -- threshold scaled to the zone's
+     * own span rather than a bare constant, see AUTOTUNE_MIN_RISE_FRACTION_
+     * OF_SPAN's comment above for why. Reuses the exact same abort-reason
+     * channel every other finalize_fit() refusal already uses (s_at.
+     * abort_reason + state = ABORTED), not a new one. ZERO-SEMANTICS TRAP,
+     * same convention as (C) below: max_temp_c == 0 means the guard is
+     * DISABLED, not "the ceiling is zero degrees", so the no-ceiling
+     * fallback (a large bare constant) applies in that case, not a fraction
+     * of a headroom that doesn't exist. */
+    float configured_max_temp_c = s_at.guard_cfg.max_temp_c;
+    float min_rise_c;
+    if (configured_max_temp_c > 0.0f) {
+        float headroom_c = configured_max_temp_c - baseline_c;
+        float scaled = AUTOTUNE_MIN_RISE_FRACTION_OF_SPAN * headroom_c;
+        min_rise_c = (scaled > AUTOTUNE_MIN_RISE_FLOOR_C) ? scaled : AUTOTUNE_MIN_RISE_FLOOR_C;
+    } else {
+        min_rise_c = AUTOTUNE_MIN_RISE_NO_CEILING_C;
+    }
+    float observed_rise_c = fabsf(s_at.model.k_gain_c_per_duty * s_at.step_duty);
+    if (observed_rise_c < min_rise_c) {
+        force_relays_off();
+        s_at.state = AUTOTUNE_ENGINE_ABORTED;
+        snprintf(s_at.abort_reason, sizeof(s_at.abort_reason),
+                 "fit failed: rise of %.2fC over the step is below the %.1fC minimum needed to trust the "
+                 "identification (baseline %.1fC, step duty %.2f)",
+                 (double)observed_rise_c, (double)min_rise_c, (double)baseline_c, (double)s_at.step_duty);
+        ESP_LOGW(TAG, "autotune zone %u: %s", s_at.zone_index, s_at.abort_reason);
+        return;
+    }
+
+    /* (C) Physical plausibility -- a static gain small enough that even full
+     * duty (u=1) could never reach this zone's own configured ceiling is
+     * definitely wrong (a real heater can only get weaker than the fit
+     * measured, never stronger), and is exactly the failure mode the old
+     * fixed-band settle detector produced: it declared settled mid-ramp,
+     * measured a fraction of the true gain, and handed zone_feedforward() a
+     * ceiling of ~42-52 degC on a kiln with a triple-digit max_temp_c.
+     *
+     * 2026-09-01 review fix: implied_max_c is now referenced to AMBIENT
+     * (s_at.step_ambient_c, the cold-junction reading captured at the
+     * SETTLING->STEPPING transition, or AUTOTUNE_FALLBACK_AMBIENT_C if none
+     * was available), not to baseline_c as before. K's physical meaning is
+     * "how far above where the zone STARTS COLD it can climb at full duty",
+     * and pid_autotune_estimate_max_ramp_c_per_hr() (pid_autotune.c) already
+     * uses ambient for the same reason. Referencing baseline_c instead
+     * inflates implied_max_c whenever a run starts hot (e.g. re-tuning a
+     * zone that is already partway up a firing) by (baseline_c -
+     * ambient_c), which makes this check MORE PERMISSIVE exactly when it
+     * should not be -- a bad (too-low) fit is more likely to slip through
+     * plausible-looking on a hot start than a cold one.
+     *
+     * ZERO-SEMANTICS TRAP: max_temp_c == 0 means the guard is DISABLED for
+     * this zone (thermal_guard.c's convention, mirrored everywhere else in
+     * this file -- see the thermal_guard_input_t.setpoint_c fallback
+     * further down), NOT "zero degrees is the ceiling". This check must
+     * only run when max_temp_c > 0.0f, or every zone that has never had a
+     * ceiling configured would have every step test refused.
+     *
+     * Kept a hard abort rather than downgraded to an override-able warning
+     * (unlike the settled-flag case, see autotune_engine_accept()'s own
+     * comment): an implied ceiling below a CONFIGURED max_temp_c means
+     * either the fit is wrong or the zone's own configuration is wrong, and
+     * the fix in the latter case is to correct max_temp_c (a deliberate,
+     * infrequent operator action on /settings/zones), not to quietly accept
+     * a gain the check itself has already flagged as physically
+     * inconsistent with what the operator told this zone it can reach. */
+    if (configured_max_temp_c > 0.0f) {
+        float implied_max_c = s_at.step_ambient_c + s_at.model.k_gain_c_per_duty;
+        if (implied_max_c < configured_max_temp_c) {
+            force_relays_off();
+            s_at.state = AUTOTUNE_ENGINE_ABORTED;
+            /* Kept short and to the point (both numbers, no prose padding)
+             * -- s_at.abort_reason is a fixed 96-byte buffer shared by every
+             * refusal in this function, and the two floats already eat a
+             * good chunk of it; a wordier version was found to truncate
+             * before the second number even printed. */
+            snprintf(s_at.abort_reason, sizeof(s_at.abort_reason),
+                     "fit failed: gain implies %.1fC max at full duty, below zone limit %.1fC -- fit is wrong",
+                     (double)implied_max_c, (double)configured_max_temp_c);
+            ESP_LOGW(TAG, "autotune zone %u: %s", s_at.zone_index, s_at.abort_reason);
+            return;
+        }
+    }
+
     s_at.proposed_gains = pid_autotune_tune_from_fopdt(&s_at.model, s_at.step_rule, 0.0f);
     s_at.predicted_max_ramp_c_per_hr =
         pid_autotune_estimate_max_ramp_c_per_hr(&s_at.model, 1.0f, s_at.actual_valid ? s_at.actual_c : baseline_c,
@@ -493,37 +823,86 @@ static void finalize_fit(void)
      * whose stack is ordinary internal SRAM. This function still decides
      * WHICH cells are eligible (guards (1) and (2) above); the worker only
      * ever writes what this function already validated. */
-    coupling_persist_job_t job = {0};
-    job.stepped_zone = s_at.zone_index;
-    for (uint8_t j = 0; j < MAX31856_CHANNEL_COUNT; j++) {
-        if (j == s_at.zone_index) {
-            continue;
+    /* 2026-09-02 review fix (round 2, item 4; extended round-3 follow-up):
+     * this whole block used to run unconditionally on every DONE run,
+     * including one that reached DONE via the max-duration backstop with
+     * s_at.model.settled == false -- the SAME truncated, low-K-biased peer
+     * traces the (B)/(C) refusals above exist to catch on the DIRECT fit,
+     * persisted to flash for every OTHER zone's coupling row before the
+     * operator ever sees an Accept button, let alone an ack_unsettled
+     * checkbox. autotune_engine_accept()'s gate only covers the direct
+     * model + gains (zones_config_set_model()/set_pid()); this persist
+     * call was never behind it at all. Gated here on the SAME THREE
+     * conditions accept() now uses for the direct fit (settled AND
+     * extrapolation_converged AND tau_consistent_with_gain -- see
+     * autotune_engine_accept()'s own comment), not settled alone.
+     *
+     * Argued explicitly, per review request, why extrapolation_converged/
+     * tau_consistent_with_gain should ALSO gate coupling persist, not just
+     * settled: those two flags are properties of THIS SAME (direct,
+     * stepped-zone) fit's asymptote correction, computed from the SAME
+     * duty step and the SAME slope_end/tau mechanics that every peer
+     * zone's own pid_autotune_fit_fopdt() call below reuses on ITS trace.
+     * An unconverged or tau-inconsistent direct fit is strong evidence the
+     * whole run's trace shape (truncation, noise, dead-time detection) was
+     * marginal, not something specific to the direct zone alone -- exactly
+     * the same reasoning settled's own gate already rests on (a run-level
+     * property of STEPPING, not a per-zone one). Persisting peer coupling
+     * cells from a run whose own direct fit could not be trusted enough to
+     * auto-accept would reintroduce the identical bypass round-2's review
+     * already caught once for settled alone. A settled-AND-converged-AND-
+     * consistent run's cross-gains are unaffected -- this is strictly a
+     * new refusal on the low-confidence path, not a behavior change on the
+     * honest one. */
+    if (s_at.model.settled && s_at.model.extrapolation_converged && s_at.model.tau_consistent_with_gain) {
+        coupling_persist_job_t job = {0};
+        job.stepped_zone = s_at.zone_index;
+        for (uint8_t j = 0; j < MAX31856_CHANNEL_COUNT; j++) {
+            if (j == s_at.zone_index) {
+                continue;
+            }
+            const autotune_coupling_cell_t *cell = &s_at.coupling.cell[s_at.zone_index][j];
+            if (!cell->valid) {
+                continue;
+            }
+            float gain = cell->model.k_gain_c_per_duty;
+            if (!isfinite(gain) || gain < 0.0f || gain > ZONE_COUPLING_COEFF_MAX) {
+                ESP_LOGW(TAG,
+                         "autotune zone %u: cross-gain against zone %u (%.4f degC/duty) out of storage range, "
+                         "not persisted",
+                         s_at.zone_index, j, (double)gain);
+                continue;
+            }
+            job.affected_zone[job.count] = j;
+            job.coeff[job.count] = gain;
+            job.count++;
         }
-        const autotune_coupling_cell_t *cell = &s_at.coupling.cell[s_at.zone_index][j];
-        if (!cell->valid) {
-            continue;
+        if (job.count > 0) {
+            esp_err_t submit_err = uart_bridge_ext_run_on_flash_worker(coupling_persist_job, &job);
+            if (submit_err != ESP_OK) {
+                ESP_LOGW(TAG, "autotune zone %u: could not submit %u coupling cell(s) to the flash worker: %s",
+                         s_at.zone_index, (unsigned)job.count, esp_err_to_name(submit_err));
+            } else if (job.fail_count > 0) {
+                ESP_LOGW(TAG, "autotune zone %u: %u of %u coupling cell(s) failed to persist", s_at.zone_index,
+                         (unsigned)job.fail_count, (unsigned)job.count);
+            }
         }
-        float gain = cell->model.k_gain_c_per_duty;
-        if (!isfinite(gain) || gain < 0.0f || gain > ZONE_COUPLING_COEFF_MAX) {
-            ESP_LOGW(TAG,
-                     "autotune zone %u: cross-gain against zone %u (%.4f degC/duty) out of storage range, "
-                     "not persisted",
-                     s_at.zone_index, j, (double)gain);
-            continue;
-        }
-        job.affected_zone[job.count] = j;
-        job.coeff[job.count] = gain;
-        job.count++;
-    }
-    if (job.count > 0) {
-        esp_err_t submit_err = uart_bridge_ext_run_on_flash_worker(coupling_persist_job, &job);
-        if (submit_err != ESP_OK) {
-            ESP_LOGW(TAG, "autotune zone %u: could not submit %u coupling cell(s) to the flash worker: %s",
-                     s_at.zone_index, (unsigned)job.count, esp_err_to_name(submit_err));
-        } else if (job.fail_count > 0) {
-            ESP_LOGW(TAG, "autotune zone %u: %u of %u coupling cell(s) failed to persist", s_at.zone_index,
-                     (unsigned)job.fail_count, (unsigned)job.count);
-        }
+    } else {
+        /* Deliberately not wired to autotune_engine_accept(): a later
+         * ack_unsettled=true accept persists the DIRECT model/gains for
+         * THIS zone but does not retroactively persist the cross-gain
+         * cells measured here -- those stay RAM-only (s_at.coupling, still
+         * visible on /settings/zones this session) and are lost on reboot,
+         * same as an unsettled run always eventually was for a zone whose
+         * accept was refused outright. Re-running the step test to genuine
+         * settlement is the only way to persist coupling; simply the
+         * safest option given this is peer-zone data the operator has no
+         * per-cell accept UI for at all. */
+        ESP_LOGW(TAG, "autotune zone %u: cross-gain coupling cells NOT persisted -- direct fit not fully "
+                      "trustworthy (settled=%d converged=%d tau_consistent=%d); re-run the test to "
+                      "persist them",
+                 s_at.zone_index, (int)s_at.model.settled, (int)s_at.model.extrapolation_converged,
+                 (int)s_at.model.tau_consistent_with_gain);
     }
 
     force_relays_off();
@@ -679,6 +1058,104 @@ static void finalize_relay_fit(void)
              (double)s_at.proposed_gains.kd);
 }
 
+/* (A) Peak-slope tracking + the honest settle check, run once per newly-
+ * recorded STEPPING sample (s_at.trace_count-1 is that sample's index,
+ * s_at.elapsed_s its stepping-relative time). Factored out of
+ * autotune_engine_tick_locked() into its own seam for exactly the reason
+ * that function itself was factored out of task_entry() (see its own
+ * comment): test_autotune_engine_prestart.c's settle-detector tests call
+ * this directly against a synthetic trace written straight into
+ * s_at.zone_trace (the same technique write_synthetic_fopdt_trace_for_zone()
+ * already uses for finalize_fit()'s own tests), one sample at a time with
+ * s_at.elapsed_s advanced by hand -- this host build's frozen
+ * xTaskGetTickCount() stub makes driving 1000+ real ticks to reach a
+ * multi-tau settle window impractical, and duplicating this logic in the
+ * test file instead of calling the real one would let the two drift apart
+ * silently. See SETTLE_RELATIVE_SLOPE_FRAC's own comment above for what the
+ * single criterion below means and why (and why there is only one, not two,
+ * as of the 2026-09-01 review fix). Must be called with s_at.lock held, only
+ * while STEPPING, only after this sample's record_trace_sample() (or its
+ * skip) has already happened. Returns true exactly when the trace should be
+ * finalized as genuinely settled -- the caller (either the tick loop or a
+ * test) is responsible for actually calling finalize_fit(). */
+static bool step_settle_check_locked(void)
+{
+    /* Peak-slope tracking -- item (4)/(4b) fix: a filtered, onset-anchored
+     * estimate instead of a raw adjacent-sample difference over the whole
+     * run. The windowed (first-to-last-of-PEAK_SLOPE_WINDOW_SAMPLES) slope
+     * is computed every sample once enough exist; response onset (this
+     * run's step_onset_seen) latches the FIRST time that windowed slope
+     * clears RESPONSE_ONSET_SLOPE_C_PER_S, wherever in the run that happens
+     * -- no fixed sample-count cutoff, so an arbitrarily long dead time (see
+     * item (4b)'s own comment for the >300s defect this replaces) is
+     * handled the same as a short one. The peak is only tracked for
+     * PEAK_SLOPE_SEARCH_SAMPLES samples STARTING AT onset, not from run
+     * start, so a late noise spike deep into the run (long after onset AND
+     * its search window have both passed) still cannot inflate the peak. */
+    if (s_at.trace_count >= PEAK_SLOPE_WINDOW_SAMPLES) {
+        int16_t dc_prev = s_at.zone_trace[s_at.zone_index][s_at.trace_count - PEAK_SLOPE_WINDOW_SAMPLES];
+        int16_t dc_cur = s_at.zone_trace[s_at.zone_index][s_at.trace_count - 1];
+        if (dc_prev != AUTOTUNE_TRACE_TEMP_INVALID && dc_cur != AUTOTUNE_TRACE_TEMP_INVALID) {
+            float v_prev = (float)dc_prev / 10.0f;
+            float v_cur = (float)dc_cur / 10.0f;
+            float window_s = (float)((PEAK_SLOPE_WINDOW_SAMPLES - 1) * AUTOTUNE_ENGINE_SAMPLE_PERIOD_S);
+            float slope = (v_cur - v_prev) / window_s;
+            float aslope = fabsf(slope);
+
+            if (!s_at.step_onset_seen && aslope > RESPONSE_ONSET_SLOPE_C_PER_S) {
+                s_at.step_onset_seen = true;
+                s_at.step_onset_trace_count = s_at.trace_count;
+            }
+            if (s_at.step_onset_seen &&
+                s_at.trace_count <= (uint32_t)s_at.step_onset_trace_count + PEAK_SLOPE_SEARCH_SAMPLES &&
+                aslope > s_at.step_peak_slope_c_per_s) {
+                s_at.step_peak_slope_c_per_s = aslope;
+                s_at.step_peak_slope_at_s = s_at.elapsed_s;
+            }
+        }
+    }
+
+    /* Item (9), a latent defect found in review: once trace_count reaches
+     * AUTOTUNE_ENGINE_MAX_SAMPLES, record_trace_sample() stops appending
+     * (buffer full) but this function would otherwise keep re-reading the
+     * SAME frozen trailing SETTLE_CHECK_SAMPLES window every subsequent
+     * tick -- recent_slope goes to exactly 0 (no new data, not genuine
+     * settling) and the detector would fire true on a trace that may still
+     * have been climbing the instant it got truncated. Today the 4h
+     * max-duration backstop happens to win the race first for every current
+     * constant combination, but that is a coincidence of timing, not a
+     * guarantee -- explicit here so a future change to AUTOTUNE_ENGINE_
+     * SAMPLE_PERIOD_S or AUTOTUNE_ENGINE_DEFAULT_MAX_DURATION_S cannot
+     * silently reopen this. A full trace is handed to the max-duration path
+     * instead (return false -> finalize_fit() is reached via the elapsed_s
+     * check in the caller, which correctly marks step_settled=false). */
+    if (s_at.trace_count >= AUTOTUNE_ENGINE_MAX_SAMPLES) {
+        return false;
+    }
+    if (s_at.trace_count < MIN_STEPPING_SAMPLES_BEFORE_SETTLE_CHECK || s_at.trace_count < SETTLE_CHECK_SAMPLES ||
+        s_at.step_peak_slope_c_per_s <= SETTLE_ABS_SLOPE_FLOOR_C_PER_S) {
+        return false;
+    }
+    int16_t dc_first = s_at.zone_trace[s_at.zone_index][s_at.trace_count - SETTLE_CHECK_SAMPLES];
+    int16_t dc_last = s_at.zone_trace[s_at.zone_index][s_at.trace_count - 1];
+    if (dc_first == AUTOTUNE_TRACE_TEMP_INVALID || dc_last == AUTOTUNE_TRACE_TEMP_INVALID) {
+        return false;
+    }
+    float v_first = (float)dc_first / 10.0f;
+    float v_last = (float)dc_last / 10.0f;
+    float window_s = (float)((SETTLE_CHECK_SAMPLES - 1) * AUTOTUNE_ENGINE_SAMPLE_PERIOD_S);
+    float recent_slope = fabsf((v_last - v_first) / window_s);
+
+    /* The single settle criterion: recent slope has decayed to a small
+     * fraction of this run's (early-region, filtered) peak, or is itself
+     * below the absolute noise floor -- a plant that has genuinely stopped
+     * moving. See this function's header comment for why the "elapsed time
+     * >= N*tau" criterion this used to also require was removed rather than
+     * kept as decoration: it was algebraically implied by this one. */
+    return (recent_slope <= SETTLE_RELATIVE_SLOPE_FRAC * s_at.step_peak_slope_c_per_s) ||
+           (recent_slope <= SETTLE_ABS_SLOPE_FLOOR_C_PER_S);
+}
+
 /* One tick of the SETTLING/STEPPING/RELAY_APPROACH/RELAY_CYCLING state
  * machine, factored out of task_entry() so host tests can drive it
  * deterministically (see test_autotune_engine_prestart.c's STEPPING-loop
@@ -696,6 +1173,12 @@ static void autotune_engine_tick_locked(void)
 
     float raw_c = NAN;
     bool sensor_ok = false;
+    /* Cold-junction reference for this tick's tested-zone channel, captured
+     * alongside the TC reading below -- used ONLY to set s_at.step_ambient_c
+     * at the SETTLING->STEPPING transition (see that transition's own
+     * comment and finalize_fit()'s physical-plausibility check). NaN unless
+     * the tested zone's own channel answered this tick. */
+    float cj_c = NAN;
     /* TODO.md 6A.5(b): every channel's reading is captured this tick,
      * not just the zone under test -- MAX31856_read_all() already reads
      * the whole bus, so logging every zone's response is free (no extra
@@ -741,6 +1224,9 @@ static void autotune_engine_tick_locked(void)
             bool ok = !readings[i].spi_failed && !isnan(readings[i].tc_temperature_c) && !fault_bits_bad;
             ch_raw_c[ch] = readings[i].tc_temperature_c;
             ch_ok[ch] = ok;
+            if (ch == s_at.zone_index && !isnan(readings[i].cj_temperature_c)) {
+                cj_c = readings[i].cj_temperature_c;
+            }
         }
         /* Peer zones (finalize_fit()'s cross-gain rows): legacy
          * channel-equals-zone mapping, unchanged from before 10.8. */
@@ -869,6 +1355,16 @@ static void autotune_engine_tick_locked(void)
             s_at.phase_start_tick = now;
             s_at.last_sample_tick = now;
             s_at.trace_count = 0;
+            s_at.step_peak_slope_c_per_s = 0.0f;
+            s_at.step_peak_slope_at_s = 0u;
+            s_at.step_settled = false;
+            s_at.step_onset_seen = false;
+            s_at.step_onset_trace_count = 0u;
+            /* Ambient reference for finalize_fit()'s physical-plausibility
+             * check -- the cj_c captured above this tick if the tested
+             * zone's own channel answered, else the same documented
+             * fallback profile_executor.c uses (FALLBACK_AMBIENT_C, 20.0C). */
+            s_at.step_ambient_c = isnan(cj_c) ? AUTOTUNE_FALLBACK_AMBIENT_C : cj_c;
             heater_output_reset(&s_at.heater_state);
             ESP_LOGI(TAG, "autotune zone %u: settled at %.1fC, stepping duty to %.2f", s_at.zone_index,
                      (double)s_at.zone_baseline_c[s_at.zone_index], (double)s_at.step_duty);
@@ -889,20 +1385,10 @@ static void autotune_engine_tick_locked(void)
                 record_trace_sample(raw_by_zone, ok_by_zone);
             }
 
-            if (s_at.trace_count >= MIN_STEPPING_SAMPLES_BEFORE_SETTLE_CHECK &&
-                s_at.trace_count >= SETTLE_CHECK_SAMPLES) {
-                float lo = 1e9f, hi = -1e9f;
-                for (uint16_t i = s_at.trace_count - SETTLE_CHECK_SAMPLES; i < s_at.trace_count; i++) {
-                    int16_t dc = s_at.zone_trace[s_at.zone_index][i];
-                    if (dc == AUTOTUNE_TRACE_TEMP_INVALID) continue;
-                    float v = (float)dc / 10.0f;
-                    if (v < lo) lo = v;
-                    if (v > hi) hi = v;
-                }
-                if (hi - lo <= SETTLE_CHECK_BAND_C) {
-                    finalize_fit();
-                    return;
-                }
+            if (step_settle_check_locked()) {
+                s_at.step_settled = true;
+                finalize_fit();
+                return;
             }
         }
     } else if (s_at.state == AUTOTUNE_ENGINE_RELAY_APPROACH) {
@@ -1499,7 +1985,7 @@ void autotune_engine_abort(const char *reason)
     ESP_LOGI(TAG, "autotune zone %u aborted by request: %s", s_at.zone_index, s_at.abort_reason);
 }
 
-bool autotune_engine_accept(void)
+bool autotune_engine_accept(bool ack_unsettled)
 {
     /* See begin_run_locked()'s guard comment above. */
     if (s_at.lock == NULL) {
@@ -1511,6 +1997,66 @@ bool autotune_engine_accept(void)
     if (s_at.state != AUTOTUNE_ENGINE_DONE || !have_result) {
         xSemaphoreGive(s_at.lock);
         return false;
+    }
+    /* 2026-09-01 review fix, extended 2026-09-02 (round-3 follow-up): the
+     * ack_unsettled gate now covers all three "is this fit fully
+     * trustworthy" signals fopdt_model_t carries -- fopdt_model_t::settled
+     * (the STEPPING-phase relative-slope detector), ::extrapolation_
+     * converged and ::tau_consistent_with_gain (pid_autotune_fit_fopdt()'s
+     * asymptote-correction loop) -- not just settled. The latter two were
+     * correctly populated and then ignored, the exact write-only pattern
+     * the settled review already caught once -- see fopdt_model_t's own
+     * KNOWN OPEN GAP comment (pid_autotune.h) for the full history. ONE
+     * acknowledgement path (ack_unsettled) covers all three conditions;
+     * the refusal text below names exactly which one(s) are unmet so an
+     * operator (or a caller reading the reason) can tell WHY, not just
+     * THAT -- see also autotune_build_status()'s wire fields and the
+     * dashboard JSON, which surface all three distinctly rather than
+     * collapsing them into one bit. */
+    if (s_at.method == AUTOTUNE_METHOD_STEP) {
+        bool settled = s_at.model.settled;
+        bool converged = s_at.model.extrapolation_converged;
+        bool tau_ok = s_at.model.tau_consistent_with_gain;
+        if ((!settled || !converged || !tau_ok) && !ack_unsettled) {
+            xSemaphoreGive(s_at.lock);
+            /* Final review fix: widened 112->160 (the three current reason
+             * strings need 123 bytes concatenated -- 112 left only a
+             * handful of bytes of margin, not overflow today only because
+             * this happens to be the last write) and the accumulation
+             * below is now underflow-safe regardless of buffer size or how
+             * many conditions are ever added: `o` is clamped to
+             * sizeof(reasons) before every `sizeof(reasons) - o`, so that
+             * subtraction can never wrap a size_t into a huge value and
+             * hand snprintf a bogus "room" figure. Without the clamp, a
+             * FOURTH condition added later would push `o` past
+             * sizeof(reasons) and the very next `sizeof(reasons) - o`
+             * would underflow -- exactly the defect being fixed here
+             * before it exists, not after. */
+            char reasons[160];
+            size_t o = 0;
+            reasons[0] = '\0';
+            if (!settled) {
+                size_t room = (o < sizeof(reasons)) ? sizeof(reasons) - o : 0;
+                o += (size_t)snprintf(reasons + o, room, "never genuinely settled "
+                                                          "(max-duration backstop)");
+                if (o > sizeof(reasons)) o = sizeof(reasons);
+            }
+            if (!converged) {
+                size_t room = (o < sizeof(reasons)) ? sizeof(reasons) - o : 0;
+                o += (size_t)snprintf(reasons + o, room, "%sextrapolation did not converge", o ? "; " : "");
+                if (o > sizeof(reasons)) o = sizeof(reasons);
+            }
+            if (!tau_ok) {
+                size_t room = (o < sizeof(reasons)) ? sizeof(reasons) - o : 0;
+                o += (size_t)snprintf(reasons + o, room, "%stau/L inconsistent with the corrected gain",
+                                      o ? "; " : "");
+                if (o > sizeof(reasons)) o = sizeof(reasons);
+            }
+            ESP_LOGW(TAG, "autotune zone %u: accept refused -- %s; pass ack_unsettled=true to accept "
+                          "anyway",
+                     s_at.zone_index, reasons);
+            return false;
+        }
     }
     uint8_t zone = s_at.zone_index;
     autotune_method_t method = s_at.method;
@@ -1569,7 +2115,13 @@ bool autotune_engine_accept(void)
     clear_block_if_any();
     s_at.state = AUTOTUNE_ENGINE_IDLE;
     xSemaphoreGive(s_at.lock);
-    ESP_LOGI(TAG, "autotune zone %u: gains accepted and written to zone config", zone);
+    if (!m.settled) {
+        ESP_LOGW(TAG, "autotune zone %u: LOW-CONFIDENCE gains accepted and written to zone config "
+                      "(ack_unsettled=true; fit never genuinely settled)",
+                 zone);
+    } else {
+        ESP_LOGI(TAG, "autotune zone %u: gains accepted and written to zone config", zone);
+    }
     return true;
 }
 

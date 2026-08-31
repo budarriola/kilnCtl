@@ -3051,8 +3051,17 @@ def autotune_get_status() -> str:
         f"state={st.state_name} method={st.method} zone={st.zone} "
         f"elapsed={st.elapsed_s}s samples={st.sample_count} "
         f"actual={st.actual_c:.1f}C{'(valid)' if st.actual_valid else '(invalid)'} "
-        f"duty={st.duty:.2f} model_valid={st.model_valid} "
+        f"duty={st.duty:.2f} model_valid={st.model_valid} model_settled={st.model_settled} "
         f"proposed_gains={st.proposed_gains} relay_valid={st.relay_valid}"
+        # Only worth flagging once there is a real STEP-method result to
+        # judge (state 5 = done, method 0 = step -- see AutotuneStatus.
+        # STATE_NAMES/method docs); model_settled reads False by default
+        # for every other state/method too and would otherwise print this
+        # warning during an ordinary relay run or before a step test has
+        # even produced a result.
+        + (" -- NOT genuinely settled (ended via the 4h max-duration backstop); "
+           "autotune_accept() will refuse this fit unless ack_unsettled=True is passed explicitly"
+           if st.state == 5 and st.method == 0 and st.model_valid and not st.model_settled else "")
         + (f" abort_reason={st.abort_reason!r}" if st.abort_reason else "")
     )
 
@@ -3103,16 +3112,26 @@ def autotune_abort() -> str:
 
 
 @_tool()
-def autotune_accept() -> str:
-    """Accept the finished autotune's proposed gains, writing them into the zone's PID config."""
+def autotune_accept(ack_unsettled: bool = False) -> str:
+    """Accept the finished autotune's proposed gains, writing them into the zone's PID config.
+
+    Call autotune_get_status() first and check model_settled. A STEP result
+    that never genuinely settled (it ended via the 4h max-duration backstop,
+    not a real steady-state read) is refused unless ack_unsettled=True is
+    passed explicitly here -- that is a deliberate choice to persist a
+    lower-confidence fit, not this tool's default, so pass it only after
+    actually looking at model_settled and the fitted K/tau/L and deciding
+    they are still worth keeping (e.g. re-running the step test is usually
+    the better option).
+    """
     try:
-        result = _autotune.accept()
+        result = _autotune.accept(ack_unsettled=ack_unsettled)
     except AutotuneQueryError as exc:
         return f"error: {exc}"
     if result.ok:
-        return "ok - gains accepted"
+        return "ok - gains accepted" + (" (low-confidence: fit never genuinely settled)" if ack_unsettled else "")
     detail = f": {result.reason}" if result.reason else ""
-    return f"refused - nothing to accept{detail}"
+    return f"refused - nothing to accept, or the fit never settled (see model_settled) and needs ack_unsettled=True{detail}"
 
 
 # ---------------------------------------------------------------------------

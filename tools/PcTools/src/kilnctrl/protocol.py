@@ -110,6 +110,20 @@ DEFAULT_BAUD_RATE = 921600
 #: Version 8 (2026-08-28): one new task_id, UI_TEST (14), for LVGL
 #: tap-target introspection/click-by-name -- see uart_task_ids.h's own
 #: UI_TEST doc comment and ui_test_client.py.
+#: Version 9 (2026-09-02): AUTOTUNE_CMD_GET_STATUS's reply grows one
+#: trailing byte (model_settled) genuinely AFTER the existing length-
+#: prefixed abort_reason string; AUTOTUNE_CMD_ACCEPT's request grows one
+#: optional trailing byte (ack_unsettled). A layout change to two existing
+#: frames, not additive -- see uart_task_ids.h's own Version 9 comment for
+#: the wire-corruption defect this bump exists to make impossible (an
+#: earlier draft shifted abort_reason's own offset without a version bump,
+#: which would have silently truncated every abort reason on a live link).
+#: Version 10 (2026-09-02, same day): AUTOTUNE_CMD_GET_STATUS's reply grows
+#: two MORE trailing bytes (extrapolation_converged, tau_consistent_with_
+#: gain) genuinely appended after model_settled -- same append-only
+#: discipline Version 9 established. See uart_task_ids.h's own Version 10
+#: comment for why these fold into autotune_engine_accept()'s ack_unsettled
+#: gate and must be surfaced distinctly, not collapsed into settled.
 #:
 #: 2026-08-24, SaftyFW/TODO.md "Shared ids split out of uart_task_ids.h;
 #: PC-link ids left behind": the alias described above is gone.
@@ -122,7 +136,7 @@ DEFAULT_BAUD_RATE = 921600
 #: of kilnlink's version from here on: bump it only when THIS protocol's own
 #: contract changes, never merely because the isolated ESP<->Pico link's
 #: number moved.
-UART_PROTOCOL_VERSION = 8
+UART_PROTOCOL_VERSION = 10
 
 
 class Device(enum.IntEnum):

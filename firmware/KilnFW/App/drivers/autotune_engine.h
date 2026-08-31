@@ -280,8 +280,38 @@ void autotune_engine_abort(const char *reason);
  * acceptance writes gains ONLY, and deliberately leaves any stored model
  * alone -- see the .c for the reasoning, which is the difference between
  * "this run measured no model" and "this run measured that there is no
- * model". */
-bool autotune_engine_accept(void);
+ * model".
+ *
+ * 2026-09-01 review fix, extended 2026-09-02 (round-3 follow-up):
+ * fopdt_model_t::settled used to be write-only -- set by finalize_fit(),
+ * read by nothing but one log line, so a fit that reached DONE via the
+ * AUTOTUNE_ENGINE_DEFAULT_MAX_DURATION_S backstop (never genuinely settled,
+ * and so lower-confidence -- see that field's own comment) was written
+ * through to zones_config_set_model()/set_pid() and used by
+ * zone_feedforward() byte-identically to a fully-settled one. This
+ * parameter closes that: for a STEP-method result, acceptance is refused
+ * UNLESS ack_unsettled is true whenever ANY of THREE independent
+ * trustworthiness signals reads false --
+ *   - model.settled (the STEPPING-phase relative-slope detector never
+ *     genuinely fired; ended via the max-duration backstop instead),
+ *   - model.extrapolation_converged (the asymptote-correction loop hit its
+ *     iteration cap or safety ceiling without settling to within its own
+ *     convergence tolerance), or
+ *   - model.tau_consistent_with_gain (tau_s/dead_time_s could not be
+ *     re-fitted to match the corrected k_gain_c_per_duty, so they describe
+ *     an earlier, less-corrected rise than the gain does)
+ * -- so an operator (or automated caller) must make a deliberate, distinct
+ * choice to persist a lower-confidence fit rather than it happening
+ * silently by default. ONE acknowledgement covers all three; the refused
+ * autotune_engine_accept() call's ESP_LOGW names exactly which one(s)
+ * tripped, and all three are surfaced distinctly (not collapsed into one
+ * bit) through autotune_engine_get_status()/the dashboard JSON/the wire
+ * status so a caller can show the operator WHY before they tick the box.
+ * Has no effect on a RELAY-method result (relay_model_t has none of these
+ * three concepts -- see this function's own relay-vs-step split) or on a
+ * STEP result where all three already read true/settled (ack_unsettled is
+ * simply unused/ignored). */
+bool autotune_engine_accept(bool ack_unsettled);
 
 void autotune_engine_get_status(autotune_engine_status_t *out);
 

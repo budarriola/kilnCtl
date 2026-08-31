@@ -1035,6 +1035,55 @@ static size_t autotune_build_status(uint8_t *out)
     bx_put_f32_le(&out[o], st.relay.tu_s); o += 4;
     bx_put_f32_le(&out[o], st.relay.amplitude_c); o += 4;
     o = bx_put_lstring(out, BRIDGE_REPLY_MAX, o, st.state == AUTOTUNE_ENGINE_ABORTED ? st.abort_reason : "");
+    /* 2026-09-02 CRITICAL FIX (round-2 review): this byte used to be
+     * inserted BEFORE the lstring above, on the false premise that it was
+     * "appended after the fixed-size fields". abort_reason is NOT
+     * fixed-size -- it is length-prefixed (bx_put_lstring), so inserting
+     * anything before it moves its own start by however many bytes were
+     * inserted. tools/PcTools/src/kilnctrl/devices.py hardcodes the
+     * abort_reason length-prefix offset (UART_PROTOCOL_VERSION 8's
+     * documented layout); the earlier version of this fix shifted that
+     * offset 62->63 without updating devices.py, silently corrupting EVERY
+     * abort_reason this frame ever carries (decoded as "" when settled==0,
+     * one garbage byte when settled==1) -- exactly while this same pass was
+     * adding new abort reasons for callers to read. Genuinely appending
+     * AFTER the variable-length lstring, as done here, is the only
+     * placement that cannot move any existing offset, including
+     * abort_reason's own. devices.py's autotune status decoder now reads
+     * this byte at the FIRST offset past the length-prefixed string
+     * (abort_len_offset + 1 + abort_len), not a fixed constant -- see that
+     * file's own comment. UART_PROTOCOL_VERSION was bumped alongside this
+     * (uart_task_ids.h) because this is a layout change to an existing
+     * frame, not a purely additive one -- see that header's own version
+     * history for why versions 4/5 bumped on far smaller changes. */
+    /* bx_put_lstring() never overruns BRIDGE_REPLY_MAX but CAN legitimately
+     * return o == BRIDGE_REPLY_MAX (abort_reason truncated to fill the
+     * buffer exactly) -- guard the same way every other bounded write in
+     * this file does rather than assume there is always one byte left. On
+     * that (pathological, abort_reason near the wire's max) truncation the
+     * settled/converged/tau_consistent bits are simply dropped; a stale/
+     * absent reading is far less harmful than an out-of-bounds write. */
+    if (o < BRIDGE_REPLY_MAX) {
+        out[o++] = st.model.settled ? 1 : 0;
+    }
+    /* 2026-09-02 round-3 follow-up: two more trailing bytes, genuinely
+     * APPENDED after model.settled (itself already after the length-
+     * prefixed abort_reason lstring) -- same append-only discipline the
+     * settled byte's own fix established (see its comment above and
+     * UART_PROTOCOL_VERSION's "Version 9" history in uart_task_ids.h for
+     * the corruption that discipline exists to prevent). Surfaces
+     * fopdt_model_t::extrapolation_converged/::tau_consistent_with_gain
+     * distinctly, not collapsed into the settled bit, so a PC-side caller
+     * can tell an operator WHICH of the three ack_unsettled-gated
+     * conditions (autotune_engine_accept()'s own comment) is unmet, not
+     * just that one is. UART_PROTOCOL_VERSION bumped again (9->10) --
+     * this is a second layout change to the same frame. */
+    if (o < BRIDGE_REPLY_MAX) {
+        out[o++] = st.model.extrapolation_converged ? 1 : 0;
+    }
+    if (o < BRIDGE_REPLY_MAX) {
+        out[o++] = st.model.tau_consistent_with_gain ? 1 : 0;
+    }
     return o;
 }
 
@@ -1088,9 +1137,28 @@ static void autotune_handle_message(void *vargs)
                 break;
             }
             case AUTOTUNE_CMD_ACCEPT: {
-                bool ok = autotune_engine_accept();
+                /* payload[1] is the optional ack_unsettled byte -- see
+                 * autotune_engine_accept()'s own comment (autotune_engine.h)
+                 * for what it gates. A short/absent payload (an older
+                 * PC-tools client that has never heard of this byte)
+                 * defaults to false, i.e. exactly the refuse-a-low-
+                 * confidence-fit behavior that comment documents -- an old
+                 * client cannot accidentally force-accept a fit it doesn't
+                 * know is low-confidence. */
+                /* bx_args_ok() is a REJECTION helper -- it logs a warning
+                 * every time it returns false, which is wrong here: a
+                 * missing ack_unsettled byte is an ordinary, expected,
+                 * common case (every client before this field existed, and
+                 * every accept of an already-settled fit), not a truncated/
+                 * malformed frame worth logging about. Probe the length
+                 * directly instead -- see this arg's own doc comment
+                 * (autotune_engine.h) for why a short payload correctly
+                 * defaults to false. */
+                bool ack_unsettled = (msg.length >= 2) && (msg.payload[1] != 0);
+                bool ok = autotune_engine_accept(ack_unsettled);
                 bx_reply_ok_err(ctx->proto, &msg, UART_TASK_ID_AUTOTUNE, subcmd, ok,
-                                ok ? NULL : "no completed autotune result to accept");
+                                ok ? NULL : "no completed autotune result to accept, or it never settled "
+                                            "and needs the ack_unsettled byte set to accept anyway");
                 break;
             }
             default:

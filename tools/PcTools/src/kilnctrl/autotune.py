@@ -92,10 +92,33 @@ class AutotuneClient:
         """
         return self._query(AUTOTUNE_CMD_ABORT, devices.autotune_abort(), timeout)  # type: ignore[return-value]
 
-    def accept(self, timeout: float = DEFAULT_REPLY_TIMEOUT_S) -> "devices.OkReason":
+    def accept(
+        self, *, ack_unsettled: bool = False, timeout: float = DEFAULT_REPLY_TIMEOUT_S
+    ) -> "devices.OkReason":
         """Accept the finished autotune's proposed gains, and learn *why*
-        if refused (e.g. "no completed autotune result to accept")."""
-        return self._query(AUTOTUNE_CMD_ACCEPT, devices.autotune_accept(), timeout)  # type: ignore[return-value]
+        if refused (e.g. "no completed autotune result to accept").
+
+        ack_unsettled defaults to False, matching the firmware's own default
+        refusal: a STEP result whose model was never genuinely settled
+        (ended via the 4h max-duration backstop -- check
+        ``get_status().model_settled`` first) is refused unless the caller
+        explicitly passes True here. A caller that wants to accept such a
+        fit anyway must make that a deliberate choice, not this method's
+        default -- see AUTOTUNE_CMD_ACCEPT's firmware-side comment
+        (autotune_engine.h) for the full reasoning.
+
+        Keyword-only (round-3 review note): this method used to be
+        accept(timeout=...); a caller passing a timeout POSITIONALLY --
+        accept(5.0), say -- would now silently bind that 5.0 to
+        ack_unsettled instead (truthy, so "accept anyway"), landing a
+        safety flag exactly where a timeout used to sit. No such caller
+        exists in this codebase today, but the `*` here makes that
+        mistake a TypeError instead of a silent behavior change for any
+        future one.
+        """
+        return self._query(
+            AUTOTUNE_CMD_ACCEPT, devices.autotune_accept(ack_unsettled), timeout
+        )  # type: ignore[return-value]
 
     def _query(self, subcommand: int, payload: bytes, timeout: float) -> object:
         with self._query_lock:

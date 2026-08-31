@@ -4099,6 +4099,9 @@ class AutotuneStatus:
     actual_valid: bool
     duty: float
     model_valid: bool
+    model_settled: bool
+    model_extrapolation_converged: bool
+    model_tau_consistent: bool
     model: AutotuneModel
     proposed_gains: AutotuneGains
     predicted_max_ramp_c_per_hr: float
@@ -4156,9 +4159,20 @@ def autotune_abort() -> bytes:
     return struct.pack("<B", AUTOTUNE_CMD_ABORT)
 
 
-def autotune_accept() -> bytes:
-    """0x04 ACCEPT: no args. Replies ok/fail."""
-    return struct.pack("<B", AUTOTUNE_CMD_ACCEPT)
+def autotune_accept(ack_unsettled: bool = False) -> bytes:
+    """0x04 ACCEPT: optional ack_unsettled byte. Replies ok/fail.
+
+    A STEP-method result whose ``AutotuneStatus.model_settled`` is False
+    (the fit ended via the 4h max-duration backstop, not genuine settling --
+    see ``fopdt_model_t::settled``'s doc comment on the firmware side) is
+    refused by the firmware UNLESS this byte is nonzero -- see
+    ``autotune_engine_accept()``'s own comment (autotune_engine.h). Callers
+    should read ``model_settled`` off the last GET_STATUS response and only
+    pass True here after an explicit, deliberate operator choice to accept a
+    low-confidence fit -- see ``docs/MCP_SERVERS.md`` / the CLI's own
+    confirmation prompt for how that choice is surfaced.
+    """
+    return struct.pack("<BB", AUTOTUNE_CMD_ACCEPT, 1 if ack_unsettled else 0)
 
 
 def parse_autotune_response(payload: bytes) -> "tuple[int, object]":
@@ -4187,10 +4201,51 @@ def parse_autotune_response(payload: bytes) -> "tuple[int, object]":
         ku, tu_s, amplitude_c = struct.unpack_from("<fff", payload, 50)
         abort_len = payload[62]
         abort_reason = ""
+        # abort_reason is length-prefixed (bx_put_lstring on the firmware
+        # side), so nothing after it can be at a fixed offset -- its own
+        # length varies frame to frame. model_settled (added 2026-09-01,
+        # UART_PROTOCOL_VERSION 8->9) is genuinely APPENDED after this
+        # string, so its offset is computed from abort_len, never
+        # hardcoded. A firmware build older than this protocol bump simply
+        # doesn't send the trailing byte at all -- defaults to False rather
+        # than raising, since a mid-transition build talking a stale
+        # firmware is refused earlier by the protocol-version handshake
+        # (UART_PROTOCOL_VERSION equality check), not here.
+        model_settled_offset = 63 + abort_len
         if abort_len:
-            if len(payload) < 63 + abort_len:
+            if len(payload) < model_settled_offset:
                 raise AutotuneResponseError("GET_STATUS abort_reason truncated")
-            abort_reason = payload[63 : 63 + abort_len].decode("ascii", errors="replace")
+            abort_reason = payload[63:model_settled_offset].decode("ascii", errors="replace")
+        model_settled = (
+            bool(payload[model_settled_offset])
+            if len(payload) > model_settled_offset
+            else False
+        )
+        # extrapolation_converged / tau_consistent_with_gain (added
+        # 2026-09-02, UART_PROTOCOL_VERSION 9->10) -- two MORE bytes
+        # genuinely appended after model_settled, same "compute from the
+        # previous field's own offset, never hardcode" discipline that
+        # field's own comment establishes. Both fold into autotune_engine_
+        # accept()'s ack_unsettled gate alongside model_settled (see
+        # uart_task_ids.h's Version 10 history and autotune_engine.h's own
+        # comment on that function) and are surfaced HERE distinctly so a
+        # caller can tell an operator WHICH of the three is unmet, not just
+        # that one is. Each independently defaults False if the firmware
+        # build predates it (same reasoning as model_settled's own
+        # default -- a genuinely mixed-version link is refused earlier by
+        # the protocol-version handshake, not here).
+        extrapolation_converged_offset = model_settled_offset + 1
+        tau_consistent_offset = extrapolation_converged_offset + 1
+        model_extrapolation_converged = (
+            bool(payload[extrapolation_converged_offset])
+            if len(payload) > extrapolation_converged_offset
+            else False
+        )
+        model_tau_consistent = (
+            bool(payload[tau_consistent_offset])
+            if len(payload) > tau_consistent_offset
+            else False
+        )
         return subcommand, AutotuneStatus(
             state=state,
             method=method,
@@ -4201,6 +4256,9 @@ def parse_autotune_response(payload: bytes) -> "tuple[int, object]":
             actual_valid=actual_valid,
             duty=duty,
             model_valid=model_valid,
+            model_settled=model_settled,
+            model_extrapolation_converged=model_extrapolation_converged,
+            model_tau_consistent=model_tau_consistent,
             model=AutotuneModel(k_gain_c_per_duty=k_gain, tau_s=tau_s, dead_time_s=dead_time_s),
             proposed_gains=AutotuneGains(kp=kp, ki=ki, kd=kd, rule=rule),
             predicted_max_ramp_c_per_hr=predicted_max_ramp,
