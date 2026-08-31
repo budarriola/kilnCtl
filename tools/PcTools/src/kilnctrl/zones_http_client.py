@@ -52,6 +52,13 @@ backwards is its own hazard in either direction:
     relay<N>_name at all: omitting it is what PRESERVES the operator's relay
     names, the same protection zones_page.html itself relies on for fields
     it doesn't render either.
+  * z%u_fuzzy_strength / z%u_coupling_c%u / z%u_settings_source: OMITTED
+    MEANS KEEP THE CURRENT VALUE, same convention as z%u_tctype above --
+    these are measured/operator-set quantities, not safe-to-zero. Sent
+    explicitly here anyway, same as every other field. The coupling
+    diagonal (j == the zone's own index) is additionally special: the
+    firmware force-ranges it to exactly 0 and _encode_zone() refuses to
+    post it nonzero even if a caller's merged dict somehow carried one in.
   * tp%u_* (zone_timing_profile_t, named safety-timing bundles): every field
     within a named profile is REQUIRED once that profile's tp%u_name is
     present at all (parse_timing_profile_fields() has no per-field presence
@@ -79,6 +86,7 @@ to zero on the board -- see ZonesHttpUnknownFieldError.
 from __future__ import annotations
 
 import json
+import re
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -220,12 +228,36 @@ _ZONE_FIELD_FORM_KEY = {
     "tc_type": "tctype",
     "ct_mask": "ct_mask",
     "timing_profile": "timingprofile",
+    # PID_EXPANSION_PLAN.md Phase 2/4 (2026-08-30). zones_http.c line ~4834:
+    # snprintf(key, sizeof(key), "z%u_fuzzy_strength", i) -- NOT
+    # "z%u_fuzzy_strength_pct"; the JSON key and the form-key suffix differ.
+    # Omitted-on-POST means PRESERVE the current value (parse_zone_fields()),
+    # not zero -- irrelevant to this module since every GET field is always
+    # echoed back explicitly.
+    "fuzzy_strength_pct": "fuzzy_strength",
+    # settings_source: zones_http.c line ~4877, snprintf(key, ..., "z%u_settings_source", i).
+    # 0xFF (ZONE_SETTINGS_SOURCE_CUSTOM) or another zone's index; self-reference
+    # and cycle-forming chains are refused by the firmware itself.
+    "settings_source": "settings_source",
 }
 #: Integer-valued zone fields -- posted as a plain int string (parse_u8_field()
 #: on the firmware side), never a float repr like "2.0".
 _ZONE_INT_FIELDS = {
     "relay_mask", "thermo_mask", "control_mode", "tc_type", "ct_mask", "timing_profile",
+    "settings_source",
 }
+#: zones_http.c emits the coupling row as MAX31856_CHANNEL_COUNT separate
+#: JSON keys per zone -- "coupling_c0".."coupling_c{N-1}" -- rather than an
+#: array, and parse_zone_fields() expects the identical name back as the
+#: z%u_ suffix (z%u_coupling_c%u). Matched by pattern in _encode_zone()
+#: below rather than listed individually here, since N is a firmware
+#: constant this module does not hardcode. Omitted-on-POST means PRESERVE
+#: the current cell (same convention as fuzzy_strength_pct above); the
+#: diagonal cell (j == the zone's own index) is force-ranged to [0,0] by
+#: parse_zone_fields() (`(j == i) ? 0.0f : ZONE_COUPLING_COEFF_MAX`) and
+#: MUST NEVER be posted nonzero -- _encode_zone() asserts this explicitly
+#: rather than trusting the GET payload always has 0 there.
+_ZONE_COUPLING_CELL_RE = re.compile(r"^coupling_c(\d+)$")
 #: Read-only telemetry zones_get_handler() emits per zone that has NO POST
 #: counterpart at all (measured data, or the array index itself) -- excluded
 #: from the POST body on purpose, not by omission-means-preserve, since these
@@ -287,6 +319,23 @@ def _encode_zone(index: int, zone: dict) -> "dict[str, str]":
     fields: "dict[str, str]" = {}
     for key, value in zone.items():
         if key in _ZONE_READONLY_KEYS:
+            continue
+        cell_match = _ZONE_COUPLING_CELL_RE.match(key)
+        if cell_match:
+            j = int(cell_match.group(1))
+            if j == index and float(value) != 0.0:
+                # zones_http.c's parse_zone_fields() ranges the diagonal
+                # cell to exactly [0,0] (`(j == i) ? 0.0f : ...`) -- a
+                # nonzero value here means either this module's caller
+                # corrupted the GET payload, or the firmware itself no
+                # longer forces the diagonal to 0. Either way, posting it
+                # would either be refused by the firmware or -- worse, if
+                # the firmware's own guard ever regressed -- silently
+                # accepted. Refuse rather than post it.
+                raise ZonesHttpError(
+                    f"zone {index}: coupling diagonal cell coupling_c{j} is {value!r}, "
+                    "not 0 -- refusing to post a nonzero diagonal")
+            fields[f"z{index}_{key}"] = repr(float(value))
             continue
         if key not in _ZONE_FIELD_FORM_KEY:
             raise ZonesHttpUnknownFieldError(

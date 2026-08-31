@@ -53,6 +53,13 @@ def _sample_zone(index: int, **overrides) -> dict:
         "cross_zone_max_delta_c": 0.0, "model_k_dc": 0.0, "model_tau_s": 0.0, "model_dead_time_s": 0.0,
         "tc_type": 3, "ct_mask": 0, "timing_profile": 0,
         "normal_current_measured": False, "normal_current_a": 0.0,
+        "fuzzy_strength_pct": 0.0,
+        # Coupling row: MAX31856_CHANNEL_COUNT (3, uart_task_ids.h's
+        # THERMO_CHANNEL_COUNT) cells, diagonal (j == index) always 0 --
+        # zones_http.c always emits the full row for every zone regardless
+        # of thermo_count.
+        **{f"coupling_c{j}": 0.0 for j in range(3)},
+        "settings_source": 0xFF,
     }
     z.update(overrides)
     return z
@@ -237,6 +244,82 @@ class BuildPostBodyTest(unittest.TestCase):
         current["continue_on_zone_trip"] = True
         form = _decode_body(zh.build_post_body(current, {"name": "p", "zones": []}))
         self.assertEqual(form["continue_on_zone_trip"], "1")
+
+    # ---- PID_EXPANSION_PLAN.md Phase 2/4/5 fields (fuzzy_strength_pct,
+    # coupling_c%u, settings_source): added to zones_http.c 2026-08-30, the
+    # producer/consumer gap this task exists to close. ----
+
+    def test_every_currently_emitted_field_round_trips_without_unknown_field_refusal(self):
+        """The mandatory 'GET payload containing every currently-emitted
+        field builds without refusal, values unchanged' check -- covers
+        fuzzy_strength_pct, all three coupling_c%u cells and
+        settings_source in one pass, not just the mapping's existence."""
+        current = _sample_get_response(n_zones=3)
+        current["zones"][1]["fuzzy_strength_pct"] = 37.5
+        current["zones"][1]["coupling_c0"] = 0.0     # diagonal for zone 0, off-diag for zone 1
+        current["zones"][1]["coupling_c2"] = 1.25
+        current["zones"][1]["settings_source"] = 0
+        form = _decode_body(zh.build_post_body(current, {"name": "p", "zones": []}))
+        self.assertEqual(form["z1_fuzzy_strength"], repr(37.5))
+        self.assertEqual(form["z1_coupling_c0"], repr(0.0))
+        self.assertEqual(form["z1_coupling_c2"], repr(1.25))
+        self.assertEqual(form["z1_settings_source"], "0")
+        # settings_source == 0 is a REAL distinct value (a chain link to
+        # zone 0), not the "not set" sentinel -- must round-trip as "0",
+        # never coerced to something else or dropped as falsy.
+        self.assertIn("z1_settings_source", form)
+
+    def test_settings_source_custom_sentinel_round_trips_as_255(self):
+        current = _sample_get_response()
+        current["zones"][0]["settings_source"] = 0xFF
+        form = _decode_body(zh.build_post_body(current, {"name": "p", "zones": []}))
+        self.assertEqual(form["z0_settings_source"], "255")
+
+    def test_coupling_diagonal_never_posted_nonzero(self):
+        """Semantics test: the diagonal (j == the zone's own index) must
+        never be posted nonzero -- zones_http.c's parse_zone_fields() force-
+        ranges it to exactly [0,0] and a client that posted a stray nonzero
+        value there would simply be refused by the board, but this module
+        is supposed to catch it before the request ever goes out."""
+        current = _sample_get_response(n_zones=3)
+        # Diagonal correctly 0 -- must round-trip fine.
+        form = _decode_body(zh.build_post_body(current, {"name": "p", "zones": []}))
+        self.assertEqual(form["z0_coupling_c0"], repr(0.0))
+        self.assertEqual(form["z1_coupling_c1"], repr(0.0))
+        self.assertEqual(form["z2_coupling_c2"], repr(0.0))
+
+    def test_coupling_diagonal_nonzero_is_refused_BREAK_PROOF(self):
+        """NEGATIVE TEST: corrupt zone 1's own diagonal cell (coupling_c1)
+        to a nonzero value and prove build_post_body() refuses to post it,
+        rather than silently forwarding a value the firmware would reject
+        anyway (or, if the firmware's own guard ever regressed, silently
+        accepting)."""
+        current = _sample_get_response(n_zones=3)
+        current["zones"][1]["coupling_c1"] = 2.5  # zone 1's own diagonal cell
+        with self.assertRaises(zh.ZonesHttpError) as ctx:
+            zh.build_post_body(current, {"name": "p", "zones": []})
+        self.assertIn("coupling_c1", str(ctx.exception))
+        self.assertIn("diagonal", str(ctx.exception))
+
+    def test_control_mode_3_pid_fuzzy_accepted(self):
+        """control_mode now accepts ZONE_CONTROL_MODE_PID_FUZZY (3) -- confirm
+        this module's int-field encoding does not clamp/reject it."""
+        current = _sample_get_response()
+        current["zones"][0]["control_mode"] = 3
+        form = _decode_body(zh.build_post_body(current, {"name": "p", "zones": []}))
+        self.assertEqual(form["z0_mode"], "3")
+
+    def test_unmapped_field_guard_still_refuses_BREAK_PROOF(self):
+        """NEGATIVE TEST for the guard itself, run again post-fix: an
+        UNEXPECTED field (not fuzzy_strength_pct/coupling_c%u/
+        settings_source, and not anything else this module knows) must
+        still raise. This is the exact guard the aborted hardware run hit,
+        and the fix above must not have weakened it into silence."""
+        current = _sample_get_response()
+        current["zones"][0]["totally_unmapped_field_xyz"] = 1.0
+        with self.assertRaises(zh.ZonesHttpUnknownFieldError) as ctx:
+            zh.build_post_body(current, {"name": "p", "zones": []})
+        self.assertIn("totally_unmapped_field_xyz", str(ctx.exception))
 
 
 class PostZonesTest(unittest.TestCase):
