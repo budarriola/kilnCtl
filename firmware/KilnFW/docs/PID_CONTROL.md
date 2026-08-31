@@ -377,8 +377,93 @@ does not determine a FOPDT model, and a model an earlier step test measured
 must survive. Note guard 3 has no off-window while cycling — the low branch
 is duty 0.15 — so the welded-relay check simply has nothing to observe;
 guards 4 and 5 cover that window with the real setpoint.
-**Neither method has ever completed on hardware**: with no thermocouples
-attached, every on-target run aborts on guard 6 first.
+**This section used to say "neither method has ever completed on hardware,
+because with no thermocouples attached every on-target run aborts on guard 6
+first."** That stopped being true on 2026-08-29/2026-08-30: a thermocouple
+daughterboard is now attached to the bench unit, the window/min-on ratio bug
+above is fixed, and the step method has completed multiple times — see "Measured
+on the bench, 2026-08-29" above and "First real cross-zone coupling
+measurement (2026-08-30)" below. The relay-feedback method specifically has
+still never completed on hardware; nothing in this file should be read as
+claiming otherwise for it.
+
+### Tuning-rule comparison
+
+Four rules are implemented, on two different identification paths, and they
+are not interchangeable — each refuses the other path's input rather than
+guessing at a conversion.
+
+**SIMC** (`pid_autotune_tune_from_fopdt()`, `AUTOTUNE_RULE_SIMC`, the
+default) consumes the FOPDT step-test model `{K, tau, L}`: `Kc = tau /
+(K*(lambda+L))`, `Ti = min(tau, 4*(lambda+L))`, `Td = L/2`
+(`pid_autotune.c:180-192`). `lambda` defaults to `3*L` when the caller passes
+0 (`pid_autotune.c:180`), which is the "robust" tuning Skogestad's own SIMC
+paper recommends over the "tight" `lambda = L` — a 3x larger lambda trades
+response speed for margin against exactly the kind of model error a two-point
+fit on a noisy thermocouple trace is going to have. On the degenerate `L == 0`
+case, lambda falls back to `tau` (or 1.0 if `tau` is also non-positive) rather
+than leaving lambda at zero (`pid_autotune.c:181-183`).
+
+**Cohen-Coon** (`AUTOTUNE_RULE_COHEN_COON`, added 2026-08-30, same FOPDT
+path) is more aggressive: `Kc = (1/K) * (tau/L) * (4/3 + L/(4*tau))`, `Ti = L
+* (32 + 6*(L/tau)) / (13 + 8*(L/tau))`, `Td = L * 4 / (11 + 2*(L/tau))`
+(`pid_autotune.c:116-119, 152-154`). It refuses below
+`AUTOTUNE_COHEN_COON_MIN_DEAD_TIME_S` (0.5 s, `pid_autotune.c:96`) rather than
+clamping a small `L`: Cohen-Coon's `Kc` divides by `L` directly, so a fit
+whose step response barely lagged reports `L` near zero and `1/L` blows up
+right where the two-point method is least trustworthy anyway. SIMC has a
+principled fallback for `L == 0` (substitute `tau` for `lambda` and keep
+producing a conservative number); Cohen-Coon has none, because the whole rule
+is parameterized by `L/tau` with no substitute that preserves its meaning —
+clamping `L` to an epsilon would hand back an arbitrarily large `Kc` dressed
+up as a real answer, so the code refuses instead (`pid_autotune.c:85-96`).
+
+**Ziegler-Nichols** and **Tyreus-Luyben** (`pid_autotune_tune_from_relay()`,
+`pid_autotune.c:444-483`) take a completely different input: `{Ku, Tu}` from
+the relay-feedback test, not `{K, tau, L}` from the step test. ZN is `Kc =
+0.6*Ku`, `Ti = Tu/2`, `Td = Tu/8`; Tyreus-Luyben is `Kc = Ku/3.2`, `Ti =
+2.2*Tu`, `Td = Tu/6.3` — roughly a third the gain and four times the integral
+time of ZN, trading settling speed for a loop that does not ring
+(`pid_autotune.c:460-473`). Each tuning function refuses the other path's
+rules outright: `pid_autotune_tune_from_fopdt()` returns
+`AUTOTUNE_REFUSAL_RULE_NOT_ON_THIS_PATH` for ZN/Tyreus-Luyben
+(`pid_autotune.c:162-167`), and `pid_autotune_tune_from_relay()` does the
+mirror-image refusal for SIMC (`pid_autotune.c:474-483`) — SIMC has no
+definition in terms of a single frequency-response point, and ZN/Tyreus-Luyben
+have no definition without one. This is why the UI needs two separate rule
+selectors rather than one four-way dropdown: picking a rule also picks which
+identification run has to precede it.
+
+All four rules produce their gains in Kc/Ti/Td **series** form and convert to
+pid.c's **parallel** form the same way, in the same two lines, at every call
+site: `Kp = Kc`, `Ki = Kc/Ti`, `Kd = Kc*Td` (`pid_autotune.c:194-198,
+485-490`). This conversion matters enough to call out explicitly — pid.c's
+integral and derivative terms are `Ki*integral` and `Kd*d_filtered`, i.e.
+already parallel form, so a Ti/Td pair plugged in directly (as if it were
+already Ki/Kd) would be wrong by a factor of `Kc`, and mixing the two forms
+by hand is a classic way to end up with a plausible-looking but wrong tuning.
+
+All four rules also share the same refusal conditions rather than emitting a
+nonsense gain: an invalid input model or fit (`AUTOTUNE_REFUSAL_INVALID_MODEL`),
+a non-positive fitted plant gain `K` or `Ku`/`Tu`
+(`AUTOTUNE_REFUSAL_NONPOSITIVE_GAIN` — a heater that cannot cool cannot have a
+negative gain, so a negative fit is always a bad fit, never a real plant), and
+for the FOPDT path a non-positive `tau`
+(`AUTOTUNE_REFUSAL_NONPOSITIVE_TAU`). Every refusal path returns an explicit
+enum plus a human-readable reason string carrying the offending numbers
+(`pid_autotune.h:83-100`), rather than the all-zero gains a refusal used to
+collapse to indistinguishably from every other refusal.
+
+**SIMC stays the default, and Cohen-Coon should be a deliberate choice, not
+one.** Both are derivable from the same FOPDT model, but Cohen-Coon is the
+more aggressive of the two (`pid_autotune.c:108-114`) — like ZN, it targets
+roughly quarter-amplitude decay, the same design target as the
+oscillation-based rules even though it is derived differently. On a kiln,
+where overshoot costs the ware and elements do not enjoy being cycled hard,
+the conservative SIMC/`lambda=3*L` tuning is the one that should run
+unattended; Cohen-Coon is offered for an operator who specifically wants the
+faster response and understands the overshoot trade, the same posture this
+file already takes toward ZN and Tyreus-Luyben.
 
 ## Feedforward (TODO.md 6A.2), built 2026-08-12
 
@@ -439,6 +524,87 @@ ownership-tag mechanism itself was never generally built). Cross-zone
 coupling logging during a run (TODO.md 6A.5(b)) is now built — see the
 Module layout table above and TODO.md 6A.5(b) for what it does and doesn't
 cover (no real hardware has exercised it yet).
+
+## Fuzzy adjustment (`pid_fuzzy.c`, PID_EXPANSION_PLAN.md §2b/§4 Phase 3)
+
+An optional second control mode layered over classic PID: a fixed,
+firmware-wide Mamdani fuzzy-rule table nudges the three PID gains up or down
+around whatever base gains Autotune measured, so one set of tuning numbers
+keeps working across a temperature range wider than the point Autotune ran
+at. It does not change the base gains — selecting it lets them drift within a
+caller-bounded range while firing. Pure C, no FreeRTOS, no ESP-IDF, no
+globals, same host-testability discipline as `pid.c` (`pid_fuzzy.c:1-6`).
+
+**The rule table.** Two inputs — this zone's own error (`setpoint -
+measurement`, degC) and its rate of change (degC/s) — each mapped onto three
+triangular membership buckets (NEG/ZERO/POS on error, FALLING/STEADY/RISING
+on rate), giving a 3x3 grid of 9 rule cells (`RULE_TABLE`,
+`pid_fuzzy.c:96-109`). Membership degrees are computed with plain triangular
+functions centered at `-band/0/+band` (`triangular_memberships()`,
+`pid_fuzzy.c:55-82`), each cell's firing strength is the product AND of its
+two membership degrees (Mamdani, product AND), and the three output gain
+directions are combined by weighted-average defuzzification over all 9 cells
+(`pid_fuzzy.c:205-219`) — a lookup-plus-interpolation, not a fuzzy-logic
+library. The rule table is a compile-time constant rather than per-zone
+config, deliberately: a per-installation editable table reopens the
+trial-and-error tuning problem this mode exists to avoid (`pid_fuzzy.h:17-21`).
+
+**The band constants** (`pid_fuzzy.c:44-50`):
+- `ERROR_BAND_C = 20.0` — the error axis half-width; "large" error is set
+  around a single time-proportioning window's worth of visible
+  overshoot/undershoot for a mid-size kiln zone.
+- `RATE_BAND_C_PER_S = 0.5` — the rate axis half-width, rescaled 2026-08-30
+  from an earlier `0.05`. At `0.05`, an ordinary 100-300 degC/hr profile ramp
+  (0.028-0.083 degC/s) sat mid-scale on this axis for its entire duration, so
+  "large rate" was measuring the commanded profile rather than a disturbance
+  — exactly the hazard PID_EXPANSION_PLAN.md Phase 3 hazard 2 calls out. At
+  `0.5` (30 degC/min, roughly 6x the fastest ramp this kiln's profiles
+  realistically command), a legitimate firing's own ramp now sits well inside
+  the STEADY bucket for its whole duration, and only a rate no ordinary ramp
+  produces — a stuck-open lid, a runaway element, a thermocouple snapping
+  loose toward ambient — reaches toward the RISING/FALLING extremes.
+- `MAX_NUDGE_FRACTION = 0.5` — the maximum fractional adjustment any single
+  gain may receive at `strength_pct=100` and full rule membership: the fuzzy
+  layer may at most halve or 1.5x a base gain. A bounded adjustment, not a
+  re-tune.
+
+**The sign convention — read this carefully before touching either
+file.** `pid.c` computes `raw_d = -(measurement - prev_measurement)/dt_s`, so
+`d_filtered` (what `pid_fuzzy_adjust()` receives as `error_rate_c_per_s`)
+carries `+d(error)/dt` in form, but it is derivative *on measurement*, never
+on the setpoint — `pid.c` never differentiates the setpoint. A **climbing**
+kiln therefore feeds a **negative** value on the rate axis: a kiln rising at
+300 degC/hr (0.083 degC/s) feeds `-0.083` here, which leans toward the NEG
+(FALLING) bucket, not POS (RISING). The magnitude tracks the profile's ramp
+rate because the derivative is on measurement and the setpoint is never
+differentiated in it — not because "tracking well" implies a large
+d(error)/dt. The opposite is true: true `d(error)/dt` is close to zero while
+a ramp is being tracked well, since error itself is roughly constant. Getting
+this backwards would invert every rule in the table; `pid_fuzzy.c:9-33` and
+`pid_fuzzy.h:79-94` carry the same explanation and this paragraph is meant to
+stay consistent with both.
+
+**Defaults and degenerate inputs.** `strength_pct = 0` is the safety
+contract: it reproduces the base gains bit-for-bit, with no fuzzy math in the
+path at all, and is the default (`pid_fuzzy.c:148-166`). A non-finite
+`error_c` or `error_rate_c_per_s` (e.g. from a faulted thermocouple) also
+holds the base gains rather than adjusting — an earlier version mapped a
+non-finite input to `0.0` on both axes, which lands on the ZERO/STEADY cell
+and *raises* Ki by up to 50% at the exact moment the temperature reading has
+failed; that was replaced with "make no adjustment at all, let the thermal
+guards decide" (`pid_fuzzy.c:168-188`). Every output gain is separately
+clamped finite and non-negative regardless of how the inputs misbehave
+(`clamp_gain()`, `pid_fuzzy.c:111-121`).
+
+**The integral rescale this mode requires.** Because the fuzzy layer can
+change Ki every tick while a zone is running, `pid.c` carries
+`pid_rescale_integral_for_new_ki()` (`pid.c:25`), which rescales the
+accumulated integral term proportionally whenever Ki changes so the *product*
+`Ki * integral` — the actual I contribution to duty — stays continuous across
+the gain change. Without it, a Ki nudge would step the I term (and therefore
+the commanded duty) discontinuously the instant the fuzzy layer moved it,
+exactly the kind of bump bumpless transfer exists elsewhere in this file to
+avoid.
 
 ## Host-side testing (`App/test/`, TODO.md 6A.8)
 
@@ -588,3 +754,105 @@ paginating the underlying getters and streaming both responses via
 allocation is now independent of how many samples exist. The general
 lesson: a static-size report is not a substitute for hitting the actual
 endpoint on real hardware before calling something done.
+
+## First real cross-zone coupling measurement (2026-08-30)
+
+The step test finally ran to completion on hardware, and the coupling matrix
+`autotune_engine.c` has been filling since 2026-08-11 has its first real row.
+Zone 0 driven at duty 0.4, from ~27 °C ambient, 39 samples over 390 s:
+
+| Cell | K (°C/duty) | tau (s) | dead time (s) |
+|------|-------------|---------|---------------|
+| 0 -> 0 (self) | 32.648 | 163.7 | 40.2 |
+| 0 -> 1        |  5.863 | 181.4 | 65.5 |
+| 0 -> 2        |  2.812 | 163.9 | 84.7 |
+
+SIMC proposal from the self-cell: `kp = 0.03123`, `ki = 0.00019`,
+`kd = 0.62687`, predicted max ramp 431 °C/hr. **Not accepted** — zone 0 still
+carries its hand-entered `Kp=2.0 / Ki=0.1 / Kd=1.0`.
+
+**The zones are genuinely coupled.** Zone 1 sees 18% of zone 0's own gain and
+zone 2 sees 8.6%. That is not measurement noise, and it settles the question
+`PID_EXPANSION_PLAN.md` §2c was left open on: cross-zone compensation is worth
+building, because a controller tuned per-zone in isolation here really is
+fighting a disturbance worth ~18% of its own authority.
+
+Two details worth keeping:
+
+- **Dead time grows with distance** (40.2 -> 65.5 -> 84.7 s) while tau stays
+  roughly constant (~164-181 s). That is the physically expected signature —
+  heat takes longer to *arrive* at a further zone, but once arriving, the
+  thermal mass it is charging is similar. A coupling row where the dead times
+  came out equal, or shorter with distance, would be a reason to distrust the
+  fit; these do not.
+- **The self-cell reproduces the earlier bench run** (K = 32.95, tau = 166.9,
+  L = 36.9 recorded above) to within ~1% on K and ~2% on tau. Two independent
+  runs agreeing is the first evidence the identification path is repeatable
+  rather than merely finishing.
+
+**RGA is still unavailable** (`code 2`, "no 2 zones yet have every cross-gain
+between them measured") — it needs zones 1 and 2 driven too, so rows 1 and 2
+of the matrix are still `valid: false`. Note the ordering hazard when
+filling them: a step test on zone 1 started while zone 0 is still cooling
+will fit cell (1,0) against a falling baseline and can report a *negative*
+cross-gain. Let the kiln settle to a flat baseline between rows rather than
+chaining runs back to back.
+
+Caveat on all of the above: this rig is range-limited to 0..80 °C, so these
+numbers describe the plant near ambient. `PID_EXPANSION_PLAN.md` §2a's `T^4`
+argument means K at cone temperature will not be this number.
+
+## Full 3x3 coupling matrix and first RGA (2026-08-30, later the same night)
+
+All three zones have now been step-tested (duty 0.4, bench rig, near-ambient
+0..80 °C), each run started only after the rig settled below 0.8 °C spread —
+the ordering hazard called out above, taken seriously. The coupling matrix
+`autotune_engine.c` has been filling since 2026-08-11 is complete for the
+first time:
+
+| K (°C/duty), tau (s), L (s) | j=0 | j=1 | j=2 |
+|---|---|---|---|
+| i=0 | K=32.648 tau=163.7 L=40.2 | K=5.863 tau=181.4 L=65.5 | K=2.812 tau=163.9 L=84.7 |
+| i=1 | K=10.887 tau=123.2 L=56.7 | K=20.969 tau=113.5 L=39.3 | K=3.332 tau=125.6 L=65.4 |
+| i=2 | K=7.723 tau=123.1 L=93.2 | K=8.625 tau=127.8 L=83.7 | K=23.641 tau=124.7 L=40.8 |
+
+With every cell now measured, `pid_autotune_rga()` produces its first real
+answer instead of the incomplete-matrix refusal (`n=3`, `det=13700`):
+
+```
+[ 1.1131  -0.0992  -0.0140 ]
+[-0.0909   1.1484  -0.0575 ]
+[-0.0222  -0.0492   1.0715 ]
+```
+
+**Diagonal pairing is confirmed correct for all three zones.** All three
+diagonal elements sit in 1.07-1.15 with small, negative off-diagonals — weak
+interaction, and zone *i*'s own loop should drive heater *i*, not some other
+assignment. This does not extend to justifying full MIMO decoupling; the RGA
+says decentralized per-zone PID is the right structure here, not that
+cross-zone compensation is unnecessary (the earlier 0->1/0->2 row already
+established the couplings are real, ~8-18% of self-gain).
+
+**Coupling is asymmetric in every pair, and by a lot.** 0<->1 is 5.863 vs
+10.887 (zone 1's pull on zone 0 is 1.86x zone 0's pull on zone 1); 0<->2 is
+2.812 vs 7.723 (2.75x); 1<->2 is 3.332 vs 8.625 (2.59x). Normalized to each
+zone's own self-gain, zone 1 sends 52% of its self-gain into zone 0, while
+zone 2 spreads its influence more evenly (33% into zone 0, 37% into zone 1).
+Much of this asymmetry is just zone 0's much larger self-gain (32.6 against
+21.0 and 23.6 for zones 1 and 2) diluting the *fraction* zones 1 and 2
+receive back from it, rather than the physical coupling paths themselves
+being one-directional.
+
+**Dead time rises monotonically with distance from the driven zone in every
+row** — the same signature the single-row measurement above flagged, and
+seeing it hold across all three rows is the check that these fits are
+tracking real heat transport through the kiln body rather than baseline
+drift dressed up as a cross-gain.
+
+**Caveat, and it is the same one as above, worth repeating because it bounds
+everything in this section**: the bench rig only reaches 0..80 °C, so this
+whole matrix and RGA describe the plant near ambient. It does not settle
+`PID_EXPANSION_PLAN.md` §2a's `T^4` radiative-gain-variation question, which
+needs a real firing to real cone temperature to answer — an RGA is a
+steady-state measure at a single operating point, and this is one operating
+point (near-ambient, all zones driven individually at the same duty step).
