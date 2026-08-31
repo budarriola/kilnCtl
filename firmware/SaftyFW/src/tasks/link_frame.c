@@ -55,6 +55,11 @@ bool link_frame_status_v2_supported(uint16_t peer_protocol_version)
     return peer_protocol_version >= LINK_FRAME_STATUS_V2_MIN_PROTOCOL;
 }
 
+bool link_frame_rollback_result_supported(uint16_t peer_protocol_version)
+{
+    return peer_protocol_version >= LINK_FRAME_ROLLBACK_RESULT_MIN_PROTOCOL;
+}
+
 uint8_t link_frame_saturate_tx_dropped(uint32_t tx_dropped)
 {
     return (tx_dropped > LINK_FRAME_STATUS_TX_DROPPED_SAT_MAX)

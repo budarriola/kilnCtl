@@ -386,6 +386,24 @@ static void test_status_v2_supported_gate(void)
     TEST_CHECK(link_frame_status_v2_supported(7u), "protocol_version 7 (above the floor) IS supported");
 }
 
+// link_frame_rollback_result_supported() -- same gate shape as
+// link_frame_status_v2_supported() above, mirrored for SAFETY_CMD_ROLLBACK_
+// RESULT (0x25)'s own floor (LINK_FRAME_ROLLBACK_RESULT_MIN_PROTOCOL = 9).
+static void test_rollback_result_supported_gate(void)
+{
+    TEST_SECTION("link_frame_rollback_result_supported -- peer protocol_version gate boundary");
+
+    TEST_CHECK(!link_frame_rollback_result_supported(0u),
+               "0 (never announced -- s_peer_protocol_version's default) is NOT supported: "
+               "the safe default before any ANNOUNCE_VERSION has arrived");
+    TEST_CHECK(!link_frame_rollback_result_supported(8u),
+               "protocol_version 8 (the pre-ROLLBACK_RESULT version this whole repo shipped "
+               "until now) is NOT supported");
+    TEST_CHECK(link_frame_rollback_result_supported(9u),
+               "protocol_version 9 (LINK_FRAME_ROLLBACK_RESULT_MIN_PROTOCOL itself) IS supported");
+    TEST_CHECK(link_frame_rollback_result_supported(10u), "protocol_version 10 (above the floor) IS supported");
+}
+
 // 2026-08-23, the DIAG-frame-went-dark investigation: link_frame_saturate_
 // tx_dropped() (link_frame.c) is the pure conversion feeding byte 23's
 // tx_dropped_sat wire value. Tested directly at its own boundaries first --
@@ -739,6 +757,7 @@ void run_test_link_frame_wire(void)
     test_status_frame_nan_when_invalid();
     test_status_frame_negative();
     test_status_v2_supported_gate();
+    test_rollback_result_supported_gate();
     test_saturate_tx_dropped();
     test_status_frame_v2_tx_dropped();
     test_fw_version_round_trip();

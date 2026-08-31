@@ -267,6 +267,17 @@ static TaskHandle_t s_task_handle = NULL;
 // only ever tightens a real abs_max_temp_c, it does not manufacture one.
 static safety_guard_cfg_t s_guard_cfg;
 
+// S13's per-zone last-seen sample_counter, indexed by zone_index (0..
+// CONTEXT_SNAPSHOT_MAX_ZONES-1, NOT by array position in a given tick's
+// zones[] -- see safety_core_build_input()'s sample_counter_advancing block
+// for why those two differ). s_borrowed_sample_counter_known[z] is false
+// until zone_index z has been seen in a context frame at least once this
+// boot, so the very first sighting of a zone can never manufacture a false
+// "advancing" (or "stalled") verdict by comparing against zero-initialized
+// state that was never a real reading.
+static uint8_t s_borrowed_last_sample_counter[CONTEXT_SNAPSHOT_MAX_ZONES];
+static bool    s_borrowed_sample_counter_known[CONTEXT_SNAPSHOT_MAX_ZONES];
+
 // Cached alongside s_guard_cfg by apply_config_to_guard_cfg(), for the same
 // reason: recomputed only when the commissioned record changes, read every
 // tick. See that function's comment for why S9 needs it. False until a
@@ -323,9 +334,9 @@ static void safety_core_load_guard_cfg(const config_store_record_t *rec)
                                          : SAFETY_TC_CHAMBER_AGREED;
 
     // tc_source gates S13. OWN_J7 is the conservative uncommissioned reading
-    // (safety_guards.h) -- and note S13's producer (sample_counter_advancing)
-    // is still hardcoded false in safety_core_build_input(), so BORROWED_ZONE/
-    // BOTH must NOT be selected on a real board yet; see that call site.
+    // (safety_guards.h). sample_counter_advancing (safety_core_build_input())
+    // now has a real producer -- see that call site -- so BORROWED_ZONE/BOTH
+    // is safe to commission once borrowed_zone_index is also set.
     s_guard_cfg.tc_source = SAFETY_TC_SOURCE_OWN_J7;
     if (rec->fields_set & CONFIG_STORE_SET_TC_SOURCE) {
         if (rec->tc_source == CONFIG_STORE_TC_SOURCE_BORROWED_ZONE) {
@@ -903,36 +914,40 @@ static safety_guard_input_t safety_core_build_input(void)
         relay_commanded_continuously = (float)continuous_ms >= correlation_window_s * 1000.0f;
     }
 
-    // S13's sample_counter_advancing: deliberately left false. SAFETY_MODEL.md
-    // section 3 requires a commissioned `borrowed_zone_index` (0..2) to say
-    // WHICH context zone is "the" borrowed channel before this fact means
-    // anything at all -- that field is documented (docs/CONFIG_REFERENCE.md,
-    // SAFETY_MODEL.md section 3) but does not exist anywhere in this
-    // codebase yet (grep-confirmed: no config_store field, no
-    // safety_guard_cfg_t field), the same "Phase 9, not commissioned" gap
-    // abs_max_temp_c is in for S1. Guessing a zone index (e.g. hardcoding
-    // zone 0) would be inventing a commissioning decision this pass is not
-    // authorised to make, and it would be silently WRONG the moment a real
-    // installation's borrowed zone is not zone 0. This is harmless today
-    // regardless: cfg.tc_source has no default and stays SAFETY_TC_SOURCE_
-    // OWN_J7 (0) absent Phase 9 commissioning, and safety_guards.c's own S13
-    // block is gated on `cfg->tc_source == BORROWED_ZONE || BOTH` before it
-    // ever reads this field -- so S13 stays correctly dormant either way,
-    // the same "config gap, not a missing-producer gap" category
-    // GUARD_TEST_MATRIX.md section 6 already documents for S1. Revisit once
-    // borrowed_zone_index is real.
-    bool sample_counter_advancing = false;
-
     // safety_tc_installed (config param 0x0211) -- config_store_get_full_
     // record() is a cheap cached-copy read (config_store_flash.c), safe to
     // call every 100ms tick, same as config_store_get_tc_type()'s own use
     // elsewhere. Inverted into safety_tc_not_installed_declared here (see
     // that field's own doc comment in safety_guards.h for why the pure
     // module's input struct deliberately uses the opposite polarity from
-    // the config field it is derived from).
+    // the config field it is derived from). Pulled up here (was previously
+    // read AFTER sample_counter_advancing below) because that producer now
+    // needs cfg_rec.borrowed_zone_index too.
     config_store_record_t cfg_rec;
     config_store_get_full_record(&cfg_rec);
     bool safety_tc_not_installed_declared = (cfg_rec.safety_tc_installed == 0u);
+
+    // S13's sample_counter_advancing. GUARD_TEST_MATRIX.md section 6 (row
+    // S13) found the actual gap: `borrowed_zone_index` IS a real config_store
+    // field (config_store.h/.c, config_params.c param 0x0102) -- the comment
+    // that used to sit here, claiming it "does not exist anywhere in this
+    // codebase yet", was written before that field landed and went stale.
+    // The real gap was always the one-step plumbing GUARD_TEST_MATRIX.md
+    // describes: nothing read it back out to decide whether the context
+    // frame's per-zone sample_counter was moving. Fixed here by calling
+    // snapshots.h's context_borrowed_sample_counter_advancing() -- see that
+    // function's own doc comment for the zone_index-vs-array-position
+    // subtlety and the "missing zone doesn't reset the remembered counter"
+    // rule. Indexed into the file-static last-seen arrays by
+    // cfg_rec.borrowed_zone_index itself (always 0..2, config_params.c's
+    // CHECK_U8_MAX(2u) on param 0x0102), which is safe to do even when the
+    // index is uncommissioned (defaults to 0, config_store.c's zero-record) --
+    // have_index below is what actually gates whether the result means
+    // anything, not the array indexing.
+    bool sample_counter_advancing = context_borrowed_sample_counter_advancing(
+        &ctx, context_valid, (cfg_rec.fields_set & CONFIG_STORE_SET_BORROWED_ZONE_INDEX) != 0u,
+        cfg_rec.borrowed_zone_index, &s_borrowed_sample_counter_known[cfg_rec.borrowed_zone_index],
+        &s_borrowed_last_sample_counter[cfg_rec.borrowed_zone_index]);
 
     // Carry every commissioned threshold into s_guard_cfg from the SAME
     // record read above, on the same tick the guards are about to run

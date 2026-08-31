@@ -101,6 +101,7 @@
 #include "kilnlink/kilnlink_param.h" // SAFETY_CMD_PARAM (0x1E reply), see link_task_send_param()
 #include "kilnlink/kilnlink_power.h"
 #include "kilnlink/kilnlink_rollback.h" // SAFETY_CMD_ROLLBACK, see link_task_handle_rollback()
+#include "kilnlink/kilnlink_rollback_result.h" // SAFETY_CMD_ROLLBACK_RESULT, see link_task_send_rollback_result()
 #include "kilnlink/kilnlink_set_clock.h" // SAFETY_CMD_SET_CLOCK, see link_task_handle_set_clock()
 #include "kilnlink/kilnlink_set_config.h"
 #include "kilnlink/kilnlink_set_ct_cal.h" // SAFETY_CMD_SET_CT_CAL, see link_task_handle_set_ct_cal()
@@ -352,6 +353,27 @@ static uint8_t s_trip_last_seq_seen = 0;
 static kilnlink_trip_t s_pending_trip;
 static unsigned s_trip_repeats_pending = 0;
 static TickType_t s_last_trip_tx_tick = 0;
+
+// Frame C (FW_VERSION) boot push burst state -- same shape as the TRIP_EVENT
+// burst above, and for the same reason: LINK_PROTOCOL.md sec 6 calls the
+// boot push "unsolicited once at boot", but the whole point of that push is
+// telling a link that has JUST come out of reset "the safety processor
+// restarted, here is its new boot_id" -- exactly the moment a fresh link is
+// least likely to have both ends synced. A single frame with no ACK and no
+// retry means one lost byte silently strands the ESP's peer_version_known
+// (and therefore its rollback-outcome evidence) for the rest of this boot,
+// per the KilnFW-side audit that found this. Mirrors ANNOUNCE_VERSION's own
+// tuning (safety_link_send_announce_version_burst(), KilnFW's safety_link.c:
+// 4 copies, 250ms apart) rather than inventing a new number -- same
+// "loss-tolerant unsolicited burst" precedent LINK_TRIP_REPEAT_COUNT/
+// _PERIOD_MS above already cites for the identical reason. Sent from inside
+// link_task_fn's main poll loop (NOT via vTaskDelay before the loop starts),
+// so this task keeps checking in with the watchdog (WATCHDOG_CHECKIN_
+// LINK_TASK's deadline is 30ms) the whole time the burst is going out. */
+#define LINK_BOOT_FW_VERSION_REPEAT_COUNT     4u
+#define LINK_BOOT_FW_VERSION_REPEAT_PERIOD_MS 250u
+static unsigned s_boot_fw_version_repeats_pending = 0;
+static TickType_t s_last_boot_fw_version_tx_tick = 0;
 
 // Link liveness (SAFETY_MODEL.md section 4, S6b), snapshots.h's
 // link_task_link_up() doc comment. Single-writer: only
@@ -1527,6 +1549,12 @@ static void link_task_handle_get_ct_cal(const kilnlink_frame_t *frame)
     link_task_send_ct_cal();
 }
 
+// Forward declaration -- link_task_handle_rollback() below calls this on
+// its refusal path, but the function itself (defined right after) also
+// wants to sit next to link_task_handle_rollback() in the file for
+// locality, same trade-off this file already makes elsewhere.
+static void link_task_send_rollback_result(uint8_t reason_code);
+
 // SAFETY_CMD_ROLLBACK (0x17), CommonFW/docs/LINK_PROTOCOL.md section 4 --
 // tools/PcTools/TODO.md's `ota_rollback(processor)` line, Pico half (the ESP
 // half, POST /api/ota/esp/rollback, already exists). Same shape as
@@ -1563,11 +1591,46 @@ static void link_task_handle_rollback(const kilnlink_frame_t *frame)
     log_task_log(LOG_LEVEL_WARN, "rollback", "requested");
 
     const char *reason = NULL;
-    bool accepted = update_task_request_rollback(&reason);
+    uint8_t reason_code = KILNLINK_ROLLBACK_RESULT_REASON_UNKNOWN;
+    bool accepted = update_task_request_rollback(&reason, &reason_code);
     // Reached only on refusal/failure -- see the function's own doc comment.
     if (!accepted) {
         log_task_log(LOG_LEVEL_WARN, "rollback", reason ? reason : "refused");
+        link_task_send_rollback_result(reason_code);
     }
+}
+
+// SAFETY_CMD_ROLLBACK_RESULT (0x25), CommonFW/docs/LINK_PROTOCOL.md sec 4 --
+// the missing wire-visible reply for a refused SAFETY_CMD_ROLLBACK, sent
+// ONLY from link_task_handle_rollback() above's refusal path (never on
+// acceptance -- update_task_request_rollback() does not return in that
+// case; see kilnlink_rollback_result.h's own "ASYMMETRIC BY DESIGN"
+// comment). Gated by link_frame_rollback_result_supported() on this boot's
+// cached s_peer_protocol_version, the EXACT same skew-safety discipline
+// link_task_send_status() already applies to its own V2 (24-byte) frame --
+// an ESP that has not positively announced protocol_version >= 9 never
+// receives a frame its dispatch switch has no case for.
+static void link_task_send_rollback_result(uint8_t reason_code)
+{
+    if (!link_frame_rollback_result_supported(s_peer_protocol_version)) {
+        // Peer never announced (0, the safe default) or announced an old
+        // version -- stay silent, same as this frame not existing at all
+        // for that peer. The refusal is still fully recorded in THIS boot's
+        // own log line above; only the wire visibility is skipped.
+        return;
+    }
+
+    kilnlink_rollback_result_t msg = {0};
+    msg.accepted = 0; // only ever sent on refusal, see this function's own doc comment
+    msg.reason = reason_code;
+
+    uint8_t payload[KILNLINK_ROLLBACK_RESULT_LEN];
+    kilnlink_rollback_result_status_t status;
+    size_t len = kilnlink_rollback_result_encode(&msg, payload, sizeof(payload), &status);
+    if (len == 0) {
+        return; // shouldn't happen for a well-formed frame built from a fixed-size local buffer
+    }
+    link_task_send_broadcast(payload, (uint8_t)len);
 }
 
 // SAFETY_CMD_ANNOUNCE_REBOOT (0x18), CommonFW/docs/LINK_PROTOCOL.md section
@@ -2311,8 +2374,13 @@ static void link_task_fn(void *arg)
     // Boot push, unsolicited, before entering the steady loop
     // (LINK_PROTOCOL.md section 6, Frame C: "pushed unsolicited once at
     // boot" -- this is what tells the ESP "the safety processor just
-    // restarted" without polling for it).
+    // restarted" without polling for it). Sent as the first copy of a burst
+    // (see LINK_BOOT_FW_VERSION_REPEAT_COUNT's own comment above) -- the
+    // remaining copies go out from inside the main loop below so this task
+    // keeps checking in with the watchdog between them.
     link_task_send_fw_version();
+    s_boot_fw_version_repeats_pending = LINK_BOOT_FW_VERSION_REPEAT_COUNT - 1u;
+    s_last_boot_fw_version_tx_tick = xTaskGetTickCount();
 
     TickType_t last_status_tx = xTaskGetTickCount();
     TickType_t last_diag_tx = xTaskGetTickCount();
@@ -2339,6 +2407,13 @@ static void link_task_fn(void *arg)
             last_power_tx = now;
         }
         link_task_poll_trip_event(now);
+
+        if (s_boot_fw_version_repeats_pending > 0 &&
+            (now - s_last_boot_fw_version_tx_tick) >= pdMS_TO_TICKS(LINK_BOOT_FW_VERSION_REPEAT_PERIOD_MS)) {
+            link_task_send_fw_version();
+            s_boot_fw_version_repeats_pending--;
+            s_last_boot_fw_version_tx_tick = now;
+        }
 
         vTaskDelay(pdMS_TO_TICKS(LINK_TASK_POLL_MS));
 
@@ -2375,6 +2450,9 @@ bool link_task_start(void)
     s_trip_last_seq_seen = 0;
     s_trip_repeats_pending = 0;
     s_last_trip_tx_tick = 0;
+
+    s_boot_fw_version_repeats_pending = 0;
+    s_last_boot_fw_version_tx_tick = 0;
 
     s_last_valid_frame_tick = 0;
     s_valid_frame_seen = false;

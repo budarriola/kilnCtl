@@ -102,12 +102,23 @@ esp_err_t ota_http_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_bus_or_
 // reboot must not double as authorization to wipe the board's configuration,
 // and repeated wrong-password guesses against this route must not share (or
 // burn through) any other route's 3-strikes budget.
+//
+// OTA_HTTP_CONTEXT_PICO_ROLLBACK is the same story again, for POST
+// /api/ota/pico/rollback: it is NOT a reuse of OTA_HTTP_CONTEXT_PICO (a MAC
+// signed to push a new Pico image must not double as authorization to roll
+// the safety processor's bootloader slot back) and NOT a reuse of
+// OTA_HTTP_CONTEXT_ESP_ROLLBACK either, even though both are "rollback" in
+// spirit -- they revert two DIFFERENT processors, and a MAC signed for one
+// must not double as authorization for the other, same reasoning as every
+// context above. It gets its own context string ("pico-rollback") and its
+// own lockout state.
 typedef enum {
     OTA_HTTP_CONTEXT_ESP = 0,
     OTA_HTTP_CONTEXT_PICO,
     OTA_HTTP_CONTEXT_ESP_ROLLBACK,
     OTA_HTTP_CONTEXT_RECOVERY_EXIT,
     OTA_HTTP_CONTEXT_FACTORY_RESET,
+    OTA_HTTP_CONTEXT_PICO_ROLLBACK,
 } ota_http_context_t;
 
 typedef enum {

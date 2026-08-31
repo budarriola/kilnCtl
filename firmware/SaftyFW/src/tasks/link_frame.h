@@ -78,6 +78,25 @@ uint8_t link_frame_saturate_tx_dropped(uint32_t tx_dropped);
 // comparison only ever exercised indirectly through link_task_send_status().
 bool link_frame_status_v2_supported(uint16_t peer_protocol_version);
 
+// Same pure peer-version gate, mirrored for SAFETY_CMD_ROLLBACK_RESULT
+// (0x25, kilnlink_rollback_result.h) instead of the V2 status field --
+// link_task_handle_rollback() uses this to decide whether it may EVER emit
+// a ROLLBACK_RESULT frame at the current peer, exactly the same "only after
+// this boot's own ANNOUNCE_VERSION has positively named a peer new enough"
+// discipline link_frame_status_v2_supported() above enforces.
+//
+// LINK_FRAME_ROLLBACK_RESULT_MIN_PROTOCOL duplicates the numeric value of
+// kilnlink_rollback_result.h's KILNLINK_ROLLBACK_RESULT_MIN_PROTOCOL rather
+// than including that header -- same "deliberately free of ... kilnlink"
+// discipline this file's own top comment states, and the same duplication
+// LINK_FRAME_STATUS_V2_MIN_PROTOCOL (6u) above already makes for
+// KILNLINK_PROTOCOL_VERSION's 5->6 bump. If this ever drifts from
+// kilnlink_version.h's 8->9 history entry, that is a real bug -- there is
+// no compile-time link between the two, only this comment and the mirrored
+// value.
+#define LINK_FRAME_ROLLBACK_RESULT_MIN_PROTOCOL 9u
+bool link_frame_rollback_result_supported(uint16_t peer_protocol_version);
+
 // flags byte (offset 1): bits 0/1 (LINK_UP, FAULT) are the ESP's to own --
 // this module never sets them, they simply are not parameters below.
 #define LINK_FLAG_ESTOP      0x04u

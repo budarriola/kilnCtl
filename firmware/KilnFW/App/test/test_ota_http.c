@@ -250,6 +250,18 @@ esp_err_t safety_link_get_peer_version_status(SafetyLinkClass *link, bool *out_k
     return ESP_FAIL;
 }
 esp_err_t safety_link_send_announce_reboot(SafetyLinkClass *link) { (void)link; return ESP_OK; }
+esp_err_t safety_link_send_rollback_ex(SafetyLinkClass *link, safety_link_rollback_outcome_t *out_outcome,
+                                        uint8_t *out_reason_code)
+{
+    (void)link;
+    (void)out_reason_code;
+    // Never actually invoked by any test in this file -- ota_pico_rollback_
+    // post_handler() is not exercised here (s_safety stays NULL, same "must
+    // resolve, never called" role as the safety_link_get_status() stub
+    // above), so any fixed outcome is fine as a link-time stub.
+    if (out_outcome) *out_outcome = SAFETY_LINK_ROLLBACK_OUTCOME_LINK_DOWN;
+    return ESP_OK;
+}
 
 // run_state.h
 bool run_state_boot_record_interrupted(void) { return false; }
@@ -379,7 +391,26 @@ esp_err_t httpd_register_uri_handler(httpd_handle_t handle, const httpd_uri_t *u
 esp_err_t httpd_resp_set_type(httpd_req_t *r, const char *type) { (void)r; (void)type; return ESP_OK; }
 esp_err_t httpd_resp_set_hdr(httpd_req_t *r, const char *field, const char *value)
 { (void)r; (void)field; (void)value; return ESP_OK; }
-esp_err_t httpd_resp_send(httpd_req_t *r, const char *buf, long long buf_len) { (void)r; (void)buf; (void)buf_len; return ESP_OK; }
+// opus-review finding 3's tests below (ota_pico_rollback_status_get_handler(),
+// the async POST returning promptly) need to see what a handler actually
+// sent, not just whether it returned ESP_OK -- s_last_err_code/_msg above
+// only capture the httpd_resp_send_err() path. Same capture shape, for the
+// ordinary httpd_resp_send()/httpd_resp_set_status() path.
+static char s_last_resp_body[512] = "";
+static char s_last_resp_status[32] = "";
+esp_err_t httpd_resp_send(httpd_req_t *r, const char *buf, long long buf_len)
+{
+    (void)r;
+    size_t n = (buf_len < 0) ? 0 : (size_t)buf_len;
+    if (n >= sizeof(s_last_resp_body)) {
+        n = sizeof(s_last_resp_body) - 1;
+    }
+    if (buf && n > 0) {
+        memcpy(s_last_resp_body, buf, n);
+    }
+    s_last_resp_body[n] = '\0';
+    return ESP_OK;
+}
 esp_err_t httpd_resp_send_chunk(httpd_req_t *r, const char *buf, size_t buf_len) { (void)r; (void)buf; (void)buf_len; return ESP_OK; }
 
 static int s_last_err_code = 0;
@@ -396,7 +427,17 @@ esp_err_t httpd_resp_send_err(httpd_req_t *r, httpd_err_code_t error, const char
     }
     return ESP_OK;
 }
-esp_err_t httpd_resp_set_status(httpd_req_t *r, const char *status) { (void)r; (void)status; return ESP_OK; }
+esp_err_t httpd_resp_set_status(httpd_req_t *r, const char *status)
+{
+    (void)r;
+    if (status) {
+        strncpy(s_last_resp_status, status, sizeof(s_last_resp_status) - 1);
+        s_last_resp_status[sizeof(s_last_resp_status) - 1] = '\0';
+    } else {
+        s_last_resp_status[0] = '\0';
+    }
+    return ESP_OK;
+}
 esp_err_t httpd_resp_sendstr(httpd_req_t *r, const char *s) { (void)r; (void)s; return ESP_OK; }
 int httpd_req_recv(httpd_req_t *r, char *buf, size_t buf_len) { (void)r; (void)buf; (void)buf_len; return 0; }
 
@@ -416,6 +457,7 @@ static const char *ctx_str_for(ota_http_context_t ctx)
         case OTA_HTTP_CONTEXT_ESP_ROLLBACK: return "esp-rollback";
         case OTA_HTTP_CONTEXT_RECOVERY_EXIT: return "recovery";
         case OTA_HTTP_CONTEXT_FACTORY_RESET: return "factory-reset";
+        case OTA_HTTP_CONTEXT_PICO_ROLLBACK: return "pico-rollback";
         default: return "?";
     }
 }
@@ -455,6 +497,7 @@ static void reset_all_lockouts(void)
     memset(&s_lockout_esp_rollback, 0, sizeof(s_lockout_esp_rollback));
     memset(&s_lockout_recovery_exit, 0, sizeof(s_lockout_recovery_exit));
     memset(&s_lockout_factory_reset, 0, sizeof(s_lockout_factory_reset));
+    memset(&s_lockout_pico_rollback, 0, sizeof(s_lockout_pico_rollback));
 }
 
 // ---------------------------------------------------------------------------
@@ -537,6 +580,70 @@ static void test_mac_for_one_context_rejected_for_another(void)
     TEST_CHECK(r == OTA_HTTP_VERIFY_BAD_MAC,
               "a MAC signed for pushing an ESP image must not double as authorization to factory-reset "
               "the board -- contexts must use distinct context strings");
+}
+
+// Rollback-of-the-Pico-specific isolation, both directions -- the task this
+// pass was built for ("add a rollback button for the SAFETY processor")
+// explicitly calls out this exact pair as security-critical: a MAC signed
+// for pushing a new Pico image must not authorize rolling it back, and a
+// MAC signed to roll the Pico back must not authorize pushing it a new
+// image either. test_mac_for_one_context_rejected_for_another() above
+// already proves the general property (esp vs factory-reset); this proves
+// it specifically for the pair this feature adds, in both directions.
+static void test_pico_and_pico_rollback_macs_are_not_interchangeable(void)
+{
+    TEST_SECTION("ota_http_verify_request -- a MAC signed for 'pico' is REJECTED for 'pico-rollback', and vice versa");
+    reset_all_lockouts();
+    g_stub_boot_button_bypass = false;
+    g_stub_ap_password = "hunter2hunter2";
+
+    // Direction 1: signed for PICO, presented against PICO_ROLLBACK.
+    {
+        uint8_t nonce[OTA_AUTH_NONCE_LEN];
+        issue_nonce(nonce);
+        uint8_t mac[32];
+        compute_mac(g_stub_ap_password, nonce, ctx_str_for(OTA_HTTP_CONTEXT_PICO), mac);
+        ota_http_verify_result_t r = ota_http_verify_request(OTA_HTTP_CONTEXT_PICO_ROLLBACK, mac, "10.0.0.1");
+        TEST_CHECK(r == OTA_HTTP_VERIFY_BAD_MAC,
+                  "a MAC signed to push a new Pico IMAGE must not double as authorization to ROLL IT BACK");
+    }
+
+    // Direction 2: signed for PICO_ROLLBACK, presented against PICO.
+    {
+        uint8_t nonce[OTA_AUTH_NONCE_LEN];
+        issue_nonce(nonce);
+        uint8_t mac[32];
+        compute_mac(g_stub_ap_password, nonce, ctx_str_for(OTA_HTTP_CONTEXT_PICO_ROLLBACK), mac);
+        ota_http_verify_result_t r = ota_http_verify_request(OTA_HTTP_CONTEXT_PICO, mac, "10.0.0.1");
+        TEST_CHECK(r == OTA_HTTP_VERIFY_BAD_MAC,
+                  "a MAC signed to ROLL BACK the Pico must not double as authorization to push it a new IMAGE");
+    }
+
+    // Also distinct from ESP_ROLLBACK's own context (rolling back the WRONG
+    // processor) -- same "different processor, different action, different
+    // context string" property PICO_ROLLBACK's own ota_http.h doc comment
+    // states.
+    {
+        uint8_t nonce[OTA_AUTH_NONCE_LEN];
+        issue_nonce(nonce);
+        uint8_t mac[32];
+        compute_mac(g_stub_ap_password, nonce, ctx_str_for(OTA_HTTP_CONTEXT_ESP_ROLLBACK), mac);
+        ota_http_verify_result_t r = ota_http_verify_request(OTA_HTTP_CONTEXT_PICO_ROLLBACK, mac, "10.0.0.1");
+        TEST_CHECK(r == OTA_HTTP_VERIFY_BAD_MAC,
+                  "a MAC signed to roll back the ESP must not double as authorization to roll back the Pico");
+    }
+
+    // A CORRECT PICO_ROLLBACK-signed MAC, presented against PICO_ROLLBACK,
+    // must still succeed -- proves the rejections above are about context
+    // mismatch, not a broken context string breaking the route entirely.
+    {
+        uint8_t nonce[OTA_AUTH_NONCE_LEN];
+        issue_nonce(nonce);
+        uint8_t mac[32];
+        compute_mac(g_stub_ap_password, nonce, ctx_str_for(OTA_HTTP_CONTEXT_PICO_ROLLBACK), mac);
+        ota_http_verify_result_t r = ota_http_verify_request(OTA_HTTP_CONTEXT_PICO_ROLLBACK, mac, "10.0.0.1");
+        TEST_CHECK(r == OTA_HTTP_VERIFY_OK, "a correctly-signed pico-rollback MAC against pico-rollback succeeds");
+    }
 }
 
 static void test_lockout_is_per_context_not_shared(void)
@@ -700,6 +807,175 @@ static void test_check_interlocks_ok_when_no_sweep(void)
 }
 
 // ---------------------------------------------------------------------------
+// opus-review finding 3 -- POST /api/ota/pico/rollback used to block its one
+// httpd worker task for up to ~6.3s inside safety_link_send_rollback_ex().
+// It now hands the whole attempt to a background task (ota_pico_rollback_
+// task()) and returns a 202 "pending" immediately; the outcome is polled
+// from GET /api/ota/pico/rollback/status. xTaskCreate() is stubbed (this
+// file's own header comment on esp_restart()) to accept the task but never
+// actually run it, so a test that reaches the async branch and observes an
+// immediate 202 response -- with safety_link_send_rollback_ex() never
+// having been called synchronously -- is a direct proof the handler no
+// longer blocks on it.
+// ---------------------------------------------------------------------------
+
+static SafetyLinkClass s_rollback_test_safety;
+
+// Lets a test authenticate through ota_pico_rollback_post_handler()'s full
+// step 1-4 gate (mac/auth/interlock/mutex) with one call, same helper shape
+// test_authenticated_request_does_reach_interlock() above builds inline.
+static void set_pico_rollback_headers_for(const char *password)
+{
+    uint8_t nonce[OTA_AUTH_NONCE_LEN];
+    issue_nonce(nonce);
+    uint8_t mac[32];
+    compute_mac(password, nonce, ctx_str_for(OTA_HTTP_CONTEXT_PICO_ROLLBACK), mac);
+    char hex[65];
+    hex_encode(mac, sizeof(mac), hex);
+    stub_headers_reset();
+    stub_header_set("X-Ota-Mac", hex);
+    // Bypasses the "safety link is down" interlock refusal (safety_link_
+    // get_status() is stubbed to always fail/return link_up=false in this
+    // file) -- an operator acknowledgement, not part of authentication; see
+    // ota_http_req_ack_no_safety()'s own doc comment in ota_http.c.
+    stub_header_set("X-Ota-Ack-No-Safety", "1");
+}
+
+static void test_pico_rollback_post_returns_pending_without_blocking(void)
+{
+    TEST_SECTION("ota_pico_rollback_post_handler -- opus-review finding 3: returns 202 'pending' "
+                 "immediately, WITHOUT calling safety_link_send_rollback_ex() synchronously");
+    reset_all_lockouts();
+    g_stub_boot_button_bypass = false;
+    g_stub_ap_password = "rollback-async-test-password";
+    s_test_sweep_active = false;
+    s_update_claim = OTA_UPDATE_NONE; // ensure no earlier test left the mutex claimed
+    memset(&s_rollback_test_safety, 0, sizeof(s_rollback_test_safety));
+    s_safety = &s_rollback_test_safety;
+    memset(&s_pico_rollback_async, 0, sizeof(s_pico_rollback_async));
+
+    set_pico_rollback_headers_for(g_stub_ap_password);
+    s_last_resp_status[0] = '\0';
+    s_last_resp_body[0] = '\0';
+
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    esp_err_t err = ota_pico_rollback_post_handler(&req);
+
+    s_safety = NULL; // restore -- every other test in this file expects s_safety == NULL
+
+    TEST_CHECK(err == ESP_OK, "the handler itself always returns ESP_OK");
+    TEST_CHECK(strcmp(s_last_resp_status, "202 Accepted") == 0,
+              "202 Accepted, not the old synchronous 200/409/500 -- the request was accepted for "
+              "async processing, the outcome is not known yet");
+    TEST_CHECK(strstr(s_last_resp_body, "\"status\":\"pending\"") != NULL,
+              "the immediate body reports 'pending', not a final outcome");
+    TEST_CHECK(s_pico_rollback_async.state == OTA_PICO_ROLLBACK_ASYNC_IN_PROGRESS,
+              "the assertion that can fail: the handler marks the async state IN_PROGRESS and hands "
+              "off to the background task BEFORE returning -- if it fell back to calling safety_link_"
+              "send_rollback_ex() synchronously (the old blocking behavior) this would instead already "
+              "be DONE by the time the handler returns, defeating the entire point of this fix");
+    TEST_CHECK(s_update_claim != OTA_UPDATE_NONE,
+              "the update-claim mutex is still held across the async attempt -- it is the background "
+              "task's job to release it (xTaskCreate() is stubbed to never actually run that task in "
+              "this file, so the claim is expected to still be held here; a real board's task releases "
+              "it once safety_link_send_rollback_ex() returns)");
+
+    // Cleanup: this stub environment's xTaskCreate() never runs the task
+    // that would normally release the claim, so release it here by hand --
+    // otherwise every test after this one in the same process sees an
+    // update "already in progress" that never clears.
+    s_update_claim = OTA_UPDATE_NONE;
+}
+
+static void test_pico_rollback_status_reports_idle_before_any_request(void)
+{
+    TEST_SECTION("ota_pico_rollback_status_get_handler -- reports 'idle' before any rollback has "
+                 "ever been requested this boot");
+    memset(&s_pico_rollback_async, 0, sizeof(s_pico_rollback_async));
+    s_pico_rollback_async.state = OTA_PICO_ROLLBACK_ASYNC_IDLE;
+    s_last_resp_body[0] = '\0';
+
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    esp_err_t err = ota_pico_rollback_status_get_handler(&req);
+
+    TEST_CHECK(err == ESP_OK, "handler returns ESP_OK");
+    TEST_CHECK(strstr(s_last_resp_body, "\"status\":\"idle\"") != NULL, "reports idle");
+}
+
+static void test_pico_rollback_status_reports_pending_while_in_progress(void)
+{
+    TEST_SECTION("ota_pico_rollback_status_get_handler -- reports 'pending' while the background "
+                 "task is still running");
+    memset(&s_pico_rollback_async, 0, sizeof(s_pico_rollback_async));
+    s_pico_rollback_async.state = OTA_PICO_ROLLBACK_ASYNC_IN_PROGRESS;
+    s_last_resp_body[0] = '\0';
+
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    esp_err_t err = ota_pico_rollback_status_get_handler(&req);
+
+    TEST_CHECK(err == ESP_OK, "handler returns ESP_OK");
+    TEST_CHECK(strstr(s_last_resp_body, "\"status\":\"pending\"") != NULL, "reports pending");
+}
+
+// The mandatory "four-way outcome still reaches the operator" + "a timeout
+// must never be reported as success" checks, now exercised through the
+// STATUS endpoint (the outcome's new home) rather than the old synchronous
+// POST response.
+static void test_pico_rollback_status_reports_all_four_outcomes_honestly(void)
+{
+    TEST_SECTION("ota_pico_rollback_status_get_handler -- once DONE, all four honest outcomes "
+                 "(refused-with-reason / accepted / link-down / unknown) reach the operator, and "
+                 "UNKNOWN_TIMEOUT is never reported as success text");
+
+    struct {
+        safety_link_rollback_outcome_t outcome;
+        uint8_t reason_code;
+        const char *want_status;
+        const char *want_ok;
+    } cases[] = {
+        { SAFETY_LINK_ROLLBACK_OUTCOME_LINK_DOWN, 0, "\"status\":\"link_down\"", "\"ok\":false" },
+        { SAFETY_LINK_ROLLBACK_OUTCOME_SEND_FAILED, 0, "\"status\":\"send_failed\"", "\"ok\":false" },
+        { SAFETY_LINK_ROLLBACK_OUTCOME_REFUSED, KILNLINK_ROLLBACK_RESULT_REASON_ARMED, "\"status\":\"refused\"",
+          "\"ok\":false" },
+        { SAFETY_LINK_ROLLBACK_OUTCOME_UNKNOWN_TIMEOUT, 0, "\"status\":\"unknown\"", "\"ok\":true" },
+        { SAFETY_LINK_ROLLBACK_OUTCOME_ACCEPTED, 0, "\"status\":\"rebooting\"", "\"ok\":true" },
+    };
+
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        memset(&s_pico_rollback_async, 0, sizeof(s_pico_rollback_async));
+        s_pico_rollback_async.state = OTA_PICO_ROLLBACK_ASYNC_DONE;
+        s_pico_rollback_async.outcome = cases[i].outcome;
+        s_pico_rollback_async.reason_code = cases[i].reason_code;
+        s_last_resp_body[0] = '\0';
+
+        httpd_req_t req;
+        memset(&req, 0, sizeof(req));
+        esp_err_t err = ota_pico_rollback_status_get_handler(&req);
+
+        TEST_CHECK(err == ESP_OK, "handler returns ESP_OK");
+        TEST_CHECK(strstr(s_last_resp_body, cases[i].want_status) != NULL, "reports the right status field");
+        TEST_CHECK(strstr(s_last_resp_body, cases[i].want_ok) != NULL, "reports the right ok field");
+    }
+
+    // The specific assertion this whole feature exists to guarantee: an
+    // UNKNOWN_TIMEOUT body must never contain the word this code uses for a
+    // real success ("rebooting"), and an ACCEPTED body must not claim
+    // "unknown" -- i.e. the two are not accidentally sharing one template.
+    memset(&s_pico_rollback_async, 0, sizeof(s_pico_rollback_async));
+    s_pico_rollback_async.state = OTA_PICO_ROLLBACK_ASYNC_DONE;
+    s_pico_rollback_async.outcome = SAFETY_LINK_ROLLBACK_OUTCOME_UNKNOWN_TIMEOUT;
+    s_last_resp_body[0] = '\0';
+    httpd_req_t req2;
+    memset(&req2, 0, sizeof(req2));
+    (void)ota_pico_rollback_status_get_handler(&req2);
+    TEST_CHECK(strstr(s_last_resp_body, "\"status\":\"rebooting\"") == NULL,
+              "UNKNOWN_TIMEOUT must NEVER be reported with the ACCEPTED path's 'rebooting' status");
+}
+
+// ---------------------------------------------------------------------------
 
 void run_test_ota_http(void)
 {
@@ -716,6 +992,7 @@ void run_test_ota_http(void)
     test_nonempty_password_valid_mac_succeeds();
 
     test_mac_for_one_context_rejected_for_another();
+    test_pico_and_pico_rollback_macs_are_not_interchangeable();
     test_lockout_is_per_context_not_shared();
 
     test_missing_auth_header_never_reaches_interlock();
@@ -723,6 +1000,11 @@ void run_test_ota_http(void)
 
     test_check_interlocks_refuses_during_zone_sweep();
     test_check_interlocks_ok_when_no_sweep();
+
+    test_pico_rollback_post_returns_pending_without_blocking();
+    test_pico_rollback_status_reports_idle_before_any_request();
+    test_pico_rollback_status_reports_pending_while_in_progress();
+    test_pico_rollback_status_reports_all_four_outcomes_honestly();
 }
 
 int main(void)

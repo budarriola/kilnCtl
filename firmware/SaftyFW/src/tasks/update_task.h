@@ -86,7 +86,18 @@ void update_task_handle_abort(const uint8_t *payload, uint8_t length);
 // PENDING_VERIFY -- the property that keeps a rollback from ever stranding
 // the board with zero bootable slots. On success this function DOES NOT
 // RETURN: it calls watchdog_reboot() and the RP2040 resets immediately.
-bool update_task_request_rollback(const char **out_reason);
+//
+// `out_reason_code`, if non-NULL, is filled with the SAME refusal on every
+// path `out_reason` is (never on success -- see the loop below) with a
+// kilnlink_rollback_result_reason_t value instead of a free-text string --
+// this is what link_task_handle_rollback() serializes into a wire-visible
+// SAFETY_CMD_ROLLBACK_RESULT (0x25) frame, since `out_reason`'s C string is
+// for THIS processor's own local log only, same split kilnlink_commit_
+// config_rejected.h's `reason` documents against config_params_validate()'s
+// own free-text out_rule. Kept as a second out-param rather than folding
+// the human string away entirely so the local log message does not lose
+// any detail this pass did not need to touch.
+bool update_task_request_rollback(const char **out_reason, uint8_t *out_reason_code);
 
 // True while an UPDATE_BEGIN...UPDATE_END/ABORT transfer is actively staged
 // (s_transfer_active, update_task.c) -- i.e. between a UPDATE_BEGIN this

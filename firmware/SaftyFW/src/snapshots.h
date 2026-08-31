@@ -256,6 +256,59 @@ static inline bool link_firing_ceiling_should_apply(bool have_ceiling, bool cont
     return have_ceiling && context_valid;
 }
 
+// S13's sample_counter_advancing (SAFETY_MODEL.md section 4, S13 /
+// docs/GUARD_TEST_MATRIX.md section 6 row S13 -- the field the row calls "a
+// one-step plumbing gap": borrowed_zone_index has been a real config_store
+// field for a while, but nothing read it back out against a context frame).
+// Finds the borrowed zone by `zone_index` -- NOT by `zones[]` array position:
+// link_frame_unpack_context() (link_frame.c) fills zones[] in wire order, so
+// a given zone_index can land at any array slot from one frame to the next --
+// and compares its `sample_counter` against the caller's own remembered
+// last-seen value for that zone_index, updating it in place. The comparison
+// itself is pure/host-testable; safety_core.c owns the actual state
+// (*last_counter/*last_counter_known must persist across ticks, which this
+// function cannot do itself without file-static storage of its own -- and
+// snapshots.h's whole reason for existing here is to stay a pure, stateless
+// reduction, matching context_reduce_zones()/current_any_present() above).
+//
+// have_index is CONFIG_STORE_SET_BORROWED_ZONE_INDEX: an uncommissioned index
+// has no zone to scan for, and 0 is both the zero-init sentinel and a
+// legitimate real zone id, so "unset" cannot be told apart from "zone 0" any
+// other way (same reasoning tc_placement_valid uses for tc_placement_mode).
+//
+// A zone missing from this tick's context (context_valid false, or the zone
+// simply absent from zones[]) reads as "not advancing" WITHOUT touching
+// *last_counter/*last_counter_known -- SAFETY_MODEL.md's S13 is exactly
+// "context frames arriving AND sample_counter has not advanced", so a
+// borrowed zone that stops being reported at all is the same fault, not a
+// free pass; leaving the remembered state untouched means a single-tick drop
+// followed by the zone reappearing compares against the value from before
+// the drop, not a false "just started" reset that would silently clear an
+// otherwise-continuous stall.
+static inline bool context_borrowed_sample_counter_advancing(const context_snapshot_t *ctx, bool context_valid,
+                                                               bool have_index, uint8_t borrowed_zone_index,
+                                                               bool *last_counter_known, uint8_t *last_counter)
+{
+    if (!context_valid || !have_index || ctx == NULL) {
+        return false;
+    }
+    uint8_t n = ctx->zone_count;
+    if (n > CONTEXT_SNAPSHOT_MAX_ZONES) {
+        n = CONTEXT_SNAPSHOT_MAX_ZONES; /* defensive -- ctx is caller-trusted here, but never overrun */
+    }
+    for (uint8_t i = 0; i < n; i++) {
+        const context_zone_t *z = &ctx->zones[i];
+        if (z->zone_index != borrowed_zone_index) {
+            continue;
+        }
+        bool advancing = *last_counter_known && (*last_counter != z->sample_counter);
+        *last_counter = z->sample_counter;
+        *last_counter_known = true;
+        return advancing;
+    }
+    return false;
+}
+
 // --- Link-task boundary getters ---------------------------------------------
 // Declared here, not in link_task.h, for the same isolation reason as the
 // pure functions above -- these three are implemented in link_task.c (their

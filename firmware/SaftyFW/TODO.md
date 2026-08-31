@@ -102,12 +102,13 @@ below is **confirmed by code reading and still open**, ordered by severity.
       that repeatedly loses its mutex leaves `safety_core` on the last good
       reading while the task keeps feeding the watchdog — the documented
       "stale reading looks fresh" class.
-- [ ] **S13's producer does not exist.** `sample_counter_advancing` is
-      hardcoded false. Harmless only because `tc_source` is pinned to `OWN_J7`;
-      **fixing the config wiring without also fixing this turns a dormant
-      guard into a hard brick** (S13 trips unconditionally and correctly
-      refuses every clear). Ordering hazard — see the note in
-      `SAFETY_MODEL.md`'s guard table.
+- [x] **S13's producer does not exist.** ~~`sample_counter_advancing` is
+      hardcoded false.~~ Fixed: `context_borrowed_sample_counter_advancing()`
+      (`src/snapshots.h`, host-tested in `test/test_snapshots.c`) compares the
+      commissioned `borrowed_zone_index` zone's context-frame `sample_counter`
+      against the last tick's, called from `safety_core_build_input()`
+      (`src/tasks/safety_core.c`). `tc_source` may now be commissioned to
+      BORROWED_ZONE/BOTH — see `SAFETY_MODEL.md`'s guard table.
 - [ ] **Config record field ranges are validated on commit but not on load.**
       `config_params_validate_ranges()` runs only at COMMIT_CONFIG; a
       CRC-valid record from a *different build* with different semantics loads

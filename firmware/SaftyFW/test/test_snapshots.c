@@ -304,6 +304,157 @@ static void test_firing_ceiling_should_apply_no_ceiling_ever(void)
                "neither fact true -> false");
 }
 
+// --- context_borrowed_sample_counter_advancing ------------------------------
+// SAFETY_MODEL.md section 4, S13 / docs/GUARD_TEST_MATRIX.md section 6 row
+// S13's "one-step plumbing gap": borrowed_zone_index was already a real
+// config_store field, but nothing compared it against a context frame's
+// per-zone sample_counter. This is the pure half of that fix -- see the
+// function's own doc comment (snapshots.h) for the zone_index-vs-array-
+// position subtlety and the "missing zone doesn't reset remembered state"
+// rule this suite exercises directly.
+
+static void test_borrowed_counter_uncommissioned_index(void)
+{
+    TEST_SECTION("context_borrowed_sample_counter_advancing -- have_index==false -> false, "
+                  "state untouched");
+    context_snapshot_t ctx = empty_context();
+    ctx.valid = true;
+    ctx.zone_count = 1;
+    ctx.zones[0] = make_zone(0, 0, 0.0f, 0.0f);
+    ctx.zones[0].sample_counter = 5;
+    bool known = false;
+    uint8_t last = 0;
+    bool advancing = context_borrowed_sample_counter_advancing(&ctx, true, false, 0, &known, &last);
+    TEST_CHECK(!advancing, "an uncommissioned borrowed_zone_index never reports advancing");
+    TEST_CHECK(!known, "an uncommissioned index must not start remembering a counter");
+}
+
+static void test_borrowed_counter_context_invalid(void)
+{
+    TEST_SECTION("context_borrowed_sample_counter_advancing -- context_valid==false -> false, "
+                  "state untouched");
+    context_snapshot_t ctx = empty_context();
+    ctx.valid = true;
+    ctx.zone_count = 1;
+    ctx.zones[0] = make_zone(1, 0, 0.0f, 0.0f);
+    ctx.zones[0].sample_counter = 7;
+    bool known = true;
+    uint8_t last = 3;
+    bool advancing = context_borrowed_sample_counter_advancing(&ctx, false, true, 1, &known, &last);
+    TEST_CHECK(!advancing, "stale/absent context (safety_core.c's own context_valid) never reports "
+                           "advancing, matching every other context-gated fact");
+    TEST_CHECK(known && last == 3, "a merely-stale tick must not overwrite the remembered counter -- "
+                                    "the link can recover a moment later and must compare against the "
+                                    "value from before the outage, not a reset one");
+}
+
+static void test_borrowed_counter_zone_absent(void)
+{
+    TEST_SECTION("context_borrowed_sample_counter_advancing -- borrowed zone not in this tick's "
+                  "zones[] -> false, remembered state untouched (not a free pass, just not evidence "
+                  "either way)");
+    context_snapshot_t ctx = empty_context();
+    ctx.valid = true;
+    ctx.zone_count = 1;
+    ctx.zones[0] = make_zone(2, 0, 0.0f, 0.0f); /* zone 2 present, borrowed zone is 0 */
+    bool known = true;
+    uint8_t last = 9;
+    bool advancing = context_borrowed_sample_counter_advancing(&ctx, true, true, 0, &known, &last);
+    TEST_CHECK(!advancing, "the borrowed zone_index simply isn't on the wire this tick -> false");
+    TEST_CHECK(known && last == 9, "an absent zone must not reset the remembered counter either");
+}
+
+static void test_borrowed_counter_first_sighting_never_advances(void)
+{
+    TEST_SECTION("context_borrowed_sample_counter_advancing -- first-ever sighting of a zone_index "
+                  "-> false (nothing to compare against yet), but records the counter");
+    context_snapshot_t ctx = empty_context();
+    ctx.valid = true;
+    ctx.zone_count = 1;
+    ctx.zones[0] = make_zone(1, 0, 0.0f, 0.0f);
+    ctx.zones[0].sample_counter = 42;
+    bool known = false;
+    uint8_t last = 0;
+    bool advancing = context_borrowed_sample_counter_advancing(&ctx, true, true, 1, &known, &last);
+    TEST_CHECK(!advancing, "a never-before-seen counter cannot be proven to be advancing yet");
+    TEST_CHECK(known && last == 42, "the first reading is still recorded so the NEXT tick has "
+                                     "something real to compare against");
+}
+
+static void test_borrowed_counter_same_value_not_advancing(void)
+{
+    TEST_SECTION("context_borrowed_sample_counter_advancing -- unchanged sample_counter -> false "
+                  "(this is the actual S13 stall this guard exists to catch)");
+    context_snapshot_t ctx = empty_context();
+    ctx.valid = true;
+    ctx.zone_count = 1;
+    ctx.zones[0] = make_zone(1, 0, 0.0f, 0.0f);
+    ctx.zones[0].sample_counter = 42;
+    bool known = true;
+    uint8_t last = 42;
+    bool advancing = context_borrowed_sample_counter_advancing(&ctx, true, true, 1, &known, &last);
+    TEST_CHECK(!advancing, "an unchanged counter across ticks is exactly S13's trip condition, not "
+                           "a pass");
+    TEST_CHECK(last == 42, "the remembered value stays what it was -- still stalled");
+}
+
+static void test_borrowed_counter_changed_value_advancing(void)
+{
+    TEST_SECTION("context_borrowed_sample_counter_advancing -- sample_counter moved -> true, "
+                  "records the new value");
+    context_snapshot_t ctx = empty_context();
+    ctx.valid = true;
+    ctx.zone_count = 1;
+    ctx.zones[0] = make_zone(1, 0, 0.0f, 0.0f);
+    ctx.zones[0].sample_counter = 43;
+    bool known = true;
+    uint8_t last = 42;
+    bool advancing = context_borrowed_sample_counter_advancing(&ctx, true, true, 1, &known, &last);
+    TEST_CHECK(advancing, "a genuinely different counter value is a live, converting thermocouple");
+    TEST_CHECK(last == 43, "the new value replaces the old one for the next comparison");
+}
+
+static void test_borrowed_counter_wraparound_advancing(void)
+{
+    TEST_SECTION("context_borrowed_sample_counter_advancing -- 255 -> 0 wraparound still counts as "
+                  "advancing (plain != comparison, no ordering assumed)");
+    context_snapshot_t ctx = empty_context();
+    ctx.valid = true;
+    ctx.zone_count = 1;
+    ctx.zones[0] = make_zone(1, 0, 0.0f, 0.0f);
+    ctx.zones[0].sample_counter = 0;
+    bool known = true;
+    uint8_t last = 255;
+    bool advancing = context_borrowed_sample_counter_advancing(&ctx, true, true, 1, &known, &last);
+    TEST_CHECK(advancing, "wrapping from 255 back to 0 is still a genuinely different value, not a "
+                          "stall");
+}
+
+static void test_borrowed_counter_zone_index_not_array_position(void)
+{
+    TEST_SECTION("context_borrowed_sample_counter_advancing -- borrowed zone found by zone_index, "
+                  "NOT by its position in zones[]");
+    context_snapshot_t ctx = empty_context();
+    ctx.valid = true;
+    ctx.zone_count = 3;
+    /* Wire order deliberately scrambled relative to zone_index -- zone 2's
+     * data sits at array position 0, exactly the case link_frame_unpack_
+     * context() can produce and this function's own doc comment warns about. */
+    ctx.zones[0] = make_zone(2, 0, 0.0f, 0.0f);
+    ctx.zones[0].sample_counter = 99;
+    ctx.zones[1] = make_zone(0, 0, 0.0f, 0.0f);
+    ctx.zones[1].sample_counter = 11;
+    ctx.zones[2] = make_zone(1, 0, 0.0f, 0.0f);
+    ctx.zones[2].sample_counter = 22;
+    bool known = true;
+    uint8_t last = 98; /* previous reading for zone_index 2 */
+    bool advancing = context_borrowed_sample_counter_advancing(&ctx, true, true, 2, &known, &last);
+    TEST_CHECK(advancing, "zone_index 2's counter (99, at array slot 0) moved from 98 -- must be "
+                          "found despite not being at array position 2");
+    TEST_CHECK(last == 99, "the CORRECT zone's counter (99) was recorded, not array-position 2's "
+                           "(22, zone_index 1) or any other slot's");
+}
+
 void run_test_snapshots(void)
 {
     test_reduce_zones_invalid_context();
@@ -323,4 +474,13 @@ void run_test_snapshots(void)
     test_firing_ceiling_should_apply_both_true();
     test_firing_ceiling_should_apply_link_loss();
     test_firing_ceiling_should_apply_no_ceiling_ever();
+
+    test_borrowed_counter_uncommissioned_index();
+    test_borrowed_counter_context_invalid();
+    test_borrowed_counter_zone_absent();
+    test_borrowed_counter_first_sighting_never_advances();
+    test_borrowed_counter_same_value_not_advancing();
+    test_borrowed_counter_changed_value_advancing();
+    test_borrowed_counter_wraparound_advancing();
+    test_borrowed_counter_zone_index_not_array_position();
 }

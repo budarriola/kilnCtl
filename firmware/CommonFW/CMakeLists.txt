@@ -59,6 +59,7 @@ add_library(kilnlink STATIC
     src/kilnlink_param.c
     src/kilnlink_get_config_page.c
     src/kilnlink_config_page.c
+    src/kilnlink_rollback_result.c
 )
 target_include_directories(kilnlink PUBLIC include)
 set_target_properties(kilnlink PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
@@ -349,6 +350,15 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
         target_compile_options(test_config_page PRIVATE -Wall -Wextra -Werror)
     endif()
     add_test(NAME test_config_page COMMAND test_config_page)
+
+    add_executable(test_rollback_result test/test_rollback_result.c)
+    target_link_libraries(test_rollback_result PRIVATE kilnlink)
+    if(MSVC)
+        target_compile_options(test_rollback_result PRIVATE /W4 /WX)
+    else()
+        target_compile_options(test_rollback_result PRIVATE -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME test_rollback_result COMMAND test_rollback_result)
 
     add_executable(test_inject_tc test/test_inject_tc.c)
     target_link_libraries(test_inject_tc PRIVATE kilnlink)

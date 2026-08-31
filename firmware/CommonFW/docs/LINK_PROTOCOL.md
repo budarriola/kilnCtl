@@ -585,6 +585,48 @@ fall back to? — is entirely `SaftyFW`'s, in `bootloader/metadata.c`'s
 serializes the one-byte frame; it carries no opinion about whether a
 rollback should be allowed.
 
+### `SAFETY_CMD_ROLLBACK_RESULT` = `0x25` (Pico → ESP)
+
+| Offset | Type | Field |
+|---|---|---|
+| 0 | u8 | `0x25` |
+| 1 | u8 | `accepted` (0/1) |
+| 2 | u8 | `reason` |
+
+The missing reply for a refused `SAFETY_CMD_ROLLBACK` — see
+`kilnlink_rollback_result.h` for the full design rationale. `reason` is
+`kilnlink_rollback_result_reason_t`:
+
+| Value | Meaning |
+|---|---|
+| 0 | `ARMED` — relay is ARMED, same gate `SET_CONFIG`/`SET_CT_CAL` use |
+| 1 | `NO_METADATA` — no bootloader metadata record to roll back from |
+| 2 | `SLOT_INVALID` — the other slot is not currently VALID/PENDING_VERIFY |
+| 3 | `STORAGE` — validation passed but the flash write itself failed |
+| 4 | `UNKNOWN` — fallback; should not occur in practice |
+
+**Asymmetric by design.** `update_task_request_rollback()` does not return
+on acceptance — it calls `watchdog_reboot()` and the RP2040 resets
+immediately (`src/tasks/update_task.c`) — so no code path exists that could
+send this frame after an accepted rollback. In practice this frame is sent
+**only on refusal**. `accepted` is a real wire field (not hardcoded), but
+every ESP-side decoder must treat "the rollback was accepted" as something
+it infers from the *absence* of this frame plus a link drop-and-reconnect
+with a new `boot_id` — never as something this frame itself reports.
+
+**Skew safety.** SaftyFW only emits this frame once it has learned, via
+`ANNOUNCE_VERSION`, that the peer ESP is running `KILNLINK_PROTOCOL_VERSION`
+≥ `KILNLINK_ROLLBACK_RESULT_MIN_PROTOCOL` (9) — mirroring
+`LINK_FRAME_STATUS_V2_MIN_PROTOCOL`'s own gate exactly, so an old ESP is
+never sent a frame its dispatch switch has no case for. The reverse
+direction (a new ESP talking to an old Pico that predates this frame
+entirely) cannot be protected by a version gate at all — an old Pico simply
+never sends `0x25`, gate or no gate — so `safety_link_send_rollback()`
+(KilnFW's `safety_link.c`) always bounds its wait for this reply with a
+timeout and reports "unknown outcome" rather than success when nothing
+arrives in that window, exactly the same as it would if the link had simply
+been down. **A timeout must never be misreported as success.**
+
 ### `SAFETY_CMD_GET_FW_VERSION` = `0x0B` (ESP → Pico)
 
 One byte, no arguments. Sent by the ESP at boot and whenever the Pico's

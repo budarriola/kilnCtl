@@ -1092,7 +1092,7 @@ Provocation methods are in [`GUARD_TEST_MATRIX.md`](GUARD_TEST_MATRIX.md).
 | S10 | Safety TC vs zone TC disagreement | WARN | [x] | [x] | [x] *(same `tc_placement_valid` gate as S2)* | [ ] |
 | S11 | Frozen safety reading | TRIP | [x] | [x] | [x] | [ ] |
 | S12 | Cold junction / enclosure over-temp | WARN→TRIP | [x] | [x] | [x] | [ ] |
-| S13 | Borrowed channel not updating | WARN→TRIP | [x] | [x] | [ ] **dormant — `sample_counter_advancing` is hardcoded false in `safety_core.c`; do NOT commission `tc_source` to BORROWED_ZONE/BOTH until a real producer exists, or S13 trips unconditionally** | [ ] |
+| S13 | Borrowed channel not updating | WARN→TRIP | [x] | [x] | [x] `sample_counter_advancing` now has a real producer (`context_borrowed_sample_counter_advancing()`, `src/snapshots.h`, called from `safety_core_build_input()`) -- `tc_source` may be commissioned to BORROWED_ZONE/BOTH once `borrowed_zone_index` is also set | [ ] |
 | — | Runtime config integrity | TRIP | [ ] | [ ] | [ ] | [ ] |
 
 S2/S3/S4/S6/S9/S10/S13 built and host-tested 2026-08-18: `src/safety_guards.c`

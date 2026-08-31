@@ -82,8 +82,44 @@
  * direction (an OLD Pico's frames, which never set bit 7, read by a NEW ESP)
  * is fully additive and needs no version check at all. Per this file's own
  * rule ("bump if a peer would break"), the version number moves; see
- * KILNLINK_MIN_COMPATIBLE below for whether the floor moves with it. */
-#define KILNLINK_PROTOCOL_VERSION 8
+ * KILNLINK_MIN_COMPATIBLE below for whether the floor moves with it.
+ *
+ * 8 -> 9 (2026-08-30): new Pico -> ESP frame, SAFETY_CMD_ROLLBACK_RESULT
+ * (0x25, kilnlink_rollback_result.h) -- the missing wire-visible reply for
+ * a refused SAFETY_CMD_ROLLBACK (0x17). Before this, a rollback refusal
+ * (relay ARMED, or the other bootloader slot not VALID/PENDING_VERIFY) was
+ * logged only to SaftyFW's own local log; the ESP had no way to distinguish
+ * "refused" from "accepted, rebooting" from "link was down the whole time."
+ * This follows the EXACT 5->6 precedent: ADDITIVE, not breaking, same as
+ * that entry's own reasoning applied to a whole new frame instead of a
+ * growing field --
+ *   - An ESP still on protocol 8 or older simply never sees this frame: it
+ *     keeps working exactly as it does today (a refusal stays silent on the
+ *     wire, same as before this change). Nothing about the OLD frame set
+ *     (STATUS/ROLLBACK/etc.) changed shape, so an old ESP decoding those
+ *     is completely unaffected.
+ *   - SaftyFW's sender (link_task_handle_rollback(), src/tasks/link_task.c)
+ *     only emits 0x25 once it has positively learned, via this same
+ *     protocol_version field on an ANNOUNCE_VERSION it received, that the
+ *     peer ESP is built against 9+ (kilnlink_rollback_result.h's own
+ *     KILNLINK_ROLLBACK_RESULT_MIN_PROTOCOL gate, mirroring link_frame.h's
+ *     LINK_FRAME_STATUS_V2_MIN_PROTOCOL exactly) -- so an old ESP is never
+ *     sent a frame its dispatch switch has no case for.
+ *   - The reverse skew direction (a NEW ESP talking to an OLD Pico that
+ *     predates this frame entirely) is the one this bump does NOT protect
+ *     against by itself, because it cannot: an old Pico simply never sends
+ *     0x25, bump or no bump. This is why safety_link_send_rollback()
+ *     (KilnFW's safety_link.c) is written to ALWAYS bound its wait for this
+ *     reply with a timeout and treat "no frame arrived" as an UNKNOWN
+ *     outcome the caller must not report as success -- only a subsequent
+ *     link drop-and-reconnect with a new boot_id is treated as proof of
+ *     acceptance. A protocol-version bump cannot make an old peer speak a
+ *     frame it was never built to send; only the receiver's own timeout
+ *     discipline can make that safe, and this codebase's discipline for it
+ *     already assumes "no reply" is not evidence of anything.
+ * KILNLINK_MIN_COMPATIBLE is NOT raised alongside this bump -- see its own
+ * comment below. */
+#define KILNLINK_PROTOCOL_VERSION 9
 
 /* The oldest peer this build will talk to (docs/LINK_PROTOCOL.md section 4,
  * "What 'compatible' means"). Deliberately NOT bumped alongside the 5 -> 6
@@ -112,7 +148,15 @@
  * floor to 8 would instead brick EVERY OTHER frame on the link (GET_STATUS/
  * DIAG/POWER/TRIP_EVENT/...) against a peer whose only actual gap is one
  * reply's honesty about an unset field -- a strictly worse outcome than the
- * targeted, self-diagnosing failure this staying at 7 already produces. */
+ * targeted, self-diagnosing failure this staying at 7 already produces.
+ *
+ * NOT bumped alongside the 8 -> 9 step above either, same shape of reason
+ * as the 5 -> 6 step: that step is purely additive (a whole new frame
+ * neither side is required to send or understand to keep every existing
+ * frame working -- see KILNLINK_PROTOCOL_VERSION's own 8->9 comment for the
+ * full two-direction skew argument), so a peer built against 7 or 8 remains
+ * fully compatible with a 9-built peer and must not be locked out over a
+ * feature it simply predates. */
 #define KILNLINK_MIN_COMPATIBLE 7
 
 #endif /* KILNLINK_VERSION_H */

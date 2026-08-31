@@ -21,6 +21,7 @@
 #include "kilnlink/kilnlink_clear_trip.h"
 #include "kilnlink/kilnlink_commit_config.h"
 #include "kilnlink/kilnlink_commit_config_rejected.h"
+#include "kilnlink/kilnlink_rollback_result.h"
 #include "kilnlink/kilnlink_config_page.h"
 #include "kilnlink/kilnlink_context.h"
 #include "kilnlink/kilnlink_ct_cal.h"
@@ -277,6 +278,44 @@ static bool safety_link_up_locked(const SafetyLinkClass *link)
         base = (SAFETY_POLL_PERIOD_MS > 0) ? (uint32_t)SAFETY_POLL_PERIOD_MS : 500u;
     }
     return (uint32_t)age <= base * SAFETY_LINK_UP_PERIODS;
+}
+
+/* Opus-review finding: "the boot_id evidence channel is single-shot and
+ * unrecoverable". peer_version_known/pico_boot_id_known/peer_build_known are
+ * each a "have we ever decoded a FW_VERSION frame this session" latch, set
+ * once by safety_apply_fw_version() and, before this fix, never cleared --
+ * not even when the link is later observed down. The Pico's boot-time
+ * FW_VERSION push is unsolicited and (now) a 4-copy burst (SaftyFW's
+ * link_task.c), but it is still sent into a link that has JUST come out of
+ * reset; if the whole burst is lost -- or the Pico rebooted while this side
+ * still held stale "known" flags from BEFORE the link dropped -- this side
+ * would otherwise keep believing it already knows the peer's boot_id/build/
+ * protocol version forever, and never re-request. Concretely, that turns a
+ * rollback that fully succeeded into a permanent UNKNOWN_TIMEOUT:
+ * safety_link_rollback_boot_id_changed() compares against a boot_id that is
+ * still the PRE-rollback value, and nothing on this side is polling to
+ * refresh it.
+ *
+ * Called once per poll iteration (safety_poll_task); clears the three flags
+ * whenever safety_link_up_locked() reads false, so the poll loop's own
+ * "!peer_version_known -> re-request FW_VERSION every period" branch
+ * (SAFETY_LINK_BACKOFF_MAX_STREAK's comment) now also covers "was known, but
+ * that peer went away and may be a different peer/boot by the time it's
+ * back", not just "never known yet". Extracted as its own function (rather
+ * than left inline in the poll loop) specifically so this decision is
+ * host-testable from a plain SafetyLinkClass -- see test_safety_link_
+ * compile.c -- without needing the FreeRTOS poll loop itself running. */
+static void safety_reset_stale_peer_info_if_link_down(SafetyLinkClass *link)
+{
+    if (!link || !safety_lock(link)) {
+        return;
+    }
+    if (!safety_link_up_locked(link)) {
+        link->peer_version_known = false;
+        link->pico_boot_id_known = false;
+        link->peer_build_known = false;
+    }
+    safety_unlock(link);
 }
 
 /* Drives GPIO6 from the current source mask. High = fault asserted = U1's LED
@@ -1320,6 +1359,10 @@ static void safety_count_cmd_byte(SafetyLinkClass *link, uint8_t cmd, uint8_t le
         link->stats.cmd_commit_config_rejected_count++;
         link->stats.last_commit_config_rejected_len = len;
         break;
+    case KILNLINK_ROLLBACK_RESULT_CMD:
+        link->stats.cmd_rollback_result_count++;
+        link->stats.last_rollback_result_len = len;
+        break;
     default:
         /* Not counted here -- the switch in safety_drain_inbox_ex() below
          * already counts and records this exact case via
@@ -1333,7 +1376,8 @@ static void safety_count_cmd_byte(SafetyLinkClass *link, uint8_t cmd, uint8_t le
 static bool safety_drain_inbox_ex(SafetyLinkClass *link, uint32_t wait_ms, bool want_status,
                                    uart_proto_message_t *out_ct_cal, bool *out_got_ct_cal,
                                    uart_proto_message_t *out_config_page, bool *out_got_config_page,
-                                   uart_proto_message_t *out_commit_rejected, bool *out_got_commit_rejected)
+                                   uart_proto_message_t *out_commit_rejected, bool *out_got_commit_rejected,
+                                   uart_proto_message_t *out_rollback_result, bool *out_got_rollback_result)
 {
     uart_proto_message_t msg;
     bool got_status = false;
@@ -1350,6 +1394,7 @@ static bool safety_drain_inbox_ex(SafetyLinkClass *link, uint32_t wait_ms, bool 
     bool want_ct_cal = out_ct_cal && out_got_ct_cal;
     bool want_config_page = out_config_page && out_got_config_page;
     bool want_commit_rejected = out_commit_rejected && out_got_commit_rejected;
+    bool want_rollback_result = out_rollback_result && out_got_rollback_result;
 
     while (uart_protocol_receive(link->inbox, &msg, wait) == ESP_OK) {
         /* 2026-08-23: this is the ONE registered consumer of link->inbox --
@@ -1437,6 +1482,33 @@ static bool safety_drain_inbox_ex(SafetyLinkClass *link, uint32_t wait_ms, bool 
                     }
                 }
                 break;
+            case KILNLINK_ROLLBACK_RESULT_CMD: /* SAFETY_CMD_ROLLBACK_RESULT (0x25) -- the missing wire-visible
+                                                 * reply for a refused SAFETY_CMD_ROLLBACK, sent ONLY on refusal
+                                                 * (see kilnlink_rollback_result.h's own "ASYMMETRIC BY DESIGN"
+                                                 * comment). DOES need a stash branch, same reasoning as CT_CAL/
+                                                 * CONFIG_PAGE/COMMIT_CONFIG_REJECTED above: safety_link_send_
+                                                 * rollback_ex() only waits SAFETY_LINK_REPLY_TIMEOUT_MS in this
+                                                 * out-param before moving on to its boot_id-reconnect watch, but a
+                                                 * rollback reboot takes far longer than that -- a refusal landing
+                                                 * even slightly late used to be silently discarded by the next
+                                                 * drain through this inbox (typically the ordinary GET_STATUS
+                                                 * poll, which shares this queue). Stashed instead
+                                                 * (SafetyLinkClass::stashed_rollback_result), so the boot_id watch
+                                                 * can still find it and report REFUSED rather than let the watch
+                                                 * time out into UNKNOWN (or worse, a coincidental unrelated
+                                                 * reboot's boot_id change being misread as ACCEPTED). */
+                if (msg.length == KILNLINK_ROLLBACK_RESULT_LEN) {
+                    if (out_rollback_result && out_got_rollback_result) {
+                        *out_rollback_result = msg;
+                        *out_got_rollback_result = true;
+                    } else if (safety_lock(link)) {
+                        link->stashed_rollback_result = msg;
+                        link->has_stashed_rollback_result = true;
+                        link->stashed_rollback_result_tick = xTaskGetTickCount();
+                        safety_unlock(link);
+                    }
+                }
+                break;
             default:
                 /* Dequeued, CRC-valid, but payload[0] matched no case above
                  * -- recorded, both the count and the actual byte, rather
@@ -1472,7 +1544,8 @@ static bool safety_drain_inbox_ex(SafetyLinkClass *link, uint32_t wait_ms, bool 
         if (safety_drain_still_waiting(want_status, got_status, want_ct_cal,
                                         want_ct_cal && *out_got_ct_cal, want_config_page,
                                         want_config_page && *out_got_config_page, want_commit_rejected,
-                                        want_commit_rejected && *out_got_commit_rejected)) {
+                                        want_commit_rejected && *out_got_commit_rejected, want_rollback_result,
+                                        want_rollback_result && *out_got_rollback_result)) {
             TickType_t elapsed = xTaskGetTickCount() - started; /* wrap-safe unsigned subtraction */
             wait = (elapsed < total_wait_ticks) ? (total_wait_ticks - elapsed) : 0;
         } else {
@@ -1582,6 +1655,46 @@ static void safety_clear_stashed_commit_rejected(SafetyLinkClass *link)
     }
 }
 
+/* Takes the stashed ROLLBACK_RESULT frame unconditionally (no index to
+ * match -- same reasoning as COMMIT_CONFIG_REJECTED above: only one
+ * rollback request can be in flight at a time, serialized by xact_lock).
+ * Returns false (leaving *out untouched) when the stash is empty, has aged
+ * out, or the state lock could not be taken. Consumed only by safety_link_
+ * send_rollback_ex()'s own boot_id-reconnect watch -- unlike the config-page
+ * and commit-rejected stashes, nothing outside this file needs to read a
+ * rollback result late, so there is no public safety_link_take_stashed_*()
+ * wrapper for this one. */
+static bool safety_take_stashed_rollback_result(SafetyLinkClass *link, uart_proto_message_t *out)
+{
+    bool took = false;
+    if (safety_lock(link)) {
+        if (link->has_stashed_rollback_result) {
+            if (safety_elapsed_ms(link->stashed_rollback_result_tick) > SAFETY_STASHED_PAGE_MAX_AGE_MS) {
+                link->has_stashed_rollback_result = false; /* too old to be anyone's reply */
+            } else {
+                *out = link->stashed_rollback_result;
+                link->has_stashed_rollback_result = false;
+                took = true;
+            }
+        }
+        safety_unlock(link);
+    }
+    return took;
+}
+
+/* Drops any stashed ROLLBACK_RESULT frame. Called at the top of safety_
+ * link_send_rollback_ex() so a refusal left over from a PRIOR, already-
+ * resolved rollback attempt (reported to that caller, or abandoned once its
+ * own boot_id watch gave up) can never be mistaken for THIS attempt's own
+ * outcome. */
+static void safety_clear_stashed_rollback_result(SafetyLinkClass *link)
+{
+    if (safety_lock(link)) {
+        link->has_stashed_rollback_result = false;
+        safety_unlock(link);
+    }
+}
+
 void safety_link_clear_stashed_config_page(SafetyLinkClass *link)
 {
     if (!link) {
@@ -1635,7 +1748,7 @@ bool safety_link_take_stashed_commit_rejected(SafetyLinkClass *link, uint16_t *o
  * safety_drain_inbox_for_status() below for the one caller that does not. */
 static bool safety_drain_inbox(SafetyLinkClass *link, uint32_t wait_ms)
 {
-    return safety_drain_inbox_ex(link, wait_ms, false, NULL, NULL, NULL, NULL, NULL, NULL);
+    return safety_drain_inbox_ex(link, wait_ms, false, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL);
 }
 
 /* The GET_STATUS poll's drain: keeps using its own declared budget until the
@@ -1644,7 +1757,7 @@ static bool safety_drain_inbox(SafetyLinkClass *link, uint32_t wait_ms)
  * comment in safety_link.h for the bench measurement behind this. */
 static bool safety_drain_inbox_for_status(SafetyLinkClass *link, uint32_t wait_ms)
 {
-    return safety_drain_inbox_ex(link, wait_ms, true, NULL, NULL, NULL, NULL, NULL, NULL);
+    return safety_drain_inbox_ex(link, wait_ms, true, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL);
 }
 
 /* One complete request/reply exchange, serialized against every other one on
@@ -2027,6 +2140,14 @@ static void safety_poll_task(void *arg)
         } else if (link->no_reply_streak < SAFETY_LINK_BACKOFF_MAX_STREAK) {
             link->no_reply_streak++;
         }
+
+        /* See safety_reset_stale_peer_info_if_link_down()'s own doc comment
+         * (opus-review finding: "the boot_id evidence channel is single-shot
+         * and unrecoverable") -- clears peer_version_known/pico_boot_id_known/
+         * peer_build_known once the link is observed down, so the
+         * !peer_version_known branch immediately below re-requests FW_VERSION
+         * on this very iteration rather than trusting stale pre-drop state. */
+        safety_reset_stale_peer_info_if_link_down(link);
 
         bool peer_version_known = false;
         if (safety_lock(link)) {
@@ -2849,6 +2970,295 @@ esp_err_t safety_link_send_rollback(SafetyLinkClass *link)
                                          UART_TASK_ID_SAFETY, payload, len);
 }
 
+/* Send-burst sizing for safety_link_send_rollback_ex() -- the request leg is
+ * a fire-and-forget BROADCAST (link_task_handle_rollback() never ACKs it),
+ * exactly the same shape ANNOUNCE_VERSION already sends over, and the same
+ * loss argument applies: a single dropped frame must not be read as "the
+ * Pico refused" OR "the Pico accepted" when it may simply never have
+ * arrived. Reuses ANNOUNCE_VERSION's own tuning verbatim (4 sends, 250ms
+ * apart -- safety_link_send_announce_version_burst()) rather than inventing
+ * a second number with no bench data behind it. */
+#define SAFETY_LINK_ROLLBACK_SEND_REPEATS 4u
+#define SAFETY_LINK_ROLLBACK_SEND_REPEAT_GAP_MS 250u
+
+/* How long to watch the peer's boot_id for a change after the send-burst/
+ * reply-window leg above produced no refusal. This is the ONLY window that
+ * can turn silence into SAFETY_LINK_ROLLBACK_OUTCOME_ACCEPTED (defect fix:
+ * silence alone, or silence plus a version guess, used to be enough -- see
+ * safety_link_rollback_outcome_t's doc comment), so it has to be sized
+ * against what a rollback reboot actually costs, not against
+ * SAFETY_LINK_REPLY_TIMEOUT_MS (~345ms at 230400 baud -- one frame's flight
+ * time, not a reboot's). A rollback reboot is: persist the updated
+ * bootloader metadata record to flash, watchdog_reboot(), the RP2040
+ * bootloader re-validating and jumping to the other slot, SaftyFW's app
+ * re-init, and its own boot-time FW_VERSION push reaching this side and
+ * being applied by safety_apply_fw_version() -- several hundred ms of flash
+ * write and reboot alone before a single byte is back on the wire. 5s gives
+ * that sequence more than an order of magnitude of headroom over the single-
+ * frame budget while still returning a Pico that is genuinely wedged (or a
+ * request that was simply lost) to the caller in bounded time rather than
+ * hanging the HTTP handler indefinitely. */
+#define SAFETY_LINK_ROLLBACK_BOOT_WATCH_MS 5000u
+/* Poll granularity for the boot_id watch -- well under poll_period_ms's
+ * default (SAFETY_POLL_PERIOD_MS, typically a few hundred ms), so a boot_id
+ * change or a late-arriving stashed refusal (safety_take_stashed_rollback_
+ * result()) is noticed promptly rather than sitting until the next coarse
+ * tick. Cheap: each iteration is two short state_lock sections, no I/O. */
+#define SAFETY_LINK_ROLLBACK_BOOT_WATCH_POLL_MS 200u
+
+/* See safety_link.h's doc comment on safety_link_send_rollback_ex() and
+ * safety_link_rollback_outcome_t for the full design. Structured like
+ * safety_link_send_commit_config() above (own xact_lock hold, drain-then-
+ * send-then-drain-for-the-reply shape) for the send-burst/reply-window leg,
+ * plus a boot_id-reconnect watch AFTER releasing xact_lock -- see that
+ * release's own comment below for why the lock must not be held through the
+ * watch. */
+esp_err_t safety_link_send_rollback_ex(SafetyLinkClass *link, safety_link_rollback_outcome_t *out_outcome,
+                                        uint8_t *out_reason_code)
+{
+    safety_link_rollback_outcome_t local_outcome = SAFETY_LINK_ROLLBACK_OUTCOME_LINK_DOWN;
+    if (!out_outcome) {
+        out_outcome = &local_outcome;
+    }
+    *out_outcome = SAFETY_LINK_ROLLBACK_OUTCOME_LINK_DOWN;
+
+    if (!link) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!link->initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    /* Checked BEFORE anything is sent, and treated as its own outcome
+     * rather than left to fall out of a later timeout -- see safety_link_
+     * rollback_outcome_t's own doc comment: this is exactly the distinction
+     * that keeps "the link was down the whole time" from ever being
+     * misread as "the Pico is thinking about it." */
+    safety_link_status_t link_status;
+    if (safety_link_get_status(link, &link_status) != ESP_OK || !link_status.link_up) {
+        ESP_LOGW(TAG, "rollback: refused locally, the safety link is down -- not sending");
+        *out_outcome = SAFETY_LINK_ROLLBACK_OUTCOME_LINK_DOWN;
+        return ESP_OK;
+    }
+
+    /* Snapshot the peer's boot_id BEFORE anything is sent -- this, not a
+     * version guess, is the sole positive evidence this function will ever
+     * accept for ACCEPTED (defect fix: the old peer_can_reply gate read
+     * THIS side's cached view of the PICO's protocol_version, but whether
+     * the Pico SENDS 0x25 is decided by the Pico's own cached view of the
+     * ESP's protocol_version -- a value this side cannot observe at all;
+     * removed rather than patched, see safety_link_rollback_outcome_t's
+     * ACCEPTED doc comment). If had_boot_id comes back false there is no
+     * baseline to compare against at all, and safety_link_rollback_boot_id_
+     * changed() (safety_link.h) therefore reports "no evidence" for the
+     * whole watch rather than treating the first FW_VERSION that happens to
+     * arrive as a reboot -- see that function's own comment for why the
+     * opposite convention in safety_apply_fw_version() is right there and
+     * wrong here. */
+    bool had_boot_id = false;
+    uint8_t boot_id_before = 0;
+    if (safety_lock(link)) {
+        had_boot_id = link->pico_boot_id_known;
+        boot_id_before = link->pico_boot_id;
+        safety_unlock(link);
+    }
+
+    /* Snapshot the peer's build identity BEFORE anything is sent too -- see
+     * opus-review finding 2, "a reboot is not a rollback": the boot_id watch
+     * below on its own cannot tell a rollback reboot apart from an unrelated
+     * crash/watchdog/power-glitch reboot inside the same window, since both
+     * change the boot_id identically. The commit+datetime pair from the same
+     * FW_VERSION frame is independent evidence -- a rollback reboots into
+     * the OTHER bootloader slot (a different build), an unrelated reboot
+     * comes back running the SAME one. safety_link_get_peer_build_status()
+     * copies out the full 64/32-byte buffers regardless of length; the *_len
+     * outputs are what safety_link_rollback_build_identity_changed() (safety_
+     * link.h) actually compares against. */
+    bool had_build = false;
+    uint8_t commit_before[64];
+    uint8_t commit_len_before = 0;
+    uint8_t datetime_before[32];
+    uint8_t datetime_len_before = 0;
+    (void)safety_link_get_peer_build_status(link, &had_build, NULL, commit_before, &commit_len_before,
+                                             datetime_before, &datetime_len_before, NULL, NULL);
+
+    kilnlink_rollback_t msg = {0};
+    uint8_t payload[KILNLINK_ROLLBACK_LEN];
+    kilnlink_rollback_status_t status = KILNLINK_ROLLBACK_OK;
+    size_t len = kilnlink_rollback_encode(&msg, payload, sizeof(payload), &status);
+    if (len == 0) {
+        ESP_LOGE(TAG, "rollback: encode failed (status=%d)", (int)status);
+        *out_outcome = SAFETY_LINK_ROLLBACK_OUTCOME_SEND_FAILED;
+        return ESP_OK;
+    }
+
+    if (xSemaphoreTake(link->xact_lock, pdMS_TO_TICKS(SAFETY_XACT_LOCK_TIMEOUT_MS)) != pdTRUE) {
+        ESP_LOGE(TAG, "rollback: timed out waiting for the safety link transaction lock");
+        *out_outcome = SAFETY_LINK_ROLLBACK_OUTCOME_SEND_FAILED;
+        return ESP_OK;
+    }
+    (void)safety_drain_inbox(link, 0);
+    /* A refusal stashed by a PRIOR, already-resolved rollback attempt must
+     * never be read as this attempt's own answer -- see safety_clear_
+     * stashed_rollback_result()'s own comment. */
+    safety_clear_stashed_rollback_result(link);
+
+    ESP_LOGW(TAG, "rollback: sending -- requesting the safety processor revert to its "
+                  "previous bootloader slot (burst of %u, %ums apart)",
+             (unsigned)SAFETY_LINK_ROLLBACK_SEND_REPEATS, (unsigned)SAFETY_LINK_ROLLBACK_SEND_REPEAT_GAP_MS);
+
+    uart_proto_message_t result_msg;
+    bool got_result = false;
+    bool sent_at_least_once = false;
+    for (unsigned n = 0; n < SAFETY_LINK_ROLLBACK_SEND_REPEATS; n++) {
+        esp_err_t send_err = uart_protocol_send_broadcast(&link->proto, UART_PROTO_DEVICE_SAFETY,
+                                                           UART_TASK_ID_SAFETY, UART_TASK_ID_SAFETY, payload, len);
+        if (send_err == ESP_OK) {
+            sent_at_least_once = true;
+        } else if (!sent_at_least_once) {
+            /* Never left this board even once -- a local UART fault, not a
+             * peer response. Give up now rather than spend the rest of the
+             * burst budget on a link that cannot transmit at all. */
+            xSemaphoreGive(link->xact_lock);
+            ESP_LOGE(TAG, "rollback: send failed on the first attempt: %s", esp_err_to_name(send_err));
+            *out_outcome = SAFETY_LINK_ROLLBACK_OUTCOME_SEND_FAILED;
+            return ESP_OK;
+        } else {
+            /* A later repeat failed locally after at least one earlier send
+             * already reached the UART -- log and keep listening for a
+             * reply to the send(s) that DID go out, rather than discard
+             * that progress over one bad repeat. */
+            ESP_LOGW(TAG, "rollback: repeat %u/%u send failed: %s (continuing -- an earlier "
+                          "send already reached the UART)",
+                     n + 1u, (unsigned)SAFETY_LINK_ROLLBACK_SEND_REPEATS, esp_err_to_name(send_err));
+        }
+
+        bool last_repeat = (n + 1u == SAFETY_LINK_ROLLBACK_SEND_REPEATS);
+        uint32_t wait_ms = last_repeat ? SAFETY_LINK_REPLY_TIMEOUT_MS : SAFETY_LINK_ROLLBACK_SEND_REPEAT_GAP_MS;
+        (void)safety_drain_inbox_ex(link, wait_ms, false, NULL, NULL, NULL, NULL, NULL, NULL, &result_msg,
+                                     &got_result);
+        if (got_result) {
+            break;
+        }
+    }
+    /* Released here, BEFORE the boot_id watch below -- holding it through a
+     * multi-second watch would block safety_exchange()'s own xact_lock hold
+     * (the ordinary GET_STATUS poll), which is exactly the mechanism that
+     * keeps link_up current and drains the FW_VERSION pushes the watch is
+     * waiting to see. Blocking the poll task here would make the watch wait
+     * on a poll it is itself preventing from running. */
+    xSemaphoreGive(link->xact_lock);
+
+    if (got_result) {
+        kilnlink_rollback_result_t result = {0};
+        bool decoded_ok = (kilnlink_rollback_result_decode(result_msg.payload, result_msg.length, &result) ==
+                            KILNLINK_ROLLBACK_RESULT_OK);
+        if (decoded_ok && result.accepted) {
+            // No sender in this codebase ever sets accepted=1 today
+            // (kilnlink_rollback_result.h's own comment), but a future one
+            // might -- an explicit accepted=1 is stronger evidence than the
+            // boot_id watch below, so honor it directly rather than routing
+            // it through safety_link_rollback_infer_outcome() (which has no
+            // "explicit accept" input, only refusal/boot_id).
+            *out_outcome = SAFETY_LINK_ROLLBACK_OUTCOME_ACCEPTED;
+            ESP_LOGW(TAG, "rollback: peer reported accepted=1 (unexpected but honored)");
+            return ESP_OK;
+        }
+        *out_outcome = safety_link_rollback_infer_outcome(true, decoded_ok, false);
+        if (*out_outcome == SAFETY_LINK_ROLLBACK_OUTCOME_REFUSED) {
+            if (out_reason_code) {
+                *out_reason_code = result.reason;
+            }
+            ESP_LOGW(TAG, "rollback: REFUSED by the safety processor (reason=%u)", (unsigned)result.reason);
+        } else {
+            // Decoded frame matched the id/length gate in safety_drain_
+            // inbox_ex() but failed the codec's own checks -- should not
+            // happen for a frame this driver's own gate already filtered on
+            // length, but do not claim an outcome this driver cannot prove.
+            ESP_LOGE(TAG, "rollback: a ROLLBACK_RESULT-shaped frame arrived but failed to decode");
+        }
+        return ESP_OK;
+    }
+
+    // No refusal within the send-burst/reply-window leg. Per kilnlink_
+    // rollback_result.h's "ASYMMETRIC BY DESIGN" comment, the only
+    // trustworthy positive evidence left is the peer's boot_id changing --
+    // watch for that (or a refusal that arrives late enough to be stashed
+    // instead) for up to SAFETY_LINK_ROLLBACK_BOOT_WATCH_MS. A timeout here
+    // must never be misreported as success (kilnlink_rollback_result.h,
+    // CommonFW/docs/LINK_PROTOCOL.md sec 4) -- see safety_link_rollback_
+    // infer_outcome()'s fallthrough to UNKNOWN_TIMEOUT below.
+    TickType_t watch_start = xTaskGetTickCount();
+    bool logged_boot_id_without_build = false; /* dedup for the "looks like an unrelated reboot" log below */
+    for (;;) {
+        uart_proto_message_t stashed;
+        if (safety_take_stashed_rollback_result(link, &stashed)) {
+            kilnlink_rollback_result_t late_result = {0};
+            bool late_ok = (kilnlink_rollback_result_decode(stashed.payload, stashed.length, &late_result) ==
+                            KILNLINK_ROLLBACK_RESULT_OK);
+            *out_outcome = safety_link_rollback_infer_outcome(true, late_ok, false);
+            if (*out_outcome == SAFETY_LINK_ROLLBACK_OUTCOME_REFUSED) {
+                if (out_reason_code) {
+                    *out_reason_code = late_result.reason;
+                }
+                ESP_LOGW(TAG, "rollback: a refusal arrived AFTER the reply window closed but was stashed and "
+                              "found by the boot_id watch -- REFUSED (reason=%u), not the ACCEPTED this driver "
+                              "used to infer from silence", (unsigned)late_result.reason);
+            } else {
+                ESP_LOGE(TAG, "rollback: a stashed ROLLBACK_RESULT-shaped frame failed to decode");
+            }
+            return ESP_OK;
+        }
+
+        bool boot_id_changed_now = false;
+        bool build_changed_now = false;
+        if (safety_lock(link)) {
+            boot_id_changed_now = safety_link_rollback_boot_id_changed(had_boot_id, boot_id_before,
+                                                                        link->pico_boot_id_known,
+                                                                        link->pico_boot_id);
+            build_changed_now = safety_link_rollback_build_identity_changed(
+                had_build, commit_len_before, commit_before, datetime_len_before, datetime_before,
+                link->peer_build_known, link->peer_build_commit_len, link->peer_build_commit,
+                link->peer_build_datetime_len, link->peer_build_datetime);
+            safety_unlock(link);
+        }
+        if (safety_link_rollback_reboot_confirmed(boot_id_changed_now, build_changed_now)) {
+            *out_outcome = safety_link_rollback_infer_outcome(false, false, true);
+            ESP_LOGW(TAG, "rollback: no refusal, and the peer's boot_id AND build identity both changed "
+                          "within the %ums watch -- ACCEPTED (reboot into a different image observed, not "
+                          "inferred from silence or from a boot_id change alone)",
+                     (unsigned)SAFETY_LINK_ROLLBACK_BOOT_WATCH_MS);
+            return ESP_OK;
+        } else if (boot_id_changed_now && !logged_boot_id_without_build) {
+            /* Evidence this driver deliberately does NOT accept (opus-review
+             * finding 2): the boot_id moved but the build identity did not
+             * (or could not be compared), which is exactly what an
+             * unrelated crash/watchdog/power-glitch reboot inside this
+             * watch window looks like. Logged once (this condition is now
+             * true for every remaining iteration of the watch, since the
+             * boot_id does not un-change), not reported -- the watch keeps
+             * running rather than returning here, since a genuine rollback
+             * reboot could still complete and its own FW_VERSION (carrying
+             * the new build identity) arrive before the window closes. */
+            logged_boot_id_without_build = true;
+            ESP_LOGW(TAG, "rollback: the peer's boot_id changed within the watch but its build identity did "
+                          "not (or is not yet known) -- NOT reporting ACCEPTED, this looks like an unrelated "
+                          "reboot rather than a rollback; continuing to watch");
+        }
+
+        if (safety_elapsed_ms(watch_start) >= SAFETY_LINK_ROLLBACK_BOOT_WATCH_MS) {
+            break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(SAFETY_LINK_ROLLBACK_BOOT_WATCH_POLL_MS));
+    }
+
+    *out_outcome = safety_link_rollback_infer_outcome(false, false, false);
+    ESP_LOGW(TAG, "rollback: no refusal and no boot_id change within the %ums send-burst/reply window plus "
+                  "%ums boot_id watch -- outcome UNKNOWN, never reported as accepted",
+             (unsigned)SAFETY_LINK_REPLY_TIMEOUT_MS, (unsigned)SAFETY_LINK_ROLLBACK_BOOT_WATCH_MS);
+    return ESP_OK;
+}
+
 /* CommonFW/docs/LINK_PROTOCOL.md sec 4, SAFETY_CMD_ANNOUNCE_REBOOT (0x18) --
  * see safety_link.h's doc comment for the full design rationale (why this
  * exists, why it grants no heating permission, why it is fire-and-forget).
@@ -3004,7 +3414,7 @@ esp_err_t safety_link_get_ct_cal(SafetyLinkClass *link, uint8_t *out, size_t out
     uart_proto_message_t ct_cal_msg;
     bool got_ct_cal = false;
     (void)safety_drain_inbox_ex(link, SAFETY_LINK_REPLY_TIMEOUT_MS, false, &ct_cal_msg, &got_ct_cal, NULL, NULL, NULL,
-                                 NULL);
+                                 NULL, NULL, NULL);
 
     if (!got_ct_cal) {
         /* ACKed but no CT_CAL reply: same "protocol layer alive, application
@@ -3194,7 +3604,7 @@ esp_err_t safety_link_send_commit_config(SafetyLinkClass *link, uint16_t *out_pa
         uart_proto_message_t rejected_msg;
         bool got_rejected = false;
         (void)safety_drain_inbox_ex(link, SAFETY_LINK_REPLY_TIMEOUT_MS, false, NULL, NULL, NULL, NULL, &rejected_msg,
-                                     &got_rejected);
+                                     &got_rejected, NULL, NULL);
         if (got_rejected) {
             kilnlink_commit_config_rejected_t rejected;
             if (kilnlink_commit_config_rejected_decode(rejected_msg.payload, rejected_msg.length, &rejected) ==
@@ -3317,7 +3727,7 @@ esp_err_t safety_link_get_config_page(SafetyLinkClass *link, uint8_t page_index,
      * trade-off safety_drain_inbox_ex()'s own stash branch already makes
      * (single slot, newest wins) -- unchanged here, just applied on this
      * path too instead of skipped. */
-    (void)safety_drain_inbox_ex(link, 0, false, NULL, NULL, &early_msg, &got_early, NULL, NULL);
+    (void)safety_drain_inbox_ex(link, 0, false, NULL, NULL, &early_msg, &got_early, NULL, NULL, NULL, NULL);
     if (safety_take_stashed_config_page(link, page_index, &early_msg)) {
         got_early = true; /* prefer the stash: it is the older, already-orphaned frame */
     }
@@ -3410,7 +3820,7 @@ esp_err_t safety_link_get_config_page(SafetyLinkClass *link, uint8_t page_index,
         }
         bool got_one = false;
         (void)safety_drain_inbox_ex(link, (uint32_t)remaining_ms, false, NULL, NULL, &page_msg, &got_one,
-                                     NULL, NULL);
+                                     NULL, NULL, NULL, NULL);
         if (!got_one) {
             break;
         }

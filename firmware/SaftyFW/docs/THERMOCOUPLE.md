@@ -450,7 +450,7 @@ sensor reading low tells you nothing at all.
 - [ ] `tc_source` implemented: `OWN_J7` / `BORROWED_ZONE` / `BOTH`
 - [ ] `SAFETY_FLAG_BORROWED` set in status frames when borrowing
 - [ ] `tc_placement_mode` forced to `CHAMBER_AGREED`; contradictory config **rejected**
-- [ ] S13 implemented against `sample_counter`
+- [x] S13 implemented against `sample_counter` (`context_borrowed_sample_counter_advancing()`, `src/snapshots.h`)
 - [ ] Borrowed `tc_type` compared against `borrowed_type_expected`
 - [ ] `BOTH` mode cross-compares the two sources via S10
 

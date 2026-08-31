@@ -134,7 +134,7 @@ the board, only used locally in this page to sign each request.</p>
   <input type="file" id="picoFile" accept=".bin">
   <div>
     <button id="picoUpdateBtn" type="button" class="primary">Update Pico</button>
-    <button type="button" class="danger" disabled title="Not yet available: no Pico-side rollback HTTP route exists. Pico rollback is being wired over the safety UART link, not HTTP, by separate work -- this page cannot call it yet.">Roll back Pico (not yet available)</button>
+    <button id="picoRollbackBtn" type="button" class="danger">Roll back Pico to previous image</button>
   </div>
 </div>
 <div id="picoProgressWrap" style="display:none">
@@ -247,7 +247,8 @@ function hexToBytes(hex) {
  * derive_mac() both implement:
  *   key = HMAC-SHA256(ap_password, "kilnctl-ota-v1")
  *   mac = HMAC-SHA256(key, nonce_bytes || context)
- * context is exactly "esp", "pico", "esp-rollback", or "recovery". */
+ * context is exactly "esp", "pico", "esp-rollback", "pico-rollback",
+ * "recovery", or "factory-reset". */
 var OTA_KDF_CONTEXT = "kilnctl-ota-v1";
 function deriveMac(apPassword, nonceBytes, context) {
   var key = hmacSha256(strToBytes(apPassword), strToBytes(OTA_KDF_CONTEXT));
@@ -355,15 +356,20 @@ function loadInterlock() {
 // (phase/percent) is the one thing here that is genuinely live: it only
 // exists while a write/verify is actively in flight and is meaningless the
 // instant the connection to report it drops.
+function esc(v) {
+  return String(v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
 function renderEspInfo(s) {
   var info = document.getElementById('espInfo');
   info.innerHTML =
-    '<dt>Running version</dt><dd>' + (s.version || '(unknown)') + '</dd>' +
-    '<dt>Build commit</dt><dd>' + s.commit + (s.dirty ? ' (dirty)' : '') + '</dd>' +
-    '<dt>Build date</dt><dd>' + s.build_date + '</dd>' +
-    '<dt>Active slot</dt><dd>' + s.active_slot + '</dd>' +
-    '<dt>Inactive slot</dt><dd>' + s.inactive_slot +
-      ' (' + (s.inactive_version ? s.inactive_version : '(empty)') + ')</dd>';
+    '<dt>Running version</dt><dd>' + esc(s.version || '(unknown)') + '</dd>' +
+    '<dt>Build commit</dt><dd>' + esc(s.commit) + (s.dirty ? ' (dirty)' : '') + '</dd>' +
+    '<dt>Build date</dt><dd>' + esc(s.build_date) + '</dd>' +
+    '<dt>Active slot</dt><dd>' + esc(s.active_slot) + '</dd>' +
+    '<dt>Inactive slot</dt><dd>' + esc(s.inactive_slot) +
+      ' (' + esc(s.inactive_version ? s.inactive_version : '(empty)') + ')</dd>';
 
   var lu = document.getElementById('espLastUpdate');
   if (s.last_update) {
@@ -412,33 +418,47 @@ function pollEspStatus() {
 
 /* ---- Pico status ----------------------------------------------------------
  * GET /api/ota/pico/status -- phase/percent/last_error plus protocol_version*
- * fields (App/drivers/ota_http.c, extended this session). NOTE: unlike the
- * ESP side, the Pico's build commit/dirty flag/build date are NOT available
- * over this link -- safety_link.c's safety_apply_fw_version() parses past
- * those fields (to reach boot_id) but never stores them (see safety_link.h's
- * SAFETY_CMD_FW_VERSION doc comment and safety_link.c's
- * safety_parse_fw_version()). This page shows what IS actually on the wire:
- * protocol version and whether it's compatible with this ESP build. There is
- * also no A/B "active/inactive slot" concept on the Pico side in this
- * protocol at all -- the RP2040 has one firmware image, not two OTA
- * partitions -- so this section has no slot row, unlike the ESP one. */
-// Same live/static split as renderEspInfo above: protocol_version is fixed
-// per firmware build (not a moment-to-moment reading), so unmarked; relay
-// phase and the last relay error are both current link/relay state and get
-// kc-live-value.
+ * fields (App/drivers/ota_http.c, extended this session). There is no A/B
+ * "active/inactive slot" concept on the Pico side in this protocol at all --
+ * the RP2040 has one firmware image, not two OTA partitions -- so this
+ * section has no slot row, unlike the ESP one.
+ *
+ * Build commit/dirty/date come from a SEPARATE endpoint, GET /api/status
+ * (dashboard_http.c's safety_build_* fields) -- those are parsed off the
+ * safety processor's own SAFETY_CMD_FW_VERSION broadcast
+ * (safety_link.h's safety_link_get_peer_build_status(), TODO.md owner-report
+ * item 5) and retained there, not part of this ota_http.c relay status.
+ * Stashed in s_safetyBuild by pollBootButtonBypass() below (which already
+ * polls /api/status every 3s for the boot-button banner) and merged in here
+ * so a single render function still owns all of #picoInfo's markup. */
+var s_safetyBuild = null; // { known, dirty, commit, datetime } or null before the first /api/status reply
+var s_lastPicoStatus = null;
+
+// Same live/static split as renderEspInfo above: protocol_version and the
+// safety build identity are fixed per firmware build (not moment-to-moment
+// readings), so unmarked; relay phase and the last relay error are current
+// link/relay state and get kc-live-value.
 function renderPicoInfo(s) {
+  s_lastPicoStatus = s;
   var info = document.getElementById('picoInfo');
-  var html = '<dt>Relay phase</dt><dd class="kc-live-value">' + s.phase + '</dd>';
+  var html = '<dt>Relay phase</dt><dd class="kc-live-value">' + esc(s.phase) + '</dd>';
   if (s.protocol_version_known) {
-    html += '<dt>Protocol version</dt><dd>' + s.protocol_version +
-      ' (min compatible ' + s.protocol_min_compatible + ')</dd>' +
+    html += '<dt>Protocol version</dt><dd>' + esc(s.protocol_version) +
+      ' (min compatible ' + esc(s.protocol_min_compatible) + ')</dd>' +
       '<dt>Compatible with this ESP</dt><dd>' + (s.protocol_compatible ? 'yes' : 'NO -- mismatch') + '</dd>';
   } else {
     html += '<dt>Protocol version</dt><dd>not yet known (no FW_VERSION frame received)</dd>';
   }
-  html += '<dt>Build commit / date</dt><dd>not available over this link -- see page source comment</dd>';
+  if (s_safetyBuild && s_safetyBuild.known) {
+    html += '<dt>Safety processor (RP2040) build commit</dt><dd>' + esc(s_safetyBuild.commit) +
+      (s_safetyBuild.dirty ? ' (dirty)' : '') + '</dd>' +
+      '<dt>Safety processor (RP2040) build date</dt><dd>' + esc(s_safetyBuild.datetime) + '</dd>';
+  } else {
+    html += '<dt>Safety processor (RP2040) build commit / date</dt><dd>not reported yet' +
+      ' (no FW_VERSION frame parsed from the safety link)</dd>';
+  }
   if (s.last_error) {
-    html += '<dt>Last relay error</dt><dd class="kc-live-value">' + s.last_error + '</dd>';
+    html += '<dt>Last relay error</dt><dd class="kc-live-value">' + esc(s.last_error) + '</dd>';
   }
   info.innerHTML = html;
 
@@ -510,6 +530,70 @@ document.getElementById('espRollbackBtn').addEventListener('click', function () 
   });
 });
 
+// opus-review finding 3: POST /api/ota/pico/rollback used to block for up
+// to ~6.3s (App/drivers/ota_http.c's own comment on ota_pico_rollback_task()
+// explains why -- one httpd worker, a multi-second send-burst/reply-window
+// plus boot_id-reconnect watch). It now returns a 202 "pending" promptly and
+// the actual outcome is polled from GET /api/ota/pico/rollback/status, same
+// poll-for-progress shape pollPicoStatus() above already uses for the plain
+// Pico update. renderPicoRollbackStatus() below never collapses "refused"
+// and "unknown outcome" into a single "done" message -- both are real,
+// distinct possibilities here, same as the old synchronous handler's body.
+function renderPicoRollbackStatus(msg, body) {
+  if (body.status === 'rebooting') {
+    msg.textContent = 'Rollback accepted -- the safety processor rebooted into a different image.';
+  } else if (body.status === 'unknown') {
+    msg.textContent = 'Rollback sent, but the outcome is unknown: ' + (body.detail || '');
+  } else if (body.status === 'pending') {
+    msg.textContent = 'Rollback in progress -- waiting for the safety processor…';
+  } else {
+    msg.textContent = 'Rollback: ' + (body.detail || JSON.stringify(body));
+  }
+}
+
+function pollPicoRollbackStatus() {
+  var msg = document.getElementById('picoMsg');
+  fetch('/api/ota/pico/rollback/status').then(function (r) { return r.json(); }).then(function (body) {
+    renderPicoRollbackStatus(msg, body);
+    if (body.status === 'pending') {
+      setTimeout(pollPicoRollbackStatus, 500);
+    }
+  }).catch(function () {
+    msg.textContent = 'Could not load rollback status.';
+  });
+}
+
+document.getElementById('picoRollbackBtn').addEventListener('click', function () {
+  var msg = document.getElementById('picoMsg');
+  var pw = document.getElementById('apPassword').value;
+  if (!pw) { msg.textContent = 'Enter the Wi-Fi AP password first.'; return; }
+  if (!confirm('Roll back the SAFETY PROCESSOR (Pico) to its previous image and reboot it now? ' +
+               'This reboots the safety processor mid-session.')) return;
+  msg.textContent = 'Requesting rollback…';
+  getChallenge().then(function (nonce) {
+    var mac = deriveMac(pw, nonce, 'pico-rollback');
+    return window.kcFetchWithSafetyAck('/api/ota/pico/rollback', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/octet-stream', 'X-Ota-Mac': bytesToHex(mac) },
+      body: new Uint8Array(0),
+    });
+  }).then(function (r) {
+    return r.text().then(function (text) {
+      var body = null;
+      try { body = JSON.parse(text); } catch (parseErr) { /* fall through to the raw-text error below */ }
+      if (!r.ok) throw new Error((body && body.detail) || text || ('HTTP ' + r.status));
+      return body || {};
+    });
+  }).then(function (body) {
+    // Request accepted (202, status "pending") -- start polling for the
+    // real outcome rather than treating this response as the final word.
+    renderPicoRollbackStatus(msg, body);
+    setTimeout(pollPicoRollbackStatus, 500);
+  }).catch(function (e) {
+    msg.textContent = 'Rollback failed: ' + e.message;
+  });
+});
+
 document.getElementById('recoveryExitBtn').addEventListener('click', function () {
   var msg = document.getElementById('espMsg');
   var pw = document.getElementById('apPassword').value;
@@ -561,13 +645,34 @@ document.getElementById('picoUpdateBtn').addEventListener('click', function () {
 function pollBootButtonBypass() {
   fetch('/api/status').then(function (r) { return r.json(); }).then(function (data) {
     var box = document.getElementById('bootButtonBypassBox');
-    if (!data.boot_button_bypass_active) { box.style.display = 'none'; return; }
-    var remS = data.boot_button_bypass_remaining_s || 0;
-    var mm = Math.floor(remS / 60), ss = remS % 60;
-    box.style.display = '';
-    box.textContent = 'BOOT-BUTTON RECOVERY: OTA password check is BYPASSED right now -- ' +
-      'anyone on this network can push firmware with no password. Closes automatically in ' +
-      mm + ':' + (ss < 10 ? '0' : '') + ss + '.';
+    if (!data.boot_button_bypass_active) { box.style.display = 'none'; }
+    else {
+      var remS = data.boot_button_bypass_remaining_s || 0;
+      var mm = Math.floor(remS / 60), ss = remS % 60;
+      box.style.display = '';
+      box.textContent = 'BOOT-BUTTON RECOVERY: OTA password check is BYPASSED right now -- ' +
+        'anyone on this network can push firmware with no password. Closes automatically in ' +
+        mm + ':' + (ss < 10 ? '0' : '') + ss + '.';
+    }
+
+    // safety_build_* -- dashboard_http.c's parse of the RP2040's own
+    // SAFETY_CMD_FW_VERSION broadcast (TODO.md owner-report item 5). Only
+    // trust the commit/dirty/datetime fields when known is true -- see
+    // dashboard_http.h's field comment and safety_link.h's peer_build_known
+    // doc: every other peer_build_* field is meaningless until a FW_VERSION
+    // frame has actually parsed, so "not reported yet" beats showing a stale
+    // or zeroed build. renderPicoInfo() re-runs against the last-seen pico
+    // status so the build row updates without waiting for the next
+    // /api/ota/pico/status poll.
+    s_safetyBuild = {
+      known: !!data.safety_build_known,
+      dirty: !!data.safety_build_dirty,
+      commit: data.safety_build_commit,
+      datetime: data.safety_build_datetime,
+    };
+    if (s_lastPicoStatus) {
+      renderPicoInfo(s_lastPicoStatus);
+    }
   }).catch(function () {});
 }
 

@@ -93,6 +93,7 @@
 #include "update_receiver.h" // src/update/
 
 #include "kilnlink/kilnlink_frame.h" // KILNLINK_FRAME_MAX_PAYLOAD
+#include "kilnlink/kilnlink_rollback_result.h" // kilnlink_rollback_result_reason_t, for update_task_request_rollback()'s out_reason_code
 
 #define UPDATE_TASK_STACK_WORDS (configMINIMAL_STACK_SIZE * 3) // page_buf below is 512 bytes
 #define UPDATE_TASK_POLL_MS            100
@@ -897,7 +898,7 @@ static void update_task_confirm_tick(void)
 // CLEAR_TRIP/SET_CONFIG). On success this function DOES NOT RETURN:
 // watchdog_reboot() resets the RP2040 immediately, which is the entire
 // point of the command.
-bool update_task_request_rollback(const char **out_reason)
+bool update_task_request_rollback(const char **out_reason, uint8_t *out_reason_code)
 {
     // Same ARMED-equivalent gate config_store_write() uses (relay_owner_
     // get_state() == RELAY_OWNER_STATE_ARMED there; this file legitimately
@@ -915,6 +916,9 @@ bool update_task_request_rollback(const char **out_reason)
             *out_reason = "refused: relay is ARMED, rollback is refused while ARMED "
                           "(same gate as config writes)";
         }
+        if (out_reason_code) {
+            *out_reason_code = KILNLINK_ROLLBACK_RESULT_REASON_ARMED;
+        }
         return false;
     }
 
@@ -924,11 +928,20 @@ bool update_task_request_rollback(const char **out_reason)
         if (out_reason) {
             *out_reason = "refused: no bootloader metadata to roll back from";
         }
+        if (out_reason_code) {
+            *out_reason_code = KILNLINK_ROLLBACK_RESULT_REASON_NO_METADATA;
+        }
         return false;
     }
     if (meta.active_slot >= BOOTLOADER_SLOT_COUNT) {
         if (out_reason) {
             *out_reason = "refused: malformed metadata (active_slot out of range)";
+        }
+        if (out_reason_code) {
+            // Not one of the three "expected" refusal shapes -- malformed
+            // metadata should not occur in practice, same "should not occur"
+            // role KILNLINK_ROLLBACK_RESULT_REASON_UNKNOWN documents.
+            *out_reason_code = KILNLINK_ROLLBACK_RESULT_REASON_UNKNOWN;
         }
         return false;
     }
@@ -954,6 +967,9 @@ bool update_task_request_rollback(const char **out_reason)
             *out_reason = "refused: the other bootloader slot is not currently valid "
                           "to fall back to";
         }
+        if (out_reason_code) {
+            *out_reason_code = KILNLINK_ROLLBACK_RESULT_REASON_SLOT_INVALID;
+        }
         return false;
     }
 
@@ -961,12 +977,19 @@ bool update_task_request_rollback(const char **out_reason)
         if (out_reason) {
             *out_reason = "flash write failed";
         }
+        if (out_reason_code) {
+            *out_reason_code = KILNLINK_ROLLBACK_RESULT_REASON_STORAGE;
+        }
         return false;
     }
 
     if (out_reason) {
         *out_reason = "ok";
     }
+    // out_reason_code is deliberately left untouched here: this function
+    // never returns on success (watchdog_reboot() below), so there is no
+    // path from here that could carry a "success" reason code anywhere --
+    // see kilnlink_rollback_result.h's own "ASYMMETRIC BY DESIGN" comment.
 
     // No further code in this function runs after this call -- the caller
     // must log "accepted" (or otherwise act on `out_reason == "ok"`) BEFORE

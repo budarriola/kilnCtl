@@ -29,6 +29,7 @@
 #include "autotune_engine.h"
 #include "boot_button.h"
 #include "boot_guard.h"
+#include "kilnlink/kilnlink_rollback_result.h" /* KILNLINK_ROLLBACK_RESULT_REASON_* -- ota_pico_rollback_post_handler()'s response mapping */
 #include "kiln_io.h"
 #include "MAX31856.h"
 #include "ota_auth.h"
@@ -117,6 +118,60 @@ static ota_auth_lockout_state_t s_lockout_recovery_exit;
 // Same reasoning again for POST /api/factory_reset -- see ota_http.h's doc
 // comment on OTA_HTTP_CONTEXT_FACTORY_RESET.
 static ota_auth_lockout_state_t s_lockout_factory_reset;
+// Same reasoning again for POST /api/ota/pico/rollback -- see ota_http.h's
+// doc comment on OTA_HTTP_CONTEXT_PICO_ROLLBACK.
+static ota_auth_lockout_state_t s_lockout_pico_rollback;
+
+// opus-review finding 3: safety_link_send_rollback_ex() blocks its caller
+// for up to ~6.3s (4 sends * 250ms + one reply window + the 5s boot_id
+// watch). esp_http_server here runs with exactly ONE worker task
+// (wifi_provision_http.c's own config), so a handler that blocks inside it
+// for that long queues up EVERY other request behind it -- including the
+// dashboard's ~1Hz /api/status poll and this very OTA page's own UI, both
+// of which have client-side timeouts well under 6.3s (wifi_provision_http.c
+// lines 695-735 document a previously live-tested wedge in exactly this
+// area). Rather than shorten the watch (which trades a wedged HTTP worker
+// for reporting UNKNOWN_TIMEOUT on a rollback that was still genuinely in
+// flight -- see safety_link.h's SAFETY_LINK_ROLLBACK_BOOT_WATCH_MS comment
+// for why 5s is already a rough estimate, not a measured floor), the whole
+// safety_link_send_rollback_ex() call now runs on its own short-lived task,
+// same "task owns the mutex release, handler returns promptly" shape
+// ota_pico_do_stage()/the Pico relay task already use for the plain Pico
+// update path just above. ota_pico_rollback_post_handler() below starts the
+// task and returns a 202 immediately; the OTA page polls GET /api/ota/pico/
+// rollback/status (ota_pico_rollback_status_get_handler()) for the outcome,
+// the same poll-for-progress shape /api/ota/pico/status already establishes
+// for the plain update.
+typedef enum {
+    OTA_PICO_ROLLBACK_ASYNC_IDLE = 0,       // never attempted this boot, or a
+                                             // POST is still working through
+                                             // its synchronous auth/interlock
+                                             // checks (nothing async started yet)
+    OTA_PICO_ROLLBACK_ASYNC_IN_PROGRESS,    // the background task is running
+                                             // safety_link_send_rollback_ex()
+    OTA_PICO_ROLLBACK_ASYNC_DONE,           // outcome/reason_code below are
+                                             // valid; stays DONE (not reset to
+                                             // IDLE) until a NEW rollback is
+                                             // requested, so a page that polls
+                                             // a little late still sees the
+                                             // result rather than racing back
+                                             // to IDLE first
+} ota_pico_rollback_async_state_t;
+
+typedef struct {
+    ota_pico_rollback_async_state_t state;
+    safety_link_rollback_outcome_t outcome;
+    uint8_t reason_code;
+} ota_pico_rollback_async_t;
+
+// Guarded by its own small mutex, deliberately separate from s_ota_lock
+// (nonce/lockout bookkeeping) and from the update-claim mechanism
+// (ota_http_update_try_begin()/_end(), a different file's own mutex) --
+// this state is written by a background task while the handler that started
+// it may already have returned and moved on to a different request, so it
+// cannot share either of those locks' lifetimes.
+static SemaphoreHandle_t s_pico_rollback_async_lock;
+static ota_pico_rollback_async_t s_pico_rollback_async;
 
 // The hardware pointers main.c hands to ota_http_start(), same pattern (and
 // same NULL-tolerant meaning) as dashboard_http.c's s_dash struct. Read-only
@@ -323,6 +378,7 @@ ota_http_verify_result_t ota_http_verify_request(ota_http_context_t ctx, const u
         case OTA_HTTP_CONTEXT_ESP_ROLLBACK:   ctx_str = "esp-rollback"; lockout = &s_lockout_esp_rollback; break;
         case OTA_HTTP_CONTEXT_RECOVERY_EXIT:  ctx_str = "recovery";     lockout = &s_lockout_recovery_exit; break;
         case OTA_HTTP_CONTEXT_FACTORY_RESET:  ctx_str = "factory-reset"; lockout = &s_lockout_factory_reset; break;
+        case OTA_HTTP_CONTEXT_PICO_ROLLBACK:  ctx_str = "pico-rollback"; lockout = &s_lockout_pico_rollback; break;
         case OTA_HTTP_CONTEXT_PICO:
         default:                              ctx_str = "pico";         lockout = &s_lockout_pico;         break;
     }
@@ -418,9 +474,10 @@ ota_http_verify_result_t ota_http_verify_request(ota_http_context_t ctx, const u
 
     // expected_mac = HMAC-SHA256(key, nonce || context)
     uint8_t msg[OTA_AUTH_NONCE_LEN + 13]; // "esp" (3), "pico" (4), "esp-rollback" (12), "recovery" (8),
-                                           // or "factory-reset" (13) -- 13 covers all five context
-                                           // strings currently in use; if a future context string
-                                           // exceeds 13 chars, widen this buffer AND update this comment
+                                           // "factory-reset" (13), or "pico-rollback" (13) -- 13 covers
+                                           // all six context strings currently in use; if a future
+                                           // context string exceeds 13 chars, widen this buffer AND
+                                           // update this comment
     size_t ctx_len = strlen(ctx_str);
     memcpy(msg, nonce_copy, sizeof(nonce_copy));
     memcpy(msg + sizeof(nonce_copy), ctx_str, ctx_len);
@@ -753,10 +810,54 @@ bool ota_http_heat_blocked_by_update(char *reason_out, size_t reason_cap)
 
     snap.update_in_progress = ota_http_update_in_progress(&ctx);
     if (snap.update_in_progress) {
-        // ESP_ROLLBACK collapses onto ESP -- see heat_interlock.h's doc
-        // comment on heat_interlock_update_context_t for why.
-        snap.update_context =
-            (ctx == OTA_HTTP_CONTEXT_PICO) ? HEAT_INTERLOCK_UPDATE_PICO : HEAT_INTERLOCK_UPDATE_ESP;
+        // Explicit per-value mapping, not a two-way ternary -- a ternary
+        // testing only "== OTA_HTTP_CONTEXT_PICO" happened to be correct
+        // today only because ota_http_update_try_begin() is, in fact, never
+        // called with anything but OTA_HTTP_CONTEXT_ESP or _PICO (every
+        // other ota_http_context_t member -- ESP_ROLLBACK, RECOVERY_EXIT,
+        // FACTORY_RESET, PICO_ROLLBACK -- is an auth context that claims the
+        // mutex AS _ESP or _PICO, per each handler's own doc comment; see
+        // ota_pico_rollback_post_handler() above claiming OTA_HTTP_CONTEXT_
+        // PICO, not _PICO_ROLLBACK). That is an invariant of the CALL SITES,
+        // not of this enum, so a future context that claims the mutex under
+        // its own value would silently fall through to the ternary's "else"
+        // (ESP) with no compiler warning. A switch makes every currently-
+        // reachable value's mapping explicit and gives a single place to
+        // extend if that invariant ever changes.
+        switch (ctx) {
+            case OTA_HTTP_CONTEXT_PICO:
+                snap.update_context = HEAT_INTERLOCK_UPDATE_PICO;
+                break;
+            // opus-review finding 4 (latent nit): OTA_HTTP_CONTEXT_PICO_
+            // ROLLBACK used to sit in the same case-group as the ESP-mapped
+            // values below, correct only because ota_pico_rollback_post_
+            // handler() claims the mutex AS OTA_HTTP_CONTEXT_PICO (see the
+            // comment above this switch), never as _PICO_ROLLBACK -- so this
+            // branch has never actually been reached for it. If a future
+            // handler ever DID claim the mutex under its own _PICO_ROLLBACK
+            // value, grouping it with ESP would misreport a Pico-side action
+            // to the heat interlock as an ESP one. Given its own explicit
+            // case rather than left to fall into the ESP group: it names the
+            // processor it actually rolls back (the Pico), which is also the
+            // semantically correct mapping even in the unreachable-today
+            // case, not just the loudest one.
+            case OTA_HTTP_CONTEXT_PICO_ROLLBACK:
+                snap.update_context = HEAT_INTERLOCK_UPDATE_PICO;
+                break;
+            case OTA_HTTP_CONTEXT_ESP:
+            case OTA_HTTP_CONTEXT_ESP_ROLLBACK:
+            case OTA_HTTP_CONTEXT_RECOVERY_EXIT:
+            case OTA_HTTP_CONTEXT_FACTORY_RESET:
+            default:
+                // ESP_ROLLBACK/RECOVERY_EXIT/FACTORY_RESET are listed
+                // explicitly even though the claim mutex never actually
+                // holds these values (see the comment above) -- collapsing
+                // onto ESP here matches heat_interlock.h's own doc comment
+                // on heat_interlock_update_context_t (only ESP/PICO exist on
+                // that side; ESP_ROLLBACK collapses onto ESP).
+                snap.update_context = HEAT_INTERLOCK_UPDATE_ESP;
+                break;
+        }
     }
 
     return heat_interlock_check(&snap, reason_out, reason_cap) != HEAT_INTERLOCK_OK;
@@ -1892,6 +1993,352 @@ static esp_err_t ota_esp_rollback_post_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+// Forward declarations -- ota_pico_rollback_post_handler()/ota_pico_rollback_
+// task()/ota_pico_rollback_status_get_handler() below call these; defined
+// right after their last use (kept adjacent for locality, same trade-off
+// this file already makes elsewhere, e.g. link_task_send_rollback_result()
+// in SaftyFW's link_task.c).
+static const char *ota_pico_rollback_reason_str(uint8_t reason_code);
+static int ota_pico_rollback_format_body(safety_link_rollback_outcome_t outcome, uint8_t reason_code,
+                                          char *body, size_t cap);
+
+// Background task for POST /api/ota/pico/rollback -- see that handler's own
+// doc comment (opus-review finding 3) for why this call moved off the httpd
+// worker task. Owns releasing the OTA_HTTP_CONTEXT_PICO update-claim mutex
+// the handler claimed before starting this task (same "task owns the
+// release" contract ota_pico_do_stage()'s relay task already uses for the
+// plain Pico update path), and owns writing the final outcome into
+// s_pico_rollback_async for ota_pico_rollback_status_get_handler() to read
+// back. No arg: reads the same s_safety this whole file already treats as
+// fixed for the boot (set once by ota_http_start()).
+static void ota_pico_rollback_task(void *arg)
+{
+    (void)arg;
+
+    safety_link_rollback_outcome_t outcome = SAFETY_LINK_ROLLBACK_OUTCOME_LINK_DOWN;
+    uint8_t reason_code = KILNLINK_ROLLBACK_RESULT_REASON_UNKNOWN;
+    (void)safety_link_send_rollback_ex(s_safety, &outcome, &reason_code);
+
+    if (xSemaphoreTake(s_pico_rollback_async_lock, portMAX_DELAY) == pdTRUE) {
+        s_pico_rollback_async.state = OTA_PICO_ROLLBACK_ASYNC_DONE;
+        s_pico_rollback_async.outcome = outcome;
+        s_pico_rollback_async.reason_code = reason_code;
+        xSemaphoreGive(s_pico_rollback_async_lock);
+    }
+
+    ESP_LOGW(TAG, "OTA pico rollback: safety_link_send_rollback_ex outcome=%d reason=%u",
+             (int)outcome, (unsigned)reason_code);
+
+    // Released here, on EVERY outcome, now that the WHOLE rollback attempt
+    // (send-burst/reply-window leg AND the boot_id-reconnect watch) has run
+    // to completion on this task -- see ota_pico_rollback_post_handler()'s
+    // own doc comment for why the claim must stay held for that entire
+    // span, not just until the handler returns.
+    ota_http_update_end();
+    vTaskDelete(NULL);
+}
+
+// --- POST /api/ota/pico/rollback -------------------------------------------
+//
+// The Pico half of "roll back the firmware from the OTA page" -- the missing
+// piece a previous pass on this feature correctly stopped short of shipping,
+// because SAFETY_CMD_ROLLBACK used to be unable to tell the ESP whether the
+// safety processor had refused (relay ARMED, or the other bootloader slot
+// not VALID/PENDING_VERIFY) or accepted. kilnlink_rollback_result.h /
+// safety_link_send_rollback_ex() close that gap; this handler is the HTTP
+// surface on top of it.
+//
+// Auth: its own context, OTA_HTTP_CONTEXT_PICO_ROLLBACK ("pico-rollback") --
+// NOT a reuse of OTA_HTTP_CONTEXT_PICO (pushing a new Pico image) and NOT a
+// reuse of OTA_HTTP_CONTEXT_ESP_ROLLBACK (rolling the OTHER processor back)
+// -- see ota_http.h's doc comment on the enum value for why a MAC signed for
+// one action must never double as authorization for a different one.
+//
+// Heat interlock: a Pico rollback reboots the SAFETY processor mid-firing,
+// which this handler treats as AT LEAST as disruptive as a plain Pico
+// firmware update (heat_interlock.h already collapses any non-ESP update
+// context onto HEAT_INTERLOCK_UPDATE_PICO) -- so the single cross-processor
+// update mutex is claimed as OTA_HTTP_CONTEXT_PICO (the same slot a plain
+// Pico update claims, not a separate one), same precedent
+// ota_esp_rollback_post_handler() sets for the ESP side just above. Unlike
+// the ESP rollback path, this ESP does not itself reboot, so there is no
+// natural "claim survives until a fresh boot clears it" moment to lean on --
+// holding the claim indefinitely with no release path would eventually wedge
+// heat/updates for good if anything went wrong on the Pico side. Instead the
+// claim is held for exactly as long as safety_link_send_rollback_ex() takes
+// to run -- covering the send-burst/reply-window leg (SAFETY_LINK_REPLY_
+// TIMEOUT_MS-ish, the moment update_task_request_rollback() reads the ARMED/
+// relay-energized fact on the Pico, the actual race this mutex originally
+// existed to prevent) AND the boot_id-reconnect watch that follows it
+// (SAFETY_LINK_ROLLBACK_BOOT_WATCH_MS, safety_link.c) when no refusal
+// arrives -- and released on every outcome. That second leg is exactly the
+// "cover the Pico's own reboot-and-reload time" gap a previous pass here
+// left open -- without it, ota_http_heat_blocked_by_update() (this claim's
+// read side) would have stopped blocking heat the moment the reply window
+// closed, while the safety processor could still be mid-reboot with no
+// safety link at all, guarded only by safety_link_get_status()'s own
+// up-to-1500ms-stale link_up. If the boot_id watch times out with no
+// evidence either way, the claim is still released (UNKNOWN_TIMEOUT is not
+// withheld forever) -- that residual window is bounded by link_up's own
+// staleness check, the same as any other "safety link went quiet" case this
+// driver already handles.
+//
+// Async since opus-review finding 3: safety_link_send_rollback_ex() blocks
+// for up to ~6.3s, and esp_http_server here has exactly one worker task
+// (wifi_provision_http.c), so running that call ON this handler's task used
+// to queue every other request -- including the dashboard's ~1Hz /api/
+// status poll -- behind a single rollback attempt. The call above ("held
+// for exactly as long as... takes to run") is now literally true of a
+// background task, ota_pico_rollback_task(), not of this handler: the
+// handler itself does steps 1-4 below, starts that task, and returns a 202
+// within normal request time. The claim is still held across the task's
+// entire run (the invariant this comment exists to document is unchanged),
+// it is just no longer this handler's own task doing the holding. Poll GET
+// /api/ota/pico/rollback/status (ota_pico_rollback_status_get_handler(),
+// defined right after this handler) for the eventual outcome.
+static esp_err_t ota_pico_rollback_post_handler(httpd_req_t *req)
+{
+    char ip[46];
+    get_client_ip(req, ip, sizeof(ip));
+
+    // 1. X-Ota-Mac header present and exactly 64 hex chars -- same order as
+    // every other mutating OTA handler.
+    size_t mac_hex_len = httpd_req_get_hdr_value_len(req, OTA_MAC_HEADER);
+    if (mac_hex_len != 64) {
+        ESP_LOGW(TAG, "OTA pico rollback from %s: missing or malformed X-Ota-Mac header (len %u, want 64)",
+                 ip, (unsigned)mac_hex_len);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing or malformed X-Ota-Mac header (want 64 hex chars)");
+        return ESP_OK;
+    }
+    char mac_hex[65];
+    if (httpd_req_get_hdr_value_str(req, OTA_MAC_HEADER, mac_hex, sizeof(mac_hex)) != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "could not read X-Ota-Mac header");
+        return ESP_OK;
+    }
+    uint8_t mac[32];
+    if (!hex_decode(mac_hex, 64, mac)) {
+        ESP_LOGW(TAG, "OTA pico rollback from %s: X-Ota-Mac is not valid hex", ip);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "X-Ota-Mac must be 64 hex characters");
+        return ESP_OK;
+    }
+
+    // 2. Auth -- its own context (OTA_HTTP_CONTEXT_PICO_ROLLBACK), see this
+    // handler's own doc comment above for why a rollback MAC is not
+    // interchangeable with a plain-pico-update or an esp-rollback MAC.
+    ota_http_verify_result_t vr = ota_http_verify_request(OTA_HTTP_CONTEXT_PICO_ROLLBACK, mac, ip);
+    if (vr != OTA_HTTP_VERIFY_OK) {
+        httpd_resp_send_err(req, HTTPD_403_FORBIDDEN, verify_result_str(vr));
+        return ESP_OK;
+    }
+
+    // 3. Interlocks -- identical gate to POST /api/ota/esp/rollback: a Pico
+    // rollback is exactly as disruptive as pushing it a new image (kiln not
+    // idle/cool, safety link down, another update in progress, ...), and
+    // ota_http_check_interlocks() already refuses when the safety link
+    // itself is down, which a rollback request obviously cannot survive
+    // either.
+    char reason[OTA_INTERLOCK_REASON_MAX];
+    ota_interlock_result_t gate = ota_http_check_interlocks(ota_http_req_ack_no_safety(req), reason,
+                                                            sizeof(reason));
+    if (gate != OTA_INTERLOCK_OK) {
+        ESP_LOGW(TAG, "OTA pico rollback from %s: refused by interlock: %s", ip, reason);
+        return ota_http_send_interlock_refusal(req, gate, reason);
+    }
+
+    // 4. Single update mutex -- claimed as OTA_HTTP_CONTEXT_PICO (the same
+    // slot a plain Pico update claims), see this handler's own doc comment
+    // above for why this is deliberately not a distinct claim kind.
+    if (!ota_http_update_try_begin(OTA_HTTP_CONTEXT_PICO)) {
+        ESP_LOGW(TAG, "OTA pico rollback from %s: refused, an update is already in progress", ip);
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_set_type(req, "text/plain");
+        httpd_resp_send(req, "an update is already in progress", HTTPD_RESP_USE_STRLEN);
+        return ESP_OK;
+    }
+
+    if (!s_safety) {
+        ESP_LOGW(TAG, "OTA pico rollback from %s: refused, no safety link configured this boot", ip);
+        ota_http_update_end();
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_set_type(req, "text/plain");
+        httpd_resp_send(req, "no safety link configured", HTTPD_RESP_USE_STRLEN);
+        return ESP_OK;
+    }
+
+    {
+        ota_record_t rec;
+        // No trustworthy version-before string for the Pico from this side
+        // -- same reasoning ota_pico_relay.c's own ota_record_fill() call
+        // already documents (this ESP-side code never reads the Pico's own
+        // running version back out). Left blank rather than guessed.
+        ota_record_fill(&rec, (uint32_t)(esp_timer_get_time() / 1000000), "pico", "", "", true,
+                         "rollback requested", NULL);
+        ota_record_append(&rec); // best-effort, logs its own failure -- see ota_record.h
+    }
+
+    ESP_LOGW(TAG, "OTA pico rollback from %s: requesting the safety processor revert to its "
+                  "previous bootloader slot (async -- see GET /api/ota/pico/rollback/status)", ip);
+
+    // opus-review finding 3: hand the whole multi-second attempt off to its
+    // own task (ota_pico_rollback_task() above) rather than blocking this
+    // httpd worker for it -- see that task's own doc comment. Mark IN_
+    // PROGRESS before starting the task so a status poll that lands before
+    // the task's first scheduler slot still reports something better than a
+    // stale prior DONE.
+    if (xSemaphoreTake(s_pico_rollback_async_lock, portMAX_DELAY) == pdTRUE) {
+        s_pico_rollback_async.state = OTA_PICO_ROLLBACK_ASYNC_IN_PROGRESS;
+        xSemaphoreGive(s_pico_rollback_async_lock);
+    }
+
+    if (xTaskCreate(ota_pico_rollback_task, "ota_pico_rollback", 4096, NULL, tskIDLE_PRIORITY + 1, NULL) !=
+        pdPASS) {
+        ESP_LOGE(TAG, "OTA pico rollback from %s: failed to start the rollback task -- "
+                      "the update claim was never released, this OTA layer is now wedged", ip);
+        // Failed before the task could ever run, so nothing else will
+        // release the claim this handler took at step 4 above -- release it
+        // here, the same "whoever fails to hand off owns cleanup" rule
+        // ota_pico_do_stage() follows for its own relay-task start failure.
+        if (xSemaphoreTake(s_pico_rollback_async_lock, portMAX_DELAY) == pdTRUE) {
+            s_pico_rollback_async.state = OTA_PICO_ROLLBACK_ASYNC_IDLE;
+            xSemaphoreGive(s_pico_rollback_async_lock);
+        }
+        ota_http_update_end();
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_set_type(req, "text/plain");
+        httpd_resp_send(req, "failed to start the rollback task", HTTPD_RESP_USE_STRLEN);
+        return ESP_OK;
+    }
+
+    // 202, not 200: the request has been accepted and IS being acted on,
+    // but the outcome is not known yet -- the page is expected to poll GET
+    // /api/ota/pico/rollback/status (ota_pico_rollback_status_get_handler()
+    // below) for it, same shape /api/ota/pico/status already establishes
+    // for the plain Pico update's phase/percent polling.
+    httpd_resp_set_status(req, "202 Accepted");
+    httpd_resp_set_type(req, "application/json");
+    static const char pending_body[] =
+        "{\"ok\":true,\"status\":\"pending\","
+        "\"detail\":\"rollback request sent; poll /api/ota/pico/rollback/status for the outcome\"}";
+    httpd_resp_send(req, pending_body, sizeof(pending_body) - 1);
+    return ESP_OK;
+}
+
+// --- GET /api/ota/pico/rollback/status --------------------------------------
+//
+// Poll target for the async POST above (opus-review finding 3) -- reports
+// whatever ota_pico_rollback_task() has (or has not yet) written into
+// s_pico_rollback_async. Always 200: unlike the old synchronous POST
+// response, the HTTP status code here describes "did this GET succeed",
+// not "what was the rollback outcome" -- that distinction now lives entirely
+// in the JSON body's "status" field, same convention ota_pico_status_get_
+// handler() already uses for the plain Pico update's phase field.
+static esp_err_t ota_pico_rollback_status_get_handler(httpd_req_t *req)
+{
+    ota_pico_rollback_async_state_t state = OTA_PICO_ROLLBACK_ASYNC_IDLE;
+    safety_link_rollback_outcome_t outcome = SAFETY_LINK_ROLLBACK_OUTCOME_LINK_DOWN;
+    uint8_t reason_code = KILNLINK_ROLLBACK_RESULT_REASON_UNKNOWN;
+    if (xSemaphoreTake(s_pico_rollback_async_lock, portMAX_DELAY) == pdTRUE) {
+        state = s_pico_rollback_async.state;
+        outcome = s_pico_rollback_async.outcome;
+        reason_code = s_pico_rollback_async.reason_code;
+        xSemaphoreGive(s_pico_rollback_async_lock);
+    }
+
+    char body[256];
+    int n;
+    switch (state) {
+        case OTA_PICO_ROLLBACK_ASYNC_IDLE:
+            n = snprintf(body, sizeof(body),
+                         "{\"ok\":true,\"status\":\"idle\",\"detail\":\"no rollback requested this boot\"}");
+            break;
+        case OTA_PICO_ROLLBACK_ASYNC_IN_PROGRESS:
+            n = snprintf(body, sizeof(body),
+                         "{\"ok\":true,\"status\":\"pending\",\"detail\":\"rollback in progress\"}");
+            break;
+        case OTA_PICO_ROLLBACK_ASYNC_DONE:
+        default:
+            n = ota_pico_rollback_format_body(outcome, reason_code, body, sizeof(body));
+            break;
+    }
+    httpd_resp_set_type(req, "application/json");
+    send_json_clamped(req, body, n, sizeof(body));
+    return ESP_OK;
+}
+
+// The same outcome -> JSON body mapping the synchronous handler used to
+// build inline before opus-review finding 3 moved the send off this
+// handler's task -- extracted so ota_pico_rollback_status_get_handler()
+// above (the only caller now that the outcome is known asynchronously) has
+// one place to get it from. No HTTP status code side effect here (the old
+// per-outcome httpd_resp_set_status() calls do not apply to a GET whose
+// response code no longer encodes the rollback result -- see that
+// handler's own doc comment); callers that still want a distinct HTTP
+// status per outcome would set it themselves from the returned outcome.
+static int ota_pico_rollback_format_body(safety_link_rollback_outcome_t outcome, uint8_t reason_code,
+                                          char *body, size_t cap)
+{
+    switch (outcome) {
+        case SAFETY_LINK_ROLLBACK_OUTCOME_LINK_DOWN:
+            return snprintf(body, cap, "{\"ok\":false,\"status\":\"link_down\","
+                             "\"detail\":\"the safety link is down; the request was not sent\"}");
+        case SAFETY_LINK_ROLLBACK_OUTCOME_SEND_FAILED:
+            return snprintf(body, cap, "{\"ok\":false,\"status\":\"send_failed\","
+                             "\"detail\":\"could not send the rollback request over the safety link\"}");
+        case SAFETY_LINK_ROLLBACK_OUTCOME_REFUSED:
+            return snprintf(body, cap,
+                             "{\"ok\":false,\"status\":\"refused\",\"reason_code\":%u,\"detail\":\"%s\"}",
+                             (unsigned)reason_code, ota_pico_rollback_reason_str(reason_code));
+        case SAFETY_LINK_ROLLBACK_OUTCOME_UNKNOWN_TIMEOUT:
+            // Still ok:true: the request DID reach the point of being sent
+            // (this is not a local failure), but this driver genuinely
+            // cannot say what happened -- an old Pico that predates
+            // ROLLBACK_RESULT cannot report a refusal even if it refused.
+            // Honest, not a false success.
+            return snprintf(body, cap, "{\"ok\":true,\"status\":\"unknown\","
+                             "\"detail\":\"no reply within the wait window; this safety processor build "
+                             "predates ROLLBACK_RESULT and cannot confirm accept or refuse -- watch for "
+                             "a link reconnect\"}");
+        case SAFETY_LINK_ROLLBACK_OUTCOME_ACCEPTED:
+        default:
+            // opus-review finding 2: this outcome is now only reported once
+            // BOTH the peer's boot_id and its build identity have been
+            // observed to change (safety_link_rollback_reboot_confirmed()),
+            // so "rebooted into a different image" is what was actually
+            // seen on the wire -- but this handler still never watched the
+            // reboot complete or verified which slot came up, so "into the
+            // previous image" specifically (as opposed to "an update landed
+            // mid-watch" or some other different-image case) is more than
+            // this evidence proves. Worded to claim only what was observed.
+            return snprintf(body, cap, "{\"ok\":true,\"status\":\"rebooting\","
+                             "\"detail\":\"accepted -- the safety processor rebooted into a different "
+                             "firmware image (boot_id and build identity both changed)\"}");
+    }
+}
+
+// Human-readable string for kilnlink_rollback_result_reason_t, HTTP-facing
+// (not the same as SaftyFW's own local log strings in update_task.c --
+// those are this processor's internal wording, this is the wire-carried
+// closed-set enum decoded back into English for the OTA page). Any value
+// outside the known set (untrusted wire input -- CommonFW/README.md rule 6,
+// even though this specific decode already validated the frame) reads as
+// "unknown reason" rather than indexing out of bounds or aliasing a real one.
+static const char *ota_pico_rollback_reason_str(uint8_t reason_code)
+{
+    switch (reason_code) {
+        case KILNLINK_ROLLBACK_RESULT_REASON_ARMED:
+            return "relay is ARMED -- rollback is refused while ARMED";
+        case KILNLINK_ROLLBACK_RESULT_REASON_NO_METADATA:
+            return "no bootloader metadata to roll back from";
+        case KILNLINK_ROLLBACK_RESULT_REASON_SLOT_INVALID:
+            return "the other bootloader slot is not currently valid to fall back to";
+        case KILNLINK_ROLLBACK_RESULT_REASON_STORAGE:
+            return "the safety processor's flash write failed";
+        case KILNLINK_ROLLBACK_RESULT_REASON_UNKNOWN:
+        default:
+            return "unknown reason";
+    }
+}
+
 // GET /api/ota/interlock -- TODO.md 9.6: "interlock state shown BEFORE the
 // file picker, with the blocker named." ota_http_check_interlocks() itself
 // is only ever called from inside the authenticated POST /api/ota/{esp,pico}
@@ -2003,6 +2450,12 @@ esp_err_t ota_http_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_bus_or_
     if (!s_ota_lock) {
         return ESP_ERR_NO_MEM;
     }
+    s_pico_rollback_async_lock = xSemaphoreCreateMutex();
+    if (!s_pico_rollback_async_lock) {
+        return ESP_ERR_NO_MEM;
+    }
+    memset(&s_pico_rollback_async, 0, sizeof(s_pico_rollback_async));
+    s_pico_rollback_async.state = OTA_PICO_ROLLBACK_ASYNC_IDLE;
     memset(&s_nonce, 0, sizeof(s_nonce));
     memset(&s_lockout_esp, 0, sizeof(s_lockout_esp));
     memset(&s_lockout_pico, 0, sizeof(s_lockout_pico));
@@ -2109,6 +2562,32 @@ esp_err_t ota_http_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_bus_or_
     err = httpd_register_uri_handler(server, &esp_rollback_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_register_uri_handler(/api/ota/esp/rollback) failed: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    // The Pico half of the same feature -- see ota_pico_rollback_post_
+    // handler()'s own doc comment above for the full contract (its own auth
+    // context, its own honest accept/refuse/link-down/unknown response
+    // shape, built on safety_link_send_rollback_ex()).
+    static const httpd_uri_t pico_rollback_uri = {
+        .uri = "/api/ota/pico/rollback", .method = HTTP_POST, .handler = ota_pico_rollback_post_handler
+    };
+    err = httpd_register_uri_handler(server, &pico_rollback_uri);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "httpd_register_uri_handler(/api/ota/pico/rollback) failed: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    // opus-review finding 3's poll target -- see ota_pico_rollback_status_
+    // get_handler()'s own doc comment above.
+    static const httpd_uri_t pico_rollback_status_uri = {
+        .uri = "/api/ota/pico/rollback/status", .method = HTTP_GET,
+        .handler = ota_pico_rollback_status_get_handler
+    };
+    err = httpd_register_uri_handler(server, &pico_rollback_status_uri);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "httpd_register_uri_handler(/api/ota/pico/rollback/status) failed: %s",
+                 esp_err_to_name(err));
         return err;
     }
 

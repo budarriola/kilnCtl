@@ -512,7 +512,7 @@ pass (no hardware was touched); it is a now-open door, not a result.
 | S10 | Yes | **Yes**, same context/mode gating as S2 | Same as S2 |
 | S11 | Yes | **Yes**, needs `heat_commanded` (`any_current_present`) true for the full `frozen_window_s` | Current flowing — same as S3/S4/S9 |
 | S12 | Yes | **Yes** — `cj_c` is read ungated by context or link | None |
-| S13 | Yes | **No** | `borrowed_zone_index` IS in `config_store` (`config_store.h:355`, validated 0..2) but is never plumbed into `safety_guard_cfg_t`, so no guard can read it — a one-step plumbing gap, NOT a missing field; `tc_source` defaults to `OWN_J7`. Two independent commissioning gaps, unrelated to the TC fit — `tc_stuck`'s S13 clauses stay `BLOCKED` in `SCENARIO_RESULTS.md` for exactly this reason |
+| S13 | Yes | **Yes** — `sample_counter_advancing` now produced from a real context-frame comparison (`context_borrowed_sample_counter_advancing()`, `src/snapshots.h`, called from `safety_core_build_input()`); `tc_source` still defaults to `OWN_J7` until BORROWED_ZONE/BOTH + `borrowed_zone_index` are commissioned | Requires `tc_source` = BORROWED_ZONE/BOTH and `borrowed_zone_index` both commissioned on a real board — same commissioning requirement every other config-gated guard (S1, S2/S10) has |
 | S8 | Would have been masked too, had it existed | **N/A — not implemented.** `safety_guards.c` has no S8 code at all (`safety_guards.h`: "NOT implemented here") | `max_rate_c_per_min` defaulting to 0 is a *design* "ships disabled" choice (`SAFETY_MODEL.md` §4, `CONFIG_REFERENCE.md` §2), not a missing wire — needs a measured kiln ramp before it can even be written |
 
 **Checked explicitly: does any other guard share S1's "0 means not

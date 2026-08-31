@@ -57,5 +57,9 @@ idf_component_register(
          # per-field commissioning rejection reason (COMMISSIONING.md sec 3.1).
          "${KILNLINK_DIR}/src/kilnlink_set_log_level.c"
          "${KILNLINK_DIR}/src/kilnlink_commit_config_rejected.c"
+         # SAFETY_CMD_ROLLBACK_RESULT (0x25) -- the missing Pico->ESP reply
+         # for a refused SAFETY_CMD_ROLLBACK, safety_link.c decodes this the
+         # same way it decodes COMMIT_CONFIG_REJECTED above.
+         "${KILNLINK_DIR}/src/kilnlink_rollback_result.c"
     INCLUDE_DIRS "${KILNLINK_DIR}/include"
 )

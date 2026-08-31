@@ -122,9 +122,9 @@ static void test_drain_wait_not_waiting_for_anything_never_blocks(void)
     // want_* is false at the call site) -- the periodic poll's pre-drain and
     // GET_STATUS wait must keep their original "grab one burst, don't block
     // for more" behaviour untouched by this fix.
-    TEST_CHECK(safety_drain_still_waiting(false, false, false, false, false, false, false, false) == false,
+    TEST_CHECK(safety_drain_still_waiting(false, false, false, false, false, false, false, false, false, false) == false,
                "nothing wanted, nothing gotten -- never keep blocking");
-    TEST_CHECK(safety_drain_still_waiting(false, false, false, true, false, true, false, true) == false,
+    TEST_CHECK(safety_drain_still_waiting(false, false, false, true, false, true, false, true, false, false) == false,
                "nothing wanted even if the got_* flags are (implausibly) true -- still never block");
 }
 
@@ -137,7 +137,7 @@ static void test_drain_wait_config_page_wanted_not_yet_captured_keeps_waiting(vo
     // CONFIG_PAGE has not arrived yet. The pre-fix code would abandon the
     // wait here; the fix must not.
     TEST_CHECK(safety_drain_still_waiting(false, false, false, false, /*want_config_page=*/true,
-                                           /*got_config_page=*/false, false, false) == true,
+                                           /*got_config_page=*/false, false, false, false, false) == true,
                "an unrelated frame must not end the wait while CONFIG_PAGE is still outstanding");
 }
 
@@ -146,7 +146,7 @@ static void test_drain_wait_config_page_captured_stops_waiting(void)
     TEST_SECTION("safety_drain_still_waiting -- CONFIG_PAGE wanted and captured: stop waiting");
 
     TEST_CHECK(safety_drain_still_waiting(false, false, false, false, /*want_config_page=*/true,
-                                           /*got_config_page=*/true, false, false) == false,
+                                           /*got_config_page=*/true, false, false, false, false) == false,
                "once the wanted CONFIG_PAGE reply has been captured, degrade to a zero-wait drain");
 }
 
@@ -158,19 +158,19 @@ static void test_drain_wait_ct_cal_and_commit_rejected_same_shape(void)
     // exact same bug as safety_link_get_config_page() -- same drain loop,
     // same premature-degrade failure mode -- so the fix must cover them too.
     TEST_CHECK(safety_drain_still_waiting(false, false, /*want_ct_cal=*/true, /*got_ct_cal=*/false, false, false, false,
-                                           false) == true,
+                                           false, false, false) == true,
                "CT_CAL wanted, not yet captured -- keep waiting (safety_link_get_ct_cal())");
     TEST_CHECK(safety_drain_still_waiting(false, false, /*want_ct_cal=*/true, /*got_ct_cal=*/true, false,
-                                           false, false, false) == false,
+                                           false, false, false, false, false) == false,
                "CT_CAL wanted and captured -- stop waiting");
     TEST_CHECK(safety_drain_still_waiting(false, false, false, false, false, false,
                                            /*want_commit_rejected=*/true,
-                                           /*got_commit_rejected=*/false) == true,
+                                           /*got_commit_rejected=*/false, false, false) == true,
                "COMMIT_CONFIG_REJECTED wanted, not yet captured -- keep waiting "
                "(safety_link_send_commit_config())");
     TEST_CHECK(safety_drain_still_waiting(false, false, false, false, false, false,
                                            /*want_commit_rejected=*/true,
-                                           /*got_commit_rejected=*/true) == false,
+                                           /*got_commit_rejected=*/true, false, false) == false,
                "COMMIT_CONFIG_REJECTED wanted and captured -- stop waiting");
 }
 
@@ -187,7 +187,7 @@ static void test_drain_wait_only_the_wanted_reply_gates_waiting(void)
                                            /*want_ct_cal=*/false, /*got_ct_cal=*/false,
                                            /*want_config_page=*/true, /*got_config_page=*/true,
                                            /*want_commit_rejected=*/false,
-                                           /*got_commit_rejected=*/false) == false,
+                                           /*got_commit_rejected=*/false, false, false) == false,
                "only CONFIG_PAGE was wanted and it was captured -- the untouched "
                "ct_cal/commit_rejected flags must not force continued waiting");
 }
@@ -218,7 +218,7 @@ static void test_drain_wait_status_wanted_not_yet_captured_keeps_waiting(void)
     // The round-3 bug itself: the poll wants a STATUS, an unrelated DIAG or
     // POWER push was just dispatched, and the STATUS has not arrived yet.
     TEST_CHECK(safety_drain_still_waiting(/*want_status=*/true, /*got_status=*/false, false, false,
-                                           false, false, false, false) == true,
+                                           false, false, false, false, false, false) == true,
                "a DIAG/POWER push must not end the poll while its STATUS is still outstanding");
 }
 
@@ -227,7 +227,7 @@ static void test_drain_wait_status_captured_stops_waiting(void)
     TEST_SECTION("safety_drain_still_waiting -- STATUS wanted and captured: stop waiting");
 
     TEST_CHECK(safety_drain_still_waiting(/*want_status=*/true, /*got_status=*/true, false, false,
-                                           false, false, false, false) == false,
+                                           false, false, false, false, false, false) == false,
                "once the STATUS has been applied, degrade to a zero-wait drain");
 }
 
@@ -241,11 +241,196 @@ static void test_drain_wait_opportunistic_drains_are_unchanged(void)
     // that fails if someone makes want_status default to true for all callers
     // rather than only the poll.
     TEST_CHECK(safety_drain_still_waiting(/*want_status=*/false, /*got_status=*/false, false, false,
-                                           false, false, false, false) == false,
+                                           false, false, false, false, false, false) == false,
                "want_status false: never keep blocking, whatever arrived");
     TEST_CHECK(safety_drain_still_waiting(/*want_status=*/false, /*got_status=*/true, false, false,
-                                           false, false, false, false) == false,
+                                           false, false, false, false, false, false) == false,
                "want_status false with a status incidentally applied: still never block");
+}
+
+// --------------------------------------------------------------------------
+// safety_link_rollback_infer_outcome() -- the opus-review "blocking defect"
+// fix. Previously, safety_link_send_rollback_ex() inferred ACCEPTED from
+// plain silence (no reply within SAFETY_LINK_REPLY_TIMEOUT_MS) gated by a
+// version read of the WRONG side (this ESP's cached view of the Pico's
+// protocol_version, when what actually decides whether the Pico SENDS a
+// refusal is the Pico's own cached view of the ESP's protocol_version -- a
+// value this ESP cannot observe at all). The fix: silence alone proves
+// nothing; the ONLY accepted positive evidence for ACCEPTED is the peer's
+// boot_id changing (a direct, direction-agnostic observation of a reboot),
+// and a wire-confirmed refusal always outranks it. This function is the
+// pure decision at the center of that fix, extracted specifically so the
+// inference itself can be pinned here without needing safety_link.c's
+// FreeRTOS-timed send-burst/boot_id-watch loop (which this test file, by
+// its own scope, does not attempt to drive -- see test_safety_link_
+// compile.c's header comment on what it does NOT close).
+// --------------------------------------------------------------------------
+
+static void test_rollback_infer_no_evidence_is_unknown_not_accepted(void)
+{
+    TEST_SECTION("safety_link_rollback_infer_outcome -- no refusal and no boot_id change "
+                 "(a lost request, a lost reply, a peer too busy to answer, or a link that "
+                 "simply stayed down the whole watch) is UNKNOWN, never ACCEPTED");
+
+    TEST_CHECK(safety_link_rollback_infer_outcome(false, false, false) ==
+                   SAFETY_LINK_ROLLBACK_OUTCOME_UNKNOWN_TIMEOUT,
+               "no wire evidence at all -- UNKNOWN_TIMEOUT, NOT the old silence-is-accepted default");
+}
+
+static void test_rollback_infer_refusal_wins(void)
+{
+    TEST_SECTION("safety_link_rollback_infer_outcome -- a decoded refusal is REFUSED");
+
+    TEST_CHECK(safety_link_rollback_infer_outcome(/*refusal_received=*/true, /*refusal_decoded_ok=*/true,
+                                                   /*boot_id_changed=*/false) ==
+                   SAFETY_LINK_ROLLBACK_OUTCOME_REFUSED,
+               "a wire-confirmed refusal, boot_id unchanged -- REFUSED");
+    TEST_CHECK(safety_link_rollback_infer_outcome(/*refusal_received=*/true, /*refusal_decoded_ok=*/true,
+                                                   /*boot_id_changed=*/true) ==
+                   SAFETY_LINK_ROLLBACK_OUTCOME_REFUSED,
+               "a refusal frame always outranks a boot_id change that happened to coincide with it "
+               "(e.g. an unrelated Pico reboot racing the same watch window) -- REFUSED, not ACCEPTED");
+}
+
+static void test_rollback_infer_undecodable_refusal_is_unknown(void)
+{
+    TEST_SECTION("safety_link_rollback_infer_outcome -- a ROLLBACK_RESULT-shaped frame that failed "
+                 "to decode proves nothing, so it must not be reported as a refusal");
+
+    TEST_CHECK(safety_link_rollback_infer_outcome(/*refusal_received=*/true, /*refusal_decoded_ok=*/false,
+                                                   /*boot_id_changed=*/false) ==
+                   SAFETY_LINK_ROLLBACK_OUTCOME_UNKNOWN_TIMEOUT,
+               "id/length gate matched but the codec itself rejected it -- UNKNOWN, not REFUSED");
+    TEST_CHECK(safety_link_rollback_infer_outcome(/*refusal_received=*/true, /*refusal_decoded_ok=*/false,
+                                                   /*boot_id_changed=*/true) ==
+                   SAFETY_LINK_ROLLBACK_OUTCOME_UNKNOWN_TIMEOUT,
+               "same, even with an (unrelated) boot_id change alongside it -- an undecodable frame "
+               "still must not be promoted to a refusal by a boot_id coincidence");
+}
+
+static void test_rollback_infer_boot_id_change_after_silence_is_accepted(void)
+{
+    TEST_SECTION("safety_link_rollback_infer_outcome -- no refusal, but the peer's boot_id changed "
+                 "-- ACCEPTED (the defect-2 fix: this is a direct reboot observation, not a version "
+                 "guess about which side can/would have replied)");
+
+    TEST_CHECK(safety_link_rollback_infer_outcome(/*refusal_received=*/false, /*refusal_decoded_ok=*/false,
+                                                   /*boot_id_changed=*/true) ==
+                   SAFETY_LINK_ROLLBACK_OUTCOME_ACCEPTED,
+               "silence plus an observed boot_id change -- ACCEPTED");
+}
+
+static void test_rollback_boot_id_unknown_before_is_not_evidence(void)
+{
+    TEST_SECTION("safety_link_rollback_boot_id_changed -- with no baseline (the boot_id was never "
+                 "learned before the request went out) a boot_id merely BECOMING known during the "
+                 "watch is not evidence of a reboot");
+
+    // The lossy-link case this guards: link_up is true (STATUS replies are
+    // landing) but every FW_VERSION reply so far has been lost, so
+    // pico_boot_id_known is still false when the rollback goes out. The
+    // Pico silently ignores/refuses the request and keeps running; the next
+    // FW_VERSION finally gets through. Treating that as "changed" would
+    // report ACCEPTED for a rollback that never happened -- the exact
+    // silence-plus-an-unrelated-event class this path exists to remove.
+    TEST_CHECK(safety_link_rollback_boot_id_changed(/*had_before=*/false, /*before=*/0,
+                                                     /*known_now=*/true, /*now=*/7) == false,
+               "unknown before, known after -- NO baseline, so no evidence, never ACCEPTED");
+    TEST_CHECK(safety_link_rollback_boot_id_changed(false, 0, false, 0) == false,
+               "unknown before and still unknown -- no evidence");
+    TEST_CHECK(safety_link_rollback_infer_outcome(false, false,
+                                                   safety_link_rollback_boot_id_changed(false, 0, true, 7)) ==
+                   SAFETY_LINK_ROLLBACK_OUTCOME_UNKNOWN_TIMEOUT,
+               "fed through the same inference the watch uses, that case reports UNKNOWN_TIMEOUT");
+}
+
+static void test_rollback_boot_id_real_change_is_evidence(void)
+{
+    TEST_SECTION("safety_link_rollback_boot_id_changed -- a known baseline that then differs IS the "
+                 "reboot observation ACCEPTED rests on, and an unchanged one is not");
+
+    TEST_CHECK(safety_link_rollback_boot_id_changed(/*had_before=*/true, /*before=*/3,
+                                                     /*known_now=*/true, /*now=*/4) == true,
+               "known before, different after -- a real, observed reboot");
+    TEST_CHECK(safety_link_rollback_boot_id_changed(true, 3, true, 3) == false,
+               "known before, identical after -- the Pico never restarted");
+    TEST_CHECK(safety_link_rollback_boot_id_changed(true, 3, false, 0) == false,
+               "known before but not known now -- nothing was observed, not a change");
+    TEST_CHECK(safety_link_rollback_infer_outcome(false, false,
+                                                   safety_link_rollback_boot_id_changed(true, 3, true, 4)) ==
+                   SAFETY_LINK_ROLLBACK_OUTCOME_ACCEPTED,
+               "and only that case reaches ACCEPTED through the watch's own inference");
+}
+
+// --------------------------------------------------------------------------
+// safety_link_rollback_build_identity_changed() / safety_link_rollback_
+// reboot_confirmed() -- opus-review finding 2, "a reboot is not a
+// rollback". A boot_id change alone (the fix above) is not proof of a
+// ROLLBACK specifically: an unrelated crash/watchdog/power-glitch reboot
+// inside the same watch window changes the boot_id exactly the same way.
+// The build identity (commit+datetime from the same FW_VERSION frame) is
+// independent evidence -- a rollback reboots into a DIFFERENT image, an
+// unrelated reboot comes back running the SAME one -- and ACCEPTED now
+// requires both to have changed.
+// --------------------------------------------------------------------------
+
+static void test_build_identity_unknown_before_or_after_is_not_evidence(void)
+{
+    TEST_SECTION("safety_link_rollback_build_identity_changed -- no baseline (or no fresh "
+                 "read) means no evidence, same convention as the boot_id version");
+
+    uint8_t commit_a[4] = {1, 2, 3, 4};
+    uint8_t commit_b[4] = {5, 6, 7, 8};
+    uint8_t dt[2] = {9, 9};
+
+    TEST_CHECK(safety_link_rollback_build_identity_changed(/*had_before=*/false, 4, commit_a, 2, dt,
+                                                             /*known_now=*/true, 4, commit_b, 2, dt) == false,
+               "no build identity known before the request went out -- no baseline, never reported changed");
+    TEST_CHECK(safety_link_rollback_build_identity_changed(/*had_before=*/true, 4, commit_a, 2, dt,
+                                                             /*known_now=*/false, 4, commit_b, 2, dt) == false,
+               "known before but not known now (no fresh FW_VERSION parsed yet) -- nothing observed");
+}
+
+static void test_build_identity_real_change_is_evidence(void)
+{
+    TEST_SECTION("safety_link_rollback_build_identity_changed -- a known baseline that then "
+                 "differs (commit, datetime, or either length) IS a change; an identical "
+                 "re-read is not");
+
+    uint8_t commit_a[4] = {1, 2, 3, 4};
+    uint8_t commit_b[4] = {1, 2, 3, 9}; // one byte differs
+    uint8_t dt_a[3] = {5, 6, 7};
+    uint8_t dt_b[3] = {5, 6, 7};
+
+    TEST_CHECK(safety_link_rollback_build_identity_changed(true, 4, commit_a, 3, dt_a, true, 4, commit_b, 3,
+                                                             dt_b) == true,
+               "commit bytes differ, datetime identical -- still a change");
+    TEST_CHECK(safety_link_rollback_build_identity_changed(true, 4, commit_a, 3, dt_a, true, 4, commit_a, 3,
+                                                             dt_a) == false,
+               "identical commit AND datetime, same lengths -- not a change (an unrelated reboot "
+               "into the SAME image)");
+    TEST_CHECK(safety_link_rollback_build_identity_changed(true, 4, commit_a, 3, dt_a, true, 5, commit_a, 3,
+                                                             dt_a) == true,
+               "commit LENGTH alone differing (even with identical overlapping bytes) is a change");
+}
+
+static void test_reboot_confirmed_requires_both_boot_id_and_build_identity(void)
+{
+    TEST_SECTION("safety_link_rollback_reboot_confirmed -- ACCEPTED evidence requires BOTH "
+                 "the boot_id AND the build identity to have changed; either alone is not enough");
+
+    TEST_CHECK(safety_link_rollback_reboot_confirmed(/*boot_id_changed=*/true, /*build_identity_changed=*/true) ==
+                   true,
+               "both changed -- a rollback into a different image, genuinely observed");
+    TEST_CHECK(safety_link_rollback_reboot_confirmed(/*boot_id_changed=*/true,
+                                                       /*build_identity_changed=*/false) == false,
+               "boot_id changed but the build did not -- looks like an unrelated reboot, NOT confirmed");
+    TEST_CHECK(safety_link_rollback_reboot_confirmed(/*boot_id_changed=*/false,
+                                                       /*build_identity_changed=*/true) == false,
+               "build identity 'changed' with no boot_id change cannot happen on a real link (the "
+               "build identity is only ever refreshed BY a FW_VERSION frame that also refreshes the "
+               "boot_id), but the function itself must still require both defensively");
+    TEST_CHECK(safety_link_rollback_reboot_confirmed(false, false) == false, "neither changed -- not confirmed");
 }
 
 void run_test_safety_link(void)
@@ -263,4 +448,13 @@ void run_test_safety_link(void)
     test_drain_wait_config_page_captured_stops_waiting();
     test_drain_wait_ct_cal_and_commit_rejected_same_shape();
     test_drain_wait_only_the_wanted_reply_gates_waiting();
+    test_rollback_infer_no_evidence_is_unknown_not_accepted();
+    test_rollback_infer_refusal_wins();
+    test_rollback_infer_undecodable_refusal_is_unknown();
+    test_rollback_infer_boot_id_change_after_silence_is_accepted();
+    test_rollback_boot_id_unknown_before_is_not_evidence();
+    test_rollback_boot_id_real_change_is_evidence();
+    test_build_identity_unknown_before_or_after_is_not_evidence();
+    test_build_identity_real_change_is_evidence();
+    test_reboot_confirmed_requires_both_boot_id_and_build_identity();
 }
