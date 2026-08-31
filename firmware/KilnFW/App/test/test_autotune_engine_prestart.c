@@ -350,9 +350,62 @@ bool zones_config_get_temp_limits(uint8_t zone_index, float *out_max_temp_c, flo
     return false;
 }
 
+// Configurable per-test (default 0, this stub's original hardcoded
+// behavior) via direct assignment, same convention as s_stub_max_temp_c
+// above -- test_finalize_fit_persists_valid_cross_gain_cells() below needs
+// a real thermo_count so finalize_fit()'s cross-zone loop does not refuse
+// every peer cell with "j >= thermo_count" before ever reaching the new
+// persist step.
+static uint8_t s_stub_thermo_count = 0;
+
 uint8_t zones_config_get_thermo_count(void)
 {
-    return 0;
+    return s_stub_thermo_count;
+}
+
+/* 2026-08-30 (ZONES_CFG_VERSION 10->11): finalize_fit()'s new persist step
+ * (see autotune_engine.c's own comment) needs this symbol to link.
+ * Records every call (zone_index, neighbor_index, coeff) rather than just
+ * refusing, so test_finalize_fit_persists_valid_cross_gain_cells() below can
+ * observe exactly what finalize_fit() tried to persist -- succeeds
+ * unconditionally by default, same "default succeeds" convention this
+ * file's header comment documents for the STEPPING-loop's other setters. */
+typedef struct {
+    bool called;
+    float coeff;
+} coupling_cell_call_t;
+static coupling_cell_call_t s_coupling_cell_calls[MAX31856_CHANNEL_COUNT][MAX31856_CHANNEL_COUNT];
+
+static void reset_coupling_cell_calls(void)
+{
+    memset(s_coupling_cell_calls, 0, sizeof(s_coupling_cell_calls));
+}
+
+/* 2026-08-31 defect fix: mirrors the real setter's bound (zones_http.c's
+ * zones_config_set_coupling_cell(): finite, 0..ZONE_COUPLING_COEFF_MAX,
+ * nonzero diagonal refused). Previously this fake accepted ANY value
+ * unconditionally, which meant autotune_engine.c's OWN isfinite/range guard
+ * (finalize_fit(), ~line 437 -- the guard that decides whether to call this
+ * setter AT ALL) had no negative test: stubbing that guard to `if (0)`
+ * still passed 156/156, because the fake could not tell "the guard skipped
+ * the call" from "the call happened and the fake let a bad value through
+ * anyway". `called` is still recorded unconditionally (even for a rejected
+ * value) so a test can distinguish those two cases: a working guard never
+ * calls this at all for an out-of-range gain (called stays false); a broken
+ * guard calls it and gets refused (called becomes true, return value
+ * false) -- either way the real bound is enforced here exactly like the
+ * production setter, so a test built on this fake proves something real. */
+bool zones_config_set_coupling_cell(uint8_t zone_index, uint8_t neighbor_index, float coeff)
+{
+    if (zone_index >= MAX31856_CHANNEL_COUNT || neighbor_index >= MAX31856_CHANNEL_COUNT) {
+        return false;
+    }
+    s_coupling_cell_calls[zone_index][neighbor_index].called = true;
+    s_coupling_cell_calls[zone_index][neighbor_index].coeff = coeff;
+    if (zone_index == neighbor_index) {
+        return coeff == 0.0f;
+    }
+    return isfinite(coeff) && coeff >= 0.0f && coeff <= ZONE_COUPLING_COEFF_MAX;
 }
 
 bool zones_config_get_thermo_mask(uint8_t zone_index, uint8_t *out_mask)
@@ -416,7 +469,7 @@ static void test_run_refuses_before_start(void)
 {
     TEST_SECTION("autotune_engine_run() before start() -- refused, no crash");
     char err[96] = {0};
-    bool ok = autotune_engine_run(0, 0.5f, err, sizeof(err));
+    bool ok = autotune_engine_run(0, 0.5f, AUTOTUNE_RULE_SIMC, err, sizeof(err));
     TEST_CHECK(!ok, "must refuse, not crash, when s_at.lock is NULL");
     TEST_CHECK(err[0] != '\0', "an error message is filled in for the caller");
 }
@@ -547,7 +600,7 @@ static void test_get_status_reports_well_formed_idle_before_start(void)
 // begin_run_locked()'s real guard_cfg setup from the zones_config_*()
 // stubs, still runs for real; only the never-succeeding task spawn is
 // bypassed.
-static void start_stepping_run(float max_temp_c, float step_duty)
+static void start_stepping_run_rule(float max_temp_c, float step_duty, autotune_rule_t rule)
 {
     static MAX31856BusClass bus;
     // A real (if never-dereferenced-for-real, thanks to the
@@ -570,7 +623,7 @@ static void start_stepping_run(float max_temp_c, float step_duty)
     s_stub_ch0_ok = true;
 
     char errbuf[96] = {0};
-    bool ok = autotune_engine_run(0, step_duty, errbuf, sizeof(errbuf));
+    bool ok = autotune_engine_run(0, step_duty, rule, errbuf, sizeof(errbuf));
     TEST_CHECK(ok, "autotune_engine_run() must accept a step test on zone 0");
 
     xSemaphoreTake(s_at.lock, portMAX_DELAY);
@@ -578,6 +631,11 @@ static void start_stepping_run(float max_temp_c, float step_duty)
     s_at.phase_start_tick = 0;
     s_at.last_sample_tick = 0;
     xSemaphoreGive(s_at.lock);
+}
+
+static void start_stepping_run(float max_temp_c, float step_duty)
+{
+    start_stepping_run_rule(max_temp_c, step_duty, AUTOTUNE_RULE_SIMC);
 }
 
 // Runs up to n_ticks ticks, stopping early if the run leaves the "running"
@@ -616,6 +674,325 @@ static void test_step_no_ceiling_flat_reading_trips_guard1(void)
     TEST_CHECK(s_at.guard_state.reason == THERMAL_GUARD_TRIP_HEATING_FAILED,
                "specifically guard 1 (HEATING_FAILED) -- the guard whose job this is");
     TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_ABORTED, "the run must abort, not silently continue");
+}
+
+// Sets up a real (non-NULL) s_at.lock, exactly like start_stepping_run_rule()
+// does, but does NOT call autotune_engine_run() -- the caller does that, so
+// it can inspect the return value/err_msg of a call that is expected to be
+// REFUSED. This matters: a NULL s_at.lock refuses every call unconditionally
+// (begin_run_locked()'s very first check), so a rule-rejection test run
+// before autotune_engine_start() would pass for the wrong reason -- masked by
+// that earlier guard, never actually reaching the rule check under test. See
+// this file's task brief: exactly the "input the range check rejected before
+// the check under test ever ran" trap. A deliberate revert of the rule check
+// confirmed this: with it removed, the naive "before start" version of this
+// test kept passing (125/125) because begin_run_locked()'s NULL-lock guard
+// still refused the call -- this version, with a live lock, is what actually
+// catches it.
+static void prep_live_lock_no_run(void)
+{
+    static MAX31856BusClass bus;
+    static SafetyLinkClass safety;
+    memset(&s_at, 0, sizeof(s_at));
+    memset(&bus, 0, sizeof(bus));
+    memset(&safety, 0, sizeof(safety));
+    bus.initialized = true;
+    s_at.thermo_bus = &bus;
+    s_at.safety = &safety;
+    s_at.lock = xSemaphoreCreateMutex();
+    TEST_CHECK(s_at.lock != NULL, "test setup: lock must be creatable");
+}
+
+static void test_run_rejects_relay_only_rules_on_step_path(void)
+{
+    TEST_SECTION("autotune_engine_run() refuses ZN/Tyreus-Luyben -- relay-only rules on the FOPDT step path");
+    prep_live_lock_no_run();
+    char err[96] = {0};
+    bool ok = autotune_engine_run(0, 0.5f, AUTOTUNE_RULE_ZIEGLER_NICHOLS, err, sizeof(err));
+    TEST_CHECK(!ok, "ZN must be refused on the step-test path -- it needs a relay (Ku/Tu) test");
+    TEST_CHECK(err[0] != '\0', "an error message is filled in for the caller");
+    TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_IDLE, "a refused rule must not have started anything");
+
+    prep_live_lock_no_run();
+    err[0] = '\0';
+    ok = autotune_engine_run(0, 0.5f, AUTOTUNE_RULE_TYREUS_LUYBEN, err, sizeof(err));
+    TEST_CHECK(!ok, "Tyreus-Luyben must be refused on the step-test path for the same reason");
+    TEST_CHECK(err[0] != '\0', "an error message is filled in for the caller");
+    TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_IDLE, "a refused rule must not have started anything");
+
+    // Positive control, same live-lock setup: SIMC must still be accepted --
+    // proves the two refusals above are the rule check firing, not some
+    // unrelated reason begin_run_locked() would refuse everything here.
+    prep_live_lock_no_run();
+    err[0] = '\0';
+    ok = autotune_engine_run(0, 0.5f, AUTOTUNE_RULE_SIMC, err, sizeof(err));
+    TEST_CHECK(ok, "positive control: SIMC must be accepted with the same live-lock setup ZN/TL were refused under");
+}
+
+static void test_step_run_accepts_simc_and_cohen_coon_and_stores_the_rule(void)
+{
+    TEST_SECTION("autotune_engine_run() accepts SIMC and Cohen-Coon, and records which one for finalize_fit()");
+    start_stepping_run_rule(/*max_temp_c=*/0.0f, /*step_duty=*/1.0f, AUTOTUNE_RULE_SIMC);
+    TEST_CHECK(s_at.step_rule == AUTOTUNE_RULE_SIMC, "SIMC accepted and stored");
+
+    start_stepping_run_rule(/*max_temp_c=*/0.0f, /*step_duty=*/1.0f, AUTOTUNE_RULE_COHEN_COON);
+    TEST_CHECK(s_at.step_rule == AUTOTUNE_RULE_COHEN_COON,
+               "Cohen-Coon accepted and stored -- this is what finalize_fit() passes to "
+               "pid_autotune_tune_from_fopdt() instead of the old hardcoded AUTOTUNE_RULE_SIMC");
+}
+
+// Writes a synthetic FOPDT step-response trace directly into s_at.zone_trace,
+// bypassing the STEPPING tick loop entirely: this host build's
+// xTaskGetTickCount() stub always returns 0 (see this file's header comment
+// on the STEPPING-loop guard tests above), which freezes s_at.elapsed_s and
+// last_sample_tick forever and makes the real record-a-sample-every-
+// AUTOTUNE_ENGINE_SAMPLE_PERIOD_S path unreachable from a driven tick loop.
+// finalize_fit() itself has no such dependency (it only reads
+// zone_trace/trace_count/zone_baseline_c/step_duty/step_rule, all set
+// directly here), so it is called white-box, same convention as this file's
+// #include of autotune_engine.c -- and it is the actual function under test
+// for "does the step path still hardcode SIMC".
+// zone-index-parameterized version -- test_finalize_fit_persists_valid_
+// cross_gain_cells() below needs to write a trace for more than one zone
+// (the zone under test AND its peers) to exercise finalize_fit()'s
+// cross-zone loop, not just the single self-fit write_synthetic_fopdt_trace()
+// (zone 0 only) below was originally written for.
+static void write_synthetic_fopdt_trace_for_zone(uint8_t zone, float baseline_c, float k_gain_c_per_duty,
+                                                  float tau_s, float dead_time_s, float duty_step,
+                                                  uint16_t n_samples)
+{
+    s_at.zone_baseline_c[zone] = baseline_c;
+    s_at.zone_baseline_valid[zone] = true;
+    s_at.step_duty = duty_step;
+    s_at.trace_count = n_samples;
+    for (uint16_t i = 0; i < n_samples; i++) {
+        float t_s = (float)(i * AUTOTUNE_ENGINE_SAMPLE_PERIOD_S);
+        float rise = (t_s <= dead_time_s)
+                         ? 0.0f
+                         : k_gain_c_per_duty * duty_step * (1.0f - expf(-(t_s - dead_time_s) / tau_s));
+        s_at.zone_trace[zone][i] = (int16_t)lroundf((baseline_c + rise) * 10.0f);
+    }
+}
+
+static void write_synthetic_fopdt_trace(float baseline_c, float k_gain_c_per_duty, float tau_s, float dead_time_s,
+                                        float duty_step, uint16_t n_samples)
+{
+    write_synthetic_fopdt_trace_for_zone(0, baseline_c, k_gain_c_per_duty, tau_s, dead_time_s, duty_step, n_samples);
+}
+
+static void test_finalize_fit_uses_the_requested_rule(void)
+{
+    TEST_SECTION("finalize_fit() uses s_at.step_rule, not a hardcoded SIMC -- PID_EXPANSION_PLAN.md Phase 1");
+    // K=2 degC/duty, tau=200s, L=20s (well above
+    // AUTOTUNE_COHEN_COON_MIN_DEAD_TIME_S so Cohen-Coon does not refuse on
+    // dead time), 60 samples * 10s/sample = 600s -- comfortably past 5*tau
+    // so both the two-point crossing fit AND the settle band would succeed.
+    memset(&s_at, 0, sizeof(s_at));
+    s_at.zone_index = 0;
+    s_at.step_rule = AUTOTUNE_RULE_SIMC;
+    write_synthetic_fopdt_trace(/*baseline_c=*/25.0f, /*k_gain_c_per_duty=*/2.0f, /*tau_s=*/200.0f,
+                                /*dead_time_s=*/20.0f, /*duty_step=*/1.0f, /*n_samples=*/60);
+    finalize_fit();
+    TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_DONE, "a well-formed trace must fit");
+    TEST_CHECK(s_at.model.valid, "the FOPDT fit must have succeeded");
+    TEST_CHECK(s_at.proposed_gains.rule == AUTOTUNE_RULE_SIMC, "SIMC requested -> SIMC reported");
+    TEST_CHECK(s_at.proposed_gains.refusal == AUTOTUNE_REFUSAL_OK, "a valid model + SIMC must not refuse");
+    float simc_kp = s_at.proposed_gains.kp;
+    TEST_CHECK(simc_kp != 0.0f, "sanity: SIMC actually produced a nonzero Kp on this trace");
+
+    // Identical trace, Cohen-Coon requested instead: must report its OWN
+    // rule and produce different numbers than SIMC on the exact same fitted
+    // model -- if finalize_fit() were still passing AUTOTUNE_RULE_SIMC to
+    // pid_autotune_tune_from_fopdt() regardless of s_at.step_rule (the
+    // pre-fix defect this test exists to catch), both of these would read
+    // back as SIMC/simc_kp again.
+    memset(&s_at, 0, sizeof(s_at));
+    s_at.zone_index = 0;
+    s_at.step_rule = AUTOTUNE_RULE_COHEN_COON;
+    write_synthetic_fopdt_trace(/*baseline_c=*/25.0f, /*k_gain_c_per_duty=*/2.0f, /*tau_s=*/200.0f,
+                                /*dead_time_s=*/20.0f, /*duty_step=*/1.0f, /*n_samples=*/60);
+    finalize_fit();
+    TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_DONE, "the same trace must fit again");
+    TEST_CHECK(s_at.model.valid, "the FOPDT fit must have succeeded");
+    TEST_CHECK(s_at.proposed_gains.rule == AUTOTUNE_RULE_COHEN_COON, "Cohen-Coon requested -> Cohen-Coon reported");
+    TEST_CHECK(s_at.proposed_gains.refusal == AUTOTUNE_REFUSAL_OK,
+               "this trace's dead time is well above AUTOTUNE_COHEN_COON_MIN_DEAD_TIME_S, so Cohen-Coon must not "
+               "refuse");
+    TEST_CHECK(s_at.proposed_gains.kp != simc_kp,
+               "Cohen-Coon's Kp must differ from SIMC's Kp on the identical fitted model -- if this fails, "
+               "finalize_fit() is still hardcoding one rule regardless of what was requested");
+}
+
+// 2026-08-30 (ZONES_CFG_VERSION 10->11): finalize_fit()'s new persist step
+// -- see that function's own comment in autotune_engine.c. Runs a real
+// three-zone step test white-box (zone 1 stepped, zones 0 and 2 as peers,
+// same synthetic-trace technique test_finalize_fit_uses_the_requested_rule()
+// above uses) and checks exactly what gets committed through
+// zones_config_set_coupling_cell(): a valid cross-gain lands in the AFFECTED
+// zone's row at the STEPPED zone's column, an invalid/absent peer fit is
+// skipped, and the diagonal is never touched at all (that is model_k_dc's
+// job, not coupling_coeff[]'s).
+static void test_finalize_fit_persists_valid_cross_gain_cells(void)
+{
+    TEST_SECTION("finalize_fit() persists every valid cross-gain cell through "
+                 "zones_config_set_coupling_cell(), skips an invalid/missing peer, "
+                 "and never touches the diagonal");
+    memset(&s_at, 0, sizeof(s_at));
+    reset_coupling_cell_calls();
+    s_stub_thermo_count = 3;
+    s_at.zone_index = 1; // the zone under test -- the STEPPED zone
+    s_at.step_rule = AUTOTUNE_RULE_SIMC;
+
+    // Zone 1 (self): K=2, tau=200s, L=20s -- the direct fit finalize_fit()
+    // needs to succeed before it ever reaches the cross-zone loop.
+    write_synthetic_fopdt_trace_for_zone(1, /*baseline_c=*/25.0f, /*k_gain_c_per_duty=*/2.0f, /*tau_s=*/200.0f,
+                                         /*dead_time_s=*/20.0f, /*duty_step=*/1.0f, /*n_samples=*/60);
+    // Zone 0: a real, fittable cross-gain, K=0.5 (well inside
+    // ZONE_COUPLING_COEFF_MAX) -- this is what must land in
+    // coupling_coeff[0] of ZONE 0's row (the AFFECTED zone), not zone 1's.
+    write_synthetic_fopdt_trace_for_zone(0, /*baseline_c=*/22.0f, /*k_gain_c_per_duty=*/0.5f, /*tau_s=*/150.0f,
+                                         /*dead_time_s=*/15.0f, /*duty_step=*/1.0f, /*n_samples=*/60);
+    // Zone 2: baseline never went valid -- finalize_fit()'s own
+    // !s_at.zone_baseline_valid[j] check must skip it, same as a sensor
+    // that never reported during the run.
+    s_at.zone_baseline_valid[2] = false;
+
+    finalize_fit();
+    TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_DONE, "the direct (zone 1) fit must succeed");
+    TEST_CHECK(s_at.model.valid, "zone 1's own model must be valid");
+    TEST_CHECK(s_at.coupling.cell[1][0].valid, "zone 0's cross-gain cell was fitted and marked valid");
+    TEST_CHECK(!s_at.coupling.cell[1][2].valid, "zone 2's cell is invalid -- its baseline never went valid");
+
+    TEST_CHECK(s_coupling_cell_calls[0][1].called,
+              "zone 0's row, column 1 (the AFFECTED zone's cell against the STEPPED zone) was persisted");
+    TEST_CHECK_NEAR(s_coupling_cell_calls[0][1].coeff, s_at.coupling.cell[1][0].model.k_gain_c_per_duty, 1e-4,
+                    "the persisted value is EXACTLY the fitted cross-gain, no scaling applied "
+                    "(coupling_coeff[] stores a raw degC/duty gain, not a ratio -- see finalize_fit()'s own "
+                    "comment)");
+    TEST_CHECK(!s_coupling_cell_calls[2][1].called,
+              "zone 2's cell was NEVER persisted -- its fit was invalid (unmeasured baseline)");
+    TEST_CHECK(!s_coupling_cell_calls[1][1].called,
+              "the diagonal (zone 1 against itself) was never touched by the persist step -- "
+              "that is model_k_dc's job, not coupling_coeff[]'s");
+
+    s_stub_thermo_count = 0; // restore this file's original hardcoded default for every other test
+}
+
+// 2026-08-31 defect fix: finalize_fit()'s own isfinite/range guard (~line
+// 437 in autotune_engine.c) must skip persisting a VALID cell whose fitted
+// gain landed outside 0..ZONE_COUPLING_COEFF_MAX -- distinct from the
+// "cell->valid == false" case test_finalize_fit_persists_valid_cross_gain_
+// cells() already covers above (zone 2's unmeasured baseline). Here zone
+// 0's peer fit itself SUCCEEDS (cell->valid is true) but recovers a gain
+// far past ZONE_COUPLING_COEFF_MAX (100.0), so the guard -- not an invalid
+// fit -- is what has to stop the persist call. Proven against the real
+// bound now that the zones_config_set_coupling_cell() fake above enforces
+// it too (see that fake's own comment): stubbing this guard to `if (0)`
+// makes s_coupling_cell_calls[0][1].called flip to true (the fake then
+// itself refuses the value, but the call happened at all, which is exactly
+// what this test exists to catch) -- proven below by deliberately breaking
+// the guard, re-running, and restoring it.
+static void test_finalize_fit_skips_a_valid_fit_with_out_of_range_gain(void)
+{
+    TEST_SECTION("finalize_fit() -- a cross-gain cell that fits VALID but lands outside "
+                 "0..ZONE_COUPLING_COEFF_MAX is skipped, not persisted");
+    memset(&s_at, 0, sizeof(s_at));
+    reset_coupling_cell_calls();
+    s_stub_thermo_count = 3;
+    s_at.zone_index = 1;
+    s_at.step_rule = AUTOTUNE_RULE_SIMC;
+
+    write_synthetic_fopdt_trace_for_zone(1, /*baseline_c=*/25.0f, /*k_gain_c_per_duty=*/2.0f, /*tau_s=*/200.0f,
+                                         /*dead_time_s=*/20.0f, /*duty_step=*/1.0f, /*n_samples=*/60);
+    // Zone 0: a fittable but WAY out-of-range gain -- ZONE_COUPLING_COEFF_MAX
+    // is 100.0, this trace recovers something far past it.
+    write_synthetic_fopdt_trace_for_zone(0, /*baseline_c=*/22.0f, /*k_gain_c_per_duty=*/500.0f, /*tau_s=*/150.0f,
+                                         /*dead_time_s=*/15.0f, /*duty_step=*/1.0f, /*n_samples=*/60);
+    s_at.zone_baseline_valid[2] = false;
+
+    finalize_fit();
+    TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_DONE, "the direct (zone 1) fit must still succeed");
+    TEST_CHECK(s_at.coupling.cell[1][0].valid, "zone 0's cross-gain cell fit itself is valid -- the FIT is not "
+              "what's wrong here, only the recovered gain's magnitude");
+    TEST_CHECK(s_at.coupling.cell[1][0].model.k_gain_c_per_duty > ZONE_COUPLING_COEFF_MAX,
+              "sanity: the recovered gain really is past ZONE_COUPLING_COEFF_MAX, or this test proves nothing");
+
+    TEST_CHECK(!s_coupling_cell_calls[0][1].called,
+              "the out-of-range guard must skip the call entirely -- zones_config_set_coupling_cell() "
+              "was never even invoked for this cell");
+
+    s_stub_thermo_count = 0; // restore this file's original hardcoded default for every other test
+}
+
+// finalize_fit() must not persist ANYTHING from an aborted run -- proven by
+// giving zone 1 (the zone under test) a degenerate trace that fails to fit
+// at all: finalize_fit() returns early (before the cross-zone loop, let
+// alone the persist step) the exact same way an aborted relay run would.
+static void test_finalize_fit_persists_nothing_on_an_invalid_direct_fit(void)
+{
+    TEST_SECTION("finalize_fit() persists NOTHING -- not even a valid-looking peer cell -- "
+                 "when the direct (self) fit itself fails");
+    memset(&s_at, 0, sizeof(s_at));
+    reset_coupling_cell_calls();
+    s_stub_thermo_count = 3;
+    s_at.zone_index = 1;
+    s_at.step_rule = AUTOTUNE_RULE_SIMC;
+
+    // Zone 1: a flat trace (no rise at all) -- pid_autotune_fit_fopdt()
+    // refuses a plant with no measurable gain, so s_at.model.valid stays
+    // false and finalize_fit() returns before touching the coupling matrix
+    // or calling any setter at all.
+    write_synthetic_fopdt_trace_for_zone(1, /*baseline_c=*/25.0f, /*k_gain_c_per_duty=*/0.0f, /*tau_s=*/200.0f,
+                                         /*dead_time_s=*/20.0f, /*duty_step=*/1.0f, /*n_samples=*/60);
+    // Zone 0: would fit perfectly well on its own -- if this cell got
+    // persisted anyway, that would prove the direct-fit guard is not
+    // actually gating the whole function the way it's supposed to.
+    write_synthetic_fopdt_trace_for_zone(0, /*baseline_c=*/22.0f, /*k_gain_c_per_duty=*/0.5f, /*tau_s=*/150.0f,
+                                         /*dead_time_s=*/15.0f, /*duty_step=*/1.0f, /*n_samples=*/60);
+
+    finalize_fit();
+    TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_ABORTED, "a flat, unfittable direct trace must abort the run");
+    TEST_CHECK(!s_at.model.valid, "the direct model must be invalid");
+    for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
+        for (uint8_t j = 0; j < MAX31856_CHANNEL_COUNT; j++) {
+            char msg[96];
+            snprintf(msg, sizeof(msg), "coupling cell [%u][%u] was never persisted from an aborted fit", i, j);
+            TEST_CHECK(!s_coupling_cell_calls[i][j].called, msg);
+        }
+    }
+
+    s_stub_thermo_count = 0; // restore this file's original hardcoded default for every other test
+}
+
+// /api/autotune serializes proposed_gains.refusal/.refusal_reason, and unlike
+// kp/ki/kd those have no companion `valid` flag the page can discount them
+// with -- a nonempty refusal_reason reads as THIS run's verdict. So a run that
+// refused must not leave its verdict lying around for the next run to report.
+// Same shape as test_next_autotune_run_clears_prior_global_fault_source()
+// above, and for the same reason it does NOT call start_stepping_run() to set
+// up the second run: that memsets s_at and would erase the very state this
+// test needs begin_run_locked() itself to clear.
+static void test_next_run_clears_prior_runs_refusal(void)
+{
+    TEST_SECTION("starting a new autotune run clears the previous run's refusal/refusal_reason");
+    start_stepping_run_rule(/*max_temp_c=*/0.0f, /*step_duty=*/1.0f, AUTOTUNE_RULE_SIMC);
+    // Stand in for a completed run whose tuning rule refused the fitted model
+    // (pid_autotune.c fills exactly these two fields and leaves kp/ki/kd at 0).
+    s_at.state = AUTOTUNE_ENGINE_DONE;
+    s_at.proposed_gains.refusal = AUTOTUNE_REFUSAL_DEAD_TIME_TOO_SMALL;
+    snprintf(s_at.proposed_gains.refusal_reason, sizeof(s_at.proposed_gains.refusal_reason),
+             "dead time 3.0s is below the 5.0s Cohen-Coon needs");
+    s_at.predicted_max_ramp_c_per_hr = 123.0f;
+
+    char errbuf[96] = {0};
+    bool ok = autotune_engine_run(0, 0.5f, AUTOTUNE_RULE_SIMC, errbuf, sizeof(errbuf));
+    TEST_CHECK(ok, "a new run must be accepted on this zone after the earlier one finished");
+    TEST_CHECK(s_at.proposed_gains.refusal == AUTOTUNE_REFUSAL_OK,
+               "the new run must report no refusal until IT produces one -- not the previous run's verdict");
+    TEST_CHECK(s_at.proposed_gains.refusal_reason[0] == '\0',
+               "and no refusal_reason text: /api/autotune would serialize it verbatim as this run's");
+    TEST_CHECK(s_at.predicted_max_ramp_c_per_hr == 0.0f,
+               "the predicted ramp is the same class of stale number and is cleared with it");
 }
 
 static void test_step_max_temp_configured_flat_reading_still_trips_guard1(void)
@@ -754,7 +1131,7 @@ static void test_next_autotune_run_clears_prior_global_fault_source(void)
     // to prove gets cleared by begin_run_locked() itself, not by test setup.
     reset_fault_recorder();
     char errbuf[96] = {0};
-    bool ok = autotune_engine_run(0, 1.0f, errbuf, sizeof(errbuf));
+    bool ok = autotune_engine_run(0, 1.0f, AUTOTUNE_RULE_SIMC, errbuf, sizeof(errbuf));
 
     TEST_CHECK(ok, "a new autotune run must be accepted on this zone after the earlier one aborted");
     TEST_CHECK(s_at.global_fault_source == 0,
@@ -862,7 +1239,7 @@ static void test_run_refuses_while_zone_sweep_is_active(void)
     s_test_sweep_active = true;
 
     char errbuf[96] = {0};
-    bool ok = autotune_engine_run(0, 0.5f, errbuf, sizeof(errbuf));
+    bool ok = autotune_engine_run(0, 0.5f, AUTOTUNE_RULE_SIMC, errbuf, sizeof(errbuf));
 
     TEST_CHECK(!ok, "B2: a live zone sweep must refuse the autotune run, not merely warn");
     TEST_CHECK(strstr(errbuf, "sweep") != NULL, "the refusal must name the sweep specifically");
@@ -876,7 +1253,7 @@ static void test_run_refuses_while_zone_sweep_is_active(void)
     s_at.safety = &safety;
     s_at.lock = xSemaphoreCreateMutex();
     errbuf[0] = '\0';
-    ok = autotune_engine_run(0, 0.5f, errbuf, sizeof(errbuf));
+    ok = autotune_engine_run(0, 0.5f, AUTOTUNE_RULE_SIMC, errbuf, sizeof(errbuf));
     TEST_CHECK(ok, "control: with no sweep active, the identical setup must succeed");
 }
 
@@ -913,7 +1290,7 @@ static void test_run_refuses_at_atomic_heat_claim_gate(void)
     // check above and this call.
     s_test_heat_zone_claim_refused = true;
     char errbuf[96] = {0};
-    bool ok = autotune_engine_run(0, 0.5f, errbuf, sizeof(errbuf));
+    bool ok = autotune_engine_run(0, 0.5f, AUTOTUNE_RULE_SIMC, errbuf, sizeof(errbuf));
 
     TEST_CHECK(!ok, "the atomic gate alone must be able to refuse a run the early check let through");
     TEST_CHECK(strstr(errbuf, "sweep") != NULL, "the refusal must still name the sweep specifically");
@@ -928,7 +1305,7 @@ static void test_run_refuses_at_atomic_heat_claim_gate(void)
     s_at.safety = &safety;
     s_at.lock = xSemaphoreCreateMutex();
     errbuf[0] = '\0';
-    ok = autotune_engine_run(0, 0.5f, errbuf, sizeof(errbuf));
+    ok = autotune_engine_run(0, 0.5f, AUTOTUNE_RULE_SIMC, errbuf, sizeof(errbuf));
 
     TEST_CHECK(ok, "with the atomic gate allowing it, the identical setup must succeed");
     TEST_CHECK(s_heat_zone_claim_begin_calls == 2, "the gate is attempted exactly once per autotune_engine_run() call");
@@ -1030,6 +1407,13 @@ void run_test_autotune_engine_prestart(void)
     // STEPPING-loop tests LAST -- see that section's header comment: these
     // are the only tests here that call autotune_engine_start(), which
     // would invalidate the "before start" premise of everything above it.
+    test_run_rejects_relay_only_rules_on_step_path();
+    test_step_run_accepts_simc_and_cohen_coon_and_stores_the_rule();
+    test_finalize_fit_uses_the_requested_rule();
+    test_finalize_fit_persists_valid_cross_gain_cells();
+    test_finalize_fit_skips_a_valid_fit_with_out_of_range_gain();
+    test_finalize_fit_persists_nothing_on_an_invalid_direct_fit();
+    test_next_run_clears_prior_runs_refusal();
     test_step_no_ceiling_flat_reading_trips_guard1();
     test_step_max_temp_configured_flat_reading_still_trips_guard1();
     test_step_no_ceiling_rising_reading_does_not_trip();

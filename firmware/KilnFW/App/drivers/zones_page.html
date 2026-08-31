@@ -112,6 +112,11 @@
     font-weight: normal; margin-right: 1em; margin-top: 0.4em; }
   .row2 { display: flex; gap: 0.7em; }
   .row2 > div { flex: 1; }
+  /* One number input per neighbouring zone (zoneBlock()'s couplingHtml) --
+     same flex-row-of-cells shape as .row2 above, but flex-wrap since the
+     cell count varies with thermoCount (0-2 cells, not always 3 like Kp/Ki/Kd). */
+  .couplingCells { display: flex; flex-wrap: wrap; gap: 0.7em; }
+  .couplingCells > div { flex: 1; min-width: 6em; }
   /* min-height now shared via theme.css's `button {}` rule (UI_PLAN.md
      Web item 2). */
   button { margin-top: 1em; padding: 0.7em 1.5em; font-size: 1em;
@@ -378,13 +383,16 @@ across a band twice this wide)</label>
      never refused should show nothing extra here. -->
 <p id="atRefusal" class="verdict-bad" style="display:none;"></p>
 
-<h3>Cross-zone coupling matrix</h3>
+<h3>Cross-zone coupling matrix (measured this session)</h3>
 <p class="hint">Filled in one row at a time: when zone i's autotune step test
 runs, every zone's response to it is logged, not just zone i's -- so K[i][j]
 is zone j's steady-state gain (&deg;C per unit duty) to zone i's step. The
 diagonal is each zone's own direct gain (same number the Autotune result
 above shows). Empty until that row's zone has completed a run this session
-(not persisted across reboot).</p>
+(not persisted across reboot). This is what autotune <i>measured</i> --
+it is not saved and does not feed the controller; the "Cross-zone coupling
+to feedforward" field in each zone's settings above is what actually gets
+<i>used</i>, and is only updated when you copy a number over and save.</p>
 <!-- UI_PLAN.md section 3, Web item 1: wrapper, not the table itself -- the
      <table class="coupling"> is built by buildCouplingTable-style JS below
      (see line ~612's html += '<table class="coupling">...') and replaces
@@ -573,14 +581,39 @@ function zoneBlock(z, i, relayCount, thermoCount) {
      whole-page submit sets it to zero, so without this a save here would
      quietly reassign the zone to profile 0. */
   div.dataset.timingProfile = z.timing_profile || 0;
-  /* coupling_coeff/coupling_neighbor_zone: same echo-it-back reasoning as
-   * modelK/Tau/Dead above -- these are MEASURED (by autotune, PID_EXPANSION_
-   * PLAN.md 2c), not inherited from another zone's settings (3.5's "still not
-   * covered" list is about wiring; coupling is closer kin to the model, not
-   * to Kp/Ki/Kd), and not editable here, so a whole-page save must carry them
-   * back unchanged or an unrelated edit silently erases a measured value. */
-  div.dataset.couplingCoeff = z.coupling_coeff || 0;
-  div.dataset.couplingNeighbor = (z.coupling_neighbor_zone != null) ? z.coupling_neighbor_zone : 0;
+  /* 2026-08-30 (ZONES_CFG_VERSION 10->11): the single coupling_coeff/
+   * coupling_neighbor_zone pair became a directed row, coupling_c0..c{N-1}
+   * (zones_http.c's zone_cfg_t::coupling_coeff[] comment), one cell per
+   * OTHER zone -- "this zone's measured steady-state response, in
+   * degC per unit duty at zone j's heater". Unlike modelK/Tau/Dead above
+   * (autotune-only, no sensible operator entry), the feedforward needs a
+   * value per neighbour and there is no per-pair autotune step yet, so this
+   * IS an editable field per PID_EXPANSION_PLAN.md 2c -- one number input
+   * per other zone, diagonal omitted (self-gain is model_k_dc's job, and
+   * zones_http.c refuses a nonzero diagonal outright). Values are
+   * non-negative -- the feedforward's own sign carries the direction (see
+   * zone_cfg_t::coupling_coeff's doc comment) -- so min="0" here matches
+   * ZONE_COUPLING_COEFF_MAX's server-side range check. Omitting a cell from
+   * the save preserves its stored value (parse_zone_fields()'s per-cell
+   * "omit preserves" convention), so a zone that scrolls out of view or a
+   * client that predates a given neighbour must not silently erase a
+   * measurement -- see saveAll()'s per-cell push below, which always sends
+   * every rendered cell explicitly instead of relying on that fallback. */
+  var couplingHtml = '<label>Cross-zone coupling to feedforward (&deg;C per unit duty at ' +
+    'the other zone\'s heater; measured, not a ratio -- 0 = no coupling measured/assumed)</label>';
+  if (thermoCount <= 1) {
+    couplingHtml += '<p class="hint">Only one zone configured -- nothing to couple against.</p>';
+  } else {
+    couplingHtml += '<div class="couplingCells">';
+    for (var cj = 0; cj < thermoCount; cj++) {
+      if (cj === i) { continue; /* diagonal: not editable, always 0 -- model_k_dc's job */ }
+      var cellVal = (z['coupling_c' + cj] != null) ? z['coupling_c' + cj] : 0;
+      couplingHtml += '<div><label>from zone ' + cj + '</label><input type="number" ' +
+        'class="couplingcell" data-neighbor="' + cj + '" min="0" step="0.01" value="' +
+        cellVal + '"></div>';
+    }
+    couplingHtml += '</div>';
+  }
   var modelHtml = '<label>Identified plant model</label><p class="hint">' +
     (haveModel
       ? 'K = ' + k.toFixed(1) + ' &deg;C/duty, tau = ' + tau.toFixed(0) + ' s, dead time = ' +
@@ -598,6 +631,7 @@ function zoneBlock(z, i, relayCount, thermoCount) {
         '<div><label>Kd</label><input type="number" step="0.01" class="kd" value="' + z.pid_kd + '"></div>' +
       '</div>' +
       modelHtml +
+      couplingHtml +
       '<div class="fuzzyPanel">' +
         FUZZY_RULE_TABLE_HTML +
         '<label>Adjustment strength (0-100%) -- how far the fuzzy layer may move Kp/Ki/Kd ' +
@@ -1118,7 +1152,7 @@ function renderZones() {
      * channel i" -- so a freshly grown thermoCount starts a new zone off
      * reading a real channel instead of nothing. */
     var z = current.zones[i] || { name: '', relay_mask: 0, thermo_mask: (1 << i), cal_offset_c: 0, pid_kp: 0, pid_ki: 0, pid_kd: 0, max_ramp_c_per_hr: 0, sanity_rate_c_per_min: 0, control_mode: 0, max_temp_c: 0, min_temp_c: -20, heater_window_ms: 0, heater_min_on_ms: 0, heater_min_off_ms: 0, cross_zone_max_delta_c: 0, model_k_dc: 0, model_tau_s: 0, model_dead_time_s: 0, guard_wrong_dir_window_s: 0, guard_wrong_dir_rate_c_per_min: 0, guard_off_settle_s: 0, guard_runaway_rate_c_per_min: 0, guard_runaway_margin_c: 0, guard_drift_period_s: 0, guard_sensor_fault_debounce_ticks: 0, guard_frozen_window_s: 0, timing_profile: 0, tc_type: 3 /* Type K, matching MAX31856.c's/the NVS migration's default */,
-      fuzzy_strength_pct: 30, coupling_coeff: 0, coupling_neighbor_zone: 0,
+      fuzzy_strength_pct: 30, /* coupling_c0.. omitted: zoneBlock() defaults each missing cell to 0 */
       settings_source: (i === 0 ? 255 : 0) /* zones_http.c's ZONE_SETTINGS_SOURCE_CUSTOM; PID_EXPANSION_PLAN.md 3.5's "default same as zone 0" */ };
     el.appendChild(zoneBlock(z, i, relayCount, thermoCount));
   }
@@ -1380,8 +1414,16 @@ document.getElementById('saveBtn').addEventListener('click', function () {
     params.push('z' + i + '_k=' + div.dataset.modelK);
     params.push('z' + i + '_tau=' + div.dataset.modelTau);
     params.push('z' + i + '_deadtime=' + div.dataset.modelDead);
-    params.push('z' + i + '_coupling_coeff=' + div.dataset.couplingCoeff);
-    params.push('z' + i + '_coupling_neighbor=' + div.dataset.couplingNeighbor);
+    /* Per-cell, matching parse_zone_fields()'s z%u_coupling_c%u keys --
+       always sent explicitly for every cell this page rendered (see
+       zoneBlock()'s own couplingHtml comment) rather than leaning on the
+       server's "omit preserves" fallback, so a save from this page never
+       depends on that fallback to avoid erasing a measurement. */
+    var couplingCells = div.querySelectorAll('.couplingcell');
+    for (var cc = 0; cc < couplingCells.length; cc++) {
+      var ccEl = couplingCells[cc];
+      params.push('z' + i + '_coupling_c' + ccEl.dataset.neighbor + '=' + ccEl.value);
+    }
     /* settings_source itself: this zone's OWN dropdown choice (255/CUSTOM
        for zone 0, which has no dropdown) -- always sent explicitly, per
        zones_http.c's comment that an omission here must NOT be read as

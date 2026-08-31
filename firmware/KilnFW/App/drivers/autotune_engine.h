@@ -224,8 +224,18 @@ esp_err_t autotune_engine_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_
  * cold). Refuses (false, err_msg filled) if: zone_index has no relay mask
  * configured, step_duty is out of (0, 1], profile_executor has a run active
  * (RUNNING/PAUSED, any zone -- TODO.md 6A.4: "cannot run while a profile
- * runs"), or this engine is already SETTLING/STEPPING. */
-bool autotune_engine_run(uint8_t zone_index, float step_duty, char *err_msg, size_t err_cap);
+ * runs"), or this engine is already SETTLING/STEPPING.
+ *
+ * rule selects the tuning rule finalize_fit() applies to the fitted FOPDT
+ * model once the step completes: AUTOTUNE_RULE_SIMC (the default -- pass it
+ * explicitly, there is no "0 means default" magic here) or
+ * AUTOTUNE_RULE_COHEN_COON, opt-in only, see PID_EXPANSION_PLAN.md Phase 1 /
+ * pid_autotune.h's header comment on why it must never become the default on
+ * a kiln. AUTOTUNE_RULE_ZIEGLER_NICHOLS and AUTOTUNE_RULE_TYREUS_LUYBEN are
+ * relay-only (they need Ku/Tu, not a FOPDT model) and are refused here with
+ * err_msg filled, the mirror image of autotune_engine_run_relay() refusing
+ * AUTOTUNE_RULE_SIMC. */
+bool autotune_engine_run(uint8_t zone_index, float step_duty, autotune_rule_t rule, char *err_msg, size_t err_cap);
 
 /* Starts a relay-feedback (Astrom-Hagglund) test on zone_index, oscillating
  * the zone around setpoint_c.

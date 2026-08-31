@@ -125,11 +125,25 @@ esp_err_t httpd_resp_set_hdr(httpd_req_t *r, const char *field, const char *valu
    Same local-stub convention as httpd_resp_set_hdr() just above. */
 void web_set_asset_cache_headers(httpd_req_t *r);
 void web_set_asset_cache_headers(httpd_req_t *r) { (void)r; }
+/* PID_EXPANSION_PLAN.md Phase 4 round-trip test support: captures the last
+ * body httpd_resp_send() was asked to send, so a test can inspect what
+ * zones_get_handler() actually emitted -- every prior test in this file only
+ * ever calls parse_zone_fields()/zones_post_handler(), never
+ * zones_get_handler(), so this capture is inert for them. */
+static char s_last_resp_body[8192];
+static size_t s_last_resp_len;
 esp_err_t httpd_resp_send(httpd_req_t *r, const char *buf, long long buf_len)
 {
     (void)r;
-    (void)buf;
-    (void)buf_len;
+    size_t n = (buf_len < 0) ? 0 : (size_t)buf_len;
+    if (n >= sizeof(s_last_resp_body)) {
+        n = sizeof(s_last_resp_body) - 1;
+    }
+    if (buf && n > 0) {
+        memcpy(s_last_resp_body, buf, n);
+    }
+    s_last_resp_body[n] = '\0';
+    s_last_resp_len = n;
     return ESP_OK;
 }
 esp_err_t httpd_resp_send_chunk(httpd_req_t *r, const char *buf, size_t buf_len)
@@ -1563,6 +1577,769 @@ static void test_validate_rejects_out_of_range_v8_fields(void)
         TEST_CHECK(!validate_zones_cfg(&cfg, &reason),
                   "a zone's timing_profile referencing a profile past timing_profile_count is rejected");
     }
+}
+
+// ---------------------------------------------------------------------------
+// PID_EXPANSION_PLAN.md Phase 2/4 (2026-08-30): ZONE_CONTROL_MODE_PID_FUZZY,
+// fuzzy_strength_pct/coupling_coeff/coupling_neighbor_zone/settings_source,
+// and the ZONES_CFG_VERSION 9->10 migration. Every test below was run once
+// against a deliberately-broken version of the change it covers (see the
+// task report) to confirm it can actually fail, per this file's own
+// "negative-test every check" convention.
+// ---------------------------------------------------------------------------
+
+// THE migration test this bump is about: a v9 blob (predating all four new
+// fields) must upgrade losslessly -- every pre-existing field survives
+// unchanged, the three new floats read as 0 (their documented "not
+// configured" default), and settings_source lands at ZONE_SETTINGS_SOURCE_CUSTOM
+// (0xFF) for EVERY zone, never 0 -- 0 would silently mean "copies zone 0's
+// settings" and would be overwritten by zone 0's numbers on the next save
+// once Phase 5's resolve-on-save logic lands (a later pass). This test would
+// FAIL if convert_zone_v9() ever left settings_source at its zero-initialized
+// default instead of explicitly setting it.
+static void test_nvs_load_from_v9_blob_upconverts_new_fields_default_and_settings_source_is_custom(void)
+{
+    TEST_SECTION("nvs_load_from -- a v9 blob upconverts to v10: new float fields default to 0, "
+                 "settings_source lands at CUSTOM (0xFF) for every zone (NOT 0), and every "
+                 "pre-existing field survives unchanged");
+    nvs_test_enable(true);
+    nvs_test_clear();
+
+    zones_cfg_v9_t src;
+    memset(&src, 0, sizeof(src));
+    src.version = 9;
+    src.thermo_count = 3;
+    src.relay_count = 3;
+    src.continue_on_zone_trip = 1;
+    src.safety_tc_type = 3;
+    src.pc_link_abort_silence_ms = 45000.0f;
+    src.timing_profile_count = 1;
+    snprintf(src.timing_profiles[0].name, sizeof(src.timing_profiles[0].name), "Default");
+
+    src.zones[0].relay_mask = 0x01;
+    src.zones[0].thermo_mask = 0x01;
+    src.zones[0].tc_type = 3;
+    src.zones[0].control_mode = 2; /* PID -- a real, distinct, pre-existing operator setting */
+    src.zones[0].pid_kp = 2.5f;
+    src.zones[0].max_temp_c = 1300.0f;
+
+    src.zones[1].relay_mask = 0x02;
+    src.zones[1].thermo_mask = 0x02;
+    src.zones[1].max_temp_c = 1250.0f;
+
+    src.zones[2].relay_mask = 0x04;
+    src.zones[2].thermo_mask = 0x04;
+    src.zones[2].max_temp_c = 1200.0f;
+
+    src.crc32 = 0; /* v9's own CRC is not checked on the old-version path */
+
+    stage_zones_blob(&src, sizeof(src));
+
+    zones_cfg_t out_cfg;
+    bool found = false, valid = false;
+    esp_err_t err = nvs_load_from("kiln_nvs", &out_cfg, &found, &valid);
+
+    TEST_CHECK(err == ESP_OK, "no NVS error");
+    TEST_CHECK(found && valid, "a well-formed v9 blob must migrate to a valid current (v10) config");
+    TEST_CHECK(out_cfg.version == ZONES_CFG_VERSION, "migrated config is stamped the current version");
+
+    for (uint8_t i = 0; i < 3; i++) {
+        char msg[128];
+        snprintf(msg, sizeof(msg), "zones[%u].fuzzy_strength_pct defaults to 0 (not configured)", i);
+        TEST_CHECK_NEAR(out_cfg.zones[i].fuzzy_strength_pct, 0.0f, 1e-6, msg);
+        for (uint8_t j = 0; j < MAX31856_CHANNEL_COUNT; j++) {
+            snprintf(msg, sizeof(msg), "zones[%u].coupling_coeff[%u] defaults to 0 (no coupling measured)", i, j);
+            TEST_CHECK_NEAR(out_cfg.zones[i].coupling_coeff[j], 0.0f, 1e-6, msg);
+        }
+        snprintf(msg, sizeof(msg),
+                "zones[%u].settings_source lands at ZONE_SETTINGS_SOURCE_CUSTOM (0xFF), NOT 0 -- "
+                "0 would silently claim \"copies zone 0's settings\"", i);
+        TEST_CHECK(out_cfg.zones[i].settings_source == ZONE_SETTINGS_SOURCE_CUSTOM, msg);
+    }
+
+    // Pre-existing fields must survive the upgrade completely unchanged.
+    TEST_CHECK(out_cfg.thermo_count == 3 && out_cfg.relay_count == 3, "counts carried through");
+    TEST_CHECK(out_cfg.continue_on_zone_trip == 1, "continue_on_zone_trip carried through");
+    TEST_CHECK(out_cfg.safety_tc_type == 3, "safety_tc_type carried through");
+    TEST_CHECK_NEAR(out_cfg.pc_link_abort_silence_ms, 45000.0f, 1e-6, "pc_link_abort_silence_ms carried through");
+    TEST_CHECK(out_cfg.timing_profile_count == 1, "timing_profile_count carried through");
+    TEST_CHECK(strcmp(out_cfg.timing_profiles[0].name, "Default") == 0, "timing profile name carried through");
+
+    TEST_CHECK(out_cfg.zones[0].relay_mask == 0x01 && out_cfg.zones[1].relay_mask == 0x02 &&
+              out_cfg.zones[2].relay_mask == 0x04, "relay_mask must NOT be shifted for any zone");
+    TEST_CHECK(out_cfg.zones[0].thermo_mask == 0x01 && out_cfg.zones[1].thermo_mask == 0x02 &&
+              out_cfg.zones[2].thermo_mask == 0x04, "thermo_mask must NOT be shifted for any zone");
+    TEST_CHECK(out_cfg.zones[0].control_mode == 2, "zones[0].control_mode (PID) survives the upgrade");
+    TEST_CHECK_NEAR(out_cfg.zones[0].pid_kp, 2.5f, 1e-6, "zones[0].pid_kp survives the upgrade");
+    TEST_CHECK_NEAR(out_cfg.zones[0].max_temp_c, 1300.0f, 1e-6, "zones[0].max_temp_c survives");
+    TEST_CHECK_NEAR(out_cfg.zones[1].max_temp_c, 1250.0f, 1e-6, "zones[1].max_temp_c survives");
+    TEST_CHECK_NEAR(out_cfg.zones[2].max_temp_c, 1200.0f, 1e-6, "zones[2].max_temp_c survives");
+
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
+// ---------------------------------------------------------------------------
+// Same-day follow-up (2026-08-30): ZONES_CFG_VERSION 10->11 -- the single
+// coupling_coeff/coupling_neighbor_zone pair is replaced by a full directed
+// coupling_coeff[] row (bench-measured coupling is asymmetric AND
+// multi-neighbor; see zone_cfg_t's own doc comment). Every test below was
+// run once against a deliberately-broken version of the change it covers to
+// confirm it can actually fail, per this file's own "negative-test every
+// check" convention (see the task report for the specific break/restore
+// pairs).
+// ---------------------------------------------------------------------------
+
+// THE migration test this bump is about: a v10 blob's single
+// (coupling_coeff, coupling_neighbor_zone) pair must land in exactly the
+// right cell of the new row, every other cell (including the diagonal) 0,
+// and every other pre-existing v10 field survives unchanged. sizeof(src) is
+// zone_cfg_v10_t/zones_cfg_v10_t -- both frozen, historical types with their
+// own _Static_assert(sizeof(...) == N) in zones_http.c checked against a
+// HAND-COMPUTED byte count, never the live zone_cfg_t/zones_cfg_t (which by
+// now is already the v11 row-coupling shape) -- so staging with sizeof(src)
+// here stages a byte count independently verified to match the real v10
+// on-flash layout, not a number that happens to match today's struct.
+static void test_nvs_load_from_v10_blob_folds_single_pair_into_row_cell(void)
+{
+    TEST_SECTION("nvs_load_from -- a v10 blob upconverts to v11: coupling_coeff/coupling_neighbor_zone "
+                 "fold into the right coupling_coeff[] cell, every other cell (incl. diagonal) is 0, "
+                 "and every other pre-existing v10 field survives unchanged");
+    nvs_test_enable(true);
+    nvs_test_clear();
+
+    zones_cfg_v10_t src;
+    memset(&src, 0, sizeof(src));
+    src.version = 10;
+    src.thermo_count = 3;
+    src.relay_count = 3;
+    src.continue_on_zone_trip = 1;
+    src.safety_tc_type = 3;
+    src.pc_link_abort_silence_ms = 45000.0f;
+    src.timing_profile_count = 1;
+    snprintf(src.timing_profiles[0].name, sizeof(src.timing_profiles[0].name), "Default");
+
+    src.zones[0].relay_mask = 0x01;
+    src.zones[0].thermo_mask = 0x01;
+    src.zones[0].max_temp_c = 1300.0f;
+    src.zones[0].fuzzy_strength_pct = 40.0f;
+    src.zones[0].settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
+    /* zone 0's ONE storable neighbor before this pass: zone 2, coeff 6.75. */
+    src.zones[0].coupling_coeff = 6.75f;
+    src.zones[0].coupling_neighbor_zone = 2.0f;
+
+    src.zones[1].relay_mask = 0x02;
+    src.zones[1].thermo_mask = 0x02;
+    src.zones[1].max_temp_c = 1250.0f;
+    src.zones[1].settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
+    /* zone 1: no coupling ever measured on a v10 board -- coupling_coeff
+     * stays at its 0 default, same "not configured" meaning either side of
+     * the migration. */
+
+    src.zones[2].relay_mask = 0x04;
+    src.zones[2].thermo_mask = 0x04;
+    src.zones[2].max_temp_c = 1200.0f;
+    src.zones[2].settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
+
+    src.crc32 = 0; /* v10's own CRC is not checked on the old-version path */
+
+    stage_zones_blob(&src, sizeof(src));
+
+    zones_cfg_t out_cfg;
+    bool found = false, valid = false;
+    esp_err_t err = nvs_load_from("kiln_nvs", &out_cfg, &found, &valid);
+
+    TEST_CHECK(err == ESP_OK, "no NVS error");
+    TEST_CHECK(found && valid, "a well-formed v10 blob must migrate to a valid current (v11) config");
+    TEST_CHECK(out_cfg.version == ZONES_CFG_VERSION, "migrated config is stamped the current version");
+
+    // The one cell that must be populated: zone 0's row, column 2.
+    TEST_CHECK_NEAR(out_cfg.zones[0].coupling_coeff[2], 6.75f, 1e-6,
+                    "zone 0's v10 (coeff, neighbor=2) pair lands in coupling_coeff[2]");
+    // Every other cell of zone 0's row, including its own diagonal, is 0.
+    TEST_CHECK_NEAR(out_cfg.zones[0].coupling_coeff[0], 0.0f, 1e-6, "zone 0's diagonal cell is 0");
+    TEST_CHECK_NEAR(out_cfg.zones[0].coupling_coeff[1], 0.0f, 1e-6, "zone 0's untouched neighbor cell (1) is 0");
+    // Zones 1 and 2 never had a v10 coupling pair -- their whole rows are 0.
+    for (uint8_t j = 0; j < MAX31856_CHANNEL_COUNT; j++) {
+        char msg[96];
+        snprintf(msg, sizeof(msg), "zone 1's untouched coupling_coeff[%u] is 0", j);
+        TEST_CHECK_NEAR(out_cfg.zones[1].coupling_coeff[j], 0.0f, 1e-6, msg);
+        snprintf(msg, sizeof(msg), "zone 2's untouched coupling_coeff[%u] is 0", j);
+        TEST_CHECK_NEAR(out_cfg.zones[2].coupling_coeff[j], 0.0f, 1e-6, msg);
+    }
+
+    // Pre-existing v10 fields must survive the upgrade completely unchanged.
+    TEST_CHECK(out_cfg.thermo_count == 3 && out_cfg.relay_count == 3, "counts carried through");
+    TEST_CHECK(out_cfg.continue_on_zone_trip == 1, "continue_on_zone_trip carried through");
+    TEST_CHECK_NEAR(out_cfg.pc_link_abort_silence_ms, 45000.0f, 1e-6, "pc_link_abort_silence_ms carried through");
+    TEST_CHECK(strcmp(out_cfg.timing_profiles[0].name, "Default") == 0, "timing profile name carried through");
+    TEST_CHECK(out_cfg.zones[0].relay_mask == 0x01 && out_cfg.zones[1].relay_mask == 0x02 &&
+              out_cfg.zones[2].relay_mask == 0x04, "relay_mask must NOT be shifted for any zone");
+    TEST_CHECK_NEAR(out_cfg.zones[0].fuzzy_strength_pct, 40.0f, 1e-6, "zones[0].fuzzy_strength_pct survives");
+    TEST_CHECK_NEAR(out_cfg.zones[0].max_temp_c, 1300.0f, 1e-6, "zones[0].max_temp_c survives");
+    TEST_CHECK_NEAR(out_cfg.zones[1].max_temp_c, 1250.0f, 1e-6, "zones[1].max_temp_c survives");
+    TEST_CHECK_NEAR(out_cfg.zones[2].max_temp_c, 1200.0f, 1e-6, "zones[2].max_temp_c survives");
+    TEST_CHECK(out_cfg.zones[0].settings_source == ZONE_SETTINGS_SOURCE_CUSTOM,
+              "zones[0].settings_source (already a real v10 field) is carried through verbatim, "
+              "not re-defaulted the way v9's migration must");
+
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
+// 2026-08-31 defect fix: a v10 blob whose single coupling pair is
+// self-referencing (coupling_neighbor_zone == the zone's OWN index) must
+// have that pair dropped, not folded into the diagonal cell. Before this
+// fix convert_zone_v10() had no chan_idx parameter to compare against (unlike
+// convert_zone_v1(), which has always taken one and skipped exactly this
+// case), so a self-referencing pair wrote a nonzero diagonal cell;
+// validate_zones_cfg() rejects any nonzero diagonal, and decode_zones_blob()
+// then returns CORRUPT for the WHOLE migrated struct -- discarding the
+// entire commissioned config over one stray self-reference. Unreachable
+// today (no board has ever held a v10 blob with a self-referencing pair),
+// but cheap to guard and this proves the guard actually does something.
+static void test_nvs_load_from_v10_blob_self_referencing_pair_is_dropped(void)
+{
+    TEST_SECTION("nvs_load_from -- a v10 blob with a self-referencing coupling pair "
+                 "(neighbor == own zone index) is dropped, not folded into the diagonal, "
+                 "so the migrated config is still VALID rather than CORRUPT");
+    nvs_test_enable(true);
+    nvs_test_clear();
+
+    zones_cfg_v10_t src;
+    memset(&src, 0, sizeof(src));
+    src.version = 10;
+    src.thermo_count = 3;
+    src.relay_count = 3;
+    src.safety_tc_type = 3;
+    src.timing_profile_count = 1;
+    snprintf(src.timing_profiles[0].name, sizeof(src.timing_profiles[0].name), "Default");
+
+    src.zones[0].relay_mask = 0x01;
+    src.zones[0].thermo_mask = 0x01;
+    src.zones[0].max_temp_c = 1300.0f;
+    src.zones[0].settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
+
+    src.zones[1].relay_mask = 0x02;
+    src.zones[1].thermo_mask = 0x02;
+    src.zones[1].max_temp_c = 1250.0f;
+    src.zones[1].settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
+    /* the defect: zone 1's stored pair points at itself. */
+    src.zones[1].coupling_coeff = 9.5f;
+    src.zones[1].coupling_neighbor_zone = 1.0f;
+
+    src.zones[2].relay_mask = 0x04;
+    src.zones[2].thermo_mask = 0x04;
+    src.zones[2].max_temp_c = 1200.0f;
+    src.zones[2].settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
+
+    src.crc32 = 0;
+
+    stage_zones_blob(&src, sizeof(src));
+
+    zones_cfg_t out_cfg;
+    bool found = false, valid = false;
+    esp_err_t err = nvs_load_from("kiln_nvs", &out_cfg, &found, &valid);
+
+    TEST_CHECK(err == ESP_OK, "no NVS error");
+    TEST_CHECK(found && valid,
+              "a v10 blob with a self-referencing coupling pair must still migrate to a VALID "
+              "config, not be discarded as CORRUPT");
+    TEST_CHECK(out_cfg.version == ZONES_CFG_VERSION, "migrated config is stamped the current version");
+    for (uint8_t j = 0; j < MAX31856_CHANNEL_COUNT; j++) {
+        char msg[96];
+        snprintf(msg, sizeof(msg), "zone 1's self-referencing pair leaves coupling_coeff[%u] at 0", j);
+        TEST_CHECK_NEAR(out_cfg.zones[1].coupling_coeff[j], 0.0f, 1e-6, msg);
+    }
+
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
+// Full end-to-end chain: a genuine v9 blob (predates coupling entirely) must
+// still land on a valid, all-zero-coupling v11 config after going through
+// BOTH migration steps back-to-back (v9->v10->v11 inside one
+// convert_versioned_blob_to_current(9, ...) call, since case 9 lands
+// directly on CURRENT format rather than stopping at v10). Exists
+// separately from the two single-step tests above because a chain bug
+// (e.g. an intermediate value never making it into the final struct) is
+// exactly the kind of thing that would NOT show up testing each hop in
+// isolation.
+static void test_nvs_load_from_v9_blob_chains_through_v10_to_v11_with_zero_coupling(void)
+{
+    TEST_SECTION("nvs_load_from -- a v9 blob migrates through v10 to v11 (end-to-end): valid, "
+                 "current version, and an all-zero coupling row (v9 never had ANY coupling data)");
+    nvs_test_enable(true);
+    nvs_test_clear();
+
+    zones_cfg_v9_t src;
+    memset(&src, 0, sizeof(src));
+    src.version = 9;
+    src.thermo_count = 3;
+    src.relay_count = 3;
+    src.timing_profile_count = 1;
+    snprintf(src.timing_profiles[0].name, sizeof(src.timing_profiles[0].name), "Default");
+    src.zones[0].relay_mask = 0x01;
+    src.zones[0].thermo_mask = 0x01;
+    src.zones[1].relay_mask = 0x02;
+    src.zones[1].thermo_mask = 0x02;
+    src.zones[2].relay_mask = 0x04;
+    src.zones[2].thermo_mask = 0x04;
+    src.crc32 = 0;
+
+    stage_zones_blob(&src, sizeof(src));
+
+    zones_cfg_t out_cfg;
+    bool found = false, valid = false;
+    esp_err_t err = nvs_load_from("kiln_nvs", &out_cfg, &found, &valid);
+
+    TEST_CHECK(err == ESP_OK, "no NVS error");
+    TEST_CHECK(found && valid, "a well-formed v9 blob must migrate all the way to a valid v11 config");
+    TEST_CHECK(out_cfg.version == ZONES_CFG_VERSION, "migrated config is stamped the current version");
+    for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
+        for (uint8_t j = 0; j < MAX31856_CHANNEL_COUNT; j++) {
+            char msg[96];
+            snprintf(msg, sizeof(msg), "zones[%u].coupling_coeff[%u] is 0 (v9 has no coupling data at all)", i, j);
+            TEST_CHECK_NEAR(out_cfg.zones[i].coupling_coeff[j], 0.0f, 1e-6, msg);
+        }
+    }
+
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
+static void test_validate_accepts_control_mode_pid_fuzzy_rejects_past_it(void)
+{
+    TEST_SECTION("validate_zones_cfg / zones_config_set_control_mode -- ZONE_CONTROL_MODE_PID_FUZZY "
+                 "(3) is accepted, 4 is still rejected");
+    {
+        zones_cfg_t cfg;
+        make_minimal_valid_cfg(&cfg);
+        cfg.zones[0].control_mode = (uint8_t)ZONE_CONTROL_MODE_PID_FUZZY;
+        const char *reason = NULL;
+        TEST_CHECK(validate_zones_cfg(&cfg, &reason), "control_mode 3 (PID_FUZZY) validates");
+    }
+    {
+        zones_cfg_t cfg;
+        make_minimal_valid_cfg(&cfg);
+        cfg.zones[0].control_mode = 4;
+        const char *reason = NULL;
+        TEST_CHECK(!validate_zones_cfg(&cfg, &reason), "control_mode 4 is still out of range and rejected");
+    }
+
+    // zones_config_set_control_mode() enforces the identical bound. Its
+    // success path calls nvs_save(), which needs the NVS stub armed (same
+    // convention every other setter test in this file that persists uses).
+    {
+        nvs_test_enable(true);
+        nvs_test_clear();
+        s_zones.cfg.thermo_count = 1;
+        TEST_CHECK(zones_config_set_control_mode(0, ZONE_CONTROL_MODE_PID_FUZZY),
+                  "zones_config_set_control_mode(PID_FUZZY) is accepted");
+        zone_control_mode_t got;
+        TEST_CHECK(zones_config_get_control_mode(0, &got) && got == ZONE_CONTROL_MODE_PID_FUZZY,
+                  "the accepted mode reads back correctly");
+        TEST_CHECK(!zones_config_set_control_mode(0, (zone_control_mode_t)4),
+                  "zones_config_set_control_mode(4) is refused");
+        nvs_test_enable(false);
+        nvs_test_clear();
+    }
+}
+
+static void test_post_mode_pid_fuzzy_accepted_by_parser(void)
+{
+    TEST_SECTION("parse_zone_fields -- z0_mode=3 (PID_FUZZY) is accepted, z0_mode=4 is refused (0-3)");
+    char body3[512];
+    snprintf(body3, sizeof(body3),
+             "z0_name=Top&z0_tctype=2&z0_relay_mask=1&z0_thermo_mask=1&"
+             "z0_cal=0&z0_kp=1&z0_ki=0&z0_kd=0&z0_ramp=100&z0_sanity=0&z0_mode=3&"
+             "z0_maxtemp=1300&z0_mintemp=-20&z0_window=0&z0_minon=0&z0_minoff=0&"
+             "z0_timingprofile=0");
+    zone_cfg_t current = make_stored_zone();
+    zone_cfg_t out;
+    memset(&out, 0, sizeof(out));
+    const char *err_reason = "unset";
+    bool ok = parse_zone_fields(body3, 0, 1, 4, 1, &current, &out, &err_reason);
+    TEST_CHECK(ok, "z0_mode=3 (PID_FUZZY) must be accepted");
+    TEST_CHECK(out.control_mode == (uint8_t)ZONE_CONTROL_MODE_PID_FUZZY, "the parsed mode is PID_FUZZY");
+
+    char body4[512];
+    snprintf(body4, sizeof(body4),
+             "z0_name=Top&z0_tctype=2&z0_relay_mask=1&z0_thermo_mask=1&"
+             "z0_cal=0&z0_kp=1&z0_ki=0&z0_kd=0&z0_ramp=100&z0_sanity=0&z0_mode=4&"
+             "z0_maxtemp=1300&z0_mintemp=-20&z0_window=0&z0_minon=0&z0_minoff=0&"
+             "z0_timingprofile=0");
+    memset(&out, 0, sizeof(out));
+    err_reason = "unset";
+    ok = parse_zone_fields(body4, 0, 1, 4, 1, &current, &out, &err_reason);
+    TEST_CHECK(!ok, "z0_mode=4 must still be refused -- appending PID_FUZZY did not widen the ceiling further");
+    TEST_CHECK(err_reason && strstr(err_reason, "control_mode") != NULL, "the refusal names the field");
+}
+
+/* One clean body with only the field-under-test varied, mirroring
+ * post_body_with_minon()'s own pattern above. */
+static bool post_body_with_fuzzy_strength(const char *literal, const char **err_reason_out, float *out_value)
+{
+    char body[600];
+    snprintf(body, sizeof(body),
+             "z0_name=Top&z0_tctype=2&z0_relay_mask=1&z0_thermo_mask=1&"
+             "z0_cal=0&z0_kp=1&z0_ki=0&z0_kd=0&z0_ramp=100&z0_sanity=0&z0_mode=3&"
+             "z0_maxtemp=1300&z0_mintemp=-20&z0_window=0&z0_minon=0&z0_minoff=0&"
+             "z0_timingprofile=0&z0_fuzzy_strength=%s",
+             literal);
+    zone_cfg_t current = make_stored_zone();
+    zone_cfg_t out;
+    memset(&out, 0, sizeof(out));
+    const char *err_reason = "unset";
+    bool ok = parse_zone_fields(body, 0, 1, 4, 1, &current, &out, &err_reason);
+    if (err_reason_out) {
+        *err_reason_out = err_reason;
+    }
+    if (out_value) {
+        *out_value = out.fuzzy_strength_pct;
+    }
+    return ok;
+}
+
+static void test_post_fuzzy_strength_out_of_range_refused_not_clamped(void)
+{
+    TEST_SECTION("parse_zone_fields -- z0_fuzzy_strength=101 and =-1 are REFUSED, not clamped to 100/0");
+    const char *reason = "unset";
+    float value = -99.0f;
+
+    TEST_CHECK(!post_body_with_fuzzy_strength("101", &reason, &value),
+              "101 (just above the 0-100 range) must be refused outright");
+    TEST_CHECK(reason && strstr(reason, "fuzzy_strength_pct") != NULL, "the refusal names the field");
+
+    TEST_CHECK(!post_body_with_fuzzy_strength("-1", &reason, &value),
+              "-1 (just below the 0-100 range) must be refused outright");
+    TEST_CHECK(reason && strstr(reason, "fuzzy_strength_pct") != NULL, "the refusal names the field");
+
+    // Positive control: the boundary values themselves must still be accepted
+    // EXACTLY, proving a rejected 101/-1 is a real range check, not a
+    // bug that rejects everything.
+    TEST_CHECK(post_body_with_fuzzy_strength("0", &reason, &value), "0 is accepted");
+    TEST_CHECK_NEAR(value, 0.0f, 1e-6, "0 is stored as 0 exactly");
+    TEST_CHECK(post_body_with_fuzzy_strength("100", &reason, &value), "100 is accepted");
+    TEST_CHECK_NEAR(value, 100.0f, 1e-6, "100 is stored as 100 exactly");
+}
+
+/* Generic single-field body, so the three post-review refusals below can be
+ * exercised without one helper per field. */
+static bool post_body_with_extra(const char *extra_kv, const char **err_reason_out, zone_cfg_t *out_zone)
+{
+    char body[700];
+    snprintf(body, sizeof(body),
+             "z0_name=Top&z0_tctype=2&z0_relay_mask=1&z0_thermo_mask=1&"
+             "z0_cal=0&z0_kp=1&z0_ki=0&z0_kd=0&z0_ramp=100&z0_sanity=0&z0_mode=3&"
+             "z0_maxtemp=1300&z0_mintemp=-20&z0_window=0&z0_minon=0&z0_minoff=0&"
+             "z0_timingprofile=0&%s",
+             extra_kv);
+    zone_cfg_t current = make_stored_zone();
+    zone_cfg_t out;
+    memset(&out, 0, sizeof(out));
+    const char *err_reason = "unset";
+    bool ok = parse_zone_fields(body, 0, 1, 4, 1, &current, &out, &err_reason);
+    if (err_reason_out) *err_reason_out = err_reason;
+    if (out_zone) *out_zone = out;
+    return ok;
+}
+
+/* All three of these were found by review AFTER the phase was first called
+ * done, and each one silently accepted bad input rather than refusing it. */
+static void test_post_new_fields_present_but_unparseable_are_refused(void)
+{
+    TEST_SECTION("parse_zone_fields -- a PRESENT but empty/over-long new field is refused, not "
+                 "treated as omitted");
+    const char *reason = "unset";
+    zone_cfg_t out;
+
+    /* An empty value ("key=") makes http_form_find_field() return 0, and an
+     * over-long one returns -2. The original probe tested `> 0`, so BOTH
+     * fell into the preserve-on-omit branch: a 200 OK, the old value kept,
+     * and the operator told nothing. Only a genuinely absent key is an
+     * omission. */
+    TEST_CHECK(!post_body_with_extra("z0_fuzzy_strength=", &reason, &out),
+              "an empty z0_fuzzy_strength= is refused, not silently treated as omitted");
+    TEST_CHECK(!post_body_with_extra("z0_coupling_c1=", &reason, &out),
+              "an empty z0_coupling_c1= is refused");
+    TEST_CHECK(!post_body_with_extra(
+                   "z0_fuzzy_strength=999999999999999999999999999999999999", &reason, &out),
+              "an over-long z0_fuzzy_strength value is refused, not swallowed by the probe buffer");
+
+    /* Positive control: genuinely omitting the key still succeeds, so the
+     * above is a real present-vs-absent distinction and not a blanket
+     * rejection. */
+    TEST_CHECK(post_body_with_extra("z0_kp=1", &reason, &out),
+              "omitting the new fields entirely is still accepted (preserve-on-omit intact)");
+}
+
+// 2026-08-30 (ZONES_CFG_VERSION 10->11): coupling_neighbor_zone as a
+// separate field no longer exists -- "which neighbor" is now which
+// z%u_coupling_c%u key was posted, not a value. What replaces the old
+// integrality check is the diagonal rule: z0_coupling_c0 (zone 0's OWN
+// index) must be exactly 0, since a zone's response to its own heater is
+// model_k_dc, not a coupling cell.
+static void test_post_coupling_diagonal_must_be_zero(void)
+{
+    TEST_SECTION("parse_zone_fields -- z0_coupling_c0 (the diagonal) must be exactly 0, "
+                 "an off-diagonal cell accepts the normal range");
+    const char *reason = "unset";
+    zone_cfg_t out;
+
+    TEST_CHECK(!post_body_with_extra("z0_coupling_c0=1.5", &reason, &out),
+              "a nonzero diagonal cell is refused at the door");
+    TEST_CHECK(reason && strstr(reason, "coupling_coeff") != NULL, "the refusal names the field");
+
+    TEST_CHECK(post_body_with_extra("z0_coupling_c0=0", &reason, &out),
+              "a diagonal cell posted as exactly 0 is accepted (a no-op, not an error)");
+    TEST_CHECK_NEAR(out.coupling_coeff[0], 0.0f, 1e-6, "and reads back as 0");
+
+    TEST_CHECK(post_body_with_extra("z0_coupling_c2=8.25", &reason, &out),
+              "an off-diagonal cell in range is accepted");
+    TEST_CHECK_NEAR(out.coupling_coeff[2], 8.25f, 1e-6, "and is stored exactly");
+}
+
+static void test_post_settings_source_self_reference_refused(void)
+{
+    TEST_SECTION("parse_zone_fields -- a zone cannot claim 'same settings as' itself");
+    const char *reason = "unset";
+    zone_cfg_t out;
+
+    TEST_CHECK(!post_body_with_extra("z0_settings_source=0", &reason, &out),
+              "zone 0 pointing at zone 0 is the degenerate cycle and is refused");
+    TEST_CHECK(reason && strstr(reason, "settings_source") != NULL, "the refusal names the field");
+
+    /* Positive controls: CUSTOM and a different zone both still work, so the
+     * check is specifically self-reference and not a blanket refusal. */
+    TEST_CHECK(post_body_with_extra("z0_settings_source=255", &reason, &out),
+              "ZONE_SETTINGS_SOURCE_CUSTOM (0xFF) is still accepted");
+    TEST_CHECK(out.settings_source == 0xFF, "and is stored as CUSTOM");
+    TEST_CHECK(post_body_with_extra("z0_settings_source=1", &reason, &out),
+              "pointing at a DIFFERENT zone is still accepted");
+    TEST_CHECK(out.settings_source == 1, "and is stored as that zone index");
+}
+
+static void test_post_omitting_new_fields_preserves_stored_values(void)
+{
+    TEST_SECTION("parse_zone_fields -- omitting z0_fuzzy_strength/z0_coupling_coeff/"
+                 "z0_coupling_neighbor/z0_settings_source succeeds and PRESERVES the "
+                 "previously-stored values, never zeroing them");
+    char body[512];
+    snprintf(body, sizeof(body),
+             "z0_name=Top&z0_tctype=2&z0_relay_mask=1&z0_thermo_mask=1&"
+             "z0_cal=0&z0_kp=1&z0_ki=0&z0_kd=0&z0_ramp=100&z0_sanity=0&z0_mode=3&"
+             "z0_maxtemp=1300&z0_mintemp=-20&z0_window=0&z0_minon=0&z0_minoff=0&"
+             "z0_timingprofile=0"); // none of the four new fields present
+
+    zone_cfg_t current = make_stored_zone();
+    current.fuzzy_strength_pct = 42.0f;
+    current.coupling_coeff[1] = 5.0f;
+    current.coupling_coeff[2] = 7.5f;
+    current.settings_source = 1; /* "copies zone 1" -- a real, previously-chosen value */
+
+    zone_cfg_t out;
+    memset(&out, 0, sizeof(out));
+    const char *err_reason = "unset";
+    bool ok = parse_zone_fields(body, 0, 1, 4, 1, &current, &out, &err_reason);
+
+    TEST_CHECK(ok, "a POST omitting all four new fields must still succeed (optionality)");
+    TEST_CHECK_NEAR(out.fuzzy_strength_pct, 42.0f, 1e-6,
+                    "fuzzy_strength_pct must be PRESERVED, not zeroed, when omitted");
+    TEST_CHECK_NEAR(out.coupling_coeff[1], 5.0f, 1e-6,
+                    "coupling_coeff[1] must be PRESERVED, not zeroed, when omitted");
+    TEST_CHECK_NEAR(out.coupling_coeff[2], 7.5f, 1e-6,
+                    "coupling_coeff[2] must be PRESERVED, not zeroed, when omitted");
+    TEST_CHECK(out.settings_source == 1,
+              "settings_source must be PRESERVED at its previously-chosen value, not reset to CUSTOM "
+              "or zeroed to \"copies zone 0\"");
+}
+
+// End-to-end round trip through the real handlers: a POST carrying real
+// values for all four new fields, then a GET, must report exactly what was
+// posted. Uses run_zones_post() (the real zones_post_handler()) and
+// zones_get_handler() directly, with httpd_resp_send() captured by this
+// file's own stub above.
+static void test_post_then_get_round_trips_new_fields(void)
+{
+    TEST_SECTION("zones_post_handler -> zones_get_handler -- the four new fields round-trip exactly");
+
+    char body[900];
+    snprintf(body, sizeof(body),
+             "thermo_count=1&relay_count=1&" MINIMAL_TIMING_PROFILE_BODY
+             "&z0_name=Top&z0_tctype=2&z0_relay_mask=1&z0_thermo_mask=1&z0_timingprofile=0&"
+             "z0_cal=0&z0_kp=1&z0_ki=0&z0_kd=0&z0_ramp=0&z0_sanity=0&z0_mode=3&"
+             "z0_maxtemp=1300&z0_mintemp=-20&z0_window=0&z0_minon=0&z0_minoff=0&"
+             "z0_fuzzy_strength=12.5&z0_coupling_c1=1.5&z0_coupling_c2=3.25&"
+             "z0_settings_source=255");
+    run_zones_post(body);
+    TEST_CHECK(s_test_ok_called && !s_test_err_called, "the whole-page POST with new fields must be accepted");
+
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    esp_err_t err = zones_get_handler(&req);
+    TEST_CHECK(err == ESP_OK, "zones_get_handler must return ESP_OK");
+
+    TEST_CHECK(strstr(s_last_resp_body, "\"control_mode\":3") != NULL,
+              "GET reports the posted control_mode (PID_FUZZY)");
+    TEST_CHECK(strstr(s_last_resp_body, "\"fuzzy_strength_pct\":12.50") != NULL,
+              "GET reports the posted fuzzy_strength_pct exactly");
+    TEST_CHECK(strstr(s_last_resp_body, "\"coupling_c1\":1.5000") != NULL,
+              "GET reports the posted coupling_coeff[1] exactly");
+    TEST_CHECK(strstr(s_last_resp_body, "\"coupling_c2\":3.2500") != NULL,
+              "GET reports the posted coupling_coeff[2] exactly");
+    TEST_CHECK(strstr(s_last_resp_body, "\"coupling_c0\":0.0000") != NULL,
+              "GET reports the untouched diagonal cell as 0 (never omitted)");
+    TEST_CHECK(strstr(s_last_resp_body, "\"settings_source\":255") != NULL,
+              "GET reports the posted settings_source (CUSTOM) exactly");
+}
+
+// ---------------------------------------------------------------------------
+// zones_config_set_fuzzy_strength_pct / zones_config_get/set_coupling /
+// zones_config_get/set_settings_source -- new accessors backup_http.c's
+// import needs, added because parse_zone_fields() previously was the only
+// door onto these four fields. Same nvs_test_enable discipline as every other
+// setter test in this file: the setter writes RAM immediately either way, but
+// its return value (and thus TEST_CHECK) depends on nvs_save() succeeding.
+// ---------------------------------------------------------------------------
+
+static void test_fuzzy_strength_pct_setter_round_trip_and_bounds(void)
+{
+    TEST_SECTION("zones_config_set/get_fuzzy_strength_pct -- accepts in-range, refuses out-of-range");
+    nvs_test_enable(true);
+    nvs_test_clear();
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    s_zones.cfg.thermo_count = 1;
+
+    TEST_CHECK(zones_config_set_fuzzy_strength_pct(0, 55.5f), "55.5 is in range 0-100");
+    float out = -1.0f;
+    TEST_CHECK(zones_config_get_fuzzy_strength_pct(0, &out), "getter succeeds");
+    TEST_CHECK_NEAR(out, 55.5f, 1e-6, "the exact value set comes back out");
+
+    TEST_CHECK(!zones_config_set_fuzzy_strength_pct(0, 100.0001f), "just over 100 is refused");
+    TEST_CHECK(!zones_config_set_fuzzy_strength_pct(0, -0.0001f), "just under 0 is refused");
+    TEST_CHECK(zones_config_get_fuzzy_strength_pct(0, &out) && out == 55.5f,
+              "a refused setter call must not have changed the stored value (refuse, not clamp)");
+
+    TEST_CHECK(!zones_config_set_fuzzy_strength_pct(1, 10.0f), "zone_index >= thermo_count is refused");
+
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
+// 2026-08-30 (ZONES_CFG_VERSION 10->11): row-based, not a bundled pair --
+// see zones_config_get/set_coupling()'s own doc comment (zones_http.h).
+// THE test the whole 10->11 bump exists to make possible: two different
+// off-diagonal cells of the SAME row hold distinct, asymmetric values
+// simultaneously -- the bench-measured c(1->0)=10.887 / c(1->2)=3.332 pair
+// this task's own brief cites as the reason a single (coeff, neighbor) pair
+// could never represent this kiln's real coupling.
+static void test_coupling_row_whole_setter_round_trip_and_bounds(void)
+{
+    TEST_SECTION("zones_config_set/get_coupling -- whole row, diagonal must stay 0, "
+                 "multi-neighbor asymmetric values survive together");
+    nvs_test_enable(true);
+    nvs_test_clear();
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    s_zones.cfg.thermo_count = 3;
+
+    // The exact bench-measured asymmetric pair this whole change exists for.
+    float row[MAX31856_CHANNEL_COUNT] = {10.887f, 0.0f, 3.332f};
+    TEST_CHECK(zones_config_set_coupling(1, row), "zone 1's asymmetric two-neighbor row is accepted");
+    float out_row[MAX31856_CHANNEL_COUNT] = {-1.0f, -1.0f, -1.0f};
+    TEST_CHECK(zones_config_get_coupling(1, out_row), "getter succeeds");
+    TEST_CHECK_NEAR(out_row[0], 10.887f, 1e-6, "c(1->0) comes back exactly");
+    TEST_CHECK_NEAR(out_row[2], 3.332f, 1e-6, "c(1->2) comes back exactly, DISTINCT from c(1->0)");
+    TEST_CHECK(out_row[0] != out_row[2], "the whole point: two neighbors of one zone hold different values");
+    TEST_CHECK_NEAR(out_row[1], 0.0f, 1e-6, "the diagonal (zone 1's own cell) reads back as 0");
+
+    // A nonzero diagonal is refused outright, the whole row left untouched.
+    float bad_diag[MAX31856_CHANNEL_COUNT] = {10.887f, 1.0f, 3.332f};
+    TEST_CHECK(!zones_config_set_coupling(1, bad_diag), "a nonzero diagonal cell is refused");
+
+    // An out-of-range off-diagonal cell is refused outright too.
+    float bad_range[MAX31856_CHANNEL_COUNT] = {10.887f, 0.0f, ZONE_COUPLING_COEFF_MAX + 1.0f};
+    TEST_CHECK(!zones_config_set_coupling(1, bad_range), "an off-diagonal cell above ZONE_COUPLING_COEFF_MAX is refused");
+
+    TEST_CHECK(zones_config_get_coupling(1, out_row) && out_row[0] == 10.887f && out_row[2] == 3.332f,
+              "every refused whole-row call above left the previously-stored row untouched (refuse, not clamp)");
+
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
+// The single-cell setter autotune_engine.c's finalize_fit() uses to persist
+// one neighbor's measured coefficient without disturbing the others.
+//
+// Storage convention (2026-08-31 correction -- these two bench numbers were
+// previously both placed in zone 1's row, which is backwards): row index =
+// the AFFECTED zone (the one whose temperature the coefficient describes the
+// response of), column index = the STEPPED zone (the one whose heater was
+// perturbed to produce the measurement). The bench pair this file cites
+// elsewhere -- stepping zone 1's heater moves zone 0 by 10.887 and zone 2 by
+// 3.332 -- therefore lands in TWO DIFFERENT rows, both at column 1:
+// coupling_coeff[0][1] = 10.887 and coupling_coeff[2][1] = 3.332. It never
+// belonged in zone 1's own row at all.
+static void test_coupling_single_cell_setter_preserves_other_cells(void)
+{
+    TEST_SECTION("zones_config_set_coupling_cell -- updates ONE cell, leaves other rows alone, "
+                 "diagonal write of 0 is a harmless no-op, nonzero diagonal is refused");
+    nvs_test_enable(true);
+    nvs_test_clear();
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    s_zones.cfg.thermo_count = 3;
+
+    // row=affected, column=stepped: zone 0's response to zone 1's step, and
+    // zone 2's response to that SAME step -- two different rows, same column.
+    TEST_CHECK(zones_config_set_coupling_cell(0, 1, 10.887f), "zone 0's response to zone 1's step is set");
+    TEST_CHECK(zones_config_set_coupling_cell(2, 1, 3.332f), "zone 2's response to zone 1's step is set separately");
+    float row0[MAX31856_CHANNEL_COUNT] = {0};
+    float row2[MAX31856_CHANNEL_COUNT] = {0};
+    TEST_CHECK(zones_config_get_coupling(0, row0), "zone 0's getter succeeds");
+    TEST_CHECK(zones_config_get_coupling(2, row2), "zone 2's getter succeeds");
+    TEST_CHECK_NEAR(row0[1], 10.887f, 1e-6, "zone 0's cell survived zone 2's write");
+    TEST_CHECK_NEAR(row2[1], 3.332f, 1e-6, "and zone 2's cell is exactly what was set, in its OWN row");
+
+    TEST_CHECK(zones_config_set_coupling_cell(0, 0, 0.0f), "writing the diagonal to exactly 0 is accepted");
+    TEST_CHECK(!zones_config_set_coupling_cell(0, 0, 5.0f), "writing a NONZERO diagonal is refused");
+    TEST_CHECK(zones_config_get_coupling(0, row0) && row0[1] == 10.887f,
+              "the refused diagonal write left zone 0's other cell untouched");
+    TEST_CHECK(zones_config_get_coupling(2, row2) && row2[1] == 3.332f,
+              "zone 0's diagonal write did not cross into zone 2's row");
+
+    TEST_CHECK(!zones_config_set_coupling_cell(0, 1, ZONE_COUPLING_COEFF_MAX + 1.0f),
+              "a single cell above ZONE_COUPLING_COEFF_MAX is refused");
+    TEST_CHECK(zones_config_get_coupling(0, row0) && row0[1] == 10.887f,
+              "the refused cell write did not clamp or corrupt the previously-good value");
+
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
+static void test_settings_source_setter_round_trip_and_bounds(void)
+{
+    TEST_SECTION("zones_config_set/get_settings_source -- CUSTOM or a real other zone, self-reference refused");
+    nvs_test_enable(true);
+    nvs_test_clear();
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    s_zones.cfg.thermo_count = 3;
+
+    TEST_CHECK(zones_config_set_settings_source(0, 1), "zone 0 copying zone 1 is legal");
+    uint8_t out = 0;
+    TEST_CHECK(zones_config_get_settings_source(0, &out), "getter succeeds");
+    TEST_CHECK(out == 1, "the exact value set comes back out");
+
+    TEST_CHECK(zones_config_set_settings_source(0, ZONE_SETTINGS_SOURCE_CUSTOM), "0xFF (CUSTOM) is always legal");
+    TEST_CHECK(zones_config_get_settings_source(0, &out) && out == ZONE_SETTINGS_SOURCE_CUSTOM,
+              "CUSTOM round-trips exactly");
+
+    TEST_CHECK(!zones_config_set_settings_source(0, 0), "zone 0 cannot copy itself (self-reference refused)");
+    TEST_CHECK(!zones_config_set_settings_source(0, 3), "zone index 3 does not exist (thermo_count is 3, 0-2 valid)");
+    TEST_CHECK(zones_config_get_settings_source(0, &out) && out == ZONE_SETTINGS_SOURCE_CUSTOM,
+              "every refused call above left the stored value at CUSTOM (refuse, not clamp)");
+
+    nvs_test_enable(false);
+    nvs_test_clear();
 }
 
 // ---------------------------------------------------------------------------
@@ -3946,6 +4723,23 @@ void run_test_zones_http(void)
     test_nvs_load_from_v8_blob_with_distinct_zone_values_migrates_losslessly();
     test_nvs_load_from_v8_blob_upconverts_to_shared_default_profile();
     test_validate_rejects_out_of_range_v8_fields();
+
+    test_nvs_load_from_v9_blob_upconverts_new_fields_default_and_settings_source_is_custom();
+    test_nvs_load_from_v10_blob_folds_single_pair_into_row_cell();
+    test_nvs_load_from_v10_blob_self_referencing_pair_is_dropped();
+    test_nvs_load_from_v9_blob_chains_through_v10_to_v11_with_zero_coupling();
+    test_validate_accepts_control_mode_pid_fuzzy_rejects_past_it();
+    test_post_mode_pid_fuzzy_accepted_by_parser();
+    test_post_fuzzy_strength_out_of_range_refused_not_clamped();
+    test_post_omitting_new_fields_preserves_stored_values();
+    test_post_new_fields_present_but_unparseable_are_refused();
+    test_post_coupling_diagonal_must_be_zero();
+    test_post_settings_source_self_reference_refused();
+    test_post_then_get_round_trips_new_fields();
+    test_fuzzy_strength_pct_setter_round_trip_and_bounds();
+    test_coupling_row_whole_setter_round_trip_and_bounds();
+    test_coupling_single_cell_setter_preserves_other_cells();
+    test_settings_source_setter_round_trip_and_bounds();
 
     test_post_sanity_rate_bounds();
     test_validate_rejects_out_of_range_sanity_rate();

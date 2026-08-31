@@ -35,8 +35,15 @@ typedef enum {
  * note). One single blob slot only -- enough for one module's one key at a
  * time, which is all any test needs; a second concurrent key would need a
  * real per-(namespace,key) map this stub deliberately does not build. */
+/* 6144, not 2048: kiln_cfg_store.c's host test (test_kiln_cfg_store.c) needs
+ * to round-trip a REAL full-size kiln_cfg_store_blob_t (5420 bytes as of
+ * ZONES_CONFIG_BLOB_MAX_SIZE=640) and kiln_cfg_store_blob_v1_t (4396 bytes)
+ * through this stub to exercise nvs_load_store()'s migration path -- the
+ * exact path where those structs previously lived as oversized function
+ * locals and blew app_main's stack. A slot too small to hold them just
+ * makes that path silently untestable again. */
 static bool s_stub_nvs_enabled = false;
-static uint8_t s_stub_nvs_blob[2048];
+static uint8_t s_stub_nvs_blob[6144];
 static size_t s_stub_nvs_blob_len = 0;
 static bool s_stub_nvs_has_blob = false;
 
@@ -114,7 +121,22 @@ static inline esp_err_t nvs_get_blob(nvs_handle_t h, const char *key, void *out,
     if (!s_stub_nvs_enabled || !s_stub_nvs_has_blob) {
         return ESP_ERR_NVS_NOT_FOUND;
     }
-    if (!out || !len || *len < s_stub_nvs_blob_len) {
+    if (!len) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    /* Real nvs_get_blob()'s documented size-query idiom: out==NULL just
+     * reports the stored length via *len, no copy. kiln_cfg_store.c's
+     * nvs_load_store() relies on exactly this to size its v1-vs-current
+     * branch before reading the blob for real -- added when that path's
+     * host test (test_kiln_cfg_store.c) found this stub previously treated
+     * a NULL `out` as an error instead, which made every call into
+     * nvs_load_store() silently take the "unreadable, defaults stand"
+     * branch no matter what was staged. */
+    if (!out) {
+        *len = s_stub_nvs_blob_len;
+        return ESP_OK;
+    }
+    if (*len < s_stub_nvs_blob_len) {
         return ESP_ERR_INVALID_SIZE;
     }
     memcpy(out, s_stub_nvs_blob, s_stub_nvs_blob_len);

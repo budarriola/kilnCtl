@@ -35,11 +35,31 @@
 // ota_http_verify_request(), the update-mutex functions), so only
 // ota_http_check_interlocks() needs a body -- the rest are declarations
 // only, never referenced, and need none.
+#include <stdbool.h>
 #include <string.h>
+#include <stdlib.h>
 
 #include "test_common.h"
 
 #include "esp_err.h"
+
+// Test-only malloc seam for nvs_load_store()'s v1-migration-buffer
+// allocation (kiln_cfg_store.c:234ish, `malloc(sizeof(*v1))`) -- proves the
+// "malloc failure leaves defaults standing" branch without needing a real
+// out-of-memory condition. kiln_cfg_store_test_malloc() is defined BEFORE
+// the #define below takes effect, so it still calls the REAL malloc() on
+// the non-failing path; the #define only redirects calls made FROM
+// kiln_cfg_store.c (textually included right after it), never this
+// function's own body.
+static bool s_test_malloc_should_fail = false;
+static void *kiln_cfg_store_test_malloc(size_t n)
+{
+    if (s_test_malloc_should_fail) {
+        return NULL;
+    }
+    return malloc(n);
+}
+#define malloc kiln_cfg_store_test_malloc
 
 #include "../drivers/kiln_cfg_store.c"
 
@@ -544,6 +564,191 @@ static void test_store_full_rejected(void)
                                         "wrote anything");
 }
 
+// ---------------------------------------------------------------------------
+// nvs_load_store() coverage -- previously untested at any level: every test
+// above drives kiln_cfg_store_apply()'s own version-refuse logic against the
+// stub zones_config_import_blob(), never nvs_load_store()'s SEPARATE
+// version/size handling for the on-flash kiln_cfg_store_blob_t itself. That
+// is exactly the function the opus review flagged: it declared a whole
+// kiln_cfg_store_blob_t (5420B) AND, on the v1 migration branch, a whole
+// kiln_cfg_store_blob_v1_t (4396B) as ordinary stack locals -- ~9816B against
+// app_main's 8192B CONFIG_ESP_MAIN_TASK_STACK_SIZE. Both are now `static`.
+// This host test cannot reproduce a stack overflow (MSVC's host stack is a
+// different size from an ESP32 task's, and there is no portable way to probe
+// remaining stack depth from standard C), so it cannot directly prove the
+// overflow is gone. What it CAN prove, and does: (1) nvs_load_store()'s v1
+// migration path still works end-to-end through a real nvs_get_blob() round
+// trip at full size (this exact path was never reached by any pre-existing
+// test), and (2) calling it twice in a row with DIFFERENT stored data
+// produces the SECOND call's data, not a mix with the first -- the static
+// buffers are function-scoped statics, not module-scoped ones the rest of
+// the file also writes, so nothing else should be able to bleed into them,
+// but a stack-to-static conversion is exactly the kind of change that can
+// silently reintroduce stale-read bugs if a future edit misuses the new
+// storage, and that failure mode IS directly testable.
+// ---------------------------------------------------------------------------
+
+static void build_v1_blob(kiln_cfg_store_blob_v1_t *out, int32_t active_id, uint8_t fill_byte)
+{
+    memset(out, 0, sizeof(*out));
+    out->version = 1;
+    out->active_id = active_id;
+    out->next_id = 2;
+    out->entries[0].in_use = 1;
+    out->entries[0].id = 1;
+    snprintf(out->entries[0].name, sizeof(out->entries[0].name), "V1 Config");
+    out->entries[0].blob_len = 8;
+    for (size_t i = 0; i < out->entries[0].blob_len; i++) {
+        out->entries[0].blob[i] = (uint8_t)(fill_byte + i);
+    }
+}
+
+static void test_nvs_load_store_migrates_v1_blob_at_full_size(void)
+{
+    TEST_SECTION("nvs_load_store() -- v1-sized blob migrates through a real nvs_get_blob() round trip");
+    reset_state();
+    nvs_test_enable(true);
+    nvs_test_clear();
+
+    kiln_cfg_store_blob_v1_t v1;
+    build_v1_blob(&v1, 1, 0x10);
+    nvs_handle_t h;
+    TEST_CHECK(nvs_open_from_partition(KILN_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h) == ESP_OK,
+               "stub nvs open succeeds once enabled");
+    TEST_CHECK(nvs_set_blob(h, NVS_KEY_STORE, &v1, sizeof(v1)) == ESP_OK,
+               "a full-size (4396B) v1 blob fits the stub's storage slot");
+    nvs_close(h);
+
+    nvs_load_store();
+
+    TEST_CHECK(s_store.version == KILN_CFG_STORE_VERSION, "migrated store carries the CURRENT version");
+    TEST_CHECK(s_store.active_id == 1, "active_id carried over from the v1 blob");
+    TEST_CHECK(s_store.entries[0].in_use == 1 && s_store.entries[0].id == 1,
+               "entry 0 migrated (in_use/id)");
+    TEST_CHECK(strcmp(s_store.entries[0].name, "V1 Config") == 0, "entry 0's name migrated");
+    TEST_CHECK(s_store.entries[0].blob_len == 8, "entry 0's blob_len migrated");
+    TEST_CHECK(s_store.entries[0].blob[0] == 0x10 && s_store.entries[0].blob[7] == 0x17,
+               "entry 0's blob bytes migrated verbatim");
+
+    nvs_test_enable(false);
+}
+
+static void test_nvs_load_store_second_call_does_not_see_first_calls_data(void)
+{
+    // NOTE on what this test does and does NOT prove: it does not, and
+    // cannot, distinguish `static` locals from ordinary stack locals for
+    // v1/loaded -- verified by hand (reverted both to plain locals, rebuilt,
+    // reran: this test and every other still passed 1230/1230). Both call
+    // nvs_get_blob() with an exact-size buffer that either fully overwrites
+    // it or errors out before s_store is touched, so there is no code path
+    // where a stale byte could survive a second call either way -- static
+    // vs. auto storage duration makes no observable difference here. What
+    // IS worth guarding, and what this actually tests, is a DIFFERENT
+    // regression: that nvs_load_store() genuinely re-reads from NVS on every
+    // call rather than caching/short-circuiting after the first (e.g. an
+    // "already migrated once, skip" shortcut that reads whatever the FIRST
+    // board's blob decoded to instead of the current one).
+    TEST_SECTION("nvs_load_store() -- back-to-back v1 migrations for two different boards each load "
+                 "THEIR OWN data, not a cached/stale result from the previous call");
+    reset_state();
+    nvs_test_enable(true);
+
+    // First load: a v1 blob for "board A".
+    nvs_test_clear();
+    kiln_cfg_store_blob_v1_t v1_a;
+    build_v1_blob(&v1_a, 1, 0xAA);
+    nvs_handle_t h;
+    nvs_open_from_partition(KILN_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
+    nvs_set_blob(h, NVS_KEY_STORE, &v1_a, sizeof(v1_a));
+    nvs_close(h);
+    nvs_load_store();
+    TEST_CHECK(s_store.active_id == 1 && s_store.entries[0].blob[0] == 0xAA,
+               "first call reads board A's data");
+
+    // Second load: DIFFERENT active_id and blob content for "board B", as if
+    // this were a fresh boot reading a different board's flash.
+    reset_to_defaults();
+    kiln_cfg_store_blob_v1_t v1_b;
+    build_v1_blob(&v1_b, 2, 0xBB);
+    nvs_open_from_partition(KILN_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
+    nvs_set_blob(h, NVS_KEY_STORE, &v1_b, sizeof(v1_b));
+    nvs_close(h);
+    nvs_load_store();
+    TEST_CHECK(s_store.active_id == 2, "second call reads board B's active_id, not board A's stale 1");
+    TEST_CHECK(s_store.entries[0].blob[0] == 0xBB,
+               "second call reads board B's blob bytes, not board A's stale 0xAA");
+
+    nvs_test_enable(false);
+}
+
+static void test_nvs_load_store_v1_migration_malloc_failure_leaves_defaults(void)
+{
+    // Proves nvs_load_store()'s malloc() failure path (kiln_cfg_store.c's
+    // v1-migration branch) is handled exactly like any other "unreadable"
+    // failure -- defaults stand, s_store is untouched by whatever bytes
+    // were sitting in NVS. Uses the kiln_cfg_store_test_malloc() seam
+    // #defined at the top of this file, which is the only reachable way to
+    // force this branch from a host test (no portable way to actually
+    // exhaust the heap deterministically).
+    TEST_SECTION("nvs_load_store() -- v1 migration buffer malloc() failure leaves defaults standing");
+    reset_state();
+    nvs_test_enable(true);
+    nvs_test_clear();
+
+    kiln_cfg_store_blob_v1_t v1;
+    build_v1_blob(&v1, 1, 0x99);
+    nvs_handle_t h;
+    nvs_open_from_partition(KILN_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
+    nvs_set_blob(h, NVS_KEY_STORE, &v1, sizeof(v1));
+    nvs_close(h);
+
+    s_test_malloc_should_fail = true;
+    nvs_load_store();
+    s_test_malloc_should_fail = false;
+
+    TEST_CHECK(s_store.version == KILN_CFG_STORE_VERSION, "defaults still carry the current version");
+    TEST_CHECK(s_store.active_id == KILN_CFG_NO_ACTIVE_ID,
+               "active_id is the default (NOT the v1 blob's 1) -- malloc failure did not migrate anything");
+    TEST_CHECK(s_store.entries[0].in_use == 0,
+               "entry 0 is NOT in_use -- the v1 blob's data never reached s_store");
+
+    nvs_test_enable(false);
+}
+
+static void test_nvs_load_store_current_version_full_size_happy_path(void)
+{
+    TEST_SECTION("nvs_load_store() -- a current-version, current-size blob loads on the fast path");
+    reset_state();
+    nvs_test_enable(true);
+    nvs_test_clear();
+
+    kiln_cfg_store_blob_t current;
+    memset(&current, 0, sizeof(current));
+    current.version = KILN_CFG_STORE_VERSION;
+    current.active_id = 7;
+    current.next_id = 9;
+    current.entries[0].in_use = 1;
+    current.entries[0].id = 7;
+    snprintf(current.entries[0].name, sizeof(current.entries[0].name), "Current");
+    current.entries[0].blob_len = 4;
+    current.entries[0].blob[0] = 0xDE;
+    current.entries[0].blob[3] = 0xEF;
+
+    nvs_handle_t h;
+    nvs_open_from_partition(KILN_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
+    TEST_CHECK(nvs_set_blob(h, NVS_KEY_STORE, &current, sizeof(current)) == ESP_OK,
+               "a full-size (5420B) current-version blob fits the stub's storage slot");
+    nvs_close(h);
+
+    nvs_load_store();
+
+    TEST_CHECK(s_store.active_id == 7, "current-version blob's active_id loaded as-is");
+    TEST_CHECK(s_store.entries[0].blob[0] == 0xDE && s_store.entries[0].blob[3] == 0xEF,
+               "current-version blob's bytes loaded as-is, no migration applied");
+
+    nvs_test_enable(false);
+}
+
 void run_test_kiln_cfg_store(void)
 {
     test_save_clone_apply_roundtrip();
@@ -559,4 +764,8 @@ void run_test_kiln_cfg_store(void)
     test_noop_rename_allowed();
     test_empty_or_whitespace_only_name_rejected();
     test_store_full_rejected();
+    test_nvs_load_store_migrates_v1_blob_at_full_size();
+    test_nvs_load_store_second_call_does_not_see_first_calls_data();
+    test_nvs_load_store_v1_migration_malloc_failure_leaves_defaults();
+    test_nvs_load_store_current_version_full_size_happy_path();
 }

@@ -38,9 +38,31 @@ static const char *TAG = "backup_http";
  * NEW fields are left unset (not written) on such an import, which is
  * correct: a version 1 export never claimed to carry them, so restoring one
  * must not silently zero what the target board already has for those
- * fields. A version 3+ body (this firmware does not understand it) is still
- * refused outright, matching the "reject rather than guess" brief. */
-#define BACKUP_FORMAT_VERSION 2
+ * fields.
+ *
+ * 2 -> 3 (2026-08-30): PID_EXPANSION_PLAN.md Phase 2/4's four new zone_cfg_t
+ * fields -- fuzzy_strength_pct, coupling_coeff, coupling_neighbor_zone,
+ * settings_source. Same superset rule as 1->2: every new key is OPTIONAL per
+ * zone entry, so a genuine version-1 or version-2 export (neither ever has
+ * these keys) still imports cleanly under version 3's reader. settings_source
+ * gets special handling at import time -- see backup_import_apply()'s own
+ * comment on why its absent-default must be ZONE_SETTINGS_SOURCE_CUSTOM
+ * (0xFF), never 0, unlike the three floats which default to 0 like every
+ * other optional numeric field in this file.
+ *
+ * 3 -> 4 (2026-08-30, same-day follow-up, ZONES_CFG_VERSION 10->11): the
+ * single coupling_coeff/coupling_neighbor_zone pair a version-3 export wrote
+ * is replaced by MAX31856_CHANNEL_COUNT indexed coupling_c0..coupling_cN-1
+ * keys, one per neighbor -- a real shape change (bench-measured coupling is
+ * asymmetric and multi-neighbor; a single pair can only hold one neighbor),
+ * not just a superset addition, hence the version bump rather than reusing
+ * 3. Import stays LOSSLESS across the change: a version-1/2/3 body's old
+ * coupling_coeff/coupling_neighbor_zone pair, if present, is still read and
+ * mapped onto coupling_c<neighbor> (see backup_import_zone_fields()'s own
+ * comment) -- exactly zones_http.c's own v10->v11 migration, applied at the
+ * backup layer instead of the NVS layer. A version 5+ body is still refused
+ * outright, matching the "reject rather than guess" brief. */
+#define BACKUP_FORMAT_VERSION 4
 #define BACKUP_FORMAT_VERSION_MIN 1
 
 /* Generous headroom over a legitimate full backup (8 profiles x up to 12
@@ -262,6 +284,17 @@ static esp_err_t backup_export_get_handler(httpd_req_t *req)
                                               &sensor_fault_debounce_ticks, &frozen_window_s);
             float cross_zone_max_delta_c = 0.0f;
             zones_config_get_cross_zone_delta(zi, &cross_zone_max_delta_c);
+            /* Version 3 (2026-08-30): PID_EXPANSION_PLAN.md Phase 2/4's four
+             * new fields. Same "always answerable once zi passed the pid_kp
+             * check above" reasoning as every other version-2 field in this
+             * block -- no "not yet measured" state to skip, unlike
+             * have_model/have_tc. */
+            float fuzzy_strength_pct = 0.0f;
+            zones_config_get_fuzzy_strength_pct(zi, &fuzzy_strength_pct);
+            float coupling_row[MAX31856_CHANNEL_COUNT] = {0};
+            zones_config_get_coupling(zi, coupling_row);
+            uint8_t settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
+            zones_config_get_settings_source(zi, &settings_source);
 
             /* Each fragment kept comfortably under backup_stream_printf()'s
              * own tmp[192] scratch buffer (including formatted values, not
@@ -290,11 +323,22 @@ static esp_err_t backup_export_get_handler(httpd_req_t *req)
                                 (double)runaway_rate_c_per_min, (double)runaway_margin_c,
                                 (double)drift_period_s);
             backup_stream_printf(&s, "\"guard_sensor_fault_debounce_ticks\":%.0f,\"guard_frozen_window_s\":%.1f,"
-                                "\"cross_zone_max_delta_c\":%.1f",
+                                "\"cross_zone_max_delta_c\":%.1f,",
                                 (double)sensor_fault_debounce_ticks, (double)frozen_window_s,
                                 (double)cross_zone_max_delta_c);
+            backup_stream_printf(&s, "\"fuzzy_strength_pct\":%.2f,", (double)fuzzy_strength_pct);
+            /* Version 4 (2026-08-30, same-day follow-up): coupling_c0..
+             * coupling_cN-1, one indexed key per neighbor -- see
+             * BACKUP_FORMAT_VERSION's own 3->4 comment. Diagonal included
+             * (always 0), same always-emit convention every other field in
+             * this block already follows. */
+            for (uint8_t j = 0; j < MAX31856_CHANNEL_COUNT; j++) {
+                backup_stream_printf(&s, "\"coupling_c%u\":%.4f,", (unsigned)j, (double)coupling_row[j]);
+            }
+            backup_stream_printf(&s, "\"settings_source\":%u", (unsigned)settings_source);
         }
-        /* cross_zone_max_delta_c above is the last key of this object and is
+        /* settings_source above is the last key of this object now (it was
+         * cross_zone_max_delta_c before settings_source was added) and is
          * always emitted (every entry that reaches this point already
          * emitted pid_kp, have_model/have_tc are the only optional keys and
          * both come before this block) -- no trailing-comma guard needed, so
@@ -791,6 +835,26 @@ static bool backup_import_apply(const char *body, char *err_msg, size_t err_cap)
             guard_sensor_fault_debounce_ticks, guard_frozen_window_s;
         bool has_cross_zone;
         float cross_zone_max_delta_c;
+        /* Version 3 (2026-08-30): PID_EXPANSION_PLAN.md Phase 2/4's four new
+         * fields. The three floats follow the ordinary optional-field
+         * convention (absent -> not written, so an older board's stored value
+         * survives an older-format import untouched). settings_source is
+         * different -- see this struct's field and backup_import_apply()'s
+         * own comment: an ABSENT settings_source must still be written as
+         * ZONE_SETTINGS_SOURCE_CUSTOM on a fresh zone, so it carries no
+         * has_settings_source flag at all; instead settings_source itself is
+         * pre-seeded to ZONE_SETTINGS_SOURCE_CUSTOM by memset+explicit
+         * default below, and is simply overwritten when the key is present. */
+        bool has_fuzzy_strength;
+        float fuzzy_strength_pct;
+        /* Version 4 (2026-08-30, same-day follow-up): per-cell presence and
+         * value, not a bundled pair -- see BACKUP_FORMAT_VERSION's 3->4
+         * comment. has_coupling_cell[j]/coupling_row[j] track neighbor j
+         * independently, so an import can update just the cells a backup
+         * actually has values for (a version-3 body has at most one). */
+        bool has_coupling_cell[MAX31856_CHANNEL_COUNT];
+        float coupling_row[MAX31856_CHANNEL_COUNT];
+        uint8_t settings_source; /* defaults to ZONE_SETTINGS_SOURCE_CUSTOM -- see comment above */
     } zone_candidate_t;
     zone_candidate_t zone_candidates[MAX31856_CHANNEL_COUNT];
     size_t zone_candidate_count = 0;
@@ -804,6 +868,13 @@ static bool backup_import_apply(const char *body, char *err_msg, size_t err_cap)
         }
         zone_candidate_t *zc = &zone_candidates[zone_candidate_count];
         memset(zc, 0, sizeof(*zc));
+        /* Never 0 -- see zone_candidate_t's own comment and
+         * zones_config_set_settings_source()'s identical reasoning. Set here,
+         * before the "settings_source" key (if any) is parsed below, so an
+         * older-format import (or a version-3 entry that simply omits the
+         * key) commits this exact sentinel rather than the zero a plain
+         * memset would leave. */
+        zc->settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
 
         double didx;
         if (!json_field_num(ze, "index", &didx) || didx < 0 || didx >= MAX31856_CHANNEL_COUNT) {
@@ -978,7 +1049,13 @@ static bool backup_import_apply(const char *body, char *err_msg, size_t err_cap)
         }
 
         double dmode;
-        if (json_field_opt_num(ze, "control_mode", 0, (double)ZONE_CONTROL_MODE_PID, &dmode, &zc->has_mode,
+        /* ZONE_CONTROL_MODE_PID_FUZZY (2026-08-30, PID_EXPANSION_PLAN.md
+         * Phase 2/4) -- this bound must track zones_http.c's own
+         * parse_zone_fields()/zones_config_set_control_mode() ceiling exactly,
+         * the same "second copy of a bound drifting" hazard every other field
+         * in this file is written against (see this file's own header
+         * comment). */
+        if (json_field_opt_num(ze, "control_mode", 0, (double)ZONE_CONTROL_MODE_PID_FUZZY, &dmode, &zc->has_mode,
                                "control_mode", err_msg, err_cap, (unsigned)zone_candidate_count) == false) {
             return false;
         }
@@ -1080,6 +1157,135 @@ static bool backup_import_apply(const char *body, char *err_msg, size_t err_cap)
         }
         if (zc->has_cross_zone) {
             zc->cross_zone_max_delta_c = (float)dxzone;
+        }
+
+        /* ---- Version 3 fields -- see zone_candidate_t's comment ---- */
+        double dfuzzy;
+        if (json_field_opt_num(ze, "fuzzy_strength_pct", 0, (double)ZONE_FUZZY_STRENGTH_PCT_MAX, &dfuzzy,
+                               &zc->has_fuzzy_strength, "fuzzy_strength_pct", err_msg, err_cap,
+                               (unsigned)zone_candidate_count) == false) {
+            return false;
+        }
+        if (zc->has_fuzzy_strength) {
+            zc->fuzzy_strength_pct = (float)dfuzzy;
+        }
+
+        /* Version 4 (2026-08-30, same-day follow-up): per-cell indexed keys
+         * coupling_c0..coupling_cN-1, read straight into the row -- see
+         * BACKUP_FORMAT_VERSION's 3->4 comment and zone_candidate_t's own. */
+        for (uint8_t j = 0; j < MAX31856_CHANNEL_COUNT; j++) {
+            char ckey[16];
+            snprintf(ckey, sizeof(ckey), "coupling_c%u", (unsigned)j);
+            double dcell;
+            if (json_field_num(ze, ckey, &dcell)) {
+                float max = (j == zc->index) ? 0.0f : (float)ZONE_COUPLING_COEFF_MAX;
+                if (dcell < 0 || dcell > (double)max) {
+                    snprintf(err_msg, err_cap, "zone tuning entry %u: %s out of range",
+                            (unsigned)zone_candidate_count, ckey);
+                    return false;
+                }
+                zc->has_coupling_cell[j] = true;
+                zc->coupling_row[j] = (float)dcell;
+            }
+        }
+        /* Version <=3 LOSSLESS backward compat: an old export's single
+         * coupling_coeff/coupling_neighbor_zone pair maps onto exactly one
+         * cell of the row, same "one neighbor, everything else 0" mapping
+         * zones_http.c's convert_zone_v10() applies at the NVS layer for a
+         * v10 blob. Only honored if this entry did NOT already supply the
+         * new per-cell keys above (a hand-edited or future body should never
+         * have both; if it does, the explicit per-cell keys win and this
+         * legacy pair is ignored rather than silently overwriting them). */
+        double dcoeff, dneighbor;
+        bool has_coeff = json_field_num(ze, "coupling_coeff", &dcoeff);
+        bool has_neighbor = json_field_num(ze, "coupling_neighbor_zone", &dneighbor);
+        if (has_coeff || has_neighbor) {
+            if (!(has_coeff && has_neighbor)) {
+                snprintf(err_msg, err_cap,
+                        "zone tuning entry %u: coupling_coeff/coupling_neighbor_zone must both be present together",
+                        (unsigned)zone_candidate_count);
+                return false;
+            }
+            if (dcoeff < 0 || dcoeff > (double)ZONE_COUPLING_COEFF_MAX || dneighbor < 0 ||
+                dneighbor > (double)(MAX31856_CHANNEL_COUNT - 1)) {
+                snprintf(err_msg, err_cap, "zone tuning entry %u: coupling_coeff/coupling_neighbor_zone out of range",
+                        (unsigned)zone_candidate_count);
+                return false;
+            }
+            /* Same "reject a fractional index, never truncate" rule
+             * parse_zone_fields()'s z%u_coupling_c%u enforces --
+             * coupling_neighbor_zone is a zone INDEX living in a float. */
+            if (dneighbor != floor(dneighbor)) {
+                snprintf(err_msg, err_cap, "zone tuning entry %u: coupling_neighbor_zone must be a whole zone index",
+                        (unsigned)zone_candidate_count);
+                return false;
+            }
+            /* Reject a self-referencing legacy pair HERE, in pass 1, same as
+             * every other coupling check in this function (the per-cell loop
+             * above forces max=0 for j==zc->index rather than deferring to
+             * pass 2). Without this, a self-referencing pair sailed through
+             * pass 1 and only failed later, in pass 2 at
+             * zones_config_set_coupling_cell(zc->index, zc->index, ...) --
+             * which the setter refuses as a nonzero diagonal -- after
+             * earlier candidates in the same import had ALREADY been
+             * committed. The two-pass split exists precisely so pass 2, once
+             * started, cannot fail: a validation gap here turns an import
+             * error into a half-applied config. */
+            if ((uint8_t)dneighbor == zc->index) {
+                snprintf(err_msg, err_cap,
+                        "zone tuning entry %u: coupling_neighbor_zone must not be this zone's own index",
+                        (unsigned)zone_candidate_count);
+                return false;
+            }
+            uint8_t neighbor = (uint8_t)dneighbor;
+            if (!zc->has_coupling_cell[neighbor]) {
+                zc->has_coupling_cell[neighbor] = true;
+                zc->coupling_row[neighbor] = (float)dcoeff;
+            }
+        }
+
+        /* settings_source -- UNLIKE the three floats above, an absent key
+         * must NOT leave zc->settings_source at 0 (see zone_candidate_t's own
+         * comment): zc->settings_source was already pre-seeded to
+         * ZONE_SETTINGS_SOURCE_CUSTOM right after this candidate's memset,
+         * above, so this block only ever OVERWRITES it when the key is
+         * actually present. No has_* flag: pass 2 always commits
+         * zc->settings_source for every candidate. */
+        double dsrc;
+        if (json_field_num(ze, "settings_source", &dsrc)) {
+            if (dsrc < 0 || dsrc > 255) {
+                snprintf(err_msg, err_cap, "zone tuning entry %u: settings_source out of range",
+                        (unsigned)zone_candidate_count);
+                return false;
+            }
+            /* Same "reject a fractional index, never truncate" rule as
+             * coupling_neighbor_zone above: settings_source is a zone INDEX
+             * (or the ZONE_SETTINGS_SOURCE_CUSTOM sentinel) living in a
+             * float here, and (uint8_t)dsrc below would otherwise silently
+             * truncate e.g. 1.7 to 1 -- a hand-edited backup could make a
+             * zone inherit a DIFFERENT zone's settings than the one written
+             * in the file, with no error. */
+            if (dsrc != floor(dsrc)) {
+                snprintf(err_msg, err_cap, "zone tuning entry %u: settings_source must be a whole zone index",
+                        (unsigned)zone_candidate_count);
+                return false;
+            }
+            uint8_t src_raw = (uint8_t)dsrc;
+            /* Same bound zones_config_set_settings_source()/
+             * parse_zone_fields()'s z%u_settings_source enforce: either
+             * ZONE_SETTINGS_SOURCE_CUSTOM (0xFF) or a real zone index other
+             * than this entry's own. */
+            if (src_raw != ZONE_SETTINGS_SOURCE_CUSTOM && src_raw >= MAX31856_CHANNEL_COUNT) {
+                snprintf(err_msg, err_cap, "zone tuning entry %u: settings_source references a zone that doesn't exist",
+                        (unsigned)zone_candidate_count);
+                return false;
+            }
+            if (src_raw == zc->index) {
+                snprintf(err_msg, err_cap, "zone tuning entry %u: settings_source cannot point at itself",
+                        (unsigned)zone_candidate_count);
+                return false;
+            }
+            zc->settings_source = src_raw;
         }
 
         zone_candidate_count++;
@@ -1205,6 +1411,35 @@ static bool backup_import_apply(const char *body, char *err_msg, size_t err_cap)
         if (zc->has_cross_zone && !zones_config_set_cross_zone_delta(zc->index, zc->cross_zone_max_delta_c)) {
             snprintf(err_msg, err_cap,
                     "zone tuning entry %u (channel %u) rejected at commit setting cross_zone_max_delta_c",
+                    (unsigned)i, zc->index);
+            return false;
+        }
+        if (zc->has_fuzzy_strength && !zones_config_set_fuzzy_strength_pct(zc->index, zc->fuzzy_strength_pct)) {
+            snprintf(err_msg, err_cap,
+                    "zone tuning entry %u (channel %u) rejected at commit setting fuzzy_strength_pct",
+                    (unsigned)i, zc->index);
+            return false;
+        }
+        /* Per-cell, not whole-row: an import that only supplies (or only
+         * ever had, pre-version-4) one neighbor's coefficient must not blank
+         * out this zone's OTHER already-stored neighbors -- same "omit
+         * preserves the current value" convention as fuzzy_strength_pct
+         * above, applied per cell instead of per field. */
+        for (uint8_t j = 0; j < MAX31856_CHANNEL_COUNT; j++) {
+            if (zc->has_coupling_cell[j] && !zones_config_set_coupling_cell(zc->index, j, zc->coupling_row[j])) {
+                snprintf(err_msg, err_cap,
+                        "zone tuning entry %u (channel %u) rejected at commit setting coupling_c%u",
+                        (unsigned)i, zc->index, (unsigned)j);
+                return false;
+            }
+        }
+        /* No has_* guard -- zc->settings_source is ALWAYS a real value (either
+         * the imported one, or the ZONE_SETTINGS_SOURCE_CUSTOM default seeded
+         * in pass 1), and always committed, matching the "older backup must
+         * default this to CUSTOM, never 0" brief. */
+        if (!zones_config_set_settings_source(zc->index, zc->settings_source)) {
+            snprintf(err_msg, err_cap,
+                    "zone tuning entry %u (channel %u) rejected at commit setting settings_source",
                     (unsigned)i, zc->index);
             return false;
         }

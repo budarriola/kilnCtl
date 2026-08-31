@@ -37,6 +37,7 @@ $sources = @(
     (Join-Path $testDir "test_heater_output.c"),
     (Join-Path $testDir "test_closed_loop.c"),
     (Join-Path $testDir "test_pid_autotune.c"),
+    (Join-Path $testDir "test_pid_fuzzy.c"),
     (Join-Path $testDir "test_sim_kiln.c"),
     (Join-Path $testDir "test_ota_auth.c"),
     (Join-Path $testDir "test_ota_interlock.c"),
@@ -64,11 +65,13 @@ $sources = @(
     (Join-Path $testDir "test_owner_slot_pool.c"),
     (Join-Path $testDir "test_dram_margin.c"),
     (Join-Path $testDir "test_stack_margin.c"),
+    (Join-Path $testDir "test_time_sync.c"),
     (Join-Path $testDir "sim_plant.c"),
     (Join-Path $driversDir "pid.c"),
     (Join-Path $driversDir "thermal_guard.c"),
     (Join-Path $driversDir "heater_output.c"),
     (Join-Path $driversDir "pid_autotune.c"),
+    (Join-Path $driversDir "pid_fuzzy.c"),
     (Join-Path $driversDir "ota_auth.c"),
     (Join-Path $driversDir "ota_interlock.c"),
     (Join-Path $driversDir "ota_record.c"),
@@ -78,7 +81,8 @@ $sources = @(
     (Join-Path $driversDir "profile_feasibility.c"),
     (Join-Path $driversDir "ui_page_home_graph.c"),
     (Join-Path $driversDir "max31856_codec.c"),
-    (Join-Path $driversDir "owner_slot_pool.c")
+    (Join-Path $driversDir "owner_slot_pool.c"),
+    (Join-Path $driversDir "time_sync_tz.c")
 )
 
 $sourceArgs = ($sources | ForEach-Object { '"' + $_ + '"' }) -join " "
@@ -89,27 +93,59 @@ $stubDir = Join-Path $testDir "stubs"
 $commonInc = Join-Path $testDir "..\..\..\CommonFW\include"
 $cmd = "call `"$vcvars`" x64 >nul && cl /nologo /W3 /EHsc /I`"$stubDir`" /I`"$commonInc`" /Fo:`"$outDir\\`" /Fe:`"$exe`" $sourceArgs"
 
-cmd.exe /c $cmd
-if ($LASTEXITCODE -ne 0) {
-    throw "build failed"
-}
-
-# Every executable RUNS, even after one of them fails.
+# ---- build/run bookkeeping -------------------------------------------------
 #
-# This script used to `exit $LASTEXITCODE` the moment an executable returned
-# non-zero, so a single failing check in the first binary meant the other five
-# never ran and their results were simply unknown -- reported as if the suite
-# had been considered. Found 2026-08-27, when four stale wording assertions in
-# the first executable were hiding whether zones_http, safety_cfg_http, and the
-# two prestart suites passed at all. A test runner that stops at the first
-# failure hides exactly the failures you most need to see together.
+# Every executable is BUILT, even after an earlier one fails to build or run,
+# and a build that fails can never be mistaken for a stale pass:
+#
+#   1. Each executable's binary is deleted (if present) immediately before
+#      its own build command runs. If the build then fails, there is no
+#      leftover .exe on disk for anything downstream to accidentally pick up
+#      or re-report -- the file simply does not exist.
+#   2. A failed build is recorded and the function returns WITHOUT running
+#      the (now-absent) binary. It never `throw`s, so one broken executable
+#      can no longer prevent every later executable from even being built.
+#   3. The final summary distinguishes three counts: how many executables
+#      were even BUILT, how many of those were RUN, and how many of the ones
+#      run actually PASSED -- so "156/156 passed" can never silently mean
+#      "the other N never got that far".
+#
+# This replaces an earlier version that `throw`d the instant any one
+# executable's build failed, which aborted the whole script before later
+# executables were built at all. If a caller then re-ran (or separately
+# invoked) an executable built in a previous, successful pass, its result
+# described stale code, not the code the caller was trying to test --
+# exactly the failure class this rewrite exists to make impossible. Found
+# 2026-08-31 during the opus review that deliberately broke the coupling-
+# index orientation check and watched it read as a pass.
+$script:builtExes = @()
+$script:buildFailures = @()
 $script:failedExes = @()
 
-
-& $exe
-if ($LASTEXITCODE -ne 0) {
-    $script:failedExes += $exe
+function Invoke-HostTestExe {
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][string]$ExePath,
+        [Parameter(Mandatory)][string]$BuildCmd
+    )
+    if (Test-Path $ExePath) {
+        Remove-Item -Force $ExePath
+    }
+    cmd.exe /c $BuildCmd
+    $buildExit = $LASTEXITCODE
+    if ($buildExit -ne 0 -or -not (Test-Path $ExePath)) {
+        Write-Host "BUILD FAILED: $Name"
+        $script:buildFailures += $Name
+        return
+    }
+    $script:builtExes += $Name
+    & $ExePath
+    if ($LASTEXITCODE -ne 0) {
+        $script:failedExes += $Name
+    }
 }
+
+Invoke-HostTestExe -Name "main" -ExePath $exe -BuildCmd $cmd
 
 # ---- test_zones_http.c: its own SEPARATE executable ------------------------
 # See test_zones_http.c's header comment for why: it #includes zones_http.c
@@ -124,15 +160,7 @@ $exe2 = Join-Path $outDir "kilnctl_host_tests_zones.exe"
 $cmd2 = "call `"$vcvars`" x64 >nul && cl /nologo /W3 /EHsc /std:c11 /I`"$stubDir`" /I`"$commonInc`" " +
         "/Fo:`"$outDir\\zones_`" /Fe:`"$exe2`" `"$(Join-Path $testDir 'test_zones_http.c')`""
 
-cmd.exe /c $cmd2
-if ($LASTEXITCODE -ne 0) {
-    throw "zones_http build failed"
-}
-
-& $exe2
-if ($LASTEXITCODE -ne 0) {
-    $script:failedExes += $exe2
-}
+Invoke-HostTestExe -Name "zones_http" -ExePath $exe2 -BuildCmd $cmd2
 
 # ---- test_safety_cfg_http.c: its own THIRD, separate executable -----------
 # Same reason as test_zones_http.c above: it #includes safety_cfg_http.c
@@ -146,15 +174,7 @@ $exe3 = Join-Path $outDir "kilnctl_host_tests_safety_cfg_http.exe"
 $cmd3 = "call `"$vcvars`" x64 >nul && cl /nologo /W3 /EHsc /std:c11 /I`"$stubDir`" /I`"$commonInc`" " +
         "/Fo:`"$outDir\\safety_cfg_http_`" /Fe:`"$exe3`" `"$(Join-Path $testDir 'test_safety_cfg_http.c')`""
 
-cmd.exe /c $cmd3
-if ($LASTEXITCODE -ne 0) {
-    throw "safety_cfg_http build failed"
-}
-
-& $exe3
-if ($LASTEXITCODE -ne 0) {
-    $script:failedExes += $exe3
-}
+Invoke-HostTestExe -Name "safety_cfg_http" -ExePath $exe3 -BuildCmd $cmd3
 
 # ---- test_profile_executor_prestart.c: its own FOURTH, separate executable-
 # Same reason as test_zones_http.c above: it #includes profile_executor.c
@@ -174,17 +194,9 @@ $cmd4 = "call `"$vcvars`" x64 >nul && cl /nologo /W3 /EHsc /I`"$stubDir`" /I`"$c
         "`"$(Join-Path $testDir 'test_profile_executor_prestart.c')`" " +
         "`"$(Join-Path $driversDir 'pid.c')`" `"$(Join-Path $driversDir 'thermal_guard.c')`" " +
         "`"$(Join-Path $driversDir 'heater_output.c')`" `"$(Join-Path $driversDir 'thermo_combine.c')`" " +
-        "`"$(Join-Path $driversDir 'heat_enable.c')`""
+        "`"$(Join-Path $driversDir 'heat_enable.c')`" `"$(Join-Path $driversDir 'pid_fuzzy.c')`""
 
-cmd.exe /c $cmd4
-if ($LASTEXITCODE -ne 0) {
-    throw "profile_executor prestart build failed"
-}
-
-& $exe4
-if ($LASTEXITCODE -ne 0) {
-    $script:failedExes += $exe4
-}
+Invoke-HostTestExe -Name "profile_executor_prestart" -ExePath $exe4 -BuildCmd $cmd4
 
 # ---- test_autotune_engine_prestart.c: its own FIFTH, separate executable --
 # Same reasoning as test_profile_executor_prestart.c immediately above, for
@@ -201,15 +213,7 @@ $cmd5 = "call `"$vcvars`" x64 >nul && cl /nologo /W3 /EHsc /I`"$stubDir`" /I`"$c
         "`"$(Join-Path $driversDir 'thermo_combine.c')`" `"$(Join-Path $driversDir 'pid_autotune.c')`" " +
         "`"$(Join-Path $driversDir 'heat_enable.c')`""
 
-cmd.exe /c $cmd5
-if ($LASTEXITCODE -ne 0) {
-    throw "autotune_engine prestart build failed"
-}
-
-& $exe5
-if ($LASTEXITCODE -ne 0) {
-    $script:failedExes += $exe5
-}
+Invoke-HostTestExe -Name "autotune_engine_prestart" -ExePath $exe5 -BuildCmd $cmd5
 
 # rules_task.c/test_rules_task_prestart.c (the SIXTH executable this script
 # used to build) were deleted 2026-08-27 along with the rest of the rule
@@ -231,13 +235,7 @@ $exe7 = Join-Path $outDir "kilnctl_host_tests_profiles_http.exe"
 $cmd7 = "call `"$vcvars`" x64 >nul && cl /nologo /W3 /EHsc /std:c11 /I`"$stubDir`" /I`"$commonInc`" " +
         "/Fo:`"$outDir\\profiles_`" /Fe:`"$exe7`" `"$(Join-Path $testDir 'test_profiles_http.c')`""
 
-cmd.exe /c $cmd7
-if ($LASTEXITCODE -ne 0) {
-    throw "profiles_http build failed"
-}
-
-& $exe7
-if ($LASTEXITCODE -ne 0) { $script:failedExes += $exe7 }
+Invoke-HostTestExe -Name "profiles_http" -ExePath $exe7 -BuildCmd $cmd7
 
 # ---- test_ota_http.c: its own EIGHTH, separate executable -----------------
 # ota_http.c/factory_reset.c shipped their security fixes (empty-AP-password
@@ -264,13 +262,7 @@ $cmd8 = "call `"$vcvars`" x64 >nul && cl /nologo /W3 /EHsc /std:c11 /I`"$stubDir
         "`"$(Join-Path $driversDir 'ota_auth.c')`" `"$(Join-Path $driversDir 'ota_interlock.c')`" " +
         "`"$(Join-Path $driversDir 'ota_record.c')`""
 
-cmd.exe /c $cmd8
-if ($LASTEXITCODE -ne 0) {
-    throw "ota_http build failed"
-}
-
-& $exe8
-if ($LASTEXITCODE -ne 0) { $script:failedExes += $exe8 }
+Invoke-HostTestExe -Name "ota_http" -ExePath $exe8 -BuildCmd $cmd8
 
 # ---- test_uart_protocol_link_delegate.c: its own NINTH, separate executable
 # SaftyFW/TODO.md Phase 1's "KilnFW's uart_protocol.c delegating framing/CRC,
@@ -287,13 +279,7 @@ $cmd9 = "call `"$vcvars`" x64 >nul && cl /nologo /W3 /EHsc /std:c11 /I`"$stubDir
         "`"$(Join-Path $testDir 'test_uart_protocol_link_delegate.c')`" " +
         "`"$(Join-Path $commonSrc 'kilnlink_frame.c')`" `"$(Join-Path $commonSrc 'kilnlink_crc.c')`""
 
-cmd.exe /c $cmd9
-if ($LASTEXITCODE -ne 0) {
-    throw "uart_protocol_link_delegate build failed"
-}
-
-& $exe9
-if ($LASTEXITCODE -ne 0) { $script:failedExes += $exe9 }
+Invoke-HostTestExe -Name "uart_protocol_link_delegate" -ExePath $exe9 -BuildCmd $cmd9
 
 # ---- test_board_temps.c: its own TENTH, separate executable --------------
 # Same reason as test_zones_http.c above: it #includes board_temps.c
@@ -308,13 +294,7 @@ New-Item -ItemType Directory -Force -Path $btObjDir | Out-Null
 $cmd10 = "call `"$vcvars`" x64 >nul && cl /nologo /W3 /EHsc /std:c11 /I`"$stubDir`" /I`"$commonInc`" " +
         "/Fo:`"$btObjDir\\`" /Fe:`"$exe10`" `"$(Join-Path $testDir 'test_board_temps.c')`""
 
-cmd.exe /c $cmd10
-if ($LASTEXITCODE -ne 0) {
-    throw "board_temps build failed"
-}
-
-& $exe10
-if ($LASTEXITCODE -ne 0) { $script:failedExes += $exe10 }
+Invoke-HostTestExe -Name "board_temps" -ExePath $exe10 -BuildCmd $cmd10
 
 # ---- test_kiln_io_owner.c: its own ELEVENTH, separate executable ----------
 # Audit item, TODO.md "Audit 2026-08-27 -- open items" (IO_CMD_SX_LED_DRIVER's
@@ -334,13 +314,7 @@ $cmd11 = "call `"$vcvars`" x64 >nul && cl /nologo /W3 /EHsc /std:c11 /I`"$stubDi
         "`"$(Join-Path $testDir 'test_kiln_io_owner.c')`" `"$(Join-Path $driversDir 'kiln_io.c')`" " +
         "`"$(Join-Path $driversDir 'owner_slot_pool.c')`""
 
-cmd.exe /c $cmd11
-if ($LASTEXITCODE -ne 0) {
-    throw "kiln_io_owner build failed"
-}
-
-& $exe11
-if ($LASTEXITCODE -ne 0) { $script:failedExes += $exe11 }
+Invoke-HostTestExe -Name "kiln_io_owner" -ExePath $exe11 -BuildCmd $cmd11
 
 # ---- test_safety_trip_words.c: its own TWELFTH, separate executable ------
 # Header-only (safety_trip_words.h is static inline, no .c) -- see the test
@@ -352,13 +326,7 @@ New-Item -ItemType Directory -Force -Path $stwObjDir | Out-Null
 $cmd12 = "call `"$vcvars`" x64 >nul && cl /nologo /W3 /EHsc /std:c11 /I`"$stubDir`" /I`"$commonInc`" " +
         "/Fo:`"$stwObjDir\\`" /Fe:`"$exe12`" `"$(Join-Path $testDir 'test_safety_trip_words.c')`""
 
-cmd.exe /c $cmd12
-if ($LASTEXITCODE -ne 0) {
-    throw "safety_trip_words build failed"
-}
-
-& $exe12
-if ($LASTEXITCODE -ne 0) { $script:failedExes += $exe12 }
+Invoke-HostTestExe -Name "safety_trip_words" -ExePath $exe12 -BuildCmd $cmd12
 
 # ---- test_safety_trip_decision.c: its own THIRTEENTH, separate executable
 # 2026-08-28 opus review: safety_apply_trip_event()'s trip_fault_sources_
@@ -382,13 +350,7 @@ $cmd13 = "call `"$vcvars`" x64 >nul && cl /nologo /W3 /EHsc /std:c11 /I`"$driver
         "/Fo:`"$stdObjDir\\`" /Fe:`"$exe13`" " +
         "`"$(Join-Path $testDir 'test_safety_trip_decision.c')`" `"$(Join-Path $driversDir 'safety_trip_decision.c')`""
 
-cmd.exe /c $cmd13
-if ($LASTEXITCODE -ne 0) {
-    throw "safety_trip_decision build failed"
-}
-
-& $exe13
-if ($LASTEXITCODE -ne 0) { $script:failedExes += $exe13 }
+Invoke-HostTestExe -Name "safety_trip_decision" -ExePath $exe13 -BuildCmd $cmd13
 
 # ---- test_safety_link_compile.c: its own FOURTEENTH, separate executable --
 # ROADMAP.md M13 TASK 2: safety_link.c itself now compiles and links off-
@@ -422,7 +384,7 @@ New-Item -ItemType Directory -Force -Path $slObjDir | Out-Null
 $slExtra = @("kilnlink_config_page.c", "kilnlink_announce.c", "kilnlink_announce_reboot.c",
              "kilnlink_clear_trip.c", "kilnlink_commit_config.c", "kilnlink_commit_config_rejected.c",
              "kilnlink_context.c", "kilnlink_get_config_page.c", "kilnlink_get_ct_cal.c",
-             "kilnlink_rollback.c", "kilnlink_set_config.c", "kilnlink_set_ct_cal.c",
+             "kilnlink_rollback.c", "kilnlink_rollback_result.c", "kilnlink_set_config.c", "kilnlink_set_ct_cal.c",
              "kilnlink_set_log_level.c", "kilnlink_set_param.c", "kilnlink_frame.c", "kilnlink_crc.c",
              "kilnlink_param.c", "kilnlink_param_value.c") | ForEach-Object { "`"$(Join-Path $commonSrc $_)`"" }
 $cmd14 = "call `"$vcvars`" x64 >nul && cl /nologo /W3 /EHsc /std:c11 /I`"$driversDir`" /I`"$stubDir`" /I`"$commonInc`" " +
@@ -431,20 +393,31 @@ $cmd14 = "call `"$vcvars`" x64 >nul && cl /nologo /W3 /EHsc /std:c11 /I`"$driver
         "`"$(Join-Path $driversDir 'stack_margin.c')`" `"$(Join-Path $driversDir 'safety_trip_decision.c')`" " +
         "$($slExtra -join ' ')"
 
-cmd.exe /c $cmd14
-if ($LASTEXITCODE -ne 0) {
-    throw "safety_link build failed"
+Invoke-HostTestExe -Name "safety_link" -ExePath $exe14 -BuildCmd $cmd14
+
+# ---- summary ----------------------------------------------------------
+#
+# 13 executables are attempted above (main + zones_http + safety_cfg_http +
+# profile_executor_prestart + autotune_engine_prestart + profiles_http +
+# ota_http + uart_protocol_link_delegate + board_temps + kiln_io_owner +
+# safety_trip_words + safety_trip_decision + safety_link). Report how many
+# of those were even built, separately from how many of the built ones
+# passed, so a partial run can never read as a full green suite.
+$totalExpected = 13
+Write-Host ""
+Write-Host "Built: $($script:builtExes.Count)/$totalExpected executables"
+if ($script:buildFailures.Count -gt 0) {
+    Write-Host "BUILD FAILURES ($($script:buildFailures.Count)) -- these did not even run:"
+    foreach ($f in $script:buildFailures) { Write-Host "  $f" }
+}
+if ($script:failedExes.Count -gt 0) {
+    Write-Host "RUN FAILURES ($($script:failedExes.Count)):"
+    foreach ($f in $script:failedExes) { Write-Host "  $f" }
 }
 
-& $exe14
-if ($LASTEXITCODE -ne 0) { $script:failedExes += $exe14 }
-
-if ($script:failedExes.Count -gt 0) {
-    Write-Host ""
-    Write-Host "FAILED executables ($($script:failedExes.Count)):"
-    foreach ($f in $script:failedExes) { Write-Host "  $f" }
+if ($script:buildFailures.Count -gt 0 -or $script:failedExes.Count -gt 0) {
     exit 1
 }
-Write-Host ""
-Write-Host "all host test executables passed"
+
+Write-Host "all $totalExpected host test executables built and passed"
 exit 0

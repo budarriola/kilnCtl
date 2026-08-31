@@ -2,6 +2,7 @@
 
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "esp_heap_caps.h"
@@ -76,6 +77,9 @@ typedef struct {
     autotune_method_t method;
     uint8_t  zone_index;
     float    step_duty;
+    autotune_rule_t step_rule; /* AUTOTUNE_METHOD_STEP only -- SIMC or Cohen-Coon, see
+                                 * autotune_engine_run()'s header comment for why only
+                                 * those two are valid here. */
 
     /* Relay-feedback method only (AUTOTUNE_METHOD_RELAY). relay_on is the
      * current branch of the bang-bang law, held across the band so the relay
@@ -346,7 +350,7 @@ static void finalize_fit(void)
         ESP_LOGW(TAG, "autotune zone %u: %s", s_at.zone_index, s_at.abort_reason);
         return;
     }
-    s_at.proposed_gains = pid_autotune_tune_from_fopdt(&s_at.model, AUTOTUNE_RULE_SIMC, 0.0f);
+    s_at.proposed_gains = pid_autotune_tune_from_fopdt(&s_at.model, s_at.step_rule, 0.0f);
     s_at.predicted_max_ramp_c_per_hr =
         pid_autotune_estimate_max_ramp_c_per_hr(&s_at.model, 1.0f, s_at.actual_valid ? s_at.actual_c : baseline_c,
                                                 baseline_c);
@@ -381,6 +385,65 @@ static void finalize_fit(void)
         free(peer);
         cell->model = m;
         cell->valid = m.valid;
+    }
+
+    /* Persist every valid cross-gain cell fitted just above into
+     * zones_http.c's NVS-backed coupling row -- until this pass, the whole
+     * matrix lived in s_at.coupling (RAM only, see this struct's own field
+     * comment); nothing ever called zones_config_set_coupling*(), so a step
+     * test's measured cross-coupling died at the next reboot even though
+     * zone i's own direct model (model_k_dc etc, right above) was already
+     * being saved. A step test costs the operator hours of real kiln heat --
+     * re-measuring it every boot is not an option, same reasoning
+     * model_k_dc's own persistence exists for.
+     *
+     * What gets stored, and its units: cell[zone_index][j].model is the
+     * FOPDT fit of ZONE j's own trace against the duty step commanded at
+     * zone_index's heater -- i.e. "how much does zone_index's heater move
+     * zone j". That is exactly zone j's row, column zone_index in
+     * zones_http.c's coupling_coeff[] (row i = zone i's measured response to
+     * a unit step at neighbor j's heater -- see zone_cfg_t's own doc
+     * comment). So this writes zones_config_set_coupling_cell(j,
+     * zone_index, ...): the AFFECTED zone owns the row, the zone under test
+     * is the column. The stored number is model.k_gain_c_per_duty AS
+     * MEASURED -- a raw degC-per-unit-duty steady-state gain, the same unit
+     * convention model_k_dc already uses, NOT a ratio to any self-gain --
+     * so the feedforward term (a later pass) can combine coupling_coeff[]
+     * cells with model_k_dc directly with no extra scaling step.
+     *
+     * Guarded twice against a bad or aborted fit:
+     *   (1) this whole function already returned early above if s_at.model
+     *       (the DIRECT zone_index<-zone_index fit) was invalid -- an
+     *       aborted run never reaches here at all, so it can never persist
+     *       anything, direct or cross.
+     *   (2) each cross cell is persisted only if cell->valid AND its gain is
+     *       finite and within ZONE_COUPLING_COEFF_MAX's bound (the same
+     *       range zones_config_set_coupling_cell() itself enforces) -- a
+     *       cell whose peer fit failed, or whose gain landed outside the
+     *       storage layer's accepted range (e.g. a spurious negative
+     *       reading -- see ZONE_COUPLING_COEFF_MAX's own "why non-negative"
+     *       comment in zones_http.h), is skipped rather than clobbering a
+     *       previously-stored good value for that same neighbor with 0 or a
+     *       rejected write. */
+    for (uint8_t j = 0; j < MAX31856_CHANNEL_COUNT; j++) {
+        if (j == s_at.zone_index) {
+            continue;
+        }
+        const autotune_coupling_cell_t *cell = &s_at.coupling.cell[s_at.zone_index][j];
+        if (!cell->valid) {
+            continue;
+        }
+        float gain = cell->model.k_gain_c_per_duty;
+        if (!isfinite(gain) || gain < 0.0f || gain > ZONE_COUPLING_COEFF_MAX) {
+            ESP_LOGW(TAG,
+                     "autotune zone %u: cross-gain against zone %u (%.4f degC/duty) out of storage range, "
+                     "not persisted",
+                     s_at.zone_index, j, (double)gain);
+            continue;
+        }
+        if (!zones_config_set_coupling_cell(j, s_at.zone_index, gain)) {
+            ESP_LOGW(TAG, "autotune zone %u: failed to persist cross-gain cell for zone %u", s_at.zone_index, j);
+        }
     }
 
     force_relays_off();
@@ -1117,6 +1180,18 @@ static bool begin_run_locked(uint8_t zone_index, char *err_msg, size_t err_cap)
     s_at.model.valid = false;
     s_at.relay.valid = false;
     s_at.relay_cycles_seen = 0;
+    /* And the gains those results produce, for the same reason one step
+     * further out: /api/autotune serializes proposed_gains.refusal and
+     * .refusal_reason (2026-08-30), and unlike kp/ki/kd those have no
+     * companion `valid` flag the page can use to discount them. Left
+     * un-cleared, a run that refused ("dead time 3.0s is below the 5.0s
+     * Cohen-Coon needs", say) would keep reporting that verdict through the
+     * whole of the NEXT run -- and permanently, if that run aborts before
+     * finalize_fit()/finalize_relay_fit() overwrites it. Zero is
+     * AUTOTUNE_REFUSAL_OK with an empty reason, i.e. exactly the
+     * never-tuned-yet state autotune_engine_start()'s memset() leaves. */
+    s_at.proposed_gains = (autotune_gains_t){0};
+    s_at.predicted_max_ramp_c_per_hr = 0.0f;
 
     float window_ms = 0.0f, min_on_ms = 0.0f, min_off_ms = 0.0f;
     zones_config_get_heater_cfg(zone_index, &window_ms, &min_on_ms, &min_off_ms);
@@ -1177,10 +1252,19 @@ static bool begin_run_locked(uint8_t zone_index, char *err_msg, size_t err_cap)
     return true;
 }
 
-bool autotune_engine_run(uint8_t zone_index, float step_duty, char *err_msg, size_t err_cap)
+bool autotune_engine_run(uint8_t zone_index, float step_duty, autotune_rule_t rule, char *err_msg, size_t err_cap)
 {
     if (!(step_duty > 0.0f) || step_duty > 1.0f) {
         if (err_msg) snprintf(err_msg, err_cap, "step_duty must be in (0, 1]");
+        return false;
+    }
+    if (rule != AUTOTUNE_RULE_SIMC && rule != AUTOTUNE_RULE_COHEN_COON) {
+        /* ZN/Tyreus-Luyben are relay-only -- pid_autotune_tune_from_fopdt()
+         * already refuses them (AUTOTUNE_REFUSAL_RULE_NOT_ON_THIS_PATH), but
+         * catching it here avoids running a full step test just to hand the
+         * operator zero gains at the end of it, same reasoning as the relay
+         * path's SIMC rejection above. */
+        if (err_msg) snprintf(err_msg, err_cap, "step-test rule must be SIMC or Cohen-Coon");
         return false;
     }
     if (!begin_run_locked(zone_index, err_msg, err_cap)) {
@@ -1189,6 +1273,7 @@ bool autotune_engine_run(uint8_t zone_index, float step_duty, char *err_msg, siz
 
     s_at.method = AUTOTUNE_METHOD_STEP;
     s_at.step_duty = step_duty;
+    s_at.step_rule = rule;
     s_at.state = AUTOTUNE_ENGINE_SETTLING;
     bool no_ceiling = !(s_at.guard_cfg.max_temp_c > 0.0f);
     xSemaphoreGive(s_at.lock);

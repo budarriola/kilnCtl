@@ -83,7 +83,7 @@ extern "C" {
  * an operator picking "relay 3" off a dropdown should be picking "Vent
  * fan"). Same length as ZONE_NAME_MAX_LEN, deliberately NOT shortened the
  * way TIMING_PROFILE_NAME_MAX_LEN was: that cut was to buy back bytes inside
- * zones_cfg_t's 512-byte ZONES_CONFIG_BLOB_MAX_SIZE ceiling, and relay names
+ * zones_cfg_t's 640-byte ZONES_CONFIG_BLOB_MAX_SIZE ceiling, and relay names
  * live in a SEPARATE NVS blob of their own (see zones_http.c's relay-names
  * section header comment) that never touches that ceiling at all -- there is
  * no budget pressure here motivating a shorter label than a zone gets. */
@@ -139,6 +139,51 @@ extern "C" {
  * configured (caller substitutes PROFILE_EXECUTOR_DEFAULT_*_MS). */
 #define ZONE_HEATER_WINDOW_MS_MAX 600000.0f
 #define ZONE_HEATER_MIN_ON_OFF_MS_MAX 60000.0f
+
+/* zone_cfg_t::fuzzy_strength_pct (PID_EXPANSION_PLAN.md Phase 2/section
+ * 3.3's "Adjustment strength" knob) -- 0-100, how far the fuzzy layer
+ * (pid_fuzzy.c, a later pass) is allowed to move Kp/Ki/Kd away from the
+ * base autotune-fitted gains. 0 = no adjustment at all, which is also the
+ * safe default: a zone in ZONE_CONTROL_MODE_PID_FUZZY with strength 0 must
+ * reproduce classic-PID output exactly (see PID_EXPANSION_PLAN.md Phase 6's
+ * "strength_pct=0 reproduces the base gains bit-for-bit" negative test --
+ * that is pid_fuzzy.c's obligation, not this file's, but the bound here is
+ * what makes 0 reachable and typo'd values above 100% refused at the door). */
+#define ZONE_FUZZY_STRENGTH_PCT_MAX 100.0f
+
+/* zone_cfg_t::coupling_coeff[j] (PID_EXPANSION_PLAN.md section 2c's
+ * cross-zone feedforward coefficients, one per neighbor since ZONES_CFG_
+ * VERSION 10->11) -- each a measured, non-negative scalar the feedforward
+ * term's additive `-coupling_coeff[j] * (T_j - T_j_setpoint)` contribution
+ * is scaled by (Phase 3b, a later pass; this file only stores the
+ * coefficients). 0 = "no coupling measured against that neighbor", which is
+ * both the safe default and the degrade-to-today behavior -- the plan's own
+ * words. This ceiling is a typo/garbage filter like ZONE_MODEL_K_MAX, not a
+ * physics bound: nothing about a kiln's radiative coupling has been
+ * measured yet to derive a tighter one from.
+ *
+ * DELIBERATELY still non-negative, even after the 10->11 widening to a full
+ * directed row: the feedforward's own `-coupling_coeff[j] * (...)` minus
+ * sign already carries the direction (a hotter-than-setpoint neighbor always
+ * pulls this zone's feedforward down, a colder one pushes it up), so an
+ * independently-signed coefficient would be redundant at best, a
+ * double-negative bug at worst. Every coefficient measured on the bench so
+ * far is a positive cross-heating gain; nothing today needs a negative
+ * (cooling) coupling to be representable. Revisit this if that ever
+ * changes, but do not silently relax it -- see zone_cfg_t::coupling_coeff's
+ * own doc comment in zones_http.c for the full reasoning. */
+#define ZONE_COUPLING_COEFF_MAX 100.0f
+
+/* zone_cfg_t::settings_source (PID_EXPANSION_PLAN.md section 3.5's "Same as
+ * zone N / Custom settings for this zone" UI dropdown) -- this exact
+ * sentinel value means "this zone holds its own, custom settings", the only
+ * legal value other than a real zone index < MAX31856_CHANNEL_COUNT. MUST be
+ * the migration target for every zone in a v9->v10 upgrade (see
+ * ZONES_CFG_VERSION's 9->10 comment in zones_http.c) -- migrating to 0
+ * instead would silently mean "this zone copies zone 0's settings", which
+ * Phase 5's (a later pass's) resolve-on-save logic would then overwrite
+ * every zone with zone 0's numbers on the very next save. */
+#define ZONE_SETTINGS_SOURCE_CUSTOM 0xFFu
 
 /* heater_min_on_ms is the ONE heater timing field with a lower bound as well
  * as an upper one, and the bound is a hardware-protection minimum rather than
@@ -508,6 +553,61 @@ bool zones_config_get_model(uint8_t zone_index, float *out_k_dc, float *out_tau_
  * fit is a lie); it is not treated as a validation failure. */
 bool zones_config_set_model(uint8_t zone_index, float k_dc, float tau_s, float dead_time_s);
 
+/* zone_cfg_t::fuzzy_strength_pct read-only accessor for the control loop
+ * (PID_EXPANSION_PLAN.md Phase 3 wiring, profile_executor.c) -- the one
+ * operator-set knob pid_fuzzy_adjust() needs each tick a
+ * ZONE_CONTROL_MODE_PID_FUZZY zone runs. 0..100, and 0 is the documented
+ * safe default (zero fuzzy adjustment, identical to classic PID). Read-only
+ * here: the field is written only via POST /api/zones (zones_http.c's own
+ * parse_zone_fields()), never by the control loop. */
+bool zones_config_get_fuzzy_strength_pct(uint8_t zone_index, float *out_pct);
+
+/* Writer for the getter above (PID_EXPANSION_PLAN.md Phase 2/4, 2026-08-30
+ * pass: previously read-only). Same bound parse_zone_fields()'s
+ * z%u_fuzzy_strength enforces (0..ZONE_FUZZY_STRENGTH_PCT_MAX) -- refused at
+ * the door, never clamped, matching every other setter in this file.
+ * backup_http.c's import needs this to round-trip the field, the same reason
+ * every other setter in this file exists. */
+bool zones_config_set_fuzzy_strength_pct(uint8_t zone_index, float pct);
+
+/* zone_cfg_t::coupling_coeff[] (PID_EXPANSION_PLAN.md section 2c's cross-zone
+ * feedforward row, widened to a full directed row ZONES_CFG_VERSION 10->11,
+ * 2026-08-30 -- a single (coeff, neighbor) pair could not represent the
+ * bench-measured matrix: coupling is asymmetric AND every interior zone has
+ * multiple neighbors) -- see ZONE_COUPLING_COEFF_MAX's doc comment above and
+ * zone_cfg_t::coupling_coeff's own doc comment for what each cell means and
+ * its unit convention. out_row must have room for MAX31856_CHANNEL_COUNT
+ * floats; out_row[zone_index] (the diagonal) is always 0. */
+bool zones_config_get_coupling(uint8_t zone_index, float out_row[MAX31856_CHANNEL_COUNT]);
+
+/* Whole-row setter. Every cell checked before any is written -- same
+ * reject-nothing-half-applied discipline as zones_config_set_model().
+ * row[zone_index] (the diagonal) MUST be exactly 0; every other cell must be
+ * finite and in 0..ZONE_COUPLING_COEFF_MAX. */
+bool zones_config_set_coupling(uint8_t zone_index, const float row[MAX31856_CHANNEL_COUNT]);
+
+/* Single-cell setter -- updates ONE neighbor's coefficient without touching
+ * the rest of zone_index's row. Exists for autotune_engine.c's finalize_fit():
+ * one relay run only measures the running zone's effect on OTHER zones, one
+ * cell at a time, and must not wipe out those zones' other already-measured
+ * neighbors. Same bounds as the whole-row setter, applied to this one cell;
+ * writing the diagonal to exactly 0 is accepted as a no-op (never actually
+ * needed in practice, but harmless), any other diagonal value is refused. */
+bool zones_config_set_coupling_cell(uint8_t zone_index, uint8_t neighbor_index, float coeff);
+
+/* zone_cfg_t::settings_source (PID_EXPANSION_PLAN.md section 3.5's "Same as
+ * zone N / Custom settings for this zone" UI dropdown) -- see
+ * ZONE_SETTINGS_SOURCE_CUSTOM's doc comment above for the full "0 is a real
+ * value here" hazard. Getter reports the stored byte verbatim. */
+bool zones_config_get_settings_source(uint8_t zone_index, uint8_t *out_settings_source);
+
+/* Setter for the getter above. Same rule parse_zone_fields()'s
+ * z%u_settings_source enforces: either ZONE_SETTINGS_SOURCE_CUSTOM (0xFF) or a
+ * real zone index < MAX31856_CHANNEL_COUNT other than zone_index itself
+ * (self-reference is the degenerate inheritance cycle -- refused here, not
+ * left for a later pass to unwind). */
+bool zones_config_set_settings_source(uint8_t zone_index, uint8_t settings_source);
+
 /* Direction/rate sanity monitor threshold (TODO.md section 6's "reasonable
  * rate ... I will determine later" item) -- degC/minute a zone's actual
  * reading must move, in the commanded direction, over a monitoring window
@@ -537,23 +637,31 @@ bool zones_config_set_max_ramp(uint8_t zone_index, float c_per_hr);
 bool zones_config_get_cal_offset(uint8_t zone_index, float *out_cal_offset_c);
 bool zones_config_set_cal_offset(uint8_t zone_index, float cal_offset_c);
 
-/* TODO.md 6A.1's three control modes. OFF: never commands heat (safe
- * default, and what a zone the board supports but the kiln doesn't use
- * should be set to). BANGBANG: relay on/off around setpoint with a fixed
- * hysteresis band, no PID math -- always available, the fallback if tuning
- * is bad. PID: the pid.c loop, rendered onto the relay by
- * heater_output_duty()'s time-proportioning window. */
+/* TODO.md 6A.1's control modes. OFF: never commands heat (safe default, and
+ * what a zone the board supports but the kiln doesn't use should be set to).
+ * BANGBANG: relay on/off around setpoint with a fixed hysteresis band, no
+ * PID math -- always available, the fallback if tuning is bad. PID: the
+ * pid.c loop, rendered onto the relay by heater_output_duty()'s
+ * time-proportioning window. PID_FUZZY (PID_EXPANSION_PLAN.md section 2b/
+ * Phase 2, added 2026-08-30): same PID loop, but a fixed-rule-table fuzzy
+ * layer (pid_fuzzy.c, a later pass) nudges Kp/Ki/Kd around their base
+ * autotune-fitted values by up to zone_cfg_t::fuzzy_strength_pct, so one set
+ * of tuning numbers holds up across a firing's full temperature range
+ * instead of only near where Autotune ran. Appended, never inserted -- this
+ * enum is persisted in NVS (see ZONES_CFG_VERSION's own comment on why
+ * every enum touched by a stored blob only ever grows at the tail). */
 typedef enum {
     ZONE_CONTROL_MODE_OFF = 0,
     ZONE_CONTROL_MODE_BANGBANG = 1,
     ZONE_CONTROL_MODE_PID = 2,
+    ZONE_CONTROL_MODE_PID_FUZZY = 3,
 } zone_control_mode_t;
 
 bool zones_config_get_control_mode(uint8_t zone_index, zone_control_mode_t *out_mode);
 
 /* Setter for the getter above. Same bound parse_zone_fields()'s z%u_mode
- * enforces (0-2, i.e. <= ZONE_CONTROL_MODE_PID) -- any other numeric value
- * is rejected, matching the POST handler's "out of range (0-2)" error. */
+ * enforces (0-3, i.e. <= ZONE_CONTROL_MODE_PID_FUZZY) -- any other numeric
+ * value is rejected, matching the POST handler's "out of range (0-3)" error. */
 bool zones_config_set_control_mode(uint8_t zone_index, zone_control_mode_t mode);
 
 /* Guard 5's absolute limits (TODO.md 6A.3). max_temp_c == 0 still means
@@ -760,7 +868,16 @@ float zones_config_apply_cal(uint8_t zone_index, float raw_c);
  * macro then, which also means every kiln_cfg_store entry already on a
  * board's flash keeps its old (smaller) blob size until re-saved, exactly
  * like ZONES_CFG_VERSION's own "grows, never shrinks" migration discipline. */
-#define ZONES_CONFIG_BLOB_MAX_SIZE 512
+/* 512 -> 640 (2026-08-30, ZONES_CFG_VERSION 9->10, PID_EXPANSION_PLAN.md
+ * Phase 2): zones_cfg_t was already sitting at ~500/512 bytes before this
+ * bump (see zones_http.c's zone_normals_cfg_t comment for that measurement);
+ * three new floats plus one uint8_t per zone_cfg_t element (fuzzy_strength_pct/
+ * coupling_coeff/coupling_neighbor_zone/settings_source) adds ~13 bytes per
+ * zone across MAX31856_CHANNEL_COUNT zones, which does not fit in the old
+ * ceiling. Existing kiln_cfg_store.c entries already on a board's flash keep
+ * their old (smaller) blob size until re-saved -- same discipline as every
+ * ZONES_CFG_VERSION migration; see zones_config_blob_size()'s own comment. */
+#define ZONES_CONFIG_BLOB_MAX_SIZE 640
 
 /* Runtime size of the internal zones_cfg_t struct THIS firmware build
  * stores -- what zones_config_export_blob() below actually writes, and the
@@ -932,7 +1049,7 @@ void zones_current_sweep_get_status(zone_sweep_status_t *out);
 
 /* Task 1's persisted result -- a SEPARATE NVS blob (zone_normals_cfg, see
  * zones_http.c), not a field on zones_cfg_t: zones_cfg_t is already 500 of
- * its 512-byte ZONES_CONFIG_BLOB_MAX_SIZE ceiling (see that macro's own
+ * its 640-byte ZONES_CONFIG_BLOB_MAX_SIZE ceiling (see that macro's own
  * comment), the same reason relay_names_cfg_t got its own blob. Returns
  * false (leaving outputs untouched) for an out-of-range zone_index.
  * *out_measured false means "never measured" -- *out_amps is 0.0f in that

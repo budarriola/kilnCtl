@@ -1,6 +1,7 @@
 #include "kiln_cfg_store.h"
 
 #include <ctype.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "esp_log.h"
@@ -31,11 +32,22 @@ static const char *TAG = "kiln_cfg_store";
 #define NVS_KEY_STORE "kilncfgs"
 
 /* Bump whenever kiln_cfg_store_blob_t's on-flash layout changes -- mirrors
- * ZONES_CFG_VERSION's role in zones_http.c. Only version 1 exists today, so
- * nvs_load_store() below has no migration chain yet; a future bump needs one
- * (see that function's comment), the same discipline
- * migrate_zones_cfg_v1_to_current() established for zones_cfg_t. */
-#define KILN_CFG_STORE_VERSION 1
+ * ZONES_CFG_VERSION's role in zones_http.c. Version 2 is current; version 1
+ * is still readable via nvs_load_store()'s migration branch
+ * (migrate_store_v1_to_current() below), the same discipline
+ * migrate_zones_cfg_v1_to_current() established for zones_cfg_t. A future
+ * bump needs another branch added alongside that one. */
+#define KILN_CFG_STORE_VERSION 2
+
+/* v1's blob ceiling. ZONES_CONFIG_BLOB_MAX_SIZE was widened 512 -> 640 on
+ * 2026-08-30 (zone_cfg_t gained the four PID_EXPANSION_PLAN.md Phase 2
+ * fields), and because that macro sizes a member of the PERSISTED struct
+ * below -- not just a runtime ceiling -- widening it changed
+ * sizeof(kiln_cfg_store_blob_t). nvs_load_store()'s `len != sizeof(loaded)`
+ * check would then have read every existing board's saved store as
+ * corruption and silently discarded every named kiln config and active_id.
+ * Frozen here so the v1 layout can still be read and migrated. */
+#define KILN_CFG_STORE_BLOB_MAX_SIZE_V1 512u
 
 /* One saved kiln config slot. blob/blob_len hold whatever
  * zones_config_export_blob() produced at save time -- an opaque byte string
@@ -66,6 +78,73 @@ typedef struct {
     int32_t next_id;
     kiln_cfg_entry_t entries[KILN_CFG_MAX_COUNT];
 } kiln_cfg_store_blob_t;
+
+/* ---- Frozen v1 on-flash layout -------------------------------------------
+ * Used ONLY to reinterpret a stored v1 blob during migration. Never grown,
+ * never reused: same discipline as zones_http.c's zone_cfg_v*_t snapshots,
+ * and for the same reason -- a historical layout that no longer matches the
+ * bytes actually in flash is worse than no migration at all. */
+typedef struct {
+    uint8_t in_use;
+    int32_t id;
+    char name[KILN_CFG_NAME_MAX_LEN + 1];
+    uint16_t blob_len;
+    uint8_t blob[KILN_CFG_STORE_BLOB_MAX_SIZE_V1];
+} kiln_cfg_entry_v1_t;
+
+typedef struct {
+    uint8_t version;
+    int32_t active_id;
+    int32_t next_id;
+    kiln_cfg_entry_v1_t entries[KILN_CFG_MAX_COUNT];
+} kiln_cfg_store_blob_v1_t;
+
+/* Budget guard: kiln_cfg_store_blob_t is a permanent member of s_store
+ * (static, BSS-resident) and kiln_cfg_store_blob_v1_t is heap-allocated only
+ * transiently, on the once-ever v1-migration path in nvs_load_store() below
+ * (malloc'd, freed before that function returns) -- neither is ever an
+ * ordinary function-local/stack buffer, so this is no longer a stack budget.
+ * What it actually bounds now: s_store's permanent BSS footprint plus the
+ * transient heap high-water mark the migration path can hit, added together
+ * as a single loose tripwire so a future ZONES_CONFIG_BLOB_MAX_SIZE widening
+ * (or KILN_CFG_MAX_COUNT bump) gets caught here instead of silently growing
+ * either cost. 16384 is deliberately loose, not a real budget -- the point
+ * is only to force a human back to this comment and nvs_load_store()'s
+ * reasoning before either struct doubles again. */
+/* Portable compile-time assert (not _Static_assert): this file is compiled
+ * both by the ESP-IDF (xtensa-gcc, C11) build and, #included directly, by
+ * this repo's MSVC host tests (test_kiln_cfg_store.c) which are not
+ * necessarily invoked in C11 mode. A negative array size is a hard error in
+ * every C standard this file has ever been built under. */
+typedef char kiln_cfg_store_blob_budget_check
+    [(sizeof(kiln_cfg_store_blob_t) + sizeof(kiln_cfg_store_blob_v1_t) < 16384) ? 1 : -1];
+
+/* Migrates a v1 store into the current layout: every field copied by name,
+ * the shorter v1 blob copied into the wider array and the remainder left
+ * zeroed. Lossless -- a v1 blob is a complete zones config that a v1-era
+ * build wrote, and zones_http.c's own decoder handles its version separately
+ * (it carries its own ZONES_CFG_VERSION inside those bytes). */
+static void migrate_store_v1_to_current(const kiln_cfg_store_blob_v1_t *src, kiln_cfg_store_blob_t *dst)
+{
+    memset(dst, 0, sizeof(*dst));
+    dst->version = KILN_CFG_STORE_VERSION;
+    dst->active_id = src->active_id;
+    dst->next_id = src->next_id;
+    for (size_t i = 0; i < KILN_CFG_MAX_COUNT; i++) {
+        const kiln_cfg_entry_v1_t *se = &src->entries[i];
+        kiln_cfg_entry_t *de = &dst->entries[i];
+        de->in_use = se->in_use;
+        de->id = se->id;
+        memcpy(de->name, se->name, sizeof(de->name));
+        de->name[sizeof(de->name) - 1] = '\0';
+        uint16_t n = se->blob_len;
+        if (n > KILN_CFG_STORE_BLOB_MAX_SIZE_V1) {
+            n = KILN_CFG_STORE_BLOB_MAX_SIZE_V1; /* stored length can never exceed v1's own array */
+        }
+        de->blob_len = n;
+        memcpy(de->blob, se->blob, n);
+    }
+}
 
 static kiln_cfg_store_blob_t s_store;
 
@@ -99,18 +178,18 @@ static void reset_to_defaults(void)
 }
 
 /* Loads the persisted store blob, or defaults to an empty store if nothing
- * was ever saved. No migration chain exists yet (KILN_CFG_STORE_VERSION==1
- * is the only version this build has ever written, so the "older version"
- * branch below is unreachable today) -- a future version bump needs one
- * here, mirroring zones_http.c's nvs_load_from()/
- * migrate_zones_cfg_v1_to_current(). Follows that same file's "refuse and
- * leave flash alone, don't reset-and-treat-as-corrupt" discipline for a
- * newer-than-firmware blob specifically -- see the version-check block
- * below for the per-branch reasoning (zones_http.c's FIX 1 found exactly
- * this distinction missing there; kiln_cfg_store.c cannot yet trigger the
- * same bug since it never runs a migration off the version it reads here,
- * but getting the distinction right now means a future change that DOES add
- * one won't have to rediscover it). */
+ * was ever saved. One migration branch exists today -- a v1-sized blob is
+ * upgraded via migrate_store_v1_to_current() below, mirroring
+ * zones_http.c's nvs_load_from()/migrate_zones_cfg_v1_to_current(). Follows
+ * that same file's "refuse and leave flash alone, don't reset-and-treat-as-
+ * corrupt" discipline for a newer-than-firmware blob specifically -- see the
+ * version-check block below for the per-branch reasoning (zones_http.c's
+ * FIX 1 found exactly this distinction missing there). A future version
+ * bump beyond 2 needs its own branch added alongside the v1 one. */
+/* Defined below; nvs_load_store() calls it to rewrite a migrated v1 store in
+ * the current layout. */
+static esp_err_t nvs_save_store(void);
+
 static void nvs_load_store(void)
 {
     reset_to_defaults();
@@ -121,57 +200,121 @@ static void nvs_load_store(void)
         return; /* ESP_ERR_NVS_NOT_FOUND (never saved) or partition trouble -- defaults stand */
     }
 
-    kiln_cfg_store_blob_t loaded;
-    size_t len = sizeof(loaded);
-    err = nvs_get_blob(h, NVS_KEY_STORE, &loaded, &len);
-    nvs_close(h);
+    /* Read the size first, so a v1-sized blob can be migrated instead of
+     * being dismissed as corruption by the exact-size check below. */
+    size_t stored_len = 0;
+    err = nvs_get_blob(h, NVS_KEY_STORE, NULL, &stored_len);
     if (err != ESP_OK) {
+        nvs_close(h);
         return; /* nothing stored, or unreadable -- defaults stand */
     }
-    if (len != sizeof(loaded)) {
+
+    if (stored_len == sizeof(kiln_cfg_store_blob_v1_t)) {
+        /* A board saved by a pre-2026-08-30 build. Its entries are the same
+         * data, just with a 512-byte blob array instead of 640. Migrate
+         * rather than discard: this is a user's named kiln configs.
+         *
+         * Heap-allocated, not `static`/stack: sizeof(kiln_cfg_store_blob_v1_t)
+         * is 4396 bytes (KILN_CFG_MAX_COUNT=8 entries, each
+         * KILN_CFG_STORE_BLOB_MAX_SIZE_V1=512 blob + header/padding =~ 548
+         * bytes -- verified by hand against the struct layout above, not
+         * assumed). This branch runs at most once per board (the very next
+         * boot takes the fast, already-current-version path below), so it is
+         * not worth 4396 bytes of *permanent* BSS the other ~99.99% of boots
+         * never touch. malloc() failure is handled exactly like the
+         * "unreadable, defaults stand" branch a few lines below -- there is
+         * nothing special about running out of heap here versus any other
+         * read failure. */
+        kiln_cfg_store_blob_v1_t *v1 = malloc(sizeof(*v1));
+        if (!v1) {
+            nvs_close(h);
+            ESP_LOGW(TAG, "kiln_cfg_store v1 migration buffer alloc failed -- defaults stand");
+            return;
+        }
+        size_t v1_len = sizeof(*v1);
+        err = nvs_get_blob(h, NVS_KEY_STORE, v1, &v1_len);
+        nvs_close(h);
+        if (err != ESP_OK || v1_len != sizeof(*v1)) {
+            ESP_LOGW(TAG, "kiln_cfg_store v1 blob could not be re-read -- defaults stand");
+            free(v1);
+            return;
+        }
+        if (v1->version != 1) {
+            ESP_LOGW(TAG, "kiln_cfg_store blob is v1-SIZED but claims version %u -- treating as corrupt",
+                     (unsigned)v1->version);
+            free(v1);
+            return;
+        }
+        migrate_store_v1_to_current(v1, &s_store);
+        free(v1);
+        ESP_LOGI(TAG, "kiln_cfg_store migrated v1 -> v%u (blob ceiling %u -> %u); saved kiln configs kept",
+                 (unsigned)KILN_CFG_STORE_VERSION, (unsigned)KILN_CFG_STORE_BLOB_MAX_SIZE_V1,
+                 (unsigned)ZONES_CONFIG_BLOB_MAX_SIZE);
+        nvs_save_store(); /* rewrite in the current layout so the next boot takes the fast path */
+        return;
+    }
+
+    /* Read directly into s_store -- no separate whole-store scratch buffer.
+     * Every rejection branch below (wrong size, unreadable, older version,
+     * newer version) calls reset_to_defaults() before returning, so a read
+     * that fails partway (leaving s_store partially overwritten) or succeeds
+     * into a version this build refuses to use can never leave s_store in a
+     * half-written or wrongly-versioned state -- behaviourally identical to
+     * the previous "read into a scratch `loaded`, only copy to s_store on
+     * the happy path" approach, at zero bytes of extra BSS/heap. */
+    size_t len = sizeof(s_store);
+    err = nvs_get_blob(h, NVS_KEY_STORE, &s_store, &len);
+    nvs_close(h);
+    if (err != ESP_OK) {
+        reset_to_defaults(); /* nothing stored, or unreadable, or a partial read -- defaults stand */
+        return;
+    }
+    if (len != sizeof(s_store)) {
         /* Wrong size for ANY version's claimed layout is genuine corruption
          * -- a real blob is always written at exactly sizeof(s_store) (see
          * nvs_save_store()). Nothing here is worth protecting; defaults
          * stand, same as "nothing was ever saved." */
         ESP_LOGW(TAG, "kiln_cfg_store blob is the wrong size -- treating as corrupt, resetting to an "
                       "empty store rather than risking a half-understood layout");
+        reset_to_defaults();
         return;
     }
-    if (loaded.version == KILN_CFG_STORE_VERSION) {
-        s_store = loaded; /* current version, right size -- happy path */
-        return;
+    if (s_store.version == KILN_CFG_STORE_VERSION) {
+        return; /* current version, right size -- happy path, s_store already holds it */
     }
-    if (loaded.version < KILN_CFG_STORE_VERSION) {
-        /* Unreachable today (KILN_CFG_STORE_VERSION has only ever been 1),
-         * but reachable the moment a second version exists and no migration
-         * chain has been written for it yet -- an older-version blob with no
-         * defined conversion is exactly as unusable as a wrong-size one, not
-         * a case where the data is newer than this firmware understands, so
-         * it is treated as corrupt rather than refused. */
+    if (s_store.version < KILN_CFG_STORE_VERSION) {
+        /* Reachable only for a version between 1 (handled by the size-based
+         * migration branch above) and KILN_CFG_STORE_VERSION for which no
+         * migration chain has been written yet -- an older-version blob with
+         * no defined conversion is exactly as unusable as a wrong-size one,
+         * not a case where the data is newer than this firmware understands,
+         * so it is treated as corrupt rather than refused. */
         ESP_LOGW(TAG, "kiln_cfg_store blob is version %u, older than this firmware's %u, and no "
                       "migration chain exists yet -- treating as corrupt, resetting to an empty store",
-                 (unsigned)loaded.version, (unsigned)KILN_CFG_STORE_VERSION);
+                 (unsigned)s_store.version, (unsigned)KILN_CFG_STORE_VERSION);
+        reset_to_defaults();
         return;
     }
-    /* loaded.version > KILN_CFG_STORE_VERSION: written by newer firmware
+    /* s_store.version > KILN_CFG_STORE_VERSION: written by newer firmware
      * than this build -- the same firmware-rollback case zones_http.c's
      * nvs_load_from() guards against (see that function's comment, and its
-     * FIX 1 note above). Refuse to load rather than reset: resetting costs
-     * nothing THIS boot (defaults already stand either way), but
-     * zones_http.c's bug was a caller downstream conflating "refused" with
-     * "genuinely nothing was ever saved" and writing a fresh, empty blob
-     * back over the newer one. kiln_cfg_store_init() below never does that
-     * automatically today -- it only calls nvs_save_store() when
-     * s_store.active_id != KILN_CFG_NO_ACTIVE_ID, and reset_to_defaults()
-     * (called at the top of this function, above) always clears active_id
-     * first -- so this is a documentation-only distinction for now. It stops
-     * being one the instant a future change adds any automatic write-back
-     * after a load, which is exactly why the distinct log message and this
-     * reasoning are written down here rather than left for that change to
-     * rediscover. */
+     * FIX 1 note above). Refuse to load rather than reset flash: nothing on
+     * flash is touched here regardless (this function never writes), but
+     * s_store itself IS reset to defaults below -- unlike the old
+     * scratch-buffer version, this function now reads straight into
+     * s_store, so the newer-than-firmware bytes it just read must be wiped
+     * back out of memory before returning, or the caller would be handed a
+     * half-understood layout it never validated. kiln_cfg_store_init()
+     * below only calls nvs_save_store() when s_store.active_id !=
+     * KILN_CFG_NO_ACTIVE_ID, and reset_to_defaults() always clears
+     * active_id, so this reset can never itself trigger the write-back that
+     * would overwrite the newer blob on flash -- that write-back guard is
+     * exactly why the distinct log message and this reasoning are written
+     * down here rather than left for a future change to rediscover. */
     ESP_LOGW(TAG, "kiln_cfg_store blob is version %u, newer than this firmware's %u -- refusing to "
                   "load, flash data left untouched",
-             (unsigned)loaded.version, (unsigned)KILN_CFG_STORE_VERSION);
+             (unsigned)s_store.version, (unsigned)KILN_CFG_STORE_VERSION);
+    reset_to_defaults();
 }
 
 static esp_err_t nvs_save_store(void)

@@ -244,6 +244,18 @@ typedef struct {
     float guard[8];
     bool set_xzone_called;
     float cross_zone_max_delta_c;
+    bool set_fuzzy_strength_called;
+    float fuzzy_strength_pct;
+    /* 2026-08-30 (ZONES_CFG_VERSION 10->11): row, not a pair -- one flag/
+     * value PER CELL, since backup_http.c now commits via the single-cell
+     * setter (zones_config_set_coupling_cell()) rather than the whole-row
+     * one, one cell at a time, so a partial import (some cells present,
+     * others not) is observable per cell, matching the real setter's own
+     * per-cell semantics. */
+    bool set_coupling_cell_called[MAX31856_CHANNEL_COUNT];
+    float coupling_coeff[MAX31856_CHANNEL_COUNT];
+    bool set_settings_source_called;
+    uint8_t settings_source;
 } zone_write_t;
 
 static zone_write_t s_writes[STUB_ZONE_COUNT];
@@ -440,6 +452,33 @@ bool zones_config_get_cross_zone_delta(uint8_t zone_index, float *out_max_delta_
     return true;
 }
 
+bool zones_config_get_fuzzy_strength_pct(uint8_t zone_index, float *out_pct)
+{
+    if (!out_pct || zone_index >= STUB_ZONE_COUNT) {
+        return false;
+    }
+    *out_pct = s_writes[zone_index].fuzzy_strength_pct;
+    return true;
+}
+
+bool zones_config_get_coupling(uint8_t zone_index, float out_row[MAX31856_CHANNEL_COUNT])
+{
+    if (!out_row || zone_index >= STUB_ZONE_COUNT) {
+        return false;
+    }
+    memcpy(out_row, s_writes[zone_index].coupling_coeff, sizeof(s_writes[zone_index].coupling_coeff));
+    return true;
+}
+
+bool zones_config_get_settings_source(uint8_t zone_index, uint8_t *out_settings_source)
+{
+    if (!out_settings_source || zone_index >= STUB_ZONE_COUNT) {
+        return false;
+    }
+    *out_settings_source = s_writes[zone_index].settings_source;
+    return true;
+}
+
 bool zones_config_get_safety_tc_type(uint8_t *out_tc_type)
 {
     if (!out_tc_type) {
@@ -584,6 +623,42 @@ bool zones_config_set_cross_zone_delta(uint8_t zone_index, float max_delta_c)
     g_total_write_calls++;
     return true;
 }
+bool zones_config_set_fuzzy_strength_pct(uint8_t zone_index, float pct)
+{
+    if (zone_index >= STUB_ZONE_COUNT) return false;
+    s_writes[zone_index].set_fuzzy_strength_called = true;
+    s_writes[zone_index].fuzzy_strength_pct = pct;
+    g_total_write_calls++;
+    return true;
+}
+bool zones_config_set_coupling(uint8_t zone_index, const float row[MAX31856_CHANNEL_COUNT])
+{
+    if (zone_index >= STUB_ZONE_COUNT || !row) return false;
+    for (uint8_t j = 0; j < MAX31856_CHANNEL_COUNT; j++) {
+        s_writes[zone_index].set_coupling_cell_called[j] = true;
+        s_writes[zone_index].coupling_coeff[j] = row[j];
+    }
+    g_total_write_calls++;
+    return true;
+}
+/* backup_import_apply() commits per-cell now -- see zone_write_t's own
+ * comment for why this stub tracks a called-flag PER CELL. */
+bool zones_config_set_coupling_cell(uint8_t zone_index, uint8_t neighbor_index, float coeff)
+{
+    if (zone_index >= STUB_ZONE_COUNT || neighbor_index >= MAX31856_CHANNEL_COUNT) return false;
+    s_writes[zone_index].set_coupling_cell_called[neighbor_index] = true;
+    s_writes[zone_index].coupling_coeff[neighbor_index] = coeff;
+    g_total_write_calls++;
+    return true;
+}
+bool zones_config_set_settings_source(uint8_t zone_index, uint8_t settings_source)
+{
+    if (zone_index >= STUB_ZONE_COUNT) return false;
+    s_writes[zone_index].set_settings_source_called = true;
+    s_writes[zone_index].settings_source = settings_source;
+    g_total_write_calls++;
+    return true;
+}
 bool zones_config_set_safety_tc_type(uint8_t tc_type)
 {
     s_safety_tc_set = true;
@@ -668,11 +743,15 @@ static void test_unknown_version_refused(void)
     TEST_SECTION("backup_import_apply -- unknown (too new) version is refused");
     reset_stub_state();
 
-    const char *body = "{\"kind\":\"kilnctl_backup\",\"version\":3,\"profiles\":[],\"zones\":[]}";
+    /* 2026-08-30 (ZONES_CFG_VERSION 10->11): BACKUP_FORMAT_VERSION moved
+     * 3 -> 4 (coupling_coeff/coupling_neighbor_zone -> indexed
+     * coupling_c0..coupling_cN-1), so 4 is now a real, supported version --
+     * this test moved to version 5, the new too-new boundary. */
+    const char *body = "{\"kind\":\"kilnctl_backup\",\"version\":5,\"profiles\":[],\"zones\":[]}";
     char err[160];
     bool ok = backup_import_apply(body, err, sizeof(err));
 
-    TEST_CHECK(!ok, "version 3 is newer than this firmware's BACKUP_FORMAT_VERSION (2) -- must be refused");
+    TEST_CHECK(!ok, "version 5 is newer than this firmware's BACKUP_FORMAT_VERSION (4) -- must be refused");
     TEST_CHECK(g_total_write_calls == 0, "nothing written for an unsupported version");
 }
 
@@ -846,6 +925,232 @@ static void test_profile_name_at_limit_accepted(void)
     TEST_CHECK(strcmp(g_last_saved_profile.name, "ExactlyFifteenC") == 0, "the full, untruncated name was written");
 }
 
+// ---------------------------------------------------------------------------
+// Version 3 (2026-08-30): PID_EXPANSION_PLAN.md Phase 2/4's four new fields
+// -- fuzzy_strength_pct, coupling_coeff, coupling_neighbor_zone,
+// settings_source.
+//
+// Version 4 (2026-08-30, same-day follow-up, ZONES_CFG_VERSION 10->11): the
+// coupling_coeff/coupling_neighbor_zone pair is replaced by indexed
+// coupling_c0..coupling_cN-1 keys -- see BACKUP_FORMAT_VERSION's own 3->4
+// comment in backup_http.c.
+// ---------------------------------------------------------------------------
+
+static void test_v4_new_fields_round_trip_distinct_values(void)
+{
+    TEST_SECTION("backup_import_apply -- fuzzy_strength_pct/coupling_c0../settings_source all set to "
+                 "distinctive non-default values, committed exactly, per cell");
+    reset_stub_state();
+
+    const char *body =
+        "{\"kind\":\"kilnctl_backup\",\"version\":4,\"profiles\":[],"
+        "\"zones\":[{\"index\":1,\"pid_kp\":1,\"pid_ki\":0,\"pid_kd\":0,"
+        "\"fuzzy_strength_pct\":37.25,\"coupling_c0\":10.887,\"coupling_c2\":3.332,"
+        "\"settings_source\":0}]}";
+    char err[160];
+    bool ok = backup_import_apply(body, err, sizeof(err));
+
+    TEST_CHECK(ok, "a well-formed version-4 zone entry must import");
+    TEST_CHECK(s_writes[1].set_fuzzy_strength_called, "fuzzy_strength_pct was committed");
+    TEST_CHECK_NEAR(s_writes[1].fuzzy_strength_pct, 37.25, 1e-6, "fuzzy_strength_pct comes back exactly");
+    TEST_CHECK(s_writes[1].set_coupling_cell_called[0], "cell 0 was committed");
+    TEST_CHECK(s_writes[1].set_coupling_cell_called[2], "cell 2 was committed");
+    TEST_CHECK(!s_writes[1].set_coupling_cell_called[1], "the diagonal cell (1, zone 1's own index) was NOT touched");
+    TEST_CHECK_NEAR(s_writes[1].coupling_coeff[0], 10.887, 1e-6,
+                    "coupling_coeff[0] comes back exactly -- the bench-measured c(1->0)");
+    TEST_CHECK_NEAR(s_writes[1].coupling_coeff[2], 3.332, 1e-6,
+                    "coupling_coeff[2] comes back exactly, DISTINCT from coupling_coeff[0] -- the "
+                    "whole point of the 10->11 widening, round-tripped through a real import");
+    TEST_CHECK(s_writes[1].set_settings_source_called, "settings_source was committed");
+    TEST_CHECK(s_writes[1].settings_source == 0, "settings_source comes back exactly (zone 1 copies zone 0)");
+}
+
+static void test_v2_body_imports_new_fields_default_floats_zero_source_custom(void)
+{
+    TEST_SECTION("backup_import_apply -- an OLDER-format (v2) backup, with none of the four new keys, "
+                 "must still import: the three floats land at 0, and settings_source lands at "
+                 "ZONE_SETTINGS_SOURCE_CUSTOM (0xFF), NEVER 0 -- 0 is a real, different value "
+                 "(\"copies zone 0's settings\")");
+    reset_stub_state();
+
+    const char *body =
+        "{\"kind\":\"kilnctl_backup\",\"version\":2,\"profiles\":[],"
+        "\"zones\":[{\"index\":0,\"pid_kp\":1,\"pid_ki\":0,\"pid_kd\":0}]}";
+    char err[160];
+    bool ok = backup_import_apply(body, err, sizeof(err));
+
+    TEST_CHECK(ok, "a version-2-shaped body (no v3-only keys) must import cleanly under the v3 reader");
+    TEST_CHECK(!s_writes[0].set_fuzzy_strength_called, "no fuzzy_strength_pct key present -- setter must not run");
+    for (uint8_t j = 0; j < MAX31856_CHANNEL_COUNT; j++) {
+        TEST_CHECK(!s_writes[0].set_coupling_cell_called[j], "no coupling keys present -- no cell setter must run");
+    }
+    /* settings_source is UNLIKE the three floats: it has no has_* flag and is
+     * ALWAYS committed (see zone_candidate_t's own comment in backup_http.c)
+     * -- this is the field the task brief calls out as "the identical trap
+     * that nearly destroyed commissioned configs in the v9->v10 NVS migration
+     * earlier today" if it defaulted to 0 instead. */
+    TEST_CHECK(s_writes[0].set_settings_source_called, "settings_source is ALWAYS committed, even when absent");
+    TEST_CHECK(s_writes[0].settings_source == ZONE_SETTINGS_SOURCE_CUSTOM,
+              "and lands at ZONE_SETTINGS_SOURCE_CUSTOM (0xFF) exactly -- asserted explicitly, not \"some value\"");
+}
+
+static void test_v3_fuzzy_strength_out_of_range_rejected(void)
+{
+    TEST_SECTION("backup_import_apply -- fuzzy_strength_pct over ZONE_FUZZY_STRENGTH_PCT_MAX is rejected, "
+                 "nothing written");
+    reset_stub_state();
+
+    char body[256];
+    snprintf(body, sizeof(body),
+             "{\"kind\":\"kilnctl_backup\",\"version\":3,\"profiles\":[],"
+             "\"zones\":[{\"index\":0,\"pid_kp\":1,\"pid_ki\":0,\"pid_kd\":0,\"fuzzy_strength_pct\":%.1f}]}",
+             (double)(ZONE_FUZZY_STRENGTH_PCT_MAX + 1.0f));
+    char err[160];
+    bool ok = backup_import_apply(body, err, sizeof(err));
+
+    TEST_CHECK(!ok, "fuzzy_strength_pct over ZONE_FUZZY_STRENGTH_PCT_MAX must be rejected in validation");
+    TEST_CHECK(g_total_write_calls == 0,
+              "pass 1 validates the WHOLE entry before pass 2 commits ANY of it -- even pid_kp/ki/kd, "
+              "which were themselves in range, must not have been written");
+}
+
+static void test_v3_coupling_neighbor_fractional_rejected(void)
+{
+    TEST_SECTION("backup_import_apply -- a fractional coupling_neighbor_zone (1.5, IN RANGE for 0-2) is "
+                 "refused by the integrality rule, not masked by an earlier range check (LEGACY v3-shaped "
+                 "pair, still readable under the v4 reader)");
+    reset_stub_state();
+
+    // MAX31856_CHANNEL_COUNT is 3, so the valid index range is 0-2 -- 1.5 is
+    // deliberately IN that range so this can only fail on integrality, never
+    // on the range check (2.7 would be out of range and mask the bug this
+    // test exists to catch).
+    const char *body =
+        "{\"kind\":\"kilnctl_backup\",\"version\":3,\"profiles\":[],"
+        "\"zones\":[{\"index\":0,\"pid_kp\":1,\"pid_ki\":0,\"pid_kd\":0,"
+        "\"coupling_coeff\":1,\"coupling_neighbor_zone\":1.5}]}";
+    char err[160];
+    bool ok = backup_import_apply(body, err, sizeof(err));
+
+    TEST_CHECK(!ok, "a fractional, in-range coupling_neighbor_zone must be refused");
+    TEST_CHECK(strstr(err, "coupling_neighbor_zone") != NULL, "the refusal names the field");
+    TEST_CHECK(g_total_write_calls == 0, "nothing written for the whole entry, including pid_kp/ki/kd");
+}
+
+// THE lossless-backward-compat test BACKUP_FORMAT_VERSION's 3->4 comment
+// promises: a genuine version-3 body's legacy pair, with no v4 indexed keys
+// present at all, must still land in the right cell of the new row.
+static void test_v3_legacy_pair_maps_into_row_cell(void)
+{
+    TEST_SECTION("backup_import_apply -- a LEGACY (version 3) coupling_coeff/coupling_neighbor_zone pair, "
+                 "with no v4 coupling_c%u keys present, maps losslessly onto the matching cell");
+    reset_stub_state();
+
+    const char *body =
+        "{\"kind\":\"kilnctl_backup\",\"version\":3,\"profiles\":[],"
+        "\"zones\":[{\"index\":0,\"pid_kp\":1,\"pid_ki\":0,\"pid_kd\":0,"
+        "\"coupling_coeff\":6.75,\"coupling_neighbor_zone\":2}]}";
+    char err[160];
+    bool ok = backup_import_apply(body, err, sizeof(err));
+
+    TEST_CHECK(ok, "a legacy version-3 pair must import cleanly under the v4 reader");
+    TEST_CHECK(s_writes[0].set_coupling_cell_called[2], "the legacy pair committed cell 2 (the named neighbor)");
+    TEST_CHECK_NEAR(s_writes[0].coupling_coeff[2], 6.75, 1e-6, "and the coefficient is exact");
+    TEST_CHECK(!s_writes[0].set_coupling_cell_called[0], "cell 0 (not the named neighbor) was left untouched");
+    TEST_CHECK(!s_writes[0].set_coupling_cell_called[1], "cell 1 (the diagonal) was left untouched");
+}
+
+// 2026-08-31 defect fix: a LEGACY (version <=3) coupling_neighbor_zone
+// pointing at the entry's OWN index must be rejected in PASS 1, same as
+// every other coupling check in this function -- not deferred to pass 2's
+// zones_config_set_coupling_cell(zc->index, zc->index, ...) call, which the
+// setter refuses as a nonzero diagonal. Two zone entries here, in order,
+// with zone 0's entry entirely well-formed and zone 1's entry carrying the
+// self-referencing legacy pair: g_total_write_calls == 0 proves the defect
+// is really fixed -- before the fix, zone 0 committed successfully in pass 2
+// (its setters ran) and only zone 1's pass-2 call failed, leaving zone 0's
+// write live. All-or-nothing means NEITHER zone may have been written.
+static void test_v3_legacy_pair_self_reference_rejected_before_any_commit(void)
+{
+    TEST_SECTION("backup_import_apply -- a LEGACY coupling_neighbor_zone equal to the entry's OWN index "
+                 "is refused in pass 1, before any earlier zone in the same import is committed");
+    reset_stub_state();
+
+    const char *body =
+        "{\"kind\":\"kilnctl_backup\",\"version\":3,\"profiles\":[],"
+        "\"zones\":["
+        "{\"index\":0,\"pid_kp\":1,\"pid_ki\":0,\"pid_kd\":0},"
+        "{\"index\":1,\"pid_kp\":1,\"pid_ki\":0,\"pid_kd\":0,"
+        "\"coupling_coeff\":4.0,\"coupling_neighbor_zone\":1}]}";
+    char err[160];
+    bool ok = backup_import_apply(body, err, sizeof(err));
+
+    TEST_CHECK(!ok, "a self-referencing legacy pair must be refused");
+    TEST_CHECK(strstr(err, "coupling_neighbor_zone") != NULL, "the refusal names the field");
+    TEST_CHECK(g_total_write_calls == 0,
+              "NOTHING was written for either zone -- zone 0's well-formed entry must not have been "
+              "committed before zone 1's pass-1 validation caught the self-reference");
+}
+
+// A body that carries BOTH the new indexed key and the legacy pair for the
+// SAME cell must let the explicit v4 key win -- see zone_candidate_t's own
+// "has_coupling_cell" comment in backup_http.c for why the legacy pair is
+// ignored once the per-cell key has already claimed that cell.
+static void test_v4_key_wins_over_legacy_pair_for_the_same_cell(void)
+{
+    TEST_SECTION("backup_import_apply -- an explicit coupling_c%u key wins over a legacy pair naming "
+                 "the SAME cell, rather than the legacy pair silently overwriting it");
+    reset_stub_state();
+
+    const char *body =
+        "{\"kind\":\"kilnctl_backup\",\"version\":4,\"profiles\":[],"
+        "\"zones\":[{\"index\":0,\"pid_kp\":1,\"pid_ki\":0,\"pid_kd\":0,"
+        "\"coupling_c2\":9.0,\"coupling_coeff\":1.0,\"coupling_neighbor_zone\":2}]}";
+    char err[160];
+    bool ok = backup_import_apply(body, err, sizeof(err));
+
+    TEST_CHECK(ok, "a body with both an explicit key and a legacy pair for the same cell must still import");
+    TEST_CHECK(s_writes[0].set_coupling_cell_called[2], "cell 2 was committed");
+    TEST_CHECK_NEAR(s_writes[0].coupling_coeff[2], 9.0, 1e-6,
+                    "the EXPLICIT coupling_c2 value (9.0) won, not the legacy pair's 1.0");
+}
+
+// 2026-08-30 (ZONES_CFG_VERSION 10->11): a diagonal cell posted nonzero must
+// be refused at the import door -- same rule parse_zone_fields()'s
+// z%u_coupling_c%u enforces at the POST layer.
+static void test_v4_coupling_diagonal_rejected(void)
+{
+    TEST_SECTION("backup_import_apply -- a nonzero coupling_c%u for a zone's OWN index (the diagonal) "
+                 "is rejected");
+    reset_stub_state();
+
+    const char *body =
+        "{\"kind\":\"kilnctl_backup\",\"version\":4,\"profiles\":[],"
+        "\"zones\":[{\"index\":1,\"pid_kp\":1,\"pid_ki\":0,\"pid_kd\":0,\"coupling_c1\":2.5}]}";
+    char err[160];
+    bool ok = backup_import_apply(body, err, sizeof(err));
+
+    TEST_CHECK(!ok, "a nonzero diagonal cell must be rejected");
+    TEST_CHECK(strstr(err, "coupling_c1") != NULL, "the refusal names the specific cell key");
+    TEST_CHECK(g_total_write_calls == 0, "nothing written for the whole entry");
+}
+
+static void test_v3_settings_source_self_reference_rejected(void)
+{
+    TEST_SECTION("backup_import_apply -- settings_source pointing at its own zone index is rejected");
+    reset_stub_state();
+
+    const char *body =
+        "{\"kind\":\"kilnctl_backup\",\"version\":3,\"profiles\":[],"
+        "\"zones\":[{\"index\":1,\"pid_kp\":1,\"pid_ki\":0,\"pid_kd\":0,\"settings_source\":1}]}";
+    char err[160];
+    bool ok = backup_import_apply(body, err, sizeof(err));
+
+    TEST_CHECK(!ok, "zone 1 claiming settings_source=1 (itself) must be refused");
+    TEST_CHECK(strstr(err, "settings_source") != NULL, "the refusal names the field");
+    TEST_CHECK(g_total_write_calls == 0, "nothing written for the whole entry");
+}
+
 void run_test_backup_import(void)
 {
     test_malformed_body_writes_nothing();
@@ -858,4 +1163,14 @@ void run_test_backup_import(void)
     test_v2_body_with_stale_sentinel_still_imports();
     test_overlong_profile_name_rejected();
     test_profile_name_at_limit_accepted();
+
+    test_v4_new_fields_round_trip_distinct_values();
+    test_v2_body_imports_new_fields_default_floats_zero_source_custom();
+    test_v3_fuzzy_strength_out_of_range_rejected();
+    test_v3_coupling_neighbor_fractional_rejected();
+    test_v3_legacy_pair_maps_into_row_cell();
+    test_v3_legacy_pair_self_reference_rejected_before_any_commit();
+    test_v4_key_wins_over_legacy_pair_for_the_same_cell();
+    test_v4_coupling_diagonal_rejected();
+    test_v3_settings_source_self_reference_rejected();
 }
