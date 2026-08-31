@@ -22,6 +22,14 @@ void pid_seed_bumpless(pid_state_t *state, const pid_cfg_t *cfg, float setpoint,
     state->initialized = true;
 }
 
+void pid_rescale_integral_for_new_ki(pid_state_t *state, float old_ki, float new_ki)
+{
+    if (!(old_ki > 0.0f) || !(new_ki > 0.0f) || old_ki == new_ki) {
+        return; /* nothing sensible to rescale against/onto, or nothing changed */
+    }
+    state->integral *= (double)old_ki / (double)new_ki;
+}
+
 float pid_update(pid_state_t *state, const pid_cfg_t *cfg, float setpoint, float measurement,
                  float dt_s, float ff_u)
 {
@@ -48,7 +56,12 @@ float pid_update_terms(pid_state_t *state, const pid_cfg_t *cfg, float setpoint,
      * integrator -- a 900C climb from cold must not spend an hour winding
      * up I only to overshoot on arrival. prev_measurement still updates so
      * D isn't fed a stale value when re-entering the range; the caller is
-     * responsible for pid_seed_bumpless() at that transition. */
+     * responsible for pid_seed_bumpless() at that transition. Note this
+     * early return does NOT update d_filtered -- it stays frozen (0.0f on a
+     * cold start) for the whole time error is out of range. Gains don't
+     * matter while out of range, but any fuzzy-PID layer reading d_filtered
+     * (pid_fuzzy.c) will see a stale/zero rate on the first in-range tick
+     * or two after re-entering, until the low-pass filter catches up. */
     if (fabsf(error) > cfg->pid_range_c) {
         state->prev_measurement = measurement;
         float u = (error > 0.0f) ? 1.0f : 0.0f;

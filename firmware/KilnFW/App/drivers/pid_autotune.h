@@ -35,6 +35,10 @@ typedef enum {
     AUTOTUNE_RULE_SIMC = 0,   /* default -- see TODO.md 6A.4 for why ZN is wrong for a kiln */
     AUTOTUNE_RULE_ZIEGLER_NICHOLS,
     AUTOTUNE_RULE_TYREUS_LUYBEN,
+    AUTOTUNE_RULE_COHEN_COON, /* appended, never inserted -- this enum crosses the HTTP boundary
+                               * and value 0 is the documented default; see PID_EXPANSION_PLAN.md
+                               * Phase 1. FOPDT-derivable like SIMC, but the more aggressive of the
+                               * two -- see pid_autotune_tune_from_fopdt()'s header comment below. */
 } autotune_rule_t;
 
 /* One (time, temperature) sample of a step-test trace. t_s is elapsed time
@@ -76,25 +80,50 @@ fopdt_model_t pid_autotune_fit_fopdt(const autotune_sample_t *samples, int sampl
  * integral/derivative terms are Ki*integral and Kd*d_filtered, i.e.
  * "parallel form", not "Ti/Td series form", so this function does that
  * conversion once here rather than making every caller redo it). */
+/* Why a call to pid_autotune_tune_from_fopdt()/pid_autotune_tune_from_relay()
+ * produced all-zero gains -- see PID_EXPANSION_PLAN.md Phase 1, "Surface the
+ * refusal in the UI." Every refusal path used to collapse to the same
+ * kp=ki=kd=0, indistinguishable from every other refusal path; this enum
+ * plus the reason string below (same convention as fopdt_model_t's
+ * valid/invalid_reason pair above) let the caller tell an operator *why*,
+ * with the actual offending numbers where they help. AUTOTUNE_REFUSAL_OK is
+ * the zero value so a zero-initialized autotune_gains_t reads as "ok" only
+ * by convention of also having non-zero gains; callers should check the
+ * enum, not infer success from gains alone. */
+typedef enum {
+    AUTOTUNE_REFUSAL_OK = 0,
+    AUTOTUNE_REFUSAL_INVALID_MODEL,       /* input model/fit was not valid (fopdt or relay) */
+    AUTOTUNE_REFUSAL_RULE_NOT_ON_THIS_PATH, /* e.g. ZN/Tyreus-Luyben on the FOPDT path, or SIMC on the relay path */
+    AUTOTUNE_REFUSAL_DEAD_TIME_TOO_SMALL, /* Cohen-Coon only: dead_time_s below AUTOTUNE_COHEN_COON_MIN_DEAD_TIME_S */
+    AUTOTUNE_REFUSAL_NONPOSITIVE_TAU,     /* tau_s <= 0 */
+    AUTOTUNE_REFUSAL_NONPOSITIVE_GAIN,    /* k_gain_c_per_duty <= 0, or Ku/Tu <= 0 on the relay path */
+} autotune_refusal_t;
+
 typedef struct {
     float kp;
     float ki;
     float kd;
     autotune_rule_t rule;
+    autotune_refusal_t refusal;    /* AUTOTUNE_REFUSAL_OK on success */
+    char  refusal_reason[96];      /* human-readable, with the specific numbers where they help; empty on success */
 } autotune_gains_t;
 
 /* lambda_s is only used by AUTOTUNE_RULE_SIMC; pass 0 to get the "default
  * lambda = 3*L, robust" behavior TODO.md 6A.4 specifies, or a positive
  * value (e.g. model.dead_time_s for "tight") to override it. Ignored for
- * the other two rules, which are not lambda-tunable by definition.
+ * the other three rules -- ZN/Tyreus-Luyben are not lambda-tunable by
+ * definition, and Cohen-Coon has no lambda parameter at all (its formula is
+ * fixed once {K, tau, L} are known).
  *
- * ZN and Tyreus-Luyben are defined here in their *relay-test* form (from
- * Ku/Tu, an ultimate gain and period), not derivable from a FOPDT model
- * alone without also assuming a relationship between (K,tau,L) and
- * (Ku,Tu) -- so pid_autotune_tune_from_relay() is the one that actually
- * accepts those two rules; calling pid_autotune_tune_from_fopdt() with
- * anything other than AUTOTUNE_RULE_SIMC returns kp=ki=kd=0 and is a
- * caller error. */
+ * Two rules are derivable from a FOPDT model alone: SIMC (the default) and,
+ * as of PID_EXPANSION_PLAN.md Phase 1, Cohen-Coon -- both take {K, tau, L}
+ * and need nothing else. ZN and Tyreus-Luyben are defined here in their
+ * *relay-test* form (from Ku/Tu, an ultimate gain and period), not derivable
+ * from a FOPDT model alone without also assuming a relationship between
+ * (K,tau,L) and (Ku,Tu) -- so pid_autotune_tune_from_relay() is the one that
+ * actually accepts those two rules; calling pid_autotune_tune_from_fopdt()
+ * with AUTOTUNE_RULE_ZIEGLER_NICHOLS or AUTOTUNE_RULE_TYREUS_LUYBEN returns
+ * kp=ki=kd=0 and is a caller error. */
 autotune_gains_t pid_autotune_tune_from_fopdt(const fopdt_model_t *model, autotune_rule_t rule, float lambda_s);
 
 /* ------------------------------------------------------------------------

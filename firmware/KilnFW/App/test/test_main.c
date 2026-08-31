@@ -12,6 +12,7 @@ void run_test_thermal_guard(void);
 void run_test_heater_output(void);
 void run_test_closed_loop(void);
 void run_test_pid_autotune(void);
+void run_test_pid_fuzzy(void);
 void run_test_sim_kiln(void);
 void run_test_ota_auth(void);
 void run_test_ota_interlock(void);
@@ -39,6 +40,7 @@ void run_test_max31856_codec(void);
 void run_test_owner_slot_pool(void);
 void run_test_dram_margin(void);
 void run_test_stack_margin(void);
+void run_test_time_sync(void);
 // run_test_safety_cfg_http() is NOT called here -- test_safety_cfg_http.c is
 // its own separate executable (build_host_tests.ps1's third build+run step),
 // same reason test_zones_http.c is: it #includes safety_cfg_http.c directly
@@ -56,6 +58,7 @@ int main(void)
     run_test_heater_output();
     run_test_closed_loop();
     run_test_pid_autotune();
+    run_test_pid_fuzzy();
     run_test_sim_kiln();
     run_test_ota_auth();
     run_test_ota_interlock();
@@ -83,6 +86,7 @@ int main(void)
     run_test_owner_slot_pool();
     run_test_dram_margin();
     run_test_stack_margin();
+    run_test_time_sync();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     if (g_test_failures > 0) {

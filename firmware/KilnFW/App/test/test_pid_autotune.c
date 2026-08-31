@@ -4,6 +4,7 @@
 #include "test_common.h"
 #include "../drivers/pid_autotune.h"
 #include "sim_plant.h"
+#include <string.h>
 
 #define MAX_SAMPLES 4096
 
@@ -87,6 +88,160 @@ void run_test_pid_autotune(void)
         autotune_gains_t g2 = pid_autotune_tune_from_fopdt(&good, AUTOTUNE_RULE_ZIEGLER_NICHOLS, 0.0f);
         TEST_CHECK(g2.kp == 0.0f && g2.ki == 0.0f && g2.kd == 0.0f,
                   "ZN requested from a FOPDT model (not Ku/Tu) yields zero gains, not a silently wrong tuning");
+
+        autotune_gains_t g3 = pid_autotune_tune_from_fopdt(&good, AUTOTUNE_RULE_TYREUS_LUYBEN, 0.0f);
+        TEST_CHECK(g3.kp == 0.0f && g3.ki == 0.0f && g3.kd == 0.0f,
+                  "Tyreus-Luyben requested from a FOPDT model yields zero gains -- still relay-only (regression)");
+    }
+
+    /* Cohen-Coon tuning from a known model (PID_EXPANSION_PLAN.md Phase 1),
+     * checked against the published formula by hand:
+     *   K=400, tau=1000, L=30, r=L/tau=0.03
+     *   Kc = (1/400)*(1000/30)*(4/3 + 0.03/4)
+     *      = 0.0025 * 33.3333 * (1.33333 + 0.0075) = 0.0025*33.3333*1.34083
+     *      = 0.111736
+     *   Ti = 30*(32 + 6*0.03)/(13 + 8*0.03) = 30*32.18/13.24 = 72.925...
+     *   Td = 30*4/(11 + 2*0.03) = 120/11.06 = 10.8499...
+     * Ki = Kc/Ti, Kd = Kc*Td, same parallel-form conversion as SIMC. */
+    {
+        fopdt_model_t m = {.k_gain_c_per_duty = 400.0f, .tau_s = 1000.0f, .dead_time_s = 30.0f, .valid = true};
+        autotune_gains_t cc = pid_autotune_tune_from_fopdt(&m, AUTOTUNE_RULE_COHEN_COON, 0.0f);
+
+        /* Literal expected values, NOT the formula re-evaluated. Re-deriving
+         * `kc_expect` from the same expressions the implementation uses makes
+         * the check tautological: transpose 32 and 6, or write `r/4` where
+         * the rule says `L/(4*tau)`, and both sides move together and the
+         * test still passes. These constants come from the arithmetic worked
+         * out longhand in the comment above, so an algebra error in
+         * pid_autotune.c has nothing to hide behind.
+         *
+         *   Kc = 0.11173611
+         *   Ti = 30*(32 + 0.18)/(13 + 0.24) = 965.4/13.24 = 72.9154129 s
+         *   Td = 30*4/(11 + 0.06) = 120/11.06 = 10.8499088 s
+         *   Ki = Kc/Ti = 1.53240736e-3
+         *   Kd = Kc*Td = 1.21232665
+         *
+         * These are float32 values, matching the implementation's precision;
+         * a double-precision derivation drifts far enough to fail the tighter
+         * tolerances below. Worth noting the literals earned their keep
+         * immediately: the first version of this test carried a hand-computed
+         * Ti of 72.9245, which is wrong in the 4th significant figure, and
+         * the mistake surfaced as a failing Ki the moment the tautological
+         * self-referential expressions were removed. */
+        TEST_CHECK_NEAR(cc.kp, 0.11173611f, 1e-6, "Cohen-Coon Kp matches the hand-computed published formula");
+        TEST_CHECK_NEAR(cc.ki, 1.53240736e-3f, 1e-7, "Cohen-Coon Ki == Kc/Ti (parallel-form conversion)");
+        TEST_CHECK_NEAR(cc.kd, 1.21232665f, 1e-5, "Cohen-Coon Kd == Kc*Td (parallel-form conversion)");
+        TEST_CHECK(cc.rule == AUTOTUNE_RULE_COHEN_COON, "returned gains carry the rule they were computed with");
+
+        /* [9]'s claim (PID_EXPANSION_PLAN.md §2a): Cohen-Coon is the more
+         * aggressive rule of the two offered on the FOPDT path. Prove it
+         * directly on the same model, rather than asserting it in prose. */
+        autotune_gains_t simc = pid_autotune_tune_from_fopdt(&m, AUTOTUNE_RULE_SIMC, 0.0f);
+        TEST_CHECK(cc.kp > simc.kp, "Cohen-Coon Kp is larger than SIMC's on the same model (more aggressive)");
+
+        /* Degenerate dead time: L==0 and L tiny both refuse rather than
+         * emit an inflated (or infinite/NaN) Kc from dividing by L. */
+        fopdt_model_t zero_l = {.k_gain_c_per_duty = 400.0f, .tau_s = 1000.0f, .dead_time_s = 0.0f, .valid = true};
+        autotune_gains_t cc_zero = pid_autotune_tune_from_fopdt(&zero_l, AUTOTUNE_RULE_COHEN_COON, 0.0f);
+        TEST_CHECK(cc_zero.kp == 0.0f && cc_zero.ki == 0.0f && cc_zero.kd == 0.0f,
+                  "Cohen-Coon with L==0 refuses (zero gains), doesn't divide by zero");
+
+        fopdt_model_t tiny_l = {.k_gain_c_per_duty = 400.0f, .tau_s = 1000.0f, .dead_time_s = 0.001f, .valid = true};
+        autotune_gains_t cc_tiny = pid_autotune_tune_from_fopdt(&tiny_l, AUTOTUNE_RULE_COHEN_COON, 0.0f);
+        TEST_CHECK(cc_tiny.kp == 0.0f && cc_tiny.ki == 0.0f && cc_tiny.kd == 0.0f,
+                  "Cohen-Coon with L near zero also refuses, not an inflated Kc");
+        TEST_CHECK(!isnan(cc_tiny.kp) && !isinf(cc_tiny.kp), "no NaN/Inf leaks out of the tiny-L case either way");
+
+        /* Invalid model still refuses, same as SIMC. */
+        fopdt_model_t bad = {.valid = false};
+        autotune_gains_t cc_bad = pid_autotune_tune_from_fopdt(&bad, AUTOTUNE_RULE_COHEN_COON, 0.0f);
+        TEST_CHECK(cc_bad.kp == 0.0f && cc_bad.ki == 0.0f && cc_bad.kd == 0.0f,
+                  "invalid model yields zero Cohen-Coon gains too");
+    }
+
+    /* A NEGATIVE fitted plant gain must be refused by BOTH FOPDT rules.
+     * K < 0 means the zone got colder as duty went up -- a step test started
+     * while the kiln was still cooling, or a relay wired to the wrong zone's
+     * thermocouple. Both rules' Kc inherits K's sign, so without this the
+     * operator is shown three plausible-looking negative gains that drive the
+     * loop backwards. A heater cannot have a negative gain, so this is always
+     * a bad fit, never a real plant. (Regression: the original Cohen-Coon
+     * guard tested `== 0.0f` and SIMC had no gain check at all.) */
+    {
+        fopdt_model_t neg_k = {.k_gain_c_per_duty = -400.0f, .tau_s = 1000.0f, .dead_time_s = 30.0f, .valid = true};
+
+        autotune_gains_t cc_neg = pid_autotune_tune_from_fopdt(&neg_k, AUTOTUNE_RULE_COHEN_COON, 0.0f);
+        TEST_CHECK(cc_neg.kp == 0.0f && cc_neg.ki == 0.0f && cc_neg.kd == 0.0f,
+                  "Cohen-Coon refuses a negative plant gain rather than returning negative PID gains");
+
+        autotune_gains_t simc_neg = pid_autotune_tune_from_fopdt(&neg_k, AUTOTUNE_RULE_SIMC, 0.0f);
+        TEST_CHECK(simc_neg.kp == 0.0f && simc_neg.ki == 0.0f && simc_neg.kd == 0.0f,
+                  "SIMC refuses a negative plant gain too -- not a Cohen-Coon-specific concern");
+
+        /* Zero gain stays refused by both (the case the original == 0 check
+         * did cover -- proving the widened check didn't lose it). */
+        fopdt_model_t zero_k = {.k_gain_c_per_duty = 0.0f, .tau_s = 1000.0f, .dead_time_s = 30.0f, .valid = true};
+        autotune_gains_t cc_zero = pid_autotune_tune_from_fopdt(&zero_k, AUTOTUNE_RULE_COHEN_COON, 0.0f);
+        autotune_gains_t simc_zero = pid_autotune_tune_from_fopdt(&zero_k, AUTOTUNE_RULE_SIMC, 0.0f);
+        TEST_CHECK(cc_zero.kp == 0.0f && simc_zero.kp == 0.0f, "zero plant gain still refused by both rules");
+    }
+
+    /* Machine-readable refusal reasons (PID_EXPANSION_PLAN.md Phase 1,
+     * "Surface the refusal in the UI"): every distinct way
+     * pid_autotune_tune_from_fopdt() can refuse must set its OWN distinct
+     * autotune_refusal_t, not just "some non-OK code" -- that's the entire
+     * point, an operator picking Cohen-Coon needs to know *which* of five
+     * different problems they hit. The success path must report OK. */
+    {
+        fopdt_model_t good = {.k_gain_c_per_duty = 400.0f, .tau_s = 1000.0f, .dead_time_s = 30.0f, .valid = true};
+        autotune_gains_t ok = pid_autotune_tune_from_fopdt(&good, AUTOTUNE_RULE_SIMC, 0.0f);
+        TEST_CHECK(ok.refusal == AUTOTUNE_REFUSAL_OK, "successful SIMC tuning reports AUTOTUNE_REFUSAL_OK");
+        TEST_CHECK(ok.kp == ok.kp && ok.kp != 0.0f, "success path leaves gains as computed (unaffected by refusal field)");
+
+        fopdt_model_t bad = {.valid = false};
+        snprintf(bad.invalid_reason, sizeof(bad.invalid_reason), "flat trace");
+        autotune_gains_t r_invalid = pid_autotune_tune_from_fopdt(&bad, AUTOTUNE_RULE_SIMC, 0.0f);
+        TEST_CHECK(r_invalid.refusal == AUTOTUNE_REFUSAL_INVALID_MODEL, "invalid model -> AUTOTUNE_REFUSAL_INVALID_MODEL");
+        TEST_CHECK(strstr(r_invalid.refusal_reason, "flat trace") != NULL,
+                  "invalid-model reason string carries the model's own invalid_reason");
+
+        autotune_gains_t r_wrong_rule = pid_autotune_tune_from_fopdt(&good, AUTOTUNE_RULE_ZIEGLER_NICHOLS, 0.0f);
+        TEST_CHECK(r_wrong_rule.refusal == AUTOTUNE_REFUSAL_RULE_NOT_ON_THIS_PATH,
+                  "ZN on the FOPDT path -> AUTOTUNE_REFUSAL_RULE_NOT_ON_THIS_PATH");
+
+        fopdt_model_t tiny_l = {.k_gain_c_per_duty = 400.0f, .tau_s = 1000.0f, .dead_time_s = 0.21f, .valid = true};
+        autotune_gains_t r_dead_time = pid_autotune_tune_from_fopdt(&tiny_l, AUTOTUNE_RULE_COHEN_COON, 0.0f);
+        TEST_CHECK(r_dead_time.refusal == AUTOTUNE_REFUSAL_DEAD_TIME_TOO_SMALL,
+                  "Cohen-Coon with L < 0.5s -> AUTOTUNE_REFUSAL_DEAD_TIME_TOO_SMALL");
+        TEST_CHECK(strstr(r_dead_time.refusal_reason, "0.21") != NULL,
+                  "dead-time reason string names the actual L value, not a generic message");
+
+        fopdt_model_t bad_tau = {.k_gain_c_per_duty = 400.0f, .tau_s = 0.0f, .dead_time_s = 30.0f, .valid = true};
+        autotune_gains_t r_tau = pid_autotune_tune_from_fopdt(&bad_tau, AUTOTUNE_RULE_COHEN_COON, 0.0f);
+        TEST_CHECK(r_tau.refusal == AUTOTUNE_REFUSAL_NONPOSITIVE_TAU,
+                  "Cohen-Coon with tau<=0 -> AUTOTUNE_REFUSAL_NONPOSITIVE_TAU");
+
+        fopdt_model_t bad_gain = {.k_gain_c_per_duty = -400.0f, .tau_s = 1000.0f, .dead_time_s = 30.0f, .valid = true};
+        autotune_gains_t r_gain = pid_autotune_tune_from_fopdt(&bad_gain, AUTOTUNE_RULE_COHEN_COON, 0.0f);
+        TEST_CHECK(r_gain.refusal == AUTOTUNE_REFUSAL_NONPOSITIVE_GAIN,
+                  "Cohen-Coon with K<=0 -> AUTOTUNE_REFUSAL_NONPOSITIVE_GAIN");
+
+        autotune_gains_t r_gain_simc = pid_autotune_tune_from_fopdt(&bad_gain, AUTOTUNE_RULE_SIMC, 0.0f);
+        TEST_CHECK(r_gain_simc.refusal == AUTOTUNE_REFUSAL_NONPOSITIVE_GAIN,
+                  "SIMC with K<=0 also -> AUTOTUNE_REFUSAL_NONPOSITIVE_GAIN (same reason, both rules)");
+
+        /* All five distinct refusal codes above must actually BE distinct
+         * from one another -- this is the assertion that would have caught
+         * two refusal paths sharing a code (see the deliberate-break check
+         * this task's report documents). */
+        autotune_refusal_t codes[] = {
+            r_invalid.refusal, r_wrong_rule.refusal, r_dead_time.refusal, r_tau.refusal, r_gain.refusal,
+        };
+        for (size_t i = 0; i < sizeof(codes) / sizeof(codes[0]); i++) {
+            for (size_t j = i + 1; j < sizeof(codes) / sizeof(codes[0]); j++) {
+                TEST_CHECK(codes[i] != codes[j], "distinct FOPDT refusal paths report distinct refusal codes");
+            }
+        }
     }
 
     /* Fit rejects degenerate inputs instead of returning a bogus model. */
@@ -267,10 +422,29 @@ static void run_test_pid_autotune_relay(void)
         autotune_gains_t simc = pid_autotune_tune_from_relay(&m, AUTOTUNE_RULE_SIMC);
         TEST_CHECK(simc.kp == 0.0f && simc.ki == 0.0f && simc.kd == 0.0f,
                   "SIMC requested from Ku/Tu yields zero gains, not a silently wrong tuning");
+        TEST_CHECK(simc.refusal == AUTOTUNE_REFUSAL_RULE_NOT_ON_THIS_PATH,
+                  "SIMC on the relay path -> AUTOTUNE_REFUSAL_RULE_NOT_ON_THIS_PATH");
 
         relay_model_t bad = {.valid = false};
+        snprintf(bad.invalid_reason, sizeof(bad.invalid_reason), "no oscillation");
         autotune_gains_t g = pid_autotune_tune_from_relay(&bad, AUTOTUNE_RULE_TYREUS_LUYBEN);
         TEST_CHECK(g.kp == 0.0f && g.ki == 0.0f && g.kd == 0.0f, "invalid relay model yields zero gains");
+        TEST_CHECK(g.refusal == AUTOTUNE_REFUSAL_INVALID_MODEL, "invalid relay model -> AUTOTUNE_REFUSAL_INVALID_MODEL");
+        TEST_CHECK(strstr(g.refusal_reason, "no oscillation") != NULL,
+                  "invalid-relay-model reason carries the model's own invalid_reason");
+
+        relay_model_t bad_ku = {.ku = 0.0f, .tu_s = 240.0f, .valid = true};
+        autotune_gains_t g_ku = pid_autotune_tune_from_relay(&bad_ku, AUTOTUNE_RULE_TYREUS_LUYBEN);
+        TEST_CHECK(g_ku.refusal == AUTOTUNE_REFUSAL_NONPOSITIVE_GAIN,
+                  "Ku<=0 on a valid relay model -> AUTOTUNE_REFUSAL_NONPOSITIVE_GAIN");
+
+        autotune_gains_t ok = pid_autotune_tune_from_relay(&m, AUTOTUNE_RULE_ZIEGLER_NICHOLS);
+        TEST_CHECK(ok.refusal == AUTOTUNE_REFUSAL_OK, "successful relay tuning reports AUTOTUNE_REFUSAL_OK");
+
+        /* The three relay-path refusal codes exercised above must be
+         * distinct from one another, same rationale as the FOPDT block. */
+        TEST_CHECK(g.refusal != simc.refusal && g.refusal != g_ku.refusal && simc.refusal != g_ku.refusal,
+                  "distinct relay-path refusal causes report distinct refusal codes");
     }
 
     /* Negative cases: every one of these is a trace a real aborted or

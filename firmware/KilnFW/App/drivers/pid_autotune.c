@@ -82,11 +82,99 @@ fopdt_model_t pid_autotune_fit_fopdt(const autotune_sample_t *samples, int sampl
     return m;
 }
 
+/* Below this, Cohen-Coon's Kc term divides by L (dead_time_s); a fit whose
+ * step response barely lagged at all can legitimately report L at or near
+ * zero, and 1/L blows toward infinity right where the fit is least trustworthy
+ * anyway (a near-zero dead time is exactly the regime the two-point method is
+ * weakest in). Unlike SIMC's L==0 fallback -- which substitutes tau for
+ * lambda and keeps producing a (conservative) number -- Cohen-Coon has no
+ * substitute that preserves its meaning: the whole rule is parameterized by
+ * L/tau. Silently clamping L to some epsilon would hand back an arbitrarily
+ * large Kc that looks like a real answer. For a kiln, refusing (all-zero
+ * gains, same shape as an invalid model) is the safer failure than emitting
+ * a huge proportional gain, so that's the choice here. */
+#define AUTOTUNE_COHEN_COON_MIN_DEAD_TIME_S 0.5f
+
 autotune_gains_t pid_autotune_tune_from_fopdt(const fopdt_model_t *model, autotune_rule_t rule, float lambda_s)
 {
-    autotune_gains_t g = {.kp = 0.0f, .ki = 0.0f, .kd = 0.0f, .rule = rule};
-    if (!model->valid || rule != AUTOTUNE_RULE_SIMC) {
+    autotune_gains_t g = {.kp = 0.0f, .ki = 0.0f, .kd = 0.0f, .rule = rule, .refusal = AUTOTUNE_REFUSAL_OK};
+    if (!model->valid) {
+        g.refusal = AUTOTUNE_REFUSAL_INVALID_MODEL;
+        snprintf(g.refusal_reason, sizeof(g.refusal_reason), "FOPDT model is invalid: %s", model->invalid_reason);
+        return g;
+    }
+
+    if (rule == AUTOTUNE_RULE_COHEN_COON) {
+        /* Cohen-Coon (Cohen & Coon, 1953), from the identified FOPDT model
+         * {K, tau, L} -- see PID_EXPANSION_PLAN.md Phase 1 / [9] in that
+         * plan's literature review. Like Ziegler-Nichols, it is a
+         * quarter-amplitude-decay rule (same design target, not derived from
+         * it), and it is the more aggressive of the two FOPDT-derivable rules
+         * offered here -- SIMC stays the default; this is opt-in only, per
+         * §2a's caveat that overshoot on a kiln costs the ware.
+         *
+         * Series (Kc, Ti, Td) form, in terms of L/tau:
+         *   Kc = (1/K) * (tau/L) * (4/3 + L/(4*tau))
+         *   Ti = L * (32 + 6*(L/tau)) / (13 + 8*(L/tau))
+         *   Td = L * 4 / (11 + 2*(L/tau))
+         */
+        /* k_gain <= 0, not == 0: a *negative* fitted gain (a step test run
+         * while the zone was still cooling, or a miswired relay/thermocouple
+         * pair) sails through an == 0 check and yields Kc < 0, i.e. negative
+         * Kp/Ki/Kd. autotune_gains_t has no clamp of its own and the operator
+         * would be shown three plausible-looking numbers that drive the loop
+         * backwards. A heater that cannot cool cannot have a negative gain,
+         * so this is always a bad fit, never a real plant. */
+        if (model->dead_time_s < AUTOTUNE_COHEN_COON_MIN_DEAD_TIME_S) {
+            g.refusal = AUTOTUNE_REFUSAL_DEAD_TIME_TOO_SMALL;
+            snprintf(g.refusal_reason, sizeof(g.refusal_reason),
+                     "Cohen-Coon needs dead time >= %.2f s; this fit has L = %.3f s",
+                     (double)AUTOTUNE_COHEN_COON_MIN_DEAD_TIME_S, (double)model->dead_time_s);
+            return g; /* degenerate L -- refuse rather than emit an inflated Kc, see above */
+        }
+        if (model->tau_s <= 0.0f) {
+            g.refusal = AUTOTUNE_REFUSAL_NONPOSITIVE_TAU;
+            snprintf(g.refusal_reason, sizeof(g.refusal_reason),
+                     "fitted time constant tau = %.3f s is not positive", (double)model->tau_s);
+            return g;
+        }
+        if (model->k_gain_c_per_duty <= 0.0f) {
+            g.refusal = AUTOTUNE_REFUSAL_NONPOSITIVE_GAIN;
+            snprintf(g.refusal_reason, sizeof(g.refusal_reason),
+                     "fitted plant gain K = %.4f degC/duty is not positive", (double)model->k_gain_c_per_duty);
+            return g;
+        }
+
+        float L = model->dead_time_s;
+        float tau = model->tau_s;
+        float r = L / tau;
+
+        float kc = (1.0f / model->k_gain_c_per_duty) * (tau / L) * (4.0f / 3.0f + r / 4.0f);
+        float ti = L * (32.0f + 6.0f * r) / (13.0f + 8.0f * r);
+        float td = L * 4.0f / (11.0f + 2.0f * r);
+
+        g.kp = kc;
+        g.ki = (ti > 0.0f) ? kc / ti : 0.0f;
+        g.kd = kc * td;
+        return g;
+    }
+
+    if (rule != AUTOTUNE_RULE_SIMC) {
+        g.refusal = AUTOTUNE_REFUSAL_RULE_NOT_ON_THIS_PATH;
+        snprintf(g.refusal_reason, sizeof(g.refusal_reason),
+                 "rule %d needs a relay (Ku/Tu) test, not the FOPDT step-test path", (int)rule);
         return g; /* relay-test rules need Ku/Tu, not this FOPDT path -- see header */
+    }
+
+    /* Same negative-gain refusal as the Cohen-Coon branch above, and for the
+     * same reason: SIMC's Kc = tau/(K*(lambda+L)) inherits K's sign, so a
+     * negative fitted gain hands back negative Kp/Ki/Kd here too. This check
+     * was missing until 2026-08-30; it is not a Cohen-Coon-specific concern. */
+    if (model->k_gain_c_per_duty <= 0.0f) {
+        g.refusal = AUTOTUNE_REFUSAL_NONPOSITIVE_GAIN;
+        snprintf(g.refusal_reason, sizeof(g.refusal_reason),
+                 "fitted plant gain K = %.4f degC/duty is not positive", (double)model->k_gain_c_per_duty);
+        return g;
     }
 
     float lambda = (lambda_s > 0.0f) ? lambda_s : 3.0f * model->dead_time_s;
@@ -339,8 +427,16 @@ relay_model_t pid_autotune_fit_relay(const autotune_sample_t *samples, int sampl
 
 autotune_gains_t pid_autotune_tune_from_relay(const relay_model_t *model, autotune_rule_t rule)
 {
-    autotune_gains_t g = {.kp = 0.0f, .ki = 0.0f, .kd = 0.0f, .rule = rule};
-    if (!model->valid || model->ku <= 0.0f || model->tu_s <= 0.0f) {
+    autotune_gains_t g = {.kp = 0.0f, .ki = 0.0f, .kd = 0.0f, .rule = rule, .refusal = AUTOTUNE_REFUSAL_OK};
+    if (!model->valid) {
+        g.refusal = AUTOTUNE_REFUSAL_INVALID_MODEL;
+        snprintf(g.refusal_reason, sizeof(g.refusal_reason), "relay model is invalid: %s", model->invalid_reason);
+        return g;
+    }
+    if (model->ku <= 0.0f || model->tu_s <= 0.0f) {
+        g.refusal = AUTOTUNE_REFUSAL_NONPOSITIVE_GAIN;
+        snprintf(g.refusal_reason, sizeof(g.refusal_reason),
+                 "fitted Ku = %.5f, Tu = %.3f s must both be positive", (double)model->ku, (double)model->tu_s);
         return g;
     }
 
@@ -380,6 +476,9 @@ autotune_gains_t pid_autotune_tune_from_relay(const relay_model_t *model, autotu
         /* SIMC is a model-based rule: it needs tau and L, which a single
          * frequency-response point cannot supply. Mirror image of the FOPDT
          * path's rejection of ZN -- zero gains, not a silently wrong tuning. */
+        g.refusal = AUTOTUNE_REFUSAL_RULE_NOT_ON_THIS_PATH;
+        snprintf(g.refusal_reason, sizeof(g.refusal_reason),
+                 "SIMC needs a FOPDT step-test model (tau, L), not a relay (Ku/Tu) test");
         return g;
     }
 

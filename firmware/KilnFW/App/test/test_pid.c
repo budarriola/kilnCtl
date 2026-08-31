@@ -1,6 +1,8 @@
 #include "test_common.h"
 #include "../drivers/pid.h"
 
+#include <math.h>
+
 void run_test_pid(void)
 {
     TEST_SECTION("pid");
@@ -127,5 +129,72 @@ void run_test_pid(void)
         float u = pid_update_terms(&s, &cfg, 500.0f, 20.0f, 1.0f, 0.0f, &terms);
         TEST_CHECK_NEAR(u, 1.0f, 1e-6, "functional-range clamp still returns 1.0 via the _terms path");
         TEST_CHECK(terms.i == 0.0f && terms.d == 0.0f, "functional-range terms report i=d=0, not fabricated PID math");
+    }
+
+    /* pid_rescale_integral_for_new_ki() (PID_EXPANSION_PLAN.md Phase 3 hazard
+     * 3): rescaling should hold the I term's actual contribution (ki*integral)
+     * constant across a Ki change, which is the whole point -- assert on the
+     * output duty itself, the way the task requires, not just that the
+     * function ran. Without the rescale, the same Ki jump steps u by exactly
+     * the difference an un-rescaled i_term would produce. */
+    {
+        pid_state_t s;
+        pid_cfg_t cfg = {.kp = 0.0f, .ki = 0.01f, .kd = 0.0f, .d_filter_tau_s = 1.0f, .b = 1.0f, .pid_range_c = 1000.0f};
+        pid_reset(&s);
+        /* Run a few ticks with a sustained error to build up a real integral
+         * (not a hand-set one), so this exercises the same state
+         * pid_update_terms() itself produces. */
+        float u_before = 0.0f;
+        for (int i = 0; i < 20; i++) {
+            u_before = pid_update(&s, &cfg, 300.0f, 250.0f, 1.0f, 0.0f);
+        }
+        float i_term_before = cfg.ki * s.integral;
+
+        /* Ki cut by 40% (a fuzzy-adjust-sized move) -- WITHOUT the rescale,
+         * i_term = ki*integral would immediately drop by 40% too, stepping
+         * u down by that much on the very next tick despite nothing else
+         * about the plant/error having changed. */
+        float new_ki = cfg.ki * 0.6f;
+        pid_rescale_integral_for_new_ki(&s, cfg.ki, new_ki);
+        cfg.ki = new_ki;
+        float i_term_after = cfg.ki * s.integral;
+        TEST_CHECK_NEAR(i_term_after, i_term_before, 1e-6, "rescale holds ki*integral (the I term's actual contribution) constant across a Ki move");
+
+        /* And the very next tick's output must not have stepped either --
+         * this is the assertion the task requires: on the actual output,
+         * not just the internal i_term arithmetic above. */
+        float u_after = pid_update(&s, &cfg, 300.0f, 250.0f, 1.0f, 0.0f);
+        TEST_CHECK(fabsf(u_after - u_before) < 0.01f, "rescaled Ki change: next tick's duty does not step (bump-transferred)");
+    }
+    {
+        /* Negative test: prove the assertion above can actually fail --
+         * the same Ki cut WITHOUT calling pid_rescale_integral_for_new_ki()
+         * first must step the output by roughly the un-rescaled i_term drop
+         * (0.4 * i_term_before here), not stay flat. If this ever starts
+         * passing, the "no rescale" comparison stopped being a real bump. */
+        pid_state_t s;
+        pid_cfg_t cfg = {.kp = 0.0f, .ki = 0.01f, .kd = 0.0f, .d_filter_tau_s = 1.0f, .b = 1.0f, .pid_range_c = 1000.0f};
+        pid_reset(&s);
+        float u_before = 0.0f;
+        for (int i = 0; i < 20; i++) {
+            u_before = pid_update(&s, &cfg, 300.0f, 250.0f, 1.0f, 0.0f);
+        }
+        cfg.ki = cfg.ki * 0.6f; /* same 40% cut, no rescale call this time */
+        float u_after = pid_update(&s, &cfg, 300.0f, 250.0f, 1.0f, 0.0f);
+        TEST_CHECK(fabsf(u_after - u_before) > 0.02f, "sanity: an UN-rescaled Ki cut of this size really does step duty (proves the test above is not vacuous)");
+    }
+
+    /* pid_rescale_integral_for_new_ki() no-op guards: <=0 gains, or an
+     * unchanged Ki, must not touch integral at all. */
+    {
+        pid_state_t s;
+        pid_reset(&s);
+        s.integral = 42.0f;
+        pid_rescale_integral_for_new_ki(&s, 0.0f, 0.02f);
+        TEST_CHECK_NEAR(s.integral, 42.0f, 1e-9, "old_ki<=0: no-op, integral untouched");
+        pid_rescale_integral_for_new_ki(&s, 0.02f, 0.0f);
+        TEST_CHECK_NEAR(s.integral, 42.0f, 1e-9, "new_ki<=0: no-op, integral untouched");
+        pid_rescale_integral_for_new_ki(&s, 0.02f, 0.02f);
+        TEST_CHECK_NEAR(s.integral, 42.0f, 1e-9, "old_ki==new_ki: no-op, integral untouched");
     }
 }

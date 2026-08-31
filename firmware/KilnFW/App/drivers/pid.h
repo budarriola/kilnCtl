@@ -42,7 +42,16 @@ typedef struct {
 typedef struct {
     float integral;          /* accumulated error*dt, NOT yet multiplied by Ki */
     float prev_measurement;
-    float d_filtered;
+    float d_filtered;        /* -d(measurement)/dt, low-pass filtered through
+                              * d_filter_tau_s -- see pid_update_terms()'s raw_d.
+                              * Equals d(error)/dt whenever setpoint is locally
+                              * constant, which is exactly the signal
+                              * profile_executor.c's ZONE_CONTROL_MODE_PID_FUZZY
+                              * path reuses as pid_fuzzy_adjust()'s
+                              * error_rate_c_per_s input (PID_EXPANSION_PLAN.md
+                              * Phase 3 hazard 1) rather than differencing a
+                              * fresh, unfiltered rate of its own -- one
+                              * filtered derivative, not two that could disagree. */
     bool  initialized;
 } pid_state_t;
 
@@ -61,6 +70,24 @@ void pid_reset(pid_state_t *state);
  * the next tick). Pass 0.0f for a zone with no feedforward model. */
 void pid_seed_bumpless(pid_state_t *state, const pid_cfg_t *cfg, float setpoint, float measurement,
                        float u_desired, float ff_u);
+
+/* Bump-transfer for a gain-only change mid-run (PID_EXPANSION_PLAN.md Phase 3
+ * hazard 3), distinct from pid_seed_bumpless() above: that function
+ * re-derives the WHOLE integral from a desired output, which is right for a
+ * deliberate discontinuity (mode change, tuning-panel edit, resume from
+ * pause) but overkill -- and the wrong tool -- for a caller (a fuzzy-
+ * adjustment layer) that moves only Ki, tick to tick, while every other
+ * fact about the loop's running state (measurement, d_filtered, the duty
+ * the element is actually at) stays valid and should not be disturbed.
+ *
+ * Rescales integral so ki_old*integral == ki_new*integral' -- the I term's
+ * actual contribution to duty (ki*integral) is unchanged by the rescale
+ * itself; only the caller's own deliberate change in Ki moves it, and it
+ * moves smoothly rather than stepping. A no-op if either gain is <= 0 (no
+ * sensible ratio to rescale against/onto) or the gains are equal (nothing to
+ * do) -- call this unconditionally every tick a caller's effective Ki may
+ * have changed; it is cheap and correct to call when it didn't. */
+void pid_rescale_integral_for_new_ki(pid_state_t *state, float old_ki, float new_ki);
 
 /* Term breakdown from the most recent pid_update_terms() call -- "tuning by
  * evidence, not intuition" (TODO.md 6A.9's /api/control bullet). p/i/d/ff
