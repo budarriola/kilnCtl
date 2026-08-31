@@ -766,28 +766,51 @@ static void apply_relay(uint8_t zi, bool want_on)
      * is the whole failure this exists to catch. */
     s_exec.claimed_relay_mask |= mask;
 
-    if (want_on) {
-        uint32_t sources = 0;
-        bool blocked = relay_authority_zone_blocked(s_exec.safety, zi, &sources);
-        /* Log on the EDGE of the block, not on the edge of an energized relay.
-         * The old condition was `relay_commanded_on`, i.e. "we are turning a
-         * relay off that was on" -- which never fires for a run blocked from
-         * tick one, the case that most needs saying out loud. */
-        if (blocked != s_exec.zones[zi].heat_blocked ||
-            (blocked && sources != s_exec.zones[zi].heat_blocked_sources)) {
-            if (blocked) {
-                ESP_LOGW(TAG, "zone %u WANTS HEAT BUT IS BLOCKED: sources 0x%02X -- no relay will "
-                              "close and the run will otherwise look normal",
-                         zi, (unsigned)sources);
-            } else {
-                ESP_LOGI(TAG, "zone %u heat no longer blocked", zi);
-            }
+    /* Evaluated EVERY tick now, unconditionally -- NOT only when want_on is
+     * true, which is what this function did until a review caught the
+     * regression it caused (2026-09-XX PWM/progress-window fix, defect 1).
+     * z->heat_blocked is the single source of truth profile_executor_
+     * guard_commanded_duty() reads to decide whether the guards see zero or
+     * the intended duty; if it were only refreshed on ticks that wanted
+     * heat, a duty commanded partway through a PWM window (want_on=true on
+     * the on-pulse, false on the off-pulse) would leave heat_blocked stale
+     * on every off-pulse -- true from the last on-pulse's real evaluation,
+     * but READ by the guard-duty helper as "this tick is genuinely
+     * blocked", so a zone with a real, contiguous block ends up reporting
+     * ALTERNATING zero/nonzero to the guards at the PWM period instead of a
+     * genuine contiguous zero. That broke guard 3 (welded relay) during an
+     * authority block specifically -- guard 3 needs a contiguous duty<=0
+     * run, which it had before this whole fix (apply_relay() always forced
+     * relay_commanded_on=false while blocked) and lost when heat_blocked's
+     * staleness was introduced. Evaluating unconditionally restores that: a
+     * genuinely blocked zone now reads heat_blocked=true on EVERY tick,
+     * want_on or not, so profile_executor_guard_commanded_duty() sees a
+     * true contiguous zero again. */
+    uint32_t sources = 0;
+    bool blocked = relay_authority_zone_blocked(s_exec.safety, zi, &sources);
+    bool edge = (blocked != s_exec.zones[zi].heat_blocked) ||
+                (blocked && sources != s_exec.zones[zi].heat_blocked_sources);
+    if (edge) {
+        if (blocked && want_on) {
+            /* The common, most-actionable case: this tick actually wanted
+             * heat and got refused. */
+            ESP_LOGW(TAG, "zone %u WANTS HEAT BUT IS BLOCKED: sources 0x%02X -- no relay will "
+                          "close and the run will otherwise look normal",
+                     zi, (unsigned)sources);
+        } else if (blocked) {
+            /* Block state changed on a tick that did not itself want heat
+             * (e.g. a PWM off-pulse, or a zone between demands) -- still
+             * worth a line, just without claiming this exact tick wanted
+             * heat. */
+            ESP_LOGW(TAG, "zone %u's heat is blocked: sources 0x%02X", zi, (unsigned)sources);
+        } else {
+            ESP_LOGI(TAG, "zone %u heat no longer blocked", zi);
         }
-        s_exec.zones[zi].heat_blocked = blocked;
-        s_exec.zones[zi].heat_blocked_sources = blocked ? sources : 0u;
-        if (blocked) {
-            want_on = false;
-        }
+    }
+    s_exec.zones[zi].heat_blocked = blocked;
+    s_exec.zones[zi].heat_blocked_sources = blocked ? sources : 0u;
+    if (want_on && blocked) {
+        want_on = false;
     }
 
     if (s_exec.io) {
@@ -808,6 +831,70 @@ static void apply_relay(uint8_t zi, bool want_on)
      * would have. */
     sim_backend_note_zone_relay(zi, want_on);
     s_exec.zones[zi].relay_commanded_on = want_on;
+}
+
+/* What guards 1/2/3/7 (thermal_guard.c) should be told this zone's
+ * commanded_duty is, for THIS tick -- factored out of the apply-relays-and-
+ * guards loop below purely so it is directly unit-testable (same reasoning
+ * as this file's other small pure-decision helpers). See that loop's own
+ * comment, right above where this is called, for the full defect this
+ * replaces and the load-cap reasoning behind the choice below.
+ *
+ * REVISED (review defect 1): the first version of this function took an
+ * additional want_relay_on_this_tick parameter and only zeroed intended_duty
+ * when (want_relay_on_this_tick && heat_blocked). That gate was WRONG, and a
+ * regression against the pre-fix code: want_relay_on_this_tick is itself the
+ * POST-PWM instantaneous relay decision (heater_output_duty()'s return, see
+ * the caller), so under a genuine authority block at a partial intended
+ * duty it alternated true/false at the PWM period right along with the
+ * relay -- true on an on-pulse (heat_blocked freshly true that tick,
+ * correctly zeroing), false on an off-pulse (the gate itself false, so the
+ * function returned intended_duty UNZEROED even though the zone was, in
+ * fact, still blocked that whole time). Guard 3 (welded relay) needs a
+ * CONTIGUOUS duty<=0 run to arm; this alternation broke it during exactly
+ * the scenario guard 3 exists for -- a welded/shorted contact discovered
+ * while heat is authority-blocked. The pre-fix code never had this bug
+ * (apply_relay() always forced relay_commanded_on=false while blocked, a
+ * genuine contiguous zero) -- the bug was introduced by this function's own
+ * first version, not inherited.
+ *
+ * Root cause: heat_blocked is now refreshed by apply_relay() on EVERY tick
+ * (see that function's own comment on this exact change), so it is no
+ * longer only "fresh when want_on was true" -- there is nothing left for a
+ * want_relay_on_this_tick gate to usefully condition, and gating on it was
+ * actively wrong whenever heat_blocked correctly stayed true across a
+ * PWM off-pulse. Dropped entirely: this function now trusts heat_blocked
+ * unconditionally, which is correct precisely because the caller keeps it
+ * unconditionally fresh. */
+static float profile_executor_guard_commanded_duty(bool heat_blocked, float intended_duty)
+{
+    return heat_blocked ? 0.0f : intended_duty;
+}
+
+/* Guard 1's own effective rate requirement for THIS tick -- factored out of
+ * the apply-relays-and-guards loop for the same reason profile_executor_
+ * guard_commanded_duty() was (direct unit-testability), see that loop's own
+ * comment on review defect 2 for the full "a fixed absolute rate has no
+ * knowledge of the commanded ramp" reasoning.
+ *
+ * configured_rate_c_per_min is the zone's own guard_cfg.sanity_rate_c_per_min
+ * (0 meaning "not configured" -- substituted with thermal_guard.c's own
+ * 0.5 C/min default here so the min() below always compares two real
+ * numbers, mirroring effective_f()'s convention in that file without
+ * needing to export it). target_rate_c_per_s is s_exec.target_rate_c_per_s,
+ * exactly 0.0f during a dwell/step-segment/ramp-lock tick (see that field's
+ * own comment) -- deliberately left AT the configured rate in that case
+ * (returned unchanged), not capped to zero, so a lagging DWELL still has to
+ * catch up at the zone's full configured rate; the cap only ever narrows
+ * the requirement while a ramp is genuinely still moving. */
+static float profile_executor_guard_sanity_rate(float configured_rate_c_per_min, float target_rate_c_per_s)
+{
+    float configured = (configured_rate_c_per_min > 0.0f) ? configured_rate_c_per_min : 0.5f;
+    float ramp_rate_c_per_min = fabsf(target_rate_c_per_s) * 60.0f;
+    if (ramp_rate_c_per_min > 0.0f && ramp_rate_c_per_min < configured) {
+        return ramp_rate_c_per_min;
+    }
+    return configured;
 }
 
 /* Must be called with s_exec.lock held. */
@@ -2337,11 +2424,132 @@ static void executor_task_entry(void *arg)
 
             apply_relay(zi, want_relay_on[zi]);
 
+            /* Guards 1/2/3/7 all gate their multi-tick accumulation windows
+             * on commanded_duty (thermal_guard.c), and this used to be fed
+             * z->relay_commanded_on -- the POST-PWM, POST-load-cap relay
+             * state apply_relay() just set a few lines up. heater_output_
+             * duty() (heater_output.c) time-proportions any duty strictly
+             * between 0 and 1 across its own window (HEATER_DEFAULT_WINDOW_
+             * MS, 60s default), so relay_commanded_on drops to false on
+             * every off-pulse of that PWM cycle -- and EVERY ONE of these
+             * four windows resets on that same transition (thermal_guard.c:
+             * guard 1/2 reset when commanded_duty < progress_duty_min,
+             * guard 3 needs a CONTIGUOUS duty==0 run and resets the instant
+             * duty is nonzero again, guard 7 needs a CONTIGUOUS duty>0 run
+             * and resets the instant duty drops to 0). None of guard 1's
+             * 300s, guard 2's 120s, guard 3's 120s or guard 7's 600s window
+             * can ever complete at any duty strictly between 0 and 1 -- at
+             * duty 0.6 the longest contiguous armed run is 36s. A frozen
+             * thermocouple during a partial-duty firing was never caught.
+             *
+             * Fixed the same way autotune_engine.c's identical defect was:
+             * feed the guards the INTENDED duty (z->duty, decided in this
+             * tick's own "pass 1" above, before load-cap/PWM/authority ever
+             * touch it), not the instantaneous post-PWM relay state. No
+             * guard constant changes -- the existing windows are fine once
+             * they can actually accumulate.
+             *
+             * Two things intentionally do NOT feed through as "intended,
+             * heat commanded" here, each a deliberate choice (both ways
+             * have a real argument, so both are spelled out rather than
+             * assumed):
+             *
+             *   LOAD CAP (this tick's want_relay_on[zi] possibly forced
+             *   false by the cap loop just above, z->duty left untouched):
+             *   still reported as z->duty, NOT zeroed. Treated as the same
+             *   kind of scheduling detail PWM chopping is -- deferred_on_ms
+             *   is a genuine, self-correcting promise that this zone gets
+             *   its owed on-time back, so a HEALTHY load-cap-throttled zone
+             *   should still show real rise across guard 1's window (it is
+             *   getting real heat, just multiplexed with other zones) and
+             *   should not read as "not commanded" just because this
+             *   PARTICULAR tick's relay stayed open for a sibling zone
+             *   instead. The alternative (zero whenever deferred) would
+             *   recreate this exact defect under a different name: a zone
+             *   cycling in and out of load-cap deferral resets these
+             *   windows on THAT transition instead of PWM's. The remaining
+             *   risk -- a zone so persistently starved by the cap that it
+             *   never gets enough real on-time to keep up with rate_cfg --
+             *   is judged the CORRECT case for guard 1 to eventually catch
+             *   and escalate, not silently swallow: that zone is genuinely
+             *   not being heated adequately, whatever the reason.
+             *
+             *   AUTHORITY/INTERLOCK BLOCK (relay_authority_zone_blocked(),
+             *   surfaced here as z->heat_blocked): reported as ZERO whenever
+             *   z->heat_blocked reads true, want_relay_on[zi] or not.
+             *   z->heat_blocked is now refreshed by apply_relay() on EVERY
+             *   tick (see that function's own comment) -- an earlier version
+             *   of this fix gated the zero on want_relay_on[zi] too, on the
+             *   theory that heat_blocked was only fresh when want_on was
+             *   true; that theory, and the gate built on it, were WRONG (a
+             *   review caught it as a regression: it broke guard 3 during a
+             *   real authority block by re-introducing an alternating
+             *   zero/nonzero pattern at the PWM period -- see apply_relay()
+             *   and profile_executor_guard_commanded_duty()'s own comments
+             *   for the full account). Unlike the load cap, a block is a
+             *   DETERMINISTIC, ALREADY-REPORTED fact -- the safety link down,
+             *   or an earlier guard trip's own latch -- and re-deriving the
+             *   same fact through guard 1/2's noisier "no rise despite
+             *   commanded heat" statistics would only produce a redundant,
+             *   less specific alarm (or, for a global block, one on EVERY
+             *   active zone at once) on top of the real one relay_authority_
+             *   on_blocked()/the per-zone latch already surfaced. Guard 3
+             *   (welded contact) correctly reads this zone as duty==0 either
+             *   way -- the relay genuinely is open -- and guard 7 (frozen
+             *   sensor) correctly goes inert, since "is the process
+             *   responding to commanded heat" is not a meaningful question
+             *   while no heat is being commanded at all.
+             *
+             * (autotune_engine.c's own copy of this reasoning has a
+             * corrected note on relay_authority_zone_blocked() not feeding
+             * back into that file's duty -- see that file's comment; that
+             * file's guard wiring is unchanged by this pass.) */
+            float commanded_duty_for_guards = profile_executor_guard_commanded_duty(z->heat_blocked, z->duty);
+
+            /* Guard 1's "climbing" rise requirement (thermal_guard.c: delta
+             * >= rate_cfg * elapsed_min whenever error > progress_band_c) is
+             * a FIXED absolute rate with no knowledge of what rate is
+             * actually being commanded. Review defect 2: this whole PWM fix
+             * widened guard 1's real window from "can only ever complete at
+             * duty==1.0" to "completes at any duty >= progress_duty_min
+             * (0.5)" -- i.e. most of a real firing -- and a perfectly
+             * healthy zone tracking a modest ramp (20 C/hr = 0.33 C/min is
+             * routine: candling, quartz inversion, thick ware, a large
+             * kiln's own thermal lag) legitimately lags more than
+             * progress_band_c behind a setpoint that is ITSELF only moving
+             * that fast. Demanding rate_cfg's full 0.5 C/min (30 C/hr) rise
+             * from such a zone is demanding it outrun the setpoint it is
+             * chasing -- guaranteed to false-trip at 300s, and under the
+             * load cap (every zone forced to a high duty, lagging further,
+             * rising at roughly a fair share of the commanded rate) able to
+             * trip EVERY zone in the same window at once, not a cascade.
+             *
+             * Fix: cap the expected rate at the commanded ramp's own rate
+             * (s_exec.target_rate_c_per_s, set a few hundred lines up --
+             * "Only claimed while the ramp still has distance left to run",
+             * explicitly 0.0f during a dwell/step-segment/ramp-lock tick) --
+             * min(configured rate_cfg, |commanded ramp rate|) -- rather than
+             * changing rate_cfg's own stored value (a per-zone config field
+             * read elsewhere) or thermal_guard.c's guard 1 math itself (no
+             * guard constant needs to change, same as the duty fix above).
+             * Deliberately NOT applied during a dwell (target_rate_c_per_s
+             * is exactly 0.0f then, which would demand zero rise forever,
+             * i.e. disarm guard 1 completely for a lagging dwell -- the
+             * ORIGINAL "must actively catch up" case this guard exists for
+             * and must not be softened): the cap only ever narrows the
+             * requirement while a ramp is genuinely in progress, and is a
+             * per-tick LOCAL override of a copy of z->guard_cfg -- the
+             * zone's own stored guard_cfg.sanity_rate_c_per_min (read
+             * elsewhere) is never mutated. */
+            thermal_guard_cfg_t guard_cfg_this_tick = z->guard_cfg;
+            guard_cfg_this_tick.sanity_rate_c_per_min =
+                profile_executor_guard_sanity_rate(z->guard_cfg.sanity_rate_c_per_min, s_exec.target_rate_c_per_s);
+
             thermal_guard_input_t gin = {
                 .sensor_ok = sensor_ok[zi],
                 .measurement_c = raw_c[zi], /* RAW -- a calibration offset must not hide an out-of-range sensor */
                 .setpoint_c = s_exec.target_c,
-                .commanded_duty = z->relay_commanded_on ? (z->duty > 0.0f ? z->duty : 1.0f) : 0.0f,
+                .commanded_duty = commanded_duty_for_guards,
                 .dt_s = dt_s,
                 /* Guard 8 (TODO.md 6A.3/6A.5): this tick's whole-bus snapshot,
                  * raw and un-averaged, so a zone can be compared against its
@@ -2354,7 +2562,7 @@ static void executor_task_entry(void *arg)
                 .peer_count = MAX31856_CHANNEL_COUNT,
                 .peer_index_self = zi,
             };
-            if (thermal_guard_tick(&z->guard_state, &z->guard_cfg, &gin)) {
+            if (thermal_guard_tick(&z->guard_state, &guard_cfg_this_tick, &gin)) {
                 if (escalate_guard_trip(zi, z->guard_state.reason, z->guard_state.detail)) {
                     run_faulted_this_tick = true;
                 }

@@ -31,6 +31,7 @@
 // profile_executor.c's dependency chain's declarations), and other host
 // tests already define their OWN fakes of several of the same names --
 // linking both into one binary would multiply-define those symbols.
+#include <math.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
@@ -212,11 +213,18 @@ bool relay_authority_on_blocked(SafetyLinkClass *safety, uint32_t *out_sources)
     return s_test_relay_authority_blocked;
 }
 
+// Configurable per-test (default false, matching the old hardcoded
+// behavior for every other test in this file) -- see
+// test_apply_relay_refreshes_heat_blocked_even_on_a_want_on_false_tick()
+// below and the guard-scenario tests for why this needed to become
+// controllable rather than a bare `return false;`.
+static bool s_test_relay_authority_zone_blocked = false;
+static uint32_t s_test_relay_authority_zone_blocked_sources = 0;
 bool relay_authority_zone_blocked(SafetyLinkClass *safety, uint8_t zone_index, uint32_t *out_sources)
 {
     (void)safety; (void)zone_index;
-    if (out_sources) *out_sources = 0;
-    return false;
+    if (out_sources) *out_sources = s_test_relay_authority_zone_blocked ? s_test_relay_authority_zone_blocked_sources : 0;
+    return s_test_relay_authority_zone_blocked;
 }
 
 void relay_authority_set_zone_blocked(uint8_t zone_index, bool blocked)
@@ -547,11 +555,20 @@ bool zones_config_get_pid(uint8_t zone_index, float *out_kp, float *out_ki, floa
     return false;
 }
 
+// Configurable per-test via g_stub_relay_mask (default all-zero, matching
+// every pre-existing test in this file that never touches it -- apply_relay()
+// early-returns with mask==0, which was fine before any test needed to
+// drive apply_relay() itself for real). test_apply_relay_refreshes_heat_
+// blocked_even_on_a_want_on_false_tick() and
+// test_authority_block_at_partial_duty_guard3_arms_and_trips_on_a_welded_
+// relay() below are the first tests that call apply_relay() directly and
+// need it to proceed past the mask check.
+static uint8_t g_stub_relay_mask[MAX31856_CHANNEL_COUNT];
 bool zones_config_get_relay_mask(uint8_t zone_index, uint8_t *out_mask)
 {
-    (void)zone_index;
-    if (out_mask) *out_mask = 0;
-    return false;
+    uint8_t mask = (zone_index < MAX31856_CHANNEL_COUNT) ? g_stub_relay_mask[zone_index] : 0;
+    if (out_mask) *out_mask = mask;
+    return mask != 0;
 }
 
 bool zones_config_get_sanity_rate(uint8_t zone_index, float *out_c_per_min)
@@ -2343,6 +2360,418 @@ static void test_feedforward_zero_coefficient_parity_still_holds_with_new_gates(
               "every neighbor otherwise fully qualifying");
 }
 
+// ---------------------------------------------------------------------------
+// profile_executor_guard_commanded_duty() -- the shipped-firmware PWM/
+// progress-window defect fix (guards 1/2/3/7 all gate their multi-tick
+// accumulation windows on commanded_duty, which used to be fed the POST-PWM
+// relay_commanded_on state; see this file's apply-relays-and-guards loop for
+// the full defect and the load-cap/authority-block reasoning). Two layers:
+//   - Direct unit tests of the helper itself (the decision logic).
+//   - Scenario tests proving the ACTUAL accumulation behavior differs
+//     between the OLD (post-PWM) and NEW (intended-duty) expressions, for
+//     guard 1 (dead element) and guard 7 (frozen sensor) specifically --
+//     guard 7 has no PID-saturation escape and is the one with no other
+//     cover, per the review that found this defect.
+// ---------------------------------------------------------------------------
+
+static void test_guard_commanded_duty_normal_case_passes_through(void)
+{
+    TEST_SECTION("profile_executor_guard_commanded_duty(): the ordinary case (not blocked) reports the "
+                 "intended duty unchanged");
+    float d = profile_executor_guard_commanded_duty(/*heat_blocked=*/false, /*intended_duty=*/0.6f);
+    TEST_CHECK_NEAR(d, 0.6f, 1e-6f, "must pass the intended duty through");
+}
+
+static void test_guard_commanded_duty_authority_block_zeroes(void)
+{
+    TEST_SECTION("profile_executor_guard_commanded_duty(): heat_blocked=true reports ZERO, not the "
+                 "intended duty -- a deterministic, already-reported fact, not something guard 1/2 should "
+                 "re-derive");
+    float d = profile_executor_guard_commanded_duty(/*heat_blocked=*/true, /*intended_duty=*/0.6f);
+    TEST_CHECK_NEAR(d, 0.0f, 1e-6f, "must report zero when heat is blocked");
+}
+
+// Review defect 1's own root-cause fix: apply_relay() must refresh
+// z->heat_blocked on EVERY call, want_on or not -- the first version only
+// refreshed it inside `if (want_on)`, which meant a PWM off-pulse
+// (apply_relay(zi, false)) left heat_blocked stale from the LAST on-pulse.
+// That was "accidentally correct" while blocked (the last on-pulse's real
+// answer WAS true), which is exactly why profile_executor_guard_commanded_
+// duty()'s first version's want_relay_on_this_tick gate was actively wrong
+// (see that function's own comment) -- but relying on staleness at all was
+// the underlying defect. Drives the REAL apply_relay() (not a hand-set
+// z->heat_blocked) with want_on=false while relay_authority_zone_blocked()
+// answers true, and checks the field it actually writes.
+static void test_apply_relay_refreshes_heat_blocked_even_on_a_want_on_false_tick(void)
+{
+    TEST_SECTION("apply_relay(zi, want_on=false) still refreshes z->heat_blocked for real when "
+                 "relay_authority_zone_blocked() answers true -- the fix must not depend on staleness");
+    memset(&s_exec, 0, sizeof(s_exec));
+    s_exec.zones[0].active = true;
+    g_stub_relay_mask[0] = 0x01u; /* apply_relay() early-returns on mask==0 -- must be nonzero to reach the check */
+    s_test_relay_authority_zone_blocked = true;
+    s_test_relay_authority_zone_blocked_sources = 0x02u;
+
+    apply_relay(/*zi=*/0, /*want_on=*/false);
+
+    TEST_CHECK(s_exec.zones[0].heat_blocked, "heat_blocked must read true even though this call's want_on "
+                                             "was false -- the evaluation must not be gated on want_on");
+    TEST_CHECK(s_exec.zones[0].heat_blocked_sources == 0x02u, "sources must be captured too, not just the bool");
+
+    s_test_relay_authority_zone_blocked = false;
+    s_test_relay_authority_zone_blocked_sources = 0;
+    g_stub_relay_mask[0] = 0;
+}
+
+// Runs n_ticks of thermal_guard_tick() at a constant target duty, computing
+// commanded_duty EITHER the OLD way (relay_commanded_on-gated, PWM-chopped
+// via the REAL heater_output_duty(), reproducing exactly what the shipped
+// defect fed the guards) OR the NEW way (profile_executor_guard_commanded_
+// duty() with a constant intended duty, no PWM chop -- what an unblocked
+// zone commanding a steady duty produces). measurement stays perfectly flat
+// throughout -- both a dead element (guard 1, at a setpoint far above so
+// the climbing branch applies) and a frozen sensor (guard 7) look
+// identical: an unmoving reading. sanity_rate_c_per_min is fixed at
+// thermal_guard.c's own 0.5 C/min default (no ramp in progress) unless
+// overridden via the cfg parameter -- callers that need the ramp-rate cap
+// build their own cfg with profile_executor_guard_sanity_rate().
+static bool run_guard_scenario_cfg(bool use_old_pwm_expression, float duty, float measurement_c,
+                                   float setpoint_c, int n_ticks, const thermal_guard_cfg_t *cfg,
+                                   float dither_c)
+{
+    thermal_guard_state_t gs;
+    thermal_guard_reset(&gs);
+
+    heater_output_state_t hstate;
+    heater_output_cfg_t hcfg = {.window_ms = HEATER_DEFAULT_WINDOW_MS, .min_on_ms = 0, .min_off_ms = 0};
+    heater_output_reset(&hstate);
+
+    for (int i = 0; i < n_ticks; i++) {
+        float commanded;
+        if (use_old_pwm_expression) {
+            // The OLD, shipped expression: relay_commanded_on ? (duty>0 ?
+            // duty : 1.0) : 0.0 -- relay_commanded_on IS heater_output_
+            // duty()'s real PWM decision, reproduced here via the real
+            // function so this is a faithful repro, not a hand-waved one.
+            bool relay_on = heater_output_duty(&hstate, &hcfg, duty, PROFILE_EXECUTOR_TICK_MS);
+            commanded = relay_on ? (duty > 0.0f ? duty : 1.0f) : 0.0f;
+        } else {
+            // The NEW expression -- an unblocked zone steadily commanding `duty`.
+            commanded = profile_executor_guard_commanded_duty(/*heat_blocked=*/false, duty);
+        }
+        float meas = measurement_c + ((dither_c != 0.0f) ? ((i % 2) ? dither_c : -dither_c) : 0.0f);
+        thermal_guard_input_t gin = {
+            .sensor_ok = true,
+            .measurement_c = meas,
+            .setpoint_c = setpoint_c,
+            .commanded_duty = commanded,
+            .dt_s = (float)PROFILE_EXECUTOR_TICK_MS / 1000.0f,
+        };
+        if (thermal_guard_tick(&gs, cfg, &gin)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool run_guard_scenario(bool use_old_pwm_expression, float duty, float measurement_c, float setpoint_c,
+                               int n_ticks)
+{
+    thermal_guard_cfg_t cfg = {.max_temp_c = 1300.0f, .min_temp_c = -20.0f, .sanity_rate_c_per_min = 0.5f};
+    return run_guard_scenario_cfg(use_old_pwm_expression, duty, measurement_c, setpoint_c, n_ticks, &cfg, 0.0f);
+}
+
+static void test_guard1_never_catches_a_dead_element_at_partial_duty_under_the_old_expression(void)
+{
+    TEST_SECTION("MANDATORY negative test (guard 1): a genuinely dead element at duty 0.5, fed through the "
+                 "OLD post-PWM commanded_duty expression, NEVER trips guard 1 within 900s -- the 300s "
+                 "window can never complete against a 60s PWM window chopping 0.5 duty into 30s on/30s off");
+    // setpoint far above measurement -> guard 1's climbing branch; flat
+    // measurement -> zero rise, exactly a dead element.
+    bool tripped = run_guard_scenario(/*use_old_pwm_expression=*/true, /*duty=*/0.5f, /*measurement_c=*/25.0f,
+                                      /*setpoint_c=*/500.0f, /*n_ticks=*/900);
+    TEST_CHECK(!tripped, "the OLD expression must NEVER complete guard 1's window at duty 0.5 -- this IS "
+                        "the shipped defect, reproduced here through the real heater_output_duty() PWM");
+}
+
+static void test_guard1_catches_a_dead_element_at_partial_duty_with_the_fix(void)
+{
+    TEST_SECTION("MANDATORY negative test (guard 1), PASS side: the SAME dead element at duty 0.5 DOES trip "
+                 "guard 1 with the fix (intended duty, no PWM chop)");
+    bool tripped = run_guard_scenario(/*use_old_pwm_expression=*/false, /*duty=*/0.5f, /*measurement_c=*/25.0f,
+                                      /*setpoint_c=*/500.0f, /*n_ticks=*/320);
+    TEST_CHECK(tripped, "the fixed expression must trip guard 1 well within its 300s window at duty 0.5");
+}
+
+static void test_guard7_never_catches_a_frozen_sensor_at_partial_duty_under_the_old_expression(void)
+{
+    TEST_SECTION("MANDATORY negative test (guard 7, no PID-saturation escape): a frozen sensor at duty 0.5, "
+                 "fed through the OLD post-PWM expression, NEVER trips guard 7 within 900s -- the 600s "
+                 "window needs commanded_duty > 0 CONTINUOUSLY, which the PWM chop never provides");
+    // setpoint == measurement (no rise/fall question at all -- purely
+    // testing guard 7's own frozen-window logic).
+    bool tripped = run_guard_scenario(/*use_old_pwm_expression=*/true, /*duty=*/0.5f, /*measurement_c=*/300.0f,
+                                      /*setpoint_c=*/300.0f, /*n_ticks=*/900);
+    TEST_CHECK(!tripped, "the OLD expression must NEVER complete guard 7's window at duty 0.5 -- a frozen "
+                        "thermocouple during a partial-duty firing was never caught");
+}
+
+static void test_guard7_catches_a_frozen_sensor_at_partial_duty_with_the_fix(void)
+{
+    TEST_SECTION("MANDATORY negative test (guard 7), PASS side: the SAME frozen sensor at duty 0.5 DOES "
+                 "trip guard 7 with the fix");
+    bool tripped = run_guard_scenario(/*use_old_pwm_expression=*/false, /*duty=*/0.5f, /*measurement_c=*/300.0f,
+                                      /*setpoint_c=*/300.0f, /*n_ticks=*/620);
+    TEST_CHECK(tripped, "the fixed expression must trip guard 7 well within its 600s window at duty 0.5");
+}
+
+// Regression guard: duty == 0 must still leave guards 1/2/7 disarmed (no
+// heat commanded -- nothing for them to check) and guard 3 (welded relay)
+// ARMED (duty==0 is exactly guard 3's own precondition) -- the fix must not
+// over-correct into arming 1/2/7 at zero duty, and must not have broken
+// guard 3's existing duty==0 gate.
+static void test_duty_zero_leaves_1_2_7_disarmed_and_3_armed(void)
+{
+    TEST_SECTION("duty == 0 (via the fixed expression): guards 1/2/7 stay disarmed (no over-correction), "
+                 "guard 3 (welded relay) stays armed");
+    thermal_guard_state_t gs;
+    thermal_guard_cfg_t cfg = {.max_temp_c = 1300.0f, .min_temp_c = -20.0f, .sanity_rate_c_per_min = 0.5f};
+    thermal_guard_reset(&gs);
+
+    // A welded/shorted relay: duty commanded 0, but temperature keeps
+    // rising anyway -- guard 3's own trip condition.
+    float measurement_c = 25.0f;
+    bool tripped = false;
+    thermal_guard_trip_t reason = THERMAL_GUARD_TRIP_NONE;
+    for (int i = 0; i < 200 && !tripped; i++) {
+        measurement_c += 1.0f; /* well above guard 3's runaway rate at duty 0 */
+        float commanded = profile_executor_guard_commanded_duty(/*heat_blocked=*/false, /*intended_duty=*/0.0f);
+        TEST_CHECK_NEAR(commanded, 0.0f, 1e-6f, "sanity: duty must read exactly 0 for a zone commanding no heat");
+        thermal_guard_input_t gin = {
+            .sensor_ok = true,
+            .measurement_c = measurement_c,
+            .setpoint_c = 500.0f,
+            .commanded_duty = commanded,
+            .dt_s = 1.0f,
+        };
+        if (thermal_guard_tick(&gs, &cfg, &gin)) {
+            tripped = true;
+            reason = gs.reason;
+        }
+    }
+    TEST_CHECK(tripped, "guard 3 (welded relay) must still trip at duty 0 with the fix in place");
+    TEST_CHECK(reason == THERMAL_GUARD_TRIP_RUNAWAY, "specifically guard 3 (RUNAWAY), not 1/2/7 -- those "
+                                                     "guards must not have been armed by a rising reading "
+                                                     "at duty 0 (guard 1/2 need commanded_duty >= "
+                                                     "progress_duty_min > 0; guard 7 needs commanded_duty "
+                                                     "> 0)");
+}
+
+// MANDATORY (review defect 1): an authority block at PARTIAL intended duty
+// (0.5), driven through the REAL heater_output_duty() PWM AND the REAL
+// apply_relay() (so heat_blocked is refreshed exactly the way production
+// code refreshes it, on-pulse and off-pulse alike) -- guard 3 (welded
+// relay) must arm and trip on a welded contact discovered while blocked.
+// Confirmed to FAIL against the pre-fix want_relay_on_this_tick-gated
+// helper (see this task's own negative-test report for the captured
+// output): that version alternated the guard's view of commanded_duty
+// between 0.0 (on-pulse, heat_blocked freshly true) and 0.5 (off-pulse, the
+// gate itself false so heat_blocked's true value was never applied),
+// which never lets guard 3's contiguous duty<=0 window complete.
+static void test_authority_block_at_partial_duty_guard3_arms_and_trips_on_a_welded_relay(void)
+{
+    TEST_SECTION("MANDATORY negative test (defect 1): an authority block at duty 0.5, driven through the "
+                 "REAL heater_output_duty() PWM and apply_relay(), still lets guard 3 (welded relay) arm "
+                 "and trip -- z->heat_blocked must read a genuine CONTIGUOUS true, not alternate with the "
+                 "PWM period");
+    memset(&s_exec, 0, sizeof(s_exec));
+    s_exec.zones[0].active = true;
+    g_stub_relay_mask[0] = 0x01u; /* apply_relay() early-returns on mask==0 -- must be nonzero to reach the check */
+    s_exec.zones[0].guard_cfg = (thermal_guard_cfg_t){.max_temp_c = 1300.0f, .min_temp_c = -20.0f,
+                                                       .sanity_rate_c_per_min = 0.5f};
+    thermal_guard_reset(&s_exec.zones[0].guard_state);
+    heater_output_reset(&s_exec.zones[0].heater_state);
+    s_exec.zones[0].heater_cfg = (heater_output_cfg_t){.window_ms = HEATER_DEFAULT_WINDOW_MS, .min_on_ms = 0,
+                                                        .min_off_ms = 0};
+    s_test_relay_authority_zone_blocked = true;
+    s_test_relay_authority_zone_blocked_sources = 0x02u;
+
+    float measurement_c = 25.0f;
+    bool tripped = false;
+    thermal_guard_trip_t reason = THERMAL_GUARD_TRIP_NONE;
+    for (int i = 0; i < 200 && !tripped; i++) {
+        zone_runtime_t *z = &s_exec.zones[0];
+        float intended_duty = 0.5f;
+        bool want_relay_on = heater_output_duty(&z->heater_state, &z->heater_cfg, intended_duty,
+                                                PROFILE_EXECUTOR_TICK_MS);
+        apply_relay(/*zi=*/0, want_relay_on); /* refreshes z->heat_blocked for REAL, every tick */
+        float commanded = profile_executor_guard_commanded_duty(z->heat_blocked, intended_duty);
+        TEST_CHECK_NEAR(commanded, 0.0f, 1e-6f, "sanity: a genuinely blocked zone must read 0 on EVERY "
+                                                "tick, on-pulse or off-pulse -- if this fails the alternation "
+                                                "defect is back");
+        measurement_c += 1.0f; /* welded/shorted contact: rising despite the block */
+        thermal_guard_input_t gin = {
+            .sensor_ok = true,
+            .measurement_c = measurement_c,
+            .setpoint_c = 500.0f,
+            .commanded_duty = commanded,
+            .dt_s = (float)PROFILE_EXECUTOR_TICK_MS / 1000.0f,
+        };
+        if (thermal_guard_tick(&z->guard_state, &z->guard_cfg, &gin)) {
+            tripped = true;
+            reason = z->guard_state.reason;
+        }
+    }
+    TEST_CHECK(tripped, "guard 3 must trip on a welded relay discovered during an authority block");
+    TEST_CHECK(reason == THERMAL_GUARD_TRIP_RUNAWAY, "specifically guard 3 (RUNAWAY)");
+
+    s_test_relay_authority_zone_blocked = false;
+    s_test_relay_authority_zone_blocked_sources = 0;
+    g_stub_relay_mask[0] = 0;
+}
+
+// MANDATORY (review defect 2): a HEALTHY zone lagging a ramping setpoint by
+// 5C (> PROGRESS_BAND_C's 3C, so guard 1's climbing branch applies), rising
+// at 0.33 C/min (20 C/hr -- a routine ramp: candling, quartz inversion,
+// thick ware) at duty 0.6 (>= PROGRESS_DUTY_MIN, so the widened window now
+// reaches it), must NOT trip guard 1 within 600s. Confirmed to FAIL without
+// profile_executor_guard_sanity_rate()'s ramp-rate cap (see this task's own
+// negative-test report): thermal_guard.c's own bare 0.5 C/min default (30
+// C/hr) is uncapped and demands more rise than a 20 C/hr ramp can honestly
+// deliver from 5C behind.
+static void test_healthy_ramp_lag_does_not_false_trip_guard1(void)
+{
+    TEST_SECTION("MANDATORY negative test (defect 2): a healthy zone 5C behind a 20 C/hr ramp, rising at "
+                 "0.33 C/min, duty 0.6, must NOT trip guard 1 within 600s");
+    const float ramp_c_per_hr = 20.0f;
+    const float target_rate_c_per_s = ramp_c_per_hr / 3600.0f;
+    /* 10% faster than the bare ramp rate, not exactly matching it -- a
+     * genuinely healthy zone tracking (or slightly gaining on) a ramp, not
+     * pinned to it. Deliberate margin over the exact rate: comparing
+     * float-accumulated rise against a float-computed expected value at
+     * EXACT equality is a coin flip on which side of "<" 600 tick-by-tick
+     * additions land after normal floating-point rounding -- this test is
+     * about the cap actually working, not about proving IEEE-754 addition
+     * is associative. */
+    const float rise_c_per_s = target_rate_c_per_s * 1.1f;
+
+    thermal_guard_cfg_t cfg = {.max_temp_c = 1300.0f, .min_temp_c = -20.0f, .sanity_rate_c_per_min = 0.5f};
+    cfg.sanity_rate_c_per_min = profile_executor_guard_sanity_rate(cfg.sanity_rate_c_per_min, target_rate_c_per_s);
+    TEST_CHECK(cfg.sanity_rate_c_per_min < 0.5f, "sanity: the ramp-rate cap must actually have reduced the "
+                                                 "requirement below the bare 0.5 C/min default");
+    TEST_CHECK_NEAR(cfg.sanity_rate_c_per_min, ramp_c_per_hr / 60.0f, 1e-4f,
+                    "sanity: capped at exactly the commanded ramp rate (20 C/hr = 0.333 C/min)");
+
+    thermal_guard_state_t gs;
+    thermal_guard_reset(&gs);
+    float measurement_c = 495.0f; /* 5C behind a setpoint starting at 500 -- past PROGRESS_BAND_C (3C) */
+    float setpoint_c = 500.0f;
+    bool tripped = false;
+    for (int i = 0; i < 600 && !tripped; i++) {
+        measurement_c += rise_c_per_s; /* per-second rise matching the ramp -- healthy tracking, not catching up */
+        setpoint_c += target_rate_c_per_s; /* the setpoint itself is also moving at the same rate */
+        thermal_guard_input_t gin = {
+            .sensor_ok = true,
+            .measurement_c = measurement_c,
+            .setpoint_c = setpoint_c,
+            .commanded_duty = 0.6f,
+            .dt_s = 1.0f,
+        };
+        if (thermal_guard_tick(&gs, &cfg, &gin)) {
+            tripped = true;
+        }
+    }
+    TEST_CHECK(!tripped, "a healthy zone tracking its own commanded ramp rate must not false-trip guard 1");
+}
+
+// Sanity companion to the ramp-lag test: WITHOUT the ramp-rate cap (dwell,
+// target_rate_c_per_s == 0.0f, or the bare default), the SAME lag/rise
+// numbers (which only match a 20 C/hr ramp, not the bare 30 C/hr
+// requirement) DO trip -- proves the cap is what's actually preventing the
+// false trip above, not some other change.
+static void test_healthy_ramp_lag_still_trips_without_the_rate_cap(void)
+{
+    TEST_SECTION("negative control: the SAME lag/rise numbers DO trip guard 1 without the ramp-rate cap "
+                 "(bare 0.5 C/min default) -- proves the cap above is load-bearing");
+    thermal_guard_cfg_t cfg = {.max_temp_c = 1300.0f, .min_temp_c = -20.0f, .sanity_rate_c_per_min = 0.5f};
+    thermal_guard_state_t gs;
+    thermal_guard_reset(&gs);
+    float measurement_c = 495.0f;
+    float setpoint_c = 500.0f;
+    const float rise_c_per_s = 20.0f / 3600.0f;
+    bool tripped = false;
+    for (int i = 0; i < 600 && !tripped; i++) {
+        measurement_c += rise_c_per_s;
+        setpoint_c += rise_c_per_s;
+        thermal_guard_input_t gin = {
+            .sensor_ok = true,
+            .measurement_c = measurement_c,
+            .setpoint_c = setpoint_c,
+            .commanded_duty = 0.6f,
+            .dt_s = 1.0f,
+        };
+        if (thermal_guard_tick(&gs, &cfg, &gin)) {
+            tripped = true;
+        }
+    }
+    TEST_CHECK(tripped, "without the cap, a 0.33 C/min rise against a 0.5 C/min bare requirement must trip");
+}
+
+// Dwell case: target_rate_c_per_s == 0.0f must NOT relax the requirement to
+// zero -- a zone genuinely lagging a STATIONARY setpoint must still catch
+// up at the full configured rate (the cap only narrows the requirement
+// while a ramp is actually moving).
+static void test_dwell_lag_still_requires_the_full_configured_rate(void)
+{
+    TEST_SECTION("a lagging DWELL (target_rate_c_per_s == 0) is NOT relaxed by the ramp-rate cap -- must "
+                 "still trip guard 1 on a truly stalled catch-up");
+    float capped = profile_executor_guard_sanity_rate(/*configured_rate_c_per_min=*/0.5f,
+                                                       /*target_rate_c_per_s=*/0.0f);
+    TEST_CHECK_NEAR(capped, 0.5f, 1e-6f, "a dwell (rate 0) must leave the configured rate unchanged, not "
+                                        "cap it to zero");
+}
+
+static void test_guard7_does_not_false_trip_on_a_healthy_dwell_with_realistic_dither(void)
+{
+    TEST_SECTION("guard 7 (frozen sensor) does not false-trip on a healthy dwell with realistic sensor "
+                 "dither PLUS real PID/PWM-cycling thermal ripple, now that partial duty actually runs "
+                 "the full 600s contiguous window for the first time");
+    /* Pure +/-0.02C sensor dither ALONE cannot ever exceed guard 7's own
+     * FROZEN_EPS_C (0.05C) -- two samples each bounded within +/-0.02C of a
+     * center can differ from each other by at most 0.04C < 0.05C, so no
+     * pattern of sensor noise at that amplitude can ever reset the window
+     * (confirmed: an earlier version of this test used dither alone and
+     * never tripped for the wrong reason -- it could not have tripped no
+     * matter how badly frozen the guard's window logic was, so it proved
+     * nothing about the fix). A genuinely healthy dwell is not that quiet
+     * in reality either -- this file's own PROGRESS_BAND_C comment
+     * documents real PID/time-proportioning ripple "under 2C on this bench
+     * at a 60s window and full duty". Modeled here as a modest 0.3C, 60s-
+     * period ripple (comfortably inside that documented range, at a lower
+     * partial duty) with +/-0.02C sensor dither on top -- realistic, and
+     * large enough to periodically clear the 0.05C epsilon and legitimately
+     * re-arm guard 7's window, the same way a genuinely live sensor would. */
+    thermal_guard_state_t gs;
+    thermal_guard_cfg_t cfg = {.max_temp_c = 1300.0f, .min_temp_c = -20.0f, .sanity_rate_c_per_min = 0.5f};
+    thermal_guard_reset(&gs);
+    bool tripped = false;
+    for (int i = 0; i < 620 && !tripped; i++) {
+        float ripple_c = 0.3f * sinf(2.0f * 3.14159265f * (float)i / 60.0f);
+        float dither_c = (i % 2) ? 0.02f : -0.02f;
+        thermal_guard_input_t gin = {
+            .sensor_ok = true,
+            .measurement_c = 300.0f + ripple_c + dither_c,
+            .setpoint_c = 300.0f,
+            .commanded_duty = 0.5f,
+            .dt_s = 1.0f,
+        };
+        if (thermal_guard_tick(&gs, &cfg, &gin)) {
+            tripped = true;
+        }
+    }
+    TEST_CHECK(!tripped, "realistic dwell ripple + sensor dither must not read as frozen");
+}
+
 void run_test_profile_executor_prestart(void)
 {
     test_run_refuses_before_start();
@@ -2403,6 +2832,22 @@ void run_test_profile_executor_prestart(void)
     test_warm_start_reached_dwell_is_not_shortened();
     test_warm_start_descending_profile_does_not_jump_into_cooldown();
     test_warm_start_hotter_than_entire_profile_lands_on_last_segment();
+
+    // PWM/progress-window fix -- order-independent, each re-derives its own
+    // fresh thermal_guard_state_t/heater_output_state_t (or memsets s_exec).
+    test_guard_commanded_duty_normal_case_passes_through();
+    test_guard_commanded_duty_authority_block_zeroes();
+    test_apply_relay_refreshes_heat_blocked_even_on_a_want_on_false_tick();
+    test_guard1_never_catches_a_dead_element_at_partial_duty_under_the_old_expression();
+    test_guard1_catches_a_dead_element_at_partial_duty_with_the_fix();
+    test_guard7_never_catches_a_frozen_sensor_at_partial_duty_under_the_old_expression();
+    test_guard7_catches_a_frozen_sensor_at_partial_duty_with_the_fix();
+    test_duty_zero_leaves_1_2_7_disarmed_and_3_armed();
+    test_authority_block_at_partial_duty_guard3_arms_and_trips_on_a_welded_relay();
+    test_healthy_ramp_lag_does_not_false_trip_guard1();
+    test_healthy_ramp_lag_still_trips_without_the_rate_cap();
+    test_dwell_lag_still_requires_the_full_configured_rate();
+    test_guard7_does_not_false_trip_on_a_healthy_dwell_with_realistic_dither();
 }
 
 int main(void)
