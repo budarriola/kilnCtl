@@ -21,12 +21,15 @@ import json
 import math
 import os
 import sys
+import time
 
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+sys.path.insert(0, os.path.dirname(__file__))
 
 from kilnctrl import pid_validation as pv  # noqa: E402
+import bench_fixture_session as bfs  # noqa: E402
 
 _SCRIPTS_DIR = os.path.join(os.path.dirname(__file__), "..", "scripts")
 
@@ -785,7 +788,7 @@ def test_profile_tracking_sample_response_is_not_retried(harness, tmp_path):
             super().__init__()
             self.sample_calls = 0
 
-        def sample_response(self, duration_s, period_s=2.0, zone_index=0):
+        def sample_response(self, duration_s, period_s=2.0, zone_index=0, on_sample=None):
             self.sample_calls += 1
             raise harness.BenchSessionError(
                 "http://kilnctl.local/api/status: <urlopen error timed out>")
@@ -802,6 +805,129 @@ def test_profile_tracking_sample_response_is_not_retried(harness, tmp_path):
     assert tracking.error and "timed out" in tracking.error
     assert not any(r.operation == "sample_response" for r in report.retries), (
         "sample_response must never appear as a retried operation")
+    # Item 3 fix, the OTHER direction: this is a generic transient error, NOT
+    # a genuine ceiling breach (no channels_c/hottest_c on the exception) --
+    # it must stay a plain stage failure, not get promoted to report.aborted.
+    assert report.aborted is False
+
+
+def test_profile_tracking_keeps_partial_trace_on_ceiling_breach(harness, tmp_path):
+    """NEGATIVE TEST for the actual hardware failure in the brief: a 28.6-
+    minute heat run's ``profile_tracking`` stage failed with only the bare
+    string "live temperature 80.1 C breached the 80.0 C fixture ceiling
+    during sampling" -- checks, detail and history all came back EMPTY, so
+    the sampled trace that would have explained the breach was gone.
+
+    Simulates the breach directly: ``sample_response`` here plays two rows
+    through ``on_sample`` (as the real one does incrementally as it polls)
+    and then raises ``BenchSessionError`` exactly as the real fixture ceiling
+    check does, WITHOUT ever returning a row list to its caller -- so any fix
+    that only reads the function's return value would still see nothing.
+
+    Before the fix, ``stage_profile_tracking``'s ``except BenchSessionError``
+    handler built a bare ``StageReport(error=str(exc))`` with no ``checks=``
+    and no ``detail=`` at all -- this assertion block genuinely fails against
+    that code (verified by hand: reverting the fix reproduces empty
+    ``checks``/``detail`` here, and this test fails on
+    ``assert tracking.detail.get("history")`` with detail == {}).
+    """
+
+    class BreachingSession(harness.FakeSession):
+        def sample_response(self, duration_s, period_s=2.0, zone_index=0, on_sample=None):
+            rows_before_breach = [
+                {"t_s": 0.0, "channels_c": {0: 40.0, 1: 40.0, 2: 40.0}, "target_c": 50.0,
+                 "segment_index": 0, "duty_by_zone": {0: 1.0, 1: 1.0, 2: 1.0}, "hottest_c": 40.0},
+                {"t_s": 2.0, "channels_c": {0: 60.0, 1: 60.0, 2: 60.0}, "target_c": 50.0,
+                 "segment_index": 0, "duty_by_zone": {0: 1.0, 1: 1.0, 2: 1.0}, "hottest_c": 80.1},
+            ]
+            for row in rows_before_breach:
+                if on_sample is not None:
+                    on_sample(row)
+            # No `return rows` ever reached -- exactly like the real
+            # bench_fixture_session.sample_response() on a ceiling breach.
+            # channels_c/hottest_c set on the exception, exactly as the
+            # real sample_response() does (see its S1 fix) -- these are
+            # what tell stage_profile_tracking this is a genuine breach,
+            # not a generic transient error (item 3 fix below).
+            exc = harness.BenchSessionError(
+                "live temperature 80.1 C breached the 80.0 C fixture ceiling during sampling")
+            exc.channels_c = {0: 60.0, 1: 60.0, 2: 60.0}
+            exc.hottest_c = 80.1
+            raise exc
+
+    args = harness.build_arg_parser().parse_args([
+        "--dry-run", "--report-dir", str(tmp_path),
+        "--skip-cooldown", "--skip-tune", "--skip-matrix", "--skip-backup"])
+    session = BreachingSession()
+    report = harness._run(session, args)
+
+    # Item 3 fix: a genuine ceiling breach is exactly as serious as the
+    # harness's own hard-max path, which already sets these -- must not be
+    # a plain unflagged stage failure.
+    assert report.aborted is True
+    assert report.abort_reason and "fixture ceiling" in report.abort_reason
+
+    tracking = [s for s in report.stages if s.name == "profile_tracking"][0]
+    assert tracking.passed is False
+    assert tracking.error and "fixture ceiling" in tracking.error
+
+    # THE FIX under test: the partial trace must have survived the raise.
+    assert tracking.detail.get("history"), (
+        "the sampled trace must not be empty on a mid-sampling ceiling breach")
+    assert len(tracking.detail["history"]) == 2
+    assert tracking.detail["history"][0]["hottest_c"] == 40.0
+    assert tracking.detail["history"][1]["hottest_c"] == 80.1
+
+    # Requirement 2: the segments actually posted must be recorded, and
+    # recorded before this failure -- present even though heating never
+    # produced a single passing check. Asserted EQUAL to what was actually
+    # computed and posted, not just "truthy".
+    expected_segments = harness._profile_segments_c_to_80(
+        args.tracking_peak1_c, args.tracking_peak2_c)
+    assert tracking.detail.get("posted_segments") == expected_segments
+
+    # Zone-mode checks gathered before sampling began must survive too --
+    # they are exactly the "checks" the bug report says came back empty.
+    assert any(c.name.endswith(".control_mode_pid") for c in tracking.checks)
+
+    # Requirement 3: breach summary stats computed from the partial trace,
+    # never fabricated -- zone 0 saw 40.0 then 60.0, so max_c is 60.0. Row 0
+    # (40.0 < target 50.0) then row 1 (60.0 >= target 50.0) is a genuine
+    # crossing, with duty 1.0 (fraction_0_1) at that row -- "full_power".
+    stats = tracking.detail.get("breach_stats")
+    assert stats is not None
+    assert stats["0"]["max_c"] == 60.0
+    assert stats["0"]["setpoint_crossing"] == "crossed"
+    assert stats["0"]["duty_at_clamp"] == "full_power"
+
+    # JSON-serializable end to end (requirement 4), NaN-free (item 6): the
+    # dumped/reloaded doc must contain a plain float, never a bare NaN token.
+    doc = json.loads(pv.RunReport(
+        host="x", started_at="t", dry_run=True, hard_max_temp_c=90.0,
+        stages=[tracking]).to_json())
+    assert doc["stages"][0]["detail"]["history"][0]["hottest_c"] == 40.0
+
+
+def test_profile_tracking_records_posted_segments_before_start_profile_fails(harness, tmp_path):
+    """A second exit path: the board refuses ``start_profile`` (a bare 400,
+    say) before any sampling happens at all. ``posted_segments`` must still
+    be in the report -- it was computed and should be recorded before the
+    HTTP call that failed, not only on a sampling-time breach."""
+
+    class RefusingStartSession(harness.FakeSession):
+        def start_profile(self, slot):
+            return 400, "bad request"
+
+    args = harness.build_arg_parser().parse_args([
+        "--dry-run", "--report-dir", str(tmp_path),
+        "--skip-cooldown", "--skip-tune", "--skip-matrix", "--skip-backup"])
+    report = harness._run(RefusingStartSession(), args)
+    tracking = [s for s in report.stages if s.name == "profile_tracking"][0]
+    assert not tracking.passed
+    assert "start refused" in tracking.error
+    expected_segments = harness._profile_segments_c_to_80(
+        args.tracking_peak1_c, args.tracking_peak2_c)
+    assert tracking.detail.get("posted_segments") == expected_segments
 
 
 def test_hard_max_abort_stops_the_dry_run_and_still_tears_down(harness, tmp_path):
@@ -1153,6 +1279,14 @@ def test_dry_run_profile_tracking_aborts_locally_when_zone_not_commissioned(harn
     assert tracking["passed"] is False
     assert "zone 1" in tracking["error"] and "zone 2" in tracking["error"]
     assert "max_ramp_c_per_hr" in tracking["error"]
+    # Item 5 regression: this return used to build its OWN
+    # ``detail={"commissioning_failures": ...}``, silently overwriting the
+    # ``posted_segments`` already recorded into the shared detail dict.
+    assert tracking["detail"].get("commissioning_failures")
+    assert tracking["detail"].get("posted_segments") == \
+        harness._profile_segments_c_to_80(
+            harness.build_arg_parser().parse_args(["--dry-run"]).tracking_peak1_c,
+            harness.build_arg_parser().parse_args(["--dry-run"]).tracking_peak2_c)
 
 
 def test_dry_run_profile_tracking_commission_zones_flag_writes_only_deficient_fields(
@@ -1220,3 +1354,564 @@ def test_dry_run_profile_tracking_commission_zones_flag_still_refuses_missing_cr
     tracking = next(s for s in doc["stages"] if s["name"] == "profile_tracking")
     assert tracking["passed"] is False
     assert "cross_zone_max_delta_c" in tracking["error"]
+    # Item 5 regression, same as the sibling test above: this is the SECOND
+    # commissioning-failure return (post --commission-zones re-check) and it
+    # used to overwrite posted_segments the same way the first one did.
+    assert tracking["detail"].get("commissioning_failures")
+    assert tracking["detail"].get("posted_segments")
+
+
+# ---------------------------------------------------------------------------
+# S1/S2: sample_response()'s emergency ordering, against the REAL
+# bench_fixture_session.BenchSession -- not FakeSession's own override.
+#
+# A BreachingSession subclass that supplies its own sample_response() (as
+# the tests above do) cannot exercise what bench_fixture_session.
+# sample_response() itself does internally: an implementation that calls
+# on_sample AFTER the ceiling raise, or that fetches exec_status() before
+# checking the ceiling, would pass every test above while still being the
+# safety regression the review found. These construct a real BenchSession
+# and monkeypatch its status()/exec_status() methods directly (no urllib
+# involved) to prove the ordering.
+# ---------------------------------------------------------------------------
+
+def _breach_status(temp_c: float = 80.1, channel: int = 0) -> dict:
+    return {
+        "channels": [{"channel": channel, "temp_c": temp_c, "valid": True}],
+        "relays": [], "safety_heating_enabled": True, "safety_relay_energized": True,
+        "heat_block_sources_words": [0, 0],
+    }
+
+
+def test_real_sample_response_raises_on_breach_without_calling_exec_status():
+    """S1 NEGATIVE TEST. The emergency raise must not depend on
+    exec_status() at all -- prove it by making exec_status() itself explode
+    if it is ever called, and confirm sample_response() still raises the
+    expected BenchSessionError (not exec_status()'s exception) with
+    exec_status() never invoked."""
+    session = bfs.BenchSession(host="unit-test-host")
+    session.status = lambda: _breach_status(80.1)
+
+    def _exec_status_must_not_run():
+        raise RuntimeError("exec_status() must never be reached on a breaching sample")
+
+    session.exec_status = _exec_status_must_not_run
+
+    with pytest.raises(bfs.BenchSessionError) as exc_info:
+        session.sample_response(duration_s=10.0, period_s=1.0)
+    assert "fixture ceiling" in str(exc_info.value)
+    # The exception carries the channel/temperature that tripped it -- item
+    # 4's "record which channel actually breached" -- computed from data
+    # already in hand (chan_c came off the same status() call as hottest),
+    # never a second network round trip.
+    assert exc_info.value.channels_c == {0: 80.1}
+    assert exc_info.value.hottest_c == 80.1
+
+
+def test_real_sample_response_breach_is_not_delayed_by_a_slow_exec_status():
+    """S1 NEGATIVE TEST, the latency half: even if exec_status() would be
+    slow to fail (an 8s HTTP timeout is exactly what a hung board looks
+    like), the breach raise must not wait on it. exec_status() sleeps
+    briefly here and then raises; the test asserts sample_response() returns
+    in well under that sleep, proving exec_status() is never reached at
+    all, not merely reached-and-caught."""
+    session = bfs.BenchSession(host="unit-test-host")
+    session.status = lambda: _breach_status(90.0)
+    calls = {"n": 0}
+
+    def _slow_exec_status():
+        calls["n"] += 1
+        time.sleep(0.3)
+        raise RuntimeError("must never be reached")
+
+    session.exec_status = _slow_exec_status
+
+    t0 = time.monotonic()
+    with pytest.raises(bfs.BenchSessionError):
+        session.sample_response(duration_s=10.0, period_s=1.0)
+    elapsed = time.monotonic() - t0
+    assert calls["n"] == 0, "exec_status() must never be called on a breaching sample"
+    assert elapsed < 0.15, (
+        f"breach raise took {elapsed:.3f}s -- must not be delayed by exec_status() at all")
+
+
+def test_real_sample_response_on_sample_exception_does_not_mask_the_breach():
+    """S2 NEGATIVE TEST. An exception thrown from a caller's on_sample
+    callback must never propagate in place of the real ceiling breach --
+    that would silently convert "the kiln is over the ceiling" into
+    whatever unrelated bug the callback happened to have, and drop the
+    force_all_stop()-triggering exception entirely."""
+    session = bfs.BenchSession(host="unit-test-host")
+    # First poll: safe temperature (on_sample fires and explodes). Second
+    # poll: breaches. If the explosion masked/aborted sampling, no second
+    # poll would happen and BenchSessionError would never be raised.
+    statuses = [_breach_status(40.0), _breach_status(80.1)]
+    call_index = {"n": 0}
+
+    def _status():
+        s = statuses[min(call_index["n"], len(statuses) - 1)]
+        call_index["n"] += 1
+        return s
+
+    session.status = _status
+    session.exec_status = lambda: {"state": "running", "target_c": 50.0,
+                                   "segment_index": 0, "zones": []}
+
+    def _bad_on_sample(row):
+        raise ValueError("boom -- a bug in the caller's callback, not a real breach")
+
+    with pytest.raises(bfs.BenchSessionError) as exc_info:
+        session.sample_response(duration_s=10.0, period_s=0.0, on_sample=_bad_on_sample)
+    assert "fixture ceiling" in str(exc_info.value)
+
+
+def test_on_sample_exception_is_logged_once_not_per_sample(caplog):
+    """Minor fix NEGATIVE TEST: a persistently-throwing on_sample callback
+    must not write one full traceback to the log per poll for the whole
+    run -- that floods the log for a multi-hour run with a bug that only
+    needed reporting once. Confirms exactly ONE exception-level record is
+    emitted across 250+ samples, with a rate-limited summary line covering
+    the rest."""
+    import logging
+
+    class _StopLoop(Exception):
+        """Deterministically ends the sampling loop after N calls, instead
+        of depending on wall-clock duration_s in a unit test."""
+
+    session = bfs.BenchSession(host="unit-test-host")
+    call_count = {"n": 0}
+
+    def _status():
+        call_count["n"] += 1
+        if call_count["n"] > 250:
+            raise _StopLoop()
+        return {"channels": [{"channel": 0, "temp_c": 40.0, "valid": True}], "relays": [],
+                "safety_heating_enabled": True, "safety_relay_energized": True,
+                "heat_block_sources_words": [0, 0]}
+
+    session.status = _status
+    session.exec_status = lambda: {"state": "running", "target_c": 50.0,
+                                   "segment_index": 0, "zones": []}
+
+    def _bad_on_sample(row):
+        raise ValueError("boom -- a persistently broken callback")
+
+    with caplog.at_level(logging.WARNING, logger="bench_fixture_session"):
+        with pytest.raises(_StopLoop):
+            session.sample_response(duration_s=1e9, period_s=0.0, on_sample=_bad_on_sample)
+
+    exception_records = [r for r in caplog.records if r.exc_info]
+    assert len(exception_records) == 1, (
+        "on_sample's traceback must be logged exactly once across the whole run, not per sample")
+    summary_records = [r for r in caplog.records if "on_sample callback has now raised" in r.message]
+    assert len(summary_records) >= 1, "a rate-limited summary must still make a persistent failure visible"
+
+
+def test_real_sample_response_duty_by_zone_uses_the_firmware_zone_key():
+    """DEFECT NEGATIVE TEST (consumer without producer): the firmware's
+    /api/profile_exec zone objects use the key "zone", NOT "index" --
+    firmware/KilnFW/App/drivers/dashboard_http.c:1220-1258's
+    append_zone_status_json() (shared by /api/profile_exec and
+    /api/control) emits ``{"zone":%u,...,"duty":%.3f,...}``. "index" is a
+    DIFFERENT endpoint's config key (/api/zones, zones_http.c:4184/4210)
+    and is never present here. Getting this wrong left duty_by_zone == {}
+    on every real-hardware row -- this test feeds a response shaped
+    field-for-field like the real firmware's (key names and value ranges
+    copied from that snprintf format string, not invented) through the
+    REAL BenchSession.sample_response and confirms duty_by_zone comes out
+    populated with the right 0-1 fraction, not empty.
+    """
+    session = bfs.BenchSession(host="unit-test-host")
+    session.status = lambda: {
+        "channels": [{"channel": 0, "temp_c": 45.2, "valid": True}],
+        "relays": [{"relay": 0, "on": True}],
+        "safety_heating_enabled": True, "safety_relay_energized": True,
+        "heat_block_sources_words": [0, 0],
+    }
+    # Field-for-field from dashboard_http.c:1238-1250's control_fields
+    # snprintf: real key names, real value ranges. "duty" is z->duty, a
+    # float already in [0,1] on the wire -- profile_executor.c:130 only
+    # multiplies by 100 for ITS OWN separate percent-display conversion,
+    # not this JSON field.
+    session.exec_status = lambda: {
+        "state": "running", "target_c": 50.0, "segment_index": 0,
+        "zones": [
+            {"zone": 0, "control_mode": 2, "actual_c": 45.23, "actual_valid": True,
+             "duty": 0.842, "relay_on": True, "pid_p": 0.1, "pid_i": 0.05, "pid_d": 0.02,
+             "pid_ff": 0.3, "cooling_limited": False, "faulted": False, "fault_guard": 0,
+             "heat_blocked": False, "heat_blocked_sources": 0},
+        ],
+    }
+    rows = session.sample_response(duration_s=0.0, period_s=0.0)
+    assert rows[0]["duty_by_zone"] == {0: {"value": 0.842, "unit": "fraction_0_1"}}, (
+        "duty_by_zone must be populated from the firmware's real \"zone\"/\"duty\" keys, "
+        "not empty")
+
+
+# ---------------------------------------------------------------------------
+# Item 3: the trace cap keeps the NEWEST rows (deque), not the oldest.
+# ---------------------------------------------------------------------------
+
+def _many_rows_session_class(harness, n):
+    """Shared by the cap tests below: a FakeSession subclass whose
+    sample_response() produces ``n`` rows with distinct, ordered
+    ``t_s``/``channels_c`` values (cheap, no sleeping) so a test can tell
+    exactly which rows a cap kept. Everything else (ensure_pid_mode,
+    get_zones, put_profile, start_profile, force_all_stop, status, ...) is
+    inherited unchanged from the real FakeSession."""
+
+    class ManyRowsSession(harness.FakeSession):
+        def sample_response(self, duration_s, period_s=2.0, zone_index=0, on_sample=None):
+            rows = []
+            for i in range(n):
+                row = {
+                    "t_s": float(i), "channels_c": {0: float(i)}, "target_c": 50.0,
+                    "segment_index": 0,
+                    "duty_by_zone": {0: {"value": 1.0, "unit": "fraction_0_1"}},
+                    "hottest_c": float(i),
+                }
+                rows.append(row)
+                if on_sample is not None:
+                    on_sample(row)
+            return rows
+
+    return ManyRowsSession()
+
+
+def _run_tracking_only(harness, tmp_path, session):
+    args = harness.build_arg_parser().parse_args([
+        "--dry-run", "--report-dir", str(tmp_path),
+        "--skip-cooldown", "--skip-tune", "--skip-matrix", "--skip-backup"])
+    report = harness._run(session, args)
+    return [s for s in report.stages if s.name == "profile_tracking"][0]
+
+
+def test_profile_tracking_trace_cap_evicts_oldest_and_flags_truncation(harness, tmp_path, monkeypatch):
+    """Item 2 NEGATIVE TEST, driven through the REAL stage function (not a
+    hand-built deque): with the module-level ``MAX_TRACE_ROWS`` shrunk to 3
+    and a session producing 10 rows, the surviving ``history`` must be
+    EXACTLY the newest 3 (t_s 7, 8, 9) -- not the oldest 3, and not all 10
+    -- and ``history_truncated`` must be set. A regression where the cap
+    stops appending instead of evicting (the bug this replaced) would keep
+    [0, 1, 2] here instead; a regression where ``history_truncated`` is
+    simply never set would still keep the right rows but fail the flag
+    assertion below."""
+    monkeypatch.setattr(harness, "MAX_TRACE_ROWS", 3)
+    session = _many_rows_session_class(harness, n=10)
+    tracking = _run_tracking_only(harness, tmp_path, session)
+    history = tracking.detail["history"]
+    assert [row["t_s"] for row in history] == [7.0, 8.0, 9.0], (
+        "the cap must keep the NEWEST rows, not the oldest")
+    assert tracking.detail.get("history_truncated") is True
+
+
+def test_profile_tracking_trace_under_cap_is_not_flagged_truncated(harness, tmp_path, monkeypatch):
+    """The counterpart, same mechanism: with the cap shrunk to 10 rows and a
+    session producing only 5, nothing is evicted and ``history_truncated``
+    must be ABSENT -- proving the flag is a real signal, not set
+    unconditionally (which would make the assertion above vacuous the other
+    way)."""
+    monkeypatch.setattr(harness, "MAX_TRACE_ROWS", 10)
+    session = _many_rows_session_class(harness, n=5)
+    tracking = _run_tracking_only(harness, tmp_path, session)
+    history = tracking.detail["history"]
+    assert [row["t_s"] for row in history] == [0.0, 1.0, 2.0, 3.0, 4.0]
+    assert "history_truncated" not in tracking.detail, (
+        "a run under the cap must not be flagged truncated")
+
+
+def test_profile_tracking_history_truncated_flag_absent_on_a_short_run(harness, tmp_path):
+    """Same as above, against the REAL 200k cap (no monkeypatch) with
+    FakeSession's ordinary synthetic run -- the everyday case."""
+    args = harness.build_arg_parser().parse_args([
+        "--dry-run", "--report-dir", str(tmp_path),
+        "--skip-cooldown", "--skip-tune", "--skip-matrix", "--skip-backup"])
+    report = harness._run(harness.FakeSession(), args)
+    tracking = [s for s in report.stages if s.name == "profile_tracking"][0]
+    assert "history_truncated" not in tracking.detail, (
+        "a run far under the cap must not be flagged truncated")
+    assert tracking.detail.get("history")
+
+
+# ---------------------------------------------------------------------------
+# pv.summarize_breach -- crossing detection, duty units, "starts above
+# setpoint", multiple crossings, breached-channel-outside-zones, and the
+# never-fabricate contract.
+# ---------------------------------------------------------------------------
+
+def _row(t_s, channels_c, target_c, duty_by_zone=None):
+    return {"t_s": t_s, "channels_c": channels_c, "target_c": target_c,
+            "duty_by_zone": duty_by_zone or {}, "segment_index": 0,
+            "hottest_c": max(channels_c.values())}
+
+
+def test_summarize_breach_requires_a_genuine_crossing():
+    """NEGATIVE TEST for the bug the review found: a row where the FIRST
+    sample is already at/above target must not be reported as a crossing
+    just because ``v >= target`` is true on it -- there is no PREVIOUS
+    below-target sample, so there is no crossing to attribute a duty
+    reading to."""
+    trace = [
+        _row(0.0, {0: 55.0}, 50.0, {0: {"value": 0.5, "unit": "fraction_0_1"}}),
+    ]
+    stats = pv.summarize_breach(trace, [0])
+    assert stats["0"]["setpoint_crossing"] == "started_above_setpoint"
+    assert stats["0"]["duty_at_clamp"] is None, "must not fabricate a duty reading with no crossing"
+
+
+def test_summarize_breach_detects_a_real_crossing_and_reads_duty_there():
+    trace = [
+        _row(0.0, {0: 40.0}, 50.0, {0: {"value": 1.0, "unit": "fraction_0_1"}}),
+        _row(2.0, {0: 60.0}, 50.0, {0: {"value": 1.0, "unit": "fraction_0_1"}}),
+    ]
+    stats = pv.summarize_breach(trace, [0])
+    assert stats["0"]["setpoint_crossing"] == "crossed"
+    assert stats["0"]["duty_at_clamp"] == "full_power"
+
+
+def test_summarize_breach_multiple_crossings_prefers_the_one_nearest_the_breach():
+    """NEGATIVE TEST: an early crossing (duty pinned full) followed by a
+    LATER crossing (duty already backed off) must report the LATER one --
+    the one nearest whatever eventually breached -- not the first."""
+    trace = [
+        _row(0.0, {0: 40.0}, 50.0, {0: {"value": 1.0, "unit": "fraction_0_1"}}),
+        _row(1.0, {0: 55.0}, 50.0, {0: {"value": 1.0, "unit": "fraction_0_1"}}),  # crossing #1
+        _row(2.0, {0: 48.0}, 50.0, {0: {"value": 0.4, "unit": "fraction_0_1"}}),  # dips back below
+        _row(3.0, {0: 60.0}, 50.0, {0: {"value": 0.4, "unit": "fraction_0_1"}}),  # crossing #2
+    ]
+    stats = pv.summarize_breach(trace, [0])
+    assert stats["0"]["setpoint_crossing"] == "crossed"
+    assert stats["0"]["duty_at_clamp"] == "not_at_clamp", (
+        "must report the SECOND crossing's duty (0.4), not the first crossing's (1.0)")
+
+
+def test_summarize_breach_duty_at_clamp_distinguishes_full_power_from_commanded_off():
+    """NEGATIVE TEST for the conflation the review flagged: "duty pinned
+    full and still climbing" and "duty commanded off and still climbing"
+    are opposite diagnoses and must not collapse to the same value."""
+    full_power_trace = [
+        _row(0.0, {0: 40.0}, 50.0, {0: {"value": 1.0, "unit": "fraction_0_1"}}),
+        _row(1.0, {0: 55.0}, 50.0, {0: {"value": 1.0, "unit": "fraction_0_1"}}),
+    ]
+    commanded_off_trace = [
+        _row(0.0, {0: 40.0}, 50.0, {0: {"value": 0.0, "unit": "fraction_0_1"}}),
+        _row(1.0, {0: 55.0}, 50.0, {0: {"value": 0.0, "unit": "fraction_0_1"}}),
+    ]
+    not_clamped_trace = [
+        _row(0.0, {0: 40.0}, 50.0, {0: {"value": 0.5, "unit": "fraction_0_1"}}),
+        _row(1.0, {0: 55.0}, 50.0, {0: {"value": 0.5, "unit": "fraction_0_1"}}),
+    ]
+    assert pv.summarize_breach(full_power_trace, [0])["0"]["duty_at_clamp"] == "full_power"
+    assert pv.summarize_breach(commanded_off_trace, [0])["0"]["duty_at_clamp"] == "commanded_off"
+    assert pv.summarize_breach(not_clamped_trace, [0])["0"]["duty_at_clamp"] == "not_at_clamp"
+    assert (pv.summarize_breach(full_power_trace, [0])["0"]["duty_at_clamp"]
+            != pv.summarize_breach(commanded_off_trace, [0])["0"]["duty_at_clamp"])
+
+
+def test_summarize_breach_normalizes_percent_and_fraction_duty_the_same_way():
+    """NEGATIVE TEST for the unit-ambiguity bug: 100.0 tagged
+    percent_0_100 and 1.0 tagged fraction_0_1 are the SAME duty and must
+    both report full_power -- comparing a percent value against the
+    fraction thresholds (>=0.999) without normalizing would instead read
+    100.0 as nowhere near clamped."""
+    pct_trace = [
+        _row(0.0, {0: 40.0}, 50.0, {0: {"value": 0.0, "unit": "percent_0_100"}}),
+        _row(1.0, {0: 55.0}, 50.0, {0: {"value": 100.0, "unit": "percent_0_100"}}),
+    ]
+    frac_trace = [
+        _row(0.0, {0: 40.0}, 50.0, {0: {"value": 0.0, "unit": "fraction_0_1"}}),
+        _row(1.0, {0: 55.0}, 50.0, {0: {"value": 1.0, "unit": "fraction_0_1"}}),
+    ]
+    assert pv.summarize_breach(pct_trace, [0])["0"]["duty_at_clamp"] == "full_power"
+    assert pv.summarize_breach(frac_trace, [0])["0"]["duty_at_clamp"] == "full_power"
+
+
+def test_summarize_breach_duty_present_but_value_none_falls_back_honestly():
+    """The review's "make z.get('duty', ...) fall back when the 'duty' key
+    exists with a None value" -- exercised here one layer up: an entry
+    whose ``value`` is ``None`` must normalize to ``None``, not to 0.0 or
+    crash."""
+    trace = [
+        _row(0.0, {0: 40.0}, 50.0, {0: {"value": None, "unit": "fraction_0_1"}}),
+        _row(1.0, {0: 55.0}, 50.0, {0: {"value": None, "unit": "fraction_0_1"}}),
+    ]
+    stats = pv.summarize_breach(trace, [0])
+    assert stats["0"]["setpoint_crossing"] == "crossed"
+    assert stats["0"]["duty_at_clamp"] is None, "a missing duty value must never be fabricated"
+
+
+def test_summarize_breach_never_crossed_is_distinct_from_started_above():
+    """A zone that stayed below its (rising) target the whole trace is a
+    third, distinct state from both "crossed" and "started above" -- must
+    not be silently folded into either."""
+    trace = [
+        _row(0.0, {0: 10.0}, 50.0, {0: {"value": 1.0, "unit": "fraction_0_1"}}),
+        _row(1.0, {0: 20.0}, 50.0, {0: {"value": 1.0, "unit": "fraction_0_1"}}),
+    ]
+    stats = pv.summarize_breach(trace, [0])
+    assert stats["0"]["setpoint_crossing"] == "never_crossed"
+    assert stats["0"]["duty_at_clamp"] is None
+
+
+def test_summarize_breach_too_short_trace_reports_none_not_fabricated():
+    """NEGATIVE TEST: an empty trace, or one with no target_c at all, must
+    report None throughout -- never a fabricated 0.0/False that would read
+    as a real (and reassuring) measurement."""
+    stats = pv.summarize_breach([], [0])
+    assert stats["0"] == {
+        "max_c": None, "peak_overshoot_c": None,
+        "setpoint_crossing": None, "duty_at_clamp": None,
+    }
+    no_target_trace = [{"t_s": 0.0, "channels_c": {0: 40.0}, "target_c": None,
+                        "duty_by_zone": {}, "hottest_c": 40.0}]
+    stats2 = pv.summarize_breach(no_target_trace, [0])
+    assert stats2["0"]["max_c"] == 40.0  # max_c does not need target_c
+    assert stats2["0"]["setpoint_crossing"] is None
+    assert stats2["0"]["peak_overshoot_c"] is None
+
+
+def test_summarize_breach_includes_the_breached_channel_even_outside_zones():
+    """NEGATIVE TEST for item 4's last bullet: the ceiling trips on the
+    hottest of ALL valid channels, not just --zones. A breach on channel 4
+    while tracking only zones [0, 1] must still show up in breach_stats."""
+    trace = [
+        _row(0.0, {0: 40.0, 1: 41.0, 4: 79.0}, 50.0,
+             {0: {"value": 0.5, "unit": "fraction_0_1"}}),
+        _row(1.0, {0: 45.0, 1: 42.0, 4: 80.1}, 50.0,
+             {0: {"value": 0.5, "unit": "fraction_0_1"}}),
+    ]
+    stats = pv.summarize_breach(trace, [0, 1], breach_channel=4, breach_hottest_c=80.1)
+    assert "4" in stats, "the breached channel must be present even though it is outside --zones"
+    assert stats["4"]["max_c"] == 80.1
+    assert stats["breach"] == {"channel": 4, "hottest_c": 80.1}
+
+
+def test_summarize_breach_channel_already_in_zones_is_not_duplicated():
+    trace = [_row(0.0, {0: 79.0}, 50.0)]
+    stats = pv.summarize_breach(trace, [0], breach_channel=0, breach_hottest_c=79.0)
+    assert set(stats.keys()) == {"0", "breach"}
+
+
+# ---------------------------------------------------------------------------
+# Aborted.partial_report / _run()'s fallback.
+# ---------------------------------------------------------------------------
+
+def test_aborted_partial_report_is_used_by_run_instead_of_an_empty_stub(harness, tmp_path):
+    """NEGATIVE TEST directly against the Aborted/_run() mechanism (not
+    routed through stage_profile_tracking): a stage that raises
+    ``Aborted(msg, partial_report=...)`` must have THAT report land in
+    ``RunReport.stages``, not a freshly built empty one."""
+    carried = pv.StageReport(
+        name="tune", passed=False, error="synthetic abort",
+        checks=[pv.CheckResult(name="probe", passed=False, actual=1, threshold=0)],
+        detail={"marker": "carried-through"})
+
+    def _stage_that_aborts_with_a_report(session, args):
+        raise harness.Aborted("synthetic abort", partial_report=carried)
+
+    real_stages = harness.STAGES
+    harness.STAGES = [("tune", _stage_that_aborts_with_a_report)]
+    try:
+        args = harness.build_arg_parser().parse_args(["--dry-run", "--report-dir", str(tmp_path)])
+        report = harness._run(harness.FakeSession(), args)
+    finally:
+        harness.STAGES = real_stages
+
+    assert report.aborted is True
+    tune_stage = [s for s in report.stages if s.name == "tune"][0]
+    assert tune_stage.detail == {"marker": "carried-through"}
+    assert tune_stage.checks and tune_stage.checks[0].name == "probe"
+
+
+def test_aborted_without_partial_report_still_falls_back_cleanly(harness, tmp_path):
+    """The counterpart: a plain ``Aborted("msg")`` with no partial_report
+    (every other stage's ``_guard``/``_retrying`` raises this way) must
+    still produce a usable, empty-but-present StageReport -- confirms the
+    fallback branch itself was not broken by adding the other one."""
+    def _stage_that_aborts_plain(session, args):
+        raise harness.Aborted("plain abort, no report")
+
+    real_stages = harness.STAGES
+    harness.STAGES = [("tune", _stage_that_aborts_plain)]
+    try:
+        args = harness.build_arg_parser().parse_args(["--dry-run", "--report-dir", str(tmp_path)])
+        report = harness._run(harness.FakeSession(), args)
+    finally:
+        harness.STAGES = real_stages
+
+    assert report.aborted is True
+    tune_stage = [s for s in report.stages if s.name == "tune"][0]
+    assert tune_stage.passed is False
+    assert tune_stage.detail == {}
+
+
+def test_ceiling_breach_stops_a_later_stage_regardless_of_stage_ordering(harness, tmp_path):
+    """Item 3 NEGATIVE TEST for the ordering-dependence half of the review
+    finding: before the fix, a real ceiling breach RETURNED a failed
+    StageReport from stage_profile_tracking instead of raising Aborted, so
+    stopping the run depended entirely on 'tracking' happening to be the
+    LAST entry in STAGES (control then fell through to the top-level
+    ``for``/``if not stage_report.passed and args.stop_on_first_failure``
+    -- and even that only stops the run if --stop-on-first-failure is set;
+    otherwise a later stage runs on an over-ceiling kiln).
+
+    Puts a dummy stage AFTER tracking in STAGES and confirms it never runs,
+    with the DEFAULT (not --stop-on-first-failure) args -- i.e. this must
+    hold unconditionally, the same way an Aborted-raising path already
+    does for every other stage."""
+    class BreachingSession(harness.FakeSession):
+        def sample_response(self, duration_s, period_s=2.0, zone_index=0, on_sample=None):
+            exc = harness.BenchSessionError(
+                "live temperature 90.0 C breached the 80.0 C fixture ceiling during sampling")
+            exc.channels_c = {0: 90.0}
+            exc.hottest_c = 90.0
+            raise exc
+
+    later_stage_ran = []
+
+    def _later_stage(session, args):
+        later_stage_ran.append(True)
+        return pv.StageReport(name="backup", passed=True)
+
+    real_stages = harness.STAGES
+    # Reuses the "backup" name (a real skip-dict key) for the dummy stage so
+    # _run()'s ``skip[name]`` lookup does not need touching -- the point is
+    # ORDER, not which stage.
+    harness.STAGES = [("tracking", harness.stage_profile_tracking), ("backup", _later_stage)]
+    try:
+        args = harness.build_arg_parser().parse_args([
+            "--dry-run", "--report-dir", str(tmp_path),
+            "--skip-cooldown", "--skip-tune", "--skip-matrix"])
+        report = harness._run(BreachingSession(), args)
+    finally:
+        harness.STAGES = real_stages
+
+    assert report.aborted is True
+    assert not later_stage_ran, "a later stage must not run after a genuine ceiling breach"
+    assert not any(s.name == "backup" and s.passed for s in report.stages)
+
+
+# ---------------------------------------------------------------------------
+# Item 6: NaN must never reach the JSON output as a bare token.
+# ---------------------------------------------------------------------------
+
+def test_json_safe_replaces_nan_and_inf_with_none():
+    doc = {"a": float("nan"), "b": [1.0, float("inf"), float("-inf")], "c": {"d": float("nan")}}
+    safe = pv._json_safe(doc)
+    assert safe == {"a": None, "b": [1.0, None, None], "c": {"d": None}}
+
+
+def test_run_report_to_json_never_emits_a_bare_nan_token():
+    """NEGATIVE TEST: a report whose trace contains ``float("nan")`` (a
+    thermocouple fault mid-run, i.e. no valid channel that poll) must
+    produce output with no bare ``NaN``/``Infinity`` token -- proving the
+    output is strict JSON, not merely "readable by Python's own permissive
+    json module"."""
+    report = pv.RunReport(host="x", started_at="t0", dry_run=True, hard_max_temp_c=90.0)
+    report.stages = [pv.StageReport(
+        name="profile_tracking", passed=False,
+        detail={"history": [{"t_s": 0.0, "hottest_c": float("nan")}]})]
+    text = report.to_json()
+    assert "NaN" not in text and "Infinity" not in text
+    doc = json.loads(text)
+    assert doc["stages"][0]["detail"]["history"][0]["hottest_c"] is None

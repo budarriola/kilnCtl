@@ -35,6 +35,7 @@ Non-zero exit code on any failure, abort, or exception -- suitable for CI.
 from __future__ import annotations
 
 import argparse
+import collections
 import json
 import logging
 import os
@@ -71,6 +72,14 @@ DEFAULT_BACKUP_PATH = os.path.join(_HERE, "..", "config_presets", "pid_validatio
 #: 0.4 duty step, per the brief. Kept as a module constant (not just an
 #: argparse default) so tests can reference the same number.
 DEFAULT_TUNE_DUTY = 0.4
+
+#: Cap on stage_profile_tracking's sampled trace. A module-level constant
+#: (not a local inside the function) specifically so a test can
+#: monkeypatch it small and exercise the truncation path without sampling
+#: 200k real rows -- see test_pid_validation.py's
+#: test_profile_tracking_trace_cap_evicts_oldest_and_flags_truncation and
+#: its negative counterpart for a run under the cap.
+MAX_TRACE_ROWS = 200_000
 
 
 # ---------------------------------------------------------------------------
@@ -152,7 +161,21 @@ BenchSession.commission_zones = _bs_commission_zones
 # ---------------------------------------------------------------------------
 
 class Aborted(Exception):
-    """Raised by a stage to unwind the whole run through the finally block."""
+    """Raised by a stage to unwind the whole run through the finally block.
+
+    ``partial_report``, if given, is whatever :class:`pv.StageReport` the
+    raising stage had already assembled -- checks, detail, an accumulated
+    trace -- at the moment it decided to abort. Without this, ``_run()``'s
+    ``except Aborted`` handler below had no report to fall back on and built
+    an empty one (just ``error=str(exc)``), which is exactly how a ceiling
+    breach mid-profile-tracking used to come back with EMPTY ``checks``,
+    ``detail`` and ``history``: the sampled trace existed locally in the
+    stage function but nothing carried it out through the exception.
+    """
+
+    def __init__(self, message: str, partial_report: "Optional[pv.StageReport]" = None) -> None:
+        super().__init__(message)
+        self.partial_report = partial_report
 
 
 def _guard(session, args, limit_c: float, where: str) -> None:
@@ -375,6 +398,64 @@ def stage_profile_tracking(session, args) -> pv.StageReport:
     t0 = time.monotonic()
     checks: "list[pv.CheckResult]" = []
     detail: "dict[str, Any]" = {}
+    #: Sampled incrementally via ``_on_sample`` below (requirement: the
+    #: trace must survive ANY exit path -- normal completion, a failed
+    #: check, a raised exception, a ceiling breach, a timeout -- not just
+    #: the happy path where ``sample_response()`` returns normally). Large
+    #: cap (module-level ``MAX_TRACE_ROWS``, so a test can shrink it), and a
+    #: ``deque(maxlen=...)`` rather than a manual "stop appending" guard: a
+    #: runaway/very-long run must keep the NEWEST rows -- the ones nearest
+    #: an eventual breach -- not freeze on 200k rows of uneventful early
+    #: ramp and silently discard everything after, including the breach
+    #: itself.
+    trace: "collections.deque[dict]" = collections.deque(maxlen=MAX_TRACE_ROWS)
+    trace_truncated = False
+
+    def _on_sample(row: dict) -> None:
+        nonlocal trace_truncated
+        if len(trace) >= MAX_TRACE_ROWS:
+            trace_truncated = True  # about to evict the oldest row -- record that it happened
+        trace.append({
+            "t_s": row.get("t_s"),
+            "channels_c": dict(row.get("channels_c") or {}),
+            "target_c": row.get("target_c"),
+            "segment_index": row.get("segment_index"),
+            "duty_by_zone": {k: (dict(v) if isinstance(v, dict) else v)
+                             for k, v in (row.get("duty_by_zone") or {}).items()},
+            "hottest_c": row.get("hottest_c"),
+        })
+
+    def _attach_trace() -> None:
+        detail["history"] = list(trace)
+        detail["n_trace_rows"] = len(trace)
+        if trace_truncated:
+            detail["history_truncated"] = True
+
+    def _breach_identity(exc: Exception) -> "tuple[Optional[int], Optional[float]]":
+        """Pull the channel/temperature that actually tripped a ceiling out
+        of whatever raised it, when available. ``BenchSessionError`` from a
+        live fixture-ceiling breach carries ``channels_c``/``hottest_c``
+        (see ``bench_fixture_session.sample_response``); a
+        ``pv.HardMaxExceeded`` from the harness's own separate hard-max
+        check below carries the same information as attributes. Neither is
+        fabricated when absent -- both return ``(None, None)``."""
+        channels_c = getattr(exc, "channels_c", None)
+        hottest_c = getattr(exc, "hottest_c", None)
+        if not channels_c or hottest_c is None:
+            return None, None
+        matches = [ch for ch, v in channels_c.items() if v == hottest_c]
+        return (min(matches) if matches else None), hottest_c
+
+    def _failure_report(error: str, breach_exc: "Optional[Exception]" = None) -> pv.StageReport:
+        _attach_trace()
+        if trace:
+            breach_channel, breach_hottest_c = (
+                _breach_identity(breach_exc) if breach_exc is not None else (None, None))
+            detail["breach_stats"] = pv.summarize_breach(
+                trace, args.zones, breach_channel=breach_channel, breach_hottest_c=breach_hottest_c)
+        return pv.StageReport(name="profile_tracking", passed=False, error=error,
+                              checks=checks, detail=detail, duration_s=time.monotonic() - t0)
+
     try:
         # autotune_accept() (stage 2) writes gains + model but NOT
         # control_mode -- a zone tuned there can still be sitting in OFF, in
@@ -398,6 +479,10 @@ def stage_profile_tracking(session, args) -> pv.StageReport:
 
         zone_mask = sum(1 << z for z in args.zones)
         segments = _profile_segments_c_to_80(args.tracking_peak1_c, args.tracking_peak2_c)
+        # Recorded into detail BEFORE anything below can start heating -- a
+        # failure mid-run (including a bare exception with nothing else
+        # decoded yet) must still show what was being run.
+        detail["posted_segments"] = segments
 
         # Zone commissioning pre-flight (see pv.check_zones_commissioned's
         # docstring for the full "0 means what, on which field" citations).
@@ -413,13 +498,14 @@ def stage_profile_tracking(session, args) -> pv.StageReport:
             pv.check_zones_commissioned(args.zones, zone_configs, segments)
         except pv.ZoneNotCommissionedError as exc:
             if not args.commission_zones:
-                return pv.StageReport(
-                    name="profile_tracking", passed=False,
-                    error="one or more zones are not commissioned for this profile, refusing "
-                          "to start it (pass --commission-zones to have the OPERATOR-reviewed "
-                          "values below written first): " + "; ".join(exc.failures),
-                    detail={"commissioning_failures": exc.failures},
-                    duration_s=time.monotonic() - t0)
+                # Merged into the shared `detail` dict (via _failure_report),
+                # not a fresh ``detail={...}`` -- that used to silently
+                # overwrite ``posted_segments`` set above.
+                detail["commissioning_failures"] = exc.failures
+                return _failure_report(
+                    "one or more zones are not commissioned for this profile, refusing "
+                    "to start it (pass --commission-zones to have the OPERATOR-reviewed "
+                    "values below written first): " + "; ".join(exc.failures))
             # --commission-zones: an explicit, opt-in override. Loudly logged
             # (this widens safety guard ceilings) and limited to the fields
             # this run's pre-flight actually found deficient -- never a bulk
@@ -456,13 +542,11 @@ def stage_profile_tracking(session, args) -> pv.StageReport:
             try:
                 pv.check_zones_commissioned(args.zones, refreshed_cfgs, segments)
             except pv.ZoneNotCommissionedError as exc2:
-                return pv.StageReport(
-                    name="profile_tracking", passed=False,
-                    error="--commission-zones could not fully commission every zone (fields "
-                          "it never auto-writes, e.g. cross_zone_max_delta_c, still need an "
-                          "operator-chosen value): " + "; ".join(exc2.failures),
-                    detail={"commissioning_failures": exc2.failures},
-                    duration_s=time.monotonic() - t0)
+                detail["commissioning_failures"] = exc2.failures
+                return _failure_report(
+                    "--commission-zones could not fully commission every zone (fields "
+                    "it never auto-writes, e.g. cross_zone_max_delta_c, still need an "
+                    "operator-chosen value): " + "; ".join(exc2.failures))
 
         # Build a name that fits the firmware's PROFILE_NAME_MAX_LEN (15
         # chars, profiles_http.h:29) while still embedding a timestamp so
@@ -477,18 +561,14 @@ def stage_profile_tracking(session, args) -> pv.StageReport:
         try:
             pv.validate_profile_payload(args.tracking_slot, profile_name, zone_mask, segments)
         except pv.ProfilePayloadError as exc:
-            return pv.StageReport(name="profile_tracking", passed=False,
-                                  error=f"payload would be rejected by firmware, not sent: {exc}",
-                                  duration_s=time.monotonic() - t0)
+            return _failure_report(f"payload would be rejected by firmware, not sent: {exc}")
         _retrying(session, args, "profile_tracking", "put_profile",
                  lambda: session.put_profile(args.tracking_slot, profile_name,
                                               zone_mask, segments))
         code, body = _retrying(session, args, "profile_tracking", "start_profile",
                                lambda: session.start_profile(args.tracking_slot))
         if code != 200:
-            return pv.StageReport(name="profile_tracking", passed=False,
-                                  error=f"start refused: {code}: {body[:300]}",
-                                  duration_s=time.monotonic() - t0)
+            return _failure_report(f"start refused: {code}: {body[:300]}")
         # B4: deliberately NOT run through _retrying(). sample_response()
         # polls and accumulates rows over the whole tracking_duration_s
         # while the profile keeps executing on the board -- it is not
@@ -498,12 +578,32 @@ def stage_profile_tracking(session, args) -> pv.StageReport:
         # expectations for the ORIGINAL start time: a spurious FAIL, or a
         # PASS on data that never covered the ramp. A transient error here
         # must surface as a stage failure (via the BenchSessionError catch
-        # below), not be silently retried past.
+        # below), not be silently retried past. ``on_sample=_on_sample`` is
+        # what makes the trace incremental: every row reaches ``trace`` as
+        # it is sampled, before sample_response() can raise
+        # BenchSessionError on a ceiling breach and lose whatever it would
+        # otherwise have returned.
         raw_rows = session.sample_response(
-            args.tracking_duration_s, period_s=args.tracking_period_s, zone_index=args.zones[0])
+            args.tracking_duration_s, period_s=args.tracking_period_s,
+            zone_index=args.zones[0], on_sample=_on_sample)
     except BenchSessionError as exc:
-        return pv.StageReport(name="profile_tracking", passed=False, error=str(exc),
-                              duration_s=time.monotonic() - t0)
+        if getattr(exc, "hottest_c", None) is not None:
+            # A genuine live ceiling breach -- bench_fixture_session.
+            # sample_response() sets ``channels_c``/``hottest_c`` on the
+            # exception ONLY when FIXTURE_MAX_TEMP_C was actually exceeded
+            # (never on a generic transient HTTP error, which is the OTHER
+            # thing that can reach this except clause -- see the B4 comment
+            # above). This is exactly as serious as the harness's OWN
+            # hard-max path below, which already raises Aborted -- returning
+            # a plain failed StageReport here instead left
+            # report.aborted/abort_reason unset for the more serious of the
+            # two events, and made "stop the run here, do not run further
+            # stages" depend on ``tracking`` happening to be the LAST entry
+            # in STAGES rather than being true unconditionally.
+            raise Aborted(str(exc), partial_report=_failure_report(str(exc), breach_exc=exc)) from exc
+        return _failure_report(str(exc), breach_exc=exc)
+
+    _attach_trace()
 
     hold_target_low = min(args.tracking_peak1_c, args.tracking_peak2_c) - 0.5
     samples: "list[pv.TrackingSample]" = []
@@ -529,7 +629,18 @@ def stage_profile_tracking(session, args) -> pv.StageReport:
             try:
                 pv.check_hard_max(float(hottest), args.max_temp_c, "profile tracking sample")
             except pv.HardMaxExceeded as exc:
-                raise Aborted(str(exc)) from exc
+                # Same identity info BenchSessionError carries on a live
+                # fixture breach: this row's own channels_c IS the reading
+                # that tripped check_hard_max, already in hand, no extra
+                # I/O needed to attach it.
+                exc.channels_c = dict(chans)
+                exc.hottest_c = float(hottest)
+                # Same fix as the BenchSessionError path above: build the
+                # StageReport with everything gathered so far (checks,
+                # detail incl. posted_segments + history + breach_stats)
+                # and hand it to Aborted so _run()'s handler uses it instead
+                # of building an empty one from scratch.
+                raise Aborted(str(exc), partial_report=_failure_report(str(exc), breach_exc=exc)) from exc
 
     thresholds = pv.TrackingThresholds(
         max_abs_err_c=args.max_abs_err_c, rms_err_c=args.rms_err_c,
@@ -555,6 +666,8 @@ def stage_profile_tracking(session, args) -> pv.StageReport:
     checks.append(spread_check)
     passed = passed and spread_check.passed
     detail["n_raw_rows"] = len(raw_rows)
+    if not passed:
+        detail["breach_stats"] = pv.summarize_breach(trace, args.zones)
     return pv.StageReport(name="profile_tracking", passed=passed, checks=checks, detail=detail,
                           duration_s=time.monotonic() - t0)
 
@@ -678,7 +791,7 @@ class FakeSession:
     def start_profile(self, slot):
         return 200, "ok"
 
-    def sample_response(self, duration_s, period_s=2.0, zone_index=0):
+    def sample_response(self, duration_s, period_s=2.0, zone_index=0, on_sample=None):
         rows = []
         t = 0.0
         peaks = (50.0, 70.0)
@@ -689,13 +802,22 @@ class FakeSession:
             # the 1.5 C default threshold -- so a dry run demonstrably FAILS
             # stage 5 rather than trivially passing every number.
             chans = {0: target - 0.2, 1: target - 0.3, 2: target - 2.0}
-            rows.append({
+            row = {
                 "t_s": round(t, 1), "zone_c": chans.get(zone_index, target),
                 "channels_c": chans, "hottest_c": max(chans.values()),
                 "relays_on": [], "safety_heating_enabled": True,
                 "safety_relay_energized": True, "heat_block_sources_words": [0, 0],
                 "exec_state": "running", "target_c": target,
-            })
+                "segment_index": phase,
+                # Same shape the real sample_response() now records --
+                # {"value": ..., "unit": ...} -- so a test exercising
+                # summarize_breach()/duty unit normalization against
+                # FakeSession data sees the real contract, not a shortcut.
+                "duty_by_zone": {z: {"value": 0.6, "unit": "fraction_0_1"} for z in (0, 1, 2)},
+            }
+            rows.append(row)
+            if on_sample is not None:
+                on_sample(row)
             t += period_s
         return rows
 
@@ -746,7 +868,9 @@ def _run(session, args) -> pv.RunReport:
             except Aborted as exc:
                 report.aborted = True
                 report.abort_reason = f"{name}: {exc}"
-                report.stages.append(pv.StageReport(name=name, passed=False, error=str(exc)))
+                report.stages.append(
+                    exc.partial_report if exc.partial_report is not None
+                    else pv.StageReport(name=name, passed=False, error=str(exc)))
                 break
             report.stages.append(stage_report)
             log.info("stage %s: %s", name, "PASS" if stage_report.passed else "FAIL")

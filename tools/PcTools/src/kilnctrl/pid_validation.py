@@ -26,6 +26,23 @@ from dataclasses import dataclass, field, asdict
 from typing import Any, Optional
 
 
+def _json_safe(obj: Any) -> Any:
+    """Recursively replace NaN/+Inf/-Inf with ``None`` so a report is STRICT
+    JSON, not Python's ``json.dumps`` default of emitting bare ``NaN``/
+    ``Infinity`` tokens (valid to ``json.loads`` on this end, invalid to any
+    conformant parser reading the file elsewhere). A trace's ``hottest_c``
+    is ``float("nan")`` exactly when no thermocouple channel reported valid
+    -- a real fault condition a report needs to survive cleanly, not an
+    edge case."""
+    if isinstance(obj, float):
+        return None if (obj != obj or obj in (float("inf"), float("-inf"))) else obj
+    if isinstance(obj, dict):
+        return {k: _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_json_safe(v) for v in obj]
+    return obj
+
+
 # ---------------------------------------------------------------------------
 # Safety ceiling. This is the harness's OWN hard stop -- independent of, and
 # in addition to, whatever the firmware's own safety processor enforces. A
@@ -407,6 +424,159 @@ def tracking_stats(samples: "list[TrackingSample]", zone: int) -> ZoneTrackingSt
     return ZoneTrackingStats(
         zone=zone, max_abs_err_c=max_abs, rms_err_c=rms,
         steady_state_err_c=steady, n_samples=len(zs), n_hold_samples=len(hold_errs))
+
+
+#: Fraction-of-full-scale band that counts as "pinned at a clamp" -- applied
+#: after unit normalization (see ``_duty_fraction``), so it is meaningful
+#: against both a live 0-1 "duty" reading and a 0-100 "output_pct" one.
+_DUTY_CLAMP_BAND = 0.001
+
+
+def _duty_fraction(entry: Any) -> "Optional[float]":
+    """Normalize one ``duty_by_zone`` entry to a 0-1 fraction.
+
+    ``entry`` is ``{"value": ..., "unit": "fraction_0_1" | "percent_0_100"}``
+    (see ``bench_fixture_session.sample_response``'s duty extraction, which
+    records the unit explicitly rather than leaving it to be guessed here).
+    A bare number (older trace, or a test fixture that predates the unit
+    tagging) is treated as an already-normalized 0-1 fraction. Returns
+    ``None`` -- never a guess -- for anything else, including a ``None``
+    value or an unrecognized unit string.
+    """
+    if entry is None:
+        return None
+    if isinstance(entry, dict):
+        value = entry.get("value")
+        if value is None:
+            return None
+        unit = entry.get("unit", "fraction_0_1")
+        if unit == "percent_0_100":
+            return float(value) / 100.0
+        if unit == "fraction_0_1":
+            return float(value)
+        return None  # unrecognized unit -- do not guess which convention
+    try:
+        return float(entry)
+    except (TypeError, ValueError):
+        return None
+
+
+def _zone_breach_stats(trace: "list[dict]", zone: int) -> "dict[str, Any]":
+    """Diagnostic stats for one zone/channel from a partial trace -- see
+    :func:`summarize_breach` for the full contract. Split out so the same
+    logic covers both a ``--zones``-tracked zone and (per the review) the
+    channel that actually breached, even when that channel is outside
+    ``--zones``.
+    """
+    temps: "list[tuple[dict, float]]" = []
+    for row in trace:
+        chans = row.get("channels_c") or {}
+        v = chans.get(zone, chans.get(str(zone)))
+        if v is not None:
+            temps.append((row, float(v)))
+    max_c = max((v for _, v in temps), default=None)
+
+    overshoots = []
+    for row, v in temps:
+        target = row.get("target_c")
+        if target is not None:
+            overshoots.append(v - float(target))
+    peak_overshoot_c = max(overshoots) if overshoots else None
+
+    # Genuine setpoint CROSSING detection: the previous sample must have
+    # been strictly below target and the current one at-or-above it. A row
+    # where target is at/below ambient early in a run (target not yet
+    # ramped up) must not look like a crossing just because the first
+    # reading happens to be >= it -- that is the "starts already above
+    # setpoint" case, reported as its own distinct state below, never
+    # silently treated as a real crossing with whatever duty happened to be
+    # sampled alongside it.
+    prev_below: "Optional[bool]" = None
+    started_above = False
+    crossing = None  # (row, v, target) of the LAST (nearest-to-breach) crossing seen
+    have_target_data = False
+    for i, (row, v) in enumerate(temps):
+        target = row.get("target_c")
+        if target is None:
+            continue
+        have_target_data = True
+        target = float(target)
+        is_below = v < target
+        if prev_below is None:
+            started_above = not is_below
+        elif prev_below and not is_below:
+            # Overwrite on every crossing found -- the trace is in time
+            # order, so the LAST one recorded is the one nearest the
+            # eventual breach, which is what a diagnosis cares about.
+            crossing = (row, v, target)
+        prev_below = is_below
+
+    if crossing is not None:
+        setpoint_crossing = "crossed"
+        crow, _cv, _ctarget = crossing
+        duty_by_zone = crow.get("duty_by_zone") or {}
+        duty_entry = duty_by_zone.get(zone, duty_by_zone.get(str(zone)))
+        frac = _duty_fraction(duty_entry)
+        if frac is None:
+            duty_at_clamp = None
+        elif frac >= 1.0 - _DUTY_CLAMP_BAND:
+            duty_at_clamp = "full_power"
+        elif frac <= _DUTY_CLAMP_BAND:
+            duty_at_clamp = "commanded_off"
+        else:
+            duty_at_clamp = "not_at_clamp"
+    elif started_above:
+        setpoint_crossing = "started_above_setpoint"
+        duty_at_clamp = None  # no crossing to attribute a duty reading to -- not fabricated
+    elif have_target_data:
+        setpoint_crossing = "never_crossed"
+        duty_at_clamp = None
+    else:
+        # No row in this (possibly empty) trace carried a target_c for this
+        # zone at all -- nothing to say about crossing, one way or another.
+        setpoint_crossing = None
+        duty_at_clamp = None
+
+    return {
+        "max_c": max_c, "peak_overshoot_c": peak_overshoot_c,
+        "setpoint_crossing": setpoint_crossing, "duty_at_clamp": duty_at_clamp,
+    }
+
+
+def summarize_breach(trace: "list[dict]", zones: "list[int]",
+                     breach_channel: "Optional[int]" = None,
+                     breach_hottest_c: "Optional[float]" = None) -> "dict[str, Any]":
+    """Best-effort diagnostic stats computed from whatever trace rows a
+    profile-tracking stage managed to collect before it failed (a ceiling
+    breach, a raised exception, a timeout) -- called on the PARTIAL trace,
+    not a complete one. Never fabricates: every stat is ``None`` when the
+    trace is too short, or missing the field, to compute it honestly.
+
+    Per zone (every zone in ``zones``, PLUS ``breach_channel`` if it is
+    outside ``zones`` -- the ceiling trips on the hottest of ALL valid
+    channels, not just the ones this run is tracking, and a breach on an
+    untracked channel is exactly the case a diagnosis most needs to see):
+    highest temperature seen, worst overshoot above that zone's setpoint,
+    whether the measured temperature ever made a genuine crossing of the
+    setpoint (as opposed to starting above it, or never reaching it), and --
+    only when a real crossing was found -- whether duty was pinned at a
+    clamp at that moment, reported as one of ``"full_power"`` (saturated,
+    still climbing) or ``"commanded_off"`` (already told to stop, climbing
+    anyway on residual/neighbour heat) rather than a single ambiguous bool:
+    those are opposite diagnoses and must not collapse into the same value.
+
+    ``breach_channel``/``breach_hottest_c``, when known (see
+    ``BenchSessionError.channels_c``/``.hottest_c`` on the exception a real
+    ceiling breach raises), are echoed back under the ``"breach"`` key so a
+    report reader does not have to re-derive which channel actually tripped
+    the ceiling from the trace.
+    """
+    all_zones = list(dict.fromkeys(zones))  # de-duplicate, preserve order
+    if breach_channel is not None and breach_channel not in all_zones:
+        all_zones.append(breach_channel)
+    out: "dict[str, Any]" = {str(zone): _zone_breach_stats(trace, zone) for zone in all_zones}
+    out["breach"] = {"channel": breach_channel, "hottest_c": breach_hottest_c}
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -870,7 +1040,15 @@ class RunReport:
         return d
 
     def to_json(self) -> str:
-        return json.dumps(self.to_dict(), indent=2, sort_keys=False)
+        # ``allow_nan=False`` is the belt: it turns any NaN/Infinity that
+        # slips past the sanitizer below into a loud ``ValueError`` instead
+        # of a silent bare ``NaN`` token in the output, which is not valid
+        # JSON and a strict parser on the reading end rejects outright. The
+        # suspenders is ``_json_safe`` actually replacing them with ``null``
+        # first -- a trace's ``hottest_c`` is ``float("nan")`` exactly when
+        # no thermocouple channel is valid (a fault, not a rare case), so
+        # this is not a hypothetical.
+        return json.dumps(_json_safe(self.to_dict()), indent=2, sort_keys=False, allow_nan=False)
 
     def summary_text(self) -> str:
         lines = [

@@ -40,6 +40,7 @@ executor stopped and every relay reported off.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
 import time
@@ -51,6 +52,8 @@ from typing import Any, Optional
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from kilnctrl import config_presets, safety_cfg_http_client, zones_http_client  # noqa: E402
+
+log = logging.getLogger("bench_fixture_session")
 
 #: Env var naming the live board. Absent -> every live test skips, so the
 #: default `pytest` run on a laptop with no bench stays green and honest.
@@ -557,7 +560,7 @@ class BenchSession:
 
     # -- step-response sampling -------------------------------------------
     def sample_response(self, duration_s: float, period_s: float = 2.0,
-                        zone_index: int = 0) -> "list[dict]":
+                        zone_index: int = 0, on_sample=None) -> "list[dict]":
         """Poll the board for ``duration_s`` and return one row per poll.
 
         This is the PV trace a step test is actually about, taken from the
@@ -570,10 +573,38 @@ class BenchSession:
         -- the whole point of sampling during a heat-adjacent operation is to
         catch the excursion while it is happening. A breach raises, which
         puts the caller into its ``finally`` and force_all_stop().
+
+        SAFETY ORDERING (S1/S2 fix -- do not reorder this again). The
+        ceiling check runs on ``hottest`` the instant it is known, straight
+        off ``self.status()``, with NOTHING else -- no second HTTP call, no
+        callback -- between that reading and the ``raise``. Before this fix,
+        ``self.exec_status()`` (its own ~8s-timeout urlopen) ran ahead of the
+        raise: a breach on a genuinely hung board could sit ~8s with the
+        heaters still on before force_all_stop() ever got called, and if
+        exec_status() itself raised first the breach was never even
+        detected. ``exec_status()`` and ``duty_by_zone`` are only gathered,
+        and ``on_sample`` only called, for a row that is NOT the breach --
+        the trace does not need the breach row (see the docstring on
+        ``stage_profile_tracking._on_sample`` for what the caller already
+        does with the last good row plus the error message).
+
+        ``on_sample``, when given, is called with every NON-breach row.
+        Wrapped in try/except: an exception inside a caller's callback (a
+        malformed ``channels_c``, a MemoryError on a very long run) must
+        never propagate from here in place of a real ceiling breach --
+        before this fix that exact failure mode discarded the whole partial
+        trace the callback exists to preserve, no different from the bug
+        this callback was added to fix in the first place. It is logged and
+        swallowed instead.
         """
         rows: "list[dict]" = []
         deadline = time.monotonic() + duration_s
         t0 = time.monotonic()
+        #: A persistently-throwing on_sample must not flood the log once
+        #: per poll for the rest of a multi-hour run -- log the first
+        #: occurrence at full detail (so the cause is diagnosable) and every
+        #: one after that as a single-line count, not a new traceback.
+        on_sample_error_count = 0
         while True:
             status = self.status()
             # Keyed by the channel's OWN index, not by position in a filtered
@@ -585,12 +616,59 @@ class BenchSession:
                       for c in status.get("channels", []) if c.get("valid")}
             temps = list(chan_c.values())
             hottest = max(temps) if temps else float("nan")
+            # THE RAISE COMES FIRST. Nothing above this line is a second
+            # network call, and nothing below it runs before the raise.
+            # ``channels_c``/``hottest_c`` are attached to the exception --
+            # pure computation on data already in hand (chan_c came from the
+            # SAME status() response as hottest, no extra I/O), so a caller
+            # can identify which channel actually tripped the ceiling
+            # without that costing the raise any delay.
             if hottest == hottest and hottest > FIXTURE_MAX_TEMP_C:
-                raise BenchSessionError(
+                exc = BenchSessionError(
                     f"live temperature {hottest:.1f} C breached the {FIXTURE_MAX_TEMP_C} C "
                     "fixture ceiling during sampling")
+                exc.channels_c = dict(chan_c)
+                exc.hottest_c = hottest
+                raise exc
             exec_st = self.exec_status()
-            rows.append({
+            # Per-zone duty/output command, best-effort: not every firmware
+            # build's /api/profile_exec carries this yet, so it is pulled
+            # defensively and left absent (never fabricated) when it is not
+            # there. Units are normalized and recorded explicitly (S4/item 4
+            # fix) -- "duty" (a live 0-1 fraction) and "output_pct" (0-100)
+            # are NOT the same number, and a caller comparing one against a
+            # threshold meant for the other silently misjudges "at clamp".
+            #
+            # THE KEY IS "zone", NOT "index". append_zone_status_json()
+            # (firmware/KilnFW/App/drivers/dashboard_http.c:1220-1258, shared
+            # by /api/profile_exec and /api/control) emits
+            # {"zone":%u,...,"duty":%.3f,...} -- "index" is a DIFFERENT
+            # endpoint's config key (/api/zones, zones_http.c:4184/4210) and
+            # never appears here. Getting this wrong left duty_by_zone == {}
+            # on every real-hardware row, silently killing the whole
+            # full_power-vs-commanded_off diagnosis summarize_breach()
+            # exists to make (see test_real_sample_response_duty_by_zone_
+            # uses_firmware_zone_key in test_pid_validation.py for the
+            # regression proof). "duty" is already a 0-1 fraction on the
+            # wire (profile_executor.c:130 multiplies by 100 only for its
+            # OWN display-percent conversion, not the JSON value) --
+            # "fraction_0_1" is correct. Nothing in the firmware currently
+            # emits "output_pct"; that branch is dead code today, kept only
+            # in case a future/alternate build adds a percent-based field
+            # under that name.
+            duty_by_zone = {}
+            for z in (exec_st.get("zones") or status.get("zones") or []):
+                idx = z.get("zone")
+                if idx is None:
+                    continue
+                raw_duty = z.get("duty")
+                if raw_duty is not None:
+                    duty_by_zone[int(idx)] = {"value": raw_duty, "unit": "fraction_0_1"}
+                    continue
+                raw_pct = z.get("output_pct")  # dead today -- see comment above
+                if raw_pct is not None:
+                    duty_by_zone[int(idx)] = {"value": raw_pct, "unit": "percent_0_100"}
+            row = {
                 "t_s": round(time.monotonic() - t0, 2),
                 "zone_c": chan_c.get(zone_index, float("nan")),
                 # EVERY zone's reading on every sample. Free (one /api/status
@@ -609,7 +687,26 @@ class BenchSession:
                 "heat_block_sources_words": status.get("heat_block_sources_words"),
                 "exec_state": exec_st.get("state"),
                 "target_c": exec_st.get("target_c"),
-            })
+                "segment_index": exec_st.get("segment_index"),
+                "duty_by_zone": duty_by_zone,
+            }
+            rows.append(row)
+            if on_sample is not None:
+                try:
+                    on_sample(row)
+                except Exception:  # noqa: BLE001 - see docstring: never mask a real breach
+                    on_sample_error_count += 1
+                    if on_sample_error_count == 1:
+                        log.exception("on_sample callback raised -- swallowed so it cannot "
+                                      "mask or delay a ceiling breach on the next iteration")
+                    elif on_sample_error_count % 100 == 0:
+                        # Rate-limited: a callback that keeps throwing for a
+                        # multi-hour run must not write one traceback per
+                        # poll -- one full traceback up front, then a
+                        # count every 100 polls so a long-running failure
+                        # is still visible without flooding the log.
+                        log.warning("on_sample callback has now raised %d times this run "
+                                   "(suppressing individual tracebacks)", on_sample_error_count)
             if time.monotonic() >= deadline:
                 return rows
             time.sleep(period_s)
