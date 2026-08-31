@@ -484,9 +484,44 @@ AUTOTUNE_CMD_ACCEPT = 0x04
 #: START method byte.
 AUTOTUNE_METHOD_STEP = 0
 AUTOTUNE_METHOD_RELAY = 1
-#: START rule byte.
+#: START rule byte -- the ONLY two values AUTOTUNE_CMD_START's wire encoding
+#: carries a rule for (relay method; uart_bridge_ext.c's
+#: AUTOTUNE_RULE_WIRE_TL/AUTOTUNE_RULE_WIRE_ZN, uart_task_ids.h).
 AUTOTUNE_RULE_TL = 0  # Tyreus-Luyben
 AUTOTUNE_RULE_ZN = 1  # Ziegler-Nichols
+
+#: Single source of truth for every tuning-rule NAME the firmware actually
+#: knows about, mirrored from pid_autotune.h's autotune_rule_t (authoritative
+#: enum: AUTOTUNE_RULE_SIMC=0, AUTOTUNE_RULE_ZIEGLER_NICHOLS=1,
+#: AUTOTUNE_RULE_TYREUS_LUYBEN=2, AUTOTUNE_RULE_COHEN_COON=3 -- a DIFFERENT,
+#: HTTP-facing numbering than the wire bytes above) and
+#: dashboard_http.c's autotune_start_post_handler() (~line 1990-2065), which
+#: is the fullest-featured surface: relay method accepts only "tl"/"zn"
+#: (line ~2016-2031), step method accepts only "simc"/"cohen-coon" (line
+#: ~2045-2064, SIMC the default). mcp_server.py's autotune_start() keys off
+#: this dict instead of hardcoding a second, narrower copy -- that second
+#: copy (['tl', 'zn'] for every method) is exactly what let an operator
+#: never select SIMC or Cohen-Coon at all.
+#:
+#: "wire_byte": the AUTOTUNE_CMD_START rule byte this module's
+#: devices.autotune_start() should pack for the relay method (an int), OR
+#: one of two sentinels for the step method, where uart_bridge_ext.c's
+#: AUTOTUNE_CMD_START handler (~line 1108-1131) never even reads the rule
+#: byte -- it always calls autotune_engine_run() with AUTOTUNE_RULE_SIMC
+#: hardcoded:
+#:   "implicit" -- "simc": this IS what the wire step path genuinely runs
+#:     regardless of the byte sent, so it is safe to accept and start.
+#:   None -- "cohen-coon": the wire protocol has NO way to request this rule
+#:     at all (HTTP POST /api/autotune/start only); a caller must be refused
+#:     loudly here rather than silently getting a SIMC run instead of the
+#:     Cohen-Coon one they asked for. See mcp_server.autotune_start()'s
+#:     handling of each case.
+AUTOTUNE_RULES = {
+    "tl": {"methods": ("relay",), "wire_byte": AUTOTUNE_RULE_TL},
+    "zn": {"methods": ("relay",), "wire_byte": AUTOTUNE_RULE_ZN},
+    "simc": {"methods": ("step",), "wire_byte": "implicit"},
+    "cohen-coon": {"methods": ("step",), "wire_byte": None},
+}
 
 # --- WIFI subcommands (task_id = UART_TASK_ID_WIFI) --------------------------
 # Mirrors wifi_provision_http.c's GET /status, GET /scan, POST /provision,

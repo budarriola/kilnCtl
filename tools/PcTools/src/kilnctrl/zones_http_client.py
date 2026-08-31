@@ -302,6 +302,13 @@ _TOP_READONLY_OR_STRUCTURAL_KEYS = {
 
 
 def _format_scalar(key: str, value: Any, int_fields: "set[str]") -> str:
+    if value is None:
+        # A preset carrying a JSON null for a field otherwise headed for
+        # int(value)/float(value) would raise a raw TypeError that escapes
+        # every `except ZonesHttpError` handler this module's callers use --
+        # refuse it the same loud, catchable way as every other malformed
+        # value instead.
+        raise ZonesHttpError(f"field {key!r} is null -- refusing to encode a missing value")
     if key == "continue_on_zone_trip":
         return "1" if value else "0"
     if key in int_fields:
@@ -404,6 +411,85 @@ _PRESET_ZONE_OVERRIDE_FIELDS = {
     # t=62s. Also deliberately not in _REQUIRED_ZONE_FIELDS: a preset that
     # omits it still echoes the board's value back unchanged.
     "sanity_rate_c_per_min",
+    # 2026-08-31: cross_zone_max_delta_c, thermal_guard.c guard 8's
+    # cross-zone divergence limit. Found missing from this set on hardware:
+    # zones 1 and 2 ran all night with guard 8 disabled because a preset
+    # that named cross_zone_max_delta_c had the value silently dropped here
+    # -- build_post_body() still echoed the BOARD's old value back (never
+    # zeroed it, since _ZONE_FIELD_FORM_KEY's "xzone" mapping has always
+    # existed), so the POST looked identical to "success" while the field
+    # never actually changed. ZERO IS A MEANINGFUL VALUE for this field --
+    # 0.0 means the guard is DISABLED, not "no limit given" -- so it must be
+    # transmittable and must never be treated as falsy/absent by anything
+    # downstream of this set (see _PRESET_ZONE_KNOWN_IGNORED_FIELDS below
+    # for how a truly-omitted preset key is still distinguished from an
+    # explicit 0).
+    "cross_zone_max_delta_c",
+    # 2026-08-31: name/thermo_mask/tc_type/ct_mask/timing_profile/
+    # heater_min_off_ms/fuzzy_strength_pct and the whole guard_* family
+    # below were round-trippable through _ZONE_FIELD_FORM_KEY and
+    # firmware-accepted but NOT overridable by a preset -- the same silent-
+    # drop shape as cross_zone_max_delta_c above, just never hit on
+    # hardware yet. name/thermo_mask/tc_type/ct_mask are the same class as
+    # relay_mask (already overridable): per-bench hardware assignment a
+    # preset legitimately pins. heater_min_off_ms completes the
+    # heater_min_on_ms/heater_window_ms timing trio above -- same
+    # reasoning. fuzzy_strength_pct is a PID tuning knob, same class as
+    # pid_kp/ki/kd. timing_profile selects which already-echoed named
+    # profile (tp%u_*) a zone uses -- a preset naming it is picking a
+    # profile, not writing profile contents (those stay verbatim-echoed,
+    # see build_post_body()'s timing-profile loop).
+    "name", "thermo_mask", "tc_type", "ct_mask", "timing_profile", "heater_min_off_ms",
+    "fuzzy_strength_pct",
+    # guard_* family: thermal_guard.c's per-zone guard thresholds
+    # (guard 1's dead-element rate lives in sanity_rate_c_per_min above;
+    # these are guards 2-7ish -- wrong-direction, off-settle, runaway,
+    # drift, sensor-fault debounce, frozen-window). SAME INCIDENT CLASS as
+    # cross_zone_max_delta_c/guard 8: a preset naming one of these had it
+    # silently dropped, which on a bench with elements connected is a
+    # disabled safety guard exactly like the guard-8 overnight incident.
+    "guard_wrong_dir_window_s", "guard_wrong_dir_rate_c_per_min", "guard_off_settle_s",
+    "guard_runaway_rate_c_per_min", "guard_runaway_margin_c", "guard_drift_period_s",
+    "guard_sensor_fault_debounce_ticks", "guard_frozen_window_s",
+}
+
+#: Preset zone keys that are legitimately NOT overlaid by build_post_body()
+#: -- "index" locates the target zone rather than being posted as a field.
+#:
+#: k_dc/tau_s/dead_time_s (the UART/preset spelling) AND
+#: model_k_dc/model_tau_s/model_dead_time_s (the GET /api/zones /
+#: backup-export spelling of the SAME three fields -- zones_get_handler()
+#: emits them as "model_k_dc" etc, see _ZONE_FIELD_FORM_KEY's "k"/"tau"/
+#: "deadtime" mapping) are BOTH listed here on purpose: config_presets.py's
+#: apply_preset() (lines 341-344) already writes these three over the UART
+#: CONTROL link before ever calling apply_zone_preset(), so they are not
+#: lost -- do not "fix" this by moving them to _PRESET_ZONE_OVERRIDE_FIELDS.
+#: A preset hand-authored against the UART-facing schema uses k_dc/tau_s/
+#: dead_time_s; a preset built by copying a board GET or a backup export
+#: (the most natural way to author one) carries model_k_dc/model_tau_s/
+#: model_dead_time_s instead -- both spellings must be tolerated or the
+#: latter raises ZonesHttpUnknownFieldError on the operator's own preset.
+#:
+#: settings_source is a zone-to-zone settings-inheritance pointer (0xFF ==
+#: custom, or another zone's index) rather than a tunable value -- letting a
+#: preset set it would silently redirect one zone onto another zone's LIVE
+#: config instead of the values the preset itself names, which is a worse
+#: surprise than the field being merely absent. Deliberately excluded from
+#: _PRESET_ZONE_OVERRIDE_FIELDS; a preset that needs to change it should go
+#: through a tool that makes that redirection explicit, not this overlay.
+#:
+#: Any OTHER preset zone key is not "known to be out of scope" -- it is a
+#: field this module has never heard of, and the old behavior (silently
+#: falling through the `if key in _PRESET_ZONE_OVERRIDE_FIELDS` check) is
+#: exactly the "consumer without producer" bug this set exists to catch:
+#: build_post_body() now raises ZonesHttpUnknownFieldError for anything that
+#: lands in neither set, instead of quietly discarding it. See
+#: build_post_body()'s zone-merge loop.
+_PRESET_ZONE_KNOWN_IGNORED_FIELDS = {
+    "index",
+    "k_dc", "tau_s", "dead_time_s",
+    "model_k_dc", "model_tau_s", "model_dead_time_s",
+    "settings_source",
 }
 
 
@@ -478,6 +564,13 @@ def build_post_body(current: dict, preset: dict) -> str:
             for key, value in override.items():
                 if key in _PRESET_ZONE_OVERRIDE_FIELDS:
                     merged[key] = value
+                elif key not in _PRESET_ZONE_KNOWN_IGNORED_FIELDS:
+                    raise ZonesHttpUnknownFieldError(
+                        f"zone {idx}: preset field {key!r} is not in "
+                        "_PRESET_ZONE_OVERRIDE_FIELDS or _PRESET_ZONE_KNOWN_IGNORED_FIELDS "
+                        "-- refusing to silently drop it from the POST (see this module's "
+                        "docstring and the cross_zone_max_delta_c incident noted on "
+                        "_PRESET_ZONE_OVERRIDE_FIELDS)")
         fields.update(_encode_zone(idx, merged))
 
     return urllib.parse.urlencode(fields)

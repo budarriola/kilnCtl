@@ -3073,24 +3073,64 @@ def autotune_start(
     step_duty_or_setpoint_c: float,
     relay_d: float = -1.0,
     relay_h_c: float = -1.0,
-    rule: str = "tl",
+    rule: str = "",
 ) -> str:
     """Start autotune on a zone.
 
-    ``method`` is "step" or "relay"; ``rule`` (relay method only) is "tl"
-    (Tyreus-Luyben) or "zn" (Ziegler-Nichols). For the step method,
+    ``method`` is "step" or "relay". ``rule`` selects the tuning rule from
+    the full set the firmware defines (pid_autotune.h's autotune_rule_t,
+    mirrored in devices.AUTOTUNE_RULES -- the single source of truth this
+    tool and devices.autotune_start() both key off): "tl" (Tyreus-Luyben) or
+    "zn" (Ziegler-Nichols) on the relay method, "simc" (the default) or
+    "cohen-coon" on the step method. For the step method,
     ``step_duty_or_setpoint_c`` is the duty step (0..1); for the relay method
     it is the target setpoint in degC, and ``relay_d``/``relay_h_c`` (duty
     amplitude / hysteresis band) must also be given.
+
+    ``rule`` left empty (the default) resolves per method -- "simc" for
+    step, "tl" for relay -- so the most common call, autotune_start(zone,
+    "step", duty), keeps working without the caller having to know a rule
+    name at all. This mirrors dashboard_http.c's own defaulting (SIMC is
+    the step path's default, Tyreus-Luyben the relay path's -- see
+    autotune_start_post_handler()'s comments ~line 2021-2054).
+
+    Note: "cohen-coon" is a real firmware rule (dashboard_http.c's HTTP
+    POST /api/autotune/start accepts it on the step path) but the
+    UART_TASK_ID_AUTOTUNE wire protocol this tool actually talks over has no
+    rule byte for the step method yet (uart_bridge_ext.c always runs SIMC on
+    that path, see devices.AUTOTUNE_RULES' wire_byte=None docstring) -- so
+    it is refused here with an explicit error rather than silently starting
+    a SIMC run while telling the caller Cohen-Coon was selected.
     """
     method_map = {"step": devices.AUTOTUNE_METHOD_STEP, "relay": devices.AUTOTUNE_METHOD_RELAY}
-    rule_map = {"tl": devices.AUTOTUNE_RULE_TL, "zn": devices.AUTOTUNE_RULE_ZN}
-    method_val = method_map.get(method.strip().lower())
-    rule_val = rule_map.get(rule.strip().lower())
+    #: dashboard_http.c's own per-method defaults (see the docstring above) --
+    #: keeps the common no-rule-given call working for either method instead
+    #: of forcing every step caller to know that "tl" (a relay-only rule) is
+    #: not it.
+    _DEFAULT_RULE_BY_METHOD = {"step": "simc", "relay": "tl"}
+    method_key = method.strip().lower()
+    rule_key = rule.strip().lower() or _DEFAULT_RULE_BY_METHOD.get(method_key, "")
+    method_val = method_map.get(method_key)
     if method_val is None:
         return f"error: method must be one of {sorted(method_map)}, got {method!r}"
-    if rule_val is None:
-        return f"error: rule must be one of {sorted(rule_map)}, got {rule!r}"
+    rule_info = devices.AUTOTUNE_RULES.get(rule_key)
+    if rule_info is None:
+        return f"error: rule must be one of {sorted(devices.AUTOTUNE_RULES)}, got {rule_key!r}"
+    if method_key not in rule_info["methods"]:
+        return (f"error: rule {rule_key!r} is not valid for method {method!r} -- it applies to "
+                f"{sorted(rule_info['methods'])} only (see devices.AUTOTUNE_RULES)")
+    wire_byte = rule_info["wire_byte"]
+    if wire_byte is None:
+        return (f"error: rule {rule_key!r} is defined by the firmware but has no encoding on the "
+                "UART_TASK_ID_AUTOTUNE wire protocol this tool uses (uart_bridge_ext.c's "
+                "AUTOTUNE_CMD_START handler always runs SIMC for method=step) -- refusing to "
+                "silently start a different rule than requested; use the board's HTTP "
+                "POST /api/autotune/start if this rule is needed")
+    # "implicit" (simc on the step method): the wire protocol has no rule
+    # byte for this method at all -- the firmware runs SIMC regardless of
+    # what is sent -- so any placeholder value round-trips correctly; 0 is
+    # as good as any other.
+    rule_val = 0 if wire_byte == "implicit" else wire_byte
     try:
         ok, err = _autotune.start(zone, method_val, step_duty_or_setpoint_c, relay_d, relay_h_c, rule_val)
     except AutotuneQueryError as exc:

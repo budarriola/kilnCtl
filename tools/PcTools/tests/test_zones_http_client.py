@@ -321,6 +321,216 @@ class BuildPostBodyTest(unittest.TestCase):
             zh.build_post_body(current, {"name": "p", "zones": []})
         self.assertIn("totally_unmapped_field_xyz", str(ctx.exception))
 
+    # ---- cross_zone_max_delta_c overlay (guard 8 disabled-overnight bug) ----
+
+    def test_preset_overlay_carries_cross_zone_max_delta_c(self):
+        """DEFECT 1: a preset naming cross_zone_max_delta_c must actually
+        change the value in the POST body, not just get echoed from the
+        live GET. Board default is 0.0 (disabled); preset sets guard 8's
+        real limit."""
+        current = _sample_get_response()
+        current["zones"][1]["cross_zone_max_delta_c"] = 0.0
+        preset = {"name": "p", "zones": [{"index": 1, "cross_zone_max_delta_c": 15.0}]}
+        form = _decode_body(zh.build_post_body(current, preset))
+        self.assertEqual(form["z1_xzone"], repr(15.0))
+
+    def test_preset_overlay_carries_cross_zone_max_delta_c_ZERO_BREAK_PROOF(self):
+        """cross_zone_max_delta_c == 0 means guard 8 is DISABLED -- a
+        meaningful value, not "absent." A preset explicitly setting it to
+        0.0 (disabling the guard on purpose) must still land in the POST as
+        an explicit 0.0, and must not be treated as falsy/omitted by the
+        overlay logic. Start the board at a NONZERO live value so a naive
+        `if value:` truthiness check overlaying the preset would leave the
+        old nonzero value in place instead of writing the 0."""
+        current = _sample_get_response()
+        current["zones"][1]["cross_zone_max_delta_c"] = 25.0
+        preset = {"name": "p", "zones": [{"index": 1, "cross_zone_max_delta_c": 0.0}]}
+        form = _decode_body(zh.build_post_body(current, preset))
+        self.assertEqual(form["z1_xzone"], repr(0.0))
+
+    def test_preset_overlay_cross_zone_max_delta_c_NEGATIVE(self):
+        """NEGATIVE TEST proving the above tests actually catch the bug:
+        with cross_zone_max_delta_c removed from
+        _PRESET_ZONE_OVERRIDE_FIELDS (simulating the original defect), the
+        preset's value must NOT reach the POST body -- the stale live value
+        is echoed instead."""
+        current = _sample_get_response()
+        current["zones"][1]["cross_zone_max_delta_c"] = 25.0
+        preset = {"name": "p", "zones": [{"index": 1, "cross_zone_max_delta_c": 0.0}]}
+        with unittest.mock.patch.object(
+                zh, "_PRESET_ZONE_OVERRIDE_FIELDS",
+                zh._PRESET_ZONE_OVERRIDE_FIELDS - {"cross_zone_max_delta_c"}):
+            with unittest.mock.patch.object(
+                    zh, "_PRESET_ZONE_KNOWN_IGNORED_FIELDS",
+                    zh._PRESET_ZONE_KNOWN_IGNORED_FIELDS | {"cross_zone_max_delta_c"}):
+                form = _decode_body(zh.build_post_body(current, preset))
+        # Bug reproduced: the preset's 0.0 never arrived, stale 25.0 echoed.
+        self.assertEqual(form["z1_xzone"], repr(25.0))
+
+    def test_unmappable_preset_zone_key_raises_loudly(self):
+        """A preset zone key that is neither a known override field nor a
+        known-ignored field (index/k_dc/tau_s/dead_time_s) must fail loudly
+        rather than being silently dropped -- the same "consumer without
+        producer" pattern cross_zone_max_delta_c fell into."""
+        current = _sample_get_response()
+        preset = {"name": "p", "zones": [{"index": 1, "totally_unknown_preset_key": 3.0}]}
+        with self.assertRaises(zh.ZonesHttpUnknownFieldError) as ctx:
+            zh.build_post_body(current, preset)
+        self.assertIn("totally_unknown_preset_key", str(ctx.exception))
+
+    def test_unmappable_preset_zone_key_NEGATIVE(self):
+        """NEGATIVE TEST: with the unmappable key added to the ignored set
+        (simulating the pre-fix behavior of silently falling through),
+        build_post_body() must NOT raise and must NOT carry the value --
+        proving the loud-failure test above actually distinguishes fixed
+        from unfixed behavior."""
+        current = _sample_get_response()
+        preset = {"name": "p", "zones": [{"index": 1, "totally_unknown_preset_key": 3.0}]}
+        with unittest.mock.patch.object(
+                zh, "_PRESET_ZONE_KNOWN_IGNORED_FIELDS",
+                zh._PRESET_ZONE_KNOWN_IGNORED_FIELDS | {"totally_unknown_preset_key"}):
+            form = _decode_body(zh.build_post_body(current, preset))  # must not raise
+        self.assertNotIn("z1_totally_unknown_preset_key", form)
+
+    # ---- model_* spellings (board-read/backup-export presets) ----
+
+    def test_model_kdc_tau_deadtime_spellings_are_ignored_not_raised(self):
+        """A preset built by copying a board GET or a backup export --
+        the most natural way to author one -- carries model_k_dc/
+        model_tau_s/model_dead_time_s (GET /api/zones's own spelling), not
+        the short k_dc/tau_s/dead_time_s the UART-facing schema uses. Both
+        spellings name fields config_presets.apply_preset() already writes
+        over the UART CONTROL link separately, so build_post_body() must
+        ignore either spelling, never raise on it."""
+        current = _sample_get_response()
+        # Live board value stays 0.0 (config_presets.apply_preset() writes
+        # k_dc/tau_s/dead_time_s over UART separately, not through this
+        # HTTP overlay) -- the preset's attempted 1.5/120.0/8.0 must be
+        # ignored, not raised on and not applied.
+        preset = {"name": "p", "zones": [{
+            "index": 1, "model_k_dc": 1.5, "model_tau_s": 120.0, "model_dead_time_s": 8.0,
+        }]}
+        form = _decode_body(zh.build_post_body(current, preset))  # must not raise
+        self.assertEqual(form["z1_k"], repr(0.0))
+        self.assertEqual(form["z1_tau"], repr(0.0))
+        self.assertEqual(form["z1_deadtime"], repr(0.0))
+
+    def test_model_kdc_spelling_NEGATIVE(self):
+        """NEGATIVE TEST: with model_k_dc removed from the ignored set
+        (simulating the pre-fix, short-spelling-only set), a board-read-
+        derived preset carrying model_k_dc must raise -- reproducing the
+        "loud failure on the user's own preset" regression this fix
+        addresses."""
+        current = _sample_get_response()
+        preset = {"name": "p", "zones": [{"index": 1, "model_k_dc": 1.5}]}
+        with unittest.mock.patch.object(
+                zh, "_PRESET_ZONE_KNOWN_IGNORED_FIELDS",
+                zh._PRESET_ZONE_KNOWN_IGNORED_FIELDS - {"model_k_dc"}):
+            with self.assertRaises(zh.ZonesHttpUnknownFieldError):
+                zh.build_post_body(current, preset)
+
+    # ---- settings_source stays ignored (topology pointer, not a value) ----
+
+    def test_settings_source_in_preset_is_ignored_not_raised(self):
+        current = _sample_get_response()
+        preset = {"name": "p", "zones": [{"index": 1, "settings_source": 2}]}
+        form = _decode_body(zh.build_post_body(current, preset))  # must not raise
+        # Board's own live settings_source (0xFF) is still echoed, untouched
+        # by the preset's attempted override.
+        self.assertEqual(form["z1_settings_source"], "255")
+
+    # ---- guard_* family overlay (guard 8 incident class) ----
+
+    def test_preset_overlay_carries_every_guard_family_field(self):
+        """The guard_* family (thermal_guard.c's per-zone threshold set)
+        is the SAME incident class as cross_zone_max_delta_c/guard 8: round-
+        trippable, firmware-accepted, but previously not preset-overridable.
+        Prove every one of them actually lands in the POST body when a
+        preset names it."""
+        current = _sample_get_response()
+        overrides = {
+            "guard_wrong_dir_window_s": 30.0,
+            "guard_wrong_dir_rate_c_per_min": 5.0,
+            "guard_off_settle_s": 12.0,
+            "guard_runaway_rate_c_per_min": 40.0,
+            "guard_runaway_margin_c": 15.0,
+            "guard_drift_period_s": 300.0,
+            "guard_sensor_fault_debounce_ticks": 3.0,
+            "guard_frozen_window_s": 600.0,
+        }
+        preset = {"name": "p", "zones": [dict(index=1, **overrides)]}
+        form = _decode_body(zh.build_post_body(current, preset))
+        expected_suffix = {
+            "guard_wrong_dir_window_s": "wrongdirwindow",
+            "guard_wrong_dir_rate_c_per_min": "wrongdirrate",
+            "guard_off_settle_s": "offsettle",
+            "guard_runaway_rate_c_per_min": "runawayrate",
+            "guard_runaway_margin_c": "runawaymargin",
+            "guard_drift_period_s": "driftperiod",
+            "guard_sensor_fault_debounce_ticks": "debounce",
+            "guard_frozen_window_s": "frozenwindow",
+        }
+        for key, value in overrides.items():
+            suffix = expected_suffix[key]
+            self.assertEqual(form[f"z1_{suffix}"], repr(value), f"field {key!r} did not overlay")
+
+    def test_preset_overlay_carries_guard_family_NEGATIVE(self):
+        """NEGATIVE TEST: with the guard_* family stripped from
+        _PRESET_ZONE_OVERRIDE_FIELDS (simulating the pre-fix set), the
+        preset's guard_runaway_margin_c must NOT reach the POST body -- the
+        stale board value is echoed instead, reproducing the "guard
+        threshold a preset names but cannot write" defect."""
+        current = _sample_get_response()
+        current["zones"][1]["guard_runaway_margin_c"] = 999.0
+        preset = {"name": "p", "zones": [{"index": 1, "guard_runaway_margin_c": 15.0}]}
+        stripped = zh._PRESET_ZONE_OVERRIDE_FIELDS - {
+            "guard_wrong_dir_window_s", "guard_wrong_dir_rate_c_per_min", "guard_off_settle_s",
+            "guard_runaway_rate_c_per_min", "guard_runaway_margin_c", "guard_drift_period_s",
+            "guard_sensor_fault_debounce_ticks", "guard_frozen_window_s",
+        }
+        with unittest.mock.patch.object(zh, "_PRESET_ZONE_OVERRIDE_FIELDS", stripped):
+            with unittest.mock.patch.object(
+                    zh, "_PRESET_ZONE_KNOWN_IGNORED_FIELDS",
+                    zh._PRESET_ZONE_KNOWN_IGNORED_FIELDS | {"guard_runaway_margin_c"}):
+                form = _decode_body(zh.build_post_body(current, preset))
+        self.assertEqual(form["z1_runawaymargin"], repr(999.0))  # stale value, preset's 15.0 dropped
+
+    # ---- name/thermo_mask/tc_type/ct_mask/timing_profile/heater_min_off_ms/
+    # fuzzy_strength_pct overlay ----
+
+    def test_preset_overlay_carries_remaining_previously_dropped_fields(self):
+        current = _sample_get_response()
+        preset = {"name": "p", "zones": [{
+            "index": 1, "name": "top zone", "thermo_mask": 0b100, "tc_type": 5,
+            "ct_mask": 0b10, "timing_profile": 0, "heater_min_off_ms": 5000.0,
+            "fuzzy_strength_pct": 40.0,
+        }]}
+        form = _decode_body(zh.build_post_body(current, preset))
+        self.assertEqual(form["z1_name"], "top zone")
+        self.assertEqual(form["z1_thermo_mask"], "4")
+        self.assertEqual(form["z1_tctype"], "5")
+        self.assertEqual(form["z1_ct_mask"], "2")
+        self.assertEqual(form["z1_timingprofile"], "0")
+        self.assertEqual(form["z1_minoff"], repr(5000.0))
+        self.assertEqual(form["z1_fuzzy_strength"], repr(40.0))
+
+    # ---- null-valued field (item 6): loud ZonesHttpError, not a raw crash ----
+
+    def test_null_float_field_raises_ZonesHttpError_not_TypeError(self):
+        current = _sample_get_response()
+        current["zones"][0]["max_temp_c"] = None
+        with self.assertRaises(zh.ZonesHttpError):
+            zh.build_post_body(current, {"name": "p", "zones": []})
+
+    def test_null_float_field_NEGATIVE(self):
+        """NEGATIVE TEST: without the None guard in _format_scalar(), the
+        same input raises a raw TypeError instead of ZonesHttpError -- which
+        escapes every `except zones_http_client.ZonesHttpError` handler this
+        module's callers use. Reproduced here by calling the float()
+        conversion the old code path used directly."""
+        with self.assertRaises(TypeError):
+            repr(float(None))
+
 
 class PostZonesTest(unittest.TestCase):
     def test_sends_form_encoded_body_and_returns_ok_text(self):
