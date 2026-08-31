@@ -68,6 +68,17 @@ void test_stub_zones_set_max_ramp(uint8_t zone_index, bool answers, float c_per_
 
 #undef asm
 
+// The shared settings_source chain-walk (zones_http.h's
+// zones_config_settings_source_import_has_cycle() is backed by this same
+// code in zones_http.c) -- included AFTER backup_http.c so the MAX31856.h/
+// zones_http.h types it needs are already in scope from that file's own
+// #include chain, same convention as everything else in this stub section.
+// The stub below calls this directly instead of re-implementing the walk,
+// so a break in the SHIPPED algorithm (zones_http.c's real
+// zone_settings_source_chain.h use) shows up here too -- see this header's
+// own comment for why that gap existed before today.
+#include "../drivers/zone_settings_source_chain.h"
+
 // ---- Embedded-page symbols backup_page_get_handler() references ----------
 // Never actually sent by these tests (that handler is never called), but
 // must exist for the linker.
@@ -711,9 +722,48 @@ bool zones_config_set_coupling_cell(uint8_t zone_index, uint8_t neighbor_index, 
     g_total_write_calls++;
     return true;
 }
+/* Faithful to zones_http.c's real (checked) zones_config_set_settings_source():
+ * bounds, self-reference, AND the chain-walk against the LIVE (s_writes[])
+ * config via the same shared zone_settings_source_chain_has_cycle() the real
+ * setter uses -- not just bounds/self-reference like the sibling _unchecked
+ * stub below. This is deliberately the STRICTER of the two doors: it exists
+ * so a break-proof (or a future regression) that makes backup_http.c's
+ * commit loop call this checked door instead of the _unchecked one shows up
+ * as a real, chain-walk-driven refusal here too, the same way it would on
+ * real hardware -- not silently pass because this stub used to write
+ * unconditionally. */
 bool zones_config_set_settings_source(uint8_t zone_index, uint8_t settings_source)
 {
     if (zone_index >= STUB_ZONE_COUNT) return false;
+    if (settings_source != ZONE_SETTINGS_SOURCE_CUSTOM && settings_source >= MAX31856_CHANNEL_COUNT) return false;
+    if (settings_source == zone_index) return false;
+    uint8_t probe[STUB_ZONE_COUNT];
+    for (uint8_t i = 0; i < STUB_ZONE_COUNT; i++) {
+        probe[i] = s_writes[i].settings_source;
+    }
+    probe[zone_index] = settings_source;
+    uint8_t thermo_count = zones_config_get_thermo_count();
+    if (zone_settings_source_chain_has_cycle(probe, zone_index, thermo_count)) return false;
+    s_writes[zone_index].set_settings_source_called = true;
+    s_writes[zone_index].settings_source = settings_source;
+    g_total_write_calls++;
+    return true;
+}
+/* Stub for zones_http.c's real zones_config_set_settings_source_unchecked()
+ * (zones_http.h) -- backup_http.c's pass-2 commit loop calls THIS, not the
+ * checked setter above, precisely BECAUSE it must not fail once pass 1 (the
+ * zones_config_settings_source_import_has_cycle() call earlier in this same
+ * commit loop) has already accepted the full proposed set: see
+ * backup_http.c's comment on this call site for the concrete
+ * half-applied-restore scenario the checked setter used to hit. Mirrors the
+ * real function's semantics exactly -- bounds and self-reference only, no
+ * chain-walk against s_writes[] -- so a test that removes/weakens the real
+ * check would show up here as well if this stub regressed to match. */
+bool zones_config_set_settings_source_unchecked(uint8_t zone_index, uint8_t settings_source)
+{
+    if (zone_index >= STUB_ZONE_COUNT) return false;
+    if (settings_source != ZONE_SETTINGS_SOURCE_CUSTOM && settings_source >= MAX31856_CHANNEL_COUNT) return false;
+    if (settings_source == zone_index) return false;
     s_writes[zone_index].set_settings_source_called = true;
     s_writes[zone_index].settings_source = settings_source;
     g_total_write_calls++;
@@ -721,53 +771,26 @@ bool zones_config_set_settings_source(uint8_t zone_index, uint8_t settings_sourc
 }
 /* Stub for zones_http.c's real zones_config_settings_source_import_has_cycle()
  * (zones_http.h) -- backup_http.c's pass-1 cross-entry cycle check calls
- * this. Same bounded chain-walk the real implementation runs, against this
- * file's own s_writes[] stub state (merged with the caller's proposed
- * overrides) instead of s_zones.cfg, and bounded by
- * zones_config_get_thermo_count() the same "unused trailing slot" way the
- * real one is -- see that function's own header comment for why the bound
- * matters (an unconfigured slot's settings_source == 0 is real data, not a
- * "not set" marker, and must not be walked as if it were a deliberate
- * link). */
+ * this. Used to be a hand-maintained re-implementation of the chain-walk
+ * (found by 2026-08-31 opus review: it could drift from, or simply be wrong
+ * relative to, the shipped algorithm with nothing here noticing -- both
+ * backup-import cycle tests passed identically with the shipped check
+ * deleted). Now calls zone_settings_source_chain_import_has_cycle() from
+ * zone_settings_source_chain.h, the SAME shared code zones_http.c's real
+ * implementation calls -- this stub's only remaining job is adapting this
+ * file's own s_writes[]/zones_config_get_thermo_count() state into that
+ * shared function's plain-array calling convention. */
 bool zones_config_settings_source_import_has_cycle(const bool has_override[MAX31856_CHANNEL_COUNT],
                                                     const uint8_t override_source[MAX31856_CHANNEL_COUNT],
                                                     uint8_t *out_cycle_zone)
 {
     uint8_t chain[STUB_ZONE_COUNT];
     for (uint8_t i = 0; i < STUB_ZONE_COUNT; i++) {
-        chain[i] = has_override[i] ? override_source[i] : s_writes[i].settings_source;
+        chain[i] = s_writes[i].settings_source;
     }
     uint8_t thermo_count = zones_config_get_thermo_count();
-    if (thermo_count > STUB_ZONE_COUNT) {
-        thermo_count = STUB_ZONE_COUNT;
-    }
-    for (uint8_t start = 0; start < thermo_count; start++) {
-        bool visited[STUB_ZONE_COUNT] = {0};
-        visited[start] = true;
-        uint8_t cur = start;
-        bool terminated = false; /* hit CUSTOM or an out-of-range/unused link -- no cycle */
-        bool cycle = true;       /* default: hop cap exceeded without terminating */
-        for (uint8_t hop = 0; hop < STUB_ZONE_COUNT; hop++) {
-            uint8_t src = chain[cur];
-            if (src == ZONE_SETTINGS_SOURCE_CUSTOM || src >= thermo_count) {
-                terminated = true;
-                cycle = false;
-                break;
-            }
-            if (visited[src]) {
-                cycle = true;
-                break;
-            }
-            visited[src] = true;
-            cur = src;
-        }
-        (void)terminated;
-        if (cycle) {
-            if (out_cycle_zone) *out_cycle_zone = start;
-            return true;
-        }
-    }
-    return false;
+    return zone_settings_source_chain_import_has_cycle(chain, has_override, override_source, thermo_count,
+                                                        out_cycle_zone);
 }
 
 bool zones_config_set_safety_tc_type(uint8_t tc_type)
@@ -1351,6 +1374,61 @@ static void test_settings_source_cross_entry_legal_chain_still_imports(void)
               "zone 1's link committed as Custom");
 }
 
+// The BLOCKING defect from the 2026-08-31 opus review of commit b69b74a:
+// pass 1 (the cross-entry check exercised above) only ever validated the
+// FINAL assembled state, but pass 2 used to commit settings_source one zone
+// at a time through the CHECKED setter, which chain-walks against the
+// PARTIALLY APPLIED live config while the commit loop is still mid-flight --
+// a state pass 1 never sees and never validates. Concrete, ordinary
+// scenario -- restoring a valid backup (exported from a properly-configured
+// board, so its own settings_source set is internally acyclic) onto a
+// DIFFERENTLY-configured live board:
+//   Live:   zone 0 = Custom, zone 1 -> 0
+//   Backup: zone 0 -> 1, zone 1 -> Custom (export emits in index order, so
+//           entry order here is 0 then 1, same as the real exporter)
+// Pass 1 probes the FINAL state {0->1, 1->Custom} together -- acyclic,
+// accepted. Committing entry 0 first with the OLD checked setter walks the
+// then-live {0->1, 1->0} -- a genuine cycle -- and refuses, AFTER zone 0's
+// other fields (pid_kp here, standing in for name/PID/masks/cal/ramp/limits/
+// heater cfg/coupling cells in the real handler) were already committed this
+// same pass. This is the test the fix's own commit-loop comment in
+// backup_http.c cites by name.
+static void test_settings_source_restore_onto_differently_configured_board_succeeds(void)
+{
+    TEST_SECTION("backup_import_apply -- BLOCKING FIX: restoring a valid (acyclic) backup onto a "
+                 "live board whose CURRENT settings_source links differ succeeds end-to-end, nothing "
+                 "half-applied, even though committing entry-by-entry against the live config would "
+                 "transiently cycle");
+    reset_stub_state();
+    // Seed the live (stub) config to zone 0 = Custom, zone 1 -> 0 -- the
+    // "differently configured board" the backup is being restored onto.
+    TEST_CHECK(zones_config_set_settings_source(1, 0), "live seed: zone 1 -> zone 0");
+    uint8_t seeded = 0xAA;
+    TEST_CHECK(zones_config_get_settings_source(0, &seeded) && seeded == ZONE_SETTINGS_SOURCE_CUSTOM,
+              "live seed: zone 0 is Custom");
+    g_total_write_calls = 0; // only count what the import itself does
+
+    const char *body =
+        "{\"kind\":\"kilnctl_backup\",\"version\":3,\"profiles\":[],"
+        "\"zones\":["
+        "{\"index\":0,\"pid_kp\":1,\"pid_ki\":0,\"pid_kd\":0,\"settings_source\":1},"
+        "{\"index\":1,\"pid_kp\":1,\"pid_ki\":0,\"pid_kd\":0,\"settings_source\":255}]}";
+    char err[160];
+    bool ok = backup_import_apply(body, err, sizeof(err));
+
+    TEST_CHECK(ok, "the restore succeeds end-to-end -- pass 1 already proved the FINAL state "
+              "(0->1, 1->Custom) is acyclic, so pass 2 must not be able to fail committing it one "
+              "entry at a time against the old live state");
+    uint8_t s0 = 0xAA, s1 = 0xAA;
+    TEST_CHECK(zones_config_get_settings_source(0, &s0) && s0 == 1,
+              "zone 0's settings_source landed as the backup's value (1), not left at the refused "
+              "intermediate state");
+    TEST_CHECK(zones_config_get_settings_source(1, &s1) && s1 == ZONE_SETTINGS_SOURCE_CUSTOM,
+              "zone 1's settings_source landed as the backup's value (Custom) too -- nothing half-applied");
+    TEST_CHECK(s_writes[0].set_settings_source_called && s_writes[1].set_settings_source_called,
+              "both entries' settings_source were actually committed, not just accepted on paper");
+}
+
 // ---------------------------------------------------------------------------
 // Export coverage (PID_EXPANSION_PLAN.md line ~715): backup_export_get_
 // handler() was completely untested before this -- a silent no-op or a
@@ -1573,6 +1651,7 @@ void run_test_backup_import(void)
     test_v3_settings_source_self_reference_rejected();
     test_settings_source_cross_entry_cycle_rejected_before_any_commit();
     test_settings_source_cross_entry_legal_chain_still_imports();
+    test_settings_source_restore_onto_differently_configured_board_succeeds();
 
     test_export_emits_expected_keys_and_values_for_a_known_config();
     test_export_round_trips_through_import_to_identical_config();

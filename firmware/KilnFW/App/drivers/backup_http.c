@@ -1467,8 +1467,29 @@ static bool backup_import_apply(const char *body, char *err_msg, size_t err_cap)
         /* No has_* guard -- zc->settings_source is ALWAYS a real value (either
          * the imported one, or the ZONE_SETTINGS_SOURCE_CUSTOM default seeded
          * in pass 1), and always committed, matching the "older backup must
-         * default this to CUSTOM, never 0" brief. */
-        if (!zones_config_set_settings_source(zc->index, zc->settings_source)) {
+         * default this to CUSTOM, never 0" brief.
+         *
+         * Uses the _unchecked commit-loop variant, not
+         * zones_config_set_settings_source(): that setter chain-walks
+         * settings_source against the LIVE config, which here is only
+         * PARTIALLY applied mid-loop (earlier entries in this same loop
+         * already committed, later ones haven't yet) -- an ordinary restore
+         * onto a differently-configured board can walk straight into a
+         * cycle that only exists in that half-applied intermediate state
+         * even though the pass-1 cross-entry check above (which validates
+         * the FINAL assembled state) already accepted this exact import.
+         * Concretely: live zone 0=Custom, zone 1->0; backup (from a valid
+         * board) wants zone 0->1, zone 1->Custom. Pass 1 probes {0->1,
+         * 1->Custom} together -- acyclic, accepted. But committing entry 0
+         * first with the CHECKED setter walks live {0->1, 1->0} -- a cycle
+         * -- and refuses, after zone 0's name/PID/masks/cal/ramp/limits/
+         * heater cfg/coupling cells above were already written this same
+         * pass. Pass 1 already proved the end state is acyclic; this commit
+         * loop must not be able to fail on a state pass 1 accepted, so pass
+         * 2 re-checks only bounds/self-reference (still real defenses
+         * against a corrupt override_source) and skips the live-config
+         * chain-walk entirely. */
+        if (!zones_config_set_settings_source_unchecked(zc->index, zc->settings_source)) {
             snprintf(err_msg, err_cap,
                     "zone tuning entry %u (channel %u) rejected at commit setting settings_source",
                     (unsigned)i, zc->index);

@@ -630,6 +630,24 @@ bool zones_config_get_settings_source(uint8_t zone_index, uint8_t *out_settings_
  * zones_config_settings_source_import_has_cycle() for that case. */
 bool zones_config_set_settings_source(uint8_t zone_index, uint8_t settings_source);
 
+/* Commit-loop counterpart to the setter above for a multi-entry import/
+ * whole-page write that has ALREADY passed
+ * zones_config_settings_source_import_has_cycle() against the full proposed
+ * set (see that function's comment). Re-checks only bounds and
+ * self-reference -- deliberately OMITS the chain-walk
+ * zones_config_set_settings_source() runs against the live config, because
+ * during a multi-entry commit loop the live config is PARTIALLY APPLIED and
+ * that walk can refuse an intermediate state even though pass 1 already
+ * proved the final assembled state is acyclic (e.g. swapping live 0->1,1->0
+ * to 0->2,1->CUSTOM one entry at a time). Callers MUST have already run
+ * zones_config_settings_source_import_has_cycle() over every candidate in
+ * this commit loop -- this function trusts that check instead of repeating
+ * it, which is what makes it safe to call in a "pass 2 must not be able to
+ * fail" commit loop. Do not call this for a single ad-hoc write outside such
+ * a loop -- use zones_config_set_settings_source() for that, which protects
+ * itself. */
+bool zones_config_set_settings_source_unchecked(uint8_t zone_index, uint8_t settings_source);
+
 /* Cross-entry pass-1 check for a multi-zone import/whole-page write:
  * `has_override[z]` true means zone z's proposed NEW settings_source is
  * `override_source[z]`; false means zone z keeps its current LIVE value.

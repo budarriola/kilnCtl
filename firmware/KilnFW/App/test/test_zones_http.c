@@ -1024,6 +1024,149 @@ static void test_nvs_load_from_pre_existing_cycle_normalizes_not_wipes(void)
     nvs_test_clear();
 }
 
+// normalize_settings_source_cycles() non-blocking finding (opus review of
+// commit b69b74a): a zone that merely LEADS INTO a cycle (its own chain is
+// fine, it just happens to walk into one) must be left untouched -- only the
+// zone(s) actually ON the cycle may be collapsed to Custom. An earlier
+// version of this function walked start-to-finish in index order and reset
+// `start`'s own link whenever ITS walk hit a cycle, which is index-order
+// dependent: with a stored 1<->2 cycle and zone 0 -> 1 merely leading into
+// it, scanning from i=0 would hit the cycle via zone 0's own walk and reset
+// zone 0's OWN (innocent, non-cyclic) link first, even though breaking 1<->2
+// alone would have sufficed. This test seeds exactly that shape and proves
+// zone 0's link survives.
+static void test_nvs_load_from_cycle_normalization_does_not_touch_lead_in_zone(void)
+{
+    TEST_SECTION("nvs_load_from -- normalize_settings_source_cycles() breaks ONLY the zone(s) actually "
+                 "ON a cycle, not a zone that merely leads into one (index-order independence)");
+    nvs_test_enable(true);
+    nvs_test_clear();
+    zones_cfg_t src;
+    memset(&src, 0, sizeof(src));
+    src.version = ZONES_CFG_VERSION;
+    src.thermo_count = 3;
+    src.timing_profile_count = 1;
+    for (uint8_t z = 0; z < MAX31856_CHANNEL_COUNT; z++) {
+        src.zones[z].settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
+    }
+    // Zone 0 leads into the cycle (0 -> 1) but is not itself part of it.
+    src.zones[0].settings_source = 1;
+    // The actual 1 <-> 2 cycle.
+    src.zones[1].settings_source = 2;
+    src.zones[2].settings_source = 1;
+    src.crc32 = compute_zones_crc(&src);
+    stage_zones_blob(&src, sizeof(src));
+
+    zones_cfg_t out_cfg;
+    bool found = false, valid = false;
+    esp_err_t err = nvs_load_from("kiln_nvs", &out_cfg, &found, &valid);
+
+    TEST_CHECK(err == ESP_OK, "no NVS error");
+    TEST_CHECK(found && valid, "a stored cycle collapses, it does not get treated as corrupt");
+    TEST_CHECK(out_cfg.zones[0].settings_source == 1,
+              "zone 0's link (0 -> 1) survives untouched -- it was never ON the cycle, only LEADING "
+              "INTO it, and breaking the real 1<->2 cycle alone is sufficient to fix zone 0's chain too");
+    TEST_CHECK(out_cfg.zones[1].settings_source != 2 || out_cfg.zones[2].settings_source != 1,
+              "the actual 1<->2 cycle no longer exists -- at least one of its two links was broken");
+    uint8_t s1 = out_cfg.zones[1].settings_source, s2 = out_cfg.zones[2].settings_source;
+    TEST_CHECK(s1 == ZONE_SETTINGS_SOURCE_CUSTOM || s2 == ZONE_SETTINGS_SOURCE_CUSTOM,
+              "the break was made by collapsing (at least) one of the two cyclic zones to Custom");
+
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
+// zones_config_import_blob()'s own pass-1 settings_source cycle check (added
+// alongside the two-pass restore fix -- see backup_http.c's importer, which
+// calls THIS function to apply a decoded blob) had no test at all before
+// this pair, positive or negative: nvs_load_from()'s cycle tests above only
+// exercise normalize_settings_source_cycles() on the LOAD path, which
+// deliberately COLLAPSES a cycle rather than rejecting it -- a completely
+// different code path from zones_config_import_blob()'s pass-1 walk, which
+// must REJECT instead (see that function's own comment: "there is a live
+// client on the other end of this call who can be handed a clear reason").
+// Negative first: a genuinely cyclic blob must be refused, with the commit
+// point (s_zones.cfg = cand) never reached -- proven by checking the live
+// config is untouched, not just that the call returns false.
+static void test_import_blob_pass1_rejects_cyclic_settings_source(void)
+{
+    TEST_SECTION("zones_config_import_blob -- pass 1: a genuinely cyclic settings_source blob is "
+                 "REFUSED, nothing committed to the live config");
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    s_zones.cfg.thermo_count = 2;
+    s_zones.cfg.timing_profile_count = 1;
+    for (uint8_t z = 0; z < MAX31856_CHANNEL_COUNT; z++) {
+        s_zones.cfg.zones[z].settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
+    }
+    s_zones.cfg.zones[0].max_temp_c = 1234.0f; // a live value the rejected import must not disturb
+    s_zones_config_valid = true;
+    uint32_t generation_before = s_config_generation;
+
+    zones_cfg_t blob;
+    memset(&blob, 0, sizeof(blob));
+    blob.version = ZONES_CFG_VERSION;
+    blob.thermo_count = 2;
+    blob.timing_profile_count = 1;
+    for (uint8_t z = 0; z < MAX31856_CHANNEL_COUNT; z++) {
+        blob.zones[z].settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
+    }
+    blob.zones[0].settings_source = 1; // the 2-cycle this pass-1 check must catch
+    blob.zones[1].settings_source = 0;
+    blob.crc32 = compute_zones_crc(&blob);
+
+    char reason[128];
+    reason[0] = '\0';
+    bool ok = zones_config_import_blob(&blob, sizeof(blob), reason, sizeof(reason));
+
+    TEST_CHECK(!ok, "a cyclic settings_source import is refused");
+    TEST_CHECK(strstr(reason, "settings_source") != NULL && strstr(reason, "cycle") != NULL,
+              "the refusal names the field and calls out the cycle specifically");
+    TEST_CHECK(s_zones.cfg.zones[0].max_temp_c == 1234.0f,
+              "the pre-existing live config is completely untouched -- pass 1 rejected before the "
+              "commit point, not partway through it");
+    TEST_CHECK(s_zones.cfg.zones[0].settings_source == ZONE_SETTINGS_SOURCE_CUSTOM &&
+              s_zones.cfg.zones[1].settings_source == ZONE_SETTINGS_SOURCE_CUSTOM,
+              "the live settings_source links are still Custom -- the cyclic blob's links never landed");
+    TEST_CHECK(s_config_generation == generation_before, "no config generation bump for a rejected import");
+}
+
+// Positive control for the test above: the identical shape, but the blob's
+// settings_source chain is legal (acyclic) -- proves pass 1 refuses ONLY a
+// genuine cycle, not any blob that happens to link two zones' settings_source
+// together, and that a legitimate import still lands.
+static void test_import_blob_pass1_accepts_acyclic_settings_source(void)
+{
+    TEST_SECTION("zones_config_import_blob -- pass 1: a legal (acyclic) settings_source chain is "
+                 "accepted and actually committed");
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    s_zones.cfg.thermo_count = 2;
+    s_zones.cfg.timing_profile_count = 1;
+    for (uint8_t z = 0; z < MAX31856_CHANNEL_COUNT; z++) {
+        s_zones.cfg.zones[z].settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
+    }
+    s_zones_config_valid = false;
+
+    zones_cfg_t blob;
+    memset(&blob, 0, sizeof(blob));
+    blob.version = ZONES_CFG_VERSION;
+    blob.thermo_count = 2;
+    blob.timing_profile_count = 1;
+    for (uint8_t z = 0; z < MAX31856_CHANNEL_COUNT; z++) {
+        blob.zones[z].settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
+    }
+    blob.zones[0].settings_source = 1; // 0 -> 1 -> Custom: terminates cleanly, no cycle
+    blob.crc32 = compute_zones_crc(&blob);
+
+    char reason[128];
+    reason[0] = '\0';
+    bool ok = zones_config_import_blob(&blob, sizeof(blob), reason, sizeof(reason));
+
+    TEST_CHECK(ok, "an acyclic settings_source import is accepted");
+    TEST_CHECK(s_zones_config_valid, "and marked valid/committed");
+    TEST_CHECK(s_zones.cfg.zones[0].settings_source == 1,
+              "the imported link is actually live in the committed config");
+}
+
 static void test_nvs_load_from_newer_than_firmware_is_found_but_not_valid(void)
 {
     TEST_SECTION("nvs_load_from -- FIX 1: a newer-than-firmware blob is found=true, valid=false "
@@ -5160,6 +5303,9 @@ void run_test_zones_http(void)
     test_nvs_load_from_wrong_size_current_version_is_corrupt_not_refused();
     test_nvs_load_from_current_version_happy_path();
     test_nvs_load_from_pre_existing_cycle_normalizes_not_wipes();
+    test_nvs_load_from_cycle_normalization_does_not_touch_lead_in_zone();
+    test_import_blob_pass1_rejects_cyclic_settings_source();
+    test_import_blob_pass1_accepts_acyclic_settings_source();
     test_nvs_load_from_newer_than_firmware_is_found_but_not_valid();
     test_zones_http_start_refused_newer_blob_not_overwritten();
 
