@@ -405,6 +405,28 @@ typedef struct {
 
     char     fault_reason[96];   /* only meaningful when state == PROFILE_EXEC_FAULTED (a GLOBAL trip) */
     uint8_t  fault_guard;        /* thermal_guard_trip_t, only meaningful when state == PROFILE_EXEC_FAULTED */
+
+    /* Warm-start (PROFILES.md "Warm-start: joining a profile already at
+     * temperature", owner request 2026-08-30): profile_executor_run() found
+     * the kiln already hotter than one or more of the profile's opening
+     * segments and entered the schedule partway through instead of
+     * commanding a setpoint below the actual temperature. Set once at
+     * profile_executor_run() and unchanged for the life of the run --
+     * segment_index/dwelling/target_c above already reflect the entry point
+     * this decided on, this just says WHY (Q6: "the operator must see it").
+     * false for every run that started at segment 0 normally, including a
+     * cold-kiln run of a profile the kiln happens to already satisfy at
+     * segment 0 (see profile_executor.c's profile_executor_plan_warm_start()
+     * doc comment for why that case is deliberately not "warm started"). */
+    bool     warm_started;
+    char     warm_start_reason[128]; /* only meaningful when warm_started; human-readable,
+                                       * e.g. "starting at segment 4 -- kiln already at 312.0 C" */
+    /* Q1's decided replay: which segment indices (0-based) had their
+     * RELAY_IO on/off command reapplied before the first ramp tick because
+     * warm-start skipped past them, in the order they were replayed (profile
+     * order). Only the first warm_start_replayed_count entries are valid. */
+    uint8_t  warm_start_replayed_segments[PROFILE_MAX_SEGMENTS];
+    uint8_t  warm_start_replayed_count;
 } profile_exec_status_t;
 
 #define PROFILE_EXECUTOR_HYSTERESIS_C 2.0f /* BANGBANG mode's fixed band -- see profile_executor.c */

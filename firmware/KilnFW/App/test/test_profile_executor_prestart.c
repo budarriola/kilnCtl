@@ -67,11 +67,71 @@ uint8_t kiln_io_get_relay_shadow(kiln_io_t *io)
     return 0;
 }
 
+/* Warm-start tests (PROFILES.md "Warm-start: joining a profile already at
+ * temperature") need profile_executor_run()'s own start-of-run reading to
+ * return real numbers instead of always failing -- settable so a test can
+ * hand back canned per-channel temperatures, one MAX31856Reading per active
+ * channel, same shape MAX31856_read_all() itself returns. Defaults to the
+ * pre-existing behavior (ESP_FAIL, count 0) so every OTHER test in this file
+ * is unaffected. */
+static bool             s_test_thermo_read_ok = false;
+static MAX31856Reading  s_test_thermo_readings[MAX31856_CHANNEL_COUNT];
+static size_t           s_test_thermo_reading_count = 0;
+
 esp_err_t MAX31856_read_all(MAX31856BusClass *bus, MAX31856Reading *out, size_t max_readings, size_t *out_count)
 {
-    (void)bus; (void)out; (void)max_readings;
-    if (out_count) *out_count = 0;
-    return ESP_FAIL;
+    (void)bus;
+    if (!s_test_thermo_read_ok) {
+        if (out_count) *out_count = 0;
+        return ESP_FAIL;
+    }
+    size_t n = s_test_thermo_reading_count;
+    if (n > max_readings) n = max_readings;
+    if (out) memcpy(out, s_test_thermo_readings, n * sizeof(out[0]));
+    if (out_count) *out_count = n;
+    return ESP_OK;
+}
+
+/* Sets channel `channel`'s reading to `temp_c`, healthy (not spi_failed),
+ * cj_temperature_c a plausible room temperature -- for a warm-start test
+ * that wants zone `zone_index`'s combined reading to come out to `temp_c`
+ * without needing a multi-channel thermo_mask fan-in (single-channel zones
+ * cover every warm-start test below). */
+static void set_test_thermo_reading(uint8_t channel, float temp_c)
+{
+    s_test_thermo_read_ok = true;
+    if (channel >= MAX31856_CHANNEL_COUNT) return;
+    memset(&s_test_thermo_readings[channel], 0, sizeof(s_test_thermo_readings[channel]));
+    s_test_thermo_readings[channel].channel = channel;
+    s_test_thermo_readings[channel].tc_temperature_c = temp_c;
+    s_test_thermo_readings[channel].cj_temperature_c = 22.0f;
+    s_test_thermo_readings[channel].spi_failed = false;
+    if (s_test_thermo_reading_count <= channel) {
+        s_test_thermo_reading_count = (size_t)channel + 1;
+    }
+}
+
+static void reset_test_thermo_readings(void)
+{
+    s_test_thermo_read_ok = false;
+    s_test_thermo_reading_count = 0;
+    memset(s_test_thermo_readings, 0, sizeof(s_test_thermo_readings));
+    s_exec.thermo_bus = NULL;
+}
+
+/* profile_executor_run()'s start-of-run read is gated on
+ * `sim_backend_enabled() || (s_exec.thermo_bus && s_exec.thermo_bus->
+ * initialized)` -- sim_backend_enabled() is compiled out false in this host
+ * build (no CONFIG_KILNCTL_SIM_PLANT), so a warm-start test must also point
+ * s_exec.thermo_bus at SOME initialized bus or MAX31856_read_all() above is
+ * never even called. A fake, minimal bus is enough: nothing downstream of
+ * the gate touches its fields, only its non-NULL-and-initialized-ness. */
+static MAX31856BusClass s_test_thermo_bus;
+static void arm_test_thermo_bus(void)
+{
+    memset(&s_test_thermo_bus, 0, sizeof(s_test_thermo_bus));
+    s_test_thermo_bus.initialized = true;
+    s_exec.thermo_bus = &s_test_thermo_bus;
 }
 
 bool autotune_engine_is_active_on_zone(uint8_t zone_index)
@@ -352,6 +412,27 @@ bool zones_config_get_control_mode(uint8_t zone_index, zone_control_mode_t *out_
     return false;
 }
 
+/* PID_EXPANSION_PLAN.md Phase 3 wiring: profile_executor.c's
+ * ZONE_CONTROL_MODE_PID_FUZZY path reads this every tick. This prestart
+ * suite never gets a zone past profile_executor_run()'s pre-start guard
+ * (that guard is the whole point of this file, see its header comment), so
+ * the tick loop itself never runs here and this stub is only linked to
+ * satisfy the symbol -- returning false (not configured) is fine. */
+/* Settable for the pid_fuzzy_prepare_gains() regression tests below (opus
+ * review: test_closed_loop.c's fuzzy_tick() MIRRORS this function's logic
+ * instead of calling it, so a real divergence between the two would go
+ * undetected there). Defaults to "not configured" (false, 0.0f), matching
+ * every pre-existing test in this file, which never reaches the tick loop
+ * anyway. */
+static bool  s_test_fuzzy_strength_present = false;
+static float s_test_fuzzy_strength_pct = 0.0f;
+bool zones_config_get_fuzzy_strength_pct(uint8_t zone_index, float *out_pct)
+{
+    (void)zone_index;
+    if (out_pct) *out_pct = s_test_fuzzy_strength_pct;
+    return s_test_fuzzy_strength_present;
+}
+
 bool zones_config_get_cross_zone_delta(uint8_t zone_index, float *out_max_delta_c)
 {
     (void)zone_index;
@@ -413,10 +494,15 @@ bool zones_config_get_heater_cfg(uint8_t zone_index, float *out_window_ms, float
     return false;
 }
 
+/* Settable per zone (defaults to 0, matching every pre-existing test in this
+ * file, which relies on the ramp-ceiling check refusing any nonzero rate --
+ * see test_run_refuses_at_atomic_heat_claim_gate()'s own comment on using a
+ * zero-rate dwell to route around this stub). Warm-start tests need a real
+ * ceiling so a >0 ramp_c_per_hr segment is actually feasible. */
+static float g_stub_max_ramp_c_per_hr[MAX31856_CHANNEL_COUNT];
 bool zones_config_get_max_ramp(uint8_t zone_index, float *out_c_per_hr)
 {
-    (void)zone_index;
-    if (out_c_per_hr) *out_c_per_hr = 0.0f;
+    if (out_c_per_hr) *out_c_per_hr = (zone_index < MAX31856_CHANNEL_COUNT) ? g_stub_max_ramp_c_per_hr[zone_index] : 0.0f;
     return false;
 }
 
@@ -432,6 +518,24 @@ bool zones_config_get_model(uint8_t zone_index, float *out_k_dc, float *out_tau_
     if (out_tau_s) *out_tau_s = 0.0f;
     if (out_dead_time_s) *out_dead_time_s = 0.0f;
     return false;
+}
+
+/* PID_EXPANSION_PLAN.md section 2c/Phase 3b: settable coupling matrix, one
+ * row per zone, defaulting to all-zero (every pre-existing test never
+ * touches this and gets exactly today's zero-coefficient feedforward). Test
+ * fills g_stub_coupling_present[zi] to control whether the getter reports
+ * "no row" (false) vs. "a real, possibly all-zero row" (true) -- both are
+ * distinct legal states zones_http.h's real getter can return. */
+static float g_stub_coupling[MAX31856_CHANNEL_COUNT][MAX31856_CHANNEL_COUNT];
+static bool  g_stub_coupling_present[MAX31856_CHANNEL_COUNT] = {true, true, true};
+bool zones_config_get_coupling(uint8_t zone_index, float out_row[MAX31856_CHANNEL_COUNT])
+{
+    if (zone_index >= MAX31856_CHANNEL_COUNT) return false;
+    if (!g_stub_coupling_present[zone_index]) return false;
+    for (uint8_t j = 0; j < MAX31856_CHANNEL_COUNT; j++) {
+        out_row[j] = g_stub_coupling[zone_index][j];
+    }
+    return true;
 }
 
 bool zones_config_get_pid(uint8_t zone_index, float *out_kp, float *out_ki, float *out_kd)
@@ -475,11 +579,17 @@ uint8_t zones_config_get_thermo_count(void)
     return 0;
 }
 
+/* Settable per zone (defaults to 0/false, matching every pre-existing test
+ * in this file that never touches this array) -- warm-start tests need
+ * zone N's thermo_mask to actually name a channel so thermo_combine() (real,
+ * linked for this executable) produces a valid combined reading from the
+ * canned MAX31856_read_all() data above. Bit i = channel i, same convention
+ * as the real zones_http.c-owned mask. */
+static uint8_t g_stub_thermo_mask[MAX31856_CHANNEL_COUNT];
 bool zones_config_get_thermo_mask(uint8_t zone_index, uint8_t *out_mask)
 {
-    (void)zone_index;
-    if (out_mask) *out_mask = 0;
-    return false;
+    if (out_mask) *out_mask = (zone_index < MAX31856_CHANNEL_COUNT) ? g_stub_thermo_mask[zone_index] : 0;
+    return zone_index < MAX31856_CHANNEL_COUNT && g_stub_thermo_mask[zone_index] != 0;
 }
 
 // Settable for B2's negative test below -- see s_test_profiles_http_get_ok's
@@ -1252,6 +1362,987 @@ static void test_heat_enable_release_survives_a_down_link(void)
     TEST_CHECK(!heat_enable_is_granted(), "and the request is not left standing");
 }
 
+// ---------------------------------------------------------------------------
+// Warm-start (PROFILES.md "Warm-start: joining a profile already at
+// temperature", owner request 2026-08-30) -- these are the only tests in
+// this file that drive profile_executor_run() all the way to its real final
+// commit for a profile with real segments (see
+// test_run_refuses_at_atomic_heat_claim_gate()'s own comment on why that is
+// otherwise rare in this file): zone 0 gets a real 1300C ceiling, PID
+// control mode, a real thermo_mask, and a real (non-zero) ramp ceiling so a
+// >0 ramp_c_per_hr segment is actually feasible, plus a canned MAX31856
+// reading and an "initialized" thermo_bus so profile_executor_run()'s own
+// start-of-run read (the one profile_executor_plan_warm_start() is fed from)
+// returns real numbers instead of always failing.
+// ---------------------------------------------------------------------------
+
+/* io_seg_start()/io_seg_finish() only write to hardware `if (s_exec.io)` --
+ * a non-NULL, otherwise-untouched kiln_io_t is enough for test 3 (replay)
+ * below to observe the relay writes through g_relay_write_calls/
+ * g_last_relay_write_value (kiln_io_owner_command_set_relay_mask_authorized()
+ * is faked above and never actually dereferences its kiln_io_t* argument, so
+ * this can stay zeroed). */
+static kiln_io_t s_test_kiln_io;
+
+static void warm_start_test_setup(const profile_t *p, float zone0_reading_c)
+{
+    reset_relay_claim_test_state();
+    reset_test_thermo_readings();
+    s_exec.lock = xSemaphoreCreateMutex();
+    s_exec.state = PROFILE_EXEC_IDLE;
+    arm_test_thermo_bus();
+    memset(&s_test_kiln_io, 0, sizeof(s_test_kiln_io));
+    s_exec.io = &s_test_kiln_io;
+
+    s_test_profiles_http_get_out = *p;
+    s_test_profiles_http_get_ok = true;
+    s_test_zones_config_valid = true;
+    s_test_sweep_active = false;
+    s_test_heat_zone_claim_refused = false;
+
+    memset(g_stub_max_temp_c, 0, sizeof(g_stub_max_temp_c));
+    memset(g_stub_control_mode, 0, sizeof(g_stub_control_mode));
+    memset(g_stub_thermo_mask, 0, sizeof(g_stub_thermo_mask));
+    memset(g_stub_max_ramp_c_per_hr, 0, sizeof(g_stub_max_ramp_c_per_hr));
+    g_stub_max_temp_c[0] = 1300.0f;
+    g_stub_control_mode[0] = ZONE_CONTROL_MODE_PID;
+    g_stub_thermo_mask[0] = 0x01; /* zone 0 reads channel 0 */
+    g_stub_max_ramp_c_per_hr[0] = 500.0f; /* comfortably above every rate these tests use */
+
+    set_test_thermo_reading(0, zone0_reading_c);
+}
+
+static profile_segment_t zone_ramp_seg(float target_c, float ramp_c_per_hr, uint32_t dwell_min)
+{
+    profile_segment_t s;
+    memset(&s, 0, sizeof(s));
+    s.seg_kind = PROFILE_SEG_KIND_ZONE_RAMP;
+    s.target_c = target_c;
+    s.ramp_c_per_hr = ramp_c_per_hr;
+    s.dwell_min = dwell_min;
+    return s;
+}
+
+static profile_segment_t relay_io_seg(uint8_t io_target, uint8_t io_state, uint8_t blocking, uint32_t dwell_min)
+{
+    profile_segment_t s;
+    memset(&s, 0, sizeof(s));
+    s.seg_kind = PROFILE_SEG_KIND_RELAY_IO;
+    s.io_target = io_target;
+    s.io_state = io_state;
+    s.io_blocking = blocking;
+    s.dwell_min = dwell_min;
+    return s;
+}
+
+// Test 1 (mandatory coverage item 1): cold kiln -- no warm start, starts at
+// segment 0, byte-identical to the pre-feature code. The kiln reads 50C,
+// well below segment 0's 200C target -- run() must land exactly where it
+// always did: segment 0, not dwelling, target_c seeded from the actual
+// reading (50C, not the segment's target), zero elapsed, and NOT flagged as
+// warm-started.
+static void test_warm_start_cold_kiln_is_a_regression_noop(void)
+{
+    TEST_SECTION("warm-start -- a cold kiln is untouched: segment 0, offset 0, not warm-started (regression guard)");
+
+    profile_t p;
+    memset(&p, 0, sizeof(p));
+    p.zone_mask = 0x01;
+    p.segment_count = 2;
+    p.segments[0] = zone_ramp_seg(200.0f, 100.0f, 0);
+    p.segments[1] = zone_ramp_seg(600.0f, 100.0f, 10);
+
+    warm_start_test_setup(&p, 50.0f);
+    char err[128] = {0};
+    bool ok = profile_executor_run(0, err, sizeof(err));
+
+    TEST_CHECK(ok, "a well-formed run against a cold kiln must succeed");
+    TEST_CHECK(!s_exec.warm_started, "a cold kiln must never be reported as warm-started");
+    TEST_CHECK(s_exec.segment_index == 0, "must start at segment 0");
+    TEST_CHECK(!s_exec.dwelling, "segment 0 is a ramp, not yet a dwell");
+    TEST_CHECK(s_exec.segment_elapsed_s == 0, "no time has been fast-forwarded into segment 0");
+    TEST_CHECK(fabsf(s_exec.target_c - 50.0f) < 0.01f,
+              "target_c must seed from the actual reading (50C), exactly the pre-feature baseline_target_c "
+              "behavior -- never the segment's own target");
+    TEST_CHECK(s_exec.warm_start_replayed_count == 0, "nothing was skipped, so nothing was replayed");
+
+    profile_executor_halt();
+}
+
+// Test 2 (mandatory coverage item 2): warm kiln mid-ramp -- segment 1 ramps
+// 200->600C at 100C/hr and the kiln already reads 300C. run() must skip
+// segment 0 entirely, enter segment 1, and command a setpoint AT current
+// temperature (300C), never below it -- 300C is the exact bug this feature
+// removes if it were commanded 200C instead. The entry offset (Q2) is
+// reported too: 1 hour of segment 1's ramp is already "spent" reaching 300C
+// from its own 200C start, at 100C/hr.
+static void test_warm_start_mid_ramp_entry_never_below_current(void)
+{
+    TEST_SECTION("warm-start -- warm kiln mid-ramp: correct segment, correct offset, setpoint >= current (Q2)");
+
+    profile_t p;
+    memset(&p, 0, sizeof(p));
+    p.zone_mask = 0x01;
+    p.segment_count = 2;
+    p.segments[0] = zone_ramp_seg(200.0f, 100.0f, 0);
+    p.segments[1] = zone_ramp_seg(600.0f, 100.0f, 10);
+
+    warm_start_test_setup(&p, 300.0f);
+    char err[128] = {0};
+    bool ok = profile_executor_run(0, err, sizeof(err));
+
+    TEST_CHECK(ok, "a well-formed warm run must succeed");
+    TEST_CHECK(s_exec.warm_started, "skipping segment 0 must be reported as a warm start");
+    TEST_CHECK(s_exec.segment_index == 1, "must enter segment 1 (the one whose ramp reaches 300C), not segment 0");
+    TEST_CHECK(!s_exec.dwelling, "still mid-ramp, not yet at segment 1's own 600C target");
+    TEST_CHECK(s_exec.target_c >= 300.0f - 0.01f,
+              "the commanded setpoint must never be below current temperature -- the exact bug this "
+              "feature exists to remove");
+    TEST_CHECK(fabsf(s_exec.target_c - 300.0f) < 0.01f, "entry target_c must be exactly current temperature, "
+                                                         "not segment 1's own 200C start");
+    TEST_CHECK(s_exec.segment_elapsed_s == 3600,
+              "Q2's entry offset: (300-200)/100C/hr = 1h already spent climbing segment 1's ramp, carried "
+              "as segment_elapsed_s");
+    TEST_CHECK(strstr(s_exec.warm_start_reason, "segment 2") != NULL,
+              "Q6: the reason string must name the (1-based) entry segment for the operator");
+
+    profile_executor_halt();
+}
+
+// Test 3 (mandatory coverage item 3): a skipped RELAY_IO segment's command
+// is replayed, and the replayed segment is still registered for the
+// end-of-run sweep so it cannot be left energized with nothing owning it
+// (the owner's Q1 decision, verbatim in PROFILES.md). Segment 0 opens relay
+// 1; segments 1-2 are the same ramp as test 2, entered warm at segment 2.
+static void test_warm_start_replays_skipped_relay_io_and_registers_it(void)
+{
+    TEST_SECTION("warm-start -- skipped RELAY_IO segments are replayed, in order, and swept off at run end (Q1)");
+
+    profile_t p;
+    memset(&p, 0, sizeof(p));
+    p.zone_mask = 0x01;
+    p.segment_count = 3;
+    p.segments[0] = relay_io_seg(PROFILE_IO_TARGET_RELAY_BASE, 1 /* ON */, 1 /* blocking */, 5);
+    p.segments[1] = zone_ramp_seg(200.0f, 100.0f, 0);
+    p.segments[2] = zone_ramp_seg(600.0f, 100.0f, 10);
+
+    warm_start_test_setup(&p, 300.0f);
+    g_relay_write_calls = 0;
+    char err[128] = {0};
+    bool ok = profile_executor_run(0, err, sizeof(err));
+
+    TEST_CHECK(ok, "a well-formed run must succeed");
+    TEST_CHECK(s_exec.warm_started, "must be reported as warm-started");
+    TEST_CHECK(s_exec.segment_index == 2, "must enter segment 2 (mirrors test 2, just with an IO segment ahead of it)");
+    TEST_CHECK(s_exec.warm_start_replayed_count == 1, "exactly one RELAY_IO segment was skipped");
+    TEST_CHECK(s_exec.warm_start_replayed_segments[0] == 0, "it must name segment 0 (0-based)");
+    TEST_CHECK(g_relay_write_calls >= 1, "the skipped segment's ON command must actually have been written to hardware");
+    TEST_CHECK(g_last_relay_write_value == 0x01, "relay 1's bit must have been commanded ON (replayed, not skipped)");
+    TEST_CHECK(s_exec.io_segs[0].active, "the replayed segment must be registered active -- io_seg_finish()'s "
+                                        "end-of-run sweep is the only thing that may still turn it off");
+    TEST_CHECK(s_exec.io_segs[0].blocking,
+              "the replayed segment's own hold/dwell_min must NOT be restarted (Q1) -- forcing it to look "
+              "blocking to io_segs_tick() is what keeps that timer from ever touching it again this run");
+
+    // The end-of-run sweep must still retire it -- prove a relay this warm
+    // start energized is not left owned by nothing once the run ends.
+    g_relay_write_calls = 0;
+    g_last_relay_write_value = 0xFF; /* poison -- must be overwritten by a real off-write below */
+    profile_executor_halt();
+    TEST_CHECK(g_relay_write_calls >= 1, "halt()'s end-of-run sweep must still touch this relay");
+    TEST_CHECK((g_last_relay_write_value & 0x01) == 0, "and must force it OFF -- nothing may hold it energized "
+                                                        "with the run gone");
+}
+
+// Test 4 (mandatory coverage item 4): a dwell segment matched by warm-start
+// is not shortened just because the kiln has already reached (or passed) its
+// target -- Q3, "a soak is time at temperature, not time spent arriving
+// there". Segment 1 is a real 20-minute soak at 280C; the kiln is already
+// past it (300C) but a descending segment 2 follows, so this also proves the
+// soak segment is the one landed on, not the ascent scanning straight past
+// it into the cooldown leg.
+static void test_warm_start_reached_dwell_is_not_shortened(void)
+{
+    TEST_SECTION("warm-start -- an already-reached dwell still runs its FULL configured soak (Q3)");
+
+    profile_t p;
+    memset(&p, 0, sizeof(p));
+    p.zone_mask = 0x01;
+    p.segment_count = 3;
+    p.segments[0] = zone_ramp_seg(200.0f, 100.0f, 5);
+    p.segments[1] = zone_ramp_seg(280.0f, 100.0f, 20); /* the soak -- 20 real minutes */
+    p.segments[2] = zone_ramp_seg(100.0f, 100.0f, 0);  /* descending -- ends the leading ascent (Q5) */
+
+    warm_start_test_setup(&p, 300.0f); /* past the whole ascending leg (200, then 280) */
+    char err[128] = {0};
+    bool ok = profile_executor_run(0, err, sizeof(err));
+
+    TEST_CHECK(ok, "a well-formed run must succeed");
+    TEST_CHECK(s_exec.warm_started, "must be reported as warm-started");
+    TEST_CHECK(s_exec.segment_index == 1, "must land on the soak segment (index 1), not skip past it into the "
+                                          "descending segment 2");
+    TEST_CHECK(s_exec.dwelling, "already past 280C -- entered directly as a dwell, not a ramp");
+    TEST_CHECK(s_exec.segment_elapsed_s == 0,
+              "the full 20-minute soak must still be ahead of it -- 0 elapsed, NOT pre-credited/shortened "
+              "just because the kiln already reads past the target");
+
+    profile_executor_halt();
+}
+
+// Test 5 (mandatory coverage item 5): a descending (cool-down/anneal)
+// profile started hot must NOT jump into its cooling leg -- Q5, "scan only
+// the leading ascent... stop at the first descent". Segment 0 peaks at
+// 800C; segment 1 cools to 200C. The kiln is even hotter than the peak
+// (850C), so this also exercises the "hotter than the whole leading ascent"
+// landing (still segment 0, never segment 1).
+static void test_warm_start_descending_profile_does_not_jump_into_cooldown(void)
+{
+    TEST_SECTION("warm-start -- a hot kiln on a descending profile stays out of the cooling leg (Q5)");
+
+    profile_t p;
+    memset(&p, 0, sizeof(p));
+    p.zone_mask = 0x01;
+    p.segment_count = 2;
+    p.segments[0] = zone_ramp_seg(800.0f, 100.0f, 20);
+    p.segments[1] = zone_ramp_seg(200.0f, 100.0f, 0); /* the cooling leg -- must never be entered here */
+
+    warm_start_test_setup(&p, 850.0f); /* hotter than the whole leading ascent (just segment 0) */
+    char err[128] = {0};
+    bool ok = profile_executor_run(0, err, sizeof(err));
+
+    TEST_CHECK(ok, "a well-formed run must succeed");
+    TEST_CHECK(s_exec.segment_index == 0, "must never land on segment 1 (the cooling leg) -- the leading "
+                                          "ascent is only segment 0");
+    TEST_CHECK(s_exec.segment_index != 1, "explicitly: not the descending segment");
+
+    profile_executor_halt();
+}
+
+// Test 6 (mandatory coverage item 6): the kiln is hotter than every segment
+// in the whole profile -- the "hotter than everything" decision (see
+// profile_executor_plan_warm_start()'s doc comment for the full reasoning):
+// land on the LAST segment of the profile's leading ascent, entered as a
+// dwell, rather than refusing to start or fabricating a jump past the end.
+// A purely-ascending 2-segment profile, kiln hotter than both.
+static void test_warm_start_hotter_than_entire_profile_lands_on_last_segment(void)
+{
+    TEST_SECTION("warm-start -- kiln hotter than the whole profile: lands on the last segment, does not refuse "
+                 "to start (hotter-than-everything decision)");
+
+    profile_t p;
+    memset(&p, 0, sizeof(p));
+    p.zone_mask = 0x01;
+    p.segment_count = 2;
+    p.segments[0] = zone_ramp_seg(200.0f, 100.0f, 5);
+    p.segments[1] = zone_ramp_seg(280.0f, 100.0f, 15);
+
+    warm_start_test_setup(&p, 900.0f); /* hotter than every segment in the profile */
+    char err[128] = {0};
+    bool ok = profile_executor_run(0, err, sizeof(err));
+
+    TEST_CHECK(ok, "hotter-than-everything must NOT refuse to start");
+    TEST_CHECK(s_exec.state == PROFILE_EXEC_RUNNING, "and must actually reach RUNNING");
+    TEST_CHECK(s_exec.warm_started, "must be reported as warm-started");
+    TEST_CHECK(s_exec.segment_index == 1, "lands on the LAST segment of the profile (index 1), not the first");
+    TEST_CHECK(s_exec.dwelling, "entered directly as a dwell -- see Q3, the soak still runs");
+    TEST_CHECK(s_exec.segment_elapsed_s == 0, "the full soak is still ahead of it, not shortened");
+
+    profile_executor_halt();
+}
+
+// ---------------------------------------------------------------------------
+// pid_fuzzy_prepare_gains() regression guard (opus review, 2026-08-30):
+// test_closed_loop.c's "mandatory test 1" turned out to be a determinism
+// check masquerading against a MIRROR of pid_fuzzy_prepare_gains()'s logic
+// (fuzzy_tick(), local to that file) rather than a call to the real,
+// production function -- so a future edit to pid_fuzzy_prepare_gains() or
+// pid_fuzzy_adjust() that changed behavior would go completely undetected
+// there. pid_fuzzy_prepare_gains() is `static` in profile_executor.c, which
+// this file #includes wholesale (see the file header comment), so it is
+// reachable directly here exactly the same way escalate_guard_trip() and
+// guard9_assert_stale_tick_fault() are above -- no production code was
+// changed to make this possible.
+// ---------------------------------------------------------------------------
+
+static void reset_fuzzy_gain_test_state(void)
+{
+    memset(&s_exec, 0, sizeof(s_exec));
+    s_test_fuzzy_strength_present = false;
+    s_test_fuzzy_strength_pct = 0.0f;
+}
+
+static void test_fuzzy_prepare_gains_zero_strength_is_base_gains_bit_exact(void)
+{
+    TEST_SECTION("pid_fuzzy_prepare_gains() -- strength_pct == 0 reproduces base gains bit-exactly "
+                 "(the safety contract pid_fuzzy.h documents: at 0 strength, PID_FUZZY must be "
+                 "indistinguishable from classic PID)");
+    reset_fuzzy_gain_test_state();
+    s_test_fuzzy_strength_present = true;
+    s_test_fuzzy_strength_pct = 0.0f;
+
+    zone_runtime_t z;
+    memset(&z, 0, sizeof(z));
+    z.pid_cfg.kp = 1.25f;
+    z.pid_cfg.ki = 0.03f;
+    z.pid_cfg.kd = 4.5f;
+    z.pid_state.d_filtered = -0.05f; /* an ordinary climb, per pid.c's negated-climb convention */
+    z.actual_c = 700.0f;
+    s_exec.target_c = 1000.0f; /* a large POS error -- would move gains hard at nonzero strength */
+
+    pid_cfg_t out;
+    memset(&out, 0xAA, sizeof(out));
+    pid_fuzzy_prepare_gains(&z, 0, &out);
+
+    TEST_CHECK(out.kp == 1.25f, "kp must be exactly base_kp at strength 0");
+    TEST_CHECK(out.ki == 0.03f, "ki must be exactly base_ki at strength 0");
+    TEST_CHECK(out.kd == 4.5f, "kd must be exactly base_kd at strength 0");
+}
+
+static void test_fuzzy_prepare_gains_matches_pid_fuzzy_adjust_directly(void)
+{
+    TEST_SECTION("pid_fuzzy_prepare_gains() -- for a known error/rate/strength, produces exactly what "
+                 "calling the production pid_fuzzy_adjust() directly with the same inputs would -- proves "
+                 "the wiring (error = target - actual_c, rate = pid_state.d_filtered, strength from "
+                 "zones_config_get_fuzzy_strength_pct()) is intact, not just that SOME gains come out");
+    reset_fuzzy_gain_test_state();
+    s_test_fuzzy_strength_present = true;
+    s_test_fuzzy_strength_pct = 100.0f;
+
+    zone_runtime_t z;
+    memset(&z, 0, sizeof(z));
+    z.pid_cfg.kp = 1.0f;
+    z.pid_cfg.ki = 0.02f;
+    z.pid_cfg.kd = 2.0f;
+    z.pid_state.d_filtered = 0.0f; /* POS/large error, STEADY rate -> rule table: Kp+, Ki=, Kd= */
+    z.actual_c = 700.0f;
+    s_exec.target_c = 1000.0f; /* 300C error -- "large" POS bucket */
+
+    pid_cfg_t out;
+    memset(&out, 0, sizeof(out));
+    pid_fuzzy_prepare_gains(&z, 0, &out);
+
+    float expect_kp, expect_ki, expect_kd;
+    pid_fuzzy_adjust(300.0f, 0.0f, 1.0f, 0.02f, 2.0f, 100, &expect_kp, &expect_ki, &expect_kd);
+
+    TEST_CHECK(out.kp == expect_kp, "kp must equal a direct pid_fuzzy_adjust() call with the same inputs");
+    TEST_CHECK(out.ki == expect_ki, "ki must equal a direct pid_fuzzy_adjust() call with the same inputs");
+    TEST_CHECK(out.kd == expect_kd, "kd must equal a direct pid_fuzzy_adjust() call with the same inputs");
+    /* Pin the actual rule-table direction too (POS/large x STEADY -> Kp+, Ki=, Kd=), so a change to the
+     * WIRING that happened to still equal pid_fuzzy_adjust()'s output on some OTHER cell can't hide behind
+     * the comparison above alone. */
+    TEST_CHECK(out.kp > 1.0f, "POS/large error at STEADY rate must nudge Kp UP, per the rule table");
+    TEST_CHECK(out.ki == 0.02f, "POS/large error at STEADY rate must leave Ki UNCHANGED, per the rule table");
+    TEST_CHECK(out.kd == 2.0f, "POS/large error at STEADY rate must leave Kd UNCHANGED, per the rule table");
+}
+
+static void test_fuzzy_prepare_gains_nan_strength_falls_back_to_base_not_large(void)
+{
+    TEST_SECTION("pid_fuzzy_prepare_gains() -- a NaN strength_pct falls back to base gains (0, the most "
+                 "conservative value), not the large-strength end of the range");
+    reset_fuzzy_gain_test_state();
+    s_test_fuzzy_strength_present = true;
+    s_test_fuzzy_strength_pct = NAN;
+
+    zone_runtime_t z;
+    memset(&z, 0, sizeof(z));
+    z.pid_cfg.kp = 1.0f;
+    z.pid_cfg.ki = 0.02f;
+    z.pid_cfg.kd = 2.0f;
+    z.pid_state.d_filtered = 0.0f;
+    z.actual_c = 700.0f;
+    s_exec.target_c = 1000.0f; /* same large POS/STEADY case that moves Kp hard at strength 100 above */
+
+    pid_cfg_t out;
+    memset(&out, 0, sizeof(out));
+    pid_fuzzy_prepare_gains(&z, 0, &out);
+
+    TEST_CHECK(out.kp == 1.0f, "a NaN configured strength must NOT be treated as a large strength -- kp "
+                              "must stay at base_kp");
+    TEST_CHECK(out.ki == 0.02f, "ki must stay at base_ki");
+    TEST_CHECK(out.kd == 2.0f, "kd must stay at base_kd");
+}
+
+// ---------------------------------------------------------------------------
+// PID_EXPANSION_PLAN.md section 2c / Phase 3b -- cross-zone coupling
+// feedforward. zone_feedforward() is static, reached directly the same way
+// the fuzzy-gains tests above reach pid_fuzzy_prepare_gains() -- this file
+// #includes profile_executor.c itself.
+
+static void reset_coupling_test_state(void)
+{
+    memset(&s_exec, 0, sizeof(s_exec));
+    memset(g_stub_coupling, 0, sizeof(g_stub_coupling));
+    g_stub_coupling_present[0] = true;
+    g_stub_coupling_present[1] = true;
+    g_stub_coupling_present[2] = true;
+}
+
+static void test_feedforward_zero_coupling_is_bit_identical_to_no_coupling(void)
+{
+    TEST_SECTION("zone_feedforward() -- an all-zero coupling row (the migration default, an "
+                 "un-commissioned kiln) reproduces hold+climb bit-for-bit -- the safety property "
+                 "PID_EXPANSION_PLAN.md Phase 3b requires before this can ship anywhere near hardware");
+    reset_coupling_test_state();
+
+    zone_runtime_t z;
+    memset(&z, 0, sizeof(z));
+    z.ff_enabled = true;
+    z.ff_k_dc = 100.0f;
+    z.ff_tau_s = 600.0f;
+    s_exec.ambient_c = 20.0f;
+
+    s_exec.zones[0].active = true;
+    s_exec.zones[0].actual_valid = true;
+    s_exec.zones[0].actual_c = 150.0f;
+    s_exec.zones[0].ff_enabled = true;
+    s_exec.zones[0].ff_k_dc = 18.0f;
+    s_exec.zones[0].control_mode = ZONE_CONTROL_MODE_PID;
+
+    float setpoint_c = 100.0f, rate = 0.0f;
+    float with_zero_row = zone_feedforward(&z, 1, setpoint_c, rate);
+
+    float expect = (setpoint_c - s_exec.ambient_c) / z.ff_k_dc + (rate * z.ff_tau_s) / z.ff_k_dc;
+    TEST_CHECK(expect > 0.0f && expect < 1.0f, "test setup sanity: baseline must sit inside the clamp "
+                                               "so the clamp cannot hide a coupling bug either way");
+
+    TEST_CHECK(with_zero_row == expect, "all-zero coupling row must not move u_ff by even one ULP");
+
+    g_stub_coupling[1][0] = 10.887f;
+    float with_nonzero_row = zone_feedforward(&z, 1, setpoint_c, rate);
+    TEST_CHECK(with_nonzero_row != expect, "sanity: a nonzero coupling coefficient DOES move u_ff -- "
+                                           "proves the equality check above is not vacuously true");
+}
+
+static void test_feedforward_hot_neighbor_subtracts_duty(void)
+{
+    TEST_SECTION("zone_feedforward() -- a neighbor running HOT (above its own setpoint) subtracts duty "
+                 "from this zone (PID_EXPANSION_PLAN.md 2c's sign contract)");
+    reset_coupling_test_state();
+
+    zone_runtime_t z;
+    memset(&z, 0, sizeof(z));
+    z.ff_enabled = true;
+    z.ff_k_dc = 100.0f;
+    z.ff_tau_s = 600.0f;
+    s_exec.ambient_c = 20.0f;
+
+    s_exec.zones[0].active = true;
+    s_exec.zones[0].actual_valid = true;
+    s_exec.zones[0].ff_enabled = true;
+    s_exec.zones[0].ff_k_dc = 18.0f;
+    s_exec.zones[0].control_mode = ZONE_CONTROL_MODE_PID;
+
+    g_stub_coupling[1][0] = 10.887f;
+
+    float setpoint_c = 100.0f, rate = 0.0f;
+    float baseline = (setpoint_c - s_exec.ambient_c) / z.ff_k_dc;
+
+    s_exec.zones[0].actual_c = setpoint_c;
+    float on_target = zone_feedforward(&z, 1, setpoint_c, rate);
+    TEST_CHECK(on_target == baseline, "a neighbor exactly on its setpoint must change nothing");
+
+    s_exec.zones[0].actual_c = setpoint_c + 20.0f;
+    float hot = zone_feedforward(&z, 1, setpoint_c, rate);
+    TEST_CHECK(hot < on_target, "a neighbor running hot must SUBTRACT duty from this zone");
+
+    s_exec.zones[0].actual_c = setpoint_c - 20.0f;
+    float cold = zone_feedforward(&z, 1, setpoint_c, rate);
+    TEST_CHECK(cold > on_target, "a neighbor running cold must ADD duty to this zone");
+
+    TEST_CHECK(hot > 0.0f && cold < 1.0f, "test setup sanity: neither +-20C case may hit the clamp");
+    TEST_CHECK(fabsf((on_target - hot) - (cold - on_target)) < 1e-3f,
+               "the +-20C cases must move duty by the same magnitude in opposite directions");
+}
+
+static void test_feedforward_invalid_neighbor_contributes_zero_never_nan(void)
+{
+    TEST_SECTION("zone_feedforward() -- a faulted/unread neighbor contributes exactly 0, never NaN, "
+                 "even with a nonzero measured coefficient for it");
+    reset_coupling_test_state();
+
+    zone_runtime_t z;
+    memset(&z, 0, sizeof(z));
+    z.ff_enabled = true;
+    z.ff_k_dc = 100.0f;
+    z.ff_tau_s = 600.0f;
+    s_exec.ambient_c = 20.0f;
+    float setpoint_c = 100.0f, rate = 0.0f;
+    float expect = (setpoint_c - s_exec.ambient_c) / z.ff_k_dc;
+
+    g_stub_coupling[1][0] = 10.887f;
+    s_exec.zones[0].active = false;
+    s_exec.zones[0].actual_valid = true;
+    s_exec.zones[0].actual_c = 1e9f;
+    s_exec.zones[0].ff_enabled = true;
+    s_exec.zones[0].ff_k_dc = 18.0f;
+    s_exec.zones[0].control_mode = ZONE_CONTROL_MODE_PID;
+    float r_inactive = zone_feedforward(&z, 1, setpoint_c, rate);
+    TEST_CHECK(r_inactive == expect, "an inactive neighbor must contribute 0 despite a nonzero coefficient");
+    TEST_CHECK(isfinite(r_inactive), "an inactive neighbor's absurd reading must not leak into a non-finite u_ff");
+
+    s_exec.zones[0].active = true;
+    s_exec.zones[0].actual_valid = false;
+    float r_invalid = zone_feedforward(&z, 1, setpoint_c, rate);
+    TEST_CHECK(r_invalid == expect, "actual_valid==false must contribute 0");
+
+    s_exec.zones[0].actual_valid = true;
+    s_exec.zones[0].actual_c = NAN;
+    float r_nan = zone_feedforward(&z, 1, setpoint_c, rate);
+    TEST_CHECK(isfinite(r_nan), "a NaN neighbor reading must never produce a non-finite u_ff");
+    TEST_CHECK(r_nan == expect, "a NaN neighbor reading must contribute exactly 0, not just \"some finite value\"");
+
+    s_exec.zones[0].actual_c = setpoint_c + 20.0f;
+    s_exec.zones[0].ff_enabled = false;
+    s_exec.zones[0].ff_k_dc = 0.0f;
+    float r_no_model = zone_feedforward(&z, 1, setpoint_c, rate);
+    TEST_CHECK(r_no_model == expect, "a neighbor with no identified model must contribute 0, not divide by its own zero k_dc");
+    TEST_CHECK(isfinite(r_no_model), "must not produce inf/NaN from a zero neighbor k_dc");
+}
+
+static void test_feedforward_both_callers_agree_bump_transfer(void)
+{
+    TEST_SECTION("zone_feedforward() -- the bumpless-seed call site (seed_bumpless_with_ff(), used on "
+                 "gain/model reload and resume) and the per-tick call site (pid_family_zone_tick()) must "
+                 "compute the SAME feedforward for the same state, coupling term included, or bump "
+                 "transfer breaks (PID_EXPANSION_PLAN.md Phase 3b's own requirement)");
+    reset_coupling_test_state();
+
+    const uint8_t zi = 1;
+    zone_runtime_t z;
+    memset(&z, 0, sizeof(z));
+    z.ff_enabled = true;
+    z.ff_k_dc = 100.0f;
+    z.ff_tau_s = 600.0f;
+    z.pid_cfg = (pid_cfg_t){.kp = 0.0f, .ki = 0.02f, .kd = 0.0f, .d_filter_tau_s = 1.0f, .b = 1.0f,
+                            .pid_range_c = 1000.0f};
+    pid_reset(&z.pid_state);
+    z.actual_c = 100.0f;
+    s_exec.ambient_c = 20.0f;
+    s_exec.target_c = 100.0f;
+    s_exec.target_rate_c_per_s = 0.0f;
+
+    s_exec.zones[0].active = true;
+    s_exec.zones[0].actual_valid = true;
+    s_exec.zones[0].actual_c = 120.0f;
+    s_exec.zones[0].ff_enabled = true;
+    s_exec.zones[0].ff_k_dc = 18.0f;
+    s_exec.zones[0].control_mode = ZONE_CONTROL_MODE_PID;
+    g_stub_coupling[zi][0] = 10.887f;
+    g_stub_coupling[zi][2] = 3.332f;
+
+    /* Reference/oracle value only -- NOT fed back into the production code,
+     * just used below to check what the real per-tick call site computed. */
+    float u_ff_reference = zone_feedforward(&z, zi, s_exec.target_c, s_exec.target_rate_c_per_s);
+    TEST_CHECK(u_ff_reference > 0.0f && u_ff_reference < 1.0f, "test setup sanity: u_ff must sit inside the clamp");
+
+    /* Must exceed u_ff_reference: seed_bumpless_with_ff()'s own doc comment
+     * notes the floor-at-0 integral makes the zone come back at exactly
+     * u_ff when u_desired <= u_ff -- a real effect, not a bug, but it would
+     * make this test unable to tell "both callers agree" from "the floor
+     * kicked in" regardless of whether they agree. */
+    float u_desired = 0.9f;
+    TEST_CHECK(u_desired > u_ff_reference, "test setup sanity: u_desired must exceed u_ff so the anti-windup "
+                                           "floor does not mask a caller disagreement");
+
+    /* Call site 1 (real production code, not a stand-in): reload_zone_config()/
+     * resume()'s bumpless-seed path. */
+    seed_bumpless_with_ff(&z, zi, u_desired);
+    TEST_CHECK(z.pid_state.integral >= 0.0f, "seeded integral must respect the anti-windup floor");
+
+    /* Call site 2 (also real production code): pid_family_zone_tick(), the
+     * actual per-tick control-loop body -- not a second direct
+     * zone_feedforward() call, which would only prove this TEST computes a
+     * consistent number, not that the two REAL call sites agree. A minimal
+     * but valid heater_cfg keeps heater_output_duty() (called at the tail of
+     * pid_family_zone_tick(), unrelated to feedforward) out of its own
+     * degenerate-config corner cases. */
+    z.heater_cfg.window_ms = 10000;
+    z.heater_cfg.min_on_ms = 0;
+    bool want_relay_on = false;
+    float duty = pid_family_zone_tick(&z, zi, &z.pid_cfg, /*sensor_ok_zi=*/true, /*dt_s=*/1.0f,
+                                      /*dt_ms=*/1000u, &want_relay_on);
+
+    /* The two call sites must have used the identical feedforward number --
+     * proven two ways: (1) pid_family_zone_tick()'s own reported ff term
+     * (last_pid_terms.ff, what /api/control shows) equals the oracle, so its
+     * internal zone_feedforward(z, zi, s_exec.target_c, s_exec.target_rate_c_per_s)
+     * call used the same setpoint/rate/coupling row as the reference; and
+     * (2) the resulting duty reproduces u_desired -- the actual bump-transfer
+     * property this whole mechanism exists for. */
+    TEST_CHECK(z.last_pid_terms.ff == u_ff_reference, "pid_family_zone_tick()'s own u_ff (the per-tick call "
+              "site) must equal the reference value -- if the two call sites diverge on setpoint, rate, or "
+              "coupling row, this catches it directly");
+    TEST_CHECK_NEAR(duty, u_desired, 0.02, "bumpless-seeded tick (coupling engaged), run through the REAL "
+                                          "per-tick call site, reproduces u_desired -- the two call sites "
+                                          "computed the identical feedforward");
+}
+
+static void test_feedforward_realistic_measured_matrix_zone1_row(void)
+{
+    TEST_SECTION("zone_feedforward() -- realistic case using the bench-measured matrix "
+                 "(PID_EXPANSION_PLAN.md Phase 0): zone 1's row is 10.887 toward zone 0 and 3.332 toward "
+                 "zone 2, self-gain (K_dc) 20.969");
+    reset_coupling_test_state();
+
+    const uint8_t zi = 1;
+    zone_runtime_t z;
+    memset(&z, 0, sizeof(z));
+    z.ff_enabled = true;
+    z.ff_k_dc = 20.969f;
+    z.ff_tau_s = 600.0f;
+    s_exec.ambient_c = 20.0f;
+    float setpoint_c = 40.0f, rate = 0.0f;
+
+    g_stub_coupling[zi][0] = 10.887f;
+    g_stub_coupling[zi][2] = 3.332f;
+
+    s_exec.zones[0].active = true;
+    s_exec.zones[0].actual_valid = true;
+    s_exec.zones[0].actual_c = setpoint_c + 5.0f;
+    s_exec.zones[0].ff_enabled = true;
+    s_exec.zones[0].ff_k_dc = 18.0f;
+    s_exec.zones[0].control_mode = ZONE_CONTROL_MODE_PID;
+
+    s_exec.zones[2].active = true;
+    s_exec.zones[2].actual_valid = true;
+    s_exec.zones[2].actual_c = setpoint_c - 3.0f;
+    s_exec.zones[2].ff_enabled = true;
+    s_exec.zones[2].ff_k_dc = 15.0f;
+    s_exec.zones[2].control_mode = ZONE_CONTROL_MODE_PID;
+
+    float u_ff = zone_feedforward(&z, zi, setpoint_c, rate);
+
+    float baseline = (setpoint_c - s_exec.ambient_c) / z.ff_k_dc;
+    TEST_CHECK(baseline > 0.0f && baseline < 1.0f, "test setup sanity: baseline must sit inside the clamp");
+
+    float gd0 = g_stub_coupling[zi][0] / s_exec.zones[0].ff_k_dc;
+    float gd2 = g_stub_coupling[zi][2] / s_exec.zones[2].ff_k_dc;
+    float expect = baseline
+                  - (gd0 / z.ff_k_dc) * (s_exec.zones[0].actual_c - setpoint_c)
+                  - (gd2 / z.ff_k_dc) * (s_exec.zones[2].actual_c - setpoint_c);
+    TEST_CHECK(expect > 0.0f && expect < 1.0f, "test setup sanity: expected result must sit inside the clamp "
+                                               "too, or this check can't tell a coupling bug from the clamp");
+
+    TEST_CHECK(fabsf(u_ff - expect) < 1e-5f, "u_ff must match the documented "
+              "-(coupling_coeff[j]/(k_dc_j*ff_k_dc))*(T_j-sp_j) sum over both neighbors");
+    TEST_CHECK(u_ff < baseline, "net effect here (hot zone 0 dominates cold zone 2) must be a net duty reduction");
+    TEST_CHECK(isfinite(u_ff) && u_ff >= 0.0f && u_ff <= 1.0f, "result must stay inside the existing [0,1] clamp");
+}
+
+// ---------------------------------------------------------------------------
+// Opus review, BLOCKING finding: the old gate here was just
+// active/actual_valid/ff_enabled/finite/>0 -- a zone in ZONE_CONTROL_MODE_OFF
+// or blocked by relay_authority_zone_blocked() passed all of that despite its
+// temperature error having nothing to do with its own heater. The tests below
+// prove the fix (zone_qualifies_as_coupling_neighbor()), the bound, the
+// filter, and the log-line fix, and that fixing all of it did not disturb the
+// zero-coefficient parity property proven above.
+
+static void test_feedforward_control_mode_off_neighbor_contributes_zero(void)
+{
+    TEST_SECTION("zone_feedforward() -- BLOCKING finding 1: a neighbor sitting in "
+                 "ZONE_CONTROL_MODE_OFF contributes exactly 0, reproducing the reviewer's own scenario "
+                 "(a ~600C gap between a shared setpoint and an OFF neighbor's reading, coefficients "
+                 "c_ij=3.332, k_dc_j=23.641, z's own k_dc=20.969 -- the exact inputs the review computed "
+                 "a +4.0 duty term from) instead of adding that term and getting clamped to the same "
+                 "duty a real +4.0 disturbance would produce");
+    reset_coupling_test_state();
+
+    const uint8_t zi = 1;
+    zone_runtime_t z;
+    memset(&z, 0, sizeof(z));
+    z.ff_enabled = true;
+    z.ff_k_dc = 20.969f;
+    z.ff_tau_s = 600.0f;
+
+    /* setpoint == ambient and rate == 0 so hold+climb == 0 exactly -- the
+     * ONLY thing that can move u_ff away from 0.0f is the coupling term.
+     * Real firings never run this way (ambient is never the setpoint), but
+     * pinning the baseline to a known constant makes the coupling term
+     * directly visible instead of possibly overlapping with the [0,1] clamp
+     * the way the reviewer's own 900C example does -- see the doc comment
+     * above coupling_filter_tick() call sites for why the clamp can hide
+     * this exact bug (buggy-and-fixed both saturate to 1.0 at 900C). */
+    s_exec.ambient_c = 0.0f;
+    float setpoint_c = 0.0f, rate = 0.0f;
+
+    g_stub_coupling[zi][0] = 3.332f;
+    s_exec.zones[0].active = true;
+    s_exec.zones[0].actual_valid = true;
+    s_exec.zones[0].actual_c = -600.0f; /* 600C below the shared setpoint, reviewer's own gap */
+    s_exec.zones[0].ff_enabled = true;
+    s_exec.zones[0].ff_k_dc = 23.641f;
+    /* control_mode left at 0 == ZONE_CONTROL_MODE_OFF (memset default) --
+     * exactly the reviewer's "zone 2 set to OFF" board state. */
+
+    float u_ff_off = zone_feedforward(&z, zi, setpoint_c, rate);
+    TEST_CHECK(u_ff_off == 0.0f, "an OFF neighbor 600C off setpoint must contribute exactly 0 -- the old "
+              "code computed +4.0 here and only the final [0,1] clamp saved it from being visibly wrong");
+
+    /* Sanity: the SAME neighbor state, control_mode flipped to PID, must
+     * move u_ff -- proves the check above is the control_mode gate actually
+     * doing something, not a coincidence of some other guard already
+     * zeroing this neighbor out. Kept comfortably inside the clamp (a 20C
+     * gap, not 600C) so the assertion checks the real number, not just
+     * "hit the ceiling". */
+    s_exec.zones[0].control_mode = ZONE_CONTROL_MODE_PID;
+    s_exec.zones[0].actual_c = -20.0f;
+    float u_ff_pid = zone_feedforward(&z, zi, setpoint_c, rate);
+    float gd = g_stub_coupling[zi][0] / s_exec.zones[0].ff_k_dc;
+    float expect_pid = -(gd / z.ff_k_dc) * (s_exec.zones[0].actual_c - setpoint_c);
+    TEST_CHECK(fabsf(u_ff_pid - expect_pid) < 1e-5f, "with control_mode == PID the same neighbor DOES "
+              "contribute, matching the documented formula -- proves the OFF case above is the gate, "
+              "not some other exclusion");
+    TEST_CHECK(u_ff_pid != 0.0f, "sanity: the PID case must not also be 0, or the check above is vacuous");
+
+    /* BANGBANG must be excluded too -- the derivation requires the LINEAR
+     * PID/FF response, which BANGBANG's on/off band is not. */
+    s_exec.zones[0].control_mode = ZONE_CONTROL_MODE_BANGBANG;
+    s_exec.zones[0].actual_c = -600.0f;
+    float u_ff_bangbang = zone_feedforward(&z, zi, setpoint_c, rate);
+    TEST_CHECK(u_ff_bangbang == 0.0f, "a BANGBANG neighbor must also contribute exactly 0 -- only the "
+              "PID family closes the loop the derivation assumes");
+}
+
+static void test_feedforward_faulted_or_blocked_neighbor_contributes_zero(void)
+{
+    TEST_SECTION("zone_feedforward() -- BLOCKING finding 1: a neighbor that is otherwise fully "
+                 "qualifying (active, PID mode, valid reading, has a model) but is faulted or "
+                 "authority-blocked still contributes exactly 0");
+    reset_coupling_test_state();
+
+    const uint8_t zi = 1;
+    zone_runtime_t z;
+    memset(&z, 0, sizeof(z));
+    z.ff_enabled = true;
+    z.ff_k_dc = 20.969f;
+    z.ff_tau_s = 600.0f;
+    s_exec.ambient_c = 0.0f;
+    float setpoint_c = 0.0f, rate = 0.0f;
+
+    g_stub_coupling[zi][0] = 3.332f;
+    s_exec.zones[0].active = true;
+    s_exec.zones[0].actual_valid = true;
+    s_exec.zones[0].actual_c = -20.0f;
+    s_exec.zones[0].ff_enabled = true;
+    s_exec.zones[0].ff_k_dc = 23.641f;
+    s_exec.zones[0].control_mode = ZONE_CONTROL_MODE_PID;
+
+    float u_ff_healthy = zone_feedforward(&z, zi, setpoint_c, rate);
+    TEST_CHECK(u_ff_healthy != 0.0f, "test setup sanity: a fully-qualifying neighbor must contribute "
+              "something, or the two checks below can't tell exclusion from coincidence");
+
+    s_exec.zones[0].faulted = true;
+    float u_ff_faulted = zone_feedforward(&z, zi, setpoint_c, rate);
+    TEST_CHECK(u_ff_faulted == 0.0f, "a faulted neighbor must contribute exactly 0 despite passing "
+              "every other check");
+    s_exec.zones[0].faulted = false;
+
+    s_exec.zones[0].heat_blocked = true;
+    float u_ff_blocked = zone_feedforward(&z, zi, setpoint_c, rate);
+    TEST_CHECK(u_ff_blocked == 0.0f, "a relay-authority-blocked neighbor (heat_blocked, "
+              "relay_authority_zone_blocked()'s last answer) must contribute exactly 0 despite passing "
+              "every other check");
+    s_exec.zones[0].heat_blocked = false;
+
+    float u_ff_recovered = zone_feedforward(&z, zi, setpoint_c, rate);
+    TEST_CHECK(u_ff_recovered == u_ff_healthy, "clearing both faulted and heat_blocked must restore "
+              "exactly the healthy contribution -- proves neither flag left any residual state behind");
+}
+
+static void test_feedforward_neighbor_deviation_bound_actually_bounds(void)
+{
+    TEST_SECTION("zone_feedforward() -- finding 2: the per-neighbor deviation bound (zn's own "
+                 "pid_cfg.pid_range_c) actually caps the contribution -- an extreme deviation cannot "
+                 "move u_ff further than the bound implies, not just further than the outer [0,1] clamp");
+    reset_coupling_test_state();
+
+    const uint8_t zi = 1;
+    zone_runtime_t z;
+    memset(&z, 0, sizeof(z));
+    z.ff_enabled = true;
+    z.ff_k_dc = 20.969f;
+    z.ff_tau_s = 600.0f;
+    s_exec.ambient_c = 0.0f;
+    float setpoint_c = 0.0f, rate = 0.0f;
+
+    g_stub_coupling[zi][0] = 3.332f;
+    s_exec.zones[0].active = true;
+    s_exec.zones[0].actual_valid = true;
+    s_exec.zones[0].ff_enabled = true;
+    s_exec.zones[0].ff_k_dc = 23.641f;
+    s_exec.zones[0].control_mode = ZONE_CONTROL_MODE_PID;
+    s_exec.zones[0].pid_cfg.pid_range_c = 25.0f; /* the bound under test */
+
+    float gd = g_stub_coupling[zi][0] / s_exec.zones[0].ff_k_dc;
+    float u_ff_at_bound_expect = -(gd / z.ff_k_dc) * (-25.0f);
+
+    s_exec.zones[0].actual_c = -25.0f; /* exactly at the bound */
+    float u_ff_at_bound = zone_feedforward(&z, zi, setpoint_c, rate);
+    TEST_CHECK(fabsf(u_ff_at_bound - u_ff_at_bound_expect) < 1e-5f, "at exactly the bound, u_ff must "
+              "match the formula evaluated at the bound -- confirms the expected-value formula below "
+              "is the right oracle before using it to prove the clamp");
+
+    s_exec.zones[0].actual_c = -500.0f; /* 20x past the bound */
+    float u_ff_past_bound = zone_feedforward(&z, zi, setpoint_c, rate);
+    TEST_CHECK(fabsf(u_ff_past_bound - u_ff_at_bound) < 1e-5f, "a deviation 20x past the bound must "
+              "produce the SAME u_ff as exactly-at-the-bound -- proves the per-neighbor bound saturates "
+              "the term, not merely the outer [0,1] clamp (which a -500C deviation would not even reach "
+              "here: u_ff_at_bound is well inside [0,1])");
+    TEST_CHECK(u_ff_at_bound > 0.0f && u_ff_at_bound < 1.0f, "test setup sanity: the bounded result must "
+              "sit strictly inside the outer clamp, so the equality above proves the PER-NEIGHBOR bound "
+              "engaged, not that both cases merely hit the same outer ceiling");
+
+    s_exec.zones[0].actual_c = -1000000.0f; /* pathological */
+    float u_ff_pathological = zone_feedforward(&z, zi, setpoint_c, rate);
+    TEST_CHECK(isfinite(u_ff_pathological), "a pathological deviation must not produce inf/NaN");
+    TEST_CHECK(fabsf(u_ff_pathological - u_ff_at_bound) < 1e-5f, "even a million-degree deviation "
+              "produces exactly the bounded value, never more");
+}
+
+static void test_coupling_filter_tick_attenuates_a_step(void)
+{
+    TEST_SECTION("coupling_filter_tick() -- finding 3: a step in the neighbor's raw reading is "
+                 "attenuated (low-pass, same alpha = dt/(tau+dt) formula as pid.c's D-term filter), not "
+                 "passed straight through to coupling_filtered_c");
+
+    zone_runtime_t zn;
+    memset(&zn, 0, sizeof(zn));
+    zn.pid_cfg.d_filter_tau_s = 10.0f;
+
+    /* First sample: the filter has no history yet, so it snaps to the raw
+     * reading exactly (same "prime, don't filter" behaviour pid.c's own
+     * d_filtered gets on its first tick) -- this is the correct, documented
+     * cold-start case, not a bug in the attenuation test below. */
+    zn.actual_c = 0.0f;
+    coupling_filter_tick(&zn, /*actual_valid_now=*/true, /*dt_s=*/1.0f);
+    TEST_CHECK(zn.coupling_filter_init, "first valid tick must mark the filter initialized");
+    TEST_CHECK(zn.coupling_filtered_c == 0.0f, "first valid tick snaps to the raw reading exactly");
+
+    /* Now the actual step: raw jumps from 0 to 100 in one tick. alpha =
+     * dt/(tau+dt) = 1/(10+1) = 0.090909..., so the filtered value should
+     * move to ~9.09, NOT jump straight to 100. */
+    zn.actual_c = 100.0f;
+    coupling_filter_tick(&zn, true, 1.0f);
+    float alpha = 1.0f / (10.0f + 1.0f);
+    float expect_after_1 = 0.0f + alpha * (100.0f - 0.0f);
+    TEST_CHECK_NEAR(zn.coupling_filtered_c, expect_after_1, 1e-4, "one tick after a 0->100 step, the "
+              "filtered value must match the documented low-pass formula");
+    TEST_CHECK(zn.coupling_filtered_c > 1.0f && zn.coupling_filtered_c < 20.0f, "a 100-unit step must "
+              "be substantially attenuated one tick later -- proves this is a low-pass, not a "
+              "pass-through (which would read exactly 100 here)");
+
+    /* Hold the step and let the filter keep approaching -- proves it is a
+     * genuine low-pass that settles over several taus, not a one-shot
+     * partial update. */
+    for (int i = 0; i < 200; i++) {
+        coupling_filter_tick(&zn, true, 1.0f);
+    }
+    TEST_CHECK_NEAR(zn.coupling_filtered_c, 100.0f, 0.5, "after ~20 tau (200 ticks at tau=10s, dt=1s) "
+              "the filter must have settled to within 0.5 of the raw value -- proves it tracks a held "
+              "input rather than staying frozen at the attenuated first-tick value");
+
+    /* An invalid reading must freeze the filter, not reset or chase it. */
+    float frozen_at = zn.coupling_filtered_c;
+    zn.actual_c = -9999.0f;
+    coupling_filter_tick(&zn, /*actual_valid_now=*/false, 1.0f);
+    TEST_CHECK(zn.coupling_filtered_c == frozen_at, "an invalid reading must leave coupling_filtered_c "
+              "untouched (frozen), matching pid.c's own d_filtered freeze on an out-of-range tick");
+}
+
+static void test_coupling_neighbor_count_matches_runtime_qualification(void)
+{
+    TEST_SECTION("count_qualifying_coupling_neighbors() -- finding 4: the firing-start log's neighbor "
+                 "count must equal the number zone_feedforward() will actually use, not the number of "
+                 "nonzero coefficients");
+    reset_coupling_test_state();
+
+    const uint8_t zi = 1;
+    g_stub_coupling[zi][0] = 3.332f;
+    g_stub_coupling[zi][2] = 10.887f;
+
+    /* Both coefficients nonzero, but neither neighbor qualifies (both left
+     * at the memset default: control_mode == OFF). The OLD log logic (count
+     * of nonzero coefficients) would report 2 here; the count this firing
+     * will actually run with is 0. */
+    s_exec.zones[0].active = true;
+    s_exec.zones[0].actual_valid = true;
+    s_exec.zones[0].actual_c = 50.0f;
+    s_exec.zones[0].ff_enabled = true;
+    s_exec.zones[0].ff_k_dc = 23.641f;
+    /* control_mode left OFF */
+
+    s_exec.zones[2].active = true;
+    s_exec.zones[2].actual_valid = true;
+    s_exec.zones[2].actual_c = 50.0f;
+    s_exec.zones[2].ff_enabled = true;
+    s_exec.zones[2].ff_k_dc = 15.0f;
+    s_exec.zones[2].faulted = true; /* qualifying in every other respect except this */
+
+    TEST_CHECK(count_qualifying_coupling_neighbors(zi) == 0, "two nonzero coefficients, zero qualifying "
+              "neighbors (one OFF, one faulted) -- the old coefficient-only count would have logged "
+              "\"coupling ON: 2 neighbor(s)\" for a firing where the coupling term never contributes");
+
+    /* Qualify zone 0 only. */
+    s_exec.zones[0].control_mode = ZONE_CONTROL_MODE_PID;
+    TEST_CHECK(count_qualifying_coupling_neighbors(zi) == 1, "exactly one neighbor now qualifies -- the "
+              "count must track the single change, not stay stuck at 0 or jump to 2");
+
+    /* Qualify zone 2 as well (clear its fault). */
+    s_exec.zones[2].faulted = false;
+    s_exec.zones[2].control_mode = ZONE_CONTROL_MODE_PID;
+    TEST_CHECK(count_qualifying_coupling_neighbors(zi) == 2, "both neighbors now qualify -- count must "
+              "reach 2, matching the coefficient-only count exactly BECAUSE both now genuinely qualify, "
+              "not because the gate was bypassed");
+
+    /* A neighbor with a zero coefficient never counts, however well it
+     * otherwise qualifies -- the zero-coefficient parity property extends to
+     * the count too. */
+    g_stub_coupling[zi][2] = 0.0f;
+    TEST_CHECK(count_qualifying_coupling_neighbors(zi) == 1, "a zeroed coefficient drops the count back "
+              "to 1 even though zone 2 still fully qualifies otherwise");
+}
+
+static void test_feedforward_zero_coefficient_parity_still_holds_with_new_gates(void)
+{
+    TEST_SECTION("zone_feedforward() -- regression guard: the zero-coefficient bit-identical parity "
+                 "property (proven above by test_feedforward_zero_coupling_is_bit_identical_to_no_coupling) "
+                 "must still hold now that neighbors also carry control_mode/faulted/heat_blocked state -- "
+                 "an all-zero coupling row must be a no-op REGARDLESS of what those new fields say, since "
+                 "the coefficient-zero check must short-circuit before any of them are even read");
+    reset_coupling_test_state();
+
+    zone_runtime_t z;
+    memset(&z, 0, sizeof(z));
+    z.ff_enabled = true;
+    z.ff_k_dc = 100.0f;
+    z.ff_tau_s = 600.0f;
+    s_exec.ambient_c = 20.0f;
+    float setpoint_c = 100.0f, rate = 0.0f;
+    float expect = (setpoint_c - s_exec.ambient_c) / z.ff_k_dc;
+
+    /* g_stub_coupling stays all-zero (reset_coupling_test_state()). Put
+     * every neighbor in the most "should obviously contribute" state
+     * possible -- active, valid, PID mode, healthy, a real model -- so this
+     * test cannot pass by accident (every neighbor already excluded some
+     * other way). */
+    for (uint8_t j = 0; j < MAX31856_CHANNEL_COUNT; j++) {
+        if (j == 1) continue;
+        s_exec.zones[j].active = true;
+        s_exec.zones[j].actual_valid = true;
+        s_exec.zones[j].actual_c = setpoint_c + 500.0f; /* would be a huge contribution if it counted */
+        s_exec.zones[j].ff_enabled = true;
+        s_exec.zones[j].ff_k_dc = 20.0f;
+        s_exec.zones[j].control_mode = ZONE_CONTROL_MODE_PID;
+        s_exec.zones[j].faulted = false;
+        s_exec.zones[j].heat_blocked = false;
+    }
+
+    float u_ff = zone_feedforward(&z, 1, setpoint_c, rate);
+    TEST_CHECK(u_ff == expect, "an all-zero coupling row must not move u_ff by even one ULP, even with "
+              "every neighbor otherwise fully qualifying");
+}
+
 void run_test_profile_executor_prestart(void)
 {
     test_run_refuses_before_start();
@@ -1282,6 +2373,36 @@ void run_test_profile_executor_prestart(void)
     test_halt_releases_heat_enable();
     test_pause_releases_heat_enable_and_resume_reacquires();
     test_heat_enable_release_survives_a_down_link();
+
+    test_fuzzy_prepare_gains_zero_strength_is_base_gains_bit_exact();
+    test_fuzzy_prepare_gains_matches_pid_fuzzy_adjust_directly();
+    test_fuzzy_prepare_gains_nan_strength_falls_back_to_base_not_large();
+
+    test_feedforward_zero_coupling_is_bit_identical_to_no_coupling();
+    test_feedforward_hot_neighbor_subtracts_duty();
+    test_feedforward_invalid_neighbor_contributes_zero_never_nan();
+    test_feedforward_both_callers_agree_bump_transfer();
+    test_feedforward_realistic_measured_matrix_zone1_row();
+
+    test_feedforward_control_mode_off_neighbor_contributes_zero();
+    test_feedforward_faulted_or_blocked_neighbor_contributes_zero();
+    test_feedforward_neighbor_deviation_bound_actually_bounds();
+    test_coupling_filter_tick_attenuates_a_step();
+    test_coupling_neighbor_count_matches_runtime_qualification();
+    test_feedforward_zero_coefficient_parity_still_holds_with_new_gates();
+
+    // Warm-start (PROFILES.md, owner request 2026-08-30) -- run last: unlike
+    // every test above, these drive profile_executor_run() through a real
+    // full-profile start (see this block's own header comment), which
+    // leaves s_exec.lock non-NULL -- test_run_refuses_before_start() and
+    // friends above assume the opposite (fresh process state) and must run
+    // first.
+    test_warm_start_cold_kiln_is_a_regression_noop();
+    test_warm_start_mid_ramp_entry_never_below_current();
+    test_warm_start_replays_skipped_relay_io_and_registers_it();
+    test_warm_start_reached_dwell_is_not_shortened();
+    test_warm_start_descending_profile_does_not_jump_into_cooldown();
+    test_warm_start_hotter_than_entire_profile_lands_on_last_segment();
 }
 
 int main(void)

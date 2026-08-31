@@ -17,6 +17,7 @@
 #include "kiln_io_owner.h"
 #include "ota_http.h" /* ota_http_heat_blocked_by_update() -- heat_interlock.h's own doc comment */
 #include "pid.h"
+#include "pid_fuzzy.h"
 #include "relay_authority.h"
 #include "relay_cycles.h"
 #include "run_state.h"
@@ -149,6 +150,18 @@ typedef struct {
     pid_cfg_t pid_cfg;
     pid_state_t pid_state;
 
+    /* ZONE_CONTROL_MODE_PID_FUZZY only (PID_EXPANSION_PLAN.md Phase 3
+     * hazard 3): the effective Ki pid_fuzzy_adjust() produced on the last
+     * tick that actually ran it, so this tick can detect a change and rescale
+     * pid_state.integral before calling pid_update_terms() -- otherwise a
+     * fuzzy-driven Ki move steps the I term's contribution (i_term =
+     * ki*integral) discontinuously, every tick, since the rule table can
+     * legitimately re-fire a different cell tick to tick. 0 means "not yet
+     * seeded" (mode just switched to fuzzy, or a fresh pid_reset()) -- the
+     * first fuzzy tick then does no rescale, matching what pid_reset()
+     * already does for the plain-PID path (cold start, no bump to avoid). */
+    float fuzzy_prev_effective_ki;
+
     /* TODO.md 6A.2 feedforward: this zone's identified FOPDT plant model, as
      * autotune left it in zone config (zones_config_get_model()). Cached at
      * run start and refreshed by reload_zone_config() like every other zone
@@ -183,6 +196,16 @@ typedef struct {
     bool  relay_commanded_on;
     float duty;
     pid_terms_t last_pid_terms;
+
+    /* Cross-zone coupling (PID_EXPANSION_PLAN.md 2c/Phase 3b): low-pass
+     * filtered copy of actual_c, updated once per control tick (not once per
+     * zone_feedforward() call -- see that update site's comment) at this
+     * zone's OWN d_filter_tau_s, the same tau/alpha formula pid.c uses for
+     * its D term. Read by every OTHER zone's zone_feedforward() as the
+     * neighbour temperature for the disturbance term, so thermocouple noise
+     * on this zone does not land straight in a neighbour's duty. */
+    float coupling_filtered_c;
+    bool  coupling_filter_init;
 
     /* TODO.md 6A.2's cooling-limited diagnostic: seconds duty has
      * continuously read 0 while still PROFILE_EXECUTOR_COOLING_LIMITED_MARGIN_C
@@ -359,6 +382,15 @@ typedef struct {
     char     fault_reason[96];
     thermal_guard_trip_t fault_guard;
 
+    /* Warm-start (PROFILES.md, owner request 2026-08-30) -- mirrors
+     * profile_exec_status_t's fields of the same name, see that header for
+     * what they mean. Set once in profile_executor_run(), read only by
+     * profile_executor_get_status(). */
+    bool     warm_started;
+    char     warm_start_reason[128];
+    uint8_t  warm_start_replayed_segments[PROFILE_MAX_SEGMENTS];
+    uint8_t  warm_start_replayed_count;
+
     /* History ring buffer (TODO.md section 0 / 6A.9) -- single
      * representative zone, see profile_executor.h's doc comment. */
     history_slot_t history[HISTORY_MAX_SAMPLES];
@@ -435,6 +467,104 @@ static bool zone_load_model(uint8_t zi)
     return (z->ff_enabled != was_enabled) || (z->ff_k_dc != was_k) || (z->ff_tau_s != was_tau);
 }
 
+/* Advances zn->coupling_filtered_c by one tick -- the cross-zone coupling
+ * term's neighbour-side low-pass (PID_EXPANSION_PLAN.md 2c/Phase 3b,
+ * BLOCKING review finding 3). Called exactly once per control tick, from the
+ * per-channel reading loop right after actual_c/actual_valid are set for
+ * that tick -- NOT from inside zone_feedforward(), even though
+ * zone_feedforward() is what reads the result. zone_feedforward() is called
+ * from two places: the real per-tick control loop AND
+ * seed_bumpless_with_ff() on mode transitions, and the latter's whole point
+ * is to reproduce EXACTLY what the very next real tick will compute (see
+ * seed_bumpless_with_ff()'s doc comment). If the filter advanced inside
+ * zone_feedforward() itself, calling it twice for the "same" tick (once to
+ * seed, once for real) would advance the filter twice, and the seed would no
+ * longer match the tick it was seeding for -- breaking bumplessness. Pulling
+ * the update out to here, called once regardless of how many zones'
+ * zone_feedforward() calls read it afterward, avoids that.
+ *
+ * Same tau/alpha formula as pid.c's own D-term low-pass (pid_update_terms()),
+ * deliberately: this reuses zn's own d_filter_tau_s -- the zone being
+ * filtered's own configured time constant, the same value pid.c already
+ * trusts as "slow enough to be signal, not noise" for this exact sensor,
+ * rather than inventing a second, unrelated tau.
+ *
+ * Frozen (not reset to 0 or NAN), not reset, on an invalid reading -- same
+ * "hold last value" freeze pid.c's d_filtered gets outside pid_range_c. A
+ * neighbour with a bad reading THIS instant is excluded from the coupling
+ * sum entirely by zone_qualifies_as_coupling_neighbor() (actual_valid is
+ * one of its checks), so a stale filtered value sitting unused does no
+ * harm, and resuming on that stale value when the sensor comes back is
+ * better than snapping to a fresh raw reading with no filtering at all. */
+static void coupling_filter_tick(zone_runtime_t *zn, bool actual_valid_now, float dt_s)
+{
+    if (!actual_valid_now || !isfinite(zn->actual_c)) {
+        return;
+    }
+    if (!zn->coupling_filter_init) {
+        zn->coupling_filtered_c = zn->actual_c;
+        zn->coupling_filter_init = true;
+        return;
+    }
+    float tau = zn->pid_cfg.d_filter_tau_s;
+    if (!(tau > 0.0f)) tau = 30.0f; /* pid.h's documented default, belt-and-braces */
+    float alpha = dt_s / (tau + dt_s);
+    zn->coupling_filtered_c += alpha * (zn->actual_c - zn->coupling_filtered_c);
+}
+
+/* True iff zone zn is genuinely under closed-loop control on the shared
+ * setpoint right now, i.e. its temperature error is attributable to ITS OWN
+ * heater the way the cross-zone coupling derivation (zone_feedforward()'s
+ * doc comment) requires. BLOCKING review finding: the old gate here was just
+ * active/ff_enabled/finite/reading-valid, which a zone sitting in
+ * ZONE_CONTROL_MODE_OFF or blocked by relay_authority_zone_blocked() still
+ * passes -- such a zone's temperature can be arbitrarily far from setpoint
+ * for reasons that have nothing to do with its own duty, so attributing that
+ * gap to "this zone's heater is doing something" is simply wrong, not just
+ * imprecise. Checked here, not folded into the caller's loop, so
+ * zone_feedforward() and the firing-start log (both need the same answer)
+ * cannot drift apart.
+ *
+ * zn->control_mode: only the PID family actually closes the loop on
+ * setpoint every tick; BANGBANG's on/off band is not the linear response
+ * this term's derivation assumes, and OFF drives nothing at all.
+ * zn->faulted: a per-zone guard trip means duty is being forced off/limited
+ * for a reason unrelated to normal setpoint tracking.
+ * zn->heat_blocked: relay_authority_zone_blocked()'s answer as of the last
+ * tick that wanted heat (apply_relay()) -- a zone whose relay authority is
+ * refusing ON is not being driven either, even though nothing else here
+ * would notice. */
+static bool zone_qualifies_as_coupling_neighbor(const zone_runtime_t *zn)
+{
+    return zn->active && zn->actual_valid && isfinite(zn->actual_c) &&
+           zn->ff_enabled && isfinite(zn->ff_k_dc) && zn->ff_k_dc > 0.0f &&
+           (zn->control_mode == ZONE_CONTROL_MODE_PID || zn->control_mode == ZONE_CONTROL_MODE_PID_FUZZY) &&
+           !zn->faulted && !zn->heat_blocked;
+}
+
+/* How many of zone zi's neighbours actually contribute to its coupling term
+ * right now -- i.e. have a nonzero/finite coefficient in zi's row AND pass
+ * zone_qualifies_as_coupling_neighbor(). Factored out of the firing-start
+ * log (finding 4) so the log's count and zone_feedforward()'s actual runtime
+ * behaviour can never independently drift: both ultimately call
+ * zone_qualifies_as_coupling_neighbor() on the same s_exec.zones[j] state. */
+static uint8_t count_qualifying_coupling_neighbors(uint8_t zi)
+{
+    float coupling_row[MAX31856_CHANNEL_COUNT];
+    uint8_t count = 0;
+    if (!zones_config_get_coupling(zi, coupling_row)) {
+        return 0;
+    }
+    for (uint8_t j = 0; j < MAX31856_CHANNEL_COUNT; j++) {
+        if (j == zi) continue;
+        if (isfinite(coupling_row[j]) && coupling_row[j] != 0.0f &&
+            zone_qualifies_as_coupling_neighbor(&s_exec.zones[j])) {
+            count++;
+        }
+    }
+    return count;
+}
+
 /* The feedforward duty for one zone, already clamped to [0,1]. Returns exactly
  * 0.0f -- i.e. the behaviour of every firing before this existed -- for a zone
  * with no usable model.
@@ -443,7 +573,7 @@ static bool zone_load_model(uint8_t zi)
  * legitimately negative and is supposed to reduce the hold duty below what a
  * steady hold would need. Clamping the terms separately would throw that away
  * and hold the kiln up through a controlled cool. */
-static float zone_feedforward(const zone_runtime_t *z, float setpoint_c, float rate_c_per_s)
+static float zone_feedforward(const zone_runtime_t *z, uint8_t zi, float setpoint_c, float rate_c_per_s)
 {
     if (!z->ff_enabled) {
         return 0.0f;
@@ -451,6 +581,108 @@ static float zone_feedforward(const zone_runtime_t *z, float setpoint_c, float r
     float hold = (setpoint_c - s_exec.ambient_c) / z->ff_k_dc;
     float climb = (rate_c_per_s * z->ff_tau_s) / z->ff_k_dc;
     float u_ff = hold + climb;
+
+    /* PID_EXPANSION_PLAN.md section 2c / Phase 3b: additive cross-zone
+     * coupling contribution, added here so it stays inside the isfinite/
+     * clamp below rather than escaping it.
+     *
+     * coupling_coeff[j] (zones_http.h) is zone zi's measured steady-state
+     * response in raw degC PER UNIT DUTY AT ZONE j'S HEATER -- the exact
+     * same convention as ff_k_dc/model_k_dc, deliberately not a
+     * dimensionless ratio. That means a plain `-c_ij*(T_j-sp_j)` is not a
+     * duty: it mixes (degC_i/duty_j) with degC_j into degC_i*degC_j/duty_j,
+     * which silently rescales the whole term by whatever K_dc happens to be.
+     * The dimensionally correct form is the standard measured-disturbance
+     * feedforward [W6]/[10]:
+     *
+     *     u_ff_d = -(Gd / Gu) * d
+     *
+     * with the manipulated-variable gain Gu = this zone's own
+     * d(T_i)/d(duty_i) = z->ff_k_dc, and the disturbance gain Gd =
+     * d(T_i)/d(T_j) -- a dimensionless degC_i-per-degC_j ratio, NOT
+     * coupling_coeff[j] itself. Gd is recovered by dividing coupling_coeff[j]
+     * (degC_i per duty_j) by neighbour j's OWN steady-state gain k_dc_j
+     * (degC_j per duty_j); the duty_j unit cancels, leaving degC_i/degC_j:
+     *
+     *     Gd_ij = coupling_coeff[j] / k_dc_j
+     *     term  = -(Gd_ij / z->ff_k_dc) * (T_j - setpoint_j)
+     *           = -(coupling_coeff[j] / (k_dc_j * z->ff_k_dc)) * (T_j - setpoint_j)
+     *
+     * A neighbour running hot (T_j > setpoint_j) subtracts duty from this
+     * zone; a neighbour running cold adds it; a neighbour on target changes
+     * nothing. The zone-wide setpoint is shared (s_exec.target_c, see its
+     * own doc comment), so neighbour j's setpoint is the very same
+     * setpoint_c already passed in for zone zi -- no separate lookup needed.
+     *
+     * Skipped, contributing exactly 0 and never NaN: the diagonal (j==zi),
+     * any coupling_coeff[j] that is 0/non-finite (0 is coupling_coeff's own
+     * "unmeasured" default -- with every row 0 this loop changes nothing,
+     * which is finding 1/the required zero-coefficient parity), any
+     * neighbour with no identified k_dc_j of its own (Gd_ij is not
+     * computable without it, so "no model for that neighbour" degrades to
+     * the same "contribute 0" default as "no coupling measured"), and any
+     * neighbour zone_qualifies_as_coupling_neighbor() rejects -- inactive,
+     * no valid reading, not currently under PID-family closed-loop control
+     * on this shared setpoint, faulted, or blocked by
+     * relay_authority_zone_blocked(). That last group is a post-review
+     * fix (was just active/reading-valid before): a neighbour sitting at
+     * ZONE_CONTROL_MODE_OFF or authority-blocked can be arbitrarily far
+     * from setpoint for reasons that have nothing to do with its own
+     * heater, so attributing that gap to "this zone's duty is doing
+     * something" was simply wrong -- see zone_qualifies_as_coupling_neighbor()'s
+     * doc comment for the concrete failure this was producing. The
+     * deviation itself is also low-pass filtered and bounded before it's
+     * scaled -- see the two comments inside the loop below. */
+    float coupling_row[MAX31856_CHANNEL_COUNT];
+    if (zones_config_get_coupling(zi, coupling_row)) {
+        for (uint8_t j = 0; j < MAX31856_CHANNEL_COUNT; j++) {
+            if (j == zi) continue;
+            float c_ij = coupling_row[j];
+            if (!isfinite(c_ij) || c_ij == 0.0f) continue;
+            const zone_runtime_t *zn = &s_exec.zones[j];
+            if (!zone_qualifies_as_coupling_neighbor(zn)) continue;
+            float gd_ij = c_ij / zn->ff_k_dc;
+
+            /* Neighbour deviation: the LOW-PASS FILTERED reading (see the
+             * coupling_filtered_c update site), not the raw one -- finding
+             * 3, keeps thermocouple noise out of this zone's duty. Bounded
+             * to +/- zn->pid_cfg.pid_range_c (finding 2) before it is
+             * scaled: that is the exact threshold pid.c itself already uses
+             * to decide a zone's error is too large for the linear PID/FF
+             * model to mean anything (pid_range_c gate in
+             * pid_update_terms(), full on/off outside it) -- reusing it
+             * here means a deviation this term is allowed to react to
+             * linearly is never larger than one pid.c itself would still
+             * be doing linear control on. Without this a neighbour idle at
+             * OFF used to pass everything else and reach a 600C deviation
+             * (the reviewer's scenario) uncapped; with a genuinely
+             * qualifying neighbour (PID family, not faulted, not blocked)
+             * a multi-hundred-degree gap should not occur in the first
+             * place, so this bound is a backstop against a bad reading or
+             * a slow-to-settle transient, not the primary defense -- that
+             * is finding 1's control_mode/faulted/heat_blocked gate above.
+             *
+             * coupling_filter_init is only set once the main control loop
+             * has actually run at least one tick for the neighbour (the
+             * filter update site above). A caller that reaches
+             * zone_feedforward() before that (the host tests below, which
+             * poke actual_c directly and call this function with no tick
+             * loop around it) falls back to the raw actual_c -- the same
+             * "snap to the first sample" the filter itself does on its own
+             * first update, so this is not a second, divergent behaviour,
+             * just the filter's own cold-start case reached a different
+             * way. */
+            float neighbour_temp = zn->coupling_filter_init ? zn->coupling_filtered_c : zn->actual_c;
+            float dev = neighbour_temp - setpoint_c;
+            float bound = zn->pid_cfg.pid_range_c;
+            if (bound > 0.0f) {
+                if (dev > bound) dev = bound;
+                else if (dev < -bound) dev = -bound;
+            }
+            u_ff -= (gd_ij / z->ff_k_dc) * dev;
+        }
+    }
+
     if (!isfinite(u_ff)) {
         return 0.0f; /* belt-and-braces: a non-finite setpoint can only come
                       * from a corrupted profile, but it must not become duty */
@@ -472,10 +704,43 @@ static float zone_feedforward(const zone_runtime_t *z, float setpoint_c, float r
  * clamp on the next tick -- so the zone comes back at its feedforward duty.
  * That is the honest outcome rather than a defect: the model's estimate of
  * what the current setpoint costs to hold is exactly what the operator asked
- * to resume onto. Must be called with s_exec.lock held. */
-static void seed_bumpless_with_ff(zone_runtime_t *z, float u_desired)
+ * to resume onto. Must be called with s_exec.lock held.
+ *
+ * zi must be z's own index in s_exec.zones[] -- zone_feedforward() needs it
+ * both to look up z's own coupling row (PID_EXPANSION_PLAN.md section 2c)
+ * and to skip that row's own diagonal. This is the same zone_feedforward()
+ * called from the per-tick control loop (pid_family_zone_tick()), on the
+ * same s_exec.target_c/target_rate_c_per_s -- deliberately identical inputs,
+ * so a zone reseeded here is bumpless against exactly the feedforward the
+ * very next tick will compute, coupling term included. If the two callers
+ * ever diverge on what they pass, bump transfer breaks.
+ *
+ * Residual bump-transfer gap the reviewer flagged: "identical inputs" only
+ * covers target_c/target_rate_c_per_s and zi -- it does NOT mean a
+ * neighbour's contribution is frozen between this seed and the next real
+ * tick. coupling_filtered_c (this zone's neighbour-side low-pass, see its
+ * update site) is bumpless against itself -- both calls read whatever the
+ * filter's current value is -- but that value keeps moving between ticks
+ * exactly like any filtered signal does. If a neighbour's thermocouple
+ * reading is recovering (e.g. it just came back in range) between this seed
+ * and the next tick, the filtered deviation used here and the one used a
+ * tick later can differ, and this zone's duty steps by
+ * (gd_ij/z->ff_k_dc) * delta_dev -- the reviewer's example (gd/k =
+ * 0.0159/degC, a 30C recovery = a 48% step) is against the raw,
+ * pre-filter deviation. The d_filter_tau_s low-pass added here
+ * (finding 3) softens this materially by construction: a low-pass turns a
+ * step into an exponential approach over ~tau, so the SAME 30C recovery
+ * spreads across many ticks instead of landing on whichever single tick
+ * happened to seed. It does not eliminate the residual: a real
+ * discontinuity in the neighbour's temperature (sensor recovering, not
+ * just filtered noise) still passes through, delayed and attenuated rather
+ * than blocked. No further machinery is added for this -- the same
+ * anti-windup clamp that already bounds every other seed's error is the
+ * backstop, and the filter is doing exactly what pid.c's own D filter does
+ * for the analogous problem on the local sensor. */
+static void seed_bumpless_with_ff(zone_runtime_t *z, uint8_t zi, float u_desired)
 {
-    float u_ff = zone_feedforward(z, s_exec.target_c, s_exec.target_rate_c_per_s);
+    float u_ff = zone_feedforward(z, zi, s_exec.target_c, s_exec.target_rate_c_per_s);
     pid_seed_bumpless(&z->pid_state, &z->pid_cfg, s_exec.target_c, z->actual_c, u_desired, u_ff);
 }
 
@@ -1190,6 +1455,7 @@ static bool reload_zone_config(uint8_t zi)
         force_zone_relay_off(zi);
         z->control_mode = mode;
         pid_reset(&z->pid_state);
+        z->fuzzy_prev_effective_ki = 0.0f; /* no bump-transfer history to carry into a cold start */
         changed = true;
     }
 
@@ -1208,15 +1474,25 @@ static bool reload_zone_config(uint8_t zi)
         z->pid_cfg.kp = kp;
         z->pid_cfg.ki = ki;
         z->pid_cfg.kd = kd;
-        if (!mode_changed && z->control_mode == ZONE_CONTROL_MODE_PID) {
+        /* PID_FUZZY covered here too, not just plain PID: it shares the same
+         * pid_state/pid_cfg base gains, so an operator's tuning edit needs
+         * the identical bumpless handling either way. */
+        if (!mode_changed &&
+            (z->control_mode == ZONE_CONTROL_MODE_PID || z->control_mode == ZONE_CONTROL_MODE_PID_FUZZY)) {
             if (z->actual_valid) {
-                seed_bumpless_with_ff(z, z->duty);
+                seed_bumpless_with_ff(z, zi, z->duty);
+                /* Reseeded off the BASE gains (u_desired's split assumes
+                 * cfg.ki, not whatever cell the fuzzy layer last picked), so
+                 * that's the "previous effective Ki" hazard-3's bump-transfer
+                 * should compare next fuzzy tick against. */
+                z->fuzzy_prev_effective_ki = ki;
             } else {
                 /* Seeding off a fabricated measurement would bake this tick's
                  * bad reading into the integral and keep driving from it long
                  * after the sensor recovers. A cold restart costs one
                  * transient; a poisoned integral costs the rest of the run. */
                 pid_reset(&z->pid_state);
+                z->fuzzy_prev_effective_ki = 0.0f;
             }
         }
         changed = true;
@@ -1241,11 +1517,14 @@ static bool reload_zone_config(uint8_t zi)
         ESP_LOGI(TAG, "zone %u plant model reloaded mid-firing: feedforward %s (K_dc %.4g, tau %.4gs) -- "
                       "PID re-seeded so the duty split changes without the duty itself stepping",
                  zi, z->ff_enabled ? "ON" : "OFF", (double)z->ff_k_dc, (double)z->ff_tau_s);
-        if (!mode_changed && z->control_mode == ZONE_CONTROL_MODE_PID) {
+        if (!mode_changed &&
+            (z->control_mode == ZONE_CONTROL_MODE_PID || z->control_mode == ZONE_CONTROL_MODE_PID_FUZZY)) {
             if (z->actual_valid) {
-                seed_bumpless_with_ff(z, z->duty);
+                seed_bumpless_with_ff(z, zi, z->duty);
+                z->fuzzy_prev_effective_ki = z->pid_cfg.ki; /* see the gain-reload path above */
             } else {
                 pid_reset(&z->pid_state); /* same reasoning as the gain path above */
+                z->fuzzy_prev_effective_ki = 0.0f;
             }
         }
         changed = true;
@@ -1437,6 +1716,188 @@ static float exec_threshold(uint8_t zone_index, int which)
 #define EXEC_COOLING_HOLD_S(zi)        exec_threshold((zi), 2)
 #define EXEC_RAMP_LOCK_BAND_C(zi)      exec_threshold((zi), 3)
 
+/* Shared PID-family per-zone tick body -- everything downstream of "which
+ * pid_cfg_t to run this tick under" (PID_EXPANSION_PLAN.md Phase 3 wiring):
+ * the pid_update_terms() call itself, TODO.md 6A.2's cooling-limited
+ * diagnostic, and 6A.5's load-cap credit payback. ZONE_CONTROL_MODE_PID
+ * calls this with cfg == &z->pid_cfg unchanged (so its behavior is
+ * byte-for-byte what it always was -- this refactor changes nothing on that
+ * path, only where the code lives). ZONE_CONTROL_MODE_PID_FUZZY calls it
+ * with a per-tick fuzzy-adjusted copy. Extracted once instead of duplicated,
+ * per PID_CONTROL.md's "each zone with its own instance of the three pure
+ * modules" -- fuzzy is a variant of the PID module, not a second copy of
+ * this several-hundred-line body that could drift from the original. */
+static float pid_family_zone_tick(zone_runtime_t *z, uint8_t zi, const pid_cfg_t *cfg,
+                                  bool sensor_ok_zi, float dt_s, uint32_t dt_ms,
+                                  bool *out_want_relay_on)
+{
+    float duty = 0.0f;
+    if (sensor_ok_zi) {
+        /* TODO.md 6A.2's feedforward. 0.0f -- byte-for-byte the behaviour of
+         * every firing before this -- for any zone with no identified
+         * model, which is every zone that has never been autotuned. Passed
+         * IN to the controller so the clamp, the anti-windup
+         * conditional-integration test and the term breakdown all see the
+         * same number the element is driven from; the value handed over
+         * here is what /api/control reports as "ff", so the operator can
+         * read the P/I/D/FF split and see how much of the duty is the model
+         * and how much is the loop correcting it. */
+        float u_ff = zone_feedforward(z, zi, s_exec.target_c, s_exec.target_rate_c_per_s);
+        duty = pid_update_terms(&z->pid_state, cfg, s_exec.target_c, z->actual_c, dt_s,
+                                u_ff, &z->last_pid_terms);
+    }
+    /* TODO.md 6A.2's cooling-limited diagnostic. Checked against the RAW
+     * duty pid_update_terms() just returned, before the load-cap boost
+     * below can add anything to it -- a boosted duty is not "the loop asked
+     * for heat," it is "another zone's deferred credit landed here," and
+     * boost only ever makes duty larger, never masks a genuine 0. */
+    if (sensor_ok_zi && duty <= 0.0f &&
+        z->actual_c > s_exec.target_c + EXEC_COOLING_MARGIN_C(zi)) {
+        z->cooling_limited_hold_s += dt_s;
+    } else {
+        z->cooling_limited_hold_s = 0.0f;
+    }
+    z->cooling_limited = z->cooling_limited_hold_s >= EXEC_COOLING_HOLD_S(zi);
+    /* Pay back any load-cap-deferred on-time as a duty boost -- only
+     * actually consumed below if this tick turns out to open a fresh
+     * window (heater_output_duty() only reads the duty argument at a
+     * window boundary; a boost handed to it mid-window is silently
+     * ignored, so crediting it back here unconditionally and only debiting
+     * on a real boundary keeps the books exact even if several ticks pass
+     * between boundaries). */
+    float boosted_duty = duty;
+    float credit_ms = 0.0f;
+    /* sensor_ok_zi gates this the same as the raw PID compute above:
+     * without it, a zone that accrued load-cap credit (TODO.md 6A.5) and
+     * then lost its thermocouple would have `duty` correctly held at 0.0f
+     * by the `if (sensor_ok_zi)` above, but this block ran unconditionally
+     * and could still boost `boosted_duty` up to 1.0f from the credit
+     * alone -- commanding full output on a dead sensor, the exact case the
+     * BANGBANG branch below explicitly refuses ("want_raw = false; no
+     * trustworthy reading -> never command heat"). PID had no equivalent
+     * until now.
+     *
+     * The credit itself is left untouched rather than forfeited: it
+     * represents on-time this zone was denied by the load cap, a
+     * bookkeeping fact that has nothing to do with whether the
+     * thermocouple is currently readable. Discarding it would
+     * double-penalize the zone -- once for losing its window to the cap,
+     * again for a sensor fault that is very likely transient (TODO.md
+     * 6A.3's SPI retry/debounce). Leaving deferred_on_ms as-is means the
+     * credit is simply not spent this tick and is still there to pay back
+     * once the sensor (and therefore sensor_ok_zi) recovers. */
+    if (sensor_ok_zi && z->deferred_on_ms > 0.0f && z->heater_cfg.window_ms > 0) {
+        float window_ms_f = (float)z->heater_cfg.window_ms;
+        credit_ms = z->deferred_on_ms;
+        float max_credit_ms = (1.0f - boosted_duty) * window_ms_f;
+        if (credit_ms > max_credit_ms) credit_ms = max_credit_ms;
+        if (credit_ms < 0.0f) credit_ms = 0.0f;
+        boosted_duty += credit_ms / window_ms_f;
+    }
+    uint32_t elapsed_before = z->heater_state.window_elapsed_ms;
+    bool was_started = z->heater_state.window_started;
+    *out_want_relay_on = heater_output_duty(&z->heater_state, &z->heater_cfg, boosted_duty, dt_ms);
+    /* A fresh window opened this tick iff window_elapsed_ms got reset to 0
+     * -- the only place heater_output_duty() sets it to exactly 0 is the
+     * new-window branch (see its comment); 1Hz ticks against a >=1s window
+     * make an accumulation-only 0 practically impossible. Only then did
+     * boosted_duty actually get baked into on_ms_this_window, so only then
+     * is the credit actually spent. */
+    if (credit_ms > 0.0f && z->heater_state.window_elapsed_ms == 0 &&
+        (!was_started || elapsed_before > 0)) {
+        z->deferred_on_ms -= credit_ms;
+        if (z->deferred_on_ms < 0.0f) z->deferred_on_ms = 0.0f;
+    }
+    return duty;
+}
+
+/* ZONE_CONTROL_MODE_PID_FUZZY's per-tick gain computation
+ * (PID_EXPANSION_PLAN.md Phase 3, "two wiring hazards found in review").
+ *
+ * Hazard 1 (error_rate_c_per_s producer): pid.c's own d_filtered is
+ * derivative-on-measurement, low-pass filtered through d_filter_tau_s --
+ * exactly the signal PID_EXPANSION_PLAN.md says to reuse rather than have
+ * this file invent a raw per-tick finite difference (which would feed the
+ * rule table unfiltered ADC noise and chatter gains cell-to-cell). Since
+ * error = setpoint - measurement, d(error)/dt = -d(measurement)/dt whenever
+ * the setpoint is locally constant -- and pid.c's own d_filtered is defined
+ * as exactly -d(measurement)/dt (see pid_update_terms()'s raw_d), so
+ * z->pid_state.d_filtered IS error_rate_c_per_s under that same
+ * "setpoint locally constant" assumption pid.c already makes for its own D
+ * term. Read BEFORE this tick's pid_update_terms() call runs (so it reflects
+ * up through last tick, one tick of lag on an already ~30s-time-constant
+ * filter -- immaterial) rather than after, because gains have to be chosen
+ * before the call that uses them.
+ *
+ * The dSP/dt decision, stated explicitly per the plan's requirement: this
+ * deliberately does NOT add the setpoint's own ramp rate
+ * (s_exec.target_rate_c_per_s) into error_rate_c_per_s. During a profile
+ * ramp the setpoint is moving at a known, constant, non-disturbance rate;
+ * folding it in would make a perfectly ordinary firing register as "rising"
+ * or "falling" on the rate axis for the entire ramp, for a reason that has
+ * nothing to do with plant behavior the fuzzy layer should be reacting to.
+ * pid.c's own derivative-on-measurement choice (not derivative-on-error) is
+ * the same judgment call for the same reason -- a moving setpoint must not
+ * by itself look like a disturbance -- and this reuses that precedent rather
+ * than re-deriving a different answer for the same question. The
+ * measurement's own filtered rate can still be large during a
+ * well-tracked ramp (the actual temperature IS climbing at close to the
+ * ramp rate) -- that is real, physical, filtered signal, not noise, and it
+ * is exactly what hazard 2's rescaled RATE_BAND_C_PER_S below is sized to
+ * treat as unremarkable rather than "large."
+ *
+ * Hazard 3 (bump transfer on a Ki move): the rule table can legitimately
+ * land on a different cell tick to tick as error/error_rate drift, so the
+ * effective Ki pid_fuzzy_adjust() returns can change every tick, and
+ * pid_state.integral persists across that change -- i_term = ki*integral
+ * would then step discontinuously the instant Ki moves. Rather than route
+ * every such move through pid_seed_bumpless() (which re-derives the
+ * integral from a *desired output*, appropriate for a deliberate
+ * discontinuity like a mode change, not for a per-tick nudge), this rescales
+ * the integral inversely so ki_old*integral == ki_new*integral' -- the I
+ * term's actual contribution to duty is unchanged by the rescale itself,
+ * only by the (deliberate, bounded) change in Ki. z->fuzzy_prev_effective_ki
+ * tracks "effective Ki last tick" across the mode-change/reseed paths in
+ * reload_zone_config()/resume() too, so this stays correct after any of
+ * those discontinuities as well. */
+static void pid_fuzzy_prepare_gains(zone_runtime_t *z, uint8_t zi, pid_cfg_t *out_cfg)
+{
+    *out_cfg = z->pid_cfg; /* d_filter_tau_s/b/pid_range_c untouched -- only kp/ki/kd move */
+
+    float error_c = s_exec.target_c - z->actual_c;
+    float error_rate_c_per_s = z->pid_state.d_filtered; /* hazard 1, see comment above */
+
+    float strength_pct_f = 0.0f;
+    (void)zones_config_get_fuzzy_strength_pct(zi, &strength_pct_f);
+    /* Defence-in-depth on the duty path: zones_http.c validates this on load
+     * so a non-finite value should never reach here, but if one ever did,
+     * both clamp comparisons below are false for NaN and (uint8_t)(NaN+0.5f)
+     * is undefined behaviour -- guard it explicitly rather than trust the
+     * loader stayed the only path in. */
+    uint8_t strength_pct = (!isfinite(strength_pct_f)) ? 0
+                          : (strength_pct_f < 0.0f) ? 0
+                          : (strength_pct_f > 100.0f) ? 100
+                          : (uint8_t)(strength_pct_f + 0.5f);
+
+    float adj_kp = z->pid_cfg.kp, adj_ki = z->pid_cfg.ki, adj_kd = z->pid_cfg.kd;
+    pid_fuzzy_adjust(error_c, error_rate_c_per_s, z->pid_cfg.kp, z->pid_cfg.ki, z->pid_cfg.kd,
+                     strength_pct, &adj_kp, &adj_ki, &adj_kd);
+
+    /* Hazard 3's bump transfer, via pid.c's own pid_rescale_integral_for_new_ki()
+     * (see its header comment for why this is the right tool, not
+     * pid_seed_bumpless()). z->fuzzy_prev_effective_ki starting at 0.0f on a
+     * cold start/mode change/reseed makes this a no-op right after any of
+     * those -- pid_reset()/pid_seed_bumpless() already gave the integral a
+     * correct starting value for THAT discontinuity, so rescaling again on
+     * top of a value just deliberately set would be wrong, not extra-safe. */
+    pid_rescale_integral_for_new_ki(&z->pid_state, z->fuzzy_prev_effective_ki, adj_ki);
+    z->fuzzy_prev_effective_ki = adj_ki;
+
+    out_cfg->kp = adj_kp;
+    out_cfg->ki = adj_ki;
+    out_cfg->kd = adj_kd;
+}
+
 /* How long the PC link may stay silent before a running firing is aborted.
  * Operator-settable since v8 (one global field, not per-zone -- the link is
  * one wire to one PC); 0 keeps the constant this was before. */
@@ -1603,6 +2064,13 @@ static void executor_task_entry(void *arg)
             sensor_ok[zi] = valid;
             s_exec.zones[zi].actual_valid = valid;
             s_exec.zones[zi].actual_c = valid ? zones_config_apply_cal(zi, combined) : NAN;
+
+            /* Cross-zone coupling filter (PID_EXPANSION_PLAN.md 2c/Phase 3b,
+             * BLOCKING review finding 3): updated exactly once per control
+             * tick, via this helper rather than inline inside
+             * zone_feedforward() -- see coupling_filter_tick()'s own doc
+             * comment for why. */
+            coupling_filter_tick(&s_exec.zones[zi], valid, dt_s);
         }
 
         /* --- Config reload (TODO.md 6A.7) ----------------------------------
@@ -1775,91 +2243,28 @@ static void executor_task_entry(void *arg)
             zone_runtime_t *z = &s_exec.zones[zi];
 
             float duty = 0.0f;
-            z->last_pid_terms = (pid_terms_t){0}; /* only ZONE_CONTROL_MODE_PID below fills this in */
+            z->last_pid_terms = (pid_terms_t){0}; /* only ZONE_CONTROL_MODE_PID/PID_FUZZY below fill this in */
             switch (z->control_mode) {
             case ZONE_CONTROL_MODE_PID: {
-                if (sensor_ok[zi]) {
-                    /* TODO.md 6A.2's feedforward. 0.0f -- byte-for-byte the
-                     * behaviour of every firing before this -- for any zone
-                     * with no identified model, which is every zone that has
-                     * never been autotuned. Passed IN to the controller so the
-                     * clamp, the anti-windup conditional-integration test and
-                     * the term breakdown all see the same number the element
-                     * is driven from; the value handed over here is what
-                     * /api/control reports as "ff", so the operator can read
-                     * the P/I/D/FF split and see how much of the duty is the
-                     * model and how much is the loop correcting it. */
-                    float u_ff = zone_feedforward(z, s_exec.target_c, s_exec.target_rate_c_per_s);
-                    duty = pid_update_terms(&z->pid_state, &z->pid_cfg, s_exec.target_c, z->actual_c, dt_s,
-                                            u_ff, &z->last_pid_terms);
-                }
-                /* TODO.md 6A.2's cooling-limited diagnostic. Checked against
-                 * the RAW duty pid_update_terms() just returned, before the
-                 * load-cap boost below can add anything to it -- a boosted
-                 * duty is not "the loop asked for heat," it is "another
-                 * zone's deferred credit landed here," and boost only ever
-                 * makes duty larger, never masks a genuine 0. */
-                if (sensor_ok[zi] && duty <= 0.0f &&
-                    z->actual_c > s_exec.target_c + EXEC_COOLING_MARGIN_C(zi)) {
-                    z->cooling_limited_hold_s += dt_s;
-                } else {
-                    z->cooling_limited_hold_s = 0.0f;
-                }
-                z->cooling_limited = z->cooling_limited_hold_s >= EXEC_COOLING_HOLD_S(zi);
-                /* Pay back any load-cap-deferred on-time as a duty boost --
-                 * only actually consumed below if this tick turns out to
-                 * open a fresh window (heater_output_duty() only reads the
-                 * duty argument at a window boundary; a boost handed to it
-                 * mid-window is silently ignored, so crediting it back here
-                 * unconditionally and only debiting on a real boundary
-                 * keeps the books exact even if several ticks pass between
-                 * boundaries). */
-                float boosted_duty = duty;
-                float credit_ms = 0.0f;
-                /* sensor_ok[zi] gates this the same as the raw PID compute
-                 * above: without it, a zone that accrued load-cap credit
-                 * (TODO.md 6A.5) and then lost its thermocouple would have
-                 * `duty` correctly held at 0.0f by the `if (sensor_ok[zi])`
-                 * above, but this block ran unconditionally and could still
-                 * boost `boosted_duty` up to 1.0f from the credit alone --
-                 * commanding full output on a dead sensor, the exact case
-                 * the BANGBANG branch below explicitly refuses
-                 * ("want_raw = false; no trustworthy reading -> never
-                 * command heat"). PID had no equivalent until now.
-                 *
-                 * The credit itself is left untouched rather than forfeited:
-                 * it represents on-time this zone was denied by the load cap,
-                 * a bookkeeping fact that has nothing to do with whether the
-                 * thermocouple is currently readable. Discarding it would
-                 * double-penalize the zone -- once for losing its window to
-                 * the cap, again for a sensor fault that is very likely
-                 * transient (TODO.md 6A.3's SPI retry/debounce). Leaving
-                 * deferred_on_ms as-is means the credit is simply not spent
-                 * this tick and is still there to pay back once the sensor
-                 * (and therefore sensor_ok[zi]) recovers. */
-                if (sensor_ok[zi] && z->deferred_on_ms > 0.0f && z->heater_cfg.window_ms > 0) {
-                    float window_ms_f = (float)z->heater_cfg.window_ms;
-                    credit_ms = z->deferred_on_ms;
-                    float max_credit_ms = (1.0f - boosted_duty) * window_ms_f;
-                    if (credit_ms > max_credit_ms) credit_ms = max_credit_ms;
-                    if (credit_ms < 0.0f) credit_ms = 0.0f;
-                    boosted_duty += credit_ms / window_ms_f;
-                }
-                uint32_t elapsed_before = z->heater_state.window_elapsed_ms;
-                bool was_started = z->heater_state.window_started;
-                want_relay_on[zi] = heater_output_duty(&z->heater_state, &z->heater_cfg, boosted_duty, dt_ms);
-                /* A fresh window opened this tick iff window_elapsed_ms got
-                 * reset to 0 -- the only place heater_output_duty() sets it
-                 * to exactly 0 is the new-window branch (see its comment);
-                 * 1Hz ticks against a >=1s window make an accumulation-only
-                 * 0 practically impossible. Only then did boosted_duty
-                 * actually get baked into on_ms_this_window, so only then
-                 * is the credit actually spent. */
-                if (credit_ms > 0.0f && z->heater_state.window_elapsed_ms == 0 &&
-                    (!was_started || elapsed_before > 0)) {
-                    z->deferred_on_ms -= credit_ms;
-                    if (z->deferred_on_ms < 0.0f) z->deferred_on_ms = 0.0f;
-                }
+                /* &z->pid_cfg directly -- no copy, no adjustment. Bit-for-bit
+                 * the same call this always was; see pid_family_zone_tick()'s
+                 * header comment for why the body moved but the behavior
+                 * didn't. */
+                duty = pid_family_zone_tick(z, zi, &z->pid_cfg, sensor_ok[zi], dt_s, dt_ms,
+                                            &want_relay_on[zi]);
+                break;
+            }
+            case ZONE_CONTROL_MODE_PID_FUZZY: {
+                /* strength_pct == 0 (or a non-finite error/rate -- faulted
+                 * thermocouple) makes pid_fuzzy_prepare_gains() hand back
+                 * z->pid_cfg's own kp/ki/kd unchanged (pid_fuzzy_adjust()'s
+                 * documented contract), so this path degrades to exactly the
+                 * PID case above at the safe default -- same call, same
+                 * shared body, only the gains it's given can differ. */
+                pid_cfg_t fuzzy_cfg;
+                pid_fuzzy_prepare_gains(z, zi, &fuzzy_cfg);
+                duty = pid_family_zone_tick(z, zi, &fuzzy_cfg, sensor_ok[zi], dt_s, dt_ms,
+                                            &want_relay_on[zi]);
                 break;
             }
             case ZONE_CONTROL_MODE_BANGBANG: {
@@ -2432,6 +2837,202 @@ static bool profile_zones_have_ceiling(const profile_t *p, uint8_t *out_missing_
     return true;
 }
 
+/* ---- Warm-start (PROFILES.md "Warm-start: joining a profile already at
+ * temperature", owner request 2026-08-30) -----------------------------------
+ *
+ * Pure decision core, deliberately pulled out of profile_executor_run() the
+ * same way profile_executor_wd_decide() (profile_executor.h) is pulled out
+ * of watchdog_task_entry() -- no I/O, no locking, host-testable directly.
+ * Decides ONLY where the schedule should enter (segment index, dwelling or
+ * not, starting target_c, and how much of the entry segment's ramp time is
+ * already spent); profile_executor_run() is the only caller and is the one
+ * that turns "entry_segment_index > 0" into replayed RELAY_IO commands and a
+ * log line.
+ *
+ * current_c is the reading profile_executor_run() decided is "current
+ * temperature" for this decision -- Q4: the SAME coolest-active-zone reading
+ * used elsewhere in this run's own start-of-run baseline, not a second,
+ * differently-sourced notion of "now". NAN means no valid reading was
+ * available at all (an absent thermocouple bus, every active zone's sensor
+ * unhealthy) -- the safe answer is never skip anything without knowing where
+ * the kiln actually is, so this returns the exact pre-feature default
+ * (segment 0, target_c = the profile's own first segment target, not
+ * warm-started).
+ *
+ * Q2, mid-ramp entry: prev_level tracks the temperature the CURRENT
+ * ZONE_RAMP segment under examination ramps FROM (its predecessor's own
+ * target, or current_c for segment 0 -- segment 0 has always ramped from
+ * "wherever the kiln actually is right now", warm-start or not, which is
+ * exactly why the i==0 case below produces byte-identical output to the
+ * pre-feature code whether or not a warm start ends up happening). The first
+ * segment whose OWN target_c is at or above current_c is where the ramp
+ * would cross current_c, so that is where the run enters -- at the crossing
+ * point (entry_target_c = current_c, carrying the remaining ramp distance/
+ * time automatically: profile_executor_run() seeds s_exec.target_c with
+ * entry_target_c and the ordinary per-tick ramp step in the control loop
+ * takes it from there), never at the segment's own start (which would be
+ * BELOW current_c and reintroduce the bug this feature exists to remove).
+ *
+ * Q3, dwell segments: deliberately NOT special-cased. A segment already at
+ * or above current_c for its own target enters as a DWELL with
+ * entry_segment_elapsed_s == 0 -- the full configured soak still runs. The
+ * tempting wrong optimization would be "we're already at temperature, count
+ * the soak as satisfied too" -- a soak is time AT temperature, not time
+ * spent arriving there, and this function never shortens one.
+ *
+ * Q5, falling edges: the loop scans segments in profile order and BREAKS at
+ * the first ZONE_RAMP segment whose target_c is below the level the
+ * previous ZONE_RAMP segment left off at -- the "leading ascent" only.
+ * RELAY_IO segments are skipped over (their target_c is meaningless, Q1) and
+ * never count as an ascent or a descent themselves. A profile that comes
+ * down again after climbing (a controlled cool, an anneal) has that descent
+ * entirely out of reach of this function -- if current_c is not reached
+ * within the leading ascent, warm_started stays false rather than ever
+ * considering a later, lower segment.
+ *
+ * Hotter-than-everything (falls off the end of the loop without ever
+ * finding a segment whose target_c >= current_c): lands on the LAST
+ * ZONE_RAMP segment of the leading ascent, entered as a DWELL from its own
+ * start (entry_segment_elapsed_s == 0) -- i.e. treated the same as "already
+ * at this segment's target" above, running that segment's full configured
+ * soak. Rejected alternatives and why:
+ *   - Refuse to start: the kiln is at a perfectly fireable temperature
+ *     (hotter than the profile only means "further along than planned"),
+ *     and refusing a start over that would make the feature this exists to
+ *     fix -- "firing back-to-back loads... wastes hours" -- worse, not
+ *     better, for the exact case (a kiln that never fully cooled) the
+ *     owner's request opens with.
+ *   - Silently mark DONE / skip straight to whatever comes after the ascent
+ *     (a cooling leg, or end of profile): would skip the top segment's own
+ *     dwell -- Q3's "a soak is time at temperature" applies here at least as
+ *     much as it does mid-profile; the top of the ascent is usually the
+ *     whole point of the firing (the final maturing soak of a glaze/bisque
+ *     schedule) and is exactly the segment a "just run the last dwell"
+ *     choice must not shortcut.
+ *   Landing on the top segment's dwell keeps that soak intact and then lets
+ *   the ordinary segment-stepping machinery carry on from there completely
+ *   unmodified -- if a cooling leg follows, it runs normally once the dwell
+ *   finishes, same as any other run that reaches that point the ordinary
+ *   way. */
+typedef struct {
+    bool     warm_started;
+    uint8_t  entry_segment_index;
+    bool     entry_dwelling;
+    float    entry_target_c;
+    uint32_t entry_segment_elapsed_s;
+} profile_warm_start_plan_t;
+
+static profile_warm_start_plan_t profile_executor_plan_warm_start(const profile_t *p, float current_c)
+{
+    profile_warm_start_plan_t plan;
+    memset(&plan, 0, sizeof(plan));
+    plan.entry_segment_index = 0;
+    plan.entry_dwelling = false;
+    plan.entry_segment_elapsed_s = 0;
+    plan.warm_started = false;
+
+    if (p == NULL || p->segment_count == 0 || isnan(current_c)) {
+        /* No usable reading (or nothing to scan) -- the pre-feature default:
+         * segment 0's own target, ramping from wherever run() otherwise
+         * decided the baseline was (it does not use entry_target_c in this
+         * branch; see profile_executor_run()'s "only apply plan fields when
+         * plan.warm_started" rule). */
+        plan.entry_target_c = (p != NULL && p->segment_count > 0) ? p->segments[0].target_c : 0.0f;
+        return plan;
+    }
+
+    /* Pass 1 (Q5): find the leading-ascent boundary using ONLY the
+     * segments' own target_c sequence, completely independent of current_c.
+     * Doing this as its own pass (rather than seeding the walk below's
+     * "previous level" with current_c and testing descent against THAT)
+     * matters: segment 0 always ramps from wherever the kiln actually is
+     * (current_c), so a kiln reading above segment 0's own target would
+     * otherwise look like an immediate "descent" relative to current_c and
+     * wrongly cut the ascent down to nothing, even on a purely ascending
+     * profile -- exactly the "hotter than segment 0" case this feature
+     * exists to handle, not a real cool-down/anneal profile at all. */
+    uint8_t ascent_end = p->segment_count; /* exclusive */
+    bool have_last_seg_target = false;
+    float last_seg_target = 0.0f;
+    for (uint8_t i = 0; i < p->segment_count; i++) {
+        const profile_segment_t *seg = &p->segments[i];
+        if (seg->seg_kind == PROFILE_SEG_KIND_RELAY_IO) {
+            continue; /* no temperature of its own -- neither ascent nor descent */
+        }
+        if (have_last_seg_target && seg->target_c < last_seg_target) {
+            ascent_end = i;
+            break;
+        }
+        last_seg_target = seg->target_c;
+        have_last_seg_target = true;
+    }
+
+    /* Pass 2 (Q2/Q3/Q4): walk the leading ascent looking for where current_c
+     * fits. prev_level starts at current_c -- segment 0 (or the first
+     * ZONE_RAMP segment, if segment 0 is a RELAY_IO) has always ramped from
+     * "wherever the kiln actually is right now", warm-start or not, which is
+     * why landing here at i==0 produces byte-identical output to the
+     * pre-feature code. Every later ZONE_RAMP segment instead uses the
+     * PRECEDING segment's own target_c as prev_level -- current_c already
+     * played its one role (picking the ascent boundary above) and must not
+     * also masquerade as an earlier segment's target here. */
+    float prev_level = current_c;
+    for (uint8_t i = 0; i < ascent_end; i++) {
+        const profile_segment_t *seg = &p->segments[i];
+        if (seg->seg_kind == PROFILE_SEG_KIND_RELAY_IO) {
+            continue; /* Q1: no temperature of its own */
+        }
+
+        if (current_c <= seg->target_c) {
+            /* This segment's ramp reaches (or already starts at/above)
+             * current_c -- this is where the run enters. */
+            plan.entry_segment_index = i;
+            plan.entry_dwelling = false;
+            if (current_c <= prev_level) {
+                /* Kiln is at/above where this segment's own ramp starts --
+                 * i==0 always lands here (prev_level == current_c), which is
+                 * exactly the pre-feature start: segment 0, offset 0,
+                 * ramping from current_c. Not a warm start. A later segment
+                 * can also land here if an earlier one's target already
+                 * reached/exceeded current_c -- entering it at its own start
+                 * is correct and IS a warm start (segments before it were
+                 * skipped). */
+                plan.entry_target_c = prev_level;
+                plan.entry_segment_elapsed_s = 0;
+                plan.warm_started = (i > 0);
+            } else if (seg->ramp_c_per_hr > 0.0f) {
+                /* Q2: mid-ramp entry. Seeding target_c at current_c (instead
+                 * of prev_level) is what carries the remaining ramp time --
+                 * the ordinary per-tick ramp step takes it from there. The
+                 * elapsed figure is reported for visibility only (Q6); the
+                 * control loop does not consume it during a ramp. */
+                plan.entry_target_c = current_c;
+                plan.entry_segment_elapsed_s =
+                    (uint32_t)(((current_c - prev_level) / seg->ramp_c_per_hr) * 3600.0f + 0.5f);
+                plan.warm_started = true;
+            } else {
+                /* A step segment (no ramp rate configured) has no partial
+                 * distance to carry -- it jumps straight to its target. */
+                plan.entry_target_c = seg->target_c;
+                plan.entry_segment_elapsed_s = 0;
+                plan.warm_started = true;
+            }
+            return plan;
+        }
+
+        /* current_c is past this whole segment already -- keep scanning the
+         * ascent, and remember this as the fallback "hotter than the whole
+         * ascent" landing spot (see this function's header comment). */
+        prev_level = seg->target_c;
+        plan.entry_segment_index = i;
+        plan.entry_target_c = seg->target_c;
+        plan.entry_dwelling = true;
+        plan.entry_segment_elapsed_s = 0;
+        plan.warm_started = true;
+    }
+    return plan;
+}
+
 bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
 {
     /* Recovery mode (boot_guard.h) deliberately skips profile_executor_start()
@@ -2694,6 +3295,12 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
      * (which segment was active, what its remaining_s countdown was) has no
      * meaning against a freshly (re)started schedule. */
     memset(s_exec.io_segs, 0, sizeof(s_exec.io_segs));
+    /* Warm-start state, same "starts owing nothing" reasoning -- overwritten
+     * below if this run actually warm-starts. */
+    s_exec.warm_started = false;
+    s_exec.warm_start_reason[0] = '\0';
+    s_exec.warm_start_replayed_count = 0;
+    memset(s_exec.warm_start_replayed_segments, 0, sizeof(s_exec.warm_start_replayed_segments));
     /* Feedforward inputs start from their safe values: no ramp commanded yet,
      * and the fallback ambient until a cold junction actually answers below. */
     s_exec.target_rate_c_per_s = 0.0f;
@@ -2763,6 +3370,13 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
     int8_t first_active = -1;
     uint8_t active_rank = 0;
     float baseline_target_c = p.segments[0].target_c;
+    /* Warm-start (Q4): "current temperature" is the COOLEST active zone's
+     * actual reading, taken from the same start-of-run sample as
+     * baseline_target_c above (not a second, separately-timed read) -- if
+     * the zones disagree, preferring the coolest one means warm-start can
+     * only ever skip work every active zone agrees is already done. NAN
+     * until (if) a valid reading is found below. */
+    float warm_start_coolest_c = NAN;
     for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
         if (!(p.zone_mask & (1u << zi))) continue;
         zone_runtime_t *z = &s_exec.zones[zi];
@@ -2798,6 +3412,7 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
             .pid_range_c = PID_FUNCTIONAL_RANGE_C,
         };
         pid_reset(&z->pid_state);
+        z->fuzzy_prev_effective_ki = 0.0f;
 
         /* TODO.md 6A.2 feedforward: identified model or nothing. A zone that
          * has never been autotuned simply runs on feedback alone, as every
@@ -2812,7 +3427,8 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
             .min_off_ms = (min_off_ms > 0.0f) ? (uint32_t)min_off_ms : HEATER_MIN_OFF_MS,
         };
         heater_output_reset(&z->heater_state);
-        if (z->control_mode == ZONE_CONTROL_MODE_PID && n_active_zones > 1) {
+        if ((z->control_mode == ZONE_CONTROL_MODE_PID || z->control_mode == ZONE_CONTROL_MODE_PID_FUZZY) &&
+            n_active_zones > 1) {
             uint32_t phase_offset_ms = ((uint32_t)active_rank * z->heater_cfg.window_ms) / n_active_zones;
             heater_output_seed_phase(&z->heater_state, z->heater_cfg.window_ms, phase_offset_ms);
         }
@@ -2906,6 +3522,30 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
                 baseline_target_c = zones_config_apply_cal(zi, base_combined);
             }
 
+            /* Warm-start's "current temperature" (Q4): the coolest ACTIVE
+             * zone's own combined+calibrated reading, from this same
+             * already-fetched `readings` array -- every active zone gets its
+             * own thermo_mask/thermo_combine/apply_cal treatment here (not
+             * just first_active's), because a zone other than first_active
+             * can legitimately be the coolest one and skipping its
+             * temperature would risk skipping work it still needs. This
+             * block runs exactly once (gated on zi == first_active, same as
+             * the baseline_target_c read above), so it loops over every
+             * active zone itself rather than relying on the outer loop's
+             * per-zi iteration to reach it. */
+            for (uint8_t wzi = 0; wzi < MAX31856_CHANNEL_COUNT; wzi++) {
+                if (!(p.zone_mask & (1u << wzi))) continue;
+                uint8_t w_tmask = 0;
+                zones_config_get_thermo_mask(wzi, &w_tmask);
+                bool w_valid = false;
+                float w_combined = thermo_combine(base_ch_c, base_ch_ok, MAX31856_CHANNEL_COUNT, w_tmask, &w_valid);
+                if (!w_valid) continue;
+                float w_c = zones_config_apply_cal(wzi, w_combined);
+                if (isnan(warm_start_coolest_c) || w_c < warm_start_coolest_c) {
+                    warm_start_coolest_c = w_c;
+                }
+            }
+
             /* Feedforward's ambient reference (TODO.md 6A.2), taken from THIS
              * read rather than a second one: the cold junction is only honest
              * about the room before the firing has warmed the board, and this
@@ -2919,6 +3559,67 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
                     s_exec.ambient_from_cj = true;
                     break;
                 }
+            }
+        }
+    }
+
+    /* Warm-start (PROFILES.md, owner request 2026-08-30): decide once, here,
+     * before the ramp-lock/segment-stepping machinery ever runs its first
+     * tick -- see profile_executor_plan_warm_start()'s own doc comment for
+     * the entry-point algorithm and profile_exec_status_t's warm_started
+     * field for what's reported back to the operator (Q6). Only APPLIED
+     * (segment_index/dwelling/segment_elapsed_s/baseline_target_c
+     * overridden) when the plan actually warm-started -- the "not
+     * warm-started" branch leaves every one of those exactly as the
+     * pre-feature code already set them, byte-for-byte. */
+    {
+        profile_warm_start_plan_t plan = profile_executor_plan_warm_start(&p, warm_start_coolest_c);
+        if (plan.warm_started) {
+            s_exec.segment_index = plan.entry_segment_index;
+            s_exec.dwelling = plan.entry_dwelling;
+            s_exec.segment_elapsed_s = plan.entry_segment_elapsed_s;
+            baseline_target_c = plan.entry_target_c;
+
+            s_exec.warm_started = true;
+            snprintf(s_exec.warm_start_reason, sizeof(s_exec.warm_start_reason),
+                     "starting at segment %u -- kiln already at %.1f C",
+                     (unsigned)plan.entry_segment_index + 1, (double)warm_start_coolest_c);
+            ESP_LOGI(TAG, "warm start: %s (dwelling=%d, entry target %.1fC, %lus into the entry segment)",
+                     s_exec.warm_start_reason, (int)plan.entry_dwelling, (double)plan.entry_target_c,
+                     (unsigned long)plan.entry_segment_elapsed_s);
+
+            /* Q1 owner decision: replay every skipped RELAY_IO segment's
+             * on/off command, in profile order, before the first ramp tick
+             * -- reusing io_seg_start() gets both the hardware write and the
+             * relay_authority claim/claimed_relay_mask registration this
+             * needs "for free", identical to how a segment reached normally
+             * would be started. The one deliberate difference: forcing
+             * `blocking = true` afterward makes io_segs_tick() (which skips
+             * any segment with blocking == true) leave this segment alone
+             * for the rest of the run -- its own hold/dwell_min timer is
+             * NOT replayed (that schedule position is already past), only
+             * the command is. It is retired the same way a real blocking
+             * segment's command is: by the end-of-run sweep
+             * (io_segs_force_all_off(), honoring leave_on_at_end only on the
+             * clean DONE path, same as always) -- exactly the registration
+             * this decision requires so a replayed relay is never left
+             * energized with nothing owning it. */
+            for (uint8_t i = 0; i < plan.entry_segment_index && i < p.segment_count; i++) {
+                if (p.segments[i].seg_kind != PROFILE_SEG_KIND_RELAY_IO) {
+                    continue;
+                }
+                io_seg_start(i, &p.segments[i]);
+                s_exec.io_segs[i].blocking = true;
+                if (s_exec.warm_start_replayed_count < PROFILE_MAX_SEGMENTS) {
+                    s_exec.warm_start_replayed_segments[s_exec.warm_start_replayed_count++] = i;
+                }
+                ESP_LOGI(TAG, "warm start: replayed relay/IO segment %u command (%s %u %s) -- its own hold "
+                              "was NOT restarted, it stays as commanded until the run ends",
+                         i + 1, s_exec.io_segs[i].is_relay ? "relay" : "IO_",
+                         s_exec.io_segs[i].is_relay
+                             ? s_exec.io_segs[i].target
+                             : (uint8_t)(s_exec.io_segs[i].target - PROFILE_IO_TARGET_IO_BASE + 1u),
+                         s_exec.io_segs[i].state_on ? "ON" : "OFF");
             }
         }
     }
@@ -2943,8 +3644,39 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
     for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
         if (!s_exec.zones[zi].active) continue;
         if (s_exec.zones[zi].ff_enabled) {
-            ESP_LOGI(TAG, "zone %u feedforward ON: K_dc %.4g C/duty, tau %.4gs (TODO.md 6A.2)",
-                     zi, (double)s_exec.zones[zi].ff_k_dc, (double)s_exec.zones[zi].ff_tau_s);
+            /* PID_EXPANSION_PLAN.md section 2c/Phase 3b: report whether this
+             * zone's coupling row can contribute anything this firing, same
+             * as the K_dc/tau line above is the per-firing record of the
+             * base model -- an un-commissioned kiln (every coupling_coeff
+             * 0, the migration default) logs "coupling OFF" and behaves
+             * exactly as before this existed.
+             *
+             * Post-review fix (finding 4): a neighbour only counts here if
+             * zone_feedforward() would actually use it -- same
+             * zone_qualifies_as_coupling_neighbor() gate, not just "has a
+             * nonzero coefficient". Before this fix the log said "coupling
+             * ON: N neighbor(s)" from the coefficient table alone, so an
+             * operator could see "coupling ON: 2 neighbour(s)" for a firing
+             * where both neighbours were OFF/blocked/faulted and every one
+             * of them was excluded at runtime -- the log claimed coupling
+             * was active while it contributed exactly 0.0 all firing. Note
+             * this is evaluated once, at firing start: a neighbour that
+             * changes qualification mid-firing (an operator flips it to OFF,
+             * a guard trips it) is not re-logged -- this line is a
+             * per-firing summary of what coupling was set up to do, not a
+             * live status feed (that's GET /api/profile_exec). */
+            uint8_t coupling_neighbors = count_qualifying_coupling_neighbors(zi);
+            bool coupling_any = coupling_neighbors > 0;
+            if (coupling_any) {
+                ESP_LOGI(TAG, "zone %u feedforward ON: K_dc %.4g C/duty, tau %.4gs (TODO.md 6A.2), "
+                              "coupling ON: %u neighbor(s) with a measured coefficient (PID_EXPANSION_PLAN.md 2c)",
+                         zi, (double)s_exec.zones[zi].ff_k_dc, (double)s_exec.zones[zi].ff_tau_s,
+                         coupling_neighbors);
+            } else {
+                ESP_LOGI(TAG, "zone %u feedforward ON: K_dc %.4g C/duty, tau %.4gs (TODO.md 6A.2), "
+                              "coupling OFF: no measured coefficient for any neighbor",
+                         zi, (double)s_exec.zones[zi].ff_k_dc, (double)s_exec.zones[zi].ff_tau_s);
+            }
         } else {
             ESP_LOGI(TAG, "zone %u feedforward OFF: no identified plant model (run autotune) -- "
                           "feedback alone, unchanged from before 6A.2's feedforward existed", zi);
@@ -3176,8 +3908,11 @@ bool profile_executor_resume(void)
      * integrator windup survives the pause. */
     for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
         zone_runtime_t *z = &s_exec.zones[zi];
-        if (z->active && !z->faulted && z->control_mode == ZONE_CONTROL_MODE_PID && z->actual_valid) {
-            seed_bumpless_with_ff(z, 0.0f);
+        if (z->active && !z->faulted &&
+            (z->control_mode == ZONE_CONTROL_MODE_PID || z->control_mode == ZONE_CONTROL_MODE_PID_FUZZY) &&
+            z->actual_valid) {
+            seed_bumpless_with_ff(z, zi, 0.0f);
+            z->fuzzy_prev_effective_ki = z->pid_cfg.ki; /* see reload_zone_config()'s same reasoning */
         }
     }
     s_exec.state = PROFILE_EXEC_RUNNING;
@@ -3225,6 +3960,13 @@ void profile_executor_get_status(profile_exec_status_t *out)
         out->ramp_lock_lagging_mask = s_exec.ramp_lock_lagging_mask;
         out->run_start_c = s_exec.run_start_c;
         out->total_elapsed_s = s_exec.total_elapsed_s;
+        out->warm_started = s_exec.warm_started;
+        if (s_exec.warm_started) {
+            strncpy(out->warm_start_reason, s_exec.warm_start_reason, sizeof(out->warm_start_reason) - 1);
+            out->warm_start_replayed_count = s_exec.warm_start_replayed_count;
+            memcpy(out->warm_start_replayed_segments, s_exec.warm_start_replayed_segments,
+                   sizeof(out->warm_start_replayed_segments));
+        }
         size_t seg_n = s_exec.profile.segment_count;
         if (seg_n > PROFILE_MAX_SEGMENTS) seg_n = PROFILE_MAX_SEGMENTS;
         memcpy(out->segments, s_exec.profile.segments, seg_n * sizeof(out->segments[0]));
