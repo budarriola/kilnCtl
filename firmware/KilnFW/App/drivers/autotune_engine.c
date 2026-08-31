@@ -25,6 +25,21 @@
 #include "thermo_combine.h"
 #include "zones_http.h"
 
+/* uart_bridge_ext.c's flash-safe executor (bx_flash_worker) -- see this
+ * file's coupling_persist_job()/finalize_fit() comments below for why
+ * finalize_fit()'s NVS write is routed through it rather than executed
+ * directly on task_entry()'s own PSRAM-stacked task. Same mechanism, same
+ * precedent as safety_cfg_store.c's nvs_save_store_job(), and the exact
+ * hazard uart_bridge_ext.c:104-127's HAZARD block documents.
+ *
+ * Declared here by hand rather than via #include "uart_bridge.h", for the
+ * same reason safety_cfg_store.c gives: that header pulls in hardware
+ * dependencies (ILI9488.h/screen_idle.h/kiln_io.h) this file neither needs
+ * nor wants, and which are not part of this file's host-test stub surface.
+ * The real declaration and its full doc comment live in uart_bridge.h; this
+ * one must be kept in sync with it by hand if that signature ever changes. */
+esp_err_t uart_bridge_ext_run_on_flash_worker(void (*fn)(void *arg), void *arg);
+
 static const char *TAG = "autotune_engine";
 
 /* Pre-start warnings from the POLLED readers below, throttled to one line
@@ -328,6 +343,34 @@ static autotune_sample_t *unpack_zone_trace(uint8_t zone, size_t count)
     return out;
 }
 
+/* finalize_fit()'s persist step (below) gathers every cell to write into one
+ * of these and hands it to bx_flash_worker in a single job -- see that
+ * function's own comment for why a direct zones_config_set_coupling_cell()
+ * call from task_entry()'s task is a hard panic, not just a bug.
+ *
+ * The struct itself may live on the caller's PSRAM stack (task_entry()'s),
+ * but that is fine: coupling_persist_job() reads every field it needs BEFORE
+ * making its first NVS call, i.e. strictly before the flash cache is ever
+ * disabled on the worker's own (internal-RAM) stack. Nothing here is
+ * touched again after that point. */
+typedef struct {
+    uint8_t affected_zone[MAX31856_CHANNEL_COUNT]; /* row index, one per cell */
+    float   coeff[MAX31856_CHANNEL_COUNT];
+    uint8_t count;
+    uint8_t stepped_zone; /* column index -- same for every cell in one run */
+    uint8_t fail_count;   /* zones_config_set_coupling_cell() calls that returned false */
+} coupling_persist_job_t;
+
+static void coupling_persist_job(void *arg)
+{
+    coupling_persist_job_t *job = (coupling_persist_job_t *)arg;
+    for (uint8_t i = 0; i < job->count; i++) {
+        if (!zones_config_set_coupling_cell(job->affected_zone[i], job->stepped_zone, job->coeff[i])) {
+            job->fail_count++;
+        }
+    }
+}
+
 static void finalize_fit(void)
 {
     float baseline_c = s_at.zone_baseline_c[s_at.zone_index];
@@ -424,7 +467,34 @@ static void finalize_fit(void)
      *       reading -- see ZONE_COUPLING_COEFF_MAX's own "why non-negative"
      *       comment in zones_http.h), is skipped rather than clobbering a
      *       previously-stored good value for that same neighbor with 0 or a
-     *       rejected write. */
+     *       rejected write.
+     *
+     * 2026-08-31 PANIC FIX -- confirmed on hardware, coredump decoded:
+     * task_entry() (this whole function's caller) runs on a PSRAM-stacked
+     * task (see autotune_engine_start()'s xTaskCreatePinnedToCoreWithCaps()
+     * call and its own comment), and zones_config_set_coupling_cell() ends in
+     * zones_http.c's nvs_save(), which disables the flash cache. A task whose
+     * stack lives in PSRAM cannot survive that -- ESP-IDF's
+     * esp_task_stack_is_sane_cache_disabled() asserts and reboots the whole
+     * board the instant a real fit reaches here (it did, first time out:
+     * finalize_fit() -> zones_config_set_coupling_cell() -> nvs_save() ->
+     * cache disable -> assert failed: spi_flash_disable_interrupts_caches_
+     * and_other_cpu, cache_utils.c:126). Exactly the hazard uart_bridge_ext.c:
+     * 104-127's HAZARD block documents for CONTROL/PROFILES/AUTOTUNE (the
+     * UART bridge tasks) and safety_cfg_store.c's nvs_save_store() documents
+     * for safety_poll_task -- this call site was simply never audited for it
+     * because the persist call itself is new this session (previously
+     * finalize_fit() only ever wrote s_at.coupling, RAM-only).
+     *
+     * Fixed the same way both of those precedents were: every cell to write
+     * is gathered into coupling_persist_job_t below (RAM only, no flash
+     * touched yet), and the actual zones_config_set_coupling_cell() calls run
+     * as ONE job on bx_flash_worker (uart_bridge_ext_run_on_flash_worker()),
+     * whose stack is ordinary internal SRAM. This function still decides
+     * WHICH cells are eligible (guards (1) and (2) above); the worker only
+     * ever writes what this function already validated. */
+    coupling_persist_job_t job = {0};
+    job.stepped_zone = s_at.zone_index;
     for (uint8_t j = 0; j < MAX31856_CHANNEL_COUNT; j++) {
         if (j == s_at.zone_index) {
             continue;
@@ -441,8 +511,18 @@ static void finalize_fit(void)
                      s_at.zone_index, j, (double)gain);
             continue;
         }
-        if (!zones_config_set_coupling_cell(j, s_at.zone_index, gain)) {
-            ESP_LOGW(TAG, "autotune zone %u: failed to persist cross-gain cell for zone %u", s_at.zone_index, j);
+        job.affected_zone[job.count] = j;
+        job.coeff[job.count] = gain;
+        job.count++;
+    }
+    if (job.count > 0) {
+        esp_err_t submit_err = uart_bridge_ext_run_on_flash_worker(coupling_persist_job, &job);
+        if (submit_err != ESP_OK) {
+            ESP_LOGW(TAG, "autotune zone %u: could not submit %u coupling cell(s) to the flash worker: %s",
+                     s_at.zone_index, (unsigned)job.count, esp_err_to_name(submit_err));
+        } else if (job.fail_count > 0) {
+            ESP_LOGW(TAG, "autotune zone %u: %u of %u coupling cell(s) failed to persist", s_at.zone_index,
+                     (unsigned)job.fail_count, (unsigned)job.count);
         }
     }
 
@@ -943,15 +1023,29 @@ esp_err_t autotune_engine_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_
      * starvation concern between them; both still sit below the link-loss
      * watchdog (6). */
     /* 2026-08-22: PSRAM stack -- audited against uart_bridge_ext.c's
-     * cache-disable hazard (see that file's boot-time comment). task_entry()
-     * never touches flash/NVS itself (autotune_engine_accept()'s zones_http
-     * writes run on whichever task calls it, not this one) and reaches
-     * hardware only through thermo_owner_task/kiln_io_owner_task's queues
-     * (owner tasks keep their own internal stacks; the caller-owned result
-     * struct they write into being in PSRAM is a plain memory store, not a
-     * DMA target). Safe to move off internal SRAM, which several other
-     * tasks are contending for during the WiFi-driver boot-time buffer
-     * storm that same comment documents. */
+     * cache-disable hazard (see that file's boot-time comment). At the time
+     * of this audit task_entry() never touched flash/NVS itself
+     * (autotune_engine_accept()'s zones_http writes run on whichever task
+     * calls it, not this one) and reached hardware only through
+     * thermo_owner_task/kiln_io_owner_task's queues (owner tasks keep their
+     * own internal stacks; the caller-owned result struct they write into
+     * being in PSRAM is a plain memory store, not a DMA target). Safe to
+     * move off internal SRAM, which several other tasks are contending for
+     * during the WiFi-driver boot-time buffer storm that same comment
+     * documents.
+     *
+     * 2026-08-31 UPDATE -- that "never touches flash/NVS" premise broke:
+     * finalize_fit() gained a direct NVS-writing call this session
+     * (zones_config_set_coupling_cell(), to persist a step test's measured
+     * cross-zone coupling) and it panicked the board on hardware the first
+     * time it ran for real -- see finalize_fit()'s own comment for the
+     * coredump. Fixed there by routing that write through bx_flash_worker
+     * (uart_bridge_ext_run_on_flash_worker()) rather than moving this task's
+     * stack back to internal SRAM, which would reopen the WiFi-driver
+     * internal-DRAM race this comment's first half describes. This task's
+     * stack stays in PSRAM; task_entry() itself must still never call
+     * anything that reaches flash/NVS directly -- route it through the
+     * worker instead, same as finalize_fit() now does. */
     BaseType_t ok = xTaskCreatePinnedToCoreWithCaps(task_entry, "autotune_engine", 4096, NULL, 5, &s_at.task,
                                                     tskNO_AFFINITY, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (ok != pdPASS) {

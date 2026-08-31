@@ -395,6 +395,27 @@ static void reset_coupling_cell_calls(void)
  * guard calls it and gets refused (called becomes true, return value
  * false) -- either way the real bound is enforced here exactly like the
  * production setter, so a test built on this fake proves something real. */
+/* 2026-08-31 panic fix: finalize_fit()'s persist step now hands its
+ * coupling_persist_job_t to uart_bridge_ext_run_on_flash_worker() instead of
+ * calling zones_config_set_coupling_cell() directly (see autotune_engine.c's
+ * own comment for the coredump this fixes). This host build has no separate
+ * flash-worker task to hand a job to -- it runs fn(arg) synchronously,
+ * in-line, which is externally indistinguishable to every test above and
+ * below: they only ever observe s_coupling_cell_calls[][], not which task
+ * made the call. Recording the call count separately (not reusing an
+ * existing counter) lets a future test assert the persist step went through
+ * this path at all, not just that the cells landed. */
+int g_flash_worker_submit_calls = 0;
+esp_err_t uart_bridge_ext_run_on_flash_worker(void (*fn)(void *arg), void *arg)
+{
+    g_flash_worker_submit_calls++;
+    if (!fn) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    fn(arg);
+    return ESP_OK;
+}
+
 bool zones_config_set_coupling_cell(uint8_t zone_index, uint8_t neighbor_index, float coeff)
 {
     if (zone_index >= MAX31856_CHANNEL_COUNT || neighbor_index >= MAX31856_CHANNEL_COUNT) {
@@ -874,6 +895,49 @@ static void test_finalize_fit_persists_valid_cross_gain_cells(void)
     TEST_CHECK(!s_coupling_cell_calls[1][1].called,
               "the diagonal (zone 1 against itself) was never touched by the persist step -- "
               "that is model_k_dc's job, not coupling_coeff[]'s");
+
+    s_stub_thermo_count = 0; // restore this file's original hardcoded default for every other test
+}
+
+// 2026-08-31 panic fix: proves finalize_fit()'s persist step actually goes
+// THROUGH uart_bridge_ext_run_on_flash_worker() -- one submission per run,
+// not one direct zones_config_set_coupling_cell() call per cell -- rather
+// than merely landing on the right cells (already covered by
+// test_finalize_fit_persists_valid_cross_gain_cells() above, which cannot
+// tell the two apart: both call this fake the same number of times either
+// way). Break-proof: this test is what actually catches a revert back to a
+// direct call, which is exactly the change that panicked real hardware.
+static void test_finalize_fit_routes_persist_through_flash_worker(void)
+{
+    TEST_SECTION("finalize_fit() submits coupling-cell persistence as ONE job to "
+                 "uart_bridge_ext_run_on_flash_worker(), not a direct call per cell");
+    memset(&s_at, 0, sizeof(s_at));
+    reset_coupling_cell_calls();
+    g_flash_worker_submit_calls = 0;
+    s_stub_thermo_count = 3;
+    s_at.zone_index = 1;
+    s_at.step_rule = AUTOTUNE_RULE_SIMC;
+
+    write_synthetic_fopdt_trace_for_zone(1, /*baseline_c=*/25.0f, /*k_gain_c_per_duty=*/2.0f, /*tau_s=*/200.0f,
+                                         /*dead_time_s=*/20.0f, /*duty_step=*/1.0f, /*n_samples=*/60);
+    // Two fittable peers (zone 0 and zone 2) so a per-cell submission count
+    // (wrong) is distinguishable from a per-run submission count (right):
+    // per-cell would read 2 here, per-run reads 1 regardless of cell count.
+    write_synthetic_fopdt_trace_for_zone(0, /*baseline_c=*/22.0f, /*k_gain_c_per_duty=*/0.5f, /*tau_s=*/150.0f,
+                                         /*dead_time_s=*/15.0f, /*duty_step=*/1.0f, /*n_samples=*/60);
+    write_synthetic_fopdt_trace_for_zone(2, /*baseline_c=*/23.0f, /*k_gain_c_per_duty=*/0.7f, /*tau_s=*/160.0f,
+                                         /*dead_time_s=*/16.0f, /*duty_step=*/1.0f, /*n_samples=*/60);
+
+    finalize_fit();
+    TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_DONE, "the direct (zone 1) fit must succeed");
+    TEST_CHECK(s_coupling_cell_calls[0][1].called, "zone 0's cell was persisted");
+    TEST_CHECK(s_coupling_cell_calls[2][1].called, "zone 2's cell was persisted");
+    TEST_CHECK(g_flash_worker_submit_calls == 1,
+              "exactly ONE job submitted to the flash worker for the whole run, covering both cells -- "
+              "if this reads 2 (or 0), the persist path has drifted off "
+              "uart_bridge_ext_run_on_flash_worker() and a real board will panic the next time this runs "
+              "for real (see finalize_fit()'s and autotune_engine_start()'s own comments for the coredump "
+              "this guards against)");
 
     s_stub_thermo_count = 0; // restore this file's original hardcoded default for every other test
 }
@@ -1411,6 +1475,7 @@ void run_test_autotune_engine_prestart(void)
     test_step_run_accepts_simc_and_cohen_coon_and_stores_the_rule();
     test_finalize_fit_uses_the_requested_rule();
     test_finalize_fit_persists_valid_cross_gain_cells();
+    test_finalize_fit_routes_persist_through_flash_worker();
     test_finalize_fit_skips_a_valid_fit_with_out_of_range_gain();
     test_finalize_fit_persists_nothing_on_an_invalid_direct_fit();
     test_next_run_clears_prior_runs_refusal();
