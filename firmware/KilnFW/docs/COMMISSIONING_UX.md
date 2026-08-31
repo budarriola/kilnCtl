@@ -456,9 +456,10 @@ the hottest firing you plan to do."
 
 The three radio options of §2.4, each with its consequence sentence rendered
 *with* the option rather than in a footnote, so the trade is visible at the
-moment of choosing. Choosing *Not fitted* expands the zone picker and shows the
-`BORROWED_ZONE` warning as a block, not an aside — and, today, is disabled with
-the S13-dormant reason.
+moment of choosing. Choosing *Not fitted* expands the zone picker (populated
+from `GET /api/zones`, indices 0-2 only — matching `CONTEXT_SNAPSHOT_MAX_ZONES`,
+SaftyFW's `snapshots.h`) and shows the `BORROWED_ZONE` warning as a block, not
+an aside.
 
 ### Screen 3 — Review what we worked out (read-only)
 
@@ -632,7 +633,7 @@ page. Each step is shippable and reversible on its own:
 | **OQ4** | ~~What is `k_ct_v_per_a` for the CTs actually fitted?~~ **CLOSED 2026-08-28 (M12b).** Nobody has to know: the zone current-sweep calibrates it against the Q3/Q4 answers rather than against a part number (§1.2). The nameplate figure is still what a clamp-meter override would be compared to, but it is no longer required to get a real kW figure. | — |
 | **OQ5** | Accept `REQUEST_CONFIG_WINDOW` (§5 mode c) as the end state, or live with the reboot-into-GRACE approach (mode b)? | Mode (c) is a two-sided wire change; mode (b) reboots a safety processor to make it writable. |
 | **OQ6** | Confirm the enum codes for `tc_source` and `tc_placement_mode` against `config_store.c`. Both this spec and the existing page are guessing (`OWN_J7`=0 / `BORROWED_ZONE`=1 / `BOTH`=2; `CHAMBER_AGREED`=0 / `EXTERNAL_OVERHEAT`=1). | A wrong code writes a 🔴 field to a plausible wrong value with no error anywhere. |
-| **OQ7** | S13 is dormant (`sample_counter_advancing` hardcoded false in `safety_core.c`), so `BORROWED_ZONE`/`BOTH` trips unconditionally. Should Q2's *Not fitted* option be **hidden**, **shown-disabled with the reason**, or **allowed with a warning**? This spec assumes shown-disabled. | It is the only Q2 answer available to a board built without the J7 daughterboard. |
+| **OQ7** | ~~S13 is dormant...~~ **CLOSED 2026-08-30.** `sample_counter_advancing` now has a real producer (`context_borrowed_sample_counter_advancing()`, `src/snapshots.h`, called from `safety_core_build_input()`) -- Q2's *Not fitted* option is allowed, with the zone picker described in §2.4/Screen 2. | — |
 | **OQ8** | The page carries 58 parameters; firmware carries 59 (`safety_tc_installed`, `0x0211`). Confirm that field's semantics — this spec treats it as the boolean form of Q2's *Not fitted*. | If it means something else, Q2's mapping in §2.4 is wrong. |
 
 ---

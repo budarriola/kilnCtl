@@ -199,3 +199,121 @@ is not in this plan.
 **Sequencing.** TLS lands *after* the auth/session layer above works over
 plain HTTP, not before — otherwise a handshake bug and an auth bug are
 indistinguishable during bring-up.
+
+---
+
+## Section 5 — owner requests, 2026-08-30
+
+### 5.1 Zone names on the dashboard instead of "Channel N" — IN PROGRESS
+
+`renderChannels()` in `main_page.html` labels each live row `Channel 0`…
+`Channel 4`. The operator has already named their zones on the Thermocouples
+& Zones page; the dashboard should use those names.
+
+The join is `zone.thermo_mask` — bit *i* set means channel *i* feeds that
+zone — and the page already does exactly this kind of mask lookup in
+`relayStatusHtml()`. `zoneName(zi)` already exists (`main_page.html:951`),
+is already 0-based, and already HTML-escapes, so reuse it rather than adding
+a second name lookup.
+
+Four states must each render sensibly, none of them as blank or `undefined`:
+an unclaimed channel (falls back to `Channel N` — a wired-but-unassigned
+thermocouple is a real state), an empty zone name (falls back to `Zone N`),
+two zones claiming one channel via overlapping masks (pick the lowest zone
+index, deterministically), and `zonesCache` not yet loaded (`loadZones()` is
+async and `renderChannels()` can run first).
+
+Keep the channel number visible somewhere on the row — an operator
+diagnosing wiring still needs to know which physical channel a reading came
+from.
+
+### 5.2 Everything is 0-based, everywhere — AUDIT IN PROGRESS
+
+Zones, relays, thermocouple channels and CT channels are all indexed from 0
+in the firmware, and every operator-facing label must say so too. No
+`+ 1` on any of these indices, in any page, log line, LCD label, or PC-tool
+string. Mixed conventions *within one screen* are the worst case and take
+priority.
+
+Audit complete 2026-08-30. Findings:
+
+**Display violations to fix (user-visible, safe to change):**
+
+| File:line | Offender | Note |
+|---|---|---|
+| `zones_page.html:472` | `'Channel ' + (tch + 1)` | mask bit `tch` is 0-based |
+| `zones_page.html:486` | `'CT ' + (cti + 1)` with `data-ch=cti` | **1-based label and 0-based attribute on the same line** |
+| `zones_page.html:825` | `'Zone ' + (i + 1)` | CT-warning fallback |
+| `ui_page_temperature.c:252,261,275,475` | `"Relay %u", (r + 1)` | LCD relay tiles |
+
+**Mixed conventions on one screen — the worst class, fix first:**
+
+- `zones_page.html` labels zone cards `Zone i` (line 523, 0-based) and the
+  autotune dropdown `Zone i` (1067, 0-based) but the CT warning `Zone i+1`
+  (825). Same page, same concept, two answers.
+- `ui_page_temperature.c` prints relay **tiles** 1-based (`r + 1`) and relay
+  **error toasts** 0-based (via `UI_RELAY_DISPLAY`), while printing zones
+  0-based (line 411) — three conventions on one screen. Already tracked in
+  `TODO.md:92-94`; this audit corroborates it.
+- `zones_page.html:472` says `Channel tch+1` where `diagnostics_page.html:703,843`
+  says `Channel c.channel` — same concept, two pages, two bases.
+
+**Do NOT blind-fix — these are 1-based on purpose:**
+
+- **The relay wire protocol is 1-based.** `relay_mask` bit *r* maps to wire/API
+  relay *r+1*, and `main_page.html:461-464` / `diagnostics_page.html:936-941`
+  key their handlers on the real 1-based wire number while display-shifting
+  only the printed label. Any further 0-basing must stay display-only; moving
+  the wire numbering breaks the SX1509 `SET_RELAY` opcode.
+- `zones_http.c:1522` writes `"Zone %c", '0' + p + 1` as the **persisted NVS**
+  default timing-profile name during the v8→v9 migration. Existing boards
+  already carry those names. Renaming is a data migration, not a display fix.
+
+**Stale docs:** `SX1509.md:97` claims the GUI is 1-based (it was moved to
+0-based 2026-08-27); `WEB_UI.md:238` documents `relay_cycles[i]` as relay
+*i+1*.
+
+**Already correct:** `ui_page_home.c:525`, `ui_page_profile_builder_review.c:264`,
+`ui_page_profile_builder_zones.c:161`, `ui_page_profile_detail.c:386`, and all
+of `tools/PcTools`.
+
+### 5.3 LCD chart markers to match the web — DECIDED, IN PROGRESS
+
+The owner asked for "10 vertical markers like the web GUI" plus matching
+horizontal markers on the LCD home chart.
+
+**A first attempt set `lv_chart_set_div_line_count(s_chart, 11, 4)` and was
+reverted the same day.** The premise was wrong: *the web chart has no
+gridlines*. `drawYAxis()` strokes a 3px tick just **outside** the plot
+(`moveTo(padL - 3, vy) -> lineTo(padL, vy)`) beside a numeric label;
+`drawChartAxis()` does the same below it. The only full-width strokes inside
+the web's plot are its border and `drawFreezingRef()`'s dashed 0 °C line.
+
+So "markers" means *labelled ticks outside the plot*, and `lv_chart` division
+lines — which run through it — are the wrong primitive. Setting `vdiv=4` in
+particular restores the exact geometry (lines at 0, 1/3, 2/3, 1) behind the
+2026-08-22 "chart reads as three separate panels" report, plus ten more cuts.
+See the comment at the `lv_chart_set_div_line_count()` call site.
+
+**Owner decision 2026-08-30: option 3 — all 11 ticks labelled, smaller font.**
+Implement labelled ticks outside the plot (not div lines), 11 on the
+temperature axis and 4 on the time axis, matching the web's counts exactly.
+If the labels prove unreadable on the real panel, come back to this list
+rather than silently dropping labels.
+
+**The density concern that prompted the question, kept for the record:**
+The LCD chart is `flex_grow` residual height on a 480px page — order
+120-160px. The web's canvas is several times taller. Eleven numeric
+temperature labels that read cleanly there will not fit here, so matching the
+*count* does not match the *appearance*. Options, in rough order of
+preference:
+
+1. Ten ticks, but label only a subset (min / mid / max), keeping the existing
+   corner overlay labels as the numeric readout.
+2. Fewer ticks, all labelled — matching the web's *intent* (a readable
+   temperature scale) rather than its literal count.
+3. All 11 labelled, accepting a smaller font — likely unreadable at this
+   size, and `feedback_lcd_no_scrolling` means there is no room to grow the
+   chart instead.
+
+(Options 1 and 2 above were offered and not chosen.)

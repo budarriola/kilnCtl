@@ -48,7 +48,10 @@ the servers auto-start when the workspace opens.
 Firmware builds and host tests are tools too — `build_kilnfw`,
 `build_saftyfw_host_tests`, `run_pctools_tests` — so
 the toolchain invocations do not have to be rediscovered. Flashing is
-`debug_program(peer="esp"|"pico")`, always OpenOCD, never esptool.
+`debug_program(peer="pico")` for the Pico. For the ESP32-S3, use `flash_firmware()`
+instead — `debug_program(peer="esp")` reliably fails flash-bank detection/verify on
+this board (confirmed repeatedly); `flash_firmware()` is the sanctioned working path,
+still OpenOCD, never esptool.
 
 Full rationale, token measurements, and how to add a tool: **docs/MCP_SERVERS.md**.
 

@@ -72,7 +72,7 @@ extern "C" {
 
 /* How many named kiln configs this board can have saved at once. Sized
  * against kiln_nvs's budget: each stored entry is
- * (1 name + 1 id + 1 blob_len + ZONES_CONFIG_BLOB_MAX_SIZE=512 blob) bytes,
+ * (1 name + 1 id + 1 blob_len + ZONES_CONFIG_BLOB_MAX_SIZE=640 blob) bytes,
  * see kiln_cfg_store.c's sizeof(kiln_cfg_store_blob_t) comment for the exact
  * arithmetic -- 8 slots lands comfortably under 5KB total, a small slice of
  * the 64KB kiln_nvs partition that also holds zones_cfg (~380B),

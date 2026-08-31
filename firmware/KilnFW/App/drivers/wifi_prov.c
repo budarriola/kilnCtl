@@ -20,6 +20,7 @@
 #include "nvs_flash.h"
 
 #include "settings.h"
+#include "time_sync.h"
 #include "wifi_provision_http.h"
 
 static const char *TAG = "wifi_prov";
@@ -1454,6 +1455,15 @@ static void do_ev_got_ip(void)
 {
     cancel_ap_fallback_timer();
     s_wifi.state = WIFI_PROV_STATE_CONNECTED;
+
+    /* Arm SNTP now that the state has actually settled into CONNECTED
+     * (the assignment immediately above, not merely the GOT_IP event this
+     * function is handling) -- see time_sync.h's header comment for why
+     * this is fully asynchronous and safe to call on owner_task(). SNTP
+     * only needs outbound UDP, so this is deliberately NOT gated behind the
+     * static-IP-confirmed check below: that check exists to protect the
+     * fallback AP teardown decision, which SNTP has nothing to do with. */
+    time_sync_notify_got_ip();
 
     /* Capture RSSI of the connected network */
     wifi_ap_record_t ap_info = {};

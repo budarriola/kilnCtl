@@ -25,9 +25,37 @@ design into the repo, add an entry here in the same pull request.
   web Profiles page and per entry via a source link. Third-party published data, not
   vendored source code, but listed here for the same traceability reason.
 
+- **Research papers informing KilnFW's PID control design** — various authors — **cited,
+  not vendored.** The PDFs are deliberately *not* in this repo (`/docs/research/` is
+  gitignored): they are third-party published papers whose redistribution terms nobody
+  here has cleared, and they are large binaries no clone needs. Only these citations are
+  tracked, so anyone can re-fetch a paper from its source. Ten were read while writing
+  `firmware/KilnFW/docs/PID_EXPANSION_PLAN.md`; the five below are the ones whose findings
+  actually informed a recommendation or shipped code (see that plan's §1-2 for how each is
+  used):
+  - Josefin Berner, *PhD thesis on relay-feedback PID autotuning* — Lund University,
+    <http://lup.lub.lu.se/search/ws/files/33100749/ThesisJosefinBerner.pdf> — decentralized
+    relay-feedback identification for coupled loops; informs the cross-zone coupling
+    extension (§2c).
+  - Nichols Philips et al., *Application of Auto Tuner Fuzzy PID Controller* — fuzzy
+    cascade PID adapting to a changing process model; informs the fuzzy-PID secondary
+    recommendation (§2b), implemented as `App/drivers/pid_fuzzy.c`.
+  - *Implementation of Fuzzy PID Controller on [a PT326 heating rig]* — fuzzy PID over a
+    system-identified ARX model, validated against real hardware; also informs §2b.
+  - *Research on temperature control with numerical methods* — Cohen-Coon vs.
+    Ziegler-Nichols vs. hysteresis on a real electric resistance furnace; motivates the
+    Cohen-Coon tuning rule added to `pid_autotune_tune_from_fopdt()`.
+  - *Tuning Optimization of Hybrid controller* — hybrid PI + feedforward on a shell-and-tube
+    heat exchanger; corroborates this codebase's existing model-based feedforward term.
+
+  The other five read (self-tuning fuzzy PID for HVAC, two fractional-order PID reviews, a
+  Q-learning/GA fuzzy hybrid, and a metaheuristic DC-motor PID optimizer) were considered
+  and explicitly *not* recommended — see the plan's §2 — so they are cited there but not
+  credited here as the source of any implemented technique.
+
 ---
 
-*Last updated: 2026-08-20. If you copy or vendor a new third-party file, library, or
+*Last updated: 2026-08-30. If you copy or vendor a new third-party file, library, or
 reference design into this repo, add an entry here in the same pull request. Plain
 package-manager dependencies (pip packages, ESP-IDF managed components, etc.) don't need
 an entry — only things actually copied into the tree.*

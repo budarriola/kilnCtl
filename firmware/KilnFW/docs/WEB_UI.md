@@ -235,7 +235,7 @@ render.
   the expander came up at boot. `relays[].on` is the **relay shadow** (last
   commanded), not a pin readback — see `docs/UART_PROTOCOL.md`'s IO task for
   why those are kept separate.
-- `relay_cycles[i]` is relay *i+1*'s lifetime on/off transition count
+- `relay_cycles[i]` is relay *i*'s (0-based) lifetime on/off transition count
   (`relay_cycles.c`, persisted in NVS, added 2026-08-12). Reported even when
   `io_ready` is false: it is stored history, not live hardware state. The
   Relays & Rules page renders it as its contact-wear table; nothing else on

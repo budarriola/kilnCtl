@@ -1072,7 +1072,9 @@ static void autotune_handle_message(void *vargs)
                                                                                 : AUTOTUNE_RULE_TYREUS_LUYBEN;
                     ok = autotune_engine_run_relay(zone, arg_a, relay_d, relay_h, rule, err_msg, sizeof(err_msg));
                 } else if (method == AUTOTUNE_METHOD_WIRE_STEP) {
-                    ok = autotune_engine_run(zone, arg_a, err_msg, sizeof(err_msg));
+                    /* Wire protocol has no step-rule byte of its own yet -- SIMC only,
+                     * same default the HTTP path uses when no rule is given. */
+                    ok = autotune_engine_run(zone, arg_a, AUTOTUNE_RULE_SIMC, err_msg, sizeof(err_msg));
                 } else {
                     ok = false;
                     snprintf(err_msg, sizeof(err_msg), "method must be 0 (step) or 1 (relay)");

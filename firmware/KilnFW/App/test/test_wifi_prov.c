@@ -60,6 +60,16 @@ int g_stub_queue_send_calls = 0;
 esp_err_t wifi_provision_http_start(void) { return ESP_OK; }
 httpd_handle_t wifi_provision_http_get_server(void) { return NULL; }
 
+// time_sync_notify_got_ip() is declared by the real time_sync.h and called
+// from do_ev_got_ip() -- see wifi_prov.c's hook comment there. The real
+// definition (time_sync.c) is off-limits to a host build (esp_netif_sntp.h/
+// nvs.h, no stub written for it in this pass -- see time_sync_tz.h's header
+// comment). This fake just counts calls, same "count it, don't simulate it"
+// shape as g_stub_wifi_set_mode_calls above, so a test can assert the hook
+// fired without needing SNTP itself to be host-testable.
+int g_stub_time_sync_notify_got_ip_calls = 0;
+void time_sync_notify_got_ip(void) { g_stub_time_sync_notify_got_ip_calls++; }
+
 #include "../drivers/wifi_prov.c"
 
 // ---- Test scaffolding ----------------------------------------------------

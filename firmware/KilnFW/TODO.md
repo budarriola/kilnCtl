@@ -89,9 +89,10 @@ text, and the safety-link config-page hardening. Still open:
       refuses with "exceeds zone 1's current 0.0 C/hr ceiling"). One unset
       value, two contradictory policies. `max_simultaneous_relays == 0` is a
       third instance of the same ambiguity and should be checked too.
-- [ ] **The LCD numbers relays from 1 and zones from 0 on the same page.** The
-      Temperature page shows "Zone 0 / Relay 1", "Zone 1 / Relay 2". The web
-      side was renumbered to R0-R3 to match the thermocouples; the LCD was not.
+- [x] **The LCD numbered relays from 1 and zones from 0 on the same page** --
+      fixed 2026-08-30 (`UI_PLAN.md` 5.2 audit): `ui_page_temperature.c`'s
+      relay tiles, relay error toasts and zone rows are now all 0-based,
+      matching the web side's R0-R3.
 - [ ] **The Safety Processor LCD page never shows the current state.** It
       reports the last trip, temperatures and link version, but not whether
       the processor is ARMED or TRIPPED right now, nor whether it has been
