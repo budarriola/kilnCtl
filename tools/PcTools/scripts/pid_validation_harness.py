@@ -50,9 +50,18 @@ for p in (_SRC, _TESTS):
         sys.path.insert(0, p)
 
 from kilnctrl import pid_validation as pv  # noqa: E402
+from kilnctrl import zones_http_client  # noqa: E402
 from bench_fixture_session import (  # noqa: E402
     BenchSession, BenchSessionError, HTTP_TIMEOUT_S, _http,
 )
+
+#: zone_control_mode_t (firmware/KilnFW/App/drivers/zones_http.h:695-698):
+#: OFF=0, BANGBANG=1, PID=2, PID_FUZZY=3. autotune_accept() writes gains and
+#: the fitted model but does NOT change control_mode -- a zone can come out
+#: of "accept" with a freshly-tuned PID and still be sitting in OFF, in which
+#: case a profile run against it measures nothing. See
+#: _bs_ensure_pid_mode()/stage_profile_tracking() below.
+ZONE_CONTROL_MODE_PID = 2
 
 log = logging.getLogger("pid_validation_harness")
 
@@ -92,9 +101,37 @@ def _bs_backup_import(self, doc: dict) -> "tuple[bool, str]":
     return code == 200, text
 
 
+def _bs_ensure_pid_mode(self, zones: "list[int]") -> "dict[int, int]":
+    """Make sure every zone in ``zones`` is in PID mode (2), and READ IT
+    BACK to confirm the write actually took -- accepting a 200 from POST
+    /api/zones is not itself proof, the same class of gap
+    diff_backup_zones() exists to catch for the backup path. Returns
+    ``{zone_index: control_mode_after}`` for every zone touched; a caller
+    that finds anything other than ZONE_CONTROL_MODE_PID in the result
+    knows the mode did not take.
+
+    Only zones that are NOT already in PID mode are POSTed -- an
+    already-correct zone is left alone rather than round-tripped for no
+    reason.
+    """
+    current = zones_http_client.get_zones(self.host, timeout=HTTP_TIMEOUT_S)
+    by_index = {z["index"]: z for z in current.get("zones", [])}
+    needs_write = [z for z in zones
+                   if by_index.get(z, {}).get("control_mode") != ZONE_CONTROL_MODE_PID]
+    if needs_write:
+        preset = {"zones": [{"index": z, "control_mode": ZONE_CONTROL_MODE_PID}
+                             for z in needs_write]}
+        body = zones_http_client.build_post_body(current, preset)
+        zones_http_client.post_zones(self.host, body, timeout=HTTP_TIMEOUT_S)
+    after = zones_http_client.get_zones(self.host, timeout=HTTP_TIMEOUT_S)
+    after_by_index = {z["index"]: z for z in after.get("zones", [])}
+    return {z: after_by_index.get(z, {}).get("control_mode") for z in zones}
+
+
 BenchSession.autotune_accept = _bs_autotune_accept
 BenchSession.backup_export = _bs_backup_export
 BenchSession.backup_import = _bs_backup_import
+BenchSession.ensure_pid_mode = _bs_ensure_pid_mode
 
 
 # ---------------------------------------------------------------------------
@@ -328,10 +365,46 @@ def stage_profile_tracking(session, args) -> pv.StageReport:
     checks: "list[pv.CheckResult]" = []
     detail: "dict[str, Any]" = {}
     try:
+        # autotune_accept() (stage 2) writes gains + model but NOT
+        # control_mode -- a zone tuned there can still be sitting in OFF, in
+        # which case this whole stage would run a profile against a zone
+        # that never actually heats and "pass" on data that measured
+        # nothing. Force every tracked zone into PID mode and read the
+        # result back to confirm it actually took, same discipline as
+        # backup_roundtrip's diff_backup_zones() re-export check.
+        modes_after = _retrying(session, args, "profile_tracking", "ensure_pid_mode",
+                                lambda: session.ensure_pid_mode(args.zones))
+        for zone in args.zones:
+            mode = modes_after.get(zone)
+            checks.append(pv.CheckResult(
+                name=f"zone{zone}.control_mode_pid", passed=mode == ZONE_CONTROL_MODE_PID,
+                actual=mode, threshold=ZONE_CONTROL_MODE_PID))
+        if not all(c.passed for c in checks):
+            return pv.StageReport(name="profile_tracking", passed=False, checks=checks,
+                                  error="one or more zones did not confirm PID mode before "
+                                        "the profile run -- refusing to start it",
+                                  duration_s=time.monotonic() - t0)
+
         zone_mask = sum(1 << z for z in args.zones)
         segments = _profile_segments_c_to_80(args.tracking_peak1_c, args.tracking_peak2_c)
+        # Build a name that fits the firmware's PROFILE_NAME_MAX_LEN (15
+        # chars, profiles_http.h:29) while still embedding a timestamp so
+        # the run is identifiable in the slot afterwards -- see
+        # pv.build_tracking_profile_name's docstring.
+        profile_name = pv.build_tracking_profile_name()
+        # Pre-flight against every firmware bound BEFORE the HTTP call: a
+        # 400 discovered here costs nothing, discovered after start_profile()
+        # it costs the run. This is exactly the check missing when this
+        # stage sent a 23-char name and burned an hour of heating on a 400
+        # at t=0.1s.
+        try:
+            pv.validate_profile_payload(args.tracking_slot, profile_name, zone_mask, segments)
+        except pv.ProfilePayloadError as exc:
+            return pv.StageReport(name="profile_tracking", passed=False,
+                                  error=f"payload would be rejected by firmware, not sent: {exc}",
+                                  duration_s=time.monotonic() - t0)
         _retrying(session, args, "profile_tracking", "put_profile",
-                 lambda: session.put_profile(args.tracking_slot, "pid_validation_tracking",
+                 lambda: session.put_profile(args.tracking_slot, profile_name,
                                               zone_mask, segments))
         code, body = _retrying(session, args, "profile_tracking", "start_profile",
                                lambda: session.start_profile(args.tracking_slot))
@@ -494,6 +567,11 @@ class FakeSession:
         # next backup_export() the same way the real board would.
         self._backup_doc = doc
         return True, '{"ok":true}'
+
+    def ensure_pid_mode(self, zones):
+        # Fake board: every zone is already in PID mode, no write needed --
+        # exercises the "already correct, nothing to POST" path.
+        return {z: ZONE_CONTROL_MODE_PID for z in zones}
 
     def put_profile(self, slot, name, zone_mask, segments):
         return None
@@ -665,8 +743,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    help=f"save the exported config here (default: {DEFAULT_BACKUP_PATH})")
 
     g = p.add_argument_group("profile tracking")
-    g.add_argument("--tracking-slot", type=int, default=15,
-                   help="user profile slot to write/run the tracking test in (default: 15)")
+    g.add_argument("--tracking-slot", type=int, default=pv.PROFILE_FW_MAX_COUNT - 1,
+                   help="user profile slot to write/run the tracking test in "
+                        f"(default: {pv.PROFILE_FW_MAX_COUNT - 1}, the last of the firmware's "
+                        f"{pv.PROFILE_FW_MAX_COUNT} slots -- profiles_http.h:28). Was 15 (out of "
+                        "the firmware's 0-7 range), which the firmware silently reinterpreted as "
+                        "\"first free slot\" (profiles_http.c's id>=0 && id<PROFILES_MAX_COUNT "
+                        "check) rather than rejecting -- validate_profile_payload() now catches "
+                        "any future out-of-range value explicitly instead of relying on that "
+                        "fallback.")
     g.add_argument("--tracking-peak1-c", type=float, default=50.0)
     g.add_argument("--tracking-peak2-c", type=float, default=70.0)
     g.add_argument("--tracking-duration-s", type=float, default=1800.0,

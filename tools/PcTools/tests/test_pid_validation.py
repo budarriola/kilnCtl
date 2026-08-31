@@ -816,3 +816,173 @@ def test_hard_max_abort_stops_the_dry_run_and_still_tears_down(harness, tmp_path
     assert doc["aborted"] is True
     stage_names = [s["name"] for s in doc["stages"]]
     assert "teardown_force_all_stop" in stage_names, "teardown must still run after an abort"
+
+
+# ---------------------------------------------------------------------------
+# build_tracking_profile_name / validate_profile_payload
+#
+# This is the fix for the actual hardware failure that prompted this pass: a
+# full validation run burned an hour of kiln heating only to discover, at
+# stage 5, that the profile name the harness sent ("pid_validation_tracking",
+# 23 chars) exceeded the firmware's PROFILE_NAME_MAX_LEN (15 chars --
+# firmware/KilnFW/App/drivers/profiles_http.h:29, enforced by the "name too
+# long" check at profiles_http.c:1346-1349). Every check below is proven able
+# to FAIL (break the bound, see the assertion fire, restore) before being
+# trusted to pass -- an assertion that cannot be shown failing has no
+# business gating an hour of heating.
+# ---------------------------------------------------------------------------
+
+_GOOD_SEGMENTS = [{"target_c": 50.0, "ramp_c_per_hr": 120.0, "dwell_min": 8}]
+
+
+def test_tracking_profile_name_fits_firmware_limit_worst_case():
+    """The default prefix ("pv") + an 8-digit MMDDHHMM timestamp must always
+    fit PROFILE_NAME_MAX_LEN (15), for every possible timestamp -- not just
+    the one 'now' happens to produce when the test runs."""
+    import time as _time
+    worst_case_when = _time.strptime("2026 12312359", "%Y %m%d%H%M")
+    name = pv.build_tracking_profile_name(when=worst_case_when)
+    assert len(name) <= pv.PROFILE_FW_NAME_MAX_LEN
+    assert name == "pv12312359"  # still human-identifiable, not just short
+
+
+def test_tracking_profile_name_long_prefix_is_truncated_not_rejected():
+    """NEGATIVE-TEST-ADJACENT: a pathological caller-supplied prefix must
+    still come back within the firmware bound rather than raising or
+    silently exceeding it."""
+    name = pv.build_tracking_profile_name(prefix="a_much_too_long_prefix_for_this")
+    assert len(name) <= pv.PROFILE_FW_NAME_MAX_LEN
+
+
+def test_validate_profile_payload_accepts_a_conforming_payload():
+    pv.validate_profile_payload(0, "pv12312359", 0b111, _GOOD_SEGMENTS)
+
+
+def test_validate_profile_payload_rejects_name_over_firmware_limit():
+    """NEGATIVE TEST. Reproduces the actual failure: a name one character
+    over PROFILE_NAME_MAX_LEN (15) must be caught here, locally, before any
+    HTTP call -- not discovered as a 400 after the board has already started
+    heating for the stage."""
+    long_name = "x" * (pv.PROFILE_FW_NAME_MAX_LEN + 1)
+    with pytest.raises(pv.ProfilePayloadError, match="name"):
+        pv.validate_profile_payload(0, long_name, 0b111, _GOOD_SEGMENTS)
+    # restore: a name exactly at the limit must be accepted
+    ok_name = "x" * pv.PROFILE_FW_NAME_MAX_LEN
+    pv.validate_profile_payload(0, ok_name, 0b111, _GOOD_SEGMENTS)
+
+
+def test_validate_profile_payload_rejects_slot_out_of_range():
+    """NEGATIVE TEST. Reproduces a second real bug found in this pass: the
+    harness's own --tracking-slot default (15) was out of the firmware's
+    0-7 range (PROFILES_MAX_COUNT=8, profiles_http.h:28) and the firmware
+    silently reinterpreted an out-of-range id as "first free slot" instead
+    of rejecting it -- so this must catch it locally instead of relying on
+    that fallback."""
+    with pytest.raises(pv.ProfilePayloadError, match="slot"):
+        pv.validate_profile_payload(15, "ok", 0b111, _GOOD_SEGMENTS)
+    with pytest.raises(pv.ProfilePayloadError, match="slot"):
+        pv.validate_profile_payload(-1, "ok", 0b111, _GOOD_SEGMENTS)
+    # restore: every in-range slot (0..7) is accepted
+    pv.validate_profile_payload(7, "ok", 0b111, _GOOD_SEGMENTS)
+    pv.validate_profile_payload(0, "ok", 0b111, _GOOD_SEGMENTS)
+
+
+def test_validate_profile_payload_rejects_zero_or_oversize_zone_mask():
+    """NEGATIVE TEST. zone_mask must select at least one zone
+    (profiles_http.c:1367) and fit a uint8_t."""
+    with pytest.raises(pv.ProfilePayloadError, match="zone_mask"):
+        pv.validate_profile_payload(0, "ok", 0, _GOOD_SEGMENTS)
+    with pytest.raises(pv.ProfilePayloadError, match="zone_mask"):
+        pv.validate_profile_payload(0, "ok", 0x100, _GOOD_SEGMENTS)
+    # restore
+    pv.validate_profile_payload(0, "ok", 0xFF, _GOOD_SEGMENTS)
+
+
+def test_validate_profile_payload_rejects_segment_count_out_of_range():
+    """NEGATIVE TEST. seg_count must be 1-12 (PROFILE_MAX_SEGMENTS,
+    profiles_http.h:30 / profiles_http.c:1382)."""
+    with pytest.raises(pv.ProfilePayloadError, match="segment count"):
+        pv.validate_profile_payload(0, "ok", 0b111, [])
+    too_many = [dict(_GOOD_SEGMENTS[0]) for _ in range(pv.PROFILE_FW_MAX_SEGMENTS + 1)]
+    with pytest.raises(pv.ProfilePayloadError, match="segment count"):
+        pv.validate_profile_payload(0, "ok", 0b111, too_many)
+    # restore: exactly the max is fine
+    at_max = [dict(_GOOD_SEGMENTS[0]) for _ in range(pv.PROFILE_FW_MAX_SEGMENTS)]
+    pv.validate_profile_payload(0, "ok", 0b111, at_max)
+
+
+def test_validate_profile_payload_rejects_target_c_out_of_range():
+    """NEGATIVE TEST. target_c must be 0-1400 (profiles_http.c:102-103)."""
+    bad = [{"target_c": 1400.1, "ramp_c_per_hr": 100.0, "dwell_min": 5}]
+    with pytest.raises(pv.ProfilePayloadError, match="target_c"):
+        pv.validate_profile_payload(0, "ok", 0b111, bad)
+    # restore: exactly at the ceiling is fine
+    ok = [{"target_c": 1400.0, "ramp_c_per_hr": 100.0, "dwell_min": 5}]
+    pv.validate_profile_payload(0, "ok", 0b111, ok)
+
+
+def test_validate_profile_payload_rejects_ramp_out_of_range():
+    """NEGATIVE TEST. ramp_c_per_hr must be 0-1000 (profiles_http.c:104-105)."""
+    bad = [{"target_c": 50.0, "ramp_c_per_hr": 1000.1, "dwell_min": 5}]
+    with pytest.raises(pv.ProfilePayloadError, match="ramp_c_per_hr"):
+        pv.validate_profile_payload(0, "ok", 0b111, bad)
+    ok = [{"target_c": 50.0, "ramp_c_per_hr": 1000.0, "dwell_min": 5}]
+    pv.validate_profile_payload(0, "ok", 0b111, ok)
+
+
+def test_validate_profile_payload_rejects_dwell_out_of_range():
+    """NEGATIVE TEST. dwell_min must be 0-1440 (profiles_http.c:106, 24h)."""
+    bad = [{"target_c": 50.0, "ramp_c_per_hr": 100.0, "dwell_min": 1441}]
+    with pytest.raises(pv.ProfilePayloadError, match="dwell_min"):
+        pv.validate_profile_payload(0, "ok", 0b111, bad)
+    ok = [{"target_c": 50.0, "ramp_c_per_hr": 100.0, "dwell_min": 1440}]
+    pv.validate_profile_payload(0, "ok", 0b111, ok)
+
+
+# ---------------------------------------------------------------------------
+# stage_profile_tracking wiring: pre-flight rejection + PID-mode enforcement
+# ---------------------------------------------------------------------------
+
+def test_dry_run_profile_tracking_pid_mode_is_verified_by_readback(harness, tmp_path):
+    """The FakeSession reports every zone already in PID mode; confirm the
+    stage actually records that check rather than skipping it."""
+    rc = harness.main([
+        "--dry-run", "--report-dir", str(tmp_path), "--steady-state-err-c", "5.0"])
+    assert rc == 0
+    jsons = sorted(tmp_path.glob("pid_validation_*.json"), key=lambda p: p.stat().st_mtime)
+    doc = json.loads(jsons[-1].read_text(encoding="utf-8"))
+    tracking = next(s for s in doc["stages"] if s["name"] == "profile_tracking")
+    mode_checks = [c for c in tracking["checks"] if c["name"].endswith("control_mode_pid")]
+    assert len(mode_checks) == len(harness.build_arg_parser().parse_args(["--dry-run"]).zones)
+    assert all(c["passed"] for c in mode_checks)
+
+
+def test_dry_run_profile_tracking_aborts_locally_when_zone_not_in_pid_mode(harness, tmp_path, monkeypatch):
+    """NEGATIVE TEST for the accept-writes-gains-but-not-mode gap: force the
+    FakeSession to report a zone stuck in OFF after ensure_pid_mode() and
+    confirm the stage fails locally (never reaches put_profile/start_profile)
+    instead of silently running a profile against a zone that cannot heat."""
+    put_profile_called = []
+
+    def _fake_ensure_pid_mode(self, zones):
+        # zone 1 refuses to take PID mode -- readback still shows OFF (0).
+        return {z: (0 if z == 1 else 2) for z in zones}
+
+    def _fake_put_profile(self, slot, name, zone_mask, segments):
+        put_profile_called.append(True)
+
+    monkeypatch.setattr(harness.FakeSession, "ensure_pid_mode", _fake_ensure_pid_mode)
+    monkeypatch.setattr(harness.FakeSession, "put_profile", _fake_put_profile)
+
+    rc = harness.main([
+        "--dry-run", "--report-dir", str(tmp_path), "--skip-cooldown", "--skip-tune",
+        "--skip-matrix", "--skip-backup"])
+    assert rc != 0
+    assert not put_profile_called, "must not start the profile when a zone's PID mode is unconfirmed"
+    jsons = sorted(tmp_path.glob("pid_validation_*.json"), key=lambda p: p.stat().st_mtime)
+    doc = json.loads(jsons[-1].read_text(encoding="utf-8"))
+    tracking = next(s for s in doc["stages"] if s["name"] == "profile_tracking")
+    assert tracking["passed"] is False
+    zone1_check = next(c for c in tracking["checks"] if c["name"] == "zone1.control_mode_pid")
+    assert zone1_check["passed"] is False
+    assert zone1_check["actual"] == 0

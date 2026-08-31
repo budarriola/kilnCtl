@@ -71,6 +71,116 @@ def check_hard_max(hottest_c: float, limit_c: float, where: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Profile payload pre-flight. Mirrors the firmware's OWN bounds on
+# POST /api/profile (firmware/KilnFW/App/drivers/profiles_http.c /
+# profiles_http.h) so the harness refuses to start an hour-long heating stage
+# it can already predict the firmware will reject with a 400 -- exactly what
+# happened when stage 5 (profile_tracking) sent a 23-char name against a
+# 15-char firmware limit and burned an hour of kiln heating before failing at
+# t=0.1s. Every constant below is cited to the firmware line that owns it;
+# these are NOT independently chosen numbers and must be kept in sync by hand
+# if the firmware's ever change (there is no shared header to import from
+# Python).
+# ---------------------------------------------------------------------------
+
+#: firmware/KilnFW/App/drivers/profiles_http.h:28
+PROFILE_FW_MAX_COUNT = 8
+#: firmware/KilnFW/App/drivers/profiles_http.h:29 -- name buffer is
+#: PROFILE_NAME_MAX_LEN+1 bytes; http_form_find_field() returns -2 ("name too
+#: long") the instant the field does not fit that +1 including the NUL, i.e.
+#: an inclusive max of 15 characters.
+PROFILE_FW_NAME_MAX_LEN = 15
+#: firmware/KilnFW/App/drivers/profiles_http.h:30 and profiles_http.c:1382
+#: ("seg_count out of range (1-12)")
+PROFILE_FW_MAX_SEGMENTS = 12
+#: firmware/KilnFW/App/drivers/profiles_http.c:102-103
+PROFILE_FW_TARGET_C_MIN = 0.0
+PROFILE_FW_TARGET_C_MAX = 1400.0
+#: firmware/KilnFW/App/drivers/profiles_http.c:104-105
+PROFILE_FW_RAMP_C_PER_HR_MIN = 0.0
+PROFILE_FW_RAMP_C_PER_HR_MAX = 1000.0
+#: firmware/KilnFW/App/drivers/profiles_http.c:106 (24h)
+PROFILE_FW_DWELL_MIN_MAX = 1440
+#: firmware/KilnFW/App/drivers/profiles_http.c:1367 -- zone_mask must be
+#: nonzero and fit a uint8_t; which SPECIFIC bits are valid additionally
+#: depends on the board's configured thermocouple count
+#: (zones_config_get_thermo_count()), which this harness has no local copy
+#: of and cannot check without a live call -- so this pre-flight only checks
+#: the bounds that are knowable offline (nonzero, <= 0xFF) and leaves the
+#: "is this zone actually configured" check to the firmware's own 400.
+PROFILE_FW_ZONE_MASK_MAX = 0xFF
+
+
+class ProfilePayloadError(ValueError):
+    """A profile field would be rejected by the firmware's own /api/profile
+    bounds. Raised by ``validate_profile_payload`` BEFORE any HTTP call, so
+    the caller never starts a stage (and never heats the kiln) for a
+    payload that is predictably a 400."""
+
+
+def build_tracking_profile_name(prefix: str = "pv", when: "Optional[time.struct_time]" = None) -> str:
+    """A profile name that (a) fits PROFILE_FW_NAME_MAX_LEN and (b) still
+    lets a human find the right slot afterwards, by embedding a compact
+    MMDDHHMM timestamp. ``prefix`` + 8 timestamp digits must total
+    <= PROFILE_FW_NAME_MAX_LEN; the default ``"pv"`` (2 chars) + 8 digits is
+    10, comfortably under the 15-char firmware limit with room to spare.
+    """
+    ts = time.strftime("%m%d%H%M", when if when is not None else time.localtime())
+    name = f"{prefix}{ts}"
+    if len(name) > PROFILE_FW_NAME_MAX_LEN:
+        # Truncate rather than raise -- a caller passing a long prefix still
+        # gets a usable (if less descriptive) name instead of a hard failure
+        # over what is, worst case, a cosmetic label.
+        name = name[:PROFILE_FW_NAME_MAX_LEN]
+    return name
+
+
+def validate_profile_payload(slot: int, name: str, zone_mask: int, segments: "list[dict]") -> None:
+    """Check ``slot``/``name``/``zone_mask``/``segments`` against every bound
+    the firmware's POST /api/profile parser enforces (see the PROFILE_FW_*
+    constants above for the exact firmware citations). Raises
+    :class:`ProfilePayloadError` naming the offending field on the first
+    violation found; returns None if the whole payload would be accepted.
+
+    Deliberately does NOT re-implement zone-mask-vs-configured-thermocouple-
+    count (that needs a live board read) or the ramp-rate feasibility check
+    (that needs the board's per-zone ceiling) -- both stay as firmware-side
+    checks. This function only catches what is knowable from the payload
+    alone, which is exactly the class of bug that just cost an hour of
+    heating: a value the harness itself constructed being out of bounds.
+    """
+    if not isinstance(slot, int) or slot < 0 or slot >= PROFILE_FW_MAX_COUNT:
+        raise ProfilePayloadError(
+            f"slot {slot!r} out of range (0-{PROFILE_FW_MAX_COUNT - 1})")
+    if not name or len(name) > PROFILE_FW_NAME_MAX_LEN:
+        raise ProfilePayloadError(
+            f"name {name!r} ({len(name)} chars) exceeds the firmware's "
+            f"{PROFILE_FW_NAME_MAX_LEN}-char limit")
+    if not isinstance(zone_mask, int) or zone_mask <= 0 or zone_mask > PROFILE_FW_ZONE_MASK_MAX:
+        raise ProfilePayloadError(
+            f"zone_mask {zone_mask!r} must select at least one zone and fit a byte "
+            f"(1-{PROFILE_FW_ZONE_MASK_MAX})")
+    if not segments or len(segments) > PROFILE_FW_MAX_SEGMENTS:
+        raise ProfilePayloadError(
+            f"segment count {len(segments)} out of range (1-{PROFILE_FW_MAX_SEGMENTS})")
+    for i, seg in enumerate(segments):
+        target_c = seg.get("target_c")
+        if target_c is None or not (PROFILE_FW_TARGET_C_MIN <= target_c <= PROFILE_FW_TARGET_C_MAX):
+            raise ProfilePayloadError(
+                f"segment {i}: target_c {target_c!r} out of range "
+                f"({PROFILE_FW_TARGET_C_MIN}-{PROFILE_FW_TARGET_C_MAX})")
+        ramp = seg.get("ramp_c_per_hr")
+        if ramp is None or not (PROFILE_FW_RAMP_C_PER_HR_MIN <= ramp <= PROFILE_FW_RAMP_C_PER_HR_MAX):
+            raise ProfilePayloadError(
+                f"segment {i}: ramp_c_per_hr {ramp!r} out of range "
+                f"({PROFILE_FW_RAMP_C_PER_HR_MIN}-{PROFILE_FW_RAMP_C_PER_HR_MAX})")
+        dwell = seg.get("dwell_min")
+        if dwell is None or not (0 <= dwell <= PROFILE_FW_DWELL_MIN_MAX):
+            raise ProfilePayloadError(
+                f"segment {i}: dwell_min {dwell!r} out of range (0-{PROFILE_FW_DWELL_MIN_MAX})")
+
+
+# ---------------------------------------------------------------------------
 # Spread across zones
 # ---------------------------------------------------------------------------
 
@@ -643,6 +753,11 @@ def now_iso() -> str:
 
 __all__ = [
     "DEFAULT_HARD_MAX_TEMP_C", "HardMaxExceeded", "check_hard_max",
+    "PROFILE_FW_MAX_COUNT", "PROFILE_FW_NAME_MAX_LEN", "PROFILE_FW_MAX_SEGMENTS",
+    "PROFILE_FW_TARGET_C_MIN", "PROFILE_FW_TARGET_C_MAX",
+    "PROFILE_FW_RAMP_C_PER_HR_MIN", "PROFILE_FW_RAMP_C_PER_HR_MAX",
+    "PROFILE_FW_DWELL_MIN_MAX", "PROFILE_FW_ZONE_MASK_MAX",
+    "ProfilePayloadError", "build_tracking_profile_name", "validate_profile_payload",
     "compute_spread_c", "TrackingSample", "ZoneTrackingStats", "tracking_stats",
     "TrackingThresholds", "CheckResult", "evaluate_zone_tracking", "evaluate_spread",
     "autotune_refusal_reason", "diff_backup_zones",
