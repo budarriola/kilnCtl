@@ -1,6 +1,7 @@
 # kilnCtl Roadmap — both processors
 
-> **Status:** planning · **Last reviewed:** 2026-08-28 (M11 closed; M12a opened
+> **Status:** planning · **Last reviewed:** 2026-08-30 (reconciled against
+> `PID_EXPANSION_PLAN.md` and `DISPLAY_ST7796_PLAN.md`; M11 closed; M12a opened
 > and closed the same day; M12/M13 in progress)
 > **Start here:** the [What is actually left](#what-is-actually-left) section
 > immediately below is the short answer; the milestones are the detail.
@@ -77,7 +78,8 @@ What is still genuinely open is short:
 | M | S9's welded-contactor escalation — by definition needs a welded contactor | M4 |
 | M | AP-fallback verified end to end (needs a router with correct *and* deliberately-wrong static config) | M6 |
 | M | Per-channel CT-to-jack commissioning, plus a bench measurement of the ADC noise floor under the 25-count presence fallback | M5 |
-| M | **HW changes:** LCD backlight control (no GPIO/PWM path exists), relay status LEDs for K1–K4/S9, distinct connector types for the thermocouple daughterboards, I2C broken out on an expansion connector | M1 |
+| M | **HW changes:** LCD backlight control (fix scoped in `DISPLAY_ST7796_PLAN.md` §3.4.1: one flying wire, GPIO15/16 to module pin 8 — needs the second-panel harness to carry it), relay status LEDs for K1–K4/S9, distinct connector types for the thermocouple daughterboards, I2C broken out on an expansion connector | M1 |
+| S | **Blocking, before the MSP4031 touches J2 at all**: meter module pins 10/12 (CTP_SCL/CTP_SDA) at 5V — confirms or clears a hazard that can back-feed the SX1509/ESP32-S3 through the shared I2C bus. `DISPLAY_ST7796_PLAN.md` §4 | M1 |
 | M | DEBUG header and GP16/GP17 access before A1 is soldered down | M0 |
 | L | Field updates exercised against real hardware: Pico bootloader over a live UART1, an actual OTA into `ota_0`/`ota_1` (a JTAG flash boots `factory` and never runs the rollback machinery), a real version mismatch | M8 |
 | L | `GUARD_TEST_MATRIX.md` §3 — every enabled guard's real trip, safe-state power-on, sensor open-circuit, current-mapping commissioning | M4 |
@@ -92,6 +94,8 @@ What is still genuinely open is short:
 | [`firmware/KilnFW/TODO.md`](firmware/KilnFW/TODO.md) | Main firmware: web UI, profiles, PID, thermal protection, storage |
 | [`firmware/KilnFW/docs/PROJECT_STATUS.md`](firmware/KilnFW/docs/PROJECT_STATUS.md) | What in `KilnFW` is built vs. verified — the honest ledger |
 | [`firmware/KilnFW/docs/UI_PLAN.md`](firmware/KilnFW/docs/UI_PLAN.md) | LCD + web UI usability/cleanup plan — no-scroll LCD audit, phone/tablet web audit, prioritized fix queue |
+| [`firmware/KilnFW/docs/PID_EXPANSION_PLAN.md`](firmware/KilnFW/docs/PID_EXPANSION_PLAN.md) | Per-zone control-algorithm choice (Cohen-Coon rule, fuzzy-PID layer), cross-zone coupling measurement (RGA) and feedforward |
+| [`firmware/KilnFW/docs/DISPLAY_ST7796_PLAN.md`](firmware/KilnFW/docs/DISPLAY_ST7796_PLAN.md) | Second LCD panel (ST7796/MSP4031) support, runtime panel auto-detection, display SPI async/DMA |
 | [`firmware/KilnFW/docs/ARCHITECTURE.md`](firmware/KilnFW/docs/ARCHITECTURE.md) | Tasks, priorities, owner-task queues, single-writer ownership doctrine |
 | [`firmware/SaftyFW/TODO.md`](firmware/SaftyFW/TODO.md) | Safety firmware, phases 0–10 |
 | [`firmware/SaftyFW/docs/SAFETY_MODEL.md`](firmware/SaftyFW/docs/SAFETY_MODEL.md) | What trips, why, and the anti-nuisance doctrine |
@@ -226,12 +230,43 @@ now a short list, which is the point:
   `SaftyFW/CMakeLists.txt` on 2026-08-28: the host suite compiled it happily
   and the target link failed on it. Host tests cannot see this class of
   mistake, and it will recur.
+- **PID Expansion Plan Phase 3b — cross-zone coupling feedforward.** Not
+  started. `PID_EXPANSION_PLAN.md` §Phase 3b: nothing persists the measured
+  coupling matrix (`autotune_engine.c` fills it in RAM only) and
+  `zone_feedforward()` has no coupling term yet. The schema question is open
+  too: today's `zone_cfg_t` holds one coupling coefficient per zone, which
+  cannot hold a full directed row now that real data shows every pair is
+  asymmetric (up to 2.75x) — see that plan's finding 3 for the `zone_cfg_v11_t`
+  shape this needs
+- **New, scoped but not yet in a plan doc: per-zone enable/disable**, so the
+  kiln can run with rings/heaters/thermocouples physically removed. Contiguous
+  prefix from index 0 only (the highest-index zone never disables), toggleable
+  whole-feature from the Thermocouples & Zones page, propagates into
+  `profile_executor`'s per-zone `active` flag (already what `safety_link.c`
+  sends to the Pico — no safety-side or link-protocol change needed).
+  **Prerequisite found during scoping:** `zone_cfg_v11_t` was never frozen
+  with a static assert the way every prior version was — fix that before any
+  v11→v12 bump, or repeat the two config-destroying bugs `PID_EXPANSION_PLAN.md`
+  Phase 2 already found and fixed for v9/v10
+- **New: Pico rollback from the OTA page**, plus a link-protocol reply frame
+  so a Pico rollback refusal is visible — it is currently fire-and-forget with
+  no ACK
+- **New: safety processor build identity** (commit + build date) shown on the
+  OTA page
 
 **Closed 2026-08-27/28, no longer open:** the task stacks were re-read after a
 real firing and 4 kB of internal DRAM reclaimed; `rules_task`'s callees were
 audited (nothing writes flash — the real finding was a cache-disabling *read*
 via `dashboard_get_status()`) and its stack moved to PSRAM; the guard scripts
 now run from `tools/run_all_checks.ps1` and the `run_repo_checks` MCP tool.
+
+**Closed 2026-08-30, no longer open:** `PID_EXPANSION_PLAN.md` Phases 1-4 are
+landed — Cohen-Coon is a selectable, reachable tuning rule alongside SIMC, and
+the fuzzy-PID layer (`pid_fuzzy.c`) is wired into `profile_executor.c` and
+selectable from `zones_page.html`. SNTP/NTP time sync landed. The first
+autotune runs ever to complete on real hardware fitted all three zones, and
+the first full 3x3 cross-zone coupling matrix and RGA were measured — see that
+plan's §4 Phase 0 for the numbers. Proposed gains reviewed, not accepted.
 
 **What is done and should not be reopened:** the link itself, the wire
 contract and its two independent version numbers, the PC-link acknowledgement
@@ -398,6 +433,10 @@ soldering session.
       by 8.7 % of its own rise; firing zone 1 raises ch0 by **43.5 %** and ch2
       by 17.7 %. Zone 1 leaks into zone 0 about 2.5× as hard as the reverse,
       which matters for any multi-zone schedule on this enclosure.
+      **Superseded 2026-08-30 by a full 3x3 coupling matrix and RGA over all
+      three zones** (all three zones now autotuned) — current numbers live in
+      `firmware/KilnFW/docs/PID_EXPANSION_PLAN.md` §4 Phase 0, not restated
+      here.
       **Full multi-segment profile.** 42 °C dwell 6 → 52 °C dwell 6 → down-ramp
       to 46 °C, run end to end through `POST /api/profile_exec/start`: all
       three segments entered in order, all dwelled, peak 56.30 °C, K4 closed on
@@ -434,8 +473,17 @@ soldering session.
 - [x] Per-processor console capture + interleaved log file
       (`kilnctrl-console-capture`) — host-verified only; the SAFETY log-relay
       wire path is still unimplemented in firmware
-- [ ] **HW change: LCD backlight control.** No GPIO/PWM path exists yet
-      (dim/off on idle, touch-driven wake)
+- [ ] **HW change: LCD backlight control.** No GPIO/PWM path exists on the
+      current panel. `DISPLAY_ST7796_PLAN.md` §3.4.1 scopes the fix as one
+      flying wire (GPIO15 or GPIO16 to module pin 8) riding along with the
+      second-panel harness, buying dim/off on idle plus PWM brightness — not
+      yet built, and gated on the STOP-block 5V I2C hazard measurement in
+      that plan's §4 before any harness is connected
+- [ ] **New, plan-only: second LCD panel (ST7796/MSP4031), auto-detection,
+      display SPI async/DMA.** `firmware/KilnFW/docs/DISPLAY_ST7796_PLAN.md` —
+      nothing implemented yet, sequenced Phase 0 (bench facts/hazard
+      measurement) through Phase 7 (UI). The only hardware change required is
+      a custom harness; the main board itself needs no modification
 - [ ] **HW change: relay status LEDs** for K1–K4, S9
 - [ ] **HW change: distinct connector types** for the thermocouple daughterboards
       vs. main-board connectors
