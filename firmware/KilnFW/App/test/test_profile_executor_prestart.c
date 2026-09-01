@@ -2995,6 +2995,82 @@ static void test_hold_membership_chatter_is_counted_and_surfaced(void)
      * in zone_feedforward(), independent of get_status(). */
 }
 
+/* Reset-one-side regression: pid_family_zone_tick()'s membership-change
+ * reseed (z->ff_membership_changed branch, right above where
+ * seed_bumpless_with_ff() is called) is one of FOUR sites in this file that
+ * call seed_bumpless_with_ff()/pid_seed_bumpless() -- the other three
+ * (reload_zone_config()'s gain-edit and plant-model-reload paths, and
+ * resume()) all also reset z->fuzzy_prev_effective_ki to z->pid_cfg.ki right
+ * alongside the reseed, and pid_fuzzy_prepare_gains()'s own doc comment
+ * (right above it) says why: that field must track "effective Ki last
+ * tick" across every reseed/discontinuity, or the NEXT tick's
+ * pid_rescale_integral_for_new_ki() rescales the freshly-seeded integral
+ * against a stale pre-discontinuity ratio instead of treating the reseed as
+ * the no-op it is supposed to be. The membership-change site was missing
+ * that half of the pair.
+ *
+ * Driven through the real call sequence production uses for
+ * ZONE_CONTROL_MODE_PID_FUZZY (profile_executor_tick()'s own switch:
+ * pid_fuzzy_prepare_gains() first, then pid_family_zone_tick() with the
+ * fuzzy-adjusted cfg) rather than hand-setting fuzzy_prev_effective_ki --
+ * pid_fuzzy_prepare_gains() itself unconditionally overwrites the field
+ * every call (its last line, "z->fuzzy_prev_effective_ki = adj_ki"), so a
+ * test that just sets the field and asserts it stayed set would not even
+ * observe the missing reset. */
+static void test_hold_membership_change_resets_fuzzy_prev_effective_ki(void)
+{
+    TEST_SECTION("pid_family_zone_tick() -- a coupled-membership-change reseed on a PID_FUZZY zone "
+                 "must reset z->fuzzy_prev_effective_ki to the BASE Ki (z->pid_cfg.ki), matching the "
+                 "gain-reload/plant-model-reload/resume sibling reseed sites, so the next tick's "
+                 "pid_fuzzy_prepare_gains() rescales the freshly-seeded integral from the value it was "
+                 "actually seeded against instead of a stale pre-reseed fuzzy-adjusted Ki");
+    zone_runtime_t *z0 = NULL;
+    setup_membership_transition_zone0(&z0, 20.0f, 35.0f);
+    z0->control_mode = ZONE_CONTROL_MODE_PID_FUZZY;
+    s_test_fuzzy_strength_present = true;
+    s_test_fuzzy_strength_pct = 60.0f; /* nonzero -- adj_ki must actually differ from base ki, or the
+                                        * missing reset would be numerically invisible */
+    s_exec.zones[1].faulted = true; /* start EXCLUDED -- the {0,2} 2-zone system, same setup as the
+                                     * gaining-a-neighbor test above */
+
+    bool want_relay_on = false;
+    pid_cfg_t fuzzy_cfg;
+
+    /* Prime the membership signature at the 2-zone system (throwaway tick,
+     * same reason setup_membership_transition_zone0()'s other callers do
+     * this: the very first tick's own 0->real edge would otherwise be the
+     * "membership change" this test means to isolate). */
+    pid_fuzzy_prepare_gains(z0, 0, &fuzzy_cfg);
+    (void)pid_family_zone_tick(z0, 0, &fuzzy_cfg, true, 1.0f, 1000u, &want_relay_on);
+    z0->pid_state.integral = 0.0f;
+
+    /* Settle at the 2-zone steady state -- z0->fuzzy_prev_effective_ki is now
+     * whatever pid_fuzzy_prepare_gains() last computed at 60% strength, which
+     * TEST_CHECK below confirms is NOT z0->pid_cfg.ki (proving the strength
+     * setting actually moved it, so the assertion after the reseed is
+     * discriminating rather than coincidental). */
+    pid_fuzzy_prepare_gains(z0, 0, &fuzzy_cfg);
+    float duty_before = pid_family_zone_tick(z0, 0, &fuzzy_cfg, true, 1.0f, 1000u, &want_relay_on);
+    z0->duty = duty_before;
+    float stale_ki_before_reseed = z0->fuzzy_prev_effective_ki;
+    TEST_CHECK(stale_ki_before_reseed != z0->pid_cfg.ki, "test setup sanity: 60% fuzzy strength on a "
+              "real error/rate must move the effective Ki away from base, or this test cannot tell a "
+              "reset from a coincidence");
+
+    /* Zone 1 heals -- system grows back to {0,1,2}, a genuine membership
+     * edge that fires the reseed at pid_family_zone_tick()'s
+     * z->ff_membership_changed branch. */
+    s_exec.zones[1].faulted = false;
+    pid_fuzzy_prepare_gains(z0, 0, &fuzzy_cfg);
+    (void)pid_family_zone_tick(z0, 0, &fuzzy_cfg, true, 1.0f, 1000u, &want_relay_on);
+
+    TEST_CHECK(z0->fuzzy_prev_effective_ki == z0->pid_cfg.ki, "the membership-change reseed must leave "
+              "fuzzy_prev_effective_ki == base Ki, the same value the OTHER three reseed sites "
+              "(reload_zone_config() x2, resume()) set -- leaving it at the stale pre-reseed "
+              "fuzzy-adjusted Ki instead means the very next tick rescales the freshly-seeded integral "
+              "against the wrong ratio");
+}
+
 // ---------------------------------------------------------------------------
 // Opus review, BLOCKING finding: the old gate here was just
 // active/actual_valid/ff_enabled/finite/>0 -- a zone in ZONE_CONTROL_MODE_OFF
@@ -4046,6 +4122,7 @@ void run_test_profile_executor_prestart(void)
     test_hold_partial_matrix_degrades_toward_less_drive_not_more();
     test_hold_membership_change_gaining_a_neighbor_reseeds_smoothly();
     test_hold_membership_change_losing_a_neighbor_reseeds_when_headroom_exists();
+    test_hold_membership_change_resets_fuzzy_prev_effective_ki();
     test_hold_membership_chatter_is_counted_and_surfaced();
 
     test_feedforward_control_mode_off_neighbor_contributes_zero();

@@ -2324,6 +2324,13 @@ static float pid_family_zone_tick(zone_runtime_t *z, uint8_t zi, const pid_cfg_t
          * the actual physical thing that must not step. */
         if (z->ff_membership_changed) {
             seed_bumpless_with_ff(z, zi, z->duty);
+            /* Same bump-transfer bookkeeping as the other reseed paths
+             * (reload_zone_config()'s gain/model reloads, resume()) --
+             * without this, pid_fuzzy_prepare_gains()'s next tick rescales
+             * the integral seed_bumpless_with_ff() just set against a stale
+             * effective-Ki ratio instead of treating the reseed as the
+             * no-op it's supposed to be. */
+            z->fuzzy_prev_effective_ki = z->pid_cfg.ki;
         }
         duty = pid_update_terms(&z->pid_state, cfg, s_exec.target_c, z->actual_c, dt_s,
                                 u_ff, &z->last_pid_terms);
