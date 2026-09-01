@@ -24,6 +24,12 @@
 #include "safety_trip_words.h" /* safety_fault_source_words() -- ROADMAP.md M13, decode the
                                  * fault-source mask for the operator instead of a bare hex value */
 #include "sim_backend.h"
+#include "stack_margin.h" /* stack_margin_register() -- Opus review round 3, item 5: a real
+                           * uxTaskGetStackHighWaterMark() reading for this task and its watchdog,
+                           * readable over the link's GET_STACK_MARGIN (uart_bridge.c) without a
+                           * debugger, before this fix's ~250-300B estimated peak stack addition
+                           * (solve_hold_for_zone()/gauss_solve_partial_pivot()) is trusted on
+                           * hardware. */
 #include "thermo_combine.h"
 #include "zones_http.h"
 
@@ -178,6 +184,39 @@ typedef struct {
     float ff_k_dc;   /* degC of steady-state rise per unit duty */
     float ff_tau_s;  /* plant time constant, seconds */
     bool  ff_enabled;
+
+    /* Coupled-hold solve diagnostics (defect: steady-state hold used to
+     * divide by this zone's own diagonal gain alone -- see
+     * solve_hold_for_zone()'s doc comment). Written by zone_feedforward()
+     * every call via s_exec.zones[zi] (not through the const z pointer
+     * zone_feedforward() itself is handed -- see that write site's comment),
+     * read by profile_executor_get_status() so an infeasible or degraded
+     * solve is visible off-board, not just in the log. */
+    bool  ff_hold_used_matrix;  /* true = last hold term came from the coupled solve; false = the
+                                  * legacy per-zone diagonal fallback (unqualified zone, no coupled
+                                  * neighbours, or a singular/ill-conditioned matrix) */
+    bool  ff_hold_infeasible;   /* true = the last coupled solve needed to clamp at least one zone's
+                                  * duty UP to 1.0 -- more heat than that zone can physically
+                                  * deliver was requested. A negative raw component is never what
+                                  * sets this (see solve_hold_for_zone()'s "b < 0 case" doc comment
+                                  * -- needing less than zero duty is always achievable). Only
+                                  * meaningful alongside ff_hold_used_matrix == true. */
+    uint8_t ff_hold_reason;     /* coupling_solve_reason_t, widened to a plain uint8_t so this
+                                 * header doesn't have to forward-declare that profile_executor.c-
+                                 * local enum -- 0 (COUPLING_SOLVE_OK) iff ff_hold_used_matrix. */
+    bool  ff_membership_changed; /* true = the set of zones in zi's coupled system (or whether zi
+                                  * qualifies at all) differs from the immediately preceding call --
+                                  * pid_family_zone_tick() re-seeds the PID integral on this edge
+                                  * (Opus review, blocker 2) so a membership flip cannot step
+                                  * commanded duty; see that call site's doc comment. */
+    uint32_t ff_membership_change_count; /* running total of ff_membership_changed edges this run
+                                          * (Opus review round 3, item 3) -- a fast-growing count means
+                                          * a flapping interlock/neighbour is repeatedly forcing the
+                                          * bumpless reseed, which leaves integral action effectively
+                                          * off for this zone (a safe but silent failure mode: sustained
+                                          * FF+P offset instead of a repeated duty step). Never reset
+                                          * mid-run -- see the write site's doc comment for the
+                                          * rate-limited log this also drives. */
     heater_output_cfg_t heater_cfg;
     heater_output_state_t heater_state;
     thermal_guard_cfg_t guard_cfg;
@@ -565,6 +604,423 @@ static uint8_t count_qualifying_coupling_neighbors(uint8_t zi)
     return count;
 }
 
+/* ---- coupled steady-state hold solve (defect fix) -------------------------
+ *
+ * zone_feedforward()'s hold term used to be
+ *     hold = (setpoint_c - ambient_c) / z->ff_k_dc
+ * -- each zone dividing by its OWN diagonal gain, as if it were the only
+ * thing putting heat into the kiln. On a coupled kiln every zone also
+ * receives its neighbours' heat: the bench-measured 3x3 gain matrix (degC of
+ * steady-state rise per unit duty, row = affected zone, column = stepped
+ * zone) has off-diagonal terms of 5-12 against a diagonal of ~22-32 -- 20-40%
+ * of the diagonal, not negligible. Dividing by the diagonal alone
+ * over-estimates every zone's required duty, and all three then over-drive
+ * together (measured: three zones that individually asymptote near 72C
+ * reached 80.1C on a 70C shared target).
+ *
+ * The physically correct steady state solves the WHOLE duty vector at once:
+ * dT_i = sum_j G[i][j] * u_j, i.e. G*u = dT, G's diagonal being each zone's
+ * own ff_k_dc and its off-diagonals zones_http.h's coupling_coeff[] (same
+ * degC-per-unit-duty convention as the diagonal, so the system is
+ * dimensionally consistent as-is -- unlike the Gd/Gu-rescaled deviation term
+ * below, which stays untouched; this fix is scoped to the HOLD term only,
+ * see zone_feedforward()'s call site). dT_i is the same (setpoint_c -
+ * ambient_c) for every zone since the executor runs one shared setpoint
+ * (s_exec.target_c) across all zones.
+ *
+ * Reduced to only the zones genuinely under coupled closed-loop control right
+ * now (zone_qualifies_as_coupling_neighbor() -- the same policy the existing
+ * deviation term already uses, deliberately not a second one), solved with
+ * Gaussian elimination and partial pivoting (never an inverse or a
+ * hand-expanded formula -- MAX31856_CHANNEL_COUNT-sized, works for any active
+ * subset), and falls back to the legacy per-zone diagonal -- byte-for-byte --
+ * whenever the system cannot be trusted: zi itself doesn't qualify, it has no
+ * qualifying neighbours (system reduces to the 1x1 diagonal case, which IS
+ * the legacy formula, not an approximation of it), or elimination hits a
+ * pivot too small to trust (singular/ill-conditioned coupling data -- an
+ * autotune-populated matrix can be partial, zero, or badly conditioned).
+ *
+ * A cache keyed on the built (members, G, b) triple skips re-running
+ * elimination when nothing that matters changed since the last call for this
+ * zi (requirement: this runs every executor tick). Building (members, G, b)
+ * itself stays cheap regardless -- MAX31856_CHANNEL_COUNT reads plus a config
+ * fetch per member, no allocation -- so it is done fresh every call purely to
+ * detect that "nothing changed" case; only the O(n^3) elimination is what the
+ * cache actually saves. */
+/* Tightened from 1e-6 (Opus review, blocker 1): float32 machine epsilon is
+ * ~1.19e-7 (~7.2 decimal digits), so a 1e-6 RELATIVE floor admits condition
+ * numbers up to ~1e6 -- at that boundary the solve has already lost ~6 of
+ * its ~7 digits and the returned duties can be pure rounding noise, yet they
+ * would be marked COUPLING_SOLVE_OK (not flagged infeasible unless they
+ * happen to also land outside [0,1]) and go straight to heater feedforward.
+ * 1e-4 admits condition numbers up to ~1e4 (~3 surviving digits) -- still
+ * generous against every physically plausible coupling matrix: the real
+ * bench-measured matrix (PID_EXPANSION_PLAN.md Phase 0) has cond_inf = 2.94,
+ * and diagonal dominance (diag 22-32 vs off-diag 2-12 -- a heater's own zone
+ * always couples to itself harder than to its neighbours) keeps any
+ * genuinely-measured matrix in the single digits. Nothing legitimate is
+ * refused; see test_hold_pivot_floor_just_{inside,outside}_condition_number_*
+ * for the boundary pinned exactly at cond ~1e4. */
+#define COUPLING_SOLVE_PIVOT_REL_EPS 1e-4f
+#define COUPLING_SOLVE_PIVOT_ABS_EPS 1e-9f
+
+/* Opus review, blocker 3: used_matrix collapsed four independently-testable
+ * causes into one boolean, which is why proving the singularity guard's
+ * necessity required stubbing three checks at once earlier -- with only a
+ * bool, disabling any ONE of several redundant guards was invisible from the
+ * outside. Each fallback reason is now its own enum value, and (see
+ * gauss_solve_partial_pivot()'s doc comment) the two guards that turned out
+ * to be provably unreachable given the others were deleted rather than kept
+ * as unfalsifiable padding. */
+typedef enum {
+    COUPLING_SOLVE_OK = 0,
+    COUPLING_SOLVE_FALLBACK_OUT_OF_RANGE,   /* zi >= MAX31856_CHANNEL_COUNT, or a non-finite
+                                             * setpoint/ambient input */
+    COUPLING_SOLVE_FALLBACK_UNQUALIFIED,    /* zi itself fails zone_qualifies_as_coupling_neighbor() */
+    COUPLING_SOLVE_FALLBACK_NO_NEIGHBORS,   /* zi qualifies but has none -- the 1x1 system IS the
+                                             * legacy diagonal formula, not an approximation of it */
+    COUPLING_SOLVE_FALLBACK_SINGULAR,       /* gauss_solve_partial_pivot(): a pivot fell below the
+                                             * conditioning floor -- singular/ill-conditioned data */
+    COUPLING_SOLVE_FALLBACK_NONFINITE,      /* gauss_solve_partial_pivot() produced a non-finite
+                                             * component despite every pivot clearing the floor --
+                                             * reachable via overflow in the back-substitution sum,
+                                             * see that check's own comment */
+} coupling_solve_reason_t;
+
+typedef struct {
+    bool    have;
+    uint8_t n;
+    uint8_t members[MAX31856_CHANNEL_COUNT];
+    float   G[MAX31856_CHANNEL_COUNT][MAX31856_CHANNEL_COUNT];
+    float   b;
+    float   u[MAX31856_CHANNEL_COUNT];
+    coupling_solve_reason_t reason;
+    bool    infeasible;
+} coupling_hold_cache_t;
+
+static coupling_hold_cache_t s_coupling_hold_cache[MAX31856_CHANNEL_COUNT];
+
+/* Opus review, blocker 2 (membership-transition damping): the SET of zones
+ * qualifying for zi's system (COUPLING_SOLVE_FALLBACK_UNQUALIFIED/
+ * NO_NEIGHBORS vs. a genuine multi-zone solve, and which neighbours are in
+ * it) can change every tick -- heat_blocked in particular is refreshed by
+ * apply_relay() unconditionally every tick (see that function's own doc
+ * comment), so a marginal interlock or an OTA heat-block flapping can flip
+ * a neighbour's qualification at tick rate. A membership change steps the
+ * WHOLE hold term (measured on this file's own test data: zone 0 alone
+ * steps 0.36739 -> 0.42625, zone 2 steps 0.47407 -> 0.57220, both in one
+ * tick) with nothing to damp it. Tracked here as a signature independent of
+ * the (members,G,b) cache above -- the cache only updates on a miss, but a
+ * membership change must be caught on EVERY call, hit or miss, since it is
+ * the transition itself that matters, not whether the coefficients also
+ * happened to change. Bit 8 records "zi itself qualifies"; bits 0..
+ * MAX31856_CHANNEL_COUNT-1 record which OTHER zones are in the system --
+ * together they distinguish every case coupling_solve_reason_t does at the
+ * membership level (OUT_OF_RANGE is never reached past the qualifies check
+ * so it never reaches this signature at all, by construction below). */
+#define COUPLING_MEMBERSHIP_QUALIFIES_BIT 0x0100u
+static uint16_t s_coupling_prev_membership_sig[MAX31856_CHANNEL_COUNT];
+
+static bool coupling_note_membership_signature(uint8_t zi, uint16_t sig)
+{
+    bool changed = s_coupling_prev_membership_sig[zi] != sig;
+    s_coupling_prev_membership_sig[zi] = sig;
+    return changed;
+}
+
+/* Gaussian elimination with partial pivoting on the n x n system G*u = b (b
+ * constant across every row -- see caller's dT_i derivation). Detects a
+ * singular/ill-conditioned system by watching pivot magnitudes during
+ * elimination -- relative to the largest entry anywhere in the ORIGINAL
+ * matrix, so a uniformly tiny but well-conditioned matrix is not mistaken for
+ * a singular one -- rather than forming a determinant or an inverse
+ * separately. Pure stack float math (an (n+1)-augmented MAX31856_CHANNEL_
+ * COUNT-sized matrix, trivially small), no dynamic allocation. out_u[] is
+ * left untouched unless COUPLING_SOLVE_OK is returned -- callers must not
+ * read it otherwise.
+ *
+ * Only THREE outcomes are reachable, and each is independently falsifiable
+ * (Opus review, blocker 3) -- proven by disabling each in turn and watching
+ * the corresponding test fail:
+ *   - COUPLING_SOLVE_FALLBACK_SINGULAR: the pivot-floor check below. The
+ *     load-bearing conditioning guard -- see COUPLING_SOLVE_PIVOT_REL_EPS.
+ *   - COUPLING_SOLVE_FALLBACK_NONFINITE: the back-substitution isfinite(v)
+ *     check. Reachable despite every pivot clearing the floor: `sum`
+ *     accumulates M[i][j]*out_u[j] terms, and while each individual M[i][j]
+ *     is bounded by `scale` (the largest ORIGINAL entry), out_u[j] itself is
+ *     NOT floor-bounded -- a huge-but-technically-conditioned matrix (see
+ *     test_hold_pathological_inputs_never_nan_or_inf()'s 1e30 case) can still
+ *     overflow `sum` to +-Inf here.
+ *   - COUPLING_SOLVE_OK: every pivot cleared the floor and every division
+ *     produced a finite value.
+ *
+ * TWO other checks that used to exist here were deleted, not kept as
+ * unfalsifiable padding, because they are provably dead given the two
+ * guards above:
+ *   - isfinite(factor) after `factor = M[r][k] / M[k][k]`: NOT because "no
+ *     entry in M ever exceeds the largest ORIGINAL entry" -- that is FALSE
+ *     (partial pivoting has a growth factor up to 2^(n-1), 4 at n=3, so
+ *     later-stage entries genuinely can exceed `scale`; an earlier version
+ *     of this comment claimed otherwise, wrongly). The real, stronger
+ *     reason: immediately above, the pivot search picks `piv` as the row
+ *     with the LARGEST |M[r][k]| among rows k..n-1 in column k, and the
+ *     swap puts that row at k -- so after the swap, M[k][k] is BY
+ *     CONSTRUCTION the column maximum: |M[r][k]| <= |M[k][k]| for every
+ *     remaining row r. Therefore |factor| = |M[r][k]/M[k][k]| <= 1
+ *     UNCONDITIONALLY, regardless of scale, REL_EPS, or growth -- dividing a
+ *     finite value by a same-or-larger-magnitude finite nonzero value can
+ *     never overflow. It can never be non-finite.
+ *   - the back-substitution re-check `fabsf(M[i][i]) < pivot_floor`: M[i][i]
+ *     was already validated as the pivot at forward-elimination step k=i,
+ *     and back-substitution's row operations only ever touch M[i][n] (the
+ *     RHS column) -- M[i][i] is provably unchanged since that validation, so
+ *     re-checking it always re-confirms what forward elimination already
+ *     guaranteed. */
+static coupling_solve_reason_t gauss_solve_partial_pivot(uint8_t n,
+                                                          const float G[MAX31856_CHANNEL_COUNT][MAX31856_CHANNEL_COUNT],
+                                                          float b_const, float out_u[MAX31856_CHANNEL_COUNT])
+{
+    if (n == 0 || n > MAX31856_CHANNEL_COUNT) {
+        return COUPLING_SOLVE_FALLBACK_SINGULAR; /* caller contract violation -- treat as untrustworthy */
+    }
+
+    float M[MAX31856_CHANNEL_COUNT][MAX31856_CHANNEL_COUNT + 1];
+    float scale = 0.0f;
+    for (uint8_t i = 0; i < n; i++) {
+        for (uint8_t j = 0; j < n; j++) {
+            float v = G[i][j];
+            if (!isfinite(v)) {
+                return COUPLING_SOLVE_FALLBACK_NONFINITE;
+            }
+            M[i][j] = v;
+            float av = fabsf(v);
+            if (av > scale) scale = av;
+        }
+        M[i][n] = b_const;
+    }
+    if (!isfinite(b_const) || !(scale > 0.0f)) {
+        return COUPLING_SOLVE_FALLBACK_SINGULAR; /* all-zero/degenerate matrix, or a non-finite target */
+    }
+    float rel_eps = scale * COUPLING_SOLVE_PIVOT_REL_EPS;
+    float pivot_floor = (rel_eps > COUPLING_SOLVE_PIVOT_ABS_EPS) ? rel_eps : COUPLING_SOLVE_PIVOT_ABS_EPS;
+
+    for (uint8_t k = 0; k < n; k++) {
+        uint8_t piv = k;
+        float best = fabsf(M[k][k]);
+        for (uint8_t r = (uint8_t)(k + 1); r < n; r++) {
+            float av = fabsf(M[r][k]);
+            if (av > best) {
+                best = av;
+                piv = r;
+            }
+        }
+        if (best < pivot_floor) {
+            return COUPLING_SOLVE_FALLBACK_SINGULAR;
+        }
+        if (piv != k) {
+            for (uint8_t c = k; c <= n; c++) {
+                float tmp = M[k][c];
+                M[k][c] = M[piv][c];
+                M[piv][c] = tmp;
+            }
+        }
+        for (uint8_t r = (uint8_t)(k + 1); r < n; r++) {
+            /* isfinite(factor) deliberately not re-checked here -- see this
+             * function's own doc comment for the bound proof. */
+            float factor = M[r][k] / M[k][k];
+            for (uint8_t c = k; c <= n; c++) {
+                M[r][c] -= factor * M[k][c];
+            }
+        }
+    }
+
+    for (int i = (int)n - 1; i >= 0; i--) {
+        float sum = M[i][n];
+        for (uint8_t j = (uint8_t)(i + 1); j < n; j++) {
+            sum -= M[i][j] * out_u[j];
+        }
+        /* M[i][i]'s own floor re-check deliberately not repeated here -- see
+         * this function's own doc comment for why it is provably unchanged
+         * since the forward pass already validated it at step k=i. */
+        float v = sum / M[i][i];
+        if (!isfinite(v)) {
+            return COUPLING_SOLVE_FALLBACK_NONFINITE;
+        }
+        out_u[i] = v;
+    }
+    return COUPLING_SOLVE_OK;
+}
+
+/* Builds the reduced coupled system for zone zi and returns its hold duty,
+ * via the cache above. `z` is zi's OWN runtime state -- passed separately
+ * rather than read from s_exec.zones[zi], the same convention
+ * zone_feedforward() already uses for every other zi-vs-neighbour distinction
+ * in this file (and what lets this function's host tests drive a zone's own
+ * state without populating s_exec.zones[] for it). Neighbours are always read
+ * from s_exec.zones[] -- there is no "neighbour's own z pointer" to receive.
+ *
+ * *out_reason is COUPLING_SOLVE_OK exactly when the return value came from a
+ * genuine solve; any other value means the return is the untouched legacy
+ * diagonal formula (setpoint_c-ambient_c)/z->ff_k_dc -- see
+ * coupling_solve_reason_t's own doc comment for what each fallback reason
+ * means. *out_used_matrix is `*out_reason == COUPLING_SOLVE_OK`, kept as a
+ * separate bool purely so existing call sites that only care about the
+ * yes/no question do not have to compare an enum.
+ *
+ * *out_infeasible is only ever true alongside a genuine solve, meaning the
+ * solve needed to clamp some zone's duty DOWN to 1.0 -- more heat than that
+ * zone can physically deliver was requested. A negative raw component is
+ * NOT infeasible and is left un-clamped here (Opus review, "b < 0 case"):
+ * needing less than zero duty is always trivially achievable (the heater
+ * simply does not fire) and is exactly what the legacy per-zone formula
+ * already returns unclamped on a cooling segment (setpoint below ambient),
+ * to be combined with the (also possibly negative) climb term and clamped
+ * only in zone_feedforward()'s own final [0,1] sum -- not here. Clamping a
+ * negative component here would both diverge from that legacy behaviour for
+ * b<0 and spuriously flag a completely normal cooling segment as
+ * infeasible.
+ *
+ * *out_membership_changed is true when the SET of zones in this system (or
+ * whether zi qualifies at all) differs from the last call for this zi --
+ * see s_coupling_prev_membership_sig's own doc comment. Callers that care
+ * about bump-transfer (pid_family_zone_tick()) must re-seed on this edge;
+ * this function only detects and reports it, exactly the same division of
+ * responsibility as *out_infeasible does not itself change what gets
+ * commanded. Must be called with s_exec.lock held (reads s_exec.zones[]). */
+static float solve_hold_for_zone(const zone_runtime_t *z, uint8_t zi, float setpoint_c, float ambient_c,
+                                  bool *out_used_matrix, bool *out_infeasible,
+                                  coupling_solve_reason_t *out_reason, bool *out_membership_changed)
+{
+    float diagonal_hold = (setpoint_c - ambient_c) / z->ff_k_dc;
+    *out_used_matrix = false;
+    *out_infeasible = false;
+    *out_membership_changed = false;
+
+    if (zi >= MAX31856_CHANNEL_COUNT || !isfinite(diagonal_hold)) {
+        *out_reason = COUPLING_SOLVE_FALLBACK_OUT_OF_RANGE;
+        return diagonal_hold; /* out-of-range zi or non-finite input: let the caller's own
+                               * isfinite()/clamp belt-and-braces handle it, same as before this fix */
+    }
+    /* zi must clear the SAME bar every neighbour does -- a faulted/blocked/
+     * non-PID-family/inactive zone's own error is not attributable to
+     * coupled closed-loop control either, so it has no business being a row
+     * in this system (it still gets a feedforward: the diagonal fallback
+     * just below). */
+    if (!zone_qualifies_as_coupling_neighbor(z)) {
+        *out_reason = COUPLING_SOLVE_FALLBACK_UNQUALIFIED;
+        *out_membership_changed = coupling_note_membership_signature(zi, 0);
+        return diagonal_hold;
+    }
+
+    uint8_t members[MAX31856_CHANNEL_COUNT];
+    uint8_t n = 0;
+    uint16_t membership_sig = COUPLING_MEMBERSHIP_QUALIFIES_BIT;
+    members[n++] = zi;
+    for (uint8_t j = 0; j < MAX31856_CHANNEL_COUNT; j++) {
+        if (j == zi) continue;
+        if (zone_qualifies_as_coupling_neighbor(&s_exec.zones[j])) {
+            members[n++] = j;
+            membership_sig |= (uint16_t)(1u << j);
+        }
+    }
+    *out_membership_changed = coupling_note_membership_signature(zi, membership_sig);
+
+    if (n == 1) {
+        /* No qualifying neighbours -- the 1x1 system IS (setpoint-ambient)/
+         * k_dc, not an approximation of it, so there is nothing to gain by
+         * routing it through the general n x n machinery below. */
+        *out_reason = COUPLING_SOLVE_FALLBACK_NO_NEIGHBORS;
+        return diagonal_hold;
+    }
+
+    float G[MAX31856_CHANNEL_COUNT][MAX31856_CHANNEL_COUNT];
+    memset(G, 0, sizeof(G));
+    for (uint8_t row = 0; row < n; row++) {
+        uint8_t s = members[row];
+        float k_dc_s = (s == zi) ? z->ff_k_dc : s_exec.zones[s].ff_k_dc;
+        G[row][row] = k_dc_s; /* this zone's own diagonal gain -- coupling_coeff[]'s own diagonal
+                               * cell is unused/must-stay-0 by zones_http.c's contract, so it is
+                               * never a source for this entry */
+        float coupling_row[MAX31856_CHANNEL_COUNT];
+        if (!zones_config_get_coupling(s, coupling_row)) {
+            continue; /* no row at all for this zone -- every off-diagonal in it stays 0,
+                      * degrading exactly to "no coupling measured" for this zone's contribution */
+        }
+        for (uint8_t col = 0; col < n; col++) {
+            uint8_t t = members[col];
+            if (t == s) continue; /* diagonal already set above */
+            float c = coupling_row[t];
+            /* 0.0f is coupling_coeff[]'s own documented "not measured"
+             * default (zones_http.c), not a real zero coupling -- the exact
+             * same convention zone_feedforward()'s existing deviation term
+             * already relies on. Leaving G[row][col] at its memset 0 for an
+             * unmeasured/non-finite cell is the correct degrade: "no data"
+             * and "measured zero" are indistinguishable in this store, and
+             * treating unmeasured as zero is no new assumption -- it is
+             * exactly what independent per-zone division already implied
+             * for every zone before this fix. */
+            if (isfinite(c)) {
+                G[row][col] = c;
+            }
+        }
+    }
+
+    /* LOAD-BEARING INVARIANT (Opus review): b_const is a single scalar,
+     * because every row of dT uses the SAME setpoint_c -- correct today only
+     * because s_exec.target_c is one shared value across every zone (no
+     * per-zone setpoint trim exists yet). solve_hold_for_zone()'s signature
+     * takes one scalar setpoint_c, not a per-member array, so a per-zone
+     * setpoint literally CANNOT be expressed through this interface as it
+     * stands -- the blind spot is in the call contract, not just in what
+     * today's tests happen to cover. The day per-zone trim lands, this line
+     * (and the signature above it) is exactly where it must change to
+     * dT[row] = per_zone_setpoint[members[row]] - ambient_c; nobody should
+     * be able to add that feature by quietly reusing zi's own setpoint_c for
+     * every row. */
+    float b_const = setpoint_c - ambient_c;
+    coupling_hold_cache_t *cache = &s_coupling_hold_cache[zi];
+    bool cache_hit = cache->have && cache->n == n && cache->b == b_const &&
+                      memcmp(cache->members, members, n) == 0 &&
+                      memcmp(cache->G, G, sizeof(G)) == 0;
+    if (cache_hit) {
+        *out_used_matrix = (cache->reason == COUPLING_SOLVE_OK);
+        *out_infeasible = cache->infeasible;
+        *out_reason = cache->reason;
+        return *out_used_matrix ? cache->u[0] : diagonal_hold;
+    }
+
+    float u[MAX31856_CHANNEL_COUNT];
+    coupling_solve_reason_t reason = gauss_solve_partial_pivot(n, G, b_const, u);
+    bool infeasible = false;
+    if (reason == COUPLING_SOLVE_OK) {
+        for (uint8_t i = 0; i < n; i++) {
+            if (u[i] > 1.0f) {
+                u[i] = 1.0f;
+                infeasible = true;
+            }
+            /* u[i] < 0 left as-is -- see this function's own doc comment
+             * ("b < 0 case"): not infeasible, and clamping it here would
+             * diverge from the legacy formula's own unclamped negative. */
+        }
+    }
+
+    cache->have = true;
+    cache->n = n;
+    memcpy(cache->members, members, n);
+    memcpy(cache->G, G, sizeof(G));
+    cache->b = b_const;
+    cache->reason = reason;
+    cache->infeasible = (reason == COUPLING_SOLVE_OK) && infeasible;
+    if (reason == COUPLING_SOLVE_OK) {
+        memcpy(cache->u, u, sizeof(float) * n);
+    }
+
+    *out_used_matrix = (reason == COUPLING_SOLVE_OK);
+    *out_infeasible = (reason == COUPLING_SOLVE_OK) && infeasible;
+    *out_reason = reason;
+    return (reason == COUPLING_SOLVE_OK) ? u[0] : diagonal_hold; /* members[0] is always zi */
+}
+
 /* The feedforward duty for one zone, already clamped to [0,1]. Returns exactly
  * 0.0f -- i.e. the behaviour of every firing before this existed -- for a zone
  * with no usable model.
@@ -578,9 +1034,88 @@ static float zone_feedforward(const zone_runtime_t *z, uint8_t zi, float setpoin
     if (!z->ff_enabled) {
         return 0.0f;
     }
-    float hold = (setpoint_c - s_exec.ambient_c) / z->ff_k_dc;
+    bool hold_used_matrix = false, hold_infeasible = false, hold_membership_changed = false;
+    coupling_solve_reason_t hold_reason = COUPLING_SOLVE_OK;
+    float hold = solve_hold_for_zone(z, zi, setpoint_c, s_exec.ambient_c, &hold_used_matrix, &hold_infeasible,
+                                     &hold_reason, &hold_membership_changed);
     float climb = (rate_c_per_s * z->ff_tau_s) / z->ff_k_dc;
     float u_ff = hold + climb;
+
+    /* Diagnostics written to s_exec.zones[zi], not through `z` -- z is const
+     * here, and (see solve_hold_for_zone()'s doc comment) is not guaranteed
+     * to BE s_exec.zones[zi] in the first place, only its production-code
+     * value. s_exec.zones[zi] is always the real per-zone runtime record
+     * that profile_executor_get_status() reports off-board (Opus review,
+     * blocker 3: wired through get_status()/dashboard_http.c's JSON, the
+     * same path heat_blocked already uses -- this comment's claim is now
+     * actually true, not aspirational). Logged once per TRANSITION only
+     * (apply_relay()'s own heat_blocked logging uses the same discipline) --
+     * this runs every tick. ff_membership_changed is read (and cleared by
+     * being re-derived) every tick by pid_family_zone_tick() immediately
+     * after this call, to decide whether to re-seed -- see that call site. */
+    if (zi < MAX31856_CHANNEL_COUNT) {
+        s_exec.zones[zi].ff_hold_used_matrix = hold_used_matrix;
+        s_exec.zones[zi].ff_hold_infeasible = hold_infeasible;
+        s_exec.zones[zi].ff_hold_reason = (uint8_t)hold_reason;
+        s_exec.zones[zi].ff_membership_changed = hold_membership_changed;
+        static bool s_fallback_active[MAX31856_CHANNEL_COUNT];
+        static bool s_infeasible_active[MAX31856_CHANNEL_COUNT];
+        bool fell_back = !hold_used_matrix;
+        if (fell_back != s_fallback_active[zi]) {
+            s_fallback_active[zi] = fell_back;
+            if (fell_back) {
+                ESP_LOGW(TAG, "zone %u coupled feedforward hold fell back to the legacy per-zone "
+                              "diagonal (unqualified zone, no qualifying coupled neighbours, or a "
+                              "singular/ill-conditioned coupling matrix)",
+                         zi);
+            } else {
+                ESP_LOGI(TAG, "zone %u coupled feedforward hold resumed using the solved coupling matrix", zi);
+            }
+        }
+        if (hold_infeasible != s_infeasible_active[zi]) {
+            s_infeasible_active[zi] = hold_infeasible;
+            if (hold_infeasible) {
+                ESP_LOGW(TAG, "zone %u coupled feedforward solve required clamping a zone's duty to "
+                              "[0,1] -- the commanded setpoint combination is not achievable as specified",
+                         zi);
+            } else {
+                ESP_LOGI(TAG, "zone %u coupled feedforward solve back within [0,1] without clamping", zi);
+            }
+        }
+
+        /* Opus review round 3, item 3: the membership-transition reseed
+         * (pid_family_zone_tick(), on hold_membership_changed) makes a
+         * chattering membership a SAFE failure mode (a sustained FF+P
+         * offset while the integrator effectively stops correcting,
+         * instead of a repeated 6-10 point duty step) but it is a silent
+         * one -- heat_blocked alone is refreshed every tick by
+         * apply_relay(), so a flapping interlock can drive
+         * seed_bumpless_with_ff() every single tick with nothing to notice
+         * it happening. Counted here (once per genuine membership change,
+         * the same edge the reseed itself reacts to) and surfaced in status
+         * (get_status()/dashboard_http.c's JSON, same path as the flags
+         * just above) so a chattering membership is visible off-board
+         * rather than only inferable from a sustained control-error offset
+         * nobody thought to attribute to this. Logged at a RATE-LIMITED
+         * cadence, not once per occurrence -- the first change (every
+         * commissioned kiln sees a few of these across a run, e.g. autotune
+         * finishing on a neighbour) and then every 10th after that, so a
+         * genuinely chattering interlock produces a growing but bounded
+         * trickle of log lines instead of flooding the UART bridge the way
+         * this file's own LOG_PRESTART_ONCE doc comment describes that
+         * queue dropping lines under. */
+        if (hold_membership_changed) {
+            s_exec.zones[zi].ff_membership_change_count++;
+            uint32_t count = s_exec.zones[zi].ff_membership_change_count;
+            if (count == 1 || count % 10 == 0) {
+                ESP_LOGW(TAG, "zone %u coupled feedforward membership changed (count=%lu this run) -- "
+                              "PID integral re-seeded to hold commanded duty steady; a fast-growing "
+                              "count means a flapping interlock/coupled-neighbour state is leaving "
+                              "integral action effectively off for this zone",
+                         zi, (unsigned long)count);
+            }
+        }
+    }
 
     /* PID_EXPANSION_PLAN.md section 2c / Phase 3b: additive cross-zone
      * coupling contribution, added here so it stays inside the isfinite/
@@ -1830,6 +2365,38 @@ static float pid_family_zone_tick(zone_runtime_t *z, uint8_t zi, const pid_cfg_t
          * read the P/I/D/FF split and see how much of the duty is the model
          * and how much is the loop correcting it. */
         float u_ff = zone_feedforward(z, zi, s_exec.target_c, s_exec.target_rate_c_per_s);
+        /* Opus review, blocker 2: the coupled system's MEMBERSHIP (which
+         * zones are in it, or whether this zone qualifies at all) can change
+         * every tick -- heat_blocked alone is refreshed unconditionally each
+         * tick by apply_relay() (see its own doc comment), so a flapping
+         * interlock or OTA heat-block can flip a neighbour's qualification
+         * at tick rate. That steps the WHOLE hold term with nothing to damp
+         * it (measured on this file's own tests: up to ~10 duty points in a
+         * single tick, landing on every remaining zone at once).
+         *
+         * Re-seeding here -- reusing seed_bumpless_with_ff(), the SAME
+         * bump-transfer mechanism already used for mode transitions and
+         * resume (see its own doc comment) -- was chosen over adding a
+         * second mechanism (hysteresis/dwell on membership) for two
+         * reasons: (1) the reviewer's own instruction to reuse rather than
+         * duplicate, and (2) hysteresis only delays the eventual step, it
+         * does not remove it, and would need new dwell-timer state on top
+         * of the flag this already reads. Re-seeding does not prevent
+         * membership from changing -- a flapping interlock still flips the
+         * FEEDFORWARD TARGET every tick, which is a separate, pre-existing
+         * hazard this fix does not silently paper over (see apply_relay()'s
+         * heat_blocked comment) -- but it guarantees the transition itself
+         * never shows up as a COMMANDED DUTY step: the integral is
+         * re-seeded so THIS tick's pid_update_terms() call below reproduces
+         * z->duty (the duty already being commanded) to within the same
+         * anti-windup tolerance every other bumpless seed in this file
+         * already accepts, and subsequent ticks converge toward the new
+         * target smoothly rather than jumping to it. z->duty, not
+         * z->last_pid_terms.ff, is deliberately used as u_desired: it is
+         * the actual physical thing that must not step. */
+        if (z->ff_membership_changed) {
+            seed_bumpless_with_ff(z, zi, z->duty);
+        }
         duty = pid_update_terms(&z->pid_state, cfg, s_exec.target_c, z->actual_c, dt_s,
                                 u_ff, &z->last_pid_terms);
     }
@@ -2944,6 +3511,14 @@ esp_err_t profile_executor_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo
         s_exec.lock = NULL;
         return ESP_ERR_NO_MEM;
     }
+    /* Opus review round 3, item 5: registered even on the ok==pdPASS-only
+     * path (matching every other stack_margin_register() call site in this
+     * codebase -- creation failure already returned above, so this line is
+     * only ever reached with a real handle). 4096 must match the literal
+     * xTaskCreatePinnedToCore() argument two lines up exactly -- see
+     * stack_margin.h's own doc comment on why this number is never assumed
+     * equal to another task's. */
+    stack_margin_register("profile_executor", &s_exec.task, 4096);
     /* Small and independent on purpose -- guard 9 exists precisely because
      * the control task cannot be trusted to notice its own death. Same
      * priority as the control task it's watching.
@@ -2959,6 +3534,11 @@ esp_err_t profile_executor_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo
     if (ok != pdPASS) {
         ESP_LOGE(TAG, "xTaskCreatePinnedToCoreWithCaps(profile_exec_wdt) failed -- guard 9 unavailable this boot");
     }
+    /* Registered unconditionally, ok==pdPASS or not -- stack_margin_register()
+     * reads *task_handle_slot fresh at report time (stack_margin.h's own
+     * doc comment), so a creation failure just reads back alive=false
+     * rather than needing a second branch here. */
+    stack_margin_register("profile_exec_wdt", &s_exec.watchdog_task, 2560);
 
     ESP_LOGI(TAG, "profile executor up (io_ready=%d, thermo_ready=%d, safety_ready=%d) -- "
                   "NOT YET VERIFIED AGAINST REAL RELAY/THERMOCOUPLE HARDWARE (single- or multi-zone), "
@@ -4209,6 +4789,9 @@ void profile_executor_get_status(profile_exec_status_t *out)
             zo->cooling_limited = z->cooling_limited;
             zo->heat_blocked = z->heat_blocked;
             zo->heat_blocked_sources = z->heat_blocked_sources;
+            zo->ff_hold_used_matrix = z->ff_hold_used_matrix;
+            zo->ff_hold_infeasible = z->ff_hold_infeasible;
+            zo->ff_membership_change_count = z->ff_membership_change_count;
         }
 
         if (s_exec.state == PROFILE_EXEC_FAULTED) {

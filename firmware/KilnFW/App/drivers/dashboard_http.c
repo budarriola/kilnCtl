@@ -19,6 +19,7 @@
 #include "boot_button.h" /* boot_button_ota_bypass_active()/_remaining_ms() -- see the GET /api/status fields below */
 #include "lvgl_port.h" /* lvgl_port_touch_is_calibrated() -- see the "touch_calibrated" /api/status field below */
 #include "danger_mode.h" /* danger_mode_active() -- profile_exec_start_post_handler()'s mutual-exclusion refusal */
+#include "dashboard_json.h" /* json_escape()/append_zone_status_json() -- split out for host-testability, see that header */
 #include "heat_interlock.h" /* HEAT_INTERLOCK_REASON_MAX -- see the ERR_UPDATING case below */
 #include "http_form.h"
 #include "kiln_io_owner.h"
@@ -52,13 +53,13 @@ static struct {
     SafetyLinkClass *safety;
 } s_dash;
 
-/* Forward declaration: json_escape() is defined further down (near the
- * profile-executor handlers, its original call site) but status_get_handler()
- * above that point now needs it too for the fw_version/fw_build strings
- * appended below -- a plain prototype here is simpler than reordering every
- * function between the two, and this is a static, single-TU helper so a
- * header declaration would be overkill. */
-static void json_escape(const char *src, char *out, size_t out_cap);
+/* json_escape()/append_zone_status_json(): declared in dashboard_json.h,
+ * defined in dashboard_json.c -- split out (Opus review, round 3) so they
+ * can be host-tested without dragging in lvgl_port.h's LCD/touch driver
+ * stack, which this file #includes at file scope and which does not compile
+ * on the host MSVC toolchain (ILI9488.h's __attribute__((format(...)))).
+ * See dashboard_json.h's own doc comment. Every call site below keeps
+ * calling them by the same names as before this split. */
 
 /* esp_reset_reason_t -> short static string, for the diagnostics page's
  * "why did this boot happen" field (UI_PLAN.md section 5). Verified against
@@ -1195,76 +1196,6 @@ static const char *exec_state_name(profile_exec_state_t s)
     }
 }
 
-static void json_escape(const char *src, char *out, size_t out_cap)
-{
-    size_t o = 0;
-    for (const char *p = src; *p && o + 2 < out_cap; p++) {
-        if (*p == '"' || *p == '\\') {
-            if (o + 3 >= out_cap) {
-                break;
-            }
-            out[o++] = '\\';
-        }
-        out[o++] = *p;
-    }
-    out[o] = '\0';
-}
-
-/* Shared by both handlers below: one JSON object per active zone. Appends
- * to *o, using the APPEND-into-json-buffer pattern every other handler in
- * this file already uses (the caller owns the buffer/APPEND macro since C
- * has no closures to hand this a local one). control_fields selects
- * between /api/profile_exec's exec-lifecycle shape and /api/control's
- * tuning-focused shape (TODO.md 6A.9 asks for both, as separate endpoints
- * with different focuses, not one bloated one). */
-static size_t append_zone_status_json(char *json, size_t cap, size_t o, const profile_exec_status_t *st,
-                                      bool control_fields)
-{
-    int n;
-    bool first = true;
-    n = snprintf(json + o, cap - o, "\"zones\":[");
-    if (n < 0 || (size_t)n >= cap - o) return o;
-    o += (size_t)n;
-    for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
-        const profile_exec_zone_status_t *z = &st->zones[zi];
-        if (!z->active) continue;
-        char reason_escaped[sizeof(z->fault_reason) * 2 + 1];
-        reason_escaped[0] = '\0';
-        if (z->faulted) {
-            json_escape(z->fault_reason, reason_escaped, sizeof(reason_escaped));
-        }
-        if (control_fields) {
-            n = snprintf(json + o, cap - o,
-                        "%s{\"zone\":%u,\"control_mode\":%u,\"actual_c\":%.2f,\"actual_valid\":%s,"
-                        "\"duty\":%.3f,\"relay_on\":%s,\"pid_p\":%.4f,\"pid_i\":%.4f,\"pid_d\":%.4f,"
-                        "\"pid_ff\":%.4f,\"cooling_limited\":%s,\"faulted\":%s,\"fault_guard\":%u,"
-                        "\"heat_blocked\":%s,\"heat_blocked_sources\":%lu}",
-                        first ? "" : ",", zi, z->control_mode, (double)(z->actual_valid ? z->actual_c : 0.0f),
-                        z->actual_valid ? "true" : "false", (double)z->duty,
-                        z->relay_commanded_on ? "true" : "false", (double)z->pid_p, (double)z->pid_i,
-                        (double)z->pid_d, (double)z->pid_ff, z->cooling_limited ? "true" : "false",
-                        z->faulted ? "true" : "false", z->fault_guard,
-                        z->heat_blocked ? "true" : "false", (unsigned long)z->heat_blocked_sources);
-        } else {
-            n = snprintf(json + o, cap - o,
-                        "%s{\"zone\":%u,\"actual_c\":%.2f,\"actual_valid\":%s,\"relay_on\":%s,"
-                        "\"duty\":%.3f,\"control_mode\":%u,\"faulted\":%s,\"fault_reason\":\"%s\","
-                        "\"fault_guard\":%u,\"heat_blocked\":%s,\"heat_blocked_sources\":%lu}",
-                        first ? "" : ",", zi, (double)(z->actual_valid ? z->actual_c : 0.0f),
-                        z->actual_valid ? "true" : "false", z->relay_commanded_on ? "true" : "false",
-                        (double)z->duty, z->control_mode, z->faulted ? "true" : "false", reason_escaped,
-                        z->fault_guard, z->heat_blocked ? "true" : "false",
-                        (unsigned long)z->heat_blocked_sources);
-        }
-        if (n < 0 || (size_t)n >= cap - o) return o;
-        o += (size_t)n;
-        first = false;
-    }
-    n = snprintf(json + o, cap - o, "]");
-    if (n > 0 && (size_t)n < cap - o) o += (size_t)n;
-    return o;
-}
-
 /* TODO.md 6A.3's "no auto-resume" breadcrumb, appended to /api/profile_exec
  * under its own "last_run" key -- deliberately NOT merged into the live
  * status fields above it. A client that confused the two would show a firing
@@ -1404,17 +1335,25 @@ static esp_err_t profile_exec_status_get_handler(httpd_req_t *req)
         snprintf(remaining_buf, sizeof(remaining_buf), "%lld", (long long)remaining_s);
     }
 
-    /* Sized against the real worst case rather than the previous estimate.
-     * Per zone the exec shape can emit a fully backslash-escaped 95-char
-     * fault_reason (190 bytes) on top of ~130 bytes of fixed keys, so 320,
-     * not 224 -- 224 was already optimistic before this change and would
-     * have truncated mid-object into invalid JSON in a multi-zone fault. The
-     * 960-byte fixed part covers the run-level line (its own escaped reason,
-     * plus the four duration-model fields added for the profile-plan
-     * contract -- at most ~48 bytes more) plus the "last_run" object at ITS
-     * worst case. The httpd task runs on an 8192-byte stack
-     * (wifi_provision_http.c), so ~2.5 KB here is comfortable. */
-    char json[960 + MAX31856_CHANNEL_COUNT * 320];
+    /* Sized against the real worst case rather than an estimate (Opus
+     * review round 3, blocker 1's own re-audit: the PRIOR "320, not 224"
+     * pass here computed 320 from ~130 bytes of fixed keys + a 190-byte
+     * fully-escaped fault_reason, but that arithmetic undercounted its own
+     * fixed-keys estimate -- the real fixed-key total (heat_blocked/
+     * heat_blocked_sources included) plus a 190-byte escaped fault_reason
+     * is 401B, already over the 320 it shipped at, before this fix's own
+     * three new fields (ff_hold_used_matrix/ff_hold_infeasible/
+     * ff_membership_change_count, another ~95B) pushed it to 496B worst
+     * case. 512 leaves real headroom. The 960-byte fixed part covers the
+     * run-level line (its own escaped reason, plus the four duration-model
+     * fields added for the profile-plan contract -- at most ~48 bytes more)
+     * plus the "last_run" object at ITS worst case. The httpd task runs on
+     * an 8192-byte stack (wifi_provision_http.c), so the ~2.5KB this now
+     * uses is comfortable. See test_dashboard_json.c's own worst-case
+     * render for both this and /api/control's buffer, so the next field
+     * added to either JSON shape gets caught here instead of shipping
+     * silently truncated again. */
+    char json[960 + MAX31856_CHANNEL_COUNT * 512];
     int n = snprintf(json, sizeof(json),
         "{\"state\":\"%s\",\"profile_id\":%u,\"profile_name\":\"%s\",\"zone_mask\":%u,"
         "\"segment_index\":%u,\"segment_count\":%u,\"dwelling\":%s,\"target_c\":%.2f,"
@@ -1543,7 +1482,27 @@ static esp_err_t control_status_get_handler(httpd_req_t *req)
     profile_exec_status_t st;
     profile_executor_get_status(&st);
 
-    char json[128 + MAX31856_CHANNEL_COUNT * 224];
+    /* Sized against the real worst case, not the previous estimate (Opus
+     * review: 224/zone was already wrong before ff_hold_used_matrix/
+     * ff_hold_infeasible existed -- the control_fields=true zone object was
+     * 259B worst-case against a 224B budget, so append_zone_status_json()'s
+     * own truncation guard (`if (n<0 || n>=cap-o) return o;`) was already
+     * silently bailing on a 3-zone firing and this handler's caller still
+     * appended the closing `}` on top of that partial buffer -- an
+     * unterminated `"zones":[{...},{...` followed by `}`, invalid JSON,
+     * with no error anywhere. Adding ff_hold_used_matrix/ff_hold_infeasible
+     * made it 313B/zone (worst case, every field at its widest: 255 for an
+     * ID/mask byte, -1234.56 for a plausible-worst actual_c, 4294967295 for
+     * the sources mask) and pushed 3 zones to 1054B against 800 -- still
+     * wrong, just more visibly so. round 3, item 3's ff_membership_change_
+     * count field added another ~34B/zone worst case (381B/zone total).
+     * 448/zone leaves real slack over that 381B measured worst case; 256
+     * fixed covers the state/zone_mask/target_c/ramp_lock header (~100B
+     * worst case) with matching headroom. See
+     * test_control_status_json_is_complete_and_well_formed_at_3_zones() --
+     * this is the field that test exists to catch the next time someone
+     * adds a key here without re-checking this budget. */
+    char json[256 + MAX31856_CHANNEL_COUNT * 448];
     int n = snprintf(json, sizeof(json),
         "{\"state\":\"%s\",\"zone_mask\":%u,\"target_c\":%.2f,\"ramp_lock_held\":%s,"
         "\"ramp_lock_lagging_mask\":%u,",

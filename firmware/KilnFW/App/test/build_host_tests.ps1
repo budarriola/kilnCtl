@@ -194,7 +194,8 @@ $cmd4 = "call `"$vcvars`" x64 >nul && cl /nologo /W3 /EHsc /I`"$stubDir`" /I`"$c
         "`"$(Join-Path $testDir 'test_profile_executor_prestart.c')`" " +
         "`"$(Join-Path $driversDir 'pid.c')`" `"$(Join-Path $driversDir 'thermal_guard.c')`" " +
         "`"$(Join-Path $driversDir 'heater_output.c')`" `"$(Join-Path $driversDir 'thermo_combine.c')`" " +
-        "`"$(Join-Path $driversDir 'heat_enable.c')`" `"$(Join-Path $driversDir 'pid_fuzzy.c')`""
+        "`"$(Join-Path $driversDir 'heat_enable.c')`" `"$(Join-Path $driversDir 'pid_fuzzy.c')`" " +
+        "`"$(Join-Path $driversDir 'stack_margin.c')`""
 
 Invoke-HostTestExe -Name "profile_executor_prestart" -ExePath $exe4 -BuildCmd $cmd4
 
@@ -395,15 +396,38 @@ $cmd14 = "call `"$vcvars`" x64 >nul && cl /nologo /W3 /EHsc /std:c11 /I`"$driver
 
 Invoke-HostTestExe -Name "safety_link" -ExePath $exe14 -BuildCmd $cmd14
 
+# ---- test_dashboard_json.c: its own FIFTEENTH, separate executable --------
+# Opus review round 3, blocker 1: dashboard_http.c's /api/control handler was
+# silently emitting truncated (invalid) JSON at 3 zones once ff_hold_used_
+# matrix/ff_hold_infeasible pushed the per-zone object past the old buffer
+# budget -- see dashboard_json.h's own doc comment for why json_escape()/
+# append_zone_status_json() were split out of dashboard_http.c into their
+# own file rather than stubbed in place: dashboard_http.c #includes
+# lvgl_port.h at file scope, which pulls in the LCD/touch driver stack
+# (ILI9488.h's __attribute__((format(printf,...))), a GCC extension MSVC's
+# host toolchain rejects outright), so that whole translation unit cannot
+# compile on this host toolchain no matter how many ESP-IDF stub headers are
+# added -- confirmed by attempting it. dashboard_json.c has no such
+# dependency (profile_executor.h + libc only, the same header chain
+# profile_executor.c's own test already proves compiles off-target), so it
+# gets its own minimal executable rather than joining the main one.
+$exe15 = Join-Path $outDir "kilnctl_host_tests_dashboard_json.exe"
+$djObjDir = Join-Path $outDir "dj"
+New-Item -ItemType Directory -Force -Path $djObjDir | Out-Null
+$cmd15 = "call `"$vcvars`" x64 >nul && cl /nologo /W3 /EHsc /std:c11 /I`"$stubDir`" /I`"$commonInc`" " +
+        "/Fo:`"$djObjDir\\`" /Fe:`"$exe15`" `"$(Join-Path $testDir 'test_dashboard_json.c')`""
+
+Invoke-HostTestExe -Name "dashboard_json" -ExePath $exe15 -BuildCmd $cmd15
+
 # ---- summary ----------------------------------------------------------
 #
-# 13 executables are attempted above (main + zones_http + safety_cfg_http +
+# 14 executables are attempted above (main + zones_http + safety_cfg_http +
 # profile_executor_prestart + autotune_engine_prestart + profiles_http +
 # ota_http + uart_protocol_link_delegate + board_temps + kiln_io_owner +
-# safety_trip_words + safety_trip_decision + safety_link). Report how many
-# of those were even built, separately from how many of the built ones
-# passed, so a partial run can never read as a full green suite.
-$totalExpected = 13
+# safety_trip_words + safety_trip_decision + safety_link + dashboard_json).
+# Report how many of those were even built, separately from how many of the
+# built ones passed, so a partial run can never read as a full green suite.
+$totalExpected = 14
 Write-Host ""
 Write-Host "Built: $($script:builtExes.Count)/$totalExpected executables"
 if ($script:buildFailures.Count -gt 0) {

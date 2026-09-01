@@ -323,6 +323,26 @@ typedef struct {
      * bitwise OR of safety_fault_source_t (safety_link.h). */
     bool     heat_blocked;
     uint32_t heat_blocked_sources;
+    /* Coupled-hold solve status (Opus review, blocker 3 -- these used to be
+     * written by zone_feedforward() and read nowhere off-board, exactly the
+     * "producer with no consumer" bug class this repo has hit repeatedly).
+     * ff_hold_used_matrix false means this zone's hold term is the legacy
+     * per-zone diagonal fallback, not the coupled solve -- expected and
+     * harmless for an uncommissioned zone, worth noticing for one that
+     * should be coupled. ff_hold_infeasible true means the coupled solve
+     * needed to clamp some zone's duty UP to 1.0 -- the commanded setpoint
+     * combination is not physically achievable as specified; only
+     * meaningful alongside ff_hold_used_matrix == true. */
+    bool     ff_hold_used_matrix;
+    bool     ff_hold_infeasible;
+    /* Running total of coupled-system membership changes this run (Opus
+     * review round 3, item 3) -- each one triggers a PID-integral reseed
+     * (profile_executor.c's pid_family_zone_tick(), on ff_membership_
+     * changed) that keeps commanded duty from stepping, but a fast-growing
+     * count means a flapping interlock/coupled neighbour is repeatedly
+     * forcing that reseed, which leaves integral action effectively off for
+     * this zone -- a safe but otherwise silent failure mode. */
+    uint32_t ff_membership_change_count;
     /* TODO.md 6A.9's "/api/control... PID term breakdown", per zone.
      * Only meaningful when control_mode == ZONE_CONTROL_MODE_PID. */
     float    pid_p;

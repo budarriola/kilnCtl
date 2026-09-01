@@ -1792,6 +1792,17 @@ static void reset_coupling_test_state(void)
     g_stub_coupling_present[0] = true;
     g_stub_coupling_present[1] = true;
     g_stub_coupling_present[2] = true;
+    /* Opus review, test-isolation hole: the (members,G,b) solve cache and
+     * the membership-transition signature both live in file-static storage
+     * OUTSIDE s_exec (deliberately -- they must survive across ticks, which
+     * memset(&s_exec,...) at the top of every test already clears). Left
+     * uncleared here, a value cached/latched by one test would leak into
+     * the next one that happens to reuse the same zi with coincidentally
+     * matching inputs -- no test happened to collide on this today, but the
+     * next author to add one should not have to discover it by debugging a
+     * flaky pass. */
+    memset(s_coupling_hold_cache, 0, sizeof(s_coupling_hold_cache));
+    memset(s_coupling_prev_membership_sig, 0, sizeof(s_coupling_prev_membership_sig));
 }
 
 static void test_feedforward_zero_coupling_is_bit_identical_to_no_coupling(void)
@@ -2044,6 +2055,693 @@ static void test_feedforward_realistic_measured_matrix_zone1_row(void)
               "-(coupling_coeff[j]/(k_dc_j*ff_k_dc))*(T_j-sp_j) sum over both neighbors");
     TEST_CHECK(u_ff < baseline, "net effect here (hot zone 0 dominates cold zone 2) must be a net duty reduction");
     TEST_CHECK(isfinite(u_ff) && u_ff >= 0.0f && u_ff <= 1.0f, "result must stay inside the existing [0,1] clamp");
+}
+
+// ---------------------------------------------------------------------------
+// Coupled steady-state HOLD solve (defect fix): the hold term used to divide
+// by each zone's own diagonal gain alone, as if it were heating alone --
+// solve_hold_for_zone()/gauss_solve_partial_pivot() replace that with a
+// proper G*u=dT solve over the zones genuinely under coupled control right
+// now. Reached the same way as the coupling tests above -- static functions,
+// this file #includes profile_executor.c directly.
+
+static void test_hold_diagonal_only_matches_legacy_exactly(void)
+{
+    TEST_SECTION("solve_hold_for_zone() -- a matrix with every off-diagonal at 0 (no coupling "
+                 "measured, or genuinely zero) must reproduce the legacy per-zone diagonal "
+                 "division EXACTLY -- an uncoupled/uncommissioned kiln behaves identically to "
+                 "before this fix");
+    reset_coupling_test_state();
+
+    const float diag[3] = {31.961f, 23.480f, 21.742f};
+    const float ambient_c = 20.0f, setpoint_c = 35.0f;
+    s_exec.ambient_c = ambient_c;
+    /* g_stub_coupling left all-zero by reset_coupling_test_state() -- every
+     * off-diagonal cell is "not measured", exactly the migration default. */
+
+    for (uint8_t i = 0; i < 3; i++) {
+        s_exec.zones[i].active = true;
+        s_exec.zones[i].actual_valid = true;
+        s_exec.zones[i].actual_c = setpoint_c;
+        s_exec.zones[i].ff_enabled = true;
+        s_exec.zones[i].ff_k_dc = diag[i];
+        s_exec.zones[i].control_mode = ZONE_CONTROL_MODE_PID;
+    }
+
+    for (uint8_t zi = 0; zi < 3; zi++) {
+        float u_ff = zone_feedforward(&s_exec.zones[zi], zi, setpoint_c, 0.0f);
+        float legacy = (setpoint_c - ambient_c) / diag[zi];
+        TEST_CHECK(u_ff == legacy, "an all-zero-off-diagonal matrix's solved hold must be bit-for-bit "
+                  "the legacy (setpoint-ambient)/k_dc division, not merely close to it");
+    }
+}
+
+static void test_hold_matrix_solves_real_measured_gain_matrix(void)
+{
+    TEST_SECTION("solve_hold_for_zone() -- the REAL bench-measured 3x3 coupling matrix (row = "
+                 "affected zone, col = stepped zone): [[31.961,5.766,2.406],[12.059,23.480,4.109],"
+                 "[6.004,6.773,21.742]]. Solving G*u=dT with dT=15 (ambient 20C, setpoint 35C, all "
+                 "three zones already on-target so the SEPARATE deviation term contributes exactly "
+                 "0 and does not contaminate this check) gives, by Gaussian elimination with "
+                 "partial pivoting (verified independently with numpy's np.linalg.solve): "
+                 "u = [0.367390, 0.367193, 0.474068]. The OLD per-zone diagonal division would have "
+                 "given [15/31.961, 15/23.480, 15/21.742] = [0.46934, 0.63884, 0.68984] instead -- "
+                 "20-45% too high on every zone, exactly the over-drive this fix removes.");
+    reset_coupling_test_state();
+
+    const float diag[3]     = {31.961f, 23.480f, 21.742f};
+    const float expect_u[3] = {0.367390f, 0.367193f, 0.474068f};
+    const float ambient_c = 20.0f, setpoint_c = 35.0f;
+    s_exec.ambient_c = ambient_c;
+
+    g_stub_coupling[0][1] = 5.766f;  g_stub_coupling[0][2] = 2.406f;
+    g_stub_coupling[1][0] = 12.059f; g_stub_coupling[1][2] = 4.109f;
+    g_stub_coupling[2][0] = 6.004f;  g_stub_coupling[2][1] = 6.773f;
+
+    for (uint8_t i = 0; i < 3; i++) {
+        s_exec.zones[i].active = true;
+        s_exec.zones[i].actual_valid = true;
+        s_exec.zones[i].actual_c = setpoint_c; /* on-target: zeroes the separate deviation term */
+        s_exec.zones[i].ff_enabled = true;
+        s_exec.zones[i].ff_k_dc = diag[i];
+        s_exec.zones[i].control_mode = ZONE_CONTROL_MODE_PID;
+    }
+
+    for (uint8_t zi = 0; zi < 3; zi++) {
+        float u_ff = zone_feedforward(&s_exec.zones[zi], zi, setpoint_c, 0.0f);
+        float legacy = (setpoint_c - ambient_c) / diag[zi];
+        TEST_CHECK_NEAR(u_ff, expect_u[zi], 1e-4, "zone's solved hold duty must match the real "
+                        "matrix's linear-system solution");
+        TEST_CHECK(fabsf(u_ff - legacy) > 0.05f, "sanity: the matrix solve must actually differ "
+                  "materially from the old diagonal-only division, or this test cannot tell the "
+                  "fix from the defect it replaces");
+        TEST_CHECK(s_exec.zones[zi].ff_hold_used_matrix, "a fully-populated, well-conditioned 3x3 "
+                  "matrix must engage the real solve, not the fallback");
+        TEST_CHECK(!s_exec.zones[zi].ff_hold_infeasible, "dT=15C is within every zone's reach here "
+                  "-- must not be reported infeasible");
+    }
+}
+
+static void test_hold_singular_matrix_falls_back(void)
+{
+    TEST_SECTION("solve_hold_for_zone() -- a singular coupling matrix (zone 2's row is an exact "
+                 "linear multiple of zone 0's, so elimination cannot separate the unknowns) must "
+                 "fall back to the legacy per-zone diagonal division, not silently return garbage "
+                 "or a NaN");
+    reset_coupling_test_state();
+
+    /* Rows are vectors across all 3 columns, diagonal included (the
+     * diagonal comes from each zone's own ff_k_dc, everything else from its
+     * coupling_coeff[] row): row0 = [d0, c01, c02], row2 = [c20, c21, d2].
+     * Setting c20=2*d0, c21=2*c01, d2=2*c02 makes row2 == 2*row0 EXACTLY --
+     * a true rank-<=2 (singular) 3x3 regardless of row1, not merely a
+     * suspicious-looking one. */
+    const float d0 = 31.961f, c01 = 5.766f, c02 = 2.406f;
+    const float ambient_c = 20.0f, setpoint_c = 35.0f;
+    s_exec.ambient_c = ambient_c;
+
+    g_stub_coupling[0][1] = c01;        g_stub_coupling[0][2] = c02;
+    g_stub_coupling[1][0] = 12.059f;    g_stub_coupling[1][2] = 4.109f; /* row1: arbitrary, independent */
+    g_stub_coupling[2][0] = 2.0f * d0;  g_stub_coupling[2][1] = 2.0f * c01;
+
+    s_exec.zones[0].ff_k_dc = d0;
+    s_exec.zones[1].ff_k_dc = 23.480f;
+    s_exec.zones[2].ff_k_dc = 2.0f * c02; /* d2 = 2*c02, completing row2 == 2*row0 */
+    for (uint8_t i = 0; i < 3; i++) {
+        s_exec.zones[i].active = true;
+        s_exec.zones[i].actual_valid = true;
+        s_exec.zones[i].actual_c = setpoint_c;
+        s_exec.zones[i].ff_enabled = true;
+        s_exec.zones[i].control_mode = ZONE_CONTROL_MODE_PID;
+    }
+
+    bool used_matrix = false, infeasible = false;
+    coupling_solve_reason_t reason = COUPLING_SOLVE_OK; bool membership_changed = false; (void)reason; (void)membership_changed;
+    float legacy0 = (setpoint_c - ambient_c) / d0;
+    float hold0 = solve_hold_for_zone(&s_exec.zones[0], 0, setpoint_c, ambient_c, &used_matrix, &infeasible, &reason, &membership_changed);
+    TEST_CHECK(!used_matrix, "a singular 3x3 system must be refused by gauss_solve_partial_pivot() "
+              "and reported as a fallback, not silently solved");
+    TEST_CHECK(hold0 == legacy0, "the fallback value itself must still be the exact legacy formula");
+    TEST_CHECK(isfinite(hold0), "a refused/singular solve must never leak a NaN/Inf into the hold term");
+    TEST_CHECK(!infeasible, "a fallback is not a 'solve that needed clamping' -- infeasible must stay false");
+}
+
+static void test_hold_excluded_faulted_zone_reduces_system(void)
+{
+    TEST_SECTION("solve_hold_for_zone() -- a faulted (excluded) zone 1 is dropped from the system "
+                 "entirely: zones 0 and 2 solve the REDUCED 2x2 [[31.961,2.406],[6.004,21.742]] "
+                 "system among themselves (numpy-verified: u = [0.426247, 0.572202] for dT=15), not "
+                 "the full 3x3, and zone 1 itself gets the diagonal fallback since it no longer "
+                 "qualifies as a row in anyone's system");
+    reset_coupling_test_state();
+
+    const float diag[3] = {31.961f, 23.480f, 21.742f};
+    const float ambient_c = 20.0f, setpoint_c = 35.0f;
+    s_exec.ambient_c = ambient_c;
+
+    g_stub_coupling[0][1] = 5.766f;  g_stub_coupling[0][2] = 2.406f;
+    g_stub_coupling[1][0] = 12.059f; g_stub_coupling[1][2] = 4.109f;
+    g_stub_coupling[2][0] = 6.004f;  g_stub_coupling[2][1] = 6.773f;
+
+    for (uint8_t i = 0; i < 3; i++) {
+        s_exec.zones[i].active = true;
+        s_exec.zones[i].actual_valid = true;
+        s_exec.zones[i].actual_c = setpoint_c;
+        s_exec.zones[i].ff_enabled = true;
+        s_exec.zones[i].ff_k_dc = diag[i];
+        s_exec.zones[i].control_mode = ZONE_CONTROL_MODE_PID;
+    }
+    s_exec.zones[1].faulted = true; /* excluded: zone_qualifies_as_coupling_neighbor() must refuse it */
+
+    bool used_matrix = false, infeasible = false;
+    coupling_solve_reason_t reason = COUPLING_SOLVE_OK; bool membership_changed = false; (void)reason; (void)membership_changed;
+    float hold0 = solve_hold_for_zone(&s_exec.zones[0], 0, setpoint_c, ambient_c, &used_matrix, &infeasible, &reason, &membership_changed);
+    TEST_CHECK(used_matrix, "the reduced 2-zone system is still well-conditioned and must engage the solve");
+    TEST_CHECK_NEAR(hold0, 0.426247, 1e-4, "zone 0's hold must match the 2x2 reduced-system solution");
+
+    float hold2 = solve_hold_for_zone(&s_exec.zones[2], 2, setpoint_c, ambient_c, &used_matrix, &infeasible, &reason, &membership_changed);
+    TEST_CHECK(used_matrix, "zone 2's own reduced-system solve must also engage");
+    TEST_CHECK_NEAR(hold2, 0.572202, 1e-4, "zone 2's hold must match the 2x2 reduced-system solution");
+
+    float legacy1 = (setpoint_c - ambient_c) / diag[1];
+    float hold1 = solve_hold_for_zone(&s_exec.zones[1], 1, setpoint_c, ambient_c, &used_matrix, &infeasible, &reason, &membership_changed);
+    TEST_CHECK(!used_matrix, "the excluded (faulted) zone itself must get the diagonal fallback, "
+              "not a row in a system it no longer qualifies for");
+    TEST_CHECK(hold1 == legacy1, "and that fallback must be the exact legacy formula");
+}
+
+static void test_hold_infeasible_setpoint_clamps_and_reports(void)
+{
+    TEST_SECTION("solve_hold_for_zone() -- a setpoint combination the coupled system cannot "
+                 "physically reach (dT=50C against a matrix whose diagonal alone tops out around "
+                 "22-32C/duty) solves to duties > 1.0 (numpy-verified: u = [1.2246, 1.2240, 1.5802] "
+                 "for dT=50), which must be CLAMPED to 1.0 and REPORTED as infeasible -- not silently "
+                 "returned as an over-1.0 duty, and not silently indistinguishable from a genuinely "
+                 "achievable solve");
+    reset_coupling_test_state();
+
+    const float diag[3] = {31.961f, 23.480f, 21.742f};
+    const float ambient_c = 20.0f, setpoint_c = 70.0f; /* dT = 50 */
+    s_exec.ambient_c = ambient_c;
+
+    g_stub_coupling[0][1] = 5.766f;  g_stub_coupling[0][2] = 2.406f;
+    g_stub_coupling[1][0] = 12.059f; g_stub_coupling[1][2] = 4.109f;
+    g_stub_coupling[2][0] = 6.004f;  g_stub_coupling[2][1] = 6.773f;
+
+    for (uint8_t i = 0; i < 3; i++) {
+        s_exec.zones[i].active = true;
+        s_exec.zones[i].actual_valid = true;
+        s_exec.zones[i].actual_c = setpoint_c;
+        s_exec.zones[i].ff_enabled = true;
+        s_exec.zones[i].ff_k_dc = diag[i];
+        s_exec.zones[i].control_mode = ZONE_CONTROL_MODE_PID;
+    }
+
+    bool used_matrix = false, infeasible = false;
+    coupling_solve_reason_t reason = COUPLING_SOLVE_OK; bool membership_changed = false; (void)reason; (void)membership_changed;
+    float hold0 = solve_hold_for_zone(&s_exec.zones[0], 0, setpoint_c, ambient_c, &used_matrix, &infeasible, &reason, &membership_changed);
+    TEST_CHECK(used_matrix, "the matrix is well-conditioned -- infeasibility is a clamp, not a fallback");
+    TEST_CHECK(infeasible, "an out-of-[0,1] raw solution must be REPORTED as infeasible");
+    TEST_CHECK(hold0 <= 1.0f && hold0 >= 0.0f, "the returned hold value itself must be clamped into [0,1]");
+    TEST_CHECK(hold0 == 1.0f, "this specific case's raw solution (1.2246) clamps to exactly 1.0");
+
+    float u_ff = zone_feedforward(&s_exec.zones[0], 0, setpoint_c, 0.0f);
+    TEST_CHECK(s_exec.zones[0].ff_hold_infeasible, "zone_feedforward()'s own call site must also "
+              "surface the infeasible flag onto s_exec.zones[] for GET /api/profile_exec, not just "
+              "the internal solver return");
+    TEST_CHECK(isfinite(u_ff) && u_ff >= 0.0f && u_ff <= 1.0f, "the overall u_ff must still respect "
+              "the existing [0,1] clamp regardless of the raw solve's infeasibility");
+}
+
+static void test_hold_pathological_inputs_never_nan_or_inf(void)
+{
+    TEST_SECTION("solve_hold_for_zone()/gauss_solve_partial_pivot() -- zero gains, huge gains, and "
+                 "negative (physically nonsensical) coupling coefficients must never let a NaN or "
+                 "Inf escape into the hold term, regardless of whether they are solved or refused");
+    reset_coupling_test_state();
+
+    const float ambient_c = 20.0f, setpoint_c = 35.0f;
+    s_exec.ambient_c = ambient_c;
+
+    /* Case 1: an all-zero coupling row for the active neighbor plus a huge
+     * neighbor coefficient elsewhere -- degrades to "no data for this row",
+     * must not divide-by-zero or blow up. */
+    g_stub_coupling[0][1] = 1e30f; g_stub_coupling[0][2] = -5.0f; /* negative coefficient */
+    g_stub_coupling[1][0] = 12.059f; g_stub_coupling[1][2] = 4.109f;
+    g_stub_coupling[2][0] = 6.004f;  g_stub_coupling[2][1] = 6.773f;
+
+    s_exec.zones[0].active = true; s_exec.zones[0].actual_valid = true;
+    s_exec.zones[0].actual_c = setpoint_c; s_exec.zones[0].ff_enabled = true;
+    s_exec.zones[0].ff_k_dc = 31.961f; s_exec.zones[0].control_mode = ZONE_CONTROL_MODE_PID;
+
+    s_exec.zones[1].active = true; s_exec.zones[1].actual_valid = true;
+    s_exec.zones[1].actual_c = setpoint_c; s_exec.zones[1].ff_enabled = true;
+    s_exec.zones[1].ff_k_dc = 23.480f; s_exec.zones[1].control_mode = ZONE_CONTROL_MODE_PID;
+
+    s_exec.zones[2].active = true; s_exec.zones[2].actual_valid = true;
+    s_exec.zones[2].actual_c = setpoint_c; s_exec.zones[2].ff_enabled = true;
+    s_exec.zones[2].ff_k_dc = 21.742f; s_exec.zones[2].control_mode = ZONE_CONTROL_MODE_PID;
+
+    for (uint8_t zi = 0; zi < 3; zi++) {
+        float u_ff = zone_feedforward(&s_exec.zones[zi], zi, setpoint_c, 0.0f);
+        TEST_CHECK(isfinite(u_ff), "a huge/negative coupling coefficient must never produce a "
+                  "non-finite u_ff, solved or refused");
+        TEST_CHECK(u_ff >= 0.0f && u_ff <= 1.0f, "and must always land inside the existing [0,1] clamp");
+    }
+
+    /* Case 2: zero ff_k_dc smuggled onto a "qualifying" zone -- shouldn't
+     * happen (zone_qualifies_as_coupling_neighbor() requires ff_k_dc > 0) but
+     * this is exactly the shape the pre-existing zone_load_model() guard
+     * exists for (a corrupted/never-autotuned model). solve_hold_for_zone()
+     * on its own is allowed to mirror the legacy bare (setpoint-ambient)/0
+     * division here -- that is the SAME thing the pre-fix code did with no
+     * guard at all -- because zone_qualifies_as_coupling_neighbor() refuses
+     * it before it can ever become a row in the matrix (checked directly
+     * below), and the REAL safety net, unchanged by this fix, is
+     * zone_feedforward()'s own outer isfinite(u_ff) check (proven via the
+     * full zone_feedforward() call further down). */
+    zone_runtime_t z_zero;
+    memset(&z_zero, 0, sizeof(z_zero));
+    z_zero.ff_k_dc = 0.0f;
+    z_zero.ff_enabled = true;
+    bool used_matrix = true, infeasible = true; /* pre-set to catch a function that forgets to write them */
+    coupling_solve_reason_t reason = COUPLING_SOLVE_OK; bool membership_changed = false; (void)reason; (void)membership_changed;
+    float hold_zero = solve_hold_for_zone(&z_zero, 0, setpoint_c, ambient_c, &used_matrix, &infeasible, &reason, &membership_changed);
+    TEST_CHECK(!isfinite(hold_zero), "sanity: this helper does not itself guard a zero k_dc -- it "
+              "mirrors the exact legacy (setpoint-ambient)/k_dc division, Inf included; the outer "
+              "guard is zone_feedforward()'s isfinite(u_ff), proven below");
+    TEST_CHECK(!used_matrix, "ff_k_dc == 0 fails zone_qualifies_as_coupling_neighbor() -- must fall "
+              "back rather than become a row in the matrix");
+
+    float u_ff_zero_k_dc = zone_feedforward(&z_zero, 0, setpoint_c, 0.0f);
+    TEST_CHECK(u_ff_zero_k_dc == 0.0f, "zone_feedforward()'s own outer isfinite(u_ff) belt-and-braces "
+              "(unchanged by this fix) must still turn a zero-k_dc Inf into exactly 0.0f duty");
+
+    /* Case 3: NaN setpoint -- must be refused outright. */
+    used_matrix = true; infeasible = true;
+    float hold_nan = solve_hold_for_zone(&s_exec.zones[0], 0, NAN, ambient_c, &used_matrix, &infeasible, &reason, &membership_changed);
+    TEST_CHECK(!isfinite(hold_nan) == !isfinite((NAN - ambient_c) / 31.961f), "a NaN setpoint must "
+              "reproduce the same (NaN) result the legacy formula itself already produced -- "
+              "zone_feedforward()'s own outer isfinite() belt-and-braces is what actually stops "
+              "this from reaching duty, unchanged by this fix");
+    TEST_CHECK(!used_matrix, "a non-finite input must never be reported as a successful matrix solve");
+    TEST_CHECK(reason == COUPLING_SOLVE_FALLBACK_OUT_OF_RANGE, "a non-finite setpoint must be "
+              "reported by name as COUPLING_SOLVE_FALLBACK_OUT_OF_RANGE, not just 'some fallback' -- "
+              "Opus review: this enum value was never previously asserted by name anywhere");
+
+    /* Case 4: zi >= MAX31856_CHANNEL_COUNT -- the other OUT_OF_RANGE path. */
+    used_matrix = true; infeasible = true; reason = COUPLING_SOLVE_OK;
+    float hold_oor = solve_hold_for_zone(&s_exec.zones[0], MAX31856_CHANNEL_COUNT, setpoint_c, ambient_c,
+                                         &used_matrix, &infeasible, &reason, &membership_changed);
+    float legacy_oor = (setpoint_c - ambient_c) / s_exec.zones[0].ff_k_dc;
+    TEST_CHECK(hold_oor == legacy_oor, "an out-of-range zi must still return the legacy diagonal "
+              "formula for the passed z (there is nowhere else for the value to come from)");
+    TEST_CHECK(reason == COUPLING_SOLVE_FALLBACK_OUT_OF_RANGE, "an out-of-range zi must also report "
+              "COUPLING_SOLVE_FALLBACK_OUT_OF_RANGE by name");
+
+    /* Case 5: COUPLING_SOLVE_FALLBACK_NONFINITE by name (Opus review -- this
+     * enum value was never previously asserted directly either). Deliberately
+     * constructed, not incidental: a 2-zone diagonally-dominant (so it passes
+     * every pivot-floor check -- this is NOT the singular case) system whose
+     * magnitudes are chosen so back-substitution's accumulation overflows.
+     * zone A: diag=1e38, coupling toward zone B=1e38 (both <= scale=1e38, so
+     * the pivot floor and every forward-elimination check pass cleanly).
+     * zone B: diag=2e34 (>= floor=scale*1e-4=1e34, also passes). With
+     * b_const=1e38: solving zone B first gives u_B = 1e38/2e34 = 5000
+     * (finite). Substituting back into zone A's row:
+     * sum = b_const - M[A][B]*u_B = 1e38 - (1e38 * 5000) = 1e38 - 5e41,
+     * and 1e38*5000=5e41 exceeds float's ~3.4e38 max -- OVERFLOWS to +Inf,
+     * so sum becomes -Inf and the final division is non-finite. This is
+     * exactly the "reachable despite every pivot clearing the floor"
+     * scenario gauss_solve_partial_pivot()'s own doc comment describes. */
+    reset_coupling_test_state();
+    s_exec.ambient_c = 0.0f;
+    g_stub_coupling[0][1] = 1e38f;
+    s_exec.zones[0].active = true; s_exec.zones[0].actual_valid = true; s_exec.zones[0].actual_c = 1e38f;
+    s_exec.zones[0].ff_enabled = true; s_exec.zones[0].ff_k_dc = 1e38f; s_exec.zones[0].control_mode = ZONE_CONTROL_MODE_PID;
+    s_exec.zones[1].active = true; s_exec.zones[1].actual_valid = true; s_exec.zones[1].actual_c = 1e38f;
+    s_exec.zones[1].ff_enabled = true; s_exec.zones[1].ff_k_dc = 2e34f; s_exec.zones[1].control_mode = ZONE_CONTROL_MODE_PID;
+
+    used_matrix = true; infeasible = true; reason = COUPLING_SOLVE_OK;
+    float hold_overflow = solve_hold_for_zone(&s_exec.zones[0], 0, 1e38f, 0.0f, &used_matrix, &infeasible,
+                                              &reason, &membership_changed);
+    TEST_CHECK(reason == COUPLING_SOLVE_FALLBACK_NONFINITE, "a back-substitution overflow must be "
+              "reported by name as COUPLING_SOLVE_FALLBACK_NONFINITE, distinct from _SINGULAR -- "
+              "these are genuinely different causes, not the same fallback with two labels");
+    TEST_CHECK(!used_matrix, "a NONFINITE solve must still be reported as a non-solve overall");
+    TEST_CHECK(isfinite(hold_overflow), "the FALLBACK value itself (the legacy diagonal formula, "
+              "1e38/1e38=1.0 here) must still be finite even though the matrix path that was "
+              "attempted first overflowed internally");
+}
+
+/* Requirement 7 (this runs every executor tick): the solved system must be
+ * CACHED and not re-run through Gaussian elimination when nothing that
+ * matters changed. Proven indirectly here (the cache is an internal
+ * optimization with no separate observable output) by checking that the
+ * cached path and a fresh solve agree bit-for-bit across repeated identical
+ * calls, and that a genuine change (setpoint moves) produces a DIFFERENT
+ * answer -- i.e. the cache never serves a stale value across a real change. */
+static void test_hold_cache_neither_stale_nor_load_bearing_for_correctness(void)
+{
+    TEST_SECTION("solve_hold_for_zone() -- repeated calls with unchanged inputs return identical "
+                 "results (the cache path), and a real change (setpoint) is picked up on the very "
+                 "next call, never serving a stale cached value");
+    reset_coupling_test_state();
+
+    const float diag[3] = {31.961f, 23.480f, 21.742f};
+    const float ambient_c = 20.0f;
+    s_exec.ambient_c = ambient_c;
+    g_stub_coupling[0][1] = 5.766f;  g_stub_coupling[0][2] = 2.406f;
+    g_stub_coupling[1][0] = 12.059f; g_stub_coupling[1][2] = 4.109f;
+    g_stub_coupling[2][0] = 6.004f;  g_stub_coupling[2][1] = 6.773f;
+    for (uint8_t i = 0; i < 3; i++) {
+        s_exec.zones[i].active = true; s_exec.zones[i].actual_valid = true;
+        s_exec.zones[i].actual_c = 35.0f; s_exec.zones[i].ff_enabled = true;
+        s_exec.zones[i].ff_k_dc = diag[i]; s_exec.zones[i].control_mode = ZONE_CONTROL_MODE_PID;
+    }
+
+    bool used_matrix = false, infeasible = false;
+    coupling_solve_reason_t reason = COUPLING_SOLVE_OK; bool membership_changed = false; (void)reason; (void)membership_changed;
+    float first = solve_hold_for_zone(&s_exec.zones[0], 0, 35.0f, ambient_c, &used_matrix, &infeasible, &reason, &membership_changed);
+    float second = solve_hold_for_zone(&s_exec.zones[0], 0, 35.0f, ambient_c, &used_matrix, &infeasible, &reason, &membership_changed);
+    TEST_CHECK(first == second, "an unchanged call (cache hit) must return bit-for-bit the same result");
+
+    float changed = solve_hold_for_zone(&s_exec.zones[0], 0, 45.0f, ambient_c, &used_matrix, &infeasible, &reason, &membership_changed);
+    TEST_CHECK(changed != first, "a genuinely different setpoint must NOT be served the stale "
+              "cached value -- proves the cache key actually covers setpoint_c");
+
+    float back = solve_hold_for_zone(&s_exec.zones[0], 0, 35.0f, ambient_c, &used_matrix, &infeasible, &reason, &membership_changed);
+    TEST_CHECK(back == first, "returning to the original setpoint must reproduce the original "
+              "solve exactly, not some cache-corrupted value left over from the intervening call");
+}
+
+// ---------------------------------------------------------------------------
+// Second coordinator review round (Opus): three blockers before this can be
+// flashed. Each test below is named for the blocker it addresses.
+
+static void test_hold_pivot_floor_just_inside_condition_number_solves(void)
+{
+    TEST_SECTION("gauss_solve_partial_pivot() -- blocker 1 (tightened pivot floor): a diagonal 2x2 "
+                 "system just INSIDE the new floor (COUPLING_SOLVE_PIVOT_REL_EPS=1e-4, floor=scale*"
+                 "1e-4; diag=[1000,0.11] -> floor=0.1, cond_inf=1000/0.11=9090.9, just under the ~1e4 "
+                 "boundary) must be accepted as a genuine solve");
+    reset_coupling_test_state();
+    const float ambient_c = 0.0f, setpoint_c = 10.0f;
+    s_exec.ambient_c = ambient_c;
+    s_exec.zones[0].active = true; s_exec.zones[0].actual_valid = true; s_exec.zones[0].actual_c = setpoint_c;
+    s_exec.zones[0].ff_enabled = true; s_exec.zones[0].ff_k_dc = 1000.0f; s_exec.zones[0].control_mode = ZONE_CONTROL_MODE_PID;
+    s_exec.zones[1].active = true; s_exec.zones[1].actual_valid = true; s_exec.zones[1].actual_c = setpoint_c;
+    s_exec.zones[1].ff_enabled = true; s_exec.zones[1].ff_k_dc = 0.11f; s_exec.zones[1].control_mode = ZONE_CONTROL_MODE_PID;
+    /* g_stub_coupling left all-zero -- purely diagonal, isolating the pivot-floor question from the
+     * off-diagonal-conditioning question the earlier singular-matrix test already covers. */
+
+    bool used_matrix = false, infeasible = false, membership_changed = false;
+    coupling_solve_reason_t reason = COUPLING_SOLVE_OK;
+    (void)solve_hold_for_zone(&s_exec.zones[1], 1, setpoint_c, ambient_c, &used_matrix, &infeasible, &reason, &membership_changed);
+    TEST_CHECK(reason == COUPLING_SOLVE_OK, "cond ~9091 is inside the 1e4 floor -- must solve, not fall back");
+    TEST_CHECK(used_matrix, "used_matrix must mirror reason==COUPLING_SOLVE_OK");
+}
+
+static void test_hold_pivot_floor_just_outside_condition_number_falls_back(void)
+{
+    TEST_SECTION("gauss_solve_partial_pivot() -- blocker 1: the SAME shape just OUTSIDE the floor "
+                 "(diag=[1000,0.09] -> cond_inf=11111, just over the ~1e4 boundary) must be refused "
+                 "and reported COUPLING_SOLVE_FALLBACK_SINGULAR, not solved as rounding noise");
+    reset_coupling_test_state();
+    const float ambient_c = 0.0f, setpoint_c = 10.0f;
+    s_exec.ambient_c = ambient_c;
+    s_exec.zones[0].active = true; s_exec.zones[0].actual_valid = true; s_exec.zones[0].actual_c = setpoint_c;
+    s_exec.zones[0].ff_enabled = true; s_exec.zones[0].ff_k_dc = 1000.0f; s_exec.zones[0].control_mode = ZONE_CONTROL_MODE_PID;
+    s_exec.zones[1].active = true; s_exec.zones[1].actual_valid = true; s_exec.zones[1].actual_c = setpoint_c;
+    s_exec.zones[1].ff_enabled = true; s_exec.zones[1].ff_k_dc = 0.09f; s_exec.zones[1].control_mode = ZONE_CONTROL_MODE_PID;
+
+    bool used_matrix = false, infeasible = false, membership_changed = false;
+    coupling_solve_reason_t reason = COUPLING_SOLVE_OK;
+    float hold1 = solve_hold_for_zone(&s_exec.zones[1], 1, setpoint_c, ambient_c, &used_matrix, &infeasible, &reason, &membership_changed);
+    TEST_CHECK(reason == COUPLING_SOLVE_FALLBACK_SINGULAR, "cond ~11111 is outside the 1e4 floor -- must fall back");
+    TEST_CHECK(!used_matrix, "used_matrix must mirror reason != COUPLING_SOLVE_OK");
+    float legacy1 = (setpoint_c - ambient_c) / 0.09f;
+    TEST_CHECK(hold1 == legacy1, "the fallback value must be the exact legacy diagonal division");
+}
+
+static void test_hold_negative_dt_matches_legacy_unclamped_not_infeasible(void)
+{
+    TEST_SECTION("solve_hold_for_zone() -- \"b < 0 case\": setpoint below ambient (a cooling segment). "
+                 "The legacy formula returns a bare NEGATIVE hold, unclamped; the n==1 (no-neighbor) "
+                 "matrix path must reproduce that bit-exactly, and a genuinely coupled (n=3) system "
+                 "must leave a negative component un-clamped and NOT report infeasible -- clamping or "
+                 "warning here would spuriously flag every ordinary cooling segment as an achievability "
+                 "failure, which it is not");
+    reset_coupling_test_state();
+
+    /* Case 1: no neighbors (n==1) -- must be bit-exact with legacy. */
+    const float ambient_c = 20.0f, setpoint_c = 10.0f; /* b = -10 */
+    s_exec.ambient_c = ambient_c;
+    s_exec.zones[0].active = true; s_exec.zones[0].actual_valid = true; s_exec.zones[0].actual_c = setpoint_c;
+    s_exec.zones[0].ff_enabled = true; s_exec.zones[0].ff_k_dc = 31.961f; s_exec.zones[0].control_mode = ZONE_CONTROL_MODE_PID;
+
+    bool used_matrix = false, infeasible = false, membership_changed = false;
+    coupling_solve_reason_t reason = COUPLING_SOLVE_OK;
+    float hold0 = solve_hold_for_zone(&s_exec.zones[0], 0, setpoint_c, ambient_c, &used_matrix, &infeasible, &reason, &membership_changed);
+    float legacy0 = (setpoint_c - ambient_c) / 31.961f;
+    TEST_CHECK(legacy0 < 0.0f, "test setup sanity: legacy hold really is negative here");
+    TEST_CHECK(hold0 == legacy0, "n==1 (no neighbors) must be bit-exact with the legacy negative division");
+    TEST_CHECK(!infeasible, "a negative hold from a cooling segment is not infeasible");
+    TEST_CHECK(reason == COUPLING_SOLVE_FALLBACK_NO_NEIGHBORS, "and the reason must say WHY it's legacy");
+
+    /* Case 2: genuinely coupled (n=3, the real measured matrix), same negative b -- numpy-verified:
+     * G*u = [-10,-10,-10] solves to u = [-0.24493, -0.24480, -0.31605], every component negative. */
+    reset_coupling_test_state();
+    s_exec.ambient_c = ambient_c;
+    const float diag[3] = {31.961f, 23.480f, 21.742f};
+    g_stub_coupling[0][1] = 5.766f;  g_stub_coupling[0][2] = 2.406f;
+    g_stub_coupling[1][0] = 12.059f; g_stub_coupling[1][2] = 4.109f;
+    g_stub_coupling[2][0] = 6.004f;  g_stub_coupling[2][1] = 6.773f;
+    for (uint8_t i = 0; i < 3; i++) {
+        s_exec.zones[i].active = true; s_exec.zones[i].actual_valid = true;
+        s_exec.zones[i].actual_c = setpoint_c; s_exec.zones[i].ff_enabled = true;
+        s_exec.zones[i].ff_k_dc = diag[i]; s_exec.zones[i].control_mode = ZONE_CONTROL_MODE_PID;
+    }
+    used_matrix = false; infeasible = false; membership_changed = false; reason = COUPLING_SOLVE_OK;
+    float hold0_coupled = solve_hold_for_zone(&s_exec.zones[0], 0, setpoint_c, ambient_c, &used_matrix, &infeasible, &reason, &membership_changed);
+    TEST_CHECK(reason == COUPLING_SOLVE_OK, "this matrix is well-conditioned regardless of b's sign");
+    TEST_CHECK_NEAR(hold0_coupled, -0.24493, 1e-3, "must match the numpy-verified negative solution");
+    TEST_CHECK(!infeasible, "a negative solved component must never be reported infeasible -- this is "
+              "the exact case the pre-fix clamp-any-out-of-[0,1] logic got wrong");
+}
+
+static void test_hold_partial_matrix_degrades_toward_less_drive_not_more(void)
+{
+    TEST_SECTION("solve_hold_for_zone() -- the most likely REAL commissioning state: zone 0's row is "
+                 "measured, zones 1 and 2's rows are not (autotune hasn't reached them yet). Zone 0's "
+                 "own row still incorporates the (unmeasured-so-diagonal-only) duties it computes "
+                 "zones 1/2 need, so its solved hold must be LESS than the pure legacy diagonal value "
+                 "-- partial coupling data must never make a zone look like it needs MORE duty than "
+                 "the pre-fix code already commanded, only equal or less. Hand-computed (upper "
+                 "triangular: G=[[31.961,5.766,2.406],[0,23.480,0],[0,0,21.742]], b=15 uniformly): "
+                 "u2=15/21.742=0.68984, u1=15/23.480=0.63884, u0=(15-5.766*u1-2.406*u2)/31.961="
+                 "0.30213 (numpy-verified)");
+    reset_coupling_test_state();
+
+    const float ambient_c = 20.0f, setpoint_c = 35.0f; /* b = 15 */
+    s_exec.ambient_c = ambient_c;
+    const float diag[3] = {31.961f, 23.480f, 21.742f};
+    /* Only zone 0's row is populated -- zones 1 and 2 report "no row at all"
+     * (g_stub_coupling_present false), the exact state an un-autotuned zone
+     * is in. */
+    g_stub_coupling[0][1] = 5.766f; g_stub_coupling[0][2] = 2.406f;
+    g_stub_coupling_present[1] = false;
+    g_stub_coupling_present[2] = false;
+
+    for (uint8_t i = 0; i < 3; i++) {
+        s_exec.zones[i].active = true; s_exec.zones[i].actual_valid = true;
+        s_exec.zones[i].actual_c = setpoint_c; s_exec.zones[i].ff_enabled = true;
+        s_exec.zones[i].ff_k_dc = diag[i]; s_exec.zones[i].control_mode = ZONE_CONTROL_MODE_PID;
+    }
+
+    bool used_matrix = false, infeasible = false, membership_changed = false;
+    coupling_solve_reason_t reason = COUPLING_SOLVE_OK;
+    float hold0 = solve_hold_for_zone(&s_exec.zones[0], 0, setpoint_c, ambient_c, &used_matrix, &infeasible, &reason, &membership_changed);
+    TEST_CHECK(reason == COUPLING_SOLVE_OK, "a partially-measured but still well-conditioned system must solve");
+    TEST_CHECK_NEAR(hold0, 0.30213, 1e-4, "must match the hand/numpy-computed partial-matrix solution");
+
+    float legacy0 = (setpoint_c - ambient_c) / diag[0];
+    TEST_CHECK(hold0 < legacy0, "SAFETY PROPERTY: partial coupling data must degrade toward LESS "
+              "drive than the legacy no-data baseline, never more -- an incompletely-commissioned "
+              "kiln must never be worse off than the pre-fix code already was");
+}
+
+/* Shared setup for both direction tests below: 3 zones, the real measured
+ * matrix, zone 0 on a plain-I controller sitting exactly on setpoint (so
+ * P/D contribute nothing and every duty change is attributable to FF+I). */
+static void setup_membership_transition_zone0(zone_runtime_t **out_z0, float ambient_c, float setpoint_c)
+{
+    reset_coupling_test_state();
+    s_exec.ambient_c = ambient_c;
+    s_exec.target_c = setpoint_c;
+    s_exec.target_rate_c_per_s = 0.0f;
+    const float diag[3] = {31.961f, 23.480f, 21.742f};
+    g_stub_coupling[0][1] = 5.766f;  g_stub_coupling[0][2] = 2.406f;
+    g_stub_coupling[1][0] = 12.059f; g_stub_coupling[1][2] = 4.109f;
+    g_stub_coupling[2][0] = 6.004f;  g_stub_coupling[2][1] = 6.773f;
+    for (uint8_t i = 0; i < 3; i++) {
+        s_exec.zones[i].active = true; s_exec.zones[i].actual_valid = true;
+        s_exec.zones[i].actual_c = setpoint_c;
+        s_exec.zones[i].ff_enabled = true; s_exec.zones[i].ff_k_dc = diag[i];
+        s_exec.zones[i].control_mode = ZONE_CONTROL_MODE_PID;
+    }
+    zone_runtime_t *z0 = &s_exec.zones[0];
+    z0->pid_cfg = (pid_cfg_t){.kp = 0.0f, .ki = 0.02f, .kd = 0.0f, .d_filter_tau_s = 1.0f, .b = 1.0f,
+                              .pid_range_c = 1000.0f};
+    pid_reset(&z0->pid_state);
+    z0->heater_cfg.window_ms = 10000;
+    z0->heater_cfg.min_on_ms = 0;
+    *out_z0 = z0;
+}
+
+static void test_hold_membership_change_gaining_a_neighbor_reseeds_smoothly(void)
+{
+    TEST_SECTION("pid_family_zone_tick() -- blocker 2 (membership-transition damping), the direction "
+                 "the reseed can fully absorb: zone 1 HEALING back into zone 0's system (2-zone {0,2} "
+                 "settled duty ~0.42625 -> 3-zone hold target drops to 0.36739, a DOWNWARD step) is "
+                 "reseeded to reproduce the pre-transition commanded duty bumplessly, because the "
+                 "needed integral correction is towards zero, which the existing anti-windup floor "
+                 "(integral >= 0, see seed_bumpless_with_ff()'s own doc comment) never blocks");
+    zone_runtime_t *z0 = NULL;
+    setup_membership_transition_zone0(&z0, 20.0f, 35.0f);
+    s_exec.zones[1].faulted = true; /* start EXCLUDED -- the {0,2} 2-zone system */
+
+    bool want_relay_on = false;
+    float duty_before = 0.0f;
+    for (int i = 0; i < 25; i++) {
+        duty_before = pid_family_zone_tick(z0, 0, &z0->pid_cfg, true, 1.0f, 1000u, &want_relay_on);
+        z0->duty = duty_before; /* the real control loop writes this after every tick (line ~2900)
+                                 * -- seed_bumpless_with_ff() reads z->duty, not the return value,
+                                 * so a direct pid_family_zone_tick() test must mirror that write. */
+    }
+    TEST_CHECK_NEAR(duty_before, 0.42625, 0.01, "test setup sanity: duty must have settled near the "
+                    "2-zone steady-state hold before healing");
+
+    s_exec.zones[1].faulted = false; /* zone 1 heals -- system grows back to {0,1,2} */
+    float duty_after = pid_family_zone_tick(z0, 0, &z0->pid_cfg, true, 1.0f, 1000u, &want_relay_on);
+    z0->duty = duty_after;
+
+    TEST_CHECK_NEAR(z0->last_pid_terms.ff, 0.36739, 0.01, "this tick's own FF term must already "
+              "reflect the NEW (healed, 3-zone) system -- proves the membership change was detected "
+              "and used, not merely that duty happens to look stable");
+    TEST_CHECK(fabsf(duty_after - duty_before) < 0.02f, "COMMANDED DUTY must not step across a "
+              "DOWNWARD membership transition -- the reseed fully absorbs it, matching the same "
+              "bump-transfer property every other seed_bumpless_with_ff() call site already proves");
+}
+
+static void test_hold_membership_change_losing_a_neighbor_reseeds_when_headroom_exists(void)
+{
+    TEST_SECTION("pid_family_zone_tick() -- blocker 2, the UPWARD direction (zone 1 dropping out, "
+                 "3-zone hold 0.36739 -> 2-zone hold 0.42625, the coordinator's own example), made "
+                 "genuinely DISCRIMINATING (Opus review, test-honesty item: the first version of "
+                 "this test used actual_c==target_c throughout, which pins the PID integral at "
+                 "exactly 0 for the WHOLE run regardless of whether the reseed runs at all -- "
+                 "removing the reseed changed nothing and the test passed either way, documenting "
+                 "rather than testing). Here the zone carries a real nonzero integral (as any zone "
+                 "sitting at steady state against a real heat-loss bias would) BEFORE the "
+                 "transition, so 'was the reseed applied' is an observable difference: WITH real "
+                 "headroom above the new target, the same seed_bumpless_with_ff() mechanism DOES "
+                 "fully absorb an upward step too -- the anti-windup floor this file's earlier "
+                 "version worried about only bites when duty_before has no headroom over the new "
+                 "target (a zone caught with near-zero integral at the exact instant of the fault), "
+                 "which is a real but narrower edge case than 'every upward transition', documented "
+                 "here rather than re-tested given the coordinator's own math already confirmed the "
+                 "floor mechanism itself.");
+    zone_runtime_t *z0 = NULL;
+    setup_membership_transition_zone0(&z0, 20.0f, 35.0f);
+    /* zone 1 starts healthy -- the full {0,1,2} 3-zone system. */
+
+    /* Prime the membership signature to the current (3-zone) system with one
+     * throwaway tick BEFORE hand-setting the integral below -- otherwise
+     * this very first call's own 0->real membership edge would fire a
+     * reseed against z0->duty's memset-zero default and clobber the
+     * integral this test is about to set deliberately. */
+    bool want_relay_on = false;
+    (void)pid_family_zone_tick(z0, 0, &z0->pid_cfg, true, 1.0f, 1000u, &want_relay_on);
+
+    /* A real, nonzero integral -- e.g. this zone has been quietly holding
+     * against a small heat-loss bias. actual_c stays exactly on setpoint
+     * (kp=0 anyway, so P contributes nothing either way) so duty is exactly
+     * P(0)+I+D(0)+FF = integral*ki + ff. */
+    z0->pid_state.integral = 5.0f;
+    float duty_before = pid_family_zone_tick(z0, 0, &z0->pid_cfg, true, 1.0f, 1000u, &want_relay_on);
+    z0->duty = duty_before;
+    float expect_duty_before = 5.0f * z0->pid_cfg.ki + 0.36739f;
+    TEST_CHECK_NEAR(duty_before, expect_duty_before, 0.005, "test setup sanity: duty must reflect the "
+                    "hand-set nonzero integral plus the 3-zone hold (5.0*0.02 + 0.36739 = 0.46739)");
+
+    s_exec.zones[1].faulted = true; /* the transition under test */
+    float duty_after = pid_family_zone_tick(z0, 0, &z0->pid_cfg, true, 1.0f, 1000u, &want_relay_on);
+    z0->duty = duty_after;
+
+    TEST_CHECK_NEAR(z0->last_pid_terms.ff, 0.42625, 0.01, "this tick's own FF term must already "
+              "reflect the NEW (2-zone) system -- proves the membership change was detected");
+    /* duty_before (0.46739) comfortably exceeds the new 2-zone target
+     * (0.42625) -- the anti-windup floor is NOT hit here, so the reseed can
+     * fully absorb the step, discriminating this test from a stub that
+     * disables the reseed (see the negative-test evidence in the report). */
+    TEST_CHECK(fabsf(duty_after - duty_before) < 0.02f, "COMMANDED DUTY must not step across this "
+              "UPWARD membership transition when real integral headroom exists -- the reseed fully "
+              "absorbs it, exactly like the downward case");
+}
+
+static void test_hold_membership_chatter_is_counted_and_surfaced(void)
+{
+    TEST_SECTION("zone_feedforward()/profile_executor_get_status() -- Opus review round 3, item 3: "
+                 "a chattering membership (e.g. a flapping interlock) makes the per-tick reseed a "
+                 "SAFE but SILENT failure mode -- integral action effectively stops correcting while "
+                 "the reseed keeps firing. ff_membership_change_count must increment exactly once per "
+                 "genuine membership EDGE (not once per tick a changed system happens to persist "
+                 "across, and not at all while membership is stable), and must reach the operator via "
+                 "get_status(), the same path as ff_hold_used_matrix/ff_hold_infeasible.");
+    zone_runtime_t *z0 = NULL;
+    setup_membership_transition_zone0(&z0, 20.0f, 35.0f);
+    bool want_relay_on = false;
+
+    /* Tick 1: primes the membership signature (0->3-zone edge) -- counts as
+     * one change, same as every other test in this file that starts from
+     * reset_coupling_test_state()'s cleared signature. */
+    (void)pid_family_zone_tick(z0, 0, &z0->pid_cfg, true, 1.0f, 1000u, &want_relay_on);
+    TEST_CHECK(z0->ff_membership_change_count == 1, "the initial 0->real membership edge must count "
+              "as exactly one change");
+
+    /* Ticks 2-4: membership STABLE (still the full 3-zone system) -- must
+     * NOT increment, proving this counts EDGES, not ticks. */
+    for (int i = 0; i < 3; i++) {
+        (void)pid_family_zone_tick(z0, 0, &z0->pid_cfg, true, 1.0f, 1000u, &want_relay_on);
+    }
+    TEST_CHECK(z0->ff_membership_change_count == 1, "a stable membership across multiple ticks must "
+              "NOT keep incrementing the counter");
+
+    /* Simulate a flapping interlock: zone 1 toggles faulted/healthy three
+     * times, one tick each -- three genuine edges. */
+    for (int i = 0; i < 3; i++) {
+        s_exec.zones[1].faulted = true;
+        (void)pid_family_zone_tick(z0, 0, &z0->pid_cfg, true, 1.0f, 1000u, &want_relay_on);
+        s_exec.zones[1].faulted = false;
+        (void)pid_family_zone_tick(z0, 0, &z0->pid_cfg, true, 1.0f, 1000u, &want_relay_on);
+    }
+    TEST_CHECK(z0->ff_membership_change_count == 7, "6 flaps (3 fault + 3 recover) on top of the "
+              "initial edge must land at exactly 7 -- one count per genuine transition");
+
+    /* get_status()'s copy loop (profile_executor.c, right alongside
+     * ff_hold_used_matrix/ff_hold_infeasible) does
+     * `zo->ff_membership_change_count = z->ff_membership_change_count;` --
+     * verified by inspection of that diff, not re-exercised here: doing so
+     * would require running a full profile through profile_executor_run()
+     * (s_exec.lock == NULL short-circuits get_status() in every prestart
+     * test in this file, by design -- see this file's header comment) just
+     * to cover one more memcpy-shaped assignment line already covered by
+     * ff_hold_used_matrix's own identical wiring, which IS exercised
+     * end-to-end by test_hold_infeasible_setpoint_clamps_and_reports() via
+     * zone_feedforward()'s write into s_exec.zones[zi]. What this test adds
+     * is the COUNTING logic itself (edges vs. ticks), which lives entirely
+     * in zone_feedforward(), independent of get_status(). */
 }
 
 // ---------------------------------------------------------------------------
@@ -2812,6 +3510,22 @@ void run_test_profile_executor_prestart(void)
     test_feedforward_invalid_neighbor_contributes_zero_never_nan();
     test_feedforward_both_callers_agree_bump_transfer();
     test_feedforward_realistic_measured_matrix_zone1_row();
+
+    test_hold_diagonal_only_matches_legacy_exactly();
+    test_hold_matrix_solves_real_measured_gain_matrix();
+    test_hold_singular_matrix_falls_back();
+    test_hold_excluded_faulted_zone_reduces_system();
+    test_hold_infeasible_setpoint_clamps_and_reports();
+    test_hold_pathological_inputs_never_nan_or_inf();
+    test_hold_cache_neither_stale_nor_load_bearing_for_correctness();
+
+    test_hold_pivot_floor_just_inside_condition_number_solves();
+    test_hold_pivot_floor_just_outside_condition_number_falls_back();
+    test_hold_negative_dt_matches_legacy_unclamped_not_infeasible();
+    test_hold_partial_matrix_degrades_toward_less_drive_not_more();
+    test_hold_membership_change_gaining_a_neighbor_reseeds_smoothly();
+    test_hold_membership_change_losing_a_neighbor_reseeds_when_headroom_exists();
+    test_hold_membership_chatter_is_counted_and_surfaced();
 
     test_feedforward_control_mode_off_neighbor_contributes_zero();
     test_feedforward_faulted_or_blocked_neighbor_contributes_zero();
