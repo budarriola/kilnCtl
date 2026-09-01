@@ -156,9 +156,18 @@ Invoke-HostTestExe -Name "main" -ExePath $exe -BuildCmd $cmd
 # zones_http.h. Linking both into one executable would be a multiple-
 # definition error, so this one is built and run as a second, independent
 # binary instead of being added to $sources above.
+#
+# zones_http.c now calls into zones_config_json.c (the HTTP-free split of its
+# own validation/decode/field-parsing core -- see that file's header comment)
+# instead of defining those functions itself, so this executable's link needs
+# zones_config_json.c compiled in alongside it, the same way $sources lists
+# every other driver .c a test executable actually calls into.
 $exe2 = Join-Path $outDir "kilnctl_host_tests_zones.exe"
+$exe2ObjDir = Join-Path $outDir "zones_obj\"
+if (-not (Test-Path $exe2ObjDir)) { New-Item -ItemType Directory -Path $exe2ObjDir | Out-Null }
 $cmd2 = "call `"$vcvars`" x64 >nul && cl /nologo /W3 /EHsc /std:c11 /I`"$stubDir`" /I`"$commonInc`" " +
-        "/Fo:`"$outDir\\zones_`" /Fe:`"$exe2`" `"$(Join-Path $testDir 'test_zones_http.c')`""
+        "/Fo:`"$exe2ObjDir\`" /Fe:`"$exe2`" `"$(Join-Path $testDir 'test_zones_http.c')`" " +
+        "`"$(Join-Path $driversDir 'zones_config_json.c')`""
 
 Invoke-HostTestExe -Name "zones_http" -ExePath $exe2 -BuildCmd $cmd2
 
@@ -392,6 +401,7 @@ $cmd14 = "call `"$vcvars`" x64 >nul && cl /nologo /W3 /EHsc /std:c11 /I`"$driver
         "/Fo:`"$slObjDir\\`" /Fe:`"$exe14`" " +
         "`"$(Join-Path $testDir 'test_safety_link_compile.c')`" " +
         "`"$(Join-Path $driversDir 'stack_margin.c')`" `"$(Join-Path $driversDir 'safety_trip_decision.c')`" " +
+        "`"$(Join-Path $driversDir 'safety_link_frame.c')`" " +
         "$($slExtra -join ' ')"
 
 Invoke-HostTestExe -Name "safety_link" -ExePath $exe14 -BuildCmd $cmd14

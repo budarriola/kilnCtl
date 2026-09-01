@@ -949,3 +949,136 @@ which none of §2's recommendations have been validated against anything but
 simulation and literature. Note the bench rig's 0..80 °C range means even a
 successful run validates the *mechanism* rather than the kiln-temperature
 behavior — §2a's `T^4` caveat stays open until a real firing.
+
+---
+
+## Phase 7 — tuning quality factors and live autotune on the graph — opened 2026-09-01
+
+Two operator-facing asks, plus the generalization work the 2026-09-01 constants
+audit turned up. Phase 7a and 7b are UI/telemetry; 7c is the algorithm work that
+decides whether any of this transfers to a second kiln.
+
+### Phase 7a — per-zone tuning quality factors
+
+Accumulated over a whole profile run, shown per zone on the thermocouples page
+and the zones page. The point is to compare *firing accuracy between runs*, so
+every figure has to be comparable across profiles of different length and
+different setpoint span.
+
+- [ ] **Mean error**, signed. Signed, not absolute — the sign is what separates
+      a zone that runs hot from one that runs cold, and that distinction drives
+      a different fix.
+- [ ] **Max overshoot** and **max undershoot**, as two separate figures, each
+      carrying the timestamp and the segment index where it occurred. A single
+      "max absolute error" would hide which direction the zone fails in.
+- [ ] **Normalized IAE** — `∫|error| dt / (duration_s * setpoint_span_c)`.
+      **The normalization is the whole point of this metric.** A raw integral
+      grows with run length, so an 8 h glaze firing would always score worse
+      than a 2 h bisque even when it tracked better. Dividing by duration and
+      span gives a dimensionless number comparable across profiles, kilns and
+      zone counts. Store raw `∫|error| dt` alongside it — it is free once the
+      accumulator exists, and someone will want the un-normalized value.
+- [ ] **Ramp error vs dwell error, separated.** Nearly free once the above
+      exists, and worth more than it costs: ramp error is a feedforward/rate
+      problem, dwell error is an integral-term problem. Lumping them together
+      hides which one the kiln actually has.
+
+Design notes:
+- Accumulate in the executor, not in the UI — the UI polls at an unreliable
+  rate and would alias the integral.
+- Error is `actual - target` against the *executor's* current target (the
+  ramped setpoint), not the segment's end temperature. Using the segment
+  endpoint would score every ramp as a large error by construction.
+- Define behavior for the zone-not-yet-at-temperature case at run start, and
+  for samples where `actual_valid == false` — the accumulator must not silently
+  treat a sensor dropout as zero error. Excluded samples need their own count
+  so a run with heavy dropout can be recognised as untrustworthy rather than
+  quietly scoring well.
+
+### Phase 7a-2 — two independent stat sets, different lifetimes
+
+The quality factors above are not one set but two, measuring different things
+and living for different lengths of time. Keeping them in one bucket would mean
+a re-tune silently wipes firing history, or a firing silently overwrites the
+figures that describe the model.
+
+**Set 1 — tuning quality, persists until that zone is re-tuned.** A property of
+the *identification*, stored beside the gains it describes:
+
+- [ ] Fit residual (RMS of the FOPDT model against the captured trace).
+- [ ] The three existing confidence flags: `settled`,
+      `extrapolation_converged`, `tau_consistent_with_gain`.
+- [ ] Identified `K`, `tau_s`, `dead_time_s`, plus the baseline and the duty the
+      step was run at — without the operating point the gain is not
+      interpretable.
+- [ ] Timestamp of the tune, and which rule produced the gains.
+- [ ] **Invalidated whenever the gains change by any path** — autotune accept,
+      manual edit, config import, backup restore. Stale fit-quality figures
+      shown against gains they do not describe are worse than no figures,
+      because they read as current. This invalidation is the part most likely
+      to be missed; it needs its own test.
+
+**Set 2 — firing quality, per profile run.** Mean error, max overshoot/
+undershoot, normalized IAE, ramp-vs-dwell split, as specified in 7a.
+
+- [ ] Keep the **last N runs (N≈5), not just the last one.** A single previous
+      run gives no way to distinguish a real regression from ordinary
+      variation between firings. Cost is a few dozen bytes per run.
+- [ ] Each entry records the profile name/id and the gains in force at the
+      time, so a comparison across runs cannot silently span a re-tune.
+
+Reading them together is the point: good fit + poor tracking indicts the
+controller or the profile; poor fit + poor tracking says re-tune before
+touching anything else.
+
+### Phase 7b — live autotune trace on the graph
+
+- [ ] Draw the in-progress autotune trace on the home graph against the planned
+      profile, while the tune is running.
+- [ ] Annotate the current engine phase (settling / probing / stepping /
+      identifying) so it is visible *what* is producing the curve — a flat
+      settling segment and a stalled step look identical without it.
+- [ ] Mostly plumbing: the graph already draws a series, and
+      `/api/autotune/trace.csv` already exists. Check the sample budget before
+      adding a second series — see [[project_esp_internal_dram_exhaustion]];
+      this board has run out of internal DRAM on smaller additions than this.
+
+### Phase 7c — stop hand-fitting thresholds to this one kiln
+
+From the 2026-09-01 audit of every numeric threshold in the autotune and
+thermal-guard path. Classification: scale-free / sensor-derived / should-be-
+computed / policy. The should-be-computed set is the bug list.
+
+- [ ] **Consume `probe_k_rough` in the guard thresholds.** The probe phase
+      already produces a rough plant model, and it is currently used only to
+      pick the identify duty. These thresholds are evaluated at a point where
+      that estimate is already in hand and could be derived from it:
+      `AUTOTUNE_ELEMENT_ALIVE_RISE_C`, `AUTOTUNE_ELEMENT_DEATH_DROP_C`,
+      `AUTOTUNE_TARGET_ACHIEVED_WARN_C`, the post-probe re-settle instance of
+      `AUTOTUNE_ENGINE_SETTLE_S`, the identify-phase time budget, and
+      `PEAK_SLOPE_WINDOW_SAMPLES` / `PEAK_SLOPE_SEARCH_SAMPLES` /
+      `MIN_STEPPING_SAMPLES_BEFORE_SETTLE_CHECK`.
+- [ ] **Make the probe phase self-terminating.** `PROBE_DURATION_S` is a fixed
+      600 s sized against this kiln's τ≈285 s (~2.2τ). On a kiln 10× slower it
+      is 0.21τ — the curvature never develops and the fit degrades to "never
+      reached 28.3% of total rise". On one 10× faster it wastes ~21τ of run
+      budget and thermal headroom. This cannot be fixed with a formula, because
+      the probe is the phase that measures τ; the fix is terminating the probe
+      on its own settle criterion instead of a wall clock. **This single change
+      removes the worst scale dependence in the system.**
+- [ ] **Genuinely bootstrap-only, leave as conservative constants but document
+      the validity range:** the first `AUTOTUNE_ENGINE_SETTLE_S`, and
+      `AUTOTUNE_ENGINE_TARGET_CEILING_MARGIN_C` (a pre-start gate, so it runs
+      before the probe by construction — no estimate can exist yet).
+- [ ] **Fix the plausibility check** at `autotune_engine.c:1086`. It computes
+      `implied_max_c = ambient + K_ii` and refuses the fit if that is below the
+      zone's configured `max_temp_c`. On a coupled multi-zone kiln one zone
+      alone cannot reach the chamber ceiling — this board measures ~74 °C
+      single-zone against an 80 °C configured ceiling — so it rejects correct
+      fits. It must either fold in the measured coupling row
+      (`implied_max_c = ambient + K_ii + Σ_j G[i][j]·u_j`) or not assume the
+      ceiling is single-zone reachable.
+
+**Definition of done:** 7a and 7b demonstrated on a real firing with all three
+zones; 7c's first two boxes closed and negative-tested per this repo's rule
+that a check must be provably falsifiable.

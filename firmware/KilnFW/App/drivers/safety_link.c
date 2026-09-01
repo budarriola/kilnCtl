@@ -1,4 +1,5 @@
 #include "safety_link.h"
+#include "safety_link_frame.h"
 #include "safety_trip_decision.h"
 
 #include <inttypes.h>
@@ -185,45 +186,9 @@ static const char *TAG = "safety_link";
 /* Small helpers                                                            */
 /* ------------------------------------------------------------------------ */
 
-/* The ESP32-S3 is little-endian and so is every multi-byte field in this
- * protocol, so these are memcpy rather than byte assembly -- but they stay
- * functions so the wire layout is still stated once, in one place. */
-static float safety_read_f32_le(const uint8_t *bytes)
-{
-    float value;
-    memcpy(&value, bytes, sizeof(value));
-    return value;
-}
-
-static uint32_t safety_read_u32_le(const uint8_t *bytes)
-{
-    return (uint32_t)bytes[0] | ((uint32_t)bytes[1] << 8) | ((uint32_t)bytes[2] << 16) |
-           ((uint32_t)bytes[3] << 24);
-}
-
-static uint16_t safety_read_u16_le(const uint8_t *bytes)
-{
-    return (uint16_t)(bytes[0] | ((uint16_t)bytes[1] << 8));
-}
-
-static void safety_put_f32_le(uint8_t *out, float value)
-{
-    memcpy(out, &value, sizeof(value));
-}
-
-static void safety_put_u16_le(uint8_t *out, uint16_t value)
-{
-    out[0] = (uint8_t)(value & 0xFFu);
-    out[1] = (uint8_t)((value >> 8) & 0xFFu);
-}
-
-static void safety_put_u32_le(uint8_t *out, uint32_t value)
-{
-    out[0] = (uint8_t)(value & 0xFFu);
-    out[1] = (uint8_t)((value >> 8) & 0xFFu);
-    out[2] = (uint8_t)((value >> 16) & 0xFFu);
-    out[3] = (uint8_t)((value >> 24) & 0xFFu);
-}
+/* safety_read_f32_le/u32_le/u16_le, safety_put_f32_le/u16_le/u32_le moved to
+ * safety_link_frame.c/.h (pure byte<->value marshalling, no locking/hardware
+ * -- see that header's own comment). Called the same way from here. */
 
 static uint32_t safety_elapsed_ms(TickType_t since)
 {
@@ -337,13 +302,11 @@ static void safety_apply_fault_locked(SafetyLinkClass *link)
  * and this is one boolean formula, not a codec. CommonFW/docs/LINK_PROTOCOL.md
  * sec 4, "What 'compatible' means": both directions matter, because "I can
  * read you" and "you can read me" are different claims. */
-static bool safety_link_versions_compatible(uint16_t self_protocol, uint16_t self_min_compatible,
-                                             uint16_t peer_protocol, uint16_t peer_min_compatible)
-{
-    return (peer_protocol >= self_min_compatible) && (self_protocol >= peer_min_compatible);
-}
-
-/* commit/datetime must each fit the shared codec's fixed caps (kilnlink_announce.h:
+/* safety_link_versions_compatible() moved to safety_link_frame.c/.h (pure
+ * two-sided comparison, no locking/hardware -- see that header's own
+ * comment). Called the same way from here.
+ *
+ * commit/datetime must each fit the shared codec's fixed caps (kilnlink_announce.h:
  * KILNLINK_ANNOUNCE_MAX_COMMIT_LEN/MAX_DATETIME_LEN) -- a build identity longer than
  * that isn't a real build stamp (see that header's own comment), so catch it at
  * compile time rather than let kilnlink_announce_encode() silently drop the frame
@@ -438,101 +401,12 @@ static void safety_link_send_announce_version_burst(SafetyLinkClass *link)
  * actually reachable -- a truncated or old-format frame that stops short of
  * it must not report a stale/zero boot_id as real. Returns false only if
  * bytes 1-4 themselves aren't present (frame too short to say anything). */
-static bool safety_parse_fw_version(const uint8_t *p, uint8_t len, uint16_t *out_protocol,
-                                     uint16_t *out_min_compatible, uint8_t *out_boot_id,
-                                     bool *out_have_boot_id, bool *out_dirty,
-                                     uint8_t *out_commit, uint8_t *out_commit_len,
-                                     uint8_t *out_datetime, uint8_t *out_datetime_len,
-                                     uint8_t *out_config_version, uint16_t *out_config_crc,
-                                     bool *out_have_build)
-{
-    *out_have_boot_id = false;
-    *out_have_build = false;
-    if (len < 5u) {
-        return false;
-    }
-    *out_protocol = (uint16_t)(p[1] | ((uint16_t)p[2] << 8));
-    *out_min_compatible = (uint16_t)(p[3] | ((uint16_t)p[4] << 8));
-
-    if (len < 7u) {
-        return true; /* no dirty/commit_len byte to even start the tail */
-    }
-    *out_dirty = (p[5] != 0u);
-    size_t i = 6; /* byte5 = dirty, read above */
-    uint8_t commit_len = p[i++];
-    if ((size_t)commit_len + i > (size_t)len) {
-        return true; /* truncated commit -- the fields already set stand */
-    }
-    /* STACK OVERFLOW FIX (audit 2026-08-27). The bound above checks only that
-     * the SOURCE read stays inside the frame. commit_len is an untrusted wire
-     * byte (0..255) and out_commit is a 64-byte buffer, so a CRC-valid frame
-     * declaring commit_len=246 wrote 182 bytes past the caller's stack array,
-     * over its saved return address, on safety_poll_task. Reachable from any
-     * peer running mismatched or corrupted firmware -- exactly the case this
-     * link exists to survive. The shared codec (kilnlink_announce.c) always
-     * enforced this cap; only this hand-written parser ever lost it.
-     *
-     * Copy is capped; the PARSE OFFSET still advances by the full wire length,
-     * so the datetime/boot_id/config fields after this one stay correctly
-     * aligned instead of being read from the middle of an over-long commit
-     * string. Truncating rather than rejecting is deliberate: protocol and
-     * min_compatible were already parsed above and are what the compatibility
-     * gate acts on, so a build string too long to store is a cosmetic loss,
-     * not a reason to discard a frame that may be reporting a real version
-     * mismatch. */
-    uint8_t commit_copy = commit_len;
-    if ((size_t)commit_copy > KILNLINK_ANNOUNCE_MAX_COMMIT_LEN) {
-        ESP_LOGW(TAG, "FW_VERSION commit_len %u exceeds the %u-byte maximum -- storing a truncated "
-                      "build string (peer firmware is mismatched or the frame is corrupt)",
-                 (unsigned)commit_len, (unsigned)KILNLINK_ANNOUNCE_MAX_COMMIT_LEN);
-        commit_copy = (uint8_t)KILNLINK_ANNOUNCE_MAX_COMMIT_LEN;
-    }
-    memcpy(out_commit, &p[i], commit_copy);
-    *out_commit_len = commit_copy;
-    i += commit_len; /* full wire length -- see the comment above */
-    if (i >= (size_t)len) {
-        return true;
-    }
-    uint8_t datetime_len = p[i++];
-    if ((size_t)datetime_len + i > (size_t)len) {
-        return true;
-    }
-    /* Same cap, same reasoning, same 32-byte destination -- see commit above. */
-    uint8_t datetime_copy = datetime_len;
-    if ((size_t)datetime_copy > KILNLINK_ANNOUNCE_MAX_DATETIME_LEN) {
-        ESP_LOGW(TAG, "FW_VERSION datetime_len %u exceeds the %u-byte maximum -- storing a "
-                      "truncated build datetime",
-                 (unsigned)datetime_len, (unsigned)KILNLINK_ANNOUNCE_MAX_DATETIME_LEN);
-        datetime_copy = (uint8_t)KILNLINK_ANNOUNCE_MAX_DATETIME_LEN;
-    }
-    memcpy(out_datetime, &p[i], datetime_copy);
-    *out_datetime_len = datetime_copy;
-    i += datetime_len; /* full wire length -- see the comment above */
-    if (i >= (size_t)len) {
-        return true;
-    }
-    *out_boot_id = p[i++];
-    *out_have_boot_id = true;
-
-    /* TODO.md owner-report item 5: config_version (u8) then config_crc (u16
-     * LE), CommonFW/docs/LINK_PROTOCOL.md sec 4's Frame C table -- only
-     * meaningful once both are actually present, hence the two-step length
-     * check rather than reusing out_have_boot_id for this too (an older/
-     * truncated Pico build that stops at boot_id must not report a fabricated
-     * config_crc of 0 as "commissioned with a real CRC of zero"). */
-    if (i >= (size_t)len) {
-        return true;
-    }
-    *out_config_version = p[i++];
-    if (i + 1u >= (size_t)len) {
-        return true;
-    }
-    *out_config_crc = (uint16_t)(p[i] | ((uint16_t)p[i + 1] << 8));
-    *out_have_build = true;
-    return true;
-}
-
-/* Applies one Pico FW_VERSION frame: updates the tracked peer-compatibility
+/* safety_parse_fw_version() moved to safety_link_frame.c/.h (pure decode, no
+ * locking/hardware -- see that header's own comment, including the
+ * 2026-08-27 stack-overflow fix's truncation contract). Called the same way
+ * from here.
+ *
+ * Applies one Pico FW_VERSION frame: updates the tracked peer-compatibility
  * verdict and boot_id, and re-announces ourselves (a burst, not just one
  * frame -- same loss-tolerance reasoning as the boot push) if the boot_id
  * changed, since a Pico that just rebooted has forgotten who it was talking

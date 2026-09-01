@@ -155,8 +155,8 @@ esp_err_t httpd_resp_send_chunk(httpd_req_t *r, const char *buf, size_t buf_len)
 }
 /* Test hooks added for FIX 2's zones_post_handler() end-to-end coverage
  * (the two inline strtol sites -- max_simultaneous_relays/safety_tc_type --
- * have no seam of their own to call directly, unlike parse_u8_field()/
- * parse_float_field()). NULL/false by default so every pre-existing test in
+ * have no seam of their own to call directly, unlike zones_config_json_parse_u8_field()/
+ * zones_config_json_parse_float_field()). NULL/false by default so every pre-existing test in
  * this file, which only calls parse_zone_fields() directly and never
  * zones_post_handler(), is completely unaffected -- same opt-in convention
  * stubs/nvs.h's nvs_test_enable() uses. */
@@ -685,7 +685,7 @@ static void test_old_behaviour_would_have_zeroed_it(void)
 }
 
 // ---------------------------------------------------------------------------
-// FIX 2 -- parse_u8_field()/parse_float_field() trailing-garbage rejection,
+// FIX 2 -- zones_config_json_parse_u8_field()/zones_config_json_parse_float_field() trailing-garbage rejection,
 // plus the two inline strtol sites (max_simultaneous_relays/safety_tc_type)
 // zones_post_handler() has no other seam for. Blast-radius check (see the
 // task's own instructions): zones_page.html's saveBtn handler pushes raw
@@ -702,7 +702,7 @@ static void test_parse_u8_field_rejects_trailing_garbage(void)
 {
     TEST_SECTION("parse_u8_field -- trailing garbage after a valid numeric prefix is rejected (FIX 2)");
     uint8_t out = 99;
-    bool ok = parse_u8_field("thermo_count=3X", "thermo_count", 0, 10, &out);
+    bool ok = zones_config_json_parse_u8_field("thermo_count=3X", "thermo_count", 0, 10, &out);
     TEST_CHECK(!ok, "\"3X\" must be rejected outright, not silently accepted as 3");
     TEST_CHECK(out == 99, "out must be untouched on rejection");
 }
@@ -711,7 +711,7 @@ static void test_parse_u8_field_accepts_clean_value(void)
 {
     TEST_SECTION("parse_u8_field -- positive control: a clean in-range value is still accepted");
     uint8_t out = 0;
-    bool ok = parse_u8_field("thermo_count=3", "thermo_count", 0, 10, &out);
+    bool ok = zones_config_json_parse_u8_field("thermo_count=3", "thermo_count", 0, 10, &out);
     TEST_CHECK(ok, "a clean value must still parse");
     TEST_CHECK(out == 3, "parsed value must be correct");
 }
@@ -720,7 +720,7 @@ static void test_parse_float_field_rejects_trailing_garbage(void)
 {
     TEST_SECTION("parse_float_field -- trailing garbage after a valid numeric prefix is rejected (FIX 2)");
     float out = -1.0f;
-    bool ok = parse_float_field("z0_kp=1200X", "z0_kp", 0.0f, 5000.0f, &out);
+    bool ok = zones_config_json_parse_float_field("z0_kp=1200X", "z0_kp", 0.0f, 5000.0f, &out);
     TEST_CHECK(!ok, "\"1200X\" must be rejected outright, not silently accepted as 1200.0");
     TEST_CHECK(out == -1.0f, "out must be untouched on rejection");
 }
@@ -729,7 +729,7 @@ static void test_parse_float_field_rejects_unit_suffix(void)
 {
     TEST_SECTION("parse_float_field -- a value with a trailing unit suffix is rejected (FIX 2)");
     float out = -1.0f;
-    bool ok = parse_float_field("z0_maxtemp=1300C", "z0_maxtemp", 0.0f, 1400.0f, &out);
+    bool ok = zones_config_json_parse_float_field("z0_maxtemp=1300C", "z0_maxtemp", 0.0f, 1400.0f, &out);
     TEST_CHECK(!ok, "\"1300C\" must be rejected outright, not silently accepted as 1300.0");
 }
 
@@ -737,7 +737,7 @@ static void test_parse_float_field_accepts_clean_value(void)
 {
     TEST_SECTION("parse_float_field -- positive control: a clean in-range value is still accepted");
     float out = 0.0f;
-    bool ok = parse_float_field("z0_kp=2.5", "z0_kp", 0.0f, 5000.0f, &out);
+    bool ok = zones_config_json_parse_float_field("z0_kp=2.5", "z0_kp", 0.0f, 5000.0f, &out);
     TEST_CHECK(ok, "a clean value must still parse");
     TEST_CHECK_NEAR(out, 2.5, 1e-6, "parsed value must be correct");
 }
@@ -834,7 +834,7 @@ static void test_post_whole_page_cross_zone_cycle_refused(void)
      * parse_zone_fields(), for the single-zone case) also consults the live
      * config for every OTHER zone, so a leftover raw-zero from an earlier
      * test (or this file's own zero-initialized BSS default) must not leak
-     * in as an accidental link -- see settings_source_chain_has_cycle()'s
+     * in as an accidental link -- see zones_config_json_settings_source_chain_has_cycle()'s
      * own comment on why 0 is real data, not a "not set" sentinel. */
     memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
     s_zones.cfg.thermo_count = 2; /* the getters below refuse zone_index >= thermo_count */
@@ -948,8 +948,8 @@ static void test_nvs_load_from_current_version_happy_path(void)
     memset(&src, 0, sizeof(src));
     src.version = ZONES_CFG_VERSION;
     src.thermo_count = 2;
-    src.timing_profile_count = 1; // must never be 0 in a config validate_zones_cfg() accepts
-    src.crc32 = compute_zones_crc(&src); // CRC now checked on the current-version path (item 4)
+    src.timing_profile_count = 1; // must never be 0 in a config zones_config_json_validate() accepts
+    src.crc32 = zones_config_json_compute_crc(&src); // CRC now checked on the current-version path (item 4)
     stage_zones_blob(&src, sizeof(src));
 
     zones_cfg_t out_cfg;
@@ -967,12 +967,12 @@ static void test_nvs_load_from_current_version_happy_path(void)
 
 // A pre-existing stored settings_source cycle (however it got onto flash --
 // direct NVS tampering, or a blob written by firmware that predates the
-// chain-walk guard) must NOT brick the config on load. validate_zones_cfg()
-// rejecting it would drive decode_zones_blob() to the CORRUPT/wipe outcome
+// chain-walk guard) must NOT brick the config on load. zones_config_json_validate()
+// rejecting it would drive zones_config_json_decode_blob() to the CORRUPT/wipe outcome
 // and destroy an entire commissioned config over one stale UI-only
 // provenance link -- this repo has lost configs to exactly that shape of
 // overreaction before (raise_heater_timing_to_floors()'s neighboring
-// precedent, cited by normalize_settings_source_cycles()'s own comment). So
+// precedent, cited by zones_config_json_normalize_settings_source_cycles()'s own comment). So
 // nvs_load_from() must instead collapse the cyclic zone(s) to Custom and
 // keep booting with everything else intact, the same "collapse to Custom"
 // resolution zones_page.html's own client-side resolveTerminal() already
@@ -1005,7 +1005,7 @@ static void test_nvs_load_from_pre_existing_cycle_normalizes_not_wipes(void)
     // scoped to the zone(s) actually on a cycle, not a blanket "any zone
     // with a real link gets wiped" overreaction.
     src.zones[2].settings_source = 0; // "copies zone 0" -- legal once zone 0 is Custom below
-    src.crc32 = compute_zones_crc(&src);
+    src.crc32 = zones_config_json_compute_crc(&src);
     stage_zones_blob(&src, sizeof(src));
 
     zones_cfg_t out_cfg;
@@ -1015,8 +1015,8 @@ static void test_nvs_load_from_pre_existing_cycle_normalizes_not_wipes(void)
     TEST_CHECK(err == ESP_OK, "no NVS error");
     TEST_CHECK(found, "a stored cycle is still a REAL blob -- found=true");
     TEST_CHECK(valid, "and it is still VALID -- the cycle is normalized, not treated as corrupt "
-              "(this is the assertion that proves normalize-not-reject: a validate_zones_cfg() "
-              "rejection here would flip this to false and wipe out_cfg via decode_zones_blob()'s "
+              "(this is the assertion that proves normalize-not-reject: a zones_config_json_validate() "
+              "rejection here would flip this to false and wipe out_cfg via zones_config_json_decode_blob()'s "
               "CORRUPT path)");
     TEST_CHECK(out_cfg.thermo_count == 3, "the rest of the config survives the load untouched");
     uint8_t s0 = 0xAA, s1 = 0xAA;
@@ -1038,7 +1038,7 @@ static void test_nvs_load_from_pre_existing_cycle_normalizes_not_wipes(void)
     nvs_test_clear();
 }
 
-// normalize_settings_source_cycles() non-blocking finding (opus review of
+// zones_config_json_normalize_settings_source_cycles() non-blocking finding (opus review of
 // commit b69b74a): a zone that merely LEADS INTO a cycle (its own chain is
 // fine, it just happens to walk into one) must be left untouched -- only the
 // zone(s) actually ON the cycle may be collapsed to Custom. An earlier
@@ -1051,7 +1051,7 @@ static void test_nvs_load_from_pre_existing_cycle_normalizes_not_wipes(void)
 // zone 0's link survives.
 static void test_nvs_load_from_cycle_normalization_does_not_touch_lead_in_zone(void)
 {
-    TEST_SECTION("nvs_load_from -- normalize_settings_source_cycles() breaks ONLY the zone(s) actually "
+    TEST_SECTION("nvs_load_from -- zones_config_json_normalize_settings_source_cycles() breaks ONLY the zone(s) actually "
                  "ON a cycle, not a zone that merely leads into one (index-order independence)");
     nvs_test_enable(true);
     nvs_test_clear();
@@ -1068,7 +1068,7 @@ static void test_nvs_load_from_cycle_normalization_does_not_touch_lead_in_zone(v
     // The actual 1 <-> 2 cycle.
     src.zones[1].settings_source = 2;
     src.zones[2].settings_source = 1;
-    src.crc32 = compute_zones_crc(&src);
+    src.crc32 = zones_config_json_compute_crc(&src);
     stage_zones_blob(&src, sizeof(src));
 
     zones_cfg_t out_cfg;
@@ -1094,7 +1094,7 @@ static void test_nvs_load_from_cycle_normalization_does_not_touch_lead_in_zone(v
 // alongside the two-pass restore fix -- see backup_http.c's importer, which
 // calls THIS function to apply a decoded blob) had no test at all before
 // this pair, positive or negative: nvs_load_from()'s cycle tests above only
-// exercise normalize_settings_source_cycles() on the LOAD path, which
+// exercise zones_config_json_normalize_settings_source_cycles() on the LOAD path, which
 // deliberately COLLAPSES a cycle rather than rejecting it -- a completely
 // different code path from zones_config_import_blob()'s pass-1 walk, which
 // must REJECT instead (see that function's own comment: "there is a live
@@ -1126,7 +1126,7 @@ static void test_import_blob_pass1_rejects_cyclic_settings_source(void)
     }
     blob.zones[0].settings_source = 1; // the 2-cycle this pass-1 check must catch
     blob.zones[1].settings_source = 0;
-    blob.crc32 = compute_zones_crc(&blob);
+    blob.crc32 = zones_config_json_compute_crc(&blob);
 
     char reason[128];
     reason[0] = '\0';
@@ -1169,7 +1169,7 @@ static void test_import_blob_pass1_accepts_acyclic_settings_source(void)
         blob.zones[z].settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
     }
     blob.zones[0].settings_source = 1; // 0 -> 1 -> Custom: terminates cleanly, no cycle
-    blob.crc32 = compute_zones_crc(&blob);
+    blob.crc32 = zones_config_json_compute_crc(&blob);
 
     char reason[128];
     reason[0] = '\0';
@@ -1262,7 +1262,7 @@ static void test_zones_http_start_refused_newer_blob_not_overwritten(void)
 // ---------------------------------------------------------------------------
 // "Saved securely like the others" -- the real defect this pass fixes.
 // nvs_load_from()'s old load path (for a stored version OLDER than current)
-// did no length check, never ran validate_zones_cfg(), assumed zone_cfg_t
+// did no length check, never ran zones_config_json_validate(), assumed zone_cfg_t
 // only ever grew at the tail (false: three of the last four bumps before
 // this one grew it mid-struct, an ARRAY ELEMENT, which displaces every zone
 // after the first), and had no CRC at all. Each check below is proven to be
@@ -1314,7 +1314,7 @@ static void test_nvs_load_from_bad_crc_is_rejected(void)
     src.version = ZONES_CFG_VERSION;
     src.thermo_count = 1;
     src.zones[0].max_temp_c = 1300.0f;
-    src.crc32 = compute_zones_crc(&src) ^ 0x1u; // one bit off from the real CRC
+    src.crc32 = zones_config_json_compute_crc(&src) ^ 0x1u; // one bit off from the real CRC
     stage_zones_blob(&src, sizeof(src));
 
     zones_cfg_t out_cfg;
@@ -1330,7 +1330,7 @@ static void test_nvs_load_from_bad_crc_is_rejected(void)
     nvs_test_clear();
 }
 
-// Item 3 -- validate_zones_cfg() now runs on the NVS load path too, not just
+// Item 3 -- zones_config_json_validate() now runs on the NVS load path too, not just
 // zones_config_import_blob(). A current-version blob with the right length
 // AND a correct CRC (proving the bytes are exactly what was written) but an
 // out-of-range field must still be rejected, not adopted with the valid flag
@@ -1338,7 +1338,7 @@ static void test_nvs_load_from_bad_crc_is_rejected(void)
 // over wrong data is not a reason to trust it.
 static void test_nvs_load_from_failed_validation_is_rejected(void)
 {
-    TEST_SECTION("nvs_load_from -- item 3: length+CRC correct but validate_zones_cfg() fails "
+    TEST_SECTION("nvs_load_from -- item 3: length+CRC correct but zones_config_json_validate() fails "
                  "-> rejected, not partially adopted");
     nvs_test_enable(true);
     nvs_test_clear();
@@ -1347,8 +1347,8 @@ static void test_nvs_load_from_failed_validation_is_rejected(void)
     memset(&src, 0, sizeof(src));
     src.version = ZONES_CFG_VERSION;
     src.thermo_count = 1;
-    src.zones[0].max_temp_c = 999999.0f; // past ZONE_MAX_TEMP_C_MAX -- validate_zones_cfg() must reject
-    src.crc32 = compute_zones_crc(&src); // CRC is genuinely correct for these (bad) bytes
+    src.zones[0].max_temp_c = 999999.0f; // past ZONE_MAX_TEMP_C_MAX -- zones_config_json_validate() must reject
+    src.crc32 = zones_config_json_compute_crc(&src); // CRC is genuinely correct for these (bad) bytes
     stage_zones_blob(&src, sizeof(src));
 
     zones_cfg_t out_cfg;
@@ -1356,7 +1356,7 @@ static void test_nvs_load_from_failed_validation_is_rejected(void)
     esp_err_t err = nvs_load_from("kiln_nvs", &out_cfg, &found, &valid);
 
     TEST_CHECK(err == ESP_OK, "a validation failure is a handled outcome, not an NVS error");
-    TEST_CHECK(!found, "a validate_zones_cfg() failure must be rejected (found=false), matching "
+    TEST_CHECK(!found, "a zones_config_json_validate() failure must be rejected (found=false), matching "
                        "every other corruption case, not partially defaulted");
     TEST_CHECK(!valid, "must not be trustworthy");
     TEST_CHECK(out_cfg.thermo_count == 0, "nothing from a validation-rejected blob may leak through");
@@ -1523,7 +1523,7 @@ static void test_nvs_load_from_v5_blob_upconverts_zones_1_and_2_correctly(void)
     nvs_test_clear();
 }
 
-/* A config that validate_zones_cfg() accepts, so a test can change exactly
+/* A config that zones_config_json_validate() accepts, so a test can change exactly
  * one field and attribute the rejection to it. */
 static void make_minimal_valid_cfg(zones_cfg_t *cfg)
 {
@@ -1535,7 +1535,7 @@ static void make_minimal_valid_cfg(zones_cfg_t *cfg)
     cfg->zones[0].thermo_mask = 0x01;
     cfg->zones[0].max_temp_c = 1300.0f;
     /* zone[0].timing_profile stays 0 from the memset above, and that must
-     * resolve to a REAL profile for validate_zones_cfg() to accept this --
+     * resolve to a REAL profile for zones_config_json_validate() to accept this --
      * see zones_cfg_t::timing_profile_count's own comment. */
     cfg->timing_profile_count = 1;
     strncpy(cfg->timing_profiles[0].name, "Default", TIMING_PROFILE_NAME_MAX_LEN);
@@ -1823,28 +1823,28 @@ static void test_validate_rejects_out_of_range_v8_fields(void)
         make_minimal_valid_cfg(&cfg);
         cfg.timing_profiles[0].guard_progress_duty_min = 1.5f;
         const char *reason = NULL;
-        TEST_CHECK(!validate_zones_cfg(&cfg, &reason), "guard_progress_duty_min > 1.0 is rejected");
+        TEST_CHECK(!zones_config_json_validate(&cfg, &reason), "guard_progress_duty_min > 1.0 is rejected");
     }
     {
         zones_cfg_t cfg;
         make_minimal_valid_cfg(&cfg);
         cfg.timing_profiles[0].guard_progress_window_s = -1.0f;
         const char *reason = NULL;
-        TEST_CHECK(!validate_zones_cfg(&cfg, &reason), "a negative guard_progress_window_s is rejected");
+        TEST_CHECK(!zones_config_json_validate(&cfg, &reason), "a negative guard_progress_window_s is rejected");
     }
     {
         zones_cfg_t cfg;
         make_minimal_valid_cfg(&cfg);
         cfg.timing_profiles[0].ramp_lock_band_c = ZONE_GUARD_MARGIN_C_MAX + 1.0f;
         const char *reason = NULL;
-        TEST_CHECK(!validate_zones_cfg(&cfg, &reason), "ramp_lock_band_c past its ceiling is rejected");
+        TEST_CHECK(!zones_config_json_validate(&cfg, &reason), "ramp_lock_band_c past its ceiling is rejected");
     }
     {
         zones_cfg_t cfg;
         make_minimal_valid_cfg(&cfg);
         cfg.pc_link_abort_silence_ms = ZONE_PC_LINK_SILENCE_MS_MAX + 1.0f;
         const char *reason = NULL;
-        TEST_CHECK(!validate_zones_cfg(&cfg, &reason), "pc_link_abort_silence_ms past its ceiling is rejected");
+        TEST_CHECK(!zones_config_json_validate(&cfg, &reason), "pc_link_abort_silence_ms past its ceiling is rejected");
     }
     /* 0 must stay legal on every one of them -- it is the "use the firmware
      * default" value, not a missing setting. */
@@ -1852,7 +1852,7 @@ static void test_validate_rejects_out_of_range_v8_fields(void)
         zones_cfg_t cfg;
         make_minimal_valid_cfg(&cfg);
         const char *reason = NULL;
-        TEST_CHECK(validate_zones_cfg(&cfg, &reason), "all-zero timing profile fields stay valid (0 = firmware default)");
+        TEST_CHECK(zones_config_json_validate(&cfg, &reason), "all-zero timing profile fields stay valid (0 = firmware default)");
     }
     /* timing_profile_count itself: 0 is illegal (zone[0].timing_profile == 0
      * from a fresh config must always resolve to something real), and a
@@ -1863,14 +1863,14 @@ static void test_validate_rejects_out_of_range_v8_fields(void)
         make_minimal_valid_cfg(&cfg);
         cfg.timing_profile_count = 0;
         const char *reason = NULL;
-        TEST_CHECK(!validate_zones_cfg(&cfg, &reason), "timing_profile_count == 0 is rejected");
+        TEST_CHECK(!zones_config_json_validate(&cfg, &reason), "timing_profile_count == 0 is rejected");
     }
     {
         zones_cfg_t cfg;
         make_minimal_valid_cfg(&cfg);
         cfg.timing_profile_count = MAX31856_CHANNEL_COUNT + 1;
         const char *reason = NULL;
-        TEST_CHECK(!validate_zones_cfg(&cfg, &reason), "timing_profile_count past MAX31856_CHANNEL_COUNT is rejected");
+        TEST_CHECK(!zones_config_json_validate(&cfg, &reason), "timing_profile_count past MAX31856_CHANNEL_COUNT is rejected");
     }
     /* zone_cfg_t::timing_profile: must reference a profile that actually
      * exists in THIS candidate -- the owner's whole feature ("assign the
@@ -1881,7 +1881,7 @@ static void test_validate_rejects_out_of_range_v8_fields(void)
         make_minimal_valid_cfg(&cfg);
         cfg.zones[0].timing_profile = 1; /* timing_profile_count is 1 -- only index 0 exists */
         const char *reason = NULL;
-        TEST_CHECK(!validate_zones_cfg(&cfg, &reason),
+        TEST_CHECK(!zones_config_json_validate(&cfg, &reason),
                   "a zone's timing_profile referencing a profile past timing_profile_count is rejected");
     }
 }
@@ -2100,7 +2100,7 @@ static void test_nvs_load_from_v10_blob_folds_single_pair_into_row_cell(void)
 // fix convert_zone_v10() had no chan_idx parameter to compare against (unlike
 // convert_zone_v1(), which has always taken one and skipped exactly this
 // case), so a self-referencing pair wrote a nonzero diagonal cell;
-// validate_zones_cfg() rejects any nonzero diagonal, and decode_zones_blob()
+// zones_config_json_validate() rejects any nonzero diagonal, and zones_config_json_decode_blob()
 // then returns CORRUPT for the WHOLE migrated struct -- discarding the
 // entire commissioned config over one stray self-reference. Unreachable
 // today (no board has ever held a v10 blob with a self-referencing pair),
@@ -2224,14 +2224,14 @@ static void test_validate_accepts_control_mode_pid_fuzzy_rejects_past_it(void)
         make_minimal_valid_cfg(&cfg);
         cfg.zones[0].control_mode = (uint8_t)ZONE_CONTROL_MODE_PID_FUZZY;
         const char *reason = NULL;
-        TEST_CHECK(validate_zones_cfg(&cfg, &reason), "control_mode 3 (PID_FUZZY) validates");
+        TEST_CHECK(zones_config_json_validate(&cfg, &reason), "control_mode 3 (PID_FUZZY) validates");
     }
     {
         zones_cfg_t cfg;
         make_minimal_valid_cfg(&cfg);
         cfg.zones[0].control_mode = 4;
         const char *reason = NULL;
-        TEST_CHECK(!validate_zones_cfg(&cfg, &reason), "control_mode 4 is still out of range and rejected");
+        TEST_CHECK(!zones_config_json_validate(&cfg, &reason), "control_mode 4 is still out of range and rejected");
     }
 
     // zones_config_set_control_mode() enforces the identical bound. Its
@@ -2833,7 +2833,7 @@ static void test_settings_source_save_reload_inheritance_round_trip(void)
 // opus reviewer flagged: backup_http.c's importer commits settings_source
 // through this same setter, one zone entry at a time.
 //
-// Both doors now run settings_source_chain_has_cycle() (a bounded
+// Both doors now run zones_config_json_settings_source_chain_has_cycle() (a bounded
 // visited-set walk, capped at MAX31856_CHANNEL_COUNT hops so it terminates
 // even against an already-corrupt stored chain) before committing a new
 // link, so the second call of any cycle-closing pair is refused and the
@@ -3194,7 +3194,7 @@ static void test_relay_names_load_wrong_length_blob_is_rejected(void)
 static void test_relay_names_load_wrong_version_is_rejected(void)
 {
     TEST_SECTION("relay_names_load -- an unrecognized version is discarded, never guessed at "
-                 "(same NEWER-refuses-to-load discipline as decode_zones_blob())");
+                 "(same NEWER-refuses-to-load discipline as zones_config_json_decode_blob())");
     nvs_test_enable(true);
     nvs_test_clear();
     relay_names_cfg_t src;
@@ -4977,8 +4977,8 @@ static void test_zone_sweep_push_k_ct_backout_restores_the_uncommissioned_zero(v
 // fourth, heater_output_duty()'s own quantization + running hold, is
 // test_heater_output.c's and stays there as defense in depth):
 //   1. parse_zone_fields()  -- the POST /api/zones door an operator types at;
-//   2. validate_zones_cfg() -- every stored or imported blob;
-//   3. raise_heater_timing_to_floors(), via decode_zones_blob() -- a pre-floor stored
+//   2. zones_config_json_validate() -- every stored or imported blob;
+//   3. raise_heater_timing_to_floors(), via zones_config_json_decode_blob() -- a pre-floor stored
 //      value is raised on load, so a GET can never report a number the very
 //      next POST would bounce.
 //
@@ -5070,7 +5070,7 @@ static void test_validate_rejects_sub_floor_min_on(void)
         make_minimal_valid_cfg(&cfg);
         cfg.zones[0].heater_min_on_ms = 3000.0f;
         const char *reason = NULL;
-        TEST_CHECK(!validate_zones_cfg(&cfg, &reason),
+        TEST_CHECK(!zones_config_json_validate(&cfg, &reason),
                    "a config carrying 3000 ms does not validate, whichever door it came through");
         TEST_CHECK(reason && strstr(reason, "heater_min_on_ms") != NULL, "the reason names the field");
     }
@@ -5079,7 +5079,7 @@ static void test_validate_rejects_sub_floor_min_on(void)
         make_minimal_valid_cfg(&cfg);
         cfg.zones[0].heater_min_on_ms = 15000.0f;
         const char *reason = NULL;
-        TEST_CHECK(validate_zones_cfg(&cfg, &reason),
+        TEST_CHECK(zones_config_json_validate(&cfg, &reason),
                    "15000 ms still validates -- the check must not have become 'must equal 10000'");
     }
 }
@@ -5101,11 +5101,11 @@ static void test_stored_pre_floor_blob_is_raised_on_load_not_rejected(void)
     stored.zones[1].heater_min_on_ms = 0.0f;
     stored.zones[2].heater_min_on_ms = 15000.0f;
     stored.crc32 = 0;
-    stored.crc32 = compute_zones_crc(&stored);
+    stored.crc32 = zones_config_json_compute_crc(&stored);
 
     zones_cfg_t out;
     const char *reason = "unset";
-    zones_decode_result_t r = decode_zones_blob(&stored, sizeof(stored), &out, &reason);
+    zones_decode_result_t r = zones_config_json_decode_blob(&stored, sizeof(stored), &out, &reason);
 
     TEST_CHECK(r == ZONES_DECODE_OK,
                "a pre-floor blob still decodes -- it must not be called corrupt");
@@ -5128,7 +5128,7 @@ static void test_stored_pre_floor_blob_is_raised_on_load_not_rejected(void)
 // duty 0.4 commanded heat for 40 minutes and never closed the relay once.
 //
 // Enforced the same four places the min-on floor is (refuse at the POST door,
-// refuse in the setter backup import uses, refuse in validate_zones_cfg(),
+// refuse in the setter backup import uses, refuse in zones_config_json_validate(),
 // raise on load), with heater_output_cfg_expressible() as the point-of-use
 // check. These tests negative-test the rule at each door -- a check nothing
 // can fail is not a check.
@@ -5218,7 +5218,7 @@ static void test_setter_and_validate_reject_short_window(void)
         cfg.zones[0].heater_window_ms = 2000.0f;
         cfg.zones[0].heater_min_on_ms = 0.0f;
         const char *reason = NULL;
-        TEST_CHECK(!validate_zones_cfg(&cfg, &reason),
+        TEST_CHECK(!zones_config_json_validate(&cfg, &reason),
                    "a stored/imported config with a 2000 ms window does not validate");
         TEST_CHECK(reason && strstr(reason, "heater_window_ms") != NULL, "the reason names the field");
     }
@@ -5228,7 +5228,7 @@ static void test_setter_and_validate_reject_short_window(void)
         cfg.zones[0].heater_window_ms = 30000.0f;
         cfg.zones[0].heater_min_on_ms = 0.0f;
         const char *reason = NULL;
-        TEST_CHECK(validate_zones_cfg(&cfg, &reason),
+        TEST_CHECK(zones_config_json_validate(&cfg, &reason),
                    "30000 still validates -- the check must not reject everything");
     }
     /* The setter backup import comes through. Its refusal is the reason a
@@ -5257,11 +5257,11 @@ static void test_stored_short_window_is_raised_on_load(void)
     stored.zones[2].heater_window_ms = 20000.0f;
     stored.zones[2].heater_min_on_ms = 2000.0f;
     stored.crc32 = 0;
-    stored.crc32 = compute_zones_crc(&stored);
+    stored.crc32 = zones_config_json_compute_crc(&stored);
 
     zones_cfg_t out;
     const char *reason = "unset";
-    zones_decode_result_t r = decode_zones_blob(&stored, sizeof(stored), &out, &reason);
+    zones_decode_result_t r = zones_config_json_decode_blob(&stored, sizeof(stored), &out, &reason);
 
     TEST_CHECK(r == ZONES_DECODE_OK, "the blob still decodes -- it must not be called corrupt");
     TEST_CHECK_NEAR(out.zones[0].heater_window_ms, 30000.0f, 1e-6,
@@ -5274,7 +5274,7 @@ static void test_stored_short_window_is_raised_on_load(void)
 
     /* And what came out must now pass the very validation that rejects the
      * input -- the whole point of raising rather than refusing at load. */
-    TEST_CHECK(validate_zones_cfg(&out, &reason), "the raised config validates");
+    TEST_CHECK(zones_config_json_validate(&out, &reason), "the raised config validates");
 }
 
 /* ------------------------------------------------------------------------
@@ -5356,7 +5356,7 @@ static void test_validate_rejects_out_of_range_sanity_rate(void)
         make_minimal_valid_cfg(&cfg);
         cfg.zones[0].sanity_rate_c_per_min = 500.0f;
         const char *reason = NULL;
-        TEST_CHECK(!validate_zones_cfg(&cfg, &reason),
+        TEST_CHECK(!zones_config_json_validate(&cfg, &reason),
                    "500 C/min does not validate, whichever door it came through");
         TEST_CHECK(reason && strstr(reason, "sanity_rate_c_per_min") != NULL,
                    "the reason names the field");
@@ -5366,7 +5366,7 @@ static void test_validate_rejects_out_of_range_sanity_rate(void)
         make_minimal_valid_cfg(&cfg);
         cfg.zones[0].sanity_rate_c_per_min = 0.2f;
         const char *reason = NULL;
-        TEST_CHECK(validate_zones_cfg(&cfg, &reason),
+        TEST_CHECK(zones_config_json_validate(&cfg, &reason),
                    "0.2 C/min validates -- the slow-jig value must not be collateral damage");
     }
 }
