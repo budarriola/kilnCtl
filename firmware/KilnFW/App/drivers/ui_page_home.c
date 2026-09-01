@@ -340,6 +340,15 @@ static bool s_chart_y_ticks_visible; /* false hides labels AND tick marks */
 static bool s_axis_hold_have;
 static int32_t s_axis_hold_lo, s_axis_hold_hi;
 static bool s_axis_hold_prev_active;
+/* total_elapsed_s observed on the previous "active" refresh tick -- fed to
+ * ui_page_home_axis_ratchet_should_reset() alongside s_axis_hold_prev_active
+ * so the ratchet reset is keyed to RUN IDENTITY (a total_elapsed_s decrease)
+ * rather than just the IDLE->active state edge, which misses a new run
+ * started from DONE/FAULTED (no IDLE tick in between) and a stop/restart
+ * that happens between two refreshes. See that function's header comment in
+ * ui_page_home_graph.h for the full reasoning. Only meaningful/updated while
+ * state_active; stale while idle, but never read in that state. */
+static uint32_t s_axis_hold_prev_elapsed_s;
 /* 2026-08-31 owner request ("the times for the lcd graph should be at the
  * bottom of the graph"): replaces the old single top-right "0:00-MM:SS" chip
  * with four individually positioned tick labels along the BOTTOM edge of the
@@ -365,10 +374,10 @@ static lv_obj_t *s_chart_x_tick_labels[UI_PAGE_HOME_X_TICK_COUNT];
  * (a colour swatch + a label) so its on-screen width is LV_SIZE_CONTENT and
  * chart_set_legend() never has to add up swatch+label widths by hand, the
  * same "let LVGL measure it" approach chart_set_x_ticks() already uses for
- * its own label widths. ui_page_home_legend_row_count() (ui_page_home_graph.c)
- * is the host-tested pure logic for HOW MANY of these two rows should be
- * visible on a given tick; this file only ever shows/hides and repositions
- * the two already-built rows, never creates or destroys one. */
+ * its own label widths. ui_page_home_legend_visibility() (ui_page_home_graph.c)
+ * is the host-tested pure logic for WHICH of these two rows should be visible
+ * on a given tick; this file only ever shows/hides and repositions the two
+ * already-built rows, never creates or destroys one. */
 #define UI_PAGE_HOME_LEGEND_ROWS 2
 static lv_obj_t *s_chart_legend_row[UI_PAGE_HOME_LEGEND_ROWS];
 static lv_obj_t *s_chart_legend_swatch[UI_PAGE_HOME_LEGEND_ROWS];
@@ -1263,16 +1272,39 @@ static void refresh_cb(lv_timer_t *timer)
          * scale must say the truth in both idle and running states -- idle
          * has no planned horizon, it's showing recent history"). */
         bool state_active = (st.state != PROFILE_EXEC_IDLE);
-        /* Reset the active-axis hold exactly once, on the IDLE->active
-         * transition -- a brand new run must not inherit the previous run's
-         * widened range. Updated unconditionally (not just inside the
-         * state_active branch below) so a run that ends and a new one that
-         * starts are never mistaken for the same run just because this
-         * refresh happened to run between them. */
-        if (state_active && !s_axis_hold_prev_active) {
+        /* Reset the active-axis hold exactly once per RUN -- a brand new
+         * firing must not inherit the previous firing's widened range.
+         * 2026-09-01 defect fix (review of commit 98c3278, reset-one-side
+         * class): this used to reset only on the IDLE->active state edge,
+         * which is NOT the same as "a new run started". state_active also
+         * covers DONE and FAULTED (it's just `state != IDLE`), and
+         * profile_executor_start() only refuses RUNNING/PAUSED -- so a new
+         * firing started from DONE or FAULTED goes straight to RUNNING with
+         * no IDLE tick in between, and the old edge check never fired. A
+         * stop/restart that both happen inside this ~1 Hz refresh interval
+         * has the same symptom (both the tick before and the tick after see
+         * state_active == true, no edge to observe). Both are exactly the
+         * "mistaken for the same run just because this refresh happened to
+         * run between them" case the old comment here claimed could not
+         * happen -- it can, and did.
+         *
+         * ui_page_home_axis_ratchet_should_reset() (ui_page_home_graph.c) is
+         * keyed to run IDENTITY instead: st.total_elapsed_s is documented
+         * (profile_executor.h) to be set to 0 exactly once, at
+         * profile_executor_run(), and to never decrease again until the next
+         * run. A decrease observed between two active ticks -- regardless of
+         * whether an IDLE tick was ever sampled in between -- is therefore
+         * proof a new run began. See that function's header comment for the
+         * full reasoning on why this is the best signal available without
+         * modifying profile_executor.c (owned by another task). */
+        if (ui_page_home_axis_ratchet_should_reset(state_active, s_axis_hold_prev_active,
+                                                    st.total_elapsed_s, s_axis_hold_prev_elapsed_s)) {
             s_axis_hold_have = false;
         }
         s_axis_hold_prev_active = state_active;
+        if (state_active) {
+            s_axis_hold_prev_elapsed_s = st.total_elapsed_s;
+        }
         size_t count = profile_executor_get_history_count();
         float horizon_s;
         if (state_active) {

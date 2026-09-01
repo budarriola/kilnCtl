@@ -111,6 +111,23 @@ void ui_page_home_legend_visibility(bool has_span, bool has_actual_multi, bool h
     *out_show_plan = has_span && has_planned;
 }
 
+bool ui_page_home_axis_ratchet_should_reset(bool active, bool prev_active, uint32_t elapsed_s,
+                                             uint32_t prev_elapsed_s)
+{
+    if (!active) {
+        return false;
+    }
+    if (!prev_active) {
+        return true; /* ordinary IDLE -> active start */
+    }
+    /* Both ticks active: total_elapsed_s is set to 0 exactly once, at
+     * profile_executor_run(), and never decreases again until the next run
+     * -- see this function's header comment in ui_page_home_graph.h. A drop
+     * between two active ticks means a new run started in between, whether
+     * or not an IDLE tick was ever observed. */
+    return elapsed_s < prev_elapsed_s;
+}
+
 static int32_t quantize_floor_i32(int32_t v, int32_t step)
 {
     int32_t r = v % step;
@@ -142,11 +159,20 @@ void ui_page_home_active_y_axis_range(float lo, float hi, float floor_disp, bool
      * bound (never the reverse -- that would shrink the visible span below
      * the real data) means a tick that does not cross a step boundary always
      * quantizes to the exact same pair of integers as the tick before it. */
+    /* No `q_hi <= q_lo` guard here (a prior version of this function had
+     * one): ui_page_home_y_axis_range() above already guarantees raw_hi >
+     * raw_lo (its own callers-facing contract, enforced by its own
+     * axis_hi<=axis_lo bump). floor_i32(raw_lo) <= raw_lo < raw_hi <=
+     * ceil_i32(raw_hi) therefore holds transitively with the middle
+     * inequality strict, so floor_i32(raw_lo) < ceil_i32(raw_hi) always --
+     * q_hi > q_lo is unreachable to violate and a defensive bump here would
+     * be untested, unreachable dead code (this repo's negative-test rule:
+     * every guard must be provable to fire, or it does not belong). See
+     * test_ui_page_home_graph.c's "quantize never collapses" case, which
+     * sweeps lo/hi pairs spanning every possible quantize-boundary alignment
+     * and asserts q_hi > q_lo holds without this guard's help. */
     int32_t q_lo = quantize_floor_i32(raw_lo, UI_PAGE_HOME_AXIS_QUANT_STEP_DISP);
     int32_t q_hi = quantize_ceil_i32(raw_hi, UI_PAGE_HOME_AXIS_QUANT_STEP_DISP);
-    if (q_hi <= q_lo) {
-        q_hi = q_lo + UI_PAGE_HOME_AXIS_QUANT_STEP_DISP;
-    }
 
     /* Only-widen ratchet: once a bound has been shown this run, it never
      * moves back inward. Combined with quantization above this is what keeps

@@ -215,6 +215,40 @@ void ui_page_home_active_y_axis_range(float lo, float hi, float floor_disp, bool
 void ui_page_home_legend_visibility(bool has_span, bool has_actual_multi, bool has_planned,
                                      bool *out_show_actual, bool *out_show_plan);
 
+/* 2026-09-01 defect fix (review of commit 98c3278, reset-one-side class):
+ * ui_page_home_active_y_axis_range()'s only-widen ratchet must be reset
+ * exactly once per RUN, not once per IDLE->active state edge. Those are not
+ * the same thing: profile_executor_start() only refuses RUNNING/PAUSED, so a
+ * new firing started from DONE or FAULTED goes straight DONE->RUNNING or
+ * FAULTED->RUNNING with no IDLE tick in between (`state_active` is `state !=
+ * PROFILE_EXEC_IDLE`, so DONE and FAULTED both already count as "active") --
+ * the edge never fires and the new run inherits the previous run's widened
+ * axis. A stop/restart that both happen inside one ~1 Hz refresh interval has
+ * the identical symptom: the sampled state is "active" on both the tick
+ * before and the tick after, so there is no edge to see there either.
+ *
+ * profile_executor.h (owned by another task, not touched here) exposes no
+ * run-id or run-start tick a caller can key off directly. What it does
+ * document as a hard per-run invariant is `total_elapsed_s`: "real seconds
+ * since this run started (profile_executor_run())... only freezes across a
+ * PAUSE... otherwise keeps counting" -- i.e. it is set to 0 exactly once, at
+ * profile_executor_run(), and is monotonically non-decreasing for the rest of
+ * that run's life (flat during a pause, never lower than a prior tick's
+ * value). That makes a DECREASE in total_elapsed_s, observed between two
+ * ticks that are both "active", an unambiguous witness that a new run began
+ * in between -- true whether the previous run ended in DONE, FAULTED, or was
+ * still RUNNING/PAUSED when the operator stopped and immediately restarted
+ * it. This is the best signal available from the UI layer alone; it needs no
+ * change to profile_executor.c.
+ *
+ * active/prev_active still cover the ordinary IDLE->active start (prev_active
+ * false means there is nothing to compare elapsed_s against, so that case
+ * alone is sufficient and elapsed_s is not consulted). Returns false whenever
+ * active is false -- there is no ratchet decision to make while idle; the
+ * caller only calls this on ticks where state_active is true. */
+bool ui_page_home_axis_ratchet_should_reset(bool active, bool prev_active, uint32_t elapsed_s,
+                                             uint32_t prev_elapsed_s);
+
 #ifdef __cplusplus
 }
 #endif

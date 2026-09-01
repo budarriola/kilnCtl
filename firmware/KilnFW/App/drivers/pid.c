@@ -47,10 +47,14 @@ void pid_seed_bumpless(pid_state_t *state, const pid_cfg_t *cfg, float setpoint,
     }
     /* ki-blowup guard (separate from the hold/climb change above) -- see
      * PID_INTEGRAL_RAW_ABS_BOUND's doc comment at the top of this file: a
-     * small positive ki makes -ff_hold/ki a huge RAW integral even for a
-     * modest ff_hold. Bound the raw magnitude directly. */
+     * small (positive or negative-approaching) ki makes integral_needed a
+     * huge RAW integral even for a modest u_desired/ff_hold. Bound the raw
+     * magnitude directly, both directions -- the hazard (compounding via
+     * pid_rescale_integral_for_new_ki()) is symmetric. */
     if (integral_needed < -PID_INTEGRAL_RAW_ABS_BOUND) {
         integral_needed = -PID_INTEGRAL_RAW_ABS_BOUND;
+    } else if (integral_needed > PID_INTEGRAL_RAW_ABS_BOUND) {
+        integral_needed = PID_INTEGRAL_RAW_ABS_BOUND;
     }
     state->integral = integral_needed;
     state->initialized = true;
@@ -61,7 +65,18 @@ void pid_rescale_integral_for_new_ki(pid_state_t *state, float old_ki, float new
     if (!(old_ki > 0.0f) || !(new_ki > 0.0f) || old_ki == new_ki) {
         return; /* nothing sensible to rescale against/onto, or nothing changed */
     }
-    state->integral *= (double)old_ki / (double)new_ki;
+    double rescaled = state->integral * (double)old_ki / (double)new_ki;
+    /* ki-blowup guard -- see PID_INTEGRAL_RAW_ABS_BOUND's doc comment at the
+     * top of this file. This function is the compounding path the guard's
+     * doc comment names explicitly: a ki drop rescales an already-large raw
+     * integral even larger, and a further ki drop compounds it again. Bound
+     * the result the same way the other two call sites do. */
+    if (rescaled > (double)PID_INTEGRAL_RAW_ABS_BOUND) {
+        rescaled = (double)PID_INTEGRAL_RAW_ABS_BOUND;
+    } else if (rescaled < -(double)PID_INTEGRAL_RAW_ABS_BOUND) {
+        rescaled = -(double)PID_INTEGRAL_RAW_ABS_BOUND;
+    }
+    state->integral = (float)rescaled;
 }
 
 float pid_update(pid_state_t *state, const pid_cfg_t *cfg, float setpoint, float measurement,
@@ -172,6 +187,16 @@ float pid_update_terms(pid_state_t *state, const pid_cfg_t *cfg, float setpoint,
     } else if (i_term > 1.0f) {
         i_term = 1.0f;
         state->integral = (cfg->ki > 0.0f) ? 1.0f / cfg->ki : 0.0f;
+        /* ki-blowup guard, positive side -- see PID_INTEGRAL_RAW_ABS_BOUND's
+         * doc comment at the top of this file. The macro name claims a
+         * two-sided absolute bound; a tiny positive ki makes 1.0f/ki just as
+         * enormous on this branch as -ff_hold/ki is on the negative one, so
+         * this side needs the same clamp for the guard to actually be what
+         * it says it is. */
+        if (state->integral > PID_INTEGRAL_RAW_ABS_BOUND) {
+            state->integral = PID_INTEGRAL_RAW_ABS_BOUND;
+            i_term = cfg->ki * state->integral;
+        }
     }
 
     float u = p_term + i_term + d_term + ff_u;

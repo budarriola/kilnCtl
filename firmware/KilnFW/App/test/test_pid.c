@@ -514,16 +514,23 @@ void run_test_pid(void)
                    "ki-blowup guard: a tiny ki with a moderate ff_hold must not push raw state->integral past the guard's bound");
     }
     {
-        /* Test 5's mutation (documented here rather than by editing pid.c):
-         * WITHOUT the guard, -ff_hold/ki for this scenario is exactly
-         * -500000.0, comfortably past any sane bound -- this is the raw
-         * unguarded value the guard exists to prevent, captured so a future
-         * regression that silently removes the guard has a concrete number
-         * to compare against (the guard clamps to -100000, this shows what
-         * an unguarded run would have reached). */
-        float unguarded = -0.5f / 1e-6f;
-        TEST_CHECK(unguarded < -100000.0f,
-                   "sanity: the unguarded floor value for this scenario really is past the guard's bound -- proves test 5 above is not vacuous");
+        /* Test 5's positive-side twin: the i_term > 1.0f branch of
+         * pid_update_terms() (pid.c, "ki-blowup guard, positive side") is
+         * the mirror of the negative floor-clamp branch tested above -- a
+         * tiny ki makes 1.0f/ki just as enormous. Drive it via the real
+         * production function (not a compile-time computation): force the
+         * raw integral deeply positive, then run one tick with a mildly
+         * positive error so i_term saturates above 1.0f and the clamp path
+         * engages. */
+        pid_cfg_t cfg = {.kp = 0.0f, .ki = 1e-6f, .kd = 0.0f, .d_filter_tau_s = 1.0f, .b = 1.0f, .pid_range_c = 1000.0f};
+        const float setpoint = 60.0f;
+        pid_state_t s;
+        pid_reset(&s);
+        pid_update_terms(&s, &cfg, setpoint, setpoint, 1.0f, 0.0f, 0.0f, NULL);
+        s.integral = 2000000.0f;
+        pid_update_terms(&s, &cfg, setpoint, setpoint - 1.0f, 1.0f, 0.0f, 0.0f, NULL);
+        TEST_CHECK(fabsf(s.integral) < 100000.0f + 1.0f,
+                   "ki-blowup guard (positive side): a tiny ki must not push raw state->integral past the guard's bound on the i_term>1.0f branch either");
     }
 
     /* Test 6 (hold_only_floor_analysis.md section 4's "genuinely new
@@ -655,5 +662,62 @@ void run_test_pid(void)
         }
         TEST_CHECK(bound_ticks_mutant == 0,
                    "sanity: the -ff_u-floor mutant on this exact scenario binds for 0 ticks (headroom from the deeper floor), a different outcome than the real new-floor run above -- proves test 6 can distinguish the two floors");
+    }
+
+    /* Test 7: ki-blowup guard on the seed path, pid_seed_bumpless()
+     * (pid.c:29-57). Reviewer found this path was completely untested --
+     * deleting the guard's clamp there (pid.c:52-54 in the pre-fix code)
+     * left the whole suite green. Drive the real production function with a
+     * tiny ki and a moderate u_desired/ff_hold so integral_needed's
+     * unguarded value would be enormous, and check the seeded raw integral
+     * stays bounded. */
+    {
+        pid_cfg_t cfg = {.kp = 0.0f, .ki = 1e-6f, .kd = 0.0f, .d_filter_tau_s = 1.0f, .b = 1.0f, .pid_range_c = 1000.0f};
+        const float setpoint = 60.0f;
+        const float measurement = 60.0f; /* p_term == 0 so integral_needed is driven purely by u_desired/ff_u/ki */
+        const float ff_hold = 0.5f;
+        const float ff_u = ff_hold; /* no climb component -- isolates the floor/guard interaction */
+
+        pid_state_t s;
+        pid_reset(&s);
+        pid_seed_bumpless(&s, &cfg, setpoint, measurement, /*u_desired=*/0.0f, ff_u, ff_hold);
+        TEST_CHECK(fabsf(s.integral) < 100000.0f + 1.0f,
+                   "ki-blowup guard (seed path, negative side): pid_seed_bumpless() must not seed a raw integral past the guard's bound");
+    }
+    {
+        /* Seed path, positive side: a large positive u_desired with the same
+         * tiny ki drives integral_needed positive and enormous before any
+         * floor applies. */
+        pid_cfg_t cfg = {.kp = 0.0f, .ki = 1e-6f, .kd = 0.0f, .d_filter_tau_s = 1.0f, .b = 1.0f, .pid_range_c = 1000.0f};
+        const float setpoint = 60.0f;
+        const float measurement = 60.0f;
+
+        pid_state_t s;
+        pid_reset(&s);
+        pid_seed_bumpless(&s, &cfg, setpoint, measurement, /*u_desired=*/2.0f, /*ff_u=*/0.0f, /*ff_hold=*/0.0f);
+        TEST_CHECK(fabsf(s.integral) < 100000.0f + 1.0f,
+                   "ki-blowup guard (seed path, positive side): pid_seed_bumpless() must not seed a raw integral past the guard's bound on the positive side either");
+    }
+
+    /* Test 8: ki-blowup guard on the compounding path, pid_rescale_integral_for_new_ki()
+     * (pid.c:59-72) -- the function PID_INTEGRAL_RAW_ABS_BOUND's own doc
+     * comment names as the reason the guard exists. Before this fix this
+     * function applied no bound at all: rescaling an already-large raw
+     * integral onto a much smaller new ki compounded it further. */
+    {
+        pid_state_t s;
+        pid_reset(&s);
+        s.integral = 90000.0f; /* already near the bound, but legally so */
+        pid_rescale_integral_for_new_ki(&s, /*old_ki=*/1e-3f, /*new_ki=*/1e-6f); /* 1000x rescale */
+        TEST_CHECK(fabsf(s.integral) < 100000.0f + 1.0f,
+                   "ki-blowup guard (rescale path, positive side): pid_rescale_integral_for_new_ki() must clamp a compounding rescale to the guard's bound");
+    }
+    {
+        pid_state_t s;
+        pid_reset(&s);
+        s.integral = -90000.0f;
+        pid_rescale_integral_for_new_ki(&s, /*old_ki=*/1e-3f, /*new_ki=*/1e-6f);
+        TEST_CHECK(fabsf(s.integral) < 100000.0f + 1.0f,
+                   "ki-blowup guard (rescale path, negative side): pid_rescale_integral_for_new_ki() must clamp a compounding rescale to the guard's bound on the negative side too");
     }
 }

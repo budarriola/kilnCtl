@@ -282,5 +282,72 @@ void run_test_ui_page_home_graph(void)
         int32_t lo_c, hi_c;
         ui_page_home_active_y_axis_range(25.0f, 70.0f, 0.0f, true, lo_a, hi_a, &lo_c, &hi_c);
         TEST_CHECK(hi_c > hi_a, "genuine growth beyond the held range widens the axis");
+
+        // Quantize never collapses: sweep lo/hi pairs across every possible
+        // alignment against the UI_PAGE_HOME_AXIS_QUANT_STEP_DISP=5 grid
+        // (raw_lo/raw_hi landing exactly on a step boundary, just past one,
+        // and just before one) and confirm axis_hi > axis_lo always holds --
+        // this is the case the removed `if (q_hi <= q_lo)` guard in
+        // ui_page_home_active_y_axis_range() used to cover defensively.
+        // ui_page_home_y_axis_range()'s own axis_hi>axis_lo contract makes
+        // that guard provably unreachable (see this function's own header
+        // comment in ui_page_home_graph.c), so this sweep stands in as the
+        // proof instead of an untested guard.
+        for (int base = 0; base < 50; base += 1) {
+            int32_t lo_s, hi_s;
+            // hi is always at least 1 above lo, matching
+            // ui_page_home_y_axis_range()'s own guarantee.
+            ui_page_home_active_y_axis_range((float)base, (float)base + 1.0f, 0.0f, false, 0, 0, &lo_s, &hi_s);
+            TEST_CHECK(hi_s > lo_s, "quantize sweep: axis_hi > axis_lo at every grid alignment");
+        }
+    }
+
+    TEST_SECTION("ui_page_home_graph: axis_ratchet_should_reset (run-identity defect fix, review of 98c3278)");
+    {
+        // Ordinary IDLE -> active start: prev_active false, always resets
+        // regardless of elapsed_s values (nothing meaningful to compare).
+        TEST_CHECK(ui_page_home_axis_ratchet_should_reset(true, false, 0, 0),
+                   "IDLE -> active start: ratchet resets");
+
+        // Not active this tick: no reset decision to make (caller does not
+        // even consult this while idle, but the function must not claim a
+        // reset here either).
+        TEST_CHECK(!ui_page_home_axis_ratchet_should_reset(false, true, 0, 100),
+                   "not active this tick: no reset");
+
+        // THE BUG: a new run started from DONE. The old ui_page_home.c edge
+        // check used `state != PROFILE_EXEC_IDLE` for "active", so DONE
+        // already counted as active and profile_executor_start() allows a
+        // new run to begin straight from DONE with no IDLE tick in between
+        // -- the old code's IDLE->active edge never fired and the axis hold
+        // was never reset. Here: previous tick was DONE (active=true,
+        // elapsed=1620, a finished ~27 minute run), this tick is the new
+        // run's first RUNNING sample (active=true, elapsed=0 -- total_elapsed_s
+        // resets to 0 exactly once, at profile_executor_run()).
+        TEST_CHECK(ui_page_home_axis_ratchet_should_reset(true, true, 0, 1620),
+                   "new run started from DONE: ratchet resets (elapsed_s dropped)");
+
+        // Same bug, FAULTED source instead of DONE.
+        TEST_CHECK(ui_page_home_axis_ratchet_should_reset(true, true, 0, 340),
+                   "new run started from FAULTED: ratchet resets (elapsed_s dropped)");
+
+        // Stop/restart both happening inside one ~1 Hz refresh interval:
+        // sampled state is "active" on the tick before (RUNNING, elapsed=50)
+        // AND the tick after (the new run's RUNNING, elapsed=2) -- no IDLE
+        // tick was ever observed, yet this is still a different run and must
+        // still reset.
+        TEST_CHECK(ui_page_home_axis_ratchet_should_reset(true, true, 2, 50),
+                   "stop/restart within one refresh interval: ratchet resets (elapsed_s dropped)");
+
+        // Regression guard: within a SINGLE run, elapsed_s only ever
+        // increases (or holds flat across a PAUSE) -- the ratchet must NOT
+        // reset on every ordinary tick, or the only-widen behaviour this
+        // whole mechanism exists for would never accumulate.
+        TEST_CHECK(!ui_page_home_axis_ratchet_should_reset(true, true, 51, 50),
+                   "same run, elapsed_s advanced by one tick: no reset");
+        TEST_CHECK(!ui_page_home_axis_ratchet_should_reset(true, true, 50, 50),
+                   "same run, elapsed_s flat across a PAUSE tick: no reset");
+        TEST_CHECK(!ui_page_home_axis_ratchet_should_reset(true, true, 1600, 10),
+                   "same run, elapsed_s far advanced from an early tick: no reset");
     }
 }
