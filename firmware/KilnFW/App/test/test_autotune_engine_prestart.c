@@ -412,6 +412,12 @@ uint8_t zones_config_get_thermo_count(void)
 typedef struct {
     bool called;
     float coeff;
+    /* ZONES_CFG_VERSION 11->12 (DATA PLUMBING pass): the setter widened to
+     * also carry tau_s/dead_time_s -- recorded here the same unconditional
+     * way coeff is, so a test can observe exactly what finalize_fit() tried
+     * to persist for all three, not just the gain. */
+    float tau_s;
+    float dead_time_s;
 } coupling_cell_call_t;
 static coupling_cell_call_t s_coupling_cell_calls[MAX31856_CHANNEL_COUNT][MAX31856_CHANNEL_COUNT];
 
@@ -455,17 +461,54 @@ esp_err_t uart_bridge_ext_run_on_flash_worker(void (*fn)(void *arg), void *arg)
     return ESP_OK;
 }
 
-bool zones_config_set_coupling_cell(uint8_t zone_index, uint8_t neighbor_index, float coeff)
+bool zones_config_set_coupling_cell(uint8_t zone_index, uint8_t neighbor_index, float coeff, float tau_s,
+                                     float dead_time_s)
 {
     if (zone_index >= MAX31856_CHANNEL_COUNT || neighbor_index >= MAX31856_CHANNEL_COUNT) {
         return false;
     }
     s_coupling_cell_calls[zone_index][neighbor_index].called = true;
     s_coupling_cell_calls[zone_index][neighbor_index].coeff = coeff;
+    s_coupling_cell_calls[zone_index][neighbor_index].tau_s = tau_s;
+    s_coupling_cell_calls[zone_index][neighbor_index].dead_time_s = dead_time_s;
     if (zone_index == neighbor_index) {
-        return coeff == 0.0f;
+        return coeff == 0.0f && tau_s == 0.0f && dead_time_s == 0.0f;
     }
-    return isfinite(coeff) && coeff >= 0.0f && coeff <= ZONE_COUPLING_COEFF_MAX;
+    if (!isfinite(coeff) || coeff < 0.0f || coeff > ZONE_COUPLING_COEFF_MAX) {
+        return false;
+    }
+    /* ZONES_CFG_VERSION 11->12: same all-or-nothing bound the real setter
+     * enforces -- see zones_config_set_coupling_cell()'s own header comment. */
+    return isfinite(tau_s) && tau_s >= 0.0f && tau_s <= ZONE_MODEL_TIME_MAX_S && isfinite(dead_time_s) &&
+           dead_time_s >= 0.0f && dead_time_s <= ZONE_MODEL_TIME_MAX_S;
+}
+
+/* ZONES_CFG_VERSION 11->12 stub siblings of zones_config_get_coupling() just
+ * below -- same "tests set it directly before calling finalize_fit()" role,
+ * for coupling_tau_s[]/coupling_dead_time_s[]. Unused by the (C)
+ * ceiling-reachability check (that one only ever needed the gain), but
+ * finalize_fit() itself does not call these getters -- kept purely so this
+ * translation unit still provides every symbol autotune_engine.c/zones_http.h
+ * declare, same reason zones_config_get_coupling() exists here at all. */
+static float s_stub_coupling_tau_row[MAX31856_CHANNEL_COUNT][MAX31856_CHANNEL_COUNT];
+static float s_stub_coupling_dead_time_row[MAX31856_CHANNEL_COUNT][MAX31856_CHANNEL_COUNT];
+
+bool zones_config_get_coupling_tau(uint8_t zone_index, float out_row[MAX31856_CHANNEL_COUNT])
+{
+    if (zone_index >= MAX31856_CHANNEL_COUNT || !out_row) {
+        return false;
+    }
+    memcpy(out_row, s_stub_coupling_tau_row[zone_index], sizeof(s_stub_coupling_tau_row[zone_index]));
+    return true;
+}
+
+bool zones_config_get_coupling_dead_time(uint8_t zone_index, float out_row[MAX31856_CHANNEL_COUNT])
+{
+    if (zone_index >= MAX31856_CHANNEL_COUNT || !out_row) {
+        return false;
+    }
+    memcpy(out_row, s_stub_coupling_dead_time_row[zone_index], sizeof(s_stub_coupling_dead_time_row[zone_index]));
+    return true;
 }
 
 /* 2026-08-31 defect fix: finalize_fit()'s (C) ceiling-reachability check now
@@ -1194,6 +1237,138 @@ static void test_finalize_fit_persists_valid_cross_gain_cells(void)
               "that is model_k_dc's job, not coupling_coeff[]'s");
 
     s_stub_thermo_count = 0; // restore this file's original hardcoded default for every other test
+}
+
+// ZONES_CFG_VERSION 11->12 (DATA PLUMBING pass): proves finalize_fit()'s
+// persist step carries tau_s/dead_time_s through zones_config_set_
+// coupling_cell() in the RIGHT orientation -- [affected][stepped], same as
+// coupling_coeff[]. Deliberately ASYMMETRIC (pair (0,1) tau=40s/L=5s vs pair
+// (1,0) tau=90s/L=15s): a transpose bug (writing [stepped][affected] instead
+// of [affected][stepped], or reading the wrong peer's fit) would land the
+// WRONG pair's numbers in one of the two cells below, and this test would
+// catch it; a symmetric fixture could not distinguish "orientation correct"
+// from "orientation swapped" and would be vacuous. Two separate step tests
+// (zone 0 stepped/zone 1 the peer, then zone 1 stepped/zone 0 the peer) are
+// run because finalize_fit() only ever persists the STEPPED zone's peers in
+// one call -- the [1][0] cell and the [0][1] cell are each written by a
+// DIFFERENT run in real operation, exactly as reproduced here.
+static void test_finalize_fit_persists_cross_gain_tau_dead_time_in_correct_orientation(void)
+{
+    TEST_SECTION("finalize_fit() persists coupling_tau_s/coupling_dead_time_s in the SAME "
+                 "[affected][stepped] orientation as coupling_coeff -- asymmetric fixture, "
+                 "a transpose bug would land the wrong pair's numbers");
+
+    // Run 1: zone 0 stepped, zone 1 the peer -- must land in cell [1][0]
+    // (zone 1's row, column 0) with tau=40s, L=5s.
+    memset(&s_at, 0, sizeof(s_at));
+    reset_coupling_cell_calls();
+    s_stub_thermo_count = 3;
+    s_at.zone_index = 0;
+    s_at.step_rule = AUTOTUNE_RULE_SIMC;
+    s_at.step_settled = true;
+    write_synthetic_fopdt_trace_for_zone(0, /*baseline_c=*/25.0f, /*k_gain_c_per_duty=*/50.0f, /*tau_s=*/200.0f,
+                                         /*dead_time_s=*/20.0f, /*duty_step=*/1.0f, /*n_samples=*/60);
+    write_synthetic_fopdt_trace_for_zone(1, /*baseline_c=*/22.0f, /*k_gain_c_per_duty=*/0.5f, /*tau_s=*/40.0f,
+                                         /*dead_time_s=*/5.0f, /*duty_step=*/1.0f, /*n_samples=*/60);
+    s_at.zone_baseline_valid[2] = false; // zone 2 not part of this run's fixture
+    finalize_fit();
+    TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_DONE, "run 1 (zone 0 stepped) direct fit must succeed");
+    TEST_CHECK(s_coupling_cell_calls[1][0].called, "cell [1][0] (zone 1 affected, zone 0 stepped) was persisted");
+    // The FOPDT curve fit does not reproduce the fed-in tau/L exactly off a
+    // finite synthetic trace, so this checks against a generous envelope
+    // around pair (0,1)'s fed values (40s/5s) rather than pinning an exact
+    // number -- what actually proves orientation is the CROSS-comparison
+    // against run 2's cell below (fed 90s/15s), not either absolute value
+    // alone.
+    float run1_tau = s_coupling_cell_calls[1][0].tau_s;
+    float run1_dead_time = s_coupling_cell_calls[1][0].dead_time_s;
+    TEST_CHECK(run1_tau > 0.0f && run1_tau < 80.0f,
+              "cell [1][0]'s persisted tau_s is in pair (0,1)'s ballpark (fed 40s), nowhere near pair "
+              "(1,0)'s fed 90s");
+
+    // Run 2: zone 1 stepped, zone 0 the peer -- must land in cell [0][1]
+    // (zone 0's row, column 1) with tau=90s, L=15s, a DIFFERENT number from
+    // run 1's cell -- proof this is not just the same value read back twice.
+    memset(&s_at, 0, sizeof(s_at));
+    reset_coupling_cell_calls();
+    s_at.zone_index = 1;
+    s_at.step_rule = AUTOTUNE_RULE_SIMC;
+    s_at.step_settled = true;
+    write_synthetic_fopdt_trace_for_zone(1, /*baseline_c=*/25.0f, /*k_gain_c_per_duty=*/50.0f, /*tau_s=*/200.0f,
+                                         /*dead_time_s=*/20.0f, /*duty_step=*/1.0f, /*n_samples=*/60);
+    write_synthetic_fopdt_trace_for_zone(0, /*baseline_c=*/22.0f, /*k_gain_c_per_duty=*/0.5f, /*tau_s=*/90.0f,
+                                         /*dead_time_s=*/15.0f, /*duty_step=*/1.0f, /*n_samples=*/60);
+    s_at.zone_baseline_valid[2] = false;
+    finalize_fit();
+    TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_DONE, "run 2 (zone 1 stepped) direct fit must succeed");
+    TEST_CHECK(s_coupling_cell_calls[0][1].called, "cell [0][1] (zone 0 affected, zone 1 stepped) was persisted");
+    float run2_tau = s_coupling_cell_calls[0][1].tau_s;
+    float run2_dead_time = s_coupling_cell_calls[0][1].dead_time_s;
+    TEST_CHECK(run2_tau > 80.0f,
+              "cell [0][1]'s persisted tau_s is in pair (1,0)'s ballpark (fed 90s), nowhere near pair "
+              "(0,1)'s fed 40s");
+    TEST_CHECK(!s_coupling_cell_calls[1][0].called,
+              "run 2 never touches cell [1][0] -- that was run 1's cell, a different (affected, stepped) pair");
+
+    // THE orientation proof: pair (1,0) was fed a materially larger tau/L
+    // than pair (0,1) (90s/15s vs 40s/5s). A transpose bug -- writing
+    // [stepped][affected] instead of [affected][stepped], or reading the
+    // wrong peer's fit -- would swap which cell ends up with the larger
+    // value; this fails on either kind of swap regardless of exactly how
+    // precisely the curve fit reproduces the fed-in numbers.
+    TEST_CHECK(run2_tau > run1_tau,
+              "cell [0][1] (fed the larger tau, 90s) must come out with a LARGER fitted tau_s than "
+              "cell [1][0] (fed the smaller tau, 40s) -- a transpose bug would reverse this");
+    TEST_CHECK(run2_dead_time > run1_dead_time,
+              "cell [0][1] (fed the larger L, 15s) must come out with a LARGER fitted dead_time_s than "
+              "cell [1][0] (fed the smaller L, 5s) -- a transpose bug would reverse this");
+
+    s_stub_thermo_count = 0;
+}
+
+// ZONES_CFG_VERSION 11->12 (DATA PLUMBING pass): an invalid peer fit
+// (cell->valid == false, e.g. an unmeasured baseline) must not persist ANY
+// of coeff/tau_s/dead_time_s for that cell -- extends
+// test_finalize_fit_persists_valid_cross_gain_cells()'s existing "invalid
+// peer is skipped" coverage (which only checked `.called`) to also confirm
+// the recorded tau_s/dead_time_s stay at their fake's zero-initialized
+// default, i.e. genuinely never written, not written-then-ignored.
+static void test_finalize_fit_does_not_persist_tau_dead_time_for_invalid_peer(void)
+{
+    TEST_SECTION("finalize_fit() does not persist coupling_tau_s/coupling_dead_time_s "
+                 "for a peer whose fit is invalid");
+    memset(&s_at, 0, sizeof(s_at));
+    reset_coupling_cell_calls();
+    s_stub_thermo_count = 3;
+    s_at.zone_index = 1;
+    s_at.step_rule = AUTOTUNE_RULE_SIMC;
+    s_at.step_settled = true;
+
+    write_synthetic_fopdt_trace_for_zone(1, /*baseline_c=*/25.0f, /*k_gain_c_per_duty=*/50.0f, /*tau_s=*/200.0f,
+                                         /*dead_time_s=*/20.0f, /*duty_step=*/1.0f, /*n_samples=*/60);
+    // Zone 0: a valid peer fit, for contrast with zone 2's invalid one below.
+    write_synthetic_fopdt_trace_for_zone(0, /*baseline_c=*/22.0f, /*k_gain_c_per_duty=*/0.5f, /*tau_s=*/60.0f,
+                                         /*dead_time_s=*/8.0f, /*duty_step=*/1.0f, /*n_samples=*/60);
+    // Zone 2: baseline never went valid -- same invalidity finalize_fit()'s
+    // existing !s_at.zone_baseline_valid[j] check must skip.
+    s_at.zone_baseline_valid[2] = false;
+
+    finalize_fit();
+    TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_DONE, "the direct (zone 1) fit must succeed");
+    TEST_CHECK(!s_at.coupling.cell[1][2].valid, "zone 2's cell is invalid -- its baseline never went valid");
+    TEST_CHECK(!s_coupling_cell_calls[2][1].called,
+              "zone 2's cell was never persisted -- neither coeff nor tau_s/dead_time_s");
+    TEST_CHECK_NEAR(s_coupling_cell_calls[2][1].coeff, 0.0f, 1e-6,
+                    "the fake's coeff for the untouched cell stays at its zero default");
+    TEST_CHECK_NEAR(s_coupling_cell_calls[2][1].tau_s, 0.0f, 1e-6,
+                    "the fake's tau_s for the untouched cell stays at its zero default -- proves this was "
+                    "never written, not written-then-discarded");
+    TEST_CHECK_NEAR(s_coupling_cell_calls[2][1].dead_time_s, 0.0f, 1e-6,
+                    "the fake's dead_time_s for the untouched cell stays at its zero default");
+    // The valid peer (zone 0), for contrast, DID persist all three.
+    TEST_CHECK(s_coupling_cell_calls[0][1].called, "zone 0's valid cell WAS persisted, unlike zone 2's");
+
+    s_stub_thermo_count = 0;
 }
 
 // 2026-08-31 panic fix: proves finalize_fit()'s persist step actually goes
@@ -3994,6 +4169,8 @@ void run_test_autotune_engine_prestart(void)
     test_accept_succeeds_end_to_end_regardless_of_last_sample_quantization_dither();
     test_finalize_fit_uses_the_requested_rule();
     test_finalize_fit_persists_valid_cross_gain_cells();
+    test_finalize_fit_persists_cross_gain_tau_dead_time_in_correct_orientation();
+    test_finalize_fit_does_not_persist_tau_dead_time_for_invalid_peer();
     test_finalize_fit_routes_persist_through_flash_worker();
     test_finalize_fit_skips_coupling_persist_when_unsettled();
     test_finalize_fit_skips_coupling_persist_when_extrapolation_did_not_converge();

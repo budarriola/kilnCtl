@@ -269,7 +269,30 @@ static const char *TAG = "zones_http";
  * MAX31856_CHANNEL_COUNT" -- there is not, without also widening
  * ZONES_CONFIG_BLOB_MAX_SIZE. That macro is NOT touched by this pass (it is
  * shared with kiln_cfg_store_blob_t, owned elsewhere -- see this file's own
- * task brief). */
+ * task brief).
+ *
+ * 11 -> 12 (2026-08-31, DATA PLUMBING pass): autotune_engine.c's finalize_fit()
+ * already fits a full FOPDT model (K, tau, L) for every off-diagonal
+ * coupling cell, not just the gain -- only the gain ever reached storage;
+ * tau/L died with the RAM-only s_at.coupling the moment the run ended. This
+ * bump adds coupling_tau_s[]/coupling_dead_time_s[], row-per-zone, SAME
+ * orientation as coupling_coeff[] (zones[affected].coupling_tau_s[stepped]).
+ * See zone_cfg_t::coupling_tau_s's own doc comment for the full unit/
+ * orientation story. Pure storage -- no consumer of either array exists yet.
+ *
+ * MIGRATION IS TRIVIAL: no version before v12 ever stored either array, so
+ * every migrated zone's two new rows are left at the memset-zero
+ * convert_zone_v11() (below) starts each destination zone at -- already each
+ * cell's documented "not measured" meaning, identical to how coupling_coeff
+ * itself was born zeroed on the v10->v11 bump for every zone the single old
+ * pair didn't already cover.
+ *
+ * zone_cfg_t grows by 2*MAX31856_CHANNEL_COUNT floats per zone (3 channels:
+ * 24 bytes/zone, 72 bytes total) -- see the _Static_assert byte math on
+ * zone_cfg_v11_t and the live zone_cfg_t below, and the _Static_assert on
+ * zones_cfg_t/ZONES_CONFIG_BLOB_MAX_SIZE just below this file's struct
+ * definitions, which fails the build rather than silently overflowing if
+ * this ever does not fit. */
 
 /* ZONE_CT_CHANNEL_COUNT moved to zones_http.h (2026-08-27, same day it was
  * added) -- backup_http.c's import validation needs it too, for the exact
@@ -1422,6 +1445,28 @@ bool zones_config_get_coupling(uint8_t zone_index, float out_row[MAX31856_CHANNE
     return true;
 }
 
+/* ZONES_CFG_VERSION 11->12 siblings of the getter above -- identical shape
+ * and orientation, for coupling_tau_s[]/coupling_dead_time_s[]. */
+bool zones_config_get_coupling_tau(uint8_t zone_index, float out_row[MAX31856_CHANNEL_COUNT])
+{
+    if (!out_row || zone_index >= s_zones.cfg.thermo_count) {
+        return false;
+    }
+    const zone_cfg_t *z = &s_zones.cfg.zones[zone_index];
+    memcpy(out_row, z->coupling_tau_s, sizeof(z->coupling_tau_s));
+    return true;
+}
+
+bool zones_config_get_coupling_dead_time(uint8_t zone_index, float out_row[MAX31856_CHANNEL_COUNT])
+{
+    if (!out_row || zone_index >= s_zones.cfg.thermo_count) {
+        return false;
+    }
+    const zone_cfg_t *z = &s_zones.cfg.zones[zone_index];
+    memcpy(out_row, z->coupling_dead_time_s, sizeof(z->coupling_dead_time_s));
+    return true;
+}
+
 /* Whole-row setter -- every cell checked before ANY is written, same
  * "no half-updated group" discipline as zones_config_set_model()/
  * zones_config_set_temp_limits(). Bounds match parse_zone_fields()'s
@@ -1463,16 +1508,17 @@ bool zones_config_set_coupling(uint8_t zone_index, const float row[MAX31856_CHAN
  * j's row at a time, and must never wipe out zone j's other, previously
  * measured neighbors just because this run didn't touch them. Same bounds
  * as the whole-row setter above, applied to the one cell being written. */
-bool zones_config_set_coupling_cell(uint8_t zone_index, uint8_t neighbor_index, float coeff)
+bool zones_config_set_coupling_cell(uint8_t zone_index, uint8_t neighbor_index, float coeff, float tau_s,
+                                     float dead_time_s)
 {
     if (zone_index >= s_zones.cfg.thermo_count || neighbor_index >= MAX31856_CHANNEL_COUNT) {
         return false;
     }
-    if (!isfinite(coeff)) {
+    if (!isfinite(coeff) || !isfinite(tau_s) || !isfinite(dead_time_s)) {
         return false;
     }
     if (neighbor_index == zone_index) {
-        if (coeff != 0.0f) {
+        if (coeff != 0.0f || tau_s != 0.0f || dead_time_s != 0.0f) {
             return false;
         }
         return true; /* writing the diagonal to 0 is a no-op, not an error */
@@ -1480,8 +1526,18 @@ bool zones_config_set_coupling_cell(uint8_t zone_index, uint8_t neighbor_index, 
     if (coeff < 0.0f || coeff > ZONE_COUPLING_COEFF_MAX) {
         return false;
     }
+    /* ZONES_CFG_VERSION 11->12: all-or-nothing with coeff above -- an
+     * out-of-range tau_s/dead_time_s must refuse the WHOLE cell, not just
+     * silently leave the two new fields unwritten while coeff still lands.
+     * See zones_config_set_coupling_cell()'s own header comment. */
+    if (tau_s < 0.0f || tau_s > ZONE_MODEL_TIME_MAX_S || dead_time_s < 0.0f ||
+        dead_time_s > ZONE_MODEL_TIME_MAX_S) {
+        return false;
+    }
     zone_cfg_t *z = &s_zones.cfg.zones[zone_index];
     z->coupling_coeff[neighbor_index] = coeff;
+    z->coupling_tau_s[neighbor_index] = tau_s;
+    z->coupling_dead_time_s[neighbor_index] = dead_time_s;
     s_config_generation++;
     return nvs_save() == ESP_OK;
 }
@@ -2113,7 +2169,14 @@ static esp_err_t zones_get_handler(httpd_req_t *req)
      * of 8192 live). At 5760 bytes this one buffer alone was more than 70%
      * of the entire 8192-byte task stack. Freed on every return path
      * (success and truncated). */
-    const size_t json_cap = 5760; /* 5632 -> 5760 (2026-08-30, same-day follow-up,
+    const size_t json_cap = 6528; /* 5760 -> 6528 (2026-08-31, ZONES_CFG_VERSION
+                      * 11->12): coupling_tau_c%u/coupling_dead_time_c%u add
+                      * two more indexed keys per cell alongside coupling_c%u
+                      * (~13 bytes each worst case, same per-key estimate the
+                      * 5632->5760 bump below used), i.e. ~26 bytes/cell x
+                      * MAX31856_CHANNEL_COUNT^2 cells = ~234 bytes, rounded
+                      * up generously to a round number with headroom.
+                      * 5632 -> 5760 (2026-08-30, same-day follow-up,
                       * ZONES_CFG_VERSION 10->11): coupling_coeff/
                       * coupling_neighbor_zone (2 keys) replaced by
                       * MAX31856_CHANNEL_COUNT indexed coupling_c%u keys (3
@@ -2331,6 +2394,19 @@ static esp_err_t zones_get_handler(httpd_req_t *req)
          * model_k_dc/timing_profile above. */
         for (uint8_t j = 0; j < MAX31856_CHANNEL_COUNT; j++) {
             APPEND("\"coupling_c%u\":%.4f,", j, (double)z->coupling_coeff[j]);
+        }
+        /* ZONES_CFG_VERSION 11->12: coupling_tau_s[]/coupling_dead_time_s[],
+         * same orientation as coupling_c%u just above ([affected][stepped],
+         * i.e. row i = affected zone i's row -- NOT the transpose orientation
+         * /api/autotune_matrix uses for the RAM-only s_at.coupling matrix,
+         * see that endpoint's own comment for why it stays untouched by this
+         * pass). Key names deliberately echo model_tau_s/model_dead_time_s's
+         * own JSON key style rather than coupling_c%u's "_c" suffix, since
+         * these are the tau/L, not another gain. Always emitted, same
+         * always-emit/round-trip reasoning as coupling_c%u. */
+        for (uint8_t j = 0; j < MAX31856_CHANNEL_COUNT; j++) {
+            APPEND("\"coupling_tau_c%u\":%.1f,\"coupling_dead_time_c%u\":%.1f,", j,
+                   (double)z->coupling_tau_s[j], j, (double)z->coupling_dead_time_s[j]);
         }
         APPEND("\"settings_source\":%u}", z->settings_source);
     }
@@ -2887,6 +2963,21 @@ static bool parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_count,
             z->coupling_coeff[j] = current_z->coupling_coeff[j];
         }
     }
+    /* 2026-08-31 (ZONES_CFG_VERSION 11->12): coupling_tau_s[]/
+     * coupling_dead_time_s[] have NO POST wire fields of their own -- unlike
+     * coupling_coeff[], nothing on the settings page lets an operator type a
+     * cross-zone time constant, so there is nothing to parse here. What DOES
+     * matter is the omit case: `z` starts fresh (not copied from current_z),
+     * so without this, every ordinary whole-page save from the settings page
+     * -- which never sends these two arrays at all -- would silently zero out
+     * whatever autotune_engine.c's finalize_fit() had persisted for every
+     * zone, the exact "reset-one-side" class this codebase has shipped
+     * before. Always preserve, unconditionally -- autotune_engine.c's own
+     * persist path writes s_zones.cfg directly (via a coupling-cell setter),
+     * never through this POST parser, so there is no legitimate way for a
+     * POST to be the one updating these two arrays. */
+    memcpy(z->coupling_tau_s, current_z->coupling_tau_s, sizeof(z->coupling_tau_s));
+    memcpy(z->coupling_dead_time_s, current_z->coupling_dead_time_s, sizeof(z->coupling_dead_time_s));
     /* settings_source: UNLIKE the three floats above, omitted must NOT
      * default to 0 -- 0 is a real, different value here ("copies zone 0's
      * settings"), not a safe empty default. Falls back to the CURRENT stored

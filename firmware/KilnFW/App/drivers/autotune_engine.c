@@ -892,6 +892,13 @@ static autotune_sample_t *unpack_zone_trace(uint8_t zone, size_t count)
 typedef struct {
     uint8_t affected_zone[MAX31856_CHANNEL_COUNT]; /* row index, one per cell */
     float   coeff[MAX31856_CHANNEL_COUNT];
+    /* ZONES_CFG_VERSION 11->12 (DATA PLUMBING pass): the full FOPDT fit
+     * cell->model already carries for each peer -- tau_s/dead_time_s were
+     * fitted right alongside coeff (k_gain_c_per_duty) below but, until this
+     * pass, thrown away instead of reaching zones_config_set_coupling_cell().
+     * Same per-cell indexing as coeff[] above. */
+    float   tau_s[MAX31856_CHANNEL_COUNT];
+    float   dead_time_s[MAX31856_CHANNEL_COUNT];
     uint8_t count;
     uint8_t stepped_zone; /* column index -- same for every cell in one run */
     uint8_t fail_count;   /* zones_config_set_coupling_cell() calls that returned false */
@@ -901,7 +908,8 @@ static void coupling_persist_job(void *arg)
 {
     coupling_persist_job_t *job = (coupling_persist_job_t *)arg;
     for (uint8_t i = 0; i < job->count; i++) {
-        if (!zones_config_set_coupling_cell(job->affected_zone[i], job->stepped_zone, job->coeff[i])) {
+        if (!zones_config_set_coupling_cell(job->affected_zone[i], job->stepped_zone, job->coeff[i],
+                                             job->tau_s[i], job->dead_time_s[i])) {
             job->fail_count++;
         }
     }
@@ -1367,8 +1375,29 @@ static void finalize_fit(void)
                          s_at.zone_index, j, (double)gain);
                 continue;
             }
+            /* ZONES_CFG_VERSION 11->12: the same peer fit's tau/dead-time,
+             * gated the same way -- finite and within the storage layer's
+             * bound (ZONE_MODEL_TIME_MAX_S, the same ceiling model_tau_s/
+             * model_dead_time_s use) -- so a spurious fit cannot land a
+             * garbage gain paired with a garbage time constant, or vice
+             * versa. zones_config_set_coupling_cell() itself re-checks this
+             * (all-or-nothing per cell); this mirrors that check up front so
+             * the reason for skipping a cell is logged with the same detail
+             * the gain check above already gets. */
+            float tau_s = cell->model.tau_s;
+            float dead_time_s = cell->model.dead_time_s;
+            if (!isfinite(tau_s) || tau_s < 0.0f || tau_s > ZONE_MODEL_TIME_MAX_S || !isfinite(dead_time_s) ||
+                dead_time_s < 0.0f || dead_time_s > ZONE_MODEL_TIME_MAX_S) {
+                ESP_LOGW(TAG,
+                         "autotune zone %u: cross-gain against zone %u fitted tau=%.1fs L=%.1fs out of storage "
+                         "range, not persisted",
+                         s_at.zone_index, j, (double)tau_s, (double)dead_time_s);
+                continue;
+            }
             job.affected_zone[job.count] = j;
             job.coeff[job.count] = gain;
+            job.tau_s[job.count] = tau_s;
+            job.dead_time_s[job.count] = dead_time_s;
             job.count++;
         }
         if (job.count > 0) {

@@ -59,7 +59,7 @@ extern "C" {
  * value. Shared because both files must agree on what "the current version"
  * means: nvs_save() writes it, decode_zones_blob() decides whether a stored
  * blob needs migrating against it. */
-#define ZONES_CFG_VERSION 11
+#define ZONES_CFG_VERSION 12
 
 
 /* MAX31856 CR1.TC[3:0] nibble values 0x00-0x07 name a real thermocouple type
@@ -192,6 +192,32 @@ typedef struct {
      * cross-heating gains) needs a negative coefficient to be represented,
      * and the ceiling here is a typo/garbage filter, not a physics bound. */
     float coupling_coeff[MAX31856_CHANNEL_COUNT];
+    /* ---- ZONES_CFG_VERSION 11->12 (2026-08-31): the FOPDT tau/dead-time
+     * autotune already fits for every off-diagonal cell of coupling_coeff[]
+     * above (finalize_fit()'s per-peer pid_autotune_fit_fopdt() call,
+     * autotune_engine.c) but, until now, threw away -- only the gain
+     * (k_gain_c_per_duty) was persisted; tau/L died with the RAM-only
+     * s_at.coupling the moment the run ended. DATA PLUMBING ONLY: no
+     * consumer reads either array yet, same as coupling_coeff was itself
+     * pure storage for one pass before profile_executor.c's Phase 3b wired
+     * it into the feedforward.
+     *
+     * SAME orientation as coupling_coeff -- coupling_tau_s[j]/
+     * coupling_dead_time_s[j] are THIS zone's (the affected zone's) fitted
+     * response to a step at zone j's (the stepped zone's) heater, i.e.
+     * zones[affected].coupling_tau_s[stepped]. The diagonal is unused and
+     * MUST stay 0, identical to coupling_coeff's own diagonal rule.
+     *
+     * 0 in either array = "not measured" -- the same convention
+     * coupling_coeff/model_tau_s/model_dead_time_s already use, and the only
+     * value an older (pre-v12) blob's migrated zones can carry, since no
+     * prior version stored these at all. Units: seconds, same as
+     * model_tau_s/model_dead_time_s. Bounded by ZONE_MODEL_TIME_MAX_S, the
+     * same ceiling the diagonal (self) tau/dead-time already use -- a
+     * cross-zone thermal time constant has no reason to be a different order
+     * of magnitude than a zone's own. */
+    float coupling_tau_s[MAX31856_CHANNEL_COUNT];
+    float coupling_dead_time_s[MAX31856_CHANNEL_COUNT];
     /* ---- Every remaining field is a uint8_t, deliberately grouped here at
      * the struct tail -- see this struct's own top-of-definition comment for
      * why (alignment padding, and the ZONES_CONFIG_BLOB_MAX_SIZE budget it
@@ -357,7 +383,7 @@ typedef struct {
     uint32_t crc32;
 } zones_cfg_t;
 
-/* ---- Historical on-flash layouts (ZONES_CFG_VERSION 1..10) ---------------
+/* ---- Historical on-flash layouts (ZONES_CFG_VERSION 1..11) ---------------
  * EXACT field-for-field snapshots of what zone_cfg_t/zones_cfg_t looked like
  * at each prior version, recovered from this file's git history (see
  * zones_config_json.c's decode/convert functions for the full per-version
@@ -679,6 +705,59 @@ typedef struct {
 _Static_assert(sizeof(zone_cfg_v10_t) == 128,
                "zone_cfg_v10_t must match the on-flash v10 layout byte-for-byte (128 bytes)"); /* v10 -- predates the coupling_coeff[] row */
 
+/* Frozen v11 layout -- what zone_cfg_t looked like immediately before THIS
+ * pass (ZONES_CFG_VERSION 11->12), coupling_coeff[] row and all, predating
+ * coupling_tau_s[]/coupling_dead_time_s[]. Same discipline as
+ * zone_cfg_v10_t just above: field order hand-copied from v11's actual
+ * shape, never derived from the live struct. */
+typedef struct {
+    char name[ZONE_NAME_MAX_LEN + 1];
+    float cal_offset_c;
+    float pid_kp;
+    float pid_ki;
+    float pid_kd;
+    float max_ramp_c_per_hr;
+    float sanity_rate_c_per_min;
+    float max_temp_c;
+    float min_temp_c;
+    float heater_window_ms;
+    float heater_min_on_ms;
+    float heater_min_off_ms;
+    float guard_wrong_dir_window_s;
+    float guard_wrong_dir_rate_c_per_min;
+    float guard_off_settle_s;
+    float guard_runaway_rate_c_per_min;
+    float guard_runaway_margin_c;
+    float guard_drift_period_s;
+    float guard_sensor_fault_debounce_ticks;
+    float guard_frozen_window_s;
+    float cross_zone_max_delta_c;
+    float model_k_dc;
+    float model_tau_s;
+    float model_dead_time_s;
+    float fuzzy_strength_pct;
+    float coupling_coeff[MAX31856_CHANNEL_COUNT]; /* v11's row -- predates coupling_tau_s[]/
+                                                    * coupling_dead_time_s[] */
+    /* ---- uint8_t tail, exactly as v9/v10 grouped them ---- */
+    uint8_t relay_mask;
+    uint8_t control_mode;
+    uint8_t tc_type;
+    uint8_t thermo_mask;
+    uint8_t ct_mask;
+    uint8_t timing_profile;
+    uint8_t settings_source;
+} zone_cfg_v11_t;
+
+/* 132 = 16 (name) + 27*4 (floats: v10's 26 minus coupling_coeff/
+ * coupling_neighbor_zone (2 scalars) plus the 3-wide coupling_coeff[] row,
+ * i.e. 24 + 3 = 27) + 7 (the uint8_t tail, unchanged since v9) + 1 (tail
+ * padding to the struct's 4-byte float alignment). Hand-computed AND
+ * verified with ctypes against the live field layout before this assert was
+ * written -- never sizeof(zone_cfg_t), which by the time this pass lands is
+ * already the v12 (tau_s[]/dead_time_s[]) shape, not v11's. */
+_Static_assert(sizeof(zone_cfg_v11_t) == 132,
+               "zone_cfg_v11_t must match the on-flash v11 layout byte-for-byte (132 bytes)"); /* v11 -- predates coupling_tau_s[]/coupling_dead_time_s[] */
+
 typedef struct {
     uint8_t version;
     uint8_t thermo_count;
@@ -789,6 +868,23 @@ typedef struct {
 } zones_cfg_v10_t; /* v10 -- what zones_cfg_t looked like immediately before THIS
                      * pass; predates the coupling_coeff[] row. zone_timing_profile_t
                      * unchanged again, reused verbatim same as v9's own comment. */
+
+typedef struct {
+    uint8_t version;
+    uint8_t thermo_count;
+    uint8_t relay_count;
+    uint8_t max_simultaneous_relays;
+    uint8_t continue_on_zone_trip;
+    uint8_t safety_tc_type;
+    zone_cfg_v11_t zones[MAX31856_CHANNEL_COUNT];
+    uint8_t timing_profile_count;
+    zone_timing_profile_t timing_profiles[MAX31856_CHANNEL_COUNT];
+    float pc_link_abort_silence_ms;
+    uint32_t crc32;
+} zones_cfg_v11_t; /* v11 -- what zones_cfg_t looked like immediately before THIS
+                     * pass; predates coupling_tau_s[]/coupling_dead_time_s[].
+                     * zone_timing_profile_t unchanged again, reused verbatim
+                     * same as v9/v10's own comment. */
 
 
 typedef enum {

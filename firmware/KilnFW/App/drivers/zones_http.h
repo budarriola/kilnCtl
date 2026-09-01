@@ -607,6 +607,13 @@ bool zones_config_set_fuzzy_strength_pct(uint8_t zone_index, float pct);
  * floats; out_row[zone_index] (the diagonal) is always 0. */
 bool zones_config_get_coupling(uint8_t zone_index, float out_row[MAX31856_CHANNEL_COUNT]);
 
+/* ZONES_CFG_VERSION 11->12 siblings of the getter above -- same row shape,
+ * same orientation, same diagonal-always-0 rule, for zone_cfg_t::
+ * coupling_tau_s[]/coupling_dead_time_s[] (see that field's own doc comment).
+ * DATA PLUMBING ONLY: nothing in the control loop reads either yet. */
+bool zones_config_get_coupling_tau(uint8_t zone_index, float out_row[MAX31856_CHANNEL_COUNT]);
+bool zones_config_get_coupling_dead_time(uint8_t zone_index, float out_row[MAX31856_CHANNEL_COUNT]);
+
 /* Whole-row setter. Every cell checked before any is written -- same
  * reject-nothing-half-applied discipline as zones_config_set_model().
  * row[zone_index] (the diagonal) MUST be exactly 0; every other cell must be
@@ -619,8 +626,20 @@ bool zones_config_set_coupling(uint8_t zone_index, const float row[MAX31856_CHAN
  * cell at a time, and must not wipe out those zones' other already-measured
  * neighbors. Same bounds as the whole-row setter, applied to this one cell;
  * writing the diagonal to exactly 0 is accepted as a no-op (never actually
- * needed in practice, but harmless), any other diagonal value is refused. */
-bool zones_config_set_coupling_cell(uint8_t zone_index, uint8_t neighbor_index, float coeff);
+ * needed in practice, but harmless), any other diagonal value is refused.
+ *
+ * ZONES_CFG_VERSION 11->12: widened to also take this cell's fitted tau_s/
+ * dead_time_s (finalize_fit() fits all three -- K, tau, L -- for every peer
+ * in the same pid_autotune_fit_fopdt() call, so this is the one place that
+ * ever writes a coupling cell and the natural place to carry the other two
+ * through). Same all-or-nothing rule as the coeff bound: tau_s/dead_time_s
+ * must each be finite and in 0..ZONE_MODEL_TIME_MAX_S (or exactly 0 on the
+ * diagonal, matching coeff), and if either is out of range NOTHING for this
+ * cell is written -- not even coeff -- so a cell's three stored numbers can
+ * never end up from two different fits. backup_http.c's import is this
+ * function's other caller, alongside autotune_engine.c's finalize_fit(). */
+bool zones_config_set_coupling_cell(uint8_t zone_index, uint8_t neighbor_index, float coeff, float tau_s,
+                                     float dead_time_s);
 
 /* zone_cfg_t::settings_source (PID_EXPANSION_PLAN.md section 3.5's "Same as
  * zone N / Custom settings for this zone" UI dropdown) -- see

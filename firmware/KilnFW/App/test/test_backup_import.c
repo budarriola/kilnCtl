@@ -303,6 +303,11 @@ typedef struct {
      * per-cell semantics. */
     bool set_coupling_cell_called[MAX31856_CHANNEL_COUNT];
     float coupling_coeff[MAX31856_CHANNEL_COUNT];
+    /* ZONES_CFG_VERSION 11->12 (DATA PLUMBING pass): the setter widened to
+     * carry tau_s/dead_time_s alongside coeff -- tracked here the same
+     * per-cell way. */
+    float coupling_tau_s[MAX31856_CHANNEL_COUNT];
+    float coupling_dead_time_s[MAX31856_CHANNEL_COUNT];
     bool set_settings_source_called;
     uint8_t settings_source;
 } zone_write_t;
@@ -541,6 +546,24 @@ bool zones_config_get_coupling(uint8_t zone_index, float out_row[MAX31856_CHANNE
     return true;
 }
 
+bool zones_config_get_coupling_tau(uint8_t zone_index, float out_row[MAX31856_CHANNEL_COUNT])
+{
+    if (!out_row || zone_index >= STUB_ZONE_COUNT) {
+        return false;
+    }
+    memcpy(out_row, s_writes[zone_index].coupling_tau_s, sizeof(s_writes[zone_index].coupling_tau_s));
+    return true;
+}
+
+bool zones_config_get_coupling_dead_time(uint8_t zone_index, float out_row[MAX31856_CHANNEL_COUNT])
+{
+    if (!out_row || zone_index >= STUB_ZONE_COUNT) {
+        return false;
+    }
+    memcpy(out_row, s_writes[zone_index].coupling_dead_time_s, sizeof(s_writes[zone_index].coupling_dead_time_s));
+    return true;
+}
+
 bool zones_config_get_settings_source(uint8_t zone_index, uint8_t *out_settings_source)
 {
     if (!out_settings_source || zone_index >= STUB_ZONE_COUNT) {
@@ -714,11 +737,14 @@ bool zones_config_set_coupling(uint8_t zone_index, const float row[MAX31856_CHAN
 }
 /* backup_import_apply() commits per-cell now -- see zone_write_t's own
  * comment for why this stub tracks a called-flag PER CELL. */
-bool zones_config_set_coupling_cell(uint8_t zone_index, uint8_t neighbor_index, float coeff)
+bool zones_config_set_coupling_cell(uint8_t zone_index, uint8_t neighbor_index, float coeff, float tau_s,
+                                     float dead_time_s)
 {
     if (zone_index >= STUB_ZONE_COUNT || neighbor_index >= MAX31856_CHANNEL_COUNT) return false;
     s_writes[zone_index].set_coupling_cell_called[neighbor_index] = true;
     s_writes[zone_index].coupling_coeff[neighbor_index] = coeff;
+    s_writes[zone_index].coupling_tau_s[neighbor_index] = tau_s;
+    s_writes[zone_index].coupling_dead_time_s[neighbor_index] = dead_time_s;
     g_total_write_calls++;
     return true;
 }
@@ -1477,8 +1503,8 @@ static void test_export_emits_expected_keys_and_values_for_a_known_config(void)
     TEST_CHECK(zones_config_set_temp_limits(1, 1250.0f, -15.0f), "seed zone 1 temp limits");
     TEST_CHECK(zones_config_set_heater_cfg(1, 60000.0f, 200.0f, 200.0f), "seed zone 1 heater cfg");
     TEST_CHECK(zones_config_set_fuzzy_strength_pct(1, 42.25f), "seed zone 1 fuzzy_strength_pct");
-    TEST_CHECK(zones_config_set_coupling_cell(1, 0, 10.5f), "seed zone 1 coupling cell (1,0)");
-    TEST_CHECK(zones_config_set_coupling_cell(1, 2, 3.25f), "seed zone 1 coupling cell (1,2)");
+    TEST_CHECK(zones_config_set_coupling_cell(1, 0, 10.5f, 0.0f, 0.0f), "seed zone 1 coupling cell (1,0)");
+    TEST_CHECK(zones_config_set_coupling_cell(1, 2, 3.25f, 0.0f, 0.0f), "seed zone 1 coupling cell (1,2)");
     TEST_CHECK(zones_config_set_settings_source(1, 2), "seed zone 1 settings_source (copies zone 2)");
 
     /* Model is the one field this stub setup cannot control from this file
@@ -1577,8 +1603,8 @@ static void test_export_round_trips_through_import_to_identical_config(void)
     zones_config_set_temp_limits(1, 1250.0f, -15.0f);
     zones_config_set_heater_cfg(1, 60000.0f, 200.0f, 200.0f);
     zones_config_set_fuzzy_strength_pct(1, 42.25f);
-    zones_config_set_coupling_cell(1, 0, 10.5f);
-    zones_config_set_coupling_cell(1, 2, 3.25f);
+    zones_config_set_coupling_cell(1, 0, 10.5f, 0.0f, 0.0f);
+    zones_config_set_coupling_cell(1, 2, 3.25f, 0.0f, 0.0f);
     zones_config_set_settings_source(1, 2);
 
     esp_err_t err = run_export();

@@ -2397,6 +2397,105 @@ static void test_nvs_load_from_v10_blob_self_referencing_pair_is_dropped(void)
     nvs_test_clear();
 }
 
+// ZONES_CFG_VERSION 11->12 (DATA PLUMBING pass): a v11 blob (coupling_coeff[]
+// row shape, but predating coupling_tau_s[]/coupling_dead_time_s[] entirely)
+// must migrate cleanly to the current (v12) config with both new arrays at
+// 0 -- "not measured", not garbage -- while coupling_coeff[] itself and every
+// other pre-existing v11 field survive unchanged. sizeof(src) is
+// zone_cfg_v11_t/zones_cfg_v11_t -- both frozen, historical types with their
+// own _Static_assert(sizeof(...) == N) checked against a hand-computed byte
+// count, never the live zone_cfg_t/zones_cfg_t (already the v12 shape by
+// now), mirroring test_nvs_load_from_v10_blob_folds_single_pair_into_row_cell()
+// above exactly.
+static void test_nvs_load_from_v11_blob_defaults_coupling_tau_dead_time_to_zero(void)
+{
+    TEST_SECTION("nvs_load_from -- a v11 blob upconverts to v12: coupling_tau_s[]/"
+                 "coupling_dead_time_s[] default to 0 (never stored pre-v12), coupling_coeff[] "
+                 "and every other pre-existing v11 field survive unchanged");
+    nvs_test_enable(true);
+    nvs_test_clear();
+
+    zones_cfg_v11_t src;
+    memset(&src, 0, sizeof(src));
+    src.version = 11;
+    src.thermo_count = 3;
+    src.relay_count = 3;
+    src.continue_on_zone_trip = 1;
+    src.safety_tc_type = 3;
+    src.pc_link_abort_silence_ms = 45000.0f;
+    src.timing_profile_count = 1;
+    snprintf(src.timing_profiles[0].name, sizeof(src.timing_profiles[0].name), "Default");
+
+    src.zones[0].relay_mask = 0x01;
+    src.zones[0].thermo_mask = 0x01;
+    src.zones[0].max_temp_c = 1300.0f;
+    src.zones[0].fuzzy_strength_pct = 40.0f;
+    src.zones[0].settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
+    // A v11 board that HAD already measured a coupling gain (the row this
+    // pass's own bump exists to grow with tau/L) -- coupling_coeff[2] must
+    // survive the migration untouched while coupling_tau_s[2]/
+    // coupling_dead_time_s[2] (fields v11 never had at all) come out at 0.
+    src.zones[0].coupling_coeff[2] = 6.75f;
+
+    src.zones[1].relay_mask = 0x02;
+    src.zones[1].thermo_mask = 0x02;
+    src.zones[1].max_temp_c = 1250.0f;
+    src.zones[1].settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
+
+    src.zones[2].relay_mask = 0x04;
+    src.zones[2].thermo_mask = 0x04;
+    src.zones[2].max_temp_c = 1200.0f;
+    src.zones[2].settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
+
+    src.crc32 = 0; // v11's own CRC is not checked on the old-version path
+
+    stage_zones_blob(&src, sizeof(src));
+
+    zones_cfg_t out_cfg;
+    bool found = false, valid = false;
+    esp_err_t err = nvs_load_from("kiln_nvs", &out_cfg, &found, &valid);
+
+    TEST_CHECK(err == ESP_OK, "no NVS error");
+    TEST_CHECK(found && valid, "a well-formed v11 blob must migrate to a valid current (v12) config");
+    TEST_CHECK(out_cfg.version == ZONES_CFG_VERSION, "migrated config is stamped the current version");
+
+    // coupling_coeff[] carried through verbatim -- this migration does not
+    // touch the row's existing shape at all.
+    TEST_CHECK_NEAR(out_cfg.zones[0].coupling_coeff[2], 6.75f, 1e-6,
+                    "zone 0's pre-existing coupling_coeff[2] survives the v11->v12 migration untouched");
+
+    // THE thing this test is really about: coupling_tau_s[]/
+    // coupling_dead_time_s[] must be all-zero for every zone and every cell
+    // -- not garbage, not uninitialized memory -- since no version before v12
+    // ever stored either array.
+    for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
+        for (uint8_t j = 0; j < MAX31856_CHANNEL_COUNT; j++) {
+            char msg[96];
+            snprintf(msg, sizeof(msg), "zones[%u].coupling_tau_s[%u] is 0 (v11 never stored this)", i, j);
+            TEST_CHECK_NEAR(out_cfg.zones[i].coupling_tau_s[j], 0.0f, 1e-6, msg);
+            snprintf(msg, sizeof(msg), "zones[%u].coupling_dead_time_s[%u] is 0 (v11 never stored this)", i, j);
+            TEST_CHECK_NEAR(out_cfg.zones[i].coupling_dead_time_s[j], 0.0f, 1e-6, msg);
+        }
+    }
+
+    // Pre-existing v11 fields must survive the upgrade completely unchanged.
+    TEST_CHECK(out_cfg.thermo_count == 3 && out_cfg.relay_count == 3, "counts carried through");
+    TEST_CHECK(out_cfg.continue_on_zone_trip == 1, "continue_on_zone_trip carried through");
+    TEST_CHECK_NEAR(out_cfg.pc_link_abort_silence_ms, 45000.0f, 1e-6, "pc_link_abort_silence_ms carried through");
+    TEST_CHECK(strcmp(out_cfg.timing_profiles[0].name, "Default") == 0, "timing profile name carried through");
+    TEST_CHECK(out_cfg.zones[0].relay_mask == 0x01 && out_cfg.zones[1].relay_mask == 0x02 &&
+              out_cfg.zones[2].relay_mask == 0x04, "relay_mask must NOT be shifted for any zone");
+    TEST_CHECK_NEAR(out_cfg.zones[0].fuzzy_strength_pct, 40.0f, 1e-6, "zones[0].fuzzy_strength_pct survives");
+    TEST_CHECK_NEAR(out_cfg.zones[0].max_temp_c, 1300.0f, 1e-6, "zones[0].max_temp_c survives");
+    TEST_CHECK_NEAR(out_cfg.zones[1].max_temp_c, 1250.0f, 1e-6, "zones[1].max_temp_c survives");
+    TEST_CHECK_NEAR(out_cfg.zones[2].max_temp_c, 1200.0f, 1e-6, "zones[2].max_temp_c survives");
+    TEST_CHECK(out_cfg.zones[0].settings_source == ZONE_SETTINGS_SOURCE_CUSTOM,
+              "zones[0].settings_source is carried through verbatim");
+
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
 // Full end-to-end chain: a genuine v9 blob (predates coupling entirely) must
 // still land on a valid, all-zero-coupling v11 config after going through
 // BOTH migration steps back-to-back (v9->v10->v11 inside one
@@ -2930,26 +3029,47 @@ static void test_coupling_single_cell_setter_preserves_other_cells(void)
 
     // row=affected, column=stepped: zone 0's response to zone 1's step, and
     // zone 2's response to that SAME step -- two different rows, same column.
-    TEST_CHECK(zones_config_set_coupling_cell(0, 1, 10.887f), "zone 0's response to zone 1's step is set");
-    TEST_CHECK(zones_config_set_coupling_cell(2, 1, 3.332f), "zone 2's response to zone 1's step is set separately");
+    TEST_CHECK(zones_config_set_coupling_cell(0, 1, 10.887f, 42.0f, 6.0f),
+              "zone 0's response to zone 1's step is set");
+    TEST_CHECK(zones_config_set_coupling_cell(2, 1, 3.332f, 18.0f, 2.5f),
+              "zone 2's response to zone 1's step is set separately");
     float row0[MAX31856_CHANNEL_COUNT] = {0};
     float row2[MAX31856_CHANNEL_COUNT] = {0};
+    float tau0[MAX31856_CHANNEL_COUNT] = {0};
+    float dead0[MAX31856_CHANNEL_COUNT] = {0};
     TEST_CHECK(zones_config_get_coupling(0, row0), "zone 0's getter succeeds");
     TEST_CHECK(zones_config_get_coupling(2, row2), "zone 2's getter succeeds");
     TEST_CHECK_NEAR(row0[1], 10.887f, 1e-6, "zone 0's cell survived zone 2's write");
     TEST_CHECK_NEAR(row2[1], 3.332f, 1e-6, "and zone 2's cell is exactly what was set, in its OWN row");
+    // ZONES_CFG_VERSION 11->12: tau_s/dead_time_s ride alongside coeff.
+    TEST_CHECK(zones_config_get_coupling_tau(0, tau0), "zone 0's tau getter succeeds");
+    TEST_CHECK(zones_config_get_coupling_dead_time(0, dead0), "zone 0's dead-time getter succeeds");
+    TEST_CHECK_NEAR(tau0[1], 42.0f, 1e-6, "zone 0's coupling_tau_s[1] is exactly what was set");
+    TEST_CHECK_NEAR(dead0[1], 6.0f, 1e-6, "zone 0's coupling_dead_time_s[1] is exactly what was set");
 
-    TEST_CHECK(zones_config_set_coupling_cell(0, 0, 0.0f), "writing the diagonal to exactly 0 is accepted");
-    TEST_CHECK(!zones_config_set_coupling_cell(0, 0, 5.0f), "writing a NONZERO diagonal is refused");
+    TEST_CHECK(zones_config_set_coupling_cell(0, 0, 0.0f, 0.0f, 0.0f),
+              "writing the diagonal to exactly 0 is accepted");
+    TEST_CHECK(!zones_config_set_coupling_cell(0, 0, 5.0f, 0.0f, 0.0f), "writing a NONZERO diagonal is refused");
     TEST_CHECK(zones_config_get_coupling(0, row0) && row0[1] == 10.887f,
               "the refused diagonal write left zone 0's other cell untouched");
     TEST_CHECK(zones_config_get_coupling(2, row2) && row2[1] == 3.332f,
               "zone 0's diagonal write did not cross into zone 2's row");
 
-    TEST_CHECK(!zones_config_set_coupling_cell(0, 1, ZONE_COUPLING_COEFF_MAX + 1.0f),
+    TEST_CHECK(!zones_config_set_coupling_cell(0, 1, ZONE_COUPLING_COEFF_MAX + 1.0f, 1.0f, 1.0f),
               "a single cell above ZONE_COUPLING_COEFF_MAX is refused");
     TEST_CHECK(zones_config_get_coupling(0, row0) && row0[1] == 10.887f,
               "the refused cell write did not clamp or corrupt the previously-good value");
+
+    // ZONES_CFG_VERSION 11->12: an in-range coeff paired with an
+    // out-of-range tau_s must refuse the WHOLE cell -- coeff must NOT land
+    // while tau_s/dead_time_s are silently dropped (the all-or-nothing rule
+    // zones_config_set_coupling_cell()'s own header comment documents).
+    TEST_CHECK(!zones_config_set_coupling_cell(0, 1, 99.0f, ZONE_MODEL_TIME_MAX_S + 1.0f, 1.0f),
+              "an in-range coeff with an out-of-range tau_s is refused entirely");
+    TEST_CHECK(zones_config_get_coupling(0, row0) && row0[1] == 10.887f,
+              "the all-or-nothing refusal left coeff at its previous value, not the rejected 99.0");
+    TEST_CHECK(zones_config_get_coupling_tau(0, tau0) && tau0[1] == 42.0f,
+              "the all-or-nothing refusal left tau_s at its previous value too");
 
     nvs_test_enable(false);
     nvs_test_clear();
@@ -5662,6 +5782,7 @@ void run_test_zones_http(void)
 
     test_nvs_load_from_v9_blob_upconverts_new_fields_default_and_settings_source_is_custom();
     test_nvs_load_from_v10_blob_folds_single_pair_into_row_cell();
+    test_nvs_load_from_v11_blob_defaults_coupling_tau_dead_time_to_zero();
     test_nvs_load_from_v10_blob_self_referencing_pair_is_dropped();
     test_nvs_load_from_v9_blob_chains_through_v10_to_v11_with_zero_coupling();
     test_validate_accepts_control_mode_pid_fuzzy_rejects_past_it();

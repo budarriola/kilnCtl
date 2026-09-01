@@ -293,6 +293,14 @@ static esp_err_t backup_export_get_handler(httpd_req_t *req)
             zones_config_get_fuzzy_strength_pct(zi, &fuzzy_strength_pct);
             float coupling_row[MAX31856_CHANNEL_COUNT] = {0};
             zones_config_get_coupling(zi, coupling_row);
+            /* ZONES_CFG_VERSION 11->12 (DATA PLUMBING pass): the tau/L
+             * siblings of coupling_row above -- same "always answerable"
+             * reasoning, same getters' own zeroed-array contract on a zone
+             * with nothing measured yet. */
+            float coupling_tau_row[MAX31856_CHANNEL_COUNT] = {0};
+            zones_config_get_coupling_tau(zi, coupling_tau_row);
+            float coupling_dead_row[MAX31856_CHANNEL_COUNT] = {0};
+            zones_config_get_coupling_dead_time(zi, coupling_dead_row);
             uint8_t settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
             zones_config_get_settings_source(zi, &settings_source);
 
@@ -334,6 +342,16 @@ static esp_err_t backup_export_get_handler(httpd_req_t *req)
              * this block already follows. */
             for (uint8_t j = 0; j < MAX31856_CHANNEL_COUNT; j++) {
                 backup_stream_printf(&s, "\"coupling_c%u\":%.4f,", (unsigned)j, (double)coupling_row[j]);
+            }
+            /* ZONES_CFG_VERSION 11->12 (DATA PLUMBING pass): coupling_tau_c%u/
+             * coupling_dead_c%u, same per-cell always-emit shape as
+             * coupling_c%u just above -- no BACKUP_FORMAT_VERSION bump, see
+             * backup_import_apply()'s own comment on the matching parse. */
+            for (uint8_t j = 0; j < MAX31856_CHANNEL_COUNT; j++) {
+                backup_stream_printf(&s, "\"coupling_tau_c%u\":%.1f,", (unsigned)j, (double)coupling_tau_row[j]);
+            }
+            for (uint8_t j = 0; j < MAX31856_CHANNEL_COUNT; j++) {
+                backup_stream_printf(&s, "\"coupling_dead_c%u\":%.1f,", (unsigned)j, (double)coupling_dead_row[j]);
             }
             backup_stream_printf(&s, "\"settings_source\":%u", (unsigned)settings_source);
         }
@@ -854,6 +872,15 @@ static bool backup_import_apply(const char *body, char *err_msg, size_t err_cap)
          * actually has values for (a version-3 body has at most one). */
         bool has_coupling_cell[MAX31856_CHANNEL_COUNT];
         float coupling_row[MAX31856_CHANNEL_COUNT];
+        /* ZONES_CFG_VERSION 11->12 (DATA PLUMBING pass): the tau/dead-time
+         * siblings of coupling_row above, same per-cell presence tracking.
+         * NOT gated on has_coupling_cell[j] -- an export may in principle
+         * carry a coeff without a matching tau/L key (or vice versa) from a
+         * hand-edited body, and each is independently optional/preserved. */
+        bool has_coupling_tau_cell[MAX31856_CHANNEL_COUNT];
+        float coupling_tau_row[MAX31856_CHANNEL_COUNT];
+        bool has_coupling_dead_cell[MAX31856_CHANNEL_COUNT];
+        float coupling_dead_row[MAX31856_CHANNEL_COUNT];
         uint8_t settings_source; /* defaults to ZONE_SETTINGS_SOURCE_CUSTOM -- see comment above */
     } zone_candidate_t;
     zone_candidate_t zone_candidates[MAX31856_CHANNEL_COUNT];
@@ -1188,6 +1215,39 @@ static bool backup_import_apply(const char *body, char *err_msg, size_t err_cap)
                 zc->coupling_row[j] = (float)dcell;
             }
         }
+        /* ZONES_CFG_VERSION 11->12 (DATA PLUMBING pass): coupling_tau_c%u/
+         * coupling_dead_c%u, same per-cell shape as coupling_c%u just above.
+         * No version bump of BACKUP_FORMAT_VERSION -- these are purely
+         * additive optional keys, same as fuzzy_strength_pct/coupling_c%u
+         * were when they landed (an older export simply never has them, and
+         * commit's has_* guard leaves the currently-stored value alone). */
+        for (uint8_t j = 0; j < MAX31856_CHANNEL_COUNT; j++) {
+            char ckey[24];
+            snprintf(ckey, sizeof(ckey), "coupling_tau_c%u", (unsigned)j);
+            double dtau;
+            if (json_field_num(ze, ckey, &dtau)) {
+                float max = (j == zc->index) ? 0.0f : ZONE_MODEL_TIME_MAX_S;
+                if (dtau < 0 || dtau > (double)max) {
+                    snprintf(err_msg, err_cap, "zone tuning entry %u: %s out of range",
+                            (unsigned)zone_candidate_count, ckey);
+                    return false;
+                }
+                zc->has_coupling_tau_cell[j] = true;
+                zc->coupling_tau_row[j] = (float)dtau;
+            }
+            snprintf(ckey, sizeof(ckey), "coupling_dead_c%u", (unsigned)j);
+            double ddead;
+            if (json_field_num(ze, ckey, &ddead)) {
+                float max = (j == zc->index) ? 0.0f : ZONE_MODEL_TIME_MAX_S;
+                if (ddead < 0 || ddead > (double)max) {
+                    snprintf(err_msg, err_cap, "zone tuning entry %u: %s out of range",
+                            (unsigned)zone_candidate_count, ckey);
+                    return false;
+                }
+                zc->has_coupling_dead_cell[j] = true;
+                zc->coupling_dead_row[j] = (float)ddead;
+            }
+        }
         /* Version <=3 LOSSLESS backward compat: an old export's single
          * coupling_coeff/coupling_neighbor_zone pair maps onto exactly one
          * cell of the row, same "one neighbor, everything else 0" mapping
@@ -1457,7 +1517,40 @@ static bool backup_import_apply(const char *body, char *err_msg, size_t err_cap)
          * preserves the current value" convention as fuzzy_strength_pct
          * above, applied per cell instead of per field. */
         for (uint8_t j = 0; j < MAX31856_CHANNEL_COUNT; j++) {
-            if (zc->has_coupling_cell[j] && !zones_config_set_coupling_cell(zc->index, j, zc->coupling_row[j])) {
+            /* ZONES_CFG_VERSION 11->12: zones_config_set_coupling_cell() is
+             * now all-or-nothing across all three of coeff/tau/dead_time --
+             * see its own header comment. An import that only supplies coeff
+             * (every pre-v12 export, and any v12 export whose autotune run
+             * never fitted a trustworthy peer tau) must not wipe out
+             * whichever of tau/dead_time is ALREADY stored for this cell, so
+             * this reads the current value first and only overwrites the
+             * pieces this import actually supplied -- same "omit preserves"
+             * discipline coupling_row's own has_coupling_cell[] flag already
+             * follows, just extended to three fields written together. */
+            if (!zc->has_coupling_cell[j] && !zc->has_coupling_tau_cell[j] && !zc->has_coupling_dead_cell[j]) {
+                continue;
+            }
+            float coeff = zc->coupling_row[j];
+            float tau_s = zc->coupling_tau_row[j];
+            float dead_time_s = zc->coupling_dead_row[j];
+            if (!zc->has_coupling_cell[j] || !zc->has_coupling_tau_cell[j] || !zc->has_coupling_dead_cell[j]) {
+                float cur_coeff_row[MAX31856_CHANNEL_COUNT] = {0};
+                float cur_tau_row[MAX31856_CHANNEL_COUNT] = {0};
+                float cur_dead_row[MAX31856_CHANNEL_COUNT] = {0};
+                zones_config_get_coupling(zc->index, cur_coeff_row);
+                zones_config_get_coupling_tau(zc->index, cur_tau_row);
+                zones_config_get_coupling_dead_time(zc->index, cur_dead_row);
+                if (!zc->has_coupling_cell[j]) {
+                    coeff = cur_coeff_row[j];
+                }
+                if (!zc->has_coupling_tau_cell[j]) {
+                    tau_s = cur_tau_row[j];
+                }
+                if (!zc->has_coupling_dead_cell[j]) {
+                    dead_time_s = cur_dead_row[j];
+                }
+            }
+            if (!zones_config_set_coupling_cell(zc->index, j, coeff, tau_s, dead_time_s)) {
                 snprintf(err_msg, err_cap,
                         "zone tuning entry %u (channel %u) rejected at commit setting coupling_c%u",
                         (unsigned)i, zc->index, (unsigned)j);
