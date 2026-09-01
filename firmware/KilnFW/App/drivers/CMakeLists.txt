@@ -221,7 +221,7 @@ idf_component_register(SRCS "MAX31856.c"
                                 esp_partition kilnlink mbedtls lwip app_update esp_rom lvgl mdns
                                 esp_hw_support esp_hal_wdt
                                 espcoredump
-                       PRIV_REQUIRES spi_flash)
+                       PRIV_REQUIRES spi_flash spiffs)
 
 # Firmware version info (git commit/dirty flag/build timestamp), regenerated
 # on *every* build invocation -- not just when CMake reconfigures -- so it
