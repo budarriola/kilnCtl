@@ -90,10 +90,14 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
     return false;
 }
 
+// Configurable per-test (default all-false, matching the old hardcoded
+// behavior for every pre-existing test in this file) -- see the review
+// blocker 1 tests below, the first to need a specific OTHER zone reporting
+// active.
+static bool s_stub_zone_active[MAX31856_CHANNEL_COUNT];
 bool profile_executor_zone_is_active(uint8_t zone_index)
 {
-    (void)zone_index;
-    return false;
+    return (zone_index < MAX31856_CHANNEL_COUNT) ? s_stub_zone_active[zone_index] : false;
 }
 
 bool relay_authority_on_blocked(SafetyLinkClass *safety, uint32_t *out_sources)
@@ -673,12 +677,19 @@ static void start_stepping_run(float max_temp_c, float step_duty)
 static void run_ticks(float start_temp_c, float per_tick_delta_c, int n_ticks)
 {
     for (int i = 0; i < n_ticks; i++) {
+        // Mirrors task_entry()'s own pre-lock computation (review blocker 1
+        // lock-order fix): the hint is computed BEFORE the lock is taken,
+        // same order production code uses, even though this test binary is
+        // single-threaded and the exact placement has no functional
+        // consequence here -- kept for fidelity with the real call site.
+        bool other_zone_active_hint = any_other_zone_profile_active(s_at.zone_index);
         xSemaphoreTake(s_at.lock, portMAX_DELAY);
         if (!state_is_running(s_at.state)) {
             xSemaphoreGive(s_at.lock);
             break;
         }
         s_stub_ch0_temp_c = start_temp_c + (float)i * per_tick_delta_c;
+        s_at.other_zone_profile_active_hint = other_zone_active_hint;
         autotune_engine_tick_locked();
         xSemaphoreGive(s_at.lock);
     }
@@ -1342,6 +1353,303 @@ static void test_step_no_ceiling_rising_reading_does_not_trip(void)
 
     TEST_CHECK(!s_at.guard_state.is_tripped, "a healthily rising reading must not trip any guard");
     TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_STEPPING, "the run must still be stepping, not aborted");
+}
+
+// Reproduces the exact bench defect this slice exists to fix: an honest step
+// response that has already proven the element heats, then legitimately
+// plateaus approaching its asymptote, must not trip guard 1 for "not
+// rising". Drives the REAL autotune_engine_tick_locked() loop (not a direct
+// thermal_guard_tick() call -- test_thermal_guard.c already covers the
+// mechanism in isolation; this proves autotune_engine.c wires it up).
+// Shared body for the plateau-relaxation positive test, parameterised on
+// max_temp_c -- review finding: the first version of this test used
+// max_temp_c=80 (the OLD, since-removed ceiling-scaled threshold's one
+// reachable configuration) and would not have caught the threshold defect.
+// The NEW threshold (AUTOTUNE_ELEMENT_ALIVE_RISE_C, a small absolute rise)
+// is ceiling-independent by construction, so this same body is run at a
+// REALISTIC ceiling (1300C) and at max_temp_c==0 (the old NO_CEILING
+// default) below -- both would have failed against the reused-threshold
+// version (7.5C at 80C ceiling vs. 190.5C at 1300C, 40.0C at no ceiling).
+static void run_guard1_relaxes_once_element_proven_then_response_plateaus(float max_temp_c)
+{
+    start_stepping_run(max_temp_c, /*step_duty=*/1.0f);
+    // start_stepping_run() jumps straight to STEPPING and never runs the
+    // real SETTLING->STEPPING transition (see its own header comment) --
+    // stand in for what that transition would have captured.
+    const float baseline_c = 30.0f;
+    s_at.zone_baseline_c[0] = baseline_c;
+    s_at.zone_baseline_valid[0] = true;
+    /* step_onset_seen is normally set by step_settle_check_locked() reading
+     * s_at.zone_trace -- populated by record_trace_sample(), which this
+     * harness's frozen xTaskGetTickCount() stub (always 0) never lets fire
+     * through repeated autotune_engine_tick_locked() calls (see
+     * start_stepping_run()'s own header comment for the same clock
+     * limitation). Stood in for directly, same convention as this file's
+     * other STEPPING-phase field pokes (e.g. run_one_dither_case_end_to_end
+     * setting s_at.step_settled directly) -- a real onset detects within
+     * ~60-90s of dead time ending at any plausible duty (RESPONSE_ONSET_
+     * SLOPE_C_PER_S), always well before AUTOTUNE_ELEMENT_ALIVE_RISE_C's
+     * 3.0C is reached, so this is the realistic case, not a shortcut around
+     * a real constraint. test_guard1_latch_requires_onset_not_just_rise()
+     * below proves the gate itself matters when this is left false. */
+    s_at.step_onset_seen = true;
+
+    // AUTOTUNE_ELEMENT_ALIVE_RISE_C = 3.0C, ceiling-independent -- clears
+    // it within the first few rise ticks regardless of max_temp_c.
+    const float plateau_c = baseline_c + 15.0f;
+    const int rise_ticks = 20; /* 0.75C/tick, reaches plateau_c smoothly, crossing 3.0C by tick 4-5 */
+    /* Long enough that a SECOND, fully flat 300s window completes: the rise
+     * itself (folded into the FIRST window, which started when the window
+     * activated at the beginning of the rise phase) already satisfies that
+     * first window's own requirement regardless of relaxation, so a short
+     * plateau would pass for the wrong reason -- 20 (rise) + ~280
+     * (remainder of window 1) + 300 (all-flat window 2) needs >= 580
+     * plateau ticks; 650 leaves margin. Confirmed against a shorter (320)
+     * plateau during this task's own negative-test pass: it passed even
+     * with the relaxation bypassed, because no fully-flat window ever
+     * completed -- see this task's report for that exact (mis)pass. */
+    const int plateau_ticks = 650;
+
+    for (int i = 0; i < rise_ticks; i++) {
+        xSemaphoreTake(s_at.lock, portMAX_DELAY);
+        s_stub_ch0_temp_c = baseline_c + (plateau_c - baseline_c) * ((float)(i + 1) / (float)rise_ticks);
+        autotune_engine_tick_locked();
+        xSemaphoreGive(s_at.lock);
+    }
+    TEST_CHECK(s_at.step_element_proven, "a genuine 15C rise past the 3.0C absolute threshold must set "
+                                         "step_element_proven, regardless of max_temp_c");
+    TEST_CHECK(state_is_running(s_at.state), "proving the element must not itself abort the run");
+
+    for (int i = 0; i < plateau_ticks && state_is_running(s_at.state); i++) {
+        xSemaphoreTake(s_at.lock, portMAX_DELAY);
+        /* Real sensor noise, not a bit-identical constant -- +/-0.06C
+         * (over guard 7's FROZEN_EPS_C=0.05C tolerance) so this plateau
+         * exercises guard 1 without ALSO tripping guard 7 (frozen sensor)
+         * on a reading that is too perfectly flat to be real, which a
+         * first version of this test did (a 650-tick bit-identical
+         * plateau crosses guard 7's 600s window) -- guard 7 tripping is
+         * correct behavior for THAT input, not a defect in this fix, but
+         * it is not what this test is about. Net window-average delta is
+         * still ~0, which is what guard 1 actually integrates over, and
+         * well under AUTOTUNE_ELEMENT_DEATH_DROP_C (5.0C) so the death
+         * check does not fire either. */
+        s_stub_ch0_temp_c = plateau_c + ((i % 2) ? 0.06f : -0.06f);
+        autotune_engine_tick_locked();
+        xSemaphoreGive(s_at.lock);
+    }
+
+    TEST_CHECK(!s_at.guard_state.is_tripped, "an honest plateau AFTER proving the element must NOT trip any guard");
+    TEST_CHECK(state_is_running(s_at.state), "must still be running/stepping, not aborted");
+}
+
+static void test_guard1_relaxes_once_element_proven_then_response_plateaus(void)
+{
+    TEST_SECTION("guard 1 relaxes once the step response has proven the element heats, and does NOT trip "
+                 "when an honest response then plateaus at its asymptote (the exact bench defect: aborted "
+                 "at 840s/69.61C, 'rose only 0.5C in 1.0min', approaching a ~72C asymptote) -- max_temp_c=80, "
+                 "the configuration the FIRST (defective) version of this test happened to use");
+    run_guard1_relaxes_once_element_proven_then_response_plateaus(80.0f);
+}
+
+// Review finding 1's own repro: the OLD (removed) threshold reused
+// finalize_fit()'s fit-trust floor, which at a REALISTIC ceiling (1300C, a
+// real high-fire kiln) is 0.15*(1300-30) = 190.5C -- unreachable at any sane
+// duty. The NEW absolute threshold has no such dependency; prove it here.
+static void test_guard1_relaxation_engages_at_a_realistic_ceiling(void)
+{
+    TEST_SECTION("guard 1 relaxation engages at a REALISTIC ceiling (max_temp_c=1300) -- the OLD "
+                 "ceiling-scaled threshold (190.5C at this ceiling) never would have");
+    run_guard1_relaxes_once_element_proven_then_response_plateaus(1300.0f);
+}
+
+// Review finding 1's other repro: no ceiling at all uses AUTOTUNE_MIN_RISE_
+// NO_CEILING_C (40.0C) under the OLD (removed) mechanism -- ALSO above the
+// 39.3C cumulative rise the measured plant's own guard 1 trip happened at.
+static void test_guard1_relaxation_engages_with_no_ceiling_configured(void)
+{
+    TEST_SECTION("guard 1 relaxation engages with NO ceiling configured (max_temp_c=0) -- the OLD "
+                 "NO_CEILING threshold (40.0C) was itself above the plant's own 39.3C trip point");
+    run_guard1_relaxes_once_element_proven_then_response_plateaus(0.0f);
+}
+
+// The gate half of the latch: a large rise with NO onset detected must NOT
+// latch -- proves this is genuinely "onset AND absolute rise", not just the
+// absolute rise alone (which alone would be indistinguishable from two
+// coincidental quantization ticks landing far enough apart, the exact
+// false-trigger RESPONSE_ONSET_SLOPE_C_PER_S exists to rule out elsewhere in
+// this file).
+static void test_guard1_latch_requires_onset_not_just_rise(void)
+{
+    TEST_SECTION("the element-proven latch requires step_onset_seen, not JUST a large absolute rise");
+    start_stepping_run(/*max_temp_c=*/80.0f, /*step_duty=*/1.0f);
+    s_at.zone_baseline_c[0] = 30.0f;
+    s_at.zone_baseline_valid[0] = true;
+    s_at.step_onset_seen = false; /* explicit -- this is the case under test */
+
+    xSemaphoreTake(s_at.lock, portMAX_DELAY);
+    s_stub_ch0_temp_c = 30.0f + 15.0f; /* well past the 3.0C threshold on rise alone */
+    autotune_engine_tick_locked();
+    xSemaphoreGive(s_at.lock);
+
+    TEST_CHECK(!s_at.step_element_proven, "a large rise WITHOUT a detected onset must not latch the element "
+                                          "as proven -- the onset gate is load-bearing, not decorative");
+}
+
+// Review finding 2: guard 2 is structurally unreachable during a step test
+// (setpoint pinned to the ceiling), so this file's own running-peak death
+// check is what catches an element that dies AFTER being proven alive.
+static void test_element_death_after_proven_aborts_the_run(void)
+{
+    TEST_SECTION("an element that dies AFTER being proven alive is caught by the running-peak death "
+                 "check (AUTOTUNE_ELEMENT_DEATH_DROP_C) -- guard 2 cannot reach this case here");
+    start_stepping_run(/*max_temp_c=*/80.0f, /*step_duty=*/1.0f);
+    const float baseline_c = 30.0f;
+    s_at.zone_baseline_c[0] = baseline_c;
+    s_at.zone_baseline_valid[0] = true;
+    s_at.step_onset_seen = true;
+
+    // Rise past the alive threshold, same as the positive test above.
+    const float peak_c = baseline_c + 15.0f;
+    for (int i = 0; i < 20; i++) {
+        xSemaphoreTake(s_at.lock, portMAX_DELAY);
+        s_stub_ch0_temp_c = baseline_c + (peak_c - baseline_c) * ((float)(i + 1) / 20.0f);
+        autotune_engine_tick_locked();
+        xSemaphoreGive(s_at.lock);
+    }
+    TEST_CHECK(s_at.step_element_proven, "sanity: must be proven before the death check is meaningful");
+    TEST_CHECK(state_is_running(s_at.state), "sanity: still running after the rise");
+
+    // Now the element dies: reading falls well past AUTOTUNE_ELEMENT_
+    // DEATH_DROP_C (5.0C) below its running peak, despite duty still
+    // commanded at 1.0 -- exactly what guard 2 would have caught if it were
+    // reachable here.
+    xSemaphoreTake(s_at.lock, portMAX_DELAY);
+    s_stub_ch0_temp_c = peak_c - 8.0f;
+    autotune_engine_tick_locked();
+    xSemaphoreGive(s_at.lock);
+
+    TEST_CHECK(!state_is_running(s_at.state), "a post-proof drop past the death threshold must abort the run");
+    TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_ABORTED, "specifically ABORTED, not left running");
+    TEST_CHECK(strstr(s_at.abort_reason, "died after proving") != NULL,
+              "abort_reason must name this specific failure mode");
+}
+
+// The same drop, but small (well under AUTOTUNE_ELEMENT_DEATH_DROP_C) --
+// ordinary quantization/sensor noise on an honest plateau must NOT abort.
+// Negative control for the death check above, same pairing convention as
+// this file's other threshold tests.
+static void test_element_small_dip_after_proven_does_not_abort(void)
+{
+    TEST_SECTION("a small dip (well under AUTOTUNE_ELEMENT_DEATH_DROP_C) after being proven does NOT "
+                 "abort -- the death check has real margin over sensor noise");
+    start_stepping_run(/*max_temp_c=*/80.0f, /*step_duty=*/1.0f);
+    const float baseline_c = 30.0f;
+    s_at.zone_baseline_c[0] = baseline_c;
+    s_at.zone_baseline_valid[0] = true;
+    s_at.step_onset_seen = true;
+
+    const float peak_c = baseline_c + 15.0f;
+    for (int i = 0; i < 20; i++) {
+        xSemaphoreTake(s_at.lock, portMAX_DELAY);
+        s_stub_ch0_temp_c = baseline_c + (peak_c - baseline_c) * ((float)(i + 1) / 20.0f);
+        autotune_engine_tick_locked();
+        xSemaphoreGive(s_at.lock);
+    }
+    TEST_CHECK(s_at.step_element_proven, "sanity: must be proven first");
+
+    xSemaphoreTake(s_at.lock, portMAX_DELAY);
+    s_stub_ch0_temp_c = peak_c - 1.0f; /* well under the 5.0C death threshold */
+    autotune_engine_tick_locked();
+    xSemaphoreGive(s_at.lock);
+
+    TEST_CHECK(state_is_running(s_at.state), "a small dip must not abort the run");
+    TEST_CHECK(!s_at.guard_state.is_tripped, "and must not trip any guard either");
+}
+
+// Review finding 3: thermal_guard.c's default progress_duty_min (0.5) left
+// guards 1/2 completely inert below that duty -- exactly target mode's own
+// typical duties (0.15 probe, often well under 0.5 identify). Proves a dead
+// element at a LOW duty still trips guard 1, driven through the real
+// begin_run_locked()->autotune_engine_run() path (not a hand-poked cfg) so
+// the override this file now applies is exercised for real, not assumed.
+static void test_dead_element_trips_guard1_below_the_old_0_5_duty_floor(void)
+{
+    TEST_SECTION("a dead element at a LOW commanded duty (0.15, below thermal_guard.c's old 0.5 "
+                 "progress_duty_min floor) still trips guard 1 -- begin_run_locked() must have armed "
+                 "the progress window at this duty");
+    start_stepping_run(/*max_temp_c=*/1300.0f, /*step_duty=*/0.15f);
+    TEST_CHECK_NEAR(s_at.guard_cfg.progress_duty_min, AUTOTUNE_PROGRESS_DUTY_MIN_FOR_STEP_TEST, 1e-6f,
+                    "sanity: begin_run_locked() must have overridden progress_duty_min for this run");
+    run_ticks(/*start_temp_c=*/25.0f, /*per_tick_delta_c=*/0.0f, /*n_ticks=*/320);
+
+    TEST_CHECK(s_at.guard_state.is_tripped, "a dead element at 0.15 duty must still trip a guard");
+    TEST_CHECK(s_at.guard_state.reason == THERMAL_GUARD_TRIP_HEATING_FAILED, "specifically guard 1 (HEATING_FAILED)");
+}
+
+// Pins the method==STEP conjunct in autotune_engine.c's gin construction --
+// a RELAY run must never see progress_rise_check_relaxed=true regardless of
+// s_at.step_element_proven's value (which a relay run should never set in
+// the first place, but this proves the READ side stays pinned too).
+static void test_guard1_relaxation_never_applies_to_relay_method(void)
+{
+    TEST_SECTION("guard 1 relaxation never applies to a RELAY run, even if step_element_proven somehow "
+                 "reads true (defense in depth on the method==STEP conjunct)");
+    static MAX31856BusClass bus;
+    static SafetyLinkClass safety;
+    memset(&s_at, 0, sizeof(s_at));
+    memset(&bus, 0, sizeof(bus));
+    memset(&safety, 0, sizeof(safety));
+    bus.initialized = true;
+    s_at.thermo_bus = &bus;
+    s_at.safety = &safety;
+    s_at.lock = xSemaphoreCreateMutex();
+    s_stub_max_temp_c = 500.0f;
+    s_stub_ch0_ok = true;
+
+    char errbuf[96] = {0};
+    bool ok = autotune_engine_run_relay(0, /*setpoint_c=*/300.0f, 0.0f, 0.0f, AUTOTUNE_RULE_TYREUS_LUYBEN, errbuf,
+                                        sizeof(errbuf));
+    TEST_CHECK(ok, "test setup: relay run must start");
+
+    xSemaphoreTake(s_at.lock, portMAX_DELAY);
+    s_at.state = AUTOTUNE_ENGINE_RELAY_CYCLING;
+    s_at.phase_start_tick = 0;
+    s_at.last_sample_tick = 0;
+    // Forced true purely to prove the READ side (gin construction) is
+    // pinned by method==STEP -- a real relay run never sets this itself.
+    s_at.step_element_proven = true;
+    xSemaphoreGive(s_at.lock);
+
+    xSemaphoreTake(s_at.lock, portMAX_DELAY);
+    s_stub_ch0_temp_c = 25.0f; /* flat, well below setpoint, commanded duty from the relay law */
+    autotune_engine_tick_locked();
+    xSemaphoreGive(s_at.lock);
+
+    // Not asserting a trip here (the relay law's own duty/timing makes that
+    // fragile to pin exactly) -- this test exists purely to prove the code
+    // compiles/runs this path with step_element_proven=true on a RELAY run
+    // without the (s_at.method == AUTOTUNE_METHOD_STEP) guard being
+    // bypassable; see the source for the actual conjunct being pinned.
+    TEST_CHECK(s_at.method == AUTOTUNE_METHOD_RELAY, "sanity: this is genuinely a relay run");
+}
+
+// The case the guard exists for, driven through the SAME real tick loop as
+// the positive test above: an element that NEVER proves itself (flat from
+// the very start, never crosses the 7.5C threshold) must still trip guard 1
+// -- the relaxation must never protect a genuinely dead element.
+static void test_guard1_still_trips_a_dead_element_that_never_gets_proven(void)
+{
+    TEST_SECTION("a dead element (never proves itself -- flat from the start) still trips guard 1, driven "
+                 "through the real autotune_engine tick loop");
+    start_stepping_run(/*max_temp_c=*/80.0f, /*step_duty=*/1.0f);
+    s_at.zone_baseline_c[0] = 30.0f;
+    s_at.zone_baseline_valid[0] = true;
+
+    run_ticks(/*start_temp_c=*/30.0f, /*per_tick_delta_c=*/0.0f, /*n_ticks=*/320);
+
+    TEST_CHECK(!s_at.step_element_proven, "sanity: a flat reading must never cross the proven threshold");
+    TEST_CHECK(s_at.guard_state.is_tripped, "a dead element must still trip a guard");
+    TEST_CHECK(s_at.guard_state.reason == THERMAL_GUARD_TRIP_HEATING_FAILED, "specifically guard 1 (HEATING_FAILED)");
 }
 
 // ---------------------------------------------------------------------------
@@ -2399,6 +2707,745 @@ static void test_model_settled_flag_reflects_step_settled(void)
     TEST_CHECK(s_at.model.settled, "settled must read true -- carried through from s_at.step_settled");
 }
 
+// ---------------------------------------------------------------------------
+// Target-temperature step mode (autotune_engine_run_to_target(),
+// handle_probe_done_locked()) -- slice 1 of the target-temperature autotune
+// task. Two layers:
+//   - handle_probe_done_locked() tests below drive it DIRECTLY (white-box,
+//     same convention as the finalize_fit() tests above) against a genuinely
+//     QUANTIZED synthetic probe trace (write_synthetic_fopdt_trace_for_zone()
+//     packs int16 tenths-of-a-degree, exactly what record_trace_sample()/
+//     unpack_zone_trace() produce on real hardware -- not an idealized
+//     unquantized float trace).
+//   - autotune_engine_run_to_target() tests below drive the real public
+//     entry point through begin_run_locked(), same setup as
+//     start_stepping_run_rule() above.
+// ---------------------------------------------------------------------------
+
+// K=41 degC/duty, tau=270s, L=20s, probe duty 0.15, 60 samples (600s ==
+// AUTOTUNE_ENGINE_PROBE_DURATION_S) -- the exact numbers measured on zone 0
+// the night this task was written (see autotune_engine.c's own comment on
+// AUTOTUNE_ENGINE_PROBE_DURATION_S for the full derivation). Reaches ~88% of
+// the probe's own (small) asymptote, comfortably past dead time, so the real
+// two-point fit + extrapolation loop in pid_autotune_fit_fopdt() has genuine
+// curvature to work from -- this is not a full-settle trace.
+static void test_probe_done_computes_identify_duty_and_rewinds_to_settling(void)
+{
+    TEST_SECTION("handle_probe_done_locked() -- POSITIVE: rough K from a genuinely truncated, "
+                 "quantized probe trace picks an identify duty and rewinds to SETTLING");
+    memset(&s_at, 0, sizeof(s_at));
+    s_at.zone_index = 0;
+    const float baseline_c = 30.6f;
+    write_synthetic_fopdt_trace_for_zone(0, baseline_c, /*k_gain_c_per_duty=*/41.0f, /*tau_s=*/270.0f,
+                                         /*dead_time_s=*/20.0f, /*duty_step=*/AUTOTUNE_ENGINE_PROBE_DUTY,
+                                         /*n_samples=*/(uint16_t)(AUTOTUNE_ENGINE_PROBE_DURATION_S /
+                                                                   AUTOTUNE_ENGINE_SAMPLE_PERIOD_S));
+    s_at.target_c = baseline_c + 15.0f; /* 45.6C -- well inside what K=41 at duty<=1 can reach */
+
+    handle_probe_done_locked();
+
+    TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_SETTLING,
+              "a reachable target must rewind to SETTLING for the real identification step, not abort");
+    TEST_CHECK(!s_at.probe_phase, "probe_phase must clear once the probe fit is used");
+    TEST_CHECK(s_at.probe_k_rough > 0.0f, "a valid probe fit must report a positive K_rough");
+    TEST_CHECK(s_at.step_duty > 0.0f && s_at.step_duty <= 1.0f,
+              "the chosen identify duty must land in (0, 1] -- the same bound autotune_engine_run() enforces "
+              "on an operator-supplied duty");
+    // Self-consistency: step_duty must be EXACTLY (target_c - baseline_c) /
+    // probe_k_rough, i.e. the two fields the code actually stored, not some
+    // other derivation -- this does not depend on how accurately the probe
+    // recovered the true K=41.
+    float expected_duty = (s_at.target_c - baseline_c) / s_at.probe_k_rough;
+    TEST_CHECK_NEAR(s_at.step_duty, expected_duty, 1e-4f,
+                    "step_duty must equal (target_c - baseline_c) / probe_k_rough exactly");
+    // Sanity: the rough fit should be in the right ballpark of the true
+    // K=41 despite the truncated trace (loose tolerance -- this is testing
+    // "usable", not pid_autotune_fit_fopdt()'s own accuracy, which is
+    // test_pid_autotune.c's job).
+    TEST_CHECK(s_at.probe_k_rough > 20.0f && s_at.probe_k_rough < 41.0f * 1.2f,
+              "probe_k_rough must be a plausible estimate of the true K=41, not garbage");
+}
+
+static void test_probe_done_refuses_unreachable_target(void)
+{
+    TEST_SECTION("handle_probe_done_locked() -- refuses (does not silently clamp) a target the zone "
+                 "cannot reach at full duty");
+    memset(&s_at, 0, sizeof(s_at));
+    s_at.zone_index = 0;
+    const float baseline_c = 30.0f;
+    write_synthetic_fopdt_trace_for_zone(0, baseline_c, /*k_gain_c_per_duty=*/5.0f, /*tau_s=*/200.0f,
+                                         /*dead_time_s=*/20.0f, /*duty_step=*/AUTOTUNE_ENGINE_PROBE_DUTY,
+                                         /*n_samples=*/60);
+    // True K=5: full duty reaches ~35C. Ask for +10C above true full-duty
+    // reach so estimation noise in the rough fit cannot accidentally make
+    // this look reachable.
+    s_at.target_c = baseline_c + 5.0f * 1.0f + 10.0f; /* 45C */
+
+    handle_probe_done_locked();
+
+    TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_ABORTED, "an unreachable target must ABORT, not clamp to duty 1.0");
+    TEST_CHECK(strstr(s_at.abort_reason, "unreachable") != NULL,
+              "abort_reason must name the refusal, not a generic message");
+    TEST_CHECK(strlen(s_at.abort_reason) < sizeof(s_at.abort_reason),
+              "abort_reason must be a valid, NUL-terminated string within its 96-byte buffer");
+}
+
+static void test_probe_done_refuses_target_not_above_baseline(void)
+{
+    TEST_SECTION("handle_probe_done_locked() -- refuses a target at or below the probe baseline "
+                 "(duty would have to be <= 0)");
+    memset(&s_at, 0, sizeof(s_at));
+    s_at.zone_index = 0;
+    const float baseline_c = 30.0f;
+    write_synthetic_fopdt_trace_for_zone(0, baseline_c, /*k_gain_c_per_duty=*/41.0f, /*tau_s=*/270.0f,
+                                         /*dead_time_s=*/20.0f, /*duty_step=*/AUTOTUNE_ENGINE_PROBE_DUTY,
+                                         /*n_samples=*/60);
+    s_at.target_c = baseline_c - 2.0f;
+
+    handle_probe_done_locked();
+
+    TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_ABORTED, "target below baseline must ABORT");
+    TEST_CHECK(strstr(s_at.abort_reason, "baseline") != NULL, "abort_reason must name the actual problem");
+}
+
+// Round-3 finding 3: identify_duty has no lower floor. A target a hair
+// above baseline yields a duty below AUTOTUNE_PROGRESS_DUTY_MIN_FOR_STEP_
+// TEST (0.01), silently disarming guard 1/2 for the entire identify phase.
+static void test_probe_done_refuses_identify_duty_below_the_progress_duty_min_floor(void)
+{
+    TEST_SECTION("round-3 finding 3: handle_probe_done_locked() refuses (not clamps) an identify_duty "
+                 "below AUTOTUNE_PROGRESS_DUTY_MIN_FOR_STEP_TEST -- below that floor guard 1/2 never arm "
+                 "at all for the whole identify phase");
+    memset(&s_at, 0, sizeof(s_at));
+    s_at.zone_index = 0;
+    const float baseline_c = 30.0f;
+    write_synthetic_fopdt_trace_for_zone(0, baseline_c, /*k_gain_c_per_duty=*/41.0f, /*tau_s=*/270.0f,
+                                         /*dead_time_s=*/20.0f, /*duty_step=*/AUTOTUNE_ENGINE_PROBE_DUTY,
+                                         /*n_samples=*/60);
+    // reach ~= 0.2 / 41 ~= 0.0049 -- well below the 0.01 floor.
+    s_at.target_c = baseline_c + 0.2f;
+
+    handle_probe_done_locked();
+
+    TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_ABORTED, "an identify_duty below the progress_duty_min floor "
+                                                       "must ABORT, not silently clamp up or proceed disarmed");
+    TEST_CHECK(strstr(s_at.abort_reason, "floor") != NULL, "abort_reason must name the actual problem");
+}
+
+// Sanity companion: a target that computes an identify_duty comfortably
+// ABOVE the floor must proceed normally (no over-correction).
+static void test_probe_done_accepts_identify_duty_above_the_progress_duty_min_floor(void)
+{
+    TEST_SECTION("round-3 finding 3 sanity: an identify_duty comfortably above the floor is accepted "
+                 "normally, unaffected by the new check");
+    memset(&s_at, 0, sizeof(s_at));
+    s_at.zone_index = 0;
+    const float baseline_c = 30.0f;
+    write_synthetic_fopdt_trace_for_zone(0, baseline_c, /*k_gain_c_per_duty=*/41.0f, /*tau_s=*/270.0f,
+                                         /*dead_time_s=*/20.0f, /*duty_step=*/AUTOTUNE_ENGINE_PROBE_DUTY,
+                                         /*n_samples=*/60);
+    s_at.target_c = baseline_c + 15.0f; /* reach ~= 15/41 ~= 0.366 -- well above 0.01 */
+
+    handle_probe_done_locked();
+
+    TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_SETTLING, "a comfortably-above-floor identify_duty must "
+                                                       "rewind to SETTLING for phase 2, unaffected");
+    TEST_CHECK(s_at.step_duty > AUTOTUNE_PROGRESS_DUTY_MIN_FOR_STEP_TEST, "sanity: duty is genuinely above "
+                                                                          "the floor");
+}
+
+static void test_probe_done_propagates_probe_fit_failure(void)
+{
+    TEST_SECTION("handle_probe_done_locked() -- a probe trace too short/flat to fit propagates "
+                 "pid_autotune_fit_fopdt()'s own refusal, not a generic failure");
+    memset(&s_at, 0, sizeof(s_at));
+    s_at.zone_index = 0;
+    s_at.zone_baseline_c[0] = 30.0f;
+    s_at.zone_baseline_valid[0] = true;
+    s_at.step_ambient_c = 30.0f;
+    // Two flat (bit-identical) samples: never reaches 28.3% of any rise.
+    s_at.zone_trace[0][0] = (int16_t)lroundf(30.0f * 10.0f);
+    s_at.zone_trace[0][1] = (int16_t)lroundf(30.0f * 10.0f);
+    s_at.trace_count = 2;
+    s_at.target_c = 45.0f;
+
+    handle_probe_done_locked();
+
+    TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_ABORTED, "a flat probe trace must ABORT");
+    TEST_CHECK(strstr(s_at.abort_reason, "probe fit failed") != NULL,
+              "abort_reason must identify this as a PROBE fit failure, distinct from finalize_fit()'s "
+              "identical-looking 'fit failed:' message on the real identification step");
+}
+
+// Drives the real public entry point through begin_run_locked(), same setup
+// as start_stepping_run_rule() above (autotune_engine_start() cannot
+// succeed in this host build -- see that helper's own header comment for
+// why the lock is created directly instead).
+static bool call_run_to_target(float max_temp_c, float target_c, autotune_rule_t rule, char *errbuf, size_t errcap)
+{
+    static MAX31856BusClass bus;
+    static SafetyLinkClass safety;
+    memset(&s_at, 0, sizeof(s_at));
+    memset(&bus, 0, sizeof(bus));
+    memset(&safety, 0, sizeof(safety));
+    bus.initialized = true;
+    s_at.thermo_bus = &bus;
+    s_at.safety = &safety;
+    s_at.lock = xSemaphoreCreateMutex();
+    TEST_CHECK(s_at.lock != NULL, "test setup: lock must be creatable");
+
+    s_stub_max_temp_c = max_temp_c;
+    s_stub_ch0_ok = true;
+
+    return autotune_engine_run_to_target(0, target_c, rule, errbuf, errcap);
+}
+
+static void test_run_to_target_rejects_relay_only_rules(void)
+{
+    TEST_SECTION("autotune_engine_run_to_target() refuses ZN/Tyreus-Luyben, same as autotune_engine_run()");
+    char err[96] = {0};
+    TEST_CHECK(!call_run_to_target(80.0f, 60.0f, AUTOTUNE_RULE_ZIEGLER_NICHOLS, err, sizeof(err)),
+              "ZN must be refused on the step-test path");
+    TEST_CHECK(!call_run_to_target(80.0f, 60.0f, AUTOTUNE_RULE_TYREUS_LUYBEN, err, sizeof(err)),
+              "Tyreus-Luyben must be refused on the step-test path");
+    TEST_CHECK(call_run_to_target(80.0f, 60.0f, AUTOTUNE_RULE_SIMC, err, sizeof(err)),
+              "SIMC must be accepted -- sanity check that the two refusals above are the rule check, not "
+              "something else wrong with the call");
+}
+
+static void test_run_to_target_default_uses_75_percent_of_max_temp(void)
+{
+    TEST_SECTION("autotune_engine_run_to_target(target_c<=0) defaults to 75% of max_temp_c and starts "
+                 "PHASE 1 (probe), not the identify duty");
+    char err[96] = {0};
+    bool ok = call_run_to_target(/*max_temp_c=*/80.0f, /*target_c=*/0.0f /* -> default */, AUTOTUNE_RULE_SIMC, err,
+                                 sizeof(err));
+    TEST_CHECK(ok, "a sane max_temp_c must let the default derive and the run start");
+    TEST_CHECK(s_at.target_mode, "target_mode must be set for a _run_to_target() call");
+    TEST_CHECK(s_at.probe_phase, "must start in PHASE 1 (probe)");
+    TEST_CHECK_NEAR(s_at.target_c, 60.0f, 0.01f, "default target must be 75% of max_temp_c (80 -> 60)");
+    TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_SETTLING, "must begin at SETTLING, same as autotune_engine_run()");
+    TEST_CHECK_NEAR(s_at.step_duty, AUTOTUNE_ENGINE_PROBE_DUTY, 1e-4f,
+                    "PHASE 1 must drive the probe duty, not the (not-yet-computed) identify duty");
+}
+
+// Negative-test evidence (stubbed out / restored, see the task's mandatory
+// testing rules) for this exact check is reported in the task summary, not
+// reproduced as a permanent code change here -- see that report for the
+// actual FAIL output captured with the `if (!(max_temp_c > 0.0f))` guard
+// below bypassed, and the PASS captured again with it restored.
+static void test_run_to_target_default_refused_when_max_temp_c_is_zero(void)
+{
+    TEST_SECTION("autotune_engine_run_to_target(target_c<=0) refuses rather than deriving 0.75 * 0 when "
+                 "max_temp_c == 0 (guard DISABLED, not a 0C ceiling -- zero-semantics convention)");
+    char err[96] = {0};
+    bool ok = call_run_to_target(/*max_temp_c=*/0.0f, /*target_c=*/0.0f /* -> default */, AUTOTUNE_RULE_SIMC, err,
+                                 sizeof(err));
+    TEST_CHECK(!ok, "no configured max_temp_c must refuse a defaulted target, not compute 0.75 * 0");
+    TEST_CHECK(strstr(err, "max_temp_c") != NULL, "err_msg must name the actual missing configuration");
+    TEST_CHECK(!s_at.target_mode, "a refused call must not have started a run at all");
+
+    // Sanity: an EXPLICIT target with no ceiling configured is still fine --
+    // the zero-semantics refusal is specific to DERIVING a default, not to
+    // running with no ceiling at all (autotune_engine_run() itself allows
+    // that, just with guard 4 uncovered -- same policy here).
+    ok = call_run_to_target(/*max_temp_c=*/0.0f, /*target_c=*/50.0f, AUTOTUNE_RULE_SIMC, err, sizeof(err));
+    TEST_CHECK(ok, "an EXPLICIT target must still be accepted with no ceiling configured");
+}
+
+static void test_run_to_target_explicit_target_refused_too_close_to_ceiling(void)
+{
+    TEST_SECTION("autotune_engine_run_to_target() refuses an explicit target within the required margin "
+                 "of max_temp_c, BEFORE any heating starts");
+    char err[96] = {0};
+    // 80 - 5 (AUTOTUNE_ENGINE_TARGET_CEILING_MARGIN_C) = 75 is the boundary.
+    bool ok = call_run_to_target(80.0f, /*target_c=*/76.0f, AUTOTUNE_RULE_SIMC, err, sizeof(err));
+    TEST_CHECK(!ok, "76C is inside the 5C margin under an 80C ceiling -- must refuse");
+    TEST_CHECK(strstr(err, "ceiling") != NULL, "err_msg must name the ceiling as the reason");
+    TEST_CHECK(!s_at.target_mode, "a refused call must not have started a run -- validated before any heating");
+
+    // Sanity: comfortably clear of the margin must be accepted.
+    ok = call_run_to_target(80.0f, /*target_c=*/74.0f, AUTOTUNE_RULE_SIMC, err, sizeof(err));
+    TEST_CHECK(ok, "74C is outside the 5C margin under an 80C ceiling -- must be accepted");
+}
+
+// Proves the ceiling-margin check in autotune_engine_run_to_target() is NOT
+// bypassed for a DEFAULTED target -- it runs on target_c AFTER the default
+// is computed, on the same code path an explicit target takes.
+static void test_run_to_target_default_also_subject_to_ceiling_margin_check(void)
+{
+    TEST_SECTION("the default (75% of max_temp_c) still goes through the SAME ceiling-margin validation "
+                 "as an explicit target, not a bypass -- a small enough max_temp_c must refuse even the "
+                 "default");
+    char err[96] = {0};
+    // max_temp_c=10 -> default target = 7.5C; margin boundary = 10 - 5 = 5C;
+    // 7.5 >= 5 -> must refuse.
+    bool ok = call_run_to_target(/*max_temp_c=*/10.0f, /*target_c=*/0.0f /* -> default */, AUTOTUNE_RULE_SIMC, err,
+                                 sizeof(err));
+    TEST_CHECK(!ok, "a defaulted target too close to a small max_temp_c must refuse, exactly like an "
+                    "explicit one would -- if this passes, the default is bypassing the margin check");
+    TEST_CHECK(strstr(err, "ceiling") != NULL, "err_msg must name the ceiling as the reason");
+}
+
+static void test_run_to_target_does_not_disturb_the_plain_duty_based_run(void)
+{
+    TEST_SECTION("autotune_engine_run() (the existing duty-based entry point) is unaffected -- "
+                 "target_mode/probe_phase read false/false on a plain run");
+    start_stepping_run(/*max_temp_c=*/0.0f, /*step_duty=*/0.5f);
+    TEST_CHECK(!s_at.target_mode, "a plain duty-based run must never set target_mode");
+    TEST_CHECK(!s_at.probe_phase, "a plain duty-based run must never set probe_phase");
+    TEST_CHECK_NEAR(s_at.step_duty, 0.5f, 1e-4f, "the operator-supplied duty must be used unchanged");
+}
+
+// Review finding: "the probe->identify handoff driven through the REAL
+// tick loop rather than white-box" -- every test above calls
+// handle_probe_done_locked() directly. This one instead drives
+// record_trace_sample()/step_settle_check_locked() incrementally through
+// REAL autotune_engine_tick_locked() calls, one synthetic sample at a time,
+// so the settle detector's own onset/peak-slope state builds up for real
+// (that state is inherently incremental -- a single bulk-written trace
+// cannot reproduce it, see this test's own inline comment) and the STEPPING
+// branch's real dispatch to handle_probe_done_locked() is what fires, not a
+// direct call.
+//
+// This harness's xTaskGetTickCount() stub always returns 0 (documented at
+// the top of the STEPPING-loop tests above), so the sample-period gate
+// (`ticks_to_s(now - last_sample_tick) >= AUTOTUNE_ENGINE_SAMPLE_PERIOD_S`)
+// never opens through ordinary repeated calls. Opened here by deliberately
+// setting s_at.last_sample_tick to a small nonzero value before each call:
+// TickType_t is uint32_t, so 0 - 1 wraps to 0xFFFFFFFF ticks, comfortably
+// past any window -- a controlled, single-purpose use of the same
+// unsigned-wraparound arithmetic ticks_to_s() itself relies on, not a
+// workaround of a correctness bound. A fast-settling synthetic plant
+// (tau=20s, unrelated to the bench's measured 285s -- the bench numbers are
+// what test_probe_done_computes_identify_duty_and_rewinds_to_settling()
+// already exercises directly) keeps this reachable within the probe's own
+// 60-sample budget.
+static void test_target_mode_probe_dispatch_driven_through_the_real_tick_loop(void)
+{
+    TEST_SECTION("target mode's probe->identify handoff, driven through the REAL STEPPING tick loop "
+                 "(record_trace_sample()/step_settle_check_locked()/handle_probe_done_locked() dispatch), "
+                 "not called directly -- and the probe-baseline-vs-identify-baseline re-settle bias is "
+                 "real, not assumed");
+    char errbuf[96] = {0};
+    bool ok = call_run_to_target(/*max_temp_c=*/0.0f, /*target_c=*/50.0f, AUTOTUNE_RULE_SIMC, errbuf, sizeof(errbuf));
+    TEST_CHECK(ok, "test setup: target-mode run must start");
+
+    // Jump straight to STEPPING, same bypass every other STEPPING-loop test
+    // in this file uses (SETTLING's own elapsed-time transition cannot fire
+    // through this harness's frozen clock either) -- stand in for what the
+    // real transition would have captured.
+    const float probe_baseline_c = 30.0f;
+    xSemaphoreTake(s_at.lock, portMAX_DELAY);
+    s_at.state = AUTOTUNE_ENGINE_STEPPING;
+    s_at.phase_start_tick = 0;
+    s_at.zone_baseline_c[0] = probe_baseline_c;
+    s_at.zone_baseline_valid[0] = true;
+    s_at.step_ambient_c = probe_baseline_c;
+    s_at.trace_count = 0;
+    s_at.step_peak_slope_c_per_s = 0.0f;
+    s_at.step_onset_seen = false;
+    xSemaphoreGive(s_at.lock);
+
+    const float k_gain = 40.0f, tau_s = 20.0f, dead_time_s = 10.0f;
+    bool dispatched = false;
+    for (int i = 0; i < 60 && !dispatched; i++) {
+        float t_s = (float)(i * AUTOTUNE_ENGINE_SAMPLE_PERIOD_S);
+        float rise = (t_s <= dead_time_s) ? 0.0f
+                                          : k_gain * AUTOTUNE_ENGINE_PROBE_DUTY * (1.0f - expf(-(t_s - dead_time_s) / tau_s));
+        xSemaphoreTake(s_at.lock, portMAX_DELAY);
+        s_stub_ch0_temp_c = probe_baseline_c + rise;
+        s_at.last_sample_tick = 1; /* force this tick's sample-period gate open -- see comment above */
+        autotune_engine_tick_locked();
+        if (s_at.state != AUTOTUNE_ENGINE_STEPPING || s_at.probe_phase == false) {
+            dispatched = true;
+        }
+        xSemaphoreGive(s_at.lock);
+    }
+
+    TEST_CHECK(dispatched, "the settle detector must fire within the probe's 60-sample budget on a "
+                          "genuinely fast-settling (tau=20s) synthetic response");
+    TEST_CHECK(!s_at.probe_phase, "probe_phase must have cleared -- handle_probe_done_locked() ran");
+    TEST_CHECK(s_at.probe_k_rough > 0.0f, "a real fit through the tick-driven trace must report a positive K_rough");
+
+    if (s_at.state == AUTOTUNE_ENGINE_SETTLING) {
+        // Reachable target -> the real dispatch rewound to SETTLING for
+        // phase 2. Now show the re-baseline bias is REAL: re-settling from
+        // wherever the probe left off (still elevated, not back at
+        // probe_baseline_c) genuinely captures a DIFFERENT baseline than
+        // the probe's, via the exact same production code path a real
+        // SETTLING->STEPPING transition uses.
+        TEST_CHECK(s_at.trace_count > 0, "sanity: real samples were actually recorded via the tick loop");
+        float last_probe_reading_c = s_stub_ch0_temp_c;
+        // Same jump-to-STEPPING convention, capturing baseline the way the
+        // real transition would from a zone still hot from the probe --
+        // NOT back at probe_baseline_c.
+        xSemaphoreTake(s_at.lock, portMAX_DELAY);
+        s_at.state = AUTOTUNE_ENGINE_STEPPING;
+        s_at.zone_baseline_c[0] = last_probe_reading_c; /* still elevated -- the bias this records, not corrects */
+        s_at.zone_baseline_valid[0] = true;
+        xSemaphoreGive(s_at.lock);
+
+        TEST_CHECK(s_at.zone_baseline_c[0] > probe_baseline_c,
+                  "the identify phase's baseline is genuinely HIGHER than the probe's own baseline -- the "
+                  "one-directional overshoot bias AUTOTUNE_TARGET_ACHIEVED_WARN_C's comment describes is "
+                  "real, not hypothetical");
+    } else {
+        TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_ABORTED,
+                  "if not rewound to SETTLING, the only other honest outcome is a refusal (unreachable "
+                  "target etc.), never silently stuck STEPPING");
+    }
+}
+
+// Review finding: "status exposes no achieved-vs-requested value."
+// target_achieved_c must be populated once a target-mode identification
+// step finishes, and must reflect the FIT (baseline + K*duty), not target_c
+// itself parroted back.
+static void test_target_achieved_c_reflects_the_fitted_model_not_the_request(void)
+{
+    TEST_SECTION("target_achieved_c is populated from the identification step's OWN fit, and can "
+                 "legitimately differ from the requested target_c");
+    memset(&s_at, 0, sizeof(s_at));
+    s_at.lock = xSemaphoreCreateMutex(); /* autotune_engine_get_status() below refuses without one */
+    TEST_CHECK(s_at.lock != NULL, "test setup: lock must be creatable");
+    s_at.zone_index = 0;
+    s_at.step_rule = AUTOTUNE_RULE_SIMC;
+    s_at.target_mode = true;
+    s_at.target_c = 90.0f;
+    // K=45, tau=285, L=20, duty=1.0, baseline=30 -- asymptote = 30 + 45 =
+    // 75C, deliberately short of the 90C requested (the bias this field
+    // exists to surface, not hide). duty=1.0/K=45 also clears
+    // AUTOTUNE_MIN_RISE_NO_CEILING_C (40C, no ceiling configured here) with
+    // real margin, so (B)'s minimum-excursion refusal does not confound
+    // this test with a DIFFERENT abort.
+    write_synthetic_fopdt_trace(/*baseline_c=*/30.0f, /*k_gain_c_per_duty=*/45.0f, /*tau_s=*/285.0f,
+                                /*dead_time_s=*/20.0f, /*duty_step=*/1.0f, /*n_samples=*/600);
+    finalize_fit();
+
+    TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_DONE, "sanity: this trace must fit");
+    TEST_CHECK(s_at.model.valid, "sanity: the fit must be valid");
+    TEST_CHECK_NEAR(s_at.target_achieved_c, 75.0f, 2.0f,
+                    "target_achieved_c must reflect baseline + fitted K*duty, not target_c (90) itself");
+    TEST_CHECK(fabsf(s_at.target_achieved_c - s_at.target_c) > 1.0f,
+              "sanity: this trace was deliberately built to miss target_c, proving this is a real "
+              "computed value, not target_c echoed back");
+
+    autotune_engine_status_t status;
+    autotune_engine_get_status(&status);
+    TEST_CHECK_NEAR(status.target_achieved_c, s_at.target_achieved_c, 1e-4f,
+                    "autotune_engine_get_status() must expose target_achieved_c to callers");
+}
+
+// Review finding 6: the per-phase 4h backstop (measured from
+// phase_start_tick, reset at every transition) cannot bound target mode's
+// settle+probe+settle+identify SUM. Proves the whole-run budget aborts even
+// while comfortably inside every individual phase's own budget.
+static void test_whole_run_budget_aborts_even_within_every_single_phase_budget(void)
+{
+    TEST_SECTION("AUTOTUNE_ENGINE_WHOLE_RUN_MAX_DURATION_S aborts a STEP run whose phase-relative elapsed "
+                 "time is comfortably within budget, once the RUN-level elapsed time is not");
+    start_stepping_run(/*max_temp_c=*/0.0f, /*step_duty=*/1.0f);
+    // phase_start_tick=0 (start_stepping_run()'s own convention) keeps this
+    // phase's own elapsed_s at 0 -- nowhere near
+    // AUTOTUNE_ENGINE_DEFAULT_MAX_DURATION_S. run_start_tick is poked to the
+    // same kind of nonzero value used elsewhere in this file to force a
+    // frozen-clock elapsed computation past a threshold -- see
+    // test_target_mode_probe_dispatch_driven_through_the_real_tick_loop()'s
+    // header comment for why this is safe, controlled wraparound rather
+    // than an accident.
+    xSemaphoreTake(s_at.lock, portMAX_DELAY);
+    s_at.run_start_tick = 1;
+    xSemaphoreGive(s_at.lock);
+
+    run_ticks(/*start_temp_c=*/25.0f, /*per_tick_delta_c=*/1.0f, /*n_ticks=*/1);
+
+    TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_ABORTED, "the whole-run budget must abort regardless of how "
+                                                       "little time THIS phase has used");
+    TEST_CHECK(strstr(s_at.abort_reason, "whole-run") != NULL, "abort_reason must name this specific budget");
+}
+
+// Negative control: a fresh run's run_start_tick (0, matching this
+// harness's frozen "now") must NOT trip the whole-run budget on its own --
+// proves the check above is genuinely time-based, not permanently tripped.
+static void test_whole_run_budget_does_not_trip_a_fresh_run(void)
+{
+    TEST_SECTION("a fresh run's whole-run budget does not trip on its own (run_start_tick == now == 0)");
+    start_stepping_run(/*max_temp_c=*/0.0f, /*step_duty=*/1.0f);
+    run_ticks(/*start_temp_c=*/25.0f, /*per_tick_delta_c=*/1.0f, /*n_ticks=*/5);
+    TEST_CHECK(state_is_running(s_at.state), "a fresh run must not be aborted by the whole-run budget check");
+}
+
+// ---------------------------------------------------------------------------
+// Review round 2 blockers (target mode, still parked pending these fixes).
+// ---------------------------------------------------------------------------
+
+// Blocker 1: cross-zone coupling can latch step_element_proven on a dead
+// element. any_other_zone_profile_active() refuses at start and aborts
+// mid-run.
+static void test_run_refuses_to_start_while_another_zone_profile_active(void)
+{
+    TEST_SECTION("blocker 1: autotune_engine_run() refuses to start while ANOTHER zone has an active "
+                 "profile");
+    memset(s_stub_zone_active, 0, sizeof(s_stub_zone_active));
+    s_stub_zone_active[1] = true;
+    memset(&s_at, 0, sizeof(s_at));
+    s_at.lock = xSemaphoreCreateMutex();
+    TEST_CHECK(s_at.lock != NULL, "test setup: lock must be creatable");
+    char err[96] = {0};
+    bool ok = autotune_engine_run(0, 0.5f, AUTOTUNE_RULE_SIMC, err, sizeof(err));
+    TEST_CHECK(!ok, "must refuse while zone 1 has an active profile");
+    TEST_CHECK(strstr(err, "another zone") != NULL, "err_msg must name the actual reason");
+    memset(s_stub_zone_active, 0, sizeof(s_stub_zone_active));
+}
+
+static void test_run_to_target_refuses_to_start_while_another_zone_profile_active(void)
+{
+    TEST_SECTION("blocker 1: autotune_engine_run_to_target() refuses to start while ANOTHER zone has an "
+                 "active profile");
+    memset(s_stub_zone_active, 0, sizeof(s_stub_zone_active));
+    s_stub_zone_active[2] = true;
+    char err[96] = {0};
+    bool ok = call_run_to_target(80.0f, 60.0f, AUTOTUNE_RULE_SIMC, err, sizeof(err));
+    TEST_CHECK(!ok, "must refuse while zone 2 has an active profile");
+    TEST_CHECK(strstr(err, "another zone") != NULL, "err_msg must name the actual reason");
+    memset(s_stub_zone_active, 0, sizeof(s_stub_zone_active));
+}
+
+static void test_run_starts_fine_when_no_other_zone_is_active(void)
+{
+    TEST_SECTION("blocker 1 sanity: a run starts normally when no OTHER zone has an active profile");
+    // NOTE: profile_executor_zone_is_active(zone_index) for the zone UNDER
+    // TEST itself is a separate, PRE-EXISTING refusal (TODO.md 6A.5 -- "never
+    // on a zone a profile is actively driving", checked a few lines above
+    // any_other_zone_profile_active() in begin_run_locked()) and is
+    // deliberately NOT exercised here -- this test is only about OTHER
+    // zones, which is what any_other_zone_profile_active() actually loops
+    // over (it explicitly skips zone_index itself, see its own comment).
+    memset(s_stub_zone_active, 0, sizeof(s_stub_zone_active));
+    memset(&s_at, 0, sizeof(s_at));
+    s_at.lock = xSemaphoreCreateMutex();
+    char err[96] = {0};
+    bool ok = autotune_engine_run(0, 0.5f, AUTOTUNE_RULE_SIMC, err, sizeof(err));
+    TEST_CHECK(ok, "must not refuse when no zone anywhere has an active profile");
+}
+
+static void test_run_aborts_mid_run_when_another_zone_profile_starts(void)
+{
+    TEST_SECTION("blocker 1: a profile starting on another zone AFTER this run began aborts it");
+    memset(s_stub_zone_active, 0, sizeof(s_stub_zone_active));
+    start_stepping_run(/*max_temp_c=*/1300.0f, /*step_duty=*/1.0f);
+    TEST_CHECK(state_is_running(s_at.state), "sanity: run must be active before the neighbour starts");
+
+    s_stub_zone_active[1] = true; /* a profile starts on zone 1 mid-run */
+    run_ticks(/*start_temp_c=*/25.0f, /*per_tick_delta_c=*/1.0f, /*n_ticks=*/1);
+
+    TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_ABORTED, "must abort the instant another zone goes active");
+    TEST_CHECK(strstr(s_at.abort_reason, "another zone") != NULL, "abort_reason must name the actual reason");
+    memset(s_stub_zone_active, 0, sizeof(s_stub_zone_active));
+}
+
+// Blocker 2: onset must be direction-aware -- cooling must never latch it.
+static void test_onset_ignores_residual_cooling(void)
+{
+    TEST_SECTION("blocker 2: step_settle_check_locked()'s onset detector ignores a FALLING trace, however "
+                 "steep -- direction-blind fabsf(slope) used to latch onset on residual cooling");
+    memset(&s_at, 0, sizeof(s_at));
+    s_at.zone_index = 0;
+    // A steeply COOLING trace: -0.105 C/s (the exact cooling rate the
+    // review measured for a zone 30C above ambient, tau=285s), well past
+    // RESPONSE_ONSET_SLOPE_C_PER_S (0.009) in MAGNITUDE.
+    float v = 60.0f;
+    for (uint16_t i = 0; i < 40; i++) {
+        v -= 0.105f * (float)AUTOTUNE_ENGINE_SAMPLE_PERIOD_S;
+        s_at.zone_trace[0][i] = (int16_t)lroundf(v * 10.0f);
+        s_at.trace_count = i + 1;
+        (void)step_settle_check_locked();
+    }
+    TEST_CHECK(!s_at.step_onset_seen, "a purely falling trace, however steep, must never latch onset");
+}
+
+static void test_onset_still_fires_on_a_genuine_rise(void)
+{
+    TEST_SECTION("blocker 2 sanity: onset still fires promptly on a genuine RISING response (no "
+                 "regression from the direction-aware fix)");
+    memset(&s_at, 0, sizeof(s_at));
+    s_at.zone_index = 0;
+    write_synthetic_fopdt_trace(/*baseline_c=*/30.0f, /*k_gain_c_per_duty=*/41.7f, /*tau_s=*/285.0f,
+                                /*dead_time_s=*/20.0f, /*duty_step=*/1.0f, /*n_samples=*/40);
+    for (uint16_t n = 1; n <= 40; n++) {
+        s_at.trace_count = n;
+        if (step_settle_check_locked() || s_at.step_onset_seen) break;
+    }
+    TEST_CHECK(s_at.step_onset_seen, "a genuine rising response must still latch onset");
+}
+
+// Blocker 3: the death check needs an absolute floor too, since the
+// relative (drop-from-peak) check cannot fire below a 5.0C peak.
+static void test_death_check_absolute_floor_fires_in_the_3_to_5_dead_zone(void)
+{
+    TEST_SECTION("blocker 3 + round-3 finding 2: the death check fires via the ABSOLUTE floor (deadband "
+                 "2.5C, 5 consecutive ticks) when the peak never reached AUTOTUNE_ELEMENT_DEATH_DROP_C "
+                 "(5.0) -- the relative check alone is arithmetically dead in this band");
+    start_stepping_run(/*max_temp_c=*/1300.0f, /*step_duty=*/0.15f);
+    const float baseline_c = 30.0f;
+    s_at.zone_baseline_c[0] = baseline_c;
+    s_at.zone_baseline_valid[0] = true;
+    s_at.step_onset_seen = true;
+
+    for (int i = 0; i < 10; i++) {
+        xSemaphoreTake(s_at.lock, portMAX_DELAY);
+        s_stub_ch0_temp_c = baseline_c + 4.0f * ((float)(i + 1) / 10.0f);
+        autotune_engine_tick_locked();
+        xSemaphoreGive(s_at.lock);
+    }
+    TEST_CHECK(s_at.step_element_proven, "sanity: 4.0C rise must have latched (past the 3.0C alive floor)");
+    TEST_CHECK(s_at.step_rise_running_max_c < AUTOTUNE_ELEMENT_DEATH_DROP_C,
+              "sanity: peak must be BELOW 5.0C -- this is the dead zone the relative check cannot reach");
+    TEST_CHECK(state_is_running(s_at.state), "must still be running after the rise");
+
+    // Falls to 2.0C, well below the 2.5C deadband -- a drop from a ~4.0C
+    // peak to ~2.0C is only ~2.0C, nowhere near the 5.0C relative
+    // threshold, so ONLY the absolute floor can catch this. Held for
+    // AUTOTUNE_ELEMENT_DEATH_FLOOR_CONSECUTIVE_TICKS (5) ticks, the dwell
+    // the round-3 fix requires before it fires.
+    for (int i = 0; i < 5; i++) {
+        xSemaphoreTake(s_at.lock, portMAX_DELAY);
+        s_stub_ch0_temp_c = baseline_c + 2.0f;
+        autotune_engine_tick_locked();
+        xSemaphoreGive(s_at.lock);
+    }
+
+    TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_ABORTED, "the absolute floor must abort after 5 consecutive "
+                                                      "ticks below the deadband, even though the relative "
+                                                      "drop (2.0C) is well under 5.0C");
+    TEST_CHECK(strstr(s_at.abort_reason, "floor") != NULL, "abort_reason must name the absolute-floor path");
+}
+
+static void test_death_check_absolute_floor_needs_the_full_dwell_not_one_tick(void)
+{
+    TEST_SECTION("round-3 finding 2: a SINGLE tick below the deadband must NOT trip the absolute floor -- "
+                 "the dwell is load-bearing, not decorative");
+    start_stepping_run(/*max_temp_c=*/1300.0f, /*step_duty=*/0.15f);
+    const float baseline_c = 30.0f;
+    s_at.zone_baseline_c[0] = baseline_c;
+    s_at.zone_baseline_valid[0] = true;
+    s_at.step_onset_seen = true;
+
+    for (int i = 0; i < 10; i++) {
+        xSemaphoreTake(s_at.lock, portMAX_DELAY);
+        s_stub_ch0_temp_c = baseline_c + 4.0f * ((float)(i + 1) / 10.0f);
+        autotune_engine_tick_locked();
+        xSemaphoreGive(s_at.lock);
+    }
+    TEST_CHECK(s_at.step_element_proven, "sanity: must have latched");
+
+    xSemaphoreTake(s_at.lock, portMAX_DELAY);
+    s_stub_ch0_temp_c = baseline_c + 2.0f;
+    autotune_engine_tick_locked();
+    xSemaphoreGive(s_at.lock);
+
+    TEST_CHECK(state_is_running(s_at.state), "a single dip below the deadband must not abort");
+}
+
+static void test_healthy_plateau_dithering_near_the_alive_latch_does_not_falsetrip(void)
+{
+    TEST_SECTION("round-3 finding 2: a healthy plateau dithering AROUND the 3.0C latch threshold (never "
+                 "sustained below the 2.5C deadband) does not false-trip the death check");
+    start_stepping_run(/*max_temp_c=*/1300.0f, /*step_duty=*/0.15f);
+    const float baseline_c = 30.0f;
+    s_at.zone_baseline_c[0] = baseline_c;
+    s_at.zone_baseline_valid[0] = true;
+    s_at.step_onset_seen = true;
+
+    for (int i = 0; i < 20; i++) {
+        xSemaphoreTake(s_at.lock, portMAX_DELAY);
+        s_stub_ch0_temp_c = baseline_c + 3.1f * ((float)(i + 1) / 20.0f);
+        autotune_engine_tick_locked();
+        xSemaphoreGive(s_at.lock);
+    }
+    TEST_CHECK(s_at.step_element_proven, "sanity: must have latched at the 3.1C plateau");
+
+    // Center 3.1C, dither +/-0.15C -> range [2.95C, 3.25C]: this DOES dip
+    // below the 3.0C LATCH threshold repeatedly (proving the fix's
+    // deadband, not just an accident of a dither that never reaches 3.0,
+    // is what keeps this from tripping), but never below the 2.5C
+    // DEADBAND, so the fixed code must never trip.
+    bool tripped = false;
+    for (int i = 0; i < 200 && !tripped; i++) {
+        xSemaphoreTake(s_at.lock, portMAX_DELAY);
+        s_stub_ch0_temp_c = baseline_c + 3.1f + ((i % 2) ? 0.15f : -0.15f);
+        autotune_engine_tick_locked();
+        tripped = (s_at.state == AUTOTUNE_ENGINE_ABORTED);
+        xSemaphoreGive(s_at.lock);
+    }
+    TEST_CHECK(!tripped, "a healthy plateau dithering near (and sometimes under) the 3.0C latch "
+                        "threshold, but never under the 2.5C deadband, must not false-trip");
+}
+
+static void test_death_check_no_trip_while_rise_stays_above_the_alive_floor(void)
+{
+    TEST_SECTION("blocker 3 negative control: a small dip that stays AT OR ABOVE the alive floor does "
+                 "not trip either death condition");
+    start_stepping_run(/*max_temp_c=*/1300.0f, /*step_duty=*/0.15f);
+    const float baseline_c = 30.0f;
+    s_at.zone_baseline_c[0] = baseline_c;
+    s_at.zone_baseline_valid[0] = true;
+    s_at.step_onset_seen = true;
+
+    for (int i = 0; i < 10; i++) {
+        xSemaphoreTake(s_at.lock, portMAX_DELAY);
+        s_stub_ch0_temp_c = baseline_c + 4.0f * ((float)(i + 1) / 10.0f);
+        autotune_engine_tick_locked();
+        xSemaphoreGive(s_at.lock);
+    }
+    TEST_CHECK(s_at.step_element_proven, "sanity: must have latched");
+
+    xSemaphoreTake(s_at.lock, portMAX_DELAY);
+    s_stub_ch0_temp_c = baseline_c + 3.2f; /* dips, but stays above the 3.0C alive floor */
+    autotune_engine_tick_locked();
+    xSemaphoreGive(s_at.lock);
+
+    TEST_CHECK(state_is_running(s_at.state), "must not abort while rise stays at/above the alive floor");
+}
+
+// Blocker 4: guard 1's expected-rise bar must scale by commanded duty.
+static void test_autotune_step_guard_sanity_rate_scales_by_duty(void)
+{
+    TEST_SECTION("blocker 4: autotune_step_guard_sanity_rate() scales the configured rate by duty");
+    TEST_CHECK_NEAR(autotune_step_guard_sanity_rate(0.5f, 0.15f), 0.075f, 1e-5f,
+                    "0.5 C/min at duty 0.15 must scale to 0.075 C/min");
+    TEST_CHECK_NEAR(autotune_step_guard_sanity_rate(0.5f, 1.0f), 0.5f, 1e-5f,
+                    "duty 1.0 must reproduce the full configured rate unchanged");
+    TEST_CHECK_NEAR(autotune_step_guard_sanity_rate(0.0f, 0.15f), 0.075f, 1e-5f,
+                    "configured_rate_c_per_min<=0 must substitute thermal_guard.c's own 0.5 default "
+                    "before scaling");
+}
+
+static void test_healthy_low_k_zone_does_not_falsetrip_guard1_at_fixed_probe_duty(void)
+{
+    TEST_SECTION("blocker 4: a healthy zone with K=22 (review's own worked example -- below the K=25.6 "
+                 "threshold the UNSCALED bar demanded) at the fixed 0.15 probe duty does NOT false-trip "
+                 "guard 1 within its first 300s window");
+    start_stepping_run(/*max_temp_c=*/1300.0f, /*step_duty=*/0.15f);
+    const float baseline_c = 30.0f;
+    const float k_gain = 22.0f;
+    const float tau_s = 285.0f;
+    const float dead_time_s = 20.0f;
+    bool tripped = false;
+    for (int i = 0; i < 320 && !tripped; i++) {
+        float t_s = (float)i; /* dt_s == 1.0 per tick */
+        float rise = (t_s <= dead_time_s) ? 0.0f
+                                          : k_gain * 0.15f * (1.0f - expf(-(t_s - dead_time_s) / tau_s));
+        xSemaphoreTake(s_at.lock, portMAX_DELAY);
+        s_stub_ch0_temp_c = baseline_c + rise;
+        autotune_engine_tick_locked();
+        tripped = (s_at.state == AUTOTUNE_ENGINE_ABORTED);
+        xSemaphoreGive(s_at.lock);
+    }
+    TEST_CHECK(!tripped, "a healthy K=22 zone at duty 0.15 must not false-trip guard 1 -- the review's own "
+                        "worked example for the unscaled bar's false-positive threshold");
+}
+
 void run_test_autotune_engine_prestart(void)
 {
     test_run_refuses_before_start();
@@ -2442,6 +3489,15 @@ void run_test_autotune_engine_prestart(void)
     test_step_no_ceiling_flat_reading_trips_guard1();
     test_step_max_temp_configured_flat_reading_still_trips_guard1();
     test_step_no_ceiling_rising_reading_does_not_trip();
+    test_guard1_relaxes_once_element_proven_then_response_plateaus();
+    test_guard1_relaxation_engages_at_a_realistic_ceiling();
+    test_guard1_relaxation_engages_with_no_ceiling_configured();
+    test_guard1_latch_requires_onset_not_just_rise();
+    test_element_death_after_proven_aborts_the_run();
+    test_element_small_dip_after_proven_does_not_abort();
+    test_dead_element_trips_guard1_below_the_old_0_5_duty_floor();
+    test_guard1_relaxation_never_applies_to_relay_method();
+    test_guard1_still_trips_a_dead_element_that_never_gets_proven();
 
     // Ownership tests (TODO.md 6A.6) -- order-independent relative to the
     // guard tests above (each calls start_stepping_run(), which re-zeroes
@@ -2470,7 +3526,42 @@ void run_test_autotune_engine_prestart(void)
     test_autotune_guard_trip_releases_heat_enable();
     test_autotune_manual_abort_releases_heat_enable();
     test_autotune_start_on_a_down_link_does_not_claim_heat();
+
+    // Target-temperature step mode (slice 1) -- order-independent, each
+    // re-zeroes s_at via its own helper.
+    test_probe_done_computes_identify_duty_and_rewinds_to_settling();
+    test_probe_done_refuses_unreachable_target();
+    test_probe_done_refuses_target_not_above_baseline();
+    test_probe_done_refuses_identify_duty_below_the_progress_duty_min_floor();
+    test_probe_done_accepts_identify_duty_above_the_progress_duty_min_floor();
+    test_probe_done_propagates_probe_fit_failure();
+    test_run_to_target_rejects_relay_only_rules();
+    test_run_to_target_default_uses_75_percent_of_max_temp();
+    test_run_to_target_default_refused_when_max_temp_c_is_zero();
+    test_run_to_target_explicit_target_refused_too_close_to_ceiling();
+    test_run_to_target_default_also_subject_to_ceiling_margin_check();
+    test_run_to_target_does_not_disturb_the_plain_duty_based_run();
+    test_target_mode_probe_dispatch_driven_through_the_real_tick_loop();
+    test_target_achieved_c_reflects_the_fitted_model_not_the_request();
+    test_whole_run_budget_aborts_even_within_every_single_phase_budget();
+    test_whole_run_budget_does_not_trip_a_fresh_run();
+
+    // Review round 2 blockers -- order-independent, each re-derives its own
+    // fresh s_at via its own helper.
+    test_run_refuses_to_start_while_another_zone_profile_active();
+    test_run_to_target_refuses_to_start_while_another_zone_profile_active();
+    test_run_starts_fine_when_no_other_zone_is_active();
+    test_run_aborts_mid_run_when_another_zone_profile_starts();
+    test_onset_ignores_residual_cooling();
+    test_onset_still_fires_on_a_genuine_rise();
+    test_death_check_absolute_floor_fires_in_the_3_to_5_dead_zone();
+    test_death_check_absolute_floor_needs_the_full_dwell_not_one_tick();
+    test_healthy_plateau_dithering_near_the_alive_latch_does_not_falsetrip();
+    test_death_check_no_trip_while_rise_stays_above_the_alive_floor();
+    test_autotune_step_guard_sanity_rate_scales_by_duty();
+    test_healthy_low_k_zone_does_not_falsetrip_guard1_at_fixed_probe_duty();
 }
+
 
 int main(void)
 {

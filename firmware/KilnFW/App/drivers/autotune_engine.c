@@ -290,6 +290,188 @@ static const char *TAG = "autotune_engine";
  * that constant is `static`/file-local there, same as this one is here. */
 #define AUTOTUNE_FALLBACK_AMBIENT_C 20.0f
 
+/* ---------------------------------------------------------------------------
+ * Target-temperature step mode (autotune_engine_run_to_target()). Two-phase:
+ * a short, low-duty PROBE step to get a rough gain estimate, then a real
+ * identification step at the duty that rough gain implies will land the
+ * response's asymptote at the operator's requested target. Both phases reuse
+ * pid_autotune_fit_fopdt() -- see handle_probe_done_locked() -- rather than a
+ * second estimator, and both reuse the existing SETTLING/STEPPING state
+ * machine and finalize_fit()'s guards unmodified.
+ *
+ * PROBE_DUTY / PROBE_DURATION_S tradeoff, sized against the hardware numbers
+ * measured on zone 0 the night this was written (baseline 30.6C, 100% duty:
+ * 51.16C at 71s, 61.11C at 242s, 65.70C at 389s and still climbing -- a
+ * three-point fit gives K ~= 41 degC/duty, tau ~= 270s): a 600s (10 min,
+ * ~2.2*tau on that zone) probe at 15% duty reaches roughly 1 - e^(-580/270)
+ * ~= 88% of its own (small) asymptote of K*0.15 ~= 6.2 degC above baseline --
+ * enough curvature past dead time for pid_autotune_fit_fopdt()'s two-point
+ * method to locate a rise it can extrapolate from (that method only needs to
+ * reach 28.3%/63.2% of the trace's OWN raw rise, not of the true asymptote,
+ * so it does not require anything close to full settling), while staying a
+ * small fraction of ANY reasonable max_temp_c ceiling even on a much
+ * stronger zone than this one. Going shorter risks a probe trace too flat to
+ * fit (mostly dead time, no real curvature yet); going longer buys little
+ * extra fit confidence for tau's of several minutes while eating more of the
+ * run's time budget and, on a fast/strong zone, more of its headroom. 15%
+ * duty (not lower) keeps the response comfortably above the sensor's
+ * quantization/noise floor so the probe fit is not itself noise-dominated. */
+#define AUTOTUNE_ENGINE_PROBE_DUTY 0.15f
+#define AUTOTUNE_ENGINE_PROBE_DURATION_S 600u
+
+/* Default target = this fraction of the zone's configured max_temp_c, used
+ * when the operator supplies no explicit target_c. Deliberately requires an
+ * explicit target when max_temp_c == 0 (guard disabled, see
+ * autotune_engine_run_to_target()) rather than inventing a fallback ceiling
+ * of its own -- there is no "reasonable" absolute default across a kiln
+ * range from a ~350C hobby kiln to a ~1300C industrial one. */
+#define AUTOTUNE_ENGINE_TARGET_DEFAULT_FRACTION 0.75f
+
+/* Minimum clearance required between a (given or defaulted) target_c and the
+ * zone's max_temp_c ceiling, checked BEFORE any heating starts. Exists so a
+ * target right at the ceiling doesn't hand the identification step a duty
+ * that guard 5 (or guard 4's drift-near-ceiling check) is expected to trip
+ * on as a matter of course -- the same "don't build a test to trip its own
+ * guard" reasoning as AUTOTUNE_RELAY_SETPOINT_HEADROOM_C above, sized
+ * smaller because this mode targets a temperature directly (not an
+ * oscillation around one) so it needs less margin than the relay path's 50C. */
+#define AUTOTUNE_ENGINE_TARGET_CEILING_MARGIN_C 5.0f
+
+/* ---------------------------------------------------------------------------
+ * Guard 1 relaxation for a step test (step_element_proven) -- REVISED after
+ * review found the first version reused finalize_fit()'s FIT-TRUST threshold
+ * (autotune_min_rise_c()) for an unrelated question ("is this element
+ * alive"). Those thresholds do not agree: on the plant measured the night
+ * this was written (K=41.7 degC/duty, tau=285s, baseline 30C, no ceiling ->
+ * AUTOTUNE_MIN_RISE_NO_CEILING_C=40.0), guard 1 fires once REMAINING rise
+ * drops below rate*tau/60 = 0.5*285/60 = 2.4C, i.e. at cumulative rise ~=
+ * 41.7 - 2.4 = 39.3C -- BELOW the 40.0C fit-trust floor, so the old latch
+ * never armed before guard 1 tripped: it reproduced the exact bench defect
+ * it was written to fix, and only ever helped a run that was never going to
+ * trip in the first place. A ceiling-scaled threshold is worse still: at
+ * max_temp_c=1300 (a real high-fire kiln), the (B) fraction-of-headroom
+ * threshold is 0.15*(1300-30) = 190.5C -- unreachable at any sane duty this
+ * side of scorching the ware.
+ *
+ * "Element alive" is a DIFFERENT, much cheaper question than "is this fit
+ * trustworthy", and gets its own threshold: a small ABSOLUTE rise (this is
+ * not "enough signal to trust a K/tau/L fit", just "the plant visibly
+ * responded to commanded heat, not noise"), combined with the SAME onset
+ * detector step_settle_check_locked() already computes
+ * (RESPONSE_ONSET_SLOPE_C_PER_S) so a couple of coincidental quantization
+ * ticks cannot latch it. On the measured plant, a 3.0C rise at ANY duty > 0
+ * arrives within tens of seconds of dead time ending (duty=1.0: solving
+ * 41.7*(1-exp(-(t-L)/285))=3.0 gives t-L ~= 20.9s; duty=0.15 -- roughly
+ * target mode's typical identify duty -- gives t-L ~= 141s), i.e. it engages
+ * within the first STEPPING minutes, nowhere near the ~816s the guard 1 trip
+ * actually happened at -- see test_guard1_relaxes_... in
+ * test_autotune_engine_prestart.c for this driven through the real engine at
+ * a REALISTIC ceiling (1300C) and at max_temp_c==0, not just the one
+ * configuration (80C) the first version's test happened to make reachable. */
+#define AUTOTUNE_ELEMENT_ALIVE_RISE_C 3.0f
+
+/* Guard 2 (falling while heating) is structurally UNREACHABLE during a step
+ * test: this file's own thermal_guard_input_t.setpoint_c construction pins
+ * setpoint_c to the zone's ceiling (or raw_c + STEP_TEST_GUARD_HEADROOM_C
+ * with none configured) for the whole run, so error = setpoint_c -
+ * measurement_c stays large and `climbing` (thermal_guard.c, the 3C arrival
+ * band) is true on every tick outside a sliver just under the ceiling --
+ * where guard 5 has already fired. Relaxing guard 1's rise check therefore
+ * silences the WHOLE progress-window family for the rest of the step, not
+ * "guard 1 only" as the first version's comment claimed. Nothing else in
+ * the guard suite covers "element dies partway through a proven-alive step":
+ * guard 3 needs commanded_duty <= 0 (this is a heating step), guard 4 needs
+ * abs_error <= 25C (never true against a ceiling setpoint), guard 7 needs
+ * +/-0.05C for 600s (a genuinely falling reading moves faster than that),
+ * and guard 8 is not wired for autotune at all (no peer_c/peer_ok passed).
+ *
+ * So this file does guard 2's job itself, directly on the trace it is
+ * already recording: once step_element_proven has latched, s_at.
+ * step_rise_running_max_c tracks the highest rise seen since STEPPING
+ * started, and a drop of this many degrees below that running peak aborts
+ * the run (escalate_and_abort(WRONG_DIRECTION, ...), the same trip reason
+ * and per-zone-block/severity guard 2 itself would have used). Sized well
+ * above sensor noise/quantization (0.1C trace quantum, a few tenths of real
+ * MAX31856 noise) so a healthy plateau's dither never chatters this, while
+ * staying small enough to catch a genuinely dying element well before it has
+ * fallen back anywhere near baseline. */
+#define AUTOTUNE_ELEMENT_DEATH_DROP_C 5.0f
+
+/* Review round-3 finding 2: the absolute-floor death condition (added to
+ * close blocker 3's 3.0-5.0C dead zone) used the SAME 3.0C as the latch,
+ * with no hysteresis and no dwell. A zone whose probe asymptote sits just
+ * above the floor -- K*0.15 in roughly 21-28 degC/duty is a K range this
+ * file's own Blocker 4 rationale already calls "well within a real kiln's
+ * plausible range" -- plateaus a few tenths above 3.0C, and ordinary
+ * MAX31856 noise plus the 0.1C trace quantum dips a single reading under
+ * it. That called escalate_and_abort(WRONG_DIRECTION, ...), which LATCHES
+ * a per-zone block (relay_authority_set_zone_blocked()) -- not just an
+ * aborted tune, a block that outlives the run.
+ *
+ * Fixed with a deadband (trip below 2.5C, i.e. AUTOTUNE_ELEMENT_ALIVE_
+ * RISE_C minus this margin -- NOT the same 3.0C the latch itself used, so a
+ * plateau sitting anywhere between 2.5 and 3.0C cannot trip merely by
+ * dithering across the LATCH threshold) AND a dwell (the floor must read
+ * true for this many CONSECUTIVE ticks, 1Hz, before it fires -- a single
+ * noisy sample can no longer trip it, only a genuine sustained fall). Both
+ * together: a healthy plateau at, say, 3.2C +/-0.15C noise dips to ~3.05C
+ * at worst -- comfortably above 2.5C, so neither condition engages; a
+ * genuinely dying element's reading keeps falling past 2.5C and stays
+ * there, so both conditions engage within a few seconds of the real drop. */
+#define AUTOTUNE_ELEMENT_DEATH_FLOOR_MARGIN_C 0.5f
+#define AUTOTUNE_ELEMENT_DEATH_FLOOR_CONSECUTIVE_TICKS 5u
+
+/* Guards 1/2's progress window is gated on commanded_duty >=
+ * cfg.progress_duty_min, which defaults (thermal_guard.c's
+ * PROGRESS_DUTY_MIN) to 0.5 -- a step test's own probe duty
+ * (AUTOTUNE_ENGINE_PROBE_DUTY, 0.15) and target mode's typical identify duty
+ * (often well under 0.5 too -- a 60C target on a K~41 zone computes duty
+ * ~0.36) never reach that bar, so with the default left in place guard 1/2
+ * are COMPLETELY INERT for the run's own actual duty, the whole time --
+ * discovered in review, not by a bench trip, because nothing in this file's
+ * own step_element_proven mechanism is duty-gated (it reads the trace
+ * directly), so it silently covered up that the underlying thermal_guard
+ * window is not seeing this duty at all.
+ *
+ * begin_run_locked() explicitly overrides progress_duty_min to this (any
+ * commanded step duty > 0 arms guard 1/2) for every step-method run, probe
+ * or identify, so the ordinary "rate_cfg C/min" rise requirement -- not just
+ * this file's own alive/death checks -- covers a dead element from the very
+ * first STEPPING tick, at whatever duty this run happens to be driving. */
+#define AUTOTUNE_PROGRESS_DUTY_MIN_FOR_STEP_TEST 0.01f
+
+/* Absolute margin between target mode's requested target_c and what the
+ * identification step's OWN fitted model says it actually landed on
+ * (target_achieved_c, computed in finalize_fit()) before this file logs a
+ * WARNING (not a refusal -- the fit itself is still valid and DONE, this is
+ * purely an operator-visible flag). Exists because duty is computed from the
+ * PROBE's baseline (handle_probe_done_locked()) while the identification
+ * step re-baselines after only a 180s re-settle (AUTOTUNE_ENGINE_SETTLE_S)
+ * from a zone that is still hot and cooling, not back at the probe's
+ * baseline -- a one-directional bias toward a HIGHER re-settle baseline than
+ * the probe's, which (duty held fixed) computes toward overshooting
+ * target_c. Not corrected in this pass -- RECORDED instead, via this log
+ * line and the target_achieved_c status field, so an operator can see the
+ * actual landing point rather than trusting the requested one blindly. */
+#define AUTOTUNE_TARGET_ACHIEVED_WARN_C 5.0f
+
+/* Hard ceiling on total run duration, measured from begin_run_locked()'s
+ * s_at.run_start_tick (set ONCE per run, never reset at a phase transition)
+ * -- STEP method only. Exists because AUTOTUNE_ENGINE_DEFAULT_MAX_DURATION_S
+ * (4h) is a PER-PHASE backstop measured from s_at.phase_start_tick, which
+ * DOES reset at every phase transition: target mode's worst case is
+ * therefore 180s (settle) + 600s (probe) + 180s (re-settle) + 4h (identify)
+ * ~= 4.27h, not 4h, with nothing capping the SUM. Computed from the same
+ * per-phase constants so it tracks them automatically rather than needing a
+ * second hand-picked number to stay in sync; plain duty-based runs (worst
+ * case 180s + 4h ~= 4.05h) never approach it in practice -- it exists purely
+ * as target mode's outer safety net, not a tighter budget for the plain
+ * path. Relay method keeps its own two independent 4h phase budgets
+ * (AUTOTUNE_RELAY_APPROACH_MAX_S / AUTOTUNE_RELAY_CYCLE_MAX_S, worst case
+ * ~8h) untouched -- this check is gated to AUTOTUNE_METHOD_STEP only. */
+#define AUTOTUNE_ENGINE_WHOLE_RUN_MAX_DURATION_S \
+    (2u * AUTOTUNE_ENGINE_SETTLE_S + AUTOTUNE_ENGINE_PROBE_DURATION_S + AUTOTUNE_ENGINE_DEFAULT_MAX_DURATION_S)
+
 typedef struct {
     kiln_io_t *io;
     MAX31856BusClass *thermo_bus;
@@ -305,6 +487,21 @@ typedef struct {
     autotune_rule_t step_rule; /* AUTOTUNE_METHOD_STEP only -- SIMC or Cohen-Coon, see
                                  * autotune_engine_run()'s header comment for why only
                                  * those two are valid here. */
+
+    /* Target-temperature step mode (AUTOTUNE_METHOD_STEP only). Reset to
+     * false/0 at the top of every begin_run_locked() call so a plain
+     * duty-based run never inherits a previous target-mode run's state. */
+    bool     target_mode;   /* true: this run is autotune_engine_run_to_target(), not _run() */
+    bool     probe_phase;   /* true while PHASE 1 (probe) is in progress; target_mode only */
+    float    target_c;      /* requested (or defaulted) target; target_mode only */
+    float    probe_k_rough; /* K estimated from the probe fit; target_mode only, 0 until valid */
+    /* Post-hoc landing point -- computed by finalize_fit() once the
+     * identification step's OWN fit is in (baseline_c + k_gain_c_per_duty *
+     * step_duty, i.e. what the fitted model says this step actually
+     * asymptotes to), NOT the requested target_c. target_mode only, 0 until
+     * DONE with a valid model. See AUTOTUNE_TARGET_ACHIEVED_WARN_C's own
+     * comment for why this can legitimately differ from target_c. */
+    float    target_achieved_c;
 
     /* Relay-feedback method only (AUTOTUNE_METHOD_RELAY). relay_on is the
      * current branch of the bang-bang law, held across the band so the relay
@@ -322,6 +519,11 @@ typedef struct {
     TickType_t last_sample_tick;
     TickType_t prev_tick;
     uint32_t   elapsed_s; /* time in the current phase, updated every tick */
+    /* Set ONCE per run by begin_run_locked(), never touched at a phase
+     * transition -- see AUTOTUNE_ENGINE_WHOLE_RUN_MAX_DURATION_S's own
+     * comment for why phase_start_tick alone cannot bound a multi-phase
+     * (settle/probe/settle/identify) target-mode run. */
+    TickType_t run_start_tick;
 
     heater_output_cfg_t heater_cfg;
     heater_output_state_t heater_state;
@@ -365,6 +567,50 @@ typedef struct {
     float    step_peak_slope_c_per_s;    /* max |slope| seen so far this STEPPING phase */
     uint32_t step_peak_slope_at_s;       /* elapsed_s at which that peak was recorded */
     bool     step_settled;               /* true only if the detector genuinely fired -- see finalize_fit() */
+    /* Latched true once this STEPPING phase's cumulative rise from baseline
+     * has crossed AUTOTUNE_ELEMENT_ALIVE_RISE_C (a small ABSOLUTE alive
+     * threshold -- NOT finalize_fit()'s much larger fit-trust threshold, see
+     * that constant's own comment for why conflating the two was the first
+     * version's defect) with a genuine onset already detected. STEP method
+     * only; reset false at every SETTLING->STEPPING transition (both a
+     * plain run's and target mode's probe->identify one), and also in
+     * begin_run_locked() so it cannot survive into a new run's SETTLING
+     * phase either. See thermal_guard_input_t::progress_rise_check_relaxed's
+     * comment for what this relaxes and why. */
+    bool     step_element_proven;
+    /* Highest (actual_c - baseline_c) seen so far this STEPPING phase --
+     * tracked regardless of step_element_proven so the running peak is
+     * already correct the instant the element IS proven. Used only once
+     * proven: AUTOTUNE_ELEMENT_DEATH_DROP_C below this peak aborts the run
+     * (this file's own stand-in for guard 2, which cannot reach this case --
+     * see that constant's comment). Reset with step_element_proven at every
+     * SETTLING->STEPPING transition and in begin_run_locked(). */
+    float    step_rise_running_max_c;
+    /* Review blocker 1 fix (lock-order deadlock): whether ANY other zone
+     * has an active profile, as of the START of this tick -- computed by
+     * task_entry() by calling any_other_zone_profile_active() BEFORE it
+     * takes s_at.lock (see that function's own comment, and task_entry()'s,
+     * for the documented lock-order invariant this preserves:
+     * profile_executor.c's sweep_unowned_relays() takes s_exec.lock then
+     * autotune_engine_is_active_on_zone() (s_at.lock) -- the reverse of
+     * s_at.lock then s_exec.lock, which is exactly what calling
+     * profile_executor_zone_is_active() from INSIDE autotune_engine_tick_
+     * locked() -- i.e. while s_at.lock is already held -- would have done).
+     * A single plain field, not a function parameter, because the tick
+     * function has ~30 call sites in the host test suite and every one but
+     * run_ticks()/task_entry() itself is unaffected by this value -- see
+     * run_ticks()'s own comment for how tests keep it correct. Reset false
+     * in begin_run_locked() so a new run never starts on a stale hint from
+     * a previous one before task_entry() gets a chance to compute a fresh
+     * one. */
+    bool     other_zone_profile_active_hint;
+    /* Consecutive-tick counter for the death check's absolute floor (review
+     * round-3 finding 2) -- counts 1Hz ticks with rise_c below AUTOTUNE_
+     * ELEMENT_ALIVE_RISE_C - AUTOTUNE_ELEMENT_DEATH_FLOOR_MARGIN_C in a row;
+     * reset to 0 the instant rise_c is back at/above that floor. Reset with
+     * step_element_proven at every SETTLING->STEPPING transition and in
+     * begin_run_locked(). */
+    uint16_t step_below_death_floor_ticks;
     /* Response-onset anchor (item 5, 2026-09-02 review fix) -- see
      * PEAK_SLOPE_SEARCH_SAMPLES's own comment for why the peak-slope search
      * window is anchored to DETECTED onset rather than a fixed sample count
@@ -401,6 +647,54 @@ static bool state_is_running(autotune_engine_state_t s)
 
 static uint32_t ticks_to_s(TickType_t t) { return (uint32_t)(t / configTICK_RATE_HZ); }
 static uint32_t ticks_to_ms(TickType_t t) { return (uint32_t)t * (1000u / configTICK_RATE_HZ); }
+
+/* Review blocker 1: cross-zone coupling can latch step_element_proven on a
+ * DEAD element. Measured off-diagonal coupling on this hardware is 5-12
+ * degC per unit duty -- a neighbour zone firing at duty 0.5 puts 2.5-6 degC
+ * into the zone under test, comfortably past AUTOTUNE_ELEMENT_ALIVE_RISE_C
+ * (3.0), and step_element_proven's own check (autotune_engine_tick_locked())
+ * has no way to tell "this zone's own element moved the plant" from "a
+ * neighbour's did" -- it only reads this zone's raw rise. Once latched on
+ * neighbour heat, guard 1's rise requirement relaxes on an element that has
+ * done nothing, guard 2 is structurally unreachable during a step test (see
+ * that mechanism's own comment), and guards 4/7 do not apply either -- a
+ * dead element then runs the full budget with no progress guard at all.
+ *
+ * FIX CHOICE: refuse to START a STEP run (both autotune_engine_run() and
+ * autotune_engine_run_to_target()) while ANY OTHER zone has an active
+ * profile, and ABORT one already running if another zone's profile starts
+ * mid-run (autotune_engine_tick_locked() calls this too, STEP method only,
+ * right alongside the whole-run budget check). REJECTED alternative:
+ * "require the rise be attributable to this zone's own commanded duty" --
+ * that needs a trusted coupling model to subtract the neighbour's expected
+ * contribution, and the coupling matrix is exactly what an autotune run
+ * (TODO.md 6A.5(b)'s cross-gain fit) is used to MEASURE in the first place;
+ * gating the safety of the measurement on the thing being measured is
+ * circular. Requiring isolation is strictly stronger, simpler to verify,
+ * and costs nothing an operator running a real characterisation session
+ * wants anyway -- TODO.md 6A.5's own "one at a time" convention already
+ * applies between two AUTOTUNE runs, this just extends it to "and no
+ * profile on any other zone either" for the STEP method specifically,
+ * where step_element_proven actually lives. Not applied to the RELAY
+ * method, which has no such latch and already runs the full, unrelaxed
+ * guard suite regardless of what other zones are doing.
+ *
+ * Loops profile_executor_zone_is_active() (already published, per-zone)
+ * over every zone but the one under test -- no profile_executor.c change
+ * needed; there is no "any zone" query published, and this file must not
+ * add one to that translation unit while target-mode work is still
+ * uncommitted and profile_executor.c has moved on independently. */
+static bool any_other_zone_profile_active(uint8_t zone_index)
+{
+    for (uint8_t z = 0; z < MAX31856_CHANNEL_COUNT; z++) {
+        if (z == zone_index) continue;
+        if (profile_executor_zone_is_active(z)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 
 /* Must be called with s_at.lock held. */
 static void apply_relay(bool want_on)
@@ -601,6 +895,66 @@ static void coupling_persist_job(void *arg)
     }
 }
 
+/* The minimum rise (degC) a step test's zone must show above its own
+ * baseline before it is trustworthy -- shared by finalize_fit()'s (B)
+ * minimum-excursion refusal (the fitted gain's implied total rise) AND
+ * the live "has this element proven it heats" check that gates guard 1's
+ * relaxation during STEPPING (see step_element_proven's comment). One
+ * threshold, two consumers -- deliberately the SAME number: if it's not
+ * enough rise to trust a finished fit, it's not enough rise to have proven
+ * the element yet either. Factored out of finalize_fit() (where this used
+ * to be inlined) rather than duplicated. ZERO-SEMANTICS TRAP: max_temp_c
+ * == 0 means the ceiling guard is DISABLED, not "the ceiling is zero
+ * degrees" -- see AUTOTUNE_MIN_RISE_FRACTION_OF_SPAN's own comment above
+ * for the full reasoning behind the fraction-of-headroom vs. no-ceiling
+ * split below. */
+static float autotune_min_rise_c(float baseline_c, float configured_max_temp_c)
+{
+    if (configured_max_temp_c > 0.0f) {
+        float headroom_c = configured_max_temp_c - baseline_c;
+        float scaled = AUTOTUNE_MIN_RISE_FRACTION_OF_SPAN * headroom_c;
+        return (scaled > AUTOTUNE_MIN_RISE_FLOOR_C) ? scaled : AUTOTUNE_MIN_RISE_FLOOR_C;
+    }
+    return AUTOTUNE_MIN_RISE_NO_CEILING_C;
+}
+
+/* Review blocker 4: guard 1's expected-rise bar (thermal_guard.c: rate_cfg *
+ * elapsed_min) is completely duty-independent, while achievable rise on a
+ * linear plant is proportional to commanded duty. Combined with review
+ * finding 3's AUTOTUNE_PROGRESS_DUTY_MIN_FOR_STEP_TEST (0.01 -- arming
+ * guards 1/2 at any commanded duty > 0, not just >= 0.5), this asserted
+ * that a 1% duty must rise as fast as a 100% duty: at the FIXED 0.15 probe
+ * duty, guard 1's first 300s window needs K*d*(1-e^(-300/285)) >=
+ * rate_cfg*5min = 2.5C, i.e. K >= 25.6 -- a perfectly healthy zone with
+ * K = 22 (well within a real kiln's plausible range) false-trips at 300s.
+ * Target mode's identify phase is worse: a target only a few degrees above
+ * baseline computes a duty near 0.05, whose entire asymptote (K*0.05) can
+ * sit BELOW the fixed 2.5C bar -- an immediate, unavoidable false abort
+ * regardless of how healthy the element is.
+ *
+ * Fixed the same way profile_executor.c's own analogous defect was (guard
+ * 1's expected rate capped at the commanded ramp rate there, see that
+ * file's apply-relays-and-guards loop -- same pattern, different achievable-
+ * rate source since a step test has no ramp, only a duty): the expected
+ * rate is scaled by commanded duty, `rate_cfg * duty`, rather than left as
+ * a bare absolute. Physically this is the CORRECT bar, not a relaxation for
+ * its own sake -- a dead element still produces ZERO rise at any duty, so a
+ * proportionally smaller (but still strictly positive, since step_duty is
+ * always > 0 during STEPPING) bar still correctly separates "zero real
+ * rise" from "some real rise"; it only removes the FALSE-POSITIVE risk for
+ * a healthy, low-K, or low-duty zone that a fixed absolute bar cannot
+ * distinguish from a dead one. Deliberately NOT a fixed minimum duty floor
+ * on run_to_target()'s computed identify_duty (the OTHER fix this finding's
+ * note offered as an alternative) -- scaling the bar already resolves both
+ * symptoms described (the fixed-probe-duty K threshold AND target mode's
+ * near-zero identify duty) with one mechanism, so a second, overlapping
+ * floor was judged unnecessary complexity rather than added safety. */
+static float autotune_step_guard_sanity_rate(float configured_rate_c_per_min, float step_duty)
+{
+    float configured = (configured_rate_c_per_min > 0.0f) ? configured_rate_c_per_min : 0.5f;
+    return configured * step_duty;
+}
+
 static void finalize_fit(void)
 {
     float baseline_c = s_at.zone_baseline_c[s_at.zone_index];
@@ -622,6 +976,27 @@ static void finalize_fit(void)
         snprintf(s_at.abort_reason, sizeof(s_at.abort_reason), "fit failed: %s", s_at.model.invalid_reason);
         ESP_LOGW(TAG, "autotune zone %u: %s", s_at.zone_index, s_at.abort_reason);
         return;
+    }
+    /* Review finding: "no post-hoc check that the identification step
+     * landed anywhere near target_c, and status exposes no achieved-vs-
+     * requested value." target_achieved_c is what THIS fit says the step
+     * actually asymptotes to -- not target_c. Computed for every target-mode
+     * fit (not just ones that miss), so an operator always sees the real
+     * landing point rather than trusting the requested one. See
+     * AUTOTUNE_TARGET_ACHIEVED_WARN_C's own comment for the known
+     * probe-baseline-vs-identify-baseline bias this is watching for. */
+    if (s_at.target_mode) {
+        s_at.target_achieved_c = baseline_c + s_at.model.k_gain_c_per_duty * s_at.step_duty;
+        float miss_c = s_at.target_achieved_c - s_at.target_c;
+        if (fabsf(miss_c) >= AUTOTUNE_TARGET_ACHIEVED_WARN_C) {
+            ESP_LOGW(TAG, "autotune zone %u: target-mode identification landed at %.1fC, requested %.1fC "
+                          "(miss %.1fC) -- likely the probe-baseline-vs-identify-baseline bias, see "
+                          "AUTOTUNE_TARGET_ACHIEVED_WARN_C's comment",
+                     s_at.zone_index, (double)s_at.target_achieved_c, (double)s_at.target_c, (double)miss_c);
+        } else {
+            ESP_LOGI(TAG, "autotune zone %u: target-mode identification landed at %.1fC (requested %.1fC)",
+                     s_at.zone_index, (double)s_at.target_achieved_c, (double)s_at.target_c);
+        }
     }
     /* (A) fopdt_model_t::settled defaults false; only the honest settle
      * detector in autotune_engine_tick_locked() is allowed to set it true.
@@ -649,14 +1024,7 @@ static void finalize_fit(void)
      * fallback (a large bare constant) applies in that case, not a fraction
      * of a headroom that doesn't exist. */
     float configured_max_temp_c = s_at.guard_cfg.max_temp_c;
-    float min_rise_c;
-    if (configured_max_temp_c > 0.0f) {
-        float headroom_c = configured_max_temp_c - baseline_c;
-        float scaled = AUTOTUNE_MIN_RISE_FRACTION_OF_SPAN * headroom_c;
-        min_rise_c = (scaled > AUTOTUNE_MIN_RISE_FLOOR_C) ? scaled : AUTOTUNE_MIN_RISE_FLOOR_C;
-    } else {
-        min_rise_c = AUTOTUNE_MIN_RISE_NO_CEILING_C;
-    }
+    float min_rise_c = autotune_min_rise_c(baseline_c, configured_max_temp_c);
     float observed_rise_c = fabsf(s_at.model.k_gain_c_per_duty * s_at.step_duty);
     if (observed_rise_c < min_rise_c) {
         force_relays_off();
@@ -922,6 +1290,138 @@ static void finalize_fit(void)
              (double)s_at.proposed_gains.kp, (double)s_at.proposed_gains.ki, (double)s_at.proposed_gains.kd);
 }
 
+/* Target-temperature mode only: called instead of finalize_fit() when
+ * PHASE 1 (the probe) ends -- either AUTOTUNE_ENGINE_PROBE_DURATION_S
+ * elapsed, or (a fast/strong zone) the ordinary settle detector fired early.
+ *
+ * Fits a rough FOPDT gain from the probe's own trace by calling
+ * pid_autotune_fit_fopdt() -- the SAME fit finalize_fit() itself uses, not a
+ * second estimator, just applied to the probe's (small, low-duty) step
+ * instead of the real one. Uses that rough K to pick the duty PHASE 2 needs
+ * to land its asymptote at s_at.target_c, refuses clearly if the target is
+ * out of reach at full duty, and otherwise rewinds the state machine to
+ * SETTLING with the new duty so the UNMODIFIED SETTLING->STEPPING->
+ * finalize_fit() path runs the real identification step -- every guard
+ * finalize_fit() applies (ceiling headroom, physical plausibility, minimum
+ * excursion) therefore applies to the identification step exactly as it
+ * does to a plain duty-based run. */
+static void handle_probe_done_locked(void)
+{
+    float baseline_c = s_at.zone_baseline_c[s_at.zone_index];
+
+    autotune_sample_t *scratch = unpack_zone_trace(s_at.zone_index, s_at.trace_count);
+    if (!scratch) {
+        force_relays_off();
+        s_at.state = AUTOTUNE_ENGINE_ABORTED;
+        snprintf(s_at.abort_reason, sizeof(s_at.abort_reason),
+                 "out of memory unpacking a %u-sample probe trace", (unsigned)s_at.trace_count);
+        ESP_LOGW(TAG, "autotune zone %u: %s", s_at.zone_index, s_at.abort_reason);
+        return;
+    }
+    fopdt_model_t probe = pid_autotune_fit_fopdt(scratch, s_at.trace_count, baseline_c, AUTOTUNE_ENGINE_PROBE_DUTY);
+    free(scratch);
+    if (!probe.valid) {
+        force_relays_off();
+        s_at.state = AUTOTUNE_ENGINE_ABORTED;
+        snprintf(s_at.abort_reason, sizeof(s_at.abort_reason), "probe fit failed: %s", probe.invalid_reason);
+        ESP_LOGW(TAG, "autotune zone %u: %s", s_at.zone_index, s_at.abort_reason);
+        return;
+    }
+    if (!(probe.k_gain_c_per_duty > 0.0f)) {
+        force_relays_off();
+        s_at.state = AUTOTUNE_ENGINE_ABORTED;
+        snprintf(s_at.abort_reason, sizeof(s_at.abort_reason),
+                 "probe gain %.3f is non-positive -- cannot derive a duty for target %.1fC",
+                 (double)probe.k_gain_c_per_duty, (double)s_at.target_c);
+        ESP_LOGW(TAG, "autotune zone %u: %s", s_at.zone_index, s_at.abort_reason);
+        return;
+    }
+    s_at.probe_k_rough = probe.k_gain_c_per_duty;
+
+    /* duty = (target - baseline) / K_rough -- the duty that, at this rough
+     * gain, asymptotes the step response at target_c. Refused, not clamped,
+     * when it falls outside (0, 1]: a target at or below the probe baseline
+     * needs a negative (impossible) duty, and a target above what full duty
+     * can reach needs a duty > 1.0 -- both are told apart below so the
+     * refusal names the actual problem rather than one generic message. */
+    float reach = (s_at.target_c - baseline_c) / probe.k_gain_c_per_duty;
+    if (!(reach > 0.0f)) {
+        force_relays_off();
+        s_at.state = AUTOTUNE_ENGINE_ABORTED;
+        snprintf(s_at.abort_reason, sizeof(s_at.abort_reason),
+                 "target %.1fC is not above the %.1fC probe baseline", (double)s_at.target_c, (double)baseline_c);
+        ESP_LOGW(TAG, "autotune zone %u: %s", s_at.zone_index, s_at.abort_reason);
+        return;
+    }
+    if (reach > 1.0f) {
+        /* Highest temperature this rough gain says the zone CAN reach, at
+         * duty 1.0 -- the number the caller asked this refusal to name.
+         * probe_k_rough itself is separately visible through
+         * autotune_engine_get_status() (out->probe_k_rough), so it does not
+         * also have to be crammed into this 96-byte, two-float-substitution
+         * buffer alongside the target and the reachable max. */
+        float reachable_max_c = baseline_c + probe.k_gain_c_per_duty;
+        force_relays_off();
+        s_at.state = AUTOTUNE_ENGINE_ABORTED;
+        snprintf(s_at.abort_reason, sizeof(s_at.abort_reason),
+                 "target %.1fC unreachable at full duty (est max ~%.1fC)", (double)s_at.target_c,
+                 (double)reachable_max_c);
+        ESP_LOGW(TAG, "autotune zone %u: %s", s_at.zone_index, s_at.abort_reason);
+        return;
+    }
+
+    /* Review round-3 finding 3: reach > 0 alone does not bound how SMALL
+     * identify_duty can be -- a target only a hair above baseline (a tight
+     * re-tune, or a probe-fit K_rough that overshoots the true gain) yields
+     * e.g. reach ~= 0.002, below AUTOTUNE_PROGRESS_DUTY_MIN_FOR_STEP_TEST
+     * (0.01). Below that floor guard 1/2's progress window
+     * (thermal_guard.c's commanded_duty >= progress_duty_min gate) never
+     * arms AT ALL for the entire identify phase -- not merely a weaker bar
+     * (blocker 4's duty scaling), an absent one -- and even armed, the
+     * duty-scaled bar (blocker 4) would itself be within rounding of zero.
+     * finalize_fit()'s own minimum-excursion check (autotune_min_rise_c())
+     * still refuses a fit this small eventually, so this was never a heat-
+     * safety hole -- but it silently ran the identify phase's whole
+     * multi-hour budget with the progress guards disarmed. Refused here,
+     * before PHASE 2 ever starts, rather than merely clamped up to the
+     * floor (which would identify at a duty the operator's target did not
+     * actually ask for). */
+    if (reach < AUTOTUNE_PROGRESS_DUTY_MIN_FOR_STEP_TEST) {
+        force_relays_off();
+        s_at.state = AUTOTUNE_ENGINE_ABORTED;
+        /* Two float substitutions only (reach, target_c) -- the floor
+         * itself is a compile-time constant, written as a literal below
+         * rather than a third %f substitution, matching this file's own
+         * "at most two float substitutions per 96-byte abort_reason"
+         * -Werror=format-truncation discipline (see finalize_fit()'s (B)
+         * refusal comment for the original incident this convention
+         * traces back to). */
+        snprintf(s_at.abort_reason, sizeof(s_at.abort_reason),
+                 "identify duty %.4f for target %.1fC is below the 0.01 floor guard 1/2 need to arm",
+                 (double)reach, (double)s_at.target_c);
+        ESP_LOGW(TAG, "autotune zone %u: %s", s_at.zone_index, s_at.abort_reason);
+        return;
+    }
+
+    float identify_duty = reach;
+    if (identify_duty > 1.0f) identify_duty = 1.0f; /* defensive -- reach already <= 1.0f on this path */
+
+    ESP_LOGI(TAG, "autotune zone %u: probe done, K_rough=%.3f baseline=%.1fC -- identifying at duty %.3f for "
+                  "target %.1fC",
+             s_at.zone_index, (double)probe.k_gain_c_per_duty, (double)baseline_c, (double)identify_duty,
+             (double)s_at.target_c);
+
+    s_at.probe_phase = false;
+    s_at.step_duty = identify_duty;
+    /* Rewinds to SETTLING exactly as begin_run_locked() left it before the
+     * probe's own SETTLING->STEPPING transition -- that transition code is
+     * unmodified and will capture a fresh baseline_c (wherever the zone
+     * actually is after the probe and this re-settle, not necessarily back
+     * at the original cold baseline) before stepping to identify_duty. */
+    s_at.state = AUTOTUNE_ENGINE_SETTLING;
+    s_at.phase_start_tick = xTaskGetTickCount();
+}
+
 /* One tick of the bang-bang relay law. Returns the duty this tick wants and
  * reports, through *edge_on_to_off, the moment the relay switched from its
  * high branch to its low one.
@@ -1112,7 +1612,30 @@ static bool step_settle_check_locked(void)
             float slope = (v_cur - v_prev) / window_s;
             float aslope = fabsf(slope);
 
-            if (!s_at.step_onset_seen && aslope > RESPONSE_ONSET_SLOPE_C_PER_S) {
+            /* Review blocker 2: this used to test aslope (fabsf(slope)) --
+             * direction-blind. In target mode the identify phase re-baselines
+             * after only a 180s re-settle (AUTOTUNE_ENGINE_SETTLE_S) on a
+             * zone still cooling from the probe -- a zone 30C above ambient
+             * with tau=285s cools at ~0.105 C/s, 11x RESPONSE_ONSET_SLOPE_
+             * C_PER_S (0.009), so the OLD magnitude-only test latched onset
+             * on residual COOLING before the element had done anything,
+             * defeating this defense entirely and leaving the 3.0C absolute
+             * rise (AUTOTUNE_ELEMENT_ALIVE_RISE_C) as the sole gate -- the
+             * exact gate blocker 1 (cross-zone coupling) can also defeat.
+             * Two independent defenses were meant to compose; a direction-
+             * blind onset test silently removed one of them in exactly the
+             * scenario (target mode) that most needs both. Fixed by testing
+             * the SIGNED slope, not its magnitude: a real step response
+             * always rises (this file's convention is a positive duty step
+             * from a lower baseline -- see autotune_engine_run()'s own doc
+             * comment), so onset now means "this zone is genuinely heating",
+             * never "this zone's temperature moved, in either direction".
+             * Every EXISTING settle-detector test drives a rising synthetic
+             * trace (K positive), so this is behaviorally transparent for
+             * all of them -- it only changes behavior for a falling
+             * response, which was never a genuine step-response case this
+             * detector was built to recognize. */
+            if (!s_at.step_onset_seen && slope > RESPONSE_ONSET_SLOPE_C_PER_S) {
                 s_at.step_onset_seen = true;
                 s_at.step_onset_trace_count = s_at.trace_count;
             }
@@ -1180,6 +1703,51 @@ static void autotune_engine_tick_locked(void)
     uint32_t dt_ms = ticks_to_ms(now - s_at.prev_tick);
     if (dt_ms == 0) dt_ms = AUTOTUNE_ENGINE_TICK_MS;
     s_at.prev_tick = now;
+
+    /* Whole-run budget (review finding 6) -- STEP method only, see
+     * AUTOTUNE_ENGINE_WHOLE_RUN_MAX_DURATION_S's own comment for why
+     * AUTOTUNE_ENGINE_DEFAULT_MAX_DURATION_S alone (measured from
+     * phase_start_tick, which DOES reset at every phase transition) cannot
+     * bound target mode's settle+probe+settle+identify sequence. Checked
+     * before anything else this tick, same as a guard trip. */
+    if (s_at.method == AUTOTUNE_METHOD_STEP &&
+        ticks_to_s(now - s_at.run_start_tick) >= AUTOTUNE_ENGINE_WHOLE_RUN_MAX_DURATION_S) {
+        abort_locked("whole-run time budget exceeded (settle+probe+settle+identify sum, not just one phase)");
+        return;
+    }
+
+    /* Review blocker 1, live half: refused at START (autotune_engine_run()/
+     * _run_to_target()), but a profile can also start on another zone AFTER
+     * this run is already under way -- checked every tick too, STEP method
+     * only. Not gated to STEPPING specifically: SETTLING drives duty 0 so
+     * a neighbour's heat cannot bias a baseline capture either, and
+     * catching it here (rather than only once STEPPING begins) means a
+     * neighbour that started during THIS run's own SETTLING is caught
+     * before any trace is even recorded, not partway through it.
+     *
+     * LOCK-ORDER FIX (review, hard blocker): this used to call
+     * any_other_zone_profile_active() -> profile_executor_zone_is_active()
+     * directly HERE, i.e. from inside autotune_engine_tick_locked() while
+     * s_at.lock is already held (task_entry() takes it before calling this
+     * function). profile_executor_zone_is_active() takes s_exec.lock --
+     * and profile_executor.c's own sweep_unowned_relays() (called with
+     * s_exec.lock held) calls autotune_engine_is_active_on_zone() (s_at.
+     * lock) the OTHER way round. Two control tasks, both polling at ~1Hz
+     * with portMAX_DELAY, taking the same two locks in opposite orders is
+     * a textbook AB-BA deadlock -- profile_executor.c's own doc comment on
+     * that function states the invariant this broke: "autotune never does
+     * the reverse [of taking s_exec.lock while holding s_at.lock]". Fixed
+     * by reading a HINT computed by task_entry() BEFORE it takes s_at.lock
+     * (see that function's own comment, and other_zone_profile_active_
+     * hint's field comment) instead of querying live from in here -- the
+     * two START-TIME call sites in autotune_engine_run()/_run_to_target()
+     * were already correct (both run before begin_run_locked() takes the
+     * lock) and are untouched. */
+    if (s_at.method == AUTOTUNE_METHOD_STEP && s_at.other_zone_profile_active_hint) {
+        abort_locked("a profile started on another zone mid-run -- this step test's element-alive "
+                     "detection can no longer trust this zone's own reading");
+        return;
+    }
 
     float raw_c = NAN;
     bool sensor_ok = false;
@@ -1295,9 +1863,115 @@ static void autotune_engine_tick_locked(void)
         s_at.cycles_reported = cycles_now;
     }
 
+    /* "This element has proven it heats" -- STEP method, STEPPING only.
+     * Two things happen here, both against s_at.step_rise_running_max_c
+     * (tracked unconditionally, see its own comment):
+     *
+     *   (1) LATCH: once cumulative rise crosses AUTOTUNE_ELEMENT_ALIVE_
+     *       RISE_C (a small ABSOLUTE threshold -- NOT autotune_min_rise_c(),
+     *       see AUTOTUNE_ELEMENT_ALIVE_RISE_C's own comment for why the
+     *       first version's reuse of that threshold never actually engaged
+     *       on the measured plant), with a genuine onset already detected
+     *       (step_onset_seen -- rules out a couple of coincidental
+     *       quantization ticks). Checked only while still false, so a
+     *       momentary noisy dip back under the threshold cannot un-latch it
+     *       mid-plateau, which is exactly the scenario this exists to
+     *       survive.
+     *
+     *   (2) DEATH CHECK: once latched, EITHER a drop of AUTOTUNE_ELEMENT_
+     *       DEATH_DROP_C below the running peak, OR rise_c falling back
+     *       below AUTOTUNE_ELEMENT_ALIVE_RISE_C (review blocker 3 -- the
+     *       relative check alone is arithmetically dead below a 5.0C peak),
+     *       aborts the run -- this file's own stand-in for guard 2, which
+     *       cannot reach this case during a step test (see that constant's
+     *       comment for why). Checked EVERY tick once proven, not just at
+     *       latch time. */
+    if (s_at.method == AUTOTUNE_METHOD_STEP && s_at.state == AUTOTUNE_ENGINE_STEPPING && s_at.actual_valid &&
+        s_at.zone_baseline_valid[s_at.zone_index]) {
+        float rise_c = s_at.actual_c - s_at.zone_baseline_c[s_at.zone_index];
+        if (rise_c > s_at.step_rise_running_max_c) {
+            s_at.step_rise_running_max_c = rise_c;
+        }
+        if (!s_at.step_element_proven && s_at.step_onset_seen && rise_c >= AUTOTUNE_ELEMENT_ALIVE_RISE_C) {
+            s_at.step_element_proven = true;
+            ESP_LOGI(TAG, "autotune zone %u: element proven (rise %.2fC) -- guard 1's rise requirement is "
+                          "relaxed for the rest of this step; the running-peak death check now covers "
+                          "guard 2's job instead",
+                     s_at.zone_index, (double)rise_c);
+        }
+        /* Review blocker 3: the RELATIVE check alone (drop from running
+         * peak) is arithmetically incapable of firing when the peak never
+         * reaches AUTOTUNE_ELEMENT_DEATH_DROP_C (5.0) in the first place --
+         * step_rise_running_max_c starts at 0.0f, so a peak anywhere in
+         * [ALIVE_RISE_C, DEATH_DROP_C) = [3.0, 5.0) makes the drop needed
+         * to reach 5.0 larger than the peak itself. Measured: the 0.15 duty
+         * probe phase on this hardware's plant peaks around 5.4C by the
+         * 600s budget -- and even THAT best case needs a fall from 5.4 to
+         * 0.4 (a 5.0C drop) to trip, which at this plant's own cooling rate
+         * takes 741s against a 600s budget. The whole probe phase sat in
+         * this dead zone: proven, guard 1 relaxed, guard 2 unreachable, and
+         * the death check unable to fire at all.
+         *
+         * Fixed with a SECOND, ABSOLUTE condition alongside the relative
+         * one: once proven, rise_c falling back below AUTOTUNE_ELEMENT_
+         * ALIVE_RISE_C also trips -- symmetric with the condition that
+         * proved it in the first place ("this only counts as alive above
+         * the alive floor" cuts both ways). This closes the dead zone
+         * entirely: below a 5.0C peak, the absolute floor is the ONLY one
+         * that can ever fire (the relative drop mathematically cannot);
+         * above it, whichever condition is reached first fires. */
+        bool relative_drop = (s_at.step_rise_running_max_c - rise_c) >= AUTOTUNE_ELEMENT_DEATH_DROP_C;
+        /* Review round-3 finding 2: a DEADBAND (2.5C, not the 3.0C the
+         * latch itself uses) plus a DWELL (must read below the deadband
+         * for AUTOTUNE_ELEMENT_DEATH_FLOOR_CONSECUTIVE_TICKS ticks in a
+         * row, not just once) -- see AUTOTUNE_ELEMENT_DEATH_FLOOR_MARGIN_C's
+         * own comment for why a bare "rise_c < ALIVE_RISE_C" false-tripped
+         * a healthy plateau. The streak counter is maintained every tick
+         * (proven or not, though it is only ever READ while proven) so it
+         * is already correct the instant proven flips true. */
+        float death_floor_c = AUTOTUNE_ELEMENT_ALIVE_RISE_C - AUTOTUNE_ELEMENT_DEATH_FLOOR_MARGIN_C;
+        if (rise_c < death_floor_c) {
+            if (s_at.step_below_death_floor_ticks < UINT16_MAX) {
+                s_at.step_below_death_floor_ticks++;
+            }
+        } else {
+            s_at.step_below_death_floor_ticks = 0u;
+        }
+        bool below_alive_floor = s_at.step_below_death_floor_ticks >= AUTOTUNE_ELEMENT_DEATH_FLOOR_CONSECUTIVE_TICKS;
+        if (s_at.step_element_proven && (relative_drop || below_alive_floor)) {
+            char detail[80];
+            if (relative_drop) {
+                snprintf(detail, sizeof(detail), "element died after proving alive: dropped %.2fC from a %.2fC peak",
+                         (double)(s_at.step_rise_running_max_c - rise_c), (double)s_at.step_rise_running_max_c);
+            } else {
+                snprintf(detail, sizeof(detail), "element died after proving alive: rise %.2fC stayed below the "
+                                                 "%.2fC floor",
+                         (double)rise_c, (double)death_floor_c);
+            }
+            escalate_and_abort(THERMAL_GUARD_TRIP_WRONG_DIRECTION, detail);
+            return;
+        }
+    }
+
+    /* Review blocker 4's own fix, see autotune_step_guard_sanity_rate()'s
+     * comment -- a per-tick LOCAL copy of s_at.guard_cfg, same pattern as
+     * profile_executor.c's guard_cfg_this_tick: the zone's own stored
+     * guard_cfg.sanity_rate_c_per_min is never mutated, only what THIS
+     * tick's thermal_guard_tick() call is handed. STEP method, STEPPING
+     * only -- SETTLING commands duty 0 (nothing to scale against) and the
+     * RELAY method's guard suite is deliberately left at the zone's full,
+     * unscaled configuration (see this file's own doc note on why the
+     * relay test runs the full guard suite, never a relaxed one). */
+    thermal_guard_cfg_t guard_cfg_this_tick = s_at.guard_cfg;
+    if (s_at.method == AUTOTUNE_METHOD_STEP && s_at.state == AUTOTUNE_ENGINE_STEPPING) {
+        guard_cfg_this_tick.sanity_rate_c_per_min =
+            autotune_step_guard_sanity_rate(s_at.guard_cfg.sanity_rate_c_per_min, s_at.step_duty);
+    }
+
     thermal_guard_input_t gin = {
         .sensor_ok = sensor_ok,
         .measurement_c = raw_c,
+        .progress_rise_check_relaxed = (s_at.method == AUTOTUNE_METHOD_STEP) && s_at.step_element_proven,
         /* A relay run has a real setpoint, so guard 4 (drift after
          * settling) becomes a genuine check that the oscillation stayed
          * around the target instead of walking away from it -- the step
@@ -1344,10 +2018,58 @@ static void autotune_engine_tick_locked(void)
                           ? s_at.relay_setpoint_c
                           : (s_at.guard_cfg.max_temp_c > 0.0f ? s_at.guard_cfg.max_temp_c
                                                                : raw_c + STEP_TEST_GUARD_HEADROOM_C),
-        .commanded_duty = want_relay_on ? want_duty : 0.0f,
+        /* STEP method: the INTENDED duty (want_duty, pre-PWM), not the
+         * post-PWM want_relay_on-gated value -- found while testing review
+         * finding 3 (progress_duty_min override) at a realistic sub-1.0
+         * duty: heater_output_duty() PWM-chops any duty below 1.0 into
+         * on/off pulses within its own window_ms, and commanded_duty
+         * dropping to 0 every "off" pulse was resetting guard 1/2's
+         * (unrelated, much longer -- 300s default) progress window every
+         * single PWM cycle, so lowering progress_duty_min ALONE still left
+         * the window unable to ever accumulate 300s at any duty below
+         * 1.0 -- only duty==1.0 (heater_output_duty()'s documented
+         * always-on special case) ever worked, which is exactly why every
+         * pre-existing guard-1 test in this file used step_duty=1.0. Using
+         * want_duty (what this run is COMMANDING this phase, matching
+         * s_at.step_duty during STEPPING) instead of the instantaneous PWM
+         * state is what thermal_guard_input_t's own "what this tick decided
+         * to drive... AFTER any safety-refusal" doc comment is reaching for.
+         *
+         * CORRECTION (review, after the same fix landed in
+         * profile_executor.c): an earlier version of this comment claimed "a
+         * relay_authority block still zeroes it" here. That is FALSE --
+         * relay_authority_zone_blocked() is evaluated inside apply_relay()
+         * (this file, above) purely to gate apply_relay()'s OWN local
+         * want_on before it writes the relay; the result never feeds back
+         * into want_duty, which is computed earlier in this function and
+         * unconditionally fed to thermal_guard_tick() as commanded_duty
+         * regardless of whether apply_relay() went on to refuse the write.
+         * This file has NOT been given profile_executor.c's equivalent fix
+         * (a per-zone "was this tick's want_on actually blocked" signal,
+         * fed as a genuine zero rather than the intended duty) -- an
+         * autotune run that is relay-authority-blocked for its entire
+         * STEPPING phase still reports its full commanded duty to the
+         * guards here, exactly as it always did. Left uncorrected in THIS
+         * pass (target-mode work, including this file's guard wiring, is
+         * paused pending review of separate findings) -- sensor_ok is the
+         * only thing this expression actually gates.
+         *
+         * RELAY method is untouched (its want_duty deliberately toggles
+         * between two extremes as part of the bang-bang law itself, a
+         * different situation this fix does not address).
+         *
+         * profile_executor.c's own identical PWM/progress-window defect
+         * (commanded_duty fed from the post-PWM relay state, resetting
+         * guards 1/2/3/7's windows on every PWM cycle at any duty strictly
+         * between 0 and 1) has been fixed separately and shipped on its own
+         * -- see that file's apply-relays-and-guards loop for the fix and
+         * its explicit reasoning on the load-cap and authority-block
+         * questions the same defect class raises there. */
+        .commanded_duty = (s_at.method == AUTOTUNE_METHOD_STEP) ? (sensor_ok ? want_duty : 0.0f)
+                                                                 : (want_relay_on ? want_duty : 0.0f),
         .dt_s = (float)dt_ms / 1000.0f,
     };
-    if (thermal_guard_tick(&s_at.guard_state, &s_at.guard_cfg, &gin)) {
+    if (thermal_guard_tick(&s_at.guard_state, &guard_cfg_this_tick, &gin)) {
         escalate_and_abort(s_at.guard_state.reason, s_at.guard_state.detail);
         return;
     }
@@ -1370,6 +2092,9 @@ static void autotune_engine_tick_locked(void)
             s_at.step_settled = false;
             s_at.step_onset_seen = false;
             s_at.step_onset_trace_count = 0u;
+            s_at.step_element_proven = false; /* re-earned fresh every STEPPING phase -- see its own comment */
+            s_at.step_rise_running_max_c = 0.0f;
+            s_at.step_below_death_floor_ticks = 0u;
             /* Ambient reference for finalize_fit()'s physical-plausibility
              * check -- the cj_c captured above this tick if the tested
              * zone's own channel answered, else the same documented
@@ -1380,8 +2105,22 @@ static void autotune_engine_tick_locked(void)
                      (double)s_at.zone_baseline_c[s_at.zone_index], (double)s_at.step_duty);
         }
     } else if (s_at.state == AUTOTUNE_ENGINE_STEPPING) {
-        if (s_at.elapsed_s >= AUTOTUNE_ENGINE_DEFAULT_MAX_DURATION_S) {
-            finalize_fit(); /* attempt a fit on whatever we have; ABORTED if it doesn't fit */
+        /* Target mode's PHASE 1 (probe) uses a much shorter budget than the
+         * real identification step -- see AUTOTUNE_ENGINE_PROBE_DURATION_S's
+         * comment for the tradeoff. Both budgets, and both settle-detector
+         * hits, route to handle_probe_done_locked() instead of
+         * finalize_fit() while probing; step_settled/step_peak_slope_* etc.
+         * get reset again at the probe->identify SETTLING->STEPPING
+         * transition, so nothing from the probe phase leaks into the real
+         * fit's own settle detection. */
+        bool probing = s_at.target_mode && s_at.probe_phase;
+        uint32_t phase_budget_s = probing ? AUTOTUNE_ENGINE_PROBE_DURATION_S : AUTOTUNE_ENGINE_DEFAULT_MAX_DURATION_S;
+        if (s_at.elapsed_s >= phase_budget_s) {
+            if (probing) {
+                handle_probe_done_locked();
+            } else {
+                finalize_fit(); /* attempt a fit on whatever we have; ABORTED if it doesn't fit */
+            }
             return;
         }
         if (ticks_to_s(now - s_at.last_sample_tick) >= AUTOTUNE_ENGINE_SAMPLE_PERIOD_S) {
@@ -1397,7 +2136,11 @@ static void autotune_engine_tick_locked(void)
 
             if (step_settle_check_locked()) {
                 s_at.step_settled = true;
-                finalize_fit();
+                if (probing) {
+                    handle_probe_done_locked();
+                } else {
+                    finalize_fit();
+                }
                 return;
             }
         }
@@ -1480,6 +2223,27 @@ static void task_entry(void *arg)
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(AUTOTUNE_ENGINE_TICK_MS));
 
+        /* Review blocker 1 fix (lock-order deadlock) -- evaluated BEFORE
+         * s_at.lock is taken, never after, preserving the documented lock
+         * order between this module and profile_executor.c: this module
+         * may take s_exec.lock (via profile_executor_zone_is_active(),
+         * inside any_other_zone_profile_active()) only while s_at.lock is
+         * NOT held, because profile_executor.c's sweep_unowned_relays()
+         * (called with s_exec.lock held) calls autotune_engine_is_active_
+         * on_zone() (s_at.lock) the other way round -- see profile_
+         * executor.c's own doc comment on that ordering, and any_other_
+         * zone_profile_active()'s comment here for the full account of the
+         * defect this replaced (querying live from INSIDE autotune_engine_
+         * tick_locked(), i.e. while s_at.lock was already held).
+         *
+         * Reads s_at.zone_index without the lock -- tolerated because it is
+         * write-once for the duration of a run (only begin_run_locked()
+         * ever changes it, and only between runs); a momentarily stale read
+         * here affects at most one tick's neighbour hint, corrected the
+         * very next tick, and this whole computation is simply discarded
+         * below whenever the engine turns out not to be running at all. */
+        bool other_zone_active_hint = any_other_zone_profile_active(s_at.zone_index);
+
         xSemaphoreTake(s_at.lock, portMAX_DELAY);
         if (!state_is_running(s_at.state)) {
             /* Backstop, same shape and reasoning as profile_executor.c's in
@@ -1493,6 +2257,7 @@ static void task_entry(void *arg)
             continue;
         }
 
+        s_at.other_zone_profile_active_hint = other_zone_active_hint;
         autotune_engine_tick_locked();
 
         xSemaphoreGive(s_at.lock);
@@ -1782,6 +2547,32 @@ static bool begin_run_locked(uint8_t zone_index, char *err_msg, size_t err_cap)
      * never-tuned-yet state autotune_engine_start()'s memset() leaves. */
     s_at.proposed_gains = (autotune_gains_t){0};
     s_at.predicted_max_ramp_c_per_hr = 0.0f;
+    /* Target-mode fields default off/zero for every run; autotune_engine_
+     * run_to_target() sets target_mode/probe_phase/target_c right after this
+     * function returns, exactly as it already does for method/step_duty --
+     * see that function. Without this reset a plain autotune_engine_run()
+     * following an earlier target-mode run would inherit its stale
+     * target_mode=true and route STEPPING's end through handle_probe_done_
+     * locked() instead of finalize_fit(). */
+    s_at.target_mode = false;
+    s_at.probe_phase = false;
+    s_at.target_c = 0.0f;
+    s_at.probe_k_rough = 0.0f;
+    s_at.target_achieved_c = 0.0f;
+    /* Review finding 5: these two used to be reset ONLY at the SETTLING->
+     * STEPPING transition, so a brand-new run's SETTLING phase carried the
+     * PREVIOUS run's true step_element_proven through it -- benign only
+     * because SETTLING always commands duty 0 (guard 1's climbing branch
+     * never evaluates there regardless), but stale safety state surviving a
+     * run boundary for no reason. Reset here too so it never happens. */
+    s_at.step_element_proven = false;
+    s_at.step_rise_running_max_c = 0.0f;
+    s_at.step_below_death_floor_ticks = 0u;
+    /* Same reasoning -- task_entry() sets a fresh value every tick before
+     * calling autotune_engine_tick_locked(), but reset here too so a new
+     * run's very first tick (before task_entry() has run its own pre-lock
+     * computation for THIS run) never reads a previous run's true. */
+    s_at.other_zone_profile_active_hint = false;
 
     float window_ms = 0.0f, min_on_ms = 0.0f, min_off_ms = 0.0f;
     zones_config_get_heater_cfg(zone_index, &window_ms, &min_on_ms, &min_off_ms);
@@ -1838,6 +2629,9 @@ static bool begin_run_locked(uint8_t zone_index, char *err_msg, size_t err_cap)
     TickType_t now = xTaskGetTickCount();
     s_at.phase_start_tick = now;
     s_at.prev_tick = now;
+    /* Set ONCE per run, never touched again -- see
+     * AUTOTUNE_ENGINE_WHOLE_RUN_MAX_DURATION_S's own comment. */
+    s_at.run_start_tick = now;
     /* Lock stays held -- caller sets method, method-specific fields, state. */
     return true;
 }
@@ -1857,6 +2651,18 @@ bool autotune_engine_run(uint8_t zone_index, float step_duty, autotune_rule_t ru
         if (err_msg) snprintf(err_msg, err_cap, "step-test rule must be SIMC or Cohen-Coon");
         return false;
     }
+    /* Review blocker 1: refused BEFORE any heating starts, same convention
+     * as every other pre-begin_run_locked() refusal -- see
+     * any_other_zone_profile_active()'s own comment for why isolation, not
+     * attribution, is this file's fix. */
+    if (any_other_zone_profile_active(zone_index)) {
+        if (err_msg) {
+            snprintf(err_msg, err_cap,
+                     "a profile is running on another zone -- a step test's element-alive detection "
+                     "cannot tell that zone's heat from this one's");
+        }
+        return false;
+    }
     if (!begin_run_locked(zone_index, err_msg, err_cap)) {
         return false;
     }
@@ -1864,6 +2670,13 @@ bool autotune_engine_run(uint8_t zone_index, float step_duty, autotune_rule_t ru
     s_at.method = AUTOTUNE_METHOD_STEP;
     s_at.step_duty = step_duty;
     s_at.step_rule = rule;
+    /* Review finding 3: thermal_guard.c's default progress_duty_min (0.5)
+     * leaves guards 1/2 completely inert below that duty -- every step test
+     * arms them explicitly at any commanded duty > 0 instead. See
+     * AUTOTUNE_PROGRESS_DUTY_MIN_FOR_STEP_TEST's own comment. Relay method
+     * is untouched -- set here, not in begin_run_locked(), because that
+     * function runs before the caller has chosen a method. */
+    s_at.guard_cfg.progress_duty_min = AUTOTUNE_PROGRESS_DUTY_MIN_FOR_STEP_TEST;
     s_at.state = AUTOTUNE_ENGINE_SETTLING;
     bool no_ceiling = !(s_at.guard_cfg.max_temp_c > 0.0f);
     xSemaphoreGive(s_at.lock);
@@ -1881,6 +2694,100 @@ bool autotune_engine_run(uint8_t zone_index, float step_duty, autotune_rule_t ru
                       "nothing to compare against for this run; guards 1/2/5/6 are unaffected",
                  zone_index);
     }
+    return true;
+}
+
+bool autotune_engine_run_to_target(uint8_t zone_index, float target_c, autotune_rule_t rule, char *err_msg,
+                                   size_t err_cap)
+{
+    if (rule != AUTOTUNE_RULE_SIMC && rule != AUTOTUNE_RULE_COHEN_COON) {
+        /* Same restriction as autotune_engine_run() -- this is still a step
+         * test underneath, just with the duty chosen for the caller. */
+        if (err_msg) snprintf(err_msg, err_cap, "step-test rule must be SIMC or Cohen-Coon");
+        return false;
+    }
+
+    /* Ceiling validation happens here, BEFORE begin_run_locked() is even
+     * called -- i.e. strictly before any heating. (begin_run_locked()'s own
+     * SETTLING phase drives duty 0, but this check must refuse before that
+     * phase is even entered, per "validated ... before any heating starts".)
+     * zones_config_get_temp_limits() is a cheap cached-config read;
+     * begin_run_locked() reads the same config again just below for the
+     * guard suite it arms -- reading it twice here is simpler than
+     * restructuring begin_run_locked() to hand this back out, and nothing
+     * can change max_temp_c between the two reads (no run is active yet,
+     * and this function is the only writer of a NEW run's target_c). */
+    float max_temp_c = 0.0f, min_temp_c = -20.0f;
+    zones_config_get_temp_limits(zone_index, &max_temp_c, &min_temp_c);
+
+    if (!(target_c > 0.0f)) {
+        /* target_c <= 0 means "use the default": AUTOTUNE_ENGINE_TARGET_
+         * DEFAULT_FRACTION of max_temp_c. ZERO-SEMANTICS TRAP, same
+         * convention as every other max_temp_c check in this file:
+         * max_temp_c == 0 means the ceiling guard is DISABLED for this
+         * zone, not "the ceiling is zero degrees" -- there is therefore no
+         * usable maximum to take a fraction of, and 0.75 * 0 would silently
+         * hand back a target of 0C. Refuse and require an explicit target
+         * instead of inventing a fallback ceiling of our own. */
+        if (!(max_temp_c > 0.0f)) {
+            if (err_msg) {
+                snprintf(err_msg, err_cap,
+                         "zone %u has no max_temp_c configured -- cannot derive a default target, specify "
+                         "one explicitly",
+                         zone_index);
+            }
+            return false;
+        }
+        target_c = AUTOTUNE_ENGINE_TARGET_DEFAULT_FRACTION * max_temp_c;
+    }
+
+    /* Validated against the ceiling with margin whether target_c was given
+     * explicitly or just defaulted above -- the default is comfortably
+     * inside this margin (75% vs. this check's headroom requirement) but
+     * still goes through the SAME check, not a bypass, so a future change to
+     * either constant cannot silently reopen the gap. */
+    if (max_temp_c > 0.0f && target_c >= max_temp_c - AUTOTUNE_ENGINE_TARGET_CEILING_MARGIN_C) {
+        if (err_msg) {
+            snprintf(err_msg, err_cap, "target %.1fC too close to zone ceiling %.1fC", (double)target_c,
+                     (double)max_temp_c);
+        }
+        return false;
+    }
+
+    /* Review blocker 1 -- same refusal as autotune_engine_run()'s, see
+     * any_other_zone_profile_active()'s own comment. Checked here too
+     * (target mode's probe phase is exactly the scenario the blocker's
+     * measured-hardware numbers describe). */
+    if (any_other_zone_profile_active(zone_index)) {
+        if (err_msg) {
+            snprintf(err_msg, err_cap,
+                     "a profile is running on another zone -- a step test's element-alive detection "
+                     "cannot tell that zone's heat from this one's");
+        }
+        return false;
+    }
+
+    if (!begin_run_locked(zone_index, err_msg, err_cap)) {
+        return false;
+    }
+
+    s_at.method = AUTOTUNE_METHOD_STEP;
+    s_at.step_rule = rule;
+    s_at.target_mode = true;
+    s_at.probe_phase = true;
+    s_at.target_c = target_c;
+    s_at.probe_k_rough = 0.0f;
+    s_at.step_duty = AUTOTUNE_ENGINE_PROBE_DUTY; /* PHASE 1: probe, not the real identification duty yet */
+    /* Same override as the plain duty path -- see its own comment. Target
+     * mode's own duties (0.15 probe, typically well under 0.5 identify too)
+     * are exactly the case this exists for. */
+    s_at.guard_cfg.progress_duty_min = AUTOTUNE_PROGRESS_DUTY_MIN_FOR_STEP_TEST;
+    s_at.state = AUTOTUNE_ENGINE_SETTLING;
+    xSemaphoreGive(s_at.lock);
+
+    ESP_LOGI(TAG, "autotune zone %u starting target-temperature run: settling %us before probing at duty "
+                  "%.2f, target %.1fC",
+             zone_index, AUTOTUNE_ENGINE_SETTLE_S, (double)AUTOTUNE_ENGINE_PROBE_DUTY, (double)target_c);
     return true;
 }
 
@@ -2166,6 +3073,19 @@ void autotune_engine_get_status(autotune_engine_status_t *out)
     out->relay_hysteresis_c = s_at.relay_h;
     out->relay_cycles_seen = s_at.relay_cycles_seen;
     out->relay_cycles_target = AUTOTUNE_RELAY_TARGET_CYCLES;
+    /* Target mode's own progress, visible in every state (not just DONE) for
+     * the same reason the relay fields above are: while probing/identifying
+     * this is the only way a caller can show WHICH phase is running and WHY
+     * a particular duty was picked, and after an abort probe_k_rough is
+     * still meaningful diagnostic context for the abort_reason text. */
+    out->target_mode = s_at.target_mode;
+    out->probe_phase = s_at.probe_phase;
+    out->target_c = s_at.target_c;
+    out->probe_k_rough = s_at.probe_k_rough;
+    /* Only meaningful once finalize_fit() has actually run on the
+     * identification step (target_mode + a valid model) -- 0 otherwise,
+     * same "only meaningful when ..." convention as model/relay below. */
+    out->target_achieved_c = s_at.target_achieved_c;
     if (s_at.state == AUTOTUNE_ENGINE_DONE) {
         out->model = s_at.model;
         out->relay = s_at.relay;

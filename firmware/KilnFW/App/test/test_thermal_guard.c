@@ -6,7 +6,16 @@
 
 static thermal_guard_input_t base_input(void)
 {
-    thermal_guard_input_t in;
+    /* Zero-initialized, not just declared, so every field this function
+     * doesn't set explicitly below (peer_c/peer_ok/peer_count/
+     * peer_index_self, and now progress_rise_check_relaxed) reads as its
+     * documented "off"/"not configured" value rather than whatever
+     * garbage happened to be on the stack. Without this, an uninitialized
+     * progress_rise_check_relaxed could read nonzero by pure stack-content
+     * luck and silently relax guard 1 in tests that exist specifically to
+     * prove it trips -- exactly the false-negative class this whole task
+     * is about not shipping. */
+    thermal_guard_input_t in = {0};
     in.sensor_ok = true;
     in.measurement_c = 20.0f;
     in.setpoint_c = 20.0f;
@@ -116,6 +125,142 @@ void run_test_thermal_guard(void)
             tripped = thermal_guard_tick(&s, &cfg, &in);
         }
         TEST_CHECK(!tripped, "guard 1 does not trip on healthy heating");
+    }
+
+    /* Guard 1 relaxation (progress_rise_check_relaxed) -- autotune_engine.c's
+     * "element proven" latch, see thermal_guard_input_t's own comment for
+     * the bench defect this exists to fix (an honest step test approaching
+     * its asymptote tripping guard 1 for "not rising" when it had already
+     * proven the element heats). Tested here at the pure thermal_guard.c
+     * level -- autotune_engine.c's own tests cover the latch that DRIVES
+     * this flag; these prove the flag itself does what it claims. */
+
+    /* THE CASE THE GUARD EXISTS FOR: a genuinely dead element (commanded
+     * heat, zero rise, relaxation flag left false/unset exactly as it would
+     * be for real -- a dead element never crosses the min-rise threshold
+     * that earns the relaxation) must still trip, explicitly with the flag
+     * named here even though it's the zero-init default. */
+    {
+        thermal_guard_state_t s;
+        thermal_guard_cfg_t cfg = {.max_temp_c = 1300.0f, .min_temp_c = -20.0f, .sanity_rate_c_per_min = 0.5f};
+        thermal_guard_reset(&s);
+        thermal_guard_input_t in = base_input();
+        in.setpoint_c = 500.0f;
+        in.measurement_c = 20.0f;
+        in.commanded_duty = 1.0f;
+        in.progress_rise_check_relaxed = false; /* explicit -- this is the case that must never be masked */
+        bool tripped = false;
+        for (int i = 0; i < 40 && !tripped; i++) {
+            /* dead element: commanded heat, ZERO rise (not even the 0.01C
+             * drift the earlier guard-1 test allows) */
+            tripped = thermal_guard_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(tripped, "a dead element (no relaxation, no rise at all) must still trip guard 1 -- this "
+                            "is the hazard the guard exists to catch and must never be maskable");
+        TEST_CHECK(!tripped || s.reason == THERMAL_GUARD_TRIP_HEATING_FAILED, "reason is HEATING_FAILED");
+    }
+
+    /* THE RELAXATION ITSELF: the identical dead/flat trace, but with
+     * progress_rise_check_relaxed=true throughout -- must NOT trip guard 1.
+     * This is what autotune_engine.c sets once it has ALREADY proven the
+     * element heats; a real autotune run never reaches this flag=true state
+     * without first showing genuine rise (see the autotune_engine.c-level
+     * tests), but the flag's own mechanism must behave correctly regardless
+     * of how a caller arrived at it. */
+    {
+        thermal_guard_state_t s;
+        thermal_guard_cfg_t cfg = {.max_temp_c = 1300.0f, .min_temp_c = -20.0f, .sanity_rate_c_per_min = 0.5f};
+        thermal_guard_reset(&s);
+        thermal_guard_input_t in = base_input();
+        in.setpoint_c = 500.0f;
+        in.measurement_c = 20.0f;
+        in.commanded_duty = 1.0f;
+        in.progress_rise_check_relaxed = true;
+        bool tripped = false;
+        for (int i = 0; i < 40 && !tripped; i++) {
+            tripped = thermal_guard_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(!tripped, "progress_rise_check_relaxed=true must relax guard 1's rise requirement -- an "
+                             "identical flat trace that trips above must NOT trip here");
+    }
+
+    /* SCOPE: relaxation covers guard 1 ONLY -- guard 2 (falling while
+     * heating, at/above setpoint) must still trip even with
+     * progress_rise_check_relaxed=true. Proves the relaxation cannot be
+     * (mis)used to blind the OTHER heating-related guard in the same
+     * progress window. */
+    {
+        thermal_guard_state_t s;
+        thermal_guard_cfg_t cfg = {.max_temp_c = 1300.0f, .min_temp_c = -20.0f, .sanity_rate_c_per_min = 0.5f};
+        thermal_guard_reset(&s);
+        thermal_guard_input_t in = base_input();
+        in.setpoint_c = 500.0f;
+        in.measurement_c = 600.0f; /* already above setpoint -- guard 2's branch */
+        in.commanded_duty = 1.0f;
+        in.progress_rise_check_relaxed = true;
+        bool tripped = false;
+        for (int i = 0; i < 20 && !tripped; i++) {
+            in.measurement_c -= 2.0f; /* falling fast despite full commanded heat */
+            tripped = thermal_guard_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(tripped, "guard 2 must trip regardless of progress_rise_check_relaxed -- the relaxation "
+                            "is scoped to guard 1's rise check only");
+        TEST_CHECK(!tripped || s.reason == THERMAL_GUARD_TRIP_WRONG_DIRECTION, "reason is WRONG_DIRECTION");
+    }
+
+    /* BOUNDARY: delta == expected EXACTLY must NOT trip -- guard 1's
+     * "delta < expected" is a strict-less-than on purpose (equality means
+     * the zone cleared the bar). Two ticks only, both using exact-in-float
+     * integers (20.0, 25.0, 300.0, 60.0, 1.0), so no float-accumulation
+     * error can nudge either side of the comparison: tick 1 activates the
+     * window at measurement_c=20.0; tick 2 uses dt_s=300.0 (the DEFAULT
+     * 300s window in one jump) and measurement_c=25.0, giving
+     * delta=5.0 == expected=(1.0 C/min * 5.0 min)=5.0 exactly. */
+    {
+        thermal_guard_state_t s;
+        thermal_guard_cfg_t cfg = {.max_temp_c = 1300.0f, .min_temp_c = -20.0f, .sanity_rate_c_per_min = 1.0f};
+        thermal_guard_reset(&s);
+        thermal_guard_input_t in = base_input();
+        in.setpoint_c = 500.0f;
+        in.measurement_c = 20.0f;
+        in.commanded_duty = 1.0f;
+        in.dt_s = 1.0f;
+        TEST_CHECK(thermal_guard_tick(&s, &cfg, &in) == false, "tick 1 (window activation) must not trip");
+        in.dt_s = 300.0f;
+        in.measurement_c = 25.0f;
+        bool tripped = thermal_guard_tick(&s, &cfg, &in);
+        TEST_CHECK(!tripped, "delta (5.0C) == expected (1.0C/min * 5.0min = 5.0C) EXACTLY must NOT trip -- "
+                             "equality means the zone cleared the bar, not missed it");
+    }
+
+    /* PRECISION: a genuine near-miss (delta=4.96C, expected=5.00C) that used
+     * to round to the SAME "5.0C" at one decimal in the trip message --
+     * making a real, correct trip look like a delta==expected boundary bug
+     * to anyone reading the log (the exact confusion a bench trip produced:
+     * "rose only 0.5C in 1.0min (need >=0.5C)"). Same two-tick construction
+     * as the boundary test above. Confirmed to FAIL (message showed "5.0C
+     * ... need >=5.0C", indistinguishable from the boundary case) against
+     * the pre-fix %.1f format; restoring %.2f makes the two cases visibly
+     * different -- see this task's own negative-test report for the exact
+     * captured pre-fix string. */
+    {
+        thermal_guard_state_t s;
+        thermal_guard_cfg_t cfg = {.max_temp_c = 1300.0f, .min_temp_c = -20.0f, .sanity_rate_c_per_min = 1.0f};
+        thermal_guard_reset(&s);
+        thermal_guard_input_t in = base_input();
+        in.setpoint_c = 500.0f;
+        in.measurement_c = 20.0f;
+        in.commanded_duty = 1.0f;
+        in.dt_s = 1.0f;
+        thermal_guard_tick(&s, &cfg, &in);
+        in.dt_s = 300.0f;
+        in.measurement_c = 24.96f;
+        bool tripped = thermal_guard_tick(&s, &cfg, &in);
+        TEST_CHECK(tripped, "delta (4.96C) < expected (5.00C) must trip -- a genuine, if small, shortfall");
+        TEST_CHECK(strstr(s.detail, "4.96") != NULL,
+                  "the trip message must show enough precision (4.96, not 5.0) to prove this was a real "
+                  "shortfall, not a delta==expected boundary case -- see PRECISION comment above");
+        TEST_CHECK(strstr(s.detail, "5.00") != NULL, "the 'need >=' side must show the same precision");
     }
 
     /* Guard 2: heating commanded while at/above setpoint and falling fast --

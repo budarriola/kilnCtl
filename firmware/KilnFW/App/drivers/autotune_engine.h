@@ -99,6 +99,26 @@ typedef struct {
     uint16_t relay_cycles_seen;     /* complete cycles recorded so far */
     uint16_t relay_cycles_target;   /* how many are needed before a fit is attempted */
 
+    /* Target-temperature step mode (autotune_engine_run_to_target()), STEP
+     * method only. Meaningful in every state, not just DONE -- see
+     * autotune_engine_get_status()'s own comment -- so a caller can show
+     * which of the two phases is running and, once probe_k_rough is
+     * nonzero, why a particular identification duty was chosen. */
+    bool     target_mode;    /* true: this run was started via _run_to_target(), not _run() */
+    bool     probe_phase;    /* true while PHASE 1 (the low-duty probe) is in progress */
+    float    target_c;       /* the requested (or defaulted) target temperature */
+    float    probe_k_rough;  /* K estimated from the probe fit; 0 until the probe completes */
+    /* What the identification step's OWN fitted model says it actually
+     * asymptotes to (baseline_c + k_gain_c_per_duty * step_duty), NOT
+     * target_c -- 0 until finalize_fit() has run on a valid model. Can
+     * legitimately differ from target_c: duty is computed from the PROBE's
+     * baseline, but the identification step re-baselines after only a
+     * short re-settle from a zone still cooling from the probe, biasing
+     * toward overshoot. See autotune_engine.c's AUTOTUNE_TARGET_ACHIEVED_
+     * WARN_C for the full reasoning; this field is what lets a caller show
+     * the operator the real landing point instead of the requested one. */
+    float    target_achieved_c;
+
     /* Only meaningful when state == DONE.
      *
      * Exactly one of model.valid / relay.valid is ever true, and which one
@@ -236,6 +256,51 @@ esp_err_t autotune_engine_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_
  * err_msg filled, the mirror image of autotune_engine_run_relay() refusing
  * AUTOTUNE_RULE_SIMC. */
 bool autotune_engine_run(uint8_t zone_index, float step_duty, autotune_rule_t rule, char *err_msg, size_t err_cap);
+
+/* Starts a TARGET-TEMPERATURE step test on zone_index: instead of the
+ * operator guessing a duty and discovering where the response asymptotes
+ * (autotune_engine_run() above), this picks the duty itself so the response
+ * asymptotes at (approximately) target_c.
+ *
+ * Two phases, both visible through autotune_engine_get_status()'s
+ * target_mode/probe_phase/probe_k_rough fields:
+ *   PHASE 1 (probe): a short, conservative-duty step (AUTOTUNE_ENGINE_
+ *     PROBE_DUTY for AUTOTUNE_ENGINE_PROBE_DURATION_S -- see their comments
+ *     in the .c for the tradeoff) to get a rough gain estimate, fit with the
+ *     SAME pid_autotune_fit_fopdt() finalize_fit() uses -- no second
+ *     estimator.
+ *   PHASE 2 (identify): duty = (target_c - baseline_c) / K_rough, clamped to
+ *     (0, 1]; refused, not silently clamped, if that ratio exceeds 1.0 (the
+ *     zone cannot reach target_c at full duty) -- the abort names the
+ *     target and the highest temperature the rough fit says the zone CAN
+ *     reach. The real identification step then runs exactly as
+ *     autotune_engine_run() would, through the same finalize_fit() guards
+ *     (ceiling headroom, physical plausibility, minimum excursion).
+ *
+ * target_c <= 0 means "use the default": AUTOTUNE_ENGINE_TARGET_DEFAULT_
+ * FRACTION (75%) of the zone's configured max_temp_c. ZERO-SEMANTICS TRAP:
+ * max_temp_c == 0 means that zone's ceiling guard is DISABLED, not "the
+ * ceiling is 0C" -- in that case there is no usable maximum to take 75% of,
+ * and this refuses (err_msg filled) rather than computing 0.75 * 0 or
+ * inventing a fallback ceiling of its own. An explicit target_c is still
+ * accepted with no ceiling configured (nothing to validate it against).
+ *
+ * Whether given explicitly or defaulted, target_c is validated against the
+ * zone's max_temp_c ceiling (when configured) WITH MARGIN
+ * (AUTOTUNE_ENGINE_TARGET_CEILING_MARGIN_C) and refused up front if too
+ * close -- BEFORE begin_run_locked() is even called, i.e. before any
+ * heating starts, same as every other refusal in this function. This is in
+ * addition to, not instead of, finalize_fit()'s own ceiling-headroom check
+ * on the identification step's ACTUAL fitted rise once PHASE 2 completes.
+ *
+ * rule is restricted exactly as autotune_engine_run()'s is (SIMC or
+ * Cohen-Coon -- see that function's doc comment); the same relay-only
+ * refusal applies. Every other refusal condition (no relay mask, a profile
+ * active on the zone, a test already running, heat blocked, OTA/current-
+ * sweep interlocks) is identical too, since both funnel through the same
+ * begin_run_locked(). */
+bool autotune_engine_run_to_target(uint8_t zone_index, float target_c, autotune_rule_t rule, char *err_msg,
+                                   size_t err_cap);
 
 /* Starts a relay-feedback (Astrom-Hagglund) test on zone_index, oscillating
  * the zone around setpoint_c.

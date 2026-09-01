@@ -160,6 +160,50 @@ typedef struct {
     const bool  *peer_ok;
     uint8_t      peer_count;
     uint8_t      peer_index_self;
+
+    /* Relaxes ONLY guard 1's "still rising" requirement for this tick.
+     * Exists for autotune_engine.c's step test: a step response that has
+     * genuinely reached (or is approaching) its asymptote legitimately
+     * stops rising, and guard 1 previously could not tell that apart from a
+     * dead element -- it fired on an honest, successful identification
+     * exactly as the run was about to succeed (confirmed on the bench, zone
+     * 0, 100% duty: aborted at 840s, 69.61C, "rose only 0.5C in 1.0min",
+     * approaching a ~72C asymptote).
+     *
+     * IMPORTANT, found in review of the first version of this mechanism:
+     * during a step test guard 2 (falling while heating, "every other guard
+     * is unaffected" as this comment used to claim) is ALSO effectively
+     * silenced by this flag in practice, even though its own code path never
+     * reads it -- autotune_engine.c pins this run's setpoint_c to the
+     * zone's ceiling for the whole test, so `climbing` (the arrival-band
+     * check just above, in thermal_guard.c) is true on nearly every tick and
+     * guard 2's falling branch is structurally almost never reached whether
+     * or not this flag is set. autotune_engine.c therefore does NOT rely on
+     * guard 2 to catch an element dying after this flag goes true -- it
+     * tracks its own running-peak-vs-current-rise check
+     * (step_rise_running_max_c / AUTOTUNE_ELEMENT_DEATH_DROP_C) and aborts
+     * through escalate_and_abort() directly, the same trip reason and
+     * severity guard 2 itself would have used, once a real drop is seen.
+     * See that file's comments for the reasoning -- this field's own
+     * scope is still "relax guard 1's rise check, nothing else in this
+     * file's code", the caller-side mitigation for guard 2's practical
+     * unreachability lives in autotune_engine.c, not here.
+     *
+     * Callers earn this by proving the element genuinely heats FIRST --
+     * autotune_engine.c only ever sets it true once the zone's cumulative
+     * rise from baseline has crossed a small ABSOLUTE alive threshold
+     * (AUTOTUNE_ELEMENT_ALIVE_RISE_C, autotune_engine.c) with a genuine
+     * onset already detected -- deliberately NOT finalize_fit()'s much
+     * larger fit-trust threshold, which the first version of this mechanism
+     * reused and which never actually engaged before guard 1 tripped on the
+     * measured plant (see that constant's own comment for the arithmetic).
+     * Before that threshold, and for a dead element that never reaches it,
+     * guard 1 behaves exactly as it always has -- this field defaults false
+     * (a plain struct literal that doesn't name it, or a memset(0), reads
+     * as "not relaxed"), and profile_executor.c's own thermal_guard_input_t
+     * construction never sets it, so an ordinary firing sees no behavior
+     * change at all. */
+    bool progress_rise_check_relaxed;
 } thermal_guard_input_t;
 
 typedef struct {

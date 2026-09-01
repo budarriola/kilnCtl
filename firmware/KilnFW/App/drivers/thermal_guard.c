@@ -197,11 +197,26 @@ bool thermal_guard_tick(thermal_guard_state_t *state, const thermal_guard_cfg_t 
                 float delta = in->measurement_c - state->progress_window_start_c;
                 float elapsed_min = state->progress_window_elapsed_s / 60.0f;
                 if (climbing) {
-                    /* Guard 1: heating, below setpoint, must be rising. */
+                    /* Guard 1: heating, below setpoint, must be rising --
+                     * UNLESS the caller has already proven this element
+                     * genuinely heats (in->progress_rise_check_relaxed, see
+                     * thermal_guard_input_t's own comment). That relaxation
+                     * covers exactly this branch and nothing else: guard 2
+                     * below (falling while heating) and every other guard
+                     * still run unconditionally. */
                     float expected = rate_cfg * elapsed_min;
-                    if (delta < expected) {
+                    /* delta < expected is a STRICT inequality on purpose --
+                     * delta == expected means the zone cleared the bar
+                     * exactly and must NOT trip (see the test pinning this
+                     * boundary). %.2f below (not %.1f) is deliberate too: a
+                     * genuine near-miss like delta=0.494C/expected=0.500C
+                     * used to both round to "0.5C" at one decimal, so the
+                     * logged "rose only 0.5C ... need >=0.5C" read as an
+                     * inclusive-boundary bug when the actual numbers were
+                     * never equal -- see the bench trip this was found from. */
+                    if (delta < expected && !in->progress_rise_check_relaxed) {
                         trip(state, THERMAL_GUARD_TRIP_HEATING_FAILED,
-                             "heating but rose only %.1fC in %.1fmin (need >=%.1fC)", (double)delta,
+                             "heating but rose only %.2fC in %.1fmin (need >=%.2fC)", (double)delta,
                              (double)elapsed_min, (double)expected);
                         return true;
                     }
