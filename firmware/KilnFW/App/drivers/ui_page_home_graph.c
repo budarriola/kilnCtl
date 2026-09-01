@@ -103,3 +103,11 @@ void ui_page_home_y_axis_range(float lo, float hi, float floor_disp, int32_t *ou
     *out_axis_lo = axis_lo;
     *out_axis_hi = axis_hi;
 }
+
+size_t ui_page_home_legend_row_count(bool has_span, bool has_planned)
+{
+    if (!has_span) {
+        return 0;
+    }
+    return has_planned ? 2 : 1;
+}

@@ -133,6 +133,26 @@ bool ui_page_home_build_x_label(float horizon_s, bool has_span, char *out, size_
  * comment in ui_page_home.c documents; this function just applies it). */
 void ui_page_home_y_axis_range(float lo, float hi, float floor_disp, int32_t *out_axis_lo, int32_t *out_axis_hi);
 
+/* 2026-09-01 owner request: "add a compact legend inside the graph, bottom
+ * right corner". The chart carries exactly two possible series -- actual
+ * (always attempted whenever the chart has a real span, see has_span in
+ * ui_page_home.c's refresh_cb()) and planned-ahead (only meaningful, and
+ * only ever drawn, when a live profile's plan curve came back non-empty --
+ * the same `state_active && plan_n > 0` condition refresh_cb() already gates
+ * the dashed planned series and the current-position dot on). Rather than
+ * scatter that visibility decision inline at each of refresh_cb()'s legend
+ * show/hide call sites, it lives here as one pure function so it is host
+ * tested like this file's other seams.
+ *
+ * Row order is fixed: row 0 is always "Actual" (whenever any row is shown at
+ * all), row 1 is "Plan". Returns 0 (hide the whole legend -- the idle
+ * single-dot state has no series, only a point, to key), 1 (actual only), or
+ * 2 (both). has_span=false forces 0 regardless of has_planned, since
+ * has_planned can never legitimately be true without has_span also being
+ * true (a planned series needs a real horizon) -- this function does not
+ * trust the caller to already enforce that and clamps defensively instead. */
+size_t ui_page_home_legend_row_count(bool has_span, bool has_planned);
+
 #ifdef __cplusplus
 }
 #endif

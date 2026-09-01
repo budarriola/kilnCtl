@@ -190,4 +190,22 @@ void run_test_ui_page_home_graph(void)
         ui_page_home_y_axis_range(1.0f, 5.0f, 0.0f, &lo, &hi);
         TEST_CHECK(lo >= 0, "above-freezing data whose padding alone dips below 0: axis_lo floored at freezing");
     }
+
+    TEST_SECTION("ui_page_home_graph: legend_row_count");
+    {
+        // Idle single-dot state: no span at all, so no legend regardless of
+        // what has_planned claims -- a stray true here would be exactly the
+        // "confident wrong number" this codebase's other honesty guards warn
+        // against (has_planned should never legitimately be true without
+        // has_span, but the function must not trust that).
+        TEST_CHECK(ui_page_home_legend_row_count(false, false) == 0, "no span, no plan -> 0 rows");
+        TEST_CHECK(ui_page_home_legend_row_count(false, true) == 0, "no span (even if plan claimed) -> 0 rows");
+
+        // Idle-with-history or a running plan that came back empty: actual
+        // line only.
+        TEST_CHECK(ui_page_home_legend_row_count(true, false) == 1, "span, no plan -> 1 row (actual only)");
+
+        // A live running profile with a real plan curve: both series drawn.
+        TEST_CHECK(ui_page_home_legend_row_count(true, true) == 2, "span + plan -> 2 rows (actual + plan)");
+    }
 }

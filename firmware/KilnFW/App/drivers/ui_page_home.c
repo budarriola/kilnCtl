@@ -305,8 +305,22 @@ static int32_t s_chart_planned_pts[UI_PAGE_HOME_CHART_POINTS];
  * they use montserrat_10, enabled via CONFIG_LV_FONT_MONTSERRAT_10 in the
  * tracked sdkconfig.defaults -- see the build() comment for why that had to
  * go in sdkconfig.defaults and not sdkconfig, and why a render-time
- * transform_scale on montserrat_14 was tried first and rejected. */
-#define UI_PAGE_HOME_Y_TICK_COUNT 11
+ * transform_scale on montserrat_14 was tried first and rejected.
+ *
+ * 2026-09-01: was 11. Owner report ("vertical axis label spacing is too
+ * wide -- the labels do not all fit on the graph") against a real device:
+ * this chart's plot height is flex_grow(1) residual on a 480px page already
+ * carrying a status row, trip strip, progress bar and action row above/below
+ * it -- nowhere near the web GUI's much taller canvas the "all 11 ticks"
+ * decision (UI_PLAN.md 5.3) was originally sized for. 11 montserrat_10
+ * labels (~11px line height each) need >=110px of plot height with zero
+ * overlap; on the real panel the residual is well under that, so the top and
+ * bottom labels' text boxes were being pushed outside the chart's own
+ * bounds. 6 ticks (0, 1/5, 2/5, 3/5, 4/5, top) keeps 0/peak/-endpoints
+ * labelled and roughly doubles the per-label spacing without touching the
+ * axis-RANGE math (chart_set_y_ticks() below still derives every label from
+ * axis_lo/axis_hi via the same frac-of-range formula, just over fewer k). */
+#define UI_PAGE_HOME_Y_TICK_COUNT 6
 static lv_obj_t *s_chart_y_tick_labels[UI_PAGE_HOME_Y_TICK_COUNT];
 /* Current axis range, mirrored here so the draw-event tick-mark hook
  * (chart_y_tick_draw_event_cb(), fires on every LVGL render pass, not just
@@ -327,6 +341,27 @@ static bool s_chart_y_ticks_visible; /* false hides labels AND tick marks */
  * text/position on these four. */
 #define UI_PAGE_HOME_X_TICK_COUNT 4
 static lv_obj_t *s_chart_x_tick_labels[UI_PAGE_HOME_X_TICK_COUNT];
+
+/* 2026-09-01 owner request: "add a compact legend inside the graph, bottom
+ * right corner" (plus, in the same pass, "remove the dots from the plot,
+ * keep the lines" -- that half is a one-line lv_obj_set_style_size() on
+ * LV_PART_INDICATOR at series-creation time in ui_page_home_build(), no
+ * static state needed for it).
+ *
+ * Two rows, built ONCE as children of s_chart (same "never allocate inside
+ * refresh_cb()" discipline as the Y/X tick labels above) -- row 0 is always
+ * "Actual", row 1 is "Plan". Each row is its own small flex-row container
+ * (a colour swatch + a label) so its on-screen width is LV_SIZE_CONTENT and
+ * chart_set_legend() never has to add up swatch+label widths by hand, the
+ * same "let LVGL measure it" approach chart_set_x_ticks() already uses for
+ * its own label widths. ui_page_home_legend_row_count() (ui_page_home_graph.c)
+ * is the host-tested pure logic for HOW MANY of these two rows should be
+ * visible on a given tick; this file only ever shows/hides and repositions
+ * the two already-built rows, never creates or destroys one. */
+#define UI_PAGE_HOME_LEGEND_ROWS 2
+static lv_obj_t *s_chart_legend_row[UI_PAGE_HOME_LEGEND_ROWS];
+static lv_obj_t *s_chart_legend_swatch[UI_PAGE_HOME_LEGEND_ROWS];
+static lv_obj_t *s_chart_legend_label[UI_PAGE_HOME_LEGEND_ROWS];
 
 /* 2026-08-23 owner request ("the LCD profile graph should look like the web
  * GUI's profile graph"): a small filled blue dot marking the current
@@ -943,6 +978,70 @@ static void chart_set_x_ticks(float horizon_s, bool has_span)
     }
 }
 
+/* Shows/hides and repositions the 0-2 legend rows built in
+ * ui_page_home_build() -- row count comes from the host-tested
+ * ui_page_home_legend_row_count() (ui_page_home_graph.c), never decided
+ * here. Must be called AFTER chart_set_x_ticks() for the same horizon_s/
+ * has_span this tick: the legend anchors itself just ABOVE the bottom
+ * tick-label row (s_chart_x_tick_labels[0]'s own height, measured after that
+ * call has given it real text) rather than sharing the bottom-right corner
+ * with tick 3 (the rightmost, full-span tick, which chart_set_x_ticks()'s
+ * own right-clamp also parks in that same corner) -- the two would otherwise
+ * overlap right where the actual/planned trace lines are often passing
+ * through near the end of a run. Rows stack bottom-up so the LAST visible
+ * row (row 1, "Plan", when both are shown) sits closest to the tick row and
+ * row 0 ("Actual") sits above it. */
+static void chart_set_legend(bool has_span, bool has_planned)
+{
+    size_t rows = ui_page_home_legend_row_count(has_span, has_planned);
+    if (rows == 0) {
+        for (int k = 0; k < UI_PAGE_HOME_LEGEND_ROWS; k++) {
+            lv_obj_add_flag(s_chart_legend_row[k], LV_OBJ_FLAG_HIDDEN);
+        }
+        return;
+    }
+    for (int k = 0; k < UI_PAGE_HOME_LEGEND_ROWS; k++) {
+        if ((size_t)k < rows) {
+            lv_obj_remove_flag(s_chart_legend_row[k], LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(s_chart_legend_row[k], LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+
+    lv_obj_update_layout(s_chart);
+    lv_area_t content;
+    lv_obj_get_content_coords(s_chart, &content);
+    lv_area_t chart_coords;
+    lv_obj_get_coords(s_chart, &chart_coords);
+    int32_t content_left_local = content.x1 - chart_coords.x1;
+    int32_t content_bottom_local = content.y2 - chart_coords.y1;
+    int32_t width = content.x2 - content.x1;
+    if (width <= 0) {
+        return;
+    }
+    int32_t right_bound = content_left_local + width - 2;
+
+    /* Tick row's own rendered height -- valid to measure here because
+     * chart_set_x_ticks() has already run this tick and (when has_span) left
+     * real text/a resolved layout on s_chart_x_tick_labels[0]. A 2px buffer
+     * keeps the legend from touching the tick text baseline-to-baseline. */
+    int32_t tick_row_h = (int32_t)lv_obj_get_height(s_chart_x_tick_labels[0]);
+    int32_t legend_bottom_local = content_bottom_local - tick_row_h - 2;
+
+    int32_t y = legend_bottom_local;
+    for (int k = (int)rows - 1; k >= 0; k--) {
+        lv_obj_t *row = s_chart_legend_row[k];
+        int32_t row_h = lv_obj_get_height(row);
+        int32_t row_w = lv_obj_get_width(row);
+        y -= row_h;
+        int32_t x = right_bound - row_w;
+        if (x < content_left_local) {
+            x = content_left_local; /* never run off the left edge if the plot is very narrow */
+        }
+        lv_obj_set_pos(row, x, y);
+    }
+}
+
 static void refresh_cb(lv_timer_t *timer)
 {
     (void)timer;
@@ -1096,6 +1195,10 @@ static void refresh_cb(lv_timer_t *timer)
          * Hidden here unconditionally; the running branch below is the only
          * place that ever un-hides it. */
         chart_set_x_ticks(0.0f, false);
+        /* No series drawn either (a single dot, not a line) -- see
+         * ui_page_home_legend_row_count()'s own header comment for why
+         * has_span=false forces the legend hidden regardless. */
+        chart_set_legend(false, false);
         /* No planned curve, so no "current position along the curve" to mark
          * either -- same honesty rule as the x-label above. */
         lv_obj_add_flag(s_chart_now_dot, LV_OBJ_FLAG_HIDDEN);
@@ -1321,6 +1424,10 @@ static void refresh_cb(lv_timer_t *timer)
          *     hidden -- see that branch's own comment. */
         bool has_span = (state_active && plan_n > 0) || (!state_active && count > 1);
         chart_set_x_ticks(horizon_s, has_span);
+        /* Same "state_active && plan_n > 0" condition that gates the dashed
+         * planned series and the current-position dot below -- the legend's
+         * "Plan" row must never claim a series is drawn that isn't. */
+        chart_set_legend(has_span, state_active && plan_n > 0);
         if (state_active && plan_n > 0) {
             /* Current-position dot -- see its own static declaration comment.
              * Only meaningful here (a live plan with a real horizon to place
@@ -1659,6 +1766,21 @@ lv_obj_t *ui_page_home_build(void)
     lv_chart_set_series_ext_y_array(s_chart, s_chart_planned_series, s_chart_planned_pts);
     lv_chart_set_axis_range(s_chart, LV_CHART_AXIS_PRIMARY_Y, 0, 100);
     lv_obj_remove_flag(s_chart, LV_OBJ_FLAG_SCROLLABLE);
+    /* 2026-09-01 owner request: "remove the dots from the plot, keep the
+     * lines". lv_chart draws a per-point marker (LV_PART_INDICATOR) sized
+     * from that part's width/height style props, halved to a circle radius
+     * -- grepped this tree's own lv_chart.c (draw_series_point()) to confirm
+     * before writing this: width/height 0 collapses that radius to 0, i.e.
+     * no marker drawn, while leaving LV_PART_ITEMS (the line draw path
+     * chart_draw_event_cb() above already hooks for the dashed-planned-line
+     * trick) completely untouched -- lines stay exactly as they were. Set on
+     * s_chart itself (not per-series) since LVGL has no per-series indicator
+     * style selector, same "the widget doesn't expose it per-series"
+     * situation chart_draw_event_cb()'s own comment already documents for
+     * dashing -- but here there is nothing to intercept: zero-size applies
+     * uniformly to both series, which is exactly what "keep the lines,
+     * remove the dots" asks for on both of them. */
+    lv_obj_set_style_size(s_chart, 0, 0, LV_PART_INDICATOR);
 
     /* Temp/time scale overlay widgets -- see s_chart_y_tick_labels' own
      * comment (near the static declarations above) for why these are plain
@@ -1736,6 +1858,46 @@ lv_obj_t *ui_page_home_build(void)
     lv_obj_set_style_border_width(s_chart_now_dot, 0, 0);
     lv_obj_set_style_pad_all(s_chart_now_dot, 0, 0);
     lv_obj_add_flag(s_chart_now_dot, LV_OBJ_FLAG_HIDDEN);
+
+    /* Legend -- see s_chart_legend_row's own static-declaration comment
+     * above for the row-count logic. Built LAST among s_chart's children (a
+     * later lv_obj child paints on top of earlier ones in LVGL, same as
+     * everything else in this z-stack) so it always sits above the trace
+     * lines and the now-dot, never gets drawn under them. Colours reuse
+     * the exact series-creation symbols above (UI_THEME_ACCENT_1,
+     * UI_PAGE_HOME_PLAN_COLOR_HEX) rather than duplicating literals -- if
+     * either series colour ever changes, the swatch changes with it. */
+    for (int i = 0; i < UI_PAGE_HOME_LEGEND_ROWS; i++) {
+        lv_obj_t *row = lv_obj_create(s_chart);
+        lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_size(row, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+        lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(row, 0, 0);
+        lv_obj_set_style_pad_all(row, 0, 0);
+        lv_obj_set_style_pad_gap(row, 3, 0);
+        lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        lv_obj_add_flag(row, LV_OBJ_FLAG_HIDDEN);
+
+        lv_obj_t *swatch = lv_obj_create(row);
+        lv_obj_remove_flag(swatch, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_size(swatch, 6, 6);
+        lv_obj_set_style_radius(swatch, LV_RADIUS_CIRCLE, 0);
+        lv_obj_set_style_bg_color(swatch, i == 0 ? UI_THEME_ACCENT_1 : lv_color_hex(UI_PAGE_HOME_PLAN_COLOR_HEX), 0);
+        lv_obj_set_style_bg_opa(swatch, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_width(swatch, 0, 0);
+        lv_obj_set_style_pad_all(swatch, 0, 0);
+
+        lv_obj_t *label = lv_label_create(row);
+        lv_obj_set_style_text_color(label, UI_THEME_COLOR_TEXT_PRIMARY, 0);
+        lv_obj_set_style_bg_opa(label, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_text_font(label, &lv_font_montserrat_10, 0);
+        lv_label_set_text(label, i == 0 ? "Actual" : "Plan");
+
+        s_chart_legend_row[i] = row;
+        s_chart_legend_swatch[i] = swatch;
+        s_chart_legend_label[i] = label;
+    }
 
     /* Progress bar -- see s_progress_wrap's own static-declaration comment.
      * Sits directly under the chart, above action_row (the Start/Stop
