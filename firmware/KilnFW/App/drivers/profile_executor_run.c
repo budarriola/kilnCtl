@@ -20,6 +20,7 @@
 #include "relay_authority.h"
 #include "safety_trip_words.h"
 #include "sim_backend.h"
+#include "thermo_combine.h"
 #include "zones_http.h"
 
 bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
