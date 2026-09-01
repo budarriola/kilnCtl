@@ -279,3 +279,60 @@ ota_1,        app,  ota_1,     0x510000, 0x300000,
 factory,      app,  factory,   0x810000, 0x300000,
 pico_img,     data, undefined, 0xB10000, 0xE0000,
 coredump,     data, coredump,  0xBF0000, 0x100000,
+logs,         data, spiffs,    0xCF0000, 0x300000,
+
+# --- `logs` partition, added 2026-09-01 (external-flash log storage gap) ---
+#
+# The owner asked that "configs the user writes as well as statistics and
+# logs are kept in external flash". Configs (nvs/wifi_nvs/kiln_nvs/
+# profiles_nvs above) and firing statistics (also NVS, 5 runs/profile) were
+# already covered; logs had NO partition at all -- the audit that found this
+# also found ~3.06 MB unallocated at 0xCF0000 (this file's own "spare"
+# comment above). NOTE ON WORDING: this board is an ESP32-S3 N16R8 -- ONE
+# on-module 16 MB SPI flash, no separate flash chip, no SD card. "External
+# flash" here means that on-module SPI flash, external only to the SoC die
+# itself, not a second physical device. log_store.c's own file banner
+# repeats this so the distinction survives independently of this comment.
+#
+# APPEND-ONLY CHANGE, per the same discipline as every partition added to
+# this table since the OTA pass: nothing above this line moved, resized, or
+# changed subtype. See this file's own before/after table in the commit
+# message that added this entry.
+#
+# Sized 3072K (0x300000) out of the 0x310000 (3,211,264 B, ~3.06 MB) spare
+# region computed above (0xCF0000..0x1000000) -- 0x300000 is 64K-aligned
+# (matching every other entry in this table) and leaves 0x10000 (64K) spare
+# above it, at 0xFF0000..0x1000000, rather than consuming the region to the
+# byte. subtype `spiffs` (0x82) is the reserved subtype esp_spiffs uses to
+# find this partition by type+subtype scan (esp_vfs_spiffs_register() with
+# partition_label="logs" also matches it by name -- log_store_mount.c passes
+# both), same convention `coredump` above uses for esp_core_dump_*.
+#
+# Filesystem choice: SPIFFS, not LittleFS, even though LittleFS is generally
+# preferred (wear-levelling, power-loss robustness) on ESP-IDF. Checked
+# before choosing:
+#   - This IDF version (v6.0.2, see build logs) ships `spiffs` as a BUILT-IN
+#     component -- already compiled into this project's build (esp-idf/
+#     spiffs/libspiffs.a exists in firmware/KilnFW/build/ already, pulled in
+#     transitively) and requires NO idf_component.yml entry, no network
+#     fetch from the component registry, no new managed_components/ tree.
+#   - LittleFS is NOT built into ESP-IDF proper; it would need
+#     joltwallet/littlefs added as a managed component (like espressif/mdns
+#     in App/idf_component.yml), which means a component-registry fetch the
+#     next time someone runs a clean `idf.py build` or `tools/setup.ps1`.
+#     With a firing in progress and no confirmation the build machine has
+#     registry access available/desired right now, adding a new external
+#     dependency mid-firing was the wrong tradeoff versus a component
+#     already proven to build in this exact tree.
+#   - The written volume here is small and rotation-bounded (log_store.h:
+#     LOG_STORE_MAX_TOTAL_BYTES, 1 MiB cap, well under this partition's 3 MB)
+#     at a low write rate (one line per 5-10s from telemetry_log.c) -- SPIFFS'
+#     known weaknesses (slower mount/GC at near-full, weaker wear-levelling
+#     than LittleFS) matter far less at this volume/rate than they would for
+#     a filesystem taking continuous high-frequency writes.
+#   - If LittleFS is added to this project later for another reason (the
+#     managed component becomes available), migrating `logs` to it is a
+#     partition subtype + esp_vfs_spiffs_register()->esp_vfs_littlefs_register()
+#     swap in log_store_mount.c; log_store.c's own logic (plain stdio fopen/
+#     fwrite/remove/rename over a mounted VFS path) does not change either
+#     way, which is why that split exists.

@@ -50,6 +50,8 @@
 #include "profiles_builtin.h"
 #include "unit_pref.h"
 #include "profiles_http.h"
+#include "log_http.h"
+#include "log_store_mount.h"
 #include "readiness_http.h"
 #include "relay_cycles.h"
 #include "rtc_watchdog.h"
@@ -1263,6 +1265,18 @@ void app_main(void)
                  esp_err_to_name(readiness_err));
     }
 
+    // log_http.c: read-back for the firing/autotune logs log_store_mount.c
+    // persists to flash (GET /api/logs/firing, GET /api/logs/autotune).
+    // Registered here alongside the other read-only status pages -- no
+    // ordering dependency on anything else, and it lives in its own file
+    // rather than dashboard_http.c (owned by parallel work at the time this
+    // was added).
+    esp_err_t log_http_err = log_http_start();
+    if (log_http_err != ESP_OK) {
+        ESP_LOGW(TAG, "log_http_start failed: %s -- no /api/logs/* endpoints this boot",
+                 esp_err_to_name(log_http_err));
+    }
+
     // UI_PLAN.md "page structure rework" section: /diagnostics, /diagnostics/
     // thermo and /safety -- the four LCD pages (diagnostics + board health
     // merged into one web page, thermo faults, safety) that had no web
@@ -1646,12 +1660,29 @@ void app_main(void)
         if (uart_bridge_start_wifi_task(&uart_proto) != ESP_OK) {
             ESP_LOGE(TAG, "Failed to start wifi uart bridge task");
         }
-        // telemetry_log.c: opt-in firing/autotune telemetry over the same
-        // debug UART every ESP_LOGx call already rides (uart_log_bridge.c).
-        // Started here (after both profile_executor_start()/
-        // autotune_engine_start(), further up this function, are up) but
-        // does nothing until an operator calls telemetry_log_set_enabled()
-        // -- see telemetry_log.h's file banner for why the default is OFF.
+        // log_store_mount.c: mounts the `logs` SPIFFS partition (partitions.csv,
+        // 0xCF0000, 3072K) at "/logs" -- the persistent home for firing/
+        // autotune logs (2026-09-01 audit: "logs are kept in external
+        // flash" had nothing behind it before this). Must run before
+        // telemetry_log_start() below so the telemetry task's very first
+        // tick can persist rather than silently no-op against an unmounted
+        // store; a failure here is logged and left non-fatal -- every
+        // subsequent log_store_write_*() call just returns
+        // ESP_ERR_INVALID_STATE and drops the line, same "degrade, don't
+        // wedge" contract log_store.c documents.
+        if (log_store_mount() != ESP_OK) {
+            ESP_LOGE(TAG, "log_store_mount failed -- firing/autotune logs will NOT be persisted "
+                          "to flash this boot (live debug-UART telemetry is unaffected)");
+        }
+        // telemetry_log.c: firing/autotune telemetry over the same debug
+        // UART every ESP_LOGx call already rides (uart_log_bridge.c), PLUS
+        // (unconditionally, regardless of the UART feed's opt-in enable
+        // flag) persistence to the log store just mounted above. Started
+        // here (after both profile_executor_start()/autotune_engine_start(),
+        // further up this function, are up). The UART feed itself does
+        // nothing until an operator calls telemetry_log_set_enabled() -- see
+        // telemetry_log.h's file banner for why THAT default is OFF; the
+        // flash persistence path has no such gate.
         if (telemetry_log_start() != ESP_OK) {
             ESP_LOGE(TAG, "Failed to start telemetry_log task -- no firing/autotune UART telemetry this boot");
         }

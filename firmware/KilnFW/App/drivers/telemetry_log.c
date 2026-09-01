@@ -9,6 +9,7 @@
 #include "freertos/task.h"
 
 #include "autotune_engine.h"
+#include "log_store_mount.h"
 #include "profile_executor.h"
 #include "telemetry_format.h"
 
@@ -91,23 +92,37 @@ static void telemetry_log_task(void *arg)
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(TELEMETRY_LOG_TICK_MS));
 
-        if (!s_enabled) {
-            continue;
-        }
-
-        /* Never blocks: profile_executor_get_status()/
+        /* Persistence to the on-flash log store (log_store_mount.c) runs
+         * UNCONDITIONALLY, regardless of s_enabled -- s_enabled only gates
+         * the live debug-UART feed (ESP_LOGI below), which this project's
+         * own file banner documents as default-OFF and opt-in for a capture
+         * session. The persistent record the 2026-09-01 audit asked for
+         * ("logs are kept in external flash") is not something an operator
+         * should have to remember to switch on before every firing -- it
+         * uses the SAME formatted lines telemetry_format_firing()/
+         * telemetry_format_autotune() already produce, just written to
+         * "/logs" via log_store_write_firing()/log_store_write_autotune()
+         * instead of (or as well as) the UART queue.
+         *
+         * Never blocks: profile_executor_get_status()/
          * autotune_engine_get_status() are documented snapshot copies that
-         * never block on their owning task (profile_executor.h), and the
-         * ESP_LOGI() calls below enqueue onto uart_log_bridge.c's queue with
-         * a ZERO-tick xQueueSend -- see this file's header comment. Nothing
-         * in this loop can stall waiting on another task. */
+         * never block on their owning task (profile_executor.h); the
+         * ESP_LOGI() calls enqueue onto uart_log_bridge.c's queue with a
+         * ZERO-tick xQueueSend (see this file's header comment); and
+         * log_store_write_firing()/_autotune() block only on the internal-
+         * stack flash worker (log_store_mount.c), never on this task's own
+         * PSRAM stack touching flash directly. Nothing in this loop can
+         * stall waiting on another task indefinitely. */
         profile_executor_get_status(&fst);
         if (fst.state == PROFILE_EXEC_RUNNING || fst.state == PROFILE_EXEC_PAUSED) {
             if (fst.total_elapsed_s >= firing_next_s) {
                 firing_next_s = fst.total_elapsed_s + TELEMETRY_LOG_FIRING_PERIOD_S;
                 int n = telemetry_format_firing(&fst, line, sizeof(line));
                 if (n > 0) {
-                    ESP_LOGI(TAG, "%s", line);
+                    log_store_write_firing(line);
+                    if (s_enabled) {
+                        ESP_LOGI(TAG, "%s", line);
+                    }
                 }
             }
         } else {
@@ -122,7 +137,10 @@ static void telemetry_log_task(void *arg)
                 autotune_next_s = ast.elapsed_s + TELEMETRY_LOG_AUTOTUNE_PERIOD_S;
                 int n = telemetry_format_autotune(&ast, line, sizeof(line));
                 if (n > 0) {
-                    ESP_LOGI(TAG, "%s", line);
+                    log_store_write_autotune(line);
+                    if (s_enabled) {
+                        ESP_LOGI(TAG, "%s", line);
+                    }
                 }
             }
         } else {
