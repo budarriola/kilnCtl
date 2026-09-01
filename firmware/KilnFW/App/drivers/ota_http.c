@@ -1,4 +1,5 @@
 #include "ota_http.h"
+#include "ota_http_util.h"
 
 #include <stdarg.h>
 #include <string.h>
@@ -223,44 +224,11 @@ static uint32_t now_ms(void)
     return (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
 }
 
-static void hex_encode(const uint8_t *in, size_t len, char *out /* 2*len + 1 bytes */)
-{
-    static const char digits[] = "0123456789abcdef";
-    for (size_t i = 0; i < len; i++) {
-        out[2 * i] = digits[(in[i] >> 4) & 0xFu];
-        out[2 * i + 1] = digits[in[i] & 0xFu];
-    }
-    out[2 * len] = '\0';
-}
-
-// Inverse of hex_encode() -- decodes exactly `hex_len` hex characters (must
-// be even) into hex_len/2 bytes. Returns false on any non-hex character or
-// odd length, leaving `out` in an unspecified state (callers must check the
-// return value before trusting `out`, same convention as every other
-// parse-and-validate helper in this codebase, e.g. profiles_http.c's field
-// parsers).
-static bool hex_decode(const char *hex, size_t hex_len, uint8_t *out)
-{
-    if (hex_len % 2 != 0) {
-        return false;
-    }
-    for (size_t i = 0; i < hex_len / 2; i++) {
-        int hi = -1, lo = -1;
-        char ch = hex[2 * i];
-        if (ch >= '0' && ch <= '9') hi = ch - '0';
-        else if (ch >= 'a' && ch <= 'f') hi = ch - 'a' + 10;
-        else if (ch >= 'A' && ch <= 'F') hi = ch - 'A' + 10;
-        ch = hex[2 * i + 1];
-        if (ch >= '0' && ch <= '9') lo = ch - '0';
-        else if (ch >= 'a' && ch <= 'f') lo = ch - 'a' + 10;
-        else if (ch >= 'A' && ch <= 'F') lo = ch - 'A' + 10;
-        if (hi < 0 || lo < 0) {
-            return false;
-        }
-        out[i] = (uint8_t)((hi << 4) | lo);
-    }
-    return true;
-}
+// hex_encode()/hex_decode() moved to ota_http_util.c (ota_http_hex_encode()/
+// ota_http_hex_decode()) -- see that file's header comment. Local aliases
+// keep every call site below unchanged.
+#define hex_encode ota_http_hex_encode
+#define hex_decode ota_http_hex_decode
 
 // Client IP for the "log every attempt with the source IP" requirement
 // (UPDATE_PROTOCOL.md section 2). Standard ESP-IDF httpd pattern: the
@@ -881,20 +849,10 @@ static const char *OTA_MAC_HEADER = "X-Ota-Mac"; // shared by both /api/ota/esp 
 #define OTA_ESP_CHUNK_SIZE 4096
 static uint8_t s_ota_esp_chunk[OTA_ESP_CHUNK_SIZE];
 
-static const char *verify_result_str(ota_http_verify_result_t r)
-{
-    switch (r) {
-        case OTA_HTTP_VERIFY_OK: return "ok";
-        case OTA_HTTP_VERIFY_LOCKED_OUT: return "locked out -- too many recent wrong-password attempts";
-        case OTA_HTTP_VERIFY_NO_VALID_NONCE:
-            return "no valid challenge -- GET /api/ota/challenge first, then POST within 30 s";
-        case OTA_HTTP_VERIFY_BAD_MAC: return "wrong password";
-        case OTA_HTTP_VERIFY_NO_AP_PASSWORD:
-            return "this board's AP password is empty -- set an AP password to update it over HTTP, "
-                   "or use the physical BOOT-button recovery window (hold BOOT during boot)";
-        default: return "authentication failed";
-    }
-}
+// verify_result_str() moved to ota_http_util.c (ota_http_verify_result_str())
+// -- see that file's header comment. Local alias keeps every call site
+// below unchanged.
+#define verify_result_str ota_http_verify_result_str
 
 // See ota_http.h's doc comment above this function's declaration for the
 // full contract. Consolidates the "X-Ota-Mac header well-formed -> hex-decode
@@ -1606,18 +1564,9 @@ static esp_err_t ota_pico_post_handler(httpd_req_t *req)
 // ota_pico_relay_phase_str() sets for the Pico side -- no shared enum/string
 // mapping exists between the two processors' phases, and there is no reason
 // to invent one here.
-static const char *esp_phase_str(ota_http_esp_phase_t phase)
-{
-    switch (phase) {
-        case OTA_HTTP_ESP_PHASE_IDLE:       return "idle";
-        case OTA_HTTP_ESP_PHASE_VERIFYING:  return "verifying";
-        case OTA_HTTP_ESP_PHASE_WRITING:    return "writing";
-        case OTA_HTTP_ESP_PHASE_FINALIZING: return "finalizing";
-        case OTA_HTTP_ESP_PHASE_DONE:       return "done";
-        case OTA_HTTP_ESP_PHASE_FAILED:     return "failed";
-        default:                            return "unknown";
-    }
-}
+// esp_phase_str() moved to ota_http_util.c (ota_http_esp_phase_str()) -- see
+// that file's header comment. Local alias keeps every call site unchanged.
+#define esp_phase_str ota_http_esp_phase_str
 
 // GET /api/ota/esp/status -- see ota_http.h's doc comment above
 // ota_http_get_esp_progress() for the full field-by-field contract. Closes
@@ -1993,14 +1942,12 @@ static esp_err_t ota_esp_rollback_post_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
-// Forward declarations -- ota_pico_rollback_post_handler()/ota_pico_rollback_
-// task()/ota_pico_rollback_status_get_handler() below call these; defined
-// right after their last use (kept adjacent for locality, same trade-off
-// this file already makes elsewhere, e.g. link_task_send_rollback_result()
-// in SaftyFW's link_task.c).
-static const char *ota_pico_rollback_reason_str(uint8_t reason_code);
-static int ota_pico_rollback_format_body(safety_link_rollback_outcome_t outcome, uint8_t reason_code,
-                                          char *body, size_t cap);
+// ota_pico_rollback_reason_str()/ota_pico_rollback_format_body() moved to
+// ota_http_util.c (ota_http_pico_rollback_reason_str()/
+// ota_http_pico_rollback_format_body()) -- see that file's header comment.
+// Local aliases keep every call site below unchanged.
+#define ota_pico_rollback_reason_str ota_http_pico_rollback_reason_str
+#define ota_pico_rollback_format_body ota_http_pico_rollback_format_body
 
 // Background task for POST /api/ota/pico/rollback -- see that handler's own
 // doc comment (opus-review finding 3) for why this call moved off the httpd
@@ -2265,79 +2212,9 @@ static esp_err_t ota_pico_rollback_status_get_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
-// The same outcome -> JSON body mapping the synchronous handler used to
-// build inline before opus-review finding 3 moved the send off this
-// handler's task -- extracted so ota_pico_rollback_status_get_handler()
-// above (the only caller now that the outcome is known asynchronously) has
-// one place to get it from. No HTTP status code side effect here (the old
-// per-outcome httpd_resp_set_status() calls do not apply to a GET whose
-// response code no longer encodes the rollback result -- see that
-// handler's own doc comment); callers that still want a distinct HTTP
-// status per outcome would set it themselves from the returned outcome.
-static int ota_pico_rollback_format_body(safety_link_rollback_outcome_t outcome, uint8_t reason_code,
-                                          char *body, size_t cap)
-{
-    switch (outcome) {
-        case SAFETY_LINK_ROLLBACK_OUTCOME_LINK_DOWN:
-            return snprintf(body, cap, "{\"ok\":false,\"status\":\"link_down\","
-                             "\"detail\":\"the safety link is down; the request was not sent\"}");
-        case SAFETY_LINK_ROLLBACK_OUTCOME_SEND_FAILED:
-            return snprintf(body, cap, "{\"ok\":false,\"status\":\"send_failed\","
-                             "\"detail\":\"could not send the rollback request over the safety link\"}");
-        case SAFETY_LINK_ROLLBACK_OUTCOME_REFUSED:
-            return snprintf(body, cap,
-                             "{\"ok\":false,\"status\":\"refused\",\"reason_code\":%u,\"detail\":\"%s\"}",
-                             (unsigned)reason_code, ota_pico_rollback_reason_str(reason_code));
-        case SAFETY_LINK_ROLLBACK_OUTCOME_UNKNOWN_TIMEOUT:
-            // Still ok:true: the request DID reach the point of being sent
-            // (this is not a local failure), but this driver genuinely
-            // cannot say what happened -- an old Pico that predates
-            // ROLLBACK_RESULT cannot report a refusal even if it refused.
-            // Honest, not a false success.
-            return snprintf(body, cap, "{\"ok\":true,\"status\":\"unknown\","
-                             "\"detail\":\"no reply within the wait window; this safety processor build "
-                             "predates ROLLBACK_RESULT and cannot confirm accept or refuse -- watch for "
-                             "a link reconnect\"}");
-        case SAFETY_LINK_ROLLBACK_OUTCOME_ACCEPTED:
-        default:
-            // opus-review finding 2: this outcome is now only reported once
-            // BOTH the peer's boot_id and its build identity have been
-            // observed to change (safety_link_rollback_reboot_confirmed()),
-            // so "rebooted into a different image" is what was actually
-            // seen on the wire -- but this handler still never watched the
-            // reboot complete or verified which slot came up, so "into the
-            // previous image" specifically (as opposed to "an update landed
-            // mid-watch" or some other different-image case) is more than
-            // this evidence proves. Worded to claim only what was observed.
-            return snprintf(body, cap, "{\"ok\":true,\"status\":\"rebooting\","
-                             "\"detail\":\"accepted -- the safety processor rebooted into a different "
-                             "firmware image (boot_id and build identity both changed)\"}");
-    }
-}
-
-// Human-readable string for kilnlink_rollback_result_reason_t, HTTP-facing
-// (not the same as SaftyFW's own local log strings in update_task.c --
-// those are this processor's internal wording, this is the wire-carried
-// closed-set enum decoded back into English for the OTA page). Any value
-// outside the known set (untrusted wire input -- CommonFW/README.md rule 6,
-// even though this specific decode already validated the frame) reads as
-// "unknown reason" rather than indexing out of bounds or aliasing a real one.
-static const char *ota_pico_rollback_reason_str(uint8_t reason_code)
-{
-    switch (reason_code) {
-        case KILNLINK_ROLLBACK_RESULT_REASON_ARMED:
-            return "relay is ARMED -- rollback is refused while ARMED";
-        case KILNLINK_ROLLBACK_RESULT_REASON_NO_METADATA:
-            return "no bootloader metadata to roll back from";
-        case KILNLINK_ROLLBACK_RESULT_REASON_SLOT_INVALID:
-            return "the other bootloader slot is not currently valid to fall back to";
-        case KILNLINK_ROLLBACK_RESULT_REASON_STORAGE:
-            return "the safety processor's flash write failed";
-        case KILNLINK_ROLLBACK_RESULT_REASON_UNKNOWN:
-        default:
-            return "unknown reason";
-    }
-}
+// ota_pico_rollback_format_body()/ota_pico_rollback_reason_str() moved to
+// ota_http_util.c -- see the #define aliases above and ota_http_util.h's
+// header comment.
 
 // GET /api/ota/interlock -- TODO.md 9.6: "interlock state shown BEFORE the
 // file picker, with the blocker named." ota_http_check_interlocks() itself

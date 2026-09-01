@@ -126,3 +126,118 @@ truncated:
     if (n > 0 && (size_t)n < cap - o) o += (size_t)n;
     return o;
 }
+
+/* ---- GET /api/autotune body ----------------------------------------------
+ * Moved out of dashboard_http.c's autotune_status_get_handler() verbatim
+ * (2026-08-31 dashboard-split pass) -- these three name-lookup helpers and
+ * the format function below have no dependency beyond autotune_engine.h's
+ * types, json_escape() (above), and libc, so they host-test the same way
+ * append_zone_status_json() does. See dashboard_json.h's doc comment on
+ * dashboard_format_autotune_status_json(). */
+static const char *autotune_state_name(autotune_engine_state_t s)
+{
+    switch (s) {
+    case AUTOTUNE_ENGINE_IDLE: return "idle";
+    case AUTOTUNE_ENGINE_SETTLING: return "settling";
+    case AUTOTUNE_ENGINE_STEPPING: return "stepping";
+    case AUTOTUNE_ENGINE_RELAY_APPROACH: return "relay_approach";
+    case AUTOTUNE_ENGINE_RELAY_CYCLING: return "relay_cycling";
+    case AUTOTUNE_ENGINE_DONE: return "done";
+    case AUTOTUNE_ENGINE_ABORTED: return "aborted";
+    default: return "unknown";
+    }
+}
+
+/* The rule is reported by name rather than by enum value because it is the
+ * one part of a proposal an operator has to be able to judge for themselves:
+ * "ziegler-nichols" is a warning label (pid_autotune.h: it is *designed* to
+ * leave the loop oscillating), and a bare integer would not be. */
+static const char *autotune_rule_name(autotune_rule_t r)
+{
+    switch (r) {
+    case AUTOTUNE_RULE_SIMC: return "simc";
+    case AUTOTUNE_RULE_ZIEGLER_NICHOLS: return "ziegler-nichols";
+    case AUTOTUNE_RULE_TYREUS_LUYBEN: return "tyreus-luyben";
+    case AUTOTUNE_RULE_COHEN_COON: return "cohen-coon";
+    default: return "unknown";
+    }
+}
+
+/* Same reasoning as autotune_rule_name() above: PID_EXPANSION_PLAN.md Phase 1
+ * added this enum specifically so a refusal is distinguishable from every
+ * other refusal (and from success) rather than collapsing to the same silent
+ * kp=ki=kd=0 -- so the page gets the code by name, not just the number. */
+static const char *autotune_refusal_name(autotune_refusal_t r)
+{
+    switch (r) {
+    case AUTOTUNE_REFUSAL_OK: return "ok";
+    case AUTOTUNE_REFUSAL_INVALID_MODEL: return "invalid_model";
+    case AUTOTUNE_REFUSAL_RULE_NOT_ON_THIS_PATH: return "rule_not_on_this_path";
+    case AUTOTUNE_REFUSAL_DEAD_TIME_TOO_SMALL: return "dead_time_too_small";
+    case AUTOTUNE_REFUSAL_NONPOSITIVE_TAU: return "nonpositive_tau";
+    case AUTOTUNE_REFUSAL_NONPOSITIVE_GAIN: return "nonpositive_gain";
+    default: return "unknown";
+    }
+}
+
+int dashboard_format_autotune_status_json(char *json, size_t cap, const autotune_engine_status_t *st)
+{
+    char reason_escaped[sizeof(st->abort_reason) * 2 + 1];
+    json_escape(st->abort_reason, reason_escaped, sizeof(reason_escaped));
+
+    /* The relay fit's own rejection reason is reported verbatim alongside the
+     * abort reason, for the same reason the RGA's is (see that handler): "not
+     * a limit cycle" and "amplitude inside the hysteresis band" are different
+     * findings about the kiln and the page must not flatten them. */
+    char relay_reason_escaped[sizeof(st->relay.invalid_reason) * 2 + 1];
+    json_escape(st->relay.invalid_reason, relay_reason_escaped, sizeof(relay_reason_escaped));
+
+    /* proposed_gains is a zero-initialized struct whenever no tune has run
+     * yet (state IDLE), so refusal/refusal_reason read AUTOTUNE_REFUSAL_OK /
+     * "" in that case too -- exactly "empty string, not stale", since there
+     * is no previous run's reason left lying around to leak. */
+    char refusal_reason_escaped[sizeof(st->proposed_gains.refusal_reason) * 2 + 1];
+    json_escape(st->proposed_gains.refusal_reason, refusal_reason_escaped, sizeof(refusal_reason_escaped));
+
+    /* Diagnostic fit inputs/intermediates (2026-08-31): expose exactly what
+     * pid_autotune_fit_fopdt() was actually called with and what it actually
+     * computed, so a captured run's K can be checked against the fit's own
+     * inputs instead of re-derived by hand from the raw trace. Only
+     * meaningful when model_valid; 0 otherwise, same convention as
+     * k_gain_c_per_duty etc. above. step_ambient_c is reported alongside
+     * baseline_c deliberately -- see autotune_engine_status_t::step_ambient_c
+     * -- they are different quantities that have been conflated before. */
+    int n = snprintf(json, cap,
+        "{\"state\":\"%s\",\"method\":\"%s\",\"zone\":%u,\"elapsed_s\":%lu,\"sample_count\":%u,"
+        "\"actual_c\":%.2f,\"actual_valid\":%s,\"duty\":%.3f,\"abort_reason\":\"%s\","
+        "\"model_valid\":%s,\"model_settled\":%s,\"model_extrapolation_converged\":%s,"
+        "\"model_tau_consistent\":%s,\"k_gain_c_per_duty\":%.3f,\"tau_s\":%.1f,\"dead_time_s\":%.1f,"
+        "\"baseline_c\":%.2f,\"final_c\":%.2f,\"raw_rise_c\":%.2f,\"rise_inf_c\":%.2f,"
+        "\"step_ambient_c\":%.2f,"
+        "\"proposed_kp\":%.5f,\"proposed_ki\":%.5f,\"proposed_kd\":%.5f,\"rule\":\"%s\","
+        "\"refusal\":\"%s\",\"refusal_reason\":\"%s\","
+        "\"predicted_max_ramp_c_per_hr\":%.1f,"
+        "\"relay_setpoint_c\":%.1f,\"relay_d\":%.3f,\"relay_h_c\":%.2f,"
+        "\"relay_cycles_seen\":%u,\"relay_cycles_target\":%u,"
+        "\"relay_valid\":%s,\"relay_ku\":%.5f,\"relay_tu_s\":%.1f,\"relay_amplitude_c\":%.2f,"
+        "\"relay_cycles_used\":%d,\"relay_reason\":\"%s\"}",
+        autotune_state_name(st->state), st->method == AUTOTUNE_METHOD_RELAY ? "relay" : "step", st->zone_index,
+        (unsigned long)st->elapsed_s, st->sample_count,
+        (double)(st->actual_valid ? st->actual_c : 0.0f), st->actual_valid ? "true" : "false", (double)st->duty,
+        reason_escaped, st->model.valid ? "true" : "false", st->model.settled ? "true" : "false",
+        st->model.extrapolation_converged ? "true" : "false", st->model.tau_consistent_with_gain ? "true" : "false",
+        (double)st->model.k_gain_c_per_duty,
+        (double)st->model.tau_s, (double)st->model.dead_time_s,
+        (double)st->model.baseline_c, (double)st->model.final_c, (double)st->model.raw_rise_c,
+        (double)st->model.rise_inf_c, (double)st->step_ambient_c,
+        (double)st->proposed_gains.kp,
+        (double)st->proposed_gains.ki, (double)st->proposed_gains.kd,
+        autotune_rule_name(st->proposed_gains.rule),
+        autotune_refusal_name(st->proposed_gains.refusal), refusal_reason_escaped,
+        (double)st->predicted_max_ramp_c_per_hr,
+        (double)st->relay_setpoint_c, (double)st->relay_amplitude_duty, (double)st->relay_hysteresis_c,
+        st->relay_cycles_seen, st->relay_cycles_target,
+        st->relay.valid ? "true" : "false", (double)st->relay.ku, (double)st->relay.tu_s,
+        (double)st->relay.amplitude_c, st->relay.cycles_used, relay_reason_escaped);
+    return n;
+}

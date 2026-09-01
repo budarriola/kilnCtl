@@ -270,7 +270,7 @@ $cmd8 = "call `"$vcvars`" x64 >nul && cl /nologo /W3 /EHsc /std:c11 /I`"$stubDir
         "/Fo:`"$otaObjDir\\`" /Fe:`"$exe8`" " +
         "`"$(Join-Path $testDir 'test_ota_http.c')`" " +
         "`"$(Join-Path $driversDir 'ota_auth.c')`" `"$(Join-Path $driversDir 'ota_interlock.c')`" " +
-        "`"$(Join-Path $driversDir 'ota_record.c')`""
+        "`"$(Join-Path $driversDir 'ota_record.c')`" `"$(Join-Path $driversDir 'ota_http_util.c')`""
 
 Invoke-HostTestExe -Name "ota_http" -ExePath $exe8 -BuildCmd $cmd8
 

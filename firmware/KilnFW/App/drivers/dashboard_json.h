@@ -27,6 +27,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 
+#include "autotune_engine.h"
 #include "profile_executor.h"
 
 /* Buffer-size expressions shared with dashboard_http.c's two call sites and
@@ -84,5 +85,17 @@ size_t append_zone_status_json(char *json, size_t cap, size_t o, const profile_e
  * through -- see test_dashboard_json.c's own stress test against this
  * exact property. cap must be >= 1. */
 size_t json_append_clamped(char *json, size_t cap, size_t o, const char *fmt, ...);
+
+/* GET /api/autotune's whole response body, moved out of dashboard_http.c's
+ * autotune_status_get_handler() (2026-08-31 dashboard-split pass) -- pure
+ * formatting of an autotune_engine_status_t snapshot the caller already
+ * fetched via autotune_engine_get_status(), no httpd/hardware touched here.
+ * Same escaping (json_escape()) and same single-snprintf-into-caller-owned-
+ * buffer shape as the original handler body -- NOT a behavior change, just a
+ * different translation unit. Returns whatever snprintf returned (negative
+ * on an encoding error, or the would-be length -- the caller decides how to
+ * clamp that for httpd_resp_send(), same as the original code did). `json`
+ * must be at least `cap` bytes; this never writes past `cap`. */
+int dashboard_format_autotune_status_json(char *json, size_t cap, const autotune_engine_status_t *st);
 
 #endif // DASHBOARD_JSON_H
