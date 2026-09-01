@@ -9,6 +9,7 @@ import struct
 from dataclasses import dataclass
 
 from .protocol import *  # noqa: F401,F403
+from .devices_display import _check_coord  # noqa: F401
 from .devices_common import (  # noqa: F401
     OkReason,
     _check_bool_byte,

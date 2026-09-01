@@ -10,6 +10,7 @@ from dataclasses import dataclass
 
 from .protocol import *  # noqa: F401,F403
 from .devices_common import _decode_ok_reason  # noqa: F401
+from .devices_profiles import _pack_str8  # noqa: F401
 
 
 # ---------------------------------------------------------------------------

@@ -128,6 +128,8 @@ def load_config_preset(name: str, host: Optional[str] = None,
 
     Does NOT reset, does NOT touch relays, does NOT request enable.
     """
+    from .mcp_server_ota import _ota_resolve_host  # local import: avoids a circular import with mcp_server_ota.py
+
     try:
         preset = config_presets.load_preset_data(name)
     except config_presets.ConfigPresetError as exc:

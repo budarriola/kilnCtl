@@ -64,11 +64,15 @@ class PinConfigEntry:
     @property
     def label(self) -> str:
         """Full human-readable description, e.g. "SPI MISO (shared: ...)"."""
+        from .devices import pin_function_label  # local import: avoids a circular import with devices.py
+
         return pin_function_label(self.function_id)
 
     @property
     def abbrev(self) -> str:
         """Short callout text, e.g. "MISO"."""
+        from .devices import pin_function_abbrev  # local import: avoids a circular import with devices.py
+
         return pin_function_abbrev(self.function_id)
 
 

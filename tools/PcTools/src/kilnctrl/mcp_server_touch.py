@@ -108,6 +108,8 @@ def touch_inject(x: int, y: int, pressed: bool = True) -> str:
     An injected press takes priority over the physical NS2009 for as long as
     it is held, so it will not race a stray touch on the bench.
     """
+    from .mcp_server_io import _touch_mutating  # local import: avoids a circular import with mcp_server_io.py
+
     return _touch_mutating(f"touch injected ({x},{y},{'down' if pressed else 'up'})",
                             lambda: _srv._touch.inject(x, y, pressed))
 
@@ -124,6 +126,8 @@ def touch_set_tap_dump(enable: bool) -> str:
     driving a sequence of navigations and wanting every switch's targets
     logged without a separate call after each one.
     """
+    from .mcp_server_io import _touch_mutating  # local import: avoids a circular import with mcp_server_io.py
+
     return _touch_mutating(
         f"tap dump {'on' if enable else 'off'}", lambda: _srv._touch.set_tap_dump(enable)
     )
@@ -142,6 +146,8 @@ def touch_log_tap_targets() -> str:
     (get_device_log / get_device_log_json), not as this call's return value --
     but a driver-error refusal is no longer silent, see _touch_mutating().
     """
+    from .mcp_server_io import _touch_mutating  # local import: avoids a circular import with mcp_server_io.py
+
     return _touch_mutating("tap-target dump requested", lambda: _srv._touch.log_tap_targets())
 
 

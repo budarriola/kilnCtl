@@ -25,6 +25,10 @@ dependencies = [
 [dependency-groups]
 dev = [
     "pytest>=8.0",
+    # Used by tests/test_no_undefined_names.py to catch a moved-function-left-
+    # its-import-behind defect (the devices_info.py/pin_function_label class of
+    # bug) before it ships silently in a function body no test happens to call.
+    "pyflakes>=3.0",
 ]
 
 [project.scripts]

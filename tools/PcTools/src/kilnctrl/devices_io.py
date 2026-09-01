@@ -10,6 +10,7 @@ import struct
 from dataclasses import dataclass
 
 from .protocol import *  # noqa: F401,F403
+from .devices_thermo import _check_thermo_channel  # noqa: F401
 from .devices_common import (  # noqa: F401
     OkReason,
     _check_bool_byte,

@@ -91,6 +91,8 @@ def ui_run_script(name: str, zones_host: Optional[str] = None, apply_preset: boo
     (see ``_ota_resolve_host``); the lcd backend drives the already-connected
     board over task 14.
     """
+    from .mcp_server_ota import _ota_resolve_host  # local import: avoids a circular import with mcp_server_ota.py
+
     try:
         script = ui_test_runner.load_ui_script(name)
     except ui_test_runner.UiScriptError as exc:
@@ -114,6 +116,8 @@ def ui_step(backend: str, action: str, target: str, timeout_ms: int = 3000,
     """Run a single UI step directly -- the debug entry point for trying one
     action without a whole script (see ui_test_runner.run_ui_step()).
     """
+    from .mcp_server_ota import _ota_resolve_host  # local import: avoids a circular import with mcp_server_ota.py
+
     step = {"action": action, "target": target, "timeout_ms": timeout_ms}
     if contains is not None:
         step["contains"] = contains
@@ -190,6 +194,8 @@ def factory_default_then_load_preset(name: str, scope: int = FACTORY_RESET_SCOPE
     invoke it against a bench with a firing in progress or with the safety
     processor ARMED.
     """
+    from .mcp_server_ota import _ota_resolve_host  # local import: avoids a circular import with mcp_server_ota.py
+
     try:
         preset = config_presets.load_preset_data(name)
     except config_presets.ConfigPresetError as exc:
