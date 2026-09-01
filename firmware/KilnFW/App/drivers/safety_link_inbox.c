@@ -100,15 +100,13 @@
 
 static const char *TAG = "safety_link";
 
-
-/* Ceiling on how long a caller waits to start its own request/reply exchange.
- * One exchange is bounded by the ACK timeout times uart_protocol's retries plus
- * the reply timeout (~750 ms with a dead peer), so anything past a few of those
- * means the holder is wedged rather than merely unlucky. Waiting forever here
- * would let a stuck safety link take out whatever task asked it a question --
- * including the bridge task that answers the PC. */
-#define SAFETY_XACT_LOCK_TIMEOUT_MS 5000u
-
+/* SAFETY_XACT_LOCK_TIMEOUT_MS is declared in safety_link_internal.h -- it
+ * used to live here (this file's own safety_exchange() is its original,
+ * still-only caller within this file), but safety_link_commands.c's
+ * safety_link_send_rollback_ex() also takes link->xact_lock directly against
+ * the same ceiling (the rollback boot-id watch needs to hold it across a
+ * longer operation than a plain safety_exchange() call), so it moved to the
+ * shared internal header rather than being duplicated in both files. */
 
 /* Drains the inbox for up to wait_ms, applying every status frame found.
  * Returns true if at least one was applied. Waiting on the *first* message

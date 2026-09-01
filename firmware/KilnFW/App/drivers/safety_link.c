@@ -203,7 +203,7 @@ static const char *TAG = "safety_link";
  * safety_link_frame.c/.h (pure byte<->value marshalling, no locking/hardware
  * -- see that header's own comment). Called the same way from here. */
 
-static uint32_t safety_elapsed_ms(TickType_t since)
+uint32_t safety_elapsed_ms(TickType_t since)
 {
     /* Unsigned tick subtraction, so the 32-bit tick counter's eventual wrap
      * (~497 days at the default 100 Hz) produces the right delta rather than
@@ -218,7 +218,7 @@ static uint32_t safety_elapsed_ms(TickType_t since)
 
 /* Age of the cached status in ms, saturating just below the reserved
  * "never received" value so the two can never be confused. */
-static uint16_t safety_age_ms_locked(const SafetyLinkClass *link)
+uint16_t safety_age_ms_locked(const SafetyLinkClass *link)
 {
     if (!link->ever_received) {
         return SAFETY_LINK_AGE_NEVER;
@@ -235,7 +235,7 @@ static uint16_t safety_age_ms_locked(const SafetyLinkClass *link)
  * configured default is used -- otherwise turning polling off would make the
  * link look permanently up (nothing ever goes stale) or permanently down
  * (window of zero), and both are lies. */
-static bool safety_link_up_locked(const SafetyLinkClass *link)
+bool safety_link_up_locked(const SafetyLinkClass *link)
 {
     uint16_t age = safety_age_ms_locked(link);
     if (age == SAFETY_LINK_AGE_NEVER) {
@@ -273,7 +273,7 @@ static bool safety_link_up_locked(const SafetyLinkClass *link)
  * than left inline in the poll loop) specifically so this decision is
  * host-testable from a plain SafetyLinkClass -- see test_safety_link_
  * compile.c -- without needing the FreeRTOS poll loop itself running. */
-static void safety_reset_stale_peer_info_if_link_down(SafetyLinkClass *link)
+void safety_reset_stale_peer_info_if_link_down(SafetyLinkClass *link)
 {
     if (!link || !safety_lock(link)) {
         return;

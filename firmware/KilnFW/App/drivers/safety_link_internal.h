@@ -33,6 +33,18 @@
 extern "C" {
 #endif
 
+/* Ceiling on how long a caller waits to start its own request/reply exchange.
+ * One exchange is bounded by the ACK timeout times uart_protocol's retries plus
+ * the reply timeout (~750 ms with a dead peer), so anything past a few of those
+ * means the holder is wedged rather than merely unlucky. Waiting forever here
+ * would let a stuck safety link take out whatever task asked it a question --
+ * including the bridge task that answers the PC. Used directly by both
+ * safety_link_inbox.c's safety_exchange() and safety_link_commands.c's
+ * safety_link_send_rollback_ex() (which takes link->xact_lock itself, against
+ * the same ceiling, for its longer boot-id-watch operation) -- shared here
+ * rather than duplicated in each. */
+#define SAFETY_XACT_LOCK_TIMEOUT_MS 5000u
+
 /* --- safety_link.c (helpers / cache / staleness) ------------------------ */
 
 static inline bool safety_lock(SafetyLinkClass *link)
