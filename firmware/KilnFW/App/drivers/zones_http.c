@@ -457,13 +457,13 @@ static esp_err_t sweep_status_get_handler(httpd_req_t *req)
     zone_sweep_status_t st;
     zones_current_sweep_get_status(&st);
     char reason_escaped[sizeof(st.reason) * 2 + 1];
-    json_escape(st.reason, reason_escaped, sizeof(reason_escaped));
+    zones_json_escape(st.reason, reason_escaped, sizeof(reason_escaped));
     char ct_reason_escaped[sizeof(st.ct_map_reason) * 2 + 1];
-    json_escape(st.ct_map_reason, ct_reason_escaped, sizeof(ct_reason_escaped));
+    zones_json_escape(st.ct_map_reason, ct_reason_escaped, sizeof(ct_reason_escaped));
     /* M12b: the CT-scale derivation reports separately -- see
      * zone_sweep_status_t's own comment for why the two share no field. */
     char k_reason_escaped[sizeof(st.k_ct_reason) * 2 + 1];
-    json_escape(st.k_ct_reason, k_reason_escaped, sizeof(k_reason_escaped));
+    zones_json_escape(st.k_ct_reason, k_reason_escaped, sizeof(k_reason_escaped));
     char json[1024];
     int n = snprintf(json, sizeof(json),
                      "{\"state\":\"%s\",\"zone_index\":%u,\"zones_done\":%u,\"zones_total\":%u,"

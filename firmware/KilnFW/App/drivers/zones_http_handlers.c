@@ -52,8 +52,11 @@ esp_err_t page_get_handler(httpd_req_t *req)
 }
 
 /* Same escaping convention as wifi_provision_http.c's json_escape -- a zone
- * name came from a POST body at some point, so it's untrusted-ish. */
-void json_escape(const char *src, char *out, size_t out_cap)
+ * name came from a POST body at some point, so it's untrusted-ish. Named
+ * zones_json_escape (not json_escape) because dashboard_json.c has its own
+ * copy with external linkage too; two same-named externally-linked symbols
+ * collide at link time. */
+void zones_json_escape(const char *src, char *out, size_t out_cap)
 {
     size_t o = 0;
     for (const char *p = src; *p && o + 2 < out_cap; p++) {
@@ -217,7 +220,7 @@ esp_err_t zones_get_handler(httpd_req_t *req)
 
     for (uint8_t r = 0; r < KILN_IO_RELAY_COUNT; r++) {
         char rn_escaped[RELAY_NAME_MAX_LEN * 2 + 1];
-        json_escape(s_relay_names.cfg.names[r], rn_escaped, sizeof(rn_escaped));
+        zones_json_escape(s_relay_names.cfg.names[r], rn_escaped, sizeof(rn_escaped));
         APPEND("%s\"%s\"", r == 0 ? "" : ",", rn_escaped);
     }
     APPEND("],\"timing_profiles\":[");
@@ -231,7 +234,7 @@ esp_err_t zones_get_handler(httpd_req_t *req)
     for (uint8_t p = 0; p < s_zones.cfg.timing_profile_count; p++) {
         const zone_timing_profile_t *tp = &s_zones.cfg.timing_profiles[p];
         char tp_name_escaped[TIMING_PROFILE_NAME_MAX_LEN * 2 + 1];
-        json_escape(tp->name, tp_name_escaped, sizeof(tp_name_escaped));
+        zones_json_escape(tp->name, tp_name_escaped, sizeof(tp_name_escaped));
         APPEND(
             "%s{\"index\":%u,\"name\":\"%s\","
             "\"guard_progress_duty_min\":%.3f,\"guard_progress_window_s\":%.1f,"
@@ -250,7 +253,7 @@ esp_err_t zones_get_handler(httpd_req_t *req)
     for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
         const zone_cfg_t *z = &s_zones.cfg.zones[i];
         char name_escaped[ZONE_NAME_MAX_LEN * 2 + 1];
-        json_escape(z->name, name_escaped, sizeof(name_escaped));
+        zones_json_escape(z->name, name_escaped, sizeof(name_escaped));
         /* Task 1 (2026-08-27+2): this zone's measured normal current, if
          * any -- read-only, never round-tripped through POST (it is
          * measured data, not an operator-entered field; see

@@ -148,10 +148,10 @@ bool zone_k_ct_set(uint8_t ct_channel, float k_v_per_a);
 uint8_t zone_owned_relay_mask(const zones_cfg_t *cfg);
 
 /* ---- zones_http_handlers.c: shared with zones_http.c's sweep-status
- * handler (json_escape() itself is otherwise only used inside
+ * handler (zones_json_escape() itself is otherwise only used inside
  * zones_http_handlers.c -- widened for that one cross-file caller), and the
  * page/GET/POST handlers zones_http_start() registers by function pointer. */
-void json_escape(const char *src, char *out, size_t out_cap);
+void zones_json_escape(const char *src, char *out, size_t out_cap);
 esp_err_t page_get_handler(httpd_req_t *req);
 esp_err_t safety_config_page_get_handler(httpd_req_t *req);
 esp_err_t zones_get_handler(httpd_req_t *req);
