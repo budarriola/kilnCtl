@@ -39,6 +39,7 @@
 #include "test_common.h"
 
 #include "esp_err.h"
+#include "esp_http_server.h" /* PID_EXPANSION_PLAN.md Phase 7d -- adaptive_tune.c's httpd_* fakes below need these types */
 
 // Own executable (see this file's header comment) -- test_common.h's
 // counters are defined once per host-test binary, same as test_main.c does
@@ -554,6 +555,44 @@ bool zones_config_get_pid(uint8_t zone_index, float *out_kp, float *out_ki, floa
     if (out_kd) *out_kd = 0.0f;
     return false;
 }
+
+/* PID_EXPANSION_PLAN.md Phase 7d: profile_executor.c now links adaptive_
+ * tune.c (adaptive_tune_init()/_zone_tick()/_run_end(), called from
+ * profile_executor_start()/executor_task_entry()/profile_executor_halt()),
+ * which needs its own set_model()/set_pid() fakes (get_model()/get_pid()
+ * already exist above) plus the httpd/flash-worker symbols it calls.
+ * MAX31856_CHANNEL_COUNT accepted since none of these tests exercise a
+ * refinement (no zone ever opts in), only that the link succeeds and the
+ * pre-start guard tests this file exists for still behave. */
+bool zones_config_set_model(uint8_t zone_index, float k_dc, float tau_s, float dead_time_s)
+{
+    (void)zone_index; (void)k_dc; (void)tau_s; (void)dead_time_s;
+    return true;
+}
+bool zones_config_set_pid(uint8_t zone_index, float kp, float ki, float kd)
+{
+    (void)zone_index; (void)kp; (void)ki; (void)kd;
+    return true;
+}
+esp_err_t uart_bridge_ext_run_on_flash_worker(void (*fn)(void *arg), void *arg)
+{
+    fn(arg);
+    return ESP_OK;
+}
+httpd_handle_t wifi_provision_http_get_server(void) { return NULL; }
+esp_err_t httpd_register_uri_handler(httpd_handle_t handle, const httpd_uri_t *uri_handler)
+{
+    (void)handle; (void)uri_handler;
+    return ESP_OK;
+}
+esp_err_t httpd_resp_set_type(httpd_req_t *r, const char *type) { (void)r; (void)type; return ESP_OK; }
+esp_err_t httpd_resp_sendstr(httpd_req_t *r, const char *s) { (void)r; (void)s; return ESP_OK; }
+esp_err_t httpd_resp_send_err(httpd_req_t *r, httpd_err_code_t error, const char *msg)
+{
+    (void)r; (void)error; (void)msg;
+    return ESP_OK;
+}
+int httpd_req_recv(httpd_req_t *r, char *buf, size_t buf_len) { (void)r; (void)buf; (void)buf_len; return 0; }
 
 // Configurable per-test via g_stub_relay_mask (default all-zero, matching
 // every pre-existing test in this file that never touches it -- apply_relay()

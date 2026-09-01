@@ -15,6 +15,7 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 
+#include "adaptive_tune.h" /* PID_EXPANSION_PLAN.md Phase 7d -- see that file's own header comment */
 #include "autotune_engine.h"
 #include "heat_enable.h"
 #include "heater_output.h"
@@ -2595,12 +2596,22 @@ static void executor_task_entry(void *arg)
              * firing_stats_maybe_finalize()'s own (looser) IDLE-only guard. */
             bool fs_need_persist = false;
             profile_firing_run_record_t fs_rec;
+            bool at_clean_run = false; /* PID_EXPANSION_PLAN.md Phase 7d: DONE only -- a FAULTED run
+                                        * must never become adaptive-tune training data. */
             if (s_exec.state == PROFILE_EXEC_DONE || s_exec.state == PROFILE_EXEC_FAULTED) {
                 fs_need_persist = firing_stats_maybe_finalize(&fs_rec);
+                at_clean_run = (s_exec.state == PROFILE_EXEC_DONE);
             }
             xSemaphoreGive(s_exec.lock);
             if (fs_need_persist) {
                 firing_stats_persist(&fs_rec);
+                /* Outside s_exec.lock, same as the persist call above --
+                 * this can do a batch fit and an NVS write of its own (via
+                 * the flash worker), and must not hold the control loop's
+                 * lock across either. Run-end is also the safe boundary
+                 * that makes a mid-firing gain bump structurally
+                 * impossible -- see adaptive_tune.c's top comment. */
+                adaptive_tune_run_end(&fs_rec, at_clean_run);
             }
             continue;
         }
@@ -2880,6 +2891,14 @@ static void executor_task_entry(void *arg)
             if (!s_exec.zones[zi].active || s_exec.zones[zi].faulted) continue;
             firing_stats_zone_tick(&s_exec.zones[zi], s_exec.target_c, s_exec.dwelling, s_exec.total_elapsed_s,
                                     s_exec.segment_index, dt_s);
+            /* PID_EXPANSION_PLAN.md Phase 7d, Layer 1: harvest one dwell
+             * observation per settled dwell, opt-in per zone, off by
+             * default -- see adaptive_tune.c's own doc comment. Placed
+             * right alongside firing_stats_zone_tick() for the same
+             * reason: dwelling/actual_c/actual_valid are already final for
+             * this tick. */
+            adaptive_tune_zone_tick(zi, s_exec.zones[zi].actual_c, s_exec.zones[zi].actual_valid,
+                                     s_exec.zones[zi].duty, s_exec.dwelling, s_exec.ambient_c, dt_s);
         }
 
         /* --- Control mode, per active zone (pass 1: decide, don't apply yet)
@@ -3471,6 +3490,14 @@ esp_err_t profile_executor_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo
         ESP_LOGW(TAG, "run_state_init failed: %s -- no reboot breadcrumb kept this boot",
                  esp_err_to_name(rs_err));
     }
+
+    /* PID_EXPANSION_PLAN.md Phase 7d: loads the per-zone opt-in flags (own
+     * NVS namespace, see adaptive_tune.c's top comment) and registers its
+     * HTTP endpoints. No init entry point of its own in main.c -- hooked
+     * here since profile_executor.c is this feature's owner and this
+     * function already runs once, from app_main's task, before the control
+     * task exists. */
+    adaptive_tune_init();
 
     /* Priority 5, matching the UART bridge tasks (uart_bridge.c, all 5) --
      * TODO.md 6A.7 calls for "below the link-loss watchdog (6), above the
@@ -4611,6 +4638,14 @@ void profile_executor_halt(void)
     xSemaphoreGive(s_exec.lock);
     if (fs_need_persist) {
         firing_stats_persist(&fs_rec);
+        /* PID_EXPANSION_PLAN.md Phase 7d: `clean` is always false here --
+         * every run finalized on THIS path (see the comment above) is
+         * either an operator stop straight out of RUNNING/PAUSED (stopped
+         * early, by definition) or a dismiss of an already-persisted
+         * DONE/FAULTED run (fs_need_persist is false for that case, so this
+         * line is not reached at all -- see firing_stats_maybe_finalize()'s
+         * fs_persisted guard). Never "true" from this call site. */
+        adaptive_tune_run_end(&fs_rec, false);
     }
 
     /* An operator halt is a CLEAN end -- that is the whole point of recording

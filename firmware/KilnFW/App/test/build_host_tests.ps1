@@ -206,7 +206,8 @@ $cmd4 = "call `"$vcvars`" x64 >nul && cl /nologo /W3 /EHsc /I`"$stubDir`" /I`"$c
         "`"$(Join-Path $driversDir 'pid.c')`" `"$(Join-Path $driversDir 'thermal_guard.c')`" " +
         "`"$(Join-Path $driversDir 'heater_output.c')`" `"$(Join-Path $driversDir 'thermo_combine.c')`" " +
         "`"$(Join-Path $driversDir 'heat_enable.c')`" `"$(Join-Path $driversDir 'pid_fuzzy.c')`" " +
-        "`"$(Join-Path $driversDir 'stack_margin.c')`" `"$(Join-Path $driversDir 'zone_coupling_solve.c')`""
+        "`"$(Join-Path $driversDir 'stack_margin.c')`" `"$(Join-Path $driversDir 'zone_coupling_solve.c')`" " +
+        "`"$(Join-Path $driversDir 'adaptive_tune.c')`" `"$(Join-Path $driversDir 'pid_autotune.c')`""
 
 Invoke-HostTestExe -Name "profile_executor_prestart" -ExePath $exe4 -BuildCmd $cmd4
 
@@ -448,16 +449,36 @@ $cmd16 = "call `"$vcvars`" x64 >nul && cl /nologo /W3 /EHsc /std:c11 /I`"$stubDi
 
 Invoke-HostTestExe -Name "telemetry_format" -ExePath $exe16 -BuildCmd $cmd16
 
+# ---- test_adaptive_tune.c: its own SEVENTEENTH, separate executable -------
+# PID_EXPANSION_PLAN.md Phase 7d. #includes adaptive_tune.c directly (same
+# convention as test_autotune_engine_prestart.c/test_profile_executor_
+# prestart.c above) to reach its guard constants with no other seam, and
+# defines its own tiny fake zones_config_get_model()/set_model()/get_pid()/
+# set_pid() table plus minimal httpd_*()/wifi_provision_http_get_server()/
+# uart_bridge_ext_run_on_flash_worker() stubs -- own executable so none of
+# those collide with any other test file's fakes of the same names.
+# pid_autotune.c is linked in for real (already host-tested elsewhere) so
+# the SIMC recompute this file drives is the actual production math, not a
+# stand-in.
+$exe17 = Join-Path $outDir "kilnctl_host_tests_adaptive_tune.exe"
+$atObjDir = Join-Path $outDir "at"
+New-Item -ItemType Directory -Force -Path $atObjDir | Out-Null
+$cmd17 = "call `"$vcvars`" x64 >nul && cl /nologo /W3 /EHsc /std:c11 /I`"$stubDir`" /I`"$commonInc`" " +
+        "/Fo:`"$atObjDir\\`" /Fe:`"$exe17`" " +
+        "`"$(Join-Path $testDir 'test_adaptive_tune.c')`" `"$(Join-Path $driversDir 'pid_autotune.c')`""
+
+Invoke-HostTestExe -Name "adaptive_tune" -ExePath $exe17 -BuildCmd $cmd17
+
 # ---- summary ----------------------------------------------------------
 #
-# 15 executables are attempted above (main + zones_http + safety_cfg_http +
+# 16 executables are attempted above (main + zones_http + safety_cfg_http +
 # profile_executor_prestart + autotune_engine_prestart + profiles_http +
 # ota_http + uart_protocol_link_delegate + board_temps + kiln_io_owner +
 # safety_trip_words + safety_trip_decision + safety_link + dashboard_json +
-# telemetry_format). Report how many of those were even built, separately
-# from how many of the built ones passed, so a partial run can never read as
-# a full green suite.
-$totalExpected = 15
+# telemetry_format + adaptive_tune). Report how many of those were even
+# built, separately from how many of the built ones passed, so a partial
+# run can never read as a full green suite.
+$totalExpected = 16
 Write-Host ""
 Write-Host "Built: $($script:builtExes.Count)/$totalExpected executables"
 if ($script:buildFailures.Count -gt 0) {
