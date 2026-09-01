@@ -47,7 +47,22 @@
 int g_test_failures = 0;
 int g_test_count = 0;
 
+// profile_executor.c split 2026-09-01 ("files over 1500 lines should be
+// broken up where it makes sense") -- same convention as test_zones_http.c's
+// own #include block (see that file's header comment): every piece is
+// #included directly rather than linked as a separate object, so this file
+// keeps reaching each split-out module's `static` internals (the coupling
+// solve caches below included) exactly as it did when this was all one
+// translation unit.
 #include "../drivers/profile_executor.c"
+#include "../drivers/profile_executor_feedforward.c"
+#include "../drivers/profile_executor_firing_stats.c"
+#include "../drivers/profile_executor_relay_io.c"
+#include "../drivers/profile_executor_config_reload.c"
+#include "../drivers/profile_executor_pid_tick.c"
+#include "../drivers/profile_executor_start.c"
+#include "../drivers/profile_executor_run.c"
+#include "../drivers/profile_executor_status.c"
 
 // ---------------------------------------------------------------------------
 // Stub bodies for every extern symbol profile_executor.c references that

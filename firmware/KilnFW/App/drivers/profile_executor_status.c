@@ -1,0 +1,404 @@
+/* profile_executor_halt()/pause()/resume()/get_status() and the small
+ * read-only accessors (zone_is_active(), get_firing_history(),
+ * get_history_count()/get_history()) -- split out of profile_executor.c
+ * (2026-09-01, "files over 1500 lines should be broken up where it makes
+ * sense"). See profile_executor_internal.h's own doc comment for the full
+ * multi-way split this is one piece of. */
+
+#include "profile_executor_internal.h"
+
+#include <math.h>
+
+#include "esp_log.h"
+
+#include "adaptive_tune.h"
+#include "heat_enable.h"
+#include "relay_authority.h"
+#include "relay_cycles.h"
+#include "run_state.h"
+#include "zones_http.h"
+
+void profile_executor_halt(void)
+{
+    /* See profile_executor_run()'s guard comment above -- s_exec.lock is
+     * NULL until profile_executor_start() runs. */
+    if (s_exec.lock == NULL) {
+        ESP_LOGW(TAG, "profile_executor_halt() called before profile_executor_start() -- refused");
+        return;
+    }
+    xSemaphoreTake(s_exec.lock, portMAX_DELAY);
+    if (s_exec.state == PROFILE_EXEC_IDLE) {
+        xSemaphoreGive(s_exec.lock);
+        return;
+    }
+    force_all_relays_off();
+    /* An operator halt is an abnormal stop for the segment machinery too --
+     * force off regardless of leave_on_at_end, same as a guard trip. An
+     * operator stopping a firing on purpose is not the "reached its own
+     * planned end" case that flag exists for. */
+    io_segs_force_all_off(false);
+    /* Hand every relay this run ever claimed back to unowned -- a halted run
+     * owns nothing, and the next run (or a manual command) starts clean. */
+    relay_authority_release_mask(s_exec.claimed_relay_mask);
+    /* ...and give back the shared heat claim too (relay_authority.h) -- a
+     * halt from RUNNING or PAUSED must free the whole-board sweep to start,
+     * not just this run's relays. Not routed through release_profile_relay_
+     * claim() (unlike every OTHER terminal transition) because that
+     * function's single relay_authority_release_mask() call is this one's
+     * near-duplicate, not something halt() can share without also pulling
+     * in its own separate lock-held/state-transition assumptions -- calling
+     * both here inline keeps halt() self-contained the way it already is.
+     * Safe unconditionally, same no-op-if-never-held reasoning as
+     * release_profile_relay_claim()'s call. */
+    relay_authority_heat_zone_claim_end(RELAY_HEAT_ZONE_CLAIM_PROFILE);
+    /* ...and K4, inline for the same reason the two calls above are inline
+     * rather than routed through release_profile_relay_claim(). After
+     * force_all_relays_off() above, never before it. */
+    heat_enable_release(HEAT_ENABLE_CLAIMANT_PROFILE);
+    /* Captured BEFORE the fault fields are cleared below: if this halt is the
+     * operator acknowledging a trip, the reason for that trip is the most
+     * useful thing the breadcrumb can carry, and clearing it first would
+     * throw it away. */
+    run_snapshot_buf_t halt_snap;
+    capture_run_snapshot(&halt_snap);
+    profile_exec_state_t state_at_halt = s_exec.state;
+    /* PID_EXPANSION_PLAN.md Phase 7a: the OTHER ending the tick loop's DONE/
+     * FAULTED branch doesn't see -- an operator Stop straight out of RUNNING
+     * or PAUSED. firing_stats_maybe_finalize()'s own fs_persisted/IDLE guard
+     * makes this a no-op when state_at_halt is DONE/FAULTED (already
+     * persisted by the tick loop above) or when this run never produced a
+     * single tick worth persisting. Must happen before s_exec.state is reset
+     * to IDLE just below -- firing_stats_build_record() reads s_exec.profile/
+     * zones/total_elapsed_s, all still this run's values here. */
+    bool fs_need_persist = false;
+    profile_firing_run_record_t fs_rec;
+    fs_need_persist = firing_stats_maybe_finalize(&fs_rec);
+    clear_this_runs_faults();
+    s_exec.state = PROFILE_EXEC_IDLE;
+    s_exec.fault_reason[0] = '\0';
+    s_exec.fault_guard = THERMAL_GUARD_TRIP_NONE;
+    xSemaphoreGive(s_exec.lock);
+    if (fs_need_persist) {
+        firing_stats_persist(&fs_rec);
+        /* PID_EXPANSION_PLAN.md Phase 7d: `clean` is always false here --
+         * every run finalized on THIS path (see the comment above) is
+         * either an operator stop straight out of RUNNING/PAUSED (stopped
+         * early, by definition) or a dismiss of an already-persisted
+         * DONE/FAULTED run (fs_need_persist is false for that case, so this
+         * line is not reached at all -- see firing_stats_maybe_finalize()'s
+         * fs_persisted guard). Never "true" from this call site. */
+        adaptive_tune_run_end(&fs_rec, false);
+    }
+
+    /* An operator halt is a CLEAN end -- that is the whole point of recording
+     * it. Without this write the record would still say RUNNING, and the next
+     * boot would report a firing the operator deliberately stopped as one the
+     * power cut short. A halt that acknowledges a latched trip keeps the
+     * FAULTED phase instead, and dismissing a finished run keeps DONE: "a
+     * guard stopped it" and "it ran to completion" are truer summaries of
+     * those firings than "the operator stopped it", and halt() is also how
+     * both of those states are dismissed from the dashboard. Only a halt out
+     * of RUNNING/PAUSED is genuinely an operator stop. Either way the record
+     * ends up marked ended, which is the property that matters. */
+    run_state_phase_t end_phase = RUN_STATE_PHASE_HALTED;
+    if (state_at_halt == PROFILE_EXEC_FAULTED) {
+        end_phase = RUN_STATE_PHASE_FAULTED;
+    } else if (state_at_halt == PROFILE_EXEC_DONE) {
+        end_phase = RUN_STATE_PHASE_DONE;
+    }
+    run_state_note(end_phase, &halt_snap.snap);
+
+    /* Natural end point for the contact-cycle counter: force a write now
+     * rather than waiting out the 10-minute interval, so a firing's relay
+     * wear survives a power-down right after it stops. Outside the lock --
+     * relay_cycles.c takes its own. */
+    relay_cycles_flush();
+    ESP_LOGI(TAG, "profile executor halted");
+}
+
+bool profile_executor_pause(void)
+{
+    /* See profile_executor_run()'s guard comment above. */
+    if (s_exec.lock == NULL) {
+        ESP_LOGW(TAG, "profile_executor_pause() called before profile_executor_start() -- refused");
+        return false;
+    }
+    xSemaphoreTake(s_exec.lock, portMAX_DELAY);
+    if (s_exec.state != PROFILE_EXEC_RUNNING) {
+        xSemaphoreGive(s_exec.lock);
+        return false;
+    }
+    force_all_relays_off();
+    /* A pause gives K4 back, even though the relay claim is only handed to
+     * MANUAL rather than released (see the comment just below). The two are
+     * not the same question: keeping this run's relays reserved for a resume
+     * costs nothing, whereas leaving the safety processor permitting heat
+     * across a pause of unknown length -- possibly forever, if nobody ever
+     * resumes -- means the ONE interlock that stands between a stuck relay
+     * and a live element is held open by a firing that is not driving
+     * anything. profile_executor_resume() re-acquires; heat_enable_acquire()
+     * is a single frame, so nothing about that is expensive. Also consistent
+     * with heater_output_force_off()'s own treatment of a pause as a full
+     * de-energize that bypasses the min-on-time hold. */
+    heat_enable_release(HEAT_ENABLE_CLAIMANT_PROFILE);
+    /* TODO.md section 0: pausing is the one explicit way to hand a
+     * PROFILE-owned relay back to MANUAL (not NONE -- a paused firing still
+     * "belongs" to the operator's session, it's just not driving right now;
+     * resuming reclaims PROFILE below). Chosen over auto-pause-on-touch so
+     * a manual command never has the side effect of pausing a firing. */
+    relay_authority_claim_mask(s_exec.claimed_relay_mask, RELAY_OWNER_MANUAL);
+    s_exec.state = PROFILE_EXEC_PAUSED;
+    run_snapshot_buf_t pause_snap;
+    capture_run_snapshot(&pause_snap);
+    xSemaphoreGive(s_exec.lock);
+
+    /* PAUSED is recorded but is NOT an ending (see run_state.h): a firing
+     * paused at 2am and never resumed because the power failed is still an
+     * interrupted firing, and the operator deserves to be told so. Recording
+     * it at all is what makes the segment progress accurate at the moment
+     * the ramp/dwell clock stopped -- the periodic refresh is RUNNING-only. */
+    run_state_note(RUN_STATE_PHASE_PAUSED, &pause_snap.snap);
+    return true;
+}
+
+bool profile_executor_resume(void)
+{
+    /* See profile_executor_run()'s guard comment above. */
+    if (s_exec.lock == NULL) {
+        ESP_LOGW(TAG, "profile_executor_resume() called before profile_executor_start() -- refused");
+        return false;
+    }
+    xSemaphoreTake(s_exec.lock, portMAX_DELAY);
+    if (s_exec.state != PROFILE_EXEC_PAUSED) {
+        xSemaphoreGive(s_exec.lock);
+        return false;
+    }
+    /* Reclaim PROFILE ownership handed to MANUAL on pause -- see
+     * profile_executor_pause()'s comment. */
+    relay_authority_claim_mask(s_exec.claimed_relay_mask, RELAY_OWNER_PROFILE);
+    /* Re-ask for K4, released on pause -- see profile_executor_pause()'s
+     * comment. Same "not a reason to refuse" handling as the start path. */
+    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
+    /* Shared ramp/dwell state (target_c, segment_elapsed_s) is untouched by
+     * pause -- the control task simply doesn't tick it while PAUSED, so
+     * there's nothing to un-shift on resume (unlike the old tick-delta-
+     * based timing this replaced, which needed to shift phase_start_tick by
+     * the paused duration). prev_control_tick is reset so the next tick's
+     * measured dt_s doesn't include the whole pause. */
+    s_exec.prev_control_tick = xTaskGetTickCount();
+    /* Bumpless transfer (TODO.md 6A.2): each active PID-mode zone resumes
+     * as if it had been driving u=0 the whole pause (relays were off),
+     * rather than an integral that jumps on the first post-resume tick.
+     *
+     * With feedforward on, u=0 is not reachable from a zero integral -- the
+     * model contributes its hold duty the moment the loop runs again. So this
+     * seeds the integral to 0 (see seed_bumpless_with_ff()) and the zone comes
+     * back at exactly its feedforward duty: the model's own estimate of what
+     * the setpoint costs to hold, with nothing accumulated on top. That is the
+     * right place to restart from -- resuming a firing means resuming the heat
+     * it needs -- and it is still bumpless in the sense that matters, no
+     * integrator windup survives the pause. */
+    for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+        zone_runtime_t *z = &s_exec.zones[zi];
+        if (z->active && !z->faulted &&
+            (z->control_mode == ZONE_CONTROL_MODE_PID || z->control_mode == ZONE_CONTROL_MODE_PID_FUZZY) &&
+            z->actual_valid) {
+            seed_bumpless_with_ff(z, zi, 0.0f);
+            z->fuzzy_prev_effective_ki = z->pid_cfg.ki; /* see reload_zone_config()'s same reasoning */
+        }
+    }
+    s_exec.state = PROFILE_EXEC_RUNNING;
+    run_snapshot_buf_t resume_snap;
+    capture_run_snapshot(&resume_snap);
+    xSemaphoreGive(s_exec.lock);
+
+    /* Back to "in progress" -- and it must be written now rather than left to
+     * the periodic refresh, or a brownout minutes after a resume would show
+     * the firing as paused when it was actively driving elements. */
+    run_state_note(RUN_STATE_PHASE_RUNNING, &resume_snap.snap);
+    return true;
+}
+
+void profile_executor_get_status(profile_exec_status_t *out)
+{
+    if (!out) {
+        return;
+    }
+    memset(out, 0, sizeof(*out));
+
+    /* See profile_executor_run()'s guard comment above -- this is the exact
+     * call chain (safety_poll_task -> safety_build_and_send_context() ->
+     * profile_executor_get_status()) that panicked on the bench. The zeroed
+     * struct above already reads as a well-formed IDLE snapshot
+     * (PROFILE_EXEC_IDLE == 0), so a caller here needs nothing more than
+     * "don't touch the NULL lock". */
+    if (s_exec.lock == NULL) {
+        LOG_PRESTART_ONCE("profile_executor_get_status() called before profile_executor_start() -- reporting IDLE");
+        return;
+    }
+
+    xSemaphoreTake(s_exec.lock, portMAX_DELAY);
+    out->state = s_exec.state;
+    if (s_exec.state != PROFILE_EXEC_IDLE) {
+        out->profile_id = s_exec.profile_id;
+        strncpy(out->profile_name, s_exec.profile.name, sizeof(out->profile_name) - 1);
+        out->zone_mask = s_exec.profile.zone_mask;
+        out->segment_index = s_exec.segment_index;
+        out->segment_count = s_exec.profile.segment_count;
+        out->dwelling = s_exec.dwelling;
+        out->target_c = s_exec.target_c;
+        out->segment_elapsed_s = s_exec.segment_elapsed_s;
+        out->ramp_lock_held = s_exec.ramp_lock_held;
+        out->ramp_lock_lagging_mask = s_exec.ramp_lock_lagging_mask;
+        out->run_start_c = s_exec.run_start_c;
+        out->total_elapsed_s = s_exec.total_elapsed_s;
+        out->warm_started = s_exec.warm_started;
+        if (s_exec.warm_started) {
+            strncpy(out->warm_start_reason, s_exec.warm_start_reason, sizeof(out->warm_start_reason) - 1);
+            out->warm_start_replayed_count = s_exec.warm_start_replayed_count;
+            memcpy(out->warm_start_replayed_segments, s_exec.warm_start_replayed_segments,
+                   sizeof(out->warm_start_replayed_segments));
+        }
+        size_t seg_n = s_exec.profile.segment_count;
+        if (seg_n > PROFILE_MAX_SEGMENTS) seg_n = PROFILE_MAX_SEGMENTS;
+        memcpy(out->segments, s_exec.profile.segments, seg_n * sizeof(out->segments[0]));
+
+        if (s_exec.dwelling) {
+            const profile_segment_t *seg = &s_exec.profile.segments[s_exec.segment_index < s_exec.profile.segment_count
+                                                                         ? s_exec.segment_index
+                                                                         : s_exec.profile.segment_count - 1];
+            uint32_t dwell_total_s = seg->dwell_min * 60u;
+            out->dwell_remaining_s = s_exec.segment_elapsed_s >= dwell_total_s ? 0 : dwell_total_s - s_exec.segment_elapsed_s;
+        }
+
+        for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+            const zone_runtime_t *z = &s_exec.zones[zi];
+            profile_exec_zone_status_t *zo = &out->zones[zi];
+            zo->active = z->active;
+            if (!z->active) continue;
+            zo->actual_c = z->actual_c;
+            zo->actual_valid = z->actual_valid;
+            zo->relay_commanded_on = z->relay_commanded_on;
+            zo->duty = z->duty;
+            zo->control_mode = (uint8_t)z->control_mode;
+            zo->faulted = z->faulted;
+            if (z->faulted) {
+                strncpy(zo->fault_reason, z->fault_reason, sizeof(zo->fault_reason) - 1);
+                zo->fault_guard = (uint8_t)z->fault_guard;
+            }
+            zo->pid_p = z->last_pid_terms.p;
+            zo->pid_i = z->last_pid_terms.i;
+            zo->pid_d = z->last_pid_terms.d;
+            zo->pid_ff = z->last_pid_terms.ff;
+            zo->cooling_limited = z->cooling_limited;
+            zo->heat_blocked = z->heat_blocked;
+            zo->heat_blocked_sources = z->heat_blocked_sources;
+            zo->ff_hold_used_matrix = z->ff_hold_used_matrix;
+            zo->ff_hold_infeasible = z->ff_hold_infeasible;
+            zo->ff_climb_used_matrix = z->ff_climb_used_matrix;
+            zo->ff_climb_infeasible = z->ff_climb_infeasible;
+            zo->ff_membership_change_count = z->ff_membership_change_count;
+
+            /* PID_EXPANSION_PLAN.md Phase 7a: live tracking-quality
+             * snapshot, same derivation used for the persisted record --
+             * see firing_stats_snapshot()'s doc comment. span uses the
+             * run's current fs_target_min_c/max_c even mid-run, so this
+             * live figure converges toward (but does not exactly equal, for
+             * a still-narrowing/widening span) the final persisted one. */
+            {
+                float span = fabsf(s_exec.fs_target_max_c - s_exec.fs_target_min_c);
+                if (isnan(s_exec.fs_target_min_c) || isnan(s_exec.fs_target_max_c)) {
+                    span = 0.0f;
+                }
+                firing_stats_snapshot(z, span, &zo->firing_stats);
+            }
+        }
+
+        if (s_exec.state == PROFILE_EXEC_FAULTED) {
+            strncpy(out->fault_reason, s_exec.fault_reason, sizeof(out->fault_reason) - 1);
+            out->fault_guard = (uint8_t)s_exec.fault_guard;
+        }
+    }
+    xSemaphoreGive(s_exec.lock);
+}
+
+bool profile_executor_zone_is_active(uint8_t zone_index)
+{
+    if (zone_index >= MAX31856_CHANNEL_COUNT) {
+        return false;
+    }
+    /* See profile_executor_run()'s guard comment above. */
+    if (s_exec.lock == NULL) {
+        LOG_PRESTART_ONCE("profile_executor_zone_is_active() called before profile_executor_start() -- refused");
+        return false;
+    }
+    xSemaphoreTake(s_exec.lock, portMAX_DELAY);
+    bool active = (s_exec.state == PROFILE_EXEC_RUNNING || s_exec.state == PROFILE_EXEC_PAUSED) &&
+                  (s_exec.profile.zone_mask & (1u << zone_index)) != 0;
+    xSemaphoreGive(s_exec.lock);
+    return active;
+}
+
+size_t profile_executor_get_firing_history(uint8_t profile_id, profile_firing_run_record_t *out,
+                                            size_t max_entries)
+{
+    if (!out || max_entries == 0) {
+        return 0;
+    }
+    /* NVS-only, no s_exec/lock -- see firing_stats_load()'s own doc comment.
+     * Safe from any task/state, including before profile_executor_start(). */
+    profile_firing_history_blob_t blob;
+    if (!firing_stats_load(profile_id, &blob)) {
+        return 0;
+    }
+    size_t n = blob.count;
+    if (n > PROFILE_EXECUTOR_FIRING_HISTORY_DEPTH) n = PROFILE_EXECUTOR_FIRING_HISTORY_DEPTH; /* corrupt-blob guard */
+    if (n > max_entries) n = max_entries;
+    memcpy(out, blob.runs, n * sizeof(blob.runs[0])); /* runs[0] = newest, matches this function's contract */
+    return n;
+}
+
+size_t profile_executor_get_history_count(void)
+{
+    /* See profile_executor_run()'s guard comment above. */
+    if (s_exec.lock == NULL) {
+        LOG_PRESTART_ONCE("profile_executor_get_history_count() called before profile_executor_start() -- refused");
+        return 0;
+    }
+    xSemaphoreTake(s_exec.lock, portMAX_DELAY);
+    size_t count = s_exec.history_count;
+    xSemaphoreGive(s_exec.lock);
+    return count;
+}
+
+size_t profile_executor_get_history(profile_history_entry_t *out, size_t start_index, size_t max_entries)
+{
+    if (!out || max_entries == 0) {
+        return 0;
+    }
+    /* See profile_executor_run()'s guard comment above. */
+    if (s_exec.lock == NULL) {
+        LOG_PRESTART_ONCE("profile_executor_get_history() called before profile_executor_start() -- refused");
+        return 0;
+    }
+    xSemaphoreTake(s_exec.lock, portMAX_DELAY);
+    if (start_index >= s_exec.history_count) {
+        xSemaphoreGive(s_exec.lock);
+        return 0;
+    }
+    size_t count = s_exec.history_count - start_index;
+    if (count > max_entries) {
+        count = max_entries;
+    }
+    /* Oldest-first: history_head is the next WRITE slot, so the oldest
+     * valid entry (once the buffer has wrapped) is exactly history_head;
+     * before it wraps, the oldest is index 0. start_index is relative to
+     * that chronological ordering, not the raw array index. */
+    uint16_t oldest = (s_exec.history_count < HISTORY_MAX_SAMPLES) ? 0 : s_exec.history_head;
+    for (size_t i = 0; i < count; i++) {
+        uint16_t idx = (uint16_t)((oldest + start_index + i) % HISTORY_MAX_SAMPLES);
+        history_unpack(&s_exec.history[idx], &out[i]);
+    }
+    xSemaphoreGive(s_exec.lock);
+    return count;
+}

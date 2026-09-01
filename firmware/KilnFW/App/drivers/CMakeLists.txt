@@ -219,6 +219,20 @@ idf_component_register(SRCS "MAX31856.c"
                        "heater_output.c"
                        "zone_coupling_solve.c"
                        "profile_executor.c"
+                       # profile_executor.c split 2026-09-01 ("files over
+                       # 1500 lines should be broken up where it makes
+                       # sense" -- it had grown to 4962 lines, the last of
+                       # that day's four biggest firmware files). See
+                       # profile_executor_internal.h's own doc comment for
+                       # the seam rationale.
+                       "profile_executor_feedforward.c"
+                       "profile_executor_firing_stats.c"
+                       "profile_executor_relay_io.c"
+                       "profile_executor_config_reload.c"
+                       "profile_executor_pid_tick.c"
+                       "profile_executor_start.c"
+                       "profile_executor_run.c"
+                       "profile_executor_status.c"
                        "adaptive_tune.c"
                        "adaptive_tune_http.c"
                        "pid_autotune.c"
