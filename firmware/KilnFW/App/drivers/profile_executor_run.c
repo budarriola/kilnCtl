@@ -35,7 +35,7 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
      * asserts. Every public entry point below tests it first and returns a
      * clean "not running" answer instead of touching s_exec at all. */
     if (s_exec.lock == NULL) {
-        ESP_LOGW(TAG, "profile_executor_run() called before profile_executor_start() -- refused");
+        ESP_LOGW(PE_TAG, "profile_executor_run() called before profile_executor_start() -- refused");
         if (err_msg) snprintf(err_msg, err_cap, "profile executor not started");
         return false;
     }
@@ -360,7 +360,7 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
         if (m != ZONE_CONTROL_MODE_OFF) {
             n_heating_zones++;
         } else {
-            ESP_LOGW(TAG, "zone %u is in this profile but its control mode is OFF -- it will not heat", zi);
+            ESP_LOGW(PE_TAG, "zone %u is in this profile but its control mode is OFF -- it will not heat", zi);
         }
     }
     if (n_heating_zones == 0) {
@@ -590,7 +590,7 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
             snprintf(s_exec.warm_start_reason, sizeof(s_exec.warm_start_reason),
                      "starting at segment %u -- kiln already at %.1f C",
                      (unsigned)plan.entry_segment_index + 1, (double)warm_start_coolest_c);
-            ESP_LOGI(TAG, "warm start: %s (dwelling=%d, entry target %.1fC, %lus into the entry segment)",
+            ESP_LOGI(PE_TAG, "warm start: %s (dwelling=%d, entry target %.1fC, %lus into the entry segment)",
                      s_exec.warm_start_reason, (int)plan.entry_dwelling, (double)plan.entry_target_c,
                      (unsigned long)plan.entry_segment_elapsed_s);
 
@@ -619,7 +619,7 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
                 if (s_exec.warm_start_replayed_count < PROFILE_MAX_SEGMENTS) {
                     s_exec.warm_start_replayed_segments[s_exec.warm_start_replayed_count++] = i;
                 }
-                ESP_LOGI(TAG, "warm start: replayed relay/IO segment %u command (%s %u %s) -- its own hold "
+                ESP_LOGI(PE_TAG, "warm start: replayed relay/IO segment %u command (%s %u %s) -- its own hold "
                               "was NOT restarted, it stays as commanded until the run ends",
                          i + 1, s_exec.io_segs[i].is_relay ? "relay" : "IO_",
                          s_exec.io_segs[i].is_relay
@@ -640,10 +640,10 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
      * differently and there is no other record of it: which zones have a model
      * at all, and which ambient the hold term is measured against. */
     if (s_exec.ambient_from_cj) {
-        ESP_LOGI(TAG, "feedforward ambient reference: %.1fC (cold junction at firing start, not re-sampled)",
+        ESP_LOGI(PE_TAG, "feedforward ambient reference: %.1fC (cold junction at firing start, not re-sampled)",
                  (double)s_exec.ambient_c);
     } else {
-        ESP_LOGW(TAG, "no valid cold-junction reading at firing start -- feedforward ambient falls back to "
+        ESP_LOGW(PE_TAG, "no valid cold-junction reading at firing start -- feedforward ambient falls back to "
                       "%.1fC; the hold term is off by (true ambient - %.1f)/K_dc, a few percent of duty at most",
                  (double)FALLBACK_AMBIENT_C, (double)FALLBACK_AMBIENT_C);
     }
@@ -674,17 +674,17 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
             uint8_t coupling_neighbors = count_qualifying_coupling_neighbors(zi);
             bool coupling_any = coupling_neighbors > 0;
             if (coupling_any) {
-                ESP_LOGI(TAG, "zone %u feedforward ON: K_dc %.4g C/duty, tau %.4gs (TODO.md 6A.2), "
+                ESP_LOGI(PE_TAG, "zone %u feedforward ON: K_dc %.4g C/duty, tau %.4gs (TODO.md 6A.2), "
                               "coupling ON: %u neighbor(s) with a measured coefficient (PID_EXPANSION_PLAN.md 2c)",
                          zi, (double)s_exec.zones[zi].ff_k_dc, (double)s_exec.zones[zi].ff_tau_s,
                          coupling_neighbors);
             } else {
-                ESP_LOGI(TAG, "zone %u feedforward ON: K_dc %.4g C/duty, tau %.4gs (TODO.md 6A.2), "
+                ESP_LOGI(PE_TAG, "zone %u feedforward ON: K_dc %.4g C/duty, tau %.4gs (TODO.md 6A.2), "
                               "coupling OFF: no measured coefficient for any neighbor",
                          zi, (double)s_exec.zones[zi].ff_k_dc, (double)s_exec.zones[zi].ff_tau_s);
             }
         } else {
-            ESP_LOGI(TAG, "zone %u feedforward OFF: no identified plant model (run autotune) -- "
+            ESP_LOGI(PE_TAG, "zone %u feedforward OFF: no identified plant model (run autotune) -- "
                           "feedback alone, unchanged from before 6A.2's feedforward existed", zi);
         }
     }
@@ -750,7 +750,7 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
      * firing is in progress until something records an ending. */
     run_state_note(RUN_STATE_PHASE_RUNNING, &start_snap.snap);
 
-    ESP_LOGI(TAG, "profile '%s' (id %u, zone_mask 0x%02X) running", p.name, profile_id, p.zone_mask);
+    ESP_LOGI(PE_TAG, "profile '%s' (id %u, zone_mask 0x%02X) running", p.name, profile_id, p.zone_mask);
     return true;
 }
 

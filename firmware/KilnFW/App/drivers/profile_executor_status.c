@@ -23,7 +23,7 @@ void profile_executor_halt(void)
     /* See profile_executor_run()'s guard comment above -- s_exec.lock is
      * NULL until profile_executor_start() runs. */
     if (s_exec.lock == NULL) {
-        ESP_LOGW(TAG, "profile_executor_halt() called before profile_executor_start() -- refused");
+        ESP_LOGW(PE_TAG, "profile_executor_halt() called before profile_executor_start() -- refused");
         return;
     }
     xSemaphoreTake(s_exec.lock, portMAX_DELAY);
@@ -113,14 +113,14 @@ void profile_executor_halt(void)
      * wear survives a power-down right after it stops. Outside the lock --
      * relay_cycles.c takes its own. */
     relay_cycles_flush();
-    ESP_LOGI(TAG, "profile executor halted");
+    ESP_LOGI(PE_TAG, "profile executor halted");
 }
 
 bool profile_executor_pause(void)
 {
     /* See profile_executor_run()'s guard comment above. */
     if (s_exec.lock == NULL) {
-        ESP_LOGW(TAG, "profile_executor_pause() called before profile_executor_start() -- refused");
+        ESP_LOGW(PE_TAG, "profile_executor_pause() called before profile_executor_start() -- refused");
         return false;
     }
     xSemaphoreTake(s_exec.lock, portMAX_DELAY);
@@ -165,7 +165,7 @@ bool profile_executor_resume(void)
 {
     /* See profile_executor_run()'s guard comment above. */
     if (s_exec.lock == NULL) {
-        ESP_LOGW(TAG, "profile_executor_resume() called before profile_executor_start() -- refused");
+        ESP_LOGW(PE_TAG, "profile_executor_resume() called before profile_executor_start() -- refused");
         return false;
     }
     xSemaphoreTake(s_exec.lock, portMAX_DELAY);
