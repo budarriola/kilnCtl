@@ -299,6 +299,106 @@ static inline profile_executor_wd_result_t profile_executor_wd_decide(const prof
     return out;
 }
 
+/* PID_EXPANSION_PLAN.md Phase 7a: per-zone tracking-quality accumulator for
+ * one profile run -- "how well did this firing follow its own ramp/dwell
+ * schedule," comparable across profiles of different length and setpoint
+ * span. Accumulated tick-by-tick in the executor (profile_executor.c's
+ * control task -- NOT the UI, which polls at an unreliable rate and would
+ * alias the integral), against the EXECUTOR's current ramped setpoint
+ * (s_exec_state_t.target_c), never the segment's end temperature -- scoring
+ * every ramp as a huge error by construction is exactly the bug this avoids.
+ *
+ * Embedded directly in profile_exec_zone_status_t below so the dashboard can
+ * read live, still-accumulating figures while RUNNING, not just the final
+ * per-run record persisted at completion (profile_firing_run_record_t
+ * further down). The two share this same field layout on purpose -- the
+ * live view and the historical record are the same measurement at different
+ * points in its life.
+ *
+ * DEFINED BEHAVIOR for the edge cases Phase 7a calls out:
+ *   - Samples where actual_valid == false are EXCLUDED, never treated as
+ *     zero error -- counted instead in excluded_sample_count, so a run with
+ *     heavy sensor dropout is recognisable as untrustworthy rather than
+ *     quietly scoring well.
+ *   - Zone-not-yet-at-temperature at run start: NOT specially excluded.
+ *     Accumulation starts on this zone's very first RUNNING tick. A cold
+ *     zone chasing a ramp from a large initial gap IS real ramp error --
+ *     excluding it would make a firing that started far from its target
+ *     look better than it tracked. (A zone whose reading is outright
+ *     invalid at start falls under the actual_valid exclusion above, not
+ *     this one.)
+ *   - Ramp vs dwell classification uses the shared executor's `dwelling`
+ *     flag as of this tick. A RELAY_IO segment leaves target_c/dwelling
+ *     frozen at whatever the last ZONE_RAMP segment left them (see
+ *     profile_executor.c's segment-stepping block) -- ticks spent in such a
+ *     segment are attributed to whichever bucket was current when it began,
+ *     a deliberate simplification since a RELAY_IO segment does not command
+ *     a temperature at all.
+ *   - Normalized IAE's setpoint_span_c divides into duration_s*span_c; a
+ *     profile whose target never moves (a pure single-dwell run) has span_c
+ *     == 0, which would make the normalization divide by zero. Floored at
+ *     PROFILE_EXECUTOR_FIRING_STATS_MIN_SPAN_C so the number stays finite --
+ *     documented as a real, if unusual, degenerate case rather than an
+ *     unhandled one. */
+typedef struct {
+    float    mean_error_c;         /* SIGNED (actual - target), sum/sample_count; sign says
+                                     * hot-running (+) vs cold-running (-) zone */
+    float    max_overshoot_c;      /* largest POSITIVE (actual - target) seen, 0 if never overshot */
+    uint32_t max_overshoot_elapsed_s; /* profile_exec_status_t.total_elapsed_s at that tick */
+    uint8_t  max_overshoot_segment;   /* segment_index at that tick */
+    float    max_undershoot_c;     /* largest POSITIVE (target - actual) seen, 0 if never undershot --
+                                     * i.e. a magnitude, not signed the opposite way from overshoot */
+    uint32_t max_undershoot_elapsed_s;
+    uint8_t  max_undershoot_segment;
+    float    iae_raw_c_s;          /* raw integral(|error|)dt, degC*seconds -- grows with run length,
+                                     * kept alongside the normalized figure because it's free once the
+                                     * accumulator exists and someone will want the un-normalized value */
+    float    iae_normalized;       /* iae_raw_c_s / (duration_s * max(setpoint_span_c, MIN_SPAN_C)) --
+                                     * THE comparable-across-firings figure; dimensionless */
+    float    ramp_err_mean_c;      /* mean |error| while dwelling == false */
+    float    ramp_err_max_c;
+    float    dwell_err_mean_c;     /* mean |error| while dwelling == true */
+    float    dwell_err_max_c;
+    uint32_t sample_count;         /* valid (actual_valid == true) ticks counted into the above */
+    uint32_t excluded_sample_count; /* actual_valid == false ticks -- NOT counted as zero error;
+                                     * high relative to sample_count means "don't trust this run's
+                                     * numbers," not "this zone tracked perfectly" */
+    uint32_t duration_s;           /* wall-clock seconds this zone was active (RUNNING, not
+                                     * per-zone-faulted) and being accumulated over */
+} profile_exec_firing_stats_t;
+
+#define PROFILE_EXECUTOR_FIRING_STATS_MIN_SPAN_C 1.0f
+
+/* Set 2 (PID_EXPANSION_PLAN.md Phase 7a-2) -- one persisted snapshot of a
+ * completed (or operator-stopped) firing, keyed by profile and kept as a
+ * ring of the last PROFILE_EXECUTOR_FIRING_HISTORY_DEPTH entries per
+ * profile (profile_executor_get_firing_history()). Gains are copied in at
+ * finalize time specifically so a later comparison against an OLDER entry
+ * in the same ring cannot silently span a re-tune -- see this struct's
+ * kp/ki/kd fields. */
+typedef struct {
+    bool     active;               /* this zone participated in the run this record describes */
+    profile_exec_firing_stats_t stats;
+    float    kp, ki, kd;           /* this zone's PID gains in force at run completion -- 0/0/0 for a
+                                     * zone whose control_mode wasn't PID/PID_FUZZY, or that was never
+                                     * autotuned/hand-tuned (a legitimate all-zero gain set) */
+} profile_firing_zone_record_t;
+
+typedef struct {
+    uint8_t  profile_id;
+    char     profile_name[PROFILE_NAME_MAX_LEN + 1]; /* copied at run start, not looked up again --
+                                                       * a later profile rename/delete must not
+                                                       * retroactively relabel old history */
+    uint32_t run_started_unix_s;   /* time(NULL) at profile_executor_run(); 0 if the clock was never
+                                     * synced (SNTP never completed) -- callers must treat 0 as
+                                     * "unknown," not as an epoch date */
+    uint32_t duration_s;           /* this run's total_elapsed_s at finalize */
+    uint8_t  zone_mask;
+    profile_firing_zone_record_t zones[MAX31856_CHANNEL_COUNT];
+} profile_firing_run_record_t;
+
+#define PROFILE_EXECUTOR_FIRING_HISTORY_DEPTH 5
+
 /* Per-zone status within the current (or last) run. Only zones[i] with
  * .active == true participated in this run -- the rest are zeroed. */
 typedef struct {
@@ -367,6 +467,17 @@ typedef struct {
      * meaningful when control_mode == ZONE_CONTROL_MODE_PID; always false
      * for BANGBANG (no continuous u=0 to observe the same way) and OFF. */
     bool     cooling_limited;
+
+    /* PID_EXPANSION_PLAN.md Phase 7a: this run's tracking-quality figures so
+     * far -- live and still accumulating while state == RUNNING/PAUSED,
+     * frozen at their final values once state == DONE/FAULTED (or an
+     * operator halt() ends the run early). See profile_exec_firing_stats_t's
+     * own doc comment for the exclusion/edge-case rules. Meaningless (all
+     * zero) for a zone with .active == false. UI SERIALIZATION: this whole
+     * struct is what dashboard_http.c/dashboard_json.* should expose per
+     * zone for "this firing's tracking quality so far" -- see each field's
+     * comment for units and sign. */
+    profile_exec_firing_stats_t firing_stats;
 } profile_exec_zone_status_t;
 
 typedef struct {
@@ -557,6 +668,16 @@ bool profile_executor_resume(void);
 /* Snapshot for the dashboard's status API -- never blocks on the executor
  * task. */
 void profile_executor_get_status(profile_exec_status_t *out);
+
+/* PID_EXPANSION_PLAN.md Phase 7a-2/7a-3: copies up to
+ * PROFILE_EXECUTOR_FIRING_HISTORY_DEPTH persisted run records for
+ * profile_id into out, newest-first, and returns how many were actually
+ * written (0 if this profile has never completed/been-stopped-from a run,
+ * or on an NVS read error -- both look the same to a caller, "nothing to
+ * show yet"). Reads profiles_nvs; safe to call from any task/state, does
+ * not touch s_exec. */
+size_t profile_executor_get_firing_history(uint8_t profile_id, profile_firing_run_record_t *out,
+                                            size_t max_entries);
 
 /* True if zone_index is one of the zones the currently RUNNING/PAUSED
  * profile (if any) targets -- autotune_engine.c uses this to refuse

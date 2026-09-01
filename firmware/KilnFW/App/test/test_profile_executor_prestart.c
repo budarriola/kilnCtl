@@ -3528,6 +3528,273 @@ static void test_guard7_does_not_false_trip_on_a_healthy_dwell_with_realistic_di
     TEST_CHECK(!tripped, "realistic dwell ripple + sensor dither must not read as frozen");
 }
 
+// ---------------------------------------------------------------------------
+// PID_EXPANSION_PLAN.md Phase 7a -- per-zone firing-quality-stats
+// accumulator. firing_stats_zone_tick()/firing_stats_snapshot() are pure
+// (no s_exec, no lock, no NVS) so these drive a synthetic tick sequence
+// straight through them -- no FreeRTOS task loop needed. Every temperature
+// below is quantized to 0.1C (a realistic MAX31856 reading), not an
+// idealized float, per this repo's own "idealized test input" bug class.
+// ---------------------------------------------------------------------------
+
+static void test_firing_stats_synthetic_sequence_matches_hand_computed_values(void)
+{
+    TEST_SECTION("firing_stats_zone_tick() -- a known 5-tick error sequence produces the exact "
+                 "hand-computed signed mean, max overshoot, max undershoot and normalized IAE");
+
+    zone_runtime_t z;
+    memset(&z, 0, sizeof(z));
+
+    // target_c is constant at 100.0C, dwelling=false (ramp bucket) for all
+    // 5 ticks, dt_s=1.0 each. Errors (actual - target), all 0.1C-quantized:
+    //   102.3 -> +2.3   98.7 -> -1.3   101.5 -> +1.5   99.2 -> -0.8   100.0 -> 0.0
+    // sum = 2.3 - 1.3 + 1.5 - 0.8 + 0.0 = 1.7        mean = 1.7 / 5 = 0.34
+    // |err| sum = 2.3 + 1.3 + 1.5 + 0.8 + 0.0 = 5.9  raw IAE (dt=1s each) = 5.9
+    // max overshoot = 2.3 (tick 1, elapsed_s=1, segment 0)
+    // max undershoot = 1.3 (tick 2, elapsed_s=2, segment 0)
+    const float actuals[5] = {102.3f, 98.7f, 101.5f, 99.2f, 100.0f};
+    for (uint32_t i = 0; i < 5; i++) {
+        z.actual_c = actuals[i];
+        z.actual_valid = true;
+        firing_stats_zone_tick(&z, 100.0f, /*dwelling=*/false, /*elapsed_s=*/i + 1, /*segment_index=*/0, 1.0f);
+    }
+
+    TEST_CHECK(z.fs_sample_count == 5, "all 5 samples were valid");
+    TEST_CHECK(z.fs_excluded_sample_count == 0, "nothing excluded");
+    TEST_CHECK(z.fs_duration_s == 5, "5 ticks of 1s each");
+
+    profile_exec_firing_stats_t out;
+    // span=50.0C (arbitrary, chosen so duration_s * span = 250, a clean
+    // denominator): normalized IAE = 5.9 / (5 * 50) = 0.0236
+    firing_stats_snapshot(&z, 50.0f, &out);
+
+    TEST_CHECK(fabsf(out.mean_error_c - 0.34f) < 0.01f, "signed mean error must be exactly +0.34C (hand-computed)");
+    TEST_CHECK(fabsf(out.max_overshoot_c - 2.3f) < 0.01f, "max overshoot must be exactly 2.3C");
+    TEST_CHECK(out.max_overshoot_elapsed_s == 1, "overshoot's elapsed_s must be tick 1, not the run's last tick");
+    TEST_CHECK(fabsf(out.max_undershoot_c - 1.3f) < 0.01f, "max undershoot must be exactly 1.3C (a positive "
+                                                            "MAGNITUDE, not -1.3)");
+    TEST_CHECK(out.max_undershoot_elapsed_s == 2, "undershoot's elapsed_s must be tick 2");
+    TEST_CHECK(fabsf(out.iae_raw_c_s - 5.9f) < 0.01f, "raw integral(|error|)dt must be exactly 5.9 degC*s");
+    TEST_CHECK(fabsf(out.iae_normalized - 0.0236f) < 0.001f,
+               "normalized IAE must be exactly iae_raw/(duration_s*span) = 5.9/(5*50) = 0.0236");
+}
+
+static void test_firing_stats_excludes_invalid_samples_not_zero(void)
+{
+    TEST_SECTION("firing_stats_zone_tick() -- actual_valid==false is EXCLUDED (counted separately), never "
+                 "folded into the error sums as a zero-error sample");
+
+    zone_runtime_t z;
+    memset(&z, 0, sizeof(z));
+
+    // 3 valid ticks with a real, nonzero error, then 2 INVALID ticks (sensor
+    // dropout -- MAX31856 fault). If an invalid tick were wrongly treated as
+    // "error 0", it would (a) grow sample_count to 5, dragging mean_error_c
+    // toward 0 from its true +2.0C, and (b) contribute nothing further to
+    // iae_raw_c_s while still counting as though it had tracked perfectly --
+    // both effects assert against below.
+    for (int i = 0; i < 3; i++) {
+        z.actual_c = 102.0f; // quantized, real 0.1C-precision reading
+        z.actual_valid = true;
+        firing_stats_zone_tick(&z, 100.0f, false, (uint32_t)(i + 1), 0, 1.0f);
+    }
+    for (int i = 0; i < 2; i++) {
+        z.actual_c = NAN; // MAX31856 fault_bits_bad / spi_failed reading
+        z.actual_valid = false;
+        firing_stats_zone_tick(&z, 100.0f, false, (uint32_t)(i + 4), 0, 1.0f);
+    }
+
+    TEST_CHECK(z.fs_sample_count == 3, "only the 3 VALID ticks are counted -- not 5");
+    TEST_CHECK(z.fs_excluded_sample_count == 2, "the 2 invalid ticks are counted separately, not silently dropped");
+    TEST_CHECK(z.fs_duration_s == 5, "duration still accrues for every tick the zone was active, valid or not -- "
+                                     "it describes wall-clock time in the run, not measurement trust");
+
+    profile_exec_firing_stats_t out;
+    firing_stats_snapshot(&z, 50.0f, &out);
+    // If the 2 invalid ticks had instead been counted as error==0:
+    //   mean = (2.0*3 + 0*2) / 5 = 1.2C, not the correct 2.0C -- the
+    //   assertion below is exactly the number that DISTINGUISHES the two
+    //   behaviors, not a value both implementations would agree on.
+    TEST_CHECK(fabsf(out.mean_error_c - 2.0f) < 0.01f,
+               "mean error over the 3 EXCLUDED-invalid-samples-correctly run must be exactly +2.0C, not the "
+               "+1.2C a zero-substitution bug would produce");
+    TEST_CHECK(out.sample_count == 3, "profile_exec_firing_stats_t must report the same 3, not 5");
+    TEST_CHECK(out.excluded_sample_count == 2, "and the same 2 excluded");
+
+    // NEGATIVE-TEST VERIFICATION (per this repo's "negative-test every
+    // check" rule): this exact test was run against a deliberately broken
+    // firing_stats_zone_tick() that dropped the "if (!z->actual_valid) {
+    // fs_excluded_sample_count++; return; }" early-return -- i.e. every
+    // invalid sample fell through and was folded into fs_err_sum/
+    // fs_sample_count as error==0, exactly the bug class this test guards
+    // against. Against that broken build: fs_sample_count read 5 (not 3),
+    // fs_excluded_sample_count read 0 (not 2), and mean_error_c read
+    // +1.2C (not +2.0C) -- every assertion above failed. Reverted before
+    // this pass; see this task's own report for the exact before/after
+    // numbers.
+}
+
+static void test_firing_stats_ramp_and_dwell_buckets_are_kept_separate(void)
+{
+    TEST_SECTION("firing_stats_zone_tick() -- ramp error and dwell error accumulate into SEPARATE mean/max "
+                 "figures, keyed off the caller's dwelling flag");
+
+    zone_runtime_t z;
+    memset(&z, 0, sizeof(z));
+
+    // 3 ramp ticks (dwelling=false), |error| 1.0, 2.0, 3.0 -> mean 2.0, max 3.0
+    const float ramp_actuals[3] = {101.0f, 102.0f, 97.0f}; // target 100 -> errors +1,+2,-3
+    for (int i = 0; i < 3; i++) {
+        z.actual_c = ramp_actuals[i];
+        z.actual_valid = true;
+        firing_stats_zone_tick(&z, 100.0f, /*dwelling=*/false, (uint32_t)(i + 1), 0, 1.0f);
+    }
+    // 2 dwell ticks (dwelling=true), |error| 0.5, 1.5 -> mean 1.0, max 1.5
+    const float dwell_actuals[2] = {100.5f, 98.5f}; // target 100 -> errors +0.5, -1.5
+    for (int i = 0; i < 2; i++) {
+        z.actual_c = dwell_actuals[i];
+        z.actual_valid = true;
+        firing_stats_zone_tick(&z, 100.0f, /*dwelling=*/true, (uint32_t)(i + 4), 1, 1.0f);
+    }
+
+    profile_exec_firing_stats_t out;
+    firing_stats_snapshot(&z, 50.0f, &out);
+
+    TEST_CHECK(fabsf(out.ramp_err_mean_c - 2.0f) < 0.01f, "ramp mean |error| must be (1+2+3)/3 = 2.0C, "
+                                                           "untouched by the dwell ticks");
+    TEST_CHECK(fabsf(out.ramp_err_max_c - 3.0f) < 0.01f, "ramp max |error| must be 3.0C");
+    TEST_CHECK(fabsf(out.dwell_err_mean_c - 1.0f) < 0.01f, "dwell mean |error| must be (0.5+1.5)/2 = 1.0C, "
+                                                            "untouched by the ramp ticks");
+    TEST_CHECK(fabsf(out.dwell_err_max_c - 1.5f) < 0.01f, "dwell max |error| must be 1.5C");
+    // Sanity: neither bucket accidentally absorbed the other's sample count.
+    TEST_CHECK(z.fs_ramp_sample_count == 3 && z.fs_dwell_sample_count == 2,
+               "3 ramp samples and 2 dwell samples, not lumped into one bucket of 5");
+}
+
+static void test_firing_stats_normalized_iae_is_length_invariant(void)
+{
+    TEST_SECTION("firing_stats_snapshot() -- normalized IAE is genuinely length-invariant: the SAME per-tick "
+                 "tracking quality sustained over a 2x longer run yields the SAME normalized value, against "
+                 "the exact hand-computed number (not just A==B, which a missing-span-division bug would "
+                 "also satisfy)");
+
+    // Run A: 5 ticks, constant |error| 2.0C (quantized), dt=1s, span=50C.
+    //   iae_raw = 2.0*5 = 10.0   duration=5   normalized = 10.0/(5*50) = 0.04
+    zone_runtime_t za;
+    memset(&za, 0, sizeof(za));
+    for (int i = 0; i < 5; i++) {
+        za.actual_c = 102.0f; // target 100 -> error +2.0, quantized
+        za.actual_valid = true;
+        firing_stats_zone_tick(&za, 100.0f, false, (uint32_t)(i + 1), 0, 1.0f);
+    }
+    profile_exec_firing_stats_t out_a;
+    firing_stats_snapshot(&za, 50.0f, &out_a);
+
+    // Run B: the SAME 2.0C tracking error, sustained for 10 ticks instead of
+    // 5 (a 2x LONGER firing at identical quality) -- same span.
+    //   iae_raw = 2.0*10 = 20.0   duration=10   normalized = 20.0/(10*50) = 0.04
+    zone_runtime_t zb;
+    memset(&zb, 0, sizeof(zb));
+    for (int i = 0; i < 10; i++) {
+        zb.actual_c = 102.0f;
+        zb.actual_valid = true;
+        firing_stats_zone_tick(&zb, 100.0f, false, (uint32_t)(i + 1), 0, 1.0f);
+    }
+    profile_exec_firing_stats_t out_b;
+    firing_stats_snapshot(&zb, 50.0f, &out_b);
+
+    TEST_CHECK(fabsf(out_a.iae_raw_c_s - 10.0f) < 0.01f, "run A's raw IAE must be 10.0 (sanity on the setup)");
+    TEST_CHECK(fabsf(out_b.iae_raw_c_s - 20.0f) < 0.01f, "run B's raw IAE must be 20.0 -- the raw figure DOES "
+                                                          "grow with run length, which is exactly why it alone "
+                                                          "isn't comparable across firings");
+    TEST_CHECK(fabsf(out_a.iae_normalized - 0.04f) < 0.001f,
+               "run A's normalized IAE must be exactly 10.0/(5*50) = 0.04");
+    TEST_CHECK(fabsf(out_b.iae_normalized - 0.04f) < 0.001f,
+               "run B's normalized IAE must ALSO be exactly 20.0/(10*50) = 0.04 -- pinned against the real "
+               "hand-computed formula, not just checked equal to run A (a 'divide by duration only, drop "
+               "span' bug would still make A==B here since span is IDENTICAL in both runs, but would move "
+               "both away from 0.04 to 10.0/5=2.0 and 20.0/10=2.0 respectively -- caught by this assertion, "
+               "not by the equality check alone)");
+    TEST_CHECK(fabsf(out_a.iae_normalized - out_b.iae_normalized) < 0.0001f,
+               "and the two must read as EQUAL -- the whole point of normalizing: a 2x longer firing at the "
+               "same tracking quality must not score worse");
+
+    // NEGATIVE-TEST VERIFICATION: this test was also run against a
+    // deliberately broken firing_stats_snapshot() with
+    // "out->iae_normalized = out->iae_raw_c_s / (float)out->duration_s;"
+    // (span dropped from the denominator entirely). Against that broken
+    // build: out_a.iae_normalized read 2.0 and out_b.iae_normalized read
+    // 2.0 -- A==B STILL held (span was constant across both runs, so
+    // dropping it scales both sides by the same missing factor), which is
+    // exactly why the equality check alone is not sufficient and the
+    // pinned-to-0.04 assertions above are the ones that actually failed.
+    // Reverted before this pass; see this task's own report for the exact
+    // before/after numbers.
+}
+
+static void test_firing_stats_persist_load_round_trip_and_ring_depth(void)
+{
+    TEST_SECTION("firing_stats_persist()/profile_executor_get_firing_history() -- round-trips a run record "
+                 "through NVS, newest-first, and keeps only the last "
+                 "PROFILE_EXECUTOR_FIRING_HISTORY_DEPTH entries per profile");
+
+    nvs_test_enable(true);
+    nvs_test_clear();
+
+    // Write PROFILE_EXECUTOR_FIRING_HISTORY_DEPTH + 2 runs for the same
+    // profile, each carrying a distinguishable duration_s so the ring order
+    // can be checked without relying on any other field.
+    for (uint32_t i = 0; i < PROFILE_EXECUTOR_FIRING_HISTORY_DEPTH + 2; i++) {
+        profile_firing_run_record_t rec;
+        memset(&rec, 0, sizeof(rec));
+        rec.profile_id = 3;
+        strncpy(rec.profile_name, "TestFire", sizeof(rec.profile_name) - 1);
+        rec.duration_s = 1000 + i; // strictly increasing -- newest always has the largest value
+        rec.zone_mask = 0x01;
+        rec.zones[0].active = true;
+        rec.zones[0].stats.mean_error_c = (float)i;
+        rec.zones[0].kp = 1.0f;
+        rec.zones[0].ki = 0.1f;
+        rec.zones[0].kd = 0.01f;
+        firing_stats_persist(&rec);
+    }
+
+    profile_firing_run_record_t out[PROFILE_EXECUTOR_FIRING_HISTORY_DEPTH + 2];
+    memset(out, 0, sizeof(out));
+    size_t n = profile_executor_get_firing_history(3, out, PROFILE_EXECUTOR_FIRING_HISTORY_DEPTH + 2);
+
+    TEST_CHECK(n == PROFILE_EXECUTOR_FIRING_HISTORY_DEPTH,
+               "only the last PROFILE_EXECUTOR_FIRING_HISTORY_DEPTH runs survive -- the oldest 2 of "
+               "DEPTH+2 written must have been evicted, not silently grown past the ring's depth");
+    // Newest-first: the LAST write (duration_s = 1000 + DEPTH + 1) must be
+    // out[0]; the oldest SURVIVING write (duration_s = 1000 + 2) must be
+    // out[DEPTH-1].
+    TEST_CHECK(out[0].duration_s == 1000u + PROFILE_EXECUTOR_FIRING_HISTORY_DEPTH + 1,
+               "out[0] must be the NEWEST run, not the oldest or an arbitrary ring slot");
+    TEST_CHECK(out[PROFILE_EXECUTOR_FIRING_HISTORY_DEPTH - 1].duration_s == 1000u + 2,
+               "the oldest SURVIVING entry must be exactly the 3rd run written (the first 2 were evicted)");
+    TEST_CHECK(out[0].zone_mask == 0x01, "zone_mask round-trips");
+    TEST_CHECK(out[0].zones[0].active, "per-zone active flag round-trips");
+    TEST_CHECK(fabsf(out[0].zones[0].kp - 1.0f) < 0.001f, "the gains-in-force snapshot round-trips -- this is "
+                                                           "what lets a later comparison detect a re-tune "
+                                                           "between two ring entries");
+
+    // A profile that has never fired must come back empty, not an error --
+    // this is the common case for most of the board's 8 saved + ~28 builtin
+    // profile ids.
+    profile_firing_run_record_t empty_out[1];
+    // Clear the stub's single blob slot: firing_stats_load() for a DIFFERENT
+    // profile_id would otherwise still find profile 3's blob sitting there
+    // (the stub does not key by name -- see stubs/nvs.h's own doc comment)
+    // and misreport it as profile 9's history.
+    nvs_test_clear();
+    size_t n_empty = profile_executor_get_firing_history(9, empty_out, 1);
+    TEST_CHECK(n_empty == 0, "a profile that has never fired reports 0 history entries, not an error");
+
+    nvs_test_enable(false); // leave the stub in its default state for any test that runs after this one
+    nvs_test_clear();
+}
+
 void run_test_profile_executor_prestart(void)
 {
     test_run_refuses_before_start();
@@ -3620,7 +3887,17 @@ void run_test_profile_executor_prestart(void)
     test_healthy_ramp_lag_still_trips_without_the_rate_cap();
     test_dwell_lag_still_requires_the_full_configured_rate();
     test_guard7_does_not_false_trip_on_a_healthy_dwell_with_realistic_dither();
+
+    // PID_EXPANSION_PLAN.md Phase 7a firing-quality-stats accumulator --
+    // order-independent: each test builds its own fresh zone_runtime_t (or
+    // memsets s_exec's relevant fields) and never calls profile_executor_run().
+    test_firing_stats_synthetic_sequence_matches_hand_computed_values();
+    test_firing_stats_excludes_invalid_samples_not_zero();
+    test_firing_stats_ramp_and_dwell_buckets_are_kept_separate();
+    test_firing_stats_normalized_iae_is_length_invariant();
+    test_firing_stats_persist_load_round_trip_and_ring_depth();
 }
+
 
 int main(void)
 {

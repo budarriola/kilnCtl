@@ -4,8 +4,12 @@
 #include <stdio.h>
 #include <string.h>
 
+#include <time.h>
+
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "nvs.h"
+#include "nvs_flash.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/idf_additions.h"
 #include "freertos/semphr.h"
@@ -294,6 +298,32 @@ typedef struct {
      * against a lowered ceiling, so the WARN logs once per occurrence
      * rather than every reload tick while it stays true. */
     bool     max_ramp_warned;
+
+    /* PID_EXPANSION_PLAN.md Phase 7a: live tracking-quality accumulator for
+     * this zone across the current run -- see profile_exec_firing_stats_t's
+     * doc comment (profile_executor.h) for the field-by-field rules this
+     * fills in. Raw running sums here (err_sum, iae included as a running
+     * sum too since it's already an integral); mean_error_c/iae_normalized
+     * etc. are DERIVED, computed once by firing_stats_snapshot() rather than
+     * divided every tick. Zeroed by profile_executor_run()'s
+     * memset(s_exec.zones, ...). */
+    float    fs_err_sum;             /* sum of (actual - target) over valid samples */
+    float    fs_iae_raw_sum;         /* running integral(|error|)dt */
+    float    fs_max_overshoot_c;
+    uint32_t fs_max_overshoot_elapsed_s;
+    uint8_t  fs_max_overshoot_segment;
+    float    fs_max_undershoot_c;
+    uint32_t fs_max_undershoot_elapsed_s;
+    uint8_t  fs_max_undershoot_segment;
+    float    fs_ramp_abs_err_sum;
+    uint32_t fs_ramp_sample_count;
+    float    fs_ramp_err_max_c;
+    float    fs_dwell_abs_err_sum;
+    uint32_t fs_dwell_sample_count;
+    float    fs_dwell_err_max_c;
+    uint32_t fs_sample_count;        /* valid samples */
+    uint32_t fs_excluded_sample_count; /* actual_valid == false samples */
+    uint32_t fs_duration_s;          /* wall-clock seconds accumulated over */
 } zone_runtime_t;
 
 /* TODO relay/IO segments: per-segment runtime tracking, one slot per
@@ -378,6 +408,21 @@ typedef struct {
      * tick regardless of ramp-lock, and simply not touched while PAUSED. */
     float run_start_c;
     uint32_t total_elapsed_s;
+
+    /* PID_EXPANSION_PLAN.md Phase 7a: run-wide setpoint span for normalized
+     * IAE (target_c is shared across every active zone, so the span is
+     * computed once here rather than duplicated per zone). NAN until the
+     * first RUNNING tick sets both from that tick's target_c. */
+    float fs_target_min_c;
+    float fs_target_max_c;
+    uint32_t run_started_unix_s; /* time(NULL) at profile_executor_run(); 0 if unsynced */
+    /* True once this run's firing stats have been persisted (or a persist
+     * was attempted) -- guards against writing NVS twice for the same run
+     * (once at the DONE/FAULTED tick transition, again if the operator then
+     * calls halt() to dismiss it) and against ever writing for a run that
+     * never produced a single tick of data. Reset false at profile_executor_
+     * run(). */
+    bool fs_persisted;
 
     bool ramp_lock_held;
     uint8_t ramp_lock_lagging_mask;
@@ -1392,6 +1437,278 @@ static void clear_this_runs_faults(void)
     }
 }
 
+/* ---- firing quality stats (PID_EXPANSION_PLAN.md Phase 7a/7a-2/7a-3) ------
+ *
+ * Set 2 from the plan: per-profile firing-accuracy history, distinct from
+ * (and independent of) Set 1's per-zone tuning-quality figures, which this
+ * task does not touch (autotune_engine.c/pid_autotune.c are off limits here
+ * -- another agent owns that half).
+ *
+ * STORAGE: profiles_nvs (384 KB, see partitions.csv), namespace "fire_stats"
+ * -- deliberately NOT kiln_nvs (64 KB, already carrying zones/rules/
+ * relay_cycles/run_state) and NOT the "kiln_cfg" namespace profiles_http.c
+ * itself uses in profiles_nvs, so a firing-stats read/write can never
+ * collide with a profile-blob key. One key per profile_id
+ * ("fs_<id>", <=8 chars, well under NVS's 15-char key limit even for a
+ * 3-digit builtin id), holding a ring of the last
+ * PROFILE_EXECUTOR_FIRING_HISTORY_DEPTH runs for THAT profile only -- see
+ * profile_firing_history_blob_t below. Only profiles that have actually
+ * fired allocate a key, so the realistic footprint is (profiles actually
+ * run) * sizeof(profile_firing_history_blob_t), not
+ * (PROFILES_MAX_COUNT + builtin count) * that -- see this module's
+ * PID_EXPANSION_PLAN.md report for the exact byte arithmetic.
+ *
+ * WHICH TASK WRITES: the profile executor's own control task
+ * (executor_task_entry(), INTERNAL-stacked -- see profile_executor_start()'s
+ * xTaskCreatePinnedToCore() call and its doc comment a few hundred lines
+ * below, ~3491-3506 in this file as of this pass) or profile_executor_halt()
+ * (called from whichever task the operator's Stop request lands on, e.g.
+ * dashboard_http.c's HTTP handler task or the UART bridge). NEITHER is
+ * PSRAM-stacked: the control task is internal by the same 2026-08-22-crash
+ * reasoning that already lets it call run_state_note()/relay_cycles_
+ * maybe_persist() from this exact tick path, and every HTTP/bridge task in
+ * this codebase already writes NVS routinely (settings, profiles, kiln
+ * config) without routing through uart_bridge_ext_run_on_flash_worker() --
+ * that worker exists for PSRAM-stacked tasks only (autotune_engine.c's),
+ * which this write path never runs on. Written ONCE at run completion (the
+ * DONE/FAULTED tick transition, or an operator halt() that ends a RUNNING/
+ * PAUSED run early) -- never per tick, so the partition is never worn by
+ * this feature. */
+
+#define FIRING_STATS_NVS_PARTITION "profiles_nvs"
+#define FIRING_STATS_NVS_NAMESPACE "fire_stats"
+
+typedef struct {
+    uint8_t count; /* 0..PROFILE_EXECUTOR_FIRING_HISTORY_DEPTH */
+    profile_firing_run_record_t runs[PROFILE_EXECUTOR_FIRING_HISTORY_DEPTH]; /* runs[0] = newest */
+} profile_firing_history_blob_t;
+
+/* One tick's worth of firing-quality accumulation for one zone -- pure
+ * (touches only *z and its own arguments, no s_exec, no lock, no I/O), so a
+ * host test can drive a synthetic error sequence through it directly without
+ * a real FreeRTOS task loop. See profile_exec_firing_stats_t's doc comment
+ * (profile_executor.h) for the exclusion/edge-case rules this implements:
+ *
+ *   - actual_valid == false: counted in fs_excluded_sample_count, NOT folded
+ *     into fs_err_sum/fs_iae_raw_sum as a zero error. duration still
+ *     accrues (the zone was still "in the run" for that tick), but nothing
+ *     else does.
+ *   - error is SIGNED (actual - target): + = running hot, - = running cold.
+ *   - overshoot tracks the largest positive error; undershoot tracks the
+ *     largest positive MAGNITUDE of a negative error (both reported as
+ *     non-negative numbers, see the struct's own comment).
+ *   - ramp vs dwell is decided by the caller's `dwelling` flag for this
+ *     tick, not re-derived here. */
+static void firing_stats_zone_tick(zone_runtime_t *z, float target_c, bool dwelling, uint32_t elapsed_s,
+                                    uint8_t segment_index, float dt_s)
+{
+    z->fs_duration_s += (uint32_t)(dt_s + 0.5f);
+    if (!z->actual_valid) {
+        z->fs_excluded_sample_count++;
+        return;
+    }
+    float error = z->actual_c - target_c;
+    z->fs_sample_count++;
+    z->fs_err_sum += error;
+    z->fs_iae_raw_sum += fabsf(error) * dt_s;
+    if (error > z->fs_max_overshoot_c) {
+        z->fs_max_overshoot_c = error;
+        z->fs_max_overshoot_elapsed_s = elapsed_s;
+        z->fs_max_overshoot_segment = segment_index;
+    }
+    if (-error > z->fs_max_undershoot_c) {
+        z->fs_max_undershoot_c = -error;
+        z->fs_max_undershoot_elapsed_s = elapsed_s;
+        z->fs_max_undershoot_segment = segment_index;
+    }
+    float abs_error = fabsf(error);
+    if (dwelling) {
+        z->fs_dwell_abs_err_sum += abs_error;
+        z->fs_dwell_sample_count++;
+        if (abs_error > z->fs_dwell_err_max_c) z->fs_dwell_err_max_c = abs_error;
+    } else {
+        z->fs_ramp_abs_err_sum += abs_error;
+        z->fs_ramp_sample_count++;
+        if (abs_error > z->fs_ramp_err_max_c) z->fs_ramp_err_max_c = abs_error;
+    }
+}
+
+/* Derives the reportable (mean/max/normalized) figures from a zone's raw
+ * running sums. Pure -- takes no lock, touches no NVS -- so it's equally
+ * usable for a live in-progress snapshot (profile_executor_get_status()) and
+ * for the final record persisted at run end. duration_s/setpoint_span_c
+ * come from the caller (duration is per-zone; span is run-wide, shared
+ * across zones -- see s_exec_state_t.fs_target_min_c/fs_target_max_c). */
+static void firing_stats_snapshot(const zone_runtime_t *z, float setpoint_span_c,
+                                   profile_exec_firing_stats_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    out->sample_count = z->fs_sample_count;
+    out->excluded_sample_count = z->fs_excluded_sample_count;
+    out->duration_s = z->fs_duration_s;
+    out->max_overshoot_c = z->fs_max_overshoot_c;
+    out->max_overshoot_elapsed_s = z->fs_max_overshoot_elapsed_s;
+    out->max_overshoot_segment = z->fs_max_overshoot_segment;
+    out->max_undershoot_c = z->fs_max_undershoot_c;
+    out->max_undershoot_elapsed_s = z->fs_max_undershoot_elapsed_s;
+    out->max_undershoot_segment = z->fs_max_undershoot_segment;
+    out->iae_raw_c_s = z->fs_iae_raw_sum;
+
+    if (z->fs_sample_count > 0) {
+        out->mean_error_c = z->fs_err_sum / (float)z->fs_sample_count;
+    }
+    if (z->fs_ramp_sample_count > 0) {
+        out->ramp_err_mean_c = z->fs_ramp_abs_err_sum / (float)z->fs_ramp_sample_count;
+    }
+    out->ramp_err_max_c = z->fs_ramp_err_max_c;
+    if (z->fs_dwell_sample_count > 0) {
+        out->dwell_err_mean_c = z->fs_dwell_abs_err_sum / (float)z->fs_dwell_sample_count;
+    }
+    out->dwell_err_max_c = z->fs_dwell_err_max_c;
+
+    /* Normalized IAE -- see profile_exec_firing_stats_t's doc comment for
+     * the span-floor and zero-duration guards. Both guards make this 0
+     * rather than NAN/inf for a degenerate run (no ticks yet, or a run that
+     * somehow ended in the same tick it started) -- 0 reads as "nothing to
+     * show," which is true, rather than propagating a NaN into whatever
+     * later formats it. */
+    float span = fmaxf(setpoint_span_c, PROFILE_EXECUTOR_FIRING_STATS_MIN_SPAN_C);
+    if (out->duration_s > 0) {
+        out->iae_normalized = out->iae_raw_c_s / ((float)out->duration_s * span);
+    }
+}
+
+/* Must be called with s_exec.lock held. Fills rec from the run currently (or
+ * just-finished) in s_exec -- profile id/name/zone_mask/duration, then each
+ * active zone's derived stats snapshot plus the PID gains in force right
+ * now, so a later comparison against an older ring entry can tell whether a
+ * re-tune happened between them. */
+static void firing_stats_build_record(profile_firing_run_record_t *rec)
+{
+    memset(rec, 0, sizeof(*rec));
+    rec->profile_id = s_exec.profile_id;
+    strncpy(rec->profile_name, s_exec.profile.name, sizeof(rec->profile_name) - 1);
+    rec->run_started_unix_s = s_exec.run_started_unix_s;
+    rec->duration_s = s_exec.total_elapsed_s;
+    rec->zone_mask = s_exec.profile.zone_mask;
+
+    float span = fabsf(s_exec.fs_target_max_c - s_exec.fs_target_min_c);
+    if (isnan(s_exec.fs_target_min_c) || isnan(s_exec.fs_target_max_c)) {
+        span = 0.0f; /* never ticked -- e.g. halted the instant it started */
+    }
+
+    for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+        zone_runtime_t *z = &s_exec.zones[zi];
+        profile_firing_zone_record_t *zr = &rec->zones[zi];
+        zr->active = z->active;
+        if (!z->active) continue;
+        firing_stats_snapshot(z, span, &zr->stats);
+        if (z->control_mode == ZONE_CONTROL_MODE_PID || z->control_mode == ZONE_CONTROL_MODE_PID_FUZZY) {
+            zr->kp = z->pid_cfg.kp;
+            zr->ki = z->pid_cfg.ki;
+            zr->kd = z->pid_cfg.kd;
+        }
+    }
+}
+
+/* NVS I/O only -- no s_exec, no lock. Safe to call from any task/state.
+ * Loads FIRING_STATS_NVS_NAMESPACE/"fs_<id>" from profiles_nvs; a missing
+ * key (never fired) is reported as an empty (count == 0) blob, not an
+ * error -- that's the normal, common case for most profiles. */
+static bool firing_stats_load(uint8_t profile_id, profile_firing_history_blob_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    char key[16];
+    snprintf(key, sizeof(key), "fs_%u", (unsigned)profile_id);
+
+    nvs_handle_t h;
+    esp_err_t err = nvs_open_from_partition(FIRING_STATS_NVS_PARTITION, FIRING_STATS_NVS_NAMESPACE,
+                                             NVS_READONLY, &h);
+    if (err != ESP_OK) {
+        /* ESP_ERR_NVS_NOT_FOUND here means the namespace itself has never
+         * been written to (no profile has ever finished a firing yet) --
+         * expected on a fresh board, not worth logging. */
+        return (err == ESP_ERR_NVS_NOT_FOUND);
+    }
+    size_t len = sizeof(*out);
+    err = nvs_get_blob(h, key, out, &len);
+    nvs_close(h);
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        memset(out, 0, sizeof(*out));
+        return true; /* this profile has never fired -- not an error */
+    }
+    if (err != ESP_OK || len != sizeof(*out)) {
+        ESP_LOGW(TAG, "firing_stats_load(%u) failed: %s (len %u/%u)", (unsigned)profile_id,
+                 esp_err_to_name(err), (unsigned)len, (unsigned)sizeof(*out));
+        memset(out, 0, sizeof(*out));
+        return false;
+    }
+    return true;
+}
+
+/* Persists rec as the newest entry for its own profile_id -- read-modify-
+ * write against profiles_nvs, called from whichever task ended the run
+ * (see this section's top comment for why that's always safe here). A
+ * failure is logged and otherwise swallowed: losing one run's history is
+ * not worth failing the run itself over, matching relay_cycles_flush()'s
+ * and run_state_note()'s own non-fatal convention. */
+static void firing_stats_persist(const profile_firing_run_record_t *rec)
+{
+    profile_firing_history_blob_t blob;
+    firing_stats_load(rec->profile_id, &blob); /* empty blob on any failure -- still safe to prepend into */
+
+    uint8_t keep = (blob.count < PROFILE_EXECUTOR_FIRING_HISTORY_DEPTH)
+                       ? blob.count
+                       : (PROFILE_EXECUTOR_FIRING_HISTORY_DEPTH - 1);
+    if (keep > 0) {
+        memmove(&blob.runs[1], &blob.runs[0], keep * sizeof(blob.runs[0]));
+    }
+    blob.runs[0] = *rec;
+    blob.count = keep + 1;
+
+    char key[16];
+    snprintf(key, sizeof(key), "fs_%u", (unsigned)rec->profile_id);
+    nvs_handle_t h;
+    esp_err_t err = nvs_open_from_partition(FIRING_STATS_NVS_PARTITION, FIRING_STATS_NVS_NAMESPACE,
+                                             NVS_READWRITE, &h);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "firing_stats_persist(%u): nvs_open failed: %s", (unsigned)rec->profile_id,
+                 esp_err_to_name(err));
+        return;
+    }
+    err = nvs_set_blob(h, key, &blob, sizeof(blob));
+    if (err == ESP_OK) {
+        err = nvs_commit(h);
+    }
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "firing_stats_persist(%u): write failed: %s", (unsigned)rec->profile_id,
+                 esp_err_to_name(err));
+    } else {
+        ESP_LOGI(TAG, "firing stats persisted for profile %u (%s), %u/%u history entries",
+                 (unsigned)rec->profile_id, rec->profile_name, (unsigned)blob.count,
+                 (unsigned)PROFILE_EXECUTOR_FIRING_HISTORY_DEPTH);
+    }
+    nvs_close(h);
+}
+
+/* Called from the tick loop's non-RUNNING branch (DONE/FAULTED) and from
+ * profile_executor_halt() (an operator stop out of RUNNING/PAUSED, which
+ * never passes through that tick-loop transition). s_exec.fs_persisted
+ * makes a second call for the same run a no-op -- halt() dismissing an
+ * already-DONE/FAULTED run must not persist twice. Must be called with
+ * s_exec.lock held; the actual NVS write happens after the caller releases
+ * the lock (matching capture_run_snapshot()'s split), via the record this
+ * writes into *out_rec and the bool it returns. */
+static bool firing_stats_maybe_finalize(profile_firing_run_record_t *out_rec)
+{
+    if (s_exec.fs_persisted || s_exec.state == PROFILE_EXEC_IDLE) {
+        return false;
+    }
+    firing_stats_build_record(out_rec);
+    s_exec.fs_persisted = true;
+    return true;
+}
+
 /* ---- reboot breadcrumb (TODO.md 6A.3, "No auto-resume across reboot") ------
  *
  * The relays-come-up-off half of that bullet is kiln_io_init()'s latch
@@ -2178,7 +2495,24 @@ static void executor_task_entry(void *arg)
              * free rather than a release frame per tick. PAUSED lands here too, which is what a pause is
              * supposed to mean -- see profile_executor_pause(). */
             heat_enable_release(HEAT_ENABLE_CLAIMANT_PROFILE);
+            /* PID_EXPANSION_PLAN.md Phase 7a: the moment a run first lands
+             * in DONE or FAULTED, persist its firing stats -- this is the
+             * "run completion" write, not waiting on the operator to press
+             * Stop (profile_executor_halt() covers the OTHER ending, an
+             * operator stop straight out of RUNNING/PAUSED that never
+             * passes through here). PAUSED also lands in this branch every
+             * tick and must NOT finalize -- a paused run can still resume --
+             * hence the explicit state check rather than relying on
+             * firing_stats_maybe_finalize()'s own (looser) IDLE-only guard. */
+            bool fs_need_persist = false;
+            profile_firing_run_record_t fs_rec;
+            if (s_exec.state == PROFILE_EXEC_DONE || s_exec.state == PROFILE_EXEC_FAULTED) {
+                fs_need_persist = firing_stats_maybe_finalize(&fs_rec);
+            }
             xSemaphoreGive(s_exec.lock);
+            if (fs_need_persist) {
+                firing_stats_persist(&fs_rec);
+            }
             continue;
         }
 
@@ -2439,6 +2773,24 @@ static void executor_task_entry(void *arg)
                     segment_changed = true;
                 }
             }
+        }
+
+        /* --- Firing quality stats accumulation (PID_EXPANSION_PLAN.md Phase
+         * 7a), per active zone --------------------------------------------
+         * Placed here: target_c/dwelling/segment_index are already final for
+         * this tick (the segment-stepping block above has run), and
+         * s_exec.zones[zi].actual_c/actual_valid were set by the reading
+         * loop earlier this same tick. The per-zone math itself lives in
+         * firing_stats_zone_tick() (a few hundred lines up, pure and
+         * argument-driven) specifically so a host test can drive a synthetic
+         * error sequence through it tick-by-tick without a real FreeRTOS
+         * task loop -- see that function's own doc comment. */
+        s_exec.fs_target_min_c = isnan(s_exec.fs_target_min_c) ? s_exec.target_c : fminf(s_exec.fs_target_min_c, s_exec.target_c);
+        s_exec.fs_target_max_c = isnan(s_exec.fs_target_max_c) ? s_exec.target_c : fmaxf(s_exec.fs_target_max_c, s_exec.target_c);
+        for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+            if (!s_exec.zones[zi].active || s_exec.zones[zi].faulted) continue;
+            firing_stats_zone_tick(&s_exec.zones[zi], s_exec.target_c, s_exec.dwelling, s_exec.total_elapsed_s,
+                                    s_exec.segment_index, dt_s);
         }
 
         /* --- Control mode, per active zone (pass 1: decide, don't apply yet)
@@ -3650,7 +4002,24 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
     s_exec.ambient_c = FALLBACK_AMBIENT_C;
     s_exec.ambient_from_cj = false;
 
-    memset(s_exec.zones, 0, sizeof(s_exec.zones));
+    memset(s_exec.zones, 0, sizeof(s_exec.zones)); /* also zeros every zone's fs_* accumulator */
+
+    /* PID_EXPANSION_PLAN.md Phase 7a: fresh firing-stats accumulator for
+     * this run. fs_target_min_c/max_c start NAN (not 0) so the first
+     * RUNNING tick's target_c seeds both ends of the span unconditionally --
+     * 0 would be a real, wrong target for a kiln firing (see the tick
+     * loop's fs_target_min_c/max_c update). */
+    s_exec.fs_target_min_c = NAN;
+    s_exec.fs_target_max_c = NAN;
+    s_exec.fs_persisted = false;
+    {
+        time_t now = time(NULL);
+        /* time(NULL) before SNTP sync reads as a small epoch offset (ESP-IDF
+         * boots the RTC near 0), not a plausible 2020s+ date -- treat
+         * anything before 2020-01-01 UTC (1577836800) as "unsynced" and
+         * store 0 rather than a misleadingly precise-looking fake date. */
+        s_exec.run_started_unix_s = (now >= (time_t)1577836800) ? (uint32_t)now : 0u;
+    }
 
     /* Sampled BEFORE the per-zone config read below, not after (TODO.md
      * 6A.7): zones_http.c's writers don't take s_exec.lock, so an edit
@@ -4135,11 +4504,25 @@ void profile_executor_halt(void)
     run_snapshot_buf_t halt_snap;
     capture_run_snapshot(&halt_snap);
     profile_exec_state_t state_at_halt = s_exec.state;
+    /* PID_EXPANSION_PLAN.md Phase 7a: the OTHER ending the tick loop's DONE/
+     * FAULTED branch doesn't see -- an operator Stop straight out of RUNNING
+     * or PAUSED. firing_stats_maybe_finalize()'s own fs_persisted/IDLE guard
+     * makes this a no-op when state_at_halt is DONE/FAULTED (already
+     * persisted by the tick loop above) or when this run never produced a
+     * single tick worth persisting. Must happen before s_exec.state is reset
+     * to IDLE just below -- firing_stats_build_record() reads s_exec.profile/
+     * zones/total_elapsed_s, all still this run's values here. */
+    bool fs_need_persist = false;
+    profile_firing_run_record_t fs_rec;
+    fs_need_persist = firing_stats_maybe_finalize(&fs_rec);
     clear_this_runs_faults();
     s_exec.state = PROFILE_EXEC_IDLE;
     s_exec.fault_reason[0] = '\0';
     s_exec.fault_guard = THERMAL_GUARD_TRIP_NONE;
     xSemaphoreGive(s_exec.lock);
+    if (fs_need_persist) {
+        firing_stats_persist(&fs_rec);
+    }
 
     /* An operator halt is a CLEAN end -- that is the whole point of recording
      * it. Without this write the record would still say RUNNING, and the next
@@ -4347,6 +4730,20 @@ void profile_executor_get_status(profile_exec_status_t *out)
             zo->ff_hold_used_matrix = z->ff_hold_used_matrix;
             zo->ff_hold_infeasible = z->ff_hold_infeasible;
             zo->ff_membership_change_count = z->ff_membership_change_count;
+
+            /* PID_EXPANSION_PLAN.md Phase 7a: live tracking-quality
+             * snapshot, same derivation used for the persisted record --
+             * see firing_stats_snapshot()'s doc comment. span uses the
+             * run's current fs_target_min_c/max_c even mid-run, so this
+             * live figure converges toward (but does not exactly equal, for
+             * a still-narrowing/widening span) the final persisted one. */
+            {
+                float span = fabsf(s_exec.fs_target_max_c - s_exec.fs_target_min_c);
+                if (isnan(s_exec.fs_target_min_c) || isnan(s_exec.fs_target_max_c)) {
+                    span = 0.0f;
+                }
+                firing_stats_snapshot(z, span, &zo->firing_stats);
+            }
         }
 
         if (s_exec.state == PROFILE_EXEC_FAULTED) {
@@ -4372,6 +4769,25 @@ bool profile_executor_zone_is_active(uint8_t zone_index)
                   (s_exec.profile.zone_mask & (1u << zone_index)) != 0;
     xSemaphoreGive(s_exec.lock);
     return active;
+}
+
+size_t profile_executor_get_firing_history(uint8_t profile_id, profile_firing_run_record_t *out,
+                                            size_t max_entries)
+{
+    if (!out || max_entries == 0) {
+        return 0;
+    }
+    /* NVS-only, no s_exec/lock -- see firing_stats_load()'s own doc comment.
+     * Safe from any task/state, including before profile_executor_start(). */
+    profile_firing_history_blob_t blob;
+    if (!firing_stats_load(profile_id, &blob)) {
+        return 0;
+    }
+    size_t n = blob.count;
+    if (n > PROFILE_EXECUTOR_FIRING_HISTORY_DEPTH) n = PROFILE_EXECUTOR_FIRING_HISTORY_DEPTH; /* corrupt-blob guard */
+    if (n > max_entries) n = max_entries;
+    memcpy(out, blob.runs, n * sizeof(blob.runs[0])); /* runs[0] = newest, matches this function's contract */
+    return n;
 }
 
 size_t profile_executor_get_history_count(void)

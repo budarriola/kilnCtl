@@ -1083,22 +1083,126 @@ static void finalize_fit(void)
      * infrequent operator action on /settings/zones), not to quietly accept
      * a gain the check itself has already flagged as physically
      * inconsistent with what the operator told this zone it can reach. */
+    /* (C0) Scale-free sanity floor -- runs UNCONDITIONALLY, even when the
+     * reachability guard below is disabled (max_temp_c == 0, "no ceiling
+     * configured") or degrades to a no-op (no cross-zone coupling ever
+     * measured, see below): a real heater cannot have a negative, non-
+     * finite, or absurdly large gain. ZONE_MODEL_K_MAX (zones_http.h) is the
+     * exact same typo/garbage bound zones_config_set_model() enforces at
+     * persist time -- checking it here means a nonsense fit is refused with
+     * a reason right where it was computed, instead of silently reaching
+     * autotune_engine_accept() and only then failing three steps later at
+     * persist time with "feedforward will stay off". Single substitution,
+     * well inside the 96-byte abort_reason buffer. */
+    if (!isfinite(s_at.model.k_gain_c_per_duty) || s_at.model.k_gain_c_per_duty <= 0.0f ||
+        s_at.model.k_gain_c_per_duty > ZONE_MODEL_K_MAX) {
+        force_relays_off();
+        s_at.state = AUTOTUNE_ENGINE_ABORTED;
+        snprintf(s_at.abort_reason, sizeof(s_at.abort_reason),
+                 "fit failed: fitted gain K = %.4f is not a plausible heater gain",
+                 (double)s_at.model.k_gain_c_per_duty);
+        ESP_LOGW(TAG, "autotune zone %u: %s", s_at.zone_index, s_at.abort_reason);
+        return;
+    }
+
+    /* (C) Ceiling reachability -- 2026-08-31 fix. The ORIGINAL version of
+     * this check asked "can this ONE zone's own heater, alone, at full
+     * duty, reach this zone's configured ceiling" and rejected the fit if
+     * not. That question is simply wrong on a COUPLED multi-zone kiln: two
+     * consecutive real runs tonight fit K~=39.4 and K~=40.6 against an
+     * 80.0C zone limit with step_ambient_c ~=29.8-30.6C (implied ~69-70C
+     * alone) and BOTH were correct fits -- the trace tail was fully settled
+     * (slope ~0.001 C/s) at ~70C. This zone's own heater genuinely cannot
+     * reach 80C by itself; 80C is only reachable with the other zones'
+     * measured 5-12 degC/duty of cross-heating added in. The old check
+     * rejected both runs as "fit is wrong" even though nothing was wrong.
+     *
+     * Fix: fold in this zone's MEASURED cross-coupling from every other
+     * zone, each assumed driven at full duty too -- the same "can the whole
+     * plant configuration reach the ceiling" question, just answered
+     * honestly instead of one heater in isolation. zones_config_get_coupling
+     * (zones_http.c) returns ROW s_at.zone_index; s_at.zone_index is the
+     * AFFECTED zone here (the one whose ceiling is being checked), and
+     * out_row[j] is ITS measured response to zone j's heater -- zones_http.h
+     * ~line 158's "row i is the affected zone, column j is the stepped
+     * zone" convention, the SAME orientation finalize_fit()'s own cross-gain
+     * fit below this block writes. Do NOT transpose: the wire orientation at
+     * /api/autotune/matrix is the OPPOSITE of this storage orientation, and
+     * that exact swap has already been made once by mistake.
+     *
+     * ZERO-SEMANTICS DEGRADE PATH: an unmeasured coupling cell defaults to
+     * 0.0 (zones_http.h's own "never measured" convention), which this
+     * function cannot tell apart from "genuinely zero coupling measured".
+     * A kiln that has never run a step test on ANY zone therefore reads an
+     * all-zero row -- folding zeros in would silently reproduce the OLD,
+     * just-proven-wrong single-zone-only test on exactly the coupled kiln
+     * this fix targets (always-reject risk). The opposite extreme -- always
+     * skipping the reachability question whenever data is thin -- would
+     * let a genuinely undersized/wrong fit through unnoticed (always-pass
+     * risk). This function picks neither extreme: when NO coupling has ever
+     * been measured for this zone, the reachability question is left
+     * unanswered (skipped) rather than answered wrong in either direction,
+     * and the fit still has to clear (C0) above (positive/finite/bounded
+     * gain) and (B) above (minimum excursion) -- a real sanity floor, just
+     * not a reachability claim this function has no data to back. Once ANY
+     * neighbor's coupling into this zone has been measured (a later run
+     * stepped that neighbor and fit this zone as a peer, see finalize_fit()'s
+     * cross-gain loop below), the full reachability test engages again.
+     *
+     * ZERO-SEMANTICS TRAP (max_temp_c): max_temp_c == 0 means the ceiling
+     * guard is DISABLED for this zone (thermal_guard.c's convention,
+     * mirrored everywhere else in this file), NOT "zero degrees is the
+     * ceiling" -- this whole block, C0 excepted, only runs when
+     * max_temp_c > 0.0f, or every zone that has never had a ceiling
+     * configured would have every step test refused.
+     *
+     * Kept a hard abort rather than an override-able warning when it DOES
+     * fire (unlike the settled-flag case, see autotune_engine_accept()'s own
+     * comment): an implied ceiling below a CONFIGURED max_temp_c, even with
+     * measured coupling folded in, means either the fit is wrong or the
+     * zone's own configuration is wrong, and the fix in the latter case is
+     * to correct max_temp_c (a deliberate, infrequent operator action on
+     * /settings/zones), not to quietly accept a gain this check has already
+     * flagged as physically inconsistent with what the operator told this
+     * zone (and its neighbors) can reach. */
     if (configured_max_temp_c > 0.0f) {
-        float implied_max_c = s_at.step_ambient_c + s_at.model.k_gain_c_per_duty;
-        if (implied_max_c < configured_max_temp_c) {
-            force_relays_off();
-            s_at.state = AUTOTUNE_ENGINE_ABORTED;
-            /* Kept short and to the point (both numbers, no prose padding)
-             * -- s_at.abort_reason is a fixed 96-byte buffer shared by every
-             * refusal in this function, and the two floats already eat a
-             * good chunk of it; a wordier version was found to truncate
-             * before the second number even printed. */
-            snprintf(s_at.abort_reason, sizeof(s_at.abort_reason),
-                     "fit failed: gain implies %.1fC max at full duty, below zone limit %.1fC -- fit is wrong",
-                     (double)implied_max_c, (double)configured_max_temp_c);
-            ESP_LOGW(TAG, "autotune zone %u: %s", s_at.zone_index, s_at.abort_reason);
-            return;
+        float coupling_row[MAX31856_CHANNEL_COUNT] = {0};
+        bool have_coupling_row = zones_config_get_coupling(s_at.zone_index, coupling_row);
+        uint8_t coupling_thermo_count = zones_config_get_thermo_count();
+        float cross_contribution_c = 0.0f;
+        bool any_coupling_measured = false;
+        if (have_coupling_row) {
+            for (uint8_t j = 0; j < coupling_thermo_count && j < MAX31856_CHANNEL_COUNT; j++) {
+                if (j == s_at.zone_index) {
+                    continue; /* diagonal is always 0, see zones_config_get_coupling()'s own comment */
+                }
+                if (coupling_row[j] > 0.0f) {
+                    any_coupling_measured = true;
+                    cross_contribution_c += coupling_row[j]; /* full duty on zone j: u_j = 1.0 */
+                }
+            }
         }
+        if (any_coupling_measured) {
+            float implied_max_c = s_at.step_ambient_c + s_at.model.k_gain_c_per_duty + cross_contribution_c;
+            if (implied_max_c < configured_max_temp_c) {
+                force_relays_off();
+                s_at.state = AUTOTUNE_ENGINE_ABORTED;
+                /* Kept short and to the point (both numbers, no prose
+                 * padding) -- s_at.abort_reason is a fixed 96-byte buffer
+                 * shared by every refusal in this function, and the two
+                 * floats already eat a good chunk of it; a wordier version
+                 * was found to truncate before the second number even
+                 * printed. */
+                snprintf(s_at.abort_reason, sizeof(s_at.abort_reason),
+                         "fit failed: gain+coupling implies %.1fC max, below zone limit %.1fC -- fit is wrong",
+                         (double)implied_max_c, (double)configured_max_temp_c);
+                ESP_LOGW(TAG, "autotune zone %u: %s", s_at.zone_index, s_at.abort_reason);
+                return;
+            }
+        }
+        /* else: no coupling has ever been measured for this zone -- the
+         * reachability question is left unanswered rather than answered
+         * wrong (see the block comment above). (C0) and (B) still applied. */
     }
 
     s_at.proposed_gains = pid_autotune_tune_from_fopdt(&s_at.model, s_at.step_rule, 0.0f);
@@ -3110,7 +3214,34 @@ void autotune_engine_get_status(autotune_engine_status_t *out)
      * unconditionally like target_achieved_c above, not gated to DONE, so a
      * caller can see it was captured even while STEPPING is still running. */
     out->step_ambient_c = s_at.step_ambient_c;
-    if (s_at.state == AUTOTUNE_ENGINE_DONE) {
+    /* 2026-08-31 fix: this used to gate on state == DONE only, which erases
+     * out->model (baseline_c/final_c/raw_rise_c/rise_inf_c/k_gain_c_per_duty
+     * etc, all fields fopdt_model_t's own comment calls out as existing
+     * specifically to make a rejected fit diagnosable) at the exact moment
+     * they are needed most: finalize_fit()'s (B)/(C0)/(C) refusal paths all
+     * populate s_at.model (pid_autotune_fit_fopdt() already ran, see
+     * finalize_fit()'s very first call) BEFORE setting state = ABORTED and
+     * returning, so the data exists in s_at.model the whole time -- it was
+     * only this getter throwing it away on the way out. A real aborted run
+     * confirmed this: every diagnostic field read 0.00 even though the abort
+     * message's own numbers proved the fit had computed a real, non-zero
+     * gain.
+     *
+     * This does NOT reintroduce the stale-payload bug begin_run_locked()'s
+     * full-zero fix (commit 49d979d) exists to prevent: s_at.model is
+     * zeroed there at the START of every new run (`s_at.model = (fopdt_
+     * model_t){0}`, above), so a fresh run always begins with zeroed
+     * diagnostics regardless of this getter. What changes here is only
+     * whether THIS run's own diagnostics, once computed, are still handed
+     * out after a reject -- exposing them on ABORTED, not clearing them
+     * again on the way out, is exactly the "cleared at start, preserved on
+     * this run's own reject" distinction the fix needs. relay/proposed_gains/
+     * predicted_max_ramp_c_per_hr are included on ABORTED too, for the same
+     * reason and because none of them carry stale-run risk either -- they
+     * are only ever written by THIS run's own finalize_fit()/finalize_
+     * relay_fit(), never left over from a previous one (begin_run_locked()
+     * zeros s_at.proposed_gains/s_at.relay the same way). */
+    if (s_at.state == AUTOTUNE_ENGINE_DONE || s_at.state == AUTOTUNE_ENGINE_ABORTED) {
         out->model = s_at.model;
         out->relay = s_at.relay;
         out->proposed_gains = s_at.proposed_gains;

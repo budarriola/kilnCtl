@@ -433,6 +433,35 @@ bool zones_config_set_coupling_cell(uint8_t zone_index, uint8_t neighbor_index, 
     return isfinite(coeff) && coeff >= 0.0f && coeff <= ZONE_COUPLING_COEFF_MAX;
 }
 
+/* 2026-08-31 defect fix: finalize_fit()'s (C) ceiling-reachability check now
+ * folds in this zone's already-measured cross-coupling from every other
+ * zone (zones_config_get_coupling(), zones_http.h ~line 158's "row i is the
+ * AFFECTED zone" convention) rather than asking whether the zone can reach
+ * its own ceiling completely alone. Backed by its own storage, separate
+ * from s_coupling_cell_calls[][] above (that one only records what
+ * finalize_fit() itself WROTE this run, via the single-cell setter; this one
+ * is what a PRIOR run already measured and finalize_fit() now READS back) --
+ * tests set it directly via s_stub_coupling_row[][] before calling
+ * finalize_fit(). Defaults to all-zero, i.e. "nothing measured yet", the
+ * same convention zones_http.c's real getter documents for an unmeasured
+ * cell -- which is exactly the "no coupling data" degrade case the new (C)
+ * check has to handle safely (see its own comment in autotune_engine.c). */
+static float s_stub_coupling_row[MAX31856_CHANNEL_COUNT][MAX31856_CHANNEL_COUNT];
+
+static void reset_stub_coupling_row(void)
+{
+    memset(s_stub_coupling_row, 0, sizeof(s_stub_coupling_row));
+}
+
+bool zones_config_get_coupling(uint8_t zone_index, float out_row[MAX31856_CHANNEL_COUNT])
+{
+    if (zone_index >= MAX31856_CHANNEL_COUNT || !out_row) {
+        return false;
+    }
+    memcpy(out_row, s_stub_coupling_row[zone_index], sizeof(s_stub_coupling_row[zone_index]));
+    return true;
+}
+
 bool zones_config_get_thermo_mask(uint8_t zone_index, uint8_t *out_mask)
 {
     // Zone 0 -> channel 0 (bit 0), matching MAX31856_read_all()'s stub
@@ -2650,13 +2679,21 @@ static void test_min_excursion_refuses_a_fit_below_the_rise_floor(void)
 static void test_physical_plausibility_refuses_gain_implying_ceiling_below_max_temp(void)
 {
     TEST_SECTION("(C) physical plausibility -- a fitted gain implying less than max_temp_c at full "
-                 "duty must be refused, naming both numbers; max_temp_c==0 (guard DISABLED, not a "
-                 "0-degree ceiling) must NOT trigger the check");
-    /* Case 1: implausible -- K~=100, baseline=25=ambient (this helper
-     * defaults ambient to baseline -- see write_synthetic_fopdt_trace_for_
-     * zone()'s own comment; a dedicated hot-start test below covers the
-     * ambient-vs-baseline distinction itself) -> implied max ~=125C, but the
-     * zone's configured ceiling is 500C. K raised from the original 5.0 to
+                 "duty, WITH its measured cross-coupling folded in, must be refused, naming both "
+                 "numbers; max_temp_c==0 (guard DISABLED, not a 0-degree ceiling) must NOT trigger "
+                 "the check");
+    /* Case 1: implausible EVEN WITH measured coupling folded in -- K~=100,
+     * baseline=25=ambient (this helper defaults ambient to baseline -- see
+     * write_synthetic_fopdt_trace_for_zone()'s own comment; a dedicated
+     * hot-start test below covers the ambient-vs-baseline distinction
+     * itself), plus a modest measured cross-coupling from zone 1 (30C/duty)
+     * -> implied max ~=155C, still far below the zone's configured 500C
+     * ceiling -- 2026-08-31 fix: this now HAS to seed coupling data (via
+     * s_stub_coupling_row + s_stub_thermo_count), because the reachability
+     * check degrades to a no-op with none measured (see its own comment in
+     * autotune_engine.c) -- exactly the behavior
+     * test_coupling_reachable_ceiling_is_accepted_even_with_low_single_zone_
+     * gain() below proves is not vacuous. K raised from the original 5.0 to
      * 100.0 so this trace also clears (B)'s now-scaled minimum-excursion
      * floor (0.15 * (500-25) = 71.25C) and reaches the (C) check under test
      * at all. The two-point fit's recovered K is not bit-exact to the
@@ -2665,6 +2702,9 @@ static void test_physical_plausibility_refuses_gain_implying_ceiling_below_max_t
      * SAME trace's actual fitted model (obtained with the check disarmed via
      * max_temp_c=0 below) rather than hardcoded, so this test cannot flake
      * on fit-precision noise. */
+    reset_stub_coupling_row();
+    s_stub_thermo_count = 2;
+    s_stub_coupling_row[0][1] = 30.0f;
     memset(&s_at, 0, sizeof(s_at));
     s_at.zone_index = 0;
     s_at.step_rule = AUTOTUNE_RULE_SIMC;
@@ -2673,7 +2713,7 @@ static void test_physical_plausibility_refuses_gain_implying_ceiling_below_max_t
                                          /*dead_time_s=*/20.0f, /*duty_step=*/1.0f, /*n_samples=*/60);
     finalize_fit();
     TEST_CHECK(s_at.model.valid, "sanity: the fit itself must succeed before the plausibility case matters");
-    float implied_max_c = 25.0f + s_at.model.k_gain_c_per_duty;
+    float implied_max_c = 25.0f + s_at.model.k_gain_c_per_duty + 30.0f;
     char expect_implied[32], expect_limit[32];
     snprintf(expect_implied, sizeof(expect_implied), "%.1fC", (double)implied_max_c);
     snprintf(expect_limit, sizeof(expect_limit), "%.1fC", 500.0);
@@ -2702,6 +2742,8 @@ static void test_physical_plausibility_refuses_gain_implying_ceiling_below_max_t
     TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_DONE,
               "max_temp_c == 0 (guard disabled) must NOT trigger the plausibility refusal");
     TEST_CHECK(s_at.model.valid, "the fit itself is unaffected by the check being skipped");
+    reset_stub_coupling_row();
+    s_stub_thermo_count = 0;
 }
 
 /* (8) 2026-09-01 review fix: implied_max_c must be referenced to AMBIENT,
@@ -2718,6 +2760,16 @@ static void test_physical_plausibility_uses_ambient_not_baseline_on_a_hot_start(
 {
     TEST_SECTION("(C) physical plausibility is referenced to ambient, not baseline_c -- a hot-start "
                  "re-tune must not let a bad fit through just because the zone was already warm");
+    /* 2026-08-31 fix: seed a modest measured coupling (same reasoning as
+     * test_physical_plausibility_refuses_gain_implying_ceiling_below_max_temp()
+     * above -- the reachability check is a no-op without SOME measured
+     * coupling) small enough that ambient (25C) + K (100C) + coupling (30C)
+     * = 155C is still below the 250C ceiling, so this case still proves what
+     * it always proved: the ambient reference, not the coupling fold-in,
+     * is what's under test here. */
+    reset_stub_coupling_row();
+    s_stub_thermo_count = 2;
+    s_stub_coupling_row[0][1] = 30.0f;
     memset(&s_at, 0, sizeof(s_at));
     s_at.zone_index = 0;
     s_at.step_rule = AUTOTUNE_RULE_SIMC;
@@ -2731,12 +2783,169 @@ static void test_physical_plausibility_uses_ambient_not_baseline_on_a_hot_start(
     finalize_fit();
 
     TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_ABORTED,
-              "ambient (25C) + K (100C) = 125C is below the 250C ceiling -- must refuse. A "
-              "baseline-referenced check (200C + 100C = 300C) would have wrongly accepted this fit");
+              "ambient (25C) + K (100C) + coupling (30C) = 155C is below the 250C ceiling -- must "
+              "refuse. A baseline-referenced check (200C + 100C + 30C = 330C) would have wrongly "
+              "accepted this fit");
     /* "zone limit" (not "max_temp_c" literally -- see the real message in
      * finalize_fit()'s (C) block) is unique to THIS check's abort message,
      * distinguishing it from (B)'s "minimum needed to trust" refusal. */
     TEST_CHECK(strstr(s_at.abort_reason, "zone limit") != NULL, "refused through the same (C) channel");
+    reset_stub_coupling_row();
+    s_stub_thermo_count = 0;
+}
+
+/* 2026-08-31 THE GATING BUG, reproduced from tonight's real hardware run:
+ * two consecutive step tests on zone 0 of a coupled 3-zone kiln both fit a
+ * correct, fully-settled model (K~=40.6, step_ambient_c~=29.8, both
+ * realistic 0.1C-quantized numbers, not idealized synthetic ones) and were
+ * both wrongly rejected by the OLD (C) check as "fit is wrong" -- zone 0
+ * genuinely cannot reach the kiln's 80.0C zone limit alone; it only gets
+ * there with the other two zones' measured 5-12 degC/duty of cross-heating
+ * added in (here: zone 1 at 10.0, zone 2 at 8.0 -- squarely inside that
+ * measured range, thermo_count=3 for a genuine 3-zone kiln). Total implied
+ * ceiling with coupling folded in: 29.8 + ~40.6 + 10.0 + 8.0 ~= 88.4C, ABOVE
+ * the 80.0C limit -- this fit MUST be ACCEPTED.
+ *
+ * Falsifiability: this test is checked NOT vacuous by running it against the
+ * pre-fix (C) check (implied_max_c = step_ambient_c + k_gain_c_per_duty
+ * only, no coupling term) -- 29.8 + ~40.6 ~= 70.4C, BELOW 80.0C, which is
+ * exactly the "gain implies 69.2C/70.4C max... below zone limit 80.0C"
+ * abort tonight's two real runs actually hit. Verified by temporarily
+ * reverting autotune_engine.c's (C) block to the old single-zone formula
+ * (`s_at.step_ambient_c + s_at.model.k_gain_c_per_duty`, dropping the
+ * coupling fold-in) and re-running this one test: it FAILS
+ * (s_at.state == AUTOTUNE_ENGINE_ABORTED, not DONE) against that old code,
+ * then passes again once the fix is restored -- proving this test actually
+ * exercises the fixed code path rather than passing by construction. */
+static void test_coupling_reachable_ceiling_is_accepted_even_with_low_single_zone_gain(void)
+{
+    TEST_SECTION("2026-08-31 THE GATING BUG (real hardware repro): a zone whose OWN gain implies "
+                 "less than the configured ceiling must still be ACCEPTED once its measured "
+                 "cross-zone coupling closes the gap -- reproduces tonight's two real, wrongly-"
+                 "rejected step tests (K~=40.6, ambient~=29.8, zone limit 80.0C, coupled 3-zone kiln)");
+    reset_stub_coupling_row();
+    s_stub_thermo_count = 3;
+    s_stub_coupling_row[0][1] = 10.0f; /* zone 0's measured response to zone 1's heater */
+    s_stub_coupling_row[0][2] = 8.0f;  /* zone 0's measured response to zone 2's heater */
+    memset(&s_at, 0, sizeof(s_at));
+    s_at.zone_index = 0;
+    s_at.step_rule = AUTOTUNE_RULE_SIMC;
+    s_at.guard_cfg.max_temp_c = 80.0f;
+    /* Realistic, quantized (0.1C-step) values matching tonight's real runs --
+     * not an idealized clean number (this repo's own documented "idealized
+     * test input" bug class: unquantized synthetic data hides branches a
+     * real 0.1C-resolution trace would exercise). write_synthetic_fopdt_
+     * trace_for_zone() already quantizes every sample via lroundf(...*10)/10. */
+    write_synthetic_fopdt_trace_for_zone(0, /*baseline_c=*/29.8f, /*k_gain_c_per_duty=*/40.6f, /*tau_s=*/285.0f,
+                                         /*dead_time_s=*/15.0f, /*duty_step=*/1.0f, /*n_samples=*/90);
+    s_at.step_ambient_c = 29.8f; /* cold-junction reading at SETTLING->STEPPING, same as baseline here */
+    s_at.step_settled = true;    /* tonight's real runs both genuinely settled -- not the max-duration backstop */
+    finalize_fit();
+
+    TEST_CHECK(s_at.model.valid, "sanity: the fit itself must succeed");
+    TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_DONE,
+              "a correct single-zone fit on a coupled kiln must be ACCEPTED once measured "
+              "cross-coupling shows the CONFIGURATION (not the one heater alone) can reach the "
+              "ceiling -- this is exactly the case the old check rejected on real hardware");
+    reset_stub_coupling_row();
+    s_stub_thermo_count = 0;
+}
+
+/* 2026-08-31: the (C0) scale-free sanity floor must still catch a nonsense
+ * fit (here: a NEGATIVE gain -- e.g. a step test run while the zone was
+ * still cooling from a prior firing, or a miswired relay/thermocouple pair)
+ * regardless of coupling data or whether a ceiling is even configured
+ * (max_temp_c = 0.0f here, deliberately -- proving this is NOT the
+ * reachability check (C) firing, which would be a no-op with the guard
+ * disabled). A negative-gain fit must never reach DONE and propose gains
+ * that would drive the loop backwards.
+ *
+ * Falsifiability: verified NOT vacuous by temporarily removing the (C0)
+ * block from finalize_fit() (autotune_engine.c) and re-running this one
+ * test -- it FAILS (state reaches DONE with a negative k_gain_c_per_duty
+ * proposed) against the weakened code, then passes again once (C0) is
+ * restored. */
+static void test_nonsense_negative_gain_fit_is_still_rejected(void)
+{
+    TEST_SECTION("(C0) scale-free sanity floor -- a negative fitted gain (a cooling trace, or a "
+                 "miswired relay/TC pair) must still be refused, independent of coupling data or "
+                 "whether a ceiling is even configured");
+    reset_stub_coupling_row();
+    s_stub_thermo_count = 0;
+    memset(&s_at, 0, sizeof(s_at));
+    s_at.zone_index = 0;
+    s_at.step_rule = AUTOTUNE_RULE_SIMC;
+    s_at.guard_cfg.max_temp_c = 0.0f; /* guard disabled -- isolates (C0) from (C) */
+    /* A trace that COOLS from baseline (negative k_gain_c_per_duty) --
+     * realistic 0.1C-quantized samples, same helper every other test here
+     * uses, just with a negative synthetic gain. */
+    write_synthetic_fopdt_trace_for_zone(0, /*baseline_c=*/120.0f, /*k_gain_c_per_duty=*/-50.0f, /*tau_s=*/200.0f,
+                                         /*dead_time_s=*/20.0f, /*duty_step=*/1.0f, /*n_samples=*/60);
+    finalize_fit();
+
+    TEST_CHECK(s_at.model.valid, "sanity: the two-point fit itself succeeds on a clean (if negative) exponential");
+    TEST_CHECK(s_at.model.k_gain_c_per_duty < 0.0f, "sanity: the synthetic trace really does fit a negative gain");
+    TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_ABORTED,
+              "a negative fitted gain is not a plausible heater and must be refused, not accepted");
+    TEST_CHECK(strstr(s_at.abort_reason, "not a plausible heater gain") != NULL,
+              "refused through the (C0) sanity-floor channel, not (B) or (C)");
+}
+
+/* 2026-08-31 THE DIAGNOSTICS-ERASED BUG: a rejected fit's diagnostics
+ * (baseline_c/final_c/raw_rise_c/rise_inf_c, added specifically to make a
+ * rejected fit diagnosable) must survive the reject -- autotune_engine_get_
+ * status() used to zero them by gating the model copy on state == DONE only,
+ * throwing away exactly the numbers an operator needs to see WHY a real
+ * aborted run was refused (confirmed on hardware: every diagnostic field
+ * read 0.00 despite the abort message itself proving a real, non-zero gain
+ * had been computed). Both halves matter: preserved on THIS run's own
+ * reject, but still cleared at the START of the NEXT run (the begin_run_
+ * locked() full-zero fix, commit 49d979d, must not be undone). */
+static void test_rejected_fit_diagnostics_survive_the_reject_but_clear_on_next_run(void)
+{
+    TEST_SECTION("2026-08-31 THE DIAGNOSTICS-ERASED BUG: baseline_c/final_c/raw_rise_c/rise_inf_c "
+                 "must survive a REJECTED fit through autotune_engine_get_status(), and still read "
+                 "zero at the START of the next run");
+    reset_stub_coupling_row();
+    s_stub_thermo_count = 0;
+    memset(&s_at, 0, sizeof(s_at));
+    s_at.zone_index = 0;
+    s_at.step_rule = AUTOTUNE_RULE_SIMC;
+    s_at.guard_cfg.max_temp_c = 80.0f; /* reachability check (C) armed, no coupling measured -> degrades, */
+    /* so this trace is rejected by (B) minimum-excursion instead -- any
+     * rejection path works here since the bug under test is the getter, not
+     * a specific reject reason; (B) needs the smallest, least contrived
+     * trace of the three reject paths available. Realistic 0.1C-quantized
+     * samples, same helper as every test in this file. */
+    write_synthetic_fopdt_trace_for_zone(0, /*baseline_c=*/25.0f, /*k_gain_c_per_duty=*/2.0f, /*tau_s=*/200.0f,
+                                         /*dead_time_s=*/20.0f, /*duty_step=*/1.0f, /*n_samples=*/60);
+    s_at.lock = xSemaphoreCreateMutex();
+    TEST_CHECK(s_at.lock != NULL, "test setup: lock must be creatable");
+    finalize_fit();
+    TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_ABORTED, "sanity: this trace must actually be rejected (by (B))");
+
+    autotune_engine_status_t status;
+    autotune_engine_get_status(&status);
+    TEST_CHECK(status.state == AUTOTUNE_ENGINE_ABORTED, "status reflects the reject");
+    TEST_CHECK(fabsf(status.model.baseline_c - 25.0f) < 0.15f,
+              "baseline_c survives the reject through the status getter (was 0.00 before the fix)");
+    TEST_CHECK(status.model.final_c > 25.0f && status.model.final_c < 35.0f,
+              "final_c survives the reject through the status getter (was 0.00 before the fix)");
+    TEST_CHECK(status.model.raw_rise_c > 0.0f,
+              "raw_rise_c survives the reject through the status getter (was 0.00 before the fix)");
+    TEST_CHECK(status.model.rise_inf_c > 0.0f,
+              "rise_inf_c survives the reject through the status getter (was 0.00 before the fix)");
+
+    // Second half: a NEW run's begin_run_locked() must still zero s_at.model
+    // -- the stale-payload fix (commit 49d979d) must not be undone by this
+    // change. Uses the real start_stepping_run() path (autotune_engine_run()
+    // -> begin_run_locked() for real), not a hand-poked reset, so this is
+    // the actual production reset path, not a stand-in for it.
+    start_stepping_run(/*max_temp_c=*/0.0f, /*step_duty=*/0.5f);
+    TEST_CHECK(s_at.model.baseline_c == 0.0f && s_at.model.final_c == 0.0f && s_at.model.raw_rise_c == 0.0f &&
+                   s_at.model.rise_inf_c == 0.0f,
+              "a NEW run's begin_run_locked() still clears every diagnostic field -- the previous "
+              "run's rejected-fit numbers do not leak into this one");
 }
 
 static void test_model_settled_flag_reflects_step_settled(void)
@@ -3542,6 +3751,9 @@ void run_test_autotune_engine_prestart(void)
     test_min_excursion_refuses_a_fit_below_the_rise_floor();
     test_physical_plausibility_refuses_gain_implying_ceiling_below_max_temp();
     test_physical_plausibility_uses_ambient_not_baseline_on_a_hot_start();
+    test_coupling_reachable_ceiling_is_accepted_even_with_low_single_zone_gain();
+    test_nonsense_negative_gain_fit_is_still_rejected();
+    test_rejected_fit_diagnostics_survive_the_reject_but_clear_on_next_run();
     test_model_settled_flag_reflects_step_settled();
     test_next_run_clears_prior_runs_refusal();
     test_next_run_clears_prior_runs_model_payload();
