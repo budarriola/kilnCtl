@@ -188,6 +188,15 @@ typedef struct {
      * ever corrects it. */
     float ff_k_dc;   /* degC of steady-state rise per unit duty */
     float ff_tau_s;  /* plant time constant, seconds */
+    float ff_dead_time_s; /* plant dead time (transport lag), seconds -- a DIFFERENT
+                           * measured quantity from ff_tau_s (5-8x smaller on this rig:
+                           * 52.8/43.5/33.9s dead time vs 263.8/269.8/270.9s tau for
+                           * z0/z1/z2). Cached the same place/gating as ff_k_dc/ff_tau_s
+                           * (zone_load_model()) -- see that function's own
+                           * zones_config_get_model() call, which already validates
+                           * dead_time_s > 0.0f alongside k_dc/tau_s. Used ONLY by the
+                           * dwell-entry climb decay below; nothing else in this file
+                           * reads it. */
     bool  ff_enabled;
 
     /* Coupled-hold solve diagnostics (defect: steady-state hold used to
@@ -302,14 +311,17 @@ typedef struct {
      * latch is taken). Everything here is zeroed by
      * profile_executor_run()'s memset(s_exec.zones, ...), same as every
      * other per-zone field -- a fresh run, a fresh zone (never
-     * autotuned, ff_tau_s == 0), a paused-then-resumed run (this loop
-     * simply doesn't execute while paused, so the decay clock freezes
-     * rather than jumping), and a zone-membership change (orthogonal --
-     * membership only affects the coupled SOLVE this latch is captured
-     * from, not the latch/decay bookkeeping itself) all start from this
-     * same safe zero state. ff_tau_s == 0 (unmeasured dead time) is
-     * handled explicitly in zone_feedforward(), not by dividing by it --
-     * see that call site. */
+     * autotuned, ff_dead_time_s == 0), a paused-then-resumed run (this
+     * loop simply doesn't execute while paused, so the decay clock
+     * freezes rather than jumping), and a zone-membership change
+     * (orthogonal -- membership only affects the coupled SOLVE this
+     * latch is captured from, not the latch/decay bookkeeping itself)
+     * all start from this same safe zero state. The decay divides by
+     * ff_dead_time_s, NOT ff_tau_s -- see ff_dead_time_s's own doc
+     * comment above for why those are different measured quantities and
+     * ff_dead_time_s == 0 (unmeasured dead time) is handled explicitly
+     * in zone_feedforward(), not by dividing by it -- see that call
+     * site. */
     float ff_climb_last_ramp_c;
     float ff_climb_decay_latch_c;
     float ff_climb_decay_t_s;
@@ -612,6 +624,10 @@ static bool zone_load_model(uint8_t zi)
     z->ff_enabled = have;
     z->ff_k_dc = have ? k_dc : 0.0f;
     z->ff_tau_s = have ? tau_s : 0.0f;
+    /* Same have-gating as ff_k_dc/ff_tau_s above -- dead_time_s > 0.0f was
+     * already required for `have` to be true, so this is never a stale
+     * positive value surviving a model that just went missing. */
+    z->ff_dead_time_s = have ? dead_time_s : 0.0f;
 
     return (z->ff_enabled != was_enabled) || (z->ff_k_dc != was_k) || (z->ff_tau_s != was_tau);
 }
@@ -770,16 +786,32 @@ static float zone_feedforward(const zone_runtime_t *z, uint8_t zi, float setpoin
          * previously solved number, not a new solve, so there is nothing
          * new to report and no fallback/infeasible edge to log.
          *
-         * ff_tau_s <= 0 (an unmeasured/fresh zone -- no dead time model
-         * exists yet): no decay curve is defined, so climb goes straight
-         * to 0 here, same as the pre-fix behaviour for every zone. This
-         * is an explicit branch, not a division by zero. */
+         * Decays over ff_DEAD_TIME_s (the plant's measured transport lag),
+         * NOT ff_tau_s (the plant's time constant) -- these are two
+         * different measured quantities and are NOT interchangeable here.
+         * dwell_entry_overshoot.md's whole point for option (c) is to cover
+         * the dead time: duty already committed during the ramp is still
+         * physically in flight through the plant's transport lag when the
+         * dwell starts, so the outgoing pulse should be allowed to finish
+         * arriving and then stop. Decaying over tau instead (a much larger
+         * number on this rig -- 263.8/269.8/270.9s tau vs 52.8/43.5/33.9s
+         * dead time for z0/z1/z2) would keep injecting a large fraction of
+         * climb duty for most or all of a typical 470-478s dwell, which is
+         * a mechanism for MORE dwell-entry overshoot, not less -- the
+         * opposite of the intended fix. exp(-t/L) with L = dead time is
+         * down to ~5% by 3L (~100-160s here), matching "cover the lag,
+         * then stop".
+         *
+         * ff_dead_time_s <= 0 (an unmeasured/fresh zone -- no dead-time
+         * model exists yet): no decay curve is defined, so climb goes
+         * straight to 0 here, same as the pre-fix behaviour for every
+         * zone. This is an explicit branch, not a division by zero. */
         climb_used_matrix = s_exec.zones[zi].ff_climb_used_matrix;
         climb_infeasible = s_exec.zones[zi].ff_climb_infeasible;
         climb_reason = (coupling_solve_reason_t)s_exec.zones[zi].ff_climb_reason;
-        if (z->ff_tau_s > 0.0f) {
+        if (z->ff_dead_time_s > 0.0f) {
             climb = s_exec.zones[zi].ff_climb_decay_latch_c *
-                    expf(-s_exec.zones[zi].ff_climb_decay_t_s / z->ff_tau_s);
+                    expf(-s_exec.zones[zi].ff_climb_decay_t_s / z->ff_dead_time_s);
         } else {
             climb = 0.0f;
         }

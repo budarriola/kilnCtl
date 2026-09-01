@@ -3567,13 +3567,18 @@ static void test_zone_feedforward_climb_decay_after_ramp_end(void)
 {
     TEST_SECTION("zone_feedforward() -- dwell-entry climb decay: the climb component must NOT step "
                  "straight to 0 the instant s_exec.dwelling becomes true -- it must decay from the "
-                 "last ramp tick's climb value, strictly decreasing, over this zone's own dead time "
-                 "(ff_tau_s), converging near 0 by 5*ff_tau_s. Nonzero rate AND nonzero hold so a "
-                 "climb-only regression cannot hide behind a hold-only assertion.");
+                 "last ramp tick's climb value, strictly decreasing, over this zone's own measured "
+                 "DEAD TIME (ff_dead_time_s -- NOT ff_tau_s, the plant time constant, which is set to "
+                 "a very different value below specifically so a tau/dead-time mixup cannot pass by "
+                 "coincidence), converging near 0 by 5*ff_dead_time_s. Nonzero rate AND nonzero hold "
+                 "so a climb-only regression cannot hide behind a hold-only assertion.");
     reset_coupling_test_state();
 
     const uint8_t zi = 0;
-    float L = 50.0f;
+    float L = 50.0f;      /* dead time -- what the decay must actually use */
+    float TAU = 250.0f;   /* plant time constant -- 5x L, deliberately NOT what the decay should use;
+                           * also feeds solve_climb_for_zone()'s own legacy rate*tau/k_dc formula
+                           * during the ramp ticks below, same as any real zone's ff_tau_s would. */
     /* hold and climb both nonzero AND sized so hold+climb stays well inside
      * [0,1] -- if either term saturated the joint clamp, the clamp itself
      * (not the decay) would be what the test is accidentally measuring. */
@@ -3583,11 +3588,14 @@ static void test_zone_feedforward_climb_decay_after_ramp_end(void)
     s_exec.zones[zi].actual_c = 150.0f;
     s_exec.zones[zi].ff_enabled = true;
     s_exec.zones[zi].ff_k_dc = 50.0f;
-    s_exec.zones[zi].ff_tau_s = L;
+    s_exec.zones[zi].ff_tau_s = TAU;
+    s_exec.zones[zi].ff_dead_time_s = L;
     s_exec.zones[zi].control_mode = ZONE_CONTROL_MODE_PID;
 
     float setpoint_c = 30.0f;              /* hold = (30-20)/50 = 0.2, nonzero */
-    float rate = 0.3f;                     /* climb = rate*L/k_dc = 0.3*50/50 = 0.3, nonzero */
+    float rate = 0.06f;                    /* ramp climb = rate*TAU/k_dc = 0.06*250/50 = 0.3, nonzero
+                                            * -- uses TAU (the legacy ramp formula's own constant,
+                                            * unrelated to the dwell decay this test is proving) */
 
     /* Several ramp ticks -- each records ff_climb_last_ramp_c via
      * zone_feedforward()'s own !dwelling branch, exactly as the real
@@ -3645,13 +3653,20 @@ static void test_zone_feedforward_climb_decay_after_ramp_end(void)
 static void test_zone_feedforward_climb_decay_uses_own_L_not_hold_tau(void)
 {
     TEST_SECTION("zone_feedforward() -- dwell-entry climb decay: two zones with DIFFERENT measured "
-                 "dead times (ff_tau_s) must decay at different, own-L rates -- not a shared/global "
-                 "constant. Compares two nonzero, rate-driven trajectories against EACH OTHER, never "
-                 "against a zero-rate baseline, so a climb-vs-hold mixup cannot hide here either.");
+                 "dead times (ff_dead_time_s) must decay at different, own-L rates -- not a shared/ "
+                 "global constant, not the OTHER zone's dead time (a transposed-index bug), and not "
+                 "either zone's own ff_tau_s (deliberately set here to values that differ from BOTH "
+                 "dead times and from each other, so a tau/dead-time mixup cannot pass by "
+                 "coincidence). Compares two nonzero, rate-driven trajectories against EACH OTHER, "
+                 "never against a zero-rate baseline, so a climb-vs-hold mixup cannot hide here "
+                 "either.");
     reset_coupling_test_state();
 
     const uint8_t zi_long = 0, zi_short = 2;
-    float L_long = 60.0f, L_short = 20.0f;
+    float L_long = 60.0f, L_short = 20.0f;     /* dead times -- what the decay must use */
+    float TAU_long = 400.0f, TAU_short = 130.0f; /* plant time constants -- neither equal to the
+                                                  * corresponding L, neither equal to each other,
+                                                  * and neither equal to the OTHER zone's L either */
     s_exec.ambient_c = 20.0f;
     for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
         s_exec.zones[zi].active = true;
@@ -3661,15 +3676,22 @@ static void test_zone_feedforward_climb_decay_uses_own_L_not_hold_tau(void)
         s_exec.zones[zi].ff_k_dc = 50.0f;
         s_exec.zones[zi].control_mode = ZONE_CONTROL_MODE_PID;
     }
-    s_exec.zones[zi_long].ff_tau_s = L_long;
-    s_exec.zones[zi_short].ff_tau_s = L_short;
+    s_exec.zones[zi_long].ff_tau_s = TAU_long;
+    s_exec.zones[zi_long].ff_dead_time_s = L_long;
+    s_exec.zones[zi_short].ff_tau_s = TAU_short;
+    s_exec.zones[zi_short].ff_dead_time_s = L_short;
 
     float setpoint_c = 30.0f; /* hold = 0.2 on both zones */
-    float rate = 0.3f;        /* climb_long = 0.3*60/50=0.36, climb_short = 0.3*20/50=0.12 */
+    /* Ramp rates chosen so the legacy rate*TAU/k_dc formula (which the ramp
+     * ticks below still use, exactly like any real ramp) again lands both
+     * zones' climb at a comparable, nonzero size -- rate*TAU/k_dc = 0.3 for
+     * both, same as before, just via each zone's own (now much larger) TAU. */
+    float rate_long = 0.3f * 60.0f / TAU_long;
+    float rate_short = 0.3f * 60.0f / TAU_short;
     s_exec.dwelling = false;
     float hold_long_ramp = 0.0f, hold_short_ramp = 0.0f;
-    float u_ff_long_ramp = zone_feedforward(&s_exec.zones[zi_long], zi_long, setpoint_c, rate, &hold_long_ramp);
-    float u_ff_short_ramp = zone_feedforward(&s_exec.zones[zi_short], zi_short, setpoint_c, rate, &hold_short_ramp);
+    float u_ff_long_ramp = zone_feedforward(&s_exec.zones[zi_long], zi_long, setpoint_c, rate_long, &hold_long_ramp);
+    float u_ff_short_ramp = zone_feedforward(&s_exec.zones[zi_short], zi_short, setpoint_c, rate_short, &hold_short_ramp);
     float latch_long_actual = u_ff_long_ramp - hold_long_ramp;
     float latch_short_actual = u_ff_short_ramp - hold_short_ramp;
     TEST_CHECK(latch_long_actual > 0.05f && latch_short_actual > 0.05f, "test setup sanity: both "
@@ -3777,6 +3799,12 @@ static void test_ramp_tracking_unaffected_by_dwell_decay_state(void)
     s_exec.zones[zi].ff_enabled = true;
     s_exec.zones[zi].ff_k_dc = 50.0f;
     s_exec.zones[zi].ff_tau_s = 50.0f;
+    /* ff_dead_time_s deliberately set too, and nonzero: if this were left
+     * at its zero-init default, the "no dead-time model" branch would zero
+     * climb unconditionally regardless of whether the dwelling gate leaked
+     * -- vacuous for exactly the mutation this test exists to catch (the
+     * dwelling gate reached unconditionally). */
+    s_exec.zones[zi].ff_dead_time_s = 20.0f;
     s_exec.zones[zi].control_mode = ZONE_CONTROL_MODE_PID;
 
     /* hold = (30-20)/50 = 0.2, kept deliberately small (unlike some of this
