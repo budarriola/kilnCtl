@@ -1914,6 +1914,31 @@ function thermoCountForRga() {
   return parseInt(document.getElementById('thermoCount').value, 10) || 0;
 }
 
+/* 2026-08-31 follow-up (owner: "show empty table items if it will be filled
+ * in"): this used to replace the ENTIRE table with a one-sentence "no runs
+ * yet" paragraph whenever no cell was valid, which meant a fresh session
+ * (or the very common mid-campaign case -- one or two zones accepted,
+ * others not) showed a sentence instead of the grid the operator needs to
+ * know what's still outstanding and how many cells they're waiting on.
+ * Always renders the full n x n grid now; the explanatory sentence, when
+ * there's anything to explain, goes ABOVE it instead of replacing it.
+ *
+ * Orientation (unchanged, load-bearing -- getting this backwards has
+ * already happened once in this project): m.cells is indexed [i][j] =
+ * "step zone i, response measured at zone j", the TRANSPOSE of how
+ * zones_http.h stores the same coupling ([affected][stepped]). The row
+ * header ("zone i") is therefore the STEPPED zone, matching the table's own
+ * "step zone \ response at" corner label -- do not swap i/j here.
+ *
+ * A ROW fills in as a unit: autotune_engine.c's finalize_fit() measures a
+ * stepped zone's own gain (the diagonal, cell i,i) and its cross-gain into
+ * every other zone (the rest of row i) from the SAME step test, and
+ * autotune_engine_accept() writes the whole row at once -- so "zone i's row
+ * is measured" and "zone i's tune has been ACCEPTED" are the same event,
+ * which is exactly the thing an operator who ran-but-didn't-accept a tune
+ * needs spelled out (a completed-but-unaccepted run leaves the row exactly
+ * as empty as one that was never run at all -- nothing here can tell those
+ * two apart, and the progress note says so). */
 function pollCouplingMatrix() {
   fetch('/api/autotune/matrix').then(function (r) { return r.json(); }).then(function (m) {
     renderRga(m.rga);
@@ -1921,12 +1946,28 @@ function pollCouplingMatrix() {
     var n = m.zone_count;
     var byIJ = {};
     m.cells.forEach(function (c) { byIJ[c.i + ',' + c.j] = c; });
-    var anyValid = m.cells.some(function (c) { return c.valid; });
-    if (!anyValid) {
-      el.innerHTML = '<p class="empty">No autotune runs completed yet this session.</p>';
-      return;
+
+    var measuredRows = 0;
+    for (var ri = 0; ri < n; ri++) {
+      var rowHasValid = false;
+      for (var rj = 0; rj < n; rj++) {
+        var rc = byIJ[ri + ',' + rj];
+        if (rc && rc.valid) { rowHasValid = true; break; }
+      }
+      if (rowHasValid) measuredRows++;
     }
-    var html = '<table class="coupling"><tr><th>step zone \\ response at</th>';
+
+    var html = '';
+    if (measuredRows === 0) {
+      html += '<p class="empty">No autotune runs accepted yet this session -- the grid below will ' +
+              'fill in one row per zone as each zone\'s tune is run AND accepted (running a tune alone ' +
+              'does not fill in its row; accepting it does).</p>';
+    } else if (measuredRows < n) {
+      html += '<p class="hint">' + measuredRows + ' of ' + n + ' zones\' rows measured so far -- a row ' +
+              'fills in once that zone\'s own autotune has been ACCEPTED (not just run/completed).</p>';
+    }
+
+    html += '<table class="coupling"><tr><th>step zone \\ response at</th>';
     for (var j = 0; j < n; j++) html += '<th>zone ' + j + '</th>';
     html += '</tr>';
     for (var i = 0; i < n; i++) {
@@ -1937,7 +1978,13 @@ function pollCouplingMatrix() {
           html += '<td' + (i === jj ? ' class="diag"' : '') + '>' + c.k.toFixed(1) + '&deg;C/duty<br>' +
                   '<span class="hint">&tau;=' + c.tau_s.toFixed(0) + 's L=' + c.dead_time_s.toFixed(0) + 's</span></td>';
         } else {
-          html += '<td class="empty">&mdash;</td>';
+          // Not a value -- and must not read as one (a bare em-dash alone
+          // is ambiguous between "measured as zero/negligible" and "never
+          // measured"/"broken"). title gives the same explanation as a
+          // hover tooltip for an operator who lands on one cell and wants
+          // to know why, without repeating the whole paragraph n^2 times.
+          html += '<td class="empty" title="Zone ' + i + ' has not been autotuned and accepted yet -- ' +
+                  'this cell fills in once it is.">not measured</td>';
         }
       }
       html += '</tr>';

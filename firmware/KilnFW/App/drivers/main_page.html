@@ -905,8 +905,17 @@ function renderChartMeta(mode, opts) {
     // identical on the trace line alone (this cost real debugging time
     // tonight). zone/elapsed/duty ride along in the same note so an
     // operator glancing at the chart doesn't have to also open zones_page.
+    //
+    // 2026-08-31 follow-up: one legend row per zone actually plotted
+    // (opts.zoneItems, built by drawAutotuneChart from CH_COLORS/chColor --
+    // the same per-channel colour every other view on this page uses, so a
+    // zone reads as the same colour here as in the channel list/idle dots),
+    // plus the commanded-duty series -- see that function's own comment for
+    // why coupling between zones needs to be visible, not just the tested
+    // zone's own trace.
     var st = opts.st;
-    items.push(chartLegendItem('#f60', 'autotune trace'));
+    (opts.zoneItems || []).forEach(function (it) { items.push(chartLegendItem(it.color, it.label)); });
+    items.push(chartLegendItem('#888', 'commanded duty (right axis, %, stepped)'));
     if (opts.planShown) items.push(chartLegendItem('#96c', 'planned profile (preview)', true));
     if (opts.freezingShown) items.push(chartLegendItem(opts.faultColor || '#b00', 'freezing (0°C)', true));
     var phase = AUTOTUNE_PHASE_LABEL[st.state] || st.state;
@@ -914,6 +923,17 @@ function renderChartMeta(mode, opts) {
       ' — elapsed ' + fmtTick(st.elapsed_s) + ' — duty ' + st.duty.toFixed(2);
     if (st.state === 'aborted' && st.abort_reason) {
       note += ' — ' + st.abort_reason;
+    }
+    // Reload-mid-run honesty (2026-08-31 follow-up): the OTHER zones' traces
+    // are accumulated client-side (there is no server-side history for them
+    // the way trace.csv is the tested zone's own authoritative record), so a
+    // page opened after a run was already underway has NO history for those
+    // zones before the moment it opened -- their lines start partway across
+    // the plot rather than at t=0. Said explicitly here rather than left for
+    // the reader to notice a line that "just starts partway through", which
+    // could otherwise read as a sensor fault instead of what it actually is.
+    if (opts.partialZoneSeries) {
+      note += ' (some zones\' traces only cover time since this page was opened)';
     }
   } else {
     // Idle: the dots are this instant's live readings, not a time series --
@@ -1839,25 +1859,148 @@ var AUTOTUNE_PHASE_LABEL = {
   done: 'done', aborted: 'ABORTED',
 };
 
+// True for exactly the states an autotune run is actively driving relays
+// and recording -- shared by updateChartMode's mode switch and the
+// client-side sampling below so both agree on "is a run live" the same way.
+function isAutotuneActive(state) {
+  return state === 'settling' || state === 'stepping' ||
+    state === 'relay_approach' || state === 'relay_cycling';
+}
+
+// ---------------------------------------------------------------------------
+// Client-side multi-zone trace (2026-08-31 follow-up, owner: "if the
+// autotune trace is the zone 0 real temp then the other zones should also
+// leave a trace, instead of the dots"). /api/autotune/trace.csv only ever
+// records the ONE zone under test (autotune_engine.c drives/samples a
+// single zone at a time) -- there is no server-side history for the other
+// zones' temperatures during a run. But cross-zone coupling on this board
+// is real and large (5-12 C/duty measured) -- a single-zone step test
+// visibly warms its neighbours, and THAT is diagnostic: it is the coupling
+// being measured, not noise. So the other zones' traces are built
+// client-side from the SAME /api/status channel readings the idle dots and
+// channel cards already use, sampled once per poll() tick while a run is
+// active.
+//
+// Keyed by channel index; the zone actually under test is deliberately NOT
+// collected here -- autotuneTrace (the parsed trace.csv) is already its own
+// authoritative, device-sampled record, and duplicating it client-side at a
+// different (2s vs. the device's 10s) cadence would just be two competing,
+// slightly-disagreeing lines for the same zone.
+var autotuneZoneSeries = {};
+// The duty the autotune engine actually commanded, as a piecewise-constant
+// (stepped) series -- "what was intended/commanded", the other half of the
+// "intended vs actual" the owner asked for alongside the temperature trace.
+// One point per pollAutotune() tick (10s, matches AUTOTUNE_ENGINE_SAMPLE_
+// PERIOD_S -- duty cannot change faster than the engine's own control loop
+// samples it, so there is nothing to gain from sampling this any faster).
+var autotuneDutySeries = [];
+// Which zone the CURRENT contents of the two arrays above belong to, so a
+// new run (same or different zone) is detected and the stale arrays are
+// cleared instead of splicing a new run's points onto the tail of the
+// previous one's.
+var autotuneSeriesZone = null;
+var wasAutotuneActive = false;
+
+// Bounded, per the "do not grow an array forever across a 4h run"
+// requirement. AUTOTUNE_ZONE_SAMPLE_MIN_INTERVAL_S decimates the raw 2s
+// poll cadence down to one point every 5s per zone -- denser than the
+// tested zone's own 10s device trace (so the coupling curves still read as
+// smooth), while a 4h run only ever produces 4*3600/5 = 2880 points per
+// zone, comfortably under the MAX_POINTS ring cap below (which exists as a
+// hard backstop, not the normal exit path). Each {t,c}/{t,duty} point is a
+// tiny JS object (two numbers) -- at the cap, 3000 points * 2 series-ish
+// arrays * up to MAX31856_CHANNEL_COUNT zones is on the order of a few
+// hundred KB in the tab's heap, nowhere near a concern for a page that
+// already keeps a 2880-row history.csv-derived array in the running-chart
+// path.
+var AUTOTUNE_ZONE_SAMPLE_MIN_INTERVAL_S = 5;
+var AUTOTUNE_SERIES_MAX_POINTS = 3000;
+
+function pushCappedPoint(arr, point) {
+  arr.push(point);
+  if (arr.length > AUTOTUNE_SERIES_MAX_POINTS) arr.shift();
+}
+
+// Client-clock estimate of the autotune run's own elapsed_s, between
+// /api/autotune polls (10s apart) -- self-corrects every time pollAutotune()
+// lands a fresh st.elapsed_s, so drift never accumulates past one poll
+// interval. Used only to place the OTHER zones' 2s-cadence samples on the
+// same time axis as the tested zone's device-reported elapsed_s; the tested
+// zone's own trace never uses this (it has real elapsed_s per sample from
+// trace.csv).
+var lastAutotuneStatusFetchedAtMs = 0;
+function estimateAutotuneElapsedS() {
+  if (!lastAutotuneStatus) return null;
+  var sinceFetchS = Math.max(0, (Date.now() - lastAutotuneStatusFetchedAtMs) / 1000);
+  return (lastAutotuneStatus.elapsed_s || 0) + sinceFetchS;
+}
+
+// Called from poll()'s /api/status handler (2s cadence) with the just-
+// fetched channel data. A no-op whenever no autotune is actively running --
+// deliberately checked against isAutotuneActive(), not just "state exists",
+// so this never accumulates points for an idle board or a long-finished
+// run sitting in DONE/ABORTED.
+function sampleAutotuneZoneTemps(data) {
+  if (!lastAutotuneStatus || !isAutotuneActive(lastAutotuneStatus.state)) return;
+  if (!data || !data.thermo_ready || !data.channels) return;
+  var t = estimateAutotuneElapsedS();
+  if (t === null) return;
+  var testedZone = lastAutotuneStatus.zone;
+  data.channels.forEach(function (ch) {
+    if (!ch.valid || ch.spi_failed || ch.channel === testedZone) return;
+    var arr = autotuneZoneSeries[ch.channel];
+    if (!arr) { arr = autotuneZoneSeries[ch.channel] = []; }
+    var last = arr[arr.length - 1];
+    if (last && (t - last.t) < AUTOTUNE_ZONE_SAMPLE_MIN_INTERVAL_S) return;
+    pushCappedPoint(arr, { t: t, c: ch.temp_c });
+  });
+}
+
 // trace is the parsed /api/autotune/trace.csv (elapsed_s from autotune
-// start, not from any firing profile). The planned-profile overlay reuses
-// whatever `activePlan` the picker/idle-preview machinery already has
-// selected (see fetchPlan/setActivePlanFor above) -- it is drawn dashed and
-// CLIPPED to the trace's own elapsed window rather than stretching the axis
-// out to the plan's full length, which for a multi-hour firing profile
-// would squash a 10-20 minute autotune trace into a sliver.
+// start, not from any firing profile) -- the TESTED zone's own authoritative
+// record. autotuneZoneSeries (module-level, above) supplies the other
+// zones' client-collected traces on the same time axis, and
+// autotuneDutySeries supplies the commanded-duty step line. The
+// planned-profile overlay reuses whatever `activePlan` the picker/idle-
+// preview machinery already has selected (see fetchPlan/setActivePlanFor
+// above) -- it is drawn dashed and CLIPPED to the trace's own elapsed window
+// rather than stretching the axis out to the plan's full length, which for
+// a multi-hour firing profile would squash a 10-20 minute autotune trace
+// into a sliver. Kept even with three zones now on screen: it is a single
+// distinct dashed purple line, visually unlike any of the solid per-zone
+// colours, and an operator who ran a step test to prepare for a specific
+// profile still benefits from seeing that profile's own curve for
+// reference -- it was judged not to add clutter, only one more line.
 function drawAutotuneChart(st, trace) {
   var g = setupChart();
   if (!g) return;
   var ctx = g.ctx;
   var tMin = 0;
   var tMax = Math.max(st.elapsed_s || 0, trace.length ? trace[trace.length - 1].t : 0, 60);
+  Object.keys(autotuneZoneSeries).forEach(function (zi) {
+    var arr = autotuneZoneSeries[zi];
+    if (arr.length) tMax = Math.max(tMax, arr[arr.length - 1].t);
+  });
+  if (autotuneDutySeries.length) {
+    tMax = Math.max(tMax, autotuneDutySeries[autotuneDutySeries.length - 1].t);
+  }
 
   var planPts = ((activePlan && activePlan.points) || []).filter(function (p) { return p.t <= tMax; });
 
   var tempVals = trace.map(function (p) { return p.c; });
   if (st.actual_valid) tempVals.push(st.actual_c);
   planPts.forEach(function (p) { tempVals.push(p.c); });
+  var partialZoneSeries = false;
+  Object.keys(autotuneZoneSeries).forEach(function (zi) {
+    var arr = autotuneZoneSeries[zi];
+    arr.forEach(function (p) { tempVals.push(p.c); });
+    // A collected series that starts well after tMin means this page was
+    // (re)loaded after the run was already underway -- see this function's
+    // header comment and renderChartMeta's own doc comment on
+    // opts.partialZoneSeries for why that is surfaced rather than silently
+    // drawn as if it were the whole run.
+    if (arr.length && arr[0].t > tMin + AUTOTUNE_ZONE_SAMPLE_MIN_INTERVAL_S * 2) partialZoneSeries = true;
+  });
   var minV = tempVals.length ? Math.min.apply(null, tempVals) : 0;
   var maxV = tempVals.length ? Math.max.apply(null, tempVals) : 1;
   if (maxV === minV) maxV = minV + 1;
@@ -1867,8 +2010,15 @@ function drawAutotuneChart(st, trace) {
 
   function x(t) { return g.padL + (t - tMin) / (tMax - tMin) * g.plotW; }
   function yTemp(v) { return g.padT + g.plotH - (v - minV) / (maxV - minV) * g.plotH; }
+  // Secondary axis, right side, FIXED 0..1 range (0-100%) regardless of the
+  // temperature range -- duty is not a temperature and must never share its
+  // scale, same reasoning the running chart's own yDuty() already applies.
+  function yDuty(d) { return g.padT + g.plotH - d * g.plotH; }
 
   drawYAxis(g, yTemp, minV, maxV);
+  ctx.fillStyle = g.muted; ctx.font = '10px sans-serif';
+  ctx.fillText('100%', g.cssW - g.padR + 4, g.padT + 8);
+  ctx.fillText('0%', g.cssW - g.padR + 4, g.padT + g.plotH);
 
   if (planPts.length) {
     ctx.save();
@@ -1883,20 +2033,58 @@ function drawAutotuneChart(st, trace) {
     ctx.restore();
   }
 
-  if (trace.length) {
+  // Commanded duty FIRST (drawn under the temperature traces): piecewise
+  // CONSTANT, not interpolated -- the engine holds one duty value between
+  // samples, so each segment is drawn as a horizontal hold at the OLD value
+  // followed by a vertical jump to the new one at the sample where it
+  // changed, the standard "step" rendering, extended flat out to `now`
+  // (tMax) so the line always reaches the right edge of whatever's plotted.
+  if (autotuneDutySeries.length) {
     ctx.beginPath();
-    trace.forEach(function (p, i) {
+    ctx.strokeStyle = '#888'; ctx.lineWidth = 1.5;
+    var dx0 = x(autotuneDutySeries[0].t), dy0 = yDuty(autotuneDutySeries[0].duty);
+    ctx.moveTo(dx0, dy0);
+    for (var di = 1; di < autotuneDutySeries.length; di++) {
+      var prevY = yDuty(autotuneDutySeries[di - 1].duty);
+      var curX = x(autotuneDutySeries[di].t), curY = yDuty(autotuneDutySeries[di].duty);
+      ctx.lineTo(curX, prevY); // hold at the previous value up to this sample's time
+      ctx.lineTo(curX, curY);  // then jump to the new value
+    }
+    var lastD = autotuneDutySeries[autotuneDutySeries.length - 1];
+    ctx.lineTo(x(tMax), yDuty(lastD.duty)); // extend the final hold out to now
+    ctx.stroke();
+  }
+
+  // Per-zone temperature traces, one legend row each -- the tested zone uses
+  // its trace.csv record (device-sampled, authoritative); every other ACTIVE
+  // zone uses its client-collected autotuneZoneSeries entry, drawn only over
+  // the span actually collected (see partialZoneSeries above -- never
+  // backfilled to tMin). Colour is chColor(zone index), the SAME mapping
+  // the channel list and idle dots already use, so a zone reads as one
+  // consistent colour everywhere on this page.
+  var zoneItems = [];
+  function drawZoneTrace(zi, pts, label) {
+    if (!pts.length) return;
+    ctx.beginPath();
+    pts.forEach(function (p, i) {
       var px = x(p.t), py = yTemp(p.c);
       if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
     });
-    ctx.strokeStyle = '#f60'; ctx.lineWidth = 1.5; ctx.stroke();
+    ctx.strokeStyle = chColor(zi); ctx.lineWidth = 1.5; ctx.stroke();
+    zoneItems.push({ color: chColor(zi), label: label });
   }
+  drawZoneTrace(st.zone, trace, zoneName(st.zone) + ' (under test)');
+  Object.keys(autotuneZoneSeries).forEach(function (ziStr) {
+    var zi = Number(ziStr);
+    drawZoneTrace(zi, autotuneZoneSeries[zi], zoneName(zi) + ' (coupling)');
+  });
 
   drawChartAxis(g, x, yTemp, tMin, tMax);
   if (belowFreezing) drawFreezingRef(g, yTemp, minV, maxV);
 
   renderChartMeta('autotune', {
-    st: st, planShown: planPts.length >= 2,
+    st: st, planShown: planPts.length >= 2, zoneItems: zoneItems,
+    partialZoneSeries: partialZoneSeries,
     freezingShown: belowFreezing, faultColor: g.fault,
   });
 }
@@ -1921,15 +2109,37 @@ function drawAutotuneChart(st, trace) {
 // profile is actually running -- an autotune result from earlier tonight
 // must not eclipse a live firing that started since. lastExecStatus is
 // cached so pollAutotune's own (slower, 10s) tick can re-run this same
-// decision without waiting on pollExec's next 2s tick.
+// decision without waiting on the 2s /api/status/profile_exec tick, and so
+// a caller (like pollAutotune) that has no fresher `st` of its own can pass
+// nothing and get the last-known one back.
+//
+// 2026-08-31 follow-up ("it glitches back and forth between the 3 dots and
+// the trace"): this function is now THE ONLY place on the page that decides
+// which chart view to show and draws it. Before this fix, poll()'s own
+// /api/status handler ALSO drew directly (an unconditional drawIdleDots()
+// whenever wasIdle was true, with no idea an autotune could be active) in
+// addition to this function being called separately from pollExec()'s
+// /api/profile_exec resolution -- two independent async fetches, each
+// firing this same 2s tick, one of which used a completely different (and
+// wrong -- it never checked autotune state at all) decision than this
+// function. Whichever of the two HTTP responses happened to land last for a
+// given tick decided what was on screen, so the view alternated between the
+// idle dots and the autotune trace essentially at random, exactly the
+// symptom reported. The fix is not a timing tweak (equalizing intervals
+// would only make the race rarer, not gone) -- it's this: ONE decision
+// function, fed by state that's already been merged (poll() below now
+// gathers /api/status and /api/profile_exec via Promise.all before calling
+// this once), plus every other trigger (pollAutotune's own slower tick, the
+// manual pollExec() after a Start-firing click) routing through this exact
+// same function instead of drawing anything themselves.
 var wasIdle = true;
 var lastExecStatus = null;
 function updateChartMode(st) {
-  lastExecStatus = st;
+  if (st) { lastExecStatus = st; }
+  st = lastExecStatus;
   var idleNow = !st || st.state === 'idle';
   var atState = lastAutotuneStatus && lastAutotuneStatus.state;
-  var atActive = atState === 'settling' || atState === 'stepping' ||
-    atState === 'relay_approach' || atState === 'relay_cycling';
+  var atActive = isAutotuneActive(atState);
   var atFinished = atState === 'done' || atState === 'aborted';
   if (atActive || (atFinished && idleNow)) {
     drawAutotuneChart(lastAutotuneStatus, autotuneTrace);
@@ -1987,6 +2197,33 @@ var autotuneLastFetchedCount = -1;
 function pollAutotune() {
   fetch('/api/autotune').then(function (r) { return r.json(); }).then(function (st) {
     lastAutotuneStatus = st;
+    lastAutotuneStatusFetchedAtMs = Date.now();
+    // New-run detection for the client-side zone/duty series (autotuneTrace
+    // above has its own, older reset via the sample_count-dropped check just
+    // below -- this is the same idea applied to the two arrays this follow-
+    // up added). Three independent triggers, any one of which means "these
+    // arrays no longer describe the run that's either running now or about
+    // to be": a fresh idle/done/aborted -> active transition, a report of a
+    // different zone than the one these arrays were collected for (covers
+    // the same-poll-tick case where sample_count hasn't visibly dropped
+    // yet), and the pre-existing sample_count-dropped signal (a same-zone
+    // re-run that overwrote the device's own trace ring).
+    var active = isAutotuneActive(st.state);
+    var newRun = (active && !wasAutotuneActive) || (st.zone !== autotuneSeriesZone) ||
+      (st.sample_count < autotuneLastFetchedCount);
+    if (newRun) {
+      autotuneZoneSeries = {};
+      autotuneDutySeries = [];
+      autotuneSeriesZone = st.zone;
+    }
+    // Duty is recorded whenever a run is active, plus the ONE tick where it
+    // just finished (so the stepped line closes out at its final value
+    // instead of trailing off before the run's actual end).
+    var justFinished = (st.state === 'done' || st.state === 'aborted') && wasAutotuneActive;
+    if (active || justFinished) {
+      pushCappedPoint(autotuneDutySeries, { t: st.elapsed_s || 0, duty: st.duty || 0 });
+    }
+    wasAutotuneActive = active;
     if (st.sample_count < autotuneLastFetchedCount) {
       autotuneTrace = [];
       autotuneLastFetchedCount = -1;
@@ -1995,37 +2232,78 @@ function pollAutotune() {
       fetch('/api/autotune/trace.csv').then(function (r) { return r.text(); }).then(function (text) {
         autotuneTrace = parseAutotuneTraceCsv(text);
         autotuneLastFetchedCount = st.sample_count;
-        updateChartMode(lastExecStatus);
+        updateChartMode();
       }).catch(function () {});
     } else {
-      updateChartMode(lastExecStatus);
+      updateChartMode();
     }
   }).catch(function () {});
 }
 
+// 2026-08-31 follow-up: /api/status and /api/profile_exec are now fetched
+// together (Promise.all) and every render decision for this 2s tick,
+// including the chart, happens in this ONE .then() -- see updateChartMode's
+// own comment for the flapping bug this replaces (two independently-timed
+// fetches, each deciding and drawing the chart on its own, whichever landed
+// last for a given tick winning). A fetch failure degrades to null for that
+// half of the pair (same catch-to-null convention every optional endpoint
+// on this page already uses) rather than aborting the whole tick -- a
+// status-only or exec-only hiccup still lets the other half's render run
+// and still runs updateChartMode() once, off whatever is cached from the
+// last successful fetch of the half that failed.
 function poll() {
-  fetch('/api/status').then(r => r.json()).then(function (data) {
-    // 2026-08-21: keeps app.js's kcUnit cache current from the same response
-    // this page already fetches for its own rendering -- no second request
-    // just to learn the device's unit preference (see app.js's own
-    // one-time-fetch fallback for pages that never poll /api/status at all).
-    window.kcUnit.updateFromStatus(data);
-    // watchdog_cfg.h: cached here (not re-fetched on Start click) so the
-    // extra firing confirmation below reads the same live snapshot every
-    // other status-derived control on this page already uses.
-    lastWatchdogPanicDisabled = !!data.watchdog_panic_disabled;
-    renderChannels(data);
-    renderBootButtonBypass(data);
-    renderSafetyTrip(data);
+  Promise.all([
+    fetch('/api/status').then(function (r) { return r.json(); }).catch(function () { return null; }),
+    fetch('/api/profile_exec').then(function (r) { return r.json(); }).catch(function () { return null; }),
+  ]).then(function (results) {
+    var data = results[0], st = results[1];
+    if (data) {
+      // 2026-08-21: keeps app.js's kcUnit cache current from the same
+      // response this page already fetches for its own rendering -- no
+      // second request just to learn the device's unit preference (see
+      // app.js's own one-time-fetch fallback for pages that never poll
+      // /api/status at all).
+      window.kcUnit.updateFromStatus(data);
+      // watchdog_cfg.h: cached here (not re-fetched on Start click) so the
+      // extra firing confirmation below reads the same live snapshot every
+      // other status-derived control on this page already uses.
+      lastWatchdogPanicDisabled = !!data.watchdog_panic_disabled;
+      renderChannels(data);
+      renderBootButtonBypass(data);
+      renderSafetyTrip(data);
+      // Client-side multi-zone autotune trace sampling (see
+      // sampleAutotuneZoneTemps's own header comment) -- a no-op whenever no
+      // autotune is actively running.
+      sampleAutotuneZoneTemps(data);
+    }
+    if (st) {
+      renderExec(st);
+      renderLastRun(st);
+      renderProgress(st);
+      var idleNow = !st || st.state === 'idle';
+      var planId = idleNow ? undefined : st.profile_id;
+      if (planId !== lastExecPlanId) {
+        lastExecPlanId = planId;
+        if (idleNow) {
+          // A run just ended -- don't leave its plan curve on screen under
+          // the idle dots. Fall back to previewing whatever's currently
+          // picked (or nothing, if the list hasn't loaded / nothing's
+          // selected yet).
+          var sel = document.getElementById('profileSelect');
+          setActivePlanFor(sel ? sel.value : undefined);
+        } else {
+          setActivePlanFor(planId);
+        }
+      }
+    }
     // Idle dots are a LIVE temperature display (same data as the channel
-    // cards above), so they refresh on this 2s status poll, not history.csv's
-    // slower 15s one -- a firing that's still idle should show the dots
-    // tracking the kiln cooling/heating ambient in real time, not appear
-    // frozen between 15s history polls that (while idle) fetch nothing new
-    // anyway (history.csv only starts moving once a profile is running).
-    if (wasIdle) { drawIdleDots(data); }
-  }).catch(function () {});
-  pollExec();
+    // cards above), so they need to refresh on this 2s status poll, not
+    // history.csv's slower 15s one -- a firing that's still idle should show
+    // the dots tracking the kiln cooling/heating ambient in real time. That
+    // refresh, and every other chart-mode decision, now happens exactly
+    // once here regardless of which of data/st came back.
+    updateChartMode(st);
+  });
   setTimeout(poll, 2000);
 }
 
