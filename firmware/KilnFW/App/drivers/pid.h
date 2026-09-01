@@ -17,6 +17,23 @@
 // FOPDT model (autotune, TODO.md 6A.4); pid_update()/pid_seed_bumpless() both
 // take it explicitly rather than assuming 0, so a zone with no identified
 // model just passes 0.0f.
+//
+// Integral floor vs feedforward: the classic "integral >= 0" anti-windup
+// floor (no active cooling, so a negative I term is meaningless) is only
+// correct when ff_u is 0. With feedforward in the loop, ff_u can itself
+// over-predict the duty a zone needs (a coupled multi-zone solve routinely
+// does this for whichever zone gets the largest hold duty -- see
+// PID_EXPANSION_PLAN.md / TODO.md 6A.2's zone-2-droop case), and the PID's
+// job explicitly includes subtracting that surplus back out. The floor is
+// therefore on ki*integral >= -ff_u, not >= 0: the integral may cancel at
+// most what feedforward added, never more. This is a strict generalization
+// -- ff_u=0.0f reproduces the old >= 0 floor exactly -- so it changes
+// nothing for a zone with no feedforward model, and nothing for a zone
+// whose feedforward under-predicts (its integral stays positive and never
+// approaches the new, more permissive floor). Unbounded negative windup
+// during a genuine cool-down or heat-blocked period (ff_u ~ 0, so the floor
+// is ~0 same as before) is prevented by the conditional-integration freeze,
+// not by this floor.
 #ifndef PID_H
 #define PID_H
 
@@ -65,9 +82,11 @@ void pid_reset(pid_state_t *state);
  * handoff) so the very next pid_update() produces u_desired instead of
  * whatever a cold integral would compute. ff_u is the same feedforward duty
  * the next pid_update()/pid_update_terms() call will be given -- solves
- * integral = (u_desired - P - ff_u) / Ki and seeds it (clamped to >= 0,
- * since a negative integral would itself violate the anti-windup clamp on
- * the next tick). Pass 0.0f for a zone with no feedforward model. */
+ * integral = (u_desired - P - ff_u) / Ki and seeds it (floored so
+ * Ki*integral >= -ff_u, the same floor pid_update_terms() enforces every
+ * tick: the integral may cancel at most what feedforward added, never more,
+ * since there is no active cooling. Pass 0.0f for a zone with no
+ * feedforward model, which reduces the floor to the classic >= 0). */
 void pid_seed_bumpless(pid_state_t *state, const pid_cfg_t *cfg, float setpoint, float measurement,
                        float u_desired, float ff_u);
 

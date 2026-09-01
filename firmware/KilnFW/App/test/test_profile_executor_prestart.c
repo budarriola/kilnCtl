@@ -2847,14 +2847,26 @@ static void test_hold_membership_change_gaining_a_neighbor_reseeds_smoothly(void
     setup_membership_transition_zone0(&z0, 20.0f, 35.0f);
     s_exec.zones[1].faulted = true; /* start EXCLUDED -- the {0,2} 2-zone system */
 
+    /* Prime the membership signature to the current (2-zone) system with one
+     * throwaway tick BEFORE hand-setting the integral below -- same pattern
+     * as setup_membership_transition_zone0()'s other caller
+     * (test_hold_membership_change_losing_a_neighbor_reseeds_when_headroom_exists()):
+     * otherwise this very first call's own 0->real membership edge fires a
+     * reseed against z0->duty's memset-zero default. Under the ff-aware
+     * integral floor (the integral may cancel at most what feedforward
+     * added, not just >= 0) that reseed now faithfully reproduces the
+     * dummy 0.0 desired duty instead of coincidentally landing on ff_u the
+     * way the old >= 0 floor did -- so it can no longer be relied on to
+     * establish "already settled at the 2-zone hold." Hand-setting the
+     * integral afterward (to 0.0, matching a zone with no residual bias to
+     * correct -- duty = 0 + 0 + ff = ff, the real steady-state hold) is the
+     * same technique the loss-of-neighbor test already uses for the same
+     * reason. */
     bool want_relay_on = false;
-    float duty_before = 0.0f;
-    for (int i = 0; i < 25; i++) {
-        duty_before = pid_family_zone_tick(z0, 0, &z0->pid_cfg, true, 1.0f, 1000u, &want_relay_on);
-        z0->duty = duty_before; /* the real control loop writes this after every tick (line ~2900)
-                                 * -- seed_bumpless_with_ff() reads z->duty, not the return value,
-                                 * so a direct pid_family_zone_tick() test must mirror that write. */
-    }
+    (void)pid_family_zone_tick(z0, 0, &z0->pid_cfg, true, 1.0f, 1000u, &want_relay_on);
+    z0->pid_state.integral = 0.0f;
+    float duty_before = pid_family_zone_tick(z0, 0, &z0->pid_cfg, true, 1.0f, 1000u, &want_relay_on);
+    z0->duty = duty_before;
     TEST_CHECK_NEAR(duty_before, 0.346937, 0.01, "test setup sanity: duty must have settled near the "
                     "2-zone steady-state hold before healing");
 

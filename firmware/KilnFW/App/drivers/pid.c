@@ -15,8 +15,14 @@ void pid_seed_bumpless(pid_state_t *state, const pid_cfg_t *cfg, float setpoint,
     state->d_filtered = 0.0f;
     float p_term = cfg->kp * (cfg->b * setpoint - measurement);
     float integral_needed = (cfg->ki > 0.0f) ? (u_desired - p_term - ff_u) / cfg->ki : 0.0f;
-    if (integral_needed < 0.0f) {
-        integral_needed = 0.0f; /* the same floor the anti-windup clamp enforces every tick */
+    /* Same floor pid_update_terms() enforces every tick: the integral may
+     * cancel at most what feedforward added (ki*integral >= -ff_u), never
+     * more -- there is no active cooling, so the PID cannot owe a duty debt
+     * beyond what ff_u itself contributed. ff_u=0.0f (no feedforward model)
+     * reduces this to the original >= 0 floor, byte-for-byte. */
+    float integral_floor = (cfg->ki > 0.0f) ? (-ff_u / cfg->ki) : 0.0f;
+    if (integral_needed < integral_floor) {
+        integral_needed = integral_floor;
     }
     state->integral = integral_needed;
     state->initialized = true;
@@ -93,10 +99,25 @@ float pid_update_terms(pid_state_t *state, const pid_cfg_t *cfg, float setpoint,
         state->integral += error * dt_s;
     }
 
+    /* Floor: the integral may cancel at most what feedforward (ff_u) added,
+     * never more -- there is no active cooling, so once the I term has
+     * subtracted ff_u's entire contribution the total is back to plain P+D,
+     * and further negative integral would mean the loop owing a duty debt
+     * the hardware cannot repay. ff_u=0.0f (no feedforward model, or a zone
+     * whose feedforward under-predicts and whose integral never approaches
+     * this floor) reduces this to the original i_term >= 0 clamp,
+     * byte-for-byte -- this is a strict generalization, not a new behavior
+     * for those zones. Unbounded negative windup during a genuine cool-down
+     * or heat-blocked period (ff_u ~ 0) is prevented the same way it always
+     * was: the conditional-integration freeze above (would_push_further_out)
+     * stops the integral from accumulating further once the total output is
+     * already pinned at the 0 rail with error still negative, so this floor
+     * is rarely even the thing that bites in that case. */
     float i_term = cfg->ki * state->integral;
-    if (i_term < 0.0f) {
-        i_term = 0.0f;
-        state->integral = 0.0f;
+    float i_floor = -ff_u;
+    if (i_term < i_floor) {
+        i_term = i_floor;
+        state->integral = (cfg->ki > 0.0f) ? i_floor / cfg->ki : 0.0f;
     } else if (i_term > 1.0f) {
         i_term = 1.0f;
         state->integral = (cfg->ki > 0.0f) ? 1.0f / cfg->ki : 0.0f;
