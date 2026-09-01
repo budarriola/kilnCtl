@@ -14,7 +14,22 @@ static inline void esp_log_noop(const char *tag, const char *fmt, ...)
     (void)fmt;
 }
 
-#define ESP_LOGE(tag, fmt, ...) esp_log_noop((tag), (fmt), ##__VA_ARGS__)
+/* ESP_LOGE gets its own counter (still a no-op otherwise -- same convention
+ * as esp_log_noop() above) so a host test can assert an error was actually
+ * logged, not just that the code path that would log didn't crash. Added
+ * for dashboard_json.c's truncation test (firmware cleanup pass, item 2):
+ * proving append_zone_status_json() signals a truncation, not just that it
+ * still produces balanced JSON. Every OTHER host test that never reads this
+ * counter is unaffected -- it starts at 0 and nothing but ESP_LOGE touches it. */
+static unsigned g_esp_loge_calls = 0;
+static inline void esp_loge_noop(const char *tag, const char *fmt, ...)
+{
+    (void)tag;
+    (void)fmt;
+    g_esp_loge_calls++;
+}
+
+#define ESP_LOGE(tag, fmt, ...) esp_loge_noop((tag), (fmt), ##__VA_ARGS__)
 #define ESP_LOGW(tag, fmt, ...) esp_log_noop((tag), (fmt), ##__VA_ARGS__)
 #define ESP_LOGI(tag, fmt, ...) esp_log_noop((tag), (fmt), ##__VA_ARGS__)
 #define ESP_LOGD(tag, fmt, ...) esp_log_noop((tag), (fmt), ##__VA_ARGS__)

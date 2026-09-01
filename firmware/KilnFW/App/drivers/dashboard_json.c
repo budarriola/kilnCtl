@@ -1,9 +1,17 @@
 // See dashboard_json.h for why these two functions live in their own
-// dependency-light file. Moved verbatim out of dashboard_http.c -- no
-// behavior change, only where they are defined.
+// dependency-light file. NOT a verbatim move out of dashboard_http.c: three
+// fields (ff_hold_used_matrix, ff_hold_infeasible, ff_membership_change_count)
+// were added to both format strings and their argument lists in the same
+// commit that relocated these functions, and append_zone_status_json()'s
+// truncation path has since been changed to log and still close the array
+// (see its doc comment in dashboard_json.h) instead of bailing silently.
 #include "dashboard_json.h"
 
 #include <stdio.h>
+
+#include "esp_log.h"
+
+static const char *TAG = "dashboard_json";
 
 void json_escape(const char *src, char *out, size_t out_cap)
 {
@@ -33,7 +41,7 @@ size_t append_zone_status_json(char *json, size_t cap, size_t o, const profile_e
     int n;
     bool first = true;
     n = snprintf(json + o, cap - o, "\"zones\":[");
-    if (n < 0 || (size_t)n >= cap - o) return o;
+    if (n < 0 || (size_t)n >= cap - o) goto truncated;
     o += (size_t)n;
     for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
         const profile_exec_zone_status_t *z = &st->zones[zi];
@@ -73,10 +81,27 @@ size_t append_zone_status_json(char *json, size_t cap, size_t o, const profile_e
                         z->ff_hold_used_matrix ? "true" : "false", z->ff_hold_infeasible ? "true" : "false",
                         (unsigned long)z->ff_membership_change_count);
         }
-        if (n < 0 || (size_t)n >= cap - o) return o;
+        if (n < 0 || (size_t)n >= cap - o) goto truncated;
         o += (size_t)n;
         first = false;
     }
+    n = snprintf(json + o, cap - o, "]");
+    if (n > 0 && (size_t)n < cap - o) o += (size_t)n;
+    return o;
+
+truncated:
+    /* A truncation here used to bail silently (return o unchanged, array
+     * left open) -- the caller (dashboard_http.c's two handlers) still
+     * appended its own trailing '}' on top of that, producing an
+     * unterminated "zones":[{...},{...} -- invalid JSON served with HTTP
+     * 200 and no error anywhere on the wire or in the log. Log it by name
+     * (which shape, how big the buffer was) so a future field addition that
+     * outgrows the budget is loud instead of silent, and still close the
+     * array so the document stays at least PARSEABLE (fewer zones than
+     * expected beats a syntax error). */
+    ESP_LOGE(TAG, "%s JSON truncated at %u/%u bytes -- raise DASHBOARD_JSON_%s_BUF_SIZE "
+             "(dashboard_json.h)", control_fields ? "/api/control" : "/api/profile_exec",
+             (unsigned)o, (unsigned)cap, control_fields ? "CONTROL" : "PROFILE_EXEC");
     n = snprintf(json + o, cap - o, "]");
     if (n > 0 && (size_t)n < cap - o) o += (size_t)n;
     return o;

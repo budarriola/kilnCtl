@@ -113,8 +113,12 @@ static void test_control_status_json_is_complete_and_well_formed_at_3_zones(void
     fill_worst_case_status(&st);
 
     /* Reproduces control_status_get_handler() (dashboard_http.c) exactly:
-     * same buffer size expression, same fixed header, same trailing '}'. */
-    char json[256 + MAX31856_CHANNEL_COUNT * 448];
+     * same buffer size MACRO (item 3, firmware cleanup pass -- this used to be
+     * a hardcoded duplicate of the handler's size expression, so a revert of
+     * the handler's buffer would leave this test green; now both the handler
+     * and this test reference DASHBOARD_JSON_CONTROL_BUF_SIZE, defined once in
+     * dashboard_json.h), same fixed header, same trailing '}'. */
+    char json[DASHBOARD_JSON_CONTROL_BUF_SIZE];
     int n = snprintf(json, sizeof(json),
         "{\"state\":\"%s\",\"zone_mask\":%u,\"target_c\":%.2f,\"ramp_lock_held\":%s,"
         "\"ramp_lock_lagging_mask\":%u,",
@@ -153,9 +157,11 @@ static void test_exec_status_json_is_complete_and_well_formed_at_3_zones(void)
      * that handler's full header includes run-level/last_run fields this
      * test does not need to reproduce; the truncation risk this fix cares
      * about is entirely inside append_zone_status_json() and its buffer,
-     * which this exercises directly at the same per-zone budget
-     * (960 + MAX31856_CHANNEL_COUNT*320, dashboard_http.c:1421). */
-    char json[960 + MAX31856_CHANNEL_COUNT * 512];
+     * which this exercises directly at the same per-zone budget, now shared
+     * via DASHBOARD_JSON_PROFILE_EXEC_BUF_SIZE (dashboard_json.h) rather than
+     * a hardcoded duplicate of dashboard_http.c's size expression (item 3,
+     * firmware cleanup pass). */
+    char json[DASHBOARD_JSON_PROFILE_EXEC_BUF_SIZE];
     int n = snprintf(json, sizeof(json), "{");
     size_t o = (size_t)n;
     o = append_zone_status_json(json, sizeof(json), o, &st, false);
@@ -183,11 +189,55 @@ static void test_json_escape_doubles_every_quote_and_backslash(void)
     TEST_CHECK(strlen(tiny) < sizeof(tiny), "must truncate, never overflow, a too-small buffer");
 }
 
+/* Item 2, firmware cleanup pass: truncation used to bail silently -- the
+ * array was left open, and the caller's own trailing '}' turned that into
+ * unparseable JSON served with HTTP 200 and no error anywhere. Proves the
+ * fix two ways: (1) the rendered document is still complete/balanced even
+ * when the buffer is deliberately far too small to hold every zone, and
+ * (2) the truncation is actually SIGNALLED (ESP_LOGE, counted here via
+ * stubs/esp_log.h's g_esp_loge_calls spy) rather than silent. Negative-tested
+ * by hand against a reverted copy of append_zone_status_json() (the "return o"
+ * bail with no goto/log) before this was written into the file -- see the
+ * firmware cleanup report for the quoted FAIL output; not re-run here since
+ * this file always exercises the current, fixed production function. */
+static void test_truncation_is_logged_and_still_produces_valid_json(void)
+{
+    TEST_SECTION("append_zone_status_json() -- a buffer far too small for even one zone must still "
+                 "yield complete, balanced JSON (the array gets closed even on truncation) AND must "
+                 "signal the truncation via ESP_LOGE, not fail silently");
+
+    profile_exec_status_t st;
+    fill_worst_case_status(&st);
+
+    /* Deliberately tiny: room for the "{" header and "\"zones\":[" but not
+     * even one full worst-case zone object. */
+    char json[48];
+    int n = snprintf(json, sizeof(json), "{");
+    size_t o = (size_t)n;
+    g_esp_loge_calls = 0;
+    o = append_zone_status_json(json, sizeof(json), o, &st, false);
+    if (o + 1 < sizeof(json)) json[o++] = '}';
+    json[o < sizeof(json) ? o : sizeof(json) - 1] = '\0';
+
+    TEST_CHECK(json_looks_complete(json), "a truncated render must still be complete/balanced JSON, "
+              "not an unterminated 'zones' array followed by a bare '}'");
+    TEST_CHECK(g_esp_loge_calls >= 1, "truncation must be logged (ESP_LOGE), not silent -- the exact "
+              "defect this fix removes: HTTP 200 with invalid JSON and no error anywhere");
+
+    /* Sanity: this buffer really did truncate (didn't just happen to fit) --
+     * otherwise the checks above would be vacuous. */
+    int zone_objects = 0;
+    for (const char *p = json; (p = strstr(p, "\"zone\":")) != NULL; p += 7) zone_objects++;
+    TEST_CHECK(zone_objects < 3, "test setup sanity: the buffer must actually be too small to hold "
+              "all 3 worst-case zones, or this test cannot tell the fix from a no-op");
+}
+
 static void run_test_dashboard_json(void)
 {
     test_json_escape_doubles_every_quote_and_backslash();
     test_control_status_json_is_complete_and_well_formed_at_3_zones();
     test_exec_status_json_is_complete_and_well_formed_at_3_zones();
+    test_truncation_is_logged_and_still_produces_valid_json();
 }
 
 int main(void)

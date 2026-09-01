@@ -2096,27 +2096,61 @@ static void test_hold_diagonal_only_matches_legacy_exactly(void)
     }
 }
 
+/* Orientation note (this has now confused two people, so this is spelled out
+ * in full -- the authority is zones_http.h:158): zones_config_get_coupling()
+ * returns g_stub_coupling[zone_index][j] == coupling_coeff[zone_index][j],
+ * which is ROW zone_index (the AFFECTED zone), COLUMN j (the STEPPED zone).
+ * profile_executor.c's solve_hold_for_zone() builds G[row][col] =
+ * coupling_row[members[col]] directly from that -- i.e. G really is
+ * [affected][stepped], matching the getter's own row semantics exactly.
+ *
+ * The live board's GET /api/zones (ground truth, captured 2026-08-31) reports,
+ * per zone, coupling_coeff[0..2] with the zone's own model_k_dc filling the
+ * diagonal:
+ *   zone 0: [   -- , 12.0586,  6.0039], model_k_dc = 31.9609
+ *   zone 1: [5.7656,    --  ,  6.7734], model_k_dc = 23.4805
+ *   zone 2: [2.4062,  4.1094,    --  ], model_k_dc = 21.7422
+ * so the TRUE G[affected][stepped] is:
+ *   [[31.9609, 12.0586,  6.0039],
+ *    [ 5.7656, 23.4805,  6.7734],
+ *    [ 2.4062,  4.1094, 21.7422]]
+ *
+ * GET /api/autotune/matrix reports the SAME underlying data but organized
+ * [stepped][affected] instead -- i.e. exactly the TRANSPOSE of the matrix
+ * above:
+ *   [[31.9609,  5.7656,  2.4062],
+ *    [12.0586, 23.4805,  4.1094],
+ *    [ 6.0039,  6.7734, 21.7422]]
+ * A previous version of these tests copied the /api/autotune/matrix
+ * orientation into g_stub_coupling[][], which is wrong: g_stub_coupling
+ * stands in for zones_config_get_coupling(), i.e. the /api/zones row
+ * orientation, NOT /api/autotune/matrix's. The production code
+ * (solve_hold_for_zone()) was always correct; only the test stub's matrix was
+ * transposed. Fixed below to use the true [affected][stepped] orientation. */
 static void test_hold_matrix_solves_real_measured_gain_matrix(void)
 {
-    TEST_SECTION("solve_hold_for_zone() -- the REAL bench-measured 3x3 coupling matrix (row = "
-                 "affected zone, col = stepped zone): [[31.961,5.766,2.406],[12.059,23.480,4.109],"
-                 "[6.004,6.773,21.742]]. Solving G*u=dT with dT=15 (ambient 20C, setpoint 35C, all "
+    TEST_SECTION("solve_hold_for_zone() -- the REAL bench-measured 3x3 coupling matrix, true "
+                 "[affected][stepped] orientation per zones_http.h:158 (see the block comment just "
+                 "above this test): [[31.9609,12.0586,6.0039],[5.7656,23.4805,6.7734],"
+                 "[2.4062,4.1094,21.7422]]. Solving G*u=dT with dT=15 (ambient 20C, setpoint 35C, all "
                  "three zones already on-target so the SEPARATE deviation term contributes exactly "
                  "0 and does not contaminate this check) gives, by Gaussian elimination with "
-                 "partial pivoting (verified independently with numpy's np.linalg.solve): "
-                 "u = [0.367390, 0.367193, 0.474068]. The OLD per-zone diagonal division would have "
-                 "given [15/31.961, 15/23.480, 15/21.742] = [0.46934, 0.63884, 0.68984] instead -- "
-                 "20-45% too high on every zone, exactly the over-drive this fix removes.");
+                 "partial pivoting (verified independently with numpy's np.linalg.solve, and by "
+                 "checking G@u reproduces [15,15,15] exactly): u = [0.200373, 0.419902, 0.588364]. "
+                 "The OLD per-zone diagonal division would have given [15/31.9609, 15/23.4805, "
+                 "15/21.7422] = [0.46934, 0.63884, 0.68984] instead -- a large, clearly-distinguishable "
+                 "over-drive, exactly what this fix removes.");
     reset_coupling_test_state();
 
-    const float diag[3]     = {31.961f, 23.480f, 21.742f};
-    const float expect_u[3] = {0.367390f, 0.367193f, 0.474068f};
+    const float diag[3]     = {31.9609f, 23.4805f, 21.7422f};
+    const float expect_u[3] = {0.200373f, 0.419902f, 0.588364f};
     const float ambient_c = 20.0f, setpoint_c = 35.0f;
     s_exec.ambient_c = ambient_c;
 
-    g_stub_coupling[0][1] = 5.766f;  g_stub_coupling[0][2] = 2.406f;
-    g_stub_coupling[1][0] = 12.059f; g_stub_coupling[1][2] = 4.109f;
-    g_stub_coupling[2][0] = 6.004f;  g_stub_coupling[2][1] = 6.773f;
+    /* [affected][stepped] -- see the block comment above this test. */
+    g_stub_coupling[0][1] = 12.0586f; g_stub_coupling[0][2] = 6.0039f;
+    g_stub_coupling[1][0] = 5.7656f;  g_stub_coupling[1][2] = 6.7734f;
+    g_stub_coupling[2][0] = 2.4062f;  g_stub_coupling[2][1] = 4.1094f;
 
     for (uint8_t i = 0; i < 3; i++) {
         s_exec.zones[i].active = true;
@@ -2189,19 +2223,23 @@ static void test_hold_singular_matrix_falls_back(void)
 static void test_hold_excluded_faulted_zone_reduces_system(void)
 {
     TEST_SECTION("solve_hold_for_zone() -- a faulted (excluded) zone 1 is dropped from the system "
-                 "entirely: zones 0 and 2 solve the REDUCED 2x2 [[31.961,2.406],[6.004,21.742]] "
-                 "system among themselves (numpy-verified: u = [0.426247, 0.572202] for dT=15), not "
-                 "the full 3x3, and zone 1 itself gets the diagonal fallback since it no longer "
-                 "qualifies as a row in anyone's system");
+                 "entirely: zones 0 and 2 solve the REDUCED 2x2 [[31.9609,6.0039],[2.4062,21.7422]] "
+                 "([affected][stepped], see the orientation block comment above "
+                 "test_hold_matrix_solves_real_measured_gain_matrix()) system among themselves "
+                 "(numpy-verified: u = [0.346937, 0.651507] for dT=15), not the full 3x3, and zone 1 "
+                 "itself gets the diagonal fallback since it no longer qualifies as a row in anyone's "
+                 "system");
     reset_coupling_test_state();
 
-    const float diag[3] = {31.961f, 23.480f, 21.742f};
+    const float diag[3] = {31.9609f, 23.4805f, 21.7422f};
     const float ambient_c = 20.0f, setpoint_c = 35.0f;
     s_exec.ambient_c = ambient_c;
 
-    g_stub_coupling[0][1] = 5.766f;  g_stub_coupling[0][2] = 2.406f;
-    g_stub_coupling[1][0] = 12.059f; g_stub_coupling[1][2] = 4.109f;
-    g_stub_coupling[2][0] = 6.004f;  g_stub_coupling[2][1] = 6.773f;
+    /* [affected][stepped] -- see the orientation block comment above
+     * test_hold_matrix_solves_real_measured_gain_matrix(). */
+    g_stub_coupling[0][1] = 12.0586f; g_stub_coupling[0][2] = 6.0039f;
+    g_stub_coupling[1][0] = 5.7656f;  g_stub_coupling[1][2] = 6.7734f;
+    g_stub_coupling[2][0] = 2.4062f;  g_stub_coupling[2][1] = 4.1094f;
 
     for (uint8_t i = 0; i < 3; i++) {
         s_exec.zones[i].active = true;
@@ -2217,11 +2255,11 @@ static void test_hold_excluded_faulted_zone_reduces_system(void)
     coupling_solve_reason_t reason = COUPLING_SOLVE_OK; bool membership_changed = false; (void)reason; (void)membership_changed;
     float hold0 = solve_hold_for_zone(&s_exec.zones[0], 0, setpoint_c, ambient_c, &used_matrix, &infeasible, &reason, &membership_changed);
     TEST_CHECK(used_matrix, "the reduced 2-zone system is still well-conditioned and must engage the solve");
-    TEST_CHECK_NEAR(hold0, 0.426247, 1e-4, "zone 0's hold must match the 2x2 reduced-system solution");
+    TEST_CHECK_NEAR(hold0, 0.346937, 1e-4, "zone 0's hold must match the 2x2 reduced-system solution");
 
     float hold2 = solve_hold_for_zone(&s_exec.zones[2], 2, setpoint_c, ambient_c, &used_matrix, &infeasible, &reason, &membership_changed);
     TEST_CHECK(used_matrix, "zone 2's own reduced-system solve must also engage");
-    TEST_CHECK_NEAR(hold2, 0.572202, 1e-4, "zone 2's hold must match the 2x2 reduced-system solution");
+    TEST_CHECK_NEAR(hold2, 0.651507, 1e-4, "zone 2's hold must match the 2x2 reduced-system solution");
 
     float legacy1 = (setpoint_c - ambient_c) / diag[1];
     float hold1 = solve_hold_for_zone(&s_exec.zones[1], 1, setpoint_c, ambient_c, &used_matrix, &infeasible, &reason, &membership_changed);
@@ -2234,19 +2272,25 @@ static void test_hold_infeasible_setpoint_clamps_and_reports(void)
 {
     TEST_SECTION("solve_hold_for_zone() -- a setpoint combination the coupled system cannot "
                  "physically reach (dT=50C against a matrix whose diagonal alone tops out around "
-                 "22-32C/duty) solves to duties > 1.0 (numpy-verified: u = [1.2246, 1.2240, 1.5802] "
-                 "for dT=50), which must be CLAMPED to 1.0 and REPORTED as infeasible -- not silently "
-                 "returned as an over-1.0 duty, and not silently indistinguishable from a genuinely "
-                 "achievable solve");
+                 "22-32C/duty) solves to duties > 1.0 on zones 1 and 2 (numpy-verified, true "
+                 "[affected][stepped] orientation -- see the block comment above "
+                 "test_hold_matrix_solves_real_measured_gain_matrix(): u = [0.667909, 1.399673, "
+                 "1.961212] for dT=50; zone 0 stays under 1.0 here because it carries this matrix's "
+                 "strongest self-gain, so this test exercises zone 2, the worst overshoot), which "
+                 "must be CLAMPED to 1.0 and REPORTED as infeasible -- not silently returned as an "
+                 "over-1.0 duty, and not silently indistinguishable from a genuinely achievable "
+                 "solve");
     reset_coupling_test_state();
 
-    const float diag[3] = {31.961f, 23.480f, 21.742f};
+    const float diag[3] = {31.9609f, 23.4805f, 21.7422f};
     const float ambient_c = 20.0f, setpoint_c = 70.0f; /* dT = 50 */
     s_exec.ambient_c = ambient_c;
 
-    g_stub_coupling[0][1] = 5.766f;  g_stub_coupling[0][2] = 2.406f;
-    g_stub_coupling[1][0] = 12.059f; g_stub_coupling[1][2] = 4.109f;
-    g_stub_coupling[2][0] = 6.004f;  g_stub_coupling[2][1] = 6.773f;
+    /* [affected][stepped] -- see the orientation block comment above
+     * test_hold_matrix_solves_real_measured_gain_matrix(). */
+    g_stub_coupling[0][1] = 12.0586f; g_stub_coupling[0][2] = 6.0039f;
+    g_stub_coupling[1][0] = 5.7656f;  g_stub_coupling[1][2] = 6.7734f;
+    g_stub_coupling[2][0] = 2.4062f;  g_stub_coupling[2][1] = 4.1094f;
 
     for (uint8_t i = 0; i < 3; i++) {
         s_exec.zones[i].active = true;
@@ -2259,14 +2303,14 @@ static void test_hold_infeasible_setpoint_clamps_and_reports(void)
 
     bool used_matrix = false, infeasible = false;
     coupling_solve_reason_t reason = COUPLING_SOLVE_OK; bool membership_changed = false; (void)reason; (void)membership_changed;
-    float hold0 = solve_hold_for_zone(&s_exec.zones[0], 0, setpoint_c, ambient_c, &used_matrix, &infeasible, &reason, &membership_changed);
+    float hold2 = solve_hold_for_zone(&s_exec.zones[2], 2, setpoint_c, ambient_c, &used_matrix, &infeasible, &reason, &membership_changed);
     TEST_CHECK(used_matrix, "the matrix is well-conditioned -- infeasibility is a clamp, not a fallback");
     TEST_CHECK(infeasible, "an out-of-[0,1] raw solution must be REPORTED as infeasible");
-    TEST_CHECK(hold0 <= 1.0f && hold0 >= 0.0f, "the returned hold value itself must be clamped into [0,1]");
-    TEST_CHECK(hold0 == 1.0f, "this specific case's raw solution (1.2246) clamps to exactly 1.0");
+    TEST_CHECK(hold2 <= 1.0f && hold2 >= 0.0f, "the returned hold value itself must be clamped into [0,1]");
+    TEST_CHECK(hold2 == 1.0f, "this specific case's raw solution (1.961212) clamps to exactly 1.0");
 
-    float u_ff = zone_feedforward(&s_exec.zones[0], 0, setpoint_c, 0.0f);
-    TEST_CHECK(s_exec.zones[0].ff_hold_infeasible, "zone_feedforward()'s own call site must also "
+    float u_ff = zone_feedforward(&s_exec.zones[2], 2, setpoint_c, 0.0f);
+    TEST_CHECK(s_exec.zones[2].ff_hold_infeasible, "zone_feedforward()'s own call site must also "
               "surface the infeasible flag onto s_exec.zones[] for GET /api/profile_exec, not just "
               "the internal solver return");
     TEST_CHECK(isfinite(u_ff) && u_ff >= 0.0f && u_ff <= 1.0f, "the overall u_ff must still respect "
@@ -2408,12 +2452,14 @@ static void test_hold_cache_neither_stale_nor_load_bearing_for_correctness(void)
                  "next call, never serving a stale cached value");
     reset_coupling_test_state();
 
-    const float diag[3] = {31.961f, 23.480f, 21.742f};
+    const float diag[3] = {31.9609f, 23.4805f, 21.7422f};
     const float ambient_c = 20.0f;
     s_exec.ambient_c = ambient_c;
-    g_stub_coupling[0][1] = 5.766f;  g_stub_coupling[0][2] = 2.406f;
-    g_stub_coupling[1][0] = 12.059f; g_stub_coupling[1][2] = 4.109f;
-    g_stub_coupling[2][0] = 6.004f;  g_stub_coupling[2][1] = 6.773f;
+    /* [affected][stepped] -- see the orientation block comment above
+     * test_hold_matrix_solves_real_measured_gain_matrix(). */
+    g_stub_coupling[0][1] = 12.0586f; g_stub_coupling[0][2] = 6.0039f;
+    g_stub_coupling[1][0] = 5.7656f;  g_stub_coupling[1][2] = 6.7734f;
+    g_stub_coupling[2][0] = 2.4062f;  g_stub_coupling[2][1] = 4.1094f;
     for (uint8_t i = 0; i < 3; i++) {
         s_exec.zones[i].active = true; s_exec.zones[i].actual_valid = true;
         s_exec.zones[i].actual_c = 35.0f; s_exec.zones[i].ff_enabled = true;
@@ -2509,14 +2555,16 @@ static void test_hold_negative_dt_matches_legacy_unclamped_not_infeasible(void)
     TEST_CHECK(!infeasible, "a negative hold from a cooling segment is not infeasible");
     TEST_CHECK(reason == COUPLING_SOLVE_FALLBACK_NO_NEIGHBORS, "and the reason must say WHY it's legacy");
 
-    /* Case 2: genuinely coupled (n=3, the real measured matrix), same negative b -- numpy-verified:
-     * G*u = [-10,-10,-10] solves to u = [-0.24493, -0.24480, -0.31605], every component negative. */
+    /* Case 2: genuinely coupled (n=3, the real measured matrix, true [affected][stepped]
+     * orientation -- see the block comment above test_hold_matrix_solves_real_measured_gain_matrix()),
+     * same negative b -- numpy-verified: G*u = [-10,-10,-10] solves to
+     * u = [-0.133582, -0.279935, -0.392242], every component negative. */
     reset_coupling_test_state();
     s_exec.ambient_c = ambient_c;
-    const float diag[3] = {31.961f, 23.480f, 21.742f};
-    g_stub_coupling[0][1] = 5.766f;  g_stub_coupling[0][2] = 2.406f;
-    g_stub_coupling[1][0] = 12.059f; g_stub_coupling[1][2] = 4.109f;
-    g_stub_coupling[2][0] = 6.004f;  g_stub_coupling[2][1] = 6.773f;
+    const float diag[3] = {31.9609f, 23.4805f, 21.7422f};
+    g_stub_coupling[0][1] = 12.0586f; g_stub_coupling[0][2] = 6.0039f;
+    g_stub_coupling[1][0] = 5.7656f;  g_stub_coupling[1][2] = 6.7734f;
+    g_stub_coupling[2][0] = 2.4062f;  g_stub_coupling[2][1] = 4.1094f;
     for (uint8_t i = 0; i < 3; i++) {
         s_exec.zones[i].active = true; s_exec.zones[i].actual_valid = true;
         s_exec.zones[i].actual_c = setpoint_c; s_exec.zones[i].ff_enabled = true;
@@ -2525,7 +2573,7 @@ static void test_hold_negative_dt_matches_legacy_unclamped_not_infeasible(void)
     used_matrix = false; infeasible = false; membership_changed = false; reason = COUPLING_SOLVE_OK;
     float hold0_coupled = solve_hold_for_zone(&s_exec.zones[0], 0, setpoint_c, ambient_c, &used_matrix, &infeasible, &reason, &membership_changed);
     TEST_CHECK(reason == COUPLING_SOLVE_OK, "this matrix is well-conditioned regardless of b's sign");
-    TEST_CHECK_NEAR(hold0_coupled, -0.24493, 1e-3, "must match the numpy-verified negative solution");
+    TEST_CHECK_NEAR(hold0_coupled, -0.133582, 1e-3, "must match the numpy-verified negative solution");
     TEST_CHECK(!infeasible, "a negative solved component must never be reported infeasible -- this is "
               "the exact case the pre-fix clamp-any-out-of-[0,1] logic got wrong");
 }
@@ -2538,18 +2586,21 @@ static void test_hold_partial_matrix_degrades_toward_less_drive_not_more(void)
                  "zones 1/2 need, so its solved hold must be LESS than the pure legacy diagonal value "
                  "-- partial coupling data must never make a zone look like it needs MORE duty than "
                  "the pre-fix code already commanded, only equal or less. Hand-computed (upper "
-                 "triangular: G=[[31.961,5.766,2.406],[0,23.480,0],[0,0,21.742]], b=15 uniformly): "
-                 "u2=15/21.742=0.68984, u1=15/23.480=0.63884, u0=(15-5.766*u1-2.406*u2)/31.961="
-                 "0.30213 (numpy-verified)");
+                 "triangular, true [affected][stepped] orientation -- see the block comment above "
+                 "test_hold_matrix_solves_real_measured_gain_matrix(): "
+                 "G=[[31.9609,12.0586,6.0039],[0,23.4805,0],[0,0,21.7422]], b=15 uniformly): "
+                 "u2=15/21.7422=0.689909, u1=15/23.4805=0.638842, "
+                 "u0=(15-12.0586*u1-6.0039*u2)/31.9609=0.098693 (numpy-verified)");
     reset_coupling_test_state();
 
     const float ambient_c = 20.0f, setpoint_c = 35.0f; /* b = 15 */
     s_exec.ambient_c = ambient_c;
-    const float diag[3] = {31.961f, 23.480f, 21.742f};
+    const float diag[3] = {31.9609f, 23.4805f, 21.7422f};
     /* Only zone 0's row is populated -- zones 1 and 2 report "no row at all"
      * (g_stub_coupling_present false), the exact state an un-autotuned zone
-     * is in. */
-    g_stub_coupling[0][1] = 5.766f; g_stub_coupling[0][2] = 2.406f;
+     * is in. [affected][stepped] -- see the orientation block comment above
+     * test_hold_matrix_solves_real_measured_gain_matrix(). */
+    g_stub_coupling[0][1] = 12.0586f; g_stub_coupling[0][2] = 6.0039f;
     g_stub_coupling_present[1] = false;
     g_stub_coupling_present[2] = false;
 
@@ -2563,7 +2614,7 @@ static void test_hold_partial_matrix_degrades_toward_less_drive_not_more(void)
     coupling_solve_reason_t reason = COUPLING_SOLVE_OK;
     float hold0 = solve_hold_for_zone(&s_exec.zones[0], 0, setpoint_c, ambient_c, &used_matrix, &infeasible, &reason, &membership_changed);
     TEST_CHECK(reason == COUPLING_SOLVE_OK, "a partially-measured but still well-conditioned system must solve");
-    TEST_CHECK_NEAR(hold0, 0.30213, 1e-4, "must match the hand/numpy-computed partial-matrix solution");
+    TEST_CHECK_NEAR(hold0, 0.098693, 1e-4, "must match the hand/numpy-computed partial-matrix solution");
 
     float legacy0 = (setpoint_c - ambient_c) / diag[0];
     TEST_CHECK(hold0 < legacy0, "SAFETY PROPERTY: partial coupling data must degrade toward LESS "
@@ -2580,10 +2631,12 @@ static void setup_membership_transition_zone0(zone_runtime_t **out_z0, float amb
     s_exec.ambient_c = ambient_c;
     s_exec.target_c = setpoint_c;
     s_exec.target_rate_c_per_s = 0.0f;
-    const float diag[3] = {31.961f, 23.480f, 21.742f};
-    g_stub_coupling[0][1] = 5.766f;  g_stub_coupling[0][2] = 2.406f;
-    g_stub_coupling[1][0] = 12.059f; g_stub_coupling[1][2] = 4.109f;
-    g_stub_coupling[2][0] = 6.004f;  g_stub_coupling[2][1] = 6.773f;
+    const float diag[3] = {31.9609f, 23.4805f, 21.7422f};
+    /* [affected][stepped] -- see the orientation block comment above
+     * test_hold_matrix_solves_real_measured_gain_matrix(). */
+    g_stub_coupling[0][1] = 12.0586f; g_stub_coupling[0][2] = 6.0039f;
+    g_stub_coupling[1][0] = 5.7656f;  g_stub_coupling[1][2] = 6.7734f;
+    g_stub_coupling[2][0] = 2.4062f;  g_stub_coupling[2][1] = 4.1094f;
     for (uint8_t i = 0; i < 3; i++) {
         s_exec.zones[i].active = true; s_exec.zones[i].actual_valid = true;
         s_exec.zones[i].actual_c = setpoint_c;
@@ -2603,10 +2656,12 @@ static void test_hold_membership_change_gaining_a_neighbor_reseeds_smoothly(void
 {
     TEST_SECTION("pid_family_zone_tick() -- blocker 2 (membership-transition damping), the direction "
                  "the reseed can fully absorb: zone 1 HEALING back into zone 0's system (2-zone {0,2} "
-                 "settled duty ~0.42625 -> 3-zone hold target drops to 0.36739, a DOWNWARD step) is "
-                 "reseeded to reproduce the pre-transition commanded duty bumplessly, because the "
-                 "needed integral correction is towards zero, which the existing anti-windup floor "
-                 "(integral >= 0, see seed_bumpless_with_ff()'s own doc comment) never blocks");
+                 "settled duty ~0.346937 -> 3-zone hold target drops to 0.200373, a DOWNWARD step, "
+                 "true [affected][stepped] matrix orientation -- see the block comment above "
+                 "test_hold_matrix_solves_real_measured_gain_matrix()) is reseeded to reproduce the "
+                 "pre-transition commanded duty bumplessly, because the needed integral correction is "
+                 "towards zero, which the existing anti-windup floor (integral >= 0, see "
+                 "seed_bumpless_with_ff()'s own doc comment) never blocks");
     zone_runtime_t *z0 = NULL;
     setup_membership_transition_zone0(&z0, 20.0f, 35.0f);
     s_exec.zones[1].faulted = true; /* start EXCLUDED -- the {0,2} 2-zone system */
@@ -2619,14 +2674,14 @@ static void test_hold_membership_change_gaining_a_neighbor_reseeds_smoothly(void
                                  * -- seed_bumpless_with_ff() reads z->duty, not the return value,
                                  * so a direct pid_family_zone_tick() test must mirror that write. */
     }
-    TEST_CHECK_NEAR(duty_before, 0.42625, 0.01, "test setup sanity: duty must have settled near the "
+    TEST_CHECK_NEAR(duty_before, 0.346937, 0.01, "test setup sanity: duty must have settled near the "
                     "2-zone steady-state hold before healing");
 
     s_exec.zones[1].faulted = false; /* zone 1 heals -- system grows back to {0,1,2} */
     float duty_after = pid_family_zone_tick(z0, 0, &z0->pid_cfg, true, 1.0f, 1000u, &want_relay_on);
     z0->duty = duty_after;
 
-    TEST_CHECK_NEAR(z0->last_pid_terms.ff, 0.36739, 0.01, "this tick's own FF term must already "
+    TEST_CHECK_NEAR(z0->last_pid_terms.ff, 0.200373, 0.01, "this tick's own FF term must already "
               "reflect the NEW (healed, 3-zone) system -- proves the membership change was detected "
               "and used, not merely that duty happens to look stable");
     TEST_CHECK(fabsf(duty_after - duty_before) < 0.02f, "COMMANDED DUTY must not step across a "
@@ -2637,7 +2692,9 @@ static void test_hold_membership_change_gaining_a_neighbor_reseeds_smoothly(void
 static void test_hold_membership_change_losing_a_neighbor_reseeds_when_headroom_exists(void)
 {
     TEST_SECTION("pid_family_zone_tick() -- blocker 2, the UPWARD direction (zone 1 dropping out, "
-                 "3-zone hold 0.36739 -> 2-zone hold 0.42625, the coordinator's own example), made "
+                 "3-zone hold 0.200373 -> 2-zone hold 0.346937, true [affected][stepped] matrix "
+                 "orientation -- see the block comment above "
+                 "test_hold_matrix_solves_real_measured_gain_matrix()), made "
                  "genuinely DISCRIMINATING (Opus review, test-honesty item: the first version of "
                  "this test used actual_c==target_c throughout, which pins the PID integral at "
                  "exactly 0 for the WHOLE run regardless of whether the reseed runs at all -- "
@@ -2668,21 +2725,22 @@ static void test_hold_membership_change_losing_a_neighbor_reseeds_when_headroom_
      * against a small heat-loss bias. actual_c stays exactly on setpoint
      * (kp=0 anyway, so P contributes nothing either way) so duty is exactly
      * P(0)+I+D(0)+FF = integral*ki + ff. */
-    z0->pid_state.integral = 5.0f;
+    z0->pid_state.integral = 10.0f;
     float duty_before = pid_family_zone_tick(z0, 0, &z0->pid_cfg, true, 1.0f, 1000u, &want_relay_on);
     z0->duty = duty_before;
-    float expect_duty_before = 5.0f * z0->pid_cfg.ki + 0.36739f;
+    float expect_duty_before = 10.0f * z0->pid_cfg.ki + 0.200373f;
     TEST_CHECK_NEAR(duty_before, expect_duty_before, 0.005, "test setup sanity: duty must reflect the "
-                    "hand-set nonzero integral plus the 3-zone hold (5.0*0.02 + 0.36739 = 0.46739)");
+                    "hand-set nonzero integral plus the 3-zone hold (10.0*0.02 + 0.200373 = 0.400373 "
+                    "-- comfortably above the 2-zone target 0.346937 below, so real headroom exists)");
 
     s_exec.zones[1].faulted = true; /* the transition under test */
     float duty_after = pid_family_zone_tick(z0, 0, &z0->pid_cfg, true, 1.0f, 1000u, &want_relay_on);
     z0->duty = duty_after;
 
-    TEST_CHECK_NEAR(z0->last_pid_terms.ff, 0.42625, 0.01, "this tick's own FF term must already "
+    TEST_CHECK_NEAR(z0->last_pid_terms.ff, 0.346937, 0.01, "this tick's own FF term must already "
               "reflect the NEW (2-zone) system -- proves the membership change was detected");
-    /* duty_before (0.46739) comfortably exceeds the new 2-zone target
-     * (0.42625) -- the anti-windup floor is NOT hit here, so the reseed can
+    /* duty_before (0.400373) comfortably exceeds the new 2-zone target
+     * (0.346937) -- the anti-windup floor is NOT hit here, so the reseed can
      * fully absorb the step, discriminating this test from a stub that
      * disables the reseed (see the negative-test evidence in the report). */
     TEST_CHECK(fabsf(duty_after - duty_before) < 0.02f, "COMMANDED DUTY must not step across this "

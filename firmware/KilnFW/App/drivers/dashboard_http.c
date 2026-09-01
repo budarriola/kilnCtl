@@ -1353,7 +1353,7 @@ static esp_err_t profile_exec_status_get_handler(httpd_req_t *req)
      * render for both this and /api/control's buffer, so the next field
      * added to either JSON shape gets caught here instead of shipping
      * silently truncated again. */
-    char json[960 + MAX31856_CHANNEL_COUNT * 512];
+    char json[DASHBOARD_JSON_PROFILE_EXEC_BUF_SIZE];
     int n = snprintf(json, sizeof(json),
         "{\"state\":\"%s\",\"profile_id\":%u,\"profile_name\":\"%s\",\"zone_mask\":%u,"
         "\"segment_index\":%u,\"segment_count\":%u,\"dwelling\":%s,\"target_c\":%.2f,"
@@ -1502,7 +1502,7 @@ static esp_err_t control_status_get_handler(httpd_req_t *req)
      * test_control_status_json_is_complete_and_well_formed_at_3_zones() --
      * this is the field that test exists to catch the next time someone
      * adds a key here without re-checking this budget. */
-    char json[256 + MAX31856_CHANNEL_COUNT * 448];
+    char json[DASHBOARD_JSON_CONTROL_BUF_SIZE];
     int n = snprintf(json, sizeof(json),
         "{\"state\":\"%s\",\"zone_mask\":%u,\"target_c\":%.2f,\"ramp_lock_held\":%s,"
         "\"ramp_lock_lagging_mask\":%u,",
