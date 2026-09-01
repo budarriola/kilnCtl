@@ -993,6 +993,41 @@ reach it, rejected two consecutive correct fits.
 not kiln-temperature behavior. Section 2a's `T^4` radiative caveat stays open
 until a real firing.
 
+### Result — the coupled climb term, measured A/B on hardware 2026-09-01
+
+Same profile (#7, 45 C then 60 C, three zones), same kiln, same gains, one
+changed term. The second run started 9 C colder and therefore ran longer,
+which is exactly why the comparison metric is normalized by duration and span.
+
+| zone | normalized IAE before | after | change |
+|---|---|---|---|
+| 0 | 0.0737 | 0.0348 | -53% |
+| 1 | 0.0580 | 0.0227 | -61% |
+| 2 | 0.0644 | 0.0373 | -42% |
+
+Max overshoot 5.34 / 4.51 / 4.79 C fell to 2.16 / 2.13 / 2.96 C, and the mean
+error moved from a consistent +1 C hot bias to centred (-0.33 / +0.03 / +0.80).
+The independent PC-side analysis agreed: RMS 2.17 -> 1.23, 1.71 -> 0.90,
+1.78 -> 1.31 C.
+
+**What remains, and it is a different problem.** The error is no longer biased
+hot; over- and undershoot are now comparable, which is what a centred
+feedforward looks like. Two residuals:
+
+1. **Ramp-onset lag.** The coupled solve treats neighbour heat as arriving
+   instantly, but the off-diagonal time constants are 620-730 s against 264 s
+   on the diagonal, with 135-158 s of dead time against 53 s. Early in a ramp
+   it counts on help that has not landed and under-drives by 1-2 C, closing as
+   the ramp proceeds. Lead compensation on the coupling term is the fix; it was
+   deliberately not attempted in the same change, so that this measurement
+   would mean something.
+2. **Zone 2 holds ~1.4 C above target for entire dwells** and never settles
+   inside +/-1.0 C, in both segments, while its ramp tracking is excellent
+   (mean +0.01 and +0.27). Large dwell error with small ramp error indicts the
+   integral path, not the feedforward. Suspicious detail: it holds 0.74 duty
+   while sitting ABOVE target, so something keeps the commanded duty up rather
+   than the integrator simply being slow. Under investigation.
+
 ### Phase 7a — per-zone tuning quality factors
 
 Accumulated over a whole profile run, shown per zone on the thermocouples page
