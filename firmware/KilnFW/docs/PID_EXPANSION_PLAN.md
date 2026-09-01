@@ -73,11 +73,18 @@ analyzer's duty-off-to-peak lag is `n/a` for 5 of 6 transitions), peak timing
 tracks each zone's own dead time at 1.5–2×, and zone 2's second-dwell peak lines
 up with the cross-zone dead time while its neighbours are still driving.
 
-- [ ] **Terminal ease-off** — taper the commanded rate as the target is
-      approached so the plant arrives with little stored rate. The one untried
-      direction; under evaluation. Must be a function of remaining distance and
-      the zone's own dynamics, not a constant fitted to this kiln, and must
-      still arrive at setpoint rather than stalling short.
+- [~] **Terminal ease-off** — taper the commanded rate as the target is
+      approached so the plant arrives with little stored rate. Simulated
+      2026-09-01 with two shapes (linear, cosine) and two windows (1×L, 2×L,
+      per-zone dead time, no hand constant): **worse on z0 and z1 in all four
+      configurations, monotonically worse with a wider window**, and at best a
+      wash on z2 (4% less overshoot for nearly double the settle time). Not
+      implemented.
+      **But treat this verdict as weak.** The simulator cannot reproduce
+      hardware ramp tracking at all — it shows 5–7 °C mean ramp error where the
+      real kiln now holds ~0.03 °C, and retuning its gains barely moved that.
+      Its "no" is a reason not to prioritize ease-off, not evidence the idea is
+      wrong. See §3.4 — the simulator is now the blocker.
 
 ### 3.2 Zone 2's model over-predicts its hold duty
 
@@ -110,14 +117,37 @@ HTTP endpoint and zones-page UI.
       in adaptive_tune's own NVS namespace (`adap_tune`) because `zones_http.c`
       was held by another agent when it was written.
 
-### 3.4 Documentation
+### 3.4 The simulator is the blocker for further control work
+
+Every remaining control idea is gated on being able to predict its effect before
+spending a 35-minute firing on it, and the current simulator cannot do that. Its
+record across this session: it predicted 44–53% ramp recovery where hardware
+delivered essentially full recovery; it favoured the climb-decay change that
+hardware then measured as worse on every zone; and it shows 5–7 °C ramp error on
+a controller that actually tracks to ~0.03 °C. It is useful for mechanism
+comparisons and untrustworthy for magnitudes, which is not enough to decide a
+change on.
+
+- [ ] **Calibrate the simulator against the logged hardware runs.** Five full
+      profile-7 captures now exist with per-zone temperature, duty, target and
+      guard state at 10 s resolution, spanning four different firmware builds
+      whose control differences are known exactly. That is a real validation
+      set. Fit the simulator until it reproduces the measured runs — including
+      the ramp tracking it currently misses by two orders of magnitude — and
+      report per-run error against each capture, rather than tuning until one
+      run looks right.
+- [ ] Once it reproduces known runs, re-run the rejected levers through it. A
+      calibrated simulator that still says no to terminal ease-off is a real
+      no; the current one saying no means little.
+
+### 3.5 Documentation
 
 - [ ] `docs/PID_CONTROL.md`: a "Fuzzy adjustment" section matching the existing
       "Feedforward" one — formula, when it is off, and bench measurements.
 - [ ] `docs/PID_CONTROL.md`: tuning-rule comparison table. Deliberately deferred
       until bench data exists; do not write it from the literature alone.
 
-### 3.5 Validation gap
+### 3.6 Validation gap
 
 Everything above is measured on a bench rig spanning 0–80 °C. Radiative transfer
 goes as `T⁴`, so the plant at kiln temperatures is not the plant identified here.
