@@ -58,17 +58,10 @@
 
 const char *TAG = "zones_http";
 
-#define NVS_NAMESPACE "kiln_cfg"
-#define NVS_KEY_ZONES "zones_cfg"
-
-/* kiln_nvs is the 2026-08-13 split target for zones/rules/relay_cycles/
- * run_state (see partitions.csv and TODO.md 8.1); each module manages its own
- * migration and partition init independently rather than assuming another
- * module already brought the partition up. NVS_DEFAULT_PART_NAME (from
- * nvs_flash.h, expands to "nvs") is the old, still-live home this module's
- * data used to persist to, kept readable for the one-time migration below and
- * for firmware rollback. */
-#define KILN_NVS_PARTITION "kiln_nvs"
+/* NVS_NAMESPACE/NVS_KEY_ZONES/KILN_NVS_PARTITION moved to
+ * zones_http_internal.h -- zones_config_store.c (which now owns
+ * nvs_partition_init()/nvs_load()/nvs_save()) needs them too, not just the
+ * zones_http_start() call site below that still names KILN_NVS_PARTITION. */
 
 /* Bump whenever zones_cfg_t's on-flash layout changes; see nvs_load_from().
  * 3 -> 4 (2026-08-17, TODO.md 10.8): added zone_cfg_t::thermo_mask. Same
@@ -363,26 +356,11 @@ extern const uint8_t safety_config_page_html_gz_end[] asm("_binary_safety_config
  * below deliberately keep their ORIGINAL field order (they must, byte-for-byte,
  * to correctly interpret an old blob). */
 
-/* application/x-www-form-urlencoded whole-page submit: thermo_count,
- * relay_count, and 27 fields per zone (name/relay_mask/thermo_mask/cal/kp/
- * ki/kd/ramp/sanity/mode/maxtemp/mintemp/window/minon/minoff/xzone/k/tau/
- * deadtime plus the 8 guard-threshold overrides below) across up to
- * MAX31856_CHANNEL_COUNT zones. Generous headroom over what a legitimate
- * 3-zone submission needs -- checked against Content-Length before a single
- * byte is read, same discipline as every other handler in this codebase.
- * Bumped 2048->2560 when heater_window_ms/min_on_ms/min_off_ms were added,
- * 2560->2816 when cross_zone_max_delta_c was, 2816->3200 when the three
- * plant-model fields were, 3200->4096 when the 8 guard-threshold overrides
- * were: worst case those add 8 "z0_<name>=" keys plus separators and up to
- * zones_config_json_parse_float_field()'s 23-char value each, ~250 bytes a zone, ~750 across
- * three. z%u_thermo_mask (TODO.md 10.8) is a single 0-255 u8 field, well
- * under 20 bytes a zone even with its key name -- left inside the existing
- * 4096 without another bump; the three-zone worst case is nowhere near it.
- * z%u_tctype (2026-08-21) and the top-level safety_tc_type are each a
- * single 0-7 u8 field, smaller still -- also left inside the existing 4096.
- * z%u_ct_mask (2026-08-27) is the same shape as z%u_thermo_mask, similarly
- * left inside 4096. */
-#define ZONES_BODY_MAX 4096
+/* ZONES_BODY_MAX moved to zones_http_internal.h (unchanged) --
+ * zones_http_handlers.c's zones_post_handler() is the only remaining user,
+ * but the macro itself lives in the internal header now, alongside the
+ * other constants that moved out of this file's original top-of-file
+ * section during the 2026-09-01 split. */
 
 zones_state_t s_zones;
 
