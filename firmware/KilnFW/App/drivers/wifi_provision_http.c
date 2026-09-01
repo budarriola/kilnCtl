@@ -858,8 +858,8 @@ esp_err_t wifi_provision_http_start(void)
      * because after three prose-comment-only bumps still missing the real
      * count, and now a fourth, a comment alone has a 0% success rate on
      * this exact bug. */
-    /* 2026-09-01: raised 95 -> 108. log_http.c (/api/logs/*, on-flash log
-     * storage) added 2 routes and an in-flight adaptive-tuning endpoint
+    /* 2026-09-01: raised 95 -> 108. log_http.c (/api/logs endpoints, on-flash
+     * log storage) added 2 routes and an in-flight adaptive-tuning endpoint
      * (adaptive_tune_http.c) added 2 more, taking the real count to 99 --
      * 4 over the 95 cap. tools/check_uri_handler_cap.ps1 caught this exactly
      * as designed (99 routes counted vs cap 95) rather than letting
