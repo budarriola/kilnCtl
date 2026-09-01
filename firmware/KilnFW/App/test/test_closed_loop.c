@@ -52,7 +52,7 @@ static float fuzzy_tick(pid_state_t *state, const pid_cfg_t *base_cfg, uint8_t s
     adjusted.kp = kp;
     adjusted.ki = ki;
     adjusted.kd = kd;
-    return pid_update(state, &adjusted, setpoint, measurement, dt_s, ff_u);
+    return pid_update(state, &adjusted, setpoint, measurement, dt_s, ff_u, ff_u);
 }
 
 /* Warm-starts a plant already close to a setpoint (element_c/sensor_c/the
@@ -111,7 +111,7 @@ void run_test_closed_loop(void)
     int trip_step = -1;
 
     for (int i = 0; i < steps; i++) {
-        float duty = pid_update(&pid_state, &pid_cfg, setpoint_c, plant.sensor_c, dt_s, 0.0f);
+        float duty = pid_update(&pid_state, &pid_cfg, setpoint_c, plant.sensor_c, dt_s, 0.0f, 0.0f);
         bool relay_on = heater_output_duty(&heater_state, &heater_cfg, duty, dt_ms);
 
         thermal_guard_input_t in = {
@@ -143,7 +143,7 @@ void run_test_closed_loop(void)
         sim_plant_reset(&p2, &plant_cfg);
         pid_state_t pid2;
         pid_reset(&pid2);
-        float duty = pid_update(&pid2, &pid_cfg, setpoint_c, p2.sensor_c, dt_s, 0.0f);
+        float duty = pid_update(&pid2, &pid_cfg, setpoint_c, p2.sensor_c, dt_s, 0.0f, 0.0f);
         TEST_CHECK_NEAR(duty, 1.0f, 1e-6, "280C below setpoint (outside pid_range_c) commands full duty");
     }
 
@@ -201,8 +201,8 @@ void run_test_closed_loop(void)
         pid_reset(&s_b);
         bool bit_identical = true;
         for (int i = 0; i < 200; i++) {
-            float u_a = pid_update(&s_a, &pid_cfg, setpoint_c, p_a.sensor_c, dt_s, 0.0f);
-            float u_b = pid_update(&s_b, &pid_cfg, setpoint_c, p_b.sensor_c, dt_s, 0.0f);
+            float u_a = pid_update(&s_a, &pid_cfg, setpoint_c, p_a.sensor_c, dt_s, 0.0f, 0.0f);
+            float u_b = pid_update(&s_b, &pid_cfg, setpoint_c, p_b.sensor_c, dt_s, 0.0f, 0.0f);
             if (u_a != u_b) {
                 bit_identical = false;
             }
@@ -228,7 +228,7 @@ void run_test_closed_loop(void)
         float prev_ki = 0.0f;
         bool bit_identical = true;
         for (int i = 0; i < 200; i++) {
-            float u_classic = pid_update(&s_classic, &pid_cfg, setpoint_c, p_classic.sensor_c, dt_s, 0.0f);
+            float u_classic = pid_update(&s_classic, &pid_cfg, setpoint_c, p_classic.sensor_c, dt_s, 0.0f, 0.0f);
             float u_fuzzy0 = fuzzy_tick(&s_fuzzy0, &pid_cfg, 0, &prev_ki, setpoint_c, p_fuzzy0.sensor_c, dt_s, 0.0f);
             if (u_classic != u_fuzzy0) {
                 bit_identical = false;
@@ -253,7 +253,7 @@ void run_test_closed_loop(void)
         float prev_ki = 0.0f;
         bool ever_diverged = false;
         for (int i = 0; i < 200; i++) {
-            float u_classic = pid_update(&s_classic, &pid_cfg, setpoint_c, p_classic.sensor_c, dt_s, 0.0f);
+            float u_classic = pid_update(&s_classic, &pid_cfg, setpoint_c, p_classic.sensor_c, dt_s, 0.0f, 0.0f);
             float u_fuzzy100 = fuzzy_tick(&s_fuzzy100, &pid_cfg, 100, &prev_ki, setpoint_c, p_fuzzy100.sensor_c, dt_s, 0.0f);
             if (u_classic != u_fuzzy100) {
                 ever_diverged = true;

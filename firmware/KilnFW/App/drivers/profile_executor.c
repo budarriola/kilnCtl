@@ -668,10 +668,24 @@ static float solve_climb_for_zone(const zone_runtime_t *z, uint8_t zi, float rat
  * The SUM is clamped, not each term: on a cooling ramp the second term is
  * legitimately negative and is supposed to reduce the hold duty below what a
  * steady hold would need. Clamping the terms separately would throw that away
- * and hold the kiln up through a controlled cool. */
-static float zone_feedforward(const zone_runtime_t *z, uint8_t zi, float setpoint_c, float rate_c_per_s)
+ * and hold the kiln up through a controlled cool.
+ *
+ * out_hold (optional, NULL-able): the steady-state HOLD-only portion of the
+ * returned total -- everything EXCEPT the climb/ramp term, i.e. `hold` plus
+ * the Phase-3b cross-zone coupling correction below (that correction is a
+ * steady-state term, not a rate term -- see its own comment). Deliberately
+ * NOT independently clamped to [0,1]: only the joint hold+climb sum is
+ * clamped (matching this function's own return value), so a caller reading
+ * *out_hold directly can see a value >1.0 or <0.0 when the joint sum needed
+ * clamping -- e.g. a cooling ramp where hold alone exceeds 1.0 but
+ * hold+climb does not. This is the 2026-08-31 "hold-only integral floor" fix
+ * (pid.c's floor is -ff_hold, not -ff_u, so it never cancels the climb
+ * term) -- see pid.h's top-of-file doc comment for the full rationale. */
+static float zone_feedforward(const zone_runtime_t *z, uint8_t zi, float setpoint_c, float rate_c_per_s,
+                              float *out_hold)
 {
     if (!z->ff_enabled) {
+        if (out_hold) *out_hold = 0.0f;
         return 0.0f;
     }
     bool hold_used_matrix = false, hold_infeasible = false, hold_membership_changed = false;
@@ -692,7 +706,11 @@ static float zone_feedforward(const zone_runtime_t *z, uint8_t zi, float setpoin
     coupling_solve_reason_t climb_reason = COUPLING_SOLVE_OK;
     float climb = solve_climb_for_zone(z, zi, rate_c_per_s, &climb_used_matrix, &climb_infeasible,
                                        &climb_reason, &climb_membership_changed);
-    float u_ff = hold + climb;
+    /* hold_total accumulates `hold` plus the Phase-3b cross-zone coupling
+     * correction below -- everything that belongs on the floor's hold side,
+     * never climb. `u_ff` (climb included) is still what gets clamped and
+     * returned; hold_total is what *out_hold reports, unclamped. */
+    float hold_total = hold;
 
     /* Diagnostics written to s_exec.zones[zi], not through `z` -- z is const
      * here, and (see solve_hold_for_zone()'s doc comment) is not guaranteed
@@ -870,14 +888,20 @@ static float zone_feedforward(const zone_runtime_t *z, uint8_t zi, float setpoin
                 if (dev > bound) dev = bound;
                 else if (dev < -bound) dev = -bound;
             }
-            u_ff -= (gd_ij / z->ff_k_dc) * dev;
+            hold_total -= (gd_ij / z->ff_k_dc) * dev;
         }
     }
 
+    float u_ff = hold_total + climb;
     if (!isfinite(u_ff)) {
+        if (out_hold) *out_hold = 0.0f;
         return 0.0f; /* belt-and-braces: a non-finite setpoint can only come
                       * from a corrupted profile, but it must not become duty */
     }
+    /* out_hold is reported here, from the unclamped hold_total, BEFORE the
+     * joint clamp below touches u_ff -- see this function's own doc comment
+     * for why it must stay unclamped. */
+    if (out_hold) *out_hold = hold_total;
     if (u_ff < 0.0f) u_ff = 0.0f;
     if (u_ff > 1.0f) u_ff = 1.0f;
     return u_ff;
@@ -931,8 +955,9 @@ static float zone_feedforward(const zone_runtime_t *z, uint8_t zi, float setpoin
  * for the analogous problem on the local sensor. */
 static void seed_bumpless_with_ff(zone_runtime_t *z, uint8_t zi, float u_desired)
 {
-    float u_ff = zone_feedforward(z, zi, s_exec.target_c, s_exec.target_rate_c_per_s);
-    pid_seed_bumpless(&z->pid_state, &z->pid_cfg, s_exec.target_c, z->actual_c, u_desired, u_ff);
+    float ff_hold = 0.0f;
+    float u_ff = zone_feedforward(z, zi, s_exec.target_c, s_exec.target_rate_c_per_s, &ff_hold);
+    pid_seed_bumpless(&z->pid_state, &z->pid_cfg, s_exec.target_c, z->actual_c, u_desired, u_ff, ff_hold);
 }
 
 /* Turns zone zi's relay(s) on/off as one group -- see profile_executor.h.
@@ -2292,7 +2317,8 @@ static float pid_family_zone_tick(zone_runtime_t *z, uint8_t zi, const pid_cfg_t
          * here is what /api/control reports as "ff", so the operator can
          * read the P/I/D/FF split and see how much of the duty is the model
          * and how much is the loop correcting it. */
-        float u_ff = zone_feedforward(z, zi, s_exec.target_c, s_exec.target_rate_c_per_s);
+        float ff_hold = 0.0f;
+        float u_ff = zone_feedforward(z, zi, s_exec.target_c, s_exec.target_rate_c_per_s, &ff_hold);
         /* Opus review, blocker 2: the coupled system's MEMBERSHIP (which
          * zones are in it, or whether this zone qualifies at all) can change
          * every tick -- heat_blocked alone is refreshed unconditionally each
@@ -2333,7 +2359,7 @@ static float pid_family_zone_tick(zone_runtime_t *z, uint8_t zi, const pid_cfg_t
             z->fuzzy_prev_effective_ki = z->pid_cfg.ki;
         }
         duty = pid_update_terms(&z->pid_state, cfg, s_exec.target_c, z->actual_c, dt_s,
-                                u_ff, &z->last_pid_terms);
+                                u_ff, ff_hold, &z->last_pid_terms);
     }
     /* TODO.md 6A.2's cooling-limited diagnostic. Checked against the RAW
      * duty pid_update_terms() just returned, before the load-cap boost

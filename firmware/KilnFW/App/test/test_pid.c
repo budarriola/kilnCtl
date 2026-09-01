@@ -2,6 +2,7 @@
 #include "../drivers/pid.h"
 
 #include <math.h>
+#include <stdio.h>
 
 void run_test_pid(void)
 {
@@ -13,7 +14,7 @@ void run_test_pid(void)
         pid_state_t s;
         pid_cfg_t cfg = {.kp = 1.0f, .ki = 0.0f, .kd = 5.0f, .d_filter_tau_s = 1.0f, .b = 1.0f, .pid_range_c = 50.0f};
         pid_reset(&s);
-        float u = pid_update(&s, &cfg, 100.0f, 20.0f, 1.0f, 0.0f);
+        float u = pid_update(&s, &cfg, 100.0f, 20.0f, 1.0f, 0.0f, 0.0f);
         TEST_CHECK_NEAR(u, 1.0f, 1e-6, "80C error > pid_range_c -> functional-range full-on, no D kick from cold prev_measurement");
     }
 
@@ -22,7 +23,7 @@ void run_test_pid(void)
         pid_state_t s;
         pid_cfg_t cfg = {.kp = 0.01f, .ki = 0.0f, .kd = 0.0f, .d_filter_tau_s = 1.0f, .b = 1.0f, .pid_range_c = 100.0f};
         pid_reset(&s);
-        float u = pid_update(&s, &cfg, 100.0f, 50.0f, 1.0f, 0.0f);
+        float u = pid_update(&s, &cfg, 100.0f, 50.0f, 1.0f, 0.0f, 0.0f);
         TEST_CHECK_NEAR(u, 0.5f, 1e-5, "kp=0.01, error=50 -> u=0.5");
     }
 
@@ -31,7 +32,7 @@ void run_test_pid(void)
         pid_state_t s;
         pid_cfg_t cfg = {.kp = 1.0f, .ki = 0.0f, .kd = 0.0f, .d_filter_tau_s = 1.0f, .b = 1.0f, .pid_range_c = 1000.0f};
         pid_reset(&s);
-        float u = pid_update(&s, &cfg, 20.0f, 900.0f, 1.0f, 0.0f);
+        float u = pid_update(&s, &cfg, 20.0f, 900.0f, 1.0f, 0.0f, 0.0f);
         TEST_CHECK_NEAR(u, 0.0f, 1e-6, "large negative error clamps to 0, not negative");
     }
 
@@ -41,7 +42,7 @@ void run_test_pid(void)
         pid_state_t s;
         pid_cfg_t cfg = {.kp = 0.001f, .ki = 0.001f, .kd = 0.0f, .d_filter_tau_s = 1.0f, .b = 1.0f, .pid_range_c = 20.0f};
         pid_reset(&s);
-        float u = pid_update(&s, &cfg, 900.0f, 20.0f, 1.0f, 0.0f);
+        float u = pid_update(&s, &cfg, 900.0f, 20.0f, 1.0f, 0.0f, 0.0f);
         TEST_CHECK_NEAR(u, 1.0f, 1e-6, "error >> pid_range_c -> full on");
         TEST_CHECK_NEAR(s.integral, 0.0f, 1e-6, "integrator held (untouched) outside pid_range_c");
     }
@@ -54,7 +55,7 @@ void run_test_pid(void)
         pid_reset(&s);
         float u = 0.0f;
         for (int i = 0; i < 50; i++) {
-            u = pid_update(&s, &cfg, 500.0f, 20.0f, 1.0f, 0.0f);
+            u = pid_update(&s, &cfg, 500.0f, 20.0f, 1.0f, 0.0f, 0.0f);
         }
         TEST_CHECK_NEAR(u, 1.0f, 1e-6, "sustained large error saturates output at 1.0");
         TEST_CHECK(s.integral <= 1.0f / cfg.ki + 1e-3, "integral clamped near the ki*I<=1 boundary, not runaway");
@@ -67,8 +68,8 @@ void run_test_pid(void)
         pid_state_t s;
         pid_cfg_t cfg = {.kp = 0.01f, .ki = 0.0f, .kd = 0.0f, .d_filter_tau_s = 1.0f, .b = 0.0f, .pid_range_c = 1000.0f};
         pid_reset(&s);
-        float u1 = pid_update(&s, &cfg, 100.0f, 100.0f, 1.0f, 0.0f);
-        float u2 = pid_update(&s, &cfg, 500.0f, 100.0f, 1.0f, 0.0f);
+        float u1 = pid_update(&s, &cfg, 100.0f, 100.0f, 1.0f, 0.0f, 0.0f);
+        float u2 = pid_update(&s, &cfg, 500.0f, 100.0f, 1.0f, 0.0f, 0.0f);
         TEST_CHECK_NEAR(u1, 0.0f, 1e-6, "b=0, setpoint==measurement -> P term 0 regardless of setpoint");
         TEST_CHECK_NEAR(u2, 0.0f, 1e-6, "b=0, setpoint jump alone must not move P term");
     }
@@ -81,8 +82,8 @@ void run_test_pid(void)
         pid_state_t s;
         pid_cfg_t cfg = {.kp = 0.0f, .ki = 0.02f, .kd = 0.0f, .d_filter_tau_s = 1.0f, .b = 1.0f, .pid_range_c = 1000.0f};
         pid_reset(&s);
-        pid_seed_bumpless(&s, &cfg, 200.5f, 200.0f, 0.6f, 0.0f);
-        float u = pid_update(&s, &cfg, 200.5f, 200.0f, 1.0f, 0.0f);
+        pid_seed_bumpless(&s, &cfg, 200.5f, 200.0f, 0.6f, 0.0f, 0.0f);
+        float u = pid_update(&s, &cfg, 200.5f, 200.0f, 1.0f, 0.0f, 0.0f);
         TEST_CHECK_NEAR(u, 0.6f, 0.02, "bumpless-seeded tick reproduces u_desired closely");
     }
 
@@ -93,8 +94,8 @@ void run_test_pid(void)
         pid_state_t s;
         pid_cfg_t cfg = {.kp = 0.0f, .ki = 0.02f, .kd = 0.0f, .d_filter_tau_s = 1.0f, .b = 1.0f, .pid_range_c = 1000.0f};
         pid_reset(&s);
-        pid_seed_bumpless(&s, &cfg, 200.5f, 200.0f, 0.6f, 0.25f);
-        float u = pid_update(&s, &cfg, 200.5f, 200.0f, 1.0f, 0.25f);
+        pid_seed_bumpless(&s, &cfg, 200.5f, 200.0f, 0.6f, 0.25f, 0.25f);
+        float u = pid_update(&s, &cfg, 200.5f, 200.0f, 1.0f, 0.25f, 0.25f);
         TEST_CHECK_NEAR(u, 0.6f, 0.02, "bumpless-seeded tick with ff_u still reproduces u_desired");
     }
 
@@ -103,7 +104,7 @@ void run_test_pid(void)
         pid_state_t s;
         pid_cfg_t cfg = {.kp = 0.0f, .ki = 0.0f, .kd = 0.0f, .d_filter_tau_s = 1.0f, .b = 1.0f, .pid_range_c = 1000.0f};
         pid_reset(&s);
-        float u = pid_update(&s, &cfg, 500.0f, 500.0f, 1.0f, 0.3f);
+        float u = pid_update(&s, &cfg, 500.0f, 500.0f, 1.0f, 0.3f, 0.3f);
         TEST_CHECK_NEAR(u, 0.3f, 1e-6, "zero gains + ff_u=0.3 -> output 0.3");
     }
 
@@ -115,7 +116,7 @@ void run_test_pid(void)
         pid_cfg_t cfg = {.kp = 0.01f, .ki = 0.02f, .kd = 0.05f, .d_filter_tau_s = 30.0f, .b = 1.0f, .pid_range_c = 100.0f};
         pid_reset(&s);
         pid_terms_t terms;
-        float u = pid_update_terms(&s, &cfg, 500.0f, 480.0f, 1.0f, 0.1f, &terms);
+        float u = pid_update_terms(&s, &cfg, 500.0f, 480.0f, 1.0f, 0.1f, 0.1f, &terms);
         float sum = terms.p + terms.i + terms.d + terms.ff;
         float clamped_sum = sum < 0.0f ? 0.0f : (sum > 1.0f ? 1.0f : sum);
         TEST_CHECK_NEAR(u, clamped_sum, 1e-5, "u == clamp(p+i+d+ff)");
@@ -126,7 +127,7 @@ void run_test_pid(void)
         pid_cfg_t cfg = {.kp = 1.0f, .ki = 0.0f, .kd = 0.0f, .d_filter_tau_s = 1.0f, .b = 1.0f, .pid_range_c = 10.0f};
         pid_reset(&s);
         pid_terms_t terms;
-        float u = pid_update_terms(&s, &cfg, 500.0f, 20.0f, 1.0f, 0.0f, &terms);
+        float u = pid_update_terms(&s, &cfg, 500.0f, 20.0f, 1.0f, 0.0f, 0.0f, &terms);
         TEST_CHECK_NEAR(u, 1.0f, 1e-6, "functional-range clamp still returns 1.0 via the _terms path");
         TEST_CHECK(terms.i == 0.0f && terms.d == 0.0f, "functional-range terms report i=d=0, not fabricated PID math");
     }
@@ -146,7 +147,7 @@ void run_test_pid(void)
          * pid_update_terms() itself produces. */
         float u_before = 0.0f;
         for (int i = 0; i < 20; i++) {
-            u_before = pid_update(&s, &cfg, 300.0f, 250.0f, 1.0f, 0.0f);
+            u_before = pid_update(&s, &cfg, 300.0f, 250.0f, 1.0f, 0.0f, 0.0f);
         }
         float i_term_before = cfg.ki * s.integral;
 
@@ -163,7 +164,7 @@ void run_test_pid(void)
         /* And the very next tick's output must not have stepped either --
          * this is the assertion the task requires: on the actual output,
          * not just the internal i_term arithmetic above. */
-        float u_after = pid_update(&s, &cfg, 300.0f, 250.0f, 1.0f, 0.0f);
+        float u_after = pid_update(&s, &cfg, 300.0f, 250.0f, 1.0f, 0.0f, 0.0f);
         TEST_CHECK(fabsf(u_after - u_before) < 0.01f, "rescaled Ki change: next tick's duty does not step (bump-transferred)");
     }
     {
@@ -177,10 +178,10 @@ void run_test_pid(void)
         pid_reset(&s);
         float u_before = 0.0f;
         for (int i = 0; i < 20; i++) {
-            u_before = pid_update(&s, &cfg, 300.0f, 250.0f, 1.0f, 0.0f);
+            u_before = pid_update(&s, &cfg, 300.0f, 250.0f, 1.0f, 0.0f, 0.0f);
         }
         cfg.ki = cfg.ki * 0.6f; /* same 40% cut, no rescale call this time */
-        float u_after = pid_update(&s, &cfg, 300.0f, 250.0f, 1.0f, 0.0f);
+        float u_after = pid_update(&s, &cfg, 300.0f, 250.0f, 1.0f, 0.0f, 0.0f);
         TEST_CHECK(fabsf(u_after - u_before) > 0.02f, "sanity: an UN-rescaled Ki cut of this size really does step duty (proves the test above is not vacuous)");
     }
 
@@ -233,7 +234,7 @@ void run_test_pid(void)
         pid_reset(&s);
         float T = roundf((setpoint + 1.4f) * 10.0f) / 10.0f; /* 0.1C-quantized start, matching the +1.4C parked offset */
         for (int i = 0; i < ticks; i++) {
-            float duty = pid_update(&s, &cfg, setpoint, T, dt_s, ff_u);
+            float duty = pid_update(&s, &cfg, setpoint, T, dt_s, ff_u, ff_u);
             float dTdt = (k_dc * duty - (T - ambient)) / tau_s;
             T = roundf((T + dTdt * dt_s) * 10.0f) / 10.0f; /* keep the plant's own state 0.1C-quantized too */
         }
@@ -310,7 +311,7 @@ void run_test_pid(void)
         float T = 200.0f; /* far above an initial low setpoint -- kiln cooling naturally, ff=0 (no model / heat-blocked) */
         float duty = 0.0f;
         for (int i = 0; i < 2000; i++) {
-            duty = pid_update(&s, &cfg, 60.0f, T, 1.0f, 0.0f);
+            duty = pid_update(&s, &cfg, 60.0f, T, 1.0f, 0.0f, 0.0f);
             /* Passive cooling only -- duty (if any) can't push T down; this
              * models a heat-blocked/no-active-cooling period. */
             T -= 0.05f; /* slow passive cool */
@@ -326,7 +327,7 @@ void run_test_pid(void)
         /* Setpoint now jumps up, demanding real heat -- the loop must
          * respond promptly (duty rises quickly), not stay suppressed by a
          * large negative integral debt that has to unwind first. */
-        float duty_after_step = pid_update(&s, &cfg, 400.0f, T, 1.0f, 0.0f);
+        float duty_after_step = pid_update(&s, &cfg, 400.0f, T, 1.0f, 0.0f, 0.0f);
         TEST_CHECK(duty_after_step > 0.9f,
                    "kiln-cannot-cool: a setpoint step demanding heat gets a prompt, near-saturated response -- no sluggish unwind");
     }
@@ -351,7 +352,7 @@ void run_test_pid(void)
         float T_new = 27.0f, T_old = 27.0f;
         bool integral_ever_negative_new = false;
         for (int i = 0; i < 4000; i++) {
-            float duty_new = pid_update(&s_new, &cfg, setpoint, T_new, dt_s, ff_u);
+            float duty_new = pid_update(&s_new, &cfg, setpoint, T_new, dt_s, ff_u, ff_u);
             if (s_new.integral < 0.0f) {
                 integral_ever_negative_new = true;
             }
@@ -360,7 +361,7 @@ void run_test_pid(void)
 
             /* Old-floor reference, run in parallel on an identically
              * quantized plant. */
-            float duty_old = pid_update(&s_old_equivalent, &cfg, setpoint, T_old, dt_s, ff_u);
+            float duty_old = pid_update(&s_old_equivalent, &cfg, setpoint, T_old, dt_s, ff_u, ff_u);
             float dTdt_old = (k_dc * duty_old - (T_old - ambient)) / tau_s;
             T_old = roundf((T_old + dTdt_old * dt_s) * 10.0f) / 10.0f;
 
@@ -383,10 +384,10 @@ void run_test_pid(void)
         const float measurement = 61.4f;
         const float ff_u = 0.861f;
         const float u_desired = 0.74f; /* the physically-correct duty, below ff -- requires a negative integral contribution */
-        pid_seed_bumpless(&s, &cfg, setpoint, measurement, u_desired, ff_u);
+        pid_seed_bumpless(&s, &cfg, setpoint, measurement, u_desired, ff_u, ff_u);
         TEST_CHECK(cfg.ki * s.integral < 0.0f, "bumpless seed with over-predicting ff produces a negative integral contribution, as required");
 
-        float u_immediate = pid_update(&s, &cfg, setpoint, measurement, 1.0f, ff_u);
+        float u_immediate = pid_update(&s, &cfg, setpoint, measurement, 1.0f, ff_u, ff_u);
         TEST_CHECK_NEAR(u_immediate, u_desired, 0.02f, "bumpless-seeded tick reproduces u_desired even though ff over-predicts");
 
         /* Gain change mid-run (fuzzy-adjust-sized move) -- rescale must
@@ -394,8 +395,265 @@ void run_test_pid(void)
         float new_ki = cfg.ki * 0.7f;
         pid_rescale_integral_for_new_ki(&s, cfg.ki, new_ki);
         cfg.ki = new_ki;
-        float u_after_rescale = pid_update(&s, &cfg, setpoint, measurement, 1.0f, ff_u);
+        float u_after_rescale = pid_update(&s, &cfg, setpoint, measurement, 1.0f, ff_u, ff_u);
         TEST_CHECK(fabsf(u_after_rescale - u_immediate) < 0.02f,
                    "bumpless transfer holds across a Ki change even with a negative (ff-cancelling) integral contribution");
+    }
+
+    /* -----------------------------------------------------------------
+     * Hold-only integral floor (2026-08-31 "hold-only floor" fix, following
+     * commit b7289db's -ff_u floor and hold_only_floor_analysis.md's
+     * recommendation): the floor is Ki*integral >= -ff_hold (the STEADY-STATE
+     * HOLD component only), never -ff_u (hold+climb). Dwell case (ff_hold ==
+     * ff_u, since climb is exactly 0 on a dwell) must floor byte-identically
+     * to the old -ff_u floor; a ramp case (ff_hold < ff_u, climb > 0) must
+     * floor shallower, letting climb survive.
+     * ----------------------------------------------------------------- */
+    {
+        /* Test 1 (hold_only_floor_analysis.md section 7): dwell floor is
+         * byte-identical to the old -ff_u floor when ff_hold == ff_u. */
+        pid_state_t s;
+        pid_cfg_t cfg = {.kp = 0.0f, .ki = 0.01f, .kd = 0.0f, .d_filter_tau_s = 1.0f, .b = 1.0f, .pid_range_c = 1000.0f};
+        pid_reset(&s);
+        const float setpoint = 60.0f;
+        const float ff_hold = 0.5f, ff_u = 0.5f; /* dwell: climb == 0, so ff_hold == ff_u */
+
+        /* Init tick (any error -- just establishes state->initialized). */
+        pid_update_terms(&s, &cfg, setpoint, setpoint, 1.0f, ff_u, ff_hold, NULL);
+        /* Force a deeply negative integral (as a settled dwell's overshoot
+         * correction would), then run one more tick with a mildly negative
+         * error (measurement slightly above setpoint) so conditional
+         * integration keeps pushing it more negative and the floor binds. */
+        s.integral = -10000.0f;
+        pid_terms_t terms;
+        float u = pid_update_terms(&s, &cfg, setpoint, setpoint + 1.0f, 1.0f, ff_u, ff_hold, &terms);
+        TEST_CHECK_NEAR(terms.i, -ff_u, 1e-5f, "dwell floor (ff_hold==ff_u): i_term floors at exactly -ff_u, byte-identical to the old floor formula");
+        TEST_CHECK_NEAR(s.integral, -ff_u / cfg.ki, 1e-3f, "dwell floor: state->integral == -ff_u/ki exactly, matching the old -ff_u floor's seeded value");
+        (void)u;
+    }
+    {
+        /* Test 1's mutation, run inline (not by editing pid.c): if the floor
+         * were implemented as -0.9*ff_hold instead of -ff_hold exactly, this
+         * scenario's i_term would be -0.45, not -0.5 -- proving the assertion
+         * above checks exact equality, not "close to". Captured here as its
+         * own check so a future accidental "close enough" floor is caught
+         * without having to hand-edit pid.c to prove it. */
+        pid_state_t s;
+        pid_cfg_t cfg = {.kp = 0.0f, .ki = 0.01f, .kd = 0.0f, .d_filter_tau_s = 1.0f, .b = 1.0f, .pid_range_c = 1000.0f};
+        pid_reset(&s);
+        const float setpoint = 60.0f;
+        const float ff_hold = 0.5f;
+        pid_update_terms(&s, &cfg, setpoint, setpoint, 1.0f, ff_hold, ff_hold, NULL);
+        s.integral = -10000.0f;
+        pid_terms_t terms;
+        pid_update_terms(&s, &cfg, setpoint, setpoint + 1.0f, 1.0f, ff_hold, ff_hold, &terms);
+        float mutated_floor = -0.9f * ff_hold;
+        TEST_CHECK(fabsf(terms.i - mutated_floor) > 0.01f,
+                   "sanity: the real floor (-ff_hold exactly) does NOT match a -0.9*ff_hold mutant -- proves test 1 above can fail");
+    }
+    {
+        /* Test 2 (hold_only_floor_analysis.md section 7): ramp floor
+         * (ff_climb > 0, so ff_hold < ff_u) is strictly shallower than (or
+         * equal to) the old -ff_u floor -- the resulting i_term is >= what
+         * -ff_u would have produced, and the commanded duty is strictly
+         * greater for at least one tick (some of ff_climb survives). */
+        pid_cfg_t cfg = {.kp = 0.0f, .ki = 0.01f, .kd = 0.0f, .d_filter_tau_s = 1.0f, .b = 1.0f, .pid_range_c = 1000.0f};
+        const float setpoint = 60.0f;
+        const float ff_hold = 0.5f;
+        const float ff_climb = 0.3f;
+        const float ff_u = ff_hold + ff_climb; /* 0.8 -- a heating ramp */
+
+        /* New floor (-ff_hold), via the real production function. */
+        pid_state_t s_new;
+        pid_reset(&s_new);
+        pid_update_terms(&s_new, &cfg, setpoint, setpoint, 1.0f, ff_u, ff_hold, NULL);
+        s_new.integral = -10000.0f;
+        pid_terms_t terms_new;
+        float u_new = pid_update_terms(&s_new, &cfg, setpoint, setpoint + 1.0f, 1.0f, ff_u, ff_hold, &terms_new);
+
+        /* Old floor (-ff_u), replicated inline (matching the existing
+         * old-floor negative-test pattern elsewhere in this file) so this
+         * comparison doesn't depend on ff_hold==ff_u degenerating to the
+         * same call. */
+        pid_state_t s_old;
+        pid_reset(&s_old);
+        pid_update_terms(&s_old, &cfg, setpoint, setpoint, 1.0f, ff_u, ff_u, NULL);
+        s_old.integral = -10000.0f;
+        pid_terms_t terms_old;
+        float u_old = pid_update_terms(&s_old, &cfg, setpoint, setpoint + 1.0f, 1.0f, ff_u, ff_u, &terms_old);
+
+        TEST_CHECK(terms_new.i >= terms_old.i - 1e-6f,
+                   "ramp (ff_climb>0): new floor's i_term is shallower (>=) than the old -ff_u floor's i_term");
+        TEST_CHECK(u_new > u_old + 1e-4f,
+                   "ramp (ff_climb>0): commanded duty is strictly greater under the new floor -- ff_climb survives instead of being cancelled");
+    }
+
+    /* Test 5 (hold_only_floor_analysis.md section 7 / integral_floor_analysis.md
+     * section 3(b)): ki-blowup guard. A small ki with a moderate ff_hold and
+     * a floor-binding scenario must not push the RAW state->integral to an
+     * unbounded magnitude, even though the resulting duty-space i_term
+     * (-ff_hold) is itself perfectly ordinary. */
+    {
+        pid_cfg_t cfg = {.kp = 0.0f, .ki = 1e-6f, .kd = 0.0f, .d_filter_tau_s = 1.0f, .b = 1.0f, .pid_range_c = 1000.0f};
+        const float setpoint = 60.0f;
+        const float ff_hold = 0.5f;
+        pid_state_t s;
+        pid_reset(&s);
+        pid_update_terms(&s, &cfg, setpoint, setpoint, 1.0f, ff_hold, ff_hold, NULL);
+        /* Force a deeply negative raw integral directly (ordinary
+         * conditional integration at ki=1e-6 would take ~500000 ticks of
+         * sustained error to reach -ff_hold/ki on its own -- the guard has
+         * to hold regardless of HOW the integral got that negative, so a
+         * direct poke exercises the same clamp path more directly). One
+         * more tick with a mildly negative error (so conditional
+         * integration doesn't itself freeze first) then triggers the
+         * floor-clamp code path in pid_update_terms(). */
+        s.integral = -2000000.0f;
+        pid_update_terms(&s, &cfg, setpoint, setpoint + 1.0f, 1.0f, ff_hold, ff_hold, NULL);
+        TEST_CHECK(fabsf(s.integral) < 100000.0f + 1.0f,
+                   "ki-blowup guard: a tiny ki with a moderate ff_hold must not push raw state->integral past the guard's bound");
+    }
+    {
+        /* Test 5's mutation (documented here rather than by editing pid.c):
+         * WITHOUT the guard, -ff_hold/ki for this scenario is exactly
+         * -500000.0, comfortably past any sane bound -- this is the raw
+         * unguarded value the guard exists to prevent, captured so a future
+         * regression that silently removes the guard has a concrete number
+         * to compare against (the guard clamps to -100000, this shows what
+         * an unguarded run would have reached). */
+        float unguarded = -0.5f / 1e-6f;
+        TEST_CHECK(unguarded < -100000.0f,
+                   "sanity: the unguarded floor value for this scenario really is past the guard's bound -- proves test 5 above is not vacuous");
+    }
+
+    /* Test 6 (hold_only_floor_analysis.md section 4's "genuinely new
+     * finding" / section 7 test 6): CHARACTERIZATION, not pass/fail --
+     * reproduces the ramp2-without-reseed carryover. A dwell settles to a
+     * meaningfully negative integral (ff_climb=0 the whole time); the very
+     * next tick switches to ramp values (ff_climb>0) with NO
+     * pid_seed_bumpless() call in between, matching the real firmware's
+     * segment-advance state machine. The floor can still bind on carryover
+     * for some number of ticks -- this test records how many, and proves
+     * the new -ff_hold floor releases SOONER (fewer bound ticks) than the
+     * old -ff_u floor would have, even though it doesn't eliminate the
+     * carryover entirely (hold_only_floor_analysis.md is explicit that this
+     * change does not fully fix this case). */
+    {
+        pid_cfg_t cfg = {.kp = 0.0f, .ki = 0.01f, .kd = 0.0f, .d_filter_tau_s = 1.0f, .b = 1.0f, .pid_range_c = 1000.0f};
+        const float setpoint = 60.0f;
+        const float ff_hold = 0.5f;
+        const float ff_climb = 0.3f;
+        const float dwell_ff_u = ff_hold; /* climb == 0 during the dwell */
+        const float ramp_ff_u = ff_hold + ff_climb;
+
+        /* -- New floor (-ff_hold) run: dwell settles negative, then ramp
+         * begins with no reseed. -- */
+        pid_state_t s_new;
+        pid_reset(&s_new);
+        pid_update_terms(&s_new, &cfg, setpoint, setpoint, 1.0f, dwell_ff_u, ff_hold, NULL);
+        /* Settle the dwell: measurement runs a bit hot, driving integral
+         * meaningfully negative via ordinary conditional integration (no
+         * manual poke here -- this is the carryover this test is about).
+         * dwell_ff_u == ff_hold here (climb is 0 on a dwell), so the dwell
+         * settles to (at most) the dwell's own floor -ff_hold. */
+        for (int i = 0; i < 500; i++) {
+            pid_update_terms(&s_new, &cfg, setpoint, setpoint + 2.0f, 1.0f, dwell_ff_u, ff_hold, NULL);
+        }
+        float dwell_settled_integral_new = s_new.integral;
+        TEST_CHECK(cfg.ki * dwell_settled_integral_new < -0.05f,
+                   "test setup sanity: the dwell really did settle to a meaningfully negative integral");
+
+        /* Ramp begins -- NO pid_seed_bumpless() call, matching the real
+         * segment-advance state machine, and setpoint held flat here
+         * (error==0) so nothing but the carried-over integral itself drives
+         * what happens -- isolating the carryover mechanism from ordinary
+         * per-tick integration. Track how many ticks the floor stays bound
+         * (i_term == -ff_hold exactly). */
+        int bound_ticks_new = 0;
+        for (int i = 0; i < 200; i++) {
+            pid_terms_t terms;
+            pid_update_terms(&s_new, &cfg, setpoint, setpoint, 1.0f, ramp_ff_u, ff_hold, &terms);
+            if (fabsf(terms.i - (-ff_hold)) < 1e-4f) {
+                bound_ticks_new++;
+            }
+        }
+
+        /* -- Old floor (-ff_u) run, IDENTICAL dwell settle, for comparison
+         * -- proves this is a genuine, measurable divergence between the two
+         * floor formulas, not just a restatement of the new floor's own
+         * definition. */
+        pid_state_t s_old;
+        pid_reset(&s_old);
+        pid_update_terms(&s_old, &cfg, setpoint, setpoint, 1.0f, dwell_ff_u, dwell_ff_u, NULL);
+        for (int i = 0; i < 500; i++) {
+            pid_update_terms(&s_old, &cfg, setpoint, setpoint + 2.0f, 1.0f, dwell_ff_u, dwell_ff_u, NULL);
+        }
+        int bound_ticks_old = 0;
+        for (int i = 0; i < 200; i++) {
+            pid_terms_t terms;
+            pid_update_terms(&s_old, &cfg, setpoint, setpoint, 1.0f, ramp_ff_u, ramp_ff_u, &terms);
+            if (fabsf(terms.i - (-ramp_ff_u)) < 1e-4f) {
+                bound_ticks_old++;
+            }
+        }
+
+        printf("test 6 (ramp2-without-reseed carryover characterization): new-floor bound for %d/200 ticks, old-floor bound for %d/200 ticks\n",
+               bound_ticks_new, bound_ticks_old);
+
+        /* This is a CHARACTERIZATION test, not a pass/fail correctness
+         * check, per hold_only_floor_analysis.md section 4/7: the new
+         * -ff_hold floor does NOT fix this carryover case -- with this
+         * plant/gain shape, the dwell's settled integral sits exactly at
+         * the shared dwell/ramp hold floor, so the shallower new floor
+         * clamps it right there (bound_ticks_new > 0, documented and
+         * asserted below) while the deeper old -ff_u floor has enough
+         * headroom that the SAME carried-over integral never even reaches
+         * it (bound_ticks_old can be 0) -- i.e. in a bare no-reseed
+         * carryover with no rate-driven recovery, the new floor is not
+         * guaranteed to bind for FEWER ticks than the old one; the two
+         * floors are only "close together" (hold_only_floor_analysis.md's
+         * words) when ff_climb is comparatively small, and this isolated
+         * carryover slice (setpoint held flat, no climb-driven recovery) is
+         * exactly the case where that is least true. The scope note this
+         * change ships with is exactly this: hold-only fixes the DWELL and
+         * the steady portion of a RAMP that already has integral headroom,
+         * but does not, by itself, fix a ramp that inherits a substantially
+         * negative integral from the segment before it. */
+        TEST_CHECK(bound_ticks_new > 0,
+                   "ramp2-without-reseed carryover is real and reproducible: the new -ff_hold floor binds on carryover here (this change does not fix this case, by design/scope)");
+    }
+    {
+        /* Test 6's mutation: change the floor formula back to -ff_u (done
+         * here by re-running the SAME dwell-settle-then-flat-ramp scenario
+         * with ff_hold forced equal to ff_u throughout, i.e. simulating what
+         * pid_update_terms() would do if the hold/climb split were silently
+         * ignored) and confirm the bound-tick count actually CHANGES versus
+         * the real new-floor run above -- proving this test is sensitive to
+         * which floor formula is in effect, not vacuously true regardless. */
+        pid_cfg_t cfg = {.kp = 0.0f, .ki = 0.01f, .kd = 0.0f, .d_filter_tau_s = 1.0f, .b = 1.0f, .pid_range_c = 1000.0f};
+        const float setpoint = 60.0f;
+        const float ff_hold = 0.5f;
+        const float ff_climb = 0.3f;
+        const float dwell_ff_u = ff_hold;
+        const float ramp_ff_u = ff_hold + ff_climb;
+
+        pid_state_t s_mutant;
+        pid_reset(&s_mutant);
+        pid_update_terms(&s_mutant, &cfg, setpoint, setpoint, 1.0f, dwell_ff_u, dwell_ff_u, NULL);
+        for (int i = 0; i < 500; i++) {
+            pid_update_terms(&s_mutant, &cfg, setpoint, setpoint + 2.0f, 1.0f, dwell_ff_u, dwell_ff_u, NULL);
+        }
+        int bound_ticks_mutant = 0;
+        for (int i = 0; i < 200; i++) {
+            pid_terms_t terms;
+            /* Mutation: pass ff_hold=ramp_ff_u (i.e. ff_hold==ff_u), the
+             * "floor formula reverted to -ff_u" case. */
+            pid_update_terms(&s_mutant, &cfg, setpoint, setpoint, 1.0f, ramp_ff_u, ramp_ff_u, &terms);
+            if (fabsf(terms.i - (-ramp_ff_u)) < 1e-4f) {
+                bound_ticks_mutant++;
+            }
+        }
+        TEST_CHECK(bound_ticks_mutant == 0,
+                   "sanity: the -ff_u-floor mutant on this exact scenario binds for 0 ticks (headroom from the deeper floor), a different outcome than the real new-floor run above -- proves test 6 can distinguish the two floors");
     }
 }

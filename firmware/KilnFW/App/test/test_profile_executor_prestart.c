@@ -1831,7 +1831,7 @@ static void test_feedforward_zero_coupling_is_bit_identical_to_no_coupling(void)
     s_exec.zones[0].control_mode = ZONE_CONTROL_MODE_PID;
 
     float setpoint_c = 100.0f, rate = 0.0f;
-    float with_zero_row = zone_feedforward(&z, 1, setpoint_c, rate);
+    float with_zero_row = zone_feedforward(&z, 1, setpoint_c, rate, NULL);
 
     float expect = (setpoint_c - s_exec.ambient_c) / z.ff_k_dc + (rate * z.ff_tau_s) / z.ff_k_dc;
     TEST_CHECK(expect > 0.0f && expect < 1.0f, "test setup sanity: baseline must sit inside the clamp "
@@ -1840,7 +1840,7 @@ static void test_feedforward_zero_coupling_is_bit_identical_to_no_coupling(void)
     TEST_CHECK(with_zero_row == expect, "all-zero coupling row must not move u_ff by even one ULP");
 
     g_stub_coupling[1][0] = 10.887f;
-    float with_nonzero_row = zone_feedforward(&z, 1, setpoint_c, rate);
+    float with_nonzero_row = zone_feedforward(&z, 1, setpoint_c, rate, NULL);
     TEST_CHECK(with_nonzero_row != expect, "sanity: a nonzero coupling coefficient DOES move u_ff -- "
                                            "proves the equality check above is not vacuously true");
 }
@@ -1870,15 +1870,15 @@ static void test_feedforward_hot_neighbor_subtracts_duty(void)
     float baseline = (setpoint_c - s_exec.ambient_c) / z.ff_k_dc;
 
     s_exec.zones[0].actual_c = setpoint_c;
-    float on_target = zone_feedforward(&z, 1, setpoint_c, rate);
+    float on_target = zone_feedforward(&z, 1, setpoint_c, rate, NULL);
     TEST_CHECK(on_target == baseline, "a neighbor exactly on its setpoint must change nothing");
 
     s_exec.zones[0].actual_c = setpoint_c + 20.0f;
-    float hot = zone_feedforward(&z, 1, setpoint_c, rate);
+    float hot = zone_feedforward(&z, 1, setpoint_c, rate, NULL);
     TEST_CHECK(hot < on_target, "a neighbor running hot must SUBTRACT duty from this zone");
 
     s_exec.zones[0].actual_c = setpoint_c - 20.0f;
-    float cold = zone_feedforward(&z, 1, setpoint_c, rate);
+    float cold = zone_feedforward(&z, 1, setpoint_c, rate, NULL);
     TEST_CHECK(cold > on_target, "a neighbor running cold must ADD duty to this zone");
 
     TEST_CHECK(hot > 0.0f && cold < 1.0f, "test setup sanity: neither +-20C case may hit the clamp");
@@ -1908,25 +1908,25 @@ static void test_feedforward_invalid_neighbor_contributes_zero_never_nan(void)
     s_exec.zones[0].ff_enabled = true;
     s_exec.zones[0].ff_k_dc = 18.0f;
     s_exec.zones[0].control_mode = ZONE_CONTROL_MODE_PID;
-    float r_inactive = zone_feedforward(&z, 1, setpoint_c, rate);
+    float r_inactive = zone_feedforward(&z, 1, setpoint_c, rate, NULL);
     TEST_CHECK(r_inactive == expect, "an inactive neighbor must contribute 0 despite a nonzero coefficient");
     TEST_CHECK(isfinite(r_inactive), "an inactive neighbor's absurd reading must not leak into a non-finite u_ff");
 
     s_exec.zones[0].active = true;
     s_exec.zones[0].actual_valid = false;
-    float r_invalid = zone_feedforward(&z, 1, setpoint_c, rate);
+    float r_invalid = zone_feedforward(&z, 1, setpoint_c, rate, NULL);
     TEST_CHECK(r_invalid == expect, "actual_valid==false must contribute 0");
 
     s_exec.zones[0].actual_valid = true;
     s_exec.zones[0].actual_c = NAN;
-    float r_nan = zone_feedforward(&z, 1, setpoint_c, rate);
+    float r_nan = zone_feedforward(&z, 1, setpoint_c, rate, NULL);
     TEST_CHECK(isfinite(r_nan), "a NaN neighbor reading must never produce a non-finite u_ff");
     TEST_CHECK(r_nan == expect, "a NaN neighbor reading must contribute exactly 0, not just \"some finite value\"");
 
     s_exec.zones[0].actual_c = setpoint_c + 20.0f;
     s_exec.zones[0].ff_enabled = false;
     s_exec.zones[0].ff_k_dc = 0.0f;
-    float r_no_model = zone_feedforward(&z, 1, setpoint_c, rate);
+    float r_no_model = zone_feedforward(&z, 1, setpoint_c, rate, NULL);
     TEST_CHECK(r_no_model == expect, "a neighbor with no identified model must contribute 0, not divide by its own zero k_dc");
     TEST_CHECK(isfinite(r_no_model), "must not produce inf/NaN from a zero neighbor k_dc");
 }
@@ -1964,7 +1964,7 @@ static void test_feedforward_both_callers_agree_bump_transfer(void)
 
     /* Reference/oracle value only -- NOT fed back into the production code,
      * just used below to check what the real per-tick call site computed. */
-    float u_ff_reference = zone_feedforward(&z, zi, s_exec.target_c, s_exec.target_rate_c_per_s);
+    float u_ff_reference = zone_feedforward(&z, zi, s_exec.target_c, s_exec.target_rate_c_per_s, NULL);
     TEST_CHECK(u_ff_reference > 0.0f && u_ff_reference < 1.0f, "test setup sanity: u_ff must sit inside the clamp");
 
     /* Must exceed u_ff_reference: seed_bumpless_with_ff()'s own doc comment
@@ -1997,7 +1997,7 @@ static void test_feedforward_both_callers_agree_bump_transfer(void)
     /* The two call sites must have used the identical feedforward number --
      * proven two ways: (1) pid_family_zone_tick()'s own reported ff term
      * (last_pid_terms.ff, what /api/control shows) equals the oracle, so its
-     * internal zone_feedforward(z, zi, s_exec.target_c, s_exec.target_rate_c_per_s)
+     * internal zone_feedforward(z, zi, s_exec.target_c, s_exec.target_rate_c_per_s, NULL)
      * call used the same setpoint/rate/coupling row as the reference; and
      * (2) the resulting duty reproduces u_desired -- the actual bump-transfer
      * property this whole mechanism exists for. */
@@ -2042,7 +2042,7 @@ static void test_feedforward_realistic_measured_matrix_zone1_row(void)
     s_exec.zones[2].ff_k_dc = 15.0f;
     s_exec.zones[2].control_mode = ZONE_CONTROL_MODE_PID;
 
-    float u_ff = zone_feedforward(&z, zi, setpoint_c, rate);
+    float u_ff = zone_feedforward(&z, zi, setpoint_c, rate, NULL);
 
     float baseline = (setpoint_c - s_exec.ambient_c) / z.ff_k_dc;
     TEST_CHECK(baseline > 0.0f && baseline < 1.0f, "test setup sanity: baseline must sit inside the clamp");
@@ -2059,6 +2059,170 @@ static void test_feedforward_realistic_measured_matrix_zone1_row(void)
               "-(coupling_coeff[j]/(k_dc_j*ff_k_dc))*(T_j-sp_j) sum over both neighbors");
     TEST_CHECK(u_ff < baseline, "net effect here (hot zone 0 dominates cold zone 2) must be a net duty reduction");
     TEST_CHECK(isfinite(u_ff) && u_ff >= 0.0f && u_ff <= 1.0f, "result must stay inside the existing [0,1] clamp");
+}
+
+// ---------------------------------------------------------------------------
+// zone_feedforward()'s out_hold parameter (2026-08-31 "hold-only integral
+// floor" fix, hold_only_floor_analysis.md section 7 tests 3/4): out_hold must
+// exclude climb and include the Phase-3b coupling correction (test 3), and
+// must NOT be independently clamped to [0,1] (test 4).
+
+static void test_feedforward_out_hold_excludes_climb_includes_coupling_correction(void)
+{
+    TEST_SECTION("zone_feedforward()'s out_hold -- excludes the climb/ramp term but includes the "
+                 "Phase-3b cross-zone coupling correction (hold_only_floor_analysis.md section 7 test 3)");
+    reset_coupling_test_state();
+
+    const uint8_t zi = 1;
+    zone_runtime_t z;
+    memset(&z, 0, sizeof(z));
+    z.ff_enabled = true;
+    z.ff_k_dc = 20.969f;
+    z.ff_tau_s = 600.0f;
+    s_exec.ambient_c = 20.0f;
+    float setpoint_c = 40.0f;
+
+    g_stub_coupling[zi][0] = 10.887f;
+    g_stub_coupling[zi][2] = 3.332f;
+
+    s_exec.zones[0].active = true;
+    s_exec.zones[0].actual_valid = true;
+    s_exec.zones[0].actual_c = setpoint_c + 5.0f; /* hot neighbor -- nonzero coupling correction */
+    s_exec.zones[0].ff_enabled = true;
+    s_exec.zones[0].ff_k_dc = 18.0f;
+    s_exec.zones[0].control_mode = ZONE_CONTROL_MODE_PID;
+
+    s_exec.zones[2].active = true;
+    s_exec.zones[2].actual_valid = true;
+    s_exec.zones[2].actual_c = setpoint_c - 3.0f; /* cold neighbor */
+    s_exec.zones[2].ff_enabled = true;
+    s_exec.zones[2].ff_k_dc = 15.0f;
+    s_exec.zones[2].control_mode = ZONE_CONTROL_MODE_PID;
+
+    /* Baseline: rate=0, so climb is exactly 0 (dwell case, confirmed
+     * elsewhere in this file/hold_only_floor_analysis.md section 2) --
+     * out_hold must equal the full return value here. */
+    float hold_at_rate0 = 0.0f;
+    float u_ff_rate0 = zone_feedforward(&z, zi, setpoint_c, 0.0f, &hold_at_rate0);
+    TEST_CHECK(fabsf(hold_at_rate0 - u_ff_rate0) < 1e-6f,
+              "rate==0: climb is exactly 0, so out_hold must equal the full u_ff return value");
+
+    /* Now a nonzero ramp rate -- climb becomes nonzero (confirmed via the
+     * independent solve_climb_for_zone() call below), but out_hold must be
+     * UNCHANGED (it excludes climb, and nothing else that feeds hold or the
+     * coupling correction changed between these two calls). */
+    /* Deliberately modest -- large enough to produce a clearly nonzero
+     * climb term, but small enough that hold+climb stays comfortably under
+     * the [0,1] clamp, so the equality check below is testing out_hold's
+     * own definition, not interacting with the joint clamp (that
+     * interaction is covered separately by the never-independently-clamped
+     * test below). */
+    const float rate_c_per_s = 10.0f / 3600.0f;
+    bool climb_used_matrix = false, climb_infeasible = false, climb_membership_changed = false;
+    coupling_solve_reason_t climb_reason = COUPLING_SOLVE_OK;
+    float climb_independent = solve_climb_for_zone(&z, zi, rate_c_per_s, &climb_used_matrix, &climb_infeasible,
+                                                    &climb_reason, &climb_membership_changed);
+    TEST_CHECK(fabsf(climb_independent) > 1e-4f, "test setup sanity: this ramp rate produces a "
+              "genuinely nonzero climb term, or this test cannot distinguish hold from hold+climb");
+
+    float hold_at_ramp = 0.0f;
+    float u_ff_ramp = zone_feedforward(&z, zi, setpoint_c, rate_c_per_s, &hold_at_ramp);
+    TEST_CHECK(fabsf(hold_at_ramp - hold_at_rate0) < 1e-5f,
+              "out_hold must be UNCHANGED by a nonzero ramp rate -- it excludes climb entirely");
+    TEST_CHECK(fabsf((hold_at_ramp + climb_independent) - u_ff_ramp) < 1e-4f,
+              "out_hold + the independently-solved climb term must equal the full u_ff return value "
+              "to within float tolerance -- climb landed nowhere else and nothing was double-counted");
+    TEST_CHECK(u_ff_ramp > hold_at_ramp + 1e-4f,
+              "sanity: u_ff at a nonzero ramp rate is strictly greater than out_hold alone -- proves "
+              "climb is genuinely present in u_ff and genuinely absent from out_hold, not both zero "
+              "by coincidence");
+
+    /* Coupling correction lands in out_hold, not dropped: changing a
+     * neighbor's deviation (rate still 0, so climb stays 0) must move
+     * out_hold. Also compare against the RAW hold (no coupling correction)
+     * from solve_hold_for_zone() directly, to prove the correction is
+     * actually INSIDE out_hold and not merely "some value that happens to
+     * differ" -- this is the check the study's mutation (folding the
+     * correction into a would-be climb bucket instead) would fail, since
+     * out_hold would then equal raw_hold exactly, not raw_hold plus the
+     * correction. */
+    bool hold_used_matrix = false, hold_infeasible = false, hold_membership_changed = false;
+    coupling_solve_reason_t hold_reason = COUPLING_SOLVE_OK;
+    float raw_hold = solve_hold_for_zone(&z, zi, setpoint_c, s_exec.ambient_c, &hold_used_matrix, &hold_infeasible,
+                                         &hold_reason, &hold_membership_changed);
+    TEST_CHECK(fabsf(hold_at_rate0 - raw_hold) > 1e-4f,
+              "out_hold must differ from the RAW hold term (solve_hold_for_zone() alone) whenever a "
+              "qualifying neighbor is off its own setpoint -- proves the Phase-3b coupling correction "
+              "is actually folded into out_hold, not silently dropped or misfiled");
+
+    /* Move zone 0 further off-target (still rate==0, so climb stays 0) --
+     * out_hold must track the change; the total u_ff must move by the exact
+     * same amount, since climb (0 the whole time here) contributes nothing
+     * to the delta. */
+    s_exec.zones[0].actual_c = setpoint_c + 25.0f; /* much hotter now */
+    float hold_after_move = 0.0f;
+    float u_ff_after_move = zone_feedforward(&z, zi, setpoint_c, 0.0f, &hold_after_move);
+    TEST_CHECK(fabsf(hold_after_move - hold_at_rate0) > 1e-4f,
+              "out_hold changes when a coupling neighbor's deviation changes (rate held at 0) -- "
+              "proves the correction landed in out_hold, not a climb bucket this test doesn't touch");
+    TEST_CHECK(fabsf((u_ff_after_move - u_ff_rate0) - (hold_after_move - hold_at_rate0)) < 1e-4f,
+              "with climb held at exactly 0 throughout, the total u_ff's delta must equal out_hold's "
+              "delta exactly -- nothing else moved");
+}
+
+static void test_feedforward_out_hold_is_never_independently_clamped(void)
+{
+    TEST_SECTION("zone_feedforward()'s out_hold -- never independently clamped to [0,1], even when "
+                 "hold alone exceeds 1.0 but hold+climb is pulled back under 1.0 by a negative "
+                 "(cooling-ramp) climb term (hold_only_floor_analysis.md section 7 test 4)");
+    reset_coupling_test_state();
+
+    zone_runtime_t z;
+    memset(&z, 0, sizeof(z));
+    z.ff_enabled = true;
+    z.ff_k_dc = 5.0f;      /* small k_dc -> a large setpoint-ambient gap makes hold alone exceed 1.0 */
+    z.ff_tau_s = 600.0f;
+    s_exec.ambient_c = 20.0f;
+    float setpoint_c = 26.0f; /* (26-20)/5.0 = 1.2 -- hold alone is over 1.0, but only modestly, so a
+                               * modest cooling climb is enough to pull the SUM back under 1.0 without
+                               * needing an extreme rate */
+
+    /* No coupling neighbors configured (all-zero row) -- keeps this test
+     * isolated to the hold/climb clamp interaction, not the coupling
+     * correction (already covered by the test above). */
+    bool hold_used_matrix = false, hold_infeasible = false, hold_membership_changed = false;
+    coupling_solve_reason_t hold_reason = COUPLING_SOLVE_OK;
+    float raw_hold = solve_hold_for_zone(&z, 0, setpoint_c, s_exec.ambient_c, &hold_used_matrix, &hold_infeasible,
+                                         &hold_reason, &hold_membership_changed);
+    TEST_CHECK(raw_hold > 1.0f, "test setup sanity: hold alone must exceed 1.0, or this test cannot "
+              "distinguish an unclamped out_hold from a clamped one");
+
+    /* A large negative (cooling) ramp rate pulls climb sharply negative,
+     * enough that hold+climb comes back under 1.0 -- exactly the scenario
+     * this function's own top-of-file doc comment (profile_executor.c
+     * :661-667) flags: the SUM is clamped, not each term. */
+    const float cooling_rate_c_per_s = -0.002f; /* modest cooling rate, sized to this test's small hold overshoot */
+    bool climb_used_matrix = false, climb_infeasible = false, climb_membership_changed = false;
+    coupling_solve_reason_t climb_reason = COUPLING_SOLVE_OK;
+    float raw_climb = solve_climb_for_zone(&z, 0, cooling_rate_c_per_s, &climb_used_matrix, &climb_infeasible,
+                                           &climb_reason, &climb_membership_changed);
+    TEST_CHECK(raw_climb < 0.0f, "test setup sanity: a cooling ramp really does produce a negative "
+              "climb term");
+    TEST_CHECK(raw_hold + raw_climb < 1.0f, "test setup sanity: hold+climb together must land back "
+              "under 1.0, or this scenario doesn't actually exercise the joint-clamp/unclamped-hold "
+              "interaction this test is for");
+
+    float out_hold = 0.0f;
+    float u_ff = zone_feedforward(&z, 0, setpoint_c, cooling_rate_c_per_s, &out_hold);
+
+    TEST_CHECK(u_ff <= 1.0f + 1e-6f && u_ff >= 0.0f,
+              "the RETURNED u_ff must still be clamped to [0,1] -- the joint sum clamp is unchanged");
+    TEST_CHECK(out_hold > 1.0f,
+              "out_hold must still be the raw, UNCLAMPED value greater than 1.0 -- it must NOT be "
+              "silently clamped to [0,1] on its own, even though the joint sum needed clamping");
+    TEST_CHECK(fabsf(out_hold - raw_hold) < 1e-4f,
+              "out_hold must match the independently-solved raw hold term (no coupling neighbors "
+              "configured here, so out_hold == raw hold exactly)");
 }
 
 // ---------------------------------------------------------------------------
@@ -2093,7 +2257,7 @@ static void test_hold_diagonal_only_matches_legacy_exactly(void)
     }
 
     for (uint8_t zi = 0; zi < 3; zi++) {
-        float u_ff = zone_feedforward(&s_exec.zones[zi], zi, setpoint_c, 0.0f);
+        float u_ff = zone_feedforward(&s_exec.zones[zi], zi, setpoint_c, 0.0f, NULL);
         float legacy = (setpoint_c - ambient_c) / diag[zi];
         TEST_CHECK(u_ff == legacy, "an all-zero-off-diagonal matrix's solved hold must be bit-for-bit "
                   "the legacy (setpoint-ambient)/k_dc division, not merely close to it");
@@ -2166,7 +2330,7 @@ static void test_hold_matrix_solves_real_measured_gain_matrix(void)
     }
 
     for (uint8_t zi = 0; zi < 3; zi++) {
-        float u_ff = zone_feedforward(&s_exec.zones[zi], zi, setpoint_c, 0.0f);
+        float u_ff = zone_feedforward(&s_exec.zones[zi], zi, setpoint_c, 0.0f, NULL);
         float legacy = (setpoint_c - ambient_c) / diag[zi];
         TEST_CHECK_NEAR(u_ff, expect_u[zi], 1e-4, "zone's solved hold duty must match the real "
                         "matrix's linear-system solution");
@@ -2302,7 +2466,7 @@ static void test_climb_matrix_solves_real_measured_gain_matrix(void)
      * (setpoint-ambient)/k_dc through the coupled hold solve) plus this
      * coupled climb must land materially BELOW the old uncoupled sum on
      * zone 0, the worst-over-driven zone. */
-    float u_ff0 = zone_feedforward(&s_exec.zones[0], 0, setpoint_c, rate_c_per_s);
+    float u_ff0 = zone_feedforward(&s_exec.zones[0], 0, setpoint_c, rate_c_per_s, NULL);
     float legacy_climb0 = (rate_c_per_s * tau[0]) / diag[0];
     TEST_CHECK(u_ff0 < legacy_climb0, "zone 0's TOTAL feedforward (hold+coupled climb) must be "
               "smaller than the legacy climb term ALONE would have been -- the coupled fix must "
@@ -2336,7 +2500,7 @@ static void test_climb_zero_coupling_is_bit_identical_to_legacy_formula(void)
     s_exec.zones[0].control_mode = ZONE_CONTROL_MODE_PID;
 
     float setpoint_c = 100.0f, rate = 120.0f / 3600.0f;
-    float with_zero_row = zone_feedforward(&z, 1, setpoint_c, rate);
+    float with_zero_row = zone_feedforward(&z, 1, setpoint_c, rate, NULL);
 
     float expect_hold = (setpoint_c - s_exec.ambient_c) / z.ff_k_dc;
     float expect_climb = (rate * z.ff_tau_s) / z.ff_k_dc;
@@ -2352,7 +2516,7 @@ static void test_climb_zero_coupling_is_bit_identical_to_legacy_formula(void)
               "solve must take the NO_NEIGHBORS fallback path, same as the hold term");
 
     g_stub_coupling[1][0] = 10.887f;
-    float with_nonzero_row = zone_feedforward(&z, 1, setpoint_c, rate);
+    float with_nonzero_row = zone_feedforward(&z, 1, setpoint_c, rate, NULL);
     TEST_CHECK(with_nonzero_row != expect_hold + expect_climb, "sanity: a nonzero coupling "
               "coefficient DOES move u_ff -- proves the equality check above is not vacuously true");
 }
@@ -2490,7 +2654,7 @@ static void test_hold_infeasible_setpoint_clamps_and_reports(void)
     TEST_CHECK(hold2 <= 1.0f && hold2 >= 0.0f, "the returned hold value itself must be clamped into [0,1]");
     TEST_CHECK(hold2 == 1.0f, "this specific case's raw solution (1.961212) clamps to exactly 1.0");
 
-    float u_ff = zone_feedforward(&s_exec.zones[2], 2, setpoint_c, 0.0f);
+    float u_ff = zone_feedforward(&s_exec.zones[2], 2, setpoint_c, 0.0f, NULL);
     TEST_CHECK(s_exec.zones[2].ff_hold_infeasible, "zone_feedforward()'s own call site must also "
               "surface the infeasible flag onto s_exec.zones[] for GET /api/profile_exec, not just "
               "the internal solver return");
@@ -2528,7 +2692,7 @@ static void test_hold_pathological_inputs_never_nan_or_inf(void)
     s_exec.zones[2].ff_k_dc = 21.742f; s_exec.zones[2].control_mode = ZONE_CONTROL_MODE_PID;
 
     for (uint8_t zi = 0; zi < 3; zi++) {
-        float u_ff = zone_feedforward(&s_exec.zones[zi], zi, setpoint_c, 0.0f);
+        float u_ff = zone_feedforward(&s_exec.zones[zi], zi, setpoint_c, 0.0f, NULL);
         TEST_CHECK(isfinite(u_ff), "a huge/negative coupling coefficient must never produce a "
                   "non-finite u_ff, solved or refused");
         TEST_CHECK(u_ff >= 0.0f && u_ff <= 1.0f, "and must always land inside the existing [0,1] clamp");
@@ -2558,7 +2722,7 @@ static void test_hold_pathological_inputs_never_nan_or_inf(void)
     TEST_CHECK(!used_matrix, "ff_k_dc == 0 fails zone_qualifies_as_coupling_neighbor() -- must fall "
               "back rather than become a row in the matrix");
 
-    float u_ff_zero_k_dc = zone_feedforward(&z_zero, 0, setpoint_c, 0.0f);
+    float u_ff_zero_k_dc = zone_feedforward(&z_zero, 0, setpoint_c, 0.0f, NULL);
     TEST_CHECK(u_ff_zero_k_dc == 0.0f, "zone_feedforward()'s own outer isfinite(u_ff) belt-and-braces "
               "(unchanged by this fix) must still turn a zero-k_dc Inf into exactly 0.0f duty");
 
@@ -3117,7 +3281,7 @@ static void test_feedforward_control_mode_off_neighbor_contributes_zero(void)
     /* control_mode left at 0 == ZONE_CONTROL_MODE_OFF (memset default) --
      * exactly the reviewer's "zone 2 set to OFF" board state. */
 
-    float u_ff_off = zone_feedforward(&z, zi, setpoint_c, rate);
+    float u_ff_off = zone_feedforward(&z, zi, setpoint_c, rate, NULL);
     TEST_CHECK(u_ff_off == 0.0f, "an OFF neighbor 600C off setpoint must contribute exactly 0 -- the old "
               "code computed +4.0 here and only the final [0,1] clamp saved it from being visibly wrong");
 
@@ -3129,7 +3293,7 @@ static void test_feedforward_control_mode_off_neighbor_contributes_zero(void)
      * "hit the ceiling". */
     s_exec.zones[0].control_mode = ZONE_CONTROL_MODE_PID;
     s_exec.zones[0].actual_c = -20.0f;
-    float u_ff_pid = zone_feedforward(&z, zi, setpoint_c, rate);
+    float u_ff_pid = zone_feedforward(&z, zi, setpoint_c, rate, NULL);
     float gd = g_stub_coupling[zi][0] / s_exec.zones[0].ff_k_dc;
     float expect_pid = -(gd / z.ff_k_dc) * (s_exec.zones[0].actual_c - setpoint_c);
     TEST_CHECK(fabsf(u_ff_pid - expect_pid) < 1e-5f, "with control_mode == PID the same neighbor DOES "
@@ -3141,7 +3305,7 @@ static void test_feedforward_control_mode_off_neighbor_contributes_zero(void)
      * PID/FF response, which BANGBANG's on/off band is not. */
     s_exec.zones[0].control_mode = ZONE_CONTROL_MODE_BANGBANG;
     s_exec.zones[0].actual_c = -600.0f;
-    float u_ff_bangbang = zone_feedforward(&z, zi, setpoint_c, rate);
+    float u_ff_bangbang = zone_feedforward(&z, zi, setpoint_c, rate, NULL);
     TEST_CHECK(u_ff_bangbang == 0.0f, "a BANGBANG neighbor must also contribute exactly 0 -- only the "
               "PID family closes the loop the derivation assumes");
 }
@@ -3170,24 +3334,24 @@ static void test_feedforward_faulted_or_blocked_neighbor_contributes_zero(void)
     s_exec.zones[0].ff_k_dc = 23.641f;
     s_exec.zones[0].control_mode = ZONE_CONTROL_MODE_PID;
 
-    float u_ff_healthy = zone_feedforward(&z, zi, setpoint_c, rate);
+    float u_ff_healthy = zone_feedforward(&z, zi, setpoint_c, rate, NULL);
     TEST_CHECK(u_ff_healthy != 0.0f, "test setup sanity: a fully-qualifying neighbor must contribute "
               "something, or the two checks below can't tell exclusion from coincidence");
 
     s_exec.zones[0].faulted = true;
-    float u_ff_faulted = zone_feedforward(&z, zi, setpoint_c, rate);
+    float u_ff_faulted = zone_feedforward(&z, zi, setpoint_c, rate, NULL);
     TEST_CHECK(u_ff_faulted == 0.0f, "a faulted neighbor must contribute exactly 0 despite passing "
               "every other check");
     s_exec.zones[0].faulted = false;
 
     s_exec.zones[0].heat_blocked = true;
-    float u_ff_blocked = zone_feedforward(&z, zi, setpoint_c, rate);
+    float u_ff_blocked = zone_feedforward(&z, zi, setpoint_c, rate, NULL);
     TEST_CHECK(u_ff_blocked == 0.0f, "a relay-authority-blocked neighbor (heat_blocked, "
               "relay_authority_zone_blocked()'s last answer) must contribute exactly 0 despite passing "
               "every other check");
     s_exec.zones[0].heat_blocked = false;
 
-    float u_ff_recovered = zone_feedforward(&z, zi, setpoint_c, rate);
+    float u_ff_recovered = zone_feedforward(&z, zi, setpoint_c, rate, NULL);
     TEST_CHECK(u_ff_recovered == u_ff_healthy, "clearing both faulted and heat_blocked must restore "
               "exactly the healthy contribution -- proves neither flag left any residual state behind");
 }
@@ -3220,13 +3384,13 @@ static void test_feedforward_neighbor_deviation_bound_actually_bounds(void)
     float u_ff_at_bound_expect = -(gd / z.ff_k_dc) * (-25.0f);
 
     s_exec.zones[0].actual_c = -25.0f; /* exactly at the bound */
-    float u_ff_at_bound = zone_feedforward(&z, zi, setpoint_c, rate);
+    float u_ff_at_bound = zone_feedforward(&z, zi, setpoint_c, rate, NULL);
     TEST_CHECK(fabsf(u_ff_at_bound - u_ff_at_bound_expect) < 1e-5f, "at exactly the bound, u_ff must "
               "match the formula evaluated at the bound -- confirms the expected-value formula below "
               "is the right oracle before using it to prove the clamp");
 
     s_exec.zones[0].actual_c = -500.0f; /* 20x past the bound */
-    float u_ff_past_bound = zone_feedforward(&z, zi, setpoint_c, rate);
+    float u_ff_past_bound = zone_feedforward(&z, zi, setpoint_c, rate, NULL);
     TEST_CHECK(fabsf(u_ff_past_bound - u_ff_at_bound) < 1e-5f, "a deviation 20x past the bound must "
               "produce the SAME u_ff as exactly-at-the-bound -- proves the per-neighbor bound saturates "
               "the term, not merely the outer [0,1] clamp (which a -500C deviation would not even reach "
@@ -3236,7 +3400,7 @@ static void test_feedforward_neighbor_deviation_bound_actually_bounds(void)
               "engaged, not that both cases merely hit the same outer ceiling");
 
     s_exec.zones[0].actual_c = -1000000.0f; /* pathological */
-    float u_ff_pathological = zone_feedforward(&z, zi, setpoint_c, rate);
+    float u_ff_pathological = zone_feedforward(&z, zi, setpoint_c, rate, NULL);
     TEST_CHECK(isfinite(u_ff_pathological), "a pathological deviation must not produce inf/NaN");
     TEST_CHECK(fabsf(u_ff_pathological - u_ff_at_bound) < 1e-5f, "even a million-degree deviation "
               "produces exactly the bounded value, never more");
@@ -3380,7 +3544,7 @@ static void test_feedforward_zero_coefficient_parity_still_holds_with_new_gates(
         s_exec.zones[j].heat_blocked = false;
     }
 
-    float u_ff = zone_feedforward(&z, 1, setpoint_c, rate);
+    float u_ff = zone_feedforward(&z, 1, setpoint_c, rate, NULL);
     TEST_CHECK(u_ff == expect, "an all-zero coupling row must not move u_ff by even one ULP, even with "
               "every neighbor otherwise fully qualifying");
 }
@@ -4104,6 +4268,8 @@ void run_test_profile_executor_prestart(void)
     test_feedforward_invalid_neighbor_contributes_zero_never_nan();
     test_feedforward_both_callers_agree_bump_transfer();
     test_feedforward_realistic_measured_matrix_zone1_row();
+    test_feedforward_out_hold_excludes_climb_includes_coupling_correction();
+    test_feedforward_out_hold_is_never_independently_clamped();
 
     test_hold_diagonal_only_matches_legacy_exactly();
     test_hold_matrix_solves_real_measured_gain_matrix();
