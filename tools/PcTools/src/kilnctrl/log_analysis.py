@@ -258,6 +258,53 @@ def parse_history_csv(path: str) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Run splitting -- a poll-capture JSONL can have more than one run appended
+# to it (the board was fired twice into the same log file). ``elapsed_s`` is
+# relative to when THAT run started, so it drops back toward 0 at the start
+# of every run after the first. Every consumer of a row sequence below
+# assumes elapsed_s is monotonic non-decreasing -- callers must run
+# ``split_runs`` first and pick a single run before windowing/statting.
+# ---------------------------------------------------------------------------
+
+def split_runs(rows: Sequence[PollRow]) -> list[list[PollRow]]:
+    """Split ``rows`` into separate runs wherever ``elapsed_s`` decreases.
+
+    A new run is detected the moment a row's ``elapsed_s`` is strictly less
+    than the previous row's -- that is the signature of the firmware having
+    restarted its poll-capture clock for a new firing appended to the same
+    file. Returns a list of one or more non-empty row lists, in file order;
+    a normal single-run file returns ``[rows]`` (well, an equal copy of it).
+    """
+    if not rows:
+        return []
+    runs: list[list[PollRow]] = [[rows[0]]]
+    for r in rows[1:]:
+        if r.elapsed_s < runs[-1][-1].elapsed_s:
+            runs.append([])
+        runs[-1].append(r)
+    return runs
+
+
+def _default_run_index(runs: Sequence[Sequence[PollRow]]) -> int:
+    """Pick the run a caller should analyze when none is specified: the most
+    recent run that actually carries zone data.
+
+    A capture commonly ends with one or more trailing rows where the board
+    has gone back to "idle" (segment_index/target_c/elapsed_s all reset to
+    0, ``zones: []``) after a firing finishes or aborts -- that is itself a
+    one-row "run" by the strict elapsed_s-decrease rule in ``split_runs``,
+    but it carries no samples to analyze. Walk backward from the end and
+    use the last run with at least one non-empty ``zones`` row; if every
+    run is empty (degenerate input), fall back to the literal last run so
+    callers still get *a* run rather than an IndexError.
+    """
+    for i in range(len(runs) - 1, -1, -1):
+        if any(r.zones for r in runs[i]):
+            return i
+    return len(runs) - 1
+
+
+# ---------------------------------------------------------------------------
 # Windowing
 # ---------------------------------------------------------------------------
 
@@ -281,9 +328,22 @@ def build_windows(rows: Sequence[PollRow]) -> list[Window]:
     A window boundary is any change in ``segment_index`` or ``dwelling``.
     This is the "windowed time" the coordinator asked for -- per-segment,
     ramp separated from dwell -- rather than one number for the whole run.
+
+    ``rows`` must be a SINGLE run (``elapsed_s`` non-decreasing) -- a
+    multi-run capture must be split with ``split_runs`` first and each run
+    windowed separately, or windows would silently straddle a run boundary
+    where ``elapsed_s`` resets toward 0.
     """
     if not rows:
         return []
+    for i in range(1, len(rows)):
+        if rows[i].elapsed_s < rows[i - 1].elapsed_s:
+            raise ValueError(
+                "build_windows() received rows spanning more than one run "
+                "(elapsed_s decreases at index %d, %.1f -> %.1f) -- call "
+                "split_runs() first and window each run separately"
+                % (i, rows[i - 1].elapsed_s, rows[i].elapsed_s)
+            )
     windows: list[Window] = []
     start_idx = 0
     cur_key = (rows[0].segment_index, rows[0].dwelling)
@@ -349,6 +409,14 @@ def window_zone_stats(window: Window, rows: Sequence[PollRow], zone: int) -> Opt
     # "next" row to define its duration) but still counts for extrema/mean
     # of the plain (unweighted) kind if dt sums to zero (single-sample window).
     dts = [times[i + 1] - times[i] for i in range(len(times) - 1)] + [0.0]
+    # Defensive: a negative gap means two runs got merged into one window
+    # upstream (build_windows() should already have refused that). Clamp
+    # rather than let it poison mean/rms/iae with a negative weight.
+    assert all(dt >= 0 for dt in dts), (
+        "negative dt in window_zone_stats -- rows from more than one run "
+        "reached this window; split_runs() should have been called first"
+    )
+    dts = [max(dt, 0.0) for dt in dts]
     total_dt = sum(dts)
 
     if total_dt > 0:
@@ -362,7 +430,15 @@ def window_zone_stats(window: Window, rows: Sequence[PollRow], zone: int) -> Opt
 
     max_over_i = max(range(len(errors)), key=lambda i: errors[i])
     max_under_i = min(range(len(errors)), key=lambda i: errors[i])
-    duration = window.duration_s or 1.0
+    duration = window.duration_s
+    # A zero (or negative, though Window.duration_s already clamps that)
+    # duration means "no time elapsed in this window" -- dividing the raw
+    # IAE (C*s) by 1.0 as a fallback used to silently relabel that raw C*s
+    # figure as if it were degrees C, which is exactly how a merged-runs
+    # window (start_s > end_s -> duration clamped to 0) produced a bogus
+    # "iae_normalized_c" three orders of magnitude too large. NaN it instead
+    # so a caller can't mistake it for a real number.
+    iae_normalized = (iae_raw / duration) if duration > 0 else float("nan")
 
     return ZoneWindowStats(
         zone=zone,
@@ -374,7 +450,7 @@ def window_zone_stats(window: Window, rows: Sequence[PollRow], zone: int) -> Opt
         max_undershoot_c=max(-errors[max_under_i], 0.0),
         max_undershoot_at_s=times[max_under_i],
         iae_raw_c_s=iae_raw,
-        iae_normalized_c=iae_raw / duration,
+        iae_normalized_c=iae_normalized,
         duty_min=min(duties),
         duty_max=max(duties),
         duty_mean=sum(duties) / len(duties),
@@ -537,6 +613,9 @@ def ff_hold_infeasible_episodes(rows: Sequence[PollRow], zone: int) -> list[tupl
 
 def sanity_check_firing(rows: Sequence[PollRow]) -> list[str]:
     """Return a list of human-readable warnings, empty if nothing looks off.
+
+    ``rows`` must be a single run (see ``split_runs``); it is passed straight
+    through to ``build_windows``, which raises if it spans more than one.
 
     Currently checks: every zone's overall (whole-run, time-weighted) mean
     error shares the same sign -- a systematic over- or under-drive rather
@@ -794,9 +873,13 @@ def _pct_diff(a: float, b: float) -> Optional[float]:
 
 
 def render_firing_report(path: str, band_c: float = 1.0) -> dict:
-    rows = parse_profile_exec_jsonl(path)
-    if not rows:
+    all_rows = parse_profile_exec_jsonl(path)
+    if not all_rows:
         return {"error": f"no profile_exec rows parsed from {path}"}
+    runs = split_runs(all_rows)
+    used_run_index = _default_run_index(runs)
+    rows = runs[used_run_index]  # most recent complete run in the file
+
     windows = build_windows(rows)
     zones = zones_in_rows(rows)
 
@@ -820,6 +903,8 @@ def render_firing_report(path: str, band_c: float = 1.0) -> dict:
         "n_zones": len(zones),
         "zones": zones,
         "band_c": band_c,
+        "runs_in_file": len(runs),
+        "used_run_index": used_run_index,
         "windows": win_reports,
         "transitions": transitions,
         "saturation": saturation,
@@ -835,6 +920,12 @@ def format_firing_report_text(report: dict) -> str:
         f"firing log: {report['path']}  ({report['n_rows']} polls, "
         f"{report['n_zones']} zones, settle band +/-{report['band_c']:.2f} C)",
     ]
+    if report.get("runs_in_file", 1) > 1:
+        lines.append(
+            f"  ! file holds {report['runs_in_file']} runs (elapsed_s restarts partway "
+            f"through) -- analyzing run #{report['used_run_index'] + 1} "
+            f"(the most recent, {report['n_rows']} polls)"
+        )
     if report["warnings"]:
         for w in report["warnings"]:
             lines.append(f"  ! {w}")
@@ -929,11 +1020,29 @@ def format_autotune_report_text(report: dict) -> str:
 
 def compare_firing_runs(path_a: str, path_b: str, band_c: float = 1.0) -> dict:
     """Whole-run, per-zone comparison of two firings of the same profile --
-    the before/after check for "did tracking measurably improve"."""
-    rows_a = parse_profile_exec_jsonl(path_a)
-    rows_b = parse_profile_exec_jsonl(path_b)
-    if not rows_a or not rows_b:
+    the before/after check for "did tracking measurably improve".
+
+    Either file may hold more than one run appended to it (``elapsed_s``
+    restarting partway through, e.g. the board was fired twice into the same
+    capture). Each file is split with ``split_runs`` and only its LAST
+    (most recent, presumably-complete) run is compared -- mixing rows from
+    two runs into one "whole run" window used to silently corrupt every
+    stat derived from it (a clamped/negative duration in particular turned
+    ``iae_normalized_c`` into the raw C*s integral mislabelled as C). The
+    returned dict reports how many runs each file held and which index was
+    used so a multi-run file is never compared silently.
+    """
+    all_rows_a = parse_profile_exec_jsonl(path_a)
+    all_rows_b = parse_profile_exec_jsonl(path_b)
+    if not all_rows_a or not all_rows_b:
         return {"error": "one or both runs had no parseable rows"}
+
+    runs_a = split_runs(all_rows_a)
+    runs_b = split_runs(all_rows_b)
+    used_a = _default_run_index(runs_a)
+    used_b = _default_run_index(runs_b)
+    rows_a = runs_a[used_a]
+    rows_b = runs_b[used_b]
 
     def whole_run_stats(rows):
         w = Window(-1, "all", 0, len(rows) - 1, rows[0].elapsed_s, rows[-1].elapsed_s)
@@ -954,13 +1063,27 @@ def compare_firing_runs(path_a: str, path_b: str, band_c: float = 1.0) -> dict:
             "mean_error_a": a.mean_error_c, "mean_error_b": b.mean_error_c,
             "max_overshoot_a": a.max_overshoot_c, "max_overshoot_b": b.max_overshoot_c,
         }
-    return {"path_a": path_a, "path_b": path_b, "zones": zones, "diffs": diffs}
+    return {
+        "path_a": path_a, "path_b": path_b, "zones": zones, "diffs": diffs,
+        "runs_in_a": len(runs_a), "runs_in_b": len(runs_b),
+        "used_run_index_a": used_a, "used_run_index_b": used_b,
+    }
 
 
 def format_compare_report_text(report: dict) -> str:
     if "error" in report:
         return f"error: {report['error']}"
     lines = [f"compare: A={report['path_a']}  B={report['path_b']}"]
+    if report.get("runs_in_a", 1) > 1:
+        lines.append(
+            f"  ! A holds {report['runs_in_a']} runs -- comparing run "
+            f"#{report['used_run_index_a'] + 1} (the most recent)"
+        )
+    if report.get("runs_in_b", 1) > 1:
+        lines.append(
+            f"  ! B holds {report['runs_in_b']} runs -- comparing run "
+            f"#{report['used_run_index_b'] + 1} (the most recent)"
+        )
     for z, d in report["diffs"].items():
         arrow = "improved" if d["iae_normalized_improved"] else "WORSE"
         lines.append(

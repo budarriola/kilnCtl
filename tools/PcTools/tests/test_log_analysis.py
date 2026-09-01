@@ -445,3 +445,144 @@ def test_cli_compare(capsys):
     assert rc == 0
     out = capsys.readouterr().out
     assert "compare:" in out
+
+
+# ---------------------------------------------------------------------------
+# Multi-run logs -- elapsed_s restarts at 0 partway through the file because
+# a second firing was appended to the same JSONL. See log_analysis.py's
+# module docstring for the bug this class of test pins: a merged-run
+# "whole run" window used to have start_s > end_s, Window.duration_s
+# clamped to 0.0, and the old ``iae_raw / (duration or 1.0)`` fallback
+# silently returned the raw C*s integral mislabelled as normalized C.
+# ---------------------------------------------------------------------------
+
+def _write_run(lines, elapsed_values, actual_c, target_c=50.0, duty=0.2, zone=0):
+    for elapsed in elapsed_values:
+        lines.append(
+            f"00:00:00 {{\"state\":\"running\",\"segment_index\":0,\"segment_count\":1,"
+            f"\"dwelling\":true,\"target_c\":{target_c},\"elapsed_s\":{elapsed},"
+            f"\"zones\":[{{\"zone\":{zone},\"actual_c\":{actual_c},\"duty\":{duty}}}]}}"
+        )
+
+
+def _two_run_jsonl(tmp_path, name="two_run.jsonl"):
+    """A file holding two runs: run 1 (elapsed 0..30, actual 55 -> mean err
+    +5C) followed by run 2 restarting at elapsed_s=0 (elapsed 0..20, actual
+    52 -> mean err +2C). The LAST run is the one every consumer should use.
+    """
+    p = tmp_path / name
+    lines = []
+    _write_run(lines, (0, 10, 20, 30), actual_c=55.0)
+    _write_run(lines, (0, 10, 20), actual_c=52.0)
+    p.write_text("\n".join(lines) + "\n")
+    return str(p)
+
+
+def _one_run_jsonl(tmp_path, name="one_run.jsonl"):
+    p = tmp_path / name
+    lines = []
+    _write_run(lines, (0, 10, 20), actual_c=52.0)
+    p.write_text("\n".join(lines) + "\n")
+    return str(p)
+
+
+def test_split_runs_detects_two_runs(tmp_path):
+    rows = la.parse_profile_exec_jsonl(_two_run_jsonl(tmp_path))
+    runs = la.split_runs(rows)
+    assert len(runs) == 2
+    assert [r.elapsed_s for r in runs[0]] == [0.0, 10.0, 20.0, 30.0]
+    assert [r.elapsed_s for r in runs[1]] == [0.0, 10.0, 20.0]
+
+
+def test_split_runs_single_run_returns_one(tmp_path):
+    rows = la.parse_profile_exec_jsonl(_one_run_jsonl(tmp_path))
+    runs = la.split_runs(rows)
+    assert len(runs) == 1
+    assert len(runs[0]) == 3
+
+
+def test_split_runs_empty():
+    assert la.split_runs([]) == []
+
+
+def test_build_windows_refuses_multi_run_rows(tmp_path):
+    rows = la.parse_profile_exec_jsonl(_two_run_jsonl(tmp_path))
+    with pytest.raises(ValueError):
+        la.build_windows(rows)
+
+
+def test_merged_run_window_no_longer_yields_huge_finite_iae():
+    """Pins the exact reported bug: a window whose start_s > end_s (duration
+    clamped to 0) must NOT produce a large finite iae_normalized_c -- it must
+    come back as NaN rather than the raw C*s integral relabelled as C."""
+    rows = [
+        la.PollRow(
+            wall_time="00:00:00", elapsed_s=e, segment_index=0, segment_count=1,
+            dwelling=True, target_c=50.0, state="running",
+            zones={0: la.ZoneSample(zone=0, actual_c=55.0, duty=0.2)},
+        )
+        for e in (10.0, 20.0, 30.0, 0.0, 5.0)
+    ]
+    # a merged-run "whole run" window, exactly as the old whole_run_stats
+    # helper built one: start_s from the first row, end_s from the last.
+    bogus_window = la.Window(-1, "all", 0, len(rows) - 1, rows[0].elapsed_s, rows[-1].elapsed_s)
+    assert bogus_window.duration_s == 0.0
+    # window_zone_stats asserts dts are non-negative; a genuinely merged
+    # sequence of rows (decreasing elapsed_s inside the window) must be
+    # rejected rather than silently integrated with a negative weight.
+    with pytest.raises(AssertionError):
+        la.window_zone_stats(bogus_window, rows, zone=0)
+
+
+def test_window_zone_stats_zero_duration_window_is_nan_not_raw_iae():
+    """A single-row-spanning window with start_s == end_s (duration 0) but
+    otherwise valid (non-decreasing) rows must report iae_normalized_c as
+    NaN, never the raw iae_raw_c_s value mislabelled as C."""
+    rows = [
+        la.PollRow(
+            wall_time="00:00:00", elapsed_s=5.0, segment_index=0, segment_count=1,
+            dwelling=True, target_c=50.0, state="running",
+            zones={0: la.ZoneSample(zone=0, actual_c=55.0, duty=0.2)},
+        ),
+    ]
+    zero_window = la.Window(-1, "all", 0, 0, 5.0, 5.0)
+    s = la.window_zone_stats(zero_window, rows, zone=0)
+    assert s.iae_raw_c_s == pytest.approx(0.0)
+    assert math.isnan(s.iae_normalized_c)
+
+
+def test_compare_firing_runs_uses_last_run_and_reports_run_counts(tmp_path):
+    """The core regression: comparing a multi-run file's iae_normalized must
+    equal what you'd get analyzing the LAST run in isolation -- not the old
+    corrupted merged-run figure -- and the report must say the file was
+    multi-run."""
+    two_run_path = _two_run_jsonl(tmp_path, "a_two_run.jsonl")
+    last_run_only_path = _one_run_jsonl(tmp_path, "a_last_run_only.jsonl")  # run 2, isolated
+    single_run_path = _one_run_jsonl(tmp_path, "b_single_run.jsonl")
+
+    report = la.compare_firing_runs(two_run_path, single_run_path, band_c=1.0)
+    assert report["runs_in_a"] == 2
+    assert report["runs_in_b"] == 1
+    assert report["used_run_index_a"] == 1
+    assert report["used_run_index_b"] == 0
+
+    isolated_report = la.compare_firing_runs(last_run_only_path, single_run_path, band_c=1.0)
+
+    a_iae = report["diffs"][0]["iae_normalized_a"]
+    isolated_iae = isolated_report["diffs"][0]["iae_normalized_a"]
+    assert a_iae == pytest.approx(isolated_iae, rel=1e-9)
+    # sanity: this must be a plausible normalized-C number, nowhere near the
+    # corrupted ~1800x-too-large figure the raw-C*s fallback used to produce.
+    assert 0.0 <= a_iae <= 10.0
+
+    text = la.format_compare_report_text(report)
+    assert "A holds 2 runs" in text
+
+
+def test_render_firing_report_uses_last_run(tmp_path):
+    report = la.render_firing_report(_two_run_jsonl(tmp_path), band_c=1.0)
+    assert report["runs_in_file"] == 2
+    assert report["used_run_index"] == 1
+    assert report["n_rows"] == 3  # run 2 has 3 polls
+    text = la.format_firing_report_text(report)
+    assert "2 runs" in text
