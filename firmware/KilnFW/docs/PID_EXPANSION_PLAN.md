@@ -1114,6 +1114,52 @@ flash. Three different write patterns, and they must not share a mechanism.
       see this class at all: the host build has no PSRAM and no cache. Route
       through `uart_bridge_ext_run_on_flash_worker()`.
 
+### Phase 7d — learn from ordinary firings — opened 2026-09-01
+
+Operator ask: a mode on the zones page that lets the kiln keep improving its
+PID parameters from real firing cycles, every time any profile runs, instead of
+only from dedicated step tests.
+
+**The constraint that shapes the whole design:** closed-loop data is far less
+informative than a step test. When the controller is working, the temperature
+sits on target and a signal that does not move carries almost no information
+about the plant. A dwell at 60 C says very little about K or tau. Nearly all
+the usable information is in ramps, in the transitions, and in any interval
+where the duty moves substantially. A design that ignores this will happily
+"identify" a model from noise and hand back confident nonsense.
+
+Two mechanisms, different promises:
+
+- [ ] **Model refinement (identification).** Re-fit K/tau/dead time from the
+      informative segments of a firing. Must score each candidate segment for
+      information content and REFUSE when it is too flat, rather than fitting
+      noise. Only updates when a firing happens to contain usable data.
+- [ ] **Iterative tuning (optimization).** Treat each firing as one experiment,
+      score it with the normalized IAE already recorded per zone in Phase 7a,
+      perturb the gains slightly, and keep the change only if the next run
+      scores better. Does not need informative data in the identification
+      sense, converges over several firings, and is much harder to fool. This
+      is the mechanism that actually delivers "gets better every firing".
+
+**Recommend, do not auto-apply, by default.** Silently rewriting the gains of a
+kiln that fires unattended, on evidence from a run nobody reviewed, is how a
+bad firing happens that nobody can explain afterwards. Proposals surface the
+same way autotune's do and wait for Accept. Auto-apply may be offered as an
+explicit opt-in per zone, and if so it must be bounded — a cap on the change
+per run, a floor and ceiling per parameter, a record of what changed and why,
+and a one-click revert to the last accepted set.
+
+- [ ] Per-zone opt-in on the zones page, off by default.
+- [ ] Every proposal records which firing produced it, the gains in force at
+      the time, and the score that justified it — otherwise a comparison across
+      runs silently spans a re-tune. Phase 7a-2's history already stores the
+      gains per run; reuse it rather than inventing a second record.
+- [ ] Refuse to learn from a run that was faulted, stopped early, or had a
+      meaningful `excluded_sample_count` — an untrustworthy run must not
+      become training data.
+- [ ] Never let learned gains escape the same validation the autotune Accept
+      path applies.
+
 ### Phase 7b — live autotune trace on the graph
 
 - [x] Draw the in-progress autotune trace on the home graph against the planned
