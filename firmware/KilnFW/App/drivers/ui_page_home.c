@@ -293,7 +293,8 @@ static int32_t s_chart_planned_pts[UI_PAGE_HOME_CHART_POINTS];
  * main_page.html's drawYAxis() draws tickCount=10 -> 11 evenly spaced
  * positions from axis min to axis max, each a numeric label plus a short
  * tick mark just outside the plot; this mirrors that count and spacing.
- * Static array, built ONCE (11 lv_label children of s_chart, never created
+ * Static array, built ONCE (UI_PAGE_HOME_Y_TICK_COUNT lv_label children of
+ * s_chart -- 6, not the original 11, see the 2026-09-01 note below; never created
  * or destroyed per refresh -- see this file's own "watch memory" framing
  * elsewhere), and every refresh_cb() tick only rewrites their text/position
  * from the SAME axis_lo/axis_hi just handed to lv_chart_set_axis_range()
@@ -329,6 +330,16 @@ static lv_obj_t *s_chart_y_tick_labels[UI_PAGE_HOME_Y_TICK_COUNT];
  * driven from the same lv_chart_set_axis_range() call. */
 static int32_t s_chart_axis_lo, s_chart_axis_hi;
 static bool s_chart_y_ticks_visible; /* false hides labels AND tick marks */
+/* Anti-jitter hold state for the active-firing Y axis (see
+ * ui_page_home_active_y_axis_range()'s header comment in
+ * ui_page_home_graph.h) -- the axis this function returned on the previous
+ * tick of the CURRENT run, so it can only ever widen from here, never shrink
+ * back in. s_axis_hold_have is reset to false exactly once per run, at the
+ * state_active false->true transition detected in refresh_cb() -- see that
+ * call site's own comment. */
+static bool s_axis_hold_have;
+static int32_t s_axis_hold_lo, s_axis_hold_hi;
+static bool s_axis_hold_prev_active;
 /* 2026-08-31 owner request ("the times for the lcd graph should be at the
  * bottom of the graph"): replaces the old single top-right "0:00-MM:SS" chip
  * with four individually positioned tick labels along the BOTTOM edge of the
@@ -802,7 +813,8 @@ static void chart_draw_event_cb(lv_event_t *e)
     line_dsc->dash_gap = UI_PAGE_HOME_PLAN_DASH_GAP_PX;
 }
 
-/* LV_EVENT_DRAW_POST hook on s_chart -- draws the 11 short tick marks that
+/* LV_EVENT_DRAW_POST hook on s_chart -- draws the UI_PAGE_HOME_Y_TICK_COUNT
+ * (6) short tick marks that
  * accompany s_chart_y_tick_labels[], matching main_page.html's drawYAxis()
  * (`moveTo(padL - 3, vy) -> lineTo(padL, vy)`, a 3px stroke just outside the
  * plot in the border color). This chart's own pad_all is only 2px, so a
@@ -842,7 +854,7 @@ static void chart_y_tick_draw_event_cb(lv_event_t *e)
     }
 }
 
-/* Rewrites all 11 Y-tick labels' text and position from axis_lo/axis_hi --
+/* Rewrites all UI_PAGE_HOME_Y_TICK_COUNT (6) Y-tick labels' text and position from axis_lo/axis_hi --
  * the SAME two values just passed to lv_chart_set_axis_range() at each call
  * site below, never read back from the chart, for the reason this file's
  * header comment on s_chart_y_tick_labels gives. Also stashes them into
@@ -979,8 +991,8 @@ static void chart_set_x_ticks(float horizon_s, bool has_span)
 }
 
 /* Shows/hides and repositions the 0-2 legend rows built in
- * ui_page_home_build() -- row count comes from the host-tested
- * ui_page_home_legend_row_count() (ui_page_home_graph.c), never decided
+ * ui_page_home_build() -- per-row visibility comes from the host-tested
+ * ui_page_home_legend_visibility() (ui_page_home_graph.c), never decided
  * here. Must be called AFTER chart_set_x_ticks() for the same horizon_s/
  * has_span this tick: the legend anchors itself just ABOVE the bottom
  * tick-label row (s_chart_x_tick_labels[0]'s own height, measured after that
@@ -991,17 +1003,20 @@ static void chart_set_x_ticks(float horizon_s, bool has_span)
  * through near the end of a run. Rows stack bottom-up so the LAST visible
  * row (row 1, "Plan", when both are shown) sits closest to the tick row and
  * row 0 ("Actual") sits above it. */
-static void chart_set_legend(bool has_span, bool has_planned)
+static void chart_set_legend(bool has_span, bool has_actual_multi, bool has_planned)
 {
-    size_t rows = ui_page_home_legend_row_count(has_span, has_planned);
-    if (rows == 0) {
+    bool show_actual, show_plan;
+    ui_page_home_legend_visibility(has_span, has_actual_multi, has_planned, &show_actual, &show_plan);
+    bool row_visible[UI_PAGE_HOME_LEGEND_ROWS] = { show_actual, show_plan };
+    bool any_visible = show_actual || show_plan;
+    if (!any_visible) {
         for (int k = 0; k < UI_PAGE_HOME_LEGEND_ROWS; k++) {
             lv_obj_add_flag(s_chart_legend_row[k], LV_OBJ_FLAG_HIDDEN);
         }
         return;
     }
     for (int k = 0; k < UI_PAGE_HOME_LEGEND_ROWS; k++) {
-        if ((size_t)k < rows) {
+        if (row_visible[k]) {
             lv_obj_remove_flag(s_chart_legend_row[k], LV_OBJ_FLAG_HIDDEN);
         } else {
             lv_obj_add_flag(s_chart_legend_row[k], LV_OBJ_FLAG_HIDDEN);
@@ -1029,7 +1044,13 @@ static void chart_set_legend(bool has_span, bool has_planned)
     int32_t legend_bottom_local = content_bottom_local - tick_row_h - 2;
 
     int32_t y = legend_bottom_local;
-    for (int k = (int)rows - 1; k >= 0; k--) {
+    for (int k = UI_PAGE_HOME_LEGEND_ROWS - 1; k >= 0; k--) {
+        if (!row_visible[k]) {
+            continue; /* not the old "hide the fixed 0-2 count's tail" case --
+                       * row 0 (Actual) can now be hidden while row 1 (Plan)
+                       * stays visible, see ui_page_home_legend_visibility()'s
+                       * header comment. */
+        }
         lv_obj_t *row = s_chart_legend_row[k];
         int32_t row_h = lv_obj_get_height(row);
         int32_t row_w = lv_obj_get_width(row);
@@ -1196,9 +1217,9 @@ static void refresh_cb(lv_timer_t *timer)
          * place that ever un-hides it. */
         chart_set_x_ticks(0.0f, false);
         /* No series drawn either (a single dot, not a line) -- see
-         * ui_page_home_legend_row_count()'s own header comment for why
+         * ui_page_home_legend_visibility()'s own header comment for why
          * has_span=false forces the legend hidden regardless. */
-        chart_set_legend(false, false);
+        chart_set_legend(false, false, false);
         /* No planned curve, so no "current position along the curve" to mark
          * either -- same honesty rule as the x-label above. */
         lv_obj_add_flag(s_chart_now_dot, LV_OBJ_FLAG_HIDDEN);
@@ -1242,6 +1263,16 @@ static void refresh_cb(lv_timer_t *timer)
          * scale must say the truth in both idle and running states -- idle
          * has no planned horizon, it's showing recent history"). */
         bool state_active = (st.state != PROFILE_EXEC_IDLE);
+        /* Reset the active-axis hold exactly once, on the IDLE->active
+         * transition -- a brand new run must not inherit the previous run's
+         * widened range. Updated unconditionally (not just inside the
+         * state_active branch below) so a run that ends and a new one that
+         * starts are never mistaken for the same run just because this
+         * refresh happened to run between them. */
+        if (state_active && !s_axis_hold_prev_active) {
+            s_axis_hold_have = false;
+        }
+        s_axis_hold_prev_active = state_active;
         size_t count = profile_executor_get_history_count();
         float horizon_s;
         if (state_active) {
@@ -1273,6 +1304,15 @@ static void refresh_cb(lv_timer_t *timer)
         unit_pref_t unit = unit_pref_get();
         bool have_range = false;
         float lo = 0.0f, hi = 0.0f;
+        /* Count of real (non-NaN) actual points plotted this tick -- feeds
+         * ui_page_home_legend_visibility()'s has_actual_multi so a lone
+         * run_start_c anchor point (the very first tick of a run, before any
+         * history sample exists) does not advertise an "Actual" legend row
+         * for a line that has nothing visible to draw (a single point is not
+         * a line, and per-point dot markers were removed elsewhere on this
+         * chart -- see that function's header comment in
+         * ui_page_home_graph.h). */
+        size_t actual_point_count = 0;
         for (uint32_t i = 0; i < UI_PAGE_HOME_CHART_POINTS; i++) {
             float t_i = (UI_PAGE_HOME_CHART_POINTS > 1)
                             ? (float)i * horizon_s / (float)(UI_PAGE_HOME_CHART_POINTS - 1)
@@ -1322,6 +1362,7 @@ static void refresh_cb(lv_timer_t *timer)
                 float disp = unit_pref_convert(actual_c, unit, UNIT_PREF_KIND_ABSOLUTE);
                 s_chart_actual_pts[i] = isnan(disp) ? LV_CHART_POINT_NONE : (int32_t)lroundf(disp);
                 if (!isnan(disp)) {
+                    actual_point_count++;
                     if (!have_range) { lo = hi = disp; have_range = true; }
                     else { if (disp < lo) lo = disp; if (disp > hi) hi = disp; }
                 }
@@ -1329,31 +1370,33 @@ static void refresh_cb(lv_timer_t *timer)
                 s_chart_actual_pts[i] = LV_CHART_POINT_NONE;
             }
         }
-        /* 2026-08-23 owner request ("the LCD profile graph should look like
-         * the web GUI's profile graph"): main_page.html's Y axis is labelled
-         * at exactly two points, 0 at the bottom and the planned curve's own
-         * PEAK at the top -- not a padded min/max of whatever's plotted, the
-         * way this chart's axis worked before. Only applied when there IS a
-         * live plan to take a peak from (state_active && plan_n>0); every
-         * other case (idle-with-history, or a running state whose plan came
-         * back empty -- profile_feasibility_plan_curve()'s own -1/empty
-         * path) falls back to the previous data-driven min/max-with-padding
-         * behaviour below, since there is no "planned peak" to honestly
-         * anchor a 0..peak axis to in those cases. */
-        if (state_active && plan_n > 0) {
-            float peak_c = ui_page_home_plan_peak_c(plan_pts, plan_n);
-            if (!isnan(peak_c)) {
-                float peak_disp = unit_pref_convert(peak_c, unit, UNIT_PREF_KIND_ABSOLUTE);
-                int32_t axis_hi = (int32_t)lroundf(peak_disp);
-                int32_t axis_lo = 0;
-                if (axis_hi <= axis_lo) {
-                    axis_hi = axis_lo + 1; /* guard a degenerate/zero-peak profile */
-                }
-                lv_chart_set_axis_range(s_chart, LV_CHART_AXIS_PRIMARY_Y, axis_lo, axis_hi);
-                chart_set_y_ticks(axis_lo, axis_hi, unit);
-            } else {
-                chart_hide_y_ticks();
-            }
+        /* 2026-09-01 defect fix (review of commit a50aa64): this branch used
+         * to hard-pin the axis to 0..plan_peak, discarding the accumulated
+         * lo/hi range entirely -- see ui_page_home_active_y_axis_range()'s
+         * header comment in ui_page_home_graph.h for the full history (it
+         * superseded a 2026-08-23 "look like the web GUI" request, itself
+         * superseded now: newest instruction wins, per this repo's standing
+         * rule). lo/hi here are the same accumulated range the fallback
+         * branch below already used -- built from BOTH series across the
+         * loop above, so the planned curve's peak (anchoring the view to
+         * where the firing is going) and any actual overshoot above it (no
+         * longer clipped) are both already folded in before this call.
+         * have_range must still be true (the same guard the old code lacked
+         * -- an empty plan AND no actual sample yet has nothing to range
+         * over) or there's nothing to show a Y axis for at all. */
+        if (state_active && plan_n > 0 && have_range) {
+            int32_t axis_lo, axis_hi;
+            ui_page_home_active_y_axis_range(lo, hi, freezing_point_disp(unit), s_axis_hold_have,
+                                              s_axis_hold_lo, s_axis_hold_hi, &axis_lo, &axis_hi);
+            s_axis_hold_have = true;
+            s_axis_hold_lo = axis_lo;
+            s_axis_hold_hi = axis_hi;
+            lv_chart_set_axis_range(s_chart, LV_CHART_AXIS_PRIMARY_Y, axis_lo, axis_hi);
+            chart_set_y_ticks(axis_lo, axis_hi, unit);
+        } else if (state_active && plan_n > 0) {
+            /* Live plan, but nothing plotted yet this tick (have_range
+             * false) -- nothing to honestly range an axis over. */
+            chart_hide_y_ticks();
         } else if (have_range) {
             /* Padded 10%-of-span range with the same freezing-floor guard as
              * the idle-dot branch above, now factored into
@@ -1426,8 +1469,11 @@ static void refresh_cb(lv_timer_t *timer)
         chart_set_x_ticks(horizon_s, has_span);
         /* Same "state_active && plan_n > 0" condition that gates the dashed
          * planned series and the current-position dot below -- the legend's
-         * "Plan" row must never claim a series is drawn that isn't. */
-        chart_set_legend(has_span, state_active && plan_n > 0);
+         * "Plan" row must never claim a series is drawn that isn't.
+         * has_actual_multi (>=2 real actual points plotted this tick) is what
+         * keeps the "Actual" row honest at the very start of a run -- see
+         * ui_page_home_legend_visibility()'s header comment. */
+        chart_set_legend(has_span, actual_point_count >= 2, state_active && plan_n > 0);
         if (state_active && plan_n > 0) {
             /* Current-position dot -- see its own static declaration comment.
              * Only meaningful here (a live plan with a real horizon to place
@@ -1786,8 +1832,10 @@ lv_obj_t *ui_page_home_build(void)
      * comment (near the static declarations above) for why these are plain
      * labels overlaid on the chart's own plot rather than an lv_scale
      * widget, and for the UI_PLAN.md 5.3 "all 11 ticks" decision this array
-     * implements. No background chip on the tick labels (unlike the old
-     * hi/lo pair, and unlike s_chart_x_tick_labels below) -- 11 opaque chips
+     * originally implemented (now UI_PAGE_HOME_Y_TICK_COUNT == 6, see the
+     * 2026-09-01 note near that macro's definition). No background chip on
+     * the tick labels (unlike the old hi/lo pair, and unlike
+     * s_chart_x_tick_labels below) -- that many opaque chips
      * stacked down the left edge would themselves start to read as a solid
      * bar over the plot; a scaled-down, plain-text label in the muted
      * secondary color (matching main_page.html's g.muted) is legible enough
@@ -1802,8 +1850,8 @@ lv_obj_t *ui_page_home_build(void)
      * (UI_PLAN.md 5.3). A first pass instead faked it with
      * lv_obj_set_style_transform_scale(154/256) because only montserrat_14
      * was compiled in -- but that scales an already-rendered 14px bitmap,
-     * which aliases badly at ~60% on a real panel, and 11 stacked labels is
-     * exactly where that would show. CONFIG_LV_FONT_MONTSERRAT_10 is now
+     * which aliases badly at ~60% on a real panel, and UI_PAGE_HOME_Y_TICK_COUNT
+     * stacked labels is exactly where that would show. CONFIG_LV_FONT_MONTSERRAT_10 is now
      * enabled in the tracked sdkconfig.defaults (NOT in sdkconfig, which is
      * gitignored -- a font left only there means a clean clone silently
      * falls back to the 14px face and the labels overlap). */

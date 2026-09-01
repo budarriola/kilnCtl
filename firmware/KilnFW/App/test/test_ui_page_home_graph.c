@@ -191,21 +191,96 @@ void run_test_ui_page_home_graph(void)
         TEST_CHECK(lo >= 0, "above-freezing data whose padding alone dips below 0: axis_lo floored at freezing");
     }
 
-    TEST_SECTION("ui_page_home_graph: legend_row_count");
+    TEST_SECTION("ui_page_home_graph: legend_visibility");
     {
+        bool show_actual, show_plan;
+
         // Idle single-dot state: no span at all, so no legend regardless of
-        // what has_planned claims -- a stray true here would be exactly the
-        // "confident wrong number" this codebase's other honesty guards warn
-        // against (has_planned should never legitimately be true without
-        // has_span, but the function must not trust that).
-        TEST_CHECK(ui_page_home_legend_row_count(false, false) == 0, "no span, no plan -> 0 rows");
-        TEST_CHECK(ui_page_home_legend_row_count(false, true) == 0, "no span (even if plan claimed) -> 0 rows");
+        // what has_actual_multi/has_planned claim -- a stray true here would
+        // be exactly the "confident wrong number" this codebase's other
+        // honesty guards warn against (has_planned should never legitimately
+        // be true without has_span, but the function must not trust that).
+        ui_page_home_legend_visibility(false, false, false, &show_actual, &show_plan);
+        TEST_CHECK(!show_actual && !show_plan, "no span, no plan -> nothing shown");
+        ui_page_home_legend_visibility(false, true, true, &show_actual, &show_plan);
+        TEST_CHECK(!show_actual && !show_plan, "no span (even if actual/plan claimed) -> nothing shown");
 
         // Idle-with-history or a running plan that came back empty: actual
-        // line only.
-        TEST_CHECK(ui_page_home_legend_row_count(true, false) == 1, "span, no plan -> 1 row (actual only)");
+        // line only, and it has at least two real points.
+        ui_page_home_legend_visibility(true, true, false, &show_actual, &show_plan);
+        TEST_CHECK(show_actual && !show_plan, "span, multi-point actual, no plan -> actual only");
 
         // A live running profile with a real plan curve: both series drawn.
-        TEST_CHECK(ui_page_home_legend_row_count(true, true) == 2, "span + plan -> 2 rows (actual + plan)");
+        ui_page_home_legend_visibility(true, true, true, &show_actual, &show_plan);
+        TEST_CHECK(show_actual && show_plan, "span + multi-point actual + plan -> both shown");
+
+        // The defect this housekeeping fix targets: the very first tick of a
+        // run plots exactly ONE actual point (the run_start_c anchor) --
+        // has_actual_multi is false even though has_span is true (a live
+        // plan curve is being drawn). The Actual row must be suppressed
+        // (nothing visible to key -- a lone point is not a line, and
+        // per-point markers are gone), while the Plan row -- which IS a real
+        // multi-point dashed line at this tick -- still shows.
+        ui_page_home_legend_visibility(true, false, true, &show_actual, &show_plan);
+        TEST_CHECK(!show_actual && show_plan, "single-sample actual, span+plan -> Actual suppressed, Plan shown");
+
+        // Same single-sample case but no plan either (e.g. a run whose plan
+        // curve came back empty) -- nothing to show at all.
+        ui_page_home_legend_visibility(true, false, false, &show_actual, &show_plan);
+        TEST_CHECK(!show_actual && !show_plan, "single-sample actual, no plan -> nothing shown");
+    }
+
+    TEST_SECTION("ui_page_home_graph: active_y_axis_range (autoscale-during-firing defect fix)");
+    {
+        int32_t lo, hi;
+
+        // THE clipping bug this task is about: plan peaks at 60C, kiln
+        // starts at 25C, actual has overshot to 62C -- ABOVE the planned
+        // peak. The old 0..plan_peak behaviour would have hard-clipped this
+        // at 60. The fixed axis must cover the overshoot.
+        ui_page_home_active_y_axis_range(25.0f, 62.0f, 0.0f, false, 0, 0, &lo, &hi);
+        TEST_CHECK((float)hi > 62.0f, "overshoot above plan peak (62C, plan peak 60C folded into hi): axis_hi covers it, not clipped at 60");
+        TEST_CHECK((float)lo <= 25, "starting temp (25C) still within axis_lo");
+
+        // Degenerate span guard still holds through this wrapper (same
+        // load-bearing lroundf(44.9)==lroundf(45.1)==45 case as the
+        // underlying ui_page_home_y_axis_range()).
+        ui_page_home_active_y_axis_range(45.0f, 45.0f, 0.0f, false, 0, 0, &lo, &hi);
+        TEST_CHECK(hi > lo, "degenerate all-same-value span: axis_hi > axis_lo, guard held through the wrapper");
+
+        // Anti-jitter, quantization: two raw ranges that differ by a
+        // fraction of a degree (simulating tick-to-tick sensor noise) but do
+        // not cross a UI_PAGE_HOME_AXIS_QUANT_STEP_DISP-unit step boundary
+        // must quantize to the EXACT SAME integer pair -- this is what stops
+        // the label from flickering every refresh.
+        // These two raw padded highs straddle an INTEGER rounding boundary
+        // (hi=59.5 -> 10%-padded raw 61.9 -> lroundf 62; hi=59.6 -> raw
+        // 62.56 -> lroundf 63) -- exactly the kind of one-tick sensor drift
+        // that would flip the displayed integer bound every refresh without
+        // quantization. Both land in the SAME UI_PAGE_HOME_AXIS_QUANT_STEP_
+        // DISP=5 step (60..65), so the quantized, jitter-resistant result
+        // must be identical.
+        int32_t lo_a, hi_a, lo_b, hi_b;
+        ui_page_home_active_y_axis_range(30.0f, 59.5f, 0.0f, false, 0, 0, &lo_a, &hi_a);
+        ui_page_home_active_y_axis_range(30.0f, 59.6f, 0.0f, false, 0, 0, &lo_b, &hi_b);
+        TEST_CHECK(lo_a == lo_b && hi_a == hi_b,
+                   "sub-degree tick-to-tick drift that doesn't cross a quant step: identical quantized axis");
+
+        // Anti-jitter, only-widen ratchet: a held range from a "previous
+        // tick" must never be narrowed by a new tick whose own raw range is
+        // smaller (e.g. the accumulated actual/planned lo/hi dipped a hair).
+        // The returned range must still cover the held one.
+        ui_page_home_active_y_axis_range(25.0f, 60.0f, 0.0f, false, 0, 0, &lo_a, &hi_a);
+        // Next tick: a narrower raw range (as if the accumulated hi dropped)
+        // fed in WITH the previous tick's own result held.
+        ui_page_home_active_y_axis_range(25.0f, 40.0f, 0.0f, true, lo_a, hi_a, &lo_b, &hi_b);
+        TEST_CHECK(lo_b <= lo_a && hi_b >= hi_a,
+                   "only-widen ratchet: a narrower raw range this tick never shrinks the held axis");
+
+        // And it DOES widen when the new data genuinely exceeds the held
+        // range (a real overshoot arriving on a later tick).
+        int32_t lo_c, hi_c;
+        ui_page_home_active_y_axis_range(25.0f, 70.0f, 0.0f, true, lo_a, hi_a, &lo_c, &hi_c);
+        TEST_CHECK(hi_c > hi_a, "genuine growth beyond the held range widens the axis");
     }
 }

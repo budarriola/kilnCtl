@@ -104,10 +104,69 @@ void ui_page_home_y_axis_range(float lo, float hi, float floor_disp, int32_t *ou
     *out_axis_hi = axis_hi;
 }
 
-size_t ui_page_home_legend_row_count(bool has_span, bool has_planned)
+void ui_page_home_legend_visibility(bool has_span, bool has_actual_multi, bool has_planned,
+                                     bool *out_show_actual, bool *out_show_plan)
 {
-    if (!has_span) {
-        return 0;
+    *out_show_actual = has_span && has_actual_multi;
+    *out_show_plan = has_span && has_planned;
+}
+
+static int32_t quantize_floor_i32(int32_t v, int32_t step)
+{
+    int32_t r = v % step;
+    if (r < 0) {
+        r += step;
     }
-    return has_planned ? 2 : 1;
+    return v - r;
+}
+
+static int32_t quantize_ceil_i32(int32_t v, int32_t step)
+{
+    int32_t f = quantize_floor_i32(v, step);
+    return (f == v) ? v : f + step;
+}
+
+void ui_page_home_active_y_axis_range(float lo, float hi, float floor_disp, bool have_held,
+                                       int32_t held_lo, int32_t held_hi, int32_t *out_axis_lo,
+                                       int32_t *out_axis_hi)
+{
+    int32_t raw_lo, raw_hi;
+    ui_page_home_y_axis_range(lo, hi, floor_disp, &raw_lo, &raw_hi);
+
+    /* Quantize outward to a round UI_PAGE_HOME_AXIS_QUANT_STEP_DISP-unit
+     * step -- see this function's header comment in ui_page_home_graph.h for
+     * why: a raw padded range recomputed every ~1s tick from a live trace
+     * drifts by fractions of a degree as new samples land, which after
+     * lroundf() flips the displayed integer bound back and forth on
+     * consecutive refreshes. Flooring the low bound and ceiling the high
+     * bound (never the reverse -- that would shrink the visible span below
+     * the real data) means a tick that does not cross a step boundary always
+     * quantizes to the exact same pair of integers as the tick before it. */
+    int32_t q_lo = quantize_floor_i32(raw_lo, UI_PAGE_HOME_AXIS_QUANT_STEP_DISP);
+    int32_t q_hi = quantize_ceil_i32(raw_hi, UI_PAGE_HOME_AXIS_QUANT_STEP_DISP);
+    if (q_hi <= q_lo) {
+        q_hi = q_lo + UI_PAGE_HOME_AXIS_QUANT_STEP_DISP;
+    }
+
+    /* Only-widen ratchet: once a bound has been shown this run, it never
+     * moves back inward. Combined with quantization above this is what keeps
+     * the axis from visibly breathing in and out while a firing is under
+     * way -- the range can grow (a real overshoot, or the plan curve simply
+     * having more of itself revealed) but a momentary dip in the accumulated
+     * lo/hi (e.g. the actual trace briefly reads a hair cooler than a prior
+     * sample) can never yank the axis back in. have_held is false only on
+     * the first tick of a run (the caller resets its held state exactly
+     * once, at the state_active false->true transition) -- see
+     * ui_page_home.c's own call site comment for that reset. */
+    if (have_held) {
+        if (q_lo > held_lo) {
+            q_lo = held_lo;
+        }
+        if (q_hi < held_hi) {
+            q_hi = held_hi;
+        }
+    }
+
+    *out_axis_lo = q_lo;
+    *out_axis_hi = q_hi;
 }

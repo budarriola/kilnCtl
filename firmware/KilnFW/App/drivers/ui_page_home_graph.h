@@ -133,6 +133,58 @@ bool ui_page_home_build_x_label(float horizon_s, bool has_span, char *out, size_
  * comment in ui_page_home.c documents; this function just applies it). */
 void ui_page_home_y_axis_range(float lo, float hi, float floor_disp, int32_t *out_axis_lo, int32_t *out_axis_hi);
 
+/* Quantization step (display degrees, either C or F) the active-firing Y
+ * axis snaps its padded bounds out to -- see
+ * ui_page_home_active_y_axis_range()'s header comment below for why. */
+#define UI_PAGE_HOME_AXIS_QUANT_STEP_DISP 5
+
+/* 2026-09-01 defect fix (review of commit a50aa64, "the graph should
+ * vertically autoscale to fit the plotted items"): during an active firing
+ * (state_active && plan_n > 0) ui_page_home.c used to hard-pin the Y axis to
+ * 0..plan_peak instead of the real accumulated lo/hi data range -- an
+ * overshoot above the planned peak was clipped clean off the top of the
+ * plot, and the whole lower part of the axis was dead space while the kiln
+ * was still cold. That 0..plan_peak behaviour was itself a 2026-08-23 owner
+ * request ("make it look like the web GUI"); this request is newer, so per
+ * this repo's standing rule (newest instruction wins) it supersedes it --
+ * the axis now autoscales to what is actually plotted, same as the idle/
+ * fallback branch already did via ui_page_home_y_axis_range() above, which
+ * this function wraps rather than duplicates.
+ *
+ * lo/hi here are the SAME accumulated range refresh_cb() already builds --
+ * the loop that fills s_chart_planned_pts/s_chart_actual_pts folds every
+ * finite planned point (across the WHOLE horizon, not just up to "now" --
+ * plan_lookup() is called unconditionally for every bucket) and every
+ * recorded actual point into lo/hi, so the planned curve's peak is already
+ * part of the range fed in here: the axis anchors to where the firing is
+ * going, not just where the trace happens to be standing right now, and an
+ * actual sample above that planned peak (a real overshoot) widens the top
+ * instead of being clipped by it.
+ *
+ * A range recomputed fresh from live data every ~1 Hz refresh would jitter
+ * continuously as the trace grows by fractions of a degree tick to tick.
+ * Two policies here fix that, applied on top of the padded range
+ * ui_page_home_y_axis_range() already computes:
+ *   1. Quantize axis_lo down and axis_hi up to the nearest
+ *      UI_PAGE_HOME_AXIS_QUANT_STEP_DISP -- most single-tick drift in the
+ *      raw padded bound does not cross a step boundary, so it quantizes to
+ *      the exact same integer as the previous tick and the label never
+ *      moves.
+ *   2. Only-widen ratchet across a single run: have_held/held_lo/held_hi is
+ *      the axis this function returned on the PREVIOUS tick of the SAME run
+ *      (the caller resets have_held to false exactly once, at the
+ *      state_active false->true transition -- see ui_page_home.c's call
+ *      site). The returned bound is only ever moved outward (min of the two
+ *      lows, max of the two highs), never inward, so the axis can grow to
+ *      show a real overshoot but can never audibly "breathe" back in when a
+ *      momentary dip in the accumulated data would otherwise narrow it.
+ * Together these mean the axis changes only when the trace has genuinely
+ * grown past the current view, and even then only in discrete, readable
+ * steps -- not on every refresh tick. */
+void ui_page_home_active_y_axis_range(float lo, float hi, float floor_disp, bool have_held,
+                                       int32_t held_lo, int32_t held_hi, int32_t *out_axis_lo,
+                                       int32_t *out_axis_hi);
+
 /* 2026-09-01 owner request: "add a compact legend inside the graph, bottom
  * right corner". The chart carries exactly two possible series -- actual
  * (always attempted whenever the chart has a real span, see has_span in
@@ -144,14 +196,24 @@ void ui_page_home_y_axis_range(float lo, float hi, float floor_disp, int32_t *ou
  * show/hide call sites, it lives here as one pure function so it is host
  * tested like this file's other seams.
  *
- * Row order is fixed: row 0 is always "Actual" (whenever any row is shown at
- * all), row 1 is "Plan". Returns 0 (hide the whole legend -- the idle
- * single-dot state has no series, only a point, to key), 1 (actual only), or
- * 2 (both). has_span=false forces 0 regardless of has_planned, since
- * has_planned can never legitimately be true without has_span also being
- * true (a planned series needs a real horizon) -- this function does not
- * trust the caller to already enforce that and clamps defensively instead. */
-size_t ui_page_home_legend_row_count(bool has_span, bool has_planned);
+ * Row order is fixed: row 0 is "Actual", row 1 is "Plan" -- but unlike the
+ * old count-only version of this function, the two rows are no longer
+ * required to be a contiguous 0..N-1 prefix. 2026-09-01 housekeeping fix (
+ * same review as ui_page_home_active_y_axis_range() above): with per-point
+ * dot markers removed elsewhere on this chart, a run's very first tick plots
+ * exactly one actual sample (the run_start_c anchor, before any real history
+ * sample has been recorded) -- a lone point renders as nothing at all (a
+ * line needs two points), yet the legend was still advertising an "Actual"
+ * row with nothing visible to key. has_actual_multi is true only once at
+ * least two actual points have been plotted this tick; when it is false the
+ * Actual row is suppressed even though has_span may still be true (e.g. a
+ * live plan curve IS being drawn), so the legend never claims a series is
+ * on screen that isn't. has_span=false forces both outputs false regardless
+ * of the other two, since neither series can legitimately be true without a
+ * real horizon to plot it on -- this function does not trust the caller to
+ * already enforce that and clamps defensively instead. */
+void ui_page_home_legend_visibility(bool has_span, bool has_actual_multi, bool has_planned,
+                                     bool *out_show_actual, bool *out_show_plan);
 
 #ifdef __cplusplus
 }
