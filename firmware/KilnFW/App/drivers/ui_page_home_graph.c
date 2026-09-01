@@ -72,3 +72,34 @@ bool ui_page_home_build_x_label(float horizon_s, bool has_span, char *out, size_
     snprintf(out, out_cap, "0:00|%s|%s|%s", t1_buf, t2_buf, t3_buf);
     return true;
 }
+
+void ui_page_home_y_axis_range(float lo, float hi, float floor_disp, int32_t *out_axis_lo, int32_t *out_axis_hi)
+{
+    float range = hi - lo;
+    if (range < 1.0f) {
+        range = 1.0f; /* degenerate/all-same-value guard -- see header comment */
+    }
+    float pad_c = range * 0.1f;
+    int32_t axis_lo = (int32_t)lroundf(lo - pad_c);
+    int32_t axis_hi = (int32_t)lroundf(hi + pad_c);
+
+    int32_t floor_i = (int32_t)lroundf(floor_disp);
+    if (axis_lo < floor_i && lo >= floor_i) {
+        axis_lo = floor_i;
+    }
+    /* Second-stage guard: the float-side `range < 1.0f` floor above keeps
+     * pad_c from being zero, but does NOT guarantee axis_lo/axis_hi round to
+     * DIFFERENT integers -- e.g. lo=hi=45, range floored to 1.0, pad_c=0.1,
+     * so lo-pad_c=44.9 and hi+pad_c=45.1 both round (lroundf) to the SAME
+     * integer 45. Caught by this repo's negative-test discipline: a first
+     * pass here had only the float guard and still failed the degenerate
+     * lo==hi==45 test in test_ui_page_home_graph.c. Same integer-level
+     * "axis_hi <= axis_lo -> axis_lo + 1" bump this file's caller already
+     * uses for the 0..peak axis case (ui_page_home.c's state_active
+     * branch). */
+    if (axis_hi <= axis_lo) {
+        axis_hi = axis_lo + 1;
+    }
+    *out_axis_lo = axis_lo;
+    *out_axis_hi = axis_hi;
+}

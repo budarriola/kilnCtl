@@ -120,4 +120,74 @@ void run_test_ui_page_home_graph(void)
         TEST_CHECK(wrote, "truncated buffer still reports a label was produced");
         TEST_CHECK(strlen(tiny) == sizeof(tiny) - 1, "truncated buffer is NUL-terminated within its capacity");
     }
+
+    TEST_SECTION("ui_page_home_graph: x_ticks/format_mmss over real-run horizons");
+    {
+        // Tonight's 3-zone firing: ~27 minutes total. Ticks must land at
+        // 0, 9:00, 18:00, 27:00 and each format cleanly as mm:ss (no hour
+        // rollover -- see ui_page_home_format_mmss()'s own header comment).
+        float t[4];
+        float horizon_27min = 27.0f * 60.0f;
+        ui_page_home_x_ticks(horizon_27min, t);
+        TEST_CHECK_NEAR(t[1], 9.0f * 60.0f, 0.01f, "27min horizon: tick1 == 9:00");
+        TEST_CHECK_NEAR(t[2], 18.0f * 60.0f, 0.01f, "27min horizon: tick2 == 18:00");
+        TEST_CHECK_NEAR(t[3], 27.0f * 60.0f, 0.01f, "27min horizon: tick3 == 27:00");
+        char buf[16];
+        ui_page_home_format_mmss((uint32_t)t[3], buf, sizeof(buf));
+        TEST_CHECK(strcmp(buf, "27:00") == 0, "27min horizon: full-span tick formats as 27:00");
+
+        // Autotune's worst-case 4-hour budget: ticks at 0, 80:00, 160:00,
+        // 240:00 -- large enough that a naive hh:mm choice would need to
+        // differ from the 27-minute case's mm:ss, which is exactly why this
+        // page's ticks stay unit-of-minutes (M:SS) at every horizon rather
+        // than switching formats and forcing the label-width/tick-count
+        // logic to handle two shapes.
+        float horizon_4h = 4.0f * 3600.0f;
+        ui_page_home_x_ticks(horizon_4h, t);
+        TEST_CHECK_NEAR(t[3], 240.0f * 60.0f, 0.01f, "4h horizon: full span == 240 minutes");
+        ui_page_home_format_mmss((uint32_t)t[3], buf, sizeof(buf));
+        TEST_CHECK(strcmp(buf, "240:00") == 0, "4h horizon: full-span tick formats as 240:00");
+    }
+
+    TEST_SECTION("ui_page_home_graph: y_axis_range");
+    {
+        int32_t lo, hi;
+
+        // Tonight's firing spans ~36-63 C -- a real, few-tens-of-degrees
+        // range. 10% pad on each side, freezing floor (0 C) does not apply
+        // (36 C is well above it).
+        ui_page_home_y_axis_range(36.0f, 63.0f, 0.0f, &lo, &hi);
+        TEST_CHECK(lo < 36 && hi > 63, "36-63C range: padded on both sides");
+        TEST_CHECK_NEAR((float)lo, 36.0f - (63.0f - 36.0f) * 0.1f, 1.0f, "36-63C range: ~10% pad on the low side");
+        TEST_CHECK_NEAR((float)hi, 63.0f + (63.0f - 36.0f) * 0.1f, 1.0f, "36-63C range: ~10% pad on the high side");
+
+        // A span of a few degrees (e.g. an idle bench sitting at 31-33C) --
+        // still must pad sensibly and never collapse lo==hi.
+        ui_page_home_y_axis_range(31.0f, 33.0f, 0.0f, &lo, &hi);
+        TEST_CHECK(hi > lo, "small few-degree range: axis_hi > axis_lo");
+        TEST_CHECK(lo <= 31 && hi >= 33, "small few-degree range: still spans the real data");
+
+        // Degenerate all-same-value span (lo == hi) -- e.g. exactly one
+        // sample recorded so far, or a stuck sensor. THE load-bearing
+        // assertion: axis_hi must come back strictly greater than axis_lo,
+        // or lv_chart_set_axis_range()'s zero-height axis divides by zero
+        // one call downstream (see ui_page_home_y_axis_range()'s own header
+        // comment in ui_page_home_graph.h for exactly where). Verified this
+        // is not vacuous by removing the `if (range < 1.0f) range = 1.0f;`
+        // guard in ui_page_home_graph.c and re-running: with the guard
+        // removed, this exact call returns axis_lo == axis_hi == 45 and this
+        // assertion fails -- restored afterward.
+        ui_page_home_y_axis_range(45.0f, 45.0f, 0.0f, &lo, &hi);
+        TEST_CHECK(hi > lo, "degenerate all-same-value span (lo==hi==45): axis_hi > axis_lo, guard held");
+
+        // Freezing floor: a real sub-zero low must NOT be clamped up (the
+        // excursion has to stay visible), but padding that merely DIPS below
+        // freezing on an otherwise-above-freezing range must be raised to
+        // the floor.
+        ui_page_home_y_axis_range(-5.0f, 10.0f, 0.0f, &lo, &hi);
+        TEST_CHECK(lo < 0, "genuine sub-zero low (-5C): axis_lo stays unclamped below freezing");
+
+        ui_page_home_y_axis_range(1.0f, 5.0f, 0.0f, &lo, &hi);
+        TEST_CHECK(lo >= 0, "above-freezing data whose padding alone dips below 0: axis_lo floored at freezing");
+    }
 }

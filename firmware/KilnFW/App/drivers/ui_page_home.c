@@ -315,7 +315,18 @@ static lv_obj_t *s_chart_y_tick_labels[UI_PAGE_HOME_Y_TICK_COUNT];
  * driven from the same lv_chart_set_axis_range() call. */
 static int32_t s_chart_axis_lo, s_chart_axis_hi;
 static bool s_chart_y_ticks_visible; /* false hides labels AND tick marks */
-static lv_obj_t *s_chart_x_label;    /* top-right: the plotted window's time span, "0:00-MM:SS" */
+/* 2026-08-31 owner request ("the times for the lcd graph should be at the
+ * bottom of the graph"): replaces the old single top-right "0:00-MM:SS" chip
+ * with four individually positioned tick labels along the BOTTOM edge of the
+ * plot, one per ui_page_home_x_ticks() value (0, h/3, 2h/3, h) -- the same
+ * four-tick shape ui_page_home_build_x_label() already produced as one
+ * pipe-joined string, now laid out spatially like s_chart_y_tick_labels[]
+ * rather than packed into a single corner string. Static array, built ONCE
+ * in ui_page_home_build() (same "never allocate inside refresh_cb()"
+ * discipline as the Y ticks); chart_set_x_ticks() below only ever rewrites
+ * text/position on these four. */
+#define UI_PAGE_HOME_X_TICK_COUNT 4
+static lv_obj_t *s_chart_x_tick_labels[UI_PAGE_HOME_X_TICK_COUNT];
 
 /* 2026-08-23 owner request ("the LCD profile graph should look like the web
  * GUI's profile graph"): a small filled blue dot marking the current
@@ -857,6 +868,81 @@ static void chart_hide_y_ticks(void)
     chart_set_y_ticks(0, 0, UNIT_PREF_CELSIUS);
 }
 
+/* Rewrites/positions the four bottom time-axis ticks (or hides all four when
+ * has_span is false) -- s_chart_x_tick_labels' own comment explains why this
+ * replaced the old single top-right span string. Values come from
+ * ui_page_home_x_ticks()/ui_page_home_format_mmss() (ui_page_home_graph.c),
+ * same host-tested M:SS shape the old label used, just laid out as four
+ * separate positions instead of one pipe-joined string.
+ *
+ * Horizontal placement mirrors chart_set_y_ticks()'s vertical placement: each
+ * label's CENTER lands at its fractional x position across the content area,
+ * then is clamped so no label's box crosses the plot's own left/right edges
+ * (a raw center-anchor would let tick 0 hang half off the left edge and tick
+ * 3 half off the right, since a text label has real width unlike a
+ * zero-width tick mark). The left clamp additionally reserves
+ * UI_PAGE_HOME_X_TICK_LEFT_MARGIN_PX so tick 0 ("0:00") never sits under the
+ * Y-axis's own bottom tick label (s_chart_y_tick_labels[0], anchored at
+ * content x=2) -- the two would otherwise overlap in the plot's bottom-left
+ * corner, which is exactly the "labels must not overlap" legibility
+ * requirement this page is built under. Each label gets the same semi-opaque
+ * background chip the old single label used (not the Y ticks' plain-text
+ * style) because these sit low in the plot, right where the actual/planned
+ * trace lines are often passing through near the end of a run. */
+#define UI_PAGE_HOME_X_TICK_LEFT_MARGIN_PX 24
+
+static void chart_set_x_ticks(float horizon_s, bool has_span)
+{
+    if (!has_span) {
+        for (int k = 0; k < UI_PAGE_HOME_X_TICK_COUNT; k++) {
+            lv_obj_add_flag(s_chart_x_tick_labels[k], LV_OBJ_FLAG_HIDDEN);
+        }
+        return;
+    }
+
+    float ticks[4];
+    ui_page_home_x_ticks(horizon_s, ticks);
+
+    lv_obj_update_layout(s_chart);
+    lv_area_t content;
+    lv_obj_get_content_coords(s_chart, &content);
+    lv_area_t chart_coords;
+    lv_obj_get_coords(s_chart, &chart_coords);
+    int32_t content_left_local = content.x1 - chart_coords.x1;
+    int32_t content_bottom_local = content.y2 - chart_coords.y1;
+    int32_t width = content.x2 - content.x1;
+    if (width <= 0) {
+        for (int k = 0; k < UI_PAGE_HOME_X_TICK_COUNT; k++) {
+            lv_obj_add_flag(s_chart_x_tick_labels[k], LV_OBJ_FLAG_HIDDEN);
+        }
+        return;
+    }
+    int32_t left_bound = content_left_local + UI_PAGE_HOME_X_TICK_LEFT_MARGIN_PX;
+    int32_t right_bound = content_left_local + width - 2;
+
+    for (int k = 0; k < UI_PAGE_HOME_X_TICK_COUNT; k++) {
+        char buf[16];
+        ui_page_home_format_mmss((uint32_t)lroundf(ticks[k]), buf, sizeof(buf));
+        lv_obj_t *label = s_chart_x_tick_labels[k];
+        lv_label_set_text(label, buf);
+        lv_obj_remove_flag(label, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_update_layout(label);
+        int32_t label_w = lv_obj_get_width(label);
+        int32_t label_h = lv_obj_get_height(label);
+
+        float frac = (float)k / (float)(UI_PAGE_HOME_X_TICK_COUNT - 1);
+        int32_t x_center = content_left_local + (int32_t)lroundf(frac * (float)width);
+        int32_t x_local = x_center - label_w / 2;
+        if (x_local < left_bound) {
+            x_local = left_bound;
+        }
+        if (x_local + label_w > right_bound) {
+            x_local = right_bound - label_w;
+        }
+        lv_obj_set_pos(label, x_local, content_bottom_local - label_h);
+    }
+}
+
 static void refresh_cb(lv_timer_t *timer)
 {
     (void)timer;
@@ -1009,7 +1095,7 @@ static void refresh_cb(lv_timer_t *timer)
          * a "0:00-0:00" label would be a confident lie rather than a scale.
          * Hidden here unconditionally; the running branch below is the only
          * place that ever un-hides it. */
-        lv_obj_add_flag(s_chart_x_label, LV_OBJ_FLAG_HIDDEN);
+        chart_set_x_ticks(0.0f, false);
         /* No planned curve, so no "current position along the curve" to mark
          * either -- same honesty rule as the x-label above. */
         lv_obj_add_flag(s_chart_now_dot, LV_OBJ_FLAG_HIDDEN);
@@ -1166,21 +1252,13 @@ static void refresh_cb(lv_timer_t *timer)
                 chart_hide_y_ticks();
             }
         } else if (have_range) {
-            float range = hi - lo;
-            if (range < 1.0f) range = 1.0f;
-            float pad_c = range * 0.1f;
-            int32_t axis_lo = (int32_t)lroundf(lo - pad_c);
-            int32_t axis_hi = (int32_t)lroundf(hi + pad_c);
-            /* Freezing floor -- same guard as the idle-dot branch above: only
-             * raise axis_lo when the real data minimum (lo, pre-padding) is
-             * itself at or above freezing. If `lo` itself is below freezing
-             * (a genuine sub-zero actual/planned point), axis_lo is left
-             * unclamped so that point stays plotted and visible rather than
-             * being clipped off the bottom. */
-            int32_t floor_i = (int32_t)lroundf(freezing_point_disp(unit));
-            if (axis_lo < floor_i && lo >= floor_i) {
-                axis_lo = floor_i;
-            }
+            /* Padded 10%-of-span range with the same freezing-floor guard as
+             * the idle-dot branch above, now factored into
+             * ui_page_home_y_axis_range() (ui_page_home_graph.c) so the
+             * degenerate lo==hi guard is host-tested rather than only
+             * exercised live -- see that function's header comment. */
+            int32_t axis_lo, axis_hi;
+            ui_page_home_y_axis_range(lo, hi, freezing_point_disp(unit), &axis_lo, &axis_hi);
             lv_chart_set_axis_range(s_chart, LV_CHART_AXIS_PRIMARY_Y, axis_lo, axis_hi);
             /* Y ticks written from the SAME axis_lo/axis_hi just handed to
              * lv_chart_set_axis_range(), not read back from the chart --
@@ -1198,15 +1276,17 @@ static void refresh_cb(lv_timer_t *timer)
              * as the idle branch's "no reading" case above. */
             chart_hide_y_ticks();
         }
-        /* X (time) label -- a real scale, not just a single span string
+        /* X (time) ticks -- a real scale, not just a single span string
          * (2026-08-21 owner request: "I want a time scale on the LCD
          * chart"). 2026-08-30 owner request ("the LCD chart should always
-         * show the same markers as the web page"): both spanned states below
-         * now share ui_page_home_build_x_label() -- main_page.html's
+         * show the same markers as the web page") and 2026-08-31 ("the times
+         * ... should be at the bottom of the graph"): both spanned states
+         * below now share chart_set_x_ticks() -- main_page.html's
          * drawChartAxis() four-tick shape (tickCount=3: 0, 1/3, 2/3, full
-         * span) -- honest per branch about WHAT it is spanning, matching
-         * main_page.html's own choice of what gets an axis at all (see that
-         * function's header comment in ui_page_home_graph.h):
+         * span), laid out along the bottom edge -- honest per branch about
+         * WHAT it is spanning, matching main_page.html's own choice of what
+         * gets an axis at all (see ui_page_home_x_ticks()'s header comment in
+         * ui_page_home_graph.h):
          *   - state_active: the chart's horizontal axis is the WHOLE-RUN
          *     PLANNED horizon (0..horizon_s) from profile_feasibility_
          *     plan_curve(), NOT a trailing "last N samples" window (this
@@ -1239,13 +1319,8 @@ static void refresh_cb(lv_timer_t *timer)
          *     profile_executor.h). Inventing a span here would be exactly the
          *     "confident wrong number" this task warns against, so it stays
          *     hidden -- see that branch's own comment. */
-        char span_buf[64]; /* sized by ui_page_home_build_x_label()'s own out_cap contract */
         bool has_span = (state_active && plan_n > 0) || (!state_active && count > 1);
-        if (has_span) {
-            ui_page_home_build_x_label(horizon_s, true, span_buf, sizeof(span_buf));
-            lv_label_set_text(s_chart_x_label, span_buf);
-            lv_obj_remove_flag(s_chart_x_label, LV_OBJ_FLAG_HIDDEN);
-        }
+        chart_set_x_ticks(horizon_s, has_span);
         if (state_active && plan_n > 0) {
             /* Current-position dot -- see its own static declaration comment.
              * Only meaningful here (a live plan with a real horizon to place
@@ -1277,19 +1352,18 @@ static void refresh_cb(lv_timer_t *timer)
                 lv_obj_add_flag(s_chart_now_dot, LV_OBJ_FLAG_HIDDEN);
             }
         } else if (!state_active && count > 1) {
-            /* Idle with leftover history: span_buf/s_chart_x_label were
-             * already written by the shared has_span block above (0..
-             * horizon_s of retained history, same four-tick M:SS shape as
+            /* Idle with leftover history: the bottom tick labels were
+             * already written by the shared chart_set_x_ticks() call above
+             * (0..horizon_s of retained history, same four-tick M:SS shape as
              * the running case). No live plan in this branch, so there is
              * nothing to mark a "current position along the curve" on. */
             lv_obj_add_flag(s_chart_now_dot, LV_OBJ_FLAG_HIDDEN);
         } else {
             /* !has_span: idle with no history (a single static dot, not a
              * series -- see the block comment above) or a running state
-             * whose plan curve came back empty. Nothing was written to
-             * span_buf/s_chart_x_label in either case, so hide it rather
-             * than show whatever text happened to be there before. */
-            lv_obj_add_flag(s_chart_x_label, LV_OBJ_FLAG_HIDDEN);
+             * whose plan curve came back empty. chart_set_x_ticks() above
+             * already hid all four tick labels for this case (has_span was
+             * false), so only the now-dot needs hiding here. */
             lv_obj_add_flag(s_chart_now_dot, LV_OBJ_FLAG_HIDDEN);
         }
         lv_chart_refresh(s_chart);
@@ -1591,7 +1665,7 @@ lv_obj_t *ui_page_home_build(void)
      * labels overlaid on the chart's own plot rather than an lv_scale
      * widget, and for the UI_PLAN.md 5.3 "all 11 ticks" decision this array
      * implements. No background chip on the tick labels (unlike the old
-     * hi/lo pair, and unlike s_chart_x_label below) -- 11 opaque chips
+     * hi/lo pair, and unlike s_chart_x_tick_labels below) -- 11 opaque chips
      * stacked down the left edge would themselves start to read as a solid
      * bar over the plot; a scaled-down, plain-text label in the muted
      * secondary color (matching main_page.html's g.muted) is legible enough
@@ -1626,14 +1700,25 @@ lv_obj_t *ui_page_home_build(void)
      * below uses relative to its own draw phase. */
     lv_obj_add_event_cb(s_chart, chart_y_tick_draw_event_cb, LV_EVENT_DRAW_POST, NULL);
 
-    s_chart_x_label = lv_label_create(s_chart);
-    lv_obj_set_style_text_color(s_chart_x_label, UI_THEME_COLOR_TEXT_PRIMARY, 0);
-    lv_obj_set_style_bg_color(s_chart_x_label, UI_THEME_COLOR_BG, 0);
-    lv_obj_set_style_bg_opa(s_chart_x_label, LV_OPA_70, 0);
-    lv_obj_set_style_pad_hor(s_chart_x_label, 3, 0);
-    lv_obj_set_style_radius(s_chart_x_label, 4, 0);
-    lv_obj_align(s_chart_x_label, LV_ALIGN_TOP_RIGHT, -2, 2);
-    lv_obj_add_flag(s_chart_x_label, LV_OBJ_FLAG_HIDDEN);
+    /* Bottom time-axis ticks -- see s_chart_x_tick_labels' own comment for
+     * why four individually positioned labels replaced the old single
+     * top-right span chip. Same semi-opaque background chip style the old
+     * label used (unlike the Y ticks' plain text) -- these sit low in the
+     * plot where trace lines are often passing through. montserrat_10, same
+     * as the Y ticks, for the same overlap-avoidance reason. Built HIDDEN;
+     * chart_set_x_ticks() (called from refresh_cb() before the page is ever
+     * shown) un-hides whichever have real data. */
+    for (int i = 0; i < UI_PAGE_HOME_X_TICK_COUNT; i++) {
+        lv_obj_t *label = lv_label_create(s_chart);
+        lv_obj_set_style_text_color(label, UI_THEME_COLOR_TEXT_PRIMARY, 0);
+        lv_obj_set_style_bg_color(label, UI_THEME_COLOR_BG, 0);
+        lv_obj_set_style_bg_opa(label, LV_OPA_70, 0);
+        lv_obj_set_style_pad_hor(label, 2, 0);
+        lv_obj_set_style_radius(label, 3, 0);
+        lv_obj_set_style_text_font(label, &lv_font_montserrat_10, 0);
+        lv_obj_add_flag(label, LV_OBJ_FLAG_HIDDEN);
+        s_chart_x_tick_labels[i] = label;
+    }
 
     /* Current-position dot -- see its own static declaration comment above.
      * 6px filled circle, blue, matching main_page.html's current-position

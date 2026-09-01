@@ -107,6 +107,32 @@ size_t ui_page_home_now_bucket_index(float horizon_s, float elapsed_s, size_t po
  * file's other snprintf-into-fixed-buffer callers. */
 bool ui_page_home_build_x_label(float horizon_s, bool has_span, char *out, size_t out_cap);
 
+/* Padded Y-axis range from a real plotted data min/max (lo, hi) -- factored
+ * out of refresh_cb()'s data-driven axis branch (the "have_range" case,
+ * distinct from the idle single-dot branch's own fixed +/-10 padding, which
+ * has no span to pad a PERCENTAGE of and is left inline) so this arithmetic
+ * -- and its one load-bearing guard -- can be host tested without LVGL.
+ *
+ * Pads by 10% of (hi - lo) on both sides, same as main_page.html's own
+ * padded-range convention this task's owner cited. The guard: if hi == lo
+ * (a degenerate all-same-value span -- e.g. one sample recorded so far, or a
+ * sensor stuck at one reading), range is floored to 1.0 BEFORE computing the
+ * 10% pad. Without that floor, hi==lo produces pad_c == 0 and therefore
+ * *out_axis_lo == *out_axis_hi -- lv_chart_set_axis_range() then has a
+ * zero-height axis, and LVGL's own value-to-pixel mapping divides by
+ * (axis_hi - axis_lo) when placing a point, i.e. a real div-by-zero one call
+ * away from this function, not inside it. The floor is what keeps that call
+ * safe; see test_ui_page_home_graph.c's "degenerate span" case, which is run
+ * both with and without this guard to prove it is load-bearing.
+ *
+ * floor_disp is freezing_point_disp()'s return value (0 C or 32 F, ALREADY
+ * converted to the caller's display unit) -- axis_lo is raised to it only
+ * when the real data minimum (lo, pre-padding) is itself at or above the
+ * floor, so a genuine sub-freezing reading still plots visibly instead of
+ * being clipped off the bottom (same rule freezing_point_disp()'s own
+ * comment in ui_page_home.c documents; this function just applies it). */
+void ui_page_home_y_axis_range(float lo, float hi, float floor_disp, int32_t *out_axis_lo, int32_t *out_axis_hi);
+
 #ifdef __cplusplus
 }
 #endif
