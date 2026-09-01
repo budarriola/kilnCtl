@@ -455,6 +455,64 @@ static void test_heap_allocated_worst_case_render_matches_stack_sizing(void)
     }
 }
 
+// Task B: the probe and identify STEPPING sub-phases were previously
+// indistinguishable on the wire -- both report state=="stepping" (see
+// autotune_state_name() above, deliberately unchanged: PcTools and this
+// page's own captured .jsonl fixtures match that string literally). The new
+// "sub_phase" field is what a client uses instead. Proves all three cases:
+// probing, identifying, and "no sub-phase" (a plain/relay run, or any state
+// other than STEPPING) -- the last one guards against a field that reads
+// "probe" by leftover memory rather than genuine absence.
+static void test_autotune_status_json_reports_sub_phase_distinctly(void)
+{
+    TEST_SECTION("dashboard_format_autotune_status_json() -- \"sub_phase\" distinguishes target mode's "
+                 "probe and identify STEPPING sub-phases, without touching the wire-compatible \"state\" "
+                 "string");
+    autotune_engine_status_t st;
+    char json[2048];
+
+    memset(&st, 0, sizeof(st));
+    st.state = AUTOTUNE_ENGINE_STEPPING;
+    st.target_mode = true;
+    st.probe_phase = true;
+    dashboard_format_autotune_status_json(json, sizeof(json), &st);
+    TEST_CHECK(strstr(json, "\"state\":\"stepping\"") != NULL, "state must still read \"stepping\" -- "
+              "wire compatibility with PcTools/main_page.html is not touched");
+    TEST_CHECK(strstr(json, "\"sub_phase\":\"probe\"") != NULL, "PHASE 1 (probe) must report sub_phase=probe");
+
+    memset(&st, 0, sizeof(st));
+    st.state = AUTOTUNE_ENGINE_STEPPING;
+    st.target_mode = true;
+    st.probe_phase = false;
+    dashboard_format_autotune_status_json(json, sizeof(json), &st);
+    TEST_CHECK(strstr(json, "\"sub_phase\":\"identify\"") != NULL,
+              "PHASE 2 (identify) must report sub_phase=identify, distinctly from probe");
+
+    // Negative control: a plain (non-target-mode) STEPPING run has no
+    // sub-phase at all -- must read "", not stale/garbage "probe" or
+    // "identify" from probe_phase's zero-initialized value happening to
+    // match one of the two branches by accident.
+    memset(&st, 0, sizeof(st));
+    st.state = AUTOTUNE_ENGINE_STEPPING;
+    st.target_mode = false;
+    st.probe_phase = false;
+    dashboard_format_autotune_status_json(json, sizeof(json), &st);
+    TEST_CHECK(strstr(json, "\"sub_phase\":\"\"") != NULL,
+              "a plain duty-based run must report sub_phase as an empty string, not a stale probe/identify "
+              "label");
+
+    // Negative control: target_mode still true, but no longer STEPPING
+    // (e.g. DONE) -- sub_phase must clear even though target_mode/probe_
+    // phase fields could still carry meaningful values for other purposes.
+    memset(&st, 0, sizeof(st));
+    st.state = AUTOTUNE_ENGINE_DONE;
+    st.target_mode = true;
+    st.probe_phase = false;
+    dashboard_format_autotune_status_json(json, sizeof(json), &st);
+    TEST_CHECK(strstr(json, "\"sub_phase\":\"\"") != NULL,
+              "sub_phase must read empty outside STEPPING, even for a target-mode run that just finished");
+}
+
 static void run_test_dashboard_json(void)
 {
     test_json_escape_doubles_every_quote_and_backslash();
@@ -464,6 +522,7 @@ static void run_test_dashboard_json(void)
     test_json_append_clamped_never_walks_past_cap();
     test_heap_allocated_worst_case_render_matches_stack_sizing();
     test_firing_history_json_is_complete_and_well_formed_at_full_depth();
+    test_autotune_status_json_reports_sub_phase_distinctly();
 }
 
 int main(void)

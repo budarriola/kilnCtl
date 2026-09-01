@@ -3661,6 +3661,325 @@ static void test_target_achieved_c_reflects_the_fitted_model_not_the_request(voi
                     "autotune_engine_get_status() must expose target_achieved_c to callers");
 }
 
+// ---------------------------------------------------------------------------
+// Guard-threshold generalization off the measured plant (autotune_scale_
+// threshold_c(), autotune_min_rise_c(), and the ELEMENT_ALIVE_RISE_C/
+// DEATH_DROP_C/DEATH_FLOOR_MARGIN_C wiring in autotune_engine_tick_locked()).
+// Owner's explicit ask: seven bare degC constants, each hand-tuned to one
+// bench kiln's measured K~=41.7 degC/duty, now scale with THIS run's own
+// probe_k_rough -- see AUTOTUNE_REFERENCE_K_C_PER_DUTY's own comment.
+// ---------------------------------------------------------------------------
+
+static void test_autotune_scale_threshold_c_falls_back_when_probe_k_rough_missing(void)
+{
+    TEST_SECTION("autotune_scale_threshold_c() -- CRITICAL fallback: probe_k_rough absent/zero/negative "
+                 "must return the bare constant UNCHANGED, never divide by it");
+    TEST_CHECK(autotune_scale_threshold_c(5.0f, 0.0f) == 5.0f, "probe_k_rough == 0 -> unscaled constant");
+    TEST_CHECK(autotune_scale_threshold_c(5.0f, -12.0f) == 5.0f,
+              "a negative probe_k_rough (should never happen, but must not crash or invert the scale) -> "
+              "unscaled constant, same as the zero case");
+    // No probe_k_rough value can ever divide-by-zero this function -- it is
+    // a multiplication by (probe_k_rough / AUTOTUNE_REFERENCE_K_C_PER_DUTY),
+    // and AUTOTUNE_REFERENCE_K_C_PER_DUTY is a nonzero compile-time
+    // constant, never the divisor's own probe_k_rough.
+    TEST_CHECK(isfinite(autotune_scale_threshold_c(5.0f, 1e6f)), "an absurdly large probe_k_rough must "
+                                                                  "still produce a finite result");
+}
+
+static void test_autotune_scale_threshold_c_scales_proportionally(void)
+{
+    TEST_SECTION("autotune_scale_threshold_c() -- scales linearly with probe_k_rough / "
+                 "AUTOTUNE_REFERENCE_K_C_PER_DUTY");
+    // Exactly at the reference plant: unchanged.
+    TEST_CHECK_NEAR(autotune_scale_threshold_c(5.0f, AUTOTUNE_REFERENCE_K_C_PER_DUTY), 5.0f, 1e-4f,
+                    "probe_k_rough == the reference K must reproduce the bare constant exactly");
+    // Half the reference plant's gain -> half the threshold.
+    TEST_CHECK_NEAR(autotune_scale_threshold_c(5.0f, AUTOTUNE_REFERENCE_K_C_PER_DUTY / 2.0f), 2.5f, 1e-4f,
+                    "half the reference K must halve the threshold");
+    // This kiln's own measured zone 1 (K=31.97, PID_EXPANSION_PLAN.md Phase
+    // 7c measurement) -- the ~23% move this generalization pass's own report
+    // flags as a real behavior change, not noise.
+    float z1_floor = autotune_scale_threshold_c(AUTOTUNE_MIN_RISE_FLOOR_C, 31.97f);
+    TEST_CHECK(z1_floor > 2.2f && z1_floor < 2.4f,
+              "zone 1's measured K=31.97 must scale the 3.0C floor down to ~2.30C, not leave it at 3.0C");
+}
+
+static void test_autotune_min_rise_c_scales_and_falls_back(void)
+{
+    TEST_SECTION("autotune_min_rise_c() wires probe_k_rough into BOTH the ceiling-floor and no-ceiling "
+                 "branches, with the same 0.0f-means-unscaled fallback");
+    // No-ceiling branch: fallback (probe_k_rough<=0) reproduces the bare
+    // 40.0C constant; a probe_k_rough at half the reference plant halves it
+    // to 20.0C -- clearly distinguishable, not a coincidental match.
+    TEST_CHECK_NEAR(autotune_min_rise_c(/*baseline_c=*/30.0f, /*configured_max_temp_c=*/0.0f,
+                                        /*probe_k_rough=*/0.0f),
+                    AUTOTUNE_MIN_RISE_NO_CEILING_C, 1e-4f, "no probe estimate -> the bare NO_CEILING constant");
+    TEST_CHECK_NEAR(autotune_min_rise_c(/*baseline_c=*/30.0f, /*configured_max_temp_c=*/0.0f,
+                                        /*probe_k_rough=*/AUTOTUNE_REFERENCE_K_C_PER_DUTY / 2.0f),
+                    20.0f, 1e-4f, "half the reference K -> half the NO_CEILING constant (20.0C, not 40.0C)");
+
+    // Ceiling branch, floor-dominated case: headroom is small enough that
+    // AUTOTUNE_MIN_RISE_FRACTION_OF_SPAN*headroom falls under the floor, so
+    // the FLOOR is what's returned -- and the floor itself must scale.
+    // baseline=90, max_temp=100 -> headroom=10, fraction*headroom=1.5, well
+    // under either floor tested below.
+    TEST_CHECK_NEAR(autotune_min_rise_c(/*baseline_c=*/90.0f, /*configured_max_temp_c=*/100.0f,
+                                        /*probe_k_rough=*/0.0f),
+                    AUTOTUNE_MIN_RISE_FLOOR_C, 1e-4f, "no probe estimate -> the bare 3.0C floor");
+    TEST_CHECK_NEAR(autotune_min_rise_c(/*baseline_c=*/90.0f, /*configured_max_temp_c=*/100.0f,
+                                        /*probe_k_rough=*/2.0f * AUTOTUNE_REFERENCE_K_C_PER_DUTY),
+                    6.0f, 1e-4f, "2x the reference K -> the floor doubles to 6.0C, not the bare 3.0C");
+}
+
+// Flagship wiring test, driven through the REAL STEPPING tick loop (not the
+// bare helper functions above): AUTOTUNE_ELEMENT_ALIVE_RISE_C/DEATH_DROP_C/
+// DEATH_FLOOR_MARGIN_C are scaled by s_at.probe_k_rough inside autotune_
+// engine_tick_locked() itself. Deliberately picks a plant whose asymptote
+// (2.2C) sits BELOW the unscaled 3.0C alive-rise constant -- old behavior
+// (probe_k_rough absent/0, a plain non-target-mode run) must NEVER latch
+// step_element_proven no matter how long it runs; scaled behavior (a
+// target-mode run with a small probe_k_rough) must latch it, because the
+// scaled-down threshold (1.5C, half the reference K) sits BELOW this
+// plant's asymptote. This is the "clearly distinguishable, not coincidental"
+// case the task brief asks for -- the constant and the scaled value are on
+// OPPOSITE sides of the plant's actual rise.
+static void test_element_alive_threshold_scales_with_probe_k_rough_and_falls_back(void)
+{
+    TEST_SECTION("ELEMENT_ALIVE_RISE_C generalization -- target-mode scaling with a small probe_k_rough "
+                 "latches step_element_proven on a plant the unscaled 3.0C constant never would");
+    const float baseline_c = 30.0f;
+    const float k_gain = 2.2f;   /* full-duty asymptote 2.2C -- below the bare 3.0C alive-rise constant */
+    const float tau_s = 60.0f;
+    const float dead_time_s = 10.0f;
+
+    // --- Unscaled (fallback) path: plain run, probe_k_rough stays 0. ---
+    start_stepping_run(/*max_temp_c=*/0.0f, /*step_duty=*/1.0f);
+    TEST_CHECK(s_at.probe_k_rough == 0.0f, "sanity: a plain (non-target-mode) run never sets probe_k_rough");
+    s_at.zone_baseline_c[0] = baseline_c;
+    s_at.zone_baseline_valid[0] = true;
+    /* This harness's frozen xTaskGetTickCount() stub (always 0) never lets
+     * record_trace_sample()/step_settle_check_locked() run through repeated
+     * tick calls (see start_stepping_run()'s own header comment), so onset
+     * is stood in for directly -- same convention run_guard1_relaxes_once_
+     * element_proven_then_response_plateaus() above uses, and for the same
+     * reason: a real onset detects well within the first rise ticks at any
+     * plausible duty, long before either the bare or scaled alive-rise bar
+     * is reached. */
+    s_at.step_onset_seen = true;
+    for (int i = 0; i < 400 && s_at.state == AUTOTUNE_ENGINE_STEPPING; i++) {
+        float t_s = (float)i;
+        float rise = (t_s <= dead_time_s) ? 0.0f : k_gain * (1.0f - expf(-(t_s - dead_time_s) / tau_s));
+        xSemaphoreTake(s_at.lock, portMAX_DELAY);
+        s_stub_ch0_temp_c = baseline_c + rise;
+        autotune_engine_tick_locked();
+        xSemaphoreGive(s_at.lock);
+    }
+    TEST_CHECK(!s_at.step_element_proven, "UNSCALED: a 2.2C-asymptote plant must never cross the bare "
+                                          "3.0C alive-rise constant -- this is the OLD, pre-generalization "
+                                          "behavior, confirmed still exact for a plain run");
+
+    // --- Scaled path: target mode, probe_k_rough at half the reference K,
+    //     so the alive-rise bar scales down to 1.5C -- below this plant's
+    //     2.2C asymptote. ---
+    start_stepping_run(/*max_temp_c=*/0.0f, /*step_duty=*/1.0f);
+    s_at.zone_baseline_c[0] = baseline_c;
+    s_at.zone_baseline_valid[0] = true;
+    s_at.step_onset_seen = true;
+    xSemaphoreTake(s_at.lock, portMAX_DELAY);
+    s_at.target_mode = true;
+    s_at.probe_k_rough = AUTOTUNE_REFERENCE_K_C_PER_DUTY / 2.0f;
+    xSemaphoreGive(s_at.lock);
+    for (int i = 0; i < 400 && s_at.state == AUTOTUNE_ENGINE_STEPPING; i++) {
+        float t_s = (float)i;
+        float rise = (t_s <= dead_time_s) ? 0.0f : k_gain * (1.0f - expf(-(t_s - dead_time_s) / tau_s));
+        xSemaphoreTake(s_at.lock, portMAX_DELAY);
+        s_stub_ch0_temp_c = baseline_c + rise;
+        autotune_engine_tick_locked();
+        xSemaphoreGive(s_at.lock);
+    }
+    TEST_CHECK(s_at.step_element_proven, "SCALED: the SAME plant must latch proven once probe_k_rough "
+                                         "scales the alive-rise bar down to 1.5C -- below its 2.2C "
+                                         "asymptote. This is the behavior change the generalization "
+                                         "pass exists to produce.");
+}
+
+// ---------------------------------------------------------------------------
+// PHASE 1 (probe) self-termination -- probe_gain_converged_locked(), OR'd
+// with step_settle_check_locked() at the STEPPING sample-recording call
+// site. 600s (AUTOTUNE_ENGINE_PROBE_DURATION_S) is a hard upper bound, never
+// the normal path once the gain estimate itself has stabilised.
+// ---------------------------------------------------------------------------
+
+static void test_probe_gain_converged_requires_the_min_samples_floor(void)
+{
+    TEST_SECTION("probe_gain_converged_locked() -- never returns true before MIN_STEPPING_SAMPLES_BEFORE_"
+                 "SETTLE_CHECK samples exist, same floor step_settle_check_locked() uses");
+    memset(&s_at, 0, sizeof(s_at));
+    s_at.zone_index = 0;
+    // A fast, strong-signal trace (NOT the measured-bench K=41/tau=270 used
+    // elsewhere in this file) -- chosen so an 11-sample fit is genuinely
+    // VALID despite being below the floor, isolating the floor check itself
+    // from pid_autotune_fit_fopdt()'s own too-few-points refusal (a slow,
+    // weak trace at 11 samples fails to fit at all regardless of the floor,
+    // which would make this test pass for the wrong reason -- confirmed
+    // while writing this test).
+    write_synthetic_fopdt_trace_for_zone(0, /*baseline_c=*/30.0f, /*k_gain_c_per_duty=*/200.0f, /*tau_s=*/30.0f,
+                                         /*dead_time_s=*/5.0f, /*duty_step=*/1.0f,
+                                         /*n_samples=*/MIN_STEPPING_SAMPLES_BEFORE_SETTLE_CHECK - 1);
+    // The trace never changes between calls, so a re-fit on every call
+    // produces the IDENTICAL K estimate -- if the floor gate did not exist,
+    // AUTOTUNE_PROBE_GAIN_STABLE_DWELL consecutive calls at this UNCHANGED,
+    // below-floor sample count would trivially agree with each other and
+    // latch "converged" on nothing but a frozen trace. The real floor gate
+    // must refuse every one of these calls regardless.
+    bool converged_anywhere = false;
+    for (uint16_t call = 0; call < AUTOTUNE_PROBE_GAIN_STABLE_DWELL + 1u; call++) {
+        if (probe_gain_converged_locked()) {
+            converged_anywhere = true;
+        }
+    }
+    TEST_CHECK(!converged_anywhere, "below the sample floor, must read not-converged on every call, even "
+                                    "across enough repeated calls on an unchanging trace to trivially "
+                                    "satisfy the dwell if the floor gate were absent");
+}
+
+// Positive case: a clean, well-behaved probe response's re-fit K estimate
+// stabilises well before the probe's own 60-sample (600s) budget -- proven
+// by calling probe_gain_converged_locked() at increasing trace_count against
+// a trace built the SAME way test_probe_done_computes_identify_duty_and_
+// rewinds_to_settling() builds its own (K=41, tau=270, L=20 -- the measured
+// bench numbers), and finding the sample index where it first returns true.
+static void test_probe_gain_converged_fires_before_the_full_probe_budget(void)
+{
+    TEST_SECTION("probe_gain_converged_locked() -- a clean probe response converges before the full "
+                 "60-sample (600s) probe budget, not merely at its end");
+    memset(&s_at, 0, sizeof(s_at));
+    s_at.zone_index = 0;
+    const float baseline_c = 30.6f, k_gain = 41.0f, tau_s = 270.0f, dead_time_s = 20.0f;
+    const uint16_t full_budget_samples =
+        (uint16_t)(AUTOTUNE_ENGINE_PROBE_DURATION_S / AUTOTUNE_ENGINE_SAMPLE_PERIOD_S); /* 60 */
+    write_synthetic_fopdt_trace_for_zone(0, baseline_c, k_gain, tau_s, dead_time_s, AUTOTUNE_ENGINE_PROBE_DUTY,
+                                         full_budget_samples);
+
+    uint16_t converged_at = 0;
+    for (uint16_t n = MIN_STEPPING_SAMPLES_BEFORE_SETTLE_CHECK; n <= full_budget_samples; n++) {
+        s_at.trace_count = n;
+        if (probe_gain_converged_locked()) {
+            converged_at = n;
+            break;
+        }
+    }
+    TEST_CHECK(converged_at > 0, "a clean K=41/tau=270 probe response must converge at SOME sample count "
+                                 "within the 60-sample budget");
+    TEST_CHECK(converged_at < full_budget_samples, "convergence must fire STRICTLY before the full budget "
+                                                    "is consumed -- 600s must be a backstop, not the normal "
+                                                    "path");
+}
+
+// Genuinely never-converging case: successive re-fits of a trace that keeps
+// changing SHAPE (not just noise) never agree within AUTOTUNE_PROBE_GAIN_
+// STABLE_FRAC for AUTOTUNE_PROBE_GAIN_STABLE_DWELL samples running -- proves
+// the 600s bound is still what ends a probe when the criterion is never met,
+// by direct construction rather than by absence of a counter-example.
+static void test_probe_gain_never_converges_on_a_trace_whose_shape_keeps_changing(void)
+{
+    TEST_SECTION("probe_gain_converged_locked() -- a trace whose fitted gain keeps moving never latches "
+                 "convergence, all the way to the full probe budget (proves 600s remains the backstop)");
+    memset(&s_at, 0, sizeof(s_at));
+    s_at.zone_index = 0;
+    s_at.zone_baseline_c[0] = 30.0f;
+    s_at.zone_baseline_valid[0] = true;
+    s_at.step_ambient_c = 30.0f;
+    s_at.step_duty = AUTOTUNE_ENGINE_PROBE_DUTY;
+    const uint16_t full_budget_samples =
+        (uint16_t)(AUTOTUNE_ENGINE_PROBE_DURATION_S / AUTOTUNE_ENGINE_SAMPLE_PERIOD_S); /* 60 */
+    // A step-up-then-step-down sawtooth: every re-fit sees a DIFFERENT
+    // effective rise (growing, then falling, then growing again), so
+    // consecutive re-fits of the trace-so-far cannot possibly agree within
+    // 3% for AUTOTUNE_PROBE_GAIN_STABLE_DWELL samples running -- this is not
+    // "noisy", it is a trace an honest gain estimator SHOULD keep revising.
+    bool converged_anywhere = false;
+    for (uint16_t n = 1; n <= full_budget_samples; n++) {
+        float t_s = (float)(n - 1) * (float)AUTOTUNE_ENGINE_SAMPLE_PERIOD_S;
+        float sawtooth_c = ((n / 6u) % 2u == 0u) ? 8.0f : 1.0f;
+        s_at.zone_trace[0][n - 1] = (int16_t)lroundf((30.0f + sawtooth_c + 0.001f * t_s) * 10.0f);
+        s_at.trace_count = n;
+        if (n >= MIN_STEPPING_SAMPLES_BEFORE_SETTLE_CHECK && probe_gain_converged_locked()) {
+            converged_anywhere = true;
+        }
+    }
+    TEST_CHECK(!converged_anywhere, "a trace whose implied gain keeps swinging must never latch convergence "
+                                    "-- the ONLY thing that can end this probe is the AUTOTUNE_ENGINE_"
+                                    "PROBE_DURATION_S (600s) hard upper bound");
+}
+
+// End-to-end: the REAL STEPPING tick loop, same convention as test_target_
+// mode_probe_dispatch_driven_through_the_real_tick_loop() above, but this
+// time proving genuine EARLY termination -- the probe must dispatch to
+// handle_probe_done_locked() having recorded FEWER than the full 60 samples
+// the 600s budget alone would take, which is the actual behavior change
+// task B asks for (the old code always ran to ~600s in practice for a
+// probe-sized signal -- see AUTOTUNE_PROBE_GAIN_STABLE_FRAC's own comment).
+static void test_probe_terminates_early_through_the_real_tick_loop(void)
+{
+    TEST_SECTION("target mode's PHASE 1 (probe), driven through the REAL tick loop, dispatches BEFORE "
+                 "the full 60-sample/600s budget on a clean, fast-converging response");
+    char errbuf[96] = {0};
+    bool ok = call_run_to_target(/*max_temp_c=*/0.0f, /*target_c=*/50.0f, AUTOTUNE_RULE_SIMC, errbuf, sizeof(errbuf));
+    TEST_CHECK(ok, "test setup: target-mode run must start");
+
+    const float probe_baseline_c = 30.0f;
+    xSemaphoreTake(s_at.lock, portMAX_DELAY);
+    s_at.state = AUTOTUNE_ENGINE_STEPPING;
+    s_at.phase_start_tick = 0;
+    s_at.zone_baseline_c[0] = probe_baseline_c;
+    s_at.zone_baseline_valid[0] = true;
+    s_at.step_ambient_c = probe_baseline_c;
+    s_at.trace_count = 0;
+    s_at.step_peak_slope_c_per_s = 0.0f;
+    s_at.step_onset_seen = false;
+    xSemaphoreGive(s_at.lock);
+
+    // A clean K=41/tau=270/L=20 response -- the measured bench plant, NOT
+    // the artificially fast tau=20s plant test_target_mode_probe_dispatch_
+    // driven_through_the_real_tick_loop() uses to force step_settle_check_
+    // locked() itself to fire within 60 samples. This plant is deliberately
+    // the SLOW one: its raw trace does not go flat within the probe budget
+    // (roughly 88% of asymptote at 600s, per AUTOTUNE_ENGINE_PROBE_DURATION_
+    // S's own comment), so if this test passes it is genuinely the NEW
+    // gain-convergence criterion firing, not the pre-existing slope detector.
+    const float k_gain = 41.0f, tau_s = 270.0f, dead_time_s = 20.0f;
+    const uint16_t full_budget_samples =
+        (uint16_t)(AUTOTUNE_ENGINE_PROBE_DURATION_S / AUTOTUNE_ENGINE_SAMPLE_PERIOD_S); /* 60 */
+    uint16_t samples_recorded_before_dispatch = 0;
+    bool dispatched = false;
+    for (int i = 0; i < full_budget_samples && !dispatched; i++) {
+        float t_s = (float)(i * AUTOTUNE_ENGINE_SAMPLE_PERIOD_S);
+        float rise = (t_s <= dead_time_s)
+                         ? 0.0f
+                         : k_gain * AUTOTUNE_ENGINE_PROBE_DUTY * (1.0f - expf(-(t_s - dead_time_s) / tau_s));
+        xSemaphoreTake(s_at.lock, portMAX_DELAY);
+        s_stub_ch0_temp_c = probe_baseline_c + rise;
+        s_at.last_sample_tick = 1; /* force this tick's sample-period gate open, same trick used above */
+        autotune_engine_tick_locked();
+        samples_recorded_before_dispatch = s_at.trace_count;
+        if (s_at.state != AUTOTUNE_ENGINE_STEPPING || s_at.probe_phase == false) {
+            dispatched = true;
+        }
+        xSemaphoreGive(s_at.lock);
+    }
+
+    TEST_CHECK(dispatched, "the probe must dispatch within its own 60-sample budget");
+    TEST_CHECK(!s_at.probe_phase, "probe_phase must have cleared -- handle_probe_done_locked() ran");
+    TEST_CHECK(samples_recorded_before_dispatch < full_budget_samples,
+              "the probe must terminate BEFORE consuming the full 60-sample/600s budget on this slow, "
+              "clean plant, driven through the REAL tick loop -- the observable behavior change task B "
+              "asks for (early termination genuinely happens, not merely possible in principle), "
+              "whichever of the two OR'd criteria (gain-convergence or the shared settle detector) fires "
+              "first; probe_gain_converged_locked() is proven in isolation, unconfounded by the settle "
+              "detector, by the two tests above");
+}
+
 // Review finding 6: the per-phase 4h backstop (measured from
 // phase_start_tick, reset at every transition) cannot bound target mode's
 // settle+probe+settle+identify SUM. Proves the whole-run budget aborts even
@@ -4253,6 +4572,19 @@ void run_test_autotune_engine_prestart(void)
     test_run_to_target_does_not_disturb_the_plain_duty_based_run();
     test_target_mode_probe_dispatch_driven_through_the_real_tick_loop();
     test_target_achieved_c_reflects_the_fitted_model_not_the_request();
+
+    // Guard-threshold generalization off probe_k_rough -- order-independent.
+    test_autotune_scale_threshold_c_falls_back_when_probe_k_rough_missing();
+    test_autotune_scale_threshold_c_scales_proportionally();
+    test_autotune_min_rise_c_scales_and_falls_back();
+    test_element_alive_threshold_scales_with_probe_k_rough_and_falls_back();
+
+    // PHASE 1 (probe) self-termination -- order-independent.
+    test_probe_gain_converged_requires_the_min_samples_floor();
+    test_probe_gain_converged_fires_before_the_full_probe_budget();
+    test_probe_gain_never_converges_on_a_trace_whose_shape_keeps_changing();
+    test_probe_terminates_early_through_the_real_tick_loop();
+
     test_whole_run_budget_aborts_even_within_every_single_phase_budget();
     test_whole_run_budget_does_not_trip_a_fresh_run();
 

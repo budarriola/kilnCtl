@@ -205,6 +205,26 @@ static const char *autotune_refusal_name(autotune_refusal_t r)
     }
 }
 
+/* "probe" vs "identify" -- target mode's two STEPPING sub-phases, previously
+ * indistinguishable on the wire (both report state=="stepping"; see
+ * autotune_state_name() above, which this deliberately does NOT touch --
+ * tools/PcTools/src/kilnctrl/devices_autotune.py, main_page.html's
+ * AUTOTUNE_PHASE_LABEL/isAutotuneActive(), and tools/PcTools/tests' captured
+ * .jsonl fixtures all match the "state" string literally, so changing what
+ * it reports for STEPPING would be a wire break, not a refactor). This is a
+ * SEPARATE field instead: "" whenever there is no meaningful sub-phase
+ * (IDLE/SETTLING/DONE/ABORTED, or a relay-method or plain-duty run, none of
+ * which have a probe/identify split at all -- st->target_mode is false for
+ * all of those), "probe" while target_mode && probe_phase, "identify" while
+ * target_mode && STEPPING && !probe_phase. */
+static const char *autotune_sub_phase_name(const autotune_engine_status_t *st)
+{
+    if (!st->target_mode || st->state != AUTOTUNE_ENGINE_STEPPING) {
+        return "";
+    }
+    return st->probe_phase ? "probe" : "identify";
+}
+
 int dashboard_format_autotune_status_json(char *json, size_t cap, const autotune_engine_status_t *st)
 {
     char reason_escaped[sizeof(st->abort_reason) * 2 + 1];
@@ -233,7 +253,7 @@ int dashboard_format_autotune_status_json(char *json, size_t cap, const autotune
      * baseline_c deliberately -- see autotune_engine_status_t::step_ambient_c
      * -- they are different quantities that have been conflated before. */
     int n = snprintf(json, cap,
-        "{\"state\":\"%s\",\"method\":\"%s\",\"zone\":%u,\"elapsed_s\":%lu,\"sample_count\":%u,"
+        "{\"state\":\"%s\",\"sub_phase\":\"%s\",\"method\":\"%s\",\"zone\":%u,\"elapsed_s\":%lu,\"sample_count\":%u,"
         "\"actual_c\":%.2f,\"actual_valid\":%s,\"duty\":%.3f,\"abort_reason\":\"%s\","
         "\"model_valid\":%s,\"model_settled\":%s,\"model_extrapolation_converged\":%s,"
         "\"model_tau_consistent\":%s,\"k_gain_c_per_duty\":%.3f,\"tau_s\":%.1f,\"dead_time_s\":%.1f,"
@@ -246,7 +266,8 @@ int dashboard_format_autotune_status_json(char *json, size_t cap, const autotune
         "\"relay_cycles_seen\":%u,\"relay_cycles_target\":%u,"
         "\"relay_valid\":%s,\"relay_ku\":%.5f,\"relay_tu_s\":%.1f,\"relay_amplitude_c\":%.2f,"
         "\"relay_cycles_used\":%d,\"relay_reason\":\"%s\"}",
-        autotune_state_name(st->state), st->method == AUTOTUNE_METHOD_RELAY ? "relay" : "step", st->zone_index,
+        autotune_state_name(st->state), autotune_sub_phase_name(st),
+        st->method == AUTOTUNE_METHOD_RELAY ? "relay" : "step", st->zone_index,
         (unsigned long)st->elapsed_s, st->sample_count,
         (double)(st->actual_valid ? st->actual_c : 0.0f), st->actual_valid ? "true" : "false", (double)st->duty,
         reason_escaped, st->model.valid ? "true" : "false", st->model.settled ? "true" : "false",

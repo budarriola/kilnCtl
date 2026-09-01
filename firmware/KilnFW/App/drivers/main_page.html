@@ -1312,7 +1312,8 @@ function renderChartMeta(mode, opts) {
     items.push(chartLegendItem(SERIES_COLORS.duty, 'commanded duty (right axis, %, stepped)'));
     if (opts.planShown) items.push(chartLegendItem(SERIES_COLORS.plan, 'planned profile (preview)', true));
     if (opts.freezingShown) items.push(chartLegendItem(opts.faultColor || '#b00', 'freezing (0°C)', true));
-    var phase = AUTOTUNE_PHASE_LABEL[st.state] || st.state;
+    var phase = (st.sub_phase && AUTOTUNE_SUB_PHASE_LABEL[st.sub_phase]) ||
+      AUTOTUNE_PHASE_LABEL[st.state] || st.state;
     note = 'Autotune: ' + phase + ' — ' + zoneName(st.zone) +
       ' — elapsed ' + fmtTick(st.elapsed_s) + ' — duty ' + st.duty.toFixed(2);
     if (st.state === 'aborted' && st.abort_reason) {
@@ -2334,13 +2335,17 @@ function pollHistory() {
 // buffer grew for this. States named per autotune_engine_state_t
 // (dashboard_json.c's autotune_state_name(), read from the enum rather than
 // assumed): idle/settling/stepping/relay_approach/relay_cycling/done/
-// aborted -- "probing"/"identifying" are internal sub-phases of STEPPING,
-// not states the engine exposes, so they are not offered as separate labels
-// here either.
+// aborted. "probe"/"identify" are target mode's two STEPPING sub-phases --
+// distinguishable via the separate "sub_phase" field dashboard_json.c now
+// reports (added rather than changing "state" itself, which PcTools and this
+// page's own isAutotuneActive() below still match literally).
 var AUTOTUNE_PHASE_LABEL = {
   settling: 'settling (baseline hold)', stepping: 'stepping (recording trace)',
   relay_approach: 'relay approach (driving to setpoint)', relay_cycling: 'relay cycling (recording trace)',
   done: 'done', aborted: 'ABORTED',
+};
+var AUTOTUNE_SUB_PHASE_LABEL = {
+  probe: 'probing (rough gain estimate)', identify: 'identifying (recording trace)',
 };
 
 // True for exactly the states an autotune run is actively driving relays

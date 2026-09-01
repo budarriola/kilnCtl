@@ -319,6 +319,47 @@ static const char *TAG = "autotune_engine";
 #define AUTOTUNE_ENGINE_PROBE_DUTY 0.15f
 #define AUTOTUNE_ENGINE_PROBE_DURATION_S 600u
 
+/* PHASE 1 self-termination -- 600s above is a HARD UPPER BOUND, not the
+ * normal path. step_settle_check_locked() (the STEPPING settle detector,
+ * shared with the real identification step -- see its own header comment)
+ * already runs during probing too, but at the probe's low 15% duty its own
+ * asymptote is small (the PROBE_DUTY/PROBE_DURATION_S comment above puts it
+ * at roughly K*0.15 ~= 6.2 degC on the reference plant) and that detector's
+ * relative arm needs the peak slope to clear real margin above quantization
+ * noise before it can fire at all (see SETTLE_RELATIVE_SLOPE_FRAC's own
+ * "2026-09-02 review fix" paragraph) -- in practice a probe's peak slope
+ * rarely gets there before the trace is most of the way to its own
+ * asymptote, so that shared detector alone leaves the probe running to
+ * (or very near) the 600s budget on every run, which is exactly the "fixed
+ * 600s" behavior this generalization pass exists to fix.
+ *
+ * A probe does not need the same "genuinely flat" bar an identification
+ * step does -- it only needs a GAIN ESTIMATE that has stopped moving, since
+ * that estimate (not the raw trace) is all handle_probe_done_locked() ever
+ * reads. probe_gain_converged_locked() re-fits pid_autotune_fit_fopdt() on
+ * the trace-so-far every sample (same fit function, same cadence
+ * AUTOTUNE_ENGINE_SAMPLE_PERIOD_S as record_trace_sample(), same MIN_
+ * STEPPING_SAMPLES_BEFORE_SETTLE_CHECK floor before it ever looks -- reusing
+ * the existing detector's noise-floor discipline rather than inventing a
+ * second one) and declares PHASE 1 done once consecutive re-fits agree
+ * within AUTOTUNE_PROBE_GAIN_STABLE_FRAC for AUTOTUNE_PROBE_GAIN_STABLE_
+ * DWELL samples running -- the same "one sample is noise, several in a row
+ * is signal" dwell pattern this file already uses for the death-floor check
+ * (AUTOTUNE_ELEMENT_DEATH_FLOOR_CONSECUTIVE_TICKS), not a new noise model.
+ * ROBUSTNESS TO NOISE: a two-point FOPDT fit on a still-curving trace keeps
+ * revising K sample to sample (the fit is still learning), so noise alone
+ * cannot fake DWELL consecutive near-identical fits in a row -- an actually
+ * converging trace's successive K estimates settle toward each other well
+ * before the raw temperature trace itself goes flat, which is precisely why
+ * this criterion can fire earlier than step_settle_check_locked()'s "trace
+ * is flat" bar without being any less trustworthy: it is asking a narrower,
+ * earlier-answerable question ("has the ESTIMATE stopped moving") instead of
+ * "has the PLANT stopped moving". Checked in addition to (OR'd with, never
+ * instead of) step_settle_check_locked(), so a fast/strong zone whose probe
+ * genuinely goes flat before gain-stability triggers is unaffected. */
+#define AUTOTUNE_PROBE_GAIN_STABLE_FRAC 0.03f     /* consecutive re-fits of K must agree within 3% */
+#define AUTOTUNE_PROBE_GAIN_STABLE_DWELL 3u       /* that many samples running (30s at the 10s trace period) */
+
 /* Default target = this fraction of the zone's configured max_temp_c, used
  * when the operator supplies no explicit target_c. Deliberately requires an
  * explicit target when max_temp_c == 0 (guard disabled, see
@@ -471,6 +512,47 @@ static const char *TAG = "autotune_engine";
  * ~8h) untouched -- this check is gated to AUTOTUNE_METHOD_STEP only. */
 #define AUTOTUNE_ENGINE_WHOLE_RUN_MAX_DURATION_S \
     (2u * AUTOTUNE_ENGINE_SETTLE_S + AUTOTUNE_ENGINE_PROBE_DURATION_S + AUTOTUNE_ENGINE_DEFAULT_MAX_DURATION_S)
+
+/* ---------------------------------------------------------------------------
+ * Guard-threshold generalization off the measured plant (owner's explicit
+ * ask: "use this device to help you create generalized algorithms", not
+ * hand-tune every constant below to this one bench kiln).
+ *
+ * Seven of the degC constants above/below (AUTOTUNE_MIN_RISE_FLOOR_C,
+ * AUTOTUNE_MIN_RISE_NO_CEILING_C, STEP_TEST_GUARD_HEADROOM_C, AUTOTUNE_
+ * ELEMENT_ALIVE_RISE_C, AUTOTUNE_ELEMENT_DEATH_DROP_C, AUTOTUNE_ELEMENT_
+ * DEATH_FLOOR_MARGIN_C, AUTOTUNE_TARGET_ACHIEVED_WARN_C) were each picked by
+ * eyeballing a rise/drop/margin against ONE measured plant: the AUTOTUNE_
+ * ENGINE_PROBE_DUTY/PROBE_DURATION_S comment above records K ~= 41.7
+ * degC/duty, tau ~= 270s, measured on zone 0 the night this file's guard
+ * suite was built. A zone with a much weaker element (low K -- a big kiln,
+ * or a small one on a low-voltage element) never rises enough to satisfy an
+ * "alive" threshold sized for a 41.7 K/duty plant; a much stronger one
+ * (high K) reaches "death" thresholds sized for that plant on ordinary
+ * noise. Every one of these seven is a temperature-RISE bar, so the natural
+ * generalization is to scale each linearly with the CURRENT run's own rough
+ * gain estimate (probe_k_rough, degC per unit duty, from PHASE 1's fit)
+ * relative to the reference plant these constants were tuned against.
+ *
+ * autotune_scale_threshold_c() is the one place that arithmetic happens.
+ * FALLBACK, EXPLICIT: probe_k_rough <= 0.0f (the probe was skipped -- a
+ * plain autotune_engine_run(), not target mode -- or a target-mode run that
+ * has not finished PHASE 1 yet, or a fresh board where the probe fit itself
+ * failed) returns base_c UNCHANGED, exactly the old hand-tuned constant.
+ * This is a multiplication, never a division BY probe_k_rough, so there is
+ * no div-by-zero path regardless of what the probe measured -- a
+ * pathological probe_k_rough (e.g. a fit that came back with a tiny
+ * positive gain) only ever shrinks the threshold toward zero, it can never
+ * blow it up or crash. */
+#define AUTOTUNE_REFERENCE_K_C_PER_DUTY 41.7f
+
+static float autotune_scale_threshold_c(float base_c, float probe_k_rough)
+{
+    if (!(probe_k_rough > 0.0f)) {
+        return base_c;
+    }
+    return base_c * (probe_k_rough / AUTOTUNE_REFERENCE_K_C_PER_DUTY);
+}
 
 typedef struct {
     kiln_io_t *io;
@@ -629,6 +711,17 @@ typedef struct {
      * from the start of STEPPING. */
     bool     step_onset_seen;            /* true once a real (not noise) response has been detected */
     uint16_t step_onset_trace_count;     /* trace_count at the sample onset was first detected */
+    /* PHASE 1 (probe) self-termination -- see probe_gain_converged_locked()'s
+     * own comment. probe_last_k_c_per_duty is the previous sample's re-fit
+     * of the probe trace-so-far (0 = no prior estimate yet); probe_stable_
+     * checks counts CONSECUTIVE samples whose fit moved by no more than
+     * AUTOTUNE_PROBE_GAIN_STABLE_FRAC from the one before. Reset at every
+     * SETTLING->STEPPING transition (both begin_run_locked()'s and
+     * handle_probe_done_locked()'s rewind), same as step_onset_seen above --
+     * a re-settle before the IDENTIFY phase must not inherit the PROBE
+     * phase's convergence state. */
+    float    probe_last_k_c_per_duty;
+    uint16_t probe_stable_checks;
     /* Cold-junction reference captured at the SETTLING->STEPPING transition
      * (or AUTOTUNE_FALLBACK_AMBIENT_C if no cj reading was available) --
      * see finalize_fit()'s physical-plausibility check for why this, not
@@ -928,14 +1021,21 @@ static void coupling_persist_job(void *arg)
  * degrees" -- see AUTOTUNE_MIN_RISE_FRACTION_OF_SPAN's own comment above
  * for the full reasoning behind the fraction-of-headroom vs. no-ceiling
  * split below. */
-static float autotune_min_rise_c(float baseline_c, float configured_max_temp_c)
+/* probe_k_rough: the CURRENT run's rough gain estimate (0 if unavailable --
+ * see AUTOTUNE_REFERENCE_K_C_PER_DUTY's own comment for the fallback this
+ * triggers). Callers that have no run-specific plant estimate to offer
+ * (check_thermal_readiness_locked(), judging OTHER zones pre-run) pass 0.0f
+ * and get the original hand-tuned constants back, unscaled -- exactly the
+ * old behavior. */
+static float autotune_min_rise_c(float baseline_c, float configured_max_temp_c, float probe_k_rough)
 {
+    float floor_c = autotune_scale_threshold_c(AUTOTUNE_MIN_RISE_FLOOR_C, probe_k_rough);
     if (configured_max_temp_c > 0.0f) {
         float headroom_c = configured_max_temp_c - baseline_c;
         float scaled = AUTOTUNE_MIN_RISE_FRACTION_OF_SPAN * headroom_c;
-        return (scaled > AUTOTUNE_MIN_RISE_FLOOR_C) ? scaled : AUTOTUNE_MIN_RISE_FLOOR_C;
+        return (scaled > floor_c) ? scaled : floor_c;
     }
-    return AUTOTUNE_MIN_RISE_NO_CEILING_C;
+    return autotune_scale_threshold_c(AUTOTUNE_MIN_RISE_NO_CEILING_C, probe_k_rough);
 }
 
 /* Review blocker 4: guard 1's expected-rise bar (thermal_guard.c: rate_cfg *
@@ -1008,7 +1108,8 @@ static void finalize_fit(void)
     if (s_at.target_mode) {
         s_at.target_achieved_c = baseline_c + s_at.model.k_gain_c_per_duty * s_at.step_duty;
         float miss_c = s_at.target_achieved_c - s_at.target_c;
-        if (fabsf(miss_c) >= AUTOTUNE_TARGET_ACHIEVED_WARN_C) {
+        float target_achieved_warn_c = autotune_scale_threshold_c(AUTOTUNE_TARGET_ACHIEVED_WARN_C, s_at.probe_k_rough);
+        if (fabsf(miss_c) >= target_achieved_warn_c) {
             ESP_LOGW(TAG, "autotune zone %u: target-mode identification landed at %.1fC, requested %.1fC "
                           "(miss %.1fC) -- likely the probe-baseline-vs-identify-baseline bias, see "
                           "AUTOTUNE_TARGET_ACHIEVED_WARN_C's comment",
@@ -1044,7 +1145,7 @@ static void finalize_fit(void)
      * fallback (a large bare constant) applies in that case, not a fraction
      * of a headroom that doesn't exist. */
     float configured_max_temp_c = s_at.guard_cfg.max_temp_c;
-    float min_rise_c = autotune_min_rise_c(baseline_c, configured_max_temp_c);
+    float min_rise_c = autotune_min_rise_c(baseline_c, configured_max_temp_c, s_at.probe_k_rough);
     float observed_rise_c = fabsf(s_at.model.k_gain_c_per_duty * s_at.step_duty);
     if (observed_rise_c < min_rise_c) {
         force_relays_off();
@@ -1840,6 +1941,54 @@ static bool step_settle_check_locked(void)
            (recent_slope <= SETTLE_ABS_SLOPE_FLOOR_C_PER_S);
 }
 
+/* Target-mode PHASE 1 (probe) self-termination -- see AUTOTUNE_PROBE_GAIN_
+ * STABLE_FRAC's own comment above for the full reasoning. Must be called
+ * with s_at.lock held, only while probing (s_at.target_mode &&
+ * s_at.probe_phase), only after this sample's record_trace_sample() has
+ * already happened this tick -- same calling convention as
+ * step_settle_check_locked(), and called from the exact same call site,
+ * right alongside it.
+ *
+ * Re-fits pid_autotune_fit_fopdt() -- the SAME function handle_probe_done_
+ * locked() itself uses for the final probe fit, not a second estimator --
+ * against the trace recorded so far. A fit that is not yet valid (too few
+ * points, no onset yet) or whose gain is non-positive is treated as "not
+ * converged" and also resets the dwell counter, exactly like any other
+ * disagreement between consecutive estimates: a momentarily invalid fit is
+ * not evidence of stability. */
+static bool probe_gain_converged_locked(void)
+{
+    if (s_at.trace_count < MIN_STEPPING_SAMPLES_BEFORE_SETTLE_CHECK) {
+        return false; /* same floor step_settle_check_locked() uses -- too early to trust any fit */
+    }
+    autotune_sample_t *scratch = unpack_zone_trace(s_at.zone_index, s_at.trace_count);
+    if (!scratch) {
+        return false; /* OOM -- treat as not-yet-converged, the whole-run/phase budgets remain the backstop */
+    }
+    float baseline_c = s_at.zone_baseline_c[s_at.zone_index];
+    fopdt_model_t fit = pid_autotune_fit_fopdt(scratch, s_at.trace_count, baseline_c, AUTOTUNE_ENGINE_PROBE_DUTY);
+    free(scratch);
+    if (!fit.valid || !(fit.k_gain_c_per_duty > 0.0f)) {
+        s_at.probe_stable_checks = 0u;
+        return false;
+    }
+    float k_new = fit.k_gain_c_per_duty;
+    if (s_at.probe_last_k_c_per_duty > 0.0f) {
+        float rel_change = fabsf(k_new - s_at.probe_last_k_c_per_duty) / s_at.probe_last_k_c_per_duty;
+        if (rel_change <= AUTOTUNE_PROBE_GAIN_STABLE_FRAC) {
+            if (s_at.probe_stable_checks < UINT16_MAX) {
+                s_at.probe_stable_checks++;
+            }
+        } else {
+            s_at.probe_stable_checks = 0u;
+        }
+    } else {
+        s_at.probe_stable_checks = 0u; /* first estimate this phase -- nothing to compare against yet */
+    }
+    s_at.probe_last_k_c_per_duty = k_new;
+    return s_at.probe_stable_checks >= AUTOTUNE_PROBE_GAIN_STABLE_DWELL;
+}
+
 /* Phase 7c pre-start thermal readiness check (2026-08-31 hardware finding;
  * REVISED 2026-08-31 after checking the first version against real
  * accept/refuse data from tonight's rig -- it failed the accept side, see
@@ -1997,7 +2146,12 @@ static bool check_thermal_readiness_locked(const float *raw_by_zone, const bool 
         if (have_min_baseline) {
             float max_temp_z = 0.0f, min_temp_z = -20.0f;
             zones_config_get_temp_limits(z, &max_temp_z, &min_temp_z);
-            float min_rise_z = autotune_min_rise_c(baseline_z_c, max_temp_z);
+            /* No run-specific probe estimate exists for zone z here -- this
+             * check runs pre-STEPPING, judging OTHER zones' rest state, not
+             * the zone under test's own measured plant. 0.0f falls back to
+             * the original unscaled constants (see autotune_min_rise_c()'s
+             * own comment). */
+            float min_rise_z = autotune_min_rise_c(baseline_z_c, max_temp_z, 0.0f);
             float spread_z = baseline_z_c - min_baseline_c;
             if (spread_z > min_rise_z) {
                 /* ONE unbounded runtime float substitution (spread_z), not
@@ -2222,11 +2376,21 @@ static void autotune_engine_tick_locked(void)
      *       latch time. */
     if (s_at.method == AUTOTUNE_METHOD_STEP && s_at.state == AUTOTUNE_ENGINE_STEPPING && s_at.actual_valid &&
         s_at.zone_baseline_valid[s_at.zone_index]) {
+        /* Scaled once per tick off THIS run's own probe_k_rough (0 for a
+         * plain, non-target-mode run -- see AUTOTUNE_REFERENCE_K_C_PER_
+         * DUTY's comment for why that falls back to the bare constants
+         * unchanged). Same relative ordering as the un-scaled constants
+         * (alive_rise_c > death_floor_margin_c), preserved because both are
+         * scaled by the identical factor. */
+        float alive_rise_c = autotune_scale_threshold_c(AUTOTUNE_ELEMENT_ALIVE_RISE_C, s_at.probe_k_rough);
+        float death_drop_c = autotune_scale_threshold_c(AUTOTUNE_ELEMENT_DEATH_DROP_C, s_at.probe_k_rough);
+        float death_floor_margin_c =
+            autotune_scale_threshold_c(AUTOTUNE_ELEMENT_DEATH_FLOOR_MARGIN_C, s_at.probe_k_rough);
         float rise_c = s_at.actual_c - s_at.zone_baseline_c[s_at.zone_index];
         if (rise_c > s_at.step_rise_running_max_c) {
             s_at.step_rise_running_max_c = rise_c;
         }
-        if (!s_at.step_element_proven && s_at.step_onset_seen && rise_c >= AUTOTUNE_ELEMENT_ALIVE_RISE_C) {
+        if (!s_at.step_element_proven && s_at.step_onset_seen && rise_c >= alive_rise_c) {
             s_at.step_element_proven = true;
             ESP_LOGI(TAG, "autotune zone %u: element proven (rise %.2fC) -- guard 1's rise requirement is "
                           "relaxed for the rest of this step; the running-peak death check now covers "
@@ -2254,7 +2418,7 @@ static void autotune_engine_tick_locked(void)
          * entirely: below a 5.0C peak, the absolute floor is the ONLY one
          * that can ever fire (the relative drop mathematically cannot);
          * above it, whichever condition is reached first fires. */
-        bool relative_drop = (s_at.step_rise_running_max_c - rise_c) >= AUTOTUNE_ELEMENT_DEATH_DROP_C;
+        bool relative_drop = (s_at.step_rise_running_max_c - rise_c) >= death_drop_c;
         /* Review round-3 finding 2: a DEADBAND (2.5C, not the 3.0C the
          * latch itself uses) plus a DWELL (must read below the deadband
          * for AUTOTUNE_ELEMENT_DEATH_FLOOR_CONSECUTIVE_TICKS ticks in a
@@ -2263,7 +2427,7 @@ static void autotune_engine_tick_locked(void)
          * a healthy plateau. The streak counter is maintained every tick
          * (proven or not, though it is only ever READ while proven) so it
          * is already correct the instant proven flips true. */
-        float death_floor_c = AUTOTUNE_ELEMENT_ALIVE_RISE_C - AUTOTUNE_ELEMENT_DEATH_FLOOR_MARGIN_C;
+        float death_floor_c = alive_rise_c - death_floor_margin_c;
         if (rise_c < death_floor_c) {
             if (s_at.step_below_death_floor_ticks < UINT16_MAX) {
                 s_at.step_below_death_floor_ticks++;
@@ -2301,6 +2465,13 @@ static void autotune_engine_tick_locked(void)
         guard_cfg_this_tick.sanity_rate_c_per_min =
             autotune_step_guard_sanity_rate(s_at.guard_cfg.sanity_rate_c_per_min, s_at.step_duty);
     }
+    /* Scaled the same way as the alive/death thresholds above -- see
+     * AUTOTUNE_REFERENCE_K_C_PER_DUTY's comment. Falls back to the bare
+     * 5.0C constant when probe_k_rough is unavailable (plain runs, or
+     * before PHASE 1 completes), which is what guard 4's own "behaviorally
+     * identical for any strictly positive value" reasoning (this constant's
+     * comment) already tolerates. */
+    float step_test_guard_headroom_c = autotune_scale_threshold_c(STEP_TEST_GUARD_HEADROOM_C, s_at.probe_k_rough);
 
     thermal_guard_input_t gin = {
         .sensor_ok = sensor_ok,
@@ -2351,7 +2522,7 @@ static void autotune_engine_tick_locked(void)
         .setpoint_c = (s_at.method == AUTOTUNE_METHOD_RELAY)
                           ? s_at.relay_setpoint_c
                           : (s_at.guard_cfg.max_temp_c > 0.0f ? s_at.guard_cfg.max_temp_c
-                                                               : raw_c + STEP_TEST_GUARD_HEADROOM_C),
+                                                               : raw_c + step_test_guard_headroom_c),
         /* STEP method: the INTENDED duty (want_duty, pre-PWM), not the
          * post-PWM want_relay_on-gated value -- found while testing review
          * finding 3 (progress_duty_min override) at a realistic sub-1.0
@@ -2461,6 +2632,8 @@ static void autotune_engine_tick_locked(void)
             s_at.step_element_proven = false; /* re-earned fresh every STEPPING phase -- see its own comment */
             s_at.step_rise_running_max_c = 0.0f;
             s_at.step_below_death_floor_ticks = 0u;
+            s_at.probe_last_k_c_per_duty = 0.0f;
+            s_at.probe_stable_checks = 0u;
             s_at.step_ambient_c = ambient_c_now;
             heater_output_reset(&s_at.heater_state);
             ESP_LOGI(TAG, "autotune zone %u: settled at %.1fC, stepping duty to %.2f", s_at.zone_index,
@@ -2496,7 +2669,15 @@ static void autotune_engine_tick_locked(void)
                 record_trace_sample(raw_by_zone, ok_by_zone);
             }
 
-            if (step_settle_check_locked()) {
+            /* Probe self-termination (task B): OR'd with the shared settle
+             * detector, never instead of it -- see AUTOTUNE_PROBE_GAIN_
+             * STABLE_FRAC's own comment for why the probe needs a second,
+             * earlier-firing criterion the identify phase does not. Only
+             * evaluated while probing; the identify phase is unaffected --
+             * probe_gain_converged_locked() is not even called for it, so
+             * its dwell counters never advance on real identification data. */
+            bool probe_converged = probing && probe_gain_converged_locked();
+            if (step_settle_check_locked() || probe_converged) {
                 s_at.step_settled = true;
                 if (probing) {
                     handle_probe_done_locked();
@@ -2950,6 +3131,8 @@ static bool begin_run_locked(uint8_t zone_index, char *err_msg, size_t err_cap)
     s_at.step_element_proven = false;
     s_at.step_rise_running_max_c = 0.0f;
     s_at.step_below_death_floor_ticks = 0u;
+    s_at.probe_last_k_c_per_duty = 0.0f;
+    s_at.probe_stable_checks = 0u;
     /* Same staleness class -- a new run's first SETTLING tick must capture
      * its OWN start-of-settle reading, never inherit the previous run's. */
     s_at.readiness_start_captured = false;
