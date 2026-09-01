@@ -958,6 +958,41 @@ Two operator-facing asks, plus the generalization work the 2026-09-01 constants
 audit turned up. Phase 7a and 7b are UI/telemetry; 7c is the algorithm work that
 decides whether any of this transfers to a second kiln.
 
+### Phase 0 — first valid autotune on the real rig, 2026-09-01
+
+Recorded here because every recommendation in section 2 was, until now,
+validated against simulation and literature only.
+
+**Zone 0, step method, full duty, from a rested 31.36 °C baseline:**
+
+| quantity | value |
+|---|---|
+| `k_gain_c_per_duty` | 39.246 |
+| `tau_s` | 263.8 |
+| `dead_time_s` | 52.8 |
+| `raw_rise_c` → `rise_inf_c` | 38.04 → 39.25 |
+| `baseline_c` / `step_ambient_c` | 31.36 / 29.75 |
+| flags | settled, extrapolation_converged, tau_consistent — all true |
+| accepted gains (SIMC) | Kp 0.0318, Ki 0.00012, Kd 0.8401 |
+
+Corroborated independently: a least-squares FOPDT fit of an earlier raw trace
+gave K ≈ 39.1–40.0, τ ≈ 280 s. Two methods, two runs, agreement within a few
+percent.
+
+The previously stored gains came from a fit of K = 31.96 — about 19 % low.
+Feedforward divides by that gain, so it over-drove every zone, which is the
+mechanism behind the three-zone profile overshooting to 80.1 °C against a
+70 °C target.
+
+**Single-zone plateau is ~70 °C at full duty**, against a configured 80 °C
+ceiling. The ceiling is only reachable with all three zones contributing —
+which is why the old plausibility check, which assumed one zone alone must
+reach it, rejected two consecutive correct fits.
+
+**Caveat unchanged:** the bench rig's 0–80 °C range validates the *mechanism*,
+not kiln-temperature behavior. Section 2a's `T^4` radiative caveat stays open
+until a real firing.
+
 ### Phase 7a — per-zone tuning quality factors
 
 Accumulated over a whole profile run, shown per zone on the thermocouples page
