@@ -1120,18 +1120,47 @@ Operator ask: a mode on the zones page that lets the kiln keep improving its
 PID parameters from real firing cycles, every time any profile runs, instead of
 only from dedicated step tests.
 
-**The constraint that shapes the whole design:** closed-loop data is far less
-informative than a step test. When the controller is working, the temperature
-sits on target and a signal that does not move carries almost no information
-about the plant. A dwell at 60 C says very little about K or tau. Nearly all
-the usable information is in ramps, in the transitions, and in any interval
-where the duty moves substantially. A design that ignores this will happily
-"identify" a model from noise and hand back confident nonsense.
+**What each phase of a firing actually tells you** (corrected 2026-09-01 — an
+earlier draft of this section claimed a dwell says little about K, which is
+wrong, and wrong in a way that would have thrown away the best data available):
+
+- **Dwells give steady-state gain, directly.** A zone holding a known
+  temperature at a known steady duty IS a DC-gain measurement:
+  `K_effective = (T_dwell - T_ambient) / u_steady`, or the coupled equivalent
+  `A * u = (T - ambient)` across all zones at once. There is no asymptote to
+  extrapolate and no settle detector to get wrong. **This matters because every
+  bug in tonight's chain existed precisely because a step test must guess where
+  the temperature would eventually land** — the detector firing mid-transient,
+  the fit reading the last sample as the asymptote, the contaminated baseline.
+  A dwell does not guess; it is sitting at the answer. Cross-checked against
+  the 2026-09-01 run: dwell duties of 0.12/0.43/0.82 at 60 C are consistent
+  with the matrix identified by step test.
+- **Dwells also expose the integral term**, which no step test does: a residual
+  steady offset means Ki is too small or the integrator is clamped; slow drift
+  or hunting means Ki is too large; and any limit cycling hands over Ku and Tu
+  — the relay-method quantities — for free, from a firing nobody had to
+  interrupt.
+- **Ramps and transitions give the dynamics** — tau and dead time — which a
+  dwell genuinely cannot, since those need excitation and a flat signal has
+  none.
+
+So the real constraint is not "closed-loop data is uninformative" but that
+**different phases identify different parameters, and each must only be used
+for what it can support.** Fitting tau from a dwell would be fitting noise;
+so would ignoring a dwell's steady duty when estimating gain.
 
 Two mechanisms, different promises:
 
-- [ ] **Model refinement (identification).** Re-fit K/tau/dead time from the
-      informative segments of a firing. Must score each candidate segment for
+- [ ] **Steady-state gain from dwells.** At each settled dwell, record the
+      holding duty and temperature per zone and solve for the coupled gain
+      matrix. Requires only a settled-ness test, which the autotune settle
+      detector already implements. Highest-confidence data in the whole system,
+      and every firing that dwells produces it.
+- [ ] **Integral diagnosis from dwells.** Residual offset, drift, and limit
+      cycling each imply a specific correction to Ki; a detected limit cycle
+      additionally yields Ku/Tu without a dedicated relay test.
+- [ ] **Dynamics from ramps and transitions.** Re-fit tau and dead time only
+      from segments with genuine excitation. Score each candidate segment for
       information content and REFUSE when it is too flat, rather than fitting
       noise. Only updates when a firing happens to contain usable data.
 - [ ] **Iterative tuning (optimization).** Treat each firing as one experiment,
