@@ -899,6 +899,22 @@ function renderChartMeta(mode, opts) {
     if (opts.totalPlannedS !== null && opts.totalPlannedS !== undefined) {
       note += ' of ' + fmtTick(opts.totalPlannedS) + ' planned';
     }
+  } else if (mode === 'autotune') {
+    // PID_EXPANSION_PLAN.md Phase 7b: the phase label is REQUIRED here, not
+    // decoration -- a flat settling segment and a stalled step look
+    // identical on the trace line alone (this cost real debugging time
+    // tonight). zone/elapsed/duty ride along in the same note so an
+    // operator glancing at the chart doesn't have to also open zones_page.
+    var st = opts.st;
+    items.push(chartLegendItem('#f60', 'autotune trace'));
+    if (opts.planShown) items.push(chartLegendItem('#96c', 'planned profile (preview)', true));
+    if (opts.freezingShown) items.push(chartLegendItem(opts.faultColor || '#b00', 'freezing (0°C)', true));
+    var phase = AUTOTUNE_PHASE_LABEL[st.state] || st.state;
+    note = 'Autotune: ' + phase + ' — ' + zoneName(st.zone) +
+      ' — elapsed ' + fmtTick(st.elapsed_s) + ' — duty ' + st.duty.toFixed(2);
+    if (st.state === 'aborted' && st.abort_reason) {
+      note += ' — ' + st.abort_reason;
+    }
   } else {
     // Idle: the dots are this instant's live readings, not a time series --
     // see drawIdleDots's own header comment for why there is nothing to put a
@@ -1436,6 +1452,25 @@ function parseHistoryCsv(text) {
   return rows;
 }
 
+// PID_EXPANSION_PLAN.md Phase 7b: /api/autotune/trace.csv's own two-column
+// format ("elapsed_s,measurement_c\n" header then one row per captured
+// sample) -- same skip-header/split-on-comma shape as parseHistoryCsv above,
+// kept as its own function rather than generalised because the two CSVs
+// don't share a column layout and forcing one parser to know both would
+// just be an extra branch for no reuse.
+function parseAutotuneTraceCsv(text) {
+  var lines = text.split('\n').filter(function (l) { return l.trim().length > 0; });
+  var pts = [];
+  for (var i = 1; i < lines.length; i++) { // skip header
+    var f = lines[i].split(',');
+    if (f.length < 2) continue;
+    var t = parseFloat(f[0]), c = parseFloat(f[1]);
+    if (isNaN(t) || isNaN(c)) continue;
+    pts.push({ t: t, c: c });
+  }
+  return pts;
+}
+
 // The chart canvas itself carries no kc-live-value: a <canvas> is one opaque
 // bitmap to the DOM, not text nodes/elements the .kc-stale rule's opacity
 // selector can reach, and re-drawing it fully transparent on every stale
@@ -1740,6 +1775,84 @@ function pollHistory() {
   }).catch(function () {});
 }
 
+// PID_EXPANSION_PLAN.md Phase 7b: live autotune trace drawn on the SAME
+// canvas as the run chart / idle dots, entirely client-side -- /api/autotune
+// and /api/autotune/trace.csv already existed, both are polled far below
+// their own rate limits (see pollAutotune()'s comment), and no firmware
+// buffer grew for this. States named per autotune_engine_state_t
+// (dashboard_json.c's autotune_state_name(), read from the enum rather than
+// assumed): idle/settling/stepping/relay_approach/relay_cycling/done/
+// aborted -- "probing"/"identifying" are internal sub-phases of STEPPING,
+// not states the engine exposes, so they are not offered as separate labels
+// here either.
+var AUTOTUNE_PHASE_LABEL = {
+  settling: 'settling (baseline hold)', stepping: 'stepping (recording trace)',
+  relay_approach: 'relay approach (driving to setpoint)', relay_cycling: 'relay cycling (recording trace)',
+  done: 'done', aborted: 'ABORTED',
+};
+
+// trace is the parsed /api/autotune/trace.csv (elapsed_s from autotune
+// start, not from any firing profile). The planned-profile overlay reuses
+// whatever `activePlan` the picker/idle-preview machinery already has
+// selected (see fetchPlan/setActivePlanFor above) -- it is drawn dashed and
+// CLIPPED to the trace's own elapsed window rather than stretching the axis
+// out to the plan's full length, which for a multi-hour firing profile
+// would squash a 10-20 minute autotune trace into a sliver.
+function drawAutotuneChart(st, trace) {
+  var g = setupChart();
+  if (!g) return;
+  var ctx = g.ctx;
+  var tMin = 0;
+  var tMax = Math.max(st.elapsed_s || 0, trace.length ? trace[trace.length - 1].t : 0, 60);
+
+  var planPts = ((activePlan && activePlan.points) || []).filter(function (p) { return p.t <= tMax; });
+
+  var tempVals = trace.map(function (p) { return p.c; });
+  if (st.actual_valid) tempVals.push(st.actual_c);
+  planPts.forEach(function (p) { tempVals.push(p.c); });
+  var minV = tempVals.length ? Math.min.apply(null, tempVals) : 0;
+  var maxV = tempVals.length ? Math.max.apply(null, tempVals) : 1;
+  if (maxV === minV) maxV = minV + 1;
+  minV -= (maxV - minV) * 0.05; maxV += (maxV - minV) * 0.05;
+  var belowFreezing = trace.some(function (p) { return p.c < CHART_FREEZING_C; });
+  if (!belowFreezing) { minV = Math.max(minV, CHART_FREEZING_C); if (maxV <= minV) maxV = minV + 1; }
+
+  function x(t) { return g.padL + (t - tMin) / (tMax - tMin) * g.plotW; }
+  function yTemp(v) { return g.padT + g.plotH - (v - minV) / (maxV - minV) * g.plotH; }
+
+  drawYAxis(g, yTemp, minV, maxV);
+
+  if (planPts.length) {
+    ctx.save();
+    ctx.setLineDash([6, 4]);
+    ctx.strokeStyle = '#96c'; ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    planPts.forEach(function (p, i) {
+      var px = x(p.t), py = yTemp(p.c);
+      if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+    });
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  if (trace.length) {
+    ctx.beginPath();
+    trace.forEach(function (p, i) {
+      var px = x(p.t), py = yTemp(p.c);
+      if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+    });
+    ctx.strokeStyle = '#f60'; ctx.lineWidth = 1.5; ctx.stroke();
+  }
+
+  drawChartAxis(g, x, yTemp, tMin, tMax);
+  if (belowFreezing) drawFreezingRef(g, yTemp, minV, maxV);
+
+  renderChartMeta('autotune', {
+    st: st, planShown: planPts.length >= 2,
+    freezingShown: belowFreezing, faultColor: g.fault,
+  });
+}
+
 // Chart mode switch: the user's actual request ("the current temps should
 // just show as dots ... until the profile is started") means the chart is
 // two different visuals sharing one canvas, not one dataset with an empty
@@ -1751,10 +1864,28 @@ function pollHistory() {
 // live. wasIdle tracks the previous call so a fresh idle->running
 // transition repaints the trend chart immediately instead of waiting up to
 // 15s for pollHistory's own interval.
+//
+// Phase 7b: an in-progress autotune (state not idle/done/aborted) takes
+// priority over both -- it is the more urgent "what is happening" view, the
+// same reasoning renderChartMeta's banners elsewhere on this page already
+// follow. A DONE/ABORTED result stays showing too ("leave the trace and the
+// outcome visible... rather than blanking it") but ONLY while no firing
+// profile is actually running -- an autotune result from earlier tonight
+// must not eclipse a live firing that started since. lastExecStatus is
+// cached so pollAutotune's own (slower, 10s) tick can re-run this same
+// decision without waiting on pollExec's next 2s tick.
 var wasIdle = true;
+var lastExecStatus = null;
 function updateChartMode(st) {
+  lastExecStatus = st;
   var idleNow = !st || st.state === 'idle';
-  if (idleNow) {
+  var atState = lastAutotuneStatus && lastAutotuneStatus.state;
+  var atActive = atState === 'settling' || atState === 'stepping' ||
+    atState === 'relay_approach' || atState === 'relay_cycling';
+  var atFinished = atState === 'done' || atState === 'aborted';
+  if (atActive || (atFinished && idleNow)) {
+    drawAutotuneChart(lastAutotuneStatus, autotuneTrace);
+  } else if (idleNow) {
     drawIdleDots(lastChannelsData);
   } else if (wasIdle) {
     pollHistory();
@@ -1787,6 +1918,40 @@ function pollExec() {
       }
     }
     updateChartMode(st);
+  }).catch(function () {});
+}
+
+// PID_EXPANSION_PLAN.md Phase 7b: /api/autotune status + trace, polled
+// independently of pollExec/poll since an autotune run has nothing to do
+// with firing-profile execution state. lastAutotuneStatus feeds
+// updateChartMode's mode switch; autotuneTrace is the parsed trace.csv,
+// refetched only when the device's own sample_count has actually grown
+// (matches the 10s AUTOTUNE_ENGINE_SAMPLE_PERIOD_S -- polling the CSV every
+// 2-3s the way /api/status is polled would just be requesting the same rows
+// over and over, a needless load on an httpd this board has run short of
+// memory under before). autotuneLastFetchedCount resets to -1 whenever the
+// device-side sample_count is seen to have DROPPED (a new run started and
+// overwrote the trace ring), which both clears the stale trace and forces
+// an immediate refetch.
+var lastAutotuneStatus = null;
+var autotuneTrace = [];
+var autotuneLastFetchedCount = -1;
+function pollAutotune() {
+  fetch('/api/autotune').then(function (r) { return r.json(); }).then(function (st) {
+    lastAutotuneStatus = st;
+    if (st.sample_count < autotuneLastFetchedCount) {
+      autotuneTrace = [];
+      autotuneLastFetchedCount = -1;
+    }
+    if (st.sample_count > 0 && st.sample_count !== autotuneLastFetchedCount) {
+      fetch('/api/autotune/trace.csv').then(function (r) { return r.text(); }).then(function (text) {
+        autotuneTrace = parseAutotuneTraceCsv(text);
+        autotuneLastFetchedCount = st.sample_count;
+        updateChartMode(lastExecStatus);
+      }).catch(function () {});
+    } else {
+      updateChartMode(lastExecStatus);
+    }
   }).catch(function () {});
 }
 
@@ -1835,6 +2000,8 @@ loadZones().then(function () {
   poll();
 });
 setInterval(pollHistory, 15000); // history only gains a new sample every 30s -- no need to poll faster
+pollAutotune();
+setInterval(pollAutotune, 10000); // matches AUTOTUNE_ENGINE_SAMPLE_PERIOD_S -- the trace can't move faster than that
 window.addEventListener('resize', function () { if (wasIdle) { drawIdleDots(lastChannelsData); } else { pollHistory(); } });
 
 // UI_PLAN.md item 7: re-render immediately on a °C/°F toggle instead of
