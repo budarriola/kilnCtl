@@ -642,116 +642,46 @@ function attachLongPress(el, onLongPress) {
 // ---------------------------------------------------------------------------
 // PID edit popup.
 //
-// Bounds mirror zones_config_json.c's zones_config_json_parse_float_field()
-// calls for z%u_kp/z%u_ki/z%u_kd EXACTLY (read there, not invented here):
-// [0.0, 1000.0] inclusive, finite, refused (never clamped) outside that --
-// "zone pid_kp/ki/kd missing or out of range" is the firmware's own error
-// text for a value outside this range. Kept as one shared constant so this
-// popup can never drift from the firmware's own bound without both being
-// touched in the same place.
-var PID_BOUND_MIN = 0.0, PID_BOUND_MAX = 1000.0;
-
-// Write path (requirement: reuse the existing POST /api/zones path and
-// payload shape rather than a second one). That endpoint IS a whole-page
-// submit (zones_http.c's zones_post_handler(): every zone's every field,
-// plus top-level thermo_count/relay_count/relay names/timing profiles, all
-// re-validated as one unit) -- there is no narrower "just this zone's PID"
-// endpoint. Rather than reimplementing zones_page.html's own inheritance-
-// aware form-building UI (settings_source chains, per-field customStack
-// resolution -- real complexity that page owns and this popup must not
-// duplicate or subtly diverge from), this does a GENERIC, MECHANICAL echo
-// instead: GET /api/zones already returns every field POST wants, as a
-// fully RESOLVED, concrete snapshot (settings_source, coupling_c%u, tc_type
-// etc are all already-resolved values, not inheritance references) -- so
-// echoing every field straight back, changing only the target zone's
-// kp/ki/kd, is a complete and correct round-trip without needing any of
-// that page's UI-side logic. Field-name mapping below was read directly out
-// of zones_page.html's own submit handler and zones_http.c's
-// parse_zone_fields()/zones_post_handler(), not guessed.
-var ZONE_FIELD_MAP = [
-  ['name', 'name', true], ['relay_mask', 'relay_mask', false], ['thermo_mask', 'thermo_mask', false],
-  ['ct_mask', 'ct_mask', false], ['tc_type', 'tctype', false], ['timing_profile', 'timingprofile', false],
-  ['cal_offset_c', 'cal', false],
-  ['pid_kp', 'kp', false], ['pid_ki', 'ki', false], ['pid_kd', 'kd', false],
-  ['max_ramp_c_per_hr', 'ramp', false], ['sanity_rate_c_per_min', 'sanity', false],
-  ['control_mode', 'mode', false], ['max_temp_c', 'maxtemp', false], ['min_temp_c', 'mintemp', false],
-  ['heater_window_ms', 'window', false], ['heater_min_on_ms', 'minon', false], ['heater_min_off_ms', 'minoff', false],
-  ['guard_wrong_dir_window_s', 'wrongdirwindow', false], ['guard_wrong_dir_rate_c_per_min', 'wrongdirrate', false],
-  ['guard_off_settle_s', 'offsettle', false], ['guard_runaway_rate_c_per_min', 'runawayrate', false],
-  ['guard_runaway_margin_c', 'runawaymargin', false], ['guard_drift_period_s', 'driftperiod', false],
-  ['guard_sensor_fault_debounce_ticks', 'debounce', false], ['guard_frozen_window_s', 'frozenwindow', false],
-  ['cross_zone_max_delta_c', 'xzone', false],
-  ['model_k_dc', 'k', false], ['model_tau_s', 'tau', false], ['model_dead_time_s', 'deadtime', false],
-  ['fuzzy_strength_pct', 'fuzzy_strength', false], ['settings_source', 'settings_source', false],
-];
-
-// Builds the exact application/x-www-form-urlencoded body zones_page.html's
-// own save handler posts -- see ZONE_FIELD_MAP's own comment. `cfg` is a
-// freshly-fetched GET /api/zones response; `zoneIndex`/`kp`/`ki`/`kd` are
-// the one change this popup makes. Every other field, for every zone,
-// timing profile and relay name, is echoed back verbatim.
-function buildZonesEchoPostBody(cfg, zoneIndex, kp, ki, kd) {
-  var params = [];
-  params.push('thermo_count=' + cfg.thermo_count);
-  params.push('relay_count=' + cfg.relay_count);
-  params.push('max_simultaneous_relays=' + cfg.max_simultaneous_relays);
-  params.push('continue_on_zone_trip=' + (cfg.continue_on_zone_trip ? '1' : '0'));
-  params.push('safety_tc_type=' + cfg.safety_tc_type);
-  params.push('pc_link_abort_silence_ms=' + cfg.pc_link_abort_silence_ms);
-  (cfg.relay_names || []).forEach(function (nm, r) {
-    params.push('relay' + (r + 1) + '_name=' + encodeURIComponent(nm));
-  });
-  (cfg.timing_profiles || []).forEach(function (p, idx) {
-    params.push('tp' + idx + '_name=' + encodeURIComponent(p.name || ''));
-    params.push('tp' + idx + '_progressduty=' + p.guard_progress_duty_min);
-    params.push('tp' + idx + '_progresswindow=' + p.guard_progress_window_s);
-    params.push('tp' + idx + '_drifthyst=' + p.guard_drift_hysteresis_c);
-    params.push('tp' + idx + '_frozeneps=' + p.guard_frozen_eps_c);
-    params.push('tp' + idx + '_xzoneperiod=' + p.guard_cross_zone_period_s);
-    params.push('tp' + idx + '_bbhyst=' + p.bangbang_hysteresis_c);
-    params.push('tp' + idx + '_coolmargin=' + p.cooling_limited_margin_c);
-    params.push('tp' + idx + '_coolhold=' + p.cooling_limited_hold_s);
-    params.push('tp' + idx + '_ramplock=' + p.ramp_lock_band_c);
-  });
-  (cfg.zones || []).forEach(function (z, i) {
-    ZONE_FIELD_MAP.forEach(function (m) {
-      var key = m[0], suffix = m[1], isString = m[2];
-      var val = z[key];
-      params.push('z' + i + '_' + suffix + '=' + (isString ? encodeURIComponent(val) : val));
-    });
-    for (var j = 0; j < cfg.zones.length; j++) {
-      params.push('z' + i + '_coupling_c' + j + '=' + z['coupling_c' + j]);
-    }
-    if (i === zoneIndex) {
-      // Override the three this popup actually edits -- appended AFTER the
-      // echoed z{i}_kp/ki/kd above, so these win (a duplicate key in an
-      // application/x-www-form-urlencoded body resolves to the LAST
-      // occurrence under http_form_find_field()'s linear scan, same as
-      // every browser's own form-encoding convention).
-      params.push('z' + i + '_kp=' + kp);
-      params.push('z' + i + '_ki=' + ki);
-      params.push('z' + i + '_kd=' + kd);
-    }
-  });
-  return params.join('&');
-}
+// 2026-09-01 second follow-up: firmware commit 9d7dbc8 added a dedicated
+// POST /api/zones/pid (zones_http.c's zones_pid_post_handler()) that
+// parses ONLY zone/kp/ki/kd and carries NO ota_http_check_interlocks()
+// gate at all -- a PID-only edit is safe in any executor state, including
+// DURING a running firing, which is what this popup was actually built
+// for. This replaces the earlier "fetch the whole /api/zones config and
+// echo every field back through the whole-page POST /api/zones" approach
+// that first version had to use before this endpoint existed: that whole-
+// page path is untouched and still refuses mid-firing (deliberately --
+// relay mapping, guard limits, coupling etc. have no business changing
+// under a hot kiln), so it was never going to satisfy "adjust while
+// running" and the echo-building complexity it required is gone now that
+// there is a real narrow endpoint to point at instead.
+//
+// Bound mirrors zones_http.h's ZONE_PID_GAIN_MAX (1000.0) EXACTLY -- read
+// there, not invented here; zones_pid_post_handler() parses kp/ki/kd with
+// zones_config_json_parse_float_field(body, key, 0.0f, ZONE_PID_GAIN_MAX, ...),
+// the SAME bound the whole-page path already used. If that constant's
+// value ever changes, this literal must change with it -- there is no way
+// for JS to read a C #define at runtime, so this is the one place that
+// value has to be kept in sync by hand.
+var PID_BOUND_MIN = 0.0, PID_BOUND_MAX = 1000.0; // = zones_http.h ZONE_PID_GAIN_MAX
 
 var pidPopupZone = null; // zone index currently open, or null
-var pidPopupCfg = null;  // last-fetched GET /api/zones snapshot for that zone
 
 function closePidPopup() {
   pidPopupZone = null;
-  pidPopupCfg = null;
   document.getElementById('pidPopupOverlay').setAttribute('hidden', '');
 }
 
-// Live actual/error refresh while the popup is open -- called from poll()'s
-// existing 2s tick (reusing that cadence rather than a second timer), so
-// "what are you about to affect" stays current for as long as the operator
-// is deciding. actual_c comes from lastChannelsData (already fetched every
-// tick); target/error need a RUNNING or PAUSED firing that includes this
-// zone -- otherwise there is no setpoint to compare against and the popup
-// says so rather than inventing a zero error.
+// Live actual/error/duty refresh while the popup is open -- called from
+// poll()'s existing 2s tick (reusing that cadence rather than a second
+// timer), so "what are you about to affect" stays current for as long as
+// the operator is deciding. actual_c comes from lastChannelsData (already
+// fetched every tick); target/error need a RUNNING or PAUSED firing that
+// includes this zone -- otherwise there is no setpoint to compare against
+// and the popup says so rather than inventing a zero error. Also drives
+// the bumpless-hazard warning (see renderPidPopup) -- both read the same
+// zst.actual_valid, so the warning and the live line can never disagree
+// about whether the reading is currently good.
 function refreshPidPopupLive() {
   if (pidPopupZone === null) return;
   var elLive = document.getElementById('pidPopupLive');
@@ -767,6 +697,7 @@ function refreshPidPopupLive() {
       (zst.duty !== undefined ? ', duty ' + zst.duty.toFixed(3) : '');
   }
   elLive.innerHTML = 'Actual: <b class="kc-live-value">' + actualTxt + '</b><br>' + errTxt;
+  updatePidPopupBumplessWarning();
 }
 
 // window.kcUnit.fmt()'s +32 Fahrenheit offset is wrong for a delta (target
@@ -780,16 +711,55 @@ function fmtDeltaC(c) {
   return (v >= 0 ? '+' : '') + v.toFixed(1) + ' ' + window.kcUnit.label();
 }
 
+// Bumpless-transfer hazard (owner report, from the firmware agent):
+// profile_executor.c's reload_config_if_changed() re-seeds the PID
+// integral via seed_bumpless_with_ff() when it notices a gain change mid-
+// firing, so the commanded duty does not step -- but ONLY when the zone's
+// actual_valid is true at that moment; otherwise it takes a COLD
+// pid_reset() branch instead and the duty CAN step. True only while:
+//   - a firing is RUNNING or PAUSED (no firing = no duty to step at all,
+//     reload_config_if_changed() only re-seeds zones the run is actively
+//     driving), AND
+//   - this zone is one of that run's active zones, AND
+//   - its actual_valid currently reads false.
+// Deliberately NOT shown unconditionally -- "a warning that is always
+// present is a warning nobody reads" -- so the vast majority of edits
+// (reading valid, or no firing running at all) show nothing here.
+function pidPopupBumplessHazard() {
+  var st = lastExecStatus;
+  if (!st || (st.state !== 'running' && st.state !== 'paused')) return false;
+  var zst = (st.zones || []).filter(function (z) { return z.zone === pidPopupZone; })[0];
+  return !!(zst && zst.active && !zst.actual_valid);
+}
+
+// Judgment call (owner: "consider whether Apply should be blocked in that
+// state, use your judgment and say what you chose"): NOT a hard block --
+// a momentary sensor fault the operator already knows about and is
+// correcting gains ahead of, say, is a legitimate reason to proceed. But
+// also not silent: while the hazard holds, an explicit acknowledgement
+// checkbox gates Apply, the same "acknowledge, don't silently allow"
+// pattern zones_page.html's own unsettled-autotune-result Accept flow
+// already uses for a different, but similarly-shaped, "the fit/reading
+// isn't fully trustworthy right now" situation.
+function updatePidPopupBumplessWarning() {
+  var warnEl = document.getElementById('pidPopupBumplessWarn');
+  var ackBox = document.getElementById('pidPopupBumplessAck');
+  var applyBtn = document.getElementById('pidPopupApplyBtn');
+  if (!warnEl || !applyBtn) return;
+  var hazard = pidPopupBumplessHazard();
+  warnEl.style.display = hazard ? '' : 'none';
+  if (!hazard && ackBox) ackBox.checked = false;
+  applyBtn.disabled = hazard && (!ackBox || !ackBox.checked);
+}
+
 function openPidPopup(zoneIndex) {
   pidPopupZone = zoneIndex;
-  pidPopupCfg = null;
   var overlay = document.getElementById('pidPopupOverlay');
   var box = document.getElementById('pidPopupBox');
   box.innerHTML = '<h3>' + zoneName(zoneIndex) + ' -- PID</h3><p>Loading current config&hellip;</p>';
   overlay.removeAttribute('hidden');
   fetch('/api/zones').then(function (r) { return r.json(); }).then(function (cfg) {
     if (pidPopupZone !== zoneIndex) return; // closed/reopened on a different zone while this was in flight
-    pidPopupCfg = cfg;
     renderPidPopup(cfg.zones[zoneIndex]);
   }).catch(function () {
     box.innerHTML = '<h3>' + zoneName(zoneIndex) + ' -- PID</h3>' +
@@ -800,12 +770,11 @@ function openPidPopup(zoneIndex) {
 
 function renderPidPopup(z) {
   var box = document.getElementById('pidPopupBox');
-  var running = lastExecStatus && (lastExecStatus.state === 'running' || lastExecStatus.state === 'paused');
-  // Last autotune this SESSION proposed for this zone, if any -- lastAutotuneStatus
-  // is the same global the autotune chart already uses (main_page.html has
-  // no history beyond the current/last-polled run, same session-only
-  // limitation the coupling matrix has, and for the same reason: nothing
-  // else on this page persists it either).
+  // Last autotune this SESSION proposed for this zone, if any --
+  // lastAutotuneStatus is the same global the autotune chart already uses
+  // (main_page.html has no history beyond the current/last-polled run,
+  // same session-only limitation the coupling matrix has, and for the
+  // same reason: nothing else on this page persists it either).
   var at = lastAutotuneStatus;
   var atUsable = !!(at && at.zone === pidPopupZone && (at.state === 'done' || at.state === 'aborted') &&
     (at.method === 'relay' ? at.relay_valid : at.model_valid));
@@ -815,19 +784,19 @@ function renderPidPopup(z) {
        '<button type="button" id="pidPopupUseProposed">Use these</button></div>')
     : '<div class="proposed">No usable autotune result for this zone this session.</div>';
 
-  var runningWarn = running
-    ? '<p class="warn">This board REFUSES to write zone config while ANY firing is RUNNING or PAUSED ' +
-      '(zones_http.c own interlock check -- a hard refusal, not overridable). Apply below will still be ' +
-      'sent and the boards own refusal reason shown, but it will not take effect until the firing is ' +
-      'stopped. This is a firmware-level limitation, not a bug in this popup.</p>'
-    : '';
-
   box.innerHTML =
     '<h3>' + zoneName(pidPopupZone) + ' -- PID parameters</h3>' +
     '<div id="pidPopupLive"></div>' +
-    '<p class="warn">Changes take effect immediately on a running firing -- this directly changes how ' +
-    'this zone is heated, right now, with no confirmation beyond clicking Apply below.</p>' +
-    runningWarn + proposedHtml +
+    '<p class="warn">Changes take effect immediately -- including on a running firing -- with no ' +
+    'confirmation beyond clicking Apply below. This is meant for small nudges to gains that are already ' +
+    'close, not for rescuing a badly-behaved kiln -- if the zone is far off, prefer re-running autotune.</p>' +
+    '<p class="warn" id="pidPopupBumplessWarn" style="display:none">This zone’s reading is currently ' +
+    'INVALID while its firing is active -- profile_executor.c only re-seeds the control integral bumplessly ' +
+    'when the reading is valid at the moment the new gains are noticed; with an invalid reading right now it ' +
+    'falls back to a cold reset instead, and the commanded duty CAN step. ' +
+    '<label style="display:inline;font-weight:normal"><input type="checkbox" id="pidPopupBumplessAck"> ' +
+    'I understand this may cause a duty step</label></p>' +
+    proposedHtml +
     '<label>Kp (current ' + z.pid_kp + ')<input type="number" id="pidPopupKp" value="' + z.pid_kp +
       '" step="any" min="0"></label>' +
     '<label>Ki (current ' + z.pid_ki + ') -- small values matter here, e.g. 0.00012; do not round this' +
@@ -845,12 +814,15 @@ function renderPidPopup(z) {
       document.getElementById('pidPopupKd').value = at.proposed_kd;
     });
   }
+  var ackBox = document.getElementById('pidPopupBumplessAck');
+  if (ackBox) ackBox.addEventListener('change', updatePidPopupBumplessWarning);
   refreshPidPopupLive();
 }
 
-// Bounds mirrored EXACTLY from zones_config_json.c (see PID_BOUND_MIN/MAX's
-// own comment) -- rejects, never clamps, same discipline the firmware
-// itself uses ("refuse at the door, never clamp or ignore").
+// Bounds mirrored EXACTLY from zones_http.h's ZONE_PID_GAIN_MAX (see
+// PID_BOUND_MIN/MAX's own comment) -- rejects, never clamps, same
+// discipline the firmware itself uses ("refuse at the door, never clamp
+// or ignore").
 function validatePidValue(raw, label) {
   if (raw === '' || raw === null) return { error: label + ' is required' };
   var v = Number(raw);
@@ -867,24 +839,32 @@ function applyPidPopup() {
   var kdR = validatePidValue(document.getElementById('pidPopupKd').value, 'Kd');
   var firstError = kpR.error || kiR.error || kdR.error;
   if (firstError) { msgEl.textContent = firstError; return; }
-  if (!pidPopupCfg) { msgEl.textContent = 'Config not loaded yet -- try again in a moment.'; return; }
   var zi = pidPopupZone;
-  var body = buildZonesEchoPostBody(pidPopupCfg, zi, kpR.value, kiR.value, kdR.value);
+  // POST /api/zones/pid (zones_http.c's zones_pid_post_handler()) --
+  // application/x-www-form-urlencoded, exactly zone/kp/ki/kd, nothing else
+  // (see this section's own header comment). No interlock: works whether
+  // or not a firing is running.
+  var body = 'zone=' + zi + '&kp=' + kpR.value + '&ki=' + kiR.value + '&kd=' + kdR.value;
   var applyBtn = document.getElementById('pidPopupApplyBtn');
   applyBtn.disabled = true;
   msgEl.textContent = 'Applying…';
-  fetch('/api/zones', {
+  fetch('/api/zones/pid', {
     method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body,
   }).then(function (r) {
     if (!r.ok) return r.text().then(function (t) { throw new Error(t || ('HTTP ' + r.status)); });
+    return r.json();
+  }).then(function (result) {
+    if (result && result.ok === false) throw new Error(result.error || 'apply failed');
     // Never assume the write took -- re-read and show what the firmware
     // actually stored, the same "confirm, don't assume" discipline the
     // rest of this pass's write paths follow. A silent partial write that
     // reports success without checking is exactly the failure mode to
-    // avoid.
+    // avoid. /api/zones (whole-config GET, unaffected by this endpoint
+    // change) is still the read-back source -- /api/zones/pid's own
+    // success body is just {"ok":true}, it does not echo the stored
+    // values itself.
     return fetch('/api/zones').then(function (r2) { return r2.json(); }).then(function (cfg2) {
       if (pidPopupZone !== zi) return; // popup moved to a different zone meanwhile
-      pidPopupCfg = cfg2;
       var stored = cfg2.zones[zi];
       var matched = Math.abs(stored.pid_kp - kpR.value) < 1e-6 && Math.abs(stored.pid_ki - kiR.value) < 1e-9 &&
         Math.abs(stored.pid_kd - kdR.value) < 1e-6;
@@ -896,12 +876,14 @@ function applyPidPopup() {
       document.getElementById('pidPopupKi').value = stored.pid_ki;
       document.getElementById('pidPopupKd').value = stored.pid_kd;
       applyBtn.disabled = false;
+      updatePidPopupBumplessWarning();
     });
   }).catch(function (e) {
-    // Covers the interlock refusal (409/428, plain-text reason) and any
-    // validation 400 -- both come back as this same .then()->catch() path
-    // since !r.ok throws above; the board's own reason text is shown
-    // verbatim rather than a generic "failed".
+    // zones_pid_post_handler() sends 400 (bad zone/kp/ki/kd, plain text)
+    // or a 500 JSON {"ok":false,"error":...} on an nvs_save() failure --
+    // both land here and are shown verbatim rather than a generic
+    // "failed". There is no interlock refusal to handle any more (see
+    // this section's own header comment).
     msgEl.textContent = 'Not applied: ' + e.message;
     applyBtn.disabled = false;
   });
