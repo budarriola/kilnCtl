@@ -26,6 +26,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #include "autotune_engine.h"
 #include "profile_executor.h"
@@ -38,7 +39,24 @@
  * regression to the old undersized buffer would leave the test green). See
  * dashboard_http.c's own call sites for the sizing math these numbers come
  * from. */
-#define DASHBOARD_JSON_PROFILE_EXEC_BUF_SIZE (960 + MAX31856_CHANNEL_COUNT * 512)
+/* Per-zone allowance raised from 512 -> 1024 (PID_EXPANSION_PLAN.md Phase 7a
+ * dashboard wiring): append_zone_status_json()'s control_fields==false shape
+ * (/api/profile_exec only -- /api/control's shape is unaffected) now appends
+ * a nested "firing_stats" object per zone (profile_exec_zone_status_t::
+ * firing_stats, profile_executor.h). Worst case measured by summing every
+ * field's widest %-format output: 8x "%.2f" (mean_error_c, max_overshoot_c,
+ * max_undershoot_c, iae_raw_c_s, ramp_err_mean_c, ramp_err_max_c,
+ * dwell_err_mean_c, dwell_err_max_c) at up to 8 bytes each ("-1234.56") =
+ * 64B, 5x "%lu" (max_overshoot_elapsed_s, max_undershoot_elapsed_s,
+ * sample_count, excluded_sample_count, duration_s) at up to 10 bytes each
+ * ("4294967295") = 50B, 2x "%u" (max_overshoot_segment,
+ * max_undershoot_segment, both uint8_t) at up to 3 bytes each ("255") = 6B,
+ * 1x "%.4f" (iae_normalized) at up to 10 bytes ("-1234.5678") = 10B --
+ * 130B of values. Static text (keys + punctuation, format specifiers
+ * subtracted out) is 342B. 130+342 = 472B worst case; 1024/zone leaves over
+ * 2x headroom. See test_dashboard_json.c's fill_worst_case_zone() for the
+ * exact widths this measures against. */
+#define DASHBOARD_JSON_PROFILE_EXEC_BUF_SIZE (960 + MAX31856_CHANNEL_COUNT * 1024)
 #define DASHBOARD_JSON_CONTROL_BUF_SIZE      (256 + MAX31856_CHANNEL_COUNT * 448)
 
 /* Escapes '"' and '\\' for JSON string embedding. Truncates (never writes
@@ -97,5 +115,21 @@ size_t json_append_clamped(char *json, size_t cap, size_t o, const char *fmt, ..
  * clamp that for httpd_resp_send(), same as the original code did). `json`
  * must be at least `cap` bytes; this never writes past `cap`. */
 int dashboard_format_autotune_status_json(char *json, size_t cap, const autotune_engine_status_t *st);
+
+/* GET /api/firing_history?profile_id=N's whole response body: up to
+ * PROFILE_EXECUTOR_FIRING_HISTORY_DEPTH persisted run records for one
+ * profile, newest-first (profile_executor_get_firing_history()), each with
+ * its per-zone firing_stats + PID gains in force at completion
+ * (profile_firing_zone_record_t). Pure formatting, same shape/host-testing
+ * rationale as dashboard_format_autotune_status_json() above -- the caller
+ * already fetched `records`/`record_count` via
+ * profile_executor_get_firing_history(), no httpd/hardware touched here.
+ * Appends into the caller-owned json[cap] buffer with the same self-clamping
+ * discipline as append_zone_status_json() (never writes past cap, always
+ * NUL-terminates, closes every array/object it opened even if a later
+ * record/zone doesn't fit). Returns the final offset (== strlen(json)). */
+size_t dashboard_format_firing_history_json(char *json, size_t cap, uint8_t profile_id,
+                                            const profile_firing_run_record_t *records,
+                                            size_t record_count);
 
 #endif // DASHBOARD_JSON_H

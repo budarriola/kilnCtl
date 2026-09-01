@@ -1616,7 +1616,17 @@ function pollAutotune() {
               ', h=±' + s.relay_h_c.toFixed(1) + '°C, ' + s.relay_cycles_seen + ' of ' +
               s.relay_cycles_target + ' cycles complete.';
     }
-    if (s.state === 'aborted' && s.abort_reason) {
+    /* PID_EXPANSION_PLAN.md dashboard follow-up, 2026-08-31: model_valid is
+     * now populated on ABORTED as well as DONE (autotune_engine.c's
+     * autotune_engine_get_status(), same date -- "exposing them on ABORTED,
+     * not clearing them again on the way out"), specifically because a
+     * rejected fit's own numbers are what explain WHY it was rejected.
+     * Computed here (before the plain-text Reason append just below) so
+     * that append can skip the plain-text form when the model-valid-aborted
+     * branch further down is about to render a bolded version of the same
+     * reason instead -- never both, which would show the reason twice. */
+    var modelFieldsVisible = s.model_valid && s.method !== 'relay';
+    if (s.state === 'aborted' && s.abort_reason && !modelFieldsVisible) {
       line += ' Reason: ' + s.abort_reason;
     }
     var unsettledLabel = document.getElementById('atUnsettledLabel');
@@ -1639,7 +1649,20 @@ function pollAutotune() {
     // named individually here so the operator can tell WHICH one is unmet,
     // not just that something is, matching what the wire status/JSON now
     // surface distinctly rather than collapsing into one bit.
-    var isStepDone = (s.state === 'done' && s.model_valid && s.method !== 'relay');
+    /* Deliberately still gated to state === 'done', NOT merged with the
+     * model-fields-visible display logic further down (2026-08-31 follow-up:
+     * "if 'done' and 'aborted' need different treatment here, give them
+     * different treatment rather than merging the conditions"). This flag
+     * controls whether the settled/converged/tau-consistent UNMET-reasons
+     * checkbox appears -- that checkbox exists to gate the Accept button on
+     * acknowledging a shaky-but-successful fit, and Accept is already,
+     * separately, hard-disabled for every aborted run (atLastDoneModelValid
+     * below checks state === 'done' explicitly) -- so there is nothing for
+     * an aborted run's checkbox to gate. Widening this to include 'aborted'
+     * would not change Accept's disabled state, but it would show a
+     * misleading "Accept it anyway?" checkbox next to a run that was
+     * already rejected by the firmware, with no accept path behind it. */
+    var isStepDone = (s.state === 'done' && modelFieldsVisible);
     var unmetReasons = [];
     if (isStepDone && s.model_settled === false) {
       unmetReasons.push('never reached steady state (ended by the 4-hour time limit)');
@@ -1693,13 +1716,60 @@ function pollAutotune() {
       updateAcceptButtonEnabled();
       return;
     }
-    if (s.state === 'done' && s.model_valid) {
+    // model_settled/model_extrapolation_converged/model_tau_consistent are
+    // what distinguish a trustworthy fit from a shaky one -- surfaced here as
+    // a compact yes/no line whenever modelFieldsVisible, in BOTH the done and
+    // aborted branches below, not just folded into the done-only unsettled-
+    // checkbox text above (a model_valid fit with settled=false is a weaker
+    // result even on a run that otherwise finished/was rejected for an
+    // unrelated reason, and the operator should see that either way).
+    var confidenceLine = modelFieldsVisible
+      ? (' Confidence: settled ' + (s.model_settled ? 'yes' : 'no') +
+         ', extrapolation converged ' + (s.model_extrapolation_converged ? 'yes' : 'no') +
+         ', tau consistent ' + (s.model_tau_consistent ? 'yes' : 'no') + '.')
+      : '';
+    if (s.state === 'done' && modelFieldsVisible) {
       line += ' Fitted K=' + s.k_gain_c_per_duty.toFixed(1) + '°C/duty, tau=' + s.tau_s.toFixed(0) +
-              's, L=' + s.dead_time_s.toFixed(0) + 's. Proposed Kp=' + s.proposed_kp.toFixed(4) +
+              's, L=' + s.dead_time_s.toFixed(0) + 's (baseline ' + s.baseline_c.toFixed(1) + '°C -> final ' +
+              s.final_c.toFixed(1) + '°C).' + confidenceLine + ' Proposed Kp=' + s.proposed_kp.toFixed(4) +
               ' Ki=' + s.proposed_ki.toFixed(5) + ' Kd=' + s.proposed_kd.toFixed(4) +
               '. Predicted max ramp ≈ ' + s.predicted_max_ramp_c_per_hr.toFixed(0) + '°C/hr. ' +
               '<a href="/api/autotune/trace.csv">Download trace CSV</a>';
       el.innerHTML = line;
+    } else if (s.state === 'aborted' && modelFieldsVisible) {
+      /* The gap this branch closes (2026-08-31 follow-up): a rejected fit
+       * used to fall straight to the plain-text else below, which showed
+       * only the state name + abort reason and threw away the very numbers
+       * (k_gain_c_per_duty/tau_s/dead_time_s/baseline_c/final_c/raw_rise_c/
+       * rise_inf_c) that explain WHY it was rejected -- autotune_engine.c's
+       * finalize_fit() computes them BEFORE most of its own physical-
+       * plausibility aborts, so they are real, not stale.
+       *
+       * Deliberately NOT the same line shape as the done branch above:
+       * proposed_kp/ki/kd/predicted_max_ramp_c_per_hr are only assigned
+       * once finalize_fit() reaches pid_autotune_tune_from_fopdt() (that
+       * function's own call site, autotune_engine.c), which several of the
+       * physical-plausibility aborts -- including the "gain implies ...
+       * below zone limit" ceiling-reachability check -- run BEFORE, leaving
+       * them zeroed from the run's own reset. Printing "Proposed Kp=0.0000"
+       * next to a REJECTED fit would read as a second, competing
+       * recommendation, not the diagnostic-only information this is meant
+       * to be -- so this branch never prints them. The abort reason is
+       * rendered bold and first (via <strong>, escaped through the same
+       * plain-text path json_escape() already guarantees server-side) so a
+       * rejected run can never be mistaken for an accepted one at a glance;
+       * updateAcceptButtonEnabled() below is the actual, functional guard
+       * (atLastDoneModelValid stays false for every non-'done' state), this
+       * is the visual one. */
+      var reasonHtml = s.abort_reason
+        ? ('<strong>REJECTED: ' + window.kcEscapeHtml(s.abort_reason) + '</strong> ')
+        : '<strong>REJECTED.</strong> ';
+      line += ' Fitted K=' + s.k_gain_c_per_duty.toFixed(1) + '°C/duty, tau=' + s.tau_s.toFixed(0) +
+              's, L=' + s.dead_time_s.toFixed(0) + 's (baseline ' + s.baseline_c.toFixed(1) + '°C -> final ' +
+              s.final_c.toFixed(1) + '°C, raw rise ' + s.raw_rise_c.toFixed(1) + '°C, extrapolated rise ' +
+              s.rise_inf_c.toFixed(1) + '°C).' + confidenceLine +
+              ' Gains NOT written. <a href="/api/autotune/trace.csv">Download trace CSV</a>';
+      el.innerHTML = reasonHtml + line;
     } else {
       el.textContent = line;
     }

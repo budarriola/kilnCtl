@@ -550,6 +550,18 @@ typedef struct {
      * zone's own baseline_c used to be. */
     float zone_baseline_c[MAX31856_CHANNEL_COUNT];
     bool  zone_baseline_valid[MAX31856_CHANNEL_COUNT];
+    /* Readiness-check state (Phase 7c pre-start thermal readiness): the
+     * FIRST valid reading seen for each zone after entering SETTLING,
+     * captured once (readiness_start_captured) and never touched again
+     * this SETTLING phase. Used only to estimate a slope (degC/s) over the
+     * SETTLE_S window at the SETTLING->STEPPING transition below, so a
+     * zone that is low but still visibly cooling/heating is told apart
+     * from one that is genuinely flat. Reset at every SETTLING entry
+     * (begin_run_locked() and handle_probe_done_locked()'s rewind), same
+     * as the other SETTLING->STEPPING-transition state above. */
+    float readiness_start_c[MAX31856_CHANNEL_COUNT];
+    bool  readiness_start_valid[MAX31856_CHANNEL_COUNT];
+    bool  readiness_start_captured;
     float zone_last_valid_c[MAX31856_CHANNEL_COUNT]; /* carry-forward for a zone's momentary bad read, so one dropped
                                                         * sample on a non-tested zone doesn't NaN its whole trace */
     /* Packed, 2 bytes a sample per zone -- see autotune_engine.h. */
@@ -1524,6 +1536,12 @@ static void handle_probe_done_locked(void)
      * at the original cold baseline) before stepping to identify_duty. */
     s_at.state = AUTOTUNE_ENGINE_SETTLING;
     s_at.phase_start_tick = xTaskGetTickCount();
+    /* Re-arm the readiness-check capture for this re-settle -- see
+     * readiness_start_captured's own comment. Without this the probe
+     * phase's own start-of-SETTLING reading would be compared against
+     * temperatures reached AFTER the probe's own heat, which is not what
+     * the readiness check is for. */
+    s_at.readiness_start_captured = false;
 }
 
 /* One tick of the bang-bang relay law. Returns the duty this tick wants and
@@ -1791,6 +1809,189 @@ static bool step_settle_check_locked(void)
      * kept as decoration: it was algebraically implied by this one. */
     return (recent_slope <= SETTLE_RELATIVE_SLOPE_FRAC * s_at.step_peak_slope_c_per_s) ||
            (recent_slope <= SETTLE_ABS_SLOPE_FLOOR_C_PER_S);
+}
+
+/* Phase 7c pre-start thermal readiness check (2026-08-31 hardware finding;
+ * REVISED 2026-08-31 after checking the first version against real
+ * accept/refuse data from tonight's rig -- it failed the accept side, see
+ * "THE REFERENCE PROBLEM" below):
+ *
+ * finalize_fit()'s gain comes out of raw_rise = final_c - baseline_c, and
+ * baseline_c is captured once, at the SETTLING->STEPPING transition below.
+ * If a zone still carries residual heat at that instant -- either the zone
+ * UNDER TEST (its own baseline is high, so raw_rise is too small) or a
+ * NEIGHBOUR zone that is still cooling (its coupled heat bleeds into the
+ * tested zone and decays over the run, subtracting from the apparent rise
+ * the same direction) -- the fitted gain comes out low by roughly the
+ * baseline error, and a low gain over-drives the feedforward term
+ * downstream. Measured on this board: a zone started "slightly hot" fit
+ * K=36.4 (rejected, and wrong); the same zone from a genuinely rested
+ * 31.36C fit K=39.25 with every confidence flag true, matching an
+ * independent least-squares fit of the raw trace (~39.1-40.0).
+ *
+ * THE REFERENCE PROBLEM: the obvious reference for "how hot is this zone
+ * right now" is the cold-junction reading (step_ambient_c) -- it is on the
+ * board, always available, and finalize_fit()'s own physical-plausibility
+ * check already uses it. But the CJ measures the BOARD, not the chamber,
+ * and the two are not colocated: on this rig a genuinely, fully rested
+ * zone reads 1-3C above ITS OWN CJ as a FIXED offset from sensor
+ * placement, not leftover warmth. Two real runs proved this the hard way:
+ * zone 0's only fully-valid tune ever produced (baseline 31.36C, CJ
+ * 29.75C, all three confidence flags true, corroborated by an independent
+ * least-squares fit) sits 1.61C above its own CJ; zone 1's run after the
+ * operator deliberately cooled the kiln for 25 minutes sits 1.97C above
+ * ITS CJ. A margin-above-CJ rule tight enough to catch a genuinely hot
+ * zone (tens of C) is nowhere near loose enough to pass either of these --
+ * on THIS board it would refuse every tune, forever, which is strictly
+ * worse than the bug it exists to prevent. The absolute-ambient version of
+ * this rule has been REMOVED for exactly this reason; ambient/CJ is no
+ * longer read by this check at all.
+ *
+ * THE FIX -- two checks, neither referencing ambient:
+ *
+ * (1) STABILITY, PRIMARY. A zone recently driven is either still cooling
+ *     (a clear negative slope) or, briefly, still rising; a genuinely
+ *     rested zone is flat REGARDLESS OF ITS ABSOLUTE LEVEL, because the
+ *     fixed sensor-placement offset above is CONSTANT and cancels out of
+ *     a slope entirely. Reuses SETTLE_ABS_SLOPE_FLOOR_C_PER_S -- the SAME
+ *     absolute noise floor the settle detector already uses to call a
+ *     STEPPING trace "flat" -- so this is the existing threshold applied
+ *     one phase earlier, not a second invented one. Slope is estimated
+ *     from the FIRST valid SETTLING-phase reading to the transition
+ *     reading (readiness_start_c/readiness_start_captured). Most portable
+ *     half of the check: no sensor geometry, no configured ceiling, no CJ
+ *     dependency at all.
+ *
+ * (2) CROSS-ZONE SPREAD, SECONDARY. Slope alone misses a zone that has
+ *     already PLATEAUED hot (no longer cooling, but sitting well above
+ *     where it belongs) -- unlikely mid-SETTLING but not impossible if the
+ *     operator starts back-to-back tunes without a real rest. Every zone
+ *     carries its OWN fixed placement offset, but at genuine rest every
+ *     zone sits near ITS OWN steady value -- comparing zones AGAINST EACH
+ *     OTHER cancels the per-zone offset the same way (1) cancels it over
+ *     time. Tonight's own data makes the two populations unmistakable:
+ *     rested, the three zones read 32.2 / 30.9 / 30.0 (2.2C spread);
+ *     after zone 0's run they read 67.8 / 41.9 / 35.8 (32C spread against
+ *     the coolest zone). For each zone z with a valid reading, compare it
+ *     against min_baseline_c (the coolest currently-valid zone THIS tick)
+ *     in place of ambient:
+ *         spread_z = baseline_z - min_baseline_c
+ *     refused if spread_z exceeds min_rise_z = autotune_min_rise_c
+ *     (baseline_z, max_temp_z) -- the SAME "minimum trustworthy rise"
+ *     finalize_fit() itself refuses a fit below. No fraction is taken of
+ *     it (unlike the removed absolute-ambient version): this is a coarse
+ *     sanity divider, not a tight gain-error bound, so the full min_rise
+ *     is the threshold. Reading: if a zone's excess over the coolest zone
+ *     is already as large as the rise a genuine step test itself needs to
+ *     trust a fit, that zone is carrying something on the order of an
+ *     actual step response, not rest-state scatter -- 2.2C measured on
+ *     this rig sits far under min_rise (7+ C at these baselines/ceilings);
+ *     32C sits far over it (well under 2C at that zone's much smaller
+ *     headroom). No ambient reference, no CJ, no constant tuned to this
+ *     kiln -- only autotune_min_rise_c(), already used by finalize_fit()
+ *     and unchanged here.
+ *
+ * PORTABILITY: neither check assumes anything about where the CJ sits
+ * relative to the chamber, so a board with a DIFFERENT (or zero) CJ-to-
+ * chamber offset is unaffected either way -- the removed version's
+ * failure mode (a board-specific offset making the check permanently
+ * strict or permanently loose) cannot recur, because the offset is never
+ * read. A kiln with only ONE usable zone loses the cross-zone check
+ * (min_baseline_c degenerates to that zone's own baseline, spread_z == 0,
+ * always passes) but keeps the stability check, which needs no peers --
+ * why (1) is primary and (2) a cross-check, not the reverse: single-zone
+ * hardware must still be protected.
+ *
+ * DEGRADE PATH (chosen over an explicit override parameter, unchanged
+ * reasoning from the first version): autotune_engine_run()/_run_to_
+ * target() are called only from dashboard_http.c and uart_bridge_ext.c;
+ * this pass does not own dashboard_http.c and a silent "always allow"
+ * flag would defeat the check's purpose anyway. Instead:
+ *   - a zone with no valid reading THIS tick (ok_by_zone[z] false) is
+ *     skipped entirely -- cannot judge it, so it cannot block the run,
+ *     and it is excluded from the min_baseline_c computation so one dead
+ *     sensor cannot drag every OTHER zone's spread check tight or loose;
+ *   - a zone whose start-of-SETTLING reading was never captured skips
+ *     only the STABILITY half of its check, not the spread half;
+ *   - if every zone ends up skipped this way, ready=true (nothing to
+ *     refuse) -- so a fully sensor-degraded board can still start,
+ *     matching every other guard's fail-open-on-missing-data precedent in
+ *     this file (e.g. the no-ceiling branch just above finalize_fit()).
+ * A genuinely hot or genuinely drifting, genuinely sensed zone is never
+ * overridable short of the operator waiting for it to settle -- exactly
+ * the "the ceiling had never heard of..." class of precedent this repo
+ * does not walk back silently.
+ *
+ * Returns true if ready. On false, `reason` (>= 96 bytes) is filled with
+ * a message naming the first offending zone -- kept to ONE zone by design,
+ * matching every other refusal in this file's two-float-substitution /
+ * -Wformat-truncation discipline (see the identify-duty refusal's own
+ * comment); s_at.abort_reason already reports which zone the RUN itself is
+ * on, so this only needs to add which OTHER zone is the problem. */
+static bool check_thermal_readiness_locked(const float *raw_by_zone, const bool *ok_by_zone, char *reason,
+                                           size_t reason_cap)
+{
+    /* Pass 1: coolest currently-valid zone this tick -- the reference (2)
+     * compares every zone against, in place of ambient. */
+    float min_baseline_c = 0.0f;
+    bool  have_min_baseline = false;
+    for (uint8_t z = 0; z < MAX31856_CHANNEL_COUNT; z++) {
+        if (!ok_by_zone[z]) continue;
+        float c = zones_config_apply_cal(z, raw_by_zone[z]);
+        if (!have_min_baseline || c < min_baseline_c) {
+            min_baseline_c = c;
+            have_min_baseline = true;
+        }
+    }
+
+    for (uint8_t z = 0; z < MAX31856_CHANNEL_COUNT; z++) {
+        if (!ok_by_zone[z]) {
+            continue; /* cannot judge -- degrade, do not block */
+        }
+        float baseline_z_c = zones_config_apply_cal(z, raw_by_zone[z]);
+
+        /* (1) STABILITY -- primary, no sensor-geometry dependency. */
+        if (s_at.readiness_start_valid[z]) {
+            float slope_z = (baseline_z_c - s_at.readiness_start_c[z]) / (float)AUTOTUNE_ENGINE_SETTLE_S;
+            if (fabsf(slope_z) > SETTLE_ABS_SLOPE_FLOOR_C_PER_S) {
+                if (reason) {
+                    snprintf(reason, reason_cap,
+                             "zone %u is still drifting %.4fC/s (above %.4fC/s) -- not settled yet",
+                             (unsigned)z, (double)slope_z, (double)SETTLE_ABS_SLOPE_FLOOR_C_PER_S);
+                }
+                return false;
+            }
+        }
+
+        /* (2) CROSS-ZONE SPREAD -- secondary, catches a zone that has
+         * already plateaued hot instead of still visibly cooling. */
+        if (have_min_baseline) {
+            float max_temp_z = 0.0f, min_temp_z = -20.0f;
+            zones_config_get_temp_limits(z, &max_temp_z, &min_temp_z);
+            float min_rise_z = autotune_min_rise_c(baseline_z_c, max_temp_z);
+            float spread_z = baseline_z_c - min_baseline_c;
+            if (spread_z > min_rise_z) {
+                /* ONE unbounded runtime float substitution (spread_z), not
+                 * two -- -Wformat-truncation sizes EVERY %f substitution at
+                 * its type's worst case (~40 bytes for an unbounded float)
+                 * independently, so min_rise_z (also unbounded, a per-zone
+                 * computed value, unlike SETTLE_ABS_SLOPE_FLOOR_C_PER_S in
+                 * the stability refusal above, which is a single known
+                 * compile-time constant and costs gcc nothing) has to stay
+                 * out of the format string entirely, not just be a second
+                 * "float substitution" by count -- two genuinely-unbounded
+                 * floats blew the 96-byte estimate at build time even
+                 * though the ACTUAL numbers here are always small. */
+                if (reason) {
+                    snprintf(reason, reason_cap,
+                             "zone %u is %.1fC above the coolest zone -- not rested, let it settle",
+                             (unsigned)z, (double)spread_z);
+                }
+                return false;
+            }
+        }
+    }
+    return true;
 }
 
 /* One tick of the SETTLING/STEPPING/RELAY_APPROACH/RELAY_CYCLING state
@@ -2181,7 +2382,39 @@ static void autotune_engine_tick_locked(void)
     s_at.elapsed_s = ticks_to_s(now - s_at.phase_start_tick);
 
     if (s_at.state == AUTOTUNE_ENGINE_SETTLING) {
+        /* First valid-or-not reading of THIS SETTLING phase -- see
+         * readiness_start_c's own comment. Captured once, on the very
+         * first tick after entering SETTLING (or re-entering it, for
+         * target mode's probe->identify re-settle), regardless of how far
+         * elapsed_s still has to go. */
+        if (!s_at.readiness_start_captured) {
+            for (uint8_t z = 0; z < MAX31856_CHANNEL_COUNT; z++) {
+                s_at.readiness_start_valid[z] = ok_by_zone[z];
+                s_at.readiness_start_c[z] = ok_by_zone[z] ? zones_config_apply_cal(z, raw_by_zone[z]) : 0.0f;
+            }
+            s_at.readiness_start_captured = true;
+        }
         if (s_at.elapsed_s >= AUTOTUNE_ENGINE_SETTLE_S) {
+            /* Ambient reference for step_ambient_c / finalize_fit()'s
+             * physical-plausibility check further down -- NOT used by the
+             * readiness check just below any more (see check_thermal_
+             * readiness_locked()'s own "THE REFERENCE PROBLEM" comment for
+             * why: the CJ-to-chamber offset is fixed per board/zone, not a
+             * sign of residual heat, and folding it into a refusal made
+             * this check permanently strict on this rig). The cj_c
+             * captured above this tick if the tested zone's own channel
+             * answered, else the same documented fallback profile_
+             * executor.c uses (FALLBACK_AMBIENT_C, 20.0C). */
+            float ambient_c_now = isnan(cj_c) ? AUTOTUNE_FALLBACK_AMBIENT_C : cj_c;
+
+            char readiness_reason[96];
+            if (!check_thermal_readiness_locked(raw_by_zone, ok_by_zone, readiness_reason,
+                                                sizeof(readiness_reason))) {
+                abort_locked(readiness_reason);
+                ESP_LOGW(TAG, "autotune zone %u: %s", s_at.zone_index, s_at.abort_reason);
+                return;
+            }
+
             for (uint8_t z = 0; z < MAX31856_CHANNEL_COUNT; z++) {
                 s_at.zone_baseline_valid[z] = ok_by_zone[z];
                 s_at.zone_baseline_c[z] = ok_by_zone[z] ? zones_config_apply_cal(z, raw_by_zone[z]) : 0.0f;
@@ -2199,11 +2432,7 @@ static void autotune_engine_tick_locked(void)
             s_at.step_element_proven = false; /* re-earned fresh every STEPPING phase -- see its own comment */
             s_at.step_rise_running_max_c = 0.0f;
             s_at.step_below_death_floor_ticks = 0u;
-            /* Ambient reference for finalize_fit()'s physical-plausibility
-             * check -- the cj_c captured above this tick if the tested
-             * zone's own channel answered, else the same documented
-             * fallback profile_executor.c uses (FALLBACK_AMBIENT_C, 20.0C). */
-            s_at.step_ambient_c = isnan(cj_c) ? AUTOTUNE_FALLBACK_AMBIENT_C : cj_c;
+            s_at.step_ambient_c = ambient_c_now;
             heater_output_reset(&s_at.heater_state);
             ESP_LOGI(TAG, "autotune zone %u: settled at %.1fC, stepping duty to %.2f", s_at.zone_index,
                      (double)s_at.zone_baseline_c[s_at.zone_index], (double)s_at.step_duty);
@@ -2692,6 +2921,9 @@ static bool begin_run_locked(uint8_t zone_index, char *err_msg, size_t err_cap)
     s_at.step_element_proven = false;
     s_at.step_rise_running_max_c = 0.0f;
     s_at.step_below_death_floor_ticks = 0u;
+    /* Same staleness class -- a new run's first SETTLING tick must capture
+     * its OWN start-of-settle reading, never inherit the previous run's. */
+    s_at.readiness_start_captured = false;
     /* Same reasoning -- task_entry() sets a fresh value every tick before
      * calling autotune_engine_tick_locked(), but reset here too so a new
      * run's very first tick (before task_entry() has run its own pre-lock

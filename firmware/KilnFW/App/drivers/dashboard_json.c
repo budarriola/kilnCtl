@@ -87,19 +87,44 @@ size_t append_zone_status_json(char *json, size_t cap, size_t o, const profile_e
                         z->ff_hold_used_matrix ? "true" : "false", z->ff_hold_infeasible ? "true" : "false",
                         (unsigned long)z->ff_membership_change_count);
         } else {
+            /* firing_stats (PID_EXPANSION_PLAN.md Phase 7a dashboard wiring):
+             * profile_exec_zone_status_t::firing_stats, live and still
+             * accumulating while RUNNING/PAUSED, frozen at DONE/FAULTED --
+             * see that field's own doc comment (profile_executor.h) for the
+             * exclusion/sign/units rules. Nested rather than flattened so the
+             * shape is self-describing and doesn't collide with any existing
+             * top-level zone key. Only on the /api/profile_exec shape
+             * (control_fields==false) per the sizing note in
+             * dashboard_json.h -- /api/control stays tuning-focused. */
+            const profile_exec_firing_stats_t *fs = &z->firing_stats;
             n = snprintf(json + o, cap - o,
                         "%s{\"zone\":%u,\"actual_c\":%.2f,\"actual_valid\":%s,\"relay_on\":%s,"
                         "\"duty\":%.3f,\"control_mode\":%u,\"faulted\":%s,\"fault_reason\":\"%s\","
                         "\"fault_guard\":%u,\"heat_blocked\":%s,\"heat_blocked_sources\":%lu,"
                         "\"ff_hold_used_matrix\":%s,\"ff_hold_infeasible\":%s,"
-                        "\"ff_membership_change_count\":%lu}",
+                        "\"ff_membership_change_count\":%lu,"
+                        "\"firing_stats\":{\"mean_error_c\":%.2f,\"max_overshoot_c\":%.2f,"
+                        "\"max_overshoot_elapsed_s\":%lu,\"max_overshoot_segment\":%u,"
+                        "\"max_undershoot_c\":%.2f,\"max_undershoot_elapsed_s\":%lu,"
+                        "\"max_undershoot_segment\":%u,\"iae_raw_c_s\":%.2f,\"iae_normalized\":%.4f,"
+                        "\"ramp_err_mean_c\":%.2f,\"ramp_err_max_c\":%.2f,\"dwell_err_mean_c\":%.2f,"
+                        "\"dwell_err_max_c\":%.2f,\"sample_count\":%lu,\"excluded_sample_count\":%lu,"
+                        "\"duration_s\":%lu}}",
                         first ? "" : ",", zi, (double)(z->actual_valid ? z->actual_c : 0.0f),
                         z->actual_valid ? "true" : "false", z->relay_commanded_on ? "true" : "false",
                         (double)z->duty, z->control_mode, z->faulted ? "true" : "false", reason_escaped,
                         z->fault_guard, z->heat_blocked ? "true" : "false",
                         (unsigned long)z->heat_blocked_sources,
                         z->ff_hold_used_matrix ? "true" : "false", z->ff_hold_infeasible ? "true" : "false",
-                        (unsigned long)z->ff_membership_change_count);
+                        (unsigned long)z->ff_membership_change_count,
+                        (double)fs->mean_error_c, (double)fs->max_overshoot_c,
+                        (unsigned long)fs->max_overshoot_elapsed_s, fs->max_overshoot_segment,
+                        (double)fs->max_undershoot_c, (unsigned long)fs->max_undershoot_elapsed_s,
+                        fs->max_undershoot_segment, (double)fs->iae_raw_c_s, (double)fs->iae_normalized,
+                        (double)fs->ramp_err_mean_c, (double)fs->ramp_err_max_c,
+                        (double)fs->dwell_err_mean_c, (double)fs->dwell_err_max_c,
+                        (unsigned long)fs->sample_count, (unsigned long)fs->excluded_sample_count,
+                        (unsigned long)fs->duration_s);
         }
         if (n < 0 || (size_t)n >= cap - o) goto truncated;
         o += (size_t)n;
@@ -240,4 +265,129 @@ int dashboard_format_autotune_status_json(char *json, size_t cap, const autotune
         st->relay.valid ? "true" : "false", (double)st->relay.ku, (double)st->relay.tu_s,
         (double)st->relay.amplitude_c, st->relay.cycles_used, relay_reason_escaped);
     return n;
+}
+
+/* ---- GET /api/firing_history body ----------------------------------------
+ * PID_EXPANSION_PLAN.md Phase 7a-2/7a-3's historical (last-5-per-profile)
+ * tracking-quality records, profile_executor_get_firing_history()
+ * (profile_executor.h). Output is unbounded in TWO nested dimensions -- up
+ * to PROFILE_EXECUTOR_FIRING_HISTORY_DEPTH records, each with up to
+ * MAX31856_CHANNEL_COUNT zones -- so a future depth/channel-count increase
+ * must degrade to a truncated-but-still-valid document instead of an
+ * overflow, same discipline append_zone_status_json() already established
+ * for the per-zone array. Unlike that function's "close whatever's open"
+ * approach, this one commits a RECORD only as a whole (header + every active
+ * zone + its own closing brackets) -- a record that doesn't fully fit is
+ * dropped in its entirety rather than left half-written, so the offset
+ * tracked here (`commit`) is always the end of the last COMPLETE record,
+ * and the trailing "]}" appended at the end is guaranteed room via the
+ * `reserve` bytes withheld from every snprintf cap during the loop (see
+ * inline comment below). */
+size_t dashboard_format_firing_history_json(char *json, size_t cap, uint8_t profile_id,
+                                            const profile_firing_run_record_t *records,
+                                            size_t record_count)
+{
+    if (cap == 0) {
+        return 0;
+    }
+    /* Withheld from every snprintf cap while building record content, so
+     * cap-o inside the loop never reports room this function has actually
+     * reserved for the trailing "]}\0" -- guaranteeing that final close
+     * (written against the REAL cap-o, not the reduced one) always has the
+     * 3 bytes ("]}\0") it needs, however far content-building got. */
+    const size_t reserve = (cap >= 3) ? 2 : 0;
+    const size_t work_cap = cap - reserve;
+
+    int n = snprintf(json, work_cap, "{\"profile_id\":%u,\"records\":[", profile_id);
+    if (n < 0 || (size_t)n >= work_cap) {
+        /* Header itself didn't fit (pathologically tiny cap, well below any
+         * real handler's json_cap) -- nothing sensible to build. Degrade to
+         * the smallest valid document that fits: "{}" if there's room for
+         * it, else just NUL the buffer (an empty string, which the caller's
+         * httpd_resp_send(..., 0) sends as a zero-length body -- not this
+         * function's problem to invent a longer minimum). */
+        if (cap >= 3) {
+            json[0] = '{'; json[1] = '}'; json[2] = '\0';
+            return 2;
+        }
+        json[0] = '\0';
+        return 0;
+    }
+    size_t o = (size_t)n;
+    size_t commit = o;
+    bool wrote_any_record = false;
+
+    for (size_t ri = 0; ri < record_count; ri++) {
+        const profile_firing_run_record_t *rec = &records[ri];
+        char name_escaped[sizeof(rec->profile_name) * 2 + 1];
+        json_escape(rec->profile_name, name_escaped, sizeof(name_escaped));
+
+        n = snprintf(json + o, work_cap - o,
+            "%s{\"profile_name\":\"%s\",\"run_started_unix_s\":%lu,\"duration_s\":%lu,"
+            "\"zone_mask\":%u,\"zones\":[",
+            wrote_any_record ? "," : "", name_escaped, (unsigned long)rec->run_started_unix_s,
+            (unsigned long)rec->duration_s, rec->zone_mask);
+        if (n < 0 || (size_t)n >= work_cap - o) {
+            break; /* this record's header alone doesn't fit -- stop, don't touch o */
+        }
+        size_t o_try = o + (size_t)n;
+        bool zone_first = true;
+        bool record_ok = true;
+        for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+            const profile_firing_zone_record_t *zr = &rec->zones[zi];
+            if (!zr->active) continue;
+            const profile_exec_firing_stats_t *fs = &zr->stats;
+            n = snprintf(json + o_try, work_cap - o_try,
+                "%s{\"zone\":%u,\"kp\":%.5f,\"ki\":%.5f,\"kd\":%.5f,"
+                "\"firing_stats\":{\"mean_error_c\":%.2f,\"max_overshoot_c\":%.2f,"
+                "\"max_overshoot_elapsed_s\":%lu,\"max_overshoot_segment\":%u,"
+                "\"max_undershoot_c\":%.2f,\"max_undershoot_elapsed_s\":%lu,"
+                "\"max_undershoot_segment\":%u,\"iae_raw_c_s\":%.2f,\"iae_normalized\":%.4f,"
+                "\"ramp_err_mean_c\":%.2f,\"ramp_err_max_c\":%.2f,\"dwell_err_mean_c\":%.2f,"
+                "\"dwell_err_max_c\":%.2f,\"sample_count\":%lu,\"excluded_sample_count\":%lu,"
+                "\"duration_s\":%lu}}",
+                zone_first ? "" : ",", zi, (double)zr->kp, (double)zr->ki, (double)zr->kd,
+                (double)fs->mean_error_c, (double)fs->max_overshoot_c,
+                (unsigned long)fs->max_overshoot_elapsed_s, fs->max_overshoot_segment,
+                (double)fs->max_undershoot_c, (unsigned long)fs->max_undershoot_elapsed_s,
+                fs->max_undershoot_segment, (double)fs->iae_raw_c_s, (double)fs->iae_normalized,
+                (double)fs->ramp_err_mean_c, (double)fs->ramp_err_max_c,
+                (double)fs->dwell_err_mean_c, (double)fs->dwell_err_max_c,
+                (unsigned long)fs->sample_count, (unsigned long)fs->excluded_sample_count,
+                (unsigned long)fs->duration_s);
+            if (n < 0 || (size_t)n >= work_cap - o_try) {
+                record_ok = false;
+                break;
+            }
+            o_try += (size_t)n;
+            zone_first = false;
+        }
+        if (record_ok) {
+            n = snprintf(json + o_try, work_cap - o_try, "]}"); /* close zones array + this record */
+            if (n < 0 || (size_t)n >= work_cap - o_try) {
+                record_ok = false;
+            } else {
+                o_try += (size_t)n;
+            }
+        }
+        if (!record_ok) {
+            /* This record didn't fit as a whole (header fit, but some zone
+             * or the closing brackets didn't) -- discard the partial write
+             * by NOT advancing o/commit past the last known-good state, and
+             * stop; a later, shorter record wouldn't be newest-first any
+             * more if skipped ahead to, so this stops rather than tries the
+             * next one. */
+            break;
+        }
+        o = o_try;
+        commit = o;
+        wrote_any_record = true;
+    }
+
+    o = commit;
+    n = snprintf(json + o, cap - o, "]}");
+    if (n > 0 && (size_t)n < cap - o) {
+        o += (size_t)n;
+    }
+    return o;
 }

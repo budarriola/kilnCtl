@@ -62,6 +62,26 @@ static void fill_worst_case_zone(profile_exec_zone_status_t *z, uint8_t zi)
     z->ff_hold_used_matrix = true;
     z->ff_hold_infeasible = true;
     z->ff_membership_change_count = 0xFFFFFFFFu; /* "%lu" worst case, same as heat_blocked_sources */
+    /* firing_stats worst case (PID_EXPANSION_PLAN.md Phase 7a dashboard
+     * wiring, dashboard_json.h's DASHBOARD_JSON_PROFILE_EXEC_BUF_SIZE sizing
+     * note): every %.2f/%.4f field at its widest plausible negative value,
+     * every %lu/%u field at its type's max. */
+    z->firing_stats.mean_error_c = -1234.56f;
+    z->firing_stats.max_overshoot_c = 1234.56f;
+    z->firing_stats.max_overshoot_elapsed_s = 0xFFFFFFFFu;
+    z->firing_stats.max_overshoot_segment = 255;
+    z->firing_stats.max_undershoot_c = 1234.56f;
+    z->firing_stats.max_undershoot_elapsed_s = 0xFFFFFFFFu;
+    z->firing_stats.max_undershoot_segment = 255;
+    z->firing_stats.iae_raw_c_s = -123456.78f;
+    z->firing_stats.iae_normalized = -1234.5678f;
+    z->firing_stats.ramp_err_mean_c = -1234.56f;
+    z->firing_stats.ramp_err_max_c = -1234.56f;
+    z->firing_stats.dwell_err_mean_c = -1234.56f;
+    z->firing_stats.dwell_err_max_c = -1234.56f;
+    z->firing_stats.sample_count = 0xFFFFFFFFu;
+    z->firing_stats.excluded_sample_count = 0xFFFFFFFFu;
+    z->firing_stats.duration_s = 0xFFFFFFFFu;
     (void)zi;
 }
 
@@ -176,6 +196,101 @@ static void test_exec_status_json_is_complete_and_well_formed_at_3_zones(void)
     int zone_objects = 0;
     for (const char *p = json; (p = strstr(p, "\"zone\":")) != NULL; p += 7) zone_objects++;
     TEST_CHECK(zone_objects == 3, "all 3 active zones must be present");
+
+    /* PID_EXPANSION_PLAN.md Phase 7a dashboard wiring: firing_stats must be
+     * nested inside EVERY zone object, not just appended once at the end --
+     * a naive implementation that only formats the last zone's stats (or
+     * drops them on truncation) would still pass the "somewhere in the
+     * string" check strstr() alone gives. */
+    int stats_objects = 0;
+    for (const char *p = json; (p = strstr(p, "\"firing_stats\":{")) != NULL; p += 16) stats_objects++;
+    TEST_CHECK(stats_objects == 3, "all 3 zones must carry their own nested firing_stats object");
+    TEST_CHECK(strstr(json, "\"excluded_sample_count\"") != NULL,
+              "excluded_sample_count must be present -- the untrustworthy-run signal an operator "
+              "needs to see, not just an internal accumulator");
+    TEST_CHECK(strstr(json, "\"iae_normalized\"") != NULL, "must contain iae_normalized");
+    TEST_CHECK(strstr(json, "\"mean_error_c\"") != NULL, "must contain mean_error_c");
+}
+
+/* dashboard_format_firing_history_json() -- GET /api/firing_history's body.
+ * Same worst-case-render-must-stay-complete discipline as the two tests
+ * above, at PROFILE_EXECUTOR_FIRING_HISTORY_DEPTH records x
+ * MAX31856_CHANNEL_COUNT active zones each, exercising the real production
+ * function (not a reimplementation), same convention as every other test in
+ * this file. */
+static void fill_worst_case_run_record(profile_firing_run_record_t *rec, uint8_t index)
+{
+    memset(rec, 0, sizeof(*rec));
+    rec->profile_id = index;
+    memset(rec->profile_name, 'A', sizeof(rec->profile_name) - 1);
+    rec->profile_name[sizeof(rec->profile_name) - 1] = '\0';
+    rec->run_started_unix_s = 0xFFFFFFFFu;
+    rec->duration_s = 0xFFFFFFFFu;
+    rec->zone_mask = 0xFFu;
+    for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+        profile_firing_zone_record_t *zr = &rec->zones[zi];
+        zr->active = true;
+        zr->kp = -12.34567f; zr->ki = -12.34567f; zr->kd = -12.34567f; /* "%.5f" worst case */
+        profile_exec_zone_status_t tmp;
+        fill_worst_case_zone(&tmp, zi);
+        zr->stats = tmp.firing_stats;
+    }
+}
+
+static void test_firing_history_json_is_complete_and_well_formed_at_full_depth(void)
+{
+    TEST_SECTION("dashboard_format_firing_history_json() -- PROFILE_EXECUTOR_FIRING_HISTORY_DEPTH "
+                 "worst-case-width records at 3 active zones each must produce a COMPLETE, balanced "
+                 "JSON document, every record and every zone present");
+
+    profile_firing_run_record_t records[PROFILE_EXECUTOR_FIRING_HISTORY_DEPTH];
+    for (size_t i = 0; i < PROFILE_EXECUTOR_FIRING_HISTORY_DEPTH; i++) {
+        fill_worst_case_run_record(&records[i], (uint8_t)i);
+    }
+
+    const size_t json_cap = 64 + PROFILE_EXECUTOR_FIRING_HISTORY_DEPTH * (160 + MAX31856_CHANNEL_COUNT * 600);
+    char *json = malloc(json_cap);
+    TEST_CHECK(json != NULL, "malloc must succeed on a host with plenty of heap");
+    if (json == NULL) return;
+
+    size_t o = dashboard_format_firing_history_json(json, json_cap, 7, records,
+                                                     PROFILE_EXECUTOR_FIRING_HISTORY_DEPTH);
+    TEST_CHECK(o == strlen(json), "the returned offset must match the actual rendered length");
+    TEST_CHECK(json_looks_complete(json), "the rendered /api/firing_history JSON must be a complete, "
+              "balanced object");
+
+    int record_objects = 0;
+    for (const char *p = json; (p = strstr(p, "\"profile_name\":")) != NULL; p += 15) record_objects++;
+    TEST_CHECK(record_objects == PROFILE_EXECUTOR_FIRING_HISTORY_DEPTH,
+              "all 5 records must be present, not truncated partway through");
+
+    int zone_objects = 0;
+    for (const char *p = json; (p = strstr(p, "\"zone\":")) != NULL; p += 7) zone_objects++;
+    TEST_CHECK(zone_objects == PROFILE_EXECUTOR_FIRING_HISTORY_DEPTH * MAX31856_CHANNEL_COUNT,
+              "every zone of every record must be present (5 records x 3 zones)");
+
+    TEST_CHECK(strstr(json, "\"kp\":-12.34567") != NULL, "kp must round-trip at its worst-case width");
+    TEST_CHECK(strstr(json, "\"excluded_sample_count\"") != NULL, "excluded_sample_count must be present here too");
+
+    free(json);
+
+    /* Sanity: an empty history (never-run profile) must still be a valid,
+     * complete document with an empty records array -- not an error, not a
+     * truncated one. */
+    char empty_json[64];
+    size_t eo = dashboard_format_firing_history_json(empty_json, sizeof(empty_json), 9, NULL, 0);
+    TEST_CHECK(json_looks_complete(empty_json), "zero records must still render a complete JSON object");
+    TEST_CHECK(strstr(empty_json, "\"records\":[]") != NULL, "zero records must render an empty array, "
+              "not an open one");
+    (void)eo;
+
+    /* Truncation case: a buffer far too small for even one worst-case
+     * record must still close every array/object it opened. */
+    char tiny[80];
+    size_t to = dashboard_format_firing_history_json(tiny, sizeof(tiny), 3, records, 1);
+    TEST_CHECK(json_looks_complete(tiny), "a truncated firing_history render must still be complete, "
+              "balanced JSON -- the same truncation discipline append_zone_status_json() already has");
+    (void)to;
 }
 
 static void test_json_escape_doubles_every_quote_and_backslash(void)
@@ -348,6 +463,7 @@ static void run_test_dashboard_json(void)
     test_truncation_is_logged_and_still_produces_valid_json();
     test_json_append_clamped_never_walks_past_cap();
     test_heap_allocated_worst_case_render_matches_stack_sizing();
+    test_firing_history_json_is_complete_and_well_formed_at_full_depth();
 }
 
 int main(void)

@@ -1321,6 +1321,53 @@ function renderLastRun(st) {
 // failing, so it all gets kc-live-value. Zone names and the profile title
 // are config, not readings -- left unmarked.
 var lastExecStData = null;
+// PID_EXPANSION_PLAN.md Phase 7a dashboard wiring: dashboard_json.c's
+// append_zone_status_json() now nests a "firing_stats" object
+// (profile_exec_zone_status_t::firing_stats, profile_executor.h) inside
+// every /api/profile_exec zone -- this renders it as one extra row per
+// active zone, right under that zone's existing status line.
+//
+// window.kcUnit.fmt() is deliberately NOT used for these figures: it adds
+// the +32 Fahrenheit offset (toDisplay()), which is correct for an absolute
+// reading but wrong for a DELTA (mean/overshoot/undershoot/IAE error, all
+// already (actual - target) or |error|) -- a delta only needs the x9/5
+// scale factor, never the offset. fmtDeltaC() below is that scale-only
+// conversion, kept local to this row since nothing else on this page
+// formats a temperature delta.
+function fmtDeltaC(c, decimals) {
+  if (c === null || c === undefined || isNaN(c)) return 'n/a';
+  if (decimals === undefined) decimals = 1;
+  var scaled = window.kcUnit.get() === 'f' ? c * 9 / 5 : c;
+  return (scaled >= 0 ? '+' : '') + scaled.toFixed(decimals) + ' ' + window.kcUnit.label();
+}
+
+// excluded_sample_count VISIBLE whenever non-zero is a hard requirement
+// (owner: "a run with many dropped samples must read as untrustworthy
+// rather than quietly scoring well", profile_exec_firing_stats_t's own doc
+// comment in profile_executor.h) -- so this never hides behind a details
+// toggle or a tooltip; it's an always-visible fault-styled line, same
+// visual weight as the zone-fault row above it, whenever the count is > 0.
+function renderFiringStatsRow(z) {
+  var fs = z.firing_stats;
+  if (!fs || (!fs.sample_count && !fs.excluded_sample_count)) return '';
+  var html = '<div class="row kc-live-value" style="font-size:0.85em;opacity:0.85">' +
+    '<span>' + zoneName(z.zone) + ' tuning</span><span>' +
+    'mean ' + fmtDeltaC(fs.mean_error_c) +
+    ' &middot; +ov ' + fmtDeltaC(fs.max_overshoot_c) + ' @' + fmtDuration(fs.max_overshoot_elapsed_s) +
+    ' &middot; -un ' + fmtDeltaC(fs.max_undershoot_c) + ' @' + fmtDuration(fs.max_undershoot_elapsed_s) +
+    ' &middot; IAE(norm) ' + (isNaN(fs.iae_normalized) ? 'n/a' : fs.iae_normalized.toFixed(3)) +
+    ' &middot; ramp ' + fmtDeltaC(fs.ramp_err_mean_c) + '/' + fmtDeltaC(fs.ramp_err_max_c) +
+    ' &middot; dwell ' + fmtDeltaC(fs.dwell_err_mean_c) + '/' + fmtDeltaC(fs.dwell_err_max_c) +
+    '</span></div>';
+  if (fs.excluded_sample_count > 0) {
+    html += '<div class="row fault kc-live-value" style="font-size:0.85em">' +
+      zoneName(z.zone) + ': ' + fs.excluded_sample_count + ' of ' +
+      (fs.excluded_sample_count + fs.sample_count) +
+      ' samples excluded (invalid readings) &mdash; these stats may not be trustworthy</div>';
+  }
+  return html;
+}
+
 function renderExec(st) {
   lastExecStData = st;
   const card = document.getElementById('execCard');
@@ -1365,6 +1412,7 @@ function renderExec(st) {
     if (z.faulted) {
       html += '<div class="row fault kc-live-value">' + zoneName(z.zone) + ': ' + window.kcEscapeHtml(z.fault_reason) + '</div>';
     }
+    html += renderFiringStatsRow(z);
   });
   if (st.dwelling && st.state === 'running') {
     html += '<div class="row"><span>Dwell remaining</span><span class="kc-live-value">' + fmtDuration(st.dwell_remaining_s) + '</span></div>';

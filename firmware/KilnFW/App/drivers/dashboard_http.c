@@ -1579,6 +1579,82 @@ static esp_err_t control_status_get_handler(httpd_req_t *req)
     return ret;
 }
 
+/* GET /api/firing_history?profile_id=N -- PID_EXPANSION_PLAN.md Phase 7a-2/
+ * 7a-3's last-PROFILE_EXECUTOR_FIRING_HISTORY_DEPTH persisted runs for one
+ * profile, newest-first, each with per-zone firing_stats + the PID gains in
+ * force at completion. profile_id follows /api/profile_plan?id=N's own
+ * parsing convention (dashboard_http.c's profile_plan_get_handler() above).
+ * An unknown/never-run profile_id is NOT a 404 -- unlike /api/profile_plan,
+ * this has nothing to look up in profiles_nvs to validate against (a
+ * profile can be deleted and its history is still worth showing), so it
+ * always answers 200 with an empty "records" array rather than guessing
+ * whether the id ever existed. */
+static esp_err_t firing_history_get_handler(httpd_req_t *req)
+{
+    char query[32];
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "profile_id missing");
+        return ESP_OK;
+    }
+    char id_str[8];
+    if (httpd_query_key_value(query, "profile_id", id_str, sizeof(id_str)) != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "profile_id missing");
+        return ESP_OK;
+    }
+    char *end = NULL;
+    long id = strtol(id_str, &end, 10);
+    if (end == id_str || id < 0 || id > 255) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad profile_id");
+        return ESP_OK;
+    }
+
+    /* PROFILE_EXECUTOR_FIRING_HISTORY_DEPTH (5) records, each up to
+     * MAX31856_CHANNEL_COUNT active zones -- pulled off the stack via
+     * profile_executor_get_firing_history() into a heap buffer (same
+     * "large transient off the httpd_worker stack" discipline as every
+     * other handler on this task, 64B free of 8192 measured live). Freed
+     * before the records array too, once the JSON is rendered from it. */
+    profile_firing_run_record_t *records = heap_caps_malloc(
+        sizeof(profile_firing_run_record_t) * PROFILE_EXECUTOR_FIRING_HISTORY_DEPTH,
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (records == NULL) {
+        ESP_LOGE(TAG, "GET /api/firing_history: malloc(%u) failed for the records buffer",
+                 (unsigned)(sizeof(profile_firing_run_record_t) * PROFILE_EXECUTOR_FIRING_HISTORY_DEPTH));
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"out of memory\"}");
+    }
+    size_t record_count = profile_executor_get_firing_history((uint8_t)id, records,
+                                                               PROFILE_EXECUTOR_FIRING_HISTORY_DEPTH);
+
+    /* Fixed part per record (escaped name at worst-case, run_started_unix_s/
+     * duration_s/zone_mask) ~150B, plus up to MAX31856_CHANNEL_COUNT zone
+     * objects at ~600B worst case each (kp/ki/kd plus the same firing_stats
+     * shape append_zone_status_json() renders, see dashboard_json.h's own
+     * 472B-per-zone sizing note -- this adds ~100B more for kp/ki/ki/zone
+     * index/braces, rounded up to 600 for headroom), times
+     * PROFILE_EXECUTOR_FIRING_HISTORY_DEPTH records, plus a small wrapper. */
+    const size_t json_cap = 64 + PROFILE_EXECUTOR_FIRING_HISTORY_DEPTH *
+                             (160 + MAX31856_CHANNEL_COUNT * 600);
+    char *json = heap_caps_malloc(json_cap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (json == NULL) {
+        ESP_LOGE(TAG, "GET /api/firing_history: malloc(%u) failed for the response buffer",
+                 (unsigned)json_cap);
+        free(records);
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_sendstr(req,
+                                  "{\"ok\":false,\"error\":\"out of memory building the response\"}");
+    }
+    size_t o = dashboard_format_firing_history_json(json, json_cap, (uint8_t)id, records, record_count);
+    free(records);
+
+    httpd_resp_set_type(req, "application/json");
+    esp_err_t ret = httpd_resp_send(req, json, o);
+    free(json);
+    return ret;
+}
+
 /* TODO.md section 0 / 6A.9: history ring buffer + CSV export, and the data
  * source for the dashboard graph. One row per sample; guard is
  * thermal_guard_trip_t (0 = none) so the graph can mark trips on the
@@ -2183,6 +2259,9 @@ esp_err_t dashboard_http_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_b
     static const httpd_uri_t control_status_uri = {
         .uri = "/api/control", .method = HTTP_GET, .handler = control_status_get_handler,
     };
+    static const httpd_uri_t firing_history_uri = {
+        .uri = "/api/firing_history", .method = HTTP_GET, .handler = firing_history_get_handler,
+    };
     static const httpd_uri_t safety_clear_trip_uri = {
         .uri = "/api/safety/clear_trip", .method = HTTP_POST, .handler = safety_clear_trip_post_handler,
     };
@@ -2265,6 +2344,11 @@ esp_err_t dashboard_http_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_b
     err = httpd_register_uri_handler(server, &control_status_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_register_uri_handler(/api/control) failed: %s", esp_err_to_name(err));
+        return err;
+    }
+    err = httpd_register_uri_handler(server, &firing_history_uri);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "httpd_register_uri_handler(/api/firing_history) failed: %s", esp_err_to_name(err));
         return err;
     }
     err = httpd_register_uri_handler(server, &history_csv_uri);

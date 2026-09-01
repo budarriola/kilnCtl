@@ -53,21 +53,56 @@ int g_test_count = 0;
 // ---------------------------------------------------------------------------
 static float s_stub_ch0_temp_c = 0.0f;
 static bool  s_stub_ch0_ok = true;
+// Channel 0's own cold-junction reading -- split out from the hardcoded
+// 25.0C every pre-existing test in this file implicitly relies on (none of
+// them reads step_ambient_c) so the readiness-check tests below can force
+// "no CJ this tick" (NAN) without disturbing anything else. Reset to 25.0f
+// by every test that cares (see reset_extra_channel_stubs()).
+static float s_stub_ch0_cj_c = 25.0f;
+
+// Extra (non-zone-0) channels the readiness check needs to see a hot or
+// drifting NEIGHBOUR zone -- see check_thermal_readiness_locked()'s own
+// comment in autotune_engine.c. Channel 0 is untouched above; these are
+// appended to MAX31856_read_all()'s report only for channels named in
+// s_stub_extra_ch_mask, so every pre-existing test in this file (which
+// never sets this mask) gets out_count == 1 exactly as before -- not a
+// behavior change for them.
+static float s_stub_extra_ch_temp_c[MAX31856_CHANNEL_COUNT];
+static bool  s_stub_extra_ch_ok[MAX31856_CHANNEL_COUNT];
+static uint8_t s_stub_extra_ch_mask = 0;
+
+static void reset_extra_channel_stubs(void)
+{
+    s_stub_ch0_cj_c = 25.0f;
+    memset(s_stub_extra_ch_temp_c, 0, sizeof(s_stub_extra_ch_temp_c));
+    for (uint8_t z = 0; z < MAX31856_CHANNEL_COUNT; z++) s_stub_extra_ch_ok[z] = true;
+    s_stub_extra_ch_mask = 0;
+}
 
 esp_err_t MAX31856_read_all(MAX31856BusClass *bus, MAX31856Reading *out, size_t max_readings, size_t *out_count)
 {
     (void)bus;
-    if (max_readings < 1) {
-        if (out_count) *out_count = 0;
-        return ESP_OK;
+    size_t n = 0;
+    if (max_readings >= 1) {
+        memset(&out[n], 0, sizeof(out[n]));
+        out[n].channel = 0;
+        out[n].spi_failed = !s_stub_ch0_ok;
+        out[n].fault_status = 0;
+        out[n].tc_temperature_c = s_stub_ch0_ok ? s_stub_ch0_temp_c : NAN;
+        out[n].cj_temperature_c = s_stub_ch0_cj_c;
+        n++;
     }
-    memset(&out[0], 0, sizeof(out[0]));
-    out[0].channel = 0;
-    out[0].spi_failed = !s_stub_ch0_ok;
-    out[0].fault_status = 0;
-    out[0].tc_temperature_c = s_stub_ch0_ok ? s_stub_ch0_temp_c : NAN;
-    out[0].cj_temperature_c = 25.0f;
-    if (out_count) *out_count = 1;
+    for (uint8_t z = 1; z < MAX31856_CHANNEL_COUNT && n < max_readings; z++) {
+        if (!(s_stub_extra_ch_mask & (1u << z))) continue;
+        memset(&out[n], 0, sizeof(out[n]));
+        out[n].channel = z;
+        out[n].spi_failed = !s_stub_extra_ch_ok[z];
+        out[n].fault_status = 0;
+        out[n].tc_temperature_c = s_stub_extra_ch_ok[z] ? s_stub_extra_ch_temp_c[z] : NAN;
+        out[n].cj_temperature_c = 25.0f; /* only channel s_at.zone_index's cj is ever consumed */
+        n++;
+    }
+    if (out_count) *out_count = n;
     return ESP_OK;
 }
 
@@ -697,6 +732,54 @@ static void start_stepping_run_rule(float max_temp_c, float step_duty, autotune_
 static void start_stepping_run(float max_temp_c, float step_duty)
 {
     start_stepping_run_rule(max_temp_c, step_duty, AUTOTUNE_RULE_SIMC);
+}
+
+// Phase 7c pre-start thermal readiness -- see check_thermal_readiness_
+// locked()'s own comment in autotune_engine.c. Unlike start_stepping_run()
+// above, this does NOT jump the state straight to STEPPING: it leaves the
+// run in SETTLING, exactly where the readiness check actually lives, so
+// force_settling_transition_tick() below can drive the REAL SETTLING->
+// STEPPING transition code (including the check) through the real tick
+// loop, not a white-box call.
+static void start_settling_run(float max_temp_c, float step_duty)
+{
+    static MAX31856BusClass bus;
+    static SafetyLinkClass safety;
+    memset(&s_at, 0, sizeof(s_at));
+    memset(&bus, 0, sizeof(bus));
+    memset(&safety, 0, sizeof(safety));
+    bus.initialized = true;
+    s_at.thermo_bus = &bus;
+    s_at.safety = &safety;
+    s_at.lock = xSemaphoreCreateMutex();
+    TEST_CHECK(s_at.lock != NULL, "test setup: lock must be creatable");
+
+    s_stub_max_temp_c = max_temp_c;
+    s_stub_ch0_ok = true;
+    reset_extra_channel_stubs();
+
+    char errbuf[96] = {0};
+    bool ok = autotune_engine_run(0, step_duty, AUTOTUNE_RULE_SIMC, errbuf, sizeof(errbuf));
+    TEST_CHECK(ok, "autotune_engine_run() must accept a step test on zone 0");
+    TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_SETTLING, "test setup: a fresh run starts in SETTLING");
+}
+
+// Forces the SETTLING->STEPPING elapsed-time transition to fire on the
+// NEXT tick, through this harness's frozen xTaskGetTickCount() stub (always
+// 0) -- same unsigned-wraparound trick test_target_mode_probe_dispatch_
+// driven_through_the_real_tick_loop() already uses for last_sample_tick
+// (see that test's own comment): TickType_t is uint32_t, so 0 - 1 wraps to
+// 0xFFFFFFFF ticks, comfortably past AUTOTUNE_ENGINE_SETTLE_S. Runs exactly
+// one real tick and returns -- the caller has already set
+// s_stub_ch0_temp_c/s_stub_extra_ch_*[] to whatever this tick's readings
+// should be.
+static void force_settling_transition_tick(void)
+{
+    xSemaphoreTake(s_at.lock, portMAX_DELAY);
+    s_at.phase_start_tick = 1;
+    s_at.prev_tick = 1;
+    autotune_engine_tick_locked();
+    xSemaphoreGive(s_at.lock);
 }
 
 // Runs up to n_ticks ticks, stopping early if the run leaves the "running"
@@ -3713,6 +3796,185 @@ static void test_healthy_low_k_zone_does_not_falsetrip_guard1_at_fixed_probe_dut
                         "worked example for the unscaled bar's false-positive threshold");
 }
 
+// ---------------------------------------------------------------------------
+// Phase 7c: pre-start thermal readiness check -- check_thermal_readiness_
+// locked() in autotune_engine.c, exercised through the REAL SETTLING->
+// STEPPING transition (start_settling_run() + force_settling_transition_
+// tick() above), not called directly.
+//
+// REVISED 2026-08-31: the FIRST version of this check compared each zone's
+// baseline against the cold-junction (ambient) reading. Checked against
+// real accept/refuse data from the rig, that version refused BOTH of the
+// only genuinely-valid runs this board has ever produced -- the CJ-to-
+// chamber offset (1-3C on this board, fixed sensor placement, not residual
+// heat) is bigger than the margin a real tune needs to pass. The check now
+// compares zones against EACH OTHER (the coolest currently-valid zone) and
+// against their own settling slope, never against ambient/CJ -- see check_
+// thermal_readiness_locked()'s own comment for the full reasoning. Every
+// fixture below uses either the REAL numbers from tonight's rig (both the
+// two valid runs and the two hot/rested three-zone snapshots the
+// coordinator supplied) or numbers derived the same way, at max_temp_c
+// =80.0f (this board's real configured ceiling) -- the stub applies
+// max_temp_c to every zone (zones_config_get_temp_limits() is not
+// per-zone in this harness), so autotune_min_rise_c(baseline, 80.0f) is
+// the exact function production code evaluates for each zone.
+// ---------------------------------------------------------------------------
+
+static void test_readiness_accepts_zone0s_real_valid_tune_baseline(void)
+{
+    TEST_SECTION("Phase 7c REAL DATA: zone 0's only fully-valid tune ever produced on this rig -- "
+                 "baseline 31.36C, CJ 29.75C (1.61C above CJ, a fixed sensor-placement offset, not "
+                 "residual heat) -- must be ACCEPTED, not refused");
+    start_settling_run(/*max_temp_c=*/80.0f, /*step_duty=*/0.5f);
+    s_stub_ch0_temp_c = 31.36f;
+    s_stub_ch0_cj_c = 29.75f; /* no longer read by the check at all -- present for realism only */
+
+    force_settling_transition_tick();
+
+    TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_STEPPING,
+              "the run that actually produced a trustworthy K=39.25 fit must not be refused before it "
+              "even starts");
+}
+
+static void test_readiness_accepts_zone1s_real_rested_baseline(void)
+{
+    TEST_SECTION("Phase 7c REAL DATA: zone 1, deliberately cooled 25 minutes -- baseline 30.92C, CJ "
+                 "28.95C (1.97C above CJ) -- must be ACCEPTED");
+    start_settling_run(/*max_temp_c=*/80.0f, /*step_duty=*/0.5f);
+    s_stub_ch0_temp_c = 30.92f;
+    s_stub_ch0_cj_c = 28.95f;
+
+    force_settling_transition_tick();
+
+    TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_STEPPING,
+              "a genuinely 25-minute-rested zone must not be refused just because its CJ-to-chamber "
+              "offset (1.97C) is nonzero");
+}
+
+static void test_readiness_accepts_the_real_rested_three_zone_spread(void)
+{
+    TEST_SECTION("Phase 7c REAL DATA: all three zones genuinely rested read 32.2 / 30.9 / 30.0 (a "
+                 "2.2C spread) -- must be ACCEPTED, the spread is far under any zone's own min_rise");
+    start_settling_run(/*max_temp_c=*/80.0f, /*step_duty=*/0.5f);
+    s_stub_ch0_temp_c = 32.2f; /* tested zone, the warmest of the three but still just rest-state scatter */
+    s_stub_extra_ch_mask = (1u << 1) | (1u << 2);
+    s_stub_extra_ch_ok[1] = true;
+    s_stub_extra_ch_temp_c[1] = 30.9f;
+    s_stub_extra_ch_ok[2] = true;
+    s_stub_extra_ch_temp_c[2] = 30.0f;
+
+    force_settling_transition_tick();
+
+    TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_STEPPING,
+              "min_rise(32.2, 80.0) ~= 7.17C is far above the real 2.2C rested spread -- must accept");
+}
+
+static void test_readiness_refuses_the_real_hot_three_zone_spread(void)
+{
+    TEST_SECTION("Phase 7c REAL DATA: after zone 0's run the three zones read 67.8 / 41.9 / 35.8 -- a "
+                 "32C spread against the coolest zone -- must REFUSE and name the hot zone");
+    start_settling_run(/*max_temp_c=*/80.0f, /*step_duty=*/0.5f);
+    s_stub_ch0_temp_c = 67.8f; /* the just-driven zone -- this is the zone under test this time */
+    s_stub_extra_ch_mask = (1u << 1) | (1u << 2);
+    s_stub_extra_ch_ok[1] = true;
+    s_stub_extra_ch_temp_c[1] = 41.9f;
+    s_stub_extra_ch_ok[2] = true;
+    s_stub_extra_ch_temp_c[2] = 35.8f;
+
+    force_settling_transition_tick();
+
+    TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_ABORTED,
+              "min_rise(67.8, 80.0) floors at 3.0C -- nowhere near the real 32C spread -- must refuse");
+    TEST_CHECK(strstr(s_at.abort_reason, "zone 0") != NULL, "the refusal must name the hot zone (0)");
+}
+
+static void test_readiness_blocks_on_a_hot_neighbour_zone(void)
+{
+    TEST_SECTION("Phase 7c: zone under test is rested, but zone 1 (a neighbour, not the one stepping) "
+                 "has plateaued far hotter -- the run must refuse, and name zone 1");
+    start_settling_run(/*max_temp_c=*/80.0f, /*step_duty=*/0.5f);
+    s_stub_ch0_temp_c = 30.0f; /* tested zone: rested */
+    s_stub_extra_ch_mask = (1u << 1);
+    s_stub_extra_ch_ok[1] = true;
+    s_stub_extra_ch_temp_c[1] = 55.0f; /* min_rise(55,80)=3.75C; 25C spread against zone 0 blows it */
+
+    force_settling_transition_tick();
+
+    TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_ABORTED, "a hot neighbour zone must refuse the SETTLING->"
+                                                       "STEPPING transition, not silently proceed");
+    TEST_CHECK(strstr(s_at.abort_reason, "zone 1") != NULL,
+              "the refusal must name the OFFENDING zone (1), not just the zone under test (0)");
+}
+
+static void test_readiness_blocks_on_a_drifting_zone_with_no_neighbours_at_all(void)
+{
+    TEST_SECTION("Phase 7c: a single-zone board (no neighbours reporting, so the cross-zone spread "
+                 "check is structurally inert -- spread_z is always exactly 0) still refuses a zone "
+                 "that is visibly rising through the whole SETTLING window -- proves the STABILITY "
+                 "check alone protects single-zone hardware, reusing SETTLE_ABS_SLOPE_FLOOR_C_PER_S "
+                 "rather than a made-up second threshold");
+    start_settling_run(/*max_temp_c=*/80.0f, /*step_duty=*/0.5f);
+
+    // First tick: phase_start_tick is still 0 (begin_run_locked() left it
+    // there), so elapsed_s reads 0 and the run stays in SETTLING -- this is
+    // the tick that captures readiness_start_c[0].
+    xSemaphoreTake(s_at.lock, portMAX_DELAY);
+    s_stub_ch0_temp_c = 25.0f;
+    autotune_engine_tick_locked();
+    xSemaphoreGive(s_at.lock);
+    TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_SETTLING, "test setup: must still be settling after tick 1");
+    TEST_CHECK(s_at.readiness_start_valid[0] && s_at.readiness_start_c[0] == 25.0f,
+              "test setup: the start-of-settle reading must have been captured at 25.0C");
+
+    // Second tick: 1.0C higher than the captured start, forced to the
+    // elapsed-time transition. slope = 1.0C / SETTLE_S (180s) = 0.00556 C/s,
+    // comfortably above SETTLE_ABS_SLOPE_FLOOR_C_PER_S (0.003).
+    s_stub_ch0_temp_c = 26.0f;
+    force_settling_transition_tick();
+
+    TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_ABORTED, "a zone still drifting through SETTLING must "
+                                                       "refuse even with no neighbours to compare against");
+    TEST_CHECK(strstr(s_at.abort_reason, "zone 0") != NULL, "the refusal must name the drifting zone");
+}
+
+static void test_readiness_missing_cj_has_no_effect_on_the_check_at_all(void)
+{
+    TEST_SECTION("Phase 7c: a missing cold-junction reading must have ZERO effect on the readiness "
+                 "check -- ambient/CJ is no longer read by it at all (see check_thermal_readiness_"
+                 "locked()'s own \"THE REFERENCE PROBLEM\" comment) -- a rested zone starts normally "
+                 "whether or not CJ answered this tick");
+    start_settling_run(/*max_temp_c=*/80.0f, /*step_duty=*/0.5f);
+    s_stub_ch0_cj_c = NAN; /* no CJ this tick */
+    s_stub_ch0_temp_c = 30.0f; /* an ordinary rested reading, unrelated to any ambient/fallback value */
+
+    force_settling_transition_tick();
+
+    TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_STEPPING,
+              "a rested zone must start normally regardless of CJ availability -- the readiness check "
+              "has no ambient dependency left to degrade");
+    TEST_CHECK_NEAR(s_at.step_ambient_c, AUTOTUNE_FALLBACK_AMBIENT_C, 1e-4f,
+                    "step_ambient_c (a SEPARATE consumer, finalize_fit()'s own plausibility check) "
+                    "still falls back as documented -- proving CJ really was missing this tick, not "
+                    "that the fixture failed to exercise the NAN path");
+}
+
+static void test_readiness_skips_a_zone_with_no_valid_reading_this_tick(void)
+{
+    TEST_SECTION("Phase 7c: a neighbour zone with no valid reading this tick (sensor fault) cannot be "
+                 "judged, so it must not block the run, AND must not corrupt the min-baseline reference "
+                 "every OTHER zone's spread is compared against");
+    start_settling_run(/*max_temp_c=*/80.0f, /*step_duty=*/0.5f);
+    s_stub_ch0_temp_c = 30.0f;
+    s_stub_extra_ch_mask = (1u << 1);
+    s_stub_extra_ch_ok[1] = false; /* faulted -- ok_by_zone[1] reads false regardless of temp below */
+    s_stub_extra_ch_temp_c[1] = 90.0f; /* would fail the spread check outright if it were trusted */
+
+    force_settling_transition_tick();
+
+    TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_STEPPING,
+              "an unreadable zone must be skipped, not treated as a refusal-worthy hot zone");
+}
+
 void run_test_autotune_engine_prestart(void)
 {
     test_run_refuses_before_start();
@@ -3831,6 +4093,17 @@ void run_test_autotune_engine_prestart(void)
     test_death_check_no_trip_while_rise_stays_above_the_alive_floor();
     test_autotune_step_guard_sanity_rate_scales_by_duty();
     test_healthy_low_k_zone_does_not_falsetrip_guard1_at_fixed_probe_duty();
+
+    // Phase 7c: pre-start thermal readiness check -- order-independent,
+    // each starts from its own start_settling_run().
+    test_readiness_accepts_zone0s_real_valid_tune_baseline();
+    test_readiness_accepts_zone1s_real_rested_baseline();
+    test_readiness_accepts_the_real_rested_three_zone_spread();
+    test_readiness_refuses_the_real_hot_three_zone_spread();
+    test_readiness_blocks_on_a_hot_neighbour_zone();
+    test_readiness_blocks_on_a_drifting_zone_with_no_neighbours_at_all();
+    test_readiness_missing_cj_has_no_effect_on_the_check_at_all();
+    test_readiness_skips_a_zone_with_no_valid_reading_this_tick();
 }
 
 
