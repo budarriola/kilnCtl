@@ -1021,15 +1021,63 @@ the *identification*, stored beside the gains it describes:
 **Set 2 — firing quality, per profile run.** Mean error, max overshoot/
 undershoot, normalized IAE, ramp-vs-dwell split, as specified in 7a.
 
-- [ ] Keep the **last N runs (N≈5), not just the last one.** A single previous
-      run gives no way to distinguish a real regression from ordinary
-      variation between firings. Cost is a few dozen bytes per run.
+- [ ] Keep the **last 5 runs per profile**, not just the last one, and not 5
+      runs globally. Per-profile is the scope that makes the comparison mean
+      something: comparing a bisque against a glaze firing measures the
+      profiles, not the controller. A single previous run also gives no way to
+      distinguish a real regression from ordinary variation.
 - [ ] Each entry records the profile name/id and the gains in force at the
       time, so a comparison across runs cannot silently span a re-tune.
 
 Reading them together is the point: good fit + poor tracking indicts the
 controller or the profile; poor fit + poor tracking says re-tune before
 touching anything else.
+
+### Phase 7a-3 — where all of this is stored
+
+Requirement: user-written config, statistics and logs all live in external
+flash. Three different write patterns, and they must not share a mechanism.
+
+- [x] **Answered 2026-09-01: there is no separate flash chip and no SD card.**
+      The board is an ESP32-S3 N16R8 module — 16 MB flash, 8 MB PSRAM, both in
+      the module package (`partitions.csv:1-2`). "External flash" here can only
+      mean that single on-module SPI flash: external to the die, but the same
+      chip holding firmware and the OTA slots. User config already lives there
+      — `kiln_nvs` 64 KB, `wifi_nvs` 24 KB, `profiles_nvs` 384 KB — so
+      requirement (a) is already met, and the work is (b), (c) and (d).
+- [ ] **User config** — already persisted; audit that every user-written field
+      actually reaches flash and survives a power cut, rather than extending
+      the mechanism blindly.
+- [ ] **Tuning stats and firing stats** are small and written rarely (once per
+      tune, once per firing). Key-value storage is appropriate for these.
+      Budget the space against the actual partition size: 5 runs x profiles x
+      zones adds up faster than it looks.
+- [ ] **Logs are NOT the same problem and must not go in NVS.** NVS is a
+      wear-levelled key-value store for small, infrequently written settings.
+      Anything appended per-tick or per-minute will wear the partition and is
+      the wrong mechanism — logs need a filesystem or a dedicated ring-buffer
+      partition, and no filesystem (SPIFFS/LittleFS/FAT) exists in the table
+      today. **The cost is far lower than first feared:** there is ~3.06 MB
+      unallocated at `0xCF0000`, past the last partition, so a log partition can
+      be appended there **without moving any existing partition** and therefore
+      without disturbing NVS-resident user config. Verify against the layout
+      actually flashed on the board before committing — the risk is only real
+      if offsets shift.
+- [ ] **Know which task each write runs on — they differ.** *Firing* stats
+      written from the profile executor are safe as-is: that task is
+      deliberately internal-stacked (`profile_executor.c:3491-3506`), precisely
+      because a 2026-08-22 attempt to move it to PSRAM crashed the board writing
+      NVS. *Tuning* stats are the danger — they naturally originate on the
+      autotune task, which IS PSRAM-stacked (`autotune_engine.c:2310`), so those
+      writes MUST route through the flash worker. Note NVS **reads** are equally
+      unsafe from a PSRAM stack, not just writes
+      (`uart_bridge_ext.c:128-130`). A PSRAM-stacked task that touches NVS
+      panics the board every time — this
+      repo has hit that three times, most recently on 2026-08-31 when a
+      coupling-persist call in `finalize_fit()` crashed on the first hardware
+      run after passing every host test and three reviews. Host tests cannot
+      see this class at all: the host build has no PSRAM and no cache. Route
+      through `uart_bridge_ext_run_on_flash_worker()`.
 
 ### Phase 7b — live autotune trace on the graph
 
