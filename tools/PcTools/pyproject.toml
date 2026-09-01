@@ -36,6 +36,7 @@ kilnctrl-gui = "kilnctrl.gui:main"
 kilnctrl-mcp-server = "kilnctrl.mcp_server:main"
 saleae-capture = "kilnctrl.logic_capture:main"
 kilnctrl-console-capture = "kilnctrl.console_capture:main"
+kilnctrl-log-analysis = "kilnctrl.log_analysis:main"
 
 [build-system]
 requires = ["hatchling"]

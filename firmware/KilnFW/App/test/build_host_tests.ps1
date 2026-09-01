@@ -429,15 +429,33 @@ $cmd15 = "call `"$vcvars`" x64 >nul && cl /nologo /W3 /EHsc /std:c11 /I`"$stubDi
 
 Invoke-HostTestExe -Name "dashboard_json" -ExePath $exe15 -BuildCmd $cmd15
 
+# ---- test_telemetry_format.c: its own SIXTEENTH, separate executable ------
+# telemetry_format.c (firing/autotune telemetry line formatters,
+# telemetry_log.c's debug-UART feature) has the same host-testability shape
+# as dashboard_json.c: profile_executor.h + autotune_engine.h + libc only,
+# no FreeRTOS/ESP_LOGI dependency (those live in telemetry_log.c, which is
+# NOT built here -- it needs the real xTaskCreatePinnedToCoreWithCaps/
+# ESP_LOGI machinery this host toolchain doesn't have a meaningful stub
+# story for). Own executable rather than joining exe15 so a future edit to
+# either file's stub surface can't collide.
+$exe16 = Join-Path $outDir "kilnctl_host_tests_telemetry_format.exe"
+$tfObjDir = Join-Path $outDir "tf"
+New-Item -ItemType Directory -Force -Path $tfObjDir | Out-Null
+$cmd16 = "call `"$vcvars`" x64 >nul && cl /nologo /W3 /EHsc /std:c11 /I`"$stubDir`" /I`"$commonInc`" " +
+        "/Fo:`"$tfObjDir\\`" /Fe:`"$exe16`" `"$(Join-Path $testDir 'test_telemetry_format.c')`""
+
+Invoke-HostTestExe -Name "telemetry_format" -ExePath $exe16 -BuildCmd $cmd16
+
 # ---- summary ----------------------------------------------------------
 #
-# 14 executables are attempted above (main + zones_http + safety_cfg_http +
+# 15 executables are attempted above (main + zones_http + safety_cfg_http +
 # profile_executor_prestart + autotune_engine_prestart + profiles_http +
 # ota_http + uart_protocol_link_delegate + board_temps + kiln_io_owner +
-# safety_trip_words + safety_trip_decision + safety_link + dashboard_json).
-# Report how many of those were even built, separately from how many of the
-# built ones passed, so a partial run can never read as a full green suite.
-$totalExpected = 14
+# safety_trip_words + safety_trip_decision + safety_link + dashboard_json +
+# telemetry_format). Report how many of those were even built, separately
+# from how many of the built ones passed, so a partial run can never read as
+# a full green suite.
+$totalExpected = 15
 Write-Host ""
 Write-Host "Built: $($script:builtExes.Count)/$totalExpected executables"
 if ($script:buildFailures.Count -gt 0) {

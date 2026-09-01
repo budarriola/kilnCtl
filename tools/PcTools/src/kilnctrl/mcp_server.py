@@ -399,6 +399,7 @@ from .mcp_server_autotune import *  # noqa: F401,F403
 from .mcp_server_codec import *  # noqa: F401,F403
 from .mcp_server_info import *  # noqa: F401,F403
 from .mcp_server_actions import *  # noqa: F401,F403
+from .mcp_server_log_analysis import *  # noqa: F401,F403
 
 # ---------------------------------------------------------------------------
 # facade + entry point

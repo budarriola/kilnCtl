@@ -60,6 +60,7 @@
 #include "time_sync.h"
 #include "uart_bridge.h"
 #include "uart_log_bridge.h"
+#include "telemetry_log.h"
 #include "uart_owner.h"
 #include "uart_protocol.h"
 #include "wifi_prov.h"
@@ -1644,6 +1645,15 @@ void app_main(void)
         }
         if (uart_bridge_start_wifi_task(&uart_proto) != ESP_OK) {
             ESP_LOGE(TAG, "Failed to start wifi uart bridge task");
+        }
+        // telemetry_log.c: opt-in firing/autotune telemetry over the same
+        // debug UART every ESP_LOGx call already rides (uart_log_bridge.c).
+        // Started here (after both profile_executor_start()/
+        // autotune_engine_start(), further up this function, are up) but
+        // does nothing until an operator calls telemetry_log_set_enabled()
+        // -- see telemetry_log.h's file banner for why the default is OFF.
+        if (telemetry_log_start() != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to start telemetry_log task -- no firing/autotune UART telemetry this boot");
         }
         // ESP_ERR_NOT_SUPPORTED here just means CONFIG_KILNCTL_ENABLE_GPIO_PROBE
         // is off (the default) -- not a failure worth an ESP_LOGE. See

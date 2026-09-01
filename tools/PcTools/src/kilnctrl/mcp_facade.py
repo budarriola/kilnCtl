@@ -41,6 +41,7 @@ GROUP_PREFIXES = (
     ("saleae_", "saleae"),
     ("build_", "build"),
     ("run_", "build"),
+    ("log_analyze", "analysis"),
 )
 
 GROUP_OVERRIDES = {
@@ -114,6 +115,9 @@ KEYWORDS = {
     "ui_list_scripts": ("regression", "script", "test", "lcd", "web", "json"),
     "ui_run_script": ("regression", "script", "click", "tap-target", "wait", "assert", "lcd", "web"),
     "ui_step": ("regression", "click", "tap-target", "wait", "assert", "debug", "single", "step"),
+    "log_analyze": ("firing", "tuning", "autotune", "windowed", "overshoot", "undershoot",
+                     "settle", "iae", "fopdt", "refit", "compare", "saturation", "jsonl",
+                     "trace", "poll", "capture", "report"),
 }
 
 #: Query word -> tokens to also score against. One-way on purpose: expanding

@@ -435,6 +435,17 @@ typedef struct {
      * meaningful alongside ff_hold_used_matrix == true. */
     bool     ff_hold_used_matrix;
     bool     ff_hold_infeasible;
+    /* Coupled-CLIMB solve status -- same meaning as the two fields just
+     * above, for the coupled climb term (the "extra duty to make the
+     * temperature rise at the commanded ramp rate" half of feedforward,
+     * previously computed per-zone/uncoupled -- see
+     * zone_coupling_solve_climb()'s doc comment in zone_coupling_solve.h).
+     * NOT yet wired into dashboard_http.c's JSON as of this field's
+     * addition -- the UI-owning agent still needs to add
+     * "ff_climb_used_matrix"/"ff_climb_infeasible" alongside the existing
+     * "ff_hold_used_matrix"/"ff_hold_infeasible" keys at that call site. */
+    bool     ff_climb_used_matrix;
+    bool     ff_climb_infeasible;
     /* Running total of coupled-system membership changes this run (Opus
      * review round 3, item 3) -- each one triggers a PID-integral reseed
      * (profile_executor.c's pid_family_zone_tick(), on ff_membership_

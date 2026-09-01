@@ -1803,6 +1803,10 @@ static void reset_coupling_test_state(void)
      * flaky pass. */
     memset(s_coupling_hold_cache, 0, sizeof(s_coupling_hold_cache));
     memset(s_coupling_prev_membership_sig, 0, sizeof(s_coupling_prev_membership_sig));
+    /* Same test-isolation requirement as the hold cache immediately above,
+     * for the climb term's own (separate) cache/signature storage. */
+    memset(s_coupling_climb_cache, 0, sizeof(s_coupling_climb_cache));
+    memset(s_coupling_climb_prev_membership_sig, 0, sizeof(s_coupling_climb_prev_membership_sig));
 }
 
 static void test_feedforward_zero_coupling_is_bit_identical_to_no_coupling(void)
@@ -2217,6 +2221,183 @@ static void test_hold_singular_matrix_falls_back(void)
               "and reported as a fallback, not silently solved");
     TEST_CHECK(hold0 == legacy0, "the fallback value itself must still be the exact legacy formula");
     TEST_CHECK(isfinite(hold0), "a refused/singular solve must never leak a NaN/Inf into the hold term");
+    TEST_CHECK(!infeasible, "a fallback is not a 'solve that needed clamping' -- infeasible must stay false");
+}
+
+/* Live-board defect (2026-08-31 firing): the CLIMB half of zone_feedforward()
+ * used to be `(rate_c_per_s * z->ff_tau_s) / z->ff_k_dc` unconditionally --
+ * every zone computed as though it heated alone, even after the HOLD half
+ * was fixed to solve the coupled system. On this board's real matrix that
+ * over-drove zone 0 roughly eightfold and produced the observed +5.24C
+ * overshoot with duty pinned at 0 ninety seconds before the peak.
+ *
+ * Matrix and tau are the actual bench-measured values from that firing
+ * ([affected][stepped] orientation -- see the block comment above
+ * test_hold_matrix_solves_real_measured_gain_matrix() for why this is NOT
+ * the /api/autotune/matrix orientation, which is the transpose):
+ *   A[0] = [39.25, 26.61, 20.73], tau0 = 263.8s
+ *   A[1] = [15.78, 31.97, 21.09], tau1 = 269.8s
+ *   A[2] = [ 9.70, 11.38, 31.68], tau2 = 270.9s
+ * At 120 C/hr (rate = 1/30 C/s), b = rate*tau = [8.79333, 8.99333, 9.03]
+ * (0.1C-quantized tau inputs, per this repo's "idealized test input" bug
+ * class -- these are not round numbers on purpose). numpy.linalg.solve(A,b)
+ * (cross-checked by confirming A@u reproduces b to 1e-5): u =
+ * [0.0211891, 0.1141402, 0.2375489]. The legacy per-zone formula (b/diag(A))
+ * gives [0.224034, 0.281305, 0.285038] -- zone 0 alone is over 10x the
+ * coupled answer.
+ *
+ * Verified this test is falsifiable against the pre-fix code: reverting
+ * zone_feedforward()'s climb term to the bare `(rate_c_per_s * z->ff_tau_s) /
+ * z->ff_k_dc` expression (i.e. skipping solve_climb_for_zone() entirely) and
+ * re-running by hand reproduces the legacy numbers above instead of the
+ * coupled ones, so TEST_CHECK_NEAR below fails hard (off by ~0.05-0.20 in
+ * duty, far outside the 1e-3 tolerance) against the old formula -- this test
+ * cannot pass by accident against the defect it targets. */
+static void test_climb_matrix_solves_real_measured_gain_matrix(void)
+{
+    TEST_SECTION("zone_feedforward() climb term -- the REAL bench-measured matrix/tau from the "
+                 "2026-08-31 overshoot firing, 120 C/hr ramp: coupled solve must give "
+                 "[0.0212,0.1141,0.2375], NOT the uncoupled per-zone [0.2240,0.2813,0.2850] that "
+                 "over-drove zone 0 roughly eightfold on the real board");
+    reset_coupling_test_state();
+
+    const float diag[3] = {39.25f, 31.97f, 31.68f};
+    const float tau[3]  = {263.8f, 269.8f, 270.9f};
+    const float expect_u[3] = {0.0211891f, 0.1141402f, 0.2375489f};
+    const float rate_c_per_s = 120.0f / 3600.0f;
+    const float ambient_c = 29.75f, setpoint_c = 74.75f; /* 45C above ambient, real-firing values */
+    s_exec.ambient_c = ambient_c;
+
+    /* [affected][stepped] */
+    g_stub_coupling[0][1] = 26.61f; g_stub_coupling[0][2] = 20.73f;
+    g_stub_coupling[1][0] = 15.78f; g_stub_coupling[1][2] = 21.09f;
+    g_stub_coupling[2][0] =  9.70f; g_stub_coupling[2][1] = 11.38f;
+
+    for (uint8_t i = 0; i < 3; i++) {
+        s_exec.zones[i].active = true;
+        s_exec.zones[i].actual_valid = true;
+        s_exec.zones[i].actual_c = setpoint_c; /* on-target: zeroes the separate deviation term */
+        s_exec.zones[i].ff_enabled = true;
+        s_exec.zones[i].ff_k_dc = diag[i];
+        s_exec.zones[i].ff_tau_s = tau[i];
+        s_exec.zones[i].control_mode = ZONE_CONTROL_MODE_PID;
+    }
+
+    for (uint8_t zi = 0; zi < 3; zi++) {
+        bool used_matrix = false, infeasible = false; coupling_solve_reason_t reason = COUPLING_SOLVE_OK; bool membership_changed = false;
+        float climb = solve_climb_for_zone(&s_exec.zones[zi], zi, rate_c_per_s, &used_matrix, &infeasible, &reason, &membership_changed);
+        float legacy = (rate_c_per_s * tau[zi]) / diag[zi];
+        TEST_CHECK_NEAR(climb, expect_u[zi], 1e-3, "zone's coupled climb duty must match the "
+                        "real matrix's linear-system solution, not the uncoupled per-zone formula");
+        TEST_CHECK(fabsf(climb - legacy) > 0.03f, "sanity: the coupled climb must differ materially "
+                  "from the old per-zone division, or this test cannot tell the fix from the defect "
+                  "it replaces (zone 0's legacy/coupled gap alone is >0.2)");
+        TEST_CHECK(used_matrix, "a fully-populated, well-conditioned 3x3 matrix must engage the real "
+                  "climb solve, not the fallback");
+        TEST_CHECK(!infeasible, "these duties are all comfortably under 1.0 -- must not be reported "
+                  "infeasible");
+    }
+
+    /* Full zone_feedforward() end-to-end sanity: hold (on-target, so
+     * (setpoint-ambient)/k_dc through the coupled hold solve) plus this
+     * coupled climb must land materially BELOW the old uncoupled sum on
+     * zone 0, the worst-over-driven zone. */
+    float u_ff0 = zone_feedforward(&s_exec.zones[0], 0, setpoint_c, rate_c_per_s);
+    float legacy_climb0 = (rate_c_per_s * tau[0]) / diag[0];
+    TEST_CHECK(u_ff0 < legacy_climb0, "zone 0's TOTAL feedforward (hold+coupled climb) must be "
+              "smaller than the legacy climb term ALONE would have been -- the coupled fix must "
+              "actually reduce commanded duty on the over-driven zone, not just change the number");
+}
+
+static void test_climb_zero_coupling_is_bit_identical_to_legacy_formula(void)
+{
+    TEST_SECTION("zone_feedforward() climb term -- an all-zero coupling row (uncommissioned kiln) "
+                 "must reproduce the legacy per-zone climb formula bit-for-bit, at a NONZERO ramp "
+                 "rate (test_feedforward_zero_coupling_is_bit_identical_to_no_coupling uses rate=0, "
+                 "which cannot distinguish a broken climb term from a correct one -- this is the "
+                 "parity case for the climb fix specifically)");
+    reset_coupling_test_state();
+
+    zone_runtime_t z;
+    memset(&z, 0, sizeof(z));
+    z.ff_enabled = true;
+    z.ff_k_dc = 100.0f;
+    z.ff_tau_s = 187.5f; /* 0.1C-quantized, deliberately not a round number; small enough that
+                          * hold(0.8)+legacy-climb stays under the [0,1] clamp so this test is
+                          * actually comparing the unclamped sums, not two different clamped 1.0s */
+    s_exec.ambient_c = 20.0f;
+
+    s_exec.zones[0].active = true;
+    s_exec.zones[0].actual_valid = true;
+    s_exec.zones[0].actual_c = 150.0f;
+    s_exec.zones[0].ff_enabled = true;
+    s_exec.zones[0].ff_k_dc = 18.0f;
+    s_exec.zones[0].ff_tau_s = 305.4f;
+    s_exec.zones[0].control_mode = ZONE_CONTROL_MODE_PID;
+
+    float setpoint_c = 100.0f, rate = 120.0f / 3600.0f;
+    float with_zero_row = zone_feedforward(&z, 1, setpoint_c, rate);
+
+    float expect_hold = (setpoint_c - s_exec.ambient_c) / z.ff_k_dc;
+    float expect_climb = (rate * z.ff_tau_s) / z.ff_k_dc;
+    TEST_CHECK(with_zero_row == expect_hold + expect_climb, "all-zero coupling row must not move "
+              "u_ff by even one ULP versus hold+legacy-climb -- proves the coupled climb path has "
+              "not changed uncoupled behaviour");
+
+    bool used_matrix = false, infeasible = false; coupling_solve_reason_t reason = COUPLING_SOLVE_OK; bool membership_changed = false;
+    float climb = solve_climb_for_zone(&z, 1, rate, &used_matrix, &infeasible, &reason, &membership_changed);
+    TEST_CHECK(climb == expect_climb, "the climb term alone, in isolation, must be exactly the "
+              "legacy formula with zero coupling -- not merely close to it");
+    TEST_CHECK(!used_matrix, "with only one qualifying zone (z itself) in the system, the climb "
+              "solve must take the NO_NEIGHBORS fallback path, same as the hold term");
+
+    g_stub_coupling[1][0] = 10.887f;
+    float with_nonzero_row = zone_feedforward(&z, 1, setpoint_c, rate);
+    TEST_CHECK(with_nonzero_row != expect_hold + expect_climb, "sanity: a nonzero coupling "
+              "coefficient DOES move u_ff -- proves the equality check above is not vacuously true");
+}
+
+static void test_climb_singular_matrix_falls_back(void)
+{
+    TEST_SECTION("zone_feedforward() climb term -- a singular coupling matrix (zone 2's row is an "
+                 "exact linear multiple of zone 0's) must fall back to the legacy per-zone climb "
+                 "formula, not zero duty or garbage -- same degrade contract as the hold term "
+                 "(test_hold_singular_matrix_falls_back), proven independently for climb since it "
+                 "is a separate solve/cache/reason path");
+    reset_coupling_test_state();
+
+    const float d0 = 31.961f, c01 = 5.766f, c02 = 2.406f;
+    const float tau0 = 263.8f;
+    const float rate_c_per_s = 120.0f / 3600.0f;
+
+    g_stub_coupling[0][1] = c01;        g_stub_coupling[0][2] = c02;
+    g_stub_coupling[1][0] = 12.059f;    g_stub_coupling[1][2] = 4.109f;
+    g_stub_coupling[2][0] = 2.0f * d0;  g_stub_coupling[2][1] = 2.0f * c01;
+
+    s_exec.zones[0].ff_k_dc = d0;
+    s_exec.zones[0].ff_tau_s = tau0;
+    s_exec.zones[1].ff_k_dc = 23.480f;
+    s_exec.zones[1].ff_tau_s = 269.8f;
+    s_exec.zones[2].ff_k_dc = 2.0f * c02; /* d2 = 2*c02, completing row2 == 2*row0 */
+    s_exec.zones[2].ff_tau_s = 270.9f;
+    for (uint8_t i = 0; i < 3; i++) {
+        s_exec.zones[i].active = true;
+        s_exec.zones[i].actual_valid = true;
+        s_exec.zones[i].actual_c = 100.0f;
+        s_exec.zones[i].ff_enabled = true;
+        s_exec.zones[i].control_mode = ZONE_CONTROL_MODE_PID;
+    }
+
+    bool used_matrix = false, infeasible = false;
+    coupling_solve_reason_t reason = COUPLING_SOLVE_OK; bool membership_changed = false;
+    float legacy0 = (rate_c_per_s * tau0) / d0;
+    float climb0 = solve_climb_for_zone(&s_exec.zones[0], 0, rate_c_per_s, &used_matrix, &infeasible, &reason, &membership_changed);
+    TEST_CHECK(!used_matrix, "a singular 3x3 system must be refused by "
+              "gauss_solve_partial_pivot_vec() and reported as a fallback, not silently solved");
+    TEST_CHECK(reason == COUPLING_SOLVE_FALLBACK_SINGULAR, "the reported reason must be the "
+              "singular-matrix one specifically, not a different fallback cause");
+    TEST_CHECK(climb0 == legacy0, "the fallback value itself must still be the exact legacy formula");
+    TEST_CHECK(isfinite(climb0), "a refused/singular solve must never leak a NaN/Inf into the climb term");
     TEST_CHECK(!infeasible, "a fallback is not a 'solve that needed clamping' -- infeasible must stay false");
 }
 
@@ -3839,6 +4020,9 @@ void run_test_profile_executor_prestart(void)
     test_hold_diagonal_only_matches_legacy_exactly();
     test_hold_matrix_solves_real_measured_gain_matrix();
     test_hold_singular_matrix_falls_back();
+    test_climb_matrix_solves_real_measured_gain_matrix();
+    test_climb_zero_coupling_is_bit_identical_to_legacy_formula();
+    test_climb_singular_matrix_falls_back();
     test_hold_excluded_faulted_zone_reduces_system();
     test_hold_infeasible_setpoint_clamps_and_reports();
     test_hold_pathological_inputs_never_nan_or_inf();

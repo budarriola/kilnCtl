@@ -209,6 +209,21 @@ typedef struct {
     uint8_t ff_hold_reason;     /* coupling_solve_reason_t, widened to a plain uint8_t so this
                                  * header doesn't have to forward-declare that profile_executor.c-
                                  * local enum -- 0 (COUPLING_SOLVE_OK) iff ff_hold_used_matrix. */
+
+    /* Coupled-CLIMB solve diagnostics -- same shape and meaning as the three
+     * ff_hold_* fields immediately above, for the coupled climb term added
+     * alongside the coupled hold (the climb term used to be the uncoupled
+     * per-zone `rate*tau/k_dc` formula unconditionally; see
+     * zone_coupling_solve_climb()'s doc comment). There is deliberately no
+     * ff_climb_membership_changed/ff_climb_membership_change_count pair: the
+     * hold and climb solves share the same qualifying-neighbour criteria, so
+     * a membership edge always shows up in ff_membership_changed/
+     * ff_membership_change_count already (zone_feedforward() ORs both
+     * solves' edges into that one flag) -- a second counter would just double
+     * count the same event. */
+    bool  ff_climb_used_matrix;
+    bool  ff_climb_infeasible;
+    uint8_t ff_climb_reason;
     bool  ff_membership_changed; /* true = the set of zones in zi's coupled system (or whether zi
                                   * qualifies at all) differs from the immediately preceding call --
                                   * pid_family_zone_tick() re-seeds the PID integral on this edge
@@ -593,6 +608,7 @@ static void build_coupling_neighbor_array(zone_coupling_neighbor_t out[MAX31856_
     for (uint8_t j = 0; j < MAX31856_CHANNEL_COUNT; j++) {
         out[j].qualifies = zone_qualifies_as_coupling_neighbor(&s_exec.zones[j]);
         out[j].ff_k_dc = s_exec.zones[j].ff_k_dc;
+        out[j].ff_tau_s = s_exec.zones[j].ff_tau_s;
     }
 }
 
@@ -620,6 +636,30 @@ static float solve_hold_for_zone(const zone_runtime_t *z, uint8_t zi, float setp
                                     out_membership_changed, cache_row, prev_sig);
 }
 
+/* Climb-term counterpart of solve_hold_for_zone() above -- own cache/
+ * membership-signature storage (zone_coupling_climb_cache_t's b[] differs in
+ * shape from the hold cache's scalar b, so they cannot share a slot), same
+ * wrapping pattern otherwise. See zone_feedforward()'s call site for why the
+ * climb term's own out_membership_changed is not surfaced as a second
+ * zone_runtime_t field -- the qualifying-neighbour criteria are identical to
+ * the hold term's, so it is always the same tick's edge. */
+static zone_coupling_climb_cache_t s_coupling_climb_cache[MAX31856_CHANNEL_COUNT];
+static uint16_t s_coupling_climb_prev_membership_sig[MAX31856_CHANNEL_COUNT];
+
+static float solve_climb_for_zone(const zone_runtime_t *z, uint8_t zi, float rate_c_per_s,
+                                   bool *out_used_matrix, bool *out_infeasible,
+                                   coupling_solve_reason_t *out_reason, bool *out_membership_changed)
+{
+    zone_coupling_neighbor_t zones[MAX31856_CHANNEL_COUNT];
+    build_coupling_neighbor_array(zones);
+    bool z_qualifies = zone_qualifies_as_coupling_neighbor(z);
+    zone_coupling_climb_cache_t *cache_row = (zi < MAX31856_CHANNEL_COUNT) ? &s_coupling_climb_cache[zi] : &s_coupling_climb_cache[0];
+    uint16_t *prev_sig = (zi < MAX31856_CHANNEL_COUNT) ? &s_coupling_climb_prev_membership_sig[zi] : &s_coupling_climb_prev_membership_sig[0];
+    return zone_coupling_solve_climb(z_qualifies, z->ff_k_dc, z->ff_tau_s, zi, zones, MAX31856_CHANNEL_COUNT,
+                                     rate_c_per_s, out_used_matrix, out_infeasible, out_reason,
+                                     out_membership_changed, cache_row, prev_sig);
+}
+
 
 /* The feedforward duty for one zone, already clamped to [0,1]. Returns exactly
  * 0.0f -- i.e. the behaviour of every firing before this existed -- for a zone
@@ -638,7 +678,20 @@ static float zone_feedforward(const zone_runtime_t *z, uint8_t zi, float setpoin
     coupling_solve_reason_t hold_reason = COUPLING_SOLVE_OK;
     float hold = solve_hold_for_zone(z, zi, setpoint_c, s_exec.ambient_c, &hold_used_matrix, &hold_infeasible,
                                      &hold_reason, &hold_membership_changed);
-    float climb = (rate_c_per_s * z->ff_tau_s) / z->ff_k_dc;
+
+    /* Climb term: was `(rate_c_per_s * z->ff_tau_s) / z->ff_k_dc`, the same
+     * per-zone-as-though-it-heated-alone formula the hold term used before
+     * TODO.md/PID_EXPANSION_PLAN.md's coupled-hold fix -- see
+     * zone_coupling_solve_climb()'s doc comment (zone_coupling_solve.h) for
+     * the coupled derivation. Own diagnostics/degrade path, mirroring the
+     * hold term's, deliberately not sharing hold's out_membership_changed:
+     * the two solves share the same qualifying-neighbour criteria, so a
+     * membership edge on this tick is always caught by hold_membership_changed
+     * already and does not need a second reseed trigger here. */
+    bool climb_used_matrix = false, climb_infeasible = false, climb_membership_changed = false;
+    coupling_solve_reason_t climb_reason = COUPLING_SOLVE_OK;
+    float climb = solve_climb_for_zone(z, zi, rate_c_per_s, &climb_used_matrix, &climb_infeasible,
+                                       &climb_reason, &climb_membership_changed);
     float u_ff = hold + climb;
 
     /* Diagnostics written to s_exec.zones[zi], not through `z` -- z is const
@@ -657,7 +710,10 @@ static float zone_feedforward(const zone_runtime_t *z, uint8_t zi, float setpoin
         s_exec.zones[zi].ff_hold_used_matrix = hold_used_matrix;
         s_exec.zones[zi].ff_hold_infeasible = hold_infeasible;
         s_exec.zones[zi].ff_hold_reason = (uint8_t)hold_reason;
-        s_exec.zones[zi].ff_membership_changed = hold_membership_changed;
+        s_exec.zones[zi].ff_climb_used_matrix = climb_used_matrix;
+        s_exec.zones[zi].ff_climb_infeasible = climb_infeasible;
+        s_exec.zones[zi].ff_climb_reason = (uint8_t)climb_reason;
+        s_exec.zones[zi].ff_membership_changed = hold_membership_changed || climb_membership_changed;
         static bool s_fallback_active[MAX31856_CHANNEL_COUNT];
         static bool s_infeasible_active[MAX31856_CHANNEL_COUNT];
         bool fell_back = !hold_used_matrix;
@@ -4729,6 +4785,8 @@ void profile_executor_get_status(profile_exec_status_t *out)
             zo->heat_blocked_sources = z->heat_blocked_sources;
             zo->ff_hold_used_matrix = z->ff_hold_used_matrix;
             zo->ff_hold_infeasible = z->ff_hold_infeasible;
+            zo->ff_climb_used_matrix = z->ff_climb_used_matrix;
+            zo->ff_climb_infeasible = z->ff_climb_infeasible;
             zo->ff_membership_change_count = z->ff_membership_change_count;
 
             /* PID_EXPANSION_PLAN.md Phase 7a: live tracking-quality

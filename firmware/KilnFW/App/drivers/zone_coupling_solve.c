@@ -59,6 +59,21 @@ coupling_solve_reason_t zone_coupling_gauss_solve_partial_pivot(uint8_t n,
     if (n == 0 || n > MAX31856_CHANNEL_COUNT) {
         return COUPLING_SOLVE_FALLBACK_SINGULAR; /* caller contract violation -- treat as untrustworthy */
     }
+    float b[MAX31856_CHANNEL_COUNT];
+    for (uint8_t i = 0; i < n; i++) {
+        b[i] = b_const;
+    }
+    return zone_coupling_gauss_solve_partial_pivot_vec(n, G, b, out_u);
+}
+
+coupling_solve_reason_t zone_coupling_gauss_solve_partial_pivot_vec(uint8_t n,
+                                                                     const float G[MAX31856_CHANNEL_COUNT][MAX31856_CHANNEL_COUNT],
+                                                                     const float b[MAX31856_CHANNEL_COUNT],
+                                                                     float out_u[MAX31856_CHANNEL_COUNT])
+{
+    if (n == 0 || n > MAX31856_CHANNEL_COUNT) {
+        return COUPLING_SOLVE_FALLBACK_SINGULAR; /* caller contract violation -- treat as untrustworthy */
+    }
 
     float M[MAX31856_CHANNEL_COUNT][MAX31856_CHANNEL_COUNT + 1];
     float scale = 0.0f;
@@ -72,10 +87,14 @@ coupling_solve_reason_t zone_coupling_gauss_solve_partial_pivot(uint8_t n,
             float av = fabsf(v);
             if (av > scale) scale = av;
         }
-        M[i][n] = b_const;
+        if (!isfinite(b[i])) {
+            return COUPLING_SOLVE_FALLBACK_SINGULAR; /* non-finite target -- same outcome the scalar
+                                                       * form's !isfinite(b_const) check produced */
+        }
+        M[i][n] = b[i];
     }
-    if (!isfinite(b_const) || !(scale > 0.0f)) {
-        return COUPLING_SOLVE_FALLBACK_SINGULAR; /* all-zero/degenerate matrix, or a non-finite target */
+    if (!(scale > 0.0f)) {
+        return COUPLING_SOLVE_FALLBACK_SINGULAR; /* all-zero/degenerate matrix (n==0 already rejected above) */
     }
     float rel_eps = scale * COUPLING_SOLVE_PIVOT_REL_EPS;
     float pivot_floor = (rel_eps > COUPLING_SOLVE_PIVOT_ABS_EPS) ? rel_eps : COUPLING_SOLVE_PIVOT_ABS_EPS;
@@ -289,4 +308,127 @@ float zone_coupling_solve_hold(bool z_qualifies, float z_ff_k_dc, uint8_t zi,
     *out_infeasible = (reason == COUPLING_SOLVE_OK) && infeasible;
     *out_reason = reason;
     return (reason == COUPLING_SOLVE_OK) ? u[0] : diagonal_hold; /* members[0] is always zi */
+}
+
+/* See zone_coupling_solve.h's doc comment for the derivation and why this
+ * reuses zone_coupling_gauss_solve_partial_pivot_vec() rather than a second
+ * solver. Structurally this mirrors zone_coupling_solve_hold() line for line
+ * -- same qualification gate, same membership-building loop, same G
+ * assembly -- deliberately: any divergence between the two membership sets
+ * would mean the hold and climb terms are being computed for two different
+ * coupled systems on the same tick, which would make their sum meaningless.
+ * The one substantive difference is b: a per-member array (rate_c_per_s *
+ * that member's own tau) instead of one scalar shared by every row. */
+float zone_coupling_solve_climb(bool z_qualifies, float z_ff_k_dc, float z_ff_tau_s, uint8_t zi,
+                                const zone_coupling_neighbor_t *zones, uint8_t zone_count,
+                                float rate_c_per_s, bool *out_used_matrix, bool *out_infeasible,
+                                coupling_solve_reason_t *out_reason, bool *out_membership_changed,
+                                zone_coupling_climb_cache_t *cache_row, uint16_t *prev_membership_sig)
+{
+    float diagonal_climb = (rate_c_per_s * z_ff_tau_s) / z_ff_k_dc; /* legacy per-zone formula --
+                                                                     * profile_executor.c's original
+                                                                     * `(rate_c_per_s * z->ff_tau_s) /
+                                                                     * z->ff_k_dc`, unchanged */
+    *out_used_matrix = false;
+    *out_infeasible = false;
+    *out_membership_changed = false;
+
+    if (zi >= MAX31856_CHANNEL_COUNT || !isfinite(diagonal_climb)) {
+        *out_reason = COUPLING_SOLVE_FALLBACK_OUT_OF_RANGE;
+        return diagonal_climb;
+    }
+    if (!z_qualifies) {
+        *out_reason = COUPLING_SOLVE_FALLBACK_UNQUALIFIED;
+        *out_membership_changed = coupling_note_membership_signature(prev_membership_sig, 0);
+        return diagonal_climb;
+    }
+
+    uint8_t members[MAX31856_CHANNEL_COUNT];
+    uint8_t n = 0;
+    uint16_t membership_sig = COUPLING_MEMBERSHIP_QUALIFIES_BIT;
+    members[n++] = zi;
+    for (uint8_t j = 0; j < zone_count; j++) {
+        if (j == zi) continue;
+        if (zones[j].qualifies) {
+            members[n++] = j;
+            membership_sig |= (uint16_t)(1u << j);
+        }
+    }
+    *out_membership_changed = coupling_note_membership_signature(prev_membership_sig, membership_sig);
+
+    if (n == 1) {
+        *out_reason = COUPLING_SOLVE_FALLBACK_NO_NEIGHBORS;
+        return diagonal_climb;
+    }
+
+    float G[MAX31856_CHANNEL_COUNT][MAX31856_CHANNEL_COUNT];
+    memset(G, 0, sizeof(G));
+    float b[MAX31856_CHANNEL_COUNT];
+    for (uint8_t row = 0; row < n; row++) {
+        uint8_t s = members[row];
+        float k_dc_s = (s == zi) ? z_ff_k_dc : zones[s].ff_k_dc;
+        float tau_s = (s == zi) ? z_ff_tau_s : zones[s].ff_tau_s;
+        G[row][row] = k_dc_s;
+        b[row] = rate_c_per_s * tau_s; /* NOT uniform across rows -- see this function's own doc
+                                        * comment and the header's "LOAD-BEARING INVARIANT" note on
+                                        * zone_coupling_solve_hold(), which this deliberately does
+                                        * NOT copy: tau differs per zone even though setpoint/ambient
+                                        * do not. */
+        float coupling_row[MAX31856_CHANNEL_COUNT];
+        if (!zones_config_get_coupling(s, coupling_row)) {
+            continue;
+        }
+        for (uint8_t col = 0; col < n; col++) {
+            uint8_t t = members[col];
+            if (t == s) continue;
+            float c = coupling_row[t];
+            if (isfinite(c)) {
+                G[row][col] = c;
+            }
+        }
+    }
+
+    zone_coupling_climb_cache_t *cache = cache_row;
+    bool cache_hit = cache->have && cache->n == n &&
+                      memcmp(cache->members, members, n) == 0 &&
+                      memcmp(cache->b, b, sizeof(float) * n) == 0 &&
+                      memcmp(cache->G, G, sizeof(G)) == 0;
+    if (cache_hit) {
+        *out_used_matrix = (cache->reason == COUPLING_SOLVE_OK);
+        *out_infeasible = cache->infeasible;
+        *out_reason = cache->reason;
+        return *out_used_matrix ? cache->u[0] : diagonal_climb;
+    }
+
+    float u[MAX31856_CHANNEL_COUNT];
+    coupling_solve_reason_t reason = zone_coupling_gauss_solve_partial_pivot_vec(n, G, b, u);
+    bool infeasible = false;
+    if (reason == COUPLING_SOLVE_OK) {
+        for (uint8_t i = 0; i < n; i++) {
+            if (u[i] > 1.0f) {
+                u[i] = 1.0f;
+                infeasible = true;
+            }
+            /* u[i] < 0 (a cooling-direction ramp) left unclamped here too --
+             * same rationale as zone_coupling_solve_hold(), combined with the
+             * (also possibly negative) hold term and clamped only in the
+             * caller's final [0,1] sum. */
+        }
+    }
+
+    cache->have = true;
+    cache->n = n;
+    memcpy(cache->members, members, n);
+    memcpy(cache->G, G, sizeof(G));
+    memcpy(cache->b, b, sizeof(float) * n);
+    cache->reason = reason;
+    cache->infeasible = (reason == COUPLING_SOLVE_OK) && infeasible;
+    if (reason == COUPLING_SOLVE_OK) {
+        memcpy(cache->u, u, sizeof(float) * n);
+    }
+
+    *out_used_matrix = (reason == COUPLING_SOLVE_OK);
+    *out_infeasible = (reason == COUPLING_SOLVE_OK) && infeasible;
+    *out_reason = reason;
+    return (reason == COUPLING_SOLVE_OK) ? u[0] : diagonal_climb;
 }

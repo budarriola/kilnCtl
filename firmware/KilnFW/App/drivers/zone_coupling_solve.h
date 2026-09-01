@@ -52,6 +52,11 @@ extern "C" {
 typedef struct {
     bool  qualifies; /* zone_coupling_qualifies_as_neighbor()'s verdict for this zone */
     float ff_k_dc;   /* this zone's own steady-state gain, degC per unit duty */
+    float ff_tau_s;  /* this zone's own plant time constant, seconds -- only read by
+                      * zone_coupling_solve_climb() (the per-row RHS rate*tau_i is NOT
+                      * uniform across members the way the hold term's dT is, since tau
+                      * differs per zone -- see that function's doc comment). Unused by
+                      * the hold path. */
 } zone_coupling_neighbor_t;
 
 /* True iff zone zn is genuinely under closed-loop control on the shared
@@ -180,6 +185,21 @@ coupling_solve_reason_t zone_coupling_gauss_solve_partial_pivot(uint8_t n,
                                                                  const float G[MAX31856_CHANNEL_COUNT][MAX31856_CHANNEL_COUNT],
                                                                  float b_const, float out_u[MAX31856_CHANNEL_COUNT]);
 
+/* Same Gaussian elimination as zone_coupling_gauss_solve_partial_pivot() --
+ * identical pivoting, conditioning floor and reachable-outcome set -- except
+ * the right-hand side is PER ROW rather than one scalar shared by every row.
+ * zone_coupling_gauss_solve_partial_pivot() is now a thin wrapper over this
+ * one (fills an n-long array with b_const and calls through), so the two
+ * never drift: there is exactly one elimination implementation, not two
+ * copies that happen to agree today. b[i] corresponds to row i, i.e. the same
+ * row zone_coupling_solve_hold()/zone_coupling_solve_climb() populate as
+ * G[i][*] for `members[i]` -- callers with a uniform RHS (the hold term) can
+ * keep calling the scalar form above instead of filling an array by hand. */
+coupling_solve_reason_t zone_coupling_gauss_solve_partial_pivot_vec(uint8_t n,
+                                                                     const float G[MAX31856_CHANNEL_COUNT][MAX31856_CHANNEL_COUNT],
+                                                                     const float b[MAX31856_CHANNEL_COUNT],
+                                                                     float out_u[MAX31856_CHANNEL_COUNT]);
+
 /* Builds the reduced coupled system for zone zi and returns its hold duty, via
  * *cache_row (profile_executor.c's s_coupling_hold_cache[zi]) and
  * *prev_membership_sig (profile_executor.c's s_coupling_prev_membership_sig[zi]) --
@@ -226,6 +246,64 @@ float zone_coupling_solve_hold(bool z_qualifies, float z_ff_k_dc, uint8_t zi,
                                float setpoint_c, float ambient_c, bool *out_used_matrix, bool *out_infeasible,
                                coupling_solve_reason_t *out_reason, bool *out_membership_changed,
                                zone_coupling_hold_cache_t *cache_row, uint16_t *prev_membership_sig);
+
+/* Same cache shape as zone_coupling_hold_cache_t, except `b` is one value PER
+ * MEMBER (b[row], parallel to members[row]/G[row][*]) instead of a single
+ * scalar -- the climb term's RHS is rate_c_per_s * tau_of_that_row's_zone,
+ * and tau differs per zone (unlike the hold term's dT, which is the same
+ * setpoint_c-ambient_c for every row -- see zone_coupling_solve_hold()'s
+ * "LOAD-BEARING INVARIANT" comment). Kept as its own type, not a reuse of
+ * zone_coupling_hold_cache_t with b widened, so a hold-cache/climb-cache mixup
+ * is a compile error rather than a silent aliasing bug. */
+typedef struct {
+    bool    have;
+    uint8_t n;
+    uint8_t members[MAX31856_CHANNEL_COUNT];
+    float   G[MAX31856_CHANNEL_COUNT][MAX31856_CHANNEL_COUNT];
+    float   b[MAX31856_CHANNEL_COUNT];
+    float   u[MAX31856_CHANNEL_COUNT];
+    coupling_solve_reason_t reason;
+    bool    infeasible;
+} zone_coupling_climb_cache_t;
+
+/* The coupled climb term for zone zi: how much EXTRA duty (beyond the hold
+ * term) every zone in zi's qualifying system needs so that the commanded
+ * ramp rate is achieved given cross-zone heat sharing, instead of each zone
+ * independently chasing rate_c_per_s*tau_i/k_dc as though it heated alone
+ * (the legacy formula, still returned here as the fallback for every
+ * degraded case -- same contract as zone_coupling_solve_hold()).
+ *
+ * Derivation: a zone tracking a ramp at rate_c_per_s needs its own
+ * temperature to be running `rate_c_per_s * tau_i` degrees ahead of the
+ * quasi-steady value the current duty would otherwise settle to -- the same
+ * dT-per-unit-duty steady-state relationship the hold term solves, just with
+ * that lead as the target offset instead of (setpoint-ambient). So this
+ * solves the SAME matrix A (the SAME G here, with the SAME membership) as
+ * zone_coupling_solve_hold() for the same zi at the same tick -- only the
+ * right-hand side changes -- via
+ * zone_coupling_gauss_solve_partial_pivot_vec(), the vector-RHS sibling of
+ * the exact routine zone_coupling_solve_hold() calls; there is no second
+ * solver.
+ *
+ * z_ff_tau_s is zi's OWN tau, passed separately for the same reason
+ * z_qualifies/z_ff_k_dc are in zone_coupling_solve_hold(): zi's row may not
+ * be in `zones[]` at index zi (the caller's `z` need not BE zones[zi]).
+ * Every OTHER member's tau comes from zones[j].ff_tau_s.
+ *
+ * out_membership_changed/prev_membership_sig exist for the same cache-miss/
+ * membership-edge bookkeeping zone_coupling_solve_hold() does, tracked in
+ * this function's OWN cache row and signature slot -- kept independent of the
+ * hold term's even though the qualifying-neighbour criteria (and therefore,
+ * in practice, the membership set) are identical, so a hold-cache bug can
+ * never silently corrupt the climb answer or vice versa. Callers are not
+ * obliged to surface this edge separately if they already reseed on the hold
+ * term's identical edge; see the call site's own comment for what this
+ * codebase does. */
+float zone_coupling_solve_climb(bool z_qualifies, float z_ff_k_dc, float z_ff_tau_s, uint8_t zi,
+                                const zone_coupling_neighbor_t *zones, uint8_t zone_count,
+                                float rate_c_per_s, bool *out_used_matrix, bool *out_infeasible,
+                                coupling_solve_reason_t *out_reason, bool *out_membership_changed,
+                                zone_coupling_climb_cache_t *cache_row, uint16_t *prev_membership_sig);
 
 #ifdef __cplusplus
 }
