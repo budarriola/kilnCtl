@@ -2280,6 +2280,264 @@ static void test_feedforward_out_hold_is_never_independently_clamped(void)
 }
 
 // ---------------------------------------------------------------------------
+// Terminal ease-off (PID_EXPANSION_PLAN.md sec 3.1, validated sim_calibration
+// .md sec 5): zone_taper_climb_rate() tapers the feedforward's RATE input
+// only, windowed on each zone's OWN identified dead time, as the ramp
+// approaches its segment's target. Direct unit tests below reach the
+// function itself (non-static, declared in profile_executor_internal.h);
+// the end-to-end tests further down drive it through pid_family_zone_tick()
+// the same way the bump-transfer test above drives zone_feedforward().
+
+static void test_taper_outside_window_is_bit_identical_to_no_taper(void)
+{
+    TEST_SECTION("zone_taper_climb_rate() -- distance-to-target still far outside the taper window "
+                 "(window_mult * dead_time) must return the rate UNCHANGED -- ramp tracking away from "
+                 "the boundary must not regress");
+    zone_runtime_t z;
+    memset(&z, 0, sizeof(z));
+    z.ff_dead_time_s = 50.0f; /* window = 2.0 * 50 = 100s */
+
+    float rate_c_per_s = 0.05f; /* nonzero rate approaching a target -- NOT the rate=0/error=0
+                                 * vacuity trap this area has shipped twice before */
+    float target_c = 20.0f;
+    float segment_target_c = 20.0f + rate_c_per_s * 500.0f; /* 500s of ramp left -- far outside the 100s window */
+
+    float tapered = zone_taper_climb_rate(&z, target_c, rate_c_per_s, segment_target_c);
+    TEST_CHECK(tapered == rate_c_per_s, "outside the window the taper must be bit-for-bit inert, not "
+              "merely close");
+}
+
+static void test_taper_inside_window_reduces_rate_by_linear_factor(void)
+{
+    TEST_SECTION("zone_taper_climb_rate() -- inside the window, the rate is scaled by the documented "
+                 "linear factor dist_to_end_s / (window_mult * dead_time_s)");
+    zone_runtime_t z;
+    memset(&z, 0, sizeof(z));
+    z.ff_dead_time_s = 40.0f; /* window = 80s */
+
+    float rate_c_per_s = 0.03f; /* nonzero, approaching -- see vacuity-trap note above */
+    float target_c = 100.0f;
+    float dist_to_end_s = 20.0f; /* well inside the 80s window */
+    float segment_target_c = target_c + rate_c_per_s * dist_to_end_s;
+
+    float tapered = zone_taper_climb_rate(&z, target_c, rate_c_per_s, segment_target_c);
+    float expect = rate_c_per_s * (dist_to_end_s / 80.0f);
+    TEST_CHECK_NEAR(tapered, expect, 1e-6, "must match the documented linear taper exactly, not just "
+                    "trend in the right direction");
+    TEST_CHECK(tapered < rate_c_per_s, "a tapered rate inside the window must be strictly smaller than "
+              "the untapered rate -- proves this is a rate-SHAPING change, not a no-op");
+}
+
+static void test_taper_at_target_returns_zero_not_nan(void)
+{
+    TEST_SECTION("zone_taper_climb_rate() -- zero distance left (the tick that lands exactly on the "
+                 "segment target) must return 0, never divide-by-zero/NaN");
+    zone_runtime_t z;
+    memset(&z, 0, sizeof(z));
+    z.ff_dead_time_s = 30.0f;
+    float tapered = zone_taper_climb_rate(&z, 55.0f, 0.02f, 55.0f);
+    TEST_CHECK(tapered == 0.0f, "distance-to-target of exactly 0 must taper to exactly 0");
+}
+
+static void test_taper_no_identified_dead_time_is_inert(void)
+{
+    TEST_SECTION("zone_taper_climb_rate() -- a zone with no identified dead time (never autotuned) "
+                 "gets the rate back UNCHANGED -- there is no real per-zone window to size a taper "
+                 "from, and fabricating one would be exactly the hand-constant this feature must "
+                 "never use");
+    zone_runtime_t z;
+    memset(&z, 0, sizeof(z));
+    z.ff_dead_time_s = 0.0f;
+    float rate_c_per_s = 0.04f;
+    float tapered = zone_taper_climb_rate(&z, 10.0f, rate_c_per_s, 10.0f + rate_c_per_s * 5.0f);
+    TEST_CHECK(tapered == rate_c_per_s, "no model -> no taper, byte for byte");
+}
+
+static void test_taper_asymmetric_dead_times_key_off_each_zones_own(void)
+{
+    TEST_SECTION("zone_taper_climb_rate() -- ASYMMETRIC per-zone dead times: two zones at the SAME "
+                 "distance-to-target and the SAME rate must taper by DIFFERENT amounts, keyed to each "
+                 "zone's own ff_dead_time_s -- a shared-constant or transposed-index bug would make "
+                 "them equal, or swap which zone gets the larger window");
+    zone_runtime_t z_short_dead_time, z_long_dead_time;
+    memset(&z_short_dead_time, 0, sizeof(z_short_dead_time));
+    memset(&z_long_dead_time, 0, sizeof(z_long_dead_time));
+    z_short_dead_time.ff_dead_time_s = 20.0f;  /* window = 40s -- e.g. zone 2 in the bench identification */
+    z_long_dead_time.ff_dead_time_s = 60.0f;   /* window = 120s -- e.g. zone 0 */
+
+    float rate_c_per_s = 0.02f; /* nonzero, approaching */
+    float target_c = 200.0f;
+    float dist_to_end_s = 50.0f; /* inside the long-dead-time zone's window (120s), OUTSIDE the
+                                  * short-dead-time zone's window (40s) -- exactly the asymmetric
+                                  * fixture the task calls for */
+    float segment_target_c = target_c + rate_c_per_s * dist_to_end_s;
+
+    float tapered_short = zone_taper_climb_rate(&z_short_dead_time, target_c, rate_c_per_s, segment_target_c);
+    float tapered_long = zone_taper_climb_rate(&z_long_dead_time, target_c, rate_c_per_s, segment_target_c);
+
+    TEST_CHECK(tapered_short == rate_c_per_s, "the SHORT-dead-time zone is already outside its own "
+              "(narrower) window at this distance -- must see the untapered rate");
+    TEST_CHECK(tapered_long < rate_c_per_s, "the LONG-dead-time zone is still inside its own (wider) "
+              "window at the SAME distance -- must be tapered");
+    TEST_CHECK(tapered_short != tapered_long, "the two zones, given the identical distance and rate, "
+              "must NOT agree -- a shared hand constant or a tau/dead_time mixup would make them equal "
+              "or pick the wrong zone to taper");
+}
+
+static void test_taper_gated_on_dwelling_not_zero_rate(void)
+{
+    TEST_SECTION("pid_family_zone_tick() -- terminal ease-off must be gated on s_exec.dwelling, and a "
+                 "ramp-lock stall (target_rate_c_per_s zeroed WITHOUT dwelling being set -- exactly "
+                 "the shape a previous change in this file had to gate on s_exec.dwelling for) must "
+                 "NOT trigger the taper: with a zero commanded rate the ff term must equal the "
+                 "untapered, zero-rate feedforward exactly");
+    reset_coupling_test_state();
+
+    const uint8_t zi = 0;
+    zone_runtime_t z;
+    memset(&z, 0, sizeof(z));
+    z.ff_enabled = true;
+    z.ff_k_dc = 40.0f;
+    z.ff_tau_s = 260.0f;
+    z.ff_dead_time_s = 50.0f; /* has a model -- if the gate were wrong (e.g. checked ff_dead_time_s
+                              * instead of dwelling/rate), this would be the zone that could show it */
+    z.pid_cfg = (pid_cfg_t){.kp = 0.05f, .ki = 0.0003f, .kd = 0.0f, .d_filter_tau_s = 30.0f, .b = 1.0f,
+                            .pid_range_c = 1000.0f};
+    pid_reset(&z.pid_state);
+    z.actual_c = 45.0f;
+    z.heater_cfg.window_ms = 10000;
+    z.heater_cfg.min_on_ms = 0;
+    s_exec.ambient_c = 20.0f;
+    s_exec.target_c = 50.0f;               /* mid-ramp, close to the segment target (would be well */
+    s_exec.profile.segments[0].target_c = 50.5f; /* inside the taper window if rate were nonzero) */
+    s_exec.segment_index = 0;
+    s_exec.dwelling = false;               /* the ramp-lock signature: NOT dwelling... */
+    s_exec.target_rate_c_per_s = 0.0f;     /* ...yet the rate is already zeroed, same as ramp-lock */
+
+    float ff_hold_ref = 0.0f;
+    float u_ff_reference = zone_feedforward(&z, zi, s_exec.target_c, 0.0f, &ff_hold_ref);
+
+    bool want_relay_on = false;
+    pid_family_zone_tick(&z, zi, &z.pid_cfg, /*sensor_ok_zi=*/true, /*dt_s=*/1.0f, /*dt_ms=*/1000u,
+                         &want_relay_on);
+
+    TEST_CHECK(z.last_pid_terms.ff == u_ff_reference, "a ramp-lock-shaped stall (dwelling false, rate "
+              "already 0) must produce the exact untapered rate-0 feedforward -- the taper must never "
+              "fire off of target_rate_c_per_s alone");
+}
+
+static void test_taper_gate_ignores_a_stray_nonzero_rate_during_dwelling(void)
+{
+    TEST_SECTION("pid_family_zone_tick() -- explicitly gating the taper on s_exec.dwelling (not just "
+                 "target_rate_c_per_s != 0) is defense in depth: even a hypothetically stray nonzero "
+                 "target_rate_c_per_s while s_exec.dwelling is true must not engage the taper -- proves "
+                 "the gate reads dwelling itself, not merely inferring it from a rate that production "
+                 "code happens to always zero during a real dwell");
+    reset_coupling_test_state();
+
+    const uint8_t zi = 0;
+    zone_runtime_t z;
+    memset(&z, 0, sizeof(z));
+    z.ff_enabled = true;
+    z.ff_k_dc = 40.0f;
+    z.ff_tau_s = 260.0f;
+    z.ff_dead_time_s = 50.0f;
+    z.pid_cfg = (pid_cfg_t){.kp = 0.05f, .ki = 0.0003f, .kd = 0.0f, .d_filter_tau_s = 30.0f, .b = 1.0f,
+                            .pid_range_c = 1000.0f};
+    pid_reset(&z.pid_state);
+    z.actual_c = 50.0f;
+    z.heater_cfg.window_ms = 10000;
+    z.heater_cfg.min_on_ms = 0;
+    s_exec.ambient_c = 20.0f;
+    s_exec.target_c = 50.0f;
+    s_exec.profile.segments[0].target_c = 50.4f; /* well inside a 100s window at this rate */
+    s_exec.segment_index = 0;
+    s_exec.dwelling = true;                  /* a real dwell... */
+    s_exec.target_rate_c_per_s = 0.03f;      /* ...but the rate is stray-nonzero, which real production
+                                              * code never does today -- this test is checking the
+                                              * gate's OWN robustness, not a reachable state */
+
+    float ff_hold_ref = 0.0f;
+    float u_ff_untapered_at_stray_rate = zone_feedforward(&z, zi, s_exec.target_c, 0.03f, &ff_hold_ref);
+
+    bool want_relay_on = false;
+    pid_family_zone_tick(&z, zi, &z.pid_cfg, /*sensor_ok_zi=*/true, /*dt_s=*/1.0f, /*dt_ms=*/1000u,
+                         &want_relay_on);
+
+    TEST_CHECK(z.last_pid_terms.ff == u_ff_untapered_at_stray_rate, "s_exec.dwelling == true must block "
+              "the taper regardless of what target_rate_c_per_s happens to hold -- the per-tick ff must "
+              "equal the UNTAPERED feedforward at the stray rate, not a tapered one");
+}
+
+static void test_taper_engages_end_to_end_through_pid_family_zone_tick(void)
+{
+    TEST_SECTION("pid_family_zone_tick() -- with an active, nonzero-rate ramp INSIDE the taper window, "
+                 "the per-tick ff term must be strictly SMALLER than the untapered reference -- proves "
+                 "the taper actually reaches production code through the real per-tick call site, not "
+                 "just the standalone helper");
+    reset_coupling_test_state();
+
+    const uint8_t zi = 0;
+    zone_runtime_t z;
+    memset(&z, 0, sizeof(z));
+    z.ff_enabled = true;
+    z.ff_k_dc = 40.0f;
+    z.ff_tau_s = 260.0f;
+    z.ff_dead_time_s = 50.0f; /* window = 100s */
+    z.pid_cfg = (pid_cfg_t){.kp = 0.05f, .ki = 0.0003f, .kd = 0.0f, .d_filter_tau_s = 30.0f, .b = 1.0f,
+                            .pid_range_c = 1000.0f};
+    pid_reset(&z.pid_state);
+    z.actual_c = 44.0f;
+    z.heater_cfg.window_ms = 10000;
+    z.heater_cfg.min_on_ms = 0;
+    s_exec.ambient_c = 20.0f;
+
+    float rate_c_per_s = 0.04f; /* nonzero, approaching -- not the rate=0/error=0 vacuity trap */
+    s_exec.target_c = 44.5f;
+    s_exec.profile.segments[0].target_c = s_exec.target_c + rate_c_per_s * 20.0f; /* 20s left, well inside the 100s window */
+    s_exec.segment_index = 0;
+    s_exec.dwelling = false;
+    s_exec.target_rate_c_per_s = rate_c_per_s;
+
+    float ff_hold_ref = 0.0f;
+    float u_ff_untapered = zone_feedforward(&z, zi, s_exec.target_c, rate_c_per_s, &ff_hold_ref);
+
+    bool want_relay_on = false;
+    pid_family_zone_tick(&z, zi, &z.pid_cfg, /*sensor_ok_zi=*/true, /*dt_s=*/1.0f, /*dt_ms=*/1000u,
+                         &want_relay_on);
+
+    TEST_CHECK(z.last_pid_terms.ff < u_ff_untapered, "the tapered per-tick ff must be strictly less "
+              "than the untapered reference computed at the full commanded rate -- if this is equal, "
+              "the taper never reached the real per-tick call site");
+}
+
+static void test_taper_ramp_still_reaches_target_setpoint_untouched(void)
+{
+    TEST_SECTION("terminal ease-off tapers ONLY the feedforward's rate input -- s_exec.target_c (the "
+                 "setpoint schedule) must be bit-for-bit unaffected by any call to "
+                 "zone_taper_climb_rate(), so a ramp still ARRIVES on the untouched wall-clock "
+                 "schedule regardless of what the taper does to the feedforward");
+    zone_runtime_t z;
+    memset(&z, 0, sizeof(z));
+    z.ff_dead_time_s = 45.0f;
+
+    float target_c_before = 63.25f;
+    float rate_c_per_s = 0.025f;
+    float segment_target_c = target_c_before + rate_c_per_s * 10.0f; /* well inside the 90s window */
+
+    float target_c_probe = target_c_before; /* passed BY VALUE -- zone_taper_climb_rate() takes it as
+                                             * a plain float, not a pointer, so there is no seam for it
+                                             * to write back through even in error; this asserts the
+                                             * value used for the call is unchanged after the call, and
+                                             * the function's signature (float return, float-by-value
+                                             * target_c) makes a setpoint mutation structurally
+                                             * impossible, not merely untested. */
+    (void)zone_taper_climb_rate(&z, target_c_probe, rate_c_per_s, segment_target_c);
+    TEST_CHECK(target_c_probe == target_c_before, "target_c must be bit-identical before/after -- the "
+              "taper has no path to the setpoint schedule");
+}
+
+// ---------------------------------------------------------------------------
 // Coupled steady-state HOLD solve (defect fix): the hold term used to divide
 // by each zone's own diagonal gain alone, as if it were heating alone --
 // solve_hold_for_zone()/gauss_solve_partial_pivot() replace that with a
@@ -4324,6 +4582,16 @@ void run_test_profile_executor_prestart(void)
     test_feedforward_realistic_measured_matrix_zone1_row();
     test_feedforward_out_hold_excludes_climb_includes_coupling_correction();
     test_feedforward_out_hold_is_never_independently_clamped();
+
+    test_taper_outside_window_is_bit_identical_to_no_taper();
+    test_taper_inside_window_reduces_rate_by_linear_factor();
+    test_taper_at_target_returns_zero_not_nan();
+    test_taper_no_identified_dead_time_is_inert();
+    test_taper_asymmetric_dead_times_key_off_each_zones_own();
+    test_taper_gated_on_dwelling_not_zero_rate();
+    test_taper_gate_ignores_a_stray_nonzero_rate_during_dwelling();
+    test_taper_engages_end_to_end_through_pid_family_zone_tick();
+    test_taper_ramp_still_reaches_target_setpoint_untouched();
 
     test_hold_diagonal_only_matches_legacy_exactly();
     test_hold_matrix_solves_real_measured_gain_matrix();

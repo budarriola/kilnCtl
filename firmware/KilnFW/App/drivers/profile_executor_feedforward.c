@@ -14,6 +14,14 @@
 
 #include "zones_http.h"
 
+/* Terminal ease-off taper window, as a multiple of a zone's own identified
+ * dead time -- see zone_taper_climb_rate()'s doc comment. 2.0, per
+ * sim_calibration.md sec 5: the calibrated sim measured 2.0x outperforming
+ * 1.0x on every zone's dwell-entry overshoot with linear and cosine shapes
+ * statistically equivalent, so this is the configuration it actually
+ * validated, not a guess at a wider number. */
+#define PROFILE_EXECUTOR_EASE_OFF_WINDOW_MULT 2.0f
+
 /* ---- feedforward from the identified plant model (TODO.md 6A.2) ------------
  *
  *   u_ff = (T_sp - T_ambient)/K_dc + (dT_sp/dt)*tau/K_dc
@@ -57,13 +65,15 @@ bool zone_load_model(uint8_t zi)
                 k_dc > 0.0f && tau_s > 0.0f && dead_time_s > 0.0f;
 
     bool was_enabled = z->ff_enabled;
-    float was_k = z->ff_k_dc, was_tau = z->ff_tau_s;
+    float was_k = z->ff_k_dc, was_tau = z->ff_tau_s, was_dead_time = z->ff_dead_time_s;
 
     z->ff_enabled = have;
     z->ff_k_dc = have ? k_dc : 0.0f;
     z->ff_tau_s = have ? tau_s : 0.0f;
+    z->ff_dead_time_s = have ? dead_time_s : 0.0f;
 
-    return (z->ff_enabled != was_enabled) || (z->ff_k_dc != was_k) || (z->ff_tau_s != was_tau);
+    return (z->ff_enabled != was_enabled) || (z->ff_k_dc != was_k) || (z->ff_tau_s != was_tau) ||
+           (z->ff_dead_time_s != was_dead_time);
 }
 
 /* Cross-zone coupling/feedforward math (Gaussian elimination, the coupled
@@ -159,6 +169,57 @@ static float solve_climb_for_zone(const zone_runtime_t *z, uint8_t zi, float rat
                                      out_membership_changed, cache_row, prev_sig);
 }
 
+
+/* Terminal ease-off (PID_EXPANSION_PLAN.md sec 3.1). Tapers the FEEDFORWARD's
+ * rate input toward zero as the ramp approaches its segment's own target --
+ * `s_exec.target_c`/the setpoint schedule itself is NEVER touched here, only
+ * the number this zone's zone_feedforward() call is handed as rate_c_per_s.
+ * That is deliberate, not incidental: because the schedule that advances
+ * target_c is computed elsewhere (profile_executor.c's segment-stepping
+ * block) and this function cannot see or change it, a taper bug here can, at
+ * worst, under-supply the climb feedforward near the end of a ramp -- the
+ * PID's own P/I terms still chase the untapered target_c and correct the
+ * shortfall like any other tracking error. It cannot turn into a stall: the
+ * segment still reaches c1 on the untouched wall-clock schedule regardless
+ * of what this returns.
+ *
+ * Validated in sim_calibration.md sec 5 (calibrated_sim.py, correct-rate
+ * core): window_mult=2.0 * the zone's own identified dead time, taper keyed
+ * to wall-clock time remaining in the ramp (distance / rate, matching the
+ * segment's own constant-rate schedule) roughly halves seg0-dwell RMS
+ * overshoot on z0/z1 for a 0.02-0.08C ramp-window cost, comparable to the
+ * calibrated sim's own ~1C residual-vs-hardware noise floor. The sim found
+ * linear and cosine shapes statistically equivalent at this window; linear
+ * is kept here (one fewer transcendental per tick, easier to host-test
+ * exactly).
+ *
+ * Per-zone, off the zone's OWN ff_dead_time_s -- never a hand constant tuned
+ * to this kiln -- so a short-dead-time zone (z2 here) eases later and over a
+ * shorter absolute window than a long-dead-time zone (z0). A zone with no
+ * identified dead time (never autotuned) gets rate_c_per_s back unchanged:
+ * there is no real per-zone window to size the taper from, and fabricating
+ * one would be exactly the kind of hand constant this is required not to be.
+ *
+ * rate_c_per_s == 0 (dwelling, a step segment, or a ramp-lock stall -- see
+ * this function's callers for the dwelling/nonzero-rate gate) returns 0
+ * unconditionally: multiplying zero by any taper factor is still zero, but
+ * skipping the division avoids a 0/0 on a segment with zero distance left. */
+float zone_taper_climb_rate(const zone_runtime_t *z, float target_c, float rate_c_per_s,
+                            float segment_target_c)
+{
+    if (rate_c_per_s == 0.0f) return 0.0f;
+    if (!(z->ff_dead_time_s > 0.0f)) return rate_c_per_s;
+
+    float dist_c = fabsf(segment_target_c - target_c);
+    float dist_s = dist_c / fabsf(rate_c_per_s);
+    float window_s = PROFILE_EXECUTOR_EASE_OFF_WINDOW_MULT * z->ff_dead_time_s;
+
+    if (dist_s >= window_s) return rate_c_per_s;
+    if (dist_s <= 0.0f) return 0.0f;
+
+    float f = dist_s / window_s; /* linear taper, x in (0,1) */
+    return rate_c_per_s * f;
+}
 
 /* The feedforward duty for one zone, already clamped to [0,1]. Returns exactly
  * 0.0f -- i.e. the behaviour of every firing before this existed -- for a zone
@@ -454,7 +515,22 @@ float zone_feedforward(const zone_runtime_t *z, uint8_t zi, float setpoint_c, fl
  * for the analogous problem on the local sensor. */
 void seed_bumpless_with_ff(zone_runtime_t *z, uint8_t zi, float u_desired)
 {
+    /* Same taper this zone's very next pid_family_zone_tick() call will
+     * apply (gate on s_exec.dwelling, not merely target_rate_c_per_s != 0 --
+     * a ramp-lock stall already zeros target_rate_c_per_s WITHOUT setting
+     * dwelling, and zone_taper_climb_rate() returns 0 for a 0 rate either
+     * way, but gating explicitly here keeps this call and pid_family_zone_
+     * tick()'s identical by construction rather than by coincidence of the
+     * zero-rate case) -- this function's own doc comment requires identical
+     * inputs to the very next real tick for the seed to actually be
+     * bumpless; an untapered seed racing against a tapered next tick would
+     * reintroduce exactly the duty step this function exists to avoid. */
+    float rate_c_per_s = s_exec.target_rate_c_per_s;
+    if (!s_exec.dwelling && rate_c_per_s != 0.0f) {
+        const profile_segment_t *seg = &s_exec.profile.segments[s_exec.segment_index];
+        rate_c_per_s = zone_taper_climb_rate(z, s_exec.target_c, rate_c_per_s, seg->target_c);
+    }
     float ff_hold = 0.0f;
-    float u_ff = zone_feedforward(z, zi, s_exec.target_c, s_exec.target_rate_c_per_s, &ff_hold);
+    float u_ff = zone_feedforward(z, zi, s_exec.target_c, rate_c_per_s, &ff_hold);
     pid_seed_bumpless(&z->pid_state, &z->pid_cfg, s_exec.target_c, z->actual_c, u_desired, u_ff, ff_hold);
 }

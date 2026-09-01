@@ -56,8 +56,32 @@ float pid_family_zone_tick(zone_runtime_t *z, uint8_t zi, const pid_cfg_t *cfg,
          * here is what /api/control reports as "ff", so the operator can
          * read the P/I/D/FF split and see how much of the duty is the model
          * and how much is the loop correcting it. */
+        /* Terminal ease-off (PID_EXPANSION_PLAN.md sec 3.1, validated
+         * sim_calibration.md sec 5): taper the feedforward's rate input only
+         * as this zone's own ramp approaches the segment's target -- see
+         * zone_taper_climb_rate()'s doc comment for the formula/window and
+         * why tapering only the feedforward, never s_exec.target_c, bounds
+         * the worst case to ordinary PID tracking lag.
+         *
+         * Gated on s_exec.dwelling, not merely target_rate_c_per_s != 0: a
+         * ramp-lock stall (profile_executor.c's segment-stepping block)
+         * zeros target_rate_c_per_s WITHOUT setting dwelling, for a lagging
+         * zone waiting on its neighbours to catch up. zone_taper_climb_rate()
+         * already returns 0 for a 0 input rate regardless of this gate, so a
+         * ramp-lock stall cannot be pushed into the taper's distance/rate
+         * division either way -- but gating on dwelling here (rather than
+         * relying on that zero-rate coincidence) is the same discipline a
+         * previous change in this file had to adopt for exactly this
+         * ramp-lock-without-dwelling shape, and keeps the taper's *intent* --
+         * "only while an active ramp is actually advancing" -- explicit
+         * rather than implicit in one arm's arithmetic. */
+        float ff_rate = s_exec.target_rate_c_per_s;
+        if (!s_exec.dwelling && ff_rate != 0.0f) {
+            const profile_segment_t *seg = &s_exec.profile.segments[s_exec.segment_index];
+            ff_rate = zone_taper_climb_rate(z, s_exec.target_c, ff_rate, seg->target_c);
+        }
         float ff_hold = 0.0f;
-        float u_ff = zone_feedforward(z, zi, s_exec.target_c, s_exec.target_rate_c_per_s, &ff_hold);
+        float u_ff = zone_feedforward(z, zi, s_exec.target_c, ff_rate, &ff_hold);
         /* Opus review, blocker 2: the coupled system's MEMBERSHIP (which
          * zones are in it, or whether this zone qualifies at all) can change
          * every tick -- heat_blocked alone is refreshed unconditionally each

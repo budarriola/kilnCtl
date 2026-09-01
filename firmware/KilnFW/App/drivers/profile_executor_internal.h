@@ -146,6 +146,14 @@ typedef struct {
      * ever corrects it. */
     float ff_k_dc;   /* degC of steady-state rise per unit duty */
     float ff_tau_s;  /* plant time constant, seconds */
+    /* Dead time, seconds -- identified alongside k_dc/tau_s but not consumed
+     * by the coupled hold/climb solves themselves (those only need k_dc/tau).
+     * Kept here for the terminal ease-off taper (PID_EXPANSION_PLAN.md
+     * sec 3.1, sim_calibration.md sec 5): the taper's window is sized off
+     * THIS zone's own dead time, never a hand constant, so a short-dead-time
+     * zone eases later and over a shorter absolute window than a long one.
+     * See zone_taper_climb_rate()'s doc comment. */
+    float ff_dead_time_s;
     bool  ff_enabled;
 
     /* Coupled-hold solve diagnostics (defect: steady-state hold used to
@@ -484,6 +492,8 @@ uint8_t count_qualifying_coupling_neighbors(uint8_t zi);
 float zone_feedforward(const zone_runtime_t *z, uint8_t zi, float setpoint_c, float rate_c_per_s,
                        float *out_hold);
 void seed_bumpless_with_ff(zone_runtime_t *z, uint8_t zi, float u_desired);
+float zone_taper_climb_rate(const zone_runtime_t *z, float target_c, float rate_c_per_s,
+                            float segment_target_c);
 
 /* ---- firing-statistics accounting / reboot breadcrumb
  * (profile_executor_firing_stats.c) ---------------------------------------- */
