@@ -344,14 +344,14 @@ static esp_err_t backup_export_get_handler(httpd_req_t *req)
                 backup_stream_printf(&s, "\"coupling_c%u\":%.4f,", (unsigned)j, (double)coupling_row[j]);
             }
             /* ZONES_CFG_VERSION 11->12 (DATA PLUMBING pass): coupling_tau_c%u/
-             * coupling_dead_c%u, same per-cell always-emit shape as
+             * coupling_dead_time_c%u, same per-cell always-emit shape as
              * coupling_c%u just above -- no BACKUP_FORMAT_VERSION bump, see
              * backup_import_apply()'s own comment on the matching parse. */
             for (uint8_t j = 0; j < MAX31856_CHANNEL_COUNT; j++) {
                 backup_stream_printf(&s, "\"coupling_tau_c%u\":%.1f,", (unsigned)j, (double)coupling_tau_row[j]);
             }
             for (uint8_t j = 0; j < MAX31856_CHANNEL_COUNT; j++) {
-                backup_stream_printf(&s, "\"coupling_dead_c%u\":%.1f,", (unsigned)j, (double)coupling_dead_row[j]);
+                backup_stream_printf(&s, "\"coupling_dead_time_c%u\":%.1f,", (unsigned)j, (double)coupling_dead_row[j]);
             }
             backup_stream_printf(&s, "\"settings_source\":%u", (unsigned)settings_source);
         }
@@ -1216,7 +1216,7 @@ static bool backup_import_apply(const char *body, char *err_msg, size_t err_cap)
             }
         }
         /* ZONES_CFG_VERSION 11->12 (DATA PLUMBING pass): coupling_tau_c%u/
-         * coupling_dead_c%u, same per-cell shape as coupling_c%u just above.
+         * coupling_dead_time_c%u, same per-cell shape as coupling_c%u just above.
          * No version bump of BACKUP_FORMAT_VERSION -- these are purely
          * additive optional keys, same as fuzzy_strength_pct/coupling_c%u
          * were when they landed (an older export simply never has them, and
@@ -1235,7 +1235,7 @@ static bool backup_import_apply(const char *body, char *err_msg, size_t err_cap)
                 zc->has_coupling_tau_cell[j] = true;
                 zc->coupling_tau_row[j] = (float)dtau;
             }
-            snprintf(ckey, sizeof(ckey), "coupling_dead_c%u", (unsigned)j);
+            snprintf(ckey, sizeof(ckey), "coupling_dead_time_c%u", (unsigned)j);
             double ddead;
             if (json_field_num(ze, ckey, &ddead)) {
                 float max = (j == zc->index) ? 0.0f : ZONE_MODEL_TIME_MAX_S;

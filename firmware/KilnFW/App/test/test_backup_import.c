@@ -1653,6 +1653,114 @@ static void test_export_round_trips_through_import_to_identical_config(void)
     TEST_CHECK(g_last_saved_profile.segments[0].dwell_min == 10, "profile segment dwell_min round-trips");
 }
 
+// ---------------------------------------------------------------------------
+// coupling_tau_c%u/coupling_dead_time_c%u "omit preserves" merge (backup_
+// http.c ~1519-1553, ZONES_CFG_VERSION 11->12). Untested before this: every
+// set_coupling_cell() seed in the tests above uses (0.0f, 0.0f) for tau/dead
+// time, so a total failure to carry either field -- including a transposed
+// (zone, neighbor) index -- would still read back as 0 and pass. These use
+// NONZERO, ASYMMETRIC per-pair values (pair (0,1) != pair (1,0)) so a
+// transpose or index bug fails loudly instead of coincidentally matching.
+// ---------------------------------------------------------------------------
+
+static void test_v4_coupling_tau_dead_time_round_trip_asymmetric_per_pair(void)
+{
+    TEST_SECTION("backup_import_apply -- coupling_tau_c%u/coupling_dead_time_c%u round-trip "
+                 "exactly, per cell, with pair (0,1) DISTINCT from pair (1,0) so a transposed "
+                 "index would fail rather than coincidentally match");
+    reset_stub_state();
+
+    const char *body =
+        "{\"kind\":\"kilnctl_backup\",\"version\":4,\"profiles\":[],"
+        "\"zones\":["
+        "{\"index\":0,\"pid_kp\":1,\"pid_ki\":0,\"pid_kd\":0,"
+        "\"coupling_c1\":5.0,\"coupling_tau_c1\":120.5,\"coupling_dead_time_c1\":30.5},"
+        "{\"index\":1,\"pid_kp\":1,\"pid_ki\":0,\"pid_kd\":0,"
+        "\"coupling_c0\":7.0,\"coupling_tau_c0\":450.0,\"coupling_dead_time_c0\":95.0}]}";
+    char err[160];
+    bool ok = backup_import_apply(body, err, sizeof(err));
+
+    TEST_CHECK(ok, "a well-formed coupling_tau_c%u/coupling_dead_time_c%u entry must import");
+    TEST_CHECK(s_writes[0].set_coupling_cell_called[1], "zone 0's cell 1 (pair (0,1)) was committed");
+    TEST_CHECK_NEAR(s_writes[0].coupling_coeff[1], 5.0, 1e-6, "pair (0,1) coeff round-trips");
+    TEST_CHECK_NEAR(s_writes[0].coupling_tau_s[1], 120.5, 1e-6, "pair (0,1) tau_s round-trips");
+    TEST_CHECK_NEAR(s_writes[0].coupling_dead_time_s[1], 30.5, 1e-6, "pair (0,1) dead_time_s round-trips");
+    TEST_CHECK(s_writes[1].set_coupling_cell_called[0], "zone 1's cell 0 (pair (1,0)) was committed");
+    TEST_CHECK_NEAR(s_writes[1].coupling_coeff[0], 7.0, 1e-6, "pair (1,0) coeff round-trips, DISTINCT from pair (0,1)");
+    TEST_CHECK_NEAR(s_writes[1].coupling_tau_s[0], 450.0, 1e-6,
+                    "pair (1,0) tau_s round-trips as 450.0, NOT pair (0,1)'s 120.5 -- proves "
+                    "orientation isn't swapped");
+    TEST_CHECK_NEAR(s_writes[1].coupling_dead_time_s[0], 95.0, 1e-6,
+                    "pair (1,0) dead_time_s round-trips as 95.0, NOT pair (0,1)'s 30.5");
+}
+
+static void test_v4_coupling_tau_dead_time_omitted_entirely_preserves_measured_values(void)
+{
+    TEST_SECTION("backup_import_apply -- an old-format backup that omits coupling_tau_c%u/"
+                 "coupling_dead_time_c%u entirely (only coupling_c%u present) PRESERVES the "
+                 "already-stored tau/dead_time for that cell instead of zeroing them -- the exact "
+                 "claim the commit message makes about not silently wiping what autotune measured");
+    reset_stub_state();
+
+    /* Seed the "already measured" live values for zone 0's cell 1 directly
+     * through the real setter, standing in for a prior autotune run. */
+    TEST_CHECK(zones_config_set_coupling_cell(0, 1, 2.0f, 111.0f, 22.0f),
+              "seed zone 0 cell 1 with a prior autotune-measured coeff/tau/dead_time");
+    g_total_write_calls = 0;
+
+    /* Old-format body: coupling_c1 present (a manual coefficient tweak), but
+     * NEITHER coupling_tau_c1 NOR coupling_dead_time_c1 -- exactly what any
+     * backup exported before ZONES_CFG_VERSION 12 looks like. */
+    const char *body =
+        "{\"kind\":\"kilnctl_backup\",\"version\":4,\"profiles\":[],"
+        "\"zones\":[{\"index\":0,\"pid_kp\":1,\"pid_ki\":0,\"pid_kd\":0,\"coupling_c1\":9.0}]}";
+    char err[160];
+    bool ok = backup_import_apply(body, err, sizeof(err));
+
+    TEST_CHECK(ok, "an old-format entry with only coupling_c%u must still import");
+    TEST_CHECK(s_writes[0].set_coupling_cell_called[1],
+              "cell 1 was still committed -- coupling_c1 alone is enough to trigger the merge");
+    TEST_CHECK_NEAR(s_writes[0].coupling_coeff[1], 9.0, 1e-6, "the supplied coeff was updated");
+    TEST_CHECK_NEAR(s_writes[0].coupling_tau_s[1], 111.0, 1e-6,
+                    "tau_s was PRESERVED at the previously-measured 111.0, not zeroed");
+    TEST_CHECK_NEAR(s_writes[0].coupling_dead_time_s[1], 22.0, 1e-6,
+                    "dead_time_s was PRESERVED at the previously-measured 22.0, not zeroed");
+}
+
+static void test_v4_coupling_tau_dead_time_partial_per_cell_presence(void)
+{
+    TEST_SECTION("backup_import_apply -- with two cells in one zone entry, the cell whose keys "
+                 "are present updates and the cell whose keys are absent preserves its stored "
+                 "value -- per-cell presence, not per-zone");
+    reset_stub_state();
+
+    /* Seed prior "measured" values in BOTH cells zone 2 can neighbor. */
+    TEST_CHECK(zones_config_set_coupling_cell(2, 0, 1.0f, 60.0f, 5.0f), "seed zone 2 cell 0");
+    TEST_CHECK(zones_config_set_coupling_cell(2, 1, 3.0f, 70.0f, 6.0f), "seed zone 2 cell 1");
+    g_total_write_calls = 0;
+    /* Clear the "was committed" latches the seeding above itself set, so the
+     * assertions below observe only what THIS import does. */
+    memset(s_writes[2].set_coupling_cell_called, 0, sizeof(s_writes[2].set_coupling_cell_called));
+
+    /* Cell 0 gets a full new triple in this import; cell 1 is entirely
+     * absent from the body. */
+    const char *body =
+        "{\"kind\":\"kilnctl_backup\",\"version\":4,\"profiles\":[],"
+        "\"zones\":[{\"index\":2,\"pid_kp\":1,\"pid_ki\":0,\"pid_kd\":0,"
+        "\"coupling_c0\":8.5,\"coupling_tau_c0\":200.0,\"coupling_dead_time_c0\":40.0}]}";
+    char err[160];
+    bool ok = backup_import_apply(body, err, sizeof(err));
+
+    TEST_CHECK(ok, "a partial-cell entry must import");
+    TEST_CHECK(s_writes[2].set_coupling_cell_called[0], "cell 0 (keys present) was committed");
+    TEST_CHECK_NEAR(s_writes[2].coupling_coeff[0], 8.5, 1e-6, "cell 0's coeff updated");
+    TEST_CHECK_NEAR(s_writes[2].coupling_tau_s[0], 200.0, 1e-6, "cell 0's tau_s updated");
+    TEST_CHECK_NEAR(s_writes[2].coupling_dead_time_s[0], 40.0, 1e-6, "cell 0's dead_time_s updated");
+    TEST_CHECK(!s_writes[2].set_coupling_cell_called[1],
+              "cell 1 (no keys at all present in this entry) was NOT touched -- absent cells "
+              "preserve by never being committed again");
+}
+
 void run_test_backup_import(void)
 {
     test_malformed_body_writes_nothing();
@@ -1681,4 +1789,8 @@ void run_test_backup_import(void)
 
     test_export_emits_expected_keys_and_values_for_a_known_config();
     test_export_round_trips_through_import_to_identical_config();
+
+    test_v4_coupling_tau_dead_time_round_trip_asymmetric_per_pair();
+    test_v4_coupling_tau_dead_time_omitted_entirely_preserves_measured_values();
+    test_v4_coupling_tau_dead_time_partial_per_cell_presence();
 }

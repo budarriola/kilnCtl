@@ -2169,13 +2169,17 @@ static esp_err_t zones_get_handler(httpd_req_t *req)
      * of 8192 live). At 5760 bytes this one buffer alone was more than 70%
      * of the entire 8192-byte task stack. Freed on every return path
      * (success and truncated). */
-    const size_t json_cap = 6528; /* 5760 -> 6528 (2026-08-31, ZONES_CFG_VERSION
+    const size_t json_cap = 6528; /* heap buffer (heap_caps_malloc below, not
+                      * stack). 5760 -> 6528 (2026-08-31, ZONES_CFG_VERSION
                       * 11->12): coupling_tau_c%u/coupling_dead_time_c%u add
-                      * two more indexed keys per cell alongside coupling_c%u
-                      * (~13 bytes each worst case, same per-key estimate the
-                      * 5632->5760 bump below used), i.e. ~26 bytes/cell x
-                      * MAX31856_CHANNEL_COUNT^2 cells = ~234 bytes, rounded
-                      * up generously to a round number with headroom.
+                      * two more indexed keys per cell alongside coupling_c%u.
+                      * Worst case per cell is both new keys at once:
+                      * "coupling_tau_c%u":86400.0, (~26 bytes) plus
+                      * "coupling_dead_time_c%u":86400.0, (~32 bytes) = ~58
+                      * bytes/cell x MAX31856_CHANNEL_COUNT^2 (9) cells =
+                      * ~522 bytes, leaving ~246 bytes of headroom in the 768
+                      * bytes this bump grants -- still adequate, not
+                      * changing the size, just correcting this estimate.
                       * 5632 -> 5760 (2026-08-30, same-day follow-up,
                       * ZONES_CFG_VERSION 10->11): coupling_coeff/
                       * coupling_neighbor_zone (2 keys) replaced by
