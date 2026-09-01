@@ -82,7 +82,14 @@ $excludeDirs = @(
     '\\\.venv\\',
     '\\node_modules\\',
     '\\components\\lvgl\\',
-    '\\\.claude\\worktrees\\'
+    '\\\.claude\\worktrees\\',
+    # Vendor LCD module datasheet-and-demo bundle (untracked, gitignored --
+    # see .gitignore's "Vendor LCD module datasheets/demo code" entry, added
+    # 2026-08-30). It ships a full STM32 HAL tree (stm32f4xx_hal_crc.c et
+    # al.) whose CRC_HandleTypeDef code legitimately matches the 0x1021
+    # polynomial -- reference/demo material this project doesn't build or
+    # own, not a second implementation of kilnlink's link-framing CRC.
+    '\\firmware\\KilnFW\\Datasheets\\4\.0inch_SPI_Module_ST7796_MSP4030_MSP4031_V1\.0\\'
 )
 
 # Known, already-tracked pre-migration duplicates (see header above).

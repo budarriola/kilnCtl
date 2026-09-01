@@ -858,7 +858,17 @@ esp_err_t wifi_provision_http_start(void)
      * because after three prose-comment-only bumps still missing the real
      * count, and now a fourth, a comment alone has a 0% success rate on
      * this exact bug. */
-    config.max_uri_handlers = 95;
+    /* 2026-09-01: raised 95 -> 108. log_http.c (/api/logs/*, on-flash log
+     * storage) added 2 routes and an in-flight adaptive-tuning endpoint
+     * (adaptive_tune_http.c) added 2 more, taking the real count to 99 --
+     * 4 over the 95 cap. tools/check_uri_handler_cap.ps1 caught this exactly
+     * as designed (99 routes counted vs cap 95) rather than letting
+     * registration fail silently. Set to 108: 99 plus 9 spare slots, the
+     * same order of headroom as every bump above (7-13). RAM cost: 13 extra
+     * pointer slots * 4 bytes = 52 bytes, against the ~12483-byte dram_free
+     * measured at the uart_bridges_1 heap stage and the documented ~11.9 kB
+     * failure floor -- noise, not a threat. */
+    config.max_uri_handlers = 108;
     /* Default (4096) is tight for the largest POST handlers on this server:
      * zones_post_handler (zones_http.c) alone stacks a 2561-byte body
      * buffer plus a ~170-byte zones_cfg_t scratch copy on top of whatever

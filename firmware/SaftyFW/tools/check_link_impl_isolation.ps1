@@ -174,7 +174,19 @@ $allowlistPaths = @(
     (Join-Path $firmwareRoot "KilnFW\App\drivers\watchdog_cfg.c"),
     (Join-Path $firmwareRoot "KilnFW\App\drivers\crash_report.c"),
     (Join-Path $firmwareRoot "KilnFW\App\drivers\profiles_http.c"),
-    (Join-Path $firmwareRoot "KilnFW\App\drivers\zones_http.c"),
+    # zones_http.c's compute_zones_crc() (originally allowlisted here) moved
+    # out during the 2026-09-01 zones_http.c split (commits c524ead/b1c072f)
+    # into zones_config_json.c/zones_config_store.c, split further into three
+    # named functions along the way (one per NVS record: the zones blob,
+    # relay names, zone normals). Same class as every other entry in this
+    # list -- esp_crc32_le() record integrity over an NVS blob, zeroing the
+    # crc32 field first, nothing to do with the link's CRC16-CCITT-FALSE --
+    # just relocated by the split, not newly introduced. zones_http.c itself
+    # no longer matches (only a comment referencing the new name remains), so
+    # its old entry is replaced rather than kept alongside these.
+    (Join-Path $firmwareRoot "KilnFW\App\drivers\zones_config_json.c"),
+    (Join-Path $firmwareRoot "KilnFW\App\drivers\zones_config_json.h"),
+    (Join-Path $firmwareRoot "KilnFW\App\drivers\zones_config_store.c"),
     (Join-Path $firmwareRoot "KilnFW\App\drivers\safety_cfg_store.c"),
     (Join-Path $firmwareRoot "KilnFW\App\drivers\safety_cfg_store.h"),
     (Join-Path $firmwareRoot "KilnFW\App\test\test_safety_cfg_http.c"),
@@ -213,6 +225,14 @@ $candidateFiles = Get-ChildItem -Path $firmwareRoot -Recurse -Include *.c, *.h -
         ($full -notmatch '\\CommonFW\\') -and
         ($full -notmatch '\\build\\') -and
         ($full -notmatch '\\components\\') -and
+        # Vendor LCD module datasheet-and-demo bundle (untracked, gitignored
+        # -- see .gitignore's "Vendor LCD module datasheets/demo code" entry,
+        # added 2026-08-30). Ships a full STM32 HAL tree whose CRC_HandleTypeDef
+        # accessors/HAL_CRC_Calculate() etc. legitimately match this check's
+        # "returns int, name contains crc, has an open paren" definition
+        # pattern -- reference/demo material this project doesn't build or
+        # own, not a from-scratch reimplementation of the link's CRC16-CCITT.
+        ($full -notmatch '\\KilnFW\\Datasheets\\4\.0inch_SPI_Module_ST7796_MSP4030_MSP4031_V1\.0\\') -and
         ($allowlistPaths -notcontains $full)
     }
 
