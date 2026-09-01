@@ -51,6 +51,7 @@
 #include "unit_pref.h"
 #include "profiles_http.h"
 #include "log_http.h"
+#include "adaptive_tune_http.h"
 #include "log_store_mount.h"
 #include "readiness_http.h"
 #include "relay_cycles.h"
@@ -1275,6 +1276,19 @@ void app_main(void)
     if (log_http_err != ESP_OK) {
         ESP_LOGW(TAG, "log_http_start failed: %s -- no /api/logs/* endpoints this boot",
                  esp_err_to_name(log_http_err));
+    }
+
+    // adaptive_tune_http.c: GET /api/adaptive_tune (status, all zones), POST
+    // /api/adaptive_tune/enable -- the operator's only way to reach Phase 7d
+    // continuous tuning (adaptive_tune.c). Registered here, after profile_
+    // executor_start() (above) has already called adaptive_tune_init() to
+    // load the persisted opt-in mask, and alongside the other read-mostly
+    // status APIs -- no ordering dependency beyond the shared httpd server
+    // already being up, same as log_http_start() just above.
+    esp_err_t adaptive_tune_http_err = adaptive_tune_http_start();
+    if (adaptive_tune_http_err != ESP_OK) {
+        ESP_LOGW(TAG, "adaptive_tune_http_start failed: %s -- no /api/adaptive_tune* endpoints this boot",
+                 esp_err_to_name(adaptive_tune_http_err));
     }
 
     // UI_PLAN.md "page structure rework" section: /diagnostics, /diagnostics/

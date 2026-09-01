@@ -7,14 +7,12 @@
 #include <string.h>
 #include <time.h>
 
-#include "esp_http_server.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "nvs.h"
 #include "nvs_flash.h"
 
-#include "http_form.h"
 #include "pid_autotune.h"
 #include "zones_http.h" // zones_config_get_model/set_model/get_pid/set_pid
 
@@ -31,12 +29,6 @@
 // only read (adaptive_tune_init()'s flag load) runs once at boot from
 // app_main's task, which is not PSRAM-stacked.
 esp_err_t uart_bridge_ext_run_on_flash_worker(void (*fn)(void *arg), void *arg);
-
-// wifi_provision_http.c's shared httpd handle accessor. Hand-declared for
-// the same host-test-stub-surface reason as the flash-worker declaration
-// above -- wifi_provision_http.h pulls in wifi/netif headers this file has
-// no other use for.
-httpd_handle_t wifi_provision_http_get_server(void);
 
 static const char *TAG = "adaptive_tune";
 
@@ -520,76 +512,12 @@ void adaptive_tune_get_status(uint8_t zone_index, adaptive_tune_zone_status_t *o
     xSemaphoreGive(s_lock);
 }
 
-// ---------------------------------------------------------------------
-// HTTP: GET /api/adaptive_tune (status, all zones), POST
-// /api/adaptive_tune/enable (form body "zone=<n>&enabled=<0|1>").
-// ---------------------------------------------------------------------
-
-static esp_err_t status_get_handler(httpd_req_t *req)
-{
-    char buf[96 * MAX31856_CHANNEL_COUNT + 64];
-    size_t off = 0;
-    off += (size_t)snprintf(buf + off, sizeof(buf) - off, "{\"zones\":[");
-    for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
-        adaptive_tune_zone_status_t st;
-        adaptive_tune_get_status(zi, &st);
-        off += (size_t)snprintf(
-            buf + off, sizeof(buf) - off,
-            "%s{\"zone\":%u,\"enabled\":%s,\"observation_count\":%u,\"has_applied\":%s,"
-            "\"prior_k_dc\":%.4f,\"applied_k_dc\":%.4f,\"delta_pct\":%.2f,\"last_profile_id\":%u,"
-            "\"last_applied_unix_s\":%u,\"refusal\":\"%s\"}",
-            zi == 0 ? "" : ",", (unsigned)zi, st.enabled ? "true" : "false", (unsigned)st.ring_count,
-            st.has_applied ? "true" : "false", (double)st.prior_k_dc, (double)st.applied_k_dc,
-            (double)st.last_delta_pct, (unsigned)st.last_applied_profile_id, (unsigned)st.last_applied_unix_s,
-            st.last_refusal_reason);
-        if (off >= sizeof(buf)) {
-            off = sizeof(buf) - 1; // truncated -- still a syntactically-recoverable prefix is not guaranteed,
-                                    // but MAX31856_CHANNEL_COUNT is small (<=5) and the buffer sized generously
-        }
-    }
-    snprintf(buf + off, sizeof(buf) - off, "]}");
-    httpd_resp_set_type(req, "application/json");
-    return httpd_resp_sendstr(req, buf);
-}
-
-#define ADAPTIVE_TUNE_ENABLE_BODY_MAX 64
-
-static esp_err_t enable_post_handler(httpd_req_t *req)
-{
-    if (req->content_len <= 0 || req->content_len > ADAPTIVE_TUNE_ENABLE_BODY_MAX) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body missing or too large");
-        return ESP_OK;
-    }
-    char body[ADAPTIVE_TUNE_ENABLE_BODY_MAX + 1];
-    size_t received = 0;
-    while (received < (size_t)req->content_len) {
-        int ret = httpd_req_recv(req, body + received, req->content_len - received);
-        if (ret <= 0) {
-            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body read failed");
-            return ESP_OK;
-        }
-        received += (size_t)ret;
-    }
-    body[received] = '\0';
-
-    char zone_val[8], en_val[8];
-    int zone_len = http_form_find_field(body, "zone", zone_val, sizeof(zone_val));
-    int en_len = http_form_find_field(body, "enabled", en_val, sizeof(en_val));
-    if (zone_len <= 0 || en_len <= 0) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "zone and enabled fields required");
-        return ESP_OK;
-    }
-    int zone = atoi(zone_val);
-    bool enabled = (atoi(en_val) != 0);
-    if (zone < 0 || zone >= MAX31856_CHANNEL_COUNT) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "zone out of range");
-        return ESP_OK;
-    }
-
-    bool saved = adaptive_tune_set_enabled((uint8_t)zone, enabled);
-    httpd_resp_set_type(req, "application/json");
-    return httpd_resp_sendstr(req, saved ? "{\"ok\":true}" : "{\"ok\":true,\"warning\":\"applied live, save failed\"}");
-}
+// HTTP registration lives in adaptive_tune_http.c now (GET /api/adaptive_tune,
+// POST /api/adaptive_tune/enable) -- split out so this file has no httpd
+// dependency at all; adaptive_tune_http.c reaches everything it needs through
+// the public accessors below (adaptive_tune_get_enabled/set_enabled/
+// get_status). Call adaptive_tune_http_start() separately (main.c does, near
+// log_http_start()) once the shared httpd server is up.
 
 void adaptive_tune_init(void)
 {
@@ -612,24 +540,7 @@ void adaptive_tune_init(void)
     }
     // ESP_ERR_NVS_NOT_FOUND (namespace never written) leaves every zone at
     // its struct-zero default: enabled = false. DEFAULT OFF, as required.
-
-    httpd_handle_t server = wifi_provision_http_get_server();
-    if (!server) {
-        ESP_LOGW(TAG, "no HTTP server yet -- adaptive tune status/enable endpoints not registered");
-        return;
-    }
-    static const httpd_uri_t status_uri = {
-        .uri = "/api/adaptive_tune", .method = HTTP_GET, .handler = status_get_handler,
-    };
-    static const httpd_uri_t enable_uri = {
-        .uri = "/api/adaptive_tune/enable", .method = HTTP_POST, .handler = enable_post_handler,
-    };
-    esp_err_t reg_err = httpd_register_uri_handler(server, &status_uri);
-    if (reg_err != ESP_OK) {
-        ESP_LOGE(TAG, "httpd_register_uri_handler(/api/adaptive_tune) failed: %s", esp_err_to_name(reg_err));
-    }
-    reg_err = httpd_register_uri_handler(server, &enable_uri);
-    if (reg_err != ESP_OK) {
-        ESP_LOGE(TAG, "httpd_register_uri_handler(/api/adaptive_tune/enable) failed: %s", esp_err_to_name(reg_err));
-    }
+    //
+    // No httpd registration here any more -- call adaptive_tune_http_start()
+    // separately once the shared httpd server is up (see adaptive_tune_http.c).
 }

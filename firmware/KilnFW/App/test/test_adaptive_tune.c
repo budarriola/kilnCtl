@@ -18,7 +18,6 @@
 #include "test_common.h"
 
 #include "esp_err.h"
-#include "esp_http_server.h"
 
 // Own executable (see this file's header comment).
 int g_test_failures = 0;
@@ -81,21 +80,10 @@ esp_err_t uart_bridge_ext_run_on_flash_worker(void (*fn)(void *arg), void *arg)
     return ESP_OK;
 }
 
-httpd_handle_t wifi_provision_http_get_server(void) { return NULL; }
-esp_err_t httpd_register_uri_handler(httpd_handle_t handle, const httpd_uri_t *uri_handler)
-{
-    (void)handle;
-    (void)uri_handler;
-    return ESP_OK;
-}
-esp_err_t httpd_resp_set_type(httpd_req_t *r, const char *type) { (void)r; (void)type; return ESP_OK; }
-esp_err_t httpd_resp_sendstr(httpd_req_t *r, const char *s) { (void)r; (void)s; return ESP_OK; }
-esp_err_t httpd_resp_send_err(httpd_req_t *r, httpd_err_code_t error, const char *msg)
-{
-    (void)r; (void)error; (void)msg;
-    return ESP_OK;
-}
-int httpd_req_recv(httpd_req_t *r, char *buf, size_t buf_len) { (void)r; (void)buf; (void)buf_len; return 0; }
+// No httpd fakes needed here any more -- adaptive_tune.c's HTTP surface
+// moved to adaptive_tune_http.c (2026-09-01 split), which this file does not
+// #include, so adaptive_tune.c itself now has no httpd_*/wifi_provision_
+// http_* symbols left to satisfy.
 
 #include "../drivers/adaptive_tune.c"
 
@@ -204,6 +192,103 @@ static void test_opt_in_default_off_records_nothing(void)
     adaptive_tune_run_end(&rec, true);
     TEST_CHECK(s_fake_zone_cfg[0].k_dc == k_before, "run_end on an opted-out zone must never touch its model");
     TEST_CHECK(!s_zones[0].has_applied, "an opted-out zone must never report an applied refinement");
+}
+
+// ---------------------------------------------------------------------
+// Public accessor tests -- these exercise EXACTLY the surface
+// adaptive_tune_http.c's status/enable handlers call (adaptive_tune_get_
+// enabled/set_enabled/get_status), not the internal s_zones struct
+// directly, so they prove the accessor path itself, not just the module's
+// internal state.
+// ---------------------------------------------------------------------
+
+static void test_default_off_for_every_zone(void)
+{
+    reset_module_state();
+    for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+        TEST_CHECK(adaptive_tune_get_enabled(zi) == false,
+                   "every zone's opt-in must default to OFF, via the public getter");
+    }
+}
+
+static void test_enable_one_zone_leaves_others_untouched(void)
+{
+    // Asymmetric fixture: enable ONLY zone 1, then assert zones 0 and 2
+    // (neighbours on either side) stay off -- a mask off-by-one or a
+    // transposed index would flip one of those two, not zone 1 itself.
+    reset_module_state();
+    nvs_test_clear();
+    nvs_test_enable(true); // adaptive_tune_set_enabled()'s return value reflects whether the NVS save
+                            // succeeded (see its own doc comment) -- the default-closed stub would make
+                            // even a correct live-apply report false, so this test needs the real round trip.
+    TEST_CHECK(adaptive_tune_set_enabled(1, true), "enabling zone 1 should report success");
+    TEST_CHECK(adaptive_tune_get_enabled(0) == false, "zone 0 must stay off when only zone 1 is enabled");
+    TEST_CHECK(adaptive_tune_get_enabled(1) == true, "zone 1 must be on");
+    TEST_CHECK(adaptive_tune_get_enabled(2) == false, "zone 2 must stay off when only zone 1 is enabled");
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
+static void test_enable_round_trips_through_persistence(void)
+{
+    // Real NVS round trip via stubs/nvs.h's opt-in stub store: enable zone 1
+    // only, then reload the module exactly as a reboot would
+    // (adaptive_tune_init() re-reads the en_mask byte from "flash") and
+    // check the reloaded state matches what was actually written, not what
+    // this test just set in RAM.
+    reset_module_state();
+    nvs_test_clear();
+    nvs_test_enable(true);
+
+    TEST_CHECK(adaptive_tune_set_enabled(1, true), "setting zone 1's opt-in should report success");
+
+    memset(s_zones, 0, sizeof(s_zones)); // simulate a reboot: RAM state gone
+    adaptive_tune_init();                // reload from the (stubbed) NVS namespace
+
+    TEST_CHECK(adaptive_tune_get_enabled(0) == false, "zone 0 must reload as off");
+    TEST_CHECK(adaptive_tune_get_enabled(1) == true, "zone 1 must reload as on -- this is the persisted value");
+    TEST_CHECK(adaptive_tune_get_enabled(2) == false, "zone 2 must reload as off");
+
+    nvs_test_enable(false); // leave the shared stub state as every other test in this binary expects
+    nvs_test_clear();
+}
+
+static void test_status_reports_engine_held_fields_not_test_written_values(void)
+{
+    // Drives a real refinement through adaptive_tune_run_end() (same as
+    // test_refinement_improves_gain_estimate_on_known_plant()) and then reads
+    // it back ONLY through adaptive_tune_get_status() -- the same accessor
+    // adaptive_tune_http.c's status handler calls. Every field checked here
+    // comes from the engine's own bookkeeping (z->ring_count, z->has_applied,
+    // z->prior_k_dc, z->applied_k_dc, ...), never a value this test wrote
+    // into the status struct itself.
+    reset_module_state();
+    s_zones[1].enabled = true;
+    s_fake_zone_cfg[1].k_dc = 10.0f; // prior -- true gain 15
+    const float true_k = 15.0f, ambient = 22.3f;
+    const float duties[4] = {0.20f, 0.50f, 0.80f, 0.35f};
+    for (int i = 0; i < 4; i++) {
+        feed_settled_dwell(1, ambient + true_k * duties[i], ambient, duties[i], SETTLE_TICKS, DT_S);
+    }
+
+    adaptive_tune_zone_status_t before;
+    adaptive_tune_get_status(1, &before);
+    TEST_CHECK(before.enabled == true, "status must reflect this zone's opt-in");
+    TEST_CHECK(before.ring_count == 4, "status must report the 4 dwell observations collected so far");
+    TEST_CHECK(before.has_applied == false, "no refinement has run yet -- has_applied must still be false");
+
+    profile_firing_run_record_t rec = make_clean_record(7, 1, 900);
+    adaptive_tune_run_end(&rec, true);
+
+    adaptive_tune_zone_status_t after;
+    adaptive_tune_get_status(1, &after);
+    TEST_CHECK(after.has_applied == true, "status must report the refinement as applied");
+    TEST_CHECK_NEAR(after.prior_k_dc, 10.0f, 1e-4, "status's prior_k_dc must be the model K_dc before this apply");
+    TEST_CHECK(after.applied_k_dc > after.prior_k_dc,
+               "status's applied_k_dc must show the new (higher, toward true gain 15) K_dc");
+    TEST_CHECK(after.last_delta_pct > 0.0f, "status's last_delta_pct must be positive (K_dc moved up)");
+    TEST_CHECK(after.last_applied_profile_id == 7, "status must report which profile produced the applied change");
+    TEST_CHECK(after.last_refusal_reason[0] == '\0', "a clean apply must leave the refusal reason empty");
 }
 
 static void test_min_observations_guard_rejects_too_few(void)
@@ -368,6 +453,12 @@ void run_test_adaptive_tune(void)
 
     TEST_SECTION("adaptive_tune: opt-in default off");
     test_opt_in_default_off_records_nothing();
+
+    TEST_SECTION("adaptive_tune: public accessor surface (same one adaptive_tune_http.c calls)");
+    test_default_off_for_every_zone();
+    test_enable_one_zone_leaves_others_untouched();
+    test_enable_round_trips_through_persistence();
+    test_status_reports_engine_held_fields_not_test_written_values();
 
     TEST_SECTION("adaptive_tune: guards");
     test_min_observations_guard_rejects_too_few();

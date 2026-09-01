@@ -407,6 +407,38 @@ across a band twice this wide)</label>
      never refused should show nothing extra here. -->
 <p id="atRefusal" class="verdict-bad" style="display:none;"></p>
 
+<h3>Tuning quality</h3>
+<!-- 2026-09-01: set 1 of the owner's two-sets request ("one for the pid
+     tuneing that stays unless retuned, and another for the last fireing
+     run"). This is the ONE-PER-ZONE record of how well the CURRENTLY-
+     ACTIVE gains were fitted -- it survives until the zone is next
+     re-tuned (an autotune accept, NOT a firing) and is invalidated the
+     instant those gains change any other way (a manual PID edit, an
+     adaptive-tune re-blend, a backup restore). This is deliberately a
+     DIFFERENT thing from "Firing quality" just below, which is set 2: a
+     history of how well the kiln actually tracked target during past
+     RUNS, using whatever gains happened to be active at the time. A zone
+     can have excellent tuning quality (a clean, converged fit) and still
+     fire badly (a cold load, a draft, a bad element) -- or the reverse --
+     so the two tables are kept visually and textually separate rather than
+     merged into one "quality" column that would blur which question is
+     being answered. -->
+<p class="hint">One row per zone, read-only. <b>Unknown</b> means this
+zone has never been autotuned (or was hand-edited since), not that the fit
+was bad. <b>Settled/Converged/Tau ok</b> are the three fit-confidence flags
+autotune_engine_accept() gates acceptance on -- see the Autotune section
+above for what each means; a fit that reached DONE with one or more of these
+false can still have been accepted (with an explicit override), so seeing
+"no" here does not mean the currently-active gains are wrong, only that they
+came from a lower-confidence fit. <b>Extrap. correction</b> is how much of
+the fitted gain was extrapolated past the trace's own data rather than
+directly measured (rise at infinity minus the trace's raw last-sample rise)
+-- a large correction means a weaker fit even when every flag above reads
+yes.</p>
+<div class="table-scroll">
+<div id="tuningQuality"><p class="empty">Loading…</p></div>
+</div>
+
 <h3>Firing quality</h3>
 <!-- 2026-09-01 follow-up: moved here from main_page.html (owner: "this is
      far too messy, put this in the zones page and make it readable" --
@@ -474,6 +506,36 @@ where they are not.</p>
 <!-- Same table-scroll wrapper reasoning as #couplingMatrix above. -->
 <div class="table-scroll">
 <div id="rgaMatrix"><p class="empty">Not computable yet.</p></div>
+</div>
+
+<!-- PID_EXPANSION_PLAN.md Phase 7d: continuous/adaptive tuning
+     (adaptive_tune.c/adaptive_tune_http.c). Deliberately its own section,
+     visually distinct from "PID Autotune" above -- Autotune RUNS A TEST NOW
+     (owns the zone's relay, heats it on purpose, needs the kiln empty and
+     attended); this is the opposite shape: it opts a zone in to quietly
+     learning from firings it would be running anyway, with no test of its
+     own and no extra heat. Confusing the two would mean an operator either
+     expects a step test to be running when it never will be, or skips this
+     because "I already ran Autotune" -- unrelated questions. -->
+<h2>Continuous Tuning (learn from firings)</h2>
+<p class="hint">A different thing from PID Autotune above: this runs <b>no
+test of its own</b> and applies <b>no extra heat</b>. When a zone is opted
+in here, every ORDINARY firing profile you run doubles as tuning data --
+once a dwell segment settles, this quietly banks one (duty, steady-state
+rise) observation for that zone. At the END of a clean run (never during
+one -- see below), if enough good observations have piled up, it refits
+that zone's steady-state gain (K_dc), blends it a little at a time with the
+existing model, and recomputes Kp/Ki/Kd through the exact same SIMC rule
+Autotune's own Accept button uses. <b>Off by default, per zone</b> -- opting
+in is a deliberate choice, not something that starts on its own.</p>
+<p class="hint" style="color: var(--ok);"><b>Safety property:</b> gains are
+only ever changed at the very end of a run, after that zone's relay(s) are
+already off and it is no longer being actively controlled -- never
+mid-firing. A change here can never bump a firing that is currently in
+progress; the earliest it can affect anything is the NEXT time that zone
+fires.</p>
+<div class="table-scroll">
+<div id="adaptiveTuneZones"><p class="empty">Loading&hellip;</p></div>
 </div>
 
 <script>
@@ -1365,6 +1427,7 @@ function loadCurrent() {
       populateAutotuneZones();
       renderSafetyWiring(data.safety_wiring);
       renderCtWarnings(data.ct_warn_mask, data.zones);
+      renderTuningQuality(data.zones);
     } catch (err) {
       if (window.console) console.error('zones page render failed', err);
       document.getElementById('zones').innerHTML =
@@ -1984,6 +2047,55 @@ function thermoCountForRga() {
 // main_page.html's fmtDuration/zoneName helpers don't exist here and this
 // page's own convention (see the RGA verdict text above) is a bare
 // "Zone N", not a resolved custom name.
+// 2026-09-01: set 1's render, right next to fmtStatsElapsed() since both are
+// small formatting helpers for the two quality tables. Numeric raw values
+// (tuning_method/tuning_rule) match autotune_method_t/autotune_rule_t's own
+// enum order (autotune_engine.h/pid_autotune.h) -- this is a DIFFERENT wire
+// convention from #atRule above, which posts the STEP path's rule as a
+// string ("simc"/"cohen-coon"); this table reads back the raw stored enum
+// value zones_config_set_tuning_quality() persisted, so it is indexed here
+// rather than reusing that string table.
+var TUNING_METHOD_NAMES = ['Step', 'Relay'];
+var TUNING_RULE_NAMES = ['SIMC', 'Ziegler-Nichols', 'Tyreus-Luyben', 'Cohen-Coon'];
+
+function yesNo(b) {
+  return b ? 'yes' : 'no';
+}
+
+function renderTuningQuality(zones) {
+  var el = document.getElementById('tuningQuality');
+  if (!el) return;
+  if (!zones || !zones.length) {
+    el.innerHTML = '<p class="empty">No zone config loaded.</p>';
+    return;
+  }
+  var html = '<table class="coupling firingstats">';
+  html += '<tr><th>Zone</th><th>Method</th><th>Rule</th>' +
+    '<th title="The three fit-confidence flags autotune_engine_accept() gates acceptance on">Settled / Converged / Tau ok</th>' +
+    '<th class="num" title="Baseline and step-ambient temperature the fit was measured from">Baseline / Ambient</th>' +
+    '<th class="num" title="Extrapolated asymptote rise minus the trace\'s raw measured rise -- how much of the gain was extrapolated rather than directly measured">Extrap. correction</th>' +
+    '<th class="num" title="Bumped every time this zone\'s record is (re)written -- a cheap run counter, not a wall-clock time">Seq</th></tr>';
+  zones.forEach(function (z, i) {
+    if (!z.tuning_valid) {
+      html += '<tr><td>Zone ' + i + '</td><td colspan="6" class="empty">Unknown -- never autotuned, or ' +
+        'gains changed since (manual edit, adaptive re-tune, or restore).</td></tr>';
+      return;
+    }
+    var deg = '°C';
+    var extrap = z.tuning_rise_inf_c - z.tuning_raw_rise_c;
+    html += '<tr><td>Zone ' + i + '</td>' +
+      '<td>' + (TUNING_METHOD_NAMES[z.tuning_method] || 'unknown') + '</td>' +
+      '<td>' + (TUNING_RULE_NAMES[z.tuning_rule] || 'unknown') + '</td>' +
+      '<td>' + yesNo(z.tuning_settled) + ' / ' + yesNo(z.tuning_extrapolation_converged) + ' / ' +
+        yesNo(z.tuning_tau_consistent) + '</td>' +
+      '<td class="num">' + z.tuning_baseline_c.toFixed(1) + ' / ' + z.tuning_step_ambient_c.toFixed(1) + ' ' + deg + '</td>' +
+      '<td class="num">' + (extrap >= 0 ? '+' : '') + extrap.toFixed(2) + ' ' + deg + '</td>' +
+      '<td class="num">' + z.tuning_seq + '</td></tr>';
+  });
+  html += '</table>';
+  el.innerHTML = html;
+}
+
 function fmtStatsElapsed(s) {
   if (s === null || s === undefined || isNaN(s)) return 'n/a';
   s = Math.max(0, Math.round(s));
@@ -2166,6 +2278,75 @@ setInterval(pollCouplingMatrix, 5000);
 pollCouplingMatrix();
 setInterval(pollFiringStatsCurrent, 5000);
 pollFiringStatsCurrent();
+
+// Continuous/adaptive tuning (adaptive_tune.c via adaptive_tune_http.c) --
+// GET /api/adaptive_tune reports every zone's opt-in + observation count +
+// last-applied-refinement fields; POST /api/adaptive_tune/enable flips one
+// zone's opt-in. Same poll-loop shape as pollCouplingMatrix()/
+// pollFiringStatsCurrent() above so a slow/failed fetch here never blocks
+// the rest of the page. Zone count comes from thermoCount (same field
+// populateAutotuneZones() reads) -- adaptive_tune.c's own
+// MAX31856_CHANNEL_COUNT ceiling means the endpoint always reports every
+// possible zone slot, but only the ones actually configured are shown here.
+function adaptiveTuneRefusalHtml(z) {
+  if (z.has_applied === false && !z.refusal) {
+    return '<span class="hint">No refinement attempted yet.</span>';
+  }
+  if (z.refusal) {
+    return '<span class="hint" title="Most recent run-end attempt">Last attempt: ' +
+           window.kcEscapeHtml(z.refusal) + '</span>';
+  }
+  return '<span class="hint">Last attempt applied cleanly.</span>';
+}
+function pollAdaptiveTune() {
+  var el = document.getElementById('adaptiveTuneZones');
+  if (!el) return;
+  var thermoCount = parseInt(document.getElementById('thermoCount').value, 10) || 0;
+  fetch('/api/adaptive_tune').then(function (r) { return r.json(); }).then(function (s) {
+    if (thermoCount === 0 || !s.zones || !s.zones.length) {
+      el.innerHTML = '<p class="empty">No zones configured.</p>';
+      return;
+    }
+    var html = '<table class="coupling"><tr><th>Zone</th><th>Learn from firings</th><th>Observations</th>' +
+               '<th>Last applied change</th><th>Last run-end result</th></tr>';
+    for (var i = 0; i < thermoCount && i < s.zones.length; i++) {
+      var z = s.zones[i];
+      var name = (current.zones[i] && current.zones[i].name) ? ' (' + current.zones[i].name + ')' : '';
+      var appliedHtml;
+      if (z.has_applied) {
+        var sign = z.delta_pct >= 0 ? '+' : '';
+        appliedHtml = 'K ' + z.prior_k_dc.toFixed(3) + ' &rarr; ' + z.applied_k_dc.toFixed(3) +
+                      ' (' + sign + z.delta_pct.toFixed(1) + '%), from profile #' + z.last_profile_id;
+      } else {
+        appliedHtml = '<span class="empty">no refinement applied yet</span>';
+      }
+      html += '<tr><td>Zone ' + i + name + '</td>' +
+              '<td><label><input type="checkbox" class="adaptivetunebit" data-zone="' + i + '"' +
+              (z.enabled ? ' checked' : '') + '> ' + (z.enabled ? 'On' : 'Off (default)') + '</label></td>' +
+              '<td>' + z.observation_count + ' held' +
+              (z.observations_lifetime !== undefined ? ' / ' + z.observations_lifetime + ' total this boot' : '') +
+              '</td>' +
+              '<td>' + appliedHtml + '</td>' +
+              '<td>' + adaptiveTuneRefusalHtml(z) + '</td></tr>';
+    }
+    html += '</table>';
+    el.innerHTML = html;
+    el.querySelectorAll('.adaptivetunebit').forEach(function (cb) {
+      cb.addEventListener('change', function () {
+        var zone = this.dataset.zone;
+        var enabled = this.checked;
+        this.disabled = true;
+        fetch('/api/adaptive_tune/enable', {
+          method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: 'zone=' + zone + '&enabled=' + (enabled ? '1' : '0'),
+        }).then(function () { pollAdaptiveTune(); }).catch(function () { pollAdaptiveTune(); });
+      });
+    });
+  }).catch(function () {});
+}
+setInterval(pollAdaptiveTune, 5000);
+pollAdaptiveTune();
+document.getElementById('thermoCount').addEventListener('change', pollAdaptiveTune);
 
 function updateStepRuleDesc() {
   var rule = document.getElementById('atStepRule').value;

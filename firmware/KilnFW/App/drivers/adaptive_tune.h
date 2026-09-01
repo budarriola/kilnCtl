@@ -63,13 +63,14 @@ typedef struct {
                                         // or none has been attempted yet; otherwise why it did not
 } adaptive_tune_zone_status_t;
 
-// Loads the per-zone opt-in flags from this module's own NVS namespace and
-// registers its two HTTP endpoints on the shared httpd server
-// (wifi_provision_http_get_server()). Call once at boot; profile_executor.c
-// does this from profile_executor_start(), since this file owns no init
-// entry point of its own in main.c. Safe to call from app_main's task (not
-// PSRAM-stacked) -- see adaptive_tune.c's top comment for the read-vs-write
-// stack-safety split.
+// Loads the per-zone opt-in flags from this module's own NVS namespace.
+// Call once at boot; profile_executor.c does this from profile_executor_
+// start(), since this file owns no init entry point of its own in main.c.
+// Safe to call from app_main's task (not PSRAM-stacked) -- see adaptive_
+// tune.c's top comment for the read-vs-write stack-safety split. Registers
+// NO HTTP endpoints itself -- see adaptive_tune_http.h's adaptive_tune_http_
+// start() for those (GET /api/adaptive_tune, POST /api/adaptive_tune/enable),
+// called separately from main.c once the shared httpd server is up.
 void adaptive_tune_init(void);
 
 // Called once per control tick, per active zone, from profile_executor.c's

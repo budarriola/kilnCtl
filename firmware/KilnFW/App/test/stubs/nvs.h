@@ -35,17 +35,31 @@ typedef enum {
  * note). One single blob slot only -- enough for one module's one key at a
  * time, which is all any test needs; a second concurrent key would need a
  * real per-(namespace,key) map this stub deliberately does not build. */
-/* 6144, not 2048: kiln_cfg_store.c's host test (test_kiln_cfg_store.c) needs
- * to round-trip a REAL full-size kiln_cfg_store_blob_t (5420 bytes as of
- * ZONES_CONFIG_BLOB_MAX_SIZE=640) and kiln_cfg_store_blob_v1_t (4396 bytes)
- * through this stub to exercise nvs_load_store()'s migration path -- the
- * exact path where those structs previously lived as oversized function
- * locals and blew app_main's stack. A slot too small to hold them just
- * makes that path silently untestable again. */
+/* 6144 -> 7168 (2026-09-01, ZONES_CFG_VERSION 12->13, the tuning-quality
+ * record: ZONES_CONFIG_BLOB_MAX_SIZE 640->768 grows kiln_cfg_store_blob_t by
+ * 128 bytes * KILN_CFG_MAX_COUNT (8) = 1024 bytes, which no longer fits the
+ * old 6144-byte slot). Originally sized so kiln_cfg_store.c's host test
+ * (test_kiln_cfg_store.c) could round-trip a REAL full-size
+ * kiln_cfg_store_blob_t (5420 bytes as of ZONES_CONFIG_BLOB_MAX_SIZE=640)
+ * and kiln_cfg_store_blob_v1_t (4396 bytes) through this stub to exercise
+ * nvs_load_store()'s migration path -- the exact path where those structs
+ * previously lived as oversized function locals and blew app_main's stack.
+ * A slot too small to hold them just makes that path silently untestable
+ * again. */
 static bool s_stub_nvs_enabled = false;
-static uint8_t s_stub_nvs_blob[6144];
+static uint8_t s_stub_nvs_blob[7168];
 static size_t s_stub_nvs_blob_len = 0;
 static bool s_stub_nvs_has_blob = false;
+
+/* Added for adaptive_tune.c's host test (test_adaptive_tune.c): its opt-in
+ * round-trip needs a REAL nvs_set_u8()/nvs_get_u8() round trip (the en_mask
+ * byte), which the pre-existing always-write-nowhere/always-not-found
+ * u8 stubs below could not provide -- same one-slot-is-enough reasoning as
+ * the blob slot above, since this module uses exactly one key. Only takes
+ * effect when nvs_test_enable(true) has been called, so every other test
+ * relying on "u8 reads always fail closed" is unaffected. */
+static uint8_t s_stub_nvs_u8_val = 0;
+static bool s_stub_nvs_has_u8 = false;
 
 static inline void nvs_test_enable(bool enable)
 {
@@ -56,6 +70,8 @@ static inline void nvs_test_clear(void)
 {
     s_stub_nvs_has_blob = false;
     s_stub_nvs_blob_len = 0;
+    s_stub_nvs_has_u8 = false;
+    s_stub_nvs_u8_val = 0;
 }
 
 static inline esp_err_t nvs_open_from_partition(const char *partition, const char *ns, int mode, nvs_handle_t *out)
@@ -85,15 +101,24 @@ static inline esp_err_t nvs_get_u8(nvs_handle_t h, const char *key, uint8_t *out
 {
     (void)h;
     (void)key;
-    (void)out;
-    return ESP_ERR_NVS_NOT_FOUND;
+    if (!s_stub_nvs_enabled || !s_stub_nvs_has_u8) {
+        return ESP_ERR_NVS_NOT_FOUND;
+    }
+    if (out) {
+        *out = s_stub_nvs_u8_val;
+    }
+    return ESP_OK;
 }
 
 static inline esp_err_t nvs_set_u8(nvs_handle_t h, const char *key, uint8_t val)
 {
     (void)h;
     (void)key;
-    (void)val;
+    if (!s_stub_nvs_enabled) {
+        return ESP_OK; /* pre-existing "always succeeds, nothing actually stored" behavior */
+    }
+    s_stub_nvs_u8_val = val;
+    s_stub_nvs_has_u8 = true;
     return ESP_OK;
 }
 
