@@ -3547,6 +3547,12 @@ bool autotune_engine_accept(bool ack_unsettled)
     autotune_method_t method = s_at.method;
     autotune_gains_t g = s_at.proposed_gains;
     fopdt_model_t m = s_at.model;
+    /* Captured here, under the same lock as everything else above, for the
+     * tuning-quality record written below -- see zones_config_set_tuning_
+     * quality()'s own comment (zones_http.h) for why this belongs alongside
+     * the model/gains rather than re-read from s_at after the lock is
+     * released (a new run could already be starting by then). */
+    float step_ambient_c = s_at.step_ambient_c;
     xSemaphoreGive(s_at.lock);
 
     if (!zones_config_set_pid(zone, g.kp, g.ki, g.kd)) {
@@ -3589,11 +3595,41 @@ bool autotune_engine_accept(bool ack_unsettled)
      * feedback alone -- exactly how every zone ran before this existed --
      * and it is recoverable by re-running the test. Losing the accepted
      * gains to a false return would not be. */
-    if (!zones_config_set_model(zone, m.k_gain_c_per_duty, m.tau_s, m.dead_time_s)) {
+    bool model_persisted = zones_config_set_model(zone, m.k_gain_c_per_duty, m.tau_s, m.dead_time_s);
+    if (!model_persisted) {
         ESP_LOGW(TAG,
                  "autotune zone %u: gains accepted but plant model (K=%.2f tau=%.1f L=%.1f) was rejected or "
                  "failed to persist -- feedforward will stay off for this zone",
                  zone, (double)m.k_gain_c_per_duty, (double)m.tau_s, (double)m.dead_time_s);
+    }
+    /* ZONES_CFG_VERSION 12->13: the tuning-quality record (set 1 -- see
+     * zone_cfg_t::tuning_valid's own doc comment). Written ONLY after the
+     * gains (above) and the model (just above) are both already persisted --
+     * a quality record attached to a model that failed to save would
+     * describe a fit the zone isn't actually running. zones_config_set_pid()
+     * already invalidated any PRIOR record unconditionally the moment it ran
+     * (see that function's own comment), so this call is what re-establishes
+     * a fresh one for the run that just completed; a failure here is logged,
+     * not propagated, for the exact same reason the model-persist failure
+     * just above isn't -- the gains and model the operator actually clicked
+     * Accept for are already live either way. */
+    if (model_persisted) {
+        zone_tuning_quality_t q = {
+            .valid = true,
+            .method = (uint8_t)method,
+            .rule = (uint8_t)g.rule,
+            .settled = m.settled,
+            .extrapolation_converged = m.extrapolation_converged,
+            .tau_consistent = m.tau_consistent_with_gain,
+            .baseline_c = m.baseline_c,
+            .step_ambient_c = step_ambient_c,
+            .raw_rise_c = m.raw_rise_c,
+            .rise_inf_c = m.rise_inf_c,
+        };
+        if (!zones_config_set_tuning_quality(zone, &q)) {
+            ESP_LOGW(TAG, "autotune zone %u: gains and model accepted but the tuning-quality record "
+                          "was rejected or failed to persist", zone);
+        }
     }
 
     xSemaphoreTake(s_at.lock, portMAX_DELAY);

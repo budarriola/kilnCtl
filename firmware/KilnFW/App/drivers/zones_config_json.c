@@ -44,6 +44,7 @@ static size_t expected_len_for_version(uint8_t version)
     case 9: return sizeof(zones_cfg_v9_t);
     case 10: return sizeof(zones_cfg_v10_t);
     case 11: return sizeof(zones_cfg_v11_t);
+    case 12: return sizeof(zones_cfg_v12_t);
     case ZONES_CFG_VERSION: return sizeof(zones_cfg_t);
     default: return 0;
     }
@@ -440,6 +441,63 @@ static void convert_zone_v11(const zone_cfg_v11_t *s, zone_cfg_t *d)
      * convert_zone_v9()'s own comment uses for fuzzy_strength_pct/
      * coupling_coeff[] there. */
     d->settings_source = s->settings_source;
+    /* tuning_*: not touched -- the memset above already left tuning_valid at
+     * 0 ("unknown"), same convention. A v11 blob never stored a tuning
+     * quality record, so there is nothing to carry into it -- see
+     * ZONES_CFG_VERSION's 12->13 comment (zone_cfg_t) for why 0/unknown here
+     * is exactly right rather than a placeholder needing a later fixup. */
+}
+
+/* v12 -> v13 (this pass): field-for-field carry-through, same shape as
+ * convert_zone_v11() above -- v12 already has coupling_tau_s[]/
+ * coupling_dead_time_s[] in their CURRENT shape, so there is no folding to
+ * do here either. The only real migration is convert_zone_v12() leaving
+ * every tuning_* field at its zeroed "unknown" default via the memset below
+ * -- a v12 blob never stored a tuning quality record at all, so there is
+ * nothing to carry into it; see ZONES_CFG_VERSION's 12->13 comment
+ * (zone_cfg_t) for why 0/tuning_valid==0 is exactly the right "unknown"
+ * value here, not a placeholder that needs a later fixup, and specifically
+ * why it must NOT read as a real (if zero-valued) measurement. */
+static void convert_zone_v12(const zone_cfg_v12_t *s, zone_cfg_t *d)
+{
+    memset(d, 0, sizeof(*d));
+    memcpy(d->name, s->name, sizeof(d->name));
+    d->relay_mask = s->relay_mask;
+    d->cal_offset_c = s->cal_offset_c;
+    d->pid_kp = s->pid_kp;
+    d->pid_ki = s->pid_ki;
+    d->pid_kd = s->pid_kd;
+    d->max_ramp_c_per_hr = s->max_ramp_c_per_hr;
+    d->sanity_rate_c_per_min = s->sanity_rate_c_per_min;
+    d->control_mode = s->control_mode;
+    d->max_temp_c = s->max_temp_c;
+    d->min_temp_c = s->min_temp_c;
+    d->heater_window_ms = s->heater_window_ms;
+    d->heater_min_on_ms = s->heater_min_on_ms;
+    d->heater_min_off_ms = s->heater_min_off_ms;
+    d->guard_wrong_dir_window_s = s->guard_wrong_dir_window_s;
+    d->guard_wrong_dir_rate_c_per_min = s->guard_wrong_dir_rate_c_per_min;
+    d->guard_off_settle_s = s->guard_off_settle_s;
+    d->guard_runaway_rate_c_per_min = s->guard_runaway_rate_c_per_min;
+    d->guard_runaway_margin_c = s->guard_runaway_margin_c;
+    d->guard_drift_period_s = s->guard_drift_period_s;
+    d->guard_sensor_fault_debounce_ticks = s->guard_sensor_fault_debounce_ticks;
+    d->guard_frozen_window_s = s->guard_frozen_window_s;
+    d->cross_zone_max_delta_c = s->cross_zone_max_delta_c;
+    d->tc_type = s->tc_type;
+    d->model_k_dc = s->model_k_dc;
+    d->model_tau_s = s->model_tau_s;
+    d->model_dead_time_s = s->model_dead_time_s;
+    d->thermo_mask = s->thermo_mask;
+    d->ct_mask = s->ct_mask;
+    d->timing_profile = s->timing_profile;
+    d->fuzzy_strength_pct = s->fuzzy_strength_pct;
+    memcpy(d->coupling_coeff, s->coupling_coeff, sizeof(d->coupling_coeff));
+    memcpy(d->coupling_tau_s, s->coupling_tau_s, sizeof(d->coupling_tau_s));
+    memcpy(d->coupling_dead_time_s, s->coupling_dead_time_s, sizeof(d->coupling_dead_time_s));
+    d->settings_source = s->settings_source;
+    /* tuning_*: not touched -- the memset above already left tuning_valid at
+     * 0 ("unknown"). */
 }
 
 /* Versions 1-7 predate the nine timing-override fields entirely -- there is
@@ -741,6 +799,31 @@ static bool convert_versioned_blob_to_current(uint8_t version, const void *blob,
         }
         /* src.crc32 deliberately NOT carried over -- it covered the v11
          * shape; nvs_save() stamps a fresh one over the current (v12)
+         * struct. */
+        return true;
+    }
+    case 12: {
+        /* v12 -> v13 (this pass): field-for-field carry-through, same shape
+         * as case 11 above -- timing_profiles[]/timing_profile_count are
+         * still in their CURRENT shape. The only real migration is
+         * convert_zone_v12() leaving every tuning_* field at its zeroed
+         * "unknown" default; see that function's own comment and
+         * ZONES_CFG_VERSION's 12->13 comment. */
+        zones_cfg_v12_t src;
+        memcpy(&src, blob, sizeof(src));
+        out->thermo_count = src.thermo_count;
+        out->relay_count = src.relay_count;
+        out->max_simultaneous_relays = src.max_simultaneous_relays;
+        out->continue_on_zone_trip = src.continue_on_zone_trip;
+        out->safety_tc_type = src.safety_tc_type;
+        out->pc_link_abort_silence_ms = src.pc_link_abort_silence_ms; /* real v12 value */
+        out->timing_profile_count = src.timing_profile_count;
+        memcpy(out->timing_profiles, src.timing_profiles, sizeof(out->timing_profiles));
+        for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
+            convert_zone_v12(&src.zones[i], &out->zones[i]);
+        }
+        /* src.crc32 deliberately NOT carried over -- it covered the v12
+         * shape; nvs_save() stamps a fresh one over the current (v13)
          * struct. */
         return true;
     }
@@ -1335,6 +1418,37 @@ bool zones_config_json_validate(const zones_cfg_t *cand, const char **err_reason
          * still leaves a readable, in-range index here). */
         if (z->settings_source != ZONE_SETTINGS_SOURCE_CUSTOM && z->settings_source >= MAX31856_CHANNEL_COUNT) {
             *err_reason = "zone settings_source references a zone that doesn't exist";
+            return false;
+        }
+        /* ZONES_CFG_VERSION 12->13: the tuning-quality record (set 1 -- see
+         * zone_cfg_t::tuning_valid's own doc comment). tuning_valid gates
+         * every other tuning_* field: when it is false (0), a migrated-old-
+         * config or a manually-edited zone reads "unknown", and the values
+         * below are not meaningful -- so only bounds-check them (never a
+         * cross-field consistency check that would refuse a legitimately
+         * zeroed/unknown record) regardless of tuning_valid, same
+         * "reject nothing that came off flash as garbage, but don't demand a
+         * populated record either" discipline the rest of this loop applies
+         * to every other optional field. */
+        if (z->tuning_valid > 1) {
+            *err_reason = "zone tuning_valid out of range";
+            return false;
+        }
+        if (z->tuning_method > 1) { /* autotune_method_t: 0=STEP, 1=RELAY */
+            *err_reason = "zone tuning_method out of range";
+            return false;
+        }
+        if (z->tuning_rule > 3) { /* autotune_rule_t: SIMC/ZN/Tyreus-Luyben/Cohen-Coon, 0-3 */
+            *err_reason = "zone tuning_rule out of range";
+            return false;
+        }
+        if (z->tuning_settled > 1 || z->tuning_extrapolation_converged > 1 || z->tuning_tau_consistent > 1) {
+            *err_reason = "zone tuning quality flag out of range";
+            return false;
+        }
+        if (!isfinite(z->tuning_baseline_c) || !isfinite(z->tuning_step_ambient_c) ||
+            !isfinite(z->tuning_raw_rise_c) || !isfinite(z->tuning_rise_inf_c)) {
+            *err_reason = "zone tuning quality temperature out of range";
             return false;
         }
     }

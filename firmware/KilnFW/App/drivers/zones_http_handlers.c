@@ -92,8 +92,17 @@ esp_err_t zones_get_handler(httpd_req_t *req)
      * of 8192 live). At 5760 bytes this one buffer alone was more than 70%
      * of the entire 8192-byte task stack. Freed on every return path
      * (success and truncated). */
-    const size_t json_cap = 6528; /* heap buffer (heap_caps_malloc below, not
-                      * stack). 5760 -> 6528 (2026-08-31, ZONES_CFG_VERSION
+    const size_t json_cap = 7360; /* heap buffer (heap_caps_malloc below, not
+                      * stack). 6528 -> 7360 (2026-09-01, ZONES_CFG_VERSION
+                      * 12->13, the tuning-quality record): 11 new keys a
+                      * zone (tuning_valid/method/rule/settled/extrapolation_
+                      * converged/tau_consistent/baseline_c/step_ambient_c/
+                      * raw_rise_c/rise_inf_c/seq), worst case ~35 bytes each
+                      * ("tuning_extrapolation_converged":false, is the
+                      * longest) = ~385 bytes/zone x MAX31856_CHANNEL_COUNT
+                      * (3) zones = ~1155 bytes, leaving ~677 bytes of
+                      * headroom in the 832 bytes this bump grants.
+                      * 5760 -> 6528 (2026-08-31, ZONES_CFG_VERSION
                       * 11->12): coupling_tau_c%u/coupling_dead_time_c%u add
                       * two more indexed keys per cell alongside coupling_c%u.
                       * Worst case per cell is both new keys at once:
@@ -335,6 +344,24 @@ esp_err_t zones_get_handler(httpd_req_t *req)
             APPEND("\"coupling_tau_c%u\":%.1f,\"coupling_dead_time_c%u\":%.1f,", j,
                    (double)z->coupling_tau_s[j], j, (double)z->coupling_dead_time_s[j]);
         }
+        /* ZONES_CFG_VERSION 12->13: the tuning-quality record (set 1 -- see
+         * zone_cfg_t::tuning_valid's own doc comment), read-only here (the
+         * POST side never accepts these back -- see this endpoint's own
+         * comment on normal_current_measured/normal_current_a above for the
+         * identical "measured data, not an operator-entered field"
+         * reasoning). Always emitted, tuning_valid included, so the page can
+         * tell "measured" from "unknown" without a missing key meaning
+         * something different from a present-but-invalid one -- same
+         * always-emit convention as model_k_dc/etc. */
+        APPEND("\"tuning_valid\":%s,\"tuning_method\":%u,\"tuning_rule\":%u,"
+               "\"tuning_settled\":%s,\"tuning_extrapolation_converged\":%s,\"tuning_tau_consistent\":%s,"
+               "\"tuning_baseline_c\":%.2f,\"tuning_step_ambient_c\":%.2f,"
+               "\"tuning_raw_rise_c\":%.2f,\"tuning_rise_inf_c\":%.2f,\"tuning_seq\":%u,",
+               z->tuning_valid ? "true" : "false", z->tuning_method, z->tuning_rule,
+               z->tuning_settled ? "true" : "false", z->tuning_extrapolation_converged ? "true" : "false",
+               z->tuning_tau_consistent ? "true" : "false",
+               (double)z->tuning_baseline_c, (double)z->tuning_step_ambient_c,
+               (double)z->tuning_raw_rise_c, (double)z->tuning_rise_inf_c, (unsigned)z->tuning_seq);
         APPEND("\"settings_source\":%u}", z->settings_source);
     }
     APPEND("]}");
@@ -604,6 +631,54 @@ static bool parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_count,
     if (!zones_config_json_parse_float_field(body, key, 0.0f, ZONE_PID_GAIN_MAX, &z->pid_kd)) {
         *err_reason = "zone pid_kd missing or out of range";
         return false;
+    }
+    /* ZONES_CFG_VERSION 12->13: invalidate the tuning-quality record (set 1
+     * -- see zone_cfg_t::tuning_valid's own doc comment) when THIS path
+     * changes the gains. *z started as *current_z (this function's own
+     * comment/caller, "omit-means-preserve"), so z->tuning_valid already
+     * carries the OLD record forward untouched by default -- exactly the
+     * reset-one-side shape this whole feature exists to avoid, since this
+     * whole-page submit writes pid_kp/ki/kd directly into the scratch
+     * struct and never goes through zones_config_set_pid() (the narrow
+     * POST /api/zones/pid endpoint's own choke point). A gain that reads
+     * back identical to what was already stored (an unrelated field on the
+     * same page changed, gains untouched) leaves the record standing --
+     * only an ACTUAL change invalidates it. */
+    /* z has NOT been seeded from current_z on this (in-range) path -- unlike
+     * the i >= thermo_count early return above, which does `*z = *current_z`
+     * wholesale, this path builds z field-by-field from the submission, and
+     * the caller's z started zero-initialized (zones_post_handler()'s
+     * memset(&tmp, 0, ...)). The tuning_* fields have no z%u_ POST key at
+     * all (read-only, see GET /api/zones' own comment on this block), so
+     * without an explicit carry-through here EVERY in-range save would zero
+     * tuning_valid regardless of whether the gains actually changed -- the
+     * exact reset-one-side shape this whole feature exists to avoid, just
+     * from the opposite direction (wiping a GOOD record instead of keeping
+     * a STALE one). Carry the old record through by default, then
+     * invalidate ONLY on an actual gain change.
+     *
+     * Tolerance, not exact equality, for the change check: GET /api/zones
+     * emits pid_kp/ki/kd at %.4f (this file's own APPEND format string
+     * above), so an ORDINARY read-back-and-repost round trip through the
+     * page's own form fields already loses precision below the 4th decimal
+     * place -- an exact `!=` here would invalidate a good record on every
+     * single resave, even one that changes nothing about the gains at all.
+     * 0.0001 matches that same %.4f resolution; a real operator-entered
+     * change is never that close to the stored value by accident. */
+    z->tuning_valid = current_z->tuning_valid;
+    z->tuning_method = current_z->tuning_method;
+    z->tuning_rule = current_z->tuning_rule;
+    z->tuning_settled = current_z->tuning_settled;
+    z->tuning_extrapolation_converged = current_z->tuning_extrapolation_converged;
+    z->tuning_tau_consistent = current_z->tuning_tau_consistent;
+    z->tuning_baseline_c = current_z->tuning_baseline_c;
+    z->tuning_step_ambient_c = current_z->tuning_step_ambient_c;
+    z->tuning_raw_rise_c = current_z->tuning_raw_rise_c;
+    z->tuning_rise_inf_c = current_z->tuning_rise_inf_c;
+    z->tuning_seq = current_z->tuning_seq;
+    if (fabsf(z->pid_kp - current_z->pid_kp) > 0.0001f || fabsf(z->pid_ki - current_z->pid_ki) > 0.0001f ||
+        fabsf(z->pid_kd - current_z->pid_kd) > 0.0001f) {
+        z->tuning_valid = 0;
     }
     snprintf(key, sizeof(key), "z%u_ramp", i);
     if (!zones_config_json_parse_float_field(body, key, 0.0f, ZONE_MAX_RAMP_C_PER_HR_MAX, &z->max_ramp_c_per_hr)) {

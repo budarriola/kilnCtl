@@ -649,6 +649,63 @@ static void test_out_of_range_zone_preserves_stored_fields(void)
     TEST_CHECK(out.tc_type == current.tc_type, "tc_type preserved when the submission omits z1_tctype entirely");
 }
 
+// ZONES_CFG_VERSION 12->13: the whole-page POST /api/zones path is a SECOND
+// gain-writing path (parse_zone_fields() writes z->pid_kp/ki/kd directly,
+// never through zones_config_set_pid()'s choke point -- see this function's
+// own comment on why the invalidation had to be duplicated here) -- exactly
+// the kind of second path this repo's reset-one-side bug class keeps
+// producing when a pair of writers isn't found. This proves BOTH halves: an
+// actual gain change invalidates, and an untouched gain leaves the record
+// standing (an operator editing an unrelated field on the same page must not
+// lose a good tuning record for no reason).
+static void test_whole_page_post_invalidates_tuning_quality_only_when_gains_actually_change(void)
+{
+    TEST_SECTION("parse_zone_fields -- whole-page POST invalidates tuning_valid when pid_kp/ki/kd "
+                 "actually change, and leaves it standing when they don't");
+
+    zone_cfg_t current = make_stored_zone();
+    current.tuning_valid = 1;
+    current.tuning_method = 0;
+    current.tuning_rule = 0;
+    current.tuning_baseline_c = 25.0f;
+
+    // Case 1: kp changed (2.0 -> 3.5) -- must invalidate.
+    {
+        zone_cfg_t out;
+        memset(&out, 0, sizeof(out));
+        const char *body = "z0_name=Top&z0_tctype=2&z0_relay_mask=1&z0_thermo_mask=1&z0_timingprofile=0&"
+                            "z0_cal=1.5&z0_kp=3.5&z0_ki=0.3&z0_kd=0.05&z0_ramp=120&z0_sanity=5&z0_mode=2&"
+                            "z0_maxtemp=1300&z0_mintemp=-10&z0_window=60000&z0_minon=0&z0_minoff=0";
+        const char *err_reason = "unset";
+        bool ok = parse_zone_fields(body, /*i=*/0, /*thermo_count=*/1, /*relay_count=*/4,
+                                    /*timing_profile_count=*/1, &current, &out, &err_reason);
+        TEST_CHECK(ok, "a well-formed submission with a changed kp is accepted");
+        TEST_CHECK_NEAR(out.pid_kp, 3.5f, 1e-6, "sanity: kp really did change in the parsed result");
+        TEST_CHECK(!out.tuning_valid,
+                  "an actual gain change on the whole-page path invalidates the tuning-quality record, "
+                  "same as the narrow POST /api/zones/pid path");
+    }
+
+    // Case 2: every gain field resubmitted IDENTICAL to what is already
+    // stored (the ordinary "change something else, resave" case) -- must
+    // NOT invalidate.
+    {
+        zone_cfg_t out;
+        memset(&out, 0, sizeof(out));
+        const char *body = "z0_name=Top&z0_tctype=2&z0_relay_mask=1&z0_thermo_mask=1&z0_timingprofile=0&"
+                            "z0_cal=1.5&z0_kp=2.0&z0_ki=0.3&z0_kd=0.05&z0_ramp=120&z0_sanity=5&z0_mode=2&"
+                            "z0_maxtemp=1300&z0_mintemp=-10&z0_window=60000&z0_minon=0&z0_minoff=0";
+        const char *err_reason = "unset";
+        bool ok = parse_zone_fields(body, /*i=*/0, /*thermo_count=*/1, /*relay_count=*/4,
+                                    /*timing_profile_count=*/1, &current, &out, &err_reason);
+        TEST_CHECK(ok, "a well-formed submission with unchanged gains is accepted");
+        TEST_CHECK_NEAR(out.pid_kp, current.pid_kp, 1e-6, "sanity: kp is unchanged");
+        TEST_CHECK(out.tuning_valid,
+                  "resubmitting the SAME gains (an unrelated field changed) must leave a good "
+                  "tuning-quality record standing, not wipe it for no reason");
+    }
+}
+
 // Sibling check: a zone index still IN range (i < thermo_count) that omits
 // its thermo_mask field keeps the documented legacy "zone i reads channel i"
 // fallback -- the fix above must not have disturbed this existing,
@@ -3123,6 +3180,251 @@ static void test_settings_source_setter_round_trip_and_bounds(void)
     TEST_CHECK(!zones_config_set_settings_source(0, 3), "zone index 3 does not exist (thermo_count is 3, 0-2 valid)");
     TEST_CHECK(zones_config_get_settings_source(0, &out) && out == ZONE_SETTINGS_SOURCE_CUSTOM,
               "every refused call above left the stored value at CUSTOM (refuse, not clamp)");
+
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
+// ---------------------------------------------------------------------------
+// ZONES_CFG_VERSION 12->13: the tuning-quality record (set 1 of the owner's
+// two-sets request -- see zone_cfg_t::tuning_valid's own doc comment).
+// ---------------------------------------------------------------------------
+
+// Round-trip through zones_config_set_tuning_quality()/get_tuning_quality()
+// using a DELIBERATELY ASYMMETRIC per-zone fixture (every field distinct
+// between zone 0 and zone 2, and zone 1 left entirely unset) -- a transposed
+// zone index, or a getter/setter that silently shares one struct across
+// zones, would fail this test rather than coincidentally pass it, the same
+// discipline test_coupling_single_cell_setter_preserves_other_cells() above
+// applies to the coupling row setter.
+static void test_tuning_quality_round_trip_asymmetric_per_zone(void)
+{
+    TEST_SECTION("zones_config_set/get_tuning_quality -- asymmetric per-zone round-trip, "
+                 "zone 1 stays unknown, a transposed zone index would fail this");
+    nvs_test_enable(true);
+    nvs_test_clear();
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    s_zones.cfg.thermo_count = 3;
+
+    zone_tuning_quality_t q0 = {
+        .valid = true, .method = 0 /* STEP */, .rule = 0 /* SIMC */,
+        .settled = true, .extrapolation_converged = true, .tau_consistent = false,
+        .baseline_c = 25.5f, .step_ambient_c = 24.0f, .raw_rise_c = 40.0f, .rise_inf_c = 45.5f,
+    };
+    zone_tuning_quality_t q2 = {
+        .valid = true, .method = 1 /* RELAY, stored even though finalize_fit() never actually
+                                     * calls this setter for a relay run -- the getter/setter pair
+                                     * itself must not assume STEP */
+        , .rule = 3 /* Cohen-Coon */,
+        .settled = false, .extrapolation_converged = false, .tau_consistent = true,
+        .baseline_c = 802.1f, .step_ambient_c = 799.9f, .raw_rise_c = 12.25f, .rise_inf_c = 11.9f,
+    };
+
+    TEST_CHECK(zones_config_set_tuning_quality(0, &q0), "zone 0's record is set");
+    TEST_CHECK(zones_config_set_tuning_quality(2, &q2), "zone 2's record is set separately");
+
+    zone_tuning_quality_t out0 = {0}, out1 = {0}, out2 = {0};
+    TEST_CHECK(zones_config_get_tuning_quality(0, &out0), "zone 0's getter succeeds");
+    TEST_CHECK(zones_config_get_tuning_quality(1, &out1), "zone 1's getter succeeds (even though unset)");
+    TEST_CHECK(zones_config_get_tuning_quality(2, &out2), "zone 2's getter succeeds");
+
+    TEST_CHECK(out0.valid, "zone 0 reads valid");
+    TEST_CHECK(out0.method == 0 && out0.rule == 0, "zone 0's method/rule are exactly what was set");
+    TEST_CHECK(out0.settled && out0.extrapolation_converged && !out0.tau_consistent,
+              "zone 0's three flags are exactly what was set, including the one false");
+    TEST_CHECK_NEAR(out0.baseline_c, 25.5f, 1e-4, "zone 0 baseline_c");
+    TEST_CHECK_NEAR(out0.step_ambient_c, 24.0f, 1e-4, "zone 0 step_ambient_c");
+    TEST_CHECK_NEAR(out0.raw_rise_c, 40.0f, 1e-4, "zone 0 raw_rise_c");
+    TEST_CHECK_NEAR(out0.rise_inf_c, 45.5f, 1e-4, "zone 0 rise_inf_c");
+
+    TEST_CHECK(!out1.valid, "zone 1 (never written) reads INVALID -- unknown, not a stray zero-valued record");
+
+    TEST_CHECK(out2.valid, "zone 2 reads valid");
+    TEST_CHECK(out2.method == 1 && out2.rule == 3, "zone 2's method/rule are exactly what was set -- "
+              "DISTINCT from zone 0's, so a transposed zone index would fail here");
+    TEST_CHECK(!out2.settled && !out2.extrapolation_converged && out2.tau_consistent,
+              "zone 2's three flags are exactly what was set, the mirror-image pattern of zone 0's");
+    TEST_CHECK_NEAR(out2.baseline_c, 802.1f, 1e-3, "zone 2 baseline_c -- far from zone 0's 25.5, catches a swap");
+    TEST_CHECK_NEAR(out2.step_ambient_c, 799.9f, 1e-3, "zone 2 step_ambient_c");
+    TEST_CHECK_NEAR(out2.raw_rise_c, 12.25f, 1e-4, "zone 2 raw_rise_c");
+    TEST_CHECK_NEAR(out2.rise_inf_c, 11.9f, 1e-4, "zone 2 rise_inf_c");
+
+    // Sequence counter: bumped by the setter itself, independently per zone.
+    TEST_CHECK(s_zones.cfg.zones[0].tuning_seq == 1, "zone 0's seq is 1 after its first write");
+    TEST_CHECK(s_zones.cfg.zones[2].tuning_seq == 1, "zone 2's seq is 1 after its first write, independent of zone 0's");
+    TEST_CHECK(zones_config_set_tuning_quality(0, &q0), "zone 0 written a second time");
+    TEST_CHECK(s_zones.cfg.zones[0].tuning_seq == 2, "zone 0's seq bumps again; zone 2's own write did not bump it");
+    TEST_CHECK(s_zones.cfg.zones[2].tuning_seq == 1, "zone 2's seq is untouched by zone 0's second write");
+
+    // Refusals: q->valid == false, NULL, out-of-range zone_index, non-finite,
+    // and an out-of-range method/rule must all be refused without touching
+    // storage -- same all-or-nothing discipline as every other setter here.
+    zone_tuning_quality_t q_invalid = q0;
+    q_invalid.valid = false;
+    TEST_CHECK(!zones_config_set_tuning_quality(0, &q_invalid),
+              "q->valid == false is refused -- a caller wanting to clear the record uses "
+              "zones_config_set_pid() instead, never this setter");
+    TEST_CHECK(!zones_config_set_tuning_quality(0, NULL), "NULL q is refused");
+    TEST_CHECK(!zones_config_set_tuning_quality(3, &q0), "out-of-range zone_index is refused");
+    zone_tuning_quality_t q_nan = q0;
+    q_nan.baseline_c = NAN;
+    TEST_CHECK(!zones_config_set_tuning_quality(0, &q_nan), "non-finite baseline_c is refused");
+    zone_tuning_quality_t q_bad_rule = q0;
+    q_bad_rule.rule = 4;
+    TEST_CHECK(!zones_config_set_tuning_quality(0, &q_bad_rule), "an out-of-range rule value is refused");
+    TEST_CHECK(zones_config_get_tuning_quality(0, &out0) && out0.tau_consistent == false &&
+              out0.baseline_c == 25.5f,
+              "every refusal above left zone 0's stored record exactly at its last successful write "
+              "(the second q0 write), not partially applied and not touched by the refused calls");
+
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
+// The invalidation this whole feature exists to get right: ANY gain change
+// through zones_config_set_pid() -- a manual PID edit is the operator-facing
+// example, but the setter cannot distinguish its callers -- must invalidate
+// a previously-written tuning-quality record. This is the reset-one-side
+// guard: comment out the invalidation line in zones_config_set_pid() and
+// this test must fail. Verified by hand (see this file's own build log) --
+// removing `z->tuning_valid = 0;` from zones_config_accessors.c leaves
+// tuning_valid at 1, and the "invalidated" TEST_CHECK below goes red.
+static void test_zones_config_set_pid_invalidates_tuning_quality(void)
+{
+    TEST_SECTION("zones_config_set_pid() invalidates a zone's tuning-quality record -- "
+                 "the reset-one-side guard (a manual PID edit must not leave a stale record standing)");
+    nvs_test_enable(true);
+    nvs_test_clear();
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    s_zones.cfg.thermo_count = 3;
+
+    zone_tuning_quality_t q = {
+        .valid = true, .method = 0, .rule = 0,
+        .settled = true, .extrapolation_converged = true, .tau_consistent = true,
+        .baseline_c = 25.0f, .step_ambient_c = 25.0f, .raw_rise_c = 50.0f, .rise_inf_c = 50.0f,
+    };
+    TEST_CHECK(zones_config_set_tuning_quality(1, &q), "zone 1's record is set (autotune just accepted)");
+    zone_tuning_quality_t before = {0};
+    TEST_CHECK(zones_config_get_tuning_quality(1, &before) && before.valid, "sanity: zone 1 reads valid before the edit");
+
+    // Same call POST /api/zones/pid's handler makes for a manual PID edit
+    // (zones_http_handlers.c) -- this test goes through the shared setter
+    // directly, which is exactly the point: invalidation lives in the ONE
+    // choke point every gain-writing path (autotune accept, a manual edit,
+    // adaptive_tune.c's re-blend, backup_http.c's restore, the LCD UI/
+    // uart_bridge_ext.c path) already goes through, not duplicated at each
+    // call site.
+    TEST_CHECK(zones_config_set_pid(1, 12.0f, 0.5f, 3.0f), "a manual PID edit on zone 1 succeeds");
+
+    zone_tuning_quality_t after = {0};
+    TEST_CHECK(zones_config_get_tuning_quality(1, &after), "getter still succeeds after the edit");
+    TEST_CHECK(!after.valid, "invalidated -- zone 1's tuning-quality record must read unknown "
+              "after its gains changed by ANY path, not just an autotune accept");
+
+    // Zone 0's untouched record is unaffected -- invalidation is per-zone,
+    // not a global flag (would itself be a reset-one-side-shaped bug in the
+    // other direction: wiping every zone's record because one was edited).
+    TEST_CHECK(zones_config_set_tuning_quality(0, &q), "zone 0's own record is set");
+    TEST_CHECK(zones_config_set_pid(1, 1.0f, 1.0f, 1.0f), "zone 1 edited again");
+    zone_tuning_quality_t zone0_after = {0};
+    TEST_CHECK(zones_config_get_tuning_quality(0, &zone0_after) && zone0_after.valid,
+              "zone 0's record survives a DIFFERENT zone's gain edit -- invalidation is per-zone");
+
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
+// ZONES_CFG_VERSION 12->13: a v12 blob (predates the tuning-quality record
+// entirely) must migrate cleanly, with every tuning_* field reading as
+// UNKNOWN (tuning_valid == false) rather than a value indistinguishable
+// from a real (if zero-valued) measurement -- e.g. tuning_rule == 0 must
+// NOT be readable as "SIMC, deliberately chosen", and tuning_settled == 0
+// must NOT be readable as "measured and found unsettled". sizeof(src) is
+// zone_cfg_v12_t/zones_cfg_v12_t -- frozen, historical types, never the
+// live zone_cfg_t/zones_cfg_t (already the v13 shape by now), mirroring
+// test_nvs_load_from_v11_blob_defaults_coupling_tau_dead_time_to_zero()
+// above exactly.
+static void test_nvs_load_from_v12_blob_defaults_tuning_quality_to_unknown(void)
+{
+    TEST_SECTION("nvs_load_from -- a v12 blob upconverts to v13: every tuning_* field defaults to "
+                 "UNKNOWN (tuning_valid=false), never a value that reads as a real measurement, while "
+                 "coupling_tau_s[]/model_k_dc/etc survive unchanged");
+    nvs_test_enable(true);
+    nvs_test_clear();
+
+    zones_cfg_v12_t src;
+    memset(&src, 0, sizeof(src));
+    src.version = 12;
+    src.thermo_count = 3;
+    src.relay_count = 3;
+    src.continue_on_zone_trip = 1;
+    src.safety_tc_type = 3;
+    src.pc_link_abort_silence_ms = 45000.0f;
+    src.timing_profile_count = 1;
+    snprintf(src.timing_profiles[0].name, sizeof(src.timing_profiles[0].name), "Default");
+
+    src.zones[0].relay_mask = 0x01;
+    src.zones[0].thermo_mask = 0x01;
+    src.zones[0].max_temp_c = 1300.0f;
+    src.zones[0].model_k_dc = 20.969f;
+    src.zones[0].model_tau_s = 640.0f;
+    src.zones[0].model_dead_time_s = 45.0f;
+    src.zones[0].coupling_tau_s[1] = 42.0f;
+    src.zones[0].settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
+
+    src.zones[1].relay_mask = 0x02;
+    src.zones[1].thermo_mask = 0x02;
+    src.zones[1].max_temp_c = 1250.0f;
+    src.zones[1].settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
+
+    src.zones[2].relay_mask = 0x04;
+    src.zones[2].thermo_mask = 0x04;
+    src.zones[2].max_temp_c = 1200.0f;
+    src.zones[2].settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
+
+    src.crc32 = 0; // v12's own CRC is not checked on the old-version path
+
+    stage_zones_blob(&src, sizeof(src));
+
+    zones_cfg_t out_cfg;
+    bool found = false, valid = false;
+    esp_err_t err = nvs_load_from("kiln_nvs", &out_cfg, &found, &valid);
+
+    TEST_CHECK(err == ESP_OK, "no NVS error");
+    TEST_CHECK(found && valid, "a well-formed v12 blob must migrate to a valid current (v13) config");
+    TEST_CHECK(out_cfg.version == ZONES_CFG_VERSION, "migrated config is stamped the current version");
+
+    // THE thing this test is really about: every tuning_* field must be at
+    // its "unknown" zero default for every zone -- not garbage, not
+    // uninitialized memory -- since no version before v13 ever stored a
+    // tuning-quality record.
+    for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
+        char msg[96];
+        snprintf(msg, sizeof(msg), "zones[%u].tuning_valid is false (v12 never stored a quality record)", i);
+        TEST_CHECK(!out_cfg.zones[i].tuning_valid, msg);
+        snprintf(msg, sizeof(msg), "zones[%u].tuning_method reads 0, but gated unknown by tuning_valid", i);
+        TEST_CHECK(out_cfg.zones[i].tuning_method == 0, msg);
+        snprintf(msg, sizeof(msg), "zones[%u].tuning_settled reads 0, but gated unknown by tuning_valid", i);
+        TEST_CHECK(out_cfg.zones[i].tuning_settled == 0, msg);
+        snprintf(msg, sizeof(msg), "zones[%u].tuning_seq is 0 (never written)", i);
+        TEST_CHECK(out_cfg.zones[i].tuning_seq == 0, msg);
+    }
+    // Pre-existing v12 fields must survive the upgrade completely unchanged
+    // -- the same "everything else carries through" proof
+    // test_nvs_load_from_v11_blob_defaults_coupling_tau_dead_time_to_zero()
+    // makes for the v11->v12 migration.
+    TEST_CHECK(out_cfg.thermo_count == 3 && out_cfg.relay_count == 3, "counts carried through");
+    TEST_CHECK(out_cfg.continue_on_zone_trip == 1, "continue_on_zone_trip carried through");
+    TEST_CHECK_NEAR(out_cfg.pc_link_abort_silence_ms, 45000.0f, 1e-6, "pc_link_abort_silence_ms carried through");
+    TEST_CHECK(strcmp(out_cfg.timing_profiles[0].name, "Default") == 0, "timing profile name carried through");
+    TEST_CHECK(out_cfg.zones[0].relay_mask == 0x01 && out_cfg.zones[1].relay_mask == 0x02 &&
+              out_cfg.zones[2].relay_mask == 0x04, "relay_mask must NOT be shifted for any zone");
+    TEST_CHECK_NEAR(out_cfg.zones[0].model_k_dc, 20.969f, 1e-6, "zones[0].model_k_dc survives");
+    TEST_CHECK_NEAR(out_cfg.zones[0].model_tau_s, 640.0f, 1e-6, "zones[0].model_tau_s survives");
+    TEST_CHECK_NEAR(out_cfg.zones[0].model_dead_time_s, 45.0f, 1e-6, "zones[0].model_dead_time_s survives");
+    TEST_CHECK_NEAR(out_cfg.zones[0].coupling_tau_s[1], 42.0f, 1e-6, "zones[0].coupling_tau_s[1] survives");
+    TEST_CHECK(out_cfg.zones[0].settings_source == ZONE_SETTINGS_SOURCE_CUSTOM,
+              "zones[0].settings_source is carried through verbatim");
 
     nvs_test_enable(false);
     nvs_test_clear();
@@ -5783,6 +6085,7 @@ static void test_validate_rejects_out_of_range_sanity_rate(void)
 void run_test_zones_http(void)
 {
     test_out_of_range_zone_preserves_stored_fields();
+    test_whole_page_post_invalidates_tuning_quality_only_when_gains_actually_change();
     test_in_range_zone_thermo_mask_legacy_fallback_unchanged();
     test_old_behaviour_would_have_zeroed_it();
 
@@ -5854,6 +6157,9 @@ void run_test_zones_http(void)
     test_coupling_row_whole_setter_round_trip_and_bounds();
     test_coupling_single_cell_setter_preserves_other_cells();
     test_settings_source_setter_round_trip_and_bounds();
+    test_tuning_quality_round_trip_asymmetric_per_zone();
+    test_zones_config_set_pid_invalidates_tuning_quality();
+    test_nvs_load_from_v12_blob_defaults_tuning_quality_to_unknown();
     test_settings_source_save_reload_inheritance_round_trip();
     test_settings_source_two_and_three_zone_cycles_are_refused();
     test_tc_type_write_is_identity_independent_of_settings_source();

@@ -572,10 +572,36 @@ bool zones_current_sweep_is_active(void)
     return s_test_sweep_active;
 }
 
+/* Configurable (default false, matching this stub's original hardcoded
+ * "never persists" behavior) so a test exercising autotune_engine_accept()'s
+ * tuning-quality write can flip it to true -- same convention as
+ * s_stub_set_pid_result below. */
+static bool s_stub_set_model_result = false;
 bool zones_config_set_model(uint8_t zone_index, float k_dc, float tau_s, float dead_time_s)
 {
     (void)zone_index; (void)k_dc; (void)tau_s; (void)dead_time_s;
-    return false;
+    return s_stub_set_model_result;
+}
+
+/* ZONES_CFG_VERSION 12->13 -- captures the LAST call's arguments (zone_index
+ * and *q) so a test can assert autotune_engine_accept()'s STEP-success path
+ * wrote exactly the fields the fit produced, without this file needing its
+ * own copy of zones_cfg_t/NVS machinery. s_stub_tuning_quality_call_count
+ * lets a test also prove the negative -- that this is NOT called when the
+ * model failed to persist, or on the RELAY path, or before accept() reaches
+ * the write at all. */
+static uint8_t s_stub_tuning_quality_zone = 0xFF;
+static zone_tuning_quality_t s_stub_tuning_quality_written;
+static int s_stub_tuning_quality_call_count = 0;
+static bool s_stub_set_tuning_quality_result = true;
+bool zones_config_set_tuning_quality(uint8_t zone_index, const zone_tuning_quality_t *q)
+{
+    s_stub_tuning_quality_zone = zone_index;
+    if (q) {
+        s_stub_tuning_quality_written = *q;
+    }
+    s_stub_tuning_quality_call_count++;
+    return s_stub_set_tuning_quality_result;
 }
 
 /* Configurable (default false, this stub's original hardcoded behavior --
@@ -2875,6 +2901,143 @@ static void test_autotune_engine_accept_does_not_block_a_fully_clean_fit(void)
     s_stub_set_pid_result = false;
 }
 
+/* ZONES_CFG_VERSION 12->13: the tuning-quality record (set 1 -- see
+ * zone_cfg_t::tuning_valid's own doc comment, zones_config_json.h). A
+ * completed, accepted STEP-method run must write it -- with the same
+ * baseline_c/raw_rise_c/rise_inf_c/settled/extrapolation_converged/
+ * tau_consistent_with_gain/rule the fit actually produced -- but ONLY once
+ * the gains AND the model have both already persisted; the model-persist
+ * failure and RELAY-method cases each get their own negative proof right
+ * below this one. */
+static void test_autotune_engine_accept_writes_tuning_quality_on_step_success(void)
+{
+    TEST_SECTION("autotune_engine_accept() writes zones_config_set_tuning_quality() on a successful "
+                 "STEP-method accept, with the fit's own fields");
+    static MAX31856BusClass bus;
+    static SafetyLinkClass safety;
+    memset(&s_at, 0, sizeof(s_at));
+    memset(&bus, 0, sizeof(bus));
+    memset(&safety, 0, sizeof(safety));
+    s_at.lock = xSemaphoreCreateMutex();
+    TEST_CHECK(s_at.lock != NULL, "test setup: lock must be creatable");
+    s_at.state = AUTOTUNE_ENGINE_DONE;
+    s_at.method = AUTOTUNE_METHOD_STEP;
+    s_at.zone_index = 2; /* deliberately not zone 0 -- catches a hardcoded index */
+    s_at.step_ambient_c = 24.5f;
+    s_at.proposed_gains.rule = AUTOTUNE_RULE_COHEN_COON;
+    s_at.model.valid = true;
+    s_at.model.settled = true;
+    s_at.model.extrapolation_converged = true;
+    s_at.model.tau_consistent_with_gain = true;
+    s_at.model.k_gain_c_per_duty = 10.0f;
+    s_at.model.tau_s = 100.0f;
+    s_at.model.dead_time_s = 5.0f;
+    s_at.model.baseline_c = 25.0f;
+    s_at.model.raw_rise_c = 38.2f;
+    s_at.model.rise_inf_c = 41.7f;
+
+    s_stub_set_pid_result = true;
+    s_stub_set_model_result = true;
+    s_stub_tuning_quality_call_count = 0;
+    s_stub_tuning_quality_zone = 0xFF;
+    memset(&s_stub_tuning_quality_written, 0, sizeof(s_stub_tuning_quality_written));
+
+    bool accepted = autotune_engine_accept(false);
+
+    TEST_CHECK(accepted, "a fully clean STEP fit accepts");
+    TEST_CHECK(s_stub_tuning_quality_call_count == 1,
+              "zones_config_set_tuning_quality() is called exactly once on a successful STEP accept");
+    TEST_CHECK(s_stub_tuning_quality_zone == 2, "written for the zone under test, not a hardcoded index");
+    TEST_CHECK(s_stub_tuning_quality_written.valid, "the written record's valid flag is true");
+    TEST_CHECK(s_stub_tuning_quality_written.method == (uint8_t)AUTOTUNE_METHOD_STEP, "method is STEP");
+    TEST_CHECK(s_stub_tuning_quality_written.rule == (uint8_t)AUTOTUNE_RULE_COHEN_COON,
+              "rule is exactly the tuning rule this run actually used, not a default");
+    TEST_CHECK(s_stub_tuning_quality_written.settled && s_stub_tuning_quality_written.extrapolation_converged &&
+              s_stub_tuning_quality_written.tau_consistent,
+              "all three fit-confidence flags carried through from the model");
+    TEST_CHECK_NEAR(s_stub_tuning_quality_written.baseline_c, 25.0f, 1e-4, "baseline_c carried through");
+    TEST_CHECK_NEAR(s_stub_tuning_quality_written.step_ambient_c, 24.5f, 1e-4,
+                    "step_ambient_c carried through -- captured under the lock, not re-read after release");
+    TEST_CHECK_NEAR(s_stub_tuning_quality_written.raw_rise_c, 38.2f, 1e-4, "raw_rise_c carried through");
+    TEST_CHECK_NEAR(s_stub_tuning_quality_written.rise_inf_c, 41.7f, 1e-4, "rise_inf_c carried through");
+
+    s_stub_set_pid_result = false;
+    s_stub_set_model_result = false;
+}
+
+/* Negative proof 1: the model failing to persist must skip the
+ * tuning-quality write entirely -- a quality record attached to a model
+ * that isn't actually stored would describe a fit the zone isn't running. */
+static void test_autotune_engine_accept_skips_tuning_quality_when_model_persist_fails(void)
+{
+    TEST_SECTION("autotune_engine_accept() does NOT write tuning quality when zones_config_set_model() "
+                 "itself fails/refuses");
+    static MAX31856BusClass bus;
+    static SafetyLinkClass safety;
+    memset(&s_at, 0, sizeof(s_at));
+    memset(&bus, 0, sizeof(bus));
+    memset(&safety, 0, sizeof(safety));
+    s_at.lock = xSemaphoreCreateMutex();
+    TEST_CHECK(s_at.lock != NULL, "test setup: lock must be creatable");
+    s_at.state = AUTOTUNE_ENGINE_DONE;
+    s_at.method = AUTOTUNE_METHOD_STEP;
+    s_at.zone_index = 0;
+    s_at.model.valid = true;
+    s_at.model.settled = true;
+    s_at.model.extrapolation_converged = true;
+    s_at.model.tau_consistent_with_gain = true;
+    s_at.model.k_gain_c_per_duty = 10.0f;
+    s_at.model.tau_s = 100.0f;
+    s_at.model.dead_time_s = 5.0f;
+
+    s_stub_set_pid_result = true;
+    s_stub_set_model_result = false; /* the case under test -- model persist refuses/fails */
+    s_stub_tuning_quality_call_count = 0;
+
+    bool accepted = autotune_engine_accept(false);
+
+    TEST_CHECK(accepted, "acceptance itself still succeeds -- the gains are already live, per this "
+                         "function's own comment on why a model-persist failure is logged, not propagated");
+    TEST_CHECK(s_stub_tuning_quality_call_count == 0,
+              "zones_config_set_tuning_quality() must NOT be called when the model failed to persist");
+
+    s_stub_set_pid_result = false;
+}
+
+/* Negative proof 2: a RELAY-method accept measures no FOPDT model at all
+ * (see autotune_engine_accept()'s own comment on the RELAY branch) and must
+ * not write a tuning-quality record either. */
+static void test_autotune_engine_accept_skips_tuning_quality_on_relay_method(void)
+{
+    TEST_SECTION("autotune_engine_accept() does NOT write tuning quality on the RELAY path -- "
+                 "a relay test measures no FOPDT model to attach one to");
+    static MAX31856BusClass bus;
+    static SafetyLinkClass safety;
+    memset(&s_at, 0, sizeof(s_at));
+    memset(&bus, 0, sizeof(bus));
+    memset(&safety, 0, sizeof(safety));
+    s_at.lock = xSemaphoreCreateMutex();
+    TEST_CHECK(s_at.lock != NULL, "test setup: lock must be creatable");
+    s_at.state = AUTOTUNE_ENGINE_DONE;
+    s_at.method = AUTOTUNE_METHOD_RELAY;
+    s_at.zone_index = 0;
+    s_at.relay.valid = true; /* autotune_engine_accept()'s own have_result gate reads
+                              * s_at.relay.valid, not s_at.model.valid, on this path */
+
+    s_stub_set_pid_result = true;
+    s_stub_set_model_result = true;
+    s_stub_tuning_quality_call_count = 0;
+
+    bool accepted = autotune_engine_accept(false);
+
+    TEST_CHECK(accepted, "a relay-method accept still succeeds -- gains only, no model");
+    TEST_CHECK(s_stub_tuning_quality_call_count == 0,
+              "zones_config_set_tuning_quality() must NOT be called on the RELAY path");
+
+    s_stub_set_pid_result = false;
+    s_stub_set_model_result = false;
+}
+
 static void test_min_excursion_refuses_a_fit_below_the_rise_floor(void)
 {
     TEST_SECTION("(B) minimum-excursion requirement -- a fit whose total rise is below the "
@@ -4506,6 +4669,9 @@ void run_test_autotune_engine_prestart(void)
     test_autotune_engine_accept_gates_on_extrapolation_converged();
     test_autotune_engine_accept_gates_on_tau_consistent();
     test_autotune_engine_accept_does_not_block_a_fully_clean_fit();
+    test_autotune_engine_accept_writes_tuning_quality_on_step_success();
+    test_autotune_engine_accept_skips_tuning_quality_when_model_persist_fails();
+    test_autotune_engine_accept_skips_tuning_quality_on_relay_method();
     test_min_excursion_refuses_a_fit_below_the_rise_floor();
     test_physical_plausibility_refuses_gain_implying_ceiling_below_max_temp();
     test_physical_plausibility_uses_ambient_not_baseline_on_a_hot_start();

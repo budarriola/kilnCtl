@@ -357,6 +357,24 @@ bool zones_config_set_pid(uint8_t zone_index, float kp, float ki, float kd)
     z->pid_kp = kp;
     z->pid_ki = ki;
     z->pid_kd = kd;
+    /* ZONES_CFG_VERSION 12->13: invalidate the tuning-quality record (set 1
+     * -- see zone_cfg_t::tuning_valid's own doc comment) on EVERY gain
+     * change, unconditionally, regardless of caller -- autotune's own
+     * accept() path, a manual POST /api/zones/pid edit, adaptive_tune.c's
+     * blended re-tune, backup_http.c's restore, or the LCD UI/uart_bridge_
+     * ext.c path. All of them reach gains through this one setter, which is
+     * exactly why the invalidation lives HERE and not duplicated at every
+     * call site -- this repo's recurring "reset-one-side" bug class (state
+     * updated on one path of a pair and not the other) is precisely the
+     * shape a per-caller invalidation would risk. autotune_engine.c's own
+     * accept() path re-establishes a fresh record via zones_config_set_
+     * tuning_quality() immediately after this call (and after the model is
+     * also persisted), so the invalidate-then-repopulate ordering never
+     * leaves a stale-but-valid-looking record visible in between; every
+     * OTHER caller simply leaves it invalidated, since none of them have a
+     * new fit to attach. A stale quality record pinned to hand-edited gains
+     * would be worse than none -- see zone_tuning_quality_t's own comment. */
+    z->tuning_valid = 0;
     /* Bumped before the NVS write, not after it: the gains are already live
      * for the next control tick at this point, so a running profile must
      * re-read them (TODO.md 6A.7) whether or not the save succeeds. Note
@@ -975,6 +993,56 @@ bool zones_config_set_model(uint8_t zone_index, float k_dc, float tau_s, float d
      * reaches flash, and a feedforward term computed from a stale K while a
      * firing is running is precisely what TODO.md 6A.7's reload path
      * exists to prevent. */
+    s_config_generation++;
+    return nvs_save() == ESP_OK;
+}
+
+bool zones_config_get_tuning_quality(uint8_t zone_index, zone_tuning_quality_t *out)
+{
+    if (!out || zone_index >= s_zones.cfg.thermo_count) {
+        return false;
+    }
+    const zone_cfg_t *z = &s_zones.cfg.zones[zone_index];
+    out->valid = z->tuning_valid != 0;
+    out->method = z->tuning_method;
+    out->rule = z->tuning_rule;
+    out->settled = z->tuning_settled != 0;
+    out->extrapolation_converged = z->tuning_extrapolation_converged != 0;
+    out->tau_consistent = z->tuning_tau_consistent != 0;
+    out->baseline_c = z->tuning_baseline_c;
+    out->step_ambient_c = z->tuning_step_ambient_c;
+    out->raw_rise_c = z->tuning_raw_rise_c;
+    out->rise_inf_c = z->tuning_rise_inf_c;
+    return true;
+}
+
+bool zones_config_set_tuning_quality(uint8_t zone_index, const zone_tuning_quality_t *q)
+{
+    /* q->valid must be true -- see this setter's own header comment
+     * (zones_http.h) for why a caller wanting to CLEAR the record uses
+     * zones_config_set_pid() instead, and why this setter refuses rather
+     * than silently writing a "set but empty" record. */
+    if (!q || !q->valid || zone_index >= s_zones.cfg.thermo_count) {
+        return false;
+    }
+    if (!isfinite(q->baseline_c) || !isfinite(q->step_ambient_c) || !isfinite(q->raw_rise_c) ||
+        !isfinite(q->rise_inf_c) || q->method > 1 || q->rule > 3) {
+        return false;
+    }
+    zone_cfg_t *z = &s_zones.cfg.zones[zone_index];
+    z->tuning_valid = 1;
+    z->tuning_method = q->method;
+    z->tuning_rule = q->rule;
+    z->tuning_settled = q->settled ? 1 : 0;
+    z->tuning_extrapolation_converged = q->extrapolation_converged ? 1 : 0;
+    z->tuning_tau_consistent = q->tau_consistent ? 1 : 0;
+    z->tuning_baseline_c = q->baseline_c;
+    z->tuning_step_ambient_c = q->step_ambient_c;
+    z->tuning_raw_rise_c = q->raw_rise_c;
+    z->tuning_rise_inf_c = q->rise_inf_c;
+    /* Self-incrementing -- the caller does not supply a seq, see this
+     * function's own header comment (zones_http.h) for why. */
+    z->tuning_seq++;
     s_config_generation++;
     return nvs_save() == ESP_OK;
 }

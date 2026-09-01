@@ -59,7 +59,7 @@ extern "C" {
  * value. Shared because both files must agree on what "the current version"
  * means: nvs_save() writes it, decode_zones_blob() decides whether a stored
  * blob needs migrating against it. */
-#define ZONES_CFG_VERSION 12
+#define ZONES_CFG_VERSION 13
 
 
 /* MAX31856 CR1.TC[3:0] nibble values 0x00-0x07 name a real thermocouple type
@@ -285,6 +285,69 @@ typedef struct {
      * loop ever reads this. Note 0 is a real value here ("copies zone 0"),
      * not an empty default: see convert_zone_v9(). */
     uint8_t settings_source;
+    /* ---- ZONES_CFG_VERSION 12->13 (2026-09-01, owner: "in the pid
+     * stistics consider, maybe there should be 2 sets, one for the pid
+     * tuneing that stays unless retuned, and another for the last fireing
+     * run"). This is set 1 -- the TUNING-quality record, one snapshot per
+     * zone that survives until the zone is next re-tuned (set 2, the
+     * per-run FIRING quality history -- mean error/overshoot/IAE/ramp-dwell
+     * split -- already existed before this pass and lives in
+     * profile_executor.c, not here; the two are deliberately not merged,
+     * see zones_page.html's "Tuning quality" vs "Firing quality" headings).
+     *
+     * Every field the autotune engine's fit already computes but, until
+     * this pass, discarded the instant model_k_dc/model_tau_s/
+     * model_dead_time_s above were written -- fopdt_model_t's settled/
+     * extrapolation_converged/tau_consistent_with_gain flags (pid_
+     * autotune.h), the tuning rule and identification method actually used,
+     * the baseline/step-ambient temperatures the fit was measured from, and
+     * the raw-vs-extrapolated rise (rise_inf_c - raw_rise_c tells a reader
+     * how much of model_k_dc was extrapolated rather than directly
+     * measured -- a large correction is a weaker fit, same reasoning
+     * pid_autotune.h's own "RESIDUAL ACCURACY GAP" comment documents for
+     * why this matters to a caller judging fit confidence).
+     *
+     * tuning_valid is the master gate, same "0/false means cannot answer"
+     * convention as model_k_dc/model_tau_s/model_dead_time_s use for "no
+     * model": false means every other tuning_* field below must be treated
+     * as UNKNOWN, not read as a real (if zero-valued) measurement -- this is
+     * what lets a v12 blob migrate its new fields to a safe "unknown" rather
+     * than a value indistinguishable from "SIMC rule, step method, perfectly
+     * settled", which is what an all-zero read would otherwise imply.
+     *
+     * INVALIDATION (the reset-one-side risk this whole feature exists to
+     * avoid -- see zones_config_set_pid()'s own comment): every path that
+     * changes pid_kp/pid_ki/pid_kd goes through zones_config_set_pid(),
+     * which sets tuning_valid = false unconditionally before saving,
+     * regardless of caller (autotune accept, a manual POST /api/zones/pid
+     * edit, adaptive_tune.c's blended re-tune, backup_http.c's restore, or
+     * the LCD UI/uart_bridge_ext.c path) -- a stale quality record pinned to
+     * hand-edited gains would be worse than none. autotune_engine.c's
+     * finalize accept() path re-establishes a fresh record via
+     * zones_config_set_tuning_quality() immediately afterward, once the new
+     * gains AND model are both already persisted, so the invalidate-then-
+     * repopulate ordering never leaves a valid-looking stale record visible
+     * in between. */
+    uint8_t  tuning_valid;                      /* 0/1 -- same "0 means cannot answer" convention as
+                                                  * every other bool-shaped uint8_t in this struct
+                                                  * (relay_mask siblings), never a real C99 bool: this
+                                                  * struct is a raw NVS blob, not a language-portable type */
+    uint8_t  tuning_method;                     /* autotune_method_t raw value: 0=STEP, 1=RELAY */
+    uint8_t  tuning_rule;                       /* autotune_rule_t raw value: SIMC/ZN/Tyreus-Luyben/Cohen-Coon */
+    uint8_t  tuning_settled;                    /* fopdt_model_t::settled, 0/1 */
+    uint8_t  tuning_extrapolation_converged;    /* fopdt_model_t::extrapolation_converged, 0/1 */
+    uint8_t  tuning_tau_consistent;             /* fopdt_model_t::tau_consistent_with_gain, 0/1 */
+    float    tuning_baseline_c;                 /* fopdt_model_t::baseline_c */
+    float    tuning_step_ambient_c;             /* autotune_engine_status_t::step_ambient_c at fit time */
+    float    tuning_raw_rise_c;                 /* fopdt_model_t::raw_rise_c -- measured, unextrapolated rise */
+    float    tuning_rise_inf_c;                 /* fopdt_model_t::rise_inf_c -- the extrapolated asymptote
+                                                  * actually used for model_k_dc; (rise_inf_c - raw_rise_c) is
+                                                  * the extrapolation correction, i.e. how much of the gain
+                                                  * was extrapolated rather than directly measured */
+    uint32_t tuning_seq;                        /* monotonic per-zone counter, bumped by
+                                                  * zones_config_set_tuning_quality() itself -- a cheap run
+                                                  * identifier/ordering marker in place of a wall-clock
+                                                  * timestamp this board has no guaranteed RTC for */
 } zone_cfg_t;
 
 
@@ -758,6 +821,60 @@ typedef struct {
 _Static_assert(sizeof(zone_cfg_v11_t) == 132,
                "zone_cfg_v11_t must match the on-flash v11 layout byte-for-byte (132 bytes)"); /* v11 -- predates coupling_tau_s[]/coupling_dead_time_s[] */
 
+/* Frozen v12 layout -- what zone_cfg_t looked like immediately before THIS
+ * pass (ZONES_CFG_VERSION 12->13), coupling_tau_s[]/coupling_dead_time_s[]
+ * and all, predating the tuning_* quality fields. Same discipline as
+ * zone_cfg_v11_t just above: field order hand-copied from v12's actual
+ * shape, never derived from the live struct. */
+typedef struct {
+    char name[ZONE_NAME_MAX_LEN + 1];
+    float cal_offset_c;
+    float pid_kp;
+    float pid_ki;
+    float pid_kd;
+    float max_ramp_c_per_hr;
+    float sanity_rate_c_per_min;
+    float max_temp_c;
+    float min_temp_c;
+    float heater_window_ms;
+    float heater_min_on_ms;
+    float heater_min_off_ms;
+    float guard_wrong_dir_window_s;
+    float guard_wrong_dir_rate_c_per_min;
+    float guard_off_settle_s;
+    float guard_runaway_rate_c_per_min;
+    float guard_runaway_margin_c;
+    float guard_drift_period_s;
+    float guard_sensor_fault_debounce_ticks;
+    float guard_frozen_window_s;
+    float cross_zone_max_delta_c;
+    float model_k_dc;
+    float model_tau_s;
+    float model_dead_time_s;
+    float fuzzy_strength_pct;
+    float coupling_coeff[MAX31856_CHANNEL_COUNT];
+    float coupling_tau_s[MAX31856_CHANNEL_COUNT];
+    float coupling_dead_time_s[MAX31856_CHANNEL_COUNT];
+    /* ---- uint8_t tail, exactly as v9/v10/v11 grouped them ---- */
+    uint8_t relay_mask;
+    uint8_t control_mode;
+    uint8_t tc_type;
+    uint8_t thermo_mask;
+    uint8_t ct_mask;
+    uint8_t timing_profile;
+    uint8_t settings_source;
+} zone_cfg_v12_t;
+
+/* 156 = 16 (name) + 33*4 (floats: v11's 27 plus the two new
+ * MAX31856_CHANNEL_COUNT-wide rows coupling_tau_s[]/coupling_dead_time_s[],
+ * i.e. 27 + 3 + 3 = 33) + 7 (the uint8_t tail, unchanged since v9) + 1 (tail
+ * padding to the struct's 4-byte float alignment). Hand-computed the same
+ * way as zone_cfg_v11_t's own assert comment -- never sizeof(zone_cfg_t),
+ * which by the time this pass lands is already the v13 (tuning_*) shape,
+ * not v12's. */
+_Static_assert(sizeof(zone_cfg_v12_t) == 156,
+               "zone_cfg_v12_t must match the on-flash v12 layout byte-for-byte (156 bytes)"); /* v12 -- predates tuning_* quality fields */
+
 typedef struct {
     uint8_t version;
     uint8_t thermo_count;
@@ -885,6 +1002,22 @@ typedef struct {
                      * pass; predates coupling_tau_s[]/coupling_dead_time_s[].
                      * zone_timing_profile_t unchanged again, reused verbatim
                      * same as v9/v10's own comment. */
+
+typedef struct {
+    uint8_t version;
+    uint8_t thermo_count;
+    uint8_t relay_count;
+    uint8_t max_simultaneous_relays;
+    uint8_t continue_on_zone_trip;
+    uint8_t safety_tc_type;
+    zone_cfg_v12_t zones[MAX31856_CHANNEL_COUNT];
+    uint8_t timing_profile_count;
+    zone_timing_profile_t timing_profiles[MAX31856_CHANNEL_COUNT];
+    float pc_link_abort_silence_ms;
+    uint32_t crc32;
+} zones_cfg_v12_t; /* v12 -- what zones_cfg_t looked like immediately before THIS
+                     * pass; predates the tuning_* quality fields. zone_timing_profile_t
+                     * unchanged again, reused verbatim same as v9/v10/v11's own comment. */
 
 
 typedef enum {

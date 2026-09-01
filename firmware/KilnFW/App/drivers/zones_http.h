@@ -580,6 +580,62 @@ bool zones_config_get_model(uint8_t zone_index, float *out_k_dc, float *out_tau_
  * fit is a lie); it is not treated as a validation failure. */
 bool zones_config_set_model(uint8_t zone_index, float k_dc, float tau_s, float dead_time_s);
 
+/* ZONES_CFG_VERSION 12->13 (2026-09-01, owner: "in the pid stistics
+ * consider, maybe there should be 2 sets, one for the pid tuneing that
+ * stays unless retuned, and another for the last fireing run"). This is set
+ * 1's transfer type -- the TUNING-quality record, one snapshot per zone
+ * that survives until the zone is next re-tuned. Set 2 (the per-run FIRING
+ * quality history -- mean error/overshoot/IAE/ramp-dwell split) already
+ * existed before this pass and lives in profile_executor.c; the two are
+ * deliberately not merged, see zones_page.html's "Tuning quality" vs
+ * "Firing quality" headings.
+ *
+ * method/rule are stored as the raw autotune_method_t/autotune_rule_t enum
+ * values (pid_autotune.h/autotune_engine.h) rather than typed here, so this
+ * header (included from zones_config_json.h, the storage layer) never has
+ * to depend on autotune_engine.h/pid_autotune.h -- the caller (autotune_
+ * engine.c) casts its own enums to uint8_t, the same convention zone_cfg_t::
+ * control_mode already uses for zone_control_mode_t.
+ *
+ * See zone_cfg_t::tuning_valid's own doc comment (zones_config_json.h) for
+ * the full field-by-field provenance and the "valid gates everything else"
+ * convention every getter/setter of this type must respect. */
+typedef struct {
+    bool  valid;                      /* master gate -- false means every other field is unknown */
+    uint8_t method;                   /* autotune_method_t raw value: 0=STEP, 1=RELAY */
+    uint8_t rule;                     /* autotune_rule_t raw value */
+    bool  settled;                    /* fopdt_model_t::settled */
+    bool  extrapolation_converged;    /* fopdt_model_t::extrapolation_converged */
+    bool  tau_consistent;             /* fopdt_model_t::tau_consistent_with_gain */
+    float baseline_c;                 /* fopdt_model_t::baseline_c */
+    float step_ambient_c;             /* autotune_engine_status_t::step_ambient_c at fit time */
+    float raw_rise_c;                 /* fopdt_model_t::raw_rise_c */
+    float rise_inf_c;                 /* fopdt_model_t::rise_inf_c -- (rise_inf_c - raw_rise_c) is the
+                                        * extrapolation correction: how much of model_k_dc was
+                                        * extrapolated rather than directly measured */
+} zone_tuning_quality_t;
+
+/* Getter -- always succeeds for an in-range zone_index regardless of
+ * out->valid; false only for a bad zone_index/NULL out, same "false means
+ * cannot answer" convention as zones_config_get_model(). The caller MUST
+ * check out->valid before trusting any other field -- see
+ * zone_tuning_quality_t's own doc comment. */
+bool zones_config_get_tuning_quality(uint8_t zone_index, zone_tuning_quality_t *out);
+
+/* Setter -- called by autotune_engine.c's autotune_engine_accept() once a
+ * STEP-method run's gains AND plant model are both already persisted (never
+ * before either, and never for a RELAY-method run, which measures no FOPDT
+ * model to attach a quality record to). q->valid must be true (a caller
+ * wanting to CLEAR the record uses zones_config_set_pid(), which already
+ * invalidates it -- see that function's own comment; this setter only ever
+ * writes a populated record, refusing q==NULL/q->valid==false rather than
+ * silently accepting a "set but empty" record that would be indistinguishable
+ * from a genuine all-zero fit). Bumps and stores its own tuning_seq (the
+ * caller does not supply one) so repeated calls are orderable without a
+ * wall-clock timestamp this board has no guaranteed RTC for. Persists
+ * immediately, same discipline as every other setter in this file. */
+bool zones_config_set_tuning_quality(uint8_t zone_index, const zone_tuning_quality_t *q);
+
 /* zone_cfg_t::fuzzy_strength_pct read-only accessor for the control loop
  * (PID_EXPANSION_PLAN.md Phase 3 wiring, profile_executor.c) -- the one
  * operator-set knob pid_fuzzy_adjust() needs each tick a
@@ -969,7 +1025,15 @@ float zones_config_apply_cal(uint8_t zone_index, float raw_c);
  * ceiling. Existing kiln_cfg_store.c entries already on a board's flash keep
  * their old (smaller) blob size until re-saved -- same discipline as every
  * ZONES_CFG_VERSION migration; see zones_config_blob_size()'s own comment. */
-#define ZONES_CONFIG_BLOB_MAX_SIZE 640
+/* 640 -> 768 (2026-09-01, ZONES_CFG_VERSION 12->13, the tuning-quality
+ * record -- see zone_cfg_t::tuning_valid's own doc comment): six new
+ * uint8_t flags/enums plus four new floats plus one uint32_t sequence
+ * counter per zone_cfg_t element adds ~30 bytes per zone across
+ * MAX31856_CHANNEL_COUNT (3) zones, ~90 bytes total -- comfortably inside
+ * this bump's 128 bytes of headroom. Existing kiln_cfg_store.c entries
+ * already on a board's flash keep their old (smaller) blob size until
+ * re-saved, same discipline as every prior ZONES_CFG_VERSION migration. */
+#define ZONES_CONFIG_BLOB_MAX_SIZE 768
 
 /* Runtime size of the internal zones_cfg_t struct THIS firmware build
  * stores -- what zones_config_export_blob() below actually writes, and the
