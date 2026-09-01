@@ -437,10 +437,18 @@ function chColor(channel) { return CH_COLORS[channel % CH_COLORS.length]; }
 // as the same visual language rather than two different conventions for
 // the same kind of line.
 const SERIES_COLORS = { duty: '#888', plan: '#96c', guard: '#c22' };
+// 2026-09-01 follow-up: this used to be a console.warn -- a convention, not a
+// guarantee, and the owner's own bug report ("duty is the same color as zone
+// 1") is exactly a collision nobody noticed until it was live on the chart.
+// Throwing here is deliberate: a colour collision means this deploy is
+// broken (a trace becomes indistinguishable from another series), so it
+// should fail exactly as loudly as any other startup invariant violation,
+// not scroll past in the console. See test/test_firing_chart.js for the
+// negative test that proves this actually fires.
 (function checkSeriesColorsDontCollideWithZoneColors() {
   Object.keys(SERIES_COLORS).forEach(function (k) {
     if (CH_COLORS.indexOf(SERIES_COLORS[k]) !== -1) {
-      console.warn('SERIES_COLORS.' + k + ' (' + SERIES_COLORS[k] +
+      throw new Error('SERIES_COLORS.' + k + ' (' + SERIES_COLORS[k] +
         ') collides with a zone colour in CH_COLORS -- pick a different one');
     }
   });
