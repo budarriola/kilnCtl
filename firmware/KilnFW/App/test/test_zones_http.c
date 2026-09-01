@@ -52,7 +52,23 @@ int g_test_count = 0;
 // `extern const uint8_t X[];`. Real (empty) definitions follow the include.
 #define asm(x)
 
+// zones_http.c split 2026-09-01 into six files along its natural seams (it
+// had grown to 5628 lines, the largest file in the firmware -- see
+// ../drivers/zones_http_internal.h's header comment for the seam
+// rationale). parse_zone_fields() -- the whole reason this test reaches for
+// source inclusion instead of linking -- now lives in
+// zones_http_handlers.c, but the pattern this file's own header comment
+// describes is unchanged: #include every one of the split's .c files into
+// this ONE translation unit so their (now cross-file) `static`/non-static
+// mix still resolves exactly the way it does in the real, separately-
+// compiled firmware build, and reach every `static` internal directly.
+// Order matches the original file's top-to-bottom order.
 #include "../drivers/zones_http.c"
+#include "../drivers/zones_config_store.c"
+#include "../drivers/zones_config_accessors.c"
+#include "../drivers/zones_http_handlers.c"
+#include "../drivers/zones_current_sweep_engine.c"
+#include "../drivers/zones_current_sweep_task.c"
 
 #undef asm
 

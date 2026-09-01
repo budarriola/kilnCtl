@@ -175,6 +175,17 @@ idf_component_register(SRCS "MAX31856.c"
                        "wifi_provision_http.c"
                        "web_encoding.c"
                        "zones_http.c"
+                       # zones_http.c split 2026-09-01 (it had grown to 5628
+                       # lines, the largest file in the firmware) along its
+                       # natural seams -- see zones_http_internal.h's header
+                       # comment for the full seam rationale. zones_http.c
+                       # itself keeps hw wiring, page/URI registration, and
+                       # the small sweep HTTP wrappers.
+                       "zones_config_store.c"
+                       "zones_config_accessors.c"
+                       "zones_http_handlers.c"
+                       "zones_current_sweep_engine.c"
+                       "zones_current_sweep_task.c"
                        "zones_config_json.c"
                        "kiln_cfg_store.c"
                        "kiln_cfg_http.c"

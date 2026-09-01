@@ -1,0 +1,834 @@
+#include "zones_http_internal.h"
+
+#include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
+#include "MAX31856.h"
+#include "kiln_io.h"
+#include "profile_executor.h"
+#include "safety_trip_words.h"
+#include "thermo_combine.h"
+#include "thermo_owner.h"
+
+/* ---- Task 1: per-zone normal-current measurement sweep -------------------
+ *
+ * How long to hold one zone's relay(s) on while measuring, and why:
+ *
+ * SaftyFW/docs/CURRENT_SENSE.md §3: the analog front end's rise to a full
+ * reading is < 10 ms once current actually flows through the CT -- that part
+ * of the path is effectively instant and does not gate anything here.
+ *
+ * The real settle time is mechanical + protocol. The relay coil (EE2-12NUH,
+ * kiln_io.h) needs to physically close, and this ESP only LEARNS the new
+ * current_a[] reading once the next SAFETY_LINK status poll lands --
+ * safety_link.h's poll_period_ms is 500 ms (SAFETY_LINK_UP_PERIODS=3 *
+ * 500ms comment on link_up). ZONE_SWEEP_SETTLE_MS (1000ms = two full poll
+ * periods) guarantees at least one FRESH sample has arrived after the relay
+ * physically closed, with margin for a poll that happened to land just
+ * before the relay engaged.
+ *
+ * After settling, ZONE_SWEEP_SAMPLE_MS (4000ms, ~8 more polls at 500ms) of
+ * current_a[] readings are averaged -- the same "oversample and average"
+ * discipline CURRENT_SENSE.md §4 documents for the ADC itself (16x per
+ * sample there), applied one level up here to average out poll-to-poll
+ * noise on the already-demodulated current reading.
+ *
+ * Total 5000ms/zone is short and bounded: swept back-to-back across
+ * MAX31856_CHANNEL_COUNT zones that is at most ~5s * count, well under a
+ * minute even for a fully populated board, and every zone but the one being
+ * measured has its relay(s) OFF for the whole sweep (structural, not a
+ * convention -- see zone_sweep_task() below). */
+#define ZONE_SWEEP_SETTLE_MS 1000u
+#define ZONE_SWEEP_SAMPLE_MS 4000u
+#define ZONE_SWEEP_ENERGIZE_MS (ZONE_SWEEP_SETTLE_MS + ZONE_SWEEP_SAMPLE_MS)
+#define ZONE_SWEEP_POLL_MS 500u /* matches safety_link.h's poll_period_ms */
+
+/* ---- M12: deriving ct_channel_map from this sweep ------------------------
+ * COMMISSIONING_UX.md sec 1.2 permits ct_channel_map[0..2] to be derived
+ * "only when the mapping is unambiguous AND confirmed by the one-zone-at-a-
+ * time energize (CURRENT_SENSE.md sec 5 step 2)". This sweep IS that
+ * energize -- one zone's relay(s) on, every other relay forced off for the
+ * whole 5s window (zone_sweep_hw_energize()'s 0xFF mask) -- so it is the
+ * only place on this board that can honestly claim both halves. Before
+ * this, the only producer of ct_channel_map was three hand-typed fields on
+ * the commissioning page, which means S14 (and the mapping half of S3/S4)
+ * armed only if somebody typed the right three numbers.
+ *
+ * A channel is taken to have responded to the zone under test only if:
+ *   - it is carrying real load current (>= ZONE_SWEEP_CT_RESPOND_A), and
+ *   - it dominates every other channel by ZONE_SWEEP_CT_DOMINANCE.
+ * The threshold is the same order as SaftyFW's i_present_a load-active
+ * default (2.0 A) on purpose: this only has to separate a conducting
+ * element from measurement noise, and CURRENT_SENSE.md sec 0 already scopes
+ * the current chain's accuracy as "within a factor of ~2" -- a tighter
+ * number would be promising precision the hardware does not have. The
+ * dominance factor is what refuses the genuinely ambiguous cases: ct_mask
+ * explicitly permits one CT feeding more than one zone (zones_http.c's 5->6
+ * comment), and two channels reading within 4x of each other during one
+ * zone's window is exactly that shared-CT case, or a foreign load. Neither
+ * is derivable, so nothing is written and the operator is told which zone
+ * could not be resolved -- guessing here writes a wrong value into a red
+ * field that S3/S4/S14 then trust. */
+#define ZONE_SWEEP_CT_RESPOND_A 2.0f
+#define ZONE_SWEEP_CT_DOMINANCE 4.0f
+
+/* Pure decision for the rule above. `per_ch_a` is ZONE_CT_CHANNEL_COUNT
+ * averaged per-channel currents from one zone's sample window; a NaN entry
+ * (no per-channel sampler wired) makes the whole call ambiguous rather than
+ * being treated as 0 A. */
+bool zone_sweep_derive_ct_channel(const float *per_ch_a, uint8_t *out_ch)
+{
+    uint8_t best = 0;
+    float best_a = -1.0f, second_a = -1.0f;
+    for (uint8_t c = 0; c < ZONE_CT_CHANNEL_COUNT; c++) {
+        if (!isfinite(per_ch_a[c])) {
+            return false;
+        }
+        if (per_ch_a[c] > best_a) {
+            second_a = best_a;
+            best_a = per_ch_a[c];
+            best = c;
+        } else if (per_ch_a[c] > second_a) {
+            second_a = per_ch_a[c];
+        }
+    }
+    if (best_a < ZONE_SWEEP_CT_RESPOND_A) {
+        return false; /* nothing conducted -- CT not fitted, or the zone drew no current */
+    }
+    if (second_a > 0.0f && best_a < second_a * ZONE_SWEEP_CT_DOMINANCE) {
+        return false; /* two channels saw this zone -- shared CT or foreign load */
+    }
+    if (out_ch) {
+        *out_ch = best;
+    }
+    return true;
+}
+
+/* ---- M12b: calibrating k_ct_v_per_a from the same sweep -------------------
+ * CURRENT_SENSE.md sec 5 step 3 used to be the only producer of
+ * k_ct_v_per_a: "compare the computed amps against a clamp meter and adjust
+ * k_ct_v_per_a to match". That is a number nobody has at commissioning time,
+ * on a page that then asked for it in V/A -- so in practice it stayed at
+ * config_store.c's memset(0) placeholder, which is NOT harmless: with
+ * k_ct_v_per_a <= 0 current_presence_policy.c falls back to a fixed
+ * counts-domain margin rather than the i_present_a the operator configured
+ * (that header's own comment), and every reported amps/watts figure reads 0.
+ *
+ * The sweep already has both halves of a calibration the operator does not
+ * have to type:
+ *   - the EXPECTED whole-kiln current at full output, from the two figures
+ *     the guided commissioning flow already collects (COMMISSIONING_UX.md
+ *     Q3 mains_voltage_v 0x030E, Q4 max_expected_power_w 0x0319):
+ *     I_expected = P / V.
+ *   - the MEASURED whole-kiln current, as the sum of each zone's dominant
+ *     CT channel over a run that energized every zone exactly once with all
+ *     other relays forced off (zone_sweep_hw_energize()'s 0xFF mask). Summing
+ *     the one-zone-at-a-time readings is the same total a simultaneous
+ *     full-output firing would draw, and it is the only version of that total
+ *     this fixture can measure without ever having two zones on at once.
+ *
+ * Since amps are computed on the Pico as I = V_adc / (gain * sqrt2 * k_ct),
+ * the measurement is inversely proportional to k_ct, so the whole calibration
+ * is one scale factor:
+ *
+ *     k_new[c] = k_old[c] * (I_measured_total / I_expected_total)
+ *
+ * with k_old[c] the value the Pico has actually COMMITTED. That dependence on
+ * a prior k_old is not a weakness of this derivation, it is inherent: the
+ * link carries amps, never raw counts (safety_link_status_t has current_a[3]
+ * and nothing else), so an uncommissioned k_old makes every channel read
+ * 0.0 A and there is no measurement to scale. The same is already true of
+ * the CT-MAP derivation above -- zone_sweep_derive_ct_channel() needs
+ * >= 2.0 A to resolve anything -- so a board that can derive the map can
+ * always derive this too, and one that cannot is refused here with a reason
+ * rather than being given an invented number. */
+
+/* The correction this is willing to apply. CURRENT_SENSE.md sec 0 scopes the
+ * whole current chain's accuracy as "within a factor of ~2", so a correction
+ * inside this band is a plausible calibration of a plausible starting value.
+ * Outside it, the disagreement is not a scale error at all -- a nameplate in
+ * the wrong units, a CT on the wrong conductor, a current-output CT fitted
+ * where a voltage-output one belongs (CURRENT_SENSE.md's "wiring error the
+ * firmware cannot detect") -- and quietly scaling k_ct to paper over it would
+ * make the reported amps look right while the presence threshold this same
+ * constant feeds moved to match a lie. Refuse and say so. */
+#define ZONE_KCT_RATIO_MIN 0.2f
+#define ZONE_KCT_RATIO_MAX 5.0f
+
+/* The absolute band a self-burdened voltage-output CT can plausibly land in:
+ * an SCT-013-030 is 0.0333 V/A (CURRENT_SENSE.md sec 5), a 1 V/100 A part is
+ * 0.01, and a burdened part with R72 fitted is higher still. Two decades
+ * either side of that spread is generous; anything outside is not a CT. */
+#define ZONE_KCT_MIN_V_PER_A 0.0005f
+#define ZONE_KCT_MAX_V_PER_A 0.5f
+
+/* The measured total below which no calibration is attempted. Same order and
+ * same reasoning as ZONE_SWEEP_CT_RESPOND_A: below a conducting element's
+ * current the ratio is dominated by measurement noise, and a scale factor
+ * computed from noise is worse than no scale factor. */
+#define ZONE_KCT_MIN_MEASURED_A ZONE_SWEEP_CT_RESPOND_A
+
+/* zone_kct_derive_t moved to zones_http_internal.h -- zones_current_sweep_
+ * task.c calls zone_sweep_derive_k_ct()/zone_kct_derive_str() too. */
+
+/* Pure decision for the rule above -- every input is a plain number the
+ * caller gathers, so the whole calibration is host-testable off-target.
+ * *out_k is written ONLY on ZONE_KCT_DERIVE_OK. */
+zone_kct_derive_t zone_sweep_derive_k_ct(float measured_total_a, float expected_power_w,
+                                                 float mains_voltage_v, float k_old, float *out_k)
+{
+    if (!isfinite(expected_power_w) || expected_power_w <= 0.0f || !isfinite(mains_voltage_v) ||
+        mains_voltage_v <= 0.0f) {
+        return ZONE_KCT_DERIVE_NO_NAMEPLATE;
+    }
+    if (!isfinite(measured_total_a) || measured_total_a < ZONE_KCT_MIN_MEASURED_A) {
+        return ZONE_KCT_DERIVE_NO_MEASUREMENT;
+    }
+    if (!isfinite(k_old) || k_old <= 0.0f) {
+        return ZONE_KCT_DERIVE_NO_PRIOR_K;
+    }
+    float expected_a = expected_power_w / mains_voltage_v;
+    if (!isfinite(expected_a) || expected_a <= 0.0f) {
+        return ZONE_KCT_DERIVE_NO_NAMEPLATE; /* P/V overflowed or underflowed to nothing usable */
+    }
+    float ratio = measured_total_a / expected_a;
+    if (!isfinite(ratio) || ratio < ZONE_KCT_RATIO_MIN || ratio > ZONE_KCT_RATIO_MAX) {
+        return ZONE_KCT_DERIVE_IMPLAUSIBLE;
+    }
+    float k_new = k_old * ratio;
+    if (!isfinite(k_new) || k_new < ZONE_KCT_MIN_V_PER_A || k_new > ZONE_KCT_MAX_V_PER_A) {
+        return ZONE_KCT_DERIVE_IMPLAUSIBLE;
+    }
+    if (out_k) {
+        *out_k = k_new;
+    }
+    return ZONE_KCT_DERIVE_OK;
+}
+
+const char *zone_kct_derive_str(zone_kct_derive_t r)
+{
+    switch (r) {
+    case ZONE_KCT_DERIVE_OK: return "ok";
+    case ZONE_KCT_DERIVE_NO_NAMEPLATE:
+        return "answer the mains voltage and full-output power questions first";
+    case ZONE_KCT_DERIVE_NO_MEASUREMENT: return "the sweep measured no load current";
+    case ZONE_KCT_DERIVE_NO_PRIOR_K: return "k_ct_v_per_a has never been set, so amps read zero";
+    case ZONE_KCT_DERIVE_IMPLAUSIBLE:
+        return "measured and nameplate current disagree too far to be a scale error";
+    default: return "unknown";
+    }
+}
+
+const char *zone_sweep_refusal_str(zone_sweep_refusal_t r)
+{
+    switch (r) {
+    case ZONE_SWEEP_REFUSE_OK: return "ok";
+    case ZONE_SWEEP_REFUSE_ALREADY_RUNNING: return "a current sweep is already running";
+    case ZONE_SWEEP_REFUSE_NO_HW: return "board I/O is not available this boot";
+    case ZONE_SWEEP_REFUSE_CONFIG_INVALID: return "zone config did not load cleanly -- cannot energize relays";
+    case ZONE_SWEEP_REFUSE_NO_ZONES: return "no zones are configured";
+    case ZONE_SWEEP_REFUSE_PROFILE_RUNNING: return "a firing profile is running or paused";
+    case ZONE_SWEEP_REFUSE_AUTOTUNE_RUNNING: return "autotune is running";
+    case ZONE_SWEEP_REFUSE_LINK_DOWN: return "the safety link is down";
+    case ZONE_SWEEP_REFUSE_TRIP_LATCHED: return "a safety trip is latched";
+    case ZONE_SWEEP_REFUSE_RELAYS_ON: return "a relay is already on -- turn it off before sweeping";
+    default: return "unknown refusal";
+    }
+}
+
+/* Pure, host-tested refusal decision -- every input is a plain value the
+ * caller (zones_current_sweep_start() below) gathers from the real
+ * subsystems; this function itself touches no hardware and can be exercised
+ * completely off-target. First matching reason wins; order matches the
+ * doc comment on zones_current_sweep_start() in zones_http.h. */
+zone_sweep_refusal_t zone_sweep_check_refusal(bool already_running, bool have_hw, bool config_valid,
+                                                      uint8_t thermo_count, bool profile_running_or_paused,
+                                                      bool autotune_active, bool link_up, bool trip_latched,
+                                                      bool relays_on)
+{
+    if (already_running) {
+        return ZONE_SWEEP_REFUSE_ALREADY_RUNNING;
+    }
+    if (!have_hw) {
+        return ZONE_SWEEP_REFUSE_NO_HW;
+    }
+    if (!config_valid) {
+        return ZONE_SWEEP_REFUSE_CONFIG_INVALID;
+    }
+    if (thermo_count == 0) {
+        return ZONE_SWEEP_REFUSE_NO_ZONES;
+    }
+    if (profile_running_or_paused) {
+        return ZONE_SWEEP_REFUSE_PROFILE_RUNNING;
+    }
+    if (autotune_active) {
+        return ZONE_SWEEP_REFUSE_AUTOTUNE_RUNNING;
+    }
+    if (!link_up) {
+        return ZONE_SWEEP_REFUSE_LINK_DOWN;
+    }
+    if (trip_latched) {
+        return ZONE_SWEEP_REFUSE_TRIP_LATCHED;
+    }
+    if (relays_on) {
+        return ZONE_SWEEP_REFUSE_RELAYS_ON;
+    }
+    return ZONE_SWEEP_REFUSE_OK;
+}
+
+/* H2 (opus reviews, 2026-08-27 and 2026-08-28): max_temp_c <= 0 is
+ * zones_config_get_temp_limits()'s documented "no ceiling configured" state
+ * -- and the DEFAULT on any zone that has never been commissioned. This
+ * sweep is specifically a COMMISSIONING tool: an uncommissioned board is
+ * exactly the board it will first be run on, so "no ceiling configured"
+ * cannot mean "no thermal abort at all" here the way it legitimately can for
+ * a firing profile the operator already reviewed. Refusing to sweep an
+ * unceilinged zone would make the tool useless on the one board that most
+ * needs it (nothing to measure a normal current against yet), so instead:
+ * derive an effective ceiling.
+ *
+ * The 2026-08-27 pass reused OTA_INTERLOCK_TEMP_CEILING_C (100 C) for this.
+ * The 2026-08-28 review rejected that: OTA_INTERLOCK_TEMP_CEILING_C was
+ * chosen as a conservative OTA precondition for a kiln AT REST, not as a
+ * thermal abort for a deliberate energize, and it drifts independently of
+ * this file's own needs -- worse, THIS bench is capped at 80 C by every
+ * zone's own configured ceiling, so a 100 C fallback can structurally never
+ * fire on the hardware this sweep actually runs against. Fixed:
+ * zone_sweep_effective_ceiling_c() below derives the ceiling instead of
+ * borrowing OTA's -- the tightest configured ceiling across every zone that
+ * HAS one, self-calibrating to whatever board this is (80 C on this bench,
+ * the operator's tightest real ceiling on a real kiln). Only when NO zone
+ * anywhere has a ceiling configured does it fall back to the fixed
+ * ZONE_SWEEP_UNCOMMISSIONED_CEILING_C (60 C): a 5s energize on a stone-cold,
+ * never-commissioned chamber raises it a few degrees at most, so a low
+ * absolute costs nothing in false aborts.
+ *
+ * !actual_valid (no usable thermocouple reading) is NOT a ceiling hit
+ * either: it is a different failure (see N1's consecutive-invalid-poll
+ * counter in zone_sweep_run_one_zone() below, which is what actually stops
+ * an unsupervised run once the thermo bus stops answering -- link_up()
+ * watches the ESP<->Pico UART, not temperature, and cannot substitute for
+ * this). */
+#define ZONE_SWEEP_UNCOMMISSIONED_CEILING_C 60.0f
+
+static float zone_sweep_effective_ceiling_c(void)
+{
+    bool have_any = false;
+    float min_ceiling_c = 0.0f;
+    uint8_t n = s_zones.cfg.thermo_count;
+    if (n > MAX31856_CHANNEL_COUNT) {
+        n = MAX31856_CHANNEL_COUNT;
+    }
+    for (uint8_t zi = 0; zi < n; zi++) {
+        float max_temp_c = 0.0f, min_temp_c = 0.0f;
+        if (!zones_config_get_temp_limits(zi, &max_temp_c, &min_temp_c)) {
+            continue;
+        }
+        if (max_temp_c > 0.0f && (!have_any || max_temp_c < min_ceiling_c)) {
+            min_ceiling_c = max_temp_c;
+            have_any = true;
+        }
+    }
+    return have_any ? min_ceiling_c : ZONE_SWEEP_UNCOMMISSIONED_CEILING_C;
+}
+
+static bool zone_sweep_ceiling_hit(float actual_c, bool actual_valid, float effective_ceiling_c)
+{
+    if (!actual_valid || isnan(actual_c)) {
+        return false;
+    }
+    return actual_c >= effective_ceiling_c;
+}
+
+static bool zone_sweep_should_sample(uint32_t elapsed_ms)
+{
+    return elapsed_ms >= ZONE_SWEEP_SETTLE_MS;
+}
+
+static bool zone_sweep_zone_done(uint32_t elapsed_ms)
+{
+    return elapsed_ms >= ZONE_SWEEP_ENERGIZE_MS;
+}
+
+/* zone_sweep_ctx_t moved to zones_http_internal.h (its own doc comment there
+ * is unchanged) -- zones_current_sweep_task.c reads/writes s_sweep too. The
+ * instance itself is still defined here, non-static: this is where the
+ * sweep's live state actually lives. */
+zone_sweep_ctx_t s_sweep = {
+    .active = false, .abort_requested = false, .state = ZONE_SWEEP_IDLE,
+    .zone_index = 0, .zones_done = 0, .zones_total = 0, .reason = "", .task = NULL,
+};
+
+/* THE single choke point every exit path of the sweep goes through to make
+ * sure relays end up off -- abort, ceiling hit, link loss, or ordinary
+ * completion all call this and NOTHING ELSE turns a relay off in this
+ * module's sweep code.
+ *
+ * B1 fix (opus review, 2026-08-27): this used to call kiln_io_all_relays_off()
+ * directly. kiln_io_owner.h's own top comment names that call out by name as
+ * outside its documented licence when used as a NORMAL end-of-measurement
+ * path rather than a last-resort fail-safe (link watchdog / guard-9 watchdog
+ * / kiln_enter_safe_state()) -- this is the normal path, every single zone.
+ * Routed through kiln_io_owner_command_all_relays_off() instead: same
+ * "unconditional, no gating" behavior kiln_io_owner.h documents for it
+ * (relays only ever come off here, never on), now serialized against the
+ * other five relay writers through the owner task's queue instead of racing
+ * them on a stale SX1509 read. */
+void zone_sweep_force_relays_off(void)
+{
+    if (s_hw_io) {
+        kiln_io_owner_command_all_relays_off();
+    }
+}
+
+/* Reads zone zi's combined, calibrated temperature the same way
+ * profile_executor.c's control tick does (MAX31856_read_all() +
+ * thermo_combine() over the zone's thermo_mask) -- duplicated rather than
+ * shared because profile_executor.c is off-limits for this pass and its own
+ * read is buried inside a much larger per-tick loop with no standalone
+ * entry point. *out_valid false means "no usable reading", matching
+ * thermo_combine()'s own convention. */
+static void zone_sweep_read_zone_temp(uint8_t zi, float *out_c, bool *out_valid)
+{
+    *out_c = NAN;
+    *out_valid = false;
+    if (!s_hw_thermo_bus || !s_hw_thermo_bus->initialized) {
+        return;
+    }
+    MAX31856Reading readings[MAX31856_CHANNEL_COUNT];
+    size_t count = 0;
+    if (MAX31856_read_all(s_hw_thermo_bus, readings, MAX31856_CHANNEL_COUNT, &count) != ESP_OK && count == 0) {
+        return;
+    }
+    float ch_c[MAX31856_CHANNEL_COUNT];
+    bool ch_ok[MAX31856_CHANNEL_COUNT];
+    for (uint8_t ci = 0; ci < MAX31856_CHANNEL_COUNT; ci++) {
+        ch_c[ci] = NAN;
+        ch_ok[ci] = false;
+    }
+    for (size_t i = 0; i < count; i++) {
+        uint8_t ci = readings[i].channel;
+        if (ci >= MAX31856_CHANNEL_COUNT) {
+            continue;
+        }
+        ch_c[ci] = readings[i].tc_temperature_c;
+        bool fault_bits_bad = (readings[i].fault_status & (0x01u | 0x02u | 0x40u)) != 0;
+        ch_ok[ci] = !readings[i].spi_failed && !isnan(ch_c[ci]) && !fault_bits_bad;
+    }
+    uint8_t tmask = 0;
+    zones_config_get_thermo_mask(zi, &tmask);
+    bool valid = false;
+    float combined = thermo_combine(ch_c, ch_ok, MAX31856_CHANNEL_COUNT, tmask, &valid);
+    *out_valid = valid;
+    *out_c = valid ? zones_config_apply_cal(zi, combined) : NAN;
+}
+
+/* ---- M3 (opus review, 2026-08-27): the per-zone state machine, extracted
+ * from zone_sweep_task() below into a form the host tests can drive without
+ * xTaskCreate() ever running. The task body used to be untestable by
+ * construction (test_zones_http.c stubs xTaskCreate() so it never invokes
+ * its task function, and says so in a comment) -- every safety-relevant
+ * property named in the finding (relay on/off sequencing, the single-choke-
+ * point property, the abort path, the link-loss exit) lived only in that
+ * unreachable function body. Dependency injection through zone_sweep_zone_
+ * deps_t is what makes it reachable: the SAME sequencing logic that runs on
+ * target against real hardware runs in the host tests against fakes that
+ * record call order.
+ *
+ * Deliberately excluded from the deps: the CT-mask -> live_a summation is
+ * plain arithmetic over already-fetched values (covered by other, simpler
+ * tests) and not itself part of the safety argument this extraction targets;
+ * `sample_current` hands the step function an already-summed reading so the
+ * deps surface stays focused on the calls that matter here -- energize,
+ * de-energize, abort, link status.
+ *
+ * zone_sweep_zone_deps_t itself moved to zones_http_internal.h --
+ * zones_current_sweep_task.c's zone_sweep_task() builds the real `hw_deps`
+ * instance from the zone_sweep_hw_*() bindings below. */
+
+/* N1 (opus review, 2026-08-28): consecutive `!actual_valid` polls tolerated
+ * before treating "no usable thermocouple reading" as its own abort. One
+ * poll of noise tolerance, not zero -- a single dropped/garbled SPI
+ * transaction is not itself evidence the bus is wedged. Two consecutive
+ * misses (this constant) is. */
+#define ZONE_SWEEP_TEMP_LOST_POLLS 2u
+
+typedef enum {
+    ZONE_SWEEP_ZONE_SKIPPED = 0,      /* relay_mask == 0 -- nothing wired, nothing measured */
+    ZONE_SWEEP_ZONE_ABORTED,
+    ZONE_SWEEP_ZONE_CEILING_HIT,
+    ZONE_SWEEP_ZONE_LINK_LOST,
+    ZONE_SWEEP_ZONE_TRIP_LATCHED,     /* N10: a safety trip latched mid-zone */
+    ZONE_SWEEP_ZONE_TEMP_LOST,        /* N1: the ceiling abort went blind -- ZONE_SWEEP_TEMP_LOST_POLLS
+                                        * consecutive polls with no usable thermocouple reading */
+    ZONE_SWEEP_ZONE_ENERGIZE_REFUSED, /* B1: the owner refused the ON write (owned/safety/updating/io) */
+    ZONE_SWEEP_ZONE_OK,
+} zone_sweep_zone_outcome_t;
+
+/* Runs one zone of the sweep to completion using `deps` for every side
+ * effect. Mirrors the original inline loop body exactly, plus:
+ *   - B1: the energize call itself can now be REFUSED (owner-gated), which
+ *     the original direct kiln_io_set_relay_mask() call could never report --
+ *     that refusal is itself an exit path and goes through the same choke
+ *     point as every other one below.
+ *   - N1 (opus review, 2026-08-28): the ceiling check is inert while
+ *     actual_valid is false (zone_sweep_ceiling_hit() correctly never
+ *     invents a hot reading). If the MAX31856 bus faults mid-run -- SPI
+ *     wedge, fault bits set, a pulled thermocouple -- every subsequent poll
+ *     comes back invalid and the ceiling abort could not fire for the rest
+ *     of the zone's 5s energize, with link_up() providing no substitute
+ *     supervision (it watches the ESP<->Pico UART, not temperature). Fixed:
+ *     count consecutive invalid polls and exit via ZONE_SWEEP_ZONE_TEMP_LOST
+ *     after ZONE_SWEEP_TEMP_LOST_POLLS, through the same choke point.
+ *   - N10 (opus review, 2026-08-28): a safety trip latching mid-zone used to
+ *     be invisible to this loop -- not a heat hazard on its own (the Pico
+ *     opens its own contactor independently), but the sweep would grind on
+ *     for the rest of its 5s dwell and every zone after this one would then
+ *     be refused at the energize step. Exit promptly instead. */
+static zone_sweep_zone_outcome_t zone_sweep_run_one_zone(uint8_t zi, uint8_t relay_mask,
+                                                          const zone_sweep_zone_deps_t *deps,
+                                                          float *out_avg_current_a,
+                                                          float *out_per_ch_avg_a,
+                                                          uint32_t *out_energize_refused_sources)
+{
+    if (relay_mask == 0) {
+        return ZONE_SWEEP_ZONE_SKIPPED; /* nothing wired to this zone -- nothing to measure */
+    }
+    if (deps->abort_requested(deps->ctx)) {
+        return ZONE_SWEEP_ZONE_ABORTED;
+    }
+    uint32_t safety_sources = 0;
+    kiln_io_owner_relay_result_t rr = deps->energize(deps->ctx, relay_mask, &safety_sources);
+    if (rr != KILN_IO_OWNER_RELAY_OK) {
+        deps->force_off(deps->ctx); /* choke point -- nothing was left on, but be explicit */
+        if (out_energize_refused_sources) *out_energize_refused_sources = safety_sources;
+        return ZONE_SWEEP_ZONE_ENERGIZE_REFUSED;
+    }
+
+    uint32_t elapsed = 0;
+    float sum_a = 0.0f;
+    uint32_t samples = 0;
+    float ch_sum_a[ZONE_CT_CHANNEL_COUNT] = {0};
+    uint32_t invalid_streak = 0;
+    float effective_ceiling_c = zone_sweep_effective_ceiling_c();
+    zone_sweep_zone_outcome_t outcome = ZONE_SWEEP_ZONE_OK;
+    while (!zone_sweep_zone_done(elapsed)) {
+        if (deps->abort_requested(deps->ctx)) {
+            outcome = ZONE_SWEEP_ZONE_ABORTED;
+            break;
+        }
+        deps->delay_poll(deps->ctx);
+        elapsed += ZONE_SWEEP_POLL_MS;
+
+        float actual_c;
+        bool actual_valid;
+        deps->read_temp(deps->ctx, zi, &actual_c, &actual_valid);
+
+        if (!actual_valid || isnan(actual_c)) {
+            invalid_streak++;
+            if (invalid_streak >= ZONE_SWEEP_TEMP_LOST_POLLS) {
+                outcome = ZONE_SWEEP_ZONE_TEMP_LOST;
+                break;
+            }
+        } else {
+            invalid_streak = 0;
+        }
+
+        if (zone_sweep_ceiling_hit(actual_c, actual_valid, effective_ceiling_c)) {
+            outcome = ZONE_SWEEP_ZONE_CEILING_HIT;
+            break;
+        }
+
+        if (!deps->link_up(deps->ctx)) {
+            outcome = ZONE_SWEEP_ZONE_LINK_LOST;
+            break;
+        }
+
+        if (deps->trip_latched(deps->ctx)) {
+            outcome = ZONE_SWEEP_ZONE_TRIP_LATCHED;
+            break;
+        }
+
+        if (zone_sweep_should_sample(elapsed)) {
+            sum_a += deps->sample_current(deps->ctx, zi);
+            if (deps->sample_channels) {
+                float ch_a[ZONE_CT_CHANNEL_COUNT];
+                deps->sample_channels(deps->ctx, ch_a);
+                for (uint8_t c = 0; c < ZONE_CT_CHANNEL_COUNT; c++) {
+                    ch_sum_a[c] += ch_a[c];
+                }
+            }
+            samples++;
+        }
+    }
+
+    deps->force_off(deps->ctx); /* choke point -- every path out of this zone goes through here */
+
+    if (outcome == ZONE_SWEEP_ZONE_OK && samples > 0 && out_avg_current_a) {
+        *out_avg_current_a = sum_a / (float)samples;
+    }
+    /* M12: NaN, not 0, whenever there is nothing real to report -- a zone
+     * that aborted, took no samples, or ran without a per-channel sampler
+     * must read as "cannot tell" to zone_sweep_derive_ct_channel(), never as
+     * three channels that all measured zero. */
+    if (out_per_ch_avg_a) {
+        bool have = (outcome == ZONE_SWEEP_ZONE_OK) && samples > 0 && deps->sample_channels != NULL;
+        for (uint8_t c = 0; c < ZONE_CT_CHANNEL_COUNT; c++) {
+            out_per_ch_avg_a[c] = have ? (ch_sum_a[c] / (float)samples) : NAN;
+        }
+    }
+    return outcome;
+}
+
+/* ---- Real hardware bindings for zone_sweep_zone_deps_t, used only by
+ * zone_sweep_task() below -- host tests supply their own fakes instead and
+ * never link these. */
+kiln_io_owner_relay_result_t zone_sweep_hw_energize(void *ctx, uint8_t relay_mask,
+                                                            uint32_t *out_safety_sources)
+{
+    (void)ctx;
+    /* B1: MANUAL, not AUTHORIZED -- deliberate choice (opus review). The
+     * AUTHORIZED entry point exists for profile_executor.c/autotune_engine.c
+     * because THEY already apply their own zone-level ownership/safety gate
+     * (relay_authority_zone_blocked()) before calling in; this module has no
+     * equivalent gate of its own; a sweep is not "the owner" of anything the
+     * way a running profile zone is. MANUAL is also the one that puts
+     * ota_http_heat_blocked_by_update()'s OTA gate on every write (via
+     * kiln_io_owner.c's relay_on_blocked()) -- B2's other half: even if the
+     * forward interlock (autotune/profile/OTA refusing to START while a
+     * sweep is active) were somehow bypassed, MANUAL still refuses to
+     * energize while an update is genuinely in flight, mid-sweep, the same
+     * way it already refuses a manual dashboard relay-on. ERR_OWNED is the
+     * expected refusal if a profile/autotune run is (impossibly, given B2's
+     * forward interlock) racing this sweep for the same relay -- fail
+     * closed either way.
+     *
+     * N9 (opus review, 2026-08-28): mask is 0xFF, not relay_mask -- this
+     * asserts an all-others-off precondition on every energize write, not
+     * just "make sure this zone's relay(s) are on". A relay latched on from
+     * the dashboard (or left on by a profile that just ended) before the
+     * sweep started used to keep whatever state it had: if it shared a CT
+     * channel with the zone under test, its load landed on that channel too
+     * and zone_normals_set() persisted the inflated total as the zone's
+     * measured "normal" -- permanently poisoning
+     * zones_ct_mapping_mismatch()'s reference. zones_current_sweep_start()
+     * also now refuses to start at all while any relay shadow bit is set
+     * (ZONE_SWEEP_REFUSE_RELAYS_ON), so this is belt-and-suspenders: the
+     * start-time refusal is the primary defense, this write is what keeps
+     * every OTHER relay off for the whole 5s a zone is actually measured. */
+    return kiln_io_owner_command_set_relay_mask(0xFFu, relay_mask, out_safety_sources);
+}
+
+void zone_sweep_hw_force_off(void *ctx)
+{
+    (void)ctx;
+    zone_sweep_force_relays_off();
+}
+
+void zone_sweep_hw_read_temp(void *ctx, uint8_t zi, float *out_c, bool *out_valid)
+{
+    (void)ctx;
+    zone_sweep_read_zone_temp(zi, out_c, out_valid);
+}
+
+float zone_sweep_hw_sample_current(void *ctx, uint8_t zi)
+{
+    (void)ctx;
+    uint8_t ctmask = 0;
+    zones_config_get_ct_mask(zi, &ctmask);
+    safety_link_status_t st;
+    memset(&st, 0, sizeof(st));
+    if (!s_hw_safety || safety_link_get_status(s_hw_safety, &st) != ESP_OK) {
+        return 0.0f;
+    }
+    float live_a = 0.0f;
+    for (uint8_t c = 0; c < ZONE_CT_CHANNEL_COUNT; c++) {
+        if (ctmask & (1u << c)) {
+            live_a += st.current_a[c];
+        }
+    }
+    return live_a;
+}
+
+/* M12: the same safety_link_get_status() snapshot zone_sweep_hw_sample_
+ * current() reads, handed over WITHOUT the ct_mask summing -- see
+ * zone_sweep_zone_deps_t::sample_channels for why the mask must not be
+ * applied here. A link read that fails leaves every channel NaN, which
+ * zone_sweep_derive_ct_channel() reads as "cannot tell". */
+void zone_sweep_hw_sample_channels(void *ctx, float *out_a)
+{
+    (void)ctx;
+    safety_link_status_t st;
+    memset(&st, 0, sizeof(st));
+    bool ok = s_hw_safety && safety_link_get_status(s_hw_safety, &st) == ESP_OK;
+    for (uint8_t c = 0; c < ZONE_CT_CHANNEL_COUNT; c++) {
+        out_a[c] = ok ? st.current_a[c] : NAN;
+    }
+}
+
+bool zone_sweep_hw_link_up(void *ctx)
+{
+    (void)ctx;
+    safety_link_status_t st;
+    memset(&st, 0, sizeof(st));
+    return s_hw_safety && safety_link_get_status(s_hw_safety, &st) == ESP_OK && st.link_up;
+}
+
+/* N10 (opus review, 2026-08-28): same fault_asserted/diag-TRIPPED test
+ * zones_current_sweep_start() uses to refuse a START, applied mid-run too --
+ * see zone_sweep_run_one_zone()'s comment for why this loop needs it. */
+bool zone_sweep_hw_trip_latched(void *ctx)
+{
+    (void)ctx;
+    if (!s_hw_safety) {
+        return false;
+    }
+    safety_link_status_t st;
+    memset(&st, 0, sizeof(st));
+    if (safety_link_get_status(s_hw_safety, &st) != ESP_OK) {
+        return false;
+    }
+    return st.fault_asserted || (st.diag_ever_received && st.diag_state == SAFETY_LINK_DIAG_STATE_TRIPPED);
+}
+
+bool zone_sweep_hw_abort_requested(void *ctx)
+{
+    (void)ctx;
+    return s_sweep.abort_requested;
+}
+
+void zone_sweep_hw_delay_poll(void *ctx)
+{
+    (void)ctx;
+    vTaskDelay(pdMS_TO_TICKS(ZONE_SWEEP_POLL_MS));
+}
+
+/* ---- M3 (opus review, 2026-08-28): the whole-sweep loop, extracted from
+ * zone_sweep_task() below into a form the host tests can drive without
+ * xTaskCreate() ever running -- the same reason zone_sweep_run_one_zone()
+ * was extracted from it in the earlier pass. Before this, "no two zones on
+ * at once" (the comment on zone_sweep_task() below calls it "structural, not
+ * a convention") was argued from reading the code, never actually exercised:
+ * xTaskCreate() is stubbed under test, so this loop's body never ran.
+ * zone_sweep_run_all_zones() is that same loop body, dependency-injected the
+ * same way zone_sweep_run_one_zone() is -- `deps` for the per-zone hardware
+ * calls, `hooks` for the per-sweep bookkeeping (which zone owns which relay
+ * mask, live status updates, persisting a measured normal) that used to be
+ * s_sweep/s_zones/zone_normals_set() called directly inline.
+ *
+ * zone_sweep_all_hooks_t/zone_sweep_all_result_t moved to
+ * zones_http_internal.h -- zones_current_sweep_task.c's zone_sweep_task()
+ * builds the real `hw_hooks` instance and reads the result. */
+
+void zone_sweep_run_all_zones(uint8_t zones_total, const zone_sweep_zone_deps_t *deps,
+                                      const zone_sweep_all_hooks_t *hooks, zone_sweep_all_result_t *out)
+{
+    out->state = ZONE_SWEEP_DONE;
+    out->reason[0] = '\0';
+    out->zones_done = 0;
+
+    for (uint8_t zi = 0; zi < zones_total; zi++) {
+        uint8_t relay_mask = hooks->relay_mask_for_zone(hooks->ctx, zi);
+        if (relay_mask != 0 && hooks->set_zone_index) {
+            hooks->set_zone_index(hooks->ctx, zi);
+        }
+
+        float avg_a = NAN; /* stays NaN unless zone_sweep_run_one_zone() got >=1 sample */
+        float per_ch_avg_a[ZONE_CT_CHANNEL_COUNT];
+        uint32_t refused_sources = 0;
+        zone_sweep_zone_outcome_t outcome =
+            zone_sweep_run_one_zone(zi, relay_mask, deps, &avg_a, per_ch_avg_a, &refused_sources);
+
+        switch (outcome) {
+        case ZONE_SWEEP_ZONE_SKIPPED:
+            continue; /* nothing wired to this zone -- nothing to measure */
+        case ZONE_SWEEP_ZONE_ABORTED:
+            snprintf(out->reason, sizeof(out->reason), "aborted");
+            out->state = ZONE_SWEEP_ABORTED;
+            return;
+        case ZONE_SWEEP_ZONE_CEILING_HIT:
+            snprintf(out->reason, sizeof(out->reason), "zone %u reached its temperature ceiling", zi);
+            out->state = ZONE_SWEEP_FAILED;
+            return;
+        case ZONE_SWEEP_ZONE_LINK_LOST:
+            snprintf(out->reason, sizeof(out->reason), "safety link dropped during zone %u", zi);
+            out->state = ZONE_SWEEP_FAILED;
+            return;
+        case ZONE_SWEEP_ZONE_TRIP_LATCHED:
+            /* N10: not a heat hazard by itself -- the Pico opens its own
+             * contactor independently of anything this ESP does -- but the
+             * sweep must not grind on for the rest of the dwell, or refuse
+             * every later zone at the energize step without saying why. */
+            snprintf(out->reason, sizeof(out->reason), "safety trip latched during zone %u", zi);
+            out->state = ZONE_SWEEP_FAILED;
+            return;
+        case ZONE_SWEEP_ZONE_TEMP_LOST:
+            /* N1: the ceiling abort went blind -- see zone_sweep_run_one_zone()'s comment. */
+            snprintf(out->reason, sizeof(out->reason), "zone %u lost its temperature reading mid-sweep", zi);
+            out->state = ZONE_SWEEP_FAILED;
+            return;
+        case ZONE_SWEEP_ZONE_ENERGIZE_REFUSED:
+            /* B1: the owner refused the ON write -- most likely a firmware
+             * update started mid-sweep (ERR_UPDATING) or a safety fault
+             * asserted mid-sweep (ERR_SAFETY), the exact gap the direct
+             * kiln_io_set_relay_mask() call used to have no way to see. */
+            /* ROADMAP.md M13: decode the fault-source mask instead of
+             * showing a bare hex value. out->reason is char[64] (matching
+             * zones_http.h's zone_sweep_status_t), and the full comma-joined
+             * safety_fault_source_words() sentence can run to 141 bytes (see
+             * safety_trip_words.h's comment), so the full decode does not
+             * fit here -- take just the first asserted source's name and
+             * note "(+more)" if others are also set, same shortening
+             * ui_page_temperature.c's relay-refusal message uses.
+             *
+             * Kept short and unconditionally non-truncating: zi is uint8_t
+             * (max 3 digits), and the "%.16s" precision (not just a big
+             * buffer) is what lets -Werror=format-truncation prove this can
+             * never overflow out->reason regardless of how long the decoded
+             * word actually is: "zone " + 3 + " energize refused: " + 16 +
+             * " (+more)" = 5 + 3 + 19 + 16 + 8 = 51 bytes, plus the NUL,
+             * fits in 64. */
+            {
+                char src_words[160];
+                safety_fault_source_words(refused_sources, src_words, sizeof(src_words));
+                char *comma = strchr(src_words, ',');
+                bool more = (comma != NULL);
+                if (comma != NULL) {
+                    *comma = '\0';
+                }
+                snprintf(out->reason, sizeof(out->reason), "zone %u energize refused: %.16s%s", zi, src_words,
+                         more ? " (+more)" : "");
+            }
+            out->state = ZONE_SWEEP_FAILED;
+            return;
+        case ZONE_SWEEP_ZONE_OK:
+        default:
+            /* M3: the OK-with-zero-samples path -- outcome can be OK with
+             * samples == 0 if the zone's whole dwell elapsed without ever
+             * reaching zone_sweep_should_sample()'s window (not reachable
+             * with today's fixed SETTLE/ENERGIZE constants, but the
+             * aggregation logic itself does not assume that and is tested
+             * as such below). avg_a stays NaN in that case and must not be
+             * recorded as a measured normal, but the zone still counts as
+             * "done" -- it completed without aborting/failing. */
+            if (!isnan(avg_a) && hooks->record_normal) {
+                hooks->record_normal(hooks->ctx, zi, avg_a);
+            }
+            if (hooks->record_ct_channels) {
+                hooks->record_ct_channels(hooks->ctx, zi, relay_mask, per_ch_avg_a);
+            }
+            out->zones_done++;
+            if (hooks->zone_done) {
+                hooks->zone_done(hooks->ctx);
+            }
+            break;
+        }
+    }
+}
+
