@@ -7,11 +7,31 @@
 // (see its doc comment in dashboard_json.h) instead of bailing silently.
 #include "dashboard_json.h"
 
+#include <stdarg.h>
 #include <stdio.h>
 
 #include "esp_log.h"
 
 static const char *TAG = "dashboard_json";
+
+size_t json_append_clamped(char *json, size_t cap, size_t o, const char *fmt, ...)
+{
+    if (o > cap - 1) {
+        /* Already at/over the limit (shouldn't happen if every prior call
+         * went through this same function, but a caller mixing this with a
+         * raw snprintf could hand in an already-overrun `o` -- clamp before
+         * doing any arithmetic on it so `cap - o` below can never wrap). */
+        return cap - 1;
+    }
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(json + o, cap - o, fmt, ap);
+    va_end(ap);
+    if (n > 0) {
+        o += (size_t)n;
+    }
+    return o > cap - 1 ? cap - 1 : o;
+}
 
 void json_escape(const char *src, char *out, size_t out_cap)
 {

@@ -68,4 +68,21 @@ void json_escape(const char *src, char *out, size_t out_cap);
 size_t append_zone_status_json(char *json, size_t cap, size_t o, const profile_exec_status_t *st,
                                bool control_fields);
 
+/* Self-clamping snprintf-append: writes at most one formatted chunk into
+ * json[o..cap), and ALWAYS returns an offset <= cap - 1, never more --
+ * unlike a bare `o += snprintf(json+o, cap-o, ...)`, which returns
+ * snprintf's WOULD-BE length even when truncated, so a caller that keeps
+ * chaining appends off that unclamped `o` can walk it past `cap`; the next
+ * call's `cap - o` then wraps a size_t and writes out of bounds (dashboard_
+ * http.c's autotune_matrix_get_handler hit exactly this after its RGA
+ * block's json[] moved off the stack onto the heap during the 2026-08-31
+ * httpd_worker stack-overflow fix -- a stack smash before, a heap smash
+ * after, neither ever actually reachable at today's MAX31856_CHANNEL_COUNT,
+ * but this closes the class regardless of how large a future n/cap gets).
+ * Every call clamps immediately, so a long chain of appends into a
+ * deliberately undersized buffer can never leave `o` unbounded partway
+ * through -- see test_dashboard_json.c's own stress test against this
+ * exact property. cap must be >= 1. */
+size_t json_append_clamped(char *json, size_t cap, size_t o, const char *fmt, ...);
+
 #endif // DASHBOARD_JSON_H

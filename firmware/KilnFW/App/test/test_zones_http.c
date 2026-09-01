@@ -193,8 +193,22 @@ esp_err_t httpd_resp_set_status(httpd_req_t *r, const char *status)
 esp_err_t httpd_resp_sendstr(httpd_req_t *r, const char *s)
 {
     (void)r;
-    (void)s;
     s_test_ok_called = true;
+    /* Also captured into s_last_resp_body, same as httpd_resp_send() above --
+     * added for zones_get_handler()'s malloc-failure 500 path (2026-08-31
+     * PSRAM fix), which sends its error body via httpd_resp_sendstr(), not
+     * httpd_resp_send(). Every pre-existing test in this file only checks
+     * s_test_ok_called/s_test_err_called, never s_last_resp_body after a
+     * sendstr() call, so this addition is inert for them. */
+    if (s) {
+        size_t n = strlen(s);
+        if (n >= sizeof(s_last_resp_body)) {
+            n = sizeof(s_last_resp_body) - 1;
+        }
+        memcpy(s_last_resp_body, s, n);
+        s_last_resp_body[n] = '\0';
+        s_last_resp_len = n;
+    }
     return ESP_OK;
 }
 int httpd_req_recv(httpd_req_t *r, char *buf, size_t buf_len)
@@ -2508,6 +2522,81 @@ static void test_post_then_get_round_trips_new_fields(void)
               "GET reports the untouched diagonal cell as 0 (never omitted)");
     TEST_CHECK(strstr(s_last_resp_body, "\"settings_source\":255") != NULL,
               "GET reports the posted settings_source (CUSTOM) exactly");
+}
+
+// Coordinator review, 2026-08-31 httpd_worker stack-overflow fix:
+// zones_get_handler()'s json[5760] moved off the stack and onto
+// heap_caps_malloc(..., MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) -- the largest
+// single stack buffer on the whole httpd_worker task's request path (>70%
+// of its 8192-byte stack by itself). This is the ONE handler in this
+// codebase's audit that is host-testable calling the REAL production
+// function (dashboard_http.c's equivalent handlers cannot compile on the
+// host at all -- see dashboard_json.h's own note), so it is the test that
+// actually proves the heap-allocation pattern works end to end: a normal
+// call still renders real config, and a simulated out-of-memory (via this
+// file's heap_caps_malloc_test_set_fail() stub hook) returns a clean 500
+// with a diagnosable body instead of crashing on a NULL deref -- the exact
+// property "keep the NULL check, clean 500 on failure" asks for, previously
+// completely unexercised (the prior heap-conversion test only re-implemented
+// a fragment of the render inline and never called a handler or exercised
+// the failure path at all).
+static void test_zones_get_handler_malloc_failure_returns_clean_500(void)
+{
+    TEST_SECTION("zones_get_handler -- heap_caps_malloc() failure must return a clean 500 with a "
+                 "diagnosable body, not crash");
+
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    s_zones.cfg.thermo_count = 1;
+    s_zones.cfg.relay_count = 1;
+
+    test_post_hooks_reset();
+    s_last_resp_body[0] = '\0';
+    s_last_resp_len = 0;
+
+    heap_caps_malloc_test_set_fail(true);
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    esp_err_t err = zones_get_handler(&req);
+    heap_caps_malloc_test_set_fail(false); /* restore immediately, before any other check/test can run */
+
+    TEST_CHECK(err == ESP_OK, "zones_get_handler must still return ESP_OK (httpd_resp_sendstr succeeded) "
+              "even when its own response buffer could not be allocated");
+    TEST_CHECK(s_test_ok_called, "the malloc-failure path must actually call httpd_resp_sendstr, not "
+              "silently return without sending anything");
+    TEST_CHECK(strstr(s_last_resp_body, "\"ok\":false") != NULL,
+              "the 500 body must report ok:false, not a bare crash or an empty response");
+    TEST_CHECK(strstr(s_last_resp_body, "out of memory") != NULL,
+              "the 500 body must say WHY -- out of memory, not a generic failure -- so this is "
+              "diagnosable from the wire instead of looking like a hang");
+}
+
+// Sanity companion to the failure test above: with the fail hook OFF (the
+// normal case, and every other test in this file), zones_get_handler must
+// still render real config through the now-heap-allocated buffer, exactly
+// as it did on the stack -- proves the heap move didn't break the success
+// path either.
+static void test_zones_get_handler_succeeds_when_malloc_does_not_fail(void)
+{
+    TEST_SECTION("zones_get_handler -- with heap_caps_malloc() NOT failing, the handler still renders "
+                 "real config through its now-heap-allocated buffer");
+
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    s_zones.cfg.thermo_count = 1;
+    s_zones.cfg.relay_count = 1;
+    strncpy(s_zones.cfg.zones[0].name, "Kiln Zone", ZONE_NAME_MAX_LEN - 1);
+
+    heap_caps_malloc_test_set_fail(false);
+    s_last_resp_body[0] = '\0';
+    s_last_resp_len = 0;
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    esp_err_t err = zones_get_handler(&req);
+
+    TEST_CHECK(err == ESP_OK, "zones_get_handler must return ESP_OK on a normal call");
+    TEST_CHECK(strstr(s_last_resp_body, "\"thermo_count\":1") != NULL,
+              "the heap-allocated buffer must render real config, same as the stack version did");
+    TEST_CHECK(strstr(s_last_resp_body, "Kiln Zone") != NULL,
+              "a real zone name set just above must actually appear in the rendered JSON");
 }
 
 // ---------------------------------------------------------------------------
@@ -5331,6 +5420,8 @@ void run_test_zones_http(void)
     test_post_coupling_diagonal_must_be_zero();
     test_post_settings_source_self_reference_refused();
     test_post_then_get_round_trips_new_fields();
+    test_zones_get_handler_malloc_failure_returns_clean_500();
+    test_zones_get_handler_succeeds_when_malloc_does_not_fail();
     test_fuzzy_strength_pct_setter_round_trip_and_bounds();
     test_coupling_row_whole_setter_round_trip_and_bounds();
     test_coupling_single_cell_setter_preserves_other_cells();

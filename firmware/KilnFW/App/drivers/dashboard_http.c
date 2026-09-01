@@ -938,12 +938,21 @@ static esp_err_t status_get_handler(httpd_req_t *req)
 truncated:
     ESP_LOGE(TAG, "GET /api/status did not fit in %u bytes -- raise the buffer",
              (unsigned)DASHBOARD_STATUS_JSON_BUF_SIZE);
-    free(json);
     httpd_resp_set_status(req, "500 Internal Server Error");
     httpd_resp_set_type(req, "application/json");
-    return httpd_resp_sendstr(req,
-                              "{\"ok\":false,\"error\":\"status did not fit in the response "
-                              "buffer -- this is a firmware sizing bug, not a bad configuration\"}");
+    /* free() AFTER send, same convention as this function's own success path
+     * just above and every other heap-buffer handler in this pass
+     * (dashboard_http.c/zones_http.c/profiles_http.c) -- httpd_resp_sendstr()
+     * is synchronous, so the ordering is not a correctness question either
+     * way, but one convention beats two (coordinator review, 2026-08-31: this
+     * was the one place in the whole pass still freeing before its send). */
+    {
+        esp_err_t send_err = httpd_resp_sendstr(req,
+                                  "{\"ok\":false,\"error\":\"status did not fit in the response "
+                                  "buffer -- this is a firmware sizing bug, not a bad configuration\"}");
+        free(json);
+        return send_err;
+    }
 }
 
 /* See dashboard_http.h -- mirrors status_get_handler()'s io_ready/
@@ -1348,13 +1357,29 @@ static esp_err_t profile_exec_status_get_handler(httpd_req_t *req)
      * run-level line (its own escaped reason, plus the four duration-model
      * fields added for the profile-plan contract -- at most ~48 bytes more)
      * plus the "last_run" object at ITS worst case. The httpd task runs on
-     * an 8192-byte stack (wifi_provision_http.c), so the ~2.5KB this now
-     * uses is comfortable. See test_dashboard_json.c's own worst-case
-     * render for both this and /api/control's buffer, so the next field
-     * added to either JSON shape gets caught here instead of shipping
-     * silently truncated again. */
-    char json[DASHBOARD_JSON_PROFILE_EXEC_BUF_SIZE];
-    int n = snprintf(json, sizeof(json),
+     * an 8192-byte stack (wifi_provision_http.c) -- but httpd_worker was
+     * measured at 64 bytes free of 8192 (0.8% headroom) after a live
+     * 30-minute profile run with this buffer ON the stack, right next to
+     * every other handler's own locals sharing that same task/stack across
+     * calls (autotune_matrix_get_handler's ~1.2KB, zones_get_handler's
+     * ~5.6KB, etc. -- see this file's own history for the running audit).
+     * HEAP now, not stack, same fix and same reasoning as GET /api/status's
+     * json above: freed on every return path, diagnosable 500 on malloc
+     * failure instead of a near-miss stack overflow that would corrupt
+     * memory on a board that commands kiln heaters. See
+     * test_dashboard_json.c's own worst-case render for both this and
+     * /api/control's buffer, so the next field added to either JSON shape
+     * gets caught here instead of shipping silently truncated again. */
+    char *json = heap_caps_malloc(DASHBOARD_JSON_PROFILE_EXEC_BUF_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (json == NULL) {
+        ESP_LOGE(TAG, "GET /api/profile_exec: malloc(%u) failed for the response buffer",
+                 (unsigned)DASHBOARD_JSON_PROFILE_EXEC_BUF_SIZE);
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_sendstr(req,
+                                  "{\"ok\":false,\"error\":\"out of memory building the response\"}");
+    }
+    int n = snprintf(json, DASHBOARD_JSON_PROFILE_EXEC_BUF_SIZE,
         "{\"state\":\"%s\",\"profile_id\":%u,\"profile_name\":\"%s\",\"zone_mask\":%u,"
         "\"segment_index\":%u,\"segment_count\":%u,\"dwelling\":%s,\"target_c\":%.2f,"
         "\"segment_elapsed_s\":%lu,\"dwell_remaining_s\":%lu,\"ramp_lock_held\":%s,"
@@ -1365,19 +1390,23 @@ static esp_err_t profile_exec_status_get_handler(httpd_req_t *req)
         (unsigned long)st.segment_elapsed_s, (unsigned long)st.dwell_remaining_s,
         st.ramp_lock_held ? "true" : "false", st.ramp_lock_lagging_mask, reason_escaped, st.fault_guard,
         total_planned_buf, (unsigned long)elapsed_s, remaining_buf, remaining_is_estimate ? "true" : "false");
-    size_t o = (n < 0 || (size_t)n >= sizeof(json)) ? sizeof(json) - 1 : (size_t)n;
+    size_t o = (n < 0 || (size_t)n >= DASHBOARD_JSON_PROFILE_EXEC_BUF_SIZE)
+                   ? DASHBOARD_JSON_PROFILE_EXEC_BUF_SIZE - 1
+                   : (size_t)n;
     /* last_run BEFORE the zones array on purpose: both appenders stop rather
      * than overflow, and the zones array is the unbounded-ish one (up to
      * MAX31856_CHANNEL_COUNT escaped fault reasons). Emitting the fixed-size
      * breadcrumb first means an unusually verbose fault can never be what
      * silently drops it from the response. */
-    o = append_last_run_json(json, sizeof(json), o);
-    o = append_zone_status_json(json, sizeof(json), o, &st, false);
-    if (o + 1 < sizeof(json)) json[o++] = '}';
-    json[o < sizeof(json) ? o : sizeof(json) - 1] = '\0';
+    o = append_last_run_json(json, DASHBOARD_JSON_PROFILE_EXEC_BUF_SIZE, o);
+    o = append_zone_status_json(json, DASHBOARD_JSON_PROFILE_EXEC_BUF_SIZE, o, &st, false);
+    if (o + 1 < DASHBOARD_JSON_PROFILE_EXEC_BUF_SIZE) json[o++] = '}';
+    json[o < DASHBOARD_JSON_PROFILE_EXEC_BUF_SIZE ? o : DASHBOARD_JSON_PROFILE_EXEC_BUF_SIZE - 1] = '\0';
 
     httpd_resp_set_type(req, "application/json");
-    return httpd_resp_send(req, json, o);
+    esp_err_t ret = httpd_resp_send(req, json, o);
+    free(json);
+    return ret;
 }
 
 /* GET /api/profile_plan?id=<profile_id> -- the PLANNED curve as a polyline
@@ -1438,34 +1467,49 @@ static esp_err_t profile_plan_get_handler(httpd_req_t *req)
     json_escape(p.name, name_escaped, sizeof(name_escaped));
 
     /* Fixed part plus up to PLAN_MAX_POINTS (25 for PROFILE_MAX_SEGMENTS ==
-     * 12) points at ~40 bytes each worst case ("{"t":123456.00,"c":-999.99},")
-     * -- comfortably inside the httpd task's 8192-byte stack alongside the
-     * other buffers this file already keeps there. */
-    char json[192 + PLAN_MAX_POINTS * 48];
-    size_t o = 0;
-    int n = snprintf(json, sizeof(json), "{\"profile_id\":%ld,\"name\":\"%s\",\"total_planned_s\":", id,
-                     name_escaped);
-    o = (n < 0 || (size_t)n >= sizeof(json)) ? sizeof(json) - 1 : (size_t)n;
-    if (total_s < 0) {
-        n = snprintf(json + o, sizeof(json) - o, "null,\"points\":[");
-    } else {
-        n = snprintf(json + o, sizeof(json) - o, "%lld,\"points\":[", (long long)total_s);
+     * 12) points at ~40 bytes each worst case ("{"t":123456.00,"c":-999.99},").
+     * HEAP, not stack: this handler runs on the same httpd_worker task as
+     * /api/profile_exec and /api/control (dashboard_http.c's own audit,
+     * 64 bytes free of 8192 measured live) -- every large transient buffer
+     * on this task's request path adds to the same high-water mark, so a
+     * "comfortably inside 8192" argument made handler-by-handler was the
+     * bug, not a fix. Freed on every return path. */
+    const size_t json_cap = 192 + PLAN_MAX_POINTS * 48;
+    char *json = heap_caps_malloc(json_cap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (json == NULL) {
+        ESP_LOGE(TAG, "GET /api/profile_plan: malloc(%u) failed for the response buffer",
+                 (unsigned)json_cap);
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_sendstr(req,
+                                  "{\"ok\":false,\"error\":\"out of memory building the response\"}");
     }
-    if (n > 0 && (size_t)n < sizeof(json) - o) o += (size_t)n;
+    size_t o = 0;
+    int n = snprintf(json, json_cap, "{\"profile_id\":%ld,\"name\":\"%s\",\"total_planned_s\":", id,
+                     name_escaped);
+    o = (n < 0 || (size_t)n >= json_cap) ? json_cap - 1 : (size_t)n;
+    if (total_s < 0) {
+        n = snprintf(json + o, json_cap - o, "null,\"points\":[");
+    } else {
+        n = snprintf(json + o, json_cap - o, "%lld,\"points\":[", (long long)total_s);
+    }
+    if (n > 0 && (size_t)n < json_cap - o) o += (size_t)n;
     for (size_t i = 0; i < point_count; i++) {
-        n = snprintf(json + o, sizeof(json) - o, "%s{\"t\":%.0f,\"c\":%.2f}", i == 0 ? "" : ",",
+        n = snprintf(json + o, json_cap - o, "%s{\"t\":%.0f,\"c\":%.2f}", i == 0 ? "" : ",",
                     (double)points[i].t, (double)points[i].c);
-        if (n < 0 || (size_t)n >= sizeof(json) - o) break;
+        if (n < 0 || (size_t)n >= json_cap - o) break;
         o += (size_t)n;
     }
-    if (o + 2 < sizeof(json)) {
+    if (o + 2 < json_cap) {
         json[o++] = ']';
         json[o++] = '}';
     }
-    json[o < sizeof(json) ? o : sizeof(json) - 1] = '\0';
+    json[o < json_cap ? o : json_cap - 1] = '\0';
 
     httpd_resp_set_type(req, "application/json");
-    return httpd_resp_send(req, json, o);
+    esp_err_t ret = httpd_resp_send(req, json, o);
+    free(json);
+    return ret;
 }
 
 /* TODO.md 6A.9: "a live control-status endpoint... mode, setpoint, actual,
@@ -1501,20 +1545,38 @@ static esp_err_t control_status_get_handler(httpd_req_t *req)
      * worst case) with matching headroom. See
      * test_control_status_json_is_complete_and_well_formed_at_3_zones() --
      * this is the field that test exists to catch the next time someone
-     * adds a key here without re-checking this budget. */
-    char json[DASHBOARD_JSON_CONTROL_BUF_SIZE];
-    int n = snprintf(json, sizeof(json),
+     * adds a key here without re-checking this budget.
+     *
+     * HEAP, not stack (same fix, same reasoning as /api/status and
+     * /api/profile_exec above): httpd_worker was measured at 64 bytes free
+     * of 8192 after a live run with this and /api/profile_exec's buffer
+     * both on the stack. Freed on every return path; a malloc failure gets
+     * a diagnosable 500 instead of a near-miss stack overflow. */
+    char *json = heap_caps_malloc(DASHBOARD_JSON_CONTROL_BUF_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (json == NULL) {
+        ESP_LOGE(TAG, "GET /api/control: malloc(%u) failed for the response buffer",
+                 (unsigned)DASHBOARD_JSON_CONTROL_BUF_SIZE);
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_sendstr(req,
+                                  "{\"ok\":false,\"error\":\"out of memory building the response\"}");
+    }
+    int n = snprintf(json, DASHBOARD_JSON_CONTROL_BUF_SIZE,
         "{\"state\":\"%s\",\"zone_mask\":%u,\"target_c\":%.2f,\"ramp_lock_held\":%s,"
         "\"ramp_lock_lagging_mask\":%u,",
         exec_state_name(st.state), st.zone_mask, (double)st.target_c, st.ramp_lock_held ? "true" : "false",
         st.ramp_lock_lagging_mask);
-    size_t o = (n < 0 || (size_t)n >= sizeof(json)) ? sizeof(json) - 1 : (size_t)n;
-    o = append_zone_status_json(json, sizeof(json), o, &st, true);
-    if (o + 1 < sizeof(json)) json[o++] = '}';
-    json[o < sizeof(json) ? o : sizeof(json) - 1] = '\0';
+    size_t o = (n < 0 || (size_t)n >= DASHBOARD_JSON_CONTROL_BUF_SIZE)
+                   ? DASHBOARD_JSON_CONTROL_BUF_SIZE - 1
+                   : (size_t)n;
+    o = append_zone_status_json(json, DASHBOARD_JSON_CONTROL_BUF_SIZE, o, &st, true);
+    if (o + 1 < DASHBOARD_JSON_CONTROL_BUF_SIZE) json[o++] = '}';
+    json[o < DASHBOARD_JSON_CONTROL_BUF_SIZE ? o : DASHBOARD_JSON_CONTROL_BUF_SIZE - 1] = '\0';
 
     httpd_resp_set_type(req, "application/json");
-    return httpd_resp_send(req, json, o);
+    esp_err_t ret = httpd_resp_send(req, json, o);
+    free(json);
+    return ret;
 }
 
 /* TODO.md section 0 / 6A.9: history ring buffer + CSV export, and the data
@@ -1825,9 +1887,22 @@ static esp_err_t autotune_matrix_get_handler(httpd_req_t *req)
     autotune_engine_get_coupling_matrix(&m);
 
     /* Second term is the cells array, third is the RGA block appended below
-     * (n^2 Lambda values plus the zone map, or a refusal reason). */
-    char json[64 + MAX31856_CHANNEL_COUNT * MAX31856_CHANNEL_COUNT * 96
-              + 128 + MAX31856_CHANNEL_COUNT * MAX31856_CHANNEL_COUNT * 16];
+     * (n^2 Lambda values plus the zone map, or a refusal reason). HEAP, not
+     * stack: this runs on the same httpd_worker task as every handler above
+     * (measured at 64 bytes free of 8192 live) -- ~1.2KB of locals here adds
+     * to the same high-water mark those handlers do. Freed on every return
+     * path. */
+    const size_t json_cap = 64 + MAX31856_CHANNEL_COUNT * MAX31856_CHANNEL_COUNT * 96
+                           + 128 + MAX31856_CHANNEL_COUNT * MAX31856_CHANNEL_COUNT * 16;
+    char *json = heap_caps_malloc(json_cap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (json == NULL) {
+        ESP_LOGE(TAG, "GET /api/autotune_matrix: malloc(%u) failed for the response buffer",
+                 (unsigned)json_cap);
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_sendstr(req,
+                                  "{\"ok\":false,\"error\":\"out of memory building the response\"}");
+    }
     /* Report the zones this board actually HAS, not the number of MAX31856
      * channels the hardware could carry. These differ whenever an operator
      * has declared fewer thermocouples than are wired (thermo_count=1 on a
@@ -1837,31 +1912,44 @@ static esp_err_t autotune_matrix_get_handler(httpd_req_t *req)
      * 3x3 grid of "not measured yet" on a kiln with one zone. */
     const uint8_t zone_count = zones_config_get_thermo_count();
     size_t o = 0;
-    o += snprintf(json + o, sizeof(json) - o, "{\"zone_count\":%u,\"cells\":[", (unsigned)zone_count);
+
+    /* Self-clamping append via dashboard_json.c's shared json_append_clamped()
+     * -- snprintf returns the WOULD-BE length even when truncated, so an
+     * unguarded `o += snprintf(json+o, json_cap-o, ...)` lets `o` walk past
+     * `json_cap`; the next call's `json_cap - o` then wraps a size_t and
+     * writes out of bounds. This was a stack smash before this handler's
+     * buffer moved to the heap (coordinator review, 2026-08-31); it is a
+     * HEAP smash now, corrupting some other allocation instead of tripping a
+     * stack canary -- worse, not better, if it were ever reachable.
+     * Unreachable at MAX31856_CHANNEL_COUNT == 3 (this json_cap comfortably
+     * covers the ~400B the RGA block can produce), but json_append_clamped()
+     * clamps `o` back to `json_cap - 1` after EVERY call, not just once
+     * after the cells loop, so nothing downstream can ever see
+     * `o > json_cap - 1` again regardless of channel count -- and the same
+     * function is host-tested directly (test_dashboard_json.c) against a
+     * long chain of appends into a deliberately undersized buffer, which
+     * this handler itself cannot be (dashboard_json.h's own note on why
+     * dashboard_http.c doesn't compile on the host). */
+#define RGA_APPEND(...) (o = json_append_clamped(json, json_cap, o, __VA_ARGS__))
+
+    RGA_APPEND("{\"zone_count\":%u,\"cells\":[", (unsigned)zone_count);
     bool first = true;
     for (uint8_t i = 0; i < zone_count; i++) {
         for (uint8_t j = 0; j < zone_count; j++) {
             const autotune_coupling_cell_t *c = &m.cell[i][j];
-            if (!first) o += snprintf(json + o, sizeof(json) - o, ",");
+            if (!first) RGA_APPEND(",");
             first = false;
             if (c->valid) {
-                o += snprintf(json + o, sizeof(json) - o,
-                    "{\"i\":%u,\"j\":%u,\"valid\":true,\"k\":%.3f,\"tau_s\":%.1f,\"dead_time_s\":%.1f}", i, j,
+                RGA_APPEND("{\"i\":%u,\"j\":%u,\"valid\":true,\"k\":%.3f,\"tau_s\":%.1f,\"dead_time_s\":%.1f}", i, j,
                     (double)c->model.k_gain_c_per_duty, (double)c->model.tau_s, (double)c->model.dead_time_s);
             } else {
-                o += snprintf(json + o, sizeof(json) - o, "{\"i\":%u,\"j\":%u,\"valid\":false}", i, j);
+                RGA_APPEND("{\"i\":%u,\"j\":%u,\"valid\":false}", i, j);
             }
-            if (o >= sizeof(json) - 1) break;
+            if (o >= json_cap - 1) break;
         }
     }
-    /* The cells loop above breaks on near-overflow but leaves `o` holding
-     * snprintf's would-be length, which can exceed the buffer; every append
-     * from here on computes `sizeof(json) - o` and would wrap that into a
-     * huge size_t. Clamp once. (Sized so this cannot trigger in practice at
-     * MAX31856_CHANNEL_COUNT=3 -- it is a backstop, not a code path.) */
-    if (o > sizeof(json) - 1) o = sizeof(json) - 1;
 
-    o += snprintf(json + o, sizeof(json) - o, "]");
+    RGA_APPEND("]");
 
     /* TODO.md 6A.5(c): the RGA rides along on the same response as the
      * matrix it is derived from, rather than getting its own endpoint --
@@ -1877,20 +1965,20 @@ static esp_err_t autotune_matrix_get_handler(httpd_req_t *req)
     autotune_rga_t rga;
     autotune_engine_compute_rga(&m, &rga);
     if (rga.valid) {
-        o += snprintf(json + o, sizeof(json) - o, ",\"rga\":{\"available\":true,\"n\":%d,\"det\":%.4g,\"zones\":[",
-                      rga.n, (double)rga.determinant);
+        RGA_APPEND(",\"rga\":{\"available\":true,\"n\":%d,\"det\":%.4g,\"zones\":[",
+                   rga.n, (double)rga.determinant);
         for (int a = 0; a < rga.n; a++) {
-            o += snprintf(json + o, sizeof(json) - o, "%s%u", a ? "," : "", (unsigned)rga.zone_index[a]);
+            RGA_APPEND("%s%u", a ? "," : "", (unsigned)rga.zone_index[a]);
         }
-        o += snprintf(json + o, sizeof(json) - o, "],\"lambda\":[");
+        RGA_APPEND("],\"lambda\":[");
         for (int a = 0; a < rga.n; a++) {
-            o += snprintf(json + o, sizeof(json) - o, "%s[", a ? "," : "");
+            RGA_APPEND("%s[", a ? "," : "");
             for (int b = 0; b < rga.n; b++) {
-                o += snprintf(json + o, sizeof(json) - o, "%s%.4f", b ? "," : "", (double)rga.lambda[a][b]);
+                RGA_APPEND("%s%.4f", b ? "," : "", (double)rga.lambda[a][b]);
             }
-            o += snprintf(json + o, sizeof(json) - o, "]");
+            RGA_APPEND("]");
         }
-        o += snprintf(json + o, sizeof(json) - o, "]}");
+        RGA_APPEND("]}");
     } else {
         /* An RGA describes how n>=2 control loops interact. On a board with
          * fewer than two declared zones there is nothing to interact, so
@@ -1904,14 +1992,17 @@ static esp_err_t autotune_matrix_get_handler(httpd_req_t *req)
         } else {
             json_escape(rga.invalid_reason, rga_reason, sizeof(rga_reason));
         }
-        o += snprintf(json + o, sizeof(json) - o, ",\"rga\":{\"available\":false,\"code\":%d,\"reason\":\"%s\"}",
-                      (int)rga.status, rga_reason);
+        RGA_APPEND(",\"rga\":{\"available\":false,\"code\":%d,\"reason\":\"%s\"}",
+                   (int)rga.status, rga_reason);
     }
 
-    o += snprintf(json + o, sizeof(json) - o, "}");
+    RGA_APPEND("}");
+#undef RGA_APPEND
 
     httpd_resp_set_type(req, "application/json");
-    return httpd_resp_send(req, json, o < sizeof(json) ? o : sizeof(json) - 1);
+    esp_err_t ret = httpd_resp_send(req, json, o < json_cap ? o : json_cap - 1);
+    free(json);
+    return ret;
 }
 
 static esp_err_t autotune_start_post_handler(httpd_req_t *req)

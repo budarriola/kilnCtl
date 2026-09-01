@@ -23,6 +23,7 @@
 #include <math.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "test_common.h"
@@ -232,12 +233,121 @@ static void test_truncation_is_logged_and_still_produces_valid_json(void)
               "all 3 worst-case zones, or this test cannot tell the fix from a no-op");
 }
 
+/* Coordinator review, 2026-08-31: autotune_matrix_get_handler()'s RGA block
+ * used to do `o += snprintf(json+o, json_cap-o, ...)` with no re-clamp after
+ * the cells loop's single clamp -- snprintf returns the WOULD-BE length even
+ * when truncated, so a long enough chain of appends can walk `o` past
+ * `json_cap`, and the next call's `json_cap - o` then wraps a size_t into a
+ * huge value and writes out of bounds. Unreachable at today's
+ * MAX31856_CHANNEL_COUNT (json_cap comfortably covers the RGA block's real
+ * output), but that handler lives in dashboard_http.c, which cannot compile
+ * on the host (see this file's own header comment) -- so the fix moved into
+ * json_append_clamped() (dashboard_json.c), the ONE place both the handler
+ * and this test call, and this test proves the general property directly:
+ * an arbitrarily long chain of appends into a deliberately tiny buffer can
+ * NEVER push the returned offset past `cap - 1`, however many more calls a
+ * future channel-count/zone-count increase adds. A one-byte canary placed
+ * immediately after the buffer detects the exact out-of-bounds write the
+ * old unclamped pattern could produce; if this regresses to the unclamped
+ * pattern, the canary gets overwritten and this test fails. */
+static void test_json_append_clamped_never_walks_past_cap(void)
+{
+    TEST_SECTION("json_append_clamped() -- a long chain of appends into a too-small buffer must never "
+                 "push the offset past cap-1, however many calls follow (the RGA-block heap-overflow "
+                 "class, generalized past today's MAX31856_CHANNEL_COUNT)");
+
+    /* +1 canary byte the real buffer must never reach, whatever `o` does. */
+    char buf[17];
+    buf[16] = (char)0xAA;
+    const size_t cap = 16;
+
+    size_t o = 0;
+    o = json_append_clamped(buf, cap, o, "{\"zone_count\":%u,\"cells\":[", 3u);
+    TEST_CHECK(o <= cap - 1, "offset must never exceed cap-1 after the very first oversized append");
+
+    /* Simulate a MUCH larger n/zone_count than today's 3 -- e.g. an 8-zone
+     * board -- by chaining far more appends than this 16-byte buffer could
+     * ever hold, exactly the shape autotune_matrix_get_handler's cells/RGA
+     * loops produce. */
+    for (int i = 0; i < 200; i++) {
+        o = json_append_clamped(buf, cap, o, "{\"i\":%u,\"j\":%u,\"valid\":true,\"k\":%.3f}", i, i,
+                                (double)i);
+        TEST_CHECK(o <= cap - 1, "offset must stay <= cap-1 after every single append in a long chain, "
+                  "not just the first or last one");
+    }
+    o = json_append_clamped(buf, cap, o, "]}");
+    TEST_CHECK(o <= cap - 1, "the final append must also respect the clamp");
+    TEST_CHECK(buf[16] == (char)0xAA, "the canary byte immediately past the buffer must be untouched -- "
+              "this is the exact byte the old unclamped `o += snprintf(...)` pattern could corrupt once "
+              "`cap - o` wrapped");
+}
+
+/* dashboard_http.c's httpd_worker stack-overflow fix (64B free of 8192
+ * measured live, 2026-08-31): profile_exec_status_get_handler() and
+ * control_status_get_handler() now malloc() DASHBOARD_JSON_PROFILE_EXEC_
+ * BUF_SIZE / DASHBOARD_JSON_CONTROL_BUF_SIZE off the HEAP instead of
+ * declaring `char json[...]` on the stack -- same buffer size, same macro,
+ * only WHERE the bytes live changed. This proves that move didn't
+ * accidentally shrink the usable capacity (an off-by-one in a malloc(cap)
+ * vs. a `char json[cap]` would show up here as the render silently no
+ * longer fitting all 3 worst-case zones) and that a malloc'd buffer renders
+ * byte-for-byte the same complete, balanced JSON the stack version did. */
+static void test_heap_allocated_worst_case_render_matches_stack_sizing(void)
+{
+    TEST_SECTION("malloc(DASHBOARD_JSON_PROFILE_EXEC_BUF_SIZE)/malloc(DASHBOARD_JSON_CONTROL_BUF_SIZE) "
+                 "-- the heap-allocated buffers the real handlers now use must still hold the full "
+                 "3-zone worst case, exactly like the stack-sized test above");
+
+    profile_exec_status_t st;
+    fill_worst_case_status(&st);
+
+    char *pe_json = malloc(DASHBOARD_JSON_PROFILE_EXEC_BUF_SIZE);
+    TEST_CHECK(pe_json != NULL, "malloc(DASHBOARD_JSON_PROFILE_EXEC_BUF_SIZE) must succeed on a host "
+              "with plenty of heap -- a NULL here would be a test-environment problem, not the fix");
+    if (pe_json != NULL) {
+        int n = snprintf(pe_json, DASHBOARD_JSON_PROFILE_EXEC_BUF_SIZE, "{");
+        size_t o = (size_t)n;
+        o = append_zone_status_json(pe_json, DASHBOARD_JSON_PROFILE_EXEC_BUF_SIZE, o, &st, false);
+        if (o + 1 < DASHBOARD_JSON_PROFILE_EXEC_BUF_SIZE) pe_json[o++] = '}';
+        pe_json[o < DASHBOARD_JSON_PROFILE_EXEC_BUF_SIZE ? o : DASHBOARD_JSON_PROFILE_EXEC_BUF_SIZE - 1] = '\0';
+        TEST_CHECK(json_looks_complete(pe_json), "the heap-rendered /api/profile_exec JSON must be complete");
+        int zone_objects = 0;
+        for (const char *p = pe_json; (p = strstr(p, "\"zone\":")) != NULL; p += 7) zone_objects++;
+        TEST_CHECK(zone_objects == 3, "all 3 active zones must fit in the heap buffer, same as the "
+                  "stack-sized version");
+        free(pe_json);
+    }
+
+    char *ctl_json = malloc(DASHBOARD_JSON_CONTROL_BUF_SIZE);
+    TEST_CHECK(ctl_json != NULL, "malloc(DASHBOARD_JSON_CONTROL_BUF_SIZE) must succeed on a host "
+              "with plenty of heap");
+    if (ctl_json != NULL) {
+        int n = snprintf(ctl_json, DASHBOARD_JSON_CONTROL_BUF_SIZE,
+            "{\"state\":\"%s\",\"zone_mask\":%u,\"target_c\":%.2f,\"ramp_lock_held\":%s,"
+            "\"ramp_lock_lagging_mask\":%u,",
+            "running", 255, -1234.56, "false", 255);
+        size_t o = (n < 0 || (size_t)n >= DASHBOARD_JSON_CONTROL_BUF_SIZE)
+                       ? DASHBOARD_JSON_CONTROL_BUF_SIZE - 1
+                       : (size_t)n;
+        o = append_zone_status_json(ctl_json, DASHBOARD_JSON_CONTROL_BUF_SIZE, o, &st, true);
+        if (o + 1 < DASHBOARD_JSON_CONTROL_BUF_SIZE) ctl_json[o++] = '}';
+        ctl_json[o < DASHBOARD_JSON_CONTROL_BUF_SIZE ? o : DASHBOARD_JSON_CONTROL_BUF_SIZE - 1] = '\0';
+        TEST_CHECK(json_looks_complete(ctl_json), "the heap-rendered /api/control JSON must be complete");
+        int zone_objects = 0;
+        for (const char *p = ctl_json; (p = strstr(p, "\"zone\":")) != NULL; p += 7) zone_objects++;
+        TEST_CHECK(zone_objects == 3, "all 3 active zones must fit in the heap buffer");
+        free(ctl_json);
+    }
+}
+
 static void run_test_dashboard_json(void)
 {
     test_json_escape_doubles_every_quote_and_backslash();
     test_control_status_json_is_complete_and_well_formed_at_3_zones();
     test_exec_status_json_is_complete_and_well_formed_at_3_zones();
     test_truncation_is_logged_and_still_produces_valid_json();
+    test_json_append_clamped_never_walks_past_cap();
+    test_heap_allocated_worst_case_render_matches_stack_sizing();
 }
 
 int main(void)

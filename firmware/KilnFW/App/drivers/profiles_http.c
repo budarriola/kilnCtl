@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "esp_crc.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "nvs.h"
 #include "nvs_flash.h"
@@ -1520,13 +1521,34 @@ static esp_err_t profile_post_handler(httpd_req_t *req)
         return ESP_OK;
     }
 
-    char body[PROFILE_BODY_MAX + 1];
+    /* HEAP (PSRAM), not stack, and freed the moment parse_profile_fields()
+     * is done with it, BEFORE warn_json below is even allocated -- this used
+     * to be the biggest of three buffers (2049B) that all lived on the
+     * stack simultaneously for the whole function (body + warn_json[1168] +
+     * the final json[1424] = 4641B in one frame, coordinator review,
+     * 2026-08-31 httpd_worker stack-overflow audit). `body` is never
+     * referenced again after the parse_profile_fields() call a few lines
+     * down (the id_val lookup and that one call are its only two uses), so
+     * it does not genuinely need to overlap with warn_json/json at all --
+     * sequencing it out drops this function's peak transient allocation
+     * from 4641B to ~2592B (warn_json+json, which DO need to coexist since
+     * the final response embeds warn_json's text via %s). */
+    char *body = heap_caps_malloc(PROFILE_BODY_MAX + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (body == NULL) {
+        ESP_LOGE(TAG, "POST /api/profile: malloc(%u) failed for the request body buffer",
+                 (unsigned)(PROFILE_BODY_MAX + 1));
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_sendstr(req,
+                                  "{\"ok\":false,\"error\":\"out of memory reading the request body\"}");
+    }
     size_t received = 0;
     while (received < (size_t)req->content_len) {
         int ret = httpd_req_recv(req, body + received, req->content_len - received);
         if (ret <= 0) {
             ESP_LOGW(TAG, "profile body read failed/short: %d", ret);
             httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body read failed");
+            free(body);
             return ESP_OK;
         }
         received += (size_t)ret;
@@ -1554,6 +1576,7 @@ static esp_err_t profile_post_handler(httpd_req_t *req)
         }
         if (free_slot < 0) {
             httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "profile storage full");
+            free(body);
             return ESP_OK;
         }
         target_id = (uint8_t)free_slot;
@@ -1562,7 +1585,13 @@ static esp_err_t profile_post_handler(httpd_req_t *req)
     profile_t tmp;
     memset(&tmp, 0, sizeof(tmp));
     char err_msg[128];
-    if (!parse_profile_fields(body, &tmp, err_msg, sizeof(err_msg))) {
+    bool parse_ok = parse_profile_fields(body, &tmp, err_msg, sizeof(err_msg));
+    /* Last use of `body` in this function either way -- free it here, before
+     * warn_json is allocated below, rather than holding it until the
+     * function returns. */
+    free(body);
+    body = NULL;
+    if (!parse_ok) {
         char json[192];
         int n = snprintf(json, sizeof(json), "{\"ok\":false,\"error\":\"%s\"}", err_msg);
         httpd_resp_set_status(req, "400 Bad Request");
@@ -1577,8 +1606,24 @@ static esp_err_t profile_post_handler(httpd_req_t *req)
      * which is also its "never configured" default) makes every nonzero
      * rate infeasible -- correct, since there is nothing to feasibility
      * check against until the zone's max ramp rate is set on the
-     * Thermocouples & Zones page. */
-    char warn_json[PROFILE_MAX_SEGMENTS * 96 + 16];
+     * Thermocouples & Zones page.
+     *
+     * HEAP (PSRAM): `body` above is already freed by the time this is
+     * allocated, so this and the final `json` below (which embeds this
+     * buffer's text) are the only two transient buffers actually coexisting
+     * in this function -- see this function's own opening comment for the
+     * peak-size accounting. Freed on every return path below (both the
+     * feasibility-rejection 400 and the final 200). */
+    const size_t warn_json_cap = PROFILE_MAX_SEGMENTS * 96 + 16;
+    char *warn_json = heap_caps_malloc(warn_json_cap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (warn_json == NULL) {
+        ESP_LOGE(TAG, "POST /api/profile: malloc(%u) failed for the warnings buffer",
+                 (unsigned)warn_json_cap);
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_sendstr(req,
+                                  "{\"ok\":false,\"error\":\"out of memory building the response\"}");
+    }
     size_t warn_o = 0;
     bool warn_first = true;
     warn_json[warn_o++] = '[';
@@ -1610,21 +1655,23 @@ static esp_err_t profile_post_handler(httpd_req_t *req)
                                  i + 1, (double)rate, zi, (double)ceiling);
                 httpd_resp_set_status(req, "400 Bad Request");
                 httpd_resp_set_type(req, "application/json");
-                return httpd_resp_send(req, json, n < 0 ? 0 : (size_t)n);
+                esp_err_t ret = httpd_resp_send(req, json, n < 0 ? 0 : (size_t)n);
+                free(warn_json);
+                return ret;
             }
             if (rate > PROFILE_RAMP_WARN_FRACTION * ceiling) {
                 char text[96];
                 snprintf(text, sizeof(text),
                         "segment %u: ramp rate %.1f C/hr is within 20%% of zone %u's %.1f C/hr ceiling",
                         i + 1, (double)rate, zi, (double)ceiling);
-                append_warning(warn_json, sizeof(warn_json), &warn_o, &warn_first, text);
+                append_warning(warn_json, warn_json_cap, &warn_o, &warn_first, text);
             }
         }
     }
-    if (warn_o + 1 < sizeof(warn_json)) {
+    if (warn_o + 1 < warn_json_cap) {
         warn_json[warn_o++] = ']';
     }
-    warn_json[warn_o < sizeof(warn_json) ? warn_o : sizeof(warn_json) - 1] = '\0';
+    warn_json[warn_o < warn_json_cap ? warn_o : warn_json_cap - 1] = '\0';
 
     s_profiles.profiles[target_id] = tmp;
     s_profiles.used_bitmap |= (1u << target_id);
@@ -1634,10 +1681,26 @@ static esp_err_t profile_post_handler(httpd_req_t *req)
                  target_id, esp_err_to_name(err));
     }
 
-    char json[256 + sizeof(warn_json)];
-    int n = snprintf(json, sizeof(json), "{\"ok\":true,\"id\":%u,\"warnings\":%s}", target_id, warn_json);
+    /* HEAP (PSRAM), same reasoning as warn_json above -- embeds warn_json's
+     * text via %s, so the two DO need to coexist for this one snprintf
+     * call; warn_json is freed immediately after, before this buffer is
+     * sent, rather than both living until the function returns. */
+    const size_t json_cap = 256 + warn_json_cap;
+    char *json = heap_caps_malloc(json_cap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (json == NULL) {
+        ESP_LOGE(TAG, "POST /api/profile: malloc(%u) failed for the response buffer", (unsigned)json_cap);
+        free(warn_json);
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_sendstr(req,
+                                  "{\"ok\":false,\"error\":\"out of memory building the response\"}");
+    }
+    int n = snprintf(json, json_cap, "{\"ok\":true,\"id\":%u,\"warnings\":%s}", target_id, warn_json);
+    free(warn_json);
     httpd_resp_set_type(req, "application/json");
-    return httpd_resp_send(req, json, n < 0 ? 0 : (size_t)n);
+    esp_err_t ret = httpd_resp_send(req, json, n < 0 ? 0 : (size_t)n);
+    free(json);
+    return ret;
 }
 
 static esp_err_t profile_delete_post_handler(httpd_req_t *req)

@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "esp_crc.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "nvs.h"
 #include "nvs_flash.h"
@@ -4056,7 +4057,14 @@ static esp_err_t safety_config_page_get_handler(httpd_req_t *req)
 
 static esp_err_t zones_get_handler(httpd_req_t *req)
 {
-    char json[5760]; /* 5632 -> 5760 (2026-08-30, same-day follow-up,
+    /* HEAP, not stack -- this was easily the largest single transient
+     * buffer on the httpd_worker task's request path (dashboard_http.c's
+     * profile_exec/control/autotune_matrix/profile_plan handlers all share
+     * this same task and stack; httpd_worker was measured at 64 bytes free
+     * of 8192 live). At 5760 bytes this one buffer alone was more than 70%
+     * of the entire 8192-byte task stack. Freed on every return path
+     * (success and truncated). */
+    const size_t json_cap = 5760; /* 5632 -> 5760 (2026-08-30, same-day follow-up,
                       * ZONES_CFG_VERSION 10->11): coupling_coeff/
                       * coupling_neighbor_zone (2 keys) replaced by
                       * MAX31856_CHANNEL_COUNT indexed coupling_c%u keys (3
@@ -4106,13 +4114,21 @@ static esp_err_t zones_get_handler(httpd_req_t *req)
                       * left inside the existing 2560 headroom rather than
                       * bumped again, MAX31856_CHANNEL_COUNT zones' worth of
                       * one small integer key is nowhere near what's left. */
+    char *json = heap_caps_malloc(json_cap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (json == NULL) {
+        ESP_LOGE(TAG, "GET /api/zones: malloc(%u) failed for the response buffer", (unsigned)json_cap);
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_sendstr(req,
+                                  "{\"ok\":false,\"error\":\"out of memory building the response\"}");
+    }
     size_t o = 0;
     int n;
 
 #define APPEND(...)                                                                              \
     do {                                                                                          \
-        n = snprintf(json + o, sizeof(json) - o, __VA_ARGS__);                                   \
-        if (n < 0 || (size_t)n >= sizeof(json) - o) {                                             \
+        n = snprintf(json + o, json_cap - o, __VA_ARGS__);                                   \
+        if (n < 0 || (size_t)n >= json_cap - o) {                                             \
             goto truncated;                                                                            \
         }                                                                                          \
         o += (size_t)n;                                                                            \
@@ -4274,7 +4290,11 @@ static esp_err_t zones_get_handler(httpd_req_t *req)
 #undef APPEND
 
     httpd_resp_set_type(req, "application/json");
-    return httpd_resp_send(req, json, o);
+    {
+        esp_err_t ret = httpd_resp_send(req, json, o);
+        free(json);
+        return ret;
+    }
 
     /* Reached only if `json` is too small for the config it holds. The old
      * behaviour was to send what had been written so far, which is a truncated
@@ -4284,12 +4304,16 @@ static esp_err_t zones_get_handler(httpd_req_t *req)
      * what happened. Sizing `json` is the actual fix; this is the guard that
      * makes an undersized buffer visible instead of silent. */
 truncated:
-    ESP_LOGE(TAG, "GET /api/zones did not fit in %u bytes -- raise the buffer", (unsigned)sizeof(json));
+    ESP_LOGE(TAG, "GET /api/zones did not fit in %u bytes -- raise the buffer", (unsigned)json_cap);
     httpd_resp_set_status(req, "500 Internal Server Error");
     httpd_resp_set_type(req, "application/json");
-    return httpd_resp_sendstr(req,
-                              "{\"ok\":false,\"error\":\"zone config did not fit in the response "
-                              "buffer -- this is a firmware sizing bug, not a bad configuration\"}");
+    {
+        esp_err_t ret = httpd_resp_sendstr(req,
+                                  "{\"ok\":false,\"error\":\"zone config did not fit in the response "
+                                  "buffer -- this is a firmware sizing bug, not a bad configuration\"}");
+        free(json);
+        return ret;
+    }
 }
 
 /* ---- POST /api/zones ------------------------------------------------------
@@ -5055,13 +5079,30 @@ static esp_err_t zones_post_handler(httpd_req_t *req)
         return ESP_OK;
     }
 
-    char body[ZONES_BODY_MAX + 1];
+    /* HEAP (PSRAM), not stack -- ZONES_BODY_MAX+1 (4097B) was the second-
+     * largest transient buffer on the whole httpd_worker task's request
+     * path (coordinator review, 2026-08-31), and unlike profile_post_
+     * handler's `body` this one genuinely IS read throughout the entire
+     * function (http_form_find_field() calls scattered across the whole
+     * parse), so it cannot be freed early the way that one's could -- it is
+     * freed on EVERY return path below instead, mirroring every other
+     * heap-converted handler in this pass. */
+    char *body = heap_caps_malloc(ZONES_BODY_MAX + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (body == NULL) {
+        ESP_LOGE(TAG, "POST /api/zones: malloc(%u) failed for the request body buffer",
+                 (unsigned)(ZONES_BODY_MAX + 1));
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_sendstr(req,
+                                  "{\"ok\":false,\"error\":\"out of memory reading the request body\"}");
+    }
     size_t received = 0;
     while (received < (size_t)req->content_len) {
         int ret = httpd_req_recv(req, body + received, req->content_len - received);
         if (ret <= 0) {
             ESP_LOGW(TAG, "zones body read failed/short: %d", ret);
             httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body read failed");
+            free(body);
             return ESP_OK;
         }
         received += (size_t)ret;
@@ -5073,10 +5114,12 @@ static esp_err_t zones_post_handler(httpd_req_t *req)
 
     if (!parse_u8_field(body, "thermo_count", 0, MAX31856_CHANNEL_COUNT, &tmp.thermo_count)) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "thermo_count missing or out of range");
+        free(body);
         return ESP_OK;
     }
     if (!parse_u8_field(body, "relay_count", 0, KILN_IO_RELAY_COUNT, &tmp.relay_count)) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "relay_count missing or out of range");
+        free(body);
         return ESP_OK;
     }
     /* Optional -- unlike thermo_count/relay_count, a missing
@@ -5094,6 +5137,7 @@ static esp_err_t zones_post_handler(httpd_req_t *req)
              * parse_float_field() above -- end == val alone lets it through. */
             if (end == val || *end != '\0' || v < 0 || v > KILN_IO_RELAY_COUNT) {
                 httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "max_simultaneous_relays out of range");
+                free(body);
                 return ESP_OK;
             }
             tmp.max_simultaneous_relays = (uint8_t)v;
@@ -5113,6 +5157,7 @@ static esp_err_t zones_post_handler(httpd_req_t *req)
                 tmp.continue_on_zone_trip = 0;
             } else {
                 httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "continue_on_zone_trip must be 0 or 1");
+                free(body);
                 return ESP_OK;
             }
         }
@@ -5140,6 +5185,7 @@ static esp_err_t zones_post_handler(httpd_req_t *req)
         int probe_len = http_form_find_field(body, probe_key, probe, sizeof(probe));
         if (probe_len == -2) {
             httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "timing profile name too long");
+            free(body);
             return ESP_OK;
         }
         if (probe_len < 0) {
@@ -5148,12 +5194,14 @@ static esp_err_t zones_post_handler(httpd_req_t *req)
         const char *err_reason = "invalid timing profile field";
         if (!parse_timing_profile_fields(body, p, &tmp.timing_profiles[p], &err_reason)) {
             httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, err_reason);
+            free(body);
             return ESP_OK;
         }
         tmp.timing_profile_count = (uint8_t)(p + 1);
     }
     if (tmp.timing_profile_count == 0) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "at least one timing profile (tp0_name) is required");
+        free(body);
         return ESP_OK;
     }
 
@@ -5166,6 +5214,7 @@ static esp_err_t zones_post_handler(httpd_req_t *req)
         if (!parse_zone_fields(body, i, tmp.thermo_count, tmp.relay_count, tmp.timing_profile_count,
                                &s_zones.cfg.zones[i], &tmp.zones[i], &err_reason)) {
             httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, err_reason);
+            free(body);
             return ESP_OK;
         }
     }
@@ -5196,6 +5245,7 @@ static esp_err_t zones_post_handler(httpd_req_t *req)
         if (settings_source_chain_has_cycle(tmp.zones, i, tmp.thermo_count)) {
             httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
                                 "zone settings_source would create an inheritance cycle");
+            free(body);
             return ESP_OK;
         }
     }
@@ -5223,6 +5273,7 @@ static esp_err_t zones_post_handler(httpd_req_t *req)
                 httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
                                     "safety_tc_type must be a real thermocouple type (0-7: "
                                     "B/E/J/K/N/R/S/T), not a voltage-input mode");
+                free(body);
                 return ESP_OK;
             }
             tmp.safety_tc_type = (uint8_t)v;
@@ -5244,6 +5295,7 @@ static esp_err_t zones_post_handler(httpd_req_t *req)
                                    ZONE_PC_LINK_SILENCE_MS_MAX, &tmp.pc_link_abort_silence_ms)) {
                 httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
                                     "pc_link_abort_silence_ms out of range (0 = firmware default)");
+                free(body);
                 return ESP_OK;
             }
         } else {
@@ -5287,6 +5339,7 @@ static esp_err_t zones_post_handler(httpd_req_t *req)
         int rlen = http_form_find_field(body, rkey, rval, sizeof(rval));
         if (rlen == -2) {
             httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "relay name too long");
+            free(body);
             return ESP_OK;
         }
         if (rlen >= 0) {
@@ -5329,6 +5382,7 @@ static esp_err_t zones_post_handler(httpd_req_t *req)
          * cosmetic data that failed to persist is not worth refusing a
          * whole-page save that DID validate and apply everything else. */
     }
+    free(body);
     return httpd_resp_sendstr(req, "ok");
 }
 

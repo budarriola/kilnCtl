@@ -8,10 +8,44 @@
 #define TEST_STUB_ESP_HEAP_CAPS_H
 
 #include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <stdlib.h>
 
 #define MALLOC_CAP_SPIRAM (1 << 0)
 #define MALLOC_CAP_8BIT   (1 << 1)
 #define MALLOC_CAP_DEFAULT (MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
+
+// 2026-08-31 httpd_worker stack-overflow fix: zones_get_handler() (and
+// several dashboard_http.c handlers, which cannot compile on the host --
+// see dashboard_json.h's own note) now call the real heap_caps_malloc()
+// instead of a plain malloc(), so their response buffers land in PSRAM
+// rather than the internal DRAM this board is documented to exhaust. This
+// stub actually allocates (via the host's real malloc(), caps ignored --
+// the host has no PSRAM/internal-DRAM distinction to model) so the handler
+// under test gets a real, usable buffer, but the fail flag below lets a
+// test simulate the board being out of that pool and exercise the
+// handler's NULL-check-and-500 path deterministically, the same
+// s_stub_esp_ptr_external_ram-style pattern this file already uses for
+// safety_cfg_store.c's PSRAM-stack guard test. `static` (not extern): each
+// translation unit gets its own independent copy. free() is the host's
+// real free() -- heap_caps_malloc()'s host allocation and its handler's
+// free(json) are symmetric, same as on target.
+static bool s_stub_heap_caps_malloc_fail = false;
+
+static inline void heap_caps_malloc_test_set_fail(bool fail)
+{
+    s_stub_heap_caps_malloc_fail = fail;
+}
+
+static inline void *heap_caps_malloc(size_t size, uint32_t caps)
+{
+    (void)caps;
+    if (s_stub_heap_caps_malloc_fail) {
+        return NULL;
+    }
+    return malloc(size);
+}
 
 // Added for safety_cfg_store.c's host test (test_safety_cfg_store.c): that
 // file's real code calls the real esp_ptr_external_ram() to refuse a flash
