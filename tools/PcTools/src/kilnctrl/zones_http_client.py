@@ -258,6 +258,21 @@ _ZONE_INT_FIELDS = {
 #: MUST NEVER be posted nonzero -- _encode_zone() asserts this explicitly
 #: rather than trusting the GET payload always has 0 there.
 _ZONE_COUPLING_CELL_RE = re.compile(r"^coupling_c(\d+)$")
+#: ZONES_CFG_VERSION 11->12 (2026-08-31): coupling_tau_c%u/
+#: coupling_dead_time_c%u -- zones_get_handler() emits these (same orientation
+#: as coupling_c%u, [affected][stepped]), but parse_zone_fields() has NO
+#: z%u_coupling_tau_c%u / z%u_coupling_dead_time_c%u wire field at all: it
+#: unconditionally memcpy()s coupling_tau_s[]/coupling_dead_time_s[] from
+#: current_z regardless of what a POST body contains (see zones_http.c's own
+#: comment on that memcpy -- these two arrays are only ever written by
+#: autotune_engine.c's finalize_fit() persist path, never through this POST
+#: parser). Matched here and treated like _ZONE_READONLY_KEYS -- never
+#: encoded into the POST body -- for two reasons: sending them would be
+#: silently ignored on the wire (nothing to gain), and if this module instead
+#: fell through to "unknown field" it would raise ZonesHttpUnknownFieldError
+#: on every single zones round-trip against any board running this firmware,
+#: since GET always emits these keys unconditionally.
+_ZONE_COUPLING_TAU_DEAD_TIME_CELL_RE = re.compile(r"^coupling_(?:tau|dead_time)_c\d+$")
 #: Read-only telemetry zones_get_handler() emits per zone that has NO POST
 #: counterpart at all (measured data, or the array index itself) -- excluded
 #: from the POST body on purpose, not by omission-means-preserve, since these
@@ -326,6 +341,8 @@ def _encode_zone(index: int, zone: dict) -> "dict[str, str]":
     fields: "dict[str, str]" = {}
     for key, value in zone.items():
         if key in _ZONE_READONLY_KEYS:
+            continue
+        if _ZONE_COUPLING_TAU_DEAD_TIME_CELL_RE.match(key):
             continue
         cell_match = _ZONE_COUPLING_CELL_RE.match(key)
         if cell_match:

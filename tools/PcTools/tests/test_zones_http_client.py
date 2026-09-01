@@ -59,6 +59,13 @@ def _sample_zone(index: int, **overrides) -> dict:
         # zones_http.c always emits the full row for every zone regardless
         # of thermo_count.
         **{f"coupling_c{j}": 0.0 for j in range(3)},
+        # ZONES_CFG_VERSION 11->12: coupling_tau_c%u/coupling_dead_time_c%u,
+        # always emitted alongside coupling_c%u (same [affected][stepped]
+        # orientation, same "always emit every cell including the diagonal"
+        # convention) -- see zones_http_client.py's
+        # _ZONE_COUPLING_TAU_DEAD_TIME_CELL_RE.
+        **{f"coupling_tau_c{j}": 0.0 for j in range(3)},
+        **{f"coupling_dead_time_c{j}": 0.0 for j in range(3)},
         "settings_source": 0xFF,
     }
     z.update(overrides)
@@ -300,6 +307,35 @@ class BuildPostBodyTest(unittest.TestCase):
             zh.build_post_body(current, {"name": "p", "zones": []})
         self.assertIn("coupling_c1", str(ctx.exception))
         self.assertIn("diagonal", str(ctx.exception))
+
+    def test_coupling_tau_dead_time_do_not_crash_the_round_trip_ASYMMETRIC(self):
+        """DEFECT: zones_http.c ZONES_CFG_VERSION 11->12 added
+        coupling_tau_c%u/coupling_dead_time_c%u to GET /api/zones, but this
+        module had no mapping for them -- build_post_body() raised
+        ZonesHttpUnknownFieldError on EVERY zones round-trip against any
+        board running that firmware, since GET always emits these keys
+        unconditionally. Fixture is deliberately ASYMMETRIC -- pair (0,1)
+        != pair (1,0) -- so a transpose or index bug in a future fix would
+        fail this test instead of passing by accident on a symmetric or
+        all-zero fixture (the firmware-side round-trip test made exactly
+        that mistake, seeding 0.0/0.0)."""
+        current = _sample_get_response(n_zones=3)
+        current["zones"][0]["coupling_tau_c1"] = 111.0
+        current["zones"][0]["coupling_dead_time_c1"] = 22.0
+        current["zones"][1]["coupling_tau_c0"] = 333.0
+        current["zones"][1]["coupling_dead_time_c0"] = 44.0
+        # Must not raise.
+        body = zh.build_post_body(current, {"name": "p", "zones": []})
+        form = _decode_body(body)
+        # These fields have no wire form key at all (parse_zone_fields()
+        # unconditionally preserves them from current_z, never reads them
+        # from the POST body) -- they must be excluded from the POST, not
+        # invented a fake form key.
+        for key in form:
+            self.assertFalse(key.startswith("z0_coupling_tau_"), key)
+            self.assertFalse(key.startswith("z0_coupling_dead_time_"), key)
+            self.assertFalse(key.startswith("z1_coupling_tau_"), key)
+            self.assertFalse(key.startswith("z1_coupling_dead_time_"), key)
 
     def test_control_mode_3_pid_fuzzy_accepted(self):
         """control_mode now accepts ZONE_CONTROL_MODE_PID_FUZZY (3) -- confirm
