@@ -385,10 +385,53 @@
   // (see App/drivers/ui_confirm.c, which gained confirm dialogs for Start
   // and Stop the same day) and the web (main_page.html's stopBtn handler,
   // and this sticky bar, both confirm before stopping).
-  var STOPPABLE_STATES = { running: true, paused: true, faulted: true, done: true };
+  // 2026-09-01 follow-up (owner, confirmed live on the board: "the stop
+  // firing button may have stayed red even after the firing was done" --
+  // state=3/DONE, all zones duty 0.00/relay off, yet the sticky bar still
+  // showed the red STOP FIRING control). Root cause: STOPPABLE_STATES used
+  // to include 'faulted'/'done', so this bar rendered the SAME red "STOP
+  // FIRING" button (with the SAME "this aborts the run in progress" confirm
+  // text) for a run that had already ended with every relay off as for one
+  // still actively heating -- an operator glancing at the screen cannot
+  // tell a completed run from a live one, and the safe misreading of that
+  // screen is "something is still heating," which is wrong.
+  //
+  // The real executor states (profile_executor.h's profile_exec_state_t,
+  // READ-ONLY -- another agent owns that file): IDLE, RUNNING, PAUSED,
+  // DONE ("ran to completion; relays off"), FAULTED ("a GLOBAL thermal
+  // guard tripped ... stays here until profile_executor_halt() explicitly
+  // acknowledges it"). Mapped to exactly two DIFFERENT affordances, never
+  // the same button:
+  //   RUNNING/PAUSED -- STOPPABLE: heat may genuinely be on right now,
+  //     Stop is a real abort-in-progress action, stays red.
+  //   DONE/FAULTED   -- ACKNOWLEDGEABLE: relays are already off (DONE's own
+  //     doc comment says so outright; FAULTED's guard trip already forced
+  //     them off too) -- there is nothing left TO stop. The action is
+  //     clearing the finished/faulted run so the picker reappears, worded
+  //     and coloured accordingly (never red+"STOP FIRING").
+  //   IDLE -- neither; the whole bar hides, as it always did.
+  //
+  // Both buttons end up calling the SAME /api/profile_exec/stop endpoint
+  // (profile_executor_halt() in profile_executor.c, READ-ONLY, confirmed by
+  // reading its actual implementation -- not just its header comment, which
+  // only names "running/paused/faulted" and doesn't say what it does from
+  // DONE): halt() treats every non-IDLE state uniformly (force relays off --
+  // a genuine no-op on a DONE run where they're already off -- then
+  // s_exec.state = PROFILE_EXEC_IDLE). A separate-looking endpoint,
+  // /api/profile_exec/ack_last_run, exists too, but its own handler doc
+  // comment says plainly it "does not touch the executor, the relays, or
+  // any live firing" -- it dismisses the BOOT-CROSSING previous-run
+  // breadcrumb (run_state.h, TODO.md 6A.3), a different concept from this
+  // bar's live current-session state. It is NOT a substitute for halt()
+  // here; the ack button below still posts to /api/profile_exec/stop, just
+  // dressed as what it actually is for DONE/FAULTED: an acknowledgement,
+  // not an abort.
+  var STOPPABLE_STATES = { running: true, paused: true };
+  var ACK_STATES = { faulted: true, done: true };
 
   var stopBarEl = null;
   var pauseResumeBtnEl = null;
+  var ackBtnEl = null;
   function buildStopBar() {
     var el = document.createElement('div');
     el.className = 'kc-stop-bar';
@@ -415,6 +458,7 @@
     btn.type = 'button';
     btn.className = 'kc-stop-btn';
     btn.textContent = 'STOP FIRING';
+    btn.setAttribute('hidden', '');
     btn.addEventListener('click', function () {
       if (!kcConfirm('Stop this firing now? This aborts the run in progress and cannot be resumed.')) {
         return;
@@ -425,14 +469,43 @@
         .catch(function () { btn.disabled = false; });
     });
 
+    // The DONE/FAULTED affordance -- reuses .kc-pause-btn's box/touch-target
+    // CSS (theme.css) as its base so it doesn't need a new stylesheet rule,
+    // but is NEVER red: green (--ui-accent-4, "all clear") for a run that
+    // reached its own planned end, amber (--ui-accent-1, "needs a look, but
+    // nothing is actively happening") for one a guard aborted -- set per-
+    // state in setStopOrAckState() below. Confirm text is state-specific
+    // too and never mentions "aborts the run in progress", because by the
+    // time this button is visible there is no run in progress left to
+    // abort.
+    var ackBtn = document.createElement('button');
+    ackBtn.type = 'button';
+    ackBtn.className = 'kc-pause-btn';
+    ackBtn.setAttribute('hidden', '');
+    ackBtn.addEventListener('click', function () {
+      var faulted = ackBtn.dataset.acking === 'faulted';
+      var msg = faulted
+        ? 'Clear this fault? Heat is already off; this just returns the board to idle so a new firing can start.'
+        : 'Clear this finished firing? It already completed with heat off; this just returns the board to idle so a new firing can start.';
+      if (!kcConfirm(msg)) {
+        return;
+      }
+      ackBtn.disabled = true;
+      fetch('/api/profile_exec/stop', { method: 'POST' })
+        .then(function () { ackBtn.disabled = false; })
+        .catch(function () { ackBtn.disabled = false; });
+    });
+    ackBtnEl = ackBtn;
+
     el.appendChild(pauseBtn);
     el.appendChild(btn);
+    el.appendChild(ackBtn);
     document.body.appendChild(el);
     return el;
   }
 
-  // Shown only for running/paused -- faulted/done can still be Stopped
-  // (to clear the card) but cannot be paused or resumed.
+  // Shown only for running/paused -- DONE/FAULTED get the ack button
+  // instead (setStopOrAckState() below), never this one.
   function setPauseResumeState(state) {
     if (!pauseResumeBtnEl) return;
     if (state === 'running') {
@@ -443,6 +516,33 @@
       pauseResumeBtnEl.removeAttribute('hidden');
     } else {
       pauseResumeBtnEl.setAttribute('hidden', '');
+    }
+  }
+
+  // Toggles the red Stop button vs. the green/amber Acknowledge button --
+  // the two affordances this bar now offers are mutually exclusive by
+  // construction (STOPPABLE_STATES and ACK_STATES don't overlap), so at
+  // most one of stopBtn/ackBtn is ever visible at once, and a completed or
+  // faulted run can never be mistaken for a live one at a glance.
+  function setStopOrAckState(state) {
+    var stopBtn = stopBarEl ? stopBarEl.querySelector('.kc-stop-btn') : null;
+    if (stopBtn) {
+      if (STOPPABLE_STATES[state]) stopBtn.removeAttribute('hidden');
+      else stopBtn.setAttribute('hidden', '');
+    }
+    if (!ackBtnEl) return;
+    if (state === 'done') {
+      ackBtnEl.textContent = 'ACKNOWLEDGE (firing complete)';
+      ackBtnEl.style.background = 'var(--ui-accent-4, #5cc06e)';
+      ackBtnEl.dataset.acking = 'done';
+      ackBtnEl.removeAttribute('hidden');
+    } else if (state === 'faulted') {
+      ackBtnEl.textContent = 'ACKNOWLEDGE (firing FAULTED)';
+      ackBtnEl.style.background = 'var(--ui-accent-1, #e8974e)';
+      ackBtnEl.dataset.acking = 'faulted';
+      ackBtnEl.removeAttribute('hidden');
+    } else {
+      ackBtnEl.setAttribute('hidden', '');
     }
   }
 
@@ -524,8 +624,9 @@
         lastGoodMs = Date.now();
         hideBanner();
         lastExecState = st && st.state;
-        setStopBarVisible(!!(lastExecState && STOPPABLE_STATES[lastExecState]));
+        setStopBarVisible(!!(lastExecState && (STOPPABLE_STATES[lastExecState] || ACK_STATES[lastExecState])));
         setPauseResumeState(lastExecState);
+        setStopOrAckState(lastExecState);
         scheduleNext(HEARTBEAT_MIN_MS);
       })
       .catch(function () {

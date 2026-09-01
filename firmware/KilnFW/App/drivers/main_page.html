@@ -238,6 +238,30 @@
   .relay-tag.relay-on { color: #fff; background: var(--on-color); border-color: var(--on-color); }
   .relay-tag.relay-off { color: var(--muted); background: transparent; }
   .relay-tag.relay-unknown { color: var(--muted); background: transparent; font-style: italic; }
+  /* Press-and-hold PID popup (2026-09-01, owner: "allow the user to hold a
+     zone on the dashboard and create a popup that allows them to adjust the
+     pid parameters while it is running"). Minimal, self-contained modal --
+     no modal pattern existed anywhere on this page before this, so this is
+     the first one; kept plain (no animation, no focus trap beyond click-
+     outside-to-cancel) rather than building a general-purpose dialog
+     component for a single use site. */
+  #pidPopupOverlay { position: fixed; inset: 0; background: rgba(0,0,0,0.55);
+                      display: flex; align-items: center; justify-content: center;
+                      z-index: 1000; padding: 1em; box-sizing: border-box; }
+  #pidPopupOverlay[hidden] { display: none; }
+  .pid-popup { background: var(--card-bg); color: var(--fg); border: 1px solid var(--border);
+               border-radius: var(--ui-radius); padding: 1em; max-width: 420px; width: 100%;
+               max-height: 90vh; overflow-y: auto; }
+  .pid-popup h3 { margin: 0 0 0.4em 0; }
+  .pid-popup .warn { color: var(--fault-color); font-weight: bold; }
+  .pid-popup label { display: block; margin-top: 0.6em; font-size: 0.9em; }
+  .pid-popup input[type=number] { width: 100%; box-sizing: border-box; font-size: 1em;
+                                   padding: 0.35em; margin-top: 0.2em; }
+  .pid-popup .btnrow { display: flex; gap: 0.5em; margin-top: 1em; }
+  .pid-popup .btnrow button { flex: 1; min-height: var(--ui-touch, 2.5em); }
+  .pid-popup .msg { margin-top: 0.6em; font-size: 0.9em; }
+  .pid-popup .proposed { font-size: 0.85em; opacity: 0.85; margin-top: 0.6em; }
+  .pid-popup .proposed button { font-size: 0.85em; margin-left: 0.4em; }
 </style>
 </head>
 <body>
@@ -372,6 +396,15 @@
      operator to do except something destructive. -->
 <div id="channels"><p class="empty">Loading…</p></div>
 
+<!-- Press-and-hold PID popup (2026-09-01) -- markup only, built once here
+     rather than injected via JS, so it exists in the DOM before the
+     trailing inline script tag below (which runs BEFORE the deferred
+     nav.js/app.js) ever looks for it. Content is filled in by
+     openPidPopup(). -->
+<div id="pidPopupOverlay" hidden>
+  <div class="pid-popup" id="pidPopupBox" role="dialog" aria-modal="true"></div>
+</div>
+
 <script>
 const FAULT_BITS = [
   [0x01, 'open circuit'], [0x02, 'over/under voltage'], [0x04, 'TC low'],
@@ -392,6 +425,26 @@ function faultText(bits) {
 // with room to spare.
 const CH_COLORS = ['#e63', '#3a9', '#37f', '#c8a', '#fa3', '#0bb'];
 function chColor(channel) { return CH_COLORS[channel % CH_COLORS.length]; }
+
+// Reserved palette for NON-ZONE series (commanded duty, the planned/target
+// curve, guard-trip markers) -- 2026-08-31 follow-up, owner: "duty and
+// planned should never be the same colour as the zones". INVARIANT: no
+// value in this object may ever equal a value in CH_COLORS, checked once at
+// load time just below (console.warn, not a throw -- a colour clash is a
+// legibility bug, not a reason to break the page). Grey for duty
+// deliberately matches what drawAutotuneChart() already used for the same
+// series before this pass, so the firing chart and the autotune chart read
+// as the same visual language rather than two different conventions for
+// the same kind of line.
+const SERIES_COLORS = { duty: '#888', plan: '#96c', guard: '#c22' };
+(function checkSeriesColorsDontCollideWithZoneColors() {
+  Object.keys(SERIES_COLORS).forEach(function (k) {
+    if (CH_COLORS.indexOf(SERIES_COLORS[k]) !== -1) {
+      console.warn('SERIES_COLORS.' + k + ' (' + SERIES_COLORS[k] +
+        ') collides with a zone colour in CH_COLORS -- pick a different one');
+    }
+  });
+})();
 
 // Item 11: which relay(s) a thermocouple channel drives is NOT in
 // /api/status -- it's derived from zonesCache (loaded once by loadZones(),
@@ -529,6 +582,331 @@ function renderSafetyCard(data) {
   return div;
 }
 
+// ---------------------------------------------------------------------------
+// Press-and-hold gesture (2026-09-01, owner: "allow the user to hold a zone
+// on the dashboard... create a popup that allows them to adjust the pid
+// parameters"). Pointer Events (not separate touch/mouse handlers) so one
+// implementation covers mouse, touch AND pen -- this board drives a local
+// LCD and the dashboard is used from a phone, both need to work. ~550ms
+// hold (typical long-press duration, short enough not to feel broken, long
+// enough that a scroll/swipe never accidentally triggers it) and a 10px
+// move-cancel threshold -- moving the pointer that far means the gesture is
+// a drag/scroll, not a hold. Suppresses the click event that would
+// otherwise follow a successful long-press (so it can never ALSO fire some
+// future click handler on the same row), while leaving an ordinary short
+// tap/click completely untouched -- fired=false there just clears the
+// timer, exactly what happened before this function existed.
+var LONGPRESS_MS = 550;
+var LONGPRESS_MOVE_THRESHOLD_PX = 10;
+function attachLongPress(el, onLongPress) {
+  var timer = null, startX = 0, startY = 0, fired = false;
+  function clear() { if (timer) { clearTimeout(timer); timer = null; } }
+  function onDown(e) {
+    if (e.button !== 0) return; // primary mouse button / touch / pen only
+    fired = false;
+    startX = e.clientX; startY = e.clientY;
+    clear();
+    timer = setTimeout(function () {
+      timer = null;
+      fired = true;
+      onLongPress(e);
+    }, LONGPRESS_MS);
+  }
+  function onMove(e) {
+    if (!timer) return;
+    var dx = e.clientX - startX, dy = e.clientY - startY;
+    if (Math.sqrt(dx * dx + dy * dy) > LONGPRESS_MOVE_THRESHOLD_PX) clear();
+  }
+  function onUp() {
+    clear();
+    if (fired) {
+      el.addEventListener('click', function suppress(ce) {
+        ce.stopPropagation(); ce.preventDefault();
+      }, { capture: true, once: true });
+    }
+  }
+  el.addEventListener('pointerdown', onDown);
+  el.addEventListener('pointermove', onMove);
+  el.addEventListener('pointerup', onUp);
+  el.addEventListener('pointercancel', clear);
+  el.addEventListener('pointerleave', clear);
+  // Reduces the native double-tap-zoom/scroll interference on touch, and
+  // suppresses text selection / iOS's own long-press callout menu, which
+  // would otherwise fight this gesture for the same hold.
+  el.style.touchAction = 'manipulation';
+  el.style.webkitUserSelect = 'none';
+  el.style.userSelect = 'none';
+  el.style.webkitTouchCallout = 'none';
+}
+
+// ---------------------------------------------------------------------------
+// PID edit popup.
+//
+// Bounds mirror zones_config_json.c's zones_config_json_parse_float_field()
+// calls for z%u_kp/z%u_ki/z%u_kd EXACTLY (read there, not invented here):
+// [0.0, 1000.0] inclusive, finite, refused (never clamped) outside that --
+// "zone pid_kp/ki/kd missing or out of range" is the firmware's own error
+// text for a value outside this range. Kept as one shared constant so this
+// popup can never drift from the firmware's own bound without both being
+// touched in the same place.
+var PID_BOUND_MIN = 0.0, PID_BOUND_MAX = 1000.0;
+
+// Write path (requirement: reuse the existing POST /api/zones path and
+// payload shape rather than a second one). That endpoint IS a whole-page
+// submit (zones_http.c's zones_post_handler(): every zone's every field,
+// plus top-level thermo_count/relay_count/relay names/timing profiles, all
+// re-validated as one unit) -- there is no narrower "just this zone's PID"
+// endpoint. Rather than reimplementing zones_page.html's own inheritance-
+// aware form-building UI (settings_source chains, per-field customStack
+// resolution -- real complexity that page owns and this popup must not
+// duplicate or subtly diverge from), this does a GENERIC, MECHANICAL echo
+// instead: GET /api/zones already returns every field POST wants, as a
+// fully RESOLVED, concrete snapshot (settings_source, coupling_c%u, tc_type
+// etc are all already-resolved values, not inheritance references) -- so
+// echoing every field straight back, changing only the target zone's
+// kp/ki/kd, is a complete and correct round-trip without needing any of
+// that page's UI-side logic. Field-name mapping below was read directly out
+// of zones_page.html's own submit handler and zones_http.c's
+// parse_zone_fields()/zones_post_handler(), not guessed.
+var ZONE_FIELD_MAP = [
+  ['name', 'name', true], ['relay_mask', 'relay_mask', false], ['thermo_mask', 'thermo_mask', false],
+  ['ct_mask', 'ct_mask', false], ['tc_type', 'tctype', false], ['timing_profile', 'timingprofile', false],
+  ['cal_offset_c', 'cal', false],
+  ['pid_kp', 'kp', false], ['pid_ki', 'ki', false], ['pid_kd', 'kd', false],
+  ['max_ramp_c_per_hr', 'ramp', false], ['sanity_rate_c_per_min', 'sanity', false],
+  ['control_mode', 'mode', false], ['max_temp_c', 'maxtemp', false], ['min_temp_c', 'mintemp', false],
+  ['heater_window_ms', 'window', false], ['heater_min_on_ms', 'minon', false], ['heater_min_off_ms', 'minoff', false],
+  ['guard_wrong_dir_window_s', 'wrongdirwindow', false], ['guard_wrong_dir_rate_c_per_min', 'wrongdirrate', false],
+  ['guard_off_settle_s', 'offsettle', false], ['guard_runaway_rate_c_per_min', 'runawayrate', false],
+  ['guard_runaway_margin_c', 'runawaymargin', false], ['guard_drift_period_s', 'driftperiod', false],
+  ['guard_sensor_fault_debounce_ticks', 'debounce', false], ['guard_frozen_window_s', 'frozenwindow', false],
+  ['cross_zone_max_delta_c', 'xzone', false],
+  ['model_k_dc', 'k', false], ['model_tau_s', 'tau', false], ['model_dead_time_s', 'deadtime', false],
+  ['fuzzy_strength_pct', 'fuzzy_strength', false], ['settings_source', 'settings_source', false],
+];
+
+// Builds the exact application/x-www-form-urlencoded body zones_page.html's
+// own save handler posts -- see ZONE_FIELD_MAP's own comment. `cfg` is a
+// freshly-fetched GET /api/zones response; `zoneIndex`/`kp`/`ki`/`kd` are
+// the one change this popup makes. Every other field, for every zone,
+// timing profile and relay name, is echoed back verbatim.
+function buildZonesEchoPostBody(cfg, zoneIndex, kp, ki, kd) {
+  var params = [];
+  params.push('thermo_count=' + cfg.thermo_count);
+  params.push('relay_count=' + cfg.relay_count);
+  params.push('max_simultaneous_relays=' + cfg.max_simultaneous_relays);
+  params.push('continue_on_zone_trip=' + (cfg.continue_on_zone_trip ? '1' : '0'));
+  params.push('safety_tc_type=' + cfg.safety_tc_type);
+  params.push('pc_link_abort_silence_ms=' + cfg.pc_link_abort_silence_ms);
+  (cfg.relay_names || []).forEach(function (nm, r) {
+    params.push('relay' + (r + 1) + '_name=' + encodeURIComponent(nm));
+  });
+  (cfg.timing_profiles || []).forEach(function (p, idx) {
+    params.push('tp' + idx + '_name=' + encodeURIComponent(p.name || ''));
+    params.push('tp' + idx + '_progressduty=' + p.guard_progress_duty_min);
+    params.push('tp' + idx + '_progresswindow=' + p.guard_progress_window_s);
+    params.push('tp' + idx + '_drifthyst=' + p.guard_drift_hysteresis_c);
+    params.push('tp' + idx + '_frozeneps=' + p.guard_frozen_eps_c);
+    params.push('tp' + idx + '_xzoneperiod=' + p.guard_cross_zone_period_s);
+    params.push('tp' + idx + '_bbhyst=' + p.bangbang_hysteresis_c);
+    params.push('tp' + idx + '_coolmargin=' + p.cooling_limited_margin_c);
+    params.push('tp' + idx + '_coolhold=' + p.cooling_limited_hold_s);
+    params.push('tp' + idx + '_ramplock=' + p.ramp_lock_band_c);
+  });
+  (cfg.zones || []).forEach(function (z, i) {
+    ZONE_FIELD_MAP.forEach(function (m) {
+      var key = m[0], suffix = m[1], isString = m[2];
+      var val = z[key];
+      params.push('z' + i + '_' + suffix + '=' + (isString ? encodeURIComponent(val) : val));
+    });
+    for (var j = 0; j < cfg.zones.length; j++) {
+      params.push('z' + i + '_coupling_c' + j + '=' + z['coupling_c' + j]);
+    }
+    if (i === zoneIndex) {
+      // Override the three this popup actually edits -- appended AFTER the
+      // echoed z{i}_kp/ki/kd above, so these win (a duplicate key in an
+      // application/x-www-form-urlencoded body resolves to the LAST
+      // occurrence under http_form_find_field()'s linear scan, same as
+      // every browser's own form-encoding convention).
+      params.push('z' + i + '_kp=' + kp);
+      params.push('z' + i + '_ki=' + ki);
+      params.push('z' + i + '_kd=' + kd);
+    }
+  });
+  return params.join('&');
+}
+
+var pidPopupZone = null; // zone index currently open, or null
+var pidPopupCfg = null;  // last-fetched GET /api/zones snapshot for that zone
+
+function closePidPopup() {
+  pidPopupZone = null;
+  pidPopupCfg = null;
+  document.getElementById('pidPopupOverlay').setAttribute('hidden', '');
+}
+
+// Live actual/error refresh while the popup is open -- called from poll()'s
+// existing 2s tick (reusing that cadence rather than a second timer), so
+// "what are you about to affect" stays current for as long as the operator
+// is deciding. actual_c comes from lastChannelsData (already fetched every
+// tick); target/error need a RUNNING or PAUSED firing that includes this
+// zone -- otherwise there is no setpoint to compare against and the popup
+// says so rather than inventing a zero error.
+function refreshPidPopupLive() {
+  if (pidPopupZone === null) return;
+  var elLive = document.getElementById('pidPopupLive');
+  if (!elLive) return;
+  var ch = lastChannelsData && lastChannelsData.channels &&
+    lastChannelsData.channels.filter(function (c) { return c.channel === pidPopupZone; })[0];
+  var actualTxt = (ch && ch.valid && !ch.spi_failed) ? window.kcUnit.fmt(ch.temp_c) : 'no reading';
+  var st = lastExecStatus;
+  var zst = st && (st.zones || []).filter(function (z) { return z.zone === pidPopupZone; })[0];
+  var errTxt = 'no active firing on this zone -- nothing to compare against';
+  if (zst && zst.active && zst.actual_valid && (st.state === 'running' || st.state === 'paused')) {
+    errTxt = 'target ' + window.kcUnit.fmt(st.target_c) + ', error ' + fmtDeltaC(zst.actual_c - st.target_c) +
+      (zst.duty !== undefined ? ', duty ' + zst.duty.toFixed(3) : '');
+  }
+  elLive.innerHTML = 'Actual: <b class="kc-live-value">' + actualTxt + '</b><br>' + errTxt;
+}
+
+// window.kcUnit.fmt()'s +32 Fahrenheit offset is wrong for a delta (target
+// error, here) same as everywhere else on this page -- see the earlier
+// firing-stats pass's own comment on this exact hazard. Kept local since
+// that block was removed from this file (moved to zones_page.html) but this
+// popup still needs a delta formatter of its own.
+function fmtDeltaC(c) {
+  if (c === null || c === undefined || isNaN(c)) return 'n/a';
+  var v = window.kcUnit.get() === 'f' ? c * 9 / 5 : c;
+  return (v >= 0 ? '+' : '') + v.toFixed(1) + ' ' + window.kcUnit.label();
+}
+
+function openPidPopup(zoneIndex) {
+  pidPopupZone = zoneIndex;
+  pidPopupCfg = null;
+  var overlay = document.getElementById('pidPopupOverlay');
+  var box = document.getElementById('pidPopupBox');
+  box.innerHTML = '<h3>' + zoneName(zoneIndex) + ' -- PID</h3><p>Loading current config&hellip;</p>';
+  overlay.removeAttribute('hidden');
+  fetch('/api/zones').then(function (r) { return r.json(); }).then(function (cfg) {
+    if (pidPopupZone !== zoneIndex) return; // closed/reopened on a different zone while this was in flight
+    pidPopupCfg = cfg;
+    renderPidPopup(cfg.zones[zoneIndex]);
+  }).catch(function () {
+    box.innerHTML = '<h3>' + zoneName(zoneIndex) + ' -- PID</h3>' +
+      '<p class="warn">Could not read current config.</p>' +
+      '<div class="btnrow"><button type="button" onclick="closePidPopup()">Close</button></div>';
+  });
+}
+
+function renderPidPopup(z) {
+  var box = document.getElementById('pidPopupBox');
+  var running = lastExecStatus && (lastExecStatus.state === 'running' || lastExecStatus.state === 'paused');
+  // Last autotune this SESSION proposed for this zone, if any -- lastAutotuneStatus
+  // is the same global the autotune chart already uses (main_page.html has
+  // no history beyond the current/last-polled run, same session-only
+  // limitation the coupling matrix has, and for the same reason: nothing
+  // else on this page persists it either).
+  var at = lastAutotuneStatus;
+  var atUsable = !!(at && at.zone === pidPopupZone && (at.state === 'done' || at.state === 'aborted') &&
+    (at.method === 'relay' ? at.relay_valid : at.model_valid));
+  var proposedHtml = atUsable
+    ? ('<div class="proposed">Last autotune this session proposed (' + at.state + '): ' +
+       'Kp=' + at.proposed_kp.toFixed(4) + ' Ki=' + at.proposed_ki.toFixed(5) + ' Kd=' + at.proposed_kd.toFixed(4) +
+       '<button type="button" id="pidPopupUseProposed">Use these</button></div>')
+    : '<div class="proposed">No usable autotune result for this zone this session.</div>';
+
+  var runningWarn = running
+    ? '<p class="warn">This board REFUSES to write zone config while ANY firing is RUNNING or PAUSED ' +
+      '(zones_http.c own interlock check -- a hard refusal, not overridable). Apply below will still be ' +
+      'sent and the boards own refusal reason shown, but it will not take effect until the firing is ' +
+      'stopped. This is a firmware-level limitation, not a bug in this popup.</p>'
+    : '';
+
+  box.innerHTML =
+    '<h3>' + zoneName(pidPopupZone) + ' -- PID parameters</h3>' +
+    '<div id="pidPopupLive"></div>' +
+    '<p class="warn">Changes take effect immediately on a running firing -- this directly changes how ' +
+    'this zone is heated, right now, with no confirmation beyond clicking Apply below.</p>' +
+    runningWarn + proposedHtml +
+    '<label>Kp (current ' + z.pid_kp + ')<input type="number" id="pidPopupKp" value="' + z.pid_kp +
+      '" step="any" min="0"></label>' +
+    '<label>Ki (current ' + z.pid_ki + ') -- small values matter here, e.g. 0.00012; do not round this' +
+      '<input type="number" id="pidPopupKi" value="' + z.pid_ki + '" step="any" min="0"></label>' +
+    '<label>Kd (current ' + z.pid_kd + ')<input type="number" id="pidPopupKd" value="' + z.pid_kd +
+      '" step="any" min="0"></label>' +
+    '<div id="pidPopupMsg" class="msg"></div>' +
+    '<div class="btnrow"><button type="button" id="pidPopupApplyBtn" onclick="applyPidPopup()">Apply</button>' +
+    '<button type="button" onclick="closePidPopup()">Cancel</button></div>';
+  var useBtn = document.getElementById('pidPopupUseProposed');
+  if (useBtn && atUsable) {
+    useBtn.addEventListener('click', function () {
+      document.getElementById('pidPopupKp').value = at.proposed_kp;
+      document.getElementById('pidPopupKi').value = at.proposed_ki;
+      document.getElementById('pidPopupKd').value = at.proposed_kd;
+    });
+  }
+  refreshPidPopupLive();
+}
+
+// Bounds mirrored EXACTLY from zones_config_json.c (see PID_BOUND_MIN/MAX's
+// own comment) -- rejects, never clamps, same discipline the firmware
+// itself uses ("refuse at the door, never clamp or ignore").
+function validatePidValue(raw, label) {
+  if (raw === '' || raw === null) return { error: label + ' is required' };
+  var v = Number(raw);
+  if (!isFinite(v) || isNaN(v)) return { error: label + ' must be a number' };
+  if (v < PID_BOUND_MIN) return { error: label + ' cannot be negative' };
+  if (v > PID_BOUND_MAX) return { error: label + ' is too large (max ' + PID_BOUND_MAX + ')' };
+  return { value: v };
+}
+
+function applyPidPopup() {
+  var msgEl = document.getElementById('pidPopupMsg');
+  var kpR = validatePidValue(document.getElementById('pidPopupKp').value, 'Kp');
+  var kiR = validatePidValue(document.getElementById('pidPopupKi').value, 'Ki');
+  var kdR = validatePidValue(document.getElementById('pidPopupKd').value, 'Kd');
+  var firstError = kpR.error || kiR.error || kdR.error;
+  if (firstError) { msgEl.textContent = firstError; return; }
+  if (!pidPopupCfg) { msgEl.textContent = 'Config not loaded yet -- try again in a moment.'; return; }
+  var zi = pidPopupZone;
+  var body = buildZonesEchoPostBody(pidPopupCfg, zi, kpR.value, kiR.value, kdR.value);
+  var applyBtn = document.getElementById('pidPopupApplyBtn');
+  applyBtn.disabled = true;
+  msgEl.textContent = 'Applying…';
+  fetch('/api/zones', {
+    method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body,
+  }).then(function (r) {
+    if (!r.ok) return r.text().then(function (t) { throw new Error(t || ('HTTP ' + r.status)); });
+    // Never assume the write took -- re-read and show what the firmware
+    // actually stored, the same "confirm, don't assume" discipline the
+    // rest of this pass's write paths follow. A silent partial write that
+    // reports success without checking is exactly the failure mode to
+    // avoid.
+    return fetch('/api/zones').then(function (r2) { return r2.json(); }).then(function (cfg2) {
+      if (pidPopupZone !== zi) return; // popup moved to a different zone meanwhile
+      pidPopupCfg = cfg2;
+      var stored = cfg2.zones[zi];
+      var matched = Math.abs(stored.pid_kp - kpR.value) < 1e-6 && Math.abs(stored.pid_ki - kiR.value) < 1e-9 &&
+        Math.abs(stored.pid_kd - kdR.value) < 1e-6;
+      msgEl.textContent = matched
+        ? ('Stored: Kp=' + stored.pid_kp + ' Ki=' + stored.pid_ki + ' Kd=' + stored.pid_kd + '.')
+        : ('WARNING: board now reports Kp=' + stored.pid_kp + ' Ki=' + stored.pid_ki + ' Kd=' + stored.pid_kd +
+           ' -- different from what was sent. The write may not have fully landed.');
+      document.getElementById('pidPopupKp').value = stored.pid_kp;
+      document.getElementById('pidPopupKi').value = stored.pid_ki;
+      document.getElementById('pidPopupKd').value = stored.pid_kd;
+      applyBtn.disabled = false;
+    });
+  }).catch(function (e) {
+    // Covers the interlock refusal (409/428, plain-text reason) and any
+    // validation 400 -- both come back as this same .then()->catch() path
+    // since !r.ok throws above; the board's own reason text is shown
+    // verbatim rather than a generic "failed".
+    msgEl.textContent = 'Not applied: ' + e.message;
+    applyBtn.disabled = false;
+  });
+}
+
 function renderChannels(data) {
   lastChannelsData = data;
   const el = document.getElementById('channels');
@@ -588,6 +966,15 @@ function renderChannels(data) {
       : '<span title="Channel ' + ch.channel + '">' + zoneName(zi) + '</span>';
     div.innerHTML = '<span><span class="ch-swatch" style="background:' + chColor(ch.channel) + '"></span>' +
       label + '</span><span class="temp">' + detail + '</span>';
+    // Press-and-hold opens the PID popup -- only for a channel that IS a
+    // zone (an unassigned channel has no PID to edit). Re-attached every
+    // poll tick since renderChannels() rebuilds these <div>s from scratch
+    // each time (el.innerHTML = '' above) -- cheap, and matches every other
+    // per-card listener already re-attached the same way elsewhere on this
+    // page (see e.g. the profile picker's own per-tick rebuild).
+    if (zi !== null) {
+      attachLongPress(div, function () { openPidPopup(zi); });
+    }
     el.appendChild(div);
   });
   const safetyDiv = renderSafetyCard(data);
@@ -882,15 +1269,23 @@ function renderChartMeta(mode, opts) {
   var note = '';
   var items = [];
   if (mode === 'running') {
-    items.push(chartLegendItem('#e63', 'actual'));
+    // 2026-09-01 follow-up (owner: "i am still only seeing one zone on the
+    // web graph... during a live three-zone firing"): one legend row per
+    // zone actually plotted (opts.zoneItems, built by drawHistoryChart the
+    // same way drawAutotuneChart's zoneItems already are -- chColor(zone),
+    // the same mapping the channel list/idle dots use), not a single fixed
+    // "actual" row. duty/planned/guard are all NON-zone series and now come
+    // from SERIES_COLORS exclusively -- see that constant's own doc comment
+    // for why they must never take a zone's colour.
+    (opts.zoneItems || []).forEach(function (it) { items.push(chartLegendItem(it.color, it.label)); });
     // 2026-08-29: ONE target series, not two. What used to be a separate
     // grey "desired" row (the recorded commanded setpoint, trailing) and a
     // purple "planned" row (the forward preview) are now the same line --
     // solid over elapsed time, dashed ahead of now. Only one legend row, and
     // its label says which half is which when there is a future half.
-    items.push(chartLegendItem('#96c', opts.planShown ? 'planned (dashed ahead of now)' : 'planned'));
-    items.push(chartLegendItem('#3a9', 'duty'));
-    if (opts.guardShown) items.push(chartLegendItem('#c22', 'guard trip'));
+    items.push(chartLegendItem(SERIES_COLORS.plan, opts.planShown ? 'planned (dashed ahead of now)' : 'planned'));
+    items.push(chartLegendItem(SERIES_COLORS.duty, opts.dutyLabel || 'duty'));
+    if (opts.guardShown) items.push(chartLegendItem(SERIES_COLORS.guard, 'guard trip'));
     if (opts.freezingShown) items.push(chartLegendItem(opts.faultColor || '#b00', 'freezing (0°C)', true));
     // tMin/actualMaxT are exactly the domain x() maps rows over below --
     // never the plan's own (possibly longer) horizon, so this can't overstate
@@ -898,6 +1293,15 @@ function renderChartMeta(mode, opts) {
     note = 'Showing ' + fmtTick(opts.tMin) + '–' + fmtTick(opts.actualMaxT) + ' elapsed';
     if (opts.totalPlannedS !== null && opts.totalPlannedS !== undefined) {
       note += ' of ' + fmtTick(opts.totalPlannedS) + ' planned';
+    }
+    // Same reload-mid-run honesty as the autotune view (see that branch's
+    // own comment below for the full reasoning) -- the non-representative
+    // zones' temperature traces AND the representative zone's own per-zone
+    // duty line are all client-collected, so a page (re)loaded after a
+    // firing was already underway has no history for them before the
+    // moment it opened.
+    if (opts.partialZoneSeries) {
+      note += " (coupling zones' traces and per-zone duty only cover time since this page was opened)";
     }
   } else if (mode === 'autotune') {
     // PID_EXPANSION_PLAN.md Phase 7b: the phase label is REQUIRED here, not
@@ -915,8 +1319,8 @@ function renderChartMeta(mode, opts) {
     // zone's own trace.
     var st = opts.st;
     (opts.zoneItems || []).forEach(function (it) { items.push(chartLegendItem(it.color, it.label)); });
-    items.push(chartLegendItem('#888', 'commanded duty (right axis, %, stepped)'));
-    if (opts.planShown) items.push(chartLegendItem('#96c', 'planned profile (preview)', true));
+    items.push(chartLegendItem(SERIES_COLORS.duty, 'commanded duty (right axis, %, stepped)'));
+    if (opts.planShown) items.push(chartLegendItem(SERIES_COLORS.plan, 'planned profile (preview)', true));
     if (opts.freezingShown) items.push(chartLegendItem(opts.faultColor || '#b00', 'freezing (0°C)', true));
     var phase = AUTOTUNE_PHASE_LABEL[st.state] || st.state;
     note = 'Autotune: ' + phase + ' — ' + zoneName(st.zone) +
@@ -943,7 +1347,7 @@ function renderChartMeta(mode, opts) {
     // not started" so it can never be mistaken for a run in progress.
     note = 'Live channel readings (not a time series)';
     if (opts.planShown) {
-      items.push(chartLegendItem('#96c', 'planned profile (preview)', true));
+      items.push(chartLegendItem(SERIES_COLORS.plan, 'planned profile (preview)', true));
       note += ' — dashed line previews the selected profile, 0–' +
         fmtTick(opts.planMaxT) + ', not started';
     }
@@ -1341,49 +1745,42 @@ function renderLastRun(st) {
 // failing, so it all gets kc-live-value. Zone names and the profile title
 // are config, not readings -- left unmarked.
 var lastExecStData = null;
-// PID_EXPANSION_PLAN.md Phase 7a dashboard wiring: dashboard_json.c's
-// append_zone_status_json() now nests a "firing_stats" object
-// (profile_exec_zone_status_t::firing_stats, profile_executor.h) inside
-// every /api/profile_exec zone -- this renders it as one extra row per
-// active zone, right under that zone's existing status line.
-//
-// window.kcUnit.fmt() is deliberately NOT used for these figures: it adds
-// the +32 Fahrenheit offset (toDisplay()), which is correct for an absolute
-// reading but wrong for a DELTA (mean/overshoot/undershoot/IAE error, all
-// already (actual - target) or |error|) -- a delta only needs the x9/5
-// scale factor, never the offset. fmtDeltaC() below is that scale-only
-// conversion, kept local to this row since nothing else on this page
-// formats a temperature delta.
-function fmtDeltaC(c, decimals) {
-  if (c === null || c === undefined || isNaN(c)) return 'n/a';
-  if (decimals === undefined) decimals = 1;
-  var scaled = window.kcUnit.get() === 'f' ? c * 9 / 5 : c;
-  return (scaled >= 0 ? '+' : '') + scaled.toFixed(decimals) + ' ' + window.kcUnit.label();
-}
-
-// excluded_sample_count VISIBLE whenever non-zero is a hard requirement
-// (owner: "a run with many dropped samples must read as untrustworthy
-// rather than quietly scoring well", profile_exec_firing_stats_t's own doc
-// comment in profile_executor.h) -- so this never hides behind a details
-// toggle or a tooltip; it's an always-visible fault-styled line, same
-// visual weight as the zone-fault row above it, whenever the count is > 0.
-function renderFiringStatsRow(z) {
-  var fs = z.firing_stats;
-  if (!fs || (!fs.sample_count && !fs.excluded_sample_count)) return '';
+// 2026-09-01 follow-up (owner, on a screenshot of the per-zone block this
+// used to render here: "this is far too messy, put this in the zones page
+// and make it readable"). The full firing_stats table now lives on
+// zones_page.html (per-zone detail belongs next to the PID parameters and
+// the coupling matrix, not on the live "what is the kiln doing right now"
+// dashboard) -- see that page's renderFiringStatsTable(). What's left here
+// is ONE headline number, only for a run that has actually ended
+// (done/faulted; a still-RUNNING run's stats are still accumulating and a
+// "worst so far" figure would invite reading it as final): the worst
+// (highest) zone's normalized IAE, a single dimensionless "how well did
+// this firing track" figure, linking to the zones page for the rest.
+// Excluded samples are still surfaced here, not just on the zones page --
+// "a run with many dropped samples must read as untrustworthy" is exactly
+// the kind of thing a one-line dashboard summary must not hide behind a
+// click-through, so a non-zero total gets its own short warning inline.
+function renderRunQualityHeadline(st) {
+  if (st.state !== 'done' && st.state !== 'faulted') return '';
+  var worst = null;
+  var totalExcluded = 0, totalSamples = 0;
+  (st.zones || []).forEach(function (z) {
+    var fs = z.firing_stats;
+    if (!fs || !fs.sample_count) return;
+    totalExcluded += fs.excluded_sample_count || 0;
+    totalSamples += fs.sample_count;
+    if (!isNaN(fs.iae_normalized) && (!worst || fs.iae_normalized > worst.iae)) {
+      worst = { zone: z.zone, iae: fs.iae_normalized };
+    }
+  });
+  if (!worst) return '';
   var html = '<div class="row kc-live-value" style="font-size:0.85em;opacity:0.85">' +
-    '<span>' + zoneName(z.zone) + ' tuning</span><span>' +
-    'mean ' + fmtDeltaC(fs.mean_error_c) +
-    ' &middot; +ov ' + fmtDeltaC(fs.max_overshoot_c) + ' @' + fmtDuration(fs.max_overshoot_elapsed_s) +
-    ' &middot; -un ' + fmtDeltaC(fs.max_undershoot_c) + ' @' + fmtDuration(fs.max_undershoot_elapsed_s) +
-    ' &middot; IAE(norm) ' + (isNaN(fs.iae_normalized) ? 'n/a' : fs.iae_normalized.toFixed(3)) +
-    ' &middot; ramp ' + fmtDeltaC(fs.ramp_err_mean_c) + '/' + fmtDeltaC(fs.ramp_err_max_c) +
-    ' &middot; dwell ' + fmtDeltaC(fs.dwell_err_mean_c) + '/' + fmtDeltaC(fs.dwell_err_max_c) +
-    '</span></div>';
-  if (fs.excluded_sample_count > 0) {
+    '<span>Run quality</span><span>worst zone ' + zoneName(worst.zone) + ': IAE(norm) ' +
+    worst.iae.toFixed(3) + ' &mdash; <a href="/settings/zones">details</a></span></div>';
+  if (totalExcluded > 0) {
     html += '<div class="row fault kc-live-value" style="font-size:0.85em">' +
-      zoneName(z.zone) + ': ' + fs.excluded_sample_count + ' of ' +
-      (fs.excluded_sample_count + fs.sample_count) +
-      ' samples excluded (invalid readings) &mdash; these stats may not be trustworthy</div>';
+      totalExcluded + ' of ' + (totalExcluded + totalSamples) +
+      ' samples excluded across all zones (invalid readings) &mdash; these stats may not be trustworthy</div>';
   }
   return html;
 }
@@ -1432,7 +1829,6 @@ function renderExec(st) {
     if (z.faulted) {
       html += '<div class="row fault kc-live-value">' + zoneName(z.zone) + ': ' + window.kcEscapeHtml(z.fault_reason) + '</div>';
     }
-    html += renderFiringStatsRow(z);
   });
   if (st.dwelling && st.state === 'running') {
     html += '<div class="row"><span>Dwell remaining</span><span class="kc-live-value">' + fmtDuration(st.dwell_remaining_s) + '</span></div>';
@@ -1440,6 +1836,7 @@ function renderExec(st) {
   if (st.state === 'faulted' && st.fault_reason) {
     html += '<div class="row fault kc-live-value">' + window.kcEscapeHtml(st.fault_reason) + '</div>';
   }
+  html += renderRunQualityHeadline(st);
   html += '</div>';
 
   // No Stop button here (removed 2026-08-29, owner: "there is also an extra
@@ -1659,7 +2056,7 @@ function drawIdleDots(data) {
     function px(t) { return g.padL + (t / pMaxT) * g.plotW; }
     g.ctx.save();
     g.ctx.setLineDash([6, 4]);
-    g.ctx.strokeStyle = '#96c'; g.ctx.lineWidth = 1.5;
+    g.ctx.strokeStyle = SERIES_COLORS.plan; g.ctx.lineWidth = 1.5;
     g.ctx.beginPath();
     planPts.forEach(function (p, i) {
       var ppx = px(p.t), ppy = yTemp(p.c);
@@ -1690,6 +2087,20 @@ function drawIdleDots(data) {
   });
 }
 
+// 2026-09-01 follow-up (owner, tested live against a running three-zone
+// firing): history.csv only ever carries ONE representative zone's
+// actual/target and ONE whole-kiln-aggregate duty column (verified against
+// dashboard_http.c's history_csv_get_handler() and profile_executor.h's own
+// "scoped to a single representative zone" doc comment -- this is a data
+// limitation, not a drawing bug). The representative zone (zoneMaskLowestBit
+// of the CURRENT run's zone_mask, the exact same rule the firmware itself
+// uses for that ring buffer) keeps drawing from `rows` -- the one series
+// that survives a page reload, since it lives in the device's own ring
+// buffer, not this tab. Every OTHER active zone is drawn from
+// firingZoneSeries, the client-collected accumulator built the same way
+// autotuneZoneSeries already is for the autotune view (see
+// sampleFiringZoneTemps's own header comment for the full reasoning and the
+// memory/cap arithmetic, shared with that mechanism).
 function drawHistoryChart(rows) {
   // 2026-08-21: #historyEmpty (the "No history yet" <p>) was removed from the
   // markup above along with the History heading/intro paragraph -- this used
@@ -1709,7 +2120,21 @@ function drawHistoryChart(rows) {
   var ctx = g.ctx, cssW = g.cssW, cssH = g.cssH, fg = g.fg, muted = g.muted;
   var padL = g.padL, padR = g.padR, padT = g.padT, padB = g.padB, plotW = g.plotW, plotH = g.plotH;
 
+  var repZone = lastExecStatus ? zoneMaskLowestBit(lastExecStatus.zone_mask) : -1;
+
   var tMin = rows[0].t, tMax = rows[rows.length - 1].t;
+  // "actual" span (what's really been recorded/collected, as opposed to the
+  // plan's own future preview extending tMax further below) -- this is what
+  // renderChartMeta's "Showing X-Y elapsed" note reports, so it must include
+  // the client-collected series' own tails, which can run slightly AHEAD of
+  // history.csv's 15s poll cadence.
+  Object.keys(firingZoneSeries).forEach(function (zi) {
+    var arr = firingZoneSeries[zi];
+    if (arr.length) tMax = Math.max(tMax, arr[arr.length - 1].t);
+  });
+  if (firingDutySeries.length) tMax = Math.max(tMax, firingDutySeries[firingDutySeries.length - 1].t);
+  var actualMaxT = tMax;
+
   // Planned curve (activePlan, set by pollExec's lastExecPlanId switch keyed
   // off st.profile_id): extend tMax to cover the plan's own future points so
   // the dashed half of the target line draws AHEAD of the run, not just
@@ -1732,13 +2157,23 @@ function drawHistoryChart(rows) {
     if (!isNaN(r.target)) tempVals.push(r.target);
   });
   planPts.forEach(function (p) { tempVals.push(p.c); });
+  var partialZoneSeries = false;
+  Object.keys(firingZoneSeries).forEach(function (zi) {
+    var arr = firingZoneSeries[zi];
+    arr.forEach(function (p) { tempVals.push(p.c); actualVals.push(p.c); });
+    // Same reload-mid-run honesty as the autotune view -- a collected
+    // series starting well after tMin means this page was (re)loaded after
+    // the firing was already underway; see renderChartMeta's own doc
+    // comment on opts.partialZoneSeries.
+    if (arr.length && arr[0].t > tMin + CLIENT_ZONE_SAMPLE_MIN_INTERVAL_S * 2) partialZoneSeries = true;
+  });
   var tMinV = tempVals.length ? Math.min.apply(null, tempVals) : 0;
   var tMaxV = tempVals.length ? Math.max.apply(null, tempVals) : 1;
   if (tMaxV === tMinV) tMaxV = tMinV + 1;
   tMinV -= (tMaxV - tMinV) * 0.05; tMaxV += (tMaxV - tMinV) * 0.05;
 
   // Same freezing-axis-floor clamp as drawIdleDots (see that function's
-  // comment for the full reasoning): only the recorded ACTUAL trace counts as
+  // comment for the full reasoning): only genuine sensor readings count as
   // "a real reading" for deciding whether the axis is allowed to dip below
   // 0degC -- the planned/duty series are config/plan, not sensor
   // data, and must never be what forces (or excuses clamping away) a
@@ -1755,22 +2190,81 @@ function drawHistoryChart(rows) {
   ctx.fillText('1.0', cssW - padR + 4, padT + 8);
   ctx.fillText('0.0', cssW - padR + 4, padT + plotH);
 
-  function drawLine(key, yFn, color) {
+  // Per-zone duty (2026-09-01 follow-up): prefer the representative zone's
+  // OWN commanded duty (firingDutySeries, client-collected from
+  // /api/profile_exec's per-zone duty) over the old whole-kiln aggregate
+  // history.csv 'duty' column -- see firingDutySeries's own doc comment for
+  // why per-zone was chosen over drawing all three zones' duty (clutter)
+  // and over the old aggregate (a whole-kiln number next to one zone's
+  // temperature line was arguably the more confusing pairing). Falls back
+  // to the recorded aggregate whenever firingDutySeries is empty -- older
+  // firmware that predates per-zone duty in /api/profile_exec, or the
+  // handful of seconds right after a run starts / a page reload before the
+  // first client sample lands -- so the chart is never left with NO duty
+  // line at all just because the preferred source hasn't produced a point
+  // yet. Continuous (not the autotune chart's stepped rendering): PID/
+  // BANGBANG duty output is genuinely continuous, unlike autotune's
+  // deliberately-held step-test duty.
+  var dutyLabel = 'duty (whole-kiln aggregate, recorded)';
+  if (firingDutySeries.length) {
+    dutyLabel = (repZone >= 0 ? zoneName(repZone) : 'zone') + ' duty';
+    ctx.beginPath();
+    var dStarted = false;
+    firingDutySeries.forEach(function (p) {
+      var px = x(p.t), py = yDuty(p.duty);
+      if (!dStarted) { ctx.moveTo(px, py); dStarted = true; } else { ctx.lineTo(px, py); }
+    });
+    ctx.strokeStyle = SERIES_COLORS.duty; ctx.lineWidth = 1.5; ctx.stroke();
+  } else {
+    ctx.beginPath();
+    var aStarted = false;
+    rows.forEach(function (r) {
+      if (isNaN(r.duty)) { aStarted = false; return; }
+      var px = x(r.t), py = yDuty(r.duty);
+      if (!aStarted) { ctx.moveTo(px, py); aStarted = true; } else { ctx.lineTo(px, py); }
+    });
+    ctx.strokeStyle = SERIES_COLORS.duty; ctx.lineWidth = 1.5; ctx.stroke();
+  }
+
+  // Per-zone temperature traces (2026-09-01 follow-up). Thinner than the
+  // non-zone series (1.3 vs 1.5) DELIBERATELY: tonight's real run has all
+  // three zones tracking within a few degrees of each other (targets
+  // 45C/60C, zones starting within ~7C of one another), which is exactly
+  // the case a thick line width turns into one indistinguishable band --
+  // colour separation (chColor, the same mapping the channel list/idle
+  // dots/autotune chart use) plus a slightly thinner stroke keeps close
+  // lines readable as separate lines instead of merging visually.
+  var zoneItems = [];
+  function drawZoneLine(zi, pts, label) {
+    if (!pts.length) return;
     ctx.beginPath();
     var started = false;
-    rows.forEach(function (r) {
-      var v = r[key];
-      if (isNaN(v)) { started = false; return; }
-      var px = x(r.t), py = yFn(v);
+    pts.forEach(function (p) {
+      if (isNaN(p.c)) { started = false; return; }
+      var px = x(p.t), py = yTemp(p.c);
       if (!started) { ctx.moveTo(px, py); started = true; } else { ctx.lineTo(px, py); }
     });
-    ctx.strokeStyle = color; ctx.lineWidth = 1.5; ctx.stroke();
+    ctx.strokeStyle = chColor(zi); ctx.lineWidth = 1.3; ctx.stroke();
+    zoneItems.push({ color: chColor(zi), label: label });
   }
-  drawLine('duty', yDuty, '#3a9');
-  drawLine('actual', yTemp, '#e63');
+  if (repZone >= 0) {
+    drawZoneLine(repZone, rows.map(function (r) { return { t: r.t, c: r.actual }; }),
+      zoneName(repZone) + ' (recorded, survives reload)');
+  } else {
+    // No exec status yet to say which zone is representative (a fetch
+    // failure raced this draw) -- still show SOMETHING rather than a blank
+    // chart, generically labelled since the real zone identity is unknown
+    // this tick.
+    drawZoneLine(0, rows.map(function (r) { return { t: r.t, c: r.actual }; }), 'actual');
+  }
+  Object.keys(firingZoneSeries).forEach(function (ziStr) {
+    var zi = Number(ziStr);
+    var inMask = lastExecStatus && (lastExecStatus.zone_mask & (1 << zi));
+    drawZoneLine(zi, firingZoneSeries[zi], zoneName(zi) + (inMask ? ' (live)' : ' (live, not in this run)'));
+  });
 
-  // The single target series ("planned"), in #96c, drawn last so it sits on
-  // top of the solid duty line it may cross:
+  // The single target series ("planned"), drawn last so it sits on top of
+  // the solid duty/zone lines it may cross:
   //
   //   solid  over [tMin .. last recorded sample] -- r.target, the setpoint
   //          the executor really commanded at each of those samples. This is
@@ -1796,7 +2290,7 @@ function drawHistoryChart(rows) {
     if (!tStarted) { ctx.moveTo(px, py); tStarted = true; } else { ctx.lineTo(px, py); }
     lastTargetPt = { t: r.t, c: r.target };
   });
-  ctx.strokeStyle = '#96c'; ctx.lineWidth = 1.5; ctx.stroke();
+  ctx.strokeStyle = SERIES_COLORS.plan; ctx.lineWidth = 1.5; ctx.stroke();
 
   var futurePts = planPts.filter(function (p) {
     return !lastTargetPt || p.t > lastTargetPt.t;
@@ -1806,7 +2300,7 @@ function drawHistoryChart(rows) {
     var seq = lastTargetPt ? [lastTargetPt].concat(futurePts) : futurePts;
     ctx.save();
     ctx.setLineDash([6, 4]);
-    ctx.strokeStyle = '#96c'; ctx.lineWidth = 1.5;
+    ctx.strokeStyle = SERIES_COLORS.plan; ctx.lineWidth = 1.5;
     ctx.beginPath();
     seq.forEach(function (p, i) {
       var ppx = x(p.t), ppy = yTemp(p.c);
@@ -1819,7 +2313,7 @@ function drawHistoryChart(rows) {
   rows.forEach(function (r) {
     if (r.guard && r.guard !== 0) {
       var px = x(r.t);
-      ctx.strokeStyle = '#c22'; ctx.lineWidth = 1;
+      ctx.strokeStyle = SERIES_COLORS.guard; ctx.lineWidth = 1;
       ctx.beginPath(); ctx.moveTo(px, padT); ctx.lineTo(px, padT + plotH); ctx.stroke();
     }
   });
@@ -1828,9 +2322,9 @@ function drawHistoryChart(rows) {
   drawChartAxis(g, x, yTemp, tMin, tMax);
   if (belowFreezing) drawFreezingRef(g, yTemp, tMinV, tMaxV);
 
-  var actualMaxT = rows[rows.length - 1].t;
   renderChartMeta('running', {
-    tMin: tMin, actualMaxT: actualMaxT,
+    tMin: tMin, actualMaxT: actualMaxT, zoneItems: zoneItems, dutyLabel: dutyLabel,
+    partialZoneSeries: partialZoneSeries,
     totalPlannedS: (activePlan && activePlan.total_planned_s !== undefined) ? activePlan.total_planned_s : null,
     planShown: planShown, guardShown: guardShown,
     freezingShown: belowFreezing, faultColor: g.fault,
@@ -1902,7 +2396,7 @@ var autotuneSeriesZone = null;
 var wasAutotuneActive = false;
 
 // Bounded, per the "do not grow an array forever across a 4h run"
-// requirement. AUTOTUNE_ZONE_SAMPLE_MIN_INTERVAL_S decimates the raw 2s
+// requirement. CLIENT_ZONE_SAMPLE_MIN_INTERVAL_S decimates the raw 2s
 // poll cadence down to one point every 5s per zone -- denser than the
 // tested zone's own 10s device trace (so the coupling curves still read as
 // smooth), while a 4h run only ever produces 4*3600/5 = 2880 points per
@@ -1913,12 +2407,12 @@ var wasAutotuneActive = false;
 // hundred KB in the tab's heap, nowhere near a concern for a page that
 // already keeps a 2880-row history.csv-derived array in the running-chart
 // path.
-var AUTOTUNE_ZONE_SAMPLE_MIN_INTERVAL_S = 5;
-var AUTOTUNE_SERIES_MAX_POINTS = 3000;
+var CLIENT_ZONE_SAMPLE_MIN_INTERVAL_S = 5;
+var CLIENT_SERIES_MAX_POINTS = 3000;
 
 function pushCappedPoint(arr, point) {
   arr.push(point);
-  if (arr.length > AUTOTUNE_SERIES_MAX_POINTS) arr.shift();
+  if (arr.length > CLIENT_SERIES_MAX_POINTS) arr.shift();
 }
 
 // Client-clock estimate of the autotune run's own elapsed_s, between
@@ -1951,9 +2445,106 @@ function sampleAutotuneZoneTemps(data) {
     var arr = autotuneZoneSeries[ch.channel];
     if (!arr) { arr = autotuneZoneSeries[ch.channel] = []; }
     var last = arr[arr.length - 1];
-    if (last && (t - last.t) < AUTOTUNE_ZONE_SAMPLE_MIN_INTERVAL_S) return;
+    if (last && (t - last.t) < CLIENT_ZONE_SAMPLE_MIN_INTERVAL_S) return;
     pushCappedPoint(arr, { t: t, c: ch.temp_c });
   });
+}
+
+// ---------------------------------------------------------------------------
+// 2026-09-01 follow-up (owner, tested live against a running three-zone
+// firing, profile 7): "i am still only seeing one zone on the web graph".
+// The earlier multi-zone pass above only ever fed drawAutotuneChart() --
+// the FIRING chart (drawHistoryChart(), pollHistory()) was untouched and
+// still reads /api/history.csv, whose columns are exactly
+// elapsed_s,actual_c,desired_c,duty,guard -- ONE aggregate actual and ONE
+// aggregate duty for the whole kiln (dashboard_http.c's
+// history_csv_get_handler(), confirmed by reading it: profile_executor.c's
+// history ring is explicitly "scoped to a single representative zone", see
+// profile_executor.h's own comment on HISTORY_SAMPLE_PERIOD_S). There is no
+// per-zone column to plot three lines from -- this is a DATA problem, not a
+// drawing one, so the same client-side accumulation mechanism built for the
+// autotune view is generalised here rather than patched around: the
+// representative zone (lowest-indexed bit set in zone_mask, matching
+// profile_executor.h's own convention exactly, so this can never disagree
+// with what the firmware itself considers "the" zone history.csv already
+// tracks) keeps using history.csv's recorded 'actual' column -- it is the
+// one series that SURVIVES a page reload, since profile_executor.c's ring
+// buffer lives on the device, not in this tab. Every OTHER active zone gets
+// a client-collected trace here, exactly like autotuneZoneSeries, so this
+// data problem gets the same fix in both places instead of two different
+// half-solutions.
+function isFiringActive(state) {
+  return state === 'running' || state === 'paused';
+}
+
+// Mirrors profile_executor.h's own "the lowest-indexed active zone in the
+// run's zone_mask" rule for HISTORY_SAMPLE_PERIOD_S's ring buffer -- MUST
+// stay in sync with that rule, not an independent guess, or this page's
+// "which zone is history.csv actually showing" would silently disagree with
+// the firmware's own answer. -1 if no bit is set (idle/no run).
+function zoneMaskLowestBit(mask) {
+  for (var b = 0; b < 8; b++) { if (mask & (1 << b)) return b; }
+  return -1;
+}
+
+// Client-collected traces for every zone EXCEPT the representative one
+// (history.csv's 'actual' column already covers that one, and survives
+// reload -- duplicating it here at a different cadence would just be two
+// competing lines for the same zone, the same reasoning
+// sampleAutotuneZoneTemps skips the tested zone for). Keyed by channel
+// index, same shape and same CLIENT_ZONE_SAMPLE_MIN_INTERVAL_S/
+// CLIENT_SERIES_MAX_POINTS bounds as autotuneZoneSeries -- see that
+// constant's own doc comment for the memory-cost arithmetic, which applies
+// identically here.
+var firingZoneSeries = {};
+// Per-zone duty for the representative zone ONLY, not all three --
+// /api/profile_exec exposes per-zone duty (profile_exec_zone_status_t::
+// duty) and it was tried against all-active-zones-plotted, but with three
+// temperature lines already sitting close together (a few degrees apart,
+// per the owner's own numbers) three more duty lines was real clutter, not
+// signal, on one canvas. The representative zone's own duty was chosen
+// over the OLD single-kiln-aggregate history.csv 'duty' column (which this
+// replaces) because it is at least coherently "this one zone's actual
+// temperature AND this one zone's commanded duty", the same pairing the
+// autotune chart already draws -- a whole-kiln aggregate duty next to one
+// zone's temperature was arguably more confusing than clarifying. If a
+// future request wants all three zones' duty, the natural extension is a
+// per-zone toggle in the legend rather than always drawing three more
+// lines by default.
+var firingDutySeries = [];
+// Which zone_mask the two arrays above were collected for -- a changed
+// mask (a different run, even one that happens to start immediately after
+// the last one ended) means stale data, not a continuation.
+var firingSeriesZoneMask = null;
+var wasFiringActive = false;
+
+// Called from poll()'s consolidated /api/status + /api/profile_exec handler
+// (2s cadence, both already fetched together -- see poll()'s own comment)
+// with that tick's channel data and exec status. total_elapsed_s comes
+// straight from st (profile_exec_status_t's own real-seconds-since-start
+// field, see profile_executor.h) -- unlike the autotune case, no client-
+// clock interpolation is needed here because BOTH endpoints this function
+// needs are fetched in the same tick, not on independent cadences.
+function sampleFiringZoneTemps(data, st) {
+  if (!st || !isFiringActive(st.state)) return;
+  if (!data || !data.thermo_ready || !data.channels) return;
+  var repZone = zoneMaskLowestBit(st.zone_mask);
+  var t = st.total_elapsed_s || 0;
+  data.channels.forEach(function (ch) {
+    if (!ch.valid || ch.spi_failed || ch.channel === repZone) return;
+    var arr = firingZoneSeries[ch.channel];
+    if (!arr) { arr = firingZoneSeries[ch.channel] = []; }
+    var last = arr[arr.length - 1];
+    if (last && (t - last.t) < CLIENT_ZONE_SAMPLE_MIN_INTERVAL_S) return;
+    pushCappedPoint(arr, { t: t, c: ch.temp_c });
+  });
+  var repStatus = (st.zones || []).filter(function (z) { return z.zone === repZone; })[0];
+  if (repStatus) {
+    var dlast = firingDutySeries[firingDutySeries.length - 1];
+    if (!dlast || (t - dlast.t) >= CLIENT_ZONE_SAMPLE_MIN_INTERVAL_S) {
+      pushCappedPoint(firingDutySeries, { t: t, duty: repStatus.duty });
+    }
+  }
 }
 
 // trace is the parsed /api/autotune/trace.csv (elapsed_s from autotune
@@ -1999,7 +2590,7 @@ function drawAutotuneChart(st, trace) {
     // header comment and renderChartMeta's own doc comment on
     // opts.partialZoneSeries for why that is surfaced rather than silently
     // drawn as if it were the whole run.
-    if (arr.length && arr[0].t > tMin + AUTOTUNE_ZONE_SAMPLE_MIN_INTERVAL_S * 2) partialZoneSeries = true;
+    if (arr.length && arr[0].t > tMin + CLIENT_ZONE_SAMPLE_MIN_INTERVAL_S * 2) partialZoneSeries = true;
   });
   var minV = tempVals.length ? Math.min.apply(null, tempVals) : 0;
   var maxV = tempVals.length ? Math.max.apply(null, tempVals) : 1;
@@ -2023,7 +2614,7 @@ function drawAutotuneChart(st, trace) {
   if (planPts.length) {
     ctx.save();
     ctx.setLineDash([6, 4]);
-    ctx.strokeStyle = '#96c'; ctx.lineWidth = 1.5;
+    ctx.strokeStyle = SERIES_COLORS.plan; ctx.lineWidth = 1.5;
     ctx.beginPath();
     planPts.forEach(function (p, i) {
       var px = x(p.t), py = yTemp(p.c);
@@ -2041,7 +2632,7 @@ function drawAutotuneChart(st, trace) {
   // (tMax) so the line always reaches the right edge of whatever's plotted.
   if (autotuneDutySeries.length) {
     ctx.beginPath();
-    ctx.strokeStyle = '#888'; ctx.lineWidth = 1.5;
+    ctx.strokeStyle = SERIES_COLORS.duty; ctx.lineWidth = 1.5;
     var dx0 = x(autotuneDutySeries[0].t), dy0 = yDuty(autotuneDutySeries[0].duty);
     ctx.moveTo(dx0, dy0);
     for (var di = 1; di < autotuneDutySeries.length; di++) {
@@ -2275,12 +2866,32 @@ function poll() {
       // sampleAutotuneZoneTemps's own header comment) -- a no-op whenever no
       // autotune is actively running.
       sampleAutotuneZoneTemps(data);
+      // Same, generalised to a running/paused PROFILE FIRING (see
+      // sampleFiringZoneTemps's own header comment) -- a no-op whenever no
+      // firing is actively running. Needs `st` (zone_mask, total_elapsed_s,
+      // per-zone duty) alongside `data` (channel temps), both already in
+      // hand from this same Promise.all tick.
+      sampleFiringZoneTemps(data, st);
     }
     if (st) {
       renderExec(st);
       renderLastRun(st);
       renderProgress(st);
       var idleNow = !st || st.state === 'idle';
+      // New-run detection for the client-side firing series, same shape as
+      // pollAutotune()'s own newRun check -- either a fresh idle/done/
+      // faulted -> running transition, or a zone_mask that no longer
+      // matches what firingZoneSeries/firingDutySeries were collected for
+      // (a different run started with a different zone selection).
+      var firingNowActive = isFiringActive(st.state);
+      var firingNewRun = (firingNowActive && !wasFiringActive) ||
+        (st.zone_mask !== firingSeriesZoneMask);
+      if (firingNewRun) {
+        firingZoneSeries = {};
+        firingDutySeries = [];
+        firingSeriesZoneMask = st.zone_mask;
+      }
+      wasFiringActive = firingNowActive;
       var planId = idleNow ? undefined : st.profile_id;
       if (planId !== lastExecPlanId) {
         lastExecPlanId = planId;
@@ -2303,6 +2914,9 @@ function poll() {
     // refresh, and every other chart-mode decision, now happens exactly
     // once here regardless of which of data/st came back.
     updateChartMode(st);
+    // PID popup's own live actual/error display (see its own header
+    // comment) -- a no-op whenever no popup is open.
+    refreshPidPopupLive();
   });
   setTimeout(poll, 2000);
 }

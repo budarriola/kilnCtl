@@ -140,6 +140,14 @@
   table.coupling th, table.coupling td { border: 1px solid var(--border); padding: 0.3em 0.4em; text-align: center; }
   table.coupling th { background: var(--card-bg); }
   table.coupling td.diag { background: var(--card-bg); font-weight: bold; }
+  /* 2026-09-01 follow-up (owner, on the old dense-sentence rendering: "this
+     is far too messy... make it readable"): a real table, right-aligned
+     numbers so a metric compares down a column instead of needing to be
+     re-read left to right. Reuses table.coupling's base look (border/
+     padding/font-size) via the shared class list below rather than a
+     second near-duplicate ruleset. */
+  table.firingstats td.num, table.firingstats th.num { text-align: right; }
+  table.firingstats caption { text-align: left; font-weight: bold; margin-bottom: 0.3em; }
   table.coupling td.empty { color: var(--muted); }
   /* Verdict colouring is applied to the DIAGONAL only -- the off-diagonal
      elements of an RGA are fully determined by the diagonal for a 2x2 and
@@ -398,6 +406,37 @@ across a band twice this wide)</label>
      line. Hidden/empty whenever refusal is absent or "ok" -- a tune that
      never refused should show nothing extra here. -->
 <p id="atRefusal" class="verdict-bad" style="display:none;"></p>
+
+<h3>Firing quality</h3>
+<!-- 2026-09-01 follow-up: moved here from main_page.html (owner: "this is
+     far too messy, put this in the zones page and make it readable" --
+     screenshot showed a dense run-on sentence per zone). Per-zone tuning
+     detail belongs next to the PID parameters and the coupling matrix, not
+     on the live "what is the kiln doing right now" dashboard -- the
+     dashboard keeps only a one-line "worst zone" headline that links here.
+     Explained ONCE here, not per metric per zone, per the owner's own
+     instruction. -->
+<p class="hint">Live while a firing is RUNNING (the numbers are still
+accumulating -- read them as "so far", not final) and frozen once it ends
+(DONE/FAULTED). <b>Mean err</b> is SIGNED: positive means this zone ran hot
+(above its ramp/dwell target on average), negative means it ran cold.
+<b>Max over/under</b> are separate figures on purpose -- a zone that
+overshoots on the way up and undershoots settling into a dwell has two
+different failure modes, not one "error", and averaging them together would
+hide both. <b>IAE(norm)</b> is the integral of absolute error, normalized by
+this run's own duration and setpoint span so a short profile and a 12-hour
+one -- or a 50&deg;C bisque and a 300&deg;C glaze firing -- produce
+comparable numbers; it is the one figure worth comparing ACROSS different
+profiles, which is the entire reason it exists. <b>Ramp</b>/<b>dwell</b>
+columns split the same mean/max error by which kind of segment the zone was
+in when it happened, since chasing a moving ramp target and holding a fixed
+dwell target are different jobs.</p>
+<div class="table-scroll">
+<div id="firingStatsCurrent"><p class="empty">No firing this session yet.</p></div>
+</div>
+<div class="table-scroll">
+<div id="firingStatsHistory"></div>
+</div>
 
 <h3>Cross-zone coupling matrix (measured this session)</h3>
 <p class="hint">Filled in one row at a time: when zone i's autotune step test
@@ -1939,6 +1978,136 @@ function thermoCountForRga() {
  * needs spelled out (a completed-but-unaccepted run leaves the row exactly
  * as empty as one that was never run at all -- nothing here can tell those
  * two apart, and the progress note says so). */
+// 2026-09-01 follow-up: firing-quality table, moved here from
+// main_page.html's dense per-zone sentence (owner: "far too messy... make
+// it readable"). elapsed seconds -> "NmNNs", local to this page since
+// main_page.html's fmtDuration/zoneName helpers don't exist here and this
+// page's own convention (see the RGA verdict text above) is a bare
+// "Zone N", not a resolved custom name.
+function fmtStatsElapsed(s) {
+  if (s === null || s === undefined || isNaN(s)) return 'n/a';
+  s = Math.max(0, Math.round(s));
+  var m = Math.floor(s / 60), sec = s % 60;
+  return m + 'm' + (sec < 10 ? '0' : '') + sec + 's';
+}
+
+// One row per zone. `rows` is an array of { zone, stats (firing_stats
+// shape), gains: {kp,ki,kd} or null }. `caption` and `compact` (drops the
+// ramp/dwell columns for the history table, where space is tighter and the
+// mean/IAE/gains-in-force are the figures worth comparing run to run) are
+// both optional. Excluded-sample count gets its own fault-styled line
+// whenever any row has one > 0 -- "a run with many dropped samples must
+// read as untrustworthy" is a per-render requirement, not just a per-page
+// one, so both the current-run table and every historical one carry it
+// independently rather than relying on one warning somewhere on the page
+// to cover every table.
+function renderFiringStatsTable(rows, caption, compact) {
+  var anyExcluded = rows.some(function (r) { return r.stats && r.stats.excluded_sample_count > 0; });
+  var html = '';
+  if (anyExcluded) {
+    html += '<p class="verdict-bad">Samples excluded (invalid readings) during this run -- ' +
+            'the numbers below may not be trustworthy. See the Excluded column.</p>';
+  }
+  html += '<table class="coupling firingstats">';
+  if (caption) html += '<caption>' + caption + '</caption>';
+  html += '<tr><th>Zone</th><th class="num" title="Signed: positive = ran hot">Mean err</th>' +
+    '<th class="num" title="Largest overshoot, and when it happened">Max over (at)</th>' +
+    '<th class="num" title="Largest undershoot, and when it happened">Max under (at)</th>' +
+    '<th class="num" title="Integral of absolute error, normalized by duration and setpoint span -- the figure to compare across different profiles/runs">IAE(norm)</th>';
+  if (!compact) {
+    html += '<th class="num" title="Mean / max absolute error while ramping toward a target">Ramp mean/max</th>' +
+      '<th class="num" title="Mean / max absolute error while holding a dwell">Dwell mean/max</th>';
+  }
+  if (compact) {
+    html += '<th class="num" title="PID gains in force when this run completed">Kp/Ki/Kd</th>';
+  }
+  html += '<th class="num" title="Samples excluded as invalid, out of the total">Excluded</th></tr>';
+  rows.forEach(function (r) {
+    var fs = r.stats;
+    if (!fs || (!fs.sample_count && !fs.excluded_sample_count)) return;
+    var deg = window.kcUnit ? window.kcUnit.label() : '°C';
+    function d(c) {
+      if (c === null || c === undefined || isNaN(c)) return 'n/a';
+      var v = window.kcUnit && window.kcUnit.get() === 'f' ? c * 9 / 5 : c;
+      return (v >= 0 ? '+' : '') + v.toFixed(2);
+    }
+    html += '<tr><td>Zone ' + r.zone + '</td>' +
+      '<td class="num">' + d(fs.mean_error_c) + ' ' + deg + '</td>' +
+      '<td class="num">' + d(fs.max_overshoot_c) + ' ' + deg + ' (' + fmtStatsElapsed(fs.max_overshoot_elapsed_s) + ')</td>' +
+      '<td class="num">-' + d(fs.max_undershoot_c).replace('+', '') + ' ' + deg + ' (' + fmtStatsElapsed(fs.max_undershoot_elapsed_s) + ')</td>' +
+      '<td class="num">' + (isNaN(fs.iae_normalized) ? 'n/a' : fs.iae_normalized.toFixed(4)) + '</td>';
+    if (!compact) {
+      html += '<td class="num">' + d(fs.ramp_err_mean_c).replace('+', '') + ' / ' + d(fs.ramp_err_max_c).replace('+', '') + ' ' + deg + '</td>' +
+        '<td class="num">' + d(fs.dwell_err_mean_c).replace('+', '') + ' / ' + d(fs.dwell_err_max_c).replace('+', '') + ' ' + deg + '</td>';
+    }
+    if (compact) {
+      html += '<td class="num">' + (r.gains ? r.gains.kp.toFixed(4) + ' / ' + r.gains.ki.toFixed(5) + ' / ' + r.gains.kd.toFixed(4) : 'n/a') + '</td>';
+    }
+    html += '<td class="num">' + (fs.excluded_sample_count || 0) + ' / ' + ((fs.excluded_sample_count || 0) + (fs.sample_count || 0)) + '</td></tr>';
+  });
+  html += '</table>';
+  return html;
+}
+
+// Live/current run -- same /api/profile_exec zones[].firing_stats this page
+// never used to poll at all (main_page.html owned that data exclusively
+// before this move). Polled on the same cadence as the coupling matrix
+// below; also drives which profile_id the history table (below) asks for.
+var lastFiringProfileId = null;
+function pollFiringStatsCurrent() {
+  fetch('/api/profile_exec').then(function (r) { return r.json(); }).then(function (st) {
+    var el = document.getElementById('firingStatsCurrent');
+    if (!st || st.state === 'idle' || !st.zones || !st.zones.length) {
+      el.innerHTML = '<p class="empty">No firing this session yet.</p>';
+      return;
+    }
+    var rows = st.zones.map(function (z) { return { zone: z.zone, stats: z.firing_stats, gains: null }; });
+    var caption = (st.state === 'running' || st.state === 'paused')
+      ? 'Current run (still accumulating -- read as "so far")'
+      : 'Most recent run (' + st.state + ')';
+    el.innerHTML = renderFiringStatsTable(rows, caption, false);
+    if (st.profile_id !== lastFiringProfileId) {
+      lastFiringProfileId = st.profile_id;
+      pollFiringStatsHistory();
+    }
+  }).catch(function () {});
+}
+
+// Last-5-runs-per-profile history (/api/firing_history?profile_id=N,
+// PID_EXPANSION_PLAN.md Phase 7a-2/7a-3), newest first, WITH the PID gains
+// that were actually in force when each run completed -- comparing a
+// zone's IAE(norm) across runs next to the gains that produced it is the
+// whole point of persisting this. One compact table per record rather than
+// one giant table (a per-record caption carries the run's own duration/
+// start time, which a single flattened table would have to repeat on every
+// row instead).
+function pollFiringStatsHistory() {
+  var el = document.getElementById('firingStatsHistory');
+  if (lastFiringProfileId === null || lastFiringProfileId === undefined) {
+    el.innerHTML = '';
+    return;
+  }
+  fetch('/api/firing_history?profile_id=' + lastFiringProfileId).then(function (r) { return r.json(); })
+    .then(function (data) {
+      var records = (data && data.records) || [];
+      if (!records.length) {
+        el.innerHTML = '<p class="hint">No completed-and-persisted runs for this profile yet this boot.</p>';
+        return;
+      }
+      var html = '<p class="hint">Last ' + records.length + ' run(s) of this profile, newest first ' +
+        '(persisted at the end of each run -- lost on reboot, same as the coupling matrix above).</p>';
+      records.forEach(function (rec) {
+        var when = rec.run_started_unix_s ? new Date(rec.run_started_unix_s * 1000).toLocaleString()
+          : 'start time unknown (clock never synced)';
+        var caption = rec.profile_name + ' -- ' + when + ', ' + fmtStatsElapsed(rec.duration_s);
+        var rows = (rec.zones || []).filter(function (z) { return z.active; })
+          .map(function (z) { return { zone: z.zone, stats: z.stats, gains: { kp: z.kp, ki: z.ki, kd: z.kd } }; });
+        html += renderFiringStatsTable(rows, caption, true);
+      });
+      el.innerHTML = html;
+    }).catch(function () { el.innerHTML = ''; });
+}
+
 function pollCouplingMatrix() {
   fetch('/api/autotune/matrix').then(function (r) { return r.json(); }).then(function (m) {
     renderRga(m.rga);
@@ -1995,6 +2164,8 @@ function pollCouplingMatrix() {
 }
 setInterval(pollCouplingMatrix, 5000);
 pollCouplingMatrix();
+setInterval(pollFiringStatsCurrent, 5000);
+pollFiringStatsCurrent();
 
 function updateStepRuleDesc() {
   var rule = document.getElementById('atStepRule').value;
