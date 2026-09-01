@@ -1,1364 +1,187 @@
-# PID Expansion Plan — control-algorithm choice per zone/firing
-
-> **Status:** Phases 1, 2, 3, 3b and 4 are landed and wired end to end —
-> `pid_fuzzy` is called from `profile_executor.c` every tick a zone runs in
-> PID_FUZZY mode, the mode is selectable from `zones_page.html`, and
-> cross-zone coupling feedforward runs in `zone_feedforward()` with measured
-> coefficients persisted by autotune. **Not** landed: parts of Phase 5 (the
-> zone-settings-inheritance UI has no negative tests yet; backup export of
-> the four new fields has no test). See §4 for exact status per item, and
-> `PID_CONTROL.md`'s "Cross-zone coupling feedforward" section for what
-> Phase 3b actually built.
-> Companion to `PID_CONTROL.md` (what is built today) and
-> `COMMISSIONING_UX.md` (the UI-design conventions this plan follows: ask
-> only what cannot be derived, show provenance, never silently overwrite a
-> hand-tuned value).
->
-> §4 tracks progress with checkboxes: `[x]` is in the tree, `[ ]` is
-> outstanding. Phase 0 is the foundation that predates this plan.
-
-## 0. The problem
-
-Every firing loads a different mass/arrangement of pots. That changes the
-kiln's thermal time-constant (`tau`) and gain (`K`) — the two numbers a PID
-loop is tuned against — every single time. A fixed, hand-tuned PID is tuned
-for one load and wrong for the next. `PID_CONTROL.md` already documents this
-codebase's answer to *identification*: `pid_autotune.c` fits a first-order-
-plus-dead-time (FOPDT) model (`K`, `tau`, `L`) from a step-response test and
-proposes SIMC gains from it, accepted only by an explicit
-`POST /api/autotune/accept`. (The separate relay-feedback path proposes ZN /
-Tyreus-Luyben gains from `{Ku, Tu}` and deliberately writes **no** model —
-the FOPDT path refuses ZN/TL and the relay path refuses to write `{K, tau, L}`,
-because neither rule set is derivable from the other's data. §1a checks that
-split against the literature.) What this plan adds is a considered choice of
-*which control algorithm* that identified model should feed, presented as an
-operator-facing option next to the existing Kp/Ki/Kd fields on
-`zones_page.html`, backed by a literature read of ten papers.
-
-The papers themselves are **cited, not vendored** — `/docs/research/` is
-gitignored, so the filenames in §1's table name a local working copy rather
-than something in the repo. `CREDITS.md` carries the citation for each paper
-that informed a recommendation, with a URL where one is known.
-
-## 1. What the ten papers say
-
-| # | Paper (file) | Algorithm | Problem addressed | Reported result |
-|---|---|---|---|---|
-| 1 | *Berner, PhD thesis* (`ThesisJosefinBerner.pdf`) | Relay-feedback autotuning with normalized time delay; decentralized MIMO identification | Automatic identification of process dynamics, including coupled/interacting loops, without a manual step test | Improved relay-autotune identification accuracy over the classical Åström–Hägglund method; decentralized relay experiments converge and separate coupled loops (Fig. 2) |
-| 2 | Nichols Philips et al., *Application of Auto Tuner Fuzzy PID Controller* (`Application_of_Auto_Tuner_Fuzzy_PID_Cont.pdf`) | Cascade PID with fuzzy logic continuously re-tuning each PID term | Furnace temperature control that must stay good when the process transfer function itself changes (i.e. the plant is not fixed) | Fuzzy cascade controller has better rise/overshoot/undershoot/settling time and adapts to a *changed* process model better than a fixed cascade PID (simulated, MATLAB/Simulink) |
-| 3 | *Design and simulation of self-tuning PID* (`Design_and_simulation_of_self_tuning_PID.pdf`) | Self-tuning PID-type fuzzy adaptive controller for a two-zone HVAC system | Multi-zone temperature control with different zone properties and a variable flow rate | Self-tuning fuzzy PID beat both classical PID and fuzzy-PD on settling time and steady-state error across two zones |
-| 4 | *Fractional-Order PID Controllers for Temperature [Systems]* (`Fractional_Order_PID_Controllers_for_Tem.pdf`) | Fractional-order PID (FOPID), review | Heating/temperature systems with external disturbance, model uncertainty and non-linearity | Review concludes FOPID gives better robustness, stability and flexibility than integer-order PID across ambulance, induction-heating and bioreactor case studies it surveys; notes classical PID is still more flexible on raw time-spec response |
-| 5 | *General-type industrial temperature system[s]* (`General_type_industrial_temperature_syst.pdf`) | Fuzzy fractional-order PID (FFuzzy PID) — gains updated online from fractional-order fuzzy rules (Mittag-Leffler membership functions) | Temperature systems with model uncertainty, noise, and **random delay** | Better dynamic performance and robustness to internal/external disturbance than fixed FOPID, verified only in simulation |
-| 6 | Tan et al., *Hybrid System based Fuzzy-PID Control Sche[me]* (`Hybrid_System_based_Fuzzy_PID_Control_Sc.pdf`) | Q-learning + genetic-algorithm hybrid to auto-optimize a fuzzy-PID's membership functions | Removing the need for an experienced operator to hand-tune fuzzy membership functions by trial and error, for an exothermic (runaway-prone) batch reactor | Lower undershoot/overshoot than a conventionally-tuned fuzzy-PID even under an introduced disturbance |
-| 7 | *Implementation of Fuzzy PID Controller o[n]* (`Implementation_of_Fuzzy_PID_Controller_o.pdf`) | Fuzzy PID over a system-identified ARX model (MATLAB System Identification Toolbox) of a real PT326 heating rig | Removing trial-and-error PID tuning for a physical heating process | Lower RMSE, better rise/settling time than conventional PID, validated against a real identified plant model (not just a textbook transfer function) |
-| 8 | Güven, *Comprehensive Optimization of PID Controller Parameters for DC Motor Speed* (`Optim Control Appl Methods - 2024...pdf`) | Metaheuristic optimizers (Grey Wolf, JAYA, Golden-Jackal, Jellyfish/modified-Jellyfish) searching PID gains offline | DC motor speed control (not thermal) — global gain optimization against a simulated plant | Modified Jellyfish (mJS) gives the smallest overshoot and best settling time (1.18 s) among the algorithms compared, confirmed by Friedman/Wilcoxon/Kruskal/ANOVA significance tests; GWO was unstable on one plant |
-| 9 | *Research on temperature control with num[erical methods]* (`Research_on_temperature_control_with_num.pdf`) | Comparison of two-position (hysteresis), self-tuned PID, and manually-tuned PID (Ziegler-Nichols step response, Cohen-Coon, and Ziegler-Nichols tuning-rule methods) | Which classical tuning rule is best for an indirect-heat resistance furnace (electric, 1 kW/230 V) | Cohen-Coon tuning gave the best experimental temperature control of the three PID tuning methods tried; both beat plain hysteresis control |
-| 10 | *Tuning Optimization of Hybrid controller* (`Tuning_Optimization_of_Hybrid_controller.pdf`) | Hybrid PI + feed-forward controller, tuning-optimized | Shell-and-tube heat-exchanger outlet temperature control under external disturbance | 81% improvement in overshoot and 76% improvement in settling time versus a classical PI controller, zero steady-state error |
-
-## 1a. What the literature says about the methods already implemented here
-
-This section checks the six identification/tuning methods `pid_autotune.c`,
-`autotune_engine.c` and `pid.c` already implement (per `PID_CONTROL.md`)
-against the broader control-engineering literature, separately from the ten
-papers in §1 (which argue for or against adding a *new* algorithm on top).
-Citations here use `[Wn]` to keep them out of the `[1]`-`[10]` paper numbering.
-
-**FOPDT step-response fitting, two-point 28.3%/63.2% method.** This is
-Smith's method [W2] — one of several two-point procedures for reading a
-time-constant and dead-time off an S-shaped open-loop step response, the
-others being (35%/85%) and (33%/70%) pairs. The literature treats the exact
-percentage pair as a minor choice, not a correctness question: using more
-than two points (28.3/50/63.2/70) gives redundancy against a noisy trace, but
-the two-point form this codebase uses is standard and well characterized, not
-an ad hoc shortcut. Its known weakness is exactly the one `PID_CONTROL.md`
-already calls out — the fit is only as good as the underlying assumption
-that the plant really is first-order-plus-dead-time, and a step test forces
-the plant through a large, slow excursion to get it.
-
-**Relay-feedback identification (Åström–Hägglund).** Originated in
-Åström & Hägglund's 1984 paper generating sustained relay oscillation as an
-alternative to continuous-cycling (classical Ziegler-Nichols) identification
-[W3][W4]. It recovers the ultimate gain/period pair (`Ku`, `Tu`) from the
-relay's oscillation amplitude and hysteresis band — the exact formula
-`PID_CONTROL.md` documents. The literature's consistent praise is that it is
-"one of the simplest and most robust auto-tuning techniques," in wide
-industrial use for decades [W3], because it identifies the process's
-critical point with one bounded, self-limiting test instead of a slow open
-step. Its known trade-off against step/FOPDT identification: it only yields
-one frequency-response point (`Ku`, `Tu`), not a full `{K, tau, L}` model —
-which is exactly why this codebase's own comment ("one frequency-response
-point does not determine a FOPDT model") declines to write a plant model
-from a relay result, matching how the technique is used elsewhere.
-
-**SIMC tuning rule (Skogestad).** SIMC ("Skogestad IMC") derives PID gains
-from a FOPDT model via a single tuning parameter, the closed-loop time
-constant `lambda`, and the literature calls out its "smooth" tuning intent —
-trading a controllable amount of speed for robustness — as its main
-differentiator from Ziegler-Nichols-style rules, which were designed around
-quarter-amplitude decay (i.e., a controller that is expected to ring) [W1].
-The `lambda = 3*L` choice this codebase treats as "robust" for a kiln is the
-same territory SIMC's own literature describes as favoring smooth, non-
-oscillatory response over aggressive disturbance rejection — the right side
-of that trade for a slow, high-dead-time thermal plant where any overshoot
-risks the ware. The searches found no source specifically validating
-`lambda = 3*L` as a named constant (Skogestad's own default is `lambda = tau`
-or `lambda = theta` in different treatments), so that specific multiplier
-should be read as this codebase's own conservative choice within SIMC's
-framework, not a cited external result.
-
-**Ziegler-Nichols and Tyreus-Luyben, from `{Ku, Tu}`.** Both are documented,
-long-standing rules for converting relay/continuous-cycling data into PID
-gains. The comparison literature is consistent: Tyreus-Luyben is a
-deliberately less aggressive modification of Ziegler-Nichols, trading
-response speed for reduced overshoot and better robustness margins, while
-classical Ziegler-Nichols targets quarter-amplitude decay and is
-correspondingly more oscillatory [W5]. `PID_CONTROL.md`'s note that "ZN
-targets quarter-amplitude decay... which on a kiln at 1200°C costs the
-firing" is exactly what the literature would predict — ZN is the wrong
-default for a plant where oscillation is expensive, and offering
-Tyreus-Luyben alongside it (as the code already does, non-default) is the
-literature-consistent way to expose the trade-off rather than hide it.
-
-**Model-based feedforward duty term.** Feedforward-plus-PID for FOPDT
-processes is a standard structure in the literature: a feedforward term
-computed from the identified model handles the known, predictable part of
-the control effort (here, the duty needed to hold or ramp to a setpoint),
-leaving feedback to correct only the model's error [W6]. This matches
-`PID_CONTROL.md`'s own framing ("puts the actual curve on the desired curve
-instead of a fixed offset below it, leaving the PID to correct only model
-error") closely. The literature's standard caution applies directly here
-too: a feedforward term is only as trustworthy as the model it is computed
-from, which is why gating it on "off unless that zone has an identified
-model" and clamping the sum rather than the feedforward term alone (as this
-codebase does) is the conservative, literature-consistent choice rather than
-a shortcut.
-
-**Relative Gain Array (RGA) for cross-zone coupling.** RGA is the classical
-method for choosing input-output pairings and quantifying loop interaction
-in multivariable control, computed here exactly as the textbook formula
-prescribes — `RGA = K .* (K^-1)^T` from a steady-state gain matrix [W7][W8].
-Its best-documented limitation is precisely the one relevant to a kiln: RGA
-is a **steady-state** measure computed from static gains, so on a genuinely
-nonlinear plant (as a radiatively-coupled multi-zone kiln is, since
-radiative loss scales with T^4) a single RGA computed at one operating point
-does not necessarily hold at another — the literature's answer is either
-computing RGA separately per operating region, or extensions like dynamic
-RGA (using transfer functions instead of static gains) or the nonlinear
-block RGA variants built for exactly this case [W8]. `PID_CONTROL.md`
-already reflects this correctly: the matrix is left unpopulated and unused
-until real bench data exists rather than approximated, and the code refuses
-an incomplete or singular matrix instead of guessing — consistent with the
-literature's caution that an RGA computed from a bad or unrepresentative
-gain estimate is worse than no RGA at all.
-
-**Where this checked out, and where it didn't.** Five of the six methods are
-described in `PID_CONTROL.md` in a way that matches the literature closely,
-including the reasoning behind non-default choices (relay identification not
-producing a plant model, ZN not being the default rule, RGA staying
-unpopulated). The one item worth flagging: no source found here specifically
-names `lambda = 3*L` as a standard SIMC default — Skogestad's published
-defaults use `lambda = tau` (fast) or `lambda = theta`/dead-time-based
-variants depending on the source, so `3*L` should be treated as this
-codebase's own conservative parameter choice inside the SIMC framework, not
-as a directly cited external constant, and `PID_CONTROL.md`/this plan should
-not imply otherwise.
-
-**Web references**
-
-- [W1] The SIMC Method for Smooth PID Controller Tuning (Skogestad) — https://skoge.folk.ntnu.no/publications/2012/skogestad-improved-simc-pid/PIDbook-chapter5.pdf
-- [W2] Classic Methods for Identification of First Order Plus Dead Time (FOPDT) Systems — https://towardsai.net/p/artificial-intelligence/classic-methods-for-identification-of-first-order-plus-dead-time-fopdt-systems
-- [W3] Relay feedback auto-tuning of process controllers — a tutorial review — https://www.researchgate.net/publication/222514888_Relay_feedback_auto-tuning_of_process_controllers_-_a_tutorial_review
-- [W4] Åström-Hägglund relay feedback test (overview figure/summary) — https://www.researchgate.net/figure/Astrom-Hagglund-relay-feedback-test_fig1_352973090
-- [W5] Mastering Tyreus-Luyben Tuning — https://www.numberanalytics.com/blog/tyreus-luyben-tuning-guide
-- [W6] Feedforward Control (Dynamics and Control) — https://apmonitor.com/pdc/index.php/Main/FeedforwardControl
-- [W7] Relative gain array — Wikipedia — https://en.wikipedia.org/wiki/Relative_gain_array
-- [W8] Relative Gain Array — an overview (ScienceDirect Topics) — https://www.sciencedirect.com/topics/engineering/relative-gain-array
-
-## 2. Recommendation
-
-**Recommend two algorithms, layered rather than competing, both already
-close to what `PID_CONTROL.md` has built:**
-
-### 2a. Primary: keep and lean harder on step/relay-test autotuning + feedforward PID (papers [1], [9], [10])
-
-This codebase's `pid_autotune.c`/`autotune_engine.c` already does the
-*identification* step [1] argues for and [9] tunes against: a step test fits
-`{K, tau, L}` fresh, per zone, per firing — which is precisely how "unknown
-thermal mass at firing start" gets solved. (Note the division of labour
-precisely: [1] is about relay-feedback *identification*, and the relay path
-here yields `{Ku, Tu}` only, never a model — see §0 and §1a; [9] compares
-*tuning rules* applied to an already-identified furnace model, so it validates
-the rule menu, not the identification method. Neither paper validates the
-other's half.) It needs no sensor beyond the thermocouples already on every
-zone, and it does not need online re-identification, because the *load* is
-fixed once the kiln is closed — it only needs re-identifying between firings.
-
-**Caveat this recommendation depends on, stated plainly:** "the plant is
-constant during a firing" is true of the *load*, not of the *plant gain*. A
-kiln's dominant heat-loss term is radiative and scales with `T^4`, so the
-effective `K` at 200 °C and at 1250 °C are not the same number, and a single
-FOPDT fit taken during a low-temperature step test will under-predict the duty
-needed near cone temperature. This is a real limitation of the primary
-recommendation, it is orthogonal to the load-mass problem, and it is the
-strongest argument for the §2b layer — more so than cross-zone coupling is.
-`PID_CONTROL.md` already names the same gap ("one temperature band per zone,
-no gain scheduling").
-
-[9]'s finding that Cohen-Coon step-response tuning beat plain Ziegler-Nichols
-on a real resistance furnace argues for exposing tuning-rule choice (the code
-already computes SIMC from FOPDT and ZN/Tyreus-Luyben from relay data —
-Cohen-Coon is a small, well-defined addition on the FOPDT path, see §4).
-**But note the tension:** Cohen-Coon descends from the same quarter-amplitude-
-decay design target as Ziegler-Nichols and is the more aggressive rule of the
-two on offer here, which sits awkwardly against §1a's argument for SIMC
-(smooth, non-oscillatory) on a plant where overshoot costs the ware. [9]'s
-result is one furnace, judged on tracking performance, not on overshoot risk
-to a load. Cohen-Coon should therefore ship as a *selectable third rule with
-SIMC remaining the default*, and the choice between them settled by bench data
-on this kiln — not by promoting Cohen-Coon on the strength of [9] alone.
-
-[10]'s 81%/76%
-overshoot/settling-time improvement from adding a feed-forward term over plain
-PI matches this codebase's existing model-based feedforward
-(`u_ff` in `PID_CONTROL.md` §"Feedforward") almost exactly — the plan here is
-to make sure every operator who accepts an autotune result also gets the
-feedforward term switched on (it already is, automatically, once a model is
-accepted), and to surface that fact on the UI so it is not a hidden win.
-
-**Why not adaptive/self-tuning-in-the-loop control (continuously re-estimating
-`K`/`tau` while firing) as the primary recommendation:** the papers that show
-its value ([2], [3], [6]) do so on plants whose dynamics genuinely change
-*during* a run (a furnace whose transfer function itself changes, a batch
-reactor's exothermic runaway). A kiln loaded once and closed does not — its
-thermal mass is fixed for the whole firing. Re-identifying every tick adds
-real engineering risk (an in-loop estimator can diverge, especially near a
-kiln's dead-time-heavy dynamics) for a problem this kiln does not have. The
-"unknown at firing start, constant during firing" framing calls for a
-good *identification-before-firing* step, not continuous re-identification.
-
-### 2b. Secondary, opt-in: Fuzzy-PID with fixed rule table (papers [2], [7]; multi-zone evidence from [3])
-
-`PID_CONTROL.md` already flags a real, open gap: "one temperature band per
-zone (no gain scheduling)" and a cross-zone-coupling matrix (RGA) that is
-built but never populated because no thermal-cycle hardware has run yet.
-
-What each cited paper actually supports, kept distinct rather than pooled:
-[2] shows a fuzzy layer holding performance when the *process transfer
-function itself changes* — the closest published analogue to this kiln's
-`T^4` gain variation across a firing, and the primary justification for this
-mode. [7] shows a fuzzy PID beating a conventional one on a **real**
-identified heating rig (not just a textbook transfer function), which is what
-makes the approach credible rather than simulation-only. [3] is the only
-multi-zone result in the set, and it is the weakest support of the three here:
-its two zones are independently ducted, so it shows "per-zone fuzzy adjustment
-works in a multi-zone installation", not "fuzzy adjustment solves zone
-coupling". Coupling is handled separately in §2c and should not be claimed as
-a [2]/[7] result.
-
-A zone whose element ages and drifts, and the temperature-dependent gain
-above, are the case [2] and [7] argue for: a small fuzzy-rule table nudging Kp/Ki/Kd around the
-autotune-fitted base gains, using nothing but the same error/error-rate
-signals the PID loop already computes. It is implementable in plain C: a
-9-25-rule Mamdani table over triangular membership functions and a lookup
-plus linear interpolation is a few hundred lines, no floating-point library
-beyond what `pid.c` already uses, and it needs zero additional sensors. It
-should ship **as a second selectable mode, not a replacement** for classic
-PID — the papers uniformly compare it *against* a classic PID baseline and
-show an improvement, they do not show classic PID becoming *wrong*.
-
-### 2c. Cross-zone thermal coupling
-
-This kiln has multiple zones that are not thermally independent — heat from
-one zone's element bleeds into its neighbors, so a controller tuned per zone
-in isolation can fight its neighbor or hunt. `PID_CONTROL.md` already has a
-coupling matrix (RGA — relative gain array) built but unpopulated, waiting on
-real thermal-cycle hardware data.
-
-None of the ten papers directly solve *N interacting heating zones in one
-vessel*. The closest are [1] (decentralized relay-feedback identification
-that explicitly separates coupled loops during autotune — this is an
-**identification-time** answer: it tells you how strongly zone A's relay test
-disturbs zone B's reading, which is exactly what the RGA matrix wants to be
-populated with) and [3] (self-tuning fuzzy PID across a two-zone system, but
-its zones are independently ducted, not radiatively coupled the way kiln
-zones are — its result supports "per-zone fuzzy adjustment is viable," not
-"here is how to decouple two kiln zones").
-
-**Recommended extension (this project's own; structure is textbook, the
-kiln-specific application is not attributed to any paper):** treat a neighbor
-zone's temperature as a **measured disturbance fed to the feedforward term**,
-not as an adjustment to the feedback gains.
-
-That placement is the whole point, and an earlier draft of this plan got it
-wrong by proposing a neighbor-driven bias on `Ki` instead. Two reasons the
-gain-bias form is unsound:
-
-1. A neighbor's heat bleed *already shows up* in this zone's own measured
-   error — that is what "coupled" means. Adding a second path that reacts to
-   the same physical event through the integral gain double-counts it, and
-   raising `Ki` in response to a disturbance is the classic route to integral
-   windup on a plant with this much dead time.
-2. Measured disturbances are precisely the case feedforward exists for [W6],
-   and it is the structure [10] measured an 81%/76% overshoot/settling-time
-   improvement from on a heat exchanger — a *thermal* plant with an external
-   disturbance, which is the closest published analogue in this set. The
-   feedback gains should stay a function of this zone's own error, as in every
-   fuzzy-PID paper cited in §2b.
-
-Concretely: the existing feedforward term (computed today from `{K, tau}`
-alone) gains an additive coupling contribution `-c_ij * (T_j - T_j_setpoint)`
-for the strongest-coupled neighbor `j`, where `c_ij` is a per-pair coupling
-coefficient measured by the *existing* autotune machinery — `autotune_engine.c`
-already samples every configured zone during a step test specifically to fill
-a row of the coupling matrix, so the measurement path exists and is unused. A
-neighbor running hot subtracts duty from this zone; a neighbor running cold
-adds it; a neighbor on target changes nothing. This is a bounded, sign-checked
-scalar on a term the code already computes and already clamps, not a new
-control loop, and it degrades to exactly today's behavior when `c_ij = 0`, a
-zone has no measured coupled neighbor, or no model is identified (feedforward
-is already gated off in that last case).
-
-Full MIMO decoupling (inverting the RGA gain matrix to cancel all cross terms
-at once) stays deferred: §1a's [W8] limitation applies directly — an RGA is a
-steady-state measure and this plant's gains move with `T^4`, so a decoupler
-designed against a single-operating-point matrix would be inverting a number
-that is only correct at one temperature. One measured feedforward coefficient
-per adjacent pair degrades gracefully when it is wrong; a matrix inversion
-does not.
-
-**Explicitly not recommended:**
-
-- **Fractional-order PID / fuzzy-FOPID** ([4], [5]) — real robustness gains
-  in the literature, but fractional-order controllers require approximating
-  a non-integer derivative/integral (an IIR filter bank, e.g. Oustaloup), add
-  two fractional-order exponents (conventionally written `lambda` and `mu` —
-  no relation to SIMC's closed-loop time constant `lambda` in §1a; the symbol
-  collision is the literature's, not this document's) that nobody on this
-  project has a settled way to pick, and the papers' own headline case studies (ambulance climate
-  control, bioreactors) are not thermally analogous to a kiln's very slow,
-  very high dead-time dynamics. The complexity is not justified by [4]'s own
-  admission that "the standard PID controller is more flexible to time
-  specification values."
-- **Metaheuristic offline gain search (GA/Q-learning/Jellyfish/etc.)**
-  ([6], [8]) — [8] is not even a thermal system (DC motor speed) and both
-  [6] and [8] run their optimizer offline, against a simulated plant, for
-  many generations/iterations — exactly the kind of workload an ESP32-S3
-  cannot run online, and this project has no simulated kiln plant accurate
-  enough (per `PID_CONTROL.md`'s own "untested against a real kiln" caveats
-  on the FOPDT fit) to trust an optimizer's convergence against it. [6]'s
-  actual *useful* contribution — using a search to tune fuzzy membership
-  functions instead of hand-picking them — is worth revisiting only once
-  §2b's fuzzy mode has real fielded data to search against.
-
-## 3. UI plan: per-zone control-algorithm dropdown on Thermocouples & Zones
-
-### 3.1 Where it goes
-
-`App/drivers/zones_page.html` now has, per zone, a control-mode select
-including the fuzzy option (`modeHtml`, line ~548: `<option value="3">PID —
-fuzzy-adjusted</option>`) and a fuzzy tuning panel (`.fuzzyPanel`, lines
-~599-606: rule-strength table plus the "Adjustment strength" number input,
-default 30) alongside the classic PID Kp/Ki/Kd block (lines ~592-598), plus
-the read-only fitted-model display and the page-level "PID Autotune" /
-relay-feedback / coupling-matrix sections.
-This plan **extends the existing mode select** rather than adding a
-second control, so there is exactly one place an operator decides "how does
-this zone's heat get commanded":
-
-```
-Control mode:  [ Off ▾ ]
-               [ Bang-bang (simple on/off) ]
-               [ PID — classic ]
-               [ PID — fuzzy-adjusted ]  ← NEW
-```
-
-Selecting a PID variant (classic or fuzzy) reveals a tuning panel below the
-dropdown, swapped by JS on `change` exactly the way `renderTcType()` and the
-other zone-row builders already conditionally render blocks in this file —
-no new page, no new endpoint round-trip to switch which panel is visible.
-
-### 3.2 Dropdown option copy (operator-facing, no jargon)
-
-| Option | One-line description shown under it |
-|---|---|
-| **Off** | Never turns this zone's heater on. Use for a zone with nothing loaded this firing. |
-| **Bang-bang (simple on/off)** | Turns the heater fully on below your target and fully off above it, like a household oven. Simple and reliable, but the temperature will wobble a few degrees around the target. |
-| **PID — classic** *(default once tuned)* | Smoothly adjusts how hard the heater runs instead of just on/off, for a steadier climb and fewer overshoots. Needs tuning numbers for this kiln and load — use the Autotune button below, or enter numbers from a previous firing with a similar load. |
-| **PID — fuzzy-adjusted** | Same smooth control as classic PID, but nudges its own settings up or down while firing, so one set of tuning numbers works across the whole temperature range instead of only near where it was measured. Best for long firings that climb a long way from where Autotune ran, or a zone whose elements have aged since it was last tuned. Still needs an initial Autotune first — this mode adjusts around that starting point, it does not replace it. |
-
-(A future `PID — autotune pending` badge/state is out of scope here; the
-existing "not identified yet" read-only text already covers it.)
-
-### 3.3 Panel shown per selection
-
-- **Off / Bang-bang** — no tuning panel (bang-bang already shows only its
-  existing hysteresis note, unchanged).
-- **PID — classic** — exactly what exists today: Kp/Ki/Kd number inputs,
-  the read-only fitted-model line (`K`, `tau`, `L`, or "not identified yet"),
-  and the page-level Autotune section's Start/Accept/Abort flow, scoped to
-  this zone via the existing `populateAutotuneZones()` zone picker.
-- **PID — fuzzy-adjusted** *(new)* — the same Kp/Ki/Kd fields, now labeled
-  "base gains (from Autotune)" since the fuzzy layer adjusts around them
-  rather than replacing them, plus:
-  - A read-only 3x3 rule-strength summary — for each of {error large-negative
-    / near-zero / large-positive} × {error falling / steady / rising}, the
-    direction (↑/–/↓) each of Kp/Ki/Kd is nudged, rendered as a small table,
-    not raw membership-function numbers. Kiln operators are not fuzzy-logic
-    engineers; the value of showing this at all is "prove it isn't a black
-    box," not "let them retune it."
-  - One number input, **Adjustment strength** (0-100%, default a
-    conservative value e.g. 30%), scaling how far the fuzzy layer is allowed
-    to move Kp/Ki/Kd away from the base gains — the one knob worth exposing,
-    because "how aggressively should this deviate from what Autotune
-    measured" is a real, answerable question for an operator who has seen a
-    zone overshoot or lag.
-  - The same read-only fitted-model line and Autotune section as classic PID
-    (fuzzy mode does not change how the base gains are obtained).
-
-### 3.4 Why per-zone, not per-firing
-
-`zones_page.html` already scopes control mode, Kp/Ki/Kd, and the fitted model
-per zone (`zone_cfg_t`), because zones can legitimately need different modes
-— a bisque zone that just needs to hold a soak might run bang-bang while a
-glaze zone on a tight ramp runs PID. The new dropdown follows that existing
-grain rather than adding a firing-wide setting that would fight it.
-
-### 3.5 Zone settings default to "same as another zone", not to a blank form
-
-**The problem this solves.** Every zone row currently renders the full
-settings stack below its "Thermocouple type wired to channel *i*" line:
-control mode, calibration offset, Kp/Ki/Kd, max ramp, min rise rate, max/min
-temp, the guard parameters and the timing profile. On a 3-zone kiln that is
-three near-identical copies of a long form, and in practice the zones of one
-kiln want the *same* numbers — a potter tuning zone 0 and then hand-copying a
-dozen fields into zones 1 and 2 is being asked to do a transcription job the
-page should do, and every hand-copy is a chance to fumble one digit that
-later reads as a zone-specific quirk.
-
-**Required behavior.** Only the first zone shows the settings stack expanded
-by default. Each subsequent zone shows, in place of that stack, one dropdown:
-
-```
-Thermocouple type + settings:  [ Same as zone 0 ▾ ]
-                  [ Same as zone 2 ]        <- any other *enabled* zone
-                  [ Custom settings for this zone ]
-```
-
-- Default selection for zones 1..N is **"Same as zone 0"**.
-- The list offers every other enabled zone, not just zone 0 — a 4-zone kiln
-  where zones 2 and 3 are a matched pair should be able to say so.
-- Choosing "Custom settings for this zone" expands the full stack for that
-  zone, pre-filled with the values it was inheriting, so "custom" starts from
-  what was already in effect rather than from blanks or zeros.
-- A zone in "same as" mode shows the inherited values **read-only** beneath
-  the dropdown, not hidden entirely. `COMMISSIONING_UX.md`'s show-provenance
-  rule applies: an operator must be able to see what a zone will actually do
-  without changing a control to find out.
-
-**Scope of the inherited block: thermocouple type downward.** The dropdown
-covers `tc_type` as well as everything below it. In practice a kiln is wired
-with one thermocouple type throughout — all Type K, all Type S — so making
-the operator set it once per channel is the same transcription chore the rest
-of this section exists to remove.
-
-One implementation subtlety this creates, worth stating so it is not
-discovered later: `tc_type` is the one inherited field that is **per-channel,
-not per-zone**. The existing comment at `zones_page.html:551` is explicit
-("tc_type here means *channel i*, not *zone i*"), and `zone_cfg_t::tc_type`
-is documented the same way in `zones_http.c`. So "copy zone 0's settings to
-zone 1" means, for this field, *write zone 0's thermocouple type onto the
-channel zone 1 reads* — which is the intended and useful behavior, but it is
-a write to a different addressing space than the other copied fields. Two
-consequences to handle rather than trip over:
-
-- **CORRECTED 2026-08-30 — the first version of this bullet was wrong and
-  caused a real bug.** It said "apply the type to every channel in that
-  zone's mask", full stop. Implemented literally, that changed the meaning of
-  an existing control: the select is labelled "Thermocouple type wired to
-  channel *i*" and previously posted `z<i>_tctype` straight to channel *i*.
-  Fanning it out over `thermo_mask` means that whenever
-  `thermo_mask != (1 << i)` — the normal case after any channel remap — an
-  operator setting "channel 2" silently re-types channel 0, while channel 2
-  echoes back unchanged so the edit appears to vanish on reload. A zone with
-  `thermo_mask == 0` (explicitly legal) loses the edit entirely. The
-  consequence is a wrongly-linearized thermocouple on a live kiln.
-
-  The correct rule: **for a zone with its own custom settings, the write is
-  the identity it always was** — zone *i*'s select sets channel *i*'s type.
-  The mask fan-out applies **only** to a zone that is inheriting from a
-  *different* terminal zone, which is the only case where "copy that zone's
-  thermocouple type onto the channels this zone actually reads" is what the
-  operator asked for. If the fan-out semantics are wanted for custom zones
-  too, the select must be relabelled and derived from the mask first — the
-  label and the write have to agree.
-- Two zones sharing a channel must not be able to give it conflicting types
-  through their separate dropdowns. Last-write-wins is acceptable, but the
-  page must show the resulting type on both zones rather than letting one
-  zone display a type its channel does not actually have.
-
-**Still NOT covered:** the zone name, relay mask, thermocouple mask and CT
-mask. Those are wiring — unique per zone by definition, and copying them
-between zones would describe a kiln that does not exist.
-
-**Implementation notes.**
-- Storage: this is a UI-level convenience over the existing per-zone config,
-  *not* a new inheritance layer in the firmware. On save, an inheriting zone
-  writes the resolved values into its own `zone_cfg_t` exactly as if they had
-  been typed — the control loop keeps reading one flat per-zone config and
-  knows nothing about "same as". The only new persisted state is a small
-  per-zone `settings_source` (u8: 0xFF = custom, else the zone index copied
-  from), kept solely so the page can re-open showing the same dropdown state.
-- Consequence to handle deliberately: editing zone 0 after zones 1-2 have
-  been saved as "same as zone 0" must re-resolve and re-save those zones too,
-  or they silently drift from the zone they claim to follow. Do this on save
-  in `renderZones()`'s submit path and say so in the UI ("also updates zones
-  1, 2"), rather than resolving at load time — a zone whose stored numbers
-  disagree with its claimed source is exactly the kind of split state that
-  makes a later bug unreadable.
-- Guard against a cycle (zone 1 "same as" zone 2 while zone 2 is "same as"
-  zone 1) and against pointing at a disabled zone; both should collapse to
-  custom rather than resolve to nothing.
-
-### 3.6 Cross-zone coupling is not a dropdown option
-
-§2c's coupling compensation is deliberately **not** a fourth mode or a
-checkbox. It rides on the feedforward term, which is already automatic
-whenever a zone has an identified model, and its coefficient is measured by
-autotune rather than chosen by an operator. Asking a potter "should zone 2
-compensate for zone 1?" is asking a question they have no way to answer, and
-`COMMISSIONING_UX.md`'s own rule is to ask only what cannot be derived. The
-correct surfacing is read-only provenance — the coupling-matrix display that
-already exists on the page, showing the measured coefficient once real data
-populates it, so the compensation is visible without being a decision.
-
-## 4. Implementation phases (plan only — no code in this pass)
-
-**Checkbox key.** `[x]` = built and in the tree today (verified against the
-code, not assumed). `[ ]` = outstanding. Phase 0 is the pre-existing
-foundation; Phases 1 and 3 have since been implemented against this plan, so
-a `[x]` outside Phase 0 means this plan's own work has landed and passed host
-tests — not that it is wired up or reachable by an operator. Nothing is
-selectable in the UI until Phases 2, 4 and 5 land.
-
-### Phase 0 — what already exists (no work required)
-
-- [x] FOPDT `{K, tau, L}` fit from a step-response trace, two-point
-      28.3%/63.2% method — `pid_autotune_fit_fopdt()`
-- [x] SIMC gain computation from the fitted model (`lambda = 3*L` default) —
-      `pid_autotune_tune_from_fopdt()`
-- [x] Relay-feedback `{Ku, Tu}` identification, with ZN / Tyreus-Luyben rules
-      on that path only — `pid_autotune_fit_relay()` /
-      `pid_autotune_tune_from_relay()`
-- [x] Autotune state machine, step and relay methods, guard coverage, 4h
-      budget, explicit-accept-only gain write — `autotune_engine.c`
-- [x] Model persisted per zone alongside gains (`zones_config_set_model()`)
-- [x] Model-based feedforward duty term, gated off when no model identified
-- [x] Per-zone control-mode select (Off / Bang-bang / PID) and Kp/Ki/Kd
-      inputs — `zones_page.html:491-492`, `:561-563`
-- [x] RGA coupling-matrix math and the per-zone sampling during a step test
-      that is meant to populate it — `pid_autotune.c`, `autotune_engine.c`
-- [x] **Coupling matrix populated with real data** — full 3x3 measured on
-      the bench rig 2026-08-30 (step method, duty 0.4). Measured cells
-      (`K` in °C/duty, `tau` and `L` in s):
-
-      | | j=0 | j=1 | j=2 |
-      |---|---|---|---|
-      | **i=0** | K=32.648, tau=163.7, L=40.2 | K=5.863, tau=181.4, L=65.5 | K=2.812, tau=163.9, L=84.7 |
-      | **i=1** | K=10.887, tau=123.2, L=56.7 | K=20.969, tau=113.5, L=39.3 | K=3.332, tau=125.6, L=65.4 |
-      | **i=2** | K=7.723, tau=123.1, L=93.2 | K=8.625, tau=127.8, L=83.7 | K=23.641, tau=124.7, L=40.8 |
-
-      Dead time rises monotonically with distance from the driven zone in
-      every row (row 2: 40.8 self, 83.7 to zone 1, 93.2 to zone 0), which is
-      the check that the fits track real heat transport rather than baseline
-      drift. Each run was started only after the rig settled to < 0.8 °C
-      spread, because a step test on a falling baseline fits a cross-gain as
-      *negative*.
-
-      **The matrix is not symmetric in any pair.** 0<->1 is 5.863 vs 10.887
-      (1.86x), 0<->2 is 2.812 vs 7.723 (2.75x), 1<->2 is 3.332 vs 8.625
-      (2.59x) — every higher-index zone drives more into its neighbours than
-      it receives back. Normalized to self-gain, zone 1 sends 52% of its
-      self-gain into zone 0; zone 2 spreads roughly evenly (33% into zone 0,
-      37% into zone 1) — much of the raw asymmetry is explained by zone 0's
-      larger self-gain (32.648 vs 20.969 / 23.641). §2c's feedforward must
-      use `c_ij` indexed in the correct direction, not a single shared
-      coefficient per zone pair.
-
-      Zone 2's two cross-couplings (7.723 into zone 0, 8.625 into zone 1) are
-      within 12% of each other — a schema that stores only one neighbour per
-      zone would discard a coefficient of nearly equal weight, not a
-      negligible one. See Phase 3b finding 3 below, which this data makes
-      concrete.
-- [x] **RGA computed from real data** — first RGA on this hardware,
-      2026-08-30, now 3x3 over all zones: `det = 13700`,
-
-      ```
-      [ 1.1131  -0.0992  -0.0140 ]
-      [-0.0909   1.1484  -0.0575 ]
-      [-0.0222  -0.0492   1.0715 ]
-      ```
-
-      Diagonal 1.07-1.15, off-diagonals small and negative, rows sum to 1:
-      weak interaction, and the diagonal pairing (zone *i* controlled by
-      heater *i*) is confirmed correct for all three zones — no repairing
-      needed. This strengthens the existing recommendation against full MIMO
-      decoupling rather than changing it. §1a's [W8] caveat stands
-      unchanged: this is a steady-state RGA taken near ambient on a
-      0..80 °C rig, so it does not settle the `T^4` regime a real firing
-      reaches.
-- [x] **Zones 1 and 2 configured** — all three zones have now been driven and
-      fitted: zone 1 (K=20.969, tau=113.5, L=39.3; SIMC proposal kp=0.03443,
-      ki=0.00030, kd=0.67673, *not* accepted) and zone 2 (K=23.641,
-      tau=124.7, L=40.8, step method at duty 0.4, done 2026-08-30). Zone 0 is
-      `mode 2` (PID) with hand-entered gains (Kp=2.0, Ki=0.1, Kd=1.0), not
-      autotuned ones. Proposed gains for zones 1 and 2 were reviewed, not
-      accepted.
-- [x] **An autotune run completed on real hardware** — done 2026-08-30.
-      Zone 0 (K=32.648, tau=163.7, L=40.2), zone 1 (K=20.969, tau=113.5,
-      L=39.3) and zone 2 (K=23.641, tau=124.7, L=40.8), all step method at
-      duty 0.4. `PID_CONTROL.md`'s "neither method has ever completed on
-      hardware" is now stale.
-      Proposed gains were reviewed, not accepted; every recommendation in §2 rests
-      on it. Note the rig's zones are range-limited to 0..80 °C, so a bench
-      autotune identifies the plant near ambient — useful for validating the
-      *mechanism*, but it does not settle §2a's `T^4` gain-variation caveat,
-      which needs a real firing to observe.
-
-### Phase 1 — Cohen-Coon tuning rule (small, de-risks nothing new)
-
-`pid_autotune.c` computes SIMC from the fitted FOPDT model, and ZN /
-Tyreus-Luyben from relay `{Ku, Tu}` data — the two rule sets are on separate
-paths and each refuses the other's inputs (§0). [9]'s finding motivates adding
-Cohen-Coon as a second rule on the **FOPDT** path specifically, since it takes
-the same `{K, tau, L}` inputs SIMC does. Read with §2a's caveat: Cohen-Coon is
-the more aggressive of the two and must not displace SIMC as the default.
-
-- [x] Add `pid_autotune_tune_from_fopdt()` Cohen-Coon branch (same inputs, new
-      published formula). `AUTOTUNE_RULE_COHEN_COON` appended as value 3;
-      SIMC remains 0/default.
-- [x] Host test: Cohen-Coon output on a known `{K, tau, L}` matches the
-      published formula (hand-computed against `{K=400, tau=1000, L=30}`),
-      SIMC unchanged, ZN/TL still refused on this path.
-- [x] Assert Cohen-Coon really is the more aggressive rule (`cc.kp > simc.kp`)
-      — the plan claims it, so it is now proven rather than asserted in prose.
-- [x] Degenerate-`L` handling: Cohen-Coon divides by `L`, and unlike SIMC has
-      no substitute that preserves the rule's meaning (the whole rule is
-      parameterized by `L/tau`). Below
-      `AUTOTUNE_COHEN_COON_MIN_DEAD_TIME_S` (0.5 s), or `tau <= 0`, or
-      `K == 0`, it **refuses** — all-zero gains — rather than clamping `L` to
-      an epsilon and emitting an arbitrarily large Kc that looks like a real
-      answer.
-- [x] **Refusal is now machine-readable.** `autotune_gains_t` carries
-      `autotune_refusal_t refusal` plus `char refusal_reason[96]`, mirroring
-      `fopdt_model_t`'s existing `valid`/`invalid_reason` pattern. Every
-      refusal path in *both* `pid_autotune_tune_from_fopdt()` and
-      `pid_autotune_tune_from_relay()` sets a distinct code, and the strings
-      name the offending value ("Cohen-Coon needs dead time >= 0.50 s; this
-      fit has L = 0.210 s"). Tests assert the codes are pairwise distinct —
-      a single "some reason was set" check would have missed the whole point.
-- [x] **Negative plant gain refused on both FOPDT rules** (found in review):
-      `K < 0` — a step test begun while the kiln was still cooling, or a
-      relay wired to the wrong zone's thermocouple — used to yield negative
-      Kp/Ki/Kd. Cohen-Coon's guard tested `== 0`; SIMC had no gain check at
-      all. Both now refuse.
-- [x] **Refusal reason surfaced in the UI.** `zones_page.html:1513-1524`
-      reads `s.refusal`/`s.refusal_reason` and displays "Tune refused (...)"
-      when a rule returns no gains, falling back to the bare code if the
-      reason string is empty.
-- [x] **Cohen-Coon is now reachable.** `autotune_engine_run()`
-      (`autotune_engine.c:1201-1214`) takes a `rule` parameter and refuses
-      anything but SIMC/Cohen-Coon on the step path; `s_at.step_rule` (set
-      `:1217`) is what `autotune_engine.c:353` passes to
-      `pid_autotune_tune_from_fopdt()`. `dashboard_http.c:2051-2061` parses an
-      optional `rule` field on `POST /api/autotune/start`'s step-test path,
-      defaulting to SIMC and refusing `zn`/`tl` at the door.
-- [x] **`/api/autotune` serves `refusal`/`refusal_reason`.**
-      `autotune_status_get_handler()` (`dashboard_http.c:1791`
-      `autotune_refusal_name()`, JSON body `:1823-1845`) emits `"refusal"` and
-      `"refusal_reason"` alongside `proposed_gains`, so a refused rule no
-      longer presents as three silent zeros.
-- [x] Radio option on the autotune section of `zones_page.html` — landed with
-      the two firmware gaps above; not separately re-verified line-by-line in
-      this pass, but the `rule` field it posts is consumed end to end.
-- [ ] `docs/PID_CONTROL.md`: comparison table — **deferred until bench data
-      exists**, per this repo's "measured on the bench" convention. Do not
-      write a comparison from the literature alone.
-
-No new data structures, no new wire format. Ships independently of everything
-below.
-
-### Phase 2 — data structures — LANDED (with two post-review repairs)
-
-Two bugs found in the opus review of this phase would each, on their own,
-have destroyed a commissioned board's configuration on the first boot after
-the update. Both are fixed; recorded here because the failure mode is the
-kind that gets reintroduced:
-
-1. **The frozen `zone_cfg_v9_t` was actually v8's shape** — it interleaved the
-   `uint8_t` members, where real v9 groups them all at the tail. Each isolated
-   `uint8_t` pads to the next float's alignment, so the struct measured 124
-   bytes against the real 116; `expected_len_for_version(9)` could then never
-   match a stored blob, `decode_zones_blob()` would call every v9 board's
-   config corrupt, and the board would boot to factory zone defaults — cal
-   offsets, PID gains, guard thresholds, temperature limits and relay/TC
-   wiring all silently gone. Fixed, and pinned with
-   `_Static_assert(sizeof(zone_cfg_v9_t) == 116)` so a future edit fails the
-   build instead of a user's kiln. The migration test did not catch it because
-   it staged a blob of `sizeof(zones_cfg_v9_t)` — self-consistent with the
-   wrong layout.
-2. **`ZONES_CONFIG_BLOB_MAX_SIZE` 512 → 640 silently deleted every saved kiln
-   config.** That macro is not only a runtime ceiling: it sizes
-   `kiln_cfg_entry_t::blob`, a member of the *persisted*
-   `kiln_cfg_store_blob_t`. Widening it changed `sizeof`, and
-   `nvs_load_store()`'s `len != sizeof(loaded)` check treats any other size as
-   corruption and resets to an empty store — losing every named kiln config
-   and `active_id`. Fixed by bumping `KILN_CFG_STORE_VERSION` to 2, freezing
-   `kiln_cfg_store_blob_v1_t`, and migrating v1 → v2 (copy each entry, blob
-   into the wider array, remainder zeroed) before the exact-size check runs.
-
-Remaining items from that review, not yet done:
-
-- [x] Optional-field probe fixed. `zone_field_present()` now treats only a
-      genuinely absent key (`-1`) as omitted; present-but-empty (`0`) and
-      over-long (`-2`) are refused. The older guard/timing fields keep their
-      pre-existing bare `> 0` probe — deliberately not changed as a side
-      effect of this phase.
-- [x] `settings_source` self-reference refused (the degenerate cycle Phase 5
-      would otherwise have to unwind). CUSTOM and other-zone still accepted.
-- [x] `coupling_neighbor_zone` integrality checked, so a fractional index is
-      refused rather than silently `(int)`-truncated at Phase 3b's use site.
-      **Note for whoever writes the next test here:** the first version of
-      this check's test used `2.7`, which the *range* check (0..2, since
-      `THERMO_CHANNEL_COUNT` is 3) already rejects — it passed identically
-      with the integrality check deleted. It now uses `1.5`, in range, so
-      only integrality can reject it. Caught by the deliberate-break pass,
-      which is the fourth near-miss of this kind in this repo.
-- [~] **Backup/restore of the four new fields — import done and well tested,
-      export untested.** Import: `backup_http.c:280-320` (field parsing),
-      `:1140-1220` (validation), `:1352-1370` (commit); tests in
-      `test_backup_import.c:916-1015` cover the v3 round-trip, v2-body
-      defaulting (`settings_source` lands at `ZONE_SETTINGS_SOURCE_CUSTOM`
-      0xFF, never 0 — the same trap that nearly destroyed commissioned
-      configs in the v9->v10 NVS migration), the fuzzy-strength range
-      refusal, the coupling-neighbor integrality refusal, and the
-      self-reference refusal. Export: `backup_http.c` emits all four keys
-      (`"fuzzy_strength_pct"`/`"coupling_coeff"`/`"coupling_neighbor_zone"`/
-      `"settings_source"`, same block as `:280-320`), but **no test exists
-      for the export path** — there is no `test_backup_export.c` and no
-      export-shaped test in the tree, so the emitted JSON shape is unverified.
-      Gap to close: an export test asserting the four keys appear with the
-      correct values for a known zone config.
-- [x] Stale `512` references corrected in `kiln_cfg_store.h`, `zones_http.c`
-      and `zones_http.h`.
-
-Original phase description follows.
-
-### Phase 2 — data structures — DONE (built differently than planned in one place)
-
-- [x] `zone_control_mode_t` (`zones_http.h:637`) gained `ZONE_CONTROL_MODE_PID_FUZZY = 3`,
-  appended at the tail as planned. Parse ceiling enforced at
-  `zones_http.c:4047` (0-3); test coverage `test_zones_http.c:1722-1746`.
-- [x] New per-zone fields landed in blob v10 (`zones_http.c:378-381`,
-  `_Static_assert(sizeof(zone_cfg_v9_t) == 116)` at `:911`, v9->v10 migration
-  `:1005`/`:1303-1306`):
-  - [x] `fuzzy_strength_pct` — stored as a **float**, not the originally
-    planned u8, and defaults to **0** (no-op / classic-PID-identical), not
-    30. 30 is only `zones_page.html:590`'s UI seed value when a zone has
-    never set it.
-  - [x] `coupling_coeff` + `coupling_neighbor_zone` per zone (§2c) — landed as
-    planned, one scalar + one neighbor index per zone, 0 the safe default.
-    See Phase 3b below for why this single-neighbor shape cannot hold the
-    full coupling data set.
-  - [x] The rule table stayed a firmware-wide constant, not persisted per
-    zone, exactly as planned (`pid_fuzzy.c`'s `RULE_TABLE`).
-- [x] **Built differently than this section originally planned, and this is
-  the correct design, not a shortfall:** `pid_state_t` did **not** gain a
-  fuzzy flag/pointer. Instead, `profile_executor.c`'s per-zone tick computes
-  a per-tick `pid_cfg_t` copy — `pid_fuzzy_prepare_gains()`
-  (`profile_executor.c:1620-1660`) calls `pid_fuzzy_adjust()` to produce
-  adjusted `kp`/`ki`/`kd`, then `pid.c`'s `pid_rescale_integral_for_new_ki()`
-  (`pid.c:25`) bump-transfers the integral term across the resulting Ki
-  change before `pid_family_zone_tick()` (`:1487`) runs the same
-  `pid_update_terms()` body classic PID uses, just fed the adjusted config.
-  This keeps `pid.c` itself unaware fuzzy mode exists — no branch inside the
-  PID module, no parallel control loop — and solves the bump-transfer hazard
-  (formerly listed at line ~797) as a side effect of the same call, which a
-  bare flag/pointer on `pid_state_t` would not have done on its own.
-
-### Phase 3 — control-loop change (fuzzy layer) — DONE
-
-- [x] `pid_fuzzy.c`: `pid_fuzzy_adjust()` (`pid_fuzzy.c:135-226`) implemented
-  exactly as planned — Mamdani product AND over the 3x3 {error}×{error rate}
-  rule table, weighted-average defuzzification, `strength_pct == 0` returns
-  the (sanitized) base gains bit-for-bit. Signature takes this zone's own
-  error/rate only, no neighbor input, per §2c. Host tests in `test_pid_fuzzy.c`.
-- [x] `profile_executor.c`'s per-zone tick calls it. `ZONE_CONTROL_MODE_PID_FUZZY`
-  (`profile_executor.c:2007-2016`) calls `pid_fuzzy_prepare_gains()`
-  (`:1620-1660`) to get adjusted gains, then runs the same
-  `pid_family_zone_tick()` (`:1482-1485`) the classic-PID case uses.
-  Feedforward is untouched by this phase, as planned.
-
-**Three wiring hazards found in review (2026-08-30). All three resolved before
-shipping:**
-
-- [x] **`error_rate_c_per_s` producer — resolved.** It has one:
-      `profile_executor.c:1625-1626` feeds `z->pid_state.d_filtered`
-      (`pid.c`'s existing low-pass-filtered derivative-on-measurement, negated
-      once inside `pid.c`'s `raw_d` computation), not a raw per-tick finite
-      difference. The `dSP/dt` question is settled in writing at
-      `pid_fuzzy.c:12-33`: the setpoint's own ramp rate is deliberately
-      **excluded** — `d_filtered` reflects only measurement-vs-time, so during
-      a profile ramp the axis measures tracking error's rate, not the
-      commanded ramp itself, once `RATE_BAND_C_PER_S` was rescaled (next item).
-- [x] **`RATE_BAND_C_PER_S` — resolved by rescaling 0.05 → 0.5.**
-      (`pid_fuzzy.c:45`, rationale at `:12-43`.) At 0.5 °C/s (30 °C/min,
-      ~6x the fastest ramp this kiln's profiles command), an ordinary firing's
-      ramp now sits inside the STEADY bucket for its whole duration, so the
-      axis measures disturbances, not the profile. `test_pid_fuzzy.c:191,206`
-      assert a normal ramp stays in the STEADY bucket.
-- [x] **Bump transfer on `Ki` change — resolved.** `pid.c:25`
-      `pid_rescale_integral_for_new_ki()` (a new function, not
-      `pid_seed_bumpless()`) rescales `integral` so `ki*integral` — the I
-      term's actual contribution — holds constant across a Ki move. Called
-      every tick from `profile_executor.c:1650`; tests in
-      `test_pid.c:134-196` include a negative test proving an un-rescaled Ki
-      cut really does step duty, so the positive assertion is not vacuous.
-- [x] `autotune_engine.c` needs **no change**: it always identifies/writes base
-  gains regardless of which control mode a zone is currently in, matching
-  how it already behaves for bang-bang zones (autotune is always available,
-  its acceptance just changes what number a mode later reads).
-
-### Phase 3b — cross-zone coupling feedforward (§2c) — DONE
-
-Implemented, reviewed and committed. Full detail — formula, orientation,
-neighbor-qualification gate, deviation clamp/filter, the 2026-08-31 hardware
-panic and its fix, and the open `k_dc` saturation question — lives in
-`PID_CONTROL.md`'s "Cross-zone coupling feedforward" section; this entry is
-the plan-tracking record only.
-
-- The plan's original `-c_ij*(T_j - sp_j)` (this section, as first written)
-  was dimensionally incomplete — `c_ij` is degC-per-duty, not a dimensionless
-  ratio, so that form silently mixed units. Shipped as
-  `-(coupling_coeff[j] / (k_dc_j * ff_k_dc_own)) * (T_j - T_j_setpoint)`
-  instead — divide by the neighbor's own `k_dc` to get a dimensionless
-  disturbance gain, then by this zone's own `k_dc` to get duty.
-- Schema question (finding 3, prior revision of this section) resolved: the
-  10->11 `ZONES_CFG_VERSION` bump landed, widening `coupling_coeff` to a full
-  directed `float[MAX31856_CHANNEL_COUNT]` row per zone, with the frozen
-  `zone_cfg_v10_t` / static-assert / migration discipline Phase 2's
-  post-review repairs established.
-- Sign convention (finding 4) confirmed as designed: `coupling_coeff` stays
-  non-negative, the term's leading minus sign carries direction.
-- Neighbors only count when genuinely under closed-loop control on the
-  shared setpoint (PID-family mode, not faulted, not authority-blocked) —
-  `active` alone was insufficient, see `PID_CONTROL.md` for the concrete
-  failure this gate fixes.
-- With every `coupling_coeff` at 0 (all three zones today, until a tune is
-  accepted) the output is bit-identical to pre-Phase-3b.
-- Autotune persists measured cross-gains (`zones_config_set_coupling()`),
-  previously RAM-only and lost at reboot.
-- Both host tests from the original checklist (zero-coefficient parity, sign
-  correctness) exist; see Phase 6.
-
-### Phase 4 — HTTP endpoints — DONE
-
-- [x] `POST /api/zones`: `parse_zone_fields()` accepts `z%u_mode` up to the
-  fuzzy value (`zones_http.c:4045-4047`) and `z%u_fuzzy_strength`
-  (0-100, `zones_http.c:4290-4323` alongside `z%u_coupling_coeff`/
-  `z%u_coupling_neighbor`, same range-refusal-at-the-door pattern as
-  `z%u_minon`, plus preserves the previous value when the field is absent).
-- [x] Negative test: `test_zones_http.c:1775-1795`
-  (`test_post_fuzzy_strength_out_of_range_refused_not_clamped`) proves 101
-  and -1 are refused outright, with positive controls at the 0/100 boundary.
-- [x] `GET /api/zones`: echoes `mode`, `fuzzy_strength_pct`, `coupling_coeff`
-  and `coupling_neighbor_zone` per zone (`zones_http.c:3692-3706`). Round-trip
-  test `test_zones_http.c:1939-1956`.
-- [x] No new autotune endpoint — `/api/autotune/*` stays exactly as documented
-  in `PID_CONTROL.md`; fuzzy mode consumes its output, it does not change
-  its contract.
-- [ ] Optional, later: `GET /api/zones` could also report the *live* per-tick
-  fuzzy-adjusted gains (as `/api/control`'s `pid_terms_t` already reports
-  `ff` alongside P/I/D) so the tuning panel's rule-strength table can show
-  which cell is currently active, not just the static table — a nice-to-have
-  once the base mechanism is proven, not a Phase 4 requirement.
-
-### Phase 5 — UI changes
-
-- [x] `zones_page.html`: the mode `<select>` (`modeHtml`, line ~548) has the
-  fourth option, and the fuzzy tuning panel (`.fuzzyPanel`, lines ~599-606:
-  rule-strength table + "Adjustment strength" input) sits alongside the PID
-  Kp/Ki/Kd block (lines ~592-598). Both `.kp`-style class selectors and the
-  `z%u_kp`-style wire fields carry the new field.
-- [~] **Zone settings inheritance (§3.5) — implemented, negative tests
-  missing.** The per-zone "Same as zone N / Custom" dropdown and read-only
-  inherited display (`zones_page.html:819-1000`), re-resolution on save
-  (`:1309`, `:1361-1365`), and the `settings_source` field in the config blob
-  (`zones_http.c:2739-2760`) are all in the tree. But the three negative
-  tests §3.5 demands do **not** exist: no host test for a save/reload
-  inheritance round-trip, no test that a cycle collapses to custom, no test
-  that a channel shared by two zones reads back the same type on both —
-  `settings_source` does not appear anywhere in `test_zones_http.c` in an
-  inheritance-behavior test (it appears only in migration-default and
-  POST-parse-range tests, e.g. `test_zones_http.c:1869-1920`). Gap to close:
-  add the three negative tests §3.5 specifies.
-- [x] **N/A — the web dashboard does not mirror this control.** Checked
-  before assuming: `App/drivers/app.js` and `App/drivers/main_page.html`
-  contain no `control_mode` or fuzzy references at all — `zones_page.html`
-  is the only page carrying zone config edit today, so there is nothing to
-  keep in sync.
-- [ ] `docs/PID_CONTROL.md`: still needs a new "Fuzzy adjustment" section,
-  in the same style as the existing "Feedforward" section — formula, what
-  it is off by default when (`strength_pct=0` or no base model identified),
-  and bench measurements once real hardware produces any. Not written yet.
-
-### Phase 6 — host tests (required before any of the above is considered done)
-
-Following this repo's own "negative-test every check" rule
-(`docs/GUARD_TEST_MATRIX.md`'s convention, referenced repeatedly in
-`PID_CONTROL.md`):
-
-- [x] `strength_pct=0` reproduces the base gains bit-for-bit — `test_pid_fuzzy.c:17-43`
-      (unit level) and `test_closed_loop.c:216-239` (integration level, through
-      the actual `fuzzy_tick()` per-tick wiring, not just `pid_fuzzy_adjust()`
-      in isolation).
-- [x] Each rule-table corner (large positive/negative error × rising/falling)
-      nudges in the intended direction — `test_pid_fuzzy.c:52-87`.
-- [x] Closed-loop test mirroring `PID_CONTROL.md`'s existing "4-simulated-hour
-      closed-loop run" — `test_closed_loop.c:340-356`: no false guard trip,
-      settles within 10 °C of setpoint after 4 simulated hours in fuzzy mode.
-      **Caveat:** `test_closed_loop.c`'s `fuzzy_tick()` (used by the tests
-      above) is a hand-written mirror of `pid_fuzzy_prepare_gains()`'s logic,
-      local to that test file — so a future edit to the real
-      `pid_fuzzy_prepare_gains()`/`pid_fuzzy_adjust()` would not be caught
-      there alone. A real guard against exactly that drift was since added:
-      `test_profile_executor_prestart.c:1683-1711`
-      (`test_fuzzy_prepare_gains_matches_pid_fuzzy_adjust_directly`) calls
-      the actual production `pid_fuzzy_prepare_gains()` and diffs its output
-      against a direct `pid_fuzzy_adjust()` call — confirmed present in the
-      tree, not just claimed.
-- [x] The two §2c coupling tests from Phase 3b (zero-coefficient parity, and
-      sign correctness) — landed alongside Phase 3b's feedforward code.
-- [x] Negative tests exist proving several of the checks above can actually
-      fail — e.g. `test_pid.c`'s "sanity: an UN-rescaled Ki cut... really does
-      step duty" and `test_closed_loop.c`'s strength_pct=100 divergence check
-      — following this repo's rule that a check must be provably falsifiable.
-
-**Definition of done for this plan as a whole:** every box above checked,
-plus at least one autotune run completed on the real rig (Phase 0), without
-which none of §2's recommendations have been validated against anything but
-simulation and literature. Note the bench rig's 0..80 °C range means even a
-successful run validates the *mechanism* rather than the kiln-temperature
-behavior — §2a's `T^4` caveat stays open until a real firing.
+# PID Expansion Plan — control-algorithm work for KilnFW
+
+Status doc for the per-zone control algorithms on the ESP32-S3 side. Rewritten
+2026-09-01 after the bulk of it shipped; the previous 1364-line version, with
+the full ten-paper literature review and the phase-by-phase checklists of
+completed work, is in git history immediately before this commit if the
+reasoning behind a landed decision is ever needed.
+
+Conventions this doc follows: **the code is truth, not the checkboxes** — the
+old version was stale in both directions, marking built work as pending and
+pending work as built. Anything claimed done below names the commit. Anything
+measured names the run.
 
 ---
 
-## Phase 7 — tuning quality factors and live autotune on the graph — opened 2026-09-01
+## 1. Where this stands
 
-Two operator-facing asks, plus the generalization work the 2026-09-01 constants
-audit turned up. Phase 7a and 7b are UI/telemetry; 7c is the algorithm work that
-decides whether any of this transfers to a second kiln.
+Per-zone control mode (off / PID / PID+feedforward / fuzzy-PID), step and relay
+autotuning, SIMC / ZN / Tyreus-Luyben / Cohen-Coon rules with machine-readable
+refusals, coupled cross-zone feedforward, per-zone quality statistics, adaptive
+tuning from ordinary firings, and the supporting HTTP/UI/telemetry surfaces are
+all in the tree and tested.
 
-### Phase 0 — first valid autotune on the real rig, 2026-09-01
+What follows is only what is **not** done, plus the results and dead ends that
+constrain it.
 
-Recorded here because every recommendation in section 2 was, until now,
-validated against simulation and literature only.
+---
 
-**Zone 0, step method, full duty, from a rested 31.36 °C baseline:**
+## 2. Measured results
 
-| quantity | value |
-|---|---|
-| `k_gain_c_per_duty` | 39.246 |
-| `tau_s` | 263.8 |
-| `dead_time_s` | 52.8 |
-| `raw_rise_c` → `rise_inf_c` | 38.04 → 39.25 |
-| `baseline_c` / `step_ambient_c` | 31.36 / 29.75 |
-| flags | settled, extrapolation_converged, tau_consistent — all true |
-| accepted gains (SIMC) | Kp 0.0318, Ki 0.00012, Kd 0.8401 |
+Profile 7, three zones, ramp to 45 °C, dwell, ramp to 60 °C, dwell. Normalized
+IAE (time-weighted mean absolute error, °C), whole run:
 
-Corroborated independently: a least-squares FOPDT fit of an earlier raw trace
-gave K ≈ 39.1–40.0, τ ≈ 280 s. Two methods, two runs, agreement within a few
-percent.
-
-The previously stored gains came from a fit of K = 31.96 — about 19 % low.
-Feedforward divides by that gain, so it over-drove every zone, which is the
-mechanism behind the three-zone profile overshooting to 80.1 °C against a
-70 °C target.
-
-**Single-zone plateau is ~70 °C at full duty**, against a configured 80 °C
-ceiling. The ceiling is only reachable with all three zones contributing —
-which is why the old plausibility check, which assumed one zone alone must
-reach it, rejected two consecutive correct fits.
-
-**Caveat unchanged:** the bench rig's 0–80 °C range validates the *mechanism*,
-not kiln-temperature behavior. Section 2a's `T^4` radiative caveat stays open
-until a real firing.
-
-### Result — the coupled climb term, measured A/B on hardware 2026-09-01
-
-Same profile (#7, 45 C then 60 C, three zones), same kiln, same gains, one
-changed term. The second run started 9 C colder and therefore ran longer,
-which is exactly why the comparison metric is normalized by duration and span.
-
-| zone | normalized IAE before | after | change |
+| | z0 | z1 | z2 |
 |---|---|---|---|
-| 0 | 0.0737 | 0.0348 | -53% |
-| 1 | 0.0580 | 0.0227 | -61% |
-| 2 | 0.0644 | 0.0373 | -42% |
+| baseline, 2026-09-01 | 1.630 | 1.291 | 1.425 |
+| final, after the day's work | **1.034** | **0.723** | **0.821** |
+| RMS | 2.17 → 1.27 | 1.71 → 0.97 | 1.78 → 1.06 |
+| max overshoot, °C | 5.24 → 2.45 | 4.48 → 2.04 | 4.67 → 2.67 |
+| mean error, °C | +1.10 → −0.32 | +0.70 → +0.01 | +1.00 → +0.41 |
 
-Max overshoot 5.34 / 4.51 / 4.79 C fell to 2.16 / 2.13 / 2.96 C, and the mean
-error moved from a consistent +1 C hot bias to centred (-0.33 / +0.03 / +0.80).
-The independent PC-side analysis agreed: RMS 2.17 -> 1.23, 1.71 -> 0.90,
-1.78 -> 1.31 C.
+The consistent hot bias is gone and overshoot is roughly halved. The original
+complaint — a 70 °C target reaching 80.1 °C — traced to five defects stacked on
+each other, each hidden by the one above it: a settle detector firing
+mid-transient, a fit reading its last sample as the asymptote, guard 1 blocking
+honest step tests, PWM chopping disarming four guards at partial duty, and an
+uncoupled climb term over-driving zone 0 roughly tenfold.
 
-**What remains, and it is a different problem.** The error is no longer biased
-hot; over- and undershoot are now comparable, which is what a centred
-feedforward looks like. Two residuals:
+Identified plant (bench rig, 0–80 °C): z0 K=39.25 τ=263.8 L=52.8; z1 K=31.97
+τ=269.8 L=43.5; z2 K=31.68 τ=270.9 L=33.9. Coupling matrix in wire form
+`[stepped][affected]`: z0 39.25/15.78/9.70, z1 26.61/31.97/11.38, z2
+20.73/21.09/31.68. RGA diagonal 1.53/1.69/1.34. Off-diagonal τ is 620–730 s
+against 264 s on the diagonal, dead time 135–158 s against 34–53 s — cross-zone
+heat arrives far later than a zone's own element, which is the root of the
+remaining ramp-onset error.
 
-1. **Ramp-onset lag.** The coupled solve treats neighbour heat as arriving
-   instantly, but the off-diagonal time constants are 620-730 s against 264 s
-   on the diagonal, with 135-158 s of dead time against 53 s. Early in a ramp
-   it counts on help that has not landed and under-drives by 1-2 C, closing as
-   the ramp proceeds. Lead compensation on the coupling term is the fix; it was
-   deliberately not attempted in the same change, so that this measurement
-   would mean something.
-2. **Zone 2 holds ~1.4 C above target for entire dwells** and never settles
-   inside +/-1.0 C, in both segments, while its ramp tracking is excellent
-   (mean +0.01 and +0.27). Large dwell error with small ramp error indicts the
-   integral path, not the feedforward. Suspicious detail: it holds 0.74 duty
-   while sitting ABOVE target, so something keeps the commanded duty up rather
-   than the integrator simply being slow. Under investigation.
+**Orientation, which has been swapped by mistake more than once:** persistent
+storage is `coupling_coeff[affected][stepped]`; `/api/autotune/matrix` reports
+the transpose.
 
-### Phase 7a — per-zone tuning quality factors
+---
 
-Accumulated over a whole profile run, shown per zone on the thermocouples page
-and the zones page. The point is to compare *firing accuracy between runs*, so
-every figure has to be comparable across profiles of different length and
-different setpoint span.
+## 3. Remaining work
 
-- [ ] **Mean error**, signed. Signed, not absolute — the sign is what separates
-      a zone that runs hot from one that runs cold, and that distinction drives
-      a different fix.
-- [ ] **Max overshoot** and **max undershoot**, as two separate figures, each
-      carrying the timestamp and the segment index where it occurred. A single
-      "max absolute error" would hide which direction the zone fails in.
-- [ ] **Normalized IAE** — `∫|error| dt / (duration_s * setpoint_span_c)`.
-      **The normalization is the whole point of this metric.** A raw integral
-      grows with run length, so an 8 h glaze firing would always score worse
-      than a 2 h bisque even when it tracked better. Dividing by duration and
-      span gives a dimensionless number comparable across profiles, kilns and
-      zone counts. Store raw `∫|error| dt` alongside it — it is free once the
-      accumulator exists, and someone will want the un-normalized value.
-- [ ] **Ramp error vs dwell error, separated.** Nearly free once the above
-      exists, and worth more than it costs: ramp error is a feedforward/rate
-      problem, dwell error is an integral-term problem. Lumping them together
-      hides which one the kiln actually has.
+### 3.1 Dwell-entry overshoot — the largest error left
 
-Design notes:
-- Accumulate in the executor, not in the UI — the UI polls at an unreliable
-  rate and would alias the integral.
-- Error is `actual - target` against the *executor's* current target (the
-  ramped setpoint), not the segment's end temperature. Using the segment
-  endpoint would score every ramp as a large error by construction.
-- Define behavior for the zone-not-yet-at-temperature case at run start, and
-  for samples where `actual_valid == false` — the accumulator must not silently
-  treat a sensor dropout as zero error. Excluded samples need their own count
-  so a run with heavy dropout can be recognised as untrustworthy rather than
-  quietly scoring well.
+Every zone overshoots 2.0–2.7 °C on entering every dwell, peaking 70–110 s after
+the ramp ends. Ramp tracking is now good (seg1 ramp mean +0.01/−0.49/−0.29 °C)
+and must not regress in the course of fixing this.
 
-### Phase 7a-2 — two independent stat sets, different lifetimes
+Diagnosis, evidence-backed: duty does **not** crash to zero at the boundary (the
+analyzer's duty-off-to-peak lag is `n/a` for 5 of 6 transitions), peak timing
+tracks each zone's own dead time at 1.5–2×, and zone 2's second-dwell peak lines
+up with the cross-zone dead time while its neighbours are still driving.
 
-The quality factors above are not one set but two, measuring different things
-and living for different lengths of time. Keeping them in one bucket would mean
-a re-tune silently wipes firing history, or a firing silently overwrites the
-figures that describe the model.
+- [ ] **Terminal ease-off** — taper the commanded rate as the target is
+      approached so the plant arrives with little stored rate. The one untried
+      direction; under evaluation. Must be a function of remaining distance and
+      the zone's own dynamics, not a constant fitted to this kiln, and must
+      still arrive at setpoint rather than stalling short.
 
-**Set 1 — tuning quality, persists until that zone is re-tuned.** A property of
-the *identification*, stored beside the gains it describes:
+### 3.2 Zone 2's model over-predicts its hold duty
 
-- [ ] Fit residual (RMS of the FOPDT model against the captured trace).
-- [ ] The three existing confidence flags: `settled`,
-      `extrapolation_converged`, `tau_consistent_with_gain`.
-- [ ] Identified `K`, `tau_s`, `dead_time_s`, plus the baseline and the duty the
-      step was run at — without the operating point the gain is not
-      interpretable.
-- [ ] Timestamp of the tune, and which rule produced the gains.
-- [ ] **Invalidated whenever the gains change by any path** — autotune accept,
-      manual edit, config import, backup restore. Stale fit-quality figures
-      shown against gains they do not describe are worse than no figures,
-      because they read as current. This invalidation is the part most likely
-      to be missed; it needs its own test.
+The coupled solve wants 0.861 duty where the kiln actually needs under 0.74.
+Masked by integral action rather than corrected. Not diagnosed.
 
-**Set 2 — firing quality, per profile run.** Mean error, max overshoot/
-undershoot, normalized IAE, ramp-vs-dwell split, as specified in 7a.
+### 3.3 Adaptive tuning — the layers not built
 
-- [ ] Keep the **last 5 runs per profile**, not just the last one, and not 5
-      runs globally. Per-profile is the scope that makes the comparison mean
-      something: comparing a bisque against a glaze firing measures the
-      profiles, not the controller. A single previous run also gives no way to
-      distinguish a real regression from ordinary variation.
-- [ ] Each entry records the profile name/id and the gains in force at the
-      time, so a comparison across runs cannot silently span a re-tune.
+Shipped (`fcc1fc0`, `a772d78`): dwell harvesting, diagonal-only least-squares
+gain refinement, bounded application at run end, per-zone opt-in default off,
+HTTP endpoint and zones-page UI.
 
-Reading them together is the point: good fit + poor tracking indicts the
-controller or the profile; poor fit + poor tracking says re-tune before
-touching anything else.
+- [ ] **Full coupled identification** from dwell observations — solve
+      `A·u = (T − ambient)` across all zones rather than per-zone diagonal.
+      The observations already record every zone's duty and temperature at each
+      settled dwell, so the data is there; only the solver is missing.
+- [ ] **Integral diagnosis from dwells** — residual offset, drift and limit
+      cycling each imply a specific Ki correction, and a detected limit cycle
+      yields Ku/Tu without a dedicated relay test.
+- [ ] **Dynamics from ramps** — re-fit τ and dead time only from segments with
+      genuine excitation, scoring each candidate and **refusing** when too flat
+      rather than fitting noise.
+- [ ] **Iterative tuning** — treat each firing as one experiment scored by the
+      normalized IAE already recorded per zone, perturb gains slightly, keep the
+      change only if the next run scores better. This is the mechanism that
+      actually delivers "gets better every firing"; it needs no informative data
+      in the identification sense and is much harder to fool.
+- [ ] **One-click revert** to the last accepted gain set.
+- [ ] Consolidate the opt-in flag into the zone config blob. It currently lives
+      in adaptive_tune's own NVS namespace (`adap_tune`) because `zones_http.c`
+      was held by another agent when it was written.
 
-### Phase 7a-3 — where all of this is stored
+### 3.4 Documentation
 
-Requirement: user-written config, statistics and logs all live in external
-flash. Three different write patterns, and they must not share a mechanism.
+- [ ] `docs/PID_CONTROL.md`: a "Fuzzy adjustment" section matching the existing
+      "Feedforward" one — formula, when it is off, and bench measurements.
+- [ ] `docs/PID_CONTROL.md`: tuning-rule comparison table. Deliberately deferred
+      until bench data exists; do not write it from the literature alone.
 
-- [x] **Answered 2026-09-01: there is no separate flash chip and no SD card.**
-      The board is an ESP32-S3 N16R8 module — 16 MB flash, 8 MB PSRAM, both in
-      the module package (`partitions.csv:1-2`). "External flash" here can only
-      mean that single on-module SPI flash: external to the die, but the same
-      chip holding firmware and the OTA slots. User config already lives there
-      — `kiln_nvs` 64 KB, `wifi_nvs` 24 KB, `profiles_nvs` 384 KB — so
-      requirement (a) is already met, and the work is (b), (c) and (d).
-- [ ] **User config** — already persisted; audit that every user-written field
-      actually reaches flash and survives a power cut, rather than extending
-      the mechanism blindly.
-- [ ] **Tuning stats and firing stats** are small and written rarely (once per
-      tune, once per firing). Key-value storage is appropriate for these.
-      Budget the space against the actual partition size: 5 runs x profiles x
-      zones adds up faster than it looks.
-- [ ] **Logs are NOT the same problem and must not go in NVS.** NVS is a
-      wear-levelled key-value store for small, infrequently written settings.
-      Anything appended per-tick or per-minute will wear the partition and is
-      the wrong mechanism — logs need a filesystem or a dedicated ring-buffer
-      partition, and no filesystem (SPIFFS/LittleFS/FAT) exists in the table
-      today. **The cost is far lower than first feared:** there is ~3.06 MB
-      unallocated at `0xCF0000`, past the last partition, so a log partition can
-      be appended there **without moving any existing partition** and therefore
-      without disturbing NVS-resident user config. Verify against the layout
-      actually flashed on the board before committing — the risk is only real
-      if offsets shift.
-- [ ] **Know which task each write runs on — they differ.** *Firing* stats
-      written from the profile executor are safe as-is: that task is
-      deliberately internal-stacked (`profile_executor.c:3491-3506`), precisely
-      because a 2026-08-22 attempt to move it to PSRAM crashed the board writing
-      NVS. *Tuning* stats are the danger — they naturally originate on the
-      autotune task, which IS PSRAM-stacked (`autotune_engine.c:2310`), so those
-      writes MUST route through the flash worker. Note NVS **reads** are equally
-      unsafe from a PSRAM stack, not just writes
-      (`uart_bridge_ext.c:128-130`). A PSRAM-stacked task that touches NVS
-      panics the board every time — this
-      repo has hit that three times, most recently on 2026-08-31 when a
-      coupling-persist call in `finalize_fit()` crashed on the first hardware
-      run after passing every host test and three reviews. Host tests cannot
-      see this class at all: the host build has no PSRAM and no cache. Route
-      through `uart_bridge_ext_run_on_flash_worker()`.
+### 3.5 Validation gap
 
-### Phase 7d — learn from ordinary firings — opened 2026-09-01
+Everything above is measured on a bench rig spanning 0–80 °C. Radiative transfer
+goes as `T⁴`, so the plant at kiln temperatures is not the plant identified here.
+Every result in §2 validates the **mechanism**, not the behaviour at firing
+temperature. This stays open until a real firing.
 
-Operator ask: a mode on the zones page that lets the kiln keep improving its
-PID parameters from real firing cycles, every time any profile runs, instead of
-only from dedicated step tests.
+---
 
-**What each phase of a firing actually tells you** (corrected 2026-09-01 — an
-earlier draft of this section claimed a dwell says little about K, which is
-wrong, and wrong in a way that would have thrown away the best data available):
+## 4. Rejected approaches — do not re-propose without new evidence
 
-- **Dwells give steady-state gain, directly.** A zone holding a known
-  temperature at a known steady duty IS a DC-gain measurement:
-  `K_effective = (T_dwell - T_ambient) / u_steady`, or the coupled equivalent
-  `A * u = (T - ambient)` across all zones at once. There is no asymptote to
-  extrapolate and no settle detector to get wrong. **This matters because every
-  bug in tonight's chain existed precisely because a step test must guess where
-  the temperature would eventually land** — the detector firing mid-transient,
-  the fit reading the last sample as the asymptote, the contaminated baseline.
-  A dwell does not guess; it is sitting at the answer. Cross-checked against
-  the 2026-09-01 run: dwell duties of 0.12/0.43/0.82 at 60 C are consistent
-  with the matrix identified by step test.
-- **Dwells also expose the integral term**, which no step test does: a residual
-  steady offset means Ki is too small or the integrator is clamped; slow drift
-  or hunting means Ki is too large; and any limit cycling hands over Ku and Tu
-  — the relay-method quantities — for free, from a firing nobody had to
-  interrupt.
-- **Ramps and transitions give the dynamics** — tau and dead time — which a
-  dwell genuinely cannot, since those need excitation and a flat signal has
-  none.
+Three control-theory ideas were designed and rejected or reverted on 2026-09-01.
+Each was plausible; recording why they failed is cheaper than rediscovering it.
 
-So the real constraint is not "closed-loop data is uninformative" but that
-**different phases identify different parameters, and each must only be used
-for what it can support.** Fitting tau from a dwell would be fitting noise;
-so would ignoring a dwell's steady duty when estimating gain.
+**Coupling lead compensation (three design rounds, never implemented).** The
+off-diagonal delay is real, but every bounded design either reduced at t=0 to the
+diagonal-alone solve — bit-for-bit the uncoupled climb formula measured that same
+day as a 10× over-drive on zone 0 and 5 °C overshoot — or, once the correction
+was sized honestly against a 1.5 °C budget through the coupling matrix, was worth
+under 1 °C-equivalent and inert whenever the integral sat on its floor.
+The lagged sequential form is Jacobi iteration on `A·u = b` with spectral radius
+**0.984** on this matrix: it converges in about 11 hours, and a 2% error in the
+off-diagonals — which are two-point fits on unexcited peer traces — pushes it
+past 1 into divergence.
 
-Two mechanisms, different promises:
+**Integral floor at `−ff_u` (`b7289db`, superseded by `e690f8a`).** Flooring the
+integral at the *total* feedforward means a bound integral exactly cancels the
+whole feedforward, so commanded duty runs on P+D alone — and during a constant
+ramp, once bound it does not release until the ramp ends. The floor must be
+`−ff_hold`, the steady-state component only. Because the commanded rate is
+exactly zero during a dwell, the climb term is exactly zero there and the dwell
+behaviour is byte-identical to the old floor; only the ramp changes. Any future
+change of this shape must check what the bound value is made of.
 
-- [ ] **Steady-state gain from dwells.** At each settled dwell, record the
-      holding duty and temperature per zone and solve for the coupled gain
-      matrix. Requires only a settled-ness test, which the autotune settle
-      detector already implements. Highest-confidence data in the whole system,
-      and every firing that dwells produces it.
-- [ ] **Integral diagnosis from dwells.** Residual offset, drift, and limit
-      cycling each imply a specific correction to Ki; a detected limit cycle
-      additionally yields Ku/Tu without a dedicated relay test.
-- [ ] **Dynamics from ramps and transitions.** Re-fit tau and dead time only
-      from segments with genuine excitation. Score each candidate segment for
-      information content and REFUSE when it is too flat, rather than fitting
-      noise. Only updates when a firing happens to contain usable data.
-- [ ] **Iterative tuning (optimization).** Treat each firing as one experiment,
-      score it with the normalized IAE already recorded per zone in Phase 7a,
-      perturb the gains slightly, and keep the change only if the next run
-      scores better. Does not need informative data in the identification
-      sense, converges over several firings, and is much harder to fool. This
-      is the mechanism that actually delivers "gets better every firing".
+**Decaying the climb term into the dwell (`b8b192d`+`a77db88`, reverted
+`f9d8445`).** Intended to cover the plant's dead time instead of stepping the
+climb term to zero at the boundary. Measured worse on every zone in both dwells,
+and on the second dwell drove an oscillation that tripped thermal guard 2
+("heating commanded but temperature falling") and aborted the firing. Holding
+*more* climb duty into a dwell adds heat exactly where the plant already has too
+much. The guard trip was correct.
 
-**Recommend, do not auto-apply, by default.** Silently rewriting the gains of a
-kiln that fires unattended, on evidence from a run nobody reviewed, is how a
-bad firing happens that nobody can explain afterwards. Proposals surface the
-same way autotune's do and wait for Accept. Auto-apply may be offered as an
-explicit opt-in per zone, and if so it must be bounded — a cap on the change
-per run, a floor and ceiling per parameter, a record of what changed and why,
-and a one-click revert to the last accepted set.
+Two process notes from those three. A supporting simulation showing a gain on
+one zone of three is a weak signal, not a green light. And the simulations in
+this chain have been unreliable in **both** directions — one predicted 44–53%
+ramp recovery where hardware delivered essentially full recovery; another
+favoured a change that made hardware worse. Treat their mechanism comparisons as
+informative and their magnitudes as not.
 
-- [ ] Per-zone opt-in on the zones page, off by default.
-- [ ] Every proposal records which firing produced it, the gains in force at
-      the time, and the score that justified it — otherwise a comparison across
-      runs silently spans a re-tune. Phase 7a-2's history already stores the
-      gains per run; reuse it rather than inventing a second record.
-- [ ] Refuse to learn from a run that was faulted, stopped early, or had a
-      meaningful `excluded_sample_count` — an untrustworthy run must not
-      become training data.
-- [ ] Never let learned gains escape the same validation the autotune Accept
-      path applies.
+---
 
-### Phase 7d-2 — how continuous learning actually works
+## 5. Rules that keep being relearned here
 
-Design for the mode above. Four layers, each of which can be built and tested
-on its own; the first is useful even if the rest are never built.
-
-**Layer 1 — harvest observations during any firing.** No estimation here, only
-recording. Runs in the executor, which is already internal-stacked and may
-touch NVS.
-
-- A *dwell observation* is taken when a zone has been settled at a dwell for
-  long enough to trust it — reuse the autotune settle detector's slope floor
-  rather than inventing a second settled-ness test. Record ambient, and every
-  zone's temperature AND duty at that instant. All zones together, not just the
-  settled one: the relation being measured is coupled.
-- A *transition observation* brackets a ramp start or end, for dynamics.
-- A *cycling observation* records amplitude and period if a dwell oscillates.
-- Cost: a dwell observation is ambient plus (T, u) per zone — about 32 bytes at
-  three zones. A bounded ring of 32 observations is ~1 KB.
-
-**Layer 2 — estimate, but only when the data can support it.** Runs once at the
-end of a firing, never per tick.
-
-> **The trap that decides whether this works: a single dwell cannot identify
-> the matrix.** One dwell yields three equations, `A·u = T − ambient`, but `u`
-> is one direction in 3-space, so the system is rank-deficient against nine
-> unknowns. Fitting it anyway returns a confident wrong answer. Observations
-> must be ACCUMULATED ACROSS DWELLS WITH LINEARLY INDEPENDENT DUTY VECTORS —
-> different setpoints, different zone balances — and the solver must test the
-> conditioning of the stacked system and REFUSE when it is degenerate.
-> Batch least squares over the stored ring is preferred to recursive least
-> squares here: it is auditable, it is host-testable against fixed inputs, and
-> it makes the rank test explicit rather than hidden in a covariance update.
-
-- Gain matrix from the stacked dwell observations, with an explicit condition
-  check and a refusal path.
-- Integral evidence from the same dwells: residual offset implies Ki too small
-  or a clamped integrator; drift or hunting implies Ki too large; a detected
-  limit cycle yields Ku/Tu directly.
-- tau and dead time only from transition observations with genuine excitation.
-
-**Layer 3 — decide what to change, conservatively.**
-
-- Blend rather than replace: move the stored model a bounded fraction toward
-  the new estimate, capped per run (start near 15%). A single odd firing must
-  not be able to move the model far.
-- Recompute PID gains from the refreshed model through the EXISTING rule
-  (SIMC), so learned gains and autotuned gains are produced by the same path
-  and get the same validation.
-- Refuse to learn from a run that faulted, was stopped early, or carries a
-  meaningful `excluded_sample_count` — an untrustworthy run must never become
-  training data.
-- Cold start: do nothing until a step-test model exists. This refines a model;
-  it does not create one.
-
-**Layer 4 — iterative tuning, the part that delivers "better every firing".**
-Independent of identification, and harder to fool.
-
-- Score each run by the per-zone normalized IAE already recorded in Phase 7a.
-- Compare only like with like: same profile id, comparable ambient, both runs
-  clean. Phase 7a-2 already stores the gains in force per run, so a comparison
-  cannot silently span a re-tune.
-- Perturb, keep the change if the next run scores better, revert if worse —
-  coordinate descent over a handful of parameters, one small step per firing.
-- **Divergence guard:** if N consecutive runs score worse than the best
-  recorded set, freeze learning, restore the best-known gains, and say so.
-  Runaway adaptation on a kiln must be structurally impossible, not merely
-  unlikely.
-
-**Safety envelope, applying to all of the above.** Per-zone opt-in, off by
-default. Proposals wait for Accept unless auto-apply is separately enabled per
-zone. Every change records the firing that produced it, the previous values,
-and the score that justified it. One-click revert to the last accepted set.
-Learned gains pass exactly the validation the Accept path applies — never a
-second, looser path.
-
-**Suggested build order:** Layer 1 alone is worth shipping, because harvested
-dwell duties can be checked against the matrix the step tests produced, and a
-growing disagreement is a physical signal — an element weakening — that
-nothing else in the system would notice.
-
-### Phase 7b — live autotune trace on the graph
-
-- [x] Draw the in-progress autotune trace on the home graph against the planned
-      profile, while the tune is running. Landed 2026-09-01, entirely
-      client-side — no new endpoint and no firmware change, so no DRAM cost.
-- [x] Annotate the current engine phase so it is visible *what* is producing
-      the curve — a flat settling segment and a stalled step look identical
-      without it. Landed 2026-09-01.
-- [ ] **Gap left open by the above:** the exposed enum is only
-      `idle/settling/stepping/relay_approach/relay_cycling/done/aborted`.
-      Probe and identify are internal sub-phases of `STEPPING` and are not
-      reported, so a target-mode run shows both as "stepping" — which is
-      exactly the ambiguity the phase label exists to remove. The engine needs
-      to report the sub-phase before target mode is useful on the graph.
-- [ ] Mostly plumbing: the graph already draws a series, and
-      `/api/autotune/trace.csv` already exists. Check the sample budget before
-      adding a second series — see [[project_esp_internal_dram_exhaustion]];
-      this board has run out of internal DRAM on smaller additions than this.
-
-### Phase 7c — stop hand-fitting thresholds to this one kiln
-
-From the 2026-09-01 audit of every numeric threshold in the autotune and
-thermal-guard path. Classification: scale-free / sensor-derived / should-be-
-computed / policy. The should-be-computed set is the bug list.
-
-- [ ] **Consume `probe_k_rough` in the guard thresholds.** The probe phase
-      already produces a rough plant model, and it is currently used only to
-      pick the identify duty. These thresholds are evaluated at a point where
-      that estimate is already in hand and could be derived from it:
-      `AUTOTUNE_ELEMENT_ALIVE_RISE_C`, `AUTOTUNE_ELEMENT_DEATH_DROP_C`,
-      `AUTOTUNE_TARGET_ACHIEVED_WARN_C`, the post-probe re-settle instance of
-      `AUTOTUNE_ENGINE_SETTLE_S`, the identify-phase time budget, and
-      `PEAK_SLOPE_WINDOW_SAMPLES` / `PEAK_SLOPE_SEARCH_SAMPLES` /
-      `MIN_STEPPING_SAMPLES_BEFORE_SETTLE_CHECK`.
-- [ ] **Make the probe phase self-terminating.** `PROBE_DURATION_S` is a fixed
-      600 s sized against this kiln's τ≈285 s (~2.2τ). On a kiln 10× slower it
-      is 0.21τ — the curvature never develops and the fit degrades to "never
-      reached 28.3% of total rise". On one 10× faster it wastes ~21τ of run
-      budget and thermal headroom. This cannot be fixed with a formula, because
-      the probe is the phase that measures τ; the fix is terminating the probe
-      on its own settle criterion instead of a wall clock. **This single change
-      removes the worst scale dependence in the system.**
-- [ ] **Genuinely bootstrap-only, leave as conservative constants but document
-      the validity range:** the first `AUTOTUNE_ENGINE_SETTLE_S`, and
-      `AUTOTUNE_ENGINE_TARGET_CEILING_MARGIN_C` (a pre-start gate, so it runs
-      before the probe by construction — no estimate can exist yet).
-- [ ] **Fix the plausibility check** at `autotune_engine.c:1086`. It computes
-      `implied_max_c = ambient + K_ii` and refuses the fit if that is below the
-      zone's configured `max_temp_c`. On a coupled multi-zone kiln one zone
-      alone cannot reach the chamber ceiling — this board measures ~74 °C
-      single-zone against an 80 °C configured ceiling — so it rejects correct
-      fits. It must either fold in the measured coupling row
-      (`implied_max_c = ambient + K_ii + Σ_j G[i][j]·u_j`) or not assume the
-      ceiling is single-zone reachable.
-
-**Definition of done:** 7a and 7b demonstrated on a real firing with all three
-zones; 7c's first two boxes closed and negative-tested per this repo's rule
-that a check must be provably falsifiable.
+- **A dwell is a DC-gain measurement.** Steady duty against steady rise over
+  ambient, with no asymptote to extrapolate and no settle detector to get wrong.
+  Every bug in the overshoot chain existed because a step test must guess where
+  the temperature would eventually land; a dwell is sitting at the answer.
+  Different phases of a firing identify different parameters, and each must only
+  be used for what it can support — fitting τ from a dwell is fitting noise.
+- **Autotune needs a rested baseline.** Residual heat biases the fitted gain low;
+  check every zone is at ambient, not just the one under test.
+- **Never test a control change at rate = 0 or error = 0.** Neither can
+  distinguish a climb-related change from a hold-related one. Two vacuous tests
+  shipped in this area for exactly that reason.
+- **Recommend rather than auto-apply, by default.** Silently rewriting the gains
+  of a kiln that fires unattended, on evidence from a run nobody reviewed, is how
+  a bad firing happens that nobody can explain afterwards. Auto-apply is opt-in,
+  bounded per run, recorded, and revertible.
