@@ -27,8 +27,24 @@
 # thermocouple harness those files deliberately never build. This script is
 # what covers that one: a source-level assertion that the call is present.
 #
-# WHAT THIS CHECKS, per heat-commanding module (profile_executor.c,
+# WHAT THIS CHECKS, per heat-commanding module (profile_executor*.c,
 # autotune_engine.c):
+#
+# 2026-09-01 update: profile_executor.c (4962 lines) was split into
+# profile_executor.c plus eight siblings (profile_executor_run.c,
+# _relay_io.c, _firing_stats.c, _config_reload.c, _status.c, _start.c,
+# _feedforward.c, _pid_tick.c). The acquire/release call sites moved with
+# their functions -- heat_enable_acquire() now lives in
+# profile_executor_run.c and profile_executor_status.c, heat_enable_release()
+# in profile_executor.c, profile_executor_relay_io.c and
+# profile_executor_status.c. Scanning only profile_executor.c after that
+# split would still find a release call (one is left there) and go on
+# reporting green while missing that the acquire call left the file
+# entirely -- silently blind to the one defect this script exists to catch.
+# So the profile_executor module is scanned as the whole profile_executor*.c
+# file set, not a single hardcoded name, the same fix already applied to
+# check_bridge_reject_reason.ps1 for the uart_bridge.c split. autotune_engine.c
+# was not split and stays a single file.
 #   1. it calls heat_enable_acquire() at least once;
 #   2. it calls heat_enable_release() at least once;
 #   3. it does NOT call safety_link_request_enable() directly -- the whole
@@ -55,33 +71,50 @@ if (-not (Test-Path $driversDir)) {
 $violations = @()
 
 # ---- checks 1-3: the heat-commanding modules ------------------------------
-$heatModules = @("profile_executor.c", "autotune_engine.c")
-foreach ($name in $heatModules) {
-    $path = Join-Path $driversDir $name
-    if (-not (Test-Path $path)) {
-        $violations += "$name -- file not found; it was renamed or removed and this check has gone blind."
+# Each entry is a module name paired with the glob that resolves its file
+# set. profile_executor uses a glob (see the 2026-09-01 split note above);
+# autotune_engine is still one file, expressed the same way so the loop body
+# does not need to special-case it.
+$heatModules = @(
+    @{ Name = "profile_executor"; Glob = "profile_executor*.c"; MinFiles = 2 },
+    @{ Name = "autotune_engine";  Glob = "autotune_engine.c";   MinFiles = 1 }
+)
+foreach ($mod in $heatModules) {
+    $name = $mod.Name
+    $files = @(Get-ChildItem -Path $driversDir -Filter $mod.Glob -File)
+    if ($files.Count -lt $mod.MinFiles) {
+        $violations += "$name -- expected at least $($mod.MinFiles) file(s) matching '$($mod.Glob)' under $driversDir, found $($files.Count). It was renamed, removed, or merged back down and this check has gone blind."
         continue
     }
-    $text = Get-Content -Raw -Path $path
 
-    # Calls only, never the word inside a comment: require the open paren and
-    # exclude a line whose first non-space characters are a comment marker.
-    $lines = Get-Content -Path $path
-    $acquireCalls = @($lines | Where-Object { $_ -match 'heat_enable_acquire\s*\(' -and $_ -notmatch '^\s*(\*|//|/\*)' })
-    $releaseCalls = @($lines | Where-Object { $_ -match 'heat_enable_release\s*\(' -and $_ -notmatch '^\s*(\*|//|/\*)' })
-    $directCalls  = @($lines | Where-Object { $_ -match 'safety_link_request_enable\s*\(' -and $_ -notmatch '^\s*(\*|//|/\*)' })
+    $acquireCalls = @()
+    $releaseCalls = @()
+    $directCalls  = @()
+    $hasInclude   = $false
+    foreach ($f in $files) {
+        # Calls only, never the word inside a comment: require the open
+        # paren and exclude a line whose first non-space characters are a
+        # comment marker.
+        $lines = Get-Content -Path $f.FullName
+        $acquireCalls += @($lines | Where-Object { $_ -match 'heat_enable_acquire\s*\(' -and $_ -notmatch '^\s*(\*|//|/\*)' })
+        $releaseCalls += @($lines | Where-Object { $_ -match 'heat_enable_release\s*\(' -and $_ -notmatch '^\s*(\*|//|/\*)' })
+        $directCalls  += @($lines | Where-Object { $_ -match 'safety_link_request_enable\s*\(' -and $_ -notmatch '^\s*(\*|//|/\*)' })
+        if ((Get-Content -Raw -Path $f.FullName) -match '#include\s+"heat_enable\.h"') {
+            $hasInclude = $true
+        }
+    }
 
     if ($acquireCalls.Count -lt 1) {
-        $violations += "$name -- no heat_enable_acquire() call. This module can command heat; without the request, K4 on the safety processor never closes and NO ELEMENT CURRENT FLOWS, while the run looks completely normal. This is the exact defect of 2026-08-29."
+        $violations += "$name (scanned $($files.Count) file(s) matching '$($mod.Glob)') -- no heat_enable_acquire() call. This module can command heat; without the request, K4 on the safety processor never closes and NO ELEMENT CURRENT FLOWS, while the run looks completely normal. This is the exact defect of 2026-08-29."
     }
     if ($releaseCalls.Count -lt 1) {
-        $violations += "$name -- no heat_enable_release() call. Every exit path (completion, operator stop, pause, fault/trip) must give K4 back; a request left standing outlives the run that made it."
+        $violations += "$name (scanned $($files.Count) file(s) matching '$($mod.Glob)') -- no heat_enable_release() call. Every exit path (completion, operator stop, pause, fault/trip) must give K4 back; a request left standing outlives the run that made it."
     }
     if ($directCalls.Count -ge 1) {
-        $violations += "$name -- calls safety_link_request_enable() directly ($($directCalls.Count) site(s)). Go through heat_enable.c instead: checking the return value, tracking this side's own outstanding request, and releasing on every exit are three things that have each been got wrong once already, and they belong in one place."
+        $violations += "$name -- calls safety_link_request_enable() directly ($($directCalls.Count) site(s)) across $($mod.Glob). Go through heat_enable.c instead: checking the return value, tracking this side's own outstanding request, and releasing on every exit are three things that have each been got wrong once already, and they belong in one place."
     }
-    if (-not ($text -match '#include\s+"heat_enable\.h"')) {
-        $violations += "$name -- does not include heat_enable.h."
+    if (-not $hasInclude) {
+        $violations += "$name -- no file matching '$($mod.Glob)' includes heat_enable.h."
     }
 }
 
