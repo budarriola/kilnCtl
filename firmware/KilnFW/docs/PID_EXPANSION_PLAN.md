@@ -1189,6 +1189,86 @@ and a one-click revert to the last accepted set.
 - [ ] Never let learned gains escape the same validation the autotune Accept
       path applies.
 
+### Phase 7d-2 — how continuous learning actually works
+
+Design for the mode above. Four layers, each of which can be built and tested
+on its own; the first is useful even if the rest are never built.
+
+**Layer 1 — harvest observations during any firing.** No estimation here, only
+recording. Runs in the executor, which is already internal-stacked and may
+touch NVS.
+
+- A *dwell observation* is taken when a zone has been settled at a dwell for
+  long enough to trust it — reuse the autotune settle detector's slope floor
+  rather than inventing a second settled-ness test. Record ambient, and every
+  zone's temperature AND duty at that instant. All zones together, not just the
+  settled one: the relation being measured is coupled.
+- A *transition observation* brackets a ramp start or end, for dynamics.
+- A *cycling observation* records amplitude and period if a dwell oscillates.
+- Cost: a dwell observation is ambient plus (T, u) per zone — about 32 bytes at
+  three zones. A bounded ring of 32 observations is ~1 KB.
+
+**Layer 2 — estimate, but only when the data can support it.** Runs once at the
+end of a firing, never per tick.
+
+> **The trap that decides whether this works: a single dwell cannot identify
+> the matrix.** One dwell yields three equations, `A·u = T − ambient`, but `u`
+> is one direction in 3-space, so the system is rank-deficient against nine
+> unknowns. Fitting it anyway returns a confident wrong answer. Observations
+> must be ACCUMULATED ACROSS DWELLS WITH LINEARLY INDEPENDENT DUTY VECTORS —
+> different setpoints, different zone balances — and the solver must test the
+> conditioning of the stacked system and REFUSE when it is degenerate.
+> Batch least squares over the stored ring is preferred to recursive least
+> squares here: it is auditable, it is host-testable against fixed inputs, and
+> it makes the rank test explicit rather than hidden in a covariance update.
+
+- Gain matrix from the stacked dwell observations, with an explicit condition
+  check and a refusal path.
+- Integral evidence from the same dwells: residual offset implies Ki too small
+  or a clamped integrator; drift or hunting implies Ki too large; a detected
+  limit cycle yields Ku/Tu directly.
+- tau and dead time only from transition observations with genuine excitation.
+
+**Layer 3 — decide what to change, conservatively.**
+
+- Blend rather than replace: move the stored model a bounded fraction toward
+  the new estimate, capped per run (start near 15%). A single odd firing must
+  not be able to move the model far.
+- Recompute PID gains from the refreshed model through the EXISTING rule
+  (SIMC), so learned gains and autotuned gains are produced by the same path
+  and get the same validation.
+- Refuse to learn from a run that faulted, was stopped early, or carries a
+  meaningful `excluded_sample_count` — an untrustworthy run must never become
+  training data.
+- Cold start: do nothing until a step-test model exists. This refines a model;
+  it does not create one.
+
+**Layer 4 — iterative tuning, the part that delivers "better every firing".**
+Independent of identification, and harder to fool.
+
+- Score each run by the per-zone normalized IAE already recorded in Phase 7a.
+- Compare only like with like: same profile id, comparable ambient, both runs
+  clean. Phase 7a-2 already stores the gains in force per run, so a comparison
+  cannot silently span a re-tune.
+- Perturb, keep the change if the next run scores better, revert if worse —
+  coordinate descent over a handful of parameters, one small step per firing.
+- **Divergence guard:** if N consecutive runs score worse than the best
+  recorded set, freeze learning, restore the best-known gains, and say so.
+  Runaway adaptation on a kiln must be structurally impossible, not merely
+  unlikely.
+
+**Safety envelope, applying to all of the above.** Per-zone opt-in, off by
+default. Proposals wait for Accept unless auto-apply is separately enabled per
+zone. Every change records the firing that produced it, the previous values,
+and the score that justified it. One-click revert to the last accepted set.
+Learned gains pass exactly the validation the Accept path applies — never a
+second, looser path.
+
+**Suggested build order:** Layer 1 alone is worth shipping, because harvested
+dwell duties can be checked against the matrix the step tests produced, and a
+growing disagreement is a physical signal — an element weakening — that
+nothing else in the system would notice.
+
 ### Phase 7b — live autotune trace on the graph
 
 - [x] Draw the in-progress autotune trace on the home graph against the planned
