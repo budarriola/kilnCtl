@@ -812,6 +812,240 @@ static void test_zones_post_accepts_clean_minimal_body(void)
     "z1_maxtemp=1300&z1_mintemp=-20&z1_window=0&z1_minon=0&z1_minoff=0&z1_timingprofile=0&" \
     "z1_settings_source=" SRC1
 
+// ---- POST /api/zones/pid -- narrow mid-firing PID-gain exception ----------
+// zones_pid_post_handler() (zones_http.c). Same "stage the body, call the
+// real handler, inspect the real side effects" discipline as run_zones_post()
+// above -- s_test_post_body/content_len/httpd_resp_send_err/sendstr are all
+// the SAME stub surface, so no new hooks were needed for this endpoint.
+static void run_zones_pid_post(const char *body)
+{
+    test_post_hooks_reset();
+    s_test_post_body = body;
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    req.content_len = (long long)strlen(body);
+    esp_err_t err = zones_pid_post_handler(&req);
+    TEST_CHECK(err == ESP_OK, "zones_pid_post_handler must always return ESP_OK (errors go through httpd_resp_send_err)");
+}
+
+// Seeds a live two-zone config identical to TWO_ZONE_MINIMAL_BODY's own
+// baseline (relay_mask/thermo_mask/control_mode/max_temp_c/etc all at known,
+// non-default values) through the REAL whole-page path, so every "still
+// forbidden while running" test below has a concrete baseline value to prove
+// untouched, not just an assumed zero.
+static void seed_two_zone_pid_baseline(void)
+{
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    /* "255" == ZONE_SETTINGS_SOURCE_CUSTOM (zones_http.h) on both zones --
+     * "0" would make zone 0 self-reference (parse_zone_fields() refuses
+     * that as a degenerate cycle), which is what the very first version of
+     * this seed used and every test in this group failed at this line
+     * because of it. */
+    run_zones_post(TWO_ZONE_MINIMAL_BODY("255", "255"));
+    TEST_CHECK(!s_test_err_called, "baseline seed must itself be accepted");
+}
+
+static void test_zones_pid_post_accepts_while_profile_running(void)
+{
+    TEST_SECTION("POST /api/zones/pid -- a PID-only change is ACCEPTED while profile_executor reports RUNNING");
+    seed_two_zone_pid_baseline();
+    s_test_profile_status.state = PROFILE_EXEC_RUNNING; /* zones_pid_post_handler() must not even look at this --
+                                                           * proven by the fact this still succeeds. */
+    run_zones_pid_post("zone=0&kp=0.0318&ki=0.00012&kd=0.8401");
+    s_test_profile_status.state = PROFILE_EXEC_IDLE;
+    TEST_CHECK(!s_test_err_called, "a PID-only submit must not be refused just because a firing is running");
+    TEST_CHECK(s_test_ok_called, "a PID-only submit must report success");
+    float kp = 0.0f, ki = 0.0f, kd = 0.0f;
+    TEST_CHECK(zones_config_get_pid(0, &kp, &ki, &kd), "zone 0 must still be readable after the write");
+    TEST_CHECK_NEAR(kp, 0.0318, 1e-6, "kp must be applied exactly");
+    TEST_CHECK_NEAR(ki, 0.00012, 1e-9, "ki (~1e-4 magnitude) must be applied exactly, not rounded toward zero");
+    TEST_CHECK_NEAR(kd, 0.8401, 1e-6, "kd must be applied exactly");
+}
+
+static void test_zones_pid_post_bumps_generation(void)
+{
+    TEST_SECTION("POST /api/zones/pid -- the generation counter bumps, so profile_executor will observe the change");
+    seed_two_zone_pid_baseline();
+    uint32_t gen_before = zones_config_generation();
+    run_zones_pid_post("zone=1&kp=0.0485&ki=0.00018&kd=1.0548");
+    TEST_CHECK(!s_test_err_called, "clean submit must not be refused");
+    TEST_CHECK(zones_config_generation() > gen_before,
+              "s_config_generation must advance on a successful PID write, or reload_config_if_changed() "
+              "will never notice the new gains");
+}
+
+static void test_zones_pid_post_rejects_kp_over_bound(void)
+{
+    TEST_SECTION("POST /api/zones/pid -- kp above ZONE_PID_GAIN_MAX is refused by the SHARED validator");
+    seed_two_zone_pid_baseline();
+    float kp_before = 0.0f, ki_before = 0.0f, kd_before = 0.0f;
+    zones_config_get_pid(0, &kp_before, &ki_before, &kd_before);
+    run_zones_pid_post("zone=0&kp=1000.001&ki=0.0001&kd=1.0");
+    TEST_CHECK(s_test_err_called, "kp past 1000.0 must be refused");
+    TEST_CHECK(!s_test_ok_called, "must not report success for a rejected submission");
+    float kp = 0.0f, ki = 0.0f, kd = 0.0f;
+    zones_config_get_pid(0, &kp, &ki, &kd);
+    TEST_CHECK_NEAR(kp, kp_before, 1e-9, "a rejected submission must not partially apply -- kp must be unchanged");
+}
+
+static void test_zones_pid_post_rejects_negative_ki(void)
+{
+    TEST_SECTION("POST /api/zones/pid -- a negative ki is refused by the SHARED validator");
+    seed_two_zone_pid_baseline();
+    run_zones_pid_post("zone=0&kp=0.03&ki=-0.0001&kd=1.0");
+    TEST_CHECK(s_test_err_called, "a negative ki must be refused, matching zones_config_json_parse_float_field()'s "
+                                  "0.0f floor");
+    TEST_CHECK(!s_test_ok_called, "must not report success for a rejected submission");
+}
+
+static void test_zones_pid_post_rejects_non_numeric_kd(void)
+{
+    TEST_SECTION("POST /api/zones/pid -- a non-numeric kd is refused by the SHARED validator");
+    seed_two_zone_pid_baseline();
+    run_zones_pid_post("zone=0&kp=0.03&ki=0.0001&kd=notanumber");
+    TEST_CHECK(s_test_err_called, "a non-numeric kd must be refused");
+    TEST_CHECK(!s_test_ok_called, "must not report success for a rejected submission");
+}
+
+static void test_zones_pid_post_rejects_zone_out_of_range(void)
+{
+    TEST_SECTION("POST /api/zones/pid -- a zone index at or past thermo_count is refused");
+    seed_two_zone_pid_baseline(); /* thermo_count=2 -- zone 2 does not exist */
+    run_zones_pid_post("zone=2&kp=0.03&ki=0.0001&kd=1.0");
+    TEST_CHECK(s_test_err_called, "an unconfigured zone index must be refused");
+    TEST_CHECK(!s_test_ok_called, "must not report success for a rejected submission");
+}
+
+// ---- "Still forbidden while running" -- one test PER field, proving the
+// field cannot be smuggled through this fixed-shape endpoint (it parses
+// ONLY zone/kp/ki/kd, so an attacker-controlled extra key in the same POST
+// body is simply never looked at). Each test posts a clean, ACCEPTED PID
+// change alongside an attempted edit of one forbidden field (using the SAME
+// key parse_zone_fields()/the whole-page path would recognise), then proves
+// that field's live value is exactly the seeded baseline -- not the smuggled
+// value.
+static void test_zones_pid_post_ignores_relay_mask(void)
+{
+    TEST_SECTION("POST /api/zones/pid -- relay_mask / zone membership stays refused while running "
+                "(cannot be smuggled through this endpoint)");
+    seed_two_zone_pid_baseline();
+    run_zones_pid_post("zone=0&kp=0.05&ki=0.0002&kd=1.0&z0_relay_mask=2&relay_mask=2");
+    TEST_CHECK(!s_test_err_called, "the PID part of this submit is clean and must still succeed");
+    uint8_t mask = 0xFF;
+    zones_config_get_relay_mask(0, &mask);
+    TEST_CHECK(mask == 1, "relay_mask must remain the seeded value (1) -- z0_relay_mask=2 must be ignored");
+}
+
+static void test_zones_pid_post_ignores_control_mode(void)
+{
+    TEST_SECTION("POST /api/zones/pid -- control_mode stays refused while running");
+    seed_two_zone_pid_baseline();
+    run_zones_pid_post("zone=0&kp=0.05&ki=0.0002&kd=1.0&z0_mode=0&control_mode=0&mode=0");
+    TEST_CHECK(!s_test_err_called, "the PID part of this submit is clean and must still succeed");
+    TEST_CHECK(s_zones.cfg.zones[0].control_mode == 3,
+              "control_mode must remain the seeded value (3, PID_FUZZY) -- z0_mode=0 must be ignored");
+}
+
+static void test_zones_pid_post_ignores_max_temp(void)
+{
+    TEST_SECTION("POST /api/zones/pid -- max_temp_c/min_temp_c stay refused while running");
+    seed_two_zone_pid_baseline();
+    run_zones_pid_post("zone=0&kp=0.05&ki=0.0002&kd=1.0&z0_maxtemp=1&maxtemp=1&z0_mintemp=-999&mintemp=-999");
+    TEST_CHECK(!s_test_err_called, "the PID part of this submit is clean and must still succeed");
+    TEST_CHECK_NEAR(s_zones.cfg.zones[0].max_temp_c, 1300.0, 1e-6,
+                    "max_temp_c must remain the seeded value -- z0_maxtemp=1 must be ignored");
+    TEST_CHECK_NEAR(s_zones.cfg.zones[0].min_temp_c, -20.0, 1e-6,
+                    "min_temp_c must remain the seeded value -- z0_mintemp=-999 must be ignored");
+}
+
+static void test_zones_pid_post_ignores_max_ramp(void)
+{
+    TEST_SECTION("POST /api/zones/pid -- max_ramp_c_per_hr stays refused while running");
+    seed_two_zone_pid_baseline();
+    run_zones_pid_post("zone=0&kp=0.05&ki=0.0002&kd=1.0&z0_ramp=1&ramp=1");
+    TEST_CHECK(!s_test_err_called, "the PID part of this submit is clean and must still succeed");
+    TEST_CHECK_NEAR(s_zones.cfg.zones[0].max_ramp_c_per_hr, 100.0, 1e-6,
+                    "max_ramp_c_per_hr must remain the seeded value -- z0_ramp=1 must be ignored");
+}
+
+static void test_zones_pid_post_ignores_cal_offset(void)
+{
+    TEST_SECTION("POST /api/zones/pid -- cal_offset_c stays refused while running");
+    seed_two_zone_pid_baseline();
+    run_zones_pid_post("zone=0&kp=0.05&ki=0.0002&kd=1.0&z0_cal=25&cal=25");
+    TEST_CHECK(!s_test_err_called, "the PID part of this submit is clean and must still succeed");
+    TEST_CHECK_NEAR(s_zones.cfg.zones[0].cal_offset_c, 0.0, 1e-6,
+                    "cal_offset_c must remain the seeded value (0) -- z0_cal=25 must be ignored");
+}
+
+static void test_zones_pid_post_ignores_guard_thresholds(void)
+{
+    TEST_SECTION("POST /api/zones/pid -- guard thresholds stay refused while running");
+    seed_two_zone_pid_baseline();
+    run_zones_pid_post("zone=0&kp=0.05&ki=0.0002&kd=1.0&z0_wrongdirwindow=999&wrongdirwindow=999&"
+                       "z0_runawaymargin=1&runawaymargin=1");
+    TEST_CHECK(!s_test_err_called, "the PID part of this submit is clean and must still succeed");
+    TEST_CHECK_NEAR(s_zones.cfg.zones[0].guard_wrong_dir_window_s, 0.0, 1e-6,
+                    "guard_wrong_dir_window_s must remain the seeded value (0) -- must be ignored");
+    TEST_CHECK_NEAR(s_zones.cfg.zones[0].guard_runaway_margin_c, 0.0, 1e-6,
+                    "guard_runaway_margin_c must remain the seeded value (0) -- must be ignored");
+}
+
+static void test_zones_pid_post_ignores_coupling_matrix(void)
+{
+    TEST_SECTION("POST /api/zones/pid -- the coupling matrix stays refused while running");
+    seed_two_zone_pid_baseline();
+    run_zones_pid_post("zone=0&kp=0.05&ki=0.0002&kd=1.0&z0_coupling_c1=999&coupling_c1=999");
+    TEST_CHECK(!s_test_err_called, "the PID part of this submit is clean and must still succeed");
+    TEST_CHECK_NEAR(s_zones.cfg.zones[0].coupling_coeff[1], 0.0, 1e-6,
+                    "coupling_coeff[1] must remain the seeded value (0) -- z0_coupling_c1=999 must be ignored");
+}
+
+static void test_zones_pid_post_ignores_model_parameters(void)
+{
+    TEST_SECTION("POST /api/zones/pid -- the plant model (K_dc/tau) stays refused while running");
+    seed_two_zone_pid_baseline();
+    run_zones_pid_post("zone=0&kp=0.05&ki=0.0002&kd=1.0&z0_k=99&k=99&z0_tau=99&tau=99");
+    TEST_CHECK(!s_test_err_called, "the PID part of this submit is clean and must still succeed");
+    TEST_CHECK_NEAR(s_zones.cfg.zones[0].model_k_dc, 0.0, 1e-6,
+                    "model_k_dc must remain the seeded value (0) -- z0_k=99 must be ignored");
+    TEST_CHECK_NEAR(s_zones.cfg.zones[0].model_tau_s, 0.0, 1e-6,
+                    "model_tau_s must remain the seeded value (0) -- z0_tau=99 must be ignored");
+}
+
+static void test_zones_pid_post_ignores_thermo_mask(void)
+{
+    TEST_SECTION("POST /api/zones/pid -- thermo_mask/ct_mask stay refused while running");
+    seed_two_zone_pid_baseline();
+    run_zones_pid_post("zone=0&kp=0.05&ki=0.0002&kd=1.0&z0_thermo_mask=4&thermo_mask=4");
+    TEST_CHECK(!s_test_err_called, "the PID part of this submit is clean and must still succeed");
+    uint8_t mask = 0xFF;
+    zones_config_get_thermo_mask(0, &mask);
+    TEST_CHECK(mask == 1, "thermo_mask must remain the seeded value (1) -- z0_thermo_mask=4 must be ignored");
+}
+
+static void test_zones_pid_post_ignores_settings_source(void)
+{
+    TEST_SECTION("POST /api/zones/pid -- settings_source (coupling to the safety-relevant zone) stays refused "
+                "while running");
+    seed_two_zone_pid_baseline();
+    run_zones_pid_post("zone=0&kp=0.05&ki=0.0002&kd=1.0&z0_settings_source=1&settings_source=1");
+    TEST_CHECK(!s_test_err_called, "the PID part of this submit is clean and must still succeed");
+    TEST_CHECK(s_zones.cfg.zones[0].settings_source == 0xFF,
+              "settings_source must remain the seeded value (0xFF, CUSTOM) -- z0_settings_source=1 must be ignored");
+}
+
+static void test_zones_pid_post_ignores_safety_tc_type(void)
+{
+    TEST_SECTION("POST /api/zones/pid -- safety_tc_type (mirrored to the RP2040 safety processor) stays "
+                "refused while running");
+    seed_two_zone_pid_baseline();
+    run_zones_pid_post("zone=0&kp=0.05&ki=0.0002&kd=1.0&safety_tc_type=5");
+    TEST_CHECK(!s_test_err_called, "the PID part of this submit is clean and must still succeed");
+    TEST_CHECK(s_zones.cfg.safety_tc_type == 0,
+              "safety_tc_type must remain the seeded value (0) -- safety_tc_type=5 must be ignored");
+}
+
 // parse_zone_fields()'s own per-zone chain-walk only ever checks the zone
 // being written against every OTHER zone's LIVE stored value -- it cannot
 // see a SECOND zone changing in the very same whole-page POST. z0's own
@@ -5387,6 +5621,24 @@ void run_test_zones_http(void)
     test_zones_post_accepts_clean_minimal_body();
     test_post_whole_page_cross_zone_cycle_refused();
     test_post_whole_page_cross_zone_legal_chain_accepted();
+
+    test_zones_pid_post_accepts_while_profile_running();
+    test_zones_pid_post_bumps_generation();
+    test_zones_pid_post_rejects_kp_over_bound();
+    test_zones_pid_post_rejects_negative_ki();
+    test_zones_pid_post_rejects_non_numeric_kd();
+    test_zones_pid_post_rejects_zone_out_of_range();
+    test_zones_pid_post_ignores_relay_mask();
+    test_zones_pid_post_ignores_control_mode();
+    test_zones_pid_post_ignores_max_temp();
+    test_zones_pid_post_ignores_max_ramp();
+    test_zones_pid_post_ignores_cal_offset();
+    test_zones_pid_post_ignores_guard_thresholds();
+    test_zones_pid_post_ignores_coupling_matrix();
+    test_zones_pid_post_ignores_model_parameters();
+    test_zones_pid_post_ignores_thermo_mask();
+    test_zones_pid_post_ignores_settings_source();
+    test_zones_pid_post_ignores_safety_tc_type();
 
     test_nvs_load_from_too_short_is_corrupt_not_refused();
     test_nvs_load_from_wrong_size_current_version_is_corrupt_not_refused();

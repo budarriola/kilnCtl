@@ -122,6 +122,20 @@ extern "C" {
 /* zone_cfg_t::max_ramp_c_per_hr -- 0 = never configured. */
 #define ZONE_MAX_RAMP_C_PER_HR_MAX 1000.0f
 
+/* zone_cfg_t::pid_kp/pid_ki/pid_kd -- no natural physical bound, so this is
+ * generous headroom over anything this board's PID loop would ever be tuned
+ * to, not a real per-field tuning limit. Named (not a bare literal) because
+ * TWO call sites must enforce the exact same range: the whole-page POST
+ * /api/zones parser (parse_zone_fields(), gated by ota_http_check_interlocks()
+ * and refused outright while a firing is RUNNING/PAUSED) and the narrow POST
+ * /api/zones/pid endpoint (zones_pid_post_handler(), the one write this file
+ * allows while running -- see its own header comment for why that is safe).
+ * zones_config_set_pid() -- the shared setter both paths that actually touch
+ * storage end in -- enforces this same bound too, so a caller that reaches
+ * it some other way (the LCD UI, PcTools/MCP) cannot exceed what either HTTP
+ * path would accept. */
+#define ZONE_PID_GAIN_MAX 1000.0f
+
 /* zone_cfg_t::sanity_rate_c_per_min -- 0 = never configured (caller
  * substitutes its own default, does NOT disable the check). */
 #define ZONE_SANITY_RATE_MAX_C_PER_MIN 20.0f
