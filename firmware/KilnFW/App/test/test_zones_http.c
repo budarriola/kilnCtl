@@ -5188,10 +5188,49 @@ static void test_zone_sweep_plan_k_ct_refuses_an_unanswered_nameplate(void)
     TEST_CHECK(zone_sweep_plan_k_ct(k, note, sizeof(note)) == 0,
                "an unset full-output power answer calibrates nothing");
     TEST_CHECK(strstr(note, "mains voltage") != NULL, "and asks for the missing answers");
+    /* Overflow-fix regression (zone_sweep_plan_k_ct()'s NO_NAMEPLATE arm,
+     * %.72s -> %.70s): the operator-visible reason must be the COMPLETE
+     * sentence, not silently cut short -- assert the exact byte-for-byte
+     * message, not just a substring, so a future re-introduction of a
+     * precision wider than the note[] buffer allows would fail this even if
+     * the truncated tail still happened to contain "mains voltage". */
+    TEST_CHECK(strcmp(note, "CT scale not calibrated: answer the mains voltage and "
+                            "full-output power questions first") == 0,
+               "the NO_NAMEPLATE reason lands in note[] complete and unmodified");
 
     test_cfg_set_f32(ZONE_MAX_POWER_PARAM_ID, 7200.0f, true);
     TEST_CHECK(zone_sweep_plan_k_ct(k, note, sizeof(note)) == 0x07,
                "answering it lets the same run calibrate");
+}
+
+static void test_zone_sweep_plan_k_ct_implausible_reason_is_not_truncated(void)
+{
+    TEST_SECTION("zone_sweep_plan_k_ct -- the longest real refusal reason must reach note[] whole");
+
+    /* This drives the LONGEST of the five zone_kct_derive_t strings
+     * ("measured and nameplate current disagree too far to be a scale
+     * error", 67 bytes) through the exact call site
+     * (zone_sweep_plan_k_ct()'s IMPLAUSIBLE arm) that used to read
+     * `snprintf(note, note_cap, "CT scale not calibrated: %.72s", ...)` --
+     * 25 (prefix) + 72 (precision) + 1 (NUL) = 98 bytes claimed against a
+     * 96-byte note[], the exact -Wformat-truncation shape build_kilnfw's
+     * -Werror has broken this build on twice before (see this file's H1/H3
+     * comments). measured_total_a = 10x the nameplate expectation (300A vs
+     * a 30A expected_a from 7200W/240V) lands ratio=10, past
+     * ZONE_KCT_RATIO_MAX, which is what zone_sweep_derive_k_ct() reports as
+     * ZONE_KCT_DERIVE_IMPLAUSIBLE. */
+    kct_setup_clean_run();
+    s_ct_derive.measured_total_a = 300.0f;
+    float k[ZONE_CT_CHANNEL_COUNT] = {0};
+    char note[96] = "";
+    TEST_CHECK(zone_sweep_plan_k_ct(k, note, sizeof(note)) == 0,
+               "an implausible measured/nameplate ratio calibrates nothing");
+    static const char expected[] =
+        "CT scale not calibrated: measured and nameplate current disagree too "
+        "far to be a scale error";
+    TEST_CHECK(strlen(expected) == 92, "the fixture's own expected string is the documented worst case");
+    TEST_CHECK(strcmp(note, expected) == 0,
+               "the operator sees the WHOLE reason, not a %.70s-truncated fragment of it");
 }
 
 // ---- the push, and every way it can fail after something has been staged ---
@@ -5880,6 +5919,7 @@ void run_test_zones_http(void)
     test_zone_sweep_plan_k_ct_refuses_an_incomplete_run();
     test_zone_sweep_plan_k_ct_refuses_after_a_failed_map_push();
     test_zone_sweep_plan_k_ct_refuses_an_unanswered_nameplate();
+    test_zone_sweep_plan_k_ct_implausible_reason_is_not_truncated();
     test_zone_sweep_push_k_ct_happy_path_writes_and_confirms();
     test_zone_sweep_push_k_ct_unconfirmed_readback_derives_nothing_and_backs_out();
     test_zone_sweep_push_k_ct_rejected_commit_backs_the_staging_out();

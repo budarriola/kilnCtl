@@ -510,7 +510,13 @@ static uint8_t zone_sweep_plan_k_ct(float *out_k, char *note, size_t note_cap)
     float mains_v = 0.0f, power_w = 0.0f;
     if (!zone_cfg_committed_f32(ZONE_MAINS_VOLTAGE_PARAM_ID, &mains_v) ||
         !zone_cfg_committed_f32(ZONE_MAX_POWER_PARAM_ID, &power_w)) {
-        snprintf(note, note_cap, "CT scale not calibrated: %.72s",
+        /* %.70s, not %.72s: "CT scale not calibrated: " is 25 bytes with its
+         * NUL, and both callers pass note_cap==sizeof(s_sweep.{ct_map,k_ct}_
+         * reason)==96, so 25 + 70 + 1(NUL) == 96 exactly -- provably fits
+         * however long zone_kct_derive_str()'s literals grow, the same
+         * reasoning as the %.24s sites above. The old %.72s put that bound at
+         * 98, two bytes past the buffer. */
+        snprintf(note, note_cap, "CT scale not calibrated: %.70s",
                  zone_kct_derive_str(ZONE_KCT_DERIVE_NO_NAMEPLATE));
         return 0;
     }
@@ -533,7 +539,8 @@ static uint8_t zone_sweep_plan_k_ct(float *out_k, char *note, size_t note_cap)
              * it means this run's own inputs are unusable. Writing the rest
              * would leave the three channels on different scales with
              * nothing recording that they disagree. */
-            snprintf(note, note_cap, "CT scale not calibrated: %.72s", zone_kct_derive_str(r));
+            /* Same %.72s bound as the nameplate-missing site above. */
+            snprintf(note, note_cap, "CT scale not calibrated: %.70s", zone_kct_derive_str(r));
             return 0;
         }
         out_k[c] = k_new;
