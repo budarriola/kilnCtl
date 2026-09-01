@@ -132,6 +132,16 @@ typedef struct {
     bool  tau_consistent_with_gain;
     bool  extrapolation_converged;
     char  invalid_reason[64];
+    /* Diagnostic fit inputs/intermediates, added 2026-08-31 to make a run's
+     * fit externally falsifiable (see autotune_engine.c's finalize_fit() and
+     * dashboard_http.c's /api/autotune) -- a K that looks wrong could not
+     * previously be traced to a specific baseline_c/final_c/rise_inf without
+     * re-deriving them from the raw trace by hand. Zero (the invalid_model()
+     * default) whenever !valid. */
+    float baseline_c;  /* the baseline_c parameter this fit was called with */
+    float final_c;     /* samples[sample_count-1].measurement_c */
+    float raw_rise_c;  /* final_c - baseline_c, pid_autotune.c's raw_rise */
+    float rise_inf_c;  /* extrapolated asymptote rise actually used for k_gain_c_per_duty */
 } fopdt_model_t;
 
 /* Fits a FOPDT model from a monotonic step-response trace using the

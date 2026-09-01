@@ -387,6 +387,11 @@ fopdt_model_t pid_autotune_fit_fopdt(const autotune_sample_t *samples, int sampl
     m.tau_consistent_with_gain = tau_consistent_with_gain;
     m.extrapolation_converged = extrapolation_converged;
     m.invalid_reason[0] = '\0';
+    /* Diagnostic fit inputs -- see fopdt_model_t's own comment. */
+    m.baseline_c = baseline_c;
+    m.final_c = final_c;
+    m.raw_rise_c = raw_rise;
+    m.rise_inf_c = rise_inf;
     return m;
 }
 

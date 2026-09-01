@@ -119,6 +119,17 @@ typedef struct {
      * the operator the real landing point instead of the requested one. */
     float    target_achieved_c;
 
+    /* Cold-junction ambient reference captured at the SETTLING->STEPPING
+     * transition (autotune_engine.c ~line 2102), used by finalize_fit()'s
+     * physical-plausibility check. Exposed here, next to model.baseline_c,
+     * because the two have been conflated in past analysis despite being
+     * different quantities: step_ambient_c is a cold-junction reading taken
+     * once at step-start, baseline_c (fopdt_model_t) is the zone's own
+     * settled temperature reading fed into the fit. Meaningful whenever a
+     * step (not relay) run has reached STEPPING at least once; 0 before
+     * that, same convention as target_achieved_c above. */
+    float    step_ambient_c;
+
     /* Only meaningful when state == DONE.
      *
      * Exactly one of model.valid / relay.valid is ever true, and which one

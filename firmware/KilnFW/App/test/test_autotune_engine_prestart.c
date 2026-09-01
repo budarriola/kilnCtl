@@ -1327,6 +1327,64 @@ static void test_next_run_clears_prior_runs_refusal(void)
                "the predicted ramp is the same class of stale number and is cleared with it");
 }
 
+// Reset-one-side bug class (project memory: three prior instances of this
+// exact shape in one day). begin_run_locked() used to clear ONLY
+// s_at.model.valid/s_at.relay.valid, leaving k_gain_c_per_duty/tau_s/
+// dead_time_s/invalid_reason (and relay's ku/tu_s/amplitude_c/cycles_used)
+// holding the PREVIOUS run's numbers -- the struct is otherwise zeroed only
+// once, at boot. Same non-start-stepping-run() shape as
+// test_next_run_clears_prior_runs_refusal() immediately above, and for the
+// same reason: start_stepping_run() memsets s_at and would erase the very
+// state this test needs begin_run_locked() itself to clear.
+//
+// Verified this test fails without the fix: with s_at.model.valid = false /
+// s_at.relay.valid = false (the pre-fix begin_run_locked() body) restored in
+// place of the `s_at.model = (fopdt_model_t){0}; s_at.relay =
+// (relay_model_t){0};` fix, k_gain_c_per_duty/tau_s/relay.ku below still read
+// the previous run's planted values (36.4/123.0/7.7) and every TEST_CHECK in
+// this function fails.
+static void test_next_run_clears_prior_runs_model_payload(void)
+{
+    TEST_SECTION("starting a new autotune run clears the previous run's model/relay payload, not just .valid");
+    start_stepping_run_rule(/*max_temp_c=*/0.0f, /*step_duty=*/1.0f, AUTOTUNE_RULE_SIMC);
+    // Stand in for a completed run's fitted model/relay result -- exactly
+    // the shape finalize_fit()/finalize_relay_fit() leave behind, and
+    // exactly what autotune_engine_get_status() would serialize while
+    // state == DONE and .valid == true.
+    s_at.state = AUTOTUNE_ENGINE_DONE;
+    s_at.model.valid = true;
+    s_at.model.k_gain_c_per_duty = 36.4f;
+    s_at.model.tau_s = 987.0f;
+    s_at.model.dead_time_s = 45.0f;
+    s_at.model.settled = true;
+    s_at.model.baseline_c = 32.8f;
+    s_at.model.final_c = 69.2f;
+    s_at.model.raw_rise_c = 36.4f;
+    s_at.model.rise_inf_c = 36.4f;
+    s_at.relay.valid = true;
+    s_at.relay.ku = 7.7f;
+    s_at.relay.tu_s = 210.0f;
+    s_at.relay.amplitude_c = 3.5f;
+    s_at.relay.cycles_used = 5;
+
+    char errbuf[96] = {0};
+    bool ok = autotune_engine_run(0, 0.5f, AUTOTUNE_RULE_SIMC, errbuf, sizeof(errbuf));
+    TEST_CHECK(ok, "a new run must be accepted on this zone after the earlier one finished");
+    TEST_CHECK(!s_at.model.valid, "model.valid must be cleared (already was, before the fix too)");
+    TEST_CHECK(!s_at.relay.valid, "relay.valid must be cleared (already was, before the fix too)");
+    TEST_CHECK(s_at.model.k_gain_c_per_duty == 0.0f,
+               "k_gain_c_per_duty is the previous run's PAYLOAD, not just its valid flag -- must be cleared too");
+    TEST_CHECK(s_at.model.tau_s == 0.0f, "tau_s is the same class of stale payload");
+    TEST_CHECK(s_at.model.dead_time_s == 0.0f, "dead_time_s is the same class of stale payload");
+    TEST_CHECK(!s_at.model.settled, "settled is the same class of stale payload");
+    TEST_CHECK(s_at.model.baseline_c == 0.0f, "the new diagnostic baseline_c field is the same class of stale payload");
+    TEST_CHECK(s_at.model.rise_inf_c == 0.0f, "the new diagnostic rise_inf_c field is the same class of stale payload");
+    TEST_CHECK(s_at.relay.ku == 0.0f, "relay.ku is the same class of stale payload as model's fields");
+    TEST_CHECK(s_at.relay.tu_s == 0.0f, "relay.tu_s is the same class of stale payload");
+    TEST_CHECK(s_at.relay.amplitude_c == 0.0f, "relay.amplitude_c is the same class of stale payload");
+    TEST_CHECK(s_at.relay.cycles_used == 0, "relay.cycles_used is the same class of stale payload");
+}
+
 static void test_step_max_temp_configured_flat_reading_still_trips_guard1(void)
 {
     TEST_SECTION("step test, max_temp_c configured, flat reading -- guard 1 still trips (no regression)");
@@ -3486,6 +3544,7 @@ void run_test_autotune_engine_prestart(void)
     test_physical_plausibility_uses_ambient_not_baseline_on_a_hot_start();
     test_model_settled_flag_reflects_step_settled();
     test_next_run_clears_prior_runs_refusal();
+    test_next_run_clears_prior_runs_model_payload();
     test_step_no_ceiling_flat_reading_trips_guard1();
     test_step_max_temp_configured_flat_reading_still_trips_guard1();
     test_step_no_ceiling_rising_reading_does_not_trip();

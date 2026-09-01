@@ -2528,12 +2528,27 @@ static bool begin_run_locked(uint8_t zone_index, char *err_msg, size_t err_cap)
         s_at.global_fault_source = 0;
     }
     relay_authority_claim_mask(mask, RELAY_OWNER_AUTOTUNE);
-    /* Both results are invalidated at the start of every run, whichever method
-     * follows: exactly one of them will be filled in, and a stale `valid` from
-     * the previous run would let autotune_engine_accept() write gains this run
-     * never produced. */
-    s_at.model.valid = false;
-    s_at.relay.valid = false;
+    /* Both results are fully cleared at the start of every run, whichever
+     * method follows: exactly one of them will be filled in.
+     *
+     * Fixed 2026-08-31 (found alongside the autotune-instrumentation work):
+     * this used to clear ONLY the `valid` flag ("a stale `valid` from the
+     * previous run would let autotune_engine_accept() write gains this run
+     * never produced"), leaving k_gain_c_per_duty/tau_s/dead_time_s/
+     * invalid_reason (and relay's ku/tu_s/amplitude_c/cycles_used) holding
+     * the PREVIOUS run's numbers -- the struct is otherwise only zeroed once,
+     * at boot (autotune_engine_start()'s memset). autotune_engine_get_status()
+     * copies s_at.model/s_at.relay into its output whenever state == DONE,
+     * and dashboard_http.c's /api/autotune serializes k_gain_c_per_duty etc.
+     * unconditionally alongside model_valid, so those numbers are only
+     * "discounted" by a caller that actually checks the valid flag first --
+     * exactly the same producer/consumer reset-one-side shape as the
+     * refusal/refusal_reason bug this function already guards against just
+     * below. A zeroed struct with valid=false is indistinguishable from the
+     * boot-time "never tuned yet" state, which is the correct thing for a
+     * run in progress to report. */
+    s_at.model = (fopdt_model_t){0};
+    s_at.relay = (relay_model_t){0};
     s_at.relay_cycles_seen = 0;
     /* And the gains those results produce, for the same reason one step
      * further out: /api/autotune serializes proposed_gains.refusal and
@@ -2559,6 +2574,11 @@ static bool begin_run_locked(uint8_t zone_index, char *err_msg, size_t err_cap)
     s_at.target_c = 0.0f;
     s_at.probe_k_rough = 0.0f;
     s_at.target_achieved_c = 0.0f;
+    /* Same staleness class as target_achieved_c immediately above: only set
+     * once STEPPING is reached (~line 2102), so a run whose SETTLING phase
+     * is polled before that would otherwise report the PREVIOUS run's
+     * cold-junction reading as this run's. */
+    s_at.step_ambient_c = 0.0f;
     /* Review finding 5: these two used to be reset ONLY at the SETTLING->
      * STEPPING transition, so a brand-new run's SETTLING phase carried the
      * PREVIOUS run's true step_element_proven through it -- benign only
@@ -3086,6 +3106,10 @@ void autotune_engine_get_status(autotune_engine_status_t *out)
      * identification step (target_mode + a valid model) -- 0 otherwise,
      * same "only meaningful when ..." convention as model/relay below. */
     out->target_achieved_c = s_at.target_achieved_c;
+    /* See autotune_engine_status_t::step_ambient_c's own comment -- exposed
+     * unconditionally like target_achieved_c above, not gated to DONE, so a
+     * caller can see it was captured even while STEPPING is still running. */
+    out->step_ambient_c = s_at.step_ambient_c;
     if (s_at.state == AUTOTUNE_ENGINE_DONE) {
         out->model = s_at.model;
         out->relay = s_at.relay;

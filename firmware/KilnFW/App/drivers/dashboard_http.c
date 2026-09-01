@@ -1844,12 +1844,22 @@ static esp_err_t autotune_status_get_handler(httpd_req_t *req)
     char refusal_reason_escaped[sizeof(st.proposed_gains.refusal_reason) * 2 + 1];
     json_escape(st.proposed_gains.refusal_reason, refusal_reason_escaped, sizeof(refusal_reason_escaped));
 
-    char json[1100];
+    /* Diagnostic fit inputs/intermediates (2026-08-31): expose exactly what
+     * pid_autotune_fit_fopdt() was actually called with and what it actually
+     * computed, so a captured run's K can be checked against the fit's own
+     * inputs instead of re-derived by hand from the raw trace. Only
+     * meaningful when model_valid; 0 otherwise, same convention as
+     * k_gain_c_per_duty etc. above. step_ambient_c is reported alongside
+     * baseline_c deliberately -- see autotune_engine_status_t::step_ambient_c
+     * -- they are different quantities that have been conflated before. */
+    char json[1300];
     int n = snprintf(json, sizeof(json),
         "{\"state\":\"%s\",\"method\":\"%s\",\"zone\":%u,\"elapsed_s\":%lu,\"sample_count\":%u,"
         "\"actual_c\":%.2f,\"actual_valid\":%s,\"duty\":%.3f,\"abort_reason\":\"%s\","
         "\"model_valid\":%s,\"model_settled\":%s,\"model_extrapolation_converged\":%s,"
         "\"model_tau_consistent\":%s,\"k_gain_c_per_duty\":%.3f,\"tau_s\":%.1f,\"dead_time_s\":%.1f,"
+        "\"baseline_c\":%.2f,\"final_c\":%.2f,\"raw_rise_c\":%.2f,\"rise_inf_c\":%.2f,"
+        "\"step_ambient_c\":%.2f,"
         "\"proposed_kp\":%.5f,\"proposed_ki\":%.5f,\"proposed_kd\":%.5f,\"rule\":\"%s\","
         "\"refusal\":\"%s\",\"refusal_reason\":\"%s\","
         "\"predicted_max_ramp_c_per_hr\":%.1f,"
@@ -1863,7 +1873,10 @@ static esp_err_t autotune_status_get_handler(httpd_req_t *req)
         reason_escaped, st.model.valid ? "true" : "false", st.model.settled ? "true" : "false",
         st.model.extrapolation_converged ? "true" : "false", st.model.tau_consistent_with_gain ? "true" : "false",
         (double)st.model.k_gain_c_per_duty,
-        (double)st.model.tau_s, (double)st.model.dead_time_s, (double)st.proposed_gains.kp,
+        (double)st.model.tau_s, (double)st.model.dead_time_s,
+        (double)st.model.baseline_c, (double)st.model.final_c, (double)st.model.raw_rise_c,
+        (double)st.model.rise_inf_c, (double)st.step_ambient_c,
+        (double)st.proposed_gains.kp,
         (double)st.proposed_gains.ki, (double)st.proposed_gains.kd,
         autotune_rule_name(st.proposed_gains.rule),
         autotune_refusal_name(st.proposed_gains.refusal), refusal_reason_escaped,

@@ -204,7 +204,7 @@ $cmd4 = "call `"$vcvars`" x64 >nul && cl /nologo /W3 /EHsc /I`"$stubDir`" /I`"$c
         "`"$(Join-Path $driversDir 'pid.c')`" `"$(Join-Path $driversDir 'thermal_guard.c')`" " +
         "`"$(Join-Path $driversDir 'heater_output.c')`" `"$(Join-Path $driversDir 'thermo_combine.c')`" " +
         "`"$(Join-Path $driversDir 'heat_enable.c')`" `"$(Join-Path $driversDir 'pid_fuzzy.c')`" " +
-        "`"$(Join-Path $driversDir 'stack_margin.c')`""
+        "`"$(Join-Path $driversDir 'stack_margin.c')`" `"$(Join-Path $driversDir 'zone_coupling_solve.c')`""
 
 Invoke-HostTestExe -Name "profile_executor_prestart" -ExePath $exe4 -BuildCmd $cmd4
 
