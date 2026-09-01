@@ -1,4 +1,4 @@
-// ROADMAP.md M13's TASK 2: safety_link.c is ~3900 lines of the KilnFW <->
+// ROADMAP.md M13's TASK 2: safety_link.c was ~3900 lines of the KilnFW <->
 // SaftyFW link -- several of the defects fixed this week (the stashed
 // commit-rejection frame, the reply-window race, the trip-event capture
 // logic) lived inside it, and until this file, none of it could compile off
@@ -13,6 +13,16 @@
 // #include the real .c directly (its own header comment lists which static
 // functions have no other seam) rather than restate its logic somewhere
 // host-friendly.
+//
+// Later split into six translation units (safety_link.c/_frames.c/_inbox.c/
+// _poll.c/_commands.c/_payload.c -- the owner's 1500-line rule) once
+// safety_link.c itself grew to 4183 lines; see safety_link_internal.h's own
+// header comment for the seams and which functions' linkage changed. This
+// file still proves the exact same thing it always did -- "the driver
+// compiles and links off-target, and these two decode functions are pinned"
+// -- it just now #includes all six real .c files (in dependency order)
+// instead of one, since the functions under test now live in different
+// translation units that link together into this same executable.
 //
 // What this closes: safety_apply_status() -- the Frame A (GET_STATUS) wire
 // decode -- had zero host coverage. It has two real decisions worth pinning:
@@ -182,6 +192,34 @@ static inline BaseType_t safety_link_test_xSemaphoreTake(SemaphoreHandle_t sem, 
 #define xSemaphoreTake safety_link_test_xSemaphoreTake
 
 #include "../drivers/safety_link.c"
+
+// Each of the five files below is its own translation unit in the real
+// firmware build, and each independently declares `static const char *TAG
+// = "safety_link";` at file scope -- completely unremarkable there (five
+// separate TUs, five separate file-scope statics, same convention every
+// ESP-IDF source file in this codebase follows). Textually #include-ing
+// all of them into this ONE test executable (same "compile the real .c"
+// precedent as safety_link.c above) would redefine `TAG` five times in a
+// row, which is a hard compile error only because of THIS FILE's unity-
+// build strategy -- not a real defect in any of the five. Rather than touch
+// five production files to work around a test-only artifact, rename TAG to
+// a fresh identifier around each subsequent #include: every ESP_LOGx(TAG,
+// ...) call inside the included file still macro-expands to *some* valid,
+// distinct `static const char *`, so nothing about those files' own logic
+// changes, only which token this test's single merged TU sees for each.
+#define TAG TAG_frames
+#include "../drivers/safety_link_frames.c"
+#undef TAG
+#define TAG TAG_inbox
+#include "../drivers/safety_link_inbox.c"
+#undef TAG
+#define TAG TAG_poll
+#include "../drivers/safety_link_poll.c"
+#undef TAG
+#define TAG TAG_commands
+#include "../drivers/safety_link_commands.c"
+#undef TAG
+#include "../drivers/safety_link_payload.c" // no TAG of its own -- see that file's header comment
 
 #undef xSemaphoreTake
 
