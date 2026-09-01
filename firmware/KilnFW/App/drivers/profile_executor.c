@@ -188,15 +188,6 @@ typedef struct {
      * ever corrects it. */
     float ff_k_dc;   /* degC of steady-state rise per unit duty */
     float ff_tau_s;  /* plant time constant, seconds */
-    float ff_dead_time_s; /* plant dead time (transport lag), seconds -- a DIFFERENT
-                           * measured quantity from ff_tau_s (5-8x smaller on this rig:
-                           * 52.8/43.5/33.9s dead time vs 263.8/269.8/270.9s tau for
-                           * z0/z1/z2). Cached the same place/gating as ff_k_dc/ff_tau_s
-                           * (zone_load_model()) -- see that function's own
-                           * zones_config_get_model() call, which already validates
-                           * dead_time_s > 0.0f alongside k_dc/tau_s. Used ONLY by the
-                           * dwell-entry climb decay below; nothing else in this file
-                           * reads it. */
     bool  ff_enabled;
 
     /* Coupled-hold solve diagnostics (defect: steady-state hold used to
@@ -274,58 +265,6 @@ typedef struct {
      * on this zone does not land straight in a neighbour's duty. */
     float coupling_filtered_c;
     bool  coupling_filter_init;
-
-    /* Dwell-entry overshoot fix (2026-09-01, option (c) of
-     * dwell_entry_overshoot.md): rather than the climb feedforward term
-     * stepping to exactly 0 the instant a ramp ends (the old behaviour --
-     * `target_rate_c_per_s` goes to 0 unconditionally at the ramp/dwell
-     * boundary, profile_executor.c:2743, and zone_feedforward() had no
-     * smoothing of its own), the climb value latched at that boundary now
-     * decays exponentially over this zone's own measured dead time
-     * (ff_tau_s) instead. Physical story: duty commanded during the ramp
-     * is still "in flight" through the plant's dead time when the
-     * boundary hits, so an outgoing pulse should be allowed to finish
-     * arriving rather than being cut off with a fresh discontinuity on
-     * top of it.
-     *
-     * ff_climb_last_ramp_c -- the climb component zone_feedforward()
-     * computed on the most recent tick where s_exec.dwelling was false
-     * (i.e. a real ramp tick, not a ramp-lock stall -- see that field's
-     * write site). Updated every non-dwelling tick; read only at the
-     * ramp->dwell edge to seed ff_climb_decay_latch_c.
-     *
-     * ff_climb_decay_latch_c / ff_climb_decay_t_s -- the value/clock of
-     * the decay curve `latch * exp(-t/ff_tau_s)`. Both are ADVANCED
-     * exactly once per tick, in the reading loop next to
-     * coupling_filter_tick() (profile_executor.c, same loop that sets
-     * actual_c/coupling_filtered_c) -- NOT inside zone_feedforward()
-     * itself, because zone_feedforward() is called a second time for the
-     * same tick by seed_bumpless_with_ff() (bump-transfer re-solve); if
-     * the decay clock advanced there too it would double-step every tick
-     * it fires on, the same "advance inside the function that gets
-     * called twice a tick" bug class this repo has hit before.
-     * zone_feedforward() only READS these two.
-     *
-     * ff_was_dwelling -- s_exec.dwelling as of the last tick's advance,
-     * used only to detect the false->true edge (that is the moment the
-     * latch is taken). Everything here is zeroed by
-     * profile_executor_run()'s memset(s_exec.zones, ...), same as every
-     * other per-zone field -- a fresh run, a fresh zone (never
-     * autotuned, ff_dead_time_s == 0), a paused-then-resumed run (this
-     * loop simply doesn't execute while paused, so the decay clock
-     * freezes rather than jumping), and a zone-membership change
-     * (orthogonal -- membership only affects the coupled SOLVE this
-     * latch is captured from, not the latch/decay bookkeeping itself)
-     * all start from this same safe zero state. The decay divides by
-     * ff_dead_time_s, NOT ff_tau_s -- see ff_dead_time_s's own doc
-     * comment above for why those are different measured quantities and
-     * ff_dead_time_s == 0 (unmeasured dead time) is handled explicitly
-     * in zone_feedforward(), not by dividing by it -- see that call
-     * site. */
-    float ff_climb_last_ramp_c;
-    float ff_climb_decay_latch_c;
-    float ff_climb_decay_t_s;
-    bool  ff_was_dwelling;
 
     /* TODO.md 6A.2's cooling-limited diagnostic: seconds duty has
      * continuously read 0 while still PROFILE_EXECUTOR_COOLING_LIMITED_MARGIN_C
@@ -624,10 +563,6 @@ static bool zone_load_model(uint8_t zi)
     z->ff_enabled = have;
     z->ff_k_dc = have ? k_dc : 0.0f;
     z->ff_tau_s = have ? tau_s : 0.0f;
-    /* Same have-gating as ff_k_dc/ff_tau_s above -- dead_time_s > 0.0f was
-     * already required for `have` to be true, so this is never a stale
-     * positive value surviving a model that just went missing. */
-    z->ff_dead_time_s = have ? dead_time_s : 0.0f;
 
     return (z->ff_enabled != was_enabled) || (z->ff_k_dc != was_k) || (z->ff_tau_s != was_tau);
 }
@@ -767,71 +702,10 @@ static float zone_feedforward(const zone_runtime_t *z, uint8_t zi, float setpoin
      * the two solves share the same qualifying-neighbour criteria, so a
      * membership edge on this tick is always caught by hold_membership_changed
      * already and does not need a second reseed trigger here. */
-    bool climb_used_matrix, climb_infeasible;
-    coupling_solve_reason_t climb_reason;
-    bool climb_membership_changed = false;
-    float climb;
-    if (zi < MAX31856_CHANNEL_COUNT && s_exec.dwelling) {
-        /* Dwell-entry overshoot fix, option (c) -- see the
-         * ff_climb_last_ramp_c/ff_climb_decay_* doc comment on
-         * zone_runtime_t. Gated on s_exec.dwelling, deliberately NOT on
-         * rate_c_per_s == 0: a ramp-lock stall also zeros
-         * target_rate_c_per_s without setting dwelling
-         * (profile_executor.c:2743's comment), and that must NOT start
-         * this decay -- a stalled ramp has not legitimately ended.
-         *
-         * Diagnostics (climb_used_matrix/infeasible/reason) are left at
-         * whatever the last REAL solve (the last ramp tick) reported,
-         * not forced to a fabricated value here -- this is a decay of a
-         * previously solved number, not a new solve, so there is nothing
-         * new to report and no fallback/infeasible edge to log.
-         *
-         * Decays over ff_DEAD_TIME_s (the plant's measured transport lag),
-         * NOT ff_tau_s (the plant's time constant) -- these are two
-         * different measured quantities and are NOT interchangeable here.
-         * dwell_entry_overshoot.md's whole point for option (c) is to cover
-         * the dead time: duty already committed during the ramp is still
-         * physically in flight through the plant's transport lag when the
-         * dwell starts, so the outgoing pulse should be allowed to finish
-         * arriving and then stop. Decaying over tau instead (a much larger
-         * number on this rig -- 263.8/269.8/270.9s tau vs 52.8/43.5/33.9s
-         * dead time for z0/z1/z2) would keep injecting a large fraction of
-         * climb duty for most or all of a typical 470-478s dwell, which is
-         * a mechanism for MORE dwell-entry overshoot, not less -- the
-         * opposite of the intended fix. exp(-t/L) with L = dead time is
-         * down to ~5% by 3L (~100-160s here), matching "cover the lag,
-         * then stop".
-         *
-         * ff_dead_time_s <= 0 (an unmeasured/fresh zone -- no dead-time
-         * model exists yet): no decay curve is defined, so climb goes
-         * straight to 0 here, same as the pre-fix behaviour for every
-         * zone. This is an explicit branch, not a division by zero. */
-        climb_used_matrix = s_exec.zones[zi].ff_climb_used_matrix;
-        climb_infeasible = s_exec.zones[zi].ff_climb_infeasible;
-        climb_reason = (coupling_solve_reason_t)s_exec.zones[zi].ff_climb_reason;
-        if (z->ff_dead_time_s > 0.0f) {
-            climb = s_exec.zones[zi].ff_climb_decay_latch_c *
-                    expf(-s_exec.zones[zi].ff_climb_decay_t_s / z->ff_dead_time_s);
-        } else {
-            climb = 0.0f;
-        }
-    } else {
-        climb_used_matrix = false;
-        climb_infeasible = false;
-        climb_reason = COUPLING_SOLVE_OK;
-        climb = solve_climb_for_zone(z, zi, rate_c_per_s, &climb_used_matrix, &climb_infeasible,
-                                     &climb_reason, &climb_membership_changed);
-        /* Recorded for the NEXT ramp->dwell edge to latch from -- see
-         * ff_climb_last_ramp_c's doc comment. Written every non-dwelling
-         * tick (including a ramp-lock stall, which is fine: it's still
-         * an honest "climb computed this tick", just usually 0 during a
-         * stall since rate_c_per_s is 0 then too), through
-         * s_exec.zones[zi] rather than the const z the diagnostics writes
-         * below also use. */
-        if (zi < MAX31856_CHANNEL_COUNT) {
-            s_exec.zones[zi].ff_climb_last_ramp_c = climb;
-        }
-    }
+    bool climb_used_matrix = false, climb_infeasible = false, climb_membership_changed = false;
+    coupling_solve_reason_t climb_reason = COUPLING_SOLVE_OK;
+    float climb = solve_climb_for_zone(z, zi, rate_c_per_s, &climb_used_matrix, &climb_infeasible,
+                                       &climb_reason, &climb_membership_changed);
     /* hold_total accumulates `hold` plus the Phase-3b cross-zone coupling
      * correction below -- everything that belongs on the floor's hold side,
      * never climb. `u_ff` (climb included) is still what gets clamped and
@@ -2829,34 +2703,6 @@ static void executor_task_entry(void *arg)
              * zone_feedforward() -- see coupling_filter_tick()'s own doc
              * comment for why. */
             coupling_filter_tick(&s_exec.zones[zi], valid, dt_s);
-
-            /* Dwell-entry climb-decay clock (see ff_climb_last_ramp_c's doc
-             * comment on zone_runtime_t) -- the ONE place this state
-             * advances, exactly once per real control tick, same as
-             * coupling_filter_tick() immediately above and for the same
-             * reason: zone_feedforward() is called twice in a single tick
-             * (the main control pass and seed_bumpless_with_ff()'s
-             * bump-transfer re-solve), and it must only READ this, never
-             * advance it, or a reseed tick would decay twice as fast as a
-             * normal one. s_exec.dwelling here is last tick's value (the
-             * ramp/dwell segment-stepping block that can flip it for THIS
-             * tick runs later, below) -- that's correct: the edge this
-             * detects is "dwelling became true as of the end of the
-             * PREVIOUS tick", which is exactly the tick whose
-             * zone_feedforward() call last wrote ff_climb_last_ramp_c from
-             * a real (non-dwelling) solve, so the latch always captures a
-             * genuine last-ramp-tick value, never a value from the first
-             * dwelling tick itself (which would already be stale/zero). */
-            zone_runtime_t *zff = &s_exec.zones[zi];
-            if (s_exec.dwelling) {
-                if (!zff->ff_was_dwelling) {
-                    zff->ff_climb_decay_latch_c = zff->ff_climb_last_ramp_c;
-                    zff->ff_climb_decay_t_s = 0.0f;
-                } else {
-                    zff->ff_climb_decay_t_s += dt_s;
-                }
-            }
-            zff->ff_was_dwelling = s_exec.dwelling;
         }
 
         /* --- Config reload (TODO.md 6A.7) ----------------------------------
