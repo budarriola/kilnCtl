@@ -16,6 +16,7 @@
 
 #include "esp_log.h"
 
+#include "autotune_engine.h"
 #include "heat_enable.h"
 #include "kiln_io_owner.h"
 #include "relay_authority.h"
@@ -68,7 +69,7 @@ void apply_relay(uint8_t zi, bool want_on)
         if (blocked && want_on) {
             /* The common, most-actionable case: this tick actually wanted
              * heat and got refused. */
-            ESP_LOGW(TAG, "zone %u WANTS HEAT BUT IS BLOCKED: sources 0x%02X -- no relay will "
+            ESP_LOGW(PE_TAG, "zone %u WANTS HEAT BUT IS BLOCKED: sources 0x%02X -- no relay will "
                           "close and the run will otherwise look normal",
                      zi, (unsigned)sources);
         } else if (blocked) {
@@ -76,9 +77,9 @@ void apply_relay(uint8_t zi, bool want_on)
              * (e.g. a PWM off-pulse, or a zone between demands) -- still
              * worth a line, just without claiming this exact tick wanted
              * heat. */
-            ESP_LOGW(TAG, "zone %u's heat is blocked: sources 0x%02X", zi, (unsigned)sources);
+            ESP_LOGW(PE_TAG, "zone %u's heat is blocked: sources 0x%02X", zi, (unsigned)sources);
         } else {
-            ESP_LOGI(TAG, "zone %u heat no longer blocked", zi);
+            ESP_LOGI(PE_TAG, "zone %u heat no longer blocked", zi);
         }
     }
     s_exec.zones[zi].heat_blocked = blocked;
@@ -95,7 +96,7 @@ void apply_relay(uint8_t zi, bool want_on)
          * TODO.md 10.14 Phase 1). */
         esp_err_t err = kiln_io_owner_command_set_relay_mask_authorized(mask, want_on ? mask : 0);
         if (err != ESP_OK) {
-            ESP_LOGW(TAG, "kiln_io_owner_command_set_relay_mask_authorized failed: %s -- relay "
+            ESP_LOGW(PE_TAG, "kiln_io_owner_command_set_relay_mask_authorized failed: %s -- relay "
                           "state for zone %u is unknown",
                      esp_err_to_name(err), zi);
         }
@@ -301,18 +302,18 @@ void io_seg_start(uint8_t idx, const profile_segment_t *seg)
         if (s_exec.io) {
             esp_err_t err = kiln_io_owner_command_set_relay_mask_authorized(bit, r->state_on ? bit : 0);
             if (err != ESP_OK) {
-                ESP_LOGW(TAG, "relay/IO segment %u: relay %u write failed: %s -- state is unknown",
+                ESP_LOGW(PE_TAG, "relay/IO segment %u: relay %u write failed: %s -- state is unknown",
                          idx + 1, r->target, esp_err_to_name(err));
             }
         }
     } else if (s_exec.io) {
         esp_err_t err = kiln_io_owner_command_set_io(r->target - PROFILE_IO_TARGET_IO_BASE + 1u, r->state_on);
         if (err != ESP_OK) {
-            ESP_LOGW(TAG, "relay/IO segment %u: IO_%u write failed: %s -- state is unknown",
+            ESP_LOGW(PE_TAG, "relay/IO segment %u: IO_%u write failed: %s -- state is unknown",
                      idx + 1, r->target - PROFILE_IO_TARGET_IO_BASE + 1u, esp_err_to_name(err));
         }
     }
-    ESP_LOGI(TAG, "relay/IO segment %u: %s %u %s (%s, %lus hold)", idx + 1,
+    ESP_LOGI(PE_TAG, "relay/IO segment %u: %s %u %s (%s, %lus hold)", idx + 1,
              r->is_relay ? "relay" : "IO_", r->is_relay ? r->target : (uint8_t)(r->target - PROFILE_IO_TARGET_IO_BASE + 1u),
              r->state_on ? "ON" : "OFF", r->blocking ? "blocking" : "non-blocking",
              (unsigned long)seg->dwell_min * 60u);
@@ -350,7 +351,7 @@ void io_seg_finish(uint8_t idx, bool honor_leave_on)
         if (!leave_on && s_exec.io) {
             esp_err_t err = kiln_io_owner_command_set_relay_mask_authorized(bit, 0);
             if (err != ESP_OK) {
-                ESP_LOGE(TAG, "relay/IO segment %u: force-off of relay %u failed: %s -- sweep_unowned_relays() "
+                ESP_LOGE(PE_TAG, "relay/IO segment %u: force-off of relay %u failed: %s -- sweep_unowned_relays() "
                               "will keep retrying",
                          idx + 1, r->target, esp_err_to_name(err));
             }
@@ -368,12 +369,12 @@ void io_seg_finish(uint8_t idx, bool honor_leave_on)
     } else if (!leave_on && s_exec.io) {
         esp_err_t err = kiln_io_owner_command_set_io(r->target - PROFILE_IO_TARGET_IO_BASE + 1u, false);
         if (err != ESP_OK) {
-            ESP_LOGE(TAG, "relay/IO segment %u: force-off of IO_%u failed: %s", idx + 1,
+            ESP_LOGE(PE_TAG, "relay/IO segment %u: force-off of IO_%u failed: %s", idx + 1,
                      r->target - PROFILE_IO_TARGET_IO_BASE + 1u, esp_err_to_name(err));
         }
     }
     if (leave_on) {
-        ESP_LOGW(TAG, "relay/IO segment %u left ON at run end (leave_on_at_end) -- now unowned, reachable "
+        ESP_LOGW(PE_TAG, "relay/IO segment %u left ON at run end (leave_on_at_end) -- now unowned, reachable "
                       "manually",
                  idx + 1);
     }
@@ -441,7 +442,7 @@ bool escalate_guard_trip(uint8_t zi, thermal_guard_trip_t reason, const char *de
         if (s_exec.safety) {
             esp_err_t err = safety_link_set_fault_source(s_exec.safety, source, true);
             if (err != ESP_OK) {
-                ESP_LOGE(TAG, "safety_link_set_fault_source(0x%02X) failed: %s", (unsigned)source,
+                ESP_LOGE(PE_TAG, "safety_link_set_fault_source(0x%02X) failed: %s", (unsigned)source,
                          esp_err_to_name(err));
             }
         }
@@ -463,7 +464,7 @@ bool escalate_guard_trip(uint8_t zi, thermal_guard_trip_t reason, const char *de
          * guard trip never honors it. */
         io_segs_force_all_off(false);
         release_profile_relay_claim();
-        ESP_LOGE(TAG, "GLOBAL thermal guard tripped on zone %u, whole run faulted: %s", zi, detail);
+        ESP_LOGE(PE_TAG, "GLOBAL thermal guard tripped on zone %u, whole run faulted: %s", zi, detail);
         return true;
     }
 
@@ -474,7 +475,7 @@ bool escalate_guard_trip(uint8_t zi, thermal_guard_trip_t reason, const char *de
     s_exec.zones[zi].fault_reason[sizeof(s_exec.zones[zi].fault_reason) - 1] = '\0';
     s_exec.zones[zi].fault_guard = reason;
     force_zone_relay_off(zi);
-    ESP_LOGE(TAG, "zone %u thermal guard tripped (per-zone): %s", zi, detail);
+    ESP_LOGE(PE_TAG, "zone %u thermal guard tripped (per-zone): %s", zi, detail);
 
     /* TODO.md 6A.3's "default policy on a single-zone trip: abort the whole
      * firing" -- the remaining zones would keep dumping heat into a chamber
@@ -501,7 +502,7 @@ bool escalate_guard_trip(uint8_t zi, thermal_guard_trip_t reason, const char *de
         s_exec.fault_guard = reason;
         io_segs_force_all_off(false); /* abnormal stop -- see the GLOBAL branch above */
         release_profile_relay_claim();
-        ESP_LOGE(TAG, "zone %u per-zone trip abandoned the whole firing (continue_on_zone_trip is off)", zi);
+        ESP_LOGE(PE_TAG, "zone %u per-zone trip abandoned the whole firing (continue_on_zone_trip is off)", zi);
         return true;
     }
 
@@ -519,7 +520,7 @@ bool escalate_guard_trip(uint8_t zi, thermal_guard_trip_t reason, const char *de
         s_exec.fault_guard = reason;
         io_segs_force_all_off(false); /* abnormal stop -- see the GLOBAL branch above */
         release_profile_relay_claim();
-        ESP_LOGE(TAG, "every active zone faulted -- whole run faulted");
+        ESP_LOGE(PE_TAG, "every active zone faulted -- whole run faulted");
         return true;
     }
     return false;
@@ -560,7 +561,7 @@ void clear_this_runs_faults(void)
     if (s_exec.global_fault_source != 0 && s_exec.safety) {
         esp_err_t err = safety_link_set_fault_source(s_exec.safety, s_exec.global_fault_source, false);
         if (err != ESP_OK) {
-            ESP_LOGE(TAG, "clearing fault source 0x%02X failed: %s", (unsigned)s_exec.global_fault_source,
+            ESP_LOGE(PE_TAG, "clearing fault source 0x%02X failed: %s", (unsigned)s_exec.global_fault_source,
                      esp_err_to_name(err));
         }
     }
@@ -596,7 +597,7 @@ void force_relay_mask_off(uint8_t zi, uint8_t mask)
         /* AUTHORIZED -- same reasoning as apply_relay() above. */
         esp_err_t err = kiln_io_owner_command_set_relay_mask_authorized(mask, 0);
         if (err != ESP_OK) {
-            ESP_LOGE(TAG, "zone %u: dropping superseded relay mask 0x%02X failed: %s -- "
+            ESP_LOGE(PE_TAG, "zone %u: dropping superseded relay mask 0x%02X failed: %s -- "
                           "those contacts may still be closed and nothing owns them now",
                      zi, mask, esp_err_to_name(err));
         }
@@ -688,14 +689,14 @@ void sweep_unowned_relays(void)
         return;
     }
 
-    ESP_LOGE(TAG, "UNOWNED RELAY(S) 0x%02X still closed (TODO.md 6A.7 sweep): claimed 0x%02X by this run, "
+    ESP_LOGE(PE_TAG, "UNOWNED RELAY(S) 0x%02X still closed (TODO.md 6A.7 sweep): claimed 0x%02X by this run, "
                   "owned 0x%02X by an active zone or an autotune run -- an earlier force-off failed or a "
                   "mask edit stranded them; forcing off",
              stray, s_exec.claimed_relay_mask, owned);
     /* AUTHORIZED -- same reasoning as apply_relay() above. */
     esp_err_t err = kiln_io_owner_command_set_relay_mask_authorized(stray, 0);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "unowned-relay sweep could not open 0x%02X: %s -- those contacts are still closed and "
+        ESP_LOGE(PE_TAG, "unowned-relay sweep could not open 0x%02X: %s -- those contacts are still closed and "
                       "the expander is not answering",
                  stray, esp_err_to_name(err));
     }

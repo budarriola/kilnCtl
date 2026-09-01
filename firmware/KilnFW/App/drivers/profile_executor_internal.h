@@ -33,9 +33,9 @@
  *
  * test_profile_executor_prestart.c #includes all three .c files directly
  * into one translation unit (same reason as test_zones_http.c -- see that
- * file's own header comment), so TAG is defined once, non-static, in
+ * file's own header comment), so PE_TAG is defined once, non-static, in
  * profile_executor.c and only declared `extern` here -- three independent
- * `static const char *TAG = ...` in one TU would be a redefinition error
+ * `static const char *PE_TAG = ...` in one TU would be a redefinition error
  * there even though it's fine in the normal separate-TU firmware build. */
 
 #include "profile_executor.h"
@@ -53,7 +53,7 @@
 #include "zone_coupling_solve.h"
 
 /* ---- shared log tag ------------------------------------------------------ */
-extern const char *TAG;
+extern const char *PE_TAG;
 
 /* Pre-start warnings from the POLLED readers (profile_executor_status.c),
  * throttled to one line each per boot.
@@ -68,7 +68,7 @@ extern const char *TAG;
  * drops lines when that queue fills) and buries the recovery-mode banner --
  * degrading exactly the mode these guards exist to make survivable. Once per
  * boot says everything a reader needs; the hundredth copy says nothing. */
-#define LOG_PRESTART_ONCE(msg)                                                                       do {                                                                                                  static bool s_warned_once = false;                                                                if (!s_warned_once) {                                                                                 s_warned_once = true;                                                                             ESP_LOGW(TAG, msg " (further occurrences this boot are suppressed)");                         }                                                                                              } while (0)
+#define LOG_PRESTART_ONCE(msg)                                                                       do {                                                                                                  static bool s_warned_once = false;                                                                if (!s_warned_once) {                                                                                 s_warned_once = true;                                                                             ESP_LOGW(PE_TAG, msg " (further occurrences this boot are suppressed)");                         }                                                                                              } while (0)
 
 /* Time-proportioning window defaults (TODO.md 6A.1), used when a zone
  * hasn't configured its own via zones_config_get_heater_cfg() (6A.9). 60s

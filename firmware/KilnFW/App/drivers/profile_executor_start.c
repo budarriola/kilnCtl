@@ -15,6 +15,7 @@
 #include "autotune_engine.h"
 #include "relay_cycles.h"
 #include "run_state.h"
+#include "stack_margin.h"
 #include "zones_http.h"
 
 esp_err_t profile_executor_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_bus_or_null,
@@ -29,7 +30,7 @@ esp_err_t profile_executor_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo
 
     s_exec.lock = xSemaphoreCreateMutex();
     if (!s_exec.lock) {
-        ESP_LOGE(TAG, "xSemaphoreCreateMutex failed");
+        ESP_LOGE(PE_TAG, "xSemaphoreCreateMutex failed");
         return ESP_ERR_NO_MEM;
     }
 
@@ -42,7 +43,7 @@ esp_err_t profile_executor_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo
      * convention as relay_cycles_init() in main.c. */
     esp_err_t rs_err = run_state_init();
     if (rs_err != ESP_OK) {
-        ESP_LOGW(TAG, "run_state_init failed: %s -- no reboot breadcrumb kept this boot",
+        ESP_LOGW(PE_TAG, "run_state_init failed: %s -- no reboot breadcrumb kept this boot",
                  esp_err_to_name(rs_err));
     }
 
@@ -84,7 +85,7 @@ esp_err_t profile_executor_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo
     BaseType_t ok = xTaskCreatePinnedToCore(executor_task_entry, "profile_executor", 4096, NULL, 5,
                                             &s_exec.task, tskNO_AFFINITY);
     if (ok != pdPASS) {
-        ESP_LOGE(TAG, "xTaskCreatePinnedToCoreWithCaps(profile_executor) failed");
+        ESP_LOGE(PE_TAG, "xTaskCreatePinnedToCoreWithCaps(profile_executor) failed");
         vSemaphoreDelete(s_exec.lock);
         s_exec.lock = NULL;
         return ESP_ERR_NO_MEM;
@@ -110,7 +111,7 @@ esp_err_t profile_executor_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo
     ok = xTaskCreatePinnedToCore(watchdog_task_entry, "profile_exec_wdt", 2560, NULL, 5,
                                  &s_exec.watchdog_task, tskNO_AFFINITY);
     if (ok != pdPASS) {
-        ESP_LOGE(TAG, "xTaskCreatePinnedToCoreWithCaps(profile_exec_wdt) failed -- guard 9 unavailable this boot");
+        ESP_LOGE(PE_TAG, "xTaskCreatePinnedToCoreWithCaps(profile_exec_wdt) failed -- guard 9 unavailable this boot");
     }
     /* Registered unconditionally, ok==pdPASS or not -- stack_margin_register()
      * reads *task_handle_slot fresh at report time (stack_margin.h's own
@@ -118,7 +119,7 @@ esp_err_t profile_executor_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo
      * rather than needing a second branch here. */
     stack_margin_register("profile_exec_wdt", &s_exec.watchdog_task, 2560);
 
-    ESP_LOGI(TAG, "profile executor up (io_ready=%d, thermo_ready=%d, safety_ready=%d) -- "
+    ESP_LOGI(PE_TAG, "profile executor up (io_ready=%d, thermo_ready=%d, safety_ready=%d) -- "
                   "NOT YET VERIFIED AGAINST REAL RELAY/THERMOCOUPLE HARDWARE (single- or multi-zone), "
                   "see profile_executor.h",
              io_or_null != NULL, thermo_bus_or_null != NULL && thermo_bus_or_null->initialized,

@@ -33,7 +33,7 @@ bool reload_zone_config(uint8_t zi)
      * relay. */
     zone_control_mode_t mode = ZONE_CONTROL_MODE_OFF;
     if (!zones_config_get_control_mode(zi, &mode)) {
-        ESP_LOGE(TAG, "zone %u is active in this run but is no longer configured (thermo_count shrank?) -- "
+        ESP_LOGE(PE_TAG, "zone %u is active in this run but is no longer configured (thermo_count shrank?) -- "
                       "keeping it in the run on its last-known settings, forcing its relays off; "
                       "it cannot be re-energized while the config can't name its relays", zi);
         force_relay_mask_off(zi, z->relay_mask);
@@ -45,7 +45,7 @@ bool reload_zone_config(uint8_t zi)
      * new mask instead of re-opening contacts that were just handed away. */
     uint8_t mask = 0;
     if (zones_config_get_relay_mask(zi, &mask) && mask != z->relay_mask) {
-        ESP_LOGW(TAG, "OPERATOR ACTION MID-FIRING: zone %u relay mask 0x%02X -> 0x%02X -- old mask forced off "
+        ESP_LOGW(PE_TAG, "OPERATOR ACTION MID-FIRING: zone %u relay mask 0x%02X -> 0x%02X -- old mask forced off "
                       "before the new one is adopted", zi, z->relay_mask, mask);
         force_relay_mask_off(zi, z->relay_mask);
         z->relay_mask = mask;
@@ -60,7 +60,7 @@ bool reload_zone_config(uint8_t zi)
      * the operator's action loud in the log. */
     bool mode_changed = (mode != z->control_mode);
     if (mode_changed) {
-        ESP_LOGW(TAG, "OPERATOR ACTION MID-FIRING: zone %u control mode %d -> %d -- relays forced off and "
+        ESP_LOGW(PE_TAG, "OPERATOR ACTION MID-FIRING: zone %u control mode %d -> %d -- relays forced off and "
                       "the PID restarted cold; no handover is attempted between modes",
                  zi, (int)z->control_mode, (int)mode);
         force_zone_relay_off(zi);
@@ -79,7 +79,7 @@ bool reload_zone_config(uint8_t zi)
     float kp = 0.0f, ki = 0.0f, kd = 0.0f;
     if (zones_config_get_pid(zi, &kp, &ki, &kd) &&
         (kp != z->pid_cfg.kp || ki != z->pid_cfg.ki || kd != z->pid_cfg.kd)) {
-        ESP_LOGI(TAG, "zone %u PID gains reloaded mid-firing: kp %.4g->%.4g, ki %.4g->%.4g, kd %.4g->%.4g",
+        ESP_LOGI(PE_TAG, "zone %u PID gains reloaded mid-firing: kp %.4g->%.4g, ki %.4g->%.4g, kd %.4g->%.4g",
                  zi, (double)z->pid_cfg.kp, (double)kp, (double)z->pid_cfg.ki, (double)ki,
                  (double)z->pid_cfg.kd, (double)kd);
         z->pid_cfg.kp = kp;
@@ -125,7 +125,7 @@ bool reload_zone_config(uint8_t zi)
      * needs to unwind. Re-seeding hands the same total duty over to the new
      * split between ff and I, and lets the PID walk from there. */
     if (zone_load_model(zi)) {
-        ESP_LOGI(TAG, "zone %u plant model reloaded mid-firing: feedforward %s (K_dc %.4g, tau %.4gs) -- "
+        ESP_LOGI(PE_TAG, "zone %u plant model reloaded mid-firing: feedforward %s (K_dc %.4g, tau %.4gs) -- "
                       "PID re-seeded so the duty split changes without the duty itself stepping",
                  zi, z->ff_enabled ? "ON" : "OFF", (double)z->ff_k_dc, (double)z->ff_tau_s);
         if (!mode_changed &&
@@ -150,7 +150,7 @@ bool reload_zone_config(uint8_t zi)
         uint32_t on = (min_on_ms > 0.0f) ? (uint32_t)min_on_ms : HEATER_MIN_ON_MS;
         uint32_t off = (min_off_ms > 0.0f) ? (uint32_t)min_off_ms : HEATER_MIN_OFF_MS;
         if (w != z->heater_cfg.window_ms || on != z->heater_cfg.min_on_ms || off != z->heater_cfg.min_off_ms) {
-            ESP_LOGI(TAG, "zone %u heater timing reloaded mid-firing: window %lu->%lums, min_on %lu->%lums, "
+            ESP_LOGI(PE_TAG, "zone %u heater timing reloaded mid-firing: window %lu->%lums, min_on %lu->%lums, "
                           "min_off %lu->%lums (current window finishes on the old values)",
                      zi, (unsigned long)z->heater_cfg.window_ms, (unsigned long)w,
                      (unsigned long)z->heater_cfg.min_on_ms, (unsigned long)on,
@@ -176,13 +176,13 @@ bool reload_zone_config(uint8_t zi)
     float max_temp_c = 0.0f, min_temp_c = -20.0f;
     if (zones_config_get_temp_limits(zi, &max_temp_c, &min_temp_c)) {
         if (max_temp_c != z->guard_cfg.max_temp_c) {
-            ESP_LOGW(TAG, "OPERATOR ACTION MID-FIRING: zone %u guard max_temp_c %.1f -> %.1f",
+            ESP_LOGW(PE_TAG, "OPERATOR ACTION MID-FIRING: zone %u guard max_temp_c %.1f -> %.1f",
                      zi, (double)z->guard_cfg.max_temp_c, (double)max_temp_c);
             z->guard_cfg.max_temp_c = max_temp_c;
             changed = true;
         }
         if (min_temp_c != z->guard_cfg.min_temp_c) {
-            ESP_LOGW(TAG, "OPERATOR ACTION MID-FIRING: zone %u guard min_temp_c %.1f -> %.1f",
+            ESP_LOGW(PE_TAG, "OPERATOR ACTION MID-FIRING: zone %u guard min_temp_c %.1f -> %.1f",
                      zi, (double)z->guard_cfg.min_temp_c, (double)min_temp_c);
             z->guard_cfg.min_temp_c = min_temp_c;
             changed = true;
@@ -193,7 +193,7 @@ bool reload_zone_config(uint8_t zi)
     if (zones_config_get_sanity_rate(zi, &sanity_rate)) {
         float applied = (sanity_rate > 0.0f) ? sanity_rate : PROFILE_EXECUTOR_DEFAULT_SANITY_RATE_C_PER_MIN;
         if (applied != z->guard_cfg.sanity_rate_c_per_min) {
-            ESP_LOGW(TAG, "OPERATOR ACTION MID-FIRING: zone %u guard sanity_rate_c_per_min %.3f -> %.3f",
+            ESP_LOGW(PE_TAG, "OPERATOR ACTION MID-FIRING: zone %u guard sanity_rate_c_per_min %.3f -> %.3f",
                      zi, (double)z->guard_cfg.sanity_rate_c_per_min, (double)applied);
             z->guard_cfg.sanity_rate_c_per_min = applied;
             changed = true;
@@ -212,7 +212,7 @@ bool reload_zone_config(uint8_t zi)
                                               &frozen_window_s)) {
 #define RELOAD_GUARD_FIELD(field, new_val, fmt)                                                          \
             if ((new_val) != z->guard_cfg.field) {                                                       \
-                ESP_LOGW(TAG, "OPERATOR ACTION MID-FIRING: zone %u guard " #field " " fmt " -> " fmt,     \
+                ESP_LOGW(PE_TAG, "OPERATOR ACTION MID-FIRING: zone %u guard " #field " " fmt " -> " fmt,     \
                          zi, (double)z->guard_cfg.field, (double)(new_val));                              \
                 z->guard_cfg.field = (new_val);                                                           \
                 changed = true;                                                                           \
@@ -252,7 +252,7 @@ bool reload_zone_config(uint8_t zi)
          * convention to sanity_rate), so this particular edit can silently
          * remove a protection rather than merely widen it -- all the more
          * reason for it to be in the log by name. */
-        ESP_LOGW(TAG, "OPERATOR ACTION MID-FIRING: zone %u guard cross_zone_max_delta_c %.1f -> %.1f%s",
+        ESP_LOGW(PE_TAG, "OPERATOR ACTION MID-FIRING: zone %u guard cross_zone_max_delta_c %.1f -> %.1f%s",
                  zi, (double)z->guard_cfg.cross_zone_max_delta_c, (double)cross_zone_delta_c,
                  (cross_zone_delta_c <= 0.0f) ? " (guard 8 now DISABLED for this zone)" : "");
         z->guard_cfg.cross_zone_max_delta_c = cross_zone_delta_c;
@@ -287,7 +287,7 @@ bool reload_zone_config(uint8_t zi)
                 : NULL;
         bool now_infeasible = have_ceiling && seg && seg->ramp_c_per_hr > ceiling;
         if (now_infeasible && !z->max_ramp_warned) {
-            ESP_LOGW(TAG, "OPERATOR ACTION MID-FIRING: zone %u max_ramp_c_per_hr lowered to %.1f, below the "
+            ESP_LOGW(PE_TAG, "OPERATOR ACTION MID-FIRING: zone %u max_ramp_c_per_hr lowered to %.1f, below the "
                           "current segment's %.1f C/hr -- the running ramp is UNCHANGED, this only flags that "
                           "it now exceeds the configured ceiling", zi, (double)ceiling, (double)seg->ramp_c_per_hr);
             z->max_ramp_warned = true;

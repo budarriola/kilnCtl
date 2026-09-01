@@ -237,22 +237,22 @@ float zone_feedforward(const zone_runtime_t *z, uint8_t zi, float setpoint_c, fl
         if (fell_back != s_fallback_active[zi]) {
             s_fallback_active[zi] = fell_back;
             if (fell_back) {
-                ESP_LOGW(TAG, "zone %u coupled feedforward hold fell back to the legacy per-zone "
+                ESP_LOGW(PE_TAG, "zone %u coupled feedforward hold fell back to the legacy per-zone "
                               "diagonal (unqualified zone, no qualifying coupled neighbours, or a "
                               "singular/ill-conditioned coupling matrix)",
                          zi);
             } else {
-                ESP_LOGI(TAG, "zone %u coupled feedforward hold resumed using the solved coupling matrix", zi);
+                ESP_LOGI(PE_TAG, "zone %u coupled feedforward hold resumed using the solved coupling matrix", zi);
             }
         }
         if (hold_infeasible != s_infeasible_active[zi]) {
             s_infeasible_active[zi] = hold_infeasible;
             if (hold_infeasible) {
-                ESP_LOGW(TAG, "zone %u coupled feedforward solve required clamping a zone's duty to "
+                ESP_LOGW(PE_TAG, "zone %u coupled feedforward solve required clamping a zone's duty to "
                               "[0,1] -- the commanded setpoint combination is not achievable as specified",
                          zi);
             } else {
-                ESP_LOGI(TAG, "zone %u coupled feedforward solve back within [0,1] without clamping", zi);
+                ESP_LOGI(PE_TAG, "zone %u coupled feedforward solve back within [0,1] without clamping", zi);
             }
         }
 
@@ -281,7 +281,7 @@ float zone_feedforward(const zone_runtime_t *z, uint8_t zi, float setpoint_c, fl
             s_exec.zones[zi].ff_membership_change_count++;
             uint32_t count = s_exec.zones[zi].ff_membership_change_count;
             if (count == 1 || count % 10 == 0) {
-                ESP_LOGW(TAG, "zone %u coupled feedforward membership changed (count=%lu this run) -- "
+                ESP_LOGW(PE_TAG, "zone %u coupled feedforward membership changed (count=%lu this run) -- "
                               "PID integral re-seeded to hold commanded duty steady; a fast-growing "
                               "count means a flapping interlock/coupled-neighbour state is leaving "
                               "integral action effectively off for this zone",

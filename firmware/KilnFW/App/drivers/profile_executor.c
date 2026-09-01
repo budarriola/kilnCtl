@@ -40,7 +40,7 @@
 #include "zone_coupling_solve.h"
 #include "zones_http.h"
 
-const char *TAG = "profile_executor";
+const char *PE_TAG = "profile_executor";
 
 /* Guard 9: control-tick liveness (TODO.md 6A.3/6A.7). A second, independent
  * task -- "a control loop cannot be its own watchdog" -- checks that the
@@ -150,7 +150,7 @@ static void reload_config_if_changed(void)
      * calibration offset, which is read fresh every tick anyway), still moves
      * the generation, and the operator log should show that settings were
      * touched during a firing at all, not only when it altered this run. */
-    ESP_LOGI(TAG, "config reloaded mid-run (TODO.md 6A.7): generation %lu -> %lu, %u active zone(s) re-read, "
+    ESP_LOGI(PE_TAG, "config reloaded mid-run (TODO.md 6A.7): generation %lu -> %lu, %u active zone(s) re-read, "
                   "zones changed 0x%02X",
              (unsigned long)prev, (unsigned long)gen, rechecked, changed_mask);
 }
@@ -939,7 +939,7 @@ void watchdog_task_entry(void *arg)
              * profile_executor_wd_decide() below says to do about the STATE --
              * this part is not delegated to that pure function (it always
              * needs to happen, not just "when RUNNING/PAUSED"). */
-            ESP_LOGE(TAG, "control task tick stale for %lums -- forcing relays off (guard 9)",
+            ESP_LOGE(PE_TAG, "control task tick stale for %lums -- forcing relays off (guard 9)",
                      (unsigned long)since_ms);
             if (s_exec.io) {
                 kiln_io_all_relays_off(s_exec.io);
@@ -991,7 +991,7 @@ void watchdog_task_entry(void *arg)
              * PERIOD_MS as long as the firing stays in this faulted state,
              * which is the retry LINK_PROTOCOL.md sec 8 asks for (the RETRY
              * case below is what performs those later rechecks). */
-            ESP_LOGE(TAG, "%s", wd_out.fault_reason);
+            ESP_LOGE(PE_TAG, "%s", wd_out.fault_reason);
             if (s_exec.io) {
                 kiln_io_all_relays_off(s_exec.io);
             }
@@ -1026,7 +1026,7 @@ void watchdog_task_entry(void *arg)
              * renderSafetyTrip(), ui_page_home.c's refresh()), so no shared
              * state needs adding here just for display. */
             if (!s_idle_trip_logged) {
-                ESP_LOGW(TAG, "safety processor tripped (%s) while idle -- no run to abort",
+                ESP_LOGW(PE_TAG, "safety processor tripped (%s) while idle -- no run to abort",
                          profile_executor_safety_trip_words(safety_diag_trip_reason));
             }
             s_idle_trip_logged = true;

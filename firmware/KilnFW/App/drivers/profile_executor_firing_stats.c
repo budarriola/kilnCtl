@@ -211,7 +211,7 @@ bool firing_stats_load(uint8_t profile_id, profile_firing_history_blob_t *out)
         return true; /* this profile has never fired -- not an error */
     }
     if (err != ESP_OK || len != sizeof(*out)) {
-        ESP_LOGW(TAG, "firing_stats_load(%u) failed: %s (len %u/%u)", (unsigned)profile_id,
+        ESP_LOGW(PE_TAG, "firing_stats_load(%u) failed: %s (len %u/%u)", (unsigned)profile_id,
                  esp_err_to_name(err), (unsigned)len, (unsigned)sizeof(*out));
         memset(out, 0, sizeof(*out));
         return false;
@@ -245,7 +245,7 @@ void firing_stats_persist(const profile_firing_run_record_t *rec)
     esp_err_t err = nvs_open_from_partition(FIRING_STATS_NVS_PARTITION, FIRING_STATS_NVS_NAMESPACE,
                                              NVS_READWRITE, &h);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "firing_stats_persist(%u): nvs_open failed: %s", (unsigned)rec->profile_id,
+        ESP_LOGE(PE_TAG, "firing_stats_persist(%u): nvs_open failed: %s", (unsigned)rec->profile_id,
                  esp_err_to_name(err));
         return;
     }
@@ -254,10 +254,10 @@ void firing_stats_persist(const profile_firing_run_record_t *rec)
         err = nvs_commit(h);
     }
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "firing_stats_persist(%u): write failed: %s", (unsigned)rec->profile_id,
+        ESP_LOGE(PE_TAG, "firing_stats_persist(%u): write failed: %s", (unsigned)rec->profile_id,
                  esp_err_to_name(err));
     } else {
-        ESP_LOGI(TAG, "firing stats persisted for profile %u (%s), %u/%u history entries",
+        ESP_LOGI(PE_TAG, "firing stats persisted for profile %u (%s), %u/%u history entries",
                  (unsigned)rec->profile_id, rec->profile_name, (unsigned)blob.count,
                  (unsigned)PROFILE_EXECUTOR_FIRING_HISTORY_DEPTH);
     }
