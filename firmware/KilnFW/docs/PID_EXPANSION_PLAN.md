@@ -1081,11 +1081,18 @@ flash. Three different write patterns, and they must not share a mechanism.
 
 ### Phase 7b — live autotune trace on the graph
 
-- [ ] Draw the in-progress autotune trace on the home graph against the planned
-      profile, while the tune is running.
-- [ ] Annotate the current engine phase (settling / probing / stepping /
-      identifying) so it is visible *what* is producing the curve — a flat
-      settling segment and a stalled step look identical without it.
+- [x] Draw the in-progress autotune trace on the home graph against the planned
+      profile, while the tune is running. Landed 2026-09-01, entirely
+      client-side — no new endpoint and no firmware change, so no DRAM cost.
+- [x] Annotate the current engine phase so it is visible *what* is producing
+      the curve — a flat settling segment and a stalled step look identical
+      without it. Landed 2026-09-01.
+- [ ] **Gap left open by the above:** the exposed enum is only
+      `idle/settling/stepping/relay_approach/relay_cycling/done/aborted`.
+      Probe and identify are internal sub-phases of `STEPPING` and are not
+      reported, so a target-mode run shows both as "stepping" — which is
+      exactly the ambiguity the phase label exists to remove. The engine needs
+      to report the sub-phase before target mode is useful on the graph.
 - [ ] Mostly plumbing: the graph already draws a series, and
       `/api/autotune/trace.csv` already exists. Check the sample budget before
       adding a second series — see [[project_esp_internal_dram_exhaustion]];
