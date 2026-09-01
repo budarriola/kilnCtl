@@ -74,17 +74,18 @@ tracks each zone's own dead time at 1.5–2×, and zone 2's second-dwell peak li
 up with the cross-zone dead time while its neighbours are still driving.
 
 - [~] **Terminal ease-off** — taper the commanded rate as the target is
-      approached so the plant arrives with little stored rate. Simulated
-      2026-09-01 with two shapes (linear, cosine) and two windows (1×L, 2×L,
-      per-zone dead time, no hand constant): **worse on z0 and z1 in all four
-      configurations, monotonically worse with a wider window**, and at best a
-      wash on z2 (4% less overshoot for nearly double the settle time). Not
-      implemented.
-      **But treat this verdict as weak.** The simulator cannot reproduce
-      hardware ramp tracking at all — it shows 5–7 °C mean ramp error where the
-      real kiln now holds ~0.03 °C, and retuning its gains barely moved that.
-      Its "no" is a reason not to prioritize ease-off, not evidence the idea is
-      wrong. See §3.4 — the simulator is now the blocker.
+      approached so the plant arrives with little stored rate.
+      First simulated as **worse on z0 and z1 in all four configurations**, and
+      reported as a rejection. **That verdict was void**: it came from the
+      simulator's hardcoded 10 °C/min ramp rate against profile 7's actual
+      2–3.5 °C/min (§3.4). Re-run on the calibrated simulator, the taper
+      **roughly halves dwell-entry RMS on z0 and z1 at near-zero ramp cost**.
+      Implemented and awaiting a hardware A/B, which is the arbiter — the
+      previous attempt in this family (climb decay) also simulated well and was
+      reverted after hardware measured it worse on every zone.
+      Tapers the feedforward's rate input only, never the setpoint schedule, so
+      a stall is structurally impossible and the worst case is ordinary PID
+      tracking lag.
 
 ### 3.2 Zone 2's model over-predicts its hold duty
 
@@ -117,28 +118,37 @@ HTTP endpoint and zones-page UI.
       in adaptive_tune's own NVS namespace (`adap_tune`) because `zones_http.c`
       was held by another agent when it was written.
 
-### 3.4 The simulator is the blocker for further control work
+### 3.4 The simulator — calibrated 2026-09-01, and what it is worth
 
-Every remaining control idea is gated on being able to predict its effect before
-spending a 35-minute firing on it, and the current simulator cannot do that. Its
-record across this session: it predicted 44–53% ramp recovery where hardware
-delivered essentially full recovery; it favoured the climb-decay change that
-hardware then measured as worse on every zone; and it shows 5–7 °C ramp error on
-a controller that actually tracks to ~0.03 °C. It is useful for mechanism
-comparisons and untrustworthy for magnitudes, which is not enough to decide a
-change on.
+For most of this session the simulator was wrong in both directions: it
+predicted 44–53% ramp recovery where hardware delivered essentially full
+recovery, and it favoured the climb-decay change hardware then measured as worse
+on every zone. It showed 5–7 °C ramp error for a controller tracking to
+~0.03 °C.
 
-- [ ] **Calibrate the simulator against the logged hardware runs.** Five full
-      profile-7 captures now exist with per-zone temperature, duty, target and
-      guard state at 10 s resolution, spanning four different firmware builds
-      whose control differences are known exactly. That is a real validation
-      set. Fit the simulator until it reproduces the measured runs — including
-      the ramp tracking it currently misses by two orders of magnitude — and
-      report per-run error against each capture, rather than tuning until one
-      run looks right.
-- [ ] Once it reproduces known runs, re-run the rejected levers through it. A
-      calibrated simulator that still says no to terminal ease-off is a real
-      no; the current one saying no means little.
+**The whole cause was one constant: it drove itself at a hardcoded 10 °C/min
+while profile 7 ramps at 2–3.5 °C/min.** Coupled climb feedforward is linear in
+commanded rate, so a 3–5× rate error produced the entire phantom lag — which is
+why retuning its gains never moved it (a gain sweep left the error pinned
+regardless of kp/ki/kd). Tick rate, PID form, anti-windup, the integral floor and
+the coupled solve were all checked and all matched the firmware.
+
+Calibrated against all five captures, aggregate residual is **1.45 °C RMS across
+60 windows**, against hardware's own 0.4–2.8 °C run-to-run noise. Now lives in
+the repo as `tools/PcTools/src/kilnctrl/plant_sim.py` (`7b56a8a`) with the
+captures as checked-in fixtures, a CLI, an MCP tool, and a regression test that
+fails if the ramp rate is ever hardcoded again.
+
+**What it can be trusted for**, per its own module docstring: ramp magnitude and
+sign on coupled-feedforward builds; dwell behaviour generally. **Not** the
+uncoupled baseline's exact saturation dynamics, not zone 2's second dwell in
+isolation (it runs 1.8–2.6 °C cold on every coupled build, reproducing §3.2's
+open defect rather than a sim error — a point in its favour), and nothing below
+the ~1 °C noise floor.
+
+The lesson worth keeping: every sim verdict in this chain was quoted with
+confidence while resting on an unvalidated driving condition. A simulator is not
+evidence until it reproduces a measurement someone actually took.
 
 ### 3.5 Documentation
 
