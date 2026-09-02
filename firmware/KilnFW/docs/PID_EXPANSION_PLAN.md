@@ -161,9 +161,15 @@ HTTP endpoint and zones-page UI.
       above. Classifies steady offset, drift and limit cycle; a detected limit
       cycle yields Ku/Tu without a relay test. Per-run move capped at
       `ADAPTIVE_TUNE_KI_MAX_FRACTIONAL_MOVE` (20%), cumulative growth capped at
-      50x a latched per-zone baseline. **Held from hardware until the final
-      review clears the baseline-latch question** (a baseline re-latched from an
-      already-grown Ki after reboot would ratchet, making 50x unbounded).
+      5x a per-zone baseline that is persisted to NVS and re-latched whenever
+      the model layer writes a fresh SIMC Ki, with a symmetric lower floor at
+      baseline/5. **Code-level blockers all closed and mutation-proven** across
+      six review rounds: the reboot ratchet (baseline in RAM while Ki persisted,
+      measured reaching 850.6x after one power cycle), the dead remedy (nothing
+      cleared the baseline, so the refusal's "re-autotune" advice was a no-op —
+      now cleared by `autotune_engine_accept()`), a vacuous decreasing-direction
+      test, and a real board-wide deadlock reached by Accept on the UART path.
+      **Never yet run on hardware.** Enable one zone first, not three.
 - [x] **Dynamics from ramps** — built (`13dcf49`) and **SHELVED** (`65f6525`).
       The two-point reaction-curve fit cannot work on closed-loop firing data:
       its output reduces analytically to `0.524·K·Δduty/ramp_rate`, a function
