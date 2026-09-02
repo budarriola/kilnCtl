@@ -87,6 +87,64 @@ void run_test_pid_fuzzy(void)
         TEST_CHECK(kd < 0.01f, "NEG error, RISING rate: kd nudged down");
     }
 
+    /* Rule-table cells not covered by the four "large error" corners above:
+     * the ZERO (near-setpoint) row and the STEADY-rate column. These are the
+     * cells that actually fire during well-tracked dwells/ramps -- exactly
+     * where a 2026-09-02 plant_sim.py sweep found strength=0 beating every
+     * higher strength, monotonically, on every zone at both tested starts
+     * (PID_EXPANSION_PLAN.md §3.6). A transposed or inverted table would
+     * produce exactly that symptom, so these cells -- previously untested --
+     * are the ones that mattered most to check. Expected directions are
+     * transcribed from pid_fuzzy.h's documented table (the source of truth),
+     * not from pid_fuzzy.c's RULE_TABLE, so an inversion in the .c file has
+     * something independent to be caught against. */
+    {
+        /* ZERO error, rate FALLING (crossing target fast) -> Kp-, Ki-, Kd+. */
+        float kp, ki, kd;
+        pid_fuzzy_adjust(0.0f, -1.0f, 0.02f, 0.02f, 0.02f, 100, &kp, &ki, &kd);
+        TEST_CHECK(kp < 0.02f, "ZERO error, FALLING rate: kp nudged down");
+        TEST_CHECK(ki < 0.02f, "ZERO error, FALLING rate: ki nudged down");
+        TEST_CHECK(kd > 0.02f, "ZERO error, FALLING rate: kd nudged up");
+    }
+    {
+        /* ZERO error, rate STEADY (settled) -> Kp-, Ki+, Kd- ("coast on I,
+         * ease P/D"). This is the cell a well-tracked dwell sits in almost
+         * the whole time it is dwelling. */
+        float kp, ki, kd;
+        pid_fuzzy_adjust(0.0f, 0.0f, 0.02f, 0.02f, 0.02f, 100, &kp, &ki, &kd);
+        TEST_CHECK(kp < 0.02f, "ZERO error, STEADY rate: kp nudged down");
+        TEST_CHECK(ki > 0.02f, "ZERO error, STEADY rate: ki nudged up");
+        TEST_CHECK(kd < 0.02f, "ZERO error, STEADY rate: kd nudged down");
+    }
+    {
+        /* ZERO error, rate RISING (just left target) -> Kp+, Ki-, Kd+. */
+        float kp, ki, kd;
+        pid_fuzzy_adjust(0.0f, 1.0f, 0.02f, 0.02f, 0.02f, 100, &kp, &ki, &kd);
+        TEST_CHECK(kp > 0.02f, "ZERO error, RISING rate: kp nudged up");
+        TEST_CHECK(ki < 0.02f, "ZERO error, RISING rate: ki nudged down");
+        TEST_CHECK(kd > 0.02f, "ZERO error, RISING rate: kd nudged up");
+    }
+    {
+        /* POS (large) error, rate STEADY (steady approach) -> Kp+, Ki=, Kd=.
+         * The "=" entries are the discriminator a corner-only suite would
+         * miss entirely: a table that nudges ki/kd here anyway (e.g. an
+         * off-by-one row/column shift) passes every corner test but fails
+         * this one. */
+        float kp, ki, kd;
+        pid_fuzzy_adjust(500.0f, 0.0f, 0.02f, 0.02f, 0.02f, 100, &kp, &ki, &kd);
+        TEST_CHECK(kp > 0.02f, "POS error, STEADY rate: kp nudged up");
+        TEST_CHECK(ki == 0.02f, "POS error, STEADY rate: ki unchanged");
+        TEST_CHECK(kd == 0.02f, "POS error, STEADY rate: kd unchanged");
+    }
+    {
+        /* NEG (large) error, rate STEADY (steady overshoot) -> Kp+, Ki=, Kd=. */
+        float kp, ki, kd;
+        pid_fuzzy_adjust(-500.0f, 0.0f, 0.02f, 0.02f, 0.02f, 100, &kp, &ki, &kd);
+        TEST_CHECK(kp > 0.02f, "NEG error, STEADY rate: kp nudged up");
+        TEST_CHECK(ki == 0.02f, "NEG error, STEADY rate: ki unchanged");
+        TEST_CHECK(kd == 0.02f, "NEG error, STEADY rate: kd unchanged");
+    }
+
     /* Monotonicity in strength: same inputs, a larger strength_pct must
      * move each gain at least as far from base as a smaller one (and
      * strictly further here, since the rule membership is nonzero). */

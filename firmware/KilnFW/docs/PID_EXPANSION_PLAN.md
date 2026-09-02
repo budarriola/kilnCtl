@@ -690,6 +690,54 @@ same document's own 2026-08-29/30 bench sections contradict.
       0.49 °C / z2 0.90 °C; dwell-entry overshoot z0 +0.41 °C@449s, z1
       +1.15 °C@90s, z2 +2.02 °C@90s. `fuzzy=50` has not run yet.
 
+      **Audited 2026-09-02: correct-but-unhelpful, not defective.** The
+      monotonic strength-vs-tracking result above raised an obvious
+      suspicion — an inverted error sign or a transposed rule table would
+      look exactly like this. Checked and ruled out: `pid_fuzzy.c`'s
+      `RULE_TABLE` matches `pid_fuzzy.h`'s documented table cell-for-cell
+      (verified all 9 cells by hand, not just the 4 "large error" corners
+      the existing test suite covered); the error convention
+      (`setpoint − measurement`, POS = too cold) and the rate convention
+      (`d_filtered = −d(measurement)/dt`, so a climbing kiln reads NEGATIVE
+      = FALLING = "error closing") are both self-consistent between
+      `pid.c`, `pid_fuzzy.c`, and `profile_executor_pid_tick.c`'s wiring.
+      The bump-transfer on a per-tick Ki move
+      (`pid_rescale_integral_for_new_ki()`, hazard 3) is also sound: it
+      preserves `ki·integral` across the gain change, and the `−ff_hold`
+      floor (§4) recomputes `state->integral` from the floor directly
+      whenever it binds, so a floored zone's `i_term` is exactly `−ff_hold`
+      regardless of which Ki the fuzzy layer picked that tick — floored and
+      unfloored ticks are both accounted for correctly.
+
+      The actual explanation: the design intent, stated in `pid_fuzzy.h`'s
+      own rationale, is "near setpoint favors more Ki and less Kp/Kd — fine
+      settling, not chasing noise." `plant_sim.py` is deterministic and
+      noise-free, so there is nothing for that trade to buy back — reducing
+      Kp/Kd during the well-tracked stretches (the ZERO/STEADY cell, which
+      is where a good tracker spends most of its time) only removes
+      responsiveness with no compensating noise-rejection benefit in this
+      benchmark. That is a real property of a noise-free sim, not a defect
+      in the controller: on hardware, where the noise this trade is
+      designed against actually exists, the same nudge could net positive.
+      §3.7's validation gap already says results here don't transfer to
+      firing temperature; this adds "and not to a noise-free bench either,
+      for this specific layer."
+
+      **Test gap closed.** The pre-existing `test_pid_fuzzy.c` asserted
+      direction on all 4 "large error" corner cells (POS/NEG × RISING/
+      FALLING) plus strength=0/NaN-input/monotonicity/clamping — real
+      coverage, but silent on the ZERO row and the STEADY column, i.e.
+      exactly the cells that fire during good tracking and that this
+      audit's explanation turns on. Added 5 cases (ZERO/FALLING,
+      ZERO/STEADY, ZERO/RISING, POS/STEADY, NEG/STEADY), each expected
+      direction transcribed from `pid_fuzzy.h`'s documented table (not
+      from the `.c` file, so an inversion has something independent to be
+      caught against). Mutation-proven: inverting the ZERO/STEADY cell's
+      direction reproduced 3 failing checks at exactly that test
+      (`ZERO error, STEADY rate: kp/ki/kd nudged {down,up,down}`), all
+      other 5961/5964 host-test checks unaffected; reverted. No production
+      code changed — `RULE_TABLE` was correct as found.
+
 ### 3.7 Validation gap
 
 Everything above is measured on a bench rig spanning 0–80 °C. Radiative transfer
