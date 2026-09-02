@@ -99,10 +99,49 @@ holding duty through it (§4) did not.
       result of the session and it was nearly discarded on a bad model. When a
       simulation rejects a physically sound idea, check the simulation.
 
-### 3.2 Zone 2's model over-predicts its hold duty
+### 3.2 Zone 2's model over-predicts its hold duty — DIAGNOSED 2026-09-01, not fixed
 
 The coupled solve wants 0.861 duty where the kiln actually needs under 0.74.
-Masked by integral action rather than corrected. Not diagnosed.
+Masked by integral action rather than corrected.
+
+**Diagnosis.** Every settled dwell tail (last 150 s of each of 12 dwell
+windows across 6 hardware captures — `baseline`/`after`/`ifix`/
+`holdfix_clean`/`final`/`track3zone_easeoff`) gives an independent,
+extrapolation-free reading of `u_pred = A⁻¹·(T − ambient)` against the
+matching `u_actual`, using the §2 coupling matrix `A` in its
+`[affected][stepped]` persistence orientation and each dwell's own
+first-sample actual_c as the ambient reference (the CJ-based ambient the
+firmware actually uses isn't in these poll captures).
+
+Solved as a diagonal-only single-zone gain, all three zones disagree with
+their identified `K` in the *same* direction (implied K 1.5–5× identified,
+worst on z0) — which looked at first like ambient or fit-method error. But
+solving the **full 3×3 system** instead (all three zones' duty and
+temperature simultaneously) collapses z1 to near-zero mean error
+(`u_pred − u_actual` = **−0.007**, 12 samples) while z0 and z2 stay biased
+and diverge in **opposite directions**: z0 **−0.086** (model under-predicts
+the duty z0 needs), z2 **+0.108** (model over-predicts — the ticketed
+symptom), growing with dwell temperature on z2 (~0.12–0.15 at the 45 °C
+dwell, ~0.13–0.21 at 60 °C, 5 of 6 non-baseline captures).
+
+That rules out: the ambient reference (one shared scalar can't flip sign
+between zones, and z1 fits `A` with the same scalar); zone 2 physical
+degradation/duty-ceiling (z0's row is off by *more*, in the opposite
+direction, on the same rig, same day, same matrix); and zone 2's own
+diagonal `K` in isolation (the diagonal-only check that seemed to implicate
+it is exactly the confound the coupled solve resolves — see
+`kilnctrl-plant-sim`/`log_analysis.py` note below).
+
+**Conclusion: it's the coupling matrix, specifically its z0 and z2
+rows/off-diagonals, not zone 2's diagonal gain.** Consistent with the
+matrix's own documented provenance (§4: off-diagonals are "two-point fits
+on unexcited peer traces", condition number ~5.3) and with §3.3's
+already-scoped, not-yet-built "full coupled identification from dwell
+observations" item — which is the right fix (re-solve `A` from the dwell
+data adaptive_tune is already harvesting, or a fresh MIMO bench
+identification), not a hand-edit of these matrix entries from this one
+offline pass, and not a code change to compensate for what is a
+measurement problem. No firmware change made here.
 
 ### 3.3 Adaptive tuning — the layers not built
 
