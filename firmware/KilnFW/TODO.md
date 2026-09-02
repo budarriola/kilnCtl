@@ -1216,13 +1216,9 @@ bug in the process: a touch waking the screen from idle previously set a flag
 with nothing to repaint it — `lvgl_port.c`'s flush callback now forces a
 redraw on the wake edge.
 
-- [ ] **Decision pending: `tools/PcTools`' 12+ MCP `display_*` tools are
-      stale.** They send `DISPLAY_CMD_*` frames the firmware can no longer
-      answer (`uart_bridge.c`'s `display_bridge_task` is intentionally dead
-      code — LVGL owns the display exclusively now). Not a crash risk (calls
-      simply time out), but every invocation silently fails. Options: (a)
-      delete the stale PC-side tools, (b) restore a minimal firmware handler,
-      (c) leave as-is. Not pre-judged.
+- [x] **The twelve stale `display_*` MCP tools were deleted** (ROADMAP.md:1140,
+      1071-1083). This entry was stale — see `DISPLAY_ST7796_PLAN.md` §0 and
+      §14.
 - [ ] Decide the color/asset story once the visual style (10.2) is picked —
       LVGL widgets are themeable, so this is a theme/style pass on stock
       widgets, not custom-drawn ones.

@@ -1,10 +1,20 @@
 # ST7796 panel support, panel auto-detection, and SPI DMA
 
-Status: **Phases 1, 2, 3 and 5 landed 2026-09-01/02** (§12). Phases 4
-(auto-detection) and 6 (SPI DMA) are in progress. Phase 0's blocking hardware
-measurements (§4) are still open — nothing here has touched real MSP4031
-hardware yet; Phases 1-3/5 were built and host-tested against the existing
-ILI9488 panel and the transcribed ST7796 init table only.
+Status: **Phases 1, 2, 3 and 5 landed 2026-09-01/02** (§12). Phase 4's
+detection *logic* (`panel_detect.c`, host-tested, wired into `panel_spi.c`)
+is also landed — it is correctly inert today because both descriptors'
+`id_matches` stay `NULL` until the bench RDDID bytes in §4 are recorded, so
+it always falls back to the Kconfig default and changes nothing observable.
+Phase 6 (SPI DMA/async): 9.2 (`max_transfer_sz` raised to 32768,
+`KILNCTL_SPI_MAX_TRANSFER_SZ`), 9.5 (MAX31856 on `spi_device_polling_transmit`
+via `esp_spi_owner.c`'s `use_polling` flag) and 9.9 (bounded owner-transfer
+wait) are landed. 9.1 (flush-duration measurement), 9.3
+(`SPI_TRANS_DMA_USE_PSRAM`), 9.4 (hardware CS), 9.6 (async flush), 9.7
+(ST7796 zero-copy) and 9.8 (clock step-up) remain open — see §12 Phase 6 for
+why they stay unbuilt rather than merely unmeasured. Phase 0's blocking
+hardware measurements (§4) are still open — nothing here has touched real
+MSP4031 hardware yet; Phases 1-3/5 were built and host-tested against the
+existing ILI9488 panel and the transcribed ST7796 init table only.
 Written 2026-08-30, revised the same day after a research pass over the board
 netlist, the vendor schematic, the ESP-IDF 6.0.2 source tree and the LVGL 9.5
 source.
@@ -850,8 +860,13 @@ What this permits and forbids:
       user manual, and under `Demo_ESP32/`: the instructions PDF, the vendor's
       `User_Setup.h` + `lv_conf.h`, the two-file `FT6336-arduino` reference
       source, and all 9 example sketches (`.ino`/`.h` only).
-- [ ] Commit the `_Keep` tree.
-- [ ] Delete the original 394 MB `..._V1.0/` directory once `_Keep` is committed.
+- [x] Commit the `_Keep` tree (34 files tracked; `41bb192`).
+- [ ] Delete the original 394 MB `..._V1.0/` directory now that `_Keep` is
+      committed. Confirmed safe: `..._V1.0/` is untracked and gitignored
+      (`.gitignore:80`), so removing it is filesystem cleanup, not a git
+      operation — plain `rm -rf`, no commit needed. Not done in this pass:
+      this session's sandbox refuses `rm -rf` on a 394 MB tree; needs a
+      session with that permission, or the owner doing it by hand.
 
 Deliberately not kept: the `Image2Lcd` and `PCtoLCD2002` binaries (marked
 破解版 / 完美版 — cracked, must not enter git), the opaque `.rar`, 199 MB of
@@ -899,10 +914,16 @@ Each phase ends somewhere the firmware still boots and drives the existing panel
 - [x] Panel selectable by Kconfig only (`KILNCTL_DISPLAY_PANEL`, ILI9488
       default), no detection yet.
 
-### Phase 4 — auto-detection — IN PROGRESS
-Being built now; do not treat any part of it as landed until this note is
-updated. RDDID matching still needs the **recorded** bytes from §4, which are
-still blocking.
+### Phase 4 — auto-detection — LOGIC LANDED, TABLE BLOCKED
+- [x] `panel_detect.c/.h`: pure `panel_detect_choose()` — SPI-ID match count,
+      touch-kind tiebreak/corroboration, disagreement flagging, Kconfig
+      fallback. Host-tested (`test_panel_detect.c`), wired into
+      `panel_spi.c:902-907`.
+- [ ] Both descriptors' `id_matches` stay `NULL` (`panel_spi.c:1848`,
+      `st7796_panel.c:137`) — **blocked on the recorded RDDID bytes in §4**.
+      With both NULL, `panel_detect_choose()` always falls back to the
+      Kconfig default; this is inert on the currently-attached ILI9488 by
+      construction, not by omission.
 
 ### Phase 5 — FT6336U and touch abstraction — DONE 2026-09-01/02
 - [x] `touch_dev_t` with a `self_calibrating` flag.
@@ -914,9 +935,28 @@ still blocking.
 - [x] `ui_page_touch_cal` and the raw-touch/pressure reporting handled (§7) —
       shows a notice instead of the 3×3 grid on self-calibrating devices.
 
-### Phase 6 — SPI async/DMA — IN PROGRESS
-Being built now, ahead of the flush-duration measurement in §4/§9.1. Do not
-treat any part of it as landed until this note is updated.
+### Phase 6 — SPI async/DMA — PARTIALLY LANDED, REST HARDWARE-GATED
+- [x] 9.2 `max_transfer_sz` raised to 32768 (`KILNCTL_SPI_MAX_TRANSFER_SZ`,
+      `settings.h:179`, `main.c:777`). Changes nothing observable today —
+      the ILI9488 codec still chunks every flush at `ILI9488_SCRATCH_BYTES`
+      (1440 B) regardless of the host's ceiling.
+- [x] 9.5 MAX31856 → `spi_device_polling_transmit` (`esp_spi_owner.c`'s
+      `use_polling` request flag, dispatched only ever from the owner task's
+      own thread — never an ISR, never a caller's task).
+- [x] 9.9 bounded owner-transfer wait (landed Phase 1, see above).
+- [ ] 9.1, 9.3, 9.4, 9.6, 9.7, 9.8 remain open. **Deliberately not attempted
+      blind:** these touch the live SPI transaction path shared with three
+      MAX31856 channels on hardware that is mid-run (profile 7, heaters
+      energized) right now, and 9.1's own number is a real-hardware
+      measurement, not something host tests can produce. Writing async/CS
+      changes without the ability to flash-and-verify against that
+      measurement — the standing rule against unverified checks — is worse
+      than leaving them queued. First hardware step: take the 9.1
+      measurement (record in §4) once the board is between profiles, then
+      9.4 (hardware CS) and 9.3 (`SPI_TRANS_DMA_USE_PSRAM`) are the next
+      lowest-risk pair — both are config/flag changes with no new control
+      flow, host-testable in isolation, flash-verified afterward on a bench
+      cycle with nothing energized.
 
 ### Phase 7 — the actual point: a better UI
 - [ ] `LV_USE_TJPGD` if images are wanted.
@@ -958,7 +998,7 @@ treat any part of it as landed until this note is updated.
       pin-1/pin-4 ambiguities are resolved on real hardware.
 - [ ] `docs/ILI9488.md` — either generalise to a panel doc or add an ST7796 twin.
 - [ ] `App/drivers/README.md:14` — the ILI9488 row.
-- [ ] `TODO.md` — 1215-1222 is stale (the MCP display tools were deleted per
-      ROADMAP.md:1071-1083); 364-365 closes with 9.9.
+- [x] `TODO.md` — the stale 1215-1222 entry corrected to point at
+      ROADMAP.md:1140; 364-365 already closed with 9.9.
 - [ ] `ROADMAP.md:437-438` — the backlight-control HW item, if the bodge lands.
 - [ ] `Datasheets/README.md` — add the MSP4031 package.
