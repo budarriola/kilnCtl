@@ -578,8 +578,12 @@ same document's own 2026-08-29/30 bench sections contradict.
 
 ### 3.6 Untested control paths
 
-- [~] **Relay-feedback identification: first hardware completion, 2026-09-02
-      — but the result cannot be adopted yet.**
+- [x] **Relay-feedback identification — CLOSED 2026-09-02.** First hardware
+      completion, both blockers found and fixed, Ku/Tu reconciled against the
+      FOPDT model, and the resulting gains simulated against current
+      production gains: no simulated advantage large enough over the sim's
+      own noise floor to justify a hardware confirmation run. No gains
+      applied to the board; current gains stand.
 
       **The confirming run happened.** Zone 0, setpoint 45C, Tyreus-Luyben:
       `relay_valid=true`, Ku=0.19540, Tu=334.3 s, amplitude 3.03C, 5 cycles
