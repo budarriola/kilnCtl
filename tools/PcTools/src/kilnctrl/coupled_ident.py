@@ -81,6 +81,30 @@ comment, a 1e-4 relative pivot floor that admits condition numbers up to
 about 1e4). A confident matrix fit from collinear data is the specific
 failure mode this module exists to avoid, not a corner case to be
 tolerated for the sake of always returning an answer.
+
+WHAT ORDINARY-FIRING DWELLS CANNOT TELL YOU (2026-09-02, coupid6). A
+constant-A model makes a clean, checkable prediction for a dwell where
+every zone is commanded to the same setpoint: the DUTY RATIO between
+zones should be independent of temperature (only the overall magnitude
+scales). An early pass at testing this against the coupid6 capture (10
+min dwells, three temperatures) appeared to show that ratio spreading
+with temperature -- but that read was WRONG, and the conclusion was
+retracted: those dwells run for ~600 s against a ~265 s zone tau, i.e.
+only ~2.3 tau, and the plant is visibly under-damped at these gains
+(zone 0's duty swung 0.023 -> 0.19 -> 0.144 within a single dwell window).
+The apparent "ratio changes with temperature" was two different points on
+a still-moving trajectory being compared as if they were two steady
+states -- not evidence about the matrix at all. See
+``settle_criterion_audit`` below for what this specifically implies about
+the SETTLE TEST: it only watches ``actual_c``'s slope, so it can and did
+fire at a coincidental flat spot mid-oscillation while duty was still
+swinging by up to 23% of its own value for the rest of that same window.
+Every "settled" observation in the coupid6 capture is flagged by that
+audit. No conclusion about the coupling matrix's linearity should be
+drawn from ordinary-firing dwell data until the plant is unambiguously at
+steady state; the single-zone excitation captures (35 min dwells, ~8 tau
+for the driven zone) are the ones designed to actually get there -- see
+``single_zone_column_observations`` above.
 """
 from __future__ import annotations
 
@@ -132,6 +156,16 @@ class JointObservation:
     dwell_target_c: float  # the segment's target_c, for the nonlinearity report
     source: str
     elapsed_s: float
+    # 'confirmed': passed a real settle test (firmware thresholds, or a
+    # manual capture with >=2 same-target samples showing a small slope
+    # between the last two). 'unconfirmed': accepted anyway (e.g. a single
+    # manual sample with no second reading to check slope against) --
+    # callers doing anything conclusion-sensitive (direction_constancy_
+    # report in particular) should treat 'unconfirmed' points as a
+    # caveat, not silently equal evidence. Defaults to 'confirmed' so
+    # every existing producer of this dataclass (which already only
+    # emits real firmware-settle-tested rows) is unaffected.
+    settled_confidence: str = "confirmed"
 
     @property
     def rise(self) -> np.ndarray:
@@ -212,6 +246,166 @@ def _zone_settle_row(rows: Sequence[log_analysis.PollRow], zone: int,
     return None
 
 
+# ---------------------------------------------------------------------------
+# Settle-criterion audit -- does the firmware's own dwell-settle test
+# (SETTLE_MIN_S / SETTLE_SLOPE_FLOOR_C_PER_S, mirrored by _zone_settle_row
+# above) actually catch a zone at steady state, or can it fire mid-
+# oscillation on a dwell that is too short relative to the plant's tau?
+#
+# This question came directly out of the coupid6 capture (10-minute
+# dwells against a ~265 s tau, i.e. only ~2.3 tau -- a first-order step is
+# ~90% converged there, but this plant is visibly UNDER-DAMPED at these
+# gains: zone 0's duty during the 46 C dwell swings 0.023 -> 0.19 -> 0.144
+# over the window, oscillating around the setpoint rather than settling
+# monotonically. The settle test only looks at ACTUAL_C's slope over its
+# own window; nothing about it inspects DUTY at all, so it is entirely
+# possible for the slope test to pass at a moment that is, by coincidence,
+# a local flat spot in an oscillation -- while duty is still swinging
+# across the rest of the same dwell. A DC-gain reading taken there is not
+# a DC-gain reading; it is one sample of a limit cycle mislabeled as
+# steady state, and every downstream fit (this module's, and the
+# firmware's own adaptive_tune.c harvest) inherits that bias silently.
+#
+# This audit does NOT change what dwell_observations_for_run() extracts --
+# it is a diagnostic on the side, meant to be read before trusting any
+# observation this module (or the firmware) produced from a short dwell.
+# ---------------------------------------------------------------------------
+
+# How much a zone's duty is allowed to range over the REST of a dwell
+# window (after its own settle instant fires) before that "settled"
+# reading is flagged as suspect. Not derived from firmware behavior (the
+# firmware has no equivalent check) -- chosen as roughly the same scale as
+# MIN_DUTY_FOR_OBSERVATION itself: a duty swing bigger than the floor that
+# decides whether a reading is trustworthy in the first place is not a
+# small ripple.
+UNSTABLE_DUTY_RANGE_ABS = 0.05
+# ... or, for a zone running at higher duty, a swing that is a large
+# FRACTION of the settled duty itself (an oscillation of 0.05 around a
+# duty of 0.6 is much less alarming than the same swing around 0.1).
+UNSTABLE_DUTY_RANGE_FRAC = 0.25
+
+
+@dataclasses.dataclass
+class SettleAuditEntry:
+    zone: int
+    dwell_target_c: float
+    window_duration_s: float
+    settled: bool
+    settle_elapsed_s: Optional[float]
+    settle_duty: Optional[float]
+    window_duty_min: Optional[float]
+    window_duty_max: Optional[float]
+    window_duty_range: Optional[float]
+    flagged_unstable: bool
+    source: str
+
+
+def dwell_window_duty_range(window_rows: Sequence[log_analysis.PollRow], zone: int,
+                             from_elapsed_s: float = 0.0) -> Optional[tuple]:
+    """(min, max) duty for ``zone`` across every valid row in
+    ``window_rows`` from ``from_elapsed_s`` ONWARD -- deliberately not the
+    whole window: the early rows right after a dwell is entered legitimately
+    swing a lot (the PID is still converging from the ramp), and including
+    that stretch would flag almost every settle reading as unstable
+    regardless of what happens afterward. Passing the settle instant's own
+    ``elapsed_s`` here checks the thing this audit actually cares about --
+    whether duty was still moving AFTER the settle test said "done".
+    """
+    duties = [r.zones[zone].duty for r in window_rows
+              if zone in r.zones and r.elapsed_s >= from_elapsed_s]
+    if not duties:
+        return None
+    return min(duties), max(duties)
+
+
+def settle_criterion_audit(rows: Sequence[log_analysis.PollRow], source: str = ""
+                            ) -> list:
+    """For every dwell window and zone in a SINGLE run, report whether the
+    firmware-matching settle test (``_zone_settle_row``) fired, and if so,
+    how much that zone's duty still ranged over the rest of the SAME
+    window -- the audit this module's docstring section above exists for.
+    Includes zones that never settled too (``settled=False``), so a
+    caller can see the full picture, not just the flagged ones.
+    """
+    entries = []
+    for w in log_analysis.build_windows(rows):
+        if w.phase != "dwell":
+            continue
+        window_rows = rows[w.start_idx:w.end_idx + 1]
+        target_c = window_rows[-1].target_c
+        for zone in ZONES:
+            settle_row = _zone_settle_row(window_rows, zone)
+            from_s = settle_row.elapsed_s if settle_row is not None else window_rows[0].elapsed_s
+            duty_range = dwell_window_duty_range(window_rows, zone, from_elapsed_s=from_s)
+            dmin, dmax = duty_range if duty_range is not None else (None, None)
+            drange = (dmax - dmin) if duty_range is not None else None
+
+            if settle_row is None:
+                entries.append(SettleAuditEntry(
+                    zone=zone, dwell_target_c=target_c, window_duration_s=w.duration_s,
+                    settled=False, settle_elapsed_s=None, settle_duty=None,
+                    window_duty_min=dmin, window_duty_max=dmax, window_duty_range=drange,
+                    flagged_unstable=False, source=source,
+                ))
+                continue
+
+            settle_duty = settle_row.zones[zone].duty
+            flagged = False
+            if drange is not None:
+                if drange > UNSTABLE_DUTY_RANGE_ABS:
+                    flagged = True
+                if settle_duty > 0 and drange > UNSTABLE_DUTY_RANGE_FRAC * settle_duty:
+                    flagged = True
+            entries.append(SettleAuditEntry(
+                zone=zone, dwell_target_c=target_c, window_duration_s=w.duration_s,
+                settled=True, settle_elapsed_s=settle_row.elapsed_s, settle_duty=settle_duty,
+                window_duty_min=dmin, window_duty_max=dmax, window_duty_range=drange,
+                flagged_unstable=flagged, source=source,
+            ))
+    return entries
+
+
+def settle_criterion_audit_from_paths(paths):
+    """Same file/run handling as ``dwell_observations_from_paths``."""
+    all_entries = []
+    for path in paths:
+        rows_all = log_analysis.parse_profile_exec_jsonl(path)
+        for run_idx, rows in enumerate(log_analysis.split_runs(rows_all)):
+            if not any(r.zones for r in rows):
+                continue
+            label = path if run_idx == 0 else f"{path}#run{run_idx}"
+            all_entries.extend(settle_criterion_audit(rows, source=label))
+    return all_entries
+
+
+def format_settle_audit_text(entries):
+    settled = [e for e in entries if e.settled]
+    flagged = [e for e in settled if e.flagged_unstable]
+    nl = chr(10)
+    lines = [f"settle-criterion audit: {len(entries)} (window, zone) entries, "
+             f"{len(settled)} settled, {len(flagged)} FLAGGED as possibly not steady state"]
+    for e in entries:
+        if not e.settled:
+            lines.append(f"  target={e.dwell_target_c:6.1f}C zone{e.zone} dur={e.window_duration_s:5.0f}s "
+                         f"NEVER SETTLED  [{e.source}]")
+            continue
+        marker = "FLAGGED" if e.flagged_unstable else "ok"
+        lines.append(
+            f"  target={e.dwell_target_c:6.1f}C zone{e.zone} dur={e.window_duration_s:5.0f}s "
+            f"settled@{e.settle_elapsed_s:5.0f}s duty={e.settle_duty:.3f}  "
+            f"window duty range=[{e.window_duty_min:.3f},{e.window_duty_max:.3f}] "
+            f"(span {e.window_duty_range:.3f})  {marker}  [{e.source}]"
+        )
+    if flagged:
+        lines.append("")
+        lines.append(f"*** {len(flagged)}/{len(settled)} settled readings are FLAGGED: the firmware's "
+                     f"settle criterion (slope on actual_c only, no duty check) fired while duty was "
+                     f"still swinging by more than {UNSTABLE_DUTY_RANGE_ABS} abs or "
+                     f"{UNSTABLE_DUTY_RANGE_FRAC:.0%} of the settled value over the rest of the same "
+                     f"dwell -- treat these as NOT DC-gain measurements. ***")
+    return nl.join(lines)
+
+
 def dwell_observations_for_run(rows: Sequence[log_analysis.PollRow], source: str = ""
                                 ) -> list[JointObservation]:
     """Extract every joint dwell observation from a SINGLE run (already
@@ -253,6 +447,16 @@ def dwell_observations_from_paths(paths: Sequence[str]) -> list[JointObservation
     truncated trailing line from ``parse_profile_exec_jsonl`` is simply
     skipped, same tolerance that module documents for a flaky-link
     capture) -- safe to point at a live-firing log mid-run.
+
+    Also safe to point at a RESUMED capture split across more than one
+    file (e.g. ``coupid6_run1.jsonl`` + ``coupid6_run1_part2.jsonl`` after
+    the board's HTTP server wedged mid-firing and a second poller was
+    started against the still-running board): each path is parsed and
+    settle-extracted independently, then ``_dedupe_observations`` below
+    collapses any observation the two files both happened to capture
+    (their elapsed_s clocks are the board's own and are NOT guaranteed to
+    line up file-to-file, so this dedupes on the physical READING, not on
+    elapsed_s or source).
     """
     all_obs: list[JointObservation] = []
     for path in paths:
@@ -262,7 +466,107 @@ def dwell_observations_from_paths(paths: Sequence[str]) -> list[JointObservation
                 continue
             label = path if run_idx == 0 else f"{path}#run{run_idx}"
             all_obs.extend(dwell_observations_for_run(rows, source=label))
-    return all_obs
+    return _dedupe_observations(all_obs)
+
+
+def _dedupe_observations(observations: Sequence[JointObservation]) -> list[JointObservation]:
+    """Collapse observations that are almost certainly the SAME physical
+    dwell reading, captured twice (typically two overlapping poll files
+    from a resumed capture -- see ``dwell_observations_from_paths``).
+    Two observations are the same reading if their temperature AND duty
+    vectors match to within the thermocouple/duty quantization (0.15 C,
+    0.02 duty) -- tight enough that two genuinely different steady states
+    essentially never collide, loose enough to survive the two pollers'
+    independent rounding. First occurrence wins.
+    """
+    kept: list[JointObservation] = []
+    for o in observations:
+        is_dup = False
+        for k in kept:
+            if (np.max(np.abs(o.T - k.T)) <= 0.15
+                    and np.max(np.abs(o.u - k.u)) <= 0.02
+                    and abs(o.dwell_target_c - k.dwell_target_c) <= 0.5):
+                is_dup = True
+                break
+        if not is_dup:
+            kept.append(o)
+    return kept
+
+
+def parse_manual_dwell_tsv(path: str) -> list[JointObservation]:
+    """Parse a hand-harvested dwell TSV like
+    ``logs/coupling/coupid6_dwell_observations.tsv`` -- captured over the
+    UART link when the board's HTTP poller was unavailable (server wedge),
+    so it has no ``/api/profile_exec`` JSON to reuse ``parse_profile_exec_
+    jsonl`` on.
+
+    Format: comment lines starting with ``#`` (one of which must read
+    ``# Ambient at run start: A0 / A1 / A2 C (zones 0/1/2).`` -- the run's
+    per-zone ambient reference, same convention as ``_run_ambient``), then
+    whitespace/tab-separated data rows: ``dwell_target_c t_into_dwell_s
+    actual0 actual1 actual2 duty0 duty1 duty2``.
+
+    Rows sharing the same ``dwell_target_c`` are grouped; only the LAST
+    row for each target (closest to steady state) becomes a
+    ``JointObservation``. Its ``settled_confidence`` is ``'confirmed'``
+    only if that target has >= 2 rows (so a slope can be checked between
+    the last two) AND the last row's ``t_into_dwell_s`` is past
+    ``SETTLE_MIN_S`` AND that slope is within ``SETTLE_SLOPE_FLOOR_C_PER_S``
+    for every zone -- otherwise ``'unconfirmed'``. A single-sample target
+    (like the 46 C dwell in the coupid6 TSV, taken mid-dwell before a
+    second reading) has no slope evidence at all and always comes back
+    unconfirmed, regardless of how large ``t_into_dwell_s`` happens to be
+    -- clearing the time floor is necessary but not sufficient for
+    "settled", and this parser will not claim more confidence than the
+    data supports.
+    """
+    ambient_vec: Optional[np.ndarray] = None
+    by_target: dict = {}
+    ambient_re = None
+    import re
+    with open(path, "r", encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            if line.startswith("#"):
+                if ambient_re is None:
+                    ambient_re = re.compile(
+                        r"Ambient at run start:\s*([\d.]+)\s*/\s*([\d.]+)\s*/\s*([\d.]+)")
+                m = ambient_re.search(line)
+                if m:
+                    ambient_vec = np.array([float(m.group(i)) for i in (1, 2, 3)])
+                continue
+            parts = line.split()
+            if len(parts) != 8:
+                continue
+            try:
+                target_c, t_s, a0, a1, a2, d0, d1, d2 = (float(x) for x in parts)
+            except ValueError:
+                continue
+            by_target.setdefault(target_c, []).append(
+                (t_s, np.array([a0, a1, a2]), np.array([d0, d1, d2])))
+
+    if ambient_vec is None:
+        raise ValueError(f"{path}: no '# Ambient at run start: ...' comment line found")
+
+    obs: list[JointObservation] = []
+    for target_c, samples in by_target.items():
+        samples.sort(key=lambda x: x[0])
+        t_last, T_last, u_last = samples[-1]
+        confidence = "unconfirmed"
+        if len(samples) >= 2 and t_last >= SETTLE_MIN_S:
+            t_prev, T_prev, _ = samples[-2]
+            slope = np.max(np.abs(T_last - T_prev)) / max(t_last - t_prev, 1e-6)
+            if slope <= SETTLE_SLOPE_FLOOR_C_PER_S:
+                confidence = "confirmed"
+        obs.append(JointObservation(
+            T=T_last, ambient=ambient_vec, u=u_last, settled_zone=-1,
+            dwell_target_c=target_c, source=path, elapsed_s=t_last,
+            settled_confidence=confidence,
+        ))
+    obs.sort(key=lambda o: o.dwell_target_c)
+    return obs
 
 
 # ---------------------------------------------------------------------------
@@ -739,6 +1043,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                        help="ordinary poll captures to score the assembled matrix against (joint dwell observations)")
     p_sz.add_argument("--json", action="store_true")
 
+    p_audit = sub.add_parser("settle-audit", help="check whether the firmware's dwell-settle criterion "
+                                                     "accepted readings that were still drifting/oscillating")
+    p_audit.add_argument("jsonl_paths", nargs="+")
+    p_audit.add_argument("--json", action="store_true")
+
     args = parser.parse_args(argv)
 
     if args.cmd == "report":
@@ -767,6 +1076,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             print(json.dumps(out, indent=2))
         else:
             print(format_single_zone_report_text(matrix, coverage, scores))
+    elif args.cmd == "settle-audit":
+        entries = settle_criterion_audit_from_paths(args.jsonl_paths)
+        if args.json:
+            print(json.dumps([dataclasses.asdict(e) for e in entries], indent=2))
+        else:
+            print(format_settle_audit_text(entries))
     else:
         parser.print_help()
         return 2

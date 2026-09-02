@@ -493,3 +493,163 @@ def test_current_matrix_is_plant_sim_source_of_truth():
     numbers in this module drifting from plant_sim.py's single source of
     truth."""
     assert ci.CURRENT_MATRIX is ps.K_full
+
+
+# ---------------------------------------------------------------------------
+# Settle-criterion audit -- does the firmware's settle test (slope on
+# actual_c only) accept a reading whose DUTY is still moving?
+#
+# Built directly from the coupid6 capture: the firmware-matching settle
+# test in this module fired on all 12/12 joint observations from that
+# 10-minute-dwell firing, but duty was still visibly swinging for the
+# rest of several of those same windows (up to a 0.087 span on a 0.378
+# duty -- 23%). See coupled_ident.py's own "Settle-criterion audit"
+# section for the full story and coupled_ident.UNSTABLE_DUTY_RANGE_ABS /
+# _FRAC for the thresholds these tests pin.
+# ---------------------------------------------------------------------------
+
+def _oscillating_dwell_rows(actual_c, duty_sequence, target_c, ambient, dt=10.0, segment_index=0):
+    """Like ``_dwell_rows``, but ``duty_sequence`` is a per-SAMPLE list of
+    per-zone duty dicts (rather than one constant dict) so a dwell can
+    have duty that keeps moving after actual_c has already gone flat --
+    exactly the coupid6 shape (settle test only watches actual_c)."""
+    rows = []
+    zones0 = {z: la.ZoneSample(zone=z, actual_c=_q(ambient[z]), duty=0.0) for z in ci.ZONES}
+    rows.append(la.PollRow(wall_time="00:00:00", elapsed_s=0.0, segment_index=segment_index,
+                            segment_count=1, dwelling=False, target_c=target_c, state="running",
+                            zones=zones0))
+    for i, duty in enumerate(duty_sequence):
+        e = (i + 1) * dt
+        zones = {z: la.ZoneSample(zone=z, actual_c=_q(actual_c[z]), duty=duty[z]) for z in ci.ZONES}
+        rows.append(la.PollRow(wall_time="00:00:%02d" % (e % 60), elapsed_s=e,
+                                segment_index=segment_index, segment_count=1, dwelling=True,
+                                target_c=target_c, state="running", zones=zones))
+    return rows
+
+
+def test_settle_audit_flags_oscillating_duty_after_settle():
+    """actual_c is flat from sample 1 onward (so the settle test fires
+    quickly and cleanly, same as it would in the real capture), but duty
+    keeps swinging by 0.15 for the rest of the window -- must be flagged.
+
+    Proof this can fail: temporarily set UNSTABLE_DUTY_RANGE_ABS to 10.0
+    and UNSTABLE_DUTY_RANGE_FRAC to 10.0 (thresholds no real duty swing
+    could cross). Captured red:
+        AssertionError: assert False
+      -- with both thresholds pushed out of reach, a duty swinging from
+      0.10 to 0.25 (a 150% relative, 0.15 absolute span) was reported as
+      NOT flagged.
+    """
+    ambient = {0: 20.0, 1: 20.0, 2: 20.0}
+    actual_c = {0: 45.0, 1: 45.0, 2: 45.0}
+    # 25 samples (250s dwell), actual_c pinned flat throughout so the
+    # settle test can fire at 180s+; duty for zone 0 oscillates widely
+    # for the whole window including after the settle instant.
+    duty_seq = []
+    for i in range(25):
+        d0 = 0.10 + 0.15 * (1 if i % 2 == 0 else 0)  # 0.10 / 0.25 alternating
+        duty_seq.append({0: round(d0, 2), 1: 0.20, 2: 0.20})
+    rows = _oscillating_dwell_rows(actual_c, duty_seq, target_c=45.0, ambient=ambient)
+    entries = ci.settle_criterion_audit(rows)
+    e0 = next(e for e in entries if e.zone == 0)
+    assert e0.settled
+    assert e0.flagged_unstable
+
+
+def test_settle_audit_does_not_flag_stable_dwell():
+    """A dwell whose duty is flat (mod 0.02 quantization noise) for the
+    entire post-settle window must NOT be flagged -- the audit should
+    read as clean on the data it is designed to pass, not just alarm on
+    everything.
+
+    Proof this can fail: temporarily changed the ``flagged`` initial
+    value in ``settle_criterion_audit`` from ``False`` to ``True``.
+    Captured red:
+        AssertionError: assert not True
+      -- a duty range of 0.02 (well under both thresholds) was reported
+      flagged once every settled entry defaulted to flagged regardless of
+      its actual range.
+    """
+    ambient = {0: 20.0, 1: 20.0, 2: 20.0}
+    settle_c = {0: 45.0, 1: 45.0, 2: 45.0}
+    duty = {0: 0.15, 1: 0.2, 2: 0.25}
+    rows = _dwell_rows(settle_c, duty, target_c=45.0, ambient=ambient, n_samples=25, dt=10.0)
+    entries = ci.settle_criterion_audit(rows)
+    settled = [e for e in entries if e.settled]
+    assert settled
+    assert not any(e.flagged_unstable for e in settled)
+
+
+def test_settle_audit_excludes_pre_settle_transient():
+    """Duty swings hard BEFORE the settle instant (the normal ramp-in
+    convergence) but is flat afterward -- must NOT be flagged. This is the
+    fix for the audit's first draft, which measured duty range over the
+    WHOLE window and flagged nearly every real capture's dwells
+    (including the already-validated plant_sim fixtures) purely from
+    their ordinary pre-settle convergence.
+
+    Proof this can fail: passed ``from_elapsed_s=0.0`` unconditionally
+    inside ``settle_criterion_audit`` instead of the settle row's own
+    elapsed_s. Captured red:
+        AssertionError: assert True is False
+      -- the same big pre-settle swing that should have been excluded
+      flagged the entry once the window was measured from the start
+      instead of from the settle instant.
+    """
+    ambient = {0: 20.0, 1: 20.0, 2: 20.0}
+    actual_c = {0: 45.0, 1: 45.0, 2: 45.0}
+    duty_seq = []
+    for i in range(30):
+        if i < 5:
+            d0 = 0.05 + 0.4 * (i / 5.0)  # big pre-settle swing, samples 0-4
+        else:
+            d0 = 0.15  # flat afterward
+        duty_seq.append({0: round(d0, 2), 1: 0.2, 2: 0.2})
+    rows = _oscillating_dwell_rows(actual_c, duty_seq, target_c=45.0, ambient=ambient)
+    entries = ci.settle_criterion_audit(rows)
+    e0 = next(e for e in entries if e.zone == 0)
+    assert e0.settled
+    assert not e0.flagged_unstable
+
+
+# ---------------------------------------------------------------------------
+# Resumed-capture dedup (coupid6_run1.jsonl + coupid6_run1_part2.jsonl)
+# ---------------------------------------------------------------------------
+
+def test_dedupe_collapses_same_reading_from_two_overlapping_files(tmp_path):
+    """Two capture files covering the same physical dwell (a poller
+    restarted after the board's HTTP server wedged, overlapping the tail
+    of the first file) must not double-count that dwell as two
+    observations.
+
+    Proof this can fail: temporarily made ``_dedupe_observations`` return
+    its input unchanged. Captured red:
+        AssertionError: assert 2 == 1
+      -- the same settled reading, captured by both files, counted as two
+      separate joint observations instead of one.
+    """
+    ambient = {0: 20.0, 1: 20.0, 2: 20.0}
+    settle_c = {0: 45.0, 1: 45.0, 2: 45.0}
+    duty = {0: 0.15, 1: 0.2, 2: 0.25}
+    rows = _dwell_rows(settle_c, duty, target_c=45.0, ambient=ambient, n_samples=25, dt=10.0)
+
+    def _write(path, rows):
+        lines = []
+        for r in rows:
+            body = {
+                "elapsed_s": r.elapsed_s, "segment_index": r.segment_index,
+                "segment_count": r.segment_count, "dwelling": r.dwelling,
+                "target_c": r.target_c, "state": r.state,
+                "zones": [{"zone": z, "actual_c": s.actual_c, "duty": s.duty} for z, s in r.zones.items()],
+            }
+            lines.append(f"{r.wall_time} {__import__('json').dumps(body)}")
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    p1 = tmp_path / "run1.jsonl"
+    p2 = tmp_path / "run1_part2.jsonl"
+    _write(p1, rows)
+    _write(p2, rows)  # identical re-capture of the same dwell
+
+    obs_combined = ci.dwell_observations_from_paths([str(p1), str(p2)])
+    obs_single = ci.dwell_observations_from_paths([str(p1)])
+    assert len(obs_combined) == len(obs_single)

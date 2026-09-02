@@ -105,3 +105,33 @@ def coupled_ident_single_zone(
         )
         return json.dumps(out, indent=2)
     return coupled_ident.format_single_zone_report_text(matrix, coverage, scores)
+
+
+@_srv._tool()
+def coupled_ident_settle_audit(paths: list[str], json_output: bool = False) -> str:
+    """Check whether the firmware's own dwell-settle criterion
+    (180 s / 0.003 C/s on actual_c, no duty check at all -- see
+    ``adaptive_tune.c`` / ``coupled_ident.py``'s ``_zone_settle_row``)
+    would accept a reading that is still drifting or oscillating rather
+    than genuinely at steady state.
+
+    Built directly from a real finding on the coupid6 capture (10-minute
+    dwells against a ~265 s tau): the settle test only watches actual_c's
+    slope, so it can fire at a coincidental local flat spot in an
+    under-damped oscillation while duty is still swinging widely for the
+    rest of the same dwell -- a DC-gain reading taken there is not a
+    DC-gain reading. This tool flags every "settled" reading whose duty
+    still ranged more than 0.05 (absolute) or 25% of its own value
+    (relative) over the REST of that same dwell window (after the settle
+    instant, not the whole window -- the early ramp-in convergence is
+    expected to swing and is excluded).
+
+    Run this before trusting ANY dwell-derived observation -- from this
+    module (``coupled_ident_report``) or by inference about what the
+    firmware's own adaptive_tune.c harvest is doing on this board.
+    """
+    entries = coupled_ident.settle_criterion_audit_from_paths(paths)
+    if json_output:
+        import json, dataclasses
+        return json.dumps([dataclasses.asdict(e) for e in entries], indent=2)
+    return coupled_ident.format_settle_audit_text(entries)
