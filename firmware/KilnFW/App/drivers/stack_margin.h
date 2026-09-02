@@ -60,8 +60,27 @@ extern "C" {
  * registered. Exact occupancy after this change: 28/28, no spare slots left
  * -- the next task added here needs another bump, not a silent overflow (see
  * stack_margin.c's "registry full" log line, which is the failure mode this
- * comment exists to keep from being silent). */
-#define STACK_MARGIN_MAX_TASKS 28u
+ * comment exists to keep from being silent).
+ *
+ * DRAM_PSRAM_PLAN.md section 7 (cap-raise pass), 2026-09-02: raised 28 -> 40.
+ * That 28/28-full state was the actual section 7.3 blocker: kiln_io_owner,
+ * thermo_owner, spi_owner, i2c_owner and screen_idle EACH already had a
+ * stack_margin_register() call site (added in the Phase 0 pass above), so
+ * this was never a missing-registration bug -- every call to register()
+ * beyond the 28th silently failed (logged, not fatal) with no slot to put
+ * it in, and i2c_owner_init() is shared by two live callers on this board
+ * (SX1509 the IO expander, NS2009 the touch controller -- see i2c_owner.c),
+ * so its ONE source call site fires TWICE at boot, making the real
+ * boot-time registration count 29 against a cap of 28: one guaranteed
+ * failure every boot, and which specific task lost the coin flip depended
+ * on init order, not on anything about that task. Raising to 40 gives 11
+ * spare slots above that 29 -- room for the double i2c_owner registration
+ * plus a few more tasks before this needs touching again. Cost: 12 slots *
+ * sizeof(stack_margin_entry_t) (28 bytes: char name[20] + TaskHandle_t*
+ * (4 bytes on this 32-bit target) + uint32_t, no padding) = 336 bytes of
+ * static DRAM -- a deliberate, documented spend on the measurement this
+ * whole plan needs before it can spend anything back. */
+#define STACK_MARGIN_MAX_TASKS 40u
 #define STACK_MARGIN_NAME_MAX  20u
 
 /* Registers one task for reporting. `task_handle_slot` is a `TaskHandle_t *`
