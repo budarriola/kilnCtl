@@ -123,6 +123,54 @@ Revalidated against the historical dwell tails: z0 bias −0.081 → −0.047, z
 worse**. This is a trade, not a clean win, and should be recorded as such.
 Feasible range extends 60C → 65C.
 
+**CORRECTION, 2026-09-02d: the figures above describe a matrix that does not
+run.** `zone_coupling_solve.c` (`zone_coupling_solve_hold()`/`_climb()`,
+~lines 229 and 371) never reads the matrix's own diagonal cell —
+`coupling_coeff[]`'s diagonal is contractually 0 (`zones_http.c`) — and
+instead sets `G[row][row] = ff_k_dc`, the per-zone identified DC gain.
+Every number above (cond 4.64, the −0.047/−0.053/+0.032 biases, 60C→65C) was
+computed on the matrix's **own** diagonal (38.13/35.90/35.32), not on
+`ff_k_dc` (39.2459/31.9669/31.6810 as last read off the board — within 1–3%
+of the matrix diagonal on z1/z2 but ~2.9% off on z0). The solver actually
+runs a **hybrid**: this matrix's measured off-diagonals with `ff_k_dc` on
+the diagonal. Recomputed for that hybrid, off the same fixtures and the same
+`coupled_hold_feasibility_sweep()`/`matrix_plausibility()` tooling
+(`tools/PcTools/src/kilnctrl/coupled_ident.py`):
+
+| | own-diagonal (doc's original figures, does not run) | hybrid (ff_k_dc diagonal, what actually runs) | pre-adoption hybrid (old off-diagonals, ff_k_dc diagonal — what ran before) |
+|---|---|---|---|
+| condition number | 4.64 | 5.51 | 1.92 |
+| plausibility | pass | pass | pass |
+| feasible range | 65C | 60C | 58C |
+| bias z0 | −0.047 | −0.094 | +0.201 |
+| bias z1 | −0.053 | −0.056 | +0.237 |
+| bias z2 | +0.032 | +0.116 | +0.137 |
+
+The hybrid that actually runs is worse than the own-diagonal figures on
+every axis — roughly 2–3.6× the bias magnitude on z0/z2, a materially worse
+condition number, and a feasibility boundary 5C short of the claimed one.
+It is still an improvement over what ran before adoption (all three biases
+shrink substantially, feasibility 58C→60C), so **adoption was still a net
+win in what shipped**, just a smaller one than this section originally
+claimed, and the win is despite the diagonal substitution, not because of
+it.
+
+This also answers a design question the substitution raises: should the
+solver use the matrix's own diagonal instead of `ff_k_dc`? The own-diagonal
+matrix wins on every metric above, and it is not a coincidence — its
+diagonal comes from the *same* three rested single-zone excitation runs as
+the off-diagonals it is paired with, while `ff_k_dc` is identified
+separately (step-test autotune) and carries its own ~3% disagreement with
+the matrix's own z0 reading. Using the matrix's own diagonal is better
+supported by this data. It is not a drop-in change, though: `ff_k_dc` is
+also the shared input to the uncoupled 1x1 fallback
+(`diagonal_hold`/`diagonal_climb` in `zone_coupling_solve.c`) and to other
+feedforward math outside coupling, so switching only the coupled-solve
+diagonal would make the coupled and uncoupled paths disagree about a
+zone's own gain at the seam where neighbours drop in/out of qualification —
+that discontinuity would need to be sized before making the change, not
+just the win above it. No firmware change made here.
+
 **ADOPTED 2026-09-02 (owner decision).** Every cell has exactly one
 observation — no redundancy, no error bar — and that caveat travels with the
 numbers, not just this paragraph. Reproducible from checked-in logs via
