@@ -5,7 +5,7 @@
 // document on 2026-08-24 (reset timing 13.4 Table 39 p308, SWRESET 5.2.2
 // p150, SLPIN/SLPOUT 5.2.12/13 p165-166, COLMOD 5.2.34 p200, MADCTL
 // 5.2.30 p192, SPI clock limits 17.4.3 p332).
-#include "ILI9488.h"
+#include "panel_spi.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -17,6 +17,7 @@
 #include "freertos/task.h"
 #include "panel_codec.h"
 #include "settings.h"
+#include "st7796_panel.h"
 
 static const char *TAG = "ILI9488";
 
@@ -75,14 +76,22 @@ static const char *TAG = "ILI9488";
  * So this driver runs COLMOD = 0x66 (DBI 110, 18 bits/pixel) and sends three
  * bytes per pixel. The API still speaks RGB565 -- that is what the UART
  * protocol carries and what callers want -- and the widening happens in
- * exactly one place, ili9488_rgb565_to_rgb666(). It costs 50% more bytes on
- * the wire than RGB565 would; there is no alternative on this interface.
+ * exactly one place, panel_codec_rgb565_to_rgb666(), reached through
+ * ili9488_encode_pixel() below. It costs 50% more bytes on the wire than
+ * RGB565 would; there is no alternative on this interface.
  *
  * A third thing that follows from (2): 480 x 320 x 3 bytes = 460,800 bytes.
  * There is no framebuffer, and there cannot be one. Every draw call goes
  * straight to the panel, which is why -- unlike SSD1306.c -- there is no
  * ILI9488_display() flush. Nothing is buffered, so nothing needs flushing.
- */
+ *
+ * NOTE (DISPLAY_ST7796_PLAN.md Sec.12 Phase 3): (2) above is specific to the
+ * ILI9488 part, not to this file any more. The ST7796 (st7796_panel.c) has a
+ * real 16bpp SPI data format and runs COLMOD 0x55 -- panel_desc_t.
+ * bytes_per_pixel and ili9488_encode_pixel() are what let the SAME code
+ * below (chunking, D/C batching, the blit state machine) serve either part
+ * without knowing which one it is. Everything else in this comment block
+ * (D/C batching, no framebuffer) still applies to both. */
 
 /* --- Command opcodes (datasheet §5.1 Command List) --- */
 #define ILI9488_CMD_NOP        0x00
@@ -264,28 +273,31 @@ static const uint8_t font5x7[96][5] = {
  *
  * ADJCTL3 (F7h) is included because every vendor sequence has it; note that
  * per §5.3.39 its only documented parameter bit, DSI_18_option, affects the
- * MIPI-DSI path, not the SPI path this board uses. It is harmless here. */
-typedef struct {
-    uint8_t cmd;
-    uint8_t len;
-    uint8_t params[15];
-} ili9488_init_step_t;
-
-static const ili9488_init_step_t ili9488_init_sequence[] = {
-    { ILI9488_CMD_PGAMCTRL, 15, { 0x00, 0x03, 0x09, 0x08, 0x16, 0x0A, 0x3F, 0x78,
-                                  0x4C, 0x09, 0x0A, 0x08, 0x16, 0x1A, 0x0F } },
-    { ILI9488_CMD_NGAMCTRL, 15, { 0x00, 0x16, 0x19, 0x03, 0x0F, 0x05, 0x32, 0x45,
-                                  0x46, 0x04, 0x0E, 0x0D, 0x35, 0x37, 0x0F } },
-    { ILI9488_CMD_PWCTRL1,   2, { 0x17, 0x15 } },  /* VREG1OUT / VREG2OUT */
-    { ILI9488_CMD_PWCTRL2,   1, { 0x41 } },        /* VGH/VGL step-up factor */
-    { ILI9488_CMD_VMCTRL,    3, { 0x00, 0x12, 0x80 } },
-    { ILI9488_CMD_COLMOD,    1, { ILI9488_COLMOD_RGB666 } },
-    { ILI9488_CMD_IFMODE,    1, { 0x00 } },        /* DBI (MCU) interface, not DPI */
-    { ILI9488_CMD_FRMCTR1,   1, { 0xA0 } },        /* ~60 Hz frame rate */
-    { ILI9488_CMD_INVTR,     1, { 0x02 } },        /* 2-dot inversion */
-    { ILI9488_CMD_DFC,       2, { 0x02, 0x02 } },  /* display function control */
-    { ILI9488_CMD_ENTRY_MODE,1, { 0xC6 } },
-    { ILI9488_CMD_ADJCTL3,   4, { 0xA9, 0x51, 0x2C, 0x82 } },
+ * MIPI-DSI path, not the SPI path this board uses. It is harmless here.
+ *
+ * Phase 3 (DISPLAY_ST7796_PLAN.md Sec.12): this table used to be a private
+ * cmd/len/params struct array read only by this file. It is now transcribed,
+ * byte-for-byte identical cmd/param values, into the packed
+ * [cmd][paramLen][params...] format panel_codec_init_step() decodes -- see
+ * that function's comment in panel_codec.h -- so the SAME generic
+ * ili9488_run_init_sequence() below can run either this table or ST7796's
+ * (st7796_panel.c) off nothing but the descriptor. Nothing here is
+ * re-derived; every value is the one line above it, just regrouped. */
+static const uint8_t ili9488_init_bytes[] = {
+    ILI9488_CMD_PGAMCTRL, 15, 0x00, 0x03, 0x09, 0x08, 0x16, 0x0A, 0x3F, 0x78,
+                               0x4C, 0x09, 0x0A, 0x08, 0x16, 0x1A, 0x0F,
+    ILI9488_CMD_NGAMCTRL, 15, 0x00, 0x16, 0x19, 0x03, 0x0F, 0x05, 0x32, 0x45,
+                               0x46, 0x04, 0x0E, 0x0D, 0x35, 0x37, 0x0F,
+    ILI9488_CMD_PWCTRL1,   2, 0x17, 0x15,              /* VREG1OUT / VREG2OUT */
+    ILI9488_CMD_PWCTRL2,   1, 0x41,                    /* VGH/VGL step-up factor */
+    ILI9488_CMD_VMCTRL,    3, 0x00, 0x12, 0x80,
+    ILI9488_CMD_COLMOD,    1, ILI9488_COLMOD_RGB666,
+    ILI9488_CMD_IFMODE,    1, 0x00,                    /* DBI (MCU) interface, not DPI */
+    ILI9488_CMD_FRMCTR1,   1, 0xA0,                    /* ~60 Hz frame rate */
+    ILI9488_CMD_INVTR,     1, 0x02,                    /* 2-dot inversion */
+    ILI9488_CMD_DFC,       2, 0x02, 0x02,               /* display function control */
+    ILI9488_CMD_ENTRY_MODE,1, 0xC6,
+    ILI9488_CMD_ADJCTL3,   4, 0xA9, 0x51, 0x2C, 0x82,
 };
 
 /* ===================================================================
@@ -305,13 +317,19 @@ static const ili9488_init_step_t ili9488_init_sequence[] = {
  * Green already has six bits and needs no rounding at all; red and blue lose
  * nothing either, since 5 bits genuinely carry less information than the 6
  * the panel can show. RGB565 is the API's limit here, not the panel's. */
-static inline void ili9488_rgb565_to_rgb666(uint16_t color, uint8_t out[3])
+/* Phase 3: the panel-selected encoder. bytes_per_pixel == 2 (ST7796, COLMOD
+ * 0x55) is panel_codec_rgb565_passthrough() -- the wire already IS the wire
+ * format, no widening -- anything else (3, ILI9488's RGB666) is the widening
+ * above. Writes exactly disp->panel->bytes_per_pixel bytes into `out`; the
+ * two callers below both keep out[] sized for the larger (3-byte) case so
+ * one buffer serves either panel. */
+static inline void ili9488_encode_pixel(const ILI9488Class *disp, uint16_t color, uint8_t *out)
 {
-    /* The actual widening now lives in panel_codec.c
-     * (panel_codec_rgb565_to_rgb666()) -- DISPLAY_ST7796_PLAN.md Sec.6 Step 1
-     * -- so it is host-testable without the SPI/expander machinery this file
-     * needs. This wrapper is kept so every call site below is unchanged. */
-    panel_codec_rgb565_to_rgb666(color, out);
+    if (disp->panel->bytes_per_pixel == 2) {
+        panel_codec_rgb565_passthrough(color, out);
+    } else {
+        panel_codec_rgb565_to_rgb666(color, out);
+    }
 }
 
 static inline bool ili9488_ready(const ILI9488Class *disp)
@@ -329,13 +347,13 @@ static inline size_t ili9488_chunk(const ILI9488Class *disp)
                                                        : disp->chunk_bytes;
 }
 
-/* Whole pixels (3 bytes each) that fit in one chunk -- panel_codec_chunk_
- * pixels() does the same clamp-then-divide ili9488_chunk()'s two callers used
- * to each spell out inline (`ili9488_chunk(disp) / 3`); kept as a named
- * wrapper here so both call sites read the same as before. */
+/* Whole pixels (disp->panel->bytes_per_pixel bytes each) that fit in one
+ * chunk -- panel_codec_chunk_pixels() does the clamp-then-divide; kept as a
+ * named wrapper here so every call site reads the same. */
 static inline size_t ili9488_chunk_pixels(const ILI9488Class *disp)
 {
-    return panel_codec_chunk_pixels(disp->chunk_bytes, ILI9488_SCRATCH_BYTES, 3);
+    return panel_codec_chunk_pixels(disp->chunk_bytes, ILI9488_SCRATCH_BYTES,
+                                     disp->panel->bytes_per_pixel);
 }
 
 /* Generous, but finite. The longest thing held under this lock is a full-screen
@@ -457,8 +475,9 @@ static esp_err_t ili9488_begin_ram_write(ILI9488Class *disp, uint16_t x, uint16_
  * many times as needed -- no per-pixel work, no per-chunk D/C toggle. */
 static esp_err_t ili9488_push_color_run(ILI9488Class *disp, uint16_t color, uint32_t pixels)
 {
+    uint8_t bpp = disp->panel->bytes_per_pixel;
     uint8_t px[3];
-    ili9488_rgb565_to_rgb666(color, px);
+    ili9488_encode_pixel(disp, color, px);
 
     if (pixels == 0) return ESP_OK;
 
@@ -467,14 +486,12 @@ static esp_err_t ili9488_push_color_run(ILI9488Class *disp, uint16_t color, uint
     if (chunk_pixels > pixels) chunk_pixels = (size_t)pixels;
 
     for (size_t i = 0; i < chunk_pixels; ++i) {
-        disp->scratch[i * 3 + 0] = px[0];
-        disp->scratch[i * 3 + 1] = px[1];
-        disp->scratch[i * 3 + 2] = px[2];
+        memcpy(&disp->scratch[i * bpp], px, bpp);
     }
 
     while (pixels > 0) {
         size_t n = (pixels > chunk_pixels) ? chunk_pixels : (size_t)pixels;
-        esp_err_t err = ili9488_tx(disp, disp->scratch, n * 3);
+        esp_err_t err = ili9488_tx(disp, disp->scratch, n * bpp);
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "pixel run write failed: %s", esp_err_to_name(err));
             return err;
@@ -537,7 +554,7 @@ static const uint8_t ili9488_madctl_by_rotation[4] = {
 
 static esp_err_t ili9488_apply_rotation(ILI9488Class *disp, uint8_t rotation)
 {
-    uint8_t madctl = panel_codec_madctl(ili9488_madctl_by_rotation, rotation, ILI9488_MADCTL_COLOR_ORDER);
+    uint8_t madctl = panel_codec_madctl(disp->panel->madctl, rotation, ILI9488_MADCTL_COLOR_ORDER);
     esp_err_t err = ili9488_write_cmd(disp, ILI9488_CMD_MADCTL, &madctl, 1);
     if (err != ESP_OK) return err;
 
@@ -554,16 +571,35 @@ static esp_err_t ili9488_apply_rotation(ILI9488Class *disp, uint8_t rotation)
 }
 
 /* The full bring-up, factored out because a reset (hard or soft) drops the
- * controller back to power-on defaults and has to re-run all of it. */
+ * controller back to power-on defaults and has to re-run all of it.
+ *
+ * Phase 3: runs disp->panel->init_seq generically, decoding it with
+ * panel_codec_init_step() (see that function's comment for the packed
+ * format) instead of walking a private struct array -- this is what makes
+ * the same function correct for both ILI9488 and ST7796. A malformed table
+ * (declared param length running past init_len) is treated as an init
+ * failure rather than read past the buffer -- unreachable from either real
+ * descriptor below, but panel_codec_init_step() is host-tested against it
+ * directly since nothing here would otherwise exercise that path. */
 static esp_err_t ili9488_run_init_sequence(ILI9488Class *disp)
 {
-    for (size_t i = 0; i < sizeof(ili9488_init_sequence) / sizeof(ili9488_init_sequence[0]); ++i) {
-        const ili9488_init_step_t *step = &ili9488_init_sequence[i];
-        esp_err_t err = ili9488_write_cmd(disp, step->cmd, step->params, step->len);
+    const panel_desc_t *panel = disp->panel;
+    size_t offset = 0;
+    uint8_t cmd;
+    const uint8_t *params;
+    uint8_t param_len;
+    while (panel_codec_init_step(panel->init_seq, panel->init_len, &offset,
+                                  &cmd, &params, &param_len)) {
+        esp_err_t err = ili9488_write_cmd(disp, cmd, params, param_len);
         if (err != ESP_OK) {
-            ESP_LOGE(TAG, "init step 0x%02X failed: %s", step->cmd, esp_err_to_name(err));
+            ESP_LOGE(TAG, "init step 0x%02X failed: %s", cmd, esp_err_to_name(err));
             return err;
         }
+    }
+    if (offset != panel->init_len) {
+        ESP_LOGE(TAG, "%s init_seq is malformed (stopped at byte %u of %u)",
+                 panel->name, (unsigned)offset, (unsigned)panel->init_len);
+        return ESP_ERR_INVALID_STATE;
     }
 
     esp_err_t err = ili9488_apply_rotation(disp, disp->rotation);
@@ -625,6 +661,7 @@ esp_err_t ILI9488_init(ILI9488Class *disp,
                        int cs_gpio,
                        int dc_gpio,
                        int reset_gpio,
+                       const panel_desc_t *panel,
                        uint16_t panel_width,
                        uint16_t panel_height,
                        uint8_t rotation,
@@ -633,11 +670,16 @@ esp_err_t ILI9488_init(ILI9488Class *disp,
     /* io is mandatory unless dc_gpio bypasses the expander entirely: with
      * D/C on the expander (dc_gpio == -1), no expander means no way to send
      * even a single command. Failing here is far kinder than a driver that
-     * initializes "successfully" and shows nothing. */
+     * initializes "successfully" and shows nothing. `panel` must carry a
+     * real init_seq and a nonzero bytes_per_pixel -- a NULL/empty descriptor
+     * (like ILI9488_get_panel_desc() briefly was in Phase 2) would otherwise
+     * either init a display with no bring-up sequence or divide by zero in
+     * the chunk-pixels arithmetic. */
     if (!disp || !owner || (dc_gpio < 0 && !io) || panel_width == 0 || panel_height == 0 ||
         rotation > 3 || clock_hz <= 0 || !GPIO_IS_VALID_OUTPUT_GPIO(cs_gpio) ||
         (dc_gpio >= 0 && !GPIO_IS_VALID_OUTPUT_GPIO(dc_gpio)) ||
-        (reset_gpio >= 0 && !GPIO_IS_VALID_OUTPUT_GPIO(reset_gpio))) {
+        (reset_gpio >= 0 && !GPIO_IS_VALID_OUTPUT_GPIO(reset_gpio)) ||
+        !panel || !panel->init_seq || panel->init_len == 0 || panel->bytes_per_pixel == 0) {
         return ESP_ERR_INVALID_ARG;
     }
     /* Re-initializing a live instance would memset away the scratch pointer,
@@ -653,6 +695,7 @@ esp_err_t ILI9488_init(ILI9488Class *disp,
     disp->cs_gpio = cs_gpio;
     disp->dc_gpio = dc_gpio;
     disp->reset_gpio = reset_gpio;
+    disp->panel = panel;
     disp->panel_width = panel_width;
     disp->panel_height = panel_height;
     disp->rotation = rotation;
@@ -795,19 +838,32 @@ esp_err_t ILI9488_init(ILI9488Class *disp,
         ESP_LOGW(TAG, "initial clear failed: %s", esp_err_to_name(clear_err));
     }
 
-    ESP_LOGI(TAG, "ILI9488 initialized: %ux%u (rotation %u), RGB666, %d Hz write / %d Hz read",
-             disp->width, disp->height, disp->rotation, clock_hz, ILI9488_READ_CLOCK_HZ);
+    ESP_LOGI(TAG, "%s initialized: %ux%u (rotation %u), %u bpp, %d Hz write / %d Hz read",
+             disp->panel->name, disp->width, disp->height, disp->rotation,
+             disp->panel->bytes_per_pixel, clock_hz, ILI9488_READ_CLOCK_HZ);
     return ESP_OK;
 }
 
 esp_err_t ILI9488_start(ILI9488Class *disp, spi_owner_t *owner, spi_host_device_t host, kiln_io_t *io)
 {
+    /* Phase 3 (DISPLAY_ST7796_PLAN.md Sec.6 Step 3/Sec.12): Kconfig-only
+     * panel selection, no probing yet -- that is Phase 4, and it is blocked
+     * on Sec.4's bench-recorded RDDID bytes, which do not exist. The choice
+     * is a single compile-time branch on the KILNCTL_DISPLAY_PANEL choice
+     * symbol (see Kconfig); ILI9488 stays the default so an unconfigured
+     * build behaves exactly as before this phase. */
+#if CONFIG_KILNCTL_DISPLAY_PANEL_ST7796
+    const panel_desc_t *panel = ST7796_get_panel_desc();
+#else
+    const panel_desc_t *panel = ILI9488_get_panel_desc();
+#endif
+
     /* DISPLAY_DC_GPIO/DISPLAY_RESET_GPIO are -1 unless
      * KILNCTL_DISPLAY_DC_RESET_DIRECT_GPIO is set in menuconfig, in which
      * case ILI9488_init bypasses the expander for whichever line has a real
      * GPIO number -- see settings.h and the Kconfig help text. */
     esp_err_t err = ILI9488_init(disp, owner, host, io, DISPLAY_CS_IO,
-                                 DISPLAY_DC_GPIO, DISPLAY_RESET_GPIO,
+                                 DISPLAY_DC_GPIO, DISPLAY_RESET_GPIO, panel,
                                  DISPLAY_WIDTH, DISPLAY_HEIGHT,
                                  (uint8_t)DISPLAY_ROTATION, DISPLAY_SPI_CLOCK_HZ);
     if (err != ESP_OK) {
@@ -1227,17 +1283,18 @@ static esp_err_t ili9488_draw_glyph_locked(ILI9488Class *disp, uint16_t x, uint1
 {
     const uint8_t *glyph = font5x7[c - 0x20];
     uint8_t size = disp->text_size;
+    uint8_t bpp = disp->panel->bytes_per_pixel;
     uint16_t cell_w = (uint16_t)(ILI9488_FONT_CELL_WIDTH * size);
     uint16_t cell_h = (uint16_t)(ILI9488_FONT_CELL_HEIGHT * size);
-    size_t row_bytes = (size_t)cell_w * 3;
+    size_t row_bytes = (size_t)cell_w * bpp;
 
     if (disp->text_opaque && row_bytes <= ili9488_chunk(disp)) {
         esp_err_t err = ili9488_begin_ram_write(disp, x, y, cell_w, cell_h);
         if (err != ESP_OK) return err;
 
         uint8_t fg[3], bg[3];
-        ili9488_rgb565_to_rgb666(disp->text_fg, fg);
-        ili9488_rgb565_to_rgb666(disp->text_bg, bg);
+        ili9488_encode_pixel(disp, disp->text_fg, fg);
+        ili9488_encode_pixel(disp, disp->text_bg, bg);
 
         for (int row = 0; row < ILI9488_FONT_CELL_HEIGHT; ++row) {
             size_t n = 0;
@@ -1250,9 +1307,8 @@ static esp_err_t ili9488_draw_glyph_locked(ILI9488Class *disp, uint16_t x, uint1
                            ((glyph[col] >> row) & 0x01);
                 const uint8_t *px = lit ? fg : bg;
                 for (uint8_t s = 0; s < size; ++s) {
-                    disp->scratch[n++] = px[0];
-                    disp->scratch[n++] = px[1];
-                    disp->scratch[n++] = px[2];
+                    memcpy(&disp->scratch[n], px, bpp);
+                    n += bpp;
                 }
             }
             /* Vertical scaling is free: push the same row `size` times. */
@@ -1510,17 +1566,28 @@ esp_err_t ILI9488_blit_data(ILI9488Class *disp, const uint8_t *data, size_t len)
         ili9488_unlock(disp);
         return ESP_ERR_INVALID_STATE;
     }
+    uint8_t bpp = disp->panel->bytes_per_pixel;
     uint32_t sent = 0;
     while (sent < pixels) {
         size_t n = (size_t)(pixels - sent);
         if (n > chunk_pixels) n = chunk_pixels;
 
-        for (size_t i = 0; i < n; ++i) {
-            const uint8_t *src = &data[(sent + i) * 2];
-            uint16_t color = (uint16_t)(src[0] | ((uint16_t)src[1] << 8));  /* u16 LE on the wire */
-            ili9488_rgb565_to_rgb666(color, &disp->scratch[i * 3]);
+        if (bpp == 2) {
+            /* Phase 3 fast path: at COLMOD 0x55 (ST7796) the wire's RGB565
+             * u16-LE IS the RAMWR byte stream -- panel_codec's "null
+             * conversion" -- so there is nothing to compute per pixel. One
+             * memcpy of the whole chunk replaces the per-pixel loop below,
+             * which is what actually avoids widening rather than just
+             * calling a no-op conversion function once per pixel. */
+            memcpy(disp->scratch, &data[sent * 2], n * 2);
+        } else {
+            for (size_t i = 0; i < n; ++i) {
+                const uint8_t *src = &data[(sent + i) * 2];
+                uint16_t color = (uint16_t)(src[0] | ((uint16_t)src[1] << 8));  /* u16 LE on the wire */
+                panel_codec_rgb565_to_rgb666(color, &disp->scratch[i * 3]);
+            }
         }
-        err = ili9488_tx(disp, disp->scratch, n * 3);
+        err = ili9488_tx(disp, disp->scratch, n * bpp);
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "BLIT_DATA transfer failed: %s; aborting", esp_err_to_name(err));
             ili9488_blit_clear_state(disp);
@@ -1665,28 +1732,27 @@ esp_err_t ILI9488_read_id(ILI9488Class *disp, uint8_t out_id[3])
  * Panel descriptor (DISPLAY_ST7796_PLAN.md Sec.6 Step 2)
  * ===================================================================
  *
- * Introduced this phase, not yet consumed: nothing in this file reads from
- * it, so its existence changes no boot-time behaviour. The values are the
- * same ones the rest of this file already uses (ILI9488_PANEL_WIDTH/HEIGHT,
- * ILI9488_COLMOD_RGB666, the 3-byte RGB666 wire format,
- * ili9488_madctl_by_rotation[]) -- restated here, not re-derived.
+ * Phase 3: now actually consumed -- ILI9488_start() picks this descriptor
+ * (or ST7796_get_panel_desc()) and every function above reads panel_width/
+ * height are still the real geometry constants; colmod/bytes_per_pixel/
+ * init_seq/madctl now drive ili9488_run_init_sequence() and the pixel-encode
+ * dispatch instead of being restated-but-unused metadata.
  *
- * init_seq/init_len are NULL/0: ili9488_init_sequence[] above is in a
- * cmd/len/params struct shape this flat byte-buffer pair cannot represent
- * without re-deriving it, and this phase makes no transformation it cannot
- * prove byte-identical. id_matches is NULL for the same kind of reason on the
- * data side -- Sec.4's "RDDID bytes from the ILI9488 on this wiring" line is
- * still an open checkbox, and per Sec.6 Step 3, a matcher must be written
- * against bytes actually read off this board, never datasheet nominal
- * values. Both become real once Phase 3/4 need them. */
+ * init_seq/init_len point at ili9488_init_bytes[] above, the same values
+ * ili9488_init_sequence[] held in Phase 2, transcribed into the packed
+ * format panel_codec_init_step() decodes -- see that array's own comment.
+ * id_matches stays NULL: Sec.4's "RDDID bytes from the ILI9488 on this
+ * wiring" line is still an open checkbox, and per Sec.6 Step 3, a matcher
+ * must be written against bytes actually read off this board, never
+ * datasheet nominal values. That is Phase 4's job. */
 static const panel_desc_t ili9488_panel_desc = {
     .name = "ILI9488",
     .panel_width = ILI9488_PANEL_WIDTH,
     .panel_height = ILI9488_PANEL_HEIGHT,
     .colmod = ILI9488_COLMOD_RGB666,
     .bytes_per_pixel = 3,
-    .init_seq = NULL,
-    .init_len = 0,
+    .init_seq = ili9488_init_bytes,
+    .init_len = sizeof(ili9488_init_bytes),
     .madctl = { ili9488_madctl_by_rotation[0], ili9488_madctl_by_rotation[1],
                 ili9488_madctl_by_rotation[2], ili9488_madctl_by_rotation[3] },
     .id_matches = NULL,

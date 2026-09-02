@@ -64,6 +64,24 @@ size_t panel_codec_chunk_pixels(size_t chunk_bytes, size_t scratch_bytes, size_t
     return clamped / bytes_per_pixel;
 }
 
+bool panel_codec_init_step(const uint8_t *seq, size_t len, size_t *offset,
+                            uint8_t *out_cmd, const uint8_t **out_params,
+                            uint8_t *out_param_len)
+{
+    if (!seq || !offset || !out_cmd || !out_params || !out_param_len) return false;
+    size_t i = *offset;
+    if (i + 2 > len) return false; /* no cmd+len byte pair left (also end-of-buffer) */
+    uint8_t cmd = seq[i];
+    uint8_t plen = seq[i + 1];
+    if (i + 2 + (size_t)plen > len) return false; /* declared params run past the buffer */
+
+    *out_cmd = cmd;
+    *out_params = (plen > 0) ? &seq[i + 2] : NULL;
+    *out_param_len = plen;
+    *offset = i + 2 + plen;
+    return true;
+}
+
 bool panel_codec_blit_overruns(uint32_t pixels, uint32_t pixels_total, uint32_t pixels_done)
 {
     /* pixels_done is never > pixels_total in the real driver, but guard the

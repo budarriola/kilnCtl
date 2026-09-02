@@ -31,7 +31,7 @@
 #include "backup_http.h"
 #include "settings_http.h"
 #include "factory_reset.h"
-#include "ILI9488.h"
+#include "panel_spi.h"
 #include "lvgl_port.h"
 #include "MAX31856.h"
 #include "NS2009.h"
@@ -895,7 +895,7 @@ void app_main(void)
     // register burst at a different clock and mode. Normally needs kiln_io
     // for D/C and ~RESET, both of which are expander pins -- except under
     // KILNCTL_DISPLAY_DC_RESET_DIRECT_GPIO bench wiring, where ILI9488_start
-    // drives them from bare GPIOs instead (see settings.h/ILI9488.c) and the
+    // drives them from bare GPIOs instead (see settings.h/panel_spi.c) and the
     // expander isn't needed for the display at all, so the io_ready gate
     // below is relaxed in that case specifically.
     static ILI9488Class display;

@@ -26,6 +26,18 @@
 // protocol carries. The panel cannot accept RGB565 over 4-line SPI (see the
 // RGB666 note in ILI9488.c); the conversion to 18-bit happens in exactly one
 // place inside the driver.
+// DISPLAY_ST7796_PLAN.md Sec.6 Step 2 / Sec.12 Phase 3: this file was
+// ILI9488.h. It is now a generic SPI panel driver parameterised by a
+// `const panel_desc_t *` (panel_codec.h) so the same code drives either the
+// ILI9488 or the ST7796 -- only one is live per boot (Kconfig-selected,
+// still no auto-detection -- that is Phase 4). The exported type/function
+// names below deliberately KEPT their ILI9488_ prefix rather than being
+// renamed to something generic: several files outside this phase's scope
+// (screen_idle.c, in particular -- explicitly off-limits this phase) call
+// ILI9488Class/ILI9488_clear() directly, so renaming those identifiers would
+// break a file this phase is not allowed to touch. The rename that DID
+// happen is the file itself and everything internal to it; the public names
+// are an intentionally-deferred cleanup, not an oversight.
 #ifndef ILI9488_H
 #define ILI9488_H
 
@@ -129,6 +141,17 @@ typedef struct {
 
     ILI9488BlitState blit;
 
+    /* The descriptor this instance was started with (ILI9488_get_panel_desc()
+     * or ST7796_get_panel_desc(), chosen in ILI9488_start() by
+     * KILNCTL_DISPLAY_PANEL). Borrowed -- the descriptors are file-static
+     * const in their respective drivers, never freed. Drives colmod/
+     * bytes_per_pixel/init_seq/madctl; panel_width/panel_height above stay
+     * sourced from Kconfig (DISPLAY_WIDTH/HEIGHT) rather than this pointer,
+     * since both panels share the same native geometry today (Sec.6 Step 4)
+     * and Kconfig is what every other geometry-derived constant already
+     * keys off. */
+    const panel_desc_t *panel;
+
     /* Reusable DMA-capable scratch, allocated once in init. Guarded by lock,
      * like everything else that touches the wire. */
     uint8_t *scratch;
@@ -160,7 +183,12 @@ typedef struct {
  * (same as today: init falls back to SWRESET).
  *
  * width/height are the panel's NATIVE dimensions (320x480); the rotated
- * dimensions are derived. */
+ * dimensions are derived.
+ *
+ * `panel` selects the descriptor this instance runs off (colmod, bpp,
+ * init_seq, madctl table) -- see panel_codec.h. Must be non-NULL with a
+ * non-empty init_seq and a nonzero bytes_per_pixel, or init fails with
+ * ESP_ERR_INVALID_ARG rather than running a driver with nothing to send. */
 esp_err_t ILI9488_init(ILI9488Class *disp,
                        spi_owner_t *owner,
                        spi_host_device_t host,
@@ -168,6 +196,7 @@ esp_err_t ILI9488_init(ILI9488Class *disp,
                        int cs_gpio,
                        int dc_gpio,
                        int reset_gpio,
+                       const panel_desc_t *panel,
                        uint16_t panel_width,
                        uint16_t panel_height,
                        uint8_t rotation,
@@ -241,11 +270,13 @@ bool ILI9488_blit_active(ILI9488Class *disp);
  * high-impedance MISO looks like -- worth distinguishing from a bus error. */
 esp_err_t ILI9488_read_id(ILI9488Class *disp, uint8_t out_id[3]);
 
-/* The ILI9488's panel_desc_t (DISPLAY_ST7796_PLAN.md Sec.6 Step 2), populated
- * from this driver's real geometry/COLMOD/MADCTL values. Not yet consumed by
- * anything in this file -- introduced ahead of Phase 3, when panel_spi.c
- * starts actually running off it. init_seq/id_matches are NULL; see the
- * definition's own comment in ILI9488.c for why. */
+/* The ILI9488's panel_desc_t (DISPLAY_ST7796_PLAN.md Sec.6 Step 2), with a
+ * real init_seq as of Phase 3 -- this file now runs the sequence generically
+ * off whichever descriptor ILI9488_start() picked. id_matches stays NULL:
+ * Sec.4's "RDDID bytes from the ILI9488 on this wiring" checkbox is still
+ * open, and per Sec.6 Step 3 a matcher must be written against bytes
+ * actually read off this board, never datasheet nominal values -- that is
+ * Phase 4's job. */
 const panel_desc_t *ILI9488_get_panel_desc(void);
 
 #ifdef __cplusplus

@@ -36,7 +36,7 @@
 
 #include "esp_err.h"
 
-#include "ILI9488.h"
+#include "panel_spi.h"
 #include "NS2009.h"
 #include "screen_idle.h"
 

@@ -36,7 +36,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 
-#include "ILI9488.h"
+#include "panel_spi.h"
 #include "NS2009.h"
 
 #ifdef __cplusplus

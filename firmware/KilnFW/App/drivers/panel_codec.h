@@ -110,25 +110,45 @@ size_t panel_codec_chunk_pixels(size_t chunk_bytes, size_t scratch_bytes, size_t
  * ESP-IDF-dependent driver. */
 bool panel_codec_blit_overruns(uint32_t pixels, uint32_t pixels_total, uint32_t pixels_done);
 
+/* --- Init-sequence byte format (DISPLAY_ST7796_PLAN.md Sec.6 Step 2/12
+ * Phase 3) -------------------------------------------------------------
+ *
+ * panel_desc_t.init_seq is a flat "const uint8_t *, size_t" pair (see the
+ * struct below), not the cmd/len/params struct array ILI9488.c used to keep
+ * privately -- a flat byte buffer is what a data descriptor can hold without
+ * a second, panel-specific type. The format is a run of steps back-to-back,
+ * no terminator (the caller stops at init_len):
+ *
+ *   [cmd:1][paramLen:1][params: paramLen bytes] [cmd:1][paramLen:1]...
+ *
+ * Both ILI9488 and ST7796 panel_spi.c instances are transcribed into this
+ * format now that Phase 3 actually runs a sequence off the descriptor. */
+
+/* Decodes one step starting at *offset. On success, advances *offset past
+ * the whole step (cmd + length byte + params) and fills out_cmd/out_params/
+ * out_param_len; out_params points into `seq` (never copied) and is NULL
+ * when out_param_len is 0. Returns false -- leaving *offset unchanged --
+ * when there is no complete step left: fewer than 2 bytes remain (this is
+ * also the normal "reached the end" signal when *offset == len), or the
+ * declared paramLen would read past `len`. Never reads past `seq[len-1]`. */
+bool panel_codec_init_step(const uint8_t *seq, size_t len, size_t *offset,
+                            uint8_t *out_cmd, const uint8_t **out_params,
+                            uint8_t *out_param_len);
+
 /* --- Panel descriptor (DISPLAY_ST7796_PLAN.md Sec.6 Step 2) ---------------
  *
  * Deliberately a data descriptor, not a function-pointer-per-operation
  * interface: only one panel is live per boot, and indirect calls in the
  * pixel path would cost more than they buy (see the plan doc). Phase 2
- * introduces the type and populates ONLY the ILI9488 instance, from the
- * real values already in ILI9488.c/.h -- nothing in ILI9488.c is wired to
- * read from it yet (that starts in Phase 3, alongside the ILI9488.c ->
- * panel_spi.c rename), so its existence here cannot change boot behaviour.
+ * introduced the type and populated ONLY the ILI9488 instance, with
+ * init_seq/init_len left NULL/0 (the real table was still the private
+ * cmd/len/params struct array in ILI9488.c, a shape this flat pair could not
+ * represent without re-deriving it).
  *
- * init_seq/init_len are left NULL/0 on the ILI9488 instance: the real init
- * table is ili9488_init_sequence[] in ILI9488.c, in a cmd/len/params struct
- * shape (up to 15 parameter bytes per step) that this flat
- * "const uint8_t *, size_t" pair cannot represent without also re-deriving
- * it -- and re-deriving it here, unused, would be exactly the kind of
- * transformation this phase is not allowed to make (see this file's own
- * intro: "if you cannot prove a transformation preserves the emitted byte
- * stream, do not make it"). That conversion belongs in Phase 3, when
- * panel_spi.c actually starts running the sequence from the descriptor. */
+ * Phase 3 does that conversion: both the ILI9488 and ST7796 instances now
+ * carry their real init_seq, in the packed byte format documented above
+ * panel_codec_init_step(), and panel_spi.c (the ILI9488.c rename) runs the
+ * sequence generically off whichever descriptor it was started with. */
 typedef struct {
     const char *name;
     uint16_t panel_width, panel_height;   /* native, unrotated */
