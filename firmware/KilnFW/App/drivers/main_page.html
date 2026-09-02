@@ -37,7 +37,11 @@
     --border: var(--ui-text-secondary); --button-bg: var(--ui-card); --card-bg: var(--ui-card);
     --ok: var(--ui-accent-4); --off-color: var(--ui-text-secondary); --bad: var(--ui-accent-5);
   }
-  body { font-family: sans-serif; max-width: 480px; margin: 2em auto; padding: 0 1em;
+  /* WEB_UI_RESPONSIVE_PLAN.md sec 6: fixed 480px cap replaced with the
+     shared --kc-shell-max (theme.css) -- earns real width on a wide desktop
+     display instead of sitting in a narrow centred ribbon, while still
+     stopping well short of full-bleed unreadable line lengths. */
+  body { font-family: sans-serif; max-width: var(--kc-shell-max); margin: 2em auto; padding: 0 1em;
          background: var(--bg); color: var(--fg); }
   /* .theme-btn removed 2026-08-21: was a byte-for-byte duplicate of the one
      rule in /theme.css (which loads first), and being `position: fixed`
@@ -65,6 +69,17 @@
      the select rather than the row overflowing and forcing horizontal
      scroll; the select keeps flex:1 so it fills the row (or wraps to full
      width) instead of leaving the button an arbitrary leftover sliver. */
+  /* WEB_UI_RESPONSIVE_PLAN.md sec 6: `repeat(auto-fit, minmax(...,1fr))` --
+     backup_page.html:77's own .restore-controls rule is the pattern this
+     copies (sec 6 names it explicitly as the target shape). Column count is
+     automatic from the container's own width: one column on a phone (each
+     card falls under the 240px minmax floor so auto-fit collapses to 1),
+     naturally 2-3 columns once --kc-shell-max earns enough desktop width --
+     no breakpoint list to keep in sync with the shell width above. Each
+     card's own width shrinking below 240px is exactly the case theme.css's
+     `@container kc-card` rule (sec 6) exists to catch: this grid column
+     floor and that container-query threshold intentionally match. */
+  #channels { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 0.5em; }
   #runPicker { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5em; }
   /* Kiln-config selector (relay/thermocouple/PID/guard snapshot, distinct
      from the firing-PROFILE picker above -- see #kilnConfigPicker's own
