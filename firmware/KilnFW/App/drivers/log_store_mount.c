@@ -83,6 +83,8 @@ static esp_err_t write_via_worker(log_store_kind_t kind, const char *line)
         return ESP_ERR_INVALID_ARG;
     }
     log_store_job_t job = { .kind = kind, .line = line, .result = ESP_ERR_INVALID_STATE };
+    // Not reachable on-worker today; covered by bx_run_on_internal_stack()'s
+    // generic backstop if that ever changes.
     esp_err_t dispatch_err = uart_bridge_ext_run_on_flash_worker(log_store_job_run, &job);
     if (dispatch_err != ESP_OK) {
         return dispatch_err;

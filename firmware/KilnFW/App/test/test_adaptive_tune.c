@@ -2377,30 +2377,28 @@ static void test_accept_path_clear_ki_baseline_does_not_reenter_worker(void)
 }
 
 // ---------------------------------------------------------------------
-// S1 (2026-09-01 audit of ae5905f): a SECOND re-entrant path, on the halt
-// side rather than the accept side. profile_executor_halt()
-// (profile_executor_status.c) is itself one of uart_bridge_ext.c's own
-// on-worker calls, and it reaches adaptive_tune_run_end() directly. Before
-// this fix, adaptive_tune_run_end() dispatched save_kibase_job() onto the
-// flash worker with NO uart_bridge_ext_is_on_flash_worker() guard whenever
-// baseline_newly_latched was true -- the identical deadlock shape as R1's
-// accept path, saved only by bx_run_on_internal_stack()'s generic backstop.
+// S1 (2026-09-01 audit of ae5905f, corrected 2026-09-01 re-audit): the
+// same dispatch mechanism as R1, reached from a second call site --
+// profile_executor_halt() (profile_executor_status.c) is itself one of
+// uart_bridge_ext.c's own on-worker calls, and it reaches
+// adaptive_tune_run_end() directly. adaptive_tune_run_end() dispatches
+// save_kibase_job() onto the flash worker with NO uart_bridge_ext_is_on_
+// flash_worker() guard whenever baseline_newly_latched is true -- but that
+// path is NOT actually re-entrant through profile_executor_halt(): as
+// literally written today, profile_executor_status.c always passes
+// `clean=false` to this call, which forces every zone's run_end loop
+// iteration through the skip-and-continue branch and so can never flip
+// baseline_newly_latched true through THAT specific call site. The guard
+// added here is defensive -- correct if `clean` ever stops being a
+// constant -- not a fix for a live deadlock.
 //
 // This test calls adaptive_tune_run_end() directly rather than through
-// profile_executor_halt() itself: profile_executor_halt() is in a
-// different translation unit/executable (test_profile_executor_
-// prestart.c) and, as literally written today (profile_executor_status.c),
-// always passes `clean=false` to this call -- which forces every zone's
-// run_end loop iteration through the skip-and-continue branch and so can
-// never actually flip baseline_newly_latched true through THAT specific
-// call site. adaptive_tune_run_end() is still the exact function with the
-// hazard and the fix, and it is still reached ON the flash worker whenever
-// profile_executor_halt() runs over the UART bridge (uart_bridge_ext.c's
-// own on-worker list) -- this test exercises that function under the
-// worker-dispatch stub the same way profile_executor_halt() would deliver
-// it, using the model-refine recipe from test_model_refine_relatches_ki_
-// baseline_to_fresh_simc_ki() below to genuinely latch a NEW baseline
-// (baseline_newly_latched = true) inside the call under test.
+// profile_executor_halt() itself, and deliberately drives it into the
+// state profile_executor_halt() can never reach: it uses the model-refine
+// recipe from test_model_refine_relatches_ki_baseline_to_fresh_simc_ki()
+// below to genuinely latch a NEW baseline (baseline_newly_latched = true)
+// inside the call under test, under the same worker-dispatch stub
+// profile_executor_halt() would use.
 //
 // MUST GO RED if adaptive_tune_run_end()'s uart_bridge_ext_is_on_flash_
 // worker() check (adaptive_tune.c, the `if (baseline_newly_latched)` block)

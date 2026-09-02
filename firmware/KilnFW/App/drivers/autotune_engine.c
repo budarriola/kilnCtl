@@ -1503,6 +1503,8 @@ static void finalize_fit(void)
             job.count++;
         }
         if (job.count > 0) {
+            // Not reachable on-worker today; covered by bx_run_on_internal_
+            // stack()'s generic backstop if that ever changes.
             esp_err_t submit_err = uart_bridge_ext_run_on_flash_worker(coupling_persist_job, &job);
             if (submit_err != ESP_OK) {
                 ESP_LOGW(TAG, "autotune zone %u: could not submit %u coupling cell(s) to the flash worker: %s",
@@ -3586,12 +3588,15 @@ bool autotune_engine_accept(bool ack_unsettled)
      * satisfied. The HTTP accept path (dashboard_http.c, httpd task) is
      * unaffected -- it was never on the worker to begin with.
      *
-     * This accept path is NOT the only re-entrant caller: profile_executor_
-     * halt() (reached on-worker via uart_bridge_ext.c's own on-worker list)
-     * reaches adaptive_tune_run_end(), which has the identical hazard and
-     * the identical uart_bridge_ext_is_on_flash_worker() guard -- see that
-     * function's comment in adaptive_tune.c. Do not assume this accept path
-     * is the sole re-entrant caller when auditing this hazard again. */
+     * profile_executor_halt() (reached on-worker via uart_bridge_ext.c's own
+     * on-worker list) also reaches adaptive_tune_run_end(), which has the
+     * identical mechanism and the identical uart_bridge_ext_is_on_flash_
+     * worker() guard -- but that path is not actually re-entrant today:
+     * profile_executor_status.c hardcodes `clean=false` at its call site,
+     * which forecloses baseline_newly_latched and so never dispatches.
+     * Defensive only, kept in case `clean` stops being a constant -- see
+     * that function's comment in adaptive_tune.c. This accept path remains
+     * the one genuinely reachable re-entrant caller. */
     adaptive_tune_clear_ki_baseline(zone);
 
     if (method == AUTOTUNE_METHOD_RELAY) {

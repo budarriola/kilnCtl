@@ -121,13 +121,17 @@ static const char *TAG = "uart_bridge_ext";
  * And profiles was NOT the only exposed task. The audit that followed found:
  *   - profiles_task: profiles_http_save(), profiles_http_delete(), plus the
  *     run_state writes reachable through profile_executor_run() / _halt() /
- *     _pause() and run_state_acknowledge(). profile_executor_halt() is a
- *     SECOND RE-ENTRANT caller in its own right, not just an on-worker call:
- *     it reaches adaptive_tune_run_end() (profile_executor_status.c), which
+ *     _pause() and run_state_acknowledge(). profile_executor_halt() also
+ *     reaches adaptive_tune_run_end() (profile_executor_status.c), which
  *     dispatches a save onto this same worker whenever a Ki baseline was
- *     newly latched this run -- see adaptive_tune_run_end()'s own comment in
- *     adaptive_tune.c for the explicit uart_bridge_ext_is_on_flash_worker()
- *     guard that fixes it, matching the accept path below.
+ *     newly latched this run -- but on THIS call site that can never
+ *     happen: profile_executor_status.c passes a hardcoded `clean=false`,
+ *     which forces every zone through the skip-and-continue branch before
+ *     baseline_newly_latched is ever set. Defensive only; the guard is kept
+ *     because it is cheap and correct if `clean` ever stops being a
+ *     constant -- see adaptive_tune_run_end()'s own comment in
+ *     adaptive_tune.c for the uart_bridge_ext_is_on_flash_worker() guard,
+ *     matching the accept path below.
  *   - control_task:  zones_config_set_pid() and zones_config_set_model(),
  *     both of which end in zones_http.c's nvs_save().
  *   - autotune_task: autotune_engine_accept() -- which, since it now also

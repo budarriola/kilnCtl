@@ -568,17 +568,23 @@ void adaptive_tune_run_end(const profile_firing_run_record_t *rec, bool clean)
     // persist, and en_mask-style writing the identical bytes back every run
     // would just be wear for no benefit.
     //
-    // RE-ENTRANCY: this function is also reachable ON the flash-safe worker
-    // task itself -- profile_executor_halt() (profile_executor_status.c)
-    // calls adaptive_tune_run_end() directly, and profile_executor_halt() is
+    // RE-ENTRANCY: this function is reached ON the flash-safe worker task
+    // itself -- profile_executor_halt() (profile_executor_status.c) calls
+    // adaptive_tune_run_end() directly, and profile_executor_halt() is
     // itself one of uart_bridge_ext.c's on-worker calls (its own list at
-    // uart_bridge_ext.c:120-127). Same hazard, same fix as
-    // adaptive_tune_clear_ki_baseline() above: check
+    // uart_bridge_ext.c:120-127). That part is true and stays true. But the
+    // hazard itself -- a dispatch onto the worker from inside this call --
+    // is NOT reachable through that path today: profile_executor_status.c
+    // hardcodes `clean=false` at its adaptive_tune_run_end() call site,
+    // which forces every zone through the skip-and-continue branch below
+    // before baseline_newly_latched can ever be set, so the `if
+    // (baseline_newly_latched)` block below never dispatches from there.
+    // The guard is kept anyway -- defensive, cheap, and correct if `clean`
+    // ever stops being a constant -- and it mirrors the genuinely reachable
+    // guard on adaptive_tune_clear_ki_baseline() above, which check
     // uart_bridge_ext_is_on_flash_worker() first and run the save inline
     // instead of dispatching a second job onto the worker from inside the
-    // first. This was previously saved only by bx_run_on_internal_stack()'s
-    // generic backstop -- see that function's own comment; the explicit,
-    // host-testable check here is the primary fix, same as the accept path.
+    // first.
     if (baseline_newly_latched) {
         esp_err_t err;
         if (uart_bridge_ext_is_on_flash_worker()) {
@@ -647,6 +653,8 @@ bool adaptive_tune_set_enabled(uint8_t zone_index, bool enabled)
     // blocks the calling task until the worker task runs the job (see that
     // function's own doc comment), and this file's lock must not be held
     // across a wait on a different task.
+    // Not reachable on-worker today (only autotune_task calls this); covered
+    // by bx_run_on_internal_stack()'s generic backstop if that ever changes.
     esp_err_t err = uart_bridge_ext_run_on_flash_worker(save_enmask_job, &job);
     if (err != ESP_OK || job.result != ESP_OK) {
         ESP_LOGE(ADAPTIVE_TUNE_TAG, "adaptive_tune_set_enabled(%u,%d): NVS save failed: %s / %s",

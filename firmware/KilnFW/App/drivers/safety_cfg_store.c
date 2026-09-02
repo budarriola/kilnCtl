@@ -461,6 +461,8 @@ esp_err_t safety_cfg_store_flush_if_dirty(void)
         return ESP_OK; /* nothing to do -- already persisted */
     }
     esp_err_t save_err = ESP_FAIL;
+    // Not reachable on-worker today; covered by bx_run_on_internal_stack()'s
+    // generic backstop if that ever changes.
     esp_err_t submit_err = uart_bridge_ext_run_on_flash_worker(nvs_save_store_job, &save_err);
     if (submit_err != ESP_OK) {
         /* The worker isn't up yet (boot ordering -- app_main calls
