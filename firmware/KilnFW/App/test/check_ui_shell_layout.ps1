@@ -82,6 +82,12 @@ $required = @(
         Rules = @(
             "max-width: var(--kc-shell-max);"
         )
+    },
+    @{
+        File = "backup_page.html"
+        Rules = @(
+            "width: min(100% - 2rem, var(--kc-shell-max));"
+        )
     }
 )
 
