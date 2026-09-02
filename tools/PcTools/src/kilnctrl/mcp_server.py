@@ -2,7 +2,7 @@
 """MCP server exposing the KilnCtrl board's UART control link as tools.
 
 Speaks streamable HTTP by default (``--transport stdio`` is still available for
-headless runs) and publishes a five-tool search facade rather than all 127 tools
+headless runs) and publishes a five-tool search facade rather than all 133 tools
 below -- see ``mcpkit/serve.py`` and ``mcpkit/registry.py`` for both decisions,
 and ``docs/MCP_SERVERS.md`` for how the servers get started and stopped.
 
@@ -396,11 +396,13 @@ from .mcp_server_config_presets import *  # noqa: F401,F403
 from .mcp_server_ui_test import *  # noqa: F401,F403
 from .mcp_server_profiles import *  # noqa: F401,F403
 from .mcp_server_autotune import *  # noqa: F401,F403
+from .mcp_server_adaptive_tune import *  # noqa: F401,F403
 from .mcp_server_codec import *  # noqa: F401,F403
 from .mcp_server_info import *  # noqa: F401,F403
 from .mcp_server_actions import *  # noqa: F401,F403
 from .mcp_server_log_analysis import *  # noqa: F401,F403
 from .mcp_server_plant_sim import *  # noqa: F401,F403
+from .mcp_server_coupled_ident import *  # noqa: F401,F403
 
 # ---------------------------------------------------------------------------
 # facade + entry point

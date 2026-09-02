@@ -78,7 +78,7 @@ tools\PcTools\.venv\Scripts\python.exe -m kilnctrl.mcp_server --transport stdio
 
 ### Decision 2 — a search facade instead of 213 published tools
 
-`kilnctrl` registers 127 tools and `kicad` 86. Published as MCP
+`kilnctrl` registers 133 tools and `kicad` 86. Published as MCP
 schemas that is roughly 20,000 tokens each for `kilnctrl` and `kicad`, spent in
 *every* context window before the model has read a word of the request.
 
