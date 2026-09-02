@@ -34,12 +34,13 @@ IAE (time-weighted mean absolute error, °C), whole run:
 | | z0 | z1 | z2 |
 |---|---|---|---|
 | baseline, 2026-09-01 | 1.630 | 1.291 | 1.425 |
-| final, after the day's work | **1.034** | **0.723** | **0.821** |
-| RMS | 2.17 → 1.27 | 1.71 → 0.97 | 1.78 → 1.06 |
-| max overshoot, °C | 5.24 → 2.45 | 4.48 → 2.04 | 4.67 → 2.67 |
-| mean error, °C | +1.10 → −0.32 | +0.70 → +0.01 | +1.00 → +0.41 |
+| after the day's work | **0.878** | **0.540** | **0.695** |
+| RMS | 2.17 → 1.06 | 1.71 → 0.69 | 1.78 → 0.84 |
+| max overshoot, °C | 5.24 → 1.69 | 4.48 → 1.50 | 4.67 → 1.84 |
+| mean error, °C | +1.10 → −0.30 | +0.70 → +0.02 | +1.00 → +0.40 |
 
-The consistent hot bias is gone and overshoot is roughly halved. The original
+Roughly half the tracking error and a third of the overshoot, with the mean
+centred on all three zones. The consistent hot bias that prompted this is gone. The original
 complaint — a 70 °C target reaching 80.1 °C — traced to five defects stacked on
 each other, each hidden by the one above it: a settle detector firing
 mid-transient, a fit reading its last sample as the asymptote, guard 1 blocking
@@ -62,30 +63,41 @@ the transpose.
 
 ## 3. Remaining work
 
-### 3.1 Dwell-entry overshoot — the largest error left
+### 3.1 Dwell-entry overshoot — CLOSED 2026-09-01
 
-Every zone overshoots 2.0–2.7 °C on entering every dwell, peaking 70–110 s after
-the ramp ends. Ramp tracking is now good (seg1 ramp mean +0.01/−0.49/−0.29 °C)
-and must not regress in the course of fixing this.
+Was the largest remaining error: 2.0–2.7 °C on entering every dwell, peaking
+70–110 s after the ramp ended. Now 0.4–1.8 °C.
 
-Diagnosis, evidence-backed: duty does **not** crash to zero at the boundary (the
-analyzer's duty-off-to-peak lag is `n/a` for 5 of 6 transitions), peak timing
-tracks each zone's own dead time at 1.5–2×, and zone 2's second-dwell peak lines
-up with the cross-zone dead time while its neighbours are still driving.
+Diagnosis that led to the fix: duty does **not** crash to zero at the boundary
+(the analyzer's duty-off-to-peak lag is `n/a` for 5 of 6 transitions), peak
+timing tracks each zone's own dead time at 1.5–2×, and zone 2's second-dwell peak
+lines up with the cross-zone dead time while its neighbours are still driving.
+So the plant was arriving at setpoint with stored rate, not being over-driven
+after arrival — which is why reducing rate before the boundary worked and
+holding duty through it (§4) did not.
 
-- [~] **Terminal ease-off** — taper the commanded rate as the target is
-      approached so the plant arrives with little stored rate.
-      First simulated as **worse on z0 and z1 in all four configurations**, and
-      reported as a rejection. **That verdict was void**: it came from the
-      simulator's hardcoded 10 °C/min ramp rate against profile 7's actual
-      2–3.5 °C/min (§3.4). Re-run on the calibrated simulator, the taper
-      **roughly halves dwell-entry RMS on z0 and z1 at near-zero ramp cost**.
-      Implemented and awaiting a hardware A/B, which is the arbiter — the
-      previous attempt in this family (climb decay) also simulated well and was
-      reverted after hardware measured it worse on every zone.
-      Tapers the feedforward's rate input only, never the setpoint schedule, so
-      a stall is structurally impossible and the worst case is ordinary PID
-      tracking lag.
+- [x] **Terminal ease-off** (`48940a5`) — taper the commanded rate as the target
+      is approached so the plant arrives with less stored rate. Linear taper over
+      a window of 2× each zone's own identified dead time, applied to the
+      feedforward's rate input only, never to the setpoint schedule, so a stall
+      is structurally impossible and the worst case is ordinary tracking lag.
+
+      **Measured on hardware, improvement on every zone and every metric:**
+
+      | | z0 | z1 | z2 |
+      |---|---|---|---|
+      | dwell-entry overshoot, seg0 | 0.59 → 0.41 | 1.99 → 0.88 | 2.67 → 1.80 |
+      | dwell-entry overshoot, seg1 | 2.02 → 1.50 | 2.04 → 1.50 | 2.37 → 1.84 |
+      | seg1 ramp RMS | 1.55 → 0.84 | 1.23 → 0.57 | 1.03 → 0.63 |
+      | whole-run normalized IAE | 1.034 → 0.878 | 0.723 → 0.540 | 0.821 → 0.695 |
+
+      The ramps improved as well as the dwells, which was not the goal: arriving
+      with less stored rate leaves less to correct on both sides of the boundary.
+
+      **This change was simulated, rejected, and reported as a dead end before
+      the simulator's ramp-rate bug was found (§3.4).** It is the best single
+      result of the session and it was nearly discarded on a bad model. When a
+      simulation rejects a physically sound idea, check the simulation.
 
 ### 3.2 Zone 2's model over-predicts its hold duty
 
