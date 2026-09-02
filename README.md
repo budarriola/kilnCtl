@@ -16,6 +16,25 @@ holds the milestone order and the cross-processor dependencies, and links to the
 plan that owns each area. If you do not already know which document covers what
 you are about to do, start there.
 
+## Running the regression suite
+
+```
+python tools/regression_suite.py
+```
+
+One command, every automated gate this repo has, one pass/fail summary and a
+non-zero exit on any failure (usable in CI or a pre-commit hook). It runs, in
+order: `tools/run_all_checks.ps1` (the mechanical `check_*.ps1` guards, plus
+the JS/browser harnesses and the headless-Chrome responsive sweep, which are
+themselves wired into that script's discovery); then, in parallel, the KilnFW
+and SaftyFW off-target host-test suites and the `tools/PcTools` pytest suite
+(~1089 tests -- its live-bench tests self-skip with no board attached); then,
+in parallel, the two target firmware *compiles* (KilnFW over ESP-IDF, SaftyFW
+over pico-sdk -- no flashing, ever). One gate failing does not stop the
+others; the final summary lists every gate's pass/fail and points at the full
+log for anything that failed. See the script's own header comment for why
+each stage is grouped and parallelized the way it is.
+
 ## Opening this repository
 
 On a fresh clone, run **[`tools/setup.ps1`](tools/setup.ps1)** first — it
