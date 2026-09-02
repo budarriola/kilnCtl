@@ -321,11 +321,13 @@ table itself changed at `9ede138` (`legacy_app` reclaimed, `pico_img`
 relocated to 0x10000, `logs` 3072K→768K, ~3.71 MiB freed).
 `check_flash_partition_map.ps1`'s "Expected-map check" (§4.3) confirms the
 checked-out `partitions.csv` matches that post-`9ede138` shape — **that is a
-repo check, not a board check.** The board is running an app built from a
-commit that contains the new table (`1d18fa9`, `/api/ota/esp/status`
-2026-09-02), but nothing readable over HTTP reports the partition table
-actually on the chip, so whether §7's reflash has happened is unresolved here
-and must be settled by reading the table off the board.
+repo check, not a board check.** The reflash HAS happened: `flash_firmware()` was run on 2026-09-02 and
+reported "flashed and verified OK (bootloader + partition table + app),
+board reset and running" — that tool writes and verifies all three images,
+so the post-`9ede138` table is on the chip. Nothing readable over HTTP
+reports the on-chip table, so a later session wanting independent
+confirmation must read it back with esptool/OpenOCD rather than inferring
+it from the running app's build commit.
 
 No new check was needed for this section — §4.3's `check_flash_partition_map.ps1`
 already runs in `tools/run_all_checks.ps1` and already validates the current
