@@ -166,14 +166,40 @@ class InfoClient:
         """Ask the device for the live uxTaskGetStackHighWaterMark() reading
         of every task registered with stack_margin.c (App/drivers).
 
-        This is the bench measurement KilnFW TODO.md section 13 needs before
-        any of the six candidate internal-only task stacks it names may be
-        resized -- see stack_margin.h's header comment. Raises
+        This is the bench measurement KilnFW TODO.md section 13 / DRAM_PSRAM_
+        PLAN.md section 7 need before any candidate internal-only task stack
+        may be resized -- see stack_margin.h's header comment. A single wire
+        reply cannot fit the whole registry once more than ~10 short-named
+        tasks are registered (BRIDGE_REPLY_MAX=253 bytes; STACK_MARGIN_MAX_
+        TASKS is 40), so this pages through with `start_index`
+        (uart_task_ids.h's INFO_CMD_GET_STACK_MARGIN doc) until the device
+        reports truncated=0, and returns the full aggregated list -- callers
+        don't need to know pagination happened. Raises
         :class:`InfoQueryError` on an undelivered request or a missing or
-        malformed reply.
+        malformed reply, and :class:`InfoResponseError` (via ``_query``) if a
+        page repeats a `next_start_index` (a firmware bug that would
+        otherwise loop this method forever).
         """
-        value = self._query(INFO_CMD_GET_STACK_MARGIN, devices.info_get_stack_margin(), timeout)
-        return value  # type: ignore[return-value]
+        entries: list[StackMarginEntry] = []
+        start_index = 0
+        seen_start_indices: set[int] = set()
+        while True:
+            if start_index in seen_start_indices:
+                raise InfoResponseError(
+                    f"GET_STACK_MARGIN paging did not advance: start_index={start_index} "
+                    f"repeated -- firmware bug in build_stack_margin_reply(), refusing to "
+                    f"loop forever"
+                )
+            seen_start_indices.add(start_index)
+
+            page_entries, truncated, next_start_index = self._query(
+                INFO_CMD_GET_STACK_MARGIN, devices.info_get_stack_margin(start_index), timeout
+            )  # type: ignore[misc]
+            entries.extend(page_entries)
+            if not truncated:
+                break
+            start_index = next_start_index
+        return entries
 
     def _query(self, subcommand: int, payload: bytes, timeout: float) -> object:
         with self._query_lock:
@@ -226,6 +252,24 @@ class InfoClient:
         except InfoResponseError as exc:
             log.warning("dropping malformed INFO response: %s", exc)
             return
+
+        if subcommand == INFO_CMD_GET_STACK_MARGIN:
+            # parse_info_response() classifies via parse_stack_margin_response()
+            # (entries only, for the disambiguation contract every other
+            # subcommand shares). get_stack_margin() needs the page's
+            # truncated/next_start_index too to page through the whole
+            # registry -- re-derive them from the same payload rather than
+            # widening parse_info_response()'s return shape for one
+            # subcommand. Cheap: this is a handful of bytes, parsed once
+            # more.
+            try:
+                _entries, truncated, next_start_index = devices.parse_stack_margin_page(
+                    frame.payload
+                )
+            except InfoResponseError as exc:  # pragma: no cover - already parsed once above
+                log.warning("dropping malformed GET_STACK_MARGIN response: %s", exc)
+                return
+            value = (value, truncated, next_start_index)
 
         if isinstance(value, FirmwareVersion):
             self.last_fw_version = value

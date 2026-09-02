@@ -39,15 +39,22 @@ def info_get_wifi_status() -> bytes:
     return struct.pack("<B", INFO_CMD_GET_WIFI_STATUS)
 
 
-def info_get_stack_margin() -> bytes:
-    """0x04 GET_STACK_MARGIN request: byte0 = subcommand, no args.
+def info_get_stack_margin(start_index: int = 0) -> bytes:
+    """0x04 GET_STACK_MARGIN request: byte0 = subcommand, byte1 = start_index.
 
     See stack_margin.h (App/drivers) and KilnFW TODO.md section 13 for what
-    this exists to unblock: six internal-only task stacks that must not be
+    this exists to unblock: internal-only task stacks that must not be
     resized "from the numbers in this entry alone," pending a real
     uxTaskGetStackHighWaterMark() reading.
+
+    ``start_index`` pages through the registry (DRAM_PSRAM_PLAN.md section 7,
+    2026-09-02): a single reply cannot fit the whole registry once more than
+    ~10 short-named tasks are registered (BRIDGE_REPLY_MAX=253 bytes), so
+    :meth:`KilnInfo.get_stack_margin` loops, feeding each reply's
+    ``next_start_index`` back in here, rather than a caller having to notice
+    a short reply silently meant "incomplete."
     """
-    return struct.pack("<B", INFO_CMD_GET_STACK_MARGIN)
+    return struct.pack("<BB", INFO_CMD_GET_STACK_MARGIN, start_index & 0xFF)
 
 
 class InfoResponseError(ValueError):
@@ -204,12 +211,15 @@ class StackMarginEntry:
         )
 
 
-def parse_stack_margin_response(payload: bytes) -> list[StackMarginEntry]:
-    """Decode a GET_STACK_MARGIN response payload.
+def parse_stack_margin_page(payload: bytes) -> "tuple[list[StackMarginEntry], bool, int]":
+    """Decode one GET_STACK_MARGIN response page.
 
-    Layout (build_stack_margin_reply)::
+    Layout (build_stack_margin_reply, uart_bridge_info.c -- see
+    uart_task_ids.h's INFO_CMD_GET_STACK_MARGIN doc for the full contract)::
 
-        byte0     count (N)
+        byte0     count-this-page (N)
+        byte1     truncated (0/1)
+        byte2     next_start_index (valid only when byte1==1)
         N * {
             u8   name_len (Nn)
             Nn   ASCII task name, NOT null-terminated
@@ -218,14 +228,22 @@ def parse_stack_margin_response(payload: bytes) -> list[StackMarginEntry]:
             u8   flags: bit0 alive, bits1-2 level (StackMarginLevel)
         }
 
+    Returns ``(entries, truncated, next_start_index)``. ``next_start_index``
+    is 0 (meaningless) when ``truncated`` is False.
+
     Raises :class:`InfoResponseError` if the length does not match N exactly,
     any name_len overruns the payload, or a level nibble is out of range.
     """
-    if len(payload) < 1:
-        raise InfoResponseError("stack margin response is empty")
+    if len(payload) < 3:
+        raise InfoResponseError(
+            f"stack margin response too short for its 3-byte page header "
+            f"(count/truncated/next_start_index): got {len(payload)} byte(s)"
+        )
     count = payload[0]
+    truncated = bool(payload[1])
+    next_start_index = payload[2]
     entries: list[StackMarginEntry] = []
-    offset = 1
+    offset = 3
     for _ in range(count):
         if offset >= len(payload):
             raise InfoResponseError(
@@ -269,6 +287,19 @@ def parse_stack_margin_response(payload: bytes) -> list[StackMarginEntry]:
             f"stack margin response has {len(payload) - offset} trailing byte(s) "
             f"after {count} entries"
         )
+    return entries, truncated, next_start_index
+
+
+def parse_stack_margin_response(payload: bytes) -> list[StackMarginEntry]:
+    """Decode a single GET_STACK_MARGIN page and return just its entries.
+
+    Kept for callers that only care about one page (and for
+    :func:`parse_info_response`'s structural dispatcher, which returns a
+    single page's entries) -- see :func:`parse_stack_margin_page` for the
+    full ``(entries, truncated, next_start_index)`` tuple a full-registry
+    walk needs, and :meth:`KilnInfo.get_stack_margin` for that walk.
+    """
+    entries, _truncated, _next_start_index = parse_stack_margin_page(payload)
     return entries
 
 
@@ -383,9 +414,12 @@ def parse_info_response(
     caller can pass ``prefer`` -- the subcommand it currently has
     outstanding -- to settle any tie deterministically. GET_WIFI_STATUS and
     GET_STACK_MARGIN are never sent unsolicited, so they only ever get
-    classified via ``prefer`` -- an empty ``build_stack_margin_reply()``
-    (nothing registered) is the single byte ``00``, byte-identical to an
-    empty ``build_pin_config_reply()``, and only ``prefer`` breaks that tie.
+    classified via ``prefer``. (Before the 2026-09-02 paging change, an
+    empty ``build_stack_margin_reply()`` was the single byte ``00``,
+    byte-identical to an empty ``build_pin_config_reply()``; GET_STACK_MARGIN
+    now always carries a 3-byte page header, so that particular tie no
+    longer arises, but ``prefer`` is kept for whatever the next genuine
+    structural tie turns out to be.)
 
     Raises :class:`InfoResponseError` if the payload fits no known layout.
     """

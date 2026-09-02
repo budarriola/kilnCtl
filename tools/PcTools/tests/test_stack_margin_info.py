@@ -1,16 +1,22 @@
 #!/usr/bin/env python3
-"""Unit tests for kilnctrl.devices.parse_stack_margin_response()/StackMarginEntry
--- the PC-side decode of INFO_CMD_GET_STACK_MARGIN (0x04), added to unblock
-KilnFW TODO.md section 13: six internal-only FreeRTOS task stacks (~20.5KB)
-that must not be resized "from the numbers in this entry alone" without a
-real uxTaskGetStackHighWaterMark() reading. This is the PC-side half of
-that measurement path -- see App/drivers/stack_margin.c/build_stack_margin_
-reply() in uart_bridge.c for the firmware side this mirrors byte-for-byte.
+"""Unit tests for kilnctrl.devices.parse_stack_margin_response()/
+parse_stack_margin_page()/StackMarginEntry -- the PC-side decode of
+INFO_CMD_GET_STACK_MARGIN (0x04), added to unblock KilnFW TODO.md section 13:
+internal-only FreeRTOS task stacks that must not be resized "from the numbers
+in this entry alone" without a real uxTaskGetStackHighWaterMark() reading.
+This is the PC-side half of that measurement path -- see
+App/drivers/stack_margin.c/build_stack_margin_reply() in uart_bridge_info.c
+for the firmware side this mirrors byte-for-byte.
 
 No real UART/serial connection is used -- this only checks the byte-exact
-wire decoding, built directly from build_stack_margin_reply()'s layout:
+wire decoding, built directly from build_stack_margin_reply()'s layout
+(DRAM_PSRAM_PLAN.md section 7, 2026-09-02 cap-raise pass added the
+truncated/next_start_index page header so a caller can never mistake a
+partial reply for the whole registry):
 
-    byte0     count (N)
+    byte0     count-this-page (N)
+    byte1     truncated (0/1)
+    byte2     next_start_index (valid only when byte1==1)
     N * {
         u8   name_len (Nn)
         Nn   ASCII task name, NOT null-terminated
@@ -45,13 +51,17 @@ def _entry_bytes(name: str, configured: int, hwm: int, *, alive: bool, level: in
     return struct.pack("<B", len(name_b)) + name_b + struct.pack("<IIB", configured, hwm, flags)
 
 
+def _page_header(count: int, *, truncated: bool = False, next_start_index: int = 0) -> bytes:
+    return struct.pack("<BBB", count, 1 if truncated else 0, next_start_index)
+
+
 class ParseStackMarginResponseTests(unittest.TestCase):
     def test_empty_registry_decodes_to_empty_list(self):
-        payload = struct.pack("<B", 0)
+        payload = _page_header(0)
         self.assertEqual(devices.parse_stack_margin_response(payload), [])
 
     def test_single_alive_ok_entry_round_trips_exactly(self):
-        payload = struct.pack("<B", 1) + _entry_bytes(
+        payload = _page_header(1) + _entry_bytes(
             "rules_task", 3072, 2048, alive=True, level=StackMarginLevel.OK
         )
         entries = devices.parse_stack_margin_response(payload)
@@ -66,7 +76,7 @@ class ParseStackMarginResponseTests(unittest.TestCase):
     def test_dead_task_reports_zero_hwm_and_ok_level_not_stale_data(self):
         # Mirrors stack_margin_read()'s own contract: alive=false always
         # carries hwm_bytes=0, level=OK -- never a leftover reading.
-        payload = struct.pack("<B", 1) + _entry_bytes(
+        payload = _page_header(1) + _entry_bytes(
             "system_uart_bridge", 3072, 0, alive=False, level=StackMarginLevel.OK
         )
         entries = devices.parse_stack_margin_response(payload)
@@ -74,7 +84,7 @@ class ParseStackMarginResponseTests(unittest.TestCase):
         self.assertEqual(entries[0].hwm_bytes, 0)
 
     def test_multiple_entries_in_order(self):
-        payload = struct.pack("<B", 2)
+        payload = _page_header(2)
         payload += _entry_bytes("uart_owner_task", 4096, 3800, alive=True, level=StackMarginLevel.OK)
         payload += _entry_bytes("rules_watchdog", 2048, 100, alive=True, level=StackMarginLevel.CRITICAL)
         entries = devices.parse_stack_margin_response(payload)
@@ -83,7 +93,7 @@ class ParseStackMarginResponseTests(unittest.TestCase):
 
     def test_truncated_payload_raises_not_silently_drops_entries(self):
         # count says 2 but only one full entry follows.
-        payload = struct.pack("<B", 2) + _entry_bytes(
+        payload = _page_header(2) + _entry_bytes(
             "rules_task", 3072, 2048, alive=True, level=StackMarginLevel.OK
         )
         with self.assertRaises(devices.InfoResponseError):
@@ -91,7 +101,7 @@ class ParseStackMarginResponseTests(unittest.TestCase):
 
     def test_trailing_garbage_after_last_entry_raises(self):
         payload = (
-            struct.pack("<B", 1)
+            _page_header(1)
             + _entry_bytes("rules_task", 3072, 2048, alive=True, level=StackMarginLevel.OK)
             + b"\x00\x00"
         )
@@ -100,13 +110,43 @@ class ParseStackMarginResponseTests(unittest.TestCase):
 
     def test_name_len_overrunning_payload_raises(self):
         # name_len claims 20 bytes of name but the payload doesn't have them.
-        payload = struct.pack("<B", 1) + struct.pack("<B", 20) + b"short"
+        payload = _page_header(1) + struct.pack("<B", 20) + b"short"
         with self.assertRaises(devices.InfoResponseError):
             devices.parse_stack_margin_response(payload)
 
     def test_empty_payload_raises(self):
         with self.assertRaises(devices.InfoResponseError):
             devices.parse_stack_margin_response(b"")
+
+    def test_header_shorter_than_3_bytes_raises(self):
+        # Pre-paging firmware would send just byte0=count; a pc_tools build
+        # with this pagination change must refuse to misread byte1/byte2 of
+        # a real entry as truncated/next_start_index.
+        with self.assertRaises(devices.InfoResponseError):
+            devices.parse_stack_margin_response(struct.pack("<B", 0))
+
+
+class ParseStackMarginPageTests(unittest.TestCase):
+    """parse_stack_margin_page() -- the full (entries, truncated,
+    next_start_index) tuple KilnInfo.get_stack_margin() pages with."""
+
+    def test_not_truncated_reports_next_index_zero(self):
+        payload = _page_header(1) + _entry_bytes(
+            "rules_task", 3072, 2048, alive=True, level=StackMarginLevel.OK
+        )
+        entries, truncated, next_start_index = devices.parse_stack_margin_page(payload)
+        self.assertEqual(len(entries), 1)
+        self.assertFalse(truncated)
+        self.assertEqual(next_start_index, 0)
+
+    def test_truncated_page_reports_next_start_index(self):
+        payload = _page_header(1, truncated=True, next_start_index=7) + _entry_bytes(
+            "rules_task", 3072, 2048, alive=True, level=StackMarginLevel.OK
+        )
+        entries, truncated, next_start_index = devices.parse_stack_margin_page(payload)
+        self.assertEqual(len(entries), 1)
+        self.assertTrue(truncated)
+        self.assertEqual(next_start_index, 7)
 
 
 class StackMarginEntryHelpersTests(unittest.TestCase):
@@ -145,18 +185,30 @@ class StackMarginEntryHelpersTests(unittest.TestCase):
 
 
 class InfoRequestBuilderTests(unittest.TestCase):
-    def test_info_get_stack_margin_request_is_one_byte_subcommand(self):
-        self.assertEqual(devices.info_get_stack_margin(), struct.pack("<B", INFO_CMD_GET_STACK_MARGIN))
+    def test_info_get_stack_margin_request_defaults_to_start_index_zero(self):
+        self.assertEqual(
+            devices.info_get_stack_margin(),
+            struct.pack("<BB", INFO_CMD_GET_STACK_MARGIN, 0),
+        )
+
+    def test_info_get_stack_margin_request_carries_start_index(self):
+        self.assertEqual(
+            devices.info_get_stack_margin(7),
+            struct.pack("<BB", INFO_CMD_GET_STACK_MARGIN, 7),
+        )
 
 
 class ParseInfoResponseDisambiguationTests(unittest.TestCase):
     """parse_info_response() classifies structurally since INFO replies carry
     no subcommand byte -- confirms GET_STACK_MARGIN is reachable through
-    that dispatcher, and that `prefer` breaks the empty-reply tie against
-    GET_PIN_CONFIG's own empty-response shape (both are just byte ``00``)."""
+    that dispatcher. GET_STACK_MARGIN's page header (added 2026-09-02) makes
+    its minimum reply 3 bytes, so it and GET_PIN_CONFIG's 1-byte empty reply
+    no longer tie byte-for-byte; `prefer` is still exercised below since it
+    remains the deciding factor whenever a genuine tie IS possible (see
+    test_fw_version_reply_still_wins_without_prefer)."""
 
     def test_stack_margin_reply_classified_via_prefer(self):
-        payload = struct.pack("<B", 1) + _entry_bytes(
+        payload = _page_header(1) + _entry_bytes(
             "rules_task", 3072, 2048, alive=True, level=StackMarginLevel.OK
         )
         subcommand, value = devices.parse_info_response(payload, prefer=INFO_CMD_GET_STACK_MARGIN)
@@ -164,19 +216,14 @@ class ParseInfoResponseDisambiguationTests(unittest.TestCase):
         self.assertEqual(len(value), 1)
         self.assertEqual(value[0].name, "rules_task")
 
-    def test_empty_reply_prefers_pin_config_over_stack_margin_when_asked(self):
-        # An empty count byte (0x00) is byte-identical between an empty
-        # GET_PIN_CONFIG and an empty GET_STACK_MARGIN reply -- only
-        # `prefer` can tell them apart. This proves the PIN_CONFIG side of
-        # that tie still resolves correctly now that a second candidate
-        # parser exists.
+    def test_empty_pin_config_reply_classifies_without_prefer(self):
         payload = struct.pack("<B", 0)
         subcommand, value = devices.parse_info_response(payload, prefer=INFO_CMD_GET_PIN_CONFIG)
         self.assertEqual(subcommand, INFO_CMD_GET_PIN_CONFIG)
         self.assertEqual(value, [])
 
-    def test_empty_reply_prefers_stack_margin_when_asked(self):
-        payload = struct.pack("<B", 0)
+    def test_empty_stack_margin_reply_classified_via_prefer(self):
+        payload = _page_header(0)
         subcommand, value = devices.parse_info_response(payload, prefer=INFO_CMD_GET_STACK_MARGIN)
         self.assertEqual(subcommand, INFO_CMD_GET_STACK_MARGIN)
         self.assertEqual(value, [])
