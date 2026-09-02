@@ -116,6 +116,7 @@ from typing import Optional, Sequence
 
 import numpy as np
 
+from . import coupling_pair_log
 from . import log_analysis
 from . import plant_sim
 
@@ -693,6 +694,36 @@ def single_zone_column_observations_from_paths(paths: Sequence[str], active_zone
     return all_obs
 
 
+def single_zone_column_observations_from_pair(mcp_path: str, thermo_path: str, active_zone: int,
+                                                max_skew_s: float = coupling_pair_log.DEFAULT_MAX_SKEW_S,
+                                                ) -> list[ColumnObservation]:
+    """Same extraction as ``single_zone_column_observations``, sourced from
+    the two-poller ``<name>_mcp.jsonl`` / ``<name>_thermo.jsonl`` capture
+    format (``coupling_pair_log.load_pair_run``) instead of a single
+    ``/api/profile_exec`` JSON capture. This is the live single-zone
+    excitation runs' native format -- see that module's docstring for the
+    join rule and why an unmatched exec-status row is dropped whole rather
+    than emitted with missing peer zones.
+    """
+    rows = coupling_pair_log.load_pair_run(mcp_path, thermo_path, max_skew_s=max_skew_s)
+    if not rows:
+        return []
+    label = f"{mcp_path}+{thermo_path}"
+    return single_zone_column_observations(rows, active_zone, source=label)
+
+
+def settle_criterion_audit_from_pair(mcp_path: str, thermo_path: str,
+                                      max_skew_s: float = coupling_pair_log.DEFAULT_MAX_SKEW_S,
+                                      ) -> list:
+    """``settle_criterion_audit`` sourced from a two-poller capture pair --
+    see ``single_zone_column_observations_from_pair``."""
+    rows = coupling_pair_log.load_pair_run(mcp_path, thermo_path, max_skew_s=max_skew_s)
+    if not rows:
+        return []
+    label = f"{mcp_path}+{thermo_path}"
+    return settle_criterion_audit(rows, source=label)
+
+
 def matrix_from_single_zone_columns(column_obs_by_active_zone: dict) -> tuple[Optional[np.ndarray], dict]:
     """Assemble a full matrix directly from up to three single-zone
     firings' column observations (``{active_zone: [ColumnObservation, ...]}``,
@@ -1039,6 +1070,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     p_sz.add_argument("--zone0", nargs="*", default=[], help="capture(s) with zone 0 driven alone")
     p_sz.add_argument("--zone1", nargs="*", default=[], help="capture(s) with zone 1 driven alone")
     p_sz.add_argument("--zone2", nargs="*", default=[], help="capture(s) with zone 2 driven alone")
+    p_sz.add_argument("--zone0-pair", nargs=2, metavar=("MCP_JSONL", "THERMO_JSONL"), action="append",
+                       default=[], help="mcp+thermo two-poller capture pair with zone 0 driven alone "
+                                          "(repeatable)")
+    p_sz.add_argument("--zone1-pair", nargs=2, metavar=("MCP_JSONL", "THERMO_JSONL"), action="append",
+                       default=[], help="same as --zone0-pair, zone 1 driven alone")
+    p_sz.add_argument("--zone2-pair", nargs=2, metavar=("MCP_JSONL", "THERMO_JSONL"), action="append",
+                       default=[], help="same as --zone0-pair, zone 2 driven alone")
     p_sz.add_argument("--score-against", nargs="*", default=[],
                        help="ordinary poll captures to score the assembled matrix against (joint dwell observations)")
     p_sz.add_argument("--json", action="store_true")
@@ -1058,10 +1096,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             print(format_report_text(report))
     elif args.cmd == "single-zone":
         by_zone = {0: args.zone0, 1: args.zone1, 2: args.zone2}
-        column_obs = {
-            z: single_zone_column_observations_from_paths(paths, z)
-            for z, paths in by_zone.items() if paths
-        }
+        by_zone_pairs = {0: args.zone0_pair, 1: args.zone1_pair, 2: args.zone2_pair}
+        column_obs = {}
+        for z in ZONES:
+            obs = []
+            if by_zone.get(z):
+                obs.extend(single_zone_column_observations_from_paths(by_zone[z], z))
+            for mcp_path, thermo_path in by_zone_pairs.get(z, []):
+                obs.extend(single_zone_column_observations_from_pair(mcp_path, thermo_path, z))
+            if obs:
+                column_obs[z] = obs
         matrix, coverage = matrix_from_single_zone_columns(column_obs)
         scores = None
         if matrix is not None and args.score_against:

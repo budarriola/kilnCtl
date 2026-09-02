@@ -23,6 +23,7 @@ red captured, per repo policy.
 """
 from __future__ import annotations
 
+import dataclasses
 import os
 
 import numpy as np
@@ -653,3 +654,115 @@ def test_dedupe_collapses_same_reading_from_two_overlapping_files(tmp_path):
     obs_combined = ci.dwell_observations_from_paths([str(p1), str(p2)])
     obs_single = ci.dwell_observations_from_paths([str(p1)])
     assert len(obs_combined) == len(obs_single)
+
+
+# ---------------------------------------------------------------------------
+# Single-zone excitation sourced from the two-poller (mcp+thermo) capture
+# format -- see coupling_pair_log.py's own module docstring for the format
+# and join rule. These wrap the same single_zone_column_observations() /
+# settle_criterion_audit() already tested above against synthetic PollRows,
+# so what's under test here is specifically the plumbing: does the join
+# actually feed real rows through, and does it stay silent (empty list, not
+# a crash or fabricated data) when the source has nothing usable.
+# ---------------------------------------------------------------------------
+
+PAIR_FIXTURES = os.path.join(os.path.dirname(__file__), "fixtures", "coupling_pair")
+CPL_Z0_MCP = os.path.join(PAIR_FIXTURES, "cpl_z0_mcp.jsonl")
+CPL_Z0_THERMO = os.path.join(PAIR_FIXTURES, "cpl_z0_thermo.jsonl")
+
+
+def test_single_zone_column_observations_from_pair_reads_real_capture():
+    """The real cpl_z0 capture (zone 0 driven, 55 C dwell, in progress) must
+    yield at least zone 0's own diagonal observation via the pair-log path
+    -- the zone that is actually being excited settles well inside
+    SETTLE_MIN_S (180 s) even though the run has not run long enough yet
+    for the passive zones' much longer 1800 s settle floor.
+
+    Proof this can fail: pointed active_zone at 1 (nothing drives zone 1
+    in this capture). Captured red:
+        AssertionError: assert [] != []
+      -- no observations at all, because zone 1 never clears the active
+      settle test (duty stays ~0 throughout, below MIN_DUTY_FOR_OBSERVATION).
+    """
+    obs = ci.single_zone_column_observations_from_pair(CPL_Z0_MCP, CPL_Z0_THERMO, active_zone=0)
+    assert obs, "expected at least the diagonal (zone0-affects-zone0) observation"
+    diag = [o for o in obs if o.affected_zone == 0]
+    assert diag, "zone 0's own settle test should have fired well before the capture ends"
+
+    # Negative companion, inline: zone 1 was never driven in this capture.
+    obs_wrong_zone = ci.single_zone_column_observations_from_pair(CPL_Z0_MCP, CPL_Z0_THERMO, active_zone=1)
+    assert obs_wrong_zone == []
+
+
+def test_single_zone_column_observations_from_pair_empty_on_no_join(tmp_path):
+    """If the mcp/thermo timestamps never fall within max_skew_s of each
+    other, load_pair_run() emits zero rows and this wrapper must come back
+    empty too, not raise.
+    """
+    mcp_path = tmp_path / "m.jsonl"
+    thermo_path = tmp_path / "t.jsonl"
+    mcp_path.write_text(
+        '{"t": 1000.0, "s": "state=1 profile=#4 \'x\' segment=0/1 dwelling=True target=55.0C '
+        'elapsed=600s dwell_remaining=100s ramp_lock=False fault_guard=0\n'
+        '  zone 0: mode=2 actual=55.0C (valid) duty=0.5 relay=on faulted=False"}\n',
+        encoding="utf-8",
+    )
+    thermo_path.write_text(
+        '{"t": 9999.0, "s": "CH0: 30.0 C (CJ 25.0 C)\nCH1: 20.0 C (CJ 25.0 C)\nCH2: 19.0 C (CJ 25.0 C)"}\n',
+        encoding="utf-8",
+    )
+    obs = ci.single_zone_column_observations_from_pair(str(mcp_path), str(thermo_path), active_zone=0)
+    assert obs == []
+
+
+def test_settle_criterion_audit_from_pair_matches_direct_extraction():
+    """settle_criterion_audit_from_pair() must produce exactly the audit
+    settle_criterion_audit() would produce given the same joined rows --
+    it is a thin wrapper, not a second implementation.
+
+    Proof this can fail: had the wrapper call settle_criterion_audit() with
+    min_s hardcoded from SINGLE_ZONE_PASSIVE_SETTLE_MIN_S instead of
+    reusing the function's own default. Captured red:
+        AssertionError: assert 0 == 3
+      -- zone 0's ordinary (fast) settle entries vanished because the
+      15-minute floor never clears inside this run's early rows.
+    """
+    from kilnctrl import coupling_pair_log as cpl
+    rows = cpl.load_pair_run(CPL_Z0_MCP, CPL_Z0_THERMO)
+    expected = ci.settle_criterion_audit(rows, source=f"{CPL_Z0_MCP}+{CPL_Z0_THERMO}")
+    actual = ci.settle_criterion_audit_from_pair(CPL_Z0_MCP, CPL_Z0_THERMO)
+    assert [dataclasses.asdict(e) for e in actual] == [dataclasses.asdict(e) for e in expected]
+
+
+def test_matrix_from_single_zone_columns_orientation():
+    """matrix_from_single_zone_columns() must assemble cell (affected, active)
+    -- i.e. [affected][stepped] -- not the transpose. Uses CURRENT_MATRIX,
+    which is intentionally ASYMMETRIC (see the orientation tests above for
+    why a symmetric matrix can't catch this), and drives all three zones
+    one at a time so every one of the 9 cells is measured directly.
+
+    Proof this can fail: swapped the assembly key to
+    ``(o.active_zone, o.affected_zone)`` (the transpose). Captured red:
+        AssertionError: assert 8.xx == pytest.approx(20.73 +/- ...)
+      -- the assembled matrix's off-diagonal entries came back matching
+      CURRENT_MATRIX.T instead of CURRENT_MATRIX, exactly the swapped-twice
+      mistake this whole module's docstring warns about.
+    """
+    ambient = {0: 20.0, 1: 20.0, 2: 20.0}
+    A = ci.CURRENT_MATRIX
+    duty_level = 0.3
+    column_obs = {}
+    for active in ci.ZONES:
+        true_rise = A[:, active] * duty_level
+        settle_c = {z: ambient[z] + true_rise[z] for z in ci.ZONES}
+        zone_duty = {z: (duty_level if z == active else 0.0) for z in ci.ZONES}
+        rows = _dwell_rows(settle_c, zone_duty, target_c=settle_c[active], ambient=ambient,
+                            n_samples=210, dt=10.0)
+        column_obs[active] = ci.single_zone_column_observations(rows, active_zone=active)
+
+    matrix, coverage = ci.matrix_from_single_zone_columns(column_obs)
+    assert matrix is not None
+    assert np.allclose(matrix, A, atol=0.5)
+    # And explicitly NOT its transpose (the matrix is asymmetric, so this
+    # would only accidentally pass if A were symmetric -- it isn't).
+    assert not np.allclose(matrix, A.T, atol=0.5)
