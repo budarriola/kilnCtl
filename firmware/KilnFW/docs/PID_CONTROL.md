@@ -10,13 +10,21 @@ doc and change log, with dated "Implemented"/"Not built" notes on every
 bullet; this file is the shorter "how does this actually fit together"
 companion to it.
 
-**HARDWARE STATUS**: everything below has been built, rebuilt, reflashed via
-OpenOCD, and live-verified against the absent-hardware code paths on a real
-board — but no thermocouple daughterboard or relay expander has been
-attached to the bench unit at any point this was written. Every control/guard
-behavior described here is logic-verified, not yet verified against a real
-relay driving a real heating element. Host-side testing against a plant
-*model* (below) is not a substitute for that.
+**HARDWARE STATUS**: a thermocouple daughterboard and relay expander have
+been attached to the bench unit since 2026-08-29, and the sections below
+marked "measured on hardware" or "measured on the bench" are real closed-loop
+runs against real relays and real heat, not logic-only verification — see
+"Measured on the bench, 2026-08-29", "First real cross-zone coupling
+measurement (2026-08-30)", "Full 3x3 coupling matrix and first RGA", and
+"Terminal ease-off" below. What is **not** yet true: every bench run to date
+stays within this rig's 0-80 °C range (the `T⁴` caveat repeated throughout
+this file), relay-feedback autotune has never completed on hardware, the
+simulated-plant-on-target build (`CONFIG_KILNCTL_SIM_PLANT`) has never been
+flashed, and the fuzzy-adjustment mode has never been run above
+`strength_pct=0`. Host-side testing against a plant *model* (below) remains
+useful for the identification math specifically — real hardware never has
+ground-truth `K`/`tau`/`L` to check a fit against — but is not a substitute
+for a bench or firing result where one exists.
 
 ## Module layout
 
@@ -465,6 +473,46 @@ unattended; Cohen-Coon is offered for an operator who specifically wants the
 faster response and understands the overshoot trade, the same posture this
 file already takes toward ZN and Tyreus-Luyben.
 
+### What is actually measured, versus what is not
+
+The comparison above is mechanism and code, verifiable by reading
+`pid_autotune.c` on any machine. This section is the honest scope of what has
+been run: **only SIMC has ever tuned this bench rig.** Every accepted gain set
+in this project's history, and every autotune completion referenced elsewhere
+in this file (2026-08-29's first completed step test, 2026-08-30's coupling
+rows, PID_EXPANSION_PLAN.md §2's profile-7 results), is a SIMC/`lambda=3*L`
+proposal from the FOPDT path. Cohen-Coon, Ziegler-Nichols and Tyreus-Luyben
+are implemented and host-tested against `sim_plant.c`, but **none of the
+three has been run on this hardware.** There is no relay-feedback trace and
+no Cohen-Coon proposal in any bench log this repo has; grepping the firmware,
+`tools/PcTools`, and the checked-in captures for `cohen_coon`/`tyreus`/
+`ziegler` turns up only source, tests, and UI labels, never a run record.
+The relay-feedback method itself — the only path that can produce a ZN or
+Tyreus-Luyben proposal — "has still never completed on hardware" per the
+Autotune section above; that alone rules out bench numbers for both.
+
+| Rule | Path | Bench data on this rig? | What is actually known |
+|---|---|---|---|
+| SIMC (`lambda=3*L`) | FOPDT step test | **Yes, repeatedly** | z0 self-cell `K=32.648`/`32.95`(two independent fits, ~1%/~2% agreement), `tau≈164-167 s`, `L≈36.9-40.2 s` → `kp≈0.031-0.034`, `ki≈0.0002`, `kd≈0.63`, predicted max ramp 426-432 °C/hr (2026-08-29/30 runs above). Closed-loop result (different tuning history, same PID form): profile 7 normalized IAE 0.878/0.540/0.695 across z0-z2 after the 2026-09-01 fixes (PID_EXPANSION_PLAN.md §2) |
+| Cohen-Coon | FOPDT step test | **No** | Refusal path is exercised and verified: `AUTOTUNE_REFUSAL_DEAD_TIME_TOO_SMALL` below `AUTOTUNE_COHEN_COON_MIN_DEAD_TIME_S` (0.5 s), and it refuses ZN/Tyreus-Luyben's own inputs (`AUTOTUNE_REFUSAL_RULE_NOT_ON_THIS_PATH`) — that behavior is code-verified by `test_pid_autotune.c`, not bench-measured. No accepted or even proposed Cohen-Coon gain set exists for this rig |
+| Ziegler-Nichols | Relay feedback | **No** | Relay-feedback identification (`pid_autotune_fit_relay()`) has never completed on hardware — every on-target attempt either predates thermocouple hardware or has not been run since. No `{Ku,Tu}` has ever been measured on this rig, so ZN has nothing to compute from |
+| Tyreus-Luyben | Relay feedback | **No** | Same blocker as ZN — no relay-feedback run has ever completed. `pid_autotune_tune_from_relay()`'s refusal of SIMC-shaped input is code-verified, not the tuning itself |
+
+No simulator run backs this table either: `tools/PcTools/src/kilnctrl/plant_sim.py`
+tracks a profile against the firmware's coupled-feedforward PID, not an
+autotune identification-and-tune cycle, so it has no mechanism for producing
+a Cohen-Coon/ZN/Tyreus-Luyben proposal to compare against SIMC's — using it
+here would mean writing a new comparison the calibration was never checked
+against, which is exactly the "plausible number nobody measured" this section
+exists to avoid. A cell reading "no" above is the correct, complete answer
+until a relay-feedback run and a Cohen-Coon run actually happen on this rig.
+
+**The `T⁴` caveat applies to every number in the SIMC row.** This rig spans
+0-80 °C; radiative transfer goes as `T⁴`, so `K`/`tau`/`L` and everything
+derived from them describe the plant near ambient, not at firing temperature.
+These results validate that the identification-and-tuning *mechanism* works,
+not the gains a real firing would need.
+
 ## Feedforward (TODO.md 6A.2), built 2026-08-12
 
 `u_ff = (T_sp - T_ambient)/K_dc + (dT_sp/dt) * tau/K_dc` — the first term is
@@ -580,6 +628,69 @@ across essentially its whole useful range — the bench rig's 0..80 degC
 ceiling is why this has not surfaced yet. Predates Phase 3b; the coupling
 term inherits it rather than causes it.
 
+## Terminal ease-off (`zone_taper_climb_rate()`, `profile_executor_feedforward.c`, `48940a5`)
+
+Tapers the climb feedforward's rate input to zero as a zone approaches its
+segment target, so the plant arrives at a ramp's end (into a dwell, or into
+the next ramp) with less stored rate to shed. It targeted dwell-entry
+overshoot, PID_EXPANSION_PLAN.md's largest remaining tracking error at
+2.0-2.7 °C on every zone.
+
+    window_s = 2.0 * z->ff_dead_time_s
+    dist_s   = |segment_target_c - target_c| / |rate_c_per_s|
+    tapered_rate = rate_c_per_s               if dist_s >= window_s
+                 = rate_c_per_s * dist_s/window_s   if 0 < dist_s < window_s
+                 = 0                          if dist_s <= 0 or rate_c_per_s == 0
+
+A linear taper over a window sized at **2x this zone's own identified dead
+time** (`ff_dead_time_s`, cached alongside `ff_k_dc`/`ff_tau_s` from the
+autotune-fitted model, not a shared constant — a short-dead-time zone eases
+later and over a shorter absolute window than a long one). The 2.0 multiplier
+comes from the calibrated simulator's own sweep (`sim_calibration.md` §5):
+1.0x and 2.0x were compared and 2.0x won on every zone's dwell-entry
+overshoot, with linear and cosine taper shapes statistically equivalent, so
+this is the configuration that was actually validated rather than a guess at
+a rounder number.
+
+It is applied only to the feedforward's rate input — `s_exec.target_c` and
+the ramp/dwell schedule are never touched, so a bug in the taper bounds to
+ordinary PID tracking lag and a stall is structurally impossible; the
+schedule reaches its target on the untouched wall-clock timer regardless of
+what the taper does. Gated on `s_exec.dwelling` rather than `rate_c_per_s !=
+0` alone, because a ramp-lock stall can zero the rate without setting
+`dwelling` — the same distinction PID_EXPANSION_PLAN.md's rules-relearned
+list (§5) already calls out for this area. Applied identically at both the
+per-tick path and the bumpless-seed path so the two stay consistent with each
+other, per the function's own doc comment.
+
+**Measured on hardware (`e373c39`), improvement on every zone and every
+metric** (profile 7, three zones):
+
+| | z0 | z1 | z2 |
+|---|---|---|---|
+| dwell-entry overshoot, seg0 | 0.59 → 0.41 °C | 1.99 → 0.88 °C | 2.67 → 1.80 °C |
+| dwell-entry overshoot, seg1 | 2.02 → 1.50 °C | 2.04 → 1.50 °C | 2.37 → 1.84 °C |
+| seg1 ramp RMS | 1.55 → 0.84 °C | 1.23 → 0.57 °C | 1.03 → 0.63 °C |
+| whole-run normalized IAE | 1.034 → 0.878 | 0.723 → 0.540 | 0.821 → 0.695 |
+
+The ramps improved along with the dwells, which was not the goal: arriving
+with less stored rate leaves less to correct on both sides of the boundary.
+
+**This change was simulated, rejected, and reported as a dead end before the
+simulator's ramp-rate bug was found** (see `plant_sim.py`'s module docstring
+and PID_EXPANSION_PLAN.md §3.4) — the old simulator drove itself at a
+hardcoded 10 °C/min against profile 7's real 2-3.5 °C/min, and because the
+coupled climb feedforward is linear in commanded rate, that alone produced
+the sim's entire "worse on every zone" verdict. It is the best single result
+measured this session and it was nearly discarded on a bad model. Treat this
+as the working example of "a simulator is not evidence until it reproduces a
+measurement someone actually took" (PID_EXPANSION_PLAN.md §3.4's own
+conclusion).
+
+Bench numbers above, like every bench number in this file, describe the
+0-80 °C rig — see the `T⁴` caveat in the tuning-rule comparison above and
+PID_EXPANSION_PLAN.md §3.6.
+
 ## Fuzzy adjustment (`pid_fuzzy.c`, PID_EXPANSION_PLAN.md §2b/§4 Phase 3)
 
 An optional second control mode layered over classic PID: a fixed,
@@ -623,6 +734,28 @@ trial-and-error tuning problem this mode exists to avoid (`pid_fuzzy.h:17-21`).
   layer may at most halve or 1.5x a base gain. A bounded adjustment, not a
   re-tune.
 
+**How strength scales the adjustment.** Each rule cell's firing strength
+(the product of its two membership degrees) is weighted-averaged across all 9
+cells into one direction per gain, `dir ∈ [-1, +1]` — the sign the rule table
+picks, scaled by how strongly the current error/rate actually match that
+cell. `strength_pct` then sets how much of `MAX_NUDGE_FRACTION` is available
+at all: `scale = (strength_pct/100) * MAX_NUDGE_FRACTION`
+(`pid_fuzzy.c:221`), and the output is `base * (1 + scale*dir)`
+(`pid_fuzzy.c:223-225`) — multiplicative, not additive, so a zone with a
+larger base Kp gets a proportionally larger nudge rather than the same fixed
+amount every zone would get from an additive term. `strength_pct` is the
+zones-page-configured per-zone knob (`zones_config_get_fuzzy_strength_pct()`,
+called from `pid_fuzzy_prepare_gains()` in `profile_executor_pid_tick.c` —
+the sole caller, once per zone per control tick, before that tick's
+`pid_update_terms()` runs); it never exceeds 100 even if a corrupt config
+somehow encoded a larger value, and a non-finite reading from config resolves
+to 0 rather than propagating (`profile_executor_pid_tick.c:255-258`). At
+`strength_pct=100` and full membership on a single cell (`dir=±1`), the bound
+is exactly `MAX_NUDGE_FRACTION`: a gain moves at most 50% either direction.
+It never replaces the base gains outright — even at maximum strength and
+maximum rule agreement, the result is still anchored to whatever Autotune
+measured, not a fuzzy-derived gain set of its own.
+
 **The sign convention — read this carefully before touching either
 file.** `pid.c` computes `raw_d = -(measurement - prev_measurement)/dt_s`, so
 `d_filtered` (what `pid_fuzzy_adjust()` receives as `error_rate_c_per_s`)
@@ -660,6 +793,13 @@ the gain change. Without it, a Ki nudge would step the I term (and therefore
 the commanded duty) discontinuously the instant the fuzzy layer moved it,
 exactly the kind of bump bumpless transfer exists elsewhere in this file to
 avoid.
+
+**Untested against a real kiln.** The per-zone `strength_pct` field defaults
+to 0 (off), the same conservative-by-default posture as guard 8's threshold,
+and no bench run in this repo's history has fired a zone with it above 0 —
+the mechanism above is verified by `pid_fuzzy.c`'s own host tests, not
+measured on hardware. Nothing in this section should be read as a bench
+result.
 
 ## Host-side testing (`App/test/`, TODO.md 6A.8)
 
