@@ -118,6 +118,12 @@ $required = @(
         Rules = @(
             "width: min(100% - 2rem, var(--kc-shell-max));"
         )
+    },
+    @{
+        File = "settings_display_page.html"
+        Rules = @(
+            "width: min(100% - 2rem, var(--kc-shell-max));"
+        )
     }
 )
 
