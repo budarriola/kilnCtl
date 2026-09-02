@@ -3719,6 +3719,41 @@ static void test_relay_setpoint_wide_span_keeps_the_full_50c_headroom(void)
     TEST_CHECK(ok, "60C is just outside the 50C headroom above the floor (window bottom 50) -- must be accepted");
 }
 
+// Opus review finding 8 (2026-09-02): the fallback-headroom condition used
+// `span < 2.0f*HEADROOM`, a strict `<`. At span EXACTLY 2*HEADROOM (100C,
+// with the default 50C headroom), that left the un-scaled full 50C headroom
+// in effect -> window_lo == window_hi == a degenerate, refused window, while
+// a span of 99.9C (just under the same threshold) took the scaled-down
+// quarter-span branch and got a real, usable window. A WIDER span (100)
+// refused where a narrower one (99.9) worked. Fixed to `<=` so the fallback
+// applies at the boundary too.
+static void test_relay_setpoint_span_exactly_100_is_usable(void)
+{
+    TEST_SECTION("a span of EXACTLY 100C (2x the default 50C headroom) must fall into the scaled-headroom "
+                 "branch and produce a usable window, not the knife-edge degenerate one");
+    char err[128] = {0};
+
+    // Span 100 (min 0, max 100), 2*50 == 100 -- the boundary itself. Scaled
+    // headroom = 100*0.25 = 25 -> window [25, 75]. The midpoint (50C) must be
+    // accepted, proving the window is not empty/inverted at this exact span.
+    bool ok = call_run_relay(/*max_temp_c=*/100.0f, /*min_temp_c=*/0.0f, /*setpoint_c=*/50.0f, err, sizeof(err));
+    TEST_CHECK(ok, "50C at the midpoint of an exactly-100C span must be accepted -- the window must not be "
+                   "degenerate at this boundary");
+    TEST_CHECK(s_at.method == AUTOTUNE_METHOD_RELAY, "an accepted call must actually start the relay method");
+
+    // Just inside the scaled window edges must also be accepted...
+    ok = call_run_relay(/*max_temp_c=*/100.0f, /*min_temp_c=*/0.0f, /*setpoint_c=*/26.0f, err, sizeof(err));
+    TEST_CHECK(ok, "26C is just inside the scaled window's 25C bottom edge -- must be accepted");
+    ok = call_run_relay(/*max_temp_c=*/100.0f, /*min_temp_c=*/0.0f, /*setpoint_c=*/74.0f, err, sizeof(err));
+    TEST_CHECK(ok, "74C is just inside the scaled window's 75C top edge -- must be accepted");
+
+    // ...and just outside them must still refuse, naming the real window.
+    ok = call_run_relay(/*max_temp_c=*/100.0f, /*min_temp_c=*/0.0f, /*setpoint_c=*/24.0f, err, sizeof(err));
+    TEST_CHECK(!ok, "24C is below the scaled window's 25C bottom -- must refuse");
+    TEST_CHECK(strstr(err, "25") != NULL && strstr(err, "75") != NULL,
+               "err_msg must name the scaled window (25C to 75C), not the un-scaled 50C headroom");
+}
+
 static void test_relay_setpoint_pathologically_narrow_span_refuses_with_stated_window(void)
 {
     TEST_SECTION("a span too narrow to leave ANY window (max_temp_c == min_temp_c) must refuse with ONE "
@@ -3760,6 +3795,35 @@ static bool call_run_relay_h(float max_temp_c, float min_temp_c, float setpoint_
 
     return autotune_engine_run_relay(0, setpoint_c, /*relay_d=*/0.0f, h_c, AUTOTUNE_RULE_ZIEGLER_NICHOLS, errbuf,
                                      errcap);
+}
+
+// cd6b9b2's band-vs-guard-limit check composes with the <= fix above. At
+// span exactly 100, the scaled headroom (25C) already exceeds
+// AUTOTUNE_RELAY_MAX_H_C (20C), so no setpoint the window admits can ever
+// produce a band that reaches the guard limits -- the same "headroom already
+// covers the largest legal h" property test_relay_band_must_not_reach_
+// the_zone_guard_limits() proves for the span=1000 case just below. Confirm
+// the SAME property holds right at the span=100 boundary: the window's most
+// extreme legal setpoint (75C, its top edge) combined with the largest legal
+// hysteresis (AUTOTUNE_RELAY_MAX_H_C, 20C) must still be accepted, not
+// refused by the band check -- proving the window fix did not accidentally
+// widen the window into territory the band check would then have to refuse.
+static void test_relay_setpoint_span_exactly_100_band_still_composes_safely(void)
+{
+    TEST_SECTION("span exactly 100C: the window's most extreme legal setpoint with the largest legal "
+                 "hysteresis must still clear the band-vs-guard-limit check (headroom 25C > max h 20C)");
+    char err[128] = {0};
+
+    bool ok = call_run_relay_h(/*max_temp_c=*/100.0f, /*min_temp_c=*/0.0f, /*setpoint_c=*/75.0f, /*h_c=*/20.0f,
+                                err, sizeof(err));
+    TEST_CHECK(ok, "setpoint 75C (window top) with h=20C (AUTOTUNE_RELAY_MAX_H_C) bands to [55,95], strictly "
+                   "inside 0..100 -- must be accepted");
+    TEST_CHECK(s_at.method == AUTOTUNE_METHOD_RELAY, "an accepted call must actually start the relay method");
+
+    ok = call_run_relay_h(/*max_temp_c=*/100.0f, /*min_temp_c=*/0.0f, /*setpoint_c=*/25.0f, /*h_c=*/20.0f, err,
+                          sizeof(err));
+    TEST_CHECK(ok, "setpoint 25C (window bottom) with h=20C bands to [5,45], strictly inside 0..100 -- must "
+                   "be accepted");
 }
 
 // REVIEW 2026-09-02. 17e67ee's span-proportional headroom made the setpoint
@@ -4948,6 +5012,8 @@ void run_test_autotune_engine_prestart(void)
     test_probe_done_propagates_probe_fit_failure();
     test_relay_setpoint_narrow_rig_span_now_has_a_usable_window();
     test_relay_setpoint_wide_span_keeps_the_full_50c_headroom();
+    test_relay_setpoint_span_exactly_100_is_usable();
+    test_relay_setpoint_span_exactly_100_band_still_composes_safely();
     test_relay_setpoint_pathologically_narrow_span_refuses_with_stated_window();
     test_relay_band_must_not_reach_the_zone_guard_limits();
     test_run_to_target_rejects_relay_only_rules();

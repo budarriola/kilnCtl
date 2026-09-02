@@ -3445,7 +3445,15 @@ bool autotune_engine_run_relay(uint8_t zone_index, float setpoint_c, float relay
      * told the operator nothing about what *would* have been accepted. */
     float span = max_temp_c - min_temp_c;
     float headroom = AUTOTUNE_RELAY_SETPOINT_HEADROOM_C;
-    if (span < 2.0f * AUTOTUNE_RELAY_SETPOINT_HEADROOM_C) {
+    /* <= not < : at span exactly 2*HEADROOM, window_lo == window_hi below
+     * (an empty-but-not-inverted window), which the window_lo >= window_hi
+     * check just below refuses anyway -- but only once the fallback headroom
+     * has actually been applied. A strict `<` here left span == 100.0 (with
+     * the default 50C headroom) using the UN-scaled full headroom, producing
+     * that exact degenerate window, refused, while a span of 99.9 used the
+     * scaled-down quarter-span headroom and got a real, usable window -- a
+     * WIDER span refused where a narrower one worked. */
+    if (span <= 2.0f * AUTOTUNE_RELAY_SETPOINT_HEADROOM_C) {
         headroom = span * 0.25f;
     }
     float window_lo = min_temp_c + headroom;
