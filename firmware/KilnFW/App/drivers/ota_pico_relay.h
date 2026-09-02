@@ -93,7 +93,12 @@ extern "C" {
 
 // Looks up (and caches, since a partition table entry cannot change without
 // a reboot) the `pico_img` staging partition (partitions.csv: data, subtype
-// ESP_PARTITION_SUBTYPE_DATA_UNDEFINED (0x06), 896K at 0x610000). Returns
+// ESP_PARTITION_SUBTYPE_DATA_UNDEFINED (0x06), 896K -- offset has moved more
+// than once as partitions.csv was restructured (2026-08-21 OTA/factory
+// move, 2026-09-02 relocation into the reclaimed `legacy_app` hole per
+// FLASH_BUDGET_PLAN.md section 5.1); looked up by name+type+subtype here
+// specifically so this code never has to track the current offset -- see
+// partitions.csv itself for where it actually sits today). Returns
 // NULL if the running partition table has no such entry -- should never
 // happen on a board built from this repo's partitions.csv, but this is
 // checked rather than assumed (a board flashed with an older/different

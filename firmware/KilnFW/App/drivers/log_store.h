@@ -36,11 +36,13 @@
 //     LOG_STORE_MAX_TOTAL_BYTES, the OLDEST segment(s) (lowest index) are
 //     deleted until it's back under the cap. This is the bound: the cap is
 //     checked and enforced on every rotation, never merely hoped for.
-//   - HARD CAP per kind: LOG_STORE_MAX_TOTAL_BYTES = 1 MiB (32 segments *
-//     32 KiB). Two kinds (firing, autotune) => at most 2 MiB total, well
-//     under the 3 MiB partition, leaving headroom for SPIFFS' own metadata
-//     overhead (SPIFFS typically wants slack below 100% full to avoid GC
-//     thrashing -- 2 MiB used of 3 MiB stays under 70%).
+//   - HARD CAP per kind: LOG_STORE_MAX_TOTAL_BYTES = 256 KiB (8 segments *
+//     32 KiB, reduced from 1 MiB/32 segments 2026-09-02 -- see
+//     FLASH_BUDGET_PLAN.md section 5.2). Two kinds (firing, autotune) => at
+//     most 512 KiB total, well under the 768 KiB `logs` partition, leaving
+//     headroom for SPIFFS' own metadata overhead (SPIFFS typically wants
+//     slack below 100% full to avoid GC thrashing -- 512 KiB used of 768 KiB
+//     stays at ~67%, matching this table's original ~2/3-fill ratio).
 //   - DEGRADE, DON'T WEDGE: every fopen/fwrite/remove/rename call in
 //     log_store.c is checked; any failure (full filesystem, corrupt
 //     directory entry, anything) causes log_store_append() to return an
@@ -67,10 +69,21 @@ extern "C" {
  * ~55-230-byte TUNE lines (telemetry_format.h) per file. */
 #define LOG_STORE_SEGMENT_MAX_BYTES ((size_t)(32u * 1024u))
 
-/* Segments retained per kind before the oldest is deleted. 32 * 32 KiB =
- * 1 MiB per kind -- see this header's rotation-policy comment above for the
- * full arithmetic against the 3 MiB `logs` partition. */
-#define LOG_STORE_MAX_SEGMENTS ((size_t)32u)
+/* Segments retained per kind before the oldest is deleted. 8 * 32 KiB =
+ * 256 KiB per kind -- see this header's rotation-policy comment above for the
+ * full arithmetic against the 768 KiB `logs` partition.
+ *
+ * REDUCED from 32 (1 MiB/kind) to 8 (256 KiB/kind) 2026-09-02, owner
+ * decision recorded in FLASH_BUDGET_PLAN.md section 5.2: "1Mb seems
+ * excessive for logs... maybe 256k?". Applied per-kind (this constant),
+ * not as a combined total, to keep firing/autotune rotation independent as
+ * before -- worst-case COMBINED retention is therefore 512 KiB (two kinds),
+ * not 256 KiB; see partitions.csv's `logs` entry for the sizing math against
+ * that combined figure and for the measured logging-rate finding (256 KiB
+ * per kind is a tight fit for a single long kiln firing at the ~136 KiB/hour
+ * FIRE-line rate telemetry_log.c documents -- roughly 1.9 hours of segments
+ * before the oldest rotate out). */
+#define LOG_STORE_MAX_SEGMENTS ((size_t)8u)
 
 /* Hard per-kind cap enforced on every rotation -- the number this module's
  * "never fills up" guarantee is measured against. */
