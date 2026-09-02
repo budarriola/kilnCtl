@@ -12,8 +12,30 @@
 #include "web_encoding.h"
 #include "wifi_prov.h"
 #include "stack_margin.h"
+#include "httpd_socket_budget.h"
 
 static const char *TAG = "wifi_prov_http";
+
+/* Every socket held open for this app's entire lifetime by something OTHER
+ * than this file's own httpd instance -- currently just wifi_prov.c's
+ * dns_hijack_task() UDP responder (started unconditionally at boot; see its
+ * own header comment in wifi_prov.c). Kept as one named constant, rather
+ * than a bare 1 in the _Static_assert below, so the next permanent socket
+ * this firmware adds anywhere has one obvious place to bump. */
+#define WIFI_PROV_OTHER_PERMANENT_SOCKETS 1
+
+/* See httpd_socket_budget.h's header comment and sdkconfig.defaults'
+ * CONFIG_LWIP_MAX_SOCKETS comment for the full 2026-09-01 incident this
+ * guards against: CONFIG_LWIP_MAX_SOCKETS silently falling one socket short
+ * of what this file's max_open_sockets (below) plus every other permanent
+ * consumer actually needs disables lru_purge_enable's recovery path without
+ * any build-time signal -- it only shows up live, as a socket-exhaustion
+ * wedge under sustained load. This turns that into a build failure instead. */
+_Static_assert(HTTPD_SOCKET_BUDGET_HAS_HEADROOM(CONFIG_LWIP_MAX_SOCKETS, /*max_open_sockets=*/13,
+                                                 WIFI_PROV_OTHER_PERMANENT_SOCKETS),
+               "CONFIG_LWIP_MAX_SOCKETS no longer covers max_open_sockets + httpd's 3 internal "
+               "sockets + every other permanent socket this firmware holds open -- see "
+               "httpd_socket_budget.h");
 
 /* application/x-www-form-urlencoded body, worst case ~3x expansion from
  * percent-encoding on both fields plus the "ssid=&password=" framing --
@@ -718,7 +740,24 @@ esp_err_t wifi_provision_http_start(void)
      * dozens). backlog_conn (kernel-level pending-accept queue, separate
      * from httpd's own open-socket cap) is also bumped from its default of
      * 5 so a burst larger than max_open_sockets still gets queued by the OS
-     * instead of refused at the TCP level. */
+     * instead of refused at the TCP level.
+     *
+     * 2026-09-01 correction: the "13 (16-3)" math above assumed httpd was
+     * the ONLY consumer of CONFIG_LWIP_MAX_SOCKETS. It isn't -- wifi_prov.c's
+     * dns_hijack_task() holds one more permanent UDP socket from boot for
+     * the captive-portal DNS responder, which this file's original 16-socket
+     * budget never subtracted. That silently cut the real ceiling to 12,
+     * one below max_open_sockets, which meant httpd's own session-count
+     * bookkeeping could never reach its cap to trigger lru_purge_enable's
+     * LRU-close -- the purge safety net went unreachable and a saturated
+     * pool could only clear by outside load happening to drop, observed on
+     * the bench as a ~20-minute-long "httpd_accept_conn: error in accept
+     * (23)" wedge during sustained dashboard polling. Fixed by raising
+     * CONFIG_LWIP_MAX_SOCKETS 16 -> 18 (sdkconfig.defaults, see that file's
+     * comment at the same line for the full accounting and why 18, not 17,
+     * leaves one spare) rather than lowering max_open_sockets here -- 13 is
+     * still the number proven necessary against the 10-connection burst
+     * above. */
     config.max_open_sockets = 13;
     config.backlog_conn = 10;
     /* Same burst: sockets sitting idle-but-stuck (e.g. a client that opened

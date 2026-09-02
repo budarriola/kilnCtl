@@ -141,7 +141,38 @@ CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 # without also lowering wifi_provision_http.c's max_open_sockets to match
 # (and re-checking it still survives the ~10-connection dashboard-polling
 # burst documented there), or the server will fail to start on next boot.
-CONFIG_LWIP_MAX_SOCKETS=16
+#
+# Raised again, 16 -> 18, 2026-09-01 (live wedge during a firing: sustained
+# dashboard polling drove httpd into a continuous "httpd_accept_conn: error
+# in accept (23)" (ENFILE) loop that did not clear for ~20 minutes). Root
+# cause was an accounting gap in the 16 = 13 + 3 math above, not a leak:
+# lwIP's accept() path (components/lwip/lwip/src/api/sockets.c,
+# lwip_accept() -> alloc_socket()) returns ENFILE purely because its
+# `sockets[NUM_SOCKETS]` table -- a fixed-size static array, NOT a heap
+# allocation, so this is independent of internal-DRAM headroom (see
+# dram_margin.h; a real DRAM/memp failure surfaces as ERR_MEM -> ENOMEM via
+# lwIP's err_to_errno_table in api/err.c, a different errno, and was ruled
+# out on that basis) -- is completely full. wifi_prov.c's dns_hijack_task()
+# opens one more permanent UDP socket (unconditionally at boot, for the
+# captive-portal DNS responder) that the "13 sessions + 3 httpd-internal =
+# 16" reservation above never accounted for. With that 17th permanent
+# consumer, the true ceiling for concurrent httpd sessions was actually 12,
+# one below max_open_sockets=13 -- so httpd's OWN bookkeeping
+# (hd_sd_active_count, in httpd_sess.c) could never reach its configured
+# cap, httpd_is_sess_available() kept reporting "space free", and
+# lru_purge_enable's safety net (httpd_main.c's httpd_accept_conn(), which
+# only closes the LRU session when httpd's own count is at max) never
+# engaged -- accept() just kept hitting the OS-level wall directly. Recovery
+# was possible only by the load itself dropping enough that concurrent
+# connections happened to fall back under 16 system-wide, which is slow and
+# unbounded under continuous polling, not a guarantee. 18 restores one
+# spare socket of real headroom above the dns_hijack + httpd-internal + 13-
+# session total (3 + 1 + 13 = 17 <= 18), so httpd's own accounting is
+# guaranteed to hit its cap and trigger lru_purge_enable's LRU close no
+# later than the OS would refuse a new accept() -- the purge path is now
+# always reachable, so a legitimately full pool self-recovers by closing its
+# oldest session instead of wedging until external load happens to subside.
+CONFIG_LWIP_MAX_SOCKETS=18
 
 # CONFIG_LWIP_STATS: on, 2026-08-28, for ROADMAP.md M10's open item -- an
 # 8-parallel-fetch /app.js burst resets one connection, and two mechanisms
