@@ -91,6 +91,26 @@ static const char *TAG = "adaptive_tune";
 #define ADAPTIVE_TUNE_BLEND_ALPHA 0.15f
 #define ADAPTIVE_TUNE_MAX_FRACTIONAL_MOVE 0.20f
 
+// F1 fix: try_refine_zone_locked() used to report success (and write
+// set_model()/set_pid()) on ANY nonzero blend, however small -- an
+// asymptotically-converging sequence of fits (each blend a little closer to
+// the true gain, never exactly equal) therefore reported "applied" on every
+// single run forever. adaptive_tune_run_end()'s D5 policy is "the Ki
+// diagnosis gets a turn on any run where the model refine did not fire" --
+// but with no material-change floor, that run never arrived: 8 consecutive
+// well-formed runs on one zone measured has_applied=1 every run (k_dc 10.0 ->
+// 13.65, asymptotically approaching 15, never equal), so try_refine_ki_
+// locked() never ran at all. A blended move smaller than this fraction of
+// the prior K_dc is declared "no material change" and refused (like any
+// other guard failure) rather than written -- this is what makes "the model
+// refine did not fire" a REACHABLE case again, without stacking a Ki
+// correction measured under a Ki value this same run is about to replace
+// (see try_refine_ki_locked()'s own reasoning for why the two layers must
+// not both act in one run). 0.5% is well below the smallest per-run move
+// this file's own tests exercise deliberately (the bounded-move test caps at
+// 20%), so it only ever fires once the blend has genuinely flattened out.
+#define ADAPTIVE_TUNE_MIN_MATERIAL_MOVE_FRAC 0.005f
+
 // A run whose zone lost more than this fraction of its samples to sensor
 // dropout must not become training data -- same reasoning as Phase 7a's
 // excluded_sample_count field this reuses.
@@ -199,10 +219,6 @@ static const char *TAG = "adaptive_tune";
 // already means something inside the window swung far from the mean, which
 // is the OSCILLATING case's signature instead.
 #define ADAPTIVE_TUNE_KI_OFFSET_MAX_OVER_MEAN 1.6f
-
-// A first-half-vs-second-half mean shift bigger than this, within one
-// trailing 4-minute window, is drift rather than noise.
-#define ADAPTIVE_TUNE_KI_DRIFT_THRESHOLD_C 0.15f
 
 // At least this many sign changes of (sample - window mean) before calling
 // the window "oscillating" at all -- 4 crossings is 2 full swings, ruling
@@ -403,45 +419,79 @@ void adaptive_tune_zone_tick(uint8_t zone_index, float actual_c, bool actual_val
         s_joint_last_valid[zone_index] = false;
     }
 
-    if (!z->enabled || !actual_valid || isnan(ambient_c)) {
-        // Learning is off, or this tick has nothing trustworthy to offer --
-        // still reset the settle tracker below like any other non-dwelling
-        // tick so a later dwell starts from a clean baseline rather than
-        // one contaminated by a stale reading.
-        if (!dwelling) {
-            z->dwelling_prev = false;
-            z->settle_start_valid = false;
-        }
-        xSemaphoreGive(s_lock);
-        return;
-    }
+    // F3 fix: dwell-transition bookkeeping (dwelling_prev, and everything
+    // that resets on a fresh dwell entry) runs UNCONDITIONALLY here, before
+    // the enabled/actual_valid/ambient gates below -- same "before the
+    // gates" posture as the joint cache update above, and for the same
+    // reason. Previously dwelling_prev was only ever touched inside the
+    // gated branches, which left two holes (see the review's F3 finding):
+    //   (a) a zone whose first dwelling tick(s) have !actual_valid or a NaN
+    //       ambient hit the early return below without ever setting
+    //       dwelling_prev true. When a later tick in the SAME dwell finally
+    //       had good data, dwelling_prev was still false, so THAT tick was
+    //       misread as "just entered this dwell" -- re-clearing
+    //       s_joint_dwell_row_committed and admitting a second joint row
+    //       from one physical dwell.
+    //   (b) identically for a zone that is enabled mid-dwell: every tick
+    //       before it was enabled returned early (via the old !z->enabled
+    //       check) without updating dwelling_prev, so the first tick after
+    //       enabling hit the same false "fresh dwell" branch.
+    // Tracking the raw dwelling transition here, independent of data
+    // validity and the opt-in flag, makes "just entered this dwell" true
+    // exactly once per physical dwell, regardless of what the gates below
+    // do with any given tick's data.
+    bool dwell_just_entered = dwelling && !z->dwelling_prev;
+    z->dwelling_prev = dwelling;
 
-    if (!dwelling) {
-        z->dwelling_prev = false;
+    if (dwell_just_entered) {
+        // Just entered this dwell -- start a fresh Ki-diagnosis trace (see
+        // adaptive_tune_zone_t's own comment on trace_t_s[] -- this window
+        // covers exactly one dwell, unlike the K_dc observation ring, which
+        // spans the whole run) and allow one more joint row to be committed
+        // for it (see s_joint_dwell_row_committed's own comment: this zone
+        // starting a fresh dwell is this module's proxy for "a new joint
+        // dwell has begun" module-wide). The settle window itself is
+        // (re)started below, at the first tick that actually has usable
+        // data -- which may be this same tick, or a later one if this one's
+        // reading is not trustworthy (see holes (a)/(b) above).
         z->settle_start_valid = false;
-        z->settle_elapsed_s = 0.0f;
-        z->recorded_this_dwell = false;
-        xSemaphoreGive(s_lock);
-        return;
-    }
-
-    if (!z->dwelling_prev) {
-        // Just entered this dwell -- start a fresh settle window AND a
-        // fresh Ki-diagnosis trace (see adaptive_tune_zone_t's own comment
-        // on trace_t_s[] -- this window covers exactly one dwell, unlike
-        // the K_dc observation ring, which spans the whole run).
-        z->dwelling_prev = true;
-        z->settle_start_valid = true;
-        z->settle_start_c = actual_c;
         z->settle_elapsed_s = 0.0f;
         z->recorded_this_dwell = false;
         z->trace_count = 0;
         z->trace_head = 0;
         z->trace_elapsed_s = 0.0f;
-        // See s_joint_dwell_row_committed's own comment: this zone starting
-        // a fresh dwell is this module's proxy for "a new joint dwell has
-        // begun" -- allow one more joint row to be committed for it.
         s_joint_dwell_row_committed = false;
+    }
+    if (!dwelling) {
+        // Not dwelling any more (or not yet) -- keep the settle tracker
+        // clean so the next dwell starts from a baseline uncontaminated by
+        // this tick, whatever z->enabled/actual_valid say about it.
+        z->settle_start_valid = false;
+        z->settle_elapsed_s = 0.0f;
+        z->recorded_this_dwell = false;
+    }
+
+    if (!z->enabled || !actual_valid || isnan(ambient_c)) {
+        // Learning is off, or this tick has nothing trustworthy to offer.
+        // dwelling_prev and the fresh-dwell reset above already ran
+        // unconditionally, so there is nothing left to do here.
+        xSemaphoreGive(s_lock);
+        return;
+    }
+
+    if (!dwelling) {
+        xSemaphoreGive(s_lock);
+        return;
+    }
+
+    if (!z->settle_start_valid) {
+        // Either this is genuinely the first valid tick of a fresh dwell, or
+        // the dwell was entered earlier while the data was invalid/the zone
+        // was disabled (holes (a)/(b) above) -- either way, this is the
+        // first valid opportunity to start the settle window for this
+        // dwell.
+        z->settle_start_valid = true;
+        z->settle_start_c = actual_c;
     }
     z->settle_elapsed_s += dt_s;
 
@@ -623,6 +673,15 @@ static bool try_refine_zone_locked(uint8_t zi, uint8_t profile_id)
     if (k_blended < k_dc - max_move) k_blended = k_dc - max_move;
     if (!(k_blended > 0.0f)) {
         set_refusal(z, "blended gain %.4f is not positive", (double)k_blended);
+        return false;
+    }
+
+    // F1: refuse rather than write a blend too small to be a material
+    // change -- see ADAPTIVE_TUNE_MIN_MATERIAL_MOVE_FRAC's own comment.
+    float material_move = fabsf(k_blended - k_dc);
+    if (material_move < k_dc * ADAPTIVE_TUNE_MIN_MATERIAL_MOVE_FRAC) {
+        set_refusal(z, "blended gain %.4f is not a material change from prior %.4f (<%.2f%%)", (double)k_blended,
+                    (double)k_dc, (double)(ADAPTIVE_TUNE_MIN_MATERIAL_MOVE_FRAC * 100.0f));
         return false;
     }
 
@@ -991,8 +1050,9 @@ bool adaptive_tune_diagnose_ki(const float *actual_c, const float *duty, uint32_
     }
 
     // A former branch here flagged any first-half-vs-second-half mean shift
-    // above ADAPTIVE_TUNE_KI_DRIFT_THRESHOLD_C as "OSCILLATING" (Ki too
-    // large) with fabsf() applied to the shift. That is sign-blind: this
+    // above a fixed threshold (the now-removed ADAPTIVE_TUNE_KI_DRIFT_
+    // THRESHOLD_C) as "OSCILLATING" (Ki too large) with fabsf() applied to
+    // the shift. That is sign-blind: this
     // function is never handed the setpoint (see this file's top comment),
     // so it cannot tell a slow monotonic APPROACH to setpoint (still
     // settling -- the classic too-small-Ki signature) from a slow walk AWAY
@@ -1144,7 +1204,19 @@ void adaptive_tune_run_end(const profile_firing_run_record_t *rec, bool clean)
         if (!model_refined) {
             try_refine_ki_locked(zi, &zr->stats);
         } else {
+            // F2: the diagnosis did not run this cycle, so ki_verdict/
+            // ki_correction_pct must not keep publishing whatever they held
+            // from a PREVIOUS run -- adaptive_tune_get_status() surfaces
+            // both verbatim, and a stale verdict/pct read as this run's
+            // result is exactly the kind of "reset one side" hole this
+            // module has shipped before. ADAPTIVE_TUNE_KI_INSUFFICIENT is
+            // the closest existing verdict for "nothing to report" (see its
+            // own doc comment); there is no dedicated "skipped" verdict, so
+            // the refusal reason string is what actually distinguishes this
+            // case from a real too-short-trace refusal.
             z->ki_applied = false;
+            z->ki_verdict = (uint8_t)ADAPTIVE_TUNE_KI_INSUFFICIENT;
+            z->ki_correction_pct = 0.0f;
             set_reason(z->ki_refusal_reason, sizeof(z->ki_refusal_reason),
                        "Ki diagnosis skipped this run -- the model/PID refinement already rewrote Ki from SIMC, "
                        "see adaptive_tune_run_end()'s D5 comment");

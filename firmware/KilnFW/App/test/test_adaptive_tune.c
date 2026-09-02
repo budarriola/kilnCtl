@@ -828,6 +828,32 @@ static void test_ki_diagnose_limit_cycle_yields_ku_tu(void)
     TEST_CHECK(diag.ki_correction_pct < 0.0f, "a limit cycle must suggest DECREASING Ki");
 }
 
+// F5: ADAPTIVE_TUNE_KI_OSCILLATING is reachable but previously had NO test
+// asserting it is ever actually produced (only a `!=` check elsewhere).
+// Two different periods spliced together (fast then slow) give plenty of
+// crossings but an irregular gap spacing -- multi-crossing, but not a clean
+// limit cycle.
+static void test_ki_diagnose_irregular_hunting_yields_oscillating(void)
+{
+    float a[24], d[24];
+    const float pi = 3.14159265358979f;
+    for (int i = 0; i < 24; i++) {
+        float t = (float)i;
+        float val = (i < 12) ? (100.0f + 0.30f * sinf(2.0f * pi * t / 4.0f))
+                              : (100.0f + 0.30f * sinf(2.0f * pi * (t - 12.0f) / 16.0f));
+        a[i] = q1(val);
+        d[i] = 0.40f;
+    }
+    adaptive_tune_ki_diag_t diag;
+    TEST_CHECK(adaptive_tune_diagnose_ki(a, d, 24, DT_KI, 0.0f, 0.0f, &diag), "call must return true");
+    TEST_CHECK(diag.zero_crossings >= ADAPTIVE_TUNE_KI_MIN_CROSSINGS,
+               "setup: the fixture must actually cross its own mean at least 4 times");
+    TEST_CHECK(diag.verdict == ADAPTIVE_TUNE_KI_OSCILLATING,
+               "an irregular (non-regular-spacing) but multi-crossing oscillation must actually produce the "
+               "OSCILLATING verdict -- not just avoid OK/LIMIT_CYCLE, which a `!=` check alone cannot prove");
+    TEST_CHECK(diag.ki_correction_pct < 0.0f, "an OSCILLATING verdict must suggest DECREASING Ki, like LIMIT_CYCLE");
+}
+
 static void test_ki_diagnose_ok_when_tracking_cleanly(void)
 {
     float a[16], d[16];
@@ -879,6 +905,114 @@ static void test_coupling_cell_converges_from_zero_prior_over_repeated_runs(void
 }
 
 // ---------------------------------------------------------------------
+// F5/D3: ADAPTIVE_TUNE_COUPLING_MAX_ABS_MOVE must actually bind a single
+// run's move -- zero coverage previously let it silently revert 6.0 -> 10.0
+// (or anything else) with 109/109 still green. Prior is confident-but-low
+// (2.0, so the near-zero branch is NOT the one exercised) and the fit is
+// far enough away that the uncapped 15% blend would clear the cap
+// comfortably.
+// ---------------------------------------------------------------------
+static void test_coupling_cell_per_run_move_is_bounded_by_abs_cap(void)
+{
+    reset_module_state();
+    s_zones[0].enabled = true;
+    s_fake_zone_cfg[0].k_dc = 1.0f;
+    s_fake_coupling[0][1] = 1.0f; // confident prior (> NEAR_ZERO); uncapped blend would be
+                                  // 1.0 + 0.15*(45.0-1.0) = 7.6, well past the 6.0 cap
+    const float ambient = 20.0f;
+    static const float k_test_C[3][3] = {
+        {39.25f, 45.0f, 20.73f}, {15.78f, 31.97f, 21.09f}, {9.70f, 11.38f, 31.68f}};
+    const float duty_pts[6][MAX31856_CHANNEL_COUNT] = {
+        {0.20f, 0.50f, 0.80f}, {0.50f, 0.80f, 0.20f}, {0.80f, 0.20f, 0.50f},
+        {0.35f, 0.65f, 0.15f}, {0.65f, 0.15f, 0.65f}, {0.15f, 0.35f, 0.35f}};
+    for (int k = 0; k < 6; k++) {
+        float target[MAX31856_CHANNEL_COUNT];
+        for (int i = 0; i < 3; i++) {
+            float rise = 0.0f;
+            for (int j = 0; j < 3; j++) rise += k_test_C[i][j] * duty_pts[k][j];
+            target[i] = ambient + rise;
+        }
+        feed_joint_settled_dwell(target, ambient, duty_pts[k], SETTLE_TICKS, DT_S);
+    }
+    profile_firing_run_record_t rec = make_clean_record(90, 0, 900);
+    adaptive_tune_run_end(&rec, true);
+
+    TEST_CHECK(s_zones[0].coupled_applied, "setup: the coupled solve must have applied");
+    TEST_CHECK_NEAR(s_fake_coupling[0][1], 1.0f + ADAPTIVE_TUNE_COUPLING_MAX_ABS_MOVE, 0.3,
+                     "D3: a single run's coupling-cell move must be clamped exactly at the per-run absolute cap");
+    TEST_CHECK(s_fake_coupling[0][1] <= 1.0f + ADAPTIVE_TUNE_COUPLING_MAX_ABS_MOVE + 1e-3f,
+               "D3: a single run's coupling-cell move must never exceed the per-run absolute cap");
+}
+
+// ---------------------------------------------------------------------
+// F5/D1: zero coverage of either direction of the ratio guard's upper
+// bound (upper = max(prior*5, ADAPTIVE_TUNE_COUPLING_IMPLAUSIBLE_ABS)).
+// Accept direction: a confident-but-low prior must still accept a fit far
+// past its own 5x ratio, as long as it is within the absolute plausibility
+// ceiling -- otherwise a cell blended up from a near-zero prior could never
+// converge past ~5.3x its own early blend step.
+// ---------------------------------------------------------------------
+static void test_coupling_ratio_guard_upper_bound_accepts_high_fit_from_low_confident_prior(void)
+{
+    reset_module_state();
+    s_zones[0].enabled = true;
+    s_fake_zone_cfg[0].k_dc = 1.0f;
+    s_fake_coupling[0][1] = 2.0f; // confident prior -- a plain 5x ratio ceiling alone would be 10.0
+    const float ambient = 20.0f;
+    static const float k_test_C[3][3] = {
+        {39.25f, 49.0f, 20.73f}, {15.78f, 31.97f, 21.09f}, {9.70f, 11.38f, 31.68f}};
+    const float duty_pts[6][MAX31856_CHANNEL_COUNT] = {
+        {0.20f, 0.50f, 0.80f}, {0.50f, 0.80f, 0.20f}, {0.80f, 0.20f, 0.50f},
+        {0.35f, 0.65f, 0.15f}, {0.65f, 0.15f, 0.65f}, {0.15f, 0.35f, 0.35f}};
+    for (int k = 0; k < 6; k++) {
+        float target[MAX31856_CHANNEL_COUNT];
+        for (int i = 0; i < 3; i++) {
+            float rise = 0.0f;
+            for (int j = 0; j < 3; j++) rise += k_test_C[i][j] * duty_pts[k][j];
+            target[i] = ambient + rise;
+        }
+        feed_joint_settled_dwell(target, ambient, duty_pts[k], SETTLE_TICKS, DT_S);
+    }
+    profile_firing_run_record_t rec = make_clean_record(91, 0, 900);
+    adaptive_tune_run_end(&rec, true);
+
+    TEST_CHECK(s_fake_coupling[0][1] > 2.0f, "D1 (accept direction): a fit of ~49 against a confident-but-low "
+                                              "prior of 2.0 (49 >> 2*5) must still move the cell UP, not be "
+                                              "refused for exceeding a plain 5x ratio ceiling");
+}
+
+// F5/D1, reject direction: the widened upper bound is not unlimited -- a
+// fit above the absolute plausibility ceiling must still be refused.
+static void test_coupling_ratio_guard_upper_bound_rejects_fit_above_absolute_ceiling(void)
+{
+    reset_module_state();
+    s_zones[0].enabled = true;
+    s_fake_zone_cfg[0].k_dc = 1.0f;
+    s_fake_coupling[0][1] = 2.0f;
+    const float ambient = 20.0f;
+    static const float k_test_C[3][3] = {
+        {39.25f, 55.0f, 20.73f}, {15.78f, 31.97f, 21.09f}, {9.70f, 11.38f, 31.68f}};
+    const float duty_pts[6][MAX31856_CHANNEL_COUNT] = {
+        {0.20f, 0.50f, 0.80f}, {0.50f, 0.80f, 0.20f}, {0.80f, 0.20f, 0.50f},
+        {0.35f, 0.65f, 0.15f}, {0.65f, 0.15f, 0.65f}, {0.15f, 0.35f, 0.35f}};
+    for (int k = 0; k < 6; k++) {
+        float target[MAX31856_CHANNEL_COUNT];
+        for (int i = 0; i < 3; i++) {
+            float rise = 0.0f;
+            for (int j = 0; j < 3; j++) rise += k_test_C[i][j] * duty_pts[k][j];
+            target[i] = ambient + rise;
+        }
+        feed_joint_settled_dwell(target, ambient, duty_pts[k], SETTLE_TICKS, DT_S);
+    }
+    profile_firing_run_record_t rec = make_clean_record(92, 0, 900);
+    adaptive_tune_run_end(&rec, true);
+
+    TEST_CHECK(s_fake_coupling[0][1] == 2.0f, "D1 (reject direction): a fit of 55 (above the 50.0 absolute "
+                                               "plausibility ceiling) against a confident prior must be refused, "
+                                               "not accepted -- the widened upper bound is not unlimited");
+}
+
+// ---------------------------------------------------------------------
 // D4: the joint-observation floor must count DISTINCT dwells, not rows --
 // N simultaneously-enabled zones settling on the SAME dwell must contribute
 // exactly ONE joint row, not N near-identical ones.
@@ -915,6 +1049,18 @@ static void test_joint_floor_counts_distinct_dwells_not_rows(void)
     adaptive_tune_run_end(&rec, true);
     TEST_CHECK(!s_zones[0].coupled_applied, "2 distinct dwells (below the 5-observation margin) must refuse the "
                                              "coupled solve, not silently accept an underdetermined fit");
+    // F4: the check above passes even under the REVERTED D4 gate (per-zone
+    // rather than per-dwell counting), because 3 zones x 2 dwells = 6
+    // near-duplicate rows are then singular (identical columns) and get
+    // refused as ILL_CONDITIONED anyway -- a DIFFERENT refusal path than
+    // the one this test is meant to guard. Pin the actual refusal reason so
+    // a D4 regression (which would still leave coupled_applied false, but
+    // for the wrong reason) is caught here instead of silently passing.
+    TEST_CHECK(strstr(s_zones[0].coupled_refusal_reason, "joint dwell observations") != NULL,
+               "the coupled solve must refuse specifically for TOO FEW joint observations (2 distinct dwells "
+               "against the 5-observation floor) -- a D4 regression to per-zone counting would instead leave 6 "
+               "near-duplicate rows that clear the floor and refuse as ill-conditioned instead, which the plain "
+               "!coupled_applied check above cannot tell apart from this");
 }
 
 // ---------------------------------------------------------------------
@@ -981,18 +1127,203 @@ static void test_ki_diagnosis_skipped_same_run_as_model_refine(void)
     reset_module_state();
     s_zones[1].enabled = true;
     s_fake_zone_cfg[1].k_dc = 10.0f; // prior -- true gain 15, well within jump/spread guards
+    s_fake_zone_cfg[1].ki = 1.0f;    // a positive Ki to refine -- needed below to prove the fixture is capable
     const float true_k = 15.0f, ambient = 22.3f;
     const float duties[4] = {0.20f, 0.50f, 0.80f, 0.35f};
     for (int i = 0; i < 4; i++) {
-        feed_settled_dwell(1, ambient + true_k * duties[i], ambient, duties[i], SETTLE_TICKS, DT_S);
+        // Last dwell runs long (20 ticks, not just SETTLE_TICKS) so its
+        // trailing trace clears ADAPTIVE_TUNE_KI_MIN_SAMPLES -- the Ki
+        // diagnosis reads only the MOST RECENT dwell's trace (reset every
+        // dwell entry), so this is what a real, capable fixture needs.
+        int ticks = (i == 3) ? 20 : SETTLE_TICKS;
+        feed_settled_dwell(1, ambient + true_k * duties[i], ambient, duties[i], ticks, DT_S);
     }
     profile_firing_run_record_t rec = make_clean_record(11, 1, 900);
+    // A steady, non-floored, mid-range-duty dwell error -- exactly the
+    // OFFSET_TOO_SMALL shape (duty 0.35 last dwell is nowhere near a rail).
+    rec.zones[1].stats.dwell_err_mean_c = 0.45f;
+    rec.zones[1].stats.dwell_err_max_c = 0.50f;
     adaptive_tune_run_end(&rec, true);
 
     TEST_CHECK(s_zones[1].has_applied, "setup: the diagonal model refinement must have applied this run");
     TEST_CHECK(!s_zones[1].ki_applied, "the Ki diagnosis must NOT also apply in the same run as the model refine");
     TEST_CHECK(strstr(s_zones[1].ki_refusal_reason, "skipped") != NULL,
                "the Ki refusal reason should say it was skipped because the model refine already ran this run");
+
+    // F4: the two checks above pass EVEN WITHOUT the D5 skip gate, because
+    // this fixture's dwells (SETTLE_TICKS=7 each) never clear
+    // ADAPTIVE_TUNE_KI_MIN_SAMPLES on their own -- the "!ki_applied" check
+    // was vacuous, only the "skipped" reason-string check was load-bearing.
+    // Prove this fixture is now genuinely capable of an applied Ki
+    // correction by calling try_refine_ki_locked() directly (this file
+    // #includes adaptive_tune.c, so its static functions are reachable),
+    // bypassing the D5 gate entirely, on the SAME trace/stats this run just
+    // produced.
+    try_refine_ki_locked(1, &rec.zones[1].stats);
+    TEST_CHECK(s_zones[1].ki_applied, "setup: this fixture's trace/stats must genuinely trigger an applied Ki "
+                                       "correction when nothing skips it -- otherwise the !ki_applied check above "
+                                       "would pass regardless of whether the D5 gate does anything at all");
+}
+
+// ---------------------------------------------------------------------
+// F1: try_refine_zone_locked() used to report "applied" on ANY nonzero
+// blend, however small -- an asymptotically-converging sequence of fits
+// (each blend closer to the true gain, never exactly equal) kept
+// model_refined true forever, permanently starving try_refine_ki_locked()
+// of a turn. MUST FAIL on pre-F1-fix code: 8+ consecutive well-formed runs
+// against the same true gain never produce a run where the model refine
+// reports no material change, so the Ki refusal reason always says
+// "skipped".
+// ---------------------------------------------------------------------
+static void test_ki_diagnosis_eventually_runs_after_repeated_converging_refinements(void)
+{
+    reset_module_state();
+    s_zones[1].enabled = true;
+    s_fake_zone_cfg[1].k_dc = 10.0f;
+    s_fake_zone_cfg[1].ki = 1.0f;
+    const float true_k = 15.0f, ambient = 22.3f;
+    const float duties[4] = {0.20f, 0.50f, 0.80f, 0.35f};
+
+    bool ki_ever_ran = false;
+    for (int run = 0; run < 30; run++) {
+        for (int i = 0; i < 4; i++) {
+            feed_settled_dwell(1, ambient + true_k * duties[i], ambient, duties[i], SETTLE_TICKS, DT_S);
+        }
+        profile_firing_run_record_t rec = make_clean_record(70 + run, 1, 900);
+        adaptive_tune_run_end(&rec, true);
+        if (strstr(s_zones[1].ki_refusal_reason, "skipped") == NULL) {
+            ki_ever_ran = true;
+        }
+    }
+    TEST_CHECK(ki_ever_ran, "F1: across 30 runs converging on the same true gain, the model refine must eventually "
+                             "report no material change so the Ki diagnosis gets a genuine turn -- it must never "
+                             "be permanently starved");
+    TEST_CHECK_NEAR(s_fake_zone_cfg[1].k_dc, true_k, 0.5,
+                     "setup: the repeated refinements must actually have converged k_dc close to the true gain, "
+                     "or 'never applying again' would be trivially true for the wrong reason");
+}
+
+// ---------------------------------------------------------------------
+// F2: adaptive_tune_run_end()'s D5 skip branch must not leave ki_verdict/
+// ki_correction_pct holding a PREVIOUS run's real diagnosis -- adaptive_
+// tune_get_status() publishes both verbatim, and a skipped run must not be
+// misreported as a live verdict for the run that actually skipped it. MUST
+// FAIL on pre-F2-fix code: run 2's ki_verdict/ki_correction_pct still read
+// run 1's OFFSET_TOO_SMALL/positive values.
+// ---------------------------------------------------------------------
+static void test_ki_status_fields_cleared_when_diagnosis_skipped(void)
+{
+    reset_module_state();
+    s_zones[1].enabled = true;
+    s_fake_zone_cfg[1].k_dc = 10.0f;
+    s_fake_zone_cfg[1].ki = 1.0f;
+
+    // Run 1: too few dwell observations for the model refine to fire (only
+    // 1, well under ADAPTIVE_TUNE_MIN_OBSERVATIONS), but a single LONG
+    // dwell gives the Ki trace plenty of samples, and an explicit steady,
+    // non-floored offset drives a genuine OFFSET_TOO_SMALL verdict.
+    feed_settled_dwell(1, 25.0f, 22.0f, 0.5f, 20, DT_S);
+    TEST_CHECK(s_zones[1].ring_count < ADAPTIVE_TUNE_MIN_OBSERVATIONS,
+               "setup: the model refine must not have enough observations to fire");
+    profile_firing_run_record_t rec1 = make_clean_record(80, 1, 900);
+    rec1.zones[1].stats.dwell_err_mean_c = 0.45f;
+    rec1.zones[1].stats.dwell_err_max_c = 0.50f;
+    adaptive_tune_run_end(&rec1, true);
+    TEST_CHECK(!s_zones[1].has_applied, "setup: the model refine must not have applied this run");
+    TEST_CHECK(s_zones[1].ki_verdict == (uint8_t)ADAPTIVE_TUNE_KI_OFFSET_TOO_SMALL,
+               "setup: the Ki diagnosis must have actually run and produced a real, non-default verdict");
+    TEST_CHECK(s_zones[1].ki_correction_pct > 0.0f, "setup: a real, nonzero correction must be published");
+
+    // Run 2: feed enough well-spread, on-model observations that the model
+    // refine DOES fire this time -- the Ki diagnosis must be skipped.
+    const float true_k = 15.0f, ambient = 22.3f;
+    const float duties[4] = {0.20f, 0.50f, 0.80f, 0.35f};
+    for (int i = 0; i < 4; i++) {
+        feed_settled_dwell(1, ambient + true_k * duties[i], ambient, duties[i], SETTLE_TICKS, DT_S);
+    }
+    profile_firing_run_record_t rec2 = make_clean_record(81, 1, 900);
+    adaptive_tune_run_end(&rec2, true);
+    TEST_CHECK(s_zones[1].has_applied, "setup: the model refine must have applied this run");
+    TEST_CHECK(!s_zones[1].ki_applied, "the Ki diagnosis must not apply when skipped");
+    TEST_CHECK(s_zones[1].ki_verdict == (uint8_t)ADAPTIVE_TUNE_KI_INSUFFICIENT,
+               "F2: a skipped-this-run Ki diagnosis must not keep publishing a PREVIOUS run's verdict");
+    TEST_CHECK(s_zones[1].ki_correction_pct == 0.0f,
+               "F2: a skipped-this-run Ki diagnosis must not keep publishing a PREVIOUS run's correction pct");
+}
+
+// ---------------------------------------------------------------------
+// F3: dwelling_prev (and everything gated on it -- the settle window,
+// trace reset, and s_joint_dwell_row_committed) must reflect whether a zone
+// is PHYSICALLY dwelling, independent of whether any given tick's data
+// happens to be trustworthy or whether the zone happens to be opted in.
+// Both sub-cases below share one root cause: the old code only ever
+// touched dwelling_prev from inside branches gated on enabled/actual_valid,
+// so a zone that never passed those gates during its real dwell-entry
+// tick(s) never recorded having entered at all.
+// ---------------------------------------------------------------------
+
+// F3(a): the data-validity half. MUST FAIL on pre-F3-fix code -- dwelling_
+// prev stays false after a dwelling tick with bad data, instead of tracking
+// the raw `dwelling` state.
+static void test_dwelling_prev_tracks_dwelling_state_even_when_data_is_invalid(void)
+{
+    reset_module_state();
+    s_zones[0].enabled = true;
+    adaptive_tune_zone_tick(0, 100.0f, /*actual_valid=*/false, 0.5f, /*dwelling=*/true, 22.0f, DT_S);
+    TEST_CHECK(s_zones[0].dwelling_prev == true,
+               "a zone whose FIRST dwelling tick has bad data is still physically dwelling -- dwelling_prev must "
+               "reflect that immediately, not silently stay false until the first VALID tick");
+
+    reset_module_state();
+    s_zones[0].enabled = true;
+    adaptive_tune_zone_tick(0, 100.0f, true, 0.5f, true, NAN, DT_S); // NaN ambient, same claim
+    TEST_CHECK(s_zones[0].dwelling_prev == true,
+               "a zone whose FIRST dwelling tick has a NaN ambient reading is still physically dwelling -- "
+               "dwelling_prev must reflect that immediately");
+}
+
+// F3(b): the opt-in half, and the end-to-end observable consequence of the
+// same root cause -- a zone opted into adaptive tuning MID-DWELL must not
+// be misread as having just entered a fresh dwell, or it wrongly reopens
+// (and lets something re-commit into) an already-committed joint row from
+// THIS SAME physical dwell. MUST FAIL on pre-F3-fix code: s_joint_ring_
+// count ends at 2, not 1, for one physical dwell.
+static void test_enabling_zone_mid_dwell_does_not_reopen_committed_joint_row(void)
+{
+    reset_module_state();
+    s_zones[0].enabled = false; // starts opted OUT
+    s_zones[1].enabled = true;
+    s_zones[2].enabled = true;
+    const float ambient = 20.0f;
+    const float duty[MAX31856_CHANNEL_COUNT] = {0.5f, 0.5f, 0.5f};
+
+    // Zone 0 is disabled but ticking with perfectly good data throughout --
+    // a disabled zone still contributes its duty as a joint-cache NEIGHBOUR
+    // column (see s_joint_last_duty[]'s own comment), it just never runs
+    // its OWN settle/ring bookkeeping while opted out.
+    adaptive_tune_zone_tick(0, q1(25.0f), true, duty[0], true, ambient, DT_S);
+    adaptive_tune_zone_tick(1, q1(25.0f), true, duty[1], false, ambient, DT_S);
+    adaptive_tune_zone_tick(2, q1(25.0f), true, duty[2], false, ambient, DT_S);
+    for (int i = 0; i < SETTLE_TICKS; i++) {
+        adaptive_tune_zone_tick(0, q1(25.0f), true, duty[0], true, ambient, DT_S);
+        adaptive_tune_zone_tick(1, q1(25.0f), true, duty[1], true, ambient, DT_S);
+        adaptive_tune_zone_tick(2, q1(25.0f), true, duty[2], true, ambient, DT_S);
+    }
+    TEST_CHECK(s_joint_ring_count == 1, "setup: zones 1/2 settling with zone 0 disabled-but-valid must commit "
+                                         "exactly one joint row");
+
+    // Zone 0 gets opted IN mid-dwell -- still the SAME physical dwell (it
+    // was never disabled from the joint cache's perspective, only from its
+    // own adaptive-tune bookkeeping).
+    s_zones[0].enabled = true;
+    for (int i = 0; i < SETTLE_TICKS; i++) {
+        adaptive_tune_zone_tick(0, q1(25.0f), true, duty[0], true, ambient, DT_S);
+        adaptive_tune_zone_tick(1, q1(25.0f), true, duty[1], true, ambient, DT_S);
+        adaptive_tune_zone_tick(2, q1(25.0f), true, duty[2], true, ambient, DT_S);
+    }
+    TEST_CHECK(s_joint_ring_count == 1, "F3(b): opting a zone into adaptive tuning mid-dwell must NOT be misread "
+                                         "as that zone entering a fresh dwell -- it must not reopen and re-commit "
+                                         "an already-committed joint row from this same physical dwell");
 }
 
 void run_test_adaptive_tune(void)
@@ -1035,10 +1366,14 @@ void run_test_adaptive_tune(void)
     test_ki_diagnose_flat_duty_mid_range_is_not_floored();
     test_ki_diagnose_near_rail_but_varying_is_not_floored();
     test_ki_diagnose_limit_cycle_yields_ku_tu();
+    test_ki_diagnose_irregular_hunting_yields_oscillating();
     test_ki_diagnose_ok_when_tracking_cleanly();
 
     TEST_SECTION("adaptive_tune: coupling cell convergence (D1)");
     test_coupling_cell_converges_from_zero_prior_over_repeated_runs();
+    test_coupling_cell_per_run_move_is_bounded_by_abs_cap();
+    test_coupling_ratio_guard_upper_bound_accepts_high_fit_from_low_confident_prior();
+    test_coupling_ratio_guard_upper_bound_rejects_fit_above_absolute_ceiling();
 
     TEST_SECTION("adaptive_tune: joint observation floor counts distinct dwells (D4)");
     test_joint_floor_counts_distinct_dwells_not_rows();
@@ -1048,6 +1383,16 @@ void run_test_adaptive_tune(void)
 
     TEST_SECTION("adaptive_tune: model refine and Ki diagnosis do not stack (D5)");
     test_ki_diagnosis_skipped_same_run_as_model_refine();
+
+    TEST_SECTION("adaptive_tune: Ki diagnosis eventually gets a turn (F1)");
+    test_ki_diagnosis_eventually_runs_after_repeated_converging_refinements();
+
+    TEST_SECTION("adaptive_tune: skipped Ki diagnosis clears stale status fields (F2)");
+    test_ki_status_fields_cleared_when_diagnosis_skipped();
+
+    TEST_SECTION("adaptive_tune: dwell-entry bookkeeping survives invalid data / late enable (F3)");
+    test_dwelling_prev_tracks_dwelling_state_even_when_data_is_invalid();
+    test_enabling_zone_mid_dwell_does_not_reopen_committed_joint_row();
 }
 
 int main(void)
