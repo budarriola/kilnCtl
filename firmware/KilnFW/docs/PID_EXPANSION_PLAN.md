@@ -386,6 +386,26 @@ same document's own 2026-08-29/30 bench sections contradict.
       profile-7 baseline with `fuzzy=0` on the current build is running
       concurrently to have a same-build comparison point.
 
+      **Comparison tooling built and proven 2026-09-02**, ahead of the
+      `fuzzy=50` run it will score: `tools/PcTools/src/kilnctrl/
+      http_capture_log.py` parses the `{"t","exec","status"}` HTTP-capture
+      shape (`logs/coupling/p7_fuzzy0_http.jsonl` /
+      `p7_fuzzy50_http.jsonl`) into `log_analysis.PollRow`, and
+      `pid_ab_compare.py` (`kilnctrl-pid-ab-compare compare`) reports, per
+      zone: whole-run and per-segment normalized IAE, ramp mean/worst
+      error, dwell-entry overshoot peak/time-to-peak, dwell steady-state
+      offset, and settle time — the same figures §2's table already uses.
+      It refuses to declare a winner for any zone whose start-temperature
+      delta between the two runs exceeds 1.0 °C, and always prints "noise
+      floor: UNKNOWN" — the run-to-run noise floor has never been measured
+      on this rig (§3.3, §3.7), and the only data point bearing on it (a
+      4.8 °C-confounded pair producing 22.5–47.5 % swings) is evidence a
+      confound can dominate, not a calibrated floor. Interim numbers on the
+      `fuzzy=0` baseline alone, run 1 segment 0 (ramp to 45 °C + dwell,
+      still in progress): whole-run-so-far normalized IAE z0 0.62 °C / z1
+      0.49 °C / z2 0.90 °C; dwell-entry overshoot z0 +0.41 °C@449s, z1
+      +1.15 °C@90s, z2 +2.02 °C@90s. `fuzzy=50` has not run yet.
+
 ### 3.7 Validation gap
 
 Everything above is measured on a bench rig spanning 0–80 °C. Radiative transfer

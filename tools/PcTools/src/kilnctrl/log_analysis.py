@@ -143,6 +143,46 @@ def _split_capture_line(line: str) -> Optional[tuple[str, dict]]:
         return None
 
 
+def _zone_samples_from_exec_body(body: dict) -> dict:
+    """Build the ``{zone -> ZoneSample}`` dict shared by every parser that
+    consumes a raw ``/api/profile_exec`` response body, however that body
+    reached this process (a bare poll-capture line, or nested inside some
+    other envelope like the HTTP-capture ``{"t","exec","status"}`` shape).
+    """
+    zones = {}
+    for z in body.get("zones", []):
+        zones[z["zone"]] = ZoneSample(
+            zone=z["zone"],
+            actual_c=z.get("actual_c", math.nan),
+            duty=z.get("duty", 0.0),
+            ff_hold_used_matrix=z.get("ff_hold_used_matrix", False),
+            ff_hold_infeasible=z.get("ff_hold_infeasible", False),
+            firmware_firing_stats=z.get("firing_stats"),
+        )
+    return zones
+
+
+def poll_row_from_exec_body(wall_time: str, body: dict) -> PollRow:
+    """Build a ``PollRow`` from one raw ``/api/profile_exec`` response body.
+
+    Shared by every parser in this package that has such a body in hand
+    (``parse_profile_exec_jsonl`` below, and ``http_capture_log.py``'s
+    HTTP-capture parser) -- one place defines the field mapping so a new
+    source only has to locate the body and a wall-clock label, never
+    reimplement this.
+    """
+    return PollRow(
+        wall_time=wall_time,
+        elapsed_s=float(body.get("elapsed_s", 0)),
+        segment_index=int(body.get("segment_index", 0)),
+        segment_count=int(body.get("segment_count", 0)),
+        dwelling=bool(body.get("dwelling", False)),
+        target_c=float(body.get("target_c", math.nan)),
+        state=body.get("state", ""),
+        zones=_zone_samples_from_exec_body(body),
+    )
+
+
 def parse_profile_exec_jsonl(path: str) -> list[PollRow]:
     """Parse a captured ``HH:MM:SS {profile_exec body}`` log.
 
@@ -160,26 +200,7 @@ def parse_profile_exec_jsonl(path: str) -> list[PollRow]:
             wall_time, body = parsed
             if "zones" not in body or "dwelling" not in body:
                 continue
-            zones = {}
-            for z in body.get("zones", []):
-                zones[z["zone"]] = ZoneSample(
-                    zone=z["zone"],
-                    actual_c=z.get("actual_c", math.nan),
-                    duty=z.get("duty", 0.0),
-                    ff_hold_used_matrix=z.get("ff_hold_used_matrix", False),
-                    ff_hold_infeasible=z.get("ff_hold_infeasible", False),
-                    firmware_firing_stats=z.get("firing_stats"),
-                )
-            rows.append(PollRow(
-                wall_time=wall_time,
-                elapsed_s=float(body.get("elapsed_s", 0)),
-                segment_index=int(body.get("segment_index", 0)),
-                segment_count=int(body.get("segment_count", 0)),
-                dwelling=bool(body.get("dwelling", False)),
-                target_c=float(body.get("target_c", math.nan)),
-                state=body.get("state", ""),
-                zones=zones,
-            ))
+            rows.append(poll_row_from_exec_body(wall_time, body))
     return rows
 
 
