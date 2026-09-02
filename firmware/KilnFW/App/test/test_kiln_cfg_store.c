@@ -749,6 +749,40 @@ static void test_nvs_load_store_current_version_full_size_happy_path(void)
     nvs_test_enable(false);
 }
 
+static void test_nvs_save_store_refuses_when_calling_stack_is_external_ram(void)
+{
+    TEST_SECTION("nvs_save_store -- refuses (does not crash) when called with a PSRAM stack "
+                 "underneath it (DRAM_PSRAM_PLAN.md section 7.2 safety net)");
+    reset_state();
+
+    esp_ptr_external_ram_test_set(true); // simulate being called from a PSRAM-stacked task
+
+    esp_err_t err = nvs_save_store();
+
+    TEST_CHECK(err == ESP_ERR_INVALID_STATE,
+               "the wrong-task guard refuses with a diagnosable error, not a crash -- exactly "
+               "the class of bug (an NVS write reached from a PSRAM-stack task) this net exists "
+               "to catch before a future task relocation (DRAM_PSRAM_PLAN.md section 7) makes it "
+               "reachable for real");
+
+    esp_ptr_external_ram_test_set(false); // leave shared stub state as every other test expects
+}
+
+static void test_nvs_save_store_proceeds_normally_on_an_internal_ram_stack(void)
+{
+    TEST_SECTION("nvs_save_store -- proceeds normally when the calling task's stack is internal RAM");
+    reset_state();
+    nvs_test_enable(true);
+
+    // esp_ptr_external_ram_test_set(false) is the stub's default state.
+    esp_err_t err = nvs_save_store();
+
+    TEST_CHECK(err == ESP_OK, "the guard does not fire on an internal-RAM stack -- the write "
+                              "proceeds exactly as before this net was added");
+
+    nvs_test_enable(false);
+}
+
 void run_test_kiln_cfg_store(void)
 {
     test_save_clone_apply_roundtrip();
@@ -768,4 +802,6 @@ void run_test_kiln_cfg_store(void)
     test_nvs_load_store_second_call_does_not_see_first_calls_data();
     test_nvs_load_store_v1_migration_malloc_failure_leaves_defaults();
     test_nvs_load_store_current_version_full_size_happy_path();
+    test_nvs_save_store_refuses_when_calling_stack_is_external_ram();
+    test_nvs_save_store_proceeds_normally_on_an_internal_ram_stack();
 }

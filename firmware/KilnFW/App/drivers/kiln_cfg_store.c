@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "nvs.h"
 #include "nvs_flash.h"
@@ -317,8 +318,35 @@ static void nvs_load_store(void)
     reset_to_defaults();
 }
 
+/* True iff the CURRENTLY EXECUTING task's own stack lives in external RAM
+ * (PSRAM). Same predicate, same reasoning, and same incident class as
+ * safety_cfg_store.c's caller_stack_is_external(): a flash/NVS write
+ * disables the cache, which makes a PSRAM-resident stack unreachable and
+ * aborts the whole board via ESP-IDF's own
+ * esp_task_stack_is_sane_cache_disabled() rather than failing just this one
+ * call. DRAM_PSRAM_PLAN.md section 7.2 lists this hazard as the reason
+ * whole classes of task must never get a PSRAM stack; this is the
+ * belt-and-suspenders check for the write side, so a FUTURE caller that
+ * reaches this function from a PSRAM-stacked task (directly, or by some
+ * future refactor bypassing today's callers, all of which currently run on
+ * internal-stack tasks) is refused loudly instead of taking the board down. */
+static bool caller_stack_is_external(void)
+{
+    volatile int stack_probe = 0; /* only its ADDRESS matters; volatile+initialised so -Werror=maybe-uninitialized doesn't flag it and it can't be optimised out of the frame. */
+    return esp_ptr_external_ram((void *)&stack_probe);
+}
+
 static esp_err_t nvs_save_store(void)
 {
+    if (caller_stack_is_external()) {
+        ESP_LOGE(TAG, "nvs_save_store: REFUSING -- calling task's stack is in external RAM "
+                      "(PSRAM). A flash/NVS write from here would abort the whole board "
+                      "(ESP-IDF's esp_task_stack_is_sane_cache_disabled()). Route this call "
+                      "through a task with an internal-SRAM stack instead -- see "
+                      "DRAM_PSRAM_PLAN.md section 7.2 and uart_bridge_ext.c's flash-safe "
+                      "worker for the established pattern.");
+        return ESP_ERR_INVALID_STATE;
+    }
     nvs_handle_t h;
     esp_err_t err = nvs_open_from_partition(KILN_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
     if (err != ESP_OK) {
