@@ -108,7 +108,23 @@ static const char *TAG = "adaptive_tune";
 // (see try_refine_ki_locked()'s own reasoning for why the two layers must
 // not both act in one run). 0.5% is well below the smallest per-run move
 // this file's own tests exercise deliberately (the bounded-move test caps at
-// 20%), so it only ever fires once the blend has genuinely flattened out.
+// 20%).
+//
+// H4(a) correction: this guard does NOT fire "only once the blend has
+// genuinely flattened out" onto the true gain -- it fires once the blend has
+// flattened onto a PERMANENT, biased steady state short of the true gain.
+// Each run moves k_dc by ALPHA*(k_true-k_dc); the guard refuses whenever
+// that move is smaller than FRAC*k_dc. Setting the two equal and solving for
+// the ratio k_dc/k_true gives the fixed point the sequence converges to and
+// then freezes at:
+//   k_dc / k_true = ALPHA / (ALPHA + FRAC) = 0.15 / 0.155 ~= 0.9677
+// i.e. a permanent ~3.23% UNDERESTIMATE of the true gain, independent of
+// what the true gain actually is -- measured: K_dc parks at 14.578 against a
+// true gain of 15.000 (test_ki_diagnosis_eventually_runs_after_repeated_
+// converging_refinements()) and never moves again. This is an accepted
+// trade-off (a small, bounded, permanent bias in exchange for making "the
+// model refine did not fire" reachable again), not a defect -- but it must
+// not be described as full convergence.
 #define ADAPTIVE_TUNE_MIN_MATERIAL_MOVE_FRAC 0.005f
 
 // A run whose zone lost more than this fraction of its samples to sensor
@@ -251,6 +267,35 @@ static const char *TAG = "adaptive_tune";
 // this indirect should move a fixed, conservative amount and let the NEXT
 // firing's diagnosis confirm or correct course, not try to size the "right"
 // correction from one run's shape.
+//
+// H3(c): this file adds NO cumulative (across-run) bound of its own on top
+// of this per-run cap -- the decision, and why:
+//   1. The correction is self-limiting by construction on real hardware:
+//      raising Ki genuinely shrinks dwell_err_mean_c on the NEXT firing (the
+//      loop this diagnosis measures is closed), so a real zone's Ki climbs a
+//      few runs and then the OFFSET_TOO_SMALL verdict simply stops firing --
+//      see test_ki_diagnosis_converges_under_closed_loop_plant_feedback()
+//      for the host-side model of this.
+//   2. zones_config_set_pid() already enforces an absolute ceiling
+//      (ZONE_PID_GAIN_MAX, zones_http.h) on every write this file makes,
+//      REJECTING (not silently clamping) a Ki above it -- the same setter
+//      every other Ki writer in the firmware goes through, so this is not a
+//      bound adaptive_tune.c would otherwise be missing, only one this file
+//      does not need to duplicate.
+//   3. A cumulative bound INSIDE this file would need its own state (a
+//      per-zone baseline to measure "cumulative" against, and a decision
+//      about when that baseline resets -- a new plant? a manual PID edit?)
+//      that duplicates exactly what zones_config_set_pid()'s absolute
+//      ceiling already gives for free, without (1)'s much stronger
+//      guarantee that the correction should stop long before any ceiling is
+//      reached on a genuinely closed loop.
+// What WAS missing, and is fixed by H3(a)/(b) rather than a new bound here:
+// the host fake's zones_config_set_pid() had no ceiling at all (unlike the
+// real one), and no test modeled the closed loop -- so neither of the two
+// backstops above was ever actually exercised on host. A non-closing loop
+// (a stuck sensor, a defeated heater) is exactly what the ceiling in (2)
+// exists to catch, and now has a host test proving it does
+// (test_ki_diagnosis_runaway_under_constant_error_is_capped_by_gain_ceiling()).
 #define ADAPTIVE_TUNE_KI_MAX_FRACTIONAL_MOVE 0.20f
 
 // Relay-style Ku/Tu extraction from a non-relay (ordinary PID) trace has no
@@ -460,6 +505,21 @@ void adaptive_tune_zone_tick(uint8_t zone_index, float actual_c, bool actual_val
         z->trace_count = 0;
         z->trace_head = 0;
         z->trace_elapsed_s = 0.0f;
+        // H4(c): this flag is shared MODULE-WIDE (see its own comment), so
+        // ANY zone's dwell_just_entered -- including a DISABLED zone's, since
+        // this branch runs unconditionally, before the z->enabled gate below
+        // -- clears it and reopens the commit window. Safe today only
+        // because profile_executor.c's s_exec.dwelling is a single global
+        // flag applied to every zone in the same loop iteration (see
+        // profile_executor.c:501), so every enabled AND disabled zone
+        // transitions dwelling->true on the exact same tick; a disabled
+        // zone's "fresh dwell" is therefore never actually early relative to
+        // the enabled zones it shares a physical dwell with. If profile_
+        // executor.c ever moves to a PER-ZONE dwelling signal, a disabled
+        // zone could enter its own dwell on a different tick than the
+        // enabled zones and reopen this shared commit flag mid-dwell,
+        // silently admitting a second joint row from what the enabled zones
+        // still consider one physical dwell.
         s_joint_dwell_row_committed = false;
     }
     if (!dwelling) {
@@ -1147,6 +1207,41 @@ static void try_refine_ki_locked(uint8_t zi, const profile_exec_firing_stats_t *
              (double)ki, (double)new_ki, (double)capped_pct, (unsigned)diag.verdict);
 }
 
+// H2 fix: every run_end path that skips both try_refine_zone_locked() and
+// try_refine_ki_locked()/try_refine_coupled_locked() entirely (i.e. every
+// `continue` in the loop below) must reset ALL of this run's per-run status
+// fields to a neutral, unambiguous "nothing happened this run" state --
+// not just write a refusal-reason STRING. adaptive_tune_get_status()
+// publishes ki_applied/ki_verdict/ki_correction_pct/coupled_applied/
+// coupled_cells_changed verbatim, and before this fix the !clean path and
+// the excluded-fraction path only ever touched last_refusal_reason/
+// coupled_refusal_reason/ki_refusal_reason, leaving those five fields
+// holding whatever the PREVIOUS run left there. Measured: a clean run that
+// applied (ki_applied=1, verdict=OFFSET_TOO_SMALL, pct=20.00) followed by a
+// FAULTED run left ki_applied=1/verdict=2/pct=20.00 standing right next to
+// "run was faulted or stopped early -- not used as training data" -- exactly
+// the run an operator is most likely to inspect, showing a correction that
+// was never applied this run. A single shared helper, called on every
+// `continue` path (this run_end() has three: !clean, excluded-fraction, and
+// -- already correct -- the F2 model-refined-so-Ki-skipped path below, which
+// this helper subsumes too), is deliberate: the repeated pattern across the
+// first two paths is exactly what let the third one go unnoticed, and a
+// future fourth refusal path added to this loop gets the reset for free
+// instead of needing to remember it.
+static void reset_run_status_locked(adaptive_tune_zone_t *z, const char *reason)
+{
+    set_refusal(z, "%s", reason);
+    z->has_applied = false;
+    set_reason(z->coupled_refusal_reason, sizeof(z->coupled_refusal_reason), "%s", reason);
+    z->coupled_attempted = false;
+    z->coupled_applied = false;
+    z->coupled_cells_changed = 0;
+    set_reason(z->ki_refusal_reason, sizeof(z->ki_refusal_reason), "%s", reason);
+    z->ki_applied = false;
+    z->ki_verdict = (uint8_t)ADAPTIVE_TUNE_KI_INSUFFICIENT;
+    z->ki_correction_pct = 0.0f;
+}
+
 void adaptive_tune_run_end(const profile_firing_run_record_t *rec, bool clean)
 {
     if (!rec) {
@@ -1164,22 +1259,16 @@ void adaptive_tune_run_end(const profile_firing_run_record_t *rec, bool clean)
             continue;
         }
         if (!clean) {
-            set_refusal(z, "run was faulted or stopped early -- not used as training data");
-            set_reason(z->coupled_refusal_reason, sizeof(z->coupled_refusal_reason),
-                       "run was faulted or stopped early -- not used as training data");
-            set_reason(z->ki_refusal_reason, sizeof(z->ki_refusal_reason),
-                       "run was faulted or stopped early -- not used as training data");
+            reset_run_status_locked(z, "run was faulted or stopped early -- not used as training data");
             continue;
         }
         uint32_t total = zr->stats.sample_count + zr->stats.excluded_sample_count;
         if (total > 0 && (float)zr->stats.excluded_sample_count / (float)total > ADAPTIVE_TUNE_MAX_EXCLUDED_FRACTION) {
-            set_refusal(z, "run excluded %u/%u samples (>%.0f%%) -- not used as training data",
-                        (unsigned)zr->stats.excluded_sample_count, (unsigned)total,
-                        (double)(ADAPTIVE_TUNE_MAX_EXCLUDED_FRACTION * 100.0f));
-            set_reason(z->coupled_refusal_reason, sizeof(z->coupled_refusal_reason),
-                       "run excluded too many samples -- not used as training data");
-            set_reason(z->ki_refusal_reason, sizeof(z->ki_refusal_reason),
-                       "run excluded too many samples -- not used as training data");
+            char reason[96];
+            snprintf(reason, sizeof(reason), "run excluded %u/%u samples (>%.0f%%) -- not used as training data",
+                      (unsigned)zr->stats.excluded_sample_count, (unsigned)total,
+                      (double)(ADAPTIVE_TUNE_MAX_EXCLUDED_FRACTION * 100.0f));
+            reset_run_status_locked(z, reason);
             continue;
         }
         // D5: try_refine_zone_locked() rewrites Kp/Ki/Kd from a fresh SIMC
@@ -1204,7 +1293,14 @@ void adaptive_tune_run_end(const profile_firing_run_record_t *rec, bool clean)
         if (!model_refined) {
             try_refine_ki_locked(zi, &zr->stats);
         } else {
-            // F2: the diagnosis did not run this cycle, so ki_verdict/
+            // F2: unlike the two full-skip paths above (reset_run_status_
+            // locked()), has_applied/coupled_* are NOT reset here -- the
+            // model refine and coupled solve DID run this cycle and their
+            // fields legitimately reflect this run's own outcome. Only the
+            // Ki-diagnosis fields are stale here (that diagnosis alone was
+            // skipped), so only those three are reset.
+            //
+            // The diagnosis did not run this cycle, so ki_verdict/
             // ki_correction_pct must not keep publishing whatever they held
             // from a PREVIOUS run -- adaptive_tune_get_status() surfaces
             // both verbatim, and a stale verdict/pct read as this run's

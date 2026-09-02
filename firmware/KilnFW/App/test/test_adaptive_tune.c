@@ -65,9 +65,25 @@ bool zones_config_get_pid(uint8_t zone_index, float *out_kp, float *out_ki, floa
     *out_kd = s_fake_zone_cfg[zone_index].kd;
     return true;
 }
+// H3(a): mirrors the REAL zones_config_set_pid() (zones_config_accessors.c)
+// bound-and-reject behaviour, not just "accept anything" -- the real setter
+// REJECTS (returns false, leaves the stored gain untouched) any of kp/ki/kd
+// outside [0, ZONE_PID_GAIN_MAX], it does not silently clamp. Before this
+// fix the fake accepted any finite value unconditionally, which is exactly
+// this repo's idealized-test-input bug class: try_refine_ki_locked()'s
+// repeated-Ki-application path (H3) had no real ceiling to run into on host,
+// even though hardware does (this same bound, reached through the identical
+// setter every caller in this file uses -- see that function's own comment
+// on why the invalidation/bound checks live in the one shared setter).
+#define TEST_ZONE_PID_GAIN_MAX 1000.0f // == zones_http.h's ZONE_PID_GAIN_MAX; redefined by hand since this
+                                        // file does not include zones_http.h (see its own #include list)
 bool zones_config_set_pid(uint8_t zone_index, float kp, float ki, float kd)
 {
     if (zone_index >= TEST_MAX_ZONES) return false;
+    if (!isfinite(kp) || !isfinite(ki) || !isfinite(kd) || kp < 0.0f || ki < 0.0f || kd < 0.0f ||
+        kp > TEST_ZONE_PID_GAIN_MAX || ki > TEST_ZONE_PID_GAIN_MAX || kd > TEST_ZONE_PID_GAIN_MAX) {
+        return false;
+    }
     s_fake_zone_cfg[zone_index].kp = kp;
     s_fake_zone_cfg[zone_index].ki = ki;
     s_fake_zone_cfg[zone_index].kd = kd;
@@ -421,12 +437,21 @@ static void test_dirty_run_is_never_training_data(void)
     reset_module_state();
     s_zones[1].enabled = true;
     s_fake_zone_cfg[1].k_dc = 10.0f;
-    // Otherwise-perfect, well-spread, on-model observations (true K == 10,
-    // exactly the prior -- would apply cleanly if the run were clean).
-    feed_settled_dwell(1, 22.0f + 10.0f * 0.2f, 22.0f, 0.2f, SETTLE_TICKS, DT_S);
-    feed_settled_dwell(1, 22.0f + 10.0f * 0.5f, 22.0f, 0.5f, SETTLE_TICKS, DT_S);
-    feed_settled_dwell(1, 22.0f + 10.0f * 0.8f, 22.0f, 0.8f, SETTLE_TICKS, DT_S);
-    feed_settled_dwell(1, 22.0f + 10.0f * 0.35f, 22.0f, 0.35f, SETTLE_TICKS, DT_S);
+    // H1 fix: otherwise-perfect, well-spread observations, but with true K ==
+    // 12 (NOT == prior 10) -- deliberately a MATERIAL move (blend = 10 +
+    // 0.15*(12-10) = 10.3, a 3% move, well above ADAPTIVE_TUNE_MIN_MATERIAL_
+    // MOVE_FRAC's 0.5% floor). The original fixture here used true K == prior
+    // K == 10.0 exactly, so the blend was a zero move and F1's material-
+    // change floor refused it for the WRONG reason -- masking the excluded-
+    // fraction guard this test exists to cover (see the review's H1 finding:
+    // with the excluded guard disabled entirely, that pre-existing fixture
+    // still passed, 134/134 GREEN). With a genuinely material blend, only
+    // the "not clean" / "excluded fraction" guards below can be the reason
+    // has_applied stays false.
+    feed_settled_dwell(1, 22.0f + 12.0f * 0.2f, 22.0f, 0.2f, SETTLE_TICKS, DT_S);
+    feed_settled_dwell(1, 22.0f + 12.0f * 0.5f, 22.0f, 0.5f, SETTLE_TICKS, DT_S);
+    feed_settled_dwell(1, 22.0f + 12.0f * 0.8f, 22.0f, 0.8f, SETTLE_TICKS, DT_S);
+    feed_settled_dwell(1, 22.0f + 12.0f * 0.35f, 22.0f, 0.35f, SETTLE_TICKS, DT_S);
 
     profile_firing_run_record_t rec = make_clean_record(5, 1, 900);
     adaptive_tune_run_end(&rec, /*clean=*/false); // faulted or operator-stopped
@@ -440,6 +465,9 @@ static void test_dirty_run_is_never_training_data(void)
     rec2.zones[1].stats.excluded_sample_count = 100; // 100/(900+100) = 10% > 5%
     adaptive_tune_run_end(&rec2, /*clean=*/true);
     TEST_CHECK(!s_zones[1].has_applied, "heavy excluded-sample fraction must also refuse to learn");
+    TEST_CHECK(strstr(s_zones[1].last_refusal_reason, "excluded") != NULL,
+               "H1: refusal reason should name the excluded-sample-fraction guard, not the material-change floor "
+               "-- proves this fixture's blend was genuinely material and the excluded guard is what's under test");
 }
 
 static void test_refinement_improves_gain_estimate_on_known_plant(void)
@@ -1198,9 +1226,23 @@ static void test_ki_diagnosis_eventually_runs_after_repeated_converging_refineme
     TEST_CHECK(ki_ever_ran, "F1: across 30 runs converging on the same true gain, the model refine must eventually "
                              "report no material change so the Ki diagnosis gets a genuine turn -- it must never "
                              "be permanently starved");
-    TEST_CHECK_NEAR(s_fake_zone_cfg[1].k_dc, true_k, 0.5,
-                     "setup: the repeated refinements must actually have converged k_dc close to the true gain, "
-                     "or 'never applying again' would be trivially true for the wrong reason");
+    // H4(b): the blend has a PERMANENT steady-state residual, not a transient
+    // one -- see ADAPTIVE_TUNE_MIN_MATERIAL_MOVE_FRAC's corrected comment in
+    // adaptive_tune.c. At the material-change floor's freeze point,
+    // k/k_true == ALPHA/(ALPHA+MIN_MATERIAL_MOVE_FRAC) == 0.15/0.155, so
+    // k_dc parks at 15.0 * (0.15/0.155) = 14.516 and never moves further --
+    // measured 14.578 here (close enough given the 0.1 degC quantization
+    // this fixture's temperatures go through). 0.5 tolerance left only 0.078
+    // of slack around that measured value, a standing flake risk. Widened to
+    // 0.6 -- still comfortably tighter than the 1.59 residual produced when
+    // MIN_MATERIAL_MOVE_FRAC is mistakenly retuned to 0.02f (freeze point
+    // 13.41, |15-13.41| = 1.59 >> 0.6), so this assertion still catches that
+    // regression; it must NOT be loosened further without re-checking against
+    // that mutation.
+    TEST_CHECK_NEAR(s_fake_zone_cfg[1].k_dc, true_k, 0.6,
+                     "setup: the repeated refinements must actually have converged k_dc close to the true gain "
+                     "(within its expected permanent residual), or 'never applying again' would be trivially true "
+                     "for the wrong reason");
 }
 
 // ---------------------------------------------------------------------
@@ -1249,6 +1291,228 @@ static void test_ki_status_fields_cleared_when_diagnosis_skipped(void)
                "F2: a skipped-this-run Ki diagnosis must not keep publishing a PREVIOUS run's verdict");
     TEST_CHECK(s_zones[1].ki_correction_pct == 0.0f,
                "F2: a skipped-this-run Ki diagnosis must not keep publishing a PREVIOUS run's correction pct");
+}
+
+// ---------------------------------------------------------------------
+// H2: adaptive_tune_run_end()'s !clean and excluded-fraction paths both
+// `continue` immediately, having written only the refusal-reason strings --
+// leaving ki_applied/ki_verdict/ki_correction_pct/coupled_applied/
+// coupled_cells_changed holding whatever a PREVIOUS run left there.
+// adaptive_tune_get_status() publishes all five verbatim, so a faulted run
+// could show a stale "Ki correction applied, +20%" right next to "this run
+// was faulted and not used" -- exactly the run an operator is most likely to
+// inspect. MUST FAIL on pre-H2-fix code (reset_run_status_locked() not
+// called on these two paths).
+// ---------------------------------------------------------------------
+static void test_run_status_fields_cleared_on_faulted_run(void)
+{
+    reset_module_state();
+    s_zones[1].enabled = true;
+    s_fake_zone_cfg[1].k_dc = 10.0f;
+    s_fake_zone_cfg[1].ki = 1.0f;
+
+    // Run 1: clean, applies a model refine AND leaves a real, non-default Ki
+    // diagnosis outcome behind is not possible in the same run (D5), so
+    // drive a genuine standalone Ki-applied run instead: too few dwell
+    // observations for the model refine, but a long dwell with a steady
+    // offset for the Ki diagnosis to actually apply against.
+    feed_settled_dwell(1, 25.0f, 22.0f, 0.5f, 20, DT_S);
+    profile_firing_run_record_t rec1 = make_clean_record(90, 1, 900);
+    rec1.zones[1].stats.dwell_err_mean_c = 0.45f;
+    rec1.zones[1].stats.dwell_err_max_c = 0.50f;
+    adaptive_tune_run_end(&rec1, true);
+    TEST_CHECK(s_zones[1].ki_applied, "setup: run 1 must have genuinely applied a Ki correction");
+    TEST_CHECK(s_zones[1].ki_verdict == (uint8_t)ADAPTIVE_TUNE_KI_OFFSET_TOO_SMALL,
+               "setup: run 1's Ki verdict must be real (OFFSET_TOO_SMALL), not a default");
+    TEST_CHECK(s_zones[1].ki_correction_pct > 0.0f, "setup: run 1's Ki correction pct must be real and nonzero");
+
+    // Run 2: same zone, faulted. Feed the SAME on-model observations that
+    // test_dirty_run_is_never_training_data() proved make a material blend,
+    // so a naive reader might expect coupled_applied too -- it must not.
+    feed_settled_dwell(1, 22.0f + 12.0f * 0.2f, 22.0f, 0.2f, SETTLE_TICKS, DT_S);
+    feed_settled_dwell(1, 22.0f + 12.0f * 0.5f, 22.0f, 0.5f, SETTLE_TICKS, DT_S);
+    feed_settled_dwell(1, 22.0f + 12.0f * 0.8f, 22.0f, 0.8f, SETTLE_TICKS, DT_S);
+    feed_settled_dwell(1, 22.0f + 12.0f * 0.35f, 22.0f, 0.35f, SETTLE_TICKS, DT_S);
+    profile_firing_run_record_t rec2 = make_clean_record(91, 1, 900);
+    adaptive_tune_run_end(&rec2, /*clean=*/false);
+
+    TEST_CHECK(!s_zones[1].ki_applied, "H2: a faulted run must not keep publishing a PREVIOUS run's ki_applied=1");
+    TEST_CHECK(s_zones[1].ki_verdict == (uint8_t)ADAPTIVE_TUNE_KI_INSUFFICIENT,
+               "H2: a faulted run must reset ki_verdict, not keep publishing OFFSET_TOO_SMALL from run 1");
+    TEST_CHECK(s_zones[1].ki_correction_pct == 0.0f,
+               "H2: a faulted run must reset ki_correction_pct, not keep publishing run 1's +20%%");
+    TEST_CHECK(!s_zones[1].has_applied, "H2: a faulted run must not report has_applied from a previous run");
+    TEST_CHECK(!s_zones[1].coupled_applied,
+               "H2: a faulted run must not report coupled_applied from a previous run");
+    TEST_CHECK(s_zones[1].coupled_cells_changed == 0,
+               "H2: a faulted run must reset coupled_cells_changed, not keep publishing a previous run's count");
+    TEST_CHECK(strstr(s_zones[1].ki_refusal_reason, "faulted or stopped early") != NULL,
+               "H2: the Ki refusal reason must say why THIS run produced no diagnosis");
+}
+
+// H2, excluded-fraction path -- same defect, different guard. MUST FAIL on
+// pre-H2-fix code the same way as the faulted-run test above.
+static void test_run_status_fields_cleared_on_excluded_fraction_refusal(void)
+{
+    reset_module_state();
+    s_zones[1].enabled = true;
+    s_fake_zone_cfg[1].k_dc = 10.0f;
+    s_fake_zone_cfg[1].ki = 1.0f;
+
+    feed_settled_dwell(1, 25.0f, 22.0f, 0.5f, 20, DT_S);
+    profile_firing_run_record_t rec1 = make_clean_record(92, 1, 900);
+    rec1.zones[1].stats.dwell_err_mean_c = 0.45f;
+    rec1.zones[1].stats.dwell_err_max_c = 0.50f;
+    adaptive_tune_run_end(&rec1, true);
+    TEST_CHECK(s_zones[1].ki_applied, "setup: run 1 must have genuinely applied a Ki correction");
+
+    feed_settled_dwell(1, 22.0f + 12.0f * 0.2f, 22.0f, 0.2f, SETTLE_TICKS, DT_S);
+    feed_settled_dwell(1, 22.0f + 12.0f * 0.5f, 22.0f, 0.5f, SETTLE_TICKS, DT_S);
+    feed_settled_dwell(1, 22.0f + 12.0f * 0.8f, 22.0f, 0.8f, SETTLE_TICKS, DT_S);
+    feed_settled_dwell(1, 22.0f + 12.0f * 0.35f, 22.0f, 0.35f, SETTLE_TICKS, DT_S);
+    profile_firing_run_record_t rec2 = make_clean_record(93, 1, 900);
+    rec2.zones[1].stats.excluded_sample_count = 100; // 100/(900+100) = 10% > 5%
+    adaptive_tune_run_end(&rec2, /*clean=*/true);
+
+    TEST_CHECK(!s_zones[1].ki_applied,
+               "H2: an excluded-fraction refusal must not keep publishing a PREVIOUS run's ki_applied=1");
+    TEST_CHECK(s_zones[1].ki_verdict == (uint8_t)ADAPTIVE_TUNE_KI_INSUFFICIENT,
+               "H2: an excluded-fraction refusal must reset ki_verdict");
+    TEST_CHECK(s_zones[1].ki_correction_pct == 0.0f,
+               "H2: an excluded-fraction refusal must reset ki_correction_pct");
+    TEST_CHECK(!s_zones[1].has_applied, "H2: an excluded-fraction refusal must not report a stale has_applied");
+    TEST_CHECK(!s_zones[1].coupled_applied,
+               "H2: an excluded-fraction refusal must not report a stale coupled_applied");
+    TEST_CHECK(strstr(s_zones[1].ki_refusal_reason, "excluded") != NULL,
+               "H2: the Ki refusal reason must say why THIS run produced no diagnosis");
+}
+
+// ---------------------------------------------------------------------
+// H3: try_refine_ki_locked() has no cumulative bound of its own, only
+// ADAPTIVE_TUNE_KI_MAX_FRACTIONAL_MOVE per run (20%). On real hardware the
+// loop is CLOSED -- a rising Ki genuinely shrinks dwell_err_mean_c on the
+// next firing, so the correction is self-limiting -- and zones_config_set_
+// pid() rejects a gain above ZONE_PID_GAIN_MAX as a backstop. Before H3, the
+// host fake had neither: it accepted any Ki unconditionally, and no test
+// modeled the closed loop, so a probe with STEADY, UNCHANGING evidence
+// (idealized-test-input bug class) showed Ki compounding x1.2/run forever:
+// 1.0 -> 8.92 in 12 runs with no test to catch it. This test drives
+// dwell_err_mean_c FROM the zone's own just-updated Ki every run (err
+// shrinks as Ki rises, modeling the real closed loop), and separately proves
+// the fake's new reject-above-ZONE_PID_GAIN_MAX backstop (H3(a) fix above)
+// actually holds when the loop is NOT closed (constant error, same as the
+// idealized probe).
+// ---------------------------------------------------------------------
+
+// H3(b): closed-loop model. dwell_err_mean_c = KI_TEST_ERR_K / ki -- a
+// simple inverse relationship standing in for "more integral action shrinks
+// steady-state error," which is qualitatively what a real PID loop does.
+// ki starts at 1.0 (err = 8.0, well above the 0.3 OFFSET threshold);
+// convergence is expected once err drops to/below 0.3, i.e. once ki reaches
+// KI_TEST_ERR_K/0.3 ~= 26.7, roughly 19 runs of the 20%/run cap
+// (1.2^19 ~= 27.4) -- run well past that (60 runs) and require the loop to
+// have actually STOPPED moving, not merely slowed down.
+#define KI_TEST_ERR_K 8.0f
+
+static void test_ki_diagnosis_converges_under_closed_loop_plant_feedback(void)
+{
+    reset_module_state();
+    s_zones[1].enabled = true;
+    s_fake_zone_cfg[1].k_dc = 10.0f; // never a material-move blend below -- keep the model refine permanently
+                                      // un-due so the Ki diagnosis gets a turn on EVERY run (D5 would otherwise
+                                      // starve it exactly like F1's own bug, defeating the point of this test)
+    s_fake_zone_cfg[1].ki = 1.0f;
+
+    float last_ki = 1.0f;
+    bool converged = false;
+    int converged_at_run = -1;
+    for (int run = 0; run < 60; run++) {
+        float ki_before = s_fake_zone_cfg[1].ki;
+        float err_mean = KI_TEST_ERR_K / ki_before;
+        float err_max = err_mean * 1.1f; // steady -- inside OFFSET_MAX_OVER_MEAN(1.6), same posture as the
+                                          // pure-math OFFSET tests above
+
+        // One short dwell (keeps ring_count well under ADAPTIVE_TUNE_MIN_
+        // OBSERVATIONS, so try_refine_zone_locked() never has enough data to
+        // fire and D5 never starves the Ki diagnosis) plus a long dwell that
+        // actually feeds the Ki trace -- same two-call shape as
+        // test_ki_diagnosis_skipped_same_run_as_model_refine()'s fixture.
+        feed_settled_dwell(1, 25.0f, 22.0f, 0.5f, 20, DT_S);
+
+        profile_firing_run_record_t rec = make_clean_record(100 + run, 1, 900);
+        rec.zones[1].stats.dwell_err_mean_c = err_mean;
+        rec.zones[1].stats.dwell_err_max_c = err_max;
+        adaptive_tune_run_end(&rec, true);
+
+        TEST_CHECK(!s_zones[1].has_applied, "setup: the model refine must never fire in this fixture -- only "
+                                             "the Ki diagnosis is under test here");
+
+        float ki_after = s_fake_zone_cfg[1].ki;
+        if (!s_zones[1].ki_applied && ki_after == ki_before && !converged) {
+            converged = true;
+            converged_at_run = run;
+        }
+        last_ki = ki_after;
+    }
+
+    TEST_CHECK(converged, "H3: under closed-loop plant feedback (error shrinking as Ki rises), the Ki diagnosis "
+                           "must eventually stop applying corrections -- it must NOT compound forever the way the "
+                           "idealized constant-error probe showed (1.0 -> 8.92 in 12 runs)");
+    TEST_CHECK(converged_at_run >= 0 && converged_at_run < 40,
+               "H3: convergence should happen within the expected ~19-run window for this fixture's error/Ki "
+               "relationship, not accidentally at the very end of the 60-run loop");
+    TEST_CHECK(last_ki < 50.0f, "H3: a closed loop must converge to a BOUNDED Ki, nowhere near the unclamped "
+                                 "runaway (8.92 after just 12 runs) the pre-fix probe measured");
+
+    // Re-run several more times past convergence -- Ki must genuinely have
+    // STOPPED, not merely slowed (a test that only checks "less than some
+    // number" cannot tell "converged" from "still growing slowly").
+    for (int run = 60; run < 65; run++) {
+        feed_settled_dwell(1, 25.0f, 22.0f, 0.5f, 20, DT_S);
+        profile_firing_run_record_t rec = make_clean_record(100 + run, 1, 900);
+        rec.zones[1].stats.dwell_err_mean_c = KI_TEST_ERR_K / s_fake_zone_cfg[1].ki;
+        rec.zones[1].stats.dwell_err_max_c = rec.zones[1].stats.dwell_err_mean_c * 1.1f;
+        adaptive_tune_run_end(&rec, true);
+    }
+    TEST_CHECK_NEAR(s_fake_zone_cfg[1].ki, last_ki, 1e-4,
+                     "H3: Ki must be genuinely stable past convergence, not merely growing more slowly");
+}
+
+// H3(a) backstop, negative-test companion: WITHOUT closed-loop feedback (the
+// idealized constant-error shape the original probe used), the reject-above-
+// ZONE_PID_GAIN_MAX guard in the now-realistic fake zones_config_set_pid()
+// (see its own H3(a) comment) is what eventually stops the runaway, proving
+// the fake is no longer idealized. MUST FAIL if TEST_ZONE_PID_GAIN_MAX's
+// reject check above is deleted (Ki would climb unbounded for all 40 runs
+// instead of hitting the ceiling and refusing further growth).
+static void test_ki_diagnosis_runaway_under_constant_error_is_capped_by_gain_ceiling(void)
+{
+    reset_module_state();
+    s_zones[1].enabled = true;
+    s_fake_zone_cfg[1].k_dc = 10.0f;
+    s_fake_zone_cfg[1].ki = 1.0f;
+
+    bool saw_a_refusal_after_growth = false;
+    for (int run = 0; run < 60; run++) {
+        feed_settled_dwell(1, 25.0f, 22.0f, 0.5f, 20, DT_S);
+        profile_firing_run_record_t rec = make_clean_record(200 + run, 1, 900);
+        // Constant, never-shrinking error -- the idealized-input shape the
+        // review's probe used, deliberately preserved here as the NEGATIVE
+        // case this module must not silently tolerate on host any more.
+        rec.zones[1].stats.dwell_err_mean_c = 0.45f;
+        rec.zones[1].stats.dwell_err_max_c = 0.50f;
+        adaptive_tune_run_end(&rec, true);
+        if (run > 30 && !s_zones[1].ki_applied &&
+            strstr(s_zones[1].ki_refusal_reason, "rejected the corrected Ki") != NULL) {
+            saw_a_refusal_after_growth = true;
+        }
+    }
+    TEST_CHECK(saw_a_refusal_after_growth,
+               "H3(a): under constant (non-shrinking) error, Ki must climb until zones_config_set_pid()'s "
+               "gain ceiling actually refuses it -- proving the host fake is no longer idealized (it used to "
+               "accept any Ki unconditionally)");
+    TEST_CHECK(s_fake_zone_cfg[1].ki <= TEST_ZONE_PID_GAIN_MAX,
+               "H3(a): Ki must never be left above the gain ceiling once the setter starts refusing it");
 }
 
 // ---------------------------------------------------------------------
@@ -1389,6 +1653,14 @@ void run_test_adaptive_tune(void)
 
     TEST_SECTION("adaptive_tune: skipped Ki diagnosis clears stale status fields (F2)");
     test_ki_status_fields_cleared_when_diagnosis_skipped();
+
+    TEST_SECTION("adaptive_tune: full-skip run_end paths clear ALL stale status fields (H2)");
+    test_run_status_fields_cleared_on_faulted_run();
+    test_run_status_fields_cleared_on_excluded_fraction_refusal();
+
+    TEST_SECTION("adaptive_tune: repeated Ki application is bounded under closed-loop feedback (H3)");
+    test_ki_diagnosis_converges_under_closed_loop_plant_feedback();
+    test_ki_diagnosis_runaway_under_constant_error_is_capped_by_gain_ceiling();
 
     TEST_SECTION("adaptive_tune: dwell-entry bookkeeping survives invalid data / late enable (F3)");
     test_dwelling_prev_tracks_dwelling_state_even_when_data_is_invalid();
