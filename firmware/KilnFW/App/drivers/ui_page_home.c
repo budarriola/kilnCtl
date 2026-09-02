@@ -1272,6 +1272,24 @@ static void refresh_cb(lv_timer_t *timer)
          * scale must say the truth in both idle and running states -- idle
          * has no planned horizon, it's showing recent history"). */
         bool state_active = (st.state != PROFILE_EXEC_IDLE);
+        /* 2026-09-01: profile_history_entry_t.actual_c widened from one
+         * float to one-per-zone (profile_executor.h, TODO.md section 0/6A.9
+         * -- the dashboard's web graph used to lose every non-representative
+         * zone's trace on reload, now every zone survives in the firmware
+         * ring buffer). This LCD summary chart only ever drew ONE trace
+         * (320x480, no room for a 3-line legend without overflow -- see this
+         * file's own "LCD pages must fit without scrolling" constraint), so
+         * it keeps doing exactly that: the lowest-indexed zone actually in
+         * this run's mask, same "representative zone" convention the web
+         * dashboard's history.csv used before this fix and ui_page_history.c
+         * already documents a few lines up ("first configured zone"). Falls
+         * back to zone 0 when the mask is empty (state IDLE-with-leftover-
+         * history, where zone_mask is meaningless per that same comment) so
+         * this never reads an out-of-range index. */
+        uint8_t hist_zone = 0;
+        for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+            if (st.zone_mask & (1u << zi)) { hist_zone = zi; break; }
+        }
         /* Reset the active-axis hold exactly once per RUN -- a brand new
          * firing must not inherit the previous firing's widened range.
          * 2026-09-01 defect fix (review of commit 98c3278, reset-one-side
@@ -1379,7 +1397,7 @@ static void refresh_cb(lv_timer_t *timer)
                     if (idx >= count) idx = count - 1;
                     profile_history_entry_t entry;
                     if (profile_executor_get_history(&entry, idx, 1) == 1) {
-                        actual_c = entry.actual_c;
+                        actual_c = entry.actual_c[hist_zone];
                         have_actual = true;
                     }
                 } else if (i == 0) {

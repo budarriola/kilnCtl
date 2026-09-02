@@ -382,7 +382,12 @@ size_t profile_executor_get_history(profile_history_entry_t *out, size_t start_i
         return 0;
     }
     xSemaphoreTake(s_exec.lock, portMAX_DELAY);
-    if (start_index >= s_exec.history_count) {
+    /* history_count only ever increments when s_exec.history is non-NULL
+     * (profile_executor.c's sample site checks first), so this NULL check
+     * is defensive, not load-bearing -- but a PSRAM allocation failure
+     * (history_buf_ensure_alloc()) is exactly the case where being wrong
+     * about that would deref NULL. */
+    if (s_exec.history == NULL || start_index >= s_exec.history_count) {
         xSemaphoreGive(s_exec.lock);
         return 0;
     }

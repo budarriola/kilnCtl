@@ -1667,6 +1667,19 @@ static esp_err_t firing_history_get_handler(httpd_req_t *req)
  * thermal_guard_trip_t (0 = none) so the graph can mark trips on the
  * timeline without a second request.
  *
+ * 2026-09-01 (owner: "the duty cycle and all of the zones are not always
+ * visible on the web graph"): the row used to carry ONE representative
+ * zone's actual/duty -- every other zone only ever existed client-side in
+ * the dashboard JS, gone on reload. profile_history_entry_t now carries
+ * every zone's actual_c/duty/guard (profile_executor.h), so this widens to
+ * one z<N>_actual_c,z<N>_duty,z<N>_guard triple per MAX31856_CHANNEL_COUNT
+ * zone; desired_c stays a single column since it's one setpoint ramp shared
+ * across a run's zones (TODO.md 6A.5), not per-zone data. A zone not active
+ * in the run that produced a given row reads as an empty actual_c/duty field
+ * (NAN) and guard 0 -- see profile_history_entry_t's own doc comment.
+ * log_analysis.py (tools/PcTools) was updated for this column layout in the
+ * same change.
+ *
  * Streamed in small batches via httpd_resp_send_chunk() rather than built
  * into one big buffer first: an earlier version allocated a full
  * HISTORY_MAX_SAMPLES-sized entries array (~58KB) *and* a full CSV text
@@ -1677,11 +1690,17 @@ static esp_err_t firing_history_get_handler(httpd_req_t *req)
  * This version's peak allocation is one HISTORY_CSV_BATCH-sized entries
  * array plus one small text buffer, independent of how many samples exist. */
 #define HISTORY_CSV_BATCH 128u
+/* Wide enough for "elapsed,desired," plus 3 zone columns of up to
+ * MAX31856_CHANNEL_COUNT zones ("-3276.7,100,255," worst case per zone,
+ * ~16 bytes) with headroom -- computed off the zone count rather than
+ * hand-picked so a future channel-count change can't silently truncate a
+ * row. */
+#define HISTORY_CSV_LINE_CAP (64u + 32u * MAX31856_CHANNEL_COUNT)
 
 static esp_err_t history_csv_get_handler(httpd_req_t *req)
 {
     profile_history_entry_t *batch = malloc(sizeof(profile_history_entry_t) * HISTORY_CSV_BATCH);
-    char *line = malloc(96);
+    char *line = malloc(HISTORY_CSV_LINE_CAP);
     if (!batch || !line) {
         free(batch);
         free(line);
@@ -1692,18 +1711,26 @@ static esp_err_t history_csv_get_handler(httpd_req_t *req)
     httpd_resp_set_type(req, "text/csv");
     httpd_resp_set_hdr(req, "Content-Disposition", "attachment; filename=\"kiln_history.csv\"");
 
-    int n = snprintf(line, 96, "elapsed_s,actual_c,desired_c,duty,guard\n");
-    esp_err_t err = httpd_resp_send_chunk(req, line, n > 0 ? (size_t)n : 0);
+    size_t o = (size_t)snprintf(line, HISTORY_CSV_LINE_CAP, "elapsed_s,desired_c");
+    for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT && o < HISTORY_CSV_LINE_CAP; zi++) {
+        o += (size_t)snprintf(line + o, HISTORY_CSV_LINE_CAP - o, ",z%u_actual_c,z%u_duty,z%u_guard", zi, zi, zi);
+    }
+    if (o < HISTORY_CSV_LINE_CAP) o += (size_t)snprintf(line + o, HISTORY_CSV_LINE_CAP - o, "\n");
+    esp_err_t err = httpd_resp_send_chunk(req, line, o < HISTORY_CSV_LINE_CAP ? o : HISTORY_CSV_LINE_CAP - 1);
 
     size_t start = 0;
     while (err == ESP_OK) {
         size_t got = profile_executor_get_history(batch, start, HISTORY_CSV_BATCH);
         if (got == 0) break;
         for (size_t i = 0; i < got && err == ESP_OK; i++) {
-            n = snprintf(line, 96, "%lu,%.2f,%.2f,%.3f,%u\n", (unsigned long)batch[i].elapsed_s,
-                        (double)batch[i].actual_c, (double)batch[i].desired_c, (double)batch[i].duty,
-                        batch[i].guard);
-            err = httpd_resp_send_chunk(req, line, n > 0 ? (size_t)n : 0);
+            o = (size_t)snprintf(line, HISTORY_CSV_LINE_CAP, "%lu,%.2f", (unsigned long)batch[i].elapsed_s,
+                                 (double)batch[i].desired_c);
+            for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT && o < HISTORY_CSV_LINE_CAP; zi++) {
+                o += (size_t)snprintf(line + o, HISTORY_CSV_LINE_CAP - o, ",%.2f,%.3f,%u",
+                                      (double)batch[i].actual_c[zi], (double)batch[i].duty[zi], batch[i].guard[zi]);
+            }
+            if (o < HISTORY_CSV_LINE_CAP) o += (size_t)snprintf(line + o, HISTORY_CSV_LINE_CAP - o, "\n");
+            err = httpd_resp_send_chunk(req, line, o < HISTORY_CSV_LINE_CAP ? o : HISTORY_CSV_LINE_CAP - 1);
         }
         start += got;
         if (got < HISTORY_CSV_BATCH) break; /* reached the end */

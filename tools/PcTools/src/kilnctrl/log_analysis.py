@@ -239,19 +239,70 @@ def parse_trace_csv(path: str) -> tuple[list[float], list[float]]:
 
 
 def parse_history_csv(path: str) -> list[dict]:
-    """Parse ``/api/history.csv`` (``elapsed_s,actual_c,desired_c,duty,guard``)."""
+    """Parse ``/api/history.csv``.
+
+    2026-09-01: the board's history ring buffer went from single-zone to
+    per-zone (owner: "the duty cycle and all of the zones are not always
+    visible on the web graph" -- see profile_executor.h's doc comment on
+    profile_history_entry_t for the firmware-side reasoning), so the CSV's
+    columns widened from a fixed ``elapsed_s,actual_c,desired_c,duty,guard``
+    to ``elapsed_s,desired_c,z0_actual_c,z0_duty,z0_guard,z1_actual_c,...`` --
+    one ``z<N>_actual_c,z<N>_duty,z<N>_guard`` triple per zone the firmware
+    was built for, N not fixed at parse time. Detected from the header
+    itself (``csv.DictReader``) rather than hard-coded, so this keeps working
+    if the firmware's channel count ever changes, and each row's ``zones``
+    dict is keyed by the zone index parsed out of the column name. Also
+    still accepts the OLD single-zone header (``actual_c``/``duty`` with no
+    ``z<N>_`` prefix) for any CSV captured before this change -- exposed
+    there as zone 0, the same "lowest-indexed active zone" the old firmware
+    scoped that column to.
+    """
     rows: list[dict] = []
     with open(path, "r", encoding="utf-8", newline="") as fh:
         reader = csv.DictReader(fh)
+        fieldnames = reader.fieldnames or []
+        zone_cols: dict[int, dict[str, str]] = {}
+        for name in fieldnames:
+            if name.startswith("z") and "_" in name:
+                zi_str, _, suffix = name[1:].partition("_")
+                if zi_str.isdigit():
+                    zone_cols.setdefault(int(zi_str), {})[suffix] = name
+        legacy_single_zone = not zone_cols and "actual_c" in fieldnames
         for row in reader:
             try:
-                rows.append({
+                entry = {
                     "elapsed_s": float(row["elapsed_s"]),
-                    "actual_c": float(row["actual_c"]),
                     "desired_c": float(row["desired_c"]),
-                    "duty": float(row["duty"]),
-                    "guard": row.get("guard", ""),
-                })
+                    "zones": {},
+                }
+                if legacy_single_zone:
+                    entry["zones"][0] = {
+                        "actual_c": float(row["actual_c"]),
+                        "duty": float(row["duty"]),
+                        "guard": row.get("guard", ""),
+                    }
+                else:
+                    for zi, cols in zone_cols.items():
+                        entry["zones"][zi] = {
+                            "actual_c": float(row[cols["actual_c"]]) if "actual_c" in cols else math.nan,
+                            "duty": float(row[cols["duty"]]) if "duty" in cols else math.nan,
+                            "guard": row.get(cols.get("guard", ""), ""),
+                        }
+                # Back-compat convenience fields, matching the old single-zone
+                # shape, for any caller not yet updated for multi-zone: the
+                # lowest-indexed zone with a genuine (non-NaN) reading in this
+                # row, same "lowest-indexed active zone" convention the old
+                # firmware used for its one recorded column.
+                rep_zi = next((zi for zi in sorted(entry["zones"]) if not math.isnan(entry["zones"][zi]["actual_c"])), None)
+                if rep_zi is not None:
+                    entry["actual_c"] = entry["zones"][rep_zi]["actual_c"]
+                    entry["duty"] = entry["zones"][rep_zi]["duty"]
+                    entry["guard"] = entry["zones"][rep_zi]["guard"]
+                else:
+                    entry["actual_c"] = math.nan
+                    entry["duty"] = math.nan
+                    entry["guard"] = ""
+                rows.append(entry)
             except (KeyError, ValueError):
                 continue
     return rows

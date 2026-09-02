@@ -1922,20 +1922,35 @@ document.getElementById('runBtn').addEventListener('click', function () {
   }).catch(pollExec);
 });
 
+// 2026-09-01 (owner: "the duty cycle and all of the zones are not always
+// visible on the web graph" / "sometimes the legends are there and the plot
+// for it is gone too"): history.csv widened from one representative zone's
+// actual/duty to every zone's, fixing the actual root cause -- those traces
+// used to exist ONLY client-side (firingZoneSeries/firingDutySeries below),
+// so they were gone on reload/late-open. Columns are now
+// elapsed_s,desired_c,z0_actual_c,z0_duty,z0_guard,z1_actual_c,... one
+// z<N>_actual_c,z<N>_duty,z<N>_guard triple per zone (dashboard_http.c's
+// history_csv_get_handler(), HISTORY_ZONE_COUNT zones). `target` is kept as
+// the row's name for desired_c, same reasoning as before: it's the elapsed
+// half of the single "planned" line, not a second series.
+var HISTORY_ZONE_COUNT = 3; // must match firmware's MAX31856_CHANNEL_COUNT (profile_executor.h)
 function parseHistoryCsv(text) {
   var lines = text.split('\n').filter(function (l) { return l.trim().length > 0; });
   var rows = [];
+  var minFields = 2 + HISTORY_ZONE_COUNT * 3;
   for (var i = 1; i < lines.length; i++) { // skip header
     var f = lines[i].split(',');
-    if (f.length < 5) continue;
+    if (f.length < minFields) continue;
+    var zoneActual = [], zoneDuty = [], zoneGuard = [];
+    for (var zi = 0; zi < HISTORY_ZONE_COUNT; zi++) {
+      var base = 2 + zi * 3;
+      zoneActual.push(parseFloat(f[base]));
+      zoneDuty.push(parseFloat(f[base + 1]));
+      zoneGuard.push(parseInt(f[base + 2], 10));
+    }
     rows.push({
-      // f[2] is history.csv's desired_c column: the setpoint the executor
-      // actually commanded at that sample. Named `target` here because the
-      // chart no longer has a separate "desired" series -- it is the elapsed
-      // half of the single "planned" line. The CSV column keeps its name
-      // (dashboard_http.c) so the downloadable file stays compatible.
-      t: parseFloat(f[0]), actual: parseFloat(f[1]), target: parseFloat(f[2]),
-      duty: parseFloat(f[3]), guard: parseInt(f[4], 10),
+      t: parseFloat(f[0]), target: parseFloat(f[1]),
+      zoneActual: zoneActual, zoneDuty: zoneDuty, zoneGuard: zoneGuard,
     });
   }
   return rows;
@@ -2111,20 +2126,32 @@ function drawIdleDots(data) {
   });
 }
 
-// 2026-09-01 follow-up (owner, tested live against a running three-zone
-// firing): history.csv only ever carries ONE representative zone's
-// actual/target and ONE whole-kiln-aggregate duty column (verified against
-// dashboard_http.c's history_csv_get_handler() and profile_executor.h's own
-// "scoped to a single representative zone" doc comment -- this is a data
-// limitation, not a drawing bug). The representative zone (zoneMaskLowestBit
-// of the CURRENT run's zone_mask, the exact same rule the firmware itself
-// uses for that ring buffer) keeps drawing from `rows` -- the one series
-// that survives a page reload, since it lives in the device's own ring
-// buffer, not this tab. Every OTHER active zone is drawn from
-// firingZoneSeries, the client-collected accumulator built the same way
-// autotuneZoneSeries already is for the autotune view (see
-// sampleFiringZoneTemps's own header comment for the full reasoning and the
-// memory/cap arithmetic, shared with that mechanism).
+// 2026-09-01 (owner: "the duty cycle and all of the zones are not always
+// visible on the web graph" -- reproduced live against a running three-zone
+// firing; also "sometimes the legends are there and the plot for it is gone
+// too, sometimes the legends are not there"). Two separate bugs, fixed
+// together:
+//
+//  1. history.csv used to carry ONE representative zone's actual/target and
+//     ONE whole-kiln-aggregate duty column (profile_executor.h's old
+//     "scoped to a single representative zone" limitation) -- every OTHER
+//     zone's trace, and per-zone duty, existed ONLY client-side
+//     (firingZoneSeries/firingDutySeries below), so a page (re)loaded
+//     mid-firing had nothing for them: "not always visible" was a data
+//     problem, not a drawing one. Fixed at the source: the firmware ring
+//     buffer now records every zone (see profile_executor.h's doc comment
+//     on profile_history_entry_t), so `rows` below carries every zone's
+//     trace and duty for the WHOLE run, survives reload, and
+//     firingZoneSeries/firingDutySeries become a pure freshness top-up --
+//     the few seconds between history.csv's 15s poll and "now" -- rather
+//     than the only copy of the data.
+//  2. drawZoneLine used to push a legend entry whenever `pts.length > 0`,
+//     which is true even when every point in `pts` is NaN (a zone whose
+//     entire visible window had no valid reading) -- a legend row with
+//     nothing drawn under it, exactly the "legends are there and the plot
+//     ... is gone" report. Fixed by gating the legend push on at least one
+//     DRAWABLE (non-NaN) point, the same test the draw loop itself uses to
+//     decide whether it ever calls moveTo/lineTo.
 function drawHistoryChart(rows) {
   // 2026-08-21: #historyEmpty (the "No history yet" <p>) was removed from the
   // markup above along with the History heading/intro paragraph -- this used
@@ -2177,19 +2204,21 @@ function drawHistoryChart(rows) {
   var tempVals = [];
   var actualVals = []; // genuine sensor readings only -- see freezing-clamp comment below
   rows.forEach(function (r) {
-    if (!isNaN(r.actual)) { tempVals.push(r.actual); actualVals.push(r.actual); }
+    for (var zi = 0; zi < HISTORY_ZONE_COUNT; zi++) {
+      if (!isNaN(r.zoneActual[zi])) { tempVals.push(r.zoneActual[zi]); actualVals.push(r.zoneActual[zi]); }
+    }
     if (!isNaN(r.target)) tempVals.push(r.target);
   });
   planPts.forEach(function (p) { tempVals.push(p.c); });
-  var partialZoneSeries = false;
+  // 2026-09-01: firingZoneSeries is now only a top-up for the gap since the
+  // last history.csv poll (every zone's full-run trace comes from `rows`
+  // itself, see drawHistoryChart's own doc comment) -- there is no longer a
+  // "this page was reloaded mid-run and lost the other zones' history"
+  // case to flag (opts.partialZoneSeries used to exist for exactly that;
+  // removed along with the note it drove, since it would now be false
+  // information every time it fired).
   Object.keys(firingZoneSeries).forEach(function (zi) {
-    var arr = firingZoneSeries[zi];
-    arr.forEach(function (p) { tempVals.push(p.c); actualVals.push(p.c); });
-    // Same reload-mid-run honesty as the autotune view -- a collected
-    // series starting well after tMin means this page was (re)loaded after
-    // the firing was already underway; see renderChartMeta's own doc
-    // comment on opts.partialZoneSeries.
-    if (arr.length && arr[0].t > tMin + CLIENT_ZONE_SAMPLE_MIN_INTERVAL_S * 2) partialZoneSeries = true;
+    firingZoneSeries[zi].forEach(function (p) { tempVals.push(p.c); actualVals.push(p.c); });
   });
   var tMinV = tempVals.length ? Math.min.apply(null, tempVals) : 0;
   var tMaxV = tempVals.length ? Math.max.apply(null, tempVals) : 1;
@@ -2214,41 +2243,30 @@ function drawHistoryChart(rows) {
   ctx.fillText('1.0', cssW - padR + 4, padT + 8);
   ctx.fillText('0.0', cssW - padR + 4, padT + plotH);
 
-  // Per-zone duty (2026-09-01 follow-up): prefer the representative zone's
-  // OWN commanded duty (firingDutySeries, client-collected from
-  // /api/profile_exec's per-zone duty) over the old whole-kiln aggregate
-  // history.csv 'duty' column -- see firingDutySeries's own doc comment for
-  // why per-zone was chosen over drawing all three zones' duty (clutter)
-  // and over the old aggregate (a whole-kiln number next to one zone's
-  // temperature line was arguably the more confusing pairing). Falls back
-  // to the recorded aggregate whenever firingDutySeries is empty -- older
-  // firmware that predates per-zone duty in /api/profile_exec, or the
-  // handful of seconds right after a run starts / a page reload before the
-  // first client sample lands -- so the chart is never left with NO duty
-  // line at all just because the preferred source hasn't produced a point
-  // yet. Continuous (not the autotune chart's stepped rendering): PID/
-  // BANGBANG duty output is genuinely continuous, unlike autotune's
-  // deliberately-held step-test duty.
-  var dutyLabel = 'duty (whole-kiln aggregate, recorded)';
-  if (firingDutySeries.length) {
-    dutyLabel = (repZone >= 0 ? zoneName(repZone) : 'zone') + ' duty';
-    ctx.beginPath();
-    var dStarted = false;
-    firingDutySeries.forEach(function (p) {
-      var px = x(p.t), py = yDuty(p.duty);
-      if (!dStarted) { ctx.moveTo(px, py); dStarted = true; } else { ctx.lineTo(px, py); }
-    });
-    ctx.strokeStyle = SERIES_COLORS.duty; ctx.lineWidth = 1.5; ctx.stroke();
-  } else {
-    ctx.beginPath();
-    var aStarted = false;
-    rows.forEach(function (r) {
-      if (isNaN(r.duty)) { aStarted = false; return; }
-      var px = x(r.t), py = yDuty(r.duty);
-      if (!aStarted) { ctx.moveTo(px, py); aStarted = true; } else { ctx.lineTo(px, py); }
-    });
-    ctx.strokeStyle = SERIES_COLORS.duty; ctx.lineWidth = 1.5; ctx.stroke();
-  }
+  // Per-zone duty (2026-09-01 follow-up): the representative zone's OWN
+  // commanded duty, now recorded firmware-side for the whole run
+  // (r.zoneDuty[repZone], history.csv) so this survives reload same as the
+  // temperature traces below -- topped up with firingDutySeries (client-
+  // collected from /api/profile_exec) for the handful of seconds between
+  // history.csv's 15s poll and now. One zone's duty, not all three: still a
+  // deliberate clutter call (see firingDutySeries's own doc comment) -- three
+  // temperature lines already sit close together, three more duty lines
+  // would be noise, not signal. Continuous (not the autotune chart's stepped
+  // rendering): PID/BANGBANG duty output is genuinely continuous, unlike
+  // autotune's deliberately-held step-test duty.
+  var dutyZone = repZone >= 0 ? repZone : 0;
+  var dutyLabel = (repZone >= 0 ? zoneName(repZone) : 'zone') + ' duty';
+  var dutyPts = rows.map(function (r) { return { t: r.t, duty: r.zoneDuty[dutyZone] }; });
+  var lastDutyT = dutyPts.length ? dutyPts[dutyPts.length - 1].t : -Infinity;
+  firingDutySeries.forEach(function (p) { if (p.t > lastDutyT) dutyPts.push({ t: p.t, duty: p.duty }); });
+  ctx.beginPath();
+  var dStarted = false;
+  dutyPts.forEach(function (p) {
+    if (isNaN(p.duty)) { dStarted = false; return; }
+    var px = x(p.t), py = yDuty(p.duty);
+    if (!dStarted) { ctx.moveTo(px, py); dStarted = true; } else { ctx.lineTo(px, py); }
+  });
+  ctx.strokeStyle = SERIES_COLORS.duty; ctx.lineWidth = 1.5; ctx.stroke();
 
   // Per-zone temperature traces (2026-09-01 follow-up). Thinner than the
   // non-zone series (1.3 vs 1.5) DELIBERATELY: tonight's real run has all
@@ -2259,8 +2277,11 @@ function drawHistoryChart(rows) {
   // dots/autotune chart use) plus a slightly thinner stroke keeps close
   // lines readable as separate lines instead of merging visually.
   var zoneItems = [];
+  // Bug 2 above: a legend row only belongs here if the line actually drew
+  // something -- `pts.length > 0` is not that test, since every point can
+  // still be NaN (checked via `.some`, not just presence of the array).
   function drawZoneLine(zi, pts, label) {
-    if (!pts.length) return;
+    if (!pts.some(function (p) { return !isNaN(p.c); })) return;
     ctx.beginPath();
     var started = false;
     pts.forEach(function (p) {
@@ -2271,21 +2292,28 @@ function drawHistoryChart(rows) {
     ctx.strokeStyle = chColor(zi); ctx.lineWidth = 1.3; ctx.stroke();
     zoneItems.push({ color: chColor(zi), label: label });
   }
-  if (repZone >= 0) {
-    drawZoneLine(repZone, rows.map(function (r) { return { t: r.t, c: r.actual }; }),
-      zoneName(repZone) + ' (recorded, survives reload)');
+  // history.csv now carries every zone for the whole run -- draw each zone
+  // the CURRENT run actually has in its zone_mask straight from `rows`,
+  // topped up with firingZoneSeries' more recent client-collected points
+  // (the gap between history.csv's 15s poll and now) rather than relying on
+  // firingZoneSeries as the only source for every non-representative zone.
+  if (lastExecStatus) {
+    var mask = lastExecStatus.zone_mask;
+    for (var hzi = 0; hzi < HISTORY_ZONE_COUNT; hzi++) {
+      if (!(mask & (1 << hzi))) continue; // not part of this run
+      var zpts = rows.map(function (r) { return { t: r.t, c: r.zoneActual[hzi] }; });
+      var lastZoneT = zpts.length ? zpts[zpts.length - 1].t : -Infinity;
+      (firingZoneSeries[hzi] || []).forEach(function (p) { if (p.t > lastZoneT) zpts.push(p); });
+      var label = zoneName(hzi) + (hzi === repZone ? ' (recorded, survives reload)' : '');
+      drawZoneLine(hzi, zpts, label);
+    }
   } else {
-    // No exec status yet to say which zone is representative (a fetch
+    // No exec status yet to say which zones are in this run (a fetch
     // failure raced this draw) -- still show SOMETHING rather than a blank
     // chart, generically labelled since the real zone identity is unknown
     // this tick.
-    drawZoneLine(0, rows.map(function (r) { return { t: r.t, c: r.actual }; }), 'actual');
+    drawZoneLine(0, rows.map(function (r) { return { t: r.t, c: r.zoneActual[0] }; }), 'actual');
   }
-  Object.keys(firingZoneSeries).forEach(function (ziStr) {
-    var zi = Number(ziStr);
-    var inMask = lastExecStatus && (lastExecStatus.zone_mask & (1 << zi));
-    drawZoneLine(zi, firingZoneSeries[zi], zoneName(zi) + (inMask ? ' (live)' : ' (live, not in this run)'));
-  });
 
   // The single target series ("planned"), drawn last so it sits on top of
   // the solid duty/zone lines it may cross:
@@ -2334,21 +2362,29 @@ function drawHistoryChart(rows) {
     ctx.restore();
   }
 
+  // A guard trip on ANY zone marks the timeline -- guard is now per-zone
+  // (r.zoneGuard[]), not one whole-kiln value, since a per-zone guard trip
+  // (guards 1/2/4/7, profile_executor.h) drops only that zone while the run
+  // continues for the rest.
+  function rowHasGuardTrip(r) { return r.zoneGuard.some(function (gv) { return gv && gv !== 0; }); }
   rows.forEach(function (r) {
-    if (r.guard && r.guard !== 0) {
+    if (rowHasGuardTrip(r)) {
       var px = x(r.t);
       ctx.strokeStyle = SERIES_COLORS.guard; ctx.lineWidth = 1;
       ctx.beginPath(); ctx.moveTo(px, padT); ctx.lineTo(px, padT + plotH); ctx.stroke();
     }
   });
 
-  var guardShown = rows.some(function (r) { return r.guard && r.guard !== 0; });
+  var guardShown = rows.some(rowHasGuardTrip);
   drawChartAxis(g, x, yTemp, tMin, tMax);
   if (belowFreezing) drawFreezingRef(g, yTemp, tMinV, tMaxV);
 
   renderChartMeta('running', {
     tMin: tMin, actualMaxT: actualMaxT, zoneItems: zoneItems, dutyLabel: dutyLabel,
-    partialZoneSeries: partialZoneSeries,
+    // No opts.partialZoneSeries here (2026-09-01): every zone's full-run
+    // trace now comes from `rows` itself, so there is no "lost on reload"
+    // case left to flag for the firing chart -- see the doc comment where
+    // firingZoneSeries is built.
     totalPlannedS: (activePlan && activePlan.total_planned_s !== undefined) ? activePlan.total_planned_s : null,
     planShown: planShown, guardShown: guardShown,
     freezingShown: belowFreezing, faultColor: g.fault,
@@ -2481,26 +2517,16 @@ function sampleAutotuneZoneTemps(data) {
 // ---------------------------------------------------------------------------
 // 2026-09-01 follow-up (owner, tested live against a running three-zone
 // firing, profile 7): "i am still only seeing one zone on the web graph".
-// The earlier multi-zone pass above only ever fed drawAutotuneChart() --
-// the FIRING chart (drawHistoryChart(), pollHistory()) was untouched and
-// still reads /api/history.csv, whose columns are exactly
-// elapsed_s,actual_c,desired_c,duty,guard -- ONE aggregate actual and ONE
-// aggregate duty for the whole kiln (dashboard_http.c's
-// history_csv_get_handler(), confirmed by reading it: profile_executor.c's
-// history ring is explicitly "scoped to a single representative zone", see
-// profile_executor.h's own comment on HISTORY_SAMPLE_PERIOD_S). There is no
-// per-zone column to plot three lines from -- this is a DATA problem, not a
-// drawing one, so the same client-side accumulation mechanism built for the
-// autotune view is generalised here rather than patched around: the
-// representative zone (lowest-indexed bit set in zone_mask, matching
-// profile_executor.h's own convention exactly, so this can never disagree
-// with what the firmware itself considers "the" zone history.csv already
-// tracks) keeps using history.csv's recorded 'actual' column -- it is the
-// one series that SURVIVES a page reload, since profile_executor.c's ring
-// buffer lives on the device, not in this tab. Every OTHER active zone gets
-// a client-collected trace here, exactly like autotuneZoneSeries, so this
-// data problem gets the same fix in both places instead of two different
-// half-solutions.
+// This originally got the client-side-accumulation treatment described
+// below -- history.csv only had one representative zone's actual and one
+// whole-kiln-aggregate duty, so every other zone's trace lived only in this
+// tab. That was later fixed at the SOURCE instead (see drawHistoryChart's
+// own 2026-09-01 doc comment): the firmware ring buffer now records every
+// zone, so history.csv itself carries the full-run trace for every zone in
+// the mask and survives a reload. firingZoneSeries/firingDutySeries below
+// are kept, but now only as a freshness top-up for the gap between
+// history.csv's 15s poll and "now" (drawHistoryChart merges them in),
+// rather than the only copy of a non-representative zone's data.
 function isFiringActive(state) {
   return state === 'running' || state === 'paused';
 }
@@ -2515,30 +2541,25 @@ function zoneMaskLowestBit(mask) {
   return -1;
 }
 
-// Client-collected traces for every zone EXCEPT the representative one
-// (history.csv's 'actual' column already covers that one, and survives
-// reload -- duplicating it here at a different cadence would just be two
-// competing lines for the same zone, the same reasoning
-// sampleAutotuneZoneTemps skips the tested zone for). Keyed by channel
-// index, same shape and same CLIENT_ZONE_SAMPLE_MIN_INTERVAL_S/
-// CLIENT_SERIES_MAX_POINTS bounds as autotuneZoneSeries -- see that
-// constant's own doc comment for the memory-cost arithmetic, which applies
-// identically here.
+// Client-collected TOP-UP traces (2026-09-01: history.csv now records every
+// zone for the whole run, see drawHistoryChart's own doc comment -- this is
+// no longer the only source for a non-representative zone, just the bridge
+// between history.csv's 15s poll and now). Keyed by channel index, same
+// shape and same CLIENT_ZONE_SAMPLE_MIN_INTERVAL_S/CLIENT_SERIES_MAX_POINTS
+// bounds as autotuneZoneSeries -- see that constant's own doc comment for
+// the memory-cost arithmetic, which applies identically here.
 var firingZoneSeries = {};
-// Per-zone duty for the representative zone ONLY, not all three --
+// Per-zone duty TOP-UP for the representative zone ONLY, not all three --
 // /api/profile_exec exposes per-zone duty (profile_exec_zone_status_t::
-// duty) and it was tried against all-active-zones-plotted, but with three
+// duty) and drawing all three zones' duty was tried, but with three
 // temperature lines already sitting close together (a few degrees apart,
 // per the owner's own numbers) three more duty lines was real clutter, not
-// signal, on one canvas. The representative zone's own duty was chosen
-// over the OLD single-kiln-aggregate history.csv 'duty' column (which this
-// replaces) because it is at least coherently "this one zone's actual
-// temperature AND this one zone's commanded duty", the same pairing the
-// autotune chart already draws -- a whole-kiln aggregate duty next to one
-// zone's temperature was arguably more confusing than clarifying. If a
-// future request wants all three zones' duty, the natural extension is a
-// per-zone toggle in the legend rather than always drawing three more
-// lines by default.
+// signal, on one canvas. The representative zone's own duty is drawn from
+// history.csv for the whole run (drawHistoryChart), topped up here with the
+// gap since the last poll -- see that same reasoning for why one zone's
+// duty, not all three. If a future request wants all three zones' duty, the
+// natural extension is a per-zone toggle in the legend rather than always
+// drawing three more lines by default.
 var firingDutySeries = [];
 // Which zone_mask the two arrays above were collected for -- a changed
 // mask (a different run, even one that happens to start immediately after

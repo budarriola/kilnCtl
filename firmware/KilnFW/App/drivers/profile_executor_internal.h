@@ -98,13 +98,29 @@ extern const char *PE_TAG;
 #define PID_FUNCTIONAL_RANGE_C 25.0f
 
 /* ---- packed history storage (see profile_executor.h's note on
- * profile_history_entry_t) ---------------------------------------------- */
+ * profile_history_entry_t) ----------------------------------------------
+ *
+ * 2026-09-01 multi-zone history fix: desired_dc stays a single shared field
+ * (target_c is one ramp across every zone in a run, TODO.md 6A.5) but
+ * actual/duty/guard each widen to one slot per zone. Per-slot size:
+ *   2 (elapsed_periods) + 2 (desired_dc) + 2*3 (actual_dc) + 1*3 (duty_pct)
+ *   + 1*3 (guard) = 16 bytes at MAX31856_CHANNEL_COUNT==3, vs. 8 before --
+ * NOT a naive 3x (24 bytes) because elapsed/desired are shared, not repeated
+ * per zone. At HISTORY_MAX_SAMPLES==2880 that's 46080 bytes (45KB), which
+ * would have been a real problem sitting in .bss next to a board that has
+ * been found running with single-digit KB of internal DRAM free (see
+ * s_exec_state_t.history's own comment below) -- so this buffer is now
+ * heap_caps_malloc'd from PSRAM instead of declared inline, which nets the
+ * board a WIN on internal DRAM (the old 23KB inline array is gone from
+ * .bss) even though this struct itself grew. */
+#define HISTORY_ZONE_COUNT MAX31856_CHANNEL_COUNT
+
 typedef struct {
     uint16_t elapsed_periods;
-    int16_t  actual_dc;   /* deci-degC */
-    int16_t  desired_dc;  /* deci-degC */
-    uint8_t  duty_pct;
-    uint8_t  guard;
+    int16_t  desired_dc;                     /* deci-degC; shared setpoint across zones */
+    int16_t  actual_dc[HISTORY_ZONE_COUNT];   /* deci-degC per zone */
+    uint8_t  duty_pct[HISTORY_ZONE_COUNT];    /* per zone */
+    uint8_t  guard[HISTORY_ZONE_COUNT];       /* per zone thermal_guard_trip_t */
 } history_slot_t;
 
 #define HISTORY_TEMP_INVALID INT16_MIN
@@ -457,14 +473,30 @@ typedef struct {
     uint8_t  warm_start_replayed_segments[PROFILE_MAX_SEGMENTS];
     uint8_t  warm_start_replayed_count;
 
-    /* History ring buffer (TODO.md section 0 / 6A.9) -- single
-     * representative zone, see profile_executor.h's doc comment. */
-    history_slot_t history[HISTORY_MAX_SAMPLES];
+    /* History ring buffer (TODO.md section 0 / 6A.9), now multi-zone -- see
+     * profile_executor.h's doc comment on profile_history_entry_t and
+     * history_slot_t's own comment just above for the sizing/PSRAM
+     * reasoning.
+     *
+     * Heap-allocated from PSRAM (MALLOC_CAP_SPIRAM), NOT an inline array:
+     * this board has been found running with single-digit-KB internal DRAM
+     * free (project_esp_internal_dram_exhaustion.md) and PSRAM sits mostly
+     * idle (8MB, ~8MB free in a typical GET /api/status snapshot), so this
+     * is exactly the "place the buffer in PSRAM" case. Allocated lazily on
+     * the first profile_executor_run() (history_buf_ensure_alloc(), profile_
+     * executor_run.c) rather than at profile_executor_start() -- a board
+     * that never fires a profile never needs the allocation at all. NULL
+     * until that first allocation, and if heap_caps_malloc() ever fails
+     * (logged at ERROR, once) -- every reader/writer must check before
+     * touching it; a run still proceeds without history rather than fault,
+     * since losing the graph is not a safety issue. Never freed: history
+     * needs to survive from one run to the next (IDLE/DONE/FAULTED states
+     * still serve the last run's buffer) for the life of the board. */
+    history_slot_t *history;
     uint16_t history_count;
     uint16_t history_head;
     TickType_t history_run_start_tick;
     TickType_t history_last_sample_tick;
-    uint8_t history_zone; /* lowest-indexed active zone this run */
 } s_exec_state_t;
 
 extern s_exec_state_t s_exec;

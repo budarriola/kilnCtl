@@ -50,10 +50,9 @@ const char *PE_TAG = "profile_executor";
 #define WATCHDOG_TICK_DEAD_MS 10000u
 
 /* Packed history storage (see profile_executor.h's note on
- * profile_history_entry_t). 8 bytes instead of 20, which took this buffer
- * from 57.6 KB of .bss to 23 KB -- the difference between a board that can
- * start its tasks and serve HTTP and the one found on 2026-08-12 booting
- * with 7 KB of free heap.
+ * profile_history_entry_t and history_slot_t's own doc comment in profile_
+ * executor_internal.h for the current per-slot byte count and the 2026-09-01
+ * move to PSRAM).
  *
  * Resolution, and why each is enough for a *trend line over a firing*:
  *   elapsed  units of HISTORY_SAMPLE_PERIOD_S (30 s), u16 -> 22 days
@@ -79,31 +78,52 @@ static float history_unpack_temp(int16_t dc)
     return (dc == HISTORY_TEMP_INVALID) ? NAN : (float)dc / 10.0f;
 }
 
-static void history_pack(history_slot_t *slot, uint32_t elapsed_s, float actual_c, float desired_c, float duty,
-                         uint8_t guard)
+static uint8_t history_pack_duty(float duty)
+{
+    if (isnan(duty)) {
+        return HISTORY_DUTY_INVALID;
+    }
+    float pct = duty * 100.0f;
+    if (pct < 0.0f) pct = 0.0f;
+    if (pct > 100.0f) pct = 100.0f;
+    return (uint8_t)(pct + 0.5f);
+}
+
+/* elapsed/desired are shared across every zone in the run (one ramp,
+ * TODO.md 6A.5); actual/duty/guard are per zone -- inactive_mask marks which
+ * indices of the fixed-size per-zone arrays below have nothing this run
+ * (bit set = zone not in play), so they pack as HISTORY_TEMP_INVALID/
+ * HISTORY_DUTY_INVALID/0 rather than stale data from a previous run's
+ * zone_mask. */
+static void history_pack(history_slot_t *slot, uint32_t elapsed_s, float desired_c,
+                         const float *actual_c, const float *duty, const uint8_t *guard,
+                         uint8_t inactive_mask)
 {
     uint32_t periods = elapsed_s / HISTORY_SAMPLE_PERIOD_S;
     slot->elapsed_periods = (periods > UINT16_MAX) ? UINT16_MAX : (uint16_t)periods;
-    slot->actual_dc = history_pack_temp(actual_c);
     slot->desired_dc = history_pack_temp(desired_c);
-    if (isnan(duty)) {
-        slot->duty_pct = HISTORY_DUTY_INVALID;
-    } else {
-        float pct = duty * 100.0f;
-        if (pct < 0.0f) pct = 0.0f;
-        if (pct > 100.0f) pct = 100.0f;
-        slot->duty_pct = (uint8_t)(pct + 0.5f);
+    for (uint8_t zi = 0; zi < HISTORY_ZONE_COUNT; zi++) {
+        if (inactive_mask & (1u << zi)) {
+            slot->actual_dc[zi] = HISTORY_TEMP_INVALID;
+            slot->duty_pct[zi] = HISTORY_DUTY_INVALID;
+            slot->guard[zi] = 0;
+        } else {
+            slot->actual_dc[zi] = history_pack_temp(actual_c[zi]);
+            slot->duty_pct[zi] = history_pack_duty(duty[zi]);
+            slot->guard[zi] = guard[zi];
+        }
     }
-    slot->guard = guard;
 }
 
 void history_unpack(const history_slot_t *slot, profile_history_entry_t *out)
 {
     out->elapsed_s = (uint32_t)slot->elapsed_periods * HISTORY_SAMPLE_PERIOD_S;
-    out->actual_c = history_unpack_temp(slot->actual_dc);
     out->desired_c = history_unpack_temp(slot->desired_dc);
-    out->duty = (slot->duty_pct == HISTORY_DUTY_INVALID) ? NAN : (float)slot->duty_pct / 100.0f;
-    out->guard = slot->guard;
+    for (uint8_t zi = 0; zi < HISTORY_ZONE_COUNT; zi++) {
+        out->actual_c[zi] = history_unpack_temp(slot->actual_dc[zi]);
+        out->duty[zi] = (slot->duty_pct[zi] == HISTORY_DUTY_INVALID) ? NAN : (float)slot->duty_pct[zi] / 100.0f;
+        out->guard[zi] = slot->guard[zi];
+    }
 }
 
 /* ---- small helpers -------------------------------------------------------- */
@@ -780,16 +800,41 @@ void executor_task_entry(void *arg)
          * if something changed) -- see relay_cycles.h's flash-wear note. */
         relay_cycles_maybe_persist();
 
-        /* --- History sample (TODO.md section 0 / 6A.9), single
-         * representative zone, one per 30s ---------------------------------- */
-        if (!run_faulted_this_tick && s_exec.zones[s_exec.history_zone].active &&
+        /* --- History sample (TODO.md section 0 / 6A.9), ALL active zones,
+         * one per 30s (2026-09-01: was a single representative zone -- see
+         * profile_executor.h's doc comment on profile_history_entry_t for
+         * why, and why every zone here now, not just the run's lowest-
+         * indexed one. That old gate on "is the ONE representative zone
+         * still active" also silently stopped sampling every OTHER zone the
+         * moment that one zone alone dropped to a per-zone fault, even while
+         * the rest of the run kept going -- gating on "is any zone active"
+         * instead fixes that too. s_exec.history is NULL if the PSRAM
+         * allocation in profile_executor_run() failed; skip rather than
+         * fault the run over losing the graph. ---------------------------- */
+        bool any_zone_active_for_history = false;
+        for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+            if (s_exec.zones[zi].active) { any_zone_active_for_history = true; break; }
+        }
+        if (s_exec.history != NULL && !run_faulted_this_tick && any_zone_active_for_history &&
             ticks_to_s(now - s_exec.history_last_sample_tick) >= HISTORY_SAMPLE_PERIOD_S) {
             s_exec.history_last_sample_tick = now;
-            zone_runtime_t *hz = &s_exec.zones[s_exec.history_zone];
+            float actual_c[MAX31856_CHANNEL_COUNT];
+            float duty[MAX31856_CHANNEL_COUNT];
+            uint8_t guard[MAX31856_CHANNEL_COUNT];
+            uint8_t inactive_mask = 0;
+            for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+                zone_runtime_t *hz = &s_exec.zones[zi];
+                if (!hz->active) {
+                    inactive_mask |= (uint8_t)(1u << zi);
+                    continue;
+                }
+                actual_c[zi] = hz->actual_valid ? hz->actual_c : NAN;
+                duty[zi] = hz->duty;
+                guard[zi] = (uint8_t)hz->guard_state.reason;
+            }
             history_slot_t *slot = &s_exec.history[s_exec.history_head];
-            history_pack(slot, ticks_to_s(now - s_exec.history_run_start_tick),
-                         hz->actual_valid ? hz->actual_c : NAN, s_exec.target_c, hz->duty,
-                         (uint8_t)hz->guard_state.reason);
+            history_pack(slot, ticks_to_s(now - s_exec.history_run_start_tick), s_exec.target_c,
+                        actual_c, duty, guard, inactive_mask);
             s_exec.history_head = (uint16_t)((s_exec.history_head + 1u) % HISTORY_MAX_SAMPLES);
             if (s_exec.history_count < HISTORY_MAX_SAMPLES) {
                 s_exec.history_count++;

@@ -595,31 +595,46 @@ typedef struct {
 /* History ring buffer (TODO.md section 0 / 6A.9): one sample per
  * HISTORY_SAMPLE_PERIOD_S while a profile is RUNNING, oldest overwritten
  * once full -- "this firing's trend," not indefinite history, matching
- * section 0's RAM-only settled design. Scoped to a single representative
- * zone (the lowest-indexed active zone in the run's zone_mask) even though
- * multi-zone concurrent execution now exists -- true per-zone history would
- * multiply this buffer's 23KB (was ~58KB before the 2026-08-12 packing --
- * see profile_history_entry_t) by up to MAX31856_CHANNEL_COUNT, and 6A.9
- * never actually asked for per-zone history, only for the buffer to gain a
- * duty field (done). Revisit if a real multi-zone firing shows the
- * single-series view isn't enough. Resets to empty at the start of every
+ * section 0's RAM-only settled design.
+ *
+ * 2026-09-01 (owner: "the duty cycle and all of the zones are not always
+ * visible on the web graph" / "sometimes the legends are there and the plot
+ * for it is gone too"): this WAS scoped to a single representative zone (the
+ * lowest-indexed active zone in the run's zone_mask) -- every other zone's
+ * trace, and ALL zones' duty, only ever existed client-side in the dashboard
+ * JS from the moment the page was opened, so a reload (or opening the page
+ * mid-firing) mid-run lost them. Root cause: the ring recorded one zone
+ * because a naive per-zone multiply of the packed 23KB buffer (up to
+ * MAX31856_CHANNEL_COUNT x) would have landed on top of this board's
+ * documented internal-DRAM exhaustion failure (project_esp_internal_dram_
+ * exhaustion.md -- ~11.9KB free resets HTTP sockets). Fixed by moving the
+ * buffer to PSRAM (8MB, effectively unused -- see s_exec.history's own doc
+ * comment in profile_executor_internal.h) instead of internal DRAM: sized
+ * per zone there, memory is no longer the constraint, and the move actually
+ * FREES the ~23KB this buffer used to hold in .bss. Every active zone's
+ * actual/duty is now recorded every sample; the shared setpoint (target_c is
+ * one ramp shared across a run's zones, TODO.md 6A.5) is recorded once, not
+ * duplicated per zone. Resets to empty at the start of every
  * profile_executor_run(). */
 #define HISTORY_SAMPLE_PERIOD_S 30u
 #define HISTORY_MAX_SAMPLES 2880u /* 24h at 30s/sample, per section 0's settled sizing */
 
 /* The shape callers see. Storage is NOT this struct -- see
- * profile_executor.c's packed history_slot_t, which holds the same sample in
- * 8 bytes instead of 20. That packing is not premature: at 2880 samples this
- * struct cost 57.6 KB of .bss, and on 2026-08-12 the board was found booting
- * with 7 KB of free heap, unable to start tasks or serve HTTP, precisely
- * because this buffer and the autotune trace had eaten the DRAM before Wi-Fi
- * came up. The accessors below unpack on read, so this API is unchanged. */
+ * profile_executor.c's packed history_slot_t, which holds the same sample
+ * far more densely (see that type's own doc comment in profile_executor_
+ * internal.h for the current per-slot byte count). The accessors below
+ * unpack on read, so this API shape is the only thing callers depend on. */
 typedef struct {
-    uint32_t elapsed_s;   /* since this run started */
-    float    actual_c;
-    float    desired_c;
-    float    duty;
-    uint8_t  guard;       /* thermal_guard_trip_t; 0 = THERMAL_GUARD_TRIP_NONE */
+    uint32_t elapsed_s;                          /* since this run started */
+    float    desired_c;                          /* the shared setpoint at this sample -- one ramp
+                                                    * across every zone in the run (TODO.md 6A.5) */
+    float    actual_c[MAX31856_CHANNEL_COUNT];    /* per zone; NAN = zone not active in this run, or
+                                                    * this sample's reading was invalid */
+    float    duty[MAX31856_CHANNEL_COUNT];        /* per zone; NAN = zone not active in this run */
+    uint8_t  guard[MAX31856_CHANNEL_COUNT];       /* per zone thermal_guard_trip_t; 0 =
+                                                    * THERMAL_GUARD_TRIP_NONE (also the value for an
+                                                    * inactive zone -- check actual_c for NAN to tell
+                                                    * "inactive" from "active, no trip") */
 } profile_history_entry_t;
 
 /* Total number of valid history samples right now (0..HISTORY_MAX_SAMPLES),

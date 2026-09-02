@@ -9,8 +9,10 @@
 #include "profile_executor_internal.h"
 
 #include <math.h>
+#include <string.h>
 #include <time.h>
 
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 
 #include "autotune_engine.h"
@@ -22,6 +24,33 @@
 #include "sim_backend.h"
 #include "thermo_combine.h"
 #include "zones_http.h"
+
+/* 2026-09-01 multi-zone history fix: s_exec.history is now heap-allocated
+ * from PSRAM instead of an inline .bss array (see its own doc comment in
+ * profile_executor_internal.h) -- lazily, here, on the first run() a board
+ * ever executes, rather than at profile_executor_start(), so a board that
+ * never fires a profile never pays for the allocation. Idempotent: a board
+ * that has already fired once this boot just reuses the same buffer (its
+ * contents get overwritten sample-by-sample as this run's own history_count/
+ * history_head reset to 0 below -- no need to clear it here). Leaves
+ * s_exec.history NULL on failure rather than aborting the run: every reader/
+ * writer already checks for NULL, and losing the graph is not a reason to
+ * refuse a firing. */
+static void history_buf_ensure_alloc(void)
+{
+    if (s_exec.history != NULL) {
+        return;
+    }
+    size_t bytes = (size_t)HISTORY_MAX_SAMPLES * sizeof(history_slot_t);
+    s_exec.history = heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM);
+    if (s_exec.history == NULL) {
+        ESP_LOGE(PE_TAG, "history buffer PSRAM allocation failed (%u bytes) -- this run's dashboard "
+                      "graph will have no recorded history; firing continues",
+                 (unsigned)bytes);
+    } else {
+        memset(s_exec.history, 0, bytes);
+    }
+}
 
 bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
 {
@@ -634,7 +663,6 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
     s_exec.target_c = baseline_target_c;
     s_exec.run_start_c = baseline_target_c;
     s_exec.total_elapsed_s = 0;
-    s_exec.history_zone = (first_active >= 0) ? (uint8_t)first_active : 0;
 
     /* One line per firing recording what feedforward will run on, because it
      * is the difference between two firings of the same profile behaving
@@ -694,6 +722,7 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
     s_exec.prev_control_tick = now;
     s_exec.history_run_start_tick = now;
     s_exec.history_last_sample_tick = now;
+    history_buf_ensure_alloc();
     s_exec.history_count = 0;
     s_exec.history_head = 0;
 
