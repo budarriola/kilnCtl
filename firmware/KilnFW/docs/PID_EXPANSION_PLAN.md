@@ -201,14 +201,35 @@ The lesson worth keeping: every sim verdict in this chain was quoted with
 confidence while resting on an unvalidated driving condition. A simulator is not
 evidence until it reproduces a measurement someone actually took.
 
-### 3.5 Documentation
+### 3.5 Documentation — CLOSED 2026-09-01 (`d382b06`)
 
-- [ ] `docs/PID_CONTROL.md`: a "Fuzzy adjustment" section matching the existing
-      "Feedforward" one — formula, when it is off, and bench measurements.
-- [ ] `docs/PID_CONTROL.md`: tuning-rule comparison table. Deliberately deferred
-      until bench data exists; do not write it from the literature alone.
+`PID_CONTROL.md` now carries the strength-scaling formula for the fuzzy layer,
+a terminal ease-off section with its measured before/after, and an honest
+"what is actually measured, versus what is not" table.
 
-### 3.6 Validation gap
+That table's finding is the useful part: **only SIMC has bench data.**
+Cohen-Coon, Ziegler-Nichols and Tyreus-Luyben have never been run on this rig,
+and the last two cannot be until relay-feedback identification completes on
+hardware, which it never has. The calibrated simulator was deliberately NOT used
+to fill those cells — it simulates profile tracking under the coupled PID, not
+an autotune identification cycle, so any number it produced would be exactly the
+"plausible value nobody measured" the deferral existed to prevent.
+
+Also fixed: the file's top-of-file hardware-status banner still claimed no
+thermocouple daughterboard or relay expander had ever been attached, which the
+same document's own 2026-08-29/30 bench sections contradict.
+
+### 3.6 Untested control paths
+
+- [ ] **Relay-feedback identification has never completed on hardware.** It is
+      implemented, host-tested, and reachable, but no run has produced
+      `{Ku, Tu}` on this rig — so Ziegler-Nichols and Tyreus-Luyben, which
+      depend on it, are unvalidated end to end. A single successful relay run
+      would close all three at once.
+- [ ] **The fuzzy layer has never run above `strength_pct = 0`** on hardware.
+      Every measurement in §2 is with it effectively off.
+
+### 3.7 Validation gap
 
 Everything above is measured on a bench rig spanning 0–80 °C. Radiative transfer
 goes as `T⁴`, so the plant at kiln temperatures is not the plant identified here.
