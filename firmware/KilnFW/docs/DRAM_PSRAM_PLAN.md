@@ -532,9 +532,12 @@ this measurement was never exposed there, only over this UART path.
 | `screen_idle` | 3072 B | CLEAN — full task body only reads touch and flips in-RAM flags; does NOT touch calibration storage (this table's old "display-settings persistence" caution was stale) | yes | needs a real boot to read the number |
 
 **No task was relocated this pass — instrumentation only, as directed.** The
-next pass's first step is hardware access: boot the board, pull a full
-`get_stack_margin()` (now paginated, so the whole registry — not just the
-first ~10 entries — comes back), and record real HWM numbers for
+raised cap and paging fix are source/build changes only — **the board is
+still running the pre-raise (28-slot) image; nothing in this pass has been
+flashed.** The next pass's first step is hardware access: reflash with the
+cap raise, boot the board, pull a full `get_stack_margin()` (now paginated,
+so the whole registry — not just the first ~10 entries — comes back), and
+record real HWM numbers for
 `kiln_io_owner`, `thermo_owner`, `spi_owner`, `i2c_owner`, `screen_idle`
 next to `profile_executor`'s in section 3.1's table. Only then does moving
 any of them stop being "unverified relocation."
