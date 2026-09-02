@@ -543,6 +543,51 @@ same document's own 2026-08-29/30 bench sections contradict.
       profile-7 baseline with `fuzzy=0` on the current build is running
       concurrently to have a same-build comparison point.
 
+      **Simulated first, per owner decision (2026-09-02), before any
+      hardware run.** `plant_sim.py` gained a line-for-line Python mirror
+      of `pid_fuzzy.c`'s `pid_fuzzy_adjust()` (rule table, triangular
+      memberships, `MAX_NUDGE_FRACTION`, the `strength_pct==0` short-circuit
+      that must reproduce base gains bit-for-bit), plus `pid.c`'s
+      `pid_rescale_integral_for_new_ki()` bump-transfer, wired into `PID`
+      exactly where `profile_executor_pid_tick.c`'s
+      `pid_fuzzy_prepare_gains()` calls it (same one-tick lag on
+      `error_rate_c_per_s`, same "before this tick's own P/I/D" ordering).
+      The strength=0 invariant is pinned by
+      `tests/test_plant_sim.py::test_fuzzy_strength_zero_matches_base_gains_bit_for_bit`,
+      checked against an independent reference PID implementation that
+      never calls `pid_fuzzy_adjust` at all (comparing two
+      `fuzzy_strength_pct=0.0` calls to each other would be vacuous — both
+      take the identical code path). Mutation-proven: perturbing the
+      short-circuit by a factor of 1.0000001 produced 98.5% mismatched
+      samples; reverted.
+
+      Swept strength 0/25/50/75/100 over profile 7's real segment shape
+      (`final.jsonl`, current board gains kp=0.0318 ki=0.0001 kd=0.8401,
+      coupled ff, `ff_hold` floor), rested (24 C) and warm (34 C) starts,
+      scored with `pid_ab_compare`'s whole-run normalized-IAE metric via a
+      new sim-to-`PollRow` bridge:
+
+      | start | z | strength=0 | 25 | 50 | 75 | 100 |
+      |---|---|---|---|---|---|---|
+      | 24 C | z0 | 1.453 | 1.541 | 1.645 | 1.767 | 1.910 |
+      | 24 C | z1 | 1.282 | 1.345 | 1.420 | 1.510 | 1.617 |
+      | 24 C | z2 | 1.015 | 1.070 | 1.135 | 1.209 | 1.293 |
+      | 34 C | z0 | 0.923 | 0.948 | 0.974 | 1.004 | 1.035 |
+      | 34 C | z1 | 0.783 | 0.805 | 0.830 | 0.858 | 0.886 |
+      | 34 C | z2 | 0.669 | 0.679 | 0.692 | 0.707 | 0.725 |
+
+      Largest spread across all five strengths, either start: 0.457 C
+      (z0, rested). The sim's own held-out validation RMS is 3.51/3.15/
+      3.56 C (§3.4) — **the spread is under 15% of that**, so per the
+      honesty gate this sim cannot call a winner; every strength is
+      indistinguishable from strength=0 given what this model can actually
+      resolve. Worth recording anyway: the ranking is monotonic — every
+      zone, both starts, strength=0 scored best and every increase in
+      strength scored worse, no crossover. A monotonic-but-sub-noise-floor
+      trend is not evidence the fuzzy layer hurts; it is exactly the
+      "cannot call a winner" case the gate exists for, and does not by
+      itself justify a hardware confirmation run.
+
       **Comparison tooling built and proven 2026-09-02**, ahead of the
       `fuzzy=50` run it will score: `tools/PcTools/src/kilnctrl/
       http_capture_log.py` parses the `{"t","exec","status"}` HTTP-capture

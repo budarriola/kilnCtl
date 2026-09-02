@@ -107,6 +107,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import math
 from typing import Optional, Sequence
 
 import numpy as np
@@ -420,8 +421,283 @@ class PhysicalKilnPlant:
         return self.temp.copy()
 
 
+# ---------------------------------------------------------------------------
+# Bench-rig physical model (added 2026-09-02c). PhysicalKilnPlant above is
+# NOT a validation of anything -- its own docstring says so -- because it is
+# a deliberately DIFFERENT, larger object than the bench rig, parameterized
+# entirely by ASSUMED typical-kiln quantities. It has never been checked
+# against a single real measurement. This section anchors an energy-balance
+# model to the ACTUAL bench rig instead: same physical structure as
+# PhysicalKilnPlant (own-zone power in, conductive loss out, cross-zone
+# coupling as a fraction of the neighbor's own power), but every constant
+# below is either MEASURED (K_full/tau, same numbers used by FOPDTPlant) or
+# DERIVED from those measurements -- nothing here is a typical/looked-up
+# value. See ``bench_validation_report()`` and
+# ``firmware/KilnFW/docs/PID_EXPANSION_PLAN.md`` sec 3.4 for what this can
+# and cannot be read as proving.
+#
+# The one thing that CANNOT be derived from data in this repo: absolute
+# element wattage. Steady state gives one equation per zone (K_diag =
+# P_max/G_loss) and cooldown gives a second (tau = C_thermal/G_loss) -- two
+# equations, three unknowns (P_max, G_loss, C_thermal) per zone. A third,
+# independent real-units measurement (a wattmeter reading, element
+# resistance/supply voltage) does not exist anywhere in this repo's logs or
+# docs. Closing that gap needs exactly ONE assumption, made explicit here:
+# ---------------------------------------------------------------------------
+
+# RIG_P_MAX: per-zone element power, in an ARBITRARY normalized unit where
+# 1.0 == one zone's own full-duty element output. ASSUMED equal across all
+# three zones -- not an arbitrary convenience: the three zones share an
+# identical relay/heater circuit (`Relay1`..`Relay4` off Q1/Q2/Q3/Q5 in
+# firmware/KilnFW/docs/HARDWARE.md, the same schematic block repeated per
+# zone), and no per-zone wattage figure exists anywhere in this repo to
+# derive a non-uniform split from instead. Every RIG_* constant below is
+# expressed in this normalized unit rather than inventing a Watts number
+# nothing here supports; see ``bench_validation_report()``'s docstring for
+# which downstream comparisons this assumption actually touches (only
+# cross-zone coupling -- own-zone dynamics are provably independent of it).
+RIG_P_MAX = np.ones(3)
+
+# RIG_G_LOSS: per-zone loss conductance, DERIVED from MEASURED K_diag and
+# RIG_P_MAX above (steady state: P_max_i = G_loss_i * K_diag_i at duty=1,
+# so G_loss_i = P_max_i / K_diag_i). No assumption beyond RIG_P_MAX.
+RIG_G_LOSS = RIG_P_MAX / K_diag
+
+# RIG_C_THERMAL: per-zone thermal mass, DERIVED from MEASURED tau and
+# RIG_G_LOSS (tau_i = C_i / G_loss_i, so C_i = tau_i * G_loss_i). Provably
+# independent of the RIG_P_MAX split: expand BenchKilnPlant's own-zone
+# terms (coupling=0, single zone) and G_loss cancels --
+# dT/dt = (K_diag*duty - (T-Tamb)) / tau exactly, the same equation
+# FOPDTPlant already uses. So every OWN-ZONE prediction below (DC gain,
+# cooldown tau, single-zone hold duty) is unaffected by the RIG_P_MAX
+# assumption and reproduces the fitted K_diag/tau BY CONSTRUCTION -- it is
+# not independent evidence, see bench_validation_report()'s docstring.
+# Only the CROSS-ZONE coupling terms below actually exercise RIG_P_MAX.
+RIG_C_THERMAL = tau * RIG_G_LOSS
+
+# RIG_COUPLING_FRAC: cross-zone coupling as a fraction of the STEPPED
+# zone's own power, MEASURED directly from K_full (no damping applied,
+# unlike PHYS_COUPLING_FRAC above -- PHYS_COUPLING_SEPARATION_DAMPING
+# exists specifically because PhysicalKilnPlant models a LARGER kiln with
+# more physical separation between zones than this compact rig; testing
+# the rig against its own measurements uses the measured ratio undamped).
+_RIG_COUPLING_FRAC_RAW = K_full / K_diag.reshape(1, -1)
+np.fill_diagonal(_RIG_COUPLING_FRAC_RAW, 0.0)
+RIG_COUPLING_FRAC = _RIG_COUPLING_FRAC_RAW
+
+
+class BenchKilnPlant:
+    """Energy-balance reproduction of the ACTUAL bench rig (own-zone power
+    in, conductive loss out, cross-zone coupling as a fraction of the
+    neighbor's own power -- the same structural form as PhysicalKilnPlant),
+    parameterized ONLY by RIG_* constants above (measured K_full/tau, plus
+    the single RIG_P_MAX="equal per zone" assumption). No dead time, no
+    radiative-loss extension: both are irrelevant at the rig's own ~20-80 C
+    operating range (dead time is a few tens of seconds against
+    multi-hundred-second tau; loss_conductance_scale()'s own T_REF_C=55 C
+    anchor makes the radiative term negligible in exactly this range by
+    construction) and adding either would only reintroduce an ASSUMED
+    constant (RAD_LOSS_FRACTION_AT_REF) into what is supposed to be the
+    fully-measured half of this module.
+
+    This class exists to answer one question honestly:
+    ``firmware/KilnFW/docs/PID_EXPANSION_PLAN.md`` sec 3.4 previously
+    described the physical model as reducing "to measured bench behaviour
+    -- trivial and exact" below EXTRAPOLATION_BOUNDARY_C. That claim was
+    false: PhysicalKilnPlant is a DIFFERENT object (ASSUMED cone-10-kiln
+    constants) that is never even instantiated below the boundary --
+    ``run_profile``'s ``plant_regime='physical'`` path is only reachable
+    above it. This class is the first physical (as opposed to bench-rig
+    FOPDT-identified) model actually run against the rig's own
+    measurements. See ``bench_validation_report()`` for the result and
+    ``PID_EXPANSION_PLAN.md`` sec 3.4 for the plain verdict."""
+
+    def __init__(self, dt, ambient=20.0, start_temp=None):
+        self.dt = dt
+        self.ambient = ambient
+        self.n = 3
+        self.temp = np.full(self.n, ambient) if start_temp is None else np.array(start_temp, dtype=float)
+
+    def step(self, duty):
+        duty = np.clip(duty, 0.0, 1.0)
+        own_power = RIG_P_MAX * duty
+        coupling_power = (RIG_COUPLING_FRAC * own_power.reshape(1, -1)).sum(axis=1)
+        loss = RIG_G_LOSS * (self.temp - self.ambient)
+        net = own_power + coupling_power - loss
+        dTdt = net / RIG_C_THERMAL
+        self.temp = self.temp + dTdt * self.dt
+        return self.temp.copy()
+
+
+# Ground truth for bench_validation_report(): the three single-zone
+# excitation runs' own settle instants, read directly off
+# logs/coupling/cpl_z{0,1,2}_{mcp,thermo}.jsonl via
+# coupled_ident.single_zone_column_observations_from_pair() (reproduced
+# 2026-09-02, see that function's own settle-criterion gate). Column 0 is
+# each run's own excited-zone duty; RISE_MEASURED_C[i][j] is the rise (C
+# above THAT run's own recorded ambient) zone j showed while zone i alone
+# was excited -- RISE_MEASURED_C[i][i] is the excited zone's own settle,
+# RISE_MEASURED_C[i][j] (i != j) is the asymmetric peer rise this section
+# exists to check. These are the exact numbers K_full/K_diag above were
+# fitted from (via coupled_ident.py's matrix_from_single_zone_columns /
+# solve_coupled) -- NOT an independent dataset; see
+# bench_validation_report()'s docstring for what that does and does not
+# mean for the comparisons below.
+RIG_EXCITED_DUTY = np.array([0.64, 0.78, 0.79])
+RIG_RISE_MEASURED_C = np.array([
+    [24.40, 9.15, 5.33],
+    [21.31, 27.99, 9.69],
+    [17.16, 17.50, 27.90],
+])
+
+# Measured cooldown taus (PID_EXPANSION_PLAN.md sec 3.2, logs/coupling/
+# cooldown_*.jsonl) -- the same numbers RIG_C_THERMAL/tau above are built
+# from directly.
+RIG_TAU_MEASURED_S = tau.copy()
+
 DT = 1.0
 N_ZONES = 3
+
+
+def bench_plant_steady_state(duty, ambient=20.0, dt=DT, max_steps=200_000, tol=1e-9):
+    """Runs ``BenchKilnPlant`` forward from ``ambient`` at a fixed duty
+    vector until it stops moving (or ``max_steps`` is hit), returning the
+    settled rise (T - ambient) per zone. Deliberately uses the same
+    ``BenchKilnPlant.step`` code path a caller driving the model would
+    actually use, rather than solving the linear steady state
+    analytically, so what gets checked is the class's real behaviour."""
+    plant = BenchKilnPlant(dt, ambient=ambient)
+    duty = np.asarray(duty, dtype=float)
+    prev = plant.temp.copy()
+    for _ in range(max_steps):
+        plant.step(duty)
+        if np.max(np.abs(plant.temp - prev)) < tol:
+            break
+        prev = plant.temp.copy()
+    return plant.temp - ambient
+
+
+def bench_validation_report() -> dict:
+    """Runs BenchKilnPlant against every one of the four comparisons the
+    owner asked for, and is explicit about which are and are not
+    independent evidence.
+
+    DC gain, cooldown tau and each zone's OWN settle duty (the diagonal of
+    RIG_RISE_MEASURED_C) are reproduced EXACTLY (0.00 C / 0.00 s error) --
+    but that is BY CONSTRUCTION, not a finding: RIG_G_LOSS and
+    RIG_C_THERMAL above are algebraically solved from these exact numbers
+    (see their docstrings), and BenchKilnPlant's own-zone dynamics reduce
+    to FOPDTPlant's own equation once G_loss cancels out. Reporting them
+    is useful as a sanity check that the derivation was done correctly,
+    not as validation.
+
+    The one comparison that is NOT circular: the off-diagonal (cross-zone)
+    entries of RIG_RISE_MEASURED_C. Nothing in RIG_C_THERMAL/RIG_G_LOSS
+    forces the coupling-as-power-fraction mechanism (RIG_COUPLING_FRAC,
+    injected via BenchKilnPlant.step) to reproduce the measured asymmetric
+    peer rises (z1 exciting z0 by ~22 C, z0 exciting z1 by only ~9 C) --
+    that asymmetry could easily have come out wrong, or symmetric, or the
+    wrong sign, depending on how the model routes power between zones.
+    This is the genuine test; see the returned ``off_diag_errors_c`` /
+    ``off_diag_rms_c`` and PID_EXPANSION_PLAN.md sec 3.4 for the plain
+    verdict on the result.
+    """
+    predicted = np.zeros((3, 3))
+    for i in range(3):
+        duty = np.zeros(3)
+        duty[i] = RIG_EXCITED_DUTY[i]
+        predicted[i, :] = bench_plant_steady_state(duty)
+
+    errors = predicted - RIG_RISE_MEASURED_C
+    diag_mask = np.eye(3, dtype=bool)
+    off_diag_errors = errors[~diag_mask]
+
+    # DC gain check: BenchKilnPlant's own predicted diagonal rise, divided
+    # by the same excited duty, vs the measured K_diag it was derived from.
+    predicted_k_diag = np.diag(predicted) / RIG_EXCITED_DUTY
+    k_diag_errors = predicted_k_diag - K_diag
+
+    # Cooldown tau check: BenchKilnPlant's own decay from a hot start with
+    # zero duty, fit the same simple way coupled_ident.fit_cooldown_tau
+    # does (single-exponential least-squares against ln(T - T_inf)), vs
+    # RIG_TAU_MEASURED_S (which RIG_C_THERMAL was built from).
+    predicted_tau = np.zeros(3)
+    for i in range(3):
+        plant = BenchKilnPlant(DT, ambient=20.0, start_temp=[20.0, 20.0, 20.0])
+        plant.temp[i] = 20.0 + RIG_RISE_MEASURED_C[i, i]
+        temps = [plant.temp[i]]
+        for _ in range(int(5 * RIG_TAU_MEASURED_S[i])):
+            plant.step(np.zeros(3))
+            temps.append(plant.temp[i])
+        temps = np.array(temps)
+        t = np.arange(len(temps), dtype=float) * DT
+        y = temps - 20.0
+        y = np.clip(y, 1e-6, None)
+        # ln(y) = ln(y0) - t/tau -- linear least squares for 1/tau.
+        slope, _ = np.polyfit(t, np.log(y), 1)
+        predicted_tau[i] = -1.0 / slope
+
+    return dict(
+        predicted_rise_c=predicted,
+        measured_rise_c=RIG_RISE_MEASURED_C.copy(),
+        errors_c=errors,
+        off_diag_errors_c=off_diag_errors,
+        off_diag_rms_c=float(np.sqrt((off_diag_errors ** 2).mean())),
+        off_diag_max_abs_c=float(np.abs(off_diag_errors).max()),
+        diag_errors_c=np.diag(errors),
+        predicted_k_diag=predicted_k_diag,
+        measured_k_diag=K_diag.copy(),
+        k_diag_errors=k_diag_errors,
+        predicted_tau_s=predicted_tau,
+        measured_tau_s=RIG_TAU_MEASURED_S.copy(),
+        tau_errors_s=predicted_tau - RIG_TAU_MEASURED_S,
+        excited_duty=RIG_EXCITED_DUTY.copy(),
+    )
+
+
+def format_bench_validation_report_text(report: dict) -> str:
+    lines = ["=== Bench-rig physical model (BenchKilnPlant) vs measurement ==="]
+    lines.append("")
+    lines.append("1. DC gain (diagonal, BY CONSTRUCTION -- see docstring):")
+    for i in range(3):
+        lines.append(
+            f"   z{i}: predicted={report['predicted_k_diag'][i]:.3f} "
+            f"measured={report['measured_k_diag'][i]:.3f} "
+            f"err={report['k_diag_errors'][i]:+.4f} C/duty"
+        )
+    lines.append("")
+    lines.append("2. Cooldown tau (BY CONSTRUCTION -- see docstring):")
+    for i in range(3):
+        lines.append(
+            f"   z{i}: predicted={report['predicted_tau_s'][i]:.1f}s "
+            f"measured={report['measured_tau_s'][i]:.1f}s "
+            f"err={report['tau_errors_s'][i]:+.2f} s"
+        )
+    lines.append("")
+    lines.append("3. Own-zone settled hold rise at excited duty (BY CONSTRUCTION -- see docstring):")
+    for i in range(3):
+        lines.append(
+            f"   z{i}: duty={report['excited_duty'][i]:.2f} "
+            f"predicted={report['predicted_rise_c'][i, i]:.2f}C "
+            f"measured={report['measured_rise_c'][i, i]:.2f}C "
+            f"err={report['diag_errors_c'][i]:+.3f} C"
+        )
+    lines.append("")
+    lines.append("4. Cross-zone (asymmetric peer) rise -- the GENUINE, non-circular test:")
+    for i in range(3):
+        for j in range(3):
+            if i == j:
+                continue
+            lines.append(
+                f"   excite z{i} -> z{j}: predicted={report['predicted_rise_c'][i, j]:.2f}C "
+                f"measured={report['measured_rise_c'][i, j]:.2f}C "
+                f"err={report['errors_c'][i, j]:+.3f} C"
+            )
+    lines.append(
+        f"   off-diagonal RMS error = {report['off_diag_rms_c']:.3f} C, "
+        f"max|error| = {report['off_diag_max_abs_c']:.3f} C"
+    )
+    return "\n".join(lines)
 
 
 class FOPDTPlant:
@@ -461,19 +737,144 @@ class FOPDTPlant:
         return self.temp.copy()
 
 
+# ---------------------------------------------------------------------------
+# Fuzzy-PID layer -- FAITHFUL mirror of firmware/KilnFW/App/drivers/
+# pid_fuzzy.c's pid_fuzzy_adjust(), not an approximation. Constants, the 3x3
+# rule table, the triangular-membership shape and the strength_pct==0
+# short-circuit are copied line-for-line from the C source (read
+# 2026-09-02 for this sweep). Any future edit to pid_fuzzy.c must be
+# mirrored here too, or this module's PID_FUZZY_STRENGTH_ZERO_INVARIANT
+# test (tests/test_plant_sim.py) is the tripwire that should catch the drift
+# -- it only proves strength=0 is a no-op in THIS mirror, so a firmware
+# change that only affects strength>0 behaviour would not be caught by it.
+FUZZY_ERROR_BAND_C = 20.0
+FUZZY_RATE_BAND_C_PER_S = 0.5
+FUZZY_MAX_NUDGE_FRACTION = 0.5
+
+# rule table [error_bucket][rate_bucket] -> (kp_dir, ki_dir, kd_dir),
+# bucket order 0=NEG/FALLING, 1=ZERO/STEADY, 2=POS/RISING -- copied from
+# pid_fuzzy.c's RULE_TABLE.
+FUZZY_RULE_TABLE = [
+    [(1.0, -1.0, 1.0), (1.0, 0.0, 0.0), (-1.0, 1.0, -1.0)],
+    [(-1.0, -1.0, 1.0), (-1.0, 1.0, -1.0), (1.0, -1.0, 1.0)],
+    [(-1.0, 1.0, -1.0), (1.0, 0.0, 0.0), (1.0, -1.0, 1.0)],
+]
+
+
+def _fuzzy_triangular_memberships(x, band):
+    """Mirrors pid_fuzzy.c's triangular_memberships(): returns
+    (neg, zero, pos), each in [0,1], summing to exactly 1.0."""
+    if x <= -band:
+        return 1.0, 0.0, 0.0
+    if x >= band:
+        return 0.0, 0.0, 1.0
+    if x <= 0.0:
+        t = (-x) / band
+        return t, 1.0 - t, 0.0
+    t = x / band
+    return 0.0, 1.0 - t, t
+
+
+def _fuzzy_clamp_gain(g):
+    if not math.isfinite(g) or g < 0.0:
+        return 0.0
+    return g
+
+
+def _fuzzy_sanitize_base(base):
+    if not math.isfinite(base) or base < 0.0:
+        return 0.0
+    return base
+
+
+def pid_fuzzy_adjust(error_c, error_rate_c_per_s, base_kp, base_ki, base_kd, strength_pct):
+    """Python mirror of pid_fuzzy.c's ``pid_fuzzy_adjust()``. ``strength_pct``
+    is a float here (the sim has no uint8_t rounding step) but is clamped to
+    [0, 100] exactly as the C caller (profile_executor_pid_tick.c) clamps
+    before the uint8_t cast -- strength_pct == 0 is the safety-contract
+    short-circuit and MUST reproduce the base gains bit-for-bit (see
+    pid_fuzzy.c's own comment on that short-circuit)."""
+    kp = _fuzzy_sanitize_base(base_kp)
+    ki = _fuzzy_sanitize_base(base_ki)
+    kd = _fuzzy_sanitize_base(base_kd)
+
+    if strength_pct > 100.0:
+        strength_pct = 100.0
+    if strength_pct < 0.0:
+        strength_pct = 0.0
+
+    if strength_pct == 0.0:
+        return kp, ki, kd
+
+    if not math.isfinite(error_c) or not math.isfinite(error_rate_c_per_s):
+        return kp, ki, kd
+
+    e_neg, e_zero, e_pos = _fuzzy_triangular_memberships(error_c, FUZZY_ERROR_BAND_C)
+    r_neg, r_zero, r_pos = _fuzzy_triangular_memberships(error_rate_c_per_s, FUZZY_RATE_BAND_C_PER_S)
+    e_deg = (e_neg, e_zero, e_pos)
+    r_deg = (r_neg, r_zero, r_pos)
+
+    kp_sum = ki_sum = kd_sum = weight_sum = 0.0
+    for ei in range(3):
+        for ri in range(3):
+            firing = e_deg[ei] * r_deg[ri]
+            kp_dir, ki_dir, kd_dir = FUZZY_RULE_TABLE[ei][ri]
+            kp_sum += firing * kp_dir
+            ki_sum += firing * ki_dir
+            kd_sum += firing * kd_dir
+            weight_sum += firing
+
+    kp_dir = (kp_sum / weight_sum) if weight_sum > 0.0 else 0.0
+    ki_dir = (ki_sum / weight_sum) if weight_sum > 0.0 else 0.0
+    kd_dir = (kd_sum / weight_sum) if weight_sum > 0.0 else 0.0
+
+    scale = (strength_pct / 100.0) * FUZZY_MAX_NUDGE_FRACTION
+
+    out_kp = _fuzzy_clamp_gain(kp * (1.0 + scale * kp_dir))
+    out_ki = _fuzzy_clamp_gain(ki * (1.0 + scale * ki_dir))
+    out_kd = _fuzzy_clamp_gain(kd * (1.0 + scale * kd_dir))
+    return out_kp, out_ki, out_kd
+
+
+def _pid_rescale_integral_for_new_ki(integral, old_ki, new_ki):
+    """Mirrors pid.c's pid_rescale_integral_for_new_ki(): bump-transfer the
+    raw integral accumulator so the I-term's contribution to duty is
+    unchanged by a Ki move alone (hazard 3, profile_executor_pid_tick.c)."""
+    if not (old_ki > 0.0) or not (new_ki > 0.0) or old_ki == new_ki:
+        return integral
+    rescaled = integral * old_ki / new_ki
+    bound = 100000.0
+    if rescaled > bound:
+        rescaled = bound
+    elif rescaled < -bound:
+        rescaled = -bound
+    return rescaled
+
+
 class PID:
     """Line-for-line match to ``pid.c``'s ``pid_update_terms()``: conditional
     integration freeze, feedforward-relative floor, P/I/D/ff clamp
     structure. See sim_calibration.md sec 1 for the line-by-line check
-    against the firmware source this was built against."""
+    against the firmware source this was built against.
 
-    def __init__(self, kp, ki, kd, d_tau, b, pid_range_c):
+    ``fuzzy_strength_pct`` (default 0, no fuzzy layer) mirrors the
+    ZONE_CONTROL_MODE_PID_FUZZY wiring in profile_executor_pid_tick.c: each
+    tick, BEFORE this tick's P/I/D terms are computed, error_c/error_rate
+    (error_rate read from *last* tick's d_filtered, matching the firmware's
+    documented one-tick lag) feed pid_fuzzy_adjust() against the zone's base
+    gains, and a Ki change is bump-transferred into the integral
+    accumulator via pid_rescale_integral_for_new_ki() before it is used."""
+
+    def __init__(self, kp, ki, kd, d_tau, b, pid_range_c, fuzzy_strength_pct=0.0):
+        self.base_kp, self.base_ki, self.base_kd = kp, ki, kd
         self.kp, self.ki, self.kd = kp, ki, kd
         self.d_tau, self.b, self.pid_range_c = d_tau, b, pid_range_c
+        self.fuzzy_strength_pct = fuzzy_strength_pct
         self.integral = 0.0
         self.d_filtered = 0.0
         self.prev_measurement = None
         self.initialized = False
+        self.fuzzy_prev_effective_ki = 0.0
 
     def update(self, setpoint, measurement, dt_s, ff_u, ff_hold, integral_floor='ff_hold'):
         if not self.initialized:
@@ -481,6 +882,22 @@ class PID:
             self.integral = 0.0
             self.d_filtered = 0.0
             self.initialized = True
+
+        # Fuzzy gain prep -- profile_executor_pid_tick.c's
+        # pid_fuzzy_prepare_gains(), run before this tick's pid_update_terms
+        # equivalent below. error_rate uses self.d_filtered as it stands
+        # BEFORE this tick's update (one-tick lag, matches firmware).
+        error_c = setpoint - measurement
+        error_rate_c_per_s = self.d_filtered
+        adj_kp, adj_ki, adj_kd = pid_fuzzy_adjust(
+            error_c, error_rate_c_per_s, self.base_kp, self.base_ki, self.base_kd,
+            self.fuzzy_strength_pct,
+        )
+        self.integral = _pid_rescale_integral_for_new_ki(
+            self.integral, self.fuzzy_prev_effective_ki, adj_ki)
+        self.fuzzy_prev_effective_ki = adj_ki
+        self.kp, self.ki, self.kd = adj_kp, adj_ki, adj_kd
+
         if dt_s <= 0:
             dt_s = 1.0
         error = setpoint - measurement
@@ -579,7 +996,8 @@ def uncoupled_ff_hold_climb(target_c, target_rate, i, ambient=20.0):
 
 def run_profile(segs, start_temp, kp=0.06, ki=0.0003, kd=0.0,
                  climb_mode='coupled', integral_floor='ff_hold', ambient=20.0,
-                 controller_K_inv=None, controller_tau=None, plant_regime='measured'):
+                 controller_K_inv=None, controller_tau=None, plant_regime='measured',
+                 fuzzy_strength_pct=0.0):
     """Run the plant+PID loop over an explicit segment list.
 
     ``segs``: list of ``(t0, t1, c0, c1, rate)`` tuples, ``rate`` signed
@@ -608,6 +1026,12 @@ def run_profile(segs, start_temp, kp=0.06, ki=0.0003, kd=0.0,
     (capture comparison, regression tests) always uses ``'measured'``, so
     the identical low-temperature code path this argument's default
     preserves is what keeps the five-capture calibration fit unchanged.
+
+    ``fuzzy_strength_pct``: 0-100, applied uniformly to all three zones'
+    ``PID`` instances -- see ``PID``'s docstring and ``pid_fuzzy_adjust()``
+    above for the faithful mirror of ``pid_fuzzy.c``. Default 0.0 keeps
+    every existing caller (regression tests, capture comparisons, the
+    matrix sweep) on exactly the pre-fuzzy code path.
     """
     if plant_regime == 'physical':
         plant = PhysicalKilnPlant(DT, ambient=ambient, start_temp=start_temp)
@@ -615,7 +1039,8 @@ def run_profile(segs, start_temp, kp=0.06, ki=0.0003, kd=0.0,
         plant = FOPDTPlant(K_full, tau, L, DT, ambient=ambient, start_temp=start_temp)
     else:
         raise ValueError(f"unknown plant_regime {plant_regime!r}, expected 'measured' or 'physical'")
-    pids = [PID(kp, ki, kd, d_tau=30.0, b=1.0, pid_range_c=1000.0) for _ in range(N_ZONES)]
+    pids = [PID(kp, ki, kd, d_tau=30.0, b=1.0, pid_range_c=1000.0,
+                fuzzy_strength_pct=fuzzy_strength_pct) for _ in range(N_ZONES)]
     ff_fn = coupled_ff_hold_climb if climb_mode == 'coupled' else uncoupled_ff_hold_climb
 
     total_t = segs[-1][1]

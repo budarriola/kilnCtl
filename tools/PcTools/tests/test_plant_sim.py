@@ -559,3 +559,188 @@ def test_physical_regime_reduces_to_measured_model_below_boundary_by_constructio
         plant_regime='measured')
     assert result['plant_regime'] == 'measured'
     assert report_default["rms_residual_c"] < 2.0
+
+
+# ---------------------------------------------------------------------------
+# Fuzzy-PID layer -- faithful mirror of firmware/KilnFW/App/drivers/
+# pid_fuzzy.c, PID_EXPANSION_PLAN.md sec 3.6. The safety contract this
+# mirror exists to check: strength_pct == 0 MUST reproduce the base gains
+# bit-for-bit, in BOTH the C source and this Python mirror of it.
+# ---------------------------------------------------------------------------
+
+def _simple_profile7_like_segs():
+    """Small hand-built two-segment profile (ramp to 45 C, dwell) -- enough
+    ticks to exercise every rule-table cell (error crosses zero, rate swings
+    both signs during the ramp-to-dwell transition) without needing a real
+    capture file for these unit-level fuzzy checks."""
+    return [(0.0, 1200.0, 24.0, 45.0, (45.0 - 24.0) / 1200.0),
+            (1200.0, 3000.0, 45.0, 45.0, 0.0)]
+
+
+class _ReferenceNoFuzzyPID:
+    """Independent reference implementation: pid_update_terms() with NO
+    fuzzy call in the path at all -- not "strength=0 through the fuzzy
+    machinery," an entirely separate code path that never imports
+    pid_fuzzy_adjust or the bump-transfer rescale. This is what
+    ``PID.update`` looked like before the fuzzy layer was wired in, kept
+    here so the strength=0 invariant test below compares against ground
+    truth rather than the fuzzy-enabled path compared against itself
+    (comparing ``run_profile(...)`` against
+    ``run_profile(fuzzy_strength_pct=0.0, ...)`` is vacuous: 0.0 is
+    already the default, so both calls take the identical code path and
+    can never disagree, regardless of what pid_fuzzy_adjust does)."""
+
+    def __init__(self, kp, ki, kd, d_tau, b, pid_range_c):
+        self.kp, self.ki, self.kd = kp, ki, kd
+        self.d_tau, self.b, self.pid_range_c = d_tau, b, pid_range_c
+        self.integral = 0.0
+        self.d_filtered = 0.0
+        self.prev_measurement = None
+        self.initialized = False
+
+    def update(self, setpoint, measurement, dt_s, ff_u, ff_hold, integral_floor='ff_hold'):
+        if not self.initialized:
+            self.prev_measurement = measurement
+            self.integral = 0.0
+            self.d_filtered = 0.0
+            self.initialized = True
+        if dt_s <= 0:
+            dt_s = 1.0
+        error = setpoint - measurement
+        if abs(error) > self.pid_range_c:
+            self.prev_measurement = measurement
+            u = 1.0 if error > 0 else 0.0
+            return u, dict(p=u, i=0.0, d=0.0, ff=0.0)
+        raw_d = -(measurement - self.prev_measurement) / dt_s
+        alpha = dt_s / (self.d_tau + dt_s)
+        self.d_filtered += alpha * (raw_d - self.d_filtered)
+        self.prev_measurement = measurement
+        p_term = self.kp * (self.b * setpoint - measurement)
+        d_term = self.kd * self.d_filtered
+        unclamped = p_term + self.ki * self.integral + d_term + ff_u
+        would_push_further = (unclamped >= 1.0 and error > 0) or (unclamped <= 0.0 and error < 0)
+        if not would_push_further:
+            self.integral += error * dt_s
+        i_term = self.ki * self.integral
+        floor = -ff_u if integral_floor == 'ff_u' else -ff_hold
+        if i_term < floor:
+            i_term = floor
+            self.integral = floor / self.ki if self.ki > 0 else 0.0
+        elif i_term > 1.0:
+            i_term = 1.0
+            self.integral = 1.0 / self.ki if self.ki > 0 else 0.0
+        u = p_term + i_term + d_term + ff_u
+        u = min(max(u, 0.0), 1.0)
+        return u, dict(p=p_term, i=i_term, d=d_term, ff=ff_u)
+
+
+def _run_profile_with_reference_pid(segs, start_temp, kp, ki, kd,
+                                     integral_floor='ff_hold', ambient=20.0):
+    """Duplicate of run_profile()'s loop, but driving _ReferenceNoFuzzyPID
+    instead of ps.PID -- climb_mode fixed to 'coupled' (matches the
+    strength=0 test's kwargs). Kept minimal and deliberately NOT reusing
+    ps.PID so a bug in the fuzzy wiring cannot hide behind shared code."""
+    plant = ps.FOPDTPlant(ps.K_full, ps.tau, ps.L, ps.DT, ambient=ambient, start_temp=start_temp)
+    pids = [_ReferenceNoFuzzyPID(kp, ki, kd, d_tau=30.0, b=1.0, pid_range_c=1000.0)
+            for _ in range(ps.N_ZONES)]
+    total_t = segs[-1][1]
+    times, targets, temps_log, duty_log = [], [], [], []
+    duty = np.zeros(ps.N_ZONES)
+    t = 0.0
+    while t <= total_t:
+        for si, (t0, t1, c0, c1, rate) in enumerate(segs):
+            if t0 <= t <= t1 or si == len(segs) - 1:
+                if rate == 0.0:
+                    target_c, target_rate = c1, 0.0
+                else:
+                    target_c, target_rate = c0 + rate * (t - t0), rate
+                break
+        for i in range(ps.N_ZONES):
+            hold, climb, ff = ps.coupled_ff_hold_climb(target_c, target_rate, i, ambient=ambient)
+            duty[i], _ = pids[i].update(target_c, plant.temp[i], ps.DT, ff, hold, integral_floor=integral_floor)
+        times.append(t)
+        targets.append(target_c)
+        temps_log.append(plant.temp.copy())
+        duty_log.append(duty.copy())
+        plant.step(duty)
+        t += ps.DT
+    return dict(t=np.array(times), target=np.array(targets),
+                temps=np.array(temps_log), duty=np.array(duty_log))
+
+
+def test_fuzzy_strength_zero_matches_base_gains_bit_for_bit():
+    """strength_pct=0 must be bit-for-bit identical to the fuzzy layer being
+    ABSENT -- the safety contract pid_fuzzy.c's own comment states for the
+    firmware function. Compared against ``_ReferenceNoFuzzyPID`` (an
+    independent implementation that never calls pid_fuzzy_adjust or the
+    bump-transfer rescale at all), not against another ``fuzzy_strength_pct
+    =0.0`` call -- see ``_ReferenceNoFuzzyPID``'s docstring for why that
+    comparison would be vacuous. Checked on temps AND duty, every zone,
+    every tick.
+
+    Proof this test can fail (required by repo policy): temporarily changed
+    the mirror's short-circuit from `if strength_pct == 0.0: return kp, ki,
+    kd` to `if strength_pct == 0.0: return kp, ki, kd * 1.0000001` (the
+    smallest deliberate perturbation that still reads as "no-op" on a quick
+    skim). Captured red output:
+
+        FAILED tests/test_plant_sim.py::test_fuzzy_strength_zero_matches_base_gains_bit_for_bit
+        AssertionError:
+        Arrays are not equal
+        Mismatched elements: 8866 / 9003 (98.5%)
+        First 5 mismatches are at indices:
+         [36, 2]: 23.667662474178034 (ACTUAL), 23.667662474173476 (DESIRED)
+        ...
+        Max absolute difference among violations: 3.15940625e-08
+
+    Reverted before this test was kept; suite green again.
+    """
+    segs = _simple_profile7_like_segs()
+    start = [24.0, 24.0, 24.0]
+    kwargs = dict(kp=0.0318, ki=0.0001, kd=0.8401, integral_floor='ff_hold', ambient=20.0)
+
+    result_fuzzy_zero = ps.run_profile(segs, start, climb_mode='coupled',
+                                        fuzzy_strength_pct=0.0, **kwargs)
+    result_reference = _run_profile_with_reference_pid(segs, start, **kwargs)
+
+    np.testing.assert_array_equal(result_fuzzy_zero['temps'], result_reference['temps'])
+    np.testing.assert_array_equal(result_fuzzy_zero['duty'], result_reference['duty'])
+
+
+def test_pid_fuzzy_adjust_strength_zero_returns_base_gains_exactly():
+    """Unit-level check on pid_fuzzy_adjust() itself (not run_profile): at
+    strength_pct=0, output must equal the (sanitized) base gains regardless
+    of error/rate, including non-finite inputs -- mirrors pid_fuzzy.c's own
+    documented contract line-for-line."""
+    for error_c, rate in [(0.0, 0.0), (50.0, -2.0), (-100.0, 5.0),
+                           (float('nan'), 1.0), (1.0, float('inf'))]:
+        kp, ki, kd = ps.pid_fuzzy_adjust(error_c, rate, 0.0318, 0.0001, 0.8401, 0.0)
+        assert (kp, ki, kd) == (0.0318, 0.0001, 0.8401)
+
+
+def test_pid_fuzzy_adjust_nonzero_strength_changes_gains():
+    """Sanity check that the harness CAN see a difference -- strength=100 at
+    a rule-table cell with a nonzero direction must move the gain away from
+    base. Guards against a mirror that accidentally always returns the
+    identity (which would make the strength-zero test above vacuous)."""
+    # error=+30 (POS, beyond the 20C band -> e_pos=1), rate=0 (STEADY,
+    # r_zero=1): rule cell (POS, STEADY) = {Kp+, Ki=, Kd=} in pid_fuzzy.h's
+    # table.
+    kp, ki, kd = ps.pid_fuzzy_adjust(30.0, 0.0, 0.0318, 0.0001, 0.8401, 100.0)
+    assert kp > 0.0318
+    assert ki == pytest.approx(0.0001)
+    assert kd == pytest.approx(0.8401)
+
+
+def test_fuzzy_strength_nonzero_diverges_from_zero_over_a_run():
+    """End-to-end confirmation that a nonzero strength actually changes the
+    simulated trajectory (not just the single-tick gain check above) --
+    otherwise a wiring bug in PID.update (e.g. computing adjusted gains but
+    never assigning self.kp/ki/kd) could hide behind the unit test."""
+    segs = _simple_profile7_like_segs()
+    start = [24.0, 24.0, 24.0]
+    kwargs = dict(kp=0.0318, ki=0.0001, kd=0.8401, climb_mode='coupled',
+                   integral_floor='ff_hold', ambient=20.0)
+    r0 = ps.run_profile(segs, start, fuzzy_strength_pct=0.0, **kwargs)
+    r100 = ps.run_profile(segs, start, fuzzy_strength_pct=100.0, **kwargs)
+    assert not np.allclose(r0['temps'], r100['temps'])
