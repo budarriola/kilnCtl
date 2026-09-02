@@ -216,7 +216,8 @@ $cmd4 = "call `"$vcvars`" x64 >nul && cl /nologo /W3 /EHsc /I`"$stubDir`" /I`"$c
         "`"$(Join-Path $driversDir 'heater_output.c')`" `"$(Join-Path $driversDir 'thermo_combine.c')`" " +
         "`"$(Join-Path $driversDir 'heat_enable.c')`" `"$(Join-Path $driversDir 'pid_fuzzy.c')`" " +
         "`"$(Join-Path $driversDir 'stack_margin.c')`" `"$(Join-Path $driversDir 'zone_coupling_solve.c')`" " +
-        "`"$(Join-Path $driversDir 'adaptive_tune.c')`" `"$(Join-Path $driversDir 'pid_autotune.c')`""
+        "`"$(Join-Path $driversDir 'adaptive_tune.c')`" `"$(Join-Path $driversDir 'adaptive_tune_model.c')`" " +
+        "`"$(Join-Path $driversDir 'adaptive_tune_ki.c')`" `"$(Join-Path $driversDir 'pid_autotune.c')`""
 # profile_executor.c split 2026-09-01 ("files over 1500 lines should be
 # broken up where it makes sense") -- the new profile_executor_*.c pieces
 # are NOT added as separate compile units above; test_profile_executor_

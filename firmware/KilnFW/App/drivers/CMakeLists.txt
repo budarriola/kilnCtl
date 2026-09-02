@@ -245,6 +245,14 @@ idf_component_register(SRCS "MAX31856.c"
                        "profile_executor_run.c"
                        "profile_executor_status.c"
                        "adaptive_tune.c"
+                       # adaptive_tune.c split 2026-09-01 ("files over 1500
+                       # lines should be broken up where it makes sense" --
+                       # it had grown to 1498/1500 lines and the P1 baseline
+                       # persistence + P2 re-justified cumulative bound would
+                       # have pushed it over). See adaptive_tune_internal.h's
+                       # own doc comment for the seam rationale.
+                       "adaptive_tune_model.c"
+                       "adaptive_tune_ki.c"
                        "adaptive_tune_http.c"
                        "ramp_ident.c"
                        "pid_autotune.c"
