@@ -417,6 +417,61 @@ for mechanism-level control-strategy comparison at high temperature, not yet
 for a specific gain's third decimal place, and not a substitute for a real
 high-temperature identification pass if one ever becomes possible.
 
+**Bench-rig anchor, and the correction this section makes (added 2026-09-02c).**
+`PhysicalKilnPlant` above was previously described as reducing "to the measured
+bench behaviour — trivial and exact" below `EXTRAPOLATION_BOUNDARY_C`. That was
+not a validation and the wording was wrong: `PhysicalKilnPlant` is a
+*different, larger* object (ASSUMED 2.5 kW/zone, cone-10-scale insulation) that
+`run_profile`'s `plant_regime='physical'` path only ever instantiates *above*
+the boundary — it is never run against the rig's own measurements at all, so
+nothing about it had been checked against a single real reading.
+`plant_sim.BenchKilnPlant` fixes that gap by anchoring the *same*
+energy-balance structure (own-zone power in, conductive loss out, cross-zone
+coupling as a fraction of the neighbor's own power) to the rig itself, using
+only measured `K_full`/`tau` plus one explicit, unavoidable assumption
+(`RIG_P_MAX`: equal element wattage per zone — the three zones share an
+identical relay/heater circuit per `HARDWARE.md`, and no wattage figure exists
+anywhere in this repo to derive a non-uniform split from instead; real Watts
+are not recoverable at all from two equations — steady-state gain and cooldown
+tau — in three unknowns per zone).
+
+Checked with `python -m kilnctrl.plant_sim bench-validate` against the three
+single-zone excitation runs (`logs/coupling/cpl_z{0,1,2}_{mcp,thermo}.jsonl`,
+the same data `K_full` was fit from):
+
+| | DC gain (diag) | cooldown τ | own-zone hold | cross-zone (peer) rise |
+|---|---|---|---|---|
+| z0 | 38.130 vs 38.130 (±0.00) | 468.5s vs 469.0s (±0.5s) | 24.40 vs 24.40°C (±0.00) | z1→z0 22.63 vs 21.31°C (+1.32); z2→z0 18.52 vs 17.16°C (+1.36) |
+| z1 | 35.900 vs 35.900 (±0.00) | 454.5s vs 455.0s (±0.5s) | 28.00 vs 27.99°C (±0.01) | z0→z1 8.62 vs 9.15°C (−0.53); z2→z1 17.79 vs 17.50°C (+0.29) |
+| z2 | 35.320 vs 35.320 (±0.00) | 344.5s vs 345.0s (±0.5s) | 27.90 vs 27.90°C (±0.00) | z0→z2 4.94 vs 5.33°C (−0.39); z1→z2 9.53 vs 9.69°C (−0.16) |
+
+**The first three columns are not independent evidence** — `RIG_G_LOSS`/
+`RIG_C_THERMAL` are algebraically solved from these exact `K_diag`/`tau`
+numbers, so BenchKilnPlant's own-zone dynamics reduce to FOPDTPlant's own
+equation and reproducing them is a sanity check on the derivation, not a
+finding. **The fourth column is the genuine test**: nothing forces the
+coupling-as-power-fraction mechanism to reproduce the measured *asymmetric*
+peer rises (z1 raising z0 ~22 °C vs z0 raising z1 only ~9 °C) — it could have
+come out symmetric, wrong-signed, or wrong-scale. It reproduces the direction
+and rough scale correctly, RMS 0.83 °C / max 1.36 °C across the six
+off-diagonal cells — comparable to this module's own ~1–2 °C documented
+hardware noise floor.
+
+**Verdict: BenchKilnPlant reproduces the rig within noise, on the one
+comparison that actually tests it.** This says nothing new about
+`PhysicalKilnPlant`'s cone-10 parameters (`PHYS_P_MAX_W`, `PHYS_WALL_*`,
+`PHYS_OUTER_*` remain fully ASSUMED and untouched — `BenchKilnPlant` is a
+separate class, not a refactor of `PhysicalKilnPlant`) — it validates the
+*structural choice* (power-fraction coupling, single-thermal-mass-per-zone
+energy balance) those high-temperature parameters are built on, at the one
+scale where real data exists to check it. No parameter was fitted to make
+this match: `RIG_G_LOSS`/`RIG_C_THERMAL` are fixed by the DC-gain/cooldown
+equations before the cross-zone check ever runs, and `RIG_COUPLING_FRAC`
+comes directly from `K_full` with no free scale or damping term. Pinned by
+`test_bench_validation_report_cross_zone_is_close_to_measured` and
+`test_bench_validation_report_reproduces_measured_asymmetry_direction` in
+`tests/test_plant_sim.py`.
+
 **What it can be trusted for**, per its own module docstring: ramp magnitude and
 sign on coupled-feedforward builds within the fitted ~0–80 °C envelope; dwell
 behaviour generally. **Not** the uncoupled baseline's exact saturation

@@ -1303,6 +1303,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     p_cmp.add_argument("--integral-floor", choices=["ff_hold", "ff_u"], default="ff_hold")
     p_cmp.add_argument("--json", action="store_true")
 
+    p_bv = sub.add_parser("bench-validate", help="check BenchKilnPlant (rig-anchored physical model) against the four bench measurements")
+    p_bv.add_argument("--json", action="store_true")
+
     args = parser.parse_args(argv)
 
     if args.cmd == "compare":
@@ -1315,6 +1318,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             print(json.dumps(report, indent=2))
         else:
             print(format_sim_vs_capture_report_text(report))
+    elif args.cmd == "bench-validate":
+        report = bench_validation_report()
+        if args.json:
+            import json
+            print(json.dumps({k: (v.tolist() if hasattr(v, "tolist") else v)
+                               for k, v in report.items()}, indent=2))
+        else:
+            print(format_bench_validation_report_text(report))
     else:
         parser.print_help()
         return 2

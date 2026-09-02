@@ -744,3 +744,63 @@ def test_fuzzy_strength_nonzero_diverges_from_zero_over_a_run():
     r0 = ps.run_profile(segs, start, fuzzy_strength_pct=0.0, **kwargs)
     r100 = ps.run_profile(segs, start, fuzzy_strength_pct=100.0, **kwargs)
     assert not np.allclose(r0['temps'], r100['temps'])
+
+
+# ---------------------------------------------------------------------------
+# BenchKilnPlant -- the rig-anchored physical model (owner tasking
+# 2026-09-02c): checks that it actually reproduces the bench rig's own
+# measurements, not just that it runs.
+# ---------------------------------------------------------------------------
+
+def test_bench_validation_report_own_zone_matches_by_construction():
+    """DC gain / cooldown tau / own-zone hold rise are DERIVED from these
+    exact numbers (see RIG_G_LOSS/RIG_C_THERMAL docstrings) -- they must
+    come back essentially exact. This is a sanity check on the derivation
+    algebra, not independent validation (see bench_validation_report()'s
+    own docstring)."""
+    report = ps.bench_validation_report()
+    assert np.max(np.abs(report["k_diag_errors"])) < 0.01
+    assert np.max(np.abs(report["tau_errors_s"])) < 2.0
+    assert np.max(np.abs(report["diag_errors_c"])) < 0.05
+
+
+def test_bench_validation_report_cross_zone_is_close_to_measured():
+    """The GENUINE, non-circular check: BenchKilnPlant's coupling-as-
+    power-fraction mechanism, anchored only to measured K_full/tau plus
+    the single "equal element wattage per zone" assumption, must reproduce
+    the measured ASYMMETRIC peer rises (z1->z0 ~22C, z0->z1 ~9C) to
+    within a few degrees -- comparable to this module's own documented
+    ~1-2C hardware noise floor elsewhere. Bounds pinned at 2.0C RMS /
+    3.0C max: loose enough that a correct implementation passes
+    comfortably, tight enough that a broken coupling mechanism (see the
+    mutation below) fails it."""
+    report = ps.bench_validation_report()
+    assert report["off_diag_rms_c"] < 2.0
+    assert report["off_diag_max_abs_c"] < 3.0
+
+
+def test_bench_validation_report_reproduces_measured_asymmetry_direction():
+    """The single most important qualitative fact this section exists to
+    check: z1 exciting z0 must predict a LARGER rise than z0 exciting z1
+    (measured 21.31C vs 9.15C) -- if the coupling mechanism silently
+    became symmetric or flipped which direction dominates, every other
+    numeric check above could still coincidentally pass on a smaller
+    metric while this qualitative fact broke."""
+    report = ps.bench_validation_report()
+    rise = report["predicted_rise_c"]
+    assert rise[1, 0] > rise[0, 1]
+    assert rise[1, 0] > 15.0
+    assert rise[0, 1] < 15.0
+
+
+def test_bench_kiln_plant_zero_duty_decays_to_ambient():
+    """No duty anywhere -> every zone must cool monotonically back to
+    ambient, never grow (a broken sign on the loss term would runaway
+    instead)."""
+    plant = ps.BenchKilnPlant(ps.DT, ambient=20.0, start_temp=[60.0, 60.0, 60.0])
+    prev = plant.temp.copy()
+    for _ in range(2000):
+        plant.step(np.zeros(3))
+        assert (plant.temp <= prev + 1e-9).all()
+        prev = plant.temp.copy()
+    assert np.max(np.abs(plant.temp - 20.0)) < 1.0
