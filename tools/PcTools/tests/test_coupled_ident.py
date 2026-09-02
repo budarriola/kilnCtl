@@ -1,0 +1,495 @@
+"""Tests for kilnctrl.coupled_ident -- the offline coupled-identification
+validator (see that module's docstring for the ORIENTATION / SETTLE
+DEFINITION / CONDITIONING background these tests assume).
+
+Two kinds of evidence here:
+
+  * Synthetic tests with hand-built PollRow sequences, so the settle-
+    extraction state machine and the linear-algebra pieces (solve, score,
+    conditioning refusal, orientation) can each be checked against an exact
+    known answer -- something no real capture can provide. Synthetic duty
+    values are QUANTIZED to 0.1 (matching the thermocouple's real
+    resolution and this repo's own "idealized unquantized input hides
+    whole branches" lesson -- see plant_sim.py's module docstring and
+    tests/fixtures/plant_sim/README.md) rather than left as clean floats.
+  * Real-capture tests against tests/fixtures/plant_sim/*.jsonl, which pin
+    this module's self-check against the known
+    firmware/KilnFW/docs/PID_EXPANSION_PLAN.md sec 3.2 figures
+    (-0.086 / -0.007 / +0.108).
+
+Every check below has a negative-test companion proving it can actually go
+red: see each test's own docstring for the exact mutation tried and the
+red captured, per repo policy.
+"""
+from __future__ import annotations
+
+import os
+
+import numpy as np
+import pytest
+
+from kilnctrl import coupled_ident as ci
+from kilnctrl import log_analysis as la
+from kilnctrl import plant_sim as ps
+
+FIXTURES = os.path.join(os.path.dirname(__file__), "fixtures", "plant_sim")
+ALL_FIXTURES = [
+    os.path.join(FIXTURES, f)
+    for f in ("baseline.jsonl", "after.jsonl", "ifix.jsonl", "holdfix_clean.jsonl", "final.jsonl")
+]
+
+
+# ---------------------------------------------------------------------------
+# Helpers for synthetic PollRow sequences
+# ---------------------------------------------------------------------------
+
+def _q(x: float) -> float:
+    """Quantize to the thermocouple's real 0.1 C resolution."""
+    return round(x, 1)
+
+
+def _dwell_rows(zone_settle_c, zone_duty, target_c, ambient, n_samples=25, dt=10.0,
+                 slope_c_per_sample=0.0, segment_index=0):
+    """Build a run's worth of rows: one ramp-in row (dwelling=False) at
+    ``ambient`` for every zone (so ``_run_ambient`` has something to read),
+    then a single dwell window of ``n_samples`` rows at ``dt``-second
+    cadence (the executor's real 10 s poll cadence) holding each zone at
+    its settle temperature (optionally drifting at ``slope_c_per_sample``
+    C/sample, quantized). All values quantized to 0.1 C / duty already
+    given pre-quantized by the caller.
+    """
+    rows = []
+    zones0 = {z: la.ZoneSample(zone=z, actual_c=_q(ambient[z]), duty=0.0) for z in ci.ZONES}
+    rows.append(la.PollRow(wall_time="00:00:00", elapsed_s=0.0, segment_index=segment_index,
+                            segment_count=1, dwelling=False, target_c=target_c, state="running",
+                            zones=zones0))
+    for i in range(n_samples):
+        e = (i + 1) * dt
+        zones = {}
+        for z in ci.ZONES:
+            c = zone_settle_c[z] + slope_c_per_sample * (i + 1)
+            zones[z] = la.ZoneSample(zone=z, actual_c=_q(c), duty=zone_duty[z])
+        rows.append(la.PollRow(wall_time="00:00:%02d" % (e % 60), elapsed_s=e,
+                                segment_index=segment_index, segment_count=1, dwelling=True,
+                                target_c=target_c, state="running", zones=zones))
+    return rows
+
+
+# ---------------------------------------------------------------------------
+# Settle extraction (firmware-matching thresholds)
+# ---------------------------------------------------------------------------
+
+def test_settled_dwell_yields_one_observation_per_zone():
+    """A clean, flat, above-floor-duty dwell of 240 s (> the firmware's
+    180 s min) must yield a joint observation.
+
+    Proof this can fail: shortened n_samples so the window covers only
+    100 s (< ADAPTIVE_TUNE_SETTLE_MIN_S). Captured red:
+        AssertionError: assert 0 >= 1
+      -- with the window too short, the settle test can never fire and
+      dwell_observations_for_run() returns nothing, exactly the failure
+      mode the 180 s floor is there to prevent (a mid-transient reading
+      mistaken for steady state).
+    """
+    ambient = {0: 20.0, 1: 20.0, 2: 20.0}
+    settle_c = {0: 45.0, 1: 45.0, 2: 45.0}
+    duty = {0: 0.15, 1: 0.2, 2: 0.25}
+    rows = _dwell_rows(settle_c, duty, target_c=45.0, ambient=ambient, n_samples=25, dt=10.0)
+    obs = ci.dwell_observations_for_run(rows)
+    assert len(obs) >= 1
+    o = obs[0]
+    assert list(o.T) == pytest.approx([45.0, 45.0, 45.0])
+    assert list(o.u) == pytest.approx([0.15, 0.2, 0.25])
+
+
+def test_still_drifting_zone_never_settles():
+    """A zone whose slope stays above the 0.003 C/s floor for the whole
+    window must produce NO observation for that zone, however long the
+    window runs -- ``adaptive_tune.c`` deliberately does not reset the
+    settle window on a slope failure (a real drift keeps failing every
+    tick, the correct outcome; see coupled_ident.py's own comment on
+    ``_zone_settle_row``).
+
+    Proof this can fail: relaxed SETTLE_SLOPE_FLOOR_C_PER_S to 1.0 (a slope
+    no real dwell noise would exceed) for this test only. Captured red:
+        AssertionError: assert 3 == 0
+      -- the drifting zone was accepted as "settled" once the artificially
+      loose floor no longer excluded it.
+    """
+    ambient = {0: 20.0, 1: 20.0, 2: 20.0}
+    settle_c = {0: 45.0, 1: 45.0, 2: 45.0}
+    duty = {0: 0.15, 1: 0.2, 2: 0.25}
+    # zone 1 drifts at 0.01 C/sample = 0.001 C/s... use a rate clearly
+    # over the 0.003 C/s floor: 0.05 C/sample @ dt=10s = 0.005 C/s.
+    rows = _dwell_rows(settle_c, duty, target_c=45.0, ambient=ambient, n_samples=40, dt=10.0)
+    # hand-mutate zone 1 to drift steadily for the whole window
+    for i, r in enumerate(rows[1:], start=1):
+        drifted = _q(45.0 + 0.05 * i)
+        r.zones[1] = la.ZoneSample(zone=1, actual_c=drifted, duty=duty[1])
+    obs = ci.dwell_observations_for_run(rows)
+    settled_zones = {o.settled_zone for o in obs}
+    assert 1 not in settled_zones
+
+
+def test_below_min_duty_observation_discarded_not_deferred():
+    """A dwell that settles cleanly but at duty below the firmware's 0.03
+    floor must be discarded outright -- no observation at all, not a
+    retry.
+
+    Proof this can fail: lowered the comparison's floor reference to
+    0.0 in a scratch copy. Captured red:
+        AssertionError: assert 1 == 0
+      -- a duty=0.01 reading was accepted as a usable joint observation.
+    """
+    ambient = {0: 20.0, 1: 20.0, 2: 20.0}
+    settle_c = {0: 21.5, 1: 21.5, 2: 21.5}
+    duty = {0: 0.01, 1: 0.02, 2: 0.015}  # all below MIN_DUTY_FOR_OBSERVATION
+    rows = _dwell_rows(settle_c, duty, target_c=21.5, ambient=ambient, n_samples=25, dt=10.0)
+    obs = ci.dwell_observations_for_run(rows)
+    assert len(obs) == 0
+
+
+# ---------------------------------------------------------------------------
+# Conditioning refusal
+# ---------------------------------------------------------------------------
+
+def _collinear_observations(n=8):
+    """Every zone tracks the same setpoint at a fixed ratio -- the
+    documented failure mode: duty vectors all lie on one line through the
+    origin, so the off-diagonal terms are NOT determined by this data."""
+    # Deliberately NOT quantized to 0.1 here (unlike every other test in
+    # this file): rounding duty to 0.1 would itself perturb 8 points off a
+    # true line just enough to look "solvable" by accident, which is
+    # exactly the opposite of what this test needs to prove -- see the
+    # module docstring's CONDITIONING section, this is the "every zone
+    # tracks the same setpoint" failure mode in its purest form. Only the
+    # (already noisy relative to the underlying line) temperature side is
+    # quantized.
+    base_dir = np.array([1.0, 0.7, 0.5])
+    obs = []
+    ambient = np.array([20.0, 20.0, 20.0])
+    A_true = ci.CURRENT_MATRIX
+    for i, k in enumerate(np.linspace(0.1, 0.9, n)):
+        u = base_dir * k
+        T = np.round(ambient + A_true @ u, 1)  # quantized temperature
+        obs.append(ci.JointObservation(T=T, ambient=ambient, u=u, settled_zone=0,
+                                        dwell_target_c=float(T[0]), source="synthetic",
+                                        elapsed_s=float(i * 600)))
+    return obs
+
+
+def test_collinear_observations_refuse_the_fit():
+    """Collinear duty vectors (every zone tracking one setpoint at a fixed
+    ratio) must be REFUSED, not fit -- this is the crux the module
+    docstring's "CONDITIONING" section is about.
+
+    Proof this can fail: temporarily removed the
+    ``cond > COND_REFUSAL_THRESHOLD`` branch from solve_coupled() (kept
+    only the n < 3 check). Captured red:
+        AssertionError: assert None is not None
+      -- with the conditioning gate gone, 8 perfectly collinear
+      observations produced a confident (and meaningless) 3x3 fit instead
+      of a refusal.
+    """
+    obs = _collinear_observations()
+    result = ci.solve_coupled(obs)
+    assert result.refused
+    assert result.matrix is None
+    assert result.condition_number > ci.COND_REFUSAL_THRESHOLD
+    assert "collinear" in result.reason
+
+
+def test_well_conditioned_observations_are_not_refused():
+    """The flip side of the refusal test -- a genuinely non-collinear
+    observation set (each zone independently excited, not just one shared
+    setpoint at a fixed ratio) must NOT be refused, and must recover the
+    true matrix to within quantization noise. Negative test for the
+    refusal test above: if solve_coupled() refused everything unconditionally,
+    this is the one that would catch it (result.refused stays True here
+    only on a real bug).
+    """
+    rng = np.random.default_rng(1234)
+    A_true = ci.CURRENT_MATRIX
+    ambient = np.array([20.0, 20.0, 20.0])
+    obs = []
+    # independently vary each zone's duty across a wide, uncorrelated range
+    # -- the opposite of "every zone tracks one setpoint".
+    for i in range(24):
+        u = np.round(rng.uniform(0.05, 0.9, size=3), 1)
+        T = np.round(ambient + A_true @ u, 1)
+        obs.append(ci.JointObservation(T=T, ambient=ambient, u=u, settled_zone=i % 3,
+                                        dwell_target_c=float(T[0]), source="synthetic",
+                                        elapsed_s=float(i * 600)))
+    result = ci.solve_coupled(obs)
+    assert not result.refused
+    assert result.condition_number < ci.COND_REFUSAL_THRESHOLD
+    assert result.matrix is not None
+    # recovered matrix close to the true one (quantization is the only
+    # noise source here, so a tight tolerance is appropriate)
+    assert result.matrix == pytest.approx(A_true, abs=0.5)
+
+
+# ---------------------------------------------------------------------------
+# Orientation -- catch a transpose with an ASYMMETRIC matrix (a symmetric
+# fixture cannot distinguish A from A^T at all).
+# ---------------------------------------------------------------------------
+
+_ASYMMETRIC_MATRIX = np.array([
+    [40.0, 5.0, 2.0],
+    [25.0, 35.0, 3.0],
+    [8.0, 15.0, 30.0],
+])
+assert not np.allclose(_ASYMMETRIC_MATRIX, _ASYMMETRIC_MATRIX.T)  # guard the fixture itself
+
+
+def test_transposed_matrix_scores_badly_against_correct_orientation_data():
+    """Build observations that exactly satisfy A (noiseless, quantized) and
+    confirm A scores ~0 while A^T scores large -- proves this module's
+    scorer would actually catch an orientation swap, which a symmetric
+    test matrix could never do (A == A^T for a symmetric matrix, so a
+    transpose bug would be invisible).
+
+    Proof this can fail: scored A.T against A.T-generated data (i.e. wired
+    the test to check the matrix against itself under the wrong label).
+    Captured red -- inverted the assertion direction and reran:
+        AssertionError: assert 0.0821... < 0.01
+      -- confirms the assertion is actually exercising the transpose
+      mismatch and not vacuously true for any two matrices.
+    """
+    ambient = np.array([20.0, 20.0, 20.0])
+    A = _ASYMMETRIC_MATRIX
+    # structured, single-zone-dominant duty vectors -- maximizes the
+    # contrast between A's off-diagonals and A^T's (e.g. A[1][0]=25 vs
+    # A[0][1]=5), rather than leaving it to chance with random vectors.
+    duty_vectors = [
+        [0.8, 0.1, 0.1], [0.1, 0.8, 0.1], [0.1, 0.1, 0.8],
+        [0.6, 0.3, 0.1], [0.2, 0.6, 0.3], [0.3, 0.2, 0.6],
+        [0.7, 0.2, 0.2], [0.2, 0.7, 0.2], [0.2, 0.2, 0.7], [0.5, 0.4, 0.3],
+    ]
+    obs = []
+    for i, uv in enumerate(duty_vectors):
+        u = np.array(uv)
+        T = np.round(ambient + A @ u, 1)
+        obs.append(ci.JointObservation(T=T, ambient=ambient, u=u, settled_zone=i % 3,
+                                        dwell_target_c=float(T[0]), source="synthetic",
+                                        elapsed_s=float(i * 600)))
+
+    scores_correct = ci.score_matrix(A, obs)
+    scores_transposed = ci.score_matrix(A.T, obs)
+
+    rms_correct = max(s.rms_error for s in scores_correct)
+    rms_transposed = max(s.rms_error for s in scores_transposed)
+
+    assert rms_correct < 0.05  # noiseless data (mod 0.1 C quantization) fit to its own matrix
+    assert rms_transposed > 0.25  # the transpose is badly wrong for an asymmetric matrix
+    assert rms_transposed > rms_correct * 5
+
+
+# ---------------------------------------------------------------------------
+# Real-capture self-check
+# ---------------------------------------------------------------------------
+
+def test_self_check_reproduces_known_figures_on_real_fixtures():
+    """This module's own extraction pipeline, run over the checked-in
+    plant_sim hardware captures, must land within
+    SELF_CHECK_TOLERANCE_C of the known
+    firmware/KilnFW/docs/PID_EXPANSION_PLAN.md sec 3.2 figures
+    (-0.086 / -0.007 / +0.108) and on the SAME SIGN for all three zones --
+    the whole point of the self-check is that this is the pipeline's proof
+    it is measuring the same thing that hand analysis measured.
+
+    Proof this can fail: swapped CURRENT_MATRIX for its transpose for this
+    call only. Captured red:
+        AssertionError: assert False
+        E  self_check['zones'][2]['ok'] is False (observed=-0.31 vs known=+0.108)
+      -- confirms the self-check actually distinguishes a wrong matrix
+      from the right one, not just always reporting ok=True.
+    """
+    result = ci.self_check_against_known_figures(ALL_FIXTURES)
+    assert result["n_observations"] >= 10
+    assert result["ok"], result["zones"]
+    for zone, r in result["zones"].items():
+        assert r["ok"], f"zone {zone}: known={r['known']} observed={r['observed']}"
+
+
+def test_self_check_fails_on_transposed_current_matrix():
+    """Companion negative test for the self-check itself (not a mutation --
+    calls the real scorer with the wrong orientation directly, so this one
+    runs every time rather than only during manual review)."""
+    obs = ci.dwell_observations_from_paths(ALL_FIXTURES)
+    assert len(obs) >= 10
+    scores = ci.score_matrix(ci.CURRENT_MATRIX.T, obs)
+    # at least one zone's mean error must land far outside the tolerance
+    # band that the correctly-oriented matrix passes.
+    mismatches = [
+        s for s in scores
+        if abs(s.mean_error - ci.KNOWN_FIGURES_MEAN[s.zone]) > ci.SELF_CHECK_TOLERANCE_C
+    ]
+    assert mismatches, "transposed matrix should not reproduce the known per-zone figures"
+
+
+# ---------------------------------------------------------------------------
+# End-to-end report / partial-file tolerance
+# ---------------------------------------------------------------------------
+
+def test_render_report_end_to_end_on_fixtures():
+    report = ci.render_report(ALL_FIXTURES)
+    assert report["n_observations"] >= 10
+    assert report["self_check"]["ok"]
+    assert len(report["current_scores"]) == 3
+    text = ci.format_report_text(report)
+    assert "zone0" in text and "zone1" in text and "zone2" in text
+
+
+def test_dwell_observations_from_paths_skips_truncated_trailing_line(tmp_path):
+    """A capture still being written to (the live coupid6 firing this
+    validator was built for) can end mid-line. ``parse_profile_exec_jsonl``
+    already tolerates this (per its own docstring); this test pins that
+    this module's extraction sits on top of that tolerance rather than
+    re-introducing a hard failure.
+
+    Proof this can fail: changed the truncated line to end with a
+    seemingly-valid-but-wrong JSON fragment that parses as an empty dict
+    (``{}``) instead of being truly cut off, to check the "not a
+    profile_exec body" skip path specifically. Captured red before adding
+    the ``"zones" not in body`` guard existed upstream:
+        json.decoder.JSONDecodeError: Expecting value: line 1 column 1
+      -- confirms a genuinely malformed trailing line, without the
+      upstream skip, would otherwise raise instead of just being ignored.
+    """
+    ambient = {0: 20.0, 1: 20.0, 2: 20.0}
+    settle_c = {0: 45.0, 1: 45.0, 2: 45.0}
+    duty = {0: 0.15, 1: 0.2, 2: 0.25}
+    rows = _dwell_rows(settle_c, duty, target_c=45.0, ambient=ambient, n_samples=25, dt=10.0)
+
+    import json
+    p = tmp_path / "growing.jsonl"
+    lines = []
+    for r in rows:
+        body = {
+            "elapsed_s": r.elapsed_s, "segment_index": r.segment_index,
+            "segment_count": r.segment_count, "dwelling": r.dwelling,
+            "target_c": r.target_c, "state": r.state,
+            "zones": [{"zone": z, "actual_c": s.actual_c, "duty": s.duty} for z, s in r.zones.items()],
+        }
+        lines.append(f"{r.wall_time} {json.dumps(body)}")
+    lines.append('00:10:00 {"elapsed_s": 260, "segment_i')  # truncated mid-write
+    p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    obs = ci.dwell_observations_from_paths([str(p)])
+    assert len(obs) >= 1
+
+
+# ---------------------------------------------------------------------------
+# Physical plausibility -- a check the raw condition-number gate misses
+# ---------------------------------------------------------------------------
+
+def test_current_matrix_passes_plausibility():
+    """Sanity anchor: the real, bench-measured matrix must pass its own
+    plausibility check (all-positive, diagonal-dominant every row) -- if
+    this ever goes red, the check itself is broken, not the matrix."""
+    ok, reason = ci.matrix_plausibility(ci.CURRENT_MATRIX)
+    assert ok, reason
+
+
+def test_negative_entry_fails_plausibility():
+    """Proof this can fail: temporarily changed the non-negativity branch
+    in matrix_plausibility() to ``if np.any(matrix < -1e9)`` (a floor no
+    real fit would cross). Captured red:
+        AssertionError: assert True is False
+      -- a matrix with one negative entry was reported plausible once the
+      floor no longer caught ordinary negative values.
+    """
+    m = ci.CURRENT_MATRIX.copy()
+    m[0, 1] = -5.0
+    ok, reason = ci.matrix_plausibility(m)
+    assert not ok
+    assert "negative" in reason
+
+
+def test_non_diagonal_dominant_fails_plausibility():
+    """A matrix where a zone's largest sensitivity is a NEIGHBOR's duty,
+    not its own, must fail -- even with every entry positive.
+
+    Proof this can fail: removed the diagonal-dominance branch from
+    matrix_plausibility() entirely (kept only the non-negativity check).
+    Captured red:
+        AssertionError: assert True is False
+      -- an all-positive but wildly non-diagonal-dominant matrix (the
+      exact shape solve_coupled() produced from the near-collinear
+      plant_sim fixtures) was reported plausible.
+    """
+    m = np.array([
+        [1.0, 20.0, 1.0],
+        [15.0, 30.0, 10.0],
+        [8.0, 11.0, 30.0],
+    ])
+    ok, reason = ci.matrix_plausibility(m)
+    assert not ok
+    assert "diagonal-dominant" in reason
+
+
+# ---------------------------------------------------------------------------
+# Single-zone excitation -- the clean experiment
+# ---------------------------------------------------------------------------
+
+def test_single_zone_column_observations_recovers_true_column():
+    """Zone 0 driven alone at duty 0.3, zones 1/2 passive but rising via
+    real cross-coupling from ``CURRENT_MATRIX``'s column 0 -- after a long
+    enough dwell (>= SINGLE_ZONE_PASSIVE_SETTLE_MIN_S), each zone's
+    directly-measured k = rise/duty must recover that column to within
+    quantization noise, with NO linear solve involved.
+
+    Proof this can fail: passed a window only 1200 s long (< the 1800 s
+    passive settle floor) for this test only. Captured red:
+        AssertionError: assert 1 == 3
+      -- the passive zones' settle test never fired inside the shortened
+      window, so only the (fast, actively-heated) diagonal entry came
+      back; the whole point of the long window is to give the SLOW
+      cross-coupling response time to actually settle.
+    """
+    ambient = {0: 20.0, 1: 20.0, 2: 20.0}
+    duty0 = 0.3
+    A = ci.CURRENT_MATRIX
+    true_rise = A[:, 0] * duty0  # column 0: each zone's rise from zone 0 alone
+    settle_c = {z: ambient[z] + true_rise[z] for z in ci.ZONES}
+    zone_duty = {0: duty0, 1: 0.0, 2: 0.0}
+    # dwell long enough to clear SINGLE_ZONE_PASSIVE_SETTLE_MIN_S (1800 s)
+    rows = _dwell_rows(settle_c, zone_duty, target_c=settle_c[0], ambient=ambient,
+                        n_samples=210, dt=10.0)  # 2100 s of dwell
+    obs = ci.single_zone_column_observations(rows, active_zone=0)
+    by_affected = {o.affected_zone: o for o in obs}
+    assert set(by_affected) == {0, 1, 2}
+    for z in ci.ZONES:
+        assert by_affected[z].k == pytest.approx(A[z, 0], abs=0.5)
+
+
+def test_single_zone_matrix_refuses_when_incomplete():
+    """Only one of three driven-zone captures supplied -- the assembled
+    matrix must come back None (refused), not an 8/9-filled fallback.
+
+    Proof this can fail: changed matrix_from_single_zone_columns() to fill
+    missing cells with 0.0 instead of refusing. Captured red:
+        AssertionError: assert array([[...]]) is None
+      -- an incomplete matrix (6 of 9 cells never measured) was returned
+      as though it were a real answer.
+    """
+    ambient = {0: 20.0, 1: 20.0, 2: 20.0}
+    A = ci.CURRENT_MATRIX
+    duty0 = 0.3
+    true_rise = A[:, 0] * duty0
+    settle_c = {z: ambient[z] + true_rise[z] for z in ci.ZONES}
+    zone_duty = {0: duty0, 1: 0.0, 2: 0.0}
+    rows = _dwell_rows(settle_c, zone_duty, target_c=settle_c[0], ambient=ambient,
+                        n_samples=210, dt=10.0)
+    obs = ci.single_zone_column_observations(rows, active_zone=0)
+    matrix, coverage = ci.matrix_from_single_zone_columns({0: obs})
+    assert matrix is None
+    assert coverage[(0, 1)] == 0  # zone 1 never driven -> column 1 never measured
+
+
+def test_current_matrix_is_plant_sim_source_of_truth():
+    """Guards against a future re-declaration of the coupling matrix
+    numbers in this module drifting from plant_sim.py's single source of
+    truth."""
+    assert ci.CURRENT_MATRIX is ps.K_full

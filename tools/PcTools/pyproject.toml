@@ -38,6 +38,7 @@ saleae-capture = "kilnctrl.logic_capture:main"
 kilnctrl-console-capture = "kilnctrl.console_capture:main"
 kilnctrl-log-analysis = "kilnctrl.log_analysis:main"
 kilnctrl-plant-sim = "kilnctrl.plant_sim:main"
+kilnctrl-coupled-ident = "kilnctrl.coupled_ident:main"
 
 [build-system]
 requires = ["hatchling"]
