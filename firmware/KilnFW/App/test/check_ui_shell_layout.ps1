@@ -94,6 +94,12 @@ $required = @(
         Rules = @(
             "width: min(100% - 2rem, var(--kc-shell-max));"
         )
+    },
+    @{
+        File = "safety_page.html"
+        Rules = @(
+            "width: min(100% - 2rem, var(--kc-shell-max));"
+        )
     }
 )
 
