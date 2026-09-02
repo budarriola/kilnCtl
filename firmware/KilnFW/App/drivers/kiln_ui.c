@@ -269,8 +269,20 @@ esp_err_t kiln_ui_init(void)
      * "back buttons don't work" investigation), so showing them first would
      * just repeat that. ui_page_touch_cal_build() navigates to "home" on
      * its own once calibration completes (see its header comment) -- this
-     * is only what happens at boot, before that has ever run. */
-    if (!touch_cal_store_is_calibrated()) {
+     * is only what happens at boot, before that has ever run.
+     *
+     * Gated on lvgl_port_touch_is_self_calibrating() (DISPLAY_ST7796_PLAN.md
+     * section 7, Phase 5): touch_cal_store_is_calibrated() is permanently
+     * false for a self-calibrating controller (FT6336U.h) -- it never calls
+     * touch_cal_store_save(), by design, because it never runs that fit at
+     * all (touch_dev.h). Without this gate a board on that controller would
+     * boot straight into a 3x3 target grid it can never complete, every
+     * single boot, forever -- a hard boot-path breakage the plan calls out
+     * explicitly. Always takes the "!self_calibrating" branch today: no
+     * board built by this firmware has ever wired in a self-calibrating
+     * touch_dev_t (see lvgl_port_touch_is_self_calibrating()'s own comment),
+     * so this is currently a no-op that only matters once one does. */
+    if (!lvgl_port_touch_is_self_calibrating() && !touch_cal_store_is_calibrated()) {
         ESP_LOGI(TAG, "no touch calibration on file -- starting calibration instead of home");
         return kiln_ui_show("touch_cal");
     }

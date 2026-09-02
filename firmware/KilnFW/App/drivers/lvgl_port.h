@@ -99,6 +99,17 @@ void lvgl_port_reload_touch_cal(void);
  * this codebase accepts. */
 bool lvgl_port_touch_is_calibrated(void);
 
+/* True if the touch controller wired in at lvgl_port_start() is
+ * self-calibrating (touch_dev.h) -- i.e. it reports panel coordinates
+ * directly and never runs through touch_cal_store.h's per-board affine fit,
+ * so kiln_ui.c's boot-time forced-calibration gate must not send it into a
+ * 3x3 grid it can never complete (DISPLAY_ST7796_PLAN.md section 7) and
+ * ui_page_touch_cal.c should say so rather than present that grid. Always
+ * false on every board that exists today (this signature only ever receives
+ * an NS2009) -- true only once something wires in an FT6336U-backed
+ * touch_dev_t (FT6336U.h), which nothing in this firmware does yet. */
+bool lvgl_port_touch_is_self_calibrating(void);
+
 /* Ignores every touch while disabled -- kiln_ui.c wraps a page switch in
  * this (disable, load + force a synchronous render/flush, re-enable) so a
  * tap landing during the switch can't be read against the outgoing screen's

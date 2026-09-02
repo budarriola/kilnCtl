@@ -266,8 +266,55 @@ static void on_screen_loaded(lv_event_t *e)
     }
 }
 
+/* DISPLAY_ST7796_PLAN.md section 7 (Phase 5): a self-calibrating controller
+ * (touch_dev.h; FT6336U.h) never populates touch_cal_store -- it bypasses
+ * that fit entirely, by design -- so the 3x3 target grid below can never be
+ * completed on one: every tap would append to a calibration that is never
+ * read back by anything (touch_read_cb() never even checks
+ * s_touch_cal.calibrated for a self_calibrating device -- see lvgl_port.c).
+ * kiln_ui.c's boot path already skips straight past this page for that
+ * case; this covers the OTHER way in, Config's manual "Touch Calibration"
+ * nav button, with a plain explanatory screen instead of a grid that would
+ * silently do nothing. Always false on every board that exists today (see
+ * lvgl_port_touch_is_self_calibrating()'s own comment) -- this branch is
+ * unreached dead code until a self-calibrating touch_dev_t is ever wired
+ * in, same status as the FT6336U driver itself. */
+static lv_obj_t *build_self_calibrating_notice(void)
+{
+    lv_obj_t *scr = lv_obj_create(NULL);
+    lv_obj_set_style_bg_color(scr, UI_THEME_COLOR_BG, 0);
+    lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
+    lv_obj_remove_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *label = lv_label_create(scr);
+    lv_label_set_text(label, "This touch controller self-calibrates.\n"
+                              "No calibration step is needed or available.");
+    lv_obj_set_style_text_color(label, UI_THEME_COLOR_TEXT_PRIMARY, 0);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(label, lv_pct(80));
+    lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_center(label);
+
+    lv_obj_t *back_btn = lv_button_create(scr);
+    lv_obj_set_size(back_btn, UI_THEME_MIN_TOUCH_TARGET_PX * 2, UI_THEME_MIN_TOUCH_TARGET_PX);
+    lv_obj_align(back_btn, LV_ALIGN_BOTTOM_MID, 0, -UI_THEME_PADDING_PX);
+    lv_obj_set_style_bg_color(back_btn, UI_THEME_COLOR_CARD, 0);
+    lv_obj_set_style_radius(back_btn, UI_THEME_CORNER_RADIUS_PX, 0);
+    lv_obj_add_event_cb(back_btn, cancel_press_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *back_label = lv_label_create(back_btn);
+    lv_label_set_text(back_label, "Back");
+    lv_obj_set_style_text_color(back_label, UI_THEME_COLOR_TEXT_PRIMARY, 0);
+    lv_obj_center(back_label);
+
+    return scr;
+}
+
 lv_obj_t *ui_page_touch_cal_build(void)
 {
+    if (lvgl_port_touch_is_self_calibrating()) {
+        return build_self_calibrating_notice();
+    }
+
     lv_obj_t *scr = lv_obj_create(NULL);
     lv_obj_set_style_bg_color(scr, UI_THEME_COLOR_BG, 0);
     lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
