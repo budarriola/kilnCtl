@@ -127,6 +127,25 @@ static void lv_tick_timer_cb(void *arg)
  * after having been off, the active screen is invalidated so LVGL redraws
  * everything on the very next cycle instead of only whatever widget next
  * changes. */
+/* DISPLAY_ST7796_PLAN.md 9.1: the measurement the plan asks for before any
+ * DMA/async work is trusted, made reportable rather than requiring a bench
+ * session with a scope. Written only from ili9488_flush_cb() (lvgl_port_task,
+ * this file's own single-writer convention -- e.g. s_timer_handler_calls
+ * below), read by lvgl_port_get_flush_stats() from any task, same pattern.
+ * s_max_flush_us is a running high-water mark since boot, never reset --
+ * exactly what "worst chunked flush this board has actually pushed" needs to
+ * mean for a decision like 9.2/9.6's. */
+static volatile uint32_t s_last_flush_us;
+static volatile uint32_t s_max_flush_us;
+static volatile uint32_t s_flush_count;
+
+void lvgl_port_get_flush_stats(uint32_t *last_us, uint32_t *max_us, uint32_t *count)
+{
+    if (last_us) *last_us = s_last_flush_us;
+    if (max_us) *max_us = s_max_flush_us;
+    if (count) *count = s_flush_count;
+}
+
 static void ili9488_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
 {
     lvgl_port_t *p = (lvgl_port_t *)lv_display_get_user_data(disp);
@@ -167,6 +186,17 @@ static void ili9488_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t 
         uint16_t w = (uint16_t)(area->x2 - area->x1 + 1);
         uint16_t h = (uint16_t)(area->y2 - area->y1 + 1);
 
+        /* DISPLAY_ST7796_PLAN.md 9.1: "measure first" -- flush duration,
+         * taken here rather than guessed, so the real number can be read the
+         * moment anyone looks instead of waiting on a bench session. Spans
+         * exactly the SPI work (begin/data/end), not the screen_idle read or
+         * the skip-while-blanked branch above, since those aren't what 9.6's
+         * async-flush decision turns on. esp_timer_get_time() is a plain
+         * volatile read of a hardware counter -- safe to call from
+         * lvgl_port_task same as anywhere else, no lock needed for a
+         * single-writer stat. */
+        int64_t flush_start_us = esp_timer_get_time();
+
         esp_err_t err = ILI9488_blit_begin(p->display, x, y, w, h);
         if (err == ESP_OK) {
             /* Bytes/pixel from LVGL's own color format, not a hard-coded 2 --
@@ -184,6 +214,13 @@ static void ili9488_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t 
         if (err != ESP_OK) {
             ESP_LOGW(TAG, "flush [%u,%u %ux%u] failed: %s", x, y, w, h, esp_err_to_name(err));
         }
+
+        uint32_t flush_us = (uint32_t)(esp_timer_get_time() - flush_start_us);
+        s_last_flush_us = flush_us;
+        if (flush_us > s_max_flush_us) {
+            s_max_flush_us = flush_us;
+        }
+        s_flush_count++;
     }
 
     lv_display_flush_ready(disp);

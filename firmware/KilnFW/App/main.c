@@ -51,6 +51,7 @@
 #include "unit_pref.h"
 #include "profiles_http.h"
 #include "log_http.h"
+#include "adaptive_tune.h"
 #include "adaptive_tune_http.h"
 #include "log_store_mount.h"
 #include "readiness_http.h"
@@ -760,7 +761,20 @@ void app_main(void)
         .sclk_io_num = KILN_SPI_SCLK_IO,
         .quadwp_io_num = -1,
         .quadhd_io_num = -1,
-        .max_transfer_sz = ILI9488_SCRATCH_BYTES,
+        /* DISPLAY_ST7796_PLAN.md 9.2: sized to one full LVGL draw buffer
+         * (KILNCTL_LVGL_BUF_ROWS default 40 rows x 480px x 2B/px RGB565 =
+         * 38400B), not to ILI9488_SCRATCH_BYTES (1440B) -- this is the SPI
+         * host's per-transaction CEILING, not a buffer it allocates. Per
+         * §9's "facts established" section, raising it only grows two small
+         * DMA descriptor arrays (~24B per 4092B of ceiling, so ~230B total
+         * here), not a 38 KB allocation -- cheap against the ~1.6 kB
+         * internal-DRAM headroom in §10. Today's ILI9488 codec still chunks
+         * every flush at ILI9488_SCRATCH_BYTES (panel_spi.c's
+         * disp->chunk_bytes), so this alone changes nothing observable on
+         * the currently-attached panel; it is the precondition a future
+         * ST7796 zero-copy flush (9.7) needs to DMA a whole LVGL buffer in
+         * one transaction instead of 27 chunked ones. */
+        .max_transfer_sz = KILNCTL_SPI_MAX_TRANSFER_SZ,
     };
     esp_err_t spi_err = spi_bus_initialize(KILN_SPI_HOST, &spi_config, SPI_DMA_CH_AUTO);
     if (spi_err == ESP_ERR_INVALID_STATE) {
@@ -917,8 +931,13 @@ void app_main(void)
         // do not "fix" this ordering by moving ILI9488_start() later, or by
         // moving lvgl_port_start() earlier: either change puts two tasks in
         // a position to draw at once.
+        // i2c_bus (may be NULL if the bus itself failed to come up, see
+        // above) is passed through for DISPLAY_ST7796_PLAN.md Sec.6 Step 3's
+        // touch-address corroboration -- only read from when
+        // KILNCTL_DISPLAY_PANEL_AUTO is selected (not the default); every
+        // other build ignores it entirely.
         esp_err_t disp_err =
-            ILI9488_start(&display, &thermo_bus.owner, KILN_SPI_HOST, io_ready ? &kio : NULL);
+            ILI9488_start(&display, &thermo_bus.owner, KILN_SPI_HOST, io_ready ? &kio : NULL, i2c_bus);
         if (disp_err != ESP_OK) {
             ESP_LOGE(TAG, "ILI9488 bring-up failed: %s", esp_err_to_name(disp_err));
         } else {
@@ -1216,6 +1235,18 @@ void app_main(void)
         ESP_LOGW(TAG, "zones_http_start failed: %s -- no Thermocouples & Zones page this boot",
                  esp_err_to_name(zones_err));
     }
+    // PID_EXPANSION_PLAN.md 3.3, U2: adaptive_tune.c's per-zone opt-in flags
+    // now live in the zone config blob zones_http_start() just loaded (or
+    // failed to -- either way, s_zones.cfg is in a defined, safe-default
+    // state by the time this returns, same as every other module's non-
+    // fatal load above). MUST run after zones_http_start(), never before --
+    // adaptive_tune_init() (profile_executor_start(), much earlier in this
+    // function) runs too early for it; see adaptive_tune_load_enable_
+    // flags()'s own comment for the ordering evidence. Non-fatal like every
+    // settings-load call in this block: this function has no failure mode
+    // that stops app_main, only zones left at their struct-zero (opted-out)
+    // default if something upstream never loaded.
+    adaptive_tune_load_enable_flags();
     // 2026-08-27+2 (Tasks 1/2/3): the per-zone current sweep, the runtime
     // CT-to-zone mapping check, and the read-only safety-processor wiring
     // display all need real hardware, which zones_http_start() itself

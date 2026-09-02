@@ -128,10 +128,23 @@ static bool max31856_ready(const MAX31856Class *ch)
 }
 
 /* --- Low-level register access ----------------------------------------
- * Every transfer goes through spi_owner_transfer(), which owns the queue, the
- * ~CS bit-banging (each device's CS is a plain GPIO -- spics_io_num is -1) and
- * the actual spi_device_transmit() call on its own task. Nothing in this file
- * touches the SPI driver directly except at init. */
+ * Every transfer goes through spi_owner_transfer_polling(), which owns the
+ * queue, the ~CS bit-banging (each device's CS is a plain GPIO -- spics_io_num
+ * is -1) and the actual spi_device_polling_transmit() call on its own task.
+ * Nothing in this file touches the SPI driver directly except at init.
+ *
+ * DISPLAY_ST7796_PLAN.md 9.5: the _polling variant, not spi_owner_transfer(),
+ * because every MAX31856 transfer here is <= MAX31856_MAX_XFER_LEN bytes
+ * (well under the SPI FIFO) and measured IDF overhead on S3 is 11us for
+ * spi_device_polling_transmit() versus 26us for the queued/ISR path -- for
+ * transfers this short the queue/ISR round trip costs more than it saves.
+ * This changes only which ESP-IDF call the shared owner task issues; the
+ * data path, error semantics and return codes here are unchanged -- same
+ * esp_err_t, same rx layout, same owner-task-is-sole-issuer invariant
+ * (DISPLAY_ST7796_PLAN.md section 8). A polling transmit only ever runs on
+ * the owner task's own thread (never from an ISR, never from this file's own
+ * caller's task context), so its busy-wait cannot stall anything but that
+ * one task for the duration of an 11us transfer. */
 
 /* Burst read: one address byte with bit 7 clear, then `len` bytes clocked out
  * of SDO while zeros go in. The part auto-increments the address "as long as
@@ -152,7 +165,7 @@ static esp_err_t max31856_read_burst(MAX31856Class *ch, uint8_t reg, uint8_t *ou
     memset(rx, 0, sizeof(rx));
     tx[0] = (uint8_t)(reg & 0x7Fu); /* bit 7 = 0 selects a read */
 
-    esp_err_t err = spi_owner_transfer(&ch->bus->owner, ch->dev, tx, len + 1u, rx, len + 1u,
+    esp_err_t err = spi_owner_transfer_polling(&ch->bus->owner, ch->dev, tx, len + 1u, rx, len + 1u,
                                        ch->cs_gpio);
     if (err != ESP_OK) {
         return err;
@@ -177,7 +190,7 @@ static esp_err_t max31856_write_burst(MAX31856Class *ch, uint8_t reg, const uint
     tx[0] = MAX31856_WRITE_ADDR(reg);
     memcpy(&tx[1], data, len);
 
-    return spi_owner_transfer(&ch->bus->owner, ch->dev, tx, len + 1u, NULL, 0, ch->cs_gpio);
+    return spi_owner_transfer_polling(&ch->bus->owner, ch->dev, tx, len + 1u, NULL, 0, ch->cs_gpio);
 }
 
 static esp_err_t max31856_write_u8(MAX31856Class *ch, uint8_t reg, uint8_t value)

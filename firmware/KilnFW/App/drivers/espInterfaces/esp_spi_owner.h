@@ -87,6 +87,19 @@ typedef struct {
                * owner_slot_pool_alloc(). Never a pointer into the caller's
                * stack -- see owner_slot_pool.h's top comment for why. */
     bool shutdown;
+    /* DISPLAY_ST7796_PLAN.md 9.5: MAX31856 register transfers are <=17 bytes
+     * and fit the SPI FIFO; measured IDF overhead on S3 is 11us for
+     * spi_device_polling_transmit() versus 26us for the queued/ISR path
+     * spi_device_transmit() takes. Set only by spi_owner_transfer_polling()
+     * (thermocouple call sites); display flush transfers -- larger, DMA'd --
+     * keep going through spi_device_transmit(). This changes ONLY which
+     * ESP-IDF entry point spi_owner_task() calls; the owner task itself is
+     * still the sole issuer of transfers on the bus (the single-owner
+     * invariant, DISPLAY_ST7796_PLAN.md section 8), and a polling transmit
+     * only ever runs on the owner task's own thread, so it "busy-waits" on
+     * that task and nowhere else -- never from an ISR or from a caller's own
+     * task context, where a busy-wait would be harmful. */
+    bool use_polling;
 } spi_owner_request_t;
 
 /* Operator-visible accessor for spi_owner_t::wedged (opus review, commit
@@ -104,6 +117,23 @@ esp_err_t spi_owner_init(spi_owner_t *owner,
                              BaseType_t core_id);
 esp_err_t spi_owner_deinit(spi_owner_t *owner);
 esp_err_t spi_owner_transfer(spi_owner_t *owner,
+                                 spi_device_handle_t device,
+                                 const uint8_t *tx_buffer,
+                                 size_t tx_length,
+                                 uint8_t *rx_buffer,
+                                 size_t rx_length,
+                                 int cs_pin);
+
+/* DISPLAY_ST7796_PLAN.md 9.5: identical contract to spi_owner_transfer()
+ * above (same queuing, same bounded 9.9 timeout, same wedge semantics) --
+ * the only difference is that the owner task issues this transfer with
+ * spi_device_polling_transmit() instead of spi_device_transmit(). Intended
+ * for MAX31856 register transfers only (<=17 bytes; measured 11us on S3 vs
+ * 26us for the queued path) -- NOT for display flush transfers, which stay
+ * on spi_owner_transfer() so a large transfer keeps using the ISR/DMA
+ * completion path rather than busy-waiting the owner task for its whole
+ * duration. */
+esp_err_t spi_owner_transfer_polling(spi_owner_t *owner,
                                  spi_device_handle_t device,
                                  const uint8_t *tx_buffer,
                                  size_t tx_length,

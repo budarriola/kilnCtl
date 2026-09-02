@@ -147,7 +147,15 @@ static void spi_owner_task(void *arg)
                 .rx_buffer = request.rx_buffer,
                 .rxlength = request.rx_length * 8,
             };
-            result = spi_device_transmit(request.device, &trans);
+            /* DISPLAY_ST7796_PLAN.md 9.5: dispatch on the request, not the
+             * device -- a polling transmit only ever runs here, on the
+             * owner task's own thread, never from an ISR and never from a
+             * caller's task context, so "busy-wait" costs exactly the
+             * transfer's own 11us and nothing else is blocked by it except
+             * whatever else is queued behind this same owner (true of the
+             * queued path too). */
+            result = request.use_polling ? spi_device_polling_transmit(request.device, &trans)
+                                          : spi_device_transmit(request.device, &trans);
             gpio_set_level((gpio_num_t)request.cs_pin, 1);
         } else {
             result = ESP_ERR_INVALID_ARG;
@@ -317,13 +325,14 @@ bool spi_owner_is_wedged(const spi_owner_t *owner)
     return owner && owner->wedged;
 }
 
-esp_err_t spi_owner_transfer(spi_owner_t *owner,
+static esp_err_t spi_owner_transfer_impl(spi_owner_t *owner,
                                  spi_device_handle_t device,
                                  const uint8_t *tx_buffer,
                                  size_t tx_length,
                                  uint8_t *rx_buffer,
                                  size_t rx_length,
-                                 int cs_pin)
+                                 int cs_pin,
+                                 bool use_polling)
 {
     if (!owner || !owner->initialized || !owner->request_queue || !device) {
         return ESP_ERR_INVALID_ARG;
@@ -366,6 +375,7 @@ esp_err_t spi_owner_transfer(spi_owner_t *owner,
     request.rx_length = rx_length;
     request.cs_pin = cs_pin;
     request.slot = idx;
+    request.use_polling = use_polling;
 
     if (xQueueSend(owner->request_queue, &request, pdMS_TO_TICKS(SPI_OWNER_TRANSFER_TIMEOUT_MS)) !=
         pdTRUE) {
@@ -432,4 +442,28 @@ esp_err_t spi_owner_transfer(spi_owner_t *owner,
                   "presumed wedged, failing all transfers until spi_owner_deinit()",
              (unsigned)SPI_OWNER_TRANSFER_TIMEOUT_MS);
     return ESP_ERR_TIMEOUT;
+}
+
+esp_err_t spi_owner_transfer(spi_owner_t *owner,
+                                 spi_device_handle_t device,
+                                 const uint8_t *tx_buffer,
+                                 size_t tx_length,
+                                 uint8_t *rx_buffer,
+                                 size_t rx_length,
+                                 int cs_pin)
+{
+    return spi_owner_transfer_impl(owner, device, tx_buffer, tx_length, rx_buffer, rx_length, cs_pin,
+                                    /*use_polling=*/false);
+}
+
+esp_err_t spi_owner_transfer_polling(spi_owner_t *owner,
+                                 spi_device_handle_t device,
+                                 const uint8_t *tx_buffer,
+                                 size_t tx_length,
+                                 uint8_t *rx_buffer,
+                                 size_t rx_length,
+                                 int cs_pin)
+{
+    return spi_owner_transfer_impl(owner, device, tx_buffer, tx_length, rx_buffer, rx_length, cs_pin,
+                                    /*use_polling=*/true);
 }

@@ -187,6 +187,13 @@ bool lvgl_port_indev_exists(void);
 /* ONE-OFF root-cause probe -- see lvgl_port.c's definition comment. */
 void lvgl_port_get_timer_handler_calls(uint32_t *calls);
 
+/* DISPLAY_ST7796_PLAN.md 9.1's measurement, made reportable -- see
+ * lvgl_port.c's definition comment. last_us/max_us are microseconds spent in
+ * the flush's SPI work (ILI9488_blit_begin/data/end), NOT lvgl_port_task's
+ * overall CPU use; max_us is a running high-water mark since boot. Any
+ * out-param may be NULL if the caller doesn't want that one. */
+void lvgl_port_get_flush_stats(uint32_t *last_us, uint32_t *max_us, uint32_t *count);
+
 #ifdef __cplusplus
 }
 #endif

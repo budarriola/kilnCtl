@@ -163,6 +163,21 @@
  * as TOUCH_Z1_MAX_THRESHOLD above -- see the Kconfig help text. */
 #define LVGL_BUF_ROWS          CONFIG_KILNCTL_LVGL_BUF_ROWS
 
+/* DISPLAY_ST7796_PLAN.md 9.2: the shared SPI host's per-transaction ceiling
+ * (main.c's spi_bus_config_t::max_transfer_sz). The plan's target is one
+ * full default LVGL draw buffer (480 x 40 x 2B RGB565 = 38400B) so a future
+ * zero-copy flush (9.7) can DMA a whole buffer in one transaction, but the
+ * hard SPI DMA ceiling documented in §9 (SPI_LL_DMA_MAX_BIT_LEN) is 32768B
+ * -- below that -- so this is clamped to the hard cap itself rather than to
+ * the buffer size, which also makes it independent of whatever
+ * KILNCTL_LVGL_BUF_ROWS is tuned to later. Raising max_transfer_sz costs
+ * only DMA descriptor arrays (~24B per 4092B of ceiling per §9, ~200B
+ * total here), not a 32 KB allocation -- see main.c's spi_config comment for
+ * the full accounting against §10's ~1.6 kB internal-DRAM headroom. Still
+ * comfortably above today's ILI9488_SCRATCH_BYTES (1440B) chunk size, so
+ * this alone changes nothing observable on the currently-attached panel. */
+#define KILNCTL_SPI_MAX_TRANSFER_SZ 32768u
+
 /* Bool Kconfig options that are OFF generate no CONFIG_* macro at all (not
  * "defined as 0") -- valid inside an `#if`, but a bare `#define X
  * CONFIG_KILNCTL_...` alias then leaves X expanding to an undeclared

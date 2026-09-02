@@ -42,6 +42,13 @@ extern int g_stub_queue_ring_enabled;
 
 #include <stdint.h>
 
+// Defined here (declared extern in stubs/driver/spi_master.h), same
+// convention as g_stub_queue_send_calls -- DISPLAY_ST7796_PLAN.md 9.5's
+// dispatch tests below need to tell spi_device_transmit() and
+// spi_device_polling_transmit() apart.
+int g_stub_spi_transmit_calls = 0;
+int g_stub_spi_polling_transmit_calls = 0;
+
 static void test_wedge_latches_and_fails_fast(void)
 {
     spi_owner_t owner;
@@ -214,6 +221,114 @@ static void test_pool_exhaustion_fails_closed_not_wedged(void)
     TEST_CHECK(!owner.wedged, "pool exhaustion does NOT latch owner.wedged");
 }
 
+// DISPLAY_ST7796_PLAN.md 9.5: MAX31856 register transfers move to
+// spi_device_polling_transmit() (11us measured vs 26us for the queued/ISR
+// path); display flush transfers stay on spi_device_transmit(). The dispatch
+// lives in spi_owner_task() itself (`request.use_polling ? ... : ...`), which
+// -- unlike spi_owner_transfer()'s caller-side logic covered above -- this
+// project's host stubs normally never reach (freertos/task.h's
+// xTaskCreatePinnedToCore() never invokes the task function). Reached here
+// anyway by calling spi_owner_task() directly: it is an ordinary C function
+// (not a real FreeRTOS task) that loops on xQueueReceive() until it dequeues
+// a shutdown request, so preloading the stub's ring queue (stubs/freertos/
+// queue.h's g_stub_queue_ring_enabled opt-in) with one transfer followed by a
+// shutdown request lets it run to completion synchronously in this
+// single-threaded host process, exactly as this file's header comment
+// anticipated might be needed for the SUCCESS path.
+static void test_owner_task_dispatches_polling_vs_queued(void)
+{
+    g_stub_queue_ring_enabled = 1;
+
+    spi_owner_t owner;
+    esp_err_t init_err = spi_owner_init(&owner, 0 /*host*/, 4 /*queue_len*/, 5 /*priority*/,
+                                         2048 /*stack*/, -1 /*core*/);
+    TEST_CHECK(init_err == ESP_OK, "spi_owner_init succeeds against the host stubs");
+
+    uint8_t tx[4] = { 1, 2, 3, 4 };
+    int idx = owner_slot_pool_alloc(owner.slot_refcount, owner.slot_count);
+    TEST_CHECK(idx >= 0, "setup: a slot for the hand-built polling request");
+
+    spi_owner_request_t polling_req;
+    memset(&polling_req, 0, sizeof(polling_req));
+    polling_req.device = (spi_device_handle_t)0x1;
+    polling_req.tx_buffer = tx;
+    polling_req.tx_length = sizeof(tx);
+    polling_req.cs_pin = 5;
+    polling_req.slot = idx;
+    polling_req.use_polling = true;
+
+    spi_owner_request_t shutdown_req;
+    memset(&shutdown_req, 0, sizeof(shutdown_req));
+    shutdown_req.shutdown = true;
+
+    TEST_CHECK(xQueueSend(owner.request_queue, &polling_req, 0) == pdTRUE,
+               "setup: polling request accepted by the ring");
+    TEST_CHECK(xQueueSend(owner.request_queue, &shutdown_req, 0) == pdTRUE,
+               "setup: shutdown request accepted by the ring");
+
+    g_stub_spi_transmit_calls = 0;
+    g_stub_spi_polling_transmit_calls = 0;
+
+    spi_owner_task(&owner); // returns once it dequeues the shutdown request
+
+    TEST_CHECK(g_stub_spi_polling_transmit_calls == 1,
+               "use_polling=true dispatched through spi_device_polling_transmit()");
+    TEST_CHECK(g_stub_spi_transmit_calls == 0,
+               "use_polling=true did NOT also go through spi_device_transmit()");
+
+    g_stub_queue_ring_enabled = 0;
+}
+
+// Same mechanism, use_polling=false -- the display flush path this session
+// did NOT move to polling (9.5 is scoped to MAX31856 only; see esp_spi_owner.c's
+// comment on spi_owner_transfer() vs spi_owner_transfer_polling()). Proves
+// the two dispatch arms are actually distinguished, not just that the
+// polling arm fires -- flip request.use_polling in esp_spi_owner.c's
+// spi_owner_task() and this goes red (g_stub_spi_transmit_calls would read 0).
+static void test_owner_task_dispatches_queued_when_not_polling(void)
+{
+    g_stub_queue_ring_enabled = 1;
+
+    spi_owner_t owner;
+    esp_err_t init_err = spi_owner_init(&owner, 0 /*host*/, 4 /*queue_len*/, 5 /*priority*/,
+                                         2048 /*stack*/, -1 /*core*/);
+    TEST_CHECK(init_err == ESP_OK, "spi_owner_init succeeds against the host stubs");
+
+    uint8_t tx[4] = { 9, 9, 9, 9 };
+    int idx = owner_slot_pool_alloc(owner.slot_refcount, owner.slot_count);
+    TEST_CHECK(idx >= 0, "setup: a slot for the hand-built queued request");
+
+    spi_owner_request_t queued_req;
+    memset(&queued_req, 0, sizeof(queued_req));
+    queued_req.device = (spi_device_handle_t)0x1;
+    queued_req.tx_buffer = tx;
+    queued_req.tx_length = sizeof(tx);
+    queued_req.cs_pin = 5;
+    queued_req.slot = idx;
+    queued_req.use_polling = false;
+
+    spi_owner_request_t shutdown_req;
+    memset(&shutdown_req, 0, sizeof(shutdown_req));
+    shutdown_req.shutdown = true;
+
+    TEST_CHECK(xQueueSend(owner.request_queue, &queued_req, 0) == pdTRUE,
+               "setup: queued request accepted by the ring");
+    TEST_CHECK(xQueueSend(owner.request_queue, &shutdown_req, 0) == pdTRUE,
+               "setup: shutdown request accepted by the ring");
+
+    g_stub_spi_transmit_calls = 0;
+    g_stub_spi_polling_transmit_calls = 0;
+
+    spi_owner_task(&owner);
+
+    TEST_CHECK(g_stub_spi_transmit_calls == 1,
+               "use_polling=false dispatched through spi_device_transmit()");
+    TEST_CHECK(g_stub_spi_polling_transmit_calls == 0,
+               "use_polling=false did NOT also go through spi_device_polling_transmit()");
+
+    g_stub_queue_ring_enabled = 0;
+}
+
 void run_test_esp_spi_owner(void)
 {
     TEST_SECTION("esp_spi_owner");
@@ -221,4 +336,6 @@ void run_test_esp_spi_owner(void)
     test_completion_timeout_orphans_slot();
     test_pool_sized_queue_len_plus_one();
     test_pool_exhaustion_fails_closed_not_wedged();
+    test_owner_task_dispatches_polling_vs_queued();
+    test_owner_task_dispatches_queued_when_not_polling();
 }
