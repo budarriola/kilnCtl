@@ -39,9 +39,14 @@ this plan is not mistaken for a defect list.
 Several assumptions made before this inventory were wrong. They are corrected
 here so they do not get re-adopted later.
 
-### 2.1 There IS a responsive strategy — it is the body cap
+### 2.1 There WAS a responsive strategy — it was the body cap
 
-Every substantial page sets a `max-width` on `body` with `margin: auto`:
+**Superseded by §6:** all 13 pages now set
+`max-width: var(--kc-shell-max)` (`clamp(480px, 90vw, 1100px)`). The
+pre-Phase-2 inventory below is kept only because it explains what the
+problem was.
+
+Every substantial page used to set its own `max-width` on `body`:
 
 | page | body cap |
 |---|---|
@@ -56,14 +61,14 @@ The convention is documented in-source at `backup_page.html:45`,
 `settings_page.html:43`: "shrinks to fit 320px phones automatically, holds at
 640px on anything wider."
 
-**This is the thing to change, and it is the whole problem in one line.** The
+**This was the thing to change, and it was the whole problem in one line.** The
 UI is a single fluid column capped at 420–620 px and centred. It is correct on
 a phone and correct on a tablet. On a 1280 px or 1920 px display it is a narrow
 ribbon in the middle of an empty screen. "Support different display sizes"
 means, concretely: earn the horizontal space above the cap.
 
-The three pages with no cap at all are a separate inconsistency worth fixing in
-the same pass.
+The three pages with no cap at all were a separate inconsistency, fixed in the
+same pass.
 
 ### 2.2 The per-page `:root` blocks are NOT identical
 
@@ -343,8 +348,9 @@ container-query rules on `.card`; all 13 pages converted. `main_page.html`
 `#channels` and `zones_page.html` `#zones` became
 `repeat(auto-fit, minmax(260px,1fr))` grids — a 320px floor was tried first
 and caught overflowing a 320px viewport, so 260px is what shipped. New lint
-`check_ui_shell_layout.ps1` guards 18 rules; `run_all_checks.ps1` is now 22
-checks total.
+`check_ui_shell_layout.ps1` guards 18 rules and runs from
+`run_all_checks.ps1`, which discovers its check list rather than carrying a
+count — do not restate the count here, it moves every time a check lands.
 
 Notes below kept for reference; only after Phase 1, because every rule here
 wants to be written once.
@@ -477,8 +483,9 @@ cap (2.1, 2.2). Neither is a rendering problem, so a renderer does not fix
 them. Tailwind would mean rewriting class names across 670 kB of source; Pico
 or Bootstrap would fight `theme.css`, which is deliberate and documented.
 
-Flash is not the objection — the app slot has 1.22 MB free
-(`FLASH_BUDGET_PLAN.md` §1) and Preact-with-signals or Lit is ~5–6 kB gzipped.
+Flash is not the objection — the app slot has ~1.15 MiB free
+(`FLASH_BUDGET_PLAN.md` §4.2, which owns that number) and Preact-with-signals
+or Lit is ~5–6 kB gzipped.
 
 **Re-open the question when, and only when,** the dashboards still hurt after
 Phase 2. The candidates are `main_page.html` (54,936 B gzipped, 17 `fetch`
@@ -515,7 +522,6 @@ An esbuild bundling step is worth doing *with* a framework pilot and not before
   have no corresponding source file. Stale output from deleted pages. Harmless
   — `EMBED_TXTFILES` only embeds what the CMake list names — but worth
   confirming they are genuinely unreferenced rather than silently still linked.
-- **Three pages have no body cap** (`readiness`, `settings`,
-  `settings_display`) while the other six use four different values
-  (420/480/560/620). Phase 2 replaces all of it, but the inconsistency is
-  itself evidence the cap was never a considered global decision.
+- **The body cap was never a considered global decision** — three pages had
+  none and the rest used four different values. Phase 2 replaced all of it
+  with one token.
