@@ -999,11 +999,10 @@ static void profiles_handle_message(void *vargs)
                                 ok ? NULL : "no such profile");
                 break;
             }
-            case PROFILES_CMD_GET_EXEC_STATUS: {
-                size_t len = profiles_build_exec_status(reply);
-                bx_reply(ctx->proto, &msg, UART_TASK_ID_PROFILES, reply, len);
-                break;
-            }
+            /* GET_EXEC_STATUS is handled inline in profiles_task(), before this
+             * message ever reaches the worker -- see that function's comment.
+             * Kept out of this switch entirely (not just unreachable) so
+             * there is exactly one place that builds this reply. */
             case PROFILES_CMD_START: {
                 if (!bx_args_ok("profiles", &msg, 2)) {
                     bx_reply_ok_err(ctx->proto, &msg, UART_TASK_ID_PROFILES, subcmd, false, "truncated");
@@ -1059,6 +1058,37 @@ static void profiles_task(void *arg)
             ESP_LOGW(TAG, "profiles: empty payload -- rejected");
             continue;
         }
+
+        /* GET_EXEC_STATUS is a pure read (profile_executor_get_status() only
+         * takes s_exec.lock and memcpy's a snapshot -- no NVS/flash access
+         * anywhere in it), so it does NOT need this file's internal-SRAM-
+         * stack worker, which exists solely for the PSRAM-stack-vs-flash-
+         * cache hazard documented at the top of this file. Routing it
+         * through bx_run_on_internal_stack() anyway used to serialize it
+         * behind that worker's single in-flight job -- shared with every
+         * CONTROL/PROFILES/AUTOTUNE mutating (flash-writing) command AND
+         * safety_cfg_store's deferred NVS flush -- and additionally behind
+         * profile_executor's own s_exec.lock, which the executor task holds
+         * for the length of an entire 1 Hz tick (PID/feedforward/guard math
+         * for every active zone, plus an occasional in-lock NVS write from
+         * relay_cycles_maybe_persist()). A caller polling GET_EXEC_STATUS at
+         * a fixed cadence during a multi-zone firing could queue behind
+         * either of those and miss a 3 s reply deadline -- the frame was
+         * already ACKed by the transport before any of this ran, so the
+         * request looked delivered right up until the reply arrived late (or
+         * the caller had already given up). thermo_read has no such
+         * indirection: its bridge task answers straight from its own task,
+         * which is why it never showed the same symptom under the same load.
+         * Answering here, directly on profiles_task's own stack, removes
+         * both queuing points for this one read-only subcommand without
+         * touching the flash-writing subcommands' worker dispatch below. */
+        if (msg.payload[0] == PROFILES_CMD_GET_EXEC_STATUS) {
+            uint8_t reply[BRIDGE_REPLY_MAX];
+            size_t len = profiles_build_exec_status(reply);
+            bx_reply(ctx->proto, &msg, UART_TASK_ID_PROFILES, reply, len);
+            continue;
+        }
+
         bx_handler_args_t args = { .ctx = ctx, .msg = &msg };
         bx_run_on_internal_stack(profiles_handle_message, &args);
     }

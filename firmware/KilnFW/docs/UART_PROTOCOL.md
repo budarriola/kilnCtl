@@ -778,6 +778,35 @@ an operator-relevant reason the GUI needs immediately.
 `0xFF` (`PROFILES_SAVE_ID_NEW`) as `SAVE`'s id byte requests "first free
 slot", mirroring `POST /api/profile`'s empty/`-1`/out-of-range `id` field.
 
+**`GET_EXEC_STATUS` answers inline on `profiles_task`, not the flash worker
+(2026-09-02 fix).** Every other PROFILES subcommand dispatches through
+`bx_run_on_internal_stack()` — the single-job internal-SRAM worker
+`uart_bridge_ext.c` also uses for CONTROL/AUTOTUNE's flash-writing commands
+and `safety_cfg_store`'s deferred NVS flush — because `SAVE`/`DELETE`/`START`/
+etc. reach `nvs_*()` and need that worker's internal stack. `GET_EXEC_STATUS`
+never touches flash (`profile_executor_get_status()` only takes
+`s_exec.lock` and copies a snapshot), so it used to pay for that indirection
+for nothing: queued behind whatever flash-writing job the worker was already
+running, AND behind `s_exec.lock` itself, which `profile_executor`'s own 1 Hz
+tick holds for the length of a full tick — PID/feedforward/guard math for
+every active zone, plus an in-lock NVS write from
+`relay_cycles_maybe_persist()` whenever it's due (at most once per 600 s).
+Observed live: with three zones running, polling `GET_EXEC_STATUS` over
+UART/MCP timed out ("ACKed but no reply within 3.0 s") roughly 40% of the
+time, while the same data over HTTP (`GET /api/profile_exec`, which calls
+`profile_executor_get_status()` directly from the httpd task, no worker/lock
+queuing) was clean across a full firing. The reply was never lost — the
+transport ACK happens on frame receipt, independent of the handler, so a
+delayed handler still eventually sends a real reply, just possibly after the
+caller's deadline. Fix: `profiles_task()` now special-cases `subcmd ==
+PROFILES_CMD_GET_EXEC_STATUS` and answers it directly on its own stack,
+before the worker dispatch — `thermo_read`'s bridge task already worked this
+way (answers inline, no worker), which is why it never showed the symptom
+under the same load. No host test covers this: `uart_bridge_ext.c` links no
+host test at all (FreeRTOS task/queue machinery, not host-buildable — see
+`test_bx_worker_reentrancy.c`'s own comment), so this was verified by
+`build_kilnfw` plus code inspection only, not a red/green test.
+
 **`LIST` is paged (2026-08-20).** A summary record is up to 19 bytes (id,
 name_len, <=15-byte name, zone_mask, segment_count); 8 user slots plus the 28
 shipped built-ins is ~532 bytes against the 253-byte `UART_PROTO_MAX_PAYLOAD`
