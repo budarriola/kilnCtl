@@ -115,8 +115,25 @@ function startStaticServer(dir, port) {
       res.end('not found');
     }
   });
+  // The fixed default (9334) can already be held by a leftover process from a
+  // previous run or a concurrent gate on this same machine -- that is an
+  // environment fact, not a layout regression, and reporting it as a sweep
+  // FAILURE would be exactly the false-failure class this driver's own
+  // callers (check_ui_responsive_sweep.ps1, the regression suite) are meant
+  // to avoid. On EADDRINUSE, retry once on an OS-assigned ephemeral port
+  // (0) and hand the actual bound port back to the caller via
+  // `server.address().port` -- any other listen error still rejects.
   return new Promise((resolve, reject) => {
-    server.on('error', reject);
+    const onError = (err) => {
+      if (err && err.code === 'EADDRINUSE') {
+        server.removeListener('error', onError);
+        server.once('error', reject);
+        server.listen(0, '127.0.0.1', () => resolve(server));
+      } else {
+        reject(err);
+      }
+    };
+    server.once('error', onError);
     server.listen(port, '127.0.0.1', () => resolve(server));
   });
 }
@@ -543,6 +560,14 @@ async function main() {
   ], { stdio: 'ignore' });
 
   const staticServer = await startStaticServer(args.dir, args.staticPort);
+  // startStaticServer falls back to an ephemeral port if args.staticPort was
+  // busy (EADDRINUSE) -- read back whatever it actually bound rather than
+  // assuming the requested port, or every page URL below would 404 against
+  // a server that isn't there.
+  const staticPort = staticServer.address().port;
+  if (staticPort !== args.staticPort) {
+    console.error(`ui_responsive_sweep: static port ${args.staticPort} was busy, using ${staticPort} instead`);
+  }
 
   const rows = [];
   let anyFail = false;
@@ -551,7 +576,7 @@ async function main() {
     await waitForPort(args.port, 15000);
 
     for (const pf of pageFiles) {
-      const pageUrl = `http://127.0.0.1:${args.staticPort}/${pf}`;
+      const pageUrl = `http://127.0.0.1:${staticPort}/${pf}`;
       const fixtureScript = PAGE_FIXTURES[pf];
       for (const width of args.widths) {
         let result, failures;
