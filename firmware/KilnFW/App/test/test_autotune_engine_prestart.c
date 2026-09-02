@@ -404,11 +404,17 @@ bool zones_config_get_sanity_rate(uint8_t zone_index, float *out_c_per_min)
 // for why this needed to change from an unconditional 0.0f.
 static float s_stub_max_temp_c = 0.0f;
 
+// Configurable per-test (default 0.0f, same convention as s_stub_max_temp_c
+// above -- direct assignment, no setter). Added for the relay setpoint
+// window tests, which need a real min_temp_c on both sides of the guard
+// window fix, not just the hardcoded 0.0f every earlier test relied on.
+static float s_stub_min_temp_c = 0.0f;
+
 bool zones_config_get_temp_limits(uint8_t zone_index, float *out_max_temp_c, float *out_min_temp_c)
 {
     (void)zone_index;
     if (out_max_temp_c) *out_max_temp_c = s_stub_max_temp_c;
-    if (out_min_temp_c) *out_min_temp_c = 0.0f;
+    if (out_min_temp_c) *out_min_temp_c = s_stub_min_temp_c;
     return false;
 }
 
@@ -808,6 +814,7 @@ static void start_stepping_run_rule(float max_temp_c, float step_duty, autotune_
     TEST_CHECK(s_at.lock != NULL, "test setup: lock must be creatable");
 
     s_stub_max_temp_c = max_temp_c;
+    s_stub_min_temp_c = 0.0f;
     s_stub_ch0_ok = true;
 
     char errbuf[96] = {0};
@@ -847,6 +854,7 @@ static void start_settling_run(float max_temp_c, float step_duty)
     TEST_CHECK(s_at.lock != NULL, "test setup: lock must be creatable");
 
     s_stub_max_temp_c = max_temp_c;
+    s_stub_min_temp_c = 0.0f;
     s_stub_ch0_ok = true;
     reset_extra_channel_stubs();
 
@@ -3623,6 +3631,113 @@ static bool call_run_to_target(float max_temp_c, float target_c, autotune_rule_t
     return autotune_engine_run_to_target(0, target_c, rule, errbuf, errcap);
 }
 
+// Same setup convention as call_run_to_target() above, for
+// autotune_engine_run_relay()'s setpoint-window guard.
+static bool call_run_relay(float max_temp_c, float min_temp_c, float setpoint_c, char *errbuf, size_t errcap)
+{
+    static MAX31856BusClass bus;
+    static SafetyLinkClass safety;
+    memset(&s_at, 0, sizeof(s_at));
+    memset(&bus, 0, sizeof(bus));
+    memset(&safety, 0, sizeof(safety));
+    bus.initialized = true;
+    s_at.thermo_bus = &bus;
+    s_at.safety = &safety;
+    s_at.lock = xSemaphoreCreateMutex();
+    TEST_CHECK(s_at.lock != NULL, "test setup: lock must be creatable");
+
+    s_stub_max_temp_c = max_temp_c;
+    s_stub_min_temp_c = min_temp_c;
+    s_stub_ch0_ok = true;
+
+    return autotune_engine_run_relay(0, setpoint_c, /*relay_d=*/0.0f /* -> default */,
+                                      /*hysteresis_c=*/0.0f /* -> default */, AUTOTUNE_RULE_ZIEGLER_NICHOLS, errbuf,
+                                      errcap);
+}
+
+// Live-proven blocker (see task): this rig's zone limits are max=80C,
+// min=0C. Against the old fixed 50C-each-side headroom that demanded 100C
+// of headroom on an 80C span -- an EMPTY window, so every setpoint was
+// refused: 55C got "must be at least 50C below the 80C limit", 30C got
+// "must be at least 50C above the 0C floor". No setpoint could ever be
+// accepted and relay identification could never run on this hardware.
+static void test_relay_setpoint_narrow_rig_span_now_has_a_usable_window(void)
+{
+    TEST_SECTION("relay setpoint window on this rig's real 80C/0C span must NOT be empty -- a sensible "
+                 "setpoint (e.g. 40C, the span's midpoint) must now be ACCEPTED");
+    char err[128] = {0};
+
+    // Span 80, 2*50=100 > 80, so headroom scales to 80*0.25=20 -> window
+    // [20, 60]. 55C (refused live on hardware under the old logic) and
+    // 30C (also refused live) must both be accepted now.
+    bool ok = call_run_relay(/*max_temp_c=*/80.0f, /*min_temp_c=*/0.0f, /*setpoint_c=*/55.0f, err, sizeof(err));
+    TEST_CHECK(ok, "55C under an 80/0 span must be accepted -- this exact setpoint was refused live on hardware");
+    TEST_CHECK(s_at.method == AUTOTUNE_METHOD_RELAY, "an accepted call must actually start the relay method");
+
+    ok = call_run_relay(/*max_temp_c=*/80.0f, /*min_temp_c=*/0.0f, /*setpoint_c=*/30.0f, err, sizeof(err));
+    TEST_CHECK(ok, "30C under an 80/0 span must be accepted -- this exact setpoint was also refused live on "
+                   "hardware");
+
+    // Outside the scaled window must still refuse, but with a single
+    // message naming the real window -- not the old two-sided contradiction.
+    ok = call_run_relay(/*max_temp_c=*/80.0f, /*min_temp_c=*/0.0f, /*setpoint_c=*/65.0f, err, sizeof(err));
+    TEST_CHECK(!ok, "65C is above the scaled window's 60C top -- must refuse");
+    TEST_CHECK(strstr(err, "20") != NULL && strstr(err, "60") != NULL,
+               "err_msg must name the actual computed window (20C to 60C), not a fixed 50C headroom claim");
+
+    ok = call_run_relay(/*max_temp_c=*/80.0f, /*min_temp_c=*/0.0f, /*setpoint_c=*/10.0f, err, sizeof(err));
+    TEST_CHECK(!ok, "10C is below the scaled window's 20C bottom -- must refuse");
+    TEST_CHECK(strstr(err, "20") != NULL && strstr(err, "60") != NULL,
+               "err_msg must name the actual computed window (20C to 60C) here too");
+}
+
+static void test_relay_setpoint_wide_span_keeps_the_full_50c_headroom(void)
+{
+    TEST_SECTION("a wide span (plenty of room for the full 50C headroom on both sides) must behave exactly "
+                 "as before -- no regression from the narrow-span fallback");
+    char err[128] = {0};
+
+    // Span 1000 (min 0, max 1000), 2*50=100 << 1000, so the full 50C
+    // headroom applies unchanged -> window [50, 950].
+    bool ok = call_run_relay(/*max_temp_c=*/1000.0f, /*min_temp_c=*/0.0f, /*setpoint_c=*/500.0f, err, sizeof(err));
+    TEST_CHECK(ok, "500C is comfortably inside [50, 950] on a wide span -- must be accepted");
+
+    ok = call_run_relay(/*max_temp_c=*/1000.0f, /*min_temp_c=*/0.0f, /*setpoint_c=*/970.0f, err, sizeof(err));
+    TEST_CHECK(!ok, "970C is inside the full 50C headroom under a 1000C ceiling -- must still refuse");
+    TEST_CHECK(strstr(err, "50") != NULL, "err_msg must still reflect the un-scaled 50C headroom on a wide span");
+
+    ok = call_run_relay(/*max_temp_c=*/1000.0f, /*min_temp_c=*/0.0f, /*setpoint_c=*/949.0f, err, sizeof(err));
+    TEST_CHECK(ok, "949C is just outside the 50C headroom (window top 950) -- must be accepted");
+
+    ok = call_run_relay(/*max_temp_c=*/1000.0f, /*min_temp_c=*/0.0f, /*setpoint_c=*/951.0f, err, sizeof(err));
+    TEST_CHECK(!ok, "951C is just inside the 50C headroom (window top 950) -- must refuse");
+
+    ok = call_run_relay(/*max_temp_c=*/1000.0f, /*min_temp_c=*/0.0f, /*setpoint_c=*/40.0f, err, sizeof(err));
+    TEST_CHECK(!ok, "40C is inside the full 50C headroom above the 0C floor -- must still refuse");
+
+    ok = call_run_relay(/*max_temp_c=*/1000.0f, /*min_temp_c=*/0.0f, /*setpoint_c=*/60.0f, err, sizeof(err));
+    TEST_CHECK(ok, "60C is just outside the 50C headroom above the floor (window bottom 50) -- must be accepted");
+}
+
+static void test_relay_setpoint_pathologically_narrow_span_refuses_with_stated_window(void)
+{
+    TEST_SECTION("a span too narrow to leave ANY window (max_temp_c == min_temp_c) must refuse with ONE "
+                 "message that states the computed (empty/inverted) window -- never two contradictory ones");
+    char err[128] = {0};
+
+    // Zero-width span: max == min == 40C. headroom = 0*0.25 = 0, so
+    // window_lo == window_hi == 40C -- window_lo >= window_hi, refused by
+    // the dedicated "no window exists" branch, one message only.
+    bool ok = call_run_relay(/*max_temp_c=*/40.0f, /*min_temp_c=*/40.0f, /*setpoint_c=*/40.0f, err, sizeof(err));
+    TEST_CHECK(!ok, "a zero-width span must refuse -- there is no safe setpoint");
+    TEST_CHECK(s_at.method != AUTOTUNE_METHOD_RELAY, "a refused call must not have started a run at all");
+    TEST_CHECK(strstr(err, "40") != NULL, "err_msg must name the actual span (40C to 40C), not a generic refusal");
+    // Exactly one refusal message, not the old pair -- check neither of the
+    // two retired phrasings survived as dead code paths still reachable.
+    TEST_CHECK(strstr(err, "at least") == NULL,
+               "must not fall through to either of the old two-sided 'at least NC below/above' messages");
+}
+
 static void test_run_to_target_rejects_relay_only_rules(void)
 {
     TEST_SECTION("autotune_engine_run_to_target() refuses ZN/Tyreus-Luyben, same as autotune_engine_run()");
@@ -4765,6 +4880,9 @@ void run_test_autotune_engine_prestart(void)
     test_probe_done_refuses_identify_duty_below_the_progress_duty_min_floor();
     test_probe_done_accepts_identify_duty_above_the_progress_duty_min_floor();
     test_probe_done_propagates_probe_fit_failure();
+    test_relay_setpoint_narrow_rig_span_now_has_a_usable_window();
+    test_relay_setpoint_wide_span_keeps_the_full_50c_headroom();
+    test_relay_setpoint_pathologically_narrow_span_refuses_with_stated_window();
     test_run_to_target_rejects_relay_only_rules();
     test_run_to_target_default_uses_75_percent_of_max_temp();
     test_run_to_target_default_refused_when_max_temp_c_is_zero();

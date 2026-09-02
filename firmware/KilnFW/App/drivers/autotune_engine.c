@@ -3431,17 +3431,41 @@ bool autotune_engine_run_relay(uint8_t zone_index, float setpoint_c, float relay
         if (err_msg) snprintf(err_msg, err_cap, "relay test requires an oscillation setpoint (degC)");
         return false;
     }
-    if (setpoint_c > max_temp_c - AUTOTUNE_RELAY_SETPOINT_HEADROOM_C) {
+    /* AUTOTUNE_RELAY_SETPOINT_HEADROOM_C (50C) either side is the right
+     * margin whenever the zone's span leaves room for it, but a zone can be
+     * legitimately commissioned with a narrow span (this rig: max 80C, min
+     * 0C -- a 80C span against a 50C-each-side headroom demands 100C of
+     * headroom alone, which is an EMPTY window: every setpoint was refused,
+     * one side or the other, and relay identification could never run at
+     * all). Scale the headroom down to a quarter of the span when the full
+     * 50C does not fit, so the window degrades gracefully instead of
+     * vanishing. A span so narrow that even the scaled-down headroom leaves
+     * nothing (window would invert) is refused once, with the computed
+     * window stated -- never the old two mutually exclusive messages, which
+     * told the operator nothing about what *would* have been accepted. */
+    float span = max_temp_c - min_temp_c;
+    float headroom = AUTOTUNE_RELAY_SETPOINT_HEADROOM_C;
+    if (span < 2.0f * AUTOTUNE_RELAY_SETPOINT_HEADROOM_C) {
+        headroom = span * 0.25f;
+    }
+    float window_lo = min_temp_c + headroom;
+    float window_hi = max_temp_c - headroom;
+    if (window_lo >= window_hi) {
         if (err_msg) {
-            snprintf(err_msg, err_cap, "setpoint must be at least %.0fC below this zone's %.0fC limit",
-                     (double)AUTOTUNE_RELAY_SETPOINT_HEADROOM_C, (double)max_temp_c);
+            snprintf(err_msg, err_cap,
+                     "zone %u's span (%.0fC floor to %.0fC limit) is too narrow for a relay test -- "
+                     "no setpoint window exists",
+                     zone_index, (double)min_temp_c, (double)max_temp_c);
         }
         return false;
     }
-    if (setpoint_c < min_temp_c + AUTOTUNE_RELAY_SETPOINT_HEADROOM_C) {
+    if (setpoint_c < window_lo || setpoint_c > window_hi) {
         if (err_msg) {
-            snprintf(err_msg, err_cap, "setpoint must be at least %.0fC above this zone's %.0fC floor",
-                     (double)AUTOTUNE_RELAY_SETPOINT_HEADROOM_C, (double)min_temp_c);
+            snprintf(err_msg, err_cap,
+                     "relay setpoint must be between %.0fC and %.0fC for zone %u (floor %.0fC, limit %.0fC, "
+                     "%.0fC headroom each side)",
+                     (double)window_lo, (double)window_hi, zone_index, (double)min_temp_c, (double)max_temp_c,
+                     (double)headroom);
         }
         return false;
     }
