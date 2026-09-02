@@ -246,11 +246,21 @@ CONFIG_SPIRAM_MEMTEST=y
 # DMA-capable allocations are unaffected either way -- those request
 # MALLOC_CAP_DMA explicitly and always come from internal RAM, and
 # MALLOC_RESERVE_INTERNAL below keeps a floor for them.
-# ALWAYSINTERNAL stays at the IDF default of 16384. Lowering it to 4096 was
-# tried and reverted, 2026-08-20 -- recorded here so the next person does not
-# repeat it: on real hardware the LVGL display task stopped starting at all
-# ("Failed to start lvgl_port_task"), more UART task inboxes failed than
-# before, and the PC-link safety watchdog failed with ESP_ERR_NO_MEM.
+# ALWAYSINTERNAL: DRAM_PSRAM_PLAN.md Phase 1 (2026-09-02) calls for stepping
+# this down 16384 -> 8192 -> 4096 -> 2048, soaking and measuring at each step.
+# Only the first step is landed here. Jumping straight to 4096 was tried
+# BEFORE that plan existed and reverted, 2026-08-20 -- recorded above (this
+# comment used to say ALWAYSINTERNAL "stays at" 16384 for that reason) -- on
+# real hardware the LVGL display task stopped starting at all ("Failed to
+# start lvgl_port_task"), more UART task inboxes failed than before, and the
+# PC-link safety watchdog failed with ESP_ERR_NO_MEM. That prior attempt
+# changed TRY_ALLOCATE_WIFI_LWIP in the same experiment (see the paragraph
+# below), so it is not a clean data point against 4096 alone, but it is real
+# evidence against jumping there without an intermediate step and a soak --
+# which is exactly what the plan's stepped approach (8192 first) is for. Do
+# NOT advance past 8192 without a hardware soak per DRAM_PSRAM_PLAN.md section
+# 5's soak definition (a full firing plus 24h idle-with-Wi-Fi), and do not run
+# that soak while a real firing is already in progress on the board.
 #
 # TRY_ALLOCATE_WIFI_LWIP is ON, enabled 2026-08-20 after being measured
 # properly. IMPORTANT correction to the earlier record: this knob was
@@ -296,8 +306,13 @@ CONFIG_SPIRAM_MEMTEST=y
 # xQueueCreateWithCaps(), and LVGL's entire allocator via lvgl_mem_psram.c.
 # See lvgl_port.c, uart_bridge.c, uart_bridge_ext.c and
 # espInterfaces/uart_protocol.c.
-CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=16384
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=8192
 CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
+# MALLOC_RESERVE_INTERNAL: re-examined per DRAM_PSRAM_PLAN.md section 5
+# ("re-examine ... in the same pass") and left at 32768 -- this is the floor
+# reserved for MALLOC_CAP_DMA/INTERNAL requests, which ALWAYSINTERNAL does not
+# affect, so there is no reason tied to this step to move it. Revisit only if
+# a DMA-capable allocation failure shows up under soak.
 CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=32768
 
 # CONFIG_PARTITION_TABLE_CUSTOM: found the hard way 2026-08-20, same audit
