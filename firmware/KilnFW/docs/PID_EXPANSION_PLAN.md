@@ -415,6 +415,34 @@ same document's own 2026-08-29/30 bench sections contradict.
       hysteresis-corrected describing function
       (Ku = 4d/(π·√(a²−h²))), coupled-plant effects, or a biased τ.
 
+      **Simulated first, per owner decision (2026-09-02), zone 0 only.**
+      `plant_sim.run_profile()` over profile 7's real two-segment shape
+      (segments derived from `tests/fixtures/plant_sim/final.jsonl` via
+      `segs_from_capture`), scored with `pid_ab_compare`'s metric set, at
+      rested (24 C) and warm (34 C) starts, for current gains (kp 0.0318 ki
+      0.0001 kd 0.8401), Tyreus-Luyben (kp 0.06106 ki 8.303e-5 kd 3.24009)
+      and Ziegler-Nichols from the same Ku/Tu via firmware's own conversion
+      (`pid_autotune.c`'s `kc=0.6·Ku, Ti=Tu/2, Td=Tu/8`: kp 0.11724 ki
+      7.014e-4 kd 4.89917).
+
+      | start | gains | whole-run normalized IAE (z0) |
+      |---|---|---|
+      | 24 C | current | 1.456 C |
+      | 24 C | TL | 1.264 C |
+      | 24 C | ZN | 0.940 C |
+      | 34 C | current | 0.830 C |
+      | 34 C | TL | 0.902 C |
+      | 34 C | ZN | 0.828 C |
+
+      Every |gain-set − current| gap (0.003–0.516 C) is well under the
+      sim's own held-out validation RMS on zone 0 (3.51 C, §3.4) — **the sim
+      cannot call a winner here**, and TL's apparent edge at 24 C flips to a
+      small loss at 34 C, which is itself smaller than the sim's noise
+      floor. Verdict: neither TL nor ZN has a simulated advantage large
+      enough to justify a hardware confirmation run yet, independent of the
+      still-open Ku/Tu reconciliation above, which remains the harder
+      blocker. Simulation only — no gains were applied to the board.
+
       Original diagnosis below, kept for the reasoning trail:
       `relay_law_tick()` decides the bang-bang branch every tick (1 Hz), but
       actuation went through `heater_output_duty()`, the ordinary PID
