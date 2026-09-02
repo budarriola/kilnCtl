@@ -425,13 +425,21 @@ second-dwell cold bias (1.8–2.6 °C) is now nearly gone (0.15 °C).
 `CURRENT_MATRIX` in `coupled_ident.py` — "what firmware ships" — was
 deliberately decoupled from `plant_sim.K_full` — "the sim's best physical
 estimate" — so this recalibration does not silently change what the
-firmware-facing adaptive-tune self-checks are calibrated against. **Stale as
-of the 2026-09-02 adoption:** the board now carries §3.2's off-diagonals
-(verified over `GET /api/zones`), but `CURRENT_MATRIX` still holds the old
-bench matrix and its comment still says it stays pinned "until that adoption
-happens". Every self-check scored against `CURRENT_MATRIX` is therefore
-scoring the matrix the board no longer runs. Code fix, not a doc fix — not
-made here.
+firmware-facing adaptive-tune self-checks are calibrated against. **Fixed
+2026-09-02 (`5e96424`):** `CURRENT_MATRIX` was stale in two ways at once —
+the board had moved off it, and it was never even the true pre-adoption
+bench matrix (it held superseded sec-2-identification off-diagonals). Split
+into three explicitly named constants: `ADOPTED_HYBRID_MATRIX` (adopted
+off-diagonals + `ff_k_dc` diagonal — what the board runs today, used by
+`render_report`'s "current on-board matrix" and `build_coupling_report`'s
+delta-vs-current baseline) and `SEC2_IDENTIFICATION_HYBRID_MATRIX` (the old
+`CURRENT_MATRIX` values, renamed but unchanged — still correct for
+`self_check_against_known_figures`'s historical regression fixture, which
+really was computed against those numbers). `build_coupling_report`'s "old"
+(now current-board) scores moved from the sec-2 matrix's biases
+(−0.081/−0.040/+0.113) to the actually-running hybrid's
+(−0.094/−0.056/+0.116) — matching this section's "hybrid, what actually
+runs" table above exactly.
 
 **Held-out validation** (`tests/fixtures/plant_sim/p7_fuzzy0_held_out.jsonl`,
 a live profile-7 fuzzy=0 tracking run, deliberately excluded from the fit):
@@ -441,9 +449,11 @@ fresh-PID/plant state does not match hardware's already-settled state (a
 cold-start artifact of this particular capture, not a re-identified plant
 defect — the ramp segment right after the cold start carries nearly all the
 error; the second ramp segment, once the sim has caught up, tracks to
-0.4–1.6 °C). Test pins a 6.0 °C bound per zone; genuinely tighter validation
-needs a held-out capture that starts from a rested zero, which does not exist
-yet.
+0.4–1.6 °C). Test pins a 6.0 °C bound per zone. **Superseded 2026-09-02d
+below:** rested-start captures now exist and confirm this was a cold-start
+capture artifact, not a plant defect — pooled held-out RMS from three t=0
+rested full firings is z0 1.05 °C, z1 0.61 °C, z2 0.67 °C, an
+order-of-magnitude tighter figure than the 3.51/3.15/3.56 °C above.
 
 **Known behaviours, checked against the recalibrated sim:** dwell-entry
 overshoot reproduces in the right direction and rough scale but undershoots
@@ -730,7 +740,8 @@ same document's own 2026-08-29/30 bench sections contradict.
       | 34 C | ZN | 0.828 C |
 
       Every |gain-set − current| gap (0.003–0.516 C) is well under the
-      sim's own held-out validation RMS on zone 0 (3.51 C, §3.4) — **the sim
+      2026-09-02d discrimination threshold for zone 0 (2.1 C, §3.4, from the
+      rested-start held-out RMS) — **the sim
       cannot call a winner here**, and TL's apparent edge at 24 C flips to a
       small loss at 34 C, which is itself smaller than the sim's noise
       floor. Verdict: neither TL nor ZN has a simulated advantage large
@@ -798,8 +809,9 @@ same document's own 2026-08-29/30 bench sections contradict.
       | 34 C | z2 | 0.669 | 0.679 | 0.692 | 0.707 | 0.725 |
 
       Largest spread across all five strengths, either start: 0.457 C
-      (z0, rested). The sim's own held-out validation RMS is 3.51/3.15/
-      3.56 C (§3.4) — **the spread is under 15% of that**, so per the
+      (z0, rested). The 2026-09-02d discrimination threshold (§3.4, from
+      the rested-start held-out RMS) is 2.1/1.2/1.3 C per zone — **the
+      spread is well under that**, so per the
       honesty gate this sim cannot call a winner; every strength is
       indistinguishable from strength=0 given what this model can actually
       resolve. Worth recording anyway: the ranking is monotonic — every
