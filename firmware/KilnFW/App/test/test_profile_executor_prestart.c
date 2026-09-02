@@ -562,6 +562,33 @@ bool zones_config_get_coupling(uint8_t zone_index, float out_row[MAX31856_CHANNE
     return true;
 }
 
+/* adaptive_tune.c's coupled-solve apply path (PID_EXPANSION_PLAN.md 3.3, the
+ * off-diagonal coupling_coeff refinement layer added alongside the
+ * already-linked diagonal K_dc path above) also calls these three -- trivial
+ * stand-ins, same "all zero, always succeeds" posture as g_stub_coupling
+ * above; none of this file's tests exercise the coupled solve itself (it
+ * needs ADAPTIVE_TUNE_COUPLED_OBS_MARGIN+MAX31856_CHANNEL_COUNT joint dwell
+ * observations these prestart fixtures never build up), only link
+ * resolution. */
+bool zones_config_get_coupling_tau(uint8_t zone_index, float out_row[MAX31856_CHANNEL_COUNT])
+{
+    if (zone_index >= MAX31856_CHANNEL_COUNT) return false;
+    for (uint8_t j = 0; j < MAX31856_CHANNEL_COUNT; j++) out_row[j] = 0.0f;
+    return true;
+}
+bool zones_config_get_coupling_dead_time(uint8_t zone_index, float out_row[MAX31856_CHANNEL_COUNT])
+{
+    if (zone_index >= MAX31856_CHANNEL_COUNT) return false;
+    for (uint8_t j = 0; j < MAX31856_CHANNEL_COUNT; j++) out_row[j] = 0.0f;
+    return true;
+}
+bool zones_config_set_coupling_cell(uint8_t zone_index, uint8_t neighbor_index, float coeff, float tau_s,
+                                     float dead_time_s)
+{
+    (void)zone_index; (void)neighbor_index; (void)coeff; (void)tau_s; (void)dead_time_s;
+    return true;
+}
+
 bool zones_config_get_pid(uint8_t zone_index, float *out_kp, float *out_ki, float *out_kd)
 {
     (void)zone_index;

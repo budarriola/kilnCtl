@@ -470,9 +470,17 @@ Invoke-HostTestExe -Name "telemetry_format" -ExePath $exe16 -BuildCmd $cmd16
 $exe17 = Join-Path $outDir "kilnctl_host_tests_adaptive_tune.exe"
 $atObjDir = Join-Path $outDir "at"
 New-Item -ItemType Directory -Force -Path $atObjDir | Out-Null
+# zone_coupling_solve.c is now linked in too (real code, not a fake) --
+# adaptive_tune.c's full coupled identification (PID_EXPANSION_PLAN.md 3.3)
+# calls zone_coupling_gauss_solve_partial_pivot_vec() for the actual linear
+# solve/conditioning check; this test file supplies the one symbol that
+# module's OTHER (unused-by-this-file) functions still need at link time,
+# zones_config_get_coupling(), as a tiny fake table alongside its existing
+# zones_config_get/set_model/pid fakes.
 $cmd17 = "call `"$vcvars`" x64 >nul && cl /nologo /W3 /EHsc /std:c11 /I`"$stubDir`" /I`"$commonInc`" " +
         "/Fo:`"$atObjDir\\`" /Fe:`"$exe17`" " +
-        "`"$(Join-Path $testDir 'test_adaptive_tune.c')`" `"$(Join-Path $driversDir 'pid_autotune.c')`""
+        "`"$(Join-Path $testDir 'test_adaptive_tune.c')`" `"$(Join-Path $driversDir 'pid_autotune.c')`" " +
+        "`"$(Join-Path $driversDir 'zone_coupling_solve.c')`""
 
 Invoke-HostTestExe -Name "adaptive_tune" -ExePath $exe17 -BuildCmd $cmd17
 

@@ -21,13 +21,17 @@ static const char *TAG = "adaptive_tune_http";
  * internal-DRAM-exhaustion incident that truncated /app.js (see project
  * memory "ESP internal DRAM exhaustion" and the documented httpd stack
  * near-overflow, 64 bytes free under real load). At MAX31856_CHANNEL_COUNT
- * (<=5) zones this is <=544 bytes, once, freed before the handler returns.
- * The enable-POST body buffer below stays a small fixed stack array (<=65
- * bytes) -- consistent with the tiny form-body buffers already used
- * elsewhere in this codebase (e.g. adaptive_tune.c's own prior version of
- * this handler, settings_http.c) and far below anything that would threaten
- * the documented near-overflow margin. */
-#define ADAPTIVE_TUNE_STATUS_BUF_BYTES (96 * MAX31856_CHANNEL_COUNT + 64)
+ * (<=5) zones this is comfortably under 1.5KB, once, freed before the
+ * handler returns -- the per-zone budget below was widened from 96 to 320
+ * bytes when the coupled-solve/Ki-diagnosis fields (PID_EXPANSION_PLAN.md
+ * 3.3) were added, to cover two more ~96-byte refusal-reason strings per
+ * zone plus their surrounding numeric fields. The enable-POST body buffer
+ * below stays a small fixed stack array (<=65 bytes) -- consistent with the
+ * tiny form-body buffers already used elsewhere in this codebase (e.g.
+ * adaptive_tune.c's own prior version of this handler, settings_http.c) and
+ * far below anything that would threaten the documented near-overflow
+ * margin. */
+#define ADAPTIVE_TUNE_STATUS_BUF_BYTES (320 * MAX31856_CHANNEL_COUNT + 64)
 
 static esp_err_t status_get_handler(httpd_req_t *req)
 {
@@ -46,11 +50,22 @@ static esp_err_t status_get_handler(httpd_req_t *req)
             buf + off, ADAPTIVE_TUNE_STATUS_BUF_BYTES - off,
             "%s{\"zone\":%u,\"enabled\":%s,\"observation_count\":%u,\"observations_lifetime\":%u,"
             "\"has_applied\":%s,\"prior_k_dc\":%.4f,\"applied_k_dc\":%.4f,\"delta_pct\":%.2f,"
-            "\"last_profile_id\":%u,\"last_applied_unix_s\":%u,\"refusal\":\"%s\"}",
+            "\"last_profile_id\":%u,\"last_applied_unix_s\":%u,\"refusal\":\"%s\","
+            // Full coupled identification (PID_EXPANSION_PLAN.md 3.3, layer 2) --
+            // joint_observations is module-wide (same number on every zone), the rest
+            // is per-zone (this zone's row of coupling_coeff[]).
+            "\"joint_observations\":%u,\"coupled_attempted\":%s,\"coupled_applied\":%s,"
+            "\"coupled_cells_changed\":%u,\"coupled_refusal\":\"%s\","
+            // Integral (Ki) diagnosis from dwells (same section, layer 2).
+            "\"ki_verdict\":%u,\"ki_correction_pct\":%.2f,\"ki_applied\":%s,\"ki_refusal\":\"%s\"}",
             zi == 0 ? "" : ",", (unsigned)zi, st.enabled ? "true" : "false", (unsigned)st.ring_count,
             (unsigned)st.observations_lifetime, st.has_applied ? "true" : "false", (double)st.prior_k_dc,
             (double)st.applied_k_dc, (double)st.last_delta_pct, (unsigned)st.last_applied_profile_id,
-            (unsigned)st.last_applied_unix_s, st.last_refusal_reason);
+            (unsigned)st.last_applied_unix_s, st.last_refusal_reason,
+            (unsigned)st.joint_observations, st.coupled_attempted ? "true" : "false",
+            st.coupled_applied ? "true" : "false", (unsigned)st.coupled_cells_changed, st.coupled_refusal_reason,
+            (unsigned)st.ki_verdict, (double)st.ki_correction_pct, st.ki_applied ? "true" : "false",
+            st.ki_refusal_reason);
         if (off >= ADAPTIVE_TUNE_STATUS_BUF_BYTES) {
             off = ADAPTIVE_TUNE_STATUS_BUF_BYTES - 1; // truncated -- MAX31856_CHANNEL_COUNT is small (<=5) and
                                                         // the buffer sized generously, so this should not trigger

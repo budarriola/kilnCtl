@@ -14,7 +14,11 @@
 #include "nvs_flash.h"
 
 #include "pid_autotune.h"
-#include "zones_http.h" // zones_config_get_model/set_model/get_pid/set_pid
+#include "zone_coupling_solve.h" // zone_coupling_gauss_solve_partial_pivot_vec() -- the ONLY thing of this
+                                  // module's this file calls; never edited here (see PID_EXPANSION_PLAN.md
+                                  // 3.3 and this file's coupled-fit comments for why reusing its conditioning
+                                  // check is load-bearing, not cosmetic)
+#include "zones_http.h" // zones_config_get_model/set_model/get_pid/set_pid/get_coupling/set_coupling_cell
 
 // uart_bridge_ext.c's internal-SRAM-stack flash-write executor. Declared by
 // hand rather than #include "uart_bridge.h" -- same reasoning safety_cfg_
@@ -103,6 +107,134 @@ static const char *TAG = "adaptive_tune";
 // produce an enormous, meaningless K from dividing by almost nothing.
 #define ADAPTIVE_TUNE_FIT_MIN_DENOM 1e-4
 
+// ---------------------------------------------------------------------
+// Full coupled identification (Layer 2) -- guards.
+// ---------------------------------------------------------------------
+
+// Joint (all-zone) dwell observations, shared module-wide (one ring, not
+// per-zone -- a "joint observation" IS every zone's duty/rise at once).
+// 24 rows * MAX31856_CHANNEL_COUNT(3) zones * 2 floats * 4 bytes = 576
+// bytes -- same "small enough that PSRAM buys nothing" reasoning as the
+// per-zone ring above, kept as a plain static array for the same reason.
+#define ADAPTIVE_TUNE_JOINT_RING_CAPACITY 24
+
+// n unknowns per affected-zone row (one coupling_coeff[i][j] per neighbour
+// j, n total including the diagonal j==i) need at least n equations to be
+// determined at all; PID_EXPANSION_PLAN.md's own worked example (3 zones ->
+// 9 unknowns, one dwell -> 3 equations) is exactly this n-unknowns-per-row
+// framing, not "9 equations needed from one dwell" -- each affected zone's
+// row is its own n-unknown system, solved separately, sharing only the
+// duty design matrix. This margin (independent observations REQUIRED beyond
+// the bare minimum n) mirrors the diagonal fit's own "4 required vs 2
+// theoretical minimum" choice above -- degrees of freedom for the
+// least-squares residual to mean anything, not just be exactly zero.
+#define ADAPTIVE_TUNE_COUPLED_OBS_MARGIN 2u
+
+// A joint row is committed only when every zone's duty clears this floor --
+// same reasoning and same numeric value as ADAPTIVE_TUNE_MIN_DUTY_FOR_
+// OBSERVATION, applied to every column of the row, not just the affected
+// zone's own duty: an unexcited neighbour (duty ~ 0) contributes a
+// degenerate (all-zero) column to the design matrix, which is exactly what
+// the conditioning check below exists to refuse -- excluding it up front is
+// cheaper and gives a more specific refusal reason.
+#define ADAPTIVE_TUNE_JOINT_MIN_DUTY ADAPTIVE_TUNE_MIN_DUTY_FOR_OBSERVATION
+
+// Per-run bound on how far a single coupling_coeff[i][j] cell may move.
+// Additive, not a ratio like ADAPTIVE_TUNE_MAX_FRACTIONAL_MOVE -- a coupling
+// cell legitimately starts at 0.0 ("never measured"), where any ratio-based
+// cap is either 0 (never learns anything) or infinite (no cap at all). 10.0
+// is 10% of ZONE_COUPLING_COEFF_MAX (100.0, zones_http.h) -- the same "start
+// conservative, one run cannot rewrite the model" posture as the diagonal
+// path's 20% cap, deliberately tighter here because a coupling cell's prior
+// is far more often "never measured" (0.0) than a confident earlier fit.
+#define ADAPTIVE_TUNE_COUPLING_MAX_ABS_MOVE 10.0f
+
+// Same blend fraction as the diagonal path -- see ADAPTIVE_TUNE_BLEND_ALPHA.
+#define ADAPTIVE_TUNE_COUPLING_BLEND_ALPHA ADAPTIVE_TUNE_BLEND_ALPHA
+
+// Implausible-fit guard for a cell whose prior is (near) zero, where the
+// diagonal path's ratio-based jump guard has no denominator to divide by.
+// 50.0 is half of ZONE_COUPLING_COEFF_MAX -- a raw fit above this, against a
+// never-measured prior, is refused outright rather than blended-then-capped
+// (same "refuse a contaminated point rather than quietly shrink it" posture
+// as ADAPTIVE_TUNE_MAX_JUMP_RATIO).
+#define ADAPTIVE_TUNE_COUPLING_IMPLAUSIBLE_ABS 50.0f
+#define ADAPTIVE_TUNE_COUPLING_PRIOR_NEAR_ZERO 1e-3f
+
+// ---------------------------------------------------------------------
+// Integral (Ki) diagnosis from dwells -- guards.
+// ---------------------------------------------------------------------
+
+// Trailing within-dwell trace, per zone, reset at every dwell entry. 24
+// samples at the hardware's ~10s logging cadence is 4 minutes -- enough for
+// several cycles of any limit cycle slow enough to matter thermally (a kiln
+// zone cycling faster than ~30s is not physically plausible: heater_output.h's
+// HEATER_MIN_ON_MS_FLOOR alone is 10s). 24 * (4+4 bytes) * MAX31856_CHANNEL_
+// COUNT(3) zones = 576 bytes -- same "small, plain static array" reasoning
+// as the two rings above.
+#define ADAPTIVE_TUNE_KI_TRACE_CAPACITY 24
+#define ADAPTIVE_TUNE_KI_MIN_SAMPLES 12
+
+// A temperature swing below this is at or below a MAX31856 channel's
+// practical noise floor (same value quoted in this file's other comments) --
+// not enough to call it a real oscillation regardless of how regular it
+// looks.
+#define ADAPTIVE_TUNE_KI_NOISE_FLOOR_C 0.05f
+
+// A steady dwell error below this is unremarkable tracking, not a defect to
+// diagnose -- 0.3 degC is the same order as this file's own settle-slope
+// tolerance integrated over a few minutes, and well above MAX31856 noise.
+#define ADAPTIVE_TUNE_KI_OFFSET_THRESHOLD_C 0.3f
+
+// OFFSET classification requires the error to be STEADY, not spiky: max
+// dwell error no more than this multiple of the mean dwell error. A
+// genuinely steady offset has max/mean close to 1; a value approaching 2
+// already means something inside the window swung far from the mean, which
+// is the OSCILLATING case's signature instead.
+#define ADAPTIVE_TUNE_KI_OFFSET_MAX_OVER_MEAN 1.6f
+
+// A first-half-vs-second-half mean shift bigger than this, within one
+// trailing 4-minute window, is drift rather than noise.
+#define ADAPTIVE_TUNE_KI_DRIFT_THRESHOLD_C 0.15f
+
+// At least this many sign changes of (sample - window mean) before calling
+// the window "oscillating" at all -- 4 crossings is 2 full swings, ruling
+// out a single noisy excursion.
+#define ADAPTIVE_TUNE_KI_MIN_CROSSINGS 4u
+
+// A LIMIT_CYCLE (regular) verdict additionally requires the spacing between
+// crossings to be consistent -- stddev of the gaps no more than this
+// fraction of their mean. Above this, the window is oscillating but
+// irregularly (hunting, not a clean limit cycle), and Ku/Tu extracted from
+// it would not be trustworthy the way pid_autotune_fit_relay()'s own
+// cycle-to-cycle agreement check already enforces for a real relay test.
+#define ADAPTIVE_TUNE_KI_CYCLE_REGULARITY_MAX 0.5f
+
+// Floored-integral detection: duty essentially flat (variance below this)
+// AND parked within this distance of a rail (0 or 1) -- the -ff_hold floor
+// pins duty at whatever P+D+ff_climb alone commands, which does not move
+// tick to tick the way an unclamped integrator's output would, and in
+// practice pins it low (see pid.c's own comment on the floor being reached
+// on a hot-running zone). A duty trace this flat AND this close to a rail,
+// co-occurring with an OFFSET-shaped error, means "the integrator cannot
+// move," not "Ki is too small" -- increasing Ki would do nothing (the floor
+// still applies) and the change would be silently inert at best.
+#define ADAPTIVE_TUNE_KI_FLOOR_DUTY_VARIANCE 5e-4f
+#define ADAPTIVE_TUNE_KI_FLOOR_DUTY_RAIL_BAND 0.05f
+
+// Per-run bound on a Ki correction from this layer -- same 20% posture as
+// ADAPTIVE_TUNE_MAX_FRACTIONAL_MOVE, applied to the diagonal path's sibling
+// quantity here. Flat (not proportional to error size): a first pass on data
+// this indirect should move a fixed, conservative amount and let the NEXT
+// firing's diagnosis confirm or correct course, not try to size the "right"
+// correction from one run's shape.
+#define ADAPTIVE_TUNE_KI_MAX_FRACTIONAL_MOVE 0.20f
+
+// Relay-style Ku/Tu extraction from a non-relay (ordinary PID) trace has no
+// real hysteresis band to report -- 0 passes pid_autotune_fit_relay()'s
+// sqrt(a^2-h^2) term through unmodified (h=0 reduces it to plain a).
+#define ADAPTIVE_TUNE_KI_RELAY_HYSTERESIS_C 0.0f
+
 typedef struct {
     float duty;
     float rise_c; // actual_c - ambient_c at the settled instant
@@ -132,9 +264,59 @@ typedef struct {
     uint8_t  last_applied_profile_id;
     uint32_t last_applied_unix_s;
     char     last_refusal_reason[96];
+
+    // Within-dwell trailing trace for the Ki diagnosis, reset every dwell
+    // entry, appended every dwelling tick (not gated on settle -- unlike the
+    // single dc-gain point above, this needs the SHAPE of the whole window).
+    float    trace_t_s[ADAPTIVE_TUNE_KI_TRACE_CAPACITY];
+    float    trace_actual_c[ADAPTIVE_TUNE_KI_TRACE_CAPACITY];
+    float    trace_duty[ADAPTIVE_TUNE_KI_TRACE_CAPACITY];
+    uint32_t trace_count;
+    uint32_t trace_head;
+    float    trace_elapsed_s;
+
+    // Coupled-solve and Ki-apply bookkeeping, surfaced on the zones page --
+    // see adaptive_tune_zone_status_t's own fields for what each means.
+    uint32_t joint_observations;
+    bool     coupled_attempted;
+    bool     coupled_applied;
+    uint8_t  coupled_cells_changed;
+    char     coupled_refusal_reason[96];
+    uint8_t  ki_verdict;
+    float    ki_correction_pct;
+    bool     ki_applied;
+    char     ki_refusal_reason[96];
 } adaptive_tune_zone_t;
 
 static adaptive_tune_zone_t s_zones[MAX31856_CHANNEL_COUNT];
+
+// ---------------------------------------------------------------------
+// Joint (all-zone) dwell observations for the coupled solve -- module-wide,
+// not per-zone, because a "joint observation" is every zone's duty/rise at
+// the SAME instant. Guarded by the same s_lock as s_zones[] above.
+// ---------------------------------------------------------------------
+
+typedef struct {
+    float duty[MAX31856_CHANNEL_COUNT];
+    float rise_c[MAX31856_CHANNEL_COUNT]; // actual_c - ambient_c, per zone, at this joint instant
+} adaptive_tune_joint_obs_t;
+
+static adaptive_tune_joint_obs_t s_joint_ring[ADAPTIVE_TUNE_JOINT_RING_CAPACITY];
+static uint32_t s_joint_ring_count;
+static uint32_t s_joint_ring_head;
+static uint32_t s_joint_observations_lifetime;
+
+// Latest known duty/rise for every zone, updated on EVERY tick for EVERY
+// zone regardless of that zone's own opt-in flag -- a zone that has not
+// opted its own row into learning is still a valid NEIGHBOUR column in
+// another zone's coupled row, so its duty must still be tracked. Frozen
+// (not reset to 0/NaN) on an invalid tick, same "hold last value" posture
+// as zone_coupling_filter_tick() -- a stale value sitting unused until the
+// next valid tick does no harm; only last_valid gates whether it is ever
+// read.
+static float s_joint_last_duty[MAX31856_CHANNEL_COUNT];
+static float s_joint_last_rise_c[MAX31856_CHANNEL_COUNT];
+static bool  s_joint_last_valid[MAX31856_CHANNEL_COUNT];
 static SemaphoreHandle_t s_lock; // guards s_zones; taken only from this file, never across profile_executor.c's
                                   // s_exec.lock (see adaptive_tune.h's doc comment on the lock order this keeps)
 static bool s_lock_ready;
@@ -182,6 +364,20 @@ void adaptive_tune_zone_tick(uint8_t zone_index, float actual_c, bool actual_val
     xSemaphoreTake(s_lock, portMAX_DELAY);
     adaptive_tune_zone_t *z = &s_zones[zone_index];
 
+    // Joint duty/rise cache: updated for EVERY zone on EVERY tick,
+    // regardless of that zone's own opt-in flag -- see s_joint_last_duty[]'s
+    // own comment above. Deliberately BEFORE the enabled/actual_valid/
+    // dwelling gates below: an opted-out zone, or one whose own reading is
+    // bad this instant, must still contribute its latest-known duty as a
+    // neighbour column for another zone's coupled row.
+    if (actual_valid && !isnan(ambient_c) && isfinite(actual_c) && isfinite(ambient_c)) {
+        s_joint_last_duty[zone_index] = duty;
+        s_joint_last_rise_c[zone_index] = actual_c - ambient_c;
+        s_joint_last_valid[zone_index] = true;
+    } else {
+        s_joint_last_valid[zone_index] = false;
+    }
+
     if (!z->enabled || !actual_valid || isnan(ambient_c)) {
         // Learning is off, or this tick has nothing trustworthy to offer --
         // still reset the settle tracker below like any other non-dwelling
@@ -205,14 +401,36 @@ void adaptive_tune_zone_tick(uint8_t zone_index, float actual_c, bool actual_val
     }
 
     if (!z->dwelling_prev) {
-        // Just entered this dwell -- start a fresh settle window.
+        // Just entered this dwell -- start a fresh settle window AND a
+        // fresh Ki-diagnosis trace (see adaptive_tune_zone_t's own comment
+        // on trace_t_s[] -- this window covers exactly one dwell, unlike
+        // the K_dc observation ring, which spans the whole run).
         z->dwelling_prev = true;
         z->settle_start_valid = true;
         z->settle_start_c = actual_c;
         z->settle_elapsed_s = 0.0f;
         z->recorded_this_dwell = false;
+        z->trace_count = 0;
+        z->trace_head = 0;
+        z->trace_elapsed_s = 0.0f;
     }
     z->settle_elapsed_s += dt_s;
+
+    // Trace append happens on EVERY dwelling tick, not gated on settle --
+    // the Ki diagnosis needs the window's SHAPE (drift, oscillation), which
+    // the single post-settle dc-gain point below cannot provide.
+    z->trace_elapsed_s += dt_s;
+    {
+        uint32_t tslot = (z->trace_head + z->trace_count) % ADAPTIVE_TUNE_KI_TRACE_CAPACITY;
+        if (z->trace_count < ADAPTIVE_TUNE_KI_TRACE_CAPACITY) {
+            z->trace_count++;
+        } else {
+            z->trace_head = (z->trace_head + 1) % ADAPTIVE_TUNE_KI_TRACE_CAPACITY;
+        }
+        z->trace_t_s[tslot] = z->trace_elapsed_s;
+        z->trace_actual_c[tslot] = actual_c;
+        z->trace_duty[tslot] = duty;
+    }
 
     if (z->recorded_this_dwell || !z->settle_start_valid) {
         xSemaphoreGive(s_lock);
@@ -261,6 +479,42 @@ void adaptive_tune_zone_tick(uint8_t zone_index, float actual_c, bool actual_val
     z->ring[slot].duty = duty;
     z->ring[slot].rise_c = rise_c;
     z->observations_lifetime++;
+
+    // Joint (all-zone) row for the coupled solve, committed at the SAME
+    // settle instant as this zone's own diagonal point above -- only if
+    // EVERY zone (this one included) currently has a fresh, valid,
+    // above-floor duty reading. A partial row (a neighbour never having
+    // ticked yet, or sitting invalid/too-low this instant) is discarded
+    // outright rather than committed with a placeholder -- a zero-filled
+    // column would silently poison that zone out of every future row's
+    // design matrix instead of just being absent from this one.
+    {
+        bool joint_ok = true;
+        for (uint8_t j = 0; j < MAX31856_CHANNEL_COUNT; j++) {
+            if (!s_joint_last_valid[j] || s_joint_last_duty[j] < ADAPTIVE_TUNE_JOINT_MIN_DUTY) {
+                joint_ok = false;
+                break;
+            }
+        }
+        if (joint_ok) {
+            uint32_t jslot = (s_joint_ring_head + s_joint_ring_count) % ADAPTIVE_TUNE_JOINT_RING_CAPACITY;
+            if (s_joint_ring_count < ADAPTIVE_TUNE_JOINT_RING_CAPACITY) {
+                s_joint_ring_count++;
+            } else {
+                s_joint_ring_head = (s_joint_ring_head + 1) % ADAPTIVE_TUNE_JOINT_RING_CAPACITY;
+            }
+            memcpy(s_joint_ring[jslot].duty, s_joint_last_duty, sizeof(s_joint_last_duty));
+            memcpy(s_joint_ring[jslot].rise_c, s_joint_last_rise_c, sizeof(s_joint_last_rise_c));
+            s_joint_observations_lifetime++;
+        }
+    }
+
+    // The Ki diagnosis itself runs at adaptive_tune_run_end(), not here --
+    // it needs profile_exec_firing_stats_t's dwell_err_mean_c/dwell_err_max_c
+    // (the SETPOINT-aware error figures profile_executor.c already computes;
+    // this file never receives setpoint_c per tick, see adaptive_tune.c's
+    // top comment), which only arrive with the run record. z->trace_* above
+    // is left as-is (this dwell's most recent trace) for that call to read.
 
     xSemaphoreGive(s_lock);
 }
@@ -381,6 +635,383 @@ static void try_refine_zone_locked(uint8_t zi, uint8_t profile_id)
              (unsigned)profile_id);
 }
 
+// ---------------------------------------------------------------------
+// Full coupled identification -- pure fit (host-tested directly) plus its
+// locked apply helper. See adaptive_tune.h's own comment on adaptive_tune_
+// coupled_fit() for the orientation contract: out_C[affected][stepped],
+// i.e. the SAME row/column convention zones_config_get/set_coupling() and
+// PID_EXPANSION_PLAN.md section 2 both use for persisted storage -- NOT
+// /api/autotune/matrix's transposed wire form. This function never touches
+// the wire form at all; it writes straight through zones_config_set_
+// coupling_cell(affected, stepped, ...), so there is no transpose step for
+// this code to get backwards.
+//
+// Derivation: at every joint dwell observation k, for affected zone i,
+//   rise_obs[k][i] == actual_c_i - ambient_c == sum_j coupling_coeff[i][j] * duty_obs[k][j]
+// (the coupled steady-state relation zone_coupling_solve_hold() SOLVES at
+// runtime, given a known matrix, for duty -- this is its INVERSE problem:
+// given many (duty, rise) pairs, solve for the matrix). That is m linear
+// equations in n unknowns (coupling_coeff[i][0..n-1]) for row i -- ordinary
+// least squares, via the normal equations (duty_obs^T * duty_obs) * row_i =
+// duty_obs^T * rise_obs[:,i]. The design matrix (duty_obs^T * duty_obs) is
+// the SAME n x n matrix for every row i (only the right-hand side changes
+// per affected zone), so it is built once and n independent vector solves
+// are run against it -- reusing zone_coupling_gauss_solve_partial_pivot_
+// vec() (zone_coupling_solve.c, called, never edited) for the actual
+// elimination, which is what gives this function its conditioning check
+// for free: COUPLING_SOLVE_FALLBACK_SINGULAR/NONFINITE from that call
+// becomes this function's ILL_CONDITIONED refusal, at that function's own
+// documented bound (COUPLING_SOLVE_PIVOT_REL_EPS = 1e-4 relative pivot
+// floor, admitting condition numbers up to ~1e4 -- see zone_coupling_
+// solve.h's own comment on that constant). This file adds no second,
+// independent conditioning heuristic on top of it.
+adaptive_tune_coupled_result_t adaptive_tune_coupled_fit(
+    const float duty_obs[][MAX31856_CHANNEL_COUNT], const float rise_obs[][MAX31856_CHANNEL_COUNT], uint32_t m,
+    uint8_t n, float out_C[MAX31856_CHANNEL_COUNT][MAX31856_CHANNEL_COUNT])
+{
+    if (!duty_obs || !rise_obs || !out_C || n == 0 || n > MAX31856_CHANNEL_COUNT) {
+        return ADAPTIVE_TUNE_COUPLED_TOO_FEW_OBSERVATIONS;
+    }
+    if (m < (uint32_t)n + ADAPTIVE_TUNE_COUPLED_OBS_MARGIN) {
+        return ADAPTIVE_TUNE_COUPLED_TOO_FEW_OBSERVATIONS;
+    }
+
+    float AtA[MAX31856_CHANNEL_COUNT][MAX31856_CHANNEL_COUNT];
+    memset(AtA, 0, sizeof(AtA));
+    for (uint8_t a = 0; a < n; a++) {
+        for (uint8_t b = 0; b < n; b++) {
+            double s = 0.0;
+            for (uint32_t k = 0; k < m; k++) {
+                s += (double)duty_obs[k][a] * (double)duty_obs[k][b];
+            }
+            AtA[a][b] = (float)s;
+        }
+    }
+
+    for (uint8_t i = 0; i < n; i++) {
+        float AtR[MAX31856_CHANNEL_COUNT];
+        memset(AtR, 0, sizeof(AtR));
+        for (uint8_t a = 0; a < n; a++) {
+            double s = 0.0;
+            for (uint32_t k = 0; k < m; k++) {
+                s += (double)duty_obs[k][a] * (double)rise_obs[k][i];
+            }
+            AtR[a] = (float)s;
+        }
+        float x[MAX31856_CHANNEL_COUNT];
+        coupling_solve_reason_t reason = zone_coupling_gauss_solve_partial_pivot_vec(n, AtA, AtR, x);
+        if (reason != COUPLING_SOLVE_OK) {
+            return ADAPTIVE_TUNE_COUPLED_ILL_CONDITIONED;
+        }
+        for (uint8_t j = 0; j < n; j++) {
+            out_C[i][j] = x[j];
+        }
+    }
+    return ADAPTIVE_TUNE_COUPLED_OK;
+}
+
+static void set_reason(char *buf, size_t bufsz, const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, bufsz, fmt, ap);
+    va_end(ap);
+    ESP_LOGI(TAG, "%s", buf);
+}
+
+static void try_refine_coupled_locked(uint8_t zi)
+{
+    adaptive_tune_zone_t *z = &s_zones[zi];
+    z->coupled_attempted = true;
+    z->coupled_applied = false;
+    z->coupled_cells_changed = 0;
+    z->joint_observations = s_joint_ring_count;
+
+    const uint8_t n = MAX31856_CHANNEL_COUNT;
+    uint32_t min_obs = (uint32_t)n + ADAPTIVE_TUNE_COUPLED_OBS_MARGIN;
+    if (s_joint_ring_count < min_obs) {
+        set_reason(z->coupled_refusal_reason, sizeof(z->coupled_refusal_reason),
+                   "only %u/%u joint dwell observations for coupled solve", (unsigned)s_joint_ring_count,
+                   (unsigned)min_obs);
+        return;
+    }
+
+    // Stack: ADAPTIVE_TUNE_JOINT_RING_CAPACITY(24) * MAX31856_CHANNEL_COUNT(3)
+    // * 4 bytes * 2 arrays = 576 bytes -- same order as this file's other
+    // stack-local fit buffers, well inside a FreeRTOS task's normal stack.
+    float duty_obs[ADAPTIVE_TUNE_JOINT_RING_CAPACITY][MAX31856_CHANNEL_COUNT];
+    float rise_obs[ADAPTIVE_TUNE_JOINT_RING_CAPACITY][MAX31856_CHANNEL_COUNT];
+    for (uint32_t k = 0; k < s_joint_ring_count; k++) {
+        uint32_t idx = (s_joint_ring_head + k) % ADAPTIVE_TUNE_JOINT_RING_CAPACITY;
+        memcpy(duty_obs[k], s_joint_ring[idx].duty, sizeof(duty_obs[k]));
+        memcpy(rise_obs[k], s_joint_ring[idx].rise_c, sizeof(rise_obs[k]));
+    }
+
+    float C[MAX31856_CHANNEL_COUNT][MAX31856_CHANNEL_COUNT];
+    adaptive_tune_coupled_result_t r = adaptive_tune_coupled_fit(duty_obs, rise_obs, s_joint_ring_count, n, C);
+    if (r == ADAPTIVE_TUNE_COUPLED_TOO_FEW_OBSERVATIONS) {
+        set_reason(z->coupled_refusal_reason, sizeof(z->coupled_refusal_reason),
+                   "joint observation set degenerate for a determined solve");
+        return;
+    }
+    if (r == ADAPTIVE_TUNE_COUPLED_ILL_CONDITIONED) {
+        set_reason(z->coupled_refusal_reason, sizeof(z->coupled_refusal_reason),
+                   "joint duty matrix ill-conditioned (cond above ~1e4, zone_coupling_solve.h's own pivot floor)");
+        return;
+    }
+
+    float prior_row[MAX31856_CHANNEL_COUNT];
+    if (!zones_config_get_coupling(zi, prior_row)) {
+        set_reason(z->coupled_refusal_reason, sizeof(z->coupled_refusal_reason),
+                   "no existing coupling row to refine");
+        return;
+    }
+    float tau_row[MAX31856_CHANNEL_COUNT], dead_row[MAX31856_CHANNEL_COUNT];
+    if (!zones_config_get_coupling_tau(zi, tau_row)) memset(tau_row, 0, sizeof(tau_row));
+    if (!zones_config_get_coupling_dead_time(zi, dead_row)) memset(dead_row, 0, sizeof(dead_row));
+
+    uint8_t changed = 0;
+    for (uint8_t j = 0; j < n; j++) {
+        if (j == zi) {
+            continue; // diagonal (this zone's own gain) stays owned by the existing per-zone K_dc
+                      // path (try_refine_zone_locked()) -- not duplicated here, see this function's
+                      // header comment.
+        }
+        float fit = C[zi][j];
+        if (!isfinite(fit)) {
+            continue; // skip only this cell -- do not let one bad column poison the whole row
+        }
+        float prior = prior_row[j];
+        if (prior > ADAPTIVE_TUNE_COUPLING_PRIOR_NEAR_ZERO) {
+            // Confident prior -- same ratio-based implausibility guard as the diagonal path.
+            if (fit > prior * ADAPTIVE_TUNE_MAX_JUMP_RATIO || fit < prior / ADAPTIVE_TUNE_MAX_JUMP_RATIO) {
+                continue;
+            }
+        } else if (fabsf(fit) > ADAPTIVE_TUNE_COUPLING_IMPLAUSIBLE_ABS) {
+            // No confident prior (never measured) -- absolute implausibility guard instead.
+            continue;
+        }
+
+        float blended = prior + ADAPTIVE_TUNE_COUPLING_BLEND_ALPHA * (fit - prior);
+        if (blended > prior + ADAPTIVE_TUNE_COUPLING_MAX_ABS_MOVE) blended = prior + ADAPTIVE_TUNE_COUPLING_MAX_ABS_MOVE;
+        if (blended < prior - ADAPTIVE_TUNE_COUPLING_MAX_ABS_MOVE) blended = prior - ADAPTIVE_TUNE_COUPLING_MAX_ABS_MOVE;
+        if (blended < 0.0f) blended = 0.0f;                   // storage convention: non-negative
+        if (blended > ZONE_COUPLING_COEFF_MAX) blended = ZONE_COUPLING_COEFF_MAX;
+
+        if (zones_config_set_coupling_cell(zi, j, blended, tau_row[j], dead_row[j])) {
+            changed++;
+        }
+    }
+
+    z->coupled_cells_changed = changed;
+    if (changed > 0) {
+        z->coupled_applied = true;
+        z->coupled_refusal_reason[0] = '\0';
+        ESP_LOGI(TAG, "zone %u: coupled solve refined %u coupling cell(s) from %u joint observations",
+                 (unsigned)zi, (unsigned)changed, (unsigned)s_joint_ring_count);
+    } else {
+        set_reason(z->coupled_refusal_reason, sizeof(z->coupled_refusal_reason),
+                   "coupled solve succeeded but every off-diagonal cell was implausible or rejected");
+    }
+}
+
+// ---------------------------------------------------------------------
+// Integral (Ki) diagnosis -- pure classification (host-tested directly)
+// plus its locked apply helper.
+// ---------------------------------------------------------------------
+
+bool adaptive_tune_diagnose_ki(const float *actual_c, const float *duty, uint32_t n, float dt_s,
+                               float dwell_err_mean_c, float dwell_err_max_c, adaptive_tune_ki_diag_t *out)
+{
+    if (!out) {
+        return false;
+    }
+    memset(out, 0, sizeof(*out));
+    if (!actual_c || !duty || n < ADAPTIVE_TUNE_KI_MIN_SAMPLES || !(dt_s > 0.0f)) {
+        out->verdict = ADAPTIVE_TUNE_KI_INSUFFICIENT;
+        return true;
+    }
+
+    double sum = 0.0;
+    float amin = INFINITY, amax = -INFINITY;
+    float dmin = INFINITY, dmax = -INFINITY;
+    double dsum = 0.0;
+    for (uint32_t k = 0; k < n; k++) {
+        sum += (double)actual_c[k];
+        if (actual_c[k] < amin) amin = actual_c[k];
+        if (actual_c[k] > amax) amax = actual_c[k];
+        dsum += (double)duty[k];
+        if (duty[k] < dmin) dmin = duty[k];
+        if (duty[k] > dmax) dmax = duty[k];
+    }
+    float mean = (float)(sum / (double)n);
+    float dmean = (float)(dsum / (double)n);
+    double dvar = 0.0;
+    for (uint32_t k = 0; k < n; k++) {
+        double d = (double)duty[k] - (double)dmean;
+        dvar += d * d;
+    }
+    dvar /= (double)n;
+    float amplitude = (amax - amin) / 2.0f;
+    float duty_amp = (dmax - dmin) / 2.0f;
+
+    // Zero crossings of (actual_c - mean), plus their (fractional) sample
+    // index, for the regularity/period check below.
+    float cross_idx[ADAPTIVE_TUNE_KI_TRACE_CAPACITY];
+    uint32_t ncross = 0;
+    for (uint32_t k = 1; k < n; k++) {
+        float p0 = actual_c[k - 1] - mean;
+        float p1 = actual_c[k] - mean;
+        if ((p0 < 0.0f && p1 >= 0.0f) || (p0 > 0.0f && p1 <= 0.0f)) {
+            if (ncross < ADAPTIVE_TUNE_KI_TRACE_CAPACITY) {
+                cross_idx[ncross] = (float)k;
+            }
+            ncross++;
+        }
+    }
+    out->zero_crossings = ncross;
+
+    bool regular = false;
+    float mean_gap = 0.0f;
+    if (ncross >= 3 && ncross <= ADAPTIVE_TUNE_KI_TRACE_CAPACITY) {
+        uint32_t ngaps = ncross - 1;
+        double gsum = 0.0;
+        for (uint32_t g = 0; g < ngaps; g++) gsum += (double)(cross_idx[g + 1] - cross_idx[g]);
+        mean_gap = (float)(gsum / (double)ngaps);
+        double gvar = 0.0;
+        for (uint32_t g = 0; g < ngaps; g++) {
+            double d = (double)(cross_idx[g + 1] - cross_idx[g]) - (double)mean_gap;
+            gvar += d * d;
+        }
+        gvar /= (double)ngaps;
+        float gstd = (float)sqrt(gvar);
+        if (mean_gap > 0.0f && (gstd / mean_gap) <= ADAPTIVE_TUNE_KI_CYCLE_REGULARITY_MAX) {
+            regular = true;
+        }
+    }
+
+    uint32_t half = n / 2;
+    double s1 = 0.0, s2 = 0.0;
+    for (uint32_t k = 0; k < half; k++) s1 += (double)actual_c[k];
+    for (uint32_t k = half; k < n; k++) s2 += (double)actual_c[k];
+    float m1 = (float)(s1 / (double)half);
+    float m2 = (float)(s2 / (double)(n - half));
+    float drift = m2 - m1;
+
+    if (amplitude > ADAPTIVE_TUNE_KI_NOISE_FLOOR_C && ncross >= ADAPTIVE_TUNE_KI_MIN_CROSSINGS) {
+        if (regular) {
+            out->verdict = ADAPTIVE_TUNE_KI_LIMIT_CYCLE;
+            out->tu_estimate_s = 2.0f * mean_gap * dt_s; // consecutive crossings are ~half a period apart
+            const float pi = 3.14159265358979f;
+            float denom = pi * amplitude; // relay hysteresis h == 0 for a non-relay trace, see
+                                           // ADAPTIVE_TUNE_KI_RELAY_HYSTERESIS_C
+            out->ku_estimate = (denom > 1e-6f) ? (4.0f * duty_amp / denom) : 0.0f;
+            out->ki_correction_pct = -20.0f;
+        } else {
+            out->verdict = ADAPTIVE_TUNE_KI_OSCILLATING; // hunting -- irregular
+            out->ki_correction_pct = -20.0f;
+        }
+        return true;
+    }
+    if (fabsf(drift) > ADAPTIVE_TUNE_KI_DRIFT_THRESHOLD_C) {
+        out->verdict = ADAPTIVE_TUNE_KI_OSCILLATING; // slow drift
+        out->ki_correction_pct = -20.0f;
+        return true;
+    }
+
+    if (dwell_err_mean_c > ADAPTIVE_TUNE_KI_OFFSET_THRESHOLD_C &&
+        dwell_err_max_c <= dwell_err_mean_c * ADAPTIVE_TUNE_KI_OFFSET_MAX_OVER_MEAN) {
+        bool floored = ((float)dvar < ADAPTIVE_TUNE_KI_FLOOR_DUTY_VARIANCE) &&
+                       (dmean < ADAPTIVE_TUNE_KI_FLOOR_DUTY_RAIL_BAND ||
+                        dmean > 1.0f - ADAPTIVE_TUNE_KI_FLOOR_DUTY_RAIL_BAND);
+        if (floored) {
+            // Duty is pinned near a rail and essentially not moving despite a
+            // steady error -- the classic -ff_hold floor signature (pid.c),
+            // NOT a small-Ki signature. See adaptive_tune_ki_verdict_t's own
+            // doc comment. Deliberately NO correction: raising Ki here would
+            // be inert (the floor still applies) at best.
+            out->verdict = ADAPTIVE_TUNE_KI_FLOORED;
+            out->ki_correction_pct = 0.0f;
+        } else {
+            out->verdict = ADAPTIVE_TUNE_KI_OFFSET_TOO_SMALL;
+            out->ki_correction_pct = 20.0f;
+        }
+        return true;
+    }
+
+    out->verdict = ADAPTIVE_TUNE_KI_OK;
+    return true;
+}
+
+static void try_refine_ki_locked(uint8_t zi, const profile_exec_firing_stats_t *stats)
+{
+    adaptive_tune_zone_t *z = &s_zones[zi];
+    z->ki_applied = false;
+
+    if (z->trace_count < ADAPTIVE_TUNE_KI_MIN_SAMPLES) {
+        z->ki_verdict = (uint8_t)ADAPTIVE_TUNE_KI_INSUFFICIENT;
+        z->ki_correction_pct = 0.0f;
+        set_reason(z->ki_refusal_reason, sizeof(z->ki_refusal_reason),
+                   "only %u/%u within-dwell trace samples", (unsigned)z->trace_count,
+                   (unsigned)ADAPTIVE_TUNE_KI_MIN_SAMPLES);
+        return;
+    }
+
+    float abuf[ADAPTIVE_TUNE_KI_TRACE_CAPACITY], dbuf[ADAPTIVE_TUNE_KI_TRACE_CAPACITY];
+    for (uint32_t i = 0; i < z->trace_count; i++) {
+        uint32_t idx = (z->trace_head + i) % ADAPTIVE_TUNE_KI_TRACE_CAPACITY;
+        abuf[i] = z->trace_actual_c[idx];
+        dbuf[i] = z->trace_duty[idx];
+    }
+    uint32_t first_idx = z->trace_head;
+    uint32_t last_idx = (z->trace_head + z->trace_count - 1) % ADAPTIVE_TUNE_KI_TRACE_CAPACITY;
+    float span_s = z->trace_t_s[last_idx] - z->trace_t_s[first_idx];
+    float dt_est = (z->trace_count > 1) ? (span_s / (float)(z->trace_count - 1)) : 0.0f;
+
+    adaptive_tune_ki_diag_t diag;
+    adaptive_tune_diagnose_ki(abuf, dbuf, z->trace_count, dt_est, stats->dwell_err_mean_c, stats->dwell_err_max_c,
+                              &diag);
+    z->ki_verdict = (uint8_t)diag.verdict;
+    z->ki_correction_pct = diag.ki_correction_pct;
+
+    if (diag.verdict == ADAPTIVE_TUNE_KI_OK || diag.verdict == ADAPTIVE_TUNE_KI_INSUFFICIENT) {
+        set_reason(z->ki_refusal_reason, sizeof(z->ki_refusal_reason), "no Ki correction indicated (verdict %u)",
+                   (unsigned)diag.verdict);
+        return;
+    }
+    if (diag.verdict == ADAPTIVE_TUNE_KI_FLOORED) {
+        set_reason(z->ki_refusal_reason, sizeof(z->ki_refusal_reason),
+                   "offset matches the -ff_hold integral floor signature, not small Ki -- withholding correction");
+        return;
+    }
+
+    float kp, ki, kd;
+    if (!zones_config_get_pid(zi, &kp, &ki, &kd) || !(ki > 0.0f)) {
+        set_reason(z->ki_refusal_reason, sizeof(z->ki_refusal_reason), "no existing positive Ki to refine");
+        return;
+    }
+
+    float cap_pct = ADAPTIVE_TUNE_KI_MAX_FRACTIONAL_MOVE * 100.0f;
+    float capped_pct = diag.ki_correction_pct;
+    if (capped_pct > cap_pct) capped_pct = cap_pct;
+    if (capped_pct < -cap_pct) capped_pct = -cap_pct;
+    float new_ki = ki * (1.0f + capped_pct / 100.0f);
+    if (!(new_ki > 0.0f) || !isfinite(new_ki)) {
+        set_reason(z->ki_refusal_reason, sizeof(z->ki_refusal_reason), "corrected Ki %.5f is not a valid gain",
+                   (double)new_ki);
+        return;
+    }
+    if (!zones_config_set_pid(zi, kp, new_ki, kd)) {
+        set_reason(z->ki_refusal_reason, sizeof(z->ki_refusal_reason), "zones_config_set_pid() rejected the corrected Ki");
+        return;
+    }
+
+    z->ki_applied = true;
+    z->ki_refusal_reason[0] = '\0';
+    ESP_LOGI(TAG, "zone %u: Ki %.5f -> %.5f (%.1f%%, verdict %u) from dwell trace diagnosis", (unsigned)zi,
+             (double)ki, (double)new_ki, (double)capped_pct, (unsigned)diag.verdict);
+}
+
 void adaptive_tune_run_end(const profile_firing_run_record_t *rec, bool clean)
 {
     if (!rec) {
@@ -399,6 +1030,10 @@ void adaptive_tune_run_end(const profile_firing_run_record_t *rec, bool clean)
         }
         if (!clean) {
             set_refusal(z, "run was faulted or stopped early -- not used as training data");
+            set_reason(z->coupled_refusal_reason, sizeof(z->coupled_refusal_reason),
+                       "run was faulted or stopped early -- not used as training data");
+            set_reason(z->ki_refusal_reason, sizeof(z->ki_refusal_reason),
+                       "run was faulted or stopped early -- not used as training data");
             continue;
         }
         uint32_t total = zr->stats.sample_count + zr->stats.excluded_sample_count;
@@ -406,9 +1041,15 @@ void adaptive_tune_run_end(const profile_firing_run_record_t *rec, bool clean)
             set_refusal(z, "run excluded %u/%u samples (>%.0f%%) -- not used as training data",
                         (unsigned)zr->stats.excluded_sample_count, (unsigned)total,
                         (double)(ADAPTIVE_TUNE_MAX_EXCLUDED_FRACTION * 100.0f));
+            set_reason(z->coupled_refusal_reason, sizeof(z->coupled_refusal_reason),
+                       "run excluded too many samples -- not used as training data");
+            set_reason(z->ki_refusal_reason, sizeof(z->ki_refusal_reason),
+                       "run excluded too many samples -- not used as training data");
             continue;
         }
         try_refine_zone_locked(zi, rec->profile_id);
+        try_refine_coupled_locked(zi);
+        try_refine_ki_locked(zi, &zr->stats);
     }
     xSemaphoreGive(s_lock);
 }
@@ -509,6 +1150,16 @@ void adaptive_tune_get_status(uint8_t zone_index, adaptive_tune_zone_status_t *o
     out->last_applied_profile_id = z->last_applied_profile_id;
     out->last_applied_unix_s = z->last_applied_unix_s;
     strncpy(out->last_refusal_reason, z->last_refusal_reason, sizeof(out->last_refusal_reason) - 1);
+
+    out->joint_observations = s_joint_ring_count;
+    out->coupled_attempted = z->coupled_attempted;
+    out->coupled_applied = z->coupled_applied;
+    out->coupled_cells_changed = z->coupled_cells_changed;
+    strncpy(out->coupled_refusal_reason, z->coupled_refusal_reason, sizeof(out->coupled_refusal_reason) - 1);
+    out->ki_verdict = z->ki_verdict;
+    out->ki_correction_pct = z->ki_correction_pct;
+    out->ki_applied = z->ki_applied;
+    strncpy(out->ki_refusal_reason, z->ki_refusal_reason, sizeof(out->ki_refusal_reason) - 1);
     xSemaphoreGive(s_lock);
 }
 

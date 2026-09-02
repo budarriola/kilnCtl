@@ -61,7 +61,95 @@ typedef struct {
     uint32_t last_applied_unix_s;       // time(NULL) at that apply, 0 if clock never synced
     char     last_refusal_reason[96];   // empty if the most recent run-end attempt applied cleanly,
                                         // or none has been attempted yet; otherwise why it did not
+
+    // -- Full coupled identification (PID_EXPANSION_PLAN.md 3.3, layer 2) --
+    uint32_t joint_observations;        // joint (all-zone) dwell rows currently held, module-wide, not per-zone
+    bool     coupled_attempted;         // a coupled solve for THIS zone's row was attempted at the last run_end
+    bool     coupled_applied;           // it was attempted AND at least one off-diagonal cell was written
+    uint8_t  coupled_cells_changed;     // how many coupling_coeff[this][*] cells were actually written
+    char     coupled_refusal_reason[96];// why the coupled solve was refused/not applied for this zone, if it was
+
+    // -- Integral (Ki) diagnosis from dwells (PID_EXPANSION_PLAN.md 3.3, layer 2) --
+    uint8_t  ki_verdict;                // adaptive_tune_ki_verdict_t, cached as uint8_t so this header does not
+                                        // need the enum's definition to compile against
+    float    ki_correction_pct;         // signed suggested Ki move, before the per-run cap
+    bool     ki_applied;                // true once a Ki correction was actually written this run
+    char     ki_refusal_reason[96];     // why a nonzero diagnosis was not applied, if it was not
 } adaptive_tune_zone_status_t;
+
+// ---------------------------------------------------------------------
+// Full coupled identification (Layer 2) -- pure fit math, host-tested
+// directly (test_adaptive_tune.c), same seam convention as adaptive_tune_
+// fit_gain() above.
+// ---------------------------------------------------------------------
+
+typedef enum {
+    ADAPTIVE_TUNE_COUPLED_OK = 0,
+    ADAPTIVE_TUNE_COUPLED_TOO_FEW_OBSERVATIONS,
+    ADAPTIVE_TUNE_COUPLED_ILL_CONDITIONED,
+} adaptive_tune_coupled_result_t;
+
+// Solves, for EVERY affected zone i in 0..n-1, the least-squares row
+// coupling_coeff[i][*] such that duty_obs[k][*] . coupling_coeff[i][*] ~=
+// rise_obs[k][i] across the m joint observations (rise_obs[k][i] ==
+// actual_c - ambient_c for zone i at joint observation k). This is
+// zones_http.h's stored convention exactly: out_C[affected][stepped] --
+// the SAME row/column orientation as zones_config_get/set_coupling(), NOT
+// the transposed wire-report form /api/autotune/matrix serves. See adaptive_
+// tune.c's own comment at this function's definition for the normal-
+// equations derivation and why it is safe to reuse zone_coupling_gauss_
+// solve_partial_pivot_vec() (zone_coupling_solve.c, not edited by this
+// file) as the actual linear solve.
+//
+// m is the number of joint observations, n the number of zones/unknowns per
+// row (<= MAX31856_CHANNEL_COUNT). Refuses (returns TOO_FEW_OBSERVATIONS)
+// below m == n + ADAPTIVE_TUNE_COUPLED_OBS_MARGIN joint observations -- see
+// the .c file for that margin's numeric value -- and refuses (ILL_
+// CONDITIONED) if the shared design matrix fails the same pivot-floor
+// conditioning check zone_coupling_gauss_solve_partial_pivot_vec() already
+// applies at runtime (COUPLING_SOLVE_PIVOT_REL_EPS, admitting condition
+// numbers up to ~1e4). out_C is left untouched unless ADAPTIVE_TUNE_COUPLED_
+// OK is returned.
+adaptive_tune_coupled_result_t adaptive_tune_coupled_fit(
+    const float duty_obs[][MAX31856_CHANNEL_COUNT], const float rise_obs[][MAX31856_CHANNEL_COUNT], uint32_t m,
+    uint8_t n, float out_C[MAX31856_CHANNEL_COUNT][MAX31856_CHANNEL_COUNT]);
+
+// ---------------------------------------------------------------------
+// Integral (Ki) diagnosis from a within-dwell trace -- pure math, host-
+// tested directly.
+// ---------------------------------------------------------------------
+
+typedef enum {
+    ADAPTIVE_TUNE_KI_INSUFFICIENT = 0, // trace too short to say anything
+    ADAPTIVE_TUNE_KI_OK,               // no diagnosis -- tracking looks fine
+    ADAPTIVE_TUNE_KI_OFFSET_TOO_SMALL, // steady non-zero error, not oscillating -> Ki too small
+    ADAPTIVE_TUNE_KI_FLOORED,          // looks like the OFFSET case, but duty is pinned near a rail the whole
+                                        // window -- the integral is very likely sitting on its -ff_hold floor,
+                                        // not under-correcting for lack of gain. NEVER produces a Ki correction.
+    ADAPTIVE_TUNE_KI_OSCILLATING,      // drift or irregular hunting -> Ki too large
+    ADAPTIVE_TUNE_KI_LIMIT_CYCLE,      // regular, sustained oscillation -> Ki too large, AND the same trace
+                                        // hands over Ku/Tu (pid_autotune_fit_relay()) for free
+} adaptive_tune_ki_verdict_t;
+
+typedef struct {
+    adaptive_tune_ki_verdict_t verdict;
+    float    ki_correction_pct;  // signed, BEFORE any per-run cap: +N% means "Ki should grow", -N% "shrink".
+                                  // Always 0 for INSUFFICIENT/OK/FLOORED.
+    float    ku_estimate;        // valid (nonzero) only for LIMIT_CYCLE
+    float    tu_estimate_s;      // valid (nonzero) only for LIMIT_CYCLE
+    uint32_t zero_crossings;     // diagnostic -- surfaced so a test can assert the *reason*, not just the verdict
+} adaptive_tune_ki_diag_t;
+
+// actual_c/duty are a trailing, TIME-ORDERED trace of ONE dwell (dt_s
+// constant spacing, same convention as adaptive_tune_zone_tick's dt_s).
+// dwell_err_mean_c/dwell_err_max_c are profile_exec_firing_stats_t's own
+// dwell-only error figures (mean/max |actual-target|, SETPOINT-aware --
+// this function never receives setpoint_c itself; see adaptive_tune.c's
+// top comment on why) for the SAME dwell/run. Returns false only if out is
+// NULL; a too-short trace is reported as ADAPTIVE_TUNE_KI_INSUFFICIENT in
+// *out, not a false return, so callers do not have to special-case it.
+bool adaptive_tune_diagnose_ki(const float *actual_c, const float *duty, uint32_t n, float dt_s,
+                               float dwell_err_mean_c, float dwell_err_max_c, adaptive_tune_ki_diag_t *out);
 
 // Loads the per-zone opt-in flags from this module's own NVS namespace.
 // Call once at boot; profile_executor.c does this from profile_executor_

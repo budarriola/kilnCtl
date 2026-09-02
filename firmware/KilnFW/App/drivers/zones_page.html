@@ -2298,6 +2298,35 @@ function adaptiveTuneRefusalHtml(z) {
   }
   return '<span class="hint">Last attempt applied cleanly.</span>';
 }
+// PID_EXPANSION_PLAN.md 3.3 layer 2 -- full coupled identification. Shows
+// how many joint (all-zone) dwell observations exist, whether a solve for
+// THIS zone's row was attempted/refused/why, and how many coupling_coeff
+// cells actually changed.
+function adaptiveTuneCoupledHtml(z) {
+  var obs = (z.joint_observations !== undefined ? z.joint_observations : 0) + ' joint obs.';
+  if (!z.coupled_attempted) {
+    return '<span class="hint">' + obs + ' -- not attempted yet</span>';
+  }
+  if (z.coupled_applied) {
+    return '<span class="hint">' + obs + ' -- refined ' + z.coupled_cells_changed + ' coupling cell(s)</span>';
+  }
+  return '<span class="hint">' + obs + ' -- refused: ' + window.kcEscapeHtml(z.coupled_refusal || '') + '</span>';
+}
+// Same section, layer 2's OTHER half -- integral (Ki) diagnosis from the
+// most recent dwell's within-dwell trace. ki_verdict follows adaptive_tune.h's
+// adaptive_tune_ki_verdict_t ordering (0=INSUFFICIENT, 1=OK, 2=OFFSET_TOO_SMALL,
+// 3=FLOORED, 4=OSCILLATING, 5=LIMIT_CYCLE).
+var KI_VERDICT_LABEL = ['not enough dwell data', 'tracking OK', 'offset -- Ki too small',
+                         'offset, but integral floored -- no change', 'drift/hunting -- Ki too large',
+                         'limit cycle -- Ki too large'];
+function adaptiveTuneKiHtml(z) {
+  var label = KI_VERDICT_LABEL[z.ki_verdict] || ('verdict ' + z.ki_verdict);
+  if (z.ki_applied) {
+    var sign = z.ki_correction_pct >= 0 ? '+' : '';
+    return '<span class="hint">' + label + ' (' + sign + z.ki_correction_pct.toFixed(1) + '% applied)</span>';
+  }
+  return '<span class="hint">' + label + (z.ki_refusal ? ' -- ' + window.kcEscapeHtml(z.ki_refusal) : '') + '</span>';
+}
 function pollAdaptiveTune() {
   var el = document.getElementById('adaptiveTuneZones');
   if (!el) return;
@@ -2308,7 +2337,8 @@ function pollAdaptiveTune() {
       return;
     }
     var html = '<table class="coupling"><tr><th>Zone</th><th>Learn from firings</th><th>Observations</th>' +
-               '<th>Last applied change</th><th>Last run-end result</th></tr>';
+               '<th>Last applied change</th><th>Last run-end result</th>' +
+               '<th>Coupled solve</th><th>Ki diagnosis</th></tr>';
     for (var i = 0; i < thermoCount && i < s.zones.length; i++) {
       var z = s.zones[i];
       var name = (current.zones[i] && current.zones[i].name) ? ' (' + current.zones[i].name + ')' : '';
@@ -2327,7 +2357,9 @@ function pollAdaptiveTune() {
               (z.observations_lifetime !== undefined ? ' / ' + z.observations_lifetime + ' total this boot' : '') +
               '</td>' +
               '<td>' + appliedHtml + '</td>' +
-              '<td>' + adaptiveTuneRefusalHtml(z) + '</td></tr>';
+              '<td>' + adaptiveTuneRefusalHtml(z) + '</td>' +
+              '<td>' + adaptiveTuneCoupledHtml(z) + '</td>' +
+              '<td>' + adaptiveTuneKiHtml(z) + '</td></tr>';
     }
     html += '</table>';
     el.innerHTML = html;

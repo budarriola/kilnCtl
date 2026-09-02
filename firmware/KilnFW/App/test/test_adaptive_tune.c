@@ -17,6 +17,8 @@
 
 #include "test_common.h"
 
+#include "../drivers/MAX31856.h" // MAX31856_CHANNEL_COUNT, needed by the coupling-row fakes below,
+                                  // ahead of adaptive_tune.c's own #include of it further down this file
 #include "esp_err.h"
 
 // Own executable (see this file's header comment).
@@ -72,6 +74,42 @@ bool zones_config_set_pid(uint8_t zone_index, float kp, float ki, float kd)
     return true;
 }
 
+// Coupling-row fake, same "tiny in-RAM table" convention as s_fake_zone_cfg
+// above, standing in for zones_config_accessors.c's real coupling_coeff[]
+// storage -- adaptive_tune.c's coupled-solve apply path
+// (try_refine_coupled_locked()) reads/writes exactly this surface.
+static float s_fake_coupling[TEST_MAX_ZONES][TEST_MAX_ZONES];
+static float s_fake_coupling_tau[TEST_MAX_ZONES][TEST_MAX_ZONES];
+static float s_fake_coupling_dead[TEST_MAX_ZONES][TEST_MAX_ZONES];
+
+bool zones_config_get_coupling(uint8_t zone_index, float out_row[MAX31856_CHANNEL_COUNT])
+{
+    if (zone_index >= TEST_MAX_ZONES) return false;
+    for (int j = 0; j < MAX31856_CHANNEL_COUNT; j++) out_row[j] = s_fake_coupling[zone_index][j];
+    return true;
+}
+bool zones_config_get_coupling_tau(uint8_t zone_index, float out_row[MAX31856_CHANNEL_COUNT])
+{
+    if (zone_index >= TEST_MAX_ZONES) return false;
+    for (int j = 0; j < MAX31856_CHANNEL_COUNT; j++) out_row[j] = s_fake_coupling_tau[zone_index][j];
+    return true;
+}
+bool zones_config_get_coupling_dead_time(uint8_t zone_index, float out_row[MAX31856_CHANNEL_COUNT])
+{
+    if (zone_index >= TEST_MAX_ZONES) return false;
+    for (int j = 0; j < MAX31856_CHANNEL_COUNT; j++) out_row[j] = s_fake_coupling_dead[zone_index][j];
+    return true;
+}
+bool zones_config_set_coupling_cell(uint8_t zone_index, uint8_t neighbor_index, float coeff, float tau_s,
+                                     float dead_time_s)
+{
+    if (zone_index >= TEST_MAX_ZONES || neighbor_index >= TEST_MAX_ZONES) return false;
+    s_fake_coupling[zone_index][neighbor_index] = coeff;
+    s_fake_coupling_tau[zone_index][neighbor_index] = tau_s;
+    s_fake_coupling_dead[zone_index][neighbor_index] = dead_time_s;
+    return true;
+}
+
 esp_err_t uart_bridge_ext_run_on_flash_worker(void (*fn)(void *arg), void *arg)
 {
     // Single-threaded host test -- just run it inline, matching the real
@@ -102,10 +140,20 @@ static void reset_module_state(void)
 {
     memset(s_zones, 0, sizeof(s_zones));
     memset(s_fake_zone_cfg, 0, sizeof(s_fake_zone_cfg));
+    memset(s_fake_coupling, 0, sizeof(s_fake_coupling));
+    memset(s_fake_coupling_tau, 0, sizeof(s_fake_coupling_tau));
+    memset(s_fake_coupling_dead, 0, sizeof(s_fake_coupling_dead));
     for (int i = 0; i < TEST_MAX_ZONES; i++) {
         s_fake_zone_cfg[i].tau_s = 200.0f;
         s_fake_zone_cfg[i].dead_time_s = 20.0f;
     }
+    memset(s_joint_ring, 0, sizeof(s_joint_ring));
+    s_joint_ring_count = 0;
+    s_joint_ring_head = 0;
+    s_joint_observations_lifetime = 0;
+    memset(s_joint_last_duty, 0, sizeof(s_joint_last_duty));
+    memset(s_joint_last_rise_c, 0, sizeof(s_joint_last_rise_c));
+    memset(s_joint_last_valid, 0, sizeof(s_joint_last_valid));
 }
 
 // Ticks a single settled dwell into zone zi: `ticks` ticks of dt_s seconds
@@ -445,6 +493,237 @@ static void test_per_run_move_is_bounded_even_with_many_dwells(void)
                "a single run's applied move must never exceed the per-run fractional cap");
 }
 
+// ---------------------------------------------------------------------
+// Full coupled identification -- adaptive_tune_coupled_fit() pure-math tests.
+// ---------------------------------------------------------------------
+
+// The bench-measured reference matrix from PID_EXPANSION_PLAN.md section 2,
+// converted from its WIRE form [stepped][affected] (as quoted there) to the
+// STORAGE convention adaptive_tune_coupled_fit() and zones_config_get/set_
+// coupling() both use: C[affected][stepped]. Deliberately asymmetric
+// (C[0][1]=26.61 != C[1][0]=15.78, etc.) so a transposed solver recovers the
+// WRONG numbers, not just "numbers" -- see test_coupled_fit_recovers_known_
+// asymmetric_matrix() below.
+//   wire[stepped=0] = 39.25/15.78/9.70  -> C[0][0]=39.25 C[1][0]=15.78 C[2][0]=9.70
+//   wire[stepped=1] = 26.61/31.97/11.38 -> C[0][1]=26.61 C[1][1]=31.97 C[2][1]=11.38
+//   wire[stepped=2] = 20.73/21.09/31.68 -> C[0][2]=20.73 C[1][2]=21.09 C[2][2]=31.68
+static const float k_ref_C[3][3] = {
+    {39.25f, 26.61f, 20.73f},
+    {15.78f, 31.97f, 21.09f},
+    {9.70f, 11.38f, 31.68f},
+};
+
+static void test_coupled_fit_refuses_underdetermined_observation_set(void)
+{
+    // n=3 unknowns per row, ADAPTIVE_TUNE_COUPLED_OBS_MARGIN=2 -> minimum is
+    // 5 joint observations. Feed exactly 4 (n+1) -- one short -- with
+    // otherwise perfectly well-conditioned, exactly-on-model data (so the
+    // ONLY thing that can refuse this is the observation-count guard, not a
+    // conditioning problem).
+    float duty[4][MAX31856_CHANNEL_COUNT] = {
+        {0.20f, 0.50f, 0.80f}, {0.50f, 0.80f, 0.20f}, {0.80f, 0.20f, 0.50f}, {0.35f, 0.65f, 0.15f}};
+    float rise[4][MAX31856_CHANNEL_COUNT];
+    for (int k = 0; k < 4; k++) {
+        for (int i = 0; i < 3; i++) {
+            float s = 0.0f;
+            for (int j = 0; j < 3; j++) s += k_ref_C[i][j] * duty[k][j];
+            rise[k][i] = q1(s);
+        }
+    }
+    float out_C[MAX31856_CHANNEL_COUNT][MAX31856_CHANNEL_COUNT];
+    adaptive_tune_coupled_result_t r = adaptive_tune_coupled_fit(duty, rise, 4, 3, out_C);
+    TEST_CHECK(r == ADAPTIVE_TUNE_COUPLED_TOO_FEW_OBSERVATIONS,
+               "4 joint observations (n+1) for a 3-unknown-per-row system must refuse as underdetermined");
+
+    // Sanity: the SAME data with one more observation (n+2 == 5, the
+    // documented margin) must NOT refuse for this reason -- proves the guard
+    // is checking the count, not silently failing on this data for some
+    // other reason.
+    float duty5[5][MAX31856_CHANNEL_COUNT];
+    memcpy(duty5, duty, sizeof(duty));
+    duty5[4][0] = 0.65f; duty5[4][1] = 0.15f; duty5[4][2] = 0.65f;
+    float rise5[5][MAX31856_CHANNEL_COUNT];
+    memcpy(rise5, rise, sizeof(rise));
+    for (int i = 0; i < 3; i++) {
+        float s = 0.0f;
+        for (int j = 0; j < 3; j++) s += k_ref_C[i][j] * duty5[4][j];
+        rise5[4][i] = q1(s);
+    }
+    adaptive_tune_coupled_result_t r2 = adaptive_tune_coupled_fit(duty5, rise5, 5, 3, out_C);
+    TEST_CHECK(r2 == ADAPTIVE_TUNE_COUPLED_OK, "setup: 5 observations (the documented margin) must be accepted");
+}
+
+static void test_coupled_fit_refuses_ill_conditioned_observations(void)
+{
+    // 6 observations, but zone 0's and zone 1's duty are IDENTICAL on every
+    // one -- the design matrix (duty^T * duty) is then singular (columns 0
+    // and 1 are linearly dependent), however many observations are piled
+    // on. Well above the observation-count floor, so this isolates the
+    // conditioning guard specifically.
+    float duty[6][MAX31856_CHANNEL_COUNT];
+    float rise[6][MAX31856_CHANNEL_COUNT];
+    float xs[6] = {0.20f, 0.35f, 0.50f, 0.65f, 0.80f, 0.30f};
+    float ys[6] = {0.10f, 0.40f, 0.25f, 0.55f, 0.15f, 0.60f};
+    for (int k = 0; k < 6; k++) {
+        duty[k][0] = xs[k];
+        duty[k][1] = xs[k]; // == column 0, always
+        duty[k][2] = ys[k];
+        for (int i = 0; i < 3; i++) {
+            float s = 0.0f;
+            for (int j = 0; j < 3; j++) s += k_ref_C[i][j] * duty[k][j];
+            rise[k][i] = q1(s);
+        }
+    }
+    float out_C[MAX31856_CHANNEL_COUNT][MAX31856_CHANNEL_COUNT];
+    adaptive_tune_coupled_result_t r = adaptive_tune_coupled_fit(duty, rise, 6, 3, out_C);
+    TEST_CHECK(r == ADAPTIVE_TUNE_COUPLED_ILL_CONDITIONED,
+               "two identical duty columns (rank-deficient design matrix) must refuse as ill-conditioned, "
+               "not silently return a numeric answer");
+}
+
+static void test_coupled_fit_recovers_known_asymmetric_matrix(void)
+{
+    // 6 joint observations, duty combinations spanning a wide, varied range
+    // (well above the 5-observation margin, well-conditioned), rises
+    // generated from k_ref_C and quantized to 0.1 degC -- realistically
+    // quantized synthetic input, not idealized exact floats (this repo's own
+    // "unquantized synthetic input hides whole branches" trap).
+    float duty[6][MAX31856_CHANNEL_COUNT] = {
+        {0.20f, 0.50f, 0.80f}, {0.50f, 0.80f, 0.20f}, {0.80f, 0.20f, 0.50f},
+        {0.35f, 0.65f, 0.15f}, {0.65f, 0.15f, 0.65f}, {0.15f, 0.35f, 0.35f}};
+    float rise[6][MAX31856_CHANNEL_COUNT];
+    for (int k = 0; k < 6; k++) {
+        for (int i = 0; i < 3; i++) {
+            float s = 0.0f;
+            for (int j = 0; j < 3; j++) s += k_ref_C[i][j] * duty[k][j];
+            rise[k][i] = q1(s);
+        }
+    }
+    float out_C[MAX31856_CHANNEL_COUNT][MAX31856_CHANNEL_COUNT];
+    adaptive_tune_coupled_result_t r = adaptive_tune_coupled_fit(duty, rise, 6, 3, out_C);
+    TEST_CHECK(r == ADAPTIVE_TUNE_COUPLED_OK, "setup: 6 well-spread observations on a well-conditioned matrix must solve");
+
+    for (int i = 0; i < 3; i++) {
+        for (int j = 0; j < 3; j++) {
+            TEST_CHECK_NEAR(out_C[i][j], k_ref_C[i][j], 0.6,
+                             "recovered coupling_coeff[affected][stepped] cell must match the known matrix "
+                             "within quantization tolerance");
+        }
+    }
+    // The orientation check that actually catches a transpose bug: C[0][1]
+    // (26.61) and C[1][0] (15.78) are far enough apart that a transposed
+    // solver would fail BOTH of the checks above by more than 10x this
+    // tolerance, not pass by coincidence.
+    TEST_CHECK(fabsf(out_C[0][1] - out_C[1][0]) > 5.0f,
+               "setup: C[0][1] and C[1][0] must be genuinely different values in the fixture, or a "
+               "transpose bug could not be distinguished from a correct solve");
+    TEST_CHECK_NEAR(out_C[0][1], 26.61f, 0.6, "C[0][1] (affected=0 responding to stepped=1) must NOT read as C[1][0]'s value");
+    TEST_CHECK_NEAR(out_C[1][0], 15.78f, 0.6, "C[1][0] (affected=1 responding to stepped=0) must NOT read as C[0][1]'s value");
+}
+
+// ---------------------------------------------------------------------
+// Integral (Ki) diagnosis -- adaptive_tune_diagnose_ki() pure-math tests.
+// 10s ticks (DT_KI), matching the hardware logging cadence this repo's
+// vacuity-trap note calls out; every temperature sample below goes through
+// q1() (0.1 degC quantization), same convention as the rest of this file.
+// ---------------------------------------------------------------------
+#define DT_KI 10.0f
+
+static void test_ki_diagnose_insufficient_below_min_samples(void)
+{
+    float a[8], d[8];
+    for (int i = 0; i < 8; i++) { a[i] = q1(100.0f); d[i] = 0.4f; }
+    adaptive_tune_ki_diag_t diag;
+    TEST_CHECK(adaptive_tune_diagnose_ki(a, d, 8, DT_KI, 0.0f, 0.0f, &diag), "call must return true");
+    TEST_CHECK(diag.verdict == ADAPTIVE_TUNE_KI_INSUFFICIENT, "8 samples (below the 12-sample minimum) must be INSUFFICIENT");
+}
+
+static void test_ki_diagnose_steady_offset_flags_small_ki(void)
+{
+    // Flat, quantized temperature (no oscillation, no drift), duty varying
+    // in the middle of its range (nowhere near a rail) -- and a dwell error
+    // figure the profile executor would report for a steadily hot-running
+    // zone. This must read as "Ki too small", not floored (see the paired
+    // floored test below, which is IDENTICAL except for the duty pattern).
+    float a[16], d[16];
+    for (int i = 0; i < 16; i++) {
+        a[i] = q1(101.3f);
+        d[i] = 0.40f + ((i % 2) ? 0.03f : -0.03f); // varying, centered ~0.40, real duty variance
+    }
+    adaptive_tune_ki_diag_t diag;
+    TEST_CHECK(adaptive_tune_diagnose_ki(a, d, 16, DT_KI, /*dwell_err_mean_c=*/0.45f, /*dwell_err_max_c=*/0.50f, &diag),
+               "call must return true");
+    TEST_CHECK(diag.verdict == ADAPTIVE_TUNE_KI_OFFSET_TOO_SMALL,
+               "a steady 0.45C dwell error with a non-flat, non-rail duty must diagnose as Ki too small");
+    TEST_CHECK(diag.ki_correction_pct > 0.0f, "the OFFSET verdict must suggest INCREASING Ki (positive correction)");
+}
+
+static void test_ki_diagnose_floored_not_misdiagnosed_as_small_ki(void)
+{
+    // Same flat temperature and the SAME 0.45C/0.50C dwell error figures as
+    // the OFFSET test above -- the ONLY difference is duty: pinned low and
+    // essentially not moving, the -ff_hold floor's signature (pid.c). This
+    // must NOT reuse the OFFSET_TOO_SMALL verdict, and must suggest no
+    // correction at all.
+    float a[16], d[16];
+    for (int i = 0; i < 16; i++) {
+        a[i] = q1(101.3f);
+        d[i] = 0.02f; // pinned near the 0 rail, essentially zero variance
+    }
+    adaptive_tune_ki_diag_t diag;
+    TEST_CHECK(adaptive_tune_diagnose_ki(a, d, 16, DT_KI, 0.45f, 0.50f, &diag), "call must return true");
+    TEST_CHECK(diag.verdict == ADAPTIVE_TUNE_KI_FLOORED,
+               "identical error figures but duty pinned near a rail must diagnose as FLOORED, not small Ki");
+    TEST_CHECK(diag.ki_correction_pct == 0.0f, "a FLOORED verdict must never suggest a Ki correction");
+}
+
+static void test_ki_diagnose_drift_flags_large_ki(void)
+{
+    // Monotonic drift across the window (no oscillation -- a straight
+    // climb has essentially one crossing of its own mean, not the >=4 the
+    // oscillation branch requires), well past the 0.15C drift threshold.
+    float a[18], d[18];
+    for (int i = 0; i < 18; i++) {
+        a[i] = q1(100.0f + 0.06f * (float)i); // +1.02C total drift over the window
+        d[i] = 0.40f;
+    }
+    adaptive_tune_ki_diag_t diag;
+    TEST_CHECK(adaptive_tune_diagnose_ki(a, d, 18, DT_KI, 0.0f, 0.0f, &diag), "call must return true");
+    TEST_CHECK(diag.verdict == ADAPTIVE_TUNE_KI_OSCILLATING, "a sustained monotonic drift must diagnose as Ki too large");
+    TEST_CHECK(diag.ki_correction_pct < 0.0f, "the drift verdict must suggest DECREASING Ki (negative correction)");
+}
+
+static void test_ki_diagnose_limit_cycle_yields_ku_tu(void)
+{
+    // A clean, regular oscillation: period 8 samples (3 full cycles across
+    // 24 samples), amplitude 0.3C (well above the 0.05C noise floor),
+    // quantized to 0.1C. Duty oscillates with the same period.
+    float a[24], d[24];
+    const float pi = 3.14159265358979f;
+    for (int i = 0; i < 24; i++) {
+        a[i] = q1(100.0f + 0.30f * sinf(2.0f * pi * (float)i / 8.0f));
+        d[i] = 0.40f + 0.10f * sinf(2.0f * pi * (float)i / 8.0f);
+    }
+    adaptive_tune_ki_diag_t diag;
+    TEST_CHECK(adaptive_tune_diagnose_ki(a, d, 24, DT_KI, 0.0f, 0.0f, &diag), "call must return true");
+    TEST_CHECK(diag.verdict == ADAPTIVE_TUNE_KI_LIMIT_CYCLE, "a clean, regular 8-sample-period oscillation must diagnose as a limit cycle");
+    TEST_CHECK(diag.zero_crossings >= 4, "setup: the fixture must actually cross its own mean at least 4 times");
+    TEST_CHECK(diag.ku_estimate > 0.0f, "a limit cycle must hand over a positive Ku estimate");
+    TEST_CHECK(diag.tu_estimate_s > 0.0f, "a limit cycle must hand over a positive Tu estimate");
+    TEST_CHECK(diag.ki_correction_pct < 0.0f, "a limit cycle must suggest DECREASING Ki");
+}
+
+static void test_ki_diagnose_ok_when_tracking_cleanly(void)
+{
+    float a[16], d[16];
+    for (int i = 0; i < 16; i++) { a[i] = q1(100.0f); d[i] = 0.40f; }
+    adaptive_tune_ki_diag_t diag;
+    TEST_CHECK(adaptive_tune_diagnose_ki(a, d, 16, DT_KI, /*dwell_err_mean_c=*/0.05f, /*dwell_err_max_c=*/0.08f, &diag),
+               "call must return true");
+    TEST_CHECK(diag.verdict == ADAPTIVE_TUNE_KI_OK, "flat trace, tiny dwell error, must diagnose OK (no correction)");
+    TEST_CHECK(diag.ki_correction_pct == 0.0f, "an OK verdict must suggest no correction");
+}
+
 void run_test_adaptive_tune(void)
 {
     TEST_SECTION("adaptive_tune: settling");
@@ -469,6 +748,19 @@ void run_test_adaptive_tune(void)
 
     TEST_SECTION("adaptive_tune: refinement improves the estimate");
     test_refinement_improves_gain_estimate_on_known_plant();
+
+    TEST_SECTION("adaptive_tune: coupled identification -- pure fit");
+    test_coupled_fit_refuses_underdetermined_observation_set();
+    test_coupled_fit_refuses_ill_conditioned_observations();
+    test_coupled_fit_recovers_known_asymmetric_matrix();
+
+    TEST_SECTION("adaptive_tune: Ki diagnosis from dwells");
+    test_ki_diagnose_insufficient_below_min_samples();
+    test_ki_diagnose_steady_offset_flags_small_ki();
+    test_ki_diagnose_floored_not_misdiagnosed_as_small_ki();
+    test_ki_diagnose_drift_flags_large_ki();
+    test_ki_diagnose_limit_cycle_yields_ku_tu();
+    test_ki_diagnose_ok_when_tracking_cleanly();
 }
 
 int main(void)
