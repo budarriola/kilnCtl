@@ -277,7 +277,25 @@ _ZONE_COUPLING_TAU_DEAD_TIME_CELL_RE = re.compile(r"^coupling_(?:tau|dead_time)_
 #: counterpart at all (measured data, or the array index itself) -- excluded
 #: from the POST body on purpose, not by omission-means-preserve, since these
 #: are never accepted as input in the first place.
-_ZONE_READONLY_KEYS = {"index", "normal_current_measured", "normal_current_a"}
+#: ZONES_CFG_VERSION 12->13 (2026-08-31): the tuning-quality record (set 1).
+#: zones_http_handlers.c's GET handler emits all 11 keys unconditionally
+#: (see its own comment ~line 347), but parse_zone_fields() has NO z%u_
+#: POST key for ANY of them -- the POST side unconditionally copies every
+#: one of these 11 fields from current_z (lines ~668-678 of
+#: zones_http_handlers.c), invalidating tuning_valid only when the PID
+#: gains actually changed (line ~681), never from a POST field. Genuinely
+#: read-only/derived (autotune's fitted result), same class as
+#: normal_current_a below -- listed here, not in _ZONE_FIELD_FORM_KEY,
+#: so build_post_body() leaves them out of the POST rather than raising
+#: ZonesHttpUnknownFieldError on every zones round-trip against this
+#: firmware.
+_ZONE_TUNING_READONLY_KEYS = {
+    "tuning_valid", "tuning_method", "tuning_rule", "tuning_settled",
+    "tuning_extrapolation_converged", "tuning_tau_consistent",
+    "tuning_baseline_c", "tuning_step_ambient_c", "tuning_raw_rise_c",
+    "tuning_rise_inf_c", "tuning_seq",
+}
+_ZONE_READONLY_KEYS = {"index", "normal_current_measured", "normal_current_a"} | _ZONE_TUNING_READONLY_KEYS
 
 _TIMING_PROFILE_FIELD_FORM_KEY = {
     "name": "name",

@@ -67,6 +67,15 @@ def _sample_zone(index: int, **overrides) -> dict:
         **{f"coupling_tau_c{j}": 0.0 for j in range(3)},
         **{f"coupling_dead_time_c{j}": 0.0 for j in range(3)},
         "settings_source": 0xFF,
+        # ZONES_CFG_VERSION 12->13: tuning-quality record (set 1), always
+        # emitted alongside everything else above -- see
+        # zh._ZONE_TUNING_READONLY_KEYS's own comment for why these 11 keys
+        # have no POST mapping at all.
+        "tuning_valid": False, "tuning_method": 0, "tuning_rule": 0,
+        "tuning_settled": False, "tuning_extrapolation_converged": False,
+        "tuning_tau_consistent": False,
+        "tuning_baseline_c": 0.0, "tuning_step_ambient_c": 0.0,
+        "tuning_raw_rise_c": 0.0, "tuning_rise_inf_c": 0.0, "tuning_seq": 0,
     }
     z.update(overrides)
     return z
@@ -336,6 +345,50 @@ class BuildPostBodyTest(unittest.TestCase):
             self.assertFalse(key.startswith("z0_coupling_dead_time_"), key)
             self.assertFalse(key.startswith("z1_coupling_tau_"), key)
             self.assertFalse(key.startswith("z1_coupling_dead_time_"), key)
+
+    def test_tuning_fields_do_not_crash_the_round_trip_and_are_never_posted(self):
+        """DEFECT this task exists to fix: ZONES_CFG_VERSION 12->13 added the
+        11-key tuning-quality record (tuning_valid/method/rule/settled/
+        extrapolation_converged/tau_consistent/baseline_c/step_ambient_c/
+        raw_rise_c/rise_inf_c/seq) to GET /api/zones -- build_post_body()
+        raised ZonesHttpUnknownFieldError on EVERY zones round-trip against
+        any board running that firmware (the exact error blocking the live
+        hardware run this fix responds to). These fields have NO z%u_ POST
+        key at all (parse_zone_fields() unconditionally copies them from
+        current_z -- zones_http_handlers.c lines ~668-678), so they must be
+        excluded from the POST, not invented a fake form key."""
+        current = _sample_get_response(n_zones=3)
+        current["zones"][0]["tuning_valid"] = True
+        current["zones"][0]["tuning_method"] = 2
+        current["zones"][0]["tuning_rule"] = 1
+        current["zones"][0]["tuning_settled"] = True
+        current["zones"][0]["tuning_extrapolation_converged"] = True
+        current["zones"][0]["tuning_tau_consistent"] = False
+        current["zones"][0]["tuning_baseline_c"] = 21.5
+        current["zones"][0]["tuning_step_ambient_c"] = 22.0
+        current["zones"][0]["tuning_raw_rise_c"] = 41.3
+        current["zones"][0]["tuning_rise_inf_c"] = 60.0
+        current["zones"][0]["tuning_seq"] = 7
+        # Must not raise.
+        body = zh.build_post_body(current, {"name": "p", "zones": []})
+        form = _decode_body(body)
+        for key in form:
+            self.assertFalse(key.startswith("z0_tuning"), key)
+
+    def test_tuning_field_guard_still_refuses_when_unmapped_BREAK_PROOF(self):
+        """NEGATIVE TEST / regression guard: revert one of the 11 tuning
+        keys out of _ZONE_TUNING_READONLY_KEYS (simulating the original
+        defect -- a GET field the client doesn't yet know is read-only) and
+        prove build_post_body() still refuses loudly rather than silently
+        dropping it. Run, watch it go red, then trust the fix stays green."""
+        current = _sample_get_response()
+        current["zones"][0]["tuning_valid"] = True
+        with unittest.mock.patch.object(
+                zh, "_ZONE_READONLY_KEYS",
+                zh._ZONE_READONLY_KEYS - {"tuning_valid"}):
+            with self.assertRaises(zh.ZonesHttpUnknownFieldError) as ctx:
+                zh.build_post_body(current, {"name": "p", "zones": []})
+        self.assertIn("tuning_valid", str(ctx.exception))
 
     def test_control_mode_3_pid_fuzzy_accepted(self):
         """control_mode now accepts ZONE_CONTROL_MODE_PID_FUZZY (3) -- confirm
@@ -664,6 +717,77 @@ class ApplyZonePresetTest(unittest.TestCase):
             result = zh.apply_zone_preset("kiln.local", {"name": "p", "zones": []}, verify=False)
         self.assertEqual(calls["n"], 2)  # GET + POST, no second GET
         self.assertTrue(result.ok)
+
+
+class CapturedLiveGetFixtureTest(unittest.TestCase):
+    """Round-trips build_post_body() over a REAL GET /api/zones payload
+    captured from the live board (192.168.1.156, 2026-09-02) -- the same
+    hazard as the mocked _sample_get_response() fixture above, but against
+    actual firmware output rather than a hand-authored dict, which is what
+    caught the tuning_valid gap in the first place (a hand-authored fixture
+    only has the fields the test author remembered to put in). This is also
+    the REGRESSION GUARD: any GET field the firmware emits that the live
+    board fixture carries and this module has no mapping/readonly-entry for
+    fails this test with ZonesHttpUnknownFieldError, by construction -- no
+    separate "did we forget a field" check is needed, because the fixture is
+    the field list.
+    """
+
+    @staticmethod
+    def _load_fixture() -> dict:
+        path = os.path.join(os.path.dirname(__file__), "fixtures", "zones_get_capture.json")
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+
+    def test_round_trips_without_dropping_any_field(self):
+        current = self._load_fixture()
+        # Must not raise ZonesHttpUnknownFieldError -- every field the live
+        # board actually emitted is either mapped or explicitly read-only.
+        body = zh.build_post_body(current, {"name": "p", "zones": []})
+        form = _decode_body(body)
+
+        # Every writable zone field from the captured GET must be present
+        # in the POST body, unchanged (echoed, not dropped) -- walk the
+        # fixture itself rather than hardcoding a field list, so this test
+        # does not go stale the same way the client almost did.
+        for zone in current["zones"]:
+            idx = zone["index"]
+            for key, value in zone.items():
+                if key in zh._ZONE_READONLY_KEYS:
+                    continue
+                if zh._ZONE_COUPLING_TAU_DEAD_TIME_CELL_RE.match(key):
+                    continue
+                suffix = zh._ZONE_FIELD_FORM_KEY.get(key)
+                if suffix is None and zh._ZONE_COUPLING_CELL_RE.match(key):
+                    suffix = key
+                self.assertIsNotNone(suffix, f"zone {idx} field {key!r} has no mapping")
+                form_key = f"z{idx}_{suffix}"
+                self.assertIn(form_key, form, f"zone {idx} field {key!r} missing from POST body")
+
+    def test_fuzzy_strength_override_matches_the_hardware_repro_command(self):
+        """The exact repro from the blocked hardware run: build a body that
+        sets fuzzy_strength_pct=50.0 on every zone while preserving
+        everything else from the live GET."""
+        current = self._load_fixture()
+        preset = {"zones": [{"index": i, "fuzzy_strength_pct": 50.0}
+                             for i in range(len(current["zones"]))]}
+        body = zh.build_post_body(current, preset)
+        form = _decode_body(body)
+        for i in range(len(current["zones"])):
+            self.assertEqual(form[f"z{i}_fuzzy_strength"], repr(50.0))
+
+    def test_MUTATION_a_new_unmapped_get_field_is_caught_BREAK_PROOF(self):
+        """THE regression guard, proved red then green: inject a fake field
+        into the captured payload the way a firmware change that grows GET
+        /api/zones would (e.g. a hypothetical 'tuning_snr_db') and confirm
+        build_post_body() refuses rather than silently dropping it. This is
+        the exact failure mode that blocked the live hardware run
+        (tuning_valid, before this fix)."""
+        current = self._load_fixture()
+        current["zones"][0]["tuning_snr_db_NOT_A_REAL_FIELD"] = 12.5
+        with self.assertRaises(zh.ZonesHttpUnknownFieldError) as ctx:
+            zh.build_post_body(current, {"name": "p", "zones": []})
+        self.assertIn("tuning_snr_db_NOT_A_REAL_FIELD", str(ctx.exception))
 
 
 if __name__ == "__main__":
