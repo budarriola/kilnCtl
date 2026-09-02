@@ -19,6 +19,8 @@ def log_analyze(
     trace_path: str = "",
     compare_path: str = "",
     band_c: float = 1.0,
+    run_index: int = -1,
+    compare_run_index: int = -1,
     json_output: bool = False,
 ) -> str:
     """Analyze a captured firing or autotune log -- no board access, no serial link.
@@ -53,10 +55,20 @@ def log_analyze(
 
     Set ``json_output=True`` for machine-readable JSON instead of the
     default compact text report.
+
+    If ``path`` (or, for ``kind="compare"``, ``compare_path``) holds more
+    than one run -- e.g. a telemetry poller left running caught a second
+    firing in the same capture -- this REFUSES rather than silently
+    analyzing whichever run happened to be last, and the returned text/JSON
+    names how many runs were found and their start times/temps. Pass
+    ``run_index`` (and, for compare, ``compare_run_index``) to select one
+    explicitly once you know which; -1 (the default) means "not set".
     """
     kind = kind.strip().lower()
+    run_idx = run_index if run_index >= 0 else None
+    cmp_run_idx = compare_run_index if compare_run_index >= 0 else None
     if kind == "firing":
-        report = log_analysis.render_firing_report(path, band_c=band_c)
+        report = log_analysis.render_firing_report(path, band_c=band_c, run_index=run_idx)
         return (
             log_analysis.firing_report_to_json(report)
             if json_output else log_analysis.format_firing_report_text(report)
@@ -70,7 +82,9 @@ def log_analyze(
     if kind == "compare":
         if not compare_path:
             return "error: kind='compare' requires compare_path (the second run to diff against)"
-        report = log_analysis.compare_firing_runs(path, compare_path, band_c=band_c)
+        report = log_analysis.compare_firing_runs(
+            path, compare_path, band_c=band_c, run_index_a=run_idx, run_index_b=cmp_run_idx,
+        )
         return (
             log_analysis.compare_report_to_json(report)
             if json_output else log_analysis.format_compare_report_text(report)

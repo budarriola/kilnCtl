@@ -38,6 +38,7 @@ from __future__ import annotations
 import dataclasses
 import datetime
 import json
+import os
 from typing import Optional, Sequence
 
 from kilnctrl import log_analysis as la
@@ -91,6 +92,78 @@ def poll_rows(path: str) -> list[la.PollRow]:
     analysis function in ``log_analysis.py`` (and ``pid_ab_compare.py``)
     consumes."""
     return [r.poll for r in parse_http_capture_jsonl(path)]
+
+
+def split_http_capture_lines(path: str) -> list[list[str]]:
+    """Split a raw HTTP-capture JSONL file into one list of raw lines per
+    run, so a multi-run capture (e.g. a poller left running across a kiln
+    cooldown into the next firing -- the actual near-miss this function was
+    written for) can be turned into one clean single-run file per firing
+    without hand-editing.
+
+    Boundary detection mirrors ``log_analysis.split_runs``: a new run starts
+    wherever a line's ``exec.elapsed_s`` is less than the previous exec
+    line's. This works at the RAW LINE level (not the parsed ``PollRow``
+    level) so the split files are byte-identical excerpts of the original --
+    no reserialization, no risk of dropping a field nothing here happens to
+    read (e.g. the ``status`` half of the envelope). A line with no
+    parseable ``exec.elapsed_s`` (blank, malformed, or a bare
+    ``{"t","status"}`` line) never starts a new run on its own; it rides
+    along with whichever run is currently open.
+    """
+    runs: list[list[str]] = []
+    last_elapsed: Optional[float] = None
+    with open(path, "r", encoding="utf-8") as fh:
+        for raw_line in fh:
+            line = raw_line.rstrip("\n")
+            stripped = line.strip()
+            elapsed: Optional[float] = None
+            if stripped.startswith("{"):
+                try:
+                    obj = json.loads(stripped)
+                except json.JSONDecodeError:
+                    obj = None
+                if isinstance(obj, dict):
+                    body = obj.get("exec")
+                    if isinstance(body, dict):
+                        try:
+                            elapsed = float(body.get("elapsed_s"))
+                        except (TypeError, ValueError):
+                            elapsed = None
+            if elapsed is not None and (last_elapsed is None or elapsed < last_elapsed):
+                runs.append([])
+            if elapsed is not None:
+                last_elapsed = elapsed
+            if not runs:
+                runs.append([])
+            runs[-1].append(line)
+    return [r for r in runs if r]
+
+
+def write_split_runs(path: str, outdir: str, prefix: Optional[str] = None) -> list[str]:
+    """Write each run in ``path`` to its own file under ``outdir``, named
+    ``<prefix>_run<N>.jsonl`` (N starting at 1, file order). Returns the list
+    of paths written, in run order. This is the first-class version of the
+    ad-hoc split every prior multi-run capture has needed by hand -- see
+    ``pid_ab_compare split`` for the CLI entry point.
+
+    Raises the same ``FileNotFoundError``/``OSError`` a caller would get
+    from opening ``path`` directly; returns ``[]`` (writes nothing) if the
+    file has no lines to split.
+    """
+    lines_per_run = split_http_capture_lines(path)
+    if not lines_per_run:
+        return []
+    if prefix is None:
+        prefix = os.path.splitext(os.path.basename(path))[0]
+    os.makedirs(outdir, exist_ok=True)
+    out_paths = []
+    for i, lines in enumerate(lines_per_run, start=1):
+        out_path = os.path.join(outdir, f"{prefix}_run{i}.jsonl")
+        with open(out_path, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(lines) + "\n")
+        out_paths.append(out_path)
+    return out_paths
 
 
 def starting_temps_c(rows: Sequence[la.PollRow]) -> dict:

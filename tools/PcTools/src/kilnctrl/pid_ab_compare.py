@@ -172,18 +172,30 @@ def compute_run_metrics(rows: Sequence[la.PollRow], band_c: float = 1.0) -> dict
 # Loading either capture shape, and picking the run
 # ---------------------------------------------------------------------------
 
-def load_last_run(path: str) -> list:
-    """Load an HTTP-capture JSONL and return its most recent complete run's
-    rows. HTTP captures are the only source this module accepts (that is
-    the shape the fuzzy A/B runs are being recorded in); the classic
-    ``HH:MM:SS {...}`` poll-capture shape stays log_analysis.py's own
-    ``compare`` command's job."""
+def load_last_run(path: str, run_index: Optional[int] = None) -> list:
+    """Load an HTTP-capture JSONL and return ONE run's rows. HTTP captures
+    are the only source this module accepts (that is the shape the fuzzy A/B
+    runs are being recorded in); the classic ``HH:MM:SS {...}`` poll-capture
+    shape stays log_analysis.py's own ``compare`` command's job.
+
+    2026-09-02: this used to always take the file's most recent run, no
+    questions asked. That is exactly how a telemetry poller left running
+    across a kiln cooldown produced a two-run
+    ``p7_oldmatrix_http.jsonl``, and an A/B compare silently took the second
+    run from BOTH sides -- comparing it against itself. The output looked
+    entirely plausible (matched start temps, near-identical metrics, tidy
+    verdicts) and would have been believed. Now: if the file holds more than
+    one run that actually carries zone data, this raises
+    ``log_analysis.MultiRunError`` (naming how many runs were found and their
+    start times/temps) unless ``run_index`` says which one to use. See
+    ``split()`` below for splitting a multi-run capture into one file per
+    run first.
+    """
     all_rows = hc.poll_rows(path)
     if not all_rows:
         return []
-    runs = la.split_runs(all_rows)
-    idx = la._default_run_index(runs)
-    return runs[idx]
+    rows, _n_runs, _used = la.select_run(all_rows, path, run_index=run_index)
+    return rows
 
 
 # ---------------------------------------------------------------------------
@@ -224,11 +236,14 @@ def _cmp(zone: int, metric: str, segment: Optional[int], a: Optional[float], b: 
     )
 
 
-def compare_runs(path_a: str, path_b: str, band_c: float = 1.0) -> dict:
+def compare_runs(
+    path_a: str, path_b: str, band_c: float = 1.0,
+    run_index_a: Optional[int] = None, run_index_b: Optional[int] = None,
+) -> dict:
     try:
-        rows_a = load_last_run(path_a)
-        rows_b = load_last_run(path_b)
-    except (FileNotFoundError, OSError) as exc:
+        rows_a = load_last_run(path_a, run_index=run_index_a)
+        rows_b = load_last_run(path_b, run_index=run_index_b)
+    except (FileNotFoundError, OSError, la.MultiRunError, IndexError) as exc:
         return {"error": str(exc)}
     if not rows_a or not rows_b:
         return {"error": "one or both HTTP captures had no parseable rows"}
@@ -371,20 +386,30 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     p_single = sub.add_parser("run", help="report per-zone metrics for a single HTTP capture")
     p_single.add_argument("path")
     p_single.add_argument("--band", type=float, default=1.0)
+    p_single.add_argument("--run", type=int, default=None, help="explicit run index, required if the capture holds more than one run")
     p_single.add_argument("--json", action="store_true")
 
     p_cmp = sub.add_parser("compare", help="A/B compare two HTTP captures, with the start-temp confound gate")
     p_cmp.add_argument("path_a")
     p_cmp.add_argument("path_b")
     p_cmp.add_argument("--band", type=float, default=1.0)
+    p_cmp.add_argument("--run-a", dest="run_a", type=int, default=None, help="explicit run index for path_a, required if it holds more than one run")
+    p_cmp.add_argument("--run-b", dest="run_b", type=int, default=None, help="explicit run index for path_b, required if it holds more than one run")
     p_cmp.add_argument("--json", action="store_true")
+
+    p_split = sub.add_parser(
+        "split",
+        help="split a multi-run HTTP capture into one file per run (<outdir>/<name>_run1.jsonl, _run2.jsonl, ...)",
+    )
+    p_split.add_argument("path")
+    p_split.add_argument("outdir")
 
     args = parser.parse_args(argv)
 
     if args.cmd == "run":
         try:
-            rows = load_last_run(args.path)
-        except (FileNotFoundError, OSError) as exc:
+            rows = load_last_run(args.path, run_index=args.run)
+        except (FileNotFoundError, OSError, la.MultiRunError, IndexError) as exc:
             print(f"error: {exc}")
             return 1
         if not rows:
@@ -396,8 +421,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         else:
             print(format_single_run_text(args.path, metrics))
     elif args.cmd == "compare":
-        report = compare_runs(args.path_a, args.path_b, band_c=args.band)
+        report = compare_runs(args.path_a, args.path_b, band_c=args.band,
+                               run_index_a=args.run_a, run_index_b=args.run_b)
         print(compare_report_to_json(report) if args.json else format_compare_text(report))
+        return 1 if "error" in report else 0
+    elif args.cmd == "split":
+        try:
+            paths = hc.write_split_runs(args.path, args.outdir)
+        except (FileNotFoundError, OSError) as exc:
+            print(f"error: {exc}")
+            return 1
+        if not paths:
+            print(f"error: no parseable rows in {args.path}")
+            return 1
+        for p in paths:
+            print(p)
     else:
         parser.print_help()
         return 2

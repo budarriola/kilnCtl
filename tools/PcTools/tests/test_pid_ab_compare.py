@@ -12,10 +12,17 @@ import os
 
 import pytest
 
+from kilnctrl import log_analysis as la
 from kilnctrl import pid_ab_compare as ab
 
 FIXTURES = os.path.join(os.path.dirname(__file__), "fixtures")
 EXCERPT = os.path.join(FIXTURES, "p7_fuzzy0_http_excerpt.jsonl")
+# Trimmed excerpt of the REAL logs/coupling/p7_oldmatrix_http.jsonl that
+# produced the actual near-miss this refusal exists to prevent: a poller
+# left running caught a second firing (163 rows) appended after the first
+# (281 rows) into the same file. See test_http_capture_log.py's split tests
+# for how this fixture was trimmed.
+TWO_RUN_EXCERPT = os.path.join(FIXTURES, "p7_oldmatrix_http_two_run_excerpt.jsonl")
 
 
 def _write_shifted_copy(tmp_path, src_path, temp_shift_c: float, name: str) -> str:
@@ -136,3 +143,107 @@ def test_cli_compare_text(capsys):
 def test_cli_run_missing_file(capsys):
     rc = ab.main(["run", os.path.join(FIXTURES, "does_not_exist.jsonl")])
     assert rc == 1
+
+
+# ---------------------------------------------------------------------------
+# THE NEAR-MISS: a capture holding more than one run must be REFUSED, never
+# silently resolved to "the last one" -- that silent resolution is exactly
+# what turned p7_oldmatrix_http.jsonl's two runs into an A/B compare of the
+# second run against itself.
+# ---------------------------------------------------------------------------
+
+def test_load_last_run_refuses_multirun_capture_by_default():
+    with pytest.raises(la.MultiRunError) as exc_info:
+        ab.load_last_run(TWO_RUN_EXCERPT)
+    msg = str(exc_info.value)
+    assert "2 separate runs" in msg
+    # both runs must be named -- row 0 and row 1 of split_runs' output --
+    # with their start times/temps, exactly what would have made the actual
+    # incident obvious instead of merely suspicious.
+    assert "run 0" in msg
+    assert "run 1" in msg
+    assert "elapsed=7s" in msg
+    assert "elapsed=12s" in msg
+
+
+def test_load_last_run_explicit_run_index_selects_one_run():
+    rows0 = ab.load_last_run(TWO_RUN_EXCERPT, run_index=0)
+    rows1 = ab.load_last_run(TWO_RUN_EXCERPT, run_index=1)
+    assert len(rows0) == 12
+    assert len(rows1) == 12
+    assert rows0[0].elapsed_s == pytest.approx(7.0)
+    assert rows1[0].elapsed_s == pytest.approx(12.0)
+
+
+def test_compare_runs_refuses_when_either_side_is_multirun():
+    report = ab.compare_runs(TWO_RUN_EXCERPT, EXCERPT)
+    assert "error" in report
+    assert "2 separate runs" in report["error"]
+    text = ab.format_compare_text(report)
+    assert text.startswith("error:")
+
+
+def test_compare_runs_with_explicit_run_index_proceeds_normally():
+    report = ab.compare_runs(TWO_RUN_EXCERPT, TWO_RUN_EXCERPT, run_index_a=0, run_index_b=1)
+    assert "error" not in report
+    assert report["n_rows_a"] == 12
+    assert report["n_rows_b"] == 12
+
+
+def test_single_run_capture_still_works_unchanged():
+    """A plain single-run capture must behave exactly as before -- no
+    refusal, no explicit run index required."""
+    rows_implicit = ab.load_last_run(EXCERPT)
+    rows_explicit = ab.load_last_run(EXCERPT, run_index=0)
+    assert rows_implicit == rows_explicit
+    report = ab.compare_runs(EXCERPT, EXCERPT)
+    assert "error" not in report
+
+
+def test_cli_compare_multirun_refuses_and_returns_nonzero(capsys):
+    rc = ab.main(["compare", TWO_RUN_EXCERPT, EXCERPT])
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "error:" in out
+    assert "2 separate runs" in out
+
+
+def test_cli_compare_explicit_run_selects_and_succeeds(capsys):
+    rc = ab.main(["compare", TWO_RUN_EXCERPT, TWO_RUN_EXCERPT, "--run-a", "0", "--run-b", "1"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "A/B compare" in out
+
+
+def test_cli_run_multirun_refuses(capsys):
+    rc = ab.main(["run", TWO_RUN_EXCERPT])
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "error:" in out
+    assert "2 separate runs" in out
+
+
+# ---------------------------------------------------------------------------
+# `pid_ab_compare split` -- the first-class version of the ad-hoc split
+# script this incident required by hand.
+# ---------------------------------------------------------------------------
+
+def test_cli_split_writes_two_files(tmp_path, capsys):
+    outdir = tmp_path / "split_out"
+    rc = ab.main(["split", TWO_RUN_EXCERPT, str(outdir)])
+    assert rc == 0
+    out = capsys.readouterr().out.strip().splitlines()
+    assert len(out) == 2
+    for p in out:
+        assert os.path.isfile(p)
+    # each split file must now load cleanly with no --run needed.
+    rows0 = ab.load_last_run(out[0])
+    rows1 = ab.load_last_run(out[1])
+    assert len(rows0) == 12
+    assert len(rows1) == 12
+
+
+def test_cli_split_missing_file_errors(tmp_path, capsys):
+    rc = ab.main(["split", os.path.join(FIXTURES, "does_not_exist.jsonl"), str(tmp_path / "out")])
+    assert rc == 1
+    assert "error:" in capsys.readouterr().out

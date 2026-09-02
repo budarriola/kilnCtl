@@ -552,16 +552,33 @@ def test_window_zone_stats_zero_duration_window_is_nan_not_raw_iae():
     assert math.isnan(s.iae_normalized_c)
 
 
-def test_compare_firing_runs_uses_last_run_and_reports_run_counts(tmp_path):
-    """The core regression: comparing a multi-run file's iae_normalized must
-    equal what you'd get analyzing the LAST run in isolation -- not the old
-    corrupted merged-run figure -- and the report must say the file was
-    multi-run."""
+def test_compare_firing_runs_refuses_multi_run_a_by_default(tmp_path):
+    """A multi-run file must be REFUSED, not silently resolved to its last
+    run -- this is the fix for the near-miss where an A/B compare silently
+    took the most recent run from a two-run capture and compared it against
+    itself (see log_analysis.MultiRunError)."""
     two_run_path = _two_run_jsonl(tmp_path, "a_two_run.jsonl")
-    last_run_only_path = _one_run_jsonl(tmp_path, "a_last_run_only.jsonl")  # run 2, isolated
     single_run_path = _one_run_jsonl(tmp_path, "b_single_run.jsonl")
 
     report = la.compare_firing_runs(two_run_path, single_run_path, band_c=1.0)
+    assert "error" in report
+    assert "2 separate runs" in report["error"]
+    assert "run 0" in report["error"] and "run 1" in report["error"]
+
+    text = la.format_compare_report_text(report)
+    assert text.startswith("error:")
+
+
+def test_compare_firing_runs_explicit_run_index_selects_and_matches_isolated_run(tmp_path):
+    """With an explicit run index, the selected run's iae_normalized must
+    equal what you'd get analyzing that run in isolation -- not the old
+    corrupted merged-run figure."""
+    two_run_path = _two_run_jsonl(tmp_path, "a_two_run.jsonl")
+    last_run_only_path = _one_run_jsonl(tmp_path, "a_last_run_only.jsonl")  # run 1, isolated
+    single_run_path = _one_run_jsonl(tmp_path, "b_single_run.jsonl")
+
+    report = la.compare_firing_runs(two_run_path, single_run_path, band_c=1.0, run_index_a=1)
+    assert "error" not in report
     assert report["runs_in_a"] == 2
     assert report["runs_in_b"] == 1
     assert report["used_run_index_a"] == 1
@@ -576,17 +593,21 @@ def test_compare_firing_runs_uses_last_run_and_reports_run_counts(tmp_path):
     # corrupted ~1800x-too-large figure the raw-C*s fallback used to produce.
     assert 0.0 <= a_iae <= 10.0
 
-    text = la.format_compare_report_text(report)
-    assert "A holds 2 runs" in text
 
-
-def test_render_firing_report_uses_last_run(tmp_path):
+def test_render_firing_report_refuses_multi_run_by_default(tmp_path):
     report = la.render_firing_report(_two_run_jsonl(tmp_path), band_c=1.0)
+    assert "error" in report
+    assert "2 separate runs" in report["error"]
+    text = la.format_firing_report_text(report)
+    assert text.startswith("error:")
+
+
+def test_render_firing_report_explicit_run_index_selects_run(tmp_path):
+    report = la.render_firing_report(_two_run_jsonl(tmp_path), band_c=1.0, run_index=1)
+    assert "error" not in report
     assert report["runs_in_file"] == 2
     assert report["used_run_index"] == 1
     assert report["n_rows"] == 3  # run 2 has 3 polls
-    text = la.format_firing_report_text(report)
-    assert "2 runs" in text
 
 
 # ---------------------------------------------------------------------------

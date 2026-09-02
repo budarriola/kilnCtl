@@ -491,6 +491,94 @@ def split_runs(rows: Sequence[PollRow]) -> list[list[PollRow]]:
     return runs
 
 
+class MultiRunError(ValueError):
+    """Raised when a capture holds more than one run and no caller has said
+    which one to use.
+
+    2026-09-02: this is the fix for the near-miss where a telemetry poller
+    left running across a kiln cooldown produced a two-run
+    ``p7_oldmatrix_http.jsonl``, and ``pid_ab_compare.load_last_run`` silently
+    took the most recent run from each side -- comparing the second run
+    against itself. The output looked entirely plausible (matched start
+    temps, near-identical metrics, tidy verdicts) and would have been
+    believed. Silently discarding data the caller probably did not know was
+    there is the defect; refusing and naming what was found is the fix.
+    """
+
+    def __init__(self, path: str, runs: Sequence[dict]):
+        self.path = path
+        self.runs = list(runs)
+        lines = [
+            f"{path}: contains {len(self.runs)} separate runs -- refusing to "
+            f"silently pick one. Pass an explicit run index to select one, or "
+            f"split the file first."
+        ]
+        for r in self.runs:
+            temps = ", ".join(
+                f"z{z}={t:.2f}C" for z, t in sorted(r["start_temps_c"].items())
+            ) or "no zone data"
+            lines.append(
+                f"  run {r['index']}: {r['n_rows']} rows, starts "
+                f"{r['start_wall_time'] or '?'} @elapsed={r['start_elapsed_s']:.0f}s "
+                f"({temps})"
+            )
+        super().__init__("\n".join(lines))
+
+
+def describe_runs(runs: Sequence[Sequence[PollRow]]) -> list[dict]:
+    """Summarize each non-empty run for a human/error message: row count,
+    starting wall time/elapsed, and starting per-zone temperature -- exactly
+    the information that would have made the confounded A/B near-miss (see
+    ``MultiRunError``) obviously wrong at a glance instead of merely
+    suspicious."""
+    out = []
+    for i, r in enumerate(runs):
+        if not r:
+            continue
+        first = r[0]
+        out.append({
+            "index": i,
+            "n_rows": len(r),
+            "start_wall_time": first.wall_time,
+            "start_elapsed_s": first.elapsed_s,
+            "start_temps_c": {z: s.actual_c for z, s in first.zones.items()},
+        })
+    return out
+
+
+def select_run(
+    rows: Sequence[PollRow], path: str = "<capture>", run_index: Optional[int] = None,
+) -> tuple[list[PollRow], int, int]:
+    """Split ``rows`` into runs and return the single run a caller should
+    analyze: ``(selected_rows, n_runs, used_index)``.
+
+    * ``run_index`` given explicitly -> that run, no questions asked (this is
+      the escape hatch every refusal below points callers at).
+    * Otherwise, if more than one run carries actual zone data, refuse by
+      raising :class:`MultiRunError` naming how many runs were found and
+      their start times/temps -- a default that silently discards data the
+      caller probably did not know was there is exactly the bug this
+      function exists to prevent.
+    * Otherwise (zero or one run with data -- the common "one firing, maybe
+      a trailing idle tail" case) fall back to :func:`_default_run_index`,
+      unchanged from before.
+    """
+    runs = split_runs(rows)
+    if not runs:
+        return [], 0, 0
+    if run_index is not None:
+        if not (0 <= run_index < len(runs)):
+            raise IndexError(
+                f"{path}: run index {run_index} out of range (file holds {len(runs)} runs)"
+            )
+        return runs[run_index], len(runs), run_index
+    nonempty = [i for i, r in enumerate(runs) if any(rr.zones for rr in r)]
+    if len(nonempty) > 1:
+        raise MultiRunError(path, describe_runs(runs))
+    idx = _default_run_index(runs)
+    return runs[idx], len(runs), idx
+
+
 def _default_run_index(runs: Sequence[Sequence[PollRow]]) -> int:
     """Pick the run a caller should analyze when none is specified: the most
     recent run that actually carries zone data.
@@ -1078,13 +1166,14 @@ def _pct_diff(a: float, b: float) -> Optional[float]:
     return (b - a) / a * 100.0
 
 
-def render_firing_report(path: str, band_c: float = 1.0) -> dict:
+def render_firing_report(path: str, band_c: float = 1.0, run_index: Optional[int] = None) -> dict:
     all_rows = parse_profile_exec_jsonl(path)
     if not all_rows:
         return {"error": f"no profile_exec rows parsed from {path}"}
-    runs = split_runs(all_rows)
-    used_run_index = _default_run_index(runs)
-    rows = runs[used_run_index]  # most recent complete run in the file
+    try:
+        rows, n_runs, used_run_index = select_run(all_rows, path, run_index=run_index)
+    except (MultiRunError, IndexError) as exc:
+        return {"error": str(exc)}
 
     windows = build_windows(rows)
     zones = zones_in_rows(rows)
@@ -1109,7 +1198,7 @@ def render_firing_report(path: str, band_c: float = 1.0) -> dict:
         "n_zones": len(zones),
         "zones": zones,
         "band_c": band_c,
-        "runs_in_file": len(runs),
+        "runs_in_file": n_runs,
         "used_run_index": used_run_index,
         "windows": win_reports,
         "transitions": transitions,
@@ -1224,31 +1313,33 @@ def format_autotune_report_text(report: dict) -> str:
     return "\n".join(lines)
 
 
-def compare_firing_runs(path_a: str, path_b: str, band_c: float = 1.0) -> dict:
+def compare_firing_runs(
+    path_a: str, path_b: str, band_c: float = 1.0,
+    run_index_a: Optional[int] = None, run_index_b: Optional[int] = None,
+) -> dict:
     """Whole-run, per-zone comparison of two firings of the same profile --
     the before/after check for "did tracking measurably improve".
 
     Either file may hold more than one run appended to it (``elapsed_s``
     restarting partway through, e.g. the board was fired twice into the same
-    capture). Each file is split with ``split_runs`` and only its LAST
-    (most recent, presumably-complete) run is compared -- mixing rows from
-    two runs into one "whole run" window used to silently corrupt every
-    stat derived from it (a clamped/negative duration in particular turned
-    ``iae_normalized_c`` into the raw C*s integral mislabelled as C). The
-    returned dict reports how many runs each file held and which index was
-    used so a multi-run file is never compared silently.
+    capture, or a poller left running across a cooldown captured a second
+    firing into the same file). If a file holds more than one run that
+    actually carries zone data, this REFUSES rather than silently comparing
+    whichever run happened to be last -- see ``MultiRunError`` and
+    ``select_run`` -- unless the caller passes an explicit ``run_index_a``/
+    ``run_index_b``. The returned dict reports how many runs each file held
+    and which index was used so a multi-run file is never compared silently.
     """
     all_rows_a = parse_profile_exec_jsonl(path_a)
     all_rows_b = parse_profile_exec_jsonl(path_b)
     if not all_rows_a or not all_rows_b:
         return {"error": "one or both runs had no parseable rows"}
 
-    runs_a = split_runs(all_rows_a)
-    runs_b = split_runs(all_rows_b)
-    used_a = _default_run_index(runs_a)
-    used_b = _default_run_index(runs_b)
-    rows_a = runs_a[used_a]
-    rows_b = runs_b[used_b]
+    try:
+        rows_a, n_runs_a, used_a = select_run(all_rows_a, path_a, run_index=run_index_a)
+        rows_b, n_runs_b, used_b = select_run(all_rows_b, path_b, run_index=run_index_b)
+    except (MultiRunError, IndexError) as exc:
+        return {"error": str(exc)}
 
     def whole_run_stats(rows):
         w = Window(-1, "all", 0, len(rows) - 1, rows[0].elapsed_s, rows[-1].elapsed_s)
@@ -1271,7 +1362,7 @@ def compare_firing_runs(path_a: str, path_b: str, band_c: float = 1.0) -> dict:
         }
     return {
         "path_a": path_a, "path_b": path_b, "zones": zones, "diffs": diffs,
-        "runs_in_a": len(runs_a), "runs_in_b": len(runs_b),
+        "runs_in_a": n_runs_a, "runs_in_b": n_runs_b,
         "used_run_index_a": used_a, "used_run_index_b": used_b,
     }
 
@@ -1355,6 +1446,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     p_firing = sub.add_parser("firing", help="windowed analysis of a profile_exec poll capture")
     p_firing.add_argument("jsonl_path")
     p_firing.add_argument("--band", type=float, default=1.0, help="settle band in C (default 1.0)")
+    p_firing.add_argument("--run", type=int, default=None, help="explicit run index, required if the file holds more than one run")
     p_firing.add_argument("--json", action="store_true")
 
     p_auto = sub.add_parser("autotune", help="summarize + independently re-fit an autotune")
@@ -1366,19 +1458,24 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     p_cmp.add_argument("path_a")
     p_cmp.add_argument("path_b")
     p_cmp.add_argument("--band", type=float, default=1.0)
+    p_cmp.add_argument("--run-a", dest="run_a", type=int, default=None, help="explicit run index for path_a, required if it holds more than one run")
+    p_cmp.add_argument("--run-b", dest="run_b", type=int, default=None, help="explicit run index for path_b, required if it holds more than one run")
     p_cmp.add_argument("--json", action="store_true")
 
     args = parser.parse_args(argv)
 
     if args.cmd == "firing":
-        report = render_firing_report(args.jsonl_path, band_c=args.band)
+        report = render_firing_report(args.jsonl_path, band_c=args.band, run_index=args.run)
         print(firing_report_to_json(report) if args.json else format_firing_report_text(report))
+        return 1 if "error" in report else 0
     elif args.cmd == "autotune":
         report = render_autotune_report(args.jsonl_path, args.trace_path)
         print(autotune_report_to_json(report) if args.json else format_autotune_report_text(report))
     elif args.cmd == "compare":
-        report = compare_firing_runs(args.path_a, args.path_b, band_c=args.band)
+        report = compare_firing_runs(args.path_a, args.path_b, band_c=args.band,
+                                      run_index_a=args.run_a, run_index_b=args.run_b)
         print(compare_report_to_json(report) if args.json else format_compare_report_text(report))
+        return 1 if "error" in report else 0
     else:
         parser.print_help()
         return 2

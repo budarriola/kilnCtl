@@ -83,3 +83,102 @@ def test_starting_temps_c():
 
 def test_starting_temps_c_empty():
     assert hc.starting_temps_c([]) == {}
+
+
+# ---------------------------------------------------------------------------
+# split_http_capture_lines / write_split_runs -- the real near-miss fixture.
+#
+# tests/fixtures/p7_oldmatrix_http_two_run_excerpt.jsonl is a trimmed excerpt
+# (first 6 + last 6 lines of each side) of the ACTUAL
+# logs/coupling/p7_oldmatrix_http.jsonl that produced the near-miss this
+# module's split support exists to prevent: a telemetry poller left running
+# across a kiln cooldown, so the file holds two complete runs (281 + 163
+# rows in the real file) instead of one.
+# ---------------------------------------------------------------------------
+
+TWO_RUN_EXCERPT = os.path.join(FIXTURES, "p7_oldmatrix_http_two_run_excerpt.jsonl")
+RUN_A_EXCERPT = os.path.join(FIXTURES, "p7_oldmatrix_runA_excerpt.jsonl")
+
+
+def test_split_http_capture_lines_finds_two_runs_in_real_multirun_fixture():
+    runs = hc.split_http_capture_lines(TWO_RUN_EXCERPT)
+    assert len(runs) == 2
+    assert len(runs[0]) == 12
+    assert len(runs[1]) == 12
+    # each split-out run must itself parse as a single, monotonic run.
+    for lines in runs:
+        text = "\n".join(lines) + "\n"
+        import tempfile
+        with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False, encoding="utf-8") as fh:
+            fh.write(text)
+            tmp_path = fh.name
+        try:
+            rows = hc.poll_rows(tmp_path)
+            assert len(la.split_runs(rows)) == 1
+        finally:
+            os.remove(tmp_path)
+
+
+def test_split_http_capture_lines_single_run_file_returns_one_run():
+    runs = hc.split_http_capture_lines(EXCERPT)
+    assert len(runs) == 1
+
+
+def test_write_split_runs_writes_one_file_per_run_and_each_is_a_clean_single_run(tmp_path):
+    outdir = tmp_path / "split_out"
+    paths = hc.write_split_runs(TWO_RUN_EXCERPT, str(outdir))
+    assert len(paths) == 2
+    assert paths[0].endswith("p7_oldmatrix_http_two_run_excerpt_run1.jsonl")
+    assert paths[1].endswith("p7_oldmatrix_http_two_run_excerpt_run2.jsonl")
+    for p in paths:
+        assert os.path.isfile(p)
+        rows = hc.poll_rows(p)
+        assert len(rows) == 12
+        runs = la.split_runs(rows)
+        assert len(runs) == 1  # each output file is a clean single run
+
+    # run1's rows must match the FIRST run's data exactly (start-temp check
+    # -- the whole point of splitting is that A/B tooling downstream can
+    # trust each file is one real firing).
+    rows1 = hc.poll_rows(paths[0])
+    rows2 = hc.poll_rows(paths[1])
+    assert rows1[0].elapsed_s == pytest.approx(7.0)
+    assert rows2[0].elapsed_s == pytest.approx(12.0)
+    assert rows1[-1].elapsed_s == pytest.approx(1900.0)
+    assert rows2[-1].elapsed_s == pytest.approx(1856.0)
+
+
+def test_write_split_runs_run1_matches_hand_split_runA_fixture(tmp_path):
+    """RUN_A_EXCERPT is the same first/last 6 lines, taken independently
+    from the hand-split logs/coupling/p7_oldmatrix_runA.jsonl (the file
+    extracted by an ad-hoc script during the actual incident). run1 out of
+    write_split_runs must match it row for row -- proof the first-class
+    split does the same job the ad-hoc script did."""
+    paths = hc.write_split_runs(TWO_RUN_EXCERPT, str(tmp_path / "out"))
+    rows_split = hc.poll_rows(paths[0])
+    rows_handsplit = hc.poll_rows(RUN_A_EXCERPT)
+    assert len(rows_split) == len(rows_handsplit)
+    for a, b in zip(rows_split, rows_handsplit):
+        assert a.elapsed_s == pytest.approx(b.elapsed_s)
+        assert a.zones[0].actual_c == pytest.approx(b.zones[0].actual_c)
+
+
+def test_write_split_runs_single_run_file_writes_one_file(tmp_path):
+    outdir = tmp_path / "split_out"
+    paths = hc.write_split_runs(EXCERPT, str(outdir))
+    assert len(paths) == 1
+    rows_in = hc.poll_rows(EXCERPT)
+    rows_out = hc.poll_rows(paths[0])
+    assert len(rows_in) == len(rows_out)
+
+
+def test_write_split_runs_empty_file_writes_nothing(tmp_path):
+    empty = tmp_path / "empty.jsonl"
+    empty.write_text("")
+    paths = hc.write_split_runs(str(empty), str(tmp_path / "out"))
+    assert paths == []
+
+
+def test_write_split_runs_missing_file_raises(tmp_path):
+    with pytest.raises((FileNotFoundError, OSError)):
+        hc.write_split_runs(str(tmp_path / "does_not_exist.jsonl"), str(tmp_path / "out"))

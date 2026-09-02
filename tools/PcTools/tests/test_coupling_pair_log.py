@@ -211,6 +211,98 @@ def test_load_pair_run_missing_mcp_file_drops_nothing_silently():
 # Real capture: cpl_z0 fixture
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# MultiSessionError -- the coupling-log analogue of the near-miss.
+#
+# This format's elapsed_s is wall-clock derived (see module docstring's
+# "ELAPSED_S IS NOT ..." note), so it never decreases at a firing boundary
+# the way log_analysis.split_runs expects -- a poller left running across a
+# kiln cooldown into the NEXT firing would otherwise be silently joined into
+# one fake continuous run. A large real-time gap between polls is the only
+# signal available, so that's what load_pair_run refuses on by default.
+# ---------------------------------------------------------------------------
+
+def _gap_exec_line(t, elapsed_text, actual_c=30.0, dwelling=False):
+    return json.dumps({
+        "t": t,
+        "s": (f"state=1 profile=#4 'cpl_z0' segment=0/1 dwelling={dwelling} "
+              f"target=31.0C elapsed={elapsed_text}s dwell_remaining=0s "
+              f"ramp_lock=False fault_guard=0\n"
+              f"  zone 0: mode=2 actual={actual_c}C (valid) duty=0.37 relay=on faulted=False"),
+    })
+
+
+def _gap_thermo_line(t, ch0=30.0, ch1=25.0, ch2=25.0):
+    return json.dumps({
+        "t": t,
+        "s": f"CH0: {ch0} C (CJ 26.0 C)\nCH1: {ch1} C (CJ 26.0 C)\nCH2: {ch2} C (CJ 26.0 C)",
+    })
+
+
+def test_load_pair_run_refuses_when_exec_log_has_a_session_gap(tmp_path):
+    t0 = 1_000_000.0
+    # 5 normal 20s-period polls, then a 2-hour gap (a kiln cooldown, with the
+    # poller left running), then 5 more polls -- the actual near-miss
+    # mechanism, reproduced synthetically since a real multi-hour capture
+    # isn't practical to check in.
+    exec_lines = [_gap_exec_line(t0 + i * 20, 100 + i * 20) for i in range(5)]
+    exec_lines += [_gap_exec_line(t0 + 5 * 20 + 7200 + i * 20, i * 20) for i in range(5)]
+    thermo_lines = [_gap_thermo_line(t0 + i * 20) for i in range(5)]
+    thermo_lines += [_gap_thermo_line(t0 + 5 * 20 + 7200 + i * 20) for i in range(5)]
+
+    mcp_path = tmp_path / "gap_mcp.jsonl"
+    thermo_path = tmp_path / "gap_thermo.jsonl"
+    mcp_path.write_text("\n".join(exec_lines) + "\n")
+    thermo_path.write_text("\n".join(thermo_lines) + "\n")
+
+    with pytest.raises(cpl.MultiSessionError) as exc_info:
+        cpl.load_pair_run(str(mcp_path), str(thermo_path))
+    msg = str(exc_info.value)
+    assert "1 gap" in msg
+    assert "gap of 7220s" in msg
+
+
+def test_load_pair_run_allow_multi_session_bypasses_the_refusal(tmp_path):
+    t0 = 1_000_000.0
+    exec_lines = [_gap_exec_line(t0 + i * 20, 100 + i * 20) for i in range(5)]
+    exec_lines += [_gap_exec_line(t0 + 5 * 20 + 7200 + i * 20, i * 20) for i in range(5)]
+    thermo_lines = [_gap_thermo_line(t0 + i * 20) for i in range(5)]
+    thermo_lines += [_gap_thermo_line(t0 + 5 * 20 + 7200 + i * 20) for i in range(5)]
+
+    mcp_path = tmp_path / "gap_mcp.jsonl"
+    thermo_path = tmp_path / "gap_thermo.jsonl"
+    mcp_path.write_text("\n".join(exec_lines) + "\n")
+    thermo_path.write_text("\n".join(thermo_lines) + "\n")
+
+    rows = cpl.load_pair_run(str(mcp_path), str(thermo_path), allow_multi_session=True)
+    assert len(rows) == 10
+
+
+def test_load_pair_run_normal_20s_polling_does_not_false_positive(tmp_path):
+    """Negative test for the gap detector itself: ordinary poll jitter (even
+    a couple of missed polls) must never trip the refusal."""
+    t0 = 1_000_000.0
+    # emulate two missed polls (60s gap instead of 20s) -- still well under
+    # DEFAULT_MAX_GAP_S (300s).
+    times = [t0, t0 + 20, t0 + 80, t0 + 100, t0 + 120]
+    exec_lines = [_gap_exec_line(t, 100 + i * 20) for i, t in enumerate(times)]
+    thermo_lines = [_gap_thermo_line(t) for t in times]
+
+    mcp_path = tmp_path / "jitter_mcp.jsonl"
+    thermo_path = tmp_path / "jitter_thermo.jsonl"
+    mcp_path.write_text("\n".join(exec_lines) + "\n")
+    thermo_path.write_text("\n".join(thermo_lines) + "\n")
+
+    rows = cpl.load_pair_run(str(mcp_path), str(thermo_path))
+    assert len(rows) == 5
+
+
+def test_find_session_gaps_empty_and_single_sample():
+    assert cpl.find_session_gaps([]) == []
+    one = cpl.load_exec_status_log(MCP_PATH)[:1]
+    assert cpl.find_session_gaps(one) == []
+
+
 def test_load_pair_run_real_cpl_z0_fixture():
     rows = cpl.load_pair_run(MCP_PATH, THERMO_PATH)
     assert len(rows) > 30

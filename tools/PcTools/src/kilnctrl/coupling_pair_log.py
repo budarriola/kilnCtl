@@ -288,16 +288,85 @@ def _nearest_thermo(thermo: Sequence[ThermoSample], times: Sequence[float], t: f
     return best
 
 
+#: A gap this large between consecutive exec-status polls (default poll
+#: period is 20s, see module docstring) is never legitimate within one
+#: firing. It IS exactly what a kiln cooldown between firings looks like --
+#: which is the real near-miss mechanism this guards: a poller left running
+#: across the cooldown captures the START of the NEXT firing into the same
+#: pair of files. Because this module's PollRow.elapsed_s is derived from
+#: wall-clock t (see module docstring's "ELAPSED_S IS NOT ..." note), it does
+#: NOT reset at a firing boundary the way log_analysis.split_runs's
+#: decrease-detection expects -- a large real-time gap is the only signal
+#: available here.
+DEFAULT_MAX_GAP_S = 300.0
+
+
+class MultiSessionError(ValueError):
+    """Raised by ``load_pair_run`` when the exec-status log has a gap large
+    enough (see ``DEFAULT_MAX_GAP_S``) to indicate it spans more than one
+    firing session -- the coupling-log analogue of
+    ``log_analysis.MultiRunError``. Unlike the JSONL formats, this format's
+    ``elapsed_s`` never decreases at a firing boundary (it is wall-clock
+    derived), so ``split_runs``' decrease-detection can't see this; a large
+    gap between consecutive polls is the only signal available.
+    """
+
+    def __init__(self, mcp_path: str, gaps: Sequence[tuple[int, float, float]]):
+        self.mcp_path = mcp_path
+        self.gaps = list(gaps)
+        lines = [
+            f"{mcp_path}: exec-status log has {len(self.gaps)} gap(s) over "
+            f"{DEFAULT_MAX_GAP_S:.0f}s between consecutive polls -- looks like "
+            f"a poller left running caught the start of a LATER firing in the "
+            f"same file, not one continuous run. Pass allow_multi_session=True "
+            f"if this file really is one run with a legitimate long gap."
+        ]
+        for idx, before_t, after_t in self.gaps:
+            lines.append(
+                f"  gap of {after_t - before_t:.0f}s before exec-status row {idx} "
+                f"(t={before_t:.0f} -> t={after_t:.0f})"
+            )
+        super().__init__("\n".join(lines))
+
+
+def find_session_gaps(
+    execs: Sequence[ExecStatusSample], max_gap_s: float = DEFAULT_MAX_GAP_S,
+) -> list[tuple[int, float, float]]:
+    """Indices (and the wall-clock times either side) where the gap since
+    the previous exec-status sample exceeds ``max_gap_s``."""
+    gaps: list[tuple[int, float, float]] = []
+    for i in range(1, len(execs)):
+        dt = execs[i].t - execs[i - 1].t
+        if dt > max_gap_s:
+            gaps.append((i, execs[i - 1].t, execs[i].t))
+    return gaps
+
+
 def load_pair_run(mcp_path: str, thermo_path: str,
-                   max_skew_s: float = DEFAULT_MAX_SKEW_S) -> list[la.PollRow]:
+                   max_skew_s: float = DEFAULT_MAX_SKEW_S,
+                   max_gap_s: float = DEFAULT_MAX_GAP_S,
+                   allow_multi_session: bool = False) -> list[la.PollRow]:
     """Join a single run's exec-status and thermo logs into ``PollRow``s --
     see module docstring for the assembly rule. Rows whose exec-status
     sample has no thermo match within ``max_skew_s`` are dropped (a
     ``PollRow`` with silently-missing peer zones would masquerade as a
     complete reading to every downstream consumer, which never checks for
     that).
+
+    Refuses (raises ``MultiSessionError``) if the exec-status log has a gap
+    larger than ``max_gap_s`` between consecutive polls -- the signature of
+    a poller left running across a kiln cooldown into the next firing, which
+    would otherwise be silently joined into one fake continuous run (see
+    ``MultiSessionError`` and ``find_session_gaps``). Pass
+    ``allow_multi_session=True`` to bypass this for a file you have already
+    checked, or a larger/smaller ``max_gap_s`` if 300s is wrong for a
+    particular capture's poll period.
     """
     execs = load_exec_status_log(mcp_path)
+    if not allow_multi_session:
+        gaps = find_session_gaps(execs, max_gap_s=max_gap_s)
+        if gaps:
+            raise MultiSessionError(mcp_path, gaps)
     thermo = load_thermo_log(thermo_path)
     thermo_times = [s.t for s in thermo]
     if not execs:
