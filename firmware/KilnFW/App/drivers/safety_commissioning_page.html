@@ -68,7 +68,9 @@
     --ok: var(--ui-accent-4); --warn: var(--ui-accent-1); --bad: var(--ui-accent-5);
     --fault-color: var(--ui-accent-5);
   }
-  body { font-family: sans-serif; max-width: 620px; margin: 2em auto; padding: 0 1em;
+  /* WEB_UI_RESPONSIVE_PLAN.md sec 6: shared shell width instead of a fixed
+     620px cap -- see main_page.html's identical comment for the rationale. */
+  body { font-family: sans-serif; max-width: var(--kc-shell-max); margin: 2em auto; padding: 0 1em;
          background: var(--bg); color: var(--fg); }
   a { color: var(--link); }
   .hint { font-size: 0.8em; font-weight: normal; color: var(--muted); margin: 0.2em 0 0; }

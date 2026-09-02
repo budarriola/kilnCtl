@@ -76,6 +76,12 @@ $required = @(
         Rules = @(
             "max-width: var(--kc-shell-max);"
         )
+    },
+    @{
+        File = "safety_commissioning_page.html"
+        Rules = @(
+            "max-width: var(--kc-shell-max);"
+        )
     }
 )
 
