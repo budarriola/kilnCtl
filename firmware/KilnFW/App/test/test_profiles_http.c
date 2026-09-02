@@ -931,6 +931,37 @@ static void test_validate_io_segment_drdy_lcd_gap_refused(void)
               "the IO range's own top boundary (17 = IO_7) must be ACCEPTED");
 }
 
+static void test_nvs_save_slot_refuses_when_calling_stack_is_external_ram(void)
+{
+    TEST_SECTION("nvs_save_slot -- refuses (does not crash) when called with a PSRAM stack "
+                 "underneath it (DRAM_PSRAM_PLAN.md section 7.2 safety net)");
+    memset(&s_profiles, 0, sizeof(s_profiles));
+
+    esp_ptr_external_ram_test_set(true); // simulate being called from a PSRAM-stacked task
+
+    esp_err_t err = nvs_save_slot(0);
+
+    TEST_CHECK(err == ESP_ERR_INVALID_STATE,
+               "the wrong-task guard refuses with a diagnosable error, not a crash -- exactly "
+               "the class of bug (an NVS write reached from a PSRAM-stack task) this net exists "
+               "to catch before a future task relocation (DRAM_PSRAM_PLAN.md section 7) makes it "
+               "reachable for real");
+
+    esp_ptr_external_ram_test_set(false); // leave shared stub state as every other test expects
+}
+
+static void test_nvs_save_slot_proceeds_normally_on_an_internal_ram_stack(void)
+{
+    TEST_SECTION("nvs_save_slot -- proceeds normally when the calling task's stack is internal RAM");
+    memset(&s_profiles, 0, sizeof(s_profiles));
+
+    // esp_ptr_external_ram_test_set(false) is the stub's default state.
+    esp_err_t err = nvs_save_slot(0);
+
+    TEST_CHECK(err == ESP_OK, "the guard does not fire on an internal-RAM stack -- the write "
+                              "proceeds exactly as before this net was added");
+}
+
 // ---------------------------------------------------------------------------
 
 void run_test_profiles_http(void)
@@ -945,6 +976,12 @@ void run_test_profiles_http(void)
     test_profiles_list_json_valid_with_escape_heavy_names();
     test_validate_io_segment_zone_ownership();
     test_validate_io_segment_drdy_lcd_gap_refused();
+    test_profiles_http_save_refuses_cone10_profile_on_80c_zone();
+    test_profiles_http_save_accepts_in_range_profile();
+    test_profiles_http_save_accepts_target_exactly_at_zone_limit();
+    test_profiles_http_save_refuses_one_degree_over_zone_limit();
+    test_nvs_save_slot_refuses_when_calling_stack_is_external_ram();
+    test_nvs_save_slot_proceeds_normally_on_an_internal_ram_stack();
 }
 
 int main(void)

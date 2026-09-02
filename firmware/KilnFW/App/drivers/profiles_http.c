@@ -508,8 +508,33 @@ static esp_err_t nvs_load_all_from(const char *partition, profiles_state_t *out,
     return ESP_OK;
 }
 
+/* True iff the CURRENTLY EXECUTING task's own stack lives in external RAM
+ * (PSRAM). Same predicate/reasoning as safety_cfg_store.c's
+ * caller_stack_is_external() and kiln_cfg_store.c's copy of it: a flash/NVS
+ * write disables the cache, and a PSRAM-resident stack becomes unreachable
+ * while it is down, aborting the whole board via ESP-IDF's own
+ * esp_task_stack_is_sane_cache_disabled() rather than failing just this one
+ * call. See DRAM_PSRAM_PLAN.md section 7.2. All of today's callers
+ * (control_task et al via uart_bridge_ext.c's bx_run_on_internal_stack(),
+ * and the httpd worker directly) already run on internal-stack tasks; this
+ * refuses loudly instead of crashing the board if a future caller does not. */
+static bool caller_stack_is_external(void)
+{
+    volatile int stack_probe = 0; /* only its ADDRESS matters; volatile+initialised so -Werror=maybe-uninitialized doesn't flag it and it can't be optimised out of the frame. */
+    return esp_ptr_external_ram((void *)&stack_probe);
+}
+
 static esp_err_t nvs_save_slot(uint8_t id)
 {
+    if (caller_stack_is_external()) {
+        ESP_LOGE(TAG, "nvs_save_slot: REFUSING -- calling task's stack is in external RAM "
+                      "(PSRAM). A flash/NVS write from here would abort the whole board "
+                      "(ESP-IDF's esp_task_stack_is_sane_cache_disabled()). Route this call "
+                      "through a task with an internal-SRAM stack instead -- see "
+                      "DRAM_PSRAM_PLAN.md section 7.2 and uart_bridge_ext.c's flash-safe "
+                      "worker for the established pattern.");
+        return ESP_ERR_INVALID_STATE;
+    }
     nvs_handle_t h;
     esp_err_t err = nvs_open_from_partition(PROFILES_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
     if (err != ESP_OK) {
@@ -877,6 +902,55 @@ bool profiles_http_save(uint8_t requested_id, const profile_t *candidate, uint8_
             }
             if (rate > PROFILE_RAMP_WARN_FRACTION * ceiling) {
                 warn_count++;
+            }
+        }
+    }
+
+    /* SAFETY TASK (2026-09-02): the per-segment target_c range check above
+     * (PROFILE_TARGET_C_MIN..PROFILE_TARGET_C_MAX, 0-1400) is an
+     * INPUT-sanity bound, not a per-kiln safety ceiling -- it exists so a
+     * corrupt/malicious payload cannot write an absurd float into flash,
+     * and it says nothing about what THIS rig's zones can physically
+     * survive. On this bench rig (zone max_temp_c = 80C) a profile authored
+     * for a simulator running a cone-10-scale firing (~1285C) sailed
+     * straight through that check -- 1285 is well inside 0-1400 -- and
+     * would have been accepted and saved with nothing to say it could never
+     * be run safely here. The only thing that would have caught it before
+     * this pass was thermal_guard.c's guard 5, which is REACTIVE: it does
+     * not fire until the zone's actual measured temperature reaches
+     * max_temp_c, by which point the heaters have already been commanded
+     * hard toward the segment's real target for as long as it takes to
+     * climb there. Refuse here instead, at the point of entry (this
+     * function is the shared save path for both the HTTP profile editor
+     * AND the UART CONTROL bridge -- see this file's own "UART bridge
+     * entry points" comment above), same convention as the ramp-ceiling
+     * refusal just above and the zero-means-uncommissioned refusals in
+     * profile_executor_start.c/profile_executor_run.c: a REFUSAL, never a
+     * silent clamp, naming the offending segment and the zone's real
+     * limit. A zone with max_temp_c == 0 (never commissioned) is skipped
+     * here on purpose -- profile_zones_have_ceiling() (profile_executor_start.c)
+     * already refuses to START a firing on an uncommissioned zone; this
+     * check only has a real ceiling to compare against once one exists. */
+    for (uint8_t i = 0; i < candidate->segment_count; i++) {
+        if (candidate->segments[i].seg_kind != PROFILE_SEG_KIND_ZONE_RAMP) {
+            continue;
+        }
+        float target = candidate->segments[i].target_c;
+        for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+            if (!(candidate->zone_mask & (1u << zi))) {
+                continue;
+            }
+            float zone_max_c = 0.0f, zone_min_c = 0.0f;
+            zones_config_get_temp_limits(zi, &zone_max_c, &zone_min_c);
+            if (!(zone_max_c > 0.0f)) {
+                continue; /* uncommissioned zone -- profile_zones_have_ceiling() owns this refusal */
+            }
+            if (target > zone_max_c) {
+                snprintf(err_msg, err_cap,
+                        "segment %u: target %.1fC exceeds zone %u's configured %.1fC limit -- refused, "
+                        "not clamped",
+                        i + 1, (double)target, zi, (double)zone_max_c);
+                return false;
             }
         }
     }
