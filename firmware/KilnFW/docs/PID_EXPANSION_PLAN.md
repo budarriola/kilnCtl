@@ -47,12 +47,29 @@ mid-transient, a fit reading its last sample as the asymptote, guard 1 blocking
 honest step tests, PWM chopping disarming four guards at partial duty, and an
 uncoupled climb term over-driving zone 0 roughly tenfold.
 
-Identified plant (bench rig, 0–80 °C): z0 K=39.25 τ=263.8 L=52.8; z1 K=31.97
-τ=269.8 L=43.5; z2 K=31.68 τ=270.9 L=33.9. Coupling matrix in wire form
-`[stepped][affected]`: z0 39.25/15.78/9.70, z1 26.61/31.97/11.38, z2
-20.73/21.09/31.68. RGA diagonal 1.53/1.69/1.34. Off-diagonal τ is 620–730 s
-against 264 s on the diagonal, dead time 135–158 s against 34–53 s — cross-zone
-heat arrives far later than a zone's own element, which is the root of the
+Identified plant (bench rig, 0–80 °C): z0 K=39.2459 τ=263.8 L=52.8; z1
+K=31.9669 τ=269.8 L=43.5; z2 K=31.6810 τ=270.9 L=33.9 — read back off the
+board 2026-09-02, `model_k_dc`/`model_tau_s`/`model_dead_time_s`.
+
+**Coupling coefficients now on the board** (`GET /api/zones`, 2026-09-02;
+§3.2's re-solved matrix, adopted): row = affected zone, column = stepped zone,
+diagonal contractually 0.
+
+```
+z0: [ 0    , 27.32, 21.72]
+z1: [14.30,  0    , 22.15]
+z2: [ 8.33, 12.42,  0    ]
+```
+
+The solver substitutes `ff_k_dc` for the zero diagonal (§3.2's correction).
+The old bench matrix (off-diagonals 26.61/20.73 · 15.78/21.09 · 9.70/11.38,
+RGA diagonal 1.53/1.69/1.34) is superseded; that RGA has not been recomputed
+for the adopted matrix, and `/api/autotune/matrix` reports no cells at all
+(the identification matrix is RAM-only and this board has rebooted since).
+Off-diagonal τ is 620–730 s against 264 s on the diagonal, dead time
+135–158 s against 34–53 s — from offline analysis, not from the board, whose
+`coupling_tau_c*`/`coupling_dead_time_c*` are all still 0. Cross-zone heat
+arrives far later than a zone's own element, which is the root of the
 remaining ramp-onset error.
 
 **Orientation, which has been swapped by mistake more than once:** persistent
@@ -408,8 +425,13 @@ second-dwell cold bias (1.8–2.6 °C) is now nearly gone (0.15 °C).
 `CURRENT_MATRIX` in `coupled_ident.py` — "what firmware ships" — was
 deliberately decoupled from `plant_sim.K_full` — "the sim's best physical
 estimate" — so this recalibration does not silently change what the
-firmware-facing adaptive-tune self-checks are calibrated against. The two stay
-different until §3.2's matrix is adopted into firmware, an owner decision.
+firmware-facing adaptive-tune self-checks are calibrated against. **Stale as
+of the 2026-09-02 adoption:** the board now carries §3.2's off-diagonals
+(verified over `GET /api/zones`), but `CURRENT_MATRIX` still holds the old
+bench matrix and its comment still says it stays pinned "until that adoption
+happens". Every self-check scored against `CURRENT_MATRIX` is therefore
+scoring the matrix the board no longer runs. Code fix, not a doc fix — not
+made here.
 
 **Held-out validation** (`tests/fixtures/plant_sim/p7_fuzzy0_held_out.jsonl`,
 a live profile-7 fuzzy=0 tracking run, deliberately excluded from the fit):
