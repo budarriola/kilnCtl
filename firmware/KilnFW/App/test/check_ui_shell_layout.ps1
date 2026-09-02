@@ -64,6 +64,12 @@ $required = @(
         Rules = @(
             "max-width: var(--kc-shell-max);"
         )
+    },
+    @{
+        File = "ota_page.html"
+        Rules = @(
+            "max-width: var(--kc-shell-max);"
+        )
     }
 )
 
