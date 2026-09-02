@@ -178,6 +178,39 @@ class CdpSession {
   }
 }
 
+// Per-page data fixtures, keyed by filename, run BEFORE SETUP_SCRIPT below.
+// WEB_UI_RESPONSIVE_PLAN.md sec 3 items 2 and 4 were found to not reproduce
+// under this sweep. Item 4 (diagnostics_page.html flex-wrap button overlap)
+// no longer applies -- that markup was rewritten into a stacked
+// `.linklist` block (see diagnostics_page.html's own 2026-08-22 comment
+// above `.linklist`), so there is nothing left to fixture for it; the
+// general overlap/undersized-target checks already cover that block at
+// every width the same as any other page content.
+//
+// Item 2 (zones_page.html: input.offsettle overlapping button#saveBtn,
+// 1280px) DOES still need a fixture, but not the one first assumed --
+// #zones never gets live data under this static server (loadCurrent()'s
+// fetch('/api/zones') 404s, so renderZones() never even runs), but
+// renderZones() does not actually need a real server response: `current`
+// defaults to `{ thermo_count: 0, relay_count: 0, zones: [] }` and every
+// missing zone i already falls back to a hardcoded default object in
+// renderZones() itself. So the only thing missing is a non-zero
+// thermoCount/relayCount and a call to trigger the render that the real
+// page only makes after a successful fetch -- no mock server needed.
+const PAGE_FIXTURES = {
+  'zones_page.html': `
+(function () {
+  var tc = document.getElementById('thermoCount');
+  var rc = document.getElementById('relayCount');
+  if (!tc || !rc || typeof window.renderZones !== 'function') return 'renderZones not found';
+  tc.value = 3;
+  rc.value = 4;
+  window.renderZones();
+  return 'ok';
+})()
+`,
+};
+
 // Setup script: mutates page state into the "worst case" the assertion pass
 // below needs to see -- the sticky Stop/Pause bar shown (WEB_UI_RESPONSIVE_PLAN.md
 // sec 3's "bar covers the last interactive element" class only manifests while
@@ -211,6 +244,16 @@ const SETUP_SCRIPT = `
 
   var allDetails = document.querySelectorAll('details');
   for (var di = 0; di < allDetails.length; di++) {
+    // zones_page.html's <details class="advguards"> is deliberately left
+    // CLOSED here -- see WEB_UI_RESPONSIVE_PLAN.md sec 3 item 2 and that
+    // page's own 2026-08-22 comment above ".advguards:not([open])": the
+    // "offsettle overlaps saveBtn" bug this sweep exists to catch only
+    // manifests while the <details> is closed (Chromium still lays out a
+    // closed <details>'s non-summary children even though it doesn't
+    // paint them). Forcing it open here, like every other <details> on
+    // every other page, would make this sweep permanently blind to a
+    // regression of the very CSS rule that fixes it.
+    if (allDetails[di].classList && allDetails[di].classList.contains('advguards')) continue;
     allDetails[di].open = true;
   }
   if (allDetails.length && window.kcNav && window.kcNav.updateBodyPadding) window.kcNav.updateBodyPadding();
@@ -388,7 +431,7 @@ async function closeTab(port, id) {
   try { await fetch(`http://127.0.0.1:${port}/json/close/${id}`); } catch { /* best-effort */ }
 }
 
-async function sweepOnePage(port, fileUrl, width) {
+async function sweepOnePage(port, fileUrl, width, fixtureScript) {
   const tab = await newTab(port);
   const ws = new WebSocket(tab.webSocketDebuggerUrl);
   await new Promise((resolve, reject) => {
@@ -410,6 +453,17 @@ async function sweepOnePage(port, fileUrl, width) {
     // for their IIFEs (both run synchronously on script execution, no
     // additional async work before DOM is built) plus a safety margin.
     await cdp.send('Runtime.evaluate', { expression: 'new Promise(r => setTimeout(r, 150))', awaitPromise: true });
+
+    // Page-specific data fixture (e.g. populating zones_page.html's #zones
+    // the way a real /api/zones response would) runs BEFORE SETUP_SCRIPT so
+    // the content it creates is in place for the Stop-bar/<details> mutation
+    // and the height measurement below.
+    if (fixtureScript) {
+      const fixtureResult = await cdp.send('Runtime.evaluate', { expression: fixtureScript, returnByValue: true });
+      if (fixtureResult.exceptionDetails) {
+        throw new Error('fixture script threw: ' + JSON.stringify(fixtureResult.exceptionDetails));
+      }
+    }
 
     // Run the state-mutating setup (Stop bar shown, every <details> sprung
     // open) BEFORE measuring scrollHeight below -- see SETUP_SCRIPT's own
@@ -498,10 +552,11 @@ async function main() {
 
     for (const pf of pageFiles) {
       const pageUrl = `http://127.0.0.1:${args.staticPort}/${pf}`;
+      const fixtureScript = PAGE_FIXTURES[pf];
       for (const width of args.widths) {
         let result, failures;
         try {
-          result = await sweepOnePage(args.port, pageUrl, width);
+          result = await sweepOnePage(args.port, pageUrl, width, fixtureScript);
           failures = formatFailures(pf, width, result);
         } catch (e) {
           failures = [`  [error]    ${pf} @${width}px: sweep threw: ${e.message}`];
