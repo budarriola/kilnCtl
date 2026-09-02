@@ -191,15 +191,35 @@ HTTP endpoint and zones-page UI.
       trace and least-squares fit τ/L to the residual. No step, no hold, uses
       all 27 segments, extends to the coupled case. The module stays in-tree,
       unwired, as a parked experiment with the artifact pinned by a test.
-- [ ] **Iterative tuning** — treat each firing as one experiment scored by the
-      normalized IAE already recorded per zone, perturb gains slightly, keep the
-      change only if the next run scores better. This is the mechanism that
-      actually delivers "gets better every firing"; it needs no informative data
-      in the identification sense and is much harder to fool.
-- [ ] **One-click revert** to the last accepted gain set.
-- [ ] Consolidate the opt-in flag into the zone config blob. It currently lives
-      in adaptive_tune's own NVS namespace (`adap_tune`) because `zones_http.c`
-      was held by another agent when it was written.
+- [x] **Iterative tuning** — built as `iter_tune.c/.h` (`fe14ddf`, `17f7ebd`).
+      Scores each firing by the `iae_normalized` the executor already records,
+      perturbs gains, and keeps the change only if the next *comparable* firing
+      beats the prior score. **The blocking unknown is the noise floor**: two
+      firings with identical gains do not score identically, and this kiln's
+      run-to-run spread has never been measured. The only candidate pair in the
+      fixtures (`holdfix_clean` vs `final`, same climb mode and integral floor)
+      differs by +22.5/+47.5/+28.6 % — but it is **confounded**: those runs start
+      24.6 °C and 29.4 °C respectively, a 4.8 °C difference, which is the
+      residual-heat trap this document already records. So that number is an
+      overestimate of unknown size and must not be quoted as the floor. The
+      accept threshold is a deliberately conservative 20 % pending real data, and
+      the comparability window was tightened 5.0 → 2.0 °C because the old value
+      would have accepted that very pair.
+      **The experiment that would settle it:** N ≥ 5 firings of one profile,
+      gains fixed, each from a genuinely rested start with every zone at ambient.
+- [x] **One-click revert** to the last accepted gain set (`5b44403`). Snapshots
+      Kp/Ki/Kd, K_dc/tau/dead_time and `ki_baseline` before each commit point and
+      restores them exactly, `ki_baseline` included — restoring gains while
+      leaving a baseline latched from the reverted-away value would recreate the
+      stale-reference defect this layer already had. Refuses **board-wide** while
+      any firing is running or paused, because coupled feedforward means
+      reverting one zone changes another zone's commanded duty.
+- [x] Consolidate the opt-in flag into the zone config blob (`5b44403`,
+      ZONES_CFG_VERSION 13 → 14). A one-shot migration carries an upgrading
+      board's old `adap_tune`/`en_mask` bits into the new home, marked by
+      `en_migrated` so a later explicit opt-out is not clobbered by the stale
+      byte; a silent reset to default-off would have quietly disabled a layer an
+      operator had turned on.
 
 ### 3.4 The simulator — calibrated 2026-09-01, and what it is worth
 
