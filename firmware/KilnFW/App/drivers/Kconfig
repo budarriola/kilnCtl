@@ -169,24 +169,40 @@ menu "KilnCtrl Hardware Configuration"
             prompt "Panel driven by panel_spi.c"
             default KILNCTL_DISPLAY_PANEL_ILI9488
             help
-                DISPLAY_ST7796_PLAN.md Sec.6 Step 3 / Sec.12 Phase 3:
-                Kconfig-only panel selection, no auto-detection yet -- that
-                is Phase 4, and it is blocked on Sec.4's bench-recorded
-                RDDID bytes, which do not exist. ILI9488 (the BIGTREETECH
-                TFT35 actually wired to J2 today) stays the default; picking
-                ST7796 selects the LCDWIKI/Elecrow MSP4031 driver, which has
-                NEVER RUN ON HARDWARE -- see the STOP block at the top of
-                the plan doc before that module goes anywhere near J2.
-                There is deliberately no "auto" choice here: this phase
-                explicitly does not implement detection, and an auto option
-                that silently fell back to one fixed panel would misrepresent
-                that as a real choice.
+                DISPLAY_ST7796_PLAN.md Sec.6 Step 3 / Sec.12 Phase 4: the
+                detection MECHANISM (panel_detect.c) now exists, but its ID
+                table is still EMPTY -- Sec.4's bench-recorded RDDID bytes
+                for either panel, on this wiring, do not exist yet. ILI9488
+                (the BIGTREETECH TFT35 actually wired to J2 today) stays the
+                DEFAULT, deliberately NOT "auto", until those bytes are
+                recorded and a real id_matches() is written against them --
+                see the TODO block above panel_detect_choose() in
+                panel_detect.h for exactly which two measurements that is.
+                Picking ST7796 explicitly selects the LCDWIKI/Elecrow MSP4031
+                driver, which has NEVER RUN ON HARDWARE -- see the STOP block
+                at the top of the plan doc before that module goes anywhere
+                near J2.
+
+                "auto" probes RDDID (0x04) and corroborates with the I2C
+                touch address, then falls back to whichever of ILI9488/
+                ST7796 is selected below it in this same choice if nothing
+                matches -- which, with an empty ID table, is EVERY boot
+                today. A kiln controller with a blank screen is worse than
+                one with a wrong gamma table, so that fallback is loud
+                (WARN, naming the bytes actually read) rather than silent.
+                Until the bench measurements land, "auto" and the explicit
+                default behave identically except for the extra probe reads
+                and log line -- there is no reason to select it yet, and it
+                is not the default.
 
             config KILNCTL_DISPLAY_PANEL_ILI9488
                 bool "ILI9488 (BIGTREETECH TFT35 SPI V2.1)"
 
             config KILNCTL_DISPLAY_PANEL_ST7796
                 bool "ST7796 (LCDWIKI/Elecrow MSP4031) -- UNTESTED, see STOP block"
+
+            config KILNCTL_DISPLAY_PANEL_AUTO
+                bool "auto -- probe RDDID + touch address, empty ID table today (see help)"
         endchoice
 
         config KILNCTL_DISPLAY_CS_IO

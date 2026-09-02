@@ -15,7 +15,10 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "freertos/task.h"
+#include "FT6336U.h"
+#include "NS2009.h"
 #include "panel_codec.h"
+#include "panel_detect.h"
 #include "settings.h"
 #include "st7796_panel.h"
 
@@ -844,16 +847,103 @@ esp_err_t ILI9488_init(ILI9488Class *disp,
     return ESP_OK;
 }
 
-esp_err_t ILI9488_start(ILI9488Class *disp, spi_owner_t *owner, spi_host_device_t host, kiln_io_t *io)
+/* Timeout for the two I2C touch-address probes done below, matching
+ * NS2009_PROBE_TIMEOUT_MS (NS2009.c) -- a chip that isn't there doesn't
+ * stall bring-up. */
+#define PANEL_DETECT_TOUCH_PROBE_TIMEOUT_MS 50
+
+esp_err_t ILI9488_start(ILI9488Class *disp, spi_owner_t *owner, spi_host_device_t host, kiln_io_t *io,
+                        i2c_master_bus_handle_t i2c_bus)
 {
-    /* Phase 3 (DISPLAY_ST7796_PLAN.md Sec.6 Step 3/Sec.12): Kconfig-only
-     * panel selection, no probing yet -- that is Phase 4, and it is blocked
-     * on Sec.4's bench-recorded RDDID bytes, which do not exist. The choice
-     * is a single compile-time branch on the KILNCTL_DISPLAY_PANEL choice
-     * symbol (see Kconfig); ILI9488 stays the default so an unconfigured
-     * build behaves exactly as before this phase. */
+    /* DISPLAY_ST7796_PLAN.md Sec.6 Step 3/Sec.12 Phase 4: with an EXPLICIT
+     * Kconfig selection (ILI9488, still the default, or ST7796) probing is
+     * skipped entirely -- no extra SPI or I2C traffic, same single
+     * compile-time branch Phase 3 shipped. This is also the escape hatch
+     * Sec.6 Step 3 point 1 asks for, for a panel whose ID register lies. */
 #if CONFIG_KILNCTL_DISPLAY_PANEL_ST7796
     const panel_desc_t *panel = ST7796_get_panel_desc();
+#elif CONFIG_KILNCTL_DISPLAY_PANEL_AUTO
+    /* Bring up the KCONFIG DEFAULT panel first (ILI9488 -- Sec.6 Step 3
+     * point 4's fallback target) so ILI9488_read_id() has a real, already
+     * fully-tested bring-up path to run on: a bootstrap-with-the-wrong-
+     * panel's-init-sequence risk is not one this phase takes on speculative
+     * hardware, and the STOP block means an ST7796 is never physically on
+     * J2 while ILI9488 is the fallback anyway. If the resolved panel turns
+     * out to differ from this bootstrap, the instance is torn down and
+     * re-initialized below with the correct descriptor -- ILI9488_deinit()/
+     * ILI9488_init() are already the tested teardown/bring-up pair every
+     * other caller uses. */
+    const panel_desc_t *fallback_panel = ILI9488_get_panel_desc();
+    esp_err_t boot_err = ILI9488_init(disp, owner, host, io, DISPLAY_CS_IO, DISPLAY_DC_GPIO,
+                                      DISPLAY_RESET_GPIO, fallback_panel, DISPLAY_WIDTH, DISPLAY_HEIGHT,
+                                      (uint8_t)DISPLAY_ROTATION, DISPLAY_SPI_CLOCK_HZ);
+    if (boot_err != ESP_OK) {
+        ESP_LOGE(TAG, "ILI9488_init (auto-detect bootstrap) failed: %s", esp_err_to_name(boot_err));
+        return boot_err;
+    }
+
+    uint8_t id[3] = { 0, 0, 0 };
+    esp_err_t id_err = ILI9488_read_id(disp, id);
+    if (id_err != ESP_OK) {
+        ESP_LOGW(TAG, "panel auto-detect: RDDID read failed (%s); treating as no match",
+                 esp_err_to_name(id_err));
+    }
+
+    bool touch_ns2009 = false, touch_ft6336 = false;
+    if (i2c_bus) {
+        touch_ns2009 = (i2c_master_probe(i2c_bus, NS2009_ADDR_A0_LOW, PANEL_DETECT_TOUCH_PROBE_TIMEOUT_MS) ==
+                        ESP_OK) ||
+                       (i2c_master_probe(i2c_bus, NS2009_ADDR_A0_HIGH, PANEL_DETECT_TOUCH_PROBE_TIMEOUT_MS) ==
+                        ESP_OK);
+        touch_ft6336 =
+            i2c_master_probe(i2c_bus, FT6336U_ADDR, PANEL_DETECT_TOUCH_PROBE_TIMEOUT_MS) == ESP_OK;
+    }
+
+    const panel_detect_candidate_t candidates[] = {
+        { .panel = ILI9488_get_panel_desc(), .touch = PANEL_DETECT_TOUCH_NS2009 },
+        { .panel = ST7796_get_panel_desc(), .touch = PANEL_DETECT_TOUCH_FT6336 },
+    };
+    panel_detect_result_t detect =
+        panel_detect_choose(id, touch_ns2009, touch_ft6336, candidates,
+                             sizeof(candidates) / sizeof(candidates[0]), fallback_panel);
+
+    if (detect.disagreement) {
+        ESP_LOGW(TAG, "panel auto-detect: SPI ID and touch-address signals disagree -- "
+                      "RDDID read 0x%02X 0x%02X 0x%02X, touch NS2009=%d FT6336=%d, resolved %s (%s)",
+                 id[0], id[1], id[2], (int)touch_ns2009, (int)touch_ft6336, detect.panel->name,
+                 detect.source == PANEL_DETECT_SOURCE_FALLBACK ? "fallback" : "matched");
+    }
+    if (detect.source == PANEL_DETECT_SOURCE_FALLBACK) {
+        ESP_LOGW(TAG, "panel auto-detect: no RDDID match (read 0x%02X 0x%02X 0x%02X against %u "
+                      "candidate(s)) -- record these bytes in DISPLAY_ST7796_PLAN.md Sec.4, "
+                      "booting the Kconfig default (%s) meanwhile",
+                 id[0], id[1], id[2], (unsigned)detect.matched_count, detect.panel->name);
+    } else {
+        ESP_LOGI(TAG, "panel auto-detect: resolved %s (RDDID 0x%02X 0x%02X 0x%02X, %s)",
+                 detect.panel->name, id[0], id[1], id[2],
+                 detect.source == PANEL_DETECT_SOURCE_SPI_MATCH ? "SPI match" : "touch tiebreak");
+    }
+
+    const panel_desc_t *panel = detect.panel;
+    if (panel != fallback_panel) {
+        ILI9488_deinit(disp);
+        esp_err_t reinit_err = ILI9488_init(disp, owner, host, io, DISPLAY_CS_IO, DISPLAY_DC_GPIO,
+                                            DISPLAY_RESET_GPIO, panel, DISPLAY_WIDTH, DISPLAY_HEIGHT,
+                                            (uint8_t)DISPLAY_ROTATION, DISPLAY_SPI_CLOCK_HZ);
+        if (reinit_err != ESP_OK) {
+            ESP_LOGE(TAG, "ILI9488_init (auto-detect resolved panel %s) failed: %s", panel->name,
+                     esp_err_to_name(reinit_err));
+            return reinit_err;
+        }
+    }
+
+    /* The bootstrap/resolved instance above already ran ILI9488_init() (and
+     * printed its own "initialized: ..." line) -- skip straight to the boot
+     * banner rather than falling into the shared init call below. */
+    ILI9488_set_text_style(disp, 0xFFFF, 0x0000, 3, true);
+    ILI9488_set_text_cursor(disp, 8, 8);
+    ILI9488_printf(disp, "kilnCtl ready");
+    return ESP_OK;
 #else
     const panel_desc_t *panel = ILI9488_get_panel_desc();
 #endif

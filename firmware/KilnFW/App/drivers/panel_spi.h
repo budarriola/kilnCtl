@@ -46,6 +46,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "driver/i2c_master.h"
 #include "driver/spi_master.h"
 #include "esp_err.h"
 #include "esp_spi_owner.h"
@@ -206,8 +207,17 @@ esp_err_t ILI9488_init(ILI9488Class *disp,
  * Kconfig-configured CS/clock/geometry/rotation, plus a one-line boot banner
  * so there is visible output before anything connects over UART. Logs and
  * returns the init error rather than aborting -- a dead panel is not worth
- * failing boot over, and the UART link is the real control path. */
-esp_err_t ILI9488_start(ILI9488Class *disp, spi_owner_t *owner, spi_host_device_t host, kiln_io_t *io);
+ * failing boot over, and the UART link is the real control path.
+ *
+ * `i2c_bus` (DISPLAY_ST7796_PLAN.md Sec.6 Step 3/Sec.12 Phase 4) is used
+ * ONLY when KILNCTL_DISPLAY_PANEL_AUTO is selected, to probe the NS2009/
+ * FT6336U touch addresses as corroboration for the SPI RDDID read -- see
+ * panel_detect.h. May be NULL (no I2C bus available this boot); detection
+ * then runs on the SPI signal alone. With any EXPLICIT panel selection
+ * (ILI9488 or ST7796, still the default), this parameter is not touched at
+ * all -- no extra I2C traffic, byte-identical to before this phase. */
+esp_err_t ILI9488_start(ILI9488Class *disp, spi_owner_t *owner, spi_host_device_t host, kiln_io_t *io,
+                         i2c_master_bus_handle_t i2c_bus);
 
 esp_err_t ILI9488_deinit(ILI9488Class *disp);
 
