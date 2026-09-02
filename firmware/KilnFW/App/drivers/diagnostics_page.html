@@ -44,7 +44,10 @@
      about 320/360/390 (phones), 768/820 (tablets), 1280/1920 (desktop) --
      all just resolve to whichever side of min() is smaller. */
   *, *::before, *::after { box-sizing: border-box; }
-  body { font-family: sans-serif; width: min(100% - 2rem, 640px); margin: 2em auto 5em;
+  /* WEB_UI_RESPONSIVE_PLAN.md sec 6: min() shrink-to-fit stays, fixed 640px
+     cap becomes the shared --kc-shell-max -- see backup_page.html's
+     identical comment for the rationale. */
+  body { font-family: sans-serif; width: min(100% - 2rem, var(--kc-shell-max)); margin: 2em auto 5em;
          background: var(--bg); color: var(--fg); }
   /* .theme-btn removed 2026-08-21: was a byte-for-byte duplicate of the one
      rule in /theme.css (which loads first), and being `position: fixed`
