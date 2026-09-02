@@ -8,10 +8,13 @@ it always falls back to the Kconfig default and changes nothing observable.
 Phase 6 (SPI DMA/async): 9.2 (`max_transfer_sz` raised to 32768,
 `KILNCTL_SPI_MAX_TRANSFER_SZ`), 9.5 (MAX31856 on `spi_device_polling_transmit`
 via `esp_spi_owner.c`'s `use_polling` flag) and 9.9 (bounded owner-transfer
-wait) are landed. 9.1 (flush-duration measurement), 9.3
-(`SPI_TRANS_DMA_USE_PSRAM`), 9.4 (hardware CS), 9.6 (async flush), 9.7
-(ST7796 zero-copy) and 9.8 (clock step-up) remain open — see §12 Phase 6 for
-why they stay unbuilt rather than merely unmeasured. Phase 0's blocking
+wait) are landed. 9.3 (`SPI_TRANS_DMA_USE_PSRAM`) and 9.4 (hardware CS) are
+now also landed, compiled-in but **default OFF** behind
+`CONFIG_KILNCTL_SPI_DMA_USE_PSRAM` / `CONFIG_KILNCTL_SPI_HARDWARE_CS` — see
+§12 Phase 6 for exactly what each changes and how to soak it. 9.1
+(flush-duration measurement), 9.6 (async flush), 9.7 (ST7796 zero-copy) and
+9.8 (clock step-up) remain open — see §12 Phase 6 for why they stay unbuilt
+rather than merely unmeasured. Phase 0's blocking
 hardware measurements (§4) are still open — nothing here has touched real
 MSP4031 hardware yet; Phases 1-3/5 were built and host-tested against the
 existing ILI9488 panel and the transcribed ST7796 init table only.
@@ -773,15 +776,41 @@ bytes and breaks every display push.
       or clamp `KILNCTL_LVGL_BUF_ROWS` so one flush fits under the 32768-byte
       hardware cap — 34 rows = 32640 B). Collapses 27 transactions per flush into
       one. Costs ~200 bytes of internal DRAM, not 38 kB. Cheapest real win.
-- [ ] **9.3 Set `SPI_TRANS_DMA_USE_PSRAM`** on flush transactions so LVGL's PSRAM
+- [x] **9.3 Set `SPI_TRANS_DMA_USE_PSRAM`** on flush transactions so LVGL's PSRAM
       buffers are DMA'd in place instead of bounce-copied into internal DRAM.
-      Check `SPI_TRANS_DMA_TX_FAIL` afterwards.
-- [ ] **9.4 Move the display and thermocouple devices to hardware CS**
-      (`spics_io_num = <gpio>`), and delete the `gpio_set_level` CS handling from
-      `esp_spi_owner.c:26`. Display CS is GPIO21, thermo CS are GPIO14/17/18 —
-      all real GPIOs; only D/C and ~RESET are on the expander. This removes a
-      whole class of race between the owner task and the DMA engine, and is the
-      precondition that makes async safe.
+      **LANDED 2026-09-02, default OFF** behind `CONFIG_KILNCTL_SPI_DMA_USE_PSRAM`.
+      `spi_owner_t::dma_use_psram` (set at `spi_owner_init()` time, plumbed
+      from the Kconfig option, not read as a raw `#if` inside
+      `esp_spi_owner.c` itself — kept a plain, host-testable struct field) —
+      when true, `spi_owner_task()` sets the flag on every non-polling
+      (display flush) transaction only; MAX31856 polling transfers never
+      carry it, since they never touch a PSRAM buffer. Host-tested
+      (`test_esp_spi_owner.c`): flag reaches the queued-path transaction when
+      the owner was initialized with it on, and is absent both when it is
+      off and on the polling path regardless. Not yet flash-verified — the
+      plan's own `SPI_TRANS_DMA_TX_FAIL` check happens on real hardware, not
+      host tests; enabling it and reading the 9.1 flush-duration number
+      before/after is the confirmation step.
+- [x] **9.4 Move the display and thermocouple devices to hardware CS**
+      (`spics_io_num = <gpio>`). **LANDED 2026-09-02, default OFF** behind
+      `CONFIG_KILNCTL_SPI_HARDWARE_CS`. With it on, `panel_spi.c` and
+      `MAX31856.c` skip the manual CS `gpio_config()`/`gpio_set_level()` calls
+      and instead set each device's real GPIO (display GPIO21, thermo
+      GPIO14/17/18) on `spics_io_num`; `disp->cs_gpio`/`ch->cs_gpio` are set
+      to -1 so every `spi_owner_transfer()`/`spi_owner_transfer_polling()`
+      call site passes the sentinel `esp_spi_owner.c` now checks
+      (`request.cs_pin >= 0`) before bit-banging — with it on, the owner task
+      never touches that GPIO at all, leaving the SPI peripheral to
+      assert/deassert it with correct setup/hold timing. Off (the default),
+      this changes nothing: `bitbang_cs` is `true` for every call site in
+      today's tree, proven by a host test alongside the negative-control test
+      that a real `cs_pin` still bit-bangs exactly twice per transfer.
+      **Not flash-verified** — this is the item the plan calls out as
+      touching the live bus shared with three energized-heater thermocouple
+      channels, so the STOP-block reasoning applies: verify with nothing
+      energized (RDDID / MAX31856 register-read sanity, then a 9.1
+      flush-duration re-measurement) before ever enabling it on a board with
+      elements connected.
 - [ ] **9.5 Thermocouple transfers → `spi_device_polling_transmit`.** 11 µs
       versus 26 µs. Do not mix polling and queued transactions on the *same*
       device; across devices the bus lock handles it.
@@ -944,19 +973,49 @@ Each phase ends somewhere the firmware still boots and drives the existing panel
       `use_polling` request flag, dispatched only ever from the owner task's
       own thread — never an ISR, never a caller's task).
 - [x] 9.9 bounded owner-transfer wait (landed Phase 1, see above).
-- [ ] 9.1, 9.3, 9.4, 9.6, 9.7, 9.8 remain open. **Deliberately not attempted
-      blind:** these touch the live SPI transaction path shared with three
-      MAX31856 channels on hardware that is mid-run (profile 7, heaters
-      energized) right now, and 9.1's own number is a real-hardware
-      measurement, not something host tests can produce. Writing async/CS
-      changes without the ability to flash-and-verify against that
-      measurement — the standing rule against unverified checks — is worse
-      than leaving them queued. First hardware step: take the 9.1
-      measurement (record in §4) once the board is between profiles, then
-      9.4 (hardware CS) and 9.3 (`SPI_TRANS_DMA_USE_PSRAM`) are the next
-      lowest-risk pair — both are config/flag changes with no new control
-      flow, host-testable in isolation, flash-verified afterward on a bench
-      cycle with nothing energized.
+- [x] 9.3, 9.4 **LANDED 2026-09-02, default OFF.** Written blind (no flash,
+      no scope) in a pass whose owner was mid-firing — safe only because
+      both are gated behind Kconfig options that generate no observable
+      behavior change until explicitly turned on
+      (`CONFIG_KILNCTL_SPI_DMA_USE_PSRAM`, `CONFIG_KILNCTL_SPI_HARDWARE_CS`),
+      host-tested for the plumbing and guards each one touches (10 tests
+      total in `test_esp_spi_owner.c`, each proven to fail under a targeted
+      mutation), and confirmed to leave `build_kilnfw`/`run_repo_checks`
+      green with the options at their sdkconfig default. Neither is
+      flash-verified — see 9.3/9.4's own entries above for exactly what
+      "confirmed to work" looks like for each, to be done on a bench cycle
+      with nothing energized before either is ever turned on near a live
+      kiln.
+- [ ] 9.1, 9.6, 9.7, 9.8 remain open, and none of them is a safe default-off
+      flag the way 9.3/9.4 were:
+      - **9.1** is a real-hardware measurement by definition — no config
+        option or host test can produce it. First hardware step, unchanged
+        from before this pass: take it once the board is between profiles.
+      - **9.6 (async flush)** does not reduce to a flag. It replaces
+        `spi_owner_transfer()`'s synchronous "queue, then block on a
+        completion semaphore" contract with a callback-driven one
+        (`spi_device_queue_trans`/`get_trans_result`, `queue_size >= 2`,
+        `lv_display_set_flush_wait_cb()`), which is new control flow on the
+        exact bus arbitration this plan's own §13 flags as the standing risk
+        ("Any async work needs a test that can *fail* — a deliberately
+        interleaved transfer the arbiter rejects — before it is trusted").
+        A default-off flag would just be an unexercised second code path
+        through the owner task, not a de-risked one. Per §9's own "DMA async
+        is a nice-to-have, not a requirement" note, the right next step is
+        the 9.1 measurement first — if 9.2+9.3 (and the ST7796's byte
+        reduction, eventually) already bring flush time inside budget, 9.6
+        may not be worth the arbitration risk at all.
+      - **9.7 (ST7796 zero-copy)** is scoped to a panel that has **never run
+        on hardware** (`st7796_panel.c`, STOP block at the top of this
+        document) — there is no working ST7796 bring-up yet for a zero-copy
+        flush to be verified against, default-off or not.
+      - **9.8 (clock step-up)** is a bench tuning procedure, not new code:
+        `KILNCTL_DISPLAY_SPI_CLOCK_HZ` is already a plain Kconfig int
+        (default 20 MHz, `Kconfig` under "ILI9488 Display"), so the
+        mechanism this item wants already exists. What is missing is the
+        scope-verified bench step itself (`READ_ID` + known-pattern blit at
+        each of 20/26/40 MHz, watching the ribbon) — there is nothing here
+        for a firmware pass to build.
 
 ### Phase 7 — the actual point: a better UI
 - [ ] `LV_USE_TJPGD` if images are wanted.
