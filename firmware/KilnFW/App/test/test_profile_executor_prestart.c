@@ -1952,6 +1952,83 @@ static void test_warm_start_reached_dwell_is_not_shortened(void)
     profile_executor_halt();
 }
 
+// ---------------------------------------------------------------------------
+// SAFETY TASK (2026-09-02): profile_executor_run()'s new target-vs-zone-
+// ceiling re-check, the RUN-time half of the same gap
+// profiles_http_save()'s new check closes at save time (test_profiles_http.c).
+// This re-check exists for the same reason the ramp-ceiling re-check right
+// above it in profile_executor_run.c does: a zone's max_temp_c can be edited
+// (or a profile saved before this pass's guard existed) between save and
+// run, so save-time validation alone is not enough at the moment a firing
+// actually starts.
+// ---------------------------------------------------------------------------
+
+static void test_run_refuses_cone10_profile_on_80c_zone(void)
+{
+    TEST_SECTION("profile_executor_run() -- a cone-10-scale target (1285C) on an 80C zone is REFUSED "
+                 "at run start, not silently clamped or started");
+
+    profile_t p;
+    memset(&p, 0, sizeof(p));
+    p.zone_mask = 0x01;
+    p.segment_count = 1;
+    p.segments[0] = zone_ramp_seg(1285.0f, 60.0f, 0);
+
+    warm_start_test_setup(&p, 50.0f);
+    g_stub_max_temp_c[0] = 80.0f; // this rig's real bench-fixture zone limit
+
+    char err[160] = {0};
+    bool ok = profile_executor_run(0, err, sizeof(err));
+
+    TEST_CHECK(!ok, "a cone-10-scale (1285C) segment target on an 80C zone must be REFUSED at run start");
+    TEST_CHECK(s_exec.state != PROFILE_EXEC_RUNNING, "the run must not have actually started");
+    TEST_CHECK(strstr(err, "1285") != NULL, "the refusal names the offending segment's target");
+    TEST_CHECK(strstr(err, "80") != NULL, "the refusal names the zone's actual current 80C limit");
+}
+
+static void test_run_accepts_in_range_profile_on_80c_zone(void)
+{
+    TEST_SECTION("profile_executor_run() -- a normal in-range target (55C) on an 80C zone is ACCEPTED");
+
+    profile_t p;
+    memset(&p, 0, sizeof(p));
+    p.zone_mask = 0x01;
+    p.segment_count = 1;
+    p.segments[0] = zone_ramp_seg(55.0f, 60.0f, 0);
+
+    warm_start_test_setup(&p, 50.0f);
+    g_stub_max_temp_c[0] = 80.0f;
+
+    char err[160] = {0};
+    bool ok = profile_executor_run(0, err, sizeof(err));
+
+    TEST_CHECK(ok, "55C on an 80C zone must be accepted and run start normally");
+
+    profile_executor_halt();
+}
+
+static void test_run_accepts_target_exactly_at_zone_limit(void)
+{
+    TEST_SECTION("profile_executor_run() -- a target EXACTLY at the zone's 80C limit is ACCEPTED (the "
+                 "boundary itself, not one degree over it)");
+
+    profile_t p;
+    memset(&p, 0, sizeof(p));
+    p.zone_mask = 0x01;
+    p.segment_count = 1;
+    p.segments[0] = zone_ramp_seg(80.0f, 60.0f, 0);
+
+    warm_start_test_setup(&p, 50.0f);
+    g_stub_max_temp_c[0] = 80.0f;
+
+    char err[160] = {0};
+    bool ok = profile_executor_run(0, err, sizeof(err));
+
+    TEST_CHECK(ok, "exactly 80.0C on an 80C-limit zone must be accepted, not refused as 'over'");
+
+    profile_executor_halt();
+}
+
 // Test 5 (mandatory coverage item 5): a descending (cool-down/anneal)
 // profile started hot must NOT jump into its cooling leg -- Q5, "scan only
 // the leading ascent... stop at the first descent". Segment 0 peaks at
@@ -4927,6 +5004,9 @@ void run_test_profile_executor_prestart(void)
     test_warm_start_mid_ramp_entry_never_below_current();
     test_warm_start_replays_skipped_relay_io_and_registers_it();
     test_warm_start_reached_dwell_is_not_shortened();
+    test_run_refuses_cone10_profile_on_80c_zone();
+    test_run_accepts_in_range_profile_on_80c_zone();
+    test_run_accepts_target_exactly_at_zone_limit();
     test_warm_start_descending_profile_does_not_jump_into_cooldown();
     test_warm_start_hotter_than_entire_profile_lands_on_last_segment();
 

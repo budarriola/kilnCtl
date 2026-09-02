@@ -226,6 +226,38 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
         }
     }
 
+    /* SAFETY TASK (2026-09-02): re-run profiles_http_save()'s per-segment
+     * target-vs-zone-ceiling check against every participating zone's
+     * *current* max_temp_c, same reasoning as the ramp-ceiling re-check just
+     * above -- a zone's max_temp_c can be edited (or a profile's zone_mask
+     * widened to cover a different zone) AFTER the profile was saved, so the
+     * save-time check alone is not enough at start time. Skips a zone with
+     * max_temp_c == 0 on purpose: that zone is uncommissioned, and the
+     * profile_zones_have_ceiling() refusal a few lines below is the one that
+     * owns refusing to start on it -- this check only means anything once a
+     * real ceiling exists to compare against. A REFUSAL, never a silent
+     * clamp, naming the offending segment and the zone's current limit. */
+    for (uint8_t i = 0; i < p.segment_count; i++) {
+        if (p.segments[i].seg_kind != PROFILE_SEG_KIND_ZONE_RAMP) continue;
+        float target = p.segments[i].target_c;
+        for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+            if (!(p.zone_mask & (1u << zi))) continue;
+            float zone_max_c = 0.0f, zone_min_c = 0.0f;
+            zones_config_get_temp_limits(zi, &zone_max_c, &zone_min_c);
+            if (!(zone_max_c > 0.0f)) continue;
+            if (target > zone_max_c) {
+                xSemaphoreGive(s_exec.lock);
+                if (err_msg) {
+                    snprintf(err_msg, err_cap,
+                             "segment %u: target %.1fC exceeds zone %u's current %.1fC limit -- refused, "
+                             "not clamped",
+                             i + 1, (double)target, zi, (double)zone_max_c);
+                }
+                return false;
+            }
+        }
+    }
+
     /* TODO relay/IO segments' SECOND, independent zone-ownership re-check
      * (the storage-side one is profiles_http.c's profile_relay_is_zone_owned(),
      * enforced at save time by validate_io_segment()) -- see this function's
