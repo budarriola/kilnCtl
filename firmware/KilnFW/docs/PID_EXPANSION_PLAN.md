@@ -273,11 +273,30 @@ same document's own 2026-08-29/30 bench sections contradict.
 
 ### 3.6 Untested control paths
 
-- [ ] **Relay-feedback identification has never completed on hardware.** It is
-      implemented, host-tested, and reachable, but no run has produced
-      `{Ku, Tu}` on this rig — so Ziegler-Nichols and Tyreus-Luyben, which
-      depend on it, are unvalidated end to end. A single successful relay run
-      would close all three at once.
+- [~] **Relay-feedback identification has never completed on hardware — cause
+      found and fixed (`c84abff`), awaiting one confirming run.**
+      `relay_law_tick()` decides the bang-bang branch every tick (1 Hz), but
+      actuation went through `heater_output_duty()`, the ordinary PID
+      *time-proportioning PWM* renderer, which only re-evaluates at `window_ms`
+      boundaries (60 s default). A branch flip landing mid-window did not reach
+      the relay for up to 60 s, at random phase — **comparable to or larger than
+      this plant's entire 34–53 s dead time**, and different every cycle.
+      `pid_autotune_fit_relay()` rejects above 20 % period spread
+      (`RELAY_PERIOD_SPREAD_MAX`) or 35 % amplitude spread, so the runs
+      completed and the *fit* refused: "cycle periods inconsistent". No guard
+      was ever involved — that hypothesis was ruled out from code, since guard
+      1/2's progress window resets on every duty chop below `PROGRESS_DUTY_MIN`
+      and the default relay drive (0.5 ± 0.35) chops constantly.
+      Fixed by `heater_output_duty_relay_step()`, which ends and restarts the
+      PWM window immediately on a branch flip; the ordinary duty path is
+      untouched, so PID and the STEP method are unaffected. **No guard was
+      weakened.**
+      **The confirming run:** `autotune_start(zone=<rested>, method="relay",
+      relay_d=-1.0, relay_h_c=-1.0, rule="tl")` from a zone genuinely at
+      ambient. A completed run with plausible `Ku`/`Tu` (period roughly 4–8×
+      dead time) closes this and unblocks Ziegler-Nichols and Tyreus-Luyben
+      together; the *same* rejection reason would mean a second contributor
+      remains.
 - [ ] **The fuzzy layer has never run above `strength_pct = 0`** on hardware.
       Every measurement in §2 is with it effectively off.
 
