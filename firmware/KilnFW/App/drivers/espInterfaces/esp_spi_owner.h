@@ -43,7 +43,10 @@ typedef struct {
      * every thermocouple channel routed through this owner -- see
      * spi_owner_is_wedged() below for the fix (an operator-visible surface)
      * and spi_owner_deinit() for the other half (clearing it on a real
-     * re-init). Given the request/semaphore no longer live on the caller's
+     * re-init) -- see spi_owner_deinit()'s own doc comment in
+     * esp_spi_owner.c for the caller contract that recovery path requires
+     * (opus review, commit 9fc55d9, M6): it is not safe to call while any
+     * transfer could still be in flight. Given the request/semaphore no longer live on the caller's
      * stack (see spi_owner_request_t below), a timed-out request is orphaned
      * rather than corrupting anything if it later completes -- so this flag
      * is a caution against piling more work behind a slow/stuck owner, not a

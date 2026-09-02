@@ -284,6 +284,22 @@
      more urgent thing for an operator glancing at this page to know about
      than an ordinary safety trip. Empty by default, same hide-when-nothing-
      to-report pattern as safetyTripBanner/lastRunBanner below. -->
+<!-- SPI-owner wedge (opus review, commit 9fc55d9, M4): thermo_spi_wedged
+     reached /api/status correctly from the first pass (MAX31856_bus_spi_wedged
+     -> dashboard_get_status -> status_get_handler, unconditional, NULL-safe)
+     but had NO CONSUMER anywhere in this UI -- visible only to someone
+     reading raw JSON, despite MAX31856.h/dashboard_http.h both already
+     claiming "operator-visible". A wedged bus means every thermocouple
+     channel AND the display share one dead SPI owner -- no temperature
+     readings at all, not a single-channel fault -- so this gets the same
+     solid-fill "safety-trip" treatment as a live safety-processor trip
+     (renderSafetyTrip() below), placed ABOVE it: "no data exists" is at
+     least as urgent to notice as "a trip happened", and per-channel
+     "SPI read failed" fault text (renderChannels(), thermo_ready branch)
+     already exists for individual channel faults but says nothing about
+     WHY every channel is down at once. Empty by default, same hide-when-
+     nothing-to-report pattern as the other banners here. -->
+<div id="spiWedgedBanner"></div>
 <div id="bootButtonBypassBanner"></div>
 <div id="safetyTripBanner"></div>
 <div id="lastRunBanner"></div>
@@ -1691,6 +1707,23 @@ function renderBootButtonBypass(data) {
     '</div>';
 }
 
+// opus review, commit 9fc55d9, M4: /api/status's thermo_spi_wedged straight
+// through to a prominent, impossible-to-miss indicator -- see this banner's
+// own <div> comment above for why it outranks even the safety-trip banner in
+// reading order. Same hide-when-nothing-to-report pattern as
+// renderSafetyTrip()/renderBootButtonBypass().
+function renderSpiWedged(data) {
+  var el = document.getElementById('spiWedgedBanner');
+  if (!el) return;
+  if (!data.thermo_spi_wedged) { el.innerHTML = ''; return; }
+  el.innerHTML = '<div class="banner safety-trip">' +
+    '<h3>SPI BUS WEDGED -- NO TEMPERATURE READINGS</h3>' +
+    '<div class="row"><span>Every thermocouple channel and the on-board display share one SPI bus, ' +
+    'and it has stopped responding. There are no live temperature readings from this board right now.</span></div>' +
+    '<div class="row"><span>To clear</span><span>Reboot the board. There is no other recovery today.</span></div>' +
+    '</div>';
+}
+
 function renderLastRun(st) {
   const el = document.getElementById('lastRunBanner');
   const lr = st.last_run;
@@ -2855,6 +2888,7 @@ function poll() {
       // other status-derived control on this page already uses.
       lastWatchdogPanicDisabled = !!data.watchdog_panic_disabled;
       renderChannels(data);
+      renderSpiWedged(data);
       renderBootButtonBypass(data);
       renderSafetyTrip(data);
       // Client-side multi-zone autotune trace sampling (see

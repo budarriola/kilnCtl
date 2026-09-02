@@ -62,6 +62,25 @@ static void test_wedge_latches_and_fails_fast(void)
     TEST_CHECK(first == ESP_ERR_TIMEOUT, "first transfer past a wedged queue reports ESP_ERR_TIMEOUT");
     TEST_CHECK(owner.wedged, "that timeout latches owner.wedged");
     TEST_CHECK(g_stub_queue_send_calls == 1, "the first call actually reached xQueueSend() once");
+    // BRANCH DISCRIMINATOR (opus review, commit 9fc55d9, M2): this test's own
+    // header comment already explained that without g_stub_queue_ring_enabled
+    // pinned to 0, a leaked-on ring mode makes xQueueSend() succeed instead
+    // of failing, silently diverting this test into the SECOND (completion-
+    // wait) timeout branch below -- which also returns ESP_ERR_TIMEOUT, also
+    // latches wedged, and also leaves g_stub_queue_send_calls == 1, so every
+    // check above this line still passes while the enqueue-failure branch
+    // this test is named for never actually ran. The two branches leave
+    // different refcounts behind (enqueue failure releases BOTH halves right
+    // here -- see esp_spi_owner.c's own comment on that path -- so refcount
+    // goes to 0; the completion-timeout branch releases only the client's
+    // half, leaving 1 -- see test_completion_timeout_orphans_slot() below).
+    // This assertion is also M3's uncovered-path check: deleting the second
+    // owner_slot_pool_release() call on the enqueue-failure path in
+    // esp_spi_owner.c would leave slot_refcount[0] == 1 here instead of 0.
+    TEST_CHECK(owner.slot_refcount[0] == 0,
+               "enqueue failure released BOTH halves of the slot -- refcount 0, proving this ran "
+               "the enqueue-failure branch (not the completion-timeout branch, which leaves 1) and "
+               "did not leak the slot");
 
     // THE LOAD-BEARING CHECK: once wedged, a second transfer must fail fast
     // -- ESP_ERR_INVALID_STATE, without ever touching the queue again. This
@@ -133,9 +152,73 @@ static void test_completion_timeout_orphans_slot(void)
     g_stub_queue_ring_enabled = 0;
 }
 
+// opus review, commit 9fc55d9, M1: the pool must be sized queue_len + 1, not
+// queue_len -- spi_owner_task() gives the slot's completion semaphore BEFORE
+// it takes slot_lock to release the slot (see esp_spi_owner.c's tail
+// comment), so a request can be dequeued (freeing a queue slot, letting a
+// new caller's xQueueSend() succeed) while the just-dequeued request still
+// holds its pool slot. Proven here directly against owner_slot_pool_alloc()
+// (no FreeRTOS task ever runs in this host-test process -- see this file's
+// header comment), which is exactly the bookkeeping spi_owner_transfer()
+// itself calls: queue_len + 1 successful allocations must be possible before
+// the pool is exhausted.
+static void test_pool_sized_queue_len_plus_one(void)
+{
+    spi_owner_t owner;
+    UBaseType_t queue_len = 4;
+    esp_err_t init_err = spi_owner_init(&owner, 0 /*host*/, queue_len, 5 /*priority*/,
+                                         2048 /*stack*/, -1 /*core*/);
+    TEST_CHECK(init_err == ESP_OK, "spi_owner_init succeeds against the host stubs");
+    TEST_CHECK(owner.slot_count == (size_t)queue_len + 1,
+               "pool is sized queue_len + 1, not queue_len");
+
+    for (UBaseType_t i = 0; i < queue_len + 1; i++) {
+        int idx = owner_slot_pool_alloc(owner.slot_refcount, owner.slot_count);
+        TEST_CHECK(idx >= 0, "the pool can serve queue_len + 1 concurrent slots");
+    }
+    // One more than queue_len + 1 must still fail -- the pool is bounded, not
+    // unlimited; this is what M1's fix protects against exhausting silently.
+    int over = owner_slot_pool_alloc(owner.slot_refcount, owner.slot_count);
+    TEST_CHECK(over < 0, "the (queue_len + 2)th concurrent slot is correctly refused");
+}
+
+// opus review, commit 9fc55d9, M1: pool exhaustion inside spi_owner_transfer()
+// must fail closed (one transfer refused) rather than latching the shared
+// owner wedged -- a wedge here would permanently kill the display AND every
+// thermocouple channel over a transient resource condition, not a genuinely
+// stuck bus. Forces exhaustion directly (allocate every slot behind
+// spi_owner_transfer()'s back, exactly like test_pool_sized_queue_len_plus_one
+// above) rather than trying to race real concurrent callers, which this
+// single-threaded host-test process cannot do.
+static void test_pool_exhaustion_fails_closed_not_wedged(void)
+{
+    spi_owner_t owner;
+    UBaseType_t queue_len = 4;
+    esp_err_t init_err = spi_owner_init(&owner, 0 /*host*/, queue_len, 5 /*priority*/,
+                                         2048 /*stack*/, -1 /*core*/);
+    TEST_CHECK(init_err == ESP_OK, "spi_owner_init succeeds against the host stubs");
+
+    for (UBaseType_t i = 0; i < queue_len + 1; i++) {
+        int idx = owner_slot_pool_alloc(owner.slot_refcount, owner.slot_count);
+        TEST_CHECK(idx >= 0, "setup: fill every pool slot ahead of the call under test");
+    }
+
+    uint8_t tx[4] = { 1, 2, 3, 4 };
+    esp_err_t result =
+        spi_owner_transfer(&owner, (spi_device_handle_t)0x1, tx, sizeof(tx), NULL, 0, /*cs_pin=*/5);
+    TEST_CHECK(result == ESP_ERR_NO_MEM, "pool exhaustion fails this one transfer with ESP_ERR_NO_MEM");
+    // THE LOAD-BEARING CHECK: unlike a genuine enqueue/completion timeout,
+    // this must NOT latch wedged -- an exhausted pool is a transient resource
+    // condition, not a wedged bus (see esp_spi_owner.c's own comment on this
+    // path).
+    TEST_CHECK(!owner.wedged, "pool exhaustion does NOT latch owner.wedged");
+}
+
 void run_test_esp_spi_owner(void)
 {
     TEST_SECTION("esp_spi_owner");
     test_wedge_latches_and_fails_fast();
     test_completion_timeout_orphans_slot();
+    test_pool_sized_queue_len_plus_one();
+    test_pool_exhaustion_fails_closed_not_wedged();
 }

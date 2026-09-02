@@ -197,7 +197,15 @@ esp_err_t spi_owner_init(spi_owner_t *owner,
         return ESP_ERR_NO_MEM;
     }
 
-    esp_err_t pool_err = spi_owner_slot_pool_init(owner, (size_t)queue_len);
+    /* Sized queue_len + 1, not queue_len (opus review, commit 9fc55d9, M1):
+     * the owner task dequeues a request -- freeing a queue slot -- BEFORE it
+     * releases that request's own pool slot (spi_owner_task() above gives
+     * the semaphore and only then takes slot_lock to release), so at the
+     * instant a new caller's xQueueSend() succeeds because the queue just
+     * gained room, the just-dequeued request can still be holding its pool
+     * slot. Worst case is queue_len (still-queued) + 1 (mid-release) slots
+     * concurrently held, not queue_len. */
+    esp_err_t pool_err = spi_owner_slot_pool_init(owner, (size_t)queue_len + 1);
     if (pool_err != ESP_OK) {
         vQueueDelete(owner->request_queue);
         owner->request_queue = NULL;
@@ -235,6 +243,28 @@ esp_err_t spi_owner_init(spi_owner_t *owner,
     return ESP_OK;
 }
 
+/* CALLER CONTRACT (opus review, commit 9fc55d9, M6): the caller MUST
+ * guarantee no spi_owner_transfer() call is in flight (queued, or already
+ * handed to the owner task and parked in its own xSemaphoreTake(slot->sem,
+ * ...) completion wait) anywhere else before calling this. This function
+ * frees owner->slots and deletes owner->slot_lock unconditionally below; a
+ * transfer parked in its completion wait holds a raw
+ * `spi_owner_slot_t *slot = &owner->slots[idx]` pointer (spi_owner_transfer()
+ * in this file) with no lock protecting it against a concurrent deinit --
+ * freeing the array out from under that wait is a use-after-free the moment
+ * the wait either times out and dereferences slot->sem/slot->result, or the
+ * owner task itself writes a late completion into the now-freed slot.
+ * Unreachable TODAY: nothing in this firmware calls spi_owner_deinit() or
+ * MAX31856_bus_deinit() (grep confirms it), so there is no live caller to
+ * violate this. If that ever changes, the caller must first drive `owner`
+ * into a state where every prior spi_owner_transfer() call has already
+ * returned -- e.g. only ever deinit an owner that is already latched
+ * `wedged` (spi_owner_transfer() fails every NEW call fast, without
+ * touching the queue or pool, the moment wedged is set) AND has had at
+ * least SPI_OWNER_TRANSFER_TIMEOUT_MS elapse since the call that set it, so
+ * that call's own completion wait has itself already timed out and
+ * returned. Calling this while a transfer could still be genuinely in
+ * flight is not supported by this implementation. */
 esp_err_t spi_owner_deinit(spi_owner_t *owner)
 {
     if (!owner || !owner->initialized) {
@@ -262,13 +292,16 @@ esp_err_t spi_owner_deinit(spi_owner_t *owner)
 
     /* opus review, commit f3a1600, G2(c): a re-init after this deinit must
      * start clean, not carry a permanently latched `wedged` forward -- this
-     * is the recovery path spi_owner_t::wedged's header comment promises.
-     * The slot pool itself is torn down and freed here too (owner->slots is
-     * this owner's own heap allocation, sized at init time), so any request
-     * still orphaned in it (owner-side release pending on a timed-out
-     * transfer) is released along with everything else -- safe, because a
-     * deinit means the caller has decided this owner is done for good, not
-     * merely resetting between transfers. */
+     * IS still a recovery path spi_owner_t::wedged's header comment can point
+     * to, but only under the caller contract spelled out in this function's
+     * own doc comment above (opus review, commit 9fc55d9, M6): no transfer
+     * may still be in flight anywhere. The slot pool itself is torn down and
+     * freed here too (owner->slots is this owner's own heap allocation, sized
+     * at init time), so any request still orphaned in it (owner-side release
+     * pending on a timed-out transfer whose completion wait has ALREADY
+     * returned) is released along with everything else -- safe under that
+     * contract, NOT safe against a transfer still actively parked in its own
+     * completion wait (see this function's top comment). */
     spi_owner_slot_pool_deinit(owner);
 
     owner->request_queue = NULL;
@@ -307,17 +340,21 @@ esp_err_t spi_owner_transfer(spi_owner_t *owner,
     int idx = owner_slot_pool_alloc(owner->slot_refcount, owner->slot_count);
     xSemaphoreGive(owner->slot_lock);
     if (idx < 0) {
-        /* Pool is sized to queue_len, so this means every slot is still
-         * held -- either genuinely queue_len transfers in flight at once
-         * (shouldn't happen: the queue itself would already be full and
-         * reject xQueueSend below) or every slot is orphaned behind a
-         * previously timed-out, still-unfinished owner task. Either way,
-         * queuing more work behind it is exactly the pile-up spi_owner_t's
-         * wedged latch exists to prevent, so treat this the same as a
-         * completion timeout rather than silently blocking. */
-        ESP_LOGE(TAG, "result-slot pool exhausted -- treating as wedged");
-        owner->wedged = true;
-        return ESP_ERR_TIMEOUT;
+        /* Pool is sized to queue_len + 1 (see spi_owner_init()'s pool-size
+         * comment for why one more than queue_len is required), so this
+         * means every slot is held: up to queue_len genuinely still-queued
+         * transfers plus the one extra headroom slot for a dequeue-before-
+         * release race -- ALL of them simultaneously in that state, or one
+         * or more slots orphaned behind a previously timed-out,
+         * still-unfinished owner task. This is a transient resource
+         * condition on the pool, not evidence the bus/owner task itself is
+         * stuck (a completion timeout is what actually observes that) --
+         * matching kiln_io_owner.c's/thermo_owner.c's own alloc-failure
+         * handling, fail only this one transfer closed rather than latching
+         * the shared owner wedged and taking the display and every other
+         * thermocouple channel down with it. */
+        ESP_LOGE(TAG, "result-slot pool exhausted -- failing this transfer, not latching wedged");
+        return ESP_ERR_NO_MEM;
     }
 
     spi_owner_request_t request;

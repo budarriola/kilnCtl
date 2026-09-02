@@ -490,8 +490,9 @@ static esp_err_t status_get_handler(httpd_req_t *req)
      * capacity (159B each), safety_build_commit/_datetime escaped WORST CASE
      * (every byte needing a backslash doubles -- 65/33-byte raw fields from
      * the UNTRUSTED RP2040 peer, so 130/66B), fw_version/fw_build escaped
-     * similarly (62/78B), 3 nvs_sections entries, and generous headroom
-     * >200B on top of the 3866-byte total this exact field list sums to
+     * similarly (62/78B), 3 nvs_sections entries, ,"thermo_spi_wedged":false (26B,
+     * opus review, commit 9fc55d9, M5), and generous headroom >200B on top of
+     * the ~3892-byte total this exact field list sums to
      * (verified by a standalone harness mirroring this file's own APPEND
      * macro against every field above at its documented worst width: fits
      * at 4096, and provably truncates -- the `goto truncated` path fires --

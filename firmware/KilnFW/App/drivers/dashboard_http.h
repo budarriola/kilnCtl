@@ -114,7 +114,9 @@ typedef struct {
      * every other hardware-health bit here already reports through. True
      * here means every thermocouple channel and the display are effectively
      * dead until spi_owner_deinit()/re-init recovers it (a reboot, today --
-     * see esp_spi_owner.h's wedged field comment). */
+     * see esp_spi_owner.h's wedged field comment). Rendered as a prominent
+     * banner by main_page.html's renderSpiWedged() (opus review, commit
+     * 9fc55d9, M4) -- not just a JSON field nothing reads. */
     bool     thermo_spi_wedged;
 
     bool     safety_ready;

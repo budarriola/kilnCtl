@@ -372,8 +372,11 @@ MAX31856Class *MAX31856_bus_channel(MAX31856BusClass *bus, uint8_t channel);
  * see esp_spi_owner.h. Every channel on this bus (and the display, on the
  * caller's side of the shared owner) is dead the moment this reads true;
  * false if `bus` is NULL or was never initialized. dashboard_http.c reads
- * this into /api/status so a wedged bus is finally visible somewhere an
- * operator can see it, instead of two silent ESP_LOGE lines. */
+ * this into /api/status, and main_page.html's renderSpiWedged() (opus
+ * review, commit 9fc55d9, M4) renders it as a prominent solid-fill banner on
+ * every page load -- so a wedged bus is finally visible somewhere an
+ * operator actually looks, instead of two silent ESP_LOGE lines or a raw
+ * JSON field nothing ever consumed. */
 bool MAX31856_bus_spi_wedged(const MAX31856BusClass *bus);
 
 /* Installs (or, with fn = NULL, removes) the ~DRDY observer described above.
