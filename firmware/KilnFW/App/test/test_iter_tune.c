@@ -259,24 +259,56 @@ static void test_refuses_comparison_on_residual_heat(void)
     iter_tune_gains_t g;
     iter_tune_propose_perturbation(&st, &g);
 
-    // 4.9 degC apart -- literal below the 5.0 degC tolerance, must compare.
-    iter_tune_firing_t close = mk_firing(7, 0x07, 29.9f, 0.05f, g.kp, g.ki, g.kd);
+    // 1.9 degC apart -- literal below the (tightened) 2.0 degC tolerance,
+    // must compare. Chosen independently of ITER_TUNE_START_TEMP_
+    // TOLERANCE_C's own value -- this pins the boundary's BEHAVIOR, not a
+    // restatement of the constant.
+    iter_tune_firing_t close = mk_firing(7, 0x07, 26.9f, 0.05f, g.kp, g.ki, g.kd);
     iter_tune_result_t r_close = iter_tune_process_firing(&st, &close, reason, sizeof(reason));
-    TEST_CHECK(r_close != ITER_TUNE_RESULT_REFUSED_NOT_COMPARABLE, "4.9 degC start-temp gap must still be comparable");
+    TEST_CHECK(r_close != ITER_TUNE_RESULT_REFUSED_NOT_COMPARABLE, "1.9 degC start-temp gap must still be comparable");
 
     // Reset and try the far case.
     memset(&st, 0, sizeof(st));
     st.enabled = true;
     iter_tune_process_firing(&st, &seed, reason, sizeof(reason));
     iter_tune_propose_perturbation(&st, &g);
-    // 5.1 degC apart -- literal above the 5.0 degC tolerance, must refuse.
-    // This pair of tests (4.9 vs 5.1) pins the actual boundary behavior
+    // 2.1 degC apart -- literal above the tightened tolerance, must refuse.
+    // This pair of tests (1.9 vs 2.1) pins the actual boundary behavior
     // rather than restating ITER_TUNE_START_TEMP_TOLERANCE_C's value.
-    iter_tune_firing_t far = mk_firing(7, 0x07, 30.1f, 0.05f, g.kp, g.ki, g.kd);
+    iter_tune_firing_t far = mk_firing(7, 0x07, 27.1f, 0.05f, g.kp, g.ki, g.kd);
     iter_tune_result_t r_far = iter_tune_process_firing(&st, &far, reason, sizeof(reason));
-    // Negative test: change ITER_TUNE_START_TEMP_TOLERANCE_C to 10.0f and
-    // this specific assertion goes red (5.1 degC gap becomes comparable).
-    TEST_CHECK(r_far == ITER_TUNE_RESULT_REFUSED_NOT_COMPARABLE, "5.1 degC start-temp gap must be refused -- residual heat");
+    // Negative test: change ITER_TUNE_START_TEMP_TOLERANCE_C to 5.0f (its
+    // old, confounded value) and this specific assertion goes red (2.1
+    // degC gap becomes comparable again).
+    TEST_CHECK(r_far == ITER_TUNE_RESULT_REFUSED_NOT_COMPARABLE, "2.1 degC start-temp gap must be refused -- residual heat");
+}
+
+static void test_confounded_capture_pair_is_now_refused(void)
+{
+    TEST_SECTION("iter_tune: the holdfix_clean/final 4.8 degC start-temp pair is refused under the tightened window");
+    // This is the negative test the coordinator asked for directly: the
+    // exact pair this module's noise-floor comment used to (wrongly) treat
+    // as a clean same-gain repeat now must be refused as NOT COMPARABLE,
+    // because it never was one -- see iter_tune.h's corrected noise-floor
+    // comment. Literal 4.8 degC gap taken directly from the two captures'
+    // own first poll rows (holdfix_clean.jsonl z0 24.57 degC @ 10:16:38 vs
+    // final.jsonl z0 29.32 degC @ 14:14:29 -- an average of the two is used
+    // here as a representative single-zone start_temp_c, independent of
+    // ITER_TUNE_START_TEMP_TOLERANCE_C's own value).
+    iter_tune_zone_state_t st;
+    memset(&st, 0, sizeof(st));
+    st.enabled = true;
+    iter_tune_firing_t seed = mk_firing(7, 0x07, 24.57f, 0.0275f, 8.0f, 0.05f, 0.5f);
+    char reason[96];
+    iter_tune_process_firing(&st, &seed, reason, sizeof(reason));
+    iter_tune_gains_t g;
+    iter_tune_propose_perturbation(&st, &g);
+
+    iter_tune_firing_t trial = mk_firing(7, 0x07, 29.32f, 0.0337f, g.kp, g.ki, g.kd);
+    iter_tune_result_t r = iter_tune_process_firing(&st, &trial, reason, sizeof(reason));
+    TEST_CHECK(r == ITER_TUNE_RESULT_REFUSED_NOT_COMPARABLE,
+               "the real 4.8 degC contaminated pair must be refused as not comparable, not scored as a revert");
+    TEST_CHECK(st.has_pending, "the trial must remain pending -- an incomparable firing decides nothing");
 }
 
 static void test_baseline_refreshes_without_pending_trial(void)
@@ -300,19 +332,24 @@ static void test_baseline_refreshes_without_pending_trial(void)
 }
 
 // ---------------------------------------------------------------------
-// Real-data sanity check: normalized IAE read directly from the two
-// nominally-comparable plant_sim fixture captures cited in iter_tune.h's
-// noise-floor comment (tools/PcTools/tests/fixtures/plant_sim/
-// holdfix_clean.jsonl and final.jsonl, both climb_mode=coupled/
-// integral_floor=ff_hold), whole-run figures read from each capture's
-// final poll row's zones[].firing_stats.iae_normalized:
+// Real-data sanity check -- CORRECTED: the two source captures
+// (tools/PcTools/tests/fixtures/plant_sim/holdfix_clean.jsonl and
+// final.jsonl) are NOT a same-gain, same-starting-temperature pair -- their
+// own first poll rows are 4.8 degC apart (see iter_tune.h's noise-floor
+// comment and test_confounded_capture_pair_is_now_refused() below, which
+// pins that this exact pair is refused as NOT COMPARABLE under the real
+// start_temp_c values). This test reuses only the QUANTIZED, real,
+// non-round iae_normalized figures from those captures --
 //   z0: 0.0275 -> 0.0337 (+22.5%, worse)
 //   z1: 0.0160 -> 0.0236 (+47.5%, worse)
-// These are QUANTIZED, real, non-round numbers -- not synthetic idealized
-// input (this repo's documented "idealized test input" bug class). Neither
-// pair should accept a change against the 20% floor since both regress;
-// this pins the mechanism's behavior against actual bench-noise magnitude,
-// not just synthetic percentages.
+// -- as scoring input (this repo's documented "idealized test input" bug
+// class is about round/idealized magnitudes, not about start_temp_c), but
+// deliberately holds start_temp_c IDENTICAL (25.0f) across each seed/trial
+// pair here so THIS test isolates the accept/revert-vs-score-delta logic
+// from the comparability check, which has its own dedicated tests above.
+// It is a synthetic same-start-temp scenario using real-world score
+// magnitudes, not a claim that the source captures were themselves
+// comparable.
 static void test_real_capture_data_regression_is_reverted(void)
 {
     TEST_SECTION("iter_tune: real plant_sim capture spread (holdfix_clean -> final) reverts on both zones");
@@ -367,6 +404,7 @@ void run_test_iter_tune(void)
     test_refuses_comparison_across_different_profiles();
     test_refuses_comparison_across_different_zone_masks();
     test_refuses_comparison_on_residual_heat();
+    test_confounded_capture_pair_is_now_refused();
     test_baseline_refreshes_without_pending_trial();
     test_real_capture_data_regression_is_reverted();
 }

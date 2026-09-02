@@ -77,58 +77,68 @@ extern "C" {
 // this failure mode (a vacuous decreasing-direction test) before it was
 // closed.
 //
-// This repo has no controlled same-gain repeat-firing dataset to fit a
-// true noise floor from (the five plant_sim fixture captures --
-// tools/PcTools/tests/fixtures/plant_sim/*.jsonl -- are five DIFFERENT
-// firmware/gain states, not five repeats of one). The two captures closest
-// to a repeat -- holdfix_clean.jsonl and final.jsonl, both labeled
-// climb_mode=coupled/integral_floor=ff_hold, i.e. the same shipped build --
-// still are not proven to share identical gains or ambient conditions, so
-// their spread is an UPPER bound on true noise (it may include real
-// gain/environment differences), not a measured floor. Their whole-run
-// normalized IAE, read directly from each capture's final poll row:
+// THIS REPO HAS NO UNCONTAMINATED SAME-GAIN REPEAT-FIRING DATASET, and an
+// earlier version of this comment claimed one anyway. It compared
+// holdfix_clean.jsonl and final.jsonl (both climb_mode=coupled/
+// integral_floor=ff_hold, i.e. the same shipped build) and read their
+// whole-run normalized-IAE spread (+22.5% / +47.5% / +28.6% across the
+// three zones) as if it were a measurement of run-to-run noise. It is not:
+// the two captures' own first poll rows show a **4.8 degC warmer start**
+// in final.jsonl (z0/z1/z2: 24.57/24.62/24.71 degC at 10:16:38 vs
+// 29.32/29.50/29.57 degC at 14:14:29, same afternoon). That is exactly
+// this repo's own documented failure mode --
+// project_autotune_needs_rested_baseline, "residual heat biases results" --
+// applied to THIS module's own evidence. An unknown, likely large share of
+// that spread is segment 0 needing less heating from a warmer start, not
+// noise. Presenting a confounded number as a measured noise floor was the
+// mistake; it is corrected here rather than quietly reused.
 //
-//     zone   holdfix_clean   final    relative change
-//     z0     0.0275          0.0337   +22.5% (worse)
-//     z1     0.0160          0.0236   +47.5% (worse)
-//     z2     0.0210          0.0270   +28.6% (worse)
+// So: the true noise floor -- the spread between two firings of the same
+// profile, same gains, both from a genuinely rested start -- is UNKNOWN.
+// It has not been measured in this repo. ITER_TUNE_MIN_RELATIVE_IMPROVEMENT
+// below is a DELIBERATELY CONSERVATIVE CHOICE pending real data, not a
+// number derived from these two runs -- 20%, matching the fractional-move
+// convention every other bounded layer in this file's neighborhood already
+// uses (ADAPTIVE_TUNE_MAX_FRACTIONAL_MOVE / ADAPTIVE_TUNE_KI_MAX_
+// FRACTIONAL_MOVE, adaptive_tune_internal.h), chosen because it is the
+// established convention here, not because two contaminated data points
+// support it. It could be too loose or too tight; nobody has the
+// experiment that would tell.
 //
-// Spreads of 20-48% between two nominally-comparable firings of the SAME
-// build. That is larger than many real gain improvements this session
-// measured (§2's whole-run IAE table shows the day's total improvement was
-// 41-63%, achieved over MANY changes, not one). Read plainly: at this
-// noise level, a single-firing A/B comparison cannot safely accept an
-// improvement smaller than roughly a quarter of a gain's total possible
-// benefit, which is a real limitation, not a tuning choice this file can
-// paper over. ITER_TUNE_MIN_RELATIVE_IMPROVEMENT is therefore set at the
-// conservative end of that observed spread rather than fit to it (fitting
-// a threshold to two data points would be exactly the vacuous-test mistake
-// this session has repeatedly shipped and reverted) -- 20%, matching the
-// fractional-move convention every other bounded layer in this file's
-// neighborhood already uses (ADAPTIVE_TUNE_MAX_FRACTIONAL_MOVE /
-// ADAPTIVE_TUNE_KI_MAX_FRACTIONAL_MOVE, adaptive_tune_internal.h). A firing
-// that improves by less than this is treated as noise and reverted, not
-// accepted.
+// WHAT WOULD ACTUALLY ESTABLISH THE NOISE FLOOR: N repeat firings (N >= 5
+// suggested) of the SAME profile, with GAINS HELD FIXED across all of
+// them, each one starting from a genuinely rested baseline (every zone at
+// ambient, not just the one nominally under test -- see this repo's own
+// "Autotune needs a rested baseline" lesson) and separated by enough time
+// to fully cool between firings. The spread of iae_normalized across that
+// set, per zone, is the real noise floor this file should be comparing
+// against. That is a hardware experiment for someone to run later; this
+// file cannot manufacture it from captures that were never designed to
+// hold gains and starting temperature fixed.
 //
-// HONEST CONSEQUENCE: with a 20-48% observed spread and a 20% acceptance
-// bar, this mechanism WILL occasionally accept a gain change that was pure
-// noise (a below-floor true change can still show an above-floor
-// measurement by chance), and will occasionally revert a real improvement
-// that measured smaller than the noise on that particular firing. Neither
-// failure compounds, because every subsequent firing is scored against
-// whatever is currently accepted, not against history -- a lucky accept
-// gets re-tested the very next firing under the same bar.
+// HONEST CONSEQUENCE of shipping a conservative guess instead of a
+// measured floor: this mechanism may accept real noise as an improvement,
+// or revert a real improvement that measured smaller than actual noise on
+// one firing -- in either direction, unquantified until the experiment
+// above is run. Neither failure compounds, because every subsequent firing
+// is scored against whatever is currently accepted, not against history --
+// a lucky accept gets re-tested the very next firing under the same bar.
 #define ITER_TUNE_MIN_RELATIVE_IMPROVEMENT 0.20f
 
 // Two firings are only comparable at a "comparable starting temperature" --
 // project_autotune_needs_rested_baseline (this repo's own lesson):
 // residual heat from a prior firing biases the fitted/measured behavior.
-// 5 degC is roughly half the smallest per-zone quantization-visible step
-// this repo's IAE figures resolve at bench scale (§2's overshoot deltas
-// are all >= 0.1 degC; 5 degC is two orders of magnitude looser, i.e. a
-// "this zone had clearly not returned to a rested state" guard, not a
-// precision claim).
-#define ITER_TUNE_START_TEMP_TOLERANCE_C 5.0f
+// Originally set to 5.0 degC on the mistaken belief that the holdfix_
+// clean.jsonl/final.jsonl pair above was a clean noise-floor measurement;
+// that pair is 4.8 degC apart and would have been ACCEPTED as comparable
+// under that window -- i.e. the window was loose enough to admit the exact
+// confound it exists to exclude. Tightened to 2.0 degC: the plant's own
+// dwell-settle criterion and the residual-heat lesson both point at "a
+// couple of degrees at most" for "this zone is at a rested baseline,"
+// and 2.0 degC excludes the 4.8 degC contaminated pair with margin while
+// still tolerating ordinary sensor/ambient jitter at a genuinely rested
+// start.
+#define ITER_TUNE_START_TEMP_TOLERANCE_C 2.0f
 
 // ---------------------------------------------------------------------
 
