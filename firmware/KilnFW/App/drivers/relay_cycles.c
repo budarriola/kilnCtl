@@ -2,6 +2,7 @@
 
 #include <string.h>
 
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -120,8 +121,33 @@ static bool ensure_lock(void)
     return true;
 }
 
+/* True iff the CURRENTLY EXECUTING task's own stack lives in external RAM
+ * (PSRAM). Same predicate, same reasoning, and same incident class as
+ * kiln_cfg_store.c's/safety_cfg_store.c's/run_state.c's
+ * caller_stack_is_external(): a flash/NVS write disables the cache, which
+ * makes a PSRAM-resident stack unreachable and aborts the whole board via
+ * ESP-IDF's own esp_task_stack_is_sane_cache_disabled() rather than failing
+ * just this one call. This module's persist_locked() is called directly
+ * from profile_executor's tick path (relay_cycles_maybe_persist()) and its
+ * stop path (relay_cycles_flush()) -- see run_state.c's identical guard for
+ * the fuller rationale; this closes the same gap for this module. */
+static bool caller_stack_is_external(void)
+{
+    volatile int stack_probe = 0; /* only its ADDRESS matters; volatile+initialised so -Werror=maybe-uninitialized doesn't flag it and it can't be optimised out of the frame. */
+    return esp_ptr_external_ram((void *)&stack_probe);
+}
+
 static esp_err_t persist_locked(void)
 {
+    if (caller_stack_is_external()) {
+        ESP_LOGE(TAG, "persist_locked: REFUSING -- calling task's stack is in external RAM "
+                      "(PSRAM). A flash/NVS write from here would abort the whole board "
+                      "(ESP-IDF's esp_task_stack_is_sane_cache_disabled()). Route this call "
+                      "through a task with an internal-SRAM stack instead -- see "
+                      "DRAM_PSRAM_PLAN.md section 7.2 and uart_bridge_ext.c's flash-safe "
+                      "worker for the established pattern.");
+        return ESP_ERR_INVALID_STATE;
+    }
     nvs_handle_t h;
     esp_err_t err = nvs_open_from_partition(KILN_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
     if (err != ESP_OK) {

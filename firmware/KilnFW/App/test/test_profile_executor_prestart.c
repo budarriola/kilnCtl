@@ -4938,10 +4938,77 @@ static void test_firing_stats_persist_load_round_trip_and_ring_depth(void)
     nvs_test_clear();
 }
 
+static void test_firing_stats_persist_refuses_when_calling_stack_is_external_ram(void)
+{
+    TEST_SECTION("firing_stats_persist -- refuses (does not crash) when called with a PSRAM "
+                 "stack underneath it (DRAM_PSRAM_PLAN.md section 7 safety net). "
+                 "firing_stats_persist() is called directly from profile_executor.c's tick and "
+                 "halt paths -- the same task DRAM_PSRAM_PLAN.md section 7 names as its "
+                 "highest-care relocation candidate.");
+
+    nvs_test_enable(true);
+    nvs_test_clear();
+
+    profile_firing_run_record_t rec;
+    memset(&rec, 0, sizeof(rec));
+    rec.profile_id = 11;
+    strncpy(rec.profile_name, "GuardTest", sizeof(rec.profile_name) - 1);
+    rec.duration_s = 4242;
+    rec.zone_mask = 0x01;
+
+    esp_ptr_external_ram_test_set(true); // simulate being called from a PSRAM-stacked task
+
+    firing_stats_persist(&rec); // void -- success/failure is only observable via the store
+
+    profile_firing_run_record_t out[1];
+    memset(out, 0, sizeof(out));
+    size_t n = profile_executor_get_firing_history(11, out, 1);
+    TEST_CHECK(n == 0,
+               "the refused write left no blob behind -- firing_stats_persist() returned before "
+               "calling nvs_open_from_partition()/nvs_set_blob() at all -- exactly the class of "
+               "bug (an NVS write reached from a PSRAM-stack task) this net exists to catch "
+               "before a future relocation of profile_executor makes it reachable for real");
+
+    esp_ptr_external_ram_test_set(false); // leave shared stub state as every other test expects
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
+static void test_firing_stats_persist_proceeds_normally_on_an_internal_ram_stack(void)
+{
+    TEST_SECTION("firing_stats_persist -- proceeds normally when the calling task's stack is "
+                 "internal RAM");
+
+    nvs_test_enable(true);
+    nvs_test_clear();
+
+    profile_firing_run_record_t rec;
+    memset(&rec, 0, sizeof(rec));
+    rec.profile_id = 11;
+    strncpy(rec.profile_name, "GuardTest", sizeof(rec.profile_name) - 1);
+    rec.duration_s = 4242;
+    rec.zone_mask = 0x01;
+
+    // esp_ptr_external_ram_test_set(false) is the stub's default state.
+    firing_stats_persist(&rec);
+
+    profile_firing_run_record_t out[1];
+    memset(out, 0, sizeof(out));
+    size_t n = profile_executor_get_firing_history(11, out, 1);
+    TEST_CHECK(n == 1, "the guard does not fire on an internal-RAM stack -- the write proceeds "
+                       "and lands in the stub store");
+    TEST_CHECK(out[0].duration_s == 4242, "the persisted record is the one that was passed in");
+
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
 void run_test_profile_executor_prestart(void)
 {
     test_run_refuses_before_start();
     test_halt_is_a_silent_noop_before_start();
+    test_firing_stats_persist_refuses_when_calling_stack_is_external_ram();
+    test_firing_stats_persist_proceeds_normally_on_an_internal_ram_stack();
     test_pause_resume_refuse_before_start();
     test_zone_is_active_false_before_start();
     test_get_history_empty_before_start();

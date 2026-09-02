@@ -12,6 +12,7 @@
 #include <math.h>
 #include <string.h>
 
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "nvs.h"
 
@@ -225,8 +226,33 @@ bool firing_stats_load(uint8_t profile_id, profile_firing_history_blob_t *out)
  * failure is logged and otherwise swallowed: losing one run's history is
  * not worth failing the run itself over, matching relay_cycles_flush()'s
  * and run_state_note()'s own non-fatal convention. */
+/* True iff the CURRENTLY EXECUTING task's own stack lives in external RAM
+ * (PSRAM). Same predicate, same reasoning, and same incident class as
+ * kiln_cfg_store.c's/safety_cfg_store.c's/run_state.c's/relay_cycles.c's
+ * caller_stack_is_external(): a flash/NVS write disables the cache, which
+ * makes a PSRAM-resident stack unreachable and aborts the whole board via
+ * ESP-IDF's own esp_task_stack_is_sane_cache_disabled() rather than failing
+ * just this one call. firing_stats_persist() is called directly from
+ * profile_executor.c's tick and halt paths -- see run_state.c's identical
+ * guard for the fuller rationale; this closes the same gap for this
+ * module. */
+static bool caller_stack_is_external(void)
+{
+    volatile int stack_probe = 0; /* only its ADDRESS matters; volatile+initialised so -Werror=maybe-uninitialized doesn't flag it and it can't be optimised out of the frame. */
+    return esp_ptr_external_ram((void *)&stack_probe);
+}
+
 void firing_stats_persist(const profile_firing_run_record_t *rec)
 {
+    if (caller_stack_is_external()) {
+        ESP_LOGE(PE_TAG, "firing_stats_persist: REFUSING -- calling task's stack is in external "
+                         "RAM (PSRAM). A flash/NVS write from here would abort the whole board "
+                         "(ESP-IDF's esp_task_stack_is_sane_cache_disabled()). Route this call "
+                         "through a task with an internal-SRAM stack instead -- see "
+                         "DRAM_PSRAM_PLAN.md section 7.2 and uart_bridge_ext.c's flash-safe "
+                         "worker for the established pattern.");
+        return;
+    }
     profile_firing_history_blob_t blob;
     firing_stats_load(rec->profile_id, &blob); /* empty blob on any failure -- still safe to prepend into */
 

@@ -12,6 +12,97 @@ as an estimate.
 Status at time of writing (2026-09-01): **nothing in this plan is built.** This
 is a planning document only.
 
+**Update 2026-09-02 (third pass) — coverage audit found a real gap, closed it;
+every section 7.3 candidate is BLOCKED, none relocated.**
+
+The second pass below (`f1afc8a`, `a99bc15`) added `caller_stack_is_external()`
+to `kiln_cfg_store.c`, `safety_cfg_store.c` and `profiles_http.c` and treated
+that as closing the write-side hazard. It did not: those are 3 of the
+firmware's ~17 modules that write NVS/flash. A full sweep (`grep` for
+`nvs_set_*`/`nvs_commit`/`esp_partition_write`/`esp_partition_erase` across
+`App/drivers/`, then tracing each hit back to its callers) found the guard
+missing from `adaptive_tune.c`, `boot_guard.c`, `crash_report.c`,
+`ota_record.c`, `profiles_builtin.c`, `time_sync.c`, `touch_cal_store.c`,
+`unit_pref.c`, `watchdog_cfg.c`, `wifi_prov.c`, `zones_config_store.c` — and,
+critically, **`run_state.c`, `relay_cycles.c` and
+`profile_executor_firing_stats.c`, all three reached directly from
+`profile_executor.c`'s own tick/halt path**: `run_state_note()` /
+`run_state_note_progress()` (transitions + the 300 s RUNNING refresh),
+`relay_cycles_maybe_persist()` (every tick) / `relay_cycles_flush()` (halt),
+and `firing_stats_persist()` (halt). This is exactly the task section 7.3
+names as the highest-care relocation candidate, and exactly the write this
+section's "profile_executor deserves the most care" line was written about —
+the belt-and-suspenders check the second pass believed was in place for it did
+not exist. Fixed this pass (guard added, matching the established pattern,
+each with a host test proving it refuses under a simulated PSRAM stack and a
+mutation-tested proof the check can fail): `run_state.c`, `relay_cycles.c`,
+`profile_executor_firing_stats.c`. The other 11 unguarded modules are NOT
+fixed — none of them is reachable from a section 7.3 candidate task by this
+pass's trace (see each candidate's note below), so they are out of scope for
+*this* plan, but they are the same latent hazard for whatever writes to them
+today and any future relocation must re-check this list, not assume it is
+still complete.
+
+Per-candidate verdict from this pass (full task-tree trace, no board access —
+hardware was mid-soak, see the top-level task record):
+
+- **`profile_executor`** — NOT flash-write clean before this pass (see above);
+  clean now that the three guards exist. Stack high-water mark IS measured
+  (1388 B free / 4096 B, 33.9%, section 3.1). Still **BLOCKED**: a measured
+  HWM plus a closed write-guard gap is necessary but not sufficient —
+  relocating the task this plan itself calls the most care-requiring one, on
+  the strength of a static trace with no hardware soak, is exactly the
+  "unverified relocation" this task was told to avoid. Leave for a future
+  pass with board access.
+- **`kiln_io_owner`** — flash-write clean: full trace of `owner_task()`'s
+  command switch (`kiln_io_owner.c:326-420`+) shows a bounded enum of
+  GPIO/I2C-expander operations only, no NVS/store call anywhere in the file,
+  no function-pointer dispatch to widen that later. **BLOCKED on
+  instrumentation**: not in the section 3.1 measured table, and
+  `STACK_MARGIN_MAX_TASKS` (`stack_margin.h:64`) is reported at 28/28 slots
+  used (not independently re-verified live this pass — no board access).
+- **`thermo_owner`** — flash-write clean: full trace of `owner_task()`'s
+  command switch (`thermo_owner.c:102-180`+) shows MAX31856 SPI register
+  operations only (config/thresholds/CJ-offset/read), no NVS/store call
+  anywhere in the file. **BLOCKED on instrumentation**, same reason as
+  `kiln_io_owner`.
+- **`screen_idle`** — flash-write clean: the entire task body
+  (`screen_idle.c:63-131`) calls only `NS2009_read()` and flips its own
+  in-RAM `screen_on`/`last_activity_tick` fields; it does NOT touch touch
+  calibration storage or issue the display clear itself (that's the LVGL
+  task, by design — see the file's own comment on why). This pass's trace
+  found the table's "display-settings persistence" caution for this task to
+  be stale/inaccurate. **BLOCKED on instrumentation**, same reason as above.
+- **`spi_owner`** (`esp_spi_owner.c`) — no NVS/flash call anywhere in the
+  file; it is a raw SPI-transfer relay, not a command dispatcher that could
+  reach arbitrary code. Its hazard is bus contention with the flash's own
+  SPI use during a cache-disabled window, a DIFFERENT risk than the "stack
+  unreachable while cache is down" class this section is about, and this
+  pass did not attempt to characterize it. **BLOCKED on instrumentation**
+  (not in the measured table) and on that separate, uncharacterized hazard.
+- **`i2c_owner`** — no NVS/flash call anywhere in the file (`i2c_owner.c`),
+  same shape as `spi_owner`. **BLOCKED on instrumentation.**
+- **`uart_owner_*` (×2 instances)** — unchanged: still blocked by section 6
+  on the unmeasured Pico OTA relay path. Not re-examined this pass.
+
+Net effect: **zero tasks relocated this pass.** The three NVS-write guards are
+the only change that touches board behavior at all, and they are pure
+refusals that only fire on a misuse that cannot occur on today's task
+assignment (every caller of `run_state_note()`/`relay_cycles_*`/
+`firing_stats_persist()` today runs on an internal-SRAM stack) — inert on the
+board exactly like the second pass's three guards were, no soak required for
+this part. `STACK_MARGIN_MAX_TASKS` was NOT raised this pass (no relocation
+depends on it happening now, and raising it without also registering the six
+still-uninstrumented tasks — `kiln_io_owner`, `thermo_owner`, `screen_idle`,
+`spi_owner`, `i2c_owner`, plus whichever of section 4.2's original list
+remain — would just be an unused knob). The first hardware step for the next
+pass: get real board access, confirm the 28/28 slot count, raise the cap and
+register those six tasks, capture their HWMs under the section 4.3 load, and
+only then reconsider `kiln_io_owner`/`thermo_owner`/`screen_idle` as
+relocation candidates (their flash-write cleanliness is already established
+by this pass's trace and does not need re-doing). `profile_executor` needs a
+soak on top of that regardless of HWM, per its own note above.
+
 **Update 2026-09-02 (second pass) — two safety nets landed, no soak needed.**
 1. `check_sdkconfig_defaults_applied.ps1` (picked up by
    `tools/run_all_checks.ps1`) now fails loudly whenever a deliberately
@@ -394,15 +485,26 @@ why the existing comment is wrong.
 
 ### 7.3 Candidates — evaluate individually
 
-| task | stack | must trace before moving |
-|---|---|---|
-| `kiln_io_owner` | 4096 B | relay-state persistence path |
-| `thermo_owner` | 4096 B | any calibration or NVS write |
-| `profile_executor` | 4096 B | run-state breadcrumb writes to `kiln_nvs` |
-| `spi_owner` | — | shares the SPI bus with flash |
-| `i2c_owner` | — | expected clean |
-| `uart_owner_*` ×2 instances | 3072 B each | expected clean — but see §6 first |
-| `screen_idle` | 3072 B | display-settings persistence |
+| task | stack | flash-write trace (2026-09-02 third pass) | HWM measured? | verdict |
+|---|---|---|---|---|
+| `kiln_io_owner` | 4096 B | CLEAN — bounded GPIO/I2C-expander command switch, no NVS call, no function-pointer dispatch | no (not in 3.1 table) | BLOCKED on instrumentation |
+| `thermo_owner` | 4096 B | CLEAN — bounded MAX31856 SPI register command switch, no NVS call | no | BLOCKED on instrumentation |
+| `profile_executor` | 4096 B | was NOT clean (`run_state.c`/`relay_cycles.c`/`profile_executor_firing_stats.c` had no PSRAM-stack guard); guards added this pass, now clean | yes (1388 B free, 33.9%) | BLOCKED — needs a real soak, not just a closed guard gap |
+| `spi_owner` | — | no NVS call, but shares the SPI bus with flash (a different, uncharacterized hazard) | no | BLOCKED on instrumentation + the bus-contention question |
+| `i2c_owner` | — | CLEAN — no NVS call anywhere in the file | no | BLOCKED on instrumentation |
+| `uart_owner_*` ×2 instances | 3072 B each | not re-examined this pass | yes | BLOCKED by §6 (unmeasured Pico OTA relay path) |
+| `screen_idle` | 3072 B | CLEAN — full task body only reads touch and flips in-RAM flags; does NOT touch calibration storage (this table's old "display-settings persistence" caution was stale) | no | BLOCKED on instrumentation |
+
+See this doc's 2026-09-02 (third pass) update note above for the full trace
+and the coverage-gap finding that motivated closing the three guards. **No
+task was relocated this pass** — every row above is blocked, either on
+instrumentation coverage (`STACK_MARGIN_MAX_TASKS` reported 28/28 used, not
+independently re-verified live) or, for `profile_executor`, on a real
+hardware soak. The next pass's first step is hardware access: verify the
+28/28 slot count, raise the cap, register the five uninstrumented-and-clean
+tasks (`kiln_io_owner`, `thermo_owner`, `screen_idle`, `spi_owner`,
+`i2c_owner`), and capture their HWMs under the section 4.3 load — their
+flash-write cleanliness from this pass's trace does not need re-doing.
 
 `uart_owner_*` appears in both §6 and here on purpose: §6 trims it, this phase
 would move it. Trim first, then move — and remember one call site serves both
@@ -414,7 +516,9 @@ task independently, is whether any code path reachable from that task's entry
 point writes flash, disables the cache, or runs in an ISR-adjacent context.
 
 `profile_executor` deserves the most care: it writes the run-state breadcrumb,
-and it is also the task whose failure during a firing matters most.
+and it is also the task whose failure during a firing matters most. The third
+pass found that care had not actually been paid — its write path had no
+PSRAM-stack guard at all until this pass added one.
 
 Move one task per commit, with a soak between. Do not batch.
 

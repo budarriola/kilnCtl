@@ -531,16 +531,36 @@ $cmd18 = "call `"$vcvars`" x64 >nul && cl /nologo /W3 /EHsc /std:c11 /I`"$stubDi
 
 Invoke-HostTestExe -Name "event_log" -ExePath $exe18 -BuildCmd $cmd18
 
+# ---- test_run_state.c / test_relay_cycles.c: their own NINETEENTH executable
+# DRAM_PSRAM_PLAN.md section 7 safety-net pass: both modules' persist_locked()
+# had no caller_stack_is_external() PSRAM-stack guard until this pass, despite
+# being reached directly from profile_executor's tick/halt path -- the same
+# task that plan section names as its highest-care relocation candidate. Own
+# executable, /std:c11, because run_state.c uses _Static_assert (line ~154),
+# which cl.exe only accepts under /std:c11 -- the main executable's $sources
+# are built without that flag (same reason test_zones_http.c/
+# test_profiles_http.c get their own /std:c11 executables). Both files
+# #include their driver .c directly (same convention as test_crash_report.c),
+# so neither run_state.c nor relay_cycles.c is added to $sources above.
+$exe19 = Join-Path $outDir "kilnctl_host_tests_run_state_relay_cycles.exe"
+$rsObjDir = Join-Path $outDir "rs"
+New-Item -ItemType Directory -Force -Path $rsObjDir | Out-Null
+$cmd19 = "call `"$vcvars`" x64 >nul && cl /nologo /W3 /EHsc /std:c11 /I`"$stubDir`" /I`"$commonInc`" " +
+        "/Fo:`"$rsObjDir\\`" /Fe:`"$exe19`" `"$(Join-Path $testDir 'test_run_state.c')`" " +
+        "`"$(Join-Path $testDir 'test_relay_cycles.c')`""
+
+Invoke-HostTestExe -Name "run_state_relay_cycles" -ExePath $exe19 -BuildCmd $cmd19
+
 # ---- summary ----------------------------------------------------------
 #
-# 17 executables are attempted above (main + zones_http + safety_cfg_http +
+# 18 executables are attempted above (main + zones_http + safety_cfg_http +
 # profile_executor_prestart + autotune_engine_prestart + profiles_http +
 # ota_http + uart_protocol_link_delegate + board_temps + kiln_io_owner +
 # safety_trip_words + safety_trip_decision + safety_link + dashboard_json +
-# telemetry_format + adaptive_tune + event_log). Report how many of those
-# were even built, separately from how many of the built ones passed, so a
-# partial run can never read as a full green suite.
-$totalExpected = 17
+# telemetry_format + adaptive_tune + event_log + run_state_relay_cycles).
+# Report how many of those were even built, separately from how many of the
+# built ones passed, so a partial run can never read as a full green suite.
+$totalExpected = 18
 Write-Host ""
 Write-Host "Built: $($script:builtExes.Count)/$totalExpected executables"
 if ($script:buildFailures.Count -gt 0) {

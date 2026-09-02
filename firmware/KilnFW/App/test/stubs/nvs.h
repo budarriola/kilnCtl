@@ -103,6 +103,20 @@ static inline esp_err_t nvs_open_from_partition(const char *partition, const cha
     return ESP_OK;
 }
 
+/* Added for run_state.c's/relay_cycles.c's host tests (test_run_state.c/
+ * test_relay_cycles.c): both files' migrate_from_default_partition() opens
+ * the DEFAULT NVS partition (plain nvs_open(), no partition argument) to
+ * look for a pre-partition-split blob, in addition to their real writes
+ * which go through nvs_open_from_partition(). Neither guard test under test
+ * (persist_locked()) calls migrate_from_default_partition() -- only
+ * run_state_init()/relay_cycles_init() do, and this stub only needs to
+ * satisfy the linker for that unreached call, not model a second partition.
+ * Forwards to the same single-slot store as nvs_open_from_partition() above. */
+static inline esp_err_t nvs_open(const char *ns, int mode, nvs_handle_t *out)
+{
+    return nvs_open_from_partition(NULL, ns, mode, out);
+}
+
 static inline void nvs_close(nvs_handle_t h) { (void)h; }
 
 static inline esp_err_t nvs_commit(nvs_handle_t h)
