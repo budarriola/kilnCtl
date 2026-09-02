@@ -1,7 +1,7 @@
 # kilnCtl Roadmap — both processors
 
 > **Status:** planning · **Last reviewed:** 2026-09-02 (reconciled against
-> `PID_EXPANSION_PLAN.md` and `DISPLAY_ST7796_PLAN.md`; M11 closed; M12a opened
+> the five KilnFW plan docs; M11 closed; M12a opened
 > and closed the same day; M12/M13 in progress; `DISPLAY_ST7796_PLAN.md`
 > Phases 1/2/3/5 landed, Phases 4/6 in progress)
 > **Start here:** the [What is actually left](#what-is-actually-left) section
@@ -97,6 +97,9 @@ What is still genuinely open is short:
 | [`firmware/KilnFW/docs/UI_PLAN.md`](firmware/KilnFW/docs/UI_PLAN.md) | LCD + web UI usability/cleanup plan — no-scroll LCD audit, phone/tablet web audit, prioritized fix queue |
 | [`firmware/KilnFW/docs/PID_EXPANSION_PLAN.md`](firmware/KilnFW/docs/PID_EXPANSION_PLAN.md) | Per-zone control-algorithm choice (Cohen-Coon rule, fuzzy-PID layer), cross-zone coupling measurement (RGA) and feedforward |
 | [`firmware/KilnFW/docs/DISPLAY_ST7796_PLAN.md`](firmware/KilnFW/docs/DISPLAY_ST7796_PLAN.md) | Second LCD panel (ST7796/MSP4031) support, runtime panel auto-detection, display SPI async/DMA |
+| [`firmware/KilnFW/docs/FLASH_BUDGET_PLAN.md`](firmware/KilnFW/docs/FLASH_BUDGET_PLAN.md) | The 16 MB flash: partition table, image size, what has been reclaimed |
+| [`firmware/KilnFW/docs/DRAM_PSRAM_PLAN.md`](firmware/KilnFW/docs/DRAM_PSRAM_PLAN.md) | Internal SRAM reclamation — allocator threshold, stack sizing, PSRAM relocation |
+| [`firmware/KilnFW/docs/WEB_UI_RESPONSIVE_PLAN.md`](firmware/KilnFW/docs/WEB_UI_RESPONSIVE_PLAN.md) | Browser UI across display sizes: token consolidation, shell layout, the responsive sweep |
 | [`firmware/KilnFW/docs/ARCHITECTURE.md`](firmware/KilnFW/docs/ARCHITECTURE.md) | Tasks, priorities, owner-task queues, single-writer ownership doctrine |
 | [`firmware/SaftyFW/TODO.md`](firmware/SaftyFW/TODO.md) | Safety firmware, phases 0–10 |
 | [`firmware/SaftyFW/docs/SAFETY_MODEL.md`](firmware/SaftyFW/docs/SAFETY_MODEL.md) | What trips, why, and the anti-nuisance doctrine |
@@ -237,9 +240,9 @@ now a short list, which is the point:
   `zones_config_json.c`, config store) and `zone_coupling_solve.c` /
   `profile_executor_feedforward.c` apply it as a full 3x3 directed matrix —
   the asymmetric-pair schema concern this entry raised is already resolved by
-  storing a full row per zone rather than one scalar coefficient. See
-  `PID_EXPANSION_PLAN.md` §3.2/§3.3 for the current coupling-matrix work
-  (re-solved matrix, adaptive coupled identification).
+  storing a full row per zone rather than one scalar coefficient. A re-solved
+  asymmetric matrix was adopted onto the board 2026-09-02 — see
+  `PID_EXPANSION_PLAN.md` §2/§3.2 for the coefficients and the caveats.
 - **New, scoped but not yet in a plan doc: per-zone enable/disable**, so the
   kiln can run with rings/heaters/thermocouples physically removed. Contiguous
   prefix from index 0 only (the highest-index zone never disables), toggleable
@@ -268,12 +271,14 @@ the fuzzy-PID layer (`pid_fuzzy.c`) is wired into `profile_executor.c` and
 selectable from `zones_page.html`. SNTP/NTP time sync landed. The first
 autotune runs ever to complete on real hardware fitted all three zones, and
 the first full 3x3 cross-zone coupling matrix and RGA were measured — see that
-plan's §4 Phase 0 for the numbers. Proposed gains reviewed, not accepted.
+plan's §2 for the current numbers (that matrix has since been superseded). Proposed gains reviewed, not accepted.
 
-**PID/adaptive tuning, as of 2026-09-01/02** (detail owned by
+**PID/adaptive tuning, as of 2026-09-02** (detail owned by
 `PID_EXPANSION_PLAN.md`, not duplicated here): coupled identification and the
-diagonal model refine are built, hardened over six review rounds, and cleared
-for hardware — never yet run on the kiln. The Ki diagnosis layer is built with
+diagonal model refine are built and hardened, but their hardware clearance was
+**withdrawn 2026-09-02** — the solve is sound, the harvest layer feeding it
+records non-steady duties as DC-gain observations (fired on 12 of 12 joint
+observations on the `coupid6` capture). Never yet run on the kiln. The Ki diagnosis layer is built with
 all code blockers closed — also never yet run on the kiln. Dynamics-from-ramps
 was tried and **shelved**: its two-point fit reduces analytically to
 `0.524·K·Δduty/ramp_rate`, an artifact of the commanded ramp rate with no plant
@@ -449,9 +454,9 @@ soldering session.
       by 17.7 %. Zone 1 leaks into zone 0 about 2.5× as hard as the reverse,
       which matters for any multi-zone schedule on this enclosure.
       **Superseded 2026-08-30 by a full 3x3 coupling matrix and RGA over all
-      three zones** (all three zones now autotuned) — current numbers live in
-      `firmware/KilnFW/docs/PID_EXPANSION_PLAN.md` §4 Phase 0, not restated
-      here.
+      three zones, and again 2026-09-02 by a re-solved matrix** — current
+      numbers live in `firmware/KilnFW/docs/PID_EXPANSION_PLAN.md` §2, not
+      restated here.
       **Full multi-segment profile.** 42 °C dwell 6 → 52 °C dwell 6 → down-ramp
       to 46 °C, run end to end through `POST /api/profile_exec/start`: all
       three segments entered in order, all dwelled, peak 56.30 °C, K4 closed on
