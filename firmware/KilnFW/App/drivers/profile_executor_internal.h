@@ -106,13 +106,15 @@ extern const char *PE_TAG;
  *   2 (elapsed_periods) + 2 (desired_dc) + 2*3 (actual_dc) + 1*3 (duty_pct)
  *   + 1*3 (guard) = 16 bytes at MAX31856_CHANNEL_COUNT==3, vs. 8 before --
  * NOT a naive 3x (24 bytes) because elapsed/desired are shared, not repeated
- * per zone. At HISTORY_MAX_SAMPLES==2880 that's 46080 bytes (45KB), which
- * would have been a real problem sitting in .bss next to a board that has
- * been found running with single-digit KB of internal DRAM free (see
- * s_exec_state_t.history's own comment below) -- so this buffer is now
- * heap_caps_malloc'd from PSRAM instead of declared inline, which nets the
- * board a WIN on internal DRAM (the old 23KB inline array is gone from
- * .bss) even though this struct itself grew. */
+ * per zone. At HISTORY_MAX_SAMPLES==640 (profile_executor.h's own 2026-09-02
+ * "display-only, right-sized to the two real consumers" comment) that's
+ * 10240 bytes (10KB) -- down from 46080 bytes (45KB) at the old 2880-sample/
+ * 24h sizing, which itself would have been a real problem sitting in .bss
+ * next to a board that has been found running with single-digit KB of
+ * internal DRAM free (see s_exec_state_t.history's own comment below) -- so
+ * this buffer is heap_caps_malloc'd from PSRAM instead of declared inline
+ * either way, which nets the board a WIN on internal DRAM (the old 23KB
+ * inline array is gone from .bss) even though this struct itself grew. */
 #define HISTORY_ZONE_COUNT MAX31856_CHANNEL_COUNT
 
 typedef struct {

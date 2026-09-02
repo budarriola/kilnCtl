@@ -1700,7 +1700,7 @@ static esp_err_t firing_history_get_handler(httpd_req_t *req)
  *
  * Streamed in small batches via httpd_resp_send_chunk() rather than built
  * into one big buffer first: an earlier version allocated a full
- * HISTORY_MAX_SAMPLES-sized entries array (~58KB) *and* a full CSV text
+ * HISTORY_MAX_SAMPLES-sized entries array (now ~13KB at the 2026-09-02 640-sample display-only sizing, previously ~58KB at 2880) *and* a full CSV text
  * buffer (~115KB) at once, and hit ESP_ERR_NO_MEM in practice against the
  * heap this board actually has free at runtime (Wi-Fi/lwIP/httpd already
  * hold a good chunk of it) -- the earlier size-report check only looked at

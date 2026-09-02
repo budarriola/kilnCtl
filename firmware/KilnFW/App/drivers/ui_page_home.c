@@ -170,7 +170,7 @@
 //     changes every second even between 30s samples; the per-tick cost is a
 //     handful of single-entry profile_executor_get_history() reads (at most
 //     UI_PAGE_HOME_CHART_POINTS of them), not a bulk copy of the ring buffer
-//     (which can hold up to HISTORY_MAX_SAMPLES=2880 entries -- far too big
+//     (which can hold up to HISTORY_MAX_SAMPLES=640 entries (2026-09-02, sized to what the web/LCD graphs actually display) -- still too big
 //     to stage as a local array on this board's DRAM budget).
 //   - Progress bar: now shows the WHOLE-FIRING elapsed/remaining
 //     (st.total_elapsed_s / profile_feasibility_plan_curve()'s total), not

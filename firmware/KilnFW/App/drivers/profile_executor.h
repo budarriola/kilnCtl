@@ -617,7 +617,40 @@ typedef struct {
  * duplicated per zone. Resets to empty at the start of every
  * profile_executor_run(). */
 #define HISTORY_SAMPLE_PERIOD_S 30u
-#define HISTORY_MAX_SAMPLES 2880u /* 24h at 30s/sample, per section 0's settled sizing */
+
+/* 2026-09-02, owner follow-on to the flash-logging change above (this is
+ * RAM, not flash, but the same "only keep what's actually consumed" logic
+ * applies): "you should maintain some points only for display on the
+ * screen in ram though, but only what is nessary to display the plots."
+ * SUPERSEDES the "24h at 30s/sample" sizing this constant used to carry --
+ * that was a memory-pressure-driven design point from before the ring
+ * moved to PSRAM (this header's own comment above, "memory is no longer
+ * the constraint"); it was never actually driven by what either display
+ * consumer can render.
+ *
+ * Surveyed both real consumers (2026-09-02):
+ *   - Web graph (main_page.html's drawHistoryChart(), fed by dashboard_
+ *     http.c's GET /api/history.csv, which streams the WHOLE ring with no
+ *     server-side limit or decimation of its own) -- the chart canvas has
+ *     no hard pixel cap in this codebase (CSS-responsive, setupChart()'s
+ *     own fallback is 600 CSS px when clientWidth is unavailable), so 600
+ *     points is the largest count this code already treats as "a full-
+ *     width chart" anywhere, and is generously above what any point-per-
+ *     pixel legibility argument needs at typical browser widths.
+ *   - LCD graph (ui_page_home.c) -- UI_PAGE_HOME_CHART_POINTS == 30,
+ *     reading single samples by nearest-index lookup, no batch/decimation
+ *     buffer of its own.
+ *   - CSV export is the SAME /api/history.csv endpoint the web graph
+ *     parses -- not a separate, larger consumer.
+ *
+ * HISTORY_MAX_SAMPLES is therefore sized to the larger of the two (600),
+ * rounded up for a little slack: 640. At HISTORY_SAMPLE_PERIOD_S == 30s
+ * that is ~5h20m of continuous history -- a real reduction in HOW FAR BACK
+ * the ring remembers (was 24h), which is the actual, intended tradeoff:
+ * the ring is display history, not a durable record (that role now
+ * belongs to event_log.h's flash events for state transitions, and to the
+ * debug-UART temperature feed for anything finer-grained than that). */
+#define HISTORY_MAX_SAMPLES 640u
 
 /* The shape callers see. Storage is NOT this struct -- see
  * profile_executor.c's packed history_slot_t, which holds the same sample
