@@ -153,10 +153,31 @@ HTTP endpoint and zones-page UI.
       (`6f6c8fd`), then hardened over four review rounds (`825bd82`, `e129f7c`,
       `12d709d`, `89ff20b`). Joint-observation ring committed once per dwell,
       normal-equations solve reusing the existing pivot floor as the
-      conditioning refusal, off-diagonal only. **Cleared for hardware.**
-      Not yet validated against the real dwell observations in §3.2 — the test
-      matrix is synthetic, so the solve is proven correct but not yet proven
-      *better* than the matrix it would replace.
+      conditioning refusal, off-diagonal only, plus a physical-plausibility gate
+      (rejects negative coefficients and non-dominant diagonals — the condition
+      number alone passed matrices with three negative entries).
+      **Clearance WITHDRAWN 2026-09-02** — the solve is sound and
+      mutation-proven, but what feeds it is not. Also still unvalidated against
+      the real §3.2 observations: the test matrix is synthetic, so the solve is
+      proven correct, never proven *better* than the matrix it would replace.
+
+      **The harvest layer records non-steady duties as DC-gain observations.**
+      Measured on the real `coupid6` capture (six 10-minute dwells, 30–70 °C,
+      three zones): the firmware settle criterion — temperature slope
+      ≤ 0.003 °C/s over ≥ 180 s — **fired on 12 of 12 joint observations**, and
+      on several, duty was still ranging by up to **23 % of its own value**
+      afterwards. Zone 0 inside one 46 °C dwell went 0.023 → 0.19 → 0.144: the
+      plant is **under-damped** at these gains, so the temperature slope passes
+      through zero at the top of an overshoot while duty is still swinging. A
+      momentarily flat temperature is not steady state. Since a dwell IS the
+      DC-gain measurement (`K = (T_dwell − ambient)/u_steady`), a non-steady
+      `u_steady` biases K directly and everything fitted from it — including the
+      diagonal refine, whose clearance is withdrawn on the same evidence.
+      Found by `coupled_ident.py`'s `settle_criterion_audit()`, which mirrors the
+      firmware criterion then checks whether duty kept moving after it fired.
+      **This also means coupid6's 10-minute dwells cannot measure DC gain at
+      all** (600 s is ~2.3 tau); the single-zone excitation profiles use 35-minute
+      dwells and are the primary dataset.
 - [x] **Integral diagnosis from dwells** — built and hardened alongside the
       above. Classifies steady offset, drift and limit cycle; a detected limit
       cycle yields Ku/Tu without a relay test. Per-run move capped at
