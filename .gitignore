@@ -87,3 +87,6 @@ firmware/KilnFW/Datasheets/4.0inch_SPI_Module_ST7796_MSP4030_MSP4031_V1.0/
 # Host-test scratch dirs: log_store tests create these relative to CWD,
 # so they appear wherever the suite was run from.
 log_store_test_*/
+
+# Host-test scratch build dir
+build_agent/
