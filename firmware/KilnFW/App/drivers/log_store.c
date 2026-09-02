@@ -335,10 +335,24 @@ bool log_store_reader_next(log_store_reader_t *rd, void *out, size_t cap, size_t
             continue;
         }
 
-        size_t n = rec_len < cap ? rec_len : cap;
-        memcpy(out, scratch, n);
+        /* Bound the copy by what was actually READ INTO `scratch`, not by
+         * the on-disk length prefix (REVIEW 2026-09-02). rec_len comes off
+         * flash and can be anything up to 65535 after a single corrupted
+         * byte; `scratch` is only LOG_STORE_MAX_RECORD_LEN, and the excess
+         * is fseek'd over above rather than buffered. Using rec_len here
+         * meant that with a caller `cap` larger than LOG_STORE_MAX_RECORD_
+         * LEN the memcpy read min(rec_len, cap) bytes out of a
+         * LOG_STORE_MAX_RECORD_LEN buffer -- an out-of-bounds stack read of
+         * up to ~64 KiB, triggerable by one bad byte in a log segment.
+         * Today's only caller (log_http.c) passes cap ==
+         * LOG_STORE_MAX_RECORD_LEN, which masked it; that is a property of
+         * the caller, not of this function's contract. *out_len is clamped
+         * the same way so a caller can never be told about bytes that were
+         * never delivered. */
+        size_t usable = read_now < cap ? read_now : cap;
+        memcpy(out, scratch, usable);
         if (out_len) {
-            *out_len = rec_len;
+            *out_len = usable;
         }
         return true;
     }

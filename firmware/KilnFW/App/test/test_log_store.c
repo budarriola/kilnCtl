@@ -278,9 +278,72 @@ static void test_round_trip_asymmetric(void)
     rmdir_recursive_best_effort(base);
 }
 
+// REVIEW 2026-09-02. The length prefix comes off flash and can be anything
+// after a single corrupted byte, but the reader's scratch buffer is only
+// LOG_STORE_MAX_RECORD_LEN and the excess is fseek'd over, never buffered.
+// log_store_reader_next() used to bound its memcpy (and *out_len) by that
+// on-disk length rather than by how many bytes it actually read, so a caller
+// passing a `cap` larger than LOG_STORE_MAX_RECORD_LEN got a copy of
+// min(rec_len, cap) bytes out of a LOG_STORE_MAX_RECORD_LEN buffer -- an
+// out-of-bounds stack read of up to ~64 KiB from one bad byte on flash.
+// log_http.c happens to pass cap == LOG_STORE_MAX_RECORD_LEN, which masked
+// it; that is a property of that caller, not of this function's contract.
+static void test_corrupt_oversized_length_prefix_never_reports_more_than_it_read(void)
+{
+    TEST_SECTION("log_store: a corrupt oversized length prefix must never make the reader copy or report "
+                 "more bytes than it actually read into its own buffer");
+
+    const char *base = "log_store_test_corrupt";
+    log_store_kind_t kind = LOG_STORE_KIND_FIRING;
+    reset_scratch_dir(base, kind, 2);
+    TEST_CHECK(log_store_init(base) == ESP_OK, "init succeeds");
+
+    // Twelve records (12 * (2 + 8) = 120 bytes) so that after the patched
+    // prefix there are still MORE than LOG_STORE_MAX_RECORD_LEN bytes left
+    // in the file. That matters: with too few bytes behind it the reader's
+    // short-read branch abandons the segment before it ever reaches the
+    // copy, and the test would pass without exercising anything.
+    static const uint8_t rec[] = { 0xE7, 0x01, 0x00, 0x00, 0x0C, 0x00, 0x00, 0x00 };
+    for (int i = 0; i < 12; i++) {
+        TEST_CHECK(log_store_append(kind, rec, sizeof(rec)) == ESP_OK, "append a good record");
+    }
+
+    // Corrupt ONLY the on-disk length prefix of that record: claim 5000
+    // bytes where 8 were written. Everything else on disk is untouched.
+    char path[600];
+    seg_path(base, kind, 0, path, sizeof(path));
+    FILE *f = fopen(path, "r+b");
+    TEST_CHECK(f != NULL, "the segment file the append created can be reopened for patching");
+    if (f) {
+        uint8_t bad_prefix[2] = { (uint8_t)(5000u & 0xFFu), (uint8_t)((5000u >> 8) & 0xFFu) };
+        TEST_CHECK(fwrite(bad_prefix, 1, sizeof(bad_prefix), f) == sizeof(bad_prefix), "prefix patched");
+        fclose(f);
+    }
+
+    log_store_reader_t *rd = log_store_reader_open(kind);
+    TEST_CHECK(rd != NULL, "reader opens on the corrupted segment");
+
+    // A caller buffer far LARGER than LOG_STORE_MAX_RECORD_LEN -- the shape
+    // that turns the unbounded copy into a real overread. Nothing may be
+    // reported beyond what the reader's own scratch buffer can hold.
+    static uint8_t big_out[8192];
+    memset(big_out, 0xAB, sizeof(big_out));
+    size_t out_len = (size_t)-1;
+    bool got = log_store_reader_next(rd, big_out, sizeof(big_out), &out_len);
+    TEST_CHECK(got, "the reader still returns a record for the corrupted prefix (there are plenty of bytes "
+                    "behind it) -- this is the path where the copy actually happens");
+    TEST_CHECK(out_len <= LOG_STORE_MAX_RECORD_LEN,
+               "out_len must never exceed LOG_STORE_MAX_RECORD_LEN -- the reader cannot have read more than "
+               "its own scratch buffer holds, whatever the on-disk prefix claims");
+
+    log_store_reader_close(rd);
+    rmdir_recursive_best_effort(base);
+}
+
 void run_test_log_store(void)
 {
     test_rotation_bounds_size();
     test_full_filesystem_degrades_safely();
     test_round_trip_asymmetric();
+    test_corrupt_oversized_length_prefix_never_reports_more_than_it_read();
 }
