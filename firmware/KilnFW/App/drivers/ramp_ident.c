@@ -1,6 +1,10 @@
 // ramp_ident.c -- see ramp_ident.h for the design rationale (why most ramps
 // carry no information, the excitation gate, the fit method, and the
 // coupling caveat). Pure math only.
+//
+// PARKED EXPERIMENT -- see the banner at the top of ramp_ident.h. The fitted
+// tau/dead-time this file produces on real closed-loop data carry no plant
+// information; do not wire this into any control path.
 
 #include "ramp_ident.h"
 
@@ -263,13 +267,14 @@ ramp_ident_result_t ramp_ident_fit(const ramp_ident_sample_t *samples, uint32_t 
     uint32_t resp_lo = step_index;
     uint32_t resp_hi = hold_hi; // same bounded window the hold check just validated
     uint32_t resp_n = resp_hi - resp_lo;
-    // Bounded stack buffer: callers hand in one ramp segment, not an
-    // unbounded stream -- 512 samples covers a multi-minute segment at
-    // sub-second ticks with headroom.
-    if (resp_n > 512u) resp_n = 512u;
+    // Bounded stack buffer: resp_n is at most RAMP_IDENT_MAX_RESPONSE_SAMPLES
+    // (hold_hi is capped at step_index + RAMP_IDENT_MAX_RESPONSE_SAMPLES
+    // above), never an unbounded stream, so size this to the real bound
+    // rather than an arbitrary oversized constant.
+    if (resp_n > RAMP_IDENT_MAX_RESPONSE_SAMPLES) resp_n = RAMP_IDENT_MAX_RESPONSE_SAMPLES;
     resp_hi = resp_lo + resp_n;
 
-    float response[512];
+    float response[RAMP_IDENT_MAX_RESPONSE_SAMPLES];
     float transient_peak = 0.0f;
     uint32_t peak_idx = resp_lo;
     for (uint32_t j = resp_lo; j < resp_hi; j++) {

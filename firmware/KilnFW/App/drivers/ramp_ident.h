@@ -2,12 +2,32 @@
 // zone's FOPDT tau/dead-time from an ORDINARY firing ramp segment, instead
 // of only from a dedicated step/autotune run.
 //
+// ============================================================================
+// PARKED EXPERIMENT -- DO NOT WIRE INTO ANY CONTROL PATH IN ITS CURRENT FORM.
+//
+// An opus review (commit 13dcf49, and the review that followed it) established
+// that the two-point reaction-curve fit this file implements measures NO
+// plant information when run on this kiln's real closed-loop data -- see
+// "-- What the fit actually measures on real data --" below for the full
+// analysis. This is not a caveat on an otherwise-useful result; the fitted
+// tau/L are an artifact of the model gain, the apparent duty step, and the
+// profile's ramp rate, and would come out identical on a plant with any tau
+// whatsoever. Do not call ramp_ident_fit() from adaptive_tune.c or any other
+// control-path code, do not loosen its thresholds to accept more segments,
+// and do not retune it to make the two accepted fixture fits agree with the
+// bench-identified dynamics -- that would be curve-fitting the record, not
+// fixing the estimator. See "-- What would actually work --" below for the
+// direction a real fix would need to take.
+// ============================================================================
+//
 // Pure math, no ESP-IDF/FreeRTOS dependency -- same host-testability
 // contract as pid_autotune.c/max31856_codec.c/panel_codec.c
 // (test_ramp_ident.c exercises this file directly). NOT wired into
-// adaptive_tune.c yet: adaptive_tune.c/.h are under review by another agent
-// as this is written, so this is a self-contained module with a documented
-// integration point below, for a later commit to call.
+// adaptive_tune.c or anywhere else: as of this writing the only references
+// to this module anywhere in the tree are firmware/KilnFW/App/drivers/
+// CMakeLists.txt:249 (build it), test_main.c:49/101 (run its host tests),
+// and App/test/build_host_tests.ps1:74/96 (host-test build script). Keep it
+// that way until a rewritten estimator (see below) replaces the fit method.
 //
 // -- Why most ramps carry no usable information -----------------------------
 //
@@ -83,88 +103,132 @@
 // same diagonal K_dc adaptive_tune.c already refines) -- this fit never
 // tries to re-derive K, only tau/L, consistent with the plan item's scope.
 //
-// -- Coupling: what the fitted tau/L actually mean --------------------------
+// -- What the fit actually measures on real data -----------------------------
 //
-// This is a SINGLE-ZONE fit. It cannot separate "this zone's own element
-// responding to its own duty step" from "a neighbour zone's duty also
-// moved around the same time and its heat arrived here." Nothing in this
-// file inspects other zones' duty at all. Concretely:
+// Ported to Python and reproduced exactly against the two fixture segments
+// this module accepts (final_z1_seg0: tau 35.56s, L 16.88s; final_z2_seg0:
+// tau 23.48s, L 3.31s), the fitted tau/L reduce ANALYTICALLY to a function
+// of three quantities that have nothing to do with plant dynamics: the
+// model gain K, the apparent duty step delta_d, and the profile's ramp rate
+// R. For a linear rise at rate R, the two-point method's crossing times are
+// t28 = 0.283*K*delta_d/R and t63 = 0.632*K*delta_d/R, so the fitted
+// tau = 1.5*(t63-t28) = 0.524*K*delta_d/R -- a closed-form expression that
+// contains no tau or L term from the actual plant at all. Predicted vs.
+// fitted: z1 43s predicted vs. 35.6s fitted; z2 22s predicted vs. 23.5s
+// fitted -- the fitted numbers track the closed-form artifact, not the
+// bench-identified dynamics (tau 264-271s, dead time 34-53s,
+// PID_EXPANSION_PLAN.md section 2). This is not "measuring the wrong loop"
+// (closed-loop apparent dynamics instead of open-loop plant dynamics, as an
+// earlier version of this comment claimed) -- it measures NEITHER loop. The
+// fitted tau would come out identical on a plant with any tau whatsoever,
+// because the quantity being fitted is arithmetic on the duty/ramp trace,
+// not a response to it.
 //
-//   - If the OTHER zones' duty is steady across the step-and-response
-//     window (the common case for a single-zone excitation inside an
-//     otherwise-smooth multi-zone ramp), the detrending step above
-//     absorbs their steady contribution into the removed baseline slope,
-//     and the fitted tau/L are a reasonable estimate of THIS zone's own
-//     diagonal dynamics -- the same quantity pid_autotune_fit_fopdt()
-//     identifies from a dedicated step test, just noisier.
-//   - If a NEIGHBOUR's duty also changes inside the response window, this
-//     fit has no way to know that, and the fitted tau/L become a blend of
-//     this zone's own (fast, ~264-271 s tau per PID_EXPANSION_PLAN.md
-//     section 2) dynamics and the much slower cross-zone path (620-730 s
-//     tau, 135-158 s dead time in the same section). A caller integrating
-//     this later MUST NOT treat every accepted fit as pure diagonal
-//     dynamics on that basis alone -- see the integration note below for
-//     the mitigation left for that later pass. Silently attributing
-//     neighbour-driven rise to this zone's own dynamics is exactly the
-//     error that biased the existing diagonal K_dc high (section 2); this
-//     file does not repeat it for tau/L, it just says plainly where the
-//     same risk still lives.
+// Two joint causes, both confirmed against the fixture data, not merely
+// theorized:
 //
-// -- Validated against real captures -----------------------------------
+//   1. RAMP_IDENT_MAX_RESPONSE_SAMPLES (ramp_ident.c) is 15, which is 153s
+//      at this fixture data's ~10.2s/sample tick -- against a true
+//      t63 = L+tau ~= 300-320s at the bench-identified dynamics. The bounded
+//      response window closes roughly HALF way to the true 63.2% crossing,
+//      so the true response is never observed at all; nothing in the module
+//      relates the window length to the prior tau estimate it could be
+//      checked against.
+//   2. The detrend baseline (fit_trend() over the samples strictly before
+//      the step) sits INSIDE the plant's own dead time in both accepted
+//      segments -- the pre-step window is dead flat (fitted baseline slope
+//      6.5e-05 C/s, i.e. nothing), so detrending removes approximately
+//      nothing. What is left as "the response" is just the ordinary ramp
+//      climb the plant was already on, not a step response.
 //
-// Run over every dwelling==false stretch of tools/PcTools/tests/fixtures/
-// plant_sim/*.jsonl (27 zone-segments, all five captures), with each
-// zone's PID_EXPANSION_PLAN.md section 2 identified K_dc as the model
-// gain: 2 of 27 segments (final_z1_seg0, final_z2_seg0) were ACCEPTED;
-// the other 25 were refused, spread across every gate in the list above
-// (insufficient duty span, no step event, step not held, insufficient
-// transient) rather than one gate doing all the work -- so the gate is a
-// real discriminator, not a rubber stamp or a dead letter. The dominant
-// refusal reason by far, though, is RAMP_IDENT_STEP_NOT_HELD: in this
-// data set, duty is very rarely quiet for even the ~15-sample bounded
-// response window (RAMP_IDENT_MAX_RESPONSE_SAMPLES in the .c file) --
-// this small kiln's feedforward is almost always actively adjusting duty
-// to track the ramp, which is CORRECT controller behaviour, not a data
-// artifact, and it is exactly the well-tracked-ramp case this whole item
-// exists to refuse rather than fit through. A firing with more genuinely
-// held plateaus (a coarser feedforward update rate, or a longer ramp with
-// real settling stretches) would very likely accept more; this data set
-// mostly does not offer them, and that is reported honestly here rather
-// than loosened away.
+// A third, independent problem found in the same two segments: both
+// accepted fits had zone 0's duty moving (0.044 -> 0.205) concurrently with
+// the "step" under test, directly violating the single-zone/neighbour-
+// quiescence assumption this fit relies on -- 2 for 2, not a rare edge case.
+// And step_index landed on RAMP_IDENT_PRE_STEP_MIN_SAMPLES, the MINIMUM
+// allowed index, in both segments, because the candidate search at
+// ramp_ident.c:199 (`fabsf(delta) > fabsf(best_delta)`) maximizes
+// |duty delta| ALONE with no preference for a longer pre-step baseline --
+// it systematically prefers the earliest, least-baselined candidate. The
+// "step" accepted in both cases is a slice of a smooth run-start duty climb
+// (0.135, 0.163, 0.202, 0.234, 0.267 duty across consecutive samples), not
+// a step at all.
 //
-// The two ACCEPTED fits (tau ~= 22-37 s, dead time ~= 4-16 s) disagree
-// substantially with the bench-identified diagonal figures in
-// PID_EXPANSION_PLAN.md section 2 (tau 264-271 s, dead time 34-53 s) --
-// reported honestly rather than retuned to agree, per this item's own
-// validation requirement. The most likely reason, also found during this
-// validation and not merely assumed: even a duty trace that passes the
-// STEP_NOT_HELD gate here only "roughly plateaus" over a bounded ~15-
-// sample window, a far looser bar than autotune's own dedicated, fully-
-// settled, MUCH LONGER step trace -- so what these two fits actually
-// measure is closer to this plant's fast CLOSED-LOOP apparent response
-// (the control loop's own correction shortening the observed rise) than
-// its open-loop FOPDT dynamics. Combined with the single-zone/coupling
-// caveat above, an accepted ramp-segment fit should be treated as a
-// noisy, lower-confidence, possibly closed-loop-biased sibling of a
-// dedicated autotune fit, not a substitute for one -- exactly the
-// explicit caveat PID_EXPANSION_PLAN.md 3.3 asks this item to state
-// rather than silently average away.
+// Measured consequence of integrating this as-is: dropping tau from the
+// bench value (264s) to a fitted value like 30s would cut the climb
+// feedforward term roughly 9x, since profile_executor_feedforward.c:27
+// computes u_ff = (T_sp-T_amb)/K_dc + (dT_sp/dt)*tau/K_dc -- tau enters the
+// climb term linearly. And dropping dead time from 34-53s to 3-17s would
+// shrink the terminal ease-off window (sized at 2x dead time) by roughly
+// 5x. Both are the kind of "confidently wrong" adjustment a refusal-based
+// gate is supposed to prevent; the gate did not prevent it here because the
+// two segments it let through are exactly the pathological case above.
 //
-// -- Integration point (NOT wired up by this commit) -------------------------
+// -- Real-data refusal distribution (27 dwelling==false segments, all five
+// tools/PcTools/tests/fixtures/plant_sim/*.jsonl captures, each zone's
+// PID_EXPANSION_PLAN.md section 2 K_dc as the model gain) ------------------
+//
+//   RAMP_IDENT_STEP_NOT_HELD          21
+//   RAMP_IDENT_TOO_FEW_SAMPLES         3
+//   RAMP_IDENT_NO_STEP_EVENT           3
+//   RAMP_IDENT_INSUFFICIENT_DUTY_EXCITATION  1
+//   RAMP_IDENT_FIT_FAILED              1
+//   RAMP_IDENT_TOO_SHORT_DURATION      0
+//   RAMP_IDENT_INVALID_GAIN            0
+//   RAMP_IDENT_INSUFFICIENT_TRANSIENT  0
+//   (accepted: 2 -- final_z1_seg0, final_z2_seg0, both artifacts as above)
+//
+// An earlier version of this comment claimed refusals were "spread across
+// every gate", implying INSUFFICIENT_TRANSIENT -- the discriminator the
+// design rationale above rests its whole argument on -- was doing real
+// work. It fires on ZERO of 27 real segments. STEP_NOT_HELD alone accounts
+// for 21 of 25 refusals: this small kiln's feedforward is almost always
+// actively adjusting duty to track the ramp (correct controller behaviour),
+// so a genuinely held post-step plateau essentially never occurs in this
+// data set, and the module's actual behaviour on real traces is "refuse via
+// STEP_NOT_HELD, or fall through to the analytical artifact above" -- not
+// the graduated, multi-gate discrimination the original text described.
+//
+// -- What would actually work -------------------------------------------
+//
+// The two-point reaction-curve method (this file, and
+// pid_autotune_fit_fopdt()) needs a step that is applied and then HELD
+// for at least ~2*(L+tau) ~= 600s at the bench-identified dynamics, so the
+// 63.2% crossing is actually observed. This kiln's closed-loop feedforward
+// never holds duty that long -- that is precisely what
+// RAMP_IDENT_STEP_NOT_HELD is reporting 21 times out of 28. Nor does duty
+// ever saturate here (observed range 0.04-0.45 across all 27 segments), so
+// "only accept segments where duty pins against 0 or 1" is not an escape
+// hatch either -- there is no data on this plant where it would fire.
+//
+// A method that does not need a held step: a whole-segment output-error /
+// ARX estimator. Simulate a FOPDT model driven by the ACTUAL recorded duty
+// trace over the WHOLE segment (not just a windowed step-and-response
+// slice), and fit tau/L by least squares against the residual between the
+// simulated and actual temperature trace. This needs no step and no hold at
+// all -- it uses whatever duty motion the segment happens to contain -- so
+// it can use all 27 fixture segments instead of 2, and it extends naturally
+// to the coupled case (drive the simulation with every zone's duty, not
+// just this one, and fit the cross terms too). This is a different
+// estimator, not a parameter tweak to the one in this file, and is left for
+// a future item -- do not attempt to retrofit it onto the two-point method
+// above.
+//
+// -- Integration point (NOT wired up, and must stay that way -- see the
+// PARKED EXPERIMENT banner at the top of this file) --------------------------
 //
 // adaptive_tune.c already harvests per-zone traces during a run
 // (adaptive_tune_zone_tick()) and applies refinements only at a safe run
-// boundary (adaptive_tune_run_end()). The natural hook for this module is
-// a ramp-segment ring analogous to its dwell ring: collect (t, target_c,
-// actual_c, duty) while profile_executor.c reports the zone is ramping
-// (mirroring the `dwelling` flag adaptive_tune_zone_tick() already takes),
-// hand the finished segment to ramp_ident_fit() at ramp-end or run-end, and
-// -- to close the neighbour-contribution gap noted above before applying
-// anything -- also require the OTHER zones' duty to have stayed within a
-// small band across the step-and-response window before accepting the
-// result as this zone's own diagonal tau/L. That neighbour-quiescence
-// check needs multi-zone data this file's single-zone interface does not
-// carry, so it is left for whoever wires this in, not implemented here.
+// boundary (adaptive_tune_run_end()). If a rewritten (whole-segment ARX,
+// per above) estimator someday replaces the fit method in this file, the
+// natural hook is a ramp-segment ring analogous to adaptive_tune's dwell
+// ring: collect (t, target_c, actual_c, duty) while profile_executor.c
+// reports the zone is ramping, hand the finished segment to the estimator
+// at ramp-end or run-end, and require the OTHER zones' duty trace (or, for
+// the ARX approach, feed it directly) so cross-coupling is modeled rather
+// than silently folded into a single zone's diagonal estimate. None of that
+// is implemented here, and the CURRENT (two-point) fit method in this file
+// must not be wired to it regardless -- see the top-of-file banner.
 #pragma once
 
 #include <stdbool.h>

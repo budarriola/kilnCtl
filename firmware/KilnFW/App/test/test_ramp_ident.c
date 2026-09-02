@@ -146,6 +146,106 @@ void run_test_ramp_ident(void)
         TEST_CHECK(!fit.valid, "near-flat duty: fit.valid false");
     }
 
+    // --- Refusal: step found, but duty keeps moving through the response --
+    // window instead of holding -- RAMP_IDENT_STEP_NOT_HELD. This gate does
+    // 21 of 28 real refusals on the fixture captures (ramp_ident.h) but had
+    // no test at all: deleting the check left every other test green.
+    {
+        ramp_ident_sample_t seg[TRACE_MAX];
+        const uint32_t STEP_IDX = 10;
+        for (uint32_t i = 0; i < N; i++) {
+            float t = (float)i * DT;
+            float duty;
+            if (i < STEP_IDX) {
+                duty = 0.30f; // flat pre-step baseline
+            } else {
+                // Jumps 0.15 at the step, then keeps climbing 0.01/sample --
+                // never settles, so the response window's duty range blows
+                // well past RAMP_IDENT_STEP_HOLD_TOL (0.06).
+                duty = 0.45f + 0.01f * (float)(i - STEP_IDX);
+            }
+            seg[i].t_s = t;
+            seg[i].actual_c = quantize_c(40.0f + 0.01f * t);
+            seg[i].target_c = seg[i].actual_c + 5.0f;
+            seg[i].duty = duty;
+        }
+        ramp_ident_fit_t fit;
+        ramp_ident_result_t r = ramp_ident_fit(seg, N, K, &fit);
+        TEST_CHECK(r == RAMP_IDENT_STEP_NOT_HELD, "step found but duty keeps climbing afterward: STEP_NOT_HELD");
+        TEST_CHECK(!fit.valid, "step not held: fit.valid false");
+        TEST_CHECK(fit.refusal_reason[0] != '\0', "step not held: refusal reason populated");
+    }
+
+    // --- Refusal: step found, duty holds, transient clears the excitation --
+    // floor, but the response never reaches BOTH the 28.3%/63.2% crossings
+    // of the expected rise -- RAMP_IDENT_FIT_FAILED. Also untested before
+    // this commit. Built with an enormous true tau (5000s) so the response
+    // barely rises (~0.35C, above the 0.3C transient floor) within the
+    // bounded response window but stays far short of either crossing target
+    // (1.49C / 3.32C at this K/delta).
+    {
+        ramp_ident_sample_t seg[TRACE_MAX];
+        build_segment(seg, N, DT, 40.0f, 0.01f, 10, 0.40f, 0.15f, /*inject_response*/ true, K,
+                      /*tau_s*/ 5000.0f, /*l_s*/ 0.0f);
+        ramp_ident_fit_t fit;
+        ramp_ident_result_t r = ramp_ident_fit(seg, N, K, &fit);
+        TEST_CHECK(r == RAMP_IDENT_FIT_FAILED, "transient present but crossings never reached: FIT_FAILED");
+        TEST_CHECK(!fit.valid, "fit failed: fit.valid false");
+        TEST_CHECK(fit.refusal_reason[0] != '\0', "fit failed: refusal reason populated");
+    }
+
+    // --- Artifact reproduction at a REALISTIC tick (10-16s/sample, matching --
+    // real telemetry -- ramp_ident.h notes the accept-path tests above
+    // deliberately use DT=25s so 15 samples covers t63 at the TRUE bench
+    // tau, which real captures never get). This is the defect this module
+    // ships with, made executable: a dead-flat pre-step baseline (matching
+    // the real fixture segments' near-zero fitted pre-step slope) followed
+    // by an ORDINARY LINEAR climb standing in for "the response" -- no FOPDT
+    // curve is injected at all, because the whole point is that the fitted
+    // tau carries no information about ANY true plant tau. Per ramp_ident.h's
+    // derivation, a step of delta_d with gain K into a trace that just climbs
+    // linearly at rate R produces crossings at t28=0.283*K*delta_d/R and
+    // t63=0.632*K*delta_d/R, so tau_fit = 1.5*(t63-t28) = 0.524*K*delta_d/R --
+    // purely a function of K, delta_d, R. If a future rewrite of the
+    // estimator quietly starts producing something else here, this test will
+    // go red and should be read as a signal to update it deliberately, not a
+    // reason to delete it.
+    {
+        const float DT2 = 12.0f; // realistic tick, not the 25s used above
+        const uint32_t N2 = 60;  // 59*12 = 708s span
+        const float K2 = 35.0f;
+        const uint32_t STEP_IDX2 = 10;
+        const float DUTY_BEFORE2 = 0.30f;
+        const float DUTY_DELTA2 = 0.15f;
+        const float R2 = 0.03318f; // C/s climb rate, chosen so t63 lands well inside the response window
+
+        ramp_ident_sample_t seg[TRACE_MAX];
+        for (uint32_t i = 0; i < N2; i++) {
+            float t = (float)i * DT2;
+            float duty = (i < STEP_IDX2) ? DUTY_BEFORE2 : (DUTY_BEFORE2 + DUTY_DELTA2);
+            float actual;
+            if (i < STEP_IDX2) {
+                actual = 40.0f; // dead-flat pre-step baseline
+            } else {
+                float t_since_step = (float)(i - STEP_IDX2) * DT2;
+                actual = 40.0f + R2 * t_since_step; // ordinary linear climb, not an FOPDT curve
+            }
+            seg[i].t_s = t;
+            seg[i].target_c = actual + 5.0f;
+            seg[i].actual_c = quantize_c(actual);
+            seg[i].duty = duty;
+        }
+        ramp_ident_fit_t fit;
+        ramp_ident_result_t r = ramp_ident_fit(seg, N2, K2, &fit);
+        TEST_CHECK(r == RAMP_IDENT_OK, "realistic-tick artifact: fit accepts a pure-ramp 'response'");
+        if (fit.valid) {
+            float expected_artifact_tau = 0.524f * K2 * DUTY_DELTA2 / R2;
+            TEST_CHECK_NEAR(fit.tau_s, expected_artifact_tau, expected_artifact_tau * 0.15f,
+                             "realistic-tick artifact: fitted tau matches the 0.524*K*delta_d/R closed-form "
+                             "artifact -- no true plant tau was even simulated");
+        }
+    }
+
     // --- Refusal: too few samples --------------------------------------
     {
         ramp_ident_sample_t seg[8];
