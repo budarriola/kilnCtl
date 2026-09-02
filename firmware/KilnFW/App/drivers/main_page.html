@@ -23,19 +23,19 @@
      while explicit light mode is untouched. */
   :root {
     --bg: #fff; --fg: #111; --muted: #444; --border: #888; --button-bg: #f2f2f2;
-    --card-bg: #f7f7f7; --on-color: #1a7a1a; --off-color: #888; --fault-color: #b00;
+    --card-bg: #f7f7f7; --ok: #1a7a1a; --off-color: #888; --bad: #b00;
   }
   @media (prefers-color-scheme: dark) {
     :root:not([data-theme="light"]) {
       --bg: var(--ui-bg); --fg: var(--ui-text-primary); --muted: var(--ui-text-secondary);
       --border: var(--ui-text-secondary); --button-bg: var(--ui-card); --card-bg: var(--ui-card);
-      --on-color: var(--ui-accent-4); --off-color: var(--ui-text-secondary); --fault-color: var(--ui-accent-5);
+      --ok: var(--ui-accent-4); --off-color: var(--ui-text-secondary); --bad: var(--ui-accent-5);
     }
   }
   :root[data-theme="dark"] {
     --bg: var(--ui-bg); --fg: var(--ui-text-primary); --muted: var(--ui-text-secondary);
     --border: var(--ui-text-secondary); --button-bg: var(--ui-card); --card-bg: var(--ui-card);
-    --on-color: var(--ui-accent-4); --off-color: var(--ui-text-secondary); --fault-color: var(--ui-accent-5);
+    --ok: var(--ui-accent-4); --off-color: var(--ui-text-secondary); --bad: var(--ui-accent-5);
   }
   body { font-family: sans-serif; max-width: 480px; margin: 2em auto; padding: 0 1em;
          background: var(--bg); color: var(--fg); }
@@ -54,7 +54,7 @@
           padding: 0.7em 1em; margin-bottom: 0.5em; display: flex; justify-content: space-between;
           align-items: center; }
   .temp { font-size: 1.1em; font-weight: bold; }
-  .fault { color: var(--fault-color); font-size: 0.85em; }
+  .fault { color: var(--bad); font-size: 0.85em; }
   .stale { color: var(--muted); font-size: 0.85em; }
   .empty { color: var(--muted); font-style: italic; }
   /* 2026-08-21 dashboard reflow: profile <select> and Start button now sit
@@ -92,9 +92,9 @@
   .kc-manage-row input[type=text] { flex: 1 1 140px; min-width: 0; box-sizing: border-box;
     min-height: var(--ui-touch); padding: 0.5em; font-size: 1em; background: var(--button-bg);
     color: var(--fg); border: 1px solid var(--border); border-radius: var(--ui-radius); }
-  .kc-active-tag { font-size: 0.8em; color: var(--on-color); font-weight: bold; margin-left: 0.3em; }
+  .kc-active-tag { font-size: 0.8em; color: var(--ok); font-weight: bold; margin-left: 0.3em; }
   #kcConfigMsg { font-size: 0.85em; color: var(--muted); margin-top: 0.2em; }
-  #kcConfigMsg.kc-error { color: var(--fault-color); }
+  #kcConfigMsg.kc-error { color: var(--bad); }
   /* Owner request: profile/kiln-config <select> should read the same
      height as a .card row (the thermocouple channel cards), not theme.css's
      72px touch minimum -- .card has no min-height of its own, just
@@ -108,7 +108,7 @@
                     border-radius: var(--ui-radius);
                     border: 1px solid var(--border); background: var(--button-bg); color: var(--fg);
                     cursor: pointer; margin-right: 0.5em; margin-top: 0.3em; }
-  button.run-btn.primary { background: var(--on-color); color: #fff; border-color: var(--on-color); }
+  button.run-btn.primary { background: var(--ok); color: #fff; border-color: var(--ok); }
   /* Owner's request: halve the Start button's height. theme.css's shared
      `button { min-height: var(--ui-touch); }` rule (var(--ui-touch): 72px,
      theme.css line 21) is exactly the "every real button gets a 72px touch
@@ -132,8 +132,8 @@
                padding: 0.7em 1em; margin-top: 0.5em; }
   .exec-card .row { display: flex; justify-content: space-between; margin-bottom: 0.3em; }
   .exec-state { font-weight: bold; text-transform: capitalize; }
-  .exec-state.state-faulted { color: var(--fault-color); }
-  .exec-state.state-running { color: var(--on-color); }
+  .exec-state.state-faulted { color: var(--bad); }
+  .exec-state.state-running { color: var(--ok); }
   #historyChart { width: 100%; height: 220px; background: var(--card-bg);
                   border: 1px solid var(--border); border-radius: var(--ui-radius); display: block; }
   /* 2026-08-21 owner request: chart legend/caption moved OUT of the canvas
@@ -177,10 +177,10 @@
   #progressWrap { margin-top: 0.6em; }
   .progress-track { height: 10px; border: 1px solid var(--border); border-radius: 999px;
                      background: var(--card-bg); overflow: hidden; }
-  .progress-fill { height: 100%; background: var(--on-color); width: 0%; }
+  .progress-fill { height: 100%; background: var(--ok); width: 0%; }
   .progress-fill.indeterminate {
     width: 100% !important;
-    background-image: repeating-linear-gradient(45deg, var(--on-color) 0, var(--on-color) 10px,
+    background-image: repeating-linear-gradient(45deg, var(--ok) 0, var(--ok) 10px,
                        transparent 10px, transparent 20px);
     background-size: 28px 28px;
     animation: kc-progress-stripe 1s linear infinite;
@@ -203,9 +203,9 @@
   .banner { background: var(--card-bg); border: 1px solid var(--border);
             border-left: 4px solid var(--off-color); border-radius: var(--ui-radius);
             padding: 0.7em 1em; margin-bottom: 1em; font-size: 0.9em; }
-  .banner.interrupted { border-left-color: var(--fault-color); }
+  .banner.interrupted { border-left-color: var(--bad); }
   .banner h3 { margin: 0 0 0.4em 0; font-size: 0.95em; }
-  .banner.interrupted h3 { color: var(--fault-color); }
+  .banner.interrupted h3 { color: var(--bad); }
   .banner .row { display: flex; justify-content: space-between; margin-bottom: 0.2em;
                  color: var(--muted); }
   .banner .note { color: var(--muted); font-style: italic; margin-top: 0.5em; }
@@ -217,8 +217,8 @@
      cooled" is exactly the failure this banner exists to make impossible to
      miss. ineffective (S9) gets stronger wording still, matching that same
      precedent's extra emphasis, without a second element/colour. */
-  .banner.safety-trip { background: var(--fault-color); border-color: var(--fault-color);
-                        border-left-color: var(--fault-color); }
+  .banner.safety-trip { background: var(--bad); border-color: var(--bad);
+                        border-left-color: var(--bad); }
   .banner.safety-trip h3, .banner.safety-trip .row, .banner.safety-trip .row span,
   .banner.safety-trip .note { color: #fff; }
   /* 2026-08-21 rework item 11: relay status shown next to each channel's
@@ -235,7 +235,7 @@
   .relay-status { margin-left: 0.4em; }
   .relay-tag { display: inline-block; font-size: 0.75em; font-weight: normal; border-radius: var(--ui-radius);
                padding: 0.1em 0.45em; margin-left: 0.25em; border: 1px solid var(--border); }
-  .relay-tag.relay-on { color: #fff; background: var(--on-color); border-color: var(--on-color); }
+  .relay-tag.relay-on { color: #fff; background: var(--ok); border-color: var(--ok); }
   .relay-tag.relay-off { color: var(--muted); background: transparent; }
   .relay-tag.relay-unknown { color: var(--muted); background: transparent; font-style: italic; }
   /* Press-and-hold PID popup (2026-09-01, owner: "allow the user to hold a
@@ -253,7 +253,7 @@
                border-radius: var(--ui-radius); padding: 1em; max-width: 420px; width: 100%;
                max-height: 90vh; overflow-y: auto; }
   .pid-popup h3 { margin: 0 0 0.4em 0; }
-  .pid-popup .warn { color: var(--fault-color); font-weight: bold; }
+  .pid-popup .warn { color: var(--bad); font-weight: bold; }
   .pid-popup label { display: block; margin-top: 0.6em; font-size: 0.9em; }
   .pid-popup input[type=number] { width: 100%; box-sizing: border-box; font-size: 1em;
                                    padding: 0.35em; margin-top: 0.2em; }
@@ -2005,10 +2005,10 @@ function setupChart() {
   var border = style.getPropertyValue('--border').trim() || '#888';
   // Theme-aware colour for the freezing reference line/legend swatch --
   // never a hard-coded hex, same rule the rest of this page's palette
-  // already follows (see the :root/--fault-color chain at the top of this
+  // already follows (see the :root/--bad chain at the top of this
   // file). Falls back to the light-theme default only if the variable is
   // somehow unset.
-  var fault = style.getPropertyValue('--fault-color').trim() || '#b00';
+  var fault = style.getPropertyValue('--bad').trim() || '#b00';
 
   var padL = 42, padR = 36, padT = 10, padB = 20;
   var plotW = cssW - padL - padR, plotH = cssH - padT - padB;

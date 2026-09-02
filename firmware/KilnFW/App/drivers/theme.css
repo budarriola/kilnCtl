@@ -340,7 +340,7 @@ a.button { display: inline-flex; align-items: center; min-height: var(--ui-touch
 button.relay-toggle { min-width: var(--ui-touch); padding: 0.4em 1em;
                        font-size: 0.9em; border-radius: var(--ui-radius);
                        border: 1px solid var(--border); cursor: pointer; }
-button.relay-on { background: var(--on-color); color: #fff; }
+button.relay-on { background: var(--ok); color: #fff; }
 button.relay-off { background: var(--button-bg); color: var(--fg); }
 
 /* Danger zone (settings_page.html) -- moved verbatim off main_page.html;
