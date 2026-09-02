@@ -102,6 +102,12 @@ static void history_pack(history_slot_t *slot, uint32_t elapsed_s, float desired
     uint32_t periods = elapsed_s / HISTORY_SAMPLE_PERIOD_S;
     slot->elapsed_periods = (periods > UINT16_MAX) ? UINT16_MAX : (uint16_t)periods;
     slot->desired_dc = history_pack_temp(desired_c);
+    /* This sample's own zone_mask, not the executor's current-run one read
+     * back later -- see history_slot_t's doc comment (profile_executor_
+     * internal.h) for why. inactive_mask is already exactly "not in this
+     * run's zone_mask" (see this function's caller), so the active mask is
+     * just its complement over HISTORY_ZONE_COUNT bits. */
+    slot->zone_mask = (uint8_t)(~inactive_mask & ((1u << HISTORY_ZONE_COUNT) - 1u));
     for (uint8_t zi = 0; zi < HISTORY_ZONE_COUNT; zi++) {
         if (inactive_mask & (1u << zi)) {
             slot->actual_dc[zi] = HISTORY_TEMP_INVALID;
@@ -124,6 +130,7 @@ void history_unpack(const history_slot_t *slot, profile_history_entry_t *out)
         out->duty[zi] = (slot->duty_pct[zi] == HISTORY_DUTY_INVALID) ? NAN : (float)slot->duty_pct[zi] / 100.0f;
         out->guard[zi] = slot->guard[zi];
     }
+    out->zone_mask = slot->zone_mask;
 }
 
 /* ---- small helpers -------------------------------------------------------- */

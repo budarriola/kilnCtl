@@ -834,6 +834,12 @@ static void test_history_pack_unpack_multi_zone_round_trip(void)
 
     TEST_CHECK(out.elapsed_s == 90u, "elapsed_s round-trips (exact multiple of HISTORY_SAMPLE_PERIOD_S here)");
     TEST_CHECK(fabsf(out.desired_c - 77.7f) < 0.05f, "desired_c (shared setpoint) round-trips at 0.1 degC resolution");
+    // 2026-09-02 (opus review of 3f9b1a9/2a8ff7e): every zone active
+    // (inactive_mask 0) must round-trip as a FULL zone_mask, not 0 -- this
+    // is the per-row mask the dashboard now needs to average duty correctly
+    // whether or not the executor's CURRENT run agrees.
+    TEST_CHECK(out.zone_mask == (uint8_t)((1u << MAX31856_CHANNEL_COUNT) - 1u),
+              "zone_mask round-trips as every zone active when inactive_mask is 0");
     for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
         TEST_CHECK(fabsf(out.actual_c[zi] - actual_c[zi]) < 0.05f, "actual_c round-trips per zone at 0.1 degC res");
         TEST_CHECK(fabsf(out.duty[zi] - duty[zi]) < 0.006f, "duty round-trips per zone at whole-percent resolution");
@@ -906,6 +912,58 @@ static void test_history_pack_inactive_zone_mask(void)
     TEST_CHECK(fabsf(history_unpack_temp(slot.actual_dc[1]) - 111.0f) < 0.05f,
               "the active zone's real actual_c must still be packed");
     TEST_CHECK(slot.guard[1] == 4, "the active zone's real (non-zero) guard value must still be packed");
+
+    // 2026-09-02 (opus review of 3f9b1a9/2a8ff7e): slot.zone_mask is the
+    // COMPLEMENT of inactive_mask (bit set = zone WAS active this sample),
+    // not a copy of inactive_mask itself -- a caller masking duty with this
+    // field the way the executor's live zone_mask works must see the same
+    // "bit set = participating" convention, not an inverted one.
+    TEST_CHECK(slot.zone_mask == (uint8_t)(1u << 1), "zone_mask has only zone 1 set -- the complement of "
+              "inactive_mask (zones 0,2), not inactive_mask itself");
+}
+
+// 2026-09-02 (opus review of 3f9b1a9/2a8ff7e, main_page.html's
+// avgMaskedDuty/lastExecStatus.zone_mask defect): the whole point of this
+// field is that a ring spanning MORE THAN ONE run keeps each row's OWN
+// mask, not whatever mask happens to be current when the ring is read.
+// Simulates exactly that -- one run with zones 0,1 active, immediately
+// followed (same ring, no clear) by a run with only zone 2 active -- and
+// proves profile_executor_get_history() hands back each row still carrying
+// the mask it was actually sampled under.
+static void test_get_history_preserves_per_row_zone_mask_across_runs(void)
+{
+    TEST_SECTION("profile_executor_get_history() -- each row keeps the zone_mask it was sampled with, "
+                 "even when a later run in the same ring used a different mask");
+    s_exec.lock = xSemaphoreCreateMutex();
+    s_exec.history = heap_caps_malloc(sizeof(history_slot_t) * HISTORY_MAX_SAMPLES, MALLOC_CAP_SPIRAM);
+    TEST_CHECK(s_exec.history != NULL, "test setup: history buffer allocation must succeed");
+    memset(s_exec.history, 0, sizeof(history_slot_t) * HISTORY_MAX_SAMPLES);
+
+    float actual_c[MAX31856_CHANNEL_COUNT] = { 100.0f, 200.0f, 300.0f };
+    float duty[MAX31856_CHANNEL_COUNT] = { 0.4f, 0.6f, 0.9f };
+    uint8_t guard[MAX31856_CHANNEL_COUNT] = { 0, 0, 0 };
+
+    // Row 0: "run A", zones 0,1 active (zone 2 inactive).
+    history_pack(&s_exec.history[0], 0u, 50.0f, actual_c, duty, guard, (uint8_t)(1u << 2));
+    // Row 1: "run B", started immediately after -- only zone 2 active.
+    history_pack(&s_exec.history[1], 30u, 50.0f, actual_c, duty, guard, (uint8_t)((1u << 0) | (1u << 1)));
+    s_exec.history_count = 2;
+    s_exec.history_head = 2;
+
+    profile_history_entry_t out[2];
+    size_t n = profile_executor_get_history(out, 0, 2);
+    TEST_CHECK(n == 2, "both rows returned");
+    TEST_CHECK(out[0].zone_mask == (uint8_t)((1u << 0) | (1u << 1)),
+              "row 0 (run A) reports its OWN mask (zones 0,1), not run B's");
+    TEST_CHECK(out[1].zone_mask == (uint8_t)(1u << 2),
+              "row 1 (run B) reports its OWN mask (zone 2), not run A's -- this is exactly what a shared "
+              "lastExecStatus.zone_mask (one value for the whole ring) could never represent correctly");
+    TEST_CHECK(out[0].zone_mask != out[1].zone_mask, "sanity: the two rows really do disagree");
+
+    free(s_exec.history);
+    s_exec.history = NULL;
+    s_exec.history_count = 0;
+    s_exec.history_head = 0;
 }
 
 // profile_executor_get_history()'s oldest-first unwrap, exercised directly
@@ -5015,6 +5073,7 @@ void run_test_profile_executor_prestart(void)
     test_history_pack_unpack_multi_zone_round_trip();
     test_history_pack_invalid_sentinels();
     test_history_pack_inactive_zone_mask();
+    test_get_history_preserves_per_row_zone_mask_across_runs();
     test_get_history_multi_zone_and_wraparound();
     test_get_status_reports_well_formed_idle_before_start();
     test_escalate_guard_trip_global_releases_relay_claim();

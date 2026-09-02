@@ -1959,16 +1959,30 @@ document.getElementById('runBtn').addEventListener('click', function () {
 // actual/duty to every zone's, fixing the actual root cause -- those traces
 // used to exist ONLY client-side (firingZoneSeries/firingDutySeries below),
 // so they were gone on reload/late-open. Columns are now
-// elapsed_s,desired_c,z0_actual_c,z0_duty,z0_guard,z1_actual_c,... one
-// z<N>_actual_c,z<N>_duty,z<N>_guard triple per zone (dashboard_http.c's
-// history_csv_get_handler(), HISTORY_ZONE_COUNT zones). `target` is kept as
-// the row's name for desired_c, same reasoning as before: it's the elapsed
-// half of the single "planned" line, not a second series.
+// elapsed_s,desired_c,z0_actual_c,z0_duty,z0_guard,z1_actual_c,...,zone_mask
+// -- one z<N>_actual_c,z<N>_duty,z<N>_guard triple per zone, then a trailing
+// zone_mask column (dashboard_http.c's history_csv_get_handler(),
+// HISTORY_ZONE_COUNT zones). `target` is kept as the row's name for
+// desired_c, same reasoning as before: it's the elapsed half of the single
+// "planned" line, not a second series.
+//
+// 2026-09-02 (opus review of 3f9b1a9/2a8ff7e): zone_mask is THIS ROW's own
+// mask, captured firmware-side at the time this sample was taken -- NOT the
+// executor's current-run zone_mask. A caller averaging/masking a row (e.g.
+// avgMaskedDuty below) MUST use r.zoneMask, never lastExecStatus.zone_mask:
+// the executor zeroes its zone_mask while idle (profile_executor_status.c),
+// so every historical row read that way while idle divided by zero and
+// plotted NaN for the whole duty trace, and a row from a PREVIOUS run read
+// against the CURRENT run's mask was averaged against the wrong zones.
+// Falls back to 0 (no zones known active) for a CSV from older firmware
+// with no trailing column, same "missing column -> 0/empty" tolerance the
+// per-zone fields below already have via parseFloat/parseInt on a short row.
 var HISTORY_ZONE_COUNT = 3; // must match firmware's MAX31856_CHANNEL_COUNT (profile_executor.h)
 function parseHistoryCsv(text) {
   var lines = text.split('\n').filter(function (l) { return l.trim().length > 0; });
   var rows = [];
   var minFields = 2 + HISTORY_ZONE_COUNT * 3;
+  var maskField = minFields; // zone_mask trails the per-zone triples
   for (var i = 1; i < lines.length; i++) { // skip header
     var f = lines[i].split(',');
     if (f.length < minFields) continue;
@@ -1979,9 +1993,11 @@ function parseHistoryCsv(text) {
       zoneDuty.push(parseFloat(f[base + 1]));
       zoneGuard.push(parseInt(f[base + 2], 10));
     }
+    var zoneMask = f.length > maskField ? parseInt(f[maskField], 10) : 0;
+    if (isNaN(zoneMask)) zoneMask = 0;
     rows.push({
       t: parseFloat(f[0]), target: parseFloat(f[1]),
-      zoneActual: zoneActual, zoneDuty: zoneDuty, zoneGuard: zoneGuard,
+      zoneActual: zoneActual, zoneDuty: zoneDuty, zoneGuard: zoneGuard, zoneMask: zoneMask,
     });
   }
   return rows;
@@ -2285,16 +2301,25 @@ function drawHistoryChart(rows) {
   // reload same as before -- topped up with firingDutySeries (client-
   // collected from /api/profile_exec, itself now averaged the same way, see
   // sampleFiringZoneTemps) for the gap between history.csv's 15s poll and
-  // now. Dividing by the mask's own popcount (not a hardcoded zone count)
-  // means a zone that is not part of THIS run never drags the average toward
-  // zero. Continuous (not the autotune chart's stepped rendering): PID/
+  // now. Continuous (not the autotune chart's stepped rendering): PID/
   // BANGBANG duty output is genuinely continuous, unlike autotune's
   // deliberately-held step-test duty.
-  var dutyMask = lastExecStatus ? lastExecStatus.zone_mask : 0;
-  var dutyZoneCount = popcount8(dutyMask);
+  //
+  // 2026-09-02 fix (opus review of 3f9b1a9/2a8ff7e): EACH row uses its OWN
+  // r.zoneMask, not a single lastExecStatus.zone_mask shared across every
+  // row. The executor's current-run mask is 0 whenever idle (profile_
+  // executor_status.c only fills zone_mask while state != IDLE), so masking
+  // every historical row with it divided by zero and NaN'd out the whole
+  // duty trace the instant no run was active -- and a row sampled during a
+  // PREVIOUS run got averaged against whatever mask the CURRENT run
+  // happens to have, not the mask that was actually in effect when that
+  // row was recorded. r.zoneMask (parseHistoryCsv, from history.csv's
+  // trailing column) is the mask the firmware captured at sample time, so
+  // this is correct both while idle and across a ring that spans more than
+  // one run.
   var dutyLabel = 'whole-kiln avg duty';
   var dutyPts = rows.map(function (r) {
-    return { t: r.t, duty: avgMaskedDuty(r.zoneDuty, dutyMask, dutyZoneCount) };
+    return { t: r.t, duty: avgMaskedDuty(r.zoneDuty, r.zoneMask, popcount8(r.zoneMask)) };
   });
   var lastDutyT = dutyPts.length ? dutyPts[dutyPts.length - 1].t : -Infinity;
   firingDutySeries.forEach(function (p) { if (p.t > lastDutyT) dutyPts.push({ t: p.t, duty: p.duty }); });
@@ -2561,9 +2586,14 @@ function sampleAutotuneZoneTemps(data) {
 // whole-kiln-aggregate duty, so every other zone's trace lived only in this
 // tab. That was later fixed at the SOURCE instead (see drawHistoryChart's
 // own 2026-09-01 doc comment): the firmware ring buffer now records every
-// zone, so history.csv itself carries the full-run trace for every zone in
-// the mask and survives a reload. firingZoneSeries/firingDutySeries below
-// are kept, but now only as a freshness top-up for the gap between
+// zone, so history.csv carries every zone's trace and survives a reload.
+// 2026-09-02 correction (owner policy, opus review of 3f9b1a9/2a8ff7e): this
+// is NOT "the full-run trace" for a firing longer than the ring's own
+// window (HISTORY_MAX_SAMPLES * HISTORY_SAMPLE_PERIOD_S, ~5h20m at the
+// current firmware sizing -- profile_executor.h) -- the ring is a display
+// buffer, not a durable firing record, and its early samples fall off the
+// back as a longer firing keeps sampling. firingZoneSeries/firingDutySeries
+// below are kept, but now only as a freshness top-up for the gap between
 // history.csv's 15s poll and "now" (drawHistoryChart merges them in),
 // rather than the only copy of a non-representative zone's data.
 function isFiringActive(state) {
@@ -2595,11 +2625,23 @@ function popcount8(mask) {
 
 // Mean of dutyArr[hzi] across every bit set in mask (history.csv row shape:
 // dutyArr indexed 0..HISTORY_ZONE_COUNT-1, same as r.zoneDuty). zoneCount is
-// popcount8(mask), passed in rather than recomputed per row since callers
-// already have it once per chart draw. Returns NaN when there is nothing to
-// average (no active zones, or every masked zone's duty this row is itself
-// NaN) so the trace breaks/gaps exactly like a single-zone NaN used to,
-// rather than silently plotting a false 0.
+// popcount8(mask), passed in only to short-circuit an empty mask -- it is
+// NOT the divisor (see 2026-09-02 fix below). Returns NaN when there is
+// nothing to average (no active zones, or every masked zone's duty this row
+// is itself NaN) so the trace breaks/gaps exactly like a single-zone NaN
+// used to, rather than silently plotting a false 0.
+//
+// 2026-09-02 fix (opus review of 3f9b1a9/2a8ff7e): the divisor is `n`, the
+// count of masked zones that actually HAD a value this row, not zoneCount
+// (the full mask popcount). The commit that introduced this function
+// claimed dividing by the full popcount was what kept a missing sample from
+// skewing the average -- backwards: dividing a partial sum by the FULL zone
+// count is exactly what drags the average toward zero every time one
+// in-mask zone's reading is momentarily NaN (a fault, a stale-read gap),
+// even though the other zones' duty didn't change. Dividing by n -- the
+// zones that actually contributed -- reports the true mean of the zones
+// with data this tick, and only degrades to NaN (a visible gap) when NONE
+// of them do.
 function avgMaskedDuty(dutyArr, mask, zoneCount) {
   if (zoneCount <= 0) return NaN;
   var sum = 0, n = 0;
@@ -2609,7 +2651,7 @@ function avgMaskedDuty(dutyArr, mask, zoneCount) {
     if (isNaN(d)) continue;
     sum += d; n++;
   }
-  return n > 0 ? (sum / zoneCount) : NaN;
+  return n > 0 ? (sum / n) : NaN;
 }
 
 // Client-collected TOP-UP traces (2026-09-01: history.csv now records every

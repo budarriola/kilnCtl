@@ -254,11 +254,102 @@ function loadZoneSampler() {
 // or never-started run never grows a phantom trace.
 (function testNoSamplingWhenNotFiring() {
   const ctx = loadZoneSampler();
+  // zone_mask: 0 -- an idle executor cannot report a non-zero zone_mask
+  // (profile_executor_status.c only fills zone_mask while state != IDLE);
+  // 0x03 here was a fixture the real firmware can never emit (opus review
+  // of 3f9b1a9/2a8ff7e), and is exactly why the NaN-duty-while-idle bug
+  // this file's mask tests now cover went uncaught.
   ctx.sampleFiringZoneTemps(
     { thermo_ready: true, channels: [{ channel: 1, valid: true, spi_failed: false, temp_c: 50 }] },
-    { state: 'idle', zone_mask: 0x03, total_elapsed_s: 5, zones: [] }
+    { state: 'idle', zone_mask: 0x00, total_elapsed_s: 5, zones: [] }
   );
   assert(Object.keys(ctx.firingZoneSeries).length === 0, 'no state, no run: nothing is collected');
+})();
+
+// ---------------------------------------------------------------------------
+// Group 3: per-row zone_mask (2026-09-02, opus review of 3f9b1a9/2a8ff7e).
+// parseHistoryCsv must pick up history.csv's trailing zone_mask column, and
+// avgMaskedDuty must divide by the zones that actually reported this row,
+// not the full mask popcount -- both fixed together, since the old bug was
+// exactly "no per-row mask" (forced every row to share lastExecStatus.
+// zone_mask, which is 0 while idle) PLUS "divide by the full mask" (a
+// single NaN dragged the average toward zero even with a correct mask).
+// ---------------------------------------------------------------------------
+const MASK_SRC = extractRange(
+  'var HISTORY_ZONE_COUNT = 3; // must match firmware\'s MAX31856_CHANNEL_COUNT (profile_executor.h)',
+  '}'
+) + '\n' + extractRange(
+  'function popcount8(mask) {',
+  '}'
+) + '\n' + extractRange(
+  'function avgMaskedDuty(dutyArr, mask, zoneCount) {',
+  '}'
+);
+assert(MASK_SRC.indexOf('function parseHistoryCsv') !== -1,
+  'sanity: extracted range includes parseHistoryCsv');
+assert(MASK_SRC.indexOf('function avgMaskedDuty') !== -1,
+  'sanity: extracted range includes avgMaskedDuty');
+
+function loadMaskFns() {
+  const ctx = vm.createContext({ console });
+  new vm.Script(MASK_SRC, { filename: 'main_page.html (mask slice)' }).runInContext(ctx);
+  return ctx;
+}
+
+// history.csv's actual row shape: elapsed_s,desired_c, then one
+// z<N>_actual_c,z<N>_duty,z<N>_guard triple per zone (HISTORY_ZONE_COUNT ==
+// 3 here), then the trailing zone_mask column dashboard_http.c appends.
+(function testParseHistoryCsvReadsTrailingZoneMask() {
+  const ctx = loadMaskFns();
+  const csv = 'elapsed_s,desired_c,z0_actual_c,z0_duty,z0_guard,z1_actual_c,z1_duty,z1_guard,' +
+    'z2_actual_c,z2_duty,z2_guard,zone_mask\n' +
+    '30,100.00,101.00,0.500,0,,,0,,,0,1\n'; // only zone 0 active this row (mask 0x01)
+  const rows = ctx.parseHistoryCsv(csv);
+  assert(rows.length === 1, 'one data row parsed');
+  assert(rows[0].zoneMask === 1, 'row.zoneMask reads the trailing column (got ' + rows[0].zoneMask + ')');
+})();
+
+// A row from BEFORE this change (no trailing column, older firmware) must
+// not throw or silently misparse -- falls back to zoneMask 0 rather than
+// crashing on an undefined field.
+(function testParseHistoryCsvToleratesMissingZoneMaskColumn() {
+  const ctx = loadMaskFns();
+  const csv = 'elapsed_s,desired_c,z0_actual_c,z0_duty,z0_guard,z1_actual_c,z1_duty,z1_guard,' +
+    'z2_actual_c,z2_duty,z2_guard\n' +
+    '30,100.00,101.00,0.500,0,,,0,,,0\n';
+  const rows = ctx.parseHistoryCsv(csv);
+  assert(rows.length === 1 && rows[0].zoneMask === 0,
+    'a pre-change row with no zone_mask column falls back to 0, not NaN/undefined (got ' +
+    (rows[0] && rows[0].zoneMask) + ')');
+})();
+
+// The regression itself: an idle executor's zone_mask is 0
+// (profile_executor_status.c), but a history row recorded DURING a run
+// still carries that run's own non-zero mask. Using the row's own mask
+// (not a shared "current status" mask) must recover a real average, not
+// NaN, for that row.
+(function testAvgMaskedDutyUsesRowsOwnMaskNotIdleZero() {
+  const ctx = loadMaskFns();
+  const rowMask = 0x03; // zones 0,1 were active when THIS row was sampled
+  const rowDuty = [0.40, 0.60, NaN]; // zone 2 not in this run -- NaN filler
+  const idleStatusMask = 0x00; // executor is idle NOW -- must NOT be used here
+  const usingRowMask = ctx.avgMaskedDuty(rowDuty, rowMask, ctx.popcount8(rowMask));
+  const usingIdleMask = ctx.avgMaskedDuty(rowDuty, idleStatusMask, ctx.popcount8(idleStatusMask));
+  assert(Math.abs(usingRowMask - 0.50) < 1e-9,
+    'averaging with the ROW\'s own mask recovers (0.40+0.60)/2 = 0.50, got ' + usingRowMask);
+  assert(isNaN(usingIdleMask),
+    'averaging with a shared idle-status mask (0) is exactly the old bug -- NaN, proving the row mask matters');
+})();
+
+// The divisor fix: a masked-in zone with a missing (NaN) sample this row
+// must not drag the average toward zero by being counted in the divisor.
+(function testAvgMaskedDutyDividesByReportingZonesNotFullMask() {
+  const ctx = loadMaskFns();
+  const mask = 0x07; // zones 0,1,2 all in this run's mask
+  const duty = [0.90, 0.30, NaN]; // zone 2 is in the mask but this row has no sample
+  const avg = ctx.avgMaskedDuty(duty, mask, ctx.popcount8(mask));
+  assert(Math.abs(avg - 0.60) < 1e-9,
+    'divides by the 2 zones that actually reported ((0.90+0.30)/2 = 0.60), not the full mask of 3 -- got ' + avg);
 })();
 
 // ---------------------------------------------------------------------------

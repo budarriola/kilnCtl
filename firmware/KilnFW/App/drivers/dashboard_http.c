@@ -1698,6 +1698,26 @@ static esp_err_t firing_history_get_handler(httpd_req_t *req)
  * log_analysis.py (tools/PcTools) was updated for this column layout in the
  * same change.
  *
+ * 2026-09-02 (opus review of 3f9b1a9/2a8ff7e): a trailing zone_mask column
+ * was added -- THIS ROW's own zone_mask (captured at sample time,
+ * profile_history_entry_t/history_slot_t), not the run currently active
+ * when the request was served. Without it, a client averaging duty across
+ * a row had nothing but the executor's CURRENT-run zone_mask to mask/divide
+ * with, which is wrong whenever the executor is idle (mask 0, divide-by-
+ * zero -> every historical duty point reads NaN) or the ring holds rows
+ * from an earlier run with a different mask than the one now active.
+ *
+ * This is a display buffer covering roughly the last HISTORY_MAX_SAMPLES *
+ * HISTORY_SAMPLE_PERIOD_S (currently 640 * 30s = ~5h20m), NOT a durable
+ * record of a firing -- see HISTORY_MAX_SAMPLES's own doc comment
+ * (profile_executor.h) for the sizing rationale. A firing longer than that
+ * has its early history fall off the ring by design; this endpoint (and the
+ * "Download CSV" affordance in the dashboard that hits it) exports whatever
+ * the ring currently holds, not the whole firing. Durable, whole-firing
+ * records are event_log.h's flash events (state transitions, faults) plus
+ * the live debug-UART temperature feed -- this ring exists only to draw the
+ * web/LCD graphs.
+ *
  * Streamed in small batches via httpd_resp_send_chunk() rather than built
  * into one big buffer first: an earlier version allocated a full
  * HISTORY_MAX_SAMPLES-sized entries array (now ~13KB at the 2026-09-02 640-sample display-only sizing, previously ~58KB at 2880) *and* a full CSV text
@@ -1733,6 +1753,12 @@ static esp_err_t history_csv_get_handler(httpd_req_t *req)
     for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT && o < HISTORY_CSV_LINE_CAP; zi++) {
         o += (size_t)snprintf(line + o, HISTORY_CSV_LINE_CAP - o, ",z%u_actual_c,z%u_duty,z%u_guard", zi, zi, zi);
     }
+    /* zone_mask trails the per-zone triples (appended, not interleaved) so
+     * an older parser keyed on column NAME (log_analysis.py's csv.
+     * DictReader) keeps working unmodified -- see profile_history_entry_t's
+     * own doc comment (profile_executor.h) for why this is THIS row's mask,
+     * not the executor's current-run one. */
+    if (o < HISTORY_CSV_LINE_CAP) o += (size_t)snprintf(line + o, HISTORY_CSV_LINE_CAP - o, ",zone_mask");
     if (o < HISTORY_CSV_LINE_CAP) o += (size_t)snprintf(line + o, HISTORY_CSV_LINE_CAP - o, "\n");
     esp_err_t err = httpd_resp_send_chunk(req, line, o < HISTORY_CSV_LINE_CAP ? o : HISTORY_CSV_LINE_CAP - 1);
 
@@ -1747,6 +1773,7 @@ static esp_err_t history_csv_get_handler(httpd_req_t *req)
                 o += (size_t)snprintf(line + o, HISTORY_CSV_LINE_CAP - o, ",%.2f,%.3f,%u",
                                       (double)batch[i].actual_c[zi], (double)batch[i].duty[zi], batch[i].guard[zi]);
             }
+            if (o < HISTORY_CSV_LINE_CAP) o += (size_t)snprintf(line + o, HISTORY_CSV_LINE_CAP - o, ",%u", batch[i].zone_mask);
             if (o < HISTORY_CSV_LINE_CAP) o += (size_t)snprintf(line + o, HISTORY_CSV_LINE_CAP - o, "\n");
             err = httpd_resp_send_chunk(req, line, o < HISTORY_CSV_LINE_CAP ? o : HISTORY_CSV_LINE_CAP - 1);
         }

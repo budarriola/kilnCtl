@@ -668,6 +668,14 @@ typedef struct {
                                                     * THERMAL_GUARD_TRIP_NONE (also the value for an
                                                     * inactive zone -- check actual_c for NAN to tell
                                                     * "inactive" from "active, no trip") */
+    uint8_t  zone_mask;                           /* which zones were active in THIS sample's run
+                                                    * (bit i set = zone i had real data this row --
+                                                    * matches actual_c[i]/duty[i] being non-NaN).
+                                                    * Captured at sample time -- see history_slot_t's
+                                                    * own doc comment (profile_executor_internal.h)
+                                                    * for why a caller must use THIS field rather than
+                                                    * the executor's current-run zone_mask when
+                                                    * averaging/masking a row read back later. */
 } profile_history_entry_t;
 
 /* Total number of valid history samples right now (0..HISTORY_MAX_SAMPLES),

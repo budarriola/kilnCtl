@@ -277,6 +277,23 @@ def parse_history_csv(path: str) -> list[dict]:
     ``z<N>_`` prefix) for any CSV captured before this change -- exposed
     there as zone 0, the same "lowest-indexed active zone" the old firmware
     scoped that column to.
+
+    2026-09-02 (opus review of 3f9b1a9/2a8ff7e): a trailing ``zone_mask``
+    column was added -- THIS ROW's own zone_mask, captured firmware-side
+    when the sample was taken, not whatever run happens to be current when
+    the CSV is fetched. Exposed as ``entry["zone_mask"]`` (an int, or
+    ``None`` for a CSV captured before this column existed) via
+    ``row.get()`` rather than ``row[...]`` so an older CSV with no such
+    column is not silently dropped by the existing ``except (KeyError,
+    ValueError)`` below.
+
+    This CSV is a display-buffer export, not a durable firing record: the
+    board's ring only holds the last HISTORY_MAX_SAMPLES *
+    HISTORY_SAMPLE_PERIOD_S worth of samples (currently ~5h20m -- see
+    profile_executor.h's own sizing comment), and a firing longer than that
+    has its early history already fallen off the ring by the time this is
+    fetched. Durable records live in the board's flash event log and the
+    live debug-UART temperature feed, not here.
     """
     rows: list[dict] = []
     with open(path, "r", encoding="utf-8", newline="") as fh:
@@ -296,6 +313,8 @@ def parse_history_csv(path: str) -> list[dict]:
                     "desired_c": float(row["desired_c"]),
                     "zones": {},
                 }
+                zone_mask_raw = row.get("zone_mask")
+                entry["zone_mask"] = int(zone_mask_raw) if zone_mask_raw not in (None, "") else None
                 if legacy_single_zone:
                     entry["zones"][0] = {
                         "actual_c": float(row["actual_c"]),

@@ -123,6 +123,20 @@ typedef struct {
     int16_t  actual_dc[HISTORY_ZONE_COUNT];   /* deci-degC per zone */
     uint8_t  duty_pct[HISTORY_ZONE_COUNT];    /* per zone */
     uint8_t  guard[HISTORY_ZONE_COUNT];       /* per zone thermal_guard_trip_t */
+    /* 2026-09-02 (opus review of 3f9b1a9/2a8ff7e): which zones THIS sample's
+     * run had active, captured at sample time rather than read back from the
+     * executor's CURRENT run later. Before this field, callers reached for
+     * s_exec.profile.zone_mask (or the dashboard's lastExecStatus.zone_mask)
+     * to know which of actual_dc/duty_pct/guard above are real vs. the
+     * inactive-zone filler -- correct only for the slot sampled during the
+     * run that is still active. A finished/idle executor zeroes zone_mask
+     * (profile_executor_status.c), so every historical row read back that
+     * way after a run ended, or read back while a DIFFERENT run is active,
+     * silently disagreed with its own data (whole-kiln average duty NaN'd
+     * out or averaged one run's samples against another run's mask). One
+     * byte/slot; see HISTORY_MAX_SAMPLES's own sizing comment for the total
+     * cost this adds to the ring. */
+    uint8_t  zone_mask;
 } history_slot_t;
 
 #define HISTORY_TEMP_INVALID INT16_MIN
