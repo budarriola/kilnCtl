@@ -23,6 +23,21 @@
   --ui-text-secondary: #9aa0ae; --ui-accent-1: #e8974e; --ui-accent-2: #a15fd6;
   --ui-accent-3: #3ec6c6; --ui-accent-4: #5cc06e; --ui-accent-5: #d6555f;
   --ui-radius: 10px; --ui-padding: 8px; --ui-touch: 72px; --ui-status-bar: 32px;
+  /* WEB_UI_RESPONSIVE_PLAN.md sec 6 ("earn the width above the cap"): every
+     substantial page used to hardcode its own fixed `body { max-width: Npx }`
+     (420-620px depending on page -- sec 2.1's table), correct on a phone but
+     a narrow ribbon in the middle of an empty 1920px display. This is the one
+     shared replacement: a continuously-scaling width via clamp() instead of a
+     breakpoint list, so the column earns real desktop width but still stops
+     growing before body text lines get unreadably long. A page opts in by
+     using `max-width: var(--kc-shell-max)` in its own body rule in place of
+     its old fixed px value -- everything else about that rule (margin,
+     padding, background) stays page-local, same "rename not a rewrite"
+     principle sec 2.2 used for the status-token pass. Deliberately NOT
+     touching --ui-touch above -- sec 3.7 / sec 6 are explicit that the 72px
+     LCD-parity touch target is an owner decision, not something this pass
+     gets to fold in. */
+  --kc-shell-max: clamp(480px, 90vw, 1100px);
 }
 /* 2026-08-21: no longer `position: fixed`. It used to pin itself to the
    viewport's top-right corner, which put it (and the unit toggle below,
@@ -314,8 +329,31 @@ a.button { display: inline-flex; align-items: center; min-height: var(--ui-touch
    The flex now lives on .zone-group .card below -- the relay card that
    actually wanted it -- so a card is a plain block by default and only opts
    in where a single row is the real intent. */
+/* WEB_UI_RESPONSIVE_PLAN.md sec 6: `.card` now establishes an inline-size
+   containment context so a card can reflow off ITS OWN rendered width, not
+   the viewport's. This is what makes one `.card` rule correct both stacked
+   full-width on a phone and tiled 3-up in an auto-fit grid on a desktop
+   (main_page.html's #channels, zones_page.html's #zones, sec 6 below) --
+   a `@media` breakpoint keyed on viewport width cannot tell those two cases
+   apart; a container query can, because it measures the card itself.
+   Baseline-supported since 2023 per the plan; no JS, no library. The single
+   rule below covers every `.card` consumer page-wide (main_page.html's own
+   flex-row override included -- container-type/container-name aren't
+   re-declared there, so this still applies) rather than adding a per-page
+   copy, same "one copy, not seven" principle the rest of this file follows. */
 .card { background: var(--card-bg); border: 1px solid var(--border); border-radius: var(--ui-radius);
-        padding: 0.7em 1em; margin-bottom: 0.5em; }
+        padding: 0.7em 1em; margin-bottom: 0.5em;
+        container-type: inline-size; container-name: kc-card; }
+/* Narrow-card reflow: a card whose OWN width has shrunk below 240px (e.g. a
+   3-up grid on a ~760px viewport, or main_page.html's flex-row label/value
+   card squeezed into a grid column) drops from a side-by-side row to a
+   stacked column so the value never gets crushed against the label. A card
+   that is not itself `display: flex` (the plain-block default used by
+   diagnostics/safety/backup/board_temps) is unaffected -- flex-direction is
+   a no-op on a block box, so this rule is safe to apply globally. */
+@container kc-card (max-width: 240px) {
+  .card { flex-direction: column; align-items: flex-start; gap: 0.3em; }
+}
 .empty { color: var(--muted); font-style: italic; }
 
 /* The `hidden` attribute only hides via the UA stylesheet's
