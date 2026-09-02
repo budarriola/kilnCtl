@@ -405,15 +405,27 @@ same document's own 2026-08-29/30 bench sections contradict.
       This is exactly the "second contributor" this section already
       predicted before either fix.
 
-      **Open reconciliation — do NOT adopt the Tyreus-Luyben gains until
-      this is settled.** Tu=334 s does not agree with the step-identified
-      FOPDT (τ 264–271 s, dead time 34–53 s): at ω=2π/334 the FOPDT phase is
-      about −126°, not −180°, and the FOPDT predicts Tu nearer 4L ≈ 176 s.
-      Predicted Ku ≈ 0.13 vs 0.195 measured. Tu/L comes out 6.3–9.8× against
-      the 4–8× expected range. An agent is investigating candidate causes:
-      the amplitude convention (half vs peak-to-peak), the
-      hysteresis-corrected describing function
-      (Ku = 4d/(π·√(a²−h²))), coupled-plant effects, or a biased τ.
+      **Reconciliation CLOSED 2026-09-02 — the apparent Ku/Tu-vs-FOPDT
+      conflict was an arithmetic error in the objection, not a defect.**
+      The "FOPDT predicts Tu ≈ 4L ≈ 176 s, phase −126° not −180°" claim
+      omitted the relay's own hysteresis phase lag, −arcsin(h/a). Solving
+      the full describing-function phase+magnitude conditions against the
+      identified plant (K 39.25, τ 263.8 s, L 52.8 s) predicts Tu 287.7 s /
+      Ku 0.149 against 334.6 s / 0.195 measured. Verified independently of
+      the firmware: re-detecting the cycles straight from
+      `logs/coupling/relay_z0_thermo.jsonl` gives periods
+      333.8/335.4/338.2/330.8 s (mean 334.6 s, 0.8% spread) and
+      half-amplitude 3.04 C, reproducing the firmware's reported values to
+      ~1%. `relay_amplitude_c` IS the half-amplitude, and
+      `pid_autotune_fit_relay()` already uses the hysteresis-corrected
+      Ku = 4d/(π·√(a²−h²)) — √(3.03²−2.00²) = 2.276 gives Ku 0.1957 against
+      0.1954 reported. Coupling ruled out: the peer zones show no 334 s
+      oscillation synced to zone 0's switching, and the 620–730 s cross-zone
+      time constant cannot close a loop within one cycle. The residual ~14%
+      (Tu) / ~24% (Ku) gap is consistent with §3.7's bench-vs-firing caveat
+      on τ/L. Tooling: `python -m kilnctrl.relay_ku_tu_check check`.
+      **The gains are arithmetically sound; they are simply not better than
+      what is already on the board — see the simulation below.**
 
       **Simulated first, per owner decision (2026-09-02), zone 0 only.**
       `plant_sim.run_profile()` over profile 7's real two-segment shape
@@ -440,7 +452,7 @@ same document's own 2026-08-29/30 bench sections contradict.
       small loss at 34 C, which is itself smaller than the sim's noise
       floor. Verdict: neither TL nor ZN has a simulated advantage large
       enough to justify a hardware confirmation run yet, independent of the
-      still-open Ku/Tu reconciliation above, which remains the harder
+      closed Ku/Tu reconciliation above, which turned out not to be the
       blocker. Simulation only — no gains were applied to the board.
 
       Original diagnosis below, kept for the reasoning trail:
