@@ -51,7 +51,13 @@ $scannedFiles = 0
 $scannedFns = 0
 
 # ---- C test files -----------------------------------------------------
-$assertMacroPattern = 'TEST_CHECK(_NEAR|_MSG)?\s*\(|(?<![A-Za-z0-9_])CHECK\s*\('
+# The third alternative covers the hand-rolled form used by the older
+# link/CRC tests (test_uart_protocol_link_delegate.c's compare_one():
+# print a mismatch and bump the file's own failure counter) -- that is a
+# real, failable assertion, just not spelled with a macro, and without it
+# here the helper-delegation rule below would report a genuinely checking
+# test as vacuous.
+$assertMacroPattern = 'TEST_CHECK(_NEAR|_MSG)?\s*\(|(?<![A-Za-z0-9_])CHECK\s*\(|g_\w*failures\s*(\+\+|\+=)'
 $literalToken = '(-?\d+(\.\d+)?[fFuUlL]*|"[^"]*"|true|false|NULL)'
 
 foreach ($dir in $cDirs) {
@@ -61,18 +67,59 @@ foreach ($dir in $cDirs) {
         $text = Get-Content -Raw -Path $file.FullName
         $scannedFiles++
 
-        # Locally-defined helper functions (static ret name(...) { ) -- if a
-        # test body calls one of these instead of an assertion macro
-        # directly, assume (this check cannot see inside it cheaply) that
-        # the helper is where the checking happens, same as compare_one()
-        # in test_uart_protocol_link_delegate.c or the guard1-relaxation
-        # verify_* helpers in test_autotune_engine_prestart.c. This trades
-        # a false negative on a helper that itself asserts nothing for
-        # avoiding a false positive on the many tests that legitimately
-        # factor their assertion out.
-        $localFns = New-Object System.Collections.Generic.HashSet[string]
+        # Locally-defined helper functions (static ret name(...) { ), with
+        # their BODIES -- a test body that calls one of these instead of an
+        # assertion macro directly is delegating its checking to it, same as
+        # compare_one() in test_uart_protocol_link_delegate.c or the guard1-
+        # relaxation verify_* helpers in test_autotune_engine_prestart.c.
+        #
+        # REVIEW 2026-09-02: the bodies are captured (not just the names)
+        # because an escape that accepted ANY local-helper call defeated this
+        # check's whole no-assertion arm -- a dispatched test whose entire
+        # body was `reset_state();` passed, and was REPORTED as containing "a
+        # real, non-tautological assertion". Since practically every test file
+        # here defines setup/reset helpers, that escape excused almost any
+        # genuinely empty test. Delegation now only counts when the helper
+        # itself asserts, directly or through another local helper it calls
+        # (fixed-point closure below, so a two-level verify_x -> expect_y
+        # chain still counts and a chain that never asserts does not).
+        $localFns = New-Object 'System.Collections.Generic.Dictionary[string,string]'
         foreach ($lm in [regex]::Matches($text, '(?m)^static\s+[\w\*]+\s+(\w+)\s*\([^;{]*\)\s*\{')) {
-            [void]$localFns.Add($lm.Groups[1].Value)
+            $hName = $lm.Groups[1].Value
+            $hStart = $lm.Index + $lm.Length
+            $hDepth = 1
+            $hi = $hStart
+            while ($hDepth -gt 0 -and $hi -lt $text.Length) {
+                if ($text[$hi] -eq '{') { $hDepth++ }
+                elseif ($text[$hi] -eq '}') { $hDepth-- }
+                $hi++
+            }
+            $localFns[$hName] = $text.Substring($hStart, $hi - $hStart - 1)
+        }
+
+        # Which local helpers actually assert, transitively. Seeded with the
+        # ones containing an assertion macro directly, then grown until no
+        # more helpers can be added (a helper that calls an asserting helper
+        # asserts too). Cycles terminate naturally: a pass that adds nothing
+        # ends the loop.
+        $assertingFns = New-Object System.Collections.Generic.HashSet[string]
+        foreach ($hName in $localFns.Keys) {
+            if ([regex]::IsMatch($localFns[$hName], $assertMacroPattern)) { [void]$assertingFns.Add($hName) }
+        }
+        $grew = $true
+        while ($grew) {
+            $grew = $false
+            foreach ($hName in @($localFns.Keys)) {
+                if ($assertingFns.Contains($hName)) { continue }
+                foreach ($hc in [regex]::Matches($localFns[$hName], '(\w+)\s*\(')) {
+                    $hCallee = $hc.Groups[1].Value
+                    if ($hCallee -ne $hName -and $assertingFns.Contains($hCallee)) {
+                        [void]$assertingFns.Add($hName)
+                        $grew = $true
+                        break
+                    }
+                }
+            }
         }
 
         # "Executed" means dispatched BY NAME from main() or a run_test_*()
@@ -121,13 +168,13 @@ foreach ($dir in $cDirs) {
                 $delegates = $false
                 foreach ($cm3 in [regex]::Matches($body, '(\w+)\s*\(')) {
                     $callee = $cm3.Groups[1].Value
-                    if ($callee -ne $name -and $localFns.Contains($callee)) {
+                    if ($callee -ne $name -and $assertingFns.Contains($callee)) {
                         $delegates = $true
                         break
                     }
                 }
                 if (-not $delegates) {
-                    $violations += "$($file.Name): $name -- no assertion macro call, direct or via a local helper"
+                    $violations += "$($file.Name): $name -- no assertion macro call, direct or via a local helper that itself asserts"
                 }
                 continue
             }
