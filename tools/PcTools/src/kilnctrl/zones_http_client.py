@@ -488,6 +488,26 @@ _PRESET_ZONE_OVERRIDE_FIELDS = {
     "guard_sensor_fault_debounce_ticks", "guard_frozen_window_s",
 }
 
+#: coupling_coeff is handled OUTSIDE _PRESET_ZONE_OVERRIDE_FIELDS on purpose:
+#: every other entry in that set is a single scalar GET/POST field
+#: (zone[key] -> z%u_<suffix>), but coupling_coeff is a whole ROW of the
+#: [affected][stepped] coupling matrix -- zone i's list entry j is "how much
+#: zone i (the AFFECTED zone) rises per the firmware's units when zone j (the
+#: STEPPED zone) is driven", exactly zones_http_handlers.c's
+#: `"coupling_c%u":%.4f` per-zone-i emission (line ~332) and the matching
+#: z%u_coupling_c%u POST field (line ~956, parse_zone_fields()). A preset
+#: names it "coupling_coeff": [c0, c1, ..., c{N-1}] -- SAME length and
+#: ORDERING as GET /api/zones' own coupling_c0..c{N-1} keys for that zone, not
+#: a flat scalar -- so it is expanded into the per-cell coupling_c%u keys of
+#: `merged` below rather than assigned like a scalar field. The diagonal
+#: cell (j == the zone's own index) is SKIPPED here rather than copied
+#: through: zones_http.c/parse_zone_fields() force-ranges it to exactly
+#: [0,0] regardless of what is posted, and _encode_zone() below asserts a
+#: nonzero diagonal cell reaching the merged dict is a bug -- so this
+#: expansion must never place a value there, even if the preset's row (as
+#: this matrix's rows do) already carries 0 in that slot.
+_PRESET_ZONE_COUPLING_FIELD = "coupling_coeff"
+
 #: Preset zone keys that are legitimately NOT overlaid by build_post_body()
 #: -- "index" locates the target zone rather than being posted as a field.
 #:
@@ -597,7 +617,19 @@ def build_post_body(current: dict, preset: dict) -> str:
         override = preset_zones_by_index.get(idx)
         if override:
             for key, value in override.items():
-                if key in _PRESET_ZONE_OVERRIDE_FIELDS:
+                if key == _PRESET_ZONE_COUPLING_FIELD:
+                    if not isinstance(value, list):
+                        raise ZonesHttpError(
+                            f"zone {idx}: preset field {_PRESET_ZONE_COUPLING_FIELD!r} must be a "
+                            f"list of per-cell values (coupling_c0..c{{N-1}}), got {value!r}")
+                    for j, cell in enumerate(value):
+                        if j == idx:
+                            # Diagonal stays whatever `current` already has
+                            # (0, forced by the firmware) -- never overlaid,
+                            # see this field's docstring above.
+                            continue
+                        merged[f"coupling_c{j}"] = cell
+                elif key in _PRESET_ZONE_OVERRIDE_FIELDS:
                     merged[key] = value
                 elif key not in _PRESET_ZONE_KNOWN_IGNORED_FIELDS:
                     raise ZonesHttpUnknownFieldError(

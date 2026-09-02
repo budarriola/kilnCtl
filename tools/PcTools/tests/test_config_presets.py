@@ -157,6 +157,23 @@ class LoadPresetDataTest(unittest.TestCase):
         names = [p["name"] for p in config_presets.list_presets()]
         self.assertIn("bench_fixture", names)
 
+    def test_coupling_matrix_preset_loads_and_validates(self):
+        """The real, loadable preset carrying the adopted coupling matrix --
+        see this module's docstring on the two misfiled backup files
+        (tuned_baseline_20260831.json, pid_validation_backup.json) that are
+        NOT presets and that this preset exists alongside, not instead of."""
+        preset = config_presets.load_preset_data("coupling_matrix_20260831")
+        self.assertEqual(preset["name"], "coupling_matrix_20260831")
+        self.assertEqual(len(preset["zones"]), 3)
+        by_index = {z["index"]: z for z in preset["zones"]}
+        self.assertEqual(by_index[0]["coupling_coeff"], [0.0, 27.32, 21.72])
+        self.assertEqual(by_index[1]["coupling_coeff"], [14.30, 0.0, 22.15])
+        self.assertEqual(by_index[2]["coupling_coeff"], [8.33, 12.42, 0.0])
+
+    def test_list_presets_includes_coupling_matrix(self):
+        names = [p["name"] for p in config_presets.list_presets()]
+        self.assertIn("coupling_matrix_20260831", names)
+
 
 class ValidationTest(unittest.TestCase):
     """NEGATIVE-TEST: prove the schema check actually rejects a malformed

@@ -137,14 +137,41 @@ send it), and `coupling_coeff[]` itself has no compiled-in default anywhere
 in this codebase today (every zone numeric field, PID gains and thermal
 model included, is populated by autotune/config restore, never a compiled
 constant) — so a new compile-time default for coupling specifically would
-have been the odd one out. The matrix instead lives in
-`tools/PcTools/config_presets/tuned_baseline_20260831.json`'s three zones'
-`coupling_c0/c1/c2`, in the same `[affected][stepped]` orientation as
-storage, reapplicable to any board via `load_config_preset`/
-`factory_default_then_load_preset`. It does not survive a factory reset by
-itself — reapplying the preset after a reset is the sanctioned recovery
-path for every other tunable in that file too, not a gap specific to
-coupling.
+have been the odd one out.
+
+**CORRECTION, 2026-09-02: the paragraph below (as originally written) was
+wrong, and the matrix was NOT reapplicable through the path it described.**
+`tools/PcTools/config_presets/tuned_baseline_20260831.json`, the file commit
+`78f2134` actually edited to carry this matrix, is **not a preset** —
+its top level is `{"kind":"kilnctl_backup","version":4,"profiles":[...]}`, a
+full board *backup* (same shape as `pid_validation_backup.json` next to it)
+that happens to live in the `config_presets/` directory. `list_config_presets`
+rejects it (`config_presets.py`'s `_validate()`: `missing required field
+'name'`), so `load_config_preset`/`factory_default_then_load_preset` could
+never load it. Separately, `zones_http_client.py` (the client
+`apply_preset(..., zones_host=...)` uses to reach `coupling_c%u`, since that
+field has no UART setter) had no field mapping for a preset's
+`coupling_coeff` at all — `build_post_body()` raised
+`ZonesHttpUnknownFieldError` on it. Together, there was no sanctioned path
+from this matrix to a live board.
+
+**Fixed 2026-09-02**: `zones_http_client.py` now maps a preset zone's
+`"coupling_coeff": [c0, c1, ..., c{N-1}]` (same `[affected][stepped]`
+orientation as GET `/api/zones`' own `coupling_c%u` keys — entry `j` is this
+zone's response to zone `j` being stepped) onto the per-cell
+`z%u_coupling_c%u` POST fields, skipping the diagonal cell (forced to `0` by
+the firmware, never overlaid even if a preset row carries something else
+there). The matrix now lives in a real, schema-valid preset,
+`tools/PcTools/config_presets/coupling_matrix_20260831.json`, alongside
+(not replacing) the misfiled backup files above — those are left as-is,
+being backups rather than presets is outside this correction's scope. **The
+actual working path**: `config_presets.load_preset_data(
+'coupling_matrix_20260831')`, then `apply_preset(control, preset,
+zones_host=<esp-ip>)` — `zones_host` must be given, since `coupling_coeff`
+has no UART setter and is otherwise reported in `not_written` and never
+reaches the board. It does not survive a factory reset by itself —
+reapplying the preset after a reset is the sanctioned recovery path for
+every other tunable in that file too, not a gap specific to coupling.
 
 **Prediction for the next run's analyst:** this matrix should shrink the
 positive dwell idle offset the owner noticed (profile-7 baseline,

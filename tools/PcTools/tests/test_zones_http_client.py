@@ -621,6 +621,103 @@ class BuildPostBodyTest(unittest.TestCase):
             repr(float(None))
 
 
+class CouplingCoeffOverrideTest(unittest.TestCase):
+    """coupling_coeff round-trip: a preset zone's "coupling_coeff" list
+    expands into the per-cell z%u_coupling_c%u POST keys, in the SAME
+    [affected][stepped] orientation GET /api/zones reports (zone i's list
+    entry j is zone i's response to zone j being stepped) -- see
+    zones_http_client.py's _PRESET_ZONE_COUPLING_FIELD docstring and the
+    blocking bug this fixes: commit 78f2134's matrix had no field mapping at
+    all (ZonesHttpUnknownFieldError) and was written into a file the preset
+    loader can't load (config_presets.ConfigPresetError) in the first place.
+
+    This matrix is deliberately ASYMMETRIC (zone0's response to zone1 is
+    27.32; zone1's response to zone0 is 14.30) specifically so a transposed
+    mapping is caught by these assertions, not just a swapped-value one --
+    see test_TRANSPOSED_mapping_is_caught_by_this_test below for the proof.
+    """
+
+    MATRIX = {  # preset "coupling_coeff" rows, [affected][stepped], diag 0
+        0: [0.0, 27.32, 21.72],
+        1: [14.30, 0.0, 22.15],
+        2: [8.33, 12.42, 0.0],
+    }
+
+    def _preset(self):
+        return {
+            "name": "coupling_matrix_test",
+            "zones": [{"index": i, "coupling_coeff": row} for i, row in self.MATRIX.items()],
+        }
+
+    def test_round_trips_into_the_right_per_cell_keys_and_orientation(self):
+        current = _sample_get_response(n_zones=3)
+        form = _decode_body(zh.build_post_body(current, self._preset()))
+
+        self.assertEqual(form["z0_coupling_c0"], repr(0.0))
+        self.assertEqual(form["z0_coupling_c1"], repr(27.32))
+        self.assertEqual(form["z0_coupling_c2"], repr(21.72))
+        self.assertEqual(form["z1_coupling_c0"], repr(14.30))
+        self.assertEqual(form["z1_coupling_c1"], repr(0.0))
+        self.assertEqual(form["z1_coupling_c2"], repr(22.15))
+        self.assertEqual(form["z2_coupling_c0"], repr(8.33))
+        self.assertEqual(form["z2_coupling_c1"], repr(12.42))
+        self.assertEqual(form["z2_coupling_c2"], repr(0.0))
+
+        # The two off-diagonal values sharing the {0,1} zone pair must NOT
+        # be equal -- proves this test would actually notice a transpose.
+        self.assertNotEqual(form["z0_coupling_c1"], form["z1_coupling_c0"])
+
+    def test_TRANSPOSED_mapping_is_caught_by_this_test(self):
+        """NEGATIVE TEST / mutation proof: simulate the bug of expanding a
+        row onto the WRONG zone's cells (j and i swapped, i.e. writing
+        z{j}_coupling_c{i} instead of z{i}_coupling_c{j}) and show the
+        assertions above would fail against it -- proving the positive test
+        is not vacuously true. Does not call build_post_body(); constructs
+        the transposed form the way a broken _encode_zone loop would."""
+        current = _sample_get_response(n_zones=3)
+        # Build a body the way a TRANSPOSED build_post_body() would: zone i's
+        # coupling_c{j} cell gets MATRIX[j][i] (the STEPPED zone's row, cell
+        # i) instead of the correct MATRIX[i][j] (the AFFECTED zone's own
+        # row, cell j). Written directly onto `current` and echoed with an
+        # empty preset, so this exercises only the assertion shape, not
+        # build_post_body() itself -- it is not making a false claim about
+        # the fix; it demonstrates the positive test above is not vacuous.
+        for zone in current["zones"]:
+            i = zone["index"]
+            for j in range(3):
+                if j == i:
+                    continue
+                zone[f"coupling_c{j}"] = self.MATRIX[j][i]
+
+        form = _decode_body(zh.build_post_body(current, {"name": "p", "zones": []}))
+
+        # The CORRECT (non-transposed) assertion fails against this body --
+        # proof that test_round_trips_into_the_right_per_cell_keys_and_
+        # orientation above would catch a real transpose bug in
+        # zones_http_client.py, not just echo back whatever it produced.
+        self.assertNotEqual(form["z0_coupling_c1"], repr(27.32))
+        self.assertEqual(form["z0_coupling_c1"], repr(14.30))
+        self.assertNotEqual(form["z1_coupling_c0"], repr(14.30))
+        self.assertEqual(form["z1_coupling_c0"], repr(27.32))
+
+    def test_diagonal_is_never_overlaid_even_if_preset_row_carries_nonzero(self):
+        """The diagonal cell is force-ranged to [0,0] by the firmware and
+        must never be posted nonzero -- build_post_body() must skip it
+        entirely (leaving whatever `current` already had) rather than
+        forwarding a preset author's mistaken nonzero diagonal entry."""
+        current = _sample_get_response(n_zones=3)
+        preset = {"name": "p", "zones": [{"index": 0, "coupling_coeff": [99.0, 27.32, 21.72]}]}
+        form = _decode_body(zh.build_post_body(current, preset))
+        # current's diagonal was 0.0 (see _sample_zone); must stay 0.0, not 99.0.
+        self.assertEqual(form["z0_coupling_c0"], repr(0.0))
+
+    def test_non_list_coupling_coeff_raises(self):
+        current = _sample_get_response(n_zones=3)
+        preset = {"name": "p", "zones": [{"index": 0, "coupling_coeff": 27.32}]}
+        with self.assertRaises(zh.ZonesHttpError):
+            zh.build_post_body(current, preset)
+
+
 class PostZonesTest(unittest.TestCase):
     def test_sends_form_encoded_body_and_returns_ok_text(self):
         with unittest.mock.patch.object(zh.urllib.request, "urlopen",
