@@ -128,13 +128,13 @@ class HttpTransportTest(unittest.TestCase):
     def test_get_status_parses_json(self):
         body = json.dumps({"channels": []}).encode()
         with unittest.mock.patch("urllib.request.urlopen", return_value=_FakeResp(body)):
-            result = rq.get_status("192.168.1.156")
+            result = rq.get_status("203.0.113.10")
         self.assertEqual(result, {"channels": []})
 
     def test_start_profile_parses_json(self):
         body = json.dumps({"ok": True}).encode()
         with unittest.mock.patch("urllib.request.urlopen", return_value=_FakeResp(body)):
-            result = rq.start_profile("192.168.1.156", 7)
+            result = rq.start_profile("203.0.113.10", 7)
         self.assertEqual(result, {"ok": True})
 
 
@@ -200,6 +200,114 @@ def _patched_run_entry(entry, cfg, transport, preset_dict):
     return calls
 
 
+class ApplyPresetHttpOnlyTest(unittest.TestCase):
+    """The no-serial-port path (control=None): every field a coupling-only
+    preset carries is written over POST /api/zones alone -- no UART, no
+    crash. Regression coverage for the AttributeError
+    ('NoneType' object has no attribute 'set_zone_pid') that
+    config_presets.apply_preset(None, ...) used to raise unconditionally.
+
+    HARD NETWORK GUARD: every test here patches urllib.request.urlopen to
+    raise if it is ever actually called, on top of the zones_host value
+    itself being a non-routable RFC 5737 TEST-NET-3 address
+    (203.0.113.10) -- belt and suspenders so a future regression (e.g. a
+    mutation that disables the model-field refusal, as this module's own
+    mutation-red proof does) fails loudly in-process instead of ever
+    reaching a real socket, real or test board included."""
+
+    def setUp(self):
+        patcher = unittest.mock.patch(
+            "urllib.request.urlopen",
+            side_effect=AssertionError(
+                "test attempted a real HTTP call -- zones_http_client.apply_zone_preset "
+                "should have been mocked before this code path could be reached"))
+        self._urlopen_guard = patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _preset(self, **zone_overrides):
+        zone = {
+            "index": 0, "relay_mask": 1, "control_mode": 2, "cal_offset_c": 0.0,
+            "pid_kp": 0.03, "pid_ki": 0.0001, "pid_kd": 0.8,
+            "max_ramp_c_per_hr": 900.0, "max_temp_c": 80.0, "min_temp_c": 0.0,
+            "coupling_coeff": [0.0, 10.0],
+        }
+        zone.update(zone_overrides)
+        return {"name": "fake_coupling_only", "zones": [zone]}
+
+    def test_coupling_only_preset_applies_over_http_with_no_control(self):
+        preset = self._preset()
+        with unittest.mock.patch.object(
+                rq.zones_http_client, "apply_zone_preset",
+                return_value=rq.zones_http_client.ZonesApplyResult(ok=True)) as mock_apply:
+            result = rq._apply_preset_http_only(None, preset, zones_host="203.0.113.10")
+        self.assertTrue(result.ok)
+        mock_apply.assert_called_once()
+        self.assertEqual(mock_apply.call_args.args[0], "203.0.113.10")
+
+    def test_verify_mismatch_raises(self):
+        preset = self._preset()
+        with unittest.mock.patch.object(
+                rq.zones_http_client, "apply_zone_preset",
+                return_value=rq.zones_http_client.ZonesApplyResult(
+                    ok=False, mismatches=["zone 0: pid_kp expected 0.03, got 0.05"])):
+            with self.assertRaises(rq.RunQueueError):
+                rq._apply_preset_http_only(None, preset, zones_host="203.0.113.10")
+
+    def test_model_field_preset_refuses_and_names_the_zone(self):
+        # A preset carrying a thermal model has no HTTP write path for it --
+        # must refuse up front (naming the zone), never silently drop the
+        # field or silently require a serial port with no explanation.
+        preset = self._preset(k_dc=31.9, tau_s=166.9, dead_time_s=41.1)
+        with self.assertRaises(rq.RunQueueError) as ctx:
+            rq._apply_preset_http_only(None, preset, zones_host="203.0.113.10")
+        message = str(ctx.exception)
+        self.assertIn("0", message)  # names zone index 0
+        self.assertIn("serial-port", message)
+
+    def test_nonNone_control_is_an_internal_error(self):
+        preset = self._preset()
+        with self.assertRaises(rq.RunQueueError):
+            rq._apply_preset_http_only(object(), preset, zones_host="203.0.113.10")
+
+    def test_no_zones_host_refuses(self):
+        preset = self._preset()
+        with self.assertRaises(rq.RunQueueError):
+            rq._apply_preset_http_only(None, preset, zones_host=None)
+
+    def test_run_entry_default_selection_does_not_crash_with_no_control(self):
+        """End-to-end: run_entry's default apply_preset_fn selection (no
+        explicit override) must pick the HTTP-only path when control=None,
+        not crash trying to call a method on it."""
+        tmpdir = tempfile.mkdtemp()
+        log_path = os.path.join(tmpdir, "run.jsonl")
+        preset = self._preset()
+
+        rested = _status([_channel(25.1, 25.0)])
+        transport = _ScriptedTransport(
+            status_sequence=[rested],
+            exec_sequence=[_exec([0], state="running"), _exec([0], state="done")],
+            plan_body=_plan([20, 45, 60]),
+            zones_body=_zones([80.0]),
+        )
+        entry = rq.QueueEntry(preset_name="fake_coupling_only", profile_id=7,
+                               log_path=log_path, label="t")
+        cfg = rq.RunQueueConfig(host="203.0.113.10", poll_interval_s=0.0,
+                                 sleep=transport.sleep, now=transport.now, cooldown_s=0.0)
+
+        with unittest.mock.patch("kilnctrl.config_presets.load_preset_data", return_value=preset), \
+             unittest.mock.patch.object(
+                 rq.zones_http_client, "apply_zone_preset",
+                 return_value=rq.zones_http_client.ZonesApplyResult(ok=True)), \
+             unittest.mock.patch.object(rq, "get_status", transport.get_status), \
+             unittest.mock.patch.object(rq, "get_exec", transport.get_exec), \
+             unittest.mock.patch.object(rq, "get_zones", transport.get_zones), \
+             unittest.mock.patch.object(rq, "get_profile_plan", transport.get_profile_plan), \
+             unittest.mock.patch.object(rq, "start_profile", transport.start_profile):
+            rq.run_entry(entry, cfg, control=None, apply_preset_fn=None)  # must not raise
+
+        self.assertEqual(transport.started_profile_id, 7)
+
+
 class RunEntryEndToEndTest(unittest.TestCase):
     def test_full_sequence_writes_run_and_cooldown_captures(self, tmp_path=None):
         import tempfile
@@ -214,14 +322,14 @@ class RunEntryEndToEndTest(unittest.TestCase):
             zones_body=_zones([80.0, 80.0, 80.0]),
         )
         entry = rq.QueueEntry(preset_name={"name": "fake"}, profile_id=7, log_path=log_path, label="t")
-        cfg = rq.RunQueueConfig(host="192.168.1.156", poll_interval_s=0.0,
+        cfg = rq.RunQueueConfig(host="203.0.113.10", poll_interval_s=0.0,
                                  sleep=transport.sleep, now=transport.now,
                                  cooldown_s=0.0)
 
         calls = _patched_run_entry(entry, cfg, transport, entry.preset_name)
 
         self.assertEqual(transport.started_profile_id, 7)
-        self.assertEqual(calls["applied"][1], "192.168.1.156")
+        self.assertEqual(calls["applied"][1], "203.0.113.10")
         with open(log_path) as fh:
             lines = [json.loads(line) for line in fh if line.strip()]
         self.assertGreaterEqual(len(lines), 1)
@@ -242,7 +350,7 @@ class RunEntryEndToEndTest(unittest.TestCase):
             zones_body=_zones([80.0, 80.0, 80.0]),  # all zones capped at 80C
         )
         entry = rq.QueueEntry(preset_name={"name": "fake"}, profile_id=7, log_path=log_path, label="t")
-        cfg = rq.RunQueueConfig(host="192.168.1.156", poll_interval_s=0.0,
+        cfg = rq.RunQueueConfig(host="203.0.113.10", poll_interval_s=0.0,
                                  sleep=transport.sleep, now=transport.now)
 
         with self.assertRaises(rq.RunQueueError):
@@ -263,7 +371,7 @@ class RunEntryEndToEndTest(unittest.TestCase):
             zones_body=_zones([80.0, 80.0, 80.0]),
         )
         entry = rq.QueueEntry(preset_name={"name": "fake"}, profile_id=7, log_path=log_path, label="t")
-        cfg = rq.RunQueueConfig(host="192.168.1.156", poll_interval_s=0.02,
+        cfg = rq.RunQueueConfig(host="203.0.113.10", poll_interval_s=0.02,
                                  sleep=transport.sleep, now=transport.now,
                                  rested_timeout_s=0.01)
 
@@ -284,7 +392,7 @@ class RunEntryEndToEndTest(unittest.TestCase):
             zones_body=_zones([80.0, 80.0, 80.0]),
         )
         entry = rq.QueueEntry(preset_name={"name": "fake"}, profile_id=7, log_path=log_path, label="t")
-        cfg = rq.RunQueueConfig(host="192.168.1.156", poll_interval_s=0.0,
+        cfg = rq.RunQueueConfig(host="203.0.113.10", poll_interval_s=0.0,
                                  sleep=transport.sleep, now=transport.now)
 
         with self.assertRaises(rq.RunQueueFaultError):

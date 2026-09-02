@@ -59,6 +59,8 @@ import urllib.parse
 import urllib.request
 from typing import Callable, Optional, Sequence
 
+from kilnctrl import zones_http_client
+
 log = logging.getLogger(__name__)
 
 DEFAULT_HTTP_TIMEOUT_S = 5.0
@@ -300,19 +302,80 @@ def _run_is_terminal(exec_body: dict, _status_body: dict) -> bool:
     return str(exec_body.get("state", "")).lower() in _TERMINAL_STATES
 
 
+#: Zone fields that have NO HTTP write path -- only the UART CONTROL task's
+#: SET_ZONE_MODEL can write them (config_presets.py's own required-field
+#: list; zones_http_client.py's _PRESET_ZONE_OVERRIDE_FIELDS has no k_dc/
+#: tau_s/dead_time_s entry, on purpose -- see that module's docstring).
+_MODEL_ONLY_FIELDS = ("k_dc", "tau_s", "dead_time_s")
+
+
+def _apply_preset_http_only(control, preset: dict, zones_host: "Optional[str]" = None,
+                             timeout: float = zones_http_client.ZONES_HTTP_TIMEOUT_S,
+                             verify: bool = True) -> "zones_http_client.ZonesApplyResult":
+    """Apply a preset with NO UART link at all -- the path used when
+    ``control`` is ``None``, which is the common case: the kilnctrl MCP
+    server holds the serial port, so a harness run generally cannot take it.
+
+    Every field a coupling-only preset carries (``pid_kp/ki/kd``,
+    ``coupling_coeff``, ``max_temp_c``, ``relay_mask``, ...) IS reachable
+    through ``POST /api/zones`` alone -- zones_http_handlers.c's whole-page-
+    submit handler parses and applies ``pid_kp/ki/kd`` exactly the same way
+    the UART CONTROL task's ``SET_ZONE_PID`` does (see that file's
+    ``parse_zone_fields()``, ~line 621). So for such a preset,
+    ``config_presets.apply_preset()``'s unconditional UART PID write is
+    REDUNDANT, not required -- this function does the equivalent work
+    through ``zones_http_client.apply_zone_preset()`` (GET-merge-POST-verify,
+    same as that module's own docstring), no serial port touched.
+
+    The one field that genuinely has no HTTP path is the thermal model
+    (``k_dc``/``tau_s``/``dead_time_s``). Rather than silently drop it (the
+    worst of the three options the coordinator named), this REFUSES up
+    front, naming exactly which zone(s) need it, if any zone in the preset
+    carries one -- the caller must pass ``--serial-port`` (and free the port
+    from the MCP server first) to apply that preset."""
+    if control is not None:
+        raise RunQueueError(
+            "_apply_preset_http_only called with a non-None control -- internal error, "
+            "the UART path (config_presets.apply_preset) should have been used instead")
+    if not zones_host:
+        raise RunQueueError(
+            "no serial port AND no zones_host -- there is no path at all to apply this preset")
+
+    model_zones = [z["index"] for z in preset["zones"] if any(k in z for k in _MODEL_ONLY_FIELDS)]
+    if model_zones:
+        raise RunQueueError(
+            f"preset {preset.get('name')!r} carries a thermal model (k_dc/tau_s/dead_time_s) for "
+            f"zone(s) {model_zones} -- that field has no HTTP write path, only the UART CONTROL "
+            f"task has a setter for it. Pass --serial-port to apply this preset (note: the "
+            f"kilnctrl MCP server usually owns the port, so this generally means stopping it "
+            f"first).")
+
+    result = zones_http_client.apply_zone_preset(zones_host, preset, timeout=timeout, verify=verify)
+    if not result.ok:
+        raise RunQueueError(
+            f"POST /api/zones for preset {preset.get('name')!r} was ACKed but a read-back "
+            f"disagreed: {result.mismatches}")
+    return result
+
+
 def run_entry(entry: QueueEntry, cfg: RunQueueConfig, control=None,
               apply_preset_fn=None) -> None:
     """Run one queue entry start to finish: apply preset, wait rested,
     safety-check, start, capture to ``entry.log_path`` through the run, then
     capture a cooldown tail into ``<log_path>.cooldown.jsonl``.
 
-    ``apply_preset_fn`` defaults to ``config_presets.apply_preset`` -- kept
-    injectable (rather than imported unconditionally at module load) so unit
-    tests exercising the refusal/ordering logic don't need
-    ``config_presets``'s own UART machinery in scope at all."""
+    ``apply_preset_fn``, when omitted, is chosen from ``control``: when a
+    ``ControlClient`` is given, ``config_presets.apply_preset`` (UART PID/
+    model write + HTTP zones write); when ``control`` is ``None`` (the
+    common case -- the kilnctrl MCP server holds the port),
+    :func:`_apply_preset_http_only` (HTTP only, refuses up front if the
+    preset needs a field only the UART CONTROL task can write). Passing
+    ``apply_preset_fn`` explicitly overrides this selection entirely --
+    tests use that to inject a fake with no ``config_presets``/UART
+    machinery in scope at all."""
     if apply_preset_fn is None:
         from kilnctrl import config_presets
-        apply_preset_fn = config_presets.apply_preset
+        apply_preset_fn = config_presets.apply_preset if control is not None else _apply_preset_http_only
         preset = config_presets.load_preset_data(entry.preset_name)
     else:
         # Tests hand apply_preset_fn a fake and entry.preset_name a raw
@@ -398,10 +461,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--rested-timeout-s", type=float, default=DEFAULT_RESTED_TIMEOUT_S)
     parser.add_argument("--cooldown-s", type=float, default=DEFAULT_COOLDOWN_S)
     parser.add_argument("--serial-port", default=None,
-                         help="serial port for the UART CONTROL link (PID gains). "
-                              "Required unless every preset's PID gains already match "
-                              "the board (coupling-only presets copy the bench's current "
-                              "gains verbatim, so this is often unnecessary).")
+                         help="serial port for the UART CONTROL link. Omit it (the common "
+                              "case -- the kilnctrl MCP server usually holds the port) and "
+                              "every preset field is written over HTTP alone (POST /api/zones "
+                              "writes pid_kp/ki/kd too, not just coupling/max_temp_c/etc). Only "
+                              "needed if a queued preset carries a thermal model "
+                              "(k_dc/tau_s/dead_time_s) -- that field has no HTTP write path; "
+                              "if one does and this is omitted, the run is refused up front, "
+                              "naming the zone, not silently skipped.")
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
