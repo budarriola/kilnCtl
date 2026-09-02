@@ -152,18 +152,33 @@ static size_t build_wifi_status_reply(uint8_t *out)
     return o;
 }
 
-/* byte0=count(N) + N * {name_len(1) + name(<=STACK_MARGIN_NAME_MAX-1) +
- * configured_stack_bytes(4) + hwm_bytes(4) + flags(1)}. Worst case:
- * 1 + 12 * (1 + 19 + 4 + 4 + 1) = 1 + 12*29 = 349 -- that would NOT fit
- * BRIDGE_REPLY_MAX (253), so this is capped defensively at build_stack_
- * margin_reply()'s own loop below, not just asserted; see that function. */
-static size_t build_stack_margin_reply(uint8_t *out)
+/* byte0=count-this-page(N) + byte1=truncated(0/1) + byte2=next_start_index
+ * (only meaningful when truncated=1) + N * {name_len(1) +
+ * name(<=STACK_MARGIN_NAME_MAX-1) + configured_stack_bytes(4) + hwm_bytes(4)
+ * + flags(1)}.
+ *
+ * DRAM_PSRAM_PLAN.md section 7 (2026-09-02, cap-raise pass): this used to
+ * report only byte0=count with no truncation signal, sized against a stale
+ * "today's <=6 registered tasks" assumption. The real count was already 28
+ * at STACK_MARGIN_MAX_TASKS=28 (now 40) -- worst case
+ * 1 + 40 * (1 + 19 + 4 + 4 + 1) = 1 + 40*29 = 1161, nowhere close to fitting
+ * BRIDGE_REPLY_MAX (253) in one reply, and even the REAL (short) names
+ * registered before this pass only left room for roughly the first 10 of 28
+ * entries -- most of the registry was invisible over this wire path with no
+ * indication anything was missing beyond an ESP_LOGW nobody was watching.
+ * `start_index` (from the request's optional byte1, 0 if absent -- see
+ * uart_task_ids.h) lets the caller page through the whole registry; the
+ * `truncated`/`next_start_index` bytes make that non-silent instead of
+ * requiring the caller to notice the reply looks short. */
+static size_t build_stack_margin_reply(uint8_t *out, size_t start_index)
 {
-    size_t o = 1; /* count goes in out[0], filled in once the loop below is done */
+    size_t o = 3; /* [0]=count-this-page, [1]=truncated, [2]=next_start_index -- filled in below */
     size_t n = 0;
     size_t total = stack_margin_count();
+    size_t i = start_index;
+    bool truncated = false;
 
-    for (size_t i = 0; i < total; ++i) {
+    for (; i < total; ++i) {
         const char *name = NULL;
         uint32_t configured_bytes = 0, hwm_bytes = 0;
         stack_margin_level_t level = STACK_MARGIN_LEVEL_OK;
@@ -179,11 +194,14 @@ static size_t build_stack_margin_reply(uint8_t *out)
         size_t entry_len = 1 + name_len + 4 + 4 + 1;
         if (o + entry_len > BRIDGE_REPLY_MAX) {
             /* Would overflow the shared reply buffer -- stop rather than
-             * write past it. Never hit with today's <=6 registered tasks
-             * (6 * 29 + 1 = 175 < 253); guards the buffer directly instead
-             * of trusting that headroom to hold as more tasks register. */
-            ESP_LOGW(TAG, "info: GET_STACK_MARGIN truncated at %u/%u entries -- reply buffer full",
-                     (unsigned)n, (unsigned)total);
+             * write past it, and say so on the wire (truncated=1,
+             * next_start_index=i) rather than just logging: a caller that
+             * never looks at the device log has no other way to know this
+             * page wasn't the whole registry. */
+            ESP_LOGW(TAG, "info: GET_STACK_MARGIN page truncated at %u/%u entries from "
+                          "start_index=%u -- reply buffer full, next_start_index=%u",
+                     (unsigned)n, (unsigned)total, (unsigned)start_index, (unsigned)i);
+            truncated = true;
             break;
         }
 
@@ -203,6 +221,10 @@ static size_t build_stack_margin_reply(uint8_t *out)
     }
 
     out[0] = (uint8_t)n;
+    out[1] = truncated ? 1u : 0u;
+    /* i stops at UINT8_MAX worst case (STACK_MARGIN_MAX_TASKS is nowhere
+     * near 256), so this cast never wraps a real next-page index. */
+    out[2] = truncated ? (uint8_t)i : 0u;
     return o;
 }
 
@@ -233,9 +255,14 @@ static void info_bridge_task(void *arg)
             case INFO_CMD_GET_WIFI_STATUS:
                 reply_len = build_wifi_status_reply(reply);
                 break;
-            case INFO_CMD_GET_STACK_MARGIN:
-                reply_len = build_stack_margin_reply(reply);
+            case INFO_CMD_GET_STACK_MARGIN: {
+                /* byte1 = start_index, optional -- a pre-paging PC build
+                 * sends only byte0 (msg.length==1), which reads as
+                 * start_index=0, same as always. See uart_task_ids.h. */
+                size_t start_index = (msg.length >= 2) ? (size_t)msg.payload[1] : 0;
+                reply_len = build_stack_margin_reply(reply, start_index);
                 break;
+            }
             default:
                 ESP_LOGW(TAG, "info: unknown subcmd 0x%02X -- rejected", msg.payload[0]);
                 bridge_reply_unsupported(ctx->proto, &msg, UART_TASK_ID_INFO, msg.payload[0]);

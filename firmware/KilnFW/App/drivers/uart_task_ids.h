@@ -1209,8 +1209,13 @@
  */
 #define INFO_CMD_GET_WIFI_STATUS 0x03u
 
-/* GET_STACK_MARGIN request payload: just byte0 = INFO_CMD_GET_STACK_MARGIN,
- * no args. Added 2026-08-24, TODO.md section 13: that investigation found
+/* GET_STACK_MARGIN request payload:
+ *   byte0     = INFO_CMD_GET_STACK_MARGIN
+ *   byte1     = start_index (OPTIONAL -- omit entirely for start_index=0,
+ *               same as every request before paging existed). Added
+ *               2026-09-02, DRAM_PSRAM_PLAN.md section 7 (see response
+ *               doc below for why).
+ * Added 2026-08-24, TODO.md section 13: that investigation found
  * six internal-only FreeRTOS task stacks (~20.5KB total) that are
  * candidates to shrink or move to PSRAM, but explicitly forbade resizing
  * any of them "from the numbers in this entry alone" -- this repo has
@@ -1226,7 +1231,21 @@
  * a wire-format break.
  *
  * GET_STACK_MARGIN response payload:
- *   byte0     = count (N), 0 <= N <= 12 (STACK_MARGIN_MAX_TASKS)
+ *   byte0     = count-THIS-PAGE (N), 0 <= N <= STACK_MARGIN_MAX_TASKS
+ *   byte1     = truncated (0/1) -- more entries exist past start_index+N
+ *               than fit BRIDGE_REPLY_MAX; byte2 says where to resume.
+ *               Added 2026-09-02 alongside start_index paging: with
+ *               STACK_MARGIN_MAX_TASKS now 40 (and real short task names)
+ *               a single reply only ever fits ~10 entries, so a caller
+ *               that wants the whole registry MUST loop, resending with
+ *               byte1=byte2-of-the-previous-reply until truncated=0. A
+ *               pre-paging caller that only ever reads byte0 entries
+ *               still gets a fully self-consistent (if partial) first
+ *               page -- the wire format did not change shape, just gained
+ *               two bytes and no longer represented a partial reply as
+ *               indistinguishable from a complete one.
+ *   byte2     = next_start_index (valid only when byte1==1) -- pass this
+ *               back as the next request's byte1 to continue
  *   N * entry, each:
  *     byte[0]     = name_len (Nn)
  *     Nn bytes    = ASCII task name, not null-terminated (matches the
@@ -1249,7 +1268,11 @@
  *                   threshold -- see stack_margin_calc.h)
  *   Task order matches registration order (main.c/rules_task.c/
  *   uart_bridge.c's stack_margin_register() call sites), which is fixed at
- *   build time, not alphabetical or wire-negotiated. */
+ *   build time, not alphabetical or wire-negotiated -- so paging with a
+ *   stable start_index between calls returns a stable, non-overlapping
+ *   partition of the registry as long as no task is (de)registered
+ *   mid-walk (registration only ever happens at boot, before this bridge
+ *   task is reachable at all). */
 #define INFO_CMD_GET_STACK_MARGIN 0x04u
 
 /* --- CONTROL (task_id = UART_TASK_ID_CONTROL) ---
