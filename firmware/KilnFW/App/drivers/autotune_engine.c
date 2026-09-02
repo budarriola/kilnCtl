@@ -3470,6 +3470,32 @@ bool autotune_engine_run_relay(uint8_t zone_index, float setpoint_c, float relay
         return false;
     }
 
+    /* REVIEW 2026-09-02: the window above is derived from `headroom` alone
+     * and knows nothing about `h`, the hysteresis half-width this run will
+     * actually oscillate over. Before 17e67ee that was harmless -- the
+     * headroom was a fixed 50C and AUTOTUNE_RELAY_MAX_H_C is 20C, so the
+     * band could never reach a guard limit. With the span-proportional
+     * fallback the headroom can now be SMALLER than a legal h (this rig:
+     * span 80C -> headroom 20C, and h may be up to 20C), so a setpoint at
+     * the top of the window with a large h puts the band's upper edge AT or
+     * ABOVE max_temp_c -- exactly the "a test whose oscillation is designed
+     * to sit where guard 5 trips" case the comment at the top of this block
+     * says must never be accepted. Check the band itself, independently of
+     * how the window was computed, so the invariant holds for every future
+     * headroom formula. Strict inequalities: guard 5 trips AT max_temp_c,
+     * and the band edge is where the relay switches, not where the
+     * temperature stops climbing. */
+    if (setpoint_c + h >= max_temp_c || setpoint_c - h <= min_temp_c) {
+        if (err_msg) {
+            snprintf(err_msg, err_cap,
+                     "relay band %.1fC..%.1fC (setpoint %.1fC +/- %.1fC) reaches zone %u's guard limits "
+                     "(floor %.0fC, limit %.0fC) -- lower the hysteresis or move the setpoint",
+                     (double)(setpoint_c - h), (double)(setpoint_c + h), (double)setpoint_c, (double)h,
+                     zone_index, (double)min_temp_c, (double)max_temp_c);
+        }
+        return false;
+    }
+
     if (!begin_run_locked(zone_index, err_msg, err_cap)) {
         return false;
     }

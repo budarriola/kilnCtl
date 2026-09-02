@@ -3738,6 +3738,72 @@ static void test_relay_setpoint_pathologically_narrow_span_refuses_with_stated_w
                "must not fall through to either of the old two-sided 'at least NC below/above' messages");
 }
 
+// Same as call_run_relay() but with an explicit hysteresis, for the band-vs-
+// guard-limit check (call_run_relay() always passes 0.0f -> the 2C default).
+static bool call_run_relay_h(float max_temp_c, float min_temp_c, float setpoint_c, float h_c, char *errbuf,
+                             size_t errcap)
+{
+    static MAX31856BusClass bus;
+    static SafetyLinkClass safety;
+    memset(&s_at, 0, sizeof(s_at));
+    memset(&bus, 0, sizeof(bus));
+    memset(&safety, 0, sizeof(safety));
+    bus.initialized = true;
+    s_at.thermo_bus = &bus;
+    s_at.safety = &safety;
+    s_at.lock = xSemaphoreCreateMutex();
+    TEST_CHECK(s_at.lock != NULL, "test setup: lock must be creatable");
+
+    s_stub_max_temp_c = max_temp_c;
+    s_stub_min_temp_c = min_temp_c;
+    s_stub_ch0_ok = true;
+
+    return autotune_engine_run_relay(0, setpoint_c, /*relay_d=*/0.0f, h_c, AUTOTUNE_RULE_ZIEGLER_NICHOLS, errbuf,
+                                     errcap);
+}
+
+// REVIEW 2026-09-02. 17e67ee's span-proportional headroom made the setpoint
+// window narrower than a LEGAL hysteresis on a narrow-span rig: this rig's
+// span is 80C, so headroom = 20C and the window top is 60C -- but
+// AUTOTUNE_RELAY_MAX_H_C is 20C, so a setpoint of 60C with h=20C oscillates
+// over 40C..80C, whose upper edge IS max_temp_c. Guard 5 would trip partway
+// through a multi-hour relay test. The window check alone cannot see this
+// (it never looks at h), so the band must be checked in its own right.
+static void test_relay_band_must_not_reach_the_zone_guard_limits(void)
+{
+    TEST_SECTION("relay oscillation band (setpoint +/- hysteresis) must stay strictly inside the zone's "
+                 "floor/limit -- the setpoint window alone does not check the hysteresis");
+    char err[160] = {0};
+
+    // Inside the 17e67ee window ([20, 60] on an 80/0 span) but the band's
+    // top edge lands exactly on max_temp_c -- guard 5's own trip point.
+    bool ok = call_run_relay_h(/*max_temp_c=*/80.0f, /*min_temp_c=*/0.0f, /*setpoint_c=*/60.0f, /*h_c=*/20.0f, err,
+                               sizeof(err));
+    TEST_CHECK(!ok, "setpoint 60C with h=20C on an 80/0 span puts the band top AT the 80C limit -- must refuse");
+    TEST_CHECK(s_at.method != AUTOTUNE_METHOD_RELAY, "a refused call must not have started a run at all");
+    TEST_CHECK(strstr(err, "band") != NULL, "the refusal must name the band, not restate the setpoint window");
+
+    // The floor side of the same invariant.
+    ok = call_run_relay_h(/*max_temp_c=*/80.0f, /*min_temp_c=*/0.0f, /*setpoint_c=*/20.0f, /*h_c=*/20.0f, err,
+                          sizeof(err));
+    TEST_CHECK(!ok, "setpoint 20C with h=20C puts the band bottom AT the 0C floor -- must refuse");
+
+    // The same rig, the same window, an ordinary hysteresis: still accepted.
+    // Without this the new check could pass by refusing everything.
+    ok = call_run_relay_h(/*max_temp_c=*/80.0f, /*min_temp_c=*/0.0f, /*setpoint_c=*/60.0f, /*h_c=*/2.0f, err,
+                          sizeof(err));
+    TEST_CHECK(ok, "setpoint 60C with the default-scale h=2C stays well inside 0..80 -- must still be accepted");
+    TEST_CHECK(s_at.method == AUTOTUNE_METHOD_RELAY, "an accepted call must actually start the relay method");
+
+    // A wide span keeps its pre-existing behaviour: the fixed 50C headroom
+    // is already larger than AUTOTUNE_RELAY_MAX_H_C, so nothing the window
+    // admits can be refused by this check.
+    ok = call_run_relay_h(/*max_temp_c=*/1000.0f, /*min_temp_c=*/0.0f, /*setpoint_c=*/950.0f, /*h_c=*/20.0f, err,
+                          sizeof(err));
+    TEST_CHECK(ok, "on a wide span the window's own 50C headroom already covers the largest legal h -- "
+                   "this check must not narrow it");
+}
+
 static void test_run_to_target_rejects_relay_only_rules(void)
 {
     TEST_SECTION("autotune_engine_run_to_target() refuses ZN/Tyreus-Luyben, same as autotune_engine_run()");
@@ -4883,6 +4949,7 @@ void run_test_autotune_engine_prestart(void)
     test_relay_setpoint_narrow_rig_span_now_has_a_usable_window();
     test_relay_setpoint_wide_span_keeps_the_full_50c_headroom();
     test_relay_setpoint_pathologically_narrow_span_refuses_with_stated_window();
+    test_relay_band_must_not_reach_the_zone_guard_limits();
     test_run_to_target_rejects_relay_only_rules();
     test_run_to_target_default_uses_75_percent_of_max_temp();
     test_run_to_target_default_refused_when_max_temp_c_is_zero();
