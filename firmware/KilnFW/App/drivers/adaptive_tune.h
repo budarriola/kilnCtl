@@ -53,7 +53,12 @@ typedef struct {
     bool     enabled;                  // this zone's opt-in, default OFF -- see adaptive_tune_get_enabled()
     uint32_t ring_count;                // dwell observations currently held for this zone (<= capacity)
     uint32_t observations_lifetime;     // total observations ever folded in, this boot (ring evicts, this doesn't)
-    bool     has_applied;               // true once at least one refinement has actually been applied
+    // True once at least one refinement has been applied. RAM-only, so this
+    // latch is per-BOOT, not lifetime: it clears on power cycle while the
+    // gains it describes persist in NVS. The zones page gates its "last
+    // applied change" column on this, so that column goes blank after a
+    // reboot even though the change is still in effect.
+    bool     has_applied;
     float    prior_k_dc;                // model K_dc immediately before the last applied refinement
     float    applied_k_dc;              // model K_dc immediately after it
     float    last_delta_pct;            // (applied-prior)/prior*100 -- signed
