@@ -24,6 +24,7 @@ red captured, per repo policy.
 from __future__ import annotations
 
 import dataclasses
+import json
 import os
 
 import numpy as np
@@ -169,7 +170,7 @@ def _collinear_observations(n=8):
     base_dir = np.array([1.0, 0.7, 0.5])
     obs = []
     ambient = np.array([20.0, 20.0, 20.0])
-    A_true = ci.CURRENT_MATRIX
+    A_true = ci.SEC2_IDENTIFICATION_HYBRID_MATRIX
     for i, k in enumerate(np.linspace(0.1, 0.9, n)):
         u = base_dir * k
         T = np.round(ambient + A_true @ u, 1)  # quantized temperature
@@ -210,7 +211,7 @@ def test_well_conditioned_observations_are_not_refused():
     only on a real bug).
     """
     rng = np.random.default_rng(1234)
-    A_true = ci.CURRENT_MATRIX
+    A_true = ci.SEC2_IDENTIFICATION_HYBRID_MATRIX
     ambient = np.array([20.0, 20.0, 20.0])
     obs = []
     # independently vary each zone's duty across a wide, uncorrelated range
@@ -299,7 +300,7 @@ def test_self_check_reproduces_known_figures_on_real_fixtures():
     the whole point of the self-check is that this is the pipeline's proof
     it is measuring the same thing that hand analysis measured.
 
-    Proof this can fail: swapped CURRENT_MATRIX for its transpose for this
+    Proof this can fail: swapped SEC2_IDENTIFICATION_HYBRID_MATRIX for its transpose for this
     call only. Captured red:
         AssertionError: assert False
         E  self_check['zones'][2]['ok'] is False (observed=-0.31 vs known=+0.108)
@@ -319,7 +320,7 @@ def test_self_check_fails_on_transposed_current_matrix():
     runs every time rather than only during manual review)."""
     obs = ci.dwell_observations_from_paths(ALL_FIXTURES)
     assert len(obs) >= 10
-    scores = ci.score_matrix(ci.CURRENT_MATRIX.T, obs)
+    scores = ci.score_matrix(ci.SEC2_IDENTIFICATION_HYBRID_MATRIX.T, obs)
     # at least one zone's mean error must land far outside the tolerance
     # band that the correctly-oriented matrix passes.
     mismatches = [
@@ -389,7 +390,7 @@ def test_current_matrix_passes_plausibility():
     """Sanity anchor: the real, bench-measured matrix must pass its own
     plausibility check (all-positive, diagonal-dominant every row) -- if
     this ever goes red, the check itself is broken, not the matrix."""
-    ok, reason = ci.matrix_plausibility(ci.CURRENT_MATRIX)
+    ok, reason = ci.matrix_plausibility(ci.SEC2_IDENTIFICATION_HYBRID_MATRIX)
     assert ok, reason
 
 
@@ -401,7 +402,7 @@ def test_negative_entry_fails_plausibility():
       -- a matrix with one negative entry was reported plausible once the
       floor no longer caught ordinary negative values.
     """
-    m = ci.CURRENT_MATRIX.copy()
+    m = ci.SEC2_IDENTIFICATION_HYBRID_MATRIX.copy()
     m[0, 1] = -5.0
     ok, reason = ci.matrix_plausibility(m)
     assert not ok
@@ -436,7 +437,7 @@ def test_non_diagonal_dominant_fails_plausibility():
 
 def test_single_zone_column_observations_recovers_true_column():
     """Zone 0 driven alone at duty 0.3, zones 1/2 passive but rising via
-    real cross-coupling from ``CURRENT_MATRIX``'s column 0 -- after a long
+    real cross-coupling from ``SEC2_IDENTIFICATION_HYBRID_MATRIX``'s column 0 -- after a long
     enough dwell (>= SINGLE_ZONE_PASSIVE_SETTLE_MIN_S), each zone's
     directly-measured k = rise/duty must recover that column to within
     quantization noise, with NO linear solve involved.
@@ -451,7 +452,7 @@ def test_single_zone_column_observations_recovers_true_column():
     """
     ambient = {0: 20.0, 1: 20.0, 2: 20.0}
     duty0 = 0.3
-    A = ci.CURRENT_MATRIX
+    A = ci.SEC2_IDENTIFICATION_HYBRID_MATRIX
     true_rise = A[:, 0] * duty0  # column 0: each zone's rise from zone 0 alone
     settle_c = {z: ambient[z] + true_rise[z] for z in ci.ZONES}
     zone_duty = {0: duty0, 1: 0.0, 2: 0.0}
@@ -476,7 +477,7 @@ def test_single_zone_matrix_refuses_when_incomplete():
       as though it were a real answer.
     """
     ambient = {0: 20.0, 1: 20.0, 2: 20.0}
-    A = ci.CURRENT_MATRIX
+    A = ci.SEC2_IDENTIFICATION_HYBRID_MATRIX
     duty0 = 0.3
     true_rise = A[:, 0] * duty0
     settle_c = {z: ambient[z] + true_rise[z] for z in ci.ZONES}
@@ -490,32 +491,32 @@ def test_single_zone_matrix_refuses_when_incomplete():
 
 
 def test_current_matrix_is_not_plant_sim_after_2026_09_02_recalibration():
-    """Until 2026-09-02 ``CURRENT_MATRIX`` was ``plant_sim.K_full`` by
+    """Until 2026-09-02 ``SEC2_IDENTIFICATION_HYBRID_MATRIX`` was ``plant_sim.K_full`` by
     identity -- a single source of truth for "the matrix". That stopped
     being correct once plant_sim.py's simulator was recalibrated to a new
     asymmetric excitation-run matrix while firmware itself still ships the
     old bench-rig matrix (the new one is explicitly NOT adopted into
     firmware -- an owner decision, see PID_EXPANSION_PLAN.md sec 3.2/3.4).
-    ``CURRENT_MATRIX`` means "what's on the board"; it must now be its own
+    ``SEC2_IDENTIFICATION_HYBRID_MATRIX`` means "what's on the board"; it must now be its own
     constant, pinned to the old matrix, independent of whatever plant_sim.py
     considers the best physical estimate for simulation.
 
-    Proof this can fail: pointed ``CURRENT_MATRIX`` back at ``ps.K_full``.
+    Proof this can fail: pointed ``SEC2_IDENTIFICATION_HYBRID_MATRIX`` back at ``ps.K_full``.
     Captured red output:
 
         FAILED tests/test_coupled_ident.py::test_current_matrix_is_not_plant_sim_after_2026_09_02_recalibration
-        AssertionError: CURRENT_MATRIX must not alias plant_sim.K_full any more
+        AssertionError: SEC2_IDENTIFICATION_HYBRID_MATRIX must not alias plant_sim.K_full any more
         assert not True
 
     Reverted, suite green again before this test was kept.
     """
-    assert not np.array_equal(ci.CURRENT_MATRIX, ps.K_full), (
-        "CURRENT_MATRIX must not alias plant_sim.K_full any more -- "
+    assert not np.array_equal(ci.SEC2_IDENTIFICATION_HYBRID_MATRIX, ps.K_full), (
+        "SEC2_IDENTIFICATION_HYBRID_MATRIX must not alias plant_sim.K_full any more -- "
         "the on-board firmware matrix and the sim's recalibrated matrix have diverged"
     )
     # Still the specific old bench-rig matrix, not drifted to something else.
-    assert ci.CURRENT_MATRIX[0][1] == pytest.approx(26.61)
-    assert ci.CURRENT_MATRIX[1][0] == pytest.approx(15.78)
+    assert ci.SEC2_IDENTIFICATION_HYBRID_MATRIX[0][1] == pytest.approx(26.61)
+    assert ci.SEC2_IDENTIFICATION_HYBRID_MATRIX[1][0] == pytest.approx(15.78)
 
 
 # ---------------------------------------------------------------------------
@@ -758,7 +759,7 @@ def test_settle_criterion_audit_from_pair_matches_direct_extraction():
 
 def test_matrix_from_single_zone_columns_orientation():
     """matrix_from_single_zone_columns() must assemble cell (affected, active)
-    -- i.e. [affected][stepped] -- not the transpose. Uses CURRENT_MATRIX,
+    -- i.e. [affected][stepped] -- not the transpose. Uses SEC2_IDENTIFICATION_HYBRID_MATRIX,
     which is intentionally ASYMMETRIC (see the orientation tests above for
     why a symmetric matrix can't catch this), and drives all three zones
     one at a time so every one of the 9 cells is measured directly.
@@ -767,11 +768,11 @@ def test_matrix_from_single_zone_columns_orientation():
     ``(o.active_zone, o.affected_zone)`` (the transpose). Captured red:
         AssertionError: assert 8.xx == pytest.approx(20.73 +/- ...)
       -- the assembled matrix's off-diagonal entries came back matching
-      CURRENT_MATRIX.T instead of CURRENT_MATRIX, exactly the swapped-twice
+      SEC2_IDENTIFICATION_HYBRID_MATRIX.T instead of SEC2_IDENTIFICATION_HYBRID_MATRIX, exactly the swapped-twice
       mistake this whole module's docstring warns about.
     """
     ambient = {0: 20.0, 1: 20.0, 2: 20.0}
-    A = ci.CURRENT_MATRIX
+    A = ci.SEC2_IDENTIFICATION_HYBRID_MATRIX
     duty_level = 0.3
     column_obs = {}
     for active in ci.ZONES:
@@ -905,8 +906,8 @@ def test_feasibility_sweep_diagonal_only_matches_hand_calc():
 def test_feasibility_sweep_new_matrix_extends_old_matrix_range():
     """Sanity check against the two matrices this module actually
     compares in the coupling report: a matrix with a uniformly higher
-    diagonal gain than CURRENT_MATRIX must not be LESS feasible."""
-    old = ci.CURRENT_MATRIX
+    diagonal gain than SEC2_IDENTIFICATION_HYBRID_MATRIX must not be LESS feasible."""
+    old = ci.SEC2_IDENTIFICATION_HYBRID_MATRIX
     new = old * 1.05
     r_old = ci.coupled_hold_feasibility_sweep(old, ambient_c=22.0)
     r_new = ci.coupled_hold_feasibility_sweep(new, ambient_c=22.0)
@@ -1025,3 +1026,64 @@ def test_coupling_report_cli_json_smoke(capsys):
     out = capsys.readouterr().out
     parsed = json_mod.loads(out)
     assert parsed["matrix_incomplete"] is False
+
+
+# ---------------------------------------------------------------------------
+# Anti-staleness guard: ADOPTED_MATRIX_OFF_DIAGONAL / ADOPTED_HYBRID_MATRIX
+# must never silently drift from the checked-in preset that is the actual
+# source of truth for what config_presets.apply_preset() posts to a board
+# (tools/PcTools/config_presets/coupling_matrix_20260831.json) -- the exact
+# failure mode this whole task exists to fix: CURRENT_MATRIX went stale
+# relative to what firmware actually runs and nothing caught it.
+# ---------------------------------------------------------------------------
+
+_ADOPTED_PRESET_PATH = os.path.join(
+    os.path.dirname(__file__), "..", "config_presets", "coupling_matrix_20260831.json")
+
+
+def test_adopted_matrix_matches_checked_in_preset():
+    """``ci.ADOPTED_MATRIX_OFF_DIAGONAL`` must equal, cell for cell, the
+    ``coupling_coeff`` rows in ``coupling_matrix_20260831.json`` -- the
+    checked-in preset that is the actual, sanctioned source of truth for
+    what gets POSTed to a live board (PID_EXPANSION_PLAN.md sec 3.2's
+    "ADOPTED" matrix). If this ever goes red, either the preset changed (a
+    new matrix was adopted) or this module's constant was hand-edited out
+    of sync with it -- in both cases the fix is to re-derive the constant
+    from the preset, not to edit this test.
+
+    Proof this can fail: changed a single off-diagonal cell of
+    ``ci.ADOPTED_MATRIX_OFF_DIAGONAL`` (z0's c1 entry, 27.32 -> 27.99) and
+    reran. Captured red:
+        AssertionError: zone 0 coupling_coeff mismatch: code=[0.0, 27.99, 21.72] preset=[0.0, 27.32, 21.72]
+      -- confirms the test actually compares real numbers cell-by-cell,
+      not just object identity or shape.
+    """
+    with open(_ADOPTED_PRESET_PATH, "r", encoding="utf-8") as fh:
+        preset = json.load(fh)
+    zones = sorted(preset["zones"], key=lambda z: z["index"])
+    assert len(zones) == 3
+    for z in zones:
+        i = z["index"]
+        code_row = ci.ADOPTED_MATRIX_OFF_DIAGONAL[i].tolist()
+        preset_row = z["coupling_coeff"]
+        assert code_row == pytest.approx(preset_row, abs=1e-9), (
+            f"zone {i} coupling_coeff mismatch: code={code_row} preset={preset_row}")
+
+
+def test_adopted_hybrid_matrix_diagonal_is_ff_k_dc():
+    """``ADOPTED_HYBRID_MATRIX``'s diagonal must be exactly
+    ``FF_K_DC_DIAGONAL`` (never the preset's contractual-0 diagonal) --
+    this is what makes it the HYBRID the solver actually runs, per sec
+    3.2's correction, rather than the raw preset matrix nothing on the
+    board ever solves against directly.
+
+    Proof this can fail: built the hybrid with ``off_diagonal_matrix``'s
+    own (zero) diagonal left in place instead of substituting
+    ``FF_K_DC_DIAGONAL``. Captured red:
+        AssertionError: assert 0.0 == 39.2459 +- ...
+      -- confirms the diagonal substitution is actually exercised, not
+      vacuously true because the two happen to agree.
+    """
+    for i in range(3):
+        assert ci.ADOPTED_HYBRID_MATRIX[i, i] == pytest.approx(ci.FF_K_DC_DIAGONAL[i])
+        assert ci.ADOPTED_MATRIX_OFF_DIAGONAL[i, i] == 0.0

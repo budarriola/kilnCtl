@@ -133,20 +133,72 @@ MIN_DUTY_FOR_OBSERVATION = 0.03
 # "CONDITIONING" section for why this specific value.
 COND_REFUSAL_THRESHOLD = 1.0e4
 
-# The matrix currently on the board. Until 2026-09-02 this was reused
-# verbatim from plant_sim.K_full; that is no longer correct after
-# plant_sim.py's simulator-side recalibration to the new asymmetric
-# excitation-run matrix (see PID_EXPANSION_PLAN.md sec 3.2/3.4) -- the
-# simulator's best physical estimate and what firmware actually ships are
-# now two different things, and this constant means the latter. The new
-# matrix is a sim-side/analysis finding, explicitly NOT adopted into
-# firmware (an owner decision), so CURRENT_MATRIX stays pinned to the
-# bench-rig matrix firmware actually runs until that adoption happens.
-CURRENT_MATRIX = np.array([
-    [39.25, 26.61, 20.73],
-    [15.78, 31.97, 21.09],
-    [9.70, 11.38, 31.68],
+# ---------------------------------------------------------------------------
+# The board's on-diagonal identified DC gains (model_k_dc, read back
+# 2026-09-02 -- see PID_EXPANSION_PLAN.md sec 3). zone_coupling_solve.c
+# never reads a coupling matrix's own diagonal cell (it is contractually 0
+# in storage -- zones_http.c); it always substitutes this per-zone gain
+# instead (sec 3.2's "correction"). Every "hybrid" matrix below is this
+# diagonal paired with a different set of off-diagonals.
+FF_K_DC_DIAGONAL = np.array([39.2459, 31.9669, 31.6810])
+
+
+def _hybrid(off_diagonal_matrix: np.ndarray) -> np.ndarray:
+    """``off_diagonal_matrix`` (diagonal contractually 0, [affected][stepped])
+    with ``FF_K_DC_DIAGONAL`` substituted for that diagonal -- exactly what
+    ``zone_coupling_solve_hold()``/``_climb()`` actually run, per sec 3.2's
+    correction. Never call ``np.linalg.inv`` etc. on the raw diagonal-0
+    matrices below directly; they are storage format, not something the
+    firmware solves against as-is."""
+    m = off_diagonal_matrix.copy()
+    np.fill_diagonal(m, FF_K_DC_DIAGONAL)
+    return m
+
+
+# THE MATRIX ADOPTED 2026-09-02 (commit 78f2134 / eb17ea5, owner decision --
+# PID_EXPANSION_PLAN.md sec 3.2 "ADOPTED"), off-diagonals only, diagonal
+# contractually 0 -- identical to the checked-in source of truth
+# tools/PcTools/config_presets/coupling_matrix_20260831.json's per-zone
+# "coupling_coeff" rows. See test_adopted_matrix_matches_checked_in_preset
+# for the guard that keeps these two in sync.
+ADOPTED_MATRIX_OFF_DIAGONAL = np.array([
+    [0.00, 27.32, 21.72],
+    [14.30, 0.00, 22.15],
+    [8.33, 12.42, 0.00],
 ])
+
+# THE HYBRID THE SOLVER ACTUALLY RUNS RIGHT NOW (post-2026-09-02 adoption):
+# the adopted off-diagonals with FF_K_DC_DIAGONAL substituted for the
+# diagonal. This is "what's on the board today" for any call site that
+# wants to score/report against the board's current behavior --
+# render_report's "current on-board matrix", build_coupling_report's
+# delta-vs-current baseline, etc. GET /api/zones plus model_k_dc confirm
+# this is what the board has been running since the adoption.
+ADOPTED_HYBRID_MATRIX = _hybrid(ADOPTED_MATRIX_OFF_DIAGONAL)
+
+# THE MATRIX THIS MODULE'S EARLIER SELF-CHECK WAS VALIDATED AGAINST (sec 2's
+# original full-3x3 identification, off-diagonals 26.61/20.73 ·
+# 15.78/21.09 · 9.70/11.38, hybridized with FF_K_DC_DIAGONAL the same way).
+# Renamed from the old ambiguous "CURRENT_MATRIX" 2026-09-02: this was
+# ALREADY not the true pre-adoption bench matrix even before the 2026-09-02
+# adoption event -- coupling_matrix_pre20260902.json's own provenance
+# comment traces the *actual* pre-adoption bench values (commit 78f2134's
+# removed side: off-diagonals 12.0586/6.0039 · 5.7656/6.7734 · 2.4062/4.1094)
+# and flags sec 2's numbers as "an earlier identification from a different
+# session" that never matched what was live on the board. This constant's
+# only remaining legitimate use is KNOWN_FIGURES_MEAN /
+# self_check_against_known_figures below: PID_EXPANSION_PLAN.md sec 3.2's
+# original -0.086/-0.007/+0.108 diagnosis (condition number "~5.3", which
+# is THIS matrix's cond number, 5.27 -- not the true pre-adoption bench
+# matrix's 1.92) was computed against exactly these numbers, on hardware
+# captures that predate the 2026-09-02 adoption entirely. It is a fixed
+# historical regression fixture, not a claim about any board's current or
+# past actual state -- do not reuse it for anything that means "the board".
+SEC2_IDENTIFICATION_HYBRID_MATRIX = _hybrid(np.array([
+    [0.00, 26.61, 20.73],
+    [15.78, 0.00, 21.09],
+    [9.70, 11.38, 0.00],
+]))
 
 
 # ---------------------------------------------------------------------------
@@ -906,11 +958,15 @@ def score_matrix(matrix: np.ndarray, observations: Sequence[JointObservation]
     """Score ANY candidate matrix (``[affected][stepped]``) against
     observations: per-zone mean and RMS of ``u_pred - u_actual``, where
     ``u_pred = matrix^-1 @ (T - ambient)``. This is exactly the figure
-    ``firmware/KilnFW/docs/PID_EXPANSION_PLAN.md`` sec 3.2 reports for the
-    current on-board matrix (-0.086 / -0.007 / +0.108) -- pass
-    ``CURRENT_MATRIX`` to reproduce it (approximately -- see
-    ``self_check_against_known_figures``) as a pipeline sanity check
-    before trusting a score for a NEW candidate matrix.
+    ``firmware/KilnFW/docs/PID_EXPANSION_PLAN.md`` sec 3.2's ORIGINAL
+    diagnosis pass reports for the matrix that was on the board at the
+    time (-0.086 / -0.007 / +0.108) -- pass
+    ``SEC2_IDENTIFICATION_HYBRID_MATRIX`` to reproduce it (approximately --
+    see ``self_check_against_known_figures``) as a pipeline sanity check
+    before trusting a score for a NEW candidate matrix. To score against
+    what the board actually runs TODAY (post-2026-09-02 adoption), pass
+    ``ADOPTED_HYBRID_MATRIX`` instead -- the two are no longer the same
+    matrix, see that constant's own comment.
     """
     inv = np.linalg.inv(matrix)
     errors = {z: [] for z in ZONES}
@@ -938,7 +994,7 @@ def score_matrix(matrix: np.ndarray, observations: Sequence[JointObservation]
 class NonlinearityPoint:
     zone: int
     dwell_target_c: float
-    error: float  # u_pred - u_actual, current on-board matrix
+    error: float  # u_pred - u_actual, against ``matrix`` (default: today's on-board matrix)
 
 
 def nonlinearity_report(observations: Sequence[JointObservation],
@@ -946,9 +1002,11 @@ def nonlinearity_report(observations: Sequence[JointObservation],
     """Per-zone prediction error as a function of dwell temperature --
     makes the sec 3.2 "z2's error GROWS with dwell temperature" signature
     visible, and extensible to captures well outside the 45/60 C range
-    those figures came from (e.g. the 30-70 C coupid6 sweep).
+    those figures came from (e.g. the 30-70 C coupid6 sweep). Defaults to
+    ``ADOPTED_HYBRID_MATRIX`` (what the board actually runs today) when no
+    explicit ``matrix`` is given.
     """
-    m = matrix if matrix is not None else CURRENT_MATRIX
+    m = matrix if matrix is not None else ADOPTED_HYBRID_MATRIX
     inv = np.linalg.inv(m)
     points = []
     for o in observations:
@@ -980,14 +1038,17 @@ SELF_CHECK_TOLERANCE_C = 0.06
 
 
 def self_check_against_known_figures(paths: Sequence[str]) -> dict:
-    """Reproduce (approximately -- see module docstring) sec 3.2's
-    -0.086/-0.007/+0.108 figures for the current on-board matrix, as a
-    sanity check that this module's extraction pipeline is measuring the
-    same thing that analysis did. Returns a dict with pass/fail per zone
-    and the observed vs known mean error.
+    """Reproduce (approximately -- see module docstring) sec 3.2's original
+    -0.086/-0.007/+0.108 figures, computed against
+    ``SEC2_IDENTIFICATION_HYBRID_MATRIX`` -- the matrix that historical
+    diagnosis pass actually scored (see that constant's own comment for
+    why this is a fixed historical fixture, not "the board" in any current
+    sense) -- as a sanity check that this module's extraction pipeline is
+    measuring the same thing that analysis did. Returns a dict with
+    pass/fail per zone and the observed vs known mean error.
     """
     obs = dwell_observations_from_paths(paths)
-    scores = score_matrix(CURRENT_MATRIX, obs)
+    scores = score_matrix(SEC2_IDENTIFICATION_HYBRID_MATRIX, obs)
     results = {}
     all_ok = True
     for s in scores:
@@ -1005,20 +1066,28 @@ def self_check_against_known_figures(paths: Sequence[str]) -> dict:
 # ---------------------------------------------------------------------------
 
 def render_report(paths: Sequence[str]) -> dict:
+    """``current_matrix``/``current_scores``/``nonlinearity`` here mean
+    "what the board actually runs today" -- ``ADOPTED_HYBRID_MATRIX`` --
+    not the historical sec 3.2 diagnosis matrix; ``self_check`` below is
+    deliberately the odd one out, pinned to the historical
+    ``SEC2_IDENTIFICATION_HYBRID_MATRIX`` fixture (see that constant's own
+    comment) since it exists to reproduce a fixed historical figure, not to
+    describe any board's current state.
+    """
     obs = dwell_observations_from_paths(paths)
-    current_scores = score_matrix(CURRENT_MATRIX, obs) if obs else []
+    current_scores = score_matrix(ADOPTED_HYBRID_MATRIX, obs) if obs else []
     fit = solve_coupled(obs)
     fit_scores = score_matrix(fit.matrix, obs) if (fit.matrix is not None and obs) else None
     fit_plausible, fit_plausibility_reason = (
         matrix_plausibility(fit.matrix) if fit.matrix is not None else (None, "")
     )
-    nonlin = nonlinearity_report(obs, CURRENT_MATRIX)
+    nonlin = nonlinearity_report(obs, ADOPTED_HYBRID_MATRIX)
     self_check = self_check_against_known_figures(paths)
 
     return dict(
         paths=list(paths),
         n_observations=len(obs),
-        current_matrix=CURRENT_MATRIX.tolist(),
+        current_matrix=ADOPTED_HYBRID_MATRIX.tolist(),
         current_scores=[dataclasses.asdict(s) for s in current_scores],
         # HEADLINE FIGURE -- see module docstring's "CONDITIONING" section.
         # A number well under the refusal threshold means "not literally
@@ -1305,7 +1374,11 @@ def build_coupling_report(single_zone_pairs: Optional[dict] = None,
     new_matrix, coverage = matrix_from_single_zone_columns(column_obs)
     coverage_note = coverage_redundancy_note(coverage)
 
-    old_matrix = CURRENT_MATRIX
+    # "old" here means "what the board runs today, before this report's
+    # freshly-assembled candidate would replace it" -- ADOPTED_HYBRID_MATRIX,
+    # not the stale SEC2_IDENTIFICATION_HYBRID_MATRIX fixture (see that
+    # constant's own comment for why it was never the right choice here).
+    old_matrix = ADOPTED_HYBRID_MATRIX
     result: dict = dict(
         settle_audit=settle_audit,
         coverage={f"{i},{j}": n for (i, j), n in coverage.items()},
