@@ -138,7 +138,7 @@ esp_err_t profile_executor_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo
  * to mean "disabled". That is backwards for the single most dangerous field
  * on the page: a substituted number would have to be invented (there is no
  * physically-meaningful default temperature anywhere in this repo --
- * ZONE_MAX_TEMP_C_MAX is a 1400C INPUT-validation sanity bound mirrored
+ * ZONE_MAX_TEMP_C_MAX is a 2500C INPUT-validation sanity bound mirrored
  * from profiles_http.c's PROFILE_TARGET_C_MAX, not a safe ceiling for an
  * arbitrary owner's kiln), and a wrong invented ceiling either does nothing
  * (too high) or nags a correctly-configured kiln (too low). Refusing

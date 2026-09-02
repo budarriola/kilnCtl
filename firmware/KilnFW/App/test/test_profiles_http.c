@@ -1104,6 +1104,23 @@ static void test_profiles_http_save_accepts_2015c_gas_kiln_profile_on_80c_zone(v
     char err_msg2[160] = "";
     bool ok2 = profiles_http_save(PROFILES_MAX_COUNT, &over, &out_id2, &warn_count2, err_msg2, sizeof(err_msg2));
     TEST_CHECK(!ok2, "PROFILE_TARGET_C_MAX (2015C) is still a real input-sanity bound -- 2015.1C must be refused");
+    /* Opus review finding 7 (2026-09-02): the refusal message must state the
+     * REAL bound, derived from PROFILE_TARGET_C_MAX itself via %.0f rather
+     * than a hand-typed literal that can go stale the next time the bound
+     * moves (it already did once: 1400 -> 2015). This would go red if either
+     * the message format or PROFILE_TARGET_C_MAX changed without the other
+     * following -- proved by hand: reverting the message to the old
+     * hardcoded "(0-1400)" text makes this fail with the actual "(0-2015)"
+     * string, and bumping PROFILE_TARGET_C_MAX without touching the message
+     * (impossible here since the format string reads the macro directly, but
+     * would be a stale-literal regression on any prior hardcoded version)
+     * fails the same way. */
+    char expected_bound[32];
+    snprintf(expected_bound, sizeof(expected_bound), "(%.0f-%.0f)", (double)PROFILE_TARGET_C_MIN,
+             (double)PROFILE_TARGET_C_MAX);
+    TEST_CHECK(strstr(err_msg2, expected_bound) != NULL,
+              "the refusal message must state the bound matching PROFILE_TARGET_C_MIN/MAX exactly, not a "
+              "stale hand-typed literal");
 }
 
 static void test_profiles_list_marks_exceeds_ceiling(void)

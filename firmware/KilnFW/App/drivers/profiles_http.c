@@ -908,7 +908,8 @@ bool profiles_http_save(uint8_t requested_id, const profile_t *candidate, uint8_
             return false;
         }
         if (isnan(seg->target_c) || seg->target_c < PROFILE_TARGET_C_MIN || seg->target_c > PROFILE_TARGET_C_MAX) {
-            snprintf(err_msg, err_cap, "segment %u: target_c out of range (0-1400)", i + 1);
+            snprintf(err_msg, err_cap, "segment %u: target_c out of range (%.0f-%.0f)", i + 1,
+                     (double)PROFILE_TARGET_C_MIN, (double)PROFILE_TARGET_C_MAX);
             return false;
         }
         if (isnan(seg->ramp_c_per_hr) || seg->ramp_c_per_hr < PROFILE_RAMP_C_PER_HR_MIN ||
@@ -1607,7 +1608,8 @@ static bool parse_profile_fields(const char *body, profile_t *p, char *err_msg, 
         float target = len > 0 ? strtof(val, &fend) : NAN;
         if (len <= 0 || fend == val || isnan(target) || target < PROFILE_TARGET_C_MIN ||
             target > PROFILE_TARGET_C_MAX) {
-            snprintf(err_msg, err_cap, "segment %u: target_c missing or out of range (0-1400)", i + 1);
+            snprintf(err_msg, err_cap, "segment %u: target_c missing or out of range (%.0f-%.0f)", i + 1,
+                     (double)PROFILE_TARGET_C_MIN, (double)PROFILE_TARGET_C_MAX);
             return false;
         }
         seg->target_c = target;

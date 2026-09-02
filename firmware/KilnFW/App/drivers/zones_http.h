@@ -863,7 +863,7 @@ bool zones_config_set_control_mode(uint8_t zone_index, zone_control_mode_t mode)
  * (see that function's guard-5 refusal, added the same date) rather than
  * matching sanity_rate's "0 = substitute a default" policy -- there is no
  * repo-established safe absolute-temperature default to substitute
- * (ZONE_MAX_TEMP_C_MAX below is a 1400C input-sanity bound borrowed from
+ * (ZONE_MAX_TEMP_C_MAX below is a 2500C input-sanity bound borrowed from
  * profiles_http.c, not a safe ceiling for an arbitrary kiln). Getters below
  * still faithfully report the stored 0; only the firing-start path treats it
  * as a refusal.
