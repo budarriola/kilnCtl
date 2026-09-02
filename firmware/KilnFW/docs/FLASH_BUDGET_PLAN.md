@@ -8,8 +8,26 @@ truth, not the checkboxes.** Nothing is marked done until a commit is named.
 Every number below is measured and attributed, or explicitly labelled as an
 estimate.
 
-Status at time of writing (2026-09-01): **nothing in this plan is built.**
-Planning document only.
+Status at time of writing (2026-09-02): **Phase 0 (§4.1/§4.3) is built.**
+Phase 1 (§5) is **in progress** — a Lane C agent is implementing it now, with
+two owner decisions locked in below. Do not describe §5 as done.
+
+**Phase 0, done (`699f5ab`):** `attribute_str_pool.py` +
+`check_flash_partition_map.ps1`. Methodology correction for §4.1: the map
+file's size column shows placement in the merged pool, not the input
+section's own size — true per-file sizes come from the "(size before
+relaxing)" lines. Top `.str1.1` contributors: `dashboard_http.c` 11,273 B,
+`mesh_parent.o` 11,108 B, `main.c` 9,671 B. Reconciliation: 239,415 B merged
+vs 309,165 B raw input, a 22.6% coalescing gap from string deduplication.
+The script reproduces §1's 77,824 B reclaimable figure exactly.
+
+**Owner decisions locked in for §5 (2026-09-02):**
+1. §5.2 — the 1 MiB `logs` retention cap is excessive; target 256 kB. Owner's
+   reasoning: logging that much means logging too often, so the *rate* is
+   also in question, not just the cap.
+2. §5.1 — `legacy_app`'s 1500 kB goes to relocating `pico_img` (896 kB), the
+   only one of the three candidate uses that improves contiguity rather than
+   just occupancy.
 
 Companion doc: `DRAM_PSRAM_PLAN.md` covers internal SRAM. The two are
 independent — neither blocks the other, and neither should be justified by the
@@ -33,12 +51,28 @@ KilnCtrl.bin (measured 2026-09-01)   1,924,496 B
 free                                 1,221,232 B   (38.8%)
 ```
 
+**This figure is already drifting.** The same build measured again the same day
+was 1,926,672 B (+2,176 B), against a working tree with ~20 uncommitted files
+under `App/drivers/`. That is expected churn, not an error — but it means the
+number above is not reproducible, which is precisely the failure §4.2 exists to
+prevent. **Any size baseline recorded in this doc must name the commit it was
+taken against.** A byte count with only a date attached cannot be checked later.
+
 **Chip-level — nearly exhausted.**
 
 ```
 16 MB part                          16,777,216 B
-unallocated                             65,536 B   (0.4%)
+unallocated, contiguous tail            65,536 B   (0xFF0000..0x1000000)
+unallocated, boxed-in gap               12,288 B   (0x1FD000..0x200000)
+forced 64 K-alignment pad               57,344 B   (0x202000..0x210000, not reclaimable)
 ```
+
+Usable unallocated space is therefore **77,824 B**, of which only the 65,536 B
+tail is contiguous and freely usable. The 12,288 B gap sits between
+`profiles_nvs` and `otadata` and is boxed in by two immovable partitions — at
+exactly three 4 K sectors it is the bare minimum NVS needs to operate, and
+nothing else. The 57,344 B pad is structurally required: `gen_esp32part.py`
+forces app partitions onto 64 K boundaries, and `otadata` is only 8 K.
 
 The image has room to grow. The *partition table* does not have room for
 another partition. Any future feature needing flash storage — a `web` partition
@@ -51,18 +85,24 @@ with and will require reclamation before it can be added.
 
 | region | size | note |
 |---|---:|---|
-| bootloader, partition table, `nvs`, `phy_init` | 60 K | live data in `nvs` |
+| bootloader (32 K) + partition table (4 K) + `nvs` (24 K) + `phy_init` (4 K) | 64 K | live data in `nvs` |
 | **`legacy_app`** | **1500 K** | **dead hole — see 5.1** |
 | `wifi_nvs` + `kiln_nvs` + `profiles_nvs` | 472 K | live data, immovable |
-| `otadata` + 64 K-alignment pad | 64 K | |
+| *gap* (0x1FD000..0x200000) | 12 K | unallocated, boxed in |
+| `otadata` (8 K) + forced 64 K-alignment pad (56 K) | 64 K | pad not reclaimable |
 | `ota_0` + `ota_1` + `factory` | **9216 K** | 3 × 3072 K |
 | `pico_img` | 896 K | RP2040 image relay staging |
 | `coredump` | 1024 K | sized empirically, see 5.3 |
 | `logs` | 3072 K | added 2026-09-01, see 5.2 |
-| **unallocated** (0xFF0000..0x1000000) | **64 K** | |
+| *unallocated tail* (0xFF0000..0x1000000) | 64 K | |
+| **total** | **16,384 K** | = 16,777,216 B ✓ |
 
-`0x1000000 − 0xFF0000 = 0x10000`. The ~3.06 MB of spare that this table's own
-comments describe was consumed when `logs` was added.
+The ~3.06 MB of spare that this table's own comments describe was consumed when
+`logs` was added.
+
+An earlier draft of this table stated the first row as 60 K and omitted the
+12 K gap entirely, so it summed 16 K short of the chip and understated usable
+free space. Recomputed row-by-row above; the totals now reconcile exactly.
 
 Three items dominate: **9 MB of app slots** (56% of the chip), **1.5 MB dead**
 in `legacy_app`, and **3 MB of `logs`**.
@@ -72,8 +112,107 @@ app partitions must be the same size — an OTA image has to fit either slot, an
 `factory` must stay a meaningful recovery target after an update. ESP-IDF's
 `check_sizes.py` takes `min()` across all app partitions, which is what forced
 all three to 3 MB together on 2026-08-21. **This 9 MB is not a candidate for
-reclamation** and should not be treated as one; it is the cost of the recovery
-guarantees the partition table exists to provide.
+reclamation.**
+
+### 2.1 "Why not two slots instead of three?" — asked and answered
+
+The obvious reclamation is to drop `factory` and keep only "one known-good
+image to fall back to, one that gets updated." It would free 3 MB, more than
+every other target in this plan combined. It was investigated and **rejected**;
+recorded here so it is not re-proposed as though new.
+
+Rollback *is* implemented: `main.c:241` calls
+`esp_ota_mark_app_valid_cancel_rollback()` from `ota_rollback_confirm_task()`,
+gated by `boot_confirm_decide()` (`boot_guard.c:270`) on
+`nvs_ok && web_ok && ota_routes_ok`. `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y`
+(`sdkconfig:698`); anti-rollback deliberately off (`sdkconfig:700`), matching
+`UPDATE_PROTOCOL.md` §3.
+
+**But that path has never executed on hardware.** `UPDATE_PROTOCOL.md` §7 records
+it as host-test-verified only, because the JTAG flash path always writes
+`factory` — so every bench boot takes the `BOOT_CONFIRM_SKIP_FACTORY` branch and
+the `PENDING_VERIFY` → confirm sequence is untested code. A two-slot scheme is
+only self-healing if that sequence works; dropping `factory` would remove the
+safety net while standing on the unproven mechanism.
+
+With `factory` present and `otadata` erased or corrupt, the bootloader boots
+`factory` — recovery with no serial cable. Without it, that degrades to "boot
+whatever is in `ota_0`", possibly the very image that failed. **Caveat:** the
+no-factory fallback order is general ESP-IDF behaviour and was *not* verified
+against IDF v6.0.2's bootloader source in this tree. Verifying it is a
+prerequisite to ever revisiting this.
+
+Naming trap worth knowing, since three things here sound related and are not:
+`factory_reset.c` is a scoped **NVS wipe** with no reference to app partitions;
+`boot_button.c` and `danger_mode.c` contain zero partition references. Only
+`boot_guard.c`, `main.c` and `test_boot_guard.c` touch
+`ESP_PARTITION_SUBTYPE_APP_FACTORY`.
+
+**Action item, not a flash item:** perform one real OTA into `ota_0` on hardware
+and confirm the app marks itself valid. Until that runs, OTA-updating this board
+carries more risk than the partition table implies.
+
+### 2.2 "Shrink factory to a minimal recovery image?" — DECIDED: no, keep as-is
+
+A follow-on idea: keep `factory` but fill it with a recovery-only app (boot,
+Wi-Fi or AP, upload page, write to `ota_0`/`ota_1`) instead of a full copy of
+KilnCtrl, letting the partition shrink from 3072 K to ~1024 K and freeing ~2 MB
+— more than `legacy_app` and `logs` combined.
+
+**Owner decision 2026-09-01: keep `factory` at 3072 K for now.** Not rejected on
+merit; deferred. Recorded so the arithmetic does not have to be redone.
+
+Estimated floor for such an image, from this build's per-archive numbers:
+Wi-Fi (`net80211`+`pp`+`phy`+`wpa_supplicant`) 317,062 B, `lwip` 90,418 B,
+`esp_http_server`+`http_parser` 20,874 B, core (`spi_flash`, `nvs_flash`,
+`freertos`, `esp_system`, `esp_hw_support`) ~100,738 B, plus netif/wifi/heap/
+libc/vfs and the recovery app's own code — **roughly 700–800 KB, estimated, not
+measured.** Droppable: `liblvgl.a` (267,303 B), the embedded web assets
+(261,777 B), most of `libdrivers.a` code (302,052 B), and mbedtls/tfpsacrypto
+(~280 KB) if recovery serves plain HTTP.
+
+**The size check is NOT the obstacle — `partitions.csv` overstates it.** That
+file's own note calls the 2026-08-21 episode a "build hard-failure fix". Read
+against the actual tool (`check_sizes.py:88-102` in the IDF v6.0.2 checkout),
+the hard `SystemExit` fires only when **every** app partition is too small for
+the binary:
+
+```python
+too_small_partitions = [p for p in partitions if p.size < bin_size]
+if not allow_failures and len(partitions) == len(too_small_partitions):
+    raise SystemExit(...)   # only if ALL are too small
+else:
+    print('Warning: ' + msg)
+```
+
+It is invoked with `--type app` and no subtype
+(`post_build_validation.cmake:24-33`), so `partitions` = {ota_0, ota_1,
+factory} and `min()` does span all three — but a 1 MB `factory` beside two 3 MB
+OTA slots yields one too-small partition out of three, i.e. **a warning and a
+passing build.** The 2026-08-21 event was, by this logic, also only ever a
+warning. There is no per-partition opt-out in Kconfig (`sdkconfig:964-975`);
+`--allow_failures` exists only on the CLI and is not wired to any option — and
+per the above it is not needed.
+
+**The real obstacle is the build graph.** ESP-IDF cannot produce two
+independently-linked app images from one `idf.py build`. A minimal recovery app
+therefore means a **second IDF project** sharing `partitions.csv`, with its own
+build and flash step and its own drift risk against the main firmware. No
+official IDF example exists for this; the `recovery_bootloader` variants under
+`examples/system/ota/partitions_ota/` are the backup *second-stage bootloader*
+feature, which is a different thing entirely.
+
+**And it would collide with an existing mechanism.** This firmware *already has*
+a recovery mode — `boot_guard.c:102` sets `recovery_mode` from a boot counter
+past `RECOVERY_MODE_BOOT_THRESHOLD`, exposed via `boot_guard_is_recovery_mode()`
+(`boot_guard.c:253`), with a full HTTP surface in `ota_http.c` (status JSON at
+1636-1666, a `/api/ota/esp/recovery_exit` handler at 1710-1761 with its own HMAC
+context and lockout, plus a BOOT-button bypass at 355-366). That is a degraded
+mode of the *same* image, not a separate binary. The two are complementary
+rather than redundant, but any minimal-factory design has to decide whether the
+crash-loop counter should ever route the device into `factory` at all. **That
+integration question, plus the second project, is the real cost** — not the
+partition-size check, and not the byte count.
 
 ---
 
@@ -144,7 +283,7 @@ Ordered by yield per unit of risk. Every item here requires reflashing the
 partition table, which carries fixed hazards listed in section 7 — so if more
 than one is done, do them in a single table revision, not several.
 
-### 5.1 `legacy_app` — 1500 kB, highest yield
+### 5.1 `legacy_app` — 1500 kB, highest yield — DECIDED: relocate `pico_img` (see top-of-doc note)
 
 Flash that `factory` occupied before it moved to 0x810000 on 2026-08-21. It is
 declared `data`/`undefined`, is never read or written by this firmware, and
@@ -153,18 +292,26 @@ below (0xf000) and `wifi_nvs` above (0x187000), neither of which may move.
 
 Constraints on reuse: the region is 0x10000..0x187000, which *is* 64 kB-aligned
 at its start, but at 1500 kB it cannot host an app partition (those need 3 MB
-here, per section 2). It is therefore usable only for **data**. Candidates, in
-rough order of usefulness:
+here, per section 2). It is therefore usable only for **data**.
 
-- a `web` SPIFFS partition, if OTA-able UI assets are ever wanted;
-- relocating `pico_img` (896 kB) into it, freeing 896 kB of contiguous
-  high flash;
+**These candidates are mutually exclusive — 1500 kB is one hole, not three.**
+Pick one before proposing a table revision:
+
+- a `web` SPIFFS partition, if OTA-able UI assets are ever wanted
+  (`WEB_UI_RESPONSIVE_PLAN.md` §8 would be the consumer);
+- relocating `pico_img` (896 kB) into it, which frees 896 kB of *contiguous
+  high* flash — worth more than the 1500 kB itself, since the high region is
+  where a future app-sized partition could go;
 - absorbing a future data-recorder or expanded statistics partition.
+
+The second option is the only one that improves contiguity rather than just
+occupancy, and is the default recommendation absent a specific need for the
+other two.
 
 This is the cleanest 1.5 MB available and it carries no data-loss risk, because
 nothing lives there.
 
-### 5.2 `logs` — 3072 kB backing a 1 MiB cap
+### 5.2 `logs` — 3072 kB backing a 1 MiB cap — DECIDED: cap drops to 256 kB (see top-of-doc note)
 
 `log_store.h` sets `LOG_STORE_MAX_TOTAL_BYTES` to 1 MiB. The partition is 3 MB,
 i.e. 3× its own rotation ceiling.
@@ -243,6 +390,17 @@ history and are not hypothetical — each has already caused a problem here once
    and diffed entry-by-entry rather than eyeballed.
 
 ---
+
+## 7a. Related prior work — read before starting
+
+- **`TODO.md` §14** already investigated an HTTP-reset pattern that looks
+  exactly like DRAM exhaustion and **ruled that cause out** — it was an
+  uncounted permanent socket defeating `lru_purge_enable`'s recovery
+  (`a5567ae`). Do not re-diagnose it as a memory problem.
+- **`TODO.md` §13** already began the stack candidate/classification work that
+  `DRAM_PSRAM_PLAN.md` §6 restates.
+- **`UPDATE_PROTOCOL.md` §3 and §7** own the OTA layout and its open items; §2.1
+  above summarises but does not supersede them.
 
 ## 8. Suggested order
 

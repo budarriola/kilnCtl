@@ -99,7 +99,44 @@ holding duty through it (§4) did not.
       result of the session and it was nearly discarded on a bad model. When a
       simulation rejects a physically sound idea, check the simulation.
 
-### 3.2 Zone 2's model over-predicts its hold duty — DIAGNOSED 2026-09-01, not fixed
+### 3.2 Zone 2's model over-predicts its hold duty — MEASURED 2026-09-02, RESOLVED-PENDING-ADOPTION
+
+Three single-zone excitation runs completed 2026-09-02, each from a rested
+start (every zone at ambient) with a full settled 2100 s dwell: z0 0.60 duty
+@55C (peers 35.9/31.6), z1 0.76 (peers z0 49.8, z2 36.9), z2 0.75 (peers
+45.7/45.8). Coupling is strongly **asymmetric** — z1 raises z0 ~22C, but z0
+raises z1 only ~9C.
+
+New coupling matrix, `[affected][stepped]`:
+
+```
+[[38.13, 27.32, 21.72],
+ [14.30, 35.90, 22.15],
+ [ 8.33, 12.42, 35.32]]
+```
+
+Condition number 4.64 (vs 5.27 for the current matrix) — plausibility check
+passes.
+
+Revalidated against the historical dwell tails: z0 bias −0.081 → −0.047, z2
++0.113 → +0.032 (both improve), but **z1 −0.007 → −0.053 gets slightly
+worse**. This is a trade, not a clean win, and should be recorded as such.
+Feasible range extends 60C → 65C.
+
+**Not adopted into firmware.** Every cell has exactly one observation — no
+redundancy, no error bar. Owner decision needed before this replaces the
+live matrix. Reproducible from checked-in logs via `coupling_pair_log.py` /
+`python -m kilnctrl.coupled_ident coupling-report` (`e2c7f41`, `72508ea`).
+
+Parser gotcha caught while building that tool: the exec-status `elapsed=Ns`
+field **resets to 0 at every ramp → dwell transition**; naive use makes each
+phase boundary look like the start of a new run.
+
+Cooldown tau fits from the same runs: z0 469 s, z1 455 s, z2 345 s (z2 loses
+heat fastest, consistent with its lower DC gain). Only one clean decay
+window per zone — rough, not calibration-grade.
+
+Original diagnosis below, kept for the reasoning trail:
 
 The coupled solve wants 0.861 duty where the kiln actually needs under 0.74.
 Masked by integral action rather than corrected.
@@ -294,8 +331,36 @@ same document's own 2026-08-29/30 bench sections contradict.
 
 ### 3.6 Untested control paths
 
-- [~] **Relay-feedback identification has never completed on hardware — cause
-      found and fixed (`c84abff`), awaiting one confirming run.**
+- [~] **Relay-feedback identification: first hardware completion, 2026-09-02
+      — but the result cannot be adopted yet.**
+
+      **The confirming run happened.** Zone 0, setpoint 45C, Tyreus-Luyben:
+      `relay_valid=true`, Ku=0.19540, Tu=334.3 s, amplitude 3.03C, 5 cycles
+      seen / 3 used, 1676 s total, proposed kp=0.06106 ki=0.00008
+      kd=3.24009. Confirms `c84abff`'s PWM-window diagnosis.
+
+      **A second blocker was found and fixed on the way there (`17e67ee`).**
+      `autotune_engine_run_relay()` validated the relay setpoint against both
+      `max_temp_c − 50` and `min_temp_c + 50` independently. On this rig's
+      80C/0C zone that demanded a [50, 30] window — empty — so every
+      setpoint was refused, each with one of two contradictory messages.
+      Fixed with span-proportional headroom (full 50C where the span allows
+      it, else span × 0.25) and a single computed window with one refusal
+      message naming the real range; the 80/0 zone now accepts [20, 60].
+      This is exactly the "second contributor" this section already
+      predicted before either fix.
+
+      **Open reconciliation — do NOT adopt the Tyreus-Luyben gains until
+      this is settled.** Tu=334 s does not agree with the step-identified
+      FOPDT (τ 264–271 s, dead time 34–53 s): at ω=2π/334 the FOPDT phase is
+      about −126°, not −180°, and the FOPDT predicts Tu nearer 4L ≈ 176 s.
+      Predicted Ku ≈ 0.13 vs 0.195 measured. Tu/L comes out 6.3–9.8× against
+      the 4–8× expected range. An agent is investigating candidate causes:
+      the amplitude convention (half vs peak-to-peak), the
+      hysteresis-corrected describing function
+      (Ku = 4d/(π·√(a²−h²))), coupled-plant effects, or a biased τ.
+
+      Original diagnosis below, kept for the reasoning trail:
       `relay_law_tick()` decides the bang-bang branch every tick (1 Hz), but
       actuation went through `heater_output_duty()`, the ordinary PID
       *time-proportioning PWM* renderer, which only re-evaluates at `window_ms`
@@ -312,14 +377,14 @@ same document's own 2026-08-29/30 bench sections contradict.
       PWM window immediately on a branch flip; the ordinary duty path is
       untouched, so PID and the STEP method are unaffected. **No guard was
       weakened.**
-      **The confirming run:** `autotune_start(zone=<rested>, method="relay",
-      relay_d=-1.0, relay_h_c=-1.0, rule="tl")` from a zone genuinely at
-      ambient. A completed run with plausible `Ku`/`Tu` (period roughly 4–8×
-      dead time) closes this and unblocks Ziegler-Nichols and Tyreus-Luyben
-      together; the *same* rejection reason would mean a second contributor
-      remains.
+      (The confirming run this paragraph called for has since happened —
+      see the top of this item.)
 - [ ] **The fuzzy layer has never run above `strength_pct = 0`** on hardware.
-      Every measurement in §2 is with it effectively off.
+      Every measurement in §2 is with it effectively off. A hardware run is
+      being set up as of this writing, blocked briefly by a
+      `zones_http_client` field-mapping bug (being fixed separately). A
+      profile-7 baseline with `fuzzy=0` on the current build is running
+      concurrently to have a same-build comparison point.
 
 ### 3.7 Validation gap
 

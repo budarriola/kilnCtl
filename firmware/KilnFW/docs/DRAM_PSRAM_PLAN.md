@@ -117,34 +117,45 @@ Only instrumented tasks appear here. Coverage is partial — see section 4.2.
 
 ### 3.2 Internal heap
 
-**Not yet measurable.** There is no heap-reporting tool on the `kilnctrl` MCP
-surface, and no HTTP endpoint returning `heap_caps_get_free_size()` broken down
-by capability. This is the single largest gap in the plan: Phase 1 below cannot
-be evaluated without it, because its entire effect lands on the internal heap
-rather than on anything currently observable.
+**Already measurable — an earlier draft of this doc was wrong about this.**
+
+`App/drivers/dashboard_http.c:386-397` already calls
+`heap_caps_get_free_size()`, `heap_caps_get_largest_free_block()`,
+`heap_caps_get_minimum_free_size()` and `heap_caps_get_total_size()` for both
+`MALLOC_CAP_INTERNAL` and `MALLOC_CAP_SPIRAM`, and serialises them into the
+dashboard JSON at lines 837-839 as `heap_internal` / `heap_spiram` objects with
+`free` / `largest_free_block` / `min_free` / `total`. `TODO.md` §14 already used
+this data live under load.
+
+An earlier draft claimed no such endpoint existed and built a blocking Phase 0
+around rebuilding it. That was a planning defect — verify before declaring a
+prerequisite. What is genuinely missing is much smaller; see 4.1.
 
 ---
 
-## 4. Phase 0 — tooling (blocking prerequisite)
+## 4. Phase 0 — tooling (small, and mostly already done)
 
-Nothing else in this plan should start before this phase lands. Every remaining
-phase is a change whose only visible effect is on internal DRAM, and internal
-DRAM is currently unobservable. Without Phase 0 the rest is unfalsifiable.
+Every remaining phase is a change whose only visible effect is on internal
+DRAM, so it has to be observable before it is worth attempting. Per 3.2 most of
+that observability already exists; what is left is a thin client layer and one
+missing capability.
 
-### 4.1 `get_heap_info` — board tool plus HTTP endpoint
+### 4.1 Wrap the existing heap data — do NOT build a new endpoint
 
-New MCP tool in the `system` group, backed by a new read-only HTTP endpoint,
-reporting at minimum:
+The firmware side is done (3.2). Remaining work, in full:
 
-- `heap_caps_get_free_size()` and `heap_caps_get_largest_free_block()` for
-  `MALLOC_CAP_INTERNAL`, `MALLOC_CAP_SPIRAM`, `MALLOC_CAP_DMA`, and the default
-  capability set;
-- `heap_caps_get_minimum_free_size()` — the low-water mark — for each. The
-  instantaneous free figure is nearly useless for this work, since the
-  exhaustion event is transient and load-dependent;
-- total PSRAM size and current PSRAM usage.
+- **An MCP tool** exposing the existing `heap_internal` / `heap_spiram` JSON.
+  Nothing under `tools/PcTools/src/kilnctrl/` parses those keys today, so the
+  data is reachable by hand but not from the tooling every other measurement in
+  this plan uses.
+- **Add `MALLOC_CAP_DMA`** to the existing `dashboard_http.c` block. It is the
+  one capability not currently broken out, and Phase 1 specifically needs it —
+  DMA-capable internal memory is exactly what a lowered threshold must not
+  starve.
 
-Low-water is the metric every acceptance criterion below is written against.
+`min_free` (low-water) is the metric every acceptance criterion below is
+written against. The instantaneous free figure is nearly useless here, since
+the exhaustion event is transient and load-dependent.
 
 ### 4.2 Extend `stack_margin` instrumentation coverage
 
@@ -154,7 +165,11 @@ The table in 3.1 covers 10 tasks. The firmware creates substantially more:
 `gpio_probe`, the LVGL task, `boot_button`, `danger_mode`, and the OTA reboot
 tasks. Phase 2 right-sizes stacks against measured watermarks, so any task
 without a watermark cannot be right-sized. Register the uninstrumented ones
-through the existing `stack_margin.h` mechanism.
+through the existing `stack_margin.h` mechanism — including the PC-link
+`uart_proto_rx` instance (see 7.1).
+
+`TODO.md` §13 already started this and is the place to check before redoing it;
+it also documents the label-vs-task-name ambiguity that §6 covers.
 
 ### 4.3 Baseline capture
 
@@ -172,14 +187,33 @@ cannot show whether a phase helped.
 
 ## 5. Phase 1 — lower `SPIRAM_MALLOC_ALWAYSINTERNAL`
 
-Currently 16384: every heap allocation smaller than 16 kB is served from
-internal DRAM. That threshold captures most of this firmware's allocation
+**Step 1 landed (`a0b8711`): `sdkconfig.defaults` now sets 16384 -> 8192.
+NOT soaked yet.**
+
+**This change is currently INERT on the board being worked on.**
+`firmware/KilnFW/sdkconfig` is gitignored and still holds 16384 — the
+ESP-IDF build log confirms it builds from that stale value, not from
+`sdkconfig.defaults`. Anyone relying on this step being live must first
+regenerate `sdkconfig` (`idf.py reconfigure` or a clean build dir) and
+re-measure. Do not assume the step-down below has any effect on the running
+board until that is done.
+
+`sdkconfig.defaults` already carries a 2026-08-20 note, not previously cited
+in this plan, that ALWAYSINTERNAL=4096 was tried and reverted on hardware:
+the LVGL display task failed to start, more UART inboxes failed, and the
+PC-link safety watchdog hit `ESP_ERR_NO_MEM`. That attempt is confounded —
+`SPIRAM_TRY_ALLOCATE_WIFI_LWIP` changed in the same experiment — so it does
+not rule out 4096 on its own, but the step below must acknowledge it and
+watch for the same three symptoms.
+
+Currently 8192 (was 16384): every heap allocation smaller than that is served
+from internal DRAM. That threshold captures most of this firmware's allocation
 population, which is what makes it simultaneously the highest-leverage single
 change available and the riskiest.
 
-**Change.** Step the threshold down — 8192, then 4096, then 2048 — measuring at
-each step rather than jumping straight to the lowest value. Re-examine
-`SPIRAM_MALLOC_RESERVE_INTERNAL` (32768) in the same pass.
+**Change.** Step the threshold down — 8192 (done, unsoaked), then 4096, then
+2048 — measuring at each step rather than jumping straight to the lowest
+value. Re-examine `SPIRAM_MALLOC_RESERVE_INTERNAL` (32768) in the same pass.
 
 **Why this is believed safe.** Allocations that genuinely require internal
 memory — DMA descriptors and buffers, anything touched while the cache is
@@ -202,22 +236,56 @@ has already bitten this project once; see the flash-worker rationale in
 against baseline, with no new panics, no new coredump entries, and no
 httpd-socket resets across a soak that includes a full firing.
 
+**Soak definition** — an earlier draft left "soak" undefined, which makes the
+riskiest phase in this plan unfalsifiable. Concretely: at least one complete
+firing from cold to cooldown, with the web UI open on two clients throughout,
+plus 24 h of idle-with-Wi-Fi-connected afterwards. Latent allocation failures
+surface under sustained fragmentation, not in a smoke test.
+
+**Do not run this soak concurrently with a partition-table revision.**
+`FLASH_BUDGET_PLAN.md` §5 moves flash regions and erases `otadata`; this phase
+changes where allocations land. Both can produce boot failures and flash-path
+asserts. Interleaved, neither is attributable.
+
 ---
 
-## 6. Phase 2 — right-size internal stacks
+## 6. Phase 2 — right-size internal stacks — BLOCKED
+
+All four candidate tasks below share one Kconfig knob,
+`CONFIG_KILNCTL_UART_OWNER_STACK_SIZE` (`App/drivers/Kconfig:554-569`,
+default 3072, confirmed reaching the build). It was already trimmed
+4096 -> 3072 in `8ad7d5b`, and that commit's own comment reserves the
+remaining margin for a Pico OTA relay transfer that has never been measured.
+**Blocked** until someone runs a real Pico update with stack-margin
+instrumentation live — there is no further headroom to spend against an
+unmeasured worst case.
 
 Reclaims DRAM with no PSRAM-hazard exposure whatsoever, because nothing
 relocates. Ordered before the relocation phase deliberately: it is strictly
 safer, and shrinking a stack before moving it means there is less to move.
 
-Candidates from 3.1, all sitting at 70% or more headroom:
+Candidates from 3.1, all sitting at 70% or more headroom.
 
-| task | allocated | worst-case free | note |
+**These are four distinct tasks, not two under two names.** `uart_owner_init()`
+has two call sites — `safety_link.c:395` (isolated safety link) and
+`main.c:1529` (PC link) — each creating its own `uart_owner_task` /
+`uart_owner_evt_task` pair from the same code at `uart_owner.c:235,253`. The
+`stack_margin` labels disambiguate them: `safety_link.c:419-420` registers the
+safety pair as `safety_owner_*`, `main.c:1556-1557` registers the PC pair under
+the raw names. A review of this doc asserted these were the same two tasks
+double-counted; that was checked against both call sites and is wrong. Both
+pairs are real and both consume internal DRAM.
+
+Since one `xTaskCreate*` site serves both instances, a stack-size change here
+affects **both links at once** — a per-instance size would need the depth
+passed in as a parameter.
+
+| task | link | allocated | worst-case free |
 |---|---|---|---|
-| `safety_owner_task` | 3072 B | 2164 B | trim candidate |
-| `safety_owner_evt` | 3072 B | 2336 B | trim candidate |
-| `uart_owner_task` | 3072 B | 2164 B | trim candidate |
-| `uart_owner_evt_task` | 3072 B | 2344 B | trim candidate |
+| `safety_owner_task` | safety | 3072 B | 2164 B |
+| `safety_owner_evt` | safety | 3072 B | 2336 B |
+| `uart_owner_task` | PC | 3072 B | 2164 B |
+| `uart_owner_evt_task` | PC | 3072 B | 2344 B |
 
 Trim to the measured worst case plus a stated safety factor, and write both the
 factor and the measurement date into the comment at each `xTaskCreate*` call.
@@ -241,15 +309,41 @@ Per-task, most caution required, smallest blast radius per individual change.
 ### 7.1 Already on PSRAM — no work
 
 Created via `xTaskCreatePinnedToCoreWithCaps(..., MALLOC_CAP_SPIRAM)`:
-`autotune_engine`, `safety_poll`, `uart_protocol_rx`, `telemetry_log`,
+`autotune_engine`, `safety_poll`, **`uart_proto_rx`**, `telemetry_log`,
 `link_watchdog`, `info_uart_bridge`, `gpio_probe`, `factory_reset_reboot`.
+
+Note on `uart_proto_rx` (`uart_protocol.c:480-481`): the task is named
+`uart_proto_rx`; `uart_protocol_rx_task` is the C function, and an earlier draft
+of this doc used the function name as if it were the task name. Like
+`uart_owner` (§6) it is instantiated **twice** — `safety_link.c:478` and
+`main.c:1579` — so two stacks and two TCBs exist.
+
+**Update: the PC-link instance is now registered too** (`main.c:1579`,
+`stack_margin_register("uart_proto_rx", ...)`) — the "uninstrumented,
+invisible in 3.1" note above is stale. Both instances now report. This
+closes that half of 4.2; the other tasks listed in 4.2 still need
+registering.
+
+`STACK_MARGIN_MAX_TASKS` is 28 (`stack_margin.h:64`); this session's
+reporting session claimed all 28 slots are now in use with no spares and
+that `/api/status` JSON headroom is down to ~100 B of its 4096 B buffer —
+both plausible given the count of registration call sites (51, several
+conditional on which link/board variant is built) but not independently
+re-verified against a live board here. Confirm the live count before relying
+on it; if true, any further task added to 4.2's coverage list needs either a
+slot freed elsewhere or the cap raised.
 
 ### 7.2 Deliberately internal — do not touch
 
-Each of these already carries a comment in its source explaining why. A PSRAM
-stack on a task that writes flash asserts every time; several of these also run
-in windows where the cache is disabled, where a PSRAM stack is unreachable by
-construction.
+Each of these already carries a comment in its source explaining why. The
+mechanism is worth stating precisely, because "writes flash" is the symptom
+rather than the rule: **PSRAM is reached *through* the flash cache**, so a task
+whose stack lives in PSRAM cannot run at all while the cache is down.
+`uart_bridge_ext.c:94-99` states it directly — *"A PSRAM STACK MUST NOT BE LIVE
+WHILE THE FLASH CACHE IS DOWN... ESP-IDF asserts on it: `assert failed:
+spi_flash_disable_interrupts_caches_and_other_cpu`"* — and the same file records
+it reproduced twice on hardware (the LVGL task, 2026-08-20, and the flash worker
+via a profile push over the UART bridge).
 
 - `bx_flash_worker` (`uart_bridge_ext.c`) — the flash worker itself
 - `danger_mode`
@@ -269,8 +363,12 @@ why the existing comment is wrong.
 | `profile_executor` | 4096 B | run-state breadcrumb writes to `kiln_nvs` |
 | `spi_owner` | — | shares the SPI bus with flash |
 | `i2c_owner` | — | expected clean |
-| `uart_owner` and `uart_owner_evt` | 3072 B each | expected clean |
+| `uart_owner_*` ×2 instances | 3072 B each | expected clean — but see §6 first |
 | `screen_idle` | 3072 B | display-settings persistence |
+
+`uart_owner_*` appears in both §6 and here on purpose: §6 trims it, this phase
+would move it. Trim first, then move — and remember one call site serves both
+the safety and PC instances, so either change hits both links.
 
 **The work of this phase is the tracing, not the call-site edit.** The edit is a
 single substitution per task. The question that must be answered first, for each
