@@ -47,7 +47,10 @@
      scales fluidly instead of just centering a fixed box. Reasoned about
      320/360/390, 768/820, 1280/1920. */
   *, *::before, *::after { box-sizing: border-box; }
-  body { font-family: sans-serif; width: min(100% - 2rem, 640px); margin: 2em auto;
+  /* WEB_UI_RESPONSIVE_PLAN.md sec 6: min() shrink-to-fit stays, fixed 640px
+     cap becomes the shared --kc-shell-max -- see backup_page.html's
+     identical comment for the rationale. */
+  body { font-family: sans-serif; width: min(100% - 2rem, var(--kc-shell-max)); margin: 2em auto;
          background: var(--bg); color: var(--fg); }
   h1 { font-size: 1.2em; }
   h2 { font-size: 1em; margin-top: 1.5em; border-top: 1px solid var(--border); padding-top: 1em; }
