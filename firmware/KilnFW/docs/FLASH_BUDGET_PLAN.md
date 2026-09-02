@@ -8,14 +8,13 @@ truth, not the checkboxes.** Nothing is marked done until a commit is named.
 Every number below is measured and attributed, or explicitly labelled as an
 estimate.
 
-Status at time of writing (2026-09-02): **Phase 0 (§4.1/§4.3) is built.** §5.1
-and §5.2 are landed (`9ede138`, `0bbb21c`). §5.3 stays untouched by owner
+Status at time of writing (2026-09-02): **Phase 0 (§4.1/§4.2/§4.3) is built.**
+§5.1 and §5.2 are landed (`9ede138`, `0bbb21c`). §5.3 stays untouched by owner
 decision. §5.4 is decided-not-pursued (§4.1's attribution found the string
-pool is ordinary spread-out `ESP_LOG*` strings, not dead weight). §4.2 (size
-baseline) is still open — blocked this session by a concurrent tree edit, see
-4.2 for what was tried. Do not describe §5 as done until §4.2 lands and §7's
-checklist is worked for a single partition-table revision covering §5.1/§5.2
-together; nothing has been reflashed.
+pool is ordinary spread-out `ESP_LOG*` strings, not dead weight). §4.2's size
+baseline is now recorded against `eb17ea5` — see 4.2. §7's checklist for the
+single partition-table revision covering §5.1/§5.2 is still the remaining
+hardware step; nothing has been reflashed under this plan yet.
 
 **Phase 0, done (`699f5ab`):** `attribute_str_pool.py` +
 `check_flash_partition_map.ps1`. Methodology correction for §4.1: the map
@@ -52,16 +51,17 @@ Two separate scarcities, which must not be conflated:
 
 ```
 app slot (ota_0 / ota_1 / factory)   3,145,728 B
-KilnCtrl.bin (measured 2026-09-01)   1,924,496 B
-free                                 1,221,232 B   (38.8%)
+KilnCtrl.bin (commit eb17ea5)        1,936,320 B
+free                                 1,209,408 B   (38.4%)
 ```
 
-**This figure is already drifting.** The same build measured again the same day
-was 1,926,672 B (+2,176 B), against a working tree with ~20 uncommitted files
-under `App/drivers/`. That is expected churn, not an error — but it means the
-number above is not reproducible, which is precisely the failure §4.2 exists to
-prevent. **Any size baseline recorded in this doc must name the commit it was
-taken against.** A byte count with only a date attached cannot be checked later.
+**Superseded:** the 2026-09-01 figures once here (1,924,496 B / 1,221,232 B /
+38.8%, dated but not named to a commit) are stale — both because they predated
+`9ede138`'s partition-table change and because a dated-only number is exactly
+what this section warns against. See §4.2 for the full baseline, methodology,
+and per-archive table, all pinned to `eb17ea5`. **Any size baseline recorded in
+this doc must name the commit it was taken against.** A byte count with only a
+date attached cannot be checked later.
 
 **Chip-level — nearly exhausted.**
 
@@ -223,6 +223,11 @@ partition-size check, and not the byte count.
 
 ## 3. Where the 1.92 MB image goes (measured, `esp_idf_size --archives`)
 
+**Superseded by §4.2's table**, which pins the same measurement to a named
+commit (`eb17ea5`) — the numbers below predate that and drift slightly (e.g.
+`libdrivers.a` was 637,022 B here, 645,138 B at `eb17ea5`). Kept for the
+narrative discussion below the table, which still holds.
+
 Top contributors to the ELF:
 
 | archive | total | of which |
@@ -266,32 +271,81 @@ wrong diagnosis does not get rediscovered.
 before deciding anything in 5.4 is worth doing. Until that attribution exists,
 239 kB is a number without an owner.
 
-### 4.2 Record a size baseline in this doc — BLOCKED this session, not abandoned
+### 4.2 Size baseline — recorded against `eb17ea5` (2026-09-02)
 
-Capture `esp_idf_size --archives` output and `KilnCtrl.bin` size against a named
-commit. Every later phase compares against it. Without a committed baseline,
-"this saved 40 kB" is unverifiable a week later.
+**Commit:** `eb17ea5` ("Give the coupling matrix a real preset and a client
+that can post it"). Working tree was clean (`git status` showed no tracked
+changes) and `build_kilnfw` passed before this build; `tools/run_all_checks.ps1`
+was 23/23 both before and after. This is a clean-tree baseline, unlike the
+2026-09-02 attempt recorded lower in this section's history, which was blocked
+by a concurrent agent's in-progress work and produced only non-authoritative
+numbers.
 
-**2026-09-02 attempt:** could not produce a clean, reproducible number this
-session. The working tree was mid-edit by a concurrent agent's binary
-event-log conversion (`log_store.c`/`telemetry_log.c`/`log_http.c` etc.,
-out of this plan's scope and explicitly left alone) for the whole session, so
-a build against the checked-out tree would have baselined someone else's
-in-progress, unnamed work rather than a named commit — exactly what this
-section exists to prevent. An isolated `git worktree` build pinned at
-`9665851` (the last flash-relevant commit) was tried to route around that,
-but hit an unrelated failure: `board_temps.c` fails
-`TEMPERATURE_SENSOR_CLK_SRC_DEFAULT undeclared` in a fresh worktree checkout
-that the main tree's cached `build/` does not hit — a toolchain/component
-cache difference, not a code defect in this plan's scope, and not chased
-further under this task's budget. Non-authoritative numbers were still
-gathered from a build of the (dirty) working tree for orientation only —
-`libdrivers.a` 643,447 B, `liblvgl.a` 267,287 B, `libesp_stdio.a` 240,919 B
-(the merged string pool), `libnet80211.a` 150,770 B, `libtfpsacrypto.a`
-96,924 B, `liblwip.a` 90,450 B, `libwpa_supplicant.a` 66,997 B, `libpp.a`
-64,816 B, `libphy.a` 34,479 B — consistent with section 3's table, but **do
-not cite these as the baseline**; they are not tied to a named commit.
-Re-attempt once the log-store work has landed and the tree is clean.
+**Method:** `idf.py build` from a clean `eb17ea5` checkout, then
+`esp_idf_size` (the IDF v6.0.2 venv's `python -m esp_idf_size`, same tool the
+CLI's `idf.py size` / `size-components` wrap) against
+`build/KilnCtrl.map` — both the summary and `--archives` forms. Per §4.1's
+methodology note, the per-source-file string-pool breakdown instead came from
+`App/test/attribute_str_pool.py`, which reads the map's "(size before
+relaxing)" lines rather than the merged-pool placement column; `esp_idf_size
+--archives` totals below are per-*archive*, not per-file, and are not subject
+to that trap — the trap is specific to the single merged `.str1.1` pool
+section discussed in §4.1.
+
+**Per-archive contributions (`esp_idf_size --archives`, top 10 by total size):**
+
+| archive | total | flash code | flash data (rodata) |
+|---|---:|---:|---:|
+| `libdrivers.a` | 645,138 B | 303,924 B | 267,501 B |
+| `liblvgl.a` | 267,303 B | 238,823 B | 27,916 B |
+| `libesp_stdio.a` | 241,142 B | 394 B | 240,732 B (merged string pool, §4.1) |
+| `libnet80211.a` | 150,770 B | 123,414 B | 14,845 B |
+| `libtfpsacrypto.a` | 96,924 B | 80,509 B | 15,763 B |
+| `liblwip.a` | 90,450 B | 82,158 B | 3,684 B |
+| `libwpa_supplicant.a` | 66,997 B | 63,788 B | 1,838 B |
+| `libpp.a` | 64,816 B | 42,381 B | 3,853 B |
+| `libphy.a` | 34,479 B | 27,966 B | 0 B |
+| `libespressif__mdns.a` | 31,677 B | 28,528 B | 987 B |
+
+Consistent with §3's table and the same rank order; absolute values differ
+slightly because §3 predates this commit (now noted there).
+
+**String-pool per-file attribution** (`attribute_str_pool.py`, top 5, raw
+pre-dedup bytes): `dashboard_http.c.obj` 11,350 B, `mesh_parent.o` 11,108 B,
+`main.c.obj` 9,671 B, `ota_http.c.obj` 9,510 B, `autotune_engine.c.obj`
+7,611 B. Merged pool 240,584 B; raw sum 310,317 B; 69,733 B (22.5%) dedup gap.
+Close to but not identical to §4.1's `699f5ab` figures — expected drift over
+26 intervening commits, same top contributors.
+
+**Image size and free space, smallest app partition:**
+
+```
+KilnCtrl.bin (eb17ea5)                1,936,320 B
+  (esp_idf_size total image, unpadded 1,936,206 B)
+smallest app partition (ota_0 / ota_1 / factory, all equal)  3,145,728 B
+free                                   1,209,408 B   (38.4%)
+```
+
+`ota_0`, `ota_1`, and `factory` are all 3,145,728 B (`check_flash_partition_map.ps1`
+confirms equal-sized app partitions, per §2's constraint), so "smallest app
+partition" and "the app slot" are the same figure post-`9ede138`.
+
+**Superseded by this baseline:** §1's old 2026-09-01 slot-level figures
+(1,924,496 B / 1,221,232 B / 38.8%, dated but not commit-named) and §3's
+per-archive table (predates `9ede138`'s partition-table change, though the
+*image* contents that table describes were not directly affected by the
+partition move — only the slot-level percentage in §1 was). The partition
+table itself changed at `9ede138` (`legacy_app` reclaimed, `pico_img`
+relocated to 0x10000, `logs` 3072K→768K, ~3.71 MiB freed) and the board has
+been flashed with it; `check_flash_partition_map.ps1`'s "Expected-map check"
+(§4.3) confirms the checked-out `partitions.csv` matches that post-`9ede138`
+shape.
+
+No new check was needed for this section — §4.3's `check_flash_partition_map.ps1`
+already runs in `tools/run_all_checks.ps1` and already validates the current
+partition shape; this section is a doc-only baseline capture using existing
+tooling (`attribute_str_pool.py`, `esp_idf_size`), per the task's instruction
+to reuse rather than write new.
 
 ### 4.3 A partition-map check
 
@@ -459,8 +513,8 @@ history and are not hypothetical — each has already caused a problem here once
 
 ## 8. Suggested order
 
-1. ~~Phase 0 (4.1–4.3)~~ — done (`699f5ab`), except 4.2's baseline capture,
-   still open (blocked, see 4.2).
+1. ~~Phase 0 (4.1–4.3)~~ — done. 4.1/4.3 landed at `699f5ab`; 4.2's baseline
+   is recorded against `eb17ea5` (see 4.2).
 2. ~~Decide the `logs` retention question (5.2)~~ — decided and landed
    (`0bbb21c`).
 3. Single partition-table revision covering `legacy_app` (5.1, landed
