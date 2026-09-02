@@ -580,6 +580,71 @@ confidence while resting on an unvalidated driving condition. A simulator is not
 evidence until it reproduces a measurement someone actually took — and it stays
 a lower bound on trust until a held-out run, not just a fitted one, checks it.
 
+**2026-09-02d — honest held-out RMS from three rested-start full firings, and
+a discrimination verdict.** The 3.51/3.15/3.56 °C figure above carried a
+cold-start excuse (capture began 342 s into the firing). That excuse no
+longer applies: `logs/coupling/p7_oldmatrix_http.jsonl` and
+`p7_newmatrix_http.jsonl` are complete profile-7 firings captured from `t=0`
+at a rested kiln (28.7 °C / 25.2 °C start); `p7_newmatrix2_http.jsonl` is a
+third, in-progress at analysis time (used through the 522 s it had written).
+Pooling the two complete runs (`n=868` per zone, sim driven off each
+capture's own segment boundaries via `run_profile_from_capture`, coupled/
+ff_hold, unchanged K_full/tau): **pointwise RMS z0 1.05 °C, z1 0.61 °C, z2
+0.67 °C** — a real, order-of-magnitude improvement over the cold-start
+number, confirming that excuse was correct, not a cover story.
+
+Character of the error: z2 carries a small, tight, repeatable cold bias in
+every dwell window across both matrices (mean −0.85 °C, spread only 0.09 °C
+over 5 windows) — genuinely systematic. A grid search scaling `K_full[2][2]`
+±10 % to close it made pooled z2 RMS *worse* at every setting away from 1.0
+(0.67 °C at 1.00 → 0.99 °C at 0.95, 2.29 °C at 0.90), so the bias is not a
+steady-state gain error correctable by nudging `K_diag` — it lives in the
+dynamics (dead time / tau / feedforward structure), left open. z1 is the
+best-behaved zone (0.61 °C, no established bias). z0 is the worst and,
+critically, *not* a clean bias: per-window sim−hw dwell offsets swing
+−1.77…+1.85 °C and average to ≈0 — noisy, not systematic, so no simple
+correction applies there either.
+
+**Discrimination threshold.** Treating each zone's pooled RMS as the sim's
+own 1σ measurement error and requiring ≥2σ separation to call a winner
+between two candidates: z0 needs a true difference ≳2.1 °C, z1 ≳1.2 °C, z2
+≳1.3 °C before the sim can tell two candidates apart. The control changes
+actually being compared (relay-gain, fuzzy-strength) move outcomes by
+~0.4–0.5 °C — 2–5× below every zone's threshold. **Verdict: no — the
+simulator cannot yet accelerate this work.** It is a large, confirmed
+improvement over the cold-start number (which said the same thing more
+loudly), and it settles that the earlier failure was a capture artifact, not
+a plant defect, but the gap to a 0.4–0.5 °C effect size remains open on all
+three zones.
+
+Ranked improvements, by expected value per unit effort: (1) a proper
+per-zone re-identification using z2's dwell-entry dynamics (dead time/tau),
+not steady-state gain — the one lever this pass found *doesn't* work is
+worth ruling out explicitly so the next pass doesn't repeat the grid search;
+(2) more rested full-run captures to pool down z0's noise (its error isn't
+biased, so averaging more independent runs is the correct lever, unlike z2);
+(3) per-zone rather than shared PID gains, untested this pass; (4) modelling
+the 60 s PWM window instead of continuous duty, untested this pass — lowest
+priority since none of the three found error patterns (z2 bias, z0 noise)
+look like a PWM-quantization signature.
+
+**Implemented this pass: the measurement chain.** `run_profile()` gained
+opt-in `measurement_quantum_c`/`measurement_noise_std_c`/`measurement_seed`
+args (default `0.0`/off, so every existing caller is byte-identical —
+pinned by `test_measurement_chain_defaults_off_reproduces_noise_free_result`;
+`test_measurement_chain_noise_and_quantization_change_the_trajectory` pins
+that enabling it is not silently inert). The PID previously read
+`plant.temp[i]` — true state — directly; it now can be fed a quantized
+(0.1 °C, the real MAX31856 LSB) plus noisy (0.05 °C σ) measurement instead,
+closing a real gap since the fuzzy layer's whole design target is rejecting
+noisy-derivative behaviour a deterministic measurement can never exercise.
+Re-running the two complete rested captures with it enabled moved pooled RMS
+by ≤0.003 °C per zone (noise this small is swamped by the ~0.6–1.1 °C error
+already present) — this feature does not close today's discrimination gap,
+but it was never expected to: its value is making a future fuzzy-strength
+comparison exercise the layer it is meant to test at all, not shrinking
+today's held-out number.
+
 ### 3.5 Documentation — CLOSED 2026-09-01 (`d382b06`)
 
 `PID_CONTROL.md` now carries the strength-scaling formula for the fuzzy layer,

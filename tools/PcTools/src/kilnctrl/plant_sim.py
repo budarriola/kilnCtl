@@ -997,7 +997,8 @@ def uncoupled_ff_hold_climb(target_c, target_rate, i, ambient=20.0):
 def run_profile(segs, start_temp, kp=0.06, ki=0.0003, kd=0.0,
                  climb_mode='coupled', integral_floor='ff_hold', ambient=20.0,
                  controller_K_inv=None, controller_tau=None, plant_regime='measured',
-                 fuzzy_strength_pct=0.0):
+                 fuzzy_strength_pct=0.0,
+                 measurement_quantum_c=0.0, measurement_noise_std_c=0.0, measurement_seed=0):
     """Run the plant+PID loop over an explicit segment list.
 
     ``segs``: list of ``(t0, t1, c0, c1, rate)`` tuples, ``rate`` signed
@@ -1032,6 +1033,24 @@ def run_profile(segs, start_temp, kp=0.06, ki=0.0003, kd=0.0,
     above for the faithful mirror of ``pid_fuzzy.c``. Default 0.0 keeps
     every existing caller (regression tests, capture comparisons, the
     matrix sweep) on exactly the pre-fuzzy code path.
+
+    ``measurement_quantum_c``/``measurement_noise_std_c``: the PID has
+    always been fed ``plant.temp[i]`` directly -- the true, noise-free
+    plant state -- with no model of the real measurement chain (MAX31856
+    thermocouple ADC, 0.1 C LSB quantization) or of thermocouple noise. The
+    fuzzy layer's whole design target (see ``pid_fuzzy_adjust``) is
+    rejecting noisy-derivative behaviour that this omission cannot
+    reproduce at all: a deterministic measurement can never exercise the
+    fuzzy dead-band, so any fuzzy-vs-baseline comparison run through this
+    simulator up to 2026-09-02 was necessarily comparing on a signal the
+    fuzzy layer was not built to react to. Both default to ``0.0``
+    (off, byte-for-byte the old code path) so every existing caller
+    (regression tests, capture comparisons, the matrix sweep) is
+    unaffected. ``measurement_seed`` seeds the noise draw so a given call
+    is reproducible; quantization rounds to the nearest
+    ``measurement_quantum_c`` (0.1 for the real MAX31856 LSB) and is
+    applied AFTER the additive Gaussian noise, matching the real chain
+    (continuous sensor + noise, then ADC quantization).
     """
     if plant_regime == 'physical':
         plant = PhysicalKilnPlant(DT, ambient=ambient, start_temp=start_temp)
@@ -1047,6 +1066,7 @@ def run_profile(segs, start_temp, kp=0.06, ki=0.0003, kd=0.0,
     times, targets, temps_log, duty_log = [], [], [], []
     duty = np.zeros(N_ZONES)
     t = 0.0
+    rng = np.random.default_rng(measurement_seed) if measurement_noise_std_c > 0.0 else None
     while t <= total_t:
         seg_idx = None
         for si, (t0, t1, c0, c1, rate) in enumerate(segs):
@@ -1065,7 +1085,12 @@ def run_profile(segs, start_temp, kp=0.06, ki=0.0003, kd=0.0,
                                          K_inv=controller_K_inv, tau_ff=controller_tau)
             else:
                 hold, climb, ff = ff_fn(target_c, target_rate, i, ambient=ambient)
-            duty[i], _ = pids[i].update(target_c, plant.temp[i], DT, ff, hold, integral_floor=integral_floor)
+            meas_c = plant.temp[i]
+            if rng is not None:
+                meas_c = meas_c + rng.normal(0.0, measurement_noise_std_c)
+            if measurement_quantum_c > 0.0:
+                meas_c = round(meas_c / measurement_quantum_c) * measurement_quantum_c
+            duty[i], _ = pids[i].update(target_c, meas_c, DT, ff, hold, integral_floor=integral_floor)
         times.append(t)
         targets.append(target_c)
         temps_log.append(plant.temp.copy())

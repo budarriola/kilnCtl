@@ -320,6 +320,59 @@ def test_validates_against_held_out_p7_fuzzy0_capture():
         assert rms <= 6.0, f"zone {z} RMS error {rms:.2f} C exceeds 6.0 C bound"
 
 
+def test_measurement_chain_defaults_off_reproduces_noise_free_result():
+    """``measurement_quantum_c``/``measurement_noise_std_c`` default to 0.0
+    and must not perturb any existing caller -- run_profile with no
+    measurement-chain args must be byte-identical to passing the explicit
+    zero defaults.
+
+    Proof this can fail: temporarily changed the default
+    ``measurement_noise_std_c`` to 0.05 (a plausible thermocouple noise
+    sigma) and reran. Captured red output:
+
+        FAILED tests/test_plant_sim.py::test_measurement_chain_defaults_off_reproduces_noise_free_result
+        AssertionError: default call diverged from explicit-zero call at zone 0:
+        max|diff|=0.0565 C -- measurement_noise_std_c default is no longer 0.0
+
+    Reverted (default restored to 0.0), suite green again before this test
+    was kept.
+    """
+    segs = [(0.0, 300.0, 20.0, 60.0, 40.0 / 300.0), (300.0, 900.0, 60.0, 60.0, 0.0)]
+    result_a = ps.run_profile(segs, start_temp=[20.0, 20.0, 20.0])
+    result_b = ps.run_profile(segs, start_temp=[20.0, 20.0, 20.0],
+                               measurement_quantum_c=0.0, measurement_noise_std_c=0.0)
+    for z in range(3):
+        diff = np.abs(result_a['temps'][:, z] - result_b['temps'][:, z]).max()
+        assert diff == 0.0, (
+            f"default call diverged from explicit-zero call at zone {z}: "
+            f"max|diff|={diff:.4f} C -- measurement_noise_std_c default is no longer 0.0"
+        )
+
+
+def test_measurement_chain_noise_and_quantization_change_the_trajectory():
+    """With noise/quantization actually enabled, the closed-loop trajectory
+    must differ from the noise-free run -- otherwise the feature is wired
+    in but silently inert (e.g. applied to a value nothing reads)."""
+    segs = [(0.0, 300.0, 20.0, 60.0, 40.0 / 300.0), (300.0, 900.0, 60.0, 60.0, 0.0)]
+    clean = ps.run_profile(segs, start_temp=[20.0, 20.0, 20.0])
+    noisy = ps.run_profile(segs, start_temp=[20.0, 20.0, 20.0],
+                            measurement_quantum_c=0.1, measurement_noise_std_c=0.05,
+                            measurement_seed=1)
+    diffs = np.abs(clean['temps'] - noisy['temps'])
+    assert diffs.max() > 0.01, (
+        f"measurement noise/quantization had no effect on the trajectory "
+        f"(max|diff|={diffs.max():.4f} C) -- feature looks inert"
+    )
+
+    # deterministic given a seed
+    noisy_repeat = ps.run_profile(segs, start_temp=[20.0, 20.0, 20.0],
+                                   measurement_quantum_c=0.1, measurement_noise_std_c=0.05,
+                                   measurement_seed=1)
+    assert np.array_equal(noisy['temps'], noisy_repeat['temps']), (
+        "same measurement_seed produced different trajectories -- noise draw is not reproducible"
+    )
+
+
 # ---------------------------------------------------------------------------
 # High-temperature extension (cone 10 / ~1285 C), added 2026-09-02. See
 # plant_sim.py's "High-temperature extension" section for the physical
