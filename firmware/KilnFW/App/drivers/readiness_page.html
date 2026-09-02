@@ -21,22 +21,22 @@
      while explicit light mode is untouched. */
   :root {
     --bg: #fff; --fg: #111; --muted: #444; --border: #888; --button-bg: #f2f2f2;
-    --card-bg: #f7f7f7; --link: #06c; --ok: #1a7a1a; --not-done: #b00; --cannot-yet: #888;
-    --off: #a67c00;
+    --card-bg: #f7f7f7; --link: #06c; --ok: #1a7a1a; --bad: #b00; --cannot-yet: #888;
+    --warn: #a67c00;
   }
   @media (prefers-color-scheme: dark) {
     :root:not([data-theme="light"]) {
       --bg: var(--ui-bg); --fg: var(--ui-text-primary); --muted: var(--ui-text-secondary);
       --border: var(--ui-text-secondary); --button-bg: var(--ui-card); --card-bg: var(--ui-card);
-      --link: var(--ui-accent-3); --ok: var(--ui-accent-4); --not-done: var(--ui-accent-5);
-      --cannot-yet: var(--ui-text-secondary); --off: var(--ui-accent-1);
+      --link: var(--ui-accent-3); --ok: var(--ui-accent-4); --bad: var(--ui-accent-5);
+      --cannot-yet: var(--ui-text-secondary); --warn: var(--ui-accent-1);
     }
   }
   :root[data-theme="dark"] {
     --bg: var(--ui-bg); --fg: var(--ui-text-primary); --muted: var(--ui-text-secondary);
     --border: var(--ui-text-secondary); --button-bg: var(--ui-card); --card-bg: var(--ui-card);
-    --link: var(--ui-accent-3); --ok: var(--ui-accent-4); --not-done: var(--ui-accent-5);
-    --cannot-yet: var(--ui-text-secondary); --off: var(--ui-accent-1);
+    --link: var(--ui-accent-3); --ok: var(--ui-accent-4); --bad: var(--ui-accent-5);
+    --cannot-yet: var(--ui-text-secondary); --warn: var(--ui-accent-1);
   }
   /* box-sizing reset, page-local only. Fluid width via min() rather than a
      breakpoint: fills a 320px phone, caps at 640px on tablet/desktop
@@ -73,9 +73,9 @@
   .item .fix { font-size: 0.85em; margin-top: 0.2em; display: inline-flex;
                align-items: center; min-height: 32px; padding: 0 0.4em 0 0; }
   .item.status-ok .mark { color: var(--ok); }
-  .item.status-not_done .mark { color: var(--not-done); }
+  .item.status-not_done .mark { color: var(--bad); }
   .item.status-cannot_yet .mark { color: var(--cannot-yet); }
-  .item.status-deliberately_off .mark { color: var(--off); }
+  .item.status-deliberately_off .mark { color: var(--warn); }
   .item.status-cannot_yet { opacity: 0.75; }
   .legend { font-size: 0.8em; color: var(--muted); margin-bottom: 1em; }
   .legend span { margin-right: 1em; white-space: nowrap; }
@@ -95,8 +95,8 @@ each item actually becomes checkable. Nothing here is required to run a
 firing; it is a checklist, not a gate.</p>
 <div class="legend">
   <span>&#10003; ok</span>
-  <span style="color:var(--not-done)">&#10007; not done</span>
-  <span style="color:var(--off)">&#8212; deliberately off</span>
+  <span style="color:var(--bad)">&#10007; not done</span>
+  <span style="color:var(--warn)">&#8212; deliberately off</span>
   <span style="color:var(--cannot-yet)">&#8943; can't check yet</span>
 </div>
 <div id="items"><p class="empty">Loading&hellip;</p></div>
