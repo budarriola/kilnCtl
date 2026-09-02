@@ -616,20 +616,20 @@ bool zones_config_set_pid(uint8_t zone_index, float kp, float ki, float kd)
     (void)zone_index; (void)kp; (void)ki; (void)kd;
     return true;
 }
-esp_err_t uart_bridge_ext_run_on_flash_worker(void (*fn)(void *arg), void *arg)
-{
-    fn(arg);
-    return ESP_OK;
-}
-/* R1/R2 (opus review of commit 7c47683): adaptive_tune.c's adaptive_tune_
- * clear_ki_baseline() now calls this to decide whether it may save inline
- * instead of dispatching -- see test_adaptive_tune.c for the real exercise
- * of that logic (its own stub models the worker's re-entrancy hazard in
- * full). This file never opts any zone in, so clear_ki_baseline() is never
- * actually reached by these tests -- a fixed `false` is enough for the link
- * and matches "not on the worker" (the httpd path), the only shape that
- * would ever occur here even if it were reached. */
-bool uart_bridge_ext_is_on_flash_worker(void) { return false; }
+/* S2 (2026-09-01 audit of ae5905f): this file used to define its OWN bare
+ * `fn(arg); return ESP_OK;` stub here, with a fixed `uart_bridge_ext_is_on_
+ * flash_worker() { return false; }` justified by "clear_ki_baseline() is
+ * never actually reached by these tests". That reasoning covered
+ * adaptive_tune_clear_ki_baseline() (autotune accept path) but missed that
+ * THIS file links the real adaptive_tune.c and exercises profile_executor_
+ * halt() (profile_executor_status.c:745,980,1365,1421,1428), which reaches
+ * adaptive_tune_run_end() -- a SECOND re-entrant caller of the same worker,
+ * fixed the same way (see adaptive_tune_run_end()'s own comment in
+ * adaptive_tune.c). A bare stub with no busy/lock modeling at all could
+ * never have caught that: it had no notion of "busy" to violate. Now shares
+ * the same busy-modeling stub test_adaptive_tune.c uses -- see stubs/bx_
+ * worker_stub.h's own header comment. */
+#include "bx_worker_stub.h"
 httpd_handle_t wifi_provision_http_get_server(void) { return NULL; }
 esp_err_t httpd_register_uri_handler(httpd_handle_t handle, const httpd_uri_t *uri_handler)
 {

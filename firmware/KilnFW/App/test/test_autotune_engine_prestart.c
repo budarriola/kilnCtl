@@ -125,10 +125,21 @@ bool ota_http_heat_blocked_by_update(char *reason_out, size_t reason_cap)
 // capped forever against a stale one. This file does not link adaptive_
 // tune.c at all (it is a big, separately-tested module in its own right --
 // see test_adaptive_tune.c, which is where adaptive_tune_clear_ki_baseline()
-// itself is actually exercised), so a no-op fake is all this file needs:
-// autotune_engine_accept()'s own behavior does not depend on what this call
-// does, only that it happens.
-void adaptive_tune_clear_ki_baseline(uint8_t zone_index) { (void)zone_index; }
+// itself is actually exercised), so a no-op fake is all this file needs to
+// LINK -- but S6 (2026-09-01 audit of ae5905f) found that "no-op fake" had
+// drifted into "unasserted fake": nothing here ever recorded that the call
+// actually happened, so deleting autotune_engine.c's call to this function
+// entirely left the whole suite green. Now counts calls (and the last zone
+// index passed) so test_accept_succeeds_end_to_end_regardless_of_last_
+// sample_quantization_dither() below can assert the wiring, not just that
+// linking succeeds.
+int    g_clear_ki_baseline_calls = 0;
+uint8_t g_clear_ki_baseline_last_zone = 0xFF;
+void adaptive_tune_clear_ki_baseline(uint8_t zone_index)
+{
+    g_clear_ki_baseline_calls++;
+    g_clear_ki_baseline_last_zone = zone_index;
+}
 
 bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
 {
@@ -1156,12 +1167,24 @@ static void run_one_dither_case_end_to_end(float dither_c, const char *label)
     TEST_CHECK(s_at.model.settled, msg);
 
     s_stub_set_pid_result = true;
+    int clear_ki_baseline_calls_before = g_clear_ki_baseline_calls;
     bool accepted = autotune_engine_accept(false);
     snprintf(msg, sizeof(msg),
             "%s: a well-converged 8*tau fit must ACCEPT WITHOUT ack_unsettled (converged=%d "
             "tau_ok=%d) -- quantization noise on the last sample must not gate acceptance",
             label, (int)s_at.model.extrapolation_converged, (int)s_at.model.tau_consistent_with_gain);
     TEST_CHECK(accepted, msg);
+    // S6 (2026-09-01 audit of ae5905f): the old fake was a bare no-op with
+    // no call counter, so deleting autotune_engine.c's adaptive_tune_clear_
+    // ki_baseline() call entirely left the whole suite green. Assert the
+    // wiring itself, not just that this file links against the symbol.
+    snprintf(msg, sizeof(msg),
+            "%s: a successful accept() must call adaptive_tune_clear_ki_baseline() exactly once "
+            "(Q3: the just-committed result's remedy for the Ki-diagnosis cumulative bound)", label);
+    TEST_CHECK(g_clear_ki_baseline_calls == clear_ki_baseline_calls_before + 1, msg);
+    snprintf(msg, sizeof(msg), "%s: adaptive_tune_clear_ki_baseline() must be called for the zone "
+                              "autotune_engine_accept() just committed", label);
+    TEST_CHECK(g_clear_ki_baseline_last_zone == s_at.zone_index, msg);
     s_stub_set_pid_result = false;
 }
 

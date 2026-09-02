@@ -567,8 +567,26 @@ void adaptive_tune_run_end(const profile_firing_run_record_t *rec, bool clean)
     // at all this run) skips the write entirely -- there is nothing new to
     // persist, and en_mask-style writing the identical bytes back every run
     // would just be wear for no benefit.
+    //
+    // RE-ENTRANCY: this function is also reachable ON the flash-safe worker
+    // task itself -- profile_executor_halt() (profile_executor_status.c)
+    // calls adaptive_tune_run_end() directly, and profile_executor_halt() is
+    // itself one of uart_bridge_ext.c's on-worker calls (its own list at
+    // uart_bridge_ext.c:120-127). Same hazard, same fix as
+    // adaptive_tune_clear_ki_baseline() above: check
+    // uart_bridge_ext_is_on_flash_worker() first and run the save inline
+    // instead of dispatching a second job onto the worker from inside the
+    // first. This was previously saved only by bx_run_on_internal_stack()'s
+    // generic backstop -- see that function's own comment; the explicit,
+    // host-testable check here is the primary fix, same as the accept path.
     if (baseline_newly_latched) {
-        esp_err_t err = uart_bridge_ext_run_on_flash_worker(save_kibase_job, &job);
+        esp_err_t err;
+        if (uart_bridge_ext_is_on_flash_worker()) {
+            save_kibase_job(&job);
+            err = ESP_OK;
+        } else {
+            err = uart_bridge_ext_run_on_flash_worker(save_kibase_job, &job);
+        }
         if (err != ESP_OK || job.result != ESP_OK) {
             ESP_LOGE(ADAPTIVE_TUNE_TAG, "adaptive_tune_run_end(): Ki baseline NVS save failed: %s / %s",
                      esp_err_to_name(err), esp_err_to_name(job.result));

@@ -126,62 +126,17 @@ bool zones_config_set_coupling_cell(uint8_t zone_index, uint8_t neighbor_index, 
     return true;
 }
 
-// R2 (2026-09-01, opus review of commit 7c47683): this stub used to be a bare
-// `fn(arg); return ESP_OK;` with no lock/queue modeling at all -- which meant
-// a re-entrant call (a job already running through this stub calling back
-// into it) just silently ran fn() again, no problem. That is NOT what the
-// real bx_run_on_internal_stack() does: it takes a non-recursive mutex and
-// feeds a depth-1 queue that only the worker task itself drains, so a
-// re-entrant call from within an already-dispatched job deadlocks the real
-// board permanently (see uart_bridge_ext.c's own comment on that function,
-// and autotune_engine.c's accept-path call-site comment, for exactly the
-// deadlock this shape represents -- AUTOTUNE_CMD_ACCEPT -> autotune_engine_
-// accept() -> adaptive_tune_clear_ki_baseline() -> a second dispatch attempt
-// while the first is still in flight). The old stub could never have caught
-// that: it had no notion of "busy" at all.
-//
-// Modeled here as a single "busy" flag standing in for the real non-
-// recursive mutex: a call that arrives while busy is exactly the shape that
-// would block forever on hardware, so it is surfaced as a hard test failure
-// instead of silently succeeding (or, worse, actually deadlocking this test
-// binary). adaptive_tune_clear_ki_baseline() is expected to check
-// uart_bridge_ext_is_on_flash_worker() (stubbed below, driven by
-// s_stub_on_flash_worker) BEFORE ever reaching this function again while
-// busy -- see test_accept_path_clear_ki_baseline_does_not_reenter_worker()
-// below, which is the test this stub exists to make possible.
-static bool s_stub_bx_busy = false;
-
-esp_err_t uart_bridge_ext_run_on_flash_worker(void (*fn)(void *arg), void *arg)
-{
-    if (s_stub_bx_busy) {
-        // Models the real deadlock: a caller re-entering the worker while
-        // a job is already in flight. On hardware this blocks forever; here
-        // it must fail loudly instead, or this stub is exactly as blind as
-        // the one it replaces.
-        TEST_CHECK(false,
-                   "uart_bridge_ext_run_on_flash_worker() called re-entrantly -- "
-                   "this deadlocks the real flash worker permanently (see R1, commit 7c47683)");
-        return ESP_FAIL;
-    }
-    s_stub_bx_busy = true;
-    fn(arg);
-    s_stub_bx_busy = false;
-    return ESP_OK;
-}
-
-// Stands in for "is the calling task bx_flash_worker" -- see uart_bridge_
-// ext.c's real uart_bridge_ext_is_on_flash_worker(), which this host build
-// does not link (it reads a FreeRTOS task handle). Tests that want to
-// simulate "already on the worker" (the UART-bridge accept path) set this
-// true around the call under test; adaptive_tune_clear_ki_baseline() must
-// consult it before dispatching -- see the stub above for what happens if it
-// does not.
-static bool s_stub_on_flash_worker = false;
-
-bool uart_bridge_ext_is_on_flash_worker(void)
-{
-    return s_stub_on_flash_worker;
-}
+// R2 (2026-09-01, opus review of commit 7c47683) / S2+S3 (2026-09-01 audit
+// of ae5905f): the busy-modeling uart_bridge_ext_run_on_flash_worker()/
+// uart_bridge_ext_is_on_flash_worker() stub used to live only here, hand-
+// rolled. It is now shared -- see stubs/bx_worker_stub.h's own header
+// comment for why (test_profile_executor_prestart.c linked the real
+// adaptive_tune.c and exercised profile_executor_halt()'s re-entrant path
+// through the OLD, blind, bare `fn(arg); return ESP_OK;` shape this
+// replaced) and for the self-consistency fix (the stub now sets
+// s_stub_on_flash_worker itself for the duration of fn(arg), rather than
+// callers setting it by hand).
+#include "bx_worker_stub.h"
 
 // No httpd fakes needed here any more -- adaptive_tune.c's HTTP surface
 // moved to adaptive_tune_http.c (2026-09-01 split), which this file does not
@@ -2422,6 +2377,95 @@ static void test_accept_path_clear_ki_baseline_does_not_reenter_worker(void)
 }
 
 // ---------------------------------------------------------------------
+// S1 (2026-09-01 audit of ae5905f): a SECOND re-entrant path, on the halt
+// side rather than the accept side. profile_executor_halt()
+// (profile_executor_status.c) is itself one of uart_bridge_ext.c's own
+// on-worker calls, and it reaches adaptive_tune_run_end() directly. Before
+// this fix, adaptive_tune_run_end() dispatched save_kibase_job() onto the
+// flash worker with NO uart_bridge_ext_is_on_flash_worker() guard whenever
+// baseline_newly_latched was true -- the identical deadlock shape as R1's
+// accept path, saved only by bx_run_on_internal_stack()'s generic backstop.
+//
+// This test calls adaptive_tune_run_end() directly rather than through
+// profile_executor_halt() itself: profile_executor_halt() is in a
+// different translation unit/executable (test_profile_executor_
+// prestart.c) and, as literally written today (profile_executor_status.c),
+// always passes `clean=false` to this call -- which forces every zone's
+// run_end loop iteration through the skip-and-continue branch and so can
+// never actually flip baseline_newly_latched true through THAT specific
+// call site. adaptive_tune_run_end() is still the exact function with the
+// hazard and the fix, and it is still reached ON the flash worker whenever
+// profile_executor_halt() runs over the UART bridge (uart_bridge_ext.c's
+// own on-worker list) -- this test exercises that function under the
+// worker-dispatch stub the same way profile_executor_halt() would deliver
+// it, using the model-refine recipe from test_model_refine_relatches_ki_
+// baseline_to_fresh_simc_ki() below to genuinely latch a NEW baseline
+// (baseline_newly_latched = true) inside the call under test.
+//
+// MUST GO RED if adaptive_tune_run_end()'s uart_bridge_ext_is_on_flash_
+// worker() check (adaptive_tune.c, the `if (baseline_newly_latched)` block)
+// is reverted to an unconditional uart_bridge_ext_run_on_flash_worker()
+// call: the shared stub's busy check (stubs/bx_worker_stub.h) trips and
+// fails loudly, exactly like R1's test above. Proven red 2026-09-01 by
+// reverting that guard and re-running this file -- captured in the S1/S2
+// audit report.
+static uint8_t s_halt_like_zone;
+
+static void halt_like_job_calls_run_end(void *arg)
+{
+    profile_firing_run_record_t *rec = (profile_firing_run_record_t *)arg;
+    // Mirrors profile_executor_halt() running ON the worker (reached over
+    // the UART bridge, per uart_bridge_ext.c's own on-worker list) and then
+    // calling adaptive_tune_run_end() before returning.
+    s_stub_on_flash_worker = true;
+    adaptive_tune_run_end(rec, true);
+    s_stub_on_flash_worker = false;
+}
+
+static void test_halt_path_run_end_does_not_reenter_worker(void)
+{
+    reset_module_state();
+    nvs_test_clear();
+    nvs_test_enable(true);
+
+    s_halt_like_zone = 0;
+    adaptive_tune_zones[0].enabled = true;
+    s_fake_zone_cfg[0].k_dc = 10.0f;
+    s_fake_zone_cfg[0].tau_s = 120.0f;
+    s_fake_zone_cfg[0].dead_time_s = 15.0f;
+    s_fake_zone_cfg[0].ki = 0.01f; // deliberately NOT SIMC-consistent, so this run's recompute
+                                    // is guaranteed to write a genuinely different Ki and latch
+                                    // a fresh baseline -- see test_model_refine_relatches_ki_
+                                    // baseline_to_fresh_simc_ki() below for the same recipe.
+    TEST_CHECK(!adaptive_tune_zones[0].ki_baseline_valid, "setup: zone starts with no baseline latched");
+
+    feed_settled_dwell(0, 22.0f + 10.5f * 0.30f, 22.0f, 0.30f, SETTLE_TICKS, DT_S);
+    feed_settled_dwell(0, 22.0f + 10.5f * 0.50f, 22.0f, 0.50f, SETTLE_TICKS, DT_S);
+    feed_settled_dwell(0, 22.0f + 10.5f * 0.70f, 22.0f, 0.70f, SETTLE_TICKS, DT_S);
+    feed_settled_dwell(0, 22.0f + 10.5f * 0.90f, 22.0f, 0.90f, SETTLE_TICKS, DT_S);
+
+    profile_firing_run_record_t rec = make_clean_record(601, 0, 900);
+
+    int failures_before = g_test_failures;
+
+    // The outer dispatch: models the UART bridge handing an on-worker
+    // command (which ends in profile_executor_halt()) to bx_flash_worker.
+    esp_err_t err = uart_bridge_ext_run_on_flash_worker(halt_like_job_calls_run_end, &rec);
+
+    TEST_CHECK(err == ESP_OK, "S1: the halt-path dispatch itself must not fail");
+    TEST_CHECK(g_test_failures == failures_before,
+               "S1: adaptive_tune_run_end() must not re-enter the flash worker when the caller is already on "
+               "it -- a re-entrant dispatch here is the identical deadlock shape as R1's accept path, just "
+               "reached from profile_executor_halt() instead of autotune_engine_accept()");
+    TEST_CHECK(adaptive_tune_zones[0].ki_baseline_valid,
+               "S1: the baseline must still actually be latched and saved -- the fix must not just avoid the "
+               "deadlock by skipping the work");
+
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
+// ---------------------------------------------------------------------
 // Q4: the model layer (adaptive_tune_refine_zone_locked(), adaptive_tune_model.c)
 // rewrites Ki from a fresh SIMC recompute independent of the Ki-diagnosis
 // layer, and used to leave ki_baseline untouched -- so a zone whose SIMC
@@ -2564,6 +2608,9 @@ void run_test_adaptive_tune(void)
 
     TEST_SECTION("adaptive_tune: accept-path clear_ki_baseline() does not re-enter the flash worker (R1)");
     test_accept_path_clear_ki_baseline_does_not_reenter_worker();
+
+    TEST_SECTION("adaptive_tune: halt-path run_end() does not re-enter the flash worker (S1)");
+    test_halt_path_run_end_does_not_reenter_worker();
 
     TEST_SECTION("adaptive_tune: the model layer keeps the Ki baseline tracking its own SIMC output (Q4)");
     test_model_refine_relatches_ki_baseline_to_fresh_simc_ki();

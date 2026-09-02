@@ -3584,7 +3584,14 @@ bool autotune_engine_accept(bool ack_unsettled)
      * job inline instead of dispatching, since the worker's own stack is
      * already internal SRAM and the PSRAM/flash-cache hazard is already
      * satisfied. The HTTP accept path (dashboard_http.c, httpd task) is
-     * unaffected -- it was never on the worker to begin with. */
+     * unaffected -- it was never on the worker to begin with.
+     *
+     * This accept path is NOT the only re-entrant caller: profile_executor_
+     * halt() (reached on-worker via uart_bridge_ext.c's own on-worker list)
+     * reaches adaptive_tune_run_end(), which has the identical hazard and
+     * the identical uart_bridge_ext_is_on_flash_worker() guard -- see that
+     * function's comment in adaptive_tune.c. Do not assume this accept path
+     * is the sole re-entrant caller when auditing this hazard again. */
     adaptive_tune_clear_ki_baseline(zone);
 
     if (method == AUTOTUNE_METHOD_RELAY) {

@@ -19,6 +19,8 @@
 // which boards are attached, exactly like dashboard_http_start() et al.
 #include "uart_bridge.h"
 
+#include "bx_worker_reentrancy.h"
+
 #include <math.h>
 #include <string.h>
 
@@ -39,6 +41,7 @@
 #include "profiles_builtin.h"
 #include "profiles_http.h"
 #include "run_state.h"
+#include "stack_margin.h"
 #include "uart_task_ids.h"
 #include "unit_pref.h"
 #include "wifi_prov.h"
@@ -118,14 +121,21 @@ static const char *TAG = "uart_bridge_ext";
  * And profiles was NOT the only exposed task. The audit that followed found:
  *   - profiles_task: profiles_http_save(), profiles_http_delete(), plus the
  *     run_state writes reachable through profile_executor_run() / _halt() /
- *     _pause() and run_state_acknowledge().
+ *     _pause() and run_state_acknowledge(). profile_executor_halt() is a
+ *     SECOND RE-ENTRANT caller in its own right, not just an on-worker call:
+ *     it reaches adaptive_tune_run_end() (profile_executor_status.c), which
+ *     dispatches a save onto this same worker whenever a Ki baseline was
+ *     newly latched this run -- see adaptive_tune_run_end()'s own comment in
+ *     adaptive_tune.c for the explicit uart_bridge_ext_is_on_flash_worker()
+ *     guard that fixes it, matching the accept path below.
  *   - control_task:  zones_config_set_pid() and zones_config_set_model(),
  *     both of which end in zones_http.c's nvs_save().
  *   - autotune_task: autotune_engine_accept() -- which, since it now also
  *     calls adaptive_tune_clear_ki_baseline(), is itself a RE-ENTRANT caller
  *     of this same executor once its job is already running on bx_worker_
  *     task; see bx_run_on_internal_stack()'s own comment below for the
- *     deadlock that caused and the task-identity check that fixes it.
+ *     deadlock that caused and the task-identity check that fixes it. It is
+ *     NOT the only such caller -- see profile_executor_halt() above.
  *   - wifi_task: NOT exposed -- wifi_prov_* post to the wifi_prov owner task,
  *     which has an ordinary internal stack, and the write happens there.
  *
@@ -289,6 +299,16 @@ static bool bx_worker_ensure_started(void)
         return true;
     }
 
+    // Ordering note (2026-09-01 audit of ae5905f, flagged as a non-defect):
+    // s_bx_jobs is created here before the task-create below writes
+    // s_bx_worker_task_handle, so there is a window where s_bx_jobs is
+    // non-NULL while the handle is still NULL. bx_run_on_internal_stack()'s
+    // NULL check on s_bx_jobs (not the handle) at its own top would let a
+    // job through in that window and correctly fail bx_caller_is_worker_
+    // task()'s NULL-handle check (never matches), landing on the ordinary
+    // dispatch path -- unreachable in practice anyway, since this function
+    // runs single-threaded in app_main before any bridge task exists to
+    // race it, and it fails in the safe direction if that ever changed.
     s_bx_jobs = xQueueCreate(1, sizeof(bx_job_t));
     s_bx_done = xSemaphoreCreateBinary();
     s_bx_lock = xSemaphoreCreateMutex();
@@ -305,6 +325,22 @@ static bool bx_worker_ensure_started(void)
         ESP_LOGE(TAG, "flash-safe worker: task creation failed (internal SRAM)");
         goto fail;
     }
+    /* S5 (2026-09-01 audit of ae5905f): registered only on the pdPASS-only
+     * path (creation failure already returned above, so this is only ever
+     * reached with a real handle) -- same convention as every other
+     * stack_margin_register() call site (profile_executor_start.c,
+     * safety_link.c, uart_bridge_system.c, wifi_provision_http.c). This
+     * task carries the DEEPEST flash chain in the firmware -- every
+     * CONTROL/PROFILES/AUTOTUNE mutating command, safety_cfg_store's
+     * deferred NVS flush, AND (since R1/S1) now-nested inline jobs
+     * (adaptive_tune_clear_ki_baseline()/adaptive_tune_run_end() running
+     * fn() directly on this same stack when already dispatched here) --
+     * and it was the one significant task in the firmware with no margin
+     * visibility at all. BX_WORKER_STACK must match the literal
+     * xTaskCreatePinnedToCore() argument three lines up exactly -- see
+     * stack_margin.h's own doc comment on why this number is never assumed
+     * equal to another task's. */
+    stack_margin_register("bx_flash_worker", &s_bx_worker_task_handle, BX_WORKER_STACK);
 
     s_bx_started = true;
     return true;
@@ -358,7 +394,7 @@ static bool bx_run_on_internal_stack(bx_job_fn fn, void *arg)
         ESP_LOGE(TAG, "flash-safe worker not started -- job dropped");
         return false;
     }
-    if (s_bx_worker_task_handle && xTaskGetCurrentTaskHandle() == s_bx_worker_task_handle) {
+    if (bx_caller_is_worker_task(s_bx_worker_task_handle, xTaskGetCurrentTaskHandle())) {
         if (fn) {
             fn(arg);
         }
@@ -408,7 +444,7 @@ esp_err_t uart_bridge_ext_run_on_flash_worker(void (*fn)(void *arg), void *arg)
  * to tolerate a redundant dispatch. */
 bool uart_bridge_ext_is_on_flash_worker(void)
 {
-    return s_bx_worker_task_handle != NULL && xTaskGetCurrentTaskHandle() == s_bx_worker_task_handle;
+    return bx_caller_is_worker_task(s_bx_worker_task_handle, xTaskGetCurrentTaskHandle());
 }
 
 /* Shared shape for the three refactored handlers: the task's ctx plus the
