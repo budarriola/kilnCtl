@@ -265,8 +265,16 @@ void adaptive_tune_zone_tick(uint8_t zone_index, float actual_c, bool actual_val
         // dwell.
         z->settle_start_valid = true;
         z->settle_start_c = actual_c;
+        z->settle_duty_min = duty;
+        z->settle_duty_max = duty;
     }
     z->settle_elapsed_s += dt_s;
+    if (duty < z->settle_duty_min) {
+        z->settle_duty_min = duty;
+    }
+    if (duty > z->settle_duty_max) {
+        z->settle_duty_max = duty;
+    }
 
     // Trace append happens on EVERY dwelling tick, not gated on settle --
     // the Ki diagnosis needs the window's SHAPE (drift, oscillation), which
@@ -307,6 +315,28 @@ void adaptive_tune_zone_tick(uint8_t zone_index, float actual_c, bool actual_val
     // (too-low-duty, implausible) dwell does not get re-evaluated every
     // tick for the rest of its length.
     z->recorded_this_dwell = true;
+
+    // Duty-stability check -- see ADAPTIVE_TUNE_DUTY_STABILITY_ABS/FRAC's
+    // own comment (adaptive_tune_internal.h) for the real-hardware defect
+    // this closes. A temperature slope passing this file's floor is not
+    // sufficient evidence of steady state on an under-damped zone; duty
+    // itself must also have stayed put over the same window.
+    {
+        float duty_range = z->settle_duty_max - z->settle_duty_min;
+        bool duty_unstable = duty_range > ADAPTIVE_TUNE_DUTY_STABILITY_ABS ||
+                              (duty > 0.0f && duty_range > ADAPTIVE_TUNE_DUTY_STABILITY_FRAC * duty);
+        if (duty_unstable) {
+            // Distinct refusal string (task requirement: an operator must be
+            // able to tell "no data yet" from "data rejected as unsettled")
+            // -- reaches the same last_refusal_reason surface every other
+            // guard in this module reports through.
+            adaptive_tune_set_refusal(z,
+                "duty still oscillating (range %.3f, %.0f%% of %.3f) -- not a steady-state observation",
+                (double)duty_range, (double)((duty > 0.0f) ? (100.0f * duty_range / duty) : 0.0f), (double)duty);
+            xSemaphoreGive(adaptive_tune_lock);
+            return;
+        }
+    }
 
     if (duty < ADAPTIVE_TUNE_MIN_DUTY_FOR_OBSERVATION) {
         xSemaphoreGive(adaptive_tune_lock);

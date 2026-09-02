@@ -66,6 +66,46 @@ extern const char *ADAPTIVE_TUNE_TAG;
 #define ADAPTIVE_TUNE_SETTLE_MIN_S 180.0f
 #define ADAPTIVE_TUNE_SETTLE_SLOPE_FLOOR_C_PER_S 0.003f
 
+// 2026-09-01, defect proven against REAL captured hardware data (coupid6:
+// six 10-minute dwells/zone, 30/38/46/54/62/70 C, all three zones): the
+// slope test above watches ACTUAL_C only. On an under-damped zone (this
+// plant, at these gains) temperature can pass through a coincidental flat
+// spot mid-oscillation while DUTY is still swinging hard -- zone 0's duty
+// inside the 46 C dwell went 0.023 -> 0.19 -> 0.144, a ~0.167 abs / ~88%-of-
+// value swing, well after the slope test would have already fired on a
+// flat moment. A dwell IS the DC-gain measurement (K = rise_c/duty at
+// steady state -- profile_executor.c zeroes target_rate_c_per_s in a
+// dwell, so duty there is pure hold term, no feedforward to explain the
+// motion away), so committing a still-moving duty as u_steady biases K
+// directly, and every downstream fit (diagonal refine, coupled solve) that
+// consumes it inherits the bias silently.
+//
+// tools/PcTools/src/kilnctrl/coupled_ident.py's settle_criterion_audit()
+// mirrors this firmware's settle test and then checks whether duty kept
+// moving AFTER the settle instant, over the REST of the same dwell window
+// -- a diagnostic this firmware cannot run in real time (it does not know
+// the future). The realtime-causal equivalent this module CAN run is to
+// track duty's own range over the settle window it has already seen (from
+// this dwell's first valid tick through the tick the slope test fires):
+// on a genuinely oscillating plant, duty is already ranging throughout
+// that window, not only afterward, so this check catches the same failure
+// mode the offline audit does, just looking backward instead of forward.
+//
+// Thresholds mirror that audit's own UNSTABLE_DUTY_RANGE_ABS/FRAC exactly
+// (not independently re-derived) so a reading this firmware accepts and one
+// the audit does not flag are the same reading:
+//   - ABS (0.05): this file's own ADAPTIVE_TUNE_MIN_DUTY_FOR_OBSERVATION
+//     (0.03) is already this module's floor for "enough duty energy in an
+//     observation to trust the ratio at all" -- a swing bigger than that
+//     floor is not a small ripple riding on a steady value, it is large
+//     enough to itself move the reading across the boundary that decides
+//     whether an observation is trustworthy in the first place.
+//   - FRAC (25%): the measured defect itself was a ~23%-of-value swing and
+//     MUST be rejected -- 25% is the smallest round number that still
+//     clears it, not a number chosen to make a test fixture pass.
+#define ADAPTIVE_TUNE_DUTY_STABILITY_ABS 0.05f
+#define ADAPTIVE_TUNE_DUTY_STABILITY_FRAC 0.25f
+
 #define ADAPTIVE_TUNE_MIN_DUTY_FOR_OBSERVATION 0.03f
 
 #define ADAPTIVE_TUNE_RING_CAPACITY 12
@@ -205,6 +245,12 @@ typedef struct {
     float settle_start_c;
     float settle_elapsed_s;
     bool  recorded_this_dwell;
+
+    // Duty range tracked over the SAME settle window as settle_start_c
+    // above (reset alongside it) -- see ADAPTIVE_TUNE_DUTY_STABILITY_ABS/
+    // FRAC's own comment for why this exists and what it catches.
+    float settle_duty_min;
+    float settle_duty_max;
 
     adaptive_tune_obs_t ring[ADAPTIVE_TUNE_RING_CAPACITY];
     uint32_t ring_count;
