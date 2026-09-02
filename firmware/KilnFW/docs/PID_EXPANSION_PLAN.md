@@ -149,16 +149,42 @@ Shipped (`fcc1fc0`, `a772d78`): dwell harvesting, diagonal-only least-squares
 gain refinement, bounded application at run end, per-zone opt-in default off,
 HTTP endpoint and zones-page UI.
 
-- [ ] **Full coupled identification** from dwell observations — solve
-      `A·u = (T − ambient)` across all zones rather than per-zone diagonal.
-      The observations already record every zone's duty and temperature at each
-      settled dwell, so the data is there; only the solver is missing.
-- [ ] **Integral diagnosis from dwells** — residual offset, drift and limit
-      cycling each imply a specific Ki correction, and a detected limit cycle
-      yields Ku/Tu without a dedicated relay test.
-- [ ] **Dynamics from ramps** — re-fit τ and dead time only from segments with
-      genuine excitation, scoring each candidate and **refusing** when too flat
-      rather than fitting noise.
+- [x] **Full coupled identification** from dwell observations — built
+      (`6f6c8fd`), then hardened over four review rounds (`825bd82`, `e129f7c`,
+      `12d709d`, `89ff20b`). Joint-observation ring committed once per dwell,
+      normal-equations solve reusing the existing pivot floor as the
+      conditioning refusal, off-diagonal only. **Cleared for hardware.**
+      Not yet validated against the real dwell observations in §3.2 — the test
+      matrix is synthetic, so the solve is proven correct but not yet proven
+      *better* than the matrix it would replace.
+- [x] **Integral diagnosis from dwells** — built and hardened alongside the
+      above. Classifies steady offset, drift and limit cycle; a detected limit
+      cycle yields Ku/Tu without a relay test. Per-run move capped at
+      `ADAPTIVE_TUNE_KI_MAX_FRACTIONAL_MOVE` (20%), cumulative growth capped at
+      50x a latched per-zone baseline. **Held from hardware until the final
+      review clears the baseline-latch question** (a baseline re-latched from an
+      already-grown Ki after reboot would ratchet, making 50x unbounded).
+- [x] **Dynamics from ramps** — built (`13dcf49`) and **SHELVED** (`65f6525`).
+      The two-point reaction-curve fit cannot work on closed-loop firing data:
+      its output reduces analytically to `0.524·K·Δduty/ramp_rate`, a function
+      of the commanded ramp rate and nothing else — identical on a plant with
+      any τ whatsoever. Verified by porting the fit to Python and reproducing
+      both accepted fixture fits (predicted 43 s / 22 s vs fitted 35.6 / 23.5).
+      Two joint causes: the response window is capped at 15 samples (153 s at
+      real telemetry rates) against a true `L+τ` of 300–320 s, so the response
+      is never observed; and the detrend baseline sits inside the plant's own
+      dead time, so it removes nothing and leaves the ordinary ramp climb *as*
+      the response. Integrating it would have cut the climb feedforward ~9x and
+      shrunk the terminal ease-off window ~5x.
+      **No threshold change fixes this.** A two-point fit needs a held step
+      observed for ≥ 2(L+τ) ≈ 600 s; this kiln never holds duty that long in
+      closed loop (exactly what `STEP_NOT_HELD` reports on 21 of 27 segments),
+      and duty never saturates (0.04–0.45), so "accept only saturated segments"
+      has no data here. The route that would work is a **whole-segment
+      output-error / ARX estimator**: simulate a FOPDT driven by the actual duty
+      trace and least-squares fit τ/L to the residual. No step, no hold, uses
+      all 27 segments, extends to the coupled case. The module stays in-tree,
+      unwired, as a parked experiment with the artifact pinned by a test.
 - [ ] **Iterative tuning** — treat each firing as one experiment scored by the
       normalized IAE already recorded per zone, perturb gains slightly, keep the
       change only if the next run scores better. This is the mechanism that
