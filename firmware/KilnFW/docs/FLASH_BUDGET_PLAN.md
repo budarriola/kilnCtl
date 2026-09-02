@@ -8,9 +8,14 @@ truth, not the checkboxes.** Nothing is marked done until a commit is named.
 Every number below is measured and attributed, or explicitly labelled as an
 estimate.
 
-Status at time of writing (2026-09-02): **Phase 0 (§4.1/§4.3) is built.**
-Phase 1 (§5) is **in progress** — a Lane C agent is implementing it now, with
-two owner decisions locked in below. Do not describe §5 as done.
+Status at time of writing (2026-09-02): **Phase 0 (§4.1/§4.3) is built.** §5.1
+and §5.2 are landed (`9ede138`, `0bbb21c`). §5.3 stays untouched by owner
+decision. §5.4 is decided-not-pursued (§4.1's attribution found the string
+pool is ordinary spread-out `ESP_LOG*` strings, not dead weight). §4.2 (size
+baseline) is still open — blocked this session by a concurrent tree edit, see
+4.2 for what was tried. Do not describe §5 as done until §4.2 lands and §7's
+checklist is worked for a single partition-table revision covering §5.1/§5.2
+together; nothing has been reflashed.
 
 **Phase 0, done (`699f5ab`):** `attribute_str_pool.py` +
 `check_flash_partition_map.ps1`. Methodology correction for §4.1: the map
@@ -261,11 +266,32 @@ wrong diagnosis does not get rediscovered.
 before deciding anything in 5.4 is worth doing. Until that attribution exists,
 239 kB is a number without an owner.
 
-### 4.2 Record a size baseline in this doc
+### 4.2 Record a size baseline in this doc — BLOCKED this session, not abandoned
 
 Capture `esp_idf_size --archives` output and `KilnCtrl.bin` size against a named
 commit. Every later phase compares against it. Without a committed baseline,
 "this saved 40 kB" is unverifiable a week later.
+
+**2026-09-02 attempt:** could not produce a clean, reproducible number this
+session. The working tree was mid-edit by a concurrent agent's binary
+event-log conversion (`log_store.c`/`telemetry_log.c`/`log_http.c` etc.,
+out of this plan's scope and explicitly left alone) for the whole session, so
+a build against the checked-out tree would have baselined someone else's
+in-progress, unnamed work rather than a named commit — exactly what this
+section exists to prevent. An isolated `git worktree` build pinned at
+`9665851` (the last flash-relevant commit) was tried to route around that,
+but hit an unrelated failure: `board_temps.c` fails
+`TEMPERATURE_SENSOR_CLK_SRC_DEFAULT undeclared` in a fresh worktree checkout
+that the main tree's cached `build/` does not hit — a toolchain/component
+cache difference, not a code defect in this plan's scope, and not chased
+further under this task's budget. Non-authoritative numbers were still
+gathered from a build of the (dirty) working tree for orientation only —
+`libdrivers.a` 643,447 B, `liblvgl.a` 267,287 B, `libesp_stdio.a` 240,919 B
+(the merged string pool), `libnet80211.a` 150,770 B, `libtfpsacrypto.a`
+96,924 B, `liblwip.a` 90,450 B, `libwpa_supplicant.a` 66,997 B, `libpp.a`
+64,816 B, `libphy.a` 34,479 B — consistent with section 3's table, but **do
+not cite these as the baseline**; they are not tied to a named commit.
+Re-attempt once the log-store work has landed and the tree is clean.
 
 ### 4.3 A partition-map check
 
@@ -338,18 +364,27 @@ the diagnostic was needed. **Recommendation: leave it.** If it is ever shrunk,
 the change must be validated by forcing a real panic under full task load and
 confirming the dump decodes — not by reasoning about sizes.
 
-### 5.4 Image-size reclamation
+### 5.4 Image-size reclamation — DECIDED: not pursued
 
 Lower priority than the above, because the app slot has 1.22 MB free and
 shrinking the image reclaims nothing at chip level — it only widens
 already-adequate slot headroom. Worth doing only if 4.1 shows the string pool
 is dominated by log strings that are genuinely dead weight.
 
-If pursued, the levers are `CONFIG_LOG_DEFAULT_LEVEL` / `CONFIG_LOG_MASTER_LEVEL`
-and pruning verbose logging in the noisiest modules. **Caution:** this codebase's
-log strings are a primary debugging asset, and several documented incidents in
-`docs/` were diagnosed from exactly these messages. Trading them for flash that
-is not currently scarce is a bad trade. Attribute first (4.1), then decide.
+**4.1's attribution (`699f5ab`) answers this: the pool is not dead weight.**
+The top per-file contributors are `dashboard_http.c` (11,273 B),
+`mesh_parent.o` (11,108 B), and `main.c` (9,671 B) — ordinary `ESP_LOG*`
+format strings and tags spread across the driver set, not a concentration in
+one droppable module. Combined with the caution below, this closes 5.4
+without a code change: attribute-then-decide (4.1) was the whole task, and
+the decision is not to trade the strings.
+
+If ever revisited, the levers would be `CONFIG_LOG_DEFAULT_LEVEL` /
+`CONFIG_LOG_MASTER_LEVEL` and pruning verbose logging in the noisiest
+modules. **Caution:** this codebase's log strings are a primary debugging
+asset, and several documented incidents in `docs/` were diagnosed from
+exactly these messages. Trading them for flash that is not currently scarce
+is a bad trade.
 
 The 261,777 B of embedded web assets in `libdrivers.a` are **not** a target —
 they are already gzipped, and they are the reason the pages cost zero RAM. See
@@ -404,10 +439,16 @@ history and are not hypothetical — each has already caused a problem here once
 
 ## 8. Suggested order
 
-1. Phase 0 (4.1–4.3) — cheap, and 4.1 determines whether 5.4 exists at all.
-2. Decide the `logs` retention question (5.2) — product question, gates the
-   second-largest reclamation.
-3. Single partition-table revision covering `legacy_app` (5.1) and `logs` (5.2)
-   together, with section 7's checklist worked through in order.
+1. ~~Phase 0 (4.1–4.3)~~ — done (`699f5ab`), except 4.2's baseline capture,
+   still open (blocked, see 4.2).
+2. ~~Decide the `logs` retention question (5.2)~~ — decided and landed
+   (`0bbb21c`).
+3. Single partition-table revision covering `legacy_app` (5.1, landed
+   `9ede138`) and `logs` (5.2, landed `0bbb21c`) together, with section 7's
+   checklist worked through in order — **this is the remaining hardware
+   step**: reflash the partition table and bootloader, archive the four NVS
+   partitions first, erase `otadata`, and do not touch `coredump` in the
+   process.
 4. Leave `coredump` (5.3) alone unless something forces the issue.
-5. Revisit 5.4 only if 4.1 justifies it.
+5. ~~Revisit 5.4 only if 4.1 justifies it~~ — 4.1 does not justify it;
+   decided not pursued.
