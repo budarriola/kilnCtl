@@ -766,3 +766,240 @@ def test_matrix_from_single_zone_columns_orientation():
     # And explicitly NOT its transpose (the matrix is asymmetric, so this
     # would only accidentally pass if A were symmetric -- it isn't).
     assert not np.allclose(matrix, A.T, atol=0.5)
+
+
+# ---------------------------------------------------------------------------
+# Settle audit: float64 rounding must not trip the duty-range gates
+# ---------------------------------------------------------------------------
+
+def test_settle_audit_float_dust_at_exact_gate_not_flagged():
+    """A duty range that is EXACTLY at the 0.05 absolute gate in decimal
+    (0.79 - 0.74) is 0.050000000000000044 in float64, not 0.05 -- a plain
+    ``drange > UNSTABLE_DUTY_RANGE_ABS`` trips on that representation
+    error alone, flagging a reading that never actually swung more than
+    the documented threshold. This is the exact shape of the real
+    cpl_z2_mcp.jsonl capture's settle window (0.74-0.79 duty), which this
+    test pins directly against that reported bug.
+
+    Proof this can fail: temporarily removed ``_DUTY_RANGE_EPS`` from
+    both comparisons in ``settle_criterion_audit`` (back to a bare
+    ``drange > UNSTABLE_DUTY_RANGE_ABS``). Captured red:
+        AssertionError: assert True
+      -- 0.79 - 0.74 evaluates to 0.050000000000000044 > 0.05 in float64,
+      so the reading was flagged even though its real duty swing is
+      exactly at, not past, the documented gate.
+    """
+    ambient = {0: 20.0, 1: 20.0, 2: 20.0}
+    actual_c = {0: 45.0, 1: 45.0, 2: 45.0}
+    duty_seq = []
+    for i in range(25):
+        d0 = 0.79 if i % 2 == 0 else 0.74
+        duty_seq.append({0: d0, 1: 0.2, 2: 0.2})
+    rows = _oscillating_dwell_rows(actual_c, duty_seq, target_c=45.0, ambient=ambient)
+    entries = ci.settle_criterion_audit(rows)
+    e0 = next(e for e in entries if e.zone == 0)
+    assert e0.settled
+    assert e0.window_duty_range == pytest.approx(0.05, abs=1e-6)
+    assert not e0.flagged_unstable
+
+
+def test_settle_audit_still_flags_a_real_swing_past_the_gate():
+    """The epsilon fix above must not swallow a genuine swing -- a duty
+    range clearly past 0.05 (0.80 vs 0.74, i.e. 0.06) still has to be
+    flagged. Guards against an epsilon big enough to mask real
+    instability, not just float dust.
+    """
+    ambient = {0: 20.0, 1: 20.0, 2: 20.0}
+    actual_c = {0: 45.0, 1: 45.0, 2: 45.0}
+    duty_seq = []
+    for i in range(25):
+        d0 = 0.80 if i % 2 == 0 else 0.74
+        duty_seq.append({0: d0, 1: 0.2, 2: 0.2})
+    rows = _oscillating_dwell_rows(actual_c, duty_seq, target_c=45.0, ambient=ambient)
+    entries = ci.settle_criterion_audit(rows)
+    e0 = next(e for e in entries if e.zone == 0)
+    assert e0.settled
+    assert e0.flagged_unstable
+
+
+# ---------------------------------------------------------------------------
+# Coverage redundancy note
+# ---------------------------------------------------------------------------
+
+def test_coverage_note_flags_single_observation_cells():
+    """Every cell at coverage=1 must be reported as having no error bar --
+    this is what the coupling-report needs to say in code, not just in a
+    prose report, so it can't silently drift.
+
+    Proof this can fail: made the ``all(c == 1 ...)`` branch return the
+    same string as the >=2-coverage branch. Captured red:
+        AssertionError: assert 'no redundancy' in 'cell coverage ranges 1-1 observations...'
+      -- with the two branches collapsed, coverage=1 cells were reported
+      with the same phrasing as genuinely redundant, multi-observation
+      cells, losing the "no error bar" caveat entirely.
+    """
+    coverage = {(i, j): 1 for i in ci.ZONES for j in ci.ZONES}
+    note = ci.coverage_redundancy_note(coverage)
+    assert "no redundancy" in note
+    assert "no error bar" in note
+
+
+def test_coverage_note_reports_incomplete_matrix():
+    coverage = {(i, j): 1 for i in ci.ZONES for j in ci.ZONES}
+    coverage[(0, 0)] = 0
+    note = ci.coverage_redundancy_note(coverage)
+    assert "incomplete" in note
+
+
+def test_coverage_note_distinguishes_higher_coverage():
+    coverage = {(i, j): 2 for i in ci.ZONES for j in ci.ZONES}
+    note = ci.coverage_redundancy_note(coverage)
+    assert "no redundancy" not in note
+
+
+# ---------------------------------------------------------------------------
+# Coupled-hold feasibility sweep
+# ---------------------------------------------------------------------------
+
+def test_feasibility_sweep_diagonal_only_matches_hand_calc():
+    """A pure-diagonal matrix (no coupling) makes u = (T-ambient)/K
+    independently per zone -- the sweep's max_feasible_c must match the
+    hand-computed value K + ambient (duty hits exactly 1.0 there).
+
+    Proof this can fail: swapped the feasibility test from ``np.all(u <=
+    1.0)`` to ``np.all(u < 1.0)`` (strict). Captured red:
+        AssertionError: assert 50.0 == 49.5
+      -- the boundary sample (u exactly 1.0) was marked infeasible under
+      strict ``<``, moving max_feasible_c one step short of the true
+      diagonal gain.
+    """
+    K = 30.0
+    A = np.diag([K, K, K])
+    result = ci.coupled_hold_feasibility_sweep(A, ambient_c=20.0, t_max_above_ambient_c=60.0, t_step_c=0.5)
+    assert result["max_feasible_c"] == pytest.approx(20.0 + K)
+    assert result["first_infeasible_c"] == pytest.approx(20.0 + K + 0.5)
+
+
+def test_feasibility_sweep_new_matrix_extends_old_matrix_range():
+    """Sanity check against the two matrices this module actually
+    compares in the coupling report: a matrix with a uniformly higher
+    diagonal gain than CURRENT_MATRIX must not be LESS feasible."""
+    old = ci.CURRENT_MATRIX
+    new = old * 1.05
+    r_old = ci.coupled_hold_feasibility_sweep(old, ambient_c=22.0)
+    r_new = ci.coupled_hold_feasibility_sweep(new, ambient_c=22.0)
+    assert r_new["max_feasible_c"] >= r_old["max_feasible_c"]
+
+
+# ---------------------------------------------------------------------------
+# Cooldown tau fit
+# ---------------------------------------------------------------------------
+
+def test_cooldown_tau_fit_recovers_known_time_constant():
+    """A synthetic exact exponential decay must be recovered to within a
+    tight tolerance -- this is the ground-truth check nothing about real,
+    noisy hardware data can provide.
+
+    Proof this can fail: changed the sign in
+    ``pred = t_inf + (T0 - t_inf) * exp(-t/tau)`` to ``exp(+t/tau)``
+    (growth instead of decay). Captured red:
+        AssertionError: assert None is not None
+      -- with growth instead of decay in the residual model, every T_inf
+      on the grid failed the positive-time-constant check and the fit
+      refused outright instead of recovering tau_true.
+    """
+    tau_true = 300.0
+    t_inf_true = 25.0
+    T0 = 60.0
+    times = np.arange(0.0, 1800.0, 20.0)
+    temps = t_inf_true + (T0 - t_inf_true) * np.exp(-times / tau_true)
+    fit = ci.fit_cooldown_tau(times, temps, zone=0)
+    assert not fit.refused
+    assert fit.tau_s == pytest.approx(tau_true, rel=0.1)
+    assert fit.t_inf_c == pytest.approx(t_inf_true, abs=1.0)
+    assert fit.rms_resid_c < 1.0
+
+
+def test_cooldown_tau_fit_refuses_non_monotonic_trace():
+    """A trace that cools then reheats (the real cooldown_z1.jsonl shape --
+    a later, unrelated phase spliced into the same continuous capture)
+    must be REFUSED, not fitted to a bogus tau.
+
+    Proof this can fail: removed the ``_cooldown_is_monotonic_enough``
+    guard from ``fit_cooldown_tau``. Captured red:
+        AssertionError: assert True is False
+      -- a cool-then-reheat trace no longer refused; the grid search
+      found some T_inf/tau combination through it anyway (a bad fit
+      dressed up as a confident answer instead of being flagged
+      unreliable), since the monotonicity guard is a distinct check, not
+      an automatic consequence of the grid search failing on its own.
+    """
+    times = np.arange(0.0, 1200.0, 20.0)
+    n = len(times)
+    temps = np.concatenate([
+        60.0 - np.linspace(0, 20, n // 2),   # cools
+        40.0 + np.linspace(0, 20, n - n // 2),  # then reheats
+    ])
+    fit = ci.fit_cooldown_tau(times, temps, zone=0)
+    assert fit.refused
+    assert "monotonic" in fit.reason
+
+
+def test_cooldown_tau_fit_refuses_too_few_samples():
+    fit = ci.fit_cooldown_tau(np.array([0.0, 20.0]), np.array([50.0, 49.0]), zone=0)
+    assert fit.refused
+    assert "samples" in fit.reason
+
+
+# ---------------------------------------------------------------------------
+# Full coupling report -- reproducibility of every reported number from the
+# checked-in logs/coupling/ captures
+# ---------------------------------------------------------------------------
+
+def test_coupling_report_reproduces_checked_in_captures():
+    """End-to-end: build_coupling_report() with its defaults (the checked-
+    in logs/coupling/ single-zone captures and tests/fixtures/plant_sim/
+    sec 3.2 fixtures) must assemble a complete, plausible matrix and pass
+    its own self-check -- the same numbers a coupling-matrix analysis pass
+    reports, now reproducible by re-running this function/CLI instead of
+    living only in a prose report.
+    """
+    report = ci.build_coupling_report()
+    assert report["matrix_incomplete"] is False
+    assert report["coverage_note"].startswith("every one of the 9 cells has coverage=1")
+    assert report["plausible_new"] is True
+    assert report["self_check"]["ok"] is True
+    # z2's zone-2-excited settle window is the known float-dust case --
+    # must NOT be flagged after the epsilon fix.
+    z2_entries = report["settle_audit"][2]
+    z2_primary = next(e for e in z2_entries if e["zone"] == 2 and e["settled"])
+    assert not z2_primary["flagged_unstable"]
+    # sec 3.2 revalidation: new matrix must reduce both z0's and z2's bias
+    # magnitude relative to the old matrix (the question this whole
+    # analysis exists to answer).
+    old_by_zone = {s["zone"]: s["mean_error"] for s in report["sec32_scores_old"]}
+    new_by_zone = {s["zone"]: s["mean_error"] for s in report["sec32_scores_new"]}
+    assert abs(new_by_zone[0]) < abs(old_by_zone[0])
+    assert abs(new_by_zone[2]) < abs(old_by_zone[2])
+    # feasibility: new matrix must be feasible at least as high as old.
+    assert report["feasibility_new"]["max_feasible_c"] >= report["feasibility_old"]["max_feasible_c"]
+    # format function must not raise on real data.
+    text = ci.format_coupling_report_text(report)
+    assert "coupled-hold feasibility sweep" in text
+
+
+def test_coupling_report_cli_text_smoke(capsys):
+    rc = ci.main(["coupling-report"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "settle-criterion audit" in out
+    assert "coupled-hold feasibility sweep" in out
+
+
+def test_coupling_report_cli_json_smoke(capsys):
+    import json as json_mod
+    rc = ci.main(["coupling-report", "--json"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    parsed = json_mod.loads(out)
+    assert parsed["matrix_incomplete"] is False

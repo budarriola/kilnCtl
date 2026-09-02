@@ -220,6 +220,52 @@ def load_thermo_log(path: str) -> list[ThermoSample]:
     return out
 
 
+def load_thermo_samples_any_format(path: str) -> list[ThermoSample]:
+    """Same result as ``load_thermo_log`` (per-zone actual_c timeseries),
+    but also accepts the OTHER raw temperature-capture format seen in
+    ``logs/coupling/`` cooldown captures: one ``kiln_io_get_status()``-
+    style status JSON object per line, prefixed with a plain ``HH:MM:SS``
+    wall-clock stamp (``"23:32:34 {...}"``), timestamped by its own
+    ``time_now_epoch`` field rather than an outer ``{"t": ...}`` envelope,
+    and carrying temperatures under ``channels: [{"channel": n, "temp_c":
+    x, "valid": bool}, ...]`` instead of a ``thermo_read`` reply string.
+    Tried first as the ``{"t", "s"}`` pair-log format; a line that fails
+    that (no ``{`` at the start, or missing ``t``/``s`` keys) falls back
+    to the status-JSON format. A line matching neither is skipped, same
+    tolerance as ``_load_jsonl``.
+    """
+    out = []
+    with open(path, "r", encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            sample = None
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                obj = None
+            if obj is not None and "t" in obj and "s" in obj:
+                channels = parse_thermo_text(obj["s"])
+                if channels is not None:
+                    sample = ThermoSample(t=float(obj["t"]), channels=channels)
+            if sample is None:
+                brace = line.find("{")
+                if brace > 0:
+                    try:
+                        status = json.loads(line[brace:])
+                    except json.JSONDecodeError:
+                        status = None
+                    if status is not None and "channels" in status and "time_now_epoch" in status:
+                        channels = {c["channel"]: c["temp_c"] for c in status["channels"] if c.get("valid")}
+                        if channels:
+                            sample = ThermoSample(t=float(status["time_now_epoch"]), channels=channels)
+            if sample is not None:
+                out.append(sample)
+    out.sort(key=lambda s: s.t)
+    return out
+
+
 def _nearest_thermo(thermo: Sequence[ThermoSample], times: Sequence[float], t: float,
                      max_skew_s: float) -> Optional[ThermoSample]:
     """Nearest-by-timestamp match, ``None`` if the closest candidate is

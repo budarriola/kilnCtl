@@ -228,3 +228,73 @@ def test_load_pair_run_real_cpl_z0_fixture():
     windows = la.build_windows(rows)
     assert any(w.phase == "ramp" for w in windows)
     assert any(w.phase == "dwell" for w in windows)
+
+
+# ---------------------------------------------------------------------------
+# load_thermo_samples_any_format -- both cooldown capture shapes
+# ---------------------------------------------------------------------------
+
+def test_load_thermo_samples_any_format_reads_pair_log_shape(tmp_path):
+    """The ordinary {"t": ..., "s": "CH0: .. C"} pair-log thermo format,
+    same as load_thermo_log already handles."""
+    p = tmp_path / "thermo.jsonl"
+    p.write_text(
+        '{"t": 100.0, "s": "CH0: 45.20 C (CJ 27.30 C)\\nCH1: 44.10 C (CJ 27.40 C)\\nCH2: 40.00 C (CJ 27.50 C)"}\n'
+        '{"t": 120.0, "s": "CH0: 44.90 C (CJ 27.30 C)\\nCH1: 43.90 C (CJ 27.40 C)\\nCH2: 39.80 C (CJ 27.50 C)"}\n',
+        encoding="utf-8",
+    )
+    samples = cpl.load_thermo_samples_any_format(str(p))
+    assert len(samples) == 2
+    assert samples[0].t == 100.0
+    assert samples[0].channels == {0: 45.20, 1: 44.10, 2: 40.00}
+    assert samples[1].channels[0] == 44.90
+
+
+def test_load_thermo_samples_any_format_reads_status_json_shape(tmp_path):
+    """The raw kiln_io_get_status() capture shape used by
+    cooldown_after_coupid6.jsonl: 'HH:MM:SS {json}' per line, temperatures
+    under channels[].temp_c, timestamped by time_now_epoch."""
+    p = tmp_path / "status.jsonl"
+    line1 = ('23:32:34 {"channels":[{"channel":0,"temp_c":69.65,"valid":true},'
+             '{"channel":1,"temp_c":69.56,"valid":true},'
+             '{"channel":2,"temp_c":69.24,"valid":true}],"time_now_epoch":1788344465}\n')
+    line2 = ('23:32:54 {"channels":[{"channel":0,"temp_c":68.90,"valid":true},'
+             '{"channel":1,"temp_c":68.50,"valid":false},'
+             '{"channel":2,"temp_c":68.10,"valid":true}],"time_now_epoch":1788344485}\n')
+    p.write_text(line1 + line2, encoding="utf-8")
+    samples = cpl.load_thermo_samples_any_format(str(p))
+    assert len(samples) == 2
+    assert samples[0].t == 1788344465.0
+    assert samples[0].channels == {0: 69.65, 1: 69.56, 2: 69.24}
+    # an invalid channel must be DROPPED, not carried through as a reading
+    # (the real cooldown_after_coupid6.jsonl capture has occasional
+    # invalid channels mid-run).
+    assert 1 not in samples[1].channels
+    assert samples[1].channels[0] == 68.90
+
+
+def test_load_thermo_samples_any_format_skips_unrecognized_lines(tmp_path):
+    """A line matching neither format is skipped, not raised on -- same
+    tolerance every other parser in this module documents for a flaky
+    capture link."""
+    p = tmp_path / "mixed.jsonl"
+    p.write_text(
+        "not json at all\n"
+        '{"t": 100.0, "s": "no CH lines here"}\n'
+        '{"t": 120.0, "s": "CH0: 45.0 C (CJ 27.0 C)"}\n',
+        encoding="utf-8",
+    )
+    samples = cpl.load_thermo_samples_any_format(str(p))
+    assert len(samples) == 1
+    assert samples[0].channels == {0: 45.0}
+
+
+def test_load_thermo_samples_any_format_sorts_by_time(tmp_path):
+    p = tmp_path / "unsorted.jsonl"
+    p.write_text(
+        '{"t": 200.0, "s": "CH0: 40.0 C (CJ 27.0 C)"}\n'
+        '{"t": 100.0, "s": "CH0: 45.0 C (CJ 27.0 C)"}\n',
+        encoding="utf-8",
+    )
+    samples = cpl.load_thermo_samples_any_format(str(p))
+    assert [s.t for s in samples] == [100.0, 200.0]

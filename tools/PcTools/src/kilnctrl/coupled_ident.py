@@ -285,6 +285,17 @@ UNSTABLE_DUTY_RANGE_ABS = 0.05
 # duty of 0.6 is much less alarming than the same swing around 0.1).
 UNSTABLE_DUTY_RANGE_FRAC = 0.25
 
+# Both gates above compare a SUBTRACTION of two float64 duty readings
+# (window_duty_max - window_duty_min) against a decimal literal -- e.g.
+# 0.79 - 0.74 rounds to 0.050000000000000044 in float64, not exactly
+# 0.05, so a plain ``>`` trips on representation error alone even when
+# the real duty swing is exactly at the gate. This epsilon absorbs that
+# float64 rounding only -- it must stay far smaller than any duty
+# increment this module or the firmware ever reports (2 decimal places,
+# i.e. steps of 0.01) so it can never mask a genuine swing. The gates
+# themselves (0.05 abs / 25% frac) are not changed by this constant.
+_DUTY_RANGE_EPS = 1e-9
+
 
 @dataclasses.dataclass
 class SettleAuditEntry:
@@ -353,9 +364,9 @@ def settle_criterion_audit(rows: Sequence[log_analysis.PollRow], source: str = "
             settle_duty = settle_row.zones[zone].duty
             flagged = False
             if drange is not None:
-                if drange > UNSTABLE_DUTY_RANGE_ABS:
+                if drange > UNSTABLE_DUTY_RANGE_ABS + _DUTY_RANGE_EPS:
                     flagged = True
-                if settle_duty > 0 and drange > UNSTABLE_DUTY_RANGE_FRAC * settle_duty:
+                if settle_duty > 0 and drange > UNSTABLE_DUTY_RANGE_FRAC * settle_duty + _DUTY_RANGE_EPS:
                     flagged = True
             entries.append(SettleAuditEntry(
                 zone=zone, dwell_target_c=target_c, window_duration_s=w.duration_s,
@@ -758,6 +769,33 @@ def matrix_from_single_zone_columns(column_obs_by_active_zone: dict) -> tuple[Op
     return matrix, coverage
 
 
+def coverage_redundancy_note(coverage: dict) -> str:
+    """Human-readable caveat about how many independent observations went
+    into each cell of a ``matrix_from_single_zone_columns`` matrix. With
+    exactly one single-zone-excitation capture per driven zone (the
+    current single-zone excitation data: one ramp-to-55C-then-dwell run
+    per zone), every one of the 9 cells is the MEAN OF A SINGLE
+    OBSERVATION -- there is no redundancy and therefore no error bar on
+    any entry; ``matrix_from_single_zone_columns``'s ``np.mean`` over a
+    length-1 list is a no-op, not an averaging-down of noise. A second
+    independent capture per zone (a repeat run, not a longer dwell on the
+    same run) is what it would take to put an actual uncertainty number on
+    any cell. This helper does not change any number the assembly
+    produces -- it only reports what the ``coverage`` dict already says,
+    so a caller (a report, a CLI, a test) has one place to ask "is this
+    matrix's precision known" instead of re-deriving it from the raw
+    coverage dict each time.
+    """
+    counts = [coverage.get((i, j), 0) for i in ZONES for j in ZONES]
+    if any(c == 0 for c in counts):
+        return "matrix incomplete -- at least one cell has zero observations"
+    if all(c == 1 for c in counts):
+        return ("every one of the 9 cells has coverage=1 (a single observation) -- "
+                "no redundancy, no error bar on any matrix entry")
+    lo, hi = min(counts), max(counts)
+    return f"cell coverage ranges {lo}-{hi} observations; cells at coverage=1 still have no error bar"
+
+
 # ---------------------------------------------------------------------------
 # Solve
 # ---------------------------------------------------------------------------
@@ -1051,6 +1089,326 @@ def format_single_zone_report_text(matrix, coverage: dict, scores: Optional[list
 
 
 # ---------------------------------------------------------------------------
+# Full coupling report -- ties settle audit + single-zone matrix assembly +
+# condition/plausibility + delta-vs-current + old-vs-new sec 3.2
+# revalidation + coupled-hold feasibility sweep + cooldown tau fits into one
+# reproducible pass over the checked-in ``logs/coupling/`` captures. This is
+# the CLI entry point that regenerates every number a coupling-matrix
+# analysis pass reports -- see ``coupling-report`` in ``main()`` below.
+# ---------------------------------------------------------------------------
+
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[4]
+DEFAULT_LOGS_DIR = REPO_ROOT / "logs" / "coupling"
+DEFAULT_SEC32_FIXTURES = [
+    str(REPO_ROOT / "tools" / "PcTools" / "tests" / "fixtures" / "plant_sim" / name)
+    for name in ("baseline.jsonl", "after.jsonl", "ifix.jsonl", "holdfix_clean.jsonl", "final.jsonl")
+]
+# track3zone_easeoff (the 6th of sec 3.2's 12-dwell-window provenance) is
+# not checked into this repo's fixtures -- see KNOWN_FIGURES_MEAN's comment.
+
+DEFAULT_SINGLE_ZONE_PAIRS = {
+    z: (str(DEFAULT_LOGS_DIR / f"cpl_z{z}_mcp.jsonl"), str(DEFAULT_LOGS_DIR / f"cpl_z{z}_thermo.jsonl"))
+    for z in ZONES
+}
+DEFAULT_COOLDOWN_PATHS = [
+    str(DEFAULT_LOGS_DIR / "cooldown_z1.jsonl"),
+    str(DEFAULT_LOGS_DIR / "cooldown_z2.jsonl"),
+    str(DEFAULT_LOGS_DIR / "cooldown_after_coupid6.jsonl"),
+]
+
+# How much a cooldown trace is allowed to rise, step to step, before it is
+# no longer "a passive decay" -- these captures are continuous multi-hour
+# polling sessions and more than one contains a LATER phase (another zone's
+# excitation, a reheat) appended after the cooldown of interest, not just
+# noise on top of a monotonic decay. A single-exponential fit forced onto
+# that kind of trace produces numbers that look like a tau/T_inf but are
+# not one -- see ``fit_cooldown_tau``'s refusal below.
+COOLDOWN_RISE_STEP_C = 0.3
+COOLDOWN_MAX_RISING_FRACTION = 0.15
+COOLDOWN_MIN_SAMPLES = 5
+
+
+def coupled_hold_feasibility_sweep(matrix: np.ndarray, ambient_c: float,
+                                    t_max_above_ambient_c: float = 200.0, t_step_c: float = 0.5
+                                    ) -> dict:
+    """Reproduce, offline, the feasibility gate ``zone_coupling_solve_hold()``
+    applies on the board (``firmware/KilnFW/App/drivers/zone_coupling_solve.c``):
+    for a coupled hold solve of ALL THREE zones driven to the SAME setpoint
+    (``u = A^-1 @ (T - ambient) * ones(3)``), a candidate is judged
+    infeasible the instant any zone's solved duty exceeds 1.0 -- the exact
+    ``u[i] > 1.0f`` clamp-and-flag test that function performs, just
+    evaluated across a temperature sweep offline instead of on one live
+    tick. Returns ``{"max_feasible_c": T or None, "first_infeasible_c": T
+    or None, "samples": [(T, u_vector, feasible_bool), ...]}`` -- ``T`` is
+    ABSOLUTE (ambient_c + sweep offset), matching the board's own setpoint
+    convention, not a delta.
+    """
+    A_inv = np.linalg.inv(matrix)
+    max_feasible_c = None
+    first_infeasible_c = None
+    samples = []
+    T = ambient_c
+    while T <= ambient_c + t_max_above_ambient_c:
+        rhs = np.full(3, T - ambient_c)
+        u = A_inv @ rhs
+        feasible = bool(np.all(u <= 1.0))
+        samples.append((T, u.tolist(), feasible))
+        if feasible:
+            max_feasible_c = T
+        elif first_infeasible_c is None:
+            first_infeasible_c = T
+            break
+        T += t_step_c
+    return dict(max_feasible_c=max_feasible_c, first_infeasible_c=first_infeasible_c, samples=samples)
+
+
+@dataclasses.dataclass
+class CooldownFit:
+    zone: int
+    n: int
+    span_s: float
+    tau_s: Optional[float]
+    t_inf_c: Optional[float]
+    rms_resid_c: Optional[float]
+    refused: bool
+    reason: str
+
+
+def _cooldown_is_monotonic_enough(temps: np.ndarray) -> bool:
+    """True if ``temps`` looks like ONE passive decay rather than a trace
+    that mixes phases (a later reheat, another zone's excitation appended
+    to the same continuous capture) -- see ``COOLDOWN_RISE_STEP_C``."""
+    if len(temps) < 2:
+        return False
+    diffs = np.diff(temps)
+    n_rising = int(np.sum(diffs > COOLDOWN_RISE_STEP_C))
+    return n_rising <= len(diffs) * COOLDOWN_MAX_RISING_FRACTION
+
+
+def fit_cooldown_tau(times_s: np.ndarray, temps_c: np.ndarray, zone: int = 0,
+                      t_inf_search_margin_c: float = 5.0, t_inf_grid_n: int = 120,
+                      ) -> CooldownFit:
+    """Fit ``T(t) = T_inf + (T0 - T_inf) * exp(-t/tau)`` to one zone's
+    cooldown trace via a grid search over ``T_inf`` (each candidate reduces
+    to a linear least-squares fit of ``log(T - T_inf)`` vs ``t``, picked by
+    lowest RMS residual in temperature space -- no external optimizer
+    dependency). Refuses (``refused=True``, ``tau_s``/``t_inf_c`` ``None``)
+    rather than returning a number for: too few samples, a trace that is
+    not predominantly monotonic-decreasing (see
+    ``_cooldown_is_monotonic_enough`` -- these captures are known to splice
+    in later, unrelated phases), or a grid with no candidate producing a
+    positive time constant.
+    """
+    times_s = np.asarray(times_s, dtype=float)
+    temps_c = np.asarray(temps_c, dtype=float)
+    n = len(temps_c)
+    span = float(times_s[-1] - times_s[0]) if n else 0.0
+    if n < COOLDOWN_MIN_SAMPLES:
+        return CooldownFit(zone, n, span, None, None, None, True,
+                            f"only {n} samples, need >= {COOLDOWN_MIN_SAMPLES}")
+    if not _cooldown_is_monotonic_enough(temps_c):
+        diffs = np.diff(temps_c)
+        n_rising = int(np.sum(diffs > COOLDOWN_RISE_STEP_C))
+        return CooldownFit(zone, n, span, None, None, None, True,
+                            f"not a clean monotonic decay -- {n_rising}/{len(diffs)} steps rise by "
+                            f">{COOLDOWN_RISE_STEP_C}C (this trace likely mixes phases, e.g. a later "
+                            f"reheat or another zone's excitation appended to the same continuous capture)")
+
+    T0 = temps_c[0]
+    best = None
+    for t_inf in np.linspace(temps_c.min() - t_inf_search_margin_c, T0 - 0.5, t_inf_grid_n):
+        y = temps_c - t_inf
+        if np.any(y <= 0):
+            continue
+        logy = np.log(y)
+        design = np.vstack([np.ones_like(times_s), times_s]).T
+        coef, *_ = np.linalg.lstsq(design, logy, rcond=None)
+        neg_inv_tau = coef[1]  # logy = c0 + neg_inv_tau * t; decay needs this < 0
+        if neg_inv_tau >= 0:
+            continue
+        tau = -1.0 / neg_inv_tau
+        pred = t_inf + (T0 - t_inf) * np.exp(-times_s / tau)
+        rms = float(np.sqrt(np.mean((pred - temps_c) ** 2)))
+        if best is None or rms < best[0]:
+            best = (rms, t_inf, tau)
+    if best is None:
+        return CooldownFit(zone, n, span, None, None, None, True,
+                            "no T_inf on the search grid produced a positive time constant")
+    rms, t_inf, tau = best
+    return CooldownFit(zone, n, span, float(tau), float(t_inf), rms, False, "")
+
+
+def cooldown_taus_from_path(path: str) -> list[CooldownFit]:
+    """Fit ``fit_cooldown_tau`` per zone from one cooldown capture file (any
+    format ``coupling_pair_log.load_thermo_samples_any_format`` accepts)."""
+    samples = coupling_pair_log.load_thermo_samples_any_format(path)
+    out = []
+    if not samples:
+        return out
+    t0 = samples[0].t
+    for z in ZONES:
+        pairs = [(s.t - t0, s.channels[z]) for s in samples
+                 if z in s.channels and math.isfinite(s.channels[z])]
+        if len(pairs) < COOLDOWN_MIN_SAMPLES:
+            out.append(CooldownFit(z, len(pairs), 0.0, None, None, None, True,
+                                    f"only {len(pairs)} samples, need >= {COOLDOWN_MIN_SAMPLES}"))
+            continue
+        times_s = np.array([p[0] for p in pairs])
+        temps_c = np.array([p[1] for p in pairs])
+        out.append(fit_cooldown_tau(times_s, temps_c, zone=z))
+    return out
+
+
+def build_coupling_report(single_zone_pairs: Optional[dict] = None,
+                           sec32_paths: Optional[Sequence[str]] = None,
+                           cooldown_paths: Optional[Sequence[str]] = None,
+                           ambient_c: float = 22.0,
+                           feasibility_sweep_max_c: float = 200.0,
+                           ) -> dict:
+    """Assemble every number a coupling-matrix analysis pass over the
+    checked-in single-zone excitation captures reports: the settle audit,
+    the assembled 3x3 (both orientations), condition number + plausibility
+    for old and new, the per-entry delta, an old-vs-new sec 3.2
+    revalidation, the coupled-hold feasibility sweep, and per-zone cooldown
+    tau fits. Pure function of its inputs (all default to the repo's
+    checked-in ``logs/coupling/`` captures and
+    ``tests/fixtures/plant_sim/`` sec 3.2 fixtures) so every number is
+    reproducible by re-running ``python -m kilnctrl.coupled_ident
+    coupling-report`` with no arguments.
+    """
+    single_zone_pairs = single_zone_pairs if single_zone_pairs is not None else DEFAULT_SINGLE_ZONE_PAIRS
+    sec32_paths = list(sec32_paths) if sec32_paths is not None else DEFAULT_SEC32_FIXTURES
+    cooldown_paths = list(cooldown_paths) if cooldown_paths is not None else DEFAULT_COOLDOWN_PATHS
+
+    # 1. settle audit, per single-zone-excitation file.
+    settle_audit = {}
+    for z, (mcp_path, thermo_path) in single_zone_pairs.items():
+        entries = settle_criterion_audit_from_pair(mcp_path, thermo_path)
+        settle_audit[z] = [dataclasses.asdict(e) for e in entries]
+
+    # 2/3. assemble the matrix, condition number, plausibility, delta.
+    column_obs = {}
+    for z, (mcp_path, thermo_path) in single_zone_pairs.items():
+        column_obs[z] = single_zone_column_observations_from_pair(mcp_path, thermo_path, z)
+    new_matrix, coverage = matrix_from_single_zone_columns(column_obs)
+    coverage_note = coverage_redundancy_note(coverage)
+
+    old_matrix = CURRENT_MATRIX
+    result: dict = dict(
+        settle_audit=settle_audit,
+        coverage={f"{i},{j}": n for (i, j), n in coverage.items()},
+        coverage_note=coverage_note,
+        new_matrix=(new_matrix.tolist() if new_matrix is not None else None),
+        new_matrix_transposed=(new_matrix.T.tolist() if new_matrix is not None else None),
+        old_matrix=old_matrix.tolist(),
+    )
+    if new_matrix is None:
+        result["matrix_incomplete"] = True
+        return result
+    result["matrix_incomplete"] = False
+
+    cond_new = float(np.linalg.cond(new_matrix))
+    cond_old = float(np.linalg.cond(old_matrix))
+    plausible_new, reason_new = matrix_plausibility(new_matrix)
+    plausible_old, reason_old = matrix_plausibility(old_matrix)
+    delta = new_matrix - old_matrix
+    result.update(
+        condition_number_new=cond_new,
+        condition_number_old=cond_old,
+        plausible_new=plausible_new, plausibility_reason_new=reason_new,
+        plausible_old=plausible_old, plausibility_reason_old=reason_old,
+        delta=delta.tolist(),
+        delta_pct_of_old=(100.0 * delta / old_matrix).tolist(),
+    )
+
+    # 4. old-vs-new sec 3.2 revalidation.
+    obs = dwell_observations_from_paths(sec32_paths)
+    scores_old = score_matrix(old_matrix, obs) if obs else []
+    scores_new = score_matrix(new_matrix, obs) if obs else []
+    result["sec32_n_observations"] = len(obs)
+    result["sec32_scores_old"] = [dataclasses.asdict(s) for s in scores_old]
+    result["sec32_scores_new"] = [dataclasses.asdict(s) for s in scores_new]
+    result["self_check"] = self_check_against_known_figures(sec32_paths)
+
+    # 5. coupled-hold feasibility sweep, old vs new.
+    result["feasibility_old"] = coupled_hold_feasibility_sweep(old_matrix, ambient_c, feasibility_sweep_max_c)
+    result["feasibility_new"] = coupled_hold_feasibility_sweep(new_matrix, ambient_c, feasibility_sweep_max_c)
+    result["feasibility_ambient_c"] = ambient_c
+
+    # 6. cooldown tau fits.
+    cooldown = {}
+    for path in cooldown_paths:
+        cooldown[path] = [dataclasses.asdict(f) for f in cooldown_taus_from_path(path)]
+    result["cooldown"] = cooldown
+
+    return result
+
+
+def format_coupling_report_text(report: dict) -> str:
+    lines = []
+    lines.append("=== 1. settle-criterion audit (per single-zone-excitation capture) ===")
+    for z, entries in sorted(report["settle_audit"].items()):
+        lines.append(f"-- zone{z} excited --")
+        if not entries:
+            lines.append("  no (window, zone) entries")
+        for e in entries:
+            lines.append(f"  zone{e['zone']}: settled={e['settled']} target={e['dwell_target_c']} "
+                         f"window={e['window_duration_s']:.0f}s settle_duty={e['settle_duty']} "
+                         f"duty_range=[{e['window_duty_min']},{e['window_duty_max']}] "
+                         f"flagged_unstable={e['flagged_unstable']}")
+    lines.append("")
+    lines.append("=== 2. assembled matrix ===")
+    lines.append("coverage (n observations per cell) [affected][stepped]:")
+    for i in ZONES:
+        lines.append("  " + " ".join(f"{report['coverage'].get(f'{i},{j}', 0):3d}" for j in ZONES))
+    lines.append(f"coverage note: {report['coverage_note']}")
+    if report["matrix_incomplete"]:
+        lines.append("matrix INCOMPLETE -- refusing to report further numbers")
+        return "\n".join(lines)
+    lines.append("new matrix [affected][stepped]:")
+    for row in report["new_matrix"]:
+        lines.append("  " + " ".join(f"{v:9.4f}" for v in row))
+    lines.append("new matrix, transposed [stepped][affected] (/api/autotune/matrix orientation):")
+    for row in report["new_matrix_transposed"]:
+        lines.append("  " + " ".join(f"{v:9.4f}" for v in row))
+    lines.append("")
+    lines.append("=== 3. condition number / plausibility / delta vs current ===")
+    lines.append(f"condition number: new={report['condition_number_new']:.4g} old={report['condition_number_old']:.4g}")
+    lines.append(f"plausibility: new={'PASS' if report['plausible_new'] else 'FAIL: ' + report['plausibility_reason_new']} "
+                 f"old={'PASS' if report['plausible_old'] else 'FAIL: ' + report['plausibility_reason_old']}")
+    lines.append("delta (new - old), [affected][stepped]:")
+    for row in report["delta"]:
+        lines.append("  " + " ".join(f"{v:+9.4f}" for v in row))
+    lines.append("")
+    lines.append("=== 4. sec 3.2 revalidation, old vs new ===")
+    lines.append(f"n observations: {report['sec32_n_observations']}")
+    for label, scores in (("old", report["sec32_scores_old"]), ("new", report["sec32_scores_new"])):
+        lines.append(f"{label} matrix scores:")
+        for s in scores:
+            lines.append(f"  zone{s['zone']}: n={s['n']:3d} mean={s['mean_error']:+.4f} rms={s['rms_error']:.4f}")
+    sc = report["self_check"]
+    lines.append(f"self-check vs known sec 3.2 figures: {'PASS' if sc['ok'] else 'FAIL'} (n={sc['n_observations']})")
+    lines.append("")
+    lines.append("=== 5. coupled-hold feasibility sweep ===")
+    for label in ("old", "new"):
+        f = report[f"feasibility_{label}"]
+        lines.append(f"{label}: max_feasible_c={f['max_feasible_c']} first_infeasible_c={f['first_infeasible_c']}")
+    lines.append("")
+    lines.append("=== 6. cooldown tau fits ===")
+    for path, fits in report["cooldown"].items():
+        lines.append(f"-- {path} --")
+        for f in fits:
+            if f["refused"]:
+                lines.append(f"  zone{f['zone']}: REFUSED -- {f['reason']}")
+            else:
+                lines.append(f"  zone{f['zone']}: tau={f['tau_s']:.1f}s T_inf={f['t_inf_c']:.2f}C "
+                             f"rms_resid={f['rms_resid_c']:.3f}C n={f['n']}")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -1085,6 +1443,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                                                      "accepted readings that were still drifting/oscillating")
     p_audit.add_argument("jsonl_paths", nargs="+")
     p_audit.add_argument("--json", action="store_true")
+
+    p_cr = sub.add_parser("coupling-report", help="regenerate every number a coupling-matrix analysis pass "
+                                                     "reports (settle audit, matrix assembly, condition/"
+                                                     "plausibility, delta vs current, sec 3.2 revalidation, "
+                                                     "feasibility sweep, cooldown tau fits) from the checked-in "
+                                                     "logs/coupling/ captures")
+    p_cr.add_argument("--ambient-c", type=float, default=22.0,
+                       help="ambient reference for the feasibility sweep (default 22.0)")
+    p_cr.add_argument("--json", action="store_true")
 
     args = parser.parse_args(argv)
 
@@ -1126,6 +1493,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             print(json.dumps([dataclasses.asdict(e) for e in entries], indent=2))
         else:
             print(format_settle_audit_text(entries))
+    elif args.cmd == "coupling-report":
+        report = build_coupling_report(ambient_c=args.ambient_c)
+        if args.json:
+            print(json.dumps(report, indent=2))
+        else:
+            print(format_coupling_report_text(report))
     else:
         parser.print_help()
         return 2
