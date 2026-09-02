@@ -12,6 +12,7 @@
 #include "ota_http.h" /* ota_http_heat_blocked_by_update() -- see relay_on_blocked() below */
 #include "owner_slot_pool.h"
 #include "relay_authority.h"
+#include "stack_margin.h"
 
 static const char *TAG = "kiln_io_owner";
 
@@ -109,6 +110,7 @@ typedef struct {
 } owner_cmd_t;
 
 static QueueHandle_t s_cmd_queue;
+static TaskHandle_t s_task_handle; /* DRAM_PSRAM_PLAN.md Phase 0 (4.2): stack_margin_register() target */
 static kiln_io_t *s_io;
 static SafetyLinkClass *s_safety;
 
@@ -523,13 +525,17 @@ esp_err_t kiln_io_owner_start(kiln_io_t *io, SafetyLinkClass *safety)
         return ESP_ERR_NO_MEM;
     }
 
-    BaseType_t created = xTaskCreatePinnedToCore(owner_task, "kiln_io_owner", 4096, NULL, 5, NULL,
+    BaseType_t created = xTaskCreatePinnedToCore(owner_task, "kiln_io_owner", 4096, NULL, 5, &s_task_handle,
                                                  tskNO_AFFINITY);
     if (created != pdPASS) {
         vQueueDelete(s_cmd_queue);
         s_cmd_queue = NULL;
         return ESP_ERR_NO_MEM;
     }
+    /* DRAM_PSRAM_PLAN.md Phase 0 (4.2): registration only, no size change --
+     * only reached with a real handle since the failure branch above already
+     * returned. 4096 must match the xTaskCreatePinnedToCore() literal above. */
+    stack_margin_register("kiln_io_owner", &s_task_handle, 4096);
     return ESP_OK;
 }
 

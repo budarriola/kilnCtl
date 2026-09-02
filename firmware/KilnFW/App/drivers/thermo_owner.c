@@ -10,6 +10,7 @@
 #include "freertos/task.h"
 
 #include "owner_slot_pool.h"
+#include "stack_margin.h"
 
 static const char *TAG = "thermo_owner";
 
@@ -81,6 +82,7 @@ typedef struct {
 } owner_cmd_t;
 
 static QueueHandle_t s_cmd_queue;
+static TaskHandle_t s_task_handle; /* DRAM_PSRAM_PLAN.md Phase 0 (4.2): stack_margin_register() target */
 static MAX31856BusClass *s_bus;
 
 /* ---- Module-owned result-slot pool -- see owner_slot_pool.h's top comment
@@ -240,13 +242,17 @@ esp_err_t thermo_owner_start(MAX31856BusClass *bus)
         return ESP_ERR_NO_MEM;
     }
 
-    BaseType_t created = xTaskCreatePinnedToCore(owner_task, "thermo_owner", 4096, NULL, 5, NULL,
+    BaseType_t created = xTaskCreatePinnedToCore(owner_task, "thermo_owner", 4096, NULL, 5, &s_task_handle,
                                                  tskNO_AFFINITY);
     if (created != pdPASS) {
         vQueueDelete(s_cmd_queue);
         s_cmd_queue = NULL;
         return ESP_ERR_NO_MEM;
     }
+    /* DRAM_PSRAM_PLAN.md Phase 0 (4.2): registration only, no size change --
+     * only reached with a real handle since the failure branch above already
+     * returned. 4096 must match the xTaskCreatePinnedToCore() literal above. */
+    stack_margin_register("thermo_owner", &s_task_handle, 4096);
     return ESP_OK;
 }
 

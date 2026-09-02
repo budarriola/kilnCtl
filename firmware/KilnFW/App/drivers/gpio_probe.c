@@ -30,6 +30,7 @@ esp_err_t uart_bridge_start_gpio_probe_task(uart_protocol_t *proto)
 
 #include "profile_executor.h"
 #include "settings.h"
+#include "stack_margin.h"
 #include "uart_task_ids.h"
 
 #define BRIDGE_INBOX_LEN 4
@@ -323,13 +324,18 @@ esp_err_t uart_bridge_start_gpio_probe_task(uart_protocol_t *proto)
      * body[98] under that, and every path ends in an ESP_LOGx whose
      * vsnprintf wants another ~1.5 kB. 6144 leaves real headroom rather
      * than trimming to the observed high-water mark. */
+    static TaskHandle_t s_gpio_probe_task; /* DRAM_PSRAM_PLAN.md Phase 0 (4.2): stack_margin_register() target */
     BaseType_t created = xTaskCreatePinnedToCoreWithCaps(gpio_probe_task, "gpio_probe", 6144, &ctx, 3,
-                                                         NULL, tskNO_AFFINITY,
+                                                         &s_gpio_probe_task, tskNO_AFFINITY,
                                                          MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (created != pdPASS) {
         uart_protocol_unregister_task(proto, UART_TASK_ID_GPIO_PROBE);
         return ESP_ERR_NO_MEM;
     }
+    /* Registration only, no size change -- only reached with a real handle
+     * since the failure branch above already returned. 6144 must match the
+     * xTaskCreatePinnedToCoreWithCaps() literal above. */
+    stack_margin_register("gpio_probe", &s_gpio_probe_task, 6144);
     return ESP_OK;
 }
 

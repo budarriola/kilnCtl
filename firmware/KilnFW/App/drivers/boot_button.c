@@ -9,8 +9,10 @@
 #include "freertos/task.h"
 
 #include "profile_executor.h"
+#include "stack_margin.h"
 
 static const char *TAG = "boot_button";
+static TaskHandle_t s_task_handle; /* DRAM_PSRAM_PLAN.md Phase 0 (4.2): stack_margin_register() target */
 
 // GPIO0 -- the ESP32-S3 BOOT strap pin. Confirmed free of any other claim in
 // this firmware before wiring it here: grepped this whole tree for
@@ -180,11 +182,16 @@ void boot_button_start(void)
     // creation precedent. 3072 words is generous for a loop this small
     // (one gpio_get_level(), one pure function call, an occasional
     // profile_executor_get_status() snapshot, some ESP_LOGx calls).
-    if (xTaskCreate(boot_button_task, "boot_button", 3072, NULL, tskIDLE_PRIORITY + 1, NULL) != pdPASS) {
+    if (xTaskCreate(boot_button_task, "boot_button", 3072, NULL, tskIDLE_PRIORITY + 1, &s_task_handle) != pdPASS) {
         ESP_LOGE(TAG, "xTaskCreate(boot_button_task) failed -- boot-button recovery hatch will not "
                       "be available this boot");
         s_bb.initialized = false;
+        return;
     }
+    /* DRAM_PSRAM_PLAN.md Phase 0 (4.2): registration only, no size change --
+     * only reached with a real handle since the failure branch above now
+     * returns. 3072 must match the xTaskCreate() literal above. */
+    stack_margin_register("boot_button", &s_task_handle, 3072);
 }
 
 bool boot_button_ota_bypass_active(void)

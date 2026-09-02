@@ -10,9 +10,11 @@
 
 #include "kiln_io_owner.h"
 #include "profile_executor.h"
+#include "stack_margin.h"
 #include "uart_task_ids.h" /* SAFETY_FLAG_RELAY/SAFETY_FLAG_ENABLED */
 
 static const char *TAG = "danger_mode";
+static TaskHandle_t s_task_handle; /* DRAM_PSRAM_PLAN.md Phase 0 (4.2): stack_margin_register() target */
 
 #define DANGER_MODE_POLL_MS 1000u
 
@@ -335,9 +337,14 @@ void danger_mode_init(SafetyLinkClass *safety)
      * esp_restart(), and boot_button.c/ota_http.c's own task-creation
      * comments already establish why a PSRAM-stack task must never be the
      * one holding a stack frame across a reboot path in this codebase. */
-    if (xTaskCreate(danger_mode_task, "danger_mode", 3072, NULL, tskIDLE_PRIORITY + 1, NULL) != pdPASS) {
+    if (xTaskCreate(danger_mode_task, "danger_mode", 3072, NULL, tskIDLE_PRIORITY + 1, &s_task_handle) != pdPASS) {
         ESP_LOGE(TAG, "xTaskCreate(danger_mode_task) failed -- danger mode will not be available "
                       "this boot");
         s_dm.initialized = false;
+        return;
     }
+    /* DRAM_PSRAM_PLAN.md Phase 0 (4.2): registration only, no size change --
+     * only reached with a real handle since the failure branch above now
+     * returns. 3072 must match the xTaskCreate() literal above. */
+    stack_margin_register("danger_mode", &s_task_handle, 3072);
 }

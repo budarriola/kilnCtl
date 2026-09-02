@@ -14,6 +14,7 @@
 
 #include "kiln_ui.h"
 #include "settings.h"
+#include "stack_margin.h"
 #include "touch_cal_store.h"
 #include "touch_dev.h"
 #include "ui_theme.h"
@@ -811,6 +812,15 @@ esp_err_t lvgl_port_start(ILI9488Class *display, NS2009Class *touch, screen_idle
                       "this boot");
         return ESP_ERR_NO_MEM;
     }
+    /* DRAM_PSRAM_PLAN.md Phase 0 (4.2): registration only, no size change --
+     * only reached with a real handle since the failure branch above already
+     * returned. Static creation returns the handle directly rather than
+     * filling an out-param, so it's copied into a static slot for
+     * stack_margin_register() to read through, same as every other call
+     * site's &task_handle. 8192 must match sizeof(s_lvgl_task_stack) above. */
+    static TaskHandle_t s_lvgl_task_handle;
+    s_lvgl_task_handle = created_handle;
+    stack_margin_register("lvgl", &s_lvgl_task_handle, sizeof(s_lvgl_task_stack));
 
     ESP_LOGI(TAG, "LVGL up: %ux%u, %u-row PSRAM buffers, touch %s, idle-integration %s", width,
              height, (unsigned)LVGL_BUF_ROWS, touch ? "on" : "off", idle ? "on" : "off");

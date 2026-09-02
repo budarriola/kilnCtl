@@ -7,6 +7,7 @@
 #include "esp_log.h"
 
 #include "../owner_slot_pool.h"
+#include "../stack_margin.h"
 
 static const char *TAG = "esp_spi_owner";
 
@@ -246,6 +247,13 @@ esp_err_t spi_owner_init(spi_owner_t *owner,
         ESP_LOGE(TAG, "failed to create owner task");
         return ESP_ERR_NO_MEM;
     }
+
+    /* DRAM_PSRAM_PLAN.md Phase 0 (4.2): registration only, no size change --
+     * only reached with a real handle since the failure branch above already
+     * returned. owner->task_handle is stable for the life of the process
+     * (caller holds owner in a static struct, e.g. MAX31856.c's bus->owner
+     * off main.c's static thermo_bus). */
+    stack_margin_register("spi_owner", &owner->task_handle, stack_depth);
 
     owner->initialized = true;
     return ESP_OK;

@@ -23,6 +23,7 @@
 #include "safety_trip_words.h" /* safety_fault_source_words() -- ROADMAP.md M13, decode the
                                  * fault-source mask for the operator instead of a bare hex value */
 #include "sim_backend.h"
+#include "stack_margin.h"
 #include "thermo_combine.h"
 #include "zones_http.h"
 
@@ -2872,6 +2873,11 @@ esp_err_t autotune_engine_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_
         s_at.lock = NULL;
         return ESP_ERR_NO_MEM;
     }
+    /* DRAM_PSRAM_PLAN.md Phase 0 (4.2): registration only, no size change --
+     * only reached with a real handle since the failure branch above already
+     * returned. 4096 must match the xTaskCreatePinnedToCoreWithCaps() literal
+     * above. */
+    stack_margin_register("autotune_engine", &s_at.task, 4096);
     ESP_LOGI(TAG, "autotune engine up -- step test (default) and relay-feedback methods, see autotune_engine.h "
                   "for scope; neither has ever produced a fit on real hardware");
     return ESP_OK;

@@ -11,6 +11,7 @@
 #include "autotune_engine.h"
 #include "log_store_mount.h"
 #include "profile_executor.h"
+#include "stack_margin.h"
 #include "telemetry_format.h"
 
 static const char *TAG = "KTEL";
@@ -172,5 +173,10 @@ esp_err_t telemetry_log_start(void)
         s_task = NULL;
         return ESP_ERR_NO_MEM;
     }
+    /* DRAM_PSRAM_PLAN.md Phase 0 (4.2): registration only, no size change --
+     * only reached with a real handle since the failure branch above already
+     * returned. 4096 must match the xTaskCreatePinnedToCoreWithCaps() literal
+     * above. */
+    stack_margin_register("telemetry_log", &s_task, 4096);
     return ESP_OK;
 }

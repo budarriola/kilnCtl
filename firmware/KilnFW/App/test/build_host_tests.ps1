@@ -95,6 +95,7 @@ $sources = @(
     (Join-Path $driversDir "st7796_panel.c"),
     (Join-Path $driversDir "panel_detect.c"),
     (Join-Path $driversDir "owner_slot_pool.c"),
+    (Join-Path $driversDir "stack_margin.c"),
     (Join-Path $driversDir "time_sync_tz.c"),
     (Join-Path $driversDir "log_store.c"),
     (Join-Path $driversDir "touch_dev.c"),
@@ -247,7 +248,12 @@ $cmd5 = "call `"$vcvars`" x64 >nul && cl /nologo /W3 /EHsc /I`"$stubDir`" /I`"$c
         "`"$(Join-Path $testDir 'test_autotune_engine_prestart.c')`" " +
         "`"$(Join-Path $driversDir 'thermal_guard.c')`" `"$(Join-Path $driversDir 'heater_output.c')`" " +
         "`"$(Join-Path $driversDir 'thermo_combine.c')`" `"$(Join-Path $driversDir 'pid_autotune.c')`" " +
-        "`"$(Join-Path $driversDir 'heat_enable.c')`""
+        "`"$(Join-Path $driversDir 'heat_enable.c')`" `"$(Join-Path $driversDir 'stack_margin.c')`""
+# stack_margin.c added DRAM_PSRAM_PLAN.md Phase 0 (4.2): autotune_engine.c's
+# autotune_engine_start() now calls stack_margin_register() (registration
+# only, no size change), and this executable #includes autotune_engine.c
+# directly (same as test_profile_executor_prestart.c's cmd4 above, which
+# already linked stack_margin.c for the same reason).
 
 Invoke-HostTestExe -Name "autotune_engine_prestart" -ExePath $exe5 -BuildCmd $cmd5
 
@@ -296,7 +302,12 @@ $cmd8 = "call `"$vcvars`" x64 >nul && cl /nologo /W3 /EHsc /std:c11 /I`"$stubDir
         "/Fo:`"$otaObjDir\\`" /Fe:`"$exe8`" " +
         "`"$(Join-Path $testDir 'test_ota_http.c')`" " +
         "`"$(Join-Path $driversDir 'ota_auth.c')`" `"$(Join-Path $driversDir 'ota_interlock.c')`" " +
-        "`"$(Join-Path $driversDir 'ota_record.c')`" `"$(Join-Path $driversDir 'ota_http_util.c')`""
+        "`"$(Join-Path $driversDir 'ota_record.c')`" `"$(Join-Path $driversDir 'ota_http_util.c')`" " +
+        "`"$(Join-Path $driversDir 'stack_margin.c')`""
+# stack_margin.c added DRAM_PSRAM_PLAN.md Phase 0 (4.2): ota_http.c's
+# recovery-exit/rollback/pico-rollback reboot task starts now call
+# stack_margin_register() (registration only, no size change), and this
+# executable #includes ota_http.c directly.
 
 Invoke-HostTestExe -Name "ota_http" -ExePath $exe8 -BuildCmd $cmd8
 
@@ -348,7 +359,11 @@ New-Item -ItemType Directory -Force -Path $kioObjDir | Out-Null
 $cmd11 = "call `"$vcvars`" x64 >nul && cl /nologo /W3 /EHsc /std:c11 /I`"$stubDir`" /I`"$commonInc`" " +
         "/Fo:`"$kioObjDir\\`" /Fe:`"$exe11`" " +
         "`"$(Join-Path $testDir 'test_kiln_io_owner.c')`" `"$(Join-Path $driversDir 'kiln_io.c')`" " +
-        "`"$(Join-Path $driversDir 'owner_slot_pool.c')`""
+        "`"$(Join-Path $driversDir 'owner_slot_pool.c')`" `"$(Join-Path $driversDir 'stack_margin.c')`""
+# stack_margin.c added DRAM_PSRAM_PLAN.md Phase 0 (4.2): kiln_io_owner.c's
+# kiln_io_owner_start() now calls stack_margin_register() (registration
+# only, no size change), and this executable #includes kiln_io_owner.c
+# directly.
 
 Invoke-HostTestExe -Name "kiln_io_owner" -ExePath $exe11 -BuildCmd $cmd11
 

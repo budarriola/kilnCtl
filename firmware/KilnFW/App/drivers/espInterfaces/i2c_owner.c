@@ -4,6 +4,8 @@
 
 #include "esp_log.h"
 
+#include "../stack_margin.h"
+
 static const char *TAG = "esp_i2c_owner";
 
 /* One raw attempt at whatever request.tx/rx_buffer describe. Pulled out of
@@ -148,6 +150,12 @@ esp_err_t i2c_owner_init(i2c_owner_t *owner,
         ESP_LOGE(TAG, "failed to create owner task");
         return ESP_ERR_NO_MEM;
     }
+
+    /* DRAM_PSRAM_PLAN.md Phase 0 (4.2): registration only, no size change --
+     * only reached with a real handle since the failure branch above already
+     * returned. owner->task_handle is stable for the life of the process
+     * (caller holds owner in a static struct). */
+    stack_margin_register("i2c_owner", &owner->task_handle, stack_depth);
 
     owner->initialized = true;
     return ESP_OK;

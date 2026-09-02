@@ -396,6 +396,15 @@ void dashboard_get_status(dashboard_status_t *out)
     out->heap_spiram_min_free = heap_caps_get_minimum_free_size(MALLOC_CAP_SPIRAM);
     out->heap_spiram_total = heap_caps_get_total_size(MALLOC_CAP_SPIRAM);
 
+    /* DRAM_PSRAM_PLAN.md Phase 0 (4.1): the one capability not previously
+     * broken out. A subset of heap_internal above (both draw from
+     * MALLOC_CAP_INTERNAL), reported separately because Phase 1 needs to
+     * watch it independently -- see dashboard_http.h's field comment. */
+    out->heap_dma_free = heap_caps_get_free_size(MALLOC_CAP_DMA);
+    out->heap_dma_largest_free_block = heap_caps_get_largest_free_block(MALLOC_CAP_DMA);
+    out->heap_dma_min_free = heap_caps_get_minimum_free_size(MALLOC_CAP_DMA);
+    out->heap_dma_total = heap_caps_get_total_size(MALLOC_CAP_DMA);
+
     /* Owner request 2026-08-27: flash usage on the dashboard, same facts
      * ui_page_diagnostics.c's Firmware page already shows on the LCD
      * (build_firmware_statics()) -- total chip size from esp_flash_get_size,
@@ -491,13 +500,19 @@ static esp_err_t status_get_handler(httpd_req_t *req)
      * (every byte needing a backslash doubles -- 65/33-byte raw fields from
      * the UNTRUSTED RP2040 peer, so 130/66B), fw_version/fw_build escaped
      * similarly (62/78B), 3 nvs_sections entries, ,"thermo_spi_wedged":false (26B,
-     * opus review, commit 9fc55d9, M5), and generous headroom >200B on top of
-     * the ~3892-byte total this exact field list sums to
-     * (verified by a standalone harness mirroring this file's own APPEND
-     * macro against every field above at its documented worst width: fits
-     * at 4096, and provably truncates -- the `goto truncated` path fires --
-     * once the same content is asked to fit in a materially smaller buffer,
-     * proving this is a real bound rather than a round number).
+     * opus review, commit 9fc55d9, M5), plus ~104B worst case for the
+     * heap_dma object added by DRAM_PSRAM_PLAN.md Phase 0 (4.1) --
+     * `,"heap_dma":{"free":%lu,"largest_free_block":%lu,"min_free":%lu,
+     * "total":%lu}` at 64 literal bytes plus 4 uint32_t fields at their
+     * 10-digit widest -- and headroom of ~100B on top of the ~3996-byte
+     * total this exact field list now sums to (verified by a standalone
+     * harness mirroring this file's own APPEND macro against every field
+     * above at its documented worst width: fits at 4096, and provably
+     * truncates -- the `goto truncated` path fires -- once the same content
+     * is asked to fit in a materially smaller buffer, proving this is a real
+     * bound rather than a round number). Headroom shrank from >200B to
+     * ~100B when heap_dma was added; if another field is ever added here,
+     * re-run that harness before assuming 4096 still fits.
      *
      * HEAP, not stack: httpd worker stack high-water mark was measured at
      * 2348 bytes free of 8192 on this exact endpoint (owner report,
@@ -840,6 +855,9 @@ static esp_err_t status_get_handler(httpd_req_t *req)
     APPEND(",\"heap_spiram\":{\"free\":%lu,\"largest_free_block\":%lu,\"min_free\":%lu,\"total\":%lu}",
            (unsigned long)ds.heap_spiram_free, (unsigned long)ds.heap_spiram_largest_free_block,
            (unsigned long)ds.heap_spiram_min_free, (unsigned long)ds.heap_spiram_total);
+    APPEND(",\"heap_dma\":{\"free\":%lu,\"largest_free_block\":%lu,\"min_free\":%lu,\"total\":%lu}",
+           (unsigned long)ds.heap_dma_free, (unsigned long)ds.heap_dma_largest_free_block,
+           (unsigned long)ds.heap_dma_min_free, (unsigned long)ds.heap_dma_total);
 
     /* Owner request 2026-08-27 -- see dashboard_http.h's field comment for
      * what "size" vs "partition_size" vs "used" each mean. null when the

@@ -1,0 +1,110 @@
+#!/usr/bin/env python3
+"""dashboard_http_client.py -- thin HTTP client for GET /api/status's heap
+sub-objects (firmware/KilnFW/App/drivers/dashboard_http.c:386-397/837-843).
+
+DRAM_PSRAM_PLAN.md Phase 0 (4.1): the firmware-side data has existed since
+before this plan was written -- dashboard_get_status() already populates
+heap_internal/heap_spiram (and, as of this module, heap_dma) and
+dashboard_status_handler() already serialises all three into GET
+/api/status's JSON. What was missing was a tool anywhere in this tree that
+parses those three keys; nothing did, so the data was reachable by hand
+(curl, a browser) but not from any measurement this plan's later phases
+depend on. This module is exactly that thin a wrapper: one GET, one JSON
+parse, three known keys pulled out -- same "stdlib urllib.request, no
+framework" convention as ota_http_client.py/zones_http_client.py, and unit
+tested the same way (mocked urllib responses, no real socket, no live board;
+see tools/PcTools/tests/test_dashboard_http_client.py).
+
+Each of heap_internal/heap_spiram/heap_dma carries free/largest_free_block/
+min_free/total, all in bytes, straight from heap_caps_get_*() on the target
+-- see dashboard_http.h's field comments for what MALLOC_CAP_INTERNAL vs.
+MALLOC_CAP_SPIRAM vs. MALLOC_CAP_DMA each mean and why heap_dma is a strict
+subset of heap_internal rather than new information.
+"""
+from __future__ import annotations
+
+import json
+import urllib.error
+import urllib.request
+from typing import Optional
+
+DASHBOARD_HTTP_TIMEOUT_S = 5.0
+
+# Same default as ota_http_client.OTA_AP_DEFAULT_HOST -- the board's own
+# softAP address, reachable even with no home Wi-Fi configured. Not imported
+# from there to avoid a cross-module dependency for one string literal; kept
+# identical on purpose (see this module's own test for a same-value check).
+DASHBOARD_AP_DEFAULT_HOST = "192.168.4.1"
+
+_HEAP_KEYS = ("heap_internal", "heap_spiram", "heap_dma")
+
+
+class DashboardHttpError(RuntimeError):
+    """Raised on transport failure, a non-2xx response, or a response body
+    that isn't valid JSON. Mirrors ZonesHttpError/OtaHttpError's shape
+    (message, optional HTTP status, optional detail text) for the same
+    reason those exist: an MCP tool wrapping this needs to report a
+    connectivity failure differently from a device-reported error."""
+
+    def __init__(self, message: str, status: Optional[int] = None, detail: str = ""):
+        super().__init__(message)
+        self.status = status
+        self.detail = detail
+
+
+def _url(host: str, path: str) -> str:
+    return f"http://{host}{path}"
+
+
+def _http_error_detail(exc: Exception) -> "tuple[Optional[int], str]":
+    if isinstance(exc, urllib.error.HTTPError):
+        try:
+            detail = exc.read().decode("utf-8", errors="replace").strip()
+        except Exception:
+            detail = ""
+        return exc.code, detail
+    if isinstance(exc, urllib.error.URLError):
+        return None, f"unreachable: {exc.reason}"
+    return None, str(exc)
+
+
+def get_status(host: str, timeout: float = DASHBOARD_HTTP_TIMEOUT_S) -> dict:
+    """GET /api/status and return the full decoded JSON object, straight
+    from dashboard_status_handler(). Callers after only the heap figures
+    should prefer get_heap_status() below; this is exposed for anything that
+    needs more of the payload without a second GET."""
+    req = urllib.request.Request(_url(host, "/api/status"), method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body_text = resp.read().decode("utf-8", errors="replace")
+    except Exception as exc:  # noqa: BLE001
+        status, detail = _http_error_detail(exc)
+        raise DashboardHttpError(f"GET /api/status failed: {detail}", status, detail) from exc
+    try:
+        return json.loads(body_text)
+    except Exception as exc:
+        raise DashboardHttpError(f"GET /api/status response was not valid JSON: {body_text!r}") from exc
+
+
+def get_heap_status(host: str, timeout: float = DASHBOARD_HTTP_TIMEOUT_S) -> dict:
+    """GET /api/status and return only the heap_internal/heap_spiram/
+    heap_dma sub-objects, each {free, largest_free_block, min_free, total}
+    in bytes. Raises DashboardHttpError with a specific message (not a
+    silent partial dict) if any of the three keys is missing from the
+    response -- a firmware/tool version mismatch should be loud here, not
+    read back as "0 bytes everywhere", which would look like the DRAM
+    exhaustion this plan exists to measure."""
+    status = get_status(host, timeout=timeout)
+    result: dict = {}
+    missing = []
+    for key in _HEAP_KEYS:
+        if key not in status:
+            missing.append(key)
+            continue
+        result[key] = status[key]
+    if missing:
+        raise DashboardHttpError(
+            f"GET /api/status response is missing {missing} -- "
+            f"firmware/pc_tools version mismatch? (present keys: {sorted(status.keys())})"
+        )
+    return result

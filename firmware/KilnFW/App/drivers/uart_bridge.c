@@ -546,12 +546,17 @@ esp_err_t uart_bridge_start_link_watchdog(kiln_io_t *io, SafetyLinkClass *link)
      * no DMA buffers and runs from no ISR. Note the fault line is also
      * asserted by hardware-independent paths, so the safe direction does not
      * depend solely on this task's stack being reachable. */
+    static TaskHandle_t s_link_watchdog_task; /* DRAM_PSRAM_PLAN.md Phase 0 (4.2): stack_margin_register() target */
     BaseType_t created = xTaskCreatePinnedToCoreWithCaps(link_watchdog_task, "link_watchdog", 3072,
-                                                         &ctx, 6, NULL, tskNO_AFFINITY,
+                                                         &ctx, 6, &s_link_watchdog_task, tskNO_AFFINITY,
                                                          MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (created != pdPASS) {
         return ESP_ERR_NO_MEM;
     }
+    /* Registration only, no size change -- only reached with a real handle
+     * since the failure branch above already returned. 3072 must match the
+     * xTaskCreatePinnedToCoreWithCaps() literal above. */
+    stack_margin_register("link_watchdog", &s_link_watchdog_task, 3072);
 
     ESP_LOGI(TAG, "PC link watchdog up: relays drop and the fault line asserts after %ums with no "
                   "frame or ACK", (unsigned)UART_BRIDGE_LINK_TIMEOUT_MS);

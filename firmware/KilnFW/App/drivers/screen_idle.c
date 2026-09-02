@@ -5,8 +5,15 @@
 #include "esp_log.h"
 #include "freertos/task.h"
 #include "settings.h"
+#include "stack_margin.h"
 
 static const char *TAG = "screen_idle";
+
+/* DRAM_PSRAM_PLAN.md Phase 0 (4.2): stack_margin_register() target. Only one
+ * screen_idle_t instance exists (main.c's static screen_idle), so a single
+ * module-static handle is enough -- matches kiln_io_owner.c/thermo_owner.c's
+ * s_task_handle idiom for owners whose public struct has no handle field. */
+static TaskHandle_t s_task_handle;
 
 /* How often screen_idle_task polls the touch controller (when one is up).
  * NS2009_read does three back-to-back I2C conversions worst case (Z1, then
@@ -153,8 +160,15 @@ esp_err_t screen_idle_start(screen_idle_t *idle)
     if (!idle || !idle->ready) return ESP_ERR_INVALID_STATE;
 
     BaseType_t created =
-        xTaskCreatePinnedToCore(screen_idle_task, "screen_idle", 3072, idle, 3, NULL, tskNO_AFFINITY);
-    return (created == pdPASS) ? ESP_OK : ESP_ERR_NO_MEM;
+        xTaskCreatePinnedToCore(screen_idle_task, "screen_idle", 3072, idle, 3, &s_task_handle, tskNO_AFFINITY);
+    if (created != pdPASS) {
+        return ESP_ERR_NO_MEM;
+    }
+    /* DRAM_PSRAM_PLAN.md Phase 0 (4.2): registration only, no size change --
+     * only reached with a real handle since the failure branch above already
+     * returned. 3072 must match the xTaskCreatePinnedToCore() literal above. */
+    stack_margin_register("screen_idle", &s_task_handle, 3072);
+    return ESP_OK;
 }
 
 esp_err_t screen_idle_inject_touch(screen_idle_t *idle, uint16_t x, uint16_t y, bool pressed)

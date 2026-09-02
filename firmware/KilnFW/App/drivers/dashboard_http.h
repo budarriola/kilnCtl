@@ -345,6 +345,23 @@ typedef struct {
     size_t   heap_spiram_min_free;
     size_t   heap_spiram_total;
 
+    /* MALLOC_CAP_DMA (DMA-capable internal memory) -- DRAM_PSRAM_PLAN.md
+     * Phase 0 (4.1). Added specifically for Phase 1, which lowers
+     * SPIRAM_MALLOC_ALWAYSINTERNAL: an explicit MALLOC_CAP_DMA/_INTERNAL
+     * request is unaffected by that threshold (it always lands internal),
+     * but the *pool* it draws from is the same internal heap the threshold
+     * change puts under more pressure from everything else -- this field is
+     * how a future soak would notice a DMA allocation starting to starve
+     * that it otherwise couldn't see. A strict subset of heap_internal
+     * above, not new information about total internal DRAM -- both are
+     * carved from MALLOC_CAP_INTERNAL, they just answer "how much of that is
+     * usable for DMA" vs. "how much is there at all". Same "0 is a real
+     * reading, never invented" convention as heap_spiram above. */
+    size_t   heap_dma_free;
+    size_t   heap_dma_largest_free_block;
+    size_t   heap_dma_min_free;
+    size_t   heap_dma_total;
+
     /* Owner request 2026-08-27: flash usage on the dashboard, mirroring the
      * LCD Firmware page's facts (ui_page_diagnostics.c's build_firmware_
      * statics()). flash_size is the whole chip (esp_flash_get_size());

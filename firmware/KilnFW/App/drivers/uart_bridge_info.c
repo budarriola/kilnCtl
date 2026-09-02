@@ -294,13 +294,18 @@ esp_err_t uart_bridge_start_info_task(uart_protocol_t *proto)
 
     /* 2026-08-22: PSRAM stack -- info_bridge_task only reports version/
      * uptime/reset-reason state, no flash/NVS access, no hardware ownership. */
+    static TaskHandle_t s_info_bridge_task; /* DRAM_PSRAM_PLAN.md Phase 0 (4.2): stack_margin_register() target */
     BaseType_t created = xTaskCreatePinnedToCoreWithCaps(info_bridge_task, "info_uart_bridge", 3072, &ctx, 5,
-                                                         NULL, tskNO_AFFINITY,
+                                                         &s_info_bridge_task, tskNO_AFFINITY,
                                                          MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (created != pdPASS) {
         uart_protocol_unregister_task(proto, UART_TASK_ID_INFO);
         return ESP_ERR_NO_MEM;
     }
+    /* Registration only, no size change -- only reached with a real handle
+     * since the failure branch above already returned. 3072 must match the
+     * xTaskCreatePinnedToCoreWithCaps() literal above. */
+    stack_margin_register("info_uart_bridge", &s_info_bridge_task, 3072);
 
     /* Best-effort unsolicited push so a GUI already connected at boot shows
      * the version immediately, without polling. If nothing is listening

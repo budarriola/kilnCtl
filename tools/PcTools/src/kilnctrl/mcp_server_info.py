@@ -20,7 +20,7 @@ import time
 from collections import deque
 from typing import Any, Callable, Optional
 
-from . import actions, config_presets, debug_probe, devices, mcp_facade, openocd_util, pico_gpio_probe, safety_cfg_http_client, settings, stale_check, ui_test_runner, wifi_credentials, zones_http_client
+from . import actions, config_presets, dashboard_http_client, debug_probe, devices, mcp_facade, openocd_util, pico_gpio_probe, safety_cfg_http_client, settings, stale_check, ui_test_runner, wifi_credentials, zones_http_client
 from .autotune import AutotuneClient, AutotuneQueryError
 from .control import ControlClient, ControlQueryError
 from .device_log import LogClient
@@ -118,6 +118,48 @@ def get_stack_margin() -> str:
         lines.append(
             f"{e.name}: {e.hwm_bytes} B free at worst of {e.configured_stack_bytes} B "
             f"({pct_txt} headroom) [{e.level.name}]"
+        )
+    return "\n".join(lines)
+
+
+@_srv._tool()
+def get_heap_status(host: Optional[str] = None) -> str:
+    """Report internal-DRAM, PSRAM, and DMA-capable-internal-memory heap
+    figures, live, over HTTP GET /api/status.
+
+    DRAM_PSRAM_PLAN.md Phase 0 (4.1): the one MCP-side gap that plan's
+    section identified -- dashboard_http.c has served heap_internal/
+    heap_spiram/heap_dma in every /api/status response since before this
+    tool existed, but nothing under tools/PcTools parsed those keys, so the
+    data was reachable by curl or a browser and nowhere else. `min_free`
+    (the low-water mark since boot) is the number every acceptance criterion
+    in that plan is written against -- the instantaneous `free` figure is
+    nearly useless, since the exhaustion event this plan exists to catch is
+    transient and load-dependent. `heap_dma` is a STRICT SUBSET of
+    `heap_internal` (both draw from MALLOC_CAP_INTERNAL), not new internal-
+    DRAM information -- it answers "how much of that internal memory is
+    DMA-capable", which matters once Phase 1 starts lowering
+    SPIRAM_MALLOC_ALWAYSINTERNAL.
+
+    Same host-resolution order as every ota_*/adaptive_tune_* tool
+    (`_ota_resolve_host`): explicit `host` argument, else the STA IP if
+    Wi-Fi reports one connected, else the board's own softAP address. This
+    is a single GET per call, not a poll -- call it again for a fresh
+    reading rather than looping here.
+    """
+    from .mcp_server_ota import _ota_resolve_host  # local import: avoids a circular import with mcp_server_ota.py
+
+    resolved = _ota_resolve_host(host)
+    try:
+        heap = dashboard_http_client.get_heap_status(resolved)
+    except dashboard_http_client.DashboardHttpError as exc:
+        return f"error: {exc} (host={resolved})"
+    lines = [f"host={resolved}"]
+    for key in ("heap_internal", "heap_spiram", "heap_dma"):
+        h = heap[key]
+        lines.append(
+            f"{key}: free={h['free']} B, largest_free_block={h['largest_free_block']} B, "
+            f"min_free={h['min_free']} B (low-water since boot), total={h['total']} B"
         )
     return "\n".join(lines)
 

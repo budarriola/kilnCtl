@@ -38,6 +38,7 @@
 #include "ota_record.h"
 #include "profile_executor.h" /* PROFILE_EXEC_* enum only, not its live state -- see below */
 #include "run_state.h"
+#include "stack_margin.h"
 #include "web_encoding.h"
 #include "sim_backend.h"
 #include "wifi_prov.h"
@@ -1823,11 +1824,21 @@ static esp_err_t ota_recovery_exit_post_handler(httpd_req_t *req)
      * recovery-mode escape hatch panics the board instead of rebooting it.
      * (Same trap that produced a real crash in profile_executor.c earlier
      * the same day; see its task-creation comment.) */
+    static TaskHandle_t s_recovery_exit_reboot_task; /* DRAM_PSRAM_PLAN.md Phase 0 (4.2): stack_margin_register() target */
     if (xTaskCreate(ota_recovery_exit_reboot_task, "recovery_exit_reboot", 2048, NULL,
-                    tskIDLE_PRIORITY + 1, NULL) != pdPASS) {
+                    tskIDLE_PRIORITY + 1, &s_recovery_exit_reboot_task) != pdPASS) {
         ESP_LOGE(TAG, "recovery-mode exit: failed to start the reboot task -- board will NOT "
                       "reboot; power-cycle it, the counter is already cleared");
     }
+    /* Registered unconditionally, success or not -- stack_margin_register()
+     * reads *task_handle_slot fresh at report time, so a creation failure
+     * just reads back alive=false rather than needing a second branch here.
+     * 2048 must match the xTaskCreate() literal above. Label shortened to
+     * "recovery_exit" (not the full "recovery_exit_reboot" FreeRTOS task
+     * name, unchanged above) -- the full name is 20 chars and
+     * STACK_MARGIN_NAME_MAX (20) leaves only 19 usable, which would
+     * silently truncate it to "recovery_exit_rebo". */
+    stack_margin_register("recovery_exit", &s_recovery_exit_reboot_task, 2048);
     return ESP_OK;
 }
 
@@ -1932,12 +1943,18 @@ static esp_err_t ota_esp_rollback_post_handler(httpd_req_t *req)
     // out from under this claim entirely. A fresh boot starts with
     // s_update_claim reset to OTA_UPDATE_NONE (ota_http_start()), so there
     // is nothing left to release.
+    static TaskHandle_t s_ota_rollback_reboot_task; /* DRAM_PSRAM_PLAN.md Phase 0 (4.2): stack_margin_register() target */
     if (xTaskCreate(ota_rollback_reboot_task, "ota_rollback_reboot", 3072, NULL,
-                     tskIDLE_PRIORITY + 1, NULL) != pdPASS) {
+                     tskIDLE_PRIORITY + 1, &s_ota_rollback_reboot_task) != pdPASS) {
         ESP_LOGE(TAG, "OTA esp rollback from %s: failed to start the reboot task -- "
                       "board will NOT reboot, still running the current image", ip);
         ota_http_update_end();
     }
+    /* Registered unconditionally, success or not -- stack_margin_register()
+     * reads *task_handle_slot fresh at report time, so a creation failure
+     * just reads back alive=false rather than needing a second branch here.
+     * 3072 must match the xTaskCreate() literal above. */
+    stack_margin_register("ota_rollback_reboot", &s_ota_rollback_reboot_task, 3072);
 
     return ESP_OK;
 }
@@ -2137,7 +2154,9 @@ static esp_err_t ota_pico_rollback_post_handler(httpd_req_t *req)
         xSemaphoreGive(s_pico_rollback_async_lock);
     }
 
-    if (xTaskCreate(ota_pico_rollback_task, "ota_pico_rollback", 4096, NULL, tskIDLE_PRIORITY + 1, NULL) !=
+    static TaskHandle_t s_ota_pico_rollback_task; /* DRAM_PSRAM_PLAN.md Phase 0 (4.2): stack_margin_register() target */
+    if (xTaskCreate(ota_pico_rollback_task, "ota_pico_rollback", 4096, NULL, tskIDLE_PRIORITY + 1,
+                     &s_ota_pico_rollback_task) !=
         pdPASS) {
         ESP_LOGE(TAG, "OTA pico rollback from %s: failed to start the rollback task -- "
                       "the update claim was never released, this OTA layer is now wedged", ip);
@@ -2155,6 +2174,10 @@ static esp_err_t ota_pico_rollback_post_handler(httpd_req_t *req)
         httpd_resp_send(req, "failed to start the rollback task", HTTPD_RESP_USE_STRLEN);
         return ESP_OK;
     }
+    /* DRAM_PSRAM_PLAN.md Phase 0 (4.2): registration only, no size change --
+     * only reached with a real handle since the failure branch above already
+     * returned. 4096 must match the xTaskCreate() literal above. */
+    stack_margin_register("ota_pico_rollback", &s_ota_pico_rollback_task, 4096);
 
     // 202, not 200: the request has been accepted and IS being acted on,
     // but the outcome is not known yet -- the page is expected to poll GET

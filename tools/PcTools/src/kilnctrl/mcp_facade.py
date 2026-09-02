@@ -61,6 +61,7 @@ GROUP_OVERRIDES = {
     "get_pin_config": "system",
     "get_fw_version": "system",
     "get_stack_margin": "system",
+    "get_heap_status": "system",
     "get_watchdog_panic_disabled": "system",
     "set_watchdog_panic_disabled": "system",
     # OpenOCD, shared by both processors.
@@ -92,6 +93,8 @@ KEYWORDS = {
     "safety_get_link_stats": ("uart", "isolated", "frames", "dropped"),
     "get_board_state": ("snapshot", "everything", "overview", "dump"),
     "get_stack_margin": ("freertos", "watermark", "overflow", "task"),
+    "get_heap_status": ("dram", "psram", "spiram", "memory", "malloc", "fragmentation",
+                        "internal", "dma", "free", "min_free", "exhaustion"),
     "get_device_log": ("console", "printf", "esp_logx", "serial", "tail"),
     "debug_program": ("flash", "swd", "jtag", "elf", "burn", "openocd"),
     "debug_read_symbol": ("variable", "global", "inspect", "elf", "nm"),

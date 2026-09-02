@@ -2149,6 +2149,46 @@ stacks above be resized, and the resize should update this entry with the
 measured numbers, the same way `dram_margin.h`'s own thresholds are kept
 current.
 
+**2026-09-02 follow-up — DRAM_PSRAM_PLAN.md Phase 0 (4.2), registration
+completed for the rest of the long-lived tasks.** Before this pass:
+`profile_executor`/`profile_exec_wdt` (`profile_executor_start.c`),
+`safety_owner_task`/`safety_owner_evt`/`safety_proto_rx`/`safety_poll`
+(`safety_link.c`), `bx_flash_worker` (`uart_bridge_ext.c`),
+`system_uart_bridge` (`uart_bridge_system.c`), `httpd_worker`
+(`wifi_provision_http.c`), and the PC-link `uart_owner_task`/
+`uart_owner_evt_task`/`uart_proto_rx` (`main.c`) — 12 total, exactly filling
+`STACK_MARGIN_MAX_TASKS`.
+
+**Correction to this section's own text above**: "Only the PC-link
+`uart_owner`/`uart_proto` instance is registered" undersold it —
+`uart_proto_rx` for the PC link (`main.c:1579`) was in fact already
+registered by the 2026-08-24 pass this section describes, contradicting
+DRAM_PSRAM_PLAN.md section 7.1's claim that it was still uninstrumented
+(that plan doc is stale on this point as of this writing; not corrected
+there per this project's own "code is truth, not the checkboxes" rule and
+the instruction not to edit firmware/KilnFW/docs/ from this pass). Nothing
+needed re-registering for `uart_proto_rx`.
+
+Sixteen more tasks registered this pass, all registration-only (no stack
+size changed): `spi_owner` (`esp_spi_owner.c`), `i2c_owner` (`i2c_owner.c`),
+`kiln_io_owner` (`kiln_io_owner.c`), `thermo_owner` (`thermo_owner.c`),
+`screen_idle` (`screen_idle.c`), `autotune_engine` (`autotune_engine.c`),
+`telemetry_log` (`telemetry_log.c`), `link_watchdog` (`uart_bridge.c`),
+`info_uart_bridge` (`uart_bridge_info.c`), `gpio_probe` (`gpio_probe.c`),
+`lvgl` (`lvgl_port.c`, static allocation), `boot_button` (`boot_button.c`),
+`danger_mode` (`danger_mode.c`), `recovery_exit` (`ota_http.c`'s
+`recovery_exit_reboot_task` — label shortened from the 21-char FreeRTOS task
+name `recovery_exit_reboot`, which would have silently truncated against
+`STACK_MARGIN_NAME_MAX`), `ota_rollback_reboot` (`ota_http.c`), and
+`ota_pico_rollback` (`ota_http.c`). `STACK_MARGIN_MAX_TASKS` raised 12 -> 28
+in `stack_margin.h` to hold all of it; occupancy is now 28/28, no spare
+slots — the next task registered here needs another bump.
+
+Still true, unchanged: no real high-water-mark figures exist yet for any of
+these sixteen. Same rule as above — exercise each task's real worst-case
+path before reading, and do not resize anything from a number read right
+after boot.
+
 ---
 
 ## 14. HTTP connection resets under concurrency — reproducible, cause NOT established
