@@ -91,10 +91,10 @@ with and will require reclamation before it can be added.
 | *gap* (0x1FD000..0x200000) | 12 K | unallocated, boxed in |
 | `otadata` (8 K) + forced 64 K-alignment pad (56 K) | 64 K | pad not reclaimable |
 | `ota_0` + `ota_1` + `factory` | **9216 K** | 3 × 3072 K |
-| `pico_img` | 896 K | RP2040 image relay staging |
+| `pico_img` | 896 K | RP2040 image relay staging; relocated to 0x10000 by 9ede138 |
 | `coredump` | 1024 K | sized empirically, see 5.3 |
-| `logs` | 3072 K | added 2026-09-01, see 5.2 |
-| *unallocated tail* (0xFF0000..0x1000000) | 64 K | |
+| `logs` | 768 K | shrunk from 3072 K by 9ede138, see 5.2 |
+| *unallocated tail* (0xDB0000..0x1000000) | 2368 K | freed by 9ede138 |
 | **total** | **16,384 K** | = 16,777,216 B ✓ |
 
 The ~3.06 MB of spare that this table's own comments describe was consumed when
