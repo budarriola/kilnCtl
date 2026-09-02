@@ -906,6 +906,17 @@ void app_main(void)
     // back to a software reset, same as a genuinely absent reset line today.
     bool display_needs_expander = (DISPLAY_DC_GPIO < 0);
     if ((io_ready || !display_needs_expander) && thermo_bus.owner_initialized) {
+        // INVARIANT, deliberate: ILI9488_start() draws the boot splash from
+        // this task (app_main), and it must run strictly before
+        // lvgl_port_start() below hands the display's SPI device off to the
+        // LVGL task. That handoff is where the display gets its single
+        // legal draw-call owner (DISPLAY_ST7796_PLAN.md section 8); nothing
+        // may draw to the panel from any other task once lvgl_port_start()
+        // has run. Before that point app_main is still the only task in the
+        // picture, so it drawing the splash here is not a violation -- but
+        // do not "fix" this ordering by moving ILI9488_start() later, or by
+        // moving lvgl_port_start() earlier: either change puts two tasks in
+        // a position to draw at once.
         esp_err_t disp_err =
             ILI9488_start(&display, &thermo_bus.owner, KILN_SPI_HOST, io_ready ? &kio : NULL);
         if (disp_err != ESP_OK) {

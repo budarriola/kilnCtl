@@ -15,6 +15,7 @@
 #include "kiln_ui.h"
 #include "settings.h"
 #include "touch_cal_store.h"
+#include "touch_dev.h"
 #include "ui_theme.h"
 
 static const char *TAG = "lvgl_port";
@@ -27,6 +28,15 @@ static const char *TAG = "lvgl_port";
 typedef struct {
     ILI9488Class *display;
     NS2009Class *touch;     /* NULL if no touch hardware */
+    /* touch_dev_t wrapping `touch` above -- see touch_dev.h and
+     * ns2009_touch_dev_read() below. Built once in lvgl_port_start() and
+     * read (never mutated) by touch_read_cb() on every poll. Always
+     * self_calibrating=false today: main.c only ever constructs an NS2009,
+     * the only touch controller physically present on this board revision
+     * -- the self_calibrating=true branch through touch_dev_map_uncalibrated()
+     * exists for the FT6336U (FT6336U.h) and is unreached dead code until
+     * something actually builds a touch_dev_t with that flag set. */
+    touch_dev_t touch_dev;
     screen_idle_t *idle;    /* NULL if no auto-blank integration */
 
     lv_display_t *lv_disp;
@@ -142,7 +152,15 @@ static void ili9488_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t 
 
         esp_err_t err = ILI9488_blit_begin(p->display, x, y, w, h);
         if (err == ESP_OK) {
-            err = ILI9488_blit_data(p->display, px_map, (size_t)w * (size_t)h * 2u);
+            /* Bytes/pixel from LVGL's own color format, not a hard-coded 2 --
+             * DISPLAY_ST7796_PLAN.md Sec.6 Step 2: this constant is the
+             * panel's wire format on the *decode* side (ILI9488_blit_data
+             * still only accepts RGB565 in), so it must track what
+             * lv_display_set_color_format() was actually set to, not what one
+             * particular panel happens to want. RGB565 -> 2, unchanged from
+             * today. */
+            size_t bytes_per_pixel = lv_color_format_get_size(lv_display_get_color_format(disp));
+            err = ILI9488_blit_data(p->display, px_map, (size_t)w * (size_t)h * bytes_per_pixel);
             esp_err_t end_err = ILI9488_blit_end(p->display);
             if (err == ESP_OK) err = end_err;
         }
@@ -263,17 +281,22 @@ void lvgl_port_inject_touch(uint16_t x, uint16_t y, bool pressed)
 }
 
 /* --- Touch input device -----------------------------------------------
- * The one and only NS2009 reader once this module starts (see lvgl_port.h).
- * A real press is forwarded into screen_idle_inject_touch() so screen_idle's
- * idle timer / wake logic works exactly as it does for a UART-injected
- * touch -- screen_idle was built to not care which source a touch came from
- * (screen_idle.h/.c), and this keeps it that way. */
-static int32_t touch_raw_to_px(uint16_t raw, uint16_t panel_extent, bool invert)
+ * touch_dev_t (touch_dev.h) reader once this module starts (see
+ * lvgl_port.h). A real press is forwarded into screen_idle_inject_touch() so
+ * screen_idle's idle timer / wake logic works exactly as it does for a
+ * UART-injected touch -- screen_idle was built to not care which source a
+ * touch came from (screen_idle.h/.c), and this keeps it that way. */
+
+/* touch_dev_read_fn-shaped adapter over NS2009_read() -- lets
+ * lvgl_port_start() build a touch_dev_t around the NS2009Class* main.c
+ * passes in without NS2009.c itself needing to know touch_dev_t exists (same
+ * "driver stays dumb, caller adapts" split FT6336U_touch_dev_read() follows
+ * for its own controller). self_calibrating stays false for this device --
+ * see the lvgl_port_t.touch_dev field comment. */
+static esp_err_t ns2009_touch_dev_read(void *ctx, bool *out_pressed, uint16_t *out_x,
+                                        uint16_t *out_y, uint16_t *out_z1)
 {
-    if (raw > NS2009_ADC_MAX) raw = NS2009_ADC_MAX;
-    uint32_t px = ((uint32_t)raw * (panel_extent - 1u)) / NS2009_ADC_MAX;
-    if (invert) px = (panel_extent - 1u) - px;
-    return (int32_t)px;
+    return NS2009_read((NS2009Class *)ctx, out_pressed, out_x, out_y, out_z1);
 }
 
 /* Shared by both the physical-touch and injected-touch paths below --
@@ -388,14 +411,14 @@ static void touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
         }
     }
 
-    if (!p->touch) {
+    if (!p->touch_dev.read) {
         data->state = LV_INDEV_STATE_RELEASED;
         return;
     }
 
     bool pressed = false;
     uint16_t raw_x = 0, raw_y = 0, raw_z1 = 0;
-    esp_err_t err = NS2009_read(p->touch, &pressed, &raw_x, &raw_y, &raw_z1);
+    esp_err_t err = touch_dev_read(&p->touch_dev, &pressed, &raw_x, &raw_y, &raw_z1);
     if (err != ESP_OK || !pressed) {
         data->state = LV_INDEV_STATE_RELEASED;
         return;
@@ -408,21 +431,42 @@ static void touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
     ILI9488_get_dimensions(p->display, &width, &height);
 
     int32_t px, py;
-    if (s_touch_cal.calibrated) {
+    if (touch_dev_use_calibrated_fit(&p->touch_dev, s_touch_cal.calibrated)) {
         /* Real per-board fit -- see touch_cal_store.h. This is what every
-         * page's hit-testing runs on once calibration has completed. */
+         * page's hit-testing runs on once calibration has completed. Never
+         * reached by a self_calibrating device (see below) -- its raw
+         * samples are already panel coordinates, and running them through a
+         * fit meant for uncalibrated ADC counts would double-apply a
+         * correction the controller already did on-chip. */
         touch_cal_apply(&s_touch_cal, raw_x, raw_y, width, height, &px, &py);
     } else {
-        /* Bootstrap-only fallback, before this board has ever been
-         * calibrated: the Kconfig swap/invert guess. Known inaccurate (see
-         * touch_cal_store.h's header comment) -- good enough only for
-         * ui_page_touch_cal.c's full-screen "any press counts" capture
-         * during the forced first-run calibration flow, not for real
-         * button hit-testing. */
-        uint16_t ax = TOUCH_CAL_SWAP_XY ? raw_y : raw_x;
-        uint16_t ay = TOUCH_CAL_SWAP_XY ? raw_x : raw_y;
-        px = touch_raw_to_px(ax, width, TOUCH_CAL_INVERT_X);
-        py = touch_raw_to_px(ay, height, TOUCH_CAL_INVERT_Y);
+        /* Two callers land here, sharing the same rotation/axis-swap
+         * mapping (touch_dev.h's touch_dev_map_uncalibrated) but for
+         * different reasons:
+         *   - NS2009, before this board has ever been calibrated: a
+         *     bootstrap-only fallback, the Kconfig swap/invert guess. Known
+         *     inaccurate (see touch_cal_store.h's header comment) -- good
+         *     enough only for ui_page_touch_cal.c's full-screen "any press
+         *     counts" capture during the forced first-run calibration flow,
+         *     not for real button hit-testing. raw_x_max/raw_y_max are both
+         *     NS2009_ADC_MAX, matching the old touch_raw_to_px() exactly.
+         *   - Any self_calibrating device (FT6336U.h; unreached today --
+         *     see the lvgl_port_t.touch_dev field comment): this is its
+         *     ONLY mapping, permanently, not a bootstrap stand-in for a fit
+         *     that will later replace it -- touch_cal_store.h's affine fit
+         *     never runs on this device's output at all. Its raw_x/raw_y
+         *     are already panel coordinates, so raw_x_max/raw_y_max are the
+         *     panel's own extents: touch_dev_axis_to_px's scale step
+         *     becomes identity (clamp + optional invert only), leaving just
+         *     the rotation/axis-swap correction the module's physical
+         *     mounting needs. */
+        uint16_t raw_x_max = p->touch_dev.self_calibrating ? (uint16_t)(width - 1u)
+                                                             : (uint16_t)NS2009_ADC_MAX;
+        uint16_t raw_y_max = p->touch_dev.self_calibrating ? (uint16_t)(height - 1u)
+                                                             : (uint16_t)NS2009_ADC_MAX;
+        touch_dev_map_uncalibrated(raw_x, raw_y, raw_x_max, raw_y_max, width, height,
+                                    TOUCH_CAL_SWAP_XY, TOUCH_CAL_INVERT_X, TOUCH_CAL_INVERT_Y,
+                                    &px, &py);
     }
 
     data->point.x = px;
@@ -472,10 +516,40 @@ void lvgl_port_get_timer_handler_calls(uint32_t *calls)
     if (calls) *calls = s_timer_handler_calls;
 }
 
+/* screen_idle_task (screen_idle.c) requests a blank purely by flipping its
+ * own screen_on flag to false -- it does not touch the display. This is the
+ * other half of that handoff: on the on->off edge, this (the sole legal
+ * draw-call owner, DISPLAY_ST7796_PLAN.md section 8) performs the actual
+ * ILI9488_clear(). The off->on "wake" edge is handled the other way around,
+ * inside ili9488_flush_cb -- it only needs to invalidate the active screen
+ * so the next normal flush redraws it, no explicit clear required there.
+ * Runs every loop iteration (not just on flush), because a blanked screen
+ * stops producing flushes -- nothing else would ever notice the edge. */
+static void lvgl_port_service_idle_blank(void)
+{
+    if (!s_port.idle) return;
+
+    bool screen_on = true;
+    uint32_t idle_ms = 0;
+    if (screen_idle_get_state(s_port.idle, &screen_on, &idle_ms) != ESP_OK) return;
+
+    if (!screen_on && s_port.last_screen_on) {
+        esp_err_t err = ILI9488_clear(s_port.display, 0x0000);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "blank (ILI9488_clear black) failed: %s -- will retry next loop",
+                     esp_err_to_name(err));
+            return; /* leave last_screen_on true so this is retried */
+        }
+        s_port.last_screen_on = false;
+        ESP_LOGI(TAG, "screen blanked");
+    }
+}
+
 static void lvgl_port_task(void *arg)
 {
     (void)arg;
     while (true) {
+        lvgl_port_service_idle_blank();
         s_timer_handler_calls++;
         uint32_t sleep_ms = lv_timer_handler();
         if (sleep_ms == LV_NO_TIMER_READY) sleep_ms = 50;
@@ -493,6 +567,19 @@ esp_err_t lvgl_port_start(ILI9488Class *display, NS2009Class *touch, screen_idle
     s_port.touch = touch;
     s_port.idle = idle;
     s_port.last_screen_on = true;
+
+    /* touch_dev_t wrapping the NS2009Class* main.c passed in -- see the
+     * lvgl_port_t.touch_dev field comment. self_calibrating is always false
+     * here: this signature only ever receives an NS2009, the only touch
+     * controller physically present on this board revision. When an
+     * FT6336U-carrying board is actually wired up, that path builds its own
+     * touch_dev_t (FT6336U_touch_dev_read(), self_calibrating = true)
+     * instead of going through this NS2009-specific constructor. */
+    if (touch) {
+        s_port.touch_dev.ctx = touch;
+        s_port.touch_dev.read = ns2009_touch_dev_read;
+        s_port.touch_dev.self_calibrating = false;
+    }
 
     memset(&s_inject, 0, sizeof(s_inject));
     s_inject.lock = xSemaphoreCreateMutex();
@@ -674,13 +761,19 @@ esp_err_t lvgl_port_start(ILI9488Class *display, NS2009Class *touch, screen_idle
      * once here, every boot, loud enough (WARN) to be seen when it matters:
      * an operator staring at a boot log for an unrelated reason should not
      * be able to miss "touch is unreliable right now". */
-    if (touch && !s_touch_cal.calibrated) {
+    /* A self_calibrating device (unreached today -- see the touch_dev field
+     * comment) never runs touch_cal_store's fit at all, so this WARN would
+     * be permanently, misleadingly true for it forever -- gated out here
+     * rather than discovered later as a boot-log lie. */
+    if (touch && !s_port.touch_dev.self_calibrating && !s_touch_cal.calibrated) {
         ESP_LOGW(TAG, "touch NOT calibrated -- running the known-inaccurate Kconfig "
                        "swap/invert bootstrap mapping; small controls (e.g. the topbar "
                        "back/home icons) may not respond to touch until a calibration run "
                        "completes");
-    } else if (touch) {
+    } else if (touch && !s_port.touch_dev.self_calibrating) {
         ESP_LOGI(TAG, "touch calibrated -- using the per-board touch_cal_apply() fit");
+    } else if (touch) {
+        ESP_LOGI(TAG, "touch self-calibrating -- touch_cal_store's per-board fit does not apply");
     }
 
     return ESP_OK;
@@ -702,6 +795,18 @@ void lvgl_port_reload_touch_cal(void)
 bool lvgl_port_touch_is_calibrated(void)
 {
     return s_touch_cal.calibrated;
+}
+
+/* kiln_ui.c's boot-time forced-calibration gate (DISPLAY_ST7796_PLAN.md
+ * section 7) needs to know this BEFORE deciding whether
+ * touch_cal_store_is_calibrated() == false means "show the calibration grid"
+ * or "this controller never populates that store, go to home instead" --
+ * see kiln_ui_init()'s call site. Always false today (no self_calibrating
+ * touch_dev_t is ever built -- see the touch_dev field comment), so this is
+ * behaviourally a no-op on every board that exists. */
+bool lvgl_port_touch_is_self_calibrating(void)
+{
+    return s_port.touch_dev.self_calibrating;
 }
 
 void lvgl_port_set_input_enabled(bool enabled)

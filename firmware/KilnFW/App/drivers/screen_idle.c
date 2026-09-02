@@ -110,18 +110,21 @@ static void screen_idle_task(void *arg)
          * closest a firmware-only fix gets to "dark": the backlight stays
          * lit (nothing can switch it off), but black LCD content blocks far
          * more of it than white does. A real "screen and backlight out" needs
-         * a board revision with a GPIO-driven backlight switch. */
-        esp_err_t err = ILI9488_clear(idle->display, 0x0000);
-        if (err != ESP_OK) {
-            ESP_LOGW(TAG, "blank (ILI9488_clear black) failed: %s -- will retry next poll",
-                     esp_err_to_name(err));
-            continue;
-        }
-        if (screen_idle_lock(idle)) {
-            idle->screen_on = false;
-            screen_idle_unlock(idle);
-        }
-        ESP_LOGI(TAG, "screen blanked after %lu ms idle", (unsigned long)(TOUCH_IDLE_TIMEOUT_MS));
+         * a board revision with a GPIO-driven backlight switch.
+         *
+         * This task does NOT issue the ILI9488_clear() call itself -- the
+         * display's SPI device has exactly one legal owner, the LVGL task
+         * (DISPLAY_ST7796_PLAN.md section 8), and a second task drawing to
+         * it is precisely the race that got the old UART DISPLAY task
+         * deleted on 2026-08-27. This task only requests the blank by
+         * flipping screen_on; lvgl_port_task notices the on->off edge (the
+         * same way it already notices the off->on "wake" edge) and performs
+         * the actual clear from within its own task context. */
+        if (!screen_idle_lock(idle)) continue; /* lock timeout: retry next poll */
+        idle->screen_on = false;
+        screen_idle_unlock(idle);
+        ESP_LOGI(TAG, "idle timeout (%lu ms) reached -- requesting blank",
+                 (unsigned long)(TOUCH_IDLE_TIMEOUT_MS));
 #else
         (void)last_activity_tick; /* only consumed by the elapsed_ticks calc above, compiled out here */
 #endif

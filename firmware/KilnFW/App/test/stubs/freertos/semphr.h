@@ -18,6 +18,17 @@ static inline SemaphoreHandle_t xSemaphoreCreateBinaryStatic(StaticSemaphore_t *
     return (SemaphoreHandle_t)storage;
 }
 
+/* Added 2026-09-01 for esp_spi_owner.c's host test (test_esp_spi_owner.c),
+ * which #includes esp_spi_owner.c directly -- spi_owner_init() calls this
+ * for its shutdown_done semaphore. A single process-wide dummy is enough,
+ * same reasoning as xSemaphoreCreateMutex() below: host tests are single-
+ * threaded and nothing here distinguishes semaphore identities. */
+static inline SemaphoreHandle_t xSemaphoreCreateBinary(void)
+{
+    static int dummy;
+    return (SemaphoreHandle_t)&dummy;
+}
+
 /* Added 2026-08-22 for boot_guard.c's host tests (test_boot_guard.c), which
  * #includes boot_guard.c directly (same convention as test_kiln_cfg_store.c
  * etc.) and so needs its xSemaphoreCreateMutex()/ensure_lock() call to link

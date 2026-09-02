@@ -23,6 +23,19 @@ typedef struct {
     SemaphoreHandle_t shutdown_done; /* given by the worker right before it exits */
     bool initialized;
     bool shutdown_requested;
+    /* Latched by spi_owner_transfer() the first time it gives up waiting on
+     * the owner task (DISPLAY_ST7796_PLAN.md 9.9 / TODO.md: unbounded
+     * portMAX_DELAY there defeated every caller-side timeout above it).
+     * Once set, every subsequent transfer -- display AND thermocouple alike,
+     * both routed through this one owner -- fails fast with
+     * ESP_ERR_INVALID_STATE instead of queuing more work behind a task that
+     * is presumed stuck inside a blocking spi_device_transmit(). This is
+     * deliberately permanent for the life of the owner: a genuinely wedged
+     * SPI transaction is not something a later caller can un-wedge, and
+     * letting new requests pile up on a stuck queue is exactly the failure
+     * mode being removed. Recovery is a reset, same as any other watchdog
+     * trip in this firmware. */
+    volatile bool wedged;
 } spi_owner_t;
 
 typedef struct {

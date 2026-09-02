@@ -62,11 +62,14 @@ $sources = @(
     (Join-Path $testDir "test_watchdog_cfg.c"),
     (Join-Path $testDir "test_ui_page_home_graph.c"),
     (Join-Path $testDir "test_max31856_codec.c"),
+    (Join-Path $testDir "test_panel_codec.c"),
     (Join-Path $testDir "test_owner_slot_pool.c"),
     (Join-Path $testDir "test_dram_margin.c"),
     (Join-Path $testDir "test_stack_margin.c"),
     (Join-Path $testDir "test_time_sync.c"),
     (Join-Path $testDir "test_log_store.c"),
+    (Join-Path $testDir "test_esp_spi_owner.c"),
+    (Join-Path $testDir "test_touch_dev.c"),
     (Join-Path $testDir "sim_plant.c"),
     (Join-Path $driversDir "pid.c"),
     (Join-Path $driversDir "thermal_guard.c"),
@@ -82,9 +85,11 @@ $sources = @(
     (Join-Path $driversDir "profile_feasibility.c"),
     (Join-Path $driversDir "ui_page_home_graph.c"),
     (Join-Path $driversDir "max31856_codec.c"),
+    (Join-Path $driversDir "panel_codec.c"),
     (Join-Path $driversDir "owner_slot_pool.c"),
     (Join-Path $driversDir "time_sync_tz.c"),
-    (Join-Path $driversDir "log_store.c")
+    (Join-Path $driversDir "log_store.c"),
+    (Join-Path $driversDir "touch_dev.c")
 )
 
 $sourceArgs = ($sources | ForEach-Object { '"' + $_ + '"' }) -join " "
