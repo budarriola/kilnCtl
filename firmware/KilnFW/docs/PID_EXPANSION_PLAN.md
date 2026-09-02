@@ -99,7 +99,7 @@ holding duty through it (§4) did not.
       result of the session and it was nearly discarded on a bad model. When a
       simulation rejects a physically sound idea, check the simulation.
 
-### 3.2 Zone 2's model over-predicts its hold duty — MEASURED 2026-09-02, RESOLVED-PENDING-ADOPTION
+### 3.2 Zone 2's model over-predicts its hold duty — MEASURED 2026-09-02, ADOPTED 2026-09-02
 
 Three single-zone excitation runs completed 2026-09-02, each from a rested
 start (every zone at ambient) with a full settled 2100 s dwell: z0 0.60 duty
@@ -123,10 +123,36 @@ Revalidated against the historical dwell tails: z0 bias −0.081 → −0.047, z
 worse**. This is a trade, not a clean win, and should be recorded as such.
 Feasible range extends 60C → 65C.
 
-**Not adopted into firmware.** Every cell has exactly one observation — no
-redundancy, no error bar. Owner decision needed before this replaces the
-live matrix. Reproducible from checked-in logs via `coupling_pair_log.py` /
-`python -m kilnctrl.coupled_ident coupling-report` (`e2c7f41`, `72508ea`).
+**ADOPTED 2026-09-02 (owner decision).** Every cell has exactly one
+observation — no redundancy, no error bar — and that caveat travels with the
+numbers, not just this paragraph. Reproducible from checked-in logs via
+`coupling_pair_log.py` / `python -m kilnctrl.coupled_ident coupling-report`
+(`e2c7f41`, `72508ea`).
+
+Applied as **data, not a firmware default**: presets are deliberately never
+compiled into firmware (`config_presets.py`'s own module docstring — a value
+baked into firmware ships to every board including a real kiln, one read
+from a PC-side JSON file cannot reach a board unless something chooses to
+send it), and `coupling_coeff[]` itself has no compiled-in default anywhere
+in this codebase today (every zone numeric field, PID gains and thermal
+model included, is populated by autotune/config restore, never a compiled
+constant) — so a new compile-time default for coupling specifically would
+have been the odd one out. The matrix instead lives in
+`tools/PcTools/config_presets/tuned_baseline_20260831.json`'s three zones'
+`coupling_c0/c1/c2`, in the same `[affected][stepped]` orientation as
+storage, reapplicable to any board via `load_config_preset`/
+`factory_default_then_load_preset`. It does not survive a factory reset by
+itself — reapplying the preset after a reset is the sanctioned recovery
+path for every other tunable in that file too, not a gap specific to
+coupling.
+
+**Prediction for the next run's analyst:** this matrix should shrink the
+positive dwell idle offset the owner noticed (profile-7 baseline,
+fuzzy=0, `logs/coupling/p7_fuzzy0_http.jsonl`, steady-state +0.18 to +0.92 C
+on 5 of 6 dwells) — the old matrix over-predicted z2's hold duty, and the
+integral floor at `-ff_hold` cannot correct downward past that. If a re-run
+of that profile does NOT show the offset shrink, that is evidence against
+this matrix, not just noise.
 
 Parser gotcha caught while building that tool: the exec-status `elapsed=Ns`
 field **resets to 0 at every ramp → dwell transition**; naive use makes each
