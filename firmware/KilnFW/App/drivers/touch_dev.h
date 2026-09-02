@@ -121,6 +121,23 @@ void touch_dev_map_uncalibrated(uint16_t raw_x, uint16_t raw_y, uint16_t raw_x_m
                                  bool swap_xy, bool invert_x, bool invert_y, int32_t *out_px,
                                  int32_t *out_py);
 
+/* The raw_x_max/raw_y_max the touch_read_cb() caller (lvgl_port.c) must pass
+ * into touch_dev_map_uncalibrated() above -- pulled out into its own pure,
+ * host-testable function because getting this assignment wrong is exactly
+ * the bug an opus review caught: touch_dev_map_uncalibrated's raw_x_max/
+ * raw_y_max are each axis's PRE-swap raw ceiling (it swaps the maxes right
+ * along with the axes when swap_xy is set), so a caller that assigns
+ * POST-swap screen extents (raw_x_max = width-1 unconditionally) is wrong
+ * the moment swap_xy is set -- every self-calibrating sample above the
+ * un-swapped axis's extent would clamp, and everything below it would be
+ * stretched to fill the wrong-sized range. Not self_calibrating: both
+ * outputs are ns2009_adc_max regardless of swap_xy (matching
+ * touch_dev_map_uncalibrated's NS2009 bootstrap-fallback caller, which
+ * always passes symmetric maxes). */
+void touch_dev_uncalibrated_max(bool self_calibrating, bool swap_xy, uint16_t width,
+                                 uint16_t height, uint16_t ns2009_adc_max, uint16_t *out_raw_x_max,
+                                 uint16_t *out_raw_y_max);
+
 #ifdef __cplusplus
 }
 #endif

@@ -60,16 +60,35 @@ extern "C" {
  *         read, same as the vendor driver's `touches < 3` gate).
  *   0x03  TOUCH1_XH  -- first touch point, 4-byte block starting here:
  *         [0]=XH ([7:6]=event flag, [3:0]=X[11:8]), [1]=XL (X[7:0]),
- *         [2]=YH ([3:0]=Y[11:8]), [3]=YL (Y[7:0]). Event flag bits are not
+ *         [2]=YH ([7:6]=touch ID, [3:0]=Y[11:8]), [3]=YL (Y[7:0]). Event
+ *         flag / touch ID bits ([7:6] of XH and YH respectively) are not
  *         decoded by this driver (same as the vendor reference), only the
  *         12-bit X/Y pair.
  *   0x09  TOUCH2_XH -- second touch point, identical 4-byte layout. This
  *         driver deliberately never reads it: LVGL's indev here is
  *         LV_INDEV_TYPE_POINTER (single point), so a second touch point has
- *         nowhere to go -- see FT6336U_read()'s header comment. */
-#define FT6336U_REG_DEVICE_MODE 0x00u
-#define FT6336U_REG_TD_STATUS   0x02u
-#define FT6336U_REG_TOUCH1_XH   0x03u
+ *         nowhere to go -- see FT6336U_read()'s header comment.
+ *   0xA8  FOCALTECH_ID -- fixed part-identity byte, expected 0x11.
+ *   0x9F  CIPHER_MID -- fixed part-identity byte, expected 0x26.
+ *   0xA3  CIPHER_HIGH -- fixed part-identity byte, expected 0x64.
+ *         These three are read once by FT6336U_start() (mirroring the
+ *         vendor reference driver's reset()/begin()) so that ANY I2C device
+ *         that happens to answer at 0x38 is not silently accepted as an
+ *         FT6336U -- i2c_master_probe() alone only proves something is
+ *         there, not what it is. */
+#define FT6336U_REG_DEVICE_MODE  0x00u
+#define FT6336U_REG_TD_STATUS    0x02u
+#define FT6336U_REG_TOUCH1_XH    0x03u
+#define FT6336U_REG_CIPHER_MID   0x9Fu
+#define FT6336U_REG_CIPHER_HIGH  0xA3u
+#define FT6336U_REG_FOCALTECH_ID 0xA8u
+
+/* Expected fixed identity byte values -- vendor reference driver's reset()
+ * (Demo_ESP32/FT6336-arduino/FT6336.cpp), cross-checked against
+ * FT6336U_Register.xlsx. */
+#define FT6336U_EXPECT_FOCALTECH_ID 0x11u
+#define FT6336U_EXPECT_CIPHER_MID   0x26u
+#define FT6336U_EXPECT_CIPHER_HIGH  0x64u
 
 /* TD_STATUS low nibble: 0 = no touch, 1-2 = that many valid points, 3+ is
  * documented by the vendor reference driver as a transient/invalid read

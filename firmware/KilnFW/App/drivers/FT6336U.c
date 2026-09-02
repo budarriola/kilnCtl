@@ -74,6 +74,20 @@ static esp_err_t ft6336u_read_reg(FT6336UClass *t, uint8_t reg, uint8_t *buf, si
     return err;
 }
 
+/* PRECONDITION (opus review, J4b): `t` must be zero-initialized (static/
+ * global storage, which the .bss segment zeroes for free, or an explicit
+ * `= {0}` initializer) before the very first call. The already-up guard
+ * right below reads t->dev/t->owner_initialized BEFORE this function's own
+ * memset() runs -- deliberately, because the guard exists to stop a
+ * double-init call from silently overwriting (and thereby leaking the I2C
+ * device handle and orphaning the owner task of) an already-LIVE instance,
+ * which memset-first would defeat. That means those two fields must already
+ * be known-zero coming in on a genuinely fresh instance; reading them off
+ * uninitialized stack memory instead is undefined behavior, not merely
+ * "probably works" -- this is the file's caller contract, not a bug this
+ * function can fix internally without an extra field. (NS2009.c has this
+ * exact same shape/contract; left untouched here on purpose -- it is the
+ * live driver on the only hardware this board has.) */
 esp_err_t FT6336U_init(FT6336UClass *t, i2c_master_bus_handle_t bus)
 {
     if (!t || !bus) return ESP_ERR_INVALID_ARG;
@@ -130,6 +144,54 @@ esp_err_t FT6336U_deinit(FT6336UClass *t)
     return err;
 }
 
+/* Vendor reference driver's reset() (Demo_ESP32/FT6336-arduino/FT6336.cpp)
+ * verifies three fixed identity bytes before trusting the part is really an
+ * FT6336U -- i2c_master_probe() only proves SOMETHING answered at 0x38, not
+ * WHAT. Values cross-checked by the opus review against both FT6336.cpp and
+ * FT6336U_Register.xlsx (J4a).
+ *
+ * The vendor reset() also drives the RST pin low then high before this read
+ * (its own hardware reset sequence) and gates on the INT pin. Neither RST
+ * nor INT is wired on this board's harness -- see FT6336U.h's top-of-file
+ * note, this part has never been connected -- so this driver does not
+ * attempt to drive or read either pin; it relies on whatever power-up state
+ * the part is already in when i2c_master_probe() finds it. If a real
+ * MSP4031 module needs an explicit RST pulse to answer identity reads
+ * correctly, that will show up here as ft6336u_verify_id() failing on real
+ * hardware and is exactly the kind of thing DISPLAY_ST7796_PLAN.md's bench
+ * bring-up step needs to catch. */
+static esp_err_t ft6336u_verify_id(FT6336UClass *t)
+{
+    uint8_t id = 0;
+    esp_err_t err = ft6336u_read_reg(t, FT6336U_REG_FOCALTECH_ID, &id, 1);
+    if (err != ESP_OK) return err;
+    if (id != FT6336U_EXPECT_FOCALTECH_ID) {
+        ESP_LOGE(TAG, "FOCALTECH_ID mismatch: got 0x%02X, expected 0x%02X", id,
+                 FT6336U_EXPECT_FOCALTECH_ID);
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    uint8_t cipher_mid = 0;
+    err = ft6336u_read_reg(t, FT6336U_REG_CIPHER_MID, &cipher_mid, 1);
+    if (err != ESP_OK) return err;
+    if (cipher_mid != FT6336U_EXPECT_CIPHER_MID) {
+        ESP_LOGE(TAG, "CIPHER_MID mismatch: got 0x%02X, expected 0x%02X", cipher_mid,
+                 FT6336U_EXPECT_CIPHER_MID);
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    uint8_t cipher_high = 0;
+    err = ft6336u_read_reg(t, FT6336U_REG_CIPHER_HIGH, &cipher_high, 1);
+    if (err != ESP_OK) return err;
+    if (cipher_high != FT6336U_EXPECT_CIPHER_HIGH) {
+        ESP_LOGE(TAG, "CIPHER_HIGH mismatch: got 0x%02X, expected 0x%02X", cipher_high,
+                 FT6336U_EXPECT_CIPHER_HIGH);
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    return ESP_OK;
+}
+
 esp_err_t FT6336U_start(FT6336UClass *t, i2c_master_bus_handle_t bus)
 {
     if (!t || !bus) return ESP_ERR_INVALID_ARG;
@@ -140,6 +202,19 @@ esp_err_t FT6336U_start(FT6336UClass *t, i2c_master_bus_handle_t bus)
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "FT6336U_init failed: %s", esp_err_to_name(err));
             return err;
+        }
+
+        err = ft6336u_verify_id(t);
+        if (err != ESP_OK) {
+            /* Something answered at 0x38 but is not an FT6336U (or the
+             * identity registers didn't read back as expected) -- back out
+             * the transport we just brought up rather than leaving a
+             * touch_dev_t pointed at a device that isn't what it claims to
+             * be. */
+            ESP_LOGE(TAG, "FT6336U identity check failed at 0x%02X: %s", FT6336U_ADDR,
+                     esp_err_to_name(err));
+            FT6336U_deinit(t);
+            return ESP_ERR_NOT_FOUND;
         }
         return ESP_OK;
     }

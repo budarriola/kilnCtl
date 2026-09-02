@@ -28,3 +28,23 @@ void touch_dev_map_uncalibrated(uint16_t raw_x, uint16_t raw_y, uint16_t raw_x_m
     *out_px = touch_dev_axis_to_px(ax, ax_max, width, invert_x);
     *out_py = touch_dev_axis_to_px(ay, ay_max, height, invert_y);
 }
+
+void touch_dev_uncalibrated_max(bool self_calibrating, bool swap_xy, uint16_t width,
+                                 uint16_t height, uint16_t ns2009_adc_max, uint16_t *out_raw_x_max,
+                                 uint16_t *out_raw_y_max)
+{
+    if (!out_raw_x_max || !out_raw_y_max) return;
+
+    if (!self_calibrating) {
+        *out_raw_x_max = ns2009_adc_max;
+        *out_raw_y_max = ns2009_adc_max;
+        return;
+    }
+
+    /* self-calibrating: raw_x/raw_y are already panel coordinates, so each
+     * max is that axis's OWN pre-swap panel extent -- not the screen extent
+     * it happens to land on after swap_xy is applied downstream in
+     * touch_dev_map_uncalibrated(). */
+    *out_raw_x_max = (uint16_t)((swap_xy ? height : width) - 1u);
+    *out_raw_y_max = (uint16_t)((swap_xy ? width : height) - 1u);
+}

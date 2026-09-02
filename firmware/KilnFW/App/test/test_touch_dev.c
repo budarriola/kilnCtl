@@ -73,6 +73,68 @@ void run_test_touch_dev(void)
         TEST_CHECK(py_swapped == expect_py_swapped, "swap_xy: py comes from raw_x");
     }
 
+    /* --- touch_dev_map_uncalibrated: swap_xy with ASYMMETRIC maxes -------
+     * Every other swap_xy check above uses symmetric maxes (4095, 4095) or
+     * swap_xy=false, so a bug that fails to swap ax_max/ay_max along with
+     * ax/ay (touch_dev.c:25-26) is invisible to them -- this is the negative
+     * test an opus review found missing (J2). raw_x_max=479 (a 480-wide
+     * panel's ceiling), raw_y_max=319 (a 320-tall panel's ceiling), swapped:
+     * ax = raw_y (300 of true max 479... but ax_max must be raw_y_max=319,
+     * not raw_x_max=479), landing on screen width 480. */
+    {
+        int32_t px = 0, py = 0;
+        touch_dev_map_uncalibrated(100, 300, 479, 319, 480, 320, true, false, false, &px, &py);
+        /* ax=raw_y=300 scaled against ax_max=raw_y_max=319 (the swapped
+         * max), not against raw_x_max=479 -- if the swap-along-with-the-
+         * axes step is dropped, this scales against 479 instead and the
+         * two disagree (300 is not close to raw_max in either case, but
+         * (300*479)/319=450 != (300*479)/479... use exact expected values
+         * to avoid any ambiguity). */
+        int32_t expect_px = touch_dev_axis_to_px(300, 319, 480, false);
+        int32_t expect_py = touch_dev_axis_to_px(100, 479, 320, false);
+        int32_t wrong_px = touch_dev_axis_to_px(300, 479, 480, false);
+        TEST_CHECK(expect_px != wrong_px,
+                   "sanity: asymmetric maxes actually change the expected px "
+                   "(otherwise this test cannot distinguish swapped from unswapped maxes)");
+        TEST_CHECK(px == expect_px,
+                   "swap_xy with asymmetric maxes: px uses raw_y_max (the swapped max), "
+                   "not raw_x_max -- negative test for touch_dev.c:25-26's max swap");
+        TEST_CHECK(py == expect_py,
+                   "swap_xy with asymmetric maxes: py uses raw_x_max (the swapped max), "
+                   "not raw_y_max");
+    }
+
+    /* --- touch_dev_uncalibrated_max: the touch_read_cb() caller's own
+     * raw_x_max/raw_y_max assignment (lvgl_port.c), pulled out here so it is
+     * host-testable -- this is what an opus review found wrong (J1): the
+     * caller assigned POST-swap screen extents (raw_x_max = width-1
+     * unconditionally) when touch_dev_map_uncalibrated's raw_x_max/
+     * raw_y_max contract wants each axis's PRE-swap ceiling. */
+    {
+        uint16_t x_max = 0, y_max = 0;
+
+        /* Not self-calibrating: always symmetric NS2009 maxes, swap_xy
+         * irrelevant. */
+        touch_dev_uncalibrated_max(false, true, 480, 320, 4095, &x_max, &y_max);
+        TEST_CHECK(x_max == 4095 && y_max == 4095,
+                   "not self-calibrating: both maxes are ns2009_adc_max regardless of swap_xy");
+
+        /* Self-calibrating, no swap: maxes are the panel's own extents,
+         * unswapped (width-1/height-1) -- the case that was already correct
+         * and must stay correct. */
+        touch_dev_uncalibrated_max(true, false, 480, 320, 4095, &x_max, &y_max);
+        TEST_CHECK(x_max == 479 && y_max == 319,
+                   "self-calibrating, no swap: raw_x_max=width-1, raw_y_max=height-1");
+
+        /* Self-calibrating, swap_xy set -- this is J1: raw_x's native range
+         * runs along the screen's height, not its width. A regression back
+         * to the width/height-only assignment reddens this exact check. */
+        touch_dev_uncalibrated_max(true, true, 480, 320, 4095, &x_max, &y_max);
+        TEST_CHECK(x_max == 319 && y_max == 479,
+                   "self-calibrating, swap_xy set: raw_x_max=height-1, raw_y_max=width-1 "
+                   "(J1 -- was width-1/height-1, the wrong way round for the swapped case)");
+    }
+
     /* --- touch_dev_map_uncalibrated: invert_x/invert_y independently ----- */
     {
         int32_t px = 0, py = 0;
@@ -88,6 +150,13 @@ void run_test_touch_dev(void)
      * gets its own check rather than one combined assertion that could pass
      * for the wrong reason. */
     {
+        /* resistive_uncal and resistive_cal are identical structs -- the
+         * only thing touch_dev_use_calibrated_fit() looks at is
+         * self_calibrating, and the "no fit loaded" vs. "fit loaded"
+         * distinction between these two cases lives entirely in the second
+         * (touch_cal_calibrated) ARGUMENT below, not in the struct. Kept as
+         * two separately-named locals (rather than one reused variable) so
+         * each TEST_CHECK below reads as its own named scenario. */
         touch_dev_t resistive_uncal = { .self_calibrating = false };
         touch_dev_t resistive_cal = { .self_calibrating = false };
         touch_dev_t capacitive = { .self_calibrating = true };
@@ -105,13 +174,14 @@ void run_test_touch_dev(void)
         TEST_CHECK(!touch_dev_use_calibrated_fit(NULL, true), "NULL device -> false, not a crash");
     }
 
-    /* --- TOUCH_DEV_NO_PRESSURE_SENTINEL: out of any real 12-bit ADC range,
-     * so a caller can tell "no pressure channel" apart from "a real zero
-     * reading" -- negative test proves it is NOT just zero. */
-    {
-        TEST_CHECK(TOUCH_DEV_NO_PRESSURE_SENTINEL != 0,
-                   "no-pressure sentinel is not the same value as a real zero reading");
-        TEST_CHECK(TOUCH_DEV_NO_PRESSURE_SENTINEL > 4095u,
-                   "no-pressure sentinel is out of NS2009's real 12-bit ADC range");
-    }
+    /* TOUCH_DEV_NO_PRESSURE_SENTINEL's two "sentinel != 0" / "sentinel >
+     * 4095u" checks used to live here, but both are compile-time arithmetic
+     * on a #define (0xFFFFu) -- the compiler folds them to a constant 1,
+     * they cannot fail for any code change to this file or touch_dev.h, and
+     * deleted rather than kept as dead weight (opus review, J3). Nothing
+     * here or elsewhere host-tests that FT6336U_read() (FT6336U.c) actually
+     * WRITES this sentinel into *out_z1 when out_z1 is non-NULL --
+     * FT6336U.c is not in this host-test build at all (it talks directly to
+     * ESP-IDF's i2c_master_bus_handle_t, unlike touch_dev.c's pure math),
+     * so that producer side is genuinely untested off-target today. */
 }
