@@ -44,7 +44,10 @@
      text doesn't run the full width of a 27" monitor. Reasoned about
      320/360/390, 768/820, 1280/1920. */
   *, *::before, *::after { box-sizing: border-box; }
-  body { font-family: sans-serif; width: min(100% - 2rem, 640px); margin: 2em auto;
+  /* WEB_UI_RESPONSIVE_PLAN.md sec 6: min() shrink-to-fit stays, fixed 640px
+     cap becomes the shared --kc-shell-max -- see backup_page.html's
+     identical comment for the rationale. */
+  body { font-family: sans-serif; width: min(100% - 2rem, var(--kc-shell-max)); margin: 2em auto;
          background: var(--bg); color: var(--fg); }
   /* .theme-btn removed 2026-08-21: was a byte-for-byte duplicate of the one
      rule in /theme.css (which loads first), and being `position: fixed`
