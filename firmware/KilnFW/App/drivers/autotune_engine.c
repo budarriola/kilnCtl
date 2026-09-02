@@ -2323,13 +2323,25 @@ static void autotune_engine_tick_locked(void)
      * phase logic further down, after the guards have had their say --
      * nothing about a cycle boundary may pre-empt a guard trip. */
     bool relay_edge = false;
+    bool relay_level_changed = false;
     float want_duty;
     if (s_at.method == AUTOTUNE_METHOD_RELAY) {
+        bool relay_branch_before = s_at.relay_on;
         want_duty = relay_law_tick(sensor_ok, s_at.actual_c, &relay_edge);
+        relay_level_changed = (s_at.relay_on != relay_branch_before);
     } else {
         want_duty = (s_at.state == AUTOTUNE_ENGINE_SETTLING) ? 0.0f : s_at.step_duty;
     }
-    bool want_relay_on = heater_output_duty(&s_at.heater_state, &s_at.heater_cfg, sensor_ok ? want_duty : 0.0f, dt_ms);
+    /* RELAY method: force the actuator's time-proportioning window to end
+     * and restart on the exact tick the relay law's own branch flips, rather
+     * than waiting up to window_ms (60 s default) for the ordinary window
+     * boundary -- see heater_output_duty_relay_step()'s doc comment for why
+     * that delay is large enough against this plant's dead time (34-53 s) to
+     * keep a relay-feedback run from ever fitting a clean limit cycle. STEP
+     * method and SETTLING are unaffected -- heater_output_duty_relay_step()
+     * with level_changed=false behaves exactly like heater_output_duty(). */
+    bool want_relay_on = heater_output_duty_relay_step(&s_at.heater_state, &s_at.heater_cfg,
+                                                        sensor_ok ? want_duty : 0.0f, dt_ms, relay_level_changed);
     apply_relay(want_relay_on);
     s_at.duty = want_relay_on ? want_duty : 0.0f;
 

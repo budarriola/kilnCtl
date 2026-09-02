@@ -296,4 +296,112 @@ void run_test_heater_output(void)
                    "the rendered pulse clears the 10 s floor, which is the whole point of the 3x rule");
         TEST_CHECK(s.cycle_count == 2, "one ON and one OFF transition -- a real duty cycle, not bang-bang");
     }
+
+    /* ------------------------------------------------------------------
+     * heater_output_duty_relay_step() (2026-09-01) -- relay-feedback
+     * identification's actuator. level_changed=false must be byte-identical
+     * to heater_output_duty(); level_changed=true must force an immediate
+     * new window instead of waiting for window_ms to elapse. This is the
+     * fix for PID_EXPANSION_PLAN.md Sec 3.6: without it, a relay law's
+     * branch flip early in a 60 s window is not reflected in the actual
+     * relay output for up to 60 s -- longer than this plant's identified
+     * dead time (34-53 s) -- corrupting the period/amplitude
+     * pid_autotune_fit_relay() measures from the temperature trace.
+     * ------------------------------------------------------------------ */
+
+    /* level_changed=false: identical to heater_output_duty() -- the window
+     * does NOT reopen mid-window just because this entry point was used. */
+    {
+        heater_output_state_t s = {0};
+        heater_output_cfg_t cfg = {.window_ms = 60000, .min_on_ms = 100, .min_off_ms = 100};
+        heater_output_reset(&s);
+        bool r = heater_output_duty_relay_step(&s, &cfg, 0.85f, 0, false);
+        TEST_CHECK(r == true, "sanity: window opens ON at duty 0.85");
+        TEST_CHECK(s.on_ms_this_window == 51000, "on-time computed as duty*window_ms, same as heater_output_duty()");
+        /* Flip the requested duty low WITHOUT reporting level_changed --
+         * must be ignored until the window elapses, exactly like plain
+         * heater_output_duty(). This is the bug being fixed, reproduced as
+         * the "before" case: a caller that (incorrectly) never passes
+         * level_changed=true gets the same up-to-window_ms staleness. */
+        r = heater_output_duty_relay_step(&s, &cfg, 0.30f, 30000, false);
+        TEST_CHECK(r == true, "30s in: still rendering the ORIGINAL window's on-time (51000ms) -- duty change ignored");
+        TEST_CHECK(s.on_ms_this_window == 51000, "on_ms_this_window unchanged -- no new window was opened");
+    }
+
+    /* level_changed=true: the relay law's branch flip is honoured on THIS
+     * tick, not up to 60s later. This is the actual fix.
+     *
+     * The low branch here is duty 0.30, not the identification default of
+     * 0.15: this cfg's min_on_ms=100 is still raised to the 10 s
+     * HEATER_MIN_ON_MS_FLOOR inside heater_output_duty_ex() regardless, and
+     * 0.15*60000=9000ms sits BELOW that floor (renders OFF outright) --
+     * true of the real default too, and not what this test is checking.
+     * 0.30*60000=18000ms clears the floor with room to spare, so the
+     * on_ms_this_window this test reads back actually reflects the forced
+     * window re-open, not a floor clamp. */
+    {
+        heater_output_state_t s = {0};
+        heater_output_cfg_t cfg = {.window_ms = 60000, .min_on_ms = 100, .min_off_ms = 100};
+        heater_output_reset(&s);
+        bool r = heater_output_duty_relay_step(&s, &cfg, 0.85f, 0, false);
+        TEST_CHECK(r == true, "sanity: window opens ON at duty 0.85 (51000ms on-time)");
+        /* 5s into the 60s window, the relay law flips to its low branch.
+         * Reporting level_changed=true must reopen the window NOW, using
+         * the new duty, rather than continuing the stale 51000ms decision
+         * for another 55s. */
+        r = heater_output_duty_relay_step(&s, &cfg, 0.30f, 5000, true);
+        TEST_CHECK(s.on_ms_this_window == 18000, "new window opened immediately: 0.30 * 60000 = 18000ms on-time");
+        TEST_CHECK(r == true, "18000ms on-time > 0ms elapsed in the fresh window -- still ON this tick");
+        /* Walk to 18000ms into the fresh window: must go OFF exactly there,
+         * not 51000+18000ms after the original window opened. */
+        r = heater_output_duty_relay_step(&s, &cfg, 0.30f, 18000, false);
+        TEST_CHECK(r == false, "18000ms into the fresh (forced) window: past its own on-time, now OFF");
+    }
+
+    /* And the reverse direction: low->high must also reopen immediately,
+     * not just high->low. */
+    {
+        heater_output_state_t s = {0};
+        heater_output_cfg_t cfg = {.window_ms = 60000, .min_on_ms = 100, .min_off_ms = 100};
+        heater_output_reset(&s);
+        bool r = heater_output_duty_relay_step(&s, &cfg, 0.30f, 0, false);
+        TEST_CHECK(r == true, "sanity: window opens at duty 0.30 (18000ms on-time), still inside it at t=0");
+        /* Walk past the low branch's 18000ms on-time so the window is
+         * genuinely OFF before the flip -- otherwise a false positive below
+         * could be masked by the low branch's own trailing on-time. */
+        r = heater_output_duty_relay_step(&s, &cfg, 0.30f, 18000, false);
+        TEST_CHECK(r == false, "18000ms in: past the low branch's on-time, now OFF (still the same window)");
+        /* 3s later the relay law flips to its high branch (0.85). Without
+         * level_changed=true this would stay OFF for another ~39s until the
+         * original 60s window elapses -- exactly the bug. */
+        r = heater_output_duty_relay_step(&s, &cfg, 0.85f, 3000, true);
+        TEST_CHECK(s.on_ms_this_window == 51000, "new window opened immediately on the low->high flip too");
+        TEST_CHECK(r == true, "ON on the very tick of the flip, not up to 39s later");
+    }
+
+    /* The floor case, pinned explicitly: the identification default's own
+     * low branch (0.15) renders OFF outright under the same 10s floor that
+     * applies whether or not the window was just force-reopened -- this
+     * function does not change floor/quantization behaviour, only when the
+     * window boundary lands. */
+    {
+        heater_output_state_t s = {0};
+        heater_output_cfg_t cfg = {.window_ms = 60000, .min_on_ms = 100, .min_off_ms = 100};
+        heater_output_reset(&s);
+        bool r = heater_output_duty_relay_step(&s, &cfg, 0.85f, 0, false);
+        TEST_CHECK(r == true, "sanity: high branch ON");
+        r = heater_output_duty_relay_step(&s, &cfg, 0.15f, 5000, true);
+        TEST_CHECK(s.on_ms_this_window == 0,
+                   "0.15*60000=9000ms is still below the 10s floor even in a force-reopened window -- OFF, not clamped up");
+        /* Still reads ON here -- not a bug in this function. Only 5000ms of
+         * continuous on-time has accumulated, below HEATER_MIN_ON_MS_FLOOR
+         * (10s), so the running min-on hold (heater_output_duty_ex()'s own
+         * unconditional contact-wear protection) keeps it energized
+         * regardless of the window's own decision or of force_new_window.
+         * That hold is deliberately untouched by this change -- see the next
+         * check for where it actually releases. */
+        TEST_CHECK(r == true, "held ON by the 10s min-on floor -- only 5000ms of continuous on-time so far");
+        r = heater_output_duty_relay_step(&s, &cfg, 0.15f, 5000, false);
+        TEST_CHECK(r == false, "10000ms of continuous on-time reached: the deferred OFF is applied");
+    }
 }

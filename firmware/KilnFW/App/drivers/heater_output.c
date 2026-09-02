@@ -17,6 +17,9 @@ static void note_transition(heater_output_state_t *state, bool new_on)
     state->relay_on = new_on;
 }
 
+static bool heater_output_duty_ex(heater_output_state_t *state, const heater_output_cfg_t *cfg, float duty,
+                                   uint32_t dt_ms, bool force_new_window);
+
 bool heater_output_bangbang(heater_output_state_t *state, const heater_output_cfg_t *cfg, bool want_on,
                             uint32_t dt_ms)
 {
@@ -48,6 +51,18 @@ bool heater_output_bangbang(heater_output_state_t *state, const heater_output_cf
 bool heater_output_duty(heater_output_state_t *state, const heater_output_cfg_t *cfg, float duty,
                         uint32_t dt_ms)
 {
+    return heater_output_duty_ex(state, cfg, duty, dt_ms, false);
+}
+
+bool heater_output_duty_relay_step(heater_output_state_t *state, const heater_output_cfg_t *cfg, float duty,
+                                    uint32_t dt_ms, bool level_changed)
+{
+    return heater_output_duty_ex(state, cfg, duty, dt_ms, level_changed);
+}
+
+static bool heater_output_duty_ex(heater_output_state_t *state, const heater_output_cfg_t *cfg, float duty,
+                                   uint32_t dt_ms, bool force_new_window)
+{
     if (duty < 0.0f) {
         duty = 0.0f;
     } else if (duty > 1.0f) {
@@ -78,7 +93,7 @@ bool heater_output_duty(heater_output_state_t *state, const heater_output_cfg_t 
     }
 
     state->window_elapsed_ms += dt_ms;
-    if (!state->window_started || state->window_elapsed_ms >= cfg->window_ms) {
+    if (!state->window_started || state->window_elapsed_ms >= cfg->window_ms || force_new_window) {
         /* New window (or the very first call): compute this window's
          * on-time from the current duty and quantize per TODO.md 6A.1's
          * explicit rule. */

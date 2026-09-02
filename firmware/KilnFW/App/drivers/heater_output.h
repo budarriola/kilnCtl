@@ -149,6 +149,35 @@ bool heater_output_bangbang(heater_output_state_t *state, const heater_output_cf
 bool heater_output_duty(heater_output_state_t *state, const heater_output_cfg_t *cfg, float duty,
                         uint32_t dt_ms);
 
+/* Same rendering as heater_output_duty(), except when level_changed is true
+ * the current window ends and a fresh one begins on THIS call, using this
+ * call's duty, instead of waiting for window_ms to elapse.
+ *
+ * Why this exists (autotune_engine.c's relay-feedback identification,
+ * 2026-09-01): the relay law flips its commanded duty the instant the
+ * measurement crosses the hysteresis band, and that instant is what defines
+ * Tu -- the whole point of the method. Routing that decision through
+ * heater_output_duty()'s ordinary window logic means the ALREADY-COMPUTED
+ * on_ms_this_window keeps being honoured until the window boundary, so a
+ * flip that lands early in a window is not reflected in what the relay
+ * actually does for up to window_ms (60 s by default) -- comparable to, or
+ * longer than, this plant's identified dead time (34-53 s, PID_EXPANSION_PLAN
+ * Sec 2). pid_autotune_fit_relay() measures Tu and the oscillation amplitude
+ * from the recorded temperature trace, which is driven by the ACTUAL relay
+ * state, not the logical decision -- so up to a window's worth of jitter,
+ * uncorrelated between edges, lands directly in the period and amplitude it
+ * fits, comfortably capable of exceeding RELAY_PERIOD_SPREAD_MAX (20%) and
+ * RELAY_AMPLITUDE_SPREAD_MAX (35%) every run.
+ *
+ * Pass level_changed = true only on the tick the caller's own bang-bang law
+ * actually changed which duty it wants (i.e. relay_law_tick()'s edge, in
+ * either direction); every other tick this behaves exactly like
+ * heater_output_duty(). The min_on_ms/min_off_ms quantization, floor and
+ * running min-on hold are unchanged -- this only removes the window
+ * boundary's own added delay on top of them. */
+bool heater_output_duty_relay_step(heater_output_state_t *state, const heater_output_cfg_t *cfg, float duty,
+                                    uint32_t dt_ms, bool level_changed);
+
 /* The shortest window_ms that can render a real fractional duty against the
  * given configured min_on_ms: HEATER_MIN_WINDOW_MULTIPLE * the EFFECTIVE
  * min-on, i.e. max(min_on_ms, HEATER_MIN_ON_MS_FLOOR). Config validation
