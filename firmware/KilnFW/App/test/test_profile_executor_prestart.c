@@ -621,6 +621,15 @@ esp_err_t uart_bridge_ext_run_on_flash_worker(void (*fn)(void *arg), void *arg)
     fn(arg);
     return ESP_OK;
 }
+/* R1/R2 (opus review of commit 7c47683): adaptive_tune.c's adaptive_tune_
+ * clear_ki_baseline() now calls this to decide whether it may save inline
+ * instead of dispatching -- see test_adaptive_tune.c for the real exercise
+ * of that logic (its own stub models the worker's re-entrancy hazard in
+ * full). This file never opts any zone in, so clear_ki_baseline() is never
+ * actually reached by these tests -- a fixed `false` is enough for the link
+ * and matches "not on the worker" (the httpd path), the only shape that
+ * would ever occur here even if it were reached. */
+bool uart_bridge_ext_is_on_flash_worker(void) { return false; }
 httpd_handle_t wifi_provision_http_get_server(void) { return NULL; }
 esp_err_t httpd_register_uri_handler(httpd_handle_t handle, const httpd_uri_t *uri_handler)
 {

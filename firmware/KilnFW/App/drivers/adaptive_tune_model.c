@@ -1,7 +1,7 @@
 // adaptive_tune_model.c -- Layer 2/3 of adaptive_tune.c's split (2026-09-01,
 // see adaptive_tune_internal.h's own top comment for the full shape): the
-// per-zone diagonal K_dc refine (try_refine_zone_locked()) and the full
-// coupled identification (adaptive_tune_coupled_fit(), try_refine_coupled_
+// per-zone diagonal K_dc refine (adaptive_tune_refine_zone_locked()) and the full
+// coupled identification (adaptive_tune_coupled_fit(), adaptive_tune_refine_coupled_
 // locked()). Moved out of adaptive_tune.c unchanged -- no behavior here is
 // new except where a comment says so.
 #include "adaptive_tune_internal.h"
@@ -29,11 +29,11 @@
 // Returns true only on the happy path where zones_config_set_model()/
 // set_pid() actually ran -- i.e. Kp/Ki/Kd were just rewritten this run from
 // the SIMC recompute. adaptive_tune_run_end() uses this to decide whether
-// try_refine_ki_locked() may run this same run -- see that call site's own
+// adaptive_tune_refine_ki_locked() may run this same run -- see that call site's own
 // comment (D5).
-bool try_refine_zone_locked(uint8_t zi, uint8_t profile_id)
+bool adaptive_tune_refine_zone_locked(uint8_t zi, uint8_t profile_id)
 {
-    adaptive_tune_zone_t *z = &s_at_zones[zi];
+    adaptive_tune_zone_t *z = &adaptive_tune_zones[zi];
 
     if (z->ring_count < ADAPTIVE_TUNE_MIN_OBSERVATIONS) {
         adaptive_tune_set_refusal(z, "only %u/%u dwell observations", (unsigned)z->ring_count,
@@ -136,7 +136,7 @@ bool try_refine_zone_locked(uint8_t zi, uint8_t profile_id)
     z->last_applied_unix_s = (uint32_t)time(NULL);
 
     // Q4: re-latch the Ki-diagnosis baseline (adaptive_tune_ki.c) to the Ki
-    // this SIMC recompute just wrote -- see try_refine_ki_locked()'s own
+    // this SIMC recompute just wrote -- see adaptive_tune_refine_ki_locked()'s own
     // comment on ki_baseline for the full "which layer is the more
     // authoritative reference" reasoning. This is the ONLY setter this
     // module writes gains.ki through, so this is the one place a fresh SIMC
@@ -228,19 +228,19 @@ adaptive_tune_coupled_result_t adaptive_tune_coupled_fit(
     return ADAPTIVE_TUNE_COUPLED_OK;
 }
 
-void try_refine_coupled_locked(uint8_t zi)
+void adaptive_tune_refine_coupled_locked(uint8_t zi)
 {
-    adaptive_tune_zone_t *z = &s_at_zones[zi];
+    adaptive_tune_zone_t *z = &adaptive_tune_zones[zi];
     z->coupled_attempted = true;
     z->coupled_applied = false;
     z->coupled_cells_changed = 0;
-    z->joint_observations = s_joint_ring_count;
+    z->joint_observations = adaptive_tune_joint_ring_count;
 
     const uint8_t n = MAX31856_CHANNEL_COUNT;
     uint32_t min_obs = (uint32_t)n + ADAPTIVE_TUNE_COUPLED_OBS_MARGIN;
-    if (s_joint_ring_count < min_obs) {
+    if (adaptive_tune_joint_ring_count < min_obs) {
         adaptive_tune_set_reason(z->coupled_refusal_reason, sizeof(z->coupled_refusal_reason),
-                   "only %u/%u joint dwell observations for coupled solve", (unsigned)s_joint_ring_count,
+                   "only %u/%u joint dwell observations for coupled solve", (unsigned)adaptive_tune_joint_ring_count,
                    (unsigned)min_obs);
         return;
     }
@@ -250,14 +250,14 @@ void try_refine_coupled_locked(uint8_t zi)
     // stack-local fit buffers, well inside a FreeRTOS task's normal stack.
     float duty_obs[ADAPTIVE_TUNE_JOINT_RING_CAPACITY][MAX31856_CHANNEL_COUNT];
     float rise_obs[ADAPTIVE_TUNE_JOINT_RING_CAPACITY][MAX31856_CHANNEL_COUNT];
-    for (uint32_t k = 0; k < s_joint_ring_count; k++) {
-        uint32_t idx = (s_joint_ring_head + k) % ADAPTIVE_TUNE_JOINT_RING_CAPACITY;
-        memcpy(duty_obs[k], s_joint_ring[idx].duty, sizeof(duty_obs[k]));
-        memcpy(rise_obs[k], s_joint_ring[idx].rise_c, sizeof(rise_obs[k]));
+    for (uint32_t k = 0; k < adaptive_tune_joint_ring_count; k++) {
+        uint32_t idx = (adaptive_tune_joint_ring_head + k) % ADAPTIVE_TUNE_JOINT_RING_CAPACITY;
+        memcpy(duty_obs[k], adaptive_tune_joint_ring[idx].duty, sizeof(duty_obs[k]));
+        memcpy(rise_obs[k], adaptive_tune_joint_ring[idx].rise_c, sizeof(rise_obs[k]));
     }
 
     float C[MAX31856_CHANNEL_COUNT][MAX31856_CHANNEL_COUNT];
-    adaptive_tune_coupled_result_t r = adaptive_tune_coupled_fit(duty_obs, rise_obs, s_joint_ring_count, n, C);
+    adaptive_tune_coupled_result_t r = adaptive_tune_coupled_fit(duty_obs, rise_obs, adaptive_tune_joint_ring_count, n, C);
     if (r == ADAPTIVE_TUNE_COUPLED_TOO_FEW_OBSERVATIONS) {
         adaptive_tune_set_reason(z->coupled_refusal_reason, sizeof(z->coupled_refusal_reason),
                    "joint observation set degenerate for a determined solve");
@@ -283,7 +283,7 @@ void try_refine_coupled_locked(uint8_t zi)
     for (uint8_t j = 0; j < n; j++) {
         if (j == zi) {
             continue; // diagonal (this zone's own gain) stays owned by the existing per-zone K_dc
-                      // path (try_refine_zone_locked()) -- not duplicated here, see this function's
+                      // path (adaptive_tune_refine_zone_locked()) -- not duplicated here, see this function's
                       // header comment.
         }
         float fit = C[zi][j];
@@ -339,7 +339,7 @@ void try_refine_coupled_locked(uint8_t zi)
         z->coupled_applied = true;
         z->coupled_refusal_reason[0] = '\0';
         ESP_LOGI(ADAPTIVE_TUNE_TAG, "zone %u: coupled solve refined %u coupling cell(s) from %u joint observations",
-                 (unsigned)zi, (unsigned)changed, (unsigned)s_joint_ring_count);
+                 (unsigned)zi, (unsigned)changed, (unsigned)adaptive_tune_joint_ring_count);
     } else {
         adaptive_tune_set_reason(z->coupled_refusal_reason, sizeof(z->coupled_refusal_reason),
                    "coupled solve succeeded but every off-diagonal cell was implausible or rejected");

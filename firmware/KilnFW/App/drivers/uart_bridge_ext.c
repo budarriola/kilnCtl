@@ -121,7 +121,11 @@ static const char *TAG = "uart_bridge_ext";
  *     _pause() and run_state_acknowledge().
  *   - control_task:  zones_config_set_pid() and zones_config_set_model(),
  *     both of which end in zones_http.c's nvs_save().
- *   - autotune_task: autotune_engine_accept().
+ *   - autotune_task: autotune_engine_accept() -- which, since it now also
+ *     calls adaptive_tune_clear_ki_baseline(), is itself a RE-ENTRANT caller
+ *     of this same executor once its job is already running on bx_worker_
+ *     task; see bx_run_on_internal_stack()'s own comment below for the
+ *     deadlock that caused and the task-identity check that fixes it.
  *   - wifi_task: NOT exposed -- wifi_prov_* post to the wifi_prov owner task,
  *     which has an ordinary internal stack, and the write happens there.
  *
@@ -253,6 +257,7 @@ typedef struct {
 static QueueHandle_t     s_bx_jobs;
 static SemaphoreHandle_t s_bx_done;
 static SemaphoreHandle_t s_bx_lock;
+static TaskHandle_t      s_bx_worker_task_handle;
 
 static void bx_worker_task(void *arg)
 {
@@ -295,8 +300,8 @@ static bool bx_worker_ensure_started(void)
     /* PLAIN xTaskCreatePinnedToCore, NOT the *WithCaps variant used by
      * retry_task_create_pinned(): the entire point is that this stack lives
      * in internal SRAM so the flash cache can be disabled underneath it. */
-    if (xTaskCreatePinnedToCore(bx_worker_task, "bx_flash_worker", BX_WORKER_STACK, NULL, 5, NULL,
-                                tskNO_AFFINITY) != pdPASS) {
+    if (xTaskCreatePinnedToCore(bx_worker_task, "bx_flash_worker", BX_WORKER_STACK, NULL, 5,
+                                &s_bx_worker_task_handle, tskNO_AFFINITY) != pdPASS) {
         ESP_LOGE(TAG, "flash-safe worker: task creation failed (internal SRAM)");
         goto fail;
     }
@@ -308,6 +313,7 @@ fail:
     if (s_bx_jobs) { vQueueDelete(s_bx_jobs); s_bx_jobs = NULL; }
     if (s_bx_done) { vSemaphoreDelete(s_bx_done); s_bx_done = NULL; }
     if (s_bx_lock) { vSemaphoreDelete(s_bx_lock); s_bx_lock = NULL; }
+    s_bx_worker_task_handle = NULL;
     return false;
 }
 
@@ -325,12 +331,38 @@ esp_err_t uart_bridge_ext_start_flash_worker(void)
 
 /* Runs fn(arg) on the internal-stack worker and blocks until it returns.
  * `arg` may point at the caller's stack -- the caller is blocked for the whole
- * call, so the storage stays live. */
+ * call, so the storage stays live.
+ *
+ * RE-ENTRANCY -- a job already running ON the worker (e.g. autotune_handle_
+ * message() -> AUTOTUNE_CMD_ACCEPT -> autotune_engine_accept() ->
+ * adaptive_tune_clear_ki_baseline()) can legitimately need to dispatch
+ * ANOTHER flash-safe call. Going through the normal path here would deadlock
+ * permanently: s_bx_lock is a non-recursive mutex already held by the
+ * ORIGINAL caller (e.g. autotune_task), which is blocked on s_bx_done waiting
+ * for THIS job to finish, so xSemaphoreTake(s_bx_lock, ...) below would block
+ * forever; a recursive mutex would not save it either, since the 1-deep queue
+ * is only ever drained by bx_worker_task, which is the very task now stuck
+ * trying to enqueue into it. Confirmed as a real, reproduced deadlock (opus
+ * review of commit 7c47683) that hung the flash worker for the whole board --
+ * control/profiles/autotune bridges and safety_cfg_store's deferred NVS flush
+ * all wedge with it, recoverable only by reboot.
+ *
+ * Detect the re-entrant case by task identity and run fn(arg) INLINE instead
+ * of dispatching: bx_worker_task's own stack is already the internal-SRAM
+ * stack this whole executor exists to provide, so the PSRAM/flash-cache
+ * hazard this file documents up top is already satisfied without going
+ * through the queue at all. */
 static bool bx_run_on_internal_stack(bx_job_fn fn, void *arg)
 {
     if (!s_bx_jobs || !s_bx_done || !s_bx_lock) {
         ESP_LOGE(TAG, "flash-safe worker not started -- job dropped");
         return false;
+    }
+    if (s_bx_worker_task_handle && xTaskGetCurrentTaskHandle() == s_bx_worker_task_handle) {
+        if (fn) {
+            fn(arg);
+        }
+        return true;
     }
     xSemaphoreTake(s_bx_lock, portMAX_DELAY);
     bx_job_t job = { .fn = fn, .arg = arg };
@@ -359,6 +391,24 @@ esp_err_t uart_bridge_ext_run_on_flash_worker(void (*fn)(void *arg), void *arg)
         return ESP_ERR_INVALID_ARG;
     }
     return bx_run_on_internal_stack(fn, arg) ? ESP_OK : ESP_FAIL;
+}
+
+/* Lets a caller that is ABOUT to dispatch onto this worker check first
+ * whether it is already running there -- so it can do the flash-safe work
+ * inline instead of calling uart_bridge_ext_run_on_flash_worker() a second
+ * time. bx_run_on_internal_stack() above now protects every caller of this
+ * file's own dispatcher regardless (see its "RE-ENTRANCY" comment), but a
+ * caller that KNOWS it can be reached from an already-on-worker context --
+ * adaptive_tune_clear_ki_baseline(), reached from autotune_engine_accept()
+ * when that itself runs as part of AUTOTUNE_CMD_ACCEPT on this worker -- is
+ * better off skipping the dispatch machinery entirely and just doing the
+ * work: cheaper, and it keeps the "one job in flight at a time" invariant
+ * simple for anyone reading uart_bridge_ext.c in isolation, rather than
+ * relying on a second module to know this file's internals fixed themselves
+ * to tolerate a redundant dispatch. */
+bool uart_bridge_ext_is_on_flash_worker(void)
+{
+    return s_bx_worker_task_handle != NULL && xTaskGetCurrentTaskHandle() == s_bx_worker_task_handle;
 }
 
 /* Shared shape for the three refactored handlers: the task's ctx plus the

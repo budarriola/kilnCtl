@@ -70,7 +70,7 @@ bool zones_config_get_pid(uint8_t zone_index, float *out_kp, float *out_ki, floa
 // REJECTS (returns false, leaves the stored gain untouched) any of kp/ki/kd
 // outside [0, ZONE_PID_GAIN_MAX], it does not silently clamp. Before this
 // fix the fake accepted any finite value unconditionally, which is exactly
-// this repo's idealized-test-input bug class: try_refine_ki_locked()'s
+// this repo's idealized-test-input bug class: adaptive_tune_refine_ki_locked()'s
 // repeated-Ki-application path (H3) had no real ceiling to run into on host,
 // even though hardware does (this same bound, reached through the identical
 // setter every caller in this file uses -- see that function's own comment
@@ -93,7 +93,7 @@ bool zones_config_set_pid(uint8_t zone_index, float kp, float ki, float kd)
 // Coupling-row fake, same "tiny in-RAM table" convention as s_fake_zone_cfg
 // above, standing in for zones_config_accessors.c's real coupling_coeff[]
 // storage -- adaptive_tune.c's coupled-solve apply path
-// (try_refine_coupled_locked()) reads/writes exactly this surface.
+// (adaptive_tune_refine_coupled_locked()) reads/writes exactly this surface.
 static float s_fake_coupling[TEST_MAX_ZONES][TEST_MAX_ZONES];
 static float s_fake_coupling_tau[TEST_MAX_ZONES][TEST_MAX_ZONES];
 static float s_fake_coupling_dead[TEST_MAX_ZONES][TEST_MAX_ZONES];
@@ -126,12 +126,61 @@ bool zones_config_set_coupling_cell(uint8_t zone_index, uint8_t neighbor_index, 
     return true;
 }
 
+// R2 (2026-09-01, opus review of commit 7c47683): this stub used to be a bare
+// `fn(arg); return ESP_OK;` with no lock/queue modeling at all -- which meant
+// a re-entrant call (a job already running through this stub calling back
+// into it) just silently ran fn() again, no problem. That is NOT what the
+// real bx_run_on_internal_stack() does: it takes a non-recursive mutex and
+// feeds a depth-1 queue that only the worker task itself drains, so a
+// re-entrant call from within an already-dispatched job deadlocks the real
+// board permanently (see uart_bridge_ext.c's own comment on that function,
+// and autotune_engine.c's accept-path call-site comment, for exactly the
+// deadlock this shape represents -- AUTOTUNE_CMD_ACCEPT -> autotune_engine_
+// accept() -> adaptive_tune_clear_ki_baseline() -> a second dispatch attempt
+// while the first is still in flight). The old stub could never have caught
+// that: it had no notion of "busy" at all.
+//
+// Modeled here as a single "busy" flag standing in for the real non-
+// recursive mutex: a call that arrives while busy is exactly the shape that
+// would block forever on hardware, so it is surfaced as a hard test failure
+// instead of silently succeeding (or, worse, actually deadlocking this test
+// binary). adaptive_tune_clear_ki_baseline() is expected to check
+// uart_bridge_ext_is_on_flash_worker() (stubbed below, driven by
+// s_stub_on_flash_worker) BEFORE ever reaching this function again while
+// busy -- see test_accept_path_clear_ki_baseline_does_not_reenter_worker()
+// below, which is the test this stub exists to make possible.
+static bool s_stub_bx_busy = false;
+
 esp_err_t uart_bridge_ext_run_on_flash_worker(void (*fn)(void *arg), void *arg)
 {
-    // Single-threaded host test -- just run it inline, matching the real
-    // worker's "blocks the caller until the job has run" contract.
+    if (s_stub_bx_busy) {
+        // Models the real deadlock: a caller re-entering the worker while
+        // a job is already in flight. On hardware this blocks forever; here
+        // it must fail loudly instead, or this stub is exactly as blind as
+        // the one it replaces.
+        TEST_CHECK(false,
+                   "uart_bridge_ext_run_on_flash_worker() called re-entrantly -- "
+                   "this deadlocks the real flash worker permanently (see R1, commit 7c47683)");
+        return ESP_FAIL;
+    }
+    s_stub_bx_busy = true;
     fn(arg);
+    s_stub_bx_busy = false;
     return ESP_OK;
+}
+
+// Stands in for "is the calling task bx_flash_worker" -- see uart_bridge_
+// ext.c's real uart_bridge_ext_is_on_flash_worker(), which this host build
+// does not link (it reads a FreeRTOS task handle). Tests that want to
+// simulate "already on the worker" (the UART-bridge accept path) set this
+// true around the call under test; adaptive_tune_clear_ki_baseline() must
+// consult it before dispatching -- see the stub above for what happens if it
+// does not.
+static bool s_stub_on_flash_worker = false;
+
+bool uart_bridge_ext_is_on_flash_worker(void)
+{
+    return s_stub_on_flash_worker;
 }
 
 // No httpd fakes needed here any more -- adaptive_tune.c's HTTP surface
@@ -161,7 +210,7 @@ static float q1(float c) { return roundf(c * 10.0f) / 10.0f; }
 
 static void reset_module_state(void)
 {
-    memset(s_at_zones, 0, sizeof(s_at_zones));
+    memset(adaptive_tune_zones, 0, sizeof(adaptive_tune_zones));
     memset(s_fake_zone_cfg, 0, sizeof(s_fake_zone_cfg));
     memset(s_fake_coupling, 0, sizeof(s_fake_coupling));
     memset(s_fake_coupling_tau, 0, sizeof(s_fake_coupling_tau));
@@ -170,14 +219,14 @@ static void reset_module_state(void)
         s_fake_zone_cfg[i].tau_s = 200.0f;
         s_fake_zone_cfg[i].dead_time_s = 20.0f;
     }
-    memset(s_joint_ring, 0, sizeof(s_joint_ring));
-    s_joint_ring_count = 0;
-    s_joint_ring_head = 0;
-    s_joint_observations_lifetime = 0;
-    memset(s_joint_last_duty, 0, sizeof(s_joint_last_duty));
-    memset(s_joint_last_rise_c, 0, sizeof(s_joint_last_rise_c));
-    memset(s_joint_last_valid, 0, sizeof(s_joint_last_valid));
-    s_joint_dwell_row_committed = false;
+    memset(adaptive_tune_joint_ring, 0, sizeof(adaptive_tune_joint_ring));
+    adaptive_tune_joint_ring_count = 0;
+    adaptive_tune_joint_ring_head = 0;
+    adaptive_tune_joint_observations_lifetime = 0;
+    memset(adaptive_tune_joint_last_duty, 0, sizeof(adaptive_tune_joint_last_duty));
+    memset(adaptive_tune_joint_last_rise_c, 0, sizeof(adaptive_tune_joint_last_rise_c));
+    memset(adaptive_tune_joint_last_valid, 0, sizeof(adaptive_tune_joint_last_valid));
+    adaptive_tune_joint_dwell_row_committed = false;
 }
 
 // Ticks a single settled dwell into zone zi: `ticks` ticks of dt_s seconds
@@ -203,7 +252,7 @@ static void feed_settled_dwell(uint8_t zi, float target_c, float ambient_c, floa
 // every zone's tick for a given loop iteration happens before the next
 // iteration for any zone, so every zone settles at the same simulated
 // instant (matching a real profile, where every enabled zone shares the
-// same segment boundaries -- see s_joint_dwell_row_committed's own comment
+// same segment boundaries -- see adaptive_tune_joint_dwell_row_committed's own comment
 // on why that assumption is what makes one dwell commit exactly one joint
 // row). target_c/duty are per-zone arrays of length MAX31856_CHANNEL_COUNT.
 static void feed_joint_settled_dwell(const float target_c[MAX31856_CHANNEL_COUNT], float ambient_c,
@@ -254,42 +303,42 @@ static profile_firing_run_record_t make_clean_record(uint8_t profile_id, uint8_t
 static void test_unsettled_dwell_is_not_recorded(void)
 {
     reset_module_state();
-    s_at_zones[0].enabled = true;
+    adaptive_tune_zones[0].enabled = true;
     // Climbs 0.05 degC/tick over 30s ticks == 0.00167 C/s -- wait, that IS
     // below the floor. Use a climb clearly above SETTLE_SLOPE_FLOOR
     // (0.003 C/s): 0.2 degC/tick / 30s = 0.0067 C/s, more than 2x the floor.
     feed_unsettled_dwell(0, 100.0f, 22.0f, 0.5f, SETTLE_TICKS, DT_S, 0.2f);
-    TEST_CHECK(s_at_zones[0].ring_count == 0, "a dwell that never stops drifting must record nothing");
+    TEST_CHECK(adaptive_tune_zones[0].ring_count == 0, "a dwell that never stops drifting must record nothing");
 }
 
 static void test_settled_dwell_is_recorded(void)
 {
     reset_module_state();
-    s_at_zones[0].enabled = true;
+    adaptive_tune_zones[0].enabled = true;
     feed_settled_dwell(0, 100.0f, 22.0f, 0.5f, SETTLE_TICKS, DT_S);
-    TEST_CHECK(s_at_zones[0].ring_count == 1, "a genuinely flat, settled dwell must record exactly one observation");
+    TEST_CHECK(adaptive_tune_zones[0].ring_count == 1, "a genuinely flat, settled dwell must record exactly one observation");
 }
 
 static void test_opt_in_default_off_records_nothing(void)
 {
     reset_module_state();
-    // Deliberately NOT setting s_at_zones[0].enabled -- struct-zero default,
+    // Deliberately NOT setting adaptive_tune_zones[0].enabled -- struct-zero default,
     // same as adaptive_tune_init() would leave an unconfigured zone.
-    TEST_CHECK(s_at_zones[0].enabled == false, "opt-in must default to OFF");
+    TEST_CHECK(adaptive_tune_zones[0].enabled == false, "opt-in must default to OFF");
     feed_settled_dwell(0, 100.0f, 22.0f, 0.5f, SETTLE_TICKS, DT_S);
-    TEST_CHECK(s_at_zones[0].ring_count == 0, "a settled dwell on a zone that never opted in must record nothing");
+    TEST_CHECK(adaptive_tune_zones[0].ring_count == 0, "a settled dwell on a zone that never opted in must record nothing");
 
     profile_firing_run_record_t rec = make_clean_record(1, 0, 900);
     float k_before = s_fake_zone_cfg[0].k_dc;
     adaptive_tune_run_end(&rec, true);
     TEST_CHECK(s_fake_zone_cfg[0].k_dc == k_before, "run_end on an opted-out zone must never touch its model");
-    TEST_CHECK(!s_at_zones[0].has_applied, "an opted-out zone must never report an applied refinement");
+    TEST_CHECK(!adaptive_tune_zones[0].has_applied, "an opted-out zone must never report an applied refinement");
 }
 
 // ---------------------------------------------------------------------
 // Public accessor tests -- these exercise EXACTLY the surface
 // adaptive_tune_http.c's status/enable handlers call (adaptive_tune_get_
-// enabled/set_enabled/get_status), not the internal s_at_zones struct
+// enabled/set_enabled/get_status), not the internal adaptive_tune_zones struct
 // directly, so they prove the accessor path itself, not just the module's
 // internal state.
 // ---------------------------------------------------------------------
@@ -334,7 +383,7 @@ static void test_enable_round_trips_through_persistence(void)
 
     TEST_CHECK(adaptive_tune_set_enabled(1, true), "setting zone 1's opt-in should report success");
 
-    memset(s_at_zones, 0, sizeof(s_at_zones)); // simulate a reboot: RAM state gone
+    memset(adaptive_tune_zones, 0, sizeof(adaptive_tune_zones)); // simulate a reboot: RAM state gone
     adaptive_tune_init();                // reload from the (stubbed) NVS namespace
 
     TEST_CHECK(adaptive_tune_get_enabled(0) == false, "zone 0 must reload as off");
@@ -355,7 +404,7 @@ static void test_status_reports_engine_held_fields_not_test_written_values(void)
     // z->prior_k_dc, z->applied_k_dc, ...), never a value this test wrote
     // into the status struct itself.
     reset_module_state();
-    s_at_zones[1].enabled = true;
+    adaptive_tune_zones[1].enabled = true;
     s_fake_zone_cfg[1].k_dc = 10.0f; // prior -- true gain 15
     const float true_k = 15.0f, ambient = 22.3f;
     const float duties[4] = {0.20f, 0.50f, 0.80f, 0.35f};
@@ -386,44 +435,44 @@ static void test_status_reports_engine_held_fields_not_test_written_values(void)
 static void test_min_observations_guard_rejects_too_few(void)
 {
     reset_module_state();
-    s_at_zones[1].enabled = true;
+    adaptive_tune_zones[1].enabled = true;
     s_fake_zone_cfg[1].k_dc = 10.0f;
     // Only 3 dwells (ADAPTIVE_TUNE_MIN_OBSERVATIONS is 4), otherwise a
     // perfectly good, well-spread, on-model fit.
     feed_settled_dwell(1, 25.0f, 22.0f, 0.2f, SETTLE_TICKS, DT_S);   // rise 3, u 0.2
     feed_settled_dwell(1, 27.0f, 22.0f, 0.5f, SETTLE_TICKS, DT_S);   // rise 5, u 0.5
     feed_settled_dwell(1, 30.0f, 22.0f, 0.8f, SETTLE_TICKS, DT_S);   // rise 8, u 0.8
-    TEST_CHECK(s_at_zones[1].ring_count == 3, "setup: exactly 3 observations queued");
+    TEST_CHECK(adaptive_tune_zones[1].ring_count == 3, "setup: exactly 3 observations queued");
 
     profile_firing_run_record_t rec = make_clean_record(2, 1, 900);
     adaptive_tune_run_end(&rec, true);
     TEST_CHECK(s_fake_zone_cfg[1].k_dc == 10.0f, "fewer than the minimum observation count must refuse the update");
-    TEST_CHECK(strstr(s_at_zones[1].last_refusal_reason, "observations") != NULL,
+    TEST_CHECK(strstr(adaptive_tune_zones[1].last_refusal_reason, "observations") != NULL,
                "refusal reason should name the observation-count shortfall");
 }
 
 static void test_duty_spread_guard_rejects_clustered_observations(void)
 {
     reset_module_state();
-    s_at_zones[1].enabled = true;
+    adaptive_tune_zones[1].enabled = true;
     s_fake_zone_cfg[1].k_dc = 10.0f;
     // 4 observations, all essentially the same duty (spread << 0.05).
     for (int i = 0; i < 4; i++) {
         feed_settled_dwell(1, 25.0f, 22.0f, 0.50f, SETTLE_TICKS, DT_S);
     }
-    TEST_CHECK(s_at_zones[1].ring_count == 4, "setup: 4 observations queued");
+    TEST_CHECK(adaptive_tune_zones[1].ring_count == 4, "setup: 4 observations queued");
 
     profile_firing_run_record_t rec = make_clean_record(3, 1, 900);
     adaptive_tune_run_end(&rec, true);
     TEST_CHECK(s_fake_zone_cfg[1].k_dc == 10.0f, "clustered duty values (no spread) must refuse the update");
-    TEST_CHECK(strstr(s_at_zones[1].last_refusal_reason, "clustered") != NULL,
+    TEST_CHECK(strstr(adaptive_tune_zones[1].last_refusal_reason, "clustered") != NULL,
                "refusal reason should name the duty-spread shortfall");
 }
 
 static void test_implausible_jump_guard_rejects_far_off_fit(void)
 {
     reset_module_state();
-    s_at_zones[1].enabled = true;
+    adaptive_tune_zones[1].enabled = true;
     s_fake_zone_cfg[1].k_dc = 10.0f; // prior
     // True gain here is 80 (8x the prior) -- ADAPTIVE_TUNE_MAX_JUMP_RATIO
     // is 5x, so this must be refused as implausible, not blended in.
@@ -435,14 +484,14 @@ static void test_implausible_jump_guard_rejects_far_off_fit(void)
     profile_firing_run_record_t rec = make_clean_record(4, 1, 900);
     adaptive_tune_run_end(&rec, true);
     TEST_CHECK(s_fake_zone_cfg[1].k_dc == 10.0f, "a fit >5x the prior model must be refused as implausible");
-    TEST_CHECK(strstr(s_at_zones[1].last_refusal_reason, "implausible") != NULL,
+    TEST_CHECK(strstr(adaptive_tune_zones[1].last_refusal_reason, "implausible") != NULL,
                "refusal reason should say the fit was implausible");
 }
 
 static void test_dirty_run_is_never_training_data(void)
 {
     reset_module_state();
-    s_at_zones[1].enabled = true;
+    adaptive_tune_zones[1].enabled = true;
     s_fake_zone_cfg[1].k_dc = 10.0f;
     // H1 fix: otherwise-perfect, well-spread observations, but with true K ==
     // 12 (NOT == prior 10) -- deliberately a MATERIAL move (blend = 10 +
@@ -462,8 +511,8 @@ static void test_dirty_run_is_never_training_data(void)
 
     profile_firing_run_record_t rec = make_clean_record(5, 1, 900);
     adaptive_tune_run_end(&rec, /*clean=*/false); // faulted or operator-stopped
-    TEST_CHECK(!s_at_zones[1].has_applied, "a faulted/stopped-early run must never be used as training data");
-    TEST_CHECK(strstr(s_at_zones[1].last_refusal_reason, "faulted or stopped early") != NULL,
+    TEST_CHECK(!adaptive_tune_zones[1].has_applied, "a faulted/stopped-early run must never be used as training data");
+    TEST_CHECK(strstr(adaptive_tune_zones[1].last_refusal_reason, "faulted or stopped early") != NULL,
                "refusal reason should say why (not-clean run)");
 
     // Same observations, this time reported clean but with heavy sensor
@@ -471,8 +520,8 @@ static void test_dirty_run_is_never_training_data(void)
     profile_firing_run_record_t rec2 = make_clean_record(6, 1, 900);
     rec2.zones[1].stats.excluded_sample_count = 100; // 100/(900+100) = 10% > 5%
     adaptive_tune_run_end(&rec2, /*clean=*/true);
-    TEST_CHECK(!s_at_zones[1].has_applied, "heavy excluded-sample fraction must also refuse to learn");
-    TEST_CHECK(strstr(s_at_zones[1].last_refusal_reason, "excluded") != NULL,
+    TEST_CHECK(!adaptive_tune_zones[1].has_applied, "heavy excluded-sample fraction must also refuse to learn");
+    TEST_CHECK(strstr(adaptive_tune_zones[1].last_refusal_reason, "excluded") != NULL,
                "H1: refusal reason should name the excluded-sample-fraction guard, not the material-change floor "
                "-- proves this fixture's blend was genuinely material and the excluded guard is what's under test");
 }
@@ -484,8 +533,8 @@ static void test_refinement_improves_gain_estimate_on_known_plant(void)
     // transposed zone index would fail this test: zone 1's prior undershoots
     // its true gain, zone 3's prior overshoots ITS true gain, and the two
     // zones' numbers are all distinct from each other.
-    s_at_zones[1].enabled = true;
-    s_at_zones[2].enabled = true;
+    adaptive_tune_zones[1].enabled = true;
+    adaptive_tune_zones[2].enabled = true;
     s_fake_zone_cfg[1].k_dc = 10.0f;   // prior, zone 1 -- true gain 15
     s_fake_zone_cfg[2].k_dc = 30.0f;   // prior, zone 3 -- true gain 20
     const float true_k1 = 15.0f, true_k3 = 20.0f, ambient = 22.3f;
@@ -500,8 +549,8 @@ static void test_refinement_improves_gain_estimate_on_known_plant(void)
     rec.zones[2].stats.sample_count = 900;
     adaptive_tune_run_end(&rec, true);
 
-    TEST_CHECK(s_at_zones[1].has_applied, "zone 1 should have applied a refinement");
-    TEST_CHECK(s_at_zones[2].has_applied, "zone 3 should have applied a refinement");
+    TEST_CHECK(adaptive_tune_zones[1].has_applied, "zone 1 should have applied a refinement");
+    TEST_CHECK(adaptive_tune_zones[2].has_applied, "zone 3 should have applied a refinement");
 
     // Blend: prior + ALPHA*(fit-prior), fit==true_k here (exact, no noise
     // beyond 0.1 degC quantization). Zone 1 moves UP toward 15, zone 3 moves
@@ -527,7 +576,7 @@ static void test_refinement_improves_gain_estimate_on_known_plant(void)
 static void test_per_run_move_is_bounded_even_with_many_dwells(void)
 {
     reset_module_state();
-    s_at_zones[2].enabled = true;
+    adaptive_tune_zones[2].enabled = true;
     s_fake_zone_cfg[2].k_dc = 10.0f;
     // true gain 45 is 4.5x the prior -- inside ADAPTIVE_TUNE_MAX_JUMP_RATIO
     // (5x, so the implausible-jump guard does not refuse it) but far enough
@@ -542,7 +591,7 @@ static void test_per_run_move_is_bounded_even_with_many_dwells(void)
     profile_firing_run_record_t rec = make_clean_record(10, 2, 900);
     adaptive_tune_run_end(&rec, true);
     float max_move = 10.0f * ADAPTIVE_TUNE_MAX_FRACTIONAL_MOVE; // 2.0
-    TEST_CHECK(s_at_zones[2].has_applied, "setup: the 4.5x fit must pass the jump-ratio guard and apply");
+    TEST_CHECK(adaptive_tune_zones[2].has_applied, "setup: the 4.5x fit must pass the jump-ratio guard and apply");
     TEST_CHECK_NEAR(s_fake_zone_cfg[2].k_dc, 10.0f + max_move, 0.05,
                      "a single run's applied move must be clamped exactly at the per-run fractional cap");
     TEST_CHECK(s_fake_zone_cfg[2].k_dc <= 10.0f + max_move + 1e-3f,
@@ -908,7 +957,7 @@ static void test_ki_diagnose_ok_when_tracking_cleanly(void)
 static void test_coupling_cell_converges_from_zero_prior_over_repeated_runs(void)
 {
     reset_module_state();
-    s_at_zones[0].enabled = true;
+    adaptive_tune_zones[0].enabled = true;
     s_fake_zone_cfg[0].k_dc = 1.0f; // irrelevant to this test -- just needs to be nonzero/positive
     const float ambient = 20.0f;
     const float duty_pts[5][MAX31856_CHANNEL_COUNT] = {
@@ -923,7 +972,7 @@ static void test_coupling_cell_converges_from_zero_prior_over_repeated_runs(void
         }
         feed_joint_settled_dwell(target, ambient, duty_pts[k], SETTLE_TICKS, DT_S);
     }
-    TEST_CHECK(s_joint_ring_count == 5, "setup: 5 distinct joint dwells queued");
+    TEST_CHECK(adaptive_tune_joint_ring_count == 5, "setup: 5 distinct joint dwells queued");
 
     // 30 runs against the SAME fixed evidence -- a stand-in for 30 firings
     // that all measured the same true coupling, exercising exactly the
@@ -950,7 +999,7 @@ static void test_coupling_cell_converges_from_zero_prior_over_repeated_runs(void
 static void test_coupling_cell_per_run_move_is_bounded_by_abs_cap(void)
 {
     reset_module_state();
-    s_at_zones[0].enabled = true;
+    adaptive_tune_zones[0].enabled = true;
     s_fake_zone_cfg[0].k_dc = 1.0f;
     s_fake_coupling[0][1] = 1.0f; // confident prior (> NEAR_ZERO); uncapped blend would be
                                   // 1.0 + 0.15*(45.0-1.0) = 7.6, well past the 6.0 cap
@@ -972,7 +1021,7 @@ static void test_coupling_cell_per_run_move_is_bounded_by_abs_cap(void)
     profile_firing_run_record_t rec = make_clean_record(90, 0, 900);
     adaptive_tune_run_end(&rec, true);
 
-    TEST_CHECK(s_at_zones[0].coupled_applied, "setup: the coupled solve must have applied");
+    TEST_CHECK(adaptive_tune_zones[0].coupled_applied, "setup: the coupled solve must have applied");
     TEST_CHECK_NEAR(s_fake_coupling[0][1], 1.0f + ADAPTIVE_TUNE_COUPLING_MAX_ABS_MOVE, 0.3,
                      "D3: a single run's coupling-cell move must be clamped exactly at the per-run absolute cap");
     TEST_CHECK(s_fake_coupling[0][1] <= 1.0f + ADAPTIVE_TUNE_COUPLING_MAX_ABS_MOVE + 1e-3f,
@@ -990,7 +1039,7 @@ static void test_coupling_cell_per_run_move_is_bounded_by_abs_cap(void)
 static void test_coupling_ratio_guard_upper_bound_accepts_high_fit_from_low_confident_prior(void)
 {
     reset_module_state();
-    s_at_zones[0].enabled = true;
+    adaptive_tune_zones[0].enabled = true;
     s_fake_zone_cfg[0].k_dc = 1.0f;
     s_fake_coupling[0][1] = 2.0f; // confident prior -- a plain 5x ratio ceiling alone would be 10.0
     const float ambient = 20.0f;
@@ -1021,7 +1070,7 @@ static void test_coupling_ratio_guard_upper_bound_accepts_high_fit_from_low_conf
 static void test_coupling_ratio_guard_upper_bound_rejects_fit_above_absolute_ceiling(void)
 {
     reset_module_state();
-    s_at_zones[0].enabled = true;
+    adaptive_tune_zones[0].enabled = true;
     s_fake_zone_cfg[0].k_dc = 1.0f;
     s_fake_coupling[0][1] = 2.0f;
     const float ambient = 20.0f;
@@ -1055,9 +1104,9 @@ static void test_coupling_ratio_guard_upper_bound_rejects_fit_above_absolute_cei
 static void test_joint_floor_counts_distinct_dwells_not_rows(void)
 {
     reset_module_state();
-    s_at_zones[0].enabled = true;
-    s_at_zones[1].enabled = true;
-    s_at_zones[2].enabled = true;
+    adaptive_tune_zones[0].enabled = true;
+    adaptive_tune_zones[1].enabled = true;
+    adaptive_tune_zones[2].enabled = true;
     const float ambient = 20.0f;
     const float duty_pts[2][MAX31856_CHANNEL_COUNT] = {{0.20f, 0.50f, 0.80f}, {0.50f, 0.80f, 0.20f}};
     for (int k = 0; k < 2; k++) {
@@ -1073,7 +1122,7 @@ static void test_joint_floor_counts_distinct_dwells_not_rows(void)
     // dwells, a per-zone (rather than per-dwell) commit would leave 6 rows
     // in the ring here, not 2 -- silently clearing the 5-observation floor
     // with only 2 real operating points for 3 unknowns.
-    TEST_CHECK(s_joint_ring_count == 2, "2 distinct dwells with 3 zones enabled must commit exactly 2 joint rows, "
+    TEST_CHECK(adaptive_tune_joint_ring_count == 2, "2 distinct dwells with 3 zones enabled must commit exactly 2 joint rows, "
                                          "not one per zone");
 
     profile_firing_run_record_t rec = make_clean_record(21, 0, 900);
@@ -1082,7 +1131,7 @@ static void test_joint_floor_counts_distinct_dwells_not_rows(void)
     rec.zones[2].active = true;
     rec.zones[2].stats.sample_count = 900;
     adaptive_tune_run_end(&rec, true);
-    TEST_CHECK(!s_at_zones[0].coupled_applied, "2 distinct dwells (below the 5-observation margin) must refuse the "
+    TEST_CHECK(!adaptive_tune_zones[0].coupled_applied, "2 distinct dwells (below the 5-observation margin) must refuse the "
                                              "coupled solve, not silently accept an underdetermined fit");
     // F4: the check above passes even under the REVERTED D4 gate (per-zone
     // rather than per-dwell counting), because 3 zones x 2 dwells = 6
@@ -1091,7 +1140,7 @@ static void test_joint_floor_counts_distinct_dwells_not_rows(void)
     // the one this test is meant to guard. Pin the actual refusal reason so
     // a D4 regression (which would still leave coupled_applied false, but
     // for the wrong reason) is caught here instead of silently passing.
-    TEST_CHECK(strstr(s_at_zones[0].coupled_refusal_reason, "joint dwell observations") != NULL,
+    TEST_CHECK(strstr(adaptive_tune_zones[0].coupled_refusal_reason, "joint dwell observations") != NULL,
                "the coupled solve must refuse specifically for TOO FEW joint observations (2 distinct dwells "
                "against the 5-observation floor) -- a D4 regression to per-zone counting would instead leave 6 "
                "near-duplicate rows that clear the floor and refuse as ill-conditioned instead, which the plain "
@@ -1099,7 +1148,7 @@ static void test_joint_floor_counts_distinct_dwells_not_rows(void)
 }
 
 // ---------------------------------------------------------------------
-// D6: try_refine_coupled_locked()'s OWN indexing (reading C[zi][j] and
+// D6: adaptive_tune_refine_coupled_locked()'s OWN indexing (reading C[zi][j] and
 // calling set_coupling_cell(zi, j, ...)) has no coverage from the pure-math
 // adaptive_tune_coupled_fit() tests above -- a transpose at either call
 // site would still pass all of them. This drives the full apply path (via
@@ -1110,8 +1159,8 @@ static void test_joint_floor_counts_distinct_dwells_not_rows(void)
 static void test_coupled_apply_writes_cells_in_storage_orientation(void)
 {
     reset_module_state();
-    s_at_zones[0].enabled = true;
-    s_at_zones[1].enabled = true;
+    adaptive_tune_zones[0].enabled = true;
+    adaptive_tune_zones[1].enabled = true;
     const float ambient = 20.0f;
     const float duty_pts[6][MAX31856_CHANNEL_COUNT] = {
         {0.20f, 0.50f, 0.80f}, {0.50f, 0.80f, 0.20f}, {0.80f, 0.20f, 0.50f},
@@ -1125,15 +1174,15 @@ static void test_coupled_apply_writes_cells_in_storage_orientation(void)
         }
         feed_joint_settled_dwell(target, ambient, duty_pts[k], SETTLE_TICKS, DT_S);
     }
-    TEST_CHECK(s_joint_ring_count == 6, "setup: 6 distinct joint dwells queued");
+    TEST_CHECK(adaptive_tune_joint_ring_count == 6, "setup: 6 distinct joint dwells queued");
 
     profile_firing_run_record_t rec = make_clean_record(22, 0, 900);
     rec.zones[1].active = true;
     rec.zones[1].stats.sample_count = 900;
     adaptive_tune_run_end(&rec, true);
 
-    TEST_CHECK(s_at_zones[0].coupled_applied, "setup: zone 0's coupled solve must have applied");
-    TEST_CHECK(s_at_zones[1].coupled_applied, "setup: zone 1's coupled solve must have applied");
+    TEST_CHECK(adaptive_tune_zones[0].coupled_applied, "setup: zone 0's coupled solve must have applied");
+    TEST_CHECK(adaptive_tune_zones[1].coupled_applied, "setup: zone 1's coupled solve must have applied");
 
     // One run's 15% blend from a 0.0 prior: expect ~= ALPHA * truth for
     // each cell. [0][1] (26.61) and [1][0] (15.78) are far enough apart
@@ -1160,7 +1209,7 @@ static void test_coupled_apply_writes_cells_in_storage_orientation(void)
 static void test_ki_diagnosis_skipped_same_run_as_model_refine(void)
 {
     reset_module_state();
-    s_at_zones[1].enabled = true;
+    adaptive_tune_zones[1].enabled = true;
     s_fake_zone_cfg[1].k_dc = 10.0f; // prior -- true gain 15, well within jump/spread guards
     s_fake_zone_cfg[1].ki = 1.0f;    // a positive Ki to refine -- needed below to prove the fixture is capable
     const float true_k = 15.0f, ambient = 22.3f;
@@ -1180,9 +1229,9 @@ static void test_ki_diagnosis_skipped_same_run_as_model_refine(void)
     rec.zones[1].stats.dwell_err_max_c = 0.50f;
     adaptive_tune_run_end(&rec, true);
 
-    TEST_CHECK(s_at_zones[1].has_applied, "setup: the diagonal model refinement must have applied this run");
-    TEST_CHECK(!s_at_zones[1].ki_applied, "the Ki diagnosis must NOT also apply in the same run as the model refine");
-    TEST_CHECK(strstr(s_at_zones[1].ki_refusal_reason, "skipped") != NULL,
+    TEST_CHECK(adaptive_tune_zones[1].has_applied, "setup: the diagonal model refinement must have applied this run");
+    TEST_CHECK(!adaptive_tune_zones[1].ki_applied, "the Ki diagnosis must NOT also apply in the same run as the model refine");
+    TEST_CHECK(strstr(adaptive_tune_zones[1].ki_refusal_reason, "skipped") != NULL,
                "the Ki refusal reason should say it was skipped because the model refine already ran this run");
 
     // F4: the two checks above pass EVEN WITHOUT the D5 skip gate, because
@@ -1190,21 +1239,21 @@ static void test_ki_diagnosis_skipped_same_run_as_model_refine(void)
     // ADAPTIVE_TUNE_KI_MIN_SAMPLES on their own -- the "!ki_applied" check
     // was vacuous, only the "skipped" reason-string check was load-bearing.
     // Prove this fixture is now genuinely capable of an applied Ki
-    // correction by calling try_refine_ki_locked() directly (this file
+    // correction by calling adaptive_tune_refine_ki_locked() directly (this file
     // #includes adaptive_tune.c, so its static functions are reachable),
     // bypassing the D5 gate entirely, on the SAME trace/stats this run just
     // produced.
-    try_refine_ki_locked(1, &rec.zones[1].stats);
-    TEST_CHECK(s_at_zones[1].ki_applied, "setup: this fixture's trace/stats must genuinely trigger an applied Ki "
+    adaptive_tune_refine_ki_locked(1, &rec.zones[1].stats);
+    TEST_CHECK(adaptive_tune_zones[1].ki_applied, "setup: this fixture's trace/stats must genuinely trigger an applied Ki "
                                        "correction when nothing skips it -- otherwise the !ki_applied check above "
                                        "would pass regardless of whether the D5 gate does anything at all");
 }
 
 // ---------------------------------------------------------------------
-// F1: try_refine_zone_locked() used to report "applied" on ANY nonzero
+// F1: adaptive_tune_refine_zone_locked() used to report "applied" on ANY nonzero
 // blend, however small -- an asymptotically-converging sequence of fits
 // (each blend closer to the true gain, never exactly equal) kept
-// model_refined true forever, permanently starving try_refine_ki_locked()
+// model_refined true forever, permanently starving adaptive_tune_refine_ki_locked()
 // of a turn. MUST FAIL on pre-F1-fix code: 8+ consecutive well-formed runs
 // against the same true gain never produce a run where the model refine
 // reports no material change, so the Ki refusal reason always says
@@ -1213,7 +1262,7 @@ static void test_ki_diagnosis_skipped_same_run_as_model_refine(void)
 static void test_ki_diagnosis_eventually_runs_after_repeated_converging_refinements(void)
 {
     reset_module_state();
-    s_at_zones[1].enabled = true;
+    adaptive_tune_zones[1].enabled = true;
     s_fake_zone_cfg[1].k_dc = 10.0f;
     s_fake_zone_cfg[1].ki = 1.0f;
     const float true_k = 15.0f, ambient = 22.3f;
@@ -1226,7 +1275,7 @@ static void test_ki_diagnosis_eventually_runs_after_repeated_converging_refineme
         }
         profile_firing_run_record_t rec = make_clean_record(70 + run, 1, 900);
         adaptive_tune_run_end(&rec, true);
-        if (strstr(s_at_zones[1].ki_refusal_reason, "skipped") == NULL) {
+        if (strstr(adaptive_tune_zones[1].ki_refusal_reason, "skipped") == NULL) {
             ki_ever_ran = true;
         }
     }
@@ -1263,7 +1312,7 @@ static void test_ki_diagnosis_eventually_runs_after_repeated_converging_refineme
 static void test_ki_status_fields_cleared_when_diagnosis_skipped(void)
 {
     reset_module_state();
-    s_at_zones[1].enabled = true;
+    adaptive_tune_zones[1].enabled = true;
     s_fake_zone_cfg[1].k_dc = 10.0f;
     s_fake_zone_cfg[1].ki = 1.0f;
 
@@ -1272,16 +1321,16 @@ static void test_ki_status_fields_cleared_when_diagnosis_skipped(void)
     // dwell gives the Ki trace plenty of samples, and an explicit steady,
     // non-floored offset drives a genuine OFFSET_TOO_SMALL verdict.
     feed_settled_dwell(1, 25.0f, 22.0f, 0.5f, 20, DT_S);
-    TEST_CHECK(s_at_zones[1].ring_count < ADAPTIVE_TUNE_MIN_OBSERVATIONS,
+    TEST_CHECK(adaptive_tune_zones[1].ring_count < ADAPTIVE_TUNE_MIN_OBSERVATIONS,
                "setup: the model refine must not have enough observations to fire");
     profile_firing_run_record_t rec1 = make_clean_record(80, 1, 900);
     rec1.zones[1].stats.dwell_err_mean_c = 0.45f;
     rec1.zones[1].stats.dwell_err_max_c = 0.50f;
     adaptive_tune_run_end(&rec1, true);
-    TEST_CHECK(!s_at_zones[1].has_applied, "setup: the model refine must not have applied this run");
-    TEST_CHECK(s_at_zones[1].ki_verdict == (uint8_t)ADAPTIVE_TUNE_KI_OFFSET_TOO_SMALL,
+    TEST_CHECK(!adaptive_tune_zones[1].has_applied, "setup: the model refine must not have applied this run");
+    TEST_CHECK(adaptive_tune_zones[1].ki_verdict == (uint8_t)ADAPTIVE_TUNE_KI_OFFSET_TOO_SMALL,
                "setup: the Ki diagnosis must have actually run and produced a real, non-default verdict");
-    TEST_CHECK(s_at_zones[1].ki_correction_pct > 0.0f, "setup: a real, nonzero correction must be published");
+    TEST_CHECK(adaptive_tune_zones[1].ki_correction_pct > 0.0f, "setup: a real, nonzero correction must be published");
 
     // Run 2: feed enough well-spread, on-model observations that the model
     // refine DOES fire this time -- the Ki diagnosis must be skipped.
@@ -1292,11 +1341,11 @@ static void test_ki_status_fields_cleared_when_diagnosis_skipped(void)
     }
     profile_firing_run_record_t rec2 = make_clean_record(81, 1, 900);
     adaptive_tune_run_end(&rec2, true);
-    TEST_CHECK(s_at_zones[1].has_applied, "setup: the model refine must have applied this run");
-    TEST_CHECK(!s_at_zones[1].ki_applied, "the Ki diagnosis must not apply when skipped");
-    TEST_CHECK(s_at_zones[1].ki_verdict == (uint8_t)ADAPTIVE_TUNE_KI_INSUFFICIENT,
+    TEST_CHECK(adaptive_tune_zones[1].has_applied, "setup: the model refine must have applied this run");
+    TEST_CHECK(!adaptive_tune_zones[1].ki_applied, "the Ki diagnosis must not apply when skipped");
+    TEST_CHECK(adaptive_tune_zones[1].ki_verdict == (uint8_t)ADAPTIVE_TUNE_KI_INSUFFICIENT,
                "F2: a skipped-this-run Ki diagnosis must not keep publishing a PREVIOUS run's verdict");
-    TEST_CHECK(s_at_zones[1].ki_correction_pct == 0.0f,
+    TEST_CHECK(adaptive_tune_zones[1].ki_correction_pct == 0.0f,
                "F2: a skipped-this-run Ki diagnosis must not keep publishing a PREVIOUS run's correction pct");
 }
 
@@ -1329,7 +1378,7 @@ static void test_ki_status_fields_cleared_when_diagnosis_skipped(void)
 static void test_run_status_fields_cleared_on_faulted_run(void)
 {
     reset_module_state();
-    s_at_zones[1].enabled = true;
+    adaptive_tune_zones[1].enabled = true;
     s_fake_zone_cfg[1].k_dc = 10.0f;
     s_fake_zone_cfg[1].ki = 1.0f;
 
@@ -1355,14 +1404,14 @@ static void test_run_status_fields_cleared_on_faulted_run(void)
     }
     profile_firing_run_record_t rec1 = make_clean_record(90, 1, 900);
     adaptive_tune_run_end(&rec1, true);
-    TEST_CHECK(s_at_zones[1].has_applied, "setup: run 1 must have genuinely applied a model refine");
-    TEST_CHECK(s_at_zones[1].coupled_applied, "setup: run 1 must have genuinely applied a coupled solve");
-    TEST_CHECK(s_at_zones[1].coupled_cells_changed > 0, "setup: run 1's coupled solve must have changed >0 cells");
+    TEST_CHECK(adaptive_tune_zones[1].has_applied, "setup: run 1 must have genuinely applied a model refine");
+    TEST_CHECK(adaptive_tune_zones[1].coupled_applied, "setup: run 1 must have genuinely applied a coupled solve");
+    TEST_CHECK(adaptive_tune_zones[1].coupled_cells_changed > 0, "setup: run 1's coupled solve must have changed >0 cells");
 
     // Force the NEXT diagonal fit to be refused as implausible (jump-ratio
     // guard) rather than simply re-converging -- ALPHA=0.15 leaves run 1's
     // blend far from material-move-floor territory, so without this the
-    // same static ring data would keep firing try_refine_zone_locked() for
+    // same static ring data would keep firing adaptive_tune_refine_zone_locked() for
     // many more runs (see test_per_run_move_is_bounded_even_with_many_
     // dwells()'s own numbers), which would starve the Ki diagnosis via D5
     // and make it impossible to also establish ki_applied=true within a
@@ -1378,33 +1427,33 @@ static void test_run_status_fields_cleared_on_faulted_run(void)
     rec2.zones[1].stats.dwell_err_mean_c = 0.45f;
     rec2.zones[1].stats.dwell_err_max_c = 0.50f;
     adaptive_tune_run_end(&rec2, true);
-    TEST_CHECK(s_at_zones[1].has_applied, "setup: has_applied must still be true (a latch) after run 2");
-    TEST_CHECK(s_at_zones[1].ki_applied, "setup: run 2 must have genuinely applied a Ki correction");
-    TEST_CHECK(s_at_zones[1].ki_verdict == (uint8_t)ADAPTIVE_TUNE_KI_OFFSET_TOO_SMALL,
+    TEST_CHECK(adaptive_tune_zones[1].has_applied, "setup: has_applied must still be true (a latch) after run 2");
+    TEST_CHECK(adaptive_tune_zones[1].ki_applied, "setup: run 2 must have genuinely applied a Ki correction");
+    TEST_CHECK(adaptive_tune_zones[1].ki_verdict == (uint8_t)ADAPTIVE_TUNE_KI_OFFSET_TOO_SMALL,
                "setup: run 2's Ki verdict must be real (OFFSET_TOO_SMALL), not a default");
-    TEST_CHECK(s_at_zones[1].ki_correction_pct > 0.0f, "setup: run 2's Ki correction pct must be real and nonzero");
-    TEST_CHECK(s_at_zones[1].coupled_applied, "setup: run 2's coupled solve must still be applying (same persisted "
+    TEST_CHECK(adaptive_tune_zones[1].ki_correction_pct > 0.0f, "setup: run 2's Ki correction pct must be real and nonzero");
+    TEST_CHECK(adaptive_tune_zones[1].coupled_applied, "setup: run 2's coupled solve must still be applying (same persisted "
                                              "joint ring, still far from converged)");
 
     // Run 3: same zone, faulted.
     profile_firing_run_record_t rec3 = make_clean_record(92, 1, 900);
     adaptive_tune_run_end(&rec3, /*clean=*/false);
 
-    TEST_CHECK(s_at_zones[1].has_applied,
+    TEST_CHECK(adaptive_tune_zones[1].has_applied,
                "K2: a faulted run must NOT clear has_applied -- it is a lifetime latch, and the UI's \"Last "
                "applied change\" column reads it that way");
-    TEST_CHECK(!s_at_zones[1].ki_applied, "H2: a faulted run must not keep publishing a PREVIOUS run's ki_applied=1");
-    TEST_CHECK(s_at_zones[1].ki_verdict == (uint8_t)ADAPTIVE_TUNE_KI_INSUFFICIENT,
+    TEST_CHECK(!adaptive_tune_zones[1].ki_applied, "H2: a faulted run must not keep publishing a PREVIOUS run's ki_applied=1");
+    TEST_CHECK(adaptive_tune_zones[1].ki_verdict == (uint8_t)ADAPTIVE_TUNE_KI_INSUFFICIENT,
                "H2: a faulted run must reset ki_verdict, not keep publishing OFFSET_TOO_SMALL from run 2");
-    TEST_CHECK(s_at_zones[1].ki_correction_pct == 0.0f,
+    TEST_CHECK(adaptive_tune_zones[1].ki_correction_pct == 0.0f,
                "H2: a faulted run must reset ki_correction_pct, not keep publishing run 2's +20%%");
-    TEST_CHECK(!s_at_zones[1].coupled_applied,
+    TEST_CHECK(!adaptive_tune_zones[1].coupled_applied,
                "K3: a faulted run must not report coupled_applied from a previous run (genuinely established true "
                "in runs 1/2, not trivially false)");
-    TEST_CHECK(s_at_zones[1].coupled_cells_changed == 0,
+    TEST_CHECK(adaptive_tune_zones[1].coupled_cells_changed == 0,
                "K3: a faulted run must reset coupled_cells_changed, not keep publishing a previous run's count "
                "(genuinely established >0 in run 1, not trivially zero)");
-    TEST_CHECK(strstr(s_at_zones[1].ki_refusal_reason, "faulted or stopped early") != NULL,
+    TEST_CHECK(strstr(adaptive_tune_zones[1].ki_refusal_reason, "faulted or stopped early") != NULL,
                "H2: the Ki refusal reason must say why THIS run produced no diagnosis");
 }
 
@@ -1414,7 +1463,7 @@ static void test_run_status_fields_cleared_on_faulted_run(void)
 static void test_run_status_fields_cleared_on_excluded_fraction_refusal(void)
 {
     reset_module_state();
-    s_at_zones[1].enabled = true;
+    adaptive_tune_zones[1].enabled = true;
     s_fake_zone_cfg[1].k_dc = 10.0f;
     s_fake_zone_cfg[1].ki = 1.0f;
 
@@ -1437,9 +1486,9 @@ static void test_run_status_fields_cleared_on_excluded_fraction_refusal(void)
     }
     profile_firing_run_record_t rec1 = make_clean_record(93, 1, 900);
     adaptive_tune_run_end(&rec1, true);
-    TEST_CHECK(s_at_zones[1].has_applied, "setup: run 1 must have genuinely applied a model refine");
-    TEST_CHECK(s_at_zones[1].coupled_applied, "setup: run 1 must have genuinely applied a coupled solve");
-    TEST_CHECK(s_at_zones[1].coupled_cells_changed > 0, "setup: run 1's coupled solve must have changed >0 cells");
+    TEST_CHECK(adaptive_tune_zones[1].has_applied, "setup: run 1 must have genuinely applied a model refine");
+    TEST_CHECK(adaptive_tune_zones[1].coupled_applied, "setup: run 1 must have genuinely applied a coupled solve");
+    TEST_CHECK(adaptive_tune_zones[1].coupled_cells_changed > 0, "setup: run 1's coupled solve must have changed >0 cells");
 
     s_fake_zone_cfg[1].k_dc = 1000.0f; // see faulted-run test's own comment on this line
 
@@ -1448,28 +1497,28 @@ static void test_run_status_fields_cleared_on_excluded_fraction_refusal(void)
     rec2.zones[1].stats.dwell_err_mean_c = 0.45f;
     rec2.zones[1].stats.dwell_err_max_c = 0.50f;
     adaptive_tune_run_end(&rec2, true);
-    TEST_CHECK(s_at_zones[1].ki_applied, "setup: run 2 must have genuinely applied a Ki correction");
-    TEST_CHECK(s_at_zones[1].coupled_applied, "setup: run 2's coupled solve must still be applying");
+    TEST_CHECK(adaptive_tune_zones[1].ki_applied, "setup: run 2 must have genuinely applied a Ki correction");
+    TEST_CHECK(adaptive_tune_zones[1].coupled_applied, "setup: run 2's coupled solve must still be applying");
 
     profile_firing_run_record_t rec3 = make_clean_record(95, 1, 900);
     rec3.zones[1].stats.excluded_sample_count = 100; // 100/(900+100) = 10% > 5%
     adaptive_tune_run_end(&rec3, /*clean=*/true);
 
-    TEST_CHECK(s_at_zones[1].has_applied,
+    TEST_CHECK(adaptive_tune_zones[1].has_applied,
                "K2: an excluded-fraction refusal must NOT clear has_applied -- it is a lifetime latch");
-    TEST_CHECK(!s_at_zones[1].ki_applied,
+    TEST_CHECK(!adaptive_tune_zones[1].ki_applied,
                "H2: an excluded-fraction refusal must not keep publishing a PREVIOUS run's ki_applied=1");
-    TEST_CHECK(s_at_zones[1].ki_verdict == (uint8_t)ADAPTIVE_TUNE_KI_INSUFFICIENT,
+    TEST_CHECK(adaptive_tune_zones[1].ki_verdict == (uint8_t)ADAPTIVE_TUNE_KI_INSUFFICIENT,
                "H2: an excluded-fraction refusal must reset ki_verdict");
-    TEST_CHECK(s_at_zones[1].ki_correction_pct == 0.0f,
+    TEST_CHECK(adaptive_tune_zones[1].ki_correction_pct == 0.0f,
                "H2: an excluded-fraction refusal must reset ki_correction_pct");
-    TEST_CHECK(!s_at_zones[1].coupled_applied,
+    TEST_CHECK(!adaptive_tune_zones[1].coupled_applied,
                "K3: an excluded-fraction refusal must not report a stale coupled_applied (genuinely established "
                "true beforehand, not trivially false)");
-    TEST_CHECK(s_at_zones[1].coupled_cells_changed == 0,
+    TEST_CHECK(adaptive_tune_zones[1].coupled_cells_changed == 0,
                "K3: an excluded-fraction refusal must reset coupled_cells_changed (genuinely established >0 "
                "beforehand, not trivially zero)");
-    TEST_CHECK(strstr(s_at_zones[1].ki_refusal_reason, "excluded") != NULL,
+    TEST_CHECK(strstr(adaptive_tune_zones[1].ki_refusal_reason, "excluded") != NULL,
                "H2: the Ki refusal reason must say why THIS run produced no diagnosis");
 }
 
@@ -1481,7 +1530,7 @@ static void test_run_status_fields_cleared_on_excluded_fraction_refusal(void)
 static void test_run_status_fields_cleared_when_zone_masked_out_of_profile(void)
 {
     reset_module_state();
-    s_at_zones[1].enabled = true;
+    adaptive_tune_zones[1].enabled = true;
     s_fake_zone_cfg[1].k_dc = 10.0f;
     s_fake_zone_cfg[1].ki = 1.0f;
 
@@ -1490,8 +1539,8 @@ static void test_run_status_fields_cleared_when_zone_masked_out_of_profile(void)
     rec1.zones[1].stats.dwell_err_mean_c = 0.45f;
     rec1.zones[1].stats.dwell_err_max_c = 0.50f;
     adaptive_tune_run_end(&rec1, true);
-    TEST_CHECK(s_at_zones[1].ki_applied, "setup: run 1 must have genuinely applied a Ki correction");
-    TEST_CHECK(s_at_zones[1].ki_verdict == (uint8_t)ADAPTIVE_TUNE_KI_OFFSET_TOO_SMALL, "setup: real verdict");
+    TEST_CHECK(adaptive_tune_zones[1].ki_applied, "setup: run 1 must have genuinely applied a Ki correction");
+    TEST_CHECK(adaptive_tune_zones[1].ki_verdict == (uint8_t)ADAPTIVE_TUNE_KI_OFFSET_TOO_SMALL, "setup: real verdict");
 
     // Run 2: zone 1 not touched by this profile at all (make_clean_record()
     // only marks the zone index it is given as active -- every other zone,
@@ -1499,18 +1548,18 @@ static void test_run_status_fields_cleared_when_zone_masked_out_of_profile(void)
     profile_firing_run_record_t rec2 = make_clean_record(97, 0, 900);
     adaptive_tune_run_end(&rec2, true);
 
-    TEST_CHECK(!s_at_zones[1].ki_applied,
+    TEST_CHECK(!adaptive_tune_zones[1].ki_applied,
                "K1: a zone masked out of this profile must not keep publishing a PREVIOUS run's ki_applied=1");
-    TEST_CHECK(s_at_zones[1].ki_verdict == (uint8_t)ADAPTIVE_TUNE_KI_INSUFFICIENT,
+    TEST_CHECK(adaptive_tune_zones[1].ki_verdict == (uint8_t)ADAPTIVE_TUNE_KI_INSUFFICIENT,
                "K1: a zone masked out of this profile must reset ki_verdict");
-    TEST_CHECK(s_at_zones[1].ki_correction_pct == 0.0f,
+    TEST_CHECK(adaptive_tune_zones[1].ki_correction_pct == 0.0f,
                "K1: a zone masked out of this profile must reset ki_correction_pct");
-    TEST_CHECK(strstr(s_at_zones[1].ki_refusal_reason, "zone mask") != NULL,
+    TEST_CHECK(strstr(adaptive_tune_zones[1].ki_refusal_reason, "zone mask") != NULL,
                "K1: the Ki refusal reason must say why THIS run produced no diagnosis for this zone");
 }
 
 // ---------------------------------------------------------------------
-// H3: try_refine_ki_locked() has no cumulative bound of its own, only
+// H3: adaptive_tune_refine_ki_locked() has no cumulative bound of its own, only
 // ADAPTIVE_TUNE_KI_MAX_FRACTIONAL_MOVE per run (20%). On real hardware the
 // loop is CLOSED -- a rising Ki genuinely shrinks dwell_err_mean_c on the
 // next firing, so the correction is self-limiting -- and zones_config_set_
@@ -1556,8 +1605,8 @@ static void test_run_status_fields_cleared_when_zone_masked_out_of_profile(void)
 static void test_ki_diagnosis_converges_under_closed_loop_plant_feedback(void)
 {
     reset_module_state();
-    s_at_zones[1].enabled = true;
-    s_fake_zone_cfg[1].k_dc = 10.0f; // this fixture's own dwells are too few for try_refine_zone_locked() to
+    adaptive_tune_zones[1].enabled = true;
+    s_fake_zone_cfg[1].k_dc = 10.0f; // this fixture's own dwells are too few for adaptive_tune_refine_zone_locked() to
                                       // even attempt a fit (ring_count 1 < ADAPTIVE_TUNE_MIN_OBSERVATIONS(4) --
                                       // see the single feed_settled_dwell() call per run below), NOT because the
                                       // blend would be immaterial -- keep the model refine permanently un-due so
@@ -1575,7 +1624,7 @@ static void test_ki_diagnosis_converges_under_closed_loop_plant_feedback(void)
                                           // pure-math OFFSET tests above
 
         // One short dwell (keeps ring_count well under ADAPTIVE_TUNE_MIN_
-        // OBSERVATIONS, so try_refine_zone_locked() never has enough data to
+        // OBSERVATIONS, so adaptive_tune_refine_zone_locked() never has enough data to
         // fire and D5 never starves the Ki diagnosis) plus a long dwell that
         // actually feeds the Ki trace -- same two-call shape as
         // test_ki_diagnosis_skipped_same_run_as_model_refine()'s fixture.
@@ -1586,11 +1635,11 @@ static void test_ki_diagnosis_converges_under_closed_loop_plant_feedback(void)
         rec.zones[1].stats.dwell_err_max_c = err_max;
         adaptive_tune_run_end(&rec, true);
 
-        TEST_CHECK(!s_at_zones[1].has_applied, "setup: the model refine must never fire in this fixture -- only "
+        TEST_CHECK(!adaptive_tune_zones[1].has_applied, "setup: the model refine must never fire in this fixture -- only "
                                              "the Ki diagnosis is under test here");
 
         float ki_after = s_fake_zone_cfg[1].ki;
-        if (!s_at_zones[1].ki_applied && ki_after == ki_before && !converged) {
+        if (!adaptive_tune_zones[1].ki_applied && ki_after == ki_before && !converged) {
             converged = true;
             converged_at_run = run;
         }
@@ -1615,7 +1664,7 @@ static void test_ki_diagnosis_converges_under_closed_loop_plant_feedback(void)
     TEST_CHECK(last_ki < ADAPTIVE_TUNE_KI_CUMULATIVE_MAX_MULT * 1.0f /* ki_baseline captured as 1.0 */,
                "P2/K6: this fixture's legitimate convergence must land comfortably inside the cumulative bound, "
                "proving the bound does not clip a real closed-loop zone");
-    TEST_CHECK(strstr(s_at_zones[1].ki_refusal_reason, "cumulative bound") == NULL,
+    TEST_CHECK(strstr(adaptive_tune_zones[1].ki_refusal_reason, "cumulative bound") == NULL,
                "P2/K6: a legitimately converging zone must never be refused by the cumulative bound");
 
     // Re-run several more times past convergence -- Ki must genuinely have
@@ -1654,7 +1703,7 @@ static void test_ki_diagnosis_converges_under_closed_loop_plant_feedback(void)
 static void test_ki_diagnosis_runaway_under_constant_error_is_capped_by_cumulative_bound(void)
 {
     reset_module_state();
-    s_at_zones[1].enabled = true;
+    adaptive_tune_zones[1].enabled = true;
     s_fake_zone_cfg[1].k_dc = 10.0f;
     s_fake_zone_cfg[1].ki = 1.0f;
 
@@ -1668,8 +1717,8 @@ static void test_ki_diagnosis_runaway_under_constant_error_is_capped_by_cumulati
         rec.zones[1].stats.dwell_err_mean_c = 0.45f;
         rec.zones[1].stats.dwell_err_max_c = 0.50f;
         adaptive_tune_run_end(&rec, true);
-        if (s_fake_zone_cfg[1].ki > 3.0f && !s_at_zones[1].ki_applied &&
-            strstr(s_at_zones[1].ki_refusal_reason, "cumulative bound") != NULL) {
+        if (s_fake_zone_cfg[1].ki > 3.0f && !adaptive_tune_zones[1].ki_applied &&
+            strstr(adaptive_tune_zones[1].ki_refusal_reason, "cumulative bound") != NULL) {
             saw_a_cumulative_refusal_after_growth = true;
         }
     }
@@ -1677,7 +1726,7 @@ static void test_ki_diagnosis_runaway_under_constant_error_is_capped_by_cumulati
                "P2/K6: under constant (non-shrinking) error, Ki must climb until the CUMULATIVE bound actually "
                "refuses it, and say so by name -- not silently keep growing toward the 850x runaway the "
                "pre-cumulative-bound probe measured");
-    TEST_CHECK(strstr(s_at_zones[1].ki_refusal_reason, "re-autotune") != NULL,
+    TEST_CHECK(strstr(adaptive_tune_zones[1].ki_refusal_reason, "re-autotune") != NULL,
                "P2: once the cumulative bound binds, the refusal must recommend re-autotuning this zone -- the "
                "reviewer's preferred remediation for a zone that needs this much integral correction, rather "
                "than continued Ki growth");
@@ -1702,7 +1751,7 @@ static void test_ki_diagnosis_runaway_under_constant_error_is_capped_by_cumulati
 // -- mutating 0.20f -> 5.0f (500%/run) left 218/218 GREEN, because
 // adaptive_tune_diagnose_ki()'s raw ki_correction_pct was a SEPARATELY
 // hardcoded +-20.0f literal that happened to equal the cap's value, so the
-// clamp in try_refine_ki_locked() could never actually bind on any real
+// clamp in adaptive_tune_refine_ki_locked() could never actually bind on any real
 // input (raw was never > cap). Fixed by deriving the raw magnitude from
 // this SAME named constant (see its own comment) instead of a duplicate
 // literal -- so this test, which asserts the actual per-run RATIO (not
@@ -1713,7 +1762,7 @@ static void test_ki_diagnosis_runaway_under_constant_error_is_capped_by_cumulati
 static void test_ki_diagnosis_per_run_move_is_bounded_by_configured_fraction(void)
 {
     reset_module_state();
-    s_at_zones[1].enabled = true;
+    adaptive_tune_zones[1].enabled = true;
     s_fake_zone_cfg[1].k_dc = 10.0f; // ring never reaches ADAPTIVE_TUNE_MIN_OBSERVATIONS in this fixture --
                                       // see test_ki_diagnosis_converges_...()'s identical setup comment
     s_fake_zone_cfg[1].ki = 1.0f;
@@ -1732,7 +1781,7 @@ static void test_ki_diagnosis_per_run_move_is_bounded_by_configured_fraction(voi
         rec.zones[1].stats.dwell_err_mean_c = 0.45f;
         rec.zones[1].stats.dwell_err_max_c = 0.50f;
         adaptive_tune_run_end(&rec, true);
-        TEST_CHECK(s_at_zones[1].ki_applied, "setup: every run in this fixture must genuinely apply a Ki correction");
+        TEST_CHECK(adaptive_tune_zones[1].ki_applied, "setup: every run in this fixture must genuinely apply a Ki correction");
         float ki_after = s_fake_zone_cfg[1].ki;
         TEST_CHECK_NEAR(ki_after / ki_before, expected_ratio, 1e-3,
                          "K4: each run's Ki move must be pinned at exactly 1+ADAPTIVE_TUNE_KI_MAX_FRACTIONAL_MOVE "
@@ -1750,7 +1799,7 @@ static void test_ki_diagnosis_per_run_move_is_bounded_by_configured_fraction(voi
 
 // ---------------------------------------------------------------------
 // F3: dwelling_prev (and everything gated on it -- the settle window,
-// trace reset, and s_joint_dwell_row_committed) must reflect whether a zone
+// trace reset, and adaptive_tune_joint_dwell_row_committed) must reflect whether a zone
 // is PHYSICALLY dwelling, independent of whether any given tick's data
 // happens to be trustworthy or whether the zone happens to be opted in.
 // Both sub-cases below share one root cause: the old code only ever
@@ -1765,16 +1814,16 @@ static void test_ki_diagnosis_per_run_move_is_bounded_by_configured_fraction(voi
 static void test_dwelling_prev_tracks_dwelling_state_even_when_data_is_invalid(void)
 {
     reset_module_state();
-    s_at_zones[0].enabled = true;
+    adaptive_tune_zones[0].enabled = true;
     adaptive_tune_zone_tick(0, 100.0f, /*actual_valid=*/false, 0.5f, /*dwelling=*/true, 22.0f, DT_S);
-    TEST_CHECK(s_at_zones[0].dwelling_prev == true,
+    TEST_CHECK(adaptive_tune_zones[0].dwelling_prev == true,
                "a zone whose FIRST dwelling tick has bad data is still physically dwelling -- dwelling_prev must "
                "reflect that immediately, not silently stay false until the first VALID tick");
 
     reset_module_state();
-    s_at_zones[0].enabled = true;
+    adaptive_tune_zones[0].enabled = true;
     adaptive_tune_zone_tick(0, 100.0f, true, 0.5f, true, NAN, DT_S); // NaN ambient, same claim
-    TEST_CHECK(s_at_zones[0].dwelling_prev == true,
+    TEST_CHECK(adaptive_tune_zones[0].dwelling_prev == true,
                "a zone whose FIRST dwelling tick has a NaN ambient reading is still physically dwelling -- "
                "dwelling_prev must reflect that immediately");
 }
@@ -1783,20 +1832,20 @@ static void test_dwelling_prev_tracks_dwelling_state_even_when_data_is_invalid(v
 // same root cause -- a zone opted into adaptive tuning MID-DWELL must not
 // be misread as having just entered a fresh dwell, or it wrongly reopens
 // (and lets something re-commit into) an already-committed joint row from
-// THIS SAME physical dwell. MUST FAIL on pre-F3-fix code: s_joint_ring_
-// count ends at 2, not 1, for one physical dwell.
+// THIS SAME physical dwell. MUST FAIL on pre-F3-fix code: adaptive_tune_
+// joint_ring_count ends at 2, not 1, for one physical dwell.
 static void test_enabling_zone_mid_dwell_does_not_reopen_committed_joint_row(void)
 {
     reset_module_state();
-    s_at_zones[0].enabled = false; // starts opted OUT
-    s_at_zones[1].enabled = true;
-    s_at_zones[2].enabled = true;
+    adaptive_tune_zones[0].enabled = false; // starts opted OUT
+    adaptive_tune_zones[1].enabled = true;
+    adaptive_tune_zones[2].enabled = true;
     const float ambient = 20.0f;
     const float duty[MAX31856_CHANNEL_COUNT] = {0.5f, 0.5f, 0.5f};
 
     // Zone 0 is disabled but ticking with perfectly good data throughout --
     // a disabled zone still contributes its duty as a joint-cache NEIGHBOUR
-    // column (see s_joint_last_duty[]'s own comment), it just never runs
+    // column (see adaptive_tune_joint_last_duty[]'s own comment), it just never runs
     // its OWN settle/ring bookkeeping while opted out.
     adaptive_tune_zone_tick(0, q1(25.0f), true, duty[0], true, ambient, DT_S);
     adaptive_tune_zone_tick(1, q1(25.0f), true, duty[1], false, ambient, DT_S);
@@ -1806,19 +1855,19 @@ static void test_enabling_zone_mid_dwell_does_not_reopen_committed_joint_row(voi
         adaptive_tune_zone_tick(1, q1(25.0f), true, duty[1], true, ambient, DT_S);
         adaptive_tune_zone_tick(2, q1(25.0f), true, duty[2], true, ambient, DT_S);
     }
-    TEST_CHECK(s_joint_ring_count == 1, "setup: zones 1/2 settling with zone 0 disabled-but-valid must commit "
+    TEST_CHECK(adaptive_tune_joint_ring_count == 1, "setup: zones 1/2 settling with zone 0 disabled-but-valid must commit "
                                          "exactly one joint row");
 
     // Zone 0 gets opted IN mid-dwell -- still the SAME physical dwell (it
     // was never disabled from the joint cache's perspective, only from its
     // own adaptive-tune bookkeeping).
-    s_at_zones[0].enabled = true;
+    adaptive_tune_zones[0].enabled = true;
     for (int i = 0; i < SETTLE_TICKS; i++) {
         adaptive_tune_zone_tick(0, q1(25.0f), true, duty[0], true, ambient, DT_S);
         adaptive_tune_zone_tick(1, q1(25.0f), true, duty[1], true, ambient, DT_S);
         adaptive_tune_zone_tick(2, q1(25.0f), true, duty[2], true, ambient, DT_S);
     }
-    TEST_CHECK(s_joint_ring_count == 1, "F3(b): opting a zone into adaptive tuning mid-dwell must NOT be misread "
+    TEST_CHECK(adaptive_tune_joint_ring_count == 1, "F3(b): opting a zone into adaptive tuning mid-dwell must NOT be misread "
                                          "as that zone entering a fresh dwell -- it must not reopen and re-commit "
                                          "an already-committed joint row from this same physical dwell");
 }
@@ -1834,13 +1883,13 @@ static void test_enabling_zone_mid_dwell_does_not_reopen_committed_joint_row(voi
 // session of protection and then none.
 //
 // This test simulates exactly that: latch a baseline, grow Ki past it,
-// "reboot" (memset s_at_zones -- the same simulated-reboot idiom test_enable_
+// "reboot" (memset adaptive_tune_zones -- the same simulated-reboot idiom test_enable_
 // round_trips_through_persistence() above already uses for en_mask), then
 // prove the NEXT latch attempt reloads the ORIGINAL baseline from NVS
 // rather than re-latching from the grown live Ki. MUST FAIL on code with no
 // Ki-baseline NVS persistence (adaptive_tune_init() only ever reloading
 // en_mask) -- there, after the simulated reboot, ki_baseline_valid is false
-// again, and the very next try_refine_ki_locked() call re-latches from
+// again, and the very next adaptive_tune_refine_ki_locked() call re-latches from
 // whatever Ki is then live (the grown value), reproducing the runaway.
 static void test_ki_baseline_survives_reboot_not_relatched_from_grown_ki(void)
 {
@@ -1848,7 +1897,7 @@ static void test_ki_baseline_survives_reboot_not_relatched_from_grown_ki(void)
     nvs_test_clear();
     nvs_test_enable(true);
 
-    s_at_zones[1].enabled = true;
+    adaptive_tune_zones[1].enabled = true;
     s_fake_zone_cfg[1].k_dc = 10.0f; // permanently under ADAPTIVE_TUNE_MIN_OBSERVATIONS -- see the
                                       // closed-loop convergence fixture's identical setup comment: keeps
                                       // the model refine un-due so the Ki diagnosis gets every run
@@ -1862,9 +1911,9 @@ static void test_ki_baseline_survives_reboot_not_relatched_from_grown_ki(void)
     rec1.zones[1].stats.dwell_err_mean_c = 0.45f;
     rec1.zones[1].stats.dwell_err_max_c = 0.50f;
     adaptive_tune_run_end(&rec1, true);
-    TEST_CHECK(s_at_zones[1].ki_applied, "setup: run 1 must genuinely apply a Ki correction");
-    TEST_CHECK(s_at_zones[1].ki_baseline_valid, "setup: run 1 must latch a baseline");
-    TEST_CHECK_NEAR(s_at_zones[1].ki_baseline, 1.0f, 1e-4, "setup: baseline latches at the PRE-growth Ki");
+    TEST_CHECK(adaptive_tune_zones[1].ki_applied, "setup: run 1 must genuinely apply a Ki correction");
+    TEST_CHECK(adaptive_tune_zones[1].ki_baseline_valid, "setup: run 1 must latch a baseline");
+    TEST_CHECK_NEAR(adaptive_tune_zones[1].ki_baseline, 1.0f, 1e-4, "setup: baseline latches at the PRE-growth Ki");
     TEST_CHECK(s_fake_zone_cfg[1].ki > 1.0f, "setup: Ki must have grown past the baseline this same run");
     float grown_ki = s_fake_zone_cfg[1].ki;
 
@@ -1874,9 +1923,9 @@ static void test_ki_baseline_survives_reboot_not_relatched_from_grown_ki(void)
     // persisted zones_config blob) is deliberately NOT reset here -- a real
     // reboot keeps the persisted Ki exactly where the last firing left it,
     // it only loses THIS module's own RAM state.
-    memset(s_at_zones, 0, sizeof(s_at_zones));
+    memset(adaptive_tune_zones, 0, sizeof(adaptive_tune_zones));
     adaptive_tune_init();
-    s_at_zones[1].enabled = true; // re-opt-in, as an operator would find it (persisted via en_mask on
+    adaptive_tune_zones[1].enabled = true; // re-opt-in, as an operator would find it (persisted via en_mask on
                                 // real hardware; set directly here since enable persistence is
                                 // covered by its own test above and is not what this test is about)
 
@@ -1891,10 +1940,10 @@ static void test_ki_baseline_survives_reboot_not_relatched_from_grown_ki(void)
     rec2.zones[1].stats.dwell_err_mean_c = 0.45f;
     rec2.zones[1].stats.dwell_err_max_c = 0.50f;
     adaptive_tune_run_end(&rec2, true);
-    TEST_CHECK(s_at_zones[1].ki_applied, "setup: run 2 (post-reboot) must also genuinely apply a Ki correction");
+    TEST_CHECK(adaptive_tune_zones[1].ki_applied, "setup: run 2 (post-reboot) must also genuinely apply a Ki correction");
 
-    TEST_CHECK(s_at_zones[1].ki_baseline_valid, "P1: the baseline must be valid again after a reboot");
-    TEST_CHECK_NEAR(s_at_zones[1].ki_baseline, 1.0f, 1e-4,
+    TEST_CHECK(adaptive_tune_zones[1].ki_baseline_valid, "P1: the baseline must be valid again after a reboot");
+    TEST_CHECK_NEAR(adaptive_tune_zones[1].ki_baseline, 1.0f, 1e-4,
                      "P1: the baseline must RELOAD from persisted NVS state (1.0, the original autotuned "
                      "value) after a reboot, not RE-LATCH from the already-grown live Ki -- this is the "
                      "exact defect that let one power cycle reach an 850.6x runaway (measured: boot 0 "
@@ -1919,7 +1968,7 @@ static void test_ki_baseline_survives_reboot_not_relatched_from_grown_ki(void)
 static void test_run_end_skips_disabled_zone_even_with_ring_data_present(void)
 {
     reset_module_state();
-    s_at_zones[0].enabled = true;
+    adaptive_tune_zones[0].enabled = true;
     s_fake_zone_cfg[0].k_dc = 10.0f;
     // True gain == prior (10.0) with real spread, so nothing else about this
     // fit is refusable -- if the run_end opt-in check did not exist, this
@@ -1928,18 +1977,18 @@ static void test_run_end_skips_disabled_zone_even_with_ring_data_present(void)
     feed_settled_dwell(0, 22.0f + 10.0f * 0.50f, 22.0f, 0.50f, SETTLE_TICKS, DT_S);
     feed_settled_dwell(0, 22.0f + 10.0f * 0.70f, 22.0f, 0.70f, SETTLE_TICKS, DT_S);
     feed_settled_dwell(0, 22.0f + 10.0f * 0.90f, 22.0f, 0.90f, SETTLE_TICKS, DT_S);
-    TEST_CHECK(s_at_zones[0].ring_count >= ADAPTIVE_TUNE_MIN_OBSERVATIONS,
+    TEST_CHECK(adaptive_tune_zones[0].ring_count >= ADAPTIVE_TUNE_MIN_OBSERVATIONS,
                "setup: enough dwell observations queued to clear the observation-count floor");
 
-    s_at_zones[0].enabled = false; // opted out AFTER the data was recorded, before run_end
+    adaptive_tune_zones[0].enabled = false; // opted out AFTER the data was recorded, before run_end
 
     profile_firing_run_record_t rec = make_clean_record(5, 0, 900);
     adaptive_tune_run_end(&rec, true);
 
-    TEST_CHECK(!s_at_zones[0].has_applied,
+    TEST_CHECK(!adaptive_tune_zones[0].has_applied,
                "P3: a zone opted out before run_end must never apply, even with a full, well-spread ring");
     TEST_CHECK(s_fake_zone_cfg[0].k_dc == 10.0f, "P3: the model must be untouched when opted out before run_end");
-    TEST_CHECK(strstr(s_at_zones[0].last_refusal_reason, "not opted into") != NULL,
+    TEST_CHECK(strstr(adaptive_tune_zones[0].last_refusal_reason, "not opted into") != NULL,
                "P3: the refusal must name the opt-in gate specifically, not an observation-count/spread guard "
                "that would also explain a refusal on its own -- MUST go red by mutation if adaptive_tune_run_"
                "end()'s `!z->enabled` skip check is removed");
@@ -1975,7 +2024,7 @@ static void test_duty_spread_guard_pins_exact_threshold(void)
     float over_spread = 0.051f;  // independent literal -- see this test's header comment
 
     reset_module_state();
-    s_at_zones[1].enabled = true;
+    adaptive_tune_zones[1].enabled = true;
     s_fake_zone_cfg[1].k_dc = 10.0f;
     feed_settled_dwell(1, 22.0f + 10.0f * 0.500f, 22.0f, 0.500f, SETTLE_TICKS, DT_S);
     feed_settled_dwell(1, 22.0f + 10.0f * 0.500f, 22.0f, 0.500f, SETTLE_TICKS, DT_S);
@@ -1983,12 +2032,12 @@ static void test_duty_spread_guard_pins_exact_threshold(void)
     feed_settled_dwell(1, 22.0f + 10.0f * (0.500f + under_spread), 22.0f, 0.500f + under_spread, SETTLE_TICKS, DT_S);
     profile_firing_run_record_t rec_under = make_clean_record(10, 1, 900);
     adaptive_tune_run_end(&rec_under, true);
-    TEST_CHECK(strstr(s_at_zones[1].last_refusal_reason, "clustered") != NULL,
+    TEST_CHECK(strstr(adaptive_tune_zones[1].last_refusal_reason, "clustered") != NULL,
                "P4: a duty spread just BELOW the configured floor must still refuse as clustered -- MUST go "
                "red by mutation if ADAPTIVE_TUNE_MIN_DUTY_SPREAD is lowered below this spread");
 
     reset_module_state();
-    s_at_zones[1].enabled = true;
+    adaptive_tune_zones[1].enabled = true;
     s_fake_zone_cfg[1].k_dc = 10.0f;
     feed_settled_dwell(1, 22.0f + 10.0f * 0.500f, 22.0f, 0.500f, SETTLE_TICKS, DT_S);
     feed_settled_dwell(1, 22.0f + 10.0f * 0.500f, 22.0f, 0.500f, SETTLE_TICKS, DT_S);
@@ -1996,24 +2045,45 @@ static void test_duty_spread_guard_pins_exact_threshold(void)
     feed_settled_dwell(1, 22.0f + 10.0f * (0.500f + over_spread), 22.0f, 0.500f + over_spread, SETTLE_TICKS, DT_S);
     profile_firing_run_record_t rec_over = make_clean_record(11, 1, 900);
     adaptive_tune_run_end(&rec_over, true);
-    TEST_CHECK(strstr(s_at_zones[1].last_refusal_reason, "clustered") == NULL,
+    TEST_CHECK(strstr(adaptive_tune_zones[1].last_refusal_reason, "clustered") == NULL,
                "P4: a duty spread just ABOVE the configured floor must clear the spread guard specifically -- "
                "any remaining refusal here must come from a LATER guard (e.g. material-move), never spread");
 }
 
 // ---------------------------------------------------------------------
-// P6: try_refine_ki_locked() has no LOWER bound on Ki -- only !(new_ki >
+// P6: adaptive_tune_refine_ki_locked() has no LOWER bound on Ki -- only !(new_ki >
 // 0.0f) at the setter boundary. The reviewer accepts this as self-limiting
 // (less Ki -> less oscillation -> the LIMIT_CYCLE/OSCILLATING verdict stops
 // firing) rather than an overtemp hazard, but that self-limiting behavior
 // was UNPROVEN: only unit-level sign checks existed (Ki never goes
 // negative), no multi-run integration test showing the DECREASING direction
-// actually stabilizes under real plant feedback the way the INCREASING
-// direction's test above does. This drives the decreasing direction across
-// many runs with oscillation amplitude modeled as scaling with Ki (a real
-// closed loop: less integral gain, less overshoot/hunting), and requires
-// convergence to a real, physically meaningful Ki -- not a collapse toward
-// the ~1e-38 the bare positivity check alone would permit.
+// actually stabilizes the way the INCREASING direction's test above does.
+// This drives the decreasing direction across many runs with oscillation
+// amplitude modeled as scaling with Ki (a real closed loop: less integral
+// gain, less overshoot/hunting) and requires convergence to a real,
+// physically meaningful Ki -- not a collapse toward the ~1e-38 the bare
+// positivity check alone would permit.
+//
+// R3 CORRECTION (opus review of commit 7c47683, 2026-09-01): this test's
+// original name and comments claimed the decrease "self-limits under real
+// plant feedback" -- i.e. that shrinking oscillation amplitude is what stops
+// it. That claim is FALSE for the amplitude scaling actually used below
+// (base_amplitude_c=5.0, amplitude = base_amplitude_c * ki/100): mutating
+// ONLY the Q2 cumulative floor to `if (0)` (adaptive_tune_ki.c ~line 295)
+// makes the last_ki > 1.0f assertion below FAIL. This fixture stabilizes at
+// last_ki ~= 100*0.8^7 ~= 20.97 -- pinned AT the Q2 floor
+// (ki_baseline/ADAPTIVE_TUNE_KI_CUMULATIVE_MAX_MULT = 100/5 = 20), not by
+// plant feedback: at Ki=21 the amplitude here is still 5.0*0.21 = 1.05C,
+// ~21x the 0.05C ADAPTIVE_TUNE_KI_NOISE_FLOOR_C, nowhere near the amplitude
+// threshold that would make adaptive_tune_diagnose_ki() stop returning
+// LIMIT_CYCLE on its own. So what this test actually proves is: the
+// decreasing direction is bounded, and the Q2 cumulative floor is what
+// bounds it -- not "plant feedback self-limits it", which would require the
+// amplitude itself to fall to the noise floor first. Named and commented
+// accurately below; see test_ki_diagnosis_cumulative_floor_binds_and_names_
+// itself() (Q2, further down) for the dedicated floor test this one turns
+// out to be a duplicate proof of, from the decreasing-Ki-diagnosis side
+// rather than the fixed-amplitude side.
 // ---------------------------------------------------------------------
 static void feed_oscillating_trace(uint8_t zi, float mean_c, float amplitude_c, int n_samples, float dt_s)
 {
@@ -2031,10 +2101,10 @@ static void feed_oscillating_trace(uint8_t zi, float mean_c, float amplitude_c, 
     }
 }
 
-static void test_ki_diagnosis_decreasing_direction_stabilizes_under_plant_feedback(void)
+static void test_ki_diagnosis_decreasing_direction_stabilizes_at_cumulative_floor(void)
 {
     reset_module_state();
-    s_at_zones[1].enabled = true;
+    adaptive_tune_zones[1].enabled = true;
     s_fake_zone_cfg[1].k_dc = 10.0f; // permanently under ADAPTIVE_TUNE_MIN_OBSERVATIONS -- same posture as
                                       // the increasing-direction fixture above
     s_fake_zone_cfg[1].ki = 100.0f;  // start deliberately oscillating
@@ -2099,9 +2169,10 @@ static void test_ki_diagnosis_decreasing_direction_stabilizes_under_plant_feedba
                                 "fixture -- MUST go red if adaptive_tune_ki.c's crossing/regularity branch "
                                 "(the `if (amplitude > NOISE_FLOOR && ncross >= MIN_CROSSINGS)` condition, "
                                 ":93) is disabled, e.g. mutated to `if (0)`");
-    TEST_CHECK(stabilized, "P6: under plant feedback (oscillation shrinking as Ki falls), the decreasing "
-                            "direction must eventually STOP moving, not collapse toward the ~1e-38 floor the "
-                            "bare positivity check alone permits");
+    TEST_CHECK(stabilized, "P6: the decreasing direction must eventually STOP moving -- bound by the Q2 "
+                            "cumulative floor at this fixture's amplitude scaling (see this test's own header "
+                            "comment: amplitude here never falls anywhere near the noise floor on its own) -- "
+                            "not collapse toward the ~1e-38 floor the bare positivity check alone would permit");
     TEST_CHECK(stabilized_at_run >= 0, "sanity: stabilization was actually observed within the 60-run loop");
     TEST_CHECK(last_ki < 100.0f, "P6: the decreasing direction must have genuinely moved Ki DOWN from its "
                                   "100.0 starting point by the time it stabilizes");
@@ -2122,12 +2193,14 @@ static void test_ki_diagnosis_decreasing_direction_stabilizes_under_plant_feedba
 }
 
 // ---------------------------------------------------------------------
-// Q2: symmetric LOWER cumulative bound. P6 above proved the decreasing
-// direction self-limits WHEN the oscillation source scales with Ki (a real
-// closed loop). This test is the negative case P6 cannot cover: an
-// oscillation source that does NOT scale with Ki at all -- coupling from a
-// neighbouring zone, relay chatter, thermocouple noise -- which the OLD code
-// (only `!(new_ki > 0.0f)`) would decay without limit, 20%/run, toward the
+// Q2: symmetric LOWER cumulative bound. P6 above drives the decreasing
+// direction with an oscillation source that DOES scale with Ki -- and even
+// there (see P6's own R3-corrected header comment), it is THIS floor, not
+// plant feedback, that actually stops the decrease at this repo's fixture
+// amplitudes. This test is the more direct proof, with a fixed-amplitude
+// source that does NOT scale with Ki at all -- coupling from a neighbouring
+// zone, relay chatter, thermocouple noise -- which the OLD code (only
+// `!(new_ki > 0.0f)`) would decay without limit, 20%/run, toward the
 // setter's positivity floor. MUST FAIL if adaptive_tune_ki.c's new lower-
 // bound check is removed (or its comparison inverted) -- the reason string
 // would never contain "cumulative floor" and stored Ki would keep dropping
@@ -2136,7 +2209,7 @@ static void test_ki_diagnosis_decreasing_direction_stabilizes_under_plant_feedba
 static void test_ki_diagnosis_cumulative_floor_binds_and_names_itself(void)
 {
     reset_module_state();
-    s_at_zones[1].enabled = true;
+    adaptive_tune_zones[1].enabled = true;
     s_fake_zone_cfg[1].k_dc = 10.0f; // permanently under ADAPTIVE_TUNE_MIN_OBSERVATIONS -- keeps the model
                                       // refine un-due so the Ki diagnosis gets every run (same posture as
                                       // every other Ki-diagnosis fixture in this file)
@@ -2153,15 +2226,15 @@ static void test_ki_diagnosis_cumulative_floor_binds_and_names_itself(void)
         rec.zones[1].stats.dwell_err_mean_c = 0.0f;
         rec.zones[1].stats.dwell_err_max_c = 0.0f;
         adaptive_tune_run_end(&rec, true);
-        if (s_fake_zone_cfg[1].ki < 100.0f && !s_at_zones[1].ki_applied &&
-            strstr(s_at_zones[1].ki_refusal_reason, "cumulative floor") != NULL) {
+        if (s_fake_zone_cfg[1].ki < 100.0f && !adaptive_tune_zones[1].ki_applied &&
+            strstr(adaptive_tune_zones[1].ki_refusal_reason, "cumulative floor") != NULL) {
             saw_a_floor_refusal_after_shrink = true;
         }
     }
     TEST_CHECK(saw_a_floor_refusal_after_shrink,
                "Q2: under an oscillation source that does not scale with Ki, Ki must shrink until the "
                "CUMULATIVE FLOOR actually refuses it, and say so by name -- not silently keep decaying");
-    TEST_CHECK(strstr(s_at_zones[1].ki_refusal_reason, "re-autotune") != NULL,
+    TEST_CHECK(strstr(adaptive_tune_zones[1].ki_refusal_reason, "re-autotune") != NULL,
                "Q2: once the cumulative floor binds, the refusal must recommend re-autotuning this zone, same "
                "remediation as the upper cumulative bound");
     float floor = 100.0f / ADAPTIVE_TUNE_KI_CUMULATIVE_MAX_MULT; // baseline latched at 100.0 (setup value)
@@ -2181,7 +2254,7 @@ static void test_ki_diagnosis_cumulative_floor_binds_and_names_itself(void)
 static void test_ki_diagnosis_cumulative_floor_does_not_block_legitimate_convergence(void)
 {
     reset_module_state();
-    s_at_zones[1].enabled = true;
+    adaptive_tune_zones[1].enabled = true;
     s_fake_zone_cfg[1].k_dc = 10.0f;
     s_fake_zone_cfg[1].ki = 100.0f;
 
@@ -2191,9 +2264,9 @@ static void test_ki_diagnosis_cumulative_floor_does_not_block_legitimate_converg
     rec.zones[1].stats.dwell_err_max_c = 0.0f;
     adaptive_tune_run_end(&rec, true);
 
-    TEST_CHECK(s_at_zones[1].ki_applied,
+    TEST_CHECK(adaptive_tune_zones[1].ki_applied,
                "Q2: a single, modest (20%%-capped) shrink well inside the 5x floor must apply normally");
-    TEST_CHECK(strstr(s_at_zones[1].ki_refusal_reason, "cumulative floor") == NULL,
+    TEST_CHECK(strstr(adaptive_tune_zones[1].ki_refusal_reason, "cumulative floor") == NULL,
                "Q2: a legitimately converging zone's first correction must never be refused by the new floor "
                "guard -- MUST go red if the floor is implemented as an unconditional decrease-refusal instead "
                "of the actual baseline/5 comparison");
@@ -2218,7 +2291,7 @@ static void test_clear_ki_baseline_lets_the_next_run_relatch_fresh(void)
     nvs_test_clear();
     nvs_test_enable(true);
 
-    s_at_zones[1].enabled = true;
+    adaptive_tune_zones[1].enabled = true;
     s_fake_zone_cfg[1].k_dc = 10.0f;
     s_fake_zone_cfg[1].ki = 1.0f;
 
@@ -2227,8 +2300,8 @@ static void test_clear_ki_baseline_lets_the_next_run_relatch_fresh(void)
     rec1.zones[1].stats.dwell_err_mean_c = 0.45f;
     rec1.zones[1].stats.dwell_err_max_c = 0.50f;
     adaptive_tune_run_end(&rec1, true);
-    TEST_CHECK(s_at_zones[1].ki_baseline_valid, "setup: run 1 must latch a baseline");
-    TEST_CHECK_NEAR(s_at_zones[1].ki_baseline, 1.0f, 1e-4, "setup: baseline latches at the pre-growth Ki");
+    TEST_CHECK(adaptive_tune_zones[1].ki_baseline_valid, "setup: run 1 must latch a baseline");
+    TEST_CHECK_NEAR(adaptive_tune_zones[1].ki_baseline, 1.0f, 1e-4, "setup: baseline latches at the pre-growth Ki");
     float grown_ki = s_fake_zone_cfg[1].ki;
     TEST_CHECK(grown_ki > 1.0f, "setup: Ki must have grown past the baseline this same run");
 
@@ -2236,7 +2309,7 @@ static void test_clear_ki_baseline_lets_the_next_run_relatch_fresh(void)
     // baseline for this zone, exactly as autotune_engine.c's accept path
     // now does after committing a fresh result.
     adaptive_tune_clear_ki_baseline(1);
-    TEST_CHECK(!s_at_zones[1].ki_baseline_valid,
+    TEST_CHECK(!adaptive_tune_zones[1].ki_baseline_valid,
                "Q3: adaptive_tune_clear_ki_baseline() must invalidate the RAM baseline immediately");
 
     // Reboot-survival, checked BEFORE the next run re-latches anything: the
@@ -2246,12 +2319,12 @@ static void test_clear_ki_baseline_lets_the_next_run_relatch_fresh(void)
     // specifically. Uses its own re-opt-in, same idiom as P1's own reboot
     // test above (en_mask persistence is that test's concern, not this
     // one's).
-    memset(s_at_zones, 0, sizeof(s_at_zones));
+    memset(adaptive_tune_zones, 0, sizeof(adaptive_tune_zones));
     adaptive_tune_init();
-    TEST_CHECK(!s_at_zones[1].ki_baseline_valid,
+    TEST_CHECK(!adaptive_tune_zones[1].ki_baseline_valid,
                "Q3: a cleared baseline must reload as INVALID after a reboot too -- the clear must reach NVS, "
                "not just RAM");
-    s_at_zones[1].enabled = true; // re-opt-in, as an operator would find it post-reboot
+    adaptive_tune_zones[1].enabled = true; // re-opt-in, as an operator would find it post-reboot
 
     // Next run, post-reboot: another genuine OFFSET_TOO_SMALL correction.
     // The baseline must re-latch at the CURRENT (already-grown) live Ki, not
@@ -2263,9 +2336,9 @@ static void test_clear_ki_baseline_lets_the_next_run_relatch_fresh(void)
     rec2.zones[1].stats.dwell_err_mean_c = 0.45f;
     rec2.zones[1].stats.dwell_err_max_c = 0.50f;
     adaptive_tune_run_end(&rec2, true);
-    TEST_CHECK(s_at_zones[1].ki_applied, "setup: run 2 (post-clear) must also genuinely apply a Ki correction");
-    TEST_CHECK(s_at_zones[1].ki_baseline_valid, "Q3: the baseline must be valid again after re-latching");
-    TEST_CHECK_NEAR(s_at_zones[1].ki_baseline, grown_ki, 1e-4,
+    TEST_CHECK(adaptive_tune_zones[1].ki_applied, "setup: run 2 (post-clear) must also genuinely apply a Ki correction");
+    TEST_CHECK(adaptive_tune_zones[1].ki_baseline_valid, "Q3: the baseline must be valid again after re-latching");
+    TEST_CHECK_NEAR(adaptive_tune_zones[1].ki_baseline, grown_ki, 1e-4,
                      "Q3: the re-latched baseline must track the CURRENT live Ki (the whole point of clearing "
                      "it after a re-autotune), not silently keep the value that was just cleared");
 
@@ -2274,7 +2347,82 @@ static void test_clear_ki_baseline_lets_the_next_run_relatch_fresh(void)
 }
 
 // ---------------------------------------------------------------------
-// Q4: the model layer (try_refine_zone_locked(), adaptive_tune_model.c)
+// R1 (opus review of commit 7c47683 -- SHIPPING BLOCKER): autotune_engine_
+// accept()'s call to adaptive_tune_clear_ki_baseline() is reachable from the
+// PC-tools UART GUI's Accept button (both step and relay accept paths), and
+// on THAT path autotune_engine_accept() is already running ON the flash-safe
+// worker (uart_bridge_ext.c's AUTOTUNE_CMD_ACCEPT dispatches its whole switch
+// body there). adaptive_tune_clear_ki_baseline() itself dispatches onto that
+// same worker to persist the cleared baseline -- naively doing so a second
+// time, from inside the first dispatch, deadlocks the board permanently
+// (non-recursive lock already held by the blocked original caller; the
+// 1-deep queue behind it is only ever drained by the very worker task now
+// stuck trying to enqueue into it). Recovery required a reboot, and it took
+// down control/profiles/autotune UART bridges and safety_cfg_store's
+// deferred NVS flush with it -- see uart_bridge_ext.c's HAZARD block and
+// adaptive_tune_clear_ki_baseline()'s own comment for the full incident.
+//
+// This test simulates that exact call shape: dispatch a job onto the (host)
+// worker stub, and from INSIDE that job -- with s_stub_on_flash_worker set
+// true, standing in for "we are bx_flash_worker" -- call the real
+// adaptive_tune_clear_ki_baseline(). The fix is that this function must
+// consult uart_bridge_ext_is_on_flash_worker() and do the save inline rather
+// than dispatching again. MUST GO RED if that check is removed (i.e. if
+// adaptive_tune_clear_ki_baseline() unconditionally calls uart_bridge_ext_
+// run_on_flash_worker()): the stub above models the real worker's non-
+// recursive-lock/depth-1-queue semantics, so the re-entrant dispatch trips
+// its busy check and fails loudly instead of silently succeeding -- which is
+// exactly what the OLD (bare `fn(arg)`) stub could never have caught. Proven
+// red 2026-09-01 by commenting out the uart_bridge_ext_is_on_flash_worker()
+// branch in adaptive_tune_clear_ki_baseline() and re-running this file: this
+// test failed with the re-entrancy message above, everything else unchanged.
+// ---------------------------------------------------------------------
+static uint8_t s_accept_like_zone;
+
+static void accept_like_job_calls_clear_ki_baseline(void *arg)
+{
+    (void)arg;
+    // Mirrors autotune_engine_accept() running ON the worker (UART bridge
+    // accept path) and then calling adaptive_tune_clear_ki_baseline() before
+    // returning -- see this function's caller for the outer dispatch that
+    // puts us here in the first place.
+    s_stub_on_flash_worker = true;
+    adaptive_tune_clear_ki_baseline(s_accept_like_zone);
+    s_stub_on_flash_worker = false;
+}
+
+static void test_accept_path_clear_ki_baseline_does_not_reenter_worker(void)
+{
+    reset_module_state();
+    nvs_test_clear();
+    nvs_test_enable(true);
+
+    adaptive_tune_zones[2].enabled = true;
+    adaptive_tune_zones[2].ki_baseline_valid = true;
+    adaptive_tune_zones[2].ki_baseline = 3.5f;
+    s_accept_like_zone = 2;
+
+    int failures_before = g_test_failures;
+
+    // The outer dispatch: models AUTOTUNE_CMD_ACCEPT handing the whole
+    // switch body -- including autotune_engine_accept()'s call into
+    // adaptive_tune_clear_ki_baseline() -- to bx_flash_worker.
+    esp_err_t err = uart_bridge_ext_run_on_flash_worker(accept_like_job_calls_clear_ki_baseline, NULL);
+
+    TEST_CHECK(err == ESP_OK, "R1: the accept-path dispatch itself must not fail");
+    TEST_CHECK(g_test_failures == failures_before,
+               "R1: adaptive_tune_clear_ki_baseline() must not re-enter the flash worker when the caller is "
+               "already on it -- a re-entrant dispatch here is the exact shape of the commit-7c47683 deadlock");
+    TEST_CHECK(!adaptive_tune_zones[2].ki_baseline_valid,
+               "R1: the baseline must still actually be cleared -- the fix must not just avoid the deadlock by "
+               "skipping the work");
+
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
+// ---------------------------------------------------------------------
+// Q4: the model layer (adaptive_tune_refine_zone_locked(), adaptive_tune_model.c)
 // rewrites Ki from a fresh SIMC recompute independent of the Ki-diagnosis
 // layer, and used to leave ki_baseline untouched -- so a zone whose SIMC
 // refine legitimately raised Ki past 5x a STALE baseline had its diagnosis
@@ -2289,14 +2437,14 @@ static void test_clear_ki_baseline_lets_the_next_run_relatch_fresh(void)
 static void test_model_refine_relatches_ki_baseline_to_fresh_simc_ki(void)
 {
     reset_module_state();
-    s_at_zones[0].enabled = true;
+    adaptive_tune_zones[0].enabled = true;
     s_fake_zone_cfg[0].k_dc = 10.0f;
     s_fake_zone_cfg[0].tau_s = 120.0f;
     s_fake_zone_cfg[0].dead_time_s = 15.0f;
     s_fake_zone_cfg[0].ki = 0.01f; // deliberately NOT SIMC-consistent with k_dc/tau/dead_time, so this run's
                                     // recompute is guaranteed to write a genuinely different Ki
 
-    TEST_CHECK(!s_at_zones[0].ki_baseline_valid, "setup: zone starts with no baseline latched at all");
+    TEST_CHECK(!adaptive_tune_zones[0].ki_baseline_valid, "setup: zone starts with no baseline latched at all");
 
     // A clean, well-spread ring that clears every model-refine guard --
     // same shape as test_refinement_improves_gain_estimate_on_known_plant()
@@ -2310,14 +2458,14 @@ static void test_model_refine_relatches_ki_baseline_to_fresh_simc_ki(void)
     profile_firing_run_record_t rec = make_clean_record(600, 0, 900);
     adaptive_tune_run_end(&rec, true);
 
-    TEST_CHECK(s_at_zones[0].has_applied, "setup: the model refine must genuinely apply this run");
+    TEST_CHECK(adaptive_tune_zones[0].has_applied, "setup: the model refine must genuinely apply this run");
     float fresh_ki = s_fake_zone_cfg[0].ki;
     TEST_CHECK(fabsf(fresh_ki - 0.01f) > 1e-6f, "setup: the SIMC recompute must have genuinely rewritten Ki");
 
-    TEST_CHECK(s_at_zones[0].ki_baseline_valid,
-               "Q4: the model refine must latch a baseline even though try_refine_ki_locked() never ran this "
+    TEST_CHECK(adaptive_tune_zones[0].ki_baseline_valid,
+               "Q4: the model refine must latch a baseline even though adaptive_tune_refine_ki_locked() never ran this "
                "run (D5: the model refine wins, the Ki diagnosis is skipped)");
-    TEST_CHECK_NEAR(s_at_zones[0].ki_baseline, fresh_ki, 1e-6,
+    TEST_CHECK_NEAR(adaptive_tune_zones[0].ki_baseline, fresh_ki, 1e-6,
                      "Q4: the baseline must track the model layer's fresh SIMC Ki specifically -- the value "
                      "zones_config_set_pid() was just called with -- not the old pre-refine Ki (0.01) it "
                      "replaced");
@@ -2398,7 +2546,7 @@ void run_test_adaptive_tune(void)
     test_ki_diagnosis_converges_under_closed_loop_plant_feedback();
     test_ki_diagnosis_runaway_under_constant_error_is_capped_by_cumulative_bound();
     test_ki_diagnosis_per_run_move_is_bounded_by_configured_fraction();
-    test_ki_diagnosis_decreasing_direction_stabilizes_under_plant_feedback(); // P6
+    test_ki_diagnosis_decreasing_direction_stabilizes_at_cumulative_floor(); // P6
 
     TEST_SECTION("adaptive_tune: symmetric lower cumulative Ki bound (Q2)");
     test_ki_diagnosis_cumulative_floor_binds_and_names_itself();
@@ -2413,6 +2561,9 @@ void run_test_adaptive_tune(void)
 
     TEST_SECTION("adaptive_tune: re-autotune actually clears the Ki-diagnosis baseline (Q3)");
     test_clear_ki_baseline_lets_the_next_run_relatch_fresh();
+
+    TEST_SECTION("adaptive_tune: accept-path clear_ki_baseline() does not re-enter the flash worker (R1)");
+    test_accept_path_clear_ki_baseline_does_not_reenter_worker();
 
     TEST_SECTION("adaptive_tune: the model layer keeps the Ki baseline tracking its own SIMC output (Q4)");
     test_model_refine_relatches_ki_baseline_to_fresh_simc_ki();

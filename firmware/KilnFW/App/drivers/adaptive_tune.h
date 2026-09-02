@@ -201,8 +201,8 @@ bool adaptive_tune_set_enabled(uint8_t zone_index, bool enabled);
 bool adaptive_tune_get_enabled(uint8_t zone_index);
 
 // Q3: clears this zone's persisted Ki-diagnosis baseline (RAM and NVS, via
-// the flash worker) so the NEXT try_refine_ki_locked()/try_refine_zone_
-// locked() call re-latches fresh -- the actual remedy the cumulative-bound
+// the flash worker) so the NEXT adaptive_tune_refine_ki_locked()/adaptive_tune_
+// refine_zone_locked() call re-latches fresh -- the actual remedy the cumulative-bound
 // refusal message names ("-- re-autotune this zone"). Call this once an
 // autotune RESULT has actually been committed for the zone (i.e. after the
 // same zones_config_set_pid()/set_model() calls that persist the new gains

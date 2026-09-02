@@ -17,12 +17,12 @@
  *                              flag + Ki-baseline NVS persistence, init,
  *                              public accessors (enable/get/get_status)
  *   adaptive_tune_model.c  -- Layer 2/3 diagonal K_dc refine
- *                              (try_refine_zone_locked()) and the full
+ *                              (adaptive_tune_refine_zone_locked()) and the full
  *                              coupled identification (adaptive_tune_
- *                              coupled_fit(), try_refine_coupled_locked())
+ *                              coupled_fit(), adaptive_tune_refine_coupled_locked())
  *   adaptive_tune_ki.c     -- integral (Ki) diagnosis: the pure classifier
  *                              (adaptive_tune_diagnose_ki()) and its locked
- *                              apply helper (try_refine_ki_locked())
+ *                              apply helper (adaptive_tune_refine_ki_locked())
  *
  * adaptive_tune.h stays the ONLY public API; this header is not installed
  * anywhere outside the drivers/ directory and nothing outside this module's
@@ -43,6 +43,15 @@
 // adaptive_tune.c's top comment for the full reasoning (declared by hand,
 // same as safety_cfg_store.c's identical declaration, for the same reason).
 esp_err_t uart_bridge_ext_run_on_flash_worker(void (*fn)(void *arg), void *arg);
+
+// True iff the calling task IS bx_flash_worker already -- see
+// adaptive_tune.c's adaptive_tune_clear_ki_baseline() for why this matters:
+// autotune_engine_accept() can reach that function while already running on
+// this worker (UART bridge accept path), and dispatching a second job onto
+// a busy, non-recursive-mutex-guarded, depth-1-queue worker from inside the
+// first one deadlocks the board permanently. Declared by hand for the same
+// reason the function above is.
+bool uart_bridge_ext_is_on_flash_worker(void);
 
 extern const char *ADAPTIVE_TUNE_TAG;
 
@@ -138,7 +147,7 @@ extern const char *ADAPTIVE_TUNE_TAG;
 //
 // Re-derived against plant reasoning instead: this layer only ever runs
 // AFTER a zone already has a SIMC-derived Ki from an actual FOPDT model (see
-// try_refine_ki_locked()'s "no existing positive Ki to refine" guard). If
+// adaptive_tune_refine_ki_locked()'s "no existing positive Ki to refine" guard). If
 // that model is a reasonably good description of the zone, the Ki diagnosis
 // should need only a modest correction to remove a genuine steady-state
 // offset or damp a genuine oscillation -- not many multiples of the
@@ -154,7 +163,7 @@ extern const char *ADAPTIVE_TUNE_TAG;
 // is telling us the K_dc/tau/dead_time model that Ki was derived from is
 // wrong, and the correct response is a fresh autotune (a new FOPDT
 // identification), not continued blind integral growth chasing a symptom of
-// the wrong model. try_refine_ki_locked()'s cumulative-bound refusal message
+// the wrong model. adaptive_tune_refine_ki_locked()'s cumulative-bound refusal message
 // says exactly this when it binds.
 //
 // Still an order of magnitude above where a single per-run move
@@ -219,7 +228,7 @@ typedef struct {
     char     ki_refusal_reason[96];
 
     // P1/K5: this zone's autotuned baseline Ki, latched once (see ADAPTIVE_
-    // TUNE_KI_CUMULATIVE_MAX_MULT) the first time try_refine_ki_locked()
+    // TUNE_KI_CUMULATIVE_MAX_MULT) the first time adaptive_tune_refine_ki_locked()
     // reaches a live Ki, never overwritten after. Persisted to NVS alongside
     // en_mask (adaptive_tune_kibase_blob_t below) -- see adaptive_tune.c's
     // save_kibase_job()/adaptive_tune_init() -- specifically so a power
@@ -231,23 +240,23 @@ typedef struct {
     float    ki_baseline;
 } adaptive_tune_zone_t;
 
-extern adaptive_tune_zone_t s_at_zones[MAX31856_CHANNEL_COUNT];
+extern adaptive_tune_zone_t adaptive_tune_zones[MAX31856_CHANNEL_COUNT];
 
 typedef struct {
     float duty[MAX31856_CHANNEL_COUNT];
     float rise_c[MAX31856_CHANNEL_COUNT];
 } adaptive_tune_joint_obs_t;
 
-extern adaptive_tune_joint_obs_t s_joint_ring[ADAPTIVE_TUNE_JOINT_RING_CAPACITY];
-extern uint32_t s_joint_ring_count;
-extern uint32_t s_joint_ring_head;
-extern uint32_t s_joint_observations_lifetime;
-extern bool s_joint_dwell_row_committed;
-extern float s_joint_last_duty[MAX31856_CHANNEL_COUNT];
-extern float s_joint_last_rise_c[MAX31856_CHANNEL_COUNT];
-extern bool  s_joint_last_valid[MAX31856_CHANNEL_COUNT];
+extern adaptive_tune_joint_obs_t adaptive_tune_joint_ring[ADAPTIVE_TUNE_JOINT_RING_CAPACITY];
+extern uint32_t adaptive_tune_joint_ring_count;
+extern uint32_t adaptive_tune_joint_ring_head;
+extern uint32_t adaptive_tune_joint_observations_lifetime;
+extern bool adaptive_tune_joint_dwell_row_committed;
+extern float adaptive_tune_joint_last_duty[MAX31856_CHANNEL_COUNT];
+extern float adaptive_tune_joint_last_rise_c[MAX31856_CHANNEL_COUNT];
+extern bool  adaptive_tune_joint_last_valid[MAX31856_CHANNEL_COUNT];
 
-extern SemaphoreHandle_t adaptive_tune_lock; // guards s_at_zones/s_joint_* above; taken only from this module's own
+extern SemaphoreHandle_t adaptive_tune_lock; // guards adaptive_tune_zones/adaptive_tune_joint_* above; taken only from this module's own
                                   // three files, never across profile_executor.c's s_exec.lock (see
                                   // adaptive_tune.h's doc comment on the lock order this keeps)
 extern bool adaptive_tune_lock_ready;
@@ -259,7 +268,7 @@ void adaptive_tune_ensure_lock(void);
 // the valid bitmask and the values array disagreeing about which zones have
 // a real baseline; a single nvs_set_blob() call is already atomic from this
 // module's point of view (NVS itself guarantees a key's write is all-or-
-// nothing). `mask` bit zi set means s_at_zones[zi].ki_baseline_valid should
+// nothing). `mask` bit zi set means adaptive_tune_zones[zi].ki_baseline_valid should
 // load true with vals[zi] as its baseline.
 typedef struct {
     uint8_t mask;
@@ -267,8 +276,8 @@ typedef struct {
 } adaptive_tune_kibase_blob_t;
 
 // adaptive_tune_set_refusal()/adaptive_tune_set_reason(): small vsnprintf-into-field helpers shared by
-// all three split files (try_refine_zone_locked(), try_refine_coupled_
-// locked(), try_refine_ki_locked() each report their own guard refusals
+// all three split files (adaptive_tune_refine_zone_locked(), adaptive_tune_refine_coupled_
+// locked(), adaptive_tune_refine_ki_locked() each report their own guard refusals
 // through one of these). adaptive_tune_set_refusal() always writes z->last_refusal_reason
 // specifically; adaptive_tune_set_reason() takes an explicit destination buffer for the
 // coupled/ki reason fields.
@@ -278,8 +287,8 @@ void adaptive_tune_set_reason(char *buf, size_t bufsz, const char *fmt, ...);
 // Cross-file locked helpers -- each defined in its own split file, called
 // only from adaptive_tune_run_end() (adaptive_tune.c), always with adaptive_tune_lock
 // already held.
-bool try_refine_zone_locked(uint8_t zi, uint8_t profile_id);
-void try_refine_coupled_locked(uint8_t zi);
-void try_refine_ki_locked(uint8_t zi, const profile_exec_firing_stats_t *stats);
+bool adaptive_tune_refine_zone_locked(uint8_t zi, uint8_t profile_id);
+void adaptive_tune_refine_coupled_locked(uint8_t zi);
+void adaptive_tune_refine_ki_locked(uint8_t zi, const profile_exec_firing_stats_t *stats);
 
 #endif // ADAPTIVE_TUNE_INTERNAL_H

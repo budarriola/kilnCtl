@@ -122,6 +122,15 @@ esp_err_t uart_bridge_ext_start_flash_worker(void);
  * exists to prevent). */
 esp_err_t uart_bridge_ext_run_on_flash_worker(void (*fn)(void *arg), void *arg);
 
+/* True iff the CALLING task is this same internal-SRAM-stack worker --
+ * i.e. iff calling uart_bridge_ext_run_on_flash_worker() right now would be
+ * a re-entrant, redundant dispatch onto the job the worker is already
+ * running. See adaptive_tune.c's adaptive_tune_clear_ki_baseline() for the
+ * caller this exists for (autotune_engine_accept(), reached over the UART
+ * bridge, runs ON this worker) and uart_bridge_ext.c's own bx_run_on_
+ * internal_stack() comment for the deadlock this avoids. */
+bool uart_bridge_ext_is_on_flash_worker(void);
+
 /* CONTROL (task 8): zone config reads + narrow PID/model writes -- see
  * uart_task_ids.h for the scope cap versus /api/zones. No hardware handle
  * needed; everything routes through zones_http.c's public getters/setters. */

@@ -1,7 +1,7 @@
 // adaptive_tune_ki.c -- Integral (Ki) diagnosis, split out of adaptive_
 // tune.c 2026-09-01 (see adaptive_tune_internal.h's own top comment for the
 // full shape): the pure classifier (adaptive_tune_diagnose_ki(), host-tested
-// directly) and its locked apply helper (try_refine_ki_locked()).
+// directly) and its locked apply helper (adaptive_tune_refine_ki_locked()).
 #include "adaptive_tune_internal.h"
 
 #include <math.h>
@@ -159,9 +159,9 @@ bool adaptive_tune_diagnose_ki(const float *actual_c, const float *duty, uint32_
     return true;
 }
 
-void try_refine_ki_locked(uint8_t zi, const profile_exec_firing_stats_t *stats)
+void adaptive_tune_refine_ki_locked(uint8_t zi, const profile_exec_firing_stats_t *stats)
 {
-    adaptive_tune_zone_t *z = &s_at_zones[zi];
+    adaptive_tune_zone_t *z = &adaptive_tune_zones[zi];
     z->ki_applied = false;
 
     if (z->trace_count < ADAPTIVE_TUNE_KI_MIN_SAMPLES) {
@@ -210,7 +210,7 @@ void try_refine_ki_locked(uint8_t zi, const profile_exec_firing_stats_t *stats)
     // P1/K5: latch this zone's baseline the first time this layer reaches a
     // live Ki for it -- see ki_baseline's struct comment (adaptive_tune_
     // internal.h). RAM-only here on purpose: adaptive_tune_run_end()
-    // (adaptive_tune.c) snapshots s_at_zones[*].ki_baseline* AFTER this call
+    // (adaptive_tune.c) snapshots adaptive_tune_zones[*].ki_baseline* AFTER this call
     // returns, still under adaptive_tune_lock, and dispatches the actual NVS
     // write to the flash worker only once the lock is released -- this
     // function must never itself touch NVS (it runs with adaptive_tune_lock
@@ -219,13 +219,13 @@ void try_refine_ki_locked(uint8_t zi, const profile_exec_firing_stats_t *stats)
     //
     // Q4: this is only ONE of the two places ki_baseline gets written now.
     // The comment here used to call this "the autotuned baseline", which
-    // stopped being true the moment try_refine_zone_locked() (adaptive_tune_
+    // stopped being true the moment adaptive_tune_refine_zone_locked() (adaptive_tune_
     // model.c) started rewriting Ki from a fresh SIMC recompute independent
     // of this layer -- a zone whose SIMC refine legitimately raised Ki past
     // 5x a stale value latched here would have its diagnosis muted
     // permanently, with no escape (see adaptive_tune_run_end()'s D5 comment
     // for why the two layers never both act in the same run, so this really
-    // could go stale for good). try_refine_zone_locked() now re-latches
+    // could go stale for good). adaptive_tune_refine_zone_locked() now re-latches
     // ki_baseline to its own freshly-written SIMC Ki every time it applies
     // (see that function's own comment) -- so this `if (!z->ki_baseline_
     // valid)` branch only ever fires for a zone this layer has NEVER reached

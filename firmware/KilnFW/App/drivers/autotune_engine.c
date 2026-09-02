@@ -3568,7 +3568,23 @@ bool autotune_engine_accept(bool ack_unsettled)
      * than staying capped against a ceiling derived from before this re-tune.
      * See adaptive_tune_clear_ki_baseline()'s own comment for the lock-order
      * reasoning on why this call belongs AFTER s_at.lock was already released
-     * above (xSemaphoreGive(s_at.lock)), never before. */
+     * above (xSemaphoreGive(s_at.lock)), never before.
+     *
+     * RE-ENTRANCY, not just lock order: when this accept path is reached over
+     * the UART bridge (uart_bridge_ext.c AUTOTUNE_CMD_ACCEPT), autotune_
+     * engine_accept() is ALREADY running on the flash-safe worker task (see
+     * that file's HAZARD block, "autotune_task: autotune_engine_accept()").
+     * adaptive_tune_clear_ki_baseline() itself dispatches onto that same
+     * worker via uart_bridge_ext_run_on_flash_worker() to persist the
+     * cleared baseline -- a naive dispatch from here would deadlock the
+     * worker permanently (non-recursive lock held by the original caller,
+     * 1-deep queue only the now-blocked worker drains; a recursive mutex
+     * would not save it either). Fixed at the source: bx_run_on_internal_
+     * stack() now detects "caller is already the worker task" and runs the
+     * job inline instead of dispatching, since the worker's own stack is
+     * already internal SRAM and the PSRAM/flash-cache hazard is already
+     * satisfied. The HTTP accept path (dashboard_http.c, httpd task) is
+     * unaffected -- it was never on the worker to begin with. */
     adaptive_tune_clear_ki_baseline(zone);
 
     if (method == AUTOTUNE_METHOD_RELAY) {
