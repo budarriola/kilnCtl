@@ -3148,6 +3148,72 @@ static void test_coupling_single_cell_setter_preserves_other_cells(void)
     nvs_test_clear();
 }
 
+// PID_EXPANSION_PLAN.md section 3.2's re-solved matrix (adopted
+// 2026-09-02), applied here in its storage orientation
+// coupling_coeff[affected][stepped]:
+//
+//     [[38.13, 27.32, 21.72],
+//      [14.30, 35.90, 22.15],
+//      [ 8.33, 12.42, 35.32]]
+//
+// This matrix is DELIBERATELY, strongly asymmetric off-diagonal (z1's step
+// raises z0 by ~22C; z0's step raises z1 by only ~9C) specifically so a
+// transposed apply is easy to catch here rather than on hardware -- see
+// zones_http.h's coupling_coeff doc comment ("row i is the affected zone,
+// column j is the stepped zone. Do not transpose"). Setting every row via
+// zones_config_set_coupling() (the same setter finalize_fit() and the
+// z%u_coupling_c%u POST path both funnel through) and reading it back must
+// reproduce the matrix cell-for-cell in [affected][stepped] order, NOT its
+// transpose.
+static void test_coupling_matrix_2026_09_02_adopted_orientation_not_transposed(void)
+{
+    TEST_SECTION("zones_config_set/get_coupling -- the adopted 2026-09-02 matrix round-trips in "
+                 "[affected][stepped] storage orientation, not transposed");
+    nvs_test_enable(true);
+    nvs_test_clear();
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    s_zones.cfg.thermo_count = 3;
+
+    // matrix[affected][stepped], diagonal forced to 0 by the setter's own rule.
+    const float matrix[MAX31856_CHANNEL_COUNT][MAX31856_CHANNEL_COUNT] = {
+        {0.0f,   27.32f, 21.72f},
+        {14.30f, 0.0f,   22.15f},
+        {8.33f,  12.42f, 0.0f},
+    };
+
+    for (uint8_t affected = 0; affected < MAX31856_CHANNEL_COUNT; affected++) {
+        TEST_CHECK(zones_config_set_coupling(affected, matrix[affected]),
+                  "row `affected` is accepted");
+    }
+
+    for (uint8_t affected = 0; affected < MAX31856_CHANNEL_COUNT; affected++) {
+        float out_row[MAX31856_CHANNEL_COUNT] = {-1.0f, -1.0f, -1.0f};
+        TEST_CHECK(zones_config_get_coupling(affected, out_row), "getter succeeds");
+        for (uint8_t stepped = 0; stepped < MAX31856_CHANNEL_COUNT; stepped++) {
+            char msg[128];
+            snprintf(msg, sizeof(msg),
+                     "coupling_coeff[%u][%u] must equal the adopted matrix's [affected=%u][stepped=%u] "
+                     "cell, NOT its transpose [stepped][affected]",
+                     affected, stepped, affected, stepped);
+            TEST_CHECK_NEAR(out_row[stepped], matrix[affected][stepped], 1e-6, msg);
+        }
+    }
+
+    // The asymmetry itself, called out explicitly: z1's step on z0 (14.30)
+    // must not be confused with z0's step on z1 (27.32) -- a transposed
+    // apply would swap exactly this pair and still "look plausible" (both
+    // are positive, both in range) without this check.
+    float row0[MAX31856_CHANNEL_COUNT] = {0}, row1[MAX31856_CHANNEL_COUNT] = {0};
+    TEST_CHECK(zones_config_get_coupling(0, row0) && zones_config_get_coupling(1, row1),
+              "zone 0 and zone 1 rows both read back");
+    TEST_CHECK_NEAR(row0[1], 27.32f, 1e-6, "coupling_coeff[0][1]: z1's step raises z0 by 27.32");
+    TEST_CHECK_NEAR(row1[0], 14.30f, 1e-6, "coupling_coeff[1][0]: z0's step raises z1 by only 14.30");
+    TEST_CHECK(row0[1] != row1[0], "the off-diagonal pair is asymmetric -- transposing it is detectable");
+
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
 static void test_settings_source_setter_round_trip_and_bounds(void)
 {
     TEST_SECTION("zones_config_set/get_settings_source -- CUSTOM or a real other zone, self-reference refused");
@@ -6156,6 +6222,7 @@ void run_test_zones_http(void)
     test_fuzzy_strength_pct_setter_round_trip_and_bounds();
     test_coupling_row_whole_setter_round_trip_and_bounds();
     test_coupling_single_cell_setter_preserves_other_cells();
+    test_coupling_matrix_2026_09_02_adopted_orientation_not_transposed();
     test_settings_source_setter_round_trip_and_bounds();
     test_tuning_quality_round_trip_asymmetric_per_zone();
     test_zones_config_set_pid_invalidates_tuning_quality();
