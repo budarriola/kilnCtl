@@ -59,7 +59,11 @@
     --input-bg: var(--ui-card); --input-border: var(--ui-text-secondary); --link: var(--ui-accent-3);
     --ok: var(--ui-accent-4); --warn: var(--ui-accent-1); --bad: var(--ui-accent-5);
   }
-  body { font-family: sans-serif; max-width: 480px; margin: 2em auto; padding: 0 1em;
+  /* WEB_UI_RESPONSIVE_PLAN.md sec 6: fixed 480px cap replaced with the
+     shared --kc-shell-max (theme.css) -- see main_page.html's identical
+     change for the full rationale; this page carries the same 480px cap
+     and is the other page sec 6 names as benefiting most. */
+  body { font-family: sans-serif; max-width: var(--kc-shell-max); margin: 2em auto; padding: 0 1em;
          background: var(--bg); color: var(--fg); }
   /* .theme-btn removed 2026-08-21: was a byte-for-byte duplicate of the one
      rule in /theme.css (which loads first), and being `position: fixed`
@@ -102,6 +106,20 @@
   }
   .zone { background: var(--card-bg); border: 1px solid var(--border); border-radius: var(--ui-radius);
           padding: 0.7em 1em; margin-bottom: 0.7em; }
+  /* WEB_UI_RESPONSIVE_PLAN.md sec 6: same auto-fit pattern as
+     main_page.html's #channels (backup_page.html:77's original shape). A
+     wider floor than #channels' 240px was tried first (320px, on the theory
+     that a zone card carries more content -- relay/thermocouple checkbox
+     grid, Kp/Ki/Kd row, advanced-guards <details> -- than a single label/
+     value dashboard tile) but the responsive sweep caught it: 320px alone
+     plus this page's 1em body padding on each side overflowed a real 320px
+     phone viewport (scrollWidth 336 > 320, sweep item 1 in sec 3's list is
+     exactly this class of bug). 260px matches #channels' floor and leaves
+     headroom under 320px; at most 3 zones exist on this hardware
+     (MAX31856_CHANNEL_COUNT, see the table.coupling comment below) so it
+     still yields a real 2-3up grid at 1280/1920px, not a forced single
+     column. */
+  #zones { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 0.7em; }
   /* inline-FLEX with a 32px floor, not inline-block. These labels are the hit
      area for the relay/thermocouple checkboxes they wrap, and at inline-block
      they measured 69x19 and 90x19 -- well under the 32px a fingertip needs,
