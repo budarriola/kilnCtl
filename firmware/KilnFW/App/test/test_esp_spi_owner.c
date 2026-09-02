@@ -31,6 +31,13 @@
 // second time, or the link fails with LNK2005 (found building this test).
 extern int g_stub_queue_send_calls;
 
+// Ring-buffer opt-in for stubs/freertos/queue.h's xQueueSend()/xQueueReceive()
+// -- test_uart_log_bridge.c (also linked into this same executable) DEFINES
+// this global; declared extern here, not defined a second time. Used below to
+// reach spi_owner_transfer()'s SECOND timeout branch (completion wait, not
+// enqueue), which needs xQueueSend() to actually succeed.
+extern int g_stub_queue_ring_enabled;
+
 #include "../drivers/espInterfaces/esp_spi_owner.c"
 
 #include <stdint.h>
@@ -68,8 +75,67 @@ static void test_wedge_latches_and_fails_fast(void)
                "fail-fast means xQueueSend() was NOT called again -- still 1 total");
 }
 
+// opus review, commit f3a1600, G1/G3: covers the SECOND timeout branch --
+// the request WAS accepted by the queue (xQueueSend succeeds) but the owner
+// task never answers (xSemaphoreTake on the slot's completion semaphore
+// times out; the stub's xSemaphoreTake() is unconditionally pdFALSE, and
+// nothing in this host-test process ever runs spi_owner_task() to give it --
+// see this file's own header comment). Before the G1 fix this path left a
+// StaticSemaphore_t and an esp_err_t* pointing into THIS function's stack
+// frame in the request queue forever; after the fix, the slot is
+// module-owned (owner.slots[]/owner.slot_refcount[]), so a late completion
+// would land somewhere still valid instead of corrupting a reused stack
+// frame. What is directly observable from here (owner_slot_pool.h's
+// invariant, reached by #including esp_spi_owner.c) is that the CLIENT side
+// releases only its own half of the slot's refcount on this timeout --
+// refcount goes from 2 to 1, not to 0 -- leaving the slot "orphaned" (held
+// open for whatever the owner task's own, still-pending release will
+// eventually do) rather than freed while a write into it might still be
+// coming.
+static void test_completion_timeout_orphans_slot(void)
+{
+    // Enabled BEFORE spi_owner_init(), not after: xQueueCreate() (stubs/
+    // freertos/queue.h) is what latches the ring's capacity/count from ITS
+    // OWN queue_len argument, and spi_owner_init() is what calls it. Turning
+    // ring mode on only after init would leave this test's queue with
+    // whatever capacity/count some earlier test's xQueueCreate() call last
+    // latched -- exactly the leaked-global class this file's own
+    // g_stub_queue_ring_enabled extern comment warns about, just at a
+    // different global (found by hitting it here first).
+    g_stub_queue_ring_enabled = 1; // this test's own opt-in -- see this
+                                    // file's extern declaration comment.
+                                    // Reset in the section runner below so it
+                                    // never leaks into another test file, the
+                                    // exact bug this test exists to avoid
+                                    // repeating (test_uart_log_bridge.c's
+                                    // 2026-09-01 fix).
+
+    spi_owner_t owner;
+    esp_err_t init_err = spi_owner_init(&owner, 0 /*host*/, 4 /*queue_len*/, 5 /*priority*/,
+                                         2048 /*stack*/, -1 /*core*/);
+    TEST_CHECK(init_err == ESP_OK, "spi_owner_init succeeds against the host stubs");
+
+    uint8_t tx[4] = { 9, 8, 7, 6 };
+    esp_err_t result =
+        spi_owner_transfer(&owner, (spi_device_handle_t)0x1, tx, sizeof(tx), NULL, 0, /*cs_pin=*/5);
+
+    TEST_CHECK(result == ESP_ERR_TIMEOUT,
+               "enqueue succeeds but the owner never answers -- completion wait times out");
+    TEST_CHECK(owner.wedged, "that timeout latches owner.wedged");
+    // THE LOAD-BEARING CHECK: refcount 1, not 0 -- the client released only
+    // its own half. A 0 here would mean the slot was freed (and its
+    // semaphore drained / result reset) while the "owner" might still write
+    // into it -- reintroducing the exact hazard G1 removed, just moved from
+    // the caller's stack into this pool.
+    TEST_CHECK(owner.slot_refcount[0] == 1,
+               "client-side release on a completion timeout leaves the slot orphaned (refcount 1), not freed");
+
+    g_stub_queue_ring_enabled = 0;
+}
+
 void run_test_esp_spi_owner(void)
 {
     TEST_SECTION("esp_spi_owner");
     test_wedge_latches_and_fails_fast();
+    test_completion_timeout_orphans_slot();
 }

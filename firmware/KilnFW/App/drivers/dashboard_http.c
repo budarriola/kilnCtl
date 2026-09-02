@@ -175,6 +175,7 @@ void dashboard_get_status(dashboard_status_t *out)
         MAX31856_read_all(s_dash.thermo_bus, readings, MAX31856_CHANNEL_COUNT, &count);
     }
     out->thermo_ready = count > 0;
+    out->thermo_spi_wedged = MAX31856_bus_spi_wedged(s_dash.thermo_bus);
     out->channel_count = count;
     for (size_t i = 0; i < count; i++) {
         const MAX31856Reading *r = &readings[i];
@@ -555,6 +556,11 @@ static esp_err_t status_get_handler(httpd_req_t *req)
     APPEND("]");
 
     APPEND(",\"thermo_ready\":%s", ds.thermo_ready ? "true" : "false");
+    /* opus review, commit f3a1600, G2b: operator-visible surface for the
+     * shared SPI owner's wedged latch -- see dashboard_http.h's field
+     * comment. Reported unconditionally (not gated behind thermo_ready)
+     * since a wedged owner also takes the display down with it. */
+    APPEND(",\"thermo_spi_wedged\":%s", ds.thermo_spi_wedged ? "true" : "false");
 
     if (ds.thermo_ready) {
         APPEND(",\"channels\":[");

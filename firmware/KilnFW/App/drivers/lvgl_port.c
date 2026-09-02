@@ -137,11 +137,28 @@ static void ili9488_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t 
         if (screen_idle_get_state(p->idle, &screen_on, &idle_ms) != ESP_OK) {
             screen_on = true; /* fail open: draw rather than go permanently dark */
         }
-        if (screen_on && !p->last_screen_on) {
-            ESP_LOGI(TAG, "screen woke -- forcing a full redraw");
-            lv_obj_invalidate(lv_screen_active());
+        /* Only the wake (off->on) edge is this callback's to own -- see the
+         * block comment above. The off transition belongs entirely to
+         * lvgl_port_service_idle_blank() below, including its own retry when
+         * ILI9488_clear() fails: that function deliberately leaves
+         * last_screen_on TRUE on a failed clear so the next loop iteration
+         * retries. Flushing still runs while blanked (this callback just
+         * skips the blit), so if this branch unconditionally wrote
+         * `p->last_screen_on = screen_on` on every call -- including while
+         * screen_on is already false -- it would stomp that retry latch to
+         * false itself before service_idle_blank ever got a second attempt,
+         * permanently defeating the retry the failure path's own comment
+         * promises (opus review, commit f3a1600, G4). Leaving
+         * last_screen_on untouched here while screen_on is false costs
+         * nothing: the wake edge this function cares about can only ever be
+         * observed while last_screen_on is still true. */
+        if (screen_on) {
+            if (!p->last_screen_on) {
+                ESP_LOGI(TAG, "screen woke -- forcing a full redraw");
+                lv_obj_invalidate(lv_screen_active());
+            }
+            p->last_screen_on = true;
         }
-        p->last_screen_on = screen_on;
     }
 
     if (screen_on) {
@@ -459,11 +476,23 @@ static void touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
          *     panel's own extents: touch_dev_axis_to_px's scale step
          *     becomes identity (clamp + optional invert only), leaving just
          *     the rotation/axis-swap correction the module's physical
-         *     mounting needs. */
-        uint16_t raw_x_max = p->touch_dev.self_calibrating ? (uint16_t)(width - 1u)
-                                                             : (uint16_t)NS2009_ADC_MAX;
-        uint16_t raw_y_max = p->touch_dev.self_calibrating ? (uint16_t)(height - 1u)
-                                                             : (uint16_t)NS2009_ADC_MAX;
+         *     mounting needs. touch_dev.h documents raw_x_max/raw_y_max as
+         *     each axis's PRE-swap raw ceiling (touch_dev_map_uncalibrated
+         *     swaps the maxes right along with the axes when swap_xy is
+         *     set) -- so when TOUCH_CAL_SWAP_XY is set, raw_x's native
+         *     range runs along the screen's height, not its width, and
+         *     raw_y_max must be the width. Assigning width to raw_x_max
+         *     and height to raw_y_max unconditionally (as if already
+         *     post-swap) is wrong the moment swap_xy is set: this board's
+         *     only attached controller (NS2009) never reaches this branch
+         *     with self_calibrating true, so it stayed silent, but it would
+         *     mis-scale every touch on a swapped FT6336U panel. The
+         *     assignment itself is pulled out into touch_dev_uncalibrated_max()
+         *     so it is host-testable rather than living only in this
+         *     ESP-IDF-dependent function -- see test_touch_dev.c. */
+        uint16_t raw_x_max = 0, raw_y_max = 0;
+        touch_dev_uncalibrated_max(p->touch_dev.self_calibrating, TOUCH_CAL_SWAP_XY, width,
+                                    height, NS2009_ADC_MAX, &raw_x_max, &raw_y_max);
         touch_dev_map_uncalibrated(raw_x, raw_y, raw_x_max, raw_y_max, width, height,
                                     TOUCH_CAL_SWAP_XY, TOUCH_CAL_INVERT_X, TOUCH_CAL_INVERT_Y,
                                     &px, &py);

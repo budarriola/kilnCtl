@@ -418,6 +418,14 @@ MAX31856Class *MAX31856_bus_channel(MAX31856BusClass *bus, uint8_t channel)
     return (ch && ch->initialized) ? ch : NULL;
 }
 
+bool MAX31856_bus_spi_wedged(const MAX31856BusClass *bus)
+{
+    if (!bus || !bus->owner_initialized) {
+        return false;
+    }
+    return spi_owner_is_wedged(&bus->owner);
+}
+
 esp_err_t MAX31856_set_drdy_provider(MAX31856BusClass *bus,
                                      MAX31856_drdy_provider_t fn,
                                      void *ctx)

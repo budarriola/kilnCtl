@@ -106,6 +106,16 @@ typedef struct {
     size_t   channel_count;   /* <= MAX31856_CHANNEL_COUNT, only this many of
                                 * channels[] are populated */
     dashboard_channel_status_t channels[MAX31856_CHANNEL_COUNT];
+    /* opus review, commit f3a1600, G2b: straight passthrough of
+     * MAX31856_bus_spi_wedged() -- the shared SPI owner (esp_spi_owner.h)
+     * that this bus AND the display both transfer through has given up and
+     * latched wedged. Previously this state was invisible anywhere but two
+     * ESP_LOGE lines; now it is a real field on the same status snapshot
+     * every other hardware-health bit here already reports through. True
+     * here means every thermocouple channel and the display are effectively
+     * dead until spi_owner_deinit()/re-init recovers it (a reboot, today --
+     * see esp_spi_owner.h's wedged field comment). */
+    bool     thermo_spi_wedged;
 
     bool     safety_ready;
     bool     zones_config_valid;

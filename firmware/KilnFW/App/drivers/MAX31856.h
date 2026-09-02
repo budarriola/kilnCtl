@@ -366,6 +366,16 @@ esp_err_t MAX31856_deinit(MAX31856Class *ch);
  * failed" case. */
 MAX31856Class *MAX31856_bus_channel(MAX31856BusClass *bus, uint8_t channel);
 
+/* Operator-visible surface for spi_owner_t::wedged (opus review, commit
+ * f3a1600, G2b): true once the shared SPI owner this bus and the display
+ * both transfer through has given up on a transfer and latched wedged --
+ * see esp_spi_owner.h. Every channel on this bus (and the display, on the
+ * caller's side of the shared owner) is dead the moment this reads true;
+ * false if `bus` is NULL or was never initialized. dashboard_http.c reads
+ * this into /api/status so a wedged bus is finally visible somewhere an
+ * operator can see it, instead of two silent ESP_LOGE lines. */
+bool MAX31856_bus_spi_wedged(const MAX31856BusClass *bus);
+
 /* Installs (or, with fn = NULL, removes) the ~DRDY observer described above.
  * Affects every channel on the bus. */
 esp_err_t MAX31856_set_drdy_provider(MAX31856BusClass *bus,

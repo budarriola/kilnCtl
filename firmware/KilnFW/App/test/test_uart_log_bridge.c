@@ -318,4 +318,16 @@ void run_test_uart_log_bridge(void)
     test_full_queue_non_error_not_privileged();
     test_room_available_no_eviction();
     test_eviction_bounded_per_call();
+
+    // The eviction tests above turn on the stub queue's ring mode
+    // (g_stub_queue_ring_enabled = 1, in ring_test_setup()) and never turned
+    // it back off -- a leaked global that silently changed xQueueSend()'s
+    // default-fail behavior for every test .c linked into the same host-test
+    // binary that runs after this one (found: test_esp_spi_owner.c's
+    // enqueue-timeout branch went uncovered because of exactly this leak, see
+    // that file's header comment). Restore the default here so this
+    // translation unit's ring opt-in stays local to its own tests, the same
+    // guarantee every OTHER test file already gets for free by never touching
+    // this flag at all.
+    g_stub_queue_ring_enabled = 0;
 }
