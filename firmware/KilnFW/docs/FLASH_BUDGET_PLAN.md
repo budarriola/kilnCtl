@@ -352,6 +352,26 @@ right.** If the intent is longer retention, the partition is correctly sized and
 the cap should rise instead. That is a product question, not a flash question,
 and it should be answered before the partition is touched.
 
+### 5.2a Follow-on, 2026-09-02 — DECIDED: flash holds binary events only, never per-tick text
+
+Landing the 256 kB/kind cap (5.2 above) exposed the real problem it was
+masking: the store held one text FIRE/TUNE line every 5s/10s (~136 KiB/hour),
+truncating any firing over ~2h against the new cap. Owner decision, verbatim:
+*"dont log the temps to flash, log errors,warnings,infos that are nessary for
+debug. be frugal. dont do it in human readable form. loging of temps for
+debug should be done over the uart interface"* — that UART path already
+existed (`telemetry_log.c`'s `ESP_LOGI` feed, opt-in, unchanged by this).
+
+Implemented: `log_store.c` is now a generic binary length-prefixed record
+store; `event_log.h`/`.c` define a fixed 32-byte record (magic+version,
+severity, source, code, zone, uptime, arg, short note) written only on a
+genuine state transition (run started/paused/resumed/done/faulted, autotune
+started/done/aborted) — never per-tick. `GET /api/logs/{firing,autotune}`
+now streams raw binary; decode with `tools/PcTools/src/kilnctrl/
+event_log_decoder.py`, which refuses (does not misread) any log written
+before this change. Result: 256 kB/kind now holds thousands of firings'
+worth of events, where the old scheme filled it in under 2 hours of one.
+
 ### 5.3 `coredump` — 1024 kB, examine but probably leave alone
 
 Reachable in principle, but this partition was sized *empirically* and painfully:
