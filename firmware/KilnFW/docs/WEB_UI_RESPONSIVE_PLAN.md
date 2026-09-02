@@ -8,8 +8,11 @@ Conventions, matching `PID_EXPANSION_PLAN.md`: **the code is truth, not the
 checkboxes.** Nothing is done until a commit is named.
 
 Status at time of writing (2026-09-02): **Phases 0, 1 and 2 (§4, §5, §6) are
-built and committed.** Phase 3 (§7) is owner-gated, not started. See the
-status notes at the top of each section below.
+built and committed.** Phase 3 (§7) is owner-gated, not started -- §7 below is
+now a decision-ready proposal, not applied CSS. §3 items 2 and 4 (previously
+recorded as "does not reproduce under the sweep") are now covered; see §4.
+Two token-vocabulary questions are open for the owner, made decision-ready in
+§5.1. See the status notes at the top of each section below.
 
 Companions: `FLASH_BUDGET_PLAN.md`, `DRAM_PSRAM_PLAN.md`. All three are
 independent; none blocks another.
@@ -173,6 +176,45 @@ heights under 32px on `safety_config_page.html` `#pcLink`,
 
 Sweep is now 78/78 green.
 
+**§3 items 2 and 4 coverage (2026-09-02):**
+
+- **Item 4** (`diagnostics_page.html:111-114`, buttons landing on top of each
+  other at the 320px flex-wrap point) no longer applies to the current
+  source: that markup was already rewritten into a stacked `.linklist` block
+  (see the file's own 2026-08-22 comment above `.linklist`), which the
+  general overlap/undersized-target assertions already exercise at every
+  width like any other page content. Nothing to add.
+- **Item 2** (`zones_page.html:163,181`, `input.offsettle` overlapping
+  `button#saveBtn` at 1280px) *was* a genuine gap, but not for the reason
+  first assumed. `#zones` never gets populated under the sweep's static
+  server -- `loadCurrent()`'s `fetch('/api/zones')` 404s, so `renderZones()`
+  never runs and the page's core content (every zone card, every input in
+  it) was never checked at any width. No mock server was needed to fix this:
+  `renderZones()` doesn't require a real response -- `current` defaults to
+  `{ zones: [] }` and each missing zone index already falls back to a
+  hardcoded default object inside the function itself. `ui_responsive_sweep.mjs`
+  gained a `PAGE_FIXTURES` map (currently just this one page) that sets
+  `thermoCount`/`relayCount` and calls `window.renderZones()` directly,
+  before the generic setup step. That generic step was also changed to skip
+  `<details class="advguards">` specifically (every other `<details>` is
+  still forced open) so the closed state the original bug was reported in is
+  the state actually checked, not overwritten.
+  - Negative-tested: with the fixture in place, temporarily giving `.zone` a
+    2000px `min-width` produced 20 `[clipped]` failures at 1280px -- content
+    the old, always-empty `#zones` fixture had no way to ever flag. Reverted
+    after confirming red.
+  - The specific historic Chromium quirk the 2026-08-22 CSS fix
+    (`details.advguards:not([open]) > *:not(summary) { display: none; }`)
+    targets -- a closed `<details>`'s non-summary children still getting a
+    real, non-zero layout position -- does **not** reproduce on this
+    toolchain's installed Chrome/Edge: measured `.offsettle` rects inside a
+    closed, unfixed `.advguards` are `0x0` regardless of whether the fix CSS
+    is present. That specific regression can no longer be exercised by
+    mutation on this machine; recorded here rather than forcing a test that
+    can't actually fail. The fixture is still a real, previously-total,
+    coverage improvement for this page's content independent of that one
+    historic bug, per the negative test above.
+
 Section 3 exists because someone ran headless-browser sweeps and wrote down
 what broke. Those sweeps were ad hoc and their results survive only as
 comments. This plan will change layout on every page, at widths the UI has
@@ -205,14 +247,71 @@ All 13 pages converted, one commit each where a page needed a change
 (`8e8db7f`, `a1364b4`, `369f593`, `a09bbfb`, `c27b43f`; the rest were already
 canonical).
 
-**Two items need an owner decision — still open:**
+### 5.1 Two items need an owner decision — still open
 
-1. `safety_commissioning_page.html`'s `--fault-color` and `--bad` are
-   numerically identical but the page treats them as deliberately distinct
-   concepts.
-2. `main_page.html`'s `--off-color` and `readiness_page.html`'s
-   `--cannot-yet` are neutral/grey "inactive/unknown" states with no honest
-   slot in the ok/warn/bad vocabulary — it may be one token short.
+**1. `safety_commissioning_page.html`'s `--fault-color` and `--bad`.**
+Numerically identical today (both `#c0392b` light, both `var(--ui-accent-5)`
+dark — `theme.css:391-394` and `safety_commissioning_page.html:45-69`), but
+the page's own comment (`safety_commissioning_page.html:46-53`) is explicit
+that they are meant to be different concepts: `--bad` is "this reading is a
+warning/error", `--fault-color` is "the data on screen cannot be trusted
+right now" (a `body.kc-cfg-linkdown` state, a CRC mismatch banner, an armed
+write-window). Checked what the other pages that define `--fault-color` do,
+since that's the closest thing to a house convention: `backup_page.html:21-33`
+and `settings_page.html:28-40` both alias it straight to their own `--bad`
+— the same choice safety_commissioning made. `diagnostics_page.html` is the
+one page that looks different (`--fault-color: var(--warn)`,
+`diagnostics_page.html:16-25`), but that page also spells its own "this is an
+error" red as `--warn` (`--warn: #b00`, no `--bad` defined at all —
+`diagnostics_page.html:15`, and the plan's own §2.2 flagged this exact
+"some pages spell it `--err`" naming divergence already). So once the naming
+inconsistency is set aside, **every page that has a `--fault-color`,
+safety_commissioning included, points it at whichever token that page uses
+for danger-red** — safety_commissioning is the *majority* pattern, not the
+outlier. The numeric identity is not an accident to fix; it is what the rest
+of the codebase already does. **Recommendation, pending owner sign-off:**
+leave the mapping as-is. If the owner still wants the two concepts to look
+visually distinct (danger-red for "this reading is bad" vs. a second color
+for "this data cannot be trusted"), the smallest change that does not invent
+a new hex is remapping `--fault-color` to a *different existing* accent —
+`--ui-accent-1` (`#e8974e`, orange, already used elsewhere as an
+attention-but-not-danger color) reads as "caution/uncertain" without
+competing with red's "stop/error" meaning. That is still an LCD-parity
+question (§7 below), not a web-only tweak, because `--fault-color` ultimately
+resolves to one of the shared `--ui-accent-*` tokens either way.
+
+**2. A fourth status token — `main_page.html`'s `--off-color` and
+`readiness_page.html`'s `--cannot-yet`.** Both are neutral/grey
+"inactive/unknown" states with no honest slot in `--ok`/`--warn`/`--bad`, and
+both already resolve to the exact same underlying value:
+`--ui-text-secondary` (`#9aa0ae`) in dark mode on both pages, `#888` in light
+mode on both pages (`main_page.html:26,32,38`, `readiness_page.html:24,31,38`).
+This is not a coincidence needing a decision on *what value* to use — that
+part is already settled by two independent pages agreeing — only on whether
+to formalize it as a fourth named member of the shared status vocabulary.
+
+*Is `--muted` already this token?* No — checked directly:
+`--muted` resolves to `#444` in light mode across all 13 pages
+(`theme.css`-consuming pages'  own `:root` blocks, e.g. `main_page.html:25`)
+but `--off-color`/`--cannot-yet` resolve to `#888` in light mode on the same
+pages. Same dark-mode value, different light-mode value: `--muted` is tuned
+for legible de-emphasized *text* (labels, captions), `--off-color`/
+`--cannot-yet` for a de-emphasized *status indicator*, a different design
+intent that happens to share one of its two mode values. `--muted` cannot
+quietly absorb this role without a light-mode contrast regression on
+whichever page adopts it.
+
+**Recommendation: add `--neutral`**, parallel in form to `--ok`/`--warn`/
+`--bad` (a one-word adjective naming a state, not an element), defined once
+in the shared vocabulary as `--neutral: #888` (light) /
+`var(--ui-text-secondary)` (dark) — a pure rename of values that already
+exist and already agree, not a new color decision. On adoption: `main_page.html`
+renames `--off-color` → `--neutral` (the relay/zone "not currently active"
+indicators), `readiness_page.html` renames `--cannot-yet` → `--neutral` (the
+"can't check yet" commissioning-item marker); no other page currently has an
+unmet need for it, but it becomes the shared name any future "no honest
+ok/warn/bad answer" state should reach for instead of reinventing its own
+grey.
 
 Below is the shape the pass followed, kept for reference:
 
@@ -268,17 +367,106 @@ wants to be written once.
 `main_page.html` and `zones_page.html` benefit most — they are the dashboards,
 and they are the two pages with the tightest 480 px cap.
 
-## 7. Phase 3 — modern look
+## 7. Phase 3 — modern look (decision-ready proposal, NOT applied)
 
-Cheap once Phase 1 lands, because it is edits to one file: a real spacing
-scale, one dominant accent rather than five equal-weight ones, layered-shadow
-elevation, a tighter type scale, `color-mix()` for hover/disabled states
-instead of hardcoded hexes, and `light-dark()` to collapse the paired
-declarations.
+Owner-gated per `UI_THEME.md`'s web/LCD parity rule (§3 item 7): any accent
+change is an LCD change too. Nothing below has been painted onto any page.
+This is the concrete proposal to sign off on or amend.
 
-Constraint: `UI_THEME.md`'s parity rule says the web mirrors `ui_theme.h`'s hex
-values. A palette change is therefore an **LCD change too**, or an explicit,
-documented decision to break parity. Settle that before repainting.
+### 7.1 What is actually there today
+
+`theme.css:23-24` defines five equal-weight accents (`--ui-accent-1`
+orange … `--ui-accent-5` red), mirroring `ui_theme.h`'s per-zone/per-metric
+coding scheme 1:1. Checked how they're actually *used* in the shared chrome
+(`theme.css`, excluding page-local zone-color-coding uses, which are a
+different, legitimate use of the same palette):
+
+| Token | Used for |
+|---|---|
+| `--ui-accent-1` (orange) | `.kc-pause-btn` background; `--warn` on most pages |
+| `--ui-accent-3` (teal) | `.kc-menu-panel a.kc-menu-active` only |
+| `--ui-accent-5` (red) | `.kc-stop-btn`, `.kc-conn-banner`, the stop-bar top border; `--bad` on most pages |
+| `--ui-accent-2`, `--ui-accent-4` | not used in shared chrome at all (page-local zone coding / `--ok` only) |
+
+No single accent currently means "this is the primary action" the way a
+one-brand-color design would use one. Ordinary buttons (`theme.css`'s base
+`button` rule) use `--button-bg`, a neutral grey — visually flat against
+danger/pause, which already have color.
+
+### 7.2 The proposal
+
+**No new hex values.** Every color below already exists in `ui_theme.h` /
+`theme.css`; this is a *usage* change (which existing accent means what),
+not a palette change:
+
+1. **One dominant accent: `--ui-accent-3` (teal, `#3ec6c6`).** It is
+   currently the least-claimed of the five (one rule, the nav active-link
+   underline) and does not already carry a safety meaning the way accent-1
+   (pause) and accent-5 (stop/danger) do. Proposal: `theme.css`'s base
+   `button` rule (and page-local "primary" buttons — Save, Start, Connect —
+   which today just inherit the neutral `--button-bg`) get a `--ui-accent-3`
+   border/text treatment on focus and on the single "primary" button per
+   view, so there is one recognizable "this is the button to press" color
+   site-wide instead of every button reading the same grey. Accents 1/2/4/5
+   keep their current jobs unchanged (pause, per-zone coding, ok, danger) —
+   this does not touch any status-color decision from §5.1.
+2. **Spacing scale.** Add `--ui-space-1: 4px` … `--ui-space-5: 32px` to
+   `theme.css:21` alongside the existing `--ui-padding: 8px` (which becomes
+   an alias, `--ui-padding: var(--ui-space-2)`, so nothing existing breaks).
+   Pages currently hardcode `0.3em`/`0.6em`/`0.9em`/`1em` spacing ad hoc;
+   this gives new rules a consistent scale to reach for without forcing a
+   rewrite of every existing `em` value.
+3. **Layered-shadow elevation**, `color-mix()`-based so it works in both
+   themes with one rule: `--ui-shadow-1: 0 1px 2px color-mix(in srgb, var(--ui-bg) 60%, black 40%)`
+   for resting cards, `--ui-shadow-2` (larger blur/offset) for the topbar and
+   any future hover-raised state. Purely additive — `.card` currently has no
+   shadow at all, just a border.
+4. **`color-mix()` for hover/disabled states**, replacing spots like
+   `.kc-pause-btn { background: var(--ui-accent-1, #468); }`'s hardcoded
+   `#468` fallback and any other ad hoc hover-darken hex, with e.g.
+   `color-mix(in srgb, var(--button-bg) 85%, var(--ui-text-primary) 15%)`.
+   No visual palette change, just removing hand-picked one-off hexes that
+   don't track the token they're supposed to be a variant of.
+5. **`light-dark()`** to collapse each page's paired `:root` /
+   `@media (prefers-color-scheme: dark)` / `[data-theme]` blocks (the
+   pattern every one of the 13 pages repeats three times per token) into one
+   declaration per token, e.g. `--bg: light-dark(#fff, var(--ui-bg));`.
+   Baseline-supported since 2023 (same standard §6 already leaned on for
+   container queries). This is a mechanical follow-on to §5's consolidation,
+   not a new design decision — flagged here because it's naturally done in
+   the same pass as the rest of this section's edits.
+6. **A tighter type scale** — `--ui-font-sm: 0.85em`, `--ui-font-base: 1em`,
+   `--ui-font-lg: 1.15em`, `--ui-font-xl: 1.4em` — replacing the ad hoc
+   `0.82em`/`0.85em`/`0.9em`/`0.95em`/`1.05em` values scattered per page
+   (`diagnostics_page.html`, `main_page.html`, others) with a shared,
+   shorter list.
+
+### 7.3 The corresponding LCD change
+
+Because 7.2 introduces **no new hex**, the LCD-parity change is narrower
+than "repaint the panel": it is a semantic annotation, not a color change.
+`ui_theme.h`'s `UI_THEME_ACCENT_3` comment and `UI_THEME.md`'s palette table
+row for it would gain a line designating it the primary/action accent (e.g.
+"also used as the dominant accent for primary buttons/focus, once the LCD's
+placeholder screen in `kiln_ui.c` grows real button styling") — the same
+`#3ec6c6` value, now with a stated dual role. If and when `kiln_ui.c`'s
+still-placeholder screen gets real button chrome, its primary/confirm
+buttons should reach for `UI_THEME_ACCENT_3` for the same reason the web
+proposal does: consistent with parity, and consistent with 7.1's finding
+that accent-3 is otherwise unclaimed. Nothing else in 7.2 (spacing, shadow,
+`color-mix()`, `light-dark()`, type scale) has an LCD analog to keep in sync
+— those are CSS-syntax/layout concerns LVGL expresses through its own,
+already-separate spacing/sizing constants (`UI_THEME_PADDING_PX` etc.,
+already deliberately excluded from this pass per §3 item 7).
+
+### 7.4 What this proposal deliberately does not do
+
+No change to `--ui-touch` (§3 item 7, unconditionally out of scope for this
+pass). No change to any `--ok`/`--warn`/`--bad`/`--neutral` mapping — that's
+§5.1's decision, independent of this one. No new accent hex — if the owner
+wants an actual new brand color (a sixth accent, or a paint-over of an
+existing one), that is a bigger decision than this proposal makes and would
+need its own sign-off with its own LCD-side hex change.
 
 ---
 
