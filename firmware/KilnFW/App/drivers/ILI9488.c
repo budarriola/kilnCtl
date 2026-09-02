@@ -15,6 +15,7 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "freertos/task.h"
+#include "panel_codec.h"
 #include "settings.h"
 
 static const char *TAG = "ILI9488";
@@ -306,12 +307,11 @@ static const ili9488_init_step_t ili9488_init_sequence[] = {
  * the panel can show. RGB565 is the API's limit here, not the panel's. */
 static inline void ili9488_rgb565_to_rgb666(uint16_t color, uint8_t out[3])
 {
-    uint8_t r5 = (uint8_t)((color >> 11) & 0x1F);
-    uint8_t g6 = (uint8_t)((color >> 5) & 0x3F);
-    uint8_t b5 = (uint8_t)(color & 0x1F);
-    out[0] = (uint8_t)((r5 << 3) | (r5 >> 2));
-    out[1] = (uint8_t)((g6 << 2) | (g6 >> 4));
-    out[2] = (uint8_t)((b5 << 3) | (b5 >> 2));
+    /* The actual widening now lives in panel_codec.c
+     * (panel_codec_rgb565_to_rgb666()) -- DISPLAY_ST7796_PLAN.md Sec.6 Step 1
+     * -- so it is host-testable without the SPI/expander machinery this file
+     * needs. This wrapper is kept so every call site below is unchanged. */
+    panel_codec_rgb565_to_rgb666(color, out);
 }
 
 static inline bool ili9488_ready(const ILI9488Class *disp)
@@ -327,6 +327,15 @@ static inline size_t ili9488_chunk(const ILI9488Class *disp)
 {
     return (disp->chunk_bytes > ILI9488_SCRATCH_BYTES) ? (size_t)ILI9488_SCRATCH_BYTES
                                                        : disp->chunk_bytes;
+}
+
+/* Whole pixels (3 bytes each) that fit in one chunk -- panel_codec_chunk_
+ * pixels() does the same clamp-then-divide ili9488_chunk()'s two callers used
+ * to each spell out inline (`ili9488_chunk(disp) / 3`); kept as a named
+ * wrapper here so both call sites read the same as before. */
+static inline size_t ili9488_chunk_pixels(const ILI9488Class *disp)
+{
+    return panel_codec_chunk_pixels(disp->chunk_bytes, ILI9488_SCRATCH_BYTES, 3);
 }
 
 /* Generous, but finite. The longest thing held under this lock is a full-screen
@@ -426,14 +435,13 @@ static esp_err_t ili9488_write_cmd(ILI9488Class *disp, uint8_t cmd, const uint8_
 static esp_err_t ili9488_begin_ram_write(ILI9488Class *disp, uint16_t x, uint16_t y,
                                          uint16_t w, uint16_t h)
 {
-    uint16_t x1 = (uint16_t)(x + w - 1);
-    uint16_t y1 = (uint16_t)(y + h - 1);
-
-    uint8_t caset[4] = { (uint8_t)(x >> 8), (uint8_t)x, (uint8_t)(x1 >> 8), (uint8_t)x1 };
+    uint8_t caset[4];
+    panel_codec_build_caset(x, w, caset);
     esp_err_t err = ili9488_write_cmd(disp, ILI9488_CMD_CASET, caset, sizeof(caset));
     if (err != ESP_OK) return err;
 
-    uint8_t paset[4] = { (uint8_t)(y >> 8), (uint8_t)y, (uint8_t)(y1 >> 8), (uint8_t)y1 };
+    uint8_t paset[4];
+    panel_codec_build_paset(y, h, paset);
     err = ili9488_write_cmd(disp, ILI9488_CMD_PASET, paset, sizeof(paset));
     if (err != ESP_OK) return err;
 
@@ -454,7 +462,7 @@ static esp_err_t ili9488_push_color_run(ILI9488Class *disp, uint16_t color, uint
 
     if (pixels == 0) return ESP_OK;
 
-    size_t chunk_pixels = ili9488_chunk(disp) / 3;
+    size_t chunk_pixels = ili9488_chunk_pixels(disp);
     if (chunk_pixels == 0) return ESP_ERR_INVALID_STATE; /* chunk_bytes below one pixel */
     if (chunk_pixels > pixels) chunk_pixels = (size_t)pixels;
 
@@ -483,10 +491,10 @@ static esp_err_t ili9488_push_color_run(ILI9488Class *disp, uint16_t color, uint
 static inline bool ili9488_rect_in_bounds(const ILI9488Class *disp, uint16_t x, uint16_t y,
                                           uint16_t w, uint16_t h)
 {
-    if (w == 0 || h == 0) return false;
-    /* 32-bit arithmetic so a caller passing x = 0xFFFF cannot wrap into
-     * something that looks in-range. */
-    return ((uint32_t)x + w) <= disp->width && ((uint32_t)y + h) <= disp->height;
+    /* panel_codec_rect_in_bounds() -- the w == 0/h == 0 rejection and the
+     * 32-bit-arithmetic overflow guard (a caller passing x = 0xFFFF cannot
+     * wrap into something that looks in-range) both moved there unchanged. */
+    return panel_codec_rect_in_bounds(x, y, w, h, disp->width, disp->height);
 }
 
 static void ili9488_blit_clear_state(ILI9488Class *disp)
@@ -513,26 +521,29 @@ static esp_err_t ili9488_reject_if_blitting(ILI9488Class *disp)
  * Init / deinit
  * =================================================================== */
 
+/* MADCTL per rotation. The panel scans 320x480 natively; MV swaps row/column
+ * so 1 and 3 are the landscape orientations, and MX/MY pick which corner is
+ * the origin so that (0,0) is always top-left as seen by the user.
+ *
+ * File scope (moved out of ili9488_apply_rotation() below, same four values)
+ * so the panel_desc_t descriptor at the bottom of this file can cite the same
+ * table instead of a second copy that could drift from it. */
+static const uint8_t ili9488_madctl_by_rotation[4] = {
+    ILI9488_MADCTL_MX,                                          /* 0: portrait  320x480 */
+    ILI9488_MADCTL_MV,                                          /* 1: landscape 480x320 */
+    ILI9488_MADCTL_MY,                                          /* 2: portrait  flipped */
+    ILI9488_MADCTL_MX | ILI9488_MADCTL_MY | ILI9488_MADCTL_MV,  /* 3: landscape flipped */
+};
+
 static esp_err_t ili9488_apply_rotation(ILI9488Class *disp, uint8_t rotation)
 {
-    /* MADCTL per rotation. The panel scans 320x480 natively; MV swaps
-     * row/column so 1 and 3 are the landscape orientations, and MX/MY pick
-     * which corner is the origin so that (0,0) is always top-left as seen by
-     * the user. */
-    static const uint8_t madctl_by_rotation[4] = {
-        ILI9488_MADCTL_MX,                                          /* 0: portrait  320x480 */
-        ILI9488_MADCTL_MV,                                          /* 1: landscape 480x320 */
-        ILI9488_MADCTL_MY,                                          /* 2: portrait  flipped */
-        ILI9488_MADCTL_MX | ILI9488_MADCTL_MY | ILI9488_MADCTL_MV,  /* 3: landscape flipped */
-    };
-
-    uint8_t madctl = (uint8_t)(madctl_by_rotation[rotation & 0x03] | ILI9488_MADCTL_COLOR_ORDER);
+    uint8_t madctl = panel_codec_madctl(ili9488_madctl_by_rotation, rotation, ILI9488_MADCTL_COLOR_ORDER);
     esp_err_t err = ili9488_write_cmd(disp, ILI9488_CMD_MADCTL, &madctl, 1);
     if (err != ESP_OK) return err;
 
     disp->madctl = madctl;
     disp->rotation = (uint8_t)(rotation & 0x03);
-    if (disp->rotation & 0x01) {
+    if (panel_codec_rotation_swaps_dimensions(disp->rotation)) {
         disp->width = disp->panel_height;
         disp->height = disp->panel_width;
     } else {
@@ -1475,7 +1486,7 @@ esp_err_t ILI9488_blit_data(ILI9488Class *disp, const uint8_t *data, size_t len)
     }
 
     uint32_t pixels = (uint32_t)(len / 2);
-    if (pixels > disp->blit.pixels_total - disp->blit.pixels_done) {
+    if (panel_codec_blit_overruns(pixels, disp->blit.pixels_total, disp->blit.pixels_done)) {
         ESP_LOGE(TAG, "BLIT_DATA overruns the window: %u more pixels, %u remaining; aborting",
                  (unsigned)pixels,
                  (unsigned)(disp->blit.pixels_total - disp->blit.pixels_done));
@@ -1491,7 +1502,7 @@ esp_err_t ILI9488_blit_data(ILI9488Class *disp, const uint8_t *data, size_t len)
      * spin forever with the lock held -- reachable by lowering chunk_bytes
      * under three, which the header explicitly invites callers to do. */
     esp_err_t err = ESP_OK;
-    size_t chunk_pixels = ili9488_chunk(disp) / 3;
+    size_t chunk_pixels = ili9488_chunk_pixels(disp);
     if (chunk_pixels == 0) {
         ESP_LOGE(TAG, "chunk_bytes (%u) is smaller than one pixel; aborting the blit",
                  (unsigned)disp->chunk_bytes);
@@ -1648,4 +1659,42 @@ esp_err_t ILI9488_read_id(ILI9488Class *disp, uint8_t out_id[3])
     }
     ili9488_unlock(disp);
     return err;
+}
+
+/* ===================================================================
+ * Panel descriptor (DISPLAY_ST7796_PLAN.md Sec.6 Step 2)
+ * ===================================================================
+ *
+ * Introduced this phase, not yet consumed: nothing in this file reads from
+ * it, so its existence changes no boot-time behaviour. The values are the
+ * same ones the rest of this file already uses (ILI9488_PANEL_WIDTH/HEIGHT,
+ * ILI9488_COLMOD_RGB666, the 3-byte RGB666 wire format,
+ * ili9488_madctl_by_rotation[]) -- restated here, not re-derived.
+ *
+ * init_seq/init_len are NULL/0: ili9488_init_sequence[] above is in a
+ * cmd/len/params struct shape this flat byte-buffer pair cannot represent
+ * without re-deriving it, and this phase makes no transformation it cannot
+ * prove byte-identical. id_matches is NULL for the same kind of reason on the
+ * data side -- Sec.4's "RDDID bytes from the ILI9488 on this wiring" line is
+ * still an open checkbox, and per Sec.6 Step 3, a matcher must be written
+ * against bytes actually read off this board, never datasheet nominal
+ * values. Both become real once Phase 3/4 need them. */
+static const panel_desc_t ili9488_panel_desc = {
+    .name = "ILI9488",
+    .panel_width = ILI9488_PANEL_WIDTH,
+    .panel_height = ILI9488_PANEL_HEIGHT,
+    .colmod = ILI9488_COLMOD_RGB666,
+    .bytes_per_pixel = 3,
+    .init_seq = NULL,
+    .init_len = 0,
+    .madctl = { ili9488_madctl_by_rotation[0], ili9488_madctl_by_rotation[1],
+                ili9488_madctl_by_rotation[2], ili9488_madctl_by_rotation[3] },
+    .id_matches = NULL,
+    .blank_via_power_off = false, /* today's ILI9488_clear() fills black over
+                                    * RAMWR; it does not touch DISPOFF/power. */
+};
+
+const panel_desc_t *ILI9488_get_panel_desc(void)
+{
+    return &ili9488_panel_desc;
 }

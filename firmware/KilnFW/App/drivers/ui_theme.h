@@ -151,7 +151,24 @@
  * actually computes. Left un-edited elsewhere (they are correct in spirit
  * and this constant is now the single source of truth going forward); new
  * budget arithmetic should reference UI_THEME_PAGE_CONTENT_BUDGET_PX
- * directly rather than copying either number as a literal. */
+ * directly rather than copying either number as a literal.
+ *
+ * GEOMETRY INVARIANT (DISPLAY_ST7796_PLAN.md Sec.6 Step 4): this budget is a
+ * compile-time constant, enforced per-page by _Static_assert
+ * (ui_page_temperature.c:150, ui_page_network.c:191/195,
+ * ui_page_network_manage.c:56 -- also grep-checked by
+ * App/test/check_ui_budget_asserts.ps1), but the panel it is computed for is
+ * chosen at RUNTIME once display panel auto-detection lands (ILI9488 vs
+ * ST7796, see DISPLAY_ST7796_PLAN.md Sec.6 Step 3). That only stays sound
+ * because both panels currently share the SAME geometry: 320x480 native,
+ * 480x320 landscape -- so DISPLAY_WIDTH and every _Static_assert built from
+ * it are correct no matter which panel actually answered the RDDID probe.
+ * A future THIRD panel with a different native size breaks this enforcement
+ * mechanism, not just some page's layout: the asserts would keep passing at
+ * compile time while checking the wrong panel's budget at runtime. Do not
+ * silently weaken or drop the asserts to accommodate such a panel -- that
+ * mismatch needs solving explicitly (e.g. a runtime budget check, or making
+ * the constant genuinely per-panel), not papered over. */
 #define UI_THEME_PAGE_CONTENT_BUDGET_PX \
     (DISPLAY_WIDTH - (2 * UI_THEME_PADDING_PX) - UI_THEME_STATUS_BAR_HEIGHT_PX - (UI_THEME_PADDING_PX / 2))
 

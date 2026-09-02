@@ -40,6 +40,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "kiln_io.h"
+#include "panel_codec.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -239,6 +240,13 @@ bool ILI9488_blit_active(ILI9488Class *disp);
  * the panel answers all-zero or all-ones, which is what an unwired or
  * high-impedance MISO looks like -- worth distinguishing from a bus error. */
 esp_err_t ILI9488_read_id(ILI9488Class *disp, uint8_t out_id[3]);
+
+/* The ILI9488's panel_desc_t (DISPLAY_ST7796_PLAN.md Sec.6 Step 2), populated
+ * from this driver's real geometry/COLMOD/MADCTL values. Not yet consumed by
+ * anything in this file -- introduced ahead of Phase 3, when panel_spi.c
+ * starts actually running off it. init_seq/id_matches are NULL; see the
+ * definition's own comment in ILI9488.c for why. */
+const panel_desc_t *ILI9488_get_panel_desc(void);
 
 #ifdef __cplusplus
 }

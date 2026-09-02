@@ -97,6 +97,7 @@ idf_component_register(SRCS "MAX31856.c"
                        "thermo_owner.c"
                        "owner_slot_pool.c"
                        "ILI9488.c"
+                       "panel_codec.c"
                        "lvgl_port.c"
                        "kiln_ui.c"
                        "ui_page_home.c"
@@ -126,6 +127,15 @@ idf_component_register(SRCS "MAX31856.c"
                        "ui_topbar.c"
                        "wifi_status_ui.c"
                        "NS2009.c"
+                       "touch_dev.c"
+                       # FT6336U.c: FT6336U capacitive touch controller driver
+                       # for the not-yet-connected MSP4031 module -- see its
+                       # own header comment. Compiled in (so it stays buildable
+                       # and its unvalidated register logic stays host-testable
+                       # via touch_dev.c's pure mapping split) but never
+                       # instantiated anywhere: dead code at runtime on every
+                       # board that exists today, which is still the NS2009.
+                       "FT6336U.c"
                        "screen_idle.c"
                        "safety_link.c"
                        "safety_link_frame.c"
