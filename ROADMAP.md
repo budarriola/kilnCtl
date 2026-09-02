@@ -231,14 +231,15 @@ now a short list, which is the point:
   `SaftyFW/CMakeLists.txt` on 2026-08-28: the host suite compiled it happily
   and the target link failed on it. Host tests cannot see this class of
   mistake, and it will recur.
-- **PID Expansion Plan Phase 3b — cross-zone coupling feedforward.** Not
-  started. `PID_EXPANSION_PLAN.md` §Phase 3b: nothing persists the measured
-  coupling matrix (`autotune_engine.c` fills it in RAM only) and
-  `zone_feedforward()` has no coupling term yet. The schema question is open
-  too: today's `zone_cfg_t` holds one coupling coefficient per zone, which
-  cannot hold a full directed row now that real data shows every pair is
-  asymmetric (up to 2.75x) — see that plan's finding 3 for the `zone_cfg_v11_t`
-  shape this needs
+- ~~**PID Expansion Plan Phase 3b — cross-zone coupling feedforward.**~~
+  **Stale, corrected 2026-09-02: this shipped.** The coupling matrix persists
+  per-zone (`coupling_coeff[]`, `zones_config_accessors.c`/
+  `zones_config_json.c`, config store) and `zone_coupling_solve.c` /
+  `profile_executor_feedforward.c` apply it as a full 3x3 directed matrix —
+  the asymmetric-pair schema concern this entry raised is already resolved by
+  storing a full row per zone rather than one scalar coefficient. See
+  `PID_EXPANSION_PLAN.md` §3.2/§3.3 for the current coupling-matrix work
+  (re-solved matrix, adaptive coupled identification).
 - **New, scoped but not yet in a plan doc: per-zone enable/disable**, so the
   kiln can run with rings/heaters/thermocouples physically removed. Contiguous
   prefix from index 0 only (the highest-index zone never disables), toggleable
