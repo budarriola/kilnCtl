@@ -483,28 +483,67 @@ via a profile push over the UART bridge).
 If a future pass proposes moving any of these, that proposal must first explain
 why the existing comment is wrong.
 
-### 7.3 Candidates — evaluate individually
+**Update 2026-09-02 (cap-raise pass) — the instrumentation blocker is
+closed; every 7.3 candidate is now reachable, none relocated.** All five
+uninstrumented-and-clean candidates already had a `stack_margin_register()`
+call site (added in the Phase 0 pass referenced by `stack_margin.h`'s own
+header comment) — this was never a missing-registration bug. The actual
+blocker: `STACK_MARGIN_MAX_TASKS` was 28 and the real boot-time registration
+count was 29, not 28 — `i2c_owner_init()` (`espInterfaces/i2c_owner.c`) is
+called by two live drivers on this board (`SX1509.c`, the IO expander, and
+`NS2009.c`, the touch controller; `FT6336U.c` also calls it but is dead code
+— "FT6336U_start's caller is nobody", `FT6336U.c:15` — so its call never
+executes), so that one source call site fires twice at boot. One
+registration silently lost the coin flip every boot (`stack_margin.c`'s
+`ESP_LOGE`, non-fatal, nobody watching), and which task lost depended on
+init order, not on anything about that task — which is exactly consistent
+with kiln_io_owner/thermo_owner/spi_owner/i2c_owner/screen_idle *all*
+reading as unmeasured despite being registered: whichever one the boot
+sequence happened to reach after the 28th slot filled would drop out, and
+init order here puts most of §7.3's candidates late relative to the fixed
+28-slot pre-Phase-0 tasks.
 
-| task | stack | flash-write trace (2026-09-02 third pass) | HWM measured? | verdict |
+Fixed this pass: `STACK_MARGIN_MAX_TASKS` raised 28 → 40 (`stack_margin.h`;
+12 slots × 28 B/slot = 336 B static DRAM, spent deliberately — see that
+header's own comment for the arithmetic). A new standing guard,
+`tools/check_stack_margin_registration.ps1`, now runs in
+`run_all_checks.ps1` and fails if any of this plan's tracked tasks loses its
+`stack_margin_register()` call site, or if the cap falls behind the real
+call-site count again — proved red by commenting out `kiln_io_owner`'s
+call site (`STACK MARGIN REGISTRATION CHECK FAILED: ... kiln_io_owner`),
+then reverted.
+
+Separately, the ONLY wire exposure of this registry —
+`INFO_CMD_GET_STACK_MARGIN` (`uart_bridge_info.c`, reachable via the
+`kilnctrl` MCP tool's `get_stack_margin`) — turned out to silently drop
+most entries: `BRIDGE_REPLY_MAX` is 253 bytes and the reply builder's own
+comment assumed "today's <=6 registered tasks" when the real count was
+already 28; only the first ~10 short-named entries fit one reply, and nothing
+on the wire told a caller the rest were missing. Fixed this pass:
+`build_stack_margin_reply()` now pages (`start_index` request byte,
+`truncated`/`next_start_index` response bytes — see `uart_task_ids.h`'s
+`INFO_CMD_GET_STACK_MARGIN` doc), and `KilnInfo.get_stack_margin()`
+(`tools/PcTools/src/kilnctrl/info.py`) loops pages internally, so a caller
+still gets one complete list. No `/api/status` JSON change was needed —
+this measurement was never exposed there, only over this UART path.
+
+| task | stack | flash-write trace (2026-09-02 third pass) | HWM reachable? | verdict |
 |---|---|---|---|---|
-| `kiln_io_owner` | 4096 B | CLEAN — bounded GPIO/I2C-expander command switch, no NVS call, no function-pointer dispatch | no (not in 3.1 table) | BLOCKED on instrumentation |
-| `thermo_owner` | 4096 B | CLEAN — bounded MAX31856 SPI register command switch, no NVS call | no | BLOCKED on instrumentation |
-| `profile_executor` | 4096 B | was NOT clean (`run_state.c`/`relay_cycles.c`/`profile_executor_firing_stats.c` had no PSRAM-stack guard); guards added this pass, now clean | yes (1388 B free, 33.9%) | BLOCKED — needs a real soak, not just a closed guard gap |
-| `spi_owner` | — | no NVS call, but shares the SPI bus with flash (a different, uncharacterized hazard) | no | BLOCKED on instrumentation + the bus-contention question |
-| `i2c_owner` | — | CLEAN — no NVS call anywhere in the file | no | BLOCKED on instrumentation |
+| `kiln_io_owner` | 4096 B | CLEAN — bounded GPIO/I2C-expander command switch, no NVS call, no function-pointer dispatch | yes (registered; cap/reply-paging fixed this pass) | needs a real boot to read the number, no longer BLOCKED on instrumentation |
+| `thermo_owner` | 4096 B | CLEAN — bounded MAX31856 SPI register command switch, no NVS call | yes | needs a real boot to read the number |
+| `profile_executor` | 4096 B | was NOT clean (`run_state.c`/`relay_cycles.c`/`profile_executor_firing_stats.c` had no PSRAM-stack guard); guards added third pass, now clean | yes (1388 B free, 33.9%) | BLOCKED — needs a real soak, not just a closed guard gap |
+| `spi_owner` | — | no NVS call, but shares the SPI bus with flash (a different, uncharacterized hazard) | yes | needs a real boot to read the number; bus-contention question still open |
+| `i2c_owner` | — | CLEAN — no NVS call anywhere in the file | yes | needs a real boot to read the number |
 | `uart_owner_*` ×2 instances | 3072 B each | not re-examined this pass | yes | BLOCKED by §6 (unmeasured Pico OTA relay path) |
-| `screen_idle` | 3072 B | CLEAN — full task body only reads touch and flips in-RAM flags; does NOT touch calibration storage (this table's old "display-settings persistence" caution was stale) | no | BLOCKED on instrumentation |
+| `screen_idle` | 3072 B | CLEAN — full task body only reads touch and flips in-RAM flags; does NOT touch calibration storage (this table's old "display-settings persistence" caution was stale) | yes | needs a real boot to read the number |
 
-See this doc's 2026-09-02 (third pass) update note above for the full trace
-and the coverage-gap finding that motivated closing the three guards. **No
-task was relocated this pass** — every row above is blocked, either on
-instrumentation coverage (`STACK_MARGIN_MAX_TASKS` reported 28/28 used, not
-independently re-verified live) or, for `profile_executor`, on a real
-hardware soak. The next pass's first step is hardware access: verify the
-28/28 slot count, raise the cap, register the five uninstrumented-and-clean
-tasks (`kiln_io_owner`, `thermo_owner`, `screen_idle`, `spi_owner`,
-`i2c_owner`), and capture their HWMs under the section 4.3 load — their
-flash-write cleanliness from this pass's trace does not need re-doing.
+**No task was relocated this pass — instrumentation only, as directed.** The
+next pass's first step is hardware access: boot the board, pull a full
+`get_stack_margin()` (now paginated, so the whole registry — not just the
+first ~10 entries — comes back), and record real HWM numbers for
+`kiln_io_owner`, `thermo_owner`, `spi_owner`, `i2c_owner`, `screen_idle`
+next to `profile_executor`'s in section 3.1's table. Only then does moving
+any of them stop being "unverified relocation."
 
 `uart_owner_*` appears in both §6 and here on purpose: §6 trims it, this phase
 would move it. Trim first, then move — and remember one call site serves both
