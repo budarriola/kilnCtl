@@ -55,53 +55,45 @@ commissioning the CT channels is what closes it.
 
 A six-agent read-only audit of both firmwares. Fixed and committed already:
 the dead `s_guard_cfg` (S1 unreachable at any temperature), the
-`tc_placement_valid` gate (S2/S10 armed on uncommissioned boards). Everything
-below is **confirmed by code reading and still open**, ordered by severity.
+`tc_placement_valid` gate (S2/S10 armed on uncommissioned boards).
 
-- [ ] **`safety_guards_try_clear()` grants a full re-arm window against a
-      still-present hazard.** `guard_condition_still_immediate()` refuses a
-      clear for S5/S12/S13/S6b only; S2, S3, S9 and S11 fall through to a
-      clear-and-retick that zeroes the accumulator the guard needs. Worst case
-      is S3 (welded SSR): clear is accepted, `relay_owner` re-arms, and it
-      takes another `stuck_on_time_s` (20 s) of mains into a failed-closed
-      element before it can trip again — repeatable indefinitely by
-      re-clearing. S11 is 600 s, S2 is 120 s. Extend the refusal to these four,
-      recomputing each condition from the current tick's input. Needs a
-      negative test per guard proving the refusal can fail.
-- [ ] **`TRIP_INEFFECTIVE` (S9, welded contactor) is clearable.**
-      `ARCHITECTURE.md` §9 and `SAFETY_MODEL.md` §4 both describe it as having
-      "no exit except power removal at the breaker"; in code a `CLEAR_TRIP`
-      wipes `trip_ineffective`, re-arms K4, and silences the one alarm whose
-      required response is *go to the breaker* — while mains may still be
-      flowing through fused contacts. Make it unclearable in firmware, and
-      refuse it in `link_frame_decide_clear_trip()` too.
-- [ ] **A trip during GRACE, once cleared, jumps straight to ARMED and
-      discards the remaining startup grace.** `relay_owner_clear_trip()` is
-      unconditional and `relay_grace_tick()` has no path back into GRACE. An
-      E-stop asserted and cleared 10 s into a boot leaves the board ARMED at
-      t=10 s instead of t=60 s, with rolling windows that have no samples in
-      them yet. Clear should return to GRACE, not ARMED.
-- [ ] **A dropped `relay_owner_command_trip()` silently fails to open K4 and
-      blinds S9 in the same stroke.** The return is discarded, the queue send
-      is non-blocking, and `safety_guards_tick()` returns "newly tripped" only
-      once — so a full queue means the trip command is never re-issued.
-      Compounding: S9's window is driven by `relay_owner_is_energized()`, a
-      software mirror of the *intended* state, so the one failure mode S9
-      cannot see is our own de-energize path failing. Retry until it succeeds,
-      and consider driving S9's window from `is_tripped` as well.
-- [ ] **Guard windows count nominal ticks, not wall-clock.** `dt_s` is a
-      compile-time constant; `clock_health` detects a stalled clock but does
-      not touch `dt_s`. Under sustained scheduling pressure every safety window
-      silently lengthens with nothing reporting it. Compute `dt_s` from
-      successive `now_ms` deltas, clamped, falling back to the constant when
-      the clock is stalled.
-- [ ] **Consumers do not age-check `thermo`/`current` snapshots.**
-      `ARCHITECTURE.md` §6 says staleness is the consumer's job;
-      `safety_core_build_input()` checks context age but never
-      `thermo.timestamp_ms` or `current.timestamp_ms`. A `thermo_task` publish
-      that repeatedly loses its mutex leaves `safety_core` on the last good
-      reading while the task keeps feeding the watchdog — the documented
-      "stale reading looks fresh" class.
+**Swept 2026-09-02: every item below except the last was already fixed by the
+2026-08-27 audit pass and this checklist had simply never been ticked** — each
+was re-verified against the current source before being closed here, not
+assumed from the commit log:
+
+- [x] ~~`safety_guards_try_clear()` grants a full re-arm window against a
+      still-present hazard.~~ Fixed. `guard_condition_still_immediate()`
+      (`src/safety_guards.c:149`) now covers S2/S3/S5/S11/S12/S13, each
+      recomputed from the current tick's `in`/`state` rather than trusting an
+      accumulator `safety_guards_clear()` is about to zero.
+- [x] ~~`TRIP_INEFFECTIVE` (S9, welded contactor) is clearable.~~ Fixed on both
+      sides: `safety_guards_try_clear()` refuses unconditionally whenever
+      `state->trip_ineffective` is set, before either of the checks above run
+      (`safety_guards.c:228`), and `link_frame_decide_clear_trip()`
+      (`src/tasks/link_frame.c:223`) refuses `SAFETY_TRIP_INEFFECTIVE` at the
+      wire layer too, so the refusal is visible with a reason before the pure
+      guard function is even reached.
+- [x] ~~A trip during GRACE, once cleared, jumps straight to ARMED.~~ Fixed:
+      `relay_clear_trip_transition()` (`src/tasks/relay_grace.c:23`) returns to
+      GRACE when `elapsed_ticks < grace_ticks`, matching `relay_grace_tick()`'s
+      own boundary, and only reaches ARMED when the grace window had already
+      elapsed by the same instant a normal boot would have crossed it.
+- [x] ~~A dropped `relay_owner_command_trip()` silently fails to open K4.~~
+      Fixed: `relay_trip_command_still_owed()` /
+      `relay_clear_command_still_owed()` (`src/tasks/relay_grace.c:40/48`) are
+      wired into `safety_core.c`'s queue-drain loop (lines ~1176/1311) and
+      retry the send until it succeeds, with the trip direction always winning
+      a race against a superseding clear.
+- [x] ~~Guard windows count nominal ticks, not wall-clock.~~ Fixed:
+      `tick_dt_compute_s()` (`src/tick_timing.h`) measures real elapsed time
+      from successive `now_ms` deltas, clamped, and falls back to the nominal
+      constant only when `clock_health` reports the clock stalled
+      (`src/tasks/safety_core.c:685`).
+- [x] ~~Consumers do not age-check `thermo`/`current` snapshots.~~ Fixed:
+      `safety_core.c:737` and `:899` gate both `tc_valid`/`current_valid` on
+      `snapshot_is_fresh(now_ms, ...timestamp_ms, ..._MAX_AGE_MS)` in addition
+      to the clock-health check, same audit pass as the `dt_s` fix above.
 - [x] **S13's producer does not exist.** ~~`sample_counter_advancing` is
       hardcoded false.~~ Fixed: `context_borrowed_sample_counter_advancing()`
       (`src/snapshots.h`, host-tested in `test/test_snapshots.c`) compares the
@@ -109,25 +101,36 @@ below is **confirmed by code reading and still open**, ordered by severity.
       against the last tick's, called from `safety_core_build_input()`
       (`src/tasks/safety_core.c`). `tc_source` may now be commissioned to
       BORROWED_ZONE/BOTH — see `SAFETY_MODEL.md`'s guard table.
-- [ ] **Config record field ranges are validated on commit but not on load.**
-      `config_params_validate_ranges()` runs only at COMMIT_CONFIG; a
-      CRC-valid record from a *different build* with different semantics loads
-      unvalidated and reaches the guards. Run it in `config_store_unpack()` and
-      fall back to defaults with `calibration_missing` on failure.
-- [ ] **`config_store_get_config_version()` truncates `seq` to 8 bits**, so
-      every 256th commit (and any never-committed board) reports version 0,
-      which `config_store_confirm_crc_ok()` reads as "no valid config" — the
-      updated slot then stays `PENDING_VERIFY` forever and is never promoted.
-- [ ] **`config_store_write()` erases the whole sector then programs.** Power
-      loss in between loses all commissioning (fails safe — heat refused — but
-      total). Ping-pong across two sectors, or at minimum log the wrap loudly.
-- [ ] **Only one trip reason is ever retained.** `ARCHITECTURE.md` §9 promises
-      `trip_mask` is "a bitmask indexed by guard number"; it is a single bit at
-      `reason-1`, and that index diverges from the guard number after S6.
-      Either implement per-guard masks or correct both docs.
-- [ ] **`SAFETY_MODEL.md` §6 lists an E-stop assert/release cycle as a clear
-      path.** No such path exists in code — nothing observes an E-stop release
-      edge. Remove the claim or build it.
+- [x] ~~Config record field ranges are validated on commit but not on load.~~
+      Fixed: `config_store_unpack_ex()` (`src/config_store.c:556`) calls
+      `config_params_validate_ranges()` at load time too, and a structurally
+      valid but range-refused record falls back to
+      `config_store_default()` with `calibration_missing`/
+      `config_store_is_config_rejected()` reporting why, not just booting
+      unvalidated onto the guards.
+- [x] ~~`config_store_get_config_version()` truncates `seq` to 8 bits.~~ Fixed:
+      `config_store_seq_to_version()` (`src/config_store.c:942`) maps every
+      `seq >= 1` into `[1, 255]` via `(seq - 1u) % 255u + 1u`, deliberately
+      excluding 0 from the wrapped range (0 is reserved for the one real
+      "never committed" case) instead of the old `seq & 0xFF` that let seq 256
+      alias seq 0 and read as "no valid config".
+- [x] ~~`config_store_write()` erases the whole sector then programs.~~ Fixed:
+      `config_store_flash.c` already ping-pongs across the two slots in the
+      sector (`s_cached_slot`, `config_store_next_write_needs_erase()`,
+      `needs_erase` only true when both slots are full) rather than erasing on
+      every commit.
+- [x] ~~Only one trip reason is ever retained; `ARCHITECTURE.md` §9 promises a
+      bitmask.~~ Doc corrected, not code changed — `ARCHITECTURE.md:539` now
+      states plainly that `trip_mask` is a single latched reason, wire-encoded
+      as one bit for backward compatibility, and that `trip_reason` is the
+      authoritative field. Re-verified 2026-09-02: still accurate.
+- [x] ~~`SAFETY_MODEL.md` §6 lists an E-stop assert/release cycle as a clear
+      path.~~ Doc corrected, not code changed — `SAFETY_MODEL.md:882-908` now
+      states explicitly that no such path exists, that releasing E-stop is
+      only a *precondition* S7's `CLEAR_TRIP` recheck must see satisfied, and
+      that `CLEAR_TRIP` must still be sent afterward. Re-verified 2026-09-02:
+      still accurate, and matches the code (`safety_guards_try_clear()`'s only
+      caller is `link_task.c`'s `CLEAR_TRIP` handler).
 - [ ] **`watchdog_enable(..., pause_on_debug = true)`** with a probe
       permanently attached means a core halted in a fault state is never reset,
       disabling the documented fail-safe reboot on every bench board. GPIO6
