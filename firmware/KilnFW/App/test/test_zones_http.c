@@ -3148,6 +3148,27 @@ static void test_coupling_single_cell_setter_preserves_other_cells(void)
     nvs_test_clear();
 }
 
+// Bounded search: find `needle` inside the JSON object for zone `zone_index`
+// within a GET /api/zones response, never past the following zone's object
+// (or the end of the "zones" array) -- so a value that legitimately appears
+// in a NEIGHBOR zone's object can't produce a false match for this one.
+static bool zone_json_field_present(const char *body, uint8_t zone_index, const char *needle)
+{
+    const char *zones_arr = strstr(body, "\"zones\":[");
+    if (!zones_arr) return false;
+    char marker[24];
+    snprintf(marker, sizeof(marker), "\"index\":%u,", (unsigned)zone_index);
+    const char *start = strstr(zones_arr, marker);
+    if (!start) return false;
+    char next_marker[24];
+    snprintf(next_marker, sizeof(next_marker), "\"index\":%u,", (unsigned)zone_index + 1);
+    const char *end = strstr(start, next_marker);
+    const char *found = strstr(start, needle);
+    if (!found) return false;
+    if (end && found >= end) return false;
+    return true;
+}
+
 // PID_EXPANSION_PLAN.md section 3.2's re-solved matrix (adopted
 // 2026-09-02), applied here in its storage orientation
 // coupling_coeff[affected][stepped]:
@@ -3160,15 +3181,34 @@ static void test_coupling_single_cell_setter_preserves_other_cells(void)
 // raises z0 by ~22C; z0's step raises z1 by only ~9C) specifically so a
 // transposed apply is easy to catch here rather than on hardware -- see
 // zones_http.h's coupling_coeff doc comment ("row i is the affected zone,
-// column j is the stepped zone. Do not transpose"). Setting every row via
-// zones_config_set_coupling() (the same setter finalize_fit() and the
-// z%u_coupling_c%u POST path both funnel through) and reading it back must
-// reproduce the matrix cell-for-cell in [affected][stepped] order, NOT its
-// transpose.
+// column j is the stepped zone. Do not transpose").
+//
+// REVIEW 2026-09-02: an earlier version of this test set every row through
+// zones_config_set_coupling() and read it back through
+// zones_config_get_coupling() ONLY. That is orientation-BLIND by
+// construction: if the setter's storage location and the getter's read
+// location were transposed the SAME way (e.g. both indexed by the stepped
+// zone instead of the affected one), the pair would still round-trip
+// correctly with each other while every OTHER consumer of the same storage
+// -- the GET /api/zones JSON, zone_coupling_solve.c, autotune_engine.c's
+// coupling-aware feedforward -- would silently read the wrong cell. A round
+// trip through one matched getter/setter pair can never rule that out.
+//
+// This version drives the matrix in through zones_config_set_coupling() (the
+// same setter finalize_fit() and the z%u_coupling_c%u POST path both funnel
+// through) and reads it back through zones_get_handler() -- the REAL
+// production GET /api/zones handler, which serializes coupling_coeff[]
+// straight out of zone_cfg_t with no dependency on zones_config_get_coupling()
+// at all (see zones_http_handlers.c's "coupling_c%u" emission). That is a
+// genuinely independent second view of the same storage: a setter bug that
+// lands cell [affected][stepped] in the wrong zone's array shows up here
+// even if a same-shaped getter bug would have hidden it from a get/set-only
+// round trip.
 static void test_coupling_matrix_2026_09_02_adopted_orientation_not_transposed(void)
 {
-    TEST_SECTION("zones_config_set/get_coupling -- the adopted 2026-09-02 matrix round-trips in "
-                 "[affected][stepped] storage orientation, not transposed");
+    TEST_SECTION("zones_config_set_coupling -> zones_get_handler -- the adopted 2026-09-02 matrix lands in "
+                 "[affected][stepped] storage orientation, not transposed (verified through the independent "
+                 "GET /api/zones wire path, not the matching getter)");
     nvs_test_enable(true);
     nvs_test_clear();
     memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
@@ -3186,16 +3226,25 @@ static void test_coupling_matrix_2026_09_02_adopted_orientation_not_transposed(v
                   "row `affected` is accepted");
     }
 
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    s_last_resp_body[0] = '\0';
+    s_last_resp_len = 0;
+    esp_err_t err = zones_get_handler(&req);
+    TEST_CHECK(err == ESP_OK, "zones_get_handler must return ESP_OK");
+
     for (uint8_t affected = 0; affected < MAX31856_CHANNEL_COUNT; affected++) {
-        float out_row[MAX31856_CHANNEL_COUNT] = {-1.0f, -1.0f, -1.0f};
-        TEST_CHECK(zones_config_get_coupling(affected, out_row), "getter succeeds");
         for (uint8_t stepped = 0; stepped < MAX31856_CHANNEL_COUNT; stepped++) {
-            char msg[128];
+            char needle[40];
+            snprintf(needle, sizeof(needle), "\"coupling_c%u\":%.4f", (unsigned)stepped,
+                     (double)matrix[affected][stepped]);
+            char msg[192];
             snprintf(msg, sizeof(msg),
-                     "coupling_coeff[%u][%u] must equal the adopted matrix's [affected=%u][stepped=%u] "
-                     "cell, NOT its transpose [stepped][affected]",
-                     affected, stepped, affected, stepped);
-            TEST_CHECK_NEAR(out_row[stepped], matrix[affected][stepped], 1e-6, msg);
+                     "GET /api/zones's zone %u must report coupling_c%u == the adopted matrix's "
+                     "[affected=%u][stepped=%u] cell (%.4f), NOT its transpose [stepped][affected] -- this "
+                     "reads the storage independently of zones_config_get_coupling()",
+                     affected, stepped, affected, stepped, (double)matrix[affected][stepped]);
+            TEST_CHECK(zone_json_field_present(s_last_resp_body, affected, needle), msg);
         }
     }
 
@@ -3203,12 +3252,10 @@ static void test_coupling_matrix_2026_09_02_adopted_orientation_not_transposed(v
     // must not be confused with z0's step on z1 (27.32) -- a transposed
     // apply would swap exactly this pair and still "look plausible" (both
     // are positive, both in range) without this check.
-    float row0[MAX31856_CHANNEL_COUNT] = {0}, row1[MAX31856_CHANNEL_COUNT] = {0};
-    TEST_CHECK(zones_config_get_coupling(0, row0) && zones_config_get_coupling(1, row1),
-              "zone 0 and zone 1 rows both read back");
-    TEST_CHECK_NEAR(row0[1], 27.32f, 1e-6, "coupling_coeff[0][1]: z1's step raises z0 by 27.32");
-    TEST_CHECK_NEAR(row1[0], 14.30f, 1e-6, "coupling_coeff[1][0]: z0's step raises z1 by only 14.30");
-    TEST_CHECK(row0[1] != row1[0], "the off-diagonal pair is asymmetric -- transposing it is detectable");
+    TEST_CHECK(zone_json_field_present(s_last_resp_body, 0, "\"coupling_c1\":27.3200"),
+              "zone 0 (affected) reports coupling_c1 (stepped=1) as 27.32, z1's step raising z0");
+    TEST_CHECK(zone_json_field_present(s_last_resp_body, 1, "\"coupling_c0\":14.3000"),
+              "zone 1 (affected) reports coupling_c0 (stepped=0) as only 14.30, z0's step raising z1");
 
     nvs_test_enable(false);
     nvs_test_clear();
