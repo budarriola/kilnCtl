@@ -969,7 +969,23 @@ function renderChannels(data) {
       // raw ch.cj_c value is still served by /api/status (diagnostics_page.html
       // still surfaces it); dropping it HERE is a display choice, not a data
       // removal, and needed no API change.
-      detail = '<span class="kc-live-value">' + window.kcUnit.fmt(ch.temp_c) + '</span>' + staleTag +
+      // Per-zone duty (2026-09-02, owner: "current duty cycle for each zone
+      // can be shown on the zone square below the graph" -- the graph trace
+      // itself became the whole-kiln average, see drawHistoryChart's
+      // dutyLabel change, so each zone's own duty now lives only here).
+      // lastExecStatus.zones only ever contains zones the current run has
+      // active (append_zone_status_json() skips inactive zones), so a zone
+      // with no live duty this tick (no run, or a run that doesn't include
+      // this zone) simply shows no duty tag rather than a stale/fabricated
+      // one.
+      var dutyTag = '';
+      var ziForDuty = zoneIndexForChannel(ch.channel);
+      var zst = ziForDuty !== null && lastExecStatus ?
+        (lastExecStatus.zones || []).filter(function (z) { return z.zone === ziForDuty; })[0] : null;
+      if (zst) {
+        dutyTag = ' <span class="stale">(duty ' + (zst.duty * 100).toFixed(0) + '%)</span>';
+      }
+      detail = '<span class="kc-live-value">' + window.kcUnit.fmt(ch.temp_c) + '</span>' + staleTag + dutyTag +
                relayStatusHtml(ch.channel, data.relays);
     }
     // Label the row with its zone name (operator-set on Thermocouples &
@@ -2258,20 +2274,28 @@ function drawHistoryChart(rows) {
   ctx.fillText('1.0', cssW - padR + 4, padT + 8);
   ctx.fillText('0.0', cssW - padR + 4, padT + plotH);
 
-  // Per-zone duty (2026-09-01 follow-up): the representative zone's OWN
-  // commanded duty, now recorded firmware-side for the whole run
-  // (r.zoneDuty[repZone], history.csv) so this survives reload same as the
-  // temperature traces below -- topped up with firingDutySeries (client-
-  // collected from /api/profile_exec) for the handful of seconds between
-  // history.csv's 15s poll and now. One zone's duty, not all three: still a
-  // deliberate clutter call (see firingDutySeries's own doc comment) -- three
-  // temperature lines already sit close together, three more duty lines
-  // would be noise, not signal. Continuous (not the autotune chart's stepped
-  // rendering): PID/BANGBANG duty output is genuinely continuous, unlike
-  // autotune's deliberately-held step-test duty.
-  var dutyZone = repZone >= 0 ? repZone : 0;
-  var dutyLabel = (repZone >= 0 ? zoneName(repZone) : 'zone') + ' duty';
-  var dutyPts = rows.map(function (r) { return { t: r.t, duty: r.zoneDuty[dutyZone] }; });
+  // Whole-kiln average duty (2026-09-02 follow-up, owner: "insted of showing
+  // zone 0 duty on the screen i want to see the duty of the whole kiln on
+  // the graph example (duty0+duty1+duty2+duty3)/zones"). Previously this
+  // traced ONE representative zone's own commanded duty (repZone, defaulting
+  // to zone 0 whenever no run was active to pick a representative from --
+  // exactly the "zone 0 duty" the owner is describing). Now it averages
+  // every zone actually in the run's zone_mask, recorded firmware-side for
+  // the whole run (r.zoneDuty[hzi], history.csv) so this still survives
+  // reload same as before -- topped up with firingDutySeries (client-
+  // collected from /api/profile_exec, itself now averaged the same way, see
+  // sampleFiringZoneTemps) for the gap between history.csv's 15s poll and
+  // now. Dividing by the mask's own popcount (not a hardcoded zone count)
+  // means a zone that is not part of THIS run never drags the average toward
+  // zero. Continuous (not the autotune chart's stepped rendering): PID/
+  // BANGBANG duty output is genuinely continuous, unlike autotune's
+  // deliberately-held step-test duty.
+  var dutyMask = lastExecStatus ? lastExecStatus.zone_mask : 0;
+  var dutyZoneCount = popcount8(dutyMask);
+  var dutyLabel = 'whole-kiln avg duty';
+  var dutyPts = rows.map(function (r) {
+    return { t: r.t, duty: avgMaskedDuty(r.zoneDuty, dutyMask, dutyZoneCount) };
+  });
   var lastDutyT = dutyPts.length ? dutyPts[dutyPts.length - 1].t : -Infinity;
   firingDutySeries.forEach(function (p) { if (p.t > lastDutyT) dutyPts.push({ t: p.t, duty: p.duty }); });
   ctx.beginPath();
@@ -2556,6 +2580,38 @@ function zoneMaskLowestBit(mask) {
   return -1;
 }
 
+// Count of set bits in a zone_mask -- the "how many zones are actually in
+// this run" divisor for the whole-kiln average duty trace (2026-09-02,
+// owner: "(duty0+duty1+duty2+duty3)/zones"). Mirrors the same zone_mask
+// notion zoneMaskLowestBit()/drawHistoryChart's per-zone loop already use,
+// not an independent "3 zones" or "4 zones" guess -- a zone not set in the
+// mask (not configured, or not part of THIS run) must not participate in
+// either the sum or the divisor.
+function popcount8(mask) {
+  var n = 0;
+  for (var b = 0; b < 8; b++) { if (mask & (1 << b)) n++; }
+  return n;
+}
+
+// Mean of dutyArr[hzi] across every bit set in mask (history.csv row shape:
+// dutyArr indexed 0..HISTORY_ZONE_COUNT-1, same as r.zoneDuty). zoneCount is
+// popcount8(mask), passed in rather than recomputed per row since callers
+// already have it once per chart draw. Returns NaN when there is nothing to
+// average (no active zones, or every masked zone's duty this row is itself
+// NaN) so the trace breaks/gaps exactly like a single-zone NaN used to,
+// rather than silently plotting a false 0.
+function avgMaskedDuty(dutyArr, mask, zoneCount) {
+  if (zoneCount <= 0) return NaN;
+  var sum = 0, n = 0;
+  for (var hzi = 0; hzi < HISTORY_ZONE_COUNT; hzi++) {
+    if (!(mask & (1 << hzi))) continue;
+    var d = dutyArr[hzi];
+    if (isNaN(d)) continue;
+    sum += d; n++;
+  }
+  return n > 0 ? (sum / zoneCount) : NaN;
+}
+
 // Client-collected TOP-UP traces (2026-09-01: history.csv now records every
 // zone for the whole run, see drawHistoryChart's own doc comment -- this is
 // no longer the only source for a non-representative zone, just the bridge
@@ -2602,11 +2658,22 @@ function sampleFiringZoneTemps(data, st) {
     if (last && (t - last.t) < CLIENT_ZONE_SAMPLE_MIN_INTERVAL_S) return;
     pushCappedPoint(arr, { t: t, c: ch.temp_c });
   });
-  var repStatus = (st.zones || []).filter(function (z) { return z.zone === repZone; })[0];
-  if (repStatus) {
-    var dlast = firingDutySeries[firingDutySeries.length - 1];
-    if (!dlast || (t - dlast.t) >= CLIENT_ZONE_SAMPLE_MIN_INTERVAL_S) {
-      pushCappedPoint(firingDutySeries, { t: t, duty: repStatus.duty });
+  // Whole-kiln average duty top-up (2026-09-02, same change as
+  // drawHistoryChart's dutyPts above) -- average every zone /api/profile_exec
+  // reports active (st.zones only ever contains active zones, see
+  // append_zone_status_json()) that is also set in st.zone_mask, divided by
+  // the mask's popcount, not just the one representative zone's own duty.
+  var zoneCount = popcount8(st.zone_mask);
+  if (zoneCount > 0) {
+    var activeZones = (st.zones || []).filter(function (z) {
+      return st.zone_mask & (1 << z.zone);
+    });
+    if (activeZones.length) {
+      var dlast = firingDutySeries[firingDutySeries.length - 1];
+      if (!dlast || (t - dlast.t) >= CLIENT_ZONE_SAMPLE_MIN_INTERVAL_S) {
+        var dutySum = activeZones.reduce(function (acc, z) { return acc + z.duty; }, 0);
+        pushCappedPoint(firingDutySeries, { t: t, duty: dutySum / zoneCount });
+      }
     }
   }
 }

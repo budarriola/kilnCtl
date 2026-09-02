@@ -126,6 +126,9 @@ const ZONE_SAMPLING_SRC = extractRange(
   'function zoneMaskLowestBit(mask) {',
   '}'
 ) + '\n' + extractRange(
+  'function popcount8(mask) {',
+  '}'
+) + '\n' + extractRange(
   'var firingZoneSeries = {};',
   'var wasFiringActive = false;'
 ) + '\n' + extractRange(
@@ -194,10 +197,40 @@ function loadZoneSampler() {
   assert(ctx.firingZoneSeries[3] === undefined, 'disabled (invalid) channel 3 produces NO trace');
   assert(ctx.firingZoneSeries[4] === undefined, 'SPI-faulted channel 4 produces NO trace');
 
-  // Representative zone's duty is collected (per-zone, not the aggregate),
-  // and carries zone 0's OWN duty value, not zone 1's or 2's.
-  assert(ctx.firingDutySeries.length === 1 && ctx.firingDutySeries[0].duty === 0.55,
-    'representative zone duty (0.55) collected, not a neighbouring zone\'s duty');
+  // Whole-kiln average duty (2026-09-02, owner: "(duty0+duty1+duty2+duty3)
+  // /zones") -- NOT the representative zone's own duty any more. zone_mask
+  // is 0x07 (zones 0,1,2), so the divisor is 3 (popcount8), and the sum is
+  // every zone's duty that is BOTH active (present in st.zones, per
+  // append_zone_status_json()) AND in the mask: (0.55+0.10+0.20)/3.
+  const expectedAvgDuty = (0.55 + 0.10 + 0.20) / 3;
+  assert(ctx.firingDutySeries.length === 1 &&
+    Math.abs(ctx.firingDutySeries[0].duty - expectedAvgDuty) < 1e-9,
+    'whole-kiln average duty (' + expectedAvgDuty.toFixed(4) + ') collected, got ' +
+    (ctx.firingDutySeries[0] && ctx.firingDutySeries[0].duty));
+})();
+
+// A zone_mask bit with NO matching entry in st.zones (e.g. a zone configured
+// but not yet reporting) must still divide by the FULL mask popcount, not
+// just however many zones happened to report -- otherwise a slow/missing
+// zone would inflate the average instead of being absent from it. Negative
+// fixture: mask claims 3 zones, only 2 report.
+(function testAverageDutyDividesByFullMaskNotJustReportingZones() {
+  const ctx = loadZoneSampler();
+  const data = { thermo_ready: true, channels: [] };
+  const st = {
+    state: 'running',
+    zone_mask: 0x07, // zones 0,1,2 -- 3 zones
+    total_elapsed_s: 10,
+    zones: [ // only zone 0 and 1 report this tick
+      { zone: 0, duty: 0.90 },
+      { zone: 1, duty: 0.30 },
+    ],
+  };
+  ctx.sampleFiringZoneTemps(data, st);
+  const expected = (0.90 + 0.30) / 3; // divide by 3, not 2
+  assert(ctx.firingDutySeries.length === 1 &&
+    Math.abs(ctx.firingDutySeries[0].duty - expected) < 1e-9,
+    'divides by full zone_mask popcount (3), not just the 2 zones that reported');
 })();
 
 // A repeat call inside the same CLIENT_ZONE_SAMPLE_MIN_INTERVAL_S window must
