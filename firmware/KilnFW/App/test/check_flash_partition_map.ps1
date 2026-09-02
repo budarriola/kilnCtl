@@ -272,4 +272,59 @@ if ($errors.Count -gt 0) {
 
 Write-Host ""
 Write-Host "Partition map check passed: $($sorted.Count) partitions, no overlaps, nothing exceeds the $($FlashSizeBytes / 1MB) MB flash."
+
+# --- Expected-map assertions (FLASH_BUDGET_PLAN.md section 5, 2026-09-02 pass) ---
+#
+# The generic checks above (no overlaps, nothing past the chip) pass for a
+# huge range of tables, including a wrong one -- they cannot catch "someone
+# put pico_img back at its old offset" or "logs grew back to 3072K by
+# accident". This section pins down the specific values this restructure
+# was supposed to produce, so a regression in EITHER direction (reverting
+# the reclamation, or drifting further without updating this check) fails
+# loudly. Only runs against the real partitions.csv (default $CsvPath) --
+# a caller pointing this script at some other candidate table via -CsvPath
+# is explicitly testing something else and should not trip these.
+if (-not $PSBoundParameters.ContainsKey('CsvPath')) {
+    $expected = @(
+        # name           offset      size
+        @('pico_img',    0x10000,    0xE0000),
+        @('wifi_nvs',    0x187000,   0x6000),
+        @('kiln_nvs',    0x18D000,   0x10000),
+        @('profiles_nvs',0x19D000,   0x60000),
+        @('otadata',     0x200000,   0x2000),
+        @('ota_0',       0x210000,   0x300000),
+        @('ota_1',       0x510000,   0x300000),
+        @('factory',     0x810000,   0x300000),
+        @('coredump',    0xBF0000,   0x100000),
+        @('logs',        0xCF0000,   0xC0000)
+    )
+    $mapErrors = @()
+    foreach ($e in $expected) {
+        $name, $off, $sz = $e
+        $row = $sorted | Where-Object { $_.Name -eq $name }
+        if (-not $row) {
+            $mapErrors += "expected partition '$name' not found in $CsvPath"
+            continue
+        }
+        if ($row.Offset -ne $off) {
+            $mapErrors += "'$name' offset is 0x$($row.Offset.ToString('X')), expected 0x$($off.ToString('X'))"
+        }
+        if ($row.Size -ne $sz) {
+            $mapErrors += "'$name' size is $($row.Size) B, expected $sz B"
+        }
+    }
+    if ($sorted.Name -contains 'legacy_app') {
+        $mapErrors += "'legacy_app' still present -- FLASH_BUDGET_PLAN.md section 5.1 reclaimed this hole into 'pico_img', this placeholder should be gone"
+    }
+    if ($mapErrors.Count -gt 0) {
+        Write-Host ""
+        Write-Host "EXPECTED-MAP CHECK FAILED (FLASH_BUDGET_PLAN.md section 5):" -ForegroundColor Red
+        foreach ($e in $mapErrors) {
+            Write-Host "  $e" -ForegroundColor Red
+        }
+        throw "$($mapErrors.Count) expected-map mismatch(es) in $CsvPath -- see FLASH_BUDGET_PLAN.md section 5"
+    }
+    Write-Host "Expected-map check passed: pico_img relocated into the reclaimed legacy_app hole, logs shrunk to 768 KiB, legacy_app gone."
+}
+
 exit 0

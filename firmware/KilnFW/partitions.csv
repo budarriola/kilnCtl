@@ -269,7 +269,7 @@
 # Name,       Type, SubType, Offset,   Size,     Flags
 nvs,          data, nvs,     0x9000,   0x6000,
 phy_init,     data, phy,     0xf000,   0x1000,
-legacy_app,   data, undefined, 0x10000,  0x177000,
+pico_img,     data, undefined, 0x10000,  0xE0000,
 wifi_nvs,     data, nvs,     0x187000, 0x6000,
 kiln_nvs,     data, nvs,     0x18D000, 0x10000,
 profiles_nvs, data, nvs,     0x19D000, 0x60000,
@@ -277,9 +277,8 @@ otadata,      data, ota,       0x200000, 0x2000,
 ota_0,        app,  ota_0,     0x210000, 0x300000,
 ota_1,        app,  ota_1,     0x510000, 0x300000,
 factory,      app,  factory,   0x810000, 0x300000,
-pico_img,     data, undefined, 0xB10000, 0xE0000,
 coredump,     data, coredump,  0xBF0000, 0x100000,
-logs,         data, spiffs,    0xCF0000, 0x300000,
+logs,         data, spiffs,    0xCF0000, 0xC0000,
 
 # --- `logs` partition, added 2026-09-01 (external-flash log storage gap) ---
 #
@@ -336,3 +335,116 @@ logs,         data, spiffs,    0xCF0000, 0x300000,
 #     swap in log_store_mount.c; log_store.c's own logic (plain stdio fopen/
 #     fwrite/remove/rename over a mounted VFS path) does not change either
 #     way, which is why that split exists.
+
+# --- legacy_app reclaimed (pico_img relocated into it) + logs shrunk to a
+#     256K/kind retention cap, added 2026-09-02 (FLASH_BUDGET_PLAN.md
+#     section 5.1 and 5.2, owner decisions recorded there) --------------
+#
+# TWO changes in this single table revision, per FLASH_BUDGET_PLAN.md
+# section 8's suggested order ("single partition-table revision covering
+# legacy_app (5.1) and logs (5.2) together"). Section 7's hazard checklist
+# was worked in order before this revision: NVS partitions (nvs, wifi_nvs,
+# kiln_nvs, profiles_nvs) were confirmed already archived per the
+# 2026-08-17 archive (checklist item 4, re-confirmed rather than assumed);
+# coredump was NOT moved or resized (see below) so checklist item 2 (read it
+# out before a move) does not apply this pass; otadata still needs to be
+# erased and the bootloader reflashed when this table is actually applied
+# to hardware (checklist items 1 and 3) -- NEITHER HAS HAPPENED YET, this
+# commit is code + host-verification only, per this pass's own scope.
+#
+# 1) legacy_app (5.1): the 1500K dead hole at 0x10000..0x187000 (flash
+#    `factory` occupied before its 2026-08-21 move) is REUSED, not merely
+#    renamed -- the `legacy_app` placeholder entry is removed and `pico_img`
+#    (896K/0xE0000, unchanged size) is placed at its old start offset
+#    (0x10000). This is the one candidate from section 5.1's mutually-
+#    exclusive list that improves contiguity rather than just occupancy: it
+#    frees pico_img's OLD location (0xB10000..0xBF0000, 896K) as a
+#    genuinely unallocated gap in the high region, and leaves 0x97000
+#    (618,496 B, ~604 KiB) unallocated in the low region above the
+#    relocated pico_img (0xF0000..0x187000) -- still boxed in by phy_init
+#    below and wifi_nvs above, same as legacy_app always was, but now
+#    correctly sized to what is actually free rather than padded out to a
+#    stale 1500K placeholder.
+#
+#    pico_img is looked up by name+type+subtype at runtime
+#    (ota_pico_relay.c: esp_partition_find_first(..., "pico_img")), never by
+#    a hardcoded offset, so relocating it requires no code change -- only
+#    the reflash discussed above.
+#
+#    coredump (0xBF0000, 1024K, unchanged) was deliberately NOT moved down
+#    to close the 896K gap pico_img's old slot leaves behind, even though
+#    that would have merged it with the tail freed by the logs shrink below.
+#    FLASH_BUDGET_PLAN.md section 5.3 already recommends leaving coredump
+#    alone, and section 7 item 2 requires reading any live dump out with
+#    espcoredump.py BEFORE a move -- moving it was out of scope for this
+#    pass. Consequence: the 896K freed here stays a separate, boxed-in
+#    fragment (0xB10000..0xBF0000, between the now-immovable `factory` and
+#    `coredump`), not merged with the large contiguous tail below. Merging
+#    it is a candidate for a future pass, gated on reading the coredump out
+#    first.
+#
+# 2) logs (5.2): retention cap lowered from 1 MiB/kind (32 segments) to
+#    256 KiB/kind (8 segments) -- log_store.h LOG_STORE_MAX_SEGMENTS, owner
+#    decision: "1Mb seems exsesive for logs. if we are logging that much we
+#    are loging too often. maybe 256k?". Applied per-kind, same as the
+#    original constant always was (LOG_STORE_MAX_TOTAL_BYTES is a per-kind
+#    cap, not a combined one -- see log_store.h's own rotation-policy
+#    comment), so the COMBINED worst case across both kinds (firing,
+#    autotune) is 512 KiB, not 256 KiB.
+#
+#    Partition shrunk from 3072K to 0xC0000 (768K) to match -- sized at the
+#    same ~2/3-fill ratio as the original table (512 KiB used of 768 KiB is
+#    ~66.7%, matching the original 2 MiB-of-3 MiB reasoning in this
+#    partition's 2026-09-01 comment block above), leaving SPIFFS the same
+#    proportional headroom against near-full GC thrashing it always had.
+#    Offset (0xCF0000) is UNCHANGED -- only the size shrank, so this is a
+#    pure shrink-in-place, not a move; no otadata/bootloader-adjacent hazard
+#    beyond what section 7 already requires for any app-partition-adjacent
+#    change (ota_0/ota_1/factory offsets and sizes are untouched by this
+#    pass either).
+#
+#    esp_vfs_spiffs_register()'s format_if_mount_failed=true
+#    (log_store_mount.c) means a first boot against the smaller partition
+#    self-reformats rather than needing a manual erase -- SPIFFS detects the
+#    mismatch between its stored size metadata and the partition's actual
+#    size and reformats automatically. Existing on-flash log segments are
+#    LOST on that first boot after reflashing this table. This is an
+#    accepted, pre-existing property of `logs` (see this file's 2026-09-01
+#    comment: "Losing whatever logs were already on it is an acceptable
+#    cost -- this is a rotating, bounded LOG store, not the NVS config/stats
+#    partitions"), not a new hazard introduced by this pass.
+#
+#    LOGGING-RATE FINDING (owner asked this be reported, not decided here):
+#    telemetry_log.c's own rate-arithmetic comments give a measured FIRE
+#    line at ~190 B every TELEMETRY_LOG_FIRING_PERIOD_S=5s, i.e. ~38 B/s =
+#    ~136 KiB/hour for a 3-zone firing (AUTOTUNE lines are far smaller and
+#    only run during an autotune session, not a normal firing, so they are
+#    not the binding constraint here). Real kiln firings -- bisque and glaze
+#    cycles alike -- commonly run 8-12+ hours, not the 30-minute example
+#    telemetry_log.c's comment uses to illustrate the rate. At ~136 KiB/hour,
+#    256 KiB (this kind's new per-kind cap) holds only ~1.9 HOURS of FIRE
+#    telemetry before the oldest 32 KiB segments start rotating out --
+#    NOT a comfortable fit for a full multi-hour firing's history, and would
+#    visibly truncate the early portion (ramp-up, first dwell) of any firing
+#    longer than about 2 hours. This is decision-relevant and reported here
+#    per the owner's explicit ask; the partition and the constant are set to
+#    256 KiB/kind as instructed, and this finding is not acted on further in
+#    this pass -- raising the cap (and this partition) back up, or lowering
+#    the logging rate/verbosity, is a follow-on product decision if a full
+#    firing's history is wanted from `logs` rather than just recent activity.
+#
+# Recomputed fit arithmetic (unaffected rows omitted -- see the 2026-08-21
+# block above for those):
+#   pico_img (new):  0x10000  + 0xE0000  = 0xF0000
+#   (free gap):      0xF0000  .. 0x187000  = 0x97000   (618,496 B, boxed)
+#   (free gap):      0xB10000 .. 0xBF0000  = 0xE0000   (917,504 B, boxed,
+#                                                        pico_img's old slot)
+#   logs (new):      0xCF0000 + 0xC0000  = 0xDB0000
+#   contiguous tail: 0xDB0000 .. 0x1000000 = 0x250000  (2,424,832 B, ~2.31 MiB)
+#
+#   Total newly reclaimed this pass: 618,496 + 917,504 + 2,359,296
+#   (0x900000 - 0xC0000 = the logs shrink) = 3,895,296 B, ~3.71 MiB, split
+#   across three fragments -- the 2.31 MiB contiguous tail is the largest
+#   single reclaimed chunk this table has ever had, and the first with real
+#   headroom for a future large `data` or (with further reclamation) `app`
+#   partition without another restructure.
