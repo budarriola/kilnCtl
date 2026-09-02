@@ -16,11 +16,12 @@ extern "C" {
 /* Registers GET /api/logs/firing and GET /api/logs/autotune on the shared
  * httpd instance (wifi_provision_http_get_server() -- must already be
  * running, same precondition as readiness_http_start()/diagnostics_http_
- * start()). Each streams every retained line for that kind, oldest first,
- * one per line, as text/plain -- the exact lines log_store_reader_next()
- * returns, which are themselves the exact lines telemetry_format_firing()/
- * telemetry_format_autotune() produced (same format used over the debug
- * UART, not a second format). */
+ * start()). Each streams every retained record for that kind, oldest
+ * first, back-to-back with no delimiter, as application/octet-stream --
+ * raw event_log.h binary records exactly as log_store_reader_next() returns
+ * them. Decode with tools/PcTools/src/kilnctrl/event_log_decoder.py; there
+ * is no text/plain form any more (event_log.h's file banner: flash holds
+ * binary event records, not the old per-tick text lines). */
 esp_err_t log_http_start(void);
 
 #ifdef __cplusplus

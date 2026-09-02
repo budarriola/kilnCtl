@@ -515,16 +515,32 @@ $cmd17 = "call `"$vcvars`" x64 >nul && cl /nologo /W3 /EHsc /std:c11 /I`"$stubDi
 
 Invoke-HostTestExe -Name "adaptive_tune" -ExePath $exe17 -BuildCmd $cmd17
 
+# ---- test_event_log.c: its own EIGHTEENTH, separate executable ------------
+# event_log.c (2026-09-02 flash-logging change, event_log.h's file banner)
+# is pure encode/decode -- no ESP-IDF/FreeRTOS, same host-testability shape
+# as telemetry_format.c/dashboard_json.c above. event_log_emit() (the
+# esp_timer_get_time()/flash-worker device glue) lives in the SEPARATE
+# event_log_emit.c on purpose and is NOT linked here, matching how
+# telemetry_log.c itself is excluded from exe16.
+$exe18 = Join-Path $outDir "kilnctl_host_tests_event_log.exe"
+$elObjDir = Join-Path $outDir "el"
+New-Item -ItemType Directory -Force -Path $elObjDir | Out-Null
+$cmd18 = "call `"$vcvars`" x64 >nul && cl /nologo /W3 /EHsc /std:c11 /I`"$stubDir`" /I`"$commonInc`" " +
+        "/Fo:`"$elObjDir\\`" /Fe:`"$exe18`" `"$(Join-Path $testDir 'test_event_log.c')`" " +
+        "`"$(Join-Path $driversDir 'event_log.c')`""
+
+Invoke-HostTestExe -Name "event_log" -ExePath $exe18 -BuildCmd $cmd18
+
 # ---- summary ----------------------------------------------------------
 #
-# 16 executables are attempted above (main + zones_http + safety_cfg_http +
+# 17 executables are attempted above (main + zones_http + safety_cfg_http +
 # profile_executor_prestart + autotune_engine_prestart + profiles_http +
 # ota_http + uart_protocol_link_delegate + board_temps + kiln_io_owner +
 # safety_trip_words + safety_trip_decision + safety_link + dashboard_json +
-# telemetry_format + adaptive_tune). Report how many of those were even
-# built, separately from how many of the built ones passed, so a partial
-# run can never read as a full green suite.
-$totalExpected = 16
+# telemetry_format + adaptive_tune + event_log). Report how many of those
+# were even built, separately from how many of the built ones passed, so a
+# partial run can never read as a full green suite.
+$totalExpected = 17
 Write-Host ""
 Write-Host "Built: $($script:builtExes.Count)/$totalExpected executables"
 if ($script:buildFailures.Count -gt 0) {

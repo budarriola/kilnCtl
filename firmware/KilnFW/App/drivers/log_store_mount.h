@@ -13,7 +13,10 @@
 #ifndef LOG_STORE_MOUNT_H
 #define LOG_STORE_MOUNT_H
 
+#include <stddef.h>
+
 #include "esp_err.h"
+#include "log_store.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -28,14 +31,17 @@ extern "C" {
  * is_init() stays false), never a boot-time hang. */
 esp_err_t log_store_mount(void);
 
-/* Thin wrappers that hand the line to log_store_append() on the flash
+/* Thin wrapper that hands `data`/`len` to log_store_append() on the flash
  * worker task (uart_bridge_ext_run_on_flash_worker()) rather than the
  * caller's own stack/task. Safe to call before log_store_mount() succeeds or
  * if it failed -- log_store_append() itself returns ESP_ERR_INVALID_STATE
- * in that case, which these wrappers simply propagate; nothing here
- * retries or blocks waiting for the mount to succeed later. */
-esp_err_t log_store_write_firing(const char *line);
-esp_err_t log_store_write_autotune(const char *line);
+ * in that case, which this wrapper simply propagates; nothing here retries
+ * or blocks waiting for the mount to succeed later. `data` may point at the
+ * caller's own stack buffer: the caller is blocked for the whole call, so
+ * that storage stays valid throughout. Used by event_log_emit() (event_log.h)
+ * to persist one 32-byte binary event record per genuine event -- NOT a
+ * per-tick telemetry line any more, see log_store.h's file banner. */
+esp_err_t log_store_write_event(log_store_kind_t kind, const void *data, size_t len);
 
 #ifdef __cplusplus
 }

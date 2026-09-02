@@ -60,29 +60,30 @@ esp_err_t log_store_mount(void)
 
 typedef struct {
     log_store_kind_t kind;
-    const char       *line;
+    const void       *data;
+    size_t            len;
     esp_err_t         result;
 } log_store_job_t;
 
 static void log_store_job_run(void *arg)
 {
     log_store_job_t *job = (log_store_job_t *)arg;
-    job->result = log_store_append(job->kind, job->line);
+    job->result = log_store_append(job->kind, job->data, job->len);
 }
 
-/* Common path for both wrappers: hands the append call to the internal-
- * stack flash worker and blocks (from the CALLER's task, e.g. telemetry_
- * log_task) until it completes -- same pattern safety_cfg_store.c's
- * deferred NVS flush uses through this same worker (uart_bridge_ext.c's own
- * comment on uart_bridge_ext_run_on_flash_worker()). `line` may point at
- * the caller's own stack buffer: the caller is blocked for the whole call,
- * so that storage stays valid throughout. */
-static esp_err_t write_via_worker(log_store_kind_t kind, const char *line)
+/* Hands the append call to the internal-stack flash worker and blocks (from
+ * the CALLER's task, e.g. telemetry_log_task) until it completes -- same
+ * pattern safety_cfg_store.c's deferred NVS flush uses through this same
+ * worker (uart_bridge_ext.c's own comment on
+ * uart_bridge_ext_run_on_flash_worker()). `data` may point at the caller's
+ * own stack buffer: the caller is blocked for the whole call, so that
+ * storage stays valid throughout. */
+esp_err_t log_store_write_event(log_store_kind_t kind, const void *data, size_t len)
 {
-    if (!line) {
+    if (!data || len == 0) {
         return ESP_ERR_INVALID_ARG;
     }
-    log_store_job_t job = { .kind = kind, .line = line, .result = ESP_ERR_INVALID_STATE };
+    log_store_job_t job = { .kind = kind, .data = data, .len = len, .result = ESP_ERR_INVALID_STATE };
     // Not reachable on-worker today; covered by bx_run_on_internal_stack()'s
     // generic backstop if that ever changes.
     esp_err_t dispatch_err = uart_bridge_ext_run_on_flash_worker(log_store_job_run, &job);
@@ -90,14 +91,4 @@ static esp_err_t write_via_worker(log_store_kind_t kind, const char *line)
         return dispatch_err;
     }
     return job.result;
-}
-
-esp_err_t log_store_write_firing(const char *line)
-{
-    return write_via_worker(LOG_STORE_KIND_FIRING, line);
-}
-
-esp_err_t log_store_write_autotune(const char *line)
-{
-    return write_via_worker(LOG_STORE_KIND_AUTOTUNE, line);
 }

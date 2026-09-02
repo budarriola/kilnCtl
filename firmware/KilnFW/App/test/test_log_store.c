@@ -14,6 +14,7 @@
 // filesystem-touching test gets its own working directory for the same
 // isolation reason test_kiln_cfg_store.c/test_safety_cfg_store.c already
 // use their own NVS stub instances.
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -161,7 +162,8 @@ static void test_rotation_bounds_size(void)
     /* This append cannot fit in the already-full last segment -> rotates to
      * a new segment (index MAX_SEGMENTS) -> count becomes MAX_SEGMENTS+1 ->
      * trim_to_cap() must delete index 0 to bring it back to MAX_SEGMENTS. */
-    TEST_CHECK(log_store_append(kind, "the line that forces rotation past the cap") == ESP_OK,
+    static const char rec[] = "the record that forces rotation past the cap";
+    TEST_CHECK(log_store_append(kind, rec, sizeof(rec)) == ESP_OK,
                "append that forces rotation succeeds");
 
     TEST_CHECK(log_store_segment_count(kind) <= LOG_STORE_MAX_SEGMENTS,
@@ -190,7 +192,8 @@ static void test_full_filesystem_degrades_safely(void)
     reset_scratch_dir(base, kind, 4);
     TEST_CHECK(log_store_init(base) == ESP_OK, "init succeeds");
 
-    TEST_CHECK(log_store_append(kind, "line before the obstruction") == ESP_OK,
+    static const char before[] = "record before the obstruction";
+    TEST_CHECK(log_store_append(kind, before, sizeof(before)) == ESP_OK,
                "a normal append succeeds first");
 
     /* Block the NEXT segment (index 1) with a directory of the same name,
@@ -207,8 +210,9 @@ static void test_full_filesystem_degrades_safely(void)
     /* This must NOT crash, hang, or assert -- it must simply report failure
      * and drop the line. Called several times in a row to prove it keeps
      * returning cleanly rather than wedging on the second call. */
+    static const char blocked[] = "this record cannot be written -- segment 1 is blocked";
     for (int i = 0; i < 5; i++) {
-        esp_err_t rc = log_store_append(kind, "this line cannot be written -- segment 1 is blocked");
+        esp_err_t rc = log_store_append(kind, blocked, sizeof(blocked));
         TEST_CHECK(rc != ESP_OK, "append against a blocked segment reports failure, not success");
     }
 
@@ -217,7 +221,8 @@ static void test_full_filesystem_degrades_safely(void)
      * state (the caller, telemetry_log.c, is never blocked or wedged by a
      * transient full-filesystem condition). */
     TEST_CHECK(TLS_RMDIR(blocked_path) == 0, "test cleanup: obstruction removed");
-    TEST_CHECK(log_store_append(kind, "recovered after the obstruction was cleared") == ESP_OK,
+    static const char recovered[] = "recovered after the obstruction was cleared";
+    TEST_CHECK(log_store_append(kind, recovered, sizeof(recovered)) == ESP_OK,
                "append succeeds again once the obstruction is gone -- no wedge");
 
     rmdir_recursive_best_effort(base);
@@ -239,26 +244,35 @@ static void test_round_trip_asymmetric(void)
     reset_scratch_dir(base, kind, 2);
     TEST_CHECK(log_store_init(base) == ESP_OK, "init succeeds");
 
-    const char *first = "KTEL1 TUNE state=IDENTIFY zone=0 t=12";
-    const char *second = "second";
-    const char *third = "KTEL1 TUNE state=DONE zone=2 gain_kp=1.2345 model_valid=1 abort_reason=none really long tail field";
+    /* Deliberately includes embedded 0x00 and 0x0A bytes in `second` --
+     * exactly the bytes a text-line store could never round-trip -- to
+     * prove this binary, length-prefixed store genuinely does not treat
+     * either as a delimiter. */
+    static const uint8_t first[] = { 0xE7, 0x01, 0x00, 0x00, 0x0C, 0x00, 0x00, 0x00 };
+    static const uint8_t second[] = { 0x00, 0x0A, 0xFF, 0x0A, 0x00 };
+    static const uint8_t third[] = { 0xE7, 0x01, 0x02, 0x01, 0x99, 0x01, 0x02, 0x03,
+                                      0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B };
 
-    TEST_CHECK(log_store_append(kind, first) == ESP_OK, "append line 1");
-    TEST_CHECK(log_store_append(kind, second) == ESP_OK, "append line 2");
-    TEST_CHECK(log_store_append(kind, third) == ESP_OK, "append line 3");
+    TEST_CHECK(log_store_append(kind, first, sizeof(first)) == ESP_OK, "append record 1");
+    TEST_CHECK(log_store_append(kind, second, sizeof(second)) == ESP_OK, "append record 2");
+    TEST_CHECK(log_store_append(kind, third, sizeof(third)) == ESP_OK, "append record 3");
 
     log_store_reader_t *rd = log_store_reader_open(kind);
     TEST_CHECK(rd != NULL, "reader opens");
 
-    char out[LOG_STORE_MAX_LINE_LEN];
+    uint8_t out[LOG_STORE_MAX_RECORD_LEN];
+    size_t out_len = 0;
 
-    TEST_CHECK(log_store_reader_next(rd, out, sizeof(out)) && strcmp(out, first) == 0,
-               "line 1 comes back first and unchanged");
-    TEST_CHECK(log_store_reader_next(rd, out, sizeof(out)) && strcmp(out, second) == 0,
-               "line 2 comes back second and unchanged");
-    TEST_CHECK(log_store_reader_next(rd, out, sizeof(out)) && strcmp(out, third) == 0,
-               "line 3 comes back third and unchanged");
-    TEST_CHECK(!log_store_reader_next(rd, out, sizeof(out)), "reader reports end-of-stream after 3 lines");
+    TEST_CHECK(log_store_reader_next(rd, out, sizeof(out), &out_len) && out_len == sizeof(first) &&
+                   memcmp(out, first, sizeof(first)) == 0,
+               "record 1 comes back first and unchanged, including its embedded zero byte");
+    TEST_CHECK(log_store_reader_next(rd, out, sizeof(out), &out_len) && out_len == sizeof(second) &&
+                   memcmp(out, second, sizeof(second)) == 0,
+               "record 2 comes back second and unchanged, including its embedded 0x00/0x0A bytes");
+    TEST_CHECK(log_store_reader_next(rd, out, sizeof(out), &out_len) && out_len == sizeof(third) &&
+                   memcmp(out, third, sizeof(third)) == 0,
+               "record 3 comes back third and unchanged");
+    TEST_CHECK(!log_store_reader_next(rd, out, sizeof(out), &out_len), "reader reports end-of-stream after 3 records");
 
     log_store_reader_close(rd);
     rmdir_recursive_best_effort(base);

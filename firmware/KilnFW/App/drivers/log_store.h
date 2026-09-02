@@ -1,13 +1,20 @@
-// log_store -- bounded, rotating on-flash storage for firing/autotune logs.
+// log_store -- bounded, rotating on-flash storage for BINARY event records.
 //
 // Fills the gap the 2026-09-01 audit found: user config (kiln_nvs/wifi_nvs/
 // profiles_nvs) and firing statistics both already live in NVS, but LOGS had
 // no persistent store at all -- only telemetry_log.c's live debug-UART feed,
 // which nothing captures unless a PC happens to be attached and listening.
-// This module writes the SAME lines (see telemetry_format.c's
-// telemetry_format_firing()/telemetry_format_autotune() -- reused here, not
-// reinvented) to a small rotating set of files on the `logs` partition
-// (partitions.csv, 0xCF0000, 3072K, subtype spiffs).
+//
+// 2026-09-02: this store used to hold one text FIRE/TUNE line (telemetry_
+// format.c) every 5s/10s -- ~136 KiB/hour, truncating any firing over ~2h
+// against the (then) 1 MiB cap. Owner decision (FLASH_BUDGET_PLAN.md section
+// 5.2 follow-on): flash keeps errors/warnings/info EVENTS only, never
+// per-tick samples, and never as human-readable text -- see event_log.h for
+// the fixed 32-byte binary record format and event_log_emit() for the
+// producer side. log_store.c itself does not know or care what the bytes
+// mean; it is a generic length-prefixed binary blob store, kept that way
+// (rather than hardcoding EVENT_LOG_RECORD_SIZE in here) so this file's own
+// rotation/degrade logic stays exactly as host-tested as before.
 //
 // WORDING NOTE: this board is an ESP32-S3 N16R8 -- ONE on-module 16 MB SPI
 // flash, no separate flash chip, no SD card. Every "external flash" in this
@@ -89,11 +96,12 @@ extern "C" {
  * "never fills up" guarantee is measured against. */
 #define LOG_STORE_MAX_TOTAL_BYTES (LOG_STORE_SEGMENT_MAX_BYTES * LOG_STORE_MAX_SEGMENTS)
 
-/* Matches telemetry_log.c's TELEMETRY_LOG_LINE_BUF -- the worst-case line
- * length either telemetry_format_firing()/telemetry_format_autotune() can
- * hand this module, plus room for the appended '\n'. Reader callers must
- * supply a buffer at least this large. */
-#define LOG_STORE_MAX_LINE_LEN ((size_t)320u)
+/* Ceiling on a single record's payload length, stored as a uint16_t length
+ * prefix ahead of the raw bytes (see log_store.c). event_log.h's records
+ * are a fixed EVENT_LOG_RECORD_SIZE (32) bytes; 64 leaves headroom for a
+ * future field addition without immediately needing to touch this cap.
+ * Reader callers must supply a buffer at least this large. */
+#define LOG_STORE_MAX_RECORD_LEN ((size_t)64u)
 
 typedef enum {
     LOG_STORE_KIND_FIRING = 0,
@@ -112,15 +120,18 @@ esp_err_t log_store_init(const char *base_dir);
 
 bool log_store_is_init(void);
 
-/* Appends one line (no trailing '\n' expected -- log_store adds it) to the
- * given kind's current segment, rotating and trimming to the cap as
- * described in this header's rotation-policy comment. NEVER blocks beyond a
- * normal buffered file write, and never asserts/aborts on I/O failure --
- * see "DEGRADE, DON'T WEDGE" above. Returns ESP_ERR_INVALID_STATE if
- * log_store_init() has not been called, ESP_ERR_INVALID_ARG for a NULL/
- * empty/over-length line, ESP_FAIL for an I/O failure (line dropped),
- * ESP_OK on a successful append. */
-esp_err_t log_store_append(log_store_kind_t kind, const char *line);
+/* Appends one binary record (`len` bytes at `data`, NOT expected to be a
+ * NUL-terminated C string -- may contain any byte value including 0x00 and
+ * 0x0A) to the given kind's current segment, rotating and trimming to the
+ * cap as described in this header's rotation-policy comment. Stored as a
+ * uint16_t length prefix followed by the raw bytes, so no delimiter byte is
+ * ever reserved out of the payload. NEVER blocks beyond a normal buffered
+ * file write, and never asserts/aborts on I/O failure -- see "DEGRADE,
+ * DON'T WEDGE" above. Returns ESP_ERR_INVALID_STATE if log_store_init() has
+ * not been called, ESP_ERR_INVALID_ARG for a NULL/zero-length/over-length
+ * record, ESP_FAIL for an I/O failure (record dropped), ESP_OK on a
+ * successful append. */
+esp_err_t log_store_append(log_store_kind_t kind, const void *data, size_t len);
 
 /* Sum, in bytes, of every retained segment file's size for `kind`. Used by
  * tests to verify the rotation cap, and by log_http.c to size its response. */
@@ -136,12 +147,13 @@ typedef struct log_store_reader log_store_reader_t;
 
 log_store_reader_t *log_store_reader_open(log_store_kind_t kind);
 
-/* Fills `out` (NUL-terminated, trailing '\n' stripped) with the next line
- * and returns true, or returns false at end-of-stream / on error. `cap`
- * must be >= LOG_STORE_MAX_LINE_LEN for a line to never be silently
- * truncated (a too-small cap truncates safely -- NUL-terminated, never
- * overruns -- rather than corrupting anything). */
-bool log_store_reader_next(log_store_reader_t *rd, char *out, size_t cap);
+/* Fills `out` with the next record's raw bytes (`cap` must be >=
+ * LOG_STORE_MAX_RECORD_LEN for a record to never be silently truncated --
+ * a too-small cap truncates safely, never overruns) and, if `out_len` is
+ * non-NULL, stores the record's true byte length there (which may exceed
+ * `cap` if truncated). Returns true, or returns false at end-of-stream /
+ * on error. */
+bool log_store_reader_next(log_store_reader_t *rd, void *out, size_t cap, size_t *out_len);
 
 void log_store_reader_close(log_store_reader_t *rd);
 

@@ -1,5 +1,6 @@
 #include "log_store.h"
 
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -128,7 +129,7 @@ bool log_store_is_init(void)
     return s_init;
 }
 
-static esp_err_t rotate_if_needed(log_store_kind_t kind, size_t line_len)
+static esp_err_t rotate_if_needed(log_store_kind_t kind, size_t record_len)
 {
     kind_state_t *st = &s_state[kind];
 
@@ -142,7 +143,7 @@ static esp_err_t rotate_if_needed(log_store_kind_t kind, size_t line_len)
     char path[600];
     segment_path(kind, st->newest_idx, path, sizeof(path));
     long cur_size = file_size_or_zero(path);
-    size_t needed = (size_t)cur_size + line_len + 1u; /* +1 for '\n' */
+    size_t needed = (size_t)cur_size + 2u + record_len; /* +2 for the uint16 length prefix */
 
     if (cur_size > 0 && needed > LOG_STORE_SEGMENT_MAX_BYTES) {
         st->newest_idx++;
@@ -164,7 +165,7 @@ static void trim_to_cap(log_store_kind_t kind)
     }
 }
 
-esp_err_t log_store_append(log_store_kind_t kind, const char *line)
+esp_err_t log_store_append(log_store_kind_t kind, const void *data, size_t len)
 {
     if (!s_init) {
         return ESP_ERR_INVALID_STATE;
@@ -172,11 +173,7 @@ esp_err_t log_store_append(log_store_kind_t kind, const char *line)
     if ((int)kind < 0 || kind >= LOG_STORE_KIND_COUNT) {
         return ESP_ERR_INVALID_ARG;
     }
-    if (!line || line[0] == '\0') {
-        return ESP_ERR_INVALID_ARG;
-    }
-    size_t len = strlen(line);
-    if (len >= LOG_STORE_MAX_LINE_LEN) {
+    if (!data || len == 0 || len > LOG_STORE_MAX_RECORD_LEN) {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -190,15 +187,20 @@ esp_err_t log_store_append(log_store_kind_t kind, const char *line)
 
     /* DEGRADE, DON'T WEDGE: a failed fopen/fwrite/fclose here (full or
      * failing filesystem, a directory sitting where the segment file should
-     * be, anything) drops this one line and returns ESP_FAIL. It never
+     * be, anything) drops this one record and returns ESP_FAIL. It never
      * retries and never touches any state that would leave the store
      * inconsistent for the NEXT call -- s_state[kind] is only advanced
-     * further below, after a successful write. */
-    FILE *f = fopen(path, "a");
+     * further below, after a successful write. Binary mode ("ab") on
+     * purpose: a record's bytes may be any value, including 0x0A/0x00, so
+     * text-mode translation (CRLF rewriting on Windows host tests) must
+     * never touch them. */
+    FILE *f = fopen(path, "ab");
     if (!f) {
         return ESP_FAIL;
     }
-    int wrote_ok = (fprintf(f, "%s\n", line) >= 0);
+    uint8_t len_prefix[2] = { (uint8_t)(len & 0xFFu), (uint8_t)((len >> 8) & 0xFFu) };
+    int wrote_ok = (fwrite(len_prefix, 1, sizeof(len_prefix), f) == sizeof(len_prefix)) &&
+                   (fwrite(data, 1, len, f) == len);
     int close_ok = (fclose(f) == 0);
     if (!wrote_ok || !close_ok) {
         return ESP_FAIL;
@@ -207,7 +209,7 @@ esp_err_t log_store_append(log_store_kind_t kind, const char *line)
     trim_to_cap(kind);
 
     if (save_manifest(kind) != ESP_OK) {
-        /* The line itself is safely on disk; losing the manifest update
+        /* The record itself is safely on disk; losing the manifest update
          * only risks re-scanning/rotation drift on the next boot, not data
          * loss or a wedge -- still reported so a caller/test can see it. */
         return ESP_FAIL;
@@ -277,11 +279,11 @@ static bool reader_open_current(log_store_reader_t *rd)
 {
     char path[600];
     segment_path(rd->kind, rd->idx, path, sizeof(path));
-    rd->fp = fopen(path, "r");
+    rd->fp = fopen(path, "rb"); /* binary mode -- see log_store_append()'s "ab" comment */
     return rd->fp != NULL;
 }
 
-bool log_store_reader_next(log_store_reader_t *rd, char *out, size_t cap)
+bool log_store_reader_next(log_store_reader_t *rd, void *out, size_t cap, size_t *out_len)
 {
     if (!rd || !out || cap == 0 || !rd->has_data) {
         return false;
@@ -302,16 +304,41 @@ bool log_store_reader_next(log_store_reader_t *rd, char *out, size_t cap)
             }
         }
 
-        if (fgets(out, (int)cap, rd->fp) == NULL) {
+        uint8_t len_prefix[2];
+        size_t got = fread(len_prefix, 1, sizeof(len_prefix), rd->fp);
+        if (got != sizeof(len_prefix)) {
+            /* End of this segment (clean EOF or a short/corrupt trailing
+             * prefix) -- either way, move on to the next segment rather
+             * than wedge the reader. */
+            fclose(rd->fp);
+            rd->fp = NULL;
+            rd->idx++;
+            continue;
+        }
+        size_t rec_len = (size_t)len_prefix[0] | ((size_t)len_prefix[1] << 8);
+
+        /* Read the full record into a bounded scratch buffer regardless of
+         * `cap` so a short caller buffer truncates safely instead of
+         * leaving the file position mid-record for the next call. */
+        uint8_t scratch[LOG_STORE_MAX_RECORD_LEN];
+        size_t to_read = rec_len > sizeof(scratch) ? sizeof(scratch) : rec_len;
+        size_t read_now = fread(scratch, 1, to_read, rd->fp);
+        if (rec_len > sizeof(scratch)) {
+            /* Corrupt/oversized length prefix -- skip the excess bytes we
+             * cannot buffer so the stream resyncs at the next record. */
+            fseek(rd->fp, (long)(rec_len - sizeof(scratch)), SEEK_CUR);
+        }
+        if (read_now != to_read) {
             fclose(rd->fp);
             rd->fp = NULL;
             rd->idx++;
             continue;
         }
 
-        size_t n = strlen(out);
-        while (n > 0 && (out[n - 1] == '\n' || out[n - 1] == '\r')) {
-            out[--n] = '\0';
+        size_t n = rec_len < cap ? rec_len : cap;
+        memcpy(out, scratch, n);
+        if (out_len) {
+            *out_len = rec_len;
         }
         return true;
     }

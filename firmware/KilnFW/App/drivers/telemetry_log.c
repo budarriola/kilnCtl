@@ -9,7 +9,7 @@
 #include "freertos/task.h"
 
 #include "autotune_engine.h"
-#include "log_store_mount.h"
+#include "event_log.h"
 #include "profile_executor.h"
 #include "stack_margin.h"
 #include "telemetry_format.h"
@@ -80,6 +80,51 @@ bool telemetry_log_is_enabled(void)
     return s_enabled;
 }
 
+/* event_log_code_t for a profile_exec_state_t transition, or -1 if this
+ * transition is not one of the events flash persists. Pure decision table,
+ * pulled out of the task loop so it is easy to see every transition this
+ * file treats as "genuinely necessary for debug" at a glance -- see
+ * event_log.h's file banner for the owner decision this implements. */
+static int firing_event_code_for_transition(profile_exec_state_t prev, profile_exec_state_t cur)
+{
+    if (prev == cur) {
+        return -1;
+    }
+    if (cur == PROFILE_EXEC_RUNNING && prev != PROFILE_EXEC_PAUSED) {
+        return EVENT_CODE_FIRING_STARTED;
+    }
+    if (cur == PROFILE_EXEC_PAUSED) {
+        return EVENT_CODE_FIRING_PAUSED;
+    }
+    if (cur == PROFILE_EXEC_RUNNING && prev == PROFILE_EXEC_PAUSED) {
+        return EVENT_CODE_FIRING_RESUMED;
+    }
+    if (cur == PROFILE_EXEC_DONE) {
+        return EVENT_CODE_FIRING_DONE;
+    }
+    if (cur == PROFILE_EXEC_FAULTED) {
+        return EVENT_CODE_FIRING_FAULTED;
+    }
+    return -1;
+}
+
+static int autotune_event_code_for_transition(autotune_engine_state_t prev, autotune_engine_state_t cur)
+{
+    if (prev == cur) {
+        return -1;
+    }
+    if (cur != AUTOTUNE_ENGINE_IDLE && prev == AUTOTUNE_ENGINE_IDLE) {
+        return EVENT_CODE_TUNE_STARTED;
+    }
+    if (cur == AUTOTUNE_ENGINE_DONE) {
+        return EVENT_CODE_TUNE_DONE;
+    }
+    if (cur == AUTOTUNE_ENGINE_ABORTED) {
+        return EVENT_CODE_TUNE_ABORTED;
+    }
+    return -1;
+}
+
 static void telemetry_log_task(void *arg)
 {
     (void)arg;
@@ -89,39 +134,42 @@ static void telemetry_log_task(void *arg)
 
     uint32_t firing_next_s = 0;
     uint32_t autotune_next_s = 0;
+    profile_exec_state_t firing_prev_state = PROFILE_EXEC_IDLE;
+    autotune_engine_state_t autotune_prev_state = AUTOTUNE_ENGINE_IDLE;
 
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(TELEMETRY_LOG_TICK_MS));
 
-        /* Persistence to the on-flash log store (log_store_mount.c) runs
-         * UNCONDITIONALLY, regardless of s_enabled -- s_enabled only gates
-         * the live debug-UART feed (ESP_LOGI below), which this project's
-         * own file banner documents as default-OFF and opt-in for a capture
-         * session. The persistent record the 2026-09-01 audit asked for
-         * ("logs are kept in external flash") is not something an operator
-         * should have to remember to switch on before every firing -- it
-         * uses the SAME formatted lines telemetry_format_firing()/
-         * telemetry_format_autotune() already produce, just written to
-         * "/logs" via log_store_write_firing()/log_store_write_autotune()
-         * instead of (or as well as) the UART queue.
+        /* The live debug-UART feed (ESP_LOGI below) stays exactly as it
+         * was: default-OFF, opt-in via telemetry_log_set_enabled(), the
+         * intended home for per-tick temperature/telemetry debugging (owner
+         * decision, 2026-09-02: "loging of temps for debug should be done
+         * over the uart interface").
+         *
+         * What changed: flash persistence (event_log_emit(), event_log.h)
+         * no longer runs on this 5s/10s poll at all -- it fires ONLY on a
+         * genuine state transition (run started/paused/resumed/done/
+         * faulted; tune started/done/aborted), as a small binary record,
+         * never a per-tick sample. See log_store.h's file banner for why:
+         * the old unconditional-every-tick write filled the 256 KiB/kind
+         * flash cap in under 2 hours of a single firing.
          *
          * Never blocks: profile_executor_get_status()/
          * autotune_engine_get_status() are documented snapshot copies that
          * never block on their owning task (profile_executor.h); the
          * ESP_LOGI() calls enqueue onto uart_log_bridge.c's queue with a
          * ZERO-tick xQueueSend (see this file's header comment); and
-         * log_store_write_firing()/_autotune() block only on the internal-
-         * stack flash worker (log_store_mount.c), never on this task's own
-         * PSRAM stack touching flash directly. Nothing in this loop can
-         * stall waiting on another task indefinitely. */
+         * event_log_emit() blocks only on the internal-stack flash worker
+         * (log_store_mount.c), never on this task's own PSRAM stack
+         * touching flash directly. Nothing in this loop can stall waiting
+         * on another task indefinitely. */
         profile_executor_get_status(&fst);
         if (fst.state == PROFILE_EXEC_RUNNING || fst.state == PROFILE_EXEC_PAUSED) {
             if (fst.total_elapsed_s >= firing_next_s) {
                 firing_next_s = fst.total_elapsed_s + TELEMETRY_LOG_FIRING_PERIOD_S;
-                int n = telemetry_format_firing(&fst, line, sizeof(line));
-                if (n > 0) {
-                    log_store_write_firing(line);
-                    if (s_enabled) {
+                if (s_enabled) {
+                    int n = telemetry_format_firing(&fst, line, sizeof(line));
+                    if (n > 0) {
                         ESP_LOGI(TAG, "%s", line);
                     }
                 }
@@ -129,6 +177,16 @@ static void telemetry_log_task(void *arg)
         } else {
             firing_next_s = 0; /* re-arm so the NEXT run logs its first tick immediately */
         }
+        int firing_code = firing_event_code_for_transition(firing_prev_state, fst.state);
+        if (firing_code >= 0) {
+            event_log_severity_t sev = (firing_code == EVENT_CODE_FIRING_FAULTED) ? EVENT_LOG_SEV_ERROR
+                                                                                   : EVENT_LOG_SEV_INFO;
+            int32_t arg = (firing_code == EVENT_CODE_FIRING_FAULTED) ? (int32_t)fst.fault_guard
+                                                                      : (int32_t)fst.total_elapsed_s;
+            event_log_emit(LOG_STORE_KIND_FIRING, sev, EVENT_LOG_SRC_FIRING, (event_log_code_t)firing_code,
+                            EVENT_LOG_ZONE_NONE, arg, NULL);
+        }
+        firing_prev_state = fst.state;
 
         autotune_engine_get_status(&ast);
         bool at_active = (ast.state != AUTOTUNE_ENGINE_IDLE);
@@ -136,10 +194,9 @@ static void telemetry_log_task(void *arg)
             bool boundary = (ast.state == AUTOTUNE_ENGINE_DONE || ast.state == AUTOTUNE_ENGINE_ABORTED);
             if (boundary || ast.elapsed_s >= autotune_next_s) {
                 autotune_next_s = ast.elapsed_s + TELEMETRY_LOG_AUTOTUNE_PERIOD_S;
-                int n = telemetry_format_autotune(&ast, line, sizeof(line));
-                if (n > 0) {
-                    log_store_write_autotune(line);
-                    if (s_enabled) {
+                if (s_enabled) {
+                    int n = telemetry_format_autotune(&ast, line, sizeof(line));
+                    if (n > 0) {
                         ESP_LOGI(TAG, "%s", line);
                     }
                 }
@@ -147,6 +204,14 @@ static void telemetry_log_task(void *arg)
         } else {
             autotune_next_s = 0;
         }
+        int autotune_code = autotune_event_code_for_transition(autotune_prev_state, ast.state);
+        if (autotune_code >= 0) {
+            event_log_severity_t sev = (autotune_code == EVENT_CODE_TUNE_ABORTED) ? EVENT_LOG_SEV_WARN
+                                                                                   : EVENT_LOG_SEV_INFO;
+            event_log_emit(LOG_STORE_KIND_AUTOTUNE, sev, EVENT_LOG_SRC_AUTOTUNE, (event_log_code_t)autotune_code,
+                            ast.zone_index, (int32_t)ast.elapsed_s, NULL);
+        }
+        autotune_prev_state = ast.state;
     }
 }
 
