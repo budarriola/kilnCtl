@@ -94,14 +94,39 @@ static const char *TAG = "profiles_http";
  * profile_t/profile_segment_t layout now live in profiles_http.h --
  * profile_executor.c needs them too (via profiles_http_get()). */
 
-/* Firmware sanity bounds, not real kiln-safety limits -- there is no
- * separate safety authority for firing profiles (TODO.md section 6, which
- * would run one, is unbuilt), so these exist only to reject obvious
- * garbage/typos before anything is stored. 1400C is comfortably above any
- * home-kiln cone this board's use case implies; a real ceramics kiln safety
- * limit would come from the kiln's own manufacturer data, not this file. */
+/* Firmware sanity bound, not a per-kiln safety limit -- profiles are
+ * portable between kilns (a cone-10 or gas-kiln profile authored on one rig
+ * is legitimate to SAVE on a low-temperature bench rig; only STARTING it is
+ * refused, at profile_executor_run.c's own re-check against the zone's
+ * CURRENT max_temp_c). This exists only to reject obvious garbage/typos
+ * (a corrupt payload, a stray extra digit) before anything is stored, not to
+ * cap what a real firing schedule may target.
+ *
+ * Owner request (2026-09-02): gas-kiln profiles up to cone 42 (2015C, the
+ * top of the standard pyrometric cone table) must be storable. Set to
+ * 2015.0f exactly -- the owner's own figure, not rounded up, since this is
+ * an input-sanity ceiling rather than a value anything needs headroom
+ * against. Required (`_Static_assert` below) to stay at or below
+ * ZONE_MAX_TEMP_C_MAX (zones_http.h) -- a profile target must always be
+ * representable against some legally configurable zone ceiling, or a
+ * legitimate profile could be un-runnable on ANY kiln, not just this one.
+ * profile_segment_t::target_c is a plain float (profiles_http.h) with no
+ * fixed-point encoding anywhere in the on-flash blob (decode_profile_blob()
+ * copies it field-for-field across every PROFILE_VERSION), so raising this
+ * bound cannot truncate a stored value -- no PROFILE_VERSION bump needed. */
 #define PROFILE_TARGET_C_MIN 0.0f
-#define PROFILE_TARGET_C_MAX 1400.0f
+#define PROFILE_TARGET_C_MAX 2015.0f
+
+/* Enforced at compile time rather than left to be kept equal by hand (the
+ * failure mode both constants' own comments warn about): a profile target
+ * that could never be within reach of ANY legally configurable zone ceiling
+ * would be a profile no kiln could ever be configured to run. Mutation-
+ * tested by hand (2026-09-02 pass): bumping PROFILE_TARGET_C_MAX to
+ * 2600.0f (above ZONE_MAX_TEMP_C_MAX's 2500.0f) fails the host build with
+ * this assertion's message; reverted immediately after confirming it. */
+_Static_assert(PROFILE_TARGET_C_MAX <= ZONE_MAX_TEMP_C_MAX,
+               "PROFILE_TARGET_C_MAX must not exceed ZONE_MAX_TEMP_C_MAX -- a profile target must "
+               "stay representable against some legally configurable zone ceiling");
 #define PROFILE_RAMP_C_PER_HR_MIN 0.0f
 #define PROFILE_RAMP_C_PER_HR_MAX 1000.0f
 #define PROFILE_DWELL_MIN_MAX 1440u /* 24h */
@@ -806,6 +831,52 @@ static bool validate_io_segment(const profile_segment_t *seg, uint8_t seg_num, c
     return true;
 }
 
+/* True iff some ZONE_RAMP segment's target_c exceeds the CURRENTLY configured
+ * max_temp_c of one of its zone_mask zones, and fills `note` (if non-NULL)
+ * describing the first offending segment/zone found -- same shape as the
+ * refusal message this replaces (2026-09-02 owner correction, see the SAFETY
+ * TASK / GAS-KILN comment on PROFILE_TARGET_C_MAX above): a profile whose
+ * targets exceed the zone ceiling is now a legitimate, SAVEABLE thing (a
+ * gas-kiln or cone-10 profile authored on a low-temperature bench rig --
+ * profiles are portable between kilns, the ceiling is a property of the
+ * installation, not the profile), so this is advisory, not a gate. The
+ * actual enforcement point stays profile_executor_run.c's run-start
+ * re-check against the zone's CURRENT ceiling -- this function exists only
+ * to make the condition VISIBLE at save/list/edit time instead of silent
+ * until a failed start. A zone with max_temp_c == 0 (never commissioned) is
+ * skipped -- it has no real ceiling to compare against yet. */
+static bool profile_exceeds_zone_ceiling(const profile_t *p, char *note, size_t note_cap)
+{
+    for (uint8_t i = 0; i < p->segment_count; i++) {
+        if (p->segments[i].seg_kind != PROFILE_SEG_KIND_ZONE_RAMP) {
+            continue;
+        }
+        float target = p->segments[i].target_c;
+        for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+            if (!(p->zone_mask & (1u << zi))) {
+                continue;
+            }
+            float zone_max_c = 0.0f, zone_min_c = 0.0f;
+            zones_config_get_temp_limits(zi, &zone_max_c, &zone_min_c);
+            if (!(zone_max_c > 0.0f)) {
+                continue; /* uncommissioned zone -- nothing real to compare against */
+            }
+            if (target > zone_max_c) {
+                if (note && note_cap > 0) {
+                    snprintf(note, note_cap,
+                            "segment %u: target %.1fC exceeds zone %u's %.1fC limit -- cannot run here",
+                            i + 1, (double)target, zi, (double)zone_max_c);
+                }
+                return true;
+            }
+        }
+    }
+    if (note && note_cap > 0) {
+        note[0] = '\0';
+    }
+    return false;
+}
+
 bool profiles_http_save(uint8_t requested_id, const profile_t *candidate, uint8_t *out_id,
                         uint8_t *out_warning_count, char *err_msg, size_t err_cap)
 {
@@ -906,53 +977,21 @@ bool profiles_http_save(uint8_t requested_id, const profile_t *candidate, uint8_
         }
     }
 
-    /* SAFETY TASK (2026-09-02): the per-segment target_c range check above
-     * (PROFILE_TARGET_C_MIN..PROFILE_TARGET_C_MAX, 0-1400) is an
-     * INPUT-sanity bound, not a per-kiln safety ceiling -- it exists so a
-     * corrupt/malicious payload cannot write an absurd float into flash,
-     * and it says nothing about what THIS rig's zones can physically
-     * survive. On this bench rig (zone max_temp_c = 80C) a profile authored
-     * for a simulator running a cone-10-scale firing (~1285C) sailed
-     * straight through that check -- 1285 is well inside 0-1400 -- and
-     * would have been accepted and saved with nothing to say it could never
-     * be run safely here. The only thing that would have caught it before
-     * this pass was thermal_guard.c's guard 5, which is REACTIVE: it does
-     * not fire until the zone's actual measured temperature reaches
-     * max_temp_c, by which point the heaters have already been commanded
-     * hard toward the segment's real target for as long as it takes to
-     * climb there. Refuse here instead, at the point of entry (this
-     * function is the shared save path for both the HTTP profile editor
-     * AND the UART CONTROL bridge -- see this file's own "UART bridge
-     * entry points" comment above), same convention as the ramp-ceiling
-     * refusal just above and the zero-means-uncommissioned refusals in
-     * profile_executor_start.c/profile_executor_run.c: a REFUSAL, never a
-     * silent clamp, naming the offending segment and the zone's real
-     * limit. A zone with max_temp_c == 0 (never commissioned) is skipped
-     * here on purpose -- profile_zones_have_ceiling() (profile_executor_start.c)
-     * already refuses to START a firing on an uncommissioned zone; this
-     * check only has a real ceiling to compare against once one exists. */
-    for (uint8_t i = 0; i < candidate->segment_count; i++) {
-        if (candidate->segments[i].seg_kind != PROFILE_SEG_KIND_ZONE_RAMP) {
-            continue;
-        }
-        float target = candidate->segments[i].target_c;
-        for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
-            if (!(candidate->zone_mask & (1u << zi))) {
-                continue;
-            }
-            float zone_max_c = 0.0f, zone_min_c = 0.0f;
-            zones_config_get_temp_limits(zi, &zone_max_c, &zone_min_c);
-            if (!(zone_max_c > 0.0f)) {
-                continue; /* uncommissioned zone -- profile_zones_have_ceiling() owns this refusal */
-            }
-            if (target > zone_max_c) {
-                snprintf(err_msg, err_cap,
-                        "segment %u: target %.1fC exceeds zone %u's configured %.1fC limit -- refused, "
-                        "not clamped",
-                        i + 1, (double)target, zi, (double)zone_max_c);
-                return false;
-            }
-        }
+    /* OWNER CORRECTION (2026-09-02): this pass previously REFUSED to save a
+     * profile whose target_c exceeded the participating zone's configured
+     * max_temp_c ("you should be able to put in firing profiles that
+     * exceed kiln max but not run them if they go beyond kiln max" -- a
+     * cone-10 or gas-kiln profile authored on a low-temp bench rig is
+     * legitimate; profiles are portable between kilns, and the kiln's
+     * ceiling is a property of the installation, not of the profile). Save
+     * now only WARNS (via profile_exceeds_zone_ceiling(), same helper the
+     * profile list/detail endpoints use to surface this at edit time too);
+     * it never refuses and never clamps. The single enforcement point stays
+     * profile_executor_run.c's run-start re-check against each zone's
+     * CURRENT ceiling -- unchanged by this pass, and it is what actually
+     * stops the run. */
+    if (profile_exceeds_zone_ceiling(candidate, NULL, 0)) {
+        warn_count++;
     }
 
     s_profiles.profiles[target_id] = *candidate;
@@ -1209,7 +1248,7 @@ static esp_err_t builtin_list_get_handler(httpd_req_t *req)
  * PROFILE_NAME_MAX_LEN*2 (30) escaped name bytes + `","zone_mask":255,`
  * `"segment_count":12}` (37) = 103; rounded up with slack for the format
  * rather than re-deriving the exact count if a field ever widens. */
-#define PROFILE_LIST_ENTRY_MAX 160
+#define PROFILE_LIST_ENTRY_MAX 190 /* +30 (2026-09-02) for the ",\"exceeds_ceiling\":false" marker */
 
 /* Bytes reserved at the tail of `json` that no per-slot APPEND is ever
  * allowed to write into -- so the fallback "listing truncated" notice below
@@ -1251,8 +1290,18 @@ static esp_err_t profiles_list_get_handler(httpd_req_t *req)
         const profile_t *p = &s_profiles.profiles[id];
         char name_escaped[PROFILE_NAME_MAX_LEN * 2 + 1];
         json_escape(p->name, name_escaped, sizeof(name_escaped));
-        APPEND("%s{\"id\":%u,\"builtin\":false,\"name\":\"%s\",\"zone_mask\":%u,\"segment_count\":%u}",
-               first ? "" : ",", id, name_escaped, p->zone_mask, p->segment_count);
+        /* exceeds_ceiling (2026-09-02 owner correction): computed live against
+         * each zone's CURRENT max_temp_c, not stored -- a profile that was
+         * fine to save can start exceeding the ceiling later if the zone's
+         * limit is lowered, and vice versa, so this must always reflect the
+         * present configuration, not a snapshot from save time. Advisory
+         * only; see profile_exceeds_zone_ceiling()'s own comment for why
+         * this never blocks the save/list, only the actual run start. */
+        bool exceeds = profile_exceeds_zone_ceiling(p, NULL, 0);
+        APPEND("%s{\"id\":%u,\"builtin\":false,\"name\":\"%s\",\"zone_mask\":%u,\"segment_count\":%u,"
+               "\"exceeds_ceiling\":%s}",
+               first ? "" : ",", id, name_escaped, p->zone_mask, p->segment_count,
+               exceeds ? "true" : "false");
         first = false;
     }
 
@@ -1343,8 +1392,12 @@ static esp_err_t profile_detail_get_handler(httpd_req_t *req)
     /* Sized for the per-segment "feasibility":"unreachable" field plus the
      * seg_kind/io_target/io_state/io_blocking/io_leave_on_at_end fields added
      * below (relay/IO segment support) -- worst case measured at 170 bytes
-     * per segment, rounded up. */
-    char json[224 + PROFILE_MAX_SEGMENTS * 192];
+     * per segment, rounded up. 224 -> 624 (2026-09-02) for the new
+     * exceeds_ceiling/ceiling_note fields -- ceiling_note_escaped is up to
+     * sizeof(ceiling_note)*2 = 512 bytes worst case (every byte escaped;
+     * ceiling_note itself widened 160 -> 256 to satisfy -Werror=format-
+     * truncation's conservative worst-case-float-width analysis). */
+    char json[816 + PROFILE_MAX_SEGMENTS * 192];
     size_t o = 0;
     int n;
 
@@ -1369,10 +1422,19 @@ static esp_err_t profile_detail_get_handler(httpd_req_t *req)
 
     char name_escaped[PROFILE_NAME_MAX_LEN * 2 + 1];
     json_escape(p->name, name_escaped, sizeof(name_escaped));
+    /* exceeds_ceiling/ceiling_note (2026-09-02 owner correction): same live
+     * check the list endpoint runs -- see profile_exceeds_zone_ceiling()'s
+     * own comment. ceiling_note is "" when exceeds_ceiling is false. */
+    char ceiling_note[256];
+    bool exceeds_ceiling = profile_exceeds_zone_ceiling(p, ceiling_note, sizeof(ceiling_note));
+    char ceiling_note_escaped[sizeof(ceiling_note) * 2];
+    json_escape(ceiling_note, ceiling_note_escaped, sizeof(ceiling_note_escaped));
     APPEND("{\"id\":%ld,\"builtin\":false,\"read_only\":false,\"name\":\"%s\",\"zone_mask\":%u,"
-           "\"segment_count\":%u,\"feasibility\":\"%s\",\"segments\":[",
+           "\"segment_count\":%u,\"feasibility\":\"%s\",\"exceeds_ceiling\":%s,"
+           "\"ceiling_note\":\"%s\",\"segments\":[",
            id, name_escaped, p->zone_mask, p->segment_count,
-           profile_feasibility_verdict_str(rollup));
+           profile_feasibility_verdict_str(rollup), exceeds_ceiling ? "true" : "false",
+           ceiling_note_escaped);
     for (uint8_t i = 0; i < p->segment_count; i++) {
         const profile_segment_t *s = &p->segments[i];
         /* Genuine firmware defect found while wiring the editor UI to this
@@ -1740,6 +1802,19 @@ static esp_err_t profile_post_handler(httpd_req_t *req)
                         i + 1, (double)rate, zi, (double)ceiling);
                 append_warning(warn_json, warn_json_cap, &warn_o, &warn_first, text);
             }
+        }
+    }
+    /* OWNER CORRECTION (2026-09-02): a target exceeding the zone's CURRENT
+     * max_temp_c is no longer a save-time refusal (profiles are portable
+     * between kilns -- see profile_exceeds_zone_ceiling()'s own comment).
+     * Surfaced here as a warning instead, so the web editor's response makes
+     * the condition visible immediately rather than leaving the user to
+     * discover it only when a run is refused hours later. Enforcement stays
+     * profile_executor_run.c's run-start re-check. */
+    {
+        char ceiling_note[256];
+        if (profile_exceeds_zone_ceiling(&tmp, ceiling_note, sizeof(ceiling_note))) {
+            append_warning(warn_json, warn_json_cap, &warn_o, &warn_first, ceiling_note);
         }
     }
     if (warn_o + 1 < warn_json_cap) {

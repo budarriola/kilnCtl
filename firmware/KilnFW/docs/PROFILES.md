@@ -110,18 +110,41 @@ id can address it directly.
 | `name` | required, non-empty, ≤15 chars |
 | `zone_mask` | must be >0, ≤255, and select **only zones below the configured `thermo_count`** — otherwise 400 `zone_mask must select at least one configured zone (check Thermocouples & Zones settings)` |
 | `seg_count` | 1..12 |
-| `seg<i>_target` | 0..1400 °C (`PROFILE_TARGET_C_MIN/MAX`) |
+| `seg<i>_target` | 0..2015 °C (`PROFILE_TARGET_C_MIN/MAX`) |
 | `seg<i>_ramp` | 0..1000 °C/hr |
 | `seg<i>_dwell` | 0..1440 minutes (24 h) |
 
 Those bounds are **firmware sanity bounds against a typo, not kiln-safety
-limits**. There is no separate safety authority for firing profiles; 1400 °C
-is comfortably above any home-kiln cone this board's use case implies, and a
-real ceramics kiln's ceiling would come from the kiln manufacturer's data,
-not from this file. The 1400 °C ceiling is deliberately shared with
-`zone_cfg_t.max_temp_c`'s range in `zones_http.c` — a guard-5 limit tighter
-than what a profile could request would be a contradiction between the two
-checks.
+limits**. 2015 °C is cone 42, the top of the standard pyrometric cone table
+(owner request, 2026-09-02: gas-kiln profiles up to that scale must be
+storable), not a ceiling on what any real kiln may reach.
+`ZONE_MAX_TEMP_C_MAX` (`zones_http.h`, the per-zone safety ceiling a real
+kiln's `max_temp_c` is validated against) is 2500 °C, and a compile-time
+`_Static_assert` in `profiles_http.c` enforces `PROFILE_TARGET_C_MAX <=
+ZONE_MAX_TEMP_C_MAX` so a profile target can never be unrepresentable
+against some legally configurable zone ceiling.
+
+### Save-time ceiling is advisory, not a refusal (owner correction, 2026-09-02)
+
+**Profiles are portable between kilns.** A cone-10 or gas-kiln profile
+authored on one rig is a legitimate thing to *save* on a low-temperature
+bench rig -- the kiln's ceiling is a property of the installation, not of
+the profile. `profiles_http_save()` and `POST /api/profile` therefore never
+refuse a segment whose `target_c` exceeds a participating zone's current
+`max_temp_c`; they only WARN (one more entry in the `warnings` array /
+`out_warning_count`), and `GET /api/profiles` / `GET /api/profile?id=`
+surface it persistently as `"exceeds_ceiling":true` (plus `"ceiling_note"`
+on the detail endpoint) so the condition is visible at edit time, not only
+after a failed start hours later.
+
+**The single enforcement point is run start**: `profile_executor_run()`
+re-checks every `ZONE_RAMP` segment's `target_c` against each participating
+zone's *current* `max_temp_c` and refuses the start (never clamps) if any
+segment is over. This is deliberately the same re-check pattern as the
+ramp-rate feasibility check below, and for the same reason: `max_temp_c` can
+be edited on the zones page at any time after a profile was saved, so
+save-time validation alone could never be sufficient by itself even if it
+were still a refusal.
 
 Everything parses into a scratch `profile_t`; nothing is stored unless the
 whole submission validates. NVS write failure is logged and the profile still

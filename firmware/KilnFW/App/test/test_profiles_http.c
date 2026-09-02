@@ -366,6 +366,25 @@ bool zones_config_get_max_ramp(uint8_t zone_index, float *out_c_per_hr)
     return true;
 }
 
+// Controllable per-zone max_temp_c (guard 5 ceiling) -- 0.0f by default for
+// every zone, same "uncommissioned" convention zones_http.c itself uses.
+// profiles_http_save()'s profile_exceeds_zone_ceiling() check (2026-09-02
+// owner correction: save-time is now advisory-only, never a refusal --
+// see that function's own comment in profiles_http.c) reads this getter,
+// same as profile_executor_run()'s separate run-time re-check reads its own
+// copy of this stub in test_profile_executor_prestart.c.
+static float g_stub_zone_max_temp_c[8];
+bool zones_config_get_temp_limits(uint8_t zone_index, float *out_max_temp_c, float *out_min_temp_c)
+{
+    if (out_max_temp_c) {
+        *out_max_temp_c = (zone_index < 8) ? g_stub_zone_max_temp_c[zone_index] : 0.0f;
+    }
+    if (out_min_temp_c) {
+        *out_min_temp_c = 0.0f;
+    }
+    return true;
+}
+
 // Controllable by test_validate_io_segment_zone_ownership() -- bit N-1 of
 // this mask set means "zone 0 owns relay N", matching zone_cfg_t::relay_mask's
 // own bit convention. Every other zone (1-7) always reports "no mask", same
@@ -931,6 +950,196 @@ static void test_validate_io_segment_drdy_lcd_gap_refused(void)
               "the IO range's own top boundary (17 = IO_7) must be ACCEPTED");
 }
 
+// ---------------------------------------------------------------------------
+// OWNER CORRECTION (2026-09-02): a99bc15 made profiles_http_save() REFUSE a
+// segment target_c above the participating zone's configured max_temp_c.
+// The owner overturned that: "you should be able to put in fireing profiles
+// that exceed kiln max but not run them if they go beyond kiln max ... some
+// one may want to use this for a gas fired kiln up to 2,015C". Profiles are
+// portable between kilns -- authoring a cone-10 or gas-kiln profile on a
+// low-temperature bench rig is legitimate, and the kiln's ceiling is a
+// property of the INSTALLATION, not of the profile. Save must now ACCEPT
+// every one of these; the single enforcement point is
+// profile_executor_run()'s run-start re-check (test_profile_executor_
+// prestart.c's test_run_refuses_cone10_profile_on_80c_zone() and its 2015C
+// sibling below), unchanged by this pass and proven to still fire by the
+// mutation described in the task report.
+// ---------------------------------------------------------------------------
+
+static void test_profiles_http_save_accepts_cone10_profile_on_80c_zone(void)
+{
+    TEST_SECTION("profiles_http_save -- a cone-10-scale target (1285C) on an 80C zone is now ACCEPTED "
+                 "(save is portable-across-kilns; only run start enforces the ceiling)");
+    memset(&s_profiles, 0, sizeof(s_profiles));
+    g_stub_zone_max_temp_c[0] = 80.0f;
+
+    profile_t p;
+    memset(&p, 0, sizeof(p));
+    strcpy(p.name, "Cone 10 Gas Kiln");
+    p.zone_mask = 0x01;
+    p.segment_count = 1;
+    p.segments[0].target_c = 1285.0f;
+    p.segments[0].ramp_c_per_hr = 0.0f; /* isolate the ceiling check from the ramp-rate one */
+    p.segments[0].dwell_min = 10;
+
+    uint8_t out_id = 0, warn_count = 0;
+    char err_msg[160] = "";
+    bool ok = profiles_http_save(PROFILES_MAX_COUNT, &p, &out_id, &warn_count, err_msg, sizeof(err_msg));
+
+    TEST_CHECK(ok, "a 1285C target on an 80C zone must be ACCEPTED at save time");
+    TEST_CHECK((s_profiles.used_bitmap & (1u << out_id)) != 0, "the profile must actually be written to storage");
+    TEST_CHECK(warn_count >= 1, "the over-ceiling condition must still be surfaced as a warning, not silently "
+                                "dropped");
+}
+
+static void test_profiles_http_save_accepts_in_range_profile(void)
+{
+    TEST_SECTION("profiles_http_save -- a normal in-range target (55C) on an 80C zone is accepted, no warning");
+    memset(&s_profiles, 0, sizeof(s_profiles));
+    g_stub_zone_max_temp_c[0] = 80.0f;
+
+    profile_t p;
+    memset(&p, 0, sizeof(p));
+    strcpy(p.name, "Bisque 55");
+    p.zone_mask = 0x01;
+    p.segment_count = 1;
+    p.segments[0].target_c = 55.0f;
+    p.segments[0].ramp_c_per_hr = 0.0f;
+    p.segments[0].dwell_min = 5;
+
+    uint8_t out_id = 0, warn_count = 0;
+    char err_msg[160] = "";
+    bool ok = profiles_http_save(PROFILES_MAX_COUNT, &p, &out_id, &warn_count, err_msg, sizeof(err_msg));
+
+    TEST_CHECK(ok, "55C on an 80C zone must be accepted");
+    TEST_CHECK(warn_count == 0, "an in-range target must not raise the ceiling warning");
+}
+
+static void test_profiles_http_save_accepts_target_exactly_at_zone_limit(void)
+{
+    TEST_SECTION("profiles_http_save -- a target EXACTLY at the zone's 80C limit is accepted, no warning "
+                 "(the boundary itself, not one degree over it)");
+    memset(&s_profiles, 0, sizeof(s_profiles));
+    g_stub_zone_max_temp_c[0] = 80.0f;
+
+    profile_t p;
+    memset(&p, 0, sizeof(p));
+    strcpy(p.name, "Exactly 80");
+    p.zone_mask = 0x01;
+    p.segment_count = 1;
+    p.segments[0].target_c = 80.0f;
+    p.segments[0].ramp_c_per_hr = 0.0f;
+    p.segments[0].dwell_min = 5;
+
+    uint8_t out_id = 0, warn_count = 0;
+    char err_msg[160] = "";
+    bool ok = profiles_http_save(PROFILES_MAX_COUNT, &p, &out_id, &warn_count, err_msg, sizeof(err_msg));
+
+    TEST_CHECK(ok, "exactly 80.0C on an 80C-limit zone must be accepted, not treated as 'over'");
+    TEST_CHECK(warn_count == 0, "the exact boundary must not raise the ceiling warning either");
+}
+
+static void test_profiles_http_save_accepts_one_degree_over_zone_limit(void)
+{
+    TEST_SECTION("profiles_http_save -- one degree over the zone's 80C limit (80.1C) is accepted, WITH a warning "
+                 "(was refused before the owner correction)");
+    memset(&s_profiles, 0, sizeof(s_profiles));
+    g_stub_zone_max_temp_c[0] = 80.0f;
+
+    profile_t p;
+    memset(&p, 0, sizeof(p));
+    strcpy(p.name, "One Over");
+    p.zone_mask = 0x01;
+    p.segment_count = 1;
+    p.segments[0].target_c = 80.1f;
+    p.segments[0].ramp_c_per_hr = 0.0f;
+    p.segments[0].dwell_min = 5;
+
+    uint8_t out_id = 0, warn_count = 0;
+    char err_msg[160] = "";
+    bool ok = profiles_http_save(PROFILES_MAX_COUNT, &p, &out_id, &warn_count, err_msg, sizeof(err_msg));
+
+    TEST_CHECK(ok, "80.1C on an 80C-limit zone must be accepted -- save never refuses on the ceiling any more");
+    TEST_CHECK(warn_count >= 1, "80.1C is over the ceiling -- the warning must fire");
+}
+
+static void test_profiles_http_save_accepts_2015c_gas_kiln_profile_on_80c_zone(void)
+{
+    TEST_SECTION("profiles_http_save -- the owner's exact scenario: a 2015C (cone 42) gas-kiln profile "
+                 "saves successfully on an 80C bench-rig zone");
+    memset(&s_profiles, 0, sizeof(s_profiles));
+    g_stub_zone_max_temp_c[0] = 80.0f;
+
+    profile_t p;
+    memset(&p, 0, sizeof(p));
+    strcpy(p.name, "Gas Kiln Cone 42");
+    p.zone_mask = 0x01;
+    p.segment_count = 1;
+    p.segments[0].target_c = 2015.0f; /* PROFILE_TARGET_C_MAX exactly */
+    p.segments[0].ramp_c_per_hr = 0.0f;
+    p.segments[0].dwell_min = 30;
+
+    uint8_t out_id = 0, warn_count = 0;
+    char err_msg[160] = "";
+    bool ok = profiles_http_save(PROFILES_MAX_COUNT, &p, &out_id, &warn_count, err_msg, sizeof(err_msg));
+
+    TEST_CHECK(ok, "2015C must be storable -- it is PROFILE_TARGET_C_MAX exactly, not past it");
+    TEST_CHECK((s_profiles.used_bitmap & (1u << out_id)) != 0, "the 2015C profile must actually be written");
+    TEST_CHECK(warn_count >= 1, "2015C on an 80C zone must still be flagged as exceeding this kiln's ceiling");
+
+    /* Positive control on the input-sanity bound itself, now that it moved:
+     * one degree past PROFILE_TARGET_C_MAX must still be refused (this is
+     * the garbage/typo bound, not the per-kiln ceiling, and it did not
+     * change meaning in this pass -- only its value moved from 1400 to
+     * 2015). */
+    profile_t over;
+    memset(&over, 0, sizeof(over));
+    strcpy(over.name, "Past Sanity Bound");
+    over.zone_mask = 0x01;
+    over.segment_count = 1;
+    over.segments[0].target_c = 2015.1f;
+    over.segments[0].ramp_c_per_hr = 0.0f;
+    over.segments[0].dwell_min = 5;
+    uint8_t out_id2 = 0, warn_count2 = 0;
+    char err_msg2[160] = "";
+    bool ok2 = profiles_http_save(PROFILES_MAX_COUNT, &over, &out_id2, &warn_count2, err_msg2, sizeof(err_msg2));
+    TEST_CHECK(!ok2, "PROFILE_TARGET_C_MAX (2015C) is still a real input-sanity bound -- 2015.1C must be refused");
+}
+
+static void test_profiles_list_marks_exceeds_ceiling(void)
+{
+    TEST_SECTION("profiles_list_get_handler -- a saved over-ceiling profile is marked "
+                 "\"exceeds_ceiling\":true in the list response, so the UI can surface it without a "
+                 "failed run first");
+    memset(&s_profiles, 0, sizeof(s_profiles));
+    g_stub_zone_max_temp_c[0] = 80.0f;
+
+    profile_t p;
+    memset(&p, 0, sizeof(p));
+    strcpy(p.name, "Gas Kiln");
+    p.zone_mask = 0x01;
+    p.segment_count = 1;
+    p.segments[0].target_c = 2015.0f;
+    p.segments[0].ramp_c_per_hr = 0.0f;
+    p.segments[0].dwell_min = 5;
+    uint8_t out_id = 0, warn_count = 0;
+    char err_msg[160] = "";
+    TEST_CHECK(profiles_http_save(PROFILES_MAX_COUNT, &p, &out_id, &warn_count, err_msg, sizeof(err_msg)),
+              "setup: the gas-kiln profile must save");
+
+    s_chunk_capture_len = 0;
+    s_chunk_capture[0] = '\0';
+    s_chunk_capture_on = true;
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    esp_err_t err = profiles_list_get_handler(&req);
+    s_chunk_capture_on = false;
+
+    TEST_CHECK(err == ESP_OK, "the list handler must not error");
+    TEST_CHECK(strstr(s_chunk_capture, "\"exceeds_ceiling\":true") != NULL,
+              "the over-ceiling profile must be marked exceeds_ceiling:true in the list");
+}
+
 static void test_nvs_save_slot_refuses_when_calling_stack_is_external_ram(void)
 {
     TEST_SECTION("nvs_save_slot -- refuses (does not crash) when called with a PSRAM stack "
@@ -976,10 +1185,12 @@ void run_test_profiles_http(void)
     test_profiles_list_json_valid_with_escape_heavy_names();
     test_validate_io_segment_zone_ownership();
     test_validate_io_segment_drdy_lcd_gap_refused();
-    test_profiles_http_save_refuses_cone10_profile_on_80c_zone();
+    test_profiles_http_save_accepts_cone10_profile_on_80c_zone();
     test_profiles_http_save_accepts_in_range_profile();
     test_profiles_http_save_accepts_target_exactly_at_zone_limit();
-    test_profiles_http_save_refuses_one_degree_over_zone_limit();
+    test_profiles_http_save_accepts_one_degree_over_zone_limit();
+    test_profiles_http_save_accepts_2015c_gas_kiln_profile_on_80c_zone();
+    test_profiles_list_marks_exceeds_ceiling();
     test_nvs_save_slot_refuses_when_calling_stack_is_external_ram();
     test_nvs_save_slot_proceeds_normally_on_an_internal_ram_stack();
 }

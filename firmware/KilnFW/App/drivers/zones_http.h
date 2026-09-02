@@ -140,12 +140,25 @@ extern "C" {
  * substitutes its own default, does NOT disable the check). */
 #define ZONE_SANITY_RATE_MAX_C_PER_MIN 20.0f
 
-/* zone_cfg_t::max_temp_c/min_temp_c (guard 5). 1400 mirrors
- * profiles_http.c's PROFILE_TARGET_C_MAX -- profiles_http.c is a different
- * pass's file this task does not own, so that constant could not be moved
- * here too; the two are independently maintained and must be kept equal by
- * hand if either ever changes. */
-#define ZONE_MAX_TEMP_C_MAX 1400.0f
+/* zone_cfg_t::max_temp_c/min_temp_c (guard 5) -- this IS the per-kiln safety
+ * ceiling (thermal_guard.c guard 5, profile_executor_run.c's run-start
+ * refusal), not an input-sanity bound. Owner request (2026-09-02, gas-kiln
+ * follow-up): a legal ceiling must be settable above the hottest profile
+ * anyone would author, and cone 42 (2015C) is the top of the standard
+ * pyrometric cone table -- 2500C gives ~485C of headroom above that so the
+ * ceiling can sit comfortably above the hottest realistic profile target
+ * without being an absurd number to type into a form. profiles_http.c's
+ * PROFILE_TARGET_C_MAX (a profile's own input-sanity bound, a DIFFERENT
+ * question -- see that constant's own comment) is required to stay at or
+ * below this one; profiles_http.c enforces that relationship with a
+ * `_Static_assert` right next to its own definition, checked at compile
+ * time rather than left to be kept equal by hand. float storage throughout
+ * (zone_cfg_t::max_temp_c, thermal_guard_cfg_t::max_temp_c,
+ * zones_config_json.h's per-version copies) -- no fixed-point encoding or
+ * narrower type anywhere in the chain, so raising this bound cannot
+ * truncate a legal high ceiling. No ZONES_CFG_VERSION bump needed: this is
+ * a validation-time constant, not a change to what is stored or how. */
+#define ZONE_MAX_TEMP_C_MAX 2500.0f
 #define ZONE_MIN_TEMP_C_MIN (-50.0f)
 #define ZONE_MIN_TEMP_C_MAX 200.0f
 

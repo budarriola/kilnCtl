@@ -2029,6 +2029,35 @@ static void test_run_accepts_target_exactly_at_zone_limit(void)
     profile_executor_halt();
 }
 
+// OWNER CORRECTION (2026-09-02): the owner's own worked example -- "some one
+// may want to use this for a gas fired kiln up to 2,015C". profiles_http.c's
+// PROFILE_TARGET_C_MAX moved from 1400 to 2015 to make this SAVEABLE
+// (test_profiles_http.c's test_profiles_http_save_accepts_2015c_gas_kiln_
+// profile_on_80c_zone() proves that half); this is the other half of the
+// same scenario -- STARTING it must still be refused, by this exact guard.
+static void test_run_refuses_2015c_gas_kiln_profile_on_80c_zone(void)
+{
+    TEST_SECTION("profile_executor_run() -- the owner's exact scenario: a 2015C (cone 42) gas-kiln "
+                 "profile, saveable on any kiln, is still REFUSED at run start on an 80C bench-rig zone");
+
+    profile_t p;
+    memset(&p, 0, sizeof(p));
+    p.zone_mask = 0x01;
+    p.segment_count = 1;
+    p.segments[0] = zone_ramp_seg(2015.0f, 60.0f, 0);
+
+    warm_start_test_setup(&p, 50.0f);
+    g_stub_max_temp_c[0] = 80.0f;
+
+    char err[160] = {0};
+    bool ok = profile_executor_run(0, err, sizeof(err));
+
+    TEST_CHECK(!ok, "a 2015C gas-kiln-scale segment target on an 80C zone must be REFUSED at run start");
+    TEST_CHECK(s_exec.state != PROFILE_EXEC_RUNNING, "the run must not have actually started");
+    TEST_CHECK(strstr(err, "2015") != NULL, "the refusal names the offending segment's 2015C target");
+    TEST_CHECK(strstr(err, "80") != NULL, "the refusal names the zone's actual current 80C limit");
+}
+
 // Test 5 (mandatory coverage item 5): a descending (cool-down/anneal)
 // profile started hot must NOT jump into its cooling leg -- Q5, "scan only
 // the leading ascent... stop at the first descent". Segment 0 peaks at
@@ -5007,6 +5036,7 @@ void run_test_profile_executor_prestart(void)
     test_run_refuses_cone10_profile_on_80c_zone();
     test_run_accepts_in_range_profile_on_80c_zone();
     test_run_accepts_target_exactly_at_zone_limit();
+    test_run_refuses_2015c_gas_kiln_profile_on_80c_zone();
     test_warm_start_descending_profile_does_not_jump_into_cooldown();
     test_warm_start_hotter_than_entire_profile_lands_on_last_segment();
 
