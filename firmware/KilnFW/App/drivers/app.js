@@ -638,9 +638,37 @@
       });
   }
 
+  // 2026-09-01, owner report ("pause/firing buttons cover the last page
+  // button" on the reset page, phone): setStopBarVisible() above only
+  // re-measures the bar when it transitions hidden<->shown, on the
+  // assumption that the bar's HEIGHT is otherwise constant. It isn't --
+  // setStopOrAckState()/setPauseResumeState() swap which of the three
+  // buttons are visible (pause+stop while running, just the ack button
+  // once done/faulted) without ever hiding the bar itself, and at a narrow
+  // phone width the different button combinations can wrap onto a second
+  // line, changing the bar's real offsetHeight out from under a padding
+  // value that was computed for the first-line height. A ResizeObserver on
+  // the bar itself is the one mechanism that is right by construction for
+  // every cause of a height change -- visibility toggling, button swaps,
+  // text reflow from a viewport resize, even a future page-local CSS
+  // override of --ui-touch -- rather than this file having to remember to
+  // call updateBodyPadding() from every place that might change the bar's
+  // rendered size. Falls back to doing nothing extra on a browser without
+  // ResizeObserver; the explicit calls in setStopBarVisible() still cover
+  // the show/hide transition there, just not a same-visibility content
+  // change.
+  function observeStopBarHeight(bar) {
+    if (!window.ResizeObserver || !window.kcNav) return;
+    var ro = new ResizeObserver(function () {
+      window.kcNav.updateBodyPadding();
+    });
+    ro.observe(bar);
+  }
+
   function init() {
     bannerEl = buildBanner();
     stopBarEl = buildStopBar();
+    observeStopBarHeight(stopBarEl);
     buildUnitBtn();
     pollHeartbeat();
     document.addEventListener('visibilitychange', function () {

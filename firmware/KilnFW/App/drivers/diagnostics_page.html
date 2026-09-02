@@ -56,7 +56,7 @@
   p.lead { color: var(--muted); }
   .card { background: var(--card-bg); border: 1px solid var(--border); border-radius: var(--ui-radius);
           padding: 0.2em 0.9em; margin-bottom: 0.6em; }
-  .row { display: flex; justify-content: space-between; align-items: baseline; gap: 1em;
+  .row { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 0.3em 1em;
          padding: 0.5em 0; border-bottom: 1px solid var(--border); }
   .row:last-child { border-bottom: none; }
   /* min-width: 0 on both flex children -- the trap this codebase has hit
@@ -66,10 +66,40 @@
      section name), can push the sibling off-screen on a narrow phone
      instead of wrapping. overflow-wrap lets a genuinely unbreakable token
      (hex, a commit hash) break rather than force the row wider than its
-     card. */
-  .row .label { color: var(--fg); min-width: 0; overflow-wrap: anywhere; }
+     card.
+     2026-09-01: two more bugs found in this same rule, both from the same
+     root cause -- `.row .label` and `.row .value` shrinking by the SAME
+     flex-shrink:1 ratio when a row runs out of room, which sounds fair but
+     isn't: flex distributes negative space proportional to each item's own
+     content width, so a long `.value` (e.g. Cause/Remedy prose, which can
+     run to a full sentence) drags a short `.label` ("Warning", "Reason")
+     down with it even though the label itself is nowhere near that wide --
+     the label can be shrunk to a sliver even on a desktop-width row, purely
+     because its sibling is huge. Two changes fix this:
+       1. `.row .label` no longer shares flex-shrink with `.value`: `flex: 0
+          1 auto` + `max-width: 55%` means it only shrinks against ITS OWN
+          content once it exceeds half the row, never because the value
+          needed room. `overflow-wrap` downgraded `anywhere` -> `break-word`
+          -- `anywhere` participates in min-content sizing (collapses the
+          column toward one character even when nothing overflows, which is
+          what turned "Warning" into "War/nin/g"); `break-word` only breaks
+          a word that would otherwise overflow the box `max-width: 55%`
+          already caps it to, so the label wraps at word boundaries first
+          and only mid-word as a last resort.
+       2. `.row` gained `flex-wrap: wrap`: the one case even a protected
+          label can't avoid is a genuinely long *sentence* standing in for a
+          label (row('No trip event received this boot', 'n/a')) paired
+          with real prose in `.value` (Cause/Remedy) -- letting the pair
+          drop to its own line, rather than fighting for one line, is a
+          multi-word wrap that reads as a sentence, not the vertical
+          letter-by-letter split "Last trip (Frame D)" was reported doing.
+     `.row .value` keeps `flex: 1 1 auto; min-width: 0; overflow-wrap:
+     anywhere` -- it is the column that legitimately carries unbreakable
+     tokens (hex, commit hashes, NVS section names) and is meant to give up
+     its width first. */
+  .row .label { color: var(--fg); flex: 0 1 auto; max-width: 55%; overflow-wrap: break-word; }
   .row .value { color: var(--muted); font-variant-numeric: tabular-nums; text-align: right;
-                min-width: 0; overflow-wrap: anywhere; }
+                flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
   /* The one number this page exists to surface -- see the "why this matters"
      paragraph below it. Same visual weight as a warning row, not because it
      IS a warning right now, but because it's the number to watch. */

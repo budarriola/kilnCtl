@@ -43,17 +43,38 @@
   .card { background: var(--card-bg); border: 1px solid var(--border); border-radius: var(--ui-radius);
           padding: 0.2em 0.9em; margin-bottom: 0.6em; }
   .card.tripped { background: var(--tripped-bg); border-color: var(--warn); }
-  .row { display: flex; justify-content: space-between; align-items: baseline; gap: 1em;
+  .row { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 0.3em 1em;
          padding: 0.5em 0; border-bottom: 1px solid var(--border); }
   .row:last-child { border-bottom: none; }
   /* min-width: 0 -- the flex-shrink trap flagged in theme.css's
      .kc-page-title comment: without it, a long unbreakable token (a build
      commit hash, a hex trip-reason code) floors this item at its
      min-content width and can push its sibling off a narrow phone screen
-     instead of wrapping. overflow-wrap lets those tokens actually break. */
-  .row .label { min-width: 0; overflow-wrap: anywhere; }
+     instead of wrapping. overflow-wrap lets those tokens actually break.
+     2026-09-01: this is the "Last trip (Frame D)" section the owner
+     reported wrapping vertically on BOTH phone and desktop -- see
+     diagnostics_page.html's identical rule for the full write-up. Root
+     cause was `.row .label` and `.row .value` sharing flex-shrink:1: a
+     long `.value` (Cause/Remedy prose from the trip's cause/remedy text)
+     drags a short `.label` ("Reason", "Cause", "Age") down with it in
+     proportion to the VALUE's own huge content width, not the label's --
+     the label can end up a sliver wide even in this page's 640px-capped
+     body, which is why it happened on desktop too, not just a narrow
+     phone. Fixed the same way: `.row .label` gets its own `flex: 0 1 auto;
+     max-width: 55%` so it only shrinks against its own content, plus
+     `overflow-wrap: break-word` (not `anywhere` -- `anywhere` participates
+     in min-content sizing and collapses the column pre-emptively, which is
+     what crushed diagnostics_page.html's "Warning" label into
+     "War/nin/g"); `.row` gained `flex-wrap: wrap` so the couple of rows
+     that put a full sentence in the label slot (row('No trip event
+     received this boot', 'n/a')) can drop to their own line instead of
+     fighting `.value` for one. `.row .value` keeps `flex: 1 1 auto;
+     min-width: 0; overflow-wrap: anywhere` -- it is the column that
+     actually carries unbreakable tokens (hex trip-reason codes, build
+     hashes) and is meant to give up its width first. */
+  .row .label { min-width: 0; flex: 0 1 auto; max-width: 55%; overflow-wrap: break-word; }
   .row .value { color: var(--muted); font-variant-numeric: tabular-nums; text-align: right;
-                min-width: 0; overflow-wrap: anywhere; }
+                flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
   .row .value.warn { color: var(--warn); font-weight: bold; }
   .row .value.ok { color: var(--ok); }
   .note { font-size: 0.82em; color: var(--muted); margin: 0.3em 0 0.8em; }

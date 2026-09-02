@@ -41,9 +41,38 @@
   p { color: var(--muted); }
   .card { background: var(--card-bg); border: 1px solid var(--border); border-radius: var(--ui-radius);
           padding: 0.8em 1em; margin: 0.6em 0; }
+  /* 2026-09-01, owner report: "the RP2040 section of the fw update looks
+     smashed on the phone". Root cause: an `auto` grid track sizes to its
+     items' max-content width, and a grid item's own default min-width is
+     `auto` too (its own min-content) -- for the RP2040 block's longer
+     labels ("Safety processor (RP2040) build commit / date", written out
+     in renderPicoInfo() below because unlike the ESP block this is a
+     SECOND processor's identity, not this board's own) that pushed the
+     `dt` column wide enough on a narrow phone to force `dd` into a sliver,
+     with nothing letting either column give up width gracefully.
+     `dt` deliberately does NOT get `min-width: 0` -- see diagnostics_page.
+     html's/safety_page.html's identical-in-spirit `.row .label` fix: a
+     label column that can shrink pre-emptively is the bug, not the fix.
+     Labels here are short-ish, known, multi-word strings, so plain word
+     wrapping (no explicit overflow-wrap override) already keeps them from
+     forcing the row wider than necessary without collapsing the column.
+     `dd` gets `min-width: 0` (it did not have one before) so the value
+     column -- the one that legitimately carries unbreakable tokens
+     (commit hashes, version strings) -- can actually shrink and rely on
+     its existing `word-break: break-all` to avoid overflowing sideways.
+     Below ~420px even a wrapped two-word label plus a hash value gets
+     tight enough to look cramped rather than merely narrow, so `.kv`
+     collapses to a single stacked column there -- dt above its dd, both
+     full width, no column fight left to lose. */
   .kv { display: grid; grid-template-columns: auto 1fr; gap: 0.15em 0.8em; font-size: 0.92em; }
   .kv dt { color: var(--muted); }
-  .kv dd { margin: 0; word-break: break-all; }
+  .kv dd { margin: 0; min-width: 0; word-break: break-all; }
+  @media (max-width: 420px) {
+    .kv { grid-template-columns: 1fr; gap: 0; }
+    .kv dt { margin-top: 0.5em; }
+    .kv dt:first-child { margin-top: 0; }
+    .kv dd { margin-bottom: 0.15em; }
+  }
   .blocker { background: var(--card-bg); border: 1px solid var(--warn); color: var(--warn);
              border-radius: var(--ui-radius); padding: 0.7em 1em; font-weight: bold; }
   .ready { background: var(--card-bg); border: 1px solid var(--ok); color: var(--ok);
