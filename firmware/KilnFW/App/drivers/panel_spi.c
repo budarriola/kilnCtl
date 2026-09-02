@@ -695,7 +695,16 @@ esp_err_t ILI9488_init(ILI9488Class *disp,
     memset(disp, 0, sizeof(*disp));
     disp->owner = owner;
     disp->io = io;
+#if KILNCTL_SPI_HARDWARE_CS
+    /* DISPLAY_ST7796_PLAN.md 9.4: the SPI peripheral (spics_io_num, set
+     * below on dev_config/read_config) now owns this pin, so every
+     * spi_owner_transfer()/spi_owner_transfer_polling() call in this file
+     * must pass the -1 sentinel esp_spi_owner.c treats as "do not
+     * bit-bang" instead of the real GPIO number. */
+    disp->cs_gpio = -1;
+#else
     disp->cs_gpio = cs_gpio;
+#endif
     disp->dc_gpio = dc_gpio;
     disp->reset_gpio = reset_gpio;
     disp->panel = panel;
@@ -708,6 +717,8 @@ esp_err_t ILI9488_init(ILI9488Class *disp,
     disp->text_size = 2;
     disp->text_opaque = true;
 
+    esp_err_t err;
+#if !KILNCTL_SPI_HARDWARE_CS
     /* CS is bit-banged by spi_owner around each transfer (spics_io_num = -1
      * below), so it must idle high whenever no transfer is in flight -- the
      * same arrangement the MAX31856 channels use on this bus. */
@@ -718,12 +729,21 @@ esp_err_t ILI9488_init(ILI9488Class *disp,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
         .intr_type = GPIO_INTR_DISABLE,
     };
-    esp_err_t err = gpio_config(&cs_conf);
+    err = gpio_config(&cs_conf);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "gpio_config(cs) failed: %s", esp_err_to_name(err));
         return err;
     }
     gpio_set_level((gpio_num_t)cs_gpio, 1);
+#else
+    /* DISPLAY_ST7796_PLAN.md 9.4, CONFIG_KILNCTL_SPI_HARDWARE_CS: the SPI
+     * peripheral drives this pin via spics_io_num below, so it must NOT also
+     * be configured/driven as a plain output GPIO here -- that would fight
+     * the peripheral on the same pin. disp->cs_gpio is set to -1 further
+     * down so every spi_owner_transfer() call site in this file passes the
+     * sentinel esp_spi_owner.c already treats as "hardware handles CS". */
+    err = ESP_OK;
+#endif
 
     /* Bench-wiring bypass: configure D/C and/or ~RESET as bare output GPIOs
      * when their respective *_gpio is >= 0, same as CS just above. Whichever
@@ -785,7 +805,14 @@ esp_err_t ILI9488_init(ILI9488Class *disp,
     spi_device_interface_config_t dev_config = {
         .clock_speed_hz = clock_hz,
         .mode = 0,
+#if KILNCTL_SPI_HARDWARE_CS
+        /* DISPLAY_ST7796_PLAN.md 9.4: the peripheral drives CS. disp->cs_gpio
+         * is set to -1 below so spi_owner_transfer() call sites in this file
+         * no longer bit-bang the same pin. */
+        .spics_io_num = cs_gpio,
+#else
         .spics_io_num = -1,  /* CS driven by spi_owner, not the peripheral */
+#endif
         .queue_size = 1,
     };
     err = spi_bus_add_device(host, &dev_config, &disp->dev);

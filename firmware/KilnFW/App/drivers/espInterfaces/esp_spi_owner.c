@@ -141,13 +141,34 @@ static void spi_owner_task(void *arg)
 
         esp_err_t result = ESP_OK;
         if (request.tx_buffer && request.tx_length > 0) {
-            gpio_set_level((gpio_num_t)request.cs_pin, 0);
+            /* DISPLAY_ST7796_PLAN.md 9.4: cs_pin < 0 means the device was
+             * added with a real spics_io_num (CONFIG_KILNCTL_SPI_HARDWARE_CS)
+             * and the SPI peripheral itself asserts/deasserts CS around the
+             * transaction -- bit-banging it here too would fight the
+             * peripheral on the same pin. Every caller in today's tree still
+             * passes a real GPIO (spics_io_num stays -1 at every
+             * spi_bus_add_device() call site), so this guard changes nothing
+             * observable until a caller opts into hardware CS. */
+            bool bitbang_cs = request.cs_pin >= 0;
+            if (bitbang_cs) {
+                gpio_set_level((gpio_num_t)request.cs_pin, 0);
+            }
             spi_transaction_t trans = {
                 .length = request.tx_length * 8,
                 .tx_buffer = request.tx_buffer,
                 .rx_buffer = request.rx_buffer,
                 .rxlength = request.rx_length * 8,
             };
+            /* DISPLAY_ST7796_PLAN.md 9.3: only the queued (display flush)
+             * path ever carries a PSRAM-backed buffer -- MAX31856 register
+             * transfers (use_polling) are always small stack/heap buffers,
+             * so the flag is never set for them regardless of
+             * owner->dma_use_psram. Default OFF (owner->dma_use_psram is
+             * only ever true when CONFIG_KILNCTL_SPI_DMA_USE_PSRAM is on),
+             * so trans.flags is 0 on every transfer today. */
+            if (owner->dma_use_psram && !request.use_polling) {
+                trans.flags |= SPI_TRANS_DMA_USE_PSRAM;
+            }
             /* DISPLAY_ST7796_PLAN.md 9.5: dispatch on the request, not the
              * device -- a polling transmit only ever runs here, on the
              * owner task's own thread, never from an ISR and never from a
@@ -157,7 +178,9 @@ static void spi_owner_task(void *arg)
              * queued path too). */
             result = request.use_polling ? spi_device_polling_transmit(request.device, &trans)
                                           : spi_device_transmit(request.device, &trans);
-            gpio_set_level((gpio_num_t)request.cs_pin, 1);
+            if (bitbang_cs) {
+                gpio_set_level((gpio_num_t)request.cs_pin, 1);
+            }
         } else {
             result = ESP_ERR_INVALID_ARG;
         }
@@ -192,7 +215,8 @@ esp_err_t spi_owner_init(spi_owner_t *owner,
                              UBaseType_t queue_len,
                              UBaseType_t task_priority,
                              uint32_t stack_depth,
-                             BaseType_t core_id)
+                             BaseType_t core_id,
+                             bool dma_use_psram)
 {
     if (!owner) {
         return ESP_ERR_INVALID_ARG;
@@ -200,6 +224,7 @@ esp_err_t spi_owner_init(spi_owner_t *owner,
 
     memset(owner, 0, sizeof(*owner));
     owner->host = host;
+    owner->dma_use_psram = dma_use_psram;
     owner->request_queue = xQueueCreate(queue_len, sizeof(spi_owner_request_t));
     if (!owner->request_queue) {
         ESP_LOGE(TAG, "failed to create request queue");

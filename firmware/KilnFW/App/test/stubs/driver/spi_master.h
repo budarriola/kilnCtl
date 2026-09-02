@@ -22,15 +22,26 @@ typedef struct {
     const void *tx_buffer;
     void *rx_buffer;
     unsigned long rxlength;
+    unsigned int flags;
 } spi_transaction_t;
 
+/* Real value is IDF-internal and irrelevant on host -- only "this bit is set
+ * or not" is ever asserted against (test_esp_spi_owner.c, DISPLAY_ST7796_PLAN.md
+ * 9.3). Any nonzero, distinct-from-other-flags value is fine here. */
+#define SPI_TRANS_DMA_USE_PSRAM (1u << 8)
+
 extern int g_stub_spi_transmit_calls;
+/* DISPLAY_ST7796_PLAN.md 9.3: last trans.flags seen by spi_device_transmit(),
+ * so test_esp_spi_owner.c can prove owner->dma_use_psram actually reaches
+ * the transaction on the queued (display flush) path -- and does NOT reach
+ * the polling (MAX31856) path, which never carries a PSRAM buffer. */
+extern unsigned int g_stub_spi_transmit_last_flags;
 
 static inline esp_err_t spi_device_transmit(spi_device_handle_t device, spi_transaction_t *trans)
 {
     (void)device;
-    (void)trans;
     g_stub_spi_transmit_calls++;
+    g_stub_spi_transmit_last_flags = trans ? trans->flags : 0;
     return ESP_OK;
 }
 
@@ -45,12 +56,13 @@ static inline esp_err_t spi_device_transmit(spi_device_handle_t device, spi_tran
  * defined once in test_esp_spi_owner.c, same convention as
  * g_stub_queue_send_calls in stubs/freertos/queue.h. */
 extern int g_stub_spi_polling_transmit_calls;
+extern unsigned int g_stub_spi_polling_transmit_last_flags;
 
 static inline esp_err_t spi_device_polling_transmit(spi_device_handle_t device, spi_transaction_t *trans)
 {
     (void)device;
-    (void)trans;
     g_stub_spi_polling_transmit_calls++;
+    g_stub_spi_polling_transmit_last_flags = trans ? trans->flags : 0;
     return ESP_OK;
 }
 

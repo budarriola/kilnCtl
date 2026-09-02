@@ -369,7 +369,10 @@ esp_err_t MAX31856_bus_init(MAX31856BusClass *bus,
     /* Queue deep enough that all three channels plus a UART-driven raw
      * register poke can be in flight without a caller blocking on the queue
      * itself (each caller still blocks on its own completion semaphore). */
-    err = spi_owner_init(&bus->owner, host, 8, 5, 4096, tskNO_AFFINITY);
+    /* DISPLAY_ST7796_PLAN.md 9.3: CONFIG_KILNCTL_SPI_DMA_USE_PSRAM, default
+     * OFF -- see esp_spi_owner.h's spi_owner_t::dma_use_psram comment. */
+    err = spi_owner_init(&bus->owner, host, 8, 5, 4096, tskNO_AFFINITY,
+                          KILNCTL_SPI_DMA_USE_PSRAM ? true : false);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "spi_owner_init failed: %s", esp_err_to_name(err));
         if (bus->bus_owned) {
@@ -486,9 +489,19 @@ esp_err_t MAX31856_init(MAX31856Class *ch,
     memset(ch, 0, sizeof(*ch));
     ch->bus = bus;
     ch->channel = channel;
+#if KILNCTL_SPI_HARDWARE_CS
+    /* DISPLAY_ST7796_PLAN.md 9.4: the SPI peripheral (spics_io_num, set below
+     * on dev_config) owns this pin, so every spi_owner_transfer_polling()
+     * call site in this file must pass the -1 sentinel esp_spi_owner.c
+     * treats as "do not bit-bang" instead of the real GPIO number. */
+    ch->cs_gpio = -1;
+#else
     ch->cs_gpio = cs_gpio;
+#endif
     ch->fault_gpio = fault_gpio;
 
+    esp_err_t err;
+#if !KILNCTL_SPI_HARDWARE_CS
     /* ~CS is bit-banged by spi_owner around each transfer, so it has to idle
      * high from the moment it becomes an output -- a CS left low would let the
      * part latch whatever the display is clocking out. */
@@ -499,13 +512,19 @@ esp_err_t MAX31856_init(MAX31856Class *ch,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
         .intr_type = GPIO_INTR_DISABLE,
     };
-    esp_err_t err = gpio_config(&cs_conf);
+    err = gpio_config(&cs_conf);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "ch%u: gpio_config(cs=%d) failed: %s", channel, cs_gpio,
                  esp_err_to_name(err));
         return err;
     }
     gpio_set_level((gpio_num_t)cs_gpio, 1);
+#else
+    /* DISPLAY_ST7796_PLAN.md 9.4: this pin is now driven by the SPI
+     * peripheral via spics_io_num below -- configuring/driving it as a plain
+     * GPIO here would fight the peripheral on the same wire. */
+    err = ESP_OK;
+#endif
 
     /* ~FAULT is an active-low output from the part with nothing pulling it up
      * on the daughterboard, so the internal pull-up is doing real work here.
@@ -531,7 +550,11 @@ esp_err_t MAX31856_init(MAX31856Class *ch,
     spi_device_interface_config_t dev_config = {
         .clock_speed_hz = THERMO_SPI_CLOCK_HZ,
         .mode = MAX31856_SPI_MODE,
+#if KILNCTL_SPI_HARDWARE_CS
+        .spics_io_num = cs_gpio, /* DISPLAY_ST7796_PLAN.md 9.4: peripheral drives CS */
+#else
         .spics_io_num = -1, /* CS driven by spi_owner, not the SPI peripheral */
+#endif
         .queue_size = 1,
         .input_delay_ns = MAX31856_SPI_INPUT_DELAY_NS,
     };

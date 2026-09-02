@@ -50,9 +50,26 @@ static inline int gpio_get_level(gpio_num_t gpio)
  * of this file. */
 #define GPIO_IS_VALID_OUTPUT_GPIO(gpio) (1)
 
+/* DISPLAY_ST7796_PLAN.md 9.4: test_esp_spi_owner.c proves cs_pin < 0 skips
+ * esp_spi_owner.c's bit-banging entirely (CONFIG_KILNCTL_SPI_HARDWARE_CS's
+ * precondition) by counting calls here, rather than only "compiles and
+ * links" like the rest of this stub file. `static`, NOT `extern` -- unlike
+ * g_stub_spi_transmit_calls (spi_master.h; spi_device_transmit() is only
+ * ever reachable through esp_spi_owner.c, which only ONE test executable
+ * links), gpio_set_level() is called from many drivers spread across many
+ * separate test executables (safety_link.c, boot_button.c, ...) that never
+ * link test_esp_spi_owner.c -- an extern here left those with an unresolved
+ * symbol (found building this pass: `LNK2019 g_stub_gpio_set_level_calls`
+ * in the safety_link test executable). `static` gives every translation
+ * unit that includes this header its own private counter, which is exactly
+ * what a self-contained assertion inside test_esp_spi_owner.c's own TU
+ * needs -- no cross-TU definition to link. */
+static int g_stub_gpio_set_level_calls = 0;
+
 static inline esp_err_t gpio_set_level(gpio_num_t gpio, int level)
 {
     (void)gpio; (void)level;
+    g_stub_gpio_set_level_calls++;
     return ESP_OK;
 }
 

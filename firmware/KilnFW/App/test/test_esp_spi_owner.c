@@ -48,12 +48,18 @@ extern int g_stub_queue_ring_enabled;
 // spi_device_polling_transmit() apart.
 int g_stub_spi_transmit_calls = 0;
 int g_stub_spi_polling_transmit_calls = 0;
+unsigned int g_stub_spi_transmit_last_flags = 0;
+unsigned int g_stub_spi_polling_transmit_last_flags = 0;
+// g_stub_gpio_set_level_calls itself is `static`, defined directly in
+// stubs/driver/gpio.h -- see that header's comment for why (unlike the two
+// counters above, no cross-TU extern/definition split here).
 
 static void test_wedge_latches_and_fails_fast(void)
 {
     spi_owner_t owner;
     esp_err_t init_err = spi_owner_init(&owner, 0 /*host*/, 4 /*queue_len*/, 5 /*priority*/,
-                                         2048 /*stack*/, -1 /*core*/);
+                                         2048 /*stack*/, -1 /*core*/,
+                                         /*dma_use_psram=*/false);
     TEST_CHECK(init_err == ESP_OK, "spi_owner_init succeeds against the host stubs");
     TEST_CHECK(!owner.wedged, "a freshly-initialized owner is not wedged");
 
@@ -138,7 +144,8 @@ static void test_completion_timeout_orphans_slot(void)
 
     spi_owner_t owner;
     esp_err_t init_err = spi_owner_init(&owner, 0 /*host*/, 4 /*queue_len*/, 5 /*priority*/,
-                                         2048 /*stack*/, -1 /*core*/);
+                                         2048 /*stack*/, -1 /*core*/,
+                                         /*dma_use_psram=*/false);
     TEST_CHECK(init_err == ESP_OK, "spi_owner_init succeeds against the host stubs");
 
     uint8_t tx[4] = { 9, 8, 7, 6 };
@@ -174,7 +181,8 @@ static void test_pool_sized_queue_len_plus_one(void)
     spi_owner_t owner;
     UBaseType_t queue_len = 4;
     esp_err_t init_err = spi_owner_init(&owner, 0 /*host*/, queue_len, 5 /*priority*/,
-                                         2048 /*stack*/, -1 /*core*/);
+                                         2048 /*stack*/, -1 /*core*/,
+                                         /*dma_use_psram=*/false);
     TEST_CHECK(init_err == ESP_OK, "spi_owner_init succeeds against the host stubs");
     TEST_CHECK(owner.slot_count == (size_t)queue_len + 1,
                "pool is sized queue_len + 1, not queue_len");
@@ -202,7 +210,8 @@ static void test_pool_exhaustion_fails_closed_not_wedged(void)
     spi_owner_t owner;
     UBaseType_t queue_len = 4;
     esp_err_t init_err = spi_owner_init(&owner, 0 /*host*/, queue_len, 5 /*priority*/,
-                                         2048 /*stack*/, -1 /*core*/);
+                                         2048 /*stack*/, -1 /*core*/,
+                                         /*dma_use_psram=*/false);
     TEST_CHECK(init_err == ESP_OK, "spi_owner_init succeeds against the host stubs");
 
     for (UBaseType_t i = 0; i < queue_len + 1; i++) {
@@ -241,7 +250,8 @@ static void test_owner_task_dispatches_polling_vs_queued(void)
 
     spi_owner_t owner;
     esp_err_t init_err = spi_owner_init(&owner, 0 /*host*/, 4 /*queue_len*/, 5 /*priority*/,
-                                         2048 /*stack*/, -1 /*core*/);
+                                         2048 /*stack*/, -1 /*core*/,
+                                         /*dma_use_psram=*/false);
     TEST_CHECK(init_err == ESP_OK, "spi_owner_init succeeds against the host stubs");
 
     uint8_t tx[4] = { 1, 2, 3, 4 };
@@ -291,7 +301,8 @@ static void test_owner_task_dispatches_queued_when_not_polling(void)
 
     spi_owner_t owner;
     esp_err_t init_err = spi_owner_init(&owner, 0 /*host*/, 4 /*queue_len*/, 5 /*priority*/,
-                                         2048 /*stack*/, -1 /*core*/);
+                                         2048 /*stack*/, -1 /*core*/,
+                                         /*dma_use_psram=*/false);
     TEST_CHECK(init_err == ESP_OK, "spi_owner_init succeeds against the host stubs");
 
     uint8_t tx[4] = { 9, 9, 9, 9 };
@@ -329,6 +340,197 @@ static void test_owner_task_dispatches_queued_when_not_polling(void)
     g_stub_queue_ring_enabled = 0;
 }
 
+// DISPLAY_ST7796_PLAN.md 9.4: cs_pin < 0 is the sentinel a caller built under
+// CONFIG_KILNCTL_SPI_HARDWARE_CS passes once a device's CS is handed to the
+// SPI peripheral via spics_io_num -- esp_spi_owner.c must NOT also bit-bang
+// that GPIO, or the driver-level CS and the owner's manual toggling would
+// fight each other on the same live pin. Same "hand-build the request, run
+// spi_owner_task() directly" technique as the dispatch tests above. Mutate
+// esp_spi_owner.c's `bool bitbang_cs = request.cs_pin >= 0;` to an
+// unconditional true and this goes red (g_stub_gpio_set_level_calls reads 2
+// instead of 0).
+static void test_owner_task_skips_gpio_when_cs_pin_negative(void)
+{
+    g_stub_queue_ring_enabled = 1;
+
+    spi_owner_t owner;
+    esp_err_t init_err = spi_owner_init(&owner, 0 /*host*/, 4 /*queue_len*/, 5 /*priority*/,
+                                         2048 /*stack*/, -1 /*core*/,
+                                         /*dma_use_psram=*/false);
+    TEST_CHECK(init_err == ESP_OK, "spi_owner_init succeeds against the host stubs");
+
+    uint8_t tx[4] = { 1, 2, 3, 4 };
+    int idx = owner_slot_pool_alloc(owner.slot_refcount, owner.slot_count);
+    TEST_CHECK(idx >= 0, "setup: a slot for the hand-built hardware-CS request");
+
+    spi_owner_request_t hw_cs_req;
+    memset(&hw_cs_req, 0, sizeof(hw_cs_req));
+    hw_cs_req.device = (spi_device_handle_t)0x1;
+    hw_cs_req.tx_buffer = tx;
+    hw_cs_req.tx_length = sizeof(tx);
+    hw_cs_req.cs_pin = -1; /* hardware CS: peripheral owns this pin */
+    hw_cs_req.slot = idx;
+
+    spi_owner_request_t shutdown_req;
+    memset(&shutdown_req, 0, sizeof(shutdown_req));
+    shutdown_req.shutdown = true;
+
+    TEST_CHECK(xQueueSend(owner.request_queue, &hw_cs_req, 0) == pdTRUE,
+               "setup: hardware-CS request accepted by the ring");
+    TEST_CHECK(xQueueSend(owner.request_queue, &shutdown_req, 0) == pdTRUE,
+               "setup: shutdown request accepted by the ring");
+
+    g_stub_gpio_set_level_calls = 0;
+
+    spi_owner_task(&owner);
+
+    TEST_CHECK(g_stub_gpio_set_level_calls == 0,
+               "cs_pin=-1 never touches gpio_set_level -- hardware CS owns this pin");
+
+    g_stub_queue_ring_enabled = 0;
+}
+
+// Negative control for the test above, proving it can actually fail: a
+// request with a real GPIO (today's only production shape -- every
+// spi_bus_add_device() call site in the tree still sets spics_io_num = -1)
+// must still bit-bang CS exactly twice (assert then deassert), same as
+// before this pass touched esp_spi_owner.c at all.
+static void test_owner_task_bitbangs_cs_when_cs_pin_valid(void)
+{
+    g_stub_queue_ring_enabled = 1;
+
+    spi_owner_t owner;
+    esp_err_t init_err = spi_owner_init(&owner, 0 /*host*/, 4 /*queue_len*/, 5 /*priority*/,
+                                         2048 /*stack*/, -1 /*core*/,
+                                         /*dma_use_psram=*/false);
+    TEST_CHECK(init_err == ESP_OK, "spi_owner_init succeeds against the host stubs");
+
+    uint8_t tx[4] = { 1, 2, 3, 4 };
+    int idx = owner_slot_pool_alloc(owner.slot_refcount, owner.slot_count);
+    TEST_CHECK(idx >= 0, "setup: a slot for the hand-built bit-banged-CS request");
+
+    spi_owner_request_t sw_cs_req;
+    memset(&sw_cs_req, 0, sizeof(sw_cs_req));
+    sw_cs_req.device = (spi_device_handle_t)0x1;
+    sw_cs_req.tx_buffer = tx;
+    sw_cs_req.tx_length = sizeof(tx);
+    sw_cs_req.cs_pin = 5; /* today's only production shape */
+    sw_cs_req.slot = idx;
+
+    spi_owner_request_t shutdown_req;
+    memset(&shutdown_req, 0, sizeof(shutdown_req));
+    shutdown_req.shutdown = true;
+
+    TEST_CHECK(xQueueSend(owner.request_queue, &sw_cs_req, 0) == pdTRUE,
+               "setup: bit-banged-CS request accepted by the ring");
+    TEST_CHECK(xQueueSend(owner.request_queue, &shutdown_req, 0) == pdTRUE,
+               "setup: shutdown request accepted by the ring");
+
+    g_stub_gpio_set_level_calls = 0;
+
+    spi_owner_task(&owner);
+
+    TEST_CHECK(g_stub_gpio_set_level_calls == 2,
+               "cs_pin>=0 still bit-bangs CS assert+deassert, unchanged from before this pass");
+
+    g_stub_queue_ring_enabled = 0;
+}
+
+// DISPLAY_ST7796_PLAN.md 9.3: owner->dma_use_psram (CONFIG_KILNCTL_SPI_DMA_USE_PSRAM,
+// default OFF) must reach the transaction's flags on the queued (display
+// flush) path. Mutate esp_spi_owner.c's flag-setting `if` to check the wrong
+// thing (or delete it) and this goes red (last_flags reads 0 instead of
+// SPI_TRANS_DMA_USE_PSRAM).
+static void test_owner_task_sets_dma_psram_flag_on_queued_path(void)
+{
+    g_stub_queue_ring_enabled = 1;
+
+    spi_owner_t owner;
+    esp_err_t init_err = spi_owner_init(&owner, 0 /*host*/, 4 /*queue_len*/, 5 /*priority*/,
+                                         2048 /*stack*/, -1 /*core*/,
+                                         /*dma_use_psram=*/true);
+    TEST_CHECK(init_err == ESP_OK, "spi_owner_init succeeds against the host stubs");
+    TEST_CHECK(owner.dma_use_psram, "owner.dma_use_psram reflects the init-time argument");
+
+    uint8_t tx[4] = { 1, 2, 3, 4 };
+    int idx = owner_slot_pool_alloc(owner.slot_refcount, owner.slot_count);
+    TEST_CHECK(idx >= 0, "setup: a slot for the hand-built queued request");
+
+    spi_owner_request_t queued_req;
+    memset(&queued_req, 0, sizeof(queued_req));
+    queued_req.device = (spi_device_handle_t)0x1;
+    queued_req.tx_buffer = tx;
+    queued_req.tx_length = sizeof(tx);
+    queued_req.cs_pin = 5;
+    queued_req.slot = idx;
+    queued_req.use_polling = false;
+
+    spi_owner_request_t shutdown_req;
+    memset(&shutdown_req, 0, sizeof(shutdown_req));
+    shutdown_req.shutdown = true;
+
+    TEST_CHECK(xQueueSend(owner.request_queue, &queued_req, 0) == pdTRUE,
+               "setup: queued request accepted by the ring");
+    TEST_CHECK(xQueueSend(owner.request_queue, &shutdown_req, 0) == pdTRUE,
+               "setup: shutdown request accepted by the ring");
+
+    g_stub_spi_transmit_last_flags = 0xFFFFFFFFu; /* poison, so a missed write is visible */
+
+    spi_owner_task(&owner);
+
+    TEST_CHECK((g_stub_spi_transmit_last_flags & SPI_TRANS_DMA_USE_PSRAM) != 0,
+               "dma_use_psram=true sets SPI_TRANS_DMA_USE_PSRAM on the queued-path transaction");
+
+    g_stub_queue_ring_enabled = 0;
+}
+
+// Negative control: the SAME owner (dma_use_psram=true) must NOT set the
+// flag on a polling (MAX31856) transfer -- that path never carries a
+// PSRAM-backed buffer (see esp_spi_owner.c's comment on the `!request.use_polling`
+// guard). Proves the guard is actually conditioned on use_polling, not just
+// always-on once owner->dma_use_psram is true.
+static void test_owner_task_never_sets_dma_psram_flag_on_polling_path(void)
+{
+    g_stub_queue_ring_enabled = 1;
+
+    spi_owner_t owner;
+    esp_err_t init_err = spi_owner_init(&owner, 0 /*host*/, 4 /*queue_len*/, 5 /*priority*/,
+                                         2048 /*stack*/, -1 /*core*/,
+                                         /*dma_use_psram=*/true);
+    TEST_CHECK(init_err == ESP_OK, "spi_owner_init succeeds against the host stubs");
+
+    uint8_t tx[4] = { 1, 2, 3, 4 };
+    int idx = owner_slot_pool_alloc(owner.slot_refcount, owner.slot_count);
+    TEST_CHECK(idx >= 0, "setup: a slot for the hand-built polling request");
+
+    spi_owner_request_t polling_req;
+    memset(&polling_req, 0, sizeof(polling_req));
+    polling_req.device = (spi_device_handle_t)0x1;
+    polling_req.tx_buffer = tx;
+    polling_req.tx_length = sizeof(tx);
+    polling_req.cs_pin = 5;
+    polling_req.slot = idx;
+    polling_req.use_polling = true;
+
+    spi_owner_request_t shutdown_req;
+    memset(&shutdown_req, 0, sizeof(shutdown_req));
+    shutdown_req.shutdown = true;
+
+    TEST_CHECK(xQueueSend(owner.request_queue, &polling_req, 0) == pdTRUE,
+               "setup: polling request accepted by the ring");
+    TEST_CHECK(xQueueSend(owner.request_queue, &shutdown_req, 0) == pdTRUE,
+               "setup: shutdown request accepted by the ring");
+
+    g_stub_spi_polling_transmit_last_flags = 0xFFFFFFFFu; /* poison */
+
+    spi_owner_task(&owner);
+
+    TEST_CHECK((g_stub_spi_polling_transmit_last_flags & SPI_TRANS_DMA_USE_PSRAM) == 0,
+               "dma_use_psram=true does NOT set the flag on the polling (MAX31856) path");
+
+    g_stub_queue_ring_enabled = 0;
+}
+
 void run_test_esp_spi_owner(void)
 {
     TEST_SECTION("esp_spi_owner");
@@ -338,4 +540,8 @@ void run_test_esp_spi_owner(void)
     test_pool_exhaustion_fails_closed_not_wedged();
     test_owner_task_dispatches_polling_vs_queued();
     test_owner_task_dispatches_queued_when_not_polling();
+    test_owner_task_skips_gpio_when_cs_pin_negative();
+    test_owner_task_bitbangs_cs_when_cs_pin_valid();
+    test_owner_task_sets_dma_psram_flag_on_queued_path();
+    test_owner_task_never_sets_dma_psram_flag_on_polling_path();
 }

@@ -37,6 +37,73 @@ menu "KilnCtrl Hardware Configuration"
             int "SPI MISO GPIO"
             default 13
             range 0 48
+
+        config KILNCTL_SPI_DMA_USE_PSRAM
+            bool "Set SPI_TRANS_DMA_USE_PSRAM on display flush transactions"
+            default n
+            help
+                DISPLAY_ST7796_PLAN.md 9.3. LVGL's two draw buffers live in
+                PSRAM (lvgl_port.c). Today every flush transaction handed to
+                spi_device_transmit() (esp_spi_owner.c's non-polling path,
+                display flushes only -- thermocouple transfers use
+                spi_device_polling_transmit() and are unaffected either way)
+                lets the driver bounce-copy through an internal-DRAM buffer
+                because it cannot assume the source survives a cache flush.
+                Setting this flag tells the driver the PSRAM source is safe
+                to DMA from directly, which the plan's own §10 accounting
+                calls "permitted and actively good" because it REMOVES a
+                per-transaction internal-DRAM bounce buffer rather than
+                costing one -- internal DRAM is the tight resource on this
+                board (§10: ~1.6 kB headroom above the policy floor).
+
+                Off by default: not yet flash-verified. What could go wrong
+                if enabled: the ESP-IDF driver call site must check
+                ESP_ERR_INVALID_ARG / a failed SPI_TRANS_DMA_TX_FAIL
+                completion after enabling this, since a PSRAM buffer that
+                fails an implicit alignment/cache-writeback requirement the
+                driver did not have to satisfy before now surfaces as a
+                transfer error the display flush path must handle instead of
+                silently corrupting the panel. Confirming it works: compare
+                the 9.1 flush-duration measurement (§4) with this on vs off
+                on the bench, between profiles with nothing energized --
+                enabling this should shorten flush time (no bounce copy) and
+                must not raise the internal-DRAM trough recorded in
+                dram_margin.h (it should fall, since a bounce buffer is
+                being removed).
+
+        config KILNCTL_SPI_HARDWARE_CS
+            bool "Drive display and thermocouple ~CS from spics_io_num, not spi_owner"
+            default n
+            help
+                DISPLAY_ST7796_PLAN.md 9.4. Today every device on this bus
+                (ILI9488/ST7796 display, three MAX31856 channels) is added
+                with spics_io_num = -1 and esp_spi_owner.c's spi_owner_task()
+                bit-bangs the matching GPIO around each transfer by hand.
+                With this on, each device's real ~CS GPIO (display GPIO21;
+                thermo GPIO14/17/18, KILNCTL_THERMO_CSn_IO above) is instead
+                handed to the SPI peripheral itself via spics_io_num, which
+                asserts/deasserts it with correct setup/hold timing relative
+                to SCLK automatically; the driver-level bit-banging is
+                skipped for that device (esp_spi_owner.c only drives
+                request.cs_pin when it is >= 0 -- callers built under this
+                option pass -1 instead of the real GPIO number, the same
+                sentinel spi_owner_transfer() already treats as "hardware
+                handles it").
+
+                What could go wrong if enabled: this changes WHO toggles a
+                pin shared with three live MAX31856 channels while heaters
+                are energized. A CS pin double-driven (bit-banged AND
+                claimed by the peripheral) or a device left on the old path
+                while another on this bus moved to the new one would be a
+                bus-arbitration bug on the same wire the closed-loop control
+                reads its temperatures from -- this is exactly the risk this
+                pass declines to enable blind. Confirming it works: with
+                nothing energized, verify RDDID / MAX31856 register reads
+                still return the expected identity bytes with this on, then
+                take a fresh 9.1 flush-duration measurement (hardware CS
+                removes a per-transaction GPIO round trip, so flush time
+                should not regress) before ever enabling it on a board with
+                elements connected.
     endmenu
 
     menu "MAX31856 Thermocouple Channels (via J6)"

@@ -48,6 +48,23 @@
 #define KILN_SPI_MOSI_IO       CONFIG_KILNCTL_SPI_MOSI_IO
 #define KILN_SPI_MISO_IO       CONFIG_KILNCTL_SPI_MISO_IO
 
+/* DISPLAY_ST7796_PLAN.md 9.3/9.4, both default OFF. Normalized to a real 0/1
+ * macro rather than aliased straight to CONFIG_KILNCTL_*, same reasoning as
+ * TOUCH_CAL_SWAP_XY below: a bool Kconfig option that is OFF generates no
+ * CONFIG_* macro at all, so a bare alias would leave these expanding to an
+ * undeclared identifier wherever code uses them as an ordinary C token (a
+ * ternary argument, an initializer) rather than only inside an `#if`. */
+#if CONFIG_KILNCTL_SPI_DMA_USE_PSRAM
+#define KILNCTL_SPI_DMA_USE_PSRAM 1
+#else
+#define KILNCTL_SPI_DMA_USE_PSRAM 0
+#endif
+#if CONFIG_KILNCTL_SPI_HARDWARE_CS
+#define KILNCTL_SPI_HARDWARE_CS 1
+#else
+#define KILNCTL_SPI_HARDWARE_CS 0
+#endif
+
 /* --- MAX31856 thermocouple channels (thermocouple daughterboard via J6) ---
  * CS and ~FAULT are real ESP32-S3 GPIOs; ~DRDY is not -- it lands on the
  * SX1509 (IO8/IO9/IO10), so the thermocouple driver takes an optional

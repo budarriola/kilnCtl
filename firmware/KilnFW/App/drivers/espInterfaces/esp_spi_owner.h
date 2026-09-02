@@ -60,6 +60,16 @@ typedef struct {
      * whatever recovery action (reboot, bus reset) actually fixes it. */
     volatile bool wedged;
 
+    /* DISPLAY_ST7796_PLAN.md 9.3: set from spi_owner_init()'s dma_use_psram
+     * parameter (in turn CONFIG_KILNCTL_SPI_DMA_USE_PSRAM, default OFF).
+     * When true, spi_owner_task() sets SPI_TRANS_DMA_USE_PSRAM on every
+     * non-polling (display flush) transaction's flags so the driver DMAs
+     * straight out of LVGL's PSRAM buffer instead of bounce-copying through
+     * internal DRAM first. Never applied to polling transfers (MAX31856
+     * register pokes, <=17 bytes, never PSRAM-backed) -- see esp_spi_owner.c.
+     */
+    bool dma_use_psram;
+
     /* Module-owned pool backing spi_owner_transfer()'s per-request result
      * storage and completion semaphore -- see this header's own top-of-file
      * note in esp_spi_owner.c and owner_slot_pool.h's invariant. Sized to
@@ -109,12 +119,18 @@ typedef struct {
  * codebase uses for owner-task health flags. */
 bool spi_owner_is_wedged(const spi_owner_t *owner);
 
+/* dma_use_psram: DISPLAY_ST7796_PLAN.md 9.3, CONFIG_KILNCTL_SPI_DMA_USE_PSRAM
+ * passed through by the caller (default OFF; see spi_owner_t::dma_use_psram
+ * above for what it changes). Not read from Kconfig inside this file so the
+ * behavior stays a plain, host-testable struct field rather than a
+ * compile-time #if buried in the owner task. */
 esp_err_t spi_owner_init(spi_owner_t *owner,
                              spi_host_device_t host,
                              UBaseType_t queue_len,
                              UBaseType_t task_priority,
                              uint32_t stack_depth,
-                             BaseType_t core_id);
+                             BaseType_t core_id,
+                             bool dma_use_psram);
 esp_err_t spi_owner_deinit(spi_owner_t *owner);
 esp_err_t spi_owner_transfer(spi_owner_t *owner,
                                  spi_device_handle_t device,
