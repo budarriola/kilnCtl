@@ -174,6 +174,24 @@ class LoadPresetDataTest(unittest.TestCase):
         names = [p["name"] for p in config_presets.list_presets()]
         self.assertIn("coupling_matrix_20260831", names)
 
+    def test_pre_adoption_coupling_matrix_preset_loads_and_validates(self):
+        """The OLD (pre-adoption) coupling matrix, packaged the same way as
+        coupling_matrix_20260831.json, so it can be reapplied for a matched
+        A/B against the new matrix. Values are the '-' side of commit
+        78f2134's diff to tuned_baseline_20260831.json -- what was actually
+        live on the bench immediately before that commit overwrote it."""
+        preset = config_presets.load_preset_data("coupling_matrix_pre20260902")
+        self.assertEqual(preset["name"], "coupling_matrix_pre20260902")
+        self.assertEqual(len(preset["zones"]), 3)
+        by_index = {z["index"]: z for z in preset["zones"]}
+        self.assertEqual(by_index[0]["coupling_coeff"], [0.0, 12.0586, 6.0039])
+        self.assertEqual(by_index[1]["coupling_coeff"], [5.7656, 0.0, 6.7734])
+        self.assertEqual(by_index[2]["coupling_coeff"], [2.4062, 4.1094, 0.0])
+
+    def test_list_presets_includes_pre_adoption_coupling_matrix(self):
+        names = [p["name"] for p in config_presets.list_presets()]
+        self.assertIn("coupling_matrix_pre20260902", names)
+
 
 class ValidationTest(unittest.TestCase):
     """NEGATIVE-TEST: prove the schema check actually rejects a malformed
