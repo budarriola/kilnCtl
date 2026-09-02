@@ -12,6 +12,44 @@ as an estimate.
 Status at time of writing (2026-09-01): **nothing in this plan is built.** This
 is a planning document only.
 
+**Update 2026-09-02 (second pass) — two safety nets landed, no soak needed.**
+1. `check_sdkconfig_defaults_applied.ps1` (picked up by
+   `tools/run_all_checks.ps1`) now fails loudly whenever a deliberately
+   changed key (currently just `CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL`)
+   disagrees between `sdkconfig.defaults` and the gitignored, generated
+   `sdkconfig`. It is failing right now, against the real repo, for exactly
+   the reason section 5 already described: the generated `sdkconfig` still
+   holds 16384. This is expected until someone regenerates it (`idf.py
+   reconfigure` or a clean build dir) -- do not silence it by editing the
+   check.
+2. `kiln_cfg_store.c`'s `nvs_save_store()` now refuses (does not crash) when
+   called from a PSRAM-stacked task, matching `safety_cfg_store.c`'s
+   existing `caller_stack_is_external()` guard; `profiles_http.c`'s
+   `nvs_save_slot()` already got the same guard in a concurrent commit
+   (`a99bc15`). This is the belt-and-suspenders check section 7.2 calls for
+   -- it does not require a soak, since it only ever fires on a genuine
+   misuse.
+3. Section 6 (right-size internal stacks) is **blocked**, but this session's
+   static trace narrowed the unknown instead of leaving it untouched. The
+   Pico OTA relay (`ota_pico_relay.c`) runs on its OWN dedicated task
+   (`relay_task_fn`, `OTA_PICO_RELAY_TASK_STACK` = 6144 B) -- its bulk-send
+   path (`safety_link_send_update_frame()` ->
+   `uart_protocol_send_broadcast()`, `uart_protocol.c:820`) builds each
+   frame in a local `raw[HEADER_LEN + UART_PROTO_MAX_PAYLOAD + 2]` buffer
+   (~263 B) and writes it out SYNCHRONOUSLY, on the relay task's own stack --
+   it does not run on `uart_owner_task`/`safety_owner_task` at all. So
+   whatever `CONFIG_KILNCTL_UART_OWNER_STACK_SIZE`'s comment is actually
+   defending against is not the bulk transfer's send path; it can only be
+   the RECEIVE-side dispatch of the safety processor's replies during that
+   transfer, which is frame-size-bounded (253 B max payload) the same as any
+   other traffic on that link, OTA or not -- there is no larger buffer any
+   received frame can force. This is evidence the reserved margin may be
+   defending against frequency (many back-to-back frames) rather than depth,
+   but it is not a substitute for the real measurement: still **blocked**
+   until someone runs a real Pico update with `stack_margin` live, exactly
+   as stated below. Do not trim `KILNCTL_UART_OWNER_STACK_SIZE` on the
+   strength of this trace alone.
+
 **Update 2026-09-02 — one large item landed, incidentally.** `4c0d703` moved the
 profile-history ring out of `s_exec`'s inline `.bss` into PSRAM
 (`heap_caps_malloc(MALLOC_CAP_SPIRAM)`, allocated lazily on first run) while
