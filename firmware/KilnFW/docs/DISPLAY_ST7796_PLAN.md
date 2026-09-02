@@ -1,6 +1,10 @@
 # ST7796 panel support, panel auto-detection, and SPI DMA
 
-Status: **plan only — nothing implemented.** Every checkbox below is unchecked.
+Status: **Phases 1, 2, 3 and 5 landed 2026-09-01/02** (§12). Phases 4
+(auto-detection) and 6 (SPI DMA) are in progress. Phase 0's blocking hardware
+measurements (§4) are still open — nothing here has touched real MSP4031
+hardware yet; Phases 1-3/5 were built and host-tested against the existing
+ILI9488 panel and the transcribed ST7796 init table only.
 Written 2026-08-30, revised the same day after a research pass over the board
 netlist, the vendor schematic, the ESP-IDF 6.0.2 source tree and the LVGL 9.5
 source.
@@ -81,6 +85,10 @@ These are settled; do not re-open them inside this plan.
 ---
 
 ## 1. What we have today
+
+*(This table describes the pre-Phase-1 baseline, as a reference point. See §12
+for what has since landed — `ILI9488.c` is now `panel_spi.c`, parameterised by
+a `panel_desc_t`, with `panel_codec.c` and `st7796_panel.c` alongside it.)*
 
 | Piece | Where | Notes |
 |---|---|---|
@@ -418,6 +426,10 @@ Phase 1+ should start before the ones marked **blocking** are closed.
 
 ### Bench facts to record before writing code (blocking for Phase 3)
 
+*(Phase 3's driver code has since landed by transcribing the vendor init table
+exactly, without these — but RDDID matching for Phase 4's auto-detection, and
+any DMA/flush work in Phase 6, still need the real numbers below.)*
+
 - [ ] **RDDID (`0x04`) bytes from the ILI9488** on this wiring, recorded here.
 - [ ] **RDDID (`0x04`) bytes from the ST7796** on this wiring, recorded here.
       If ambiguous, also try `0xD3` (RDID4). All-`0x00`/all-`0xFF` means MISO
@@ -642,19 +654,14 @@ unresolvable race that got the UART DISPLAY task deleted on 2026-08-27
 
 Current state of the invariant:
 
-- [ ] **Violation: `screen_idle.c:114` calls `ILI9488_clear()` from the
-      `screen_idle` task**, outside LVGL. It is currently inert only because
-      `CONFIG_KILNCTL_TOUCH_IDLE_TIMEOUT_MS` defaults to 0 and the call sits
-      inside `#if` (`screen_idle.c:97`). Enabling auto-blank today would
-      reintroduce exactly the removed race. **Fix: `screen_idle` sets a flag and
-      the LVGL task performs the blank**, which is already half true — the flush
-      callback checks the blanked state and invalidates the screen on the off→on
-      edge (`lvgl_port.c:126-136`). Do this in Phase 1, before any of the panel
-      work, because it is a live latent bug independent of ST7796.
-- [ ] **`main.c:906` `ILI9488_start()` draws the boot splash** from the main
-      task. Legitimate — it runs before `lvgl_port_start()` — but it must stay
-      strictly before, and the ordering deserves a comment saying so rather than
-      being an accident of `main()`'s current shape.
+- [x] **Violation: `screen_idle.c:114` calls `ILI9488_clear()` from the
+      `screen_idle` task**, outside LVGL. **DONE (Phase 1):** `screen_idle`
+      now sets a flag and the LVGL task performs the blank on the flush
+      callback's off→on edge (`lvgl_port.c:126-136`).
+- [x] **`main.c:906` `ILI9488_start()` draws the boot splash** from the main
+      task. **DONE (Phase 1):** the ordering is now documented in `main.c` as
+      a deliberate invariant — `ILI9488_start()` must run strictly before
+      `lvgl_port_start()`.
 - [ ] **`screen_idle` also reads touch** (`screen_idle.c:66`), which is why
       `main.c:914` passes `touch = NULL` deliberately: LVGL is the only reader.
       Same invariant, one bus down. Preserve it.
@@ -785,10 +792,9 @@ bytes and breaks every display push.
       `READ_ID` and a known-pattern blit at each step; watch the ribbon. The
       panel is rated 15 MHz, so this is knowingly out of spec — do not go past
       40 MHz without a scope.
-- [ ] **9.9 Fix `spi_owner_transfer()`'s `portMAX_DELAY` wait** (TODO.md:364),
-      which today defeats every caller-side timeout above it if the owner task
-      wedges. Directly in the path of this rewrite; do it here rather than
-      leaving it.
+- [x] **9.9 Fix `spi_owner_transfer()`'s `portMAX_DELAY` wait** (TODO.md:364).
+      **DONE (Phase 1, landed ahead of the rest of §9):** bounded to a 1000 ms
+      timeout backed by a heap slot pool, `wedged` surfaced on `/api/status`.
 - [ ] **9.10 I²C is out of scope.** The SX1509 D/C toggle is latency-bound, not
       throughput-bound; the fix there is the existing direct-GPIO option or a
       board revision, not DMA.
@@ -872,39 +878,45 @@ Each phase ends somewhere the firmware still boots and drives the existing panel
 - [ ] Characterise the "LCD back buttons don't work" bug on the ILI9488 while
       that panel is still the only one (§7).
 
-### Phase 1 — invariants and cleanup (no new panel)
-- [ ] Move `screen_idle`'s blank into the LVGL task (§8) — a live latent bug.
-- [ ] Fix `spi_owner_transfer()`'s unbounded wait (9.9).
-- [ ] Comment the `ILI9488_start`-before-`lvgl_port_start` ordering as an
+### Phase 1 — invariants and cleanup (no new panel) — DONE 2026-09-01/02
+- [x] Move `screen_idle`'s blank into the LVGL task (§8) — a live latent bug.
+- [x] Fix `spi_owner_transfer()`'s unbounded wait (9.9).
+- [x] Comment the `ILI9488_start`-before-`lvgl_port_start` ordering as an
       invariant.
 
-### Phase 2 — codec split
-- [ ] `panel_codec.c/.h` extracted, host-tested, with negative tests.
-- [ ] ILI9488 refactored onto it; behaviour byte-identical.
-- [ ] New test file wired into `build_host_tests.ps1` (`$sources` array plus a
+### Phase 2 — codec split — DONE 2026-09-01/02
+- [x] `panel_codec.c/.h` extracted, host-tested, with negative tests.
+- [x] ILI9488 refactored onto it; behaviour byte-identical.
+- [x] New test file wired into `build_host_tests.ps1` (`$sources` array plus a
       `run_test_*` declaration and call in `test_main.c`).
 
-### Phase 3 — descriptor and ST7796 driver
-- [ ] `panel_desc_t` introduced; `ILI9488.c` becomes `panel_spi.c`.
-- [ ] ST7796 init table transcribed from `ST7796_Init.txt`.
-- [ ] RGB565 fast path for ST7796.
-- [ ] Panel selectable by Kconfig only, no detection yet.
+### Phase 3 — descriptor and ST7796 driver — DONE 2026-09-01/02
+- [x] `panel_desc_t` introduced; `ILI9488.c` becomes `panel_spi.c`.
+- [x] ST7796 init table transcribed from `ST7796_Init.txt` (byte-for-byte; see
+      `st7796_panel.c`'s COLMOD note — vendor writes `0x05`, the plan's `0x55`
+      lives only as descriptor metadata).
+- [x] RGB565 fast path for ST7796.
+- [x] Panel selectable by Kconfig only (`KILNCTL_DISPLAY_PANEL`, ILI9488
+      default), no detection yet.
 
-### Phase 4 — auto-detection
-- [ ] `KILNCTL_DISPLAY_PANEL` = auto/ili9488/st7796.
-- [ ] RDDID matching against **recorded** bytes; I²C corroboration; fallback.
-- [ ] Resolved panel reported in the boot log, diagnostics page and `READ_ID`.
+### Phase 4 — auto-detection — IN PROGRESS
+Being built now; do not treat any part of it as landed until this note is
+updated. RDDID matching still needs the **recorded** bytes from §4, which are
+still blocking.
 
-### Phase 5 — FT6336U and touch abstraction
-- [ ] `touch_dev_t` with a `self_calibrating` flag.
-- [ ] FT6336U driver in the `NS2009.c` shape, polled.
-- [ ] `kiln_ui.c:273` forced-calibration boot path gated.
-- [ ] `ui_page_touch_cal` and the raw-touch/pressure reporting handled (§7).
+### Phase 5 — FT6336U and touch abstraction — DONE 2026-09-01/02
+- [x] `touch_dev_t` with a `self_calibrating` flag.
+- [x] FT6336U driver in the `NS2009.c` shape, polled — **UNVALIDATED ON
+      HARDWARE**; identity is verified (`FOCALTECH_ID`/`CIPHER_MID`/
+      `CIPHER_HIGH`) rather than accepting any device answering at 0x38.
+- [x] `kiln_ui.c:273` forced-calibration boot path gated for self-calibrating
+      devices.
+- [x] `ui_page_touch_cal` and the raw-touch/pressure reporting handled (§7) —
+      shows a notice instead of the 3×3 grid on self-calibrating devices.
 
-### Phase 6 — SPI async/DMA
-- [ ] 9.2 → 9.3 → 9.4 → 9.5, measuring after each.
-- [ ] 9.6 and 9.7 only if the measurements still justify them.
-- [ ] 9.8 clock stepping, with a scope.
+### Phase 6 — SPI async/DMA — IN PROGRESS
+Being built now, ahead of the flush-duration measurement in §4/§9.1. Do not
+treat any part of it as landed until this note is updated.
 
 ### Phase 7 — the actual point: a better UI
 - [ ] `LV_USE_TJPGD` if images are wanted.

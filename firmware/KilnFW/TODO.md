@@ -361,8 +361,12 @@ severity.
 - [ ] **`dashboard_get_status()` calls `kiln_io_read()` from the LVGL task**,
       bypassing `kiln_io_owner` and consuming the SX1509 interrupt latch that
       another reader may be waiting for.
-- [ ] **`spi_owner_transfer()` waits `portMAX_DELAY`**, defeating every
-      caller-side timeout above it if the owner task wedges.
+- [x] **`spi_owner_transfer()` waits `portMAX_DELAY`**, defeating every
+      caller-side timeout above it if the owner task wedges. DONE
+      (`DISPLAY_ST7796_PLAN.md` Phase 1): bounded to
+      `SPI_OWNER_TRANSFER_TIMEOUT_MS` (1000 ms) backed by a heap slot pool
+      (`owner_slot_pool.h`), with a `wedged` latch surfaced on `/api/status`
+      as `thermo_spi_wedged` and a banner in `main_page.html`.
 - [ ] **`gpio_probe`'s deny-list omits the three `~FAULT` pins**, so a probe
       session can drive them high permanently and forge "no fault" at the pin
       level.

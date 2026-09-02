@@ -1,8 +1,9 @@
 # kilnCtl Roadmap — both processors
 
-> **Status:** planning · **Last reviewed:** 2026-08-30 (reconciled against
+> **Status:** planning · **Last reviewed:** 2026-09-02 (reconciled against
 > `PID_EXPANSION_PLAN.md` and `DISPLAY_ST7796_PLAN.md`; M11 closed; M12a opened
-> and closed the same day; M12/M13 in progress)
+> and closed the same day; M12/M13 in progress; `DISPLAY_ST7796_PLAN.md`
+> Phases 1/2/3/5 landed, Phases 4/6 in progress)
 > **Start here:** the [What is actually left](#what-is-actually-left) section
 > immediately below is the short answer; the milestones are the detail.
 > **Keep this file current.** This is the top-level dispatch board: the place to
@@ -268,6 +269,19 @@ autotune runs ever to complete on real hardware fitted all three zones, and
 the first full 3x3 cross-zone coupling matrix and RGA were measured — see that
 plan's §4 Phase 0 for the numbers. Proposed gains reviewed, not accepted.
 
+**PID/adaptive tuning, as of 2026-09-01/02** (detail owned by
+`PID_EXPANSION_PLAN.md`, not duplicated here): coupled identification and the
+diagonal model refine are built, hardened over six review rounds, and cleared
+for hardware — never yet run on the kiln. The Ki diagnosis layer is built with
+all code blockers closed — also never yet run on the kiln. Dynamics-from-ramps
+was tried and **shelved**: its two-point fit reduces analytically to
+`0.524·K·Δduty/ramp_rate`, an artifact of the commanded ramp rate with no plant
+content. A real board-wide deadlock was found and fixed — pressing Accept on
+an autotune result over the UART bridge re-entered the flash worker and hung
+it permanently, taking down every UART bridge, `safety_cfg_store`'s deferred
+NVS flush, and `adaptive_tune`'s persistence with it. All adaptive layers stay
+per-zone opt-in, default OFF.
+
 **What is done and should not be reopened:** the link itself, the wire
 contract and its two independent version numbers, the PC-link acknowledgement
 convention, every guard's input plumbing, and the instrumentation that now
@@ -479,11 +493,18 @@ soldering session.
       second-panel harness, buying dim/off on idle plus PWM brightness — not
       yet built, and gated on the STOP-block 5V I2C hazard measurement in
       that plan's §4 before any harness is connected
-- [ ] **New, plan-only: second LCD panel (ST7796/MSP4031), auto-detection,
-      display SPI async/DMA.** `firmware/KilnFW/docs/DISPLAY_ST7796_PLAN.md` —
-      nothing implemented yet, sequenced Phase 0 (bench facts/hazard
-      measurement) through Phase 7 (UI). The only hardware change required is
-      a custom harness; the main board itself needs no modification
+- [~] **Second LCD panel (ST7796/MSP4031), auto-detection, display SPI
+      async/DMA.** `firmware/KilnFW/docs/DISPLAY_ST7796_PLAN.md`, sequenced
+      Phase 0 (bench facts/hazard measurement) through Phase 7 (UI). Phases 1
+      (single-owner cleanup, bounded SPI-owner timeout — also closes
+      `TODO.md`'s spi_owner unbounded-wait entry), 2 (panel codec extracted),
+      3 (`panel_spi`/`st7796_panel` split, Kconfig-selectable) and 5 (FT6336U
+      touch abstraction, unvalidated on hardware) landed 2026-09-01/02.
+      Phases 4 (auto-detection) and 6 (SPI DMA) are in progress. Phase 0's
+      blocking hardware measurements (STOP-block 5V I2C hazard, RDDID bytes)
+      are still open, and the module has not yet touched J2. The only
+      hardware change required remains a custom harness; the main board
+      itself needs no modification
 - [ ] **HW change: relay status LEDs** for K1–K4, S9
 - [ ] **HW change: distinct connector types** for the thermocouple daughterboards
       vs. main-board connectors
