@@ -97,6 +97,25 @@
 .forget-btn { min-height: 32px; margin-top: 0; padding: 0.3em 0.6em; font-size: 0.85em; }
   #connectSection { margin-top: 0.5em; padding: 0.5em; border: 1px solid var(--border);
                      border-radius: var(--ui-radius); display: none; }
+  /* #apSection had no default-hidden CSS, unlike #connectSection/#staticIpFields
+     above -- it relied entirely on applyModeUi()'s first poll() response to set
+     `style.display`. Until that first /status round-trip resolves (or if it
+     never does), BOTH #homeSection and #apSection rendered at once: two
+     "Save" buttons, two mutually-exclusive forms, on a page whose own
+     mode-toggle claims Home Wi-Fi and Access Point are exclusive states.
+     (An earlier version of this comment additionally blamed this for the
+     ui_responsive_sweep.mjs occlusion failure this page had against the
+     Stop bar -- that turned out to be a bug in the sweep itself, a
+     viewport-height measurement taken before the Stop bar's own
+     forced-visible mutation added height to the page; see
+     ui_responsive_sweep.mjs's SETUP_SCRIPT comment for the real fix. With
+     that fixed, this page passes the sweep whether or not apSection
+     defaults hidden. This rule stays because the double-form flash is a
+     genuine, independent correctness bug -- not because the sweep needs it.)
+     Defaulting to hidden here matches applyModeUi()'s own default assumption
+     (home mode) and JS still unhides it (`style.display = ''`) the moment a
+     real poll() confirms AP mode -- inline style always wins over this rule. */
+  #apSection { display: none; }
   #connectSection label { margin-top: 0.5em; }
   .mode-toggle { display: flex; border: 1px solid var(--input-border); border-radius: var(--ui-radius);
                  overflow: hidden; margin-top: 0.5em; }

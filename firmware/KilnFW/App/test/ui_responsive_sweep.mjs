@@ -178,9 +178,51 @@ class CdpSession {
   }
 }
 
+// Setup script: mutates page state into the "worst case" the assertion pass
+// below needs to see -- the sticky Stop/Pause bar shown (WEB_UI_RESPONSIVE_PLAN.md
+// sec 3's "bar covers the last interactive element" class only manifests while
+// it's up) and every <details> disclosure sprung open (its content is only
+// reachable to a real user after they click <summary>, so that's the state
+// worth testing -- and closed content otherwise confuses the assertion pass's
+// isVisible(), see below).
+//
+// This MUST run, and finish, before sweepOnePage measures document.scrollHeight
+// to size the emulated viewport (see that function's comment) -- both
+// mutations add real height to the page. Doing them inside the assertion
+// pass instead (as a single combined script used to) let the height
+// measurement run against the SHORT pre-mutation page, then grew the
+// viewport to that stale, too-small height; position:fixed's `bottom: 0`
+// bar was then anchored above content the mutations had since pushed further
+// down, producing occlusion/overlap failures on safety_commissioning_page.html
+// that were an artifact of this ordering bug, not a real layout defect --
+// caught by comparing computed body padding-bottom against the actual
+// distance from content bottom to the (correctly-computed) Stop bar top.
+const SETUP_SCRIPT = `
+(function () {
+  var bar = document.querySelector('.kc-stop-bar');
+  if (bar) {
+    bar.removeAttribute('hidden');
+    var stopBtn = bar.querySelector('.kc-stop-btn');
+    var pauseBtn = bar.querySelector('.kc-pause-btn');
+    if (stopBtn) stopBtn.removeAttribute('hidden');
+    if (pauseBtn) { pauseBtn.removeAttribute('hidden'); pauseBtn.textContent = 'Pause'; }
+    if (window.kcNav && window.kcNav.updateBodyPadding) window.kcNav.updateBodyPadding();
+  }
+
+  var allDetails = document.querySelectorAll('details');
+  for (var di = 0; di < allDetails.length; di++) {
+    allDetails[di].open = true;
+  }
+  if (allDetails.length && window.kcNav && window.kcNav.updateBodyPadding) window.kcNav.updateBodyPadding();
+  true;
+})()
+`;
+
 // The in-page assertion script. Runs inside the target page via
-// Runtime.evaluate. Deliberately framework-free (no injected library) --
-// just DOM/CSSOM calls every evergreen browser supports.
+// Runtime.evaluate, after SETUP_SCRIPT above and after the viewport has been
+// grown to fit the (now fully mutated) document. Deliberately framework-free
+// (no injected library) -- just DOM/CSSOM calls every evergreen browser
+// supports.
 const IN_PAGE_SCRIPT = `
 (function () {
   function isVisible(el) {
@@ -189,6 +231,16 @@ const IN_PAGE_SCRIPT = `
     var cs = getComputedStyle(el);
     if (cs.display === 'none' || cs.visibility === 'hidden' || cs.visibility === 'collapse') return false;
     if (parseFloat(cs.opacity) === 0) return false;
+    // checkVisibility(), not just display/visibility/opacity above: a closed
+    // <details>'s non-summary children are hidden via content-visibility in
+    // Chromium, not display:none, so getComputedStyle().display still reads
+    // 'inline-block' and getBoundingClientRect() still reports a real-looking
+    // box for them. SETUP_SCRIPT (run before this) already forces every
+    // <details> open, so this only matters for a page this sweep doesn't
+    // know to force open some other way -- keep it as a real check, not a
+    // vacuous one, since checkVisibility() is exactly the API built to
+    // answer "can the user actually see this".
+    if (el.checkVisibility && !el.checkVisibility()) return false;
     var r = el.getBoundingClientRect();
     return r.width > 0 && r.height > 0;
   }
@@ -208,20 +260,7 @@ const IN_PAGE_SCRIPT = `
     return false;
   }
 
-  // Force the sticky Stop/Pause bar (app.js) into its visible, "firing in
-  // progress" state -- WITHOUT any network call -- so the sweep can catch
-  // WEB_UI_RESPONSIVE_PLAN.md sec 3's "bar covers the last interactive
-  // element" class, which only manifests while the bar is shown. Mirrors
-  // what pollHeartbeat() would do on a real 'running' response.
   var bar = document.querySelector('.kc-stop-bar');
-  if (bar) {
-    bar.removeAttribute('hidden');
-    var stopBtn = bar.querySelector('.kc-stop-btn');
-    var pauseBtn = bar.querySelector('.kc-pause-btn');
-    if (stopBtn) stopBtn.removeAttribute('hidden');
-    if (pauseBtn) { pauseBtn.removeAttribute('hidden'); pauseBtn.textContent = 'Pause'; }
-    if (window.kcNav && window.kcNav.updateBodyPadding) window.kcNav.updateBodyPadding();
-  }
 
   var viewportW = document.documentElement.clientWidth;
   var docEl = document.scrollingElement || document.documentElement;
@@ -371,6 +410,14 @@ async function sweepOnePage(port, fileUrl, width) {
     // for their IIFEs (both run synchronously on script execution, no
     // additional async work before DOM is built) plus a safety margin.
     await cdp.send('Runtime.evaluate', { expression: 'new Promise(r => setTimeout(r, 150))', awaitPromise: true });
+
+    // Run the state-mutating setup (Stop bar shown, every <details> sprung
+    // open) BEFORE measuring scrollHeight below -- see SETUP_SCRIPT's own
+    // comment for why the ordering matters.
+    const setupResult = await cdp.send('Runtime.evaluate', { expression: SETUP_SCRIPT });
+    if (setupResult.exceptionDetails) {
+      throw new Error('setup script threw: ' + JSON.stringify(setupResult.exceptionDetails));
+    }
 
     // Second pass: grow the viewport to the full document height (at the
     // fixed WIDTH under test) so every element's centre point lands inside

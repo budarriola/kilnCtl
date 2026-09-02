@@ -221,7 +221,18 @@
   .writewindow.ww-ok { background: var(--ok); color: #fff; }
   #guidedMsg { font-weight: bold; margin-top: 0.6em; }
   details#advancedDetails { margin-top: 1.6em; border-top: 2px solid var(--border); padding-top: 0.6em; }
-  details#advancedDetails > summary { font-size: 1.05em; cursor: pointer; }
+  /* ui_responsive_sweep.mjs's 32px touch-target floor (WEB_UI_RESPONSIVE_PLAN.md
+     sec 4, WCAG 2.5.8): measured 620x20 at every width the disclosure's
+     content is actually reachable (sweep now springs every <details> open
+     before asserting, so a closed accordion no longer hides this from the
+     check). Unlike the native <input type=file> exemption in backup_page.html
+     or WCAG's own inline-text-link exemption, a <summary> is an ordinary
+     block-level element the page already styles (font-size/cursor above) --
+     nothing platform-locked stops it from meeting the floor, so this is a
+     real fix, not an exemption: min-height plus flex centering, same
+     pattern as label.bool-label above. */
+  details#advancedDetails > summary { font-size: 1.05em; cursor: pointer;
+    min-height: 32px; display: flex; align-items: center; }
 </style>
 </head>
 <body>

@@ -76,7 +76,15 @@
      leftover space. */
   .restore-controls { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
          gap: 0.6em; margin: 0.8em 0; }
-  .restore-controls input[type="file"] { max-width: 100%; }
+  /* ui_responsive_sweep.mjs's 32px touch-target floor: measured 254x21 at
+     320px, up to 324x21 at 390px -- height was the failing dimension, same
+     as width already being fine. Padding grows a file input's overall box
+     even though its internal "Choose file" button chrome is UA-controlled
+     (unlike that inner button, the padding IS ordinary CSS the page
+     controls) -- ota_page.html's own input[type=file] rule already does
+     this (0.5em padding) and passes the sweep; matching it here rather than
+     exempting the element, since this one turned out fixable after all. */
+  .restore-controls input[type="file"] { max-width: 100%; box-sizing: border-box; padding: 0.5em; }
 </style>
 </head>
 <body>

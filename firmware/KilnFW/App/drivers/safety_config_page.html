@@ -55,7 +55,16 @@
           border-radius: 6px; padding: 0.8em 1em; margin-bottom: 1em; }
   .zone h3 { font-size: 1em; margin: 0 0 0.6em 0; }
   label { display: block; font-weight: bold; font-size: 0.9em; margin-top: 0.7em; }
-  input[type="number"] { width: 9em; padding: 0.3em; background: var(--bg);
+  /* ui_responsive_sweep.mjs's 32px touch-target floor (WEB_UI_RESPONSIVE_PLAN.md
+     sec 4, WCAG 2.5.8): #pcLink (the one number input present without a live
+     backend) measured 120x25 -- an ordinary text-style input, not a
+     platform-locked control, so min-height is a real fix rather than an
+     exemption. Applies to every input[type=number] on this page, including
+     the ones built at runtime from the safety processor's field list
+     (line ~208 below) -- they share this same rule and were equally
+     undersized, just not reachable from the static-file sweep run (no
+     backend to answer the fetch that builds them). */
+  input[type="number"] { width: 9em; min-height: 32px; box-sizing: border-box; padding: 0.3em; background: var(--bg);
                          color: var(--fg); border: 1px solid var(--border); border-radius: 3px; }
   input[type="text"] { width: 100%; max-width: 20em; padding: 0.3em; background: var(--bg);
                        color: var(--fg); border: 1px solid var(--border); border-radius: 3px; }
