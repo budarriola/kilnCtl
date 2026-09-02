@@ -83,3 +83,7 @@ firmware/KilnFW/Datasheets/4.0inch_SPI_Module_ST7796_MSP4030_MSP4031_V1.0/
 # writes here by default even with no board) -- a test-run byproduct, not a
 # tracked config preset.
 /tools/PcTools/config_presets/pid_validation_backup.json
+
+# Host-test scratch dirs: log_store tests create these relative to CWD,
+# so they appear wherever the suite was run from.
+log_store_test_*/
