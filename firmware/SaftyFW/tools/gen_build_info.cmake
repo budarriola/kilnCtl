@@ -65,15 +65,26 @@ string(TIMESTAMP build_time "%H:%M:%SZ" UTC)
 # -- deliberate, since nothing today needs that, but nothing rules it out
 # either (e.g. a future shared diagnostics tool linking both build_info
 # headers).
-file(WRITE ${OUT} "// Auto-generated on every build by gen_build_info.cmake -- do not edit, do not commit.\n")
-file(APPEND ${OUT} "// Identity for SaftyFW itself (the RP2040 safety-processor firmware), not KilnFW.\n")
-file(APPEND ${OUT} "#ifndef SAFTYFW_BUILD_INFO_H\n#define SAFTYFW_BUILD_INFO_H\n\n")
-file(APPEND ${OUT} "// Short git commit hash (\"unknown\" if git or the repo was unavailable at build time).\n")
-file(APPEND ${OUT} "#define SAFTYFW_GIT_COMMIT \"${commit}\"\n")
-file(APPEND ${OUT} "// 1 if firmware/SaftyFW had uncommitted changes at build time (or git/the repo was\n")
-file(APPEND ${OUT} "// unavailable -- unknown safely maps to dirty), 0 if the working tree was clean.\n")
-file(APPEND ${OUT} "#define SAFTYFW_GIT_DIRTY ${dirty}\n")
-file(APPEND ${OUT} "// UTC build date/time, wall-clock at the moment this header was generated.\n")
-file(APPEND ${OUT} "#define SAFTYFW_BUILD_DATE \"${build_date}\"\n")
-file(APPEND ${OUT} "#define SAFTYFW_BUILD_TIME \"${build_time}\"\n")
-file(APPEND ${OUT} "\n#endif // SAFTYFW_BUILD_INFO_H\n")
+# Built up in one variable and written ONCE via a temp-file + file(RENAME),
+# not via WRITE + several APPENDs against ${OUT} directly -- see KilnFW's
+# gen_build_info.cmake (firmware/KilnFW/App/drivers/gen_build_info.cmake)
+# for the interleaved-write corruption this avoids. RENAME is atomic on both
+# Windows (MoveFileEx) and POSIX, so a concurrent reader/compiler always
+# sees either the complete old header or the complete new one.
+set(_content "// Auto-generated on every build by gen_build_info.cmake -- do not edit, do not commit.\n")
+string(APPEND _content "// Identity for SaftyFW itself (the RP2040 safety-processor firmware), not KilnFW.\n")
+string(APPEND _content "#ifndef SAFTYFW_BUILD_INFO_H\n#define SAFTYFW_BUILD_INFO_H\n\n")
+string(APPEND _content "// Short git commit hash (\"unknown\" if git or the repo was unavailable at build time).\n")
+string(APPEND _content "#define SAFTYFW_GIT_COMMIT \"${commit}\"\n")
+string(APPEND _content "// 1 if firmware/SaftyFW had uncommitted changes at build time (or git/the repo was\n")
+string(APPEND _content "// unavailable -- unknown safely maps to dirty), 0 if the working tree was clean.\n")
+string(APPEND _content "#define SAFTYFW_GIT_DIRTY ${dirty}\n")
+string(APPEND _content "// UTC build date/time, wall-clock at the moment this header was generated.\n")
+string(APPEND _content "#define SAFTYFW_BUILD_DATE \"${build_date}\"\n")
+string(APPEND _content "#define SAFTYFW_BUILD_TIME \"${build_time}\"\n")
+string(APPEND _content "\n#endif // SAFTYFW_BUILD_INFO_H\n")
+
+string(RANDOM LENGTH 8 _nonce)
+set(_tmp "${OUT}.tmp.${_nonce}")
+file(WRITE ${_tmp} "${_content}")
+file(RENAME ${_tmp} ${OUT})

@@ -33,6 +33,8 @@ import tempfile
 import time
 from typing import Any, Callable, Optional, Sequence
 
+from mcpkit.buildlock import BuildLockTimeout, build_lock
+
 #: Lines worth surfacing even when they are not near the end of the log.
 _INTERESTING = re.compile(
     r"\b(error|fatal|failed|FAIL|assert|undefined reference|warning C\d|"
@@ -89,7 +91,12 @@ def _summarize(tag: str, argv: "Sequence[str]", rc: Optional[int], output: str,
     status = "OK" if rc == 0 else ("TIMEOUT" if rc is None else f"FAILED (exit {rc})")
     head = f"{tag}: {status} in {elapsed:.1f}s ({len(lines)} log lines)"
     body = "\n".join(shown) if shown else "(no output)"
-    return f"{head}\nfull log: {where}\n--\n{body}"
+    result = f"{head}\nfull log: {where}\n--\n{body}"
+    if rc != 0:
+        note = _contention_note(output)
+        if note:
+            result = f"{result}\n--\n{note}"
+    return result
 
 
 #: Vars Git Bash sets that leak into this MCP server's environment when it is
@@ -98,6 +105,41 @@ def _summarize(tag: str, argv: "Sequence[str]", rc: Optional[int], output: str,
 #: ~3s with no other output -- a false pass, since _summarize still reports
 #: exit 0 for the wrapping idf.py invocation that never reached the compiler.
 _MSYS_ENV_VARS = ("MSYSTEM", "MSYSTEM_PREFIX", "MSYSTEM_CHOST", "MSYS2_PATH_TYPE")
+
+
+#: Known signatures of build-directory *contention*, not a source defect --
+#: surfaced today as: (1) ninja's own manifest lock losing a race between two
+#: concurrent invocations sharing a build dir, and (2) an interleaved partial
+#: write to a generated header (gen_build_info.cmake) reading back as a
+#: nonsense C declaration. Checked against every build/test tool's output so
+#: a caller who hits either one is told "this is contention", not left to
+#: chase a phantom source bug the way the first agent who hit this did.
+_CONTENTION_SIGNATURES = (
+    (re.compile(r"failed recompaction.*Permission denied", re.IGNORECASE),
+     "ninja's build.ninja manifest lock lost a race -- another build was "
+     "writing this same build directory at the same time"),
+    (re.compile(r"build_info\.h.*unknown type name", re.IGNORECASE | re.DOTALL),
+     "build_info.h failed to parse -- classic signature of a partial/"
+     "interleaved write from a concurrent build in the same build directory"),
+    (re.compile(r"unknown type name ['\"]by['\"]"),
+     "a generated header read back with a truncated/spliced declaration -- "
+     "classic signature of two builds writing the same generated file at once"),
+)
+
+
+def _contention_note(output: str) -> "Optional[str]":
+    for pattern, explanation in _CONTENTION_SIGNATURES:
+        if pattern.search(output):
+            return (
+                "NOTE: this failure matches a known BUILD-CONTENTION signature, "
+                f"not a source defect: {explanation}. If two build/test tools ran "
+                "at the same time, that -- not the code -- is almost certainly the "
+                "cause. This should no longer happen through the MCP build tools "
+                "themselves (they now serialize on the shared build directory), "
+                "but a build invoked outside them (a bare `idf.py build` in a "
+                "second terminal, for instance) is not covered by that lock."
+            )
+    return None
 
 
 def _run(tag: str, argv: "Sequence[str]", *, cwd: Optional[str] = None,
@@ -134,6 +176,38 @@ def _powershell(script: str, extra: "Sequence[str]" = ()) -> "list[str]":
     return ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script, *extra]
 
 
+def _run_locked(tag: str, resource_key: str, argv: "Sequence[str]", *,
+                 wait_timeout: "Optional[float]" = None, **kwargs: Any) -> str:
+    """``_run``, but serialized against any other caller contending for the
+    same ``resource_key`` (typically a build directory).
+
+    This is what turns two concurrent ``build_kilnfw`` calls from "corrupt
+    each other's build directory" into "the second one queues and reports
+    that it waited." The lock is scoped to ``resource_key``, not global --
+    a SaftyFW build and a KilnFW build never wait on each other.
+
+    ``wait_timeout`` should exceed the wrapped run's own ``timeout`` (passed
+    through ``kwargs``) by a healthy margin -- otherwise a waiter can give up
+    on a lock held by a holder that is still legitimately building, not
+    stuck. Defaults to 90s over whatever ``kwargs['timeout']`` is (or 900s if
+    that is not set), which is generous next to how long a single build step
+    typically takes to notice it should give up.
+    """
+    if wait_timeout is None:
+        wait_timeout = float(kwargs.get("timeout", 900)) + 90.0
+    started = time.monotonic()
+    try:
+        with build_lock(resource_key, wait_timeout=wait_timeout):
+            return _run(tag, argv, **kwargs)
+    except BuildLockTimeout as exc:
+        waited = time.monotonic() - started
+        return (
+            f"{tag}: FAILED (lock contention) -- another build is in progress on "
+            f"{resource_key!r}, waited {waited:.1f}s for it to finish and gave up. "
+            f"{exc}"
+        )
+
+
 # ---------------------------------------------------------------------------
 # the tools themselves
 # ---------------------------------------------------------------------------
@@ -146,8 +220,10 @@ def build_saftyfw_host_tests() -> str:
     PowerShell hosts promote to a terminating error.
     """
     root = repo_root()
-    return _run("saftyfw-host-tests",
-                _powershell(os.path.join(root, "firmware", "SaftyFW", "test", "build_host_tests.ps1")))
+    out_dir = os.path.join(root, "firmware", "SaftyFW", "test", "build")
+    return _run_locked(
+        "saftyfw-host-tests", out_dir,
+        _powershell(os.path.join(root, "firmware", "SaftyFW", "test", "build_host_tests.ps1")))
 
 
 def build_saftyfw(jobs: int = 0) -> str:
@@ -165,7 +241,7 @@ def _cmake_build(tag: str, build_dir: str, jobs: int) -> str:
     argv = ["cmake", "--build", build_dir]
     if jobs > 0:
         argv += ["--parallel", str(jobs)]
-    return _run(tag, argv, cwd=build_dir)
+    return _run_locked(tag, build_dir, argv, cwd=build_dir)
 
 
 #: Puts idf.py, cmake, ninja and the Xtensa toolchain on PATH in one step.
@@ -199,9 +275,11 @@ def build_kilnfw(target: str = "build", jobs: int = 0) -> str:
     # to avoid. See _MSYS_ENV_VARS above for the sibling false-pass this same
     # command is also guarding against.
     command = f"& '{_IDF_PROFILE}' *>&1 | Out-Null; {inner}; exit $LASTEXITCODE"
-    return _run(f"kilnfw-{target}",
-                ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
-                timeout=1800)
+    build_dir = os.path.join(root, "firmware", "KilnFW", "build")
+    return _run_locked(
+        f"kilnfw-{target}", build_dir,
+        ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+        timeout=1800)
 
 
 def run_pctools_tests(pattern: Optional[str] = None) -> str:
@@ -209,12 +287,18 @@ def run_pctools_tests(pattern: Optional[str] = None) -> str:
 
     ``pattern`` is passed to pytest's ``-k`` to scope the run. This is the
     suite that covers the protocol codecs and these MCP servers themselves.
+
+    Locked on the tests directory: two concurrent pytest runs both write
+    ``.pytest_cache`` (lastfailed, nodeids) under it, and pytest's own
+    handling of that race is best-effort, not atomic -- serializing here is
+    cheap and removes a whole class of "why did the cache look wrong" noise.
     """
     root = repo_root()
-    argv = [sys.executable, "-m", "pytest", os.path.join(root, "tools", "PcTools", "tests"), "-q"]
+    tests_dir = os.path.join(root, "tools", "PcTools", "tests")
+    argv = [sys.executable, "-m", "pytest", tests_dir, "-q"]
     if pattern:
         argv += ["-k", pattern]
-    return _run("pctools-tests", argv, timeout=600)
+    return _run_locked("pctools-tests", tests_dir, argv, timeout=600)
 
 
 def run_repo_checks(list_only: bool = False) -> str:
@@ -233,6 +317,11 @@ def run_repo_checks(list_only: bool = False) -> str:
     nothing reports a green that means the opposite of what it looks like.
 
     ``list_only`` prints what would run without running it.
+
+    Deliberately NOT lock-serialized: every ``check_*.ps1`` here reads source
+    files and git state and writes nothing shared -- there is no build
+    directory or generated artifact for two concurrent runs to corrupt, so a
+    lock here would only make unrelated callers queue for no reason.
     """
     root = repo_root()
     script = os.path.join(root, "tools", "run_all_checks.ps1")

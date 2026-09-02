@@ -53,10 +53,28 @@ endif()
 string(TIMESTAMP build_date "%Y-%m-%d" UTC)
 string(TIMESTAMP build_time "%H:%M:%SZ" UTC)
 
-file(WRITE ${OUT} "// Auto-generated on every build by gen_build_info.cmake -- do not edit, do not commit.\n")
-file(APPEND ${OUT} "#ifndef BUILD_INFO_H\n#define BUILD_INFO_H\n\n")
-file(APPEND ${OUT} "#define FW_GIT_COMMIT \"${commit}\"\n")
-file(APPEND ${OUT} "#define FW_GIT_DIRTY ${dirty}\n")
-file(APPEND ${OUT} "#define FW_BUILD_DATE \"${build_date}\"\n")
-file(APPEND ${OUT} "#define FW_BUILD_TIME \"${build_time}\"\n")
-file(APPEND ${OUT} "\n#endif // BUILD_INFO_H\n")
+# Built up in one variable and written ONCE, not via a WRITE + several
+# APPENDs against ${OUT} directly. Two overlapping build invocations (e.g.
+# two concurrent build_kilnfw MCP calls, or a stray reconfigure racing a
+# build) each running this target can interleave their WRITE/APPEND calls,
+# which is exactly what produced a build_info.h containing a truncated
+# `#define FW_GIT_DIRTY` with the tail of another line spliced in --
+# "unknown type name 'by'" from the header comment. Writing to a temp file
+# in the same directory and then file(RENAME)-ing it over ${OUT} makes the
+# header atomic: MoveFileEx-on-Windows / rename(2)-on-POSIX replace the
+# destination in one filesystem operation, so a concurrent reader/compiler
+# always sees either the old complete header or the new complete header,
+# never a partial one. The temp name includes the CMake process id so two
+# overlapping runs don't also collide on the temp file itself.
+set(_content "// Auto-generated on every build by gen_build_info.cmake -- do not edit, do not commit.\n")
+string(APPEND _content "#ifndef BUILD_INFO_H\n#define BUILD_INFO_H\n\n")
+string(APPEND _content "#define FW_GIT_COMMIT \"${commit}\"\n")
+string(APPEND _content "#define FW_GIT_DIRTY ${dirty}\n")
+string(APPEND _content "#define FW_BUILD_DATE \"${build_date}\"\n")
+string(APPEND _content "#define FW_BUILD_TIME \"${build_time}\"\n")
+string(APPEND _content "\n#endif // BUILD_INFO_H\n")
+
+string(RANDOM LENGTH 8 _nonce)
+set(_tmp "${OUT}.tmp.${_nonce}")
+file(WRITE ${_tmp} "${_content}")
+file(RENAME ${_tmp} ${OUT})

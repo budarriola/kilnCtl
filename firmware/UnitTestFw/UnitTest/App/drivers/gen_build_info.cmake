@@ -53,10 +53,20 @@ endif()
 string(TIMESTAMP build_date "%Y-%m-%d" UTC)
 string(TIMESTAMP build_time "%H:%M:%SZ" UTC)
 
-file(WRITE ${OUT} "// Auto-generated on every build by gen_build_info.cmake -- do not edit, do not commit.\n")
-file(APPEND ${OUT} "#ifndef BUILD_INFO_H\n#define BUILD_INFO_H\n\n")
-file(APPEND ${OUT} "#define FW_GIT_COMMIT \"${commit}\"\n")
-file(APPEND ${OUT} "#define FW_GIT_DIRTY ${dirty}\n")
-file(APPEND ${OUT} "#define FW_BUILD_DATE \"${build_date}\"\n")
-file(APPEND ${OUT} "#define FW_BUILD_TIME \"${build_time}\"\n")
-file(APPEND ${OUT} "\n#endif // BUILD_INFO_H\n")
+# Built up in one variable and written ONCE via a temp-file + file(RENAME),
+# not via WRITE + several APPENDs against ${OUT} directly -- see KilnFW's
+# gen_build_info.cmake (firmware/KilnFW/App/drivers/gen_build_info.cmake)
+# for the interleaved-write corruption this avoids. RENAME is atomic on both
+# Windows (MoveFileEx) and POSIX.
+set(_content "// Auto-generated on every build by gen_build_info.cmake -- do not edit, do not commit.\n")
+string(APPEND _content "#ifndef BUILD_INFO_H\n#define BUILD_INFO_H\n\n")
+string(APPEND _content "#define FW_GIT_COMMIT \"${commit}\"\n")
+string(APPEND _content "#define FW_GIT_DIRTY ${dirty}\n")
+string(APPEND _content "#define FW_BUILD_DATE \"${build_date}\"\n")
+string(APPEND _content "#define FW_BUILD_TIME \"${build_time}\"\n")
+string(APPEND _content "\n#endif // BUILD_INFO_H\n")
+
+string(RANDOM LENGTH 8 _nonce)
+set(_tmp "${OUT}.tmp.${_nonce}")
+file(WRITE ${_tmp} "${_content}")
+file(RENAME ${_tmp} ${OUT})
