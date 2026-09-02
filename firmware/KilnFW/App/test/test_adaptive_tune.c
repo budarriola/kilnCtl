@@ -1956,10 +1956,23 @@ static void test_run_end_skips_disabled_zone_even_with_ring_data_present(void)
 // material move either way) so a "clustered" refusal can only come from
 // the spread guard itself, in either direction.
 // ---------------------------------------------------------------------
+// Q5: the original straddle defined BOTH spreads as ADAPTIVE_TUNE_MIN_DUTY_
+// SPREAD +/- 0.001f -- values COMPUTED FROM the very constant under test.
+// That pins only one direction: LOWERING the threshold (0.05 -> 0.0001)
+// reddens it (0.049 is no longer clustered against the new floor), but
+// RAISING it (0.05 -> 0.5) leaves it GREEN, because both literals move in
+// lockstep with the constant and the "over" spread (0.051) is still well
+// under a 0.5 floor -- still clustered, so the "must clear the spread guard"
+// check trivially fails to catch the widened threshold... except it doesn't
+// even fail: it was never exercising the wider threshold's actual boundary
+// at all. Fixed by pinning both literals to values INDEPENDENT of the
+// constant (hand-picked around the real default of 0.05, not derived from
+// the symbol) -- so a raise to 0.5 now makes 0.049/0.051 both "clustered"
+// and the "must clear" check goes red, same as a lower to 0.0001 already did.
 static void test_duty_spread_guard_pins_exact_threshold(void)
 {
-    float under_spread = ADAPTIVE_TUNE_MIN_DUTY_SPREAD - 0.001f;
-    float over_spread = ADAPTIVE_TUNE_MIN_DUTY_SPREAD + 0.001f;
+    float under_spread = 0.049f; // independent literal -- see this test's header comment
+    float over_spread = 0.051f;  // independent literal -- see this test's header comment
 
     reset_module_state();
     s_at_zones[1].enabled = true;
@@ -2028,6 +2041,10 @@ static void test_ki_diagnosis_decreasing_direction_stabilizes_under_plant_feedba
 
     const float base_amplitude_c = 5.0f; // well above the 0.05C noise floor at ki=100
     float last_ki = s_fake_zone_cfg[1].ki;
+    bool ever_decreased = false; // Q1: see this variable's own role below -- without it, "stabilized" can
+                                  // latch trivially at run 0 (ki_after == ki_before because NOTHING ever
+                                  // fired), which is exactly the vacuous pass this fixture is supposed to
+                                  // rule out.
     bool stabilized = false;
     int stabilized_at_run = -1;
 
@@ -2036,8 +2053,31 @@ static void test_ki_diagnosis_decreasing_direction_stabilizes_under_plant_feedba
         // Plant feedback: oscillation amplitude scales with Ki relative to
         // its start -- less Ki genuinely means less oscillation, the exact
         // self-limiting mechanism under test.
+        // Q1: was ADAPTIVE_TUNE_KI_MIN_SAMPLES + 4 (16 samples) -- at this
+        // fixture's 8-sample period that produced only 3 zero crossings,
+        // below ADAPTIVE_TUNE_KI_MIN_CROSSINGS (4), so EVERY one of the 65
+        // runs below classified as KI_OK (verdict never LIMIT_CYCLE/
+        // OSCILLATING) and the decreasing-direction code path this test
+        // claims to exercise never ran even once: replacing adaptive_tune_
+        // ki.c's crossing/regularity branch condition with `if (0)` --
+        // deleting the entire Ki-decrease capability -- left this test
+        // GREEN. ADAPTIVE_TUNE_KI_TRACE_CAPACITY (24 samples, 3 complete
+        // periods) instead gives ~6 crossings, comfortably above the floor,
+        // so the decreasing direction genuinely runs on every iteration.
+        //
+        // Even with that fixed, the ORIGINAL stabilization detection below
+        // (`if (!stabilized && ki_after == ki_before)`, with no prior
+        // "actually decreased at least once" requirement) is STILL vacuous
+        // against the `if (0)` mutation on its own: with Ki-decrease
+        // entirely deleted, ki_after == ki_before == 100 already holds at
+        // run 0, so `stabilized` latches true immediately and every
+        // assertion below (stabilized, last_ki > 1.0f) passes trivially
+        // without a single real decrease ever having happened. ever_
+        // decreased (and the TEST_CHECK on it below) is what actually rules
+        // that out -- it can only become true from a genuine ki_after <
+        // ki_before observed inside this loop.
         float amplitude = base_amplitude_c * (ki_before / 100.0f);
-        feed_oscillating_trace(1, 100.0f, amplitude, ADAPTIVE_TUNE_KI_MIN_SAMPLES + 4, DT_S);
+        feed_oscillating_trace(1, 100.0f, amplitude, ADAPTIVE_TUNE_KI_TRACE_CAPACITY, DT_S);
 
         profile_firing_run_record_t rec = make_clean_record(300 + run, 1, 900);
         rec.zones[1].stats.dwell_err_mean_c = 0.0f; // irrelevant while the trace is still oscillating --
@@ -2045,17 +2085,26 @@ static void test_ki_diagnosis_decreasing_direction_stabilizes_under_plant_feedba
         adaptive_tune_run_end(&rec, true);
 
         float ki_after = s_fake_zone_cfg[1].ki;
-        if (!stabilized && ki_after == ki_before) {
+        if (ki_after < ki_before) {
+            ever_decreased = true;
+        }
+        if (ever_decreased && !stabilized && ki_after == ki_before) {
             stabilized = true;
             stabilized_at_run = run;
         }
         last_ki = ki_after;
     }
 
+    TEST_CHECK(ever_decreased, "P6/Q1: the decreasing direction must actually FIRE at least once in this "
+                                "fixture -- MUST go red if adaptive_tune_ki.c's crossing/regularity branch "
+                                "(the `if (amplitude > NOISE_FLOOR && ncross >= MIN_CROSSINGS)` condition, "
+                                ":93) is disabled, e.g. mutated to `if (0)`");
     TEST_CHECK(stabilized, "P6: under plant feedback (oscillation shrinking as Ki falls), the decreasing "
                             "direction must eventually STOP moving, not collapse toward the ~1e-38 floor the "
                             "bare positivity check alone permits");
     TEST_CHECK(stabilized_at_run >= 0, "sanity: stabilization was actually observed within the 60-run loop");
+    TEST_CHECK(last_ki < 100.0f, "P6: the decreasing direction must have genuinely moved Ki DOWN from its "
+                                  "100.0 starting point by the time it stabilizes");
     TEST_CHECK(last_ki > 1.0f, "P6: the decreasing direction must stabilize at a real, physically meaningful "
                                 "Ki, nowhere near a collapsed near-zero value");
 
@@ -2064,12 +2113,214 @@ static void test_ki_diagnosis_decreasing_direction_stabilizes_under_plant_feedba
     // the increasing-direction test above requires).
     for (int run = 60; run < 65; run++) {
         float amplitude = base_amplitude_c * (s_fake_zone_cfg[1].ki / 100.0f);
-        feed_oscillating_trace(1, 100.0f, amplitude, ADAPTIVE_TUNE_KI_MIN_SAMPLES + 4, DT_S);
+        feed_oscillating_trace(1, 100.0f, amplitude, ADAPTIVE_TUNE_KI_TRACE_CAPACITY, DT_S);
         profile_firing_run_record_t rec = make_clean_record(300 + run, 1, 900);
         adaptive_tune_run_end(&rec, true);
     }
     TEST_CHECK_NEAR(s_fake_zone_cfg[1].ki, last_ki, 1e-4,
                      "P6: Ki must be genuinely stable past stabilization, not still slowly decaying");
+}
+
+// ---------------------------------------------------------------------
+// Q2: symmetric LOWER cumulative bound. P6 above proved the decreasing
+// direction self-limits WHEN the oscillation source scales with Ki (a real
+// closed loop). This test is the negative case P6 cannot cover: an
+// oscillation source that does NOT scale with Ki at all -- coupling from a
+// neighbouring zone, relay chatter, thermocouple noise -- which the OLD code
+// (only `!(new_ki > 0.0f)`) would decay without limit, 20%/run, toward the
+// setter's positivity floor. MUST FAIL if adaptive_tune_ki.c's new lower-
+// bound check is removed (or its comparison inverted) -- the reason string
+// would never contain "cumulative floor" and stored Ki would keep dropping
+// well below baseline/ADAPTIVE_TUNE_KI_CUMULATIVE_MAX_MULT.
+// ---------------------------------------------------------------------
+static void test_ki_diagnosis_cumulative_floor_binds_and_names_itself(void)
+{
+    reset_module_state();
+    s_at_zones[1].enabled = true;
+    s_fake_zone_cfg[1].k_dc = 10.0f; // permanently under ADAPTIVE_TUNE_MIN_OBSERVATIONS -- keeps the model
+                                      // refine un-due so the Ki diagnosis gets every run (same posture as
+                                      // every other Ki-diagnosis fixture in this file)
+    s_fake_zone_cfg[1].ki = 100.0f;
+
+    bool saw_a_floor_refusal_after_shrink = false;
+    for (int run = 0; run < 30; run++) {
+        // Fixed amplitude -- deliberately NOT scaled with Ki, unlike P6's
+        // fixture: this is the "source does not scale with Ki" case the
+        // Q2 fix exists for. Stays well above the 0.05C noise floor even
+        // once Ki has shrunk to a small fraction of its start.
+        feed_oscillating_trace(1, 100.0f, 5.0f, ADAPTIVE_TUNE_KI_TRACE_CAPACITY, DT_S);
+        profile_firing_run_record_t rec = make_clean_record(400 + run, 1, 900);
+        rec.zones[1].stats.dwell_err_mean_c = 0.0f;
+        rec.zones[1].stats.dwell_err_max_c = 0.0f;
+        adaptive_tune_run_end(&rec, true);
+        if (s_fake_zone_cfg[1].ki < 100.0f && !s_at_zones[1].ki_applied &&
+            strstr(s_at_zones[1].ki_refusal_reason, "cumulative floor") != NULL) {
+            saw_a_floor_refusal_after_shrink = true;
+        }
+    }
+    TEST_CHECK(saw_a_floor_refusal_after_shrink,
+               "Q2: under an oscillation source that does not scale with Ki, Ki must shrink until the "
+               "CUMULATIVE FLOOR actually refuses it, and say so by name -- not silently keep decaying");
+    TEST_CHECK(strstr(s_at_zones[1].ki_refusal_reason, "re-autotune") != NULL,
+               "Q2: once the cumulative floor binds, the refusal must recommend re-autotuning this zone, same "
+               "remediation as the upper cumulative bound");
+    float floor = 100.0f / ADAPTIVE_TUNE_KI_CUMULATIVE_MAX_MULT; // baseline latched at 100.0 (setup value)
+    TEST_CHECK(s_fake_zone_cfg[1].ki >= floor - 1e-3f,
+               "Q2: the stored Ki must never be left below the cumulative floor once it starts binding");
+    TEST_CHECK(s_fake_zone_cfg[1].ki < 100.0f,
+               "sanity: Ki must have genuinely shrunk from its starting value across this loop");
+}
+
+// Q2: the "not blocked" half -- a zone whose oscillation genuinely stops
+// needing correction after ONE modest, well-inside-the-floor shrink must
+// apply that correction normally, with no floor refusal anywhere near it.
+// Distinguishes "the floor exists" (test above) from "the floor is not so
+// aggressive it clips an ordinary single-run correction" -- a floor guard
+// implemented as e.g. "refuse ANY decrease once baseline is latched" would
+// pass the test above but fail this one.
+static void test_ki_diagnosis_cumulative_floor_does_not_block_legitimate_convergence(void)
+{
+    reset_module_state();
+    s_at_zones[1].enabled = true;
+    s_fake_zone_cfg[1].k_dc = 10.0f;
+    s_fake_zone_cfg[1].ki = 100.0f;
+
+    feed_oscillating_trace(1, 100.0f, 5.0f, ADAPTIVE_TUNE_KI_TRACE_CAPACITY, DT_S);
+    profile_firing_run_record_t rec = make_clean_record(500, 1, 900);
+    rec.zones[1].stats.dwell_err_mean_c = 0.0f;
+    rec.zones[1].stats.dwell_err_max_c = 0.0f;
+    adaptive_tune_run_end(&rec, true);
+
+    TEST_CHECK(s_at_zones[1].ki_applied,
+               "Q2: a single, modest (20%%-capped) shrink well inside the 5x floor must apply normally");
+    TEST_CHECK(strstr(s_at_zones[1].ki_refusal_reason, "cumulative floor") == NULL,
+               "Q2: a legitimately converging zone's first correction must never be refused by the new floor "
+               "guard -- MUST go red if the floor is implemented as an unconditional decrease-refusal instead "
+               "of the actual baseline/5 comparison");
+    TEST_CHECK_NEAR(s_fake_zone_cfg[1].ki, 80.0f, 1e-2,
+                     "sanity: the applied correction is exactly the per-run cap (100 * (1 - 0.20))");
+}
+
+// ---------------------------------------------------------------------
+// Q3: adaptive_tune_clear_ki_baseline() is the escape hatch the cumulative-
+// bound refusal message names ("-- re-autotune this zone"). This proves it
+// actually works: latch a baseline, grow Ki past a point where a NEW
+// (lower) baseline would raise the ceiling, clear it, and confirm the very
+// next latch takes the CURRENT live Ki, not the stale one -- both in RAM and
+// in the persisted NVS blob (same reboot-survival proof P1's own test uses).
+// MUST FAIL if adaptive_tune_clear_ki_baseline() is a no-op (e.g. its two
+// RAM-clearing lines removed): ki_baseline_valid would stay true throughout,
+// so the post-clear run below would never re-latch at all.
+// ---------------------------------------------------------------------
+static void test_clear_ki_baseline_lets_the_next_run_relatch_fresh(void)
+{
+    reset_module_state();
+    nvs_test_clear();
+    nvs_test_enable(true);
+
+    s_at_zones[1].enabled = true;
+    s_fake_zone_cfg[1].k_dc = 10.0f;
+    s_fake_zone_cfg[1].ki = 1.0f;
+
+    feed_settled_dwell(1, 25.0f, 22.0f, 0.5f, 20, DT_S);
+    profile_firing_run_record_t rec1 = make_clean_record(1, 1, 900);
+    rec1.zones[1].stats.dwell_err_mean_c = 0.45f;
+    rec1.zones[1].stats.dwell_err_max_c = 0.50f;
+    adaptive_tune_run_end(&rec1, true);
+    TEST_CHECK(s_at_zones[1].ki_baseline_valid, "setup: run 1 must latch a baseline");
+    TEST_CHECK_NEAR(s_at_zones[1].ki_baseline, 1.0f, 1e-4, "setup: baseline latches at the pre-growth Ki");
+    float grown_ki = s_fake_zone_cfg[1].ki;
+    TEST_CHECK(grown_ki > 1.0f, "setup: Ki must have grown past the baseline this same run");
+
+    // The "re-autotune" the refusal message names -- clears the stale
+    // baseline for this zone, exactly as autotune_engine.c's accept path
+    // now does after committing a fresh result.
+    adaptive_tune_clear_ki_baseline(1);
+    TEST_CHECK(!s_at_zones[1].ki_baseline_valid,
+               "Q3: adaptive_tune_clear_ki_baseline() must invalidate the RAM baseline immediately");
+
+    // Reboot-survival, checked BEFORE the next run re-latches anything: the
+    // clear must have persisted too, or a power cycle between the clear and
+    // the next run would resurrect the stale baseline from NVS -- same
+    // defect class P1 fixed for growth, now checked for the clear path
+    // specifically. Uses its own re-opt-in, same idiom as P1's own reboot
+    // test above (en_mask persistence is that test's concern, not this
+    // one's).
+    memset(s_at_zones, 0, sizeof(s_at_zones));
+    adaptive_tune_init();
+    TEST_CHECK(!s_at_zones[1].ki_baseline_valid,
+               "Q3: a cleared baseline must reload as INVALID after a reboot too -- the clear must reach NVS, "
+               "not just RAM");
+    s_at_zones[1].enabled = true; // re-opt-in, as an operator would find it post-reboot
+
+    // Next run, post-reboot: another genuine OFFSET_TOO_SMALL correction.
+    // The baseline must re-latch at the CURRENT (already-grown) live Ki, not
+    // the value cleared above -- this zone's plant model genuinely changed
+    // (that is what "re-autotuned" means), so grown_ki is now the right
+    // reference.
+    feed_settled_dwell(1, 25.0f, 22.0f, 0.5f, 20, DT_S);
+    profile_firing_run_record_t rec2 = make_clean_record(2, 1, 900);
+    rec2.zones[1].stats.dwell_err_mean_c = 0.45f;
+    rec2.zones[1].stats.dwell_err_max_c = 0.50f;
+    adaptive_tune_run_end(&rec2, true);
+    TEST_CHECK(s_at_zones[1].ki_applied, "setup: run 2 (post-clear) must also genuinely apply a Ki correction");
+    TEST_CHECK(s_at_zones[1].ki_baseline_valid, "Q3: the baseline must be valid again after re-latching");
+    TEST_CHECK_NEAR(s_at_zones[1].ki_baseline, grown_ki, 1e-4,
+                     "Q3: the re-latched baseline must track the CURRENT live Ki (the whole point of clearing "
+                     "it after a re-autotune), not silently keep the value that was just cleared");
+
+    nvs_test_enable(false); // leave the shared stub state as every other test in this binary expects
+    nvs_test_clear();
+}
+
+// ---------------------------------------------------------------------
+// Q4: the model layer (try_refine_zone_locked(), adaptive_tune_model.c)
+// rewrites Ki from a fresh SIMC recompute independent of the Ki-diagnosis
+// layer, and used to leave ki_baseline untouched -- so a zone whose SIMC
+// refine legitimately raised Ki past 5x a STALE baseline had its diagnosis
+// layer muted permanently, with the "re-autotune" remedy not even being the
+// path that actually fires here (D5: the model refine runs INSTEAD of the
+// Ki diagnosis on any run where it applies). This proves the model layer
+// now re-latches ki_baseline to its own freshly-written SIMC Ki. MUST FAIL
+// if adaptive_tune_model.c's two ki_baseline-writing lines are removed:
+// ki_baseline would stay at its old value (or invalid) instead of tracking
+// gains.ki.
+// ---------------------------------------------------------------------
+static void test_model_refine_relatches_ki_baseline_to_fresh_simc_ki(void)
+{
+    reset_module_state();
+    s_at_zones[0].enabled = true;
+    s_fake_zone_cfg[0].k_dc = 10.0f;
+    s_fake_zone_cfg[0].tau_s = 120.0f;
+    s_fake_zone_cfg[0].dead_time_s = 15.0f;
+    s_fake_zone_cfg[0].ki = 0.01f; // deliberately NOT SIMC-consistent with k_dc/tau/dead_time, so this run's
+                                    // recompute is guaranteed to write a genuinely different Ki
+
+    TEST_CHECK(!s_at_zones[0].ki_baseline_valid, "setup: zone starts with no baseline latched at all");
+
+    // A clean, well-spread ring that clears every model-refine guard --
+    // same shape as test_refinement_improves_gain_estimate_on_known_plant()
+    // above, true gain close enough to prior K to clear the jump-ratio
+    // guard but far enough to be a material move.
+    feed_settled_dwell(0, 22.0f + 10.5f * 0.30f, 22.0f, 0.30f, SETTLE_TICKS, DT_S);
+    feed_settled_dwell(0, 22.0f + 10.5f * 0.50f, 22.0f, 0.50f, SETTLE_TICKS, DT_S);
+    feed_settled_dwell(0, 22.0f + 10.5f * 0.70f, 22.0f, 0.70f, SETTLE_TICKS, DT_S);
+    feed_settled_dwell(0, 22.0f + 10.5f * 0.90f, 22.0f, 0.90f, SETTLE_TICKS, DT_S);
+
+    profile_firing_run_record_t rec = make_clean_record(600, 0, 900);
+    adaptive_tune_run_end(&rec, true);
+
+    TEST_CHECK(s_at_zones[0].has_applied, "setup: the model refine must genuinely apply this run");
+    float fresh_ki = s_fake_zone_cfg[0].ki;
+    TEST_CHECK(fabsf(fresh_ki - 0.01f) > 1e-6f, "setup: the SIMC recompute must have genuinely rewritten Ki");
+
+    TEST_CHECK(s_at_zones[0].ki_baseline_valid,
+               "Q4: the model refine must latch a baseline even though try_refine_ki_locked() never ran this "
+               "run (D5: the model refine wins, the Ki diagnosis is skipped)");
+    TEST_CHECK_NEAR(s_at_zones[0].ki_baseline, fresh_ki, 1e-6,
+                     "Q4: the baseline must track the model layer's fresh SIMC Ki specifically -- the value "
+                     "zones_config_set_pid() was just called with -- not the old pre-refine Ki (0.01) it "
+                     "replaced");
 }
 
 void run_test_adaptive_tune(void)
@@ -2149,12 +2400,22 @@ void run_test_adaptive_tune(void)
     test_ki_diagnosis_per_run_move_is_bounded_by_configured_fraction();
     test_ki_diagnosis_decreasing_direction_stabilizes_under_plant_feedback(); // P6
 
+    TEST_SECTION("adaptive_tune: symmetric lower cumulative Ki bound (Q2)");
+    test_ki_diagnosis_cumulative_floor_binds_and_names_itself();
+    test_ki_diagnosis_cumulative_floor_does_not_block_legitimate_convergence();
+
     TEST_SECTION("adaptive_tune: dwell-entry bookkeeping survives invalid data / late enable (F3)");
     test_dwelling_prev_tracks_dwelling_state_even_when_data_is_invalid();
     test_enabling_zone_mid_dwell_does_not_reopen_committed_joint_row();
 
     TEST_SECTION("adaptive_tune: Ki baseline survives a reboot, not re-latched from grown Ki (P1)");
     test_ki_baseline_survives_reboot_not_relatched_from_grown_ki();
+
+    TEST_SECTION("adaptive_tune: re-autotune actually clears the Ki-diagnosis baseline (Q3)");
+    test_clear_ki_baseline_lets_the_next_run_relatch_fresh();
+
+    TEST_SECTION("adaptive_tune: the model layer keeps the Ki baseline tracking its own SIMC output (Q4)");
+    test_model_refine_relatches_ki_baseline_to_fresh_simc_ki();
 }
 
 int main(void)

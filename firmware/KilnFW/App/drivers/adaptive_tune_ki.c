@@ -167,7 +167,7 @@ void try_refine_ki_locked(uint8_t zi, const profile_exec_firing_stats_t *stats)
     if (z->trace_count < ADAPTIVE_TUNE_KI_MIN_SAMPLES) {
         z->ki_verdict = (uint8_t)ADAPTIVE_TUNE_KI_INSUFFICIENT;
         z->ki_correction_pct = 0.0f;
-        set_reason(z->ki_refusal_reason, sizeof(z->ki_refusal_reason),
+        adaptive_tune_set_reason(z->ki_refusal_reason, sizeof(z->ki_refusal_reason),
                    "only %u/%u within-dwell trace samples", (unsigned)z->trace_count,
                    (unsigned)ADAPTIVE_TUNE_KI_MIN_SAMPLES);
         return;
@@ -191,31 +191,48 @@ void try_refine_ki_locked(uint8_t zi, const profile_exec_firing_stats_t *stats)
     z->ki_correction_pct = diag.ki_correction_pct;
 
     if (diag.verdict == ADAPTIVE_TUNE_KI_OK || diag.verdict == ADAPTIVE_TUNE_KI_INSUFFICIENT) {
-        set_reason(z->ki_refusal_reason, sizeof(z->ki_refusal_reason), "no Ki correction indicated (verdict %u)",
+        adaptive_tune_set_reason(z->ki_refusal_reason, sizeof(z->ki_refusal_reason), "no Ki correction indicated (verdict %u)",
                    (unsigned)diag.verdict);
         return;
     }
     if (diag.verdict == ADAPTIVE_TUNE_KI_FLOORED) {
-        set_reason(z->ki_refusal_reason, sizeof(z->ki_refusal_reason),
+        adaptive_tune_set_reason(z->ki_refusal_reason, sizeof(z->ki_refusal_reason),
                    "offset matches the -ff_hold integral floor signature, not small Ki -- withholding correction");
         return;
     }
 
     float kp, ki, kd;
     if (!zones_config_get_pid(zi, &kp, &ki, &kd) || !(ki > 0.0f)) {
-        set_reason(z->ki_refusal_reason, sizeof(z->ki_refusal_reason), "no existing positive Ki to refine");
+        adaptive_tune_set_reason(z->ki_refusal_reason, sizeof(z->ki_refusal_reason), "no existing positive Ki to refine");
         return;
     }
 
-    // P1/K5: latch this zone's autotuned baseline the first time this layer
-    // reaches a live Ki for it -- see ki_baseline's struct comment
-    // (adaptive_tune_internal.h). RAM-only here on purpose: adaptive_tune_
-    // run_end() (adaptive_tune.c) snapshots s_at_zones[*].ki_baseline*
-    // AFTER this call returns, still under s_lock, and dispatches the actual
-    // NVS write to the flash worker only once the lock is released -- this
-    // function must never itself touch NVS (it runs with s_lock held, and a
-    // flash-worker wait must never happen under that lock, see adaptive_
-    // tune_set_enabled()'s identical reasoning).
+    // P1/K5: latch this zone's baseline the first time this layer reaches a
+    // live Ki for it -- see ki_baseline's struct comment (adaptive_tune_
+    // internal.h). RAM-only here on purpose: adaptive_tune_run_end()
+    // (adaptive_tune.c) snapshots s_at_zones[*].ki_baseline* AFTER this call
+    // returns, still under adaptive_tune_lock, and dispatches the actual NVS
+    // write to the flash worker only once the lock is released -- this
+    // function must never itself touch NVS (it runs with adaptive_tune_lock
+    // held, and a flash-worker wait must never happen under that lock, see
+    // adaptive_tune_set_enabled()'s identical reasoning).
+    //
+    // Q4: this is only ONE of the two places ki_baseline gets written now.
+    // The comment here used to call this "the autotuned baseline", which
+    // stopped being true the moment try_refine_zone_locked() (adaptive_tune_
+    // model.c) started rewriting Ki from a fresh SIMC recompute independent
+    // of this layer -- a zone whose SIMC refine legitimately raised Ki past
+    // 5x a stale value latched here would have its diagnosis muted
+    // permanently, with no escape (see adaptive_tune_run_end()'s D5 comment
+    // for why the two layers never both act in the same run, so this really
+    // could go stale for good). try_refine_zone_locked() now re-latches
+    // ki_baseline to its own freshly-written SIMC Ki every time it applies
+    // (see that function's own comment) -- so this `if (!z->ki_baseline_
+    // valid)` branch only ever fires for a zone this layer has NEVER reached
+    // through EITHER path yet; once either layer has touched it, the
+    // baseline tracks the more authoritative of the two (a direct SIMC
+    // refit beats this layer's own shape-based inference, same priority
+    // order D5 already applies to which correction gets to run at all).
     if (!z->ki_baseline_valid) {
         z->ki_baseline = ki;
         z->ki_baseline_valid = true;
@@ -227,7 +244,7 @@ void try_refine_ki_locked(uint8_t zi, const profile_exec_firing_stats_t *stats)
     if (capped_pct < -cap_pct) capped_pct = -cap_pct;
     float new_ki = ki * (1.0f + capped_pct / 100.0f);
     if (!(new_ki > 0.0f) || !isfinite(new_ki)) {
-        set_reason(z->ki_refusal_reason, sizeof(z->ki_refusal_reason), "corrected Ki %.5f is not a valid gain",
+        adaptive_tune_set_reason(z->ki_refusal_reason, sizeof(z->ki_refusal_reason), "corrected Ki %.5f is not a valid gain",
                    (double)new_ki);
         return;
     }
@@ -244,14 +261,46 @@ void try_refine_ki_locked(uint8_t zi, const profile_exec_firing_stats_t *stats)
         // (adaptive_tune_internal.h), and this needs to fit BOTH "cumulative
         // bound" (the guard's own name, already asserted on by the pre-P2
         // test) and "re-autotune" (P2's remediation hint) inside it.
-        set_reason(z->ki_refusal_reason, sizeof(z->ki_refusal_reason),
-                   "Ki %.4f > cumulative bound %.1fx baseline (%.4f) -- re-autotune this zone", (double)new_ki,
+        // K6/Q6: %.6f, not the original %.4f -- realistic kiln Ki magnitudes
+        // (kc/ti) are order 1e-3, and at 4 decimal places every one of them
+        // rendered as the useless "(0.0000)". Still well inside the 96-byte
+        // buffer -- see this file's own length check in test_adaptive_tune.c.
+        adaptive_tune_set_reason(z->ki_refusal_reason, sizeof(z->ki_refusal_reason),
+                   "Ki %.6f > cumulative bound %.1fx baseline (%.6f) -- re-autotune this zone", (double)new_ki,
                    (double)ADAPTIVE_TUNE_KI_CUMULATIVE_MAX_MULT, (double)z->ki_baseline);
         return;
     }
 
+    // Q2: the SYMMETRIC lower cumulative bound -- until now this layer only
+    // ever bounded GROWTH (the ceiling above); the only floor was `!(new_ki >
+    // 0.0f)` at the setter-input check above, which is not an operational
+    // bound at all (it only rejects the literal non-positive/non-finite
+    // case). A source of oscillation that does NOT scale with Ki -- coupling
+    // from a neighbouring zone, relay chatter, thermocouple noise sitting
+    // right above ADAPTIVE_TUNE_KI_NOISE_FLOOR_C -- decays Ki by up to
+    // ADAPTIVE_TUNE_KI_MAX_FRACTIONAL_MOVE (20%) every run with nothing to
+    // stop it, and since P1 that decay now PERSISTS across reboots the same
+    // way runaway growth does (ki_baseline survives a power cycle). Reuses
+    // the same 5x figure as the ceiling -- see ADAPTIVE_TUNE_KI_CUMULATIVE_
+    // MAX_MULT's own comment for why 5x is the right figure in either
+    // direction: a zone that needs to shrink its Ki by more than 5x from its
+    // own autotuned/SIMC baseline is, by this file's own standard, telling
+    // us the FOPDT model is wrong, not that the integral term needs to keep
+    // shrinking. Named distinctly ("cumulative floor", not "cumulative
+    // bound") so the two refusal reasons are independently greppable/
+    // testable -- see test_ki_diagnosis_cumulative_floor_binds_and_names_
+    // itself() and test_ki_diagnosis_cumulative_floor_does_not_block_
+    // legitimate_convergence() (test_adaptive_tune.c).
+    float cumulative_floor = z->ki_baseline / ADAPTIVE_TUNE_KI_CUMULATIVE_MAX_MULT;
+    if (new_ki < cumulative_floor) {
+        adaptive_tune_set_reason(z->ki_refusal_reason, sizeof(z->ki_refusal_reason),
+                   "Ki %.6f < cumulative floor %.2fx baseline (%.6f) -- re-autotune this zone", (double)new_ki,
+                   (double)(1.0f / ADAPTIVE_TUNE_KI_CUMULATIVE_MAX_MULT), (double)z->ki_baseline);
+        return;
+    }
+
     if (!zones_config_set_pid(zi, kp, new_ki, kd)) {
-        set_reason(z->ki_refusal_reason, sizeof(z->ki_refusal_reason), "zones_config_set_pid() rejected the corrected Ki");
+        adaptive_tune_set_reason(z->ki_refusal_reason, sizeof(z->ki_refusal_reason), "zones_config_set_pid() rejected the corrected Ki");
         return;
     }
 

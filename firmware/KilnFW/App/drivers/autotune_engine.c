@@ -12,6 +12,7 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 
+#include "adaptive_tune.h" /* adaptive_tune_clear_ki_baseline() -- see this file's accept-path call site */
 #include "heat_enable.h"
 #include "heater_output.h"
 #include "kiln_io_owner.h"
@@ -3558,6 +3559,17 @@ bool autotune_engine_accept(bool ack_unsettled)
     if (!zones_config_set_pid(zone, g.kp, g.ki, g.kd)) {
         return false;
     }
+
+    /* Q3: this IS the "re-autotune this zone" the adaptive_tune Ki-diagnosis
+     * cumulative-bound refusal names as its remedy -- an autotune result was
+     * just committed for this zone (gains just persisted above, unconditional
+     * of method). Clear its stale Ki-diagnosis baseline here so the next time
+     * that layer reaches a live Ki for this zone it re-latches fresh, rather
+     * than staying capped against a ceiling derived from before this re-tune.
+     * See adaptive_tune_clear_ki_baseline()'s own comment for the lock-order
+     * reasoning on why this call belongs AFTER s_at.lock was already released
+     * above (xSemaphoreGive(s_at.lock)), never before. */
+    adaptive_tune_clear_ki_baseline(zone);
 
     if (method == AUTOTUNE_METHOD_RELAY) {
         /* A relay test measures ONE point of the frequency response: the gain

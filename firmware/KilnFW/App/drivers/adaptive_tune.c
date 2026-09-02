@@ -57,7 +57,7 @@ adaptive_tune_zone_t s_at_zones[MAX31856_CHANNEL_COUNT];
 // ---------------------------------------------------------------------
 // Joint (all-zone) dwell observations for the coupled solve -- module-wide,
 // not per-zone, because a "joint observation" is every zone's duty/rise at
-// the SAME instant. Guarded by the same s_lock as s_at_zones[] above.
+// the SAME instant. Guarded by the same adaptive_tune_lock as s_at_zones[] above.
 // ---------------------------------------------------------------------
 
 adaptive_tune_joint_obs_t s_joint_ring[ADAPTIVE_TUNE_JOINT_RING_CAPACITY];
@@ -94,19 +94,19 @@ bool s_joint_dwell_row_committed;
 float s_joint_last_duty[MAX31856_CHANNEL_COUNT];
 float s_joint_last_rise_c[MAX31856_CHANNEL_COUNT];
 bool  s_joint_last_valid[MAX31856_CHANNEL_COUNT];
-SemaphoreHandle_t s_lock; // guards s_at_zones; taken only from this file, never across profile_executor.c's
+SemaphoreHandle_t adaptive_tune_lock; // guards s_at_zones; taken only from this file, never across profile_executor.c's
                           // s_exec.lock (see adaptive_tune.h's doc comment on the lock order this keeps)
-bool s_lock_ready;
+bool adaptive_tune_lock_ready;
 
-void ensure_lock(void)
+void adaptive_tune_ensure_lock(void)
 {
-    if (!s_lock_ready) {
-        s_lock = xSemaphoreCreateMutex();
-        s_lock_ready = true;
+    if (!adaptive_tune_lock_ready) {
+        adaptive_tune_lock = xSemaphoreCreateMutex();
+        adaptive_tune_lock_ready = true;
     }
 }
 
-void set_refusal(adaptive_tune_zone_t *z, const char *fmt, ...)
+void adaptive_tune_set_refusal(adaptive_tune_zone_t *z, const char *fmt, ...)
 {
     va_list ap;
     va_start(ap, fmt);
@@ -115,7 +115,7 @@ void set_refusal(adaptive_tune_zone_t *z, const char *fmt, ...)
     ESP_LOGI(ADAPTIVE_TUNE_TAG, "refined not applied: %s", z->last_refusal_reason);
 }
 
-void set_reason(char *buf, size_t bufsz, const char *fmt, ...)
+void adaptive_tune_set_reason(char *buf, size_t bufsz, const char *fmt, ...)
 {
     va_list ap;
     va_start(ap, fmt);
@@ -155,8 +155,8 @@ void adaptive_tune_zone_tick(uint8_t zone_index, float actual_c, bool actual_val
     if (zone_index >= MAX31856_CHANNEL_COUNT) {
         return;
     }
-    ensure_lock();
-    xSemaphoreTake(s_lock, portMAX_DELAY);
+    adaptive_tune_ensure_lock();
+    xSemaphoreTake(adaptive_tune_lock, portMAX_DELAY);
     adaptive_tune_zone_t *z = &s_at_zones[zone_index];
 
     // Joint duty/rise cache: updated for EVERY zone on EVERY tick,
@@ -244,12 +244,12 @@ void adaptive_tune_zone_tick(uint8_t zone_index, float actual_c, bool actual_val
         // Learning is off, or this tick has nothing trustworthy to offer.
         // dwelling_prev and the fresh-dwell reset above already ran
         // unconditionally, so there is nothing left to do here.
-        xSemaphoreGive(s_lock);
+        xSemaphoreGive(adaptive_tune_lock);
         return;
     }
 
     if (!dwelling) {
-        xSemaphoreGive(s_lock);
+        xSemaphoreGive(adaptive_tune_lock);
         return;
     }
 
@@ -281,11 +281,11 @@ void adaptive_tune_zone_tick(uint8_t zone_index, float actual_c, bool actual_val
     }
 
     if (z->recorded_this_dwell || !z->settle_start_valid) {
-        xSemaphoreGive(s_lock);
+        xSemaphoreGive(adaptive_tune_lock);
         return;
     }
     if (z->settle_elapsed_s < ADAPTIVE_TUNE_SETTLE_MIN_S) {
-        xSemaphoreGive(s_lock);
+        xSemaphoreGive(adaptive_tune_lock);
         return; // still within the settle window -- keep waiting
     }
     float slope = fabsf(actual_c - z->settle_start_c) / z->settle_elapsed_s;
@@ -294,7 +294,7 @@ void adaptive_tune_zone_tick(uint8_t zone_index, float actual_c, bool actual_val
         // keeps failing this test every tick going forward (the elapsed-time
         // denominator only grows), which is the correct outcome. A brief
         // noise spike self-corrects on the next tick's smaller slope.
-        xSemaphoreGive(s_lock);
+        xSemaphoreGive(adaptive_tune_lock);
         return;
     }
 
@@ -305,7 +305,7 @@ void adaptive_tune_zone_tick(uint8_t zone_index, float actual_c, bool actual_val
     z->recorded_this_dwell = true;
 
     if (duty < ADAPTIVE_TUNE_MIN_DUTY_FOR_OBSERVATION) {
-        xSemaphoreGive(s_lock);
+        xSemaphoreGive(adaptive_tune_lock);
         return; // real steady state, but too little duty to trust the ratio
     }
     float rise_c = actual_c - ambient_c;
@@ -314,7 +314,7 @@ void adaptive_tune_zone_tick(uint8_t zone_index, float actual_c, bool actual_val
         // working heater; zero/negative here means a bad ambient capture
         // or a zone that never actually rose (thermocouple/relay fault
         // elsewhere) -- not a physically usable point either way.
-        xSemaphoreGive(s_lock);
+        xSemaphoreGive(adaptive_tune_lock);
         return;
     }
 
@@ -365,7 +365,7 @@ void adaptive_tune_zone_tick(uint8_t zone_index, float actual_c, bool actual_val
     // top comment), which only arrive with the run record. z->trace_* above
     // is left as-is (this dwell's most recent trace) for that call to read.
 
-    xSemaphoreGive(s_lock);
+    xSemaphoreGive(adaptive_tune_lock);
 }
 
 // H2/K1/K2 fix: every run_end path that skips both try_refine_zone_locked()
@@ -398,12 +398,12 @@ void adaptive_tune_zone_tick(uint8_t zone_index, float actual_c, bool actual_val
 // the genuinely PER-RUN fields (coupled_*, ki_*) are reset here.
 static void reset_run_status_locked(adaptive_tune_zone_t *z, const char *reason)
 {
-    set_refusal(z, "%s", reason);
-    set_reason(z->coupled_refusal_reason, sizeof(z->coupled_refusal_reason), "%s", reason);
+    adaptive_tune_set_refusal(z, "%s", reason);
+    adaptive_tune_set_reason(z->coupled_refusal_reason, sizeof(z->coupled_refusal_reason), "%s", reason);
     z->coupled_attempted = false;
     z->coupled_applied = false;
     z->coupled_cells_changed = 0;
-    set_reason(z->ki_refusal_reason, sizeof(z->ki_refusal_reason), "%s", reason);
+    adaptive_tune_set_reason(z->ki_refusal_reason, sizeof(z->ki_refusal_reason), "%s", reason);
     z->ki_applied = false;
     z->ki_verdict = (uint8_t)ADAPTIVE_TUNE_KI_INSUFFICIENT;
     z->ki_correction_pct = 0.0f;
@@ -445,8 +445,8 @@ void adaptive_tune_run_end(const profile_firing_run_record_t *rec, bool clean)
     if (!rec) {
         return;
     }
-    ensure_lock();
-    xSemaphoreTake(s_lock, portMAX_DELAY);
+    adaptive_tune_ensure_lock();
+    xSemaphoreTake(adaptive_tune_lock, portMAX_DELAY);
     // P1: tracks whether ANY zone's ki_baseline_valid flipped false -> true
     // during this run's loop below -- the NVS write dispatched after the
     // lock is released only actually needs to happen when this is true (a
@@ -501,14 +501,18 @@ void adaptive_tune_run_end(const profile_firing_run_record_t *rec, bool clean)
         // or the zone's coupled/diagonal fit was simply not due) -- by
         // which point its trace evidence and the live Ki agree on which
         // run produced them.
+        // Q4: captured BEFORE either refine call -- try_refine_zone_locked()
+        // (the model_refined branch below) can now re-latch ki_baseline from
+        // a fresh SIMC Ki too, not just try_refine_ki_locked(), so this must
+        // watch for a VALUE change, not only a false->true valid transition
+        // (the transition alone was already sufficient before Q4, when
+        // try_refine_ki_locked() was the only writer).
+        bool baseline_was_valid = z->ki_baseline_valid;
+        float baseline_before = z->ki_baseline;
         bool model_refined = try_refine_zone_locked(zi, rec->profile_id);
         try_refine_coupled_locked(zi);
         if (!model_refined) {
-            bool baseline_was_valid = z->ki_baseline_valid; // P1: see baseline_newly_latched's own comment
             try_refine_ki_locked(zi, &zr->stats);
-            if (!baseline_was_valid && z->ki_baseline_valid) {
-                baseline_newly_latched = true;
-            }
         } else {
             // F2: unlike the full-skip paths above (reset_run_status_
             // locked()), coupled_* is NOT reset here -- the
@@ -530,9 +534,16 @@ void adaptive_tune_run_end(const profile_firing_run_record_t *rec, bool clean)
             z->ki_applied = false;
             z->ki_verdict = (uint8_t)ADAPTIVE_TUNE_KI_INSUFFICIENT;
             z->ki_correction_pct = 0.0f;
-            set_reason(z->ki_refusal_reason, sizeof(z->ki_refusal_reason),
+            adaptive_tune_set_reason(z->ki_refusal_reason, sizeof(z->ki_refusal_reason),
                        "Ki diagnosis skipped this run -- the model/PID refinement already rewrote Ki from SIMC, "
                        "see adaptive_tune_run_end()'s D5 comment");
+        }
+        // P1/Q4: a NEW or CHANGED baseline this run (from either writer --
+        // see baseline_before/baseline_was_valid's own comment above) is
+        // what actually needs persisting; a zone whose baseline was already
+        // valid and unchanged this run has nothing new to write.
+        if (z->ki_baseline_valid && (!baseline_was_valid || z->ki_baseline != baseline_before)) {
+            baseline_newly_latched = true;
         }
     }
 
@@ -547,10 +558,10 @@ void adaptive_tune_run_end(const profile_firing_run_record_t *rec, bool clean)
             job.blob.mask |= (uint8_t)(1u << zi);
         }
     }
-    xSemaphoreGive(s_lock);
+    xSemaphoreGive(adaptive_tune_lock);
 
     // Dispatched OUTSIDE the lock, only when a baseline actually changed --
-    // same "never wait on the flash worker with s_lock held" rule as
+    // same "never wait on the flash worker with adaptive_tune_lock held" rule as
     // adaptive_tune_set_enabled() below. A run that latched no NEW baseline
     // (every zone already had one, or none reached try_refine_ki_locked()
     // at all this run) skips the write entirely -- there is nothing new to
@@ -608,11 +619,11 @@ bool adaptive_tune_set_enabled(uint8_t zone_index, bool enabled)
     if (zone_index >= MAX31856_CHANNEL_COUNT) {
         return false;
     }
-    ensure_lock();
-    xSemaphoreTake(s_lock, portMAX_DELAY);
+    adaptive_tune_ensure_lock();
+    xSemaphoreTake(adaptive_tune_lock, portMAX_DELAY);
     s_at_zones[zone_index].enabled = enabled;
     enmask_job_t job = {.mask = enmask_locked(), .result = ESP_FAIL};
-    xSemaphoreGive(s_lock);
+    xSemaphoreGive(adaptive_tune_lock);
 
     // Dispatched OUTSIDE the lock -- uart_bridge_ext_run_on_flash_worker()
     // blocks the calling task until the worker task runs the job (see that
@@ -627,15 +638,73 @@ bool adaptive_tune_set_enabled(uint8_t zone_index, bool enabled)
     return true;
 }
 
+// Q3: the escape hatch the cumulative-bound refusal message actually names
+// ("-- re-autotune this zone"). Before this existed, ki_baseline was latched
+// once (try_refine_ki_locked()/try_refine_zone_locked(), see either's own
+// comment) and NEVER cleared by anything: not adaptive_tune_set_enabled(),
+// not zones_config_set_pid()/set_model() (autotune_engine.c calls those
+// directly, never through this module), not a fresh autotune. Once the
+// cumulative bound actually started refusing, the operator's only named
+// remedy -- re-autotune -- was a no-op: the ceiling stayed old_baseline *
+// ADAPTIVE_TUNE_KI_CUMULATIVE_MAX_MULT forever, even after a brand-new step
+// test produced a completely different plant model. Call this from wherever
+// an autotune RESULT is
+// actually committed for a zone (autotune_engine.c's accept path, after its
+// own zones_config_set_pid()/set_model() calls succeed -- see that call
+// site's own comment) so the next try_refine_ki_locked()/try_refine_zone_
+// locked() call re-latches fresh against the zone the operator just
+// re-tuned, rather than an assumption that autotune result superseded.
+//
+// Lock order: this module's own adaptive_tune_lock only -- autotune_engine.c
+// calls this AFTER releasing its own s_at.lock (see the call site), so there
+// is no cross-module lock nesting here at all, let alone the s_exec.lock ->
+// this-module ordering adaptive_tune.h's own comment documents for the
+// zone_tick/run_end path. NVS write routed through the flash worker exactly
+// like adaptive_tune_run_end()'s own save_kibase_job() dispatch -- and for
+// the identical reason (a flash write from a PSRAM-stacked task panics on
+// this board every time) -- and, same as adaptive_tune_set_enabled() just
+// above, dispatched OUTSIDE the lock.
+void adaptive_tune_clear_ki_baseline(uint8_t zone_index)
+{
+    if (zone_index >= MAX31856_CHANNEL_COUNT) {
+        return;
+    }
+    adaptive_tune_ensure_lock();
+    xSemaphoreTake(adaptive_tune_lock, portMAX_DELAY);
+    s_at_zones[zone_index].ki_baseline_valid = false;
+    s_at_zones[zone_index].ki_baseline = 0.0f;
+
+    kibase_job_t job = {.result = ESP_FAIL};
+    for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+        job.blob.vals[zi] = s_at_zones[zi].ki_baseline;
+        if (s_at_zones[zi].ki_baseline_valid) {
+            job.blob.mask |= (uint8_t)(1u << zi);
+        }
+    }
+    xSemaphoreGive(adaptive_tune_lock);
+
+    esp_err_t err = uart_bridge_ext_run_on_flash_worker(save_kibase_job, &job);
+    if (err != ESP_OK || job.result != ESP_OK) {
+        ESP_LOGE(ADAPTIVE_TUNE_TAG, "adaptive_tune_clear_ki_baseline(%u): NVS save failed: %s / %s",
+                 (unsigned)zone_index, esp_err_to_name(err), esp_err_to_name(job.result));
+        // Live state is still cleared either way -- same "applied live,
+        // logged if the save failed" convention as adaptive_tune_set_
+        // enabled(). A failed persist here just means a reboot before the
+        // NEXT successful save would see the OLD baseline reload -- no worse
+        // than today, and strictly better than the ceiling never clearing at
+        // all.
+    }
+}
+
 bool adaptive_tune_get_enabled(uint8_t zone_index)
 {
     if (zone_index >= MAX31856_CHANNEL_COUNT) {
         return false;
     }
-    ensure_lock();
-    xSemaphoreTake(s_lock, portMAX_DELAY);
+    adaptive_tune_ensure_lock();
+    xSemaphoreTake(adaptive_tune_lock, portMAX_DELAY);
     bool en = s_at_zones[zone_index].enabled;
-    xSemaphoreGive(s_lock);
+    xSemaphoreGive(adaptive_tune_lock);
     return en;
 }
 
@@ -648,8 +717,8 @@ void adaptive_tune_get_status(uint8_t zone_index, adaptive_tune_zone_status_t *o
     if (zone_index >= MAX31856_CHANNEL_COUNT) {
         return;
     }
-    ensure_lock();
-    xSemaphoreTake(s_lock, portMAX_DELAY);
+    adaptive_tune_ensure_lock();
+    xSemaphoreTake(adaptive_tune_lock, portMAX_DELAY);
     adaptive_tune_zone_t *z = &s_at_zones[zone_index];
     out->enabled = z->enabled;
     out->ring_count = z->ring_count;
@@ -671,7 +740,7 @@ void adaptive_tune_get_status(uint8_t zone_index, adaptive_tune_zone_status_t *o
     out->ki_correction_pct = z->ki_correction_pct;
     out->ki_applied = z->ki_applied;
     strncpy(out->ki_refusal_reason, z->ki_refusal_reason, sizeof(out->ki_refusal_reason) - 1);
-    xSemaphoreGive(s_lock);
+    xSemaphoreGive(adaptive_tune_lock);
 }
 
 // HTTP registration lives in adaptive_tune_http.c now (GET /api/adaptive_tune,
@@ -683,7 +752,7 @@ void adaptive_tune_get_status(uint8_t zone_index, adaptive_tune_zone_status_t *o
 
 void adaptive_tune_init(void)
 {
-    ensure_lock();
+    adaptive_tune_ensure_lock();
     memset(s_at_zones, 0, sizeof(s_at_zones));
 
     // Boot-time read, direct (not through the flash worker -- see this

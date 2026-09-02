@@ -36,7 +36,7 @@ bool try_refine_zone_locked(uint8_t zi, uint8_t profile_id)
     adaptive_tune_zone_t *z = &s_at_zones[zi];
 
     if (z->ring_count < ADAPTIVE_TUNE_MIN_OBSERVATIONS) {
-        set_refusal(z, "only %u/%u dwell observations", (unsigned)z->ring_count,
+        adaptive_tune_set_refusal(z, "only %u/%u dwell observations", (unsigned)z->ring_count,
                     (unsigned)ADAPTIVE_TUNE_MIN_OBSERVATIONS);
         return false;
     }
@@ -51,29 +51,29 @@ bool try_refine_zone_locked(uint8_t zi, uint8_t profile_id)
         if (duty[i] > umax) umax = duty[i];
     }
     if ((umax - umin) < ADAPTIVE_TUNE_MIN_DUTY_SPREAD) {
-        set_refusal(z, "observations too clustered (duty spread %.3f < %.3f)", (double)(umax - umin),
+        adaptive_tune_set_refusal(z, "observations too clustered (duty spread %.3f < %.3f)", (double)(umax - umin),
                     (double)ADAPTIVE_TUNE_MIN_DUTY_SPREAD);
         return false;
     }
 
     float k_fit;
     if (!adaptive_tune_fit_gain(duty, rise, z->ring_count, &k_fit)) {
-        set_refusal(z, "fit degenerate (insufficient duty energy)");
+        adaptive_tune_set_refusal(z, "fit degenerate (insufficient duty energy)");
         return false;
     }
     if (!(k_fit > 0.0f)) {
-        set_refusal(z, "fitted gain %.4f is not positive", (double)k_fit);
+        adaptive_tune_set_refusal(z, "fitted gain %.4f is not positive", (double)k_fit);
         return false;
     }
 
     float k_dc, tau_s, dead_time_s;
     if (!zones_config_get_model(zi, &k_dc, &tau_s, &dead_time_s) || !(k_dc > 0.0f)) {
-        set_refusal(z, "no existing step-test model -- learning refines, it does not create one");
+        adaptive_tune_set_refusal(z, "no existing step-test model -- learning refines, it does not create one");
         return false;
     }
 
     if (k_fit > k_dc * ADAPTIVE_TUNE_MAX_JUMP_RATIO || k_fit < k_dc / ADAPTIVE_TUNE_MAX_JUMP_RATIO) {
-        set_refusal(z, "fit %.4f is implausible against prior K %.4f (>%.0fx)", (double)k_fit, (double)k_dc,
+        adaptive_tune_set_refusal(z, "fit %.4f is implausible against prior K %.4f (>%.0fx)", (double)k_fit, (double)k_dc,
                     (double)ADAPTIVE_TUNE_MAX_JUMP_RATIO);
         return false;
     }
@@ -83,7 +83,7 @@ bool try_refine_zone_locked(uint8_t zi, uint8_t profile_id)
     if (k_blended > k_dc + max_move) k_blended = k_dc + max_move;
     if (k_blended < k_dc - max_move) k_blended = k_dc - max_move;
     if (!(k_blended > 0.0f)) {
-        set_refusal(z, "blended gain %.4f is not positive", (double)k_blended);
+        adaptive_tune_set_refusal(z, "blended gain %.4f is not positive", (double)k_blended);
         return false;
     }
 
@@ -91,7 +91,7 @@ bool try_refine_zone_locked(uint8_t zi, uint8_t profile_id)
     // change -- see ADAPTIVE_TUNE_MIN_MATERIAL_MOVE_FRAC's own comment.
     float material_move = fabsf(k_blended - k_dc);
     if (material_move < k_dc * ADAPTIVE_TUNE_MIN_MATERIAL_MOVE_FRAC) {
-        set_refusal(z, "blended gain %.4f is not a material change from prior %.4f (<%.2f%%)", (double)k_blended,
+        adaptive_tune_set_refusal(z, "blended gain %.4f is not a material change from prior %.4f (<%.2f%%)", (double)k_blended,
                     (double)k_dc, (double)(ADAPTIVE_TUNE_MIN_MATERIAL_MOVE_FRAC * 100.0f));
         return false;
     }
@@ -112,17 +112,17 @@ bool try_refine_zone_locked(uint8_t zi, uint8_t profile_id)
     };
     autotune_gains_t gains = pid_autotune_tune_from_fopdt(&model, AUTOTUNE_RULE_SIMC, 0.0f);
     if (gains.refusal != AUTOTUNE_REFUSAL_OK) {
-        set_refusal(z, "SIMC refused the refined model: %s", gains.refusal_reason);
+        adaptive_tune_set_refusal(z, "SIMC refused the refined model: %s", gains.refusal_reason);
         return false;
     }
 
     if (!zones_config_set_model(zi, k_blended, tau_s, dead_time_s)) {
-        set_refusal(z, "zones_config_set_model() rejected %.4f/%.1f/%.1f", (double)k_blended, (double)tau_s,
+        adaptive_tune_set_refusal(z, "zones_config_set_model() rejected %.4f/%.1f/%.1f", (double)k_blended, (double)tau_s,
                     (double)dead_time_s);
         return false;
     }
     if (!zones_config_set_pid(zi, gains.kp, gains.ki, gains.kd)) {
-        set_refusal(z, "zones_config_set_pid() rejected %.4f/%.4f/%.4f", (double)gains.kp, (double)gains.ki,
+        adaptive_tune_set_refusal(z, "zones_config_set_pid() rejected %.4f/%.4f/%.4f", (double)gains.kp, (double)gains.ki,
                     (double)gains.kd);
         return false;
     }
@@ -134,6 +134,18 @@ bool try_refine_zone_locked(uint8_t zi, uint8_t profile_id)
     z->last_delta_pct = (k_dc > 0.0f) ? ((k_blended - k_dc) / k_dc) * 100.0f : 0.0f;
     z->last_applied_profile_id = profile_id;
     z->last_applied_unix_s = (uint32_t)time(NULL);
+
+    // Q4: re-latch the Ki-diagnosis baseline (adaptive_tune_ki.c) to the Ki
+    // this SIMC recompute just wrote -- see try_refine_ki_locked()'s own
+    // comment on ki_baseline for the full "which layer is the more
+    // authoritative reference" reasoning. This is the ONLY setter this
+    // module writes gains.ki through, so this is the one place a fresh SIMC
+    // Ki exists to latch from. adaptive_tune_run_end() (adaptive_tune.c)
+    // detects this write and dispatches the NVS persist the same way it
+    // already does for adaptive_tune_ki.c's own latch -- see that function's
+    // baseline_newly_latched comment.
+    z->ki_baseline = gains.ki;
+    z->ki_baseline_valid = true;
 
     ESP_LOGI(ADAPTIVE_TUNE_TAG, "zone %u: K_dc %.4f -> %.4f (%.1f%%) from %u observations, profile %u", (unsigned)zi,
              (double)k_dc, (double)k_blended, (double)z->last_delta_pct, (unsigned)z->ring_count,
@@ -227,7 +239,7 @@ void try_refine_coupled_locked(uint8_t zi)
     const uint8_t n = MAX31856_CHANNEL_COUNT;
     uint32_t min_obs = (uint32_t)n + ADAPTIVE_TUNE_COUPLED_OBS_MARGIN;
     if (s_joint_ring_count < min_obs) {
-        set_reason(z->coupled_refusal_reason, sizeof(z->coupled_refusal_reason),
+        adaptive_tune_set_reason(z->coupled_refusal_reason, sizeof(z->coupled_refusal_reason),
                    "only %u/%u joint dwell observations for coupled solve", (unsigned)s_joint_ring_count,
                    (unsigned)min_obs);
         return;
@@ -247,19 +259,19 @@ void try_refine_coupled_locked(uint8_t zi)
     float C[MAX31856_CHANNEL_COUNT][MAX31856_CHANNEL_COUNT];
     adaptive_tune_coupled_result_t r = adaptive_tune_coupled_fit(duty_obs, rise_obs, s_joint_ring_count, n, C);
     if (r == ADAPTIVE_TUNE_COUPLED_TOO_FEW_OBSERVATIONS) {
-        set_reason(z->coupled_refusal_reason, sizeof(z->coupled_refusal_reason),
+        adaptive_tune_set_reason(z->coupled_refusal_reason, sizeof(z->coupled_refusal_reason),
                    "joint observation set degenerate for a determined solve");
         return;
     }
     if (r == ADAPTIVE_TUNE_COUPLED_ILL_CONDITIONED) {
-        set_reason(z->coupled_refusal_reason, sizeof(z->coupled_refusal_reason),
+        adaptive_tune_set_reason(z->coupled_refusal_reason, sizeof(z->coupled_refusal_reason),
                    "joint duty matrix ill-conditioned (cond above ~1e4, zone_coupling_solve.h's own pivot floor)");
         return;
     }
 
     float prior_row[MAX31856_CHANNEL_COUNT];
     if (!zones_config_get_coupling(zi, prior_row)) {
-        set_reason(z->coupled_refusal_reason, sizeof(z->coupled_refusal_reason),
+        adaptive_tune_set_reason(z->coupled_refusal_reason, sizeof(z->coupled_refusal_reason),
                    "no existing coupling row to refine");
         return;
     }
@@ -329,7 +341,7 @@ void try_refine_coupled_locked(uint8_t zi)
         ESP_LOGI(ADAPTIVE_TUNE_TAG, "zone %u: coupled solve refined %u coupling cell(s) from %u joint observations",
                  (unsigned)zi, (unsigned)changed, (unsigned)s_joint_ring_count);
     } else {
-        set_reason(z->coupled_refusal_reason, sizeof(z->coupled_refusal_reason),
+        adaptive_tune_set_reason(z->coupled_refusal_reason, sizeof(z->coupled_refusal_reason),
                    "coupled solve succeeded but every off-diagonal cell was implausible or rejected");
     }
 }

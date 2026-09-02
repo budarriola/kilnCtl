@@ -200,6 +200,17 @@ void adaptive_tune_run_end(const profile_firing_run_record_t *rec, bool clean);
 bool adaptive_tune_set_enabled(uint8_t zone_index, bool enabled);
 bool adaptive_tune_get_enabled(uint8_t zone_index);
 
+// Q3: clears this zone's persisted Ki-diagnosis baseline (RAM and NVS, via
+// the flash worker) so the NEXT try_refine_ki_locked()/try_refine_zone_
+// locked() call re-latches fresh -- the actual remedy the cumulative-bound
+// refusal message names ("-- re-autotune this zone"). Call this once an
+// autotune RESULT has actually been committed for the zone (i.e. after the
+// same zones_config_set_pid()/set_model() calls that persist the new gains
+// have succeeded), never before -- see adaptive_tune_clear_ki_baseline()'s
+// own comment (adaptive_tune.c) for the lock-order/flash-worker reasoning
+// and why a failed persist here is only logged, not propagated.
+void adaptive_tune_clear_ki_baseline(uint8_t zone_index);
+
 void adaptive_tune_get_status(uint8_t zone_index, adaptive_tune_zone_status_t *out);
 
 // ---- pure helpers, exposed for host tests (adaptive_tune.c has no other

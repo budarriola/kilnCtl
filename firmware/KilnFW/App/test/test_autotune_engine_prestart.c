@@ -118,6 +118,18 @@ bool ota_http_heat_blocked_by_update(char *reason_out, size_t reason_cap)
     return false;
 }
 
+// Q3: adaptive_tune_clear_ki_baseline() -- autotune_engine.c's accept path
+// now calls this (see autotune_engine_accept()'s own comment) once a
+// result's gains have been committed, so the Ki-diagnosis module's
+// cumulative bound re-latches against the fresh result instead of staying
+// capped forever against a stale one. This file does not link adaptive_
+// tune.c at all (it is a big, separately-tested module in its own right --
+// see test_adaptive_tune.c, which is where adaptive_tune_clear_ki_baseline()
+// itself is actually exercised), so a no-op fake is all this file needs:
+// autotune_engine_accept()'s own behavior does not depend on what this call
+// does, only that it happens.
+void adaptive_tune_clear_ki_baseline(uint8_t zone_index) { (void)zone_index; }
+
 bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
 {
     (void)profile_id;

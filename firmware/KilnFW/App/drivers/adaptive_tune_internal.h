@@ -247,12 +247,12 @@ extern float s_joint_last_duty[MAX31856_CHANNEL_COUNT];
 extern float s_joint_last_rise_c[MAX31856_CHANNEL_COUNT];
 extern bool  s_joint_last_valid[MAX31856_CHANNEL_COUNT];
 
-extern SemaphoreHandle_t s_lock; // guards s_at_zones/s_joint_* above; taken only from this module's own
+extern SemaphoreHandle_t adaptive_tune_lock; // guards s_at_zones/s_joint_* above; taken only from this module's own
                                   // three files, never across profile_executor.c's s_exec.lock (see
                                   // adaptive_tune.h's doc comment on the lock order this keeps)
-extern bool s_lock_ready;
+extern bool adaptive_tune_lock_ready;
 
-void ensure_lock(void);
+void adaptive_tune_ensure_lock(void);
 
 // P1: on-disk shape for the persisted Ki baseline -- ONE blob (not a mask
 // byte plus a separate values blob) so a torn/partial write can never leave
@@ -266,17 +266,17 @@ typedef struct {
     float   vals[MAX31856_CHANNEL_COUNT];
 } adaptive_tune_kibase_blob_t;
 
-// set_refusal()/set_reason(): small vsnprintf-into-field helpers shared by
+// adaptive_tune_set_refusal()/adaptive_tune_set_reason(): small vsnprintf-into-field helpers shared by
 // all three split files (try_refine_zone_locked(), try_refine_coupled_
 // locked(), try_refine_ki_locked() each report their own guard refusals
-// through one of these). set_refusal() always writes z->last_refusal_reason
-// specifically; set_reason() takes an explicit destination buffer for the
+// through one of these). adaptive_tune_set_refusal() always writes z->last_refusal_reason
+// specifically; adaptive_tune_set_reason() takes an explicit destination buffer for the
 // coupled/ki reason fields.
-void set_refusal(adaptive_tune_zone_t *z, const char *fmt, ...);
-void set_reason(char *buf, size_t bufsz, const char *fmt, ...);
+void adaptive_tune_set_refusal(adaptive_tune_zone_t *z, const char *fmt, ...);
+void adaptive_tune_set_reason(char *buf, size_t bufsz, const char *fmt, ...);
 
 // Cross-file locked helpers -- each defined in its own split file, called
-// only from adaptive_tune_run_end() (adaptive_tune.c), always with s_lock
+// only from adaptive_tune_run_end() (adaptive_tune.c), always with adaptive_tune_lock
 // already held.
 bool try_refine_zone_locked(uint8_t zi, uint8_t profile_id);
 void try_refine_coupled_locked(uint8_t zi);
