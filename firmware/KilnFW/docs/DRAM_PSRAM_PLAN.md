@@ -9,8 +9,11 @@ truth, not the checkboxes.** Nothing below is marked done until a commit is
 named. Every number is either measured and attributed, or explicitly labelled
 as an estimate.
 
-Status at time of writing (2026-09-01): **nothing in this plan is built.** This
-is a planning document only.
+Status (2026-09-02): the history ring moved to PSRAM (`4c0d703`, ~21 kB
+reclaimed), Phase 1 step 1 landed in both `sdkconfig.defaults` and the
+generated `sdkconfig` (8192, unsoaked), the PSRAM-stack write guards and the
+`stack_margin` instrumentation blocker are closed. **No task stack has been
+relocated.** Phase 2 (§6) and every §7.3 candidate are still open.
 
 **Update 2026-09-02 (third pass) — coverage audit found a real gap, closed it;
 every section 7.3 candidate is BLOCKED, none relocated.**
@@ -57,31 +60,29 @@ hardware was mid-soak, see the top-level task record):
 - **`kiln_io_owner`** — flash-write clean: full trace of `owner_task()`'s
   command switch (`kiln_io_owner.c:326-420`+) shows a bounded enum of
   GPIO/I2C-expander operations only, no NVS/store call anywhere in the file,
-  no function-pointer dispatch to widen that later. **BLOCKED on
-  instrumentation**: not in the section 3.1 measured table, and
-  `STACK_MARGIN_MAX_TASKS` (`stack_margin.h:64`) is reported at 28/28 slots
-  used (not independently re-verified live this pass — no board access).
+  no function-pointer dispatch to widen that later. **BLOCKED on instrumentation** at the time
+  of that pass; unblocked by the cap raise below (`e263b14`). Still not in
+  §3.1's measured table — needs one boot to read the number.
 - **`thermo_owner`** — flash-write clean: full trace of `owner_task()`'s
   command switch (`thermo_owner.c:102-180`+) shows MAX31856 SPI register
   operations only (config/thresholds/CJ-offset/read), no NVS/store call
-  anywhere in the file. **BLOCKED on instrumentation**, same reason as
-  `kiln_io_owner`.
+  anywhere in the file. Same as `kiln_io_owner`: unblocked, unmeasured.
 - **`screen_idle`** — flash-write clean: the entire task body
   (`screen_idle.c:63-131`) calls only `NS2009_read()` and flips its own
   in-RAM `screen_on`/`last_activity_tick` fields; it does NOT touch touch
   calibration storage or issue the display clear itself (that's the LVGL
   task, by design — see the file's own comment on why). This pass's trace
   found the table's "display-settings persistence" caution for this task to
-  be stale/inaccurate. **BLOCKED on instrumentation**, same reason as above.
+  be stale/inaccurate. Unblocked, unmeasured.
 - **`spi_owner`** (`esp_spi_owner.c`) — no NVS/flash call anywhere in the
   file; it is a raw SPI-transfer relay, not a command dispatcher that could
   reach arbitrary code. Its hazard is bus contention with the flash's own
   SPI use during a cache-disabled window, a DIFFERENT risk than the "stack
   unreachable while cache is down" class this section is about, and this
-  pass did not attempt to characterize it. **BLOCKED on instrumentation**
-  (not in the measured table) and on that separate, uncharacterized hazard.
+  pass did not attempt to characterize it. Unmeasured, and still blocked on
+  that separate, uncharacterized hazard.
 - **`i2c_owner`** — no NVS/flash call anywhere in the file (`i2c_owner.c`),
-  same shape as `spi_owner`. **BLOCKED on instrumentation.**
+  same shape as `spi_owner`. Unblocked, unmeasured.
 - **`uart_owner_*` (×2 instances)** — unchanged: still blocked by section 6
   on the unmeasured Pico OTA relay path. Not re-examined this pass.
 
@@ -91,28 +92,24 @@ refusals that only fire on a misuse that cannot occur on today's task
 assignment (every caller of `run_state_note()`/`relay_cycles_*`/
 `firing_stats_persist()` today runs on an internal-SRAM stack) — inert on the
 board exactly like the second pass's three guards were, no soak required for
-this part. `STACK_MARGIN_MAX_TASKS` was NOT raised this pass (no relocation
-depends on it happening now, and raising it without also registering the six
-still-uninstrumented tasks — `kiln_io_owner`, `thermo_owner`, `screen_idle`,
-`spi_owner`, `i2c_owner`, plus whichever of section 4.2's original list
-remain — would just be an unused knob). The first hardware step for the next
-pass: get real board access, confirm the 28/28 slot count, raise the cap and
-register those six tasks, capture their HWMs under the section 4.3 load, and
-only then reconsider `kiln_io_owner`/`thermo_owner`/`screen_idle` as
-relocation candidates (their flash-write cleanliness is already established
-by this pass's trace and does not need re-doing). `profile_executor` needs a
-soak on top of that regardless of HWM, per its own note above.
+this part. `STACK_MARGIN_MAX_TASKS` was NOT raised this pass — **the cap-raise pass
+below did it afterwards (28 → 40, `e263b14`), and found the real blocker was
+a 29th registration silently losing its slot, not a missing registration.**
+The first hardware step for the next pass is therefore just the measurement:
+boot the board, pull a full (now paginated) `get_stack_margin()`, record HWMs
+for `kiln_io_owner`/`thermo_owner`/`spi_owner`/`i2c_owner`/`screen_idle` in
+§3.1, and only then reconsider them as relocation candidates — their
+flash-write cleanliness is already established and does not need re-doing.
+`profile_executor` needs a soak on top of that regardless of HWM.
 
 **Update 2026-09-02 (second pass) — two safety nets landed, no soak needed.**
 1. `check_sdkconfig_defaults_applied.ps1` (picked up by
    `tools/run_all_checks.ps1`) now fails loudly whenever a deliberately
    changed key (currently just `CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL`)
    disagrees between `sdkconfig.defaults` and the gitignored, generated
-   `sdkconfig`. It is failing right now, against the real repo, for exactly
-   the reason section 5 already described: the generated `sdkconfig` still
-   holds 16384. This is expected until someone regenerates it (`idf.py
-   reconfigure` or a clean build dir) -- do not silence it by editing the
-   check.
+   `sdkconfig`. It was red when written (generated `sdkconfig` still held
+   16384); that file has since been regenerated and now agrees at 8192. If it
+   goes red again, regenerate -- do not silence it by editing the check.
 2. `kiln_cfg_store.c`'s `nvs_save_store()` now refuses (does not crash) when
    called from a PSRAM-stacked task, matching `safety_cfg_store.c`'s
    existing `caller_stack_is_external()` guard; `profiles_http.c`'s
@@ -193,19 +190,20 @@ were considered and deliberately excluded:
   tool.
 
 Flash is not a constraint either, and no part of this plan should be justified
-by flash pressure: `KilnCtrl.bin` is 1,924,496 B against a 3,145,728 B app slot
-(39% free, ~1.22 MB headroom).
+by flash pressure. `FLASH_BUDGET_PLAN.md` §4.2 owns that number (1,936,320 B
+against a 3,145,728 B app slot at `eb17ea5`, 38.4% free); do not restate it
+here.
 
 ---
 
-## 2. Current configuration (measured, from `sdkconfig`)
+## 2. Current configuration (measured, from `sdkconfig`, 2026-09-02)
 
 ```
 CONFIG_SPIRAM=y
 CONFIG_SPIRAM_MODE_OCT=y
 CONFIG_SPIRAM_SPEED_40M=y
 CONFIG_SPIRAM_USE_MALLOC=y
-CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=16384
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=8192
 CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=32768
 CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
 CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY=y
@@ -319,13 +317,11 @@ cannot show whether a phase helped.
 **Step 1 landed (`a0b8711`): `sdkconfig.defaults` now sets 16384 -> 8192.
 NOT soaked yet.**
 
-**This change is currently INERT on the board being worked on.**
-`firmware/KilnFW/sdkconfig` is gitignored and still holds 16384 — the
-ESP-IDF build log confirms it builds from that stale value, not from
-`sdkconfig.defaults`. Anyone relying on this step being live must first
-regenerate `sdkconfig` (`idf.py reconfigure` or a clean build dir) and
-re-measure. Do not assume the step-down below has any effect on the running
-board until that is done.
+**The generated `sdkconfig` now carries 8192 too** (`sdkconfig:1886`,
+checked 2026-09-02), so the step is no longer inert in the build — it was
+while `sdkconfig` still held the stale 16384. It remains **unsoaked**: no
+measurement has been taken against it, and §4.3's baseline was never
+captured, so there is nothing to compare a post-change number to.
 
 `sdkconfig.defaults` already carries a 2026-08-20 note, not previously cited
 in this plan, that ALWAYSINTERNAL=4096 was tried and reverted on hardware:
@@ -453,14 +449,12 @@ invisible in 3.1" note above is stale. Both instances now report. This
 closes that half of 4.2; the other tasks listed in 4.2 still need
 registering.
 
-`STACK_MARGIN_MAX_TASKS` is 28 (`stack_margin.h:64`); this session's
-reporting session claimed all 28 slots are now in use with no spares and
-that `/api/status` JSON headroom is down to ~100 B of its 4096 B buffer —
-both plausible given the count of registration call sites (51, several
-conditional on which link/board variant is built) but not independently
-re-verified against a live board here. Confirm the live count before relying
-on it; if true, any further task added to 4.2's coverage list needs either a
-slot freed elsewhere or the cap raised.
+`STACK_MARGIN_MAX_TASKS` is 40 (`stack_margin.h:83`), raised from 28 by
+`e263b14` against a real boot-time registration count of 29 — see the
+cap-raise note in §7.2. The `/api/status` JSON headroom claim from an earlier
+pass (~100 B of 4096 B) was never verified against a live board and is not
+relied on anywhere here; this registry is not exposed in `/api/status` at all
+(only over `INFO_CMD_GET_STACK_MARGIN`).
 
 ### 7.2 Deliberately internal — do not touch
 
