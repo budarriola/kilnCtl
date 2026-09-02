@@ -225,10 +225,26 @@ float zone_coupling_solve_hold(bool z_qualifies, float z_ff_k_dc, uint8_t zi,
     memset(G, 0, sizeof(G));
     for (uint8_t row = 0; row < n; row++) {
         uint8_t s = members[row];
+        /* PROVENANCE (PID_EXPANSION_PLAN.md sec 3.2, "CORRECTION 2026-09-02d"):
+         * TWO candidate values exist for this cell and only one is ever
+         * used. `ff_k_dc` (used below) is the per-zone STEP-IDENTIFIED DC
+         * gain (autotune_engine.c's single-zone step test) -- always what
+         * runs. The matrix's OWN diagonal cell is the other candidate: it
+         * would come from the SAME rested multi-zone excitation runs as the
+         * off-diagonals it sits beside, and sec 3.2's analysis found it
+         * better supported by the data (lower condition number, better bias
+         * on 2 of 3 zones, wider feasible range) -- but it is NOT available
+         * here: zones_config_get_coupling()'s diagonal cell is contractually
+         * 0 (zones_http.h), and zones_config_set_coupling() refuses a
+         * nonzero one outright, so there is no persisted storage for it on
+         * this board. Sizing the resulting seam (the step this cell's
+         * choice makes at the moment a neighbour joins/leaves the coupled
+         * system) is test_zone_coupling_solve.c's job; see that file and
+         * sec 3.2 for the numbers. Do not swap this for the matrix's own
+         * diagonal without first adding that storage -- see sec 3.2's
+         * "cost" note. */
         float k_dc_s = (s == zi) ? z_ff_k_dc : zones[s].ff_k_dc;
-        G[row][row] = k_dc_s; /* this zone's own diagonal gain -- coupling_coeff[]'s own diagonal
-                               * cell is unused/must-stay-0 by zones_http.c's contract, so it is
-                               * never a source for this entry */
+        G[row][row] = k_dc_s;
         float coupling_row[MAX31856_CHANNEL_COUNT];
         if (!zones_config_get_coupling(s, coupling_row)) {
             continue; /* no row at all for this zone -- every off-diagonal in it stays 0,

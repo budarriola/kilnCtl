@@ -551,16 +551,32 @@ $cmd19 = "call `"$vcvars`" x64 >nul && cl /nologo /W3 /EHsc /std:c11 /I`"$stubDi
 
 Invoke-HostTestExe -Name "run_state_relay_cycles" -ExePath $exe19 -BuildCmd $cmd19
 
+# ---- test_zone_coupling_solve.c: its own TWENTIETH, separate executable --
+# PID_EXPANSION_PLAN.md sec 3.2's "CORRECTION 2026-09-02d" seam-sizing pass.
+# Own executable, same reason test_adaptive_tune.c's exe17 is: it defines
+# its own tiny fake zones_config_get_coupling() (zone_coupling_solve.c's
+# only zones_http.h dependency), which would multiply-define against exe4's
+# or exe17's own fakes of the same name if linked alongside either.
+$exe20 = Join-Path $outDir "kilnctl_host_tests_zone_coupling_solve.exe"
+$zcsObjDir = Join-Path $outDir "zcs"
+New-Item -ItemType Directory -Force -Path $zcsObjDir | Out-Null
+$cmd20 = "call `"$vcvars`" x64 >nul && cl /nologo /W3 /EHsc /I`"$stubDir`" /I`"$commonInc`" /I`"$driversDir`" " +
+        "/Fo:`"$zcsObjDir\\`" /Fe:`"$exe20`" `"$(Join-Path $testDir 'test_zone_coupling_solve.c')`" " +
+        "`"$(Join-Path $driversDir 'zone_coupling_solve.c')`""
+
+Invoke-HostTestExe -Name "zone_coupling_solve" -ExePath $exe20 -BuildCmd $cmd20
+
 # ---- summary ----------------------------------------------------------
 #
-# 18 executables are attempted above (main + zones_http + safety_cfg_http +
+# 19 executables are attempted above (main + zones_http + safety_cfg_http +
 # profile_executor_prestart + autotune_engine_prestart + profiles_http +
 # ota_http + uart_protocol_link_delegate + board_temps + kiln_io_owner +
 # safety_trip_words + safety_trip_decision + safety_link + dashboard_json +
-# telemetry_format + adaptive_tune + event_log + run_state_relay_cycles).
+# telemetry_format + adaptive_tune + event_log + run_state_relay_cycles +
+# zone_coupling_solve).
 # Report how many of those were even built, separately from how many of the
 # built ones passed, so a partial run can never read as a full green suite.
-$totalExpected = 18
+$totalExpected = 19
 Write-Host ""
 Write-Host "Built: $($script:builtExes.Count)/$totalExpected executables"
 if ($script:buildFailures.Count -gt 0) {

@@ -188,6 +188,60 @@ zone's own gain at the seam where neighbours drop in/out of qualification —
 that discontinuity would need to be sized before making the change, not
 just the win above it. No firmware change made here.
 
+**SEAM SIZED, 2026-09-02e.** Hand-solved both diagonal choices against the
+adopted matrix and `ff_k_dc` at dT=30C (the bench dwell's rough operating
+point), at the moment a neighbour joins (extra step introduced by switching
+the diagonal ALONE, isolated from the much larger step the coupling terms
+themselves already introduce at every membership edge):
+
+| pair active | z0 step | z1 step | z2 step |
+|---|---|---|---|
+| z0+z1 | +0.102 | — | — |
+| z0+z2 | +0.069 | — | −0.106 |
+| z1+z2 | — | +0.010 | −0.086 |
+| all three (z0+z1+z2) | +0.059 | −0.006 | −0.093 |
+
+z0 and z2 clear the 0.05-duty "visible bump" bar in most configurations; z1
+does not (its own-diagonal and `ff_k_dc` values are within ~12% of each
+other and the off-diagonal terms further damp it). Reproducible via
+`test_zone_coupling_solve.c`'s hand-solved constants.
+
+**Reachable? Yes, but already absorbed.** `heat_blocked` is refreshed every
+tick by `apply_relay()`, so a marginal interlock or OTA heat-block can flip
+a neighbour's qualification at tick rate — membership churn is a normal,
+observed occurrence ("every commissioned kiln sees a few of these across a
+run," per `profile_executor_feedforward.c`'s own comment), not a rare edge
+case. However, `pid_family_zone_tick()` already re-seeds the PID integral to
+the CURRENTLY COMMANDED duty on every `ff_membership_changed` edge (Opus
+review round 3, item 3, landed before this analysis) — specifically so a
+feedforward discontinuity of any size at a membership edge never reaches the
+heater as a commanded-duty step; it only reshapes how the integral converges
+afterward. That mechanism does not care which candidate produced the
+discontinuity, so switching the diagonal source does not introduce a new
+*class* of risk here — the seam sizes above bound how much MORE work the
+reseed is doing, not whether a bump escapes it.
+
+**Not implemented.** The remaining blocker is data availability, not the
+discontinuity: `zones_config_get_coupling()`'s diagonal cell is
+contractually 0 and `zones_config_set_coupling()` refuses a nonzero one, so
+the matrix's own diagonal has nowhere to live on the board today — sec 3.2's
+own-diagonal figures came from offline analysis (`coupled_ident.py`), never
+from an on-board identification pass. Making the switch real needs: a new
+per-zone persisted field (one float, not a full row — the off-diagonals
+already have one), a `zones_config_get/set_coupling_own_diag()` pair
+mirroring `zones_config_get/set_model()`'s discipline, a `ZONES_CFG_VERSION`
+bump with a migration step (12->13, following the 10->11/11->12 pattern
+above), an HTTP field to let the owner post a measured value, and a
+`backup_http.c` round-trip for it — roughly the same size as the v10->v11
+coupling-matrix widening already shipped. Proposed as the next step, not
+done here: `backup_http.c` is out of scope for this pass and a schema bump
+touching it should not be split across two authors' commits.
+
+Made explicit in code instead (`zone_coupling_solve.c`, the `G[row][row]`
+assignment): a doc comment naming both candidates, why `ff_k_dc` is the one
+used, and pointing at this section and `test_zone_coupling_solve.c` for the
+seam numbers and the falsifiable pin on today's choice.
+
 **ADOPTED 2026-09-02 (owner decision).** Every cell has exactly one
 observation — no redundancy, no error bar — and that caveat travels with the
 numbers, not just this paragraph. Reproducible from checked-in logs via
