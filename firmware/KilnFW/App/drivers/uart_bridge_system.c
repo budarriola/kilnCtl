@@ -28,6 +28,7 @@
 #include "relay_authority.h"
 #include "settings.h"
 #include "stack_margin.h"
+#include "telemetry_log.h"
 #include "thermo_owner.h"
 #include "uart_task_ids.h"
 #include "wifi_prov.h"
@@ -111,6 +112,25 @@ static void system_bridge_task(void *arg)
                 }
                 bool disabled = msg.payload[1] != 0;
                 watchdog_cfg_set_panic_disabled(disabled, "UART SYSTEM_CMD_SET_WATCHDOG_PANIC_DISABLED");
+                break;
+            }
+            case SYSTEM_CMD_SET_TELEMETRY_ENABLED: {
+                if (!bridge_args_ok("system", &msg, 2)) {
+                    break;
+                }
+                bool enabled = msg.payload[1] != 0;
+                telemetry_log_set_enabled(enabled);
+                break;
+            }
+            case SYSTEM_CMD_GET_TELEMETRY_ENABLED: {
+                uint8_t reply[2];
+                reply[0] = SYSTEM_CMD_GET_TELEMETRY_ENABLED;
+                reply[1] = telemetry_log_is_enabled() ? 1 : 0;
+                esp_err_t err = uart_protocol_send(ctx->proto, msg.device, msg.task_id, UART_TASK_ID_SYSTEM,
+                                                   reply, sizeof(reply), BRIDGE_REPLY_ACK_TIMEOUT_MS);
+                if (err != ESP_OK) {
+                    ESP_LOGW(TAG, "system: GET_TELEMETRY_ENABLED reply failed: %s", esp_err_to_name(err));
+                }
                 break;
             }
             default:

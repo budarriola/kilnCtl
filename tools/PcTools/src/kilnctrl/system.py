@@ -33,6 +33,7 @@ from typing import Optional
 from . import devices
 from .devices import SystemResponseError
 from .protocol import (
+    SYSTEM_CMD_GET_TELEMETRY_ENABLED,
     SYSTEM_CMD_GET_WATCHDOG_PANIC_DISABLED,
     UART_TASK_ID_SYSTEM,
     Device,
@@ -127,7 +128,34 @@ class SystemClient:
         )
         return value  # type: ignore[return-value]
 
+    def get_telemetry_enabled(self, timeout: float = DEFAULT_REPLY_TIMEOUT_S) -> bool:
+        """Ask the device whether the live debug-UART temperature/telemetry
+        feed (telemetry_log.c) is currently enabled.
+
+        Raises :class:`SystemQueryError` on an undelivered request or a
+        missing or malformed reply.
+        """
+        value = self._query(
+            SYSTEM_CMD_GET_TELEMETRY_ENABLED,
+            devices.system_get_telemetry_enabled(),
+            timeout,
+        )
+        return value  # type: ignore[return-value]
+
     # -- fire-and-forget -----------------------------------------------
+    def set_telemetry_enabled(self, enabled: bool) -> SendResult:
+        """Turn the live debug-UART temperature/telemetry feed on or off.
+        No reply frame -- the ACK (reflected in the returned SendResult) is
+        the only confirmation. Poll :meth:`get_telemetry_enabled` afterward
+        to read back the applied value.
+        """
+        return self.link.send(
+            dst_task=self.task_id,
+            src_task=self.task_id,
+            payload=devices.system_set_telemetry_enabled(enabled),
+            dst_device=Device.ESP,
+        )
+
     def set_watchdog_panic_disabled(self, disabled: bool) -> SendResult:
         """Set the task-watchdog panic flag. No reply frame -- the ACK
         (reflected in the returned SendResult) is the only confirmation.

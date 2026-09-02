@@ -20,6 +20,7 @@ TRACK3ZONE_EXCERPT = os.path.join(FIXTURES, "track3zone_excerpt.jsonl")
 TRACK3ZONE_FULL = os.path.join(FIXTURES, "track3zone_full.jsonl")
 RETUNE_Z0C = os.path.join(FIXTURES, "retune_z0c.jsonl")
 Z0_TRACE = os.path.join(FIXTURES, "z0_trace_full.csv")
+UART_CAPTURE_SAMPLE = os.path.join(FIXTURES, "uart_capture", "sample.log")
 
 
 # ---------------------------------------------------------------------------
@@ -586,3 +587,119 @@ def test_render_firing_report_uses_last_run(tmp_path):
     assert report["n_rows"] == 3  # run 2 has 3 polls
     text = la.format_firing_report_text(report)
     assert "2 runs" in text
+
+
+# ---------------------------------------------------------------------------
+# Debug-UART temperature capture (telemetry_capture.py's output shape)
+# ---------------------------------------------------------------------------
+
+def test_parse_profile_exec_uart_capture_checked_in_fixture():
+    """Against tests/fixtures/uart_capture/sample.log -- a synthetic but
+    format-accurate excerpt (three FIRE lines, one TUNE line, one plain boot
+    log line, one "dropped" WARN line, matching telemetry_format.c's exact
+    snprintf field order)."""
+    rows = la.parse_profile_exec_uart_capture(UART_CAPTURE_SAMPLE)
+    # Exactly the 3 FIRE lines -- TUNE/plain/WARN lines must be skipped, not
+    # mis-parsed or counted.
+    assert len(rows) == 3
+
+    first = rows[0]
+    assert first.wall_time == "08:44:10.001"
+    assert first.elapsed_s == pytest.approx(120.0)
+    assert first.segment_index == 0
+    assert first.segment_count == 0  # never carried on the wire -- documented gap
+    assert first.dwelling is False
+    assert first.state == "running"
+    assert first.target_c == pytest.approx(850.0)
+    assert set(first.zones) == {0, 1}
+    assert first.zones[0].actual_c == pytest.approx(820.15)
+    assert first.zones[0].duty == pytest.approx(0.720)
+    assert first.zones[0].ff_hold_used_matrix is True
+    assert first.zones[0].ff_hold_infeasible is False
+
+    third = rows[2]
+    assert third.dwelling is True
+    assert third.segment_index == 1
+    # zone 1's z1_v=0 in the fixture -- must decode as an invalid/NaN
+    # reading, not the literal 0.0 placeholder telemetry_format.c writes for
+    # that case.
+    assert math.isnan(third.zones[1].actual_c)
+    assert third.zones[1].ff_hold_infeasible is True
+
+
+def test_parse_profile_exec_uart_capture_skips_non_fire_lines(tmp_path):
+    p = tmp_path / "mixed.log"
+    p.write_text(
+        "08:00:00.000 I (1) KTEL: KTEL1 TUNE t=10 st=1 meth=0 zone=0 n=1 c=20.0 v=1 duty=0.1\n"
+        "\n"
+        "not a capture line at all\n"
+        "08:00:05.000 W (2) uart_log_bridge: 1 log line(s) dropped (queue full)\n"
+        "08:00:10.000 I (3) KTEL: KTEL1 FIRE t=10 st=1 pid=0 seg=0 dwell=0 tgt=100.0 "
+        "z0_c=90.0 z0_v=1 z0_e=-10.0 z0_d=0.5 z0_fm=0 z0_fi=0\n",
+        encoding="utf-8",
+    )
+    rows = la.parse_profile_exec_uart_capture(str(p))
+    assert len(rows) == 1
+    assert rows[0].elapsed_s == pytest.approx(10.0)
+
+
+def test_parse_ktel_fire_line_rejects_non_fire_text():
+    assert la.parse_ktel_fire_line("I (1) KTEL: KTEL1 TUNE t=10 st=1 meth=0 zone=0 n=1 c=1.0 v=1 duty=0.1") is None
+    assert la.parse_ktel_fire_line("some unrelated boot log line") is None
+
+
+def test_parse_profile_exec_uart_capture_equivalent_to_http_capture(tmp_path):
+    """Round-trip proof: the same underlying sample (one 2-zone poll) fed
+    through the UART-capture path and through poll_row_from_exec_body (the
+    function the HTTP-capture path -- http_capture_log.py -- and the JSONL
+    poll-capture path both already share) must produce PollRows that agree
+    on every field the wire format actually carries.
+
+    ``segment_count`` is excluded from the comparison and asserted
+    separately: it is a documented, wire-format gap for the UART source (see
+    parse_ktel_fire_line's docstring), not an equivalence failure.
+    """
+    exec_body = {
+        "elapsed_s": 77,
+        "segment_index": 2,
+        "segment_count": 5,  # present in the HTTP body; absent on the wire
+        "dwelling": True,
+        "target_c": 900.25,
+        "state": "running",
+        "zones": [
+            {"zone": 0, "actual_c": 880.5, "duty": 0.81, "ff_hold_used_matrix": True, "ff_hold_infeasible": False},
+            {"zone": 1, "actual_c": 875.0, "duty": 0.79, "ff_hold_used_matrix": False, "ff_hold_infeasible": True},
+        ],
+    }
+    http_row = la.poll_row_from_exec_body("12:00:00", exec_body)
+
+    # The equivalent line telemetry_format_firing() would have produced for
+    # this same status snapshot (st=1 running, dwell=1). Field values and
+    # order match telemetry_format.c's snprintf exactly.
+    uart_line = (
+        "12:00:00.000 I (1) KTEL: KTEL1 FIRE t=77 st=1 pid=0 seg=2 dwell=1 tgt=900.25 "
+        "z0_c=880.50 z0_v=1 z0_e=-19.75 z0_d=0.810 z0_fm=1 z0_fi=0 "
+        "z1_c=875.00 z1_v=1 z1_e=-25.25 z1_d=0.790 z1_fm=0 z1_fi=1\n"
+    )
+    p = tmp_path / "one_line.log"
+    p.write_text(uart_line, encoding="utf-8")
+    uart_rows = la.parse_profile_exec_uart_capture(str(p))
+    assert len(uart_rows) == 1
+    uart_row = uart_rows[0]
+
+    assert uart_row.elapsed_s == pytest.approx(http_row.elapsed_s)
+    assert uart_row.segment_index == http_row.segment_index
+    assert uart_row.dwelling == http_row.dwelling
+    assert uart_row.target_c == pytest.approx(http_row.target_c)
+    assert uart_row.state == http_row.state
+    assert set(uart_row.zones) == set(http_row.zones)
+    for zone in http_row.zones:
+        u, h = uart_row.zones[zone], http_row.zones[zone]
+        assert u.actual_c == pytest.approx(h.actual_c)
+        assert u.duty == pytest.approx(h.duty)
+        assert u.ff_hold_used_matrix == h.ff_hold_used_matrix
+        assert u.ff_hold_infeasible == h.ff_hold_infeasible
+
+    # The one field that is NOT equivalent, and why.
+    assert http_row.segment_count == 5
+    assert uart_row.segment_count == 0

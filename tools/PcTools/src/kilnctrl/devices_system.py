@@ -66,34 +66,65 @@ def system_set_watchdog_panic_disabled(disabled: bool) -> bytes:
     return struct.pack("<BB", SYSTEM_CMD_SET_WATCHDOG_PANIC_DISABLED, 1 if disabled else 0)
 
 
+def system_get_telemetry_enabled() -> bytes:
+    """0x06 GET_TELEMETRY_ENABLED request: byte0 = subcommand, no args.
+
+    Query -- like GET_WATCHDOG_PANIC_DISABLED, ACKed for delivery only, with
+    the answer arriving as a separate DATA frame; see
+    :func:`parse_system_response`.
+    """
+    return struct.pack("<B", SYSTEM_CMD_GET_TELEMETRY_ENABLED)
+
+
+def system_set_telemetry_enabled(enabled: bool) -> bytes:
+    """0x05 SET_TELEMETRY_ENABLED: byte1 = enabled(0/1).
+
+    Turns the live debug-UART firing/autotune temperature telemetry feed
+    (telemetry_log.c's ESP_LOGI lines, task :data:`UART_TASK_ID_LOG`) on or
+    off. Applies within one telemetry-task tick (<=1s), no reboot. No reply
+    frame -- the ACK is the only confirmation; poll
+    :func:`system_get_telemetry_enabled` afterward to read back the applied
+    value.
+    """
+    return struct.pack("<BB", SYSTEM_CMD_SET_TELEMETRY_ENABLED, 1 if enabled else 0)
+
+
 class SystemResponseError(ValueError):
     """Raised when a SYSTEM response payload does not match its wire layout."""
+
+
+#: Subcommands SYSTEM answers with a reply DATA frame (byte0 = echoed
+#: subcommand, byte1 = a 0/1 flag). Every entry here is a *query* -- adding a
+#: new one only requires listing it, not touching the parser below.
+_SYSTEM_QUERY_SUBCOMMANDS = frozenset(
+    {SYSTEM_CMD_GET_WATCHDOG_PANIC_DISABLED, SYSTEM_CMD_GET_TELEMETRY_ENABLED}
+)
 
 
 def parse_system_response(payload: bytes) -> "tuple[int, bool]":
     """Decode a SYSTEM query response payload.
 
     Unlike INFO's replies, SYSTEM replies are self-describing: byte0 echoes
-    the subcommand. Currently only GET_WATCHDOG_PANIC_DISABLED replies (2
-    bytes: byte0 = 0x03, byte1 = disabled(0/1)).
+    the subcommand. Every query subcommand (see
+    :data:`_SYSTEM_QUERY_SUBCOMMANDS`) shares the same 2-byte layout: byte0 =
+    the echoed subcommand, byte1 = a 0/1 flag.
 
     Raises :class:`SystemResponseError` if the payload does not match this
-    layout, including a byte0 that doesn't echo
-    :data:`~kilnctrl.protocol.SYSTEM_CMD_GET_WATCHDOG_PANIC_DISABLED`.
+    layout, including a byte0 that doesn't echo a known query subcommand.
     """
     if len(payload) != 2:
         raise SystemResponseError(
             f"SYSTEM response length mismatch: got {len(payload)} bytes, want 2"
         )
     subcommand = payload[0]
-    if subcommand != SYSTEM_CMD_GET_WATCHDOG_PANIC_DISABLED:
+    if subcommand not in _SYSTEM_QUERY_SUBCOMMANDS:
         raise SystemResponseError(
-            f"SYSTEM response byte0=0x{subcommand:02X} does not echo "
-            f"GET_WATCHDOG_PANIC_DISABLED (0x{SYSTEM_CMD_GET_WATCHDOG_PANIC_DISABLED:02X})"
+            f"SYSTEM response byte0=0x{subcommand:02X} does not echo a known SYSTEM query subcommand "
+            f"({sorted(f'0x{c:02X}' for c in _SYSTEM_QUERY_SUBCOMMANDS)})"
         )
-    disabled = payload[1]
-    if disabled > 1:
-        raise SystemResponseError(f"SYSTEM response disabled flag must be 0 or 1, got {disabled}")
-    return subcommand, bool(disabled)
+    flag = payload[1]
+    if flag > 1:
+        raise SystemResponseError(f"SYSTEM response flag byte must be 0 or 1, got {flag}")
+    return subcommand, bool(flag)
 
 

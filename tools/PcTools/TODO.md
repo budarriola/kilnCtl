@@ -115,6 +115,19 @@ Console capture (`console_capture.py`), per-processor + interleaved log files,
 and PC-arrival-time as the common clock are built. Not yet exercised against a
 real Pico/probe — only synthetic queued events tested.
 
+**Debug-UART temperature telemetry (owner decision 2026-09-02: flash never
+holds per-tick temps, that belongs on the debug UART) — PC side done.**
+`telemetry_capture.py` gives `enable`/`disable`/`status`/`capture` (SYSTEM
+subcommands 0x05/0x06, wired through `telemetry_log_set_enabled()`/
+`telemetry_log_is_enabled()` — `uart_bridge_system.c`, host-tested only, not
+flashed this session). `log_analysis.parse_profile_exec_uart_capture()` reads
+a capture file straight into `PollRow`, per that module's own reserved seam.
+Not yet exercised against a live board — fixture/synthetic tests only (bench
+was mid-firing). Throughput: FIRE lines run ~38 B/s against a 921600-baud PC
+link, ~0.02% of capacity — see `telemetry_capture.py`'s module docstring for
+the full numbers and the shared-queue starvation risk from OTHER log
+traffic.
+
 - [ ] Pico logs emitted as `kilnlink` LOG frames (device `SAFETY`, task 5),
       relayed by the ESP — the primary path once the link is up; still needs
       the link itself

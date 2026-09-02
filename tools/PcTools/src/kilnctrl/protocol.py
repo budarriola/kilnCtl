@@ -209,6 +209,15 @@ SYSTEM_CMD_GET_WATCHDOG_PANIC_DISABLED = 0x03
 #: poll SYSTEM_CMD_GET_WATCHDOG_PANIC_DISABLED afterward to read back the
 #: applied value.
 SYSTEM_CMD_SET_WATCHDOG_PANIC_DISABLED = 0x04
+#: byte1 = enabled(0/1). Calls telemetry_log_set_enabled() (telemetry_log.h)
+#: directly -- the only remote control of the live debug-UART temperature/
+#: telemetry feed (owner decision 2026-09-02: "loging of temps for debug
+#: should be done over the uart interface"). No reply frame -- poll
+#: SYSTEM_CMD_GET_TELEMETRY_ENABLED afterward to read back the applied value.
+SYSTEM_CMD_SET_TELEMETRY_ENABLED = 0x05
+#: Query, same convention as GET_WATCHDOG_PANIC_DISABLED. Reply payload is 2
+#: bytes: byte0 = 0x06 (echoed subcommand), byte1 = enabled(0/1).
+SYSTEM_CMD_GET_TELEMETRY_ENABLED = 0x06
 
 #: FACTORY_RESET scope byte values.
 FACTORY_RESET_SCOPE_WIFI = 0

@@ -1,0 +1,6 @@
+08:44:10.001 I (11234) KTEL: KTEL1 FIRE t=120 st=1 pid=3 seg=0 dwell=0 tgt=850.00 z0_c=820.15 z0_v=1 z0_e=-29.85 z0_d=0.720 z0_fm=1 z0_fi=0 z1_c=810.00 z1_v=1 z1_e=-40.00 z1_d=0.650 z1_fm=0 z1_fi=0
+08:44:10.500 I (11235) uart_bridge: system: telemetry enabled
+08:44:15.003 I (16234) KTEL: KTEL1 FIRE t=125 st=1 pid=3 seg=0 dwell=0 tgt=852.50 z0_c=825.40 z0_v=1 z0_e=-27.10 z0_d=0.705 z0_fm=1 z0_fi=0 z1_c=814.20 z1_v=1 z1_e=-38.30 z1_d=0.640 z1_fm=0 z1_fi=0
+08:44:16.100 W (16400) uart_log_bridge: 2 log line(s) dropped (queue full)
+08:44:20.006 I (21235) KTEL: KTEL1 TUNE t=200 st=1 meth=0 zone=2 n=5 c=400.10 v=1 duty=0.500
+08:44:20.010 I (21236) KTEL: KTEL1 FIRE t=130 st=1 pid=3 seg=1 dwell=1 tgt=855.00 z0_c=830.00 z0_v=1 z0_e=-25.00 z0_d=0.690 z0_fm=1 z0_fi=0 z1_c=819.00 z1_v=0 z1_e=0.00 z1_d=0.000 z1_fm=0 z1_fi=1

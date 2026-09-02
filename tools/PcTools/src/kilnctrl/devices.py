@@ -198,6 +198,8 @@ __all__ = [
     "system_factory_reset",
     "system_get_watchdog_panic_disabled",
     "system_set_watchdog_panic_disabled",
+    "system_get_telemetry_enabled",
+    "system_set_telemetry_enabled",
     "SystemResponseError",
     "parse_system_response",
     # Shared {subcmd, ok, [reason]} reply decoding (ROADMAP.md "KilnFW

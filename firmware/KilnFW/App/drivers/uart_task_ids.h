@@ -1131,11 +1131,30 @@
  * GET_WATCHDOG_PANIC_DISABLED response payload:
  *   byte0 = SYSTEM_CMD_GET_WATCHDOG_PANIC_DISABLED (0x03)
  *   byte1 = disabled(0/1) -- watchdog_cfg_panic_disabled()
+ *
+ *   0x05 SET_TELEMETRY_ENABLED byte1=enabled(0/1) -- calls
+ *                       telemetry_log_set_enabled() (telemetry_log.h)
+ *                       directly; applies on the telemetry task's next tick
+ *                       (<=1s), no reboot. This is the ONLY remote control
+ *                       of the live debug-UART temperature/telemetry feed --
+ *                       without it an operator has no way to turn that feed
+ *                       on/off except hand-crafting this frame or reflashing
+ *                       with a different default. No reply frame -- same
+ *                       "ACK is the only confirmation" convention as
+ *                       SET_WATCHDOG_PANIC_DISABLED; poll
+ *                       GET_TELEMETRY_ENABLED afterward to read back.
+ *   0x06 GET_TELEMETRY_ENABLED (no args) -- QUERY, telemetry_log_is_enabled().
+ *
+ * GET_TELEMETRY_ENABLED response payload:
+ *   byte0 = SYSTEM_CMD_GET_TELEMETRY_ENABLED (0x06)
+ *   byte1 = enabled(0/1) -- telemetry_log_is_enabled()
  */
 #define SYSTEM_CMD_RESTART_UART  0x01u
 #define SYSTEM_CMD_FACTORY_RESET 0x02u
 #define SYSTEM_CMD_GET_WATCHDOG_PANIC_DISABLED 0x03u
 #define SYSTEM_CMD_SET_WATCHDOG_PANIC_DISABLED 0x04u
+#define SYSTEM_CMD_SET_TELEMETRY_ENABLED 0x05u
+#define SYSTEM_CMD_GET_TELEMETRY_ENABLED 0x06u
 
 /* --- INFO (task_id = UART_TASK_ID_INFO) ---
  * Unlike the device tasks, this is a query: the requester's DATA frame

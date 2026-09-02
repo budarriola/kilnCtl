@@ -10,9 +10,9 @@ pure-Python reader over three input shapes:
     ``dashboard_http.c`` / ``autotune_engine.c`` for the field definitions).
   * the board's own CSV exports: ``/api/history.csv`` and
     ``/api/autotune/trace.csv``.
-  * (future) a structured telemetry file from the debug-UART capture another
-    agent is building tonight. See ``SOURCE KINDS`` below for where that
-    plugs in -- nothing else in this module should need to change.
+  * the debug-UART temperature capture (``telemetry_capture.py``): one line
+    per FIRE tick, ``HH:MM:SS.mmm <level> <raw ESP_LOGI text>``, decoded by
+    ``parse_profile_exec_uart_capture()``. See ``SOURCE KINDS`` below.
 
 Everything downstream (windowing, stats, the FOPDT refit, comparisons) works
 on the small, source-agnostic dataclasses defined here (``PollRow``,
@@ -48,6 +48,7 @@ import csv
 import dataclasses
 import json
 import math
+import re
 import sys
 from typing import Iterable, Optional, Sequence
 
@@ -56,13 +57,14 @@ from typing import Iterable, Optional, Sequence
 # SOURCE KINDS -- where a new telemetry source plugs in.
 #
 # Every parser in this file ends by producing a list of PollRow (firing) or
-# AutotuneRow (tune) records. The structured UART telemetry stream being
-# built tonight is a third source of PollRow/AutotuneRow data; once its file
-# format is known, add one function here --
-# ``parse_profile_exec_uart_capture(path) -> list[PollRow]`` -- that emits
-# the same dataclass, and every analysis function below (windowing, stats,
-# settle time, comparisons) works unmodified. Nothing about the analysis
-# layer should need to know which of the three sources produced its input.
+# AutotuneRow (tune) records. ``parse_profile_exec_uart_capture()`` is the
+# third source (debug-UART temperature telemetry, ``telemetry_capture.py``):
+# it emits the same ``PollRow`` dataclass as the other two, so every analysis
+# function below (windowing, stats, settle time, comparisons) works on it
+# unmodified. Nothing about the analysis layer needs to know which of the
+# three sources produced its input. One field does NOT survive this source:
+# ``segment_count`` is always 0 (the wire format never carries it) -- see
+# ``parse_ktel_fire_line()``'s docstring.
 # ---------------------------------------------------------------------------
 
 
@@ -201,6 +203,119 @@ def parse_profile_exec_jsonl(path: str) -> list[PollRow]:
             if "zones" not in body or "dwelling" not in body:
                 continue
             rows.append(poll_row_from_exec_body(wall_time, body))
+    return rows
+
+
+#: Matches one telemetry_format.c FIRE line's header, e.g.
+#: "KTEL1 FIRE t=125 st=1 pid=3 seg=0 dwell=0 tgt=850.00". Captured lines are
+#: whatever ``uart_log_bridge.c`` forwarded from ESP_LOGI -- ESP-IDF's usual
+#: "I (12345) KTEL: <message>" preamble (color codes already stripped by the
+#: bridge) -- so this is matched anywhere in the line, not anchored to its
+#: start. See telemetry_format.c's own snprintf format string for the
+#: authoritative field list this mirrors.
+_KTEL_FIRE_RE = re.compile(
+    r"KTEL(?P<ver>\d+)\s+FIRE\s+t=(?P<t>\d+)\s+st=(?P<st>\d+)\s+pid=(?P<pid>\d+)\s+"
+    r"seg=(?P<seg>\d+)\s+dwell=(?P<dwell>\d+)\s+tgt=(?P<tgt>-?[\d.]+)(?P<zones>.*)$"
+)
+#: One zone's key=value run within a FIRE line's tail, e.g.
+#: "z0_c=820.15 z0_v=1 z0_e=-29.85 z0_d=0.720 z0_fm=1 z0_fi=0".
+_KTEL_ZONE_RE = re.compile(
+    r"z(?P<zi>\d+)_c=(?P<c>-?[\d.]+)\s+z\1_v=(?P<v>\d+)\s+z\1_e=-?[\d.]+\s+"
+    r"z\1_d=(?P<d>-?[\d.]+)\s+z\1_fm=(?P<fm>\d+)\s+z\1_fi=(?P<fi>\d+)"
+)
+
+#: profile_exec_state_t (profile_executor.h) enum order, matching
+#: dashboard_http.c's own profile_exec_state_str() string mapping exactly --
+#: the wire only carries the numeral (st=), never the name.
+_PROFILE_EXEC_STATE_NAMES = ["idle", "running", "paused", "done", "faulted"]
+
+
+def _profile_exec_state_name(value: int) -> str:
+    if 0 <= value < len(_PROFILE_EXEC_STATE_NAMES):
+        return _PROFILE_EXEC_STATE_NAMES[value]
+    return str(value)  # unknown enum value -- surface it rather than mask it
+
+
+def parse_ktel_fire_line(text: str) -> Optional[PollRow]:
+    """Parse one ``telemetry_format_firing()`` FIRE line's text into a
+    ``PollRow``, or ``None`` if ``text`` doesn't contain a FIRE line at all
+    (a TUNE line, a plain boot/status log line, or a truncated capture).
+
+    ``PollRow.segment_count`` is always 0 here -- the wire format
+    (telemetry_format.c) never carries it, only ``segment_index``. Nothing
+    in this module's windowing/stats/sanity-check functions reads
+    ``segment_count``, so this is a documented gap rather than a
+    fabricated value.
+
+    A zone with ``z<i>_v=0`` (``actual_valid`` false on the firmware side)
+    gets ``actual_c=nan``, matching ``_zone_samples_from_exec_body``'s own
+    convention for a missing/invalid reading, even though the wire line
+    itself carries a literal 0.0 placeholder for that case (see
+    telemetry_format.c: ``float actual = z->actual_valid ? z->actual_c :
+    0.0f;``) -- this function undoes that placeholder rather than passing
+    it through as a real temperature.
+    """
+    m = _KTEL_FIRE_RE.search(text)
+    if m is None:
+        return None
+    zones: dict[int, ZoneSample] = {}
+    for zm in _KTEL_ZONE_RE.finditer(m.group("zones")):
+        valid = zm.group("v") == "1"
+        zones[int(zm.group("zi"))] = ZoneSample(
+            zone=int(zm.group("zi")),
+            actual_c=float(zm.group("c")) if valid else math.nan,
+            duty=float(zm.group("d")),
+            ff_hold_used_matrix=zm.group("fm") == "1",
+            ff_hold_infeasible=zm.group("fi") == "1",
+        )
+    return PollRow(
+        wall_time="",  # filled in by the caller, which has the capture-line timestamp
+        elapsed_s=float(m.group("t")),
+        segment_index=int(m.group("seg")),
+        segment_count=0,
+        dwelling=m.group("dwell") != "0",
+        target_c=float(m.group("tgt")),
+        state=_profile_exec_state_name(int(m.group("st"))),
+        zones=zones,
+    )
+
+
+#: A capture line as ``telemetry_capture.py``'s CLI writes it:
+#: "HH:MM:SS.mmm <level-letter> <raw ESP_LOGI text>". Only the wall-clock
+#: prefix and the rest-of-line text matter here; the level letter is
+#: ignored (FIRE lines are always emitted at INFO, but tolerating any level
+#: means a line re-tagged by a future firmware change still parses).
+_UART_CAPTURE_LINE_RE = re.compile(r"^(?P<wall>\d{2}:\d{2}:\d{2}(?:\.\d+)?)\s+\S\s+(?P<text>.*)$")
+
+
+def parse_profile_exec_uart_capture(path: str) -> list[PollRow]:
+    """Parse a ``telemetry_capture.py``-captured debug-UART temperature feed
+    into ``PollRow`` records -- the third source kind this module's docstring
+    (see "SOURCE KINDS" above) reserved a seam for.
+
+    Every line that is not a FIRE line (a TUNE line, a plain log line, a
+    dropped-lines warning, a blank/truncated line) is skipped, same
+    tolerance as :func:`parse_profile_exec_jsonl` for a capture running for
+    hours over a real link. Once located, a FIRE line's fields are handed to
+    :func:`parse_ktel_fire_line`, which is what everything downstream
+    (windowing, IAE, transitions, comparisons) actually consumes -- this
+    function's only job is finding the wall-clock label and text for each
+    line, the same division of labor ``http_capture_log.py`` uses for its
+    own envelope.
+    """
+    rows: list[PollRow] = []
+    with open(path, "r", encoding="utf-8") as fh:
+        for line in fh:
+            line = line.rstrip("\n")
+            if not line:
+                continue
+            m = _UART_CAPTURE_LINE_RE.match(line)
+            text = m.group("text") if m is not None else line
+            wall_time = m.group("wall") if m is not None else ""
+            row = parse_ktel_fire_line(text)
+            if row is None:
+                continue
+            rows.append(dataclasses.replace(row, wall_time=wall_time))
     return rows
 
 
