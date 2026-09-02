@@ -538,6 +538,22 @@ bool zones_config_get_relay_name(uint8_t relay_n, char *out, size_t out_cap);
 bool zones_config_set_relay_name(uint8_t relay_n, const char *name);
 
 
+/* PID_EXPANSION_PLAN.md 3.3, "consolidate the opt-in flag into the zone
+ * config blob": adaptive_tune.c's per-zone continuous-tuning opt-in,
+ * consolidated here (ZONES_CFG_VERSION 13->14) out of that module's own
+ * former 'adap_tune' NVS namespace. Same "false means off (or out-of-range,
+ * same answer either way)" convention as every other simple per-zone flag
+ * in this file -- there is no separate "cannot answer" case, unlike the
+ * model_ and tuning_ getters above: opt-in is always meaningful, and its documented default
+ * is OFF, so an out-of-range zone reading as "not enabled" is exactly
+ * right, not a getter failure being mistaken for a real answer. */
+bool zones_config_get_adaptive_tune_enabled(uint8_t zone_index);
+
+/* Setter for the getter above. Persists immediately (nvs_save()), same
+ * discipline as every setter in this file -- see zones_config_set_pid()'s
+ * own header comment for the "own the write" convention this follows. */
+bool zones_config_set_adaptive_tune_enabled(uint8_t zone_index, bool enabled);
+
 bool zones_config_get_pid(uint8_t zone_index, float *out_kp, float *out_ki, float *out_kd);
 
 /* Writer for pid_autotune's results-acceptance flow (TODO.md 6A.4:

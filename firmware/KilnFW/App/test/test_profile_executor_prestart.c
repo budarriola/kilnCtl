@@ -641,6 +641,21 @@ bool zones_config_set_pid(uint8_t zone_index, float kp, float ki, float kd)
     (void)zone_index; (void)kp; (void)ki; (void)kd;
     return true;
 }
+/* U2 (2026-09-01, PID_EXPANSION_PLAN.md 3.3 "consolidate the opt-in flag"):
+ * adaptive_tune.c's opt-in getter/setter now reach into zones_config
+ * directly (adaptive_tune_load_enable_flags()/adaptive_tune_set_enabled()),
+ * needing these two link-time stand-ins alongside the pair above -- same
+ * "link succeeds, no zone ever actually opts in" posture as those. */
+bool zones_config_get_adaptive_tune_enabled(uint8_t zone_index)
+{
+    (void)zone_index;
+    return false;
+}
+bool zones_config_set_adaptive_tune_enabled(uint8_t zone_index, bool enabled)
+{
+    (void)zone_index; (void)enabled;
+    return true;
+}
 /* S2 (2026-09-01 audit of ae5905f, corrected 2026-09-01 re-audit): this file
  * used to define its OWN bare `fn(arg); return ESP_OK;` stub here, with a
  * fixed `uart_bridge_ext_is_on_flash_worker() { return false; }` justified
@@ -795,6 +810,170 @@ static void test_get_history_empty_before_start(void)
     profile_history_entry_t buf[4];
     size_t n = profile_executor_get_history(buf, 0, 4);
     TEST_CHECK(n == 0, "get_history must copy nothing before the executor has ever started");
+}
+
+// 2026-09-01 multi-zone history fix (owner: "the duty cycle and all of the
+// zones are not always visible on the web graph"): history_pack()/
+// history_unpack() are plain functions on caller-supplied data -- no
+// s_exec.lock needed, reachable directly since this file #includes
+// profile_executor.c. Covers exactly what TODO'd this fix: every active
+// zone's actual/duty/guard now round-trips independently instead of one
+// representative zone's.
+static void test_history_pack_unpack_multi_zone_round_trip(void)
+{
+    TEST_SECTION("history_pack()/history_unpack() -- every zone's actual/duty/guard round-trips independently, "
+                 "desired_c stays a single shared value");
+    history_slot_t slot;
+    float actual_c[MAX31856_CHANNEL_COUNT] = { 123.4f, 500.0f, -10.5f };
+    float duty[MAX31856_CHANNEL_COUNT] = { 0.0f, 0.5f, 1.0f };
+    uint8_t guard[MAX31856_CHANNEL_COUNT] = { 0, 2, 7 };
+    history_pack(&slot, 90u, 77.7f, actual_c, duty, guard, 0 /* every zone active */);
+
+    profile_history_entry_t out;
+    history_unpack(&slot, &out);
+
+    TEST_CHECK(out.elapsed_s == 90u, "elapsed_s round-trips (exact multiple of HISTORY_SAMPLE_PERIOD_S here)");
+    TEST_CHECK(fabsf(out.desired_c - 77.7f) < 0.05f, "desired_c (shared setpoint) round-trips at 0.1 degC resolution");
+    for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+        TEST_CHECK(fabsf(out.actual_c[zi] - actual_c[zi]) < 0.05f, "actual_c round-trips per zone at 0.1 degC res");
+        TEST_CHECK(fabsf(out.duty[zi] - duty[zi]) < 0.006f, "duty round-trips per zone at whole-percent resolution");
+        TEST_CHECK(out.guard[zi] == guard[zi], "guard round-trips per zone");
+    }
+
+    // NEGATIVE: changing only zone 1's guard must change only zone 1's
+    // unpacked guard -- proves this isn't secretly one shared field, and
+    // that the check above isn't vacuously true regardless of packing.
+    guard[1] = 3;
+    history_pack(&slot, 90u, 77.7f, actual_c, duty, guard, 0);
+    history_unpack(&slot, &out);
+    TEST_CHECK(out.guard[1] == 3, "packing a changed zone-1 guard must change what unpacks back out for zone 1");
+    TEST_CHECK(out.guard[0] == 0 && out.guard[2] == 7, "and must NOT change zones 0/2's own guard values");
+}
+
+static void test_history_pack_invalid_sentinels(void)
+{
+    TEST_SECTION("history_pack() -- NAN actual/duty pack to the documented HISTORY_TEMP_INVALID/"
+                 "HISTORY_DUTY_INVALID sentinels, not garbage, and a real neighbouring reading is unaffected");
+    history_slot_t slot;
+    float actual_c[MAX31856_CHANNEL_COUNT] = { NAN, 50.0f, NAN };
+    float duty[MAX31856_CHANNEL_COUNT] = { 0.2f, NAN, NAN };
+    uint8_t guard[MAX31856_CHANNEL_COUNT] = { 0, 0, 0 };
+    history_pack(&slot, 0, NAN, actual_c, duty, guard, 0);
+
+    TEST_CHECK(slot.actual_dc[0] == HISTORY_TEMP_INVALID, "NAN actual_c packs to HISTORY_TEMP_INVALID");
+    TEST_CHECK(slot.actual_dc[2] == HISTORY_TEMP_INVALID, "same for zone 2");
+    TEST_CHECK(slot.duty_pct[1] == HISTORY_DUTY_INVALID, "NAN duty packs to HISTORY_DUTY_INVALID");
+    TEST_CHECK(slot.duty_pct[2] == HISTORY_DUTY_INVALID, "same for zone 2 (both actual and duty NAN there)");
+    TEST_CHECK(slot.desired_dc == HISTORY_TEMP_INVALID, "NAN desired_c packs to HISTORY_TEMP_INVALID too");
+
+    profile_history_entry_t out;
+    history_unpack(&slot, &out);
+    TEST_CHECK(isnan(out.actual_c[0]), "unpack reverses the sentinel back to NAN, not e.g. -3276.8");
+    TEST_CHECK(isnan(out.duty[1]), "same for duty");
+    TEST_CHECK(isnan(out.desired_c), "same for desired_c");
+
+    // NEGATIVE: zone 1's actual_c was a genuine reading (50.0), not NAN --
+    // prove it did NOT collide with the sentinel or get clobbered by its
+    // neighbours' NaNs.
+    TEST_CHECK(slot.actual_dc[1] != HISTORY_TEMP_INVALID, "a genuine reading must not collide with the sentinel");
+    TEST_CHECK(!isnan(out.actual_c[1]) && fabsf(out.actual_c[1] - 50.0f) < 0.05f,
+              "zone 1's real reading survives round-trip unmolested by neighbours' NaNs");
+}
+
+static void test_history_pack_inactive_zone_mask(void)
+{
+    TEST_SECTION("history_pack() -- inactive_mask forces HISTORY_TEMP_INVALID/HISTORY_DUTY_INVALID/guard 0 for "
+                 "the zones it marks, not whatever the caller's actual_c/duty/guard arrays happened to hold there");
+    history_slot_t slot;
+    // Zones 0/2 are deliberately "poisoned" with plausible-looking values a
+    // real bug (e.g. forgetting to skip an inactive zone upstream) could
+    // leak through -- the mask must win regardless of what's in these arrays.
+    float actual_c[MAX31856_CHANNEL_COUNT] = { 999.0f, 111.0f, 222.0f };
+    float duty[MAX31856_CHANNEL_COUNT] = { 0.9f, 0.3f, 0.7f };
+    uint8_t guard[MAX31856_CHANNEL_COUNT] = { 5, 4, 6 };
+    uint8_t inactive_mask = (uint8_t)((1u << 0) | (1u << 2)); // zones 0 and 2 not in this run; zone 1 is
+    history_pack(&slot, 0, 40.0f, actual_c, duty, guard, inactive_mask);
+
+    TEST_CHECK(slot.actual_dc[0] == HISTORY_TEMP_INVALID, "inactive zone 0 must not carry the caller's actual_c");
+    TEST_CHECK(slot.actual_dc[2] == HISTORY_TEMP_INVALID, "same for inactive zone 2");
+    TEST_CHECK(slot.duty_pct[0] == HISTORY_DUTY_INVALID && slot.duty_pct[2] == HISTORY_DUTY_INVALID,
+              "inactive zones' duty must be the invalid sentinel too");
+    TEST_CHECK(slot.guard[0] == 0 && slot.guard[2] == 0,
+              "inactive zones must report guard 0 (none), not a stale/poisoned reason code");
+
+    // NEGATIVE: the ONE active zone (1) must still pack its real values --
+    // proves inactive_mask is per-bit, not silently blanking the whole slot.
+    TEST_CHECK(fabsf(history_unpack_temp(slot.actual_dc[1]) - 111.0f) < 0.05f,
+              "the active zone's real actual_c must still be packed");
+    TEST_CHECK(slot.guard[1] == 4, "the active zone's real (non-zero) guard value must still be packed");
+}
+
+// profile_executor_get_history()'s oldest-first unwrap, exercised directly
+// with a hand-populated PSRAM-style buffer (same xSemaphoreCreateMutex()
+// pattern test_pause_keeps_claim_resume_reclaims_it() above uses to reach
+// functions gated on s_exec.lock without a full profile_executor_start()).
+// Covers the wrap-around case TODO'd for this fix: once history_count has
+// reached HISTORY_MAX_SAMPLES, the oldest entry is at history_head, not
+// index 0 -- get_history() silently returns the wrong slice if that regresses.
+static void test_get_history_multi_zone_and_wraparound(void)
+{
+    TEST_SECTION("profile_executor_get_history() -- multi-zone unpack, oldest-first ordering, and the "
+                 "wrap-around case once history_count == HISTORY_MAX_SAMPLES");
+    s_exec.lock = xSemaphoreCreateMutex();
+    s_exec.history = heap_caps_malloc(sizeof(history_slot_t) * HISTORY_MAX_SAMPLES, MALLOC_CAP_SPIRAM);
+    TEST_CHECK(s_exec.history != NULL, "test setup: history buffer allocation must succeed");
+    memset(s_exec.history, 0, sizeof(history_slot_t) * HISTORY_MAX_SAMPLES);
+
+    // Every slot's elapsed_periods == its own array index, so ordering is
+    // directly checkable; zone 2 is marked inactive throughout, simulating a
+    // run that never used it.
+    for (uint16_t i = 0; i < HISTORY_MAX_SAMPLES; i++) {
+        float actual_c[MAX31856_CHANNEL_COUNT] = { (float)i, (float)i + 0.5f, NAN };
+        float duty[MAX31856_CHANNEL_COUNT] = { 0.1f, 0.2f, 0.3f };
+        uint8_t guard[MAX31856_CHANNEL_COUNT] = { 0, 0, 0 };
+        history_pack(&s_exec.history[i], (uint32_t)i * HISTORY_SAMPLE_PERIOD_S, 20.0f, actual_c, duty, guard,
+                    (uint8_t)(1u << 2));
+    }
+    // Simulate a ring that has JUST wrapped: full, with history_head (next
+    // write slot) at index 2 -- so index 2 is the OLDEST surviving sample and
+    // index 1 (head - 1, mod) is the newest.
+    s_exec.history_count = HISTORY_MAX_SAMPLES;
+    s_exec.history_head = 2;
+
+    TEST_CHECK(profile_executor_get_history_count() == HISTORY_MAX_SAMPLES, "count reports the full ring once wrapped");
+
+    profile_history_entry_t out[5];
+    size_t n = profile_executor_get_history(out, 0, 5);
+    TEST_CHECK(n == 5, "must return exactly the number requested when that many remain");
+    TEST_CHECK(out[0].elapsed_s == (uint32_t)2 * HISTORY_SAMPLE_PERIOD_S,
+              "the OLDEST entry after a wrap is at history_head (index 2), not index 0 -- the case that silently "
+              "returns the wrong slice if the oldest/newest math regresses");
+    TEST_CHECK(out[1].elapsed_s == (uint32_t)3 * HISTORY_SAMPLE_PERIOD_S, "chronological order continues forward");
+    TEST_CHECK(out[4].elapsed_s == (uint32_t)6 * HISTORY_SAMPLE_PERIOD_S, "5th entry is index 6, still walking forward");
+
+    for (size_t k = 0; k < n; k++) {
+        TEST_CHECK(!isnan(out[k].actual_c[0]) && !isnan(out[k].actual_c[1]), "both active zones' traces come back "
+                                                                              "on every sample");
+        TEST_CHECK(isnan(out[k].actual_c[2]), "the zone this simulated run never had active stays NAN throughout, "
+                                              "not leaking a stale/zeroed reading");
+    }
+
+    profile_history_entry_t last_batch[3];
+    size_t n2 = profile_executor_get_history(last_batch, HISTORY_MAX_SAMPLES - 3, 3);
+    TEST_CHECK(n2 == 3, "must return the tail of the ring even when start_index is near history_count");
+    TEST_CHECK(last_batch[2].elapsed_s == (uint32_t)1 * HISTORY_SAMPLE_PERIOD_S,
+              "the newest entry (index 1, one before history_head) really is chronologically last");
+
+    // NEGATIVE: start_index at/past history_count returns nothing rather
+    // than reading past the ring.
+    profile_history_entry_t none[1];
+    size_t n3 = profile_executor_get_history(none, HISTORY_MAX_SAMPLES, 1);
+    TEST_CHECK(n3 == 0, "start_index == history_count must return 0, not read past the ring");
+
+    free(s_exec.history);
+    s_exec.history = NULL;
+    s_exec.history_count = 0;
+    s_exec.history_head = 0;
 }
 
 static void test_get_status_reports_well_formed_idle_before_start(void)
@@ -4660,6 +4839,10 @@ void run_test_profile_executor_prestart(void)
     test_pause_resume_refuse_before_start();
     test_zone_is_active_false_before_start();
     test_get_history_empty_before_start();
+    test_history_pack_unpack_multi_zone_round_trip();
+    test_history_pack_invalid_sentinels();
+    test_history_pack_inactive_zone_mask();
+    test_get_history_multi_zone_and_wraparound();
     test_get_status_reports_well_formed_idle_before_start();
     test_escalate_guard_trip_global_releases_relay_claim();
     test_escalate_guard_trip_abort_policy_releases_relay_claim();

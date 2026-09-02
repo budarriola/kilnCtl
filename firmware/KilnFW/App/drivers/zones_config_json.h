@@ -59,7 +59,7 @@ extern "C" {
  * value. Shared because both files must agree on what "the current version"
  * means: nvs_save() writes it, decode_zones_blob() decides whether a stored
  * blob needs migrating against it. */
-#define ZONES_CFG_VERSION 13
+#define ZONES_CFG_VERSION 14
 
 
 /* MAX31856 CR1.TC[3:0] nibble values 0x00-0x07 name a real thermocouple type
@@ -348,6 +348,29 @@ typedef struct {
                                                   * zones_config_set_tuning_quality() itself -- a cheap run
                                                   * identifier/ordering marker in place of a wall-clock
                                                   * timestamp this board has no guaranteed RTC for */
+    /* ---- ZONES_CFG_VERSION 13->14 (2026-09-01, PID_EXPANSION_PLAN.md 3.3:
+     * "consolidate the opt-in flag into the zone config blob"). adaptive_
+     * tune.c's per-zone continuous-tuning opt-in used to live entirely in
+     * its OWN NVS namespace ('adap_tune', key 'en_mask') -- purely because
+     * this file was held live by another agent at the time that module was
+     * written, not because the flag belongs there (see adaptive_tune.h's
+     * former top comment, now updated). It belongs here, alongside every
+     * other per-zone operator setting.
+     *
+     * Same "0/false means off" convention as control_mode/tc_type/etc
+     * above: 0 = opted out (DEFAULT OFF, unchanged from the old home), 1 =
+     * opted in. A blob migrated up from a pre-14 version gets 0 here from
+     * convert_zone_v13()'s memset (this field did not exist before v14) --
+     * that is NOT the real migration path for an upgrading board's actual
+     * choice, though: the operator's old en_mask bit is carried forward
+     * separately, once, by adaptive_tune_migrate_enable_flags()
+     * (adaptive_tune.c), called at boot AFTER zones config has loaded. It
+     * does not belong in convert_zone_v13() itself -- this file's version-
+     * conversion helpers are deliberately pure, NVS-free struct math
+     * (host-testable with no NVS at all), and the old value lives in a
+     * completely different NVS namespace this file has no reason to know
+     * about. */
+    uint8_t  adaptive_tune_enabled;
 } zone_cfg_t;
 
 
@@ -875,6 +898,73 @@ typedef struct {
 _Static_assert(sizeof(zone_cfg_v12_t) == 156,
                "zone_cfg_v12_t must match the on-flash v12 layout byte-for-byte (156 bytes)"); /* v12 -- predates tuning_* quality fields */
 
+/* Frozen v13 layout -- what zone_cfg_t looked like immediately before THIS
+ * pass (ZONES_CFG_VERSION 13->14), tuning_* quality fields and all,
+ * predating adaptive_tune_enabled. Same discipline as zone_cfg_v12_t just
+ * above: field order hand-copied from v13's actual shape, never derived
+ * from the live struct. */
+typedef struct {
+    char name[ZONE_NAME_MAX_LEN + 1];
+    float cal_offset_c;
+    float pid_kp;
+    float pid_ki;
+    float pid_kd;
+    float max_ramp_c_per_hr;
+    float sanity_rate_c_per_min;
+    float max_temp_c;
+    float min_temp_c;
+    float heater_window_ms;
+    float heater_min_on_ms;
+    float heater_min_off_ms;
+    float guard_wrong_dir_window_s;
+    float guard_wrong_dir_rate_c_per_min;
+    float guard_off_settle_s;
+    float guard_runaway_rate_c_per_min;
+    float guard_runaway_margin_c;
+    float guard_drift_period_s;
+    float guard_sensor_fault_debounce_ticks;
+    float guard_frozen_window_s;
+    float cross_zone_max_delta_c;
+    float model_k_dc;
+    float model_tau_s;
+    float model_dead_time_s;
+    float fuzzy_strength_pct;
+    float coupling_coeff[MAX31856_CHANNEL_COUNT];
+    float coupling_tau_s[MAX31856_CHANNEL_COUNT];
+    float coupling_dead_time_s[MAX31856_CHANNEL_COUNT];
+    /* ---- uint8_t tail, exactly as v9/v10/v11/v12 grouped them ---- */
+    uint8_t relay_mask;
+    uint8_t control_mode;
+    uint8_t tc_type;
+    uint8_t thermo_mask;
+    uint8_t ct_mask;
+    uint8_t timing_profile;
+    uint8_t settings_source;
+    /* ---- ZONES_CFG_VERSION 12->13's tuning-quality record, unchanged by
+     * THIS pass -- see zone_cfg_t::tuning_valid's own comment. ---- */
+    uint8_t  tuning_valid;
+    uint8_t  tuning_method;
+    uint8_t  tuning_rule;
+    uint8_t  tuning_settled;
+    uint8_t  tuning_extrapolation_converged;
+    uint8_t  tuning_tau_consistent;
+    float    tuning_baseline_c;
+    float    tuning_step_ambient_c;
+    float    tuning_raw_rise_c;
+    float    tuning_rise_inf_c;
+    uint32_t tuning_seq;
+} zone_cfg_v13_t;
+
+/* 184 = 156's raw (pre-trailing-pad) content, 155 bytes, + 6 (the six new
+ * tuning_* uint8_t flags) + 3 (padding to the four tuning_* floats' 4-byte
+ * alignment) + 16 (those four floats) + 4 (tuning_seq, already 4-byte
+ * aligned) = 155 + 6 + 3 + 16 + 4 = 184, itself already a multiple of 4 so
+ * no further trailing pad. Hand-computed the same way as zone_cfg_v12_t's
+ * own assert comment -- never sizeof(zone_cfg_t), which by the time this
+ * pass lands is already the v14 (adaptive_tune_enabled) shape, not v13's. */
+_Static_assert(sizeof(zone_cfg_v13_t) == 184,
+               "zone_cfg_v13_t must match the on-flash v13 layout byte-for-byte (184 bytes)"); /* v13 -- predates adaptive_tune_enabled */
+
 typedef struct {
     uint8_t version;
     uint8_t thermo_count;
@@ -1018,6 +1108,23 @@ typedef struct {
 } zones_cfg_v12_t; /* v12 -- what zones_cfg_t looked like immediately before THIS
                      * pass; predates the tuning_* quality fields. zone_timing_profile_t
                      * unchanged again, reused verbatim same as v9/v10/v11's own comment. */
+
+typedef struct {
+    uint8_t version;
+    uint8_t thermo_count;
+    uint8_t relay_count;
+    uint8_t max_simultaneous_relays;
+    uint8_t continue_on_zone_trip;
+    uint8_t safety_tc_type;
+    zone_cfg_v13_t zones[MAX31856_CHANNEL_COUNT];
+    uint8_t timing_profile_count;
+    zone_timing_profile_t timing_profiles[MAX31856_CHANNEL_COUNT];
+    float pc_link_abort_silence_ms;
+    uint32_t crc32;
+} zones_cfg_v13_t; /* v13 -- what zones_cfg_t looked like immediately before THIS
+                     * pass; predates adaptive_tune_enabled. zone_timing_profile_t
+                     * unchanged again, reused verbatim same as v9/v10/v11/v12's own
+                     * comment. */
 
 
 typedef enum {

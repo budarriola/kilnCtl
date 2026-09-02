@@ -58,8 +58,19 @@ static bool s_stub_nvs_has_blob = false;
  * the blob slot above, since this module uses exactly one key. Only takes
  * effect when nvs_test_enable(true) has been called, so every other test
  * relying on "u8 reads always fail closed" is unaffected. */
-static uint8_t s_stub_nvs_u8_val = 0;
-static bool s_stub_nvs_has_u8 = false;
+/* 1 -> TEST_STUB_NVS_U8_SLOTS (2026-09-01, adaptive_tune.c's opt-in-flag
+ * migration host test): the module under test now writes TWO distinct u8
+ * keys in the same namespace ('en_mask' and the new 'en_migrated' marker --
+ * see adaptive_tune_migrate_enable_flags()). A single shared slot that
+ * ignores `key` entirely (the original comment above's "one key at a time"
+ * design) makes those two collide: writing en_migrated would silently
+ * stomp en_mask's value and vice versa. Widened to a small fixed table,
+ * looked up by key name, so each distinct key gets its own slot -- for the
+ * common single-key case this behaves identically to before. */
+#define TEST_STUB_NVS_U8_SLOTS 4
+static char    s_stub_nvs_u8_keys[TEST_STUB_NVS_U8_SLOTS][24];
+static uint8_t s_stub_nvs_u8_vals[TEST_STUB_NVS_U8_SLOTS];
+static bool    s_stub_nvs_u8_has[TEST_STUB_NVS_U8_SLOTS]; /* slot holds a written value for its key */
 
 static inline void nvs_test_enable(bool enable)
 {
@@ -70,8 +81,11 @@ static inline void nvs_test_clear(void)
 {
     s_stub_nvs_has_blob = false;
     s_stub_nvs_blob_len = 0;
-    s_stub_nvs_has_u8 = false;
-    s_stub_nvs_u8_val = 0;
+    for (int i = 0; i < TEST_STUB_NVS_U8_SLOTS; i++) {
+        s_stub_nvs_u8_has[i] = false;
+        s_stub_nvs_u8_keys[i][0] = '\0';
+        s_stub_nvs_u8_vals[i] = 0;
+    }
 }
 
 static inline esp_err_t nvs_open_from_partition(const char *partition, const char *ns, int mode, nvs_handle_t *out)
@@ -100,26 +114,43 @@ static inline esp_err_t nvs_commit(nvs_handle_t h)
 static inline esp_err_t nvs_get_u8(nvs_handle_t h, const char *key, uint8_t *out)
 {
     (void)h;
-    (void)key;
-    if (!s_stub_nvs_enabled || !s_stub_nvs_has_u8) {
+    if (!s_stub_nvs_enabled) {
         return ESP_ERR_NVS_NOT_FOUND;
     }
-    if (out) {
-        *out = s_stub_nvs_u8_val;
+    for (int i = 0; i < TEST_STUB_NVS_U8_SLOTS; i++) {
+        if (s_stub_nvs_u8_has[i] && strcmp(s_stub_nvs_u8_keys[i], key) == 0) {
+            if (out) {
+                *out = s_stub_nvs_u8_vals[i];
+            }
+            return ESP_OK;
+        }
     }
-    return ESP_OK;
+    return ESP_ERR_NVS_NOT_FOUND;
 }
 
 static inline esp_err_t nvs_set_u8(nvs_handle_t h, const char *key, uint8_t val)
 {
     (void)h;
-    (void)key;
     if (!s_stub_nvs_enabled) {
         return ESP_OK; /* pre-existing "always succeeds, nothing actually stored" behavior */
     }
-    s_stub_nvs_u8_val = val;
-    s_stub_nvs_has_u8 = true;
-    return ESP_OK;
+    for (int i = 0; i < TEST_STUB_NVS_U8_SLOTS; i++) {
+        if (s_stub_nvs_u8_has[i] && strcmp(s_stub_nvs_u8_keys[i], key) == 0) {
+            s_stub_nvs_u8_vals[i] = val;
+            return ESP_OK;
+        }
+    }
+    for (int i = 0; i < TEST_STUB_NVS_U8_SLOTS; i++) {
+        if (!s_stub_nvs_u8_has[i]) {
+            strncpy(s_stub_nvs_u8_keys[i], key, sizeof(s_stub_nvs_u8_keys[i]) - 1);
+            s_stub_nvs_u8_keys[i][sizeof(s_stub_nvs_u8_keys[i]) - 1] = '\0';
+            s_stub_nvs_u8_vals[i] = val;
+            s_stub_nvs_u8_has[i] = true;
+            return ESP_OK;
+        }
+    }
+    return ESP_ERR_NO_MEM; /* stub out of slots -- widen TEST_STUB_NVS_U8_SLOTS if a future
+                             * module needs more than 4 distinct u8 keys live at once */
 }
 
 static inline esp_err_t nvs_get_str(nvs_handle_t h, const char *key, char *out, size_t *len)

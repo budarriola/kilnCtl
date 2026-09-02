@@ -2338,7 +2338,7 @@ function pollAdaptiveTune() {
     }
     var html = '<table class="coupling"><tr><th>Zone</th><th>Learn from firings</th><th>Observations</th>' +
                '<th>Last applied change</th><th>Last run-end result</th>' +
-               '<th>Coupled solve</th><th>Ki diagnosis</th></tr>';
+               '<th>Coupled solve</th><th>Ki diagnosis</th><th>Revert</th></tr>';
     for (var i = 0; i < thermoCount && i < s.zones.length; i++) {
       var z = s.zones[i];
       var name = (current.zones[i] && current.zones[i].name) ? ' (' + current.zones[i].name + ')' : '';
@@ -2350,6 +2350,14 @@ function pollAdaptiveTune() {
       } else {
         appliedHtml = '<span class="empty">no refinement applied yet</span>';
       }
+      // U1 (PID_EXPANSION_PLAN.md 3.3): one-click revert to the last gain
+      // set THIS boot session applied for this zone -- see adaptive_tune.h's
+      // own comment on adaptive_tune_revert() for why the button only shows
+      // up while revert_available is true (a per-boot snapshot, same
+      // lifetime as has_applied's own "blank after a reboot" column above).
+      var revertHtml = z.revert_available
+        ? '<button type="button" class="adaptivetunerevert" data-zone="' + i + '">Revert</button>'
+        : '<span class="hint">nothing to revert</span>';
       html += '<tr><td>Zone ' + i + name + '</td>' +
               '<td><label><input type="checkbox" class="adaptivetunebit" data-zone="' + i + '"' +
               (z.enabled ? ' checked' : '') + '> ' + (z.enabled ? 'On' : 'Off (default)') + '</label></td>' +
@@ -2359,7 +2367,8 @@ function pollAdaptiveTune() {
               '<td>' + appliedHtml + '</td>' +
               '<td>' + adaptiveTuneRefusalHtml(z) + '</td>' +
               '<td>' + adaptiveTuneCoupledHtml(z) + '</td>' +
-              '<td>' + adaptiveTuneKiHtml(z) + '</td></tr>';
+              '<td>' + adaptiveTuneKiHtml(z) + '</td>' +
+              '<td>' + revertHtml + '</td></tr>';
     }
     html += '</table>';
     el.innerHTML = html;
@@ -2372,6 +2381,24 @@ function pollAdaptiveTune() {
           method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
           body: 'zone=' + zone + '&enabled=' + (enabled ? '1' : '0'),
         }).then(function () { pollAdaptiveTune(); }).catch(function () { pollAdaptiveTune(); });
+      });
+    });
+    // U1: same disable-while-in-flight/always-repoll convention as the
+    // opt-in checkbox above -- a refused revert (e.g. NOTHING_TO_REVERT, or
+    // FIRING_ACTIVE if a firing started between page loads) still needs the
+    // table repainted so the button state matches reality, not just the
+    // successful path.
+    el.querySelectorAll('.adaptivetunerevert').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var zone = this.dataset.zone;
+        this.disabled = true;
+        fetch('/api/adaptive_tune/revert', {
+          method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: 'zone=' + zone,
+        }).then(function (r) { return r.json(); }).then(function (j) {
+          if (!j.ok) { window.alert('Revert failed: ' + (j.reason || 'unknown reason')); }
+          pollAdaptiveTune();
+        }).catch(function () { pollAdaptiveTune(); });
       });
     });
   }).catch(function () {});

@@ -60,6 +60,30 @@ bool zones_config_set_cal_offset(uint8_t zone_index, float cal_offset_c)
     return nvs_save() == ESP_OK;
 }
 
+/* PID_EXPANSION_PLAN.md 3.3 consolidation -- see zones_http.h's own doc
+ * comment on this pair. zone_index >= thermo_count reads as "not enabled",
+ * same convention every other simple getter in this file uses (see
+ * zones_config_get_max_ramp() just above), not a special "cannot answer"
+ * case -- opt-in has one meaning (on/off) at every valid index and a safe
+ * default (off) everywhere else. */
+bool zones_config_get_adaptive_tune_enabled(uint8_t zone_index)
+{
+    if (zone_index >= s_zones.cfg.thermo_count) {
+        return false;
+    }
+    return s_zones.cfg.zones[zone_index].adaptive_tune_enabled != 0;
+}
+
+bool zones_config_set_adaptive_tune_enabled(uint8_t zone_index, bool enabled)
+{
+    if (zone_index >= s_zones.cfg.thermo_count) {
+        return false;
+    }
+    s_zones.cfg.zones[zone_index].adaptive_tune_enabled = enabled ? 1 : 0;
+    s_config_generation++;
+    return nvs_save() == ESP_OK;
+}
+
 uint32_t zones_config_generation(void)
 {
     return s_config_generation;

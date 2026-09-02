@@ -57,7 +57,8 @@ static esp_err_t status_get_handler(httpd_req_t *req)
             "\"joint_observations\":%u,\"coupled_attempted\":%s,\"coupled_applied\":%s,"
             "\"coupled_cells_changed\":%u,\"coupled_refusal\":\"%s\","
             // Integral (Ki) diagnosis from dwells (same section, layer 2).
-            "\"ki_verdict\":%u,\"ki_correction_pct\":%.2f,\"ki_applied\":%s,\"ki_refusal\":\"%s\"}",
+            "\"ki_verdict\":%u,\"ki_correction_pct\":%.2f,\"ki_applied\":%s,\"ki_refusal\":\"%s\","
+            "\"revert_available\":%s}",
             zi == 0 ? "" : ",", (unsigned)zi, st.enabled ? "true" : "false", (unsigned)st.ring_count,
             (unsigned)st.observations_lifetime, st.has_applied ? "true" : "false", (double)st.prior_k_dc,
             (double)st.applied_k_dc, (double)st.last_delta_pct, (unsigned)st.last_applied_profile_id,
@@ -65,7 +66,7 @@ static esp_err_t status_get_handler(httpd_req_t *req)
             (unsigned)st.joint_observations, st.coupled_attempted ? "true" : "false",
             st.coupled_applied ? "true" : "false", (unsigned)st.coupled_cells_changed, st.coupled_refusal_reason,
             (unsigned)st.ki_verdict, (double)st.ki_correction_pct, st.ki_applied ? "true" : "false",
-            st.ki_refusal_reason);
+            st.ki_refusal_reason, st.revert_available ? "true" : "false");
         if (off >= ADAPTIVE_TUNE_STATUS_BUF_BYTES) {
             off = ADAPTIVE_TUNE_STATUS_BUF_BYTES - 1; // truncated -- MAX31856_CHANNEL_COUNT is small (<=5) and
                                                         // the buffer sized generously, so this should not trigger
@@ -119,6 +120,54 @@ static esp_err_t enable_post_handler(httpd_req_t *req)
     return httpd_resp_sendstr(req, saved ? "{\"ok\":true}" : "{\"ok\":true,\"warning\":\"applied live, save failed\"}");
 }
 
+// U1: one-click revert -- POST /api/adaptive_tune/revert, body "zone=N"
+// (same tiny form-body convention as enable_post_handler() above). Runs on
+// httpd_worker, same task/flash-safety posture as every other handler in
+// this file -- see adaptive_tune_revert()'s own comment for why it is safe
+// to call its zones_config_set_*() writes directly from here.
+#define ADAPTIVE_TUNE_REVERT_BODY_MAX 32
+
+static esp_err_t revert_post_handler(httpd_req_t *req)
+{
+    if (req->content_len <= 0 || req->content_len > ADAPTIVE_TUNE_REVERT_BODY_MAX) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body missing or too large");
+        return ESP_OK;
+    }
+    char body[ADAPTIVE_TUNE_REVERT_BODY_MAX + 1];
+    size_t received = 0;
+    while (received < (size_t)req->content_len) {
+        int ret = httpd_req_recv(req, body + received, req->content_len - received);
+        if (ret <= 0) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body read failed");
+            return ESP_OK;
+        }
+        received += (size_t)ret;
+    }
+    body[received] = '\0';
+
+    char zone_val[8];
+    int zone_len = http_form_find_field(body, "zone", zone_val, sizeof(zone_val));
+    if (zone_len <= 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "zone field required");
+        return ESP_OK;
+    }
+    int zone = atoi(zone_val);
+    if (zone < 0 || zone >= MAX31856_CHANNEL_COUNT) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "zone out of range");
+        return ESP_OK;
+    }
+
+    char reason[96];
+    adaptive_tune_revert_result_t r = adaptive_tune_revert((uint8_t)zone, reason, sizeof(reason));
+    httpd_resp_set_type(req, "application/json");
+    if (r == ADAPTIVE_TUNE_REVERT_OK) {
+        return httpd_resp_sendstr(req, "{\"ok\":true}");
+    }
+    char resp[192];
+    snprintf(resp, sizeof(resp), "{\"ok\":false,\"reason\":\"%s\"}", reason);
+    return httpd_resp_sendstr(req, resp);
+}
+
 esp_err_t adaptive_tune_http_start(void)
 {
     httpd_handle_t server = wifi_provision_http_get_server();
@@ -133,6 +182,9 @@ esp_err_t adaptive_tune_http_start(void)
     static const httpd_uri_t enable_uri = {
         .uri = "/api/adaptive_tune/enable", .method = HTTP_POST, .handler = enable_post_handler,
     };
+    static const httpd_uri_t revert_uri = {
+        .uri = "/api/adaptive_tune/revert", .method = HTTP_POST, .handler = revert_post_handler,
+    };
     esp_err_t err = httpd_register_uri_handler(server, &status_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_register_uri_handler(/api/adaptive_tune) failed: %s", esp_err_to_name(err));
@@ -143,7 +195,13 @@ esp_err_t adaptive_tune_http_start(void)
         ESP_LOGE(TAG, "httpd_register_uri_handler(/api/adaptive_tune/enable) failed: %s", esp_err_to_name(err));
         return err;
     }
+    err = httpd_register_uri_handler(server, &revert_uri);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "httpd_register_uri_handler(/api/adaptive_tune/revert) failed: %s", esp_err_to_name(err));
+        return err;
+    }
 
-    ESP_LOGI(TAG, "adaptive tune status/enable API up (/api/adaptive_tune, /api/adaptive_tune/enable)");
+    ESP_LOGI(TAG, "adaptive tune status/enable/revert API up (/api/adaptive_tune, /api/adaptive_tune/enable, "
+                  "/api/adaptive_tune/revert)");
     return ESP_OK;
 }

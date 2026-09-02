@@ -116,14 +116,33 @@ bool adaptive_tune_refine_zone_locked(uint8_t zi, uint8_t profile_id)
         return false;
     }
 
+    // U1: snapshot exactly what is about to be overwritten -- the PRE-change
+    // Kp/Ki/Kd (fetched fresh; nothing above this point has read them yet),
+    // the prior K_dc/tau/dead_time already in hand as k_dc/tau_s/dead_time_s,
+    // and the current ki_baseline state (still whatever it was before THIS
+    // call's own re-latch below) -- see adaptive_tune_capture_revert_
+    // locked()'s own comment for why this exact instant is the right one.
+    float prior_kp = 0.0f, prior_ki = 0.0f, prior_kd = 0.0f;
+    zones_config_get_pid(zi, &prior_kp, &prior_ki, &prior_kd); // best-effort -- an unreadable prior PID
+                                                                // just leaves the revert snapshot at 0s,
+                                                                // no worse than not having one
+    adaptive_tune_capture_revert_locked(z, prior_kp, prior_ki, prior_kd, k_dc, tau_s, dead_time_s);
+
     if (!zones_config_set_model(zi, k_blended, tau_s, dead_time_s)) {
         adaptive_tune_set_refusal(z, "zones_config_set_model() rejected %.4f/%.1f/%.1f", (double)k_blended, (double)tau_s,
                     (double)dead_time_s);
+        z->revert_available = false; // nothing was actually written -- do not offer a revert to a "before"
+                                      // that never became a real "after"
         return false;
     }
     if (!zones_config_set_pid(zi, gains.kp, gains.ki, gains.kd)) {
         adaptive_tune_set_refusal(z, "zones_config_set_pid() rejected %.4f/%.4f/%.4f", (double)gains.kp, (double)gains.ki,
                     (double)gains.kd);
+        // The model write above DID land, even though the PID write just
+        // failed -- z->revert_available stays true so a revert can still
+        // undo the half-applied model change; its captured prior_kp/ki/kd
+        // are still correct for that (the live PID triple never actually
+        // changed on this failed path).
         return false;
     }
 
@@ -183,6 +202,68 @@ bool adaptive_tune_refine_zone_locked(uint8_t zi, uint8_t profile_id)
 // floor, admitting condition numbers up to ~1e4 -- see zone_coupling_
 // solve.h's own comment on that constant). This file adds no second,
 // independent conditioning heuristic on top of it.
+// Physical-sanity gate on a FITTED coupled matrix (out_C[affected][stepped],
+// same orientation as storage -- NOT /api/autotune/matrix's transposed wire
+// form, so no transpose is needed or wanted here), run AFTER the pivot-floor
+// conditioning check in adaptive_tune_coupled_fit() passes and BEFORE any
+// blending or write. Mirrors tools/PcTools/src/kilnctrl/coupled_ident.py's
+// matrix_plausibility() deliberately, so an operator reading a firmware
+// refusal and an offline analysis of the same captures see the same
+// verdict -- but re-derived here, not copied, because each criterion has to
+// be justified on its own physical grounds:
+//
+//   1. Every entry must be non-negative. This is a statement about the
+//      KILN, not the fit: more duty on any zone can only add heat to a
+//      neighbor through conduction/radiation, never remove it, so a fitted
+//      coupling_coeff[i][j] < 0 cannot be "a small unimportant term" --
+//      it is proof the fit is describing measurement noise, not a real
+//      thermal path. (This is a real, not hypothetical, finding: one 3-
+///     observation/3-unknown capture in this codebase's plant_sim fixtures
+//      produced a perfect-residual interpolation with three negative
+//      entries.)
+//   2. Each row's own-zone (diagonal) coefficient must be its row's largest
+//      entry. Physically, a zone's own heater sits closer to its own
+//      thermocouple than any other zone's heater does, in every geometry
+//      this kiln has -- self-coupling dominating cross-coupling is the
+//      expected shape of ANY plausible row, not an assumption specific to
+//      the current bench-measured matrix. A row where a neighbor's duty
+//      outweighs the zone's own is either a wiring/labeling fault or, as
+//      measured on the 26-observation plant_sim fixture set (condition
+//      number 44.3 -- comfortably under COUPLING_SOLVE_PIVOT_REL_EPS's
+//      ~1e4 admission bound, so the conditioning gate alone says nothing
+//      is wrong here), two rows collapsing their own-duty coefficient
+//      toward zero (0.8 against a real ~32) while dumping the sensitivity
+//      onto an off-diagonal (38) instead -- the near-parallel, same-
+//      setpoint duty vectors every ordinary firing produces leave enough
+//      freedom for quantization noise to swap which column "explains" a
+//      row, and conditioning alone cannot see that swap happen.
+//
+// Both are necessary, neither is sufficient on its own to prove a fit is
+// good -- together they catch the two concrete failure shapes actually
+// observed on real captures, without claiming to be a complete physical
+// model of the kiln.
+static adaptive_tune_coupled_result_t adaptive_tune_matrix_plausible(
+    const float C[MAX31856_CHANNEL_COUNT][MAX31856_CHANNEL_COUNT], uint8_t n)
+{
+    for (uint8_t i = 0; i < n; i++) {
+        for (uint8_t j = 0; j < n; j++) {
+            if (C[i][j] < 0.0f) {
+                return ADAPTIVE_TUNE_COUPLED_IMPLAUSIBLE_MATRIX;
+            }
+        }
+    }
+    for (uint8_t i = 0; i < n; i++) {
+        float own = C[i][i];
+        for (uint8_t j = 0; j < n; j++) {
+            if (j == i) continue;
+            if (own < C[i][j]) {
+                return ADAPTIVE_TUNE_COUPLED_IMPLAUSIBLE_MATRIX;
+            }
+        }
+    }
+    return ADAPTIVE_TUNE_COUPLED_OK;
+}
+
 adaptive_tune_coupled_result_t adaptive_tune_coupled_fit(
     const float duty_obs[][MAX31856_CHANNEL_COUNT], const float rise_obs[][MAX31856_CHANNEL_COUNT], uint32_t m,
     uint8_t n, float out_C[MAX31856_CHANNEL_COUNT][MAX31856_CHANNEL_COUNT])
@@ -190,6 +271,20 @@ adaptive_tune_coupled_result_t adaptive_tune_coupled_fit(
     if (!duty_obs || !rise_obs || !out_C || n == 0 || n > MAX31856_CHANNEL_COUNT) {
         return ADAPTIVE_TUNE_COUPLED_TOO_FEW_OBSERVATIONS;
     }
+    // m >= n + ADAPTIVE_TUNE_COUPLED_OBS_MARGIN (not just m >= n) is kept
+    // deliberately, not raised further here: the real defect this gate
+    // exists alongside was measured on a 26-observation fixture set (n=3,
+    // margin would need to reach ~23 to have blocked it), so observation
+    // COUNT was never what let the bad matrix through -- the duty vectors'
+    // DIRECTION (near-parallel, same-setpoint) was. Raising the margin
+    // further would refuse good data without addressing the actual failure
+    // mode; adaptive_tune_matrix_plausible() below is what catches it.
+    // margin=2 does still buy something real, independent of that: it
+    // guarantees m > n, i.e. at least 2 degrees of freedom in the least-
+    // squares solve, so this path can never land on the m==n exactly-
+    // determined case, where the residual is identically zero and a
+    // "perfect fit" is really zero evidence of fit quality rather than a
+    // good sign.
     if (m < (uint32_t)n + ADAPTIVE_TUNE_COUPLED_OBS_MARGIN) {
         return ADAPTIVE_TUNE_COUPLED_TOO_FEW_OBSERVATIONS;
     }
@@ -224,6 +319,15 @@ adaptive_tune_coupled_result_t adaptive_tune_coupled_fit(
         for (uint8_t j = 0; j < n; j++) {
             out_C[i][j] = x[j];
         }
+    }
+
+    // Physical plausibility, applied to the WHOLE fitted matrix, before this
+    // function reports success -- see adaptive_tune_matrix_plausible()'s own
+    // comment just above for why this is a separate gate from the
+    // conditioning check above, not folded into it.
+    adaptive_tune_coupled_result_t plausibility = adaptive_tune_matrix_plausible(out_C, n);
+    if (plausibility != ADAPTIVE_TUNE_COUPLED_OK) {
+        return plausibility;
     }
     return ADAPTIVE_TUNE_COUPLED_OK;
 }
@@ -266,6 +370,19 @@ void adaptive_tune_refine_coupled_locked(uint8_t zi)
     if (r == ADAPTIVE_TUNE_COUPLED_ILL_CONDITIONED) {
         adaptive_tune_set_reason(z->coupled_refusal_reason, sizeof(z->coupled_refusal_reason),
                    "joint duty matrix ill-conditioned (cond above ~1e4, zone_coupling_solve.h's own pivot floor)");
+        return;
+    }
+    // Distinct reason string from ILL_CONDITIONED above on purpose -- an
+    // operator needs to be able to tell "not determinable from this data"
+    // (more/better observations would help) apart from "determinable, but
+    // the answer is not physically possible" (this data's duty vectors are
+    // too collinear for THIS solve to trust, no matter how low its
+    // condition number looks -- see adaptive_tune_matrix_plausible()'s own
+    // comment above this function's definition).
+    if (r == ADAPTIVE_TUNE_COUPLED_IMPLAUSIBLE_MATRIX) {
+        adaptive_tune_set_reason(z->coupled_refusal_reason, sizeof(z->coupled_refusal_reason),
+                   "fitted coupling matrix is physically implausible (negative coefficient or a row not "
+                   "dominated by its own zone) -- determinable by conditioning alone but not trustworthy");
         return;
     }
 

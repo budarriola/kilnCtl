@@ -85,7 +85,16 @@ extern const char *ADAPTIVE_TUNE_TAG;
 
 #define ADAPTIVE_TUNE_NVS_PARTITION "kiln_nvs"
 #define ADAPTIVE_TUNE_NVS_NAMESPACE "adap_tune"
+// PID_EXPANSION_PLAN.md 3.3 "consolidate the opt-in flag": en_mask is no
+// longer this module's own source of truth for the opt-in (that moved to
+// zone_cfg_t::adaptive_tune_enabled, zones_config_get/set_adaptive_tune_
+// enabled() -- see zones_http.h's own comment) -- both keys stay defined
+// here ONLY because adaptive_tune_migrate_enable_flags() (adaptive_tune.c)
+// still needs to read en_mask once, at boot, to carry an upgrading board's
+// prior choice into its new home, and to write en_migrated so it never
+// consults en_mask again after that.
 #define ADAPTIVE_TUNE_NVS_KEY_ENMASK "en_mask"
+#define ADAPTIVE_TUNE_NVS_KEY_ENMASK_MIGRATED "en_migrated"
 
 // P1/K6: the Ki-diagnosis baseline (adaptive_tune_zone_t.ki_baseline/
 // ki_baseline_valid) persisted alongside en_mask above -- see adaptive_
@@ -238,6 +247,28 @@ typedef struct {
     // cumulative bound exists to stop (see P1's own review finding).
     bool     ki_baseline_valid;
     float    ki_baseline;
+
+    // ---------------------------------------------------------------------
+    // U1: one-click revert (PID_EXPANSION_PLAN.md 3.3) -- a snapshot of
+    // exactly what this zone's Kp/Ki/Kd, K_dc/tau/dead_time and Ki-diagnosis
+    // baseline were IMMEDIATELY BEFORE the last change THIS MODULE applied
+    // (either adaptive_tune_refine_zone_locked()'s SIMC recompute or
+    // adaptive_tune_refine_ki_locked()'s Ki-only correction -- whichever ran
+    // most recently; the two never both apply in the same run, see
+    // adaptive_tune_run_end()'s D5 comment). RAM-only, per-BOOT, same
+    // lifetime as has_applied above (its own comment explains why: the
+    // change being described is itself only tracked for this boot) --
+    // deliberately NOT persisted to NVS, so a revert is only ever offered
+    // for a change this same boot session made. adaptive_tune_capture_
+    // revert_locked() (adaptive_tune.c) is the ONE place that writes these,
+    // called by both split files right before their respective commits;
+    // adaptive_tune_revert() (adaptive_tune.c) is the only reader, and
+    // clears revert_available once consumed (a revert is one-shot).
+    bool     revert_available;
+    float    revert_kp, revert_ki, revert_kd;
+    float    revert_k_dc, revert_tau_s, revert_dead_time_s;
+    bool     revert_ki_baseline_valid;
+    float    revert_ki_baseline;
 } adaptive_tune_zone_t;
 
 extern adaptive_tune_zone_t adaptive_tune_zones[MAX31856_CHANNEL_COUNT];
@@ -290,5 +321,15 @@ void adaptive_tune_set_reason(char *buf, size_t bufsz, const char *fmt, ...);
 bool adaptive_tune_refine_zone_locked(uint8_t zi, uint8_t profile_id);
 void adaptive_tune_refine_coupled_locked(uint8_t zi);
 void adaptive_tune_refine_ki_locked(uint8_t zi, const profile_exec_firing_stats_t *stats);
+
+// U1: snapshots z's revert_* fields from the given PRE-CHANGE values --
+// called by adaptive_tune_refine_zone_locked() (adaptive_tune_model.c) and
+// adaptive_tune_refine_ki_locked() (adaptive_tune_ki.c) each right before
+// their own zones_config_set_model()/set_pid() commit, always with
+// adaptive_tune_lock already held (same convention as every other locked
+// helper here). Defined in adaptive_tune.c, the one file that also defines
+// adaptive_tune_revert() (the only reader of these fields).
+void adaptive_tune_capture_revert_locked(adaptive_tune_zone_t *z, float kp, float ki, float kd, float k_dc,
+                                          float tau_s, float dead_time_s);
 
 #endif // ADAPTIVE_TUNE_INTERNAL_H

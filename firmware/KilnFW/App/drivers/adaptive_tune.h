@@ -15,8 +15,9 @@
 //     machinery the plan calls out, on top of everything here).
 //   - No integral (Ki) diagnosis, no dynamics (tau/L) re-fit -- both need
 //     ramp/transition data this pass does not collect.
-//   - No Layer 4 (iterative IAE-scored tuning) and no one-click revert --
-//     both independent of this pass and left for later.
+//   - No Layer 4 (iterative IAE-scored tuning) -- independent of this pass
+//     and left for later. One-click revert (adaptive_tune_revert() below) IS
+//     implemented, PID_EXPANSION_PLAN.md 3.3.
 //
 // Safety: every write this module makes happens at profile_executor.c's
 // run-end (adaptive_tune_run_end()), AFTER the firing's relays are already
@@ -30,17 +31,23 @@
 // setters (zones_config_set_model()/set_pid()) into the ordinary zone
 // config blob -- the same place autotune's Accept path writes, so a reader
 // cannot tell a learned gain from a hand-tuned or autotuned one, which is
-// the point. The per-zone OPT-IN FLAG and this module's own observation
-// bookkeeping live in a SEPARATE NVS namespace owned by this file
-// (ADAPTIVE_TUNE_NVS_NAMESPACE below), NOT as a new field on the zone
-// config blob: zones_http.c/zones_config_accessors.c (the zone config
-// blob's owner) were off-limits for this pass (another agent holds them
-// live), so a field there was not an option. Consolidating the opt-in flag
-// into the zone blob proper, if wanted, is future work for whoever next
-// touches that file.
+// the point. The per-zone OPT-IN FLAG (PID_EXPANSION_PLAN.md 3.3, 2026-09-01)
+// now lives THERE TOO (zone_cfg_t::adaptive_tune_enabled, zones_config_get/
+// set_adaptive_tune_enabled() -- zones_http.h) -- consolidated out of this
+// module's own former 'adap_tune' NVS namespace, which existed only because
+// zones_http.c was held live by another agent when this module was first
+// written. adaptive_tune_migrate_enable_flags()/adaptive_tune_load_enable_
+// flags() below carry an upgrading board's prior choice forward exactly
+// once; see their own comments. This module's own observation bookkeeping
+// and the Ki-diagnosis baseline (adaptive_tune_zone_t::ki_baseline) still
+// live in that namespace (ADAPTIVE_TUNE_NVS_NAMESPACE, adaptive_tune_
+// internal.h) -- there was never a reason to move those, only the opt-in
+// flag, which is an ordinary operator setting like every other field on
+// zone_cfg_t.
 #pragma once
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #include "profile_executor.h" // profile_firing_run_record_t, MAX31856_CHANNEL_COUNT
@@ -80,6 +87,12 @@ typedef struct {
     float    ki_correction_pct;         // signed suggested Ki move, before the per-run cap
     bool     ki_applied;                // true once a Ki correction was actually written this run
     char     ki_refusal_reason[96];     // why a nonzero diagnosis was not applied, if it was not
+
+    // -- One-click revert (PID_EXPANSION_PLAN.md 3.3) --
+    bool     revert_available;          // true iff adaptive_tune_revert() has something to restore for
+                                         // this zone THIS boot -- gates whether zones_page.html shows
+                                         // the Revert control at all (see adaptive_tune_revert()'s own
+                                         // comment for why this is per-boot, not lifetime)
 } adaptive_tune_zone_status_t;
 
 // ---------------------------------------------------------------------
@@ -92,6 +105,15 @@ typedef enum {
     ADAPTIVE_TUNE_COUPLED_OK = 0,
     ADAPTIVE_TUNE_COUPLED_TOO_FEW_OBSERVATIONS,
     ADAPTIVE_TUNE_COUPLED_ILL_CONDITIONED,
+    // Distinct from ILL_CONDITIONED on purpose: the design matrix passed
+    // zone_coupling_gauss_solve_partial_pivot_vec()'s pivot-floor condition-
+    // number gate (nominally "determinable"), but the resulting matrix is
+    // physically impossible -- see adaptive_tune_matrix_plausible()'s own
+    // comment in adaptive_tune_model.c for why "not singular" and
+    // "trustworthy" are different properties, and tools/PcTools/src/
+    // kilnctrl/coupled_ident.py's matrix_plausibility() for the offline
+    // twin of this check this firmware gate is kept in step with.
+    ADAPTIVE_TUNE_COUPLED_IMPLAUSIBLE_MATRIX,
 } adaptive_tune_coupled_result_t;
 
 // Solves, for EVERY affected zone i in 0..n-1, the least-squares row
@@ -113,8 +135,16 @@ typedef enum {
 // CONDITIONED) if the shared design matrix fails the same pivot-floor
 // conditioning check zone_coupling_gauss_solve_partial_pivot_vec() already
 // applies at runtime (COUPLING_SOLVE_PIVOT_REL_EPS, admitting condition
-// numbers up to ~1e4). out_C is left untouched unless ADAPTIVE_TUNE_COUPLED_
-// OK is returned.
+// numbers up to ~1e4) -- and refuses (IMPLAUSIBLE_MATRIX) if the fitted
+// matrix, though not ill-conditioned by that test, fails the separate
+// physical-plausibility gate (adaptive_tune_matrix_plausible(), .c file):
+// any negative coefficient, or a row whose own-zone (diagonal) coefficient
+// is not its largest entry. Real same-setpoint dwell data can pass the
+// conditioning gate on a condition number as low as ~44 while still fitting
+// pure quantization noise (near-parallel duty vectors) -- see this
+// function's own IMPLAUSIBLE_MATRIX comment at its .c definition for the
+// real captures that motivated this. out_C is left untouched unless
+// ADAPTIVE_TUNE_COUPLED_OK is returned.
 adaptive_tune_coupled_result_t adaptive_tune_coupled_fit(
     const float duty_obs[][MAX31856_CHANNEL_COUNT], const float rise_obs[][MAX31856_CHANNEL_COUNT], uint32_t m,
     uint8_t n, float out_C[MAX31856_CHANNEL_COUNT][MAX31856_CHANNEL_COUNT]);
@@ -156,15 +186,45 @@ typedef struct {
 bool adaptive_tune_diagnose_ki(const float *actual_c, const float *duty, uint32_t n, float dt_s,
                                float dwell_err_mean_c, float dwell_err_max_c, adaptive_tune_ki_diag_t *out);
 
-// Loads the per-zone opt-in flags from this module's own NVS namespace.
-// Call once at boot; profile_executor.c does this from profile_executor_
-// start(), since this file owns no init entry point of its own in main.c.
-// Safe to call from app_main's task (not PSRAM-stacked) -- see adaptive_
-// tune.c's top comment for the read-vs-write stack-safety split. Registers
-// NO HTTP endpoints itself -- see adaptive_tune_http.h's adaptive_tune_http_
-// start() for those (GET /api/adaptive_tune, POST /api/adaptive_tune/enable),
-// called separately from main.c once the shared httpd server is up.
+// Sets up this module's lock and reloads its OWN NVS-namespace state (the
+// Ki-diagnosis baseline -- ki_baseline/ki_baseline_valid -- and nothing
+// else, since PID_EXPANSION_PLAN.md 3.3 moved the opt-in flag out of this
+// namespace). Call once at boot; profile_executor.c does this from profile_
+// executor_start(), since this file owns no init entry point of its own in
+// main.c. Safe to call from app_main's task (not PSRAM-stacked) -- see
+// adaptive_tune.c's top comment for the read-vs-write stack-safety split.
+// Deliberately does NOT load the per-zone opt-in flags -- see adaptive_
+// tune_load_enable_flags() below for why that is a separate call, and every
+// zone reads as disabled (the struct-zero default) until that call runs.
+// Registers NO HTTP endpoints itself -- see adaptive_tune_http.h's adaptive_
+// tune_http_start() for those (GET /api/adaptive_tune, POST /api/
+// adaptive_tune/enable, POST /api/adaptive_tune/revert), called separately
+// from main.c once the shared httpd server is up.
 void adaptive_tune_init(void);
+
+// Loads every zone's opt-in flag from its new home (zone_cfg_t::
+// adaptive_tune_enabled, zones_config_get_adaptive_tune_enabled()) into
+// this module's own RAM cache (adaptive_tune_zone_t::enabled -- the field
+// the hot per-tick path in adaptive_tune_zone_tick() actually reads, so
+// that path never has to reach into zones_config on every tick). Runs
+// adaptive_tune_migrate_enable_flags() first (idempotent -- see its own
+// comment) so an upgrading board's prior choice, still sitting in the OLD
+// 'adap_tune'/en_mask NVS key, is carried into its new home before this
+// function reads it back out.
+//
+// MUST be called AFTER zones_http_start() has loaded the zone config from
+// NVS -- adaptive_tune_init() itself runs too early for that (profile_
+// executor_start(), which calls adaptive_tune_init(), runs BEFORE zones_
+// http_start() in main.c's boot sequence; see this function's own adaptive_
+// tune.c definition for the exact ordering evidence). main.c calls this
+// once, right after zones_http_start() returns, non-fatal like every other
+// settings-load call there. Safe to call from app_main's task, same
+// reasoning as adaptive_tune_init() -- and, per that same function's
+// comment, the flash worker does not exist yet at this point in boot
+// either, which is why adaptive_tune_migrate_enable_flags()'s own NVS
+// writes (the migration itself, and the "already migrated" marker) are
+// direct, not dispatched through uart_bridge_ext_run_on_flash_worker().
+void adaptive_tune_load_enable_flags(void);
 
 // Called once per control tick, per active zone, from profile_executor.c's
 // tick loop, WITH s_exec.lock held (this module keeps its own internal
@@ -212,6 +272,59 @@ bool adaptive_tune_get_enabled(uint8_t zone_index);
 void adaptive_tune_clear_ki_baseline(uint8_t zone_index);
 
 void adaptive_tune_get_status(uint8_t zone_index, adaptive_tune_zone_status_t *out);
+
+// ---------------------------------------------------------------------
+// U1: one-click revert to the last accepted gain set (PID_EXPANSION_PLAN.md
+// 3.3).
+// ---------------------------------------------------------------------
+
+typedef enum {
+    ADAPTIVE_TUNE_REVERT_OK = 0,
+    ADAPTIVE_TUNE_REVERT_NOTHING_TO_REVERT,  // no change recorded THIS BOOT for this zone -- see
+                                              // adaptive_tune_zone_t::revert_available's own comment
+    ADAPTIVE_TUNE_REVERT_FIRING_ACTIVE,      // refused: a firing is RUNNING or PAUSED (any zone,
+                                              // board-wide) -- see adaptive_tune_revert()'s own comment
+    ADAPTIVE_TUNE_REVERT_INVALID_ZONE,
+    ADAPTIVE_TUNE_REVERT_WRITE_FAILED,       // the zone-config write itself was rejected -- see
+                                              // zones_config_set_model()/set_pid()'s own validation
+} adaptive_tune_revert_result_t;
+
+// Restores zone zone_index's Kp/Ki/Kd, K_dc/tau/dead_time, AND the Ki-
+// diagnosis baseline (ki_baseline/ki_baseline_valid) to EXACTLY what they
+// were immediately before the last change THIS MODULE applied (see
+// adaptive_tune_zone_t::revert_available's own comment for what "last
+// change" and "exactly" mean and why the snapshot is per-boot, RAM-only).
+// Restoring ki_baseline alongside the gains, not just clearing it, is
+// deliberate: leaving a baseline latched from the reverted-away Ki would
+// silently recreate the exact "reboot ratchet" stale-reference defect this
+// layer already shipped once (adaptive_tune_ki.c's own comment on ki_
+// baseline) -- the baseline must describe the gains that are actually live
+// after this call returns, not the ones that were live a moment before it.
+//
+// MID-FIRING DECISION: refused outright (ADAPTIVE_TUNE_REVERT_FIRING_ACTIVE)
+// whenever ANY firing is RUNNING or PAUSED, board-wide -- not just a firing
+// that happens to be using this zone. This module's entire safety argument
+// (adaptive_tune_run_end() runs only at profile_executor.c's run-end, AFTER
+// relays are off) rests on gain changes never happening while a control
+// loop is live; an HTTP-triggered revert is the one write path in this
+// module NOT already gated to a run boundary by construction, so this
+// function gates it explicitly instead. Bounded to "no firing running
+// anywhere" rather than "not this zone" because a coupled multi-zone firing
+// can have every zone's feedforward depend on every other zone's model --
+// reverting zone 2's K_dc mid-firing could still perturb zone 0's coupled
+// feedforward term even if zone 0 itself is untouched.
+//
+// Lock order: s_exec.lock (inside profile_executor_get_status(), taken and
+// released before this function ever touches adaptive_tune_lock) then
+// adaptive_tune_lock -- never the reverse, matching every other call site's
+// documented order. No lock is held across the zones_config_set_model()/
+// set_pid() write, nor across the Ki-baseline NVS write (dispatched through
+// uart_bridge_ext_run_on_flash_worker(), with the same is_on_flash_worker()
+// re-entrancy guard adaptive_tune_clear_ki_baseline() uses, for the
+// identical reason). reason/reason_cap, if non-NULL, receive a short
+// operator-facing refusal string (empty on ADAPTIVE_TUNE_REVERT_OK) -- same
+// idiom as this module's other refusal-reason fields.
+adaptive_tune_revert_result_t adaptive_tune_revert(uint8_t zone_index, char *reason, size_t reason_cap);
 
 // ---- pure helpers, exposed for host tests (adaptive_tune.c has no other
 // seam into this math -- see test_adaptive_tune.c) --------------------------

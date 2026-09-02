@@ -21,6 +21,13 @@
                                   // ahead of adaptive_tune.c's own #include of it further down this file
 #include "esp_err.h"
 
+// profile_exec_status_t/profile_exec_state_t/PROFILE_EXEC_* -- needed by the
+// profile_executor_get_status() fake below (U1 one-click revert's mid-firing
+// guard), pulled in explicitly here since adaptive_tune.c's own #include of
+// profile_executor.h (via adaptive_tune.h) does not happen until further
+// down this file.
+#include "../drivers/profile_executor.h"
+
 // Own executable (see this file's header comment).
 int g_test_failures = 0;
 int g_test_count = 0;
@@ -126,6 +133,34 @@ bool zones_config_set_coupling_cell(uint8_t zone_index, uint8_t neighbor_index, 
     return true;
 }
 
+// U2 (2026-09-01, PID_EXPANSION_PLAN.md 3.3 "consolidate the opt-in flag"):
+// tiny in-RAM fake for the opt-in flag's new home, same "one file, one
+// table" convention as s_fake_zone_cfg above -- stands in for zones_config_
+// accessors.c's real (NVS-backed) zone_cfg_t::adaptive_tune_enabled.
+static bool s_fake_adaptive_enabled[TEST_MAX_ZONES];
+bool zones_config_get_adaptive_tune_enabled(uint8_t zone_index)
+{
+    if (zone_index >= TEST_MAX_ZONES) return false;
+    return s_fake_adaptive_enabled[zone_index];
+}
+bool zones_config_set_adaptive_tune_enabled(uint8_t zone_index, bool enabled)
+{
+    if (zone_index >= TEST_MAX_ZONES) return false;
+    s_fake_adaptive_enabled[zone_index] = enabled;
+    return true;
+}
+
+// U1 (one-click revert): adaptive_tune_revert() calls profile_executor_get_
+// status() to refuse mid-firing -- fake it as a simple settable state, same
+// "own it here" convention as everything else on this page. Defaults to
+// IDLE (no firing), matching a board that has never run a profile.
+static profile_exec_state_t s_fake_exec_state = PROFILE_EXEC_IDLE;
+void profile_executor_get_status(profile_exec_status_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    out->state = s_fake_exec_state;
+}
+
 // R2 (2026-09-01, opus review of commit 7c47683) / S2+S3 (2026-09-01 audit
 // of ae5905f): the busy-modeling uart_bridge_ext_run_on_flash_worker()/
 // uart_bridge_ext_is_on_flash_worker() stub used to live only here, hand-
@@ -167,6 +202,8 @@ static void reset_module_state(void)
 {
     memset(adaptive_tune_zones, 0, sizeof(adaptive_tune_zones));
     memset(s_fake_zone_cfg, 0, sizeof(s_fake_zone_cfg));
+    memset(s_fake_adaptive_enabled, 0, sizeof(s_fake_adaptive_enabled));
+    s_fake_exec_state = PROFILE_EXEC_IDLE;
     memset(s_fake_coupling, 0, sizeof(s_fake_coupling));
     memset(s_fake_coupling_tau, 0, sizeof(s_fake_coupling_tau));
     memset(s_fake_coupling_dead, 0, sizeof(s_fake_coupling_dead));
@@ -312,41 +349,37 @@ static void test_enable_one_zone_leaves_others_untouched(void)
     // Asymmetric fixture: enable ONLY zone 1, then assert zones 0 and 2
     // (neighbours on either side) stay off -- a mask off-by-one or a
     // transposed index would flip one of those two, not zone 1 itself.
+    // U2: adaptive_tune_set_enabled()'s return value now reflects zones_
+    // config_set_adaptive_tune_enabled()'s own success (the fake above),
+    // not this module's own NVS namespace -- no nvs_test_enable() needed
+    // for this path any more.
     reset_module_state();
-    nvs_test_clear();
-    nvs_test_enable(true); // adaptive_tune_set_enabled()'s return value reflects whether the NVS save
-                            // succeeded (see its own doc comment) -- the default-closed stub would make
-                            // even a correct live-apply report false, so this test needs the real round trip.
     TEST_CHECK(adaptive_tune_set_enabled(1, true), "enabling zone 1 should report success");
     TEST_CHECK(adaptive_tune_get_enabled(0) == false, "zone 0 must stay off when only zone 1 is enabled");
     TEST_CHECK(adaptive_tune_get_enabled(1) == true, "zone 1 must be on");
     TEST_CHECK(adaptive_tune_get_enabled(2) == false, "zone 2 must stay off when only zone 1 is enabled");
-    nvs_test_enable(false);
-    nvs_test_clear();
 }
 
 static void test_enable_round_trips_through_persistence(void)
 {
-    // Real NVS round trip via stubs/nvs.h's opt-in stub store: enable zone 1
-    // only, then reload the module exactly as a reboot would
-    // (adaptive_tune_init() re-reads the en_mask byte from "flash") and
-    // check the reloaded state matches what was actually written, not what
-    // this test just set in RAM.
+    // U2: persistence now lives in the zone config blob (s_fake_adaptive_
+    // enabled here), not this module's own RAM -- so "reboot" means wiping
+    // adaptive_tune_zones (this module's RAM cache) WITHOUT touching s_fake_
+    // adaptive_enabled (the persisted store), then calling adaptive_tune_
+    // load_enable_flags() (not adaptive_tune_init(), which no longer loads
+    // this at all -- see its own doc comment) to reload the cache from the
+    // persisted store, exactly as main.c does after zones_http_start().
     reset_module_state();
-    nvs_test_clear();
-    nvs_test_enable(true);
-
     TEST_CHECK(adaptive_tune_set_enabled(1, true), "setting zone 1's opt-in should report success");
 
-    memset(adaptive_tune_zones, 0, sizeof(adaptive_tune_zones)); // simulate a reboot: RAM state gone
-    adaptive_tune_init();                // reload from the (stubbed) NVS namespace
+    memset(adaptive_tune_zones, 0, sizeof(adaptive_tune_zones)); // simulate a reboot: RAM cache gone,
+                                                                  // persisted store (s_fake_adaptive_enabled)
+                                                                  // untouched
+    adaptive_tune_load_enable_flags();
 
     TEST_CHECK(adaptive_tune_get_enabled(0) == false, "zone 0 must reload as off");
     TEST_CHECK(adaptive_tune_get_enabled(1) == true, "zone 1 must reload as on -- this is the persisted value");
     TEST_CHECK(adaptive_tune_get_enabled(2) == false, "zone 2 must reload as off");
-
-    nvs_test_enable(false); // leave the shared stub state as every other test in this binary expects
-    nvs_test_clear();
 }
 
 static void test_status_reports_engine_held_fields_not_test_written_values(void)
@@ -681,6 +714,98 @@ static void test_coupled_fit_recovers_known_asymmetric_matrix(void)
     TEST_CHECK_NEAR(out_C[1][0], 15.78f, 0.6, "C[1][0] (affected=1 responding to stepped=0) must NOT read as C[0][1]'s value");
 }
 
+// The same well-spread, well-conditioned duty set every test above uses --
+// factored out so the three plausibility tests below only vary the TARGET
+// matrix, never the observation geometry, isolating what each test claims
+// to isolate.
+static void coupled_fit_generate(const float target_C[3][3], float duty_out[6][MAX31856_CHANNEL_COUNT],
+                                  float rise_out[6][MAX31856_CHANNEL_COUNT])
+{
+    static const float duty[6][MAX31856_CHANNEL_COUNT] = {
+        {0.20f, 0.50f, 0.80f}, {0.50f, 0.80f, 0.20f}, {0.80f, 0.20f, 0.50f},
+        {0.35f, 0.65f, 0.15f}, {0.65f, 0.15f, 0.65f}, {0.15f, 0.35f, 0.35f}};
+    memcpy(duty_out, duty, sizeof(duty));
+    for (int k = 0; k < 6; k++) {
+        for (int i = 0; i < 3; i++) {
+            float s = 0.0f;
+            for (int j = 0; j < 3; j++) s += target_C[i][j] * duty[k][j];
+            rise_out[k][i] = q1(s);
+        }
+    }
+}
+
+// Plausibility gate, negative-coefficient branch: a target matrix that is
+// otherwise well-conditioned (same duty geometry as the accepted fit above)
+// but has ONE negative off-diagonal entry (row 0's response to zone 1's
+// duty) -- mirrors the real 3-observation/3-unknown capture cited in
+// PID_EXPANSION_PLAN.md that produced a perfect-residual interpolation with
+// three negative entries. This MUST be refused as IMPLAUSIBLE_MATRIX, not
+// silently accepted (a negative coupling coefficient means "heating this
+// zone cools that one", physically impossible in this kiln) and not
+// conflated with ILL_CONDITIONED (this data is NOT ill-conditioned -- the
+// conditioning gate alone would pass it, which is exactly the bug this
+// gate exists to close).
+static const float k_negative_C[3][3] = {
+    {39.25f, -5.0f, 20.73f},
+    {15.78f, 31.97f, 21.09f},
+    {9.70f, 11.38f, 31.68f},
+};
+
+static void test_coupled_fit_refuses_negative_coefficient(void)
+{
+    float duty[6][MAX31856_CHANNEL_COUNT], rise[6][MAX31856_CHANNEL_COUNT];
+    coupled_fit_generate(k_negative_C, duty, rise);
+    float out_C[MAX31856_CHANNEL_COUNT][MAX31856_CHANNEL_COUNT];
+    adaptive_tune_coupled_result_t r = adaptive_tune_coupled_fit(duty, rise, 6, 3, out_C);
+    TEST_CHECK(r == ADAPTIVE_TUNE_COUPLED_IMPLAUSIBLE_MATRIX,
+               "a fitted matrix with a negative off-diagonal coefficient must be refused as physically "
+               "implausible, even though this observation set is well-conditioned");
+}
+
+// Plausibility gate, diagonal-dominance branch: mirrors the REAL row-1
+// collapse measured on the 26-observation plant_sim fixture set -- row 1's
+// own (diagonal) coefficient down at 0.8 against a real ~32, with a 38 in
+// an off-diagonal cell instead. Same well-conditioned duty geometry as
+// every other test in this section (condition number is not the problem
+// here, by construction), so this isolates the dominance check
+// specifically, in the SAME [affected][stepped] storage orientation the
+// firmware actually evaluates it in (row 1 == affected zone 1, i.e.
+// C[1][1] vs C[1][0]/C[1][2] -- not the transposed wire form).
+static const float k_nondominant_C[3][3] = {
+    {39.25f, 26.61f, 20.73f},
+    {38.0f, 0.8f, 21.09f}, // row 1 (affected=1): own coefficient (0.8) is NOT the row max (38.0 is)
+    {9.70f, 11.38f, 31.68f},
+};
+
+static void test_coupled_fit_refuses_nondominant_diagonal(void)
+{
+    float duty[6][MAX31856_CHANNEL_COUNT], rise[6][MAX31856_CHANNEL_COUNT];
+    coupled_fit_generate(k_nondominant_C, duty, rise);
+    float out_C[MAX31856_CHANNEL_COUNT][MAX31856_CHANNEL_COUNT];
+    adaptive_tune_coupled_result_t r = adaptive_tune_coupled_fit(duty, rise, 6, 3, out_C);
+    TEST_CHECK(r == ADAPTIVE_TUNE_COUPLED_IMPLAUSIBLE_MATRIX,
+               "a fitted row whose own-zone coefficient is not its row's largest entry (own=0.8 vs "
+               "neighbor=38.0, the real row-1 collapse shape) must be refused as physically implausible");
+}
+
+// Plausibility gate must not reject a LEGITIMATE fit: the same bench-
+// measured asymmetric reference matrix (k_ref_C) test_coupled_fit_recovers_
+// known_asymmetric_matrix() above already proves is recovered correctly --
+// re-asserted here as its own named test so a future change to the
+// plausibility gate that starts rejecting good matrices fails a test whose
+// NAME says exactly what broke, not a numeric-recovery test with no
+// apparent connection to plausibility.
+static void test_coupled_fit_accepts_plausible_matrix(void)
+{
+    float duty[6][MAX31856_CHANNEL_COUNT], rise[6][MAX31856_CHANNEL_COUNT];
+    coupled_fit_generate(k_ref_C, duty, rise);
+    float out_C[MAX31856_CHANNEL_COUNT][MAX31856_CHANNEL_COUNT];
+    adaptive_tune_coupled_result_t r = adaptive_tune_coupled_fit(duty, rise, 6, 3, out_C);
+    TEST_CHECK(r == ADAPTIVE_TUNE_COUPLED_OK,
+               "the bench-measured reference matrix (all-positive, every row diagonal-dominant) must be "
+               "accepted -- the plausibility gate must not reject a legitimate fit");
+}
+
 // ---------------------------------------------------------------------
 // Integral (Ki) diagnosis -- adaptive_tune_diagnose_ki() pure-math tests.
 // 10s ticks (DT_KI), matching the hardware logging cadence this repo's
@@ -959,8 +1084,14 @@ static void test_coupling_cell_per_run_move_is_bounded_by_abs_cap(void)
     s_fake_coupling[0][1] = 1.0f; // confident prior (> NEAR_ZERO); uncapped blend would be
                                   // 1.0 + 0.15*(45.0-1.0) = 7.6, well past the 6.0 cap
     const float ambient = 20.0f;
+    // Row 0's own (diagonal) coefficient is raised to 50.0, above the 45.0
+    // fitted off-diagonal being clamp-tested -- otherwise this fixture would
+    // itself be a non-diagonal-dominant matrix and get refused by the
+    // physical-plausibility gate before ever reaching the per-run abs-move
+    // cap this test exists to exercise. Only c[0][0] moved; c[0][1]=45.0 is
+    // unchanged since that fitted value is what the test asserts on.
     static const float k_test_C[3][3] = {
-        {39.25f, 45.0f, 20.73f}, {15.78f, 31.97f, 21.09f}, {9.70f, 11.38f, 31.68f}};
+        {50.0f, 45.0f, 20.73f}, {15.78f, 31.97f, 21.09f}, {9.70f, 11.38f, 31.68f}};
     const float duty_pts[6][MAX31856_CHANNEL_COUNT] = {
         {0.20f, 0.50f, 0.80f}, {0.50f, 0.80f, 0.20f}, {0.80f, 0.20f, 0.50f},
         {0.35f, 0.65f, 0.15f}, {0.65f, 0.15f, 0.65f}, {0.15f, 0.35f, 0.35f}};
@@ -998,8 +1129,13 @@ static void test_coupling_ratio_guard_upper_bound_accepts_high_fit_from_low_conf
     s_fake_zone_cfg[0].k_dc = 1.0f;
     s_fake_coupling[0][1] = 2.0f; // confident prior -- a plain 5x ratio ceiling alone would be 10.0
     const float ambient = 20.0f;
+    // c[0][0] raised to 55.0 (above the 49.0 fitted off-diagonal) for the
+    // same reason as test_coupling_cell_per_run_move_is_bounded_by_abs_cap()
+    // above: a non-diagonal-dominant fixture would be refused by the
+    // physical-plausibility gate before this test's ratio-guard logic ever
+    // runs.
     static const float k_test_C[3][3] = {
-        {39.25f, 49.0f, 20.73f}, {15.78f, 31.97f, 21.09f}, {9.70f, 11.38f, 31.68f}};
+        {55.0f, 49.0f, 20.73f}, {15.78f, 31.97f, 21.09f}, {9.70f, 11.38f, 31.68f}};
     const float duty_pts[6][MAX31856_CHANNEL_COUNT] = {
         {0.20f, 0.50f, 0.80f}, {0.50f, 0.80f, 0.20f}, {0.80f, 0.20f, 0.50f},
         {0.35f, 0.65f, 0.15f}, {0.65f, 0.15f, 0.65f}, {0.15f, 0.35f, 0.35f}};
@@ -2513,6 +2649,231 @@ static void test_model_refine_relatches_ki_baseline_to_fresh_simc_ki(void)
                      "replaced");
 }
 
+// ---------------------------------------------------------------------
+// U2: opt-in flag migration (PID_EXPANSION_PLAN.md 3.3 "consolidate the
+// opt-in flag into the zone config blob"). Real NVS round trip via stubs/
+// nvs.h's stub store, same convention test_enable_round_trips_through_
+// persistence() used before U2 -- these write the OLD 'adap_tune'/en_mask
+// byte directly (this file has the macros in scope via adaptive_tune_
+// internal.h, pulled in transitively by adaptive_tune.c's own #include).
+// ---------------------------------------------------------------------
+
+static void write_old_en_mask(uint8_t mask)
+{
+    nvs_handle_t h;
+    TEST_CHECK(nvs_open_from_partition(ADAPTIVE_TUNE_NVS_PARTITION, ADAPTIVE_TUNE_NVS_NAMESPACE, NVS_READWRITE, &h) ==
+                   ESP_OK,
+               "setup: stub NVS open must succeed once nvs_test_enable(true)");
+    nvs_set_u8(h, ADAPTIVE_TUNE_NVS_KEY_ENMASK, mask);
+    nvs_close(h);
+}
+
+static bool read_old_en_migrated(uint8_t *out)
+{
+    nvs_handle_t h;
+    if (nvs_open_from_partition(ADAPTIVE_TUNE_NVS_PARTITION, ADAPTIVE_TUNE_NVS_NAMESPACE, NVS_READONLY, &h) !=
+        ESP_OK) {
+        return false;
+    }
+    esp_err_t err = nvs_get_u8(h, ADAPTIVE_TUNE_NVS_KEY_ENMASK_MIGRATED, out);
+    nvs_close(h);
+    return err == ESP_OK;
+}
+
+// MUST GO RED if adaptive_tune_migrate_enable_flags() (or the call to it
+// from adaptive_tune_load_enable_flags()) is deleted: with no migration at
+// all, every zone reloads at its struct-zero default (off), and this test's
+// zone 0/zone 2 checks fail.
+static void test_migrate_pulls_old_mask_into_zone_config(void)
+{
+    reset_module_state();
+    nvs_test_clear();
+    nvs_test_enable(true);
+
+    write_old_en_mask((uint8_t)((1u << 0) | (1u << 2))); // zones 0 and 2 were opted in under the old scheme
+
+    adaptive_tune_load_enable_flags();
+
+    TEST_CHECK(adaptive_tune_get_enabled(0) == true, "zone 0's old en_mask bit must migrate into its new home");
+    TEST_CHECK(adaptive_tune_get_enabled(1) == false, "zone 1 (never set in the old mask) must stay off");
+    TEST_CHECK(adaptive_tune_get_enabled(2) == true, "zone 2's old en_mask bit must migrate into its new home");
+    TEST_CHECK(s_fake_adaptive_enabled[0] && s_fake_adaptive_enabled[2] && !s_fake_adaptive_enabled[1],
+               "the migration must have actually written the NEW home (zones_config_set_adaptive_tune_enabled()), "
+               "not just this module's own RAM cache");
+
+    uint8_t migrated = 0;
+    TEST_CHECK(read_old_en_migrated(&migrated) && migrated == 1,
+               "migration must record en_migrated=1 so it is never re-consulted");
+
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
+// The idempotency half of "stop consulting the old one": once migrated, an
+// operator's explicit choice in the NEW home must survive a second boot
+// even though the stale old byte is still sitting there unchanged. MUST GO
+// RED if the en_migrated check is removed (or its write is skipped) --
+// without it, this second load re-applies the stale old_mask bit and zone
+// 0 comes back enabled, overriding the operator's own later choice.
+static void test_migrate_does_not_reconsult_old_mask_after_first_migration(void)
+{
+    reset_module_state();
+    nvs_test_clear();
+    nvs_test_enable(true);
+
+    write_old_en_mask((uint8_t)(1u << 0)); // zone 0 opted in under the old scheme
+    adaptive_tune_load_enable_flags();
+    TEST_CHECK(adaptive_tune_get_enabled(0) == true, "setup: zone 0 migrated on first load");
+
+    // Operator explicitly turns it back off in the NEW home.
+    TEST_CHECK(adaptive_tune_set_enabled(0, false), "operator disables zone 0 in its new home");
+
+    // Simulate a reboot: this module's RAM cache is gone, but neither the
+    // zone config blob (s_fake_adaptive_enabled -- the operator's real
+    // choice) nor the stub NVS (old en_mask, still 0x01) changes.
+    memset(adaptive_tune_zones, 0, sizeof(adaptive_tune_zones));
+    adaptive_tune_load_enable_flags();
+
+    TEST_CHECK(adaptive_tune_get_enabled(0) == false,
+               "a second boot must NOT re-apply the stale old en_mask bit over the operator's later, explicit "
+               "opt-out in the new home");
+
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
+// The old key was never written at all (a board that never opted any zone
+// in under the old scheme, or a brand-new one) -- must not crash, must
+// leave every zone at its default (off), and must still record en_migrated
+// so this namespace is not re-opened and re-checked every single boot
+// forever.
+static void test_migrate_handles_absent_old_key(void)
+{
+    reset_module_state();
+    nvs_test_clear();
+    nvs_test_enable(true); // namespace opens, but en_mask itself was never written
+
+    adaptive_tune_load_enable_flags();
+
+    for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+        TEST_CHECK(adaptive_tune_get_enabled(zi) == false, "an absent old mask must leave every zone at its default (off)");
+    }
+    uint8_t migrated = 0;
+    TEST_CHECK(read_old_en_migrated(&migrated) && migrated == 1,
+               "an absent old key is still a completed migration (nothing to carry) -- must be marked so");
+
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
+// ---------------------------------------------------------------------
+// U1: one-click revert (PID_EXPANSION_PLAN.md 3.3).
+// ---------------------------------------------------------------------
+
+// MUST GO RED if the restore is made approximate (e.g. re-deriving a value
+// instead of replaying the exact snapshot, or reverting gains without also
+// restoring ki_baseline): the fresh SIMC gains this test's refinement
+// produces are deliberately far from the priors (a genuine blended K_dc
+// move plus an independently-computed SIMC Kp/Ki/Kd triple), so a revert
+// that is off by even a rounding/formula difference fails these tight
+// equality checks, and a revert that merely clears ki_baseline instead of
+// restoring it fails the baseline check specifically.
+static void test_revert_restores_exact_prior_gains_and_ki_baseline(void)
+{
+    reset_module_state();
+    adaptive_tune_zones[1].enabled = true;
+    s_fake_zone_cfg[1].k_dc = 10.0f;         // prior -- true gain 15, see test_refinement_improves_...
+    s_fake_zone_cfg[1].kp = 2.0f;            // prior PID -- deliberately NOT what SIMC will compute
+    s_fake_zone_cfg[1].ki = 0.03f;
+    s_fake_zone_cfg[1].kd = 0.4f;
+    adaptive_tune_zones[1].ki_baseline_valid = true;
+    adaptive_tune_zones[1].ki_baseline = 0.03f; // matches the prior Ki, a plausible pre-existing baseline
+
+    const float true_k = 15.0f, ambient = 22.3f;
+    const float duties[4] = {0.20f, 0.50f, 0.80f, 0.35f};
+    for (int i = 0; i < 4; i++) {
+        feed_settled_dwell(1, ambient + true_k * duties[i], ambient, duties[i], SETTLE_TICKS, DT_S);
+    }
+    profile_firing_run_record_t rec = make_clean_record(20, 1, 900);
+    adaptive_tune_run_end(&rec, true);
+
+    TEST_CHECK(adaptive_tune_zones[1].has_applied, "setup: the refinement must genuinely apply");
+    float k_after = s_fake_zone_cfg[1].k_dc, kp_after = s_fake_zone_cfg[1].kp, ki_after = s_fake_zone_cfg[1].ki,
+          kd_after = s_fake_zone_cfg[1].kd;
+    TEST_CHECK(fabsf(k_after - 10.0f) > 1e-3f, "setup: K_dc must have genuinely moved");
+    TEST_CHECK(fabsf(ki_after - 0.03f) > 1e-6f, "setup: SIMC's fresh Ki must genuinely differ from the prior");
+    TEST_CHECK(adaptive_tune_zones[1].revert_available, "a genuinely applied change must offer a revert");
+
+    char reason[96];
+    adaptive_tune_revert_result_t r = adaptive_tune_revert(1, reason, sizeof(reason));
+    TEST_CHECK(r == ADAPTIVE_TUNE_REVERT_OK, "revert of a real applied change must succeed");
+
+    TEST_CHECK_NEAR(s_fake_zone_cfg[1].k_dc, 10.0f, 1e-5, "revert must restore K_dc EXACTLY, not approximately");
+    TEST_CHECK_NEAR(s_fake_zone_cfg[1].kp, 2.0f, 1e-5, "revert must restore Kp EXACTLY");
+    TEST_CHECK_NEAR(s_fake_zone_cfg[1].ki, 0.03f, 1e-5, "revert must restore Ki EXACTLY");
+    TEST_CHECK_NEAR(s_fake_zone_cfg[1].kd, 0.4f, 1e-5, "revert must restore Kd EXACTLY");
+    TEST_CHECK(adaptive_tune_zones[1].ki_baseline_valid, "revert must restore the ki_baseline that was live before "
+                                                          "the reverted change, not leave it cleared");
+    TEST_CHECK_NEAR(adaptive_tune_zones[1].ki_baseline, 0.03f, 1e-5,
+                     "revert must restore ki_baseline to its EXACT pre-change value, not the fresh (now reverted-"
+                     "away) SIMC Ki -- a stale-relative-to-live baseline is exactly the reboot-ratchet defect this "
+                     "layer already shipped once");
+    TEST_CHECK(!adaptive_tune_zones[1].has_applied, "a reverted change is no longer 'applied'");
+    TEST_CHECK(!adaptive_tune_zones[1].revert_available, "revert is one-shot -- the snapshot is consumed");
+
+    char reason2[96];
+    adaptive_tune_revert_result_t r2 = adaptive_tune_revert(1, reason2, sizeof(reason2));
+    TEST_CHECK(r2 == ADAPTIVE_TUNE_REVERT_NOTHING_TO_REVERT, "a second revert with nothing new applied must refuse "
+                                                              "cleanly, not silently reapply the same old values");
+    TEST_CHECK(reason2[0] != '\0', "the refusal must carry a reason string");
+    (void)kp_after; (void)kd_after;
+}
+
+static void test_revert_refuses_when_nothing_to_revert(void)
+{
+    reset_module_state();
+    adaptive_tune_zones[1].enabled = true; // never refined -- nothing was ever applied
+    char reason[96];
+    adaptive_tune_revert_result_t r = adaptive_tune_revert(1, reason, sizeof(reason));
+    TEST_CHECK(r == ADAPTIVE_TUNE_REVERT_NOTHING_TO_REVERT, "a zone with no applied change must refuse the revert");
+    TEST_CHECK(reason[0] != '\0', "the refusal must carry a reason string");
+}
+
+// MUST GO RED if adaptive_tune_revert()'s profile_executor_get_status()
+// check is removed: with the guard gone, this returns ADAPTIVE_TUNE_
+// REVERT_OK (and actually reverts) instead of refusing, and the
+// revert_available check right after would then also fail (the snapshot
+// would already be consumed).
+static void test_revert_refuses_while_firing_active(void)
+{
+    reset_module_state();
+    adaptive_tune_zones[1].enabled = true;
+    s_fake_zone_cfg[1].k_dc = 10.0f;
+    const float true_k = 15.0f, ambient = 22.3f;
+    const float duties[4] = {0.20f, 0.50f, 0.80f, 0.35f};
+    for (int i = 0; i < 4; i++) {
+        feed_settled_dwell(1, ambient + true_k * duties[i], ambient, duties[i], SETTLE_TICKS, DT_S);
+    }
+    profile_firing_run_record_t rec = make_clean_record(21, 1, 900);
+    adaptive_tune_run_end(&rec, true);
+    TEST_CHECK(adaptive_tune_zones[1].revert_available, "setup: a real applied change must be available to revert");
+
+    char reason[96];
+    s_fake_exec_state = PROFILE_EXEC_RUNNING;
+    TEST_CHECK(adaptive_tune_revert(1, reason, sizeof(reason)) == ADAPTIVE_TUNE_REVERT_FIRING_ACTIVE,
+               "revert must refuse while a firing is RUNNING");
+    TEST_CHECK(adaptive_tune_zones[1].revert_available, "a refused revert must not consume the snapshot");
+
+    s_fake_exec_state = PROFILE_EXEC_PAUSED;
+    TEST_CHECK(adaptive_tune_revert(1, reason, sizeof(reason)) == ADAPTIVE_TUNE_REVERT_FIRING_ACTIVE,
+               "revert must also refuse while a firing is PAUSED");
+    TEST_CHECK(adaptive_tune_zones[1].revert_available, "a refused revert must not consume the snapshot");
+
+    s_fake_exec_state = PROFILE_EXEC_IDLE;
+    TEST_CHECK(adaptive_tune_revert(1, reason, sizeof(reason)) == ADAPTIVE_TUNE_REVERT_OK,
+               "sanity: once idle again, the identical revert must succeed");
+}
+
 void run_test_adaptive_tune(void)
 {
     TEST_SECTION("adaptive_tune: settling");
@@ -2544,6 +2905,9 @@ void run_test_adaptive_tune(void)
     test_coupled_fit_refuses_underdetermined_observation_set();
     test_coupled_fit_refuses_ill_conditioned_observations();
     test_coupled_fit_recovers_known_asymmetric_matrix();
+    test_coupled_fit_refuses_negative_coefficient();
+    test_coupled_fit_refuses_nondominant_diagonal();
+    test_coupled_fit_accepts_plausible_matrix();
 
     TEST_SECTION("adaptive_tune: Ki diagnosis from dwells");
     test_ki_diagnose_insufficient_below_min_samples();
@@ -2612,6 +2976,16 @@ void run_test_adaptive_tune(void)
 
     TEST_SECTION("adaptive_tune: the model layer keeps the Ki baseline tracking its own SIMC output (Q4)");
     test_model_refine_relatches_ki_baseline_to_fresh_simc_ki();
+
+    TEST_SECTION("adaptive_tune: U2 opt-in flag migration out of the old NVS namespace");
+    test_migrate_pulls_old_mask_into_zone_config();
+    test_migrate_does_not_reconsult_old_mask_after_first_migration();
+    test_migrate_handles_absent_old_key();
+
+    TEST_SECTION("adaptive_tune: U1 one-click revert");
+    test_revert_restores_exact_prior_gains_and_ki_baseline();
+    test_revert_refuses_when_nothing_to_revert();
+    test_revert_refuses_while_firing_active();
 }
 
 int main(void)

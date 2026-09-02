@@ -50,6 +50,10 @@
 #include "nvs.h"
 #include "nvs_flash.h"
 
+#include "zones_http.h" // zones_config_get/set_adaptive_tune_enabled/get_pid/set_pid/get_model/set_model --
+                         // this file now writes the opt-in flag here too (U2) and reads/writes
+                         // gains directly for adaptive_tune_revert() (U1)
+
 const char *ADAPTIVE_TUNE_TAG = "adaptive_tune";
 
 adaptive_tune_zone_t adaptive_tune_zones[MAX31856_CHANNEL_COUNT];
@@ -601,42 +605,14 @@ void adaptive_tune_run_end(const profile_firing_run_record_t *rec, bool clean)
 }
 
 // ---------------------------------------------------------------------
-// Opt-in flag: own NVS namespace, flash-worker-routed write.
+// Opt-in flag: PID_EXPANSION_PLAN.md 3.3, U2 -- persisted through the zone
+// config blob now (zones_config_set_adaptive_tune_enabled(),
+// zones_config_accessors.c), NOT this module's own NVS namespace. See
+// adaptive_tune.h's top comment for the full "why" and adaptive_tune_
+// migrate_enable_flags()/adaptive_tune_load_enable_flags() below for how an
+// upgrading board's prior choice, still sitting in the old namespace, is
+// carried into its new home.
 // ---------------------------------------------------------------------
-
-typedef struct {
-    uint8_t mask;
-    esp_err_t result;
-} enmask_job_t;
-
-static void save_enmask_job(void *arg)
-{
-    enmask_job_t *job = (enmask_job_t *)arg;
-    nvs_handle_t h;
-    esp_err_t err =
-        nvs_open_from_partition(ADAPTIVE_TUNE_NVS_PARTITION, ADAPTIVE_TUNE_NVS_NAMESPACE, NVS_READWRITE, &h);
-    if (err != ESP_OK) {
-        job->result = err;
-        return;
-    }
-    err = nvs_set_u8(h, ADAPTIVE_TUNE_NVS_KEY_ENMASK, job->mask);
-    if (err == ESP_OK) {
-        err = nvs_commit(h);
-    }
-    nvs_close(h);
-    job->result = err;
-}
-
-static uint8_t enmask_locked(void)
-{
-    uint8_t mask = 0;
-    for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
-        if (adaptive_tune_zones[zi].enabled) {
-            mask |= (uint8_t)(1u << zi);
-        }
-    }
-    return mask;
-}
 
 bool adaptive_tune_set_enabled(uint8_t zone_index, bool enabled)
 {
@@ -646,22 +622,114 @@ bool adaptive_tune_set_enabled(uint8_t zone_index, bool enabled)
     adaptive_tune_ensure_lock();
     xSemaphoreTake(adaptive_tune_lock, portMAX_DELAY);
     adaptive_tune_zones[zone_index].enabled = enabled;
-    enmask_job_t job = {.mask = enmask_locked(), .result = ESP_FAIL};
     xSemaphoreGive(adaptive_tune_lock);
 
-    // Dispatched OUTSIDE the lock -- uart_bridge_ext_run_on_flash_worker()
-    // blocks the calling task until the worker task runs the job (see that
-    // function's own doc comment), and this file's lock must not be held
-    // across a wait on a different task.
-    // Not reachable on-worker today (only autotune_task calls this); covered
-    // by bx_run_on_internal_stack()'s generic backstop if that ever changes.
-    esp_err_t err = uart_bridge_ext_run_on_flash_worker(save_enmask_job, &job);
-    if (err != ESP_OK || job.result != ESP_OK) {
-        ESP_LOGE(ADAPTIVE_TUNE_TAG, "adaptive_tune_set_enabled(%u,%d): NVS save failed: %s / %s",
-                 (unsigned)zone_index, (int)enabled, esp_err_to_name(err), esp_err_to_name(job.result));
-        return false; // live flag still stands -- see time_sync_set_tz()'s identical convention
+    // Called OUTSIDE the lock -- same "never hold this lock across a write"
+    // rule the old en_mask dispatch kept, even though zones_config_set_
+    // adaptive_tune_enabled() itself is a direct, unwrapped nvs_save(), not
+    // a flash-worker dispatch: this function's only caller (adaptive_tune_
+    // http.c's enable_post_handler()) runs on httpd_worker, which is
+    // confirmed NOT PSRAM-stacked -- see zones_http_handlers.c's "TASK/FLASH
+    // SAFETY" comment on zones_pid_post_handler(), the same task, doing the
+    // identical kind of direct zones_config_set_*() write. A future second
+    // caller on a PSRAM-stacked task would need to route through the flash
+    // worker itself, same as adaptive_tune_revert() does for ITS zones_
+    // config writes below (see that function's own comment on why it does
+    // NOT need to, for the same httpd_worker reason, today).
+    bool saved = zones_config_set_adaptive_tune_enabled(zone_index, enabled);
+    if (!saved) {
+        ESP_LOGE(ADAPTIVE_TUNE_TAG, "adaptive_tune_set_enabled(%u,%d): zone config save failed",
+                 (unsigned)zone_index, (int)enabled);
+        // live flag still stands -- see time_sync_set_tz()'s identical convention
     }
-    return true;
+    return saved;
+}
+
+// U2 migration -- called once from adaptive_tune_load_enable_flags() below,
+// idempotent (safe to call every boot). Reads the OLD 'adap_tune'/en_mask
+// byte directly (not through the flash worker) and, the FIRST time this
+// runs on a given board, applies every bit it finds to the zone config
+// blob's new adaptive_tune_enabled field via zones_config_set_adaptive_
+// tune_enabled() -- then marks en_migrated so it is NEVER consulted again.
+// That last part matters: without it, an operator who explicitly turned
+// adaptive tuning back OFF in its new home would have it silently RE-
+// enabled on the next boot by the stale old byte -- exactly the "silent
+// reset to default-off/on defeats an explicit operator choice" failure
+// mode this migration must not have, just pointed the other direction (a
+// silent reset back ON instead of back OFF).
+//
+// Direct NVS access throughout -- reads for the usual "app_main task, not
+// PSRAM-stacked" reason (adaptive_tune_init()'s own top comment), and WRITES
+// here (the migrated-flag write, and zones_config_set_adaptive_tune_
+// enabled()'s own nvs_save()) for the SAME reason plus one more: this runs
+// from adaptive_tune_load_enable_flags(), called from main.c right after
+// zones_http_start() -- well before uart_bridge_ext_start_flash_worker()
+// runs (main.c's boot order), so the flash worker literally does not exist
+// yet at this point; dispatching onto it here would fail or hang.
+static void adaptive_tune_migrate_enable_flags(void)
+{
+    nvs_handle_t h;
+    esp_err_t err =
+        nvs_open_from_partition(ADAPTIVE_TUNE_NVS_PARTITION, ADAPTIVE_TUNE_NVS_NAMESPACE, NVS_READWRITE, &h);
+    if (err != ESP_OK) {
+        // Namespace never touched at all (a brand-new board, or one that
+        // never opted any zone in under the old scheme) -- nothing to
+        // migrate; the new home's struct-zero default (off) is already
+        // correct, and there is no "migrated" marker to write since there
+        // is nothing to open.
+        return;
+    }
+
+    uint8_t migrated = 0;
+    if (nvs_get_u8(h, ADAPTIVE_TUNE_NVS_KEY_ENMASK_MIGRATED, &migrated) == ESP_OK && migrated) {
+        nvs_close(h);
+        return; // already migrated on a previous boot -- en_mask must never be consulted again
+    }
+
+    uint8_t old_mask = 0;
+    esp_err_t mask_err = nvs_get_u8(h, ADAPTIVE_TUNE_NVS_KEY_ENMASK, &old_mask);
+    if (mask_err == ESP_OK && old_mask != 0) {
+        for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+            if ((old_mask & (1u << zi)) != 0) {
+                if (!zones_config_set_adaptive_tune_enabled(zi, true)) {
+                    ESP_LOGE(ADAPTIVE_TUNE_TAG,
+                             "migrate: zone %u's opt-in write to its new home failed -- will retry next boot "
+                             "(en_migrated not set)",
+                             (unsigned)zi);
+                    nvs_close(h);
+                    return; // do NOT mark migrated -- a partial migration must be retried whole, not
+                            // half-applied and then never revisited
+                }
+            }
+        }
+        ESP_LOGI(ADAPTIVE_TUNE_TAG,
+                 "migrated adaptive-tune opt-in mask 0x%02x from the old 'adap_tune' namespace into the "
+                 "zone config blob",
+                 (unsigned)old_mask);
+    }
+    // mask_err == ESP_ERR_NVS_NOT_FOUND (key never written) is just as much
+    // "nothing to migrate" as a found-but-zero mask -- either way this
+    // namespace must never be consulted again after this point.
+    esp_err_t mark_err = nvs_set_u8(h, ADAPTIVE_TUNE_NVS_KEY_ENMASK_MIGRATED, 1);
+    if (mark_err == ESP_OK) {
+        mark_err = nvs_commit(h);
+    }
+    if (mark_err != ESP_OK) {
+        ESP_LOGE(ADAPTIVE_TUNE_TAG, "migrate: failed to persist the migrated marker: %s -- will retry next boot",
+                 esp_err_to_name(mark_err));
+    }
+    nvs_close(h);
+}
+
+void adaptive_tune_load_enable_flags(void)
+{
+    adaptive_tune_ensure_lock();
+    adaptive_tune_migrate_enable_flags();
+    xSemaphoreTake(adaptive_tune_lock, portMAX_DELAY);
+    for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+        adaptive_tune_zones[zi].enabled = zones_config_get_adaptive_tune_enabled(zi);
+    }
+    xSemaphoreGive(adaptive_tune_lock);
 }
 
 // Q3: the escape hatch the cumulative-bound refusal message actually names
@@ -804,7 +872,144 @@ void adaptive_tune_get_status(uint8_t zone_index, adaptive_tune_zone_status_t *o
     out->ki_correction_pct = z->ki_correction_pct;
     out->ki_applied = z->ki_applied;
     strncpy(out->ki_refusal_reason, z->ki_refusal_reason, sizeof(out->ki_refusal_reason) - 1);
+    out->revert_available = z->revert_available;
     xSemaphoreGive(adaptive_tune_lock);
+}
+
+// ---------------------------------------------------------------------
+// U1: one-click revert (PID_EXPANSION_PLAN.md 3.3). See adaptive_tune.h's
+// own comment on adaptive_tune_revert() for the full contract.
+// ---------------------------------------------------------------------
+
+void adaptive_tune_capture_revert_locked(adaptive_tune_zone_t *z, float kp, float ki, float kd, float k_dc,
+                                          float tau_s, float dead_time_s)
+{
+    z->revert_available = true;
+    z->revert_kp = kp;
+    z->revert_ki = ki;
+    z->revert_kd = kd;
+    z->revert_k_dc = k_dc;
+    z->revert_tau_s = tau_s;
+    z->revert_dead_time_s = dead_time_s;
+    // Whatever ki_baseline currently is AT THE INSTANT just before the
+    // caller's own commit -- see this function's own prototype comment
+    // (adaptive_tune_internal.h) and adaptive_tune_revert()'s header
+    // comment for why capturing it here, rather than clearing it on
+    // revert, is what keeps the baseline consistent with whichever gains
+    // end up live.
+    z->revert_ki_baseline_valid = z->ki_baseline_valid;
+    z->revert_ki_baseline = z->ki_baseline;
+}
+
+adaptive_tune_revert_result_t adaptive_tune_revert(uint8_t zone_index, char *reason, size_t reason_cap)
+{
+    if (reason && reason_cap > 0) {
+        reason[0] = '\0';
+    }
+    if (zone_index >= MAX31856_CHANNEL_COUNT) {
+        if (reason) {
+            snprintf(reason, reason_cap, "invalid zone index");
+        }
+        return ADAPTIVE_TUNE_REVERT_INVALID_ZONE;
+    }
+
+    // Mid-firing decision (see adaptive_tune.h's own comment on this
+    // function): refuse outright while ANY firing is RUNNING or PAUSED,
+    // board-wide. profile_executor_get_status() takes and releases s_exec.
+    // lock entirely INSIDE this call, strictly before this function ever
+    // takes adaptive_tune_lock below -- s_exec.lock -> adaptive_tune_lock,
+    // never nested the other way, same order every other call site in this
+    // module keeps.
+    profile_exec_status_t st;
+    profile_executor_get_status(&st);
+    if (st.state == PROFILE_EXEC_RUNNING || st.state == PROFILE_EXEC_PAUSED) {
+        if (reason) {
+            snprintf(reason, reason_cap, "cannot revert while a firing is running or paused");
+        }
+        return ADAPTIVE_TUNE_REVERT_FIRING_ACTIVE;
+    }
+
+    adaptive_tune_ensure_lock();
+    xSemaphoreTake(adaptive_tune_lock, portMAX_DELAY);
+    adaptive_tune_zone_t *z = &adaptive_tune_zones[zone_index];
+    if (!z->revert_available) {
+        xSemaphoreGive(adaptive_tune_lock);
+        if (reason) {
+            snprintf(reason, reason_cap, "no adaptive-tune change recorded this boot to revert");
+        }
+        return ADAPTIVE_TUNE_REVERT_NOTHING_TO_REVERT;
+    }
+    float kp = z->revert_kp, ki = z->revert_ki, kd = z->revert_kd;
+    float k_dc = z->revert_k_dc, tau_s = z->revert_tau_s, dead_time_s = z->revert_dead_time_s;
+    bool base_valid = z->revert_ki_baseline_valid;
+    float base_val = z->revert_ki_baseline;
+    xSemaphoreGive(adaptive_tune_lock); // never hold this lock across the zone-config write below
+
+    // Direct, unwrapped zones_config_set_*() calls -- this function's only
+    // caller (adaptive_tune_http.c's revert_post_handler()) runs on httpd_
+    // worker, the same confirmed-not-PSRAM-stacked task zones_pid_post_
+    // handler()/adaptive_tune_set_enabled() above already write zones_
+    // config from directly, unwrapped -- see either's own comment for the
+    // evidence this rests on.
+    bool ok = zones_config_set_model(zone_index, k_dc, tau_s, dead_time_s) &&
+              zones_config_set_pid(zone_index, kp, ki, kd);
+    if (!ok) {
+        if (reason) {
+            snprintf(reason, reason_cap, "zone config write rejected the reverted gains");
+        }
+        return ADAPTIVE_TUNE_REVERT_WRITE_FAILED;
+    }
+
+    xSemaphoreTake(adaptive_tune_lock, portMAX_DELAY);
+    // One-shot: consume the snapshot so a second press without a fresh
+    // applied change in between reports NOTHING_TO_REVERT honestly, rather
+    // than silently reapplying the same old values again.
+    z->revert_available = false;
+    // Restore the Ki-diagnosis baseline to match -- see adaptive_tune_
+    // capture_revert_locked()'s own comment and adaptive_tune_revert()'s
+    // header comment for why this is a restore, not a clear.
+    z->ki_baseline_valid = base_valid;
+    z->ki_baseline = base_val;
+    // The applied-change latch this reverts now describes gains that are no
+    // longer live -- clear it so zones_page.html's "last applied change"
+    // column stops advertising a change that was just undone.
+    z->has_applied = false;
+    kibase_job_t job = {.result = ESP_FAIL};
+    for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+        job.blob.vals[zi] = adaptive_tune_zones[zi].ki_baseline;
+        if (adaptive_tune_zones[zi].ki_baseline_valid) {
+            job.blob.mask |= (uint8_t)(1u << zi);
+        }
+    }
+    xSemaphoreGive(adaptive_tune_lock);
+
+    // Ki-baseline NVS persist -- same dispatch pattern as adaptive_tune_
+    // clear_ki_baseline() above (its own comment has the full re-entrancy
+    // reasoning): check uart_bridge_ext_is_on_flash_worker() first and run
+    // the save inline if already there, otherwise dispatch. Unlike the
+    // migration writes above, the flash worker DOES exist by the time this
+    // function can ever run (it is only reachable via an HTTP request,
+    // which cannot happen until well after main.c's boot sequence finishes
+    // starting every task), so dispatching here is the correct, safe path.
+    esp_err_t err;
+    if (uart_bridge_ext_is_on_flash_worker()) {
+        save_kibase_job(&job);
+        err = ESP_OK;
+    } else {
+        err = uart_bridge_ext_run_on_flash_worker(save_kibase_job, &job);
+    }
+    if (err != ESP_OK || job.result != ESP_OK) {
+        ESP_LOGE(ADAPTIVE_TUNE_TAG, "adaptive_tune_revert(%u): Ki baseline NVS save failed: %s / %s",
+                 (unsigned)zone_index, esp_err_to_name(err), esp_err_to_name(job.result));
+        // Live state (gains AND baseline) is still reverted either way --
+        // same "applied live, logged if the save failed" convention as
+        // adaptive_tune_clear_ki_baseline() above.
+    }
+
+    if (reason) {
+        reason[0] = '\0';
+    }
+    return ADAPTIVE_TUNE_REVERT_OK;
 }
 
 // HTTP registration lives in adaptive_tune_http.c now (GET /api/adaptive_tune,
@@ -825,12 +1030,15 @@ void adaptive_tune_init(void)
     esp_err_t err =
         nvs_open_from_partition(ADAPTIVE_TUNE_NVS_PARTITION, ADAPTIVE_TUNE_NVS_NAMESPACE, NVS_READONLY, &h);
     if (err == ESP_OK) {
-        uint8_t mask = 0;
-        if (nvs_get_u8(h, ADAPTIVE_TUNE_NVS_KEY_ENMASK, &mask) == ESP_OK) {
-            for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
-                adaptive_tune_zones[zi].enabled = (mask & (1u << zi)) != 0;
-            }
-        }
+        // U2: the opt-in mask is NO LONGER read here -- it moved out of this
+        // namespace to the zone config blob (zone_cfg_t::adaptive_tune_
+        // enabled). See adaptive_tune_load_enable_flags()/adaptive_tune_
+        // migrate_enable_flags() (called separately, later in boot, once
+        // zones config has actually loaded) for where an upgrading board's
+        // prior en_mask value is carried forward, and why that cannot
+        // happen here (this function runs too early -- zones config is not
+        // loaded yet at this point in main.c's boot sequence).
+        //
         // P1: reload the persisted Ki baseline too -- see adaptive_tune_
         // kibase_blob_t's own comment (adaptive_tune_internal.h) for the
         // on-disk shape, and ki_baseline's own comment for WHY this matters:

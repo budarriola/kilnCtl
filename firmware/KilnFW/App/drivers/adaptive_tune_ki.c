@@ -299,8 +299,23 @@ void adaptive_tune_refine_ki_locked(uint8_t zi, const profile_exec_firing_stats_
         return;
     }
 
+    // U1: snapshot the PRE-change gains (kp/ki/kd, still the live values at
+    // this point) and model (fetched fresh -- this layer never touches
+    // K_dc/tau/dead_time itself, but a revert must still restore them to
+    // whatever they currently are, not silently zero them), plus the
+    // ki_baseline state AS OF right now -- which, if the `if (!z->ki_
+    // baseline_valid)` branch above just latched it fresh from this same
+    // `ki`, is exactly ki itself, so reverting Ki back to `ki` leaves the
+    // baseline still correctly describing the live value. See adaptive_
+    // tune_capture_revert_locked()'s own comment.
+    float cur_k_dc = 0.0f, cur_tau_s = 0.0f, cur_dead_time_s = 0.0f;
+    zones_config_get_model(zi, &cur_k_dc, &cur_tau_s, &cur_dead_time_s); // best-effort, same as adaptive_
+                                                                          // tune_model.c's identical call
+    adaptive_tune_capture_revert_locked(z, kp, ki, kd, cur_k_dc, cur_tau_s, cur_dead_time_s);
+
     if (!zones_config_set_pid(zi, kp, new_ki, kd)) {
         adaptive_tune_set_reason(z->ki_refusal_reason, sizeof(z->ki_refusal_reason), "zones_config_set_pid() rejected the corrected Ki");
+        z->revert_available = false; // nothing was actually written
         return;
     }
 
