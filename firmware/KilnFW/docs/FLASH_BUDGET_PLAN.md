@@ -1,7 +1,9 @@
 # Flash Budget Plan — 16 MB chip, reclaiming image and partition space
 
 Plan doc for the flash side of KilnFW: what the 16 MB part is currently spent
-on, why only 64 kB of it is unallocated, and what can be reclaimed.
+on and what has been reclaimed. As of `9ede138`+`0bbb21c` the chip-level
+squeeze this doc was written about is gone — 3880 K is unallocated, 2368 K of
+it contiguous.
 
 Conventions this doc follows, matching `PID_EXPANSION_PLAN.md`: **the code is
 truth, not the checkboxes.** Nothing is marked done until a commit is named.
@@ -13,8 +15,9 @@ Status at time of writing (2026-09-02): **Phase 0 (§4.1/§4.2/§4.3) is built.*
 decision. §5.4 is decided-not-pursued (§4.1's attribution found the string
 pool is ordinary spread-out `ESP_LOG*` strings, not dead weight). §4.2's size
 baseline is now recorded against `eb17ea5` — see 4.2. §7's checklist for the
-single partition-table revision covering §5.1/§5.2 is still the remaining
-hardware step; nothing has been reflashed under this plan yet.
+single partition-table revision covering §5.1/§5.2 is the remaining hardware
+step: whether the new table has actually been written to the chip is NOT
+established by anything in this repo — see §4.2.
 
 **Phase 0, done (`699f5ab`):** `attribute_str_pool.py` +
 `check_flash_partition_map.ps1`. Methodology correction for §4.1: the map
@@ -39,13 +42,11 @@ other's numbers.
 
 ---
 
-## 1. There is no flash emergency, but there is less slack than it looks
+## 1. Two scarcities, and where each stands
 
-Nothing here is urgent. The purpose of this doc is that the obvious summary
-("38.8% free") is measured against the wrong denominator, and acting on it
-later without this context would produce a bad decision.
-
-Two separate scarcities, which must not be conflated:
+Nothing here is urgent. The point of this section is that "38% free" is
+measured against the app slot, not the chip, and the two must not be
+conflated.
 
 **Slot-level — comfortable.**
 
@@ -55,62 +56,43 @@ KilnCtrl.bin (commit eb17ea5)        1,936,320 B
 free                                 1,209,408 B   (38.4%)
 ```
 
-**Superseded:** the 2026-09-01 figures once here (1,924,496 B / 1,221,232 B /
-38.8%, dated but not named to a commit) are stale — both because they predated
-`9ede138`'s partition-table change and because a dated-only number is exactly
-what this section warns against. See §4.2 for the full baseline, methodology,
-and per-archive table, all pinned to `eb17ea5`. **Any size baseline recorded in
-this doc must name the commit it was taken against.** A byte count with only a
-date attached cannot be checked later.
+**Any size baseline recorded in this doc must name the commit it was taken
+against.** A byte count with only a date attached cannot be checked later.
+See §4.2 for the full baseline and per-archive table, pinned to `eb17ea5`.
 
-**Chip-level — nearly exhausted.**
+**Chip-level — no longer tight.** Before `9ede138`/`0bbb21c` only 77,824 B of
+the 16 MB part was unallocated (65,536 B contiguous), which is what this plan
+was written to fix. After them, 3880 K is free in four pieces (§2): a 2368 K
+contiguous tail at 0xDB0000, an 896 K fragment boxed between `factory` and
+`coredump` (pico_img's old slot), a 604 K fragment boxed between `phy_init`
+and `wifi_nvs`, and the 12 K gap below `otadata`. The 57,344 B pad above
+`otadata` is structurally required — `gen_esp32part.py` forces app partitions
+onto 64 K boundaries — and is not reclaimable.
 
-```
-16 MB part                          16,777,216 B
-unallocated, contiguous tail            65,536 B   (0xFF0000..0x1000000)
-unallocated, boxed-in gap               12,288 B   (0x1FD000..0x200000)
-forced 64 K-alignment pad               57,344 B   (0x202000..0x210000, not reclaimable)
-```
-
-Usable unallocated space is therefore **77,824 B**, of which only the 65,536 B
-tail is contiguous and freely usable. The 12,288 B gap sits between
-`profiles_nvs` and `otadata` and is boxed in by two immovable partitions — at
-exactly three 4 K sectors it is the bare minimum NVS needs to operate, and
-nothing else. The 57,344 B pad is structurally required: `gen_esp32part.py`
-forces app partitions onto 64 K boundaries, and `otadata` is only 8 K.
-
-The image has room to grow. The *partition table* does not have room for
-another partition. Any future feature needing flash storage — a `web` partition
-for OTA-able UI assets, a larger `logs`, a data-recorder — has 64 kB to work
-with and will require reclamation before it can be added.
+The partition table now has room for another partition: a `web` partition for
+OTA-able UI assets, a data-recorder, or a larger `logs` all fit in the tail
+without further reclamation.
 
 ---
 
 ## 2. Where the 16 MB currently goes (measured, from `partitions.csv`)
 
-| region | size | note |
-|---|---:|---|
-| bootloader (32 K) + partition table (4 K) + `nvs` (24 K) + `phy_init` (4 K) | 64 K | live data in `nvs` |
-| **`legacy_app`** | **1500 K** | **dead hole — see 5.1** |
-| `wifi_nvs` + `kiln_nvs` + `profiles_nvs` | 472 K | live data, immovable |
-| *gap* (0x1FD000..0x200000) | 12 K | unallocated, boxed in |
-| `otadata` (8 K) + forced 64 K-alignment pad (56 K) | 64 K | pad not reclaimable |
-| `ota_0` + `ota_1` + `factory` | **9216 K** | 3 × 3072 K |
-| `pico_img` | 896 K | RP2040 image relay staging; relocated to 0x10000 by 9ede138 |
-| `coredump` | 1024 K | sized empirically, see 5.3 |
-| `logs` | 768 K | shrunk from 3072 K by 9ede138, see 5.2 |
-| *unallocated tail* (0xDB0000..0x1000000) | 2368 K | freed by 9ede138 |
-| **total** | **16,384 K** | = 16,777,216 B ✓ |
+| region | offset | size | note |
+|---|---|---:|---|
+| bootloader (32 K) + partition table (4 K) + `nvs` (24 K) + `phy_init` (4 K) | 0x0 | 64 K | live data in `nvs` |
+| `pico_img` | 0x10000 | 896 K | RP2040 image relay staging; moved here by 9ede138 |
+| *unallocated* | 0xF0000 | 604 K | boxed in by `phy_init` / `wifi_nvs` (what is left of `legacy_app`) |
+| `wifi_nvs` + `kiln_nvs` + `profiles_nvs` | 0x187000 | 472 K | live data, immovable |
+| *unallocated* | 0x1FD000 | 12 K | boxed in; three sectors, the NVS minimum |
+| `otadata` (8 K) + forced 64 K-alignment pad (56 K) | 0x200000 | 64 K | pad not reclaimable |
+| `ota_0` + `ota_1` + `factory` | 0x210000 | 9216 K | 3 × 3072 K |
+| *unallocated* | 0xB10000 | 896 K | `pico_img`'s old slot, boxed in by `factory` / `coredump` |
+| `coredump` | 0xBF0000 | 1024 K | sized empirically, see 5.3 |
+| `logs` | 0xCF0000 | 768 K | shrunk from 3072 K by 9ede138, see 5.2 |
+| *unallocated tail* | 0xDB0000 | 2368 K | contiguous, the largest this table has ever had |
+| **total** | | **16,384 K** | = 16,777,216 B ✓ |
 
-The ~3.06 MB of spare that this table's own comments describe was consumed when
-`logs` was added.
-
-An earlier draft of this table stated the first row as 60 K and omitted the
-12 K gap entirely, so it summed 16 K short of the chip and understated usable
-free space. Recomputed row-by-row above; the totals now reconcile exactly.
-
-Three items dominate: **9 MB of app slots** (56% of the chip), **1.5 MB dead**
-in `legacy_app`, and **3 MB of `logs`**.
+One item dominates what is *spent*: **9 MB of app slots**, 56% of the chip.
 
 The 9 MB is the price of dual-OTA plus a factory recovery image, and all three
 app partitions must be the same size — an OTA image has to fit either slot, and
@@ -336,10 +318,14 @@ per-archive table (predates `9ede138`'s partition-table change, though the
 *image* contents that table describes were not directly affected by the
 partition move — only the slot-level percentage in §1 was). The partition
 table itself changed at `9ede138` (`legacy_app` reclaimed, `pico_img`
-relocated to 0x10000, `logs` 3072K→768K, ~3.71 MiB freed) and the board has
-been flashed with it; `check_flash_partition_map.ps1`'s "Expected-map check"
-(§4.3) confirms the checked-out `partitions.csv` matches that post-`9ede138`
-shape.
+relocated to 0x10000, `logs` 3072K→768K, ~3.71 MiB freed).
+`check_flash_partition_map.ps1`'s "Expected-map check" (§4.3) confirms the
+checked-out `partitions.csv` matches that post-`9ede138` shape — **that is a
+repo check, not a board check.** The board is running an app built from a
+commit that contains the new table (`1d18fa9`, `/api/ota/esp/status`
+2026-09-02), but nothing readable over HTTP reports the partition table
+actually on the chip, so whether §7's reflash has happened is unresolved here
+and must be settled by reading the table off the board.
 
 No new check was needed for this section — §4.3's `check_flash_partition_map.ps1`
 already runs in `tools/run_all_checks.ps1` and already validates the current
@@ -363,48 +349,31 @@ Ordered by yield per unit of risk. Every item here requires reflashing the
 partition table, which carries fixed hazards listed in section 7 — so if more
 than one is done, do them in a single table revision, not several.
 
-### 5.1 `legacy_app` — 1500 kB, highest yield — DECIDED: relocate `pico_img` (see top-of-doc note)
+### 5.1 `legacy_app` — 1500 kB — LANDED (`9ede138`): `pico_img` relocated into it
 
-Flash that `factory` occupied before it moved to 0x810000 on 2026-08-21. It is
-declared `data`/`undefined`, is never read or written by this firmware, and
-exists purely to give the hole a name in the CSV. It is boxed in by `phy_init`
-below (0xf000) and `wifi_nvs` above (0x187000), neither of which may move.
+The 1500 kB hole `factory` left when it moved to 0x810000 on 2026-08-21.
+`pico_img` (896 kB) now sits at its start (0x10000); the remaining 604 kB
+stays unallocated and boxed in by `phy_init` below and `wifi_nvs` above. This
+was the one candidate use that improved contiguity rather than occupancy — it
+freed `pico_img`'s old high slot (896 kB at 0xB10000). No data-loss risk:
+nothing ever lived there, and `pico_img` is looked up by name, not offset.
 
-Constraints on reuse: the region is 0x10000..0x187000, which *is* 64 kB-aligned
-at its start, but at 1500 kB it cannot host an app partition (those need 3 MB
-here, per section 2). It is therefore usable only for **data**.
+The alternatives not taken, if the 604 kB is ever wanted: a `web` SPIFFS
+partition for OTA-able UI assets (`WEB_UI_RESPONSIVE_PLAN.md` §8 would be the
+consumer), or a data-recorder / expanded statistics partition. It is too small
+for an app partition (3 MB here) and is therefore data-only.
 
-**These candidates are mutually exclusive — 1500 kB is one hole, not three.**
-Pick one before proposing a table revision:
+### 5.2 `logs` — LANDED: cap 1 MiB -> 256 kB/kind (`0bbb21c`), partition 3072 K -> 768 K (`9ede138`)
 
-- a `web` SPIFFS partition, if OTA-able UI assets are ever wanted
-  (`WEB_UI_RESPONSIVE_PLAN.md` §8 would be the consumer);
-- relocating `pico_img` (896 kB) into it, which frees 896 kB of *contiguous
-  high* flash — worth more than the 1500 kB itself, since the high region is
-  where a future app-sized partition could go;
-- absorbing a future data-recorder or expanded statistics partition.
+`log_store.h` now sets `LOG_STORE_MAX_TOTAL_BYTES` to 256 KiB per kind
+(8 × 32 KiB segments) against a 768 K partition — the same ~2/3 fill ratio the
+3 MB/1 MiB pair had. Reasoning kept below, since it governs any future resize.
 
-The second option is the only one that improves contiguity rather than just
-occupancy, and is the default recommendation absent a specific need for the
-other two.
-
-This is the cleanest 1.5 MB available and it carries no data-loss risk, because
-nothing lives there.
-
-### 5.2 `logs` — 3072 kB backing a 1 MiB cap — DECIDED: cap drops to 256 kB (see top-of-doc note)
-
-`log_store.h` sets `LOG_STORE_MAX_TOTAL_BYTES` to 1 MiB. The partition is 3 MB,
-i.e. 3× its own rotation ceiling.
-
-Some headroom over the cap is correct — SPIFFS degrades at near-full, with
-slower mounts and more GC, which is precisely why the cap sits below the
-partition size. But 3× is more than that reasoning requires. Roughly 1.5 MB is
-plausibly reclaimable while still leaving ~50% headroom over the cap.
-
-**Do not shrink this without first deciding whether the 1 MiB cap is itself
-right.** If the intent is longer retention, the partition is correctly sized and
-the cap should rise instead. That is a product question, not a flash question,
-and it should be answered before the partition is touched.
+Headroom over the cap is deliberate: SPIFFS degrades at near-full, with slower
+mounts and more GC. Any future resize must keep that ratio, and must decide the
+retention question (how long a history is wanted) before the partition size —
+that is a product question, not a flash one. §5.2a is the answer that made
+256 kB workable.
 
 ### 5.2a Follow-on, 2026-09-02 — DECIDED: flash holds binary events only, never per-tick text
 
@@ -517,12 +486,12 @@ history and are not hypothetical — each has already caused a problem here once
    is recorded against `eb17ea5` (see 4.2).
 2. ~~Decide the `logs` retention question (5.2)~~ — decided and landed
    (`0bbb21c`).
-3. Single partition-table revision covering `legacy_app` (5.1, landed
-   `9ede138`) and `logs` (5.2, landed `0bbb21c`) together, with section 7's
-   checklist worked through in order — **this is the remaining hardware
-   step**: reflash the partition table and bootloader, archive the four NVS
-   partitions first, erase `otadata`, and do not touch `coredump` in the
-   process.
+3. **The remaining hardware step**, for the single table revision covering
+   5.1 (`9ede138`) and 5.2 (`0bbb21c`): confirm what table is actually on the
+   chip (read it back — no repo check and no HTTP endpoint can tell you), and
+   if it is still the old one, work §7's checklist in order — archive the four
+   NVS partitions first, reflash the table and bootloader, erase `otadata`,
+   and do not touch `coredump` in the process.
 4. Leave `coredump` (5.3) alone unless something forces the issue.
 5. ~~Revisit 5.4 only if 4.1 justifies it~~ — 4.1 does not justify it;
    decided not pursued.
