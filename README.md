@@ -28,7 +28,7 @@ order: `tools/run_all_checks.ps1` (the mechanical `check_*.ps1` guards, plus
 the JS/browser harnesses and the headless-Chrome responsive sweep, which are
 themselves wired into that script's discovery); then, in parallel, the KilnFW
 and SaftyFW off-target host-test suites and the `tools/PcTools` pytest suite
-(~1089 tests -- its live-bench tests self-skip with no board attached); then,
+(its live-bench tests self-skip with no board attached); then,
 in parallel, the two target firmware *compiles* (KilnFW over ESP-IDF, SaftyFW
 over pico-sdk -- no flashing, ever). One gate failing does not stop the
 others; the final summary lists every gate's pass/fail and points at the full
