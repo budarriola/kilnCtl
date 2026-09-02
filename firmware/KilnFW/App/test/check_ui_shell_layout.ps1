@@ -70,6 +70,12 @@ $required = @(
         Rules = @(
             "max-width: var(--kc-shell-max);"
         )
+    },
+    @{
+        File = "profiles_page.html"
+        Rules = @(
+            "max-width: var(--kc-shell-max);"
+        )
     }
 )
 
