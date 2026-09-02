@@ -58,6 +58,12 @@ $required = @(
             "max-width: var(--kc-shell-max);",
             "#zones { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 0.7em; }"
         )
+    },
+    @{
+        File = "wifi_provision_page.html"
+        Rules = @(
+            "max-width: var(--kc-shell-max);"
+        )
     }
 )
 
