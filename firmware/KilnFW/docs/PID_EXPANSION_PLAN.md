@@ -372,14 +372,50 @@ is the explicit confidence line: `is_extrapolation()`/`run_profile()`'s
 finding that matters most here: at the current low-temperature-fit gain
 (`K_diag` ≈ 35–38 °C rise at duty=1 relative to ambient), the coupled hold
 solve is infeasible and duty is fully saturated at every band from ~65 °C
-upward, bisque/cone6/cone10 included — i.e. this identification, extrapolated
-by any loss model, does not represent a plant able to reach firing
-temperature. **Reaching cone 10 in simulation is therefore not yet
-trustworthy for magnitude** — it needs either a genuine high-temperature
-identification pass (real thermocouple data above 80 °C) or an explicit,
-separately-justified high-power regime, neither of which exists. Treat the
-cone-band sweep output as "shows the fixed low-T matrix does not extrapolate,"
-not as a tracked-firing prediction.
+upward, bisque/cone6/cone10 included — i.e. the rig's own identification
+(K_diag ≈ 35–38 °C rise at duty=1) belongs to a small test fixture whose
+element cannot even reach 40 °C above ambient at full power against its own
+losses; no loss model turns that into a plant reaching 1285 °C.
+
+**Physical high-temperature model (added 2026-09-02b).** Rather than keep
+extrapolating the rig's fitted gain, `plant_sim.py` now also models a
+*different* physical object above `EXTRAPOLATION_BOUNDARY_C`:
+`PhysicalKilnPlant`, an energy-balance simulation of a real cone-10-capable
+kiln, parameterized by quantities a kiln owner can look up — element wattage
+(`PHYS_P_MAX_W`, ASSUMED 2.5 kW/zone), chamber wall area/thickness/k-value
+(ASSUMED IFB, `PHYS_WALL_*`), thermal mass (ASSUMED, from that same
+geometry) and outer-shell convection+radiation (ASSUMED `PHYS_OUTER_*`).
+Radiative loss (∝T⁴) is applied at the physically correct place — the outer
+shell, solved quasi-statically each step (`solve_outer_wall_temp_c`) — not
+on the chamber air directly, which would overstate loss by two-plus orders
+of magnitude. Cross-zone coupling reuses the bench rig's identified K_full
+ratios as a MEASURED dimensionless *shape* (`PHYS_COUPLING_FRAC`), damped by
+an ASSUMED `PHYS_COUPLING_SEPARATION_DAMPING=0.25` (a real kiln has more
+separation between zones than the compact rig) and capped by
+`COUPLING_GROWTH_CAP=2.0` — both constants exist because the undamped/
+uncapped version is a genuine positive-feedback runaway, caught while
+building this section (two zones' duty pinned at 0 while temperature kept
+climbing on coupled power alone) and now pinned by
+`test_physical_kiln_plant_stays_bounded_at_cone10` and
+`test_coupling_growth_is_capped`.
+
+**Plausibility, with these ASSUMED numbers**: steady-state cone-10 hold
+needs ≈0.30 duty of the 2.5 kW element (`test_physical_hold_duty_feasible_
+at_cone10`), and the sweep's 3 °C/min commanded ramp reaches cone 10 in
+≈7 hours — both in the range a real firing looks like. The full coupled run
+(sweep's `plant_sim_sweep.py`, now routing to `PhysicalKilnPlant` whenever a
+band's target exceeds `EXTRAPOLATION_BOUNDARY_C`, `'measured'` FOPDTPlant
+otherwise — `plant_regime` on every result row says which) settles cone 10
+within ~5 °C mean of target with only 6–55 % of dwell samples duty-saturated
+increasing toward the top of the range, i.e. required duty rises with
+temperature the way a real kiln's does. This is a genuinely different,
+ASSUMED-parameter physical object from the bench rig — not a claim that a
+3 kW bench element reaches cone 10, which it plausibly cannot (see above).
+Treat cone-band sweep rows as "how a plausible full-size kiln, driven by
+firmware's *fixed, low-temperature-only* feedforward matrix, behaves" — good
+for mechanism-level control-strategy comparison at high temperature, not yet
+for a specific gain's third decimal place, and not a substitute for a real
+high-temperature identification pass if one ever becomes possible.
 
 **What it can be trusted for**, per its own module docstring: ramp magnitude and
 sign on coupled-feedforward builds within the fitted ~0–80 °C envelope; dwell

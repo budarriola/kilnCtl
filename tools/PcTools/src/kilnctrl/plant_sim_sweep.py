@@ -65,6 +65,7 @@ class SweepResult:
     overshoot_peak_c: float             # max post-ramp overshoot across zones, in the 220s window
     overshoot_peak_lag_s: float         # time of that peak after ramp end
     dwell_end_mean_abs_error_c: float   # |sim - target| at the end of the dwell, mean over zones
+    plant_regime: str                   # 'measured' (bench-rig fit) or 'physical' (ASSUMED energy balance)
 
 
 def _band_segs(target_c: float):
@@ -83,10 +84,20 @@ def _run_one(args) -> dict:
     segs = _band_segs(target_c)
     start_temp = [AMBIENT_C, AMBIENT_C, AMBIENT_C]
 
+    # Which physical object the PLANT itself is: the small bench rig
+    # (MEASURED fit, valid at/below EXTRAPOLATION_BOUNDARY_C) or the
+    # ASSUMED real cone-10-capable kiln (PhysicalKilnPlant) above it. The
+    # CONTROLLER always believes the fixed, bench-rig-identified matrix
+    # (K_inv_variant/ps.tau) regardless of regime -- exactly like the real
+    # firmware, which has no temperature compensation and cannot know which
+    # physical object it is actually driving.
+    plant_regime = 'physical' if ps.is_extrapolation(target_c) else 'measured'
+
     result = ps.run_profile(
         segs, start_temp, kp=kp, ki=ki, kd=kd,
         climb_mode='coupled', integral_floor='ff_hold', ambient=AMBIENT_C,
         controller_K_inv=K_inv_variant, controller_tau=ps.tau,
+        plant_regime=plant_regime,
     )
     t, target, temps, duty = result['t'], result['target'], result['temps'], result['duty']
     ramp_end = segs[0][1]
@@ -122,6 +133,7 @@ def _run_one(args) -> dict:
         overshoot_peak_c=overshoot_peak_c,
         overshoot_peak_lag_s=overshoot_peak_lag_s,
         dwell_end_mean_abs_error_c=dwell_end_mean_abs_error_c,
+        plant_regime=plant_regime,
     ))
 
 
@@ -156,13 +168,14 @@ def run_sweep(bands: dict[str, float], matrices: Sequence[str],
 
 
 def format_sweep_table(results: Sequence[dict]) -> str:
-    header = (f"{'band':16s} {'target_c':>9s} {'matrix':>6s} {'extrap':>6s} "
+    header = (f"{'band':16s} {'target_c':>9s} {'matrix':>6s} {'regime':>9s} {'extrap':>6s} "
               f"{'infeas':>6s} {'sat_frac':>8s} {'max_duty':>8s} "
               f"{'ovs_c':>6s} {'ovs_lag_s':>9s} {'dwell_err_c':>11s}")
     lines = [header]
     for r in results:
         lines.append(
             f"{r['band']:16s} {r['target_c']:9.1f} {r['matrix_variant']:>6s} "
+            f"{r['plant_regime']:>9s} "
             f"{str(r['extrapolation']):>6s} {str(r['hold_infeasible']):>6s} "
             f"{r['duty_saturated_frac']:8.2f} {r['max_duty']:8.3f} "
             f"{r['overshoot_peak_c']:6.2f} {r['overshoot_peak_lag_s']:9.1f} "

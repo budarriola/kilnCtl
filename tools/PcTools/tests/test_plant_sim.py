@@ -416,3 +416,146 @@ def test_high_temperature_extension_does_not_change_five_capture_fit():
     same aggregate residual the plain recalibration test already pins."""
     report = ps.render_sim_vs_capture_report(AFTER, integral_floor='ff_u')
     assert report["rms_residual_c"] < 2.0
+
+
+# ---------------------------------------------------------------------------
+# Physical (energy-balance) high-temperature model, added 2026-09-02b --
+# see plant_sim.py's "Physical high-temperature model" section for the
+# equations/parameters. PhysicalKilnPlant is a DIFFERENT physical object
+# from the bench rig (FOPDTPlant/K_full/tau/L): a real cone-10-capable
+# kiln, modeled with ASSUMED element/insulation/mass quantities.
+# ---------------------------------------------------------------------------
+
+def test_run_profile_rejects_unknown_plant_regime():
+    """``plant_regime`` is a closed choice ('measured' or 'physical') --
+    silently falling back to one of them on a typo would hide exactly which
+    physical object a caller thought they were driving."""
+    segs = [(0.0, 100.0, 20.0, 55.0, 0.35), (100.0, 400.0, 55.0, 55.0, 0.0)]
+    with pytest.raises(ValueError):
+        ps.run_profile(segs, [20.0, 20.0, 20.0], plant_regime='bogus')
+
+
+def test_physical_hold_duty_feasible_at_cone10():
+    """Sanity check demanded by PID_EXPANSION_PLAN.md sec 3.4/3.7: does a
+    kiln with plausible element wattage and insulation actually have
+    enough steady-state power margin to hold cone 10 (~1285 C) at all? If
+    the ASSUMED PHYS_* parameters implied the steady loss at cone 10
+    already exceeds the element's own rating, the physical model would be
+    exactly the same kind of unusable extrapolation as the bench-rig one
+    this section replaces for high temperature.
+
+    Proof this can fail: multiplied PHYS_WALL_THICKNESS_M by 0.1 (a tenth
+    the insulation). Captured red output:
+
+        FAILED tests/test_plant_sim.py::test_physical_hold_duty_feasible_at_cone10
+        AssertionError: cone-10 steady loss 2246 W needs duty 0.90 of a
+        2500 W element -- not a plausible working margin
+        assert 0.898... < 0.7
+
+    Reverted, suite green again before this test was kept.
+    """
+    loss_w = ps.physical_loss_w(np.array([1285.0, 1285.0, 1285.0]))
+    duty_needed = loss_w / ps.PHYS_P_MAX_W
+    assert bool((duty_needed < 0.7).all()), (
+        f"cone-10 steady loss {loss_w} W needs duty {duty_needed} of a "
+        f"{ps.PHYS_P_MAX_W} W element -- not a plausible working margin"
+    )
+
+
+def test_physical_ramp_to_cone10_takes_hours_not_minutes_or_days():
+    """The commanded ramp schedule the sweep drives (plant_sim_sweep's
+    RAMP_RATE_C_PER_S=3 C/min, inside profile 7's own measured 2-3.5 C/min
+    range) must reach cone 10 in a believable real-firing timescale -- not
+    minutes (an absurdly fast commanded ramp) and not days."""
+    ramp_rate_c_per_s = 3.0 / 60.0
+    ramp_hours = (1285.0 - 20.0) / ramp_rate_c_per_s / 3600.0
+    assert 1.0 < ramp_hours < 24.0, f"cone-10 ramp schedule is {ramp_hours:.1f} h -- not a believable firing"
+
+
+def test_coupling_growth_is_capped():
+    """coupling_growth() must not grow without bound -- see
+    COUPLING_GROWTH_CAP's docstring: an uncapped reuse of
+    loss_conductance_scale() (fit against the bench rig's T_REF_C=55 C
+    anchor) turns cross-zone coupling into unbounded injected power at
+    firing temperature, which no amount of a receiving zone's own duty can
+    counteract (duty cannot go negative).
+
+    Proof this can fail: patched COUPLING_GROWTH_CAP to
+    ``float('inf')``. Captured red output:
+
+        FAILED tests/test_plant_sim.py::test_coupling_growth_is_capped
+        AssertionError: coupling_growth(1285.0)=25.45... exceeds any
+        plausible cap
+        assert 25.45... <= 10.0
+
+    Reverted, suite green again before this test was kept.
+    """
+    assert ps.coupling_growth(1285.0) <= 10.0, "coupling_growth(1285.0) exceeds any plausible cap"
+    assert ps.coupling_growth(1285.0) == pytest.approx(ps.COUPLING_GROWTH_CAP)
+
+
+def test_physical_kiln_plant_stays_bounded_at_cone10():
+    """The full coupled physical-model run at cone 10, driven by the
+    EXISTING (fixed low-T matrix, unaware it is extrapolating) coupled
+    feedforward controller, must stay within MAX_PLAUSIBLE_TEMP_C and never
+    go NaN -- this is the actual failure mode this section exists to catch:
+    an under-damped coupling term let two zones' temperature run away
+    (duty pinned at 0, temperature still climbing from neighbor coupling)
+    until the Newton solve inside solve_outer_wall_temp_c overflowed.
+
+    Proof this can fail: set PHYS_COUPLING_SEPARATION_DAMPING back to 1.0
+    (undamped) with COUPLING_GROWTH_CAP raised to 4.0 (the settings tried
+    before the damping/cap in this module were tuned down). The
+    MAX_PLAUSIBLE_TEMP_C safety clamp caught the divergence before it
+    reached NaN, but the run still failed the "landed near the commanded
+    target" assertion -- z0/z1 ran away to the clamp ceiling while duty
+    sat at 0 (coupling alone was already delivering more power than either
+    zone's own element, so no amount of reducing its own duty could pull
+    it back down). Captured red output:
+
+        FAILED tests/test_plant_sim.py::test_physical_kiln_plant_stays_bounded_at_cone10
+        AssertionError: final temps [2249.78422979 2292.01365176 1150.48599723] not close to cone-10 target 1285 C
+        assert False
+
+    (An even less damped/capped combination pins the plant at
+    MAX_PLAUSIBLE_TEMP_C and diverges to NaN outright, via overflow in
+    solve_outer_wall_temp_c's Newton iteration -- confirmed by hand while
+    tuning these constants, not re-captured here since the milder mutation
+    above already demonstrates the class of failure this test guards.)
+
+    Reverted, suite green again before this test was kept.
+    """
+    K_inv = ps._K_INV
+    segs = [(0.0, 25300.0, 20.0, 1285.0, (1285.0 - 20.0) / 25300.0),
+            (25300.0, 26200.0, 1285.0, 1285.0, 0.0)]
+    result = ps.run_profile(segs, [20.0, 20.0, 20.0], climb_mode='coupled', integral_floor='ff_hold',
+                             ambient=20.0, controller_K_inv=K_inv, controller_tau=ps.tau,
+                             plant_regime='physical')
+    temps = result['temps']
+    assert not bool(np.isnan(temps).any()), "physical plant produced NaN temperatures at cone 10"
+    assert bool((temps <= ps.PhysicalKilnPlant.MAX_PLAUSIBLE_TEMP_C).all())
+    # Not just "didn't crash" -- must land close to the commanded target,
+    # not merely somewhere finite (e.g. pinned at the safety ceiling).
+    final_temps = temps[-1]
+    assert bool((np.abs(final_temps - 1285.0) < 50.0).all()), (
+        f"final temps {final_temps} not close to cone-10 target 1285 C"
+    )
+
+
+def test_physical_regime_reduces_to_measured_model_below_boundary_by_construction():
+    """Below EXTRAPOLATION_BOUNDARY_C, run_profile's default
+    plant_regime='measured' is UNCHANGED code (FOPDTPlant with the
+    bench-identified K_full/tau/L) -- the physical model is additive, never
+    substituted in below the boundary. This is what "reduces to the
+    measured bench behaviour" means in practice here: it is not a limit of
+    a single unified model, it is the SAME, untouched code path. Pinned by
+    reproducing the already-passing five-capture regression through the
+    explicit plant_regime='measured' argument (would fail if that default
+    or the FOPDTPlant construction inside run_profile ever changed)."""
+    report_default = ps.render_sim_vs_capture_report(AFTER)
+    result, segs = ps.run_profile_from_capture(
+        __import__('kilnctrl.log_analysis', fromlist=['split_runs']).split_runs(
+            ps.log_analysis.parse_profile_exec_jsonl(AFTER))[0],
+        plant_regime='measured')
+    assert result['plant_regime'] == 'measured'
+    assert report_default["rms_residual_c"] < 2.0

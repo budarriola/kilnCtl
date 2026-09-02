@@ -223,6 +223,203 @@ def loss_conductance_scale(temp_c) -> float:
     return cond_ref + rad_now
 
 
+# ---------------------------------------------------------------------------
+# Physical high-temperature model (added 2026-09-02b): an energy-balance
+# model of a REAL cone-10-capable kiln, used only for band targets above
+# EXTRAPOLATION_BOUNDARY_C (see plant_sim_sweep._run_one).
+#
+# This is a DIFFERENT physical object from the bench rig that produced
+# K_full/tau/L above. Proof it must be: the rig's own identified K_diag
+# (~38 C/duty at *full* power) means the rig's element, against the rig's
+# own losses, cannot even reach 40 C above ambient at full duty -- no loss
+# model, however generous, turns that identification into a plant that
+# reaches 1285 C without an element rated far outside anything called a
+# "bench rig." A kiln that genuinely fires to cone 10 is bigger, more
+# powerful and much better insulated than the rig; this section models
+# THAT object from first-principles quantities a kiln owner can look up
+# (element wattage, wall thickness/k-value, chamber area, thermal mass),
+# entirely separate from the rig fit. See PID_EXPANSION_PLAN.md sec 3.4/3.7.
+#
+# Every constant below is ASSUMED -- typical small/medium electric
+# ceramics-kiln values, not measured on any hardware in this repo. The
+# MEASURED-derived exception is PHYS_COUPLING_FRAC, which reuses the
+# bench rig's identified K_full ratios (see its docstring below).
+# ---------------------------------------------------------------------------
+
+_SIGMA = 5.670e-8  # Stefan-Boltzmann constant, W/(m^2 K^4). Physical constant, not a fit.
+
+# Per-zone element rating, W. ASSUMED -- typical single-phase small/medium
+# kiln zone (~7.5 kW total across 3 zones), in the range of common
+# home/studio electric kilns.
+PHYS_P_MAX_W = np.array([2500.0, 2500.0, 2500.0])
+
+# Chamber geometry, ASSUMED: an interior box roughly 0.45 x 0.45 x 0.6 m
+# tall (a compact multi-zone kiln), wall area split evenly across 3 zones.
+PHYS_ZONE_WALL_AREA_M2 = np.array([0.495, 0.495, 0.495])
+
+# Insulating firebrick (IFB) wall, ASSUMED thickness/conductivity typical of
+# a cone-10-rated kiln: thick enough (4.5", common for a high-fire kiln) to
+# keep the outer shell touchably cool at cone 10 without exceeding
+# PHYS_P_MAX_W -- see the plausibility check in
+# firmware/KilnFW/docs/PID_EXPANSION_PLAN.md sec 3.4/3.7.
+PHYS_WALL_THICKNESS_M = 0.1143
+PHYS_WALL_K_W_PER_MK = 0.15
+PHYS_WALL_R_K_PER_W = PHYS_WALL_THICKNESS_M / (PHYS_WALL_K_W_PER_MK * PHYS_ZONE_WALL_AREA_M2)
+
+# Outer shell loss: natural convection (ASSUMED h, typical still-air
+# vertical-wall value) plus radiation (ASSUMED emissivity, an
+# oxidized-steel/refractory-faced shell). The T^4 term acts HERE, on the
+# outer shell's own temperature -- not on the (e.g.) 1285 C chamber air
+# directly, which is the physically correct place for radiative loss to
+# matter on an insulated kiln: the chamber wall conducts heat outward, and
+# only the (much cooler) OUTER surface radiates/convects to the room. A
+# model that instead radiated straight off the chamber air at 1285 C would
+# overstate loss by two-plus orders of magnitude and could never be
+# physically real for any plausible element.
+PHYS_OUTER_H_W_PER_M2K = 8.0
+PHYS_OUTER_EMISSIVITY = 0.85
+
+# Thermal mass per zone, ASSUMED: IFB wall mass (from the geometry above,
+# typical firebrick density/specific heat) plus a modest allowance for
+# shelves/ware sensible heat.
+PHYS_IFB_DENSITY_KG_M3 = 750.0
+PHYS_IFB_SPECIFIC_HEAT_J_KGK = 950.0
+_wall_mass_kg = PHYS_ZONE_WALL_AREA_M2 * PHYS_WALL_THICKNESS_M * PHYS_IFB_DENSITY_KG_M3
+PHYS_THERMAL_MASS_J_PER_K = _wall_mass_kg * PHYS_IFB_SPECIFIC_HEAT_J_KGK + 10000.0  # +shelves/ware, ASSUMED
+
+# Cross-zone coupling ratios, MEASURED-derived: normalized off-diagonal
+# shares of the identified K_full, i.e. "what fraction of zone j's own
+# effect on itself also shows up in zone i" at the bench rig's low
+# temperature. Applied in the physical model as a share of the NEIGHBOR
+# ZONE'S ELECTRICAL POWER (not its temperature rise -- see PhysicalKilnPlant
+# .step), and grown with temperature by coupling_growth() below. This is
+# ASSUMED to carry over from the (differently-sized) rig to a real kiln
+# only as a dimensionless SHAPE (asymmetry pattern), never as an absolute
+# gain -- absolute coupling gain is set by PHYS_P_MAX_W/PHYS_THERMAL_MASS_J_PER_K
+# instead.
+_PHYS_COUPLING_FRAC_RAW = K_full / K_diag.reshape(1, -1)  # [i][j] = K_full[i][j] / K_full[j][j]
+np.fill_diagonal(_PHYS_COUPLING_FRAC_RAW, 0.0)
+
+# Zone-separation damping, ASSUMED. The raw ratio above, applied
+# unmodified, sums to >1.0 on two of three rows (a zone can receive more
+# power from its two neighbors combined than its OWN element delivers) --
+# physically plausible on the compact bench rig (zones close together,
+# thin dividers) but not carried over to a real kiln, which has more
+# physical separation and thicker internal refractory between zones. A
+# conservative round-number damping keeps the SHAPE (asymmetry pattern)
+# from the bench identification while bounding the physical model's total
+# cross-zone power to a fraction of a zone's own controllable budget, so
+# no combination of neighbor duty can inject more power than the zone's
+# own PID has authority to counteract by driving its own duty toward zero.
+# Proof this matters: undamped + uncapped growth (see COUPLING_GROWTH_CAP)
+# ran away past MAX_PLAUSIBLE_TEMP_C on every high-temperature band with
+# both zones 0/1 duty pinned at 0 and still climbing -- caught by running
+# the sweep, not by a unit test (see the mutation-testing note in
+# PID_EXPANSION_PLAN.md sec 3.4/3.7).
+PHYS_COUPLING_SEPARATION_DAMPING = 0.25
+PHYS_COUPLING_FRAC = _PHYS_COUPLING_FRAC_RAW * PHYS_COUPLING_SEPARATION_DAMPING
+
+
+def solve_outer_wall_temp_c(t_in_c, ambient_c, r_wall, h, eps, area, iters=8):
+    """Quasi-static outer-shell temperature: Newton-solves
+    ``(T_in - T_out)/r_wall == h*A*(T_out-T_amb) + eps*A*sigma*(T_out_K^4 -
+    T_amb_K^4)`` -- conduction in equals convection+radiation out at the
+    shell. Quasi-static (no separate shell thermal-mass state) is a
+    standard simplification here: the shell's own mass/time-constant is
+    small next to the chamber's, so it is assumed to track the chamber's
+    slower dynamics rather than being integrated as a 4th state per zone.
+    """
+    t_in_c = np.asarray(t_in_c, dtype=float)
+    ambient_c = float(ambient_c)
+    t_out = ambient_c + (t_in_c - ambient_c) * 0.1
+    amb_k = ambient_c + 273.15
+    for _ in range(iters):
+        t_out_k = t_out + 273.15
+        f = ((t_in_c - t_out) / r_wall
+             - h * area * (t_out - ambient_c)
+             - eps * area * _SIGMA * (t_out_k ** 4 - amb_k ** 4))
+        dfdt = -1.0 / r_wall - h * area - 4.0 * eps * area * _SIGMA * t_out_k ** 3
+        t_out = t_out - f / dfdt
+    return t_out
+
+
+def physical_loss_w(t_in_c, ambient_c=20.0):
+    """Steady conductive loss (W) from chamber to outer shell, per zone --
+    equal at steady state to the outer shell's own convection+radiation
+    loss to ambient (energy conservation through the wall, see
+    ``solve_outer_wall_temp_c``)."""
+    t_out = solve_outer_wall_temp_c(t_in_c, ambient_c, PHYS_WALL_R_K_PER_W,
+                                     PHYS_OUTER_H_W_PER_M2K, PHYS_OUTER_EMISSIVITY,
+                                     PHYS_ZONE_WALL_AREA_M2)
+    return (np.asarray(t_in_c, dtype=float) - t_out) / PHYS_WALL_R_K_PER_W
+
+
+# Cap on coupling_growth() below. ASSUMED: unbounded reuse of
+# loss_conductance_scale() (fit to grow without limit against the rig's
+# T_REF_C=55 C anchor) makes coupling power a positive-feedback runaway at
+# firing temperature -- caught by mutation-testing this module (see
+# PID_EXPANSION_PLAN.md sec 3.4/3.7). Physically, radiative exchange
+# between two graybody surfaces is bounded by each surface's own emissive
+# budget (~min(A_i,A_j)*eps*sigma*(T_i^4-T_j^4)), not by the zone's OWN
+# element power -- it cannot grow indefinitely relative to a zone's own
+# loss. A conservative round-number cap (coupling never exceeds 2x its
+# bench-identified low-temperature share) keeps the model bounded pending
+# real high-temperature multi-zone data to fit this properly.
+COUPLING_GROWTH_CAP = 2.0
+
+
+def coupling_growth(temp_c):
+    """How much cross-zone coupling grows above its bench-identified,
+    low-temperature share, CAPPED at ``COUPLING_GROWTH_CAP`` (see its
+    docstring for why the cap exists). Below the cap, ASSUMED to track the
+    same curve as a zone's own radiative-loss-share growth
+    (``loss_conductance_scale``, reused rather than inventing a second free
+    curve): inter-zone transfer at high temperature is also increasingly
+    radiative (direct radiant view factor between adjacent hot
+    zones/elements), the same physical mechanism that drives
+    ``loss_conductance_scale``'s growth. Not independently measured at any
+    temperature -- flag this as the next thing to revisit if real
+    high-temperature, multi-zone data ever exists (see
+    PID_EXPANSION_PLAN.md sec 3.4/3.7)."""
+    return np.minimum(loss_conductance_scale(temp_c), COUPLING_GROWTH_CAP)
+
+
+class PhysicalKilnPlant:
+    """Energy-balance simulation of a REAL cone-10-capable kiln (ASSUMED
+    parameters, ``PHYS_*`` above) -- distinct from ``FOPDTPlant``'s
+    measured bench-rig identification. Used only for band targets above
+    ``EXTRAPOLATION_BOUNDARY_C`` (see ``plant_sim_sweep._run_one`` and
+    ``run_profile``'s ``plant_regime`` argument). Dead time is not modeled
+    here (ASSUMED negligible against the multi-hour timescale of a
+    high-temperature firing -- L is a few tens of seconds, the ramps below
+    run for hours)."""
+
+    # Numerical safety valve, not a physical claim: no glaze on earth fires
+    # this high, so a run that reaches it has already left plausibility and
+    # should be read as "this duty/target combination is not achievable,"
+    # not as a temperature prediction. Exists to keep the Newton solve in
+    # solve_outer_wall_temp_c() from diverging on a transient that would
+    # otherwise feed back into COUPLING_GROWTH_CAP's own inputs.
+    MAX_PLAUSIBLE_TEMP_C = 2500.0
+
+    def __init__(self, dt, ambient=20.0, start_temp=None):
+        self.dt = dt
+        self.ambient = ambient
+        self.n = N_ZONES
+        self.temp = np.full(self.n, ambient) if start_temp is None else np.array(start_temp, dtype=float)
+
+    def step(self, duty):
+        duty = np.clip(duty, 0.0, 1.0)
+        own_power = PHYS_P_MAX_W * duty
+        growth = coupling_growth(self.temp)
+        coupling_power = (PHYS_COUPLING_FRAC * own_power.reshape(1, -1)).sum(axis=1) * growth
+        loss = physical_loss_w(self.temp, self.ambient)
+        net_w = own_power + coupling_power - loss
+        dTdt = net_w / PHYS_THERMAL_MASS_J_PER_K
+        self.temp = np.clip(self.temp + dTdt * self.dt, self.ambient, self.MAX_PLAUSIBLE_TEMP_C)
+        return self.temp.copy()
+
+
 DT = 1.0
 N_ZONES = 3
 
@@ -382,7 +579,7 @@ def uncoupled_ff_hold_climb(target_c, target_rate, i, ambient=20.0):
 
 def run_profile(segs, start_temp, kp=0.06, ki=0.0003, kd=0.0,
                  climb_mode='coupled', integral_floor='ff_hold', ambient=20.0,
-                 controller_K_inv=None, controller_tau=None):
+                 controller_K_inv=None, controller_tau=None, plant_regime='measured'):
     """Run the plant+PID loop over an explicit segment list.
 
     ``segs``: list of ``(t0, t1, c0, c1, rate)`` tuples, ``rate`` signed
@@ -400,8 +597,24 @@ def run_profile(segs, start_temp, kp=0.06, ki=0.0003, kd=0.0,
     Reports ``max_target_c`` and ``extrapolation`` (True if any target in
     this run exceeded ``EXTRAPOLATION_BOUNDARY_C``) so callers running into
     kiln-firing range know when they've left the measured 0-80 C envelope.
+
+    ``plant_regime``: ``'measured'`` (default, unchanged since before this
+    argument existed) drives ``FOPDTPlant`` -- the bench-rig identification,
+    valid at and below ``EXTRAPOLATION_BOUNDARY_C``. ``'physical'`` drives
+    ``PhysicalKilnPlant`` -- the ASSUMED, from-first-principles model of a
+    real cone-10-capable kiln (see that class's docstring). A caller
+    choosing between them per band is exactly what
+    ``plant_sim_sweep._run_one`` does; every other caller in this module
+    (capture comparison, regression tests) always uses ``'measured'``, so
+    the identical low-temperature code path this argument's default
+    preserves is what keeps the five-capture calibration fit unchanged.
     """
-    plant = FOPDTPlant(K_full, tau, L, DT, ambient=ambient, start_temp=start_temp)
+    if plant_regime == 'physical':
+        plant = PhysicalKilnPlant(DT, ambient=ambient, start_temp=start_temp)
+    elif plant_regime == 'measured':
+        plant = FOPDTPlant(K_full, tau, L, DT, ambient=ambient, start_temp=start_temp)
+    else:
+        raise ValueError(f"unknown plant_regime {plant_regime!r}, expected 'measured' or 'physical'")
     pids = [PID(kp, ki, kd, d_tau=30.0, b=1.0, pid_range_c=1000.0) for _ in range(N_ZONES)]
     ff_fn = coupled_ff_hold_climb if climb_mode == 'coupled' else uncoupled_ff_hold_climb
 
@@ -441,7 +654,8 @@ def run_profile(segs, start_temp, kp=0.06, ki=0.0003, kd=0.0,
                 temps=np.array(temps_log), duty=np.array(duty_log),
                 seg_bounds=[s[1] for s in segs],
                 max_target_c=max_target,
-                extrapolation=is_extrapolation(max_target))
+                extrapolation=is_extrapolation(max_target),
+                plant_regime=plant_regime)
 
 
 def segs_from_capture(rows: Sequence[log_analysis.PollRow]):
