@@ -142,12 +142,19 @@ static const char *TAG = "adaptive_tune";
 // Per-run bound on how far a single coupling_coeff[i][j] cell may move.
 // Additive, not a ratio like ADAPTIVE_TUNE_MAX_FRACTIONAL_MOVE -- a coupling
 // cell legitimately starts at 0.0 ("never measured"), where any ratio-based
-// cap is either 0 (never learns anything) or infinite (no cap at all). 10.0
-// is 10% of ZONE_COUPLING_COEFF_MAX (100.0, zones_http.h) -- the same "start
-// conservative, one run cannot rewrite the model" posture as the diagonal
-// path's 20% cap, deliberately tighter here because a coupling cell's prior
-// is far more often "never measured" (0.0) than a confident earlier fit.
-#define ADAPTIVE_TUNE_COUPLING_MAX_ABS_MOVE 10.0f
+// cap is either 0 (never learns anything) or infinite (no cap at all).
+// 6.0 is deliberately BELOW ALPHA * ADAPTIVE_TUNE_COUPLING_IMPLAUSIBLE_ABS
+// (0.15 * 50 = 7.5) so it is actually reachable from a near-zero prior, not
+// just a decorative number that the near-zero branch's own absolute cap
+// (50.0) already makes unreachable at any value >= 7.5 -- see the D3 note in
+// the review this fixes (an earlier 10.0 here silently could ONLY ever bind
+// in the confident-prior regime below, at prior >= ~10.0, which is exactly
+// what this guard's original comment claimed it was NOT for). At 6.0 it
+// binds in BOTH regimes it is meant to cover: a near-zero-prior fit close to
+// the 50.0 implausibility ceiling (prior ~0, fit > ~40), and a confident
+// prior's fit near its own 5x ratio ceiling (prior >~10.0, see
+// try_refine_coupled_locked()'s combined ratio/absolute guard).
+#define ADAPTIVE_TUNE_COUPLING_MAX_ABS_MOVE 6.0f
 
 // Same blend fraction as the diagonal path -- see ADAPTIVE_TUNE_BLEND_ALPHA.
 #define ADAPTIVE_TUNE_COUPLING_BLEND_ALPHA ADAPTIVE_TUNE_BLEND_ALPHA
@@ -306,6 +313,24 @@ static uint32_t s_joint_ring_count;
 static uint32_t s_joint_ring_head;
 static uint32_t s_joint_observations_lifetime;
 
+// True once a joint row has been committed for the CURRENT dwell -- reset
+// whenever any zone begins a fresh dwell (adaptive_tune_zone_tick()'s "just
+// entered this dwell" branch). Every enabled zone settles independently
+// (each has its own settle_start_c/settle_elapsed_s), so with N zones
+// dwelling at the same operating point, each one crossing its settle floor
+// used to commit its OWN joint row from the same s_joint_last_duty/rise_c
+// snapshot -- one physical dwell (one distinct operating point) silently
+// contributing N near-identical rows to the ring. try_refine_coupled_
+// locked()'s "N joint observations" floor is a rank/conditioning
+// requirement on DISTINCT equations; duplicate rows inflate the count
+// without adding one. Gating the commit on this flag makes ring rows and
+// distinct dwells the same number again, so the existing floor check is
+// correct without a second counter. This assumes every enabled zone shares
+// the same profile segment boundaries (true for this firmware -- all zones
+// in a firing follow the same profile), so "any zone enters a fresh dwell"
+// is a reasonable proxy for "a new dwell has begun" module-wide.
+static bool s_joint_dwell_row_committed;
+
 // Latest known duty/rise for every zone, updated on EVERY tick for EVERY
 // zone regardless of that zone's own opt-in flag -- a zone that has not
 // opted its own row into learning is still a valid NEIGHBOUR column in
@@ -413,6 +438,10 @@ void adaptive_tune_zone_tick(uint8_t zone_index, float actual_c, bool actual_val
         z->trace_count = 0;
         z->trace_head = 0;
         z->trace_elapsed_s = 0.0f;
+        // See s_joint_dwell_row_committed's own comment: this zone starting
+        // a fresh dwell is this module's proxy for "a new joint dwell has
+        // begun" -- allow one more joint row to be committed for it.
+        s_joint_dwell_row_committed = false;
     }
     z->settle_elapsed_s += dt_s;
 
@@ -489,14 +518,15 @@ void adaptive_tune_zone_tick(uint8_t zone_index, float actual_c, bool actual_val
     // column would silently poison that zone out of every future row's
     // design matrix instead of just being absent from this one.
     {
-        bool joint_ok = true;
-        for (uint8_t j = 0; j < MAX31856_CHANNEL_COUNT; j++) {
+        bool joint_ok = !s_joint_dwell_row_committed; // see s_joint_dwell_row_committed's own comment --
+                                                       // at most one joint row per distinct dwell
+        for (uint8_t j = 0; joint_ok && j < MAX31856_CHANNEL_COUNT; j++) {
             if (!s_joint_last_valid[j] || s_joint_last_duty[j] < ADAPTIVE_TUNE_JOINT_MIN_DUTY) {
                 joint_ok = false;
-                break;
             }
         }
         if (joint_ok) {
+            s_joint_dwell_row_committed = true;
             uint32_t jslot = (s_joint_ring_head + s_joint_ring_count) % ADAPTIVE_TUNE_JOINT_RING_CAPACITY;
             if (s_joint_ring_count < ADAPTIVE_TUNE_JOINT_RING_CAPACITY) {
                 s_joint_ring_count++;
@@ -535,14 +565,19 @@ static void set_refusal(adaptive_tune_zone_t *z, const char *fmt, ...)
     ESP_LOGI(TAG, "refined not applied: %s", z->last_refusal_reason);
 }
 
-static void try_refine_zone_locked(uint8_t zi, uint8_t profile_id)
+// Returns true only on the happy path where zones_config_set_model()/
+// set_pid() actually ran -- i.e. Kp/Ki/Kd were just rewritten this run from
+// the SIMC recompute. adaptive_tune_run_end() uses this to decide whether
+// try_refine_ki_locked() may run this same run -- see that call site's own
+// comment (D5).
+static bool try_refine_zone_locked(uint8_t zi, uint8_t profile_id)
 {
     adaptive_tune_zone_t *z = &s_zones[zi];
 
     if (z->ring_count < ADAPTIVE_TUNE_MIN_OBSERVATIONS) {
         set_refusal(z, "only %u/%u dwell observations", (unsigned)z->ring_count,
                     (unsigned)ADAPTIVE_TUNE_MIN_OBSERVATIONS);
-        return;
+        return false;
     }
 
     float duty[ADAPTIVE_TUNE_RING_CAPACITY], rise[ADAPTIVE_TUNE_RING_CAPACITY];
@@ -557,29 +592,29 @@ static void try_refine_zone_locked(uint8_t zi, uint8_t profile_id)
     if ((umax - umin) < ADAPTIVE_TUNE_MIN_DUTY_SPREAD) {
         set_refusal(z, "observations too clustered (duty spread %.3f < %.3f)", (double)(umax - umin),
                     (double)ADAPTIVE_TUNE_MIN_DUTY_SPREAD);
-        return;
+        return false;
     }
 
     float k_fit;
     if (!adaptive_tune_fit_gain(duty, rise, z->ring_count, &k_fit)) {
         set_refusal(z, "fit degenerate (insufficient duty energy)");
-        return;
+        return false;
     }
     if (!(k_fit > 0.0f)) {
         set_refusal(z, "fitted gain %.4f is not positive", (double)k_fit);
-        return;
+        return false;
     }
 
     float k_dc, tau_s, dead_time_s;
     if (!zones_config_get_model(zi, &k_dc, &tau_s, &dead_time_s) || !(k_dc > 0.0f)) {
         set_refusal(z, "no existing step-test model -- learning refines, it does not create one");
-        return;
+        return false;
     }
 
     if (k_fit > k_dc * ADAPTIVE_TUNE_MAX_JUMP_RATIO || k_fit < k_dc / ADAPTIVE_TUNE_MAX_JUMP_RATIO) {
         set_refusal(z, "fit %.4f is implausible against prior K %.4f (>%.0fx)", (double)k_fit, (double)k_dc,
                     (double)ADAPTIVE_TUNE_MAX_JUMP_RATIO);
-        return;
+        return false;
     }
 
     float k_blended = k_dc + ADAPTIVE_TUNE_BLEND_ALPHA * (k_fit - k_dc);
@@ -588,7 +623,7 @@ static void try_refine_zone_locked(uint8_t zi, uint8_t profile_id)
     if (k_blended < k_dc - max_move) k_blended = k_dc - max_move;
     if (!(k_blended > 0.0f)) {
         set_refusal(z, "blended gain %.4f is not positive", (double)k_blended);
-        return;
+        return false;
     }
 
     // Recompute PID gains through the SAME rule autotune's Accept path
@@ -608,18 +643,18 @@ static void try_refine_zone_locked(uint8_t zi, uint8_t profile_id)
     autotune_gains_t gains = pid_autotune_tune_from_fopdt(&model, AUTOTUNE_RULE_SIMC, 0.0f);
     if (gains.refusal != AUTOTUNE_REFUSAL_OK) {
         set_refusal(z, "SIMC refused the refined model: %s", gains.refusal_reason);
-        return;
+        return false;
     }
 
     if (!zones_config_set_model(zi, k_blended, tau_s, dead_time_s)) {
         set_refusal(z, "zones_config_set_model() rejected %.4f/%.1f/%.1f", (double)k_blended, (double)tau_s,
                     (double)dead_time_s);
-        return;
+        return false;
     }
     if (!zones_config_set_pid(zi, gains.kp, gains.ki, gains.kd)) {
         set_refusal(z, "zones_config_set_pid() rejected %.4f/%.4f/%.4f", (double)gains.kp, (double)gains.ki,
                     (double)gains.kd);
-        return;
+        return false;
     }
 
     z->last_refusal_reason[0] = '\0';
@@ -633,6 +668,7 @@ static void try_refine_zone_locked(uint8_t zi, uint8_t profile_id)
     ESP_LOGI(TAG, "zone %u: K_dc %.4f -> %.4f (%.1f%%) from %u observations, profile %u", (unsigned)zi,
              (double)k_dc, (double)k_blended, (double)z->last_delta_pct, (unsigned)z->ring_count,
              (unsigned)profile_id);
+    return true;
 }
 
 // ---------------------------------------------------------------------
@@ -783,8 +819,30 @@ static void try_refine_coupled_locked(uint8_t zi)
         }
         float prior = prior_row[j];
         if (prior > ADAPTIVE_TUNE_COUPLING_PRIOR_NEAR_ZERO) {
-            // Confident prior -- same ratio-based implausibility guard as the diagonal path.
-            if (fit > prior * ADAPTIVE_TUNE_MAX_JUMP_RATIO || fit < prior / ADAPTIVE_TUNE_MAX_JUMP_RATIO) {
+            // Confident-ish prior -- ratio-based guard, same posture as the
+            // diagonal path, EXCEPT the upper bound is widened to the same
+            // absolute ceiling the near-zero branch uses below whenever the
+            // ratio bound would be tighter than that ceiling. Without this
+            // OR, a cell blended up from a near-zero prior (e.g. 0.15*26.6 ~=
+            // 3.99 after its first accepted run) becomes a "confident" prior
+            // by this branch's own >NEAR_ZERO test, and a 5x ratio around
+            // 3.99 (cap ~19.9) then permanently REJECTS the true coefficient
+            // (~26.6) on every subsequent run -- a convergence trap for any
+            // true value more than ~5.3x the near-zero blend step. Capping
+            // fit <= 50 IS the plausibility bound this module has already
+            // decided is acceptable for a coupling cell from any starting
+            // point (see ADAPTIVE_TUNE_COUPLING_IMPLAUSIBLE_ABS); reusing it
+            // here as a floor under the ratio ceiling lets a cell climb all
+            // the way to a true value that far exceeds its early, still-low
+            // prior, while the ratio's LOWER bound is left alone -- a
+            // confident prior's fit dropping to a small fraction of itself
+            // is still refused as implausible in either regime.
+            float upper = prior * ADAPTIVE_TUNE_MAX_JUMP_RATIO;
+            if (upper < ADAPTIVE_TUNE_COUPLING_IMPLAUSIBLE_ABS) {
+                upper = ADAPTIVE_TUNE_COUPLING_IMPLAUSIBLE_ABS;
+            }
+            float lower = prior / ADAPTIVE_TUNE_MAX_JUMP_RATIO;
+            if (fit > upper || fit < lower) {
                 continue;
             }
         } else if (fabsf(fit) > ADAPTIVE_TUNE_COUPLING_IMPLAUSIBLE_ABS) {
@@ -890,14 +948,10 @@ bool adaptive_tune_diagnose_ki(const float *actual_c, const float *duty, uint32_
         }
     }
 
-    uint32_t half = n / 2;
-    double s1 = 0.0, s2 = 0.0;
-    for (uint32_t k = 0; k < half; k++) s1 += (double)actual_c[k];
-    for (uint32_t k = half; k < n; k++) s2 += (double)actual_c[k];
-    float m1 = (float)(s1 / (double)half);
-    float m2 = (float)(s2 / (double)(n - half));
-    float drift = m2 - m1;
-
+    // A regular, multi-crossing oscillation is the ONLY evidence this
+    // function trusts for "Ki too large" -- see below for why the half-
+    // window drift figure that used to sit here was removed rather than
+    // fixed in place.
     if (amplitude > ADAPTIVE_TUNE_KI_NOISE_FLOOR_C && ncross >= ADAPTIVE_TUNE_KI_MIN_CROSSINGS) {
         if (regular) {
             out->verdict = ADAPTIVE_TUNE_KI_LIMIT_CYCLE;
@@ -913,29 +967,50 @@ bool adaptive_tune_diagnose_ki(const float *actual_c, const float *duty, uint32_
         }
         return true;
     }
-    if (fabsf(drift) > ADAPTIVE_TUNE_KI_DRIFT_THRESHOLD_C) {
-        out->verdict = ADAPTIVE_TUNE_KI_OSCILLATING; // slow drift
-        out->ki_correction_pct = -20.0f;
+
+    // Floored-duty check FIRST, ahead of the offset test below and
+    // unconditional on dwell_err_mean_c -- floored means NO correction,
+    // always, full stop; it must never be reachable only through the
+    // offset branch's own threshold gate (a floored zone whose steady
+    // error happens to sit right at ADAPTIVE_TUNE_KI_OFFSET_THRESHOLD_C's
+    // edge, or that gets shadowed by some earlier branch, must not slip
+    // through with a Ki change).
+    bool floored = ((float)dvar < ADAPTIVE_TUNE_KI_FLOOR_DUTY_VARIANCE) &&
+                   (dmean < ADAPTIVE_TUNE_KI_FLOOR_DUTY_RAIL_BAND ||
+                    dmean > 1.0f - ADAPTIVE_TUNE_KI_FLOOR_DUTY_RAIL_BAND);
+    if (floored) {
+        // Duty is pinned near a rail and essentially not moving -- the
+        // classic -ff_hold floor signature (pid.c), NOT a small-Ki
+        // signature, regardless of what the temperature trace or the
+        // dwell error figures look like. See adaptive_tune_ki_verdict_t's
+        // own doc comment. Deliberately NO correction: raising Ki here
+        // would be inert (the floor still applies) at best.
+        out->verdict = ADAPTIVE_TUNE_KI_FLOORED;
+        out->ki_correction_pct = 0.0f;
         return true;
     }
 
+    // A former branch here flagged any first-half-vs-second-half mean shift
+    // above ADAPTIVE_TUNE_KI_DRIFT_THRESHOLD_C as "OSCILLATING" (Ki too
+    // large) with fabsf() applied to the shift. That is sign-blind: this
+    // function is never handed the setpoint (see this file's top comment),
+    // so it cannot tell a slow monotonic APPROACH to setpoint (still
+    // settling -- the classic too-small-Ki signature) from a slow walk AWAY
+    // from it, and a one-directional trend crosses its own window mean only
+    // once, which is not oscillation evidence by any definition -- the
+    // crossing/regularity branch above is what identifies a limit cycle,
+    // not an unsigned half-window shift. Rather than guess a direction from
+    // data that cannot support the guess, this function now makes NO
+    // separate drift-based call: a window that fails the crossing test
+    // above falls through to the offset/floored evaluation, which uses
+    // dwell_err_mean_c/dwell_err_max_c -- the caller's own SIGNED-magnitude,
+    // whole-dwell error figures -- and always corrects in the direction
+    // that is actually justified by unsigned evidence (increase Ki for a
+    // steady, non-floored offset; nothing otherwise).
     if (dwell_err_mean_c > ADAPTIVE_TUNE_KI_OFFSET_THRESHOLD_C &&
         dwell_err_max_c <= dwell_err_mean_c * ADAPTIVE_TUNE_KI_OFFSET_MAX_OVER_MEAN) {
-        bool floored = ((float)dvar < ADAPTIVE_TUNE_KI_FLOOR_DUTY_VARIANCE) &&
-                       (dmean < ADAPTIVE_TUNE_KI_FLOOR_DUTY_RAIL_BAND ||
-                        dmean > 1.0f - ADAPTIVE_TUNE_KI_FLOOR_DUTY_RAIL_BAND);
-        if (floored) {
-            // Duty is pinned near a rail and essentially not moving despite a
-            // steady error -- the classic -ff_hold floor signature (pid.c),
-            // NOT a small-Ki signature. See adaptive_tune_ki_verdict_t's own
-            // doc comment. Deliberately NO correction: raising Ki here would
-            // be inert (the floor still applies) at best.
-            out->verdict = ADAPTIVE_TUNE_KI_FLOORED;
-            out->ki_correction_pct = 0.0f;
-        } else {
-            out->verdict = ADAPTIVE_TUNE_KI_OFFSET_TOO_SMALL;
-            out->ki_correction_pct = 20.0f;
-        }
+        out->verdict = ADAPTIVE_TUNE_KI_OFFSET_TOO_SMALL;
+        out->ki_correction_pct = 20.0f;
         return true;
     }
 
@@ -1047,9 +1122,33 @@ void adaptive_tune_run_end(const profile_firing_run_record_t *rec, bool clean)
                        "run excluded too many samples -- not used as training data");
             continue;
         }
-        try_refine_zone_locked(zi, rec->profile_id);
+        // D5: try_refine_zone_locked() rewrites Kp/Ki/Kd from a fresh SIMC
+        // recompute when it applies. try_refine_ki_locked() diagnoses Ki
+        // from this run's WITHIN-DWELL TRACE -- evidence gathered under
+        // whatever Ki was actually running during the dwell, which is the
+        // OLD value if the model refine just replaced it. Running the Ki
+        // diagnosis's correction on top of a Ki that postdates the evidence
+        // it was measured against is exactly the blind-stacking bug this
+        // fixes: the two layers do not compose in one run, so only one of
+        // them may act. The model/K_dc refinement wins when both would
+        // apply -- it is the more direct measurement (a dwell duty/rise
+        // ratio) versus the Ki diagnosis's shape-based inference, and a
+        // freshly-recomputed SIMC Ki is itself already responsive to a
+        // gain change this run. The Ki diagnosis gets its turn on any run
+        // where the model refine did not fire (guard refusal, no change,
+        // or the zone's coupled/diagonal fit was simply not due) -- by
+        // which point its trace evidence and the live Ki agree on which
+        // run produced them.
+        bool model_refined = try_refine_zone_locked(zi, rec->profile_id);
         try_refine_coupled_locked(zi);
-        try_refine_ki_locked(zi, &zr->stats);
+        if (!model_refined) {
+            try_refine_ki_locked(zi, &zr->stats);
+        } else {
+            z->ki_applied = false;
+            set_reason(z->ki_refusal_reason, sizeof(z->ki_refusal_reason),
+                       "Ki diagnosis skipped this run -- the model/PID refinement already rewrote Ki from SIMC, "
+                       "see adaptive_tune_run_end()'s D5 comment");
+        }
     }
     xSemaphoreGive(s_lock);
 }

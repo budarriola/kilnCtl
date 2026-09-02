@@ -154,6 +154,7 @@ static void reset_module_state(void)
     memset(s_joint_last_duty, 0, sizeof(s_joint_last_duty));
     memset(s_joint_last_rise_c, 0, sizeof(s_joint_last_rise_c));
     memset(s_joint_last_valid, 0, sizeof(s_joint_last_valid));
+    s_joint_dwell_row_committed = false;
 }
 
 // Ticks a single settled dwell into zone zi: `ticks` ticks of dt_s seconds
@@ -172,6 +173,26 @@ static void feed_settled_dwell(uint8_t zi, float target_c, float ambient_c, floa
     float c = q1(target_c);
     for (int i = 0; i < ticks; i++) {
         adaptive_tune_zone_tick(zi, c, true, duty, true, ambient_c, dt_s);
+    }
+}
+
+// Ticks ALL MAX31856_CHANNEL_COUNT zones through one JOINT settled dwell --
+// every zone's tick for a given loop iteration happens before the next
+// iteration for any zone, so every zone settles at the same simulated
+// instant (matching a real profile, where every enabled zone shares the
+// same segment boundaries -- see s_joint_dwell_row_committed's own comment
+// on why that assumption is what makes one dwell commit exactly one joint
+// row). target_c/duty are per-zone arrays of length MAX31856_CHANNEL_COUNT.
+static void feed_joint_settled_dwell(const float target_c[MAX31856_CHANNEL_COUNT], float ambient_c,
+                                      const float duty[MAX31856_CHANNEL_COUNT], int ticks, float dt_s)
+{
+    for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+        adaptive_tune_zone_tick(zi, q1(target_c[zi]), true, duty[zi], false, ambient_c, dt_s);
+    }
+    for (int i = 0; i < ticks; i++) {
+        for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+            adaptive_tune_zone_tick(zi, q1(target_c[zi]), true, duty[zi], true, ambient_c, dt_s);
+        }
     }
 }
 
@@ -677,11 +698,19 @@ static void test_ki_diagnose_floored_not_misdiagnosed_as_small_ki(void)
     TEST_CHECK(diag.ki_correction_pct == 0.0f, "a FLOORED verdict must never suggest a Ki correction");
 }
 
-static void test_ki_diagnose_drift_flags_large_ki(void)
+// D2 (was test_ki_diagnose_drift_flags_large_ki): a monotonic, one-directional
+// drift is NOT oscillation evidence (it crosses its own window mean only
+// once) and this function is never handed the setpoint, so it cannot know
+// whether the drift is approaching or receding from target. The OLD code
+// called fabsf(drift) > threshold "OSCILLATING" / Ki-too-large regardless --
+// backwards for the classic "still slowly settling" case, where Ki is
+// actually too SMALL. This is that same monotonic-drift fixture (unchanged),
+// now asserting the corrected behavior: with no dwell-error evidence handed
+// in (0.0f/0.0f, as before), and no multi-crossing oscillation, the correct
+// verdict is OK (no unjustified correction) -- not a wrong-signed
+// "decrease Ki".
+static void test_ki_diagnose_monotonic_drift_is_not_misread_as_oscillation(void)
 {
-    // Monotonic drift across the window (no oscillation -- a straight
-    // climb has essentially one crossing of its own mean, not the >=4 the
-    // oscillation branch requires), well past the 0.15C drift threshold.
     float a[18], d[18];
     for (int i = 0; i < 18; i++) {
         a[i] = q1(100.0f + 0.06f * (float)i); // +1.02C total drift over the window
@@ -689,8 +718,94 @@ static void test_ki_diagnose_drift_flags_large_ki(void)
     }
     adaptive_tune_ki_diag_t diag;
     TEST_CHECK(adaptive_tune_diagnose_ki(a, d, 18, DT_KI, 0.0f, 0.0f, &diag), "call must return true");
-    TEST_CHECK(diag.verdict == ADAPTIVE_TUNE_KI_OSCILLATING, "a sustained monotonic drift must diagnose as Ki too large");
-    TEST_CHECK(diag.ki_correction_pct < 0.0f, "the drift verdict must suggest DECREASING Ki (negative correction)");
+    TEST_CHECK(diag.verdict != ADAPTIVE_TUNE_KI_OSCILLATING && diag.verdict != ADAPTIVE_TUNE_KI_LIMIT_CYCLE,
+               "a one-directional (single-crossing) drift must never be read as oscillation -- only "
+               "crossing/regularity evidence may produce that verdict");
+    TEST_CHECK(diag.verdict == ADAPTIVE_TUNE_KI_OK, "with no dwell-error evidence supplied, a monotonic drift alone "
+                                                      "must diagnose OK, not guess a (possibly wrong-signed) correction");
+}
+
+// D2, continued: the realistic version of the same scenario -- a zone still
+// slowly converging on setpoint has EXACTLY this monotonic-drift shape AND
+// a steady non-trivial dwell error (the profile executor's own dwell_err_
+// mean/max_c). This is "the classic too-small-Ki signature" the review
+// names: it must diagnose OFFSET_TOO_SMALL (Ki should INCREASE), never
+// OSCILLATING/decrease -- proving the fix is not just "stop guessing" but
+// "let the correctly-signed offset evidence drive the verdict instead".
+static void test_ki_diagnose_monotonic_drift_with_steady_offset_flags_small_ki(void)
+{
+    float a[18], d[18];
+    for (int i = 0; i < 18; i++) {
+        a[i] = q1(100.0f + 0.06f * (float)i);
+        d[i] = 0.40f + ((i % 2) ? 0.03f : -0.03f); // varying, not floored -- see the floored-not-misdiagnosed test
+    }
+    adaptive_tune_ki_diag_t diag;
+    TEST_CHECK(adaptive_tune_diagnose_ki(a, d, 18, DT_KI, /*dwell_err_mean_c=*/0.45f, /*dwell_err_max_c=*/0.50f, &diag),
+               "call must return true");
+    TEST_CHECK(diag.verdict == ADAPTIVE_TUNE_KI_OFFSET_TOO_SMALL,
+               "a monotonic approach-to-setpoint drift with a steady non-floored dwell error must diagnose as "
+               "Ki too small, not oscillation");
+    TEST_CHECK(diag.ki_correction_pct > 0.0f, "the corrected verdict must suggest INCREASING Ki, not decreasing it");
+}
+
+// D2: floored must win even when the SAME window would otherwise satisfy
+// the (now-removed) drift heuristic's threshold -- proves floored is
+// checked unconditionally, ahead of any other classification, not just
+// ahead of the old drift branch specifically.
+static void test_ki_diagnose_floored_wins_even_with_monotonic_drift(void)
+{
+    float a[18], d[18];
+    for (int i = 0; i < 18; i++) {
+        a[i] = q1(100.0f + 0.06f * (float)i); // same drifting temperature as the tests above
+        d[i] = 0.02f;                          // pinned near the 0 rail, essentially zero variance
+    }
+    adaptive_tune_ki_diag_t diag;
+    TEST_CHECK(adaptive_tune_diagnose_ki(a, d, 18, DT_KI, 0.45f, 0.50f, &diag), "call must return true");
+    TEST_CHECK(diag.verdict == ADAPTIVE_TUNE_KI_FLOORED,
+               "a floored duty trace must diagnose FLOORED even though the temperature trace is drifting");
+    TEST_CHECK(diag.ki_correction_pct == 0.0f, "a FLOORED verdict must never suggest a Ki correction");
+}
+
+// D7: the floored conjunction (dvar < FLOOR_VARIANCE) && (near a rail) has
+// two independent clauses. The existing floored/offset fixture pair only
+// ever varies BOTH clauses together (flat+railed vs varying+mid-range), so
+// deleting either clause from the guard would still pass every existing
+// test. These two fixtures hold one clause floored-shaped and flip the
+// other, so each clause is independently load-bearing.
+static void test_ki_diagnose_flat_duty_mid_range_is_not_floored(void)
+{
+    // Flat (near-zero variance) duty, same as the floored fixture -- but
+    // parked in the MIDDLE of its range, nowhere near either rail. Must NOT
+    // read as floored: a mid-range flat duty is not the -ff_hold signature.
+    float a[16], d[16];
+    for (int i = 0; i < 16; i++) {
+        a[i] = q1(101.3f);
+        d[i] = 0.50f; // flat, but mid-range -- not near 0.0 or 1.0
+    }
+    adaptive_tune_ki_diag_t diag;
+    TEST_CHECK(adaptive_tune_diagnose_ki(a, d, 16, DT_KI, 0.45f, 0.50f, &diag), "call must return true");
+    TEST_CHECK(diag.verdict != ADAPTIVE_TUNE_KI_FLOORED,
+               "a flat but MID-RANGE duty (not near a rail) must not diagnose as floored");
+    TEST_CHECK(diag.verdict == ADAPTIVE_TUNE_KI_OFFSET_TOO_SMALL,
+               "with a steady offset and no rail evidence, the correct verdict is Ki too small");
+}
+
+static void test_ki_diagnose_near_rail_but_varying_is_not_floored(void)
+{
+    // Duty parked near the 0 rail ON AVERAGE, but genuinely moving
+    // (variance well above the floor threshold) -- the opposite flip: rail
+    // clause true, variance clause false. Must NOT read as floored either.
+    float a[16], d[16];
+    for (int i = 0; i < 16; i++) {
+        a[i] = q1(101.3f);
+        d[i] = 0.01f + ((i % 2) ? 0.06f : 0.0f); // mean ~0.04 (near the 0 rail), but swinging, real variance
+    }
+    adaptive_tune_ki_diag_t diag;
+    TEST_CHECK(adaptive_tune_diagnose_ki(a, d, 16, DT_KI, 0.45f, 0.50f, &diag), "call must return true");
+    TEST_CHECK(diag.verdict != ADAPTIVE_TUNE_KI_FLOORED,
+               "duty near a rail ON AVERAGE but genuinely varying must not diagnose as floored");
+    TEST_CHECK(diag.verdict == ADAPTIVE_TUNE_KI_OFFSET_TOO_SMALL,
+               "with a steady offset and a varying (not flat) duty, the correct verdict is Ki too small");
 }
 
 static void test_ki_diagnose_limit_cycle_yields_ku_tu(void)
@@ -722,6 +837,162 @@ static void test_ki_diagnose_ok_when_tracking_cleanly(void)
                "call must return true");
     TEST_CHECK(diag.verdict == ADAPTIVE_TUNE_KI_OK, "flat trace, tiny dwell error, must diagnose OK (no correction)");
     TEST_CHECK(diag.ki_correction_pct == 0.0f, "an OK verdict must suggest no correction");
+}
+
+// ---------------------------------------------------------------------
+// D1: a coupling cell must converge to truth across repeated runs from a
+// 0.0 prior, not freeze partway. MUST FAIL on the pre-D1-fix code (that red
+// was captured before applying the fix).
+// ---------------------------------------------------------------------
+static void test_coupling_cell_converges_from_zero_prior_over_repeated_runs(void)
+{
+    reset_module_state();
+    s_zones[0].enabled = true;
+    s_fake_zone_cfg[0].k_dc = 1.0f; // irrelevant to this test -- just needs to be nonzero/positive
+    const float ambient = 20.0f;
+    const float duty_pts[5][MAX31856_CHANNEL_COUNT] = {
+        {0.20f, 0.50f, 0.80f}, {0.50f, 0.80f, 0.20f}, {0.80f, 0.20f, 0.50f},
+        {0.35f, 0.65f, 0.15f}, {0.65f, 0.15f, 0.65f}};
+    for (int k = 0; k < 5; k++) {
+        float target[MAX31856_CHANNEL_COUNT];
+        for (int i = 0; i < 3; i++) {
+            float rise = 0.0f;
+            for (int j = 0; j < 3; j++) rise += k_ref_C[i][j] * duty_pts[k][j];
+            target[i] = ambient + rise;
+        }
+        feed_joint_settled_dwell(target, ambient, duty_pts[k], SETTLE_TICKS, DT_S);
+    }
+    TEST_CHECK(s_joint_ring_count == 5, "setup: 5 distinct joint dwells queued");
+
+    // 30 runs against the SAME fixed evidence -- a stand-in for 30 firings
+    // that all measured the same true coupling, exercising exactly the
+    // iterated-blend convergence path the review calls out.
+    for (int run = 0; run < 30; run++) {
+        profile_firing_run_record_t rec = make_clean_record(20, 0, 900);
+        adaptive_tune_run_end(&rec, true);
+    }
+
+    TEST_CHECK_NEAR(s_fake_coupling[0][1], k_ref_C[0][1], 1.0,
+                     "coupling cell [0][1] must converge to truth across repeated runs from a 0.0 prior");
+    TEST_CHECK_NEAR(s_fake_coupling[0][2], k_ref_C[0][2], 1.0,
+                     "coupling cell [0][2] must converge to truth across repeated runs from a 0.0 prior");
+}
+
+// ---------------------------------------------------------------------
+// D4: the joint-observation floor must count DISTINCT dwells, not rows --
+// N simultaneously-enabled zones settling on the SAME dwell must contribute
+// exactly ONE joint row, not N near-identical ones.
+// ---------------------------------------------------------------------
+static void test_joint_floor_counts_distinct_dwells_not_rows(void)
+{
+    reset_module_state();
+    s_zones[0].enabled = true;
+    s_zones[1].enabled = true;
+    s_zones[2].enabled = true;
+    const float ambient = 20.0f;
+    const float duty_pts[2][MAX31856_CHANNEL_COUNT] = {{0.20f, 0.50f, 0.80f}, {0.50f, 0.80f, 0.20f}};
+    for (int k = 0; k < 2; k++) {
+        float target[MAX31856_CHANNEL_COUNT];
+        for (int i = 0; i < 3; i++) {
+            float rise = 0.0f;
+            for (int j = 0; j < 3; j++) rise += k_ref_C[i][j] * duty_pts[k][j];
+            target[i] = ambient + rise;
+        }
+        feed_joint_settled_dwell(target, ambient, duty_pts[k], SETTLE_TICKS, DT_S);
+    }
+    // The regression this guards: with 3 zones enabled and 2 distinct
+    // dwells, a per-zone (rather than per-dwell) commit would leave 6 rows
+    // in the ring here, not 2 -- silently clearing the 5-observation floor
+    // with only 2 real operating points for 3 unknowns.
+    TEST_CHECK(s_joint_ring_count == 2, "2 distinct dwells with 3 zones enabled must commit exactly 2 joint rows, "
+                                         "not one per zone");
+
+    profile_firing_run_record_t rec = make_clean_record(21, 0, 900);
+    rec.zones[1].active = true;
+    rec.zones[1].stats.sample_count = 900;
+    rec.zones[2].active = true;
+    rec.zones[2].stats.sample_count = 900;
+    adaptive_tune_run_end(&rec, true);
+    TEST_CHECK(!s_zones[0].coupled_applied, "2 distinct dwells (below the 5-observation margin) must refuse the "
+                                             "coupled solve, not silently accept an underdetermined fit");
+}
+
+// ---------------------------------------------------------------------
+// D6: try_refine_coupled_locked()'s OWN indexing (reading C[zi][j] and
+// calling set_coupling_cell(zi, j, ...)) has no coverage from the pure-math
+// adaptive_tune_coupled_fit() tests above -- a transpose at either call
+// site would still pass all of them. This drives the full apply path (via
+// adaptive_tune_run_end()) against the same asymmetric bench matrix and
+// checks the fake coupling TABLE lands cells in the storage orientation
+// (coupling_coeff[affected][stepped]), not swapped.
+// ---------------------------------------------------------------------
+static void test_coupled_apply_writes_cells_in_storage_orientation(void)
+{
+    reset_module_state();
+    s_zones[0].enabled = true;
+    s_zones[1].enabled = true;
+    const float ambient = 20.0f;
+    const float duty_pts[6][MAX31856_CHANNEL_COUNT] = {
+        {0.20f, 0.50f, 0.80f}, {0.50f, 0.80f, 0.20f}, {0.80f, 0.20f, 0.50f},
+        {0.35f, 0.65f, 0.15f}, {0.65f, 0.15f, 0.65f}, {0.15f, 0.35f, 0.35f}};
+    for (int k = 0; k < 6; k++) {
+        float target[MAX31856_CHANNEL_COUNT];
+        for (int i = 0; i < 3; i++) {
+            float rise = 0.0f;
+            for (int j = 0; j < 3; j++) rise += k_ref_C[i][j] * duty_pts[k][j];
+            target[i] = ambient + rise;
+        }
+        feed_joint_settled_dwell(target, ambient, duty_pts[k], SETTLE_TICKS, DT_S);
+    }
+    TEST_CHECK(s_joint_ring_count == 6, "setup: 6 distinct joint dwells queued");
+
+    profile_firing_run_record_t rec = make_clean_record(22, 0, 900);
+    rec.zones[1].active = true;
+    rec.zones[1].stats.sample_count = 900;
+    adaptive_tune_run_end(&rec, true);
+
+    TEST_CHECK(s_zones[0].coupled_applied, "setup: zone 0's coupled solve must have applied");
+    TEST_CHECK(s_zones[1].coupled_applied, "setup: zone 1's coupled solve must have applied");
+
+    // One run's 15% blend from a 0.0 prior: expect ~= ALPHA * truth for
+    // each cell. [0][1] (26.61) and [1][0] (15.78) are far enough apart
+    // (their blended values differ by > 1.0) that a transposed read of
+    // C[][] or a transposed set_coupling_cell() call would land the WRONG
+    // number in the fake table, not just a slightly-off one.
+    float expect_01 = ADAPTIVE_TUNE_COUPLING_BLEND_ALPHA * k_ref_C[0][1];
+    float expect_10 = ADAPTIVE_TUNE_COUPLING_BLEND_ALPHA * k_ref_C[1][0];
+    TEST_CHECK(fabsf(expect_01 - expect_10) > 1.0f,
+               "setup: expected [0][1] and [1][0] blended values must be genuinely different, or a transpose bug "
+               "could not be distinguished from a correct apply");
+    TEST_CHECK_NEAR(s_fake_coupling[0][1], expect_01, 0.3,
+                     "fake_coupling[0][1] (affected=0 responding to stepped=1) must NOT read as [1][0]'s value");
+    TEST_CHECK_NEAR(s_fake_coupling[1][0], expect_10, 0.3,
+                     "fake_coupling[1][0] (affected=1 responding to stepped=0) must NOT read as [0][1]'s value");
+}
+
+// ---------------------------------------------------------------------
+// D5: the model/PID refinement (SIMC recompute) and the Ki diagnosis must
+// not stack in the same run -- the Ki diagnosis's trace evidence was
+// gathered under the OLD Ki, so applying its +/-20% scale on top of a
+// JUST-rewritten SIMC Ki would double up an unrelated correction.
+// ---------------------------------------------------------------------
+static void test_ki_diagnosis_skipped_same_run_as_model_refine(void)
+{
+    reset_module_state();
+    s_zones[1].enabled = true;
+    s_fake_zone_cfg[1].k_dc = 10.0f; // prior -- true gain 15, well within jump/spread guards
+    const float true_k = 15.0f, ambient = 22.3f;
+    const float duties[4] = {0.20f, 0.50f, 0.80f, 0.35f};
+    for (int i = 0; i < 4; i++) {
+        feed_settled_dwell(1, ambient + true_k * duties[i], ambient, duties[i], SETTLE_TICKS, DT_S);
+    }
+    profile_firing_run_record_t rec = make_clean_record(11, 1, 900);
+    adaptive_tune_run_end(&rec, true);
+
+    TEST_CHECK(s_zones[1].has_applied, "setup: the diagonal model refinement must have applied this run");
+    TEST_CHECK(!s_zones[1].ki_applied, "the Ki diagnosis must NOT also apply in the same run as the model refine");
+    TEST_CHECK(strstr(s_zones[1].ki_refusal_reason, "skipped") != NULL,
+               "the Ki refusal reason should say it was skipped because the model refine already ran this run");
 }
 
 void run_test_adaptive_tune(void)
@@ -758,9 +1029,25 @@ void run_test_adaptive_tune(void)
     test_ki_diagnose_insufficient_below_min_samples();
     test_ki_diagnose_steady_offset_flags_small_ki();
     test_ki_diagnose_floored_not_misdiagnosed_as_small_ki();
-    test_ki_diagnose_drift_flags_large_ki();
+    test_ki_diagnose_monotonic_drift_is_not_misread_as_oscillation();
+    test_ki_diagnose_monotonic_drift_with_steady_offset_flags_small_ki();
+    test_ki_diagnose_floored_wins_even_with_monotonic_drift();
+    test_ki_diagnose_flat_duty_mid_range_is_not_floored();
+    test_ki_diagnose_near_rail_but_varying_is_not_floored();
     test_ki_diagnose_limit_cycle_yields_ku_tu();
     test_ki_diagnose_ok_when_tracking_cleanly();
+
+    TEST_SECTION("adaptive_tune: coupling cell convergence (D1)");
+    test_coupling_cell_converges_from_zero_prior_over_repeated_runs();
+
+    TEST_SECTION("adaptive_tune: joint observation floor counts distinct dwells (D4)");
+    test_joint_floor_counts_distinct_dwells_not_rows();
+
+    TEST_SECTION("adaptive_tune: coupled apply orientation (D6)");
+    test_coupled_apply_writes_cells_in_storage_orientation();
+
+    TEST_SECTION("adaptive_tune: model refine and Ki diagnosis do not stack (D5)");
+    test_ki_diagnosis_skipped_same_run_as_model_refine();
 }
 
 int main(void)
