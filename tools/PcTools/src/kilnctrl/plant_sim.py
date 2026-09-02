@@ -119,20 +119,109 @@ from . import log_analysis
 # limiting factor on absolute precision).
 # ---------------------------------------------------------------------------
 
-K_diag = np.array([39.25, 31.97, 31.68])
-tau = np.array([263.8, 269.8, 270.9])
+# Re-identified 2026-09-02 from three rested-start, fully-settled (2100 s
+# dwell) single-zone excitation runs -- logs/coupling/cpl_z{0,1,2}_{mcp,thermo}.jsonl,
+# parsed with coupling_pair_log.py -- and three passive cooldowns
+# (logs/coupling/cooldown_z1.jsonl, cooldown_z2.jsonl,
+# cooldown_after_coupid6.jsonl). See PID_EXPANSION_PLAN.md sec 3.2/3.4.
+#
+# K_full IS the coupling matrix in [affected][stepped] form directly (no
+# wire_form/transpose step any more -- the excitation runs measure exactly
+# this orientation: hold column i's duty, read every zone's settled rise).
+# The prior matrix assumed much weaker/near-symmetric coupling; the
+# excitation runs show it is strongly ASYMMETRIC (z1 raises z0 ~22 C, z0
+# raises z1 only ~9 C -- K_full[0][1]=27.32 vs K_full[1][0]=14.30).
+# Condition number 4.64 (was 5.27) -- plausibility check passes.
+K_full = np.array([
+    [38.13, 27.32, 21.72],
+    [14.30, 35.90, 22.15],
+    [ 8.33, 12.42, 35.32],
+])
+K_diag = np.diag(K_full).copy()
+
+# tau from the three passive cooldowns (single clean decay window per zone
+# -- rough, not calibration-grade, but the only tau evidence that postdates
+# the original bench-rig identification). Materially longer than the old
+# bench-rig tau (263.8/269.8/270.9): the bench rig likely under-measured
+# tau, or heating/cooling tau genuinely differ on this plant -- unresolved,
+# flagged in PID_EXPANSION_PLAN.md sec 3.4.
+tau = np.array([469.0, 455.0, 345.0])
+
+# Dead time: no new dead-time data postdates the original bench-rig
+# identification (the relay run gives Tu=334.3s, an oscillation period, not
+# L directly -- deriving L from it needs a model-specific relation not yet
+# built). Left at the bench-rig value.
 L = np.array([52.8, 43.5, 33.9])
 
-# wire_form[stepped][affected]; K_full[affected][stepped] is what the
-# coupled solve needs (each column is "how much every zone rises per unit
-# duty on the stepped zone").
-_wire_form = np.array([
-    [39.25, 15.78, 9.70],
-    [26.61, 31.97, 11.38],
-    [20.73, 21.09, 31.68],
-])
-K_full = _wire_form.T
 _K_INV = np.linalg.inv(K_full)
+
+# The identified plant (K/tau/L above) comes from a 0-80 C bench rig -- see
+# module docstring's TRUST section. Any run whose commanded target leaves
+# that envelope is extrapolating beyond where the identification has ever
+# been checked against hardware.
+EXTRAPOLATION_BOUNDARY_C = 80.0
+
+
+def is_extrapolation(max_target_c: float, boundary: float = EXTRAPOLATION_BOUNDARY_C) -> bool:
+    return max_target_c > boundary
+
+
+# ---------------------------------------------------------------------------
+# High-temperature extension (cone 10 / ~1285 C), added 2026-09-02.
+#
+# Everything above is MEASURED, but only across roughly 0-80 C. A kiln
+# firing runs to bisque (~1000 C), cone 6 (~1222 C) and cone 10 (~1285 C).
+# Heat loss up there is not the same physics: conductive/convective loss is
+# linear in (T - T_ambient) (what K/tau above capture), but radiative loss
+# goes as T_kelvin^4 and comes to dominate. Total thermal conductance (and
+# therefore both K and tau, which share the same denominator -- see
+# ``loss_conductance_scale``'s docstring) is scaled by a small-signal
+# Stefan-Boltzmann term above the calibration point, so the model changes
+# CHARACTER above EXTRAPOLATION_BOUNDARY_C rather than extending a straight
+# line indefinitely.
+# ---------------------------------------------------------------------------
+
+# T_REF_C: the excitation runs' dwell temperature -- MEASURED, this is where
+# K_diag/tau above are anchored and where loss_conductance_scale() is
+# defined to equal exactly 1.0 (the high-temperature extension is inert at
+# and below the fitted range).
+T_REF_C = 55.0
+
+# RAD_LOSS_FRACTION_AT_REF: what share of TOTAL heat loss (conductive +
+# radiative) is radiative at T_REF_C. ASSUMED -- there is no measurement of
+# this split at any temperature in this dataset; every capture available
+# stays low enough (<=80 C, ~330 K) that radiative loss is negligible next
+# to conductive loss for a modestly emissive kiln interior, so a small
+# placeholder value is used. This is the number to revisit first if real
+# high-temperature (bisque+) thermocouple data ever becomes available --
+# not K_diag/tau/L, which stay MEASURED regardless.
+RAD_LOSS_FRACTION_AT_REF = 0.05
+
+_T_REF_K = T_REF_C + 273.15
+
+
+def loss_conductance_scale(temp_c) -> float:
+    """Total thermal conductance at ``temp_c`` relative to the conductance
+    at ``T_REF_C``, i.e. ``C_total(T)/C_total(T_ref)``.
+
+    Physical basis: at steady state ``K = P_max/C_total`` and
+    ``tau = C_thermal/C_total`` share the same conductance denominator, so
+    ``K/tau = P_max/C_thermal`` is INDEPENDENT of loss conductance --
+    scaling both K and tau down by this same factor (see
+    ``FOPDTPlant.step``) is therefore the physically consistent way to
+    extend a conductance change to both parameters without inventing a
+    second free constant.
+
+    Normalized so ``loss_conductance_scale(T_REF_C) == 1.0``: MEASURED
+    K/tau are used unchanged at the calibration point, and growth above
+    1.0 is entirely governed by RAD_LOSS_FRACTION_AT_REF (ASSUMED).
+    """
+    temp_k = temp_c + 273.15
+    rad_ref = RAD_LOSS_FRACTION_AT_REF
+    cond_ref = 1.0 - rad_ref
+    rad_now = rad_ref * (temp_k / _T_REF_K) ** 4
+    return cond_ref + rad_now
+
 
 DT = 1.0
 N_ZONES = 3
@@ -157,8 +246,19 @@ class FOPDTPlant:
         for i in range(self.n):
             delay_steps = min(int(round(self.L[i] / self.dt)), len(self.duty_hist) - 1)
             d_delayed = self.duty_hist[-1 - delay_steps]
-            u_ss = self.ambient + np.dot(self.K[i], d_delayed)
-            dTdt = (u_ss - self.temp[i]) / self.tau[i]
+            # High-temperature extension: total thermal conductance grows
+            # with the ZONE'S OWN current temperature (radiative loss), so
+            # both its gain row and its tau shrink by the same factor. The
+            # controller (ff/PID, coupled_ff_hold_climb) deliberately does
+            # NOT see this -- it always uses the fixed low-temperature
+            # K_full/tau, exactly like the real firmware, which has no
+            # temperature compensation. That mismatch is what a
+            # high-temperature sweep is meant to expose.
+            scale = loss_conductance_scale(self.temp[i])
+            K_row_eff = self.K[i] / scale
+            tau_eff = self.tau[i] / scale
+            u_ss = self.ambient + np.dot(K_row_eff, d_delayed)
+            dTdt = (u_ss - self.temp[i]) / tau_eff
             new_temp[i] = self.temp[i] + dTdt * self.dt
         self.temp = new_temp
         return self.temp.copy()
@@ -219,13 +319,33 @@ class PID:
         return u, dict(p=p_term, i=i_term, d=d_term, ff=ff_u)
 
 
-def coupled_ff_hold_climb(target_c, target_rate, i, ambient=20.0):
+# Prior (pre-2026-09-02) coupling matrix, kept only so a sweep can compare
+# "controller believes the old matrix" against "controller believes the new
+# one" -- see plant_sim_sweep.py. NOT used anywhere by default.
+K_full_OLD = np.array([
+    [39.25, 26.61, 20.73],
+    [15.78, 31.97, 21.09],
+    [ 9.70, 11.38, 31.68],
+])
+
+MATRIX_VARIANTS = {"new": K_full, "old": K_full_OLD}
+
+
+def coupled_ff_hold_climb(target_c, target_rate, i, ambient=20.0, K_inv=None, tau_ff=None):
     """The shipped coupled solve ('after' onward): hold and climb duty for
-    zone i, solved jointly across all three zones via K_full^-1."""
+    zone i, solved jointly across all three zones via K_full^-1.
+
+    ``K_inv``/``tau_ff`` let a caller (the high-temperature sweep) ask "what
+    would the controller compute if it believed a different matrix" while
+    the PLANT it is driving stays fixed to the measured one -- exactly what
+    the real firmware does (its coupling matrix is a fixed constant, not
+    temperature-adaptive). Defaults to the module's live matrix/tau."""
+    K_inv = _K_INV if K_inv is None else K_inv
+    tau_ff = tau if tau_ff is None else tau_ff
     rhs_hold = np.full(N_ZONES, target_c - ambient)
-    hold_duty = _K_INV @ rhs_hold
-    rhs_climb = tau * target_rate
-    climb_duty = _K_INV @ rhs_climb
+    hold_duty = K_inv @ rhs_hold
+    rhs_climb = tau_ff * target_rate
+    climb_duty = K_inv @ rhs_climb
     hold_i = hold_duty[i]
     climb_i = climb_duty[i]
     total = hold_i + climb_i
@@ -233,6 +353,17 @@ def coupled_ff_hold_climb(target_c, target_rate, i, ambient=20.0):
     hold_out = min(max(hold_i, 0.0), 1.0)
     climb_out = total_clamped - hold_out
     return hold_out, climb_out, total_clamped
+
+
+def hold_duty_infeasible(target_c, K_inv=None, ambient=20.0):
+    """True if the coupled hold solve for a uniform ``target_c`` across all
+    three zones needs a duty outside [0,1] on any zone -- the "coupled hold
+    solve going infeasible" failure mode PID_EXPANSION_PLAN.md secs 3.2/3.4
+    describe. Used by the temperature-band sweep to find the infeasibility
+    boundary for a given matrix."""
+    K_inv = _K_INV if K_inv is None else K_inv
+    hold_duty = K_inv @ np.full(N_ZONES, target_c - ambient)
+    return bool((hold_duty < 0.0).any() or (hold_duty > 1.0).any())
 
 
 def uncoupled_ff_hold_climb(target_c, target_rate, i, ambient=20.0):
@@ -250,7 +381,8 @@ def uncoupled_ff_hold_climb(target_c, target_rate, i, ambient=20.0):
 
 
 def run_profile(segs, start_temp, kp=0.06, ki=0.0003, kd=0.0,
-                 climb_mode='coupled', integral_floor='ff_hold', ambient=20.0):
+                 climb_mode='coupled', integral_floor='ff_hold', ambient=20.0,
+                 controller_K_inv=None, controller_tau=None):
     """Run the plant+PID loop over an explicit segment list.
 
     ``segs``: list of ``(t0, t1, c0, c1, rate)`` tuples, ``rate`` signed
@@ -258,6 +390,16 @@ def run_profile(segs, start_temp, kp=0.06, ki=0.0003, kd=0.0,
     NO hardcoded rate here -- see the module docstring's "THE BUG THIS
     REPLACES" section. Every caller must supply real segment timing, either
     by hand or via ``segs_from_capture``/``run_profile_from_capture``.
+
+    ``controller_K_inv``/``controller_tau``: override what the CONTROLLER
+    (ff/PID) believes the matrix/tau are, independent of the plant it is
+    actually driving (which always uses the module's measured K_full/tau/L
+    -- see FOPDTPlant.step's high-temperature note). Only meaningful with
+    climb_mode='coupled'; used by the matrix-variant sweep.
+
+    Reports ``max_target_c`` and ``extrapolation`` (True if any target in
+    this run exceeded ``EXTRAPOLATION_BOUNDARY_C``) so callers running into
+    kiln-firing range know when they've left the measured 0-80 C envelope.
     """
     plant = FOPDTPlant(K_full, tau, L, DT, ambient=ambient, start_temp=start_temp)
     pids = [PID(kp, ki, kd, d_tau=30.0, b=1.0, pid_range_c=1000.0) for _ in range(N_ZONES)]
@@ -280,7 +422,11 @@ def run_profile(segs, start_temp, kp=0.06, ki=0.0003, kd=0.0,
                     target_rate = rate
                 break
         for i in range(N_ZONES):
-            hold, climb, ff = ff_fn(target_c, target_rate, i, ambient=ambient)
+            if climb_mode == 'coupled':
+                hold, climb, ff = ff_fn(target_c, target_rate, i, ambient=ambient,
+                                         K_inv=controller_K_inv, tau_ff=controller_tau)
+            else:
+                hold, climb, ff = ff_fn(target_c, target_rate, i, ambient=ambient)
             duty[i], _ = pids[i].update(target_c, plant.temp[i], DT, ff, hold, integral_floor=integral_floor)
         times.append(t)
         targets.append(target_c)
@@ -289,9 +435,13 @@ def run_profile(segs, start_temp, kp=0.06, ki=0.0003, kd=0.0,
         plant.step(duty)
         t += DT
 
-    return dict(t=np.array(times), target=np.array(targets),
+    targets_arr = np.array(targets)
+    max_target = float(targets_arr.max()) if len(targets_arr) else float(ambient)
+    return dict(t=np.array(times), target=targets_arr,
                 temps=np.array(temps_log), duty=np.array(duty_log),
-                seg_bounds=[s[1] for s in segs])
+                seg_bounds=[s[1] for s in segs],
+                max_target_c=max_target,
+                extrapolation=is_extrapolation(max_target))
 
 
 def segs_from_capture(rows: Sequence[log_analysis.PollRow]):

@@ -279,37 +279,92 @@ HTTP endpoint and zones-page UI.
       byte; a silent reset to default-off would have quietly disabled a layer an
       operator had turned on.
 
-### 3.4 The simulator — calibrated 2026-09-01, and what it is worth
+### 3.4 The simulator — calibrated 2026-09-01, recalibrated + validated 2026-09-02
 
-For most of this session the simulator was wrong in both directions: it
+For most of the 09-01 session the simulator was wrong in both directions: it
 predicted 44–53% ramp recovery where hardware delivered essentially full
 recovery, and it favoured the climb-decay change hardware then measured as worse
-on every zone. It showed 5–7 °C ramp error for a controller tracking to
-~0.03 °C.
+on every zone. **The whole cause was one constant: it drove itself at a
+hardcoded 10 °C/min while profile 7 ramps at 2–3.5 °C/min.** Coupled climb
+feedforward is linear in commanded rate, so a 3–5× rate error produced the
+entire phantom lag. Now lives as `tools/PcTools/src/kilnctrl/plant_sim.py`
+(`7b56a8a`), CLI: `python -m kilnctrl.plant_sim compare <capture.jsonl>`.
+`kilnsim` (the MCP server) was not connected when this pass ran — use the CLI
+directly, or `tools/PcTools/scripts/mcp_servers.ps1 start` first.
 
-**The whole cause was one constant: it drove itself at a hardcoded 10 °C/min
-while profile 7 ramps at 2–3.5 °C/min.** Coupled climb feedforward is linear in
-commanded rate, so a 3–5× rate error produced the entire phantom lag — which is
-why retuning its gains never moved it (a gain sweep left the error pinned
-regardless of kp/ki/kd). Tick rate, PID form, anti-windup, the integral floor and
-the coupled solve were all checked and all matched the firmware.
+**2026-09-02 recalibration.** Re-fit `K_full`/`tau` from data the 09-01 pass
+never saw: three rested-start, fully-settled single-zone excitation runs
+(`logs/coupling/cpl_z{0,1,2}_{mcp,thermo}.jsonl`) and three passive cooldowns
+(`logs/coupling/cooldown_*.jsonl`). `K_full` is now §3.2's re-solved asymmetric
+matrix directly (`[[38.13,27.32,21.72],[14.30,35.90,22.15],[8.33,12.42,35.32]]`,
+cond 4.64); `tau` is `[469, 455, 345]` s from the cooldowns (materially longer
+than the old bench-rig `[263.8, 269.8, 270.9]` — unresolved whether the bench
+rig under-measured or heating/cooling `tau` genuinely differ). `L` (dead time)
+is unchanged — no new dead-time data exists. Re-run against the original five
+captures, aggregate residual **improved**: `after`/`final`/`holdfix_clean` all
+now RMS 0.60–0.71 °C (was 1.45 °C aggregate); the previously-flagged zone-2
+second-dwell cold bias (1.8–2.6 °C) is now nearly gone (0.15 °C).
+`CURRENT_MATRIX` in `coupled_ident.py` — "what firmware ships" — was
+deliberately decoupled from `plant_sim.K_full` — "the sim's best physical
+estimate" — so this recalibration does not silently change what the
+firmware-facing adaptive-tune self-checks are calibrated against. The two stay
+different until §3.2's matrix is adopted into firmware, an owner decision.
 
-Calibrated against all five captures, aggregate residual is **1.45 °C RMS across
-60 windows**, against hardware's own 0.4–2.8 °C run-to-run noise. Now lives in
-the repo as `tools/PcTools/src/kilnctrl/plant_sim.py` (`7b56a8a`) with the
-captures as checked-in fixtures, a CLI, an MCP tool, and a regression test that
-fails if the ramp rate is ever hardcoded again.
+**Held-out validation** (`tests/fixtures/plant_sim/p7_fuzzy0_held_out.jsonl`,
+a live profile-7 fuzzy=0 tracking run, deliberately excluded from the fit):
+temperature RMS z0 3.51 °C, z1 3.15 °C, z2 3.56 °C — worse than the fitted
+0.6–0.7 °C but the capture starts 342 s into the firing, so the sim's t=0
+fresh-PID/plant state does not match hardware's already-settled state (a
+cold-start artifact of this particular capture, not a re-identified plant
+defect — the ramp segment right after the cold start carries nearly all the
+error; the second ramp segment, once the sim has caught up, tracks to
+0.4–1.6 °C). Test pins a 6.0 °C bound per zone; genuinely tighter validation
+needs a held-out capture that starts from a rested zero, which does not exist
+yet.
+
+**Known behaviours, checked against the recalibrated sim:** dwell-entry
+overshoot reproduces in the right direction and rough scale but undershoots
+the measured numbers — sim peaks 0.95–1.8 °C at 42–70 s post-ramp vs hardware's
+documented ~2 °C at 65–145 s (real overshoot is later and larger). The coupled
+hold solve's infeasibility boundary shifts up with the new matrix as measured:
+~59 °C (old matrix) → ~64 °C (new), matching the ~62 °C → ~65 °C hardware
+finding in direction and rough magnitude.
+
+**High-temperature extension (added 2026-09-02, simulator only — never run on
+hardware).** Every parameter above is MEASURED across roughly 0–80 °C only. A
+firing runs to bisque (~1000 °C), cone 6 (~1222 °C), cone 10 (~1285 °C) — 12–16×
+past the fitted range, where radiative loss (∝T⁴) comes to dominate over the
+conductive/convective loss the fit captures. `plant_sim.py` now scales total
+thermal conductance (and therefore both `K` and `tau`, which share it) by a
+Stefan-Boltzmann small-signal term above `T_REF_C=55` (MEASURED anchor); the
+radiative split itself, `RAD_LOSS_FRACTION_AT_REF=0.05`, is **ASSUMED** — no
+high-temperature measurement exists to fit it. `EXTRAPOLATION_BOUNDARY_C=80`
+is the explicit confidence line: `is_extrapolation()`/`run_profile()`'s
+`extrapolation` flag mark anything past it. The parallel sweep
+(`python -m kilnctrl.plant_sim_sweep run`, one process per band×matrix via
+`multiprocessing.Pool`, deterministic band-sorted output) finds the qualitative
+finding that matters most here: at the current low-temperature-fit gain
+(`K_diag` ≈ 35–38 °C rise at duty=1 relative to ambient), the coupled hold
+solve is infeasible and duty is fully saturated at every band from ~65 °C
+upward, bisque/cone6/cone10 included — i.e. this identification, extrapolated
+by any loss model, does not represent a plant able to reach firing
+temperature. **Reaching cone 10 in simulation is therefore not yet
+trustworthy for magnitude** — it needs either a genuine high-temperature
+identification pass (real thermocouple data above 80 °C) or an explicit,
+separately-justified high-power regime, neither of which exists. Treat the
+cone-band sweep output as "shows the fixed low-T matrix does not extrapolate,"
+not as a tracked-firing prediction.
 
 **What it can be trusted for**, per its own module docstring: ramp magnitude and
-sign on coupled-feedforward builds; dwell behaviour generally. **Not** the
-uncoupled baseline's exact saturation dynamics, not zone 2's second dwell in
-isolation (it runs 1.8–2.6 °C cold on every coupled build, reproducing §3.2's
-open defect rather than a sim error — a point in its favour), and nothing below
-the ~1 °C noise floor.
+sign on coupled-feedforward builds within the fitted ~0–80 °C envelope; dwell
+behaviour generally. **Not** the uncoupled baseline's exact saturation
+dynamics, not anything above `EXTRAPOLATION_BOUNDARY_C` for magnitude (mechanism
+only), and nothing below the ~1 °C noise floor.
 
 The lesson worth keeping: every sim verdict in this chain was quoted with
 confidence while resting on an unvalidated driving condition. A simulator is not
-evidence until it reproduces a measurement someone actually took.
+evidence until it reproduces a measurement someone actually took — and it stays
+a lower bound on trust until a held-out run, not just a fitted one, checks it.
 
 ### 3.5 Documentation — CLOSED 2026-09-01 (`d382b06`)
 

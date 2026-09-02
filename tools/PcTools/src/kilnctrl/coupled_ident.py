@@ -133,10 +133,20 @@ MIN_DUTY_FOR_OBSERVATION = 0.03
 # "CONDITIONING" section for why this specific value.
 COND_REFUSAL_THRESHOLD = 1.0e4
 
-# The matrix currently on the board, reused verbatim (not re-declared) from
-# plant_sim.py -- see that module's own comment on _wire_form/K_full for its
-# [affected][stepped] orientation and bench-measurement provenance.
-CURRENT_MATRIX = plant_sim.K_full
+# The matrix currently on the board. Until 2026-09-02 this was reused
+# verbatim from plant_sim.K_full; that is no longer correct after
+# plant_sim.py's simulator-side recalibration to the new asymmetric
+# excitation-run matrix (see PID_EXPANSION_PLAN.md sec 3.2/3.4) -- the
+# simulator's best physical estimate and what firmware actually ships are
+# now two different things, and this constant means the latter. The new
+# matrix is a sim-side/analysis finding, explicitly NOT adopted into
+# firmware (an owner decision), so CURRENT_MATRIX stays pinned to the
+# bench-rig matrix firmware actually runs until that adoption happens.
+CURRENT_MATRIX = np.array([
+    [39.25, 26.61, 20.73],
+    [15.78, 31.97, 21.09],
+    [9.70, 11.38, 31.68],
+])
 
 
 # ---------------------------------------------------------------------------

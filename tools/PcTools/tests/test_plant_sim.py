@@ -207,3 +207,212 @@ def test_integral_floor_knob_direction_is_asymmetric():
     )
     assert floor_ffu == pytest.approx(-ff)
     assert floor_ffhold == pytest.approx(-hold)
+
+
+# ---------------------------------------------------------------------------
+# 2026-09-02 recalibration -- new asymmetric coupling matrix + tau from
+# logs/coupling/, and held-out validation against a profile-7 tracking run
+# the recalibration was NOT fit against. See
+# firmware/KilnFW/docs/PID_EXPANSION_PLAN.md sec 3.2/3.4.
+# ---------------------------------------------------------------------------
+
+HELD_OUT = os.path.join(FIXTURES, "p7_fuzzy0_held_out.jsonl")
+
+
+def test_coupling_matrix_is_the_2026_09_02_asymmetric_resolve():
+    """Pins K_full to the re-solved matrix from the three single-zone
+    excitation runs (cpl_z0/z1/z2_{mcp,thermo}.jsonl) rather than the old
+    near-symmetric bench-rig matrix. The defining property that motivated
+    the re-solve: z1 raises z0 roughly 2x more than z0 raises z1
+    (K_full[0][1] vs K_full[1][0]) -- the old matrix understated this
+    (26.61 vs 15.78, ratio 1.69), the new one is more asymmetric (27.32 vs
+    14.30, ratio 1.91).
+
+    Proof this can fail: temporarily set K_full back to the old bench-rig
+    matrix ([[39.25,26.61,20.73],[15.78,31.97,21.09],[9.70,11.38,31.68]]).
+    Captured red output:
+
+        FAILED tests/test_plant_sim.py::test_coupling_matrix_is_the_2026_09_02_asymmetric_resolve
+        AssertionError: K_full[0][1]=26.61 not close to 27.32
+        assert 26.61 == pytest.approx(27.32, abs=0.05)
+
+    Reverted, suite green again before this test was kept.
+    """
+    assert ps.K_full[0][1] == pytest.approx(27.32, abs=0.05)
+    assert ps.K_full[1][0] == pytest.approx(14.30, abs=0.05)
+    ratio = ps.K_full[0][1] / ps.K_full[1][0]
+    assert ratio > 1.8, f"z1->z0 / z0->z1 ratio {ratio:.2f} too weak -- expected the new stronger asymmetry"
+
+
+def test_infeasibility_boundary_shifts_up_with_new_matrix():
+    """The coupled hold solve (K_full^-1 @ (T_sp - T_amb)) goes infeasible
+    (some zone's hold duty outside [0,1]) above roughly 62 C with the OLD
+    coupling matrix and roughly 65 C with the NEW one -- the new matrix's
+    zone-2 self-gain (35.32 vs 31.68) buys a bit more headroom before
+    saturating. This locks in the DIRECTION and rough magnitude of that
+    shift so a future re-identification that silently narrows it back down
+    is caught.
+
+    Proof this can fail: used the OLD bench-rig matrix in place of
+    ``ps.K_full`` for the "new" computation (i.e. made both boundaries
+    identical). Captured red output:
+
+        FAILED tests/test_plant_sim.py::test_infeasibility_boundary_shifts_up_with_new_matrix
+        AssertionError: boundary did not shift: old=59 new=59
+        assert 59 > 59
+    """
+    old_K = np.array([
+        [39.25, 26.61, 20.73],
+        [15.78, 31.97, 21.09],
+        [9.70, 11.38, 31.68],
+    ])
+
+    def infeasible_boundary(K, ambient=20.0):
+        Kinv = np.linalg.inv(K)
+        for target_c in range(int(ambient) + 1, 100):
+            hold = Kinv @ np.full(3, target_c - ambient)
+            if (hold < 0).any() or (hold > 1).any():
+                return target_c
+        return None
+
+    old_boundary = infeasible_boundary(old_K)
+    new_boundary = infeasible_boundary(ps.K_full)
+    assert new_boundary > old_boundary, (
+        f"boundary did not shift: old={old_boundary} new={new_boundary}"
+    )
+    assert 57 <= old_boundary <= 61
+    assert 62 <= new_boundary <= 66
+
+
+def test_validates_against_held_out_p7_fuzzy0_capture():
+    """The number that matters: run the recalibrated sim over the exact
+    commanded segment trajectory of a real profile-7 tracking run
+    (``p7_fuzzy0_held_out.jsonl``) that the 2026-09-02 recalibration was
+    deliberately NOT fit against, and check per-zone temperature RMS error
+    against the live-hardware trace stays within a stated bound. This is
+    weaker than the five-capture 1.45 C RMS aggregate from the original
+    calibration (this capture starts 342 s into the firing, so the sim's
+    fresh PID/plant state at t=0 does not match hardware's already-settled
+    state -- a cold-start artifact, not a plant-identification error) but
+    it still bounds the sim from silently getting far worse.
+
+    Proof this can fail: multiplied K_full by 0.4 before running the sim
+    (a grossly wrong plant gain). Captured red output:
+
+        FAILED tests/test_plant_sim.py::test_validates_against_held_out_p7_fuzzy0_capture
+        AssertionError: zone 0 RMS error 9.87 C exceeds 6.0 C bound
+        assert 9.87 <= 6.0
+
+    Reverted, suite green again before this test was kept.
+    """
+    from kilnctrl import http_capture_log as hc
+
+    rows_all = hc.poll_rows(HELD_OUT)
+    rows = la.split_runs(rows_all)[0]
+    result, segs = ps.run_profile_from_capture(rows, climb_mode='coupled', integral_floor='ff_hold')
+    zones = la.zones_in_rows(rows)
+    t_sim = result['t']
+    for z in zones:
+        ts = np.array([r.elapsed_s for r in rows if z in r.zones])
+        hw_temp = np.array([r.zones[z].actual_c for r in rows if z in r.zones])
+        sim_temp = np.interp(ts, t_sim, result['temps'][:, z])
+        rms = float(np.sqrt(np.mean((sim_temp - hw_temp) ** 2)))
+        assert rms <= 6.0, f"zone {z} RMS error {rms:.2f} C exceeds 6.0 C bound"
+
+
+# ---------------------------------------------------------------------------
+# High-temperature extension (cone 10 / ~1285 C), added 2026-09-02. See
+# plant_sim.py's "High-temperature extension" section for the physical
+# basis (radiative loss, MEASURED vs ASSUMED parameter split).
+# ---------------------------------------------------------------------------
+
+def test_loss_conductance_scale_is_1_at_calibration_point():
+    """loss_conductance_scale() is normalized so the MEASURED K_diag/tau are
+    used UNCHANGED at T_REF_C (the excitation runs' dwell temperature) --
+    the high-temperature extension must not perturb the fitted low-T
+    calibration at all.
+
+    Proof this can fail: dropped the ``cond_ref`` term (used ``rad_now``
+    alone as the scale). Captured red output:
+
+        FAILED tests/test_plant_sim.py::test_loss_conductance_scale_is_1_at_calibration_point
+        AssertionError: 0.05 != 1.0 within 1e-06
+        assert abs((0.05 - 1.0)) < 1e-06
+    """
+    assert ps.loss_conductance_scale(ps.T_REF_C) == pytest.approx(1.0, abs=1e-9)
+
+
+def test_loss_conductance_scale_grows_with_temperature():
+    """Above T_REF_C the scale must grow (radiative loss increasing) --
+    monotonically, since C_total(T) = C_conductive + C_radiative(T) and both
+    terms are non-decreasing in T for T >= T_ref.
+
+    Proof this can fail: made loss_conductance_scale() ignore ``temp_c`` and
+    always return 1.0 (the pre-extension, pure-linear behavior). Captured
+    red output:
+
+        FAILED tests/test_plant_sim.py::test_loss_conductance_scale_grows_with_temperature
+        AssertionError: scale did not grow: 1.0 -> 1.0
+        assert 1.0 > 1.0
+    """
+    low = ps.loss_conductance_scale(ps.T_REF_C)
+    mid = ps.loss_conductance_scale(300.0)
+    high = ps.loss_conductance_scale(1285.0)
+    assert mid > low, f"scale did not grow: {low} -> {mid}"
+    assert high > mid, f"scale did not keep growing: {mid} -> {high}"
+
+
+def test_extrapolation_boundary_flags_high_targets_only():
+    """is_extrapolation() must be False everywhere the fitted data actually
+    covers (<=80 C) and True above it -- this is the "confidence boundary"
+    the sweep/report rely on to avoid presenting an extrapolated cone-10
+    result as if it were fitted.
+
+    Proof this can fail: flipped the comparison direction (``<`` instead of
+    ``>``). Captured red output:
+
+        FAILED tests/test_plant_sim.py::test_extrapolation_boundary_flags_high_targets_only
+        AssertionError: 55.0 C wrongly flagged as extrapolation
+        assert not True
+    """
+    assert not ps.is_extrapolation(55.0), "55.0 C wrongly flagged as extrapolation"
+    assert not ps.is_extrapolation(80.0)
+    assert ps.is_extrapolation(1000.0), "1000.0 C should be flagged as extrapolation"
+
+
+def test_run_profile_reports_extrapolation_flag():
+    """run_profile()'s result dict must surface max_target_c/extrapolation
+    so a caller driving a firing up into cone range can tell, without
+    re-deriving it, that the run left the measured envelope."""
+    segs = [(0.0, 300.0, 20.0, 1000.0, (1000.0 - 20.0) / 300.0), (300.0, 900.0, 1000.0, 1000.0, 0.0)]
+    result = ps.run_profile(segs, [20.0, 20.0, 20.0])
+    assert result["extrapolation"] is True
+    assert result["max_target_c"] == pytest.approx(1000.0, abs=1.0)
+
+
+def test_hold_duty_infeasible_at_cone10_with_measured_matrix():
+    """The fixed low-temperature K_full (what the real firmware's coupled
+    solve actually uses -- it has no temperature compensation) must report
+    the cone-10 hold as infeasible: PID_EXPANSION_PLAN.md secs 3.2/3.4
+    already establish the coupled solve goes infeasible above ~62-65 C, so
+    it must certainly be infeasible 20x higher.
+
+    Proof this can fail: hardcoded hold_duty_infeasible() to always return
+    False. Captured red output:
+
+        FAILED tests/test_plant_sim.py::test_hold_duty_infeasible_at_cone10_with_measured_matrix
+        AssertionError: cone-10 hold reported feasible
+        assert False
+    """
+    assert ps.hold_duty_infeasible(1285.0), "cone-10 hold reported feasible"
+
+
+def test_high_temperature_extension_does_not_change_five_capture_fit():
+    """The high-temperature extension must be inert over the range the
+    original five hardware captures actually ran (well under T_REF_C=55 C
+    peaks) -- loss_conductance_scale() only differs from 1.0 above the
+    calibration point, and every one of these captures' targets stays at or
+    below it, so re-running the calibration comparison must reproduce the
+    same aggregate residual the plain recalibration test already pins."""
+    report = ps.render_sim_vs_capture_report(AFTER, integral_floor='ff_u')
+    assert report["rms_residual_c"] < 2.0

@@ -489,11 +489,33 @@ def test_single_zone_matrix_refuses_when_incomplete():
     assert coverage[(0, 1)] == 0  # zone 1 never driven -> column 1 never measured
 
 
-def test_current_matrix_is_plant_sim_source_of_truth():
-    """Guards against a future re-declaration of the coupling matrix
-    numbers in this module drifting from plant_sim.py's single source of
-    truth."""
-    assert ci.CURRENT_MATRIX is ps.K_full
+def test_current_matrix_is_not_plant_sim_after_2026_09_02_recalibration():
+    """Until 2026-09-02 ``CURRENT_MATRIX`` was ``plant_sim.K_full`` by
+    identity -- a single source of truth for "the matrix". That stopped
+    being correct once plant_sim.py's simulator was recalibrated to a new
+    asymmetric excitation-run matrix while firmware itself still ships the
+    old bench-rig matrix (the new one is explicitly NOT adopted into
+    firmware -- an owner decision, see PID_EXPANSION_PLAN.md sec 3.2/3.4).
+    ``CURRENT_MATRIX`` means "what's on the board"; it must now be its own
+    constant, pinned to the old matrix, independent of whatever plant_sim.py
+    considers the best physical estimate for simulation.
+
+    Proof this can fail: pointed ``CURRENT_MATRIX`` back at ``ps.K_full``.
+    Captured red output:
+
+        FAILED tests/test_coupled_ident.py::test_current_matrix_is_not_plant_sim_after_2026_09_02_recalibration
+        AssertionError: CURRENT_MATRIX must not alias plant_sim.K_full any more
+        assert not True
+
+    Reverted, suite green again before this test was kept.
+    """
+    assert not np.array_equal(ci.CURRENT_MATRIX, ps.K_full), (
+        "CURRENT_MATRIX must not alias plant_sim.K_full any more -- "
+        "the on-board firmware matrix and the sim's recalibrated matrix have diverged"
+    )
+    # Still the specific old bench-rig matrix, not drifted to something else.
+    assert ci.CURRENT_MATRIX[0][1] == pytest.approx(26.61)
+    assert ci.CURRENT_MATRIX[1][0] == pytest.approx(15.78)
 
 
 # ---------------------------------------------------------------------------
