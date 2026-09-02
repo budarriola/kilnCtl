@@ -509,29 +509,60 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
         bool io_ready = false, thermo_ready = false, safety_ready = false;
         dashboard_http_get_hw_ready(&io_ready, &thermo_ready, &safety_ready);
 
-        char detail[112];
+        char detail[128];
         uint16_t cached_crc = safety_cfg_store_cached_crc();
         size_t count = safety_cfg_store_param_count();
-        size_t unset = 0;
+
+        /* ct_installed (param id 0x0109) gates whether ct_channel_map[0..2]
+         * and i_normal_a[0..2] are applicable -- see
+         * readiness_param_required_for_commissioning()'s comment. Default to
+         * 1 (installed) per config_store.c's own safe-direction rule: an
+         * unset/unfetched ct_installed must never relax the six CT params'
+         * requirement, only an explicit 0 does. */
+        uint8_t ct_installed_value = 1;
         for (size_t i = 0; i < count; i++) {
             safety_cfg_param_t p;
-            if (safety_cfg_store_get_by_index(i, &p) && !p.set) {
+            if (safety_cfg_store_get_by_index(i, &p) && p.param_id == 0x0109u && p.set) {
+                ct_installed_value = p.value.u8_val;
+                break;
+            }
+        }
+
+        size_t applicable = 0;
+        size_t unset = 0;
+        size_t excluded = 0;
+        for (size_t i = 0; i < count; i++) {
+            safety_cfg_param_t p;
+            if (!safety_cfg_store_get_by_index(i, &p)) {
+                continue;
+            }
+            if (!readiness_param_required_for_commissioning(p.param_id, ct_installed_value)) {
+                excluded++;
+                continue;
+            }
+            applicable++;
+            if (!p.set) {
                 unset++;
             }
         }
 
-        readiness_status_t st = readiness_commissioning_status(safety_ready, cached_crc, unset, count);
+        readiness_status_t st = readiness_commissioning_status(safety_ready, cached_crc, unset, applicable);
 
         if (cached_crc == 0) {
             snprintf(detail, sizeof(detail), "%s",
                      safety_ready ? "no commissioning values have ever been read from the safety processor"
                                   : "safety link is down -- cannot tell uncommissioned from unread");
-        } else if (unset == 0) {
+        } else if (unset == 0 && excluded == 0) {
             snprintf(detail, sizeof(detail), "all %u safety parameters have values (config_crc 0x%04X)",
                      (unsigned)count, (unsigned)cached_crc);
+        } else if (unset == 0) {
+            snprintf(detail, sizeof(detail),
+                     "all %u applicable safety parameters have values (%u not applicable to this hardware "
+                     "config, config_crc 0x%04X)",
+                     (unsigned)applicable, (unsigned)excluded, (unsigned)cached_crc);
         } else {
-            snprintf(detail, sizeof(detail), "%u of %u safety parameters still have no value", (unsigned)unset,
-                     (unsigned)count);
+            snprintf(detail, sizeof(detail), "%u of %u applicable safety parameters still have no value",
+                     (unsigned)unset, (unsigned)applicable);
         }
         size_t before_o = o;
         o = append_item(json, item_cap, o, first, "safety_commissioned", "Safety processor commissioned", st,

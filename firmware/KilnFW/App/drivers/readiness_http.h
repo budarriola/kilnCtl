@@ -49,6 +49,69 @@ typedef enum {
  * static inline (rather than a symbol in readiness_http.c) for the same
  * reason dashboard_safety_ready() is: readiness_http.c itself cannot compile
  * on the host, since it pulls in esp_http_server and the whole NVS stack. */
+/* Wire ids for the six current-transformer params (config_params.c:
+ * ct_channel_map[0..2] = 0x0106-0x0108, i_normal_a[0..2] = 0x031A-0x031C).
+ * These are the ONLY safety-config params whose "required for commissioning"
+ * status depends on the board's hardware configuration rather than being
+ * unconditionally required -- see
+ * readiness_param_required_for_commissioning()'s comment below. */
+#define READINESS_PARAM_ID_CT_CHANNEL_MAP_0 0x0106u
+#define READINESS_PARAM_ID_CT_CHANNEL_MAP_1 0x0107u
+#define READINESS_PARAM_ID_CT_CHANNEL_MAP_2 0x0108u
+#define READINESS_PARAM_ID_I_NORMAL_A_0     0x031Au
+#define READINESS_PARAM_ID_I_NORMAL_A_1     0x031Bu
+#define READINESS_PARAM_ID_I_NORMAL_A_2     0x031Cu
+
+/* Whether an unset `param_id` counts as "commissioning incomplete", given
+ * this board's `ct_installed` setting.
+ *
+ * ct_channel_map[0..2] is required for commissioning ONLY when ct_installed
+ * != 0 -- this is not a guess, it is the SAME rule
+ * firmware/SaftyFW/src/config_params.c's config_params_all_required_set()
+ * already applies to decide calibration_missing (and therefore
+ * commissioned:false on the wire): "which relay does each CT watch" is a
+ * question with no answer on a board that has no CTs, so requiring it there
+ * made a CT-less board permanently uncommissionable (that function's own
+ * comment on CONFIG_STORE_SET_CT_INSTALLED joining its required mask).
+ *
+ * i_normal_a[0..2] is not in that Pico-side required mask at all -- S14, the
+ * guard that consumes it (safety_guards.c), treats a channel with no
+ * measured normal as simply inactive, never faulted, so the Pico never
+ * blocks commissioning on it either way. This item nonetheless gates it the
+ * same way as ct_channel_map (required only when ct_installed != 0) rather
+ * than never requiring it: a board that DOES have CTs fitted should still be
+ * nudged to record the per-channel normal so S14 can actually do its job,
+ * and a board with no CTs can never produce a real measurement for it in the
+ * first place.
+ *
+ * Before this existed, a board with ct_installed=0 (no current transformers
+ * fitted -- a real, correctly-reported hardware configuration, not a fault)
+ * permanently failed this readiness item: these six params can never be set
+ * on such a board (there is nothing to map, nothing to measure), so the item
+ * counted 6 "unset" params forever and reported NOT COMMISSIONED even once
+ * every field the safety processor actually requires was filled in and the
+ * Pico itself reported commissioned:true.
+ *
+ * `ct_installed_value` follows config_store.c's own default-safe-direction
+ * rule: when the ct_installed param is itself unset, the record defaults to
+ * 1 (installed) rather than 0, so an unanswered "are CTs fitted?" question
+ * never relaxes these six params' requirement. Callers that have not yet
+ * determined ct_installed's cached value should therefore pass 1, not 0. */
+static inline bool readiness_param_required_for_commissioning(uint16_t param_id, uint8_t ct_installed_value)
+{
+    switch (param_id) {
+    case READINESS_PARAM_ID_CT_CHANNEL_MAP_0:
+    case READINESS_PARAM_ID_CT_CHANNEL_MAP_1:
+    case READINESS_PARAM_ID_CT_CHANNEL_MAP_2:
+    case READINESS_PARAM_ID_I_NORMAL_A_0:
+    case READINESS_PARAM_ID_I_NORMAL_A_1:
+    case READINESS_PARAM_ID_I_NORMAL_A_2:
+        return ct_installed_value != 0u;
+    default:
+        return true;
+    }
+}
+
 static inline readiness_status_t readiness_commissioning_status(bool link_up, uint16_t cached_crc,
                                                                 size_t unset_count, size_t param_count)
 {
