@@ -268,35 +268,50 @@ static const char *TAG = "adaptive_tune";
 // firing's diagnosis confirm or correct course, not try to size the "right"
 // correction from one run's shape.
 //
-// H3(c): this file adds NO cumulative (across-run) bound of its own on top
-// of this per-run cap -- the decision, and why:
-//   1. The correction is self-limiting by construction on real hardware:
-//      raising Ki genuinely shrinks dwell_err_mean_c on the NEXT firing (the
-//      loop this diagnosis measures is closed), so a real zone's Ki climbs a
-//      few runs and then the OFFSET_TOO_SMALL verdict simply stops firing --
-//      see test_ki_diagnosis_converges_under_closed_loop_plant_feedback()
-//      for the host-side model of this.
-//   2. zones_config_set_pid() already enforces an absolute ceiling
-//      (ZONE_PID_GAIN_MAX, zones_http.h) on every write this file makes,
-//      REJECTING (not silently clamping) a Ki above it -- the same setter
-//      every other Ki writer in the firmware goes through, so this is not a
-//      bound adaptive_tune.c would otherwise be missing, only one this file
-//      does not need to duplicate.
-//   3. A cumulative bound INSIDE this file would need its own state (a
-//      per-zone baseline to measure "cumulative" against, and a decision
-//      about when that baseline resets -- a new plant? a manual PID edit?)
-//      that duplicates exactly what zones_config_set_pid()'s absolute
-//      ceiling already gives for free, without (1)'s much stronger
-//      guarantee that the correction should stop long before any ceiling is
-//      reached on a genuinely closed loop.
-// What WAS missing, and is fixed by H3(a)/(b) rather than a new bound here:
-// the host fake's zones_config_set_pid() had no ceiling at all (unlike the
-// real one), and no test modeled the closed loop -- so neither of the two
-// backstops above was ever actually exercised on host. A non-closing loop
-// (a stuck sensor, a defeated heater) is exactly what the ceiling in (2)
-// exists to catch, and now has a host test proving it does
-// (test_ki_diagnosis_runaway_under_constant_error_is_capped_by_gain_ceiling()).
+// H3(c) (SUPERSEDED by K5 -- kept for history): this file used to add NO
+// cumulative (across-run) bound of its own, reasoning that (1) a genuinely
+// closed loop is self-limiting (Ki climbs a few runs, the OFFSET_TOO_SMALL
+// verdict stops firing) and (2) zones_config_set_pid()'s absolute
+// ZONE_PID_GAIN_MAX ceiling (1000, zones_http.h) was backstop enough for the
+// non-closing case. K5 review round: instrumented, a zone whose dwell error
+// is only PARTLY Ki-responsive (a load offset, a soft element, a lagging
+// thermocouple) is exactly the non-closing case (1) does not cover, and (2)
+// permits Ki to climb to 850.6x its starting value before that 1000 ceiling
+// finally bites -- true of the gain ceiling in general, not specific to Ki,
+// so it is not actually an OPERATIONAL bound for this layer. Fixed below
+// with a per-zone CUMULATIVE bound relative to the zone's own autotuned
+// baseline Ki, independent of and much tighter than the absolute ceiling.
+//
+// Per-run cap, unchanged in spirit: flat (not proportional to error size) --
+// a first pass on data this indirect should move a fixed, conservative
+// amount and let the NEXT firing's diagnosis confirm or correct course, not
+// try to size the "right" correction from one run's shape. K4 fix: this
+// constant now ALSO parameterizes adaptive_tune_diagnose_ki()'s raw
+// ki_correction_pct magnitude (previously a separately hardcoded +-20.0f
+// that happened to equal this constant's value, so the clamp below could
+// never actually bind on any real input -- a future edit to just one of the
+// two literals would have silently made the per-run cap either dead or
+// wrong). See test_ki_diagnosis_per_run_move_is_bounded_by_configured_
+// fraction() for the mutation-sensitive proof.
 #define ADAPTIVE_TUNE_KI_MAX_FRACTIONAL_MOVE 0.20f
+
+// K5: cumulative ceiling on a zone's Ki, expressed as a multiple of that
+// zone's AUTOTUNED BASELINE Ki (adaptive_tune_zone_t.ki_baseline -- the
+// value SIMC produced, captured the first time this layer touches the
+// zone). 50x is deliberately far above what a genuinely closed loop needs:
+// test_ki_diagnosis_converges_under_closed_loop_plant_feedback()'s own
+// modeled plant converges around ~27x baseline, so 50x does not clip a
+// legitimately converging zone. It is just as deliberately far below the
+// 1000-gain absolute ceiling, which measured 850.6x on a non-closing probe
+// before this bound existed -- 50x stops that same probe more than an order
+// of magnitude sooner, at a Ki an operator has some chance of recognizing as
+// "something is wrong with this zone" rather than "clearly a numeric
+// runaway, but only once it is already three orders of magnitude off."
+// There is deliberately no comparable LOWER cumulative bound: an
+// under-responsive zone driving Ki toward 0 is not a runaway hazard the way
+// an unbounded climb is, and zones_config_set_pid() already refuses a
+// non-positive Ki outright.
+#define ADAPTIVE_TUNE_KI_CUMULATIVE_MAX_MULT 50.0f
 
 // Relay-style Ku/Tu extraction from a non-relay (ordinary PID) trace has no
 // real hysteresis band to report -- 0 passes pid_autotune_fit_relay()'s
@@ -354,6 +369,17 @@ typedef struct {
     float    ki_correction_pct;
     bool     ki_applied;
     char     ki_refusal_reason[96];
+
+    // K5: the CUMULATIVE bound this Ki-diagnosis layer measures itself
+    // against, relative to this zone's autotuned baseline -- see
+    // ADAPTIVE_TUNE_KI_CUMULATIVE_MAX_MULT's own comment. Captured once,
+    // lazily, the first time try_refine_ki_locked() reaches a live Ki value
+    // for this zone (i.e. the first non-trivial diagnosis attempt), and
+    // never overwritten after that -- it is meant to hold the value SIMC
+    // (or a hand-tune) actually produced, before this layer ever touched
+    // Ki, not a rolling "most recent" value.
+    bool     ki_baseline_valid;
+    float    ki_baseline;
 } adaptive_tune_zone_t;
 
 static adaptive_tune_zone_t s_zones[MAX31856_CHANNEL_COUNT];
@@ -1079,10 +1105,13 @@ bool adaptive_tune_diagnose_ki(const float *actual_c, const float *duty, uint32_
             float denom = pi * amplitude; // relay hysteresis h == 0 for a non-relay trace, see
                                            // ADAPTIVE_TUNE_KI_RELAY_HYSTERESIS_C
             out->ku_estimate = (denom > 1e-6f) ? (4.0f * duty_amp / denom) : 0.0f;
-            out->ki_correction_pct = -20.0f;
+            // K4: derived from the single named per-run-cap constant, not a
+            // separately hardcoded literal -- see that constant's own
+            // comment for why the two must never be allowed to drift apart.
+            out->ki_correction_pct = -(ADAPTIVE_TUNE_KI_MAX_FRACTIONAL_MOVE * 100.0f);
         } else {
             out->verdict = ADAPTIVE_TUNE_KI_OSCILLATING; // hunting -- irregular
-            out->ki_correction_pct = -20.0f;
+            out->ki_correction_pct = -(ADAPTIVE_TUNE_KI_MAX_FRACTIONAL_MOVE * 100.0f);
         }
         return true;
     }
@@ -1130,7 +1159,7 @@ bool adaptive_tune_diagnose_ki(const float *actual_c, const float *duty, uint32_
     if (dwell_err_mean_c > ADAPTIVE_TUNE_KI_OFFSET_THRESHOLD_C &&
         dwell_err_max_c <= dwell_err_mean_c * ADAPTIVE_TUNE_KI_OFFSET_MAX_OVER_MEAN) {
         out->verdict = ADAPTIVE_TUNE_KI_OFFSET_TOO_SMALL;
-        out->ki_correction_pct = 20.0f;
+        out->ki_correction_pct = ADAPTIVE_TUNE_KI_MAX_FRACTIONAL_MOVE * 100.0f; // K4, see comment above
         return true;
     }
 
@@ -1186,6 +1215,15 @@ static void try_refine_ki_locked(uint8_t zi, const profile_exec_firing_stats_t *
         return;
     }
 
+    // K5: latch this zone's autotuned baseline the first time this layer
+    // ever reaches a live Ki for it -- see ki_baseline's own doc comment on
+    // the struct and ADAPTIVE_TUNE_KI_CUMULATIVE_MAX_MULT's comment for why
+    // this must be captured once and never overwritten.
+    if (!z->ki_baseline_valid) {
+        z->ki_baseline = ki;
+        z->ki_baseline_valid = true;
+    }
+
     float cap_pct = ADAPTIVE_TUNE_KI_MAX_FRACTIONAL_MOVE * 100.0f;
     float capped_pct = diag.ki_correction_pct;
     if (capped_pct > cap_pct) capped_pct = cap_pct;
@@ -1196,6 +1234,21 @@ static void try_refine_ki_locked(uint8_t zi, const profile_exec_firing_stats_t *
                    (double)new_ki);
         return;
     }
+
+    // K5: the operational bound this layer is actually accountable for --
+    // see ADAPTIVE_TUNE_KI_CUMULATIVE_MAX_MULT's comment. Checked BEFORE the
+    // setter call so a bound refusal is reported as such, not
+    // indistinguishable from an ordinary setter rejection.
+    float cumulative_ceiling = z->ki_baseline * ADAPTIVE_TUNE_KI_CUMULATIVE_MAX_MULT;
+    if (new_ki > cumulative_ceiling) {
+        set_reason(z->ki_refusal_reason, sizeof(z->ki_refusal_reason),
+                   "corrected Ki %.5f exceeds the cumulative bound (%.1fx autotuned baseline %.5f = %.5f) -- "
+                   "withholding further growth",
+                   (double)new_ki, (double)ADAPTIVE_TUNE_KI_CUMULATIVE_MAX_MULT, (double)z->ki_baseline,
+                   (double)cumulative_ceiling);
+        return;
+    }
+
     if (!zones_config_set_pid(zi, kp, new_ki, kd)) {
         set_reason(z->ki_refusal_reason, sizeof(z->ki_refusal_reason), "zones_config_set_pid() rejected the corrected Ki");
         return;
@@ -1207,31 +1260,49 @@ static void try_refine_ki_locked(uint8_t zi, const profile_exec_firing_stats_t *
              (double)ki, (double)new_ki, (double)capped_pct, (unsigned)diag.verdict);
 }
 
-// H2 fix: every run_end path that skips both try_refine_zone_locked() and
-// try_refine_ki_locked()/try_refine_coupled_locked() entirely (i.e. every
-// `continue` in the loop below) must reset ALL of this run's per-run status
-// fields to a neutral, unambiguous "nothing happened this run" state --
-// not just write a refusal-reason STRING. adaptive_tune_get_status()
-// publishes ki_applied/ki_verdict/ki_correction_pct/coupled_applied/
-// coupled_cells_changed verbatim, and before this fix the !clean path and
-// the excluded-fraction path only ever touched last_refusal_reason/
-// coupled_refusal_reason/ki_refusal_reason, leaving those five fields
-// holding whatever the PREVIOUS run left there. Measured: a clean run that
-// applied (ki_applied=1, verdict=OFFSET_TOO_SMALL, pct=20.00) followed by a
-// FAULTED run left ki_applied=1/verdict=2/pct=20.00 standing right next to
-// "run was faulted or stopped early -- not used as training data" -- exactly
-// the run an operator is most likely to inspect, showing a correction that
-// was never applied this run. A single shared helper, called on every
-// `continue` path (this run_end() has three: !clean, excluded-fraction, and
-// -- already correct -- the F2 model-refined-so-Ki-skipped path below, which
-// this helper subsumes too), is deliberate: the repeated pattern across the
-// first two paths is exactly what let the third one go unnoticed, and a
-// future fourth refusal path added to this loop gets the reset for free
-// instead of needing to remember it.
+// H2/K1/K2 fix: every run_end path that skips both try_refine_zone_locked()
+// and try_refine_ki_locked()/try_refine_coupled_locked() entirely must reset
+// this run's PER-RUN status fields to a neutral, unambiguous "nothing
+// happened this run" state -- not just write a refusal-reason STRING.
+// adaptive_tune_get_status() publishes ki_applied/ki_verdict/
+// ki_correction_pct/coupled_applied/coupled_cells_changed verbatim, and a
+// path that only ever touched the refusal-reason strings leaves those five
+// fields holding whatever a PREVIOUS run left there. Measured pre-H2: a
+// clean run that applied (ki_applied=1, verdict=OFFSET_TOO_SMALL, pct=20.00)
+// followed by a FAULTED run left ki_applied=1/verdict=2/pct=20.00 standing
+// right next to "run was faulted or stopped early -- not used as training
+// data" -- exactly the run an operator is most likely to inspect, showing a
+// correction that was never applied this run.
+//
+// K1: H2's own fix still missed two more paths of THE SAME SHAPE -- the
+// `!z->enabled` and `!zr->active` continues immediately above, in the
+// original loop. `zr->active` in particular is the profile's zone mask
+// (profile_executor_run.c/profile_executor_firing_stats.c), so on a kiln
+// with fewer than MAX31856_CHANNEL_COUNT zones wired, ANY profile that
+// doesn't touch a given zone left that zone publishing its previous firing's
+// status forever. H2's own comment claimed "this run_end() has three
+// continues" -- it had (at least) four, plus the F2 branch below, and a
+// per-path opt-in discipline is exactly what let three of them go unnoticed
+// one at a time. Restructured below so there is exactly ONE call site that
+// can skip a zone, guarded by an if/else-if chain rather than a sequence of
+// early `continue`s -- a future fifth skip condition is just another
+// else-if branch into the SAME reset call, not a new early-exit that has to
+// remember to make it.
+//
+// K2: has_applied is documented (adaptive_tune.h) as a LIFETIME LATCH --
+// "true once at least one refinement has actually been applied" -- and
+// zones_page.html gates its "Last applied change" column on it, alongside
+// prior_k_dc/applied_k_dc/last_delta_pct/last_applied_profile_id, which are
+// themselves never reset per-run either. H2's fix cleared has_applied on
+// every skip path, which is a REGRESSION, not a fix: a faulted run after a
+// real applied refinement made the UI revert to "no refinement applied yet"
+// even though the prior applied change is still exactly what is live on the
+// zone. reset_run_status_locked() below therefore does NOT touch
+// has_applied or any of its lifetime siblings -- only the fields that are
+// genuinely PER-RUN (coupled_*, ki_*) are reset here.
 static void reset_run_status_locked(adaptive_tune_zone_t *z, const char *reason)
 {
     set_refusal(z, "%s", reason);
-    z->has_applied = false;
     set_reason(z->coupled_refusal_reason, sizeof(z->coupled_refusal_reason), "%s", reason);
     z->coupled_attempted = false;
     z->coupled_applied = false;
@@ -1251,24 +1322,34 @@ void adaptive_tune_run_end(const profile_firing_run_record_t *rec, bool clean)
     xSemaphoreTake(s_lock, portMAX_DELAY);
     for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
         adaptive_tune_zone_t *z = &s_zones[zi];
-        if (!z->enabled) {
-            continue;
-        }
         const profile_firing_zone_record_t *zr = &rec->zones[zi];
-        if (!zr->active) {
-            continue;
+
+        // K1: single skip decision for this zone -- see this function's own
+        // block comment above for why an if/else-if chain into ONE
+        // reset_run_status_locked() call replaces the old sequence of
+        // independent early `continue`s.
+        const char *skip_reason = NULL;
+        char excluded_reason_buf[96]; // must outlive the if/else-if chain below -- declared here, not
+                                       // inside the branch that fills it, so skip_reason never dangles
+        if (!z->enabled) {
+            skip_reason = "zone not opted into adaptive tuning -- not used as training data";
+        } else if (!zr->active) {
+            skip_reason = "zone not active in this profile's zone mask -- not used as training data";
+        } else if (!clean) {
+            skip_reason = "run was faulted or stopped early -- not used as training data";
+        } else {
+            uint32_t total = zr->stats.sample_count + zr->stats.excluded_sample_count;
+            if (total > 0 &&
+                (float)zr->stats.excluded_sample_count / (float)total > ADAPTIVE_TUNE_MAX_EXCLUDED_FRACTION) {
+                snprintf(excluded_reason_buf, sizeof(excluded_reason_buf),
+                          "run excluded %u/%u samples (>%.0f%%) -- not used as training data",
+                          (unsigned)zr->stats.excluded_sample_count, (unsigned)total,
+                          (double)(ADAPTIVE_TUNE_MAX_EXCLUDED_FRACTION * 100.0f));
+                skip_reason = excluded_reason_buf;
+            }
         }
-        if (!clean) {
-            reset_run_status_locked(z, "run was faulted or stopped early -- not used as training data");
-            continue;
-        }
-        uint32_t total = zr->stats.sample_count + zr->stats.excluded_sample_count;
-        if (total > 0 && (float)zr->stats.excluded_sample_count / (float)total > ADAPTIVE_TUNE_MAX_EXCLUDED_FRACTION) {
-            char reason[96];
-            snprintf(reason, sizeof(reason), "run excluded %u/%u samples (>%.0f%%) -- not used as training data",
-                      (unsigned)zr->stats.excluded_sample_count, (unsigned)total,
-                      (double)(ADAPTIVE_TUNE_MAX_EXCLUDED_FRACTION * 100.0f));
-            reset_run_status_locked(z, reason);
+        if (skip_reason) {
+            reset_run_status_locked(z, skip_reason);
             continue;
         }
         // D5: try_refine_zone_locked() rewrites Kp/Ki/Kd from a fresh SIMC
@@ -1293,8 +1374,8 @@ void adaptive_tune_run_end(const profile_firing_run_record_t *rec, bool clean)
         if (!model_refined) {
             try_refine_ki_locked(zi, &zr->stats);
         } else {
-            // F2: unlike the two full-skip paths above (reset_run_status_
-            // locked()), has_applied/coupled_* are NOT reset here -- the
+            // F2: unlike the full-skip paths above (reset_run_status_
+            // locked()), coupled_* is NOT reset here -- the
             // model refine and coupled solve DID run this cycle and their
             // fields legitimately reflect this run's own outcome. Only the
             // Ki-diagnosis fields are stale here (that diagnosis alone was
