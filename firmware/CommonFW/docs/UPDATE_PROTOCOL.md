@@ -802,13 +802,21 @@ and "Pico update" sections below for what each actually covers.
       server and the OTA HTTP routes are all confirmed up — never at the end
       of `app_main()`. Implemented as a background task in `App/main.c`
       (`ota_rollback_confirm_task()`); a live safety-link exchange was in this
-      bar originally but dropped 2026-08-22 (see `boot_guard.h`). **Only ever
-      exercised on a factory boot on this bench** — the JTAG flash path
-      (`tools/PcTools`) always writes `factory`, not an OTA slot (see
-      `KilnFW/TODO.md` 9.1/9.2), so the PENDING_VERIFY/rollback-cancel path
-      itself is host-test-verified only, not hardware-verified; a factory
-      boot now skips the call entirely (2026-08-24, it has nothing to cancel
-      there) rather than logging it as a false ERROR.
+      bar originally but dropped 2026-08-22 (see `boot_guard.h`). A factory
+      boot skips the call entirely (2026-08-24, it has nothing to cancel
+      there) rather than logging it as a false ERROR. **Hardware-verified
+      2026-09-03**: a real `POST /api/ota/esp` push (not JTAG) wrote
+      `KilnCtrl.bin` into `ota_0`; after reboot the log showed
+      `running partition: 'ota_0' (subtype 0x10)` followed by
+      `OTA rollback confirmed: NVS readable, web server and OTA routes up --
+      this image is no longer PENDING_VERIFY`. The board's I/O expander
+      failed its first post-reset init on that boot (JTAG `debug_reset`
+      does not power-cycle external I2C peripherals) and the safety
+      processor correspondingly latched a stale S6a trip; a second
+      `debug_reset` cleared both and the board came back fully healthy
+      (expander up, safety armed, thermocouples reading, Wi-Fi
+      reconnected) — a JTAG-reset artifact of this verification method,
+      not a defect in the rollback-cancel path itself.
 - [ ] Streamed `esp_ota_ops` POST handler, no whole-image buffering — **not
       built this pass**, deliberately out of scope (see `KilnFW/TODO.md` 9.5)
 

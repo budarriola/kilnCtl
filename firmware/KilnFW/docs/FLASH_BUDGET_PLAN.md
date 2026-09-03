@@ -116,12 +116,15 @@ gated by `boot_confirm_decide()` (`boot_guard.c:270`) on
 (`sdkconfig:698`); anti-rollback deliberately off (`sdkconfig:700`), matching
 `UPDATE_PROTOCOL.md` §3.
 
-**But that path has never executed on hardware.** `UPDATE_PROTOCOL.md` §7 records
-it as host-test-verified only, because the JTAG flash path always writes
-`factory` — so every bench boot takes the `BOOT_CONFIRM_SKIP_FACTORY` branch and
-the `PENDING_VERIFY` → confirm sequence is untested code. A two-slot scheme is
-only self-healing if that sequence works; dropping `factory` would remove the
-safety net while standing on the unproven mechanism.
+**Hardware-verified 2026-09-03.** A real `ota_update_esp()` push (`POST
+/api/ota/esp`, not JTAG) wrote `KilnCtrl.bin` into `ota_0`; after reboot the
+board ran `BOOT_CONFIRM_CONFIRM_OTA_SLOT`, logged
+`running partition: 'ota_0' (subtype 0x10)`, and
+`esp_ota_mark_app_valid_cancel_rollback()` returned `ESP_OK` ("OTA rollback
+confirmed" in the log) once NVS/web/OTA-routes were up. See
+`UPDATE_PROTOCOL.md` §7 for the full account, including a JTAG-reset artifact
+(I/O expander failed its first post-reset init, tripping a stale S6a) that
+cleared on a second reset and is unrelated to the rollback-cancel path itself.
 
 With `factory` present and `otadata` erased or corrupt, the bootloader boots
 `factory` — recovery with no serial cable. Without it, that degrades to "boot
@@ -136,9 +139,8 @@ Naming trap worth knowing, since three things here sound related and are not:
 `boot_guard.c`, `main.c` and `test_boot_guard.c` touch
 `ESP_PARTITION_SUBTYPE_APP_FACTORY`.
 
-**Action item, not a flash item:** perform one real OTA into `ota_0` on hardware
-and confirm the app marks itself valid. Until that runs, OTA-updating this board
-carries more risk than the partition table implies.
+**Action item — done, 2026-09-03:** one real OTA into `ota_0` on hardware, app
+confirmed valid. See above.
 
 ### 2.2 "Shrink factory to a minimal recovery image?" — DECIDED: no, keep as-is
 

@@ -3,8 +3,12 @@
 Status: **Phases 1, 2, 3 and 5 landed 2026-09-01/02** (§12). Phase 4's
 detection *logic* (`panel_detect.c`, host-tested, wired into `panel_spi.c`)
 is also landed — it is correctly inert today because both descriptors'
-`id_matches` stay `NULL` until the bench RDDID bytes in §4 are recorded, so
-it always falls back to the Kconfig default and changes nothing observable.
+`id_matches` stay `NULL`, and stay that way permanently for the ILI9488 row:
+the bench RDDID bytes were captured 2026-09-03 (§4) and came back
+`0x00 0x00 0x00`, i.e. "MISO not driven," not a usable ID. Auto-detection
+therefore always falls back to the Kconfig default and changes nothing
+observable, on this board, by construction rather than by an unfinished
+checklist item.
 Phase 6 (SPI DMA/async): 9.2 (`max_transfer_sz` raised to 32768,
 `KILNCTL_SPI_MAX_TRANSFER_SZ`), 9.5 (MAX31856 on `spi_device_polling_transmit`
 via `esp_spi_owner.c`'s `use_polling` flag) and 9.9 (bounded owner-transfer
@@ -449,23 +453,44 @@ Phase 1+ should start before the ones marked **blocking** are closed.
 exactly, without these — but RDDID matching for Phase 4's auto-detection, and
 any DMA/flush work in Phase 6, still need the real numbers below.)*
 
-- [ ] **RDDID (`0x04`) bytes from the ILI9488** on this wiring, recorded here.
-      **Attempted 2026-09-03, still not captured:** during the same
-      six-firing A/B experiment as the 9.1b measurement above, read-only
-      access was the only option, and this repo's `DISPLAY_CMD_READ_ID`
-      bridge command (`Display: Read ID`, `display.py`) is genuinely
-      read-only at the protocol level (one SPI RDDID read plus the D/C
-      expander toggle — no panel write, no reset). It was still not run: the
-      session's own permission classifier declined the action, and separately
-      the procedure this checklist documents below (§ "How to actually read
-      these bytes") calls for a *rebuild with a different sdkconfig fragment
-      and a reflash* to force `CONFIG_KILNCTL_DISPLAY_PANEL_AUTO`, which is a
-      write/reset this task's constraints rule out outright while a firing is
-      running. Net: the RDDID bytes still need a bench pass with nothing
-      live on the kiln, either by resolving the classifier block for the
-      bridge command alone (no rebuild needed for the ILI9488 row, since the
-      panel is already attached and initialized) or by the documented
-      rebuild-and-reflash route once the experiment is done.
+- [x] **RDDID (`0x04`) bytes from the ILI9488** on this wiring, captured
+      2026-09-03 (kiln idle, nothing firing) via the documented AUTO-fragment
+      rebuild/reflash below: **`0x00 0x00 0x00`** — i.e. `ILI9488_read_id()`'s
+      own MISO-not-driven check fired (`ESP_ERR_NOT_FOUND`, logged as "RDDID
+      returned 00 00 00 -- MISO is probably not driven"), the same
+      `panel auto-detect: no RDDID match` fallback path a genuinely absent
+      panel would hit. Confirmed reproducible, not a one-off glitch. **This is
+      not a usable ID** — `panel_detect_id_equals()` already refuses to match
+      on all-`0x00`/all-`0xFF` for exactly this reason (a bench-recorded
+      all-zero triple would mean "the read failed," never "this is the real
+      ID"), so `.id_matches` for the ILI9488 row **stays `NULL`**: writing a
+      matcher against `0x00,0x00,0x00` would be dead code (the shared guard
+      already rejects it before any per-descriptor comparison runs), not a
+      working detector. Practical effect: RDDID-based auto-detection cannot
+      distinguish "ILI9488 attached" from "no panel attached" on this
+      specific board's wiring, whatever this board's read-path issue is
+      (MISO not actually reaching the ESP on the read device handle, timing,
+      or something read-side in the vendor init sequence) — §295's "MISO ...
+      RDDID readback is wireable" was the pinout, not proof the readback
+      path works end-to-end; it does not, empirically, on this bench unit.
+      Sec.12 Phase 4's auto-detection therefore still always falls back to
+      the Kconfig default on this board, exactly as it did before this
+      capture, and the touch-controller-address signal (NS2009 vs FT6336) is
+      the only corroborating signal `panel_detect_choose()` has left that
+      still works if `id_matches` is ever revisited.
+      **Also confirmed the hard way this pass:** a prior `ota_update_esp()`
+      push (Task 1 / `UPDATE_PROTOCOL.md` §7) had left `otadata` pointed at
+      `ota_0`. `flash_firmware()` always writes the app image to `factory`
+      (0x810000) and resets, but does not touch `otadata` — so two full
+      flash/reset cycles of an AUTO+temporary-debug-log build silently kept
+      booting the OLD `ota_0` image with none of those changes, and the
+      expected boot-log line never appeared. `ota_rollback_esp()` (the
+      "board is healthy but revert on purpose" tool, not a rollback from a
+      failed image) was what actually pointed the boot partition back at
+      `factory`, after which the very next boot showed the RDDID read
+      immediately. Worth remembering next time this AUTO-fragment procedure
+      is used on a board that has ever been OTA'd: check `running partition`
+      in the boot log BEFORE trusting a "the WARN just isn't logging" theory.
 - [ ] **RDDID (`0x04`) bytes from the ST7796** on this wiring, recorded here.
       If ambiguous, also try `0xD3` (RDID4). All-`0x00`/all-`0xFF` means MISO
       undriven, i.e. "no panel", not "panel 1" (`ILI9488.c:1641`). Not
@@ -1253,16 +1278,24 @@ Each phase ends somewhere the firmware still boots and drives the existing panel
 - [x] Panel selectable by Kconfig only (`KILNCTL_DISPLAY_PANEL`, ILI9488
       default), no detection yet.
 
-### Phase 4 — auto-detection — LOGIC LANDED, TABLE BLOCKED
+### Phase 4 — auto-detection — LOGIC LANDED, ILI9488 ROW RESOLVED (permanently NULL), ST7796 ROW STILL OPEN
 - [x] `panel_detect.c/.h`: pure `panel_detect_choose()` — SPI-ID match count,
       touch-kind tiebreak/corroboration, disagreement flagging, Kconfig
       fallback. Host-tested (`test_panel_detect.c`), wired into
       `panel_spi.c:902-907`.
-- [ ] Both descriptors' `id_matches` stay `NULL` (`panel_spi.c:1848`,
-      `st7796_panel.c:137`) — **blocked on the recorded RDDID bytes in §4**.
-      With both NULL, `panel_detect_choose()` always falls back to the
-      Kconfig default; this is inert on the currently-attached ILI9488 by
-      construction, not by omission.
+- [x] ILI9488 row (`panel_spi.c` `ili9488_panel_desc.id_matches`): RDDID bytes
+      captured 2026-09-03 (§4) — `0x00 0x00 0x00`, a MISO-not-driven read, not
+      a real ID. `id_matches` stays `NULL` **on purpose, not pending** — a
+      matcher built on an all-zero triple would be unreachable dead code
+      (`panel_detect_id_equals()` already refuses to match all-`0x00`/
+      all-`0xFF`). RDDID cannot distinguish "ILI9488 attached" from "no panel"
+      on this board's wiring.
+- [ ] ST7796 row (`st7796_panel.c:137`) — still `NULL`, still genuinely
+      blocked: that panel has never been wired to J2 on this bench (see §4's
+      "not attempted this pass" note), so there are no bytes to record, real
+      or otherwise. With both rows NULL, `panel_detect_choose()` always falls
+      back to the Kconfig default; this is inert on the currently-attached
+      ILI9488 by construction, not by omission.
 - [x] **Tooling to take the bench measurement, and the one-step fill-in once
       it exists — LANDED 2026-09-02.** §4 above now has the corrected
       procedure (the old "read the WARN on a default boot" claim was wrong;
