@@ -400,6 +400,30 @@ void run_test_ui_page_home_graph(void)
                    "counter saturates at UINT32_MAX rather than wrapping");
     }
 
+    TEST_SECTION("ui_page_home_graph: lag_notice_active (commit 1e03448 rich-field wiring)");
+    {
+        // Rich data present: reported immediately, no extra debounce beyond
+        // what firmware's own EXEC_SUSTAINED_LAG_S already applied -- a
+        // debounced_ticks of 0 (first ever tick) still shows if the zone is
+        // already sustained.
+        TEST_CHECK(ui_page_home_lag_notice_active(true, true, 0),
+                   "rich data, zone sustained, tick 0: shows immediately (no client debounce)");
+        TEST_CHECK(!ui_page_home_lag_notice_active(true, false, 0),
+                   "rich data, no zone sustained: hidden");
+        TEST_CHECK(!ui_page_home_lag_notice_active(true, false, UI_PAGE_HOME_LAG_NOTICE_DEBOUNCE_TICKS),
+                   "rich data path ignores debounced_ticks entirely -- a stale nonzero "
+                   "counter from a prior fallback-mode tick must not force it on");
+
+        // Old-firmware fallback: behaves exactly like
+        // ui_page_home_lag_notice_should_show() did before this pass.
+        TEST_CHECK(!ui_page_home_lag_notice_active(false, false, UI_PAGE_HOME_LAG_NOTICE_DEBOUNCE_TICKS - 1u),
+                   "fallback path, below threshold: hidden");
+        TEST_CHECK(ui_page_home_lag_notice_active(false, false, UI_PAGE_HOME_LAG_NOTICE_DEBOUNCE_TICKS),
+                   "fallback path, at threshold: shows");
+        TEST_CHECK(!ui_page_home_lag_notice_active(false, true, 0),
+                   "fallback path ignores any_zone_sustained entirely (older board never sets it)");
+    }
+
     TEST_SECTION("ui_page_home_graph: lagging_zone_indices");
     {
         uint8_t idx[8];

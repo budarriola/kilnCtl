@@ -214,6 +214,15 @@ bool ui_page_home_lag_notice_should_show(uint32_t consecutive_ticks)
     return consecutive_ticks >= UI_PAGE_HOME_LAG_NOTICE_DEBOUNCE_TICKS;
 }
 
+bool ui_page_home_lag_notice_active(bool have_rich_zone_data, bool any_zone_sustained,
+                                     uint32_t debounced_ticks)
+{
+    if (have_rich_zone_data) {
+        return any_zone_sustained;
+    }
+    return ui_page_home_lag_notice_should_show(debounced_ticks);
+}
+
 size_t ui_page_home_lagging_zone_indices(uint8_t mask, uint8_t max_zones, uint8_t *out_indices,
                                           size_t out_cap)
 {

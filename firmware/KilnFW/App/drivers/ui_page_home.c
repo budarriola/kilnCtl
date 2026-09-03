@@ -19,6 +19,7 @@
 #include "profile_executor.h"
 #include "profile_feasibility.h"
 #include "profiles_http.h"
+#include "ramp_assist_cfg.h"
 #include "ui_page_home_graph.h"
 #include "run_state.h"
 #include "ui_theme.h"
@@ -1201,16 +1202,33 @@ static void refresh_cb(lv_timer_t *timer)
 
     /* PID_EXPANSION_PLAN.md 7.4's LCD lag notice -- INFORMATIONAL, not a
      * fault (see s_lag_notice's own build()-site comment for the styling
-     * rationale). Debounced via ui_page_home_graph.c's pure counter/
-     * threshold pair so a single noisy tick right at the ramp-lock band
-     * edge cannot flicker this on; clearing is immediate (no debounce) the
-     * moment ramp_lock_held goes false, same "hidden costs nothing, so
-     * default to hidden fast" bias as s_trip_strip. profile_exec_status_t's
-     * ramp_lock_held/ramp_lock_lagging_mask are read whether or not a run
-     * is active -- both are false/0 while IDLE, so this is a no-op then. */
+     * rationale). Debounce policy: ui_page_home_lag_notice_active()
+     * (ui_page_home_graph.h) decides -- commit 1e03448 added
+     * profile_exec_zone_status_t::ramp_lag_sustained, already debounced in
+     * firmware (EXEC_SUSTAINED_LAG_S == 30s continuous), so THIS file's own
+     * ~5s counter is redundant for that field and is not applied to it
+     * (stacking both would be ~35s before a real lag reaches the LCD). This
+     * firmware build and profile_executor.c ship in the same binary -- there
+     * is no "older firmware" skew possible on-device the way main_page.html
+     * faces from a stale browser tab -- so have_rich_zone_data is always
+     * true here; the false branch exists for host-test parity with the web
+     * decision and costs nothing. The tick counter is still advanced off
+     * ramp_lock_held every tick regardless, matching the function's own
+     * doc comment. profile_exec_status_t's fields are read whether or not a
+     * run is active -- all false/0 while IDLE, so this is a no-op then. */
     if (s_lag_notice != NULL) {
         s_lag_notice_ticks = ui_page_home_lag_notice_tick(st.ramp_lock_held, s_lag_notice_ticks);
-        if (!ui_page_home_lag_notice_should_show(s_lag_notice_ticks)) {
+
+        bool any_sustained = false;
+        uint8_t sustained_mask = 0;
+        for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+            if (st.zones[zi].active && st.zones[zi].ramp_lag_sustained) {
+                any_sustained = true;
+                sustained_mask |= (uint8_t)(1u << zi);
+            }
+        }
+
+        if (!ui_page_home_lag_notice_active(true, any_sustained, s_lag_notice_ticks)) {
             lv_obj_add_flag(s_lag_notice, LV_OBJ_FLAG_HIDDEN);
         } else {
             /* Zone names, not just indices -- ui_page_home_lagging_zone_indices()
@@ -1220,7 +1238,7 @@ static void refresh_cb(lv_timer_t *timer)
              * split show_start_confirm()'s zones_buf loop above already
              * uses for a different list of zone indices. */
             uint8_t idx[MAX31856_CHANNEL_COUNT];
-            size_t n = ui_page_home_lagging_zone_indices(st.ramp_lock_lagging_mask, MAX31856_CHANNEL_COUNT, idx,
+            size_t n = ui_page_home_lagging_zone_indices(sustained_mask, MAX31856_CHANNEL_COUNT, idx,
                                                           MAX31856_CHANNEL_COUNT);
             char zones_buf[96];
             size_t zlen = 0;
@@ -1241,13 +1259,33 @@ static void refresh_cb(lv_timer_t *timer)
                     zlen += piece_len;
                 }
             }
+
             char notice_buf[160];
             /* Plain sentence, lower-case lead word -- deliberately not
              * "SAFETY TRIP"-style all-caps: this is normal, expected
              * behaviour (profile_executor.h's own header comment calls the
-             * ramp lock "healthy"), not an alert. */
-            snprintf(notice_buf, sizeof(notice_buf), "Waiting on %s to catch up -- setpoint paused",
-                     zones_buf[0] ? zones_buf : "a zone");
+             * ramp lock "healthy"), not an alert.
+             *
+             * Exactly one sustained zone: the rate/duration numbers fit and
+             * are the whole point of the richer fields (owner ask: "zone 2
+             * lagging: 60 C/hr commanded, 22 C/hr achieved, 145 s"). More
+             * than one: rates for N zones would not fit this label at any
+             * reasonable font size, so this stays to names only, same as
+             * the pre-1e03448 message -- LV_LABEL_LONG_DOT (build()-site,
+             * below) still truncates with an ellipsis rather than wrap or
+             * scroll if the name list itself runs long, per the LCD's
+             * no-scroll rule. */
+            if (n == 1) {
+                const profile_exec_zone_status_t *z = &st.zones[idx[0]];
+                snprintf(notice_buf, sizeof(notice_buf),
+                         "%s lagging %lus: %ldC/hr cmd vs %ldC/hr actual",
+                         zones_buf[0] ? zones_buf : "Zone", (unsigned long)lroundf(z->ramp_lag_held_s),
+                         lroundf(z->ramp_lag_commanded_rate_c_per_hr),
+                         lroundf(z->ramp_lag_achieved_rate_c_per_hr));
+            } else {
+                snprintf(notice_buf, sizeof(notice_buf), "Waiting on %s to catch up -- setpoint paused",
+                         zones_buf[0] ? zones_buf : "a zone");
+            }
             lv_label_set_text(s_lag_notice, notice_buf);
             lv_obj_remove_flag(s_lag_notice, LV_OBJ_FLAG_HIDDEN);
         }

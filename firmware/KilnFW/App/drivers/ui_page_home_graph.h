@@ -292,6 +292,34 @@ uint32_t ui_page_home_lag_notice_tick(bool ramp_lock_held, uint32_t prev_consecu
  * lock-clear case) means hidden. */
 bool ui_page_home_lag_notice_should_show(uint32_t consecutive_ticks);
 
+/* Commit 1e03448 added profile_exec_zone_status_t::ramp_lag_sustained -- a
+ * per-zone signal that is ALREADY debounced in firmware (EXEC_SUSTAINED_LAG_S
+ * == 30s continuous, profile_executor_internal.h), unlike ramp_lock_held
+ * above (instantaneous, which is why ui_page_home_lag_notice_tick()'s own
+ * ~5s debounce exists for it). Stacking this file's debounce on top of an
+ * already-debounced field would make a real, sustained lag take ~35s to
+ * reach the LCD for no safety benefit -- so this decides which signal to
+ * trust and applies debounce ONLY to the one that needs it:
+ *
+ *   have_rich_zone_data true  -> report any_zone_sustained directly, no
+ *                                 further debounce (the firmware-side one
+ *                                 already did the job this file's debounce
+ *                                 exists for).
+ *   have_rich_zone_data false -> fall back to the existing
+ *                                 ui_page_home_lag_notice_should_show()
+ *                                 debounce over ramp_lock_held, for a board
+ *                                 running firmware that predates commit
+ *                                 1e03448 and has never heard of
+ *                                 ramp_lag_sustained.
+ *
+ * debounced_ticks is still expected to be maintained every tick (the caller
+ * keeps calling ui_page_home_lag_notice_tick() regardless of which path is
+ * active) so a board that flips from rich to fallback mid-session (should
+ * never happen outside a live reflash, but costs nothing to handle) does not
+ * show a stale hidden state that never got the chance to accumulate. */
+bool ui_page_home_lag_notice_active(bool have_rich_zone_data, bool any_zone_sustained,
+                                     uint32_t debounced_ticks);
+
 /* Extracts the set bits of a ramp_lock_lagging_mask (profile_exec_status_t's
  * uint8_t bitmask, one bit per zone index) into out_indices, lowest zone
  * index first, capped at max_zones bits and out_cap slots (whichever is

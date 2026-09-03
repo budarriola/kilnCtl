@@ -2006,6 +2006,20 @@ function renderExec(st) {
 // the instant a tick reports the lock released, the banner drops immediately,
 // since disappearing one tick early is not the failure mode being guarded
 // against (only a false, unwarranted APPEARANCE is).
+//
+// This debounce is used ONLY for the fallback path (ramp_lock_held/
+// ramp_lock_lagging_mask), which is instantaneous on the wire -- a board
+// running firmware that predates commit 1e03448 has no other signal. The
+// per-zone ramp_lag_sustained field (added in that commit) is itself
+// debounced in firmware, 30s continuous (EXEC_SUSTAINED_LAG_S,
+// profile_executor_internal.h) before it goes true, and it clears the
+// instant the lag lifts. Stacking this UI's own 6s on top of that would
+// make a real stretch take 36s to surface for no safety benefit -- the
+// firmware debounce already exists specifically to filter the same kind of
+// blip this UI debounce was written to filter. So the rich path is shown
+// the moment any zone reports ramp_lag_sustained===true, undebounced here,
+// while the fallback path keeps its own 6s client-side debounce for an
+// older board's instantaneous field.
 var LAG_DEBOUNCE_TICKS = 3;
 var lagConsecutiveTicks = 0;
 var lagBannerShown = false;
@@ -2015,28 +2029,48 @@ var lagBannerShown = false;
 // debounce/render logic below so a Node test harness can exercise it
 // directly against representative payloads.
 //
-// PID_EXPANSION_PLAN.md sec 7.4 notes a concurrent pass may add a richer
-// server-computed "sustained lag" field to this same endpoint (the owner
-// asked for the event log to carry duration/actual/target numbers too,
-// which implies the C side ends up computing something equivalent). This
-// function PREFERS that field -- read defensively (Array.isArray + a
-// per-entry field check) so an absent, null, or differently-shaped field
-// falls straight through to the ramp_lock_held/ramp_lock_lagging_mask
-// fields this page already depends on today, with zero required schema
-// beyond what renderExec() above already needs. If the richer field lands
-// under a different name than guessed here (ramp_lock_lag_detail), this
-// falls back correctly rather than silently doing nothing.
-function deriveLagZones(st) {
-  if (!st) return [];
-  if (Array.isArray(st.ramp_lock_lag_detail)) {
-    return st.ramp_lock_lag_detail.filter(function (e) {
-      return e && typeof e.zone === 'number' &&
-             typeof e.actual_c === 'number' && typeof e.target_c === 'number';
-    }).map(function (e) {
-      return { zone: e.zone, actualC: e.actual_c, targetC: e.target_c };
-    });
+// Commit 1e03448 landed the richer per-zone fields this was written
+// speculatively against (ramp_lock_lag_detail was a guess; the real shape
+// is per-zone fields on st.zones[i]: ramp_lag_sustained/ramp_lag_held_s/
+// ramp_lag_commanded_rate_c_per_hr/ramp_lag_achieved_rate_c_per_hr -- see
+// profile_executor.h and dashboard_json.c's append_zone_status_json()).
+// Detected by field PRESENCE on the first active zone entry (typeof
+// ramp_lag_sustained === 'boolean') rather than by trusting every entry
+// blindly, so a same-tick payload from an older board (the field simply
+// absent) falls straight through to the ramp_lock_held/
+// ramp_lock_lagging_mask fields this page already depended on before this
+// pass, with zero required schema beyond what renderExec() above already
+// needs. Lag is reported per zone REGARDLESS of ramp_assist_enabled --
+// only the run-level ramp_stretch_* numbers are gated on that flag (see
+// renderLagBanner below).
+function zonesArrayHasRichLagFields(st) {
+  var zones = (st && st.zones) || [];
+  for (var i = 0; i < zones.length; i++) {
+    return typeof zones[i].ramp_lag_sustained === 'boolean';
   }
-  if (!st.ramp_lock_held) return [];
+  return false;
+}
+
+function deriveLagZones(st) {
+  if (!st) return { zones: [], rich: false };
+  if (zonesArrayHasRichLagFields(st)) {
+    var rich = (st.zones || []).filter(function (z) {
+      return z && z.ramp_lag_sustained === true;
+    }).map(function (z) {
+      return {
+        zone: z.zone,
+        actualC: z.actual_valid ? z.actual_c : null,
+        // Shared setpoint (st.target_c) -- /api/profile_exec has no per-zone
+        // target, same field renderExec()'s "Shared target" row already uses.
+        targetC: (typeof st.target_c === 'number') ? st.target_c : null,
+        heldS: z.ramp_lag_held_s,
+        commandedRate: z.ramp_lag_commanded_rate_c_per_hr,
+        achievedRate: z.ramp_lag_achieved_rate_c_per_hr,
+      };
+    });
+    return { zones: rich, rich: true };
+  }
+  if (!st.ramp_lock_held) return { zones: [], rich: false };
   var zonesByIndex = {};
   (st.zones || []).forEach(function (z) { zonesByIndex[z.zone] = z; });
   var out = [];
@@ -2046,51 +2080,89 @@ function deriveLagZones(st) {
     out.push({
       zone: zb,
       actualC: (z && z.actual_valid) ? z.actual_c : null,
-      // Shared setpoint (st.target_c) -- /api/profile_exec has no per-zone
-      // target, same field renderExec()'s "Shared target" row already uses.
       targetC: (typeof st.target_c === 'number') ? st.target_c : null,
     });
   }
-  return out;
+  return { zones: out, rich: false };
 }
 
 // Stateful: advances the module-level debounce counters from one poll()
-// tick's (firing?, laggingZones) and returns whether the banner should be
-// showing right now. Split from deriveLagZones so the harness can drive
-// debounce timing (consecutive ticks, a single-tick blip) independently of
-// payload shape.
-function updateLagBannerVisibility(firing, zones) {
+// tick's (firing?, laggingZones, rich?) and returns whether the banner
+// should be showing right now. Split from deriveLagZones so the harness can
+// drive debounce timing (consecutive ticks, a single-tick blip) independently
+// of payload shape. The rich path is already debounced upstream in firmware
+// (see the LAG_DEBOUNCE_TICKS comment above), so it shows immediately and
+// does not touch/consume the fallback path's tick counter -- but it DOES
+// reset that counter, so a board that flips between shapes mid-session
+// (firmware upgrade) never shows a fallback banner off a stale count left
+// over from before the rich fields appeared.
+function updateLagBannerVisibility(firing, zones, rich) {
   if (!firing || zones.length === 0) {
     lagConsecutiveTicks = 0;
     lagBannerShown = false;
     return false;
+  }
+  if (rich) {
+    lagConsecutiveTicks = 0;
+    lagBannerShown = true;
+    return true;
   }
   lagConsecutiveTicks++;
   if (lagConsecutiveTicks >= LAG_DEBOUNCE_TICKS) lagBannerShown = true;
   return lagBannerShown;
 }
 
-function renderLagBanner(st) {
+// Formats one zone's rich-path detail line, e.g. "Zone 2 -- 145s: 60C/hr
+// commanded vs 22C/hr achieved". Falls back to just actual-vs-target when a
+// rate/duration is missing (defensive; firmware always sends all three
+// together, sustained-or-not).
+function formatRichLagDetail(z) {
+  var name = zoneName(z.zone);
+  if (typeof z.heldS !== 'number' || typeof z.commandedRate !== 'number' ||
+      typeof z.achievedRate !== 'number') {
+    return name;
+  }
+  return name + ' &mdash; ' + fmtDuration(Math.round(z.heldS)) + ': ' +
+    Math.round(z.commandedRate) + '°C/hr commanded vs ' +
+    Math.round(z.achievedRate) + '°C/hr achieved';
+}
+
+function renderLagBanner(st, data) {
   var el = document.getElementById('lagBanner');
   if (!el) return;
-  var zones = deriveLagZones(st);
+  var derived = deriveLagZones(st);
+  var zones = derived.zones, rich = derived.rich;
   // Ramp-lock only stretches an actively RUNNING schedule -- a paused run
   // isn't advancing anyway, so "behind schedule" doesn't apply to it, and
   // this must never show while idle/faulted/done (isFiringActive() above
   // covers running+paused, deliberately narrower here to just 'running').
   var firing = !!st && st.state === 'running';
-  var show = updateLagBannerVisibility(firing, zones);
+  var show = updateLagBannerVisibility(firing, zones, rich);
   if (!show) { el.innerHTML = ''; return; }
   var items = zones.map(function (z) {
+    if (rich) return formatRichLagDetail(z);
     var name = zoneName(z.zone);
     if (z.actualC == null || z.targetC == null) return name;
     return name + ' &mdash; ' + window.kcUnit.fmt(z.actualC) + ' vs target ' + window.kcUnit.fmt(z.targetC);
   });
+  var stretchNote = '';
+  // ramp_stretch_segment_s/ramp_stretch_total_s are run-level fields on `st`
+  // (dashboard_http.c), gated on ramp_assist_enabled -- an /api/status field
+  // (data, not st: see dashboard_http.c's status handler). They read 0
+  // whenever assist is off, and 0 there means "not measured", not "nothing
+  // stretched" -- showing "0s stretched" in that case would claim a
+  // measurement that was never taken. So this is shown only when assist is
+  // known to be on; otherwise the note says nothing about a duration at all.
+  if (data && data.ramp_assist_enabled && st &&
+      typeof st.ramp_stretch_segment_s === 'number' && typeof st.ramp_stretch_total_s === 'number') {
+    stretchNote = ' This segment has been stretched ' + fmtDuration(Math.round(st.ramp_stretch_segment_s)) +
+      ' so far (' + fmtDuration(Math.round(st.ramp_stretch_total_s)) + ' total this run).';
+  }
   el.innerHTML = '<div class="banner lag"><h3>Kiln is falling behind schedule</h3>' +
     '<div class="row"><span>' + items.join('; ') + '</span></div>' +
     '<div class="note">This is normal ramp-lock behaviour, not a fault &mdash; ' +
     'the schedule is being stretched to give ' + (items.length > 1 ? 'these zones' : 'this zone') +
-    ' time to catch up before the next target.</div></div>';
+    ' time to catch up before the next target.' + stretchNote + '</div></div>';
 }
 
 // If a start attempt fails, decide whether it failed because the BOARD
@@ -3404,7 +3476,7 @@ function poll() {
       renderExec(st);
       renderLastRun(st);
       renderProgress(st);
-      renderLagBanner(st);
+      renderLagBanner(st, data);
       var idleNow = !st || st.state === 'idle';
       // New-run detection for the client-side firing series, same shape as
       // pollAutotune()'s own newRun check -- either a fresh idle/done/
