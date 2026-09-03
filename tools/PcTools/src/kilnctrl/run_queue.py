@@ -119,6 +119,16 @@ class RunQueueFaultError(RunQueueError):
     whether entry N+1's preset/profile pairing is safe."""
 
 
+class RunQueueStopFailedError(RunQueueError):
+    """An already-started firing hit an error and the stop-on-exception
+    path's own ``stop_profile()`` call ALSO failed (raised, or the state
+    never cleared) -- the kiln may still be firing, unsupervised. Kept
+    distinct from :class:`RunQueueError` so :func:`main` can print an
+    unmissable banner and exit with a distinct code: an operator who reads
+    only the final line must learn the kiln may still be lit, not just see
+    whatever the ORIGINAL (unrelated) exception said."""
+
+
 # --------------------------------------------------------------------------
 # Pure safety checks -- no HTTP, fixture-testable.
 # --------------------------------------------------------------------------
@@ -299,8 +309,50 @@ def start_profile(host: str, profile_id: int, timeout: float = DEFAULT_HTTP_TIME
         raise RunQueueError(f"POST /api/profile_exec/start response was not JSON: {body!r}") from exc
 
 
-def stop_profile(host: str, timeout: float = DEFAULT_HTTP_TIMEOUT_S) -> None:
-    _post_form(host, "/api/profile_exec/stop", {}, timeout)
+#: how long stop_profile() will keep re-polling GET /api/profile_exec for
+#: the state to clear _ACTIVE_STATES after a stop POST, before giving up and
+#: raising. A 200 response body is NOT proof the kiln actually stopped --
+#: the firmware can (and does, on a malformed/rejected stop) answer
+#: {"ok": false} with HTTP 200, which _post_form() treats identically to a
+#: real ack since it only checks the status code and discards the body. The
+#: entire safety value of the stop-on-exception path in run_entry() rests on
+#: this call being real, so it must verify against the executor's own state,
+#: not trust the POST response.
+DEFAULT_STOP_CONFIRM_TIMEOUT_S = 30.0
+DEFAULT_STOP_CONFIRM_POLL_INTERVAL_S = 1.0
+
+
+def stop_profile(host: str, timeout: float = DEFAULT_HTTP_TIMEOUT_S,
+                  confirm_timeout_s: float = DEFAULT_STOP_CONFIRM_TIMEOUT_S,
+                  poll_interval_s: float = DEFAULT_STOP_CONFIRM_POLL_INTERVAL_S,
+                  sleep: Callable[[float], None] = time.sleep,
+                  now: Callable[[], float] = time.time) -> None:
+    """POST /api/profile_exec/stop, then re-poll GET /api/profile_exec until
+    the executor's own reported state is no longer 'running'/'paused'
+    (_ACTIVE_STATES). Raises :class:`RunQueueError` if the stop POST itself
+    fails, OR if the state has not cleared within ``confirm_timeout_s`` --
+    in the latter case the kiln may still be firing and the caller must
+    treat that as a failed stop, not a successful one."""
+    body = _post_form(host, "/api/profile_exec/stop", {}, timeout)
+    try:
+        parsed = json.loads(body)
+    except Exception:  # noqa: BLE001
+        parsed = None
+    if isinstance(parsed, dict) and parsed.get("ok") is False:
+        raise RunQueueError(f"POST /api/profile_exec/stop was refused: {parsed!r}")
+
+    start = now()
+    while True:
+        exec_body = _get_json(host, "/api/profile_exec", timeout)
+        state = str(exec_body.get("state", "")).lower()
+        if state not in _ACTIVE_STATES:
+            return
+        if (now() - start) > confirm_timeout_s:
+            raise RunQueueError(
+                f"POST /api/profile_exec/stop was acked but profile_exec state stayed "
+                f"{state!r} for {confirm_timeout_s:.0f}s afterwards -- the kiln may still "
+                "be firing")
+        sleep(poll_interval_s)
 
 
 # --------------------------------------------------------------------------
@@ -523,10 +575,16 @@ def run_entry(entry: QueueEntry, cfg: RunQueueConfig, control=None,
     # marginal drift here should send this entry back to waiting for rest,
     # not abort the whole remaining queue (a single entry's drift says
     # nothing about whether the other queued entries are safe) -- so retry
-    # a bounded number of times before giving up. The overall
-    # rested_timeout_s is still honoured on each retry's wait, so this
-    # cannot spin forever.
+    # a bounded number of times before giving up. NOTE: each retry passes a
+    # SHARED deadline (this loop's own start time + rested_timeout_s), not a
+    # fresh full rested_timeout_s per call -- passing a fresh one each time
+    # would let this loop spend up to
+    # _PRESTART_RECONFIRM_ATTEMPTS * rested_timeout_s before giving up,
+    # which is what the comment here used to (incorrectly) claim could not
+    # happen. Sharing one deadline across every retry is what actually
+    # bounds the total to rested_timeout_s.
     _PRESTART_RECONFIRM_ATTEMPTS = 3
+    _prestart_reconfirm_start = cfg.now()
     status = get_status(cfg.host, cfg.http_timeout_s)
     for attempt in range(1, _PRESTART_RECONFIRM_ATTEMPTS + 1):
         if is_rested(status, cfg.rested_tol_c):
@@ -539,7 +597,9 @@ def run_entry(entry: QueueEntry, cfg: RunQueueConfig, control=None,
                 f"zones drifted out of rested tolerance between the rested wait and the "
                 f"start, and did not re-settle after {_PRESTART_RECONFIRM_ATTEMPTS} "
                 f"retries -- refusing to start")
-        wait_until_rested(cfg)
+        remaining_s = max(
+            0.0, cfg.rested_timeout_s - (cfg.now() - _prestart_reconfirm_start))
+        wait_until_rested(cfg, deadline_s=remaining_s)
         status = get_status(cfg.host, cfg.http_timeout_s)
 
     # Open (and thereby validate) the capture file BEFORE anything energizes
@@ -556,13 +616,30 @@ def run_entry(entry: QueueEntry, cfg: RunQueueConfig, control=None,
             f"cannot open capture file {entry.log_path!r} -- refusing to start the kiln "
             f"with nowhere to capture to: {exc}") from exc
 
+    # started is set to True BEFORE the POST, not after it returns. The
+    # start POST can be ACCEPTED by the board -- heaters energized -- while
+    # the client sees a URLError/HTTPError/timeout raised out of
+    # _post_form(). If `started` only flipped true on a *successful return*,
+    # that path left `started` False, so the `except BaseException` handler
+    # below never issued a stop_profile(), and the `finally` block then
+    # os.remove()'d the capture file -- a live, unsupervised, uncaptured
+    # firing. Setting it True first is pessimistic on purpose: a spurious
+    # stop_profile() against a kiln that never actually started is harmless
+    # (the board just answers "not running"); failing to stop one that did
+    # start is not.
     started = False
     try:
         log.info("[%s] starting profile %d, capturing to %s", entry.label, entry.profile_id, entry.log_path)
+        started = True
         result = start_profile(cfg.host, entry.profile_id, cfg.http_timeout_s)
         if not result.get("ok", False):
+            # Unlike a URLError/HTTPError/timeout (ambiguous -- the board may
+            # have accepted the POST anyway), an explicit {"ok": false} body
+            # is the board itself confirming the profile did NOT start. That
+            # is unambiguous, so it is safe to un-pessimize here: no stop is
+            # needed and the empty capture file should still be cleaned up.
+            started = False
             raise RunQueueError(f"POST /api/profile_exec/start refused: {result!r}")
-        started = True
 
         log.info("[%s] confirming the executor left idle (timeout=%.0fs)",
                   entry.label, cfg.start_confirm_timeout_s)
@@ -572,7 +649,7 @@ def run_entry(entry: QueueEntry, cfg: RunQueueConfig, control=None,
         log.info("[%s] waiting for the run to reach a terminal state (timeout=%.0fs)",
                   entry.label, run_timeout_s)
         _poll_capture_until(cfg, fh, _run_is_terminal, deadline_s=run_timeout_s)
-    except BaseException:
+    except BaseException as original_exc:
         if started:
             # The start POST succeeded but something after it raised before
             # (or during) capture -- a crash here must not leave the kiln
@@ -581,11 +658,23 @@ def run_entry(entry: QueueEntry, cfg: RunQueueConfig, control=None,
             log.error("[%s] error after a successful start -- stopping the profile so a "
                        "crash cannot orphan a live firing", entry.label)
             try:
-                stop_profile(cfg.host, cfg.http_timeout_s)
-            except Exception:
+                stop_profile(cfg.host, cfg.http_timeout_s, sleep=cfg.sleep, now=cfg.now)
+            except Exception as stop_exc:
                 log.exception("[%s] failed to stop the profile while handling an earlier "
                                "error -- the kiln may still be running, check it by hand",
                                entry.label)
+                # A failed stop after an already-started firing must never be
+                # discoverable only by reading a full traceback: main()
+                # reports whatever exception reaches it, and that is the
+                # ORIGINAL error (by design -- never swallowed), so an
+                # operator who reads only the final "queue stopped: ..."
+                # line would see nothing at all about the failed stop. Wrap
+                # in a distinct type so main() can print an unmissable
+                # banner and exit with a distinct code.
+                raise RunQueueStopFailedError(
+                    f"[{entry.label}] the kiln may STILL BE FIRING: stop_profile failed "
+                    f"({stop_exc}) while handling an earlier error ({original_exc})"
+                ) from original_exc
         raise
     finally:
         fh.close()
@@ -648,19 +737,47 @@ def _parse_run_arg(raw: str) -> QueueEntry:
     i = 0
     while i < len(raw_parts):
         piece = raw_parts[i]
-        if (_DRIVE_LETTER_RE.match(piece) and i + 1 < len(raw_parts)
-                and raw_parts[i + 1][:1] in ("/", "\\")):
-            merged.append(piece + ":" + raw_parts[i + 1])
-            i += 2
-        else:
-            merged.append(piece)
-            i += 1
+        if i > 0 and _DRIVE_LETTER_RE.match(piece) and i + 1 < len(raw_parts):
+            nxt = raw_parts[i + 1]
+            if nxt[:1] in ("/", "\\"):
+                # C:/... or C:\... -- the absolute form. Unambiguous: re-merge.
+                merged.append(piece + ":" + nxt)
+                i += 2
+                continue
+            else:
+                # C:foo -- the drive-RELATIVE form (relative to whatever the
+                # process's current directory on drive C: happens to be).
+                # This is the SAME silent-misparse hazard the absolute-path
+                # fix above exists to kill: raw.split(":") still splits it
+                # into a bare drive letter plus the rest, and there is no
+                # slash to detect it by. Rather than guess at a meaning
+                # (silently re-merge, or silently treat "C" as the drive and
+                # the remainder as a path relative to an unknown cwd), refuse
+                # outright and name the ambiguity -- a loud refusal here,
+                # never a quiet mangled log_path.
+                raise ValueError(
+                    f"--run LOG_PATH looks like a Windows drive-relative path "
+                    f"({piece!r}:{nxt!r} in {raw!r}) -- this form depends on the current "
+                    f"directory on that drive and is refused rather than guessed at; use "
+                    f"an absolute path (C:/... or C:\\\\...) instead")
+        merged.append(piece)
+        i += 1
 
     if len(merged) < 3:
         raise ValueError(
             f"--run must be PRESET:PROFILE_ID:LOG_PATH[:LABEL], got {raw!r}")
     preset, profile_id, log_path = merged[0], merged[1], merged[2]
     label = ":".join(merged[3:]) if len(merged) > 3 else preset
+    if _DRIVE_LETTER_RE.match(log_path):
+        # A LOG_PATH that is a single letter, after all merging above, is
+        # exactly the historical silent-misparse signature (a real path got
+        # split apart and only its drive letter landed in LOG_PATH, the rest
+        # shifted into LABEL) -- refuse loudly rather than ever write a
+        # capture file named "C".
+        raise ValueError(
+            f"--run LOG_PATH parsed as the single character {log_path!r} -- this is the "
+            f"drive-letter silent-misparse signature, not a real path; got {raw!r} "
+            f"(parsed fields: {merged!r})")
     try:
         profile_id_int = int(profile_id)
     except ValueError as exc:
@@ -761,6 +878,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     try:
         run_queue(entries, cfg, control=control)
+    except RunQueueStopFailedError as exc:
+        log.error("queue stopped: %s", exc)
+        log.error("!" * 70)
+        log.error("!! KILN MAY STILL BE FIRING -- STOP-ON-ERROR FAILED. CHECK BY HAND. !!")
+        log.error("!" * 70)
+        return 2
     except RunQueueError as exc:
         log.error("queue stopped: %s", exc)
         return 1
