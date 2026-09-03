@@ -41,8 +41,9 @@ def _zones(max_temps):
     return {"zones": [{"index": i, "max_temp_c": m} for i, m in enumerate(max_temps)]}
 
 
-def _plan(points_c):
-    return {"points": [{"t": i * 10, "c": c} for i, c in enumerate(points_c)]}
+def _plan(points_c, total_planned_s=3000.0):
+    return {"points": [{"t": i * 10, "c": c} for i, c in enumerate(points_c)],
+            "total_planned_s": total_planned_s}
 
 
 def _exec(fault_guards, state="running"):
@@ -306,6 +307,87 @@ class ApplyPresetHttpOnlyTest(unittest.TestCase):
             rq.run_entry(entry, cfg, control=None, apply_preset_fn=None)  # must not raise
 
         self.assertEqual(transport.started_profile_id, 7)
+
+
+class RunCompletionSeamTest(unittest.TestCase):
+    """Regression coverage for the live noise-floor-campaign defect: run1
+    "finished" in 5.5s against a ~50-minute profile because the poll loop
+    treated a single sample -- including a still-idle one -- as proof the
+    run was over. These tests drive a realistic multi-poll state sequence
+    (never a fixture that hands the loop 'done' on its very first read) and
+    prove the loop neither exits early nor hangs, plus the timeout and
+    global-fault paths that fixtures alone never exercised."""
+
+    def _run(self, exec_sequence, cfg_overrides=None, plan_total_planned_s=3000.0):
+        tmpdir = tempfile.mkdtemp()
+        log_path = os.path.join(tmpdir, "run.jsonl")
+        rested = _status([_channel(25.1, 25.0)])
+        transport = _ScriptedTransport(
+            status_sequence=[rested],
+            exec_sequence=exec_sequence,
+            plan_body=_plan([20, 45, 60], total_planned_s=plan_total_planned_s),
+            zones_body=_zones([80.0, 80.0, 80.0]),
+        )
+        entry = rq.QueueEntry(preset_name={"name": "fake"}, profile_id=7, log_path=log_path, label="t")
+        cfg_kwargs = dict(host="203.0.113.10", poll_interval_s=0.0,
+                           sleep=transport.sleep, now=transport.now, cooldown_s=0.0)
+        cfg_kwargs.update(cfg_overrides or {})
+        cfg = rq.RunQueueConfig(**cfg_kwargs)
+        calls = _patched_run_entry(entry, cfg, transport, entry.preset_name)
+        with open(log_path) as fh:
+            lines = [json.loads(line) for line in fh if line.strip()]
+        return transport, calls, lines
+
+    def test_idle_then_running_then_done_completes_without_exiting_early(self):
+        # Two idle samples (the executor has not flipped state yet) before
+        # it goes active, then several running polls, then done. Must NOT
+        # be treated as finished at the first (idle) sample.
+        transport, _calls, lines = self._run(
+            exec_sequence=[_exec([0], state="idle"), _exec([0], state="idle"),
+                            _exec([0], state="running"), _exec([0], state="running"),
+                            _exec([0], state="done")])
+        self.assertEqual(transport.started_profile_id, 7)
+        # The captured log starts once the run is confirmed active -- idle
+        # samples are consumed by the start-confirmation step, not written
+        # to the run capture file.
+        self.assertTrue(lines)
+        for line in lines:
+            self.assertNotEqual(line["exec"]["state"], "idle")
+        self.assertEqual(lines[-1]["exec"]["state"], "done")
+
+    def test_realistic_multi_poll_running_sequence_captures_every_poll(self):
+        # A run that stays 'running' across several polls before 'done' must
+        # produce more than one capture line -- proof the loop is actually
+        # polling repeatedly, not exiting on the first sample.
+        transport, _calls, lines = self._run(
+            exec_sequence=[_exec([0], state="running")] * 4 + [_exec([0], state="done")])
+        self.assertGreaterEqual(len(lines), 4)
+        self.assertEqual(lines[-1]["exec"]["state"], "done")
+
+    def test_stuck_idle_after_start_raises_instead_of_exiting_early(self):
+        # The executor never leaves idle at all (e.g. the start silently
+        # no-op'd on the board) -- must raise, not silently proceed as if
+        # a 0-length run had completed.
+        with self.assertRaises(rq.RunQueueError):
+            self._run(exec_sequence=[_exec([0], state="idle")],
+                       cfg_overrides={"start_confirm_timeout_s": 0.0, "poll_interval_s": 0.01})
+
+    def test_run_stays_running_past_timeout_raises(self):
+        # Never reaches a terminal state -- must raise once the computed
+        # run timeout elapses, rather than hanging or silently returning.
+        with self.assertRaises(rq.RunQueueError):
+            self._run(
+                exec_sequence=[_exec([0], state="running")],
+                cfg_overrides={"run_timeout_multiplier": 0.0, "run_timeout_margin_s": 0.0,
+                                "poll_interval_s": 0.01},
+                plan_total_planned_s=0.0)
+
+    def test_global_faulted_state_stops_queue_even_with_no_zone_fault_guard(self):
+        # profile_executor.h PROFILE_EXEC_FAULTED covers a GLOBAL guard trip
+        # too, which need not set any single zone's fault_guard --
+        # check_no_fault alone would miss this.
+        with self.assertRaises(rq.RunQueueFaultError):
+            self._run(exec_sequence=[_exec([0], state="running"), _exec([0], state="faulted")])
 
 
 class RunEntryEndToEndTest(unittest.TestCase):

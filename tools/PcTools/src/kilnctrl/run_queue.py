@@ -69,9 +69,42 @@ DEFAULT_RESTED_TOL_C = 1.0
 DEFAULT_RESTED_TIMEOUT_S = 3600.0
 DEFAULT_COOLDOWN_S = 600.0
 
-#: profile_exec state strings that mean "the run is over" (dashboard_http.c /
-#: profile_executor.h's PROFILE_EXEC_* names, lower-cased in the JSON body).
-_TERMINAL_STATES = frozenset({"done", "faulted", "idle"})
+#: how long to wait, after a successful ``POST /api/profile_exec/start``, for
+#: the executor to actually leave PROFILE_EXEC_IDLE (profile_executor.h:89 --
+#: 0, the zero value) before giving up. This is the seam the live noise-floor
+#: campaign fell into: run1 "finished" in 5.5s because the poll loop treated
+#: an ``idle`` sample -- state 0, the same value the executor reports before
+#: a run is ever started -- as proof the run was over, rather than as "not
+#: started yet" or "stale read". profile_executor_run.c:805 sets
+#: PROFILE_EXEC_RUNNING synchronously inside the call the HTTP handler makes
+#: before it responds, so 30s of slack over a 5s poll interval is generous,
+#: not tight.
+DEFAULT_START_CONFIRM_TIMEOUT_S = 30.0
+
+#: run-timeout policy: total_planned_s (GET /api/profile_plan's own field --
+#: dashboard_http.c:1529, profile_feasibility_plan_curve()'s output) times
+#: this multiplier, plus this flat margin. A profile that plans 50 minutes
+#: is allowed up to 50*1.25 + 10 = 72.5 minutes of wall time before the
+#: queue gives up and raises rather than silently believing a run that is
+#: still ``running`` has finished.
+DEFAULT_RUN_TIMEOUT_MULTIPLIER = 1.25
+DEFAULT_RUN_TIMEOUT_MARGIN_S = 600.0
+
+#: profile_exec state strings that mean "the executor has left idle and is
+#: actively firing" (profile_executor.h's PROFILE_EXEC_RUNNING/PAUSED).
+_ACTIVE_STATES = frozenset({"running", "paused"})
+
+#: profile_exec state strings that mean "the run is over" (dashboard_http.c's
+#: exec_state_name() / profile_executor.h's PROFILE_EXEC_* names, lower-cased
+#: in the JSON body). Deliberately does NOT include "idle" -- PROFILE_EXEC_IDLE
+#: is state 0, both "nothing has ever run" and "nothing is running right now",
+#: and treating it as terminal is exactly the bug that let run_queue race
+#: past a firing that had not even started yet (see
+#: DEFAULT_START_CONFIRM_TIMEOUT_S above). A run that is genuinely idle after
+#: having been confirmed RUNNING should never be observed again by this
+#: module -- profile_executor_status.c never transitions RUNNING/PAUSED back
+#: to IDLE, only to DONE or FAULTED.
+_TERMINAL_STATES = frozenset({"done", "faulted"})
 
 
 class RunQueueError(RuntimeError):
@@ -125,6 +158,35 @@ def check_no_fault(exec_body: dict) -> None:
             raise RunQueueFaultError(
                 f"zone {z.get('zone')}: fault_guard={fg} -- stopping the queue, "
                 "not advancing to the next entry")
+
+
+def check_not_faulted(exec_body: dict) -> None:
+    """Raise :class:`RunQueueFaultError` if ``exec_body``'s own top-level
+    ``state`` is ``faulted``. This is distinct from :func:`check_no_fault`:
+    profile_executor.h:93 documents PROFILE_EXEC_FAULTED as covering "a
+    GLOBAL thermal guard tripped (or every active zone individually
+    faulted)" -- a global trip need not show up as any single zone's
+    ``fault_guard`` entry, so relying on :func:`check_no_fault` alone would
+    miss it. Both checks run on every poll."""
+    if str(exec_body.get("state", "")).lower() == "faulted":
+        raise RunQueueFaultError(
+            f"profile_exec state=faulted (fault_guard={exec_body.get('fault_guard')}): "
+            f"{exec_body.get('fault_reason') or '(no reason reported)'} -- stopping the "
+            "queue, not advancing to the next entry")
+
+
+def profile_total_planned_s(plan_body: dict) -> float:
+    """``total_planned_s`` from a ``GET /api/profile_plan`` body --
+    dashboard_http.c's own duration estimate for the profile
+    (profile_feasibility_plan_curve()'s output), used to size the run-poll
+    timeout. Raises :class:`RunQueueError` if the field is missing rather
+    than silently falling back to an unbounded wait."""
+    total = plan_body.get("total_planned_s")
+    if total is None:
+        raise RunQueueError(
+            "profile_plan body has no total_planned_s -- cannot size a run timeout from "
+            f"it: {plan_body!r}")
+    return float(total)
 
 
 def profile_peak_target_c(plan_body: dict) -> float:
@@ -250,6 +312,9 @@ class RunQueueConfig:
     rested_timeout_s: float = DEFAULT_RESTED_TIMEOUT_S
     cooldown_s: float = DEFAULT_COOLDOWN_S
     http_timeout_s: float = DEFAULT_HTTP_TIMEOUT_S
+    start_confirm_timeout_s: float = DEFAULT_START_CONFIRM_TIMEOUT_S
+    run_timeout_multiplier: float = DEFAULT_RUN_TIMEOUT_MULTIPLIER
+    run_timeout_margin_s: float = DEFAULT_RUN_TIMEOUT_MARGIN_S
     #: injectable for tests / non-realtime replay; defaults to wall time.
     sleep: Callable[[float], None] = time.sleep
     now: Callable[[], float] = time.time
@@ -281,25 +346,69 @@ def _capture_line(t: float, exec_body: dict, status_body: dict) -> str:
     return json.dumps({"t": t, "exec": exec_body, "status": status_body})
 
 
-def _poll_capture_until(cfg: RunQueueConfig, fh, stop_predicate: Callable[[dict, dict], bool]) -> None:
+def _poll_capture_until(cfg: RunQueueConfig, fh, stop_predicate: Callable[[dict, dict], bool],
+                         deadline_s: Optional[float] = None) -> None:
     """Poll exec+status once per ``poll_interval_s``, append one capture
-    line each time, and check :func:`check_no_fault` on every sample (a
-    fault mid-run must stop the queue even though the run has not reached a
-    terminal state yet). Returns when ``stop_predicate(exec, status)`` is
-    True."""
+    line each time, and check :func:`check_no_fault` / :func:`check_not_faulted`
+    on every sample (a fault mid-run must stop the queue even though the run
+    has not reached a terminal state yet). Returns when
+    ``stop_predicate(exec, status)`` is True.
+
+    ``deadline_s``, when given, is wall time (via ``cfg.now()``) measured
+    from this call's own start: if the predicate has still not fired once
+    that much time has elapsed, raises :class:`RunQueueError` -- "still
+    running after the timeout" is an error, never a silent fall-through to
+    the next queue entry (that silent fall-through, with no deadline at all,
+    is exactly how run1 in the live noise-floor campaign started run2 on top
+    of an active firing)."""
+    start = cfg.now()
     while True:
         exec_body = get_exec(cfg.host, cfg.http_timeout_s)
         status_body = get_status(cfg.host, cfg.http_timeout_s)
         check_no_fault(exec_body)
+        check_not_faulted(exec_body)
         fh.write(_capture_line(cfg.now(), exec_body, status_body) + "\n")
         fh.flush()
         if stop_predicate(exec_body, status_body):
             return
+        if deadline_s is not None and (cfg.now() - start) > deadline_s:
+            raise RunQueueError(
+                f"profile_exec state={exec_body.get('state')!r} is still not terminal after "
+                f"{deadline_s:.0f}s -- treating a run that outlives its own timeout as an "
+                "error, not a completed run")
         cfg.sleep(cfg.poll_interval_s)
 
 
 def _run_is_terminal(exec_body: dict, _status_body: dict) -> bool:
     return str(exec_body.get("state", "")).lower() in _TERMINAL_STATES
+
+
+def _wait_until_run_active_or_terminal(cfg: RunQueueConfig, deadline_s: float) -> dict:
+    """Poll ``GET /api/profile_exec`` (no capture, no sleep-then-check-first
+    race) until the executor reports a state OTHER than idle -- i.e. it has
+    actually started (RUNNING/PAUSED) or, for a legitimately near-instant
+    firing, has already reached a terminal state. Raises
+    :class:`RunQueueError` if it is still ``idle`` after ``deadline_s``.
+
+    This is the fix for the root cause: a single poll immediately after
+    ``POST /api/profile_exec/start`` returns is not proof of anything by
+    itself, because PROFILE_EXEC_IDLE (state 0) is both "never started" and
+    "not currently running" -- the same value. Confirming the state has
+    actually moved to active (or terminal) before handing control to the
+    run-capture loop means a stale/idle read can never again be mistaken
+    for "the run is already over"."""
+    start = cfg.now()
+    while True:
+        exec_body = get_exec(cfg.host, cfg.http_timeout_s)
+        state = str(exec_body.get("state", "")).lower()
+        if state in _ACTIVE_STATES or state in _TERMINAL_STATES:
+            return exec_body
+        if (cfg.now() - start) > deadline_s:
+            raise RunQueueError(
+                f"profile_exec state stayed {state!r} for {deadline_s:.0f}s after a "
+                "successful POST /api/profile_exec/start response -- the executor never "
+                "left idle")
+        cfg.sleep(cfg.poll_interval_s)
 
 
 #: Zone fields that have NO HTTP write path -- only the UART CONTROL task's
@@ -408,8 +517,15 @@ def run_entry(entry: QueueEntry, cfg: RunQueueConfig, control=None,
     if not result.get("ok", False):
         raise RunQueueError(f"POST /api/profile_exec/start refused: {result!r}")
 
+    log.info("[%s] confirming the executor left idle (timeout=%.0fs)",
+              entry.label, cfg.start_confirm_timeout_s)
+    _wait_until_run_active_or_terminal(cfg, cfg.start_confirm_timeout_s)
+
+    run_timeout_s = profile_total_planned_s(plan) * cfg.run_timeout_multiplier + cfg.run_timeout_margin_s
+    log.info("[%s] waiting for the run to reach a terminal state (timeout=%.0fs)",
+              entry.label, run_timeout_s)
     with open(entry.log_path, "w", encoding="utf-8") as fh:
-        _poll_capture_until(cfg, fh, _run_is_terminal)
+        _poll_capture_until(cfg, fh, _run_is_terminal, deadline_s=run_timeout_s)
 
     cooldown_path = entry.log_path + ".cooldown.jsonl"
     log.info("[%s] capturing cooldown to %s", entry.label, cooldown_path)
