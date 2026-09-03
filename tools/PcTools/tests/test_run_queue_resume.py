@@ -109,6 +109,14 @@ def _fake_apply_preset(control, preset, zones_host=None):
     return object()
 
 
+def _fake_preflight_fn(preset, host, zones_host=None, safety_host=None, preset_name="(unnamed)",
+                        **kwargs):
+    """No-op stand-in for capability_preflight.preflight_or_raise: these
+    resume tests are about the state-file/discard machinery, not capability
+    probing, and the real function would hit real HTTP (unmocked here)."""
+    return None
+
+
 class _Harness:
     """Runs run_queue() end to end with every HTTP call monkeypatched, and
     a fake apply_preset_fn. Advances transport._exec_sequences to the next
@@ -163,7 +171,8 @@ class _Harness:
              unittest.mock.patch.object(rq, "run_entry", counting_run_entry):
             rq.run_queue(self.entries, self.cfg, control=None,
                           apply_preset_fn=_fake_apply_preset,
-                          state_path=state_path, resume=resume)
+                          state_path=state_path, resume=resume,
+                          preflight_fn=_fake_preflight_fn)
 
 
 def _entry(h: _Harness, name, profile_id=7, label=None):
@@ -252,7 +261,7 @@ class StateFileWrittenTest(unittest.TestCase):
              unittest.mock.patch.object(rq, "stop_profile", h.transport.stop_profile), \
              unittest.mock.patch.object(rq, "run_entry", wrapper):
             rq.run_queue(h.entries, h.cfg, control=None, apply_preset_fn=_fake_apply_preset,
-                         state_path=state_path, resume=False)
+                         state_path=state_path, resume=False, preflight_fn=_fake_preflight_fn)
 
         before = calls["state_before_entry2"]
         self.assertEqual(before["entries"][0]["status"], "completed")

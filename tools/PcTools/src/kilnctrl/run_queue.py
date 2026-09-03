@@ -51,6 +51,7 @@ mocked HTTP required for the safety-logic tests themselves.
 from __future__ import annotations
 
 import dataclasses
+import itertools
 import json
 import logging
 import os
@@ -61,7 +62,7 @@ import urllib.parse
 import urllib.request
 from typing import Callable, Optional, Sequence
 
-from kilnctrl import ramp_assist_http_client, zones_http_client
+from kilnctrl import capability_preflight, ramp_assist_http_client, zones_http_client
 
 log = logging.getLogger(__name__)
 
@@ -562,6 +563,82 @@ def _apply_preset_http_only(control, preset: dict, zones_host: "Optional[str]" =
     return result
 
 
+def _resolve_preset(entry: QueueEntry, apply_preset_fn) -> dict:
+    """Resolve the actual preset dict for ``entry``, following the same
+    rule :func:`run_entry` already used inline before this was factored
+    out: when the caller (a real CLI invocation) has NOT supplied an
+    explicit ``apply_preset_fn``, ``entry.preset_name`` is a preset NAME
+    resolved via ``config_presets.load_preset_data``; every test in this
+    suite (and any other caller that injects ``apply_preset_fn`` directly)
+    instead hands ``entry.preset_name`` the raw preset dict already, with
+    no ``config_presets``/UART machinery in scope at all. Shared by
+    :func:`run_entry` and :func:`_preflight_campaign` so preflight always
+    sees the exact same preset data the run itself is about to apply."""
+    if apply_preset_fn is None:
+        from kilnctrl import config_presets
+        return config_presets.load_preset_data(entry.preset_name)
+    return entry.preset_name
+
+
+def _preflight_campaign(entries: Sequence[QueueEntry], cfg: RunQueueConfig,
+                         apply_preset_fn=None,
+                         preflight_fn: "Optional[Callable]" = None) -> None:
+    """Run a capability preflight for EVERY preset ``entries`` will use, all
+    before :func:`run_queue` lets entry 0 begin -- see the incident this
+    exists for in ``capability_preflight.py``'s own docstring: a preset
+    field with no matching board endpoint used to surface as a Python
+    traceback partway into an unattended run instead of a refusal up front.
+
+    Runs ONCE per distinct preset, not once per entry -- the whole point is
+    catching a gap before ANY firing starts, so a multi-entry queue's
+    entry-3-only preset must be caught before entry 0's kiln is energised,
+    not four hours later. Runs unconditionally, resume or not: see
+    :func:`run_queue`'s docstring for why a resumed campaign is never
+    exempted -- the board may have been reflashed, or DOWNgraded, between
+    the original launch and the resume, and a capability that was present
+    at launch and is missing now must abort exactly like a first-time gap
+    would (this function has no memory of "checked before"; it only knows
+    what the board answers right now).
+
+    A board that cannot be reached at all is never reported as fine:
+    ``PreflightReport.ok`` is False whenever ``BoardInfo.reachable`` is
+    False, so ``preflight_fn`` (``capability_preflight.preflight_or_raise``
+    by default) raises :class:`capability_preflight.PreflightFailed` for an
+    unreachable board exactly as it does for a fatal capability gap --
+    there being no capability data to be "benign" about is not the same as
+    the run being safe to start."""
+    if preflight_fn is None:
+        preflight_fn = capability_preflight.preflight_or_raise
+
+    checked = set()
+    for entry in entries:
+        preset = _resolve_preset(entry, apply_preset_fn)
+        if apply_preset_fn is None:
+            preset_name = entry.preset_name
+        else:
+            preset_name = (isinstance(preset, dict) and preset.get("name")) \
+                or entry.label or entry.preset_name or "(unnamed)"
+        # De-dup key: the resolved preset NAME, not identity -- two entries
+        # that name the same preset (--repeat, or several queue entries
+        # reusing one preset by name) are probed only once, whether the
+        # caller resolves that name to a shared dict object (real
+        # config_presets.load_preset_data, which does not cache) or a test
+        # fixture hands two distinct-but-same-content dict objects for what
+        # is conceptually "the same preset". Over-checking (a false miss on
+        # this dedup) is harmless -- just an extra cheap probe; under-
+        # checking (falsely treating two different presets as one) is not
+        # possible here since the key IS the name a human/queue used to
+        # refer to the preset.
+        key = str(preset_name)
+        if key in checked:
+            continue
+        checked.add(key)
+        log.info("[preflight] checking preset %s capabilities against %s",
+                  preset_name, cfg.host)
+        preflight_fn(preset, cfg.host, zones_host=cfg.host, safety_host=None,
+                     preset_name=str(preset_name))
+
+
 def run_entry(entry: QueueEntry, cfg: RunQueueConfig, control=None,
               apply_preset_fn=None) -> None:
     """Run one queue entry start to finish: apply preset, wait rested,
@@ -735,7 +812,23 @@ def run_entry(entry: QueueEntry, cfg: RunQueueConfig, control=None,
     cooldown_path = entry.log_path + ".cooldown.jsonl"
     log.info("[%s] capturing cooldown to %s", entry.label, cooldown_path)
     cooldown_start = cfg.now()
-    with open(cooldown_path, "w", encoding="utf-8") as fh:
+    # Wrapped: an OSError here (bad path, disk full, permissions) must
+    # surface as a RunQueueError like every other failure in this function
+    # -- an uncaught OSError at this point would skip main()'s
+    # `except RunQueueError` handler entirely (a bare traceback instead of
+    # a clean exit code), AND -- because it happens after run_entry's own
+    # work is otherwise done -- would leave this entry's state-file status
+    # stuck at "in_progress" with a fully valid run capture already on
+    # disk. See run_queue()'s RESUME COMPLETION RECOVERY note: that stuck
+    # "in_progress" status is exactly the shape resume must not mistake for
+    # a genuinely partial (and therefore discardable) capture.
+    try:
+        fh = open(cooldown_path, "w", encoding="utf-8")
+    except OSError as exc:
+        raise RunQueueError(
+            f"[{entry.label}] cannot open cooldown capture file {cooldown_path!r}: {exc}"
+        ) from exc
+    with fh:
         _poll_capture_until(
             cfg, fh,
             lambda exec_body, status_body: (
@@ -783,18 +876,45 @@ def run_entry(entry: QueueEntry, cfg: RunQueueConfig, control=None,
 
 CAMPAIGN_STATE_VERSION = 1
 
+#: per-process counter mixed into _atomic_write_json's temp filename so two
+#: campaigns writing the same --state-file path never share one temp file.
+_atomic_write_counter = itertools.count()
+
 
 def _atomic_write_json(path: str, obj: dict) -> None:
     """Write ``obj`` as indented JSON to ``path`` via a sibling temp file
     plus ``os.replace`` -- atomic on both POSIX and Windows -- so a crash
-    mid-write can never leave a truncated, unparseable state file behind."""
-    tmp_path = path + ".tmp"
-    with open(tmp_path, "w", encoding="utf-8") as fh:
-        json.dump(obj, fh, indent=2, sort_keys=False)
-        fh.write("\n")
-        fh.flush()
-        os.fsync(fh.fileno())
-    os.replace(tmp_path, path)
+    mid-write can never leave a truncated, unparseable state file behind.
+
+    The temp path includes the PID and a per-process monotonic counter, not
+    a fixed ``path + ".tmp"`` -- two campaigns (or two calls racing within
+    one process, though this module never does that today) sharing one
+    ``--state-file`` path would otherwise write the SAME temp file, and one
+    process's half-written bytes could land under ``os.replace`` for the
+    other's read.
+
+    ``os.replace`` itself is wrapped: on Windows it raises ``PermissionError``
+    if anything else holds ``path`` open (an editor, an AV scanner) at the
+    exact moment of the rename. That is not a :class:`RunQueueError` by
+    default, which means -- like the cooldown-open fix above -- it would
+    escape ``main()``'s ``except RunQueueError`` as a bare traceback AND
+    leave a completed entry's capture on disk with its state-file status
+    never advanced past "in_progress". Wrapped here so it surfaces as a
+    normal, catchable failure instead."""
+    tmp_path = f"{path}.{os.getpid()}.{next(_atomic_write_counter)}.tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as fh:
+            json.dump(obj, fh, indent=2, sort_keys=False)
+            fh.write("\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp_path, path)
+    except OSError as exc:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+        raise RunQueueError(f"could not durably write campaign state to {path!r}: {exc}") from exc
 
 
 def entry_to_dict(entry: QueueEntry) -> dict:
@@ -834,8 +954,33 @@ def new_campaign_state(entries: Sequence[QueueEntry], meta: Optional[dict] = Non
 
 
 def load_campaign_state(state_path: str) -> dict:
-    with open(state_path, "r", encoding="utf-8") as fh:
-        return json.load(fh)
+    """Load and minimally validate a campaign state file. Raises
+    :class:`RunQueueError` (never a bare ``JSONDecodeError``/``KeyError``/
+    ``OSError``) for a missing file, a truncated/hand-edited unparseable
+    file, a file that is valid JSON but not the expected shape, or a
+    ``version`` this code does not know how to resume -- every one of
+    those would otherwise escape ``main()``'s ``except RunQueueError``
+    handler as a raw traceback instead of a clean, operator-facing exit."""
+    try:
+        with open(state_path, "r", encoding="utf-8") as fh:
+            state = json.load(fh)
+    except OSError as exc:
+        raise RunQueueError(f"cannot read campaign state file {state_path!r}: {exc}") from exc
+    except json.JSONDecodeError as exc:
+        raise RunQueueError(
+            f"campaign state file {state_path!r} is not valid JSON -- truncated or "
+            f"hand-edited? refusing to guess at a resume from a corrupt state file: {exc}"
+        ) from exc
+    if not isinstance(state, dict) or "entries" not in state or "version" not in state:
+        raise RunQueueError(
+            f"campaign state file {state_path!r} does not have the expected shape "
+            "(missing 'version' and/or 'entries') -- refusing to resume from it")
+    if state["version"] != CAMPAIGN_STATE_VERSION:
+        raise RunQueueError(
+            f"campaign state file {state_path!r} has version={state['version']!r}, this "
+            f"code only knows how to resume version={CAMPAIGN_STATE_VERSION!r} -- refusing "
+            "to guess at an incompatible state file's shape")
+    return state
 
 
 def save_campaign_state(state_path: str, state: dict) -> None:
@@ -902,6 +1047,49 @@ def check_board_not_running_for_resume(host: str, timeout: float = DEFAULT_HTTP_
             "via POST /api/profile_exec/stop) and then re-run --resume.")
 
 
+def _capture_run_reached_terminal_state(log_path: str) -> bool:
+    """True iff ``log_path`` (an entry's main run capture, NOT the cooldown
+    sidecar) ends with a JSONL line whose ``exec.state`` is terminal
+    (``_TERMINAL_STATES`` -- done/faulted). This is the signal that
+    distinguishes a GENUINELY partial capture (process died mid-run --
+    :func:`_poll_capture_until` never saw a terminal state, so the firing
+    itself is an incomplete, invalid data point) from a capture whose run
+    portion is fully complete and valid, but whose ENTRY was never marked
+    "completed" because the process died afterwards -- during the cooldown
+    capture, during ``save_campaign_state``, or anywhere else between
+    ``run_entry`` finishing its real work and ``run_queue`` writing
+    "completed". See the RESUME COMPLETION RECOVERY note where this is
+    used: only a run that never reached a terminal state is discarded.
+
+    Deliberately does NOT require the cooldown sidecar to exist or be
+    complete: cooldown telemetry is supplementary (it exists to see the
+    zones settle after a run, not to validate the run itself), and a crash
+    between the run finishing and the cooldown file even being opened would
+    otherwise cause this to (wrongly) discard a fully valid firing. Absence
+    of proof is never treated as proof of completion in the OTHER
+    direction, though: a missing, empty, or unparseable log_path returns
+    False, same as :func:`is_rested`'s "no data is not rested" rule --
+    when this function cannot find real evidence, the safe default is
+    "not proven complete", i.e. still discardable."""
+    try:
+        last_line = None
+        with open(log_path, "r", encoding="utf-8") as fh:
+            for raw_line in fh:
+                stripped = raw_line.strip()
+                if stripped:
+                    last_line = stripped
+    except OSError:
+        return False
+    if not last_line:
+        return False
+    try:
+        record = json.loads(last_line)
+    except ValueError:
+        return False
+    state = str((record.get("exec") or {}).get("state", "")).lower()
+    return state in _TERMINAL_STATES
+
+
 def _discard_partial_capture(entry: QueueEntry) -> None:
     """Remove ``entry``'s capture file and its cooldown sibling, if either
     exists -- used only for an entry whose state-file status was
@@ -921,11 +1109,19 @@ def _discard_partial_capture(entry: QueueEntry) -> None:
 
 def run_queue(entries: Sequence[QueueEntry], cfg: RunQueueConfig, control=None,
               apply_preset_fn=None, state_path: Optional[str] = None,
-              resume: bool = False) -> None:
+              resume: bool = False, preflight_fn: "Optional[Callable]" = None) -> None:
     """Run every entry in order. Stops (re-raises) on the first
     :class:`RunQueueError` -- in particular a :class:`RunQueueFaultError`
     from mid-run -- rather than continuing to the next entry, since a fault
     or a refusal on entry N says nothing about whether N+1 is safe.
+
+    Before ANY of that -- before the state file is even touched -- runs
+    :func:`_preflight_campaign` against every distinct preset ``entries``
+    will use (see that function's docstring): a missing capability must
+    abort the whole campaign before entry 0's kiln is energised, not
+    partway into an unattended run. This runs on every call, resume
+    included -- see the RESUME COMPLETION RECOVERY note below for why a
+    resumed campaign is never treated as "already proven safe".
 
     When ``state_path`` is given, a campaign state file is written before
     entry 0 starts and updated durably (write-then-rename) as each entry
@@ -934,10 +1130,28 @@ def run_queue(entries: Sequence[QueueEntry], cfg: RunQueueConfig, control=None,
     ``state_path`` is loaded instead of created fresh: completed entries are
     skipped (never re-run, never re-numbered, never overwritten -- the
     clobber refusal in :func:`run_entry` would catch it even if this logic
-    had a bug), an "in_progress" entry from the crashed run has its partial
-    capture discarded and is re-run from scratch (see the INTERRUPTED-ENTRY
-    DECISION note above), and :func:`check_board_not_running_for_resume`
-    runs first so a still-active board never gets a second start POST."""
+    had a bug), and :func:`check_board_not_running_for_resume` runs first so
+    a still-active board never gets a second start POST.
+
+    RESUME COMPLETION RECOVERY: an "in_progress" entry found at resume time
+    is NOT unconditionally treated as a crashed, discardable partial run.
+    ``run_entry`` finishing its capture (reaching a terminal profile_exec
+    state) and ``run_queue`` marking the entry "completed" in the state
+    file are two separate steps with real time -- the cooldown capture,
+    then a state-file write -- between them; a crash in that window
+    (``open()`` failing on the cooldown path, ``save_campaign_state``
+    itself raising, Ctrl-C, a power loss) leaves a COMPLETE, VALID run
+    capture on disk while the state file still says "in_progress". The old
+    unconditional-discard behaviour would delete that valid capture and
+    re-fire the kiln for nothing. So: :func:`_capture_run_reached_terminal_state`
+    is checked first -- if the run capture itself shows the firing reached
+    done/faulted, the entry is promoted straight to "completed" (never
+    discarded); only a capture that never reached a terminal state (the
+    process genuinely died mid-run, which is not a valid noise-floor data
+    point) is discarded and re-run from scratch, per the original
+    INTERRUPTED-ENTRY DECISION."""
+    _preflight_campaign(entries, cfg, apply_preset_fn=apply_preset_fn, preflight_fn=preflight_fn)
+
     state = None
     if state_path is not None:
         if resume:
@@ -947,8 +1161,19 @@ def run_queue(entries: Sequence[QueueEntry], cfg: RunQueueConfig, control=None,
             changed = False
             for i, entry in enumerate(entries):
                 if state["entries"][i]["status"] == "in_progress":
-                    _discard_partial_capture(entry)
-                    state["entries"][i]["status"] = "pending"
+                    if _capture_run_reached_terminal_state(entry.log_path):
+                        log.info(
+                            "[%s] resume: in_progress entry's run capture already reached "
+                            "a terminal state -- the firing itself completed, only the "
+                            "state-file update (or cooldown tail) was interrupted. "
+                            "Promoting to completed rather than discarding valid data.",
+                            entry.label or entry.preset_name)
+                        state["entries"][i]["status"] = "completed"
+                        if state["entries"][i].get("completed_at") is None:
+                            state["entries"][i]["completed_at"] = time.time()
+                    else:
+                        _discard_partial_capture(entry)
+                        state["entries"][i]["status"] = "pending"
                     changed = True
             if changed:
                 save_campaign_state(state_path, state)
@@ -1179,6 +1404,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     try:
         run_queue(entries, cfg, control=control, state_path=args.state_file, resume=args.resume)
+    except capability_preflight.PreflightFailed as exc:
+        # str(exc) is already PreflightReport.describe() -- the full,
+        # operator-facing report (which capability, why fatal, the remedy).
+        # Caught explicitly (a distinct exit code, same pattern as the
+        # stop-failed banner below) rather than letting this fall through
+        # to a bare traceback, even though PreflightFailed is not a
+        # RunQueueError subclass.
+        log.error("campaign refused before anything started:\n%s", exc)
+        return 3
     except RunQueueStopFailedError as exc:
         log.error("queue stopped: %s", exc)
         log.error("!" * 70)
