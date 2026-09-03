@@ -492,17 +492,35 @@ typedef struct {
     bool ramp_lock_held;
     uint8_t ramp_lock_lagging_mask;
 
-    /* PID_EXPANSION_PLAN.md sec 7.2: auto-stretch INSTRUMENTATION -- the
-     * ramp-lock above (7.1, already built) is what actually stretches the
-     * schedule, by holding target_c/segment_elapsed_s still; these two
-     * fields only RECORD how much wall-clock time that has cost, in
-     * seconds, so the stretch is a deliberate, reported figure rather than
-     * an invisible side effect. Accumulated only while ramp_assist_cfg_
-     * enabled() is true (see profile_executor_ramp_assist.c's ramp_assist_
-     * stretch_tick()) -- with the flag off, the same lock still holds the
-     * setpoint exactly as it always has (7.1's guarantee is unconditional),
-     * this just stops counting it as "assist". Zeroed by profile_executor_
-     * run() like the rest of this struct's per-run state. */
+    /* PID_EXPANSION_PLAN.md sec 7.2: auto-stretch. Sec 7.1's ramp-lock
+     * (already built) guarantees every ramp endpoint is eventually reached
+     * on its own, by holding target_c/segment_elapsed_s still while a zone
+     * is outside EXEC_RAMP_LOCK_BAND_C -- that guarantee is unconditional
+     * and this feature does not touch it for a short/normal hold. What sec
+     * 7.2 actually adds (profile_executor.c's segment-stepping code, gated
+     * on ramp_assist_cfg_enabled()): once a lagging zone's lag_sustained
+     * becomes true (the lock has held long enough that it would otherwise
+     * hold indefinitely), target_c stops sitting fully frozen and instead
+     * creeps forward at the slowest sustained-lagging zone's own
+     * demonstrated achievable rate (ramp_assist_zone_achievable_rate_c_per_s(),
+     * profile_executor_ramp_assist.c) rather than the commanded seg->
+     * ramp_c_per_hr it cannot keep up with -- "extend the schedule to the
+     * achievable rate" rather than stop-and-wait. It still only ever moves
+     * target_c TOWARD seg->target_c, never past it (same "reached" clamp
+     * the normal ramp path already used), so the hard-refusal-above-max-
+     * temp guarantee (profile_executor_run.c's start-time check) and the
+     * next segment's own target/shape (read fresh once this one reaches
+     * seg->target_c and hands off to dwelling) are both untouched by this --
+     * only the wall-clock time this segment takes changes. These two fields
+     * only RECORD how much wall-clock time the lock has cost, in seconds
+     * (during a stretch OR a strict hold), so that cost is a deliberate,
+     * reported figure rather than an invisible side effect. Accumulated
+     * only while ramp_assist_cfg_enabled() is true (see profile_executor_
+     * ramp_assist.c's ramp_assist_stretch_tick()) -- with the flag off, the
+     * lock still holds the setpoint exactly as it always has (7.1's
+     * guarantee is unconditional), this just stops counting it as "assist".
+     * Zeroed by profile_executor_run() like the rest of this struct's
+     * per-run state. */
     float stretch_by_segment_s[PROFILE_MAX_SEGMENTS];
     float stretch_total_s;
 
@@ -695,6 +713,23 @@ void pid_fuzzy_prepare_gains(zone_runtime_t *z, uint8_t zi, pid_cfg_t *out_cfg);
 void ramp_assist_zone_lag_tick(zone_runtime_t *z, bool lagging_now, float dt_s);
 void ramp_assist_stretch_tick(s_exec_state_t *ex, uint8_t segment_index, bool assist_enabled,
                               bool ramping_now, bool lock_held_now, float dt_s);
+
+/* PID_EXPANSION_PLAN.md sec 7.2: auto-stretch's rate computation -- the
+ * caller (profile_executor.c's segment-stepping code) uses this in place of
+ * seg->ramp_c_per_hr for the tick's target_c advance when it returns >= 0.
+ * Returns the sentinel -1.0f (meaning: no stretch this tick, fall back to
+ * sec 7.1's existing strict freeze-and-wait) when assist_enabled is false or
+ * no currently-lagging zone (lagging_mask) has lag_sustained yet -- a short
+ * hold below EXEC_SUSTAINED_LAG_S is normal PID settling, not the "would
+ * otherwise hold indefinitely" case this function exists for. Otherwise
+ * returns the MINIMUM, across every active/non-faulted/lagging/sustained
+ * zone, of (actual_c - lag_start_actual_c) / lag_held_s -- that zone's own
+ * average climb since its lag began, clamped to >= 0 so a momentarily
+ * falling zone can never run target_c backward. See
+ * profile_executor_ramp_assist.c's own doc comment above this function for
+ * the full rationale, including why the hard-refusal-above-max-temp
+ * guarantee needs no check here. */
+float ramp_assist_stretch_rate_c_per_s(s_exec_state_t *ex, uint8_t lagging_mask, bool assist_enabled);
 
 /* PID_EXPANSION_PLAN.md sec 7.3: dwell credit. ALWAYS accrues (not gated on
  * assist_enabled -- see zone_runtime_t.dwell_credit_s's own doc comment);

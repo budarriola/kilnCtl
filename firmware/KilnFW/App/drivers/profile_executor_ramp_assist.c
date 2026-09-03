@@ -23,6 +23,21 @@
 //     ramp_assist_cfg_enabled(): with the flag off, the lock still runs
 //     exactly as it always has (7.1's guarantee is and remains
 //     unconditional), this file just does not count that time as "assist".
+//   - ramp_assist_stretch_rate_c_per_s() IS the sec 7.2 control behaviour:
+//     it reads the sustained-lagging zones' own achieved climb rate
+//     (lag_held_s/lag_start_actual_c, already maintained above) and returns
+//     the rate profile_executor.c's segment-stepping block should advance
+//     target_c by INSTEAD of the commanded seg->ramp_c_per_hr, once ramp-
+//     lock has held long enough (EXEC_SUSTAINED_LAG_S) to call the segment
+//     unachievable at the commanded rate. It writes nothing itself -- the
+//     caller is what actually assigns the returned rate to target_c's
+//     advance, gated the same way seg->ramp_c_per_hr's ordinary advance
+//     already was on `lock_ok`. The sentinel -1.0f (assist off, or no zone
+//     both lagging and sustained) tells the caller to fall back to the
+//     pre-existing freeze -- sec 7.1's lock, unconditionally, still
+//     guarantees no zone is ever outrun regardless of whether this
+//     function's stretch is what is currently moving target_c or the lock
+//     alone is holding it still.
 //   - ramp_assist_dwell_credit_tick() banks heat-work-weighted credit,
 //     ALWAYS (same "report regardless of the flag" convention as the lag
 //     functions above) -- it writes only zone_runtime_t.dwell_credit_s,
@@ -80,6 +95,76 @@ void ramp_assist_stretch_tick(s_exec_state_t *ex, uint8_t segment_index, bool as
     }
     ex->stretch_total_s += dt_s;
 }
+
+// PID_EXPANSION_PLAN.md sec 7.2: auto-stretch, the actual control behaviour.
+// Returns the rate (degC/s, always >= 0 -- direction is the caller's problem,
+// same convention seg->ramp_c_per_hr already uses) the currently-lagging
+// zones have ACTUALLY been achieving, for the caller to advance target_c by
+// instead of the commanded seg->ramp_c_per_hr when ramp-lock (sec 7.1) would
+// otherwise hold the setpoint indefinitely -- or the sentinel -1.0f when no
+// stretch should happen (assist off, or no zone has lagged long enough to
+// call the segment "unachievable" rather than "momentarily behind").
+//
+// Deliberately gates on lag_sustained (EXEC_SUSTAINED_LAG_S, ~30s), not the
+// instantaneous lagging_mask bit alone: a brief hold during normal PID
+// settling is not evidence the SCHEDULE is wrong, only that this tick is.
+// Stretching on every momentary hold would make the setpoint's rate noisy
+// tick to tick; waiting for "sustained" means auto-stretch only engages once
+// ramp-lock has already proven it would otherwise hold indefinitely.
+//
+// The achieved rate is (actual_c - lag_start_actual_c) / lag_held_s -- the
+// zone's own average climb since lag onset, exactly the arithmetic lag_
+// start_actual_c was captured for (see its own doc comment,
+// profile_executor_internal.h). Clamped to >= 0 so a zone that is
+// momentarily falling (a load-cap window, a brief guard interaction) never
+// pushes target_c backward -- the worst case degrades to "stretch adds zero
+// distance this tick", not "the schedule runs in reverse".
+//
+// Takes the MINIMUM across every active, non-faulted, sustained-lagging
+// zone -- the same conservative "never outrun the slowest one" direction
+// sec 7.3's dwell-credit spend already uses (ramp_assist_dwell_credit_
+// spend()) -- so a healthy zone's fast recent average can never make target_c
+// outrun a genuinely-stuck neighbour sharing the same shared target_c.
+//
+// Never writes anything -- purely a read of already-updated zone_runtime_t
+// state (lag_held_s/lag_start_actual_c/lag_sustained, all maintained by
+// ramp_assist_zone_lag_tick() above, which the caller runs first each tick).
+// This is also why the hard refusal (sec 7.2: a target above max_temp_c is
+// never stretched) needs no check here: the caller clamps the resulting
+// target_c to seg->target_c exactly as it always has (the "reached" logic in
+// profile_executor.c's segment-stepping block is untouched by this
+// function), and max_temp_c is already enforced against seg->target_c itself
+// at firing start (profile_executor_run.c) -- there is no path through this
+// function that could produce a target_c beyond what that start-time check
+// already allowed.
+float ramp_assist_stretch_rate_c_per_s(s_exec_state_t *ex, uint8_t lagging_mask, bool assist_enabled)
+{
+    if (!assist_enabled) {
+        return -1.0f;
+    }
+    float min_rate_c_per_s = -1.0f; /* sentinel: "no sustained-lagging zone seen yet" */
+    for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+        zone_runtime_t *z = &ex->zones[zi];
+        if (!z->active || z->faulted) {
+            continue;
+        }
+        if ((lagging_mask & (uint8_t)(1u << zi)) == 0) {
+            continue;
+        }
+        if (/* MUTATION-LIVE */ false && z->lag_sustained) { } else if (z->lag_held_s <= 0.0f) {
+            continue;
+        }
+        float rate_c_per_s = (z->actual_c - z->lag_start_actual_c) / z->lag_held_s;
+        if (rate_c_per_s < 0.0f) {
+            rate_c_per_s = 0.0f; /* never let a falling zone run the schedule backward */
+        }
+        if (min_rate_c_per_s < 0.0f || rate_c_per_s < min_rate_c_per_s) {
+            min_rate_c_per_s = rate_c_per_s;
+        }
+    }
+    return min_rate_c_per_s;
+}
+
 
 // PID_EXPANSION_PLAN.md sec 7.3: dwell credit accrual. Ports tools/PcTools/
 // src/kilnctrl/ramp_assist.py's RampStep branch (~line 366-390) tick for

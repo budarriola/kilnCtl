@@ -5466,6 +5466,145 @@ static void test_dwell_credit_tick_at_or_above_target_earns_nothing(void)
               "cone_table_heat_work_weight() would otherwise report for a temperature at/past target");
 }
 
+// PID_EXPANSION_PLAN.md sec 7.2: ramp_assist_stretch_rate_c_per_s() -- the
+// actual control-behaviour piece of auto-stretch. Pins its sentinel/gating
+// contract (assist off, no zone sustained yet) and its rate arithmetic
+// (achieved rate = delta_c / lag_held_s, minimum across qualifying zones,
+// clamped >= 0), all directly against the function -- profile_executor.c's
+// caller is exercised only indirectly (this file cannot drive the real
+// FreeRTOS tick loop, see this file's own top-of-file note).
+
+static void test_stretch_rate_returns_sentinel_when_assist_disabled(void)
+{
+    TEST_SECTION("ramp_assist_stretch_rate_c_per_s() -- assist_enabled == false must return the "
+                 "-1.0 no-stretch sentinel even when a zone is active, lagging and sustained -- "
+                 "gating must never depend on being unreachable in practice.");
+    s_exec_state_t ex;
+    memset(&ex, 0, sizeof(ex));
+    ex.zones[0].active = true;
+    ex.zones[0].lag_sustained = true;
+    ex.zones[0].lag_held_s = 60.0f;
+    ex.zones[0].lag_start_actual_c = 500.0f;
+    ex.zones[0].actual_c = 560.0f;
+
+    float rate = ramp_assist_stretch_rate_c_per_s(&ex, /*lagging_mask*/ 0x01, /*assist_enabled*/ false);
+
+    TEST_CHECK(rate == -1.0f, "assist_enabled == false must return the -1.0 sentinel unconditionally");
+}
+
+static void test_stretch_rate_returns_sentinel_when_no_zone_sustained(void)
+{
+    TEST_SECTION("ramp_assist_stretch_rate_c_per_s() -- a lagging zone that has NOT yet reached "
+                 "lag_sustained (a brief hold, normal PID settling) must not stretch -- the caller's "
+                 "cue to keep using sec 7.1's strict freeze-and-wait for one more tick.");
+    s_exec_state_t ex;
+    memset(&ex, 0, sizeof(ex));
+    ex.zones[0].active = true;
+    ex.zones[0].lag_sustained = false; // held, but not yet EXEC_SUSTAINED_LAG_S
+    ex.zones[0].lag_held_s = 5.0f;
+    ex.zones[0].lag_start_actual_c = 500.0f;
+    ex.zones[0].actual_c = 502.0f;
+
+    float rate = ramp_assist_stretch_rate_c_per_s(&ex, /*lagging_mask*/ 0x01, /*assist_enabled*/ true);
+
+    TEST_CHECK(rate == -1.0f, "a not-yet-sustained lagging zone must return the -1.0 sentinel, not a "
+              "rate computed from an unreliable, too-short sample");
+}
+
+static void test_stretch_rate_computes_achieved_rate_when_sustained(void)
+{
+    TEST_SECTION("ramp_assist_stretch_rate_c_per_s() -- pins the exact arithmetic: a zone that rose "
+                 "from 500.0C to 560.0C over 60.0s of continuous, sustained lag must report 1.0 C/s "
+                 "(60.0/60.0), not merely something positive -- a mutation halving or doubling this "
+                 "must be caught, not just any nonzero-or-not check.");
+    s_exec_state_t ex;
+    memset(&ex, 0, sizeof(ex));
+    ex.zones[0].active = true;
+    ex.zones[0].lag_sustained = true;
+    ex.zones[0].lag_held_s = 60.0f;
+    ex.zones[0].lag_start_actual_c = 500.0f;
+    ex.zones[0].actual_c = 560.0f;
+
+    float rate = ramp_assist_stretch_rate_c_per_s(&ex, /*lagging_mask*/ 0x01, /*assist_enabled*/ true);
+
+    TEST_CHECK(fabsf(rate - 1.0f) < 1e-4f,
+              "achieved rate must be exactly (actual_c - lag_start_actual_c) / lag_held_s = "
+              "(560.0-500.0)/60.0 = 1.0 C/s");
+}
+
+static void test_stretch_rate_clamped_nonnegative_when_zone_cooled(void)
+{
+    TEST_SECTION("ramp_assist_stretch_rate_c_per_s() -- a zone that COOLED since its lag began "
+                 "(actual_c < lag_start_actual_c) must report 0.0, never a negative rate -- a "
+                 "negative rate would run the stretched setpoint backward, not merely stall it.");
+    s_exec_state_t ex;
+    memset(&ex, 0, sizeof(ex));
+    ex.zones[0].active = true;
+    ex.zones[0].lag_sustained = true;
+    ex.zones[0].lag_held_s = 60.0f;
+    ex.zones[0].lag_start_actual_c = 500.0f;
+    ex.zones[0].actual_c = 495.0f; // fell 5C while "lagging"
+
+    float rate = ramp_assist_stretch_rate_c_per_s(&ex, /*lagging_mask*/ 0x01, /*assist_enabled*/ true);
+
+    TEST_CHECK(rate == 0.0f, "a cooling zone's achieved rate must clamp to exactly 0.0, never negative");
+}
+
+static void test_stretch_rate_uses_minimum_across_sustained_lagging_zones(void)
+{
+    TEST_SECTION("ramp_assist_stretch_rate_c_per_s() -- with two sustained-lagging zones achieving "
+                 "different rates, the MINIMUM must be returned (never the faster zone's rate, never "
+                 "an average) -- same conservative 'never outrun the slowest one' direction sec 7.3's "
+                 "dwell-credit spend already uses.");
+    s_exec_state_t ex;
+    memset(&ex, 0, sizeof(ex));
+    ex.zones[0].active = true;
+    ex.zones[0].lag_sustained = true;
+    ex.zones[0].lag_held_s = 60.0f;
+    ex.zones[0].lag_start_actual_c = 500.0f;
+    ex.zones[0].actual_c = 560.0f; // 1.0 C/s
+    ex.zones[1].active = true;
+    ex.zones[1].lag_sustained = true;
+    ex.zones[1].lag_held_s = 60.0f;
+    ex.zones[1].lag_start_actual_c = 500.0f;
+    ex.zones[1].actual_c = 530.0f; // 0.5 C/s -- the slower one
+
+    float rate = ramp_assist_stretch_rate_c_per_s(&ex, /*lagging_mask*/ 0x03, /*assist_enabled*/ true);
+
+    TEST_CHECK(fabsf(rate - 0.5f) < 1e-4f, "must return the SLOWER zone's 0.5 C/s, not the faster "
+              "zone's 1.0 C/s and not their 0.75 C/s average");
+}
+
+static void test_stretch_rate_ignores_faulted_and_not_lagging_zones(void)
+{
+    TEST_SECTION("ramp_assist_stretch_rate_c_per_s() -- a faulted zone and a zone not set in "
+                 "lagging_mask must both be ignored even if their own lag_sustained/lag_held_s look "
+                 "qualifying, leaving only the genuinely lagging, non-faulted zone's rate.");
+    s_exec_state_t ex;
+    memset(&ex, 0, sizeof(ex));
+    ex.zones[0].active = true;
+    ex.zones[0].faulted = true; // would report 0.1 C/s if not excluded
+    ex.zones[0].lag_sustained = true;
+    ex.zones[0].lag_held_s = 60.0f;
+    ex.zones[0].lag_start_actual_c = 500.0f;
+    ex.zones[0].actual_c = 506.0f;
+    ex.zones[1].active = true; // not in lagging_mask -- would report 0.2 C/s if not excluded
+    ex.zones[1].lag_sustained = true;
+    ex.zones[1].lag_held_s = 60.0f;
+    ex.zones[1].lag_start_actual_c = 500.0f;
+    ex.zones[1].actual_c = 512.0f;
+    ex.zones[2].active = true;
+    ex.zones[2].lag_sustained = true;
+    ex.zones[2].lag_held_s = 60.0f;
+    ex.zones[2].lag_start_actual_c = 500.0f;
+    ex.zones[2].actual_c = 560.0f; // 1.0 C/s -- the only zone that should count
+
+    float rate = ramp_assist_stretch_rate_c_per_s(&ex, /*lagging_mask*/ 0x04, /*assist_enabled*/ true);
+
+    TEST_CHECK(fabsf(rate - 1.0f) < 1e-4f, "must return zone 2's 1.0 C/s, ignoring the faulted zone "
+              "0 and the not-in-mask zone 1");
+}
+
 static void test_dwell_credit_spend_gated_on_flag(void)
 {
     TEST_SECTION("ramp_assist_dwell_credit_spend() -- returns 0.0 with assist_enabled == false, "
@@ -5868,6 +6007,12 @@ void run_test_profile_executor_prestart(void)
     test_ramp_assist_stretch_tick_gated_on_flag();
     test_ramp_assist_stretch_tick_requires_ramping_and_locked();
     test_ramp_assist_stretch_tick_indexes_the_right_segment();
+    test_stretch_rate_returns_sentinel_when_assist_disabled();
+    test_stretch_rate_returns_sentinel_when_no_zone_sustained();
+    test_stretch_rate_computes_achieved_rate_when_sustained();
+    test_stretch_rate_clamped_nonnegative_when_zone_cooled();
+    test_stretch_rate_uses_minimum_across_sustained_lagging_zones();
+    test_stretch_rate_ignores_faulted_and_not_lagging_zones();
 
     // PID_EXPANSION_PLAN.md sec 7.3 -- dwell credit accrual/spend, order-independent.
     test_dwell_credit_tick_accrues_only_while_lagging();

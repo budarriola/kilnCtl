@@ -388,9 +388,59 @@ void executor_task_entry(void *arg)
         s_exec.ramp_lock_held = !lock_ok;
         s_exec.ramp_lock_lagging_mask = lagging;
 
+        /* Read once per tick, reused below by both the segment-stepping
+         * stretch decision and the ramp-assist accounting block further
+         * down (removes that block's own duplicate read). */
+        bool ramp_assist_on = ramp_assist_cfg_enabled();
+
+        /* PID_EXPANSION_PLAN.md sec 7.1/7.2: sustained-lag detection runs
+         * HERE, right after this tick's own lock_ok/lagging are known and
+         * BEFORE the stretch decision below reads lag_sustained/lag_held_s/
+         * lag_start_actual_c -- not down in the "ramp assist accounting"
+         * block further down, which runs after segment-stepping. Moved
+         * deliberately (2026-09-03, sec 7.2 landing): auto-stretch's rate
+         * computation needs THIS tick's freshly updated lag state, not the
+         * previous tick's -- calling ramp_assist_zone_lag_tick() after the
+         * stretch decision would make every stretch decision one tick stale,
+         * including the tick lag_held_s actually crosses EXEC_SUSTAINED_LAG_S
+         * (the stretch would not engage until the tick after). Safe to run
+         * this early: lag_tick only reads lagging_now (already final, from
+         * the ramp-lock loop just above) and each zone's own actual_c
+         * (already this tick's fresh reading, same ordering note lag_tick's
+         * own doc comment already relies on) -- it does not depend on
+         * anything the segment-stepping block below computes. */
+        for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+            if (!s_exec.zones[zi].active || s_exec.zones[zi].faulted) continue;
+            bool lagging_now = (lagging & (1u << zi)) != 0;
+            ramp_assist_zone_lag_tick(&s_exec.zones[zi], lagging_now, dt_s);
+        }
+
         /* --- Ramp/dwell segment stepping (shared across all active zones) - */
         bool segment_changed = false; /* reboot breadcrumb: worth its own NVS write, see below */
         const profile_segment_t *seg = &s_exec.profile.segments[s_exec.segment_index];
+        /* PID_EXPANSION_PLAN.md sec 7.2: auto-stretch. lock_ok alone (sec
+         * 7.1) already guarantees every ramp endpoint is eventually reached
+         * by freezing target_c/segment_elapsed_s while a zone lags -- that
+         * guarantee is unconditional and untouched below. What this adds:
+         * once the lock would otherwise hold INDEFINITELY (a lagging zone's
+         * lag_sustained true), and only with the flag on, replace the
+         * commanded seg->ramp_c_per_hr with the slowest sustained-lagging
+         * zone's own demonstrated achievable rate for this tick's advance,
+         * so the setpoint creeps forward at a rate the kiln can actually
+         * hold instead of sitting fully still. stretch_rate_c_per_s is the
+         * sentinel -1.0f (no stretch, use the strict hold) unless the flag
+         * is on and at least one lagging zone qualifies -- see
+         * ramp_assist_stretch_rate_c_per_s()'s own doc comment
+         * (profile_executor_internal.h). Only relevant to a genuine ramp
+         * (positive seg->ramp_c_per_hr); a step segment's instant jump is
+         * untouched, same as before this feature existed. */
+        float stretch_rate_c_per_s = -1.0f;
+        bool stretched_this_tick = false;
+        if (!lock_ok && seg->seg_kind == PROFILE_SEG_KIND_ZONE_RAMP && !s_exec.dwelling &&
+            seg->ramp_c_per_hr > 0.0f) {
+            stretch_rate_c_per_s = ramp_assist_stretch_rate_c_per_s(&s_exec, lagging, ramp_assist_on);
+            stretched_this_tick = (stretch_rate_c_per_s >= 0.0f);
+        }
         /* Zero unless a ramp is actually being commanded this tick. Falling
          * through this default covers dwelling, a step segment (target_c jumps
          * in one tick -- there is no sustained rate for tau to act on), and
@@ -457,25 +507,36 @@ void executor_task_entry(void *arg)
                 }
                 seg = &s_exec.profile.segments[s_exec.segment_index];
             }
-        } else if (lock_ok) {
+        } else if (lock_ok || stretched_this_tick) {
             s_exec.segment_elapsed_s += (uint32_t)(dt_s + 0.5f);
             if (!s_exec.dwelling) {
                 float new_target;
                 if (seg->ramp_c_per_hr <= 0.0f) {
                     new_target = seg->target_c;
                 } else {
+                    /* PID_EXPANSION_PLAN.md sec 7.2: while stretched_this_tick,
+                     * advance at the achievable rate instead of the commanded
+                     * one -- everything else below (the "reached" clamp to
+                     * seg->target_c, the dwelling handoff) is identical either
+                     * way, so the next segment's own target/shape is read
+                     * fresh from s_exec.profile once this one arrives and is
+                     * untouched by which rate got it there. */
+                    float rate_c_per_hr = stretched_this_tick ? (stretch_rate_c_per_s * 3600.0f)
+                                                                : seg->ramp_c_per_hr;
                     float direction = (seg->target_c >= s_exec.target_c) ? 1.0f : -1.0f;
-                    new_target = s_exec.target_c + direction * seg->ramp_c_per_hr * (dt_s / 3600.0f);
+                    new_target = s_exec.target_c + direction * rate_c_per_hr * (dt_s / 3600.0f);
                     bool reached = (direction > 0.0f) ? (new_target >= seg->target_c) : (new_target <= seg->target_c);
                     if (reached) {
                         new_target = seg->target_c;
                     } else {
-                        /* The commanded rate, signed and in the units the
-                         * feedforward term wants. Only claimed while the ramp
+                        /* The rate actually driving target_c this tick,
+                         * signed and in the units the feedforward term
+                         * wants -- the stretched rate while stretched, same
+                         * as before otherwise. Only claimed while the ramp
                          * still has distance left to run: the tick that
                          * arrives at the segment target is already a partial
                          * one, and the ticks after it are a dwell. */
-                        s_exec.target_rate_c_per_s = direction * seg->ramp_c_per_hr / 3600.0f;
+                        s_exec.target_rate_c_per_s = direction * rate_c_per_hr / 3600.0f;
                     }
                 }
                 s_exec.target_c = new_target;
@@ -572,22 +633,27 @@ void executor_task_entry(void *arg)
                                      s_exec.zones[zi].duty, s_exec.dwelling, s_exec.ambient_c, dt_s);
         }
 
-        /* --- Ramp assist (PID_EXPANSION_PLAN.md sec 7): sustained-lag
-         * detection and sec 7.3's dwell-credit ACCRUAL, per zone, ALWAYS --
-         * and auto-stretch instrumentation, gated on the flag. Placed here
-         * for the same reason the firing-stats loop just above is: target_c/
-         * dwelling/segment_index and every zone's actual_c/lagging bit are
-         * already final for this tick. See profile_executor_ramp_assist.c's
-         * own doc comment for why neither call below (dwell-credit SPEND is
-         * the exception -- see the dwelling-transition code above) is new
-         * schedule-altering control behaviour. */
+        /* --- Ramp assist (PID_EXPANSION_PLAN.md sec 7): sec 7.3's dwell-
+         * credit ACCRUAL, per zone, ALWAYS -- and auto-stretch time
+         * accounting, gated on the flag. Sustained-lag detection itself
+         * (ramp_assist_zone_lag_tick()) already ran earlier this tick, right
+         * after lock_ok/lagging were computed -- see that call site's own
+         * comment for why it had to move ahead of the segment-stepping
+         * block instead of living here alongside dwell-credit/stretch-
+         * accounting. Placed here for the same reason the firing-stats loop
+         * just above is: target_c/dwelling/segment_index and every zone's
+         * actual_c/lagging bit are already final for this tick. See
+         * profile_executor_ramp_assist.c's own doc comment for why neither
+         * call below (dwell-credit SPEND is the exception -- see the
+         * dwelling-transition code above) is new schedule-altering control
+         * behaviour. */
         {
-            bool ramp_assist_on = ramp_assist_cfg_enabled();
+            /* ramp_assist_on: read once, further up this tick (before
+             * segment-stepping needed it too) -- not re-read here. */
             bool ramping_now = (seg->seg_kind == PROFILE_SEG_KIND_ZONE_RAMP) && !s_exec.dwelling;
             for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
                 if (!s_exec.zones[zi].active || s_exec.zones[zi].faulted) continue;
                 bool lagging_now = (lagging & (1u << zi)) != 0;
-                ramp_assist_zone_lag_tick(&s_exec.zones[zi], lagging_now, dt_s);
                 /* seg->target_c, not s_exec.target_c: the segment's own
                  * final target, not the still-interpolating commanded
                  * value -- see ramp_assist_dwell_credit_tick()'s doc

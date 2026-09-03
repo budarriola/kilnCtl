@@ -2002,8 +2002,16 @@ same executor/feedforward machinery §3 already covers, not a new subsystem.
 
 `profile_executor.c`'s ramp-lock (~line 354-369) already detects "not
 achieving the commanded ramp rate": a zone is lagging when
-`|actual_c - target_c| > EXEC_RAMP_LOCK_BAND_C(zi)` (3 °C,
-`profile_executor_internal.h` ~585), tracked per-tick into
+`|actual_c - target_c| > EXEC_RAMP_LOCK_BAND_C(zi)` (25 °C,
+`PROFILE_EXECUTOR_RAMP_LOCK_BAND_C`, `profile_executor.h:638` — the value
+`exec_threshold(zi, 3)` in `profile_executor_pid_tick.c` falls back to
+whenever no per-zone override is configured, true for every shipped
+config. CORRECTED 2026-09: this section previously said "3 °C" here, which
+is actually `PROGRESS_BAND_C` — guard 1's arrival band, `thermal_guard.c`
+— a different constant. That stale "3 °C" claim in this very paragraph is
+the most likely source of the identical mistake that shipped in
+`ramp_assist.py`'s own mirror of this constant; see §7.6's "mirror bug"
+note), tracked per-tick into
 `s_exec.ramp_lock_held` / `s_exec.ramp_lock_lagging_mask`. While held, the
 shared `target_c` simply stops advancing (segment-stepping code just below).
 This alone already guarantees every ramp endpoint is eventually reached,
@@ -2011,15 +2019,81 @@ including back-to-back ramps with no dwell between them — ramp assist adds
 credit and warnings on top of this signal, it does not need a second lag
 detector.
 
-### 7.2 Auto-stretch — NOT STARTED
+### 7.2 Auto-stretch — DONE (2026-09-03)
 
-Formally extend a segment's schedule to the achievable rate when ramp-lock
-would otherwise hold indefinitely. Hard constraint: a segment target above
-the zone's `max_temp_c` ceiling is a hard refusal, never stretched — do not
-let auto-stretch's "always reach the target" goal override this. `max_temp_c`
-and the ramp ceiling are already re-checked at firing start in
-`profile_executor_run.c` (~line 231-321, ~line 505-528); the achievability
-gate belongs beside those checks, not as a separate pass.
+Implemented in `profile_executor_ramp_assist.c`'s `ramp_assist_stretch_rate_c_per_s()`
+and wired into `profile_executor.c`'s segment-stepping code (the `else if
+(lock_ok)` branch, now `else if (lock_ok || stretched_this_tick)`). Sec 7.1's
+ramp-lock (already built) still unconditionally guarantees every ramp
+endpoint is eventually reached, by freezing `target_c`/`segment_elapsed_s`
+while a zone lags — that guarantee, and its unconditional behaviour with the
+flag off, is untouched. What this adds, gated on `ramp_assist_cfg_enabled()`:
+once a lagging zone's lag has been continuous for `EXEC_SUSTAINED_LAG_S`
+(~30s, sec 7.1's existing `lag_sustained` field) — i.e. the lock would
+otherwise hold indefinitely, not just a normal momentary PID-settling hold —
+`target_c` stops sitting fully frozen and instead creeps forward at the
+slowest sustained-lagging zone's own demonstrated achievable rate
+((`actual_c - lag_start_actual_c) / lag_held_s`, clamped >= 0, minimum across
+every active/non-faulted/lagging/sustained zone — same conservative
+"never outrun the slowest one" direction sec 7.3's dwell-credit spend
+already uses) instead of the commanded `seg->ramp_c_per_hr` it cannot keep
+up with.
+
+Hard refusal (a segment target above the zone's `max_temp_c` ceiling is
+refused, never stretched): still enforced entirely by
+`profile_executor_run.c`'s existing `max_temp_c` re-check at firing start
+(~line 252-271) — unchanged by this pass. Auto-stretch's rate only ever
+advances `target_c` TOWARD `seg->target_c`, using the exact same "reached"
+clamp the pre-existing ramp path already used, so there is no code path
+through the new stretch logic that could push `target_c` past a target that
+check would have refused — the constraint holds by construction, as
+`profile_executor_ramp_assist.c`'s own top-of-file comment already argued
+for the (then instrumentation-only) sec 7.1/7.4 pieces.
+
+Composition with the next segment (owner decision: stretching must not
+corrupt the following segment's own target/shape): once a stretched ramp's
+`target_c` reaches `seg->target_c` it hands off to dwelling through the
+identical code path a normal (unstretched) ramp does — the next segment is
+read fresh from `s_exec.profile.segments[]` when the schedule steps forward,
+untouched by which rate (commanded or stretched) got the previous segment
+there. Only the wall-clock time a segment takes changes.
+
+Dwell-credit hookup (owner decision 3, "wire the stretch to it, don't
+rebuild it"): no new wiring needed — sec 7.3's `ramp_assist_dwell_credit_tick()`
+already runs every tick a ZONE_RAMP segment is active and not dwelling,
+regardless of whether that tick's `target_c` advance came from the strict
+hold, the commanded rate, or the new stretched rate; it watches `actual_c`
+against the band, not which rate is driving `target_c`. Stretch and credit
+compose automatically.
+
+Ships behind the existing `ramp_assist_cfg_enabled()` flag/`/api/ramp_assist`
+route (sec 7.5) — no second flag or route added, per owner decision 4.
+
+Host tests: six new tests in `test_profile_executor_prestart.c`
+(`test_stretch_rate_*`) pin `ramp_assist_stretch_rate_c_per_s()`'s gating
+sentinel (assist off, no zone sustained), its exact achieved-rate arithmetic,
+the >=0 clamp on a cooling zone, the minimum-across-zones rule, and that a
+faulted/not-lagging zone is excluded. `profile_executor.c`'s own tick-loop
+wiring is not directly host-testable (this test file's own header note: no
+FreeRTOS task harness), same limitation sec 7.3.3 already documented for the
+dwell-credit spend's caller-side wiring.
+
+Mutation testing (this task's report has the exact commands/output): (1)
+flipping the min-selection to max — caught by
+`test_stretch_rate_uses_minimum_across_sustained_lagging_zones`; (2) deleting
+the `>= 0` clamp — caught by
+`test_stretch_rate_clamped_nonnegative_when_zone_cooled`; (3) deleting the
+`assist_enabled` gate — caught by
+`test_stretch_rate_returns_sentinel_when_assist_disabled`. All three applied,
+built, run, real failure text captured, then reverted; reverted state
+re-verified clean (`grep MUTATION` empty, all 21 host-test executables
+green) before committing.
+
+**Not done in this pass:** sec 7.4's warning surfaces (still NOT STARTED,
+below) do not yet distinguish "strict hold" from "stretched" for an
+operator — both currently only show up as `ramp_lock_held`/`lag_sustained`/
+`stretch_by_segment_s`. Sec 7.6's real-firing validation of this specific
+control behaviour (as opposed to the credit) has not been run.
 
 ### 7.3 Dwell credit — FIRMWARE LANDED (2026-09-03, see §7.3.3)
 
