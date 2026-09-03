@@ -3851,6 +3851,46 @@ bool autotune_engine_accept(bool ack_unsettled)
                  "failed to persist -- feedforward will stay off for this zone",
                  zone, (double)m.k_gain_c_per_duty, (double)m.tau_s, (double)m.dead_time_s);
     }
+    /* PID_EXPANSION_PLAN.md section 3.2, "on-board identification pass" --
+     * closes the last-named gap in that section: until now coupling_diag_k_dc
+     * could only be set by hand or by a PC-side preset built from
+     * coupled_ident.py's offline analysis, never by autotune. No new
+     * identification path is built here -- see autotune_coupling_matrix_t's
+     * own doc comment ("i == j is the direct/diagonal gain, identical to the
+     * model in autotune_engine_status_t for the run that produced it"): the
+     * DIRECT fit `m` this same accept() call is already writing to
+     * model_k_dc via zones_config_set_model() above IS the diagonal cell,
+     * because zone_index's own trace against its own duty step is exactly
+     * what fills s_at.coupling.cell[zone_index][zone_index] in
+     * finalize_fit() (see that function's TODO.md 6A.5(b) block). It is the
+     * same rested single-zone step-excitation data the off-diagonal cross-
+     * gain cells just above are fit from (same trace, same duty step, same
+     * run) -- the "same kind of data" section 3.2 requires for this field to
+     * mean the same thing as the matrix it is substituted into.
+     *
+     * Gated identically to model_persisted: this line is only reached once
+     * the STEP-method settled/converged/tau_consistent gate above already
+     * passed (or was explicitly overridden with ack_unsettled), the exact
+     * same trustworthiness bar zones_config_set_model() and the cross-gain
+     * persist in finalize_fit() both apply to this same fit. No separate
+     * quality gate is invented here.
+     *
+     * Deliberately still just storage, same as the field's own doc comment
+     * says: this pass populates coupling_diag_k_dc, it does not flip
+     * `s_coupling_use_measured_diag_k_dc` in profile_executor_feedforward.c
+     * -- that stays a separate, explicit decision, off by default, per this
+     * task's constraints. Logged, not propagated, for the same reason
+     * model_persisted's own failure isn't: the gains and model the operator
+     * clicked Accept for are already live either way. */
+    if (model_persisted) {
+        bool diag_persisted = zones_config_set_coupling_diag_k_dc(zone, m.k_gain_c_per_duty);
+        if (!diag_persisted) {
+            ESP_LOGW(TAG,
+                     "autotune zone %u: gains and model accepted but coupling_diag_k_dc (%.4f degC/duty) was "
+                     "rejected or failed to persist -- coupling solve stays on the ff_k_dc hybrid for this zone",
+                     zone, (double)m.k_gain_c_per_duty);
+        }
+    }
     /* ZONES_CFG_VERSION 12->13: the tuning-quality record (set 1 -- see
      * zone_cfg_t::tuning_valid's own doc comment). Written ONLY after the
      * gains (above) and the model (just above) are both already persisted --

@@ -612,6 +612,27 @@ bool zones_config_set_model(uint8_t zone_index, float k_dc, float tau_s, float d
     return s_stub_set_model_result;
 }
 
+/* PID_EXPANSION_PLAN.md section 3.2 follow-up: autotune_engine_accept()'s
+ * on-board coupling_diag_k_dc identification pass writes this alongside
+ * zones_config_set_model() above, from the SAME fitted gain. Configurable
+ * result (default true, so the STEPPING-loop tests that reach a real
+ * accept() elsewhere in this file are unaffected) plus call-count/last-args
+ * capture, same convention as s_stub_set_model_result and
+ * s_stub_tuning_quality_* just above/below -- lets a test prove both the
+ * positive (written, with the exact same gain as model_k_dc) and the
+ * negative (NOT called when model persist fails or on the RELAY path). */
+static bool s_stub_set_coupling_diag_k_dc_result = true;
+static int s_stub_set_coupling_diag_k_dc_call_count = 0;
+static uint8_t s_stub_set_coupling_diag_k_dc_zone = 0xFF;
+static float s_stub_set_coupling_diag_k_dc_value = 0.0f;
+bool zones_config_set_coupling_diag_k_dc(uint8_t zone_index, float k_dc)
+{
+    s_stub_set_coupling_diag_k_dc_call_count++;
+    s_stub_set_coupling_diag_k_dc_zone = zone_index;
+    s_stub_set_coupling_diag_k_dc_value = k_dc;
+    return s_stub_set_coupling_diag_k_dc_result;
+}
+
 /* ZONES_CFG_VERSION 12->13 -- captures the LAST call's arguments (zone_index
  * and *q) so a test can assert autotune_engine_accept()'s STEP-success path
  * wrote exactly the fields the fit produced, without this file needing its
@@ -3314,6 +3335,127 @@ static void test_autotune_engine_accept_skips_tuning_quality_on_relay_method(voi
     s_stub_set_model_result = false;
 }
 
+/* PID_EXPANSION_PLAN.md section 3.2 follow-up ("on-board identification pass
+ * for coupling_diag_k_dc"). A completed, accepted STEP-method run must
+ * persist coupling_diag_k_dc for the zone under test, from the SAME fitted
+ * gain zones_config_set_model() just wrote to model_k_dc -- see
+ * autotune_engine_accept()'s own comment on why the direct fit IS the
+ * diagonal cell. */
+static void test_autotune_engine_accept_writes_coupling_diag_k_dc_on_step_success(void)
+{
+    TEST_SECTION("autotune_engine_accept() writes zones_config_set_coupling_diag_k_dc() on a successful "
+                 "STEP-method accept, with the SAME gain as model_k_dc");
+    static MAX31856BusClass bus;
+    static SafetyLinkClass safety;
+    memset(&s_at, 0, sizeof(s_at));
+    memset(&bus, 0, sizeof(bus));
+    memset(&safety, 0, sizeof(safety));
+    s_at.lock = xSemaphoreCreateMutex();
+    TEST_CHECK(s_at.lock != NULL, "test setup: lock must be creatable");
+    s_at.state = AUTOTUNE_ENGINE_DONE;
+    s_at.method = AUTOTUNE_METHOD_STEP;
+    s_at.zone_index = 1; /* deliberately not zone 0 -- catches a hardcoded index */
+    s_at.model.valid = true;
+    s_at.model.settled = true;
+    s_at.model.extrapolation_converged = true;
+    s_at.model.tau_consistent_with_gain = true;
+    s_at.model.k_gain_c_per_duty = 27.32f;
+    s_at.model.tau_s = 100.0f;
+    s_at.model.dead_time_s = 5.0f;
+
+    s_stub_set_pid_result = true;
+    s_stub_set_model_result = true;
+    s_stub_set_coupling_diag_k_dc_result = true;
+    s_stub_set_coupling_diag_k_dc_call_count = 0;
+    s_stub_set_coupling_diag_k_dc_zone = 0xFF;
+    s_stub_set_coupling_diag_k_dc_value = 0.0f;
+
+    bool accepted = autotune_engine_accept(false);
+
+    TEST_CHECK(accepted, "a fully clean STEP fit accepts");
+    TEST_CHECK(s_stub_set_coupling_diag_k_dc_call_count == 1,
+              "zones_config_set_coupling_diag_k_dc() is called exactly once on a successful STEP accept");
+    TEST_CHECK(s_stub_set_coupling_diag_k_dc_zone == 1, "written for the zone under test, not a hardcoded index");
+    TEST_CHECK_NEAR(s_stub_set_coupling_diag_k_dc_value, 27.32f, 1e-4,
+                    "the diagonal gain persisted is exactly the direct fit's k_gain_c_per_duty -- the same "
+                    "rested single-zone step data model_k_dc was just written from, not a separate estimate");
+
+    s_stub_set_pid_result = false;
+    s_stub_set_model_result = false;
+}
+
+/* Negative proof 1: the model failing to persist must skip the
+ * coupling_diag_k_dc write too -- writing a diagonal cell for a model that
+ * isn't actually stored would describe a fit the zone isn't running,
+ * exactly the same reasoning the tuning-quality skip above rests on. */
+static void test_autotune_engine_accept_skips_coupling_diag_k_dc_when_model_persist_fails(void)
+{
+    TEST_SECTION("autotune_engine_accept() does NOT write coupling_diag_k_dc when zones_config_set_model() "
+                 "itself fails/refuses");
+    static MAX31856BusClass bus;
+    static SafetyLinkClass safety;
+    memset(&s_at, 0, sizeof(s_at));
+    memset(&bus, 0, sizeof(bus));
+    memset(&safety, 0, sizeof(safety));
+    s_at.lock = xSemaphoreCreateMutex();
+    TEST_CHECK(s_at.lock != NULL, "test setup: lock must be creatable");
+    s_at.state = AUTOTUNE_ENGINE_DONE;
+    s_at.method = AUTOTUNE_METHOD_STEP;
+    s_at.zone_index = 0;
+    s_at.model.valid = true;
+    s_at.model.settled = true;
+    s_at.model.extrapolation_converged = true;
+    s_at.model.tau_consistent_with_gain = true;
+    s_at.model.k_gain_c_per_duty = 10.0f;
+    s_at.model.tau_s = 100.0f;
+    s_at.model.dead_time_s = 5.0f;
+
+    s_stub_set_pid_result = true;
+    s_stub_set_model_result = false; /* the case under test -- model persist refuses/fails */
+    s_stub_set_coupling_diag_k_dc_call_count = 0;
+
+    bool accepted = autotune_engine_accept(false);
+
+    TEST_CHECK(accepted, "acceptance itself still succeeds -- the gains are already live");
+    TEST_CHECK(s_stub_set_coupling_diag_k_dc_call_count == 0,
+              "zones_config_set_coupling_diag_k_dc() must NOT be called when the model failed to persist");
+
+    s_stub_set_pid_result = false;
+}
+
+/* Negative proof 2: a RELAY-method accept measures no FOPDT model, so there
+ * is no diagonal gain to persist either -- same reasoning as the
+ * tuning-quality RELAY skip above. */
+static void test_autotune_engine_accept_skips_coupling_diag_k_dc_on_relay_method(void)
+{
+    TEST_SECTION("autotune_engine_accept() does NOT write coupling_diag_k_dc on the RELAY path -- "
+                 "a relay test measures no FOPDT model to take a diagonal gain from");
+    static MAX31856BusClass bus;
+    static SafetyLinkClass safety;
+    memset(&s_at, 0, sizeof(s_at));
+    memset(&bus, 0, sizeof(bus));
+    memset(&safety, 0, sizeof(safety));
+    s_at.lock = xSemaphoreCreateMutex();
+    TEST_CHECK(s_at.lock != NULL, "test setup: lock must be creatable");
+    s_at.state = AUTOTUNE_ENGINE_DONE;
+    s_at.method = AUTOTUNE_METHOD_RELAY;
+    s_at.zone_index = 0;
+    s_at.relay.valid = true;
+
+    s_stub_set_pid_result = true;
+    s_stub_set_model_result = true;
+    s_stub_set_coupling_diag_k_dc_call_count = 0;
+
+    bool accepted = autotune_engine_accept(false);
+
+    TEST_CHECK(accepted, "a relay-method accept still succeeds -- gains only, no model");
+    TEST_CHECK(s_stub_set_coupling_diag_k_dc_call_count == 0,
+              "zones_config_set_coupling_diag_k_dc() must NOT be called on the RELAY path");
+
+    s_stub_set_pid_result = false;
+    s_stub_set_model_result = false;
+}
+
 static void test_min_excursion_refuses_a_fit_below_the_rise_floor(void)
 {
     TEST_SECTION("(B) minimum-excursion requirement -- a fit whose total rise is below the "
@@ -5185,6 +5327,9 @@ void run_test_autotune_engine_prestart(void)
     test_autotune_engine_accept_writes_tuning_quality_on_step_success();
     test_autotune_engine_accept_skips_tuning_quality_when_model_persist_fails();
     test_autotune_engine_accept_skips_tuning_quality_on_relay_method();
+    test_autotune_engine_accept_writes_coupling_diag_k_dc_on_step_success();
+    test_autotune_engine_accept_skips_coupling_diag_k_dc_when_model_persist_fails();
+    test_autotune_engine_accept_skips_coupling_diag_k_dc_on_relay_method();
     test_min_excursion_refuses_a_fit_below_the_rise_floor();
     test_physical_plausibility_refuses_gain_implying_ceiling_below_max_temp();
     test_physical_plausibility_uses_ambient_not_baseline_on_a_hot_start();

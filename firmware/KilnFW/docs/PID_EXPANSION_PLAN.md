@@ -273,6 +273,68 @@ true today would only change behaviour on a board that already has
 every other board it is a no-op by construction (the unmeasured-fallback
 case above).
 
+**ON-BOARD IDENTIFICATION PASS — LANDED 2026-09-03, mechanism only, no board
+run yet.** No new identification path or state machine: `autotune_engine.c`
+already fits the exact data needed. `autotune_coupling_matrix_t`'s own doc
+comment has always said "i == j is the direct/diagonal gain, identical to
+the model in `autotune_engine_status_t` for the run that produced it" --
+`finalize_fit()` (TODO.md 6A.5(b) block, ~line 1346) already fills
+`s_at.coupling.cell[zone_index][zone_index]` from the SAME direct FOPDT fit
+(`s_at.model`) that `autotune_engine_accept()` writes to `model_k_dc` via
+`zones_config_set_model()`. This is exactly the "same kind of data" this
+field needs to mean the same thing as the matrix it plugs into: a rested
+single-zone step excitation, held to settle, fit with
+`pid_autotune_fit_fopdt()` -- the identical trace and duty step the
+off-diagonal cross-gain cells right above it in `finalize_fit()` are
+already fit from and already persist unconditionally (not gated by operator
+Accept, since those are peer-zone cells with no per-cell accept UI).
+
+The diagonal cell IS the zone's own model, so it goes with the zone's own
+model, at the moment the operator accepts it -- `autotune_engine_accept()`
+now calls `zones_config_set_coupling_diag_k_dc(zone, m.k_gain_c_per_duty)`
+immediately after `zones_config_set_model()` succeeds, using the identical
+`m.k_gain_c_per_duty` value, gated by the identical settled/
+extrapolation_converged/tau_consistent_with_gain trustworthiness bar (or an
+explicit `ack_unsettled` override) that already gates `model_k_dc` and the
+tuning-quality record. No separate quality gate was invented. A persist
+failure is logged, not propagated, matching `model_persisted`'s own
+handling immediately above it.
+
+Because this write happens to reuse `model_k_dc`'s own fitted gain rather
+than build a second estimator, `coupling_diag_k_dc` and `model_k_dc` will
+read identically for any zone re-tuned after this pass -- that is not a
+bug, it is the point (both numbers describe the same measurement of the
+same run). They can still diverge exactly as before: a hand-edited or
+preset-loaded `coupling_diag_k_dc`, or a `model_k_dc` left over from an
+older run this pass never re-touched, are both untouched by this change.
+
+**Trigger, for an operator or an automated caller:** identical to
+identifying `model_k_dc` today -- `autotune_engine_run()` or
+`autotune_engine_run_to_target()` on the zone (from ambient, prestart-gated
+exactly as every step test always has been), then
+`autotune_engine_accept()` once the fit reaches DONE. No new HTTP endpoint,
+UART command, or UI control was added; existing `/api/autotune` accept
+already threads through to this.
+
+Host-tested in `test_autotune_engine_prestart.c`: a successful STEP accept
+writes `coupling_diag_k_dc` with the exact fitted gain for the zone under
+test (not zone 0 -- a hardcoded-index regression would be caught), and two
+negative proofs -- skipped when `zones_config_set_model()` itself fails,
+and skipped on the RELAY path (which fits no FOPDT model at all).
+Mutation-proven: temporarily short-circuiting the new persist call
+reproduced real failures (`got 0.0000, want 27.3200 +/-0.0001` and the
+call-count/zone-index checks), reverted, suite green again (21/21
+executables, this executable's own count included). `build_kilnfw`
+confirmed OK after the change.
+
+**Still open:** the values themselves need a hardware run to populate --
+blocked while the A/B hardware experiment is in progress. `coupling_diag_k_dc`
+stays 0.0 ("not measured") on this board until a fresh accepted step test
+runs per zone. `s_coupling_use_measured_diag_k_dc` stays compiled `false`
+per this pass's own scope -- flipping it is still a separate, explicit
+decision for later, after real numbers land and can be checked against the
+matrix the way §3.2's earlier hand-solved seam-sizing was.
+
 **UNCOUPLED 1x1 FALLBACK — CLOSED 2026-09-03. Verdict: switch it, and it has
 been switched.** `diagonal_hold`/`diagonal_climb` (`zone_coupling_solve.c`,
 ~lines 229/394) now compute their diagonal via
