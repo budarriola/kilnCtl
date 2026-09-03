@@ -253,6 +253,34 @@ def _gate_pctools_pytest() -> Gate:
         prereq=_pytest_prereq)
 
 
+def _mykicadmcp_python() -> str:
+    """The mykicadMcp submodule's own venv interpreter, not whatever
+    `python` resolves to on PATH -- same rationale as _pctools_python():
+    pytest and this suite's dependencies live in that venv, not in a bare
+    system Python, and using the system Python would silently report a
+    false-green (import errors look like "0 tests ran", not a failure)."""
+    venv_python = os.path.join(ROOT, "tools", "mykicadMcp", ".venv", "Scripts", "python.exe")
+    return venv_python if os.path.isfile(venv_python) else sys.executable
+
+
+def _gate_mykicadmcp_pytest() -> Gate:
+    # Deliberately NO prereq()/SKIP path here, unlike the other pytest gates.
+    # This gate exists specifically to close a false-green hole (the
+    # mykicadMcp suite ran only if a human manually reached for the right
+    # venv), so a missing venv or an unimportable pytest under it must show
+    # up as a loud FAIL in the summary, not a quiet SKIP someone glosses
+    # over. Concretely: if _mykicadmcp_python() doesn't exist on disk,
+    # subprocess.run raises FileNotFoundError, which _run_gate already turns
+    # into a FAIL ("could not launch ..."); if it exists but pytest isn't
+    # importable under it, `-m pytest` itself exits non-zero with
+    # ModuleNotFoundError in the output, which is also a FAIL. Both cases
+    # are exercised and confirmed to fail loudly (see the task report).
+    tests_dir = os.path.join(ROOT, "tools", "mykicadMcp", "tests")
+    return Gate(
+        "mykicadmcp_pytest (129 tests, synthetic and temp-copy KiCad files only)",
+        2, lambda: ([_mykicadmcp_python(), "-m", "pytest", tests_dir, "-q"], ROOT), timeout=600)
+
+
 def _idf_prereq() -> Optional[str]:
     if not os.path.isfile(_IDF_PROFILE):
         return f"ESP-IDF profile not found at {_IDF_PROFILE} -- update _IDF_PROFILE if Espressif moved"
@@ -290,6 +318,7 @@ GATES = [
     _gate_kilnfw_host_tests(),
     _gate_saftyfw_host_tests(),
     _gate_pctools_pytest(),
+    _gate_mykicadmcp_pytest(),
     _gate_build_kilnfw(),
     _gate_build_saftyfw(),
 ]
