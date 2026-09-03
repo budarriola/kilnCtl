@@ -257,6 +257,18 @@ last segment, the run goes `DONE` and drops all relays. The new segment
 inherits the current `target_c` as its ramp start — segments chain, they do
 not jump.
 
+**A dwell is a timer, not a soak.** `dwell_min` counts down from the moment
+the ramp's setpoint reaches the segment target, not from the moment the kiln
+itself gets there — the two are close but rarely identical, since the kiln is
+usually still catching up when the timer starts. This is a deliberate,
+owner-decided design: it matches how commercial kiln controllers have always
+worked, keeps every profile's total run length predictable, and avoids
+silently changing what an already-stored profile does. If your work needs a
+true minutes-at-temperature soak rather than a minutes-of-timer dwell, pad
+the segment's `dwell_min` — the executor does not do this for you. See
+`firmware/KilnFW/docs/PID_EXPANSION_PLAN.md` §7.3 for the measured size of
+the gap between the two.
+
 ### Ramp-lock (TODO.md 6A.5(d))
 
 Before stepping, the executor asks whether **every active, not-already-

@@ -1965,7 +1965,23 @@ the cone table's covered range — Orton 022 and up — so `heat_work_weight`
 raises `ConeTableError` on every tick and both `heat_work_s` and
 `dwell_heat_work_s` are exactly 0 there; `dwell_credit_parity` reports
 `nan`/-100% for those, which is the cone table's known low-temperature
-floor, not a new finding.)
+floor, not a new finding.) All three scenarios above 80 C rest on the
+simulator's extrapolated high-temperature plant parameters (unmeasured,
+assumed) — the percentages are indicative of the effect's existence and
+rough scale, not authoritative numbers to design a fix against.
+
+**Owner decision (2026-09-02): dwell timing stays as-is.** `dwell_min`
+means N minutes of *timer*, counted from when the ramp's setpoint reaches
+the segment target — not N minutes at temperature and not N minutes of
+heat work. The catch-up deficit documented above (4.9-14.4% of nominal
+heat work, 16-260 s, identical with or without ramp assist) is accepted
+as a known, measured property of the executor's existing dwell semantics
+and will be documented rather than corrected. Rationale: it matches
+long-established behaviour in commercial kiln controllers, keeps a
+profile's total schedule length predictable, and "fixing" it would
+silently change the fired result of every profile already stored on a
+board. User-facing note added at `firmware/KilnFW/docs/PROFILES.md`
+("A dwell is a timer, not a soak").
 
 ### 7.4 Warning surfaces — NOT STARTED
 
