@@ -119,6 +119,18 @@ typedef struct {
      * 9fc55d9, M4) -- not just a JSON field nothing reads. */
     bool     thermo_spi_wedged;
 
+    /* DISPLAY_ST7796_PLAN.md 9.1: passthrough of lvgl_port_get_flush_stats()
+     * -- makes the "measure first" flush-duration number a `curl .../api/status`
+     * away instead of requiring a bench session with a scope. flush_max_us is
+     * a running high-water mark since boot (never reset by reading it);
+     * flush_count is 0 whenever LVGL has not flushed yet (no display, or
+     * screen_idle blanked for the whole session), which distinguishes "no
+     * data yet" from "the display never has to redraw" for a reader that
+     * only looked once. */
+    uint32_t flush_last_us;
+    uint32_t flush_max_us;
+    uint32_t flush_count;
+
     bool     safety_ready;
     bool     zones_config_valid;
 

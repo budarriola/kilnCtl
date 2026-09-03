@@ -176,6 +176,12 @@ void dashboard_get_status(dashboard_status_t *out)
     }
     out->thermo_ready = count > 0;
     out->thermo_spi_wedged = MAX31856_bus_spi_wedged(s_dash.thermo_bus);
+
+    /* DISPLAY_ST7796_PLAN.md 9.1: no display-object dependency here --
+     * lvgl_port_get_flush_stats() reads lvgl_port.c's own file-static
+     * counters, written only by lvgl_port_task's flush callback, so this is
+     * safe to call whether or not a display ever came up. */
+    lvgl_port_get_flush_stats(&out->flush_last_us, &out->flush_max_us, &out->flush_count);
     out->channel_count = count;
     for (size_t i = 0; i < count; i++) {
         const MAX31856Reading *r = &readings[i];
@@ -511,8 +517,13 @@ static esp_err_t status_get_handler(httpd_req_t *req)
      * truncates -- the `goto truncated` path fires -- once the same content
      * is asked to fit in a materially smaller buffer, proving this is a real
      * bound rather than a round number). Headroom shrank from >200B to
-     * ~100B when heap_dma was added; if another field is ever added here,
-     * re-run that harness before assuming 4096 still fits.
+     * ~100B when heap_dma was added. DISPLAY_ST7796_PLAN.md 9.1 added
+     * `,"flush_last_us":%u,"flush_max_us":%u,"flush_count":%u` (~81B worst
+     * case: 3 literal prefixes at 18/17/16B plus 3 uint32_t fields at their
+     * 10-digit widest) on top of that ~100B headroom -- too tight by this
+     * file's own rule of thumb, so the buffer grew 4096 -> 4224 in the same
+     * change rather than letting headroom go to ~19B. If another field is
+     * ever added here, re-run that harness before assuming 4224 still fits.
      *
      * HEAP, not stack: httpd worker stack high-water mark was measured at
      * 2348 bytes free of 8192 on this exact endpoint (owner report,
@@ -526,7 +537,7 @@ static esp_err_t status_get_handler(httpd_req_t *req)
      * elsewhere. Heap-allocated instead: freed on every return path below
      * (success, truncated, and the new malloc-failure path), same
      * "diagnosable 500, never a hang" property truncated: already has. */
-#define DASHBOARD_STATUS_JSON_BUF_SIZE 4096
+#define DASHBOARD_STATUS_JSON_BUF_SIZE 4224
     char *json = malloc(DASHBOARD_STATUS_JSON_BUF_SIZE);
     if (json == NULL) {
         ESP_LOGE(TAG, "GET /api/status: malloc(%u) failed for the response buffer",
@@ -577,6 +588,11 @@ static esp_err_t status_get_handler(httpd_req_t *req)
      * comment. Reported unconditionally (not gated behind thermo_ready)
      * since a wedged owner also takes the display down with it. */
     APPEND(",\"thermo_spi_wedged\":%s", ds.thermo_spi_wedged ? "true" : "false");
+    /* DISPLAY_ST7796_PLAN.md 9.1 capture procedure: `curl .../api/status |
+     * jq .flush_max_us` (or flush_last_us for the most recent one) is now
+     * the whole bench step -- no separate build or scope session needed. */
+    APPEND(",\"flush_last_us\":%u,\"flush_max_us\":%u,\"flush_count\":%u",
+           (unsigned)ds.flush_last_us, (unsigned)ds.flush_max_us, (unsigned)ds.flush_count);
 
     if (ds.thermo_ready) {
         APPEND(",\"channels\":[");
