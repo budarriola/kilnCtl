@@ -726,6 +726,40 @@ def test_parse_profile_exec_uart_capture_equivalent_to_http_capture(tmp_path):
     assert uart_row.segment_count == 0
 
 
+def test_poll_row_from_exec_body_treats_invalid_zone_as_nan_not_zero():
+    """The firmware's JSON body carries a literal 0.0 placeholder for an
+    invalid reading (telemetry_format.c: ``actual_c = z->actual_valid ?
+    z->actual_c : 0.0f``), exactly like the UART FIRE-line wire format --
+    and parse_ktel_fire_line already undoes that placeholder (see its
+    docstring). poll_row_from_exec_body / _zone_samples_from_exec_body must
+    do the same for the HTTP/JSONL body, or a single invalid first sample
+    (target already non-zero, actual_c=0.0) reads as a huge, fictitious ramp
+    error instead of being excluded like every other invalid sample.
+
+    Regression for the noise-floor capture anomaly: five of six
+    noise_floor_p7* repeats had exactly this first-row shape and their
+    ramp_worst_error_c came out ~28C -- the target-minus-zero gap -- while
+    the one run whose first sample happened to already be valid measured
+    ~2C, which poisoned the metric's noise floor as "indistinguishable
+    forever".
+    """
+    exec_body = {
+        "elapsed_s": 0,
+        "segment_index": 0,
+        "segment_count": 2,
+        "dwelling": False,
+        "target_c": 28.65,
+        "state": "running",
+        "zones": [
+            {"zone": 0, "actual_c": 0.0, "actual_valid": False, "duty": 0.0},
+            {"zone": 1, "actual_c": 12.5, "actual_valid": True, "duty": 0.1},
+        ],
+    }
+    row = la.poll_row_from_exec_body("12:00:00", exec_body)
+    assert math.isnan(row.zones[0].actual_c)
+    assert row.zones[1].actual_c == pytest.approx(12.5)
+
+
 def test_parse_ktel_fire_line_refuses_a_truncated_zone_tail():
     """Opus review round 3 (2026-09-02): telemetry_format.c's own header
     comment records that a firing with enough active zones overruns

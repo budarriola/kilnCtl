@@ -153,12 +153,23 @@ def _zone_samples_from_exec_body(body: dict) -> dict:
     consumes a raw ``/api/profile_exec`` response body, however that body
     reached this process (a bare poll-capture line, or nested inside some
     other envelope like the HTTP-capture ``{"t","exec","status"}`` shape).
+
+    A zone with ``actual_valid`` false gets ``actual_c=nan`` here, matching
+    ``parse_ktel_fire_line``'s documented convention for the same case on the
+    UART FIRE-line path -- even though the JSON body itself carries the
+    firmware's literal ``0.0`` placeholder for an invalid reading (see
+    telemetry_format.c: ``float actual = z->actual_valid ? z->actual_c :
+    0.0f;``). Passing that placeholder through unchanged as a real
+    temperature previously let a single invalid first sample (target already
+    non-zero, actual_c=0.0) register as a ~28C ramp error -- a capture
+    artifact, not a kiln excursion.
     """
     zones = {}
     for z in body.get("zones", []):
+        valid = z.get("actual_valid", True)
         zones[z["zone"]] = ZoneSample(
             zone=z["zone"],
-            actual_c=z.get("actual_c", math.nan),
+            actual_c=z.get("actual_c", math.nan) if valid else math.nan,
             duty=z.get("duty", 0.0),
             ff_hold_used_matrix=z.get("ff_hold_used_matrix", False),
             ff_hold_infeasible=z.get("ff_hold_infeasible", False),

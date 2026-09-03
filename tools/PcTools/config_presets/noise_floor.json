@@ -1,8 +1,703 @@
 {
-  "schema_version": 1,
-  "generated_from": [],
+  "schema_version": 2,
+  "generated_from": [
+    "logs/coupling/noise_floor_p7_run1.jsonl",
+    "logs/coupling/noise_floor_p7b_run1.jsonl",
+    "logs/coupling/noise_floor_p7c_run1.jsonl",
+    "logs/coupling/noise_floor_p7d_run1.jsonl",
+    "logs/coupling/noise_floor_p7d_run2.jsonl",
+    "logs/coupling/noise_floor_p7d_run3.jsonl"
+  ],
   "band_c": 1.0,
-  "n_repeats": 0,
-  "note": "PLACEHOLDER -- not yet measured. Run the campaign (see PID_EXPANSION_PLAN.md SS3.3, run_queue.py --repeat, noise_floor.py build) to fill this in with N>=5 rested-start profile-7 repeats of one preset, then regenerate with: python -m kilnctrl.noise_floor build <run1.jsonl> <run2.jsonl> ... --out tools/PcTools/config_presets/noise_floor.json. pid_ab_compare.py treats an empty entries dict exactly like a missing artifact -- every verdict stays PROVISIONAL until this is regenerated for real.",
-  "entries": {}
+  "n_repeats": 6,
+  "note": "noise_floor_c is the observed RANGE (max-min) across the repeat captures listed in generated_from, all claimed to be the same preset+profile fired from a genuinely rested start. A difference smaller than this for a given (zone, metric, segment) key is not attributable to whatever is being A/B compared -- see pid_ab_compare.py's use of this artifact. See start_conditions for whether 'genuinely rested' actually held: the harness's rested check is relative to the on-board cold junction, not ambient, so it does not by itself guarantee like-for-like starts.",
+  "entries": {
+    "z0:dwell_entry_overshoot_peak_c:0": {
+      "zone": 0,
+      "metric": "dwell_entry_overshoot_peak_c",
+      "segment": 0,
+      "n": 6,
+      "mean": 1.3933333333333333,
+      "std_c": 0.2666583332031225,
+      "noise_floor_c": 0.720000000000006
+    },
+    "z0:dwell_entry_overshoot_peak_c:1": {
+      "zone": 0,
+      "metric": "dwell_entry_overshoot_peak_c",
+      "segment": 1,
+      "n": 6,
+      "mean": 3.7066666666666683,
+      "std_c": 0.045898438608155866,
+      "noise_floor_c": 0.10999999999999943
+    },
+    "z0:dwell_entry_time_to_peak_s:0": {
+      "zone": 0,
+      "metric": "dwell_entry_time_to_peak_s",
+      "segment": 0,
+      "n": 6,
+      "mean": 33.666666666666664,
+      "std_c": 21.98787544686086,
+      "noise_floor_c": 52.0
+    },
+    "z0:dwell_entry_time_to_peak_s:1": {
+      "zone": 0,
+      "metric": "dwell_entry_time_to_peak_s",
+      "segment": 1,
+      "n": 6,
+      "mean": 39.333333333333336,
+      "std_c": 5.5377492419453835,
+      "noise_floor_c": 16.0
+    },
+    "z0:dwell_steady_state_offset_c:0": {
+      "zone": 0,
+      "metric": "dwell_steady_state_offset_c",
+      "segment": 0,
+      "n": 6,
+      "mean": 0.6640126124984096,
+      "std_c": 0.0943637537882969,
+      "noise_floor_c": 0.23827848101265836
+    },
+    "z0:dwell_steady_state_offset_c:1": {
+      "zone": 0,
+      "metric": "dwell_steady_state_offset_c",
+      "segment": 1,
+      "n": 6,
+      "mean": 1.9727170794633644,
+      "std_c": 0.1320268389405403,
+      "noise_floor_c": 0.30153684210526355
+    },
+    "z0:dwell_steady_state_offset_c:2": {
+      "zone": 0,
+      "metric": "dwell_steady_state_offset_c",
+      "segment": 2,
+      "n": 6,
+      "mean": 0.9833333333333331,
+      "std_c": 0.35590260840104315,
+      "noise_floor_c": 0.8399999999999963
+    },
+    "z0:iae_normalized_c:0": {
+      "zone": 0,
+      "metric": "iae_normalized_c",
+      "segment": 0,
+      "n": 6,
+      "mean": 1.0489797769714153,
+      "std_c": 0.056853074187952476,
+      "noise_floor_c": 0.15675756953288678
+    },
+    "z0:iae_normalized_c:1": {
+      "zone": 0,
+      "metric": "iae_normalized_c",
+      "segment": 1,
+      "n": 6,
+      "mean": 2.1880323629920544,
+      "std_c": 0.10108070855889675,
+      "noise_floor_c": 0.24801958650707334
+    },
+    "z0:iae_normalized_whole_c:whole": {
+      "zone": 0,
+      "metric": "iae_normalized_whole_c",
+      "segment": null,
+      "n": 6,
+      "mean": 1.6043092211210588,
+      "std_c": 0.05267347393122787,
+      "noise_floor_c": 0.11565461913728514
+    },
+    "z0:ramp_mean_error_c:0": {
+      "zone": 0,
+      "metric": "ramp_mean_error_c",
+      "segment": 0,
+      "n": 6,
+      "mean": 0.7632019171727835,
+      "std_c": 0.07044014192209841,
+      "noise_floor_c": 0.2005902643205949
+    },
+    "z0:ramp_mean_error_c:1": {
+      "zone": 0,
+      "metric": "ramp_mean_error_c",
+      "segment": 1,
+      "n": 6,
+      "mean": 2.1447807683277844,
+      "std_c": 0.2042452886886997,
+      "noise_floor_c": 0.5143949083011583
+    },
+    "z0:ramp_worst_error_c:0": {
+      "zone": 0,
+      "metric": "ramp_worst_error_c",
+      "segment": 0,
+      "n": 6,
+      "mean": 2.386666666666668,
+      "std_c": 0.14348054455802392,
+      "noise_floor_c": 0.3900000000000077
+    },
+    "z0:ramp_worst_error_c:1": {
+      "zone": 0,
+      "metric": "ramp_worst_error_c",
+      "segment": 1,
+      "n": 6,
+      "mean": 4.126666666666668,
+      "std_c": 0.11724617975297498,
+      "noise_floor_c": 0.3300000000000054
+    },
+    "z0:settle_time_s:0": {
+      "zone": 0,
+      "metric": "settle_time_s",
+      "segment": 0,
+      "n": 6,
+      "mean": 124.16666666666667,
+      "std_c": 63.524535942159126,
+      "noise_floor_c": 168.0
+    },
+    "z0:settle_time_s:1": {
+      "zone": 0,
+      "metric": "settle_time_s",
+      "segment": 1,
+      "n": 3,
+      "mean": 431.6666666666667,
+      "std_c": 25.146238950056393,
+      "noise_floor_c": 48.0
+    },
+    "z1:dwell_entry_overshoot_peak_c:0": {
+      "zone": 1,
+      "metric": "dwell_entry_overshoot_peak_c",
+      "segment": 0,
+      "n": 6,
+      "mean": 2.051666666666668,
+      "std_c": 0.08060190237622641,
+      "noise_floor_c": 0.240000000000002
+    },
+    "z1:dwell_entry_overshoot_peak_c:1": {
+      "zone": 1,
+      "metric": "dwell_entry_overshoot_peak_c",
+      "segment": 1,
+      "n": 6,
+      "mean": 1.9283333333333335,
+      "std_c": 0.04792355023020285,
+      "noise_floor_c": 0.14000000000000057
+    },
+    "z1:dwell_entry_time_to_peak_s:0": {
+      "zone": 1,
+      "metric": "dwell_entry_time_to_peak_s",
+      "segment": 0,
+      "n": 6,
+      "mean": 73.0,
+      "std_c": 8.854377448471462,
+      "noise_floor_c": 22.0
+    },
+    "z1:dwell_entry_time_to_peak_s:1": {
+      "zone": 1,
+      "metric": "dwell_entry_time_to_peak_s",
+      "segment": 1,
+      "n": 6,
+      "mean": 61.0,
+      "std_c": 11.730302638892145,
+      "noise_floor_c": 26.0
+    },
+    "z1:dwell_steady_state_offset_c:0": {
+      "zone": 1,
+      "metric": "dwell_steady_state_offset_c",
+      "segment": 0,
+      "n": 6,
+      "mean": 1.1725977121039188,
+      "std_c": 0.04117251468458402,
+      "noise_floor_c": 0.09579597195949674
+    },
+    "z1:dwell_steady_state_offset_c:1": {
+      "zone": 1,
+      "metric": "dwell_steady_state_offset_c",
+      "segment": 1,
+      "n": 6,
+      "mean": 1.039278652513637,
+      "std_c": 0.03563182283098917,
+      "noise_floor_c": 0.0978105263157889
+    },
+    "z1:dwell_steady_state_offset_c:2": {
+      "zone": 1,
+      "metric": "dwell_steady_state_offset_c",
+      "segment": 2,
+      "n": 6,
+      "mean": 0.451666666666668,
+      "std_c": 0.09130534851073259,
+      "noise_floor_c": 0.20999999999999375
+    },
+    "z1:iae_normalized_c:0": {
+      "zone": 1,
+      "metric": "iae_normalized_c",
+      "segment": 0,
+      "n": 6,
+      "mean": 1.2641103316427655,
+      "std_c": 0.026437435280224818,
+      "noise_floor_c": 0.06625613269408537
+    },
+    "z1:iae_normalized_c:1": {
+      "zone": 1,
+      "metric": "iae_normalized_c",
+      "segment": 1,
+      "n": 6,
+      "mean": 1.11865486926355,
+      "std_c": 0.04349484343176109,
+      "noise_floor_c": 0.11411257702741073
+    },
+    "z1:iae_normalized_whole_c:whole": {
+      "zone": 1,
+      "metric": "iae_normalized_whole_c",
+      "segment": null,
+      "n": 6,
+      "mean": 1.1904047179791915,
+      "std_c": 0.031809904603958924,
+      "noise_floor_c": 0.07708935721812415
+    },
+    "z1:ramp_mean_error_c:0": {
+      "zone": 1,
+      "metric": "ramp_mean_error_c",
+      "segment": 0,
+      "n": 6,
+      "mean": 0.6429904604463482,
+      "std_c": 0.07927877560879089,
+      "noise_floor_c": 0.19309948841175095
+    },
+    "z1:ramp_mean_error_c:1": {
+      "zone": 1,
+      "metric": "ramp_mean_error_c",
+      "segment": 1,
+      "n": 6,
+      "mean": 0.6557384378695043,
+      "std_c": 0.03823913057208512,
+      "noise_floor_c": 0.09372460496613966
+    },
+    "z1:ramp_worst_error_c:0": {
+      "zone": 1,
+      "metric": "ramp_worst_error_c",
+      "segment": 0,
+      "n": 6,
+      "mean": 2.0016666666666665,
+      "std_c": 0.11686174167222932,
+      "noise_floor_c": 0.26000000000000156
+    },
+    "z1:ramp_worst_error_c:1": {
+      "zone": 1,
+      "metric": "ramp_worst_error_c",
+      "segment": 1,
+      "n": 6,
+      "mean": 2.0433333333333343,
+      "std_c": 0.09729679679550844,
+      "noise_floor_c": 0.269999999999996
+    },
+    "z1:settle_time_s:0": {
+      "zone": 1,
+      "metric": "settle_time_s",
+      "segment": 0,
+      "n": 6,
+      "mean": 276.3333333333333,
+      "std_c": 40.22271331805783,
+      "noise_floor_c": 105.0
+    },
+    "z1:settle_time_s:1": {
+      "zone": 1,
+      "metric": "settle_time_s",
+      "segment": 1,
+      "n": 6,
+      "mean": 217.66666666666666,
+      "std_c": 27.551164524692357,
+      "noise_floor_c": 68.0
+    },
+    "z2:dwell_entry_overshoot_peak_c:0": {
+      "zone": 2,
+      "metric": "dwell_entry_overshoot_peak_c",
+      "segment": 0,
+      "n": 6,
+      "mean": 1.7800000000000011,
+      "std_c": 0.08124038404636129,
+      "noise_floor_c": 0.19000000000000483
+    },
+    "z2:dwell_entry_overshoot_peak_c:1": {
+      "zone": 2,
+      "metric": "dwell_entry_overshoot_peak_c",
+      "segment": 1,
+      "n": 6,
+      "mean": 1.586666666666666,
+      "std_c": 0.0784006802691571,
+      "noise_floor_c": 0.21000000000000085
+    },
+    "z2:dwell_entry_time_to_peak_s:0": {
+      "zone": 2,
+      "metric": "dwell_entry_time_to_peak_s",
+      "segment": 0,
+      "n": 6,
+      "mean": 71.16666666666667,
+      "std_c": 4.262237284181474,
+      "noise_floor_c": 11.0
+    },
+    "z2:dwell_entry_time_to_peak_s:1": {
+      "zone": 2,
+      "metric": "dwell_entry_time_to_peak_s",
+      "segment": 1,
+      "n": 6,
+      "mean": 103.83333333333333,
+      "std_c": 6.306081720582652,
+      "noise_floor_c": 16.0
+    },
+    "z2:dwell_steady_state_offset_c:0": {
+      "zone": 2,
+      "metric": "dwell_steady_state_offset_c",
+      "segment": 0,
+      "n": 6,
+      "mean": 0.9253197193414398,
+      "std_c": 0.05008059356467285,
+      "noise_floor_c": 0.1426343384889286
+    },
+    "z2:dwell_steady_state_offset_c:1": {
+      "zone": 2,
+      "metric": "dwell_steady_state_offset_c",
+      "segment": 1,
+      "n": 6,
+      "mean": 0.7655535087719296,
+      "std_c": 0.021291348279101854,
+      "noise_floor_c": 0.06008421052631596
+    },
+    "z2:dwell_steady_state_offset_c:2": {
+      "zone": 2,
+      "metric": "dwell_steady_state_offset_c",
+      "segment": 2,
+      "n": 6,
+      "mean": 0.44666666666666544,
+      "std_c": 0.09479803092188378,
+      "noise_floor_c": 0.269999999999996
+    },
+    "z2:iae_normalized_c:0": {
+      "zone": 2,
+      "metric": "iae_normalized_c",
+      "segment": 0,
+      "n": 6,
+      "mean": 0.9502886552379249,
+      "std_c": 0.09967006997577164,
+      "noise_floor_c": 0.28469845585594833
+    },
+    "z2:iae_normalized_c:1": {
+      "zone": 2,
+      "metric": "iae_normalized_c",
+      "segment": 1,
+      "n": 6,
+      "mean": 0.8076896400635566,
+      "std_c": 0.02511800158879251,
+      "noise_floor_c": 0.06679007209219046
+    },
+    "z2:iae_normalized_whole_c:whole": {
+      "zone": 2,
+      "metric": "iae_normalized_whole_c",
+      "segment": null,
+      "n": 6,
+      "mean": 0.8764605831480328,
+      "std_c": 0.05407503091480317,
+      "noise_floor_c": 0.14730421418749529
+    },
+    "z2:ramp_mean_error_c:0": {
+      "zone": 2,
+      "metric": "ramp_mean_error_c",
+      "segment": 0,
+      "n": 6,
+      "mean": 0.42576623603421554,
+      "std_c": 0.13727556299878996,
+      "noise_floor_c": 0.3637799837861039
+    },
+    "z2:ramp_mean_error_c:1": {
+      "zone": 2,
+      "metric": "ramp_mean_error_c",
+      "segment": 1,
+      "n": 6,
+      "mean": 0.1277666651051245,
+      "std_c": 0.046012168801981,
+      "noise_floor_c": 0.11006772009029357
+    },
+    "z2:ramp_worst_error_c:0": {
+      "zone": 2,
+      "metric": "ramp_worst_error_c",
+      "segment": 0,
+      "n": 6,
+      "mean": 1.8650000000000002,
+      "std_c": 0.20868636754709163,
+      "noise_floor_c": 0.5899999999999999
+    },
+    "z2:ramp_worst_error_c:1": {
+      "zone": 2,
+      "metric": "ramp_worst_error_c",
+      "segment": 1,
+      "n": 6,
+      "mean": 1.4400000000000002,
+      "std_c": 0.08602325267042535,
+      "noise_floor_c": 0.22999999999999687
+    },
+    "z2:settle_time_s:0": {
+      "zone": 2,
+      "metric": "settle_time_s",
+      "segment": 0,
+      "n": 6,
+      "mean": 195.5,
+      "std_c": 12.340988615179905,
+      "noise_floor_c": 32.0
+    },
+    "z2:settle_time_s:1": {
+      "zone": 2,
+      "metric": "settle_time_s",
+      "segment": 1,
+      "n": 6,
+      "mean": 182.0,
+      "std_c": 4.0,
+      "noise_floor_c": 11.0
+    }
+  },
+  "start_conditions": {
+    "like_for_like_threshold_c": 1.0,
+    "n_runs": 6,
+    "n_missing_start_temp": 0,
+    "runs": [
+      {
+        "path": "logs/coupling/noise_floor_p7_run1.jsonl",
+        "start": {
+          "path": "logs/coupling/noise_floor_p7_run1.jsonl",
+          "channels": [
+            {
+              "channel": 0,
+              "temp_c": 28.67,
+              "cj_c": 28.14,
+              "valid": true,
+              "delta_c": 0.5300000000000011
+            },
+            {
+              "channel": 1,
+              "temp_c": 28.68,
+              "cj_c": 28.52,
+              "valid": true,
+              "delta_c": 0.16000000000000014
+            },
+            {
+              "channel": 2,
+              "temp_c": 28.58,
+              "cj_c": 28.8,
+              "valid": true,
+              "delta_c": -0.22000000000000242
+            }
+          ],
+          "enclosure_temp_c": 28.55,
+          "start_temp_c_mean": 28.643333333333334,
+          "cj_c_mean": 28.486666666666668,
+          "delta_c_mean": 0.1566666666666663
+        },
+        "outcome": 1.19722426792916
+      },
+      {
+        "path": "logs/coupling/noise_floor_p7b_run1.jsonl",
+        "start": {
+          "path": "logs/coupling/noise_floor_p7b_run1.jsonl",
+          "channels": [
+            {
+              "channel": 0,
+              "temp_c": 27.1,
+              "cj_c": 28.23,
+              "valid": true,
+              "delta_c": -1.129999999999999
+            },
+            {
+              "channel": 1,
+              "temp_c": 27.08,
+              "cj_c": 28.52,
+              "valid": true,
+              "delta_c": -1.4400000000000013
+            },
+            {
+              "channel": 2,
+              "temp_c": 28.61,
+              "cj_c": 28.62,
+              "valid": true,
+              "delta_c": -0.010000000000001563
+            }
+          ],
+          "enclosure_temp_c": 27.3,
+          "start_temp_c_mean": 27.596666666666664,
+          "cj_c_mean": 28.456666666666667,
+          "delta_c_mean": -0.8600000000000007
+        },
+        "outcome": 1.175911111111111
+      },
+      {
+        "path": "logs/coupling/noise_floor_p7c_run1.jsonl",
+        "start": {
+          "path": "logs/coupling/noise_floor_p7c_run1.jsonl",
+          "channels": [
+            {
+              "channel": 0,
+              "temp_c": 29.08,
+              "cj_c": 28.06,
+              "valid": true,
+              "delta_c": 1.0199999999999996
+            },
+            {
+              "channel": 1,
+              "temp_c": 28.84,
+              "cj_c": 28.27,
+              "valid": true,
+              "delta_c": 0.5700000000000003
+            },
+            {
+              "channel": 2,
+              "temp_c": 28.42,
+              "cj_c": 28.39,
+              "valid": true,
+              "delta_c": 0.030000000000001137
+            }
+          ],
+          "enclosure_temp_c": 26.98,
+          "start_temp_c_mean": 28.78,
+          "cj_c_mean": 28.24,
+          "delta_c_mean": 0.5400000000000004
+        },
+        "outcome": 1.2102241044644433
+      },
+      {
+        "path": "logs/coupling/noise_floor_p7d_run1.jsonl",
+        "start": {
+          "path": "logs/coupling/noise_floor_p7d_run1.jsonl",
+          "channels": [
+            {
+              "channel": 0,
+              "temp_c": 28.62,
+              "cj_c": 27.59,
+              "valid": true,
+              "delta_c": 1.0300000000000011
+            },
+            {
+              "channel": 1,
+              "temp_c": 28.39,
+              "cj_c": 27.83,
+              "valid": true,
+              "delta_c": 0.5600000000000023
+            },
+            {
+              "channel": 2,
+              "temp_c": 27.95,
+              "cj_c": 27.91,
+              "valid": true,
+              "delta_c": 0.03999999999999915
+            }
+          ],
+          "enclosure_temp_c": 26.27,
+          "start_temp_c_mean": 28.320000000000004,
+          "cj_c_mean": 27.776666666666667,
+          "delta_c_mean": 0.5433333333333342
+        },
+        "outcome": 1.2696494917630565
+      },
+      {
+        "path": "logs/coupling/noise_floor_p7d_run2.jsonl",
+        "start": {
+          "path": "logs/coupling/noise_floor_p7d_run2.jsonl",
+          "channels": [
+            {
+              "channel": 0,
+              "temp_c": 29.01,
+              "cj_c": 28.08,
+              "valid": true,
+              "delta_c": 0.9300000000000033
+            },
+            {
+              "channel": 1,
+              "temp_c": 28.98,
+              "cj_c": 28.34,
+              "valid": true,
+              "delta_c": 0.6400000000000006
+            },
+            {
+              "channel": 2,
+              "temp_c": 28.66,
+              "cj_c": 28.39,
+              "valid": true,
+              "delta_c": 0.2699999999999996
+            }
+          ],
+          "enclosure_temp_c": 26.52,
+          "start_temp_c_mean": 28.883333333333336,
+          "cj_c_mean": 28.27,
+          "delta_c_mean": 0.6133333333333345
+        },
+        "outcome": 1.2200653941322022
+      },
+      {
+        "path": "logs/coupling/noise_floor_p7d_run3.jsonl",
+        "start": {
+          "path": "logs/coupling/noise_floor_p7d_run3.jsonl",
+          "channels": [
+            {
+              "channel": 0,
+              "temp_c": 28.8,
+              "cj_c": 27.78,
+              "valid": true,
+              "delta_c": 1.0199999999999996
+            },
+            {
+              "channel": 1,
+              "temp_c": 28.58,
+              "cj_c": 28.0,
+              "valid": true,
+              "delta_c": 0.5799999999999983
+            },
+            {
+              "channel": 2,
+              "temp_c": 28.43,
+              "cj_c": 28.23,
+              "valid": true,
+              "delta_c": 0.1999999999999993
+            }
+          ],
+          "enclosure_temp_c": 26.45,
+          "start_temp_c_mean": 28.603333333333335,
+          "cj_c_mean": 28.003333333333334,
+          "delta_c_mean": 0.5999999999999991
+        },
+        "outcome": 1.2692746750965929
+      }
+    ],
+    "start_temp_c_min": 27.596666666666664,
+    "start_temp_c_max": 28.883333333333336,
+    "start_temp_c_range": 1.2866666666666724,
+    "like_for_like": false,
+    "monotonic_with_run_order": false,
+    "warning": "start temperatures span 1.29C (min 27.60, max 28.88) across 6 runs, exceeding the 1.00C like-for-like threshold -- these runs are NOT a like-for-like repeat set, and the noise floor computed from them may be inflated by start-temperature drift (self-heating of the on-board cold junction) rather than measuring controller noise alone.",
+    "vs_outcome": {
+      "metric": "iae_normalized_whole_c (mean across zones)",
+      "n": 6,
+      "pairs": [
+        {
+          "path": "logs/coupling/noise_floor_p7_run1.jsonl",
+          "start_temp_c": 28.643333333333334,
+          "outcome": 1.19722426792916
+        },
+        {
+          "path": "logs/coupling/noise_floor_p7b_run1.jsonl",
+          "start_temp_c": 27.596666666666664,
+          "outcome": 1.175911111111111
+        },
+        {
+          "path": "logs/coupling/noise_floor_p7c_run1.jsonl",
+          "start_temp_c": 28.78,
+          "outcome": 1.2102241044644433
+        },
+        {
+          "path": "logs/coupling/noise_floor_p7d_run1.jsonl",
+          "start_temp_c": 28.320000000000004,
+          "outcome": 1.2696494917630565
+        },
+        {
+          "path": "logs/coupling/noise_floor_p7d_run2.jsonl",
+          "start_temp_c": 28.883333333333336,
+          "outcome": 1.2200653941322022
+        },
+        {
+          "path": "logs/coupling/noise_floor_p7d_run3.jsonl",
+          "start_temp_c": 28.603333333333335,
+          "outcome": 1.2692746750965929
+        }
+      ],
+      "pearson_r": 0.34046814315206764,
+      "caution": "n is too small for a correlation coefficient to be meaningful on its own at this sample size -- read the raw pairs, not just pearson_r, and do not treat this as evidence of a start-temp effect from this sample alone."
+    }
+  }
 }
