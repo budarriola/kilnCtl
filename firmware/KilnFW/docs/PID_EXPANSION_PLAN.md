@@ -1407,6 +1407,16 @@ goes as `T⁴`, so the plant at kiln temperatures is not the plant identified he
 Every result in §2 validates the **mechanism**, not the behaviour at firing
 temperature. This stays open until a real firing.
 
+**Unmeasured mains voltage is a second, standing confound.** Per
+`firmware/SaftyFW/docs/CURRENT_SENSE.md` §"`mains_voltage_v` is a nominal":
+"There is no voltage measurement anywhere in this design. `mains_voltage_v` is
+a commissioning constant... Kiln elements are resistive, so power goes as
+V²... a 5% supply sag... is a 10% error in the power figure." That error is
+uninstrumented and uncompensated in every gain identification, every A/B
+controller comparison, and the noise-floor campaign (§3.3, §3.7 above): some
+fraction of any run-to-run scatter could be mains sag rather than the
+controller, and this cannot currently be ruled in or out.
+
 ### 3.8 Load sensitivity — never tested on hardware, simulator-only 2026-09-02
 
 The bench identification (K_full/tau §3.2) and the ADOPTED matrix were measured
@@ -1810,3 +1820,93 @@ impossible), `test_relay_run_healthy_rising_element_does_not_spuriously_trip`
 Both regression tests were confirmed red by mutation (reverting the
 `commanded_duty` expression, and separately dropping the `progress_duty_min`
 override) before the fix landed.
+
+---
+
+## 7. Ramp assist / schedule-stretching (owner decisions 2026-08-31, plan 2026-09-02)
+
+Owner decisions:
+
+- Max-ramp capability is extrapolated above the ~80 °C measured band (§3.4,
+  §3.7); every reported point is labelled measured vs extrapolated. Owner's
+  reasoning: even with a real kiln on hand, tuning will not happen at maximum
+  temperature.
+- Unachievable profiles auto-stretch so every target is still reached, EXCEPT
+  a target above the kiln's permitted maximum, which is a hard refusal, never
+  stretched.
+- Dwell credit is weighted by heat work, accrues only while the kiln is NOT
+  rising at the desired rate, and its band runs from the target down half a
+  cone step (cone spacing is non-uniform).
+- Cone table covers the full Orton range, cone 022 to 14.
+- The feature ships behind a setting, default OFF, to be defaulted ON once
+  validated on a real firing. Warnings surface three ways: a web banner, an
+  event-log entry, and the LCD.
+- Load/mass is not measurable — load estimation from available captures was
+  investigated and found not observable (§3.8) — so the loaded-kiln warning
+  is qualitative only and must not predict a magnitude.
+
+Landing here rather than a new doc: this is control-algorithm work on the
+same executor/feedforward machinery §3 already covers, not a new subsystem.
+
+### 7.1 Lag detection — ALREADY BUILT, do not rebuild
+
+`profile_executor.c`'s ramp-lock (~line 354-369) already detects "not
+achieving the commanded ramp rate": a zone is lagging when
+`|actual_c - target_c| > EXEC_RAMP_LOCK_BAND_C(zi)` (3 °C,
+`profile_executor_internal.h` ~585), tracked per-tick into
+`s_exec.ramp_lock_held` / `s_exec.ramp_lock_lagging_mask`. While held, the
+shared `target_c` simply stops advancing (segment-stepping code just below).
+This alone already guarantees every ramp endpoint is eventually reached,
+including back-to-back ramps with no dwell between them — ramp assist adds
+credit and warnings on top of this signal, it does not need a second lag
+detector.
+
+### 7.2 Auto-stretch — NOT STARTED
+
+Formally extend a segment's schedule to the achievable rate when ramp-lock
+would otherwise hold indefinitely. Hard constraint: a segment target above
+the zone's `max_temp_c` ceiling is a hard refusal, never stretched — do not
+let auto-stretch's "always reach the target" goal override this. `max_temp_c`
+and the ramp ceiling are already re-checked at firing start in
+`profile_executor_run.c` (~line 231-321, ~line 505-528); the achievability
+gate belongs beside those checks, not as a separate pass.
+
+### 7.3 Dwell credit — NOT STARTED
+
+Heat-work-weighted accumulator, active only while the kiln is not rising at
+the desired rate, band from the segment target down half a cone step (uses
+the new `cone_table.c`/`.h`, Orton 022-14, already landed by another agent —
+half-step band and Arrhenius heat-work weighting come from that module).
+Blocker found in survey: `profile_executor.c` (~line 461-465) zeroes
+`segment_elapsed_s` exactly at the ramp→dwell transition, discarding the
+near-target history the credit needs to accrue from. New accumulator state is
+required; it cannot be reconstructed from `segment_elapsed_s` after the fact.
+
+### 7.4 Warning surfaces — NOT STARTED
+
+All three the owner asked for, all while ramp-lock is holding:
+- Web banner (dashboard_http.c already reports `ramp_assist_enabled`,
+  ~line 442/930 — the lagging/stretch state needs the same treatment).
+- Event-log entry with the actual numbers (target, actual, lag duration) so
+  it can be analysed after the firing, not just observed live.
+- LCD. Constraint: KilnFW LCD pages are 320x480 LVGL and must fit without
+  scrolling — split into a separate page rather than scroll an existing one.
+
+### 7.5 `ramp_assist_enabled` setting — LANDING NOW (another agent)
+
+`ramp_assist_cfg.c`/`.h` exist, kiln-wide, persisted, default OFF, wired into
+`dashboard_http.c` and `diagnostics_http.c` (`GET /api/ramp_assist`). Defaults
+to ON only once validated on a real firing (§7.6). **Testing hazard:** if left
+enabled during a tuning run or an A/B comparison, it silently changes ramps
+and dwells mid-run and invalidates the measurement. Experiments must PIN the
+flag explicitly rather than inherit whatever it defaults to.
+
+### 7.6 Validation before defaulting ON — NOT STARTED
+
+Simulator can check: auto-stretch never produces a target above `max_temp_c`
+(hard-refusal path); dwell credit accrual/band arithmetic against known
+cone-table inputs; ramp-lock interaction (assist must not fight the existing
+lock). Simulator CANNOT check: whether the extrapolated max-ramp curve above
+~80 °C (§3.7) matches a real kiln, or whether the credit's heat-work weight
+tracks an actual ware load. A real firing is required before the default
+flips to ON, specifically to observe those two.

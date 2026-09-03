@@ -85,9 +85,8 @@ board, so a fix found in one project's copy often applies to the other's too.
 
 ### Schematics (hardware/mainBoard/)
 - **hardware/mainBoard/kiln.kicad_sch** — Main schematic file; top-level hierarchy
-- **hardware/mainBoard/MainControler.kicad_sch** — Arduino Nano-based main processor
+- **hardware/mainBoard/MainControler.kicad_sch** — ESP32-S3-DevKitC main processor
 - **hardware/mainBoard/Thermocouple.kicad_sch** — MAX31856 thermocouple interface (5 channels)
-- **hardware/mainBoard/ADC.kicad_sch** — ADS1118 analog-to-digital converter
 - **hardware/mainBoard/Power.kicad_sch** — Input power conditioning and protection
 - **hardware/mainBoard/Regulators.kicad_sch** — 5V and 3.3V LDO regulators
 - **hardware/mainBoard/5V_Regulator.kicad_sch** — Dedicated 5V regulation block
