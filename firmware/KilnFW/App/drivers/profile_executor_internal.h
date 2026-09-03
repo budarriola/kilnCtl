@@ -542,8 +542,27 @@ typedef struct {
      * doc comment further up): applying the smallest zone's earned credit
      * is the conservative choice -- no zone is ever credited for heat work
      * it did not itself accrue. Zeroed by profile_executor_run() like the
-     * rest of this struct's per-run state. */
+     * rest of this struct's per-run state.
+     *
+     * EXTENDED (2026-09-03, sec 7.6, bounded in-dwell credit): this field is
+     * now specifically the ENTRY portion of a dwell's total spend -- the
+     * one-time snapshot taken exactly as before. It no longer alone decides
+     * how long the dwell is shortened by; profile_executor.c's dwelling-
+     * transition code combines it with live in-dwell top-up (ramp_assist_
+     * dwell_credit_peek_min_s()) via ramp_assist_dwell_credit_total_spend_s(),
+     * bounded by dwell_credit_cap_s below. This field itself is still only
+     * ever written once per dwell, at entry -- do not start writing it every
+     * tick, or the "last spend actually applied" reporting semantics this
+     * comment describes break. */
     float dwell_credit_applied_s;
+    /* PID_EXPANSION_PLAN.md sec 7.6: fixed cap on THIS dwell's total credit
+     * spend (entry + in-dwell top-up combined), computed once at dwell entry
+     * as nominal_dwell_s * EXEC_DWELL_CREDIT_MAX_FRACTION and never changed
+     * again until the next dwell entry recomputes it. See EXEC_DWELL_CREDIT_
+     * MAX_FRACTION's own doc comment for why that fraction is safe. Zeroed
+     * by profile_executor_run() like the rest of this struct's per-run
+     * state. */
+    float dwell_credit_cap_s;
 
     /* zones_config_generation() as of the last time this run read zone
      * settings (TODO.md 6A.7, "config reload while running"). Comparing one
@@ -821,6 +840,81 @@ static inline bool ramp_assist_credit_should_accrue(profile_seg_kind_t seg_kind)
  * active zones returns 0.0f. */
 float ramp_assist_dwell_credit_spend(s_exec_state_t *ex, float nominal_dwell_s,
                                      bool assist_enabled);
+
+/* PID_EXPANSION_PLAN.md sec 7.6: BOUNDED in-dwell dwell credit. The owner's
+ * decision (2026-09-03) is to let credit accrued DURING a dwell shorten that
+ * SAME dwell -- previously impossible, because profile_executor.c froze the
+ * spend snapshot at dwell entry (commit 0402ecb) specifically so a dwell
+ * could not shorten itself; that freeze is what made the terminal dwell's
+ * banked credit (424s at bisque 4x mass) unspendable, since a terminal dwell
+ * has no "next" dwell to apply it to. Relaxing the freeze reintroduces
+ * exactly the hazard 0402ecb existed to prevent (unbounded self-shortening),
+ * so two bounds are mandatory and are the deliverable, not the feature:
+ *
+ *   1. EXEC_DWELL_CREDIT_MAX_FRACTION (below) caps the TOTAL reduction (entry
+ *      snapshot + in-dwell top-up combined) at a fixed fraction of the
+ *      nominal dwell -- no amount of banked heat-work credit, however large,
+ *      can cut a dwell by more than that fraction. This is what keeps "N
+ *      minutes of timer, not a soak" true even with the freeze relaxed: at
+ *      least (1 - EXEC_DWELL_CREDIT_MAX_FRACTION) of the nominal dwell is
+ *      always honored on the wall clock, so a dwell can never degrade into
+ *      "leave the instant actual_c arrives".
+ *   2. ramp_assist_dwell_target_reached() (below) must be true before ANY
+ *      credit-shortened exit -- a dwell can end early only once the zone has
+ *      actually reached target_c, never before, regardless of how much
+ *      credit is banked. Combined with the cap, self-shortening cannot run
+ *      away: the earliest a credited exit can happen is bounded below by
+ *      nominal_dwell_s * (1 - EXEC_DWELL_CREDIT_MAX_FRACTION), and it can
+ *      NEVER happen before the physical target is reached no matter how that
+ *      floor is computed.
+ *
+ * profile_executor.c's dwelling-transition code combines these as:
+ *   ready = (elapsed >= nominal_dwell_s) ||
+ *           (elapsed >= credited_threshold_s && target_reached)
+ * so the pre-existing unconditional-nominal-elapsed fallback is untouched --
+ * a dwell with no credit (assist off, or a run that never lagged) is exactly
+ * as bit-identical as before; credit only ever gives an EARLY exit option,
+ * never removes the guaranteed one. */
+
+/* Fraction of nominal_dwell_s the TOTAL bounded-credit reduction may never
+ * exceed, for any dwell, at any mass loading, however much credit is banked.
+ * 0.5f (50%): chosen so a dwell always keeps at least half its planned
+ * wall-clock length -- generous enough to matter at the load levels measured
+ * (424s banked against a 600s bisque terminal dwell, i.e. ~70% of nominal,
+ * is a case this cap is deliberately expected to bind on, per the "cap
+ * actually binds" test), while small enough that "N minutes of timer" still
+ * reads as a timed hold and not a bare "wait for temperature" soak -- the
+ * owner's explicit "must not turn it into a soak" requirement. A named
+ * constant, not a magic number, so a future change to the fraction is a
+ * one-line, reviewable decision. */
+#define EXEC_DWELL_CREDIT_MAX_FRACTION 0.5f
+
+/* Read-only peek at the minimum currently-banked dwell_credit_s across every
+ * active, non-faulted zone -- same conservative min() direction ramp_assist_
+ * dwell_credit_spend() uses, but WITHOUT resetting anything (unlike spend(),
+ * this may be called every tick of a dwell to see how much MORE credit has
+ * accrued since entry). Returns 0.0f if no zone is active. */
+float ramp_assist_dwell_credit_peek_min_s(const s_exec_state_t *ex);
+
+/* Total seconds this dwell's timer should be considered shortened by, right
+ * now: entry_applied_s (the frozen snapshot ramp_assist_dwell_credit_spend()
+ * returned at dwell entry) plus however much MORE credit has accrued live
+ * since then (ramp_assist_dwell_credit_peek_min_s()), clamped to cap_s
+ * (EXEC_DWELL_CREDIT_MAX_FRACTION * nominal_dwell_s, computed once by the
+ * caller at dwell entry) -- bound 1 above. Never negative, never exceeds
+ * cap_s regardless of how large entry_applied_s or the live peek are. */
+float ramp_assist_dwell_credit_total_spend_s(const s_exec_state_t *ex, float entry_applied_s,
+                                             float cap_s);
+
+/* Bound 2 above: true only when every active, non-faulted zone's actual_c
+ * has reached (>=) the shared s_exec.target_c (which already equals seg->
+ * target_c throughout a dwell -- profile_executor.c sets it once at dwell
+ * entry and never moves it again until the segment advances). A zone whose
+ * actual_valid is false counts as NOT reached (an invalid reading is never
+ * grounds to end a dwell early) -- same conservative direction as the credit
+ * accrual and lag-detection gates elsewhere in this file. A run with no
+ * active zones returns true (nothing to wait on). */
+bool ramp_assist_dwell_target_reached(const s_exec_state_t *ex);
 
 /* ---- history ring buffer unpack (profile_executor.c; history_pack()/the
  * pack-temp/unpack-temp helpers stay static there, only used by the same

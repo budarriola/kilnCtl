@@ -5618,6 +5618,204 @@ static void test_dwell_credit_spend_snapshot_is_frozen_against_later_accrual(voi
               "in-dwell accrual this test ran");
 }
 
+// PID_EXPANSION_PLAN.md sec 7.6: BOUNDED in-dwell dwell credit. The owner's
+// decision to let credit shorten the dwell it was earned in, but bounded so
+// it can never run away -- see EXEC_DWELL_CREDIT_MAX_FRACTION's own doc
+// comment (profile_executor_internal.h) for the full two-bound argument.
+// These tests exercise the three new pure functions profile_executor.c's
+// dwelling-transition code combines (ramp_assist_dwell_credit_peek_min_s(),
+// ramp_assist_dwell_credit_total_spend_s(), ramp_assist_dwell_target_
+// reached()) directly, the same reason every other ramp-assist test in this
+// file bypasses the unreachable FreeRTOS tick loop (see this file's top-of-
+// file note).
+
+static void test_dwell_credit_peek_min_s_does_not_reset(void)
+{
+    TEST_SECTION("ramp_assist_dwell_credit_peek_min_s() -- reads the minimum banked credit across "
+                 "active, non-faulted zones WITHOUT resetting it, unlike spend()");
+    s_exec_state_t ex;
+    memset(&ex, 0, sizeof(ex));
+    ex.zones[0].active = true;
+    ex.zones[0].dwell_credit_s = 30.0f;
+    ex.zones[1].active = true;
+    ex.zones[1].dwell_credit_s = 12.0f; // the minimum
+    ex.zones[2].active = true;
+    ex.zones[2].faulted = true; // excluded, would otherwise be the minimum
+    ex.zones[2].dwell_credit_s = 1.0f;
+
+    float peek1 = ramp_assist_dwell_credit_peek_min_s(&ex);
+    TEST_CHECK(peek1 == 12.0f, "must return the minimum across active, non-faulted zones, ignoring "
+              "the faulted zone's lower value");
+    float peek2 = ramp_assist_dwell_credit_peek_min_s(&ex);
+    TEST_CHECK(peek2 == 12.0f, "a second call must return the SAME value -- peek must not reset "
+              "anything, unlike ramp_assist_dwell_credit_spend()");
+    TEST_CHECK(ex.zones[1].dwell_credit_s == 12.0f, "the underlying zone credit must be untouched");
+}
+
+static void test_dwell_credit_total_spend_binds_at_cap(void)
+{
+    TEST_SECTION("ramp_assist_dwell_credit_total_spend_s() -- BOUND 1: the cap actually binds. A "
+                 "dwell banking far more credit (entry + in-dwell top-up) than the cap allows must "
+                 "have its reduction stop AT the cap, never beyond it");
+    s_exec_state_t ex;
+    memset(&ex, 0, sizeof(ex));
+    ex.zones[0].active = true;
+    ex.zones[0].dwell_credit_s = 500.0f; // an absurd amount of live in-dwell top-up
+
+    float nominal_s = 600.0f;
+    float cap_s = nominal_s * EXEC_DWELL_CREDIT_MAX_FRACTION; // 300.0f at the shipped 0.5 fraction
+    float entry_applied_s = 250.0f; // already a large entry snapshot on its own
+
+    float total_spend_s = ramp_assist_dwell_credit_total_spend_s(&ex, entry_applied_s, cap_s);
+
+    TEST_CHECK(total_spend_s == cap_s, "entry_applied_s (250) + live top-up (500) is 750, far more "
+              "than cap_s (300) -- the returned spend must be clamped exactly to the cap, not to "
+              "the sum");
+    TEST_CHECK(total_spend_s < entry_applied_s + ex.zones[0].dwell_credit_s,
+              "sanity check: the uncapped sum really would have exceeded the cap, so this is a real "
+              "clamp, not a vacuous pass");
+}
+
+static void test_dwell_credit_total_spend_below_cap_passes_through(void)
+{
+    TEST_SECTION("ramp_assist_dwell_credit_total_spend_s() -- when entry + top-up is UNDER the cap, "
+                 "the full combined amount is returned unclamped (the cap must not shave a "
+                 "legitimately small spend)");
+    s_exec_state_t ex;
+    memset(&ex, 0, sizeof(ex));
+    ex.zones[0].active = true;
+    ex.zones[0].dwell_credit_s = 20.0f;
+
+    float total_spend_s = ramp_assist_dwell_credit_total_spend_s(&ex, /*entry_applied_s*/ 10.0f,
+                                                                  /*cap_s*/ 300.0f);
+
+    TEST_CHECK(total_spend_s == 30.0f, "10 (entry) + 20 (top-up) = 30, well under the 300s cap -- "
+              "must pass through unclamped");
+}
+
+static void test_dwell_target_reached_false_until_every_active_zone_arrives(void)
+{
+    TEST_SECTION("ramp_assist_dwell_target_reached() -- BOUND 2: false unless EVERY active, "
+                 "non-faulted zone's actual_c has reached the shared target_c -- a single lagging "
+                 "zone must hold the whole dwell open");
+    s_exec_state_t ex;
+    memset(&ex, 0, sizeof(ex));
+    ex.target_c = 626.1f;
+    ex.zones[0].active = true;
+    ex.zones[0].actual_valid = true;
+    ex.zones[0].actual_c = 626.1f; // exactly at target
+    ex.zones[1].active = true;
+    ex.zones[1].actual_valid = true;
+    ex.zones[1].actual_c = 620.0f; // still short
+
+    TEST_CHECK(!ramp_assist_dwell_target_reached(&ex),
+              "must be false -- zone 1 has not yet reached target_c even though zone 0 has");
+
+    ex.zones[1].actual_c = 626.1f; // now caught up
+    TEST_CHECK(ramp_assist_dwell_target_reached(&ex),
+              "must become true once every active, non-faulted zone has reached target_c");
+}
+
+static void test_dwell_target_reached_invalid_reading_counts_as_not_reached(void)
+{
+    TEST_SECTION("ramp_assist_dwell_target_reached() -- an active zone with actual_valid == false "
+                 "must count as NOT reached, never as a free pass to end the dwell early");
+    s_exec_state_t ex;
+    memset(&ex, 0, sizeof(ex));
+    ex.target_c = 626.1f;
+    ex.zones[0].active = true;
+    ex.zones[0].actual_valid = false;
+    ex.zones[0].actual_c = 626.1f; // numerically at target, but the reading itself is not trusted
+
+    TEST_CHECK(!ramp_assist_dwell_target_reached(&ex),
+              "an invalid reading must never be grounds to end a dwell early, even if the stale "
+              "actual_c value happens to sit at target_c");
+}
+
+static void test_dwell_target_reached_ignores_faulted_zones(void)
+{
+    TEST_SECTION("ramp_assist_dwell_target_reached() -- a faulted zone's own reading must not block "
+                 "the dwell (consistent with every other credit/lag gate in this file, which also "
+                 "excludes faulted zones)");
+    s_exec_state_t ex;
+    memset(&ex, 0, sizeof(ex));
+    ex.target_c = 626.1f;
+    ex.zones[0].active = true;
+    ex.zones[0].actual_valid = true;
+    ex.zones[0].actual_c = 626.1f;
+    ex.zones[1].active = true;
+    ex.zones[1].faulted = true;
+    ex.zones[1].actual_valid = true;
+    ex.zones[1].actual_c = 300.0f; // far below target, but faulted -- must be ignored
+
+    TEST_CHECK(ramp_assist_dwell_target_reached(&ex),
+              "the faulted zone's own far-below-target reading must not hold the dwell open");
+}
+
+// THE RUNAWAY-IS-STILL-IMPOSSIBLE TEST (the direct descendant of test_dwell_
+// credit_spend_snapshot_is_frozen_against_later_accrual, now that the freeze
+// that test pinned has been deliberately relaxed for sec 7.6): proves the
+// two bounds TOGETHER close the exact hazard commit 0402ecb's freeze was
+// protecting against -- unbounded self-shortening. Even feeding this
+// combination an unbounded amount of credit, across many simulated ticks of
+// in-dwell accrual, the earliest a credited exit is possible never drops
+// below nominal_s * (1 - EXEC_DWELL_CREDIT_MAX_FRACTION), and no exit is
+// honored at all (this test's own emulation of profile_executor.c's
+// dwell_done combination) until target_reached goes true.
+static void test_dwell_credit_runaway_self_shortening_still_impossible(void)
+{
+    TEST_SECTION("BOUND 1 + BOUND 2 together -- unbounded in-dwell credit accrual can never shorten "
+                 "a dwell below its capped floor, and can never end it before the zone reaches "
+                 "target_c, no matter how many ticks of runaway accrual are simulated");
+    s_exec_state_t ex;
+    memset(&ex, 0, sizeof(ex));
+    ex.target_c = 626.1f;
+    ex.zones[0].active = true;
+    ex.zones[0].actual_valid = true;
+    ex.zones[0].actual_c = 600.0f; // well below target_c at dwell entry
+
+    float nominal_s = 600.0f;
+    float cap_s = nominal_s * EXEC_DWELL_CREDIT_MAX_FRACTION;
+    float entry_applied_s = 0.0f; // this dwell's own entry snapshot was 0 (nothing banked pre-entry)
+    float floor_s = nominal_s - cap_s; // the earliest a credited exit could ever occur
+
+    /* Simulate 1000 ticks of runaway in-dwell accrual -- far more than any
+     * real heat-work weight could plausibly bank, deliberately absurd to
+     * prove the bound holds no matter how large the input gets. */
+    ex.zones[0].dwell_credit_s = 0.0f;
+    for (int tick = 0; tick < 1000; tick++) {
+        ex.zones[0].dwell_credit_s += 1000.0f; // 1,000,000s of "credit" by the end -- absurd on purpose
+        float total_spend_s = ramp_assist_dwell_credit_total_spend_s(&ex, entry_applied_s, cap_s);
+        TEST_CHECK(total_spend_s <= cap_s, "total_spend_s must never exceed cap_s, at ANY tick, no "
+                  "matter how much credit has been banked by then");
+        uint32_t credited_threshold_s = (total_spend_s >= nominal_s) ? 0u
+            : (uint32_t)(nominal_s - total_spend_s);
+        TEST_CHECK((float)credited_threshold_s >= floor_s - 1.0f, "the credited threshold must never "
+                  "drop below nominal_s * (1 - EXEC_DWELL_CREDIT_MAX_FRACTION) -- the cap's floor");
+
+        /* And even once the threshold has collapsed all the way to the
+         * floor, an exit must still be refused while the zone has not
+         * reached target_c -- this is profile_executor.c's own dwell_done
+         * combination, `elapsed >= credited_threshold_s && target_reached`,
+         * reproduced here directly against the still-lagging zone. */
+        bool target_reached = ramp_assist_dwell_target_reached(&ex);
+        TEST_CHECK(!target_reached, "sanity check: this zone was never moved to target_c in this "
+                  "loop, so target_reached must stay false throughout -- proving BOUND 2 alone would "
+                  "refuse every one of these 1000 ticks' worth of runaway credit");
+        bool dwell_done_at_floor = (uint32_t)floor_s >= credited_threshold_s && target_reached;
+        TEST_CHECK(!dwell_done_at_floor, "even AT the collapsed floor, the dwell must not be allowed "
+                  "to end while target_reached is false -- runaway self-shortening stays impossible");
+    }
+
+    /* Finally: once the zone genuinely reaches target_c, a credited exit at
+     * the floor becomes legal -- proving the bounds gate correctly rather
+     * than simply never firing. */
+    ex.zones[0].actual_c = ex.target_c;
+    TEST_CHECK(ramp_assist_dwell_target_reached(&ex),
+              "once the zone reaches target_c, target_reached must go true -- the credited exit is "
+              "gated, not disabled outright");
+}
+
 // PID_EXPANSION_PLAN.md sec 7.2: ramp_assist_stretch_rate_c_per_s() -- the
 // actual control-behaviour piece of auto-stretch. Pins its sentinel/gating
 // contract (assist off, no zone sustained yet) and its rate arithmetic
@@ -6178,6 +6376,13 @@ void run_test_profile_executor_prestart(void)
     test_dwell_credit_tick_accrues_a_few_degrees_behind_not_25();
     test_ramp_assist_credit_should_accrue_ignores_dwelling();
     test_dwell_credit_spend_snapshot_is_frozen_against_later_accrual();
+    test_dwell_credit_peek_min_s_does_not_reset();
+    test_dwell_credit_total_spend_binds_at_cap();
+    test_dwell_credit_total_spend_below_cap_passes_through();
+    test_dwell_target_reached_false_until_every_active_zone_arrives();
+    test_dwell_target_reached_invalid_reading_counts_as_not_reached();
+    test_dwell_target_reached_ignores_faulted_zones();
+    test_dwell_credit_runaway_self_shortening_still_impossible();
     test_dwell_credit_spend_gated_on_flag();
     test_dwell_credit_spend_applies_when_enabled();
     test_dwell_credit_spend_clamped_to_nominal_never_negative();

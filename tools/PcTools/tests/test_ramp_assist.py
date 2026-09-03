@@ -384,31 +384,48 @@ class DwellCreditParityTests(unittest.TestCase):
 
     def test_zero_credit_still_shows_a_nominal_gap_from_catchup_lag(self):
         # A fast, hard ramp straight into a dwell where the zone is STILL
-        # below target (still catching up) when the dwell begins: this
-        # produces zero dwell credit (the ramp is fast enough it never
-        # enters the in-band-and-lagging gate at all -- rate=1000 C/min is
-        # used, not the 500 C/min the module docstring's older writeup
-        # used, because the DEFECT 2 band-width fix widens the credit band
-        # near 900 C enough that 500 C/min now earns a little real credit;
-        # 1000 C/min still earns none, see this test's own assertion
-        # below), yet parity_vs_nominal_pct is still negative -- proof the
-        # nominal-gap metric alone conflates a genuine second-order
-        # plant-lag effect with the credit mechanism, even when the credit
-        # mechanism did nothing at all.
+        # below target (still catching up) when the dwell begins, on a
+        # schedule ending in exactly ONE dwell (no later occurrence in the
+        # schedule).
+        #
+        # UPDATED (2026-09-03, sec 7.6 "bounded in-dwell dwell credit"): this
+        # test used to assert credit_s == 0.0 here -- before sec 7.6, credit
+        # banked during a terminal dwell's own in-dwell accrual (the sec 7.3
+        # extension) could NEVER be spent, because there was no later dwell
+        # occurrence to spend it against and the pre-7.6 freeze forbade
+        # spending it against the SAME occurrence that earned it. That is
+        # EXACTLY the motivating bug sec 7.6 fixes: this schedule's zone does
+        # enter the credit band partway through the dwell (still below
+        # target at dwell entry, per this test's own setup), earns real
+        # credit, and that credit is now spent -- bounded by DWELL_CREDIT_
+        # MAX_FRACTION -- against this same terminal dwell. So credit_s is
+        # now REQUIRED to be nonzero here; asserting it stays 0.0 would mean
+        # sec 7.6 regressed back to the unspendable-terminal-dwell bug.
+        # parity_vs_nominal_pct is still negative on top of that real spend
+        # -- proof the nominal-gap metric still conflates a genuine
+        # second-order plant-lag effect with the credit mechanism, which is
+        # the actual point of this test and is untouched by sec 7.6.
         sched = [ra.RampStep(900.0, 1000.0), ra.DwellStep(30.0)]
         res = ra.dwell_credit_parity(sched, start_temp_c=20.0, max_temp_c=1300.0,
                                       plant_regime='physical', max_sim_s=15 * 3600.0)
         for zi, z in enumerate(res['per_zone']):
-            self.assertEqual(z['credit_s'], 0.0, f"zone {zi} should have earned no credit here")
+            self.assertGreater(z['credit_s'], 0.0,
+                               f"zone {zi} must now earn and SPEND real in-dwell credit against its "
+                               "own terminal dwell -- sec 7.6's whole point")
+            # Bound 1: DwellStep's own duration is in MINUTES (30.0 ->
+            # 1800.0 s nominal), so no combination of entry + in-dwell
+            # top-up may exceed 1800.0 * DWELL_CREDIT_MAX_FRACTION.
+            self.assertLessEqual(z['credit_s'], 1800.0 * ra.DWELL_CREDIT_MAX_FRACTION + 1e-6,
+                                 f"zone {zi} credit_s must respect the Bound-1 cap")
             self.assertLess(
                 z['parity_vs_nominal_pct'], -1.0,
                 f"zone {zi} parity_vs_nominal_pct should show a real catch-up gap")
             self.assertGreater(z['catchup_deficit_s'], 0.0, f"zone {zi} catchup_deficit_s")
-            # credit_audit_pct is nan when no credit/reference heat was ever
-            # accrued (0/0) -- also proof no credit-caused problem, since
-            # none was banked at all.
-            import math
-            self.assertTrue(math.isnan(z['credit_audit_pct']))
+            # credit_audit_pct must be finite (both the real and reference
+            # accumulators now have nonzero totals to compare) and close to
+            # 0 -- the two mirrored accumulators agree, same as every other
+            # correct-accrual assertion in this file.
+            self.assertLess(abs(z['credit_audit_pct']), 5.0, f"zone {zi} credit_audit_pct")
 
 
 class ScaleSweepDiscriminatesCreditErrorsTests(unittest.TestCase):
@@ -425,7 +442,18 @@ class ScaleSweepDiscriminatesCreditErrorsTests(unittest.TestCase):
     regression test rather than a one-off manual check.
     """
 
-    _SCHED_SRC = "[RampStep(700.0, 300.0), RampStep(803.9, 500.0), DwellStep(10.0)]"
+    # UPDATED (2026-09-03, sec 7.6 "bounded in-dwell dwell credit"): the
+    # dwell's own nominal duration was widened from 10.0 to 4000.0 minutes
+    # (240000 s -> a 120000 s Bound-1 cap) so that Bound 1's cap
+    # (DWELL_CREDIT_MAX_FRACTION * nominal_s) has enough headroom to stay
+    # clear of every scale in the sweep below, up to and including 3.0x (the
+    # largest unscaled zone bank here is ~3573 s at scale 1.0x, so ~10719 s
+    # at 3.0x -- comfortably under the 120000 s cap) -- this class's whole
+    # point is proving credit_audit_pct is exactly linear in the accrual
+    # scale factor, which only holds while the cap does not bind. A schedule
+    # where the cap binds partway through the sweep is exercised separately
+    # (see CreditExceedsDwellTests), not here.
+    _SCHED_SRC = "[RampStep(700.0, 300.0), RampStep(803.9, 500.0), DwellStep(4000.0)]"
     # lag_band_c=3.0: same mechanism-vs-shipped-default rationale as
     # DwellCreditParityTests._KW above -- this class proves credit_audit_pct
     # discriminates a scaled accrual bug WHEN credit is banked, independent
@@ -603,13 +631,24 @@ class CreditExceedsDwellTests(unittest.TestCase):
         # DwellCreditParityTests -- exercises the cap/discard behaviour when
         # credit IS banked, independent of the real 25 C band's own
         # near-empty accrual window on this schedule.
+        #
+        # UPDATED (2026-09-03, sec 7.6 "bounded in-dwell dwell credit"): the
+        # cap used to be the FULL nominal dwell (3.0 s here) -- a dwell could
+        # in principle be reduced to 0.0 s by a large enough entry snapshot.
+        # Bound 1 now fixes the cap at DWELL_CREDIT_MAX_FRACTION (0.5) of
+        # nominal_s regardless, so the capped spend here is 1.5 s, not 3.0 s
+        # -- this test's whole point (a cap exists and binds) is unchanged,
+        # only the numeric ceiling moved to match the new, tighter bound.
         sched = [ra.RampStep(700.0, 300.0), ra.RampStep(803.9, 500.0), ra.DwellStep(0.05)]
         res = ra.run_ramp_assist(sched, max_temp_c=1300.0, start_temp_c=20.0,
                                   plant_regime='physical', max_sim_s=15 * 3600.0,
                                   lag_band_c=3.0)
         self.assertEqual(res['dwell_nominal_s'], [3.0])
+        expected_cap_s = 3.0 * ra.DWELL_CREDIT_MAX_FRACTION
         for zi, spend in enumerate(res['credit_applied_s']):
-            self.assertEqual(spend, 3.0, f"zone {zi} spend should be capped at the 3 s dwell")
+            self.assertEqual(spend, expected_cap_s,
+                             f"zone {zi} spend should be capped at DWELL_CREDIT_MAX_FRACTION of the "
+                             "3 s dwell, not the far larger banked credit and not the full 3 s dwell")
         self.assertTrue(all(res['targets_reached']), res['targets_reached'])
 
 

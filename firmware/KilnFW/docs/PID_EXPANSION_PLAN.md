@@ -3543,6 +3543,131 @@ scenario, see its own RUNTIME NOTE) and `tools/PcTools/tests/
 test_ramp_assist.py` (21/21 passed, unaffected — `ramp_assist.py` itself
 was not modified for this section).
 
+#### 7.6.2a BOUNDED in-dwell dwell credit (owner decision, 2026-09-03)
+
+**The owner's decision, following §7.6.2's "does not materially help" and
+"recommendation" paragraphs: let credit shorten the dwell it was earned in,
+but BOUNDED so it can never run away.** §7.6.2 measured that heavy-load
+credit accrues mostly during the terminal dwell itself (§7.3's extended-
+past-ramp-end accrual) and is then discarded, because commit `0402ecb`
+deliberately froze the spend snapshot at dwell entry so a dwell could never
+shorten itself. This section relaxes that freeze — the two bounds below
+are what make that relaxation safe, and are the deliverable this section
+documents, not the feature.
+
+**Bound 1 — a fixed cap on the total reduction.** `EXEC_DWELL_CREDIT_MAX_
+FRACTION` (firmware: `profile_executor_internal.h`; simulator: `ramp_assist.
+py`'s `DWELL_CREDIT_MAX_FRACTION`) = **0.5**. No combination of the frozen
+entry-snapshot spend and any amount of in-dwell top-up accrued afterward
+may ever reduce a dwell's timer by more than half its nominal duration —
+computed once, at dwell entry, as `nominal_dwell_s * 0.5`, and never
+recomputed upward for the life of that dwell occurrence. **Why 0.5 is safe
+and why it keeps "N minutes of timer, not a soak" true:** at least half of
+every dwell's planned wall-clock length is always honored regardless of how
+much heat-work credit is banked, however implausibly large — a dwell can
+degrade toward "half as long as planned" in the worst case, never toward
+"ends the instant the zone arrives." That is what distinguishes a
+(bounded-)shortened TIMED HOLD from a bare "wait for temperature" soak: a
+soak has no wall-clock floor at all, and this cap guarantees one always
+exists. 0.5 was chosen, not derived, against the measured heavy-load
+numbers below (bisque 1x is the one case that hits it, at exactly 900.0 s
+of a 1800 s dwell) — generous enough to matter at the load levels this
+section measures, small enough that the floor is still substantial.
+
+**Bound 2 — never before the zone reaches target.** `ramp_assist_dwell_
+target_reached()` (firmware, `profile_executor_ramp_assist.c`) /
+the `target_reached` computation in `ramp_assist.py`'s `DwellStep` branch:
+true only once every active, non-faulted zone's `actual_c` has reached the
+dwell's own held target (an invalid reading counts as NOT reached — never a
+free pass). A credited early exit is honored ONLY when this is true, in
+addition to Bound 1's threshold having been reached; the pre-existing
+unconditional "elapsed >= nominal_dwell_s" fallback is untouched, so a run
+with no credit (or `ramp_assist_cfg_enabled() == false`) stays exactly as
+it was before this section — credit only ever grants an EARLIER exit
+option, never removes the guaranteed one, and a dwell that never reaches
+target still ends at the full nominal duration rather than hanging.
+
+**Together, these make the exact hazard `0402ecb`'s freeze existed to
+prevent — unbounded self-shortening — impossible:** the earliest a credited
+exit can occur is bounded below by `nominal_dwell_s * (1 - 0.5)`, and no
+exit at all is possible before Bound 2 is satisfied, however much credit is
+banked. Firmware: `test_dwell_credit_total_spend_binds_at_cap` (the cap
+proof — negative-tested by disabling the clamp in `ramp_assist_dwell_
+credit_total_spend_s()`, which produced the real failures `entry_applied_s
+(250) + live top-up (500) is 750, far more than cap_s (300)` and `total_
+spend_s must never exceed cap_s`), `test_dwell_target_reached_false_until_
+every_active_zone_arrives` / `test_dwell_target_reached_invalid_reading_
+counts_as_not_reached` (Bound 2 — negative-tested by disabling the gate in
+`ramp_assist_dwell_target_reached()`, which produced `must be false --
+zone 1 has not yet reached target_c` and `an invalid reading must never be
+grounds to end a dwell early`), and `test_dwell_credit_runaway_self_
+shortening_still_impossible` (both bounds together, across 1000 simulated
+ticks of absurd runaway accrual — negative-tested the same way, producing
+`even AT the collapsed floor, the dwell must not be allowed to end while
+target_reached is false`) — all in
+`firmware/KilnFW/App/test/test_profile_executor_prestart.c`. Simulator:
+`CreditExceedsDwellTests`/`BisqueLightLoadCapBindsTests` in `tools/PcTools/
+tests/test_ramp_assist.py` and `test_ramp_assist_cone_scale.py`
+(negative-tested by disabling the same clamp in `ramp_assist.py`'s
+`total_spend_s` line, producing `bisque 1x credit_s must be capped at
+exactly ... (900.0 s), not the far larger 1227.5 s banked`).
+
+**Re-run against the same realistic multi-segment schedules §7.6.2's table
+used (bisque/cone 6/cone 10 × 1x/2x/4x mass), banked/SPENT/discarded and
+spent as a percentage of the dwell it applied to, alongside §7.6.2's own
+figures for direct comparison:**
+
+| schedule | mass_mult | banked | SPENT (§7.6.2, frozen-only) | SPENT (this section, bounded in-dwell) | discarded | spent % of that dwell (this section) |
+|---|---|---:|---:|---:|---:|---:|
+| bisque | 1x | 1227.5 s | 619.4 s | **900.0 s (capped)** | 327.5 s | 50.0% |
+| bisque | 2x | 153.3 s | 153.3 s | 153.3 s | 0.0 s | 8.5% |
+| bisque | 4x | 425.9 s | 1.6 s | **425.9 s** | 0.0 s | 23.7% |
+| cone 6 | 1x | 342.4 s | 105.4 s | 342.4 s | 0.0 s | 38.0% |
+| cone 6 | 2x | 0.0 s | 0.0 s | 0.0 s | 0.0 s | 0.0% |
+| cone 6 | 4x | 53.1 s | 0.0 s | **53.1 s** | 0.0 s | 5.9% |
+| cone 10 | 1x | 406.5 s | 406.5 s | 406.5 s | 0.0 s | 45.2% |
+| cone 10 | 2x | 406.2 s | 406.2 s | 406.2 s | 0.0 s | 45.1% |
+| cone 10 | 4x | 19.6 s | 0.0 s | **19.6 s** | 0.0 s | 2.2% |
+
+(Single-segment, non-multi-segment shipped-target scenarios show the same
+pattern — see `BisqueLightLoadCapBindsTests`/`CreditCollapsesAtHeavierLoad
+Tests` in `test_ramp_assist_cone_scale.py` for those figures; bisque single-
+segment 1x also binds the cap at exactly 900.0 s of 1800 s.)
+
+**Verdict on the owner's motivating question (a kiln tuned empty then fired
+full): YES, this now materially helps, reversing §7.6.2's "does not
+materially help" verdict for exactly the heavy-load cells that verdict was
+about.** At 4x mass, spent credit went from 0.1%/0.0%/0.0% (bisque/cone
+6/cone 10, §7.6.2's frozen-snapshot figures) to **23.7%/5.9%/2.2%** — the
+in-dwell accrual that used to be banked and then discarded (the "discarded"
+column above collapses to 0.0 s everywhere except 1x, where the CAP is now
+what limits it, not the freeze) is now spent, bounded, against the same
+dwell it was earned in. bisque is the standout case both light and heavy:
+23.7% at 4x is a genuinely material reduction of a 30-minute terminal
+dwell. cone 6 at 4x stays comparatively small (5.9%) because, per §7.6.2's
+own "what multi-segment structure changes" paragraph, this specific
+target/mass combination simply banks less real heat-work credit in the
+first place — Bound 1's cap is not what limits it (53.1 s is nowhere near
+the 450 s cap that dwell's 900 s nominal duration allows). The
+recommendation in §7.6.2 (a second cone-table floor extension to cover
+candling temperatures) remains unbuilt and is now lower-priority: the
+terminal dwell — the one dwell every shipped recipe's candle-below-586.1°C
+shape guarantees credit will accrue into — is the one this section's fix
+makes spendable.
+
+Full re-run:
+`powershell.exe -ExecutionPolicy Bypass -File firmware/KilnFW/App/test/build_host_tests.ps1`
+(21/21 host executables — `main`, an unrelated executable owned by a
+concurrent session's in-flight edits to `uart_owner.h`/`uart_protocol.h`/
+`gpio_probe.c`, intermittently failed to build during this pass; none of
+those files were touched here and `test_profile_executor_prestart`'s own
+4768/4768 checks passed every run), `build_kilnfw` (OK), and
+`tools/PcTools/.venv/Scripts/python.exe -m pytest tools/PcTools/tests/
+test_ramp_assist.py tools/PcTools/tests/test_ramp_assist_cone_scale.py`
+(21/21 and 15/15 passed respectively, run in foreground batches small
+enough to fit the tool's per-call timeout — the full multi-segment scan
+takes roughly 9-13 minutes wall clock).
+
 ## 2026-09-03: ramp-lock hot-start stall (confirmed executor defect, fixed)
 
 **The defect (owner-confirmed via adversarial code review).**

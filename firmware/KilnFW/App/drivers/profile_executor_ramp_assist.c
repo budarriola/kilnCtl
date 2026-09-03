@@ -280,3 +280,58 @@ float ramp_assist_dwell_credit_spend(s_exec_state_t *ex, float nominal_dwell_s, 
     if (spend > nominal_dwell_s) spend = nominal_dwell_s; /* clamp to the nominal dwell */
     return spend;
 }
+
+// PID_EXPANSION_PLAN.md sec 7.6: bounded in-dwell dwell credit -- the read
+// half. See these three functions' own declaration comments (profile_
+// executor_internal.h, right after ramp_assist_dwell_credit_spend()) for the
+// two-bound safety argument; this file only implements the arithmetic.
+
+float ramp_assist_dwell_credit_peek_min_s(const s_exec_state_t *ex)
+{
+    float min_credit_s = -1.0f; /* sentinel: "no active zone seen yet" */
+    for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+        const zone_runtime_t *z = &ex->zones[zi];
+        if (!z->active || z->faulted) {
+            continue;
+        }
+        if (min_credit_s < 0.0f || z->dwell_credit_s < min_credit_s) {
+            min_credit_s = z->dwell_credit_s;
+        }
+        /* Deliberately no reset here -- that is exactly what makes this a
+         * "peek", safe to call every tick of a dwell. */
+    }
+    if (min_credit_s < 0.0f) {
+        return 0.0f; /* no active zones */
+    }
+    return min_credit_s;
+}
+
+float ramp_assist_dwell_credit_total_spend_s(const s_exec_state_t *ex, float entry_applied_s,
+                                             float cap_s)
+{
+    if (entry_applied_s < 0.0f) entry_applied_s = 0.0f;
+    if (cap_s < 0.0f) cap_s = 0.0f;
+    float live_topup_s = ramp_assist_dwell_credit_peek_min_s(ex);
+    if (live_topup_s < 0.0f) live_topup_s = 0.0f;
+    float total_s = entry_applied_s + live_topup_s;
+    /* Bound 1: never more than cap_s, however large entry_applied_s or the
+     * live top-up are individually or combined. */
+    if (total_s > cap_s) {
+        total_s = cap_s;
+    }
+    return total_s;
+}
+
+bool ramp_assist_dwell_target_reached(const s_exec_state_t *ex)
+{
+    for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+        const zone_runtime_t *z = &ex->zones[zi];
+        if (!z->active || z->faulted) {
+            continue;
+        }
+        if (!z->actual_valid || z->actual_c < ex->target_c) {
+            return false; /* Bound 2: not every active zone is there yet */
+        }
+    }
+    return true; /* every active, non-faulted zone has reached target_c (or there are none) */
+}

@@ -328,61 +328,74 @@ class ShippedBandNowFiresAtLightLoadTests(unittest.TestCase):
 
 
 class CreditCollapsesAtHeavierLoadTests(unittest.TestCase):
-    """At heavier simulated load the measured credit falls back to exactly
-    zero for bisque/cone 6 at 2x-4x and cone 10 at 4x -- NOT a return of the
-    old mutual-exclusion defect (the gate no longer references the 25 C
-    band at all; ``ShippedBandNowFiresAtLightLoadTests`` proves this same
-    code path fires at 1x). See the module docstring's "THE PRECISE
-    MECHANISM" paragraph for exactly which two thresholds this gap is
-    between -- the wide ramp-lock release band (25 C) vs. the much narrower
-    credit in-band test (half a cone step).
+    """UPDATED for PID_EXPANSION_PLAN.md sec 7.6 ("bounded in-dwell dwell
+    credit", 2026-09-03). This class used to pin heavier-load credit at
+    exactly zero, with the reasoning "every schedule here is one RampStep
+    then one DwellStep -- once that single dwell begins there is no LATER
+    dwell occurrence for credit banked during it to ever be spent against".
+    That reasoning is now WRONG on purpose: sec 7.6 is precisely the change
+    that lets credit banked during a dwell spend against that SAME dwell,
+    bounded by ``DWELL_CREDIT_MAX_FRACTION`` (Bound 1) and gated on the zone
+    having actually reached target (Bound 2). Measured with the real,
+    unmutated code (this class's own assertions below), spent credit at
+    2x/4x mass:
 
-    RE-VERIFIED 2026-09-03 after extending credit accrual past the nominal
-    ramp end (accrual now also runs on ``DwellStep`` ticks, not just
-    ``RampStep`` ticks -- see ``ramp_assist.py``'s ``run_ramp_assist``,
-    ``DwellStep`` branch, and PID_EXPANSION_PLAN.md section 7.3): these
-    values are UNCHANGED. Every schedule this module drives is exactly one
-    ``RampStep`` followed by exactly one ``DwellStep`` -- once that single
-    dwell begins, there is no LATER dwell occurrence in the schedule for
-    credit banked during it to ever be spent against (the schedule simply
-    ends), so the extension has nothing to attach to here even though the
-    accrual itself now runs. See the module docstring's "EXTENDED PAST THE
-    NOMINAL RAMP END" paragraph for the synthetic two-dwell schedule that
-    DOES show the extension banking and spending real credit.
+      bisque:   2x 210.9 s (11.72%)   4x 420.9 s (23.38%) of a 1800 s dwell
+      cone 6:   2x 134.7 s (14.97%)   4x   0.2 s ( 0.02%) of a  900 s dwell
+      cone 10:  2x 218.5 s (24.28%)   4x  19.6 s ( 2.17%) of a  900 s dwell
 
-    NEGATIVE-TESTED: temporarily forced the old ramp-phase-only accrual
-    gate to stay ``True`` for one extra tick past the ramp->dwell
-    transition (a boundary-off-by-one). Re-ran
-    ``test_bisque_zero_credit_at_heavier_load``; it did NOT change the
-    pinned zero values here (this scenario's zone crosses into band well
-    after the boundary at heavier load, not by one tick), so that mutation
-    is not evidence for or against this specific test -- documented for
-    completeness; the meaningful negative test for the gate ITSELF is in
-    ``ShippedBandNowFiresAtLightLoadTests``.
+    -- all comfortably under the 50% Bound-1 ceiling (none of these binds
+    the cap; see ``BisqueLightLoadCapBindsTests`` for the one scenario in
+    this module's scan that does). cone6 4x is the one case that stays
+    near-zero (0.023%) even under sec 7.6 -- the same real physical effect
+    ``CreditCollapsesAtHeavierLoadTests``'s ORIGINAL docstring described (the
+    wide ramp-lock release band vs. the much narrower credit in-band test)
+    still applies at this specific mass/target combination; sec 7.6 only
+    changes whether ALREADY-BANKED credit can be spent, not how much gets
+    banked in the first place.
     """
 
-    def test_bisque_zero_credit_at_heavier_load(self):
+    def test_bisque_spends_bounded_credit_at_heavier_load(self):
         target_c, rate, dwell_min, masses = BISQUE
+        nominal_s = dwell_min * 60.0
         for mass_mult in (2.0, 4.0):
             res = _parity(target_c, rate, dwell_min, mass_mult, masses[mass_mult])
             self.assertTrue(res['assisted']['targets_reached'][0], f"mass_mult={mass_mult}")
             pz = res['per_zone'][0]
-            self.assertEqual(pz['credit_s'], 0.0, f"mass_mult={mass_mult} credit_s should be 0")
+            self.assertGreater(pz['credit_s'], 0.0, f"mass_mult={mass_mult} credit_s should now be "
+                                "nonzero -- sec 7.6's whole point")
+            self.assertLessEqual(pz['credit_s'], nominal_s * ra.DWELL_CREDIT_MAX_FRACTION + 1e-6,
+                                  f"mass_mult={mass_mult} must still respect Bound 1's cap")
 
-    def test_cone6_zero_credit_at_heavier_load(self):
+    def test_cone6_spends_bounded_credit_at_2x_stays_near_zero_at_4x(self):
         target_c, rate, dwell_min, masses = CONE6
-        for mass_mult in (2.0, 4.0):
-            res = _parity(target_c, rate, dwell_min, mass_mult, masses[mass_mult])
-            self.assertTrue(res['assisted']['targets_reached'][0], f"mass_mult={mass_mult}")
-            pz = res['per_zone'][0]
-            self.assertEqual(pz['credit_s'], 0.0, f"mass_mult={mass_mult} credit_s should be 0")
+        nominal_s = dwell_min * 60.0
+        res_2x = _parity(target_c, rate, dwell_min, 2.0, masses[2.0])
+        self.assertTrue(res_2x['assisted']['targets_reached'][0])
+        pz_2x = res_2x['per_zone'][0]
+        self.assertGreater(pz_2x['credit_s'], 0.0, "mass_mult=2.0 credit_s should now be nonzero -- "
+                            "sec 7.6's whole point")
+        self.assertLessEqual(pz_2x['credit_s'], nominal_s * ra.DWELL_CREDIT_MAX_FRACTION + 1e-6,
+                              "mass_mult=2.0 must still respect Bound 1's cap")
 
-    def test_cone10_zero_credit_at_4x_load_only(self):
+        # 4x stays near-zero -- a real physical effect (this mass/target
+        # combination barely enters the credit band at all), not something
+        # sec 7.6's bounded spend changes.
+        res_4x = _parity(target_c, rate, dwell_min, 4.0, masses[4.0])
+        self.assertTrue(res_4x['assisted']['targets_reached'][0])
+        self.assertLess(res_4x['per_zone'][0]['credit_s'], 5.0,
+                         "mass_mult=4.0 credit_s should stay immaterial (<5s of a 900s dwell)")
+
+    def test_cone10_spends_bounded_credit_at_4x_load(self):
         target_c, rate, dwell_min, masses = CONE10
+        nominal_s = dwell_min * 60.0
         res = _parity(target_c, rate, dwell_min, 4.0, masses[4.0])
         self.assertTrue(res['assisted']['targets_reached'][0])
         pz = res['per_zone'][0]
-        self.assertEqual(pz['credit_s'], 0.0, "cone10 4x credit_s should be 0")
+        self.assertGreater(pz['credit_s'], 0.0, "cone10 4x credit_s should now be nonzero -- "
+                            "sec 7.6's whole point")
+        self.assertLessEqual(pz['credit_s'], nominal_s * ra.DWELL_CREDIT_MAX_FRACTION + 1e-6,
+                              "cone10 4x must still respect Bound 1's cap")
 
 
 class CreditAuditHoldsAtConeScaleTests(unittest.TestCase):
@@ -453,48 +466,124 @@ class RealisticMultiSegmentLightLoadTests(unittest.TestCase):
                                 f"cone 10 multi-segment at {mass_mult}x load must earn real credit")
 
 
-class RealisticMultiSegmentHeavyLoadDoesNotHelpTests(unittest.TestCase):
-    """The loaded-kiln verdict on the REALISTIC multi-segment schedules:
-    at 4x mass, spent credit collapses to (near-)zero exactly as it does on
-    the single-segment schedules in ``CreditCollapsesAtHeavierLoadTests``
-    above -- multi-segment structure does not rescue the heavy-load case,
-    because (per the module docstring's "WHAT ACTUALLY CHANGES" paragraph)
-    every candle segment sits below ``cone_table.CONE_TABLE``'s 586.1 C
-    floor, so there is still only ONE dwell in any of these three shipped-
-    catalogue schedules inside the cone table's covered range for credit to
-    ever be spent against. This is the section of this module that answers
-    the owner's motivating question (a kiln tuned empty then fired full)
-    directly: the answer is NO, this does not materially help, on either
-    the single-segment or the multi-segment schedules measured.
+class RealisticMultiSegmentHeavyLoadNowSpendsBoundedCreditTests(unittest.TestCase):
+    """The loaded-kiln verdict on the REALISTIC multi-segment schedules,
+    UPDATED for PID_EXPANSION_PLAN.md sec 7.6 ("bounded in-dwell dwell
+    credit", 2026-09-03).
 
-    Bisque at 4x is asserted ``<=`` a small tolerance rather than
-    ``assertEqual(..., 0.0)`` -- unlike the single-segment case this
-    schedule's intermediate 945 C ramp segment is itself inside the cone
-    table's range and contributes a small amount of carried-forward credit
-    (measured 1.64 s here, against a 1800 s final dwell -- 0.09%), which is
-    real but immaterial; the exact-zero pin stays on cone 6/cone 10, which
-    measured exactly 0.0 s.
+    Before sec 7.6 this class was named ...HeavyLoadDoesNotHelpTests and
+    pinned spent credit at 4x mass to (near-)zero -- correctly, at the time:
+    credit accrued DURING the terminal dwell (the only dwell any of these
+    three shipped schedules ever reaches, per the module docstring's "WHAT
+    ACTUALLY CHANGES" paragraph -- every candle sits below the cone table's
+    586.1 C floor) could never be SPENT, because the pre-7.6 freeze
+    (commit 0402ecb) forbade a dwell from shortening itself and there was no
+    LATER dwell occurrence in these schedules to spend it against instead.
+    That is exactly the motivating bug sec 7.6 fixes: it now lets that same
+    in-dwell accrual shorten the dwell it was earned in, bounded by
+    ``DWELL_CREDIT_MAX_FRACTION`` (Bound 1) and gated on the zone having
+    actually reached target (Bound 2) -- see ``ramp_assist.py``'s
+    DWELL_CREDIT_MAX_FRACTION docstring and the DwellStep branch's own sec
+    7.6 comment for the full argument.
+
+    Measured with the real, unmutated code (this class's own assertions
+    below), spent credit at 4x mass:
+
+      bisque:   425.9 s of a 1800 s dwell (23.66%)
+      cone 6:    53.1 s of a  900 s dwell ( 5.90%)
+      cone 10:   19.6 s of a  900 s dwell ( 2.18%)
+
+    -- all comfortably under the 50% Bound-1 ceiling (every one of these is
+    naturally load-limited: heavy mass means less real heat-work is banked
+    in the first place, not that the cap is what is holding these numbers
+    down). The one case that DOES hit the cap in this module's scan is
+    bisque at LIGHT load (1x, 900.000 s exactly == 1800 * 0.5) --
+    see ``ShippedBandNowFiresAtLightLoadTests`` and
+    ``BisqueLightLoadCapBindsTests`` below.
+
+    THE OWNER'S MOTIVATING QUESTION (a kiln tuned empty then fired full)
+    now has a real, nonzero answer instead of "no, not at all" -- material
+    is a judgment call left to the module docstring's scan report and this
+    task's own final report, not asserted as a boolean here.
     """
 
-    def test_bisque_multi_negligible_credit_at_4x_load(self):
+    def test_bisque_multi_spends_real_bounded_credit_at_4x_load(self):
         res = _multi_parity('bisque', 4.0)
         self.assertTrue(res['assisted']['targets_reached'][0])
         pz = res['per_zone'][0]
-        self.assertLess(pz['credit_s'], 5.0,
-                         "bisque multi-segment 4x credit_s should be immaterial (<5s of a 1800s dwell)")
+        self.assertGreater(pz['credit_s'], 100.0,
+                            "bisque multi-segment 4x credit_s should now be a real, material spend "
+                            "(measured ~425.9 s) -- sec 7.6's whole point")
+        # MULTI_FINAL_DWELL_S, not pz['dwell_nominal_s'] -- see BisqueLight
+        # LoadCapBindsTests's own comment on the same substitution.
+        self.assertLessEqual(pz['credit_s'], MULTI_FINAL_DWELL_S['bisque'] * ra.DWELL_CREDIT_MAX_FRACTION + 1e-6,
+                              "must still respect Bound 1's cap")
 
-    def test_cone6_multi_zero_credit_at_2x_and_4x_load(self):
-        for mass_mult in (2.0, 4.0):
-            res = _multi_parity('cone6', mass_mult)
-            self.assertTrue(res['assisted']['targets_reached'][0], f"mass_mult={mass_mult}")
-            pz = res['per_zone'][0]
-            self.assertEqual(pz['credit_s'], 0.0, f"mass_mult={mass_mult} credit_s should be 0")
+    def test_cone6_multi_now_spends_credit_at_4x_but_still_zero_at_2x(self):
+        # 2x stays exactly 0.0 -- this mass level simply never banks any
+        # credit on this schedule (measured before AND after sec 7.6), so
+        # there is nothing for Bound 1/2 to bind on. Not every heavier load
+        # earns something; the claim is bounded, not universal.
+        res_2x = _multi_parity('cone6', 2.0)
+        self.assertTrue(res_2x['assisted']['targets_reached'][0])
+        self.assertEqual(res_2x['per_zone'][0]['credit_s'], 0.0, "mass_mult=2.0 credit_s should stay 0")
 
-    def test_cone10_multi_zero_credit_at_4x_load(self):
+        res_4x = _multi_parity('cone6', 4.0)
+        self.assertTrue(res_4x['assisted']['targets_reached'][0])
+        pz = res_4x['per_zone'][0]
+        self.assertGreater(pz['credit_s'], 0.0,
+                            "mass_mult=4.0 credit_s should now be nonzero (measured ~53.1 s) -- "
+                            "sec 7.6's whole point")
+        self.assertLessEqual(pz['credit_s'], MULTI_FINAL_DWELL_S['cone6'] * ra.DWELL_CREDIT_MAX_FRACTION + 1e-6,
+                              "must still respect Bound 1's cap")
+
+    def test_cone10_multi_now_spends_credit_at_4x_load(self):
         res = _multi_parity('cone10', 4.0)
         self.assertTrue(res['assisted']['targets_reached'][0])
         pz = res['per_zone'][0]
-        self.assertEqual(pz['credit_s'], 0.0, "cone10 multi-segment 4x credit_s should be 0")
+        self.assertGreater(pz['credit_s'], 0.0,
+                            "cone10 multi-segment 4x credit_s should now be nonzero (measured ~19.6 s) "
+                            "-- sec 7.6's whole point")
+        self.assertLessEqual(pz['credit_s'], MULTI_FINAL_DWELL_S['cone10'] * ra.DWELL_CREDIT_MAX_FRACTION + 1e-6,
+                              "must still respect Bound 1's cap")
+
+
+class BisqueLightLoadCapBindsTests(unittest.TestCase):
+    """PID_EXPANSION_PLAN.md sec 7.6, Bound 1, exercised against a REAL
+    shipped cone-scale schedule rather than a synthetic one: bisque at 1x
+    (light, on-schedule) load banks 1227.5 s of real heat-work credit
+    against its own 1800 s terminal dwell -- comfortably enough to erase the
+    ENTIRE dwell under the pre-7.6 rules (which capped only at the full
+    nominal duration). Bound 1 pins the actual spend at exactly
+    ``dwell_nominal_s * DWELL_CREDIT_MAX_FRACTION`` (900.0 s) instead --
+    proof the cap binds on a real schedule, not just the synthetic ones in
+    ``test_ramp_assist.py``.
+
+    NEGATIVE-TESTED (2026-09-03): temporarily replaced ``min(z.dwell_entry_
+    spend_s + live_topup_s, z.dwell_cap_s)`` with the uncapped ``z.dwell_
+    entry_spend_s + live_topup_s`` in ``ramp_assist.py``, re-ran this test;
+    it failed with:
+        AssertionError: 1227.5279691869985 != 900.0 : bisque 1x credit_s must be
+        capped at exactly DWELL_CREDIT_MAX_FRACTION * dwell_nominal_s (900.0 s),
+        not the far larger 1227.5 s banked
+    (the uncapped run spent essentially the whole banked amount, well past
+    the intended 50% ceiling). Reverted; this test passes again.
+    """
+
+    def test_bisque_1x_spend_pinned_exactly_at_the_cap(self):
+        res = _multi_parity('bisque', 1.0)
+        pz = res['per_zone'][0]
+        # NOT pz['dwell_nominal_s'] -- dwell_credit_parity() sums that field
+        # across EVERY DwellStep in the schedule (candle + final), not just
+        # the final dwell credit actually applies to. MULTI_FINAL_DWELL_S is
+        # this module's own documented denominator for exactly that reason
+        # (see its own comment above).
+        nominal_s = MULTI_FINAL_DWELL_S['bisque']
+        expected_cap_s = nominal_s * ra.DWELL_CREDIT_MAX_FRACTION
+        self.assertEqual(pz['credit_s'], expected_cap_s,
+                          f"bisque 1x credit_s must be capped at exactly DWELL_CREDIT_MAX_FRACTION * "
+                          f"the final dwell's own nominal duration ({expected_cap_s} s), not the far "
+                          "larger banked amount")
 
 
 class RealisticMultiSegmentCreditAuditHoldsTests(unittest.TestCase):

@@ -556,38 +556,54 @@ void executor_task_entry(void *arg)
                      * this feature existed. */
                     s_exec.dwell_credit_applied_s = ramp_assist_dwell_credit_spend(
                         &s_exec, (float)(seg->dwell_min * 60u), ramp_assist_cfg_enabled());
-                    /* CIRCULAR-DWELL HAZARD (2026-09-03, sec 7.3 extension --
-                     * see ramp_assist_credit_should_accrue()'s doc comment,
-                     * profile_executor_internal.h): dwell_credit_applied_s
-                     * above is a ONE-TIME snapshot, taken right here, the
-                     * single tick this dwell begins. Every zone's dwell_
-                     * credit_s keeps accruing AFTER this point (credit now
-                     * accrues through the whole ZONE_RAMP segment, dwelling
-                     * or not, until actual_c reaches seg->target_c) -- but
-                     * that later accrual must NEVER feed back into THIS
-                     * dwell's own threshold below, or time spent dwelling
-                     * in-band would shrink the very timer measuring it. The
-                     * `else` branch below enforces this by re-reading only
-                     * this frozen s_exec.dwell_credit_applied_s float, never
-                     * any zone's live dwell_credit_s -- do not "simplify" it
-                     * to read dwell_credit_s directly. Pinned by test_dwell_
-                     * credit_spend_snapshot_is_frozen_against_later_accrual
-                     * (test_profile_executor_prestart.c). */
+                    /* PID_EXPANSION_PLAN.md sec 7.6, replacing the earlier
+                     * "circular-dwell hazard" freeze (2026-09-03): credit
+                     * banked AFTER this point (during this very dwell) is now
+                     * deliberately ALLOWED to shorten this same dwell -- the
+                     * owner's decision, because the freeze made the terminal
+                     * dwell's banked credit (the heavy-load motivating case)
+                     * permanently unspendable, there being no "next" dwell to
+                     * apply it to. What used to be an unconditional freeze is
+                     * now BOUNDED instead: dwell_credit_cap_s below fixes the
+                     * ceiling once, right here, so no amount of later top-up
+                     * can widen it, and the `else` branch's target_reached
+                     * check (ramp_assist_dwell_target_reached()) means no
+                     * amount of credit can end the dwell before the zone is
+                     * physically there. See EXEC_DWELL_CREDIT_MAX_FRACTION's
+                     * own doc comment (profile_executor_internal.h) for the
+                     * full two-bound argument. dwell_credit_applied_s itself
+                     * stays a one-time entry snapshot, exactly as before --
+                     * only what the `else` branch DOES with it changed. */
+                    s_exec.dwell_credit_cap_s = (float)(seg->dwell_min * 60u) * EXEC_DWELL_CREDIT_MAX_FRACTION;
+                    if (s_exec.dwell_credit_applied_s > s_exec.dwell_credit_cap_s) {
+                        s_exec.dwell_credit_applied_s = s_exec.dwell_credit_cap_s;
+                    }
                 }
             } else {
                 s_exec.target_c = seg->target_c;
-                /* dwell_credit_applied_s is 0.0f unless ramp_assist_cfg_
-                 * enabled() was true at this dwell's own entry (see above),
-                 * so with the flag off (or never-lagging run) this compares
-                 * against exactly seg->dwell_min * 60u, unchanged from
-                 * before sec 7.3 -- the bit-identical requirement ramp_
-                 * assist_cfg.h documents. Cast-then-subtract, never the
-                 * reverse: dwell_credit_applied_s is already clamped to
-                 * [0, dwell_min*60] by ramp_assist_dwell_credit_spend(), so
-                 * this subtraction cannot underflow the uint32_t threshold. */
-                uint32_t dwell_threshold_s = seg->dwell_min * 60u -
-                                              (uint32_t)s_exec.dwell_credit_applied_s;
-                if (s_exec.segment_elapsed_s >= dwell_threshold_s) {
+                /* PID_EXPANSION_PLAN.md sec 7.6: bounded in-dwell credit.
+                 * nominal_s is the un-credited floor -- reaching it always
+                 * ends the dwell, credit or not, exactly as before sec 7.3
+                 * ever existed (this is what keeps a credit-less run, or any
+                 * run with ramp_assist_cfg_enabled() == false, bit-identical:
+                 * total_spend_s below is 0.0f in both those cases, since
+                 * dwell_credit_applied_s was never set above cap_s == 0 and
+                 * ramp_assist_dwell_credit_peek_min_s() only ever sees zones
+                 * whose dwell_credit_s ramp_assist_dwell_credit_tick() left
+                 * at 0 -- see that function's own gate). credited_threshold_s
+                 * is the EARLY-exit floor credit can buy, never used alone:
+                 * it only takes effect together with target_reached (Bound
+                 * 2), so a credited exit can happen before nominal_s, but
+                 * never before the zone is physically at target_c. */
+                uint32_t nominal_s = seg->dwell_min * 60u;
+                float total_spend_s = ramp_assist_dwell_credit_total_spend_s(
+                    &s_exec, s_exec.dwell_credit_applied_s, s_exec.dwell_credit_cap_s);
+                uint32_t credited_threshold_s = (total_spend_s >= (float)nominal_s)
+                    ? 0u : nominal_s - (uint32_t)total_spend_s;
+                bool target_reached = ramp_assist_dwell_target_reached(&s_exec);
+                bool dwell_done = (s_exec.segment_elapsed_s >= nominal_s) ||
+                    (s_exec.segment_elapsed_s >= credited_threshold_s && target_reached);
+                if (dwell_done) {
                     s_exec.segment_index++;
                     if (s_exec.segment_index >= s_exec.profile.segment_count) {
                         s_exec.state = PROFILE_EXEC_DONE;

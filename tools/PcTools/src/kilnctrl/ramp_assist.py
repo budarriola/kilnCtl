@@ -161,6 +161,23 @@ from . import plant_sim as ps
 # round.
 DEFAULT_LAG_BAND_C = 25.0
 
+# PID_EXPANSION_PLAN.md sec 7.6: BOUNDED in-dwell dwell credit. Mirrors
+# firmware's EXEC_DWELL_CREDIT_MAX_FRACTION (profile_executor_internal.h) --
+# see that constant's own doc comment for the full two-bound safety argument
+# this fraction is one half of. In short: the owner's decision was to let
+# credit banked DURING a dwell shorten that SAME dwell occurrence (previously
+# frozen out, see the "THE HAZARD" note above the DwellStep branch below),
+# but bounded so it can never run away. This fraction caps the TOTAL
+# reduction (entry snapshot + in-dwell top-up combined) at half the nominal
+# dwell -- generous enough to matter at the heavy-mass loadings that
+# motivated this change, small enough that a dwell always keeps at least
+# half its planned wall-clock length, so "N minutes of timer" still reads as
+# a timed hold and not a bare "wait for temperature" soak. Bound 2 (a dwell
+# may never end before ``actual_c`` reaches the dwell's own held target) is
+# enforced at the DwellStep branch's own ``target_reached`` check, not by a
+# constant here.
+DWELL_CREDIT_MAX_FRACTION = 0.5
+
 
 # ---------------------------------------------------------------------------
 # Schedule representation
@@ -224,6 +241,17 @@ class _ZoneState:
     lagging: bool = False
     credit_s: float = 0.0
     dwell_remaining_s: Optional[float] = None  # None until a dwell step is entered
+    # PID_EXPANSION_PLAN.md sec 7.6: bounded in-dwell credit bookkeeping for
+    # the CURRENT dwell occurrence only -- reset every time a fresh
+    # occurrence begins (the ``if z.dwell_remaining_s is None:`` block).
+    dwell_nominal_s: float = 0.0       # this occurrence's own nominal duration, seconds
+    dwell_entry_spend_s: float = 0.0   # frozen entry-snapshot spend (Bound 1's floor component)
+    dwell_entry_spend_ref_s: float = 0.0  # same, mirrored onto the independent audit accumulator
+                                           # (credit_reference_heat_s) -- must move in lockstep with
+                                           # dwell_entry_spend_s or credit_audit_pct compares unlike
+                                           # totals -- see dwell_credit_parity()'s own doc comment.
+    dwell_cap_s: float = 0.0           # this occurrence's fixed cap, nominal_s * DWELL_CREDIT_MAX_FRACTION
+    dwell_elapsed_s: float = 0.0       # wall-clock elapsed since this occurrence's own entry
     done: bool = False
     # accounting, for the scenario report
     stretched_s: float = 0.0        # total extra ramp time spent lagging
@@ -545,6 +573,20 @@ def run_ramp_assist(schedule: Sequence[ScheduleStep], max_temp_c: float,
                     # behaviour -- never let a dwell go negative; excess
                     # credit is silently discarded, not carried forward.
                     spend = min(spend, nominal_s)
+                    # PID_EXPANSION_PLAN.md sec 7.6, Bound 1: the ENTRY
+                    # portion of this occurrence's spend is also clamped to
+                    # the fixed per-occurrence cap (nominal_s *
+                    # DWELL_CREDIT_MAX_FRACTION) -- the in-dwell top-up
+                    # applied below (this occurrence's own DwellStep ticks)
+                    # tops up against the SAME cap, never past it, however
+                    # much entry spend already claimed.
+                    dwell_cap_s = nominal_s * DWELL_CREDIT_MAX_FRACTION
+                    if apply_dwell_credit:
+                        spend = min(spend, dwell_cap_s)
+                    z.dwell_nominal_s = nominal_s
+                    z.dwell_cap_s = dwell_cap_s
+                    z.dwell_entry_spend_s = spend
+                    z.dwell_elapsed_s = 0.0
                     z.dwell_remaining_s = nominal_s - spend
                     z.credit_applied_s += spend
                     z.credit_s = 0.0
@@ -561,6 +603,14 @@ def run_ramp_assist(schedule: Sequence[ScheduleStep], max_temp_c: float,
                     # that has nothing to do with an accrual-formula defect
                     # -- exactly the false positive this block prevents.
                     spend_ref = min(z.credit_reference_heat_s, nominal_s) if apply_dwell_credit else 0.0
+                    # Same Bound 1 cap as the real spend above -- must move
+                    # in lockstep or credit_audit_pct compares a capped real
+                    # spend against an uncapped reference one and reports a
+                    # divergence that has nothing to do with an accrual
+                    # defect.
+                    if apply_dwell_credit:
+                        spend_ref = min(spend_ref, dwell_cap_s)
+                    z.dwell_entry_spend_ref_s = spend_ref
                     z.credit_reference_applied_s += spend_ref
                     z.credit_reference_heat_s = 0.0
                     # DEFECT 1 fix: open this dwell's fixed-length window,
@@ -598,21 +648,34 @@ def run_ramp_assist(schedule: Sequence[ScheduleStep], max_temp_c: float,
                 # zone's own commanded temperature now that the step object
                 # itself has moved past the ramp.
                 #
-                # THE HAZARD (do not remove without re-reading): credit
-                # banked HERE, during THIS dwell occurrence, must never
-                # shorten THIS SAME occurrence -- z.dwell_remaining_s was
-                # already computed once, above, from a frozen `spend` at
-                # this occurrence's own first tick, and is only ever
-                # decremented by dt from here on, never recomputed from
-                # z.credit_s. Any further accrual this loop adds to
-                # z.credit_s is carried forward and can only ever be spent
-                # at the NEXT DwellStep occurrence's own first tick (the
-                # `if z.dwell_remaining_s is None:` block above) -- a
-                # structurally later point in time, so it cannot reach back
-                # and shorten the dwell it was earned during. See
-                # test_dwell_credit_accrual_during_dwell_does_not_shorten_
-                # that_dwell in test_ramp_assist_cone_scale.py for the
-                # pinned proof.
+                # PID_EXPANSION_PLAN.md sec 7.6 (2026-09-03, replacing the
+                # earlier freeze this comment used to describe): credit
+                # banked HERE, during THIS dwell occurrence, is now
+                # deliberately ALLOWED to shorten THIS SAME occurrence -- the
+                # owner's decision, because the freeze made a TERMINAL
+                # dwell's own in-dwell accrual permanently unspendable (there
+                # being no later occurrence to apply it to). What used to be
+                # an unconditional freeze is now BOUNDED instead by two
+                # mandatory bounds (mirrors firmware's profile_executor.c /
+                # profile_executor_ramp_assist.c exactly):
+                #   Bound 1 -- dwell_cap_s (nominal_s * DWELL_CREDIT_MAX_
+                #     FRACTION, fixed once at this occurrence's own entry
+                #     above) caps entry_spend + in-dwell top-up COMBINED, so
+                #     no amount of accrual can shorten this dwell by more
+                #     than that fixed fraction.
+                #   Bound 2 -- target_reached (below) must be true before ANY
+                #     credit-shortened exit is honored, so a credited exit
+                #     can never happen before actual_c has physically reached
+                #     this dwell's own held target, however much credit is
+                #     banked.
+                # Together these make the exact hazard the old freeze existed
+                # to prevent -- unbounded self-shortening -- impossible: the
+                # earliest a credited exit can occur is bounded below by
+                # dwell_nominal_s * (1 - DWELL_CREDIT_MAX_FRACTION), and it
+                # can never happen at all until target_reached. See
+                # test_dwell_credit_bounded_reduction_never_exceeds_cap and
+                # test_dwell_credit_never_ends_before_target_reached in
+                # test_ramp_assist_cone_scale.py for the pinned proof.
                 behind_schedule = actual_c < seg_start_c[zi]
                 try:
                     band_bottom = ct.band_bottom_c(seg_start_c[zi])
@@ -631,8 +694,57 @@ def run_ramp_assist(schedule: Sequence[ScheduleStep], max_temp_c: float,
                         w_ref = 0.0
                     z.credit_reference_heat_s += w_ref * dt
 
-                z.dwell_remaining_s -= dt
-                if z.dwell_remaining_s <= 0.0:
+                z.dwell_elapsed_s += dt
+                z.dwell_remaining_s -= dt  # kept for external readers; not the sole driver below
+
+                # PID_EXPANSION_PLAN.md sec 7.6: Bound 1 arithmetic,
+                # recomputed fresh every tick from the CURRENT z.credit_s
+                # (whatever has accrued since this occurrence's own entry
+                # reset it to 0.0 above) -- mirrors ramp_assist_dwell_credit_
+                # total_spend_s() in profile_executor_ramp_assist.c exactly.
+                live_topup_s = z.credit_s if apply_dwell_credit else 0.0
+                total_spend_s = min(z.dwell_entry_spend_s + live_topup_s, z.dwell_cap_s)
+                extra_topup_s = max(0.0, total_spend_s - z.dwell_entry_spend_s)
+                credited_threshold_s = max(0.0, z.dwell_nominal_s - total_spend_s)
+
+                # Mirrored onto the independent audit accumulator, same
+                # lockstep requirement as the entry spend above -- computed
+                # here (not just at the transition) so it reflects however
+                # much credit_reference_heat_s has grown by whichever tick
+                # dwell_done ends up true on, exactly like total_spend_s
+                # does for the real accumulator.
+                live_topup_ref_s = z.credit_reference_heat_s if apply_dwell_credit else 0.0
+                total_spend_ref_s = min(z.dwell_entry_spend_ref_s + live_topup_ref_s, z.dwell_cap_s)
+                extra_topup_ref_s = max(0.0, total_spend_ref_s - z.dwell_entry_spend_ref_s)
+
+                # Bound 2: never end before actual_c has reached this
+                # dwell's own held target -- mirrors ramp_assist_dwell_
+                # target_reached() exactly (single-zone here, since each
+                # _ZoneState already only speaks for itself).
+                target_reached = actual_c >= seg_start_c[zi]
+
+                # The un-credited floor (elapsed >= nominal_s) always ends
+                # the dwell on its own, credit or not -- identical to
+                # before sec 7.3 ever existed, and what keeps apply_dwell_
+                # credit=False bit-identical (total_spend_s is 0.0f in that
+                # case, so credited_threshold_s == dwell_nominal_s and this
+                # clause alone decides it). The credited clause only ever
+                # grants an EARLIER exit, gated on target_reached.
+                dwell_done = (z.dwell_elapsed_s >= z.dwell_nominal_s) or \
+                    (z.dwell_elapsed_s >= credited_threshold_s and target_reached)
+
+                if dwell_done:
+                    # Finalize whatever in-dwell top-up actually contributed
+                    # to THIS exit into the cumulative reporting total, and
+                    # consume exactly that much from the live accumulator so
+                    # it is not spent a second time at the NEXT occurrence's
+                    # own entry -- any remainder (credit banked but not
+                    # needed to reach the cap) legitimately carries forward,
+                    # same as before this feature existed.
+                    z.credit_applied_s += extra_topup_s
+                    z.credit_s = max(0.0, z.credit_s - extra_topup_s)
+                    z.credit_reference_applied_s += extra_topup_ref_s
+                    z.credit_reference_heat_s = max(0.0, z.credit_reference_heat_s - extra_topup_ref_s)
                     z.seg_idx += 1
                     if z.seg_idx >= len(schedule):
                         z.done = True
