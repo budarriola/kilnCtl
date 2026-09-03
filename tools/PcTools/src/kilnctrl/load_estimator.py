@@ -76,6 +76,7 @@ recorded verdict.
 from __future__ import annotations
 
 import dataclasses
+import itertools
 from typing import Optional, Sequence
 
 import numpy as np
@@ -210,6 +211,84 @@ def estimate_zone_mass_mult(
                              n_samples_used=n, r2=r2, slope_se=slope_se)
 
 
+@dataclasses.dataclass
+class PerSourceLoadEstimate:
+    """Result of ``estimate_zone_mass_mult_per_source`` -- a
+    ``ZoneLoadEstimate`` (``base``) plus the per-neighbour-column dead time
+    that produced it, ``L_by_source[j]`` = the fitted delay (seconds) on the
+    path from stepped zone ``j`` to this zone -- data-driven, not the single
+    ``plant_sim.OFFDIAG_L_S`` (146.5 s) ASSUMED midpoint every column shared
+    before this. ``base.zone``'s own diagonal entry is left at the caller's
+    fixed (measured) ``L[zone]``, matching every other estimator in this
+    module -- only the off-diagonal (neighbour) columns are searched, since
+    those are the ones sec 2/3.8 flagged as ASSUMED rather than measured."""
+    base: ZoneLoadEstimate
+    L_by_source: dict
+
+
+def estimate_zone_mass_mult_per_source(
+    t: np.ndarray, temps: np.ndarray, duty: np.ndarray, zone: int,
+    ambient: float = 20.0, K: Optional[np.ndarray] = None,
+    tau_ref: Optional[np.ndarray] = None, L: Optional[np.ndarray] = None,
+    min_drive_c: float = 5.0,
+    offdiag_candidates_s: Optional[Sequence[float]] = None,
+) -> Optional[PerSourceLoadEstimate]:
+    """PID_EXPANSION_PLAN.md sec 3.8, the step named but "not yet checked"
+    after the flat per-path fix (``L_pair``, 2026-09-03) landed: that fix
+    still applies ONE off-diagonal delay (the 135-158 s range's 146.5 s
+    ASSUMED midpoint) to every neighbour column alike, even though sec 2
+    only ever measured an AGGREGATE range across all six cross-zone paths,
+    never a per-pair breakdown. This function grid-searches EACH neighbour
+    column's own delay independently against the real data (rather than
+    assuming they are all equal), picking -- per column -- whichever
+    candidate, combined with the others, maximizes this zone's overall
+    regression R^2. This is a search over the model's OWN structure (which
+    delay best explains the already-collected samples), not a fit to two
+    points of a step response, so it does not inherit the closed-loop
+    two-point FOPDT failure mode already shelved for this repo (see
+    PID_EXPANSION_PLAN.md's "ramp fit measures ramp rate" note): every
+    sample in the window still enters one through-origin OLS regression via
+    ``estimate_zone_mass_mult``, exactly as the flat/per-path callers do;
+    only the delay APPLIED to each duty column before that regression
+    varies across the grid.
+
+    Cost is combinatorial in the neighbour count (``len(offdiag_candidates_s)
+    ** (N_ZONES - 1)``) -- fine for this repo's 3-zone case (default 9
+    candidates -> 81 combinations per call), not intended for a larger zone
+    count without a coarser grid or a smarter search.
+
+    Returns ``None`` under the same conditions ``estimate_zone_mass_mult``
+    does (fewer than 3 usable samples at every candidate combination, or a
+    non-physical negative/zero fitted slope everywhere).
+    """
+    K = ps.K_full if K is None else K
+    tau_ref = ps.tau if tau_ref is None else tau_ref
+    L = ps.L if L is None else L
+    n_zones = len(L)
+    if offdiag_candidates_s is None:
+        offdiag_candidates_s = np.arange(60.0, 220.0, 20.0)  # brackets sec 2's 135-158s range with margin
+    neighbours = [j for j in range(n_zones) if j != zone]
+
+    best: Optional[tuple] = None
+    for combo in itertools.product(offdiag_candidates_s, repeat=len(neighbours)):
+        L_pair = np.tile(np.asarray(L, dtype=float).reshape(-1, 1), (1, n_zones))
+        for j, Lc in zip(neighbours, combo):
+            L_pair[zone, j] = Lc
+        est = estimate_zone_mass_mult(
+            t, temps, duty, zone, ambient=ambient, K=K, tau_ref=tau_ref, L=L,
+            min_drive_c=min_drive_c, L_pair=L_pair,
+        )
+        if est is None or np.isnan(est.r2):
+            continue
+        if best is None or est.r2 > best[0].r2:
+            best = (est, dict(zip(neighbours, (float(c) for c in combo))))
+
+    if best is None:
+        return None
+    est, L_by_source = best
+    return PerSourceLoadEstimate(base=est, L_by_source=L_by_source)
+
+
 def estimate_all_zones(t, temps, duty, ambient=20.0, K=None, tau_ref=None, L=None,
                         min_drive_c=3.0, L_pair=None) -> list:
     out = []
@@ -271,3 +350,29 @@ def estimate_from_capture_path(path: str, run_index: int = 0, ambient: float = 2
     keep = t >= (t[0] + min_elapsed_s)
     return estimate_all_zones(t[keep], temps[keep], duty[keep], ambient=ambient,
                                min_drive_c=min_drive_c, L_pair=L_pair)
+
+
+def estimate_per_source_from_capture_path(
+    path: str, run_index: int = 0, ambient: float = 20.0, min_drive_c: float = 5.0,
+    min_elapsed_s: float = 0.0, offdiag_candidates_s: Optional[Sequence[float]] = None,
+) -> list:
+    """Same convenience wrapper as ``estimate_from_capture_path``, but for
+    ``estimate_zone_mass_mult_per_source`` -- one ``PerSourceLoadEstimate``
+    per zone whose regression found at least 3 usable samples at some
+    candidate combination (zones that never clear that bar are omitted, same
+    convention as ``estimate_all_zones``)."""
+    rows_all = load_capture_rows(path)
+    runs = la.split_runs(rows_all)
+    rows = runs[run_index]
+    t, temps, duty = arrays_from_capture(rows)
+    keep = t >= (t[0] + min_elapsed_s)
+    t, temps, duty = t[keep], temps[keep], duty[keep]
+    out = []
+    for z in range(temps.shape[1]):
+        est = estimate_zone_mass_mult_per_source(
+            t, temps, duty, z, ambient=ambient, min_drive_c=min_drive_c,
+            offdiag_candidates_s=offdiag_candidates_s,
+        )
+        if est is not None:
+            out.append(est)
+    return out

@@ -585,6 +585,77 @@ the capture-format note (`run_queue.py` writes the `http_capture_log.py`
 envelope, not the plain format `coupled_ident.py`'s `*_from_paths` helpers
 read) and the multi-run-file handling.
 
+**Dead time / tau re-identification tried 2026-09-03 — ruled out explicitly,
+per §3.4's own ranking, without a usable z2 number.** §3.4's "ranked
+improvements" list named "a proper per-zone re-identification using z2's
+dwell-entry dynamics (dead time/tau), not steady-state gain" as its #1 item,
+flagged in advance as "the one lever this pass found doesn't work is worth
+ruling out explicitly." That identification is now built:
+`coupled_ident.identify_zone_dead_time_tau()` (offline, additive;
+`identify_zone_dead_time_tau_from_capture_path()` for a real capture file).
+
+*Method, and why it does not repeat the shelved ramp-rate artifact.* The
+plant obeys `dT/dt = (u_ss - T)/tau`, `u_ss = ambient + K[zone]·duty_delayed(L)`
+(`load_estimator.py`'s own equation, reused unmodified). For a grid of
+candidate dead times `L`, the through-origin OLS regression of the measured
+per-sample `dT/dt` against the computed drive term `u_ss - T` gives `tau`
+(`1/slope`) and an R² in closed form; the candidate `L` with the best R² is
+kept. This is a regression over every sample in a window (hundreds, not
+two), against the ODE's own residual driven by the ACTUALLY APPLIED duty —
+unlike the closed-loop two-point FOPDT fit shelved elsewhere in this repo
+(which fit an exponential rise SHAPE to a controller's ramp-tracking
+trajectory, so the fitted "tau" partly measured the commanded ramp rate),
+this method never fits a rise shape and does not care whether duty was
+tracking a ramp, holding a dwell, or anything else — only what duty WAS.
+Verified in simulation first (`test_coupled_ident.py`): given a known-truth
+`FOPDTPlant` with `L=50s`/`tau=260s` distinct from every production
+constant, the grid search recovers `L` within one 5 s grid step and `tau`
+within 2%, R²>0.999 — the regression math is sound before it is ever
+pointed at real data.
+
+*Applied to every COMPLETED capture in `logs/coupling/`* (the six-firing A/B
+campaign running during this analysis was excluded past its first two
+completed entries — `ab_campaign_state.json` marks `old_2` onward
+`in_progress`/`pending`, never read here): every profile-7-shaped capture
+(`p7_*_http.jsonl`, `floor_run1`, `noise_floor_p7*`, `ab_old_1`, `ab_new_1`,
+`coupid6_run1(_part2)`), one fit per zone per RAMP window (the well-
+conditioned regime, same choice `load_estimator.py` already documented),
+`min_drive_c=5.0`, candidate `L` 0–300 s in 5 s steps. 35 z0 windows, 35 z1,
+34 z2 windows total across every capture. Restricting to windows clearing
+R²>0.3 (the same bar §3.8 uses to call a fit "usable," not a threshold
+invented for this result):
+
+| | z0 | z1 | z2 |
+|---|---|---|---|
+| windows total | 35 | 35 | 34 |
+| windows R²>0.3 | 16 | 18 | 6 |
+| fitted L, median (s) | 70.0 | 122.5 | 92.5 |
+| fitted L, range (s) | 40–295 | 10–245 | 50–160 |
+| board diagonal L (s, §2) | 52.8 | 43.5 | 33.9 |
+
+**Verdict: not usable, on all three zones, not just z2 — ruled out per §3.4's
+own framing, and the ranking's #1 item can be crossed off without a positive
+finding.** Fewer than half of z0/z1's ramp windows and only 6 of 34 (18%) of
+z2's clear even the loose R²>0.3 bar, and even restricted to that subset the
+fitted `L` spans a 5–7x range within a single zone (z2: 50–160 s on n=6) —
+per this doc's own discipline, a spread that size on n=6 is dominated by
+run-to-run noise, not a real per-window signal (the same "max-min at n=6 is
+2.53σ" caution §3.8 and elsewhere in this doc already apply). The medians
+themselves do not support "z2 is the outlier": z1's median (122.5 s, n=18)
+sits further from its own board value (43.5 s) than z2's (92.5 s vs 33.9 s,
+n=6) does, and z0's median (70.0 s) also exceeds its board value (52.8 s).
+Repeating the fit against the three cleanest single-zone excitation captures
+(`cpl_z{0,1,2}_{mcp,thermo}.jsonl`, one zone driven alone, no cross-zone
+ambiguity) is, if anything, worse — the 20 s poll cadence over one ~700–800 s
+ramp leaves only 3–18 samples surviving `min_drive_c`, and R² is negative on
+two of the three zones there. **No firmware change made here, and no z2-
+specific dead-time/tau number is reported as reliable** — the honest
+conclusion is that this repo's existing captures do not carry enough
+per-window signal to re-solve any zone's dynamics this way, z2 included; a
+trustworthy answer would need either a purpose-built single-zone step
+capture at faster polling, or many more independent rested single-zone
+excitation repeats than the one-per-zone this repo has today.
+
 ### 3.3 Adaptive tuning — the layers not built
 
 Shipped (`fcc1fc0`, `a772d78`): dwell harvesting, diagonal-only least-squares
@@ -1769,6 +1840,57 @@ coupling-matrix re-identification that fits per-source dead time (matching
 sec 2's own 3–4x diagonal/off-diagonal split) rather than the single-delay
 FOPDT shortcut both this module and `load_mass_sweep.py` share.
 
+**Per-zone-AND-per-source dead time, checked 2026-09-03 — the flat-146.5s
+off-diagonal is not the limiting factor either; verdict unchanged.** The
+"further step, not yet checked" this section named above (search each
+neighbour COLUMN's own delay independently, rather than sharing one ASSUMED
+midpoint across every off-diagonal cell) is now built:
+`load_estimator.estimate_zone_mass_mult_per_source()` (additive; capture-path
+convenience wrapper `estimate_per_source_from_capture_path()`). Grid-searches
+each neighbour
+column's delay over a 60–200 s range (brackets sec 2's 135–158 s measured
+aggregate with margin) and keeps whichever combination maximizes THIS
+zone's regression R², rather than assuming every column shares
+`plant_sim.OFFDIAG_L_S`. Sim-validated first (`test_load_estimator.py`):
+given a known-truth plant with two DELIBERATELY DIFFERENT neighbour delays
+(120 s / 180 s, both distinct from the flat 146.5 s value), the search
+recovers each within one 20 s grid step and clearly beats the flat baseline
+on R².
+
+*Real captures — same 17-window set §3.8 already scored (`p7_*_http.jsonl` +
+the rested-start fixtures)* — the naive comparison looked like a large win
+(z0 18/20 windows now clear R²>0.3 vs 2/20 flat; z2 5/11 vs 0/11), **but
+this is a same-day sampling-size trap this doc has been burned by before,
+not a real result**: the per-source search adds two more free parameters
+(one delay per neighbour column) fitted against windows as small as 3
+samples after the `min_drive_c`/warmup filters, and re-checking each
+"win"'s own `n_samples_used` shows exactly that — most of the apparently
+R²>0.9 z2 fits ran on `n=3`, the estimator's own minimum floor, where 2 free
+parameters trivially explain 3 points regardless of whether the delays mean
+anything (the same class of failure as this doc's own "n=3 correlation
+collapsed to r=0.031 at n=6" note). Re-scored requiring `n_samples_used≥8`
+(comfortably above the 2-parameter/3-point degenerate case, below is where
+this contamination lives) on BOTH the flat and per-source fits:
+
+| | z0 | z1 | z2 |
+|---|---|---|---|
+| windows total | 20 | 16 | 11 |
+| flat: windows with n≥8 | 12 | 5 | 1 |
+| flat: of those, R²>0.3 | 1/12 | 3/5 | 0/1 |
+| per-source: windows with n≥8 | 7 | 2 | 4 |
+| per-source: of those, R²>0.3 | 5/7 | 1/2 | **0/4** |
+
+Per-source dead time also SHRINKS the number of adequately-sampled windows
+(its larger searched delays exclude more warmup, same mechanism the flat
+per-path fix already documented for z2) — z0 goes from 12 to 7 windows with
+n≥8, z1 from 5 to 2. z0's adequately-sampled fits do look genuinely better
+(5/7 vs 1/12) and are worth keeping as a lead for a future zone-0-specific
+attempt; z2's, once the n=3 artifacts are excluded, is unchanged at zero
+usable wins either way. **Verdict: this is the further step named above,
+now checked, and it does not flip §3.8's z2 conclusion — z2's dead time is
+still not observable from this repo's captures well enough to trust, by
+this method or the flat one.** No firmware change made here.
+
 **Gap closed 2026-09-02: fuzzy strength × load, never crossed before now.**
 §3.6's fuzzy sweep and this section's load sweep each varied one axis while
 holding the other at its single tested point (fuzzy at the identified/1.0x
@@ -2147,12 +2269,15 @@ distinguish strict hold from stretched, using the same
 paragraph used to call unsurfaced. Sec 7.6's real-firing validation of this
 specific control behaviour (as opposed to the credit) has not been run.
 
-### 7.3 Dwell credit — FIRMWARE LANDED (2026-09-03, see §7.3.3)
+### 7.3 Dwell credit — FIRMWARE LANDED (2026-09-03, see §7.3.3), CREDIT GATE FIXED (2026-09-03, see §7.6)
 
-Heat-work-weighted accumulator, active only while the kiln is not rising at
-the desired rate, band from the segment target down half a cone step (uses
-the new `cone_table.c`/`.h`, Orton 022-14, already landed by another agent —
-half-step band and Arrhenius heat-work weighting come from that module).
+Heat-work-weighted accumulator, active only while the zone is BEHIND
+SCHEDULE AT ALL (`actual_c` below the moving commanded setpoint — see the
+gate-fix note in §7.6, and NOT the ramp-lock's 25 °C `lagging` signal,
+which stays exactly as it was for the lock itself), band from the segment
+target down half a cone step (uses the new `cone_table.c`/`.h`, Orton
+022-14, already landed by another agent — half-step band and Arrhenius
+heat-work weighting come from that module).
 Blocker found in survey: `profile_executor.c` (~line 461-465) zeroes
 `segment_elapsed_s` exactly at the ramp→dwell transition, discarding the
 near-target history the credit needs to accrue from. New accumulator state is
@@ -2979,7 +3104,8 @@ flips to ON, and this pass's headline finding is itself a reason that
 firing should specifically look for >25 °C tracking lag before the feature
 is judged useful at all.
 
-Reproducible tests: `tools/PcTools/tests/test_ramp_assist_cone_scale.py`
+Reproducible tests (SUPERSEDED — see §7.6.1 below for the current module
+contents): `tools/PcTools/tests/test_ramp_assist_cone_scale.py`
 (new module, kept separate from `test_ramp_assist.py` per repo convention)
 — `ShippedDefaultBandNeverFiresTests` pins the real-default zero-credit
 finding; `ConeScaleMechanismRunsTests`/`LoadGrowsCreditTests`/
@@ -2991,6 +3117,108 @@ real failure → revert); see each test's docstring, and
 band constant itself. Full suite re-run for this correction:
 `tools/PcTools/.venv/Scripts/python.exe -m pytest tools/PcTools/tests` —
 `test_ramp_assist.py` 21 passed, `test_ramp_assist_cone_scale.py` 9 passed.
+
+### 7.6.1 The "EXACTLY zero" verdict above was the bug, not the finding — credit gate fixed (2026-09-03)
+
+**This is a correction, not a footnote: §7.6's "structurally near-empty
+set" verdict above was ITSELF the defect this section documents fixing —
+it was accurately describing what the code did, but what the code did was
+wrong.** The credit-accrual gate reused `lagging` (the ramp-lock's own 25 °C
+`EXEC_RAMP_LOCK_BAND_C`/`lag_band_c` signal) as its "is the zone behind
+schedule" condition. Because `in_band` requires being within half a cone
+step of the segment target (8-18 °C at these three scenarios' targets, at
+most 25.85 °C anywhere in the whole Orton table), and a ramp's commanded
+setpoint never exceeds the segment target, a zone lagging by more than 25 °C
+is *necessarily* already past its own credit band — the two conditions
+could essentially never both hold. §7.6's arithmetic proving this was
+correct; the owner's read of it was that the GATE, not the band width or
+the mechanism, was the thing to fix.
+
+**Owner decision (2026-09-03): credit accrues when a zone is BEHIND
+SCHEDULE AT ALL** — `actual_c < the moving commanded setpoint`, no 25 °C
+threshold — while still `in_band`. The ramp-lock's own 25 °C band is
+UNCHANGED and keeps its existing meaning everywhere else (freezing the
+schedule, auto-stretch's `lag_sustained` gate, the warning surfaces, the
+event log) — only the credit accrual's own gate changed. Firmware:
+`ramp_assist_dwell_credit_tick()`'s third parameter was renamed
+`behind_schedule_now` (was `lagging_now`) specifically so the two meanings
+cannot be silently reconflated again at a future call site;
+`profile_executor.c` now computes it as `zone.actual_c < s_exec.target_c`
+(the moving commanded target), not from the `ramp_lock_lagging_mask` bit.
+Simulator: `ramp_assist.py`'s `run_ramp_assist` computes
+`behind_schedule = actual_c < z.commanded_c` and gates credit on that
+instead of `z.lagging`; `lag_band_c` still governs `z.lagging`/
+`z.stretched_s` (the lock/stretch accounting) exactly as before, but has
+no further bearing on credit.
+
+**Re-run headline numbers, zone 0, REAL shipped code (no `lag_band_c`
+override needed — it no longer affects credit at all):**
+
+| target | mass_mult | credit_s | % of nominal dwell |
+|---|---|---:|---:|
+| bisque (1062.8 °C, 150 °C/hr, 30 min dwell) | 1x | 180.6 s | 10.0% |
+| bisque | 2x | 0.0 s | 0.0% |
+| bisque | 4x | 0.0 s | 0.0% |
+| cone 6 (1222.2 °C, 150 °C/hr, 15 min dwell) | 1x | 112.8 s | 12.5% |
+| cone 6 | 2x | 0.0 s | 0.0% |
+| cone 6 | 4x | 0.0 s | 0.0% |
+| cone 10 (1285.0 °C, 100 °C/hr, 15 min dwell) | 1x | 218.7 s | 24.3% |
+| cone 10 | 2x | 218.5 s | 24.3% |
+| cone 10 | 4x | 0.0 s | 0.0% |
+
+At light load (1x for bisque/cone6, 1x-2x for cone10's slower rate), credit
+is now real and material — 10-24% of the nominal dwell — a direct reversal
+of §7.6's "exactly zero, structurally" verdict, which was an artifact of
+the gate bug, not a property of the mechanism or the band widths. At
+heavier load the figure collapses back to exactly zero, for a DIFFERENT and
+still-genuine reason: heavier mass makes the zone fall further behind
+during the ramp itself, so by the time the segment's commanded setpoint
+reaches `step.target_c` (ending the ramp step and starting the dwell), the
+zone's actual temperature often has not yet entered the half-cone-step
+in-band window — it crosses into that window only after the dwell has
+already begun, past `ramp_assist_dwell_credit_tick()`'s own `ramping_now`
+gate (dwell-phase credit is a separate, not-yet-built accumulator; see this
+section's own scope). This is a real model-dependent finding about the
+ramp/dwell boundary, not a reappearance of the mutual-exclusion bug — the
+gate itself no longer references the 25 °C band at all, and 1x load
+directly proves the gate can and does fire.
+
+**VOID, retracted by this correction:** any prior report anywhere in this
+document or its commit history of "up to 30% of a dwell at 4x load" credit.
+That figure traced back to a simulator-only defect (`ramp_assist.py`'s
+in-band check computed against a hard-coded 3.0 °C band rather than
+`cone_table.band_bottom_c`'s real bracketing-pair spacing — a stand-in for
+the `DEFAULT_LAG_BAND_C` mirror bug described above, not the same defect,
+but the same family: a synthetic override standing in for a real value
+that was never re-checked against the shipped code path). It does not
+describe any figure this document currently stands behind; the honest
+replacement is the table above.
+
+Coverage: `tools/PcTools/tests/test_ramp_assist_cone_scale.py` was rewritten
+for this fix — `ShippedBandNowFiresAtLightLoadTests` pins the corrected,
+now-nonzero 1x/2x-cone10 findings (negative-tested: reverting the gate to
+`z.lagging and in_band` collapses credit back to exactly `0.0`, quoted in
+the test's own docstring); `CreditCollapsesAtHeavierLoadTests` pins the
+heavier-load zero findings; `CreditAuditHoldsAtConeScaleTests` re-confirms
+the accrual/spend consistency check at cone scale under the real gate.
+`test_ramp_assist.py`'s bench-scale `DwellCreditGateTests` was updated the
+same way: `test_credit_is_zero_when_never_lagging` (which asserted a
+well-tracked, never-locking ramp earns exactly zero credit) is now
+INCORRECT under the fixed gate and was replaced with
+`test_well_tracked_ramp_still_earns_credit_while_in_band`, which pins the
+new, intended behaviour — an ordinary on-schedule ramp is still marginally
+behind the moving setpoint on nearly every in-band tick, so it now earns
+real credit, capped at the dwell's own nominal duration. Firmware:
+`firmware/KilnFW/App/test/test_profile_executor_prestart.c`'s
+`test_dwell_credit_tick_accrues_a_few_degrees_behind_not_25` is the
+permanent regression pin (a zone 3.1 °C behind — nowhere near the 25 °C
+lock band — must still bank credit; negative-tested by re-adding a 25 °C
+threshold inside `ramp_assist_dwell_credit_tick()`, which produced the real
+failure `credit gate has been re-tied to the 25C ramp-lock band`, quoted in
+this task's own report). Full re-run:
+`powershell.exe -ExecutionPolicy Bypass -File firmware/KilnFW/App/test/build_host_tests.ps1`
+(21/21 host executables), `build_kilnfw` (OK), and
+`tools/PcTools/.venv/Scripts/python.exe -m pytest tools/PcTools/tests`.
 
 ## 2026-09-03: ramp-lock hot-start stall (confirmed executor defect, fixed)
 

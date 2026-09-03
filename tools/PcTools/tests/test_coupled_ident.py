@@ -1334,3 +1334,96 @@ def test_coupling_report_includes_transient_section():
     text = ci.format_coupling_report_text(report)
     assert "transient-aware score" in text
     assert "adopted_hybrid matrix scores" in text
+
+
+# ---------------------------------------------------------------------------
+# identify_zone_dead_time_tau -- PID_EXPANSION_PLAN.md sec 3.2's "right fix":
+# a full coupled identification that re-solves a zone's dead time AND time
+# constant, as opposed to the diagonal-gain-only refine already shipped.
+# ---------------------------------------------------------------------------
+
+def test_identify_zone_dead_time_tau_recovers_known_values_in_sim():
+    """Known-truth check: simulate a plant with a KNOWN L/tau (distinct
+    from plant_sim's own bench-rig constants, so this cannot pass by
+    accidentally hard-coding the production numbers) and confirm the grid
+    search recovers both within one grid step / a few percent -- proves the
+    regression math is sound before it is ever pointed at noisy real
+    captures (same discipline load_estimator's own sim-validation uses)."""
+    K = np.array([[40.0, 10.0, 5.0], [8.0, 32.0, 6.0], [4.0, 7.0, 30.0]])
+    tau_true = np.array([260.0, 270.0, 271.0])
+    L_true = np.array([50.0, 40.0, 30.0])
+    dt = 5.0
+    ambient = 20.0
+    plant = ps.FOPDTPlant(K, tau_true, L_true, dt, ambient=ambient)
+    n = 400
+    duty = np.zeros((n, 3))
+    duty[:, 0] = 0.6
+    duty[:, 1] = 0.05
+    duty[:, 2] = 0.05
+    t = np.arange(n) * dt
+    temps = np.zeros((n, 3))
+    for i in range(n):
+        temps[i] = plant.temp
+        plant.step(duty[i])
+
+    result = ci.identify_zone_dead_time_tau(
+        t, temps, duty, zone=0, ambient=ambient, K=K, min_drive_c=1.0,
+    )
+    assert result is not None
+    assert result.r2 > 0.99
+    assert abs(result.dead_time_s - L_true[0]) <= 5.0  # one grid step (default candidates are 5s apart)
+    assert abs(result.tau_s - tau_true[0]) / tau_true[0] < 0.05
+
+
+def test_identify_zone_dead_time_tau_returns_none_below_sample_floor():
+    """Mutation-style negative test, tripped for real rather than only
+    asserted from the docstring: two samples, both excluded by
+    ``min_drive_c``, must refuse (``None``) at every candidate dead time."""
+    t = np.array([0.0, 5.0])
+    temps = np.array([[20.0, 20.0, 20.0], [20.0, 20.0, 20.0]])
+    duty = np.array([[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]])
+    result = ci.identify_zone_dead_time_tau(
+        t, temps, duty, zone=0, min_drive_c=5.0,
+        dead_time_candidates_s=np.array([0.0, 50.0, 100.0]),
+    )
+    assert result is None
+
+
+def test_identify_zone_dead_time_tau_from_capture_path_matches_direct_call(tmp_path):
+    """The capture-path convenience wrapper must produce the same fit the
+    direct array-based call does when fed the same underlying data --
+    exercises the ``load_estimator.load_capture_rows``/``split_runs``/
+    ``arrays_from_capture`` plumbing this wrapper adds on top of
+    ``identify_zone_dead_time_tau`` itself."""
+    lines = []
+    for i in range(40):
+        t = i * 5
+        body = {
+            "state": "running", "profile_id": 7, "profile_name": "x",
+            "zone_mask": 7, "segment_index": 0, "segment_count": 1,
+            "dwelling": False, "target_c": 60.0, "segment_elapsed_s": t,
+            "dwell_remaining_s": 0, "ramp_lock_held": False,
+            "ramp_lock_lagging_mask": 0, "fault_reason": "", "fault_guard": 0,
+            "total_planned_s": None, "elapsed_s": t,
+            "zones": [
+                {"zone": z, "actual_c": 20.0 + 0.05 * t * (1 if z == 0 else 0.1),
+                 "duty": 0.6 if z == 0 else 0.05,
+                 "ff_hold_used_matrix": True, "ff_hold_infeasible": False}
+                for z in range(3)
+            ],
+        }
+        lines.append(f"00:00:{i:02d} {json.dumps(body)}")
+    path = tmp_path / "synthetic.jsonl"
+    path.write_text("\n".join(lines) + "\n")
+
+    rows = la.parse_profile_exec_jsonl(str(path))
+    from kilnctrl import load_estimator as le
+    t_arr, temps, duty = le.arrays_from_capture(rows)
+    direct = ci.identify_zone_dead_time_tau(t_arr, temps, duty, zone=0, min_drive_c=1.0)
+    wrapped = ci.identify_zone_dead_time_tau_from_capture_path(
+        str(path), zone=0, min_drive_c=1.0,
+    )
+    assert direct is not None and wrapped is not None
+    assert wrapped.dead_time_s == direct.dead_time_s
+    assert wrapped.tau_s == pytest.approx(direct.tau_s)
+    assert wrapped.source == str(path)

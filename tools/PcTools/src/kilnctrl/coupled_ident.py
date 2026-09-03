@@ -117,6 +117,8 @@ from typing import Optional, Sequence
 import numpy as np
 
 from . import coupling_pair_log
+from . import http_capture_log
+from . import load_estimator
 from . import log_analysis
 from . import plant_sim
 
@@ -573,6 +575,107 @@ def dwell_observations_from_paths(paths: Sequence[str]) -> list[JointObservation
             label = path if run_idx == 0 else f"{path}#run{run_idx}"
             all_obs.extend(dwell_observations_for_run(rows, source=label))
     return _dedupe_observations(all_obs)
+
+
+# ---------------------------------------------------------------------------
+# Full coupled identification -- dead time / tau, not just steady-state gain
+# (PID_EXPANSION_PLAN.md sec 3.2's "right fix": "a full coupled
+# identification from dwell observations" that re-solves a zone's dead time
+# and time constant, as opposed to the diagonal-gain refine already shipped
+# (`fcc1fc0`/`a772d78`, which only ever touches steady-state K).
+#
+# METHOD. Reuses ``load_estimator.estimate_zone_mass_mult``'s regression
+# UNCHANGED: the plant obeys ``dT/dt = (u_ss - T) / tau``, ``u_ss = ambient +
+# K[zone] . duty_delayed(L)``, so for a FIXED candidate dead time L, the
+# through-origin OLS regression of the measured ``dT/dt`` against the
+# computed drive term ``u_ss - T`` gives tau (as ``1/slope``) and an R^2 in
+# closed form -- no assumption about what shape ``duty`` itself takes over
+# the window. This function grid-searches L and keeps whichever candidate
+# gives the best-fitting tau (highest R^2).
+#
+# WHY THIS DOES NOT REPEAT THE SHELVED "RAMP FIT MEASURES RAMP RATE" MISTAKE.
+# The two-point closed-loop FOPDT fit shelved elsewhere in this repo fit an
+# EXPONENTIAL RISE SHAPE to a temperature trajectory that was itself being
+# driven by a closed-loop controller tracking a ramping setpoint -- the
+# fitted "tau" ends up dominated by how fast the commanded ramp moved, not
+# by the plant. This method never fits a rise shape at all: it regresses the
+# ODE's instantaneous residual (measured dT/dt) against the ACTUAL applied
+# duty at each sample, over every sample in the window (hundreds, not two),
+# and that relationship holds regardless of whether duty happened to be
+# tracking a ramp, holding a dwell, or anything else -- the physics
+# (dT/dt = (u_ss-T)/tau) does not care what commanded the duty, only what
+# duty WAS. The only free choice this method makes per fit is L (searched);
+# tau is always the closed-form OLS slope of real per-sample residuals.
+# ---------------------------------------------------------------------------
+
+@dataclasses.dataclass
+class ZoneDynamicsFit:
+    zone: int
+    dead_time_s: float
+    tau_s: float
+    n_samples_used: int
+    r2: float
+    source: str = ""
+
+
+def identify_zone_dead_time_tau(
+    t: np.ndarray, temps: np.ndarray, duty: np.ndarray, zone: int,
+    ambient: float = 20.0, K: Optional[np.ndarray] = None,
+    dead_time_candidates_s: Optional[Sequence[float]] = None,
+    min_drive_c: float = 5.0, source: str = "",
+) -> Optional[ZoneDynamicsFit]:
+    """Grid-search this zone's OWN dead time (broadcast to every duty column
+    -- the same single-delay convention ``load_estimator``'s default uses,
+    appropriate here since the target is the DIAGONAL dead time/tau, not the
+    off-diagonal per-path question sec 3.8 / ``load_estimator``'s
+    ``L_pair``-based functions address separately) against real duty/
+    temperature data, picking the candidate whose regression best explains
+    the observed dT/dt (highest R^2). Returns ``None`` if no candidate
+    clears ``estimate_zone_mass_mult``'s own 3-usable-sample floor.
+    """
+    K = plant_sim.K_full if K is None else K
+    if dead_time_candidates_s is None:
+        dead_time_candidates_s = np.arange(0.0, 300.0, 5.0)
+    n_zones = K.shape[0]
+    best: Optional[tuple] = None
+    for Lc in dead_time_candidates_s:
+        L_row = np.full(n_zones, float(Lc))
+        L_pair = np.tile(L_row.reshape(-1, 1), (1, n_zones))
+        est = load_estimator.estimate_zone_mass_mult(
+            t, temps, duty, zone, ambient=ambient, K=K,
+            tau_ref=np.ones(n_zones), L=L_row, min_drive_c=min_drive_c,
+            L_pair=L_pair,
+        )
+        if est is None or math.isnan(est.r2):
+            continue
+        if best is None or est.r2 > best[0]:
+            best = (est.r2, float(Lc), est)
+    if best is None:
+        return None
+    r2, Lc, est = best
+    return ZoneDynamicsFit(zone=zone, dead_time_s=Lc, tau_s=est.tau_est_s,
+                            n_samples_used=est.n_samples_used, r2=r2, source=source)
+
+
+def identify_zone_dead_time_tau_from_capture_path(
+    path: str, zone: int, run_index: int = 0, ambient: float = 20.0,
+    min_drive_c: float = 5.0, min_elapsed_s: float = 0.0,
+    dead_time_candidates_s: Optional[Sequence[float]] = None,
+) -> Optional[ZoneDynamicsFit]:
+    """Convenience wrapper: parse one real capture (either on-disk envelope
+    -- see ``load_estimator.load_capture_rows``), take one run, drop the
+    first ``min_elapsed_s`` (startup transient), and identify one zone's
+    dead time/tau off the rest."""
+    rows_all = load_estimator.load_capture_rows(path)
+    runs = log_analysis.split_runs(rows_all)
+    rows = runs[run_index]
+    t, temps, duty = load_estimator.arrays_from_capture(rows)
+    keep = t >= (t[0] + min_elapsed_s)
+    return identify_zone_dead_time_tau(
+        t[keep], temps[keep], duty[keep], zone, ambient=ambient,
+        min_drive_c=min_drive_c, dead_time_candidates_s=dead_time_candidates_s,
+        source=path,
+    )
 
 
 def _dedupe_observations(observations: Sequence[JointObservation]) -> list[JointObservation]:

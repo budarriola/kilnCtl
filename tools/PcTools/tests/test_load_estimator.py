@@ -183,3 +183,91 @@ def test_real_captures_produce_finite_estimates_no_crash():
                 assert np.isfinite(e.mass_mult_est)
                 assert e.mass_mult_est > 0
     assert seen_any
+
+
+# ---------------------------------------------------------------------------
+# estimate_zone_mass_mult_per_source -- PID_EXPANSION_PLAN.md sec 3.8's
+# "not yet checked" step: per-zone AND per-source dead time, rather than one
+# flat off-diagonal delay (plant_sim.OFFDIAG_L_S, 146.5s ASSUMED) shared by
+# every neighbour column.
+# ---------------------------------------------------------------------------
+
+def _simulate_per_path(K, L_pair, tau_pair, dt, ambient, duty):
+    plant = ps.FOPDTPlantPerPath(K, L_pair, tau_pair, dt, ambient=ambient)
+    n = duty.shape[0]
+    temps = np.zeros_like(duty)
+    for i in range(n):
+        temps[i] = plant.temp
+        plant.step(duty[i])
+    return temps
+
+
+def test_per_source_recovers_distinct_neighbour_delays_in_sim():
+    """Known-truth check (mirrors the module's existing per-path test):
+    simulate zone 0 with TWO DIFFERENT off-diagonal delays on its two
+    neighbour columns (120s from zone 1, 180s from zone 2 -- both distinct
+    from each other and from plant_sim's own flat 146.5s midpoint), each
+    neighbour's duty stepped at a DIFFERENT time so the two delays are
+    actually distinguishable (a constant neighbour duty carries no timing
+    information a delay search could recover -- a real risk this test
+    guards against by construction, not by assumption). The per-source
+    search must land within one grid step of each true delay and clearly
+    outperform, on R^2, forcing both columns to the single nearest flat
+    value plant_sim.OFFDIAG_L_S would have used.
+    """
+    K = np.array([[40.0, 10.0, 5.0], [8.0, 32.0, 6.0], [4.0, 7.0, 30.0]])
+    tau = np.array([260.0, 270.0, 271.0])
+    L = np.array([50.0, 40.0, 30.0])
+    true_L_pair = np.array([[50.0, 120.0, 180.0],
+                             [130.0, 40.0, 150.0],
+                             [160.0, 140.0, 30.0]])
+    tau_pair = np.full((3, 3), 650.0)
+    np.fill_diagonal(tau_pair, tau)
+    dt = 5.0
+    ambient = 20.0
+    n = 500
+    duty = np.full((n, 3), 0.1)
+    duty[50:, 0] = 0.6
+    duty[150:, 1] = 0.55
+    duty[300:, 2] = 0.45
+    t = np.arange(n) * dt
+    temps = _simulate_per_path(K, true_L_pair, tau_pair, dt, ambient, duty)
+
+    candidates = np.arange(80.0, 220.0, 20.0)
+    result = le.estimate_zone_mass_mult_per_source(
+        t, temps, duty, zone=0, ambient=ambient, K=K, tau_ref=tau, L=L,
+        min_drive_c=1.0, offdiag_candidates_s=candidates,
+    )
+    assert result is not None
+    assert result.base.r2 > 0.85
+    assert abs(result.L_by_source[1] - true_L_pair[0, 1]) <= 20.0
+    assert abs(result.L_by_source[2] - true_L_pair[0, 2]) <= 20.0
+
+    flat_L_pair = np.tile(L.reshape(-1, 1), (1, 3))
+    flat_L_pair[0, 1] = 146.5
+    flat_L_pair[0, 2] = 146.5
+    flat_est = le.estimate_zone_mass_mult(
+        t, temps, duty, zone=0, ambient=ambient, K=K, tau_ref=tau, L=L,
+        min_drive_c=1.0, L_pair=flat_L_pair,
+    )
+    assert flat_est is not None
+    assert result.base.r2 >= flat_est.r2, (
+        f"per-source search (R2={result.base.r2:.3f}) should not do worse than "
+        f"the flat-146.5s baseline (R2={flat_est.r2:.3f}) it searches around"
+    )
+
+
+def test_per_source_returns_none_below_sample_floor():
+    """Mutation-style negative test: fewer than 3 usable samples at every
+    candidate combination must refuse (``None``), same floor
+    ``estimate_zone_mass_mult`` itself enforces -- proven by actually
+    tripping it (2 samples, both excluded by ``min_drive_c``), not merely
+    asserted from the docstring."""
+    t = np.array([0.0, 5.0])
+    temps = np.array([[20.0, 20.0, 20.0], [20.0, 20.0, 20.0]])
+    duty = np.array([[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]])
+    result = le.estimate_zone_mass_mult_per_source(
+        t, temps, duty, zone=0, min_drive_c=5.0,
+        offdiag_candidates_s=np.array([100.0, 150.0]),
+    )
+    assert result is None
