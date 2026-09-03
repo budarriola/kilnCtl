@@ -72,6 +72,50 @@ DEFAULT_RESTED_TOL_C = 1.0
 DEFAULT_RESTED_TIMEOUT_S = 3600.0
 DEFAULT_COOLDOWN_S = 600.0
 
+#: how close the SECOND arm of a matched A/B pair (``--pair-consecutive``)
+#: must start to the FIRST arm's own actual start temperature, per zone,
+#: before the queue will fire it. This exists because :func:`is_rested`
+#: alone does NOT guarantee two arms are comparable to each other -- it only
+#: guarantees each arm, independently, reads no more than
+#: ``DEFAULT_RESTED_TOL_C`` above its OWN cold junction. The cold junction
+#: itself drifts upward run over run in a back-to-back campaign (confirmed
+#: from the 2026-08-31 six-firing A/B campaign's real captures: cooldowns
+#: consistently stopped within ~0.97-1.00C of the *current, already-elevated*
+#: cold junction, never against a fixed baseline -- see
+#: logs/coupling/ab_campaign_report.md sec 3 and the root-cause note this
+#: constant's introduction added there), so a queue with no pairwise check
+#: can -- and, live, did -- alternate old/new arms across a monotonically
+#: warming baseline and call every arm "rested".
+#:
+#: 0.8C is chosen from the live campaign's own three pairs, not picked in
+#: the abstract: pair 2 (the one that DID clear pid_ab_compare.py's 1.0C
+#: gate) differed by 0.47/0.64/0.70C per zone -- 0.8C clears all three with
+#: a real margin (0.10-0.33C of headroom) rather than sitting right on
+#: pair 2's own worst zone. Pairs 1 and 3 (both REFUSED live) differed by
+#: 1.20-1.66C per zone -- every one of those is still comfortably over 0.8C,
+#: so this tolerance would have caught both live failures too. It also
+#: leaves a clear 0.2C margin under the 1.0C wall itself, so ordinary poll
+#: jitter/thermocouple noise cannot land a "passed" pair right on
+#: pid_ab_compare.py's own refusal boundary. (A stricter value like 0.5C
+#: looks appealing on paper but is NOT achievable from the real data: it
+#: would have refused pair 2 as well, i.e. it would have failed the campaign
+#: 3-for-3 instead of fixing the 2-for-3 confound this exists to fix.)
+DEFAULT_PAIR_START_TOL_C = 0.8
+
+#: how long wait_until_paired_start() will keep polling (beyond the normal
+#: rested wait) for the second arm to cool down TO WITHIN
+#: DEFAULT_PAIR_START_TOL_C of the first arm's start reading, before giving
+#: up and raising loudly. Sized generously (2x DEFAULT_RESTED_TIMEOUT_S is
+#: too much for a lever this narrow; 3600s = 1 hour is chosen instead)
+#: because the live data shows the SAME natural cooldown gap (whichever a
+#: full profile-7 run + its own cooldown loop already takes, ~50-70 minutes
+#: in the 2026-08-31 campaign) sometimes already clears 0.5C on its own
+#: (pair 2) and sometimes does not (pairs 1 and 3, which drifted
+#: 1.2-1.7C over similarly-sized gaps) -- an extra hour of passive
+#: convective cooling is the honest cost of comparability here, not a
+#: number picked to make the wait feel short.
+DEFAULT_PAIR_START_TIMEOUT_S = 3600.0
+
 #: how long to wait, after a successful ``POST /api/profile_exec/start``, for
 #: the executor to actually leave PROFILE_EXEC_IDLE (profile_executor.h:89 --
 #: 0, the zero value) before giving up. This is the seam the live noise-floor
@@ -178,6 +222,46 @@ def is_rested(status_body: dict, tol_c: float = DEFAULT_RESTED_TOL_C) -> bool:
             continue
         saw_any = True
         if float(temp_c) - float(cj_c) > tol_c:
+            return False
+    return saw_any
+
+
+def is_paired_start_matched(status_body: dict, reference_status: dict,
+                             tol_c: float = DEFAULT_PAIR_START_TOL_C) -> bool:
+    """True iff every valid, comparable thermocouple channel in
+    ``status_body`` is within ``tol_c`` of the SAME-POSITION channel's
+    ``temp_c`` in ``reference_status`` -- the FIRST arm of a matched pair's
+    actual recorded start reading. Positional (zip over the ``channels``
+    lists), the same convention :func:`is_rested` uses, rather than keyed by
+    a ``channel``/``index`` field -- neither this module's fixtures nor a
+    real ``GET /api/status`` body are required to carry one.
+
+    This is a DIFFERENT question than :func:`is_rested`: that function asks
+    "is this arm cold relative to ITS OWN cold junction". This asks "does
+    this arm's actual temperature line up with the OTHER arm's actual
+    temperature", which is what makes the two arms of an A/B pair a valid
+    comparison at all (see ``pid_ab_compare.py``'s own 1.0C start-temperature
+    confound gate, and DEFAULT_PAIR_START_TOL_C's docstring above for why a
+    campaign that only checks :func:`is_rested` can still produce
+    incomparable pairs).
+
+    A channel invalid in EITHER body, or missing a ``temp_c``, is skipped
+    (same "don't let one dead channel block forever" stance as
+    :func:`is_rested`); if NO channel is comparable at all, this returns
+    False -- absence of any real comparison is refused, never treated as a
+    match by default."""
+    ref_channels = reference_status.get("channels") or []
+    cur_channels = status_body.get("channels") or []
+    saw_any = False
+    for ref_ch, cur_ch in zip(ref_channels, cur_channels):
+        if not ref_ch.get("valid", False) or not cur_ch.get("valid", False):
+            continue
+        ref_t = ref_ch.get("temp_c")
+        cur_t = cur_ch.get("temp_c")
+        if ref_t is None or cur_t is None:
+            continue
+        saw_any = True
+        if abs(float(cur_t) - float(ref_t)) > tol_c:
             return False
     return saw_any
 
@@ -377,6 +461,16 @@ class QueueEntry:
     profile_id: int
     log_path: str
     label: str = ""
+    #: entries sharing the same non-None ``pair_key`` are treated as a
+    #: matched A/B pair, in queue order: the FIRST entry with a given key
+    #: records its actual start status; the SECOND (and only the second --
+    #: the key is consumed once matched, see run_queue()) must start within
+    #: ``RunQueueConfig.pair_start_tol_c`` of that recording (see
+    #: :func:`wait_until_paired_start`) or the queue refuses rather than
+    #: firing an arm that cannot be compared. ``None`` (the default) means
+    #: "no pairing enforced" -- unchanged behaviour for entries that are not
+    #: part of an A/B campaign.
+    pair_key: Optional[str] = None
 
 
 @dataclasses.dataclass
@@ -386,6 +480,8 @@ class RunQueueConfig:
     rested_tol_c: float = DEFAULT_RESTED_TOL_C
     rested_timeout_s: float = DEFAULT_RESTED_TIMEOUT_S
     cooldown_s: float = DEFAULT_COOLDOWN_S
+    pair_start_tol_c: float = DEFAULT_PAIR_START_TOL_C
+    pair_start_timeout_s: float = DEFAULT_PAIR_START_TIMEOUT_S
     http_timeout_s: float = DEFAULT_HTTP_TIMEOUT_S
     start_confirm_timeout_s: float = DEFAULT_START_CONFIRM_TIMEOUT_S
     run_timeout_multiplier: float = DEFAULT_RUN_TIMEOUT_MULTIPLIER
@@ -414,6 +510,38 @@ def wait_until_rested(cfg: RunQueueConfig, deadline_s: Optional[float] = None) -
             raise RunQueueError(
                 f"zones did not settle within {cfg.rested_tol_c}C of cold junction "
                 f"within {timeout_s:.0f}s")
+        cfg.sleep(cfg.poll_interval_s)
+
+
+def wait_until_paired_start(cfg: RunQueueConfig, reference_status: dict,
+                             tol_c: float = DEFAULT_PAIR_START_TOL_C,
+                             deadline_s: Optional[float] = None) -> dict:
+    """Block (polling ``GET /api/status``) until :func:`is_paired_start_matched`
+    against ``reference_status`` is True, returning the matching status body.
+    Raises :class:`RunQueueError` after ``pair_start_timeout_s`` (or
+    ``deadline_s`` if given, for tests) -- FAILS LOUDLY rather than starting
+    a second arm the campaign cannot compare against the first: an hour lost
+    to this refusal is cheap next to the six hours the 2026-08-31 A/B
+    campaign spent producing two-thirds unusable data because nothing
+    enforced this.
+
+    Deliberately separate from :func:`wait_until_rested`: the caller runs
+    this ONLY after the ordinary rested wait already passed, and only for
+    the second arm of a ``--pair-consecutive`` pair -- the first arm has
+    nothing to match against yet."""
+    timeout_s = DEFAULT_PAIR_START_TIMEOUT_S if deadline_s is None else deadline_s
+    start = cfg.now()
+    while True:
+        status = get_status(cfg.host, cfg.http_timeout_s)
+        if is_paired_start_matched(status, reference_status, tol_c):
+            return status
+        if cfg.now() - start > timeout_s:
+            raise RunQueueError(
+                f"refusing to start: zones did not settle within {tol_c}C of the paired "
+                f"arm's start reading within {timeout_s:.0f}s -- starting now would produce "
+                "an incomparable pair (see pid_ab_compare.py's own start-temperature "
+                "confound gate). Wait longer by hand, or accept the campaign will not have "
+                "this pair.")
         cfg.sleep(cfg.poll_interval_s)
 
 
@@ -640,10 +768,13 @@ def _preflight_campaign(entries: Sequence[QueueEntry], cfg: RunQueueConfig,
 
 
 def run_entry(entry: QueueEntry, cfg: RunQueueConfig, control=None,
-              apply_preset_fn=None) -> None:
+              apply_preset_fn=None, pair_reference_status: Optional[dict] = None) -> dict:
     """Run one queue entry start to finish: apply preset, wait rested,
     safety-check, start, capture to ``entry.log_path`` through the run, then
-    capture a cooldown tail into ``<log_path>.cooldown.jsonl``.
+    capture a cooldown tail into ``<log_path>.cooldown.jsonl``. Returns the
+    ``GET /api/status`` body the entry actually started from -- ``run_queue``
+    uses this to record the FIRST arm of a matched pair's start reading, so
+    the SECOND arm can be checked against it.
 
     ``apply_preset_fn``, when omitted, is chosen from ``control``: when a
     ``ControlClient`` is given, ``config_presets.apply_preset`` (UART PID/
@@ -653,7 +784,14 @@ def run_entry(entry: QueueEntry, cfg: RunQueueConfig, control=None,
     preset needs a field only the UART CONTROL task can write). Passing
     ``apply_preset_fn`` explicitly overrides this selection entirely --
     tests use that to inject a fake with no ``config_presets``/UART
-    machinery in scope at all."""
+    machinery in scope at all.
+
+    ``pair_reference_status``, when given (``QueueEntry.pair_key`` matched a
+    prior entry -- see :func:`run_queue`), is the FIRST arm's actual start
+    status: after the ordinary rested wait/reconfirm below, this entry ALSO
+    blocks (:func:`wait_until_paired_start`) until its own reading lines up
+    with it within ``cfg.pair_start_tol_c``, raising :class:`RunQueueError`
+    rather than starting an arm the campaign will not be able to compare."""
     if apply_preset_fn is None:
         from kilnctrl import config_presets
         apply_preset_fn = config_presets.apply_preset if control is not None else _apply_preset_http_only
@@ -708,6 +846,23 @@ def run_entry(entry: QueueEntry, cfg: RunQueueConfig, control=None,
             0.0, cfg.rested_timeout_s - (cfg.now() - _prestart_reconfirm_start))
         wait_until_rested(cfg, deadline_s=remaining_s)
         status = get_status(cfg.host, cfg.http_timeout_s)
+
+    # PAIRED-START GATE -- runs only for the second arm of a
+    # ``--pair-consecutive`` pair (pair_reference_status is None otherwise).
+    # This is the fix for the 2026-08-31 A/B campaign's root cause: every
+    # arm above passed the ordinary "rested" check on its OWN terms, but
+    # nothing checked the two arms of a pair against EACH OTHER, and a
+    # back-to-back campaign's cold junction drifts upward run over run (see
+    # DEFAULT_PAIR_START_TOL_C's docstring). Blocks, and re-reads ``status``
+    # from the match so the value captured below (and handed back to
+    # run_queue for the NEXT pair, if any) is the one that actually passed.
+    if pair_reference_status is not None:
+        log.info("[%s] waiting for start temperature to match its paired arm "
+                  "(tol=%.1fC, timeout=%.0fs)", entry.label, cfg.pair_start_tol_c,
+                  cfg.pair_start_timeout_s)
+        status = wait_until_paired_start(
+            cfg, pair_reference_status, tol_c=cfg.pair_start_tol_c,
+            deadline_s=cfg.pair_start_timeout_s)
 
     # Open (and thereby validate) the capture file BEFORE anything energizes
     # the kiln. Tonight's incident: the start POST landed, the heaters came
@@ -834,6 +989,8 @@ def run_entry(entry: QueueEntry, cfg: RunQueueConfig, control=None,
             lambda exec_body, status_body: (
                 is_rested(status_body, cfg.rested_tol_c)
                 or cfg.now() - cooldown_start > cfg.cooldown_s))
+
+    return status
 
 
 # --------------------------------------------------------------------------
@@ -1152,6 +1309,23 @@ def run_queue(entries: Sequence[QueueEntry], cfg: RunQueueConfig, control=None,
     INTERRUPTED-ENTRY DECISION."""
     _preflight_campaign(entries, cfg, apply_preset_fn=apply_preset_fn, preflight_fn=preflight_fn)
 
+    # PAIRING: entries sharing a QueueEntry.pair_key are matched in queue
+    # order. pair_start_status[key] holds the FIRST arm's actual start
+    # reading once it has started; the key is POPPED the moment the second
+    # arm consumes it (wait_until_paired_start matches it in run_entry), so
+    # a third entry re-using the same key is treated as a fresh first arm
+    # rather than silently matched against a stale reading. On --resume,
+    # this dict starts empty every time -- a completed first arm's start
+    # status is not persisted in the state file (only the entries below
+    # need it, and skipped/completed entries never call run_entry again),
+    # so resuming a campaign mid-pair means the second arm re-matches
+    # against nothing and runs as if it were a first arm. That is a known,
+    # deliberate limitation: --resume is for crash recovery, not designed
+    # around here, and this queue already refuses (RunQueueClobberError) to
+    # silently overwrite a first arm's completed capture, so the worst case
+    # is an unpaired second arm, not data loss.
+    pair_start_status: dict = {}
+
     state = None
     if state_path is not None:
         if resume:
@@ -1195,7 +1369,23 @@ def run_queue(entries: Sequence[QueueEntry], cfg: RunQueueConfig, control=None,
             state["entries"][i]["status"] = "in_progress"
             save_campaign_state(state_path, state)
 
-        run_entry(entry, cfg, control=control, apply_preset_fn=apply_preset_fn)
+        pair_reference_status = None
+        if entry.pair_key is not None:
+            pair_reference_status = pair_start_status.get(entry.pair_key)
+
+        start_status = run_entry(entry, cfg, control=control, apply_preset_fn=apply_preset_fn,
+                                  pair_reference_status=pair_reference_status)
+
+        if entry.pair_key is not None:
+            if pair_reference_status is None:
+                # First arm of this pair -- remember its start reading for
+                # whichever later entry shares this key.
+                pair_start_status[entry.pair_key] = start_status
+            else:
+                # Second arm consumed the reference -- drop it so a THIRD
+                # entry reusing this key starts a fresh pair instead of
+                # silently matching a stale reading.
+                pair_start_status.pop(entry.pair_key, None)
 
         if state is not None:
             state["entries"][i]["status"] = "completed"
@@ -1351,10 +1541,24 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
              "just runs it N times). Requires exactly one --run. log_path gets _run1.._runN "
              "inserted before its extension so no two runs can land in the same file -- the "
              "noise-floor campaign's turn-key form (PID_EXPANSION_PLAN.md SS3.3).")
+    parser.add_argument(
+        "--pair-consecutive", action="store_true",
+        help="treat the queue as consecutive A/B pairs (entries 0&1, 2&3, 4&5, ...): the "
+             "second entry of each pair will not start until its own temperature is within "
+             "--pair-start-tol-c of the first entry's ACTUAL start reading, waiting up to "
+             "--pair-start-timeout-s and refusing (RunQueueError) rather than starting an "
+             "arm the campaign cannot compare against its partner. Fixes the confound the "
+             "2026-08-31 A/B campaign hit: is_rested() alone only proves an arm is cold "
+             "relative to ITS OWN cold junction, which drifts upward run over run in a "
+             "back-to-back campaign, and says nothing about whether two arms line up with "
+             "each other. Requires an even number of --run entries (or --state-file's saved "
+             "queue, on --resume).")
     parser.add_argument("--poll-interval-s", type=float, default=DEFAULT_POLL_INTERVAL_S)
     parser.add_argument("--rested-tol-c", type=float, default=DEFAULT_RESTED_TOL_C)
     parser.add_argument("--rested-timeout-s", type=float, default=DEFAULT_RESTED_TIMEOUT_S)
     parser.add_argument("--cooldown-s", type=float, default=DEFAULT_COOLDOWN_S)
+    parser.add_argument("--pair-start-tol-c", type=float, default=DEFAULT_PAIR_START_TOL_C)
+    parser.add_argument("--pair-start-timeout-s", type=float, default=DEFAULT_PAIR_START_TIMEOUT_S)
     parser.add_argument("--serial-port", default=None,
                          help="serial port for the UART CONTROL link. Omit it (the common "
                               "case -- the kilnctrl MCP server usually holds the port) and "
@@ -1391,9 +1595,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 parser.error("--repeat requires exactly one --run entry")
             entries = expand_repeat(entries[0], args.repeat)
 
+    if args.pair_consecutive:
+        if len(entries) % 2 != 0:
+            parser.error(
+                f"--pair-consecutive requires an even number of queue entries, got "
+                f"{len(entries)}")
+        entries = list(entries)
+        for i in range(0, len(entries), 2):
+            key = f"pair{i // 2}"
+            entries[i] = dataclasses.replace(entries[i], pair_key=key)
+            entries[i + 1] = dataclasses.replace(entries[i + 1], pair_key=key)
+
     cfg = RunQueueConfig(
         host=args.host, poll_interval_s=args.poll_interval_s, rested_tol_c=args.rested_tol_c,
-        rested_timeout_s=args.rested_timeout_s, cooldown_s=args.cooldown_s)
+        rested_timeout_s=args.rested_timeout_s, cooldown_s=args.cooldown_s,
+        pair_start_tol_c=args.pair_start_tol_c, pair_start_timeout_s=args.pair_start_timeout_s)
 
     control = None
     if args.serial_port:

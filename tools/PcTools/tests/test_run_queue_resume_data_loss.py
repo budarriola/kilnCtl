@@ -152,7 +152,7 @@ class ResumeCompletionRecoveryTest(unittest.TestCase):
 
         ran = []
 
-        def fake_run_entry(e, c, control=None, apply_preset_fn=None):
+        def fake_run_entry(e, c, control=None, apply_preset_fn=None, pair_reference_status=None):
             ran.append(e.log_path)
             # simulate a fresh, complete run
             with open(e.log_path, "w") as fh:

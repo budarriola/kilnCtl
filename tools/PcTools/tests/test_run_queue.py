@@ -97,6 +97,90 @@ class IsRestedTest(unittest.TestCase):
         self.assertFalse(rq.is_rested(st, tol_c=0.5))
 
 
+class IsPairedStartMatchedTest(unittest.TestCase):
+    """Negative/positive-tests the paired-start gate against the ACTUAL
+    z0/z1/z2 start readings captured live during the 2026-08-31 A/B
+    campaign (logs/coupling/ab_old_*.jsonl / ab_new_*.jsonl, first line of
+    each), not synthetic numbers -- see run_queue.py's DEFAULT_PAIR_START_TOL_C
+    docstring and logs/coupling/ab_campaign_report.md sec 3 for the deltas
+    this reproduces (1.66/1.63/1.36C for pair 1, 0.47/0.64/0.70C for pair 2,
+    1.20/1.20/1.35C for pair 3, all against the tool's own 1.0C confound
+    gate). The gate here uses DEFAULT_PAIR_START_TOL_C=0.8C, so pair 2 --
+    which passed pid_ab_compare.py's 1.0C gate live -- must also pass this
+    one; pairs 1 and 3, which FAILED live, must fail here too."""
+
+    # (old_start, new_start) per zone, z0/z1/z2, read verbatim from each
+    # ab_old_N.jsonl / ab_new_N.jsonl's first capture line.
+    PAIR1_OLD = [22.77, 22.84, 22.84]
+    PAIR1_NEW = [24.48, 24.42, 24.20]
+    PAIR2_OLD = [25.92, 25.75, 25.54]
+    PAIR2_NEW = [26.37, 26.34, 26.18]
+    PAIR3_OLD = [27.70, 27.54, 27.31]
+    PAIR3_NEW = [28.88, 28.81, 28.65]
+
+    @staticmethod
+    def _status_from_temps(temps):
+        return _status([_channel(t, t - 1.0) for t in temps])  # cj_c irrelevant here
+
+    def test_pair1_real_start_temps_refused(self):
+        ref = self._status_from_temps(self.PAIR1_OLD)
+        cur = self._status_from_temps(self.PAIR1_NEW)
+        self.assertFalse(rq.is_paired_start_matched(cur, ref, tol_c=rq.DEFAULT_PAIR_START_TOL_C))
+
+    def test_pair3_real_start_temps_refused(self):
+        ref = self._status_from_temps(self.PAIR3_OLD)
+        cur = self._status_from_temps(self.PAIR3_NEW)
+        self.assertFalse(rq.is_paired_start_matched(cur, ref, tol_c=rq.DEFAULT_PAIR_START_TOL_C))
+
+    def test_pair2_real_start_temps_accepted(self):
+        ref = self._status_from_temps(self.PAIR2_OLD)
+        cur = self._status_from_temps(self.PAIR2_NEW)
+        self.assertTrue(rq.is_paired_start_matched(cur, ref, tol_c=rq.DEFAULT_PAIR_START_TOL_C))
+
+    def test_invalid_channel_skipped(self):
+        ref = _status([_channel(25.0, 24.0), _channel(99.0, 24.0, valid=False)])
+        cur = _status([_channel(25.2, 24.0), _channel(40.0, 24.0, valid=False)])
+        self.assertTrue(rq.is_paired_start_matched(cur, ref, tol_c=0.5))
+
+    def test_no_comparable_channels_refused(self):
+        ref = _status([_channel(99.0, 24.0, valid=False)])
+        cur = _status([_channel(25.2, 24.0, valid=False)])
+        self.assertFalse(rq.is_paired_start_matched(cur, ref, tol_c=0.5))
+
+
+class WaitUntilPairedStartTest(unittest.TestCase):
+    """Drives wait_until_paired_start with an injected clock/sleep and a
+    scripted GET /api/status sequence -- proves the gate actually blocks a
+    drifted second arm and then lets a settled one through, and that it
+    raises loudly (never silently proceeds) when the drift never closes."""
+
+    def test_refuses_when_never_matches_within_timeout(self):
+        ref = _status([_channel(22.77, 21.77)])
+        # every poll still reads the pair-1-shaped 1.66C-over drift
+        drifted = _status([_channel(24.48, 23.48)])
+        clock = {"t": 0.0}
+
+        def fake_now():
+            return clock["t"]
+
+        def fake_sleep(s):
+            clock["t"] += s
+
+        cfg = rq.RunQueueConfig(host="h", now=fake_now, sleep=fake_sleep, poll_interval_s=5.0)
+        with unittest.mock.patch.object(rq, "get_status", return_value=drifted):
+            with self.assertRaises(rq.RunQueueError) as ctx:
+                rq.wait_until_paired_start(cfg, ref, tol_c=0.5, deadline_s=30.0)
+        self.assertIn("did not settle within", str(ctx.exception))
+
+    def test_accepts_once_within_tolerance(self):
+        ref = _status([_channel(25.92, 24.92)])
+        close_enough = _status([_channel(26.37, 25.37)])  # pair-2-shaped 0.45C drift
+        cfg = rq.RunQueueConfig(host="h", now=lambda: 0.0, sleep=lambda s: None)
+        with unittest.mock.patch.object(rq, "get_status", return_value=close_enough):
+            result = rq.wait_until_paired_start(cfg, ref, tol_c=0.5, deadline_s=30.0)
+        self.assertEqual(result, close_enough)
+
+
 class CheckNoFaultTest(unittest.TestCase):
     def test_all_zero_ok(self):
         rq.check_no_fault(_exec([0, 0, 0]))  # must not raise

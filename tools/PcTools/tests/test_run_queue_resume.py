@@ -155,8 +155,9 @@ class _Harness:
         calls = {"entries_started": 0}
         orig_run_entry = rq.run_entry
 
-        def counting_run_entry(entry, cfg, control=None, apply_preset_fn=None):
-            result = orig_run_entry(entry, cfg, control=control, apply_preset_fn=apply_preset_fn)
+        def counting_run_entry(entry, cfg, control=None, apply_preset_fn=None, pair_reference_status=None):
+            result = orig_run_entry(entry, cfg, control=control, apply_preset_fn=apply_preset_fn,
+                                     pair_reference_status=pair_reference_status)
             calls["entries_started"] += 1
             if self.transport._exec_sequences:
                 self.transport._exec_sequences.pop(0)
@@ -244,11 +245,12 @@ class StateFileWrittenTest(unittest.TestCase):
         orig_run_entry = rq.run_entry
         calls = {}
 
-        def wrapper(entry, cfg, control=None, apply_preset_fn=None):
+        def wrapper(entry, cfg, control=None, apply_preset_fn=None, pair_reference_status=None):
             if entry.log_path == e2.log_path and "state_before_entry2" not in calls:
                 with open(state_path) as fh:
                     calls["state_before_entry2"] = json.load(fh)
-            result = orig_run_entry(entry, cfg, control=control, apply_preset_fn=apply_preset_fn)
+            result = orig_run_entry(entry, cfg, control=control, apply_preset_fn=apply_preset_fn,
+                                     pair_reference_status=pair_reference_status)
             if h.transport._exec_sequences:
                 h.transport._exec_sequences.pop(0)
             return result
