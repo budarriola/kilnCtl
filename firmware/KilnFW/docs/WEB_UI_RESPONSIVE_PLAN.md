@@ -584,3 +584,74 @@ An esbuild bundling step is worth doing *with* a framework pilot and not before
   scattered ad hoc `em` values pending a shared scale). Verified in the
   sweep (78/78) and `check_ui_shell_layout.ps1` (still passing) with the
   panel present.
+
+## 11. Colour-dependence and contrast audit (2026-09)
+
+Prompted by a concrete finding while measuring sec 5's tokens: `--ok`/`--warn`
+clear WCAG AA against the card background on their own (4.74:1 / 4.54:1 in the
+`zones_page.html`/`safety_commissioning_page.html` light palette) but are only
+**1.04:1 apart from each other** (1.03:1 in the shared dark palette,
+`--ui-accent-4`/`--ui-accent-1`) — a hue-only difference invisible to a viewer
+relying on brightness or with red/green colour vision deficiency. `--ok` vs
+`--bad` fares little better (1.07:1 light / 1.73:1 dark). Full pairwise table
+(all four page-local light palettes plus the shared dark one), computed with
+WCAG relative luminance:
+
+| pair | light (varies by page) | dark (shared: `--ui-accent-4/1/5`) |
+|---|---|---|
+| ok vs warn | 1.04–2.28:1 | 1.03:1 |
+| ok vs bad | 1.07:1 | 1.73:1 |
+| warn vs bad | 1.12–1.58:1 | 1.68:1 |
+| ok/warn/bad vs `--neutral` (`#888`/`--ui-text-secondary`) | 1.1–1.5:1 (light) | 1.12–1.51:1 |
+
+Every pair is hue-distinguishable-only; none clears 3:1 against its sibling.
+That gap is **not fixed here** — it's the sec 5.1 `--fault-color`/`--bad` and
+`--neutral` decision, still open and owner-gated, and narrowing it means
+picking new hex values (a repaint), which this pass is not authorized to do.
+
+**Inventory of colour-alone status cues**, all 13 `*_page.html`: most status
+colouring is reinforcement on top of text that already differs (`readiness_
+page.html`'s `.mark` glyphs ✓/✗/—/⋯, `zones_page.html`'s verdict paragraphs,
+`safety_commissioning_page.html`'s `NOT SET` badge, `main_page.html`'s
+`#kcConfigMsg` error text, etc. — enumerated with reasoning in the new
+`ui_status_color_allowlist.json`, sec below). Three were genuinely colour-only
+and got the minimal in-language fix:
+
+- **`profiles_page.html`**: a segment's ramp-rate `<input>` only changed
+  border colour (`--warn`/`--bad`) when near/over its zone's ceiling, no other
+  cue. Fixed with `input.title` (native tooltip + screen-reader text); no
+  layout or colour change.
+- **`safety_page.html`**: `safetyTemp`/`enclosureTemp` only recoloured the
+  numeric reading (`.near`/`.past`) with no accompanying text. Fixed by
+  appending a plain-text suffix (` -- WARN`/` -- TRIPPED`, ` -- NEAR LIMIT`/
+  ` -- OVER LIMIT`) to the existing value string — same element, same CSS
+  rule, more characters.
+
+**Proposal, not implemented**: `zones_page.html`'s RGA coupling-matrix
+diagonal cells (`td.rga-ok/-warn/-bad`) colour a bare number with no glyph.
+The verdict paragraph directly below already explains the worst cell in full
+text, so this is a secondary read, but a glyph suffix per cell would still be
+the honest fix — not done here because it risks widening the matrix's table
+columns (a repaint), which this pass avoided everywhere else too.
+
+`ota_page.html`'s light-mode `--ok: #2a7` also independently fails the
+background-contrast floor (2.77:1 vs `#f7f7f7`, below 3:1) — a page-local hex
+that's simply lighter than every other page's `--ok`, unrelated to the
+sec 5.1 decision. Tracked, not fixed (narrowing it repaints the page), in
+`ui_status_color_contrast_exceptions.json`.
+
+**New standing check**: `firmware/KilnFW/App/test/check_ui_status_color.ps1`
+runs `ui_status_color_check.mjs`, which (1) asserts every `--ok/--warn/--bad/
+--neutral` token clears a 3:1 floor against its own background in both
+themes (known gaps tracked in `ui_status_color_contrast_exceptions.json`,
+not silently passed), and (2) fails if a NEW CSS rule appears shaped like
+"status-named selector, coloured only by a status token, nothing else" and
+isn't in `ui_status_color_allowlist.json` with a reviewed note. It does
+**not** and cannot verify that an allowlisted rule's accompanying text/glyph
+still exists at runtime (that's a JS/DOM fact, not a CSS-shape fact), doesn't
+see inline SVG or canvas colouring, and doesn't check the still-open sec 5.1
+pairwise contrast (see above — that's a documented, accepted gap, not
+something a passing check should claim to guarantee). Proven red by two
+mutations (a token dropped below the contrast floor; a new colour-only rule
+added), reverted after confirming red, both under `tools/run_all_checks.ps1`
+(29 checks, one new). The responsive sweep stayed green at 99/99.
