@@ -345,28 +345,52 @@ real wire** — the pi↔ESP UART link is currently dead on the bench
       no correlation guard yet for it to reset (see S2/S6/S10 below), so the
       detection is currently a documented no-op.
 - [~] **Honour the `SIM_PLANT` flag**: disable S2/S3/S4 and warn persistently —
-      the seen-tracking/DIAG warning bit is real, but S2/S3/S4 don't exist yet
-      to be disabled.
-- [ ] **`tc_placement_mode` commissioning field** (`CHAMBER_AGREED` /
-      `EXTERNAL_OVERHEAT`). Gates S1's firing-ceiling tightening, S2 and S10.
-      **No default** — until set, S2/S10 stay off and S1 uses the fixed limit
-      (`docs/SAFETY_MODEL.md` §3).
-- [ ] Implement **S2** (sustained over-setpoint), **S6** (main controller
-      unhealthy — the two independent signals, kept independent) and **S10**
-      (safety TC vs zone TC disagreement, WARN by default).
-- [ ] **`tc_source` commissioning field**: `OWN_J7` / `BORROWED_ZONE` / `BOTH`.
-      `tc_placement_mode` forced to `CHAMBER_AGREED` when borrowing, and a
-      contradictory config **rejected, not reconciled**.
-- [ ] Implement **S13** (borrowed channel not updating) against the context
-      frame's per-zone `sample_counter`. Without it a frozen main-board channel
-      is indistinguishable from a kiln holding a soak. (Note: all guard
-      *inputs* for S13 now exist end to end; S13/S1 stay dormant until
-      commissioning sets a real `tc_source`/`tc_placement_mode` — this is
-      expected, not a gap.)
+      the seen-tracking/DIAG warning bit is real, but S3/S4 don't exist yet
+      to be disabled (S2 does now — see below).
+- [x] **`tc_placement_mode` commissioning field** (`CHAMBER_AGREED` /
+      `EXTERNAL_OVERHEAT`). **Re-swept 2026-09-03: already landed, this
+      checklist had simply never been ticked.** `config_store.h`/`.c` carry
+      the field (`CONFIG_STORE_TC_PLACEMENT_*`), `tc_placement_valid` gates
+      S2/S10 exactly as specified, and S1's firing-ceiling tightening reads
+      it too (`safety_guards.c`).
+- [x] Implement **S2** (sustained over-setpoint), **S6** (main controller
+      unhealthy) and **S10** (safety TC vs zone TC disagreement, WARN by
+      default). **Re-swept 2026-09-03: already landed.** `safety_guards.c`
+      implements `SAFETY_TRIP_OVER_SETPOINT` (S2, ~line 684),
+      `SAFETY_TRIP_MAIN_FAULT`/`SAFETY_TRIP_LINK_DEAD` (S6, ~line 423/451)
+      and the TC-disagreement WARN path (S10, ~line 740), each host-tested.
+- [x] **`tc_source` commissioning field**: `OWN_J7` / `BORROWED_ZONE` /
+      `BOTH`. **Re-swept 2026-09-03: already landed** (`config_store.h`'s
+      `tc_source`, gated by `CONFIG_STORE_SET_TC_SOURCE`; the BORROWED_ZONE
+      -> forced-`CHAMBER_AGREED` rejection is in `config_params_validate()`,
+      host-tested as "tc_placement_mode vs tc_source contradiction
+      rejected").
+- [x] Implement **S13** (borrowed channel not updating) against the context
+      frame's per-zone `sample_counter`. **Confirmed already implemented**,
+      not just its inputs: `safety_guards.c`'s `SAFETY_TRIP_BORROWED_STALE`
+      path (~line 764) consumes `sample_counter_advancing`, WARN then TRIP,
+      host-tested. S13/S1 do stay dormant until commissioning sets a real
+      `tc_source`/`tc_placement_mode` — that part of the parenthetical is
+      still accurate.
 - [ ] `SAFETY_FLAG_BORROWED` in every status frame when borrowing, and the GUI
-      labels the temperature accordingly.
-- [ ] Compare the borrowed channel's reported `tc_type` against
-      `borrowed_type_expected`; warn on a change.
+      labels the temperature accordingly. **Still genuinely open** — grepped
+      2026-09-03, no `FLAG_BORROWED`/`SAFETY_FLAG_BORROWED` anywhere in
+      `CommonFW`; this needs a new wire bit (status frame flags byte has free
+      bits 0x40/0x80) plus `KilnFW` GUI work, so it wants an owner decision on
+      the bit assignment rather than a unilateral wire change.
+- [x] Compare the borrowed channel's reported `tc_type` against
+      `borrowed_type_expected`; warn on a change. **Done 2026-09-03** —
+      genuinely open until now (confirmed: `borrowed_type_expected` was a
+      real, validated, round-tripped `config_store` field with zero
+      consumers anywhere outside config code). `context_borrowed_type_
+      mismatch()` (`src/snapshots.h`, pure/host-tested,
+      `test/test_snapshots.c`) compares the borrowed zone's context-frame
+      `tc_type` against it, called from `safety_core_build_input()`
+      (`src/tasks/safety_core.c`), which logs a `LOG_LEVEL_WARN` once on the
+      false->true transition. Not a `SAFETY_MODEL.md` guard (no S-number,
+      no trip) — a diagnostic, same as the doc's own wording ("warns on a
+      change"). No wire-format change: `tc_type` was already in every
+      `PUSH_CONTEXT` zone block.
 - [ ] Enable **S3** / **S4** once phase 5's mapping check has passed.
 - [ ] Develop the parser against a **PC-side stub emitting context frames**
       before `KilnFW` can send any — the reverse of the stub already described

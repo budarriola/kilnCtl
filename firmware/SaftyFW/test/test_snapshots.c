@@ -455,6 +455,102 @@ static void test_borrowed_counter_zone_index_not_array_position(void)
                            "(22, zone_index 1) or any other slot's");
 }
 
+// --- context_borrowed_type_mismatch ------------------------------------------
+// docs/THERMOCOUPLE.md "Type checking a borrowed channel" / its own open
+// checklist item "Borrowed tc_type compared against borrowed_type_expected".
+// Not a SAFETY_MODEL.md guard -- a diagnostic comparison, same shape as
+// context_borrowed_sample_counter_advancing() above (found by zone_index,
+// gated by have_index/context_valid, an absent zone is not evidence either
+// way).
+
+static void test_borrowed_type_uncommissioned_index(void)
+{
+    TEST_SECTION("context_borrowed_type_mismatch -- have_index==false -> false even though the "
+                  "wire type differs");
+    context_snapshot_t ctx = empty_context();
+    ctx.valid = true;
+    ctx.zone_count = 1;
+    ctx.zones[0] = make_zone(0, 0, 0.0f, 0.0f);
+    ctx.zones[0].tc_type = 5;
+    bool mismatch = context_borrowed_type_mismatch(&ctx, true, false, 0, 2);
+    TEST_CHECK(!mismatch, "an uncommissioned borrowed_zone_index never reports a mismatch");
+}
+
+static void test_borrowed_type_context_invalid(void)
+{
+    TEST_SECTION("context_borrowed_type_mismatch -- context_valid==false -> false");
+    context_snapshot_t ctx = empty_context();
+    ctx.valid = true;
+    ctx.zone_count = 1;
+    ctx.zones[0] = make_zone(1, 0, 0.0f, 0.0f);
+    ctx.zones[0].tc_type = 5;
+    bool mismatch = context_borrowed_type_mismatch(&ctx, false, true, 1, 2);
+    TEST_CHECK(!mismatch, "a stale/absent context never reports a mismatch, matching every other "
+                          "context-gated fact");
+}
+
+static void test_borrowed_type_zone_absent(void)
+{
+    TEST_SECTION("context_borrowed_type_mismatch -- borrowed zone not in this tick's zones[] -> "
+                  "false, not evidence either way");
+    context_snapshot_t ctx = empty_context();
+    ctx.valid = true;
+    ctx.zone_count = 1;
+    ctx.zones[0] = make_zone(2, 0, 0.0f, 0.0f); /* zone 2 present, borrowed zone is 0 */
+    ctx.zones[0].tc_type = 9;
+    bool mismatch = context_borrowed_type_mismatch(&ctx, true, true, 0, 2);
+    TEST_CHECK(!mismatch, "the borrowed zone_index simply isn't on the wire this tick -> false");
+}
+
+static void test_borrowed_type_matches(void)
+{
+    TEST_SECTION("context_borrowed_type_mismatch -- reported tc_type equals borrowed_type_expected "
+                  "-> false");
+    context_snapshot_t ctx = empty_context();
+    ctx.valid = true;
+    ctx.zone_count = 1;
+    ctx.zones[0] = make_zone(1, 0, 0.0f, 0.0f);
+    ctx.zones[0].tc_type = 3;
+    bool mismatch = context_borrowed_type_mismatch(&ctx, true, true, 1, 3);
+    TEST_CHECK(!mismatch, "same type on both sides is not a mismatch");
+}
+
+static void test_borrowed_type_differs(void)
+{
+    TEST_SECTION("context_borrowed_type_mismatch -- reported tc_type differs from "
+                  "borrowed_type_expected -> true (this is the case this function exists to catch: "
+                  "the main board's channel was reconfigured underneath us)");
+    context_snapshot_t ctx = empty_context();
+    ctx.valid = true;
+    ctx.zone_count = 1;
+    ctx.zones[0] = make_zone(1, 0, 0.0f, 0.0f);
+    ctx.zones[0].tc_type = 5; /* e.g. MAX31856_TC_TYPE_R */
+    bool mismatch = context_borrowed_type_mismatch(&ctx, true, true, 1, 3); /* expected Type J */
+    TEST_CHECK(mismatch, "a genuinely different reported tc_type must be flagged");
+}
+
+static void test_borrowed_type_zone_index_not_array_position(void)
+{
+    TEST_SECTION("context_borrowed_type_mismatch -- borrowed zone found by zone_index, NOT by its "
+                  "position in zones[]");
+    context_snapshot_t ctx = empty_context();
+    ctx.valid = true;
+    ctx.zone_count = 3;
+    /* Wire order deliberately scrambled relative to zone_index, same trap as
+     * the sample_counter suite above. */
+    ctx.zones[0] = make_zone(2, 0, 0.0f, 0.0f);
+    ctx.zones[0].tc_type = 5; /* zone_index 2 -- the one under test, mismatched */
+    ctx.zones[1] = make_zone(0, 0, 0.0f, 0.0f);
+    ctx.zones[1].tc_type = 3; /* zone_index 0 -- matches, must NOT be what gets compared */
+    ctx.zones[2] = make_zone(1, 0, 0.0f, 0.0f);
+    ctx.zones[2].tc_type = 3; /* zone_index 1 -- matches, must NOT be what gets compared */
+    bool mismatch = context_borrowed_type_mismatch(&ctx, true, true, 2, 3);
+    TEST_CHECK(mismatch, "zone_index 2's tc_type (5, at array slot 0) must be the one compared, "
+                         "despite not being at array position 2 -- comparing by array position "
+                         "would find zone_index 1's matching 3 instead and wrongly report no "
+                         "mismatch");
+}
+
 void run_test_snapshots(void)
 {
     test_reduce_zones_invalid_context();
@@ -483,4 +579,11 @@ void run_test_snapshots(void)
     test_borrowed_counter_changed_value_advancing();
     test_borrowed_counter_wraparound_advancing();
     test_borrowed_counter_zone_index_not_array_position();
+
+    test_borrowed_type_uncommissioned_index();
+    test_borrowed_type_context_invalid();
+    test_borrowed_type_zone_absent();
+    test_borrowed_type_matches();
+    test_borrowed_type_differs();
+    test_borrowed_type_zone_index_not_array_position();
 }

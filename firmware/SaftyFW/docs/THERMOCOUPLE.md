@@ -447,12 +447,25 @@ sensor reading low tells you nothing at all.
       triggers automatically.
 
 **Borrowed source**
-- [ ] `tc_source` implemented: `OWN_J7` / `BORROWED_ZONE` / `BOTH`
-- [ ] `SAFETY_FLAG_BORROWED` set in status frames when borrowing
-- [ ] `tc_placement_mode` forced to `CHAMBER_AGREED`; contradictory config **rejected**
-- [x] S13 implemented against `sample_counter` (`context_borrowed_sample_counter_advancing()`, `src/snapshots.h`)
-- [ ] Borrowed `tc_type` compared against `borrowed_type_expected`
-- [ ] `BOTH` mode cross-compares the two sources via S10
+- [x] `tc_source` implemented: `OWN_J7` / `BORROWED_ZONE` / `BOTH` (verified
+      2026-09-03: `config_store.h`'s `tc_source` field, `config_params.c`
+      SET/GET, contradiction-with-`tc_placement_mode` rejected at
+      `config_params_validate()`, host-tested)
+- [ ] `SAFETY_FLAG_BORROWED` set in status frames when borrowing — still
+      genuinely open, no such bit exists in `CommonFW` yet
+- [x] `tc_placement_mode` forced to `CHAMBER_AGREED`; contradictory config
+      **rejected** (verified 2026-09-03, same validator as above)
+- [x] S13 implemented against `sample_counter` (`context_borrowed_sample_counter_advancing()`, `src/snapshots.h`) —
+      and the guard itself (`SAFETY_TRIP_BORROWED_STALE`, `safety_guards.c`)
+      consumes it, not just the plumbing
+- [x] Borrowed `tc_type` compared against `borrowed_type_expected` — done
+      2026-09-03, `context_borrowed_type_mismatch()` (`src/snapshots.h`),
+      called from `safety_core_build_input()`, logs `LOG_LEVEL_WARN` once on
+      the transition into mismatch. Diagnostic only, no new guard/trip.
+- [x] `BOTH` mode cross-compares the two sources via S10 (verified
+      2026-09-03: `safety_guards.c`'s S10 block compares against
+      `nearest_zone_measured_c` regardless of `OWN_J7` vs `BOTH`, matching
+      this doc's own "And it must agree" section above)
 
 **Commissioning**
 - [ ] Thermocouple type chosen deliberately per §2, per sensor

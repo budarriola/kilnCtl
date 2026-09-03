@@ -278,6 +278,16 @@ static safety_guard_cfg_t s_guard_cfg;
 static uint8_t s_borrowed_last_sample_counter[CONTEXT_SNAPSHOT_MAX_ZONES];
 static bool    s_borrowed_sample_counter_known[CONTEXT_SNAPSHOT_MAX_ZONES];
 
+// Edge-latch for the borrowed-channel tc_type mismatch diagnostic
+// (context_borrowed_type_mismatch(), snapshots.h) -- docs/THERMOCOUPLE.md
+// "Type checking a borrowed channel". Not per-zone like the sample_counter
+// state above: only one zone can be the commissioned borrowed_zone_index at
+// a time, so one flag is enough. Logged once on the false->true transition,
+// not every 100ms tick the mismatch persists -- log_task_log() is not free
+// (this file's own comments elsewhere on log_task_log() cost), and a
+// standing mismatch is exactly as true on tick 2 as it was on tick 1.
+static bool s_borrowed_type_mismatch_warned;
+
 // Cached alongside s_guard_cfg by apply_config_to_guard_cfg(), for the same
 // reason: recomputed only when the commissioned record changes, read every
 // tick. See that function's comment for why S9 needs it. False until a
@@ -948,6 +958,23 @@ static safety_guard_input_t safety_core_build_input(void)
         &ctx, context_valid, (cfg_rec.fields_set & CONFIG_STORE_SET_BORROWED_ZONE_INDEX) != 0u,
         cfg_rec.borrowed_zone_index, &s_borrowed_sample_counter_known[cfg_rec.borrowed_zone_index],
         &s_borrowed_last_sample_counter[cfg_rec.borrowed_zone_index]);
+
+    // docs/THERMOCOUPLE.md "Type checking a borrowed channel" / THERMOCOUPLE.md's
+    // own open checklist item -- same have_index gate as sample_counter_advancing
+    // above (a borrowed zone must be commissioned before its reported tc_type
+    // means anything). Logged once on the transition into mismatch, and the
+    // latch clears the instant it stops being true so a later, different
+    // mismatch (or the same one recurring after a fix-and-break) logs again
+    // rather than being silenced forever by the first sighting.
+    bool borrowed_type_mismatch = context_borrowed_type_mismatch(
+        &ctx, context_valid, (cfg_rec.fields_set & CONFIG_STORE_SET_BORROWED_ZONE_INDEX) != 0u,
+        cfg_rec.borrowed_zone_index, cfg_rec.borrowed_type_expected);
+    if (borrowed_type_mismatch && !s_borrowed_type_mismatch_warned) {
+        log_task_log(LOG_LEVEL_WARN, "safety_core",
+                     "borrowed zone tc_type mismatch: main board now reports a different type than "
+                     "borrowed_type_expected -- reconfigured underneath us since commissioning");
+    }
+    s_borrowed_type_mismatch_warned = borrowed_type_mismatch;
 
     // Carry every commissioned threshold into s_guard_cfg from the SAME
     // record read above, on the same tick the guards are about to run

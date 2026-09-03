@@ -309,6 +309,53 @@ static inline bool context_borrowed_sample_counter_advancing(const context_snaps
     return false;
 }
 
+// Borrowed-channel type mismatch (docs/THERMOCOUPLE.md "Type checking a
+// borrowed channel", docs/CONFIG_REFERENCE.md's borrowed_type_expected row,
+// THERMOCOUPLE.md's own open checklist item "Borrowed tc_type compared
+// against borrowed_type_expected"). This was a real gap: borrowed_type_
+// expected has been a live config_store field (config_params.c param
+// 0x0210) since before S13 landed, and the context frame has always carried
+// each zone's tc_type (kilnlink_context.h, wire offset 11 of the per-zone
+// block) -- nothing ever read the two against each other. Not a
+// SAFETY_MODEL.md guard (no S-number, no trip, no WARN level in the guard
+// table) -- it is a diagnostic: "someone reconfigured the borrowed channel's
+// sensor type on the main board since commissioning", which invalidates the
+// plausibility ranges max31856_tc_range_policy.c built for the type that WAS
+// expected. Left to the caller (safety_core.c) to decide what to do with a
+// true result (this codebase's convention: log it, same as any other
+// non-tripping diagnostic) -- this function only answers the pure question.
+//
+// Same zone_index-not-array-position lookup as context_borrowed_sample_
+// counter_advancing() above (link_frame_unpack_context() does not guarantee
+// wire-order == array-slot stability across ticks), and the same "missing
+// zone reads as no-mismatch, not a spurious clear" choice: a zone briefly
+// absent from a frame says nothing about its tc_type, so this returns false
+// rather than either latching the last known answer or asserting a fresh
+// one. have_index is gated the identical way (CONFIG_STORE_SET_BORROWED_
+// ZONE_INDEX) -- with no borrowed zone commissioned there is no channel to
+// compare, matching sample_counter_advancing's own "return false" for that
+// case rather than inventing a "mismatch because unknown" reading.
+static inline bool context_borrowed_type_mismatch(const context_snapshot_t *ctx, bool context_valid,
+                                                    bool have_index, uint8_t borrowed_zone_index,
+                                                    uint8_t borrowed_type_expected)
+{
+    if (!context_valid || !have_index || ctx == NULL) {
+        return false;
+    }
+    uint8_t n = ctx->zone_count;
+    if (n > CONTEXT_SNAPSHOT_MAX_ZONES) {
+        n = CONTEXT_SNAPSHOT_MAX_ZONES; /* defensive -- ctx is caller-trusted here, but never overrun */
+    }
+    for (uint8_t i = 0; i < n; i++) {
+        const context_zone_t *z = &ctx->zones[i];
+        if (z->zone_index != borrowed_zone_index) {
+            continue;
+        }
+        return z->tc_type != borrowed_type_expected;
+    }
+    return false;
+}
+
 // --- Link-task boundary getters ---------------------------------------------
 // Declared here, not in link_task.h, for the same isolation reason as the
 // pure functions above -- these three are implemented in link_task.c (their
