@@ -220,14 +220,18 @@ waiting, not unwritten:
 **Genuinely still software, and doable without you or the fixture.** This is
 now a short list, which is the point:
 
-- **M11's remaining items are now the LCD consolidation only.** Relay/IO
-  profile segments, the rules-engine deletion and relay names all landed
-  2026-08-28 and are flash-verified on the owner's board.
-- **The LCD back buttons do not work** (owner-reported 2026-08-28). The
-  obvious explanation is ruled out — the board reports `touch_calibrated:
-  true` — so this is an open bug with no theory, not a configuration
-  question. `lvgl_port_get_last_raw_touch()` exists and is not exposed over
-  MCP; doing so would say exactly where a tap lands.
+- ~~**M11's remaining items are now the LCD consolidation only.**~~ **Stale,
+  corrected 2026-09-03: M11 is fully closed.** The LCD consolidation items
+  (temperature-page relay toggle, diagnostics/safety/thermocouple-fault
+  paging, planned-profile preview) also landed and are checked off in
+  [M11](#m11--the-ui-the-owner-actually-asked-for--opened-2026-08-28) itself.
+- ~~**The LCD back buttons do not work**~~ **CLOSED (`1982ed6`).** Root cause
+  was the topbar's z-order-first-match hit test: icons are built left-to-right
+  (Back, Home, Prev, Next, Gear) so every icon except the last in a row was
+  shadowed by whichever came after it, and Back was *always* shadowed since
+  something always follows it. Fixed by capping the touch-area extension at
+  `UI_THEME_PADDING_PX/2` per side (`ui_theme_apply_touch_area()`) and
+  registering the icon row as a touch group (`ui_topbar.c`).
 - Diagnose the HTTP concurrency reset above — it has a reproducer and two
   ruled-out mechanisms, so the next step is instrumenting the failing
   allocation, not more black-box testing.
@@ -306,6 +310,18 @@ below). A same-day defect sweep found and fixed a duplicated band-width
 formula, a band-cliff bug present in `cone_table.c` itself (not just its
 caller), and a dwell-credit crash, plus ten wrong cone temperatures in the
 Orton table (mirror test added so a future table edit can't repeat it).
+**Further hardening since, still pre-real-firing:** dwell credit was found
+**unreachable** — its gate was tied to the 25 °C ramp-lock band instead of
+schedule lag, so it could never fire — and fixed (`cf3763c`); accrual was
+then extended to keep crediting past the nominal ramp end (`0402ecb`,
+KilnFW + simulator). Separately, three ramp-lock/guard interaction bugs
+surfaced and were fixed: a hot-start stall (one-sided lock + a guard-4
+arming backstop, `8f12449`), a false guard-4 trip during autotune's
+SETTLING phase that the backstop itself introduced (`7911f26`), and guard 4
+mistaking autotune's synthetic setpoint for a real one (`1bfd5ee`). None of
+this changes the GATED verdict below — a real cone-temperature firing is
+still the only thing that flips ramp assist's default to ON — but it removes
+failure modes that would otherwise have surfaced mid-firing.
 
 **Also closed in the same window, no longer open:**
 - Relay-autotune thermal guards 1/2 now use an amplitude discriminator
