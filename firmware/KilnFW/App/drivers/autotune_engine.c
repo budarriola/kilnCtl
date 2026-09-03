@@ -480,7 +480,17 @@ static const char *TAG = "autotune_engine";
  * commanded step duty > 0 arms guard 1/2) for every step-method run, probe
  * or identify, so the ordinary "rate_cfg C/min" rise requirement -- not just
  * this file's own alive/death checks -- covers a dead element from the very
- * first STEPPING tick, at whatever duty this run happens to be driving. */
+ * first STEPPING tick, at whatever duty this run happens to be driving.
+ *
+ * autotune_engine_run_relay() applies the SAME override (name kept as-is --
+ * "step test" here means "this file's own progress-window arming", not
+ * literally AUTOTUNE_METHOD_STEP): a relay run's low branch (center - d,
+ * 0.15 at the default d=0.35) is likewise below thermal_guard.c's stock 0.5
+ * default, and once the guard input feeds want_duty (relay_law_tick()'s
+ * pre-PWM branch value, see that construction's own comment) instead of the
+ * post-PWM state, this override is what keeps guard 1/2's window armed
+ * continuously across BOTH branches of the oscillation rather than degating
+ * every time the law dips to its low branch. */
 #define AUTOTUNE_PROGRESS_DUTY_MIN_FOR_STEP_TEST 0.01f
 
 /* Absolute margin between target mode's requested target_c and what the
@@ -2575,9 +2585,47 @@ static void autotune_engine_tick_locked(void)
          * paused pending review of separate findings) -- sensor_ok is the
          * only thing this expression actually gates.
          *
-         * RELAY method is untouched (its want_duty deliberately toggles
-         * between two extremes as part of the bang-bang law itself, a
-         * different situation this fix does not address).
+         * RELAY method had the SAME defect and was left uncorrected the
+         * first time this comment was written ("its want_duty deliberately
+         * toggles between two extremes as part of the bang-bang law itself,
+         * a different situation this fix does not address"). That reasoning
+         * does not survive contact with what was actually fed to the guard:
+         * want_relay_on is heater_output_duty_relay_step()'s own PWM state
+         * for whichever branch relay_law_tick() selected (AUTOTUNE_RELAY_
+         * CENTER_DUTY +/- relay_d, e.g. 0.85 / 0.15 at the default d=0.35 --
+         * see relay_law_tick()'s own comment on why the low branch is
+         * nonzero, not off), and `want_relay_on ? want_duty : 0.0f` zeroes
+         * commanded_duty on every PWM off-pulse of EITHER branch, not just
+         * during a genuine low-branch period -- exactly the class of defect
+         * profile_executor.c's fix below describes, just unfixed here.
+         * Guards 1/2's progress window (thermal_guard.c: resets whenever
+         * commanded_duty < progress_duty_min) and guard 7's frozen-sensor
+         * window (resets whenever commanded_duty drops to <= 0) therefore
+         * both restarted every ~window_ms during a relay run, structurally
+         * unable to complete: armed in guard_cfg, but inert against the
+         * duty this method actually drives -- found in review, not a bench
+         * trip, same discovery shape as the step-test defect just above.
+         *
+         * Fixed the same way: feed both methods the INTENDED duty (want_duty,
+         * pre-PWM -- relay_law_tick()'s own branch value for RELAY, exactly
+         * as already computed above), not the instantaneous post-PWM
+         * want_relay_on-gated state. want_duty already carries the right
+         * per-method value (STEP: 0 during SETTLING, step_duty during
+         * STEPPING; RELAY: relay_law_tick()'s current branch), so a single
+         * expression now covers both methods -- see
+         * autotune_engine_run_relay()'s own progress_duty_min override
+         * (mirrors AUTOTUNE_PROGRESS_DUTY_MIN_FOR_STEP_TEST) for the other
+         * half of this fix: without it the low branch (0.15 by default,
+         * strictly below thermal_guard.c's stock 0.5 progress_duty_min)
+         * would still degate the window every other half-cycle even though
+         * it is now fed continuously.
+         *
+         * Guard 3 (runaway, heat off) is UNCHANGED by this fix and stays
+         * correctly inert for a normal relay run: want_duty's low branch is
+         * a real nonzero duty (0.15 by default), so commanded_duty <= 0
+         * never holds except at the edge case d == AUTOTUNE_RELAY_MAX_D
+         * (0.5, low branch truly 0) -- exactly the case where heat really
+         * is off and guard 3 SHOULD be able to see it.
          *
          * profile_executor.c's own identical PWM/progress-window defect
          * (commanded_duty fed from the post-PWM relay state, resetting
@@ -2586,8 +2634,7 @@ static void autotune_engine_tick_locked(void)
          * -- see that file's apply-relays-and-guards loop for the fix and
          * its explicit reasoning on the load-cap and authority-block
          * questions the same defect class raises there. */
-        .commanded_duty = (s_at.method == AUTOTUNE_METHOD_STEP) ? (sensor_ok ? want_duty : 0.0f)
-                                                                 : (want_relay_on ? want_duty : 0.0f),
+        .commanded_duty = sensor_ok ? want_duty : 0.0f,
         .dt_s = (float)dt_ms / 1000.0f,
     };
     if (thermal_guard_tick(&s_at.guard_state, &guard_cfg_this_tick, &gin)) {
@@ -3514,6 +3561,19 @@ bool autotune_engine_run_relay(uint8_t zone_index, float setpoint_c, float relay
     s_at.relay_d = d;
     s_at.relay_h = h;
     s_at.relay_rule = rule;
+    /* Same override as the step-test path (AUTOTUNE_PROGRESS_DUTY_MIN_FOR_
+     * STEP_TEST's own comment), now that the guard input feeds want_duty
+     * (relay_law_tick()'s pre-PWM branch value) instead of the post-PWM
+     * want_relay_on-gated duty -- see that construction's own comment. A
+     * relay run's low branch is AUTOTUNE_RELAY_CENTER_DUTY - d, 0.15 at the
+     * default d=0.35 -- below thermal_guard.c's stock 0.5 progress_duty_min,
+     * so without this override guard 1/2's window would still degate every
+     * time the branch dips low, even though commanded_duty no longer drops
+     * to 0 on every PWM sub-cycle within a branch. Guard 3 is unaffected:
+     * it keys off commanded_duty <= 0, not this threshold, so a low branch
+     * that stays strictly positive (the normal case) still correctly never
+     * opens guard 3's window -- see this run's guard-input comment. */
+    s_at.guard_cfg.progress_duty_min = AUTOTUNE_PROGRESS_DUTY_MIN_FOR_STEP_TEST;
     /* Start on the high branch and let the law correct it on the first tick
      * that has a reading. Starting "on" is the right guess for the usual case
      * (a cold kiln heading up to the setpoint) and costs nothing in the other:

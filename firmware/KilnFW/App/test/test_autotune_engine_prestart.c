@@ -2067,6 +2067,104 @@ static void test_guard1_still_trips_a_dead_element_that_never_gets_proven(void)
 }
 
 // ---------------------------------------------------------------------------
+// RELAY method guard 1/2 arm-during-identification pins (PID audit,
+// 2026-09-02). Before this pass, autotune_engine.c fed thermal_guard's
+// commanded_duty as `want_relay_on ? want_duty : 0.0f` for a RELAY run --
+// the POST-PWM instantaneous relay state, not the bang-bang law's own
+// branch value. Guard 1/2's progress window (thermal_guard.c: resets
+// whenever commanded_duty < progress_duty_min) therefore reset on every
+// PWM off-pulse of heater_output_duty_relay_step()'s own window (~window_ms,
+// 60s default), on EITHER bang-bang branch -- it could never accumulate
+// the 300s (PROGRESS_WINDOW_S) needed to complete, so a dead or
+// flat-but-plausible element during a relay-feedback autotune ran the
+// entire multi-hour budget with guard 1/2 fully configured (armed in
+// guard_cfg) but structurally unable to fire (inert against this method's
+// actual duty pattern) -- the "armed but inert" case, same shape as the
+// step-test defect this file already pins above and the profile_executor.c
+// defect described in that file's apply-relays-and-guards loop.
+//
+// The fix: feed both methods want_duty (pre-PWM -- relay_law_tick()'s own
+// branch value for RELAY), and give RELAY the same progress_duty_min
+// override STEP already had (a relay run's low branch, 0.15 at the default
+// d=0.35, is still below thermal_guard.c's stock 0.5 default). These tests
+// pin BOTH halves of that fix and drive a genuinely dead element through
+// the real tick loop to prove the fix actually restores detection, not
+// just that the plumbing compiles.
+// ---------------------------------------------------------------------------
+
+// Starts a real relay-feedback run on zone 0, then jumps straight to
+// RELAY_CYCLING -- same rationale and same never-succeeding-task-create
+// workaround as start_stepping_run_rule() above.
+static void start_relay_cycling_run(float max_temp_c, float setpoint_c)
+{
+    static MAX31856BusClass bus;
+    static SafetyLinkClass safety;
+    memset(&s_at, 0, sizeof(s_at));
+    memset(&bus, 0, sizeof(bus));
+    memset(&safety, 0, sizeof(safety));
+    bus.initialized = true;
+    s_at.thermo_bus = &bus;
+    s_at.safety = &safety;
+    s_at.lock = xSemaphoreCreateMutex();
+    TEST_CHECK(s_at.lock != NULL, "test setup: lock must be creatable");
+
+    s_stub_max_temp_c = max_temp_c;
+    s_stub_min_temp_c = 0.0f;
+    s_stub_ch0_ok = true;
+
+    char errbuf[96] = {0};
+    bool ok = autotune_engine_run_relay(0, setpoint_c, /*relay_d=*/0.0f, /*hysteresis_c=*/0.0f,
+                                        AUTOTUNE_RULE_TYREUS_LUYBEN, errbuf, sizeof(errbuf));
+    TEST_CHECK(ok, "test setup: relay run must start");
+
+    xSemaphoreTake(s_at.lock, portMAX_DELAY);
+    s_at.state = AUTOTUNE_ENGINE_RELAY_CYCLING;
+    s_at.phase_start_tick = 0;
+    s_at.last_sample_tick = 0;
+    xSemaphoreGive(s_at.lock);
+}
+
+static void test_relay_run_overrides_progress_duty_min_same_as_step_test(void)
+{
+    TEST_SECTION("autotune_engine_run_relay() overrides progress_duty_min the same way the step-test path "
+                 "does -- otherwise the low bang-bang branch (0.15 default) degates guard 1/2 every half-cycle");
+    start_relay_cycling_run(/*max_temp_c=*/500.0f, /*setpoint_c=*/300.0f);
+    TEST_CHECK(s_at.guard_cfg.progress_duty_min == AUTOTUNE_PROGRESS_DUTY_MIN_FOR_STEP_TEST,
+               "relay run must arm guard 1/2 at any nonzero commanded duty, same as a step test");
+}
+
+static void test_relay_run_flat_dead_element_now_trips_a_guard(void)
+{
+    TEST_SECTION("relay run: a dead/flat element still trips a guard, driven through the real autotune_engine "
+                 "tick loop -- this is the exact case that was silently inert before this pass' fix");
+    start_relay_cycling_run(/*max_temp_c=*/500.0f, /*setpoint_c=*/300.0f);
+    // Flat, well below setpoint - h: the relay law latches its high branch
+    // and never releases it (meas never crosses setpoint_c + h), so this
+    // exercises the branch that used to toggle in and out of commanded_duty
+    // on every PWM sub-cycle even though the LOGICAL branch never changed.
+    run_ticks(/*start_temp_c=*/25.0f, /*per_tick_delta_c=*/0.0f, /*n_ticks=*/320);
+
+    TEST_CHECK(s_at.guard_state.is_tripped, "a dead element on a relay run must still trip a guard");
+    TEST_CHECK(s_at.guard_state.reason == THERMAL_GUARD_TRIP_HEATING_FAILED,
+               "specifically guard 1 (HEATING_FAILED) -- climbing (error > progress_band_c), not rising");
+}
+
+static void test_relay_run_healthy_rising_element_does_not_spuriously_trip(void)
+{
+    TEST_SECTION("relay run: a HEALTHY rising element does not spuriously trip guard 1 now that its progress "
+                 "window is continuously armed across the whole run (was previously never armed at all)");
+    start_relay_cycling_run(/*max_temp_c=*/500.0f, /*setpoint_c=*/300.0f);
+    // 1.0C/tick == 60C/min, comfortably clearing the default 0.5C/min
+    // sanity_rate_c_per_min bar -- a healthy element tracking the relay
+    // law's high branch. Runs long enough to cross guard 1's 300s default
+    // window at least once while still climbing (well short of setpoint).
+    run_ticks(/*start_temp_c=*/25.0f, /*per_tick_delta_c=*/1.0f, /*n_ticks=*/320);
+
+    TEST_CHECK(!s_at.guard_state.is_tripped,
+               "a healthy climbing element must not trip guard 1 just because its window can now complete");
+}
+
+// ---------------------------------------------------------------------------
 // TODO.md 6A.6 ownership tests -- autotune_engine.c claims RELAY_OWNER_AUTOTUNE
 // on the zone it steps (begin_run_locked()) and releases it through
 // force_relays_off(), the single chokepoint every terminal path (finalize_fit,
@@ -4973,6 +5071,9 @@ void run_test_autotune_engine_prestart(void)
     test_dead_element_trips_guard1_below_the_old_0_5_duty_floor();
     test_guard1_relaxation_never_applies_to_relay_method();
     test_guard1_still_trips_a_dead_element_that_never_gets_proven();
+    test_relay_run_overrides_progress_duty_min_same_as_step_test();
+    test_relay_run_flat_dead_element_now_trips_a_guard();
+    test_relay_run_healthy_rising_element_does_not_spuriously_trip();
 
     // Ownership tests (TODO.md 6A.6) -- order-independent relative to the
     // guard tests above (each calls start_stepping_run(), which re-zeroes
