@@ -3602,6 +3602,106 @@ static void test_nvs_load_from_v12_blob_defaults_tuning_quality_to_unknown(void)
     nvs_test_clear();
 }
 
+// ZONES_CFG_VERSION 13->14: a v13 blob (predates adaptive_tune_enabled
+// entirely -- the full tuning-quality record and everything before it, but
+// no opt-in flag of its own) must migrate cleanly, with adaptive_tune_
+// enabled defaulting to 0 ("opted out") for every zone, while every
+// pre-existing field -- including the v13 tuning_* quality record and
+// coupling_coeff[]/coupling_tau_s[]/coupling_dead_time_s[] -- survives
+// unchanged. This is the migration test that was missing: convert_zone_v13()
+// and case 13 of convert_versioned_blob_to_current() had never been
+// exercised by a dedicated nvs_load_from() test, unlike every neighboring
+// version step (v9 through v12, and v14). sizeof(src) is zone_cfg_v13_t/
+// zones_cfg_v13_t -- frozen, historical types, never the live zone_cfg_t/
+// zones_cfg_t (already the v14 shape by now), mirroring
+// test_nvs_load_from_v12_blob_defaults_tuning_quality_to_unknown() above.
+static void test_nvs_load_from_v13_blob_defaults_adaptive_tune_enabled_to_zero(void)
+{
+    TEST_SECTION("nvs_load_from -- a v13 blob upconverts to v14: adaptive_tune_enabled defaults to 0 "
+                 "(\"opted out\") for every zone, while the tuning_* quality record/coupling_coeff[]/"
+                 "coupling_tau_s[]/model_k_dc/etc survive unchanged");
+    nvs_test_enable(true);
+    nvs_test_clear();
+
+    zones_cfg_v13_t src;
+    memset(&src, 0, sizeof(src));
+    src.version = 13;
+    src.thermo_count = 3;
+    src.relay_count = 3;
+    src.continue_on_zone_trip = 1;
+    src.safety_tc_type = 3;
+    src.pc_link_abort_silence_ms = 45000.0f;
+    src.timing_profile_count = 1;
+    snprintf(src.timing_profiles[0].name, sizeof(src.timing_profiles[0].name), "Default");
+
+    src.zones[0].relay_mask = 0x01;
+    src.zones[0].thermo_mask = 0x01;
+    src.zones[0].max_temp_c = 1300.0f;
+    src.zones[0].model_k_dc = 20.969f;
+    src.zones[0].model_tau_s = 640.0f;
+    src.zones[0].model_dead_time_s = 45.0f;
+    src.zones[0].coupling_coeff[1] = 10.887f;
+    src.zones[0].coupling_tau_s[1] = 42.0f;
+    src.zones[0].settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
+    src.zones[0].tuning_valid = 1;
+    src.zones[0].tuning_method = 1; /* autotune_method_t: 0=STEP, 1=RELAY */
+    src.zones[0].tuning_rule = 3;   /* autotune_rule_t: 0-3 valid */
+    src.zones[0].tuning_baseline_c = 25.5f;
+    src.zones[0].tuning_seq = 7;
+
+    src.zones[1].relay_mask = 0x02;
+    src.zones[1].thermo_mask = 0x02;
+    src.zones[1].max_temp_c = 1250.0f;
+    src.zones[1].settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
+
+    src.zones[2].relay_mask = 0x04;
+    src.zones[2].thermo_mask = 0x04;
+    src.zones[2].max_temp_c = 1200.0f;
+    src.zones[2].settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
+
+    src.crc32 = 0; // v13's own CRC is not checked on the old-version path
+
+    stage_zones_blob(&src, sizeof(src));
+
+    zones_cfg_t out_cfg;
+    bool found = false, valid = false;
+    esp_err_t err = nvs_load_from("kiln_nvs", &out_cfg, &found, &valid);
+
+    TEST_CHECK(err == ESP_OK, "no NVS error");
+    TEST_CHECK(found && valid, "a well-formed v13 blob must migrate to a valid current (v14) config");
+    TEST_CHECK(out_cfg.version == ZONES_CFG_VERSION, "migrated config is stamped the current version");
+
+    // THE thing this test is really about: adaptive_tune_enabled must be at
+    // its "opted out" zero default for every zone -- not garbage, not
+    // uninitialized memory -- since no version before v14 ever stored it.
+    for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
+        char msg[96];
+        snprintf(msg, sizeof(msg), "zones[%u].adaptive_tune_enabled reads 0 (v13 never stored it)", i);
+        TEST_CHECK(out_cfg.zones[i].adaptive_tune_enabled == 0, msg);
+    }
+    // Pre-existing v13 fields, including the tuning-quality record, must
+    // survive the upgrade completely unchanged.
+    TEST_CHECK(out_cfg.thermo_count == 3 && out_cfg.relay_count == 3, "counts carried through");
+    TEST_CHECK(out_cfg.continue_on_zone_trip == 1, "continue_on_zone_trip carried through");
+    TEST_CHECK_NEAR(out_cfg.pc_link_abort_silence_ms, 45000.0f, 1e-6, "pc_link_abort_silence_ms carried through");
+    TEST_CHECK(strcmp(out_cfg.timing_profiles[0].name, "Default") == 0, "timing profile name carried through");
+    TEST_CHECK(out_cfg.zones[0].relay_mask == 0x01 && out_cfg.zones[1].relay_mask == 0x02 &&
+              out_cfg.zones[2].relay_mask == 0x04, "relay_mask must NOT be shifted for any zone");
+    TEST_CHECK_NEAR(out_cfg.zones[0].model_k_dc, 20.969f, 1e-6, "zones[0].model_k_dc survives");
+    TEST_CHECK_NEAR(out_cfg.zones[0].coupling_coeff[1], 10.887f, 1e-6, "zones[0].coupling_coeff[1] survives");
+    TEST_CHECK_NEAR(out_cfg.zones[0].coupling_tau_s[1], 42.0f, 1e-6, "zones[0].coupling_tau_s[1] survives");
+    TEST_CHECK(out_cfg.zones[0].tuning_valid == 1, "zones[0].tuning_valid survives");
+    TEST_CHECK(out_cfg.zones[0].tuning_method == 1, "zones[0].tuning_method survives");
+    TEST_CHECK(out_cfg.zones[0].tuning_rule == 3, "zones[0].tuning_rule survives");
+    TEST_CHECK_NEAR(out_cfg.zones[0].tuning_baseline_c, 25.5f, 1e-6, "zones[0].tuning_baseline_c survives");
+    TEST_CHECK(out_cfg.zones[0].tuning_seq == 7, "zones[0].tuning_seq survives");
+    TEST_CHECK(out_cfg.zones[0].settings_source == ZONE_SETTINGS_SOURCE_CUSTOM,
+              "zones[0].settings_source is carried through verbatim");
+
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
 // ZONES_CFG_VERSION 14->15 (PID_EXPANSION_PLAN.md section 3.2 follow-up): a
 // v14 blob (predates coupling_diag_k_dc entirely -- adaptive_tune_enabled
 // and everything before it, but no diagonal cell of its own) must migrate
@@ -6429,6 +6529,7 @@ void run_test_zones_http(void)
     test_tuning_quality_round_trip_asymmetric_per_zone();
     test_zones_config_set_pid_invalidates_tuning_quality();
     test_nvs_load_from_v12_blob_defaults_tuning_quality_to_unknown();
+    test_nvs_load_from_v13_blob_defaults_adaptive_tune_enabled_to_zero();
     test_nvs_load_from_v14_blob_defaults_coupling_diag_k_dc_to_zero();
     test_settings_source_save_reload_inheritance_round_trip();
     test_settings_source_two_and_three_zone_cycles_are_refused();
