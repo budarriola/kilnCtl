@@ -31,11 +31,22 @@ WHAT THIS MODELS, and how it maps onto the plan:
   the schedule up front, independent of what the plant would have done.
 
   Dwell credit (§7.3): a heat-work-weighted accumulator
-  (``cone_table.heat_work_weight``) that runs ONLY while a zone is lagging
-  (the exact "not rising at the desired rate" gate the plan specifies,
-  reusing the lag signal rather than a second detector) AND the zone's
-  actual temperature has already entered the half-cone-step band below the
-  segment's target. Credit accumulates across a whole run of consecutive
+  (``cone_table.heat_work_weight``) that runs ONLY while a zone is BEHIND
+  SCHEDULE AT ALL (``actual_c < z.commanded_c``, the moving setpoint --
+  deliberately NOT the ``lag_band_c``-gated ``z.lagging`` used for the
+  ramp-lock/stretch accounting above) AND the zone's actual temperature has
+  already entered the half-cone-step band below the segment's target.
+  Fixed 2026-09-03: this used to reuse ``z.lagging`` (i.e. the 25 C
+  ``lag_band_c`` lock), which made the credit gate and the in-band
+  condition mutually exclusive at every real cone-scale target -- during a
+  ramp ``z.commanded_c <= step.target_c``, so a lock-lagging zone is always
+  >25 C below ``step.target_c``, while in-band requires within half a cone
+  step (well under 25 C almost everywhere in the Orton table) -- see
+  ``firmware/KilnFW/docs/PID_EXPANSION_PLAN.md`` §7.3/§7.6 for the
+  measured-zero finding this produced and the fix. ``lag_band_c`` still
+  governs ramp-lock/stretch (``z.lagging``, ``z.stretched_s``) exactly as
+  before; it no longer has any bearing on dwell credit. Credit accumulates
+  across a whole run of consecutive
   ramp steps (back-to-back ramps do not reset it) and is spent -- once --
   against the very next dwell step's nominal duration:
   ``effective_dwell_s = max(0.0, nominal_dwell_s - credit_s)``. This
@@ -419,8 +430,9 @@ def run_ramp_assist(schedule: Sequence[ScheduleStep], max_temp_c: float,
                        (direction < 0 and z.commanded_c < step.target_c):
                         z.commanded_c = step.target_c
 
-                # Dwell credit gate (§7.3): only while lagging AND within
-                # the half-cone-step band below THIS step's own target.
+                # Dwell credit gate (§7.3): only while BEHIND SCHEDULE AT ALL
+                # (actual_c < the moving z.commanded_c) AND within the
+                # half-cone-step band below THIS step's own target.
                 # cone_table.band_bottom_c now implements the corrected
                 # bracketing-pair half-spacing formula directly (DEFECT 2
                 # fixed in cone_table.c/.py, commit f84d4c8) -- ramp_assist
@@ -428,12 +440,28 @@ def run_ramp_assist(schedule: Sequence[ScheduleStep], max_temp_c: float,
                 # workaround; that duplicate is gone, this is the one and
                 # only band-width formula shared by the simulator and the
                 # firmware.
+                #
+                # DELIBERATELY NOT `z.lagging` (mirrors firmware fix
+                # 2026-09-03, profile_executor_ramp_assist.c's
+                # ramp_assist_dwell_credit_tick()): `z.lagging` is the
+                # ramp-lock's wide DEFAULT_LAG_BAND_C=25.0 band, which
+                # decides when the schedule freezes and must stay wide.
+                # Reusing it here made credit and in_band mutually
+                # exclusive -- during a ramp z.commanded_c <= step.target_c,
+                # so a lock-lagging zone is always >25C below step.target_c,
+                # while in_band requires within half a cone step (<25C
+                # almost everywhere in the Orton table) -- credit was
+                # measured at EXACTLY ZERO at bisque/cone6/cone10, every
+                # mass loading, before this was split out. `behind_schedule`
+                # asks a narrower question ("behind at all"), already scoped
+                # tight by in_band and the heat-work weight below.
+                behind_schedule = actual_c < z.commanded_c
                 try:
                     band_bottom = ct.band_bottom_c(step.target_c)
                     in_band = band_bottom <= actual_c < step.target_c
                 except ct.ConeTableError:
                     in_band = False  # target outside the cone table's range -- no credit, no crash
-                if z.lagging and in_band:
+                if behind_schedule and in_band:
                     try:
                         w = ct.heat_work_weight(actual_c, step.target_c)
                     except ct.ConeTableError:

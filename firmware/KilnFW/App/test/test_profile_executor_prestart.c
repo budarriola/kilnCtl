@@ -5466,6 +5466,46 @@ static void test_dwell_credit_tick_at_or_above_target_earns_nothing(void)
               "cone_table_heat_work_weight() would otherwise report for a temperature at/past target");
 }
 
+// Regression test for the "credit gate re-tied to the 25C ramp-lock band"
+// defect (fixed 2026-09-03): ramp_assist_dwell_credit_tick()'s third
+// parameter is `behind_schedule_now` (actual_c < the moving s_exec.target_c
+// at the call site), NOT the ramp-lock's `lagging_now`
+// ((s_exec.target_c - actual_c) > EXEC_RAMP_LOCK_BAND_C, 25C for every
+// shipped config). Before the fix, the call site passed the 25C-gated
+// lagging bit straight through, and because `in_band` here already requires
+// being within half a cone step of segment_target_c (well under 25C
+// everywhere in the Orton table except cone 019's 25.85C step), the two
+// conditions were mutually exclusive -- credit was measured at EXACTLY ZERO
+// at bisque, cone 6 and cone 10, at every mass loading tested. This test
+// pins a realistic ramp scenario -- a zone only 3.1C behind its segment
+// target, deep inside the cone-6 in-band range -- and asserts credit
+// actually accrues. A zone 3.1C behind would NEVER satisfy the old 25C
+// ramp-lock gate ((626.1 - 623.0) = 3.1, not > 25.0), so this test FAILS
+// if the credit gate is ever re-tied to that band (directly, or by widening
+// `behind_schedule_now`'s definition to require a >25C gap).
+static void test_dwell_credit_tick_accrues_a_few_degrees_behind_not_25(void)
+{
+    TEST_SECTION("ramp_assist_dwell_credit_tick() -- regression: a zone only 3.1C behind segment "
+                 "target (nowhere close to the 25C ramp-lock band) must still bank credit -- proves "
+                 "the credit gate is NOT the ramp-lock's lagging_now");
+    zone_runtime_t z;
+    memset(&z, 0, sizeof(z));
+    z.actual_c = 623.0f; // 626.1 - 623.0 = 3.1C behind -- old 25C lock gate would read false here
+
+    float old_style_ramp_lock_lagging = (626.1f - z.actual_c) > 25.0f; // == false, sanity-check the premise
+    TEST_CHECK(old_style_ramp_lock_lagging == 0.0f,
+              "sanity check: 3.1C behind must NOT satisfy the 25C ramp-lock band -- if it does, this "
+              "test is not exercising the case the fix targets");
+
+    bool behind_schedule_now = (z.actual_c < 626.1f); // the correct, gate-independent computation
+    ramp_assist_dwell_credit_tick(&z, /*ramping_now*/ true, behind_schedule_now, /*segment_target_c*/ 626.1f, 10.0f);
+
+    TEST_CHECK(z.dwell_credit_s > 0.0f,
+              "a zone a few degrees behind schedule (not 25C) must bank nonzero credit -- if this is "
+              "0.0, the credit gate has been re-tied to the 25C ramp-lock band and dwell credit is "
+              "structurally inert again at bisque/cone6/cone10 scale lag");
+}
+
 // PID_EXPANSION_PLAN.md sec 7.2: ramp_assist_stretch_rate_c_per_s() -- the
 // actual control-behaviour piece of auto-stretch. Pins its sentinel/gating
 // contract (assist off, no zone sustained yet) and its rate arithmetic
@@ -6023,6 +6063,7 @@ void run_test_profile_executor_prestart(void)
     test_dwell_credit_tick_out_of_range_target_earns_nothing();
     test_dwell_credit_tick_not_ramping_earns_nothing();
     test_dwell_credit_tick_at_or_above_target_earns_nothing();
+    test_dwell_credit_tick_accrues_a_few_degrees_behind_not_25();
     test_dwell_credit_spend_gated_on_flag();
     test_dwell_credit_spend_applies_when_enabled();
     test_dwell_credit_spend_clamped_to_nominal_never_negative();

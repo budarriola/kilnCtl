@@ -653,12 +653,19 @@ void executor_task_entry(void *arg)
             bool ramping_now = (seg->seg_kind == PROFILE_SEG_KIND_ZONE_RAMP) && !s_exec.dwelling;
             for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
                 if (!s_exec.zones[zi].active || s_exec.zones[zi].faulted) continue;
-                bool lagging_now = (lagging & (1u << zi)) != 0;
+                /* NOT `lagging` (the 25C ramp-lock mask) -- that band decides
+                 * when the schedule freezes and dwell credit must not be
+                 * re-tied to it (it made credit and in_band mutually
+                 * exclusive; see ramp_assist_dwell_credit_tick()'s doc
+                 * comment, profile_executor_internal.h, and profile_executor_
+                 * ramp_assist.c). Credit's own gate is "behind schedule at
+                 * all", against the moving s_exec.target_c. */
+                bool behind_schedule_now = (s_exec.zones[zi].actual_c < s_exec.target_c);
                 /* seg->target_c, not s_exec.target_c: the segment's own
                  * final target, not the still-interpolating commanded
                  * value -- see ramp_assist_dwell_credit_tick()'s doc
                  * comment (profile_executor_internal.h). */
-                ramp_assist_dwell_credit_tick(&s_exec.zones[zi], ramping_now, lagging_now,
+                ramp_assist_dwell_credit_tick(&s_exec.zones[zi], ramping_now, behind_schedule_now,
                                               seg->target_c, dt_s);
             }
             ramp_assist_stretch_tick(&s_exec, s_exec.segment_index, ramp_assist_on, ramping_now,

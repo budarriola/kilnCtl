@@ -3,8 +3,8 @@
 validation harness for PID_EXPANSION_PLAN.md §7, "ramp assist"). Covers:
 inert-when-capable, stretch-when-not-capable, hard refusal above
 ``max_temp_c``, back-to-back ramps, and the dwell-credit accrual gate
-(only while lagging, zero at/below band bottom, maximal at target -- the
-last two are cone_table.py's own contract, pinned again here through
+(behind schedule at all, zero at/below band bottom, maximal at target --
+the last two are cone_table.py's own contract, pinned again here through
 ``ramp_assist``'s actual call sites so a wiring mistake -- e.g. passing the
 wrong temperature into ``heat_work_weight`` -- is also caught).
 
@@ -13,6 +13,22 @@ source line was mutated, the test was re-run and observed to fail, the
 real failure output was recorded in that test's docstring, and the mutation
 was reverted before this file was finalized. See each test's docstring for
 the quoted failure.
+
+CREDIT-GATE FIX NOTE (2026-09-03): several docstrings/comments below
+(``BackToBackRampsTests.test_credit_carries_over_a_ramp_to_ramp_boundary``,
+``DwellCreditParityTests``, ``ScaleSweepDiscriminatesCreditErrorsTests``)
+still explain their ``lag_band_c=3.0`` overrides in terms of "at the real
+25 C band, lagging AND in-band is a near-empty set" -- true of the OLD gate
+(``if z.lagging and in_band:``), no longer true of the fixed one
+(``if behind_schedule and in_band:``, ``behind_schedule = actual_c <
+z.commanded_c``), which no longer references ``lag_band_c`` at all. The
+overrides themselves are harmless (still exercise ``z.lagging``/
+``z.stretched_s`` bookkeeping correctly) and every test using them still
+passes; the surrounding prose is dated context from before the fix, kept
+rather than rewritten line-by-line -- read it as history, cross-check
+against ``ramp_assist.py``'s own module docstring and
+``firmware/KilnFW/docs/PID_EXPANSION_PLAN.md`` §7.6.1 for the current
+behaviour.
 """
 from __future__ import annotations
 
@@ -233,34 +249,56 @@ class BackToBackRampsTests(unittest.TestCase):
 
 
 class DwellCreditGateTests(unittest.TestCase):
-    """The credit accumulator's gate: only while lagging (not rising at
-    the desired rate), and only within the half-cone-step band -- zero at
-    or below band bottom, growing toward the target, mirroring
-    cone_table.heat_work_weight's own contract (pinned independently in
-    test_cone_table.py; this class checks ramp_assist actually calls it
-    correctly).
+    """The credit accumulator's gate: only while BEHIND SCHEDULE AT ALL
+    (``actual_c < z.commanded_c``), and only within the half-cone-step
+    band -- zero at or below band bottom, growing toward the target,
+    mirroring cone_table.heat_work_weight's own contract (pinned
+    independently in test_cone_table.py; this class checks ramp_assist
+    actually calls it correctly).
 
-    NEGATIVE-TESTED: changed the gate from ``if z.lagging and in_band:`` to
-    ``if in_band:`` (i.e. accrue credit even while the zone IS achieving
-    the commanded rate). Ran ``test_credit_is_zero_when_never_lagging``;
-    it failed with:
-        AssertionError: 300.0 != 0.0
-    (credit accrued for the whole time the never-lagging ramp spent inside
-    the target's band, capped at the dwell's own 300 s nominal duration --
-    i.e. with the gate dropped, an ordinary on-schedule ramp would have
-    zeroed out its own dwell entirely). Reverted; this test passes again.
+    Fixed 2026-09-03: the gate used to be ``if z.lagging and in_band:``
+    (``z.lagging`` is the 25 C ``lag_band_c`` ramp-lock signal) -- see
+    ``firmware/KilnFW/docs/PID_EXPANSION_PLAN.md`` §7.3/§7.6 for why that
+    made credit and in_band mutually exclusive at every real cone-scale
+    target (measured exactly zero at bisque/cone6/cone10, every mass
+    loading). The correct gate the owner specified is narrower in one
+    sense (no 25 C threshold -- ANY shortfall counts) and does not need the
+    ramp-lock's wide band on top, because in_band + the heat-work weight
+    already scope it tightly. A consequence, not a bug: an ordinary,
+    well-tracked ramp is still marginally behind the moving setpoint on
+    almost every tick it spends in-band (float tracking error, PID
+    settling), so it now DOES earn credit -- this class's
+    ``test_well_tracked_ramp_still_earns_credit_while_in_band`` pins that
+    directly, replacing the old (and now-incorrect)
+    ``test_credit_is_zero_when_never_lagging``.
+
+    NEGATIVE-TESTED: changed the gate from ``if behind_schedule and
+    in_band:`` to ``if False:`` (i.e. credit never accrues at all). Ran
+    ``test_well_tracked_ramp_still_earns_credit_while_in_band``; it failed
+    with:
+        AssertionError: 0.0 not greater than 0.0
+    (credit was exactly zero with the gate disabled, confirming the check
+    is sensitive to the gate firing at all). Reverted; this test passes
+    again.
     """
 
-    def test_credit_is_zero_when_never_lagging(self):
+    def test_well_tracked_ramp_still_earns_credit_while_in_band(self):
         # An easy, slow ramp (1 C/min into 700 C) into a cone-range target
-        # never lags at all (measured: stretched_s == [0,0,0]), so credit
-        # should be exactly zero -- not just small.
+        # tracks closely (measured: stretched_s == [0,0,0], never locks) --
+        # but "behind schedule at all" is satisfied on nearly every in-band
+        # tick anyway (actual_c is essentially always at least a hair
+        # behind the moving commanded_c), so credit accrues and caps out at
+        # the dwell's own 300 s nominal duration. This is the corrected,
+        # intended behaviour -- see the class docstring.
         sched = [ra.RampStep(700.0, 1.0), ra.DwellStep(5.0)]
         res = ra.run_ramp_assist(sched, max_temp_c=1300.0, start_temp_c=20.0,
                                   plant_regime='physical', max_sim_s=20 * 3600.0)
         self.assertTrue(all(res['targets_reached']), res['targets_reached'])
         for c in res['credit_applied_s']:
-            self.assertEqual(c, 0.0)
+            self.assertGreater(c, 0.0, "a well-tracked ramp must still earn some credit "
+                                        "under the corrected behind-schedule-at-all gate")
+            self.assertLessEqual(c, 300.0, "credit must still clamp to the dwell's own "
+                                            "nominal duration")
 
     def test_credit_weight_matches_cone_table_at_endpoints(self):
         # Direct check that ramp_assist evaluates heat_work_weight at the

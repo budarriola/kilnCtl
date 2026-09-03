@@ -170,16 +170,43 @@ float ramp_assist_stretch_rate_c_per_s(s_exec_state_t *ex, uint8_t lagging_mask,
 // src/kilnctrl/ramp_assist.py's RampStep branch (~line 366-390) tick for
 // tick:
 //   in_band = band_bottom <= actual_c < target_c
-//   if lagging and in_band: credit += heat_work_weight(actual_c, target_c) * dt
+//   if behind_schedule and in_band: credit += heat_work_weight(actual_c, target_c) * dt
 // `segment_target_c` is the caller's seg->target_c (this ramp segment's
 // final target), not the moving s_exec.target_c -- see this function's
 // declaration comment (profile_executor_internal.h). ALWAYS runs regardless
 // of ramp_assist_cfg_enabled(); the caller decides what to do with the
 // accumulated total (ramp_assist_dwell_credit_spend(), below).
-void ramp_assist_dwell_credit_tick(zone_runtime_t *z, bool ramping_now, bool lagging_now,
+//
+// DELIBERATELY NOT the ramp-lock's `lagging_now` (sec 7.1's `(target_c -
+// actual_c) > EXEC_RAMP_LOCK_BAND_C`, 25C for every shipped config). That
+// band and this credit gate answer two different questions and must stay
+// two different booleans:
+//   - ramp-lock's lagging_now: "is the zone SO far behind that the schedule
+//     must freeze" -- correctly a wide band, and it must stay wide; it is
+//     also what auto-stretch, the warning surfaces and the event log key
+//     off of, and none of that changes here.
+//   - this gate (`behind_schedule_now`): "is the zone behind AT ALL, however
+//     slightly" -- deliberately narrow (zero), because the credit itself is
+//     already scoped tight by `in_band` (half a cone step below
+//     segment_target_c) and weighted by actual heat-work
+//     (cone_table_heat_work_weight()). Tying it to the 25C lock band instead
+//     made credit and in_band mutually exclusive: during a ramp, target_c <=
+//     segment_target_c, so a lock-lagging zone is always >25C below
+//     segment_target_c, while in_band requires being within half a cone
+//     step -- under 25C everywhere in the Orton table except cone 019.
+//     Measured result before this fix: credit was exactly zero at bisque,
+//     cone 6 and cone 10, at every mass loading tested. See the commit this
+//     function's history points at for the full measurement.
+//
+// If a future change makes this parameter track the ramp-lock band again
+// (by reusing `lagging_now`, or by widening `behind_schedule_now`'s
+// definition past "actual_c < target_c"), it will silently zero out dwell
+// credit again exactly as before -- test_ramp_assist_credit_not_ramp_lock_
+// gated in test_profile_executor_prestart.c exists to catch that.
+void ramp_assist_dwell_credit_tick(zone_runtime_t *z, bool ramping_now, bool behind_schedule_now,
                                    float segment_target_c, float dt_s)
 {
-    if (!ramping_now || !lagging_now) {
+    if (!ramping_now || !behind_schedule_now) {
         return;
     }
     float band_bottom_c;

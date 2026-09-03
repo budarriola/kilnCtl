@@ -737,9 +737,28 @@ float ramp_assist_stretch_rate_c_per_s(s_exec_state_t *ex, uint8_t lagging_mask,
  * profile_segment_t.target_c, NOT the moving s_exec.target_c a ramp is
  * still interpolating toward -- mirrors ramp_assist.py's zone_active_
  * target_c() using step.target_c, not z.commanded_c). No-ops (banks
- * nothing) when `ramping_now` or `lagging_now` is false, or when
- * cone_table reports segment_target_c out of its covered range. */
-void ramp_assist_dwell_credit_tick(zone_runtime_t *z, bool ramping_now, bool lagging_now,
+ * nothing) when `ramping_now` or `behind_schedule_now` is false, or when
+ * cone_table reports segment_target_c out of its covered range.
+ *
+ * `behind_schedule_now` is DELIBERATELY NOT the ramp-lock's `lagging_now`
+ * (sec 7.1's `(target_c - actual_c) > EXEC_RAMP_LOCK_BAND_C`, i.e.
+ * s_exec.ramp_lock_lagging_mask) -- pass a separate "actual_c < the moving
+ * s_exec.target_c" boolean instead, computed at the call site. The two must
+ * stay distinguishable: the lock's wide band decides when the schedule
+ * freezes (and still must, unconditionally -- auto-stretch, the warning
+ * surfaces and the event log all correctly key off the 25C lock and are
+ * untouched by this parameter). This credit gate answers a narrower
+ * question -- "is the zone behind at all" -- and is already scoped tight by
+ * `in_band` (half a cone step below segment_target_c) plus heat-work
+ * weighting, so it does not need the lock's wide band on top. Reusing
+ * lagging_now here made credit and in_band mutually exclusive (a
+ * lock-lagging zone during a ramp is always >25C below segment_target_c,
+ * while in_band requires within half a cone step, under 25C almost
+ * everywhere in the Orton table) -- credit was measured at exactly zero at
+ * bisque/cone 6/cone 10 at every mass loading before this was split out.
+ * See profile_executor_ramp_assist.c's own doc comment above this
+ * function's definition for the full rationale. */
+void ramp_assist_dwell_credit_tick(zone_runtime_t *z, bool ramping_now, bool behind_schedule_now,
                                    float segment_target_c, float dt_s);
 
 /* Computes the seconds to actually shorten a fresh dwell's timer by, given
