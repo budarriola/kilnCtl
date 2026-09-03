@@ -4,7 +4,8 @@
     { "selector": ".chan .subrow .bad", "note": "always renders next to its own text, e.g. 'FAULT pin: yes' -- the word carries the state, colour is reinforcement." }
   ],
   "main_page.html": [
-    { "selector": "#kcConfigMsg.kc-error", "note": "the element's text content is the error message itself; the class only recolours it." }
+    { "selector": "#kcConfigMsg.kc-error", "note": "the element's text content is the error message itself; the class only recolours it." },
+    { "selector": "#profileFeasIcon.feas-icon-warn", "note": "introduced by commit 165a017 (2026-09, profile feasibility warnings). Genuinely not colour-only in practice: updateProfileFeasIcon() (main_page.html) sets icon.textContent to a warning-triangle glyph ('⚠') for the has-problem case (info glyph 'ⓘ' for the unknown/not-assessed case, class feas-icon-unknown, which this scan doesn't flag since it targets --muted not a status token) and sets icon.title to the full warning/unassessed sentence -- both cues are DOM/JS-injected, not present in static markup, which is exactly what this CSS-shape scan cannot see. Allowlisted rather than fixed at the call site because main_page.html is owned by another concurrent change right now." }
   ],
   "profiles_page.html": [
     { "selector": "#msg .warn", "note": "wraps a full warning sentence set by JS; colour only recolours existing text." },
@@ -22,7 +23,7 @@
     { "selector": ".card.ineffective", "note": "always paired with the bold '!! TRIP_INEFFECTIVE !!' row text and a separate breaker-warning banner -- not colour alone." }
   ],
   "zones_page.html": [
-    { "selector": "table.coupling td.rga-ok", "note": "PROPOSAL, not yet fixed (see WEB_UI_RESPONSIVE_PLAN.md): the RGA matrix's diagonal cell is genuinely colour-only today -- only the plain number, no glyph. Left as a documented proposal because a fix here (appending a character to a table cell) risks widening the matrix's fixed-width columns, which is a repaint this pass is not authorized to make. The verdict paragraph directly below the table (verdict-ok/warn/bad, also in this file) already carries the full explanation in text for the worst cell, which is the load-bearing read." },
+    { "selector": "table.coupling td.rga-ok", "note": "commit c8c3b64 (2026-08-31) made classifyRga()'s call site inject a glyph suffix (✓/!/✗) into the cell text alongside the colour, resolving the prior colour-only proposal -- but the CSS rule itself (color: var(--ok) only) is unchanged, so this CSS-shape scan still flags it and still can't see the glyph, which is injected by JS (see zones_page.html's classifyRga()/glyph map) rather than present in static markup. Kept allowlisted because the check will always flag this selector shape regardless of the glyph; the note now records the real (non-colour) cue instead of the stale 'not yet fixed' text." },
     { "selector": "table.coupling td.rga-warn", "note": "see rga-ok above." },
     { "selector": "table.coupling td.rga-bad", "note": "see rga-ok above." },
     { "selector": "p.verdict-ok", "note": "full explanatory sentence, e.g. 'Every diagonal element is within...'; colour only reinforces text." },
