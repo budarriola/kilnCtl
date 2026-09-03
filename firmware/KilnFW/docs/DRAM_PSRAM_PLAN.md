@@ -9,6 +9,17 @@ truth, not the checkboxes.** Nothing below is marked done until a commit is
 named. Every number is either measured and attributed, or explicitly labelled
 as an estimate.
 
+**Update 2026-09-02 (fifth pass) — doc cleanup only, no source change.**
+Sections 4.1 and 4.2 were already fully landed by `a698dc0` (heap-status MCP
+tool + `MALLOC_CAP_DMA` breakout; all sixteen previously-uninstrumented tasks
+registered with `stack_margin`) but this doc still described both as open
+work with a stale task list. Corrected in place. `run_all_checks.ps1` is now
+29/29 (was reported 27/27 below; `check_stack_margin_registration.ps1` and
+`check_nvs_write_guard_coverage.ps1` both count). Board access was off-limits
+this pass too (mid-firing) -- everything left in this plan past §4 is gated
+on a boot/soak; see §7.3's table and §9 for what to do first once hardware is
+available again.
+
 **Update 2026-09-02 (fourth pass) — section 9 closed (unflashed), a second
 write-guard gap closed, and the section 4.3/7 measurement procedure now
 exists as code, tested without hardware.** Board access was off-limits this
@@ -51,7 +62,7 @@ only.
    added, matching the established refusal message/pattern.
 
    **New standing check:** `tools/check_nvs_write_guard_coverage.ps1`
-   (auto-discovered by `run_all_checks.ps1`, now 27/27) parses every function
+   (auto-discovered by `run_all_checks.ps1`, now part of the 29/29 suite) parses every function
    body in the six files that have opted into the `caller_stack_is_external()`
    convention (`kiln_cfg_store.c`, `safety_cfg_store.c`, `profiles_http.c`,
    `relay_cycles.c`, `run_state.c`, `profile_executor_firing_stats.c`) and
@@ -328,7 +339,9 @@ Captured 2026-09-01 from the running board via the `get_stack_margin` MCP tool:
 | `uart_owner_task` | 2164 B | 3072 B | 70.4% |
 | `uart_owner_evt_task` | 2344 B | 3072 B | 76.3% |
 
-Only instrumented tasks appear here. Coverage is partial — see section 4.2.
+Only instrumented tasks appear here. All long-lived tasks are now
+instrumented (§4.2, `a698dc0`) — what remains missing is a boot to actually
+read their HWM numbers, not further registration work.
 
 ### 3.2 Internal heap
 
@@ -355,36 +368,28 @@ DRAM, so it has to be observable before it is worth attempting. Per 3.2 most of
 that observability already exists; what is left is a thin client layer and one
 missing capability.
 
-### 4.1 Wrap the existing heap data — do NOT build a new endpoint
+### 4.1 Wrap the existing heap data — DONE (`a698dc0`)
 
-The firmware side is done (3.2). Remaining work, in full:
-
-- **An MCP tool** exposing the existing `heap_internal` / `heap_spiram` JSON.
-  Nothing under `tools/PcTools/src/kilnctrl/` parses those keys today, so the
-  data is reachable by hand but not from the tooling every other measurement in
-  this plan uses.
-- **Add `MALLOC_CAP_DMA`** to the existing `dashboard_http.c` block. It is the
-  one capability not currently broken out, and Phase 1 specifically needs it —
-  DMA-capable internal memory is exactly what a lowered threshold must not
-  starve.
-
+An MCP tool (`get_heap_status`, `tools/PcTools/src/kilnctrl/dashboard_http_client.py`
++ `mcp_server_info.py`, registered in the facade taxonomy) wraps the existing
+`heap_internal`/`heap_spiram`/`heap_dma` JSON. `MALLOC_CAP_DMA` was broken out
+as its own `heap_dma` object in `dashboard_http.c` for Phase 1's use.
 `min_free` (low-water) is the metric every acceptance criterion below is
-written against. The instantaneous free figure is nearly useless here, since
+written against — the instantaneous free figure is nearly useless here, since
 the exhaustion event is transient and load-dependent.
 
-### 4.2 Extend `stack_margin` instrumentation coverage
+### 4.2 Extend `stack_margin` instrumentation coverage — DONE (`a698dc0`)
 
-The table in 3.1 covers 10 tasks. The firmware creates substantially more:
+All sixteen previously-uninstrumented long-lived tasks are registered:
 `kiln_io_owner`, `thermo_owner`, `screen_idle`, `spi_owner`, `i2c_owner`,
 `autotune_engine`, `telemetry_log`, `link_watchdog`, `info_uart_bridge`,
-`gpio_probe`, the LVGL task, `boot_button`, `danger_mode`, and the OTA reboot
-tasks. Phase 2 right-sizes stacks against measured watermarks, so any task
-without a watermark cannot be right-sized. Register the uninstrumented ones
-through the existing `stack_margin.h` mechanism — including the PC-link
-`uart_proto_rx` instance (see 7.1).
-
-`TODO.md` §13 already started this and is the place to check before redoing it;
-it also documents the label-vs-task-name ambiguity that §6 covers.
+`gpio_probe`, `lvgl`, `boot_button`, `danger_mode`, `recovery_exit`,
+`ota_rollback_reboot`, `ota_pico_rollback`. `STACK_MARGIN_MAX_TASKS` covers
+the full boot-time registration count (raised 28→40 by `e263b14`, see §7.2).
+`tools/check_stack_margin_registration.ps1` guards regressions. Coverage in
+3.1 is no longer partial for tasks that exist in source — what is still
+missing there is real HWM numbers for the newly-registered tasks, which
+needs a boot (see §7.3).
 
 ### 4.3 Baseline capture
 
