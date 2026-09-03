@@ -82,6 +82,16 @@ bool thermal_guard_tick(thermal_guard_state_t *state, const thermal_guard_cfg_t 
         return false; /* already latched -- caller should have stopped driving anyway */
     }
 
+    /* Guard 4's arming backstop -- see thermal_guard_state_t.idle_elapsed_s's
+     * doc comment. Accumulated ahead of every other guard (including the
+     * sensor-invalid early return below) whenever this tick is NOT actively
+     * demanding heat, so a run that spends its opening ticks with a bad
+     * reading (commanded_duty would ordinarily be 0 then anyway) still ages
+     * toward arming once readings resume. */
+    if (in->commanded_duty < effective_f(cfg->progress_duty_min, PROGRESS_DUTY_MIN)) {
+        state->idle_elapsed_s += in->dt_s;
+    }
+
     /* --- Guard 6: sensor validity, debounced ------------------------------
      * TODO.md 10.8: in->sensor_ok is the caller's combined verdict across
      * every thermocouple channel assigned to this zone (thermo_combine.c),
@@ -355,17 +365,55 @@ bool thermal_guard_tick(thermal_guard_state_t *state, const thermal_guard_cfg_t 
      * (heater_output.h, typically ~2C) -- that band is tight enough that a
      * normal dwell cycling the relay would spend most of its time just
      * outside it, which would make this guard fire on completely healthy
-     * operation. */
+     * operation.
+     *
+     * ARMING (2026-09-03, profile_executor.c hot-start ramp-lock defect):
+     * a zone that starts a run already OUTSIDE the band and never once
+     * settles within it left at_setpoint_window_active permanently false --
+     * the sustained-excursion clock could never start, so this guard could
+     * never trip no matter how long the zone sat far from setpoint. That is
+     * exactly the reachable failure a zone that starts a firing already hot
+     * (e.g. re-firing soon after a previous run) produces: it is never
+     * "lagging" in the sense guards 1/2/7 look for (they gate on commanded
+     * duty, and a hot zone commands none), so ONLY guard 4 was positioned to
+     * catch a sustained hot excursion, and its arming gap meant it silently
+     * didn't.
+     *
+     * Fix: also treat the guard as armed once idle_elapsed_s (accumulated
+     * above, only while commanded_duty stays below progress_duty_min) has
+     * passed a full DRIFT_PERIOD_S, even if the zone has never yet settled
+     * -- `settled_or_timed_out` below. Gating the backstop's clock on duty,
+     * not plain wall-clock time since reset, is what keeps this safe on an
+     * ordinary cold start: a heavy/well-insulated kiln can legitimately
+     * take far longer than DRIFT_PERIOD_S to first close a 25C gap while
+     * COMMANDING FULL DUTY the entire time (confirmed against this
+     * repo's own 4h closed-loop host test, sim_plant.c's default thermal
+     * mass -- an earlier, plain-wall-clock version of this arming rule
+     * false-tripped that exact healthy run at ~1180s). Because such a zone
+     * is actively trying (duty >= progress_duty_min), idle_elapsed_s never
+     * accumulates for it, so the backstop never arms on it -- guard 1's own
+     * (much shorter, 300s) no-progress window is what would catch a truly
+     * stuck-but-still-commanded zone, and this backstop does not duplicate
+     * that job. What idle_elapsed_s DOES accumulate on is a zone commanding
+     * little or no heat while outside the band -- exactly the hot-start
+     * shape (a zone above target commands none) this fix exists for. Once
+     * armed, a zone that comes back inside the band still resets at_
+     * setpoint_elapsed_s (the sustained-excursion clock) below, same as
+     * always -- only a zone that stays BOTH outside the band AND idle for
+     * two full DRIFT_PERIODs (one to arm, one sustained after) trips. */
     float abs_error = fabsf(in->setpoint_c - in->measurement_c);
     float drift_band_c = effective_f(cfg->drift_hysteresis_c, DRIFT_HYSTERESIS_C);
+    float drift_period_cfg = effective_f(cfg->drift_period_s, DRIFT_PERIOD_S);
+    bool settled_or_timed_out = state->at_setpoint_window_active || (state->idle_elapsed_s >= drift_period_cfg);
     if (abs_error <= drift_band_c) {
         state->at_setpoint_window_active = true;
         state->at_setpoint_elapsed_s = 0.0f;
-    } else if (state->at_setpoint_window_active) {
+    } else if (settled_or_timed_out) {
         state->at_setpoint_elapsed_s += in->dt_s;
-        if (state->at_setpoint_elapsed_s >= effective_f(cfg->drift_period_s, DRIFT_PERIOD_S)) {
-            trip(state, THERMAL_GUARD_TRIP_DRIFT, "drifted >%.0fC from setpoint for %.0fs after settling",
-                 (double)drift_band_c, (double)state->at_setpoint_elapsed_s);
+        if (state->at_setpoint_elapsed_s >= drift_period_cfg) {
+            trip(state, THERMAL_GUARD_TRIP_DRIFT, "drifted >%.0fC from setpoint for %.0fs%s",
+                 (double)drift_band_c, (double)state->at_setpoint_elapsed_s,
+                 state->at_setpoint_window_active ? " after settling" : " (armed by run duration, never settled)");
             return true;
         }
     }

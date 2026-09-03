@@ -293,6 +293,23 @@ typedef struct {
      * (reset to 0 on every tick back inside it) -- see thermal_guard.c. */
     bool  at_setpoint_window_active;
     float at_setpoint_elapsed_s;
+    /* Guard 4's arming backstop -- cumulative time spent NOT actively
+     * demanding heat (commanded_duty below progress_duty_min, the same
+     * threshold guard 1 uses), accumulated regardless of at_setpoint_
+     * window_active. A zone that starts a run already hot (or otherwise
+     * never settles within DRIFT_HYSTERESIS_C even once) used to leave
+     * at_setpoint_window_active permanently false, which meant guard 4's
+     * sustained-excursion clock could never even start -- see thermal_
+     * guard.c's guard-4 comment for the full reasoning, and for why this is
+     * gated on duty (not plain wall-clock time): a zone actively climbing
+     * toward a distant setpoint at high duty can legitimately take far
+     * longer than DRIFT_PERIOD_S to first close a 25C gap on a
+     * heavy/well-insulated kiln, and gating on duty keeps that case from
+     * ever arming this backstop -- guard 1 already owns "commanding heat
+     * but not progressing". This field only accumulates while the zone is
+     * NOT trying, which is exactly the shape of the hot-start gap it
+     * exists to close. */
+    float idle_elapsed_s;
 
     /* Guard 6: consecutive-bad-read debounce. */
     uint8_t sensor_fault_streak;

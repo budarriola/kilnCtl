@@ -55,6 +55,7 @@ void run_test_touch_dev(void);
 void run_test_ramp_ident(void);
 void run_test_bx_worker_reentrancy(void);
 void run_test_iter_tune(void);
+void run_test_ramp_lock_onesided(void);
 // run_test_safety_cfg_http() is NOT called here -- test_safety_cfg_http.c is
 // its own separate executable (build_host_tests.ps1's third build+run step),
 // same reason test_zones_http.c is: it #includes safety_cfg_http.c directly
@@ -115,6 +116,7 @@ int main(void)
     run_test_ramp_ident();
     run_test_bx_worker_reentrancy();
     run_test_iter_tune();
+    run_test_ramp_lock_onesided();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     if (g_test_failures > 0) {

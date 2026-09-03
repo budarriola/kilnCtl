@@ -361,7 +361,26 @@ void executor_task_entry(void *arg)
         uint8_t lagging = 0;
         for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
             if (!s_exec.zones[zi].active || s_exec.zones[zi].faulted) continue;
-            if (!sensor_ok[zi] || fabsf(s_exec.zones[zi].actual_c - s_exec.target_c) > EXEC_RAMP_LOCK_BAND_C(zi)) {
+            /* ONE-SIDED (2026-09-03, hot-start defect): only a zone that is
+             * COLDER than the shared target by more than the band can hold
+             * the lock. A zone that is HOTTER than target by the same
+             * amount used to hold it too (fabsf made the two directions
+             * bit-identical), but the lock exists to stop the setpoint
+             * outrunning a zone that CANNOT KEEP UP -- inherently a
+             * one-sided problem. Holding the setpoint back for a zone that
+             * is already too hot does not help that zone (it can only
+             * passively cool; a frozen setpoint changes nothing about that)
+             * and actively denies it the rising setpoint that would let it
+             * reconverge from above by the schedule catching up to it. A
+             * hot start (e.g. a re-fire soon after a previous run, one zone
+             * still 50C+ above a cold baseline target) used to freeze
+             * segment_elapsed_s/target_c on tick 1 and never release, since
+             * nothing else in the executor ever un-sticks a zone that
+             * commands zero duty (guards 1/2/7 all gate on nonzero/>=0.5
+             * commanded duty). !sensor_ok[zi] still holds the lock exactly
+             * as before -- an invalid reading says nothing about direction
+             * and must still stop the ramp. */
+            if (!sensor_ok[zi] || (s_exec.target_c - s_exec.zones[zi].actual_c) > EXEC_RAMP_LOCK_BAND_C(zi)) {
                 lock_ok = false;
                 lagging |= (uint8_t)(1u << zi);
             }

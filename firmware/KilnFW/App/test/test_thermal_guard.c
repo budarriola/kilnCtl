@@ -389,9 +389,13 @@ void run_test_thermal_guard(void)
         TEST_CHECK(!tripped || s.reason == THERMAL_GUARD_TRIP_DRIFT, "reason is DRIFT");
     }
 
-    /* Guard 4: never having settled means the drift guard cannot fire, no
-     * matter how far off setpoint the zone sits (that's guards 1/2/5's job,
-     * not this one's). */
+    /* Guard 4: before having settled, a SHORT excursion (well under one
+     * DRIFT_PERIOD_S) still does not trip -- a normal cold start needs at
+     * least that much grace before the sustained-excursion clock can even
+     * arm. 80 ticks * 10s = 800s > DRIFT_PERIOD_S(600) alone would already
+     * have armed under the fix below, so this uses a shorter run
+     * (59 ticks = 590s, just under the 600s arming threshold) to isolate
+     * "still not armed" from "armed but not yet sustained long enough". */
     {
         thermal_guard_state_t s;
         thermal_guard_cfg_t cfg = {.max_temp_c = 1300.0f, .min_temp_c = -20.0f, .sanity_rate_c_per_min = 0.5f};
@@ -401,10 +405,42 @@ void run_test_thermal_guard(void)
         in.measurement_c = 20.0f; /* cold start, never near setpoint */
         in.commanded_duty = 0.0f; /* also keeps guards 1/3 from firing here */
         bool tripped = false;
-        for (int i = 0; i < 80 && !tripped; i++) {
+        for (int i = 0; i < 59 && !tripped; i++) { /* 59*10s = 590s, under DRIFT_PERIOD_S(600) */
             tripped = thermal_guard_tick(&s, &cfg, &in);
         }
-        TEST_CHECK(!tripped, "guard 4 stays quiet before the zone has ever settled");
+        TEST_CHECK(!tripped, "guard 4 stays quiet before the zone has ever settled, within one drift period's grace");
+        TEST_CHECK(!s.at_setpoint_window_active, "settle latch never set -- this zone genuinely never got close");
+    }
+
+    /* Guard 4 ARMING FIX (2026-09-03, profile_executor.c hot-start ramp-lock
+     * defect): a zone that NEVER settles must still eventually trip if it
+     * sits outside the drift band forever -- previously at_setpoint_window_
+     * active never latched true for such a zone, so the sustained-excursion
+     * clock could never start and this guard was permanently inert on it
+     * (guards 1/2/7 are no help either: they all gate on nonzero/>=0.5
+     * commanded duty, and a zone that is HOTTER than setpoint the whole time
+     * -- the reachable hot-start case -- commands none). Fix: the guard also
+     * arms once run_elapsed_s has passed a full DRIFT_PERIOD_S even without
+     * ever settling. Two full periods (one to arm, one sustained after)
+     * must elapse before the trip. */
+    {
+        thermal_guard_state_t s;
+        thermal_guard_cfg_t cfg = {.max_temp_c = 1300.0f, .min_temp_c = -20.0f, .sanity_rate_c_per_min = 0.5f};
+        thermal_guard_reset(&s);
+        thermal_guard_input_t in = base_input();
+        in.setpoint_c = 100.0f;
+        in.measurement_c = 150.0f; /* HOT start, 50C above setpoint, never settles -- the reachable case */
+        in.commanded_duty = 0.0f; /* a hot zone commands no heat -- guards 1/2/3 structurally cannot see this */
+        bool tripped = false;
+        int trip_tick = -1;
+        for (int i = 0; i < 130 && !tripped; i++) { /* up to 1300s; trip expected around 1200s (2*DRIFT_PERIOD_S) */
+            tripped = thermal_guard_tick(&s, &cfg, &in);
+            if (tripped) trip_tick = i;
+        }
+        TEST_CHECK(tripped, "guard 4 eventually trips a zone that starts hot and never settles, once armed by run duration");
+        TEST_CHECK(!tripped || s.reason == THERMAL_GUARD_TRIP_DRIFT, "reason is DRIFT");
+        TEST_CHECK(!tripped || (trip_tick >= 118 && trip_tick <= 121),
+                   "trips right around 2*DRIFT_PERIOD_S (1200s = tick 120), not early and not late");
     }
 
     /* Guard 7: frozen sensor -- identical reading for the full window while

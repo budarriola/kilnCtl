@@ -2834,3 +2834,113 @@ Every test in that module was negative-tested (mutate → observe the quoted
 real failure → revert); see each test's docstring. Full suite: `tools/
 PcTools/.venv/Scripts/python.exe -m pytest tools/PcTools/tests` — 1532
 passed, 12 skipped (pre-existing skips, unrelated to this pass).
+
+## 2026-09-03: ramp-lock hot-start stall (confirmed executor defect, fixed)
+
+**The defect (owner-confirmed via adversarial code review).**
+`profile_executor.c`'s ramp-lock decision (`~line 358`, inside
+`executor_task_entry()`'s control tick) used
+`fabsf(actual_c - target_c) > EXEC_RAMP_LOCK_BAND_C(zi)` to decide whether a
+zone was "lagging" and should hold the shared ramp setpoint. `fabsf` makes a
+zone N degrees too HOT bit-identical to one N degrees too COLD — both froze
+`s_exec.target_c`/`s_exec.segment_elapsed_s` at the ramp-stepping gate
+(`~line 439`, `} else if (lock_ok) { ... }`). The band is **25C**
+(`EXEC_RAMP_LOCK_BAND_C` → `PROFILE_EXECUTOR_RAMP_LOCK_BAND_C`,
+`profile_executor.h`) — not the 3C `PROGRESS_BAND_C` some docs and the
+simulator's mirror have used; that constant is guard 1's separate arrival
+band (`thermal_guard.c`).
+
+**The reachable failure.** `baseline_target_c` (`profile_executor_run.c`)
+seeds from the FIRST ACTIVE zone's reading on a cold start, or the COOLEST
+active zone's on a warm start — never the hottest. Re-firing ~40 minutes
+after a previous run, with one zone (say z0) back near ambient and another
+(z2) still 50C+ above it: `baseline_target_c` comes from z0 (or the
+coolest), so `target_c` starts low and z2 is immediately >25C hot. Every
+other escape this executor has was absent for that direction: guards 1/2/7
+all gate on `commanded_duty >= PROGRESS_DUTY_MIN` (0.5) or `> 0`, and a hot
+zone commands none; guard 4 (drift) only armed after
+`at_setpoint_window_active` had ever latched true, which a zone that starts
+hot and only passively cools never does. Result: the whole firing's
+schedule silently freezes — `state` stays `PROFILE_EXEC_RUNNING`, nothing
+logs a fault — until the hot zone cools 25C on its own.
+
+**Fix, both halves (owner's chosen approach — neither alone is sufficient):**
+
+1. **One-sided lock** (`profile_executor.c`, the loop building
+   `lock_ok`/`lagging`): changed to
+   `(s_exec.target_c - s_exec.zones[zi].actual_c) > EXEC_RAMP_LOCK_BAND_C(zi)`.
+   Only a zone COLDER than target by more than the band holds the lock now.
+   `!sensor_ok[zi]` still holds it unconditionally, unchanged — an invalid
+   reading says nothing about direction. Rationale: the lock exists to stop
+   the setpoint outrunning a zone that CANNOT KEEP UP, which is inherently
+   one-sided. Holding the setpoint back for a zone that is already too hot
+   doesn't help it (it can only passively cool; a frozen setpoint changes
+   nothing about that) and actively denies it the rising setpoint that
+   would let it reconverge from above.
+
+2. **Guard 4 arming fix** (`thermal_guard.c`/`.h`): a zone that never once
+   settles within `DRIFT_HYSTERESIS_C` (25C) of setpoint used to leave
+   `at_setpoint_window_active` permanently false, so the sustained-excursion
+   clock could never start — guard 4 was structurally inert on exactly the
+   hot-start case above. Added `idle_elapsed_s`, accumulated only while
+   `commanded_duty < progress_duty_min` (the same threshold guard 1 uses,
+   i.e. the zone is NOT actively trying to heat); the guard now also arms
+   once that reaches `DRIFT_PERIOD_S` (600s), even without ever settling.
+   **Why gated on duty, not plain wall-clock time since run start:** an
+   earlier version armed on wall-clock time alone and false-tripped this
+   repo's own `test_closed_loop.c` 4-hour closed-loop host test (a
+   completely healthy, `duty≈1.0` the whole way, cold start against
+   `sim_plant.c`'s default thermal mass) at ~1180s — a heavy/well-insulated
+   kiln can legitimately take far longer than one `DRIFT_PERIOD_S` to first
+   close a 25C gap while genuinely trying the entire time. Gating the clock
+   on duty means it never accumulates for a zone that's actively climbing
+   (guard 1's own, much shorter 300s no-progress window is what would catch
+   a truly stuck-but-still-commanded zone), and only accumulates for a zone
+   commanding little or no heat while outside the band — exactly the
+   hot-start shape. Once armed, a zone back inside the band still resets
+   the sustained-excursion clock as before; only a zone BOTH outside the
+   band AND idle for two full `DRIFT_PERIOD_S` (one to arm, one sustained)
+   trips.
+
+**`baseline_target_c` seeding (item 4 — NOT changed this pass).** Considered
+seeding from the HOTTEST active zone instead of first-active/coolest.
+Recommendation: **do not**, without further work:
+- The one-sided lock fix already neutralizes the defect that motivated the
+  question — a hot zone no longer freezes the shared lock regardless of
+  which zone `baseline_target_c` comes from, so the reachable failure above
+  is closed by items 1+2 alone.
+- Seeding from the hottest zone risks landing `baseline_target_c` ABOVE
+  segment 0's own `target_c` whenever the profile's first segment target is
+  below a currently-hot zone's reading (e.g. a modest opening dwell target
+  while one zone is still warm from a previous firing). The ramp-stepping
+  code picks `direction` from `seg->target_c >= s_exec.target_c` on tick 1
+  — if the seeded baseline already exceeds the segment target, `direction`
+  flips negative and `reached` can go true on the very first tick,
+  collapsing an intended ramp-up into an instant jump for every other
+  (legitimately cooler) zone. This is untested, unvalidated, and not
+  something this pass's fix requires.
+- It also breaks the symmetry warm-start's own COOLEST convention was
+  chosen for (`profile_executor_run.c`'s Q4 comment: "preferring the
+  coolest one means warm-start can only ever skip work every active zone
+  agrees is already done"). Hottest is the opposite bias — it would seed a
+  target every OTHER active zone might not agree is already reached.
+- No test in this repo exercises this seeding choice's interaction with
+  warm start, the max-temp feasibility refusal at run start, and the
+  ramp-direction math all at once; changing it blind is out of scope for a
+  task that asked for a narrow, verified fix.
+
+**Validation status: UNVALIDATED ON HARDWARE.** `ramp_lock_held` has never
+been observed true in any capture in this repo — every bench firing on
+record tops out around 70C, well within a single zone's own settle time,
+and multi-zone hot-start re-fires have not been run on hardware at all.
+This fix (both halves) is proven only by host tests against a hand-written
+mirror of the production control-tick logic (`profile_executor.c`'s
+ramp-lock/segment-stepping code lives directly inside
+`executor_task_entry()`'s `for (;;) { vTaskDelay(...); ... }` body — a real
+FreeRTOS task loop with no seam to call one tick at a time from a host test
+without restructuring the module, which this task was not asked to do) and,
+for guard 4, real calls into `thermal_guard.c` (which IS a pure, directly
+testable function). See `firmware/KilnFW/App/test/test_ramp_lock_onesided.c`
+(new file, mirror + reproduction) and the guard-4 arming tests added to
+`firmware/KilnFW/App/test/test_thermal_guard.c`. The hot-start regime this
+fix targets remains unexercised on real hardware.
