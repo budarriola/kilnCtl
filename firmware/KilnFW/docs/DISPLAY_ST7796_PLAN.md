@@ -1373,6 +1373,26 @@ Each phase ends somewhere the firmware still boots and drives the existing panel
       no-scroll guard itself was negative-tested (a deliberately overflowed
       budget assert was made to fail, quoted, then reverted) rather than
       trusted vacuously.
+- [x] **Second pass, measure-first spacing/typography audit. LANDED
+      2026-09-03.** Computed a worst-case-height-vs-268px-budget table for
+      all 18 `ui_page_*.c` (see `docs/UI_THEME.md`'s "Phase 7, second pass"
+      section for the full table). Result: no ad-hoc spacing literal was
+      migrated to `UI_THEME_SPACE_1..5` -- every non-zero pad/gap literal
+      left in the tree sits on the two pages with the least headroom
+      (`ui_page_network.c` and `ui_page_profile_detail.c`, ~10px each) or on
+      `ui_page_home.c`'s zero-free-headroom `flex_grow(1)` chart, at 2-3px
+      values below the scale's smallest rung (`UI_THEME_SPACE_1` = 4px), so
+      every candidate substitution would either lie about the value or grow
+      it on a page with no room. Typography was already harmonised (one
+      default-font role everywhere, one deliberately-smaller documented
+      exception for chart-adjacent text on `ui_page_home.c`) -- nothing to
+      change. No page needed splitting; every measured worst case already
+      fits. Verified: `build_kilnfw` green, `check_ui_budget_asserts.ps1`
+      passes, all 21 `App/test/build_host_tests.ps1` executables pass, and
+      the no-scroll guard was negative-tested again independently (bumped
+      `UI_PAGE_NETWORK_MANAGE_LIST_HEIGHT_PX` 70->700, got the real
+      `_Static_assert` compiler error naming that macro, reverted, grepped
+      the mutation gone, rebuilt green).
 
 ---
 

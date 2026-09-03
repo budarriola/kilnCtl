@@ -141,3 +141,73 @@ stands -- see that doc, not reopened here). What actually landed:
   moved. See the implementing pass's own report for how each assert was
   re-verified (`build_kilnfw` plus a deliberate-overflow negative test of the
   guard itself).
+
+## Phase 7, second pass (2026-09-03) -- measure-first spacing/typography audit
+
+The first pass above was deliberately conservative: it added the spacing
+scale and card shadows but touched no page's padding/gap/font-size literal,
+because those numbers are hand-fit per page against
+`UI_THEME_PAGE_CONTENT_BUDGET_PX` (268px, see `ui_theme.h`) and a blind mass
+substitution risked overflowing a page silently. This pass measured every
+`ui_page_*.c`'s worst-case content height against that budget before editing
+anything, per DISPLAY_ST7796_PLAN.md Phase 7's own instruction.
+
+**Headroom table** (worst-case height vs. the 268px budget; every number below
+is the page's own documented `_Static_assert`/comment arithmetic, not a fresh
+guess):
+
+| Page | Worst-case px | Headroom | Note |
+|---|---:|---:|---|
+| `ui_page_config.c` | 224 | 44 | hub grid |
+| `ui_page_diagnostics.c` | 239 (max stat-row page) | 29 | Safety/thermo-fault sub-pages run tighter, variable-height wrapped labels -- treat as tight |
+| `ui_page_home.c` | self-fitting | 0 free | chart uses `flex_grow(1)` and absorbs all leftover space by construction; any added fixed px comes straight out of chart height |
+| `ui_page_network.c` | 258 (STA and AP both) | **10 -- TIGHT** | do not touch |
+| `ui_page_network_manage.c` | 206 | 62 | |
+| `ui_page_profile_builder_review.c` | 180 | 88 | |
+| `ui_page_profile_builder_segment.c` | 162 | 106 | |
+| `ui_page_profile_builder_zones.c` | 208 | 60 | |
+| `ui_page_profile_detail.c` | 258 | **10 -- TIGHT** | do not touch |
+| `ui_page_profile_segments.c` | 204 | 64 | |
+| `ui_page_profiles.c` | 148 | 120 | |
+| `ui_page_profiles_builtin_list.c` | 172 | 96 | |
+| `ui_page_profiles_family.c` | 148 | 120 | |
+| `ui_page_profiles_mine.c` | 172 | 96 | |
+| `ui_page_temperature.c` | 194 (3 zones today) | 74 | |
+| `ui_page_touch_cal.c` | self-fitting | n/a, safe by construction | targets placed from real `lv_display_get_*_resolution()`, never a fixed row stack |
+| `ui_page_touch_test.c` | self-fitting | n/a, safe by construction | `s_canvas_h` derived from real resolution minus fixed chrome |
+
+**Spacing migration: nothing was migrated.** Every non-zero
+`lv_obj_set_style_pad_*`/`pad_gap` literal left in the tree after grepping all
+18 pages is either `0` (semantically "flush", not a scale rung -- `theme.css`
+has no `--ui-space-0` either) or a 2px/3px value on `ui_page_home.c`'s
+flex-fit chart legend/trip-strip and `ui_page_profile_detail.c`'s plan chart
+-- both zero-headroom or 10px-headroom pages. `UI_THEME_SPACE_1` is 4px, so
+substituting any scale rung there would either be a no-op-that-lies (call it
+`UI_THEME_SPACE_1` while it stays 2px, which nobody wants) or an actual
+size increase on exactly the two pages with no room to absorb one. No page
+with real headroom (44px+) had any non-macro spacing literal to migrate --
+this codebase's ad-hoc-literal population turned out to be entirely
+concentrated on its two tightest pages, which is exactly backwards from what
+a safe mass-migration needs and confirms the first pass's caution was
+correct, not merely prudent-by-default.
+
+**Typography: already harmonised, nothing to change.** Every page uses
+`LV_FONT_DEFAULT` (montserrat_14) for all body/label text with exactly one
+documented exception -- `ui_page_home.c`'s chart axis labels/legend swatches
+use `lv_font_montserrat_10`, a deliberate smaller role for dense
+chart-adjacent text (see that file's own comment, `UI_PLAN.md` 5.3). No other
+page introduces a third font or a different default-font override, so there
+was no inconsistent typography role to reconcile.
+
+**Splitting: not needed.** Every page's measured worst case already fits the
+budget with real (if in two cases thin) margin; `ui_page_diagnostics.c`
+already reflects the "grow past budget -> add a page" rule from its own
+2026-08-27 fold. No page needed splitting this pass.
+
+**Verification:** `build_kilnfw` green; `check_ui_budget_asserts.ps1` passes;
+all 21 `App/test/build_host_tests.ps1` executables pass. The guard was
+negative-tested by bumping `UI_PAGE_NETWORK_MANAGE_LIST_HEIGHT_PX` from 70 to
+700 in `ui_page_network_manage.c` -- `build_kilnfw` failed with a real
+compiler `_Static_assert` error naming that exact macro, the edit was
+reverted, and a grep for the mutated value confirmed it is gone before the
+final green rebuild.
