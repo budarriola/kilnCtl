@@ -28,6 +28,7 @@
 #include "dram_margin.h"
 #include "stack_margin.h"
 #include "diagnostics_http.h"
+#include "partition_info_http.h"
 #include "backup_http.h"
 #include "settings_http.h"
 #include "factory_reset.h"
@@ -1347,6 +1348,18 @@ void app_main(void)
     if (diagnostics_err != ESP_OK) {
         ESP_LOGW(TAG, "diagnostics_http_start failed: %s -- no /diagnostics, /diagnostics/thermo "
                       "or /safety page this boot", esp_err_to_name(diagnostics_err));
+    }
+
+    // FLASH_BUDGET_PLAN.md section 8 item 3: GET /api/partitions reports
+    // the live partition table this running app is actually using (see
+    // partition_info_http.h's header comment for why this replaced a JTAG
+    // flash read at 0x8000, which does not work on this chip). No hardware
+    // pointers needed, registered right after diagnostics for the same
+    // "no ordering dependency" reason as everything else in this block.
+    esp_err_t partition_info_err = partition_info_http_start();
+    if (partition_info_err != ESP_OK) {
+        ESP_LOGW(TAG, "partition_info_http_start failed: %s -- no /api/partitions this boot",
+                 esp_err_to_name(partition_info_err));
     }
 
     // UI_PLAN.md "web page structure" section, items 2-4: the settings hub

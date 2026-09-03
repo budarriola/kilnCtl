@@ -566,17 +566,35 @@ $cmd20 = "call `"$vcvars`" x64 >nul && cl /nologo /W3 /EHsc /I`"$stubDir`" /I`"$
 
 Invoke-HostTestExe -Name "zone_coupling_solve" -ExePath $exe20 -BuildCmd $cmd20
 
+# ---- test_partition_info_http.c: its own TWENTY-FIRST, separate executable
+# FLASH_BUDGET_PLAN.md sec 8 item 3's replacement for the broken JTAG-based
+# partition-table read: GET /api/partitions (partition_info_http.c). Own
+# executable, same "no other seam" reason as test_board_temps.c above: it
+# #includes partition_info_http.c directly to reach the static
+# api_partitions_get_handler(), and supplies its own fake
+# esp_partition_find()/esp_partition_next()/esp_ota_get_running_partition()
+# bodies, which would multiply-define against any other test file's own
+# fakes of those symbols (test_ota_http.c has its own, trivial, different
+# ones) if linked together.
+$exe21 = Join-Path $outDir "kilnctl_host_tests_partition_info_http.exe"
+$pihObjDir = Join-Path $outDir "pih"
+New-Item -ItemType Directory -Force -Path $pihObjDir | Out-Null
+$cmd21 = "call `"$vcvars`" x64 >nul && cl /nologo /W3 /EHsc /std:c11 /I`"$stubDir`" /I`"$commonInc`" " +
+        "/Fo:`"$pihObjDir\\`" /Fe:`"$exe21`" `"$(Join-Path $testDir 'test_partition_info_http.c')`""
+
+Invoke-HostTestExe -Name "partition_info_http" -ExePath $exe21 -BuildCmd $cmd21
+
 # ---- summary ----------------------------------------------------------
 #
-# 19 executables are attempted above (main + zones_http + safety_cfg_http +
+# 20 executables are attempted above (main + zones_http + safety_cfg_http +
 # profile_executor_prestart + autotune_engine_prestart + profiles_http +
 # ota_http + uart_protocol_link_delegate + board_temps + kiln_io_owner +
 # safety_trip_words + safety_trip_decision + safety_link + dashboard_json +
 # telemetry_format + adaptive_tune + event_log + run_state_relay_cycles +
-# zone_coupling_solve).
+# zone_coupling_solve + partition_info_http).
 # Report how many of those were even built, separately from how many of the
 # built ones passed, so a partial run can never read as a full green suite.
-$totalExpected = 19
+$totalExpected = 20
 Write-Host ""
 Write-Host "Built: $($script:builtExes.Count)/$totalExpected executables"
 if ($script:buildFailures.Count -gt 0) {

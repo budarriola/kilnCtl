@@ -27,4 +27,23 @@ esp_err_t esp_partition_write(const esp_partition_t *partition, size_t dst_offse
 esp_err_t esp_partition_erase_range(const esp_partition_t *partition, size_t offset, size_t size);
 uint32_t esp_partition_get_main_flash_sector_size(void);
 
+/* Added for partition_info_http.c's host tests (GET /api/partitions) --
+ * same "declared here, defined per test executable" convention as the
+ * three functions above. Numeric values match the real ESP-IDF
+ * esp_partition_type_t/esp_partition_subtype_t encoding (components/
+ * esp_partition/include/esp_partition.h) so a host test's canned data and
+ * a real board's live partition table use the identical constants. */
+typedef int esp_partition_type_t;
+typedef int esp_partition_subtype_t;
+#define ESP_PARTITION_TYPE_APP 0x00
+#define ESP_PARTITION_TYPE_DATA 0x01
+#define ESP_PARTITION_SUBTYPE_ANY 0xff
+
+typedef struct esp_partition_iterator_opaque_t *esp_partition_iterator_t;
+
+esp_partition_iterator_t esp_partition_find(esp_partition_type_t type, esp_partition_subtype_t subtype, const char *label);
+const esp_partition_t *esp_partition_get(esp_partition_iterator_t iterator);
+esp_partition_iterator_t esp_partition_next(esp_partition_iterator_t iterator);
+esp_err_t esp_partition_iterator_release(esp_partition_iterator_t iterator);
+
 #endif // TEST_STUB_ESP_PARTITION_H
