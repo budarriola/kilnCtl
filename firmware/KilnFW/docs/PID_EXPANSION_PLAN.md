@@ -1819,6 +1819,123 @@ grid=<wider tuple to check convergence>)`; pinned by
 `test_per_zone_gain_search_default_baseline_matches_live_board` in
 `tests/test_plant_sim.py`.
 
+**2026-09-03f — measurement-noise/quantization model added; gain search
+re-run with it active; grid edge STILL not resolved.**
+
+The `f89eb2a` fix above diagnosed the grid-pinning as the simulator having
+"no measurement-noise/quantization model active" (`measurement_noise_std_c`
+/`measurement_quantum_c` both default-off per `run_profile`'s own
+docstring). That gap is now closed:
+
+- **`MAX31856_QUANTUM_C = 0.0078125` C** — derived, not guessed, from
+  `firmware/KilnFW/App/drivers/max31856_codec.h`'s
+  `MAX31856_TC_TEMP_C_PER_LSB` (1/4096 C per raw 24-bit-word LSB; the low
+  5 bits of that word are hardware-fixed 0, so the real step between
+  representable temperatures is 32× that — 1/128 C — which the header
+  states as an explicit equivalence). This supersedes the 0.1 C figure
+  some of this module's own mechanism tests still use as a generic
+  exercise value; that number was never read off the driver.
+- **`MEASURED_THERMO_NOISE_STD_C = (0.0584, 0.0631, 0.0907)`** — measured
+  directly off the same 2026-09-02 coupling excitation captures used to
+  identify `K_full`/`tau`/`L`
+  (`logs/coupling/cpl_z{0,1,2}_thermo.jsonl`): each zone's own-channel
+  reading, linearly detrended over a rested/steady dwell plateau (z0
+  `CH0` samples[260:300], slope −0.017 C/sample; z1 `CH1`
+  samples[90:139]; z2 `CH2` samples[90:139]), residual std taken. Same
+  order of magnitude as §3.8's independently-derived whole-run IAE noise
+  floors (0.116/0.077/0.147 C, built by a different method — run-to-run
+  range across six repeat captures, not per-tick std within one run — so
+  expected to read somewhat higher, and does: ratios 1.99×/1.22×/1.62×).
+  Injected at `run_profile`'s 1.0 s ticks even though the source captures
+  poll at ~20 s: each MAX31856 conversion is an independent read with no
+  on-board averaging, so per-sample noise magnitude does not shrink at a
+  faster poll rate.
+- Both default OFF in `run_profile` itself (0.0/0.0, unchanged — the
+  `after`/`ifix`/`holdfix_clean`/`final` fixture captures stay
+  byte-identical, confirmed by the existing
+  `test_measurement_chain_defaults_off_reproduces_noise_free_result`) and
+  default ON in `per_zone_gain_grid_search`/`per_zone_gain_holdout_report`
+  (pinned by the new `test_gain_search_defaults_to_measured_noise_not_
+  noise_free`). Noise is seeded from a **fixed, explicit tuple**
+  (`GAIN_SEARCH_NOISE_SEEDS = (0,1,2,3,4)`), averaged over all five draws
+  per candidate, with the SAME seed set reused for every candidate
+  including the baseline (common random numbers → a paired comparison on
+  matched noise, not two independently noisy samples) — deliberately not
+  a single draw (noise alone could pick a "winner") and deliberately not
+  a persisted/mutated generator crossing calls (the project's other,
+  opposite seed bug — see `project_scenario_runner_state_bleed` — is a
+  generator whose state leaks between runs; each `run_profile` call here
+  builds its own fresh `np.random.default_rng(seed)` from an explicit
+  seed argument, so nothing can carry over).
+
+**Re-ran the same fit/test-swap comparison this section has used
+throughout** (`p7_oldmatrix_http.jsonl` / `p7_newmatrix_http.jsonl`, both
+directions, `climb_mode='coupled'`, `integral_floor='ff_hold'`,
+`kd=BOARD_ZONE_KD`), now through `per_zone_gain_holdout_report`'s
+noise-on-by-default gain search:
+
+| grid | | z0 | z1 | z2 |
+|---|---|---|---|---|
+| 0.5×–2.0× (narrow, same as the pre-noise re-run) | fit OLD→test NEW | mult **2.00×**/0.50×, Δ=−0.286 | mult **2.00×**/2.00×, Δ=−0.241 | mult **2.00×**/2.00×, Δ=−0.147 |
+| 0.5×–2.0× | fit NEW→test OLD | mult **2.00×**/2.00×, Δ=−0.300 | mult **2.00×**/2.00×, Δ=−0.268 | mult **2.00×**/2.00×, Δ=−0.155 |
+| 0.25×–8.0× (wide) | fit OLD→test NEW | mult **4.00×**/4.00×, Δ=−0.325 | mult **4.00×**/4.00×, Δ=−0.258 | mult 2.00×/4.00×, Δ=−0.082 |
+| 0.25×–8.0× | fit NEW→test OLD | mult **4.00×**/4.00×, Δ=−0.251 | mult **4.00×**/4.00×, Δ=−0.196 | mult 2.00×/8.00×, Δ=−0.033 |
+
+**The grid edge is not resolved.** With realistic measurement noise and
+the real MAX31856 quantization step active, `kp_mult` still pins at
+whichever edge the grid offers (2.00× on the narrow grid, 4.00× on the
+wide one) on z0 and z1 in every direction, and the deltas are numerically
+close to the pre-noise re-run's own table (e.g. z0 fit-OLD→test-NEW:
+−0.287 pre-noise vs −0.286 with noise) — noise of the measured, real
+magnitude changed almost nothing. z2 is the partial exception: its
+optimum moved off the immediate 2.00× edge on the wide grid (to 2.00×
+still on kp but drifting on ki, Δ shrinking toward zero, 4.00×/8.00×
+rather than climbing further), consistent with it already being the
+weakest, most easily-erased signal in every earlier pass of this section.
+
+**This is the disqualifying finding this addendum exists to report, not a
+partial win.** Diagnosis: the injected noise (σ≈0.06–0.09 C, the real
+sensor's own magnitude) is roughly an order of magnitude smaller than the
+multi-degree ramp-tracking error the search is minimizing (whole-run
+mean |error|, `sim_whole_run_iae_normalized` — the deltas above are
+tenths of a degree on tracking error measured in whole degrees). A metric
+that scores mean absolute tracking error simply cannot register
+noise-amplified derivative ringing of that size; a larger `kp`/`kd`
+keeps buying real tracking-error reduction (from the coupled ramp/dwell
+dynamics this section has calibrated) far faster than it costs anything
+this objective can see. Confirmed this is the metric, not a plumbing bug:
+`test_gain_search_noise_actually_changes_the_ranking` proves the
+noise/quantization chain is not inert (it does move the numbers, just not
+by enough to flip which candidate wins), and it changed almost nothing
+about which multiplier wins on any zone above.
+
+**What would actually be needed to see the failure mode this section
+originally expected** (not attempted here — out of this pass's scope,
+`plant_sim.py`/tests/this doc section only): an objective that scores
+something noise-amplified derivative action directly degrades and IAE
+does not — commanded-duty variance/chatter, a rate limit or PWM-window
+quantization on the actuator side (explicitly NOT modeled, see the module
+docstring's "Not modeled" section), or an ITAE-style metric that would at
+least weight the same tracking error differently. Absent one of those,
+**this simulator's gain search cannot be trusted to reject an
+ever-larger kp/kd on its own** — realistic sensor noise, injected at its
+measured real-world magnitude, is not the missing ingredient the
+2026-09-03e addendum expected it to be. The prior verdict stands and is
+now on firmer ground: **no retune candidate survives from this
+simulator**, and that conclusion is not an artifact of a missing noise
+model — a correctly-derived one was tried and did not change it.
+
+No firmware change made here. Reproducible via
+`plant_sim.per_zone_gain_holdout_report(rows_fit, rows_test, grid=<...>)`
+with no `measurement_noise_std_c`/`measurement_quantum_c` arguments (now
+defaults to the measured chain); pinned by
+`test_max31856_quantum_matches_driver_lsb`,
+`test_measured_thermo_noise_std_is_same_order_as_iae_noise_floor`,
+`test_gain_search_defaults_to_measured_noise_not_noise_free`,
+`test_gain_search_noise_is_reproducible_across_calls` and
+`test_gain_search_noise_actually_changes_the_ranking` in
+`tests/test_plant_sim.py`.
+
 ### 3.5 Documentation — CLOSED 2026-09-01 (`d382b06`)
 
 `PID_CONTROL.md` now carries the strength-scaling formula for the fuzzy layer,

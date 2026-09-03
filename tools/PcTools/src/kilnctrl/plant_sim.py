@@ -89,10 +89,27 @@ oracle.
 
 Not modeled: PWM window quantization (``heater_output.c``) -- averages out
 under 10 s sampling and is not implicated by any of the five captures'
-error shape. Thermocouple resolution is not separately modeled either; the
-five captures are already hardware-quantized, and this module's own output
-is compared against them at their native 10 s cadence, never resampled or
-smoothed to hide quantization on either side (see
+error shape.
+
+Measurement noise/quantization IS modeled (added 2026-09-03, see
+``run_profile``'s ``measurement_quantum_c``/``measurement_noise_std_c``/
+``measurement_seed`` and the ``MAX31856_QUANTUM_C``/
+``MEASURED_THERMO_NOISE_STD_C`` constants below) -- both default OFF
+(``0.0``) in ``run_profile`` itself so the five-capture regression fixtures
+stay byte-identical, but default ON in ``per_zone_gain_grid_search``/
+``per_zone_gain_holdout_report`` (the gain-search entry points), because a
+gain search run without them cannot see the ringing an ever-larger
+kp/kd combination would cause on the real noisy sensor and pins its
+"optimum" at whatever grid edge it is given (PID_EXPANSION_PLAN.md sec
+3.4's 2026-09-03 addendum). ``MAX31856_QUANTUM_C`` is derived from
+``firmware/KilnFW/App/drivers/max31856_codec.h``, not assumed;
+``MEASURED_THERMO_NOISE_STD_C`` is measured directly off rested/steady
+dwell windows in the ``logs/coupling/cpl_z{0,1,2}_thermo.jsonl`` excitation
+captures already used to identify K_full/tau above (see that constant's
+own comment for the exact sample windows and method) -- both are cited
+rather than guessed, per this module's five captures already being
+hardware-quantized and compared against at their native cadence, never
+resampled or smoothed to hide quantization on either side (see
 ``tests/fixtures/plant_sim/README.md`` and
 ``tests/test_plant_sim.py``'s module docstring for how the regression test
 keeps that honest).
@@ -1252,20 +1269,28 @@ def run_profile(segs, start_temp, kp=0.06, ki=0.0003, kd=0.0,
     ``measurement_quantum_c``/``measurement_noise_std_c``: the PID has
     always been fed ``plant.temp[i]`` directly -- the true, noise-free
     plant state -- with no model of the real measurement chain (MAX31856
-    thermocouple ADC, 0.1 C LSB quantization) or of thermocouple noise. The
-    fuzzy layer's whole design target (see ``pid_fuzzy_adjust``) is
-    rejecting noisy-derivative behaviour that this omission cannot
-    reproduce at all: a deterministic measurement can never exercise the
-    fuzzy dead-band, so any fuzzy-vs-baseline comparison run through this
-    simulator up to 2026-09-02 was necessarily comparing on a signal the
-    fuzzy layer was not built to react to. Both default to ``0.0``
-    (off, byte-for-byte the old code path) so every existing caller
+    thermocouple ADC quantization) or of thermocouple noise. The fuzzy
+    layer's whole design target (see ``pid_fuzzy_adjust``) is rejecting
+    noisy-derivative behaviour that this omission cannot reproduce at all:
+    a deterministic measurement can never exercise the fuzzy dead-band, so
+    any fuzzy-vs-baseline comparison run through this simulator up to
+    2026-09-02 was necessarily comparing on a signal the fuzzy layer was
+    not built to react to. Both default to ``0.0`` (off, byte-for-byte the
+    old code path) so every existing caller of ``run_profile`` itself
     (regression tests, capture comparisons, the matrix sweep) is
-    unaffected. ``measurement_seed`` seeds the noise draw so a given call
-    is reproducible; quantization rounds to the nearest
-    ``measurement_quantum_c`` (0.1 for the real MAX31856 LSB) and is
-    applied AFTER the additive Gaussian noise, matching the real chain
-    (continuous sensor + noise, then ADC quantization).
+    unaffected -- see ``MEASURED_THERMO_NOISE_STD_C``/``MAX31856_QUANTUM_C``
+    below for the values the gain-search entry points default these to
+    instead. ``measurement_seed`` seeds the noise draw so a given call is
+    reproducible; ``measurement_noise_std_c`` accepts a scalar (every zone)
+    or a length-3 per-zone sequence, same convention as ``kp``/``ki``/
+    ``kd`` (see ``_broadcast_zone_param``); quantization rounds to the
+    nearest ``measurement_quantum_c`` -- ``MAX31856_QUANTUM_C`` (0.0078125
+    C) is the real per-channel LSB, derived from
+    ``firmware/KilnFW/App/drivers/max31856_codec.h``, not the earlier 0.1 C
+    placeholder some of this module's own mechanism tests still use as a
+    generic exercise value -- and is applied AFTER the additive Gaussian
+    noise, matching the real chain (continuous sensor + noise, then ADC
+    quantization).
 
     The returned dict's ``measured`` array is the FED measurement series
     (what each PID actually saw each tick, post noise+quantization) --
@@ -1301,7 +1326,16 @@ def run_profile(segs, start_temp, kp=0.06, ki=0.0003, kd=0.0,
     times, targets, temps_log, duty_log, meas_log = [], [], [], [], []
     duty = np.zeros(N_ZONES)
     t = 0.0
-    rng = np.random.default_rng(measurement_seed) if measurement_noise_std_c > 0.0 else None
+    # measurement_noise_std_c accepts a scalar (applied to every zone,
+    # byte-identical to the pre-per-zone-noise code path) or a length-3
+    # sequence (e.g. MEASURED_THERMO_NOISE_STD_C, one sigma per zone --
+    # real thermocouple noise is not the same on every channel, see that
+    # constant's docstring). Broadcasting a scalar through
+    # _broadcast_zone_param reproduces the exact same per-tick rng.normal()
+    # call sequence the old scalar-only code made, so every existing
+    # scalar caller is unaffected.
+    noise_std_arr = _broadcast_zone_param(measurement_noise_std_c)
+    rng = np.random.default_rng(measurement_seed) if np.any(noise_std_arr > 0.0) else None
     while t <= total_t:
         seg_idx = None
         for si, (t0, t1, c0, c1, rate) in enumerate(segs):
@@ -1326,7 +1360,7 @@ def run_profile(segs, start_temp, kp=0.06, ki=0.0003, kd=0.0,
                 hold, climb, ff = ff_fn(target_c, target_rate, i, ambient=ambient)
             meas_c = plant.temp[i]
             if rng is not None:
-                meas_c = meas_c + rng.normal(0.0, measurement_noise_std_c)
+                meas_c = meas_c + rng.normal(0.0, noise_std_arr[i])
             if measurement_quantum_c > 0.0:
                 meas_c = round(meas_c / measurement_quantum_c) * measurement_quantum_c
             duty[i], _ = pids[i].update(target_c, meas_c, DT, ff, hold, integral_floor=integral_floor)
@@ -1498,12 +1532,109 @@ BOARD_ZONE_KI = (0.00010, 0.00020, 0.00020)
 BOARD_ZONE_KD = (0.8401, 1.0548, 1.0690)
 
 
+# ---------------------------------------------------------------------------
+# Measurement noise/quantization model (added 2026-09-03, closing the gap
+# PID_EXPANSION_PLAN.md sec 3.4's 2026-09-03 addendum identified: a gain
+# search run with no noise/quantization model active never penalizes an
+# ever-larger kp/kd, so its "optimum" just tracks whatever grid edge it is
+# given -- every zone pinned at 2.00x on a 0.5x-2.0x grid, then the wide
+# 0.25x-8.0x grid just moved the edge and flipped z2's sign. Both constants
+# below are DERIVED/MEASURED, not guessed:
+# ---------------------------------------------------------------------------
+
+#: Real MAX31856 thermocouple-channel ADC resolution, derived from
+#: firmware/KilnFW/App/drivers/max31856_codec.h's
+#: MAX31856_TC_TEMP_C_PER_LSB (1/4096 C per raw 24-bit-word LSB; the low 5
+#: bits of that word are hardware-fixed 0, so the real step between
+#: representable temperatures is 32x that, i.e. 1/128 = 0.0078125 C per
+#: 19-bit code -- the codec header states this equivalence directly). This
+#: SUPERSEDES the earlier 0.1 C figure used elsewhere in this module/its
+#: tests, which was a round-number placeholder for exercising the
+#: quantization mechanism, not a value read off the driver.
+MAX31856_QUANTUM_C = 0.0078125
+
+#: Per-zone thermocouple measurement noise sigma (C), MEASURED directly off
+#: the SAME 2026-09-02 coupling excitation captures used to identify
+#: K_full/tau/L above (logs/coupling/cpl_z{0,1,2}_thermo.jsonl, one
+#: excitation run per zone, ~20 s poll cadence): each zone's own-channel
+#: reading was linearly detrended over a rested/steady dwell window (a
+#: plateau well after the step, before that run's own cooldown) and the
+#: residual std taken, so the number reflects sensor+ADC noise with the
+#: (small, near-linear) settling/cooling drift removed rather than folded
+#: in as extra "noise":
+#:   z0: cpl_z0_thermo.jsonl CH0, samples[260:300] (40 samples, tail of a
+#:       fully-settled dwell, detrend slope -0.017 C/sample) -> std 0.0584 C
+#:   z1: cpl_z1_thermo.jsonl CH1, samples[90:139]  (49 samples, dwell
+#:       plateau after the ramp) -> std 0.0631 C
+#:   z2: cpl_z2_thermo.jsonl CH2, samples[90:139]  (49 samples, same shape)
+#:       -> std 0.0907 C
+#: Cross-check, same order of magnitude via an independent method: the
+#: whole-run IAE noise floors PID_EXPANSION_PLAN.md sec 3.8 built from SIX
+#: repeat noise_floor_p7* captures (run-to-run range, not per-tick std, so
+#: expected to run somewhat higher) are 0.116/0.077/0.147 C for z0/z1/z2.
+#: Injected in run_profile() at DT=1.0 s ticks even though the source
+#: captures poll at ~20 s: each MAX31856 conversion is an independent read
+#: (no on-board averaging), so per-sample noise magnitude does not shrink
+#: at a faster poll rate -- only the number of independent draws per
+#: second changes, which is exactly what feeding the same sigma into every
+#: 1 Hz tick reproduces.
+MEASURED_THERMO_NOISE_STD_C = (0.0584, 0.0631, 0.0907)
+
+#: Fixed, explicit seed set for gain-search noise averaging. A single
+#: stochastic draw per candidate would let noise alone pick the "winner";
+#: this project has also been bitten by a seed that PERSISTED across runs
+#: and bled state between them (project_scenario_runner_state_bleed) -- the
+#: opposite failure. Both are avoided here: each run_profile() call builds
+#: its OWN fresh ``np.random.default_rng(seed)`` from an explicit seed in
+#: this fixed tuple (no shared/mutated generator crosses calls), and every
+#: candidate in a given search -- including the baseline -- is scored
+#: against this SAME seed set (common random numbers), so a comparison
+#: between two candidates is a paired comparison on matched noise draws,
+#: not two independent noisy samples.
+GAIN_SEARCH_NOISE_SEEDS = (0, 1, 2, 3, 4)
+
+
+def _iae_over_seeds(rows, kp_vec, ki_vec, kd_vec, climb_mode, integral_floor, zone,
+                     measurement_noise_std_c, measurement_quantum_c, measurement_seeds):
+    """Runs ``run_profile_from_capture`` once per seed in ``measurement_seeds``
+    (skipped entirely -- a single noise-free call -- when
+    ``measurement_noise_std_c`` is all-zero, so a caller that explicitly
+    disables noise pays no repeat-averaging cost and gets the exact old
+    single-call behaviour) and returns the mean whole-run normalized IAE
+    for ``zone``. See ``GAIN_SEARCH_NOISE_SEEDS`` for why a fixed seed set
+    rather than one draw or a persisted generator.
+    """
+    noise_arr = _broadcast_zone_param(measurement_noise_std_c)
+    if not np.any(noise_arr > 0.0):
+        result, _ = run_profile_from_capture(
+            rows, kp=kp_vec, ki=ki_vec, kd=kd_vec,
+            climb_mode=climb_mode, integral_floor=integral_floor,
+            measurement_noise_std_c=measurement_noise_std_c,
+            measurement_quantum_c=measurement_quantum_c,
+        )
+        return sim_whole_run_iae_normalized(result, zone)
+    vals = []
+    for seed in measurement_seeds:
+        result, _ = run_profile_from_capture(
+            rows, kp=kp_vec, ki=ki_vec, kd=kd_vec,
+            climb_mode=climb_mode, integral_floor=integral_floor,
+            measurement_noise_std_c=measurement_noise_std_c,
+            measurement_quantum_c=measurement_quantum_c,
+            measurement_seed=seed,
+        )
+        vals.append(sim_whole_run_iae_normalized(result, zone))
+    return float(np.mean(vals))
+
+
 def per_zone_gain_grid_search(rows_fit: Sequence[log_analysis.PollRow],
                                base_kp=BOARD_ZONE_KP, base_ki=BOARD_ZONE_KI,
                                base_kd=BOARD_ZONE_KD,
                                grid=PER_ZONE_GAIN_GRID_MULT,
                                climb_mode: str = 'coupled',
-                               integral_floor: str = 'ff_hold') -> dict:
+                               integral_floor: str = 'ff_hold',
+                               measurement_noise_std_c=MEASURED_THERMO_NOISE_STD_C,
+                               measurement_quantum_c=MAX31856_QUANTUM_C,
+                               measurement_seeds=GAIN_SEARCH_NOISE_SEEDS) -> dict:
     """For each zone independently, grid-searches ``kp``/``ki`` multipliers
     (``kd`` left at ``base_kd`` -- the board's own per-zone ``kd`` is held
     fixed rather than swept, both because no capture in this repo was
@@ -1517,6 +1648,21 @@ def per_zone_gain_grid_search(rows_fit: Sequence[log_analysis.PollRow],
     ``_KD``, what the live board actually runs, per zone. Returns the best
     per-zone ``(kp, ki)`` plus the fit-set IAE at baseline and at the
     chosen gains, for every zone.
+
+    ``measurement_noise_std_c``/``measurement_quantum_c``/
+    ``measurement_seeds``: default ON here (unlike ``run_profile`` itself,
+    which defaults these to 0.0 to keep the historical fixture regressions
+    byte-identical -- see the module docstring's "Not modeled" section) to
+    ``MEASURED_THERMO_NOISE_STD_C``/``MAX31856_QUANTUM_C``/
+    ``GAIN_SEARCH_NOISE_SEEDS``, because a gain search is exactly the case
+    this omission broke: PID_EXPANSION_PLAN.md sec 3.4's 2026-09-03
+    addendum found every zone's chosen multiplier pinning at the grid's own
+    edge (then moving with it on a wider grid) once a realistic nonzero
+    ``kd`` was in play, because nothing in a noise-free simulator penalizes
+    an ever-larger kp/kd combination with anything that looks like
+    noise-amplified ringing. Pass ``measurement_noise_std_c=0.0`` (or an
+    all-zero sequence) to recover the old noise-free, single-call-per-
+    candidate search exactly.
     """
     base_kp_arr = _broadcast_zone_param(base_kp)
     base_ki_arr = _broadcast_zone_param(base_ki)
@@ -1531,19 +1677,19 @@ def per_zone_gain_grid_search(rows_fit: Sequence[log_analysis.PollRow],
                 ki_vec = list(base_ki_arr)
                 kp_vec[zone] = base_kp_arr[zone] * kp_mult
                 ki_vec[zone] = base_ki_arr[zone] * ki_mult
-                result, _ = run_profile_from_capture(
-                    rows_fit, kp=kp_vec, ki=ki_vec, kd=list(base_kd_arr),
-                    climb_mode=climb_mode, integral_floor=integral_floor,
+                iae = _iae_over_seeds(
+                    rows_fit, kp_vec, ki_vec, list(base_kd_arr),
+                    climb_mode, integral_floor, zone,
+                    measurement_noise_std_c, measurement_quantum_c, measurement_seeds,
                 )
-                iae = sim_whole_run_iae_normalized(result, zone)
                 if best_iae is None or iae < best_iae:
                     best_iae = iae
                     best_mult = (kp_mult, ki_mult)
-        baseline_result, _ = run_profile_from_capture(
-            rows_fit, kp=list(base_kp_arr), ki=list(base_ki_arr), kd=list(base_kd_arr),
-            climb_mode=climb_mode, integral_floor=integral_floor,
+        baseline_iae = _iae_over_seeds(
+            rows_fit, list(base_kp_arr), list(base_ki_arr), list(base_kd_arr),
+            climb_mode, integral_floor, zone,
+            measurement_noise_std_c, measurement_quantum_c, measurement_seeds,
         )
-        baseline_iae = sim_whole_run_iae_normalized(baseline_result, zone)
         best[zone] = dict(
             kp=base_kp_arr[zone] * best_mult[0], ki=base_ki_arr[zone] * best_mult[1],
             kd=base_kd_arr[zone],
@@ -1559,7 +1705,10 @@ def per_zone_gain_holdout_report(rows_fit: Sequence[log_analysis.PollRow],
                                   base_kd=BOARD_ZONE_KD,
                                   grid=PER_ZONE_GAIN_GRID_MULT,
                                   climb_mode: str = 'coupled',
-                                  integral_floor: str = 'ff_hold') -> dict:
+                                  integral_floor: str = 'ff_hold',
+                                  measurement_noise_std_c=MEASURED_THERMO_NOISE_STD_C,
+                                  measurement_quantum_c=MAX31856_QUANTUM_C,
+                                  measurement_seeds=GAIN_SEARCH_NOISE_SEEDS) -> dict:
     """Fits per-zone gains on ``rows_fit`` (``per_zone_gain_grid_search``),
     then scores BOTH the shared-baseline gains and the per-zone gains on
     ``rows_test`` -- a capture the fit never saw. This is the only honest
@@ -1571,27 +1720,54 @@ def per_zone_gain_holdout_report(rows_fit: Sequence[log_analysis.PollRow],
     the "per-zone" row on the held-out capture (not one zone at a time) --
     that is the actual deployment shape a per-zone-gains recommendation
     would take.
+
+    ``measurement_noise_std_c``/``measurement_quantum_c``/
+    ``measurement_seeds``: forwarded to ``per_zone_gain_grid_search`` for
+    the fit, and used identically (same seed set, common random numbers)
+    when scoring baseline vs. tuned on the held-out capture -- see that
+    function's docstring.
     """
     fit = per_zone_gain_grid_search(
         rows_fit, base_kp=base_kp, base_ki=base_ki, base_kd=base_kd,
         grid=grid, climb_mode=climb_mode, integral_floor=integral_floor,
+        measurement_noise_std_c=measurement_noise_std_c,
+        measurement_quantum_c=measurement_quantum_c,
+        measurement_seeds=measurement_seeds,
     )
     kp_vec = [fit[z]['kp'] for z in range(N_ZONES)]
     ki_vec = [fit[z]['ki'] for z in range(N_ZONES)]
+    base_kd_arr = list(_broadcast_zone_param(base_kd))
 
-    baseline_test, _ = run_profile_from_capture(
-        rows_test, kp=base_kp, ki=base_ki, kd=base_kd,
-        climb_mode=climb_mode, integral_floor=integral_floor,
-    )
-    tuned_test, _ = run_profile_from_capture(
-        rows_test, kp=kp_vec, ki=ki_vec, kd=base_kd,
-        climb_mode=climb_mode, integral_floor=integral_floor,
-    )
+    # One simulation per seed covers all three zones at once (a single
+    # run_profile call reports every zone's temps/target) -- computed once
+    # here and re-used for every zone's IAE below, rather than re-running
+    # the identical trajectory per zone the way per-zone _iae_over_seeds
+    # calls would.
+    noise_arr = _broadcast_zone_param(measurement_noise_std_c)
+    seeds = measurement_seeds if np.any(noise_arr > 0.0) else (None,)
+
+    def _mean_iae_all_zones(kp_v, ki_v):
+        per_zone_vals = {z: [] for z in range(N_ZONES)}
+        for seed in seeds:
+            kwargs = dict(kp=kp_v, ki=ki_v, kd=base_kd_arr,
+                           climb_mode=climb_mode, integral_floor=integral_floor,
+                           measurement_noise_std_c=measurement_noise_std_c,
+                           measurement_quantum_c=measurement_quantum_c)
+            if seed is not None:
+                kwargs["measurement_seed"] = seed
+            result, _ = run_profile_from_capture(rows_test, **kwargs)
+            for z in range(N_ZONES):
+                per_zone_vals[z].append(sim_whole_run_iae_normalized(result, z))
+        return {z: float(np.mean(vals)) for z, vals in per_zone_vals.items()}
+
+    base_iae_all = _mean_iae_all_zones(list(_broadcast_zone_param(base_kp)),
+                                        list(_broadcast_zone_param(base_ki)))
+    tuned_iae_all = _mean_iae_all_zones(kp_vec, ki_vec)
 
     per_zone = {}
     for zone in range(N_ZONES):
-        base_iae = sim_whole_run_iae_normalized(baseline_test, zone)
-        tuned_iae = sim_whole_run_iae_normalized(tuned_test, zone)
+        base_iae = base_iae_all[zone]
+        tuned_iae = tuned_iae_all[zone]
         per_zone[zone] = dict(
             fit=fit[zone],
             test_iae_baseline=base_iae,

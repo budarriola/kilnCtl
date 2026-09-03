@@ -1395,3 +1395,127 @@ def test_per_zone_gain_holdout_report_shape_and_delta_arithmetic():
     text = ps.format_per_zone_gain_holdout_report_text(report)
     for zone in range(3):
         assert f"z{zone}:" in text
+
+
+# ---------------------------------------------------------------------------
+# Measurement-noise/quantization model defaults for the gain search
+# (added for the 2026-09-03 "gain searches run away" finding --
+# PID_EXPANSION_PLAN.md sec 3.4's 2026-09-03 addendum). run_profile()'s OWN
+# defaults stay at 0.0 (proven by
+# test_measurement_chain_defaults_off_reproduces_noise_free_result above);
+# these tests instead pin that the GAIN-SEARCH entry points
+# (per_zone_gain_grid_search / per_zone_gain_holdout_report) default to the
+# measured, hardware-derived constants -- not to run_profile's noise-free
+# default.
+# ---------------------------------------------------------------------------
+
+def test_max31856_quantum_matches_driver_lsb():
+    """MAX31856_QUANTUM_C must be the real per-channel LSB derived from
+    firmware/KilnFW/App/drivers/max31856_codec.h's
+    MAX31856_TC_TEMP_C_PER_LSB (1/4096 C per raw 24-bit-word LSB; the
+    driver's own low 5 bits are hardware-fixed 0, so the real step between
+    representable temperatures is 32x that -- 1/128 = 0.0078125 C), not an
+    unrelated round-number guess."""
+    driver_raw_lsb = 1.0 / 4096.0
+    real_code_step = driver_raw_lsb * 32  # 5 fixed-zero low bits -> 19-bit code
+    assert ps.MAX31856_QUANTUM_C == pytest.approx(real_code_step)
+    assert ps.MAX31856_QUANTUM_C == pytest.approx(0.0078125)
+
+
+def test_measured_thermo_noise_std_is_same_order_as_iae_noise_floor():
+    """Cross-check MEASURED_THERMO_NOISE_STD_C (per-tick std, measured off
+    a rested/steady dwell window in the coupling excitation captures)
+    against PID_EXPANSION_PLAN.md sec 3.8's independently-derived whole-run
+    IAE noise floors (0.116/0.077/0.147 C for z0/z1/z2, built from SIX
+    repeat noise_floor_p7* captures by an entirely different method --
+    run-to-run range, not per-tick std). They should agree to within a
+    factor of ~3 -- same underlying sensor, same order of magnitude -- not
+    match exactly (different method, and the IAE figure also folds in
+    run-to-run drift this per-tick figure does not)."""
+    iae_noise_floor = (0.116, 0.077, 0.147)
+    for zone in range(3):
+        ratio = ps.MEASURED_THERMO_NOISE_STD_C[zone] / iae_noise_floor[zone]
+        assert 0.2 <= ratio <= 3.0, (
+            f"zone {zone}: measured per-tick noise std "
+            f"{ps.MEASURED_THERMO_NOISE_STD_C[zone]:.4f} C is not within the same "
+            f"order of magnitude as the sec 3.8 IAE noise floor {iae_noise_floor[zone]} C "
+            f"(ratio {ratio:.2f})"
+        )
+
+
+def test_gain_search_defaults_to_measured_noise_not_noise_free():
+    """per_zone_gain_grid_search/per_zone_gain_holdout_report must default
+    to MEASURED_THERMO_NOISE_STD_C/MAX31856_QUANTUM_C, not run_profile's
+    own noise-free 0.0 default -- this is the actual fix for the grid-edge
+    finding: a gain search called with no explicit measurement-chain
+    arguments must exercise the noisy/quantized measurement chain.
+
+    Proof this is not vacuous: temporarily changed
+    per_zone_gain_grid_search's measurement_noise_std_c default to 0.0.
+    Captured red output:
+
+        FAILED tests/test_plant_sim.py::test_gain_search_defaults_to_measured_noise_not_noise_free
+        AssertionError: per_zone_gain_grid_search's default
+        measurement_noise_std_c is not MEASURED_THERMO_NOISE_STD_C -- gain
+        search defaults back to the noise-free chain
+        assert (0.0, 0.0, 0.0) == (0.0584, 0.0631, 0.0907)
+
+    Reverted, suite green again before this test was kept.
+    """
+    import inspect
+    for fn in (ps.per_zone_gain_grid_search, ps.per_zone_gain_holdout_report):
+        sig = inspect.signature(fn)
+        default_noise = tuple(ps._broadcast_zone_param(
+            sig.parameters["measurement_noise_std_c"].default))
+        default_quantum = sig.parameters["measurement_quantum_c"].default
+        assert default_noise == pytest.approx(ps.MEASURED_THERMO_NOISE_STD_C), (
+            f"{fn.__name__}'s default measurement_noise_std_c is not "
+            "MEASURED_THERMO_NOISE_STD_C -- gain search defaults back to the "
+            f"noise-free chain\nassert {default_noise} == {ps.MEASURED_THERMO_NOISE_STD_C}"
+        )
+        assert default_quantum == pytest.approx(ps.MAX31856_QUANTUM_C), (
+            f"{fn.__name__}'s default measurement_quantum_c is not MAX31856_QUANTUM_C"
+        )
+
+
+def test_gain_search_noise_is_reproducible_across_calls():
+    """A gain search must produce the SAME chosen multipliers/IAE numbers
+    on repeated calls -- GAIN_SEARCH_NOISE_SEEDS is a fixed tuple and every
+    run_profile() call builds its own fresh rng from an explicit seed, so
+    nothing should be able to make two otherwise-identical calls disagree.
+    This is the guard against the project's other seed bug class (a
+    generator that PERSISTS and bleeds state across runs, rather than the
+    grid-edge bug this section fixes -- see GAIN_SEARCH_NOISE_SEEDS'
+    docstring): if a shared/mutated rng ever leaked between candidates,
+    call order would start to matter and this would go red."""
+    rows = _synthetic_ramp_dwell_rows()
+    grid = (0.5, 1.0, 1.5)
+    fit_a = ps.per_zone_gain_grid_search(rows, grid=grid)
+    fit_b = ps.per_zone_gain_grid_search(rows, grid=grid)
+    for zone in range(3):
+        assert fit_a[zone]["kp_mult"] == fit_b[zone]["kp_mult"]
+        assert fit_a[zone]["ki_mult"] == fit_b[zone]["ki_mult"]
+        assert fit_a[zone]["fit_iae_tuned"] == pytest.approx(fit_b[zone]["fit_iae_tuned"])
+        assert fit_a[zone]["fit_iae_baseline"] == pytest.approx(fit_b[zone]["fit_iae_baseline"])
+
+
+def test_gain_search_noise_actually_changes_the_ranking():
+    """Proves the noise/quantization plumbing in the gain search is not
+    inert: scoring the SAME candidate grid with noise off vs. on (measured
+    defaults) must change at least one zone's fit-set IAE numbers -- if
+    every number were identical, the measurement-chain arguments would be
+    wired into the function signature but not actually reaching the
+    simulated trajectory the search scores."""
+    rows = _synthetic_ramp_dwell_rows()
+    grid = (0.5, 1.0, 1.5)
+    fit_noise_free = ps.per_zone_gain_grid_search(
+        rows, grid=grid, measurement_noise_std_c=0.0, measurement_quantum_c=0.0)
+    fit_noisy = ps.per_zone_gain_grid_search(rows, grid=grid)
+    diffs = [
+        abs(fit_noise_free[z]["fit_iae_baseline"] - fit_noisy[z]["fit_iae_baseline"])
+        for z in range(3)
+    ]
+    assert max(diffs) > 1e-6, (
+        "enabling measured noise/quantization in the gain search had no "
+        "effect on any zone's fit-set IAE -- looks inert"
+    )
