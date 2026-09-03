@@ -450,9 +450,28 @@ exactly, without these — but RDDID matching for Phase 4's auto-detection, and
 any DMA/flush work in Phase 6, still need the real numbers below.)*
 
 - [ ] **RDDID (`0x04`) bytes from the ILI9488** on this wiring, recorded here.
+      **Attempted 2026-09-03, still not captured:** during the same
+      six-firing A/B experiment as the 9.1b measurement above, read-only
+      access was the only option, and this repo's `DISPLAY_CMD_READ_ID`
+      bridge command (`Display: Read ID`, `display.py`) is genuinely
+      read-only at the protocol level (one SPI RDDID read plus the D/C
+      expander toggle — no panel write, no reset). It was still not run: the
+      session's own permission classifier declined the action, and separately
+      the procedure this checklist documents below (§ "How to actually read
+      these bytes") calls for a *rebuild with a different sdkconfig fragment
+      and a reflash* to force `CONFIG_KILNCTL_DISPLAY_PANEL_AUTO`, which is a
+      write/reset this task's constraints rule out outright while a firing is
+      running. Net: the RDDID bytes still need a bench pass with nothing
+      live on the kiln, either by resolving the classifier block for the
+      bridge command alone (no rebuild needed for the ILI9488 row, since the
+      panel is already attached and initialized) or by the documented
+      rebuild-and-reflash route once the experiment is done.
 - [ ] **RDDID (`0x04`) bytes from the ST7796** on this wiring, recorded here.
       If ambiguous, also try `0xD3` (RDID4). All-`0x00`/all-`0xFF` means MISO
-      undriven, i.e. "no panel", not "panel 1" (`ILI9488.c:1641`).
+      undriven, i.e. "no panel", not "panel 1" (`ILI9488.c:1641`). Not
+      attempted this pass — the ST7796/MSP4031 is not the panel currently
+      wired up, and per this task's own instructions, guessing its ID would
+      be worse than leaving it unset.
 
   **How to actually read these bytes (2026-09-02):** the previous version of
   this checklist, and a comment in `panel_detect.h`, both said "boot the
@@ -506,10 +525,21 @@ any DMA/flush work in Phase 6, still need the real numbers below.)*
       black, `set_power(false)` becomes the better strategy on that panel — which
       means **the blank strategy belongs in the panel descriptor**, not in
       `screen_idle.c`.
-- [ ] **Current flush duration**, measured, before any DMA work. 480×40×2 =
+- [x] **Current flush duration**, measured, before any DMA work. 480×40×2 =
       38400 B at 20 MHz is ~15 ms of pure clock time split across 27 chunks of
-      1440 B. Record the real number here; it is the budget everything else is
-      judged against.
+      1440 B. **Measured 2026-09-03, `curl http://192.168.1.156/api/status`,
+      panel = ILI9488 (currently attached), 20 samples of `flush_last_us` at
+      3 s intervals over 68 s wall-clock, while the LCD was live-rendering a
+      firing in progress (real UI traffic, not idle)**: min 6054 µs, median
+      6119 µs, max 37595 µs (of the 20 samples); the lifetime high-water mark
+      `flush_max_us` read 170159 µs throughout the sampling window (unchanged
+      across all 20 reads, so no new worst-case flush occurred during
+      sampling — it is a stale-since-boot outlier, not representative of
+      steady-state cost). `flush_count` advanced 110643 → 111281 (638 flushes)
+      over the same span. The typical flush (~6.0-6.4 ms) matches the ~15 ms
+      budget estimate's order of magnitude; the handful of samples in the
+      19-38 ms range line up with heavier-content redraws (graph/page
+      transitions) rather than a fixed per-flush cost.
 
 ---
 
@@ -839,11 +869,13 @@ bytes and breaks every display push.
       compile on MSVC (same reason `dashboard_json.c` was split out) — this
       is pure driver plumbing, proven only by `build_kilnfw` succeeding and
       by reading it on real hardware.
-- [ ] **9.1b Take the measurement.** Flush duration and `lvgl_port_task` CPU,
-      with the panel attached and running real UI traffic. **First hardware
-      step: with the current ILI9488 panel already running, `curl
-      http://<board>/api/status` and record `flush_max_us` in §4** — this
-      does not even need the ST7796 to be wired up.
+- [x] **9.1b Take the measurement — DONE 2026-09-03 for the ILI9488 (flush
+      duration only; `lvgl_port_task` CPU% not captured — no dashboard field
+      for it today).** See the measured min/median/max in §4. `lvgl_port_task`
+      CPU utilization is a separate measurement this pass did not attempt
+      (no existing HTTP-exposed stat for it; would need a stack/CPU profiler
+      tool this pass didn't reach for). ST7796 row still open — no ST7796
+      attached to measure against.
 - [ ] **9.2 Raise `max_transfer_sz` to one full LVGL buffer** (480×40×2 = 38400,
       or clamp `KILNCTL_LVGL_BUF_ROWS` so one flush fits under the 32768-byte
       hardware cap — 34 rows = 32640 B). Collapses 27 transactions per flush into
@@ -1288,11 +1320,11 @@ Each phase ends somewhere the firmware still boots and drives the existing panel
       code ahead of the panel arriving; both new flags host-tested for
       plumbing/dispatch (9.6) or stated as not host-testable and why (9.7),
       neither flash-verified, same posture as 9.3/9.4.
-- [ ] **9.1b still open** — a real-hardware measurement by definition, no
-      config option or host test can produce it. First hardware step,
-      unchanged: `curl http://<board>/api/status`, record `flush_max_us` in
-      §4. Can be done against the CURRENTLY ATTACHED ILI9488 right now,
-      without waiting on the ST7796/MSP4031 harness.
+- [x] **9.1b done for the ILI9488, 2026-09-03** — see §4 for the sampled
+      min/median/max and the lifetime `flush_max_us` high-water mark, taken
+      against the currently attached ILI9488 with the LCD live-rendering a
+      firing. `lvgl_port_task` CPU% is still unmeasured. ST7796 measurement
+      still needs the ST7796/MSP4031 harness wired up.
 
 ### Phase 7 — the actual point: a better UI
 - [x] `LV_USE_TJPGD` if images are wanted. **LANDED 2026-09-03** —
