@@ -53,6 +53,8 @@ from __future__ import annotations
 import dataclasses
 import json
 import logging
+import os
+import re
 import time
 import urllib.error
 import urllib.parse
@@ -540,20 +542,61 @@ def run_entry(entry: QueueEntry, cfg: RunQueueConfig, control=None,
         wait_until_rested(cfg)
         status = get_status(cfg.host, cfg.http_timeout_s)
 
-    log.info("[%s] starting profile %d, capturing to %s", entry.label, entry.profile_id, entry.log_path)
-    result = start_profile(cfg.host, entry.profile_id, cfg.http_timeout_s)
-    if not result.get("ok", False):
-        raise RunQueueError(f"POST /api/profile_exec/start refused: {result!r}")
+    # Open (and thereby validate) the capture file BEFORE anything energizes
+    # the kiln. Tonight's incident: the start POST landed, the heaters came
+    # on, and only THEN did `open(entry.log_path, "w")` raise
+    # FileNotFoundError on a bad path, leaving a live, uncaptured,
+    # unsupervised firing. Opening first means an unwritable path refuses
+    # the run instead of orphaning one.
+    log.info("[%s] opening capture file %s before starting", entry.label, entry.log_path)
+    try:
+        fh = open(entry.log_path, "w", encoding="utf-8")
+    except OSError as exc:
+        raise RunQueueError(
+            f"cannot open capture file {entry.log_path!r} -- refusing to start the kiln "
+            f"with nowhere to capture to: {exc}") from exc
 
-    log.info("[%s] confirming the executor left idle (timeout=%.0fs)",
-              entry.label, cfg.start_confirm_timeout_s)
-    _wait_until_run_active_or_terminal(cfg, cfg.start_confirm_timeout_s)
+    started = False
+    try:
+        log.info("[%s] starting profile %d, capturing to %s", entry.label, entry.profile_id, entry.log_path)
+        result = start_profile(cfg.host, entry.profile_id, cfg.http_timeout_s)
+        if not result.get("ok", False):
+            raise RunQueueError(f"POST /api/profile_exec/start refused: {result!r}")
+        started = True
 
-    run_timeout_s = profile_total_planned_s(plan) * cfg.run_timeout_multiplier + cfg.run_timeout_margin_s
-    log.info("[%s] waiting for the run to reach a terminal state (timeout=%.0fs)",
-              entry.label, run_timeout_s)
-    with open(entry.log_path, "w", encoding="utf-8") as fh:
+        log.info("[%s] confirming the executor left idle (timeout=%.0fs)",
+                  entry.label, cfg.start_confirm_timeout_s)
+        _wait_until_run_active_or_terminal(cfg, cfg.start_confirm_timeout_s)
+
+        run_timeout_s = profile_total_planned_s(plan) * cfg.run_timeout_multiplier + cfg.run_timeout_margin_s
+        log.info("[%s] waiting for the run to reach a terminal state (timeout=%.0fs)",
+                  entry.label, run_timeout_s)
         _poll_capture_until(cfg, fh, _run_is_terminal, deadline_s=run_timeout_s)
+    except BaseException:
+        if started:
+            # The start POST succeeded but something after it raised before
+            # (or during) capture -- a crash here must not leave the kiln
+            # firing with nothing watching it. Stop it, then propagate the
+            # ORIGINAL exception (never swallowed).
+            log.error("[%s] error after a successful start -- stopping the profile so a "
+                       "crash cannot orphan a live firing", entry.label)
+            try:
+                stop_profile(cfg.host, cfg.http_timeout_s)
+            except Exception:
+                log.exception("[%s] failed to stop the profile while handling an earlier "
+                               "error -- the kiln may still be running, check it by hand",
+                               entry.label)
+        raise
+    finally:
+        fh.close()
+        if not started:
+            # The start POST never succeeded (refused, or failed before it
+            # was even attempted) -- nothing was ever captured to this file,
+            # so don't leave a stray empty capture file behind.
+            try:
+                os.remove(entry.log_path)
+            except OSError:
+                pass
 
     cooldown_path = entry.log_path + ".cooldown.jsonl"
     log.info("[%s] capturing cooldown to %s", entry.label, cooldown_path)
@@ -580,14 +623,52 @@ def run_queue(entries: Sequence[QueueEntry], cfg: RunQueueConfig, control=None,
 # CLI
 # --------------------------------------------------------------------------
 
+#: a lone single-letter field immediately followed by a field starting with
+#: "/" or "\\" is a Windows drive letter that ``raw.split(":")`` split apart
+#: (``C:/Users/...`` -> ``["C", "/Users/..."]``), not two real fields of the
+#: PRESET:PROFILE_ID:LOG_PATH[:LABEL] spec.
+_DRIVE_LETTER_RE = re.compile(r"^[A-Za-z]$")
+
+
 def _parse_run_arg(raw: str) -> QueueEntry:
-    parts = raw.split(":", 3)
-    if len(parts) < 3:
+    """Parse ``--run PRESET:PROFILE_ID:LOG_PATH[:LABEL]``.
+
+    ``raw.split(":", 3)`` alone is wrong for a Windows absolute LOG_PATH: a
+    spec like ``preset:7:C:/Users/.../run.jsonl:label`` splits on the drive
+    letter's own colon, silently handing LOG_PATH the two characters "C" and
+    shoving the real path into LABEL. That is exactly what happened live
+    (``--run coupling_matrix_pre20260902:7:C:/Users/.../
+    noise_floor_p7b.jsonl:noise_floor``) -- it did not error, it captured to
+    a mangled ``C_run1`` file with the path as the label. Detect and
+    re-merge a drive-letter split before applying the normal field split, so
+    a Windows absolute path either parses correctly or this raises a clear
+    error -- never a silent mangled path."""
+    raw_parts = raw.split(":")
+    merged = []
+    i = 0
+    while i < len(raw_parts):
+        piece = raw_parts[i]
+        if (_DRIVE_LETTER_RE.match(piece) and i + 1 < len(raw_parts)
+                and raw_parts[i + 1][:1] in ("/", "\\")):
+            merged.append(piece + ":" + raw_parts[i + 1])
+            i += 2
+        else:
+            merged.append(piece)
+            i += 1
+
+    if len(merged) < 3:
         raise ValueError(
             f"--run must be PRESET:PROFILE_ID:LOG_PATH[:LABEL], got {raw!r}")
-    preset, profile_id, log_path = parts[0], parts[1], parts[2]
-    label = parts[3] if len(parts) > 3 else preset
-    return QueueEntry(preset_name=preset, profile_id=int(profile_id), log_path=log_path, label=label)
+    preset, profile_id, log_path = merged[0], merged[1], merged[2]
+    label = ":".join(merged[3:]) if len(merged) > 3 else preset
+    try:
+        profile_id_int = int(profile_id)
+    except ValueError as exc:
+        raise ValueError(
+            f"--run PROFILE_ID must be an integer, got {profile_id!r} in {raw!r} -- if "
+            f"LOG_PATH is a Windows absolute path, check it parsed as one field "
+            f"(parsed fields: {merged!r})") from exc
+    return QueueEntry(preset_name=preset, profile_id=profile_id_int, log_path=log_path, label=label)
 
 
 def _numbered_log_path(log_path: str, k: int) -> str:

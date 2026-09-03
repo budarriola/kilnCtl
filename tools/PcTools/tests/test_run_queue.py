@@ -199,6 +199,9 @@ class _ScriptedTransport:
         self.started_profile_id = profile_id
         return {"ok": True}
 
+    def stop_profile(self, host, timeout):
+        self.stopped = True
+
 
 def _patched_run_entry(entry, cfg, transport, preset_dict):
     """Runs run_entry with every HTTP call monkeypatched onto `transport`,
@@ -214,7 +217,8 @@ def _patched_run_entry(entry, cfg, transport, preset_dict):
          unittest.mock.patch.object(rq, "get_exec", transport.get_exec), \
          unittest.mock.patch.object(rq, "get_zones", transport.get_zones), \
          unittest.mock.patch.object(rq, "get_profile_plan", transport.get_profile_plan), \
-         unittest.mock.patch.object(rq, "start_profile", transport.start_profile):
+         unittest.mock.patch.object(rq, "start_profile", transport.start_profile), \
+         unittest.mock.patch.object(rq, "stop_profile", transport.stop_profile):
         rq.run_entry(entry, cfg, control=None, apply_preset_fn=fake_apply_preset)
     return calls
 
@@ -321,7 +325,8 @@ class ApplyPresetHttpOnlyTest(unittest.TestCase):
              unittest.mock.patch.object(rq, "get_exec", transport.get_exec), \
              unittest.mock.patch.object(rq, "get_zones", transport.get_zones), \
              unittest.mock.patch.object(rq, "get_profile_plan", transport.get_profile_plan), \
-             unittest.mock.patch.object(rq, "start_profile", transport.start_profile):
+             unittest.mock.patch.object(rq, "start_profile", transport.start_profile), \
+             unittest.mock.patch.object(rq, "stop_profile", transport.stop_profile):
             rq.run_entry(entry, cfg, control=None, apply_preset_fn=None)  # must not raise
 
         self.assertEqual(transport.started_profile_id, 7)
@@ -551,6 +556,142 @@ class PrestartRestedRetryTest(unittest.TestCase):
 # (PID_EXPANSION_PLAN.md SS3.3): N repeats of one entry, each with its own
 # log file so no two runs can ever land in one file.
 # --------------------------------------------------------------------------
+
+class OpenCaptureBeforeStartTest(unittest.TestCase):
+    """Regression coverage for the live incident: run_entry used to POST
+    /api/profile_exec/start, confirm the executor left idle, and only THEN
+    open the capture file -- so a bad log_path raised FileNotFoundError
+    with the heaters already energized and nothing capturing or
+    supervising the run. run_entry must open (and validate) the capture
+    file BEFORE the start POST, and must never issue that POST at all if
+    the file cannot be opened."""
+
+    def test_unwritable_capture_dir_refuses_before_any_start_post(self):
+        # A parent directory that does not exist -- exactly tonight's
+        # FileNotFoundError shape ('../../logs/coupling/...').
+        tmpdir = tempfile.mkdtemp()
+        bad_log_path = os.path.join(tmpdir, "does_not_exist_subdir", "run.jsonl")
+
+        rested = _status([_channel(25.1, 25.0)])
+        transport = _ScriptedTransport(
+            status_sequence=[rested],
+            exec_sequence=[_exec([0], state="running"), _exec([0], state="done")],
+            plan_body=_plan([20, 45, 60]),
+            zones_body=_zones([80.0, 80.0, 80.0]),
+        )
+        entry = rq.QueueEntry(preset_name={"name": "fake"}, profile_id=7,
+                               log_path=bad_log_path, label="t")
+        cfg = rq.RunQueueConfig(host="203.0.113.10", poll_interval_s=0.0,
+                                 sleep=transport.sleep, now=transport.now, cooldown_s=0.0)
+
+        with self.assertRaises(rq.RunQueueError):
+            _patched_run_entry(entry, cfg, transport, entry.preset_name)
+
+        # The whole point: the kiln must never have been told to start.
+        self.assertIsNone(transport.started_profile_id)
+        self.assertFalse(os.path.exists(bad_log_path))
+
+    def test_refused_start_leaves_no_stray_empty_capture_file(self):
+        # The capture file CAN be opened, but the start POST itself is
+        # refused (ok: False) -- must not leave a stray empty file behind.
+        tmpdir = tempfile.mkdtemp()
+        log_path = os.path.join(tmpdir, "run.jsonl")
+
+        rested = _status([_channel(25.1, 25.0)])
+        transport = _ScriptedTransport(
+            status_sequence=[rested],
+            exec_sequence=[_exec([0], state="running")],
+            plan_body=_plan([20, 45, 60]),
+            zones_body=_zones([80.0, 80.0, 80.0]),
+        )
+
+        def refusing_start(host, profile_id, timeout):
+            return {"ok": False, "error": "refused"}
+        transport.start_profile = refusing_start
+
+        entry = rq.QueueEntry(preset_name={"name": "fake"}, profile_id=7,
+                               log_path=log_path, label="t")
+        cfg = rq.RunQueueConfig(host="203.0.113.10", poll_interval_s=0.0,
+                                 sleep=transport.sleep, now=transport.now, cooldown_s=0.0)
+
+        with self.assertRaises(rq.RunQueueError):
+            _patched_run_entry(entry, cfg, transport, entry.preset_name)
+        self.assertFalse(os.path.exists(log_path))
+
+
+class StopOnCrashAfterStartTest(unittest.TestCase):
+    """If the start POST succeeds but something later in run_entry raises
+    before/while capturing, the kiln must not be left orphaned running --
+    run_entry must POST /api/profile_exec/stop before the original
+    exception propagates."""
+
+    def test_exception_after_successful_start_stops_the_profile(self):
+        tmpdir = tempfile.mkdtemp()
+        log_path = os.path.join(tmpdir, "run.jsonl")
+
+        rested = _status([_channel(25.1, 25.0)])
+        transport = _ScriptedTransport(
+            status_sequence=[rested],
+            exec_sequence=[_exec([0], state="running")],
+            plan_body=_plan([20, 45, 60]),
+            zones_body=_zones([80.0, 80.0, 80.0]),
+        )
+        entry = rq.QueueEntry(preset_name={"name": "fake"}, profile_id=7,
+                               log_path=log_path, label="t")
+        # start_confirm_timeout_s=0 with a state that never leaves 'running'
+        # (never idle, never terminal) still passes _wait_until_run_active_
+        # or_terminal immediately since 'running' is itself an active state
+        # -- so force the failure inside the run-capture poll instead by
+        # making the timeout computation raise: total_planned_s is missing.
+        transport._plan_body = {"points": [{"t": 0, "c": 60}]}  # no total_planned_s
+
+        cfg = rq.RunQueueConfig(host="203.0.113.10", poll_interval_s=0.0,
+                                 sleep=transport.sleep, now=transport.now, cooldown_s=0.0)
+
+        with self.assertRaises(rq.RunQueueError) as ctx:
+            _patched_run_entry(entry, cfg, transport, entry.preset_name)
+
+        # It must be the ORIGINAL exception (missing total_planned_s), not
+        # swallowed or replaced by the stop-profile bookkeeping.
+        self.assertIn("total_planned_s", str(ctx.exception))
+        self.assertEqual(transport.started_profile_id, 7)
+        self.assertTrue(transport.stopped, "stop_profile was never called after the crash")
+
+
+class ParseRunArgWindowsPathTest(unittest.TestCase):
+    """Regression coverage for the live incident: --run PRESET:PROFILE_ID:
+    LOG_PATH[:LABEL] split naively on ':' treats a Windows drive letter
+    (C:/Users/...) as a field separator, silently truncating LOG_PATH to
+    'C' and shoving the real path + label together into LABEL. It must
+    either parse the absolute path correctly or raise a clear error --
+    never silently produce a mangled log path."""
+
+    def test_windows_absolute_path_parses_log_path_correctly(self):
+        raw = "coupling_matrix_pre20260902:7:C:/Users/budarriola/logs/noise_floor_p7b.jsonl:noise_floor"
+        entry = rq._parse_run_arg(raw)
+        self.assertEqual(entry.preset_name, "coupling_matrix_pre20260902")
+        self.assertEqual(entry.profile_id, 7)
+        self.assertEqual(entry.log_path, "C:/Users/budarriola/logs/noise_floor_p7b.jsonl")
+        self.assertEqual(entry.label, "noise_floor")
+
+    def test_windows_absolute_path_no_label_parses_log_path_correctly(self):
+        raw = "p:3:C:/Users/budarriola/logs/run.jsonl"
+        entry = rq._parse_run_arg(raw)
+        self.assertEqual(entry.log_path, "C:/Users/budarriola/logs/run.jsonl")
+
+    def test_windows_backslash_absolute_path_parses_log_path_correctly(self):
+        raw = r"p:3:C:\Users\budarriola\logs\run.jsonl"
+        entry = rq._parse_run_arg(raw)
+        self.assertEqual(entry.log_path, r"C:\Users\budarriola\logs\run.jsonl")
+
+    def test_log_path_never_silently_truncated_to_bare_drive_letter(self):
+        # The exact live failure mode: log_path must never come out as just
+        # "C" with the real path shoved into label.
+        raw = "coupling_matrix_pre20260902:7:C:/Users/budarriola/logs/noise_floor_p7b.jsonl:noise_floor"
+        entry = rq._parse_run_arg(raw)
+        self.assertNotEqual(entry.log_path, "C")
+        self.assertNotIn("noise_floor_p7b.jsonl", entry.label)
+
 
 class ExpandRepeatTest(unittest.TestCase):
     def test_expand_repeat_produces_n_entries_same_preset_and_profile(self):
