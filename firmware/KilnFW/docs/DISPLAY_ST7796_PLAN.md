@@ -11,10 +11,14 @@ via `esp_spi_owner.c`'s `use_polling` flag) and 9.9 (bounded owner-transfer
 wait) are landed. 9.3 (`SPI_TRANS_DMA_USE_PSRAM`) and 9.4 (hardware CS) are
 now also landed, compiled-in but **default OFF** behind
 `CONFIG_KILNCTL_SPI_DMA_USE_PSRAM` / `CONFIG_KILNCTL_SPI_HARDWARE_CS` — see
-§12 Phase 6 for exactly what each changes and how to soak it. 9.1
-(flush-duration measurement), 9.6 (async flush), 9.7 (ST7796 zero-copy) and
-9.8 (clock step-up) remain open — see §12 Phase 6 for why they stay unbuilt
-rather than merely unmeasured. Phase 0's blocking
+§12 Phase 6 for exactly what each changes and how to soak it. 9.1's
+instrumentation and capture procedure are now landed (timing in
+`lvgl_port.c`'s flush callback, `lvgl_port_get_flush_stats()`, surfaced on
+`GET /api/status` as `flush_last_us`/`flush_max_us`/`flush_count`) — reading
+the real number is now `curl .../api/status`, one command, but the number
+itself still requires a live panel and is not recorded. 9.6 (async flush),
+9.7 (ST7796 zero-copy) and 9.8 (clock step-up) remain open — see §12 Phase 6
+for why they stay unbuilt rather than merely unmeasured. Phase 0's blocking
 hardware measurements (§4) are still open — nothing here has touched real
 MSP4031 hardware yet; Phases 1-3/5 were built and host-tested against the
 existing ILI9488 panel and the transcribed ST7796 init table only.
@@ -815,8 +819,29 @@ bytes and breaks every display push.
 
 ### Work items, in order
 
-- [ ] **9.1 Measure first.** Flush duration and `lvgl_port_task` CPU, before any
-      change. Record in §4.
+- [x] **9.1a Instrumentation and capture procedure landed** (commit
+      595987c, extended this pass). `ili9488_flush_cb()` times its own SPI
+      work with `esp_timer_get_time()`; `lvgl_port_get_flush_stats()` reports
+      last/max(high-water since boot)/count; now wired into
+      `dashboard_http.c`'s `/api/status` snapshot
+      (`dashboard_stats_t::flush_last_us/flush_max_us/flush_count`,
+      `dashboard_http.h`) so the capture procedure is one command:
+      `curl http://<board>/api/status | jq '.flush_last_us,.flush_max_us,.flush_count'`
+      (or open the diagnostics page). Always on, no Kconfig flag — it is a
+      volatile-read timer measurement with no allocation and negligible cost,
+      unlike 9.3/9.4 which change wire behavior and needed to default off.
+      `DASHBOARD_STATUS_JSON_BUF_SIZE` raised 4096 → 4224 to keep this
+      endpoint's own documented ~100B headroom rule intact (see that
+      constant's comment in `dashboard_http.c`). Not host-testable:
+      `dashboard_http.c` includes `lvgl_port.h` at file scope, which does not
+      compile on MSVC (same reason `dashboard_json.c` was split out) — this
+      is pure driver plumbing, proven only by `build_kilnfw` succeeding and
+      by reading it on real hardware.
+- [ ] **9.1b Take the measurement.** Flush duration and `lvgl_port_task` CPU,
+      with the panel attached and running real UI traffic. **First hardware
+      step: with the current ILI9488 panel already running, `curl
+      http://<board>/api/status` and record `flush_max_us` in §4** — this
+      does not even need the ST7796 to be wired up.
 - [ ] **9.2 Raise `max_transfer_sz` to one full LVGL buffer** (480×40×2 = 38400,
       or clamp `KILNCTL_LVGL_BUF_ROWS` so one flush fits under the 32768-byte
       hardware cap — 34 rows = 32640 B). Collapses 27 transactions per flush into
@@ -856,6 +881,15 @@ bytes and breaks every display push.
       energized (RDDID / MAX31856 register-read sanity, then a 9.1
       flush-duration re-measurement) before ever enabling it on a board with
       elements connected.
+      **SPI3 CS-count hazard recorded where it will actually be seen**: this
+      option is only safe on a host with >= 4 hardware CS lines for this
+      bus's 4 devices. SPI2 (the default) has 6; SPI3 has only 3
+      (`SOC_SPI_PERIPH_CS_NUM`, §9's "Facts established"). The hazard is now
+      spelled out directly in `KILNCTL_SPI_HARDWARE_CS`'s own Kconfig help
+      text and next to the `KILNCTL_SPI_HOST_CHOICE` choice in
+      `App/drivers/Kconfig`, not only in this document — someone using
+      `menuconfig` to flip this option sees it without having read this
+      plan.
 - [ ] **9.5 Thermocouple transfers → `spi_device_polling_transmit`.** 11 µs
       versus 26 µs. Do not mix polling and queued transactions on the *same*
       device; across devices the bus lock handles it.
@@ -1046,11 +1080,17 @@ Each phase ends somewhere the firmware still boots and drives the existing panel
       "confirmed to work" looks like for each, to be done on a bench cycle
       with nothing energized before either is ever turned on near a live
       kiln.
-- [ ] 9.1, 9.6, 9.7, 9.8 remain open, and none of them is a safe default-off
+- [ ] 9.1b, 9.6, 9.7, 9.8 remain open, and none of them is a safe default-off
       flag the way 9.3/9.4 were:
-      - **9.1** is a real-hardware measurement by definition — no config
-        option or host test can produce it. First hardware step, unchanged
-        from before this pass: take it once the board is between profiles.
+      - **9.1a (instrumentation + capture procedure) is now landed** — see
+        its own entry above. **9.1b (the actual number) is still a
+        real-hardware measurement by definition** — no config option or host
+        test can produce it, only reading `/api/status` on a running board
+        can. First hardware step, unchanged in substance from before this
+        pass but now genuinely one command instead of a bench/scope session:
+        `curl http://<board>/api/status`, record `flush_max_us` in §4. This
+        can be done against the CURRENTLY ATTACHED ILI9488 right now, without
+        waiting on the ST7796/MSP4031 harness at all.
       - **9.6 (async flush)** does not reduce to a flag. It replaces
         `spi_owner_transfer()`'s synchronous "queue, then block on a
         completion semaphore" contract with a callback-driven one
@@ -1114,10 +1154,26 @@ Each phase ends somewhere the firmware still boots and drives the existing panel
 ## 14. Documents to update when this lands
 
 - [ ] `docs/HARDWARE.md` — the display section, once the harness and the two
-      pin-1/pin-4 ambiguities are resolved on real hardware.
-- [ ] `docs/ILI9488.md` — either generalise to a panel doc or add an ST7796 twin.
-- [ ] `App/drivers/README.md:14` — the ILI9488 row.
+      pin-1/pin-4 ambiguities are resolved on real hardware. **Still gated —
+      not touched this pass; first hardware step is §4's harness/pin-1/pin-4
+      checks.**
+- [x] `docs/ILI9488.md` — a "source file note" now points at `panel_spi.c/.h`
+      (the file `ILI9488.c/.h` was renamed to in Phase 3), documents that the
+      `ILI9488_`/`ILI9488Class` API names were deliberately kept, and the
+      "Where to find the driver code" section lists `panel_codec.c/.h`,
+      `st7796_panel.c/.h` and `panel_detect.c/.h` alongside it. No hardware
+      needed — this only had to catch up to Phase 3/4's already-landed code.
+- [x] `App/drivers/README.md` — the driver-table row now lists
+      `panel_spi.c/.h`, `panel_codec.c/.h`, `panel_detect.c/.h` and
+      `st7796_panel.c/.h` instead of the no-longer-existing `ILI9488.c/.h`.
 - [x] `TODO.md` — the stale 1215-1222 entry corrected to point at
       ROADMAP.md:1140; 364-365 already closed with 9.9.
-- [ ] `ROADMAP.md:437-438` — the backlight-control HW item, if the bodge lands.
-- [ ] `Datasheets/README.md` — add the MSP4031 package.
+- [ ] `ROADMAP.md` (line numbers drifted since this plan was written — the
+      item is at line 82/496 as of 2026-09-02, not 437-438) — the
+      backlight-control HW item, if the bodge lands. **Still gated on the
+      3.4.1 flying-wire bodge, which is hardware.**
+- [x] `Datasheets/README.md` — added the MSP4031 `_Keep` package as a row in
+      the Files table (it lists comm-interface parts, and the ST7796S/FT6336U
+      module qualifies), cross-referencing this plan and noting the untracked
+      394 MB original directory from §11 is deliberately not listed here (not
+      a tracked file).
