@@ -427,6 +427,63 @@ static void test_fw_version_known_and_dirty_roundtrips(void)
     TEST_CHECK(config_crc == 0xBEEF, "config_crc passes through");
 }
 
+static void test_fw_version_frame_too_short_for_min_compatible_leaves_peer_unknown(void)
+{
+    TEST_SECTION("safety_apply_fw_version -- a frame from a peer built BEFORE the "
+                 "min_compatible field existed (payload shorter than 5 bytes, so bytes "
+                 "3..4 do not exist on the wire at all) must NOT be read as "
+                 "min_compatible=0/'compatible with everything'. The safe interpretation "
+                 "is 'unknown', same as no FW_VERSION frame having arrived yet -- "
+                 "peer_version_known must stay false so the fail-closed "
+                 "version_mismatch = !peer_version_known || !peer_version_compatible "
+                 "check (safety_link_poll.c) still asserts the link fault.");
+
+    SafetyLinkClass link = make_link();
+    link.initialized = true;
+    uart_proto_message_t msg;
+    memset(&msg, 0, sizeof(msg));
+
+    // A pre-min_compatible ANNOUNCE/FW_VERSION frame carried only cmd(1) +
+    // protocol(2) = 3 bytes total -- one short of the 5 needed to reach
+    // offset 3..4 where min_compatible now lives.
+    msg.payload[0] = 0x0B; // GET_FW_VERSION reply cmd id (irrelevant to the parser)
+    msg.payload[1] = 5;    // protocol_version low byte
+    msg.payload[2] = 0;    // protocol_version high byte
+    msg.length = 3;
+
+    safety_apply_fw_version(&link, &msg);
+
+    TEST_CHECK(link.peer_version_known == false,
+               "too-short frame (no room for min_compatible) leaves peer_version_known "
+               "false, NOT true-with-min_compatible-defaulted-to-0 -- an all-zero struct "
+               "field must never be misread as 'peer accepts everything'");
+    TEST_CHECK(link.peer_version_compatible == false,
+               "the compatibility verdict itself is also left at its safe (false) default, "
+               "never flipped to true by a frame that never supplied enough bytes to judge it");
+
+    // A frame with EXACTLY 5 bytes (the boundary) DOES carry min_compatible
+    // and must be accepted -- this is not "any short frame is refused",
+    // it is specifically "a frame that cannot possibly contain the field
+    // is not misread as though it did".
+    SafetyLinkClass link2 = make_link();
+    link2.initialized = true;
+    uart_proto_message_t msg2;
+    memset(&msg2, 0, sizeof(msg2));
+    msg2.payload[0] = 0x0B;
+    msg2.payload[1] = 5; msg2.payload[2] = 0; // protocol_version = 5
+    msg2.payload[3] = 3; msg2.payload[4] = 0; // min_compatible = 3
+    msg2.length = 5;
+
+    safety_apply_fw_version(&link2, &msg2);
+
+    TEST_CHECK(link2.peer_version_known == true,
+               "a frame that reaches exactly byte offset 4 (5 bytes total) DOES carry "
+               "min_compatible and IS accepted as known -- the boundary is exclusive on "
+               "the short side only");
+    TEST_CHECK(link2.peer_protocol_version == 5 && link2.peer_min_compatible == 3,
+               "min_compatible decodes correctly right at the minimum viable frame length");
+}
+
 static void test_fw_version_max_length_commit_and_datetime_no_truncation(void)
 {
     TEST_SECTION("safety_apply_fw_version -- a MAXIMUM-length commit (64B) and datetime (32B), "
@@ -764,6 +821,7 @@ int main(void)
     test_apply_status_ignores_peer_link_up_and_fault_bits();
     test_fw_version_unknown_before_any_frame_arrives();
     test_fw_version_known_and_dirty_roundtrips();
+    test_fw_version_frame_too_short_for_min_compatible_leaves_peer_unknown();
     test_fw_version_max_length_commit_and_datetime_no_truncation();
     test_fw_version_oversized_commit_len_is_capped();
     test_versions_compatible_is_two_sided();

@@ -701,18 +701,63 @@ now exist -- `ota_http_verify_request()` has real callers. See the "ESP OTA"
 and "Pico update" sections below for what each actually covers.
 
 **Version compatibility** (`LINK_PROTOCOL.md`, `ANNOUNCE_VERSION`)
-- [ ] `ANNOUNCE_VERSION` = `0x0F` implemented: the ESP announces itself, unprompted
-- [ ] `min_compatible` field added to both version frames at a fixed offset
-- [ ] Both sides check **both** directions of `peer.protocol >= self.min_compatible`
-- [ ] ESP on mismatch: link fault, heating blocked, GUI names both versions and
-      which to update
-- [ ] Pico on mismatch: `DEGRADED_NO_CONTEXT`, **no trip latched**, context frames
+- [x] `ANNOUNCE_VERSION` = `0x0F` implemented: the ESP announces itself, unprompted
+- [x] `min_compatible` field added to both version frames at a fixed offset.
+      **2026-09-03**: `kilnlink_announce.h`/`.c` and `kilnlink_fw_version.h`/`.c`
+      (CommonFW) put it at bytes 3..4, right after `protocol_version`, in both
+      the ESP→Pico `ANNOUNCE_VERSION` frame and the Pico→ESP `FW_VERSION`
+      reply, matching the doc's own offset table exactly. A peer built before
+      this field existed sends a payload shorter than 5 bytes; the decoders
+      (`safety_parse_fw_version()` in KilnFW's `safety_link_frame.c`, the
+      SaftyFW `link_task.c` receive path) both refuse to read bytes 1-4 at all
+      when `len < 5`, so `peer_version_known` stays **false** rather than
+      defaulting `min_compatible` to a zero-initialized "compatible with
+      everything". An absent field is therefore treated the same as no
+      version frame ever arriving: unknown, which the poll/fault logic below
+      fails closed on (`version_mismatch = !peer_version_known ||
+      !peer_version_compatible` — KilnFW `safety_link_poll.c:253`), never as
+      an all-versions-accepted default. That direction was chosen because the
+      alternative (treating absence as "compatible") would let a
+      pre-min_compatible peer skip the check entirely — exactly the class of
+      bug this field exists to close.
+- [x] Both sides check **both** directions of `peer.protocol >= self.min_compatible`.
+      Both firmwares call the same formula
+      (`compatible == peer.protocol >= self.min_compatible && self.protocol >=
+      peer.min_compatible`) from a pure, host-testable function:
+      `safety_link_versions_compatible()` (KilnFW, `safety_link_frame.c`) and
+      `link_frame_versions_compatible()` (SaftyFW, `link_frame.c`) — same
+      formula, independently exercised. `SaftyFW/test/test_link_frame.c`'s
+      `test_versions_compatible()` runs the full combination matrix (self
+      newer/older than peer, self's floor above peer's protocol, peer's floor
+      above self's protocol, both floors violated, a self-inconsistent peer
+      claim) and `KilnFW/App/test/test_safety_link_compile.c` proves the same
+      formula from the ESP side. Both are part of the standing host-test
+      suites (2036/2036 SaftyFW, 70/70 in the KilnFW safety_link suite).
+- [x] ESP on mismatch: link fault, heating blocked, GUI names both versions and
+      which to update. `safety_link_poll.c` sets `SAFETY_FAULT_SRC_SAFETY_LINK`
+      on `version_mismatch` (line ~350); `peer_protocol_version`/
+      `peer_min_compatible` are exposed via
+      `safety_link_get_peer_version_status()` for the GUI to render both
+      sides' numbers.
+- [x] Pico on mismatch: `DEGRADED_NO_CONTEXT`, **no trip latched**, context frames
       discarded unparsed, context-free guards still running and still commanding
-      the relay, context-dependent guards reported as disabled
-- [ ] Compatibility floor frozen: framing, `ANNOUNCE_VERSION`, `FW_VERSION` and
-      the `UPDATE_*` frames work regardless of version, ids `0x00`–`0x0F` reserved
-- [ ] Floor layouts may only be **appended** to, never reordered or resized
-- [ ] Re-checked on every reconnect and every `boot_id` change, not once at boot
+      the relay, context-dependent guards reported as disabled. `link_task.c`
+      sets `s_degraded_no_context = !compatible` directly from the version
+      check and never calls a trip/relay function from that path (structurally
+      cannot — `link_task.c` is barred from naming the relay at all, per
+      `tools/check_isolation.ps1`).
+- [x] Compatibility floor frozen: framing, `ANNOUNCE_VERSION`, `FW_VERSION` and
+      the `UPDATE_*` frames work regardless of version, ids `0x00`–`0x0F` reserved.
+- [x] Floor layouts may only be **appended** to, never reordered or resized.
+      `min_compatible` itself is the appended field this rule was written for:
+      it landed at bytes 3..4, after the pre-existing `protocol_version` at
+      1..2, never displacing anything.
+- [x] Re-checked on every reconnect and every `boot_id` change, not once at boot.
+      `safety_reset_stale_peer_info_if_link_down()` clears
+      `peer_version_known` when the link is observed down, so the poll loop's
+      `!peer_version_known` branch re-requests `FW_VERSION` on reconnect
+      instead of trusting a stale pre-drop verdict forever (covered by
+      `test_safety_link_compile.c`'s own reconnect test).
 - [ ] ESP refuses to push a Pico image it could not then talk to, unless
       explicitly overridden
 - [ ] GUI states the order — ESP first — when both need updating
