@@ -82,7 +82,20 @@ extern "C" {
  * sizeof(stack_margin_entry_t) (28 bytes: char name[20] + TaskHandle_t*
  * (4 bytes on this 32-bit target) + uint32_t, no padding) = 336 bytes of
  * static DRAM -- a deliberate, documented spend on the measurement this
- * whole plan needs before it can spend anything back. */
+ * whole plan needs before it can spend anything back.
+ *
+ * 2026-09-03 follow-up: that "double i2c_owner registration" wasn't just
+ * spending two slots for one name -- both firings used the SAME literal
+ * name ("i2c_owner") with DIFFERENT configured_stack_bytes (SX1509 4096,
+ * NS2009 3072), so the registry held two indistinguishable entries and PC-
+ * side tooling keyed by name (stack_margin_baseline.py's
+ * worst_case_across_conditions()) silently collapsed them into one,
+ * dropping whichever lost the dict-overwrite. Fixed by moving registration
+ * out of the shared i2c_owner_init() and into each caller, under
+ * "i2c_owner_sx1509" / "i2c_owner_ns2009" respectively -- see i2c_owner.c,
+ * SX1509.c, NS2009.c, and tools/check_stack_margin_registration.ps1's new
+ * duplicate-name check. The 40-task cap and its slot cost above are
+ * unchanged by this fix -- it renames two entries, it doesn't remove one. */
 #define STACK_MARGIN_MAX_TASKS 40u
 #define STACK_MARGIN_NAME_MAX  20u
 

@@ -100,6 +100,43 @@ def test_worst_case_prefers_a_live_reading_over_a_dead_one():
     assert worst["thermo_owner"].hwm_bytes == 3000
 
 
+def test_worst_case_across_conditions_collapses_entries_sharing_a_name():
+    """Documents the sharp edge worst_case_across_conditions() has when two
+    DIFFERENT tasks are registered on-target under the same name -- exactly
+    what i2c_owner_init() did before its 2026-09-03 fix (SX1509's IO
+    expander and NS2009's touch controller both registered as "i2c_owner",
+    with different configured stack sizes). This function has no way to
+    know two same-named entries in one record are actually two different
+    tasks; it treats the second as a second (smaller-or-not) reading of the
+    SAME task and keeps only one, per this module's `best` dict keyed by
+    name. That is the real-world consequence the firmware-side fix (giving
+    each i2c_owner call site a distinct name) avoids -- this test exists so
+    that if some other shared-init call site reintroduces the same-name
+    pattern, the silent-collapse behavior it triggers here is at least
+    documented and pinned, not rediscovered from a live board."""
+    # One capture, two entries claiming the same name -- exactly what a
+    # single GET_STACK_MARGIN reply looked like before the fix: two owner
+    # tasks, "i2c_owner_sx1509" (4096 B stack) and "i2c_owner_ns2009"
+    # (3072 B), both reported under the literal name "i2c_owner".
+    rec = build_record(
+        "idle",
+        [_entry("i2c_owner", 4096, 3000), _entry("i2c_owner", 3072, 1500)],
+        _FW,
+        now=_NOW,
+    )
+    worst = worst_case_across_conditions([rec])
+    # Only ONE entry survives under the shared name -- the other is gone
+    # with no error, no warning, nothing to say a second task's reading
+    # was ever there. The 3072/1500 pair -- NS2009's real numbers -- wins
+    # here only because it is smaller and both are alive; had NS2009's
+    # reading come from a load condition where it read HIGHER than
+    # SX1509's, SX1509's own genuinely-worse reading would have been the
+    # one silently dropped instead.
+    assert len(worst) == 1
+    assert worst["i2c_owner"].hwm_bytes == 1500
+    assert worst["i2c_owner"].configured_stack_bytes == 3072
+
+
 def test_worst_case_reports_dead_if_every_capture_saw_it_dead():
     r1 = build_record("idle", [_entry("gone_task", 4096, 0, alive=False)], _FW, now=_NOW)
     r2 = build_record("mid_firing", [_entry("gone_task", 4096, 0, alive=False)], _FW, now=_NOW)

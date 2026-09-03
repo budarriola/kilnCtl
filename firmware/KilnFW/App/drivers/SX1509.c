@@ -8,6 +8,7 @@
 #include "esp_rom_sys.h"
 #include "freertos/task.h"
 #include "settings.h"
+#include "stack_margin.h"
 
 static const char *TAG = "SX1509";
 
@@ -416,6 +417,15 @@ esp_err_t SX1509_init(SX1509Class *e, i2c_master_bus_handle_t bus, uint8_t addr,
         return err;
     }
     e->owner_initialized = true;
+
+    /* i2c_owner_init() is shared with NS2009.c's touch-controller owner
+     * (different stack_depth, 3072) and deliberately does NOT register
+     * itself for stack-margin reporting -- see i2c_owner.c's comment at
+     * its call site. Registering here, under a name distinct from
+     * NS2009's, keeps the two independently identifiable in a
+     * GET_STACK_MARGIN report instead of colliding under one shared
+     * "i2c_owner" name. */
+    stack_margin_register("i2c_owner_sx1509", &e->owner.task_handle, 4096);
 
     if (reset_gpio >= 0) {
         /* Drive the level register before switching the pin to an output, so

@@ -4,8 +4,6 @@
 
 #include "esp_log.h"
 
-#include "../stack_margin.h"
-
 static const char *TAG = "esp_i2c_owner";
 
 /* One raw attempt at whatever request.tx/rx_buffer describe. Pulled out of
@@ -151,12 +149,21 @@ esp_err_t i2c_owner_init(i2c_owner_t *owner,
         return ESP_ERR_NO_MEM;
     }
 
-    /* DRAM_PSRAM_PLAN.md Phase 0 (4.2): registration only, no size change --
-     * only reached with a real handle since the failure branch above already
-     * returned. owner->task_handle is stable for the life of the process
-     * (caller holds owner in a static struct). */
-    stack_margin_register("i2c_owner", &owner->task_handle, stack_depth);
-
+    /* Stack-margin registration is deliberately NOT done here, even though
+     * every other owner-style driver in this codebase (kiln_io_owner.c,
+     * thermo_owner.c, esp_spi_owner.c) registers itself right after this
+     * point. i2c_owner_init() is one shared function invoked by two
+     * independent, differently-stacked callers on this board -- SX1509.c
+     * (the IO expander, stack_depth 4096) and NS2009.c (the touch
+     * controller, stack_depth 3072) -- and a stack_margin_register() call
+     * living HERE would fire under the exact same literal name for both,
+     * producing two registry entries an operator or PC-side tool cannot
+     * tell apart (see stack_margin.h's cap-raise comment for how this was
+     * first discovered, and DRAM_PSRAM_PLAN.md for the writeup). Each
+     * caller registers itself, right after this call succeeds, with its
+     * own distinct name -- exactly the every-owner-registers-itself
+     * pattern, just pushed one level up because this init function is
+     * shared where the others are not. */
     owner->initialized = true;
     return ESP_OK;
 }

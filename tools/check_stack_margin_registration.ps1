@@ -9,12 +9,28 @@
 # call site -- the actual blocker was STACK_MARGIN_MAX_TASKS sitting at
 # 28/28 with the real boot-time registration count at 29 (i2c_owner_init()
 # is shared by two live callers -- SX1509 and NS2009 -- so its one source
-# call site fires twice), so one registration silently lost the coin flip
+# call site fired twice), so one registration silently lost the coin flip
 # every boot with no signal beyond an ESP_LOGE nobody was watching. This
 # script is the standing guard against that reopening in either direction:
 # a required task losing its stack_margin_register() call site (name
 # missing below), or the cap falling behind the real call-site count again
 # (same failure mode, same silent ESP_LOGE).
+#
+# 2026-09-03 follow-up: that "fires twice" call site didn't just spend a
+# slot twice -- both firings registered under the SAME literal name
+# ("i2c_owner"), with different configured stack sizes (SX1509 4096,
+# NS2009 3072). A live stack-margin read cannot tell which of two same-
+# named entries is which, and tools/PcTools/src/kilnctrl/
+# stack_margin_baseline.py's worst_case_across_conditions() keys its
+# result dict by name, so one of the two silently overwrote the other
+# with no error -- exactly the "unqualified warning sends debugging to
+# the wrong wire" class this repo has already shipped once (two link
+# instances, one log tag). Fixed by moving registration out of the shared
+# i2c_owner_init() and into each caller (SX1509.c, NS2009.c), each under
+# its own distinct name -- "i2c_owner_sx1509" / "i2c_owner_ns2009" below.
+# This script's duplicate-name check (further down) is the standing guard
+# against that reopening: it fails loud if any two stack_margin_register()
+# call sites ever share a literal name again.
 #
 # Why a required-name list instead of comparing xTaskCreate*() counts to
 # stack_margin_register() counts directly (the check_uri_handler_cap.ps1
@@ -89,7 +105,8 @@ function Get-CodeOnlyLines {
 # top comment for why this is a named list rather than a blind create-vs-
 # register count.
 $requiredNames = @(
-    "autotune_engine", "boot_button", "danger_mode", "spi_owner", "i2c_owner",
+    "autotune_engine", "boot_button", "danger_mode", "spi_owner",
+    "i2c_owner_sx1509", "i2c_owner_ns2009",
     "gpio_probe", "kiln_io_owner", "lvgl", "recovery_exit", "ota_rollback_reboot",
     "ota_pico_rollback", "profile_executor", "profile_exec_wdt",
     "safety_owner_task", "safety_owner_evt", "safety_proto_rx", "safety_poll",
@@ -139,14 +156,42 @@ if ($missing.Count -gt 0) {
     throw "A task this plan tracks was created without being (or lost being) registered for stack-margin measurement -- its high-water mark is no longer reachable. Either restore its stack_margin_register(`"<name>`", &handle, configured_bytes) call site (matching the xTaskCreate*() that creates it), or, if this task was deliberately retired, remove it from `$requiredNames in this script in the same commit."
 }
 
+# Duplicate-name check: two DIFFERENT stack_margin_register() call sites
+# must never share a literal name. This is the standing guard for the
+# 2026-09-03 i2c_owner bug (see this script's top comment): SX1509.c and
+# NS2009.c each drive their own i2c_owner task, at different configured
+# stack sizes, but a shared call site inside i2c_owner_init() registered
+# both under the one literal name "i2c_owner" -- a stack-margin reader
+# could not tell which of the two entries was which, and
+# stack_margin_baseline.py's worst_case_across_conditions() (keyed by
+# name) silently dropped one of them. A single call site legitimately
+# firing more than once at runtime under the SAME name (none left today,
+# now that i2c_owner_init() itself no longer registers) would still only
+# appear once in this source-level scan, so this check catches the
+# source-level half of that bug class: two call sites, same string.
+$duplicateNames = @(
+    $registeredNames | Group-Object | Where-Object { $_.Count -gt 1 } | ForEach-Object { $_.Name }
+)
+if ($duplicateNames.Count -gt 0) {
+    Write-Host "STACK MARGIN DUPLICATE NAME CHECK FAILED:" -ForegroundColor Red
+    Write-Host "  The following name(s) are passed to stack_margin_register() by more" -ForegroundColor Red
+    Write-Host "  than one call site under $driversDir or $mainFile :" -ForegroundColor Red
+    foreach ($name in $duplicateNames) {
+        Write-Host "    $name" -ForegroundColor Red
+    }
+    throw "Two stack_margin_register() call sites share a literal name -- a live GET_STACK_MARGIN report cannot tell the resulting entries apart, and PC-side tooling keyed by name (stack_margin_baseline.py's worst_case_across_conditions()) will silently drop one. Give each call site its own distinct name (STACK_MARGIN_NAME_MAX in stack_margin.h caps names at 19 usable characters)."
+}
+
 # Cap check: STACK_MARGIN_MAX_TASKS must stay ahead of the real call-site
 # count, same mechanism (and same past failure) as check_uri_handler_cap.ps1
 # for config.max_uri_handlers. Registered names are found ABOVE by grep, not
-# assumed; a call site whose stack_margin_register() call is reached more
-# than once at runtime (i2c_owner_init(), shared by SX1509 and NS2009 --
-# see stack_margin.h's cap-raise comment) still counts as 1 here, so this
-# floor is a minimum, not the true worst-case boot-time count -- headroom
-# below exists precisely to cover that gap too.
+# assumed. As of the 2026-09-03 fix, every stack_margin_register() call
+# site fires exactly once at runtime (i2c_owner_init() itself no longer
+# registers; SX1509.c and NS2009.c each register their own owner task
+# under their own name after calling it) -- but a future shared-init
+# helper could reintroduce a call site that fires more than once, and a
+# source-level grep can't see that. Headroom below stays deliberately
+# generous to cover that class, not just future task growth.
 if (-not (Test-Path $capFile)) {
     throw "check_stack_margin_registration.ps1: expected cap file not found at $capFile -- has stack_margin.h moved? Update this script's path."
 }

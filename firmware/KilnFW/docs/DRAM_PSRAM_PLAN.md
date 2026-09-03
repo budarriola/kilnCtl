@@ -81,6 +81,99 @@ confirmed on-chip, not just source.
   mid-firing reading is not itself a soak result — flag for the next pass,
   do not relocate or resize from a single reading.
 
+  **Update 2026-09-03 (seventh pass) — the two-`i2c_owner`-rows anomaly is
+  resolved (source-only; not yet reflashed on the live board — that board is
+  mid-A/B-campaign and untouched this pass).** Confirmed at source: NOT a
+  double registration of one task (one `xTaskCreate*` call site producing
+  two identical-stack entries) — it is two genuinely separate FreeRTOS
+  tasks, each with its own `TaskHandle_t`-holding struct (`i2c_owner_t
+  owner`, one instance embedded in `SX1509Class`, `SX1509.c`, one in
+  `NS2009Class`, `NS2009.c`), created by two independent
+  `xTaskCreatePinnedToCore()` calls inside the ONE shared `i2c_owner_init()`
+  (`espInterfaces/i2c_owner.c:138`) — SX1509 (the IO expander) at
+  `stack_depth=4096` (`SX1509.c:409`), NS2009 (the touch controller) at
+  `stack_depth=3072` (`NS2009.c:82`). Those two sizes are not a copy-paste
+  accident: SX1509 drives more I/O (16 GPIO pins, interrupt/config
+  register traffic) than NS2009's two-command touch-sample protocol, so a
+  larger allocation for the busier device is plausible as a deliberate
+  choice — but neither number is backed by its own measured worst case
+  independent of the other's, so "deliberately sized" here means
+  "plausibly reasoned," not "measured"; no resize made this pass.
+
+  The actual bug was that `i2c_owner_init()` itself called
+  `stack_margin_register("i2c_owner", &owner->task_handle, stack_depth)`
+  (i2c_owner.c:158, now removed) — ONE literal name, reached from BOTH
+  call sites, so the registry held two entries with the same name and
+  different `configured_stack_bytes`. Consumer-side impact confirmed, not
+  hypothetical: `tools/PcTools/src/kilnctrl/stack_margin_baseline.py`'s
+  `worst_case_across_conditions()` builds a `dict[str, StackMarginEntry]`
+  keyed by name (`best.get(e.name)` / `best[e.name] = e`) — two same-named
+  entries in one capture collapse into one dict slot, silently dropping
+  whichever entry didn't win the overwrite, with no error, no log, nothing
+  on the PC side to say a second task's reading ever existed (new test:
+  `tools/PcTools/tests/test_stack_margin_baseline.py::
+  test_worst_case_across_conditions_collapses_entries_sharing_a_name`,
+  pins this exact behavior). The on-target `GET_STACK_MARGIN` wire reply
+  itself is a flat list, not keyed by name, so the raw board reply — the
+  `i2c_owner`/`i2c_owner` (2nd instance) pair in this doc's table above —
+  DID carry both readings; the ambiguity was "which physical task is
+  which," and the silent loss happened one hop downstream, in
+  `worst_case_across_conditions()`.
+
+  **Fix:** registration moved out of the shared `i2c_owner_init()` and into
+  each caller, right after that call succeeds, each under its own name —
+  `"i2c_owner_sx1509"` (`SX1509.c`) and `"i2c_owner_ns2009"` (`NS2009.c`) —
+  matching the every-owner-registers-itself pattern every other owner-style
+  driver in this codebase already follows (`kiln_io_owner.c`,
+  `thermo_owner.c`, `esp_spi_owner.c`). `tools/check_stack_margin_registration.ps1`
+  gained a new standing check: any two `stack_margin_register()` call sites
+  sharing a literal name now fails the build-time script outright (negative-
+  tested: temporarily duplicated a name, confirmed the new "STACK MARGIN
+  DUPLICATE NAME CHECK FAILED" error fires with the colliding name named,
+  restored, confirmed a clean pass). Its required-name list was updated
+  (`i2c_owner` → `i2c_owner_sx1509` / `i2c_owner_ns2009`). No `.html`,
+  `profile_executor*`, `cone_table.*`, `ramp_assist.py`, or `.kicad_*` file
+  touched. `build_kilnfw` (via the local build server) succeeded after this
+  change; all 20 host-test executables still pass. **Not yet verified on
+  the live board** — next boot's `GET_STACK_MARGIN` reply should show
+  `i2c_owner_sx1509`/`i2c_owner_ns2009` in place of the two `i2c_owner` rows
+  above, both still present, now individually identifiable.
+
+  **The three LOW findings above were investigated (read-only; not resized,
+  per this plan's own "no resize without a measured worst case" rule) —
+  none is the single-oversized-local pattern this project has previously
+  shipped, but `telemetry_log` comes closest:**
+  - **`info_uart_bridge`** (3072 B allocated, `uart_bridge_info.c`): the
+    task loop (`info_bridge_task`, ~line 231) declares one
+    `uart_proto_message_t msg` (payload `UART_PROTO_MAX_PAYLOAD`=253 B) and
+    `build_stack_margin_reply()` is called with a caller-owned
+    `uint8_t reply[BRIDGE_REPLY_MAX]` (also 253 B) — no local inside this
+    file is larger than that. ~510 B of buffers plus normal call-depth
+    (`ESP_LOG*`/`vsnprintf` formatting inside handlers) against a 3072 B
+    stack is consistent with 19.4% headroom without needing a single
+    outsized local to explain it.
+  - **`system_uart_bridge`** (3072 B allocated, `uart_bridge_system.c`):
+    same shape — one `uart_proto_message_t msg` per loop iteration
+    (~257 B) is the only sizable local in this file; its handlers call out
+    to `kiln_io_owner`/`SX1509`/`relay_authority`/`settings` code that runs
+    on ITS OWN stacks (owner-task dispatch), not this one, so headroom here
+    tracks call depth in this file's own switch, not a hidden large buffer.
+  - **`telemetry_log`** (4096 B allocated, `telemetry_log.c`, closest to the
+    documented pattern): `telemetry_log_task()`'s frame carries, all live
+    simultaneously across one loop iteration: `profile_exec_status_t fst`
+    (contains `profile_exec_zone_status_t zones[MAX31856_CHANNEL_COUNT]`,
+    `profile_executor.h:555`), `autotune_engine_status_t ast`, `char
+    line[TELEMETRY_LOG_LINE_BUF]` (320 B, `telemetry_log.c:68`), four
+    `MAX31856_CHANNEL_COUNT`-sized `lag_prev_*` arrays, plus a
+    `char firing_note[EVENT_LOG_NOTE_LEN]` (16 B) and, inside the per-zone
+    loop, a `uint8_t note[EVENT_LOG_NOTE_LEN]` (16 B) per iteration. No
+    single one of these is "a big local" by itself, and 24.0% headroom on
+    4096 B is not a red flag on its own — but this is several
+    moderately-sized locals accumulating in one frame rather than one
+    obviously-oversized array, which is a milder instance of the same
+    species this project has already been bitten by once. Flagged for the
+    next pass with a real per-field size count, not resized here.
+
 - **Display flush stats (`GET /api/status`, `flush_last_us`/`flush_max_us`/
   `flush_count`):** last 6,932 µs, max 90,637 µs, count 1,152. This is the
   **synchronous flush baseline** — both the async and zero-copy switches

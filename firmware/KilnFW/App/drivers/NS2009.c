@@ -13,6 +13,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "settings.h"
+#include "stack_margin.h"
 
 static const char *TAG = "NS2009";
 
@@ -87,6 +88,15 @@ esp_err_t NS2009_init(NS2009Class *t, i2c_master_bus_handle_t bus, uint8_t addr)
         return err;
     }
     t->owner_initialized = true;
+
+    /* i2c_owner_init() is shared with SX1509.c's IO-expander owner
+     * (different stack_depth, 4096) and deliberately does NOT register
+     * itself for stack-margin reporting -- see i2c_owner.c's comment at
+     * its call site. Registering here, under a name distinct from
+     * SX1509's, keeps the two independently identifiable in a
+     * GET_STACK_MARGIN report instead of colliding under one shared
+     * "i2c_owner" name. */
+    stack_margin_register("i2c_owner_ns2009", &t->owner.task_handle, 3072);
 
     ESP_LOGI(TAG, "NS2009 initialized addr=0x%02X", addr);
     return ESP_OK;
