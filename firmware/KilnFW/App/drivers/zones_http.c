@@ -332,6 +332,20 @@ extern const uint8_t zones_page_html_gz_end[] asm("_binary_zones_page_html_gz_en
 extern const uint8_t safety_config_page_html_gz_start[] asm("_binary_safety_config_page_html_gz_start");
 extern const uint8_t safety_config_page_html_gz_end[] asm("_binary_safety_config_page_html_gz_end");
 
+/* Tuning-method recommendation evidence artifact (OWNER REQUEST 2026-09-02
+ * part 2/2). Embedded PLAIN, not gzipped -- see App/drivers/CMakeLists.txt's
+ * KILNCTL_TUNING_REC_SRC comment: it is a few hundred bytes to a few KB, and
+ * a JSON-only endpoint this small does not carry its own weight as a second
+ * gzip content-negotiation path. Staged at configure time from
+ * tools/PcTools/config_presets/tuning_recommendations.json when the
+ * simulation campaign has produced one, or from this component's own
+ * tuning_recommendations_fallback.json (schema_version 1, empty
+ * recommendations list) when it has not -- either way this symbol always
+ * exists and is always valid JSON zones_page.html's tuningRecArtifactUsable()
+ * can parse. */
+extern const uint8_t tuning_recommendations_json_start[] asm("_binary_tuning_recommendations_json_start");
+extern const uint8_t tuning_recommendations_json_end[] asm("_binary_tuning_recommendations_json_end");
+
 /* One zone per configured thermocouple channel -- see zones_http.h. Bounded
  * by the hardware, not by anything a client can grow. */
 /* Field order below is deliberately NOT declaration order/POST-form order:
@@ -522,6 +536,20 @@ static esp_err_t ct_channel_map_get_handler(httpd_req_t *req)
     return httpd_resp_send(req, json, (o > 0 && (size_t)o < sizeof(json)) ? (size_t)o : 0);
 }
 
+/* GET /api/tuning_recommendations -- serves the embedded evidence artifact
+ * (real or fallback, see the extern symbols' comment above) as-is. Not
+ * gzip-negotiated (see that comment); web_set_asset_cache_headers() is
+ * deliberately NOT applied here, unlike the *_page.html handlers -- this
+ * body changes across firmware builds as the campaign's artifact is
+ * updated, and a stale cached copy would silently show old recommendations
+ * after a flash that carries new evidence. */
+static esp_err_t tuning_rec_get_handler(httpd_req_t *req)
+{
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, (const char *)tuning_recommendations_json_start,
+                           (size_t)(tuning_recommendations_json_end - tuning_recommendations_json_start));
+}
+
 esp_err_t zones_http_start(void)
 {
     /* kiln_nvs is shared by zones/rules/relay_cycles/run_state, and each
@@ -686,6 +714,9 @@ esp_err_t zones_http_start(void)
     static const httpd_uri_t ct_map_uri = {
         .uri = "/api/zones/ct_channel_map", .method = HTTP_GET, .handler = ct_channel_map_get_handler,
     };
+    static const httpd_uri_t tuning_rec_uri = {
+        .uri = "/api/tuning_recommendations", .method = HTTP_GET, .handler = tuning_rec_get_handler,
+    };
     err = httpd_register_uri_handler(server, &page_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_register_uri_handler(/settings/zones) failed: %s", esp_err_to_name(err));
@@ -729,6 +760,11 @@ esp_err_t zones_http_start(void)
     err = httpd_register_uri_handler(server, &ct_map_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_register_uri_handler(GET ct_channel_map) failed: %s", esp_err_to_name(err));
+        return err;
+    }
+    err = httpd_register_uri_handler(server, &tuning_rec_uri);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "httpd_register_uri_handler(GET tuning_recommendations) failed: %s", esp_err_to_name(err));
         return err;
     }
 

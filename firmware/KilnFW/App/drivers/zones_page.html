@@ -329,6 +329,62 @@ latched. Interruptible with Abort; every exit path leaves every relay off.</p>
 <p id="sweepStatus" class="hint"></p>
 
 <h2>PID Autotune</h2>
+<h3>Which tuning method should I use?</h3>
+<!-- OWNER REQUEST 2026-09-02, part 2 of 2: "the pid tuneing will be done with
+     an empty kiln, try the diffrent tuneing methods and test fire to
+     diffrent temps in the simulator with diffrent masses. use all this info
+     to create recomendations in the web gui for what to use for tuneing
+     pid". This panel reads the simulation campaign's evidence artifact
+     (tools/PcTools/config_presets/tuning_recommendations.json, embedded into
+     flash at build time -- see zones_http.c's tuning_rec_get_handler and
+     CMakeLists.txt's KILNCTL_TUNING_REC_JSON logic) and answers, for the
+     peak temperature and load the operator is about to fire, which method's
+     result to trust and how much.
+
+     Confidence is the point of this panel, not a nice-to-have: a
+     recommendation for a peak above the simulator's own
+     sim_confidence.extrapolation_boundary_c rests on ASSUMED physics
+     (emissivity, element power, insulation) that were never checked against
+     a held-out run, not measurement. It must never look as certain as one
+     that was. Three renderings, and only three -- see
+     pickTuningRecommendation()/tuningRecStatusClass() below:
+       measured        -- var(--ok),   "confirmed by held-out simulation runs"
+       extrapolated     -- var(--warn), "beyond the simulator's checked range -- treat as a starting point, not a verdict"
+       indistinguishable -- var(--warn), BOTH methods shown with the measured
+                            margin between them, no winner picked -- picking
+                            one when the campaign couldn't tell them apart
+                            would show confidence the evidence does not
+                            support.
+     A missing/unreadable artifact or a schema_version this page does not
+     understand renders the same as "no data yet", never a stale or invented
+     answer -- see tuningRecArtifactUsable(). -->
+<p class="hint">Tuning always runs on an <b>empty</b> kiln (autotune needs a
+clean, repeatable thermal response -- a load changes the mass the fitted
+model is measuring). Firing never is. The recommendation below is about
+which method's empty-kiln gains hold up once the kiln is loaded and fired --
+not which method fits the empty-kiln data best on its own; a method that
+fits beautifully empty and drifts badly loaded is not the one to prefer.
+Basis for each recommendation is shown next to it: <b>measured</b> means the
+simulation campaign held out real runs at this temperature/load and checked
+the recommendation against them; <b>extrapolated</b> means this peak is
+past the simulator's checked range (see the boundary noted below) and the
+answer rests on assumed physics, not a checked run; <b>indistinguishable</b>
+means the campaign could not tell the two leading methods apart at this
+point and neither is picked.</p>
+<div class="card" id="tuningRecPanel">
+  <label>Intended peak temp (&deg;C):
+    <input type="number" id="tuningRecPeak" min="0" max="1400" step="1" placeholder="e.g. 1000"></label>
+  <label style="margin-left:1em;">Load:
+    <select id="tuningRecLoad">
+      <option value="any">Unknown / not sure</option>
+      <option value="empty">Empty (test fire)</option>
+      <option value="light">Light load</option>
+      <option value="full">Full load</option>
+    </select></label>
+  <button id="tuningRecGoBtn" type="button" style="margin-left:1em;">Recommend</button>
+  <div id="tuningRecResult"><p class="empty">Enter a peak temperature above and click Recommend.</p></div>
+</div>
+
 <h3>Step test (start here)</h3>
 <p>Runs an open-loop step test on one zone: holds heat off to settle, then
 applies a fixed duty and records the response until it looks settled or 4
@@ -1897,6 +1953,127 @@ function pollAutotune() {
   }).catch(function () {});
 }
 setInterval(pollAutotune, 3000);
+
+// -----------------------------------------------------------------------
+// Tuning method recommendation panel (OWNER REQUEST 2026-09-02 part 2/2).
+// Reads /api/tuning_recommendations, a small JSON artifact produced by the
+// simulation campaign (schema in tools/PcTools/config_presets/
+// tuning_recommendations.json) and embedded into flash at build time --
+// see zones_http.c's tuning_rec_get_handler. The three functions between
+// the TUNING_REC markers below are pure (no DOM) so
+// test/test_tuning_recommendation.js can exercise them directly without a
+// browser; do not fold DOM access into them.
+// -----------------------------------------------------------------------
+// TUNING_REC_LOOKUP_START
+// Only schema_version 1 is understood. Any other value (including a future
+// bump this page predates) must degrade to "no data" rather than guess at
+// a shape it has never seen -- see the file's own header comment on why an
+// unrecognised schema must never render as if it were empty-but-fine.
+function tuningRecArtifactUsable(artifact) {
+  return !!(artifact && artifact.schema_version === 1 && Array.isArray(artifact.recommendations));
+}
+
+// Picks the recommendation row for the requested peak temperature and load.
+// Rows are matched load-exact first (an exact 'full'/'light'/'empty' row
+// beats an 'any' row at the same peak), then by the lowest peak_temp_c_max
+// that still covers the requested peak; if the requested peak exceeds every
+// row's ceiling, the highest-ceiling row is used (it is already the
+// artifact's own top boundary, which is where the extrapolated/measured
+// distinction below carries the caveat instead of this function inventing
+// one). Returns {ok:false, reason} when the artifact is unusable or the
+// input is not a valid non-negative number.
+function pickTuningRecommendation(artifact, peakTempC, load) {
+  if (!tuningRecArtifactUsable(artifact)) return { ok: false, reason: 'unavailable' };
+  if (typeof peakTempC !== 'number' || !isFinite(peakTempC) || peakTempC < 0) {
+    return { ok: false, reason: 'invalid_input' };
+  }
+  var wantLoad = load || 'any';
+  var rows = artifact.recommendations.slice().sort(function (a, b) {
+    var ap = (a.load === wantLoad && wantLoad !== 'any') ? 0 : 1;
+    var bp = (b.load === wantLoad && wantLoad !== 'any') ? 0 : 1;
+    if (ap !== bp) return ap - bp;
+    return a.peak_temp_c_max - b.peak_temp_c_max;
+  }).filter(function (r) { return wantLoad === 'any' || r.load === 'any' || r.load === wantLoad; });
+  if (!rows.length) return { ok: false, reason: 'no_data' };
+  var match = null;
+  for (var i = 0; i < rows.length; i++) {
+    if (peakTempC <= rows[i].peak_temp_c_max) { match = rows[i]; break; }
+  }
+  // No row's ceiling covers this peak (it exceeds even the campaign's
+  // highest-tested range): use the highest-ceiling row overall, NOT
+  // rows[rows.length-1] -- `rows` is sorted exact-load-first then by
+  // ceiling within each group, so its last element is only the highest
+  // ceiling within whichever priority group sorted last, not the true max.
+  if (!match) {
+    match = rows.reduce(function (best, r) {
+      return (!best || r.peak_temp_c_max > best.peak_temp_c_max) ? r : best;
+    }, null);
+  }
+  var boundary = (artifact.sim_confidence && typeof artifact.sim_confidence.extrapolation_boundary_c === 'number')
+    ? artifact.sim_confidence.extrapolation_boundary_c : null;
+  return { ok: true, row: match, extrapolation_boundary_c: boundary };
+}
+
+// Maps the artifact's own confidence field to this page's shared status
+// tokens. 'measured' is the only green (--ok); everything else that still
+// carries a usable recommendation is amber (--warn) -- extrapolated and
+// indistinguishable are both "do not treat this as settled", just for
+// different reasons, and are told apart in the rendered text, not the
+// color. Anything unrecognised (including a typo'd future value from the
+// campaign side) is treated as the least-trusted case, never green.
+function tuningRecStatusClass(confidence) {
+  if (confidence === 'measured') return 'ok';
+  if (confidence === 'extrapolated' || confidence === 'indistinguishable') return 'warn';
+  return 'bad';
+}
+// TUNING_REC_LOOKUP_END
+
+var tuningRecArtifact = null;
+fetch('/api/tuning_recommendations').then(function (r) {
+  if (!r.ok) throw new Error('http ' + r.status);
+  return r.json();
+}).then(function (data) { tuningRecArtifact = data; }).catch(function () { tuningRecArtifact = null; });
+
+function renderTuningRecommendation() {
+  var el = document.getElementById('tuningRecResult');
+  var peakStr = document.getElementById('tuningRecPeak').value;
+  var load = document.getElementById('tuningRecLoad').value;
+  var peak = peakStr === '' ? NaN : Number(peakStr);
+  if (!isFinite(peak)) {
+    el.innerHTML = '<p class="empty">Enter a peak temperature above and click Recommend.</p>';
+    return;
+  }
+  var result = pickTuningRecommendation(tuningRecArtifact, peak, load);
+  if (!result.ok) {
+    var why = result.reason === 'unavailable'
+      ? 'No tuning recommendation data on this board yet (evidence artifact not built in, or its schema is newer than this page understands).'
+      : (result.reason === 'no_data' ? 'No recommendation covers that load.' : 'Enter a valid peak temperature.');
+    el.innerHTML = '<p class="empty">' + why + '</p>';
+    return;
+  }
+  var row = result.row;
+  var cls = tuningRecStatusClass(row.confidence);
+  var basisLabel = { measured: 'MEASURED', extrapolated: 'EXTRAPOLATED', indistinguishable: 'INDISTINGUISHABLE' }[row.confidence] || row.confidence.toUpperCase();
+  var html = '<p><span style="color:var(--' + cls + ');font-weight:bold;">[' + basisLabel + ']</span> ';
+  if (row.confidence === 'indistinguishable') {
+    html += 'The campaign could not tell <b>' + window.kcEscapeHtml(row.method) + '</b> and ' +
+      '<b>' + window.kcEscapeHtml(row.runner_up || 'the runner-up method') + '</b> apart here' +
+      (typeof row.margin_c === 'number' ? (' (margin ' + row.margin_c.toFixed(2) + '°C, within noise)') : '') +
+      ' -- either is a reasonable starting point; this is not a coin the panel will flip for you.</p>';
+  } else {
+    html += 'Use <b>' + window.kcEscapeHtml(row.method) + '</b>' +
+      (row.rule ? (' (' + window.kcEscapeHtml(row.rule) + ' rule)') : '') + '.</p>';
+    if (row.confidence === 'extrapolated') {
+      html += '<p class="hint">Past the simulator’s checked range' +
+        (typeof result.extrapolation_boundary_c === 'number' ? (' (' + result.extrapolation_boundary_c + '°C)') : '') +
+        ' -- this rests on assumed physics (emissivity, element power, insulation), not a held-out run. ' +
+        'Treat it as a starting point, verify with a real firing.</p>';
+    }
+  }
+  if (row.why) html += '<p class="hint">' + window.kcEscapeHtml(row.why) + '</p>';
+  el.innerHTML = html;
+}
+document.getElementById('tuningRecGoBtn').addEventListener('click', renderTuningRecommendation);
 
 // Live current-sense readout next to each zone's CT checkboxes -- purely
 // display, same "show the safety processor's own number, don't recompute
