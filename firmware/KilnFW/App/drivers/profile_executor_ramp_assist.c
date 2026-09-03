@@ -151,7 +151,7 @@ float ramp_assist_stretch_rate_c_per_s(s_exec_state_t *ex, uint8_t lagging_mask,
         if ((lagging_mask & (uint8_t)(1u << zi)) == 0) {
             continue;
         }
-        if (/* MUTATION-LIVE */ false && z->lag_sustained) { } else if (z->lag_held_s <= 0.0f) {
+        if (!z->lag_sustained || z->lag_held_s <= 0.0f) {
             continue;
         }
         float rate_c_per_s = (z->actual_c - z->lag_start_actual_c) / z->lag_held_s;
