@@ -2007,6 +2007,50 @@ silently change the fired result of every profile already stored on a
 board. User-facing note added at `firmware/KilnFW/docs/PROFILES.md`
 ("A dwell is a timer, not a soak").
 
+### 7.3.1 Cone table data-entry error — FOUND AND FIXED (2026-09-02)
+
+The `cone_table.c`/`cone_table.py` table this section's dwell-credit math
+depends on shipped with **ten wrong temperatures** out of 36 entries, found
+by an adversarial review that pulled the actual Orton Self-Supporting
+108 F/hr chart and independently re-verified every entry against it
+(`hotkilns.com/sites/default/files/pdf/cone-chart.pdf`). Cones 011-018 were
+each off by 15-31 C (013/012 had been swapped in from the SS 27 F/hr column;
+016 was even further off), and cones 13/14 had been sourced from the wrong
+chart section entirely (13 from the Large-cone 270 F/hr column, 14 from the
+asterisked "different composition" Large-cone row). A tell that would have
+caught this without a source lookup: the wrong table's 011→010 gap was only
+8.9 C against neighbouring gaps of 15-56 C — the corrected table's 011→010
+gap is a normal 27.8 C, and a full adjacent-gap scan after the fix found no
+further outliers (the two genuinely tight gaps in the table, 10→11 at ~9 C
+and 1→2/7→8 at ~5-10 C, are real per the source chart, not errors). Both
+files were corrected to match (byte-identical content, values only); the
+two tests that pinned the wrong cone-14 value were updated, not loosened.
+A cross-language pin test (`ConeTableCrossLanguagePinTest` in
+`tools/PcTools/tests/test_cone_table.py`) was added that parses `s_cones[]`
+directly out of `cone_table.c` and asserts it against Python's `CONE_TABLE`
+— this is the enforcement the module docstrings on both sides had claimed
+existed but did not; before this pass, correcting the C table alone failed
+zero Python tests. Two further documentation-only contradictions between
+`cone_table.h` and the actual `cone_table.c` implementation were found and
+corrected in the same pass (not behavioural fixes — the header text was
+wrong, not the code): the heat-work weight is a min-max rescale across the
+band, not "normalised by dividing by the rate at the target" as the header
+claimed (the min-max form is the conservative direction — it under-credits,
+which lengthens dwell rather than risking over-fire, so the code was kept
+and the header corrected); and the between-cones band-bottom case does not
+linearly interpolate anything (the lower bracketing cone is used as-is) —
+`cone_table.py`'s docstring already had this right. Ea = 300 kJ/mol is
+documented as chosen to reproduce the table's own qualitative
+per-cone-step rate change at this module's own min-max normalisation, NOT
+as consistent with the table's rate columns — inverting those columns
+gives apparent activation energies roughly 500-1000+ kJ/mol across the
+working range, and the min-max normalisation is currently absorbing most
+of that gap (≈7% over-credit at Ea=300 kJ/mol vs. a table-consistent Ea in
+the ~700 kJ/mol range). Ea was deliberately left unchanged in this pass;
+changing the normalisation to match the old (incorrect) header wording
+without also revisiting Ea would turn that 7% into roughly 2x. See
+`cone_table.h`'s top-of-file comment for the full corrected rationale.
+
 ### 7.4 Warning surfaces — NOT STARTED
 
 All three the owner asked for, all while ramp-lock is holding:

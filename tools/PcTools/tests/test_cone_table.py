@@ -14,6 +14,7 @@ only the documented formula, not by importing ``cone_table``.
 from __future__ import annotations
 
 import os
+import re
 import sys
 import unittest
 
@@ -21,12 +22,75 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from kilnctrl import cone_table as ct  # noqa: E402
 
+# Path to the C source this module mirrors, from the repo root.
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+_CONE_TABLE_C_PATH = os.path.join(
+    _REPO_ROOT, "firmware", "KilnFW", "App", "drivers", "cone_table.c"
+)
+
+# Matches one s_cones[] entry, e.g.  {"022", 586.1f},
+_C_ENTRY_RE = re.compile(r'\{\s*"([^"]+)"\s*,\s*(-?\d+(?:\.\d+)?)f\s*\}')
+
+
+def _parse_c_cone_table(path: str) -> list[tuple[str, float]]:
+    """Extracts the ``s_cones[]`` initializer entries out of cone_table.c by
+    parsing its source text directly -- this is the enforcement mechanism
+    for the "MIRROR DISCIPLINE" this module's docstring and cone_table.py's
+    docstring both assert but which, before this test existed, nothing
+    actually checked: correcting a value in the C table alone did not fail
+    any Python test. Deliberately a plain-text scan (no C compiler
+    available here), scoped to the `static const cone_table_entry_t
+    s_cones[CONE_TABLE_COUNT] = { ... };` block so it can't accidentally
+    match an unrelated brace-and-float pair elsewhere in the file."""
+    with open(path, "r", encoding="utf-8") as f:
+        text = f.read()
+
+    start_marker = "s_cones[CONE_TABLE_COUNT] = {"
+    start = text.index(start_marker) + len(start_marker)
+    end = text.index("};", start)
+    body = text[start:end]
+
+    entries = [(label, float(value)) for label, value in _C_ENTRY_RE.findall(body)]
+    if not entries:
+        raise AssertionError(f"parsed zero cone entries out of {path} -- parser or marker is broken")
+    return entries
+
+
+class ConeTableCrossLanguagePinTest(unittest.TestCase):
+    """Enforces the mirror between cone_table.c's s_cones[] and Python's
+    CONE_TABLE: entry count, cone labels (in order), and temperatures. This
+    is the test that was claimed (in both files' module docstrings) but
+    never existed -- without it, a change to only one side goes undetected
+    by the test suite in either language."""
+
+    def test_python_table_matches_c_source_exactly(self):
+        c_entries = _parse_c_cone_table(_CONE_TABLE_C_PATH)
+        py_entries = list(ct.CONE_TABLE)
+
+        self.assertEqual(
+            len(c_entries), len(py_entries),
+            f"cone_table.c has {len(c_entries)} entries, cone_table.py has {len(py_entries)} -- mirror broken",
+        )
+        self.assertEqual(
+            [label for label, _ in c_entries], [label for label, _ in py_entries],
+            "cone labels (and their order) differ between cone_table.c and cone_table.py",
+        )
+        for (c_label, c_temp), (py_label, py_temp) in zip(c_entries, py_entries):
+            # C stores float32; Python stores float64 -- compare at a
+            # tolerance well above float32 rounding noise but far tighter
+            # than any real table-entry discrepancy (entries differ by at
+            # least several degrees C from their neighbours).
+            self.assertAlmostEqual(
+                c_temp, py_temp, places=3,
+                msg=f"cone '{c_label}'/'{py_label}': C={c_temp} vs Python={py_temp}",
+            )
+
 
 class ConeTableValuesTests(unittest.TestCase):
     def test_table_size_and_endpoints(self):
         self.assertEqual(ct.CONE_TABLE_COUNT, 36)
         self.assertEqual(ct.CONE_TABLE[0], ("022", 586.1))
-        self.assertEqual(ct.CONE_TABLE[-1], ("14", 1346.1))
+        self.assertEqual(ct.CONE_TABLE[-1], ("14", 1365.0))
 
     def test_table_spacing_is_non_uniform(self):
         # Bottom-of-range spacing (022->021) is much tighter than
@@ -35,7 +99,7 @@ class ConeTableValuesTests(unittest.TestCase):
         low_gap = ct.CONE_TABLE[1][1] - ct.CONE_TABLE[0][1]
         high_gap = ct.CONE_TABLE[-1][1] - ct.CONE_TABLE[-2][1]
         self.assertAlmostEqual(low_gap, 13.9, places=6)
-        self.assertAlmostEqual(high_gap, 22.2, places=6)
+        self.assertAlmostEqual(high_gap, 33.9, places=6)
         self.assertLess(low_gap, high_gap)
 
     def test_band_bottom_cone6(self):
@@ -103,7 +167,7 @@ class ConeTableValuesTests(unittest.TestCase):
 
     def test_cone_for_temp_c(self):
         self.assertEqual(ct.cone_for_temp_c(586.1), 0)
-        self.assertEqual(ct.cone_for_temp_c(1346.1), 35)
+        self.assertEqual(ct.cone_for_temp_c(1365.0), 35)
         self.assertEqual(ct.cone_for_temp_c(2000.0), 35)  # above highest clamps, not an error
         with self.assertRaises(ct.ConeTableError):
             ct.cone_for_temp_c(500.0)  # below lowest

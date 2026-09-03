@@ -38,8 +38,27 @@
 // step band. It uses an Arrhenius form, rate ~ exp(-Ea / (R * T)) with T in
 // KELVIN (never Celsius -- the whole point of the Arrhenius form is that it
 // is not linear in temperature, and using Celsius in the exponent would
-// silently reintroduce a false near-linear approximation), normalised by
-// dividing by the rate at the target so the result is exactly 1.0 there.
+// silently reintroduce a false near-linear approximation).
+//
+// NORMALISATION -- read this before touching cone_table.c's weight formula.
+// The code does NOT divide by the rate at the target (that wording shipped
+// here originally and was wrong -- it never matched the implementation).
+// What it actually computes is a MIN-MAX RESCALE across the band:
+//     weight = (rate_current - rate_bottom) / (rate_target - rate_bottom)
+// i.e. 0.0 at the band bottom's own rate and 1.0 at the target's rate,
+// linearly in *rate* space (which is still nonlinear in temperature, since
+// rate itself is the Arrhenius exponential). This under-credits everywhere
+// below the target compared to the "divide by rate at target" wording,
+// because it also subtracts off the (nonzero) rate already present at the
+// band bottom instead of treating that as part of the credit. That is the
+// CONSERVATIVE direction for a dwell-credit feature: it produces a LOWER
+// weight for a given current_c, which (once this module is wired into a
+// dwell-shortening decision) means a longer dwell and an under-fire risk
+// rather than an over-fire risk. Do NOT "fix" the code to match the old
+// wording -- see the Ea note below for the size of that mistake. If this
+// ever needs correcting, correct the comment (as this pass did), not the
+// arithmetic, unless the conservative-direction tradeoff above is
+// explicitly revisited and re-justified.
 //
 // Activation energy: Ea = 300000 J/mol (300 kJ/mol). This is an
 // ENGINEERING APPROXIMATION, not certified Orton kinetics data -- Orton
@@ -47,17 +66,39 @@
 // glass-viscosity/sintering phenomenon, not one Arrhenius-obeying chemical
 // reaction), and real ceramic heat-work models used in the industry (e.g.
 // the Hyman/Nordberg-style "cone equivalent" formulas) fit in the same
-// rough 250-450 kJ/mol range depending on body chemistry. 300 kJ/mol was
-// chosen because it reproduces roughly the right SENSE of the cone table's
-// own behaviour at this module's normalisation: over the ~15-20 C spacing
-// between adjacent cones in the 016-06 range, and evaluated near typical
-// ^6 stoneware target temperatures (~1200-1230 C = ~1473-1503 K), it
+// rough 250-450 kJ/mol range depending on body chemistry.
+//
+// This value is NOT consistent with this table's own time-temperature
+// trade-off, and an earlier version of this comment claimed it was --
+// that claim was never checked against the table's own rate columns.
+// Inverting the table's own heating-rate spacings (27->108 and 108->270
+// F/hr steps) gives per-cone apparent activation energies far above
+// 300 kJ/mol across the working range -- roughly 500-1000+ kJ/mol
+// depending on cone and step (measured examples: cone 014 ~257-299
+// kJ/mol, cone 06 ~502-1102 kJ/mol, cone 04 ~951-1219 kJ/mol, cone 6
+// ~531-675 kJ/mol, cone 10 ~808-937 kJ/mol). 300 kJ/mol was chosen only
+// because it reproduces roughly the right SENSE of the table's behaviour
+// at THIS module's own min-max normalisation (see above) -- over the
+// ~15-20 C spacing between adjacent cones in the 016-06 range, evaluated
+// near typical ^6 stoneware target temperatures (~1200-1230 C), it
 // predicts each single adjacent cone step corresponds to roughly a 2x-4x
-// change in instantaneous work rate -- consistent with the qualitative
-// fact that cones this close together represent meaningfully different
-// "how done is it" points, not a near-flat rate. This is a deliberately
-// simple single-Ea approximation across the whole table; it is not fit
-// against real vitrification data and should not be treated as such.
+// change in instantaneous work rate, which is qualitatively plausible but
+// was never fit against the table's actual rate data.
+//
+// The min-max normalisation above absorbs most of this discrepancy rather
+// than propagating it 1:1 into the weight: at Ea=300 kJ/mol the mean band
+// weight across representative bands is ~0.4775, versus ~0.4452 at a
+// table-consistent Ea in the 700 kJ/mol range -- roughly a 7% over-credit
+// at the chosen Ea, not the 2-3x the raw activation-energy gap would
+// suggest. That 7% is the honest error bound today. If the normalisation
+// is ever changed to the "divide by rate at target" form the old wording
+// described (see above -- do not do this without also revisiting Ea), the
+// two errors compound rather than cancel: the min-max rescale's
+// conservatism is what is currently absorbing most of the Ea mismatch, so
+// removing it without correcting Ea would turn today's ~7% over-credit
+// into roughly a 2x over-credit. This is a deliberately simple single-Ea
+// approximation across the whole table; it is not fit against real
+// vitrification data and should not be treated as such.
 #ifndef CONE_TABLE_H
 #define CONE_TABLE_H
 
@@ -135,10 +176,16 @@ cone_table_status_t cone_table_cone_for_temp_c(float temp_c, int *out_index);
 // the table -- that is intentional and must not be collapsed into a fixed
 // offset.
 //
-// target_c between two tabulated cones is handled by linearly interpolating
-// the "next lower cone" temperature at target_c's position (i.e. the lower
-// bracketing cone is used directly; target_c does not have to be an exact
-// table entry).
+// target_c between two tabulated cones is NOT handled by interpolating the
+// "next lower cone" temperature -- there is nothing to interpolate there,
+// since a cone's temperature is a fixed table entry, not a function of
+// target_c. What actually happens: the lower bracketing cone (the hottest
+// tabulated entry strictly below target_c) is used AS-IS, unmodified, as
+// the anchor for the halfway-down calculation above; target_c does not
+// have to be an exact table entry to look one up. (An earlier version of
+// this comment claimed linear interpolation here; it did not match the
+// implementation -- see cone_table.py's band_bottom_c() docstring, which
+// already described the real behaviour correctly.)
 //
 // Returns CONE_TABLE_ERR_OUT_OF_RANGE_LOW if target_c is at or below the
 // lowest tabulated cone (there is no lower cone to measure a band against).

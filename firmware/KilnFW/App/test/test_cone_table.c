@@ -27,7 +27,7 @@ void run_test_cone_table(void)
 
         st = cone_table_temp_c_for_cone("14", &t);
         TEST_CHECK(st == CONE_TABLE_OK, "cone '14' lookup -> OK");
-        TEST_CHECK_NEAR(t, 1346.1f, 1e-3, "cone '14' -> 1346.1 C (highest cone)");
+        TEST_CHECK_NEAR(t, 1365.0f, 1e-3, "cone '14' -> 1365.0 C (highest cone)");
 
         st = cone_table_temp_c_for_cone("nope", &t);
         TEST_CHECK(st == CONE_TABLE_ERR_INVALID_INPUT, "unknown cone label -> INVALID_INPUT");
