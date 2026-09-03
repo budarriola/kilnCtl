@@ -251,17 +251,26 @@ now a short list, which is the point:
   storing a full row per zone rather than one scalar coefficient. A re-solved
   asymmetric matrix was adopted onto the board 2026-09-02 — see
   `PID_EXPANSION_PLAN.md` §2/§3.2 for the coefficients and the caveats.
-- **New, scoped but not yet in a plan doc: per-zone enable/disable**, so the
-  kiln can run with rings/heaters/thermocouples physically removed. Contiguous
-  prefix from index 0 only (the highest-index zone never disables), toggleable
-  whole-feature from the Thermocouples & Zones page, propagates into
-  `profile_executor`'s per-zone `active` flag (already what `safety_link.c`
-  sends to the Pico — no safety-side or link-protocol change needed).
-  ~~**Prerequisite found during scoping:** `zone_cfg_v11_t` was never frozen
-  with a static assert~~ — **stale, corrected 2026-09-03: it already is.**
-  `zones_config_json.h` carries `_Static_assert(sizeof(zone_cfg_v11_t) == 132,
-  ...)` (predates this roadmap's last review). The prerequisite is satisfied;
-  this feature is not blocked on it
+- ~~**New, scoped but not yet in a plan doc: per-zone enable/disable**~~ —
+  **stale, corrected 2026-09-03 (second pass): the feature already existed.**
+  `zones_cfg_t.thermo_count` is already exactly this: a contiguous-prefix
+  `[0, thermo_count)` zone count, validated by `zones_config_json_validate()`
+  and `parse_zone_fields()`. A zone dropped by shrinking the count keeps its
+  stored config rather than losing it, so raising the count restores it.
+  `profiles_http.c`'s `valid_zone_bits` already stops any profile targeting a
+  zone outside the prefix, and guards, autotune and the coupling matrix are all
+  already bounded by the same value. `zones_post_handler()` already refuses a
+  structural change (409) while a firing is RUNNING/PAUSED **or** while any
+  affected zone is still hot or has a relay commanded on — a stronger interlock
+  than driving the relay off at toggle time.
+  The scoping note above was doubly stale: `ZONES_CFG_VERSION` is at **15**, not
+  11 — five further migrations have landed since that prerequisite was written.
+  **Shipped 2026-09-03:** `zones_page.html` now offers per-zone checkboxes as
+  UI sugar over `thermo_count` (checking zone *i* sets the count to *i+1*,
+  unchecking sets it to *i*), so the contiguous-prefix rule holds by
+  construction instead of relying on the operator editing a number by hand.
+  No config-version bump and no migration were needed, and adding a second
+  parallel "enabled" field would have duplicated `thermo_count`'s meaning
 - ~~**New: Pico rollback from the OTA page**, plus a link-protocol reply
   frame so a Pico rollback refusal is visible~~ — **stale, corrected
   2026-09-03: this shipped.** `kilnlink_rollback_result.h` is exactly that
