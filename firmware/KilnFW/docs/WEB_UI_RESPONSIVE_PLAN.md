@@ -658,3 +658,16 @@ something a passing check should claim to guarantee). Proven red by two
 mutations (a token dropped below the contrast floor; a new colour-only rule
 added), reverted after confirming red, both under `tools/run_all_checks.ps1`
 (29 checks, one new). The responsive sweep stayed green at 99/99.
+
+**Extended 2026-09-02**: `checkColorOnlyAllowlist()` now also flags a
+colour-only status cue expressed as a literal inline `style="..."` attribute
+(text-before-next-matching-close-tag decides it) or as a JS `elem.style.color
+= <token expr>` assignment with no `.textContent`/`.innerHTML`/`set()` cue on
+the same element within a 25-line window. Both are heuristics that stay quiet
+rather than guess when the shape is ambiguous (a style value built by
+concatenating the token name itself, or a cue further than 25 lines away) --
+see the header comment in `ui_status_color_check.mjs` for exactly what each
+can and can't decide. All five previously-blind sites (`diagnostics_page.html`,
+`readiness_page.html`, `zones_page.html`) resolve clean today; no new
+allowlist entries were needed. Proven red by two more mutations (an emptied
+inline `style=`; an unpaired `.style.color=`), reverted after confirming red.

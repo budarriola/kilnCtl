@@ -42,13 +42,75 @@
 //      safety_page.html's near/past were, both fixed by this same audit to
 //      add a title/text cue rather than being allowlisted bare).
 //
-// What this cannot catch: a rule that reads fine in CSS (has other
-// properties, or targets a class name that doesn't look status-like) but
+//   3. checkColorOnlyAllowlist() also covers two non-<style>-block routes
+//      that a static-CSS-only scan misses entirely (found by the 2026-09
+//      audit: diagnostics_page.html, readiness_page.html, zones_page.html
+//      all use them today):
+//
+//        3a. A literal inline `style="..."` HTML attribute whose value is
+//            ONLY color/background/border-color properties pointing at a
+//            --ok/--warn/--bad/--neutral token (findInlineStyleAttrRules).
+//            This is decidable ONLY when the attribute value is a plain
+//            string, because the check then has real evidence: the text
+//            node up to the next `<` in the same source region. If that
+//            text is non-empty, a human already put a non-colour cue right
+//            there and the rule is not flagged. If it's empty (or the tag
+//            closes immediately), there is no cue and it IS flagged --
+//            this is what proof-of-catch mutation #1 below exercises.
+//            This same text-scan also works, incidentally, on HTML strings
+//            built by JS via `+=`/`+` concatenation of literal pieces
+//            (e.g. `'<p style="color:var(--warn);">' + 'the message'`),
+//            because the regex works over raw source text, not parsed HTML
+//            or parsed JS -- the literal characters between the quotes are
+//            there either way. What it CANNOT decide, and deliberately
+//            does not flag rather than guess: a style value built by
+//            concatenating a *token name itself* (e.g.
+//            `'color:' + (ok ? 'var(--ok)' : 'var(--warn)') + '"'`) --
+//            the raw text between the attribute's opening and closing `"`
+//            then contains ternary/quote/plus glue that does not match the
+//            clean `prop: var(--token)` shape, so it is silently skipped.
+//            main_page.html's #profileFeasIcon and diagnostics_page.html's
+//            NVS-section spans build the value this way; both already carry
+//            a text/glyph cue in the same string in practice, so nothing
+//            real is missed by staying silent here -- but a hypothetical
+//            future *colour-only* case built this way would not be caught.
+//            Say so rather than pretend otherwise.
+//
+//        3b. A JS `<ref>.style.color = <expr>` assignment where <expr> is
+//            provably only ever a --ok/--warn/--bad/--neutral token: either
+//            a bare `var(--token)` or a ternary between two quoted
+//            `var(--token)` literals (findJsStyleColorRules). Whether this
+//            is colour-only in practice depends on whether the SAME element
+//            also gets a text/glyph cue -- which a regex scan cannot prove
+//            in general (that needs real scope analysis: which statements
+//            belong to which function, which variable aliases which
+//            element). The check approximates this with a same-file,
+//            +-25-source-line window around the assignment, looking for a
+//            `.textContent =`/`.innerHTML` write, or a call to this
+//            codebase's `set(id, text, ...)` helper, against the same
+//            variable name or the same `getElementById('id')` string. This
+//            is a heuristic, not a proof: it can miss a genuinely
+//            colour-only case if the cue is further than 25 lines away, and
+//            it can also be fooled if an unrelated element happens to share
+//            a generic variable name (e.g. `stateEl`) with real
+//            textContent evidence in the window. Given the choice, this
+//            check is tuned to stay quiet rather than risk a permanent
+//            false-positive allowlist entry -- see the caution at the top
+//            of this file's audit note. All five confirmed 2026-09 sites
+//            (diagnostics_page.html:509,566,608,640; and the inline-style
+//            sites in readiness_page.html/zones_page.html) resolve cleanly
+//            under this heuristic today.
+//
+// What this cannot catch, at all: a rule that reads fine in CSS/JS (has
+// other properties, or targets a name that doesn't look status-like, or
+// builds its var(--token) by string concatenation of the token name) but
 // whose only real-world differentiator is still colour once rendered; a
 // legitimate new status rule added WITH a text/glyph cue at the same time
-// (it will still need an allowlist entry, because the CSS shape alone can't
-// see the JS-side cue -- a false positive, not a miss); and anything not
-// expressed as CSS at all (inline SVG fills, canvas draws). It is a floor,
+// (it will still need an allowlist entry, because the shape alone can't see
+// a cue further away than the local heuristics above look -- a false
+// positive, not a miss); and anything not expressed as CSS/inline-style/
+// style.color at all (inline SVG fills, canvas draws, className-driven
+// colour switches without any of the three shapes above). It is a floor,
 // not a proof of accessibility.
 
 import { readFileSync, readdirSync } from 'node:fs';
@@ -186,6 +248,98 @@ function findColorOnlyRules(html) {
   return found;
 }
 
+const TOKEN_PROP_NAMES = 'color|background|background-color|border-color|border-left-color|border-top-color';
+const STATUS_TOKEN_NAMES = 'ok|warn|bad|neutral';
+
+// Strips HTML entity refs (&#10007;, &amp;, ...) down to nothing, and
+// collapses whitespace, so "content" left over is only real text/word
+// content -- an entity-only or whitespace-only remainder means "no text
+// cue", not "some cue".
+function hasRealTextContent(raw) {
+  const stripped = raw.replace(/&#?[a-zA-Z0-9]+;/g, ' ').replace(/\s+/g, ' ').trim();
+  return stripped.length > 0;
+}
+
+// 3a from the header comment: literal `style="..."` attribute values (in
+// real HTML, or in JS string-literal pieces -- the regex works over raw
+// source text either way) that are ONLY status-token colour properties.
+// Only a *clean* `prop: var(--token)[; prop: var(--token)]` value is
+// recognized -- anything built by concatenating the token name itself
+// (ternary/quote/plus glue inside the captured value) does not match and is
+// silently skipped, per the documented limit above.
+function findInlineStyleAttrRules(html) {
+  const found = [];
+  const stripped = html.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/\/\/[^\n]*/g, ' ');
+  const declRe = new RegExp(`^((?:(?:${TOKEN_PROP_NAMES})\\s*:\\s*var\\(--(?:${STATUS_TOKEN_NAMES})\\)\\s*;?\\s*)+)$`, 'i');
+  // Captures the tag name too, so the "does it have text?" scan can look
+  // for THIS element's own closing tag rather than stopping at the first
+  // `<` of any kind -- a naive "[^<]*" stop would wrongly call e.g.
+  // `<p style="color:var(--ok);"><b>Safety property:</b> gains are...</p>`
+  // colour-only, because its real text sits behind a nested <b> child.
+  const tagRe = /<([a-zA-Z][a-zA-Z0-9]*)\b[^>]*\sstyle\s*=\s*"([^"]*)"[^>]*>/g;
+  let m;
+  while ((m = tagRe.exec(stripped))) {
+    const tagName = m[1];
+    const value = m[2].trim();
+    if (!declRe.test(value)) continue; // not a clean colour-only value -- can't decide, skip
+    const afterStart = tagRe.lastIndex;
+    const closeRe = new RegExp(`</${tagName}\\b`, 'i');
+    const closeMatch = closeRe.exec(stripped.slice(afterStart, afterStart + 4000));
+    const window = closeMatch ? stripped.slice(afterStart, afterStart + closeMatch.index) : stripped.slice(afterStart, afterStart + 4000);
+    const content = window.replace(/<[^>]*>/g, ' ');
+    if (hasRealTextContent(content)) continue; // a non-colour cue is right there, possibly behind nested tags
+    found.push(`inline style="${value}" (no text before </${tagName}>)`);
+  }
+  return found;
+}
+
+// 3b from the header comment: `<ref>.style.color = <expr>` where <expr>
+// resolves only to a status token (direct, or a ternary between two quoted
+// status-token literals). Then a same-file +-25-line window is searched for
+// a textContent/innerHTML write, or a `set(id, ...)` helper call, against
+// the same variable name or the same getElementById('id') string.
+function findJsStyleColorRules(html) {
+  const found = [];
+  const stripped = html.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/\/\/[^\n]*/g, ' ');
+  const lines = stripped.split('\n');
+  const directRe = new RegExp(`^var\\(--(${STATUS_TOKEN_NAMES})\\)$`, 'i');
+  const ternaryRe = new RegExp(
+    `^.+\\?\\s*['"]var\\(--(?:${STATUS_TOKEN_NAMES})\\)['"]\\s*:\\s*['"]var\\(--(?:${STATUS_TOKEN_NAMES})\\)['"]\\s*$`
+  );
+  const assignRe = /([A-Za-z_$][\w$]*(?:\.getElementById\(\s*(['"])([^'"]+)\2\s*\))?)\.style\.color\s*=\s*([^;]+);/g;
+  for (let i = 0; i < lines.length; i++) {
+    assignRe.lastIndex = 0;
+    let m;
+    while ((m = assignRe.exec(lines[i]))) {
+      const owner = m[1];
+      const id = m[3]; // set only for document.getElementById('id').style.color = ...
+      const expr = m[4].trim();
+      if (!(directRe.test(expr) || ternaryRe.test(expr))) continue; // resolves to something other than a bare/ternary status token, or can't tell -- skip
+      const varName = id ? null : owner.split('.').pop();
+      const lo = Math.max(0, i - 25), hi = Math.min(lines.length, i + 26);
+      let hasCue = false;
+      for (let j = lo; j < hi; j++) {
+        if (j === i) continue;
+        const l = lines[j];
+        if (id) {
+          if (
+            (l.includes(`getElementById('${id}')`) || l.includes(`getElementById("${id}")`)) &&
+            /\.(textContent|innerHTML)\s*[+]?=/.test(l)
+          ) { hasCue = true; break; }
+          if (new RegExp(`\\bset\\(\\s*['"]${id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}['"]`).test(l)) { hasCue = true; break; }
+        } else if (varName) {
+          const re = new RegExp(`\\b${varName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\.(textContent|innerHTML)\\s*[+]?=`);
+          if (re.test(l)) { hasCue = true; break; }
+        }
+      }
+      if (!hasCue) {
+        found.push(`${owner}.style.color = ${expr} (line ${i + 1}, no textContent/innerHTML cue found within 25 lines)`);
+      }
+    }
+  }
+  return found;
+}
+
 function checkColorOnlyAllowlist(pages) {
   let allowlist;
   try {
@@ -195,8 +349,12 @@ function checkColorOnlyAllowlist(pages) {
   }
   const failures = [];
   for (const [file, html] of pages) {
-    const rules = findColorOnlyRules(html);
     const allowedForFile = new Set((allowlist[file] || []).map((e) => e.selector));
+    const rules = [
+      ...findColorOnlyRules(html),
+      ...findInlineStyleAttrRules(html),
+      ...findJsStyleColorRules(html),
+    ];
     for (const selector of rules) {
       if (!allowedForFile.has(selector)) {
         failures.push(
