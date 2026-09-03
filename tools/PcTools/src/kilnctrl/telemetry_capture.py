@@ -85,12 +85,36 @@ def format_capture_line(pc_time: float, level: str, text: str) -> str:
 
 
 class TelemetryCapture:
-    """Owns one LogClient and one output file for a capture session."""
+    """Owns one LogClient and one output file for a capture session.
 
-    def __init__(self, link: UartLink, out_path: Path) -> None:
+    2026-09-02: this used to always open ``out_path`` in append mode, no
+    questions asked. Running ``kilnctrl-telemetry capture --out run1.log``
+    twice (e.g. after a Ctrl+C, or a second firing) silently concatenated
+    two firings' lines into one file -- exactly the multi-session hazard
+    ``a58f0dd`` fixed the same day for the other two ``PollRow`` sources
+    (``coupling_pair_log.load_pair_run``'s ``MultiSessionError``,
+    ``log_analysis.select_run``'s ``MultiRunError``), left open here because
+    this capture path writes the file rather than reading it back. Now:
+    by default the file must not already exist (refuses with a clear
+    ``FileExistsError``-derived message naming the fix); pass
+    ``append=True`` (``--append`` on the CLI) to opt in explicitly for a
+    file you intend to keep appending to.
+    """
+
+    def __init__(self, link: UartLink, out_path: Path, append: bool = False) -> None:
         self.out_path = out_path
         out_path.parent.mkdir(parents=True, exist_ok=True)
-        self._fh = open(out_path, "a", encoding="utf-8", newline="\n")
+        mode = "a" if append else "x"
+        try:
+            self._fh = open(out_path, mode, encoding="utf-8", newline="\n")
+        except FileExistsError:
+            raise RuntimeError(
+                f"{out_path} already exists -- refusing to append blindly, that is exactly how a "
+                f"telemetry poller left running across a kiln cooldown/reconnect used to concatenate "
+                f"two firings into one file that parse_profile_exec_uart_capture then reads as one "
+                f"continuous run. Pass --append if you really mean to keep appending to this file, "
+                f"or choose a new --out path for a fresh capture."
+            ) from None
         self.lines_written = 0
 
         def on_line(line: LogLine) -> None:
@@ -173,7 +197,7 @@ def _cmd_capture(args: argparse.Namespace) -> int:
                 sys_client.close()
 
         out_path = Path(args.out) if args.out else CAPTURE_DIR / f"telemetry_{datetime.now():%Y%m%d_%H%M%S}.log"
-        capture = TelemetryCapture(link, out_path)
+        capture = TelemetryCapture(link, out_path, append=args.append)
         print(f"capturing to {out_path} -- Ctrl+C to stop")
         try:
             while True:
@@ -209,6 +233,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     cap.add_argument("--out", default=None, help=f"Output file (default {CAPTURE_DIR}/telemetry_<timestamp>.log).")
     cap.add_argument("--enable", action="store_true", help="Also enable telemetry before capturing.")
     cap.add_argument("--disable-on-exit", action="store_true", help="Also disable telemetry when capture stops.")
+    cap.add_argument("--append", action="store_true",
+                      help="Allow appending to an already-existing --out file instead of refusing "
+                           "(default refuses, to avoid silently concatenating two firings into one "
+                           "file that parse_profile_exec_uart_capture then reads as one continuous run).")
     cap.set_defaults(func=_cmd_capture)
 
     return parser
