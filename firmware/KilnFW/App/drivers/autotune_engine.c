@@ -2544,9 +2544,37 @@ static void autotune_engine_tick_locked(void)
          * restrictive than this bug warrants) and over silently disabling
          * guards 1/2 with a logged flag (unnecessary now that they are
          * genuinely covered). Guard 4 keeps behaving exactly as before in
-         * this configuration -- see STEP_TEST_GUARD_HEADROOM_C's own comment. */
+         * this configuration -- see STEP_TEST_GUARD_HEADROOM_C's own comment.
+         *
+         * SETTLING EXCEPTION (2026-09-03, guard 4 arming backstop regression):
+         * thermal_guard.c's guard 4 gained an "idle arming backstop" (commit
+         * "Fix ramp-lock hot-start stall") -- once commanded_duty stays below
+         * progress_duty_min for drift_period_s (600s default), guard 4 arms
+         * even if the zone never once settled within drift_hysteresis_c of
+         * setpoint_c, then trips if it stays outside that band for another
+         * drift_period_s. That backstop is correct for profile_executor.c's
+         * real setpoints, but this STEP branch's fallback above is not a real
+         * setpoint at all while SETTLING -- it is max_temp_c (the zone's
+         * configured CEILING), fed only so guard 1's error stays > 0 once
+         * STEPPING starts driving real duty. During SETTLING commanded_duty
+         * is always 0 (want_duty below), so this fake ceiling-as-setpoint is
+         * *always* tens of degrees from raw_c by construction -- feeding it
+         * to guard 4 here means every ordinary SETTLING phase idles long
+         * enough to arm the backstop and looks permanently "outside band",
+         * which used to be harmless (guard 4 could never arm without a real
+         * settle) and is now a false trip waiting to happen the moment
+         * idle_elapsed_s clears drift_period_s twice over. SETTLING has no
+         * real setpoint to give guard 4 in the first place -- feed raw_c
+         * itself so error is pinned at 0.0f (harmless: guard 1/2 never see
+         * this tick anyway, since they require commanded_duty >=
+         * progress_duty_min, which SETTLING's duty of 0 never clears).
+         * STEPPING (and RELAY, which always has a genuine relay_setpoint_c)
+         * are completely unaffected -- this only changes the value fed
+         * while SETTLING. */
         .setpoint_c = (s_at.method == AUTOTUNE_METHOD_RELAY)
                           ? s_at.relay_setpoint_c
+                          : (s_at.state == AUTOTUNE_ENGINE_SETTLING)
+                                ? raw_c
                           : (s_at.guard_cfg.max_temp_c > 0.0f ? s_at.guard_cfg.max_temp_c
                                                                : raw_c + step_test_guard_headroom_c),
         /* STEP method: the INTENDED duty (want_duty, pre-PWM), not the
