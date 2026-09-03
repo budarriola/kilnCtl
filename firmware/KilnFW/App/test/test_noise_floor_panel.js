@@ -81,9 +81,16 @@ function floorPresentArtifact() {
       warning: 'start temperatures span 1.29C, exceeding the 1.00C like-for-like threshold',
       stat_caveat: 'Each floor is a max-minus-min RANGE across 6 runs; it grows with sample size.',
       transfer_caveat: 'Measured on the reference bench rig only -- does not transfer to your own kiln.',
+      reliability_rule: "A metric is 'reliable' when its floor ratio is <= FLOOR_RELIABILITY_RATIO (6.0); see kilnctrl.pid_ab_compare.summarize_metric_floor_reliability.",
+      multiplicity_caveat: 'This report scores dozens of keys with no multiplicity correction; a single flagged metric is close to chance (~12% per-key at n=6) -- only a pattern across several zones is worth trusting.',
+      // NOTE: these two rows reflect the CORRECTED (post daea3bc) floors --
+      // ramp_worst_error_c used to look unreliable (117.9x, from a
+      // contaminated 27C outlier) but is now one of the tighter clusters
+      // (2.57x) once actual_valid is respected. See gen_noise_floor_panel.py.
       metrics: {
-        iae_normalized_whole_c: { reliable: true, min_c: 0.112, max_c: 0.167, unit: 'C', note: 'stable across zones' },
-        ramp_worst_error_c: { reliable: false, min_c: 0.230, max_c: 27.110, unit: 'C', note: '117.9x spread' },
+        iae_normalized_whole_c: { reliable: true, min_c: 0.077, max_c: 0.147, ratio: 1.91, unit: 'C', note: '1.91x spread across zones/segments -- reliable (<= 6.0x)' },
+        ramp_worst_error_c: { reliable: true, min_c: 0.230, max_c: 0.590, ratio: 2.57, unit: 'C', note: '2.57x spread across zones/segments -- reliable (<= 6.0x)' },
+        settle_time_s: { reliable: false, min_c: 11, max_c: 168, ratio: 15.27, unit: 's', note: '15.27x spread across zones/segments -- UNSTABLE (> 6.0x): floor too unstable to support a conclusion' },
       },
     },
   };
@@ -129,7 +136,7 @@ function floorAbsentArtifact() {
 (function testMetricRowReturnedForKnownMetric() {
   const ctx = loadFns(NOISE_FLOOR_SRC);
   const row = ctx.noiseFloorMetricRow(floorPresentArtifact(), 'iae_normalized_whole_c');
-  assert(row && row.reliable === true && row.min_c === 0.112 && row.max_c === 0.167,
+  assert(row && row.reliable === true && row.min_c === 0.077 && row.max_c === 0.147,
     'a known metric returns its real row -- got ' + JSON.stringify(row));
 })();
 
@@ -190,12 +197,50 @@ function floorAbsentArtifact() {
 (function testUnreliableMetricSaysDoNotTrustSmallDifference() {
   const ctx = loadFns(NOISE_FLOOR_SRC);
   const html = ctx.renderNoiseFloorHtml(floorPresentArtifact());
-  const idx = html.indexOf('ramp_worst_error_c');
+  const idx = html.indexOf('settle_time_s');
   assert(idx !== -1, 'unreliable metric name appears in the rendered panel');
   const around = html.slice(idx, idx + 250);
   assert(around.indexOf('do not read a small difference') !== -1,
     'an unreliable metric explicitly warns against reading a small difference as real -- got: ' + around);
   assert(html.indexOf('[UNRELIABLE]') !== -1, 'unreliable metric carries the UNRELIABLE badge -- got: ' + html);
+})();
+
+// Regression guard for the exact bug this task fixes: ramp_worst_error_c
+// was shipped as UNRELIABLE (117.9x spread) on contaminated data, but on
+// the corrected floors it is a RELIABLE metric (2.57x spread, one of the
+// tightest clusters). Prove the panel now tells the truth about it, and
+// prove (via mutation below) that this assertion actually distinguishes
+// the two claims rather than passing regardless.
+(function testFormerlyUnreliableMetricNowCorrectlyReliable() {
+  const ctx = loadFns(NOISE_FLOOR_SRC);
+  const html = ctx.renderNoiseFloorHtml(floorPresentArtifact());
+  const idx = html.indexOf('ramp_worst_error_c');
+  assert(idx !== -1, 'ramp_worst_error_c appears in the rendered panel');
+  const around = html.slice(Math.max(0, idx - 100), idx + 200);
+  assert(around.indexOf('is likely real') !== -1,
+    'ramp_worst_error_c is rendered as trustworthy on corrected data -- got: ' + around);
+  assert(around.indexOf('[RESOLVES]') !== -1,
+    'ramp_worst_error_c carries the RESOLVES badge, not UNRELIABLE, on corrected data -- got: ' + around);
+})();
+
+// Multiplicity caveat: the new honesty note about per-key chance rate must
+// actually reach the rendered HTML, not just live in the JSON.
+(function testRenderShowsMultiplicityCaveat() {
+  const ctx = loadFns(NOISE_FLOOR_SRC);
+  const html = ctx.renderNoiseFloorHtml(floorPresentArtifact());
+  assert(html.indexOf('no multiplicity correction') !== -1,
+    'rendered panel states the multiplicity caveat -- got: ' + html);
+  assert(html.indexOf('~12% per-key') !== -1,
+    'rendered panel states the per-key chance rate -- got: ' + html);
+})();
+
+(function testNoMultiplicityCaveatParagraphWhenFieldAbsent() {
+  const ctx = loadFns(NOISE_FLOOR_SRC);
+  const art = floorPresentArtifact();
+  delete art.noise_floor.multiplicity_caveat;
+  const html = ctx.renderNoiseFloorHtml(art);
+  assert(html.indexOf('no multiplicity correction') === -1,
+    'an artifact with no multiplicity_caveat field renders no such paragraph -- got: ' + html);
 })();
 
 (function testReliableAndUnreliableNeverShareABadge() {

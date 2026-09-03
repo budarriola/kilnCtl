@@ -402,7 +402,23 @@ point and neither is picked.</p>
      firing-to-firing". Same idiom as the panel above on purpose (bracket
      badge + hint paragraphs, var(--ok)/var(--bad), no new visual language) --
      see noiseFloorUsable()/renderNoiseFloorHtml() below, and
-     test/test_noise_floor_panel.js. -->
+     test/test_noise_floor_panel.js.
+
+     2026-09-03, SAME DAY -- the noise_floor block is now DERIVED, not
+     hand-copied: tools/PcTools/scripts/gen_noise_floor_panel.py regenerates
+     it straight from noise_floor.json using the exact same
+     reliable/unreliable rule pid_ab_compare.py itself uses
+     (summarize_metric_floor_reliability, FLOOR_RELIABILITY_RATIO), so a
+     rebuilt noise_floor.json cannot silently drift out of sync with what
+     this page claims. This page still just renders whatever `reliable`/
+     `min_c`/`max_c`/`note` values are in the JSON -- it does not recompute
+     anything -- so no code below needed to change for the ramp_worst_error_c
+     reclassification (was falsely "cannot resolve anything useful" on
+     contaminated data; is now RESOLVES at a 2.57x floor ratio). Also carries
+     a `multiplicity_caveat`: this report scores ~48 keys with no
+     multiplicity correction, so a single flagged metric is close to chance
+     (~12% per-key at the common n=6) -- only a same-metric, same-direction
+     pattern across several zones is worth trusting. -->
 <p class="hint">This is a measured bench result, not simulator output: six back-to-back
 firings of the exact same tuning on the reference bench rig, showing how much each metric
 moved between runs that should have agreed. A difference smaller than a metric's floor is
@@ -2102,6 +2118,11 @@ function tuningRecStatusClass(confidence) {
 // missing/unusable cases. Pure (no DOM) between the NOISE_FLOOR_START/END
 // markers so test/test_noise_floor_panel.js can exercise it directly --
 // same extraction convention as TUNING_REC_LOOKUP above.
+//
+// noise_floor.reliable per metric is derived upstream (see
+// gen_noise_floor_panel.py) from the same ratio rule pid_ab_compare.py
+// gates its own verdicts on -- this file only renders what it is given,
+// including the optional `multiplicity_caveat` string.
 // -----------------------------------------------------------------------
 // NOISE_FLOOR_START
 function noiseFloorUsable(artifact) {
@@ -2136,6 +2157,9 @@ function renderNoiseFloorHtml(artifact) {
   }
   if (nf.stat_caveat) {
     html += '<p class="hint">' + window.kcEscapeHtml(nf.stat_caveat) + '</p>';
+  }
+  if (nf.multiplicity_caveat) {
+    html += '<p class="hint">' + window.kcEscapeHtml(nf.multiplicity_caveat) + '</p>';
   }
   var names = Object.keys(nf.metrics).sort();
   names.forEach(function (name) {
