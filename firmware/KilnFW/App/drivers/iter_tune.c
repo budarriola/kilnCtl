@@ -109,26 +109,41 @@ iter_tune_result_t iter_tune_process_firing(iter_tune_zone_state_t *state, const
     // Lower iae_normalized is better. relative_improvement > 0 means the
     // trial scored better than baseline.
     float baseline_score = state->baseline.iae_normalized;
-    float relative_improvement = (baseline_score - firing->iae_normalized) / baseline_score;
+    float absolute_improvement = baseline_score - firing->iae_normalized;
+    float relative_improvement = absolute_improvement / baseline_score;
 
-    if (relative_improvement >= ITER_TUNE_MIN_RELATIVE_IMPROVEMENT) {
+    // Required absolute improvement is whichever is LARGER: the relative
+    // fraction of this baseline's own score, or the measured-noise-floor
+    // absolute constant -- see iter_tune.h's UPDATE block above
+    // ITER_TUNE_MIN_RELATIVE_IMPROVEMENT for the derivation (six-repeat
+    // noise_floor.json campaign, z2's prediction interval is the binding
+    // case). Relative alone under-protects once a zone is well-tuned
+    // enough that 20% of its score is smaller than the noise floor;
+    // absolute alone would over-demand on a badly-tuned zone with a large
+    // score. max() gets both right.
+    float relative_required = ITER_TUNE_MIN_RELATIVE_IMPROVEMENT * baseline_score;
+    float required = relative_required > ITER_TUNE_MIN_ABSOLUTE_IMPROVEMENT_C
+                          ? relative_required
+                          : ITER_TUNE_MIN_ABSOLUTE_IMPROVEMENT_C;
+
+    if (absolute_improvement >= required) {
         state->baseline = *firing; // gains AND score both move to the trial's
         state->has_pending = false;
         if (reason && reason_len) {
-            snprintf(reason, reason_len, "accepted: %.1f%% better (>= %.1f%% floor)",
-                      (double)(relative_improvement * 100.0f), (double)(ITER_TUNE_MIN_RELATIVE_IMPROVEMENT * 100.0f));
+            snprintf(reason, reason_len, "accepted: %.4f better (>= %.4f floor, %.1f%% relative)",
+                      (double)absolute_improvement, (double)required, (double)(relative_improvement * 100.0f));
         }
         return ITER_TUNE_RESULT_ACCEPTED;
     }
 
-    // Below the noise floor (including a genuinely worse score, i.e.
-    // relative_improvement < 0) -- revert. baseline is untouched, so
+    // Below the required floor (including a genuinely worse score, i.e.
+    // absolute_improvement < 0) -- revert. baseline is untouched, so
     // iter_tune_active_gains() goes straight back to baseline.gains, the
     // exact float bits accepted last time.
     state->has_pending = false;
     if (reason && reason_len) {
-        snprintf(reason, reason_len, "reverted: %.1f%% change (< %.1f%% floor, noise)",
-                  (double)(relative_improvement * 100.0f), (double)(ITER_TUNE_MIN_RELATIVE_IMPROVEMENT * 100.0f));
+        snprintf(reason, reason_len, "reverted: %.4f change (< %.4f floor, noise)",
+                  (double)absolute_improvement, (double)required);
     }
     return ITER_TUNE_RESULT_REVERTED;
 }

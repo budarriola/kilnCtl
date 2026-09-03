@@ -123,7 +123,99 @@ extern "C" {
 // above is run. Neither failure compounds, because every subsequent firing
 // is scored against whatever is currently accepted, not against history --
 // a lucky accept gets re-tested the very next firing under the same bar.
+//
+// ---------------------------------------------------------------------
+// UPDATE 2026-09: the experiment above has now been run --
+// tools/PcTools/config_presets/noise_floor.json, schema 2, six repeat
+// firings of the same profile/gains (generated_from lists all six; the
+// file's own start_conditions block flags them as NOT strictly like-for-
+// like -- start temps span 1.29 degC against a 1.0 degC threshold -- so
+// these numbers are a slight overestimate of true noise, i.e. still on the
+// conservative side, not an underestimate). The metric this file scores on
+// is iae_normalized_whole_c; per zone (mean / std_c / range-of-6 = "noise_
+// floor_c" in that artifact):
+//   z0: mean 1.6043, std_c 0.05267, range 0.11565
+//   z1: mean 1.1904, std_c 0.03181, range 0.07709
+//   z2: mean 0.8765, std_c 0.05408, range 0.14730
+//
+// THE ARITHMETIC (do not reuse the "range" column directly as a threshold
+// -- a max-min range across n=6 repeats is 2.53*sigma, not 1*sigma, and a
+// single future accept/reject decision needs a two-sample PREDICTION
+// interval, not a description of the sample already in hand). This
+// mechanism compares exactly one trial firing against exactly one baseline
+// firing, so the right figure is the two-sided prediction interval for the
+// difference of two independent same-distribution draws:
+//   PI = t(.975, n-1=5) * std_c * sqrt(2) = 2.571 * std_c * 1.41421
+//   z0: 2.571 * 0.05267 * 1.41421 = 0.1915 degC
+//   z1: 2.571 * 0.03181 * 1.41421 = 0.1156 degC
+//   z2: 2.571 * 0.05408 * 1.41421 = 0.1966 degC
+// A trial/baseline pair separated by less than this, for that zone, is not
+// distinguishable from noise at 97.5% one-sided confidence -- accepting it
+// as "improvement" ratchets on nothing.
+//
+// ITER_TUNE_MIN_RELATIVE_IMPROVEMENT is a RELATIVE threshold; the floor
+// above is ABSOLUTE (degrees C of normalized IAE). Converting requires the
+// magnitude the relative fraction is taken OF. At this bench's own
+// measured baseline magnitudes (the means above -- consistent with the
+// 0.5-1.7 normalized-IAE range the A/B campaign report,
+// logs/coupling/ab_campaign_report.md, shows for real runs), 20% relative
+// works out to:
+//   z0: 0.20 * 1.6043 = 0.3209 degC  (>= 0.1915 PI --  1.68x margin, SAFE)
+//   z1: 0.20 * 1.1904 = 0.2381 degC  (>= 0.1156 PI --  2.06x margin, SAFE)
+//   z2: 0.20 * 0.8765 = 0.1753 degC  (<  0.1966 PI -- 0.89x margin, UNSAFE)
+//
+// VERDICT: 20% relative is NOT uniformly conservative. For z0 and z1 it
+// clears the noise floor with 1.7-2x margin -- correctly conservative,
+// matching the header's original intent. For z2 it is already, TODAY, at
+// today's measured typical magnitude, BELOW the noise floor: a trial that
+// scored 17.5% better than baseline would be ACCEPTED even though a
+// 19.7 degC... (0.1966 degC) swing on this zone is not statistically
+// distinguishable from ordinary run-to-run noise (0.1966 degC). This is not a distant
+// risk -- it is the current, live threshold on the current, live baseline
+// magnitude. It gets WORSE as tuning succeeds: this mechanism's whole
+// point is to shrink iae_normalized over time, and a purely relative
+// threshold's absolute requirement shrinks in lockstep, while the noise
+// floor (a property of the sensor/tick-jitter/ambient-drift measurement
+// process, not of how well-tuned the zone currently is) does not shrink
+// with it. Eventually any fixed relative fraction, applied to a
+// sufficiently well-tuned baseline, demands less absolute separation than
+// the noise floor -- a purely relative bound is the wrong shape for a
+// floor that is fundamentally absolute.
+//
+// FIX: keep the relative fraction (still the right primary signal --
+// it scales the required improvement to how far from good a zone
+// currently is) but require the ABSOLUTE improvement to also clear a
+// floor sized to the worst-case (largest) measured prediction interval
+// across the three zones -- max(0.1915, 0.1156, 0.1966) = 0.1966, rounded
+// up to 0.20 degC for headroom given the artifact's own like-for-like
+// caveat could still be underestimating drift contamination in the other
+// direction on a different bench day. A single global absolute constant
+// (not per-zone) is deliberately used here even though the floor differs
+// by nearly 2x across zones (0.077-0.147 in the range column): sizing to
+// the WORST zone makes the other two zones somewhat more conservative than
+// their own individual floor strictly requires, but that is the safe
+// direction to err in, and three near-identical per-zone constants (0.19
+// / 0.12 / 0.20, all within 2x of each other) are not worth the added
+// state, host-test surface, and per-zone config plumbing (zone_mask
+// already exists for grouping, not per-zone THRESHOLDS) for a difference
+// this small. iter_tune_process_firing() now requires:
+//   (baseline_score - firing_score) >= max(
+//       ITER_TUNE_MIN_RELATIVE_IMPROVEMENT * baseline_score,
+//       ITER_TUNE_MIN_ABSOLUTE_IMPROVEMENT_C)
+// which behaves exactly as before (relative-driven) whenever the baseline
+// score is large enough that its 20% already clears 0.20 degC (baseline
+// score >= 1.0, true for today's z0/z1 and marginal for z2), and falls
+// back to the absolute floor once tuning has driven the baseline score
+// low enough that 20% of it no longer would.
 #define ITER_TUNE_MIN_RELATIVE_IMPROVEMENT 0.20f
+
+// See the UPDATE block above this constant for the derivation: the largest
+// of the three zones' measured two-sample prediction intervals (z2,
+// 0.1966 degC), rounded up to 0.20 degC. Applied as a floor UNDER the
+// relative requirement (max() of the two, see iter_tune_process_firing()),
+// never in place of it -- a large baseline score should still require
+// a large absolute improvement, not just this floor.
+#define ITER_TUNE_MIN_ABSOLUTE_IMPROVEMENT_C 0.20f
 
 // Two firings are only comparable at a "comparable starting temperature" --
 // project_autotune_needs_rested_baseline (this repo's own lesson):

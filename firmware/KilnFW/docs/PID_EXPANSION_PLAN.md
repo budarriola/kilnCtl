@@ -1024,6 +1024,48 @@ HTTP endpoint and zones-page UI.
         note (`START_TEMP_METRIC_NOTE`) on every `compare` so the two are
         not conflated; unifying the two modules' start-temperature
         extraction is out of scope for this pass.
+
+      **2026-09 — the loop closed: `ITER_TUNE_MIN_RELATIVE_IMPROVEMENT`
+      checked against the now-measured floor.** The blocking unknown named
+      at the top of this bullet is gone — `noise_floor.json` (schema 2,
+      6-run campaign, above) gives `iae_normalized_whole_c`'s per-zone
+      floor: z0 mean 1.6043/std 0.0527, z1 mean 1.1904/std 0.0318, z2 mean
+      0.8765/std 0.0541. `iter_tune.c` compares exactly one trial firing
+      against exactly one baseline firing, so the right absolute figure is
+      each zone's two-sample PREDICTION interval (`t(.975,5)*std*sqrt(2)`,
+      not the n=6 range, which is 2.53σ, and not raw σ, which is a 1-sample
+      figure) — z0 0.1915, z1 0.1156, z2 0.1966 °C. Mapping 20 % relative to
+      absolute terms at this bench's own measured typical magnitudes: z0
+      0.20×1.6043=0.3209 °C (1.68x the floor, safe), z1 0.20×1.1904=0.2381 °C
+      (2.06x, safe), z2 0.20×0.8765=0.1753 °C (**0.89x — already below its
+      own floor, today, at today's typical baseline**). A purely relative
+      bound is the wrong shape here: its absolute requirement shrinks as
+      the mechanism succeeds at lowering the score, while the floor
+      (sensor/tick-jitter/ambient-drift noise) does not shrink with it — z2
+      is not a distant edge case, it is the demonstrated case. Fix landed
+      in `iter_tune.h`/`iter_tune.c`: kept `ITER_TUNE_MIN_RELATIVE_
+      IMPROVEMENT` at 20 % (still correctly conservative for z0/z1) and
+      added `ITER_TUNE_MIN_ABSOLUTE_IMPROVEMENT_C = 0.20` (the worst-case,
+      i.e. largest, of the three zones' prediction intervals, z2's 0.1966,
+      rounded up for headroom), applied as `required = max(relative_
+      required, absolute_floor)`. A single global absolute constant was
+      used rather than three per-zone ones — the three floors (0.12/0.19/
+      0.20) are within 2x of each other and sizing to the worst zone only
+      makes the other two somewhat more conservative than their individual
+      floor strictly requires, which is the safe direction to err in; three
+      near-identical per-zone constants were judged not worth the added
+      state/config/test surface for a difference this small. Host tests
+      (`test_iter_tune.c`) updated: the two existing relative-only tests
+      rescaled to realistic (~1.0) baseline magnitudes so they still
+      isolate relative behavior; two new tests pin the absolute-floor-
+      governs case (a 30 % relative "improvement" at a low baseline still
+      reverts) and the relative-still-governs case (absolute floor alone
+      does not loosen a large-baseline requirement); the real-capture
+      regression test's mirror-direction assertion (previously ACCEPTED at
+      47.5 % relative on ~0.02-magnitude captures) now correctly REVERTS,
+      since that capture's absolute swing (0.0076) is an order of magnitude
+      below the measured floor. All four negative-test mutations confirmed
+      by hand (drop the `max()` term back to relative-only) before landing.
 - [x] **One-click revert** to the last accepted gain set (`5b44403`). Snapshots
       Kp/Ki/Kd, K_dc/tau/dead_time and `ki_baseline` before each commit point and
       restores them exactly, `ki_baseline` included — restoring gains while

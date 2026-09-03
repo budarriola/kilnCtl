@@ -162,7 +162,12 @@ static void test_noise_floor_refuses_small_improvement(void)
     iter_tune_zone_state_t st;
     memset(&st, 0, sizeof(st));
     st.enabled = true;
-    iter_tune_firing_t seed = mk_firing(7, 0x07, 30.0f, 0.1000f, 10.0f, 0.1f, 1.0f);
+    // Baseline score 1.0000 -- realistic magnitude (this bench's measured
+    // iae_normalized_whole_c means run 0.88-1.60, noise_floor.json) chosen
+    // so 20% relative (0.2000) and the absolute floor (0.2000) coincide
+    // here; this test is about the relative/percentage behavior, the
+    // absolute-floor-governs case has its own dedicated tests below.
+    iter_tune_firing_t seed = mk_firing(7, 0x07, 30.0f, 1.0000f, 10.0f, 0.1f, 1.0f);
     char reason[96];
     iter_tune_process_firing(&st, &seed, reason, sizeof(reason));
     iter_tune_gains_t g;
@@ -170,7 +175,7 @@ static void test_noise_floor_refuses_small_improvement(void)
 
     // 15% better -- chosen to sit strictly below ITER_TUNE_MIN_RELATIVE_
     // IMPROVEMENT's 20% floor without being derived from that macro.
-    iter_tune_firing_t trial = mk_firing(7, 0x07, 30.0f, 0.0850f, g.kp, g.ki, g.kd);
+    iter_tune_firing_t trial = mk_firing(7, 0x07, 30.0f, 0.8500f, g.kp, g.ki, g.kd);
     iter_tune_result_t r = iter_tune_process_firing(&st, &trial, reason, sizeof(reason));
     // Negative test: this is THE test that proves the noise floor is
     // load-bearing. Weaken ITER_TUNE_MIN_RELATIVE_IMPROVEMENT (e.g. to
@@ -178,7 +183,7 @@ static void test_noise_floor_refuses_small_improvement(void)
     // confirmed by hand during this task (see the task report) and
     // reverted immediately after.
     TEST_CHECK(r == ITER_TUNE_RESULT_REVERTED, "a 15% improvement must be refused -- below the 20% noise floor");
-    TEST_CHECK_NEAR(st.baseline.iae_normalized, 0.1000, 1e-6, "baseline score must NOT move on a refused trial");
+    TEST_CHECK_NEAR(st.baseline.iae_normalized, 1.0000, 1e-6, "baseline score must NOT move on a refused trial");
     TEST_CHECK_NEAR(st.baseline.gains.kp, 10.0, 1e-6, "baseline gains must NOT move on a refused trial");
 }
 
@@ -188,21 +193,91 @@ static void test_noise_floor_accepts_clear_improvement(void)
     iter_tune_zone_state_t st;
     memset(&st, 0, sizeof(st));
     st.enabled = true;
-    iter_tune_firing_t seed = mk_firing(7, 0x07, 30.0f, 0.1000f, 10.0f, 0.1f, 1.0f);
+    iter_tune_firing_t seed = mk_firing(7, 0x07, 30.0f, 1.0000f, 10.0f, 0.1f, 1.0f);
     char reason[96];
     iter_tune_process_firing(&st, &seed, reason, sizeof(reason));
     iter_tune_gains_t g;
     iter_tune_propose_perturbation(&st, &g);
 
     // 25% better -- chosen to sit strictly above the 20% floor.
-    iter_tune_firing_t trial = mk_firing(7, 0x07, 30.0f, 0.0750f, g.kp, g.ki, g.kd);
+    iter_tune_firing_t trial = mk_firing(7, 0x07, 30.0f, 0.7500f, g.kp, g.ki, g.kd);
     iter_tune_result_t r = iter_tune_process_firing(&st, &trial, reason, sizeof(reason));
     // Negative test: tighten ITER_TUNE_MIN_RELATIVE_IMPROVEMENT above 0.25
     // (e.g. to 0.30f) and this assertion flips from ACCEPTED to REVERTED.
     TEST_CHECK(r == ITER_TUNE_RESULT_ACCEPTED, "a 25% improvement must be accepted -- above the 20% floor");
-    TEST_CHECK_NEAR(st.baseline.iae_normalized, 0.0750, 1e-6, "accepted trial's score must become the new baseline");
+    TEST_CHECK_NEAR(st.baseline.iae_normalized, 0.7500, 1e-6, "accepted trial's score must become the new baseline");
     TEST_CHECK_NEAR(st.baseline.gains.kp, g.kp, 1e-9, "accepted trial's EXACT gains must become the new baseline");
     TEST_CHECK(!st.has_pending, "accept must clear the pending trial");
+}
+
+static void test_absolute_floor_blocks_relative_pass_at_low_baseline(void)
+{
+    TEST_SECTION("iter_tune: absolute noise floor overrides a passing relative percentage once baseline score is small");
+    // This is the exact failure mode the 2026-09 arithmetic in iter_tune.h
+    // found live in z2's own measured data: once a zone is well-tuned
+    // enough that 20% of its score is smaller than the measured noise
+    // floor (ITER_TUNE_MIN_ABSOLUTE_IMPROVEMENT_C, 0.20 degC), a relative-
+    // only test would accept a swing that is not distinguishable from
+    // noise. Baseline 0.5000 -- comfortably below the 1.0 threshold where
+    // 20% of the score equals the absolute floor.
+    iter_tune_zone_state_t st;
+    memset(&st, 0, sizeof(st));
+    st.enabled = true;
+    iter_tune_firing_t seed = mk_firing(7, 0x07, 30.0f, 0.5000f, 10.0f, 0.1f, 1.0f);
+    char reason[96];
+    iter_tune_process_firing(&st, &seed, reason, sizeof(reason));
+    iter_tune_gains_t g;
+    iter_tune_propose_perturbation(&st, &g);
+
+    // 30% better (0.5000 -> 0.3500, improvement 0.1500) -- clears the 20%
+    // RELATIVE requirement (0.10) with margin, but 0.1500 < the 0.20
+    // ABSOLUTE floor, so this must still revert.
+    iter_tune_firing_t trial = mk_firing(7, 0x07, 30.0f, 0.3500f, g.kp, g.ki, g.kd);
+    iter_tune_result_t r = iter_tune_process_firing(&st, &trial, reason, sizeof(reason));
+    // Negative test: this is what would have shipped without this task's
+    // fix -- with only ITER_TUNE_MIN_RELATIVE_IMPROVEMENT (no max() against
+    // ITER_TUNE_MIN_ABSOLUTE_IMPROVEMENT_C), 30% > 20% and this would be
+    // ACCEPTED. Reverting to the old single-term check (required =
+    // relative_required, dropping the absolute floor entirely) flips this
+    // assertion from REVERTED to ACCEPTED.
+    TEST_CHECK(r == ITER_TUNE_RESULT_REVERTED,
+               "a 30%% relative improvement below the 0.20 absolute noise floor must still revert");
+    TEST_CHECK_NEAR(st.baseline.iae_normalized, 0.5000, 1e-6, "baseline score must NOT move on a refused trial");
+}
+
+static void test_absolute_floor_does_not_loosen_high_baseline(void)
+{
+    TEST_SECTION("iter_tune: absolute floor never loosens the requirement when relative is already stricter");
+    // At a large baseline score, 20% relative demands far more than the
+    // 0.20 absolute floor -- the max() must not let the floor substitute
+    // for the (larger) relative requirement.
+    iter_tune_zone_state_t st;
+    memset(&st, 0, sizeof(st));
+    st.enabled = true;
+    iter_tune_firing_t seed = mk_firing(7, 0x07, 30.0f, 5.0000f, 10.0f, 0.1f, 1.0f);
+    char reason[96];
+    iter_tune_process_firing(&st, &seed, reason, sizeof(reason));
+    iter_tune_gains_t g;
+    iter_tune_propose_perturbation(&st, &g);
+
+    // Improvement of 0.30 clears the absolute floor (0.20) by 50% but is
+    // only 6% relative -- far below the 20% relative requirement (1.00 in
+    // absolute terms at this baseline) -- must revert.
+    iter_tune_firing_t trial = mk_firing(7, 0x07, 30.0f, 4.7000f, g.kp, g.ki, g.kd);
+    iter_tune_result_t r = iter_tune_process_firing(&st, &trial, reason, sizeof(reason));
+    // Negative test: if the code used min() instead of max() (or dropped
+    // the relative term when the absolute floor is smaller), this would
+    // flip to ACCEPTED since 0.30 > 0.20.
+    TEST_CHECK(r == ITER_TUNE_RESULT_REVERTED, "clearing only the absolute floor must not be enough at a large baseline");
+
+    // A trial improving by 1.2 (24% relative, clears the 1.00 relative
+    // requirement) must accept. New trial needs its own proposed
+    // perturbation -- the previous one was cleared by the revert above.
+    iter_tune_gains_t g2;
+    iter_tune_propose_perturbation(&st, &g2);
+    iter_tune_firing_t trial2 = mk_firing(7, 0x07, 30.0f, 3.8000f, g2.kp, g2.ki, g2.kd);
+    iter_tune_result_t r2 = iter_tune_process_firing(&st, &trial2, reason, sizeof(reason));
+    TEST_CHECK(r2 == ITER_TUNE_RESULT_ACCEPTED, "a 24%% relative improvement at a large baseline must accept");
 }
 
 static void test_refuses_comparison_across_different_profiles(void)
@@ -377,9 +452,18 @@ static void test_real_capture_data_regression_is_reverted(void)
     TEST_CHECK(r1 == ITER_TUNE_RESULT_REVERTED, "z1's real-capture regression (0.0160->0.0236) must revert");
 
     // And the mirror direction (final -> holdfix_clean, i.e. treating the
-    // SAME pair as an improvement) is large enough on z1 (47.5%) to clear
-    // the 20% floor and accept -- proving the floor doesn't just always
-    // say no.
+    // SAME pair as an improvement) is 47.5% relative -- large enough to
+    // clear the OLD relative-only 20% floor -- but the absolute swing is
+    // only 0.0076, far below ITER_TUNE_MIN_ABSOLUTE_IMPROVEMENT_C (0.20,
+    // this task's addition). UPDATED 2026-09: under the combined
+    // relative+absolute requirement this now correctly reverts too -- these
+    // captures' iae_normalized magnitudes (~0.02-0.03) are an order of
+    // magnitude below the noise_floor.json campaign's measured scale for
+    // this same metric on this same bench (z0-z2 means 0.88-1.60), so a
+    // 47.5% swing of THIS size is not distinguishable from noise no matter
+    // which direction it points -- exactly the case the absolute floor
+    // exists to catch, see test_absolute_floor_blocks_relative_pass_at_
+    // low_baseline() above for the isolated version of this behavior.
     iter_tune_zone_state_t st_z1b;
     memset(&st_z1b, 0, sizeof(st_z1b));
     st_z1b.enabled = true;
@@ -389,7 +473,12 @@ static void test_real_capture_data_regression_is_reverted(void)
     iter_tune_propose_perturbation(&st_z1b, &g1b);
     iter_tune_firing_t trial_z1b = mk_firing(7, 0x07, 25.0f, 0.0160f, g1b.kp, g1b.ki, g1b.kd);
     iter_tune_result_t r1b = iter_tune_process_firing(&st_z1b, &trial_z1b, reason, sizeof(reason));
-    TEST_CHECK(r1b == ITER_TUNE_RESULT_ACCEPTED, "z1's real-capture 47.5% improvement direction must accept");
+    // Negative test: drop the ITER_TUNE_MIN_ABSOLUTE_IMPROVEMENT_C term
+    // from the max() in iter_tune.c (i.e. required = relative_required
+    // alone, the old behavior) and this flips from REVERTED to ACCEPTED --
+    // this line is the exact regression case for that.
+    TEST_CHECK(r1b == ITER_TUNE_RESULT_REVERTED,
+               "z1's real-capture 47.5%% improvement direction is still below the absolute noise floor and must revert");
 }
 
 void run_test_iter_tune(void)
@@ -401,6 +490,8 @@ void run_test_iter_tune(void)
     test_perturbation_clamps_at_ceiling_and_floor();
     test_noise_floor_refuses_small_improvement();
     test_noise_floor_accepts_clear_improvement();
+    test_absolute_floor_blocks_relative_pass_at_low_baseline();
+    test_absolute_floor_does_not_loosen_high_baseline();
     test_refuses_comparison_across_different_profiles();
     test_refuses_comparison_across_different_zone_masks();
     test_refuses_comparison_on_residual_heat();
