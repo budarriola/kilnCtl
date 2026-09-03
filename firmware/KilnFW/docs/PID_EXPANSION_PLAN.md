@@ -1697,6 +1697,122 @@ before this addendum was written, and closing that gap is follow-up work,
 not done here. Before trusting any of them for a hardware decision,
 re-run with `kd=BOARD_ZONE_KD` and confirm the conclusion holds.
 
+**2026-09-03e — the four flagged findings above, re-checked against
+`kd=BOARD_ZONE_KD` (read-only re-run, `plant_sim.py`/`test_plant_sim.py`
+untouched; no firmware change; no gain search run without the module's
+still-missing noise/quantization model active by default).**
+
+1. **Dwell-entry overshoot reproduction — CONFIRMED, gap if anything
+   widened.** Fixed-gain structural comparison (no search over `kp`/`kd`),
+   usable now. Re-ran `run_profile` over all five §3.4 fixture captures
+   (`baseline`/`after`/`ifix`/`holdfix_clean`/`final.jsonl`) with per-zone
+   `kp=BOARD_ZONE_KP, ki=BOARD_ZONE_KI, kd=BOARD_ZONE_KD` in place of the
+   old `kp=0.06, ki=0.0003, kd=0.0` scalar, `climb_mode='coupled'`,
+   `integral_floor='ff_hold'`, and measured the ramp→dwell transition's
+   peak sim-vs-target error in each capture's dwell-entry window. Peaks
+   move from 0.95–1.8 °C @ 42–70 s (old `kd=0.0` scalar) to **0.82–1.42 °C
+   @ 40–85 s** (corrected per-zone gains) against hardware's documented
+   ~2 °C @ 65–145 s — the sim now underestimates the overshoot's
+   *magnitude* by more, not less, though its *timing* shifts later, closer
+   to (still short of) hardware's window. The qualitative verdict — sim
+   reproduces the right direction but undershoots magnitude and peaks too
+   early — holds under the corrected model; it was not an artifact of the
+   missing derivative term. **This does not touch the dwell-entry-overshoot
+   FIX itself (`zone_taper_climb_rate`, `e373c39`), which was validated on
+   hardware and stands regardless.** What it does affect is confidence in
+   using this simulator to size `PROFILE_EXECUTOR_EASE_OFF_WINDOW_MULT`
+   (currently 2.0×): the sim's persistent magnitude/timing gap against
+   hardware means it should not be trusted to pick that multiplier's third
+   decimal place — a **recommendation**, not a change to land, would be a
+   hardware A/B of the window multiplier itself, the same discipline this
+   section applies everywhere else.
+
+2. **Shared-retune "2-of-3 win dissolves" finding — BLOCKED, needs the
+   noise model.** This conclusion depends on a `kp`/`ki` grid SEARCH, the
+   exact category this task's own known limitation applies to. It has
+   already been re-run once against the corrected `BOARD_ZONE_KD` baseline,
+   two sections above this one (2026-09-03d): with the original 0.5×–2.0×
+   grid every zone now exceeds its own noise floor with consistent sign
+   (looks like signal), but every zone's optimum pins at the grid's own
+   edge, and widening the grid to 0.25×–8.0× makes z0/z1's chosen
+   multiplier keep climbing (2.00× → 6.00×/4.00×) instead of converging,
+   while z2's sign flips between "per-zone better" and "shared/baseline
+   better." That is the documented signature of a search with nothing to
+   penalize an ever-larger gain — i.e. exactly the missing
+   measurement-noise/quantization model, not a re-discovery of the original
+   6135ee1 mechanism. **No verdict on "does the win dissolve into a shared
+   retune" can be produced right now**, for either the old or the new
+   claim: the search itself does not converge to an answer under either
+   gain baseline without noise/quantization active to stop it running to
+   the grid's edge. Re-run once the noise model lands, with a fixed grid
+   width decided in advance (per this section's own "no post-hoc grid
+   picking" discipline) so this cannot be re-litigated by choosing a grid
+   that happens to look interior.
+
+3. **Fuzzy-gain sweep (§3.6) — CONFIRMED.** This is a fixed-gain sweep
+   over `fuzzy_strength_pct` (0/25/50/75/100), not a search over `kp`/`kd`,
+   so it is usable now. The original sweep used the old code's single
+   scalar broadcast (`kp=0.0318, ki=0.0001, kd=0.8401` — zone 0's own board
+   gains applied to all three zones, since per-zone `kp`/`ki`/`kd` support
+   did not exist yet when this sweep was written) rather than each zone's
+   real gains. Re-ran the identical sweep (`final.jsonl`'s real segment
+   shape, `climb_mode='coupled'`, `integral_floor='ff_hold'`, rested 24 °C
+   and warm 34 °C starts) with `kp=BOARD_ZONE_KP, ki=BOARD_ZONE_KI,
+   kd=BOARD_ZONE_KD` per zone instead:
+
+   | start | z | 0 | 25 | 50 | 75 | 100 |
+   |---|---|---|---|---|---|---|
+   | 24 C | z0 | 1.273 | 1.349 | 1.431 | 1.517 | 1.617 |
+   | 24 C | z1 | 1.150 | 1.217 | 1.290 | 1.367 | 1.461 |
+   | 24 C | z2 | 0.824 | 0.867 | 0.911 | 0.975 | 1.055 |
+   | 34 C | z0 | 0.902 | 0.937 | 0.977 | 1.024 | 1.084 |
+   | 34 C | z1 | 0.772 | 0.803 | 0.840 | 0.884 | 0.940 |
+   | 34 C | z2 | 0.590 | 0.613 | 0.642 | 0.678 | 0.724 |
+
+   Ranking is still monotonic — `strength=0` scores best at every zone,
+   both starts, no crossover — matching the original sweep exactly in
+   shape. Largest spread across all five strengths is 0.344 °C (z0,
+   rested), still well under the 2.1/1.2/1.3 °C per-zone discrimination
+   thresholds, so the "cannot call a winner" honesty-gate verdict also
+   holds unchanged. The corrected per-zone gains (with real `kd`) do not
+   change this conclusion in either direction or magnitude enough to
+   matter.
+
+4. **Lag-compensated feedforward candidate comparison — CONFIRMED,
+   direction and rough scale, with one softened margin.** Structural
+   comparison at fixed gains (climb-side mechanism only, independent of
+   `kd`), usable now. Re-ran the pinned pooled held-out RMS comparison
+   (`test_lag_compensated_held_out_rms_is_a_regression_not_an_improvement`'s
+   own method: both rested full firings, `p7_oldmatrix_http.jsonl` +
+   `p7_newmatrix_http.jsonl`) with per-zone `kp=BOARD_ZONE_KP,
+   ki=BOARD_ZONE_KI, kd=BOARD_ZONE_KD` instead of the test's default
+   `kp=0.06, ki=0.0003, kd=0.0` scalar:
+
+   | | z0 | z1 | z2 |
+   |---|---|---|---|
+   | `'coupled'` (current), corrected gains | 0.958 | 0.578 | 0.680 |
+   | `'lag_compensated'`, corrected gains | 1.639 | 1.222 | 1.463 |
+   | ratio (lag / coupled) | 1.71× | 2.11× | 2.15× |
+
+   Every zone is still worse under `'lag_compensated'`, by roughly the
+   same ~2× the `kd=0.0` run found (1.96/1.05=1.87×, 1.81/0.61=2.97×,
+   2.25/0.67=3.36× there) — the mechanism reading (crediting only past
+   duty under-credits through the transient windows that dominate
+   whole-run RMS) is unaffected by which gains drive the loop, as expected
+   for a climb-side-only, `kd`-independent candidate. **One margin moved
+   enough to flag**: reading the candidate's own RMS against the §3.4
+   discrimination thresholds the same way the original `kd=0.0` text did
+   (2.1/1.2/1.3 °C), z0's corrected RMS (1.639 °C) now sits clearly *under*
+   its threshold, where the `kd=0.0` run's 1.96 °C read as merely "close
+   to" 2.1 from the other side — z0 alone is weaker evidence than the
+   original text implied. z1 (1.222 vs 1.2) still barely clears its
+   threshold and z2 (1.463 vs 1.3) clears it more comfortably, so two of
+   three zones still individually distinguish from noise on this
+   candidate's own absolute error, and the ratio-based reading (~2× worse
+   than `'coupled'`, essentially unchanged from the `kd=0.0` run) holds
+   across all three zones regardless. Verdict unchanged: NOT adopted,
+   `climb_mode='lag_compensated'` stays simulation-only/opt-in.
+
 No firmware change made here (constraint of this pass). Reproducible via
 `plant_sim.per_zone_gain_holdout_report(rows_fit, rows_test,
 grid=<wider tuple to check convergence>)`; pinned by
