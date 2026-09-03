@@ -9,6 +9,94 @@ truth, not the checkboxes.** Nothing below is marked done until a commit is
 named. Every number is either measured and attributed, or explicitly labelled
 as an estimate.
 
+**Update 2026-09-02 (fourth pass) — section 9 closed (unflashed), a second
+write-guard gap closed, and the section 4.3/7 measurement procedure now
+exists as code, tested without hardware.** Board access was off-limits this
+pass (mid-firing, heaters energized) -- everything below is source/host-test
+only.
+
+1. **Section 9 (`profile_exec_wdt`, 368 B free of 2560 B, 14.4% CRITICAL) --
+   fixed, unflashed.** `profile_executor_start.c`'s `xTaskCreatePinnedToCore()`
+   for this task now requests 4096 B (was 2560), matching `profile_executor`'s
+   own configured size -- the measured worst case (~2192 B used) left too
+   little slack for code paths (`run_state_note()` on the safety-link-abort
+   branch, `safety_link_get_status()`, `guard9_assert_stale_tick_fault()`,
+   `heat_enable_reconcile()`) this pass's static read did not rule out as
+   exercised. Not a guess: the new size was chosen against the one number
+   this task actually reported, with headroom modeled on its sibling task's
+   measured percentage. `stack_margin_register()`'s constant was updated in
+   the same commit, per that function's own "must match the xTaskCreate*()
+   argument" convention. Still needs the next boot's `stack_margin` read to
+   confirm the new worst case, same as every other unflashed change in this
+   plan -- see the reflash step in section 7's update below, this task's
+   number should be pulled in the same session.
+
+2. **Write-path coverage re-audit found two more of the same gap class the
+   third pass fixed, both now closed:** `run_state.c`'s and `relay_cycles.c`'s
+   own `migrate_from_default_partition()` functions write NVS
+   (`nvs_set_blob()`/`nvs_commit()`) but had never received the
+   `caller_stack_is_external()` guard those files' main write paths
+   (`persist_locked()`) already carry -- the third pass's fix covered the
+   file's headline write function and treated the file as done, without
+   re-checking every OTHER write call site in it. A third instance of the
+   identical pattern turned up in `profiles_http.c`: `nvs_erase_slot()`
+   writes NVS next to the already-guarded `nvs_save_slot()` but had no guard
+   of its own. All three are init-time (`run_state_init()`/
+   `relay_cycles_init()`, both called once from `app_main`'s own
+   internal-stack task before any PSRAM-stacked task exists) or
+   httpd-worker-only (`nvs_erase_slot()`'s two callers are both delete-profile
+   HTTP handlers) today, so none of them was live -- but each would have read
+   as "this file is covered" to a file-level audit, which is exactly the
+   false-confidence class the third pass's own finding described. Guards
+   added, matching the established refusal message/pattern.
+
+   **New standing check:** `tools/check_nvs_write_guard_coverage.ps1`
+   (auto-discovered by `run_all_checks.ps1`, now 27/27) parses every function
+   body in the six files that have opted into the `caller_stack_is_external()`
+   convention (`kiln_cfg_store.c`, `safety_cfg_store.c`, `profiles_http.c`,
+   `relay_cycles.c`, `run_state.c`, `profile_executor_firing_stats.c`) and
+   fails by function name if any of them calls `nvs_set_*()`/`nvs_commit()`/
+   `esp_partition_write()`/`esp_partition_erase_range()` without also calling
+   `caller_stack_is_external()` in the same body. This is scoped to files
+   already on the convention, not the 12 unguarded modules
+   (`adaptive_tune.c`, `boot_guard.c`, `crash_report.c`, `ota_http.c`,
+   `ota_record.c`, `profiles_builtin.c`, `time_sync.c`, `touch_cal_store.c`,
+   `unit_pref.c`, `watchdog_cfg.c`, `wifi_prov.c`, `zones_config_store.c`) --
+   the third pass's per-candidate trace found none of those reachable from a
+   section 7.3 relocation candidate, so adding the guard there is a
+   different task's call. Proved red: commented out `nvs_erase_slot()`'s
+   guard, ran the check, got `NVS WRITE GUARD COVERAGE CHECK FAILED: ...
+   profiles_http.c : nvs_erase_slot()`; reverted, check passed again.
+
+3. **Section 4.3/7 measurement procedure now exists as code**, not just
+   prose: `tools/PcTools/src/kilnctrl/stack_margin_baseline.py` (pure,
+   no link access) turns a `get_stack_margin()` + `get_fw_version()` reading
+   into a timestamped, commit-tagged JSON record; `worst_case_across_
+   conditions()` combines records from multiple load conditions into the
+   single number each task's real worst case actually is (the minimum
+   `hwm_bytes` seen, preferring a live reading over a dead one so a boot-race
+   dead entry under one condition can't masquerade as "the" worst case); and
+   `render_markdown_table()` emits section 3.1's exact column shape, ready to
+   paste in. `tools/PcTools/scripts/capture_stack_margin_baseline.py` is the
+   thin CLI wrapper that does the real UART round trip (`kiln_call`-style
+   `m.connect()` / `m._info.get_stack_margin()` / `m._info.get_fw_version()`)
+   and writes into `firmware/KilnFW/docs/stack_margin_baseline/`; run it once
+   per condition (`idle`, `mid_firing`, `web_ui_open` -- see the module's own
+   docstring for why each matters, matching this section's existing
+   reasoning) and then with `--report` for the combined table. Tested against
+   fabricated `StackMarginEntry`/`FirmwareVersion` objects only
+   (`tools/PcTools/tests/test_stack_margin_baseline.py`, 10 tests, all
+   passing standalone and inside the full `run_pctools_tests` suite) --
+   no board was contacted while writing or testing this. Proved a mutation
+   can fail: broke the dead-vs-alive preference in
+   `worst_case_across_conditions()`, `test_worst_case_prefers_a_live_
+   reading_over_a_dead_one` failed with `assert False is True`; reverted.
+
+   This module is the CODE half of the procedure; it does not itself capture
+   anything against the still-mid-firing board, and the next pass with
+   hardware access is the one that actually runs it three times and pastes
+   the resulting table into section 3.1.
+
 Status (2026-09-02): the history ring moved to PSRAM (`4c0d703`, ~21 kB
 reclaimed), Phase 1 step 1 landed in both `sdkconfig.defaults` and the
 generated `sdkconfig` (8192, unsoaked), the PSRAM-stack write guards and the
@@ -572,11 +660,17 @@ Move one task per commit, with a soak between. Do not batch.
 
 ## 9. Open item carried out of the baseline capture
 
-**`profile_exec_wdt` at 368 B free of 2560 B (14.4%).** Found while capturing
-the 3.1 baseline. It is unrelated to PSRAM and belongs to no phase of this
-plan, but it should not be lost.
+**`profile_exec_wdt` at 368 B free of 2560 B (14.4%). Fixed 2026-09-02
+(fourth pass), unflashed.** Found while capturing the 3.1 baseline. It is
+unrelated to PSRAM and belongs to no phase of this plan, but it should not be
+lost.
 
 This is guard 9's watchdog task — the thing that is supposed to still be
-running when other things are not. It should be enlarged, and the reason it is
-running that close to the edge should be understood rather than papered over
-with a bigger number. Worth handling before this plan starts, not after.
+running when other things are not. `profile_executor_start.c` now creates it
+with 4096 B (was 2560), matching `profile_executor`'s own configured size --
+see the top-of-file update note for the reasoning and what specifically in
+`watchdog_task_entry()`'s body made 2560 too tight. This was a size change
+only, not a relocation, so it needed no soak to land in source, but it is
+still unflashed (the board is mid-firing) -- the next boot's `stack_margin`
+read should confirm the new worst case and can be pulled in the same pass
+that captures section 7's cap-raise numbers.
