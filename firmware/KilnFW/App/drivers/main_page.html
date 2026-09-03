@@ -243,6 +243,15 @@
                         border-left-color: var(--bad); }
   .banner.safety-trip h3, .banner.safety-trip .row, .banner.safety-trip .row span,
   .banner.safety-trip .note { color: #fff; }
+  /* PID_EXPANSION_PLAN.md sec 7.4 "falling behind" banner: ramp-lock is a
+     NORMAL, healthy executor mechanism (it is how every zone is guaranteed
+     to actually reach its target before the shared setpoint advances), not
+     a fault -- so this deliberately does NOT reuse .banner.interrupted /
+     .banner.safety-trip's --bad treatment. --ok is the same "things are
+     working as designed" colour the rest of the page already uses for a
+     healthy state. */
+  .banner.lag { border-left-color: var(--ok); }
+  .banner.lag h3 { color: var(--ok); }
   /* 2026-08-21 rework item 11: relay status shown next to each channel's
      temperature, sourced by joining zonesCache (thermo_mask/relay_mask,
      already loaded once by loadZones() -- see script below) against
@@ -354,6 +363,14 @@
      intro text, the extra section labels no longer added information, only
      vertical space. -->
 <div id="execCard"></div>
+<!-- PID_EXPANSION_PLAN.md sec 7.4: "kiln is falling behind" banner. Sits
+     directly under execCard (which already has a terser "Ramp-lock held"
+     row) and ABOVE the chart/progress bar/sticky STOP FIRING bar, so it is
+     visible without hunting but never covers the live chart or the stop
+     control. Empty by default, same hide-when-nothing-to-report pattern as
+     the banners above -- see renderLagBanner()'s own comment for the
+     debounce and wording rationale. -->
+<div id="lagBanner"></div>
 <!-- 2026-08-21 dashboard reflow: the history canvas now sits directly under
      execCard, ABOVE the profile picker (owner's explicit ordering request),
      matching the intuition that "what's happening" (live exec state, then
@@ -1968,6 +1985,113 @@ function renderExec(st) {
   card.innerHTML = html;
 }
 
+// -- "Kiln is falling behind" banner (PID_EXPANSION_PLAN.md sec 7.4) -------
+// Ramp-lock (ramp_lock_held/ramp_lock_lagging_mask, already read above in
+// renderExec()'s terser in-card row) is a NORMAL executor mechanism: it
+// holds the shared setpoint from advancing until every zone catches up, so
+// no target is ever skipped just because one zone is thermally slower. This
+// banner is the operator-visible version of that same state -- worded as an
+// explanation ("behind, catching up"), never as a fault. An actual zone
+// fault already gets its own "FAULTED" row in renderExec() above and is
+// untouched by this code.
+//
+// LAG_DEBOUNCE_TICKS: poll()'s /api/profile_exec fetch runs on a 2s cadence
+// (see poll()'s own setTimeout(poll, 2000)). A single momentary lock --
+// e.g. a duty-cycle transient tripping the >3C-from-setpoint test for one
+// tick and clearing before the next -- is routine and must NOT flash this
+// banner; that would train the operator to stop reading it. Requiring 3
+// CONSECUTIVE lagging ticks (6s sustained) before showing filters that
+// blip out while still surfacing a real stretch well within one poll of it
+// becoming visible in the chart. Clearing is deliberately NOT debounced --
+// the instant a tick reports the lock released, the banner drops immediately,
+// since disappearing one tick early is not the failure mode being guarded
+// against (only a false, unwarranted APPEARANCE is).
+var LAG_DEBOUNCE_TICKS = 3;
+var lagConsecutiveTicks = 0;
+var lagBannerShown = false;
+
+// Pure (no DOM, no module-level state): turns one /api/profile_exec payload
+// into the lagging-zone list this banner needs. Kept separate from the
+// debounce/render logic below so a Node test harness can exercise it
+// directly against representative payloads.
+//
+// PID_EXPANSION_PLAN.md sec 7.4 notes a concurrent pass may add a richer
+// server-computed "sustained lag" field to this same endpoint (the owner
+// asked for the event log to carry duration/actual/target numbers too,
+// which implies the C side ends up computing something equivalent). This
+// function PREFERS that field -- read defensively (Array.isArray + a
+// per-entry field check) so an absent, null, or differently-shaped field
+// falls straight through to the ramp_lock_held/ramp_lock_lagging_mask
+// fields this page already depends on today, with zero required schema
+// beyond what renderExec() above already needs. If the richer field lands
+// under a different name than guessed here (ramp_lock_lag_detail), this
+// falls back correctly rather than silently doing nothing.
+function deriveLagZones(st) {
+  if (!st) return [];
+  if (Array.isArray(st.ramp_lock_lag_detail)) {
+    return st.ramp_lock_lag_detail.filter(function (e) {
+      return e && typeof e.zone === 'number' &&
+             typeof e.actual_c === 'number' && typeof e.target_c === 'number';
+    }).map(function (e) {
+      return { zone: e.zone, actualC: e.actual_c, targetC: e.target_c };
+    });
+  }
+  if (!st.ramp_lock_held) return [];
+  var zonesByIndex = {};
+  (st.zones || []).forEach(function (z) { zonesByIndex[z.zone] = z; });
+  var out = [];
+  for (var zb = 0; zb < 8; zb++) {
+    if (!(st.ramp_lock_lagging_mask & (1 << zb))) continue;
+    var z = zonesByIndex[zb];
+    out.push({
+      zone: zb,
+      actualC: (z && z.actual_valid) ? z.actual_c : null,
+      // Shared setpoint (st.target_c) -- /api/profile_exec has no per-zone
+      // target, same field renderExec()'s "Shared target" row already uses.
+      targetC: (typeof st.target_c === 'number') ? st.target_c : null,
+    });
+  }
+  return out;
+}
+
+// Stateful: advances the module-level debounce counters from one poll()
+// tick's (firing?, laggingZones) and returns whether the banner should be
+// showing right now. Split from deriveLagZones so the harness can drive
+// debounce timing (consecutive ticks, a single-tick blip) independently of
+// payload shape.
+function updateLagBannerVisibility(firing, zones) {
+  if (!firing || zones.length === 0) {
+    lagConsecutiveTicks = 0;
+    lagBannerShown = false;
+    return false;
+  }
+  lagConsecutiveTicks++;
+  if (lagConsecutiveTicks >= LAG_DEBOUNCE_TICKS) lagBannerShown = true;
+  return lagBannerShown;
+}
+
+function renderLagBanner(st) {
+  var el = document.getElementById('lagBanner');
+  if (!el) return;
+  var zones = deriveLagZones(st);
+  // Ramp-lock only stretches an actively RUNNING schedule -- a paused run
+  // isn't advancing anyway, so "behind schedule" doesn't apply to it, and
+  // this must never show while idle/faulted/done (isFiringActive() above
+  // covers running+paused, deliberately narrower here to just 'running').
+  var firing = !!st && st.state === 'running';
+  var show = updateLagBannerVisibility(firing, zones);
+  if (!show) { el.innerHTML = ''; return; }
+  var items = zones.map(function (z) {
+    var name = zoneName(z.zone);
+    if (z.actualC == null || z.targetC == null) return name;
+    return name + ' &mdash; ' + window.kcUnit.fmt(z.actualC) + ' vs target ' + window.kcUnit.fmt(z.targetC);
+  });
+  el.innerHTML = '<div class="banner lag"><h3>Kiln is falling behind schedule</h3>' +
+    '<div class="row"><span>' + items.join('; ') + '</span></div>' +
+    '<div class="note">This is normal ramp-lock behaviour, not a fault &mdash; ' +
+    'the schedule is being stretched to give ' + (items.length > 1 ? 'these zones' : 'this zone') +
+    ' time to catch up before the next target.</div></div>';
+}
 
 // If a start attempt fails, decide whether it failed because the BOARD
 // isn't ready (missing zones, no thermocouple board, safety link down, ...)
@@ -3153,6 +3277,7 @@ function pollExec() {
     renderExec(st);
     renderLastRun(st);
     renderProgress(st);
+    renderLagBanner(st);
     var idleNow = !st || st.state === 'idle';
     var planId = idleNow ? undefined : st.profile_id;
     if (planId !== lastExecPlanId) {
@@ -3279,6 +3404,7 @@ function poll() {
       renderExec(st);
       renderLastRun(st);
       renderProgress(st);
+      renderLagBanner(st);
       var idleNow = !st || st.state === 'idle';
       // New-run detection for the client-side firing series, same shape as
       // pollAutotune()'s own newRun check -- either a fresh idle/done/
