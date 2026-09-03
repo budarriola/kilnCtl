@@ -339,11 +339,21 @@ function checkRamp(input) {
   var ceiling = currentCeiling();
   var rate = parseFloat(input.value) || 0;
   input.classList.remove('near-ceiling', 'over-ceiling');
+  // near-ceiling/over-ceiling are colour-only in the CSS above (border-color,
+  // --warn vs --bad) -- WEB_UI_RESPONSIVE_PLAN.md's colour-contrast audit
+  // flagged that pair as only 1.0-1.1:1 apart in luminance, so a border
+  // colour alone does not reliably tell the two states apart. `title` adds a
+  // non-colour cue (read by a screen reader, and on hover/long-press) without
+  // touching layout or repainting anything -- an empty title below is the
+  // "no warning" case and clears whatever the previous state left behind.
+  input.title = '';
   if (ceiling <= 0 || rate <= 0) return;
   if (rate > ceiling) {
     input.classList.add('over-ceiling');
+    input.title = 'Over the ' + ceiling + ' °C/hr ramp ceiling for the selected zone(s).';
   } else if (rate > RAMP_WARN_FRACTION * ceiling) {
     input.classList.add('near-ceiling');
+    input.title = 'Near the ' + ceiling + ' °C/hr ramp ceiling for the selected zone(s).';
   }
 }
 

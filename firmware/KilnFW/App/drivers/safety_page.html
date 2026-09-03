@@ -250,7 +250,15 @@ if the Pico's diagnostics are too stale to trust.</p>
       if (st.diag_state === 4) tempCls = 'past';       // TRIPPED
       else if (st.diag_state === 3) tempCls = 'near';  // WARN
     }
-    set('safetyTemp', fmtC(st.safety_temp_c), tempCls);
+    // .near/.past are colour-only in the CSS (--warn) -- WEB_UI_RESPONSIVE_
+    // PLAN.md's colour-contrast audit found --ok/--warn/--bad only 1.0-1.7:1
+    // apart in luminance against each other, so a reader relying on
+    // brightness (or with red/green colour vision deficiency) can't tell
+    // this reading apart from a normal one by colour alone. A plain text
+    // suffix is the minimal fix that adds no new element and repaints
+    // nothing -- same font, same colour rule, just more characters.
+    var tempSuffix = tempCls === 'past' ? ' -- TRIPPED' : (tempCls === 'near' ? ' -- WARN' : '');
+    set('safetyTemp', fmtC(st.safety_temp_c) + tempSuffix, tempCls);
 
     // S12 (firmware/SaftyFW/docs/SAFETY_MODEL.md sec on "Cold junction /
     // enclosure over-temperature"): cj_warn_c = 60 C, cj_max_c = 85 C,
@@ -267,7 +275,9 @@ if the Pico's diagnostics are too stale to trust.</p>
       if (st.enclosure_temp_c >= 85) enclosureCls = 'past';
       else if (st.enclosure_temp_c >= 60) enclosureCls = 'near';
     }
-    set('enclosureTemp', fmtC(st.enclosure_temp_c), enclosureCls);
+    // Same colour-only gap as safetyTemp above -- see that comment.
+    var enclosureSuffix = enclosureCls === 'past' ? ' -- OVER LIMIT' : (enclosureCls === 'near' ? ' -- NEAR LIMIT' : '');
+    set('enclosureTemp', fmtC(st.enclosure_temp_c) + enclosureSuffix, enclosureCls);
 
     // power_valid is already false whenever p_total_w came back NaN --
     // including the "mains_voltage_v not configured" case (dashboard_http.h's
