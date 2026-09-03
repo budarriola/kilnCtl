@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "generated_from": [],
+  "band_c": 1.0,
+  "n_repeats": 0,
+  "note": "PLACEHOLDER -- not yet measured. Run the campaign (see PID_EXPANSION_PLAN.md SS3.3, run_queue.py --repeat, noise_floor.py build) to fill this in with N>=5 rested-start profile-7 repeats of one preset, then regenerate with: python -m kilnctrl.noise_floor build <run1.jsonl> <run2.jsonl> ... --out tools/PcTools/config_presets/noise_floor.json. pid_ab_compare.py treats an empty entries dict exactly like a missing artifact -- every verdict stays PROVISIONAL until this is regenerated for real.",
+  "entries": {}
+}
