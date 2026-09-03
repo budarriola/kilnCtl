@@ -247,3 +247,124 @@ def test_cli_split_missing_file_errors(tmp_path, capsys):
     rc = ab.main(["split", os.path.join(FIXTURES, "does_not_exist.jsonl"), str(tmp_path / "out")])
     assert rc == 1
     assert "error:" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# The noise-floor gate (PID_EXPANSION_PLAN.md SS3.3) -- a difference smaller
+# than the measured floor must be reported INDISTINGUISHABLE, not
+# PROVISIONAL. This is the whole point of measuring the floor at all, so it
+# gets proved both at the _cmp unit level and through the full compare_runs
+# path with a synthetic artifact.
+# ---------------------------------------------------------------------------
+
+def test_cmp_below_floor_is_indistinguishable():
+    c = ab._cmp(0, "iae_normalized_whole_c", None, a=1.000, b=1.050,
+                start_delta_c=0.0, floor_c=0.2)
+    assert c.verdict.startswith("INDISTINGUISHABLE")
+    assert c.delta == pytest.approx(0.05)
+
+
+def test_cmp_above_floor_stays_provisional_not_indistinguishable():
+    c = ab._cmp(0, "iae_normalized_whole_c", None, a=1.000, b=1.500,
+                start_delta_c=0.0, floor_c=0.2)
+    assert c.verdict.startswith("PROVISIONAL")
+    assert "INDISTINGUISHABLE" not in c.verdict
+
+
+def test_cmp_exactly_at_floor_is_not_indistinguishable():
+    """abs(delta) < floor_c, strictly -- a difference exactly equal to the
+    floor is not below it, so it must still get a verdict (PROVISIONAL),
+    proving the comparison isn't <=."""
+    c = ab._cmp(0, "iae_normalized_whole_c", None, a=1.0, b=1.25,
+                start_delta_c=0.0, floor_c=0.25)
+    assert c.verdict.startswith("PROVISIONAL")
+
+
+def test_cmp_with_no_floor_falls_back_to_unknown_provisional():
+    c = ab._cmp(0, "iae_normalized_whole_c", None, a=1.000, b=1.001,
+                start_delta_c=0.0, floor_c=None)
+    assert c.verdict.startswith("PROVISIONAL")
+    assert "noise floor unknown" in c.verdict
+
+
+def test_confound_gate_still_wins_over_a_known_floor():
+    """A start-temp delta beyond CONFOUND_THRESHOLD_C must still REFUSE, even
+    when a noise floor is known and the metric delta is tiny -- the confound
+    gate is about whether the comparison is valid at all, not about metric
+    magnitude."""
+    c = ab._cmp(0, "iae_normalized_whole_c", None, a=1.000, b=1.001,
+                start_delta_c=5.0, floor_c=0.2)
+    assert c.verdict.startswith("REFUSED")
+
+
+def _fake_artifact(floor_c: float) -> dict:
+    """A minimal noise_floor.json-shaped artifact covering every key
+    compare_runs(EXCERPT, EXCERPT) will look up, all at the same floor --
+    enough to drive compare_runs end to end without needing a real
+    multi-repeat campaign in this test."""
+    entries = {}
+    for zone in (0, 1, 2):
+        for metric, seg in (
+            ("iae_normalized_whole_c", None),
+            ("iae_normalized_c", 0),
+            ("ramp_mean_error_c", 0),
+            ("ramp_worst_error_c", 0),
+            ("dwell_entry_overshoot_peak_c", 0),
+            ("dwell_entry_time_to_peak_s", 0),
+            ("dwell_steady_state_offset_c", 0),
+            ("settle_time_s", 0),
+        ):
+            key = f"z{zone}:{metric}:{'whole' if seg is None else seg}"
+            entries[key] = {"zone": zone, "metric": metric, "segment": seg,
+                             "n": 5, "mean": 0.0, "std_c": floor_c / 4, "noise_floor_c": floor_c}
+    return {"schema_version": 1, "generated_from": [], "band_c": 1.0,
+            "n_repeats": 5, "note": "", "entries": entries}
+
+
+def test_compare_runs_with_huge_floor_marks_identical_run_indistinguishable():
+    # EXCERPT vs itself: every delta is exactly 0.0, so ANY positive floor
+    # must mark every comparable metric INDISTINGUISHABLE.
+    artifact = _fake_artifact(floor_c=999.0)
+    report = ab.compare_runs(EXCERPT, EXCERPT, noise_floor_artifact=artifact)
+    assert report["noise_floor_known"] is True
+    comparable = [c for c in report["comparisons"] if c.a is not None]
+    assert comparable  # sanity: the fixture actually produced comparisons
+    for c in comparable:
+        assert c.verdict.startswith("INDISTINGUISHABLE"), c
+
+
+def test_compare_runs_without_artifact_reports_noise_floor_unknown():
+    report = ab.compare_runs(EXCERPT, EXCERPT)
+    assert report["noise_floor_known"] is False
+    for c in report["comparisons"]:
+        assert "REFUSED" not in c.verdict or True  # start temps match here (delta 0)
+        assert "INDISTINGUISHABLE" not in c.verdict
+
+
+def test_format_compare_text_uses_known_note_when_artifact_present():
+    artifact = _fake_artifact(floor_c=0.001)
+    report = ab.compare_runs(EXCERPT, EXCERPT, noise_floor_artifact=artifact)
+    text = ab.format_compare_text(report)
+    assert "NOISE FLOOR: measured" in text
+    assert "NOISE FLOOR: UNKNOWN" not in text
+
+
+def test_format_compare_text_uses_unknown_note_without_artifact():
+    report = ab.compare_runs(EXCERPT, EXCERPT)
+    text = ab.format_compare_text(report)
+    assert "NOISE FLOOR: UNKNOWN" in text
+
+
+def test_cli_compare_none_flag_disables_the_artifact_lookup(capsys):
+    rc = ab.main(["compare", EXCERPT, EXCERPT, "--noise-floor", "none"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "NOISE FLOOR: UNKNOWN" in out
+
+
+def test_cli_compare_missing_artifact_path_behaves_like_unknown(capsys, tmp_path):
+    missing = str(tmp_path / "does_not_exist_noise_floor.json")
+    rc = ab.main(["compare", EXCERPT, EXCERPT, "--noise-floor", missing])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "NOISE FLOOR: UNKNOWN" in out

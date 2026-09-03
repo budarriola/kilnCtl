@@ -56,6 +56,7 @@ from typing import Optional, Sequence
 
 from kilnctrl import log_analysis as la
 from kilnctrl import http_capture_log as hc
+from kilnctrl import noise_floor as nf
 
 CONFOUND_THRESHOLD_C = 1.0
 
@@ -66,6 +67,15 @@ NOISE_FLOOR_NOTE = (
     "delta and produced +22.5/+47.5/+28.6% swings -- evidence that start-temp "
     "alone can dominate, not a calibrated noise floor. Nothing below is a "
     "confirmed result."
+)
+
+NOISE_FLOOR_KNOWN_NOTE = (
+    "NOISE FLOOR: measured (tools/PcTools/config_presets/noise_floor.json, see "
+    "noise_floor.py / PID_EXPANSION_PLAN.md SS3.3). A per-(zone, metric, "
+    "segment) difference smaller than its measured floor is reported "
+    "INDISTINGUISHABLE below, not PROVISIONAL -- it is not attributable to "
+    "whatever this A/B comparison is testing. A key with no floor entry "
+    "(never covered by the repeat campaign) still falls back to PROVISIONAL."
 )
 
 
@@ -214,7 +224,8 @@ class MetricComparison:
 
 
 def _cmp(zone: int, metric: str, segment: Optional[int], a: Optional[float], b: Optional[float],
-         start_delta_c: float, smaller_is_better: bool = True) -> MetricComparison:
+         start_delta_c: float, smaller_is_better: bool = True,
+         floor_c: Optional[float] = None) -> MetricComparison:
     if a is None or b is None or (isinstance(a, float) and math.isnan(a)) or (isinstance(b, float) and math.isnan(b)):
         return MetricComparison(zone, metric, segment, a, b, None, "n/a: missing data")
     delta = b - a
@@ -225,20 +236,31 @@ def _cmp(zone: int, metric: str, segment: Optional[int], a: Optional[float], b: 
             f"{CONFOUND_THRESHOLD_C:.1f}C confound threshold -- cannot attribute this "
             f"difference to fuzzy strength",
         )
+    if floor_c is not None and abs(delta) < floor_c:
+        return MetricComparison(
+            zone, metric, segment, a, b, delta,
+            f"INDISTINGUISHABLE: |delta|={abs(delta):.3f} is below the measured noise "
+            f"floor {floor_c:.3f} for this (zone, metric, segment) -- not attributable "
+            f"to whatever is being compared",
+        )
     if smaller_is_better:
         better = "B" if abs(b) < abs(a) else ("A" if abs(a) < abs(b) else "tie")
     else:
         better = "B" if b < a else ("A" if a < b else "tie")
+    floor_note = (
+        f"exceeds measured floor {floor_c:.3f}" if floor_c is not None else "noise floor unknown"
+    )
     return MetricComparison(
         zone, metric, segment, a, b, delta,
         f"PROVISIONAL: {better} {'lower-magnitude' if smaller_is_better else 'lower'} "
-        f"(noise floor unknown -- not a confirmed result)",
+        f"({floor_note} -- not a confirmed result)",
     )
 
 
 def compare_runs(
     path_a: str, path_b: str, band_c: float = 1.0,
     run_index_a: Optional[int] = None, run_index_b: Optional[int] = None,
+    noise_floor_artifact: Optional[dict] = None,
 ) -> dict:
     try:
         rows_a = load_run(path_a, run_index=run_index_a)
@@ -258,37 +280,41 @@ def compare_runs(
         if not math.isnan(metrics_a[z].start_temp_c) and not math.isnan(metrics_b[z].start_temp_c)
     }
 
+    def _floor(z: int, metric: str, seg: Optional[int]) -> Optional[float]:
+        return nf.floor_lookup(noise_floor_artifact, z, metric, seg)
+
     comparisons: list = []
     for z in zones:
         ma, mb = metrics_a[z], metrics_b[z]
         sd = start_deltas.get(z, math.inf)  # unknown start temp -> maximally distrustful
-        comparisons.append(_cmp(z, "iae_normalized_whole_c", None, ma.iae_normalized_whole_c, mb.iae_normalized_whole_c, sd))
+        comparisons.append(_cmp(z, "iae_normalized_whole_c", None, ma.iae_normalized_whole_c, mb.iae_normalized_whole_c, sd, floor_c=_floor(z, "iae_normalized_whole_c", None)))
         segs = sorted(set(ma.iae_normalized_by_segment) & set(mb.iae_normalized_by_segment))
         for seg in segs:
-            comparisons.append(_cmp(z, "iae_normalized_c", seg, ma.iae_normalized_by_segment.get(seg), mb.iae_normalized_by_segment.get(seg), sd))
+            comparisons.append(_cmp(z, "iae_normalized_c", seg, ma.iae_normalized_by_segment.get(seg), mb.iae_normalized_by_segment.get(seg), sd, floor_c=_floor(z, "iae_normalized_c", seg)))
         segs = sorted(set(ma.ramp_mean_error_c) & set(mb.ramp_mean_error_c))
         for seg in segs:
-            comparisons.append(_cmp(z, "ramp_mean_error_c", seg, ma.ramp_mean_error_c.get(seg), mb.ramp_mean_error_c.get(seg), sd))
+            comparisons.append(_cmp(z, "ramp_mean_error_c", seg, ma.ramp_mean_error_c.get(seg), mb.ramp_mean_error_c.get(seg), sd, floor_c=_floor(z, "ramp_mean_error_c", seg)))
         segs = sorted(set(ma.ramp_worst_error_c) & set(mb.ramp_worst_error_c))
         for seg in segs:
-            comparisons.append(_cmp(z, "ramp_worst_error_c", seg, ma.ramp_worst_error_c.get(seg), mb.ramp_worst_error_c.get(seg), sd))
+            comparisons.append(_cmp(z, "ramp_worst_error_c", seg, ma.ramp_worst_error_c.get(seg), mb.ramp_worst_error_c.get(seg), sd, floor_c=_floor(z, "ramp_worst_error_c", seg)))
         segs = sorted(set(ma.dwell_entry_overshoot_peak_c) & set(mb.dwell_entry_overshoot_peak_c))
         for seg in segs:
-            comparisons.append(_cmp(z, "dwell_entry_overshoot_peak_c", seg, ma.dwell_entry_overshoot_peak_c.get(seg), mb.dwell_entry_overshoot_peak_c.get(seg), sd))
+            comparisons.append(_cmp(z, "dwell_entry_overshoot_peak_c", seg, ma.dwell_entry_overshoot_peak_c.get(seg), mb.dwell_entry_overshoot_peak_c.get(seg), sd, floor_c=_floor(z, "dwell_entry_overshoot_peak_c", seg)))
         segs = sorted(set(ma.dwell_entry_time_to_peak_s) & set(mb.dwell_entry_time_to_peak_s))
         for seg in segs:
             a_v, b_v = ma.dwell_entry_time_to_peak_s.get(seg), mb.dwell_entry_time_to_peak_s.get(seg)
-            comparisons.append(_cmp(z, "dwell_entry_time_to_peak_s", seg, a_v, b_v, sd, smaller_is_better=False))
+            comparisons.append(_cmp(z, "dwell_entry_time_to_peak_s", seg, a_v, b_v, sd, smaller_is_better=False, floor_c=_floor(z, "dwell_entry_time_to_peak_s", seg)))
         segs = sorted(set(ma.dwell_steady_state_offset_c) & set(mb.dwell_steady_state_offset_c))
         for seg in segs:
-            comparisons.append(_cmp(z, "dwell_steady_state_offset_c", seg, ma.dwell_steady_state_offset_c.get(seg), mb.dwell_steady_state_offset_c.get(seg), sd))
+            comparisons.append(_cmp(z, "dwell_steady_state_offset_c", seg, ma.dwell_steady_state_offset_c.get(seg), mb.dwell_steady_state_offset_c.get(seg), sd, floor_c=_floor(z, "dwell_steady_state_offset_c", seg)))
         segs = sorted(set(ma.settle_time_s) & set(mb.settle_time_s))
         for seg in segs:
             a_v, b_v = ma.settle_time_s.get(seg), mb.settle_time_s.get(seg)
-            comparisons.append(_cmp(z, "settle_time_s", seg, a_v, b_v, sd, smaller_is_better=False))
+            comparisons.append(_cmp(z, "settle_time_s", seg, a_v, b_v, sd, smaller_is_better=False, floor_c=_floor(z, "settle_time_s", seg)))
 
     return {
         "path_a": path_a, "path_b": path_b,
+        "noise_floor_known": bool(noise_floor_artifact and noise_floor_artifact.get("entries")),
         "zones": zones,
         "start_temps_a": {z: metrics_a[z].start_temp_c for z in zones},
         "start_temps_b": {z: metrics_b[z].start_temp_c for z in zones},
@@ -337,7 +363,7 @@ def format_compare_text(report: dict) -> str:
         return f"error: {report['error']}"
     lines = [
         f"A/B compare: A={report['path_a']}  B={report['path_b']}",
-        NOISE_FLOOR_NOTE,
+        NOISE_FLOOR_KNOWN_NOTE if report.get("noise_floor_known") else NOISE_FLOOR_NOTE,
         "",
     ]
     for z in report["zones"]:
@@ -396,6 +422,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     p_cmp.add_argument("--run-a", dest="run_a", type=int, default=None, help="explicit run index for path_a, required if it holds more than one run")
     p_cmp.add_argument("--run-b", dest="run_b", type=int, default=None, help="explicit run index for path_b, required if it holds more than one run")
     p_cmp.add_argument("--json", action="store_true")
+    p_cmp.add_argument("--noise-floor", dest="noise_floor_path", default=nf.DEFAULT_ARTIFACT_PATH,
+                        help="path to the noise_floor.json artifact (default: the checked-in one); "
+                             "pass 'none' to compare without it, as if it never existed")
 
     p_split = sub.add_parser(
         "split",
@@ -421,8 +450,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         else:
             print(format_single_run_text(args.path, metrics))
     elif args.cmd == "compare":
+        artifact = None if args.noise_floor_path.lower() == "none" else nf.load_artifact(args.noise_floor_path)
         report = compare_runs(args.path_a, args.path_b, band_c=args.band,
-                               run_index_a=args.run_a, run_index_b=args.run_b)
+                               run_index_a=args.run_a, run_index_b=args.run_b,
+                               noise_floor_artifact=artifact)
         print(compare_report_to_json(report) if args.json else format_compare_text(report))
         return 1 if "error" in report else 0
     elif args.cmd == "split":
