@@ -499,6 +499,25 @@ transient-window, both static inversions — is sufficient to gate this
 class of matrix change; the adoption decision remains, as recorded above,
 an owner call made with that caveat attached, not a metric-validated one.
 
+**Re-identification is now one command, not a night of manual steps.**
+`kilnctrl.coupling_workflow` (`python -m kilnctrl.coupling_workflow --host
+<ip> --preset <name> --out-dir <dir>`) wires `run_queue.py` (the three
+single-zone excitation firings, profiles #4/#5/#6, from rested),
+`coupled_ident.py` (settle audit, matrix assembly, condition number,
+plausibility, the bias metric, and `score_matrix_transient`) and
+`config_presets.py` (the emitted preset's schema) into one pass: capture →
+audit → **refuse if any driven zone's own dwell failed the tightened
+settle criterion, naming which** → assemble both orientations → score →
+write a ready-to-apply preset. It does not reimplement any of the three.
+Resumable at capture granularity (a capture already ending in a terminal
+`profile_exec` state is reused, not re-fired); `--dry-run` drives every
+stage over already-captured data with no HTTP/hardware call at all, which
+is how its own test suite (`test_coupling_workflow.py`) exercises it. See
+`tools/PcTools/src/kilnctrl/coupling_workflow.py`'s module docstring for
+the capture-format note (`run_queue.py` writes the `http_capture_log.py`
+envelope, not the plain format `coupled_ident.py`'s `*_from_paths` helpers
+read) and the multi-run-file handling.
+
 ### 3.3 Adaptive tuning — the layers not built
 
 Shipped (`fcc1fc0`, `a772d78`): dwell harvesting, diagonal-only least-squares
@@ -947,6 +966,76 @@ still cannot reproduce the one real hardware A/B result it would need to
 in order to be trusted for this kind of comparison** — unchanged verdict
 from the rest of this section, now checked against the specific mechanism
 this task named.
+
+**Lag-compensated feedforward, tried 2026-09-03 — worse on every zone, and
+still does not retrodict the hardware A/B.** The per-path plant finding
+above named the mechanism but slowed only the PLANT; the CONTROLLER still
+credits a neighbour's heat instantaneously either way. This candidate
+(`plant_sim.LagCompensatedFF`, opt-in via `climb_mode='lag_compensated'`,
+SIMULATION ONLY) instead changes the CONTROLLER: each zone solves its own
+hold duty directly off its own diagonal gain, crediting a neighbour's
+contribution from the DELAYED duty it actually commanded `L_PAIR[i,j]`
+seconds ago (0 before any duty has ever been recorded) instead of its
+current value. Climb stays diagonal-only, unchanged from
+`uncoupled_ff_hold_climb`'s own formula — sec 2's lag evidence is a
+settled-dwell/hold phenomenon, and extending the same treatment to climb
+would be a second, unmeasured guess stacked on this one.
+
+Pooled held-out RMS, same methodology and same two rested captures as the
+1.05/0.61/0.67 °C `'coupled'` figure above (run with the plant AND the
+controller's belief both set to the same matrix):
+
+| | z0 | z1 | z2 |
+|---|---|---|---|
+| `'coupled'` (current), new matrix | 1.05 | 0.61 | 0.67 |
+| `'coupled'` (current), old matrix | 1.06 | 0.62 | 0.63 |
+| `'lag_compensated'`, new matrix | **1.96** | **1.81** | **2.25** |
+| `'lag_compensated'`, old matrix | **2.05** | **1.90** | **2.23** |
+
+**Every zone is worse by roughly 2×**, well past the sec 3.4 discrimination
+thresholds (2.1/1.2/1.3 °C) on z1/z2 and close to it on z0 — not noise, and
+**z2's penalty under the new matrix is not removed; it moves from a small
+`'coupled'` disadvantage to the largest absolute RMS of the three zones
+under this candidate.** Reading of why: crediting only PAST duty means a
+neighbour contributes zero credit for the first `L_PAIR[i,j]` (~146.5 s
+off-diagonal) of every ramp and every dwell-entry — exactly the transient
+windows that dominate whole-run IAE/RMS — so this formulation is not just
+late relative to `'coupled'`, it is *under*-crediting through most of the
+transient in a way `'coupled'`'s instantaneous, over-generous credit never
+is. The idea that the controller's instantaneous-credit assumption is
+wrong is not in question; this specific way of fixing it trades one bias
+for a larger one.
+
+Re-ran the same old-vs-new-matrix-belief experiment sec 3.2/3.4 used above
+(plant fixed to the real new-matrix identification, controller told to
+believe old vs. new, scored as whole-run mean |error| vs. commanded target
+over `p7_newmatrix_http.jsonl`):
+
+| plant model | z0 | z1 | z2 |
+|---|---|---|---|
+| single delay (current, `'coupled'`) | worse | **better** | **better** |
+| `'lag_compensated'` | better | **better** | **better** |
+
+Hardware: z1 better, z2 **worse**. `'lag_compensated'` predicts all three
+zones improve moving old→new — it does not flip z2's sign either, and it
+now disagrees with `'coupled'` on z0's direction too, without adding a
+zone where the sign is right. **Third honest negative on retrodicting this
+specific A/B**: single-delay plant, per-path plant, and now lag-compensated
+feedforward have each been tried and none reproduces the one asymmetric
+result (z1 up, z2 down) that would validate any of them for this
+comparison. Something structural — not simply "which one lags and by how
+much" — is still missing; per the owner's own honesty gate, this is worth
+stating plainly rather than trying a fourth variant on the same axis
+without a new idea about what that missing piece is.
+
+Mutation-proven (`tests/test_plant_sim.py`): `_delayed_duty` returning a
+phantom credit before any history exists, cross-zone terms added to climb,
+and the delay lookup reading the undelayed current tick instead of the
+`L_pair`-indexed one, each independently reproduced a failing assertion;
+all reverted. The pooled-RMS finding above is itself pinned by
+`test_lag_compensated_held_out_rms_is_a_regression_not_an_improvement`,
+proven able to fail by reverting the delay lookup to undelayed (collapses
+z0 RMS from ~2.0 °C back to ~1.1 °C, caught by the bound).
 
 Ranked improvements, by expected value per unit effort: (1) a proper
 per-zone re-identification using z2's dwell-entry dynamics (dead time/tau),
