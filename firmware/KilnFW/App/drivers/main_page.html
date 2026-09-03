@@ -1444,6 +1444,33 @@ function drawYAxis(g, yTemp, minV, maxV) {
   }
 }
 
+// Duty (right-hand secondary axis) tick-label formatter -- the plotted duty
+// values themselves stay 0.0-1.0 floats (yDuty()/the trace math never
+// change), this only formats what a tick VALUE renders as. Math.round (not
+// toFixed) so an intermediate tick born from floating-point division (e.g.
+// 1/3) can never emit something like "33.33333333333333%" -- every label is
+// a clean integer percent.
+function fmtDutyPct(d) { return Math.round(d * 100) + '%'; }
+
+// Sideways "Duty cycle" label for the right-hand secondary axis, conventional
+// orientation for a Y-axis title (reads bottom-to-top). Shared by
+// drawHistoryChart and drawAutotuneChart, both of which plot commanded duty
+// on that axis. save()/rotate()/restore() is paired tightly around just this
+// text draw so no other draw call on this canvas -- before or after -- ever
+// sees a rotated context.
+function drawDutyAxisLabel(g) {
+  var ctx = g.ctx;
+  ctx.save();
+  ctx.fillStyle = g.muted;
+  ctx.font = '10px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.translate(g.cssW - 8, g.padT + g.plotH / 2);
+  ctx.rotate(-Math.PI / 2);
+  ctx.fillText('Duty cycle', 0, 0);
+  ctx.restore();
+}
+
 // The freezing-clamp's visible "this is out of range" marker -- drawn
 // whenever the axis had to stretch below CHART_FREEZING_C to fit a genuine
 // sub-zero reading (see drawIdleDots/drawHistoryChart's own comments on that
@@ -2064,7 +2091,9 @@ function setupChart() {
   // somehow unset.
   var fault = style.getPropertyValue('--bad').trim() || '#b00';
 
-  var padL = 42, padR = 36, padT = 10, padB = 20;
+  // padR is 46 (was 36) to leave room for the sideways "Duty cycle" title
+  // beside the right axis's percent tick labels -- see drawDutyAxisLabel().
+  var padL = 42, padR = 46, padT = 10, padB = 20;
   var plotW = cssW - padL - padR, plotH = cssH - padT - padB;
   ctx.strokeStyle = border; ctx.lineWidth = 1;
   ctx.strokeRect(padL, padT, plotW, plotH);
@@ -2294,8 +2323,9 @@ function drawHistoryChart(rows) {
 
   drawYAxis(g, yTemp, tMinV, tMaxV);
   ctx.fillStyle = muted; ctx.font = '10px sans-serif';
-  ctx.fillText('1.0', cssW - padR + 4, padT + 8);
-  ctx.fillText('0.0', cssW - padR + 4, padT + plotH);
+  ctx.fillText(fmtDutyPct(1), cssW - padR + 4, padT + 8);
+  ctx.fillText(fmtDutyPct(0), cssW - padR + 4, padT + plotH);
+  drawDutyAxisLabel(g);
 
   // Whole-kiln average duty (2026-09-02 follow-up, owner: "insted of showing
   // zone 0 duty on the screen i want to see the duty of the whole kiln on
@@ -2788,8 +2818,9 @@ function drawAutotuneChart(st, trace) {
 
   drawYAxis(g, yTemp, minV, maxV);
   ctx.fillStyle = g.muted; ctx.font = '10px sans-serif';
-  ctx.fillText('100%', g.cssW - g.padR + 4, g.padT + 8);
-  ctx.fillText('0%', g.cssW - g.padR + 4, g.padT + g.plotH);
+  ctx.fillText(fmtDutyPct(1), g.cssW - g.padR + 4, g.padT + 8);
+  ctx.fillText(fmtDutyPct(0), g.cssW - g.padR + 4, g.padT + g.plotH);
+  drawDutyAxisLabel(g);
 
   if (planPts.length) {
     ctx.save();
