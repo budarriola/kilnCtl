@@ -17,6 +17,7 @@ the quoted failure.
 from __future__ import annotations
 
 import os
+import re
 import sys
 import unittest
 
@@ -24,6 +25,49 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from kilnctrl import cone_table as ct  # noqa: E402
 from kilnctrl import ramp_assist as ra  # noqa: E402
+
+# Path to the C source DEFAULT_LAG_BAND_C mirrors, from the repo root --
+# same pattern as test_cone_table.py's ConeTableCrossLanguagePinTest.
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+_PROFILE_EXECUTOR_H_PATH = os.path.join(
+    _REPO_ROOT, "firmware", "KilnFW", "App", "drivers", "profile_executor.h"
+)
+_C_RAMP_LOCK_BAND_RE = re.compile(
+    r'#define\s+PROFILE_EXECUTOR_RAMP_LOCK_BAND_C\s+([0-9]+(?:\.[0-9]+)?)f?'
+)
+
+
+class RampAssistLagBandCrossLanguageTest(unittest.TestCase):
+    """Enforces the mirror between ``ramp_assist.DEFAULT_LAG_BAND_C`` and
+    firmware's ``PROFILE_EXECUTOR_RAMP_LOCK_BAND_C`` (profile_executor.h)
+    -- the fallback ``EXEC_RAMP_LOCK_BAND_C(zi)`` returns whenever no
+    per-zone override is configured, true for every shipped config.
+
+    This is the check that was claimed by a comment ("mirroring
+    EXEC_RAMP_LOCK_BAND_C") but never enforced: the comment hard-coded 3.0,
+    which is actually a DIFFERENT firmware constant (PROGRESS_BAND_C,
+    guard 1's arrival band in thermal_guard.c) confused for this one,
+    making the simulator 25.0/3.0 = 8.3x more sensitive to lag than the
+    firmware it claimed to mirror. That silent divergence produced a false
+    alarm in commit a19c1c4 (see PID_EXPANSION_PLAN.md §7.6). Parses the C
+    source directly (not by importing anything) so a change to only one
+    side is caught by the test suite in either language.
+    """
+
+    def test_python_constant_matches_c_source_exactly(self):
+        with open(_PROFILE_EXECUTOR_H_PATH, "r", encoding="utf-8") as f:
+            text = f.read()
+        m = _C_RAMP_LOCK_BAND_RE.search(text)
+        self.assertIsNotNone(
+            m, "PROFILE_EXECUTOR_RAMP_LOCK_BAND_C not found in profile_executor.h "
+               "-- parser or macro name is broken")
+        c_value = float(m.group(1))
+        self.assertEqual(
+            c_value, ra.DEFAULT_LAG_BAND_C,
+            f"ramp_assist.DEFAULT_LAG_BAND_C ({ra.DEFAULT_LAG_BAND_C}) no longer "
+            f"matches firmware's PROFILE_EXECUTOR_RAMP_LOCK_BAND_C ({c_value}) -- "
+            "mirror broken",
+        )
 
 
 class InertWhenCapableTests(unittest.TestCase):
@@ -64,9 +108,15 @@ class InertWhenCapableTests(unittest.TestCase):
 
 
 class StretchesWhenNotCapableTests(unittest.TestCase):
-    """A ramp rate well beyond what the plant can track (60 C/min to a
-    still-feasible 55 C steady state -- see ``hold_duty_infeasible(55.0)``
+    """A ramp rate well beyond what the plant can track (120 C/min to a
+    still-feasible 60 C steady state -- see ``hold_duty_infeasible(60.0)``
     is False) must still reach the target, via stretching.
+
+    Rate/target retuned for the corrected 25 C lag band (was 55 C/60 C/min,
+    tuned for the old, wrong 3 C band -- see ramp_assist.py's "MIRROR BUG"
+    note; at the real 25 C band that scenario no longer accumulates enough
+    tracking error to lag at all, since the whole ramp only spans 35 C from
+    a 20 C start).
 
     NEGATIVE-TESTED: replaced the ``z.commanded_c += rate_c_per_s * dt``
     advance (the branch that runs when NOT lagging) with a no-op, so the
@@ -80,7 +130,7 @@ class StretchesWhenNotCapableTests(unittest.TestCase):
     """
 
     def test_unachievable_rate_still_reaches_target(self):
-        sched = [ra.RampStep(55.0, 60.0), ra.DwellStep(15.0)]
+        sched = [ra.RampStep(60.0, 120.0), ra.DwellStep(15.0)]
         res = ra.run_ramp_assist(sched, max_temp_c=1300.0, start_temp_c=20.0, max_sim_s=4 * 3600.0)
         self.assertTrue(all(res['targets_reached']), res['targets_reached'])
         # And it actually had to stretch to get there -- distinguishes this
@@ -162,9 +212,22 @@ class BackToBackRampsTests(unittest.TestCase):
         # module-level widest-gap note) is what should produce credit. The
         # point under test is that the ramp->ramp transition does not zero
         # the accumulator before that second leg gets to contribute.
+        #
+        # Uses an explicit, narrower lag_band_c (NOT the real 25 C
+        # DEFAULT_LAG_BAND_C) purely to exercise the carry-over MECHANISM:
+        # at the corrected 25 C band, "lagging AND in-band" is a near-empty
+        # set everywhere in the cone table -- the widest cone gap (803.9's
+        # own bracketing pair) gives an 8.05 C band, and even the single
+        # widest gap in the whole table (cone 019, 677.8 C) gives only
+        # 25.85 C, an 0.85 C sliver above the lag band -- so this
+        # mechanism-level test cannot be exercised at the shipped default
+        # without an impractically long simulation hunting for that sliver.
+        # See PID_EXPANSION_PLAN.md §7.6 for what this implies for the
+        # feature at its real, shipped band.
         sched = [ra.RampStep(700.0, 300.0), ra.RampStep(803.9, 500.0), ra.DwellStep(10.0)]
         res = ra.run_ramp_assist(sched, max_temp_c=1300.0, start_temp_c=20.0,
-                                  plant_regime='physical', max_sim_s=15 * 3600.0)
+                                  plant_regime='physical', max_sim_s=15 * 3600.0,
+                                  lag_band_c=3.0)
         for c in res['credit_applied_s']:
             self.assertGreater(c, 0.0)
 
@@ -247,7 +310,15 @@ class DwellCreditParityTests(unittest.TestCase):
     _SCHED = [
         ra.RampStep(700.0, 300.0), ra.RampStep(803.9, 500.0), ra.DwellStep(10.0),
     ]
-    _KW = dict(start_temp_c=20.0, max_temp_c=1300.0, plant_regime='physical', max_sim_s=15 * 3600.0)
+    # lag_band_c=3.0 (NOT DEFAULT_LAG_BAND_C=25.0) is deliberate here: this
+    # class tests the credit-accrual MECHANISM (does credit_audit_pct
+    # correctly audit whatever gets banked), not whether the shipped
+    # default ever banks anything in practice -- at the real 25 C band,
+    # "lagging AND in-band" is a near-empty set for this schedule (803.9's
+    # own cone band is only 8.05 C wide; see BackToBackRampsTests' note).
+    # See PID_EXPANSION_PLAN.md §7.6 for the shipped-default finding.
+    _KW = dict(start_temp_c=20.0, max_temp_c=1300.0, plant_regime='physical',
+               max_sim_s=15 * 3600.0, lag_band_c=3.0)
 
     def test_credit_audit_pct_is_near_zero_for_correct_accrual(self):
         # credit_audit_pct compares credit actually spent (credit_s, from
@@ -317,7 +388,12 @@ class ScaleSweepDiscriminatesCreditErrorsTests(unittest.TestCase):
     """
 
     _SCHED_SRC = "[RampStep(700.0, 300.0), RampStep(803.9, 500.0), DwellStep(10.0)]"
-    _KW = dict(start_temp_c=20.0, max_temp_c=1300.0, plant_regime='physical', max_sim_s=15 * 3600.0)
+    # lag_band_c=3.0: same mechanism-vs-shipped-default rationale as
+    # DwellCreditParityTests._KW above -- this class proves credit_audit_pct
+    # discriminates a scaled accrual bug WHEN credit is banked, independent
+    # of whether the shipped 25 C band ever banks any on this schedule.
+    _KW = dict(start_temp_c=20.0, max_temp_c=1300.0, plant_regime='physical',
+               max_sim_s=15 * 3600.0, lag_band_c=3.0)
 
     @staticmethod
     def _load_scaled_module(scale: float):
@@ -479,9 +555,15 @@ class CreditExceedsDwellTests(unittest.TestCase):
         # A ramp tail earning several seconds of real credit (see
         # DwellCreditParityTests -- ~4.8/5.4/7.3 s on this same schedule),
         # spent against a deliberately tiny (3 s nominal) dwell.
+        #
+        # lag_band_c=3.0: same mechanism-vs-shipped-default rationale as
+        # DwellCreditParityTests -- exercises the cap/discard behaviour when
+        # credit IS banked, independent of the real 25 C band's own
+        # near-empty accrual window on this schedule.
         sched = [ra.RampStep(700.0, 300.0), ra.RampStep(803.9, 500.0), ra.DwellStep(0.05)]
         res = ra.run_ramp_assist(sched, max_temp_c=1300.0, start_temp_c=20.0,
-                                  plant_regime='physical', max_sim_s=15 * 3600.0)
+                                  plant_regime='physical', max_sim_s=15 * 3600.0,
+                                  lag_band_c=3.0)
         self.assertEqual(res['dwell_nominal_s'], [3.0])
         for zi, spend in enumerate(res['credit_applied_s']):
             self.assertEqual(spend, 3.0, f"zone {zi} spend should be capped at the 3 s dwell")

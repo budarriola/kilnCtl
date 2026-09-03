@@ -7,8 +7,11 @@ WHAT THIS MODELS, and how it maps onto the plan:
 
   Lag detection (§7.1, ALREADY BUILT in firmware, not re-implemented here):
   a zone is "lagging" (not achieving the commanded ramp rate) when
-  ``|actual_c - commanded_target_c| > lag_band_c`` (3.0 C, mirroring
-  ``EXEC_RAMP_LOCK_BAND_C``). While lagging, ``commanded_target_c`` for that
+  ``|actual_c - commanded_target_c| > lag_band_c`` (25.0 C, mirroring
+  ``PROFILE_EXECUTOR_RAMP_LOCK_BAND_C`` -- see ``DEFAULT_LAG_BAND_C``'s own
+  comment for the cross-language pin that now enforces this against
+  ``profile_executor.h`` directly, and the "MIRROR BUG" note below for how
+  this was wrong for a while). While lagging, ``commanded_target_c`` for that
   zone simply stops advancing -- the same mechanism the plan says already
   guarantees every ramp endpoint is eventually reached.
 
@@ -94,10 +97,32 @@ import numpy as np
 from . import cone_table as ct
 from . import plant_sim as ps
 
-# Mirrors EXEC_RAMP_LOCK_BAND_C(zi) (profile_executor_internal.h, 3.0 C for
-# every zone) -- see §7.1's "ALREADY BUILT, do not rebuild" note. This is
+# Mirrors PROFILE_EXECUTOR_RAMP_LOCK_BAND_C (profile_executor.h), the
+# fallback EXEC_RAMP_LOCK_BAND_C(zi)/exec_threshold(zi, 3) (profile_executor_
+# pid_tick.c) returns whenever no per-zone override is configured -- true for
+# every shipped config; the only assignments in the tree are in
+# test_zones_http.c. See §7.1's "ALREADY BUILT, do not rebuild" note. This is
 # the ONLY lag/achievability signal this module uses.
-DEFAULT_LAG_BAND_C = 3.0
+#
+# MIRROR BUG (found 2026-09, fixed here): this constant was hard-coded to
+# 3.0 C -- actually PROGRESS_BAND_C, a DIFFERENT constant (guard 1's arrival
+# band, thermal_guard.c), confused for this one -- making the simulator
+# 25.0/3.0 = 8.3x more sensitive to lag than the firmware it claims to
+# mirror. That 8.3x-too-tight band produced a plausible-looking false alarm
+# in commit a19c1c4 (~1/3 of zone-scenarios reported as never reaching
+# dwell, attributed to a cross-zone coupling deadlock) that an adversarial
+# review showed is arithmetically impossible at the real 25 C band on this
+# kiln's coupling matrix. See PID_EXPANSION_PLAN.md §7.6 for the corrected
+# cone-scale numbers. ``test_ramp_assist.py``'s
+# ``RampAssistLagBandCrossLanguageTest`` now parses
+# ``PROFILE_EXECUTOR_RAMP_LOCK_BAND_C`` out of profile_executor.h directly
+# and asserts this constant matches it, so this specific mirror cannot go
+# stale silently again -- though a hand-copied number for a DIFFERENT
+# firmware constant, as happened here, is exactly the failure mode that
+# check cannot see; only a wrong human-written comment ever claimed the
+# mirror, so read this comment against the pin test, not the other way
+# round.
+DEFAULT_LAG_BAND_C = 25.0
 
 
 # ---------------------------------------------------------------------------
