@@ -100,6 +100,10 @@ static esp_err_t nvs_partition_init(const char *partition)
     return err;
 }
 
+/* Forward declaration -- defined below, but this write path needs it before
+ * that point in the file. See its own definition for what it checks. */
+static bool caller_stack_is_external(void);
+
 /* One-time, one-directional copy of the old default-partition record into
  * KILN_NVS_PARTITION, for boards provisioned by firmware predating the
  * split. The old copy is left in place (never deleted) so a rollback to
@@ -107,7 +111,20 @@ static esp_err_t nvs_partition_init(const char *partition)
  * migrate_from_default_partition() for the fuller rationale. Only called
  * when KILN_NVS_PARTITION has nothing under NVS_KEY_RUN yet. The record's
  * existing version check (RUN_STATE_RECORD_VERSION) is reused unchanged --
- * this function does not add any versioning logic of its own. */
+ * this function does not add any versioning logic of its own.
+ *
+ * DRAM_PSRAM_PLAN.md section 9 write-path re-audit (2026-09-02): this
+ * function writes NVS (nvs_set_blob()/nvs_commit() below) exactly like
+ * persist_locked() does further down, but never got persist_locked()'s
+ * caller_stack_is_external() guard when that guard was added -- the earlier
+ * pass treated "this file is guarded" as true of the file's main write path
+ * and never re-checked every OTHER write call site inside it. In practice
+ * this function is only ever reached from run_state_init(), itself only
+ * called once from profile_executor_start() on app_main's own task (an
+ * internal-SRAM stack) before any PSRAM-stacked task exists, so it cannot
+ * fire the crash today -- but that makes it exactly the kind of gap a future
+ * audit would read as "covered" without this guard. Added for that reason,
+ * not because a live path was found. */
 static void migrate_from_default_partition(void)
 {
     nvs_handle_t h;
@@ -123,6 +140,13 @@ static void migrate_from_default_partition(void)
         /* Nothing there, wrong size, or an old/new version this build's
          * existing check wouldn't have trusted anyway -- nothing to
          * migrate. */
+        return;
+    }
+
+    if (caller_stack_is_external()) {
+        ESP_LOGE(TAG, "migrate_from_default_partition: REFUSING -- calling task's stack is in "
+                      "external RAM (PSRAM). See persist_locked()'s guard comment in this file "
+                      "and DRAM_PSRAM_PLAN.md section 7.2/9.");
         return;
     }
 

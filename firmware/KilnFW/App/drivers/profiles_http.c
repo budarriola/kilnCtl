@@ -584,8 +584,23 @@ static esp_err_t nvs_save_slot(uint8_t id)
     return err;
 }
 
+/* DRAM_PSRAM_PLAN.md section 9 write-path re-audit (2026-09-02): this
+ * function writes NVS (nvs_set_u8()/nvs_commit() below) exactly like
+ * nvs_save_slot() just above, but never got that function's
+ * caller_stack_is_external() guard -- the earlier pass treated "this file
+ * has the guard" as true of the file's whole write surface, not just the
+ * one call site it added it to. Both of today's callers (delete-profile HTTP
+ * handlers) run on httpd_worker, an internal-SRAM stack, so this cannot fire
+ * the crash today; added so a future audit does not read this file as fully
+ * covered when it was not. */
 static esp_err_t nvs_erase_slot(uint8_t id)
 {
+    if (caller_stack_is_external()) {
+        ESP_LOGE(TAG, "nvs_erase_slot: REFUSING -- calling task's stack is in external RAM "
+                      "(PSRAM). See nvs_save_slot()'s guard comment in this file and "
+                      "DRAM_PSRAM_PLAN.md section 7.2/9.");
+        return ESP_ERR_INVALID_STATE;
+    }
     nvs_handle_t h;
     esp_err_t err = nvs_open_from_partition(PROFILES_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
     if (err != ESP_OK) {
