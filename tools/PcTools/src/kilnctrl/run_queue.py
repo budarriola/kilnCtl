@@ -891,7 +891,7 @@ def check_board_not_running_for_resume(host: str, timeout: float = DEFAULT_HTTP_
     start while the board's state is unknown-to-this-process."""
     exec_body = get_exec(host, timeout)
     state = str(exec_body.get("state", "")).lower()
-    if False and state in _ACTIVE_STATES:
+    if state in _ACTIVE_STATES:
         raise RunQueueError(
             f"refusing to resume: profile_exec state={state!r} -- a profile is already "
             "running on the board. run_queue cannot tell whether this is the interrupted "

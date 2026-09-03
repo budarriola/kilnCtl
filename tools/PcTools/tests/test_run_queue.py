@@ -866,7 +866,7 @@ class FailedStopEscalationTest(unittest.TestCase):
         self.assertIn("total_planned_s", message)  # original error preserved too
 
     def test_main_reports_distinct_exit_code_on_failed_stop(self):
-        def boom_run_queue(entries, cfg, control=None, apply_preset_fn=None):
+        def boom_run_queue(entries, cfg, control=None, apply_preset_fn=None, **kwargs):
             raise rq.RunQueueStopFailedError("[t] the kiln may STILL BE FIRING: stop failed")
 
         with unittest.mock.patch.object(rq, "run_queue", boom_run_queue):
@@ -874,7 +874,7 @@ class FailedStopEscalationTest(unittest.TestCase):
         self.assertEqual(rc, 2)
 
     def test_main_reports_exit_code_1_for_an_ordinary_refusal(self):
-        def boom_run_queue(entries, cfg, control=None, apply_preset_fn=None):
+        def boom_run_queue(entries, cfg, control=None, apply_preset_fn=None, **kwargs):
             raise rq.RunQueueError("zones did not settle")
 
         with unittest.mock.patch.object(rq, "run_queue", boom_run_queue):
