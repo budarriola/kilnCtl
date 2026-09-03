@@ -1018,3 +1018,177 @@ def test_bench_kiln_plant_zero_duty_decays_to_ambient():
         assert (plant.temp <= prev + 1e-9).all()
         prev = plant.temp.copy()
     assert np.max(np.abs(plant.temp - 20.0)) < 1.0
+
+
+# ---------------------------------------------------------------------------
+# LagCompensatedFF (2026-09-03) -- candidate feedforward that credits a
+# neighbour's contribution using its DELAYED duty instead of its current
+# one. Opt-in via climb_mode='lag_compensated', SIMULATION ONLY. See
+# PID_EXPANSION_PLAN.md sec 3.2/3.4 for the mechanism this targets and the
+# negative result these tests pin.
+# ---------------------------------------------------------------------------
+
+def test_lag_compensated_ff_credits_zero_before_any_history():
+    """At t=0, no neighbour has ever been commanded a duty -- the credit
+    term must be exactly zero (own-diagonal only), the physically correct
+    limit for "a neighbour that has not run yet contributes no heat".
+
+    Proof this can fail: mutated ``_delayed_duty`` to unconditionally
+    return ``1.0`` (a phantom credit) instead of reading the empty
+    history. Captured red:
+
+        assert np.float64(0.2785515320334262) < 1e-09
+
+    Reverted.
+    """
+    K = ps.K_full
+    lag_ff = ps.LagCompensatedFF(K, ps.L_PAIR, ps.DT, ps.N_ZONES)
+    target_c, ambient = 30.0, 20.0
+    hold, climb, total = lag_ff(target_c, 0.0, 1, ambient=ambient)
+    expected_hold = (target_c - ambient) / K[1, 1]
+    assert abs(hold - expected_hold) < 1e-9
+    assert climb == 0.0
+    assert abs(total - expected_hold) < 1e-9
+
+
+def test_lag_compensated_ff_uses_delayed_not_current_neighbour_duty():
+    """Once a neighbour has a duty history, the credit must come from
+    ``L_pair[i,j]`` seconds AGO, not the current tick -- the whole point of
+    the candidate. Drive zone 1 to duty=1.0 and check zone 0's credit for
+    zone 1 stays at the t=0 value (no credit) until ``L_PAIR[0,1]`` seconds
+    have elapsed, then matches the analytic delayed-credit formula.
+
+    Proof this can fail: reading ``self.duty_hist[-1]`` (the current tick)
+    instead of the delay-indexed entry made the credit (and thus hold_i)
+    change on the very next call, before ``L_PAIR[0,1]`` seconds had
+    elapsed -- the first check below (``hold_before_delay == hold_t0``)
+    caught it directly: hold_before_delay came back 0.5504229004459216
+    against hold_t0's 0.5241542617884607, i.e. not equal.
+
+    Reverted.
+    """
+    K = ps.K_full
+    L_pair = ps.L_PAIR
+    dt = ps.DT
+    lag_ff = ps.LagCompensatedFF(K, L_pair, dt, ps.N_ZONES)
+    # target_c chosen well above ambient + the full credit so hold_i stays
+    # positive (unclamped) throughout -- a clamped comparison would hide a
+    # broken delay lookup behind clamp-to-zero on both sides.
+    target_c, ambient = 60.0, 20.0
+
+    hold_t0, _, _ = lag_ff(target_c, 0.0, 0, ambient=ambient)
+    lag_ff.record(np.array([0.0, 1.0, 0.0]))  # zone 1 steps to full duty
+
+    delay_steps = int(round(L_pair[0, 1] / dt))
+    hold_before_delay = hold_t0
+    for _step in range(1, delay_steps):
+        hold_before_delay, _, _ = lag_ff(target_c, 0.0, 0, ambient=ambient)
+        lag_ff.record(np.array([0.0, 1.0, 0.0]))
+        if hold_before_delay != hold_t0:
+            break
+    assert hold_before_delay == hold_t0, (
+        "zone 0 credited zone 1's duty before the path delay elapsed"
+    )
+
+    hold_after = hold_before_delay
+    for _step in range(delay_steps + 2):
+        hold_after, _, _ = lag_ff(target_c, 0.0, 0, ambient=ambient)
+        lag_ff.record(np.array([0.0, 1.0, 0.0]))
+    expected_credit = K[0, 1] * 1.0
+    expected_hold = (target_c - ambient - expected_credit) / K[0, 0]
+    assert abs(hold_after - expected_hold) < 1e-9
+
+
+def test_lag_compensated_climb_is_uncoupled_own_zone_only():
+    """Per the class docstring, climb stays diagonal-only -- no cross-zone
+    credit, delayed or otherwise. Must match ``uncoupled_ff_hold_climb``'s
+    own climb formula exactly.
+
+    Proof this can fail: temporarily summed ``tau[j]*rate/K[i,j]`` across
+    all j (extending the delayed-credit treatment to climb, which the
+    docstring explicitly says was NOT done). Captured red:
+
+        assert np.float64(0.22848244620611557) < 1e-09
+
+    Reverted.
+    """
+    K = ps.K_full
+    lag_ff = ps.LagCompensatedFF(K, ps.L_PAIR, ps.DT, ps.N_ZONES)
+    target_c, target_rate, ambient = 30.0, 0.05, 20.0
+    _, climb, _ = lag_ff(target_c, target_rate, 2, ambient=ambient)
+    expected_climb = target_rate * ps.tau[2] / K[2, 2]
+    assert abs(climb - expected_climb) < 1e-9
+
+
+def test_run_profile_default_climb_mode_unaffected_by_lag_compensated_addition():
+    """Adding climb_mode='lag_compensated' must not perturb the existing
+    'coupled' (default) code path -- byte-identical regression guard for
+    the addition this pass makes to ``run_profile``.
+
+    Proof this can fail: during development, restructuring the ``ff_fn``
+    assignment around the new branch briefly left 'coupled' also routed
+    through a ``None`` fn on some code paths, raising ``TypeError:
+    'NoneType' object is not callable`` instead of running -- an obvious
+    red, not a subtle one, but exactly the class of mistake this guard
+    exists to catch before it reaches a byte-identical claim in the docs.
+    """
+    segs = [(0.0, 200.0, 20.0, 40.0, 0.05), (200.0, 400.0, 40.0, 40.0, 0.0)]
+    start_temp = [20.0, 20.0, 20.0]
+    r1 = ps.run_profile(segs, start_temp, climb_mode='coupled', integral_floor='ff_hold')
+    r2 = ps.run_profile(segs, start_temp, climb_mode='coupled', integral_floor='ff_hold')
+    assert np.array_equal(r1['temps'], r2['temps'])
+    assert np.array_equal(r1['duty'], r2['duty'])
+
+
+def test_lag_compensated_held_out_rms_is_a_regression_not_an_improvement():
+    """HONESTY GATE (PID_EXPANSION_PLAN.md sec 3.2/3.4): pins the pooled
+    held-out RMS finding for this candidate against the same two rested,
+    complete profile-7 captures (``p7_oldmatrix_http.jsonl``,
+    ``p7_newmatrix_http.jsonl``) the 'coupled' baseline's own 1.05/0.61/0.67
+    C figure is measured against. The lag-compensated candidate is
+    materially WORSE on every zone (~2.0/1.9/2.3 C), well past the sec 3.4
+    discrimination thresholds (2.1/1.2/1.3 C) -- this is not noise, and the
+    test exists so that fact stays checked, not just written down in the
+    doc.
+
+    Proof this can fail: temporarily changed ``_delayed_duty`` to return
+    ``self.duty_hist[-1][j]`` (undelayed, reducing the candidate toward the
+    'coupled' baseline's own instantaneous-credit behaviour) instead of the
+    delay-indexed lookup. That alone collapsed z0 RMS from ~2.0 C back down
+    near the coupled baseline's own 1.05 C, and the bound below (which
+    exists to say "still clearly worse", not to be a loose ceiling) caught
+    it. Captured red:
+
+        AssertionError: z0 RMS 1.101 no longer clearly worse than coupled baseline
+        assert 1.101496327401796 > 1.8
+
+    Reverted.
+    """
+    K = ps.K_full
+    sq = {0: 0.0, 1: 0.0, 2: 0.0}
+    n = {0: 0, 1: 0, 2: 0}
+    for path in ("p7_oldmatrix_http.jsonl", "p7_newmatrix_http.jsonl"):
+        full_path = os.path.join(os.path.dirname(__file__), "..", "..", "..",
+                                  "logs", "coupling", path)
+        full_path = os.path.normpath(full_path)
+        if not os.path.exists(full_path):
+            pytest.skip(f"hardware capture not present in this checkout: {full_path}")
+        from kilnctrl import http_capture_log as hc
+        rows_all = hc.poll_rows(full_path)
+        rows = la.split_runs(rows_all)[0]
+        result, segs = ps.run_profile_from_capture(
+            rows, climb_mode='lag_compensated', integral_floor='ff_hold',
+            controller_K=K)
+        zones = la.zones_in_rows(rows)
+        t_sim = result['t']
+        for z in zones:
+            ts = np.array([r.elapsed_s for r in rows if z in r.zones])
+            hw_temp = np.array([r.zones[z].actual_c for r in rows if z in r.zones])
+            sim_temp = np.interp(ts, t_sim, result['temps'][:, z])
+            err = sim_temp - hw_temp
+            sq[z] += float(np.sum(err ** 2))
+            n[z] += len(err)
+    rms = {z: (sq[z] / n[z]) ** 0.5 for z in sq}
+    assert rms[0] > 1.8, f"z0 RMS {rms[0]:.3f} no longer clearly worse than coupled baseline"
+    assert rms[1] > 1.5, f"z1 RMS {rms[1]:.3f} no longer clearly worse than coupled baseline"
+    assert rms[2] > 1.5, f"z2 RMS {rms[2]:.3f} no longer clearly worse than coupled baseline"

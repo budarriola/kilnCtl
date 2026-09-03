@@ -1746,3 +1746,51 @@ informative and their magnitudes as not.
   of a kiln that fires unattended, on evidence from a run nobody reviewed, is how
   a bad firing happens that nobody can explain afterwards. Auto-apply is opt-in,
   bounded per run, recorded, and revertible.
+
+---
+
+## 6. Thermal-guard × identification-mode audit (2026-09-02)
+
+Guard numbers match `thermal_guard.c`'s own section comments (1 heating-failed,
+2 wrong-direction, 3 runaway/heat-off, 4 drift, 5 absolute limits, 6 sensor
+validity, 7 frozen sensor, 8 cross-zone — the `thermal_guard_trip_t` enum in
+the header is off-by-one from these for 5–9, a pre-existing doc inconsistency,
+not fixed here).
+
+| Guard | Step test | Relay autotune | Normal firing |
+|---|---|---|---|
+| 1/2 progress | armed, correct (`progress_duty_min` overridden to 0.01 so any commanded duty arms it; pre-PWM `want_duty` fed as `commanded_duty`) | **was armed-but-inert** — fixed this pass, see below | armed, correct (pre-PWM duty; guard 1's rate capped to the commanded ramp rate so a legitimate slow ramp can't self-trip) |
+| 3 runaway (heat off) | inert (duty never 0 while stepping) — not this guard's case | deliberately inert by design (low branch is 0.15, not 0; guard 5/4 cover a welded contact instead) | armed, correct |
+| 4 drift | armed but only meaningful with a real setpoint; step test pins `setpoint_c` to ceiling/raw+headroom | armed, correct (real oscillation setpoint) | armed, correct |
+| 5 absolute limits | armed, correct | armed, correct (setpoint window pre-validated against it) | armed, correct |
+| 6 sensor validity | armed, correct | armed, correct | armed, correct |
+| 7 frozen sensor | armed, correct (continuous pre-PWM duty) | **was armed-but-inert**, same root cause as 1/2 — fixed this pass | armed, correct (fixed earlier pass, PWM-chop defect) |
+| 8 cross-zone | deliberately disarmed — no peer data passed (`autotune_engine.c` never wires `peer_c`/`peer_ok`) | deliberately disarmed, same reason | armed but inert unless the zone has `cross_zone_max_delta_c` configured (0 by default — no measured cross-gain matrix exists) |
+
+**Defect found and fixed this pass:** relay autotune fed `thermal_guard`'s
+`commanded_duty` as the POST-PWM `want_relay_on ? want_duty : 0.0f`, the same
+defect class already fixed for the step-test path and for `profile_executor.c`.
+Every PWM off-pulse (~every `window_ms`, 60 s default) zeroed the reported
+duty regardless of which bang-bang branch (0.15/0.85 at the default `d`) was
+actually selected, so guards 1/2's 300 s progress window and guard 7's 600 s
+frozen window could never accumulate enough contiguous time to complete — a
+dead or flat-but-plausible element during a relay run went undetected for the
+whole multi-hour budget. Armed in `guard_cfg`, inert against this method's
+actual duty pattern — the dangerous case, indistinguishable from working
+protection until it doesn't fire.
+
+Fix (`autotune_engine.c`): feed both methods the pre-PWM `want_duty` (already
+computed per-tick for both methods), and give `autotune_engine_run_relay()`
+the same `progress_duty_min` override the step-test path already had (the
+low branch, 0.15 by default, is still below `thermal_guard.c`'s stock 0.5).
+Guard 3 is unaffected and stays correctly inert for a normal relay run: the
+low branch is a genuine nonzero duty, not a chopped zero.
+
+Pinned in `test_autotune_engine_prestart.c`: `test_relay_run_overrides_
+progress_duty_min_same_as_step_test`, `test_relay_run_flat_dead_element_now_
+trips_a_guard` (a dead element must still trip guard 1 — previously
+impossible), `test_relay_run_healthy_rising_element_does_not_spuriously_trip`
+(the newly-continuous window must not false-trip a healthy oscillation).
+Both regression tests were confirmed red by mutation (reverting the
+`commanded_duty` expression, and separately dropping the `progress_duty_min`
+override) before the fix landed.

@@ -1102,9 +1102,77 @@ def uncoupled_ff_hold_climb(target_c, target_rate, i, ambient=20.0):
     return hold_out, climb_out, total_clamped
 
 
+class LagCompensatedFF:
+    """Candidate feedforward (2026-09-03, opt-in, SIMULATION ONLY -- not a
+    firmware change, see PID_EXPANSION_PLAN.md sec 3.2/3.4). ``coupled_ff_
+    hold_climb`` solves the joint system ``K_full @ hold = target - ambient``
+    as though every zone's contribution to every other zone's temperature
+    arrives INSTANTANEOUSLY. Physically it does not -- sec 2 measured
+    cross-zone dead time 135-158 s / tau 620-730 s against 34-53 s / 264-271 s
+    on the diagonal, 3-4x slower. Sec 3.2's 2026-09-03 hardware A/B mechanism
+    traces z2's regression under the new matrix to exactly this: z2's row
+    leans harder on neighbour credit that, per this same instantaneous
+    assumption, the controller believes has already arrived.
+
+    This candidate instead solves each zone's OWN hold duty directly from
+    its own diagonal gain, crediting each neighbour's contribution using the
+    DELAYED duty it actually commanded ``L_pair[i,j]`` seconds ago (0 before
+    any duty has been commanded -- a neighbour that has not run yet
+    contributes no credit, which is the physically correct limit):
+
+        hold_i(t) = (target_c - ambient - sum_{j!=i} K[i,j]*duty_j(t-L[i,j])) / K[i,i]
+
+    No matrix inversion is needed -- each zone's own duty is solved directly,
+    only neighbours are looked up from history.
+
+    Climb stays UNCOUPLED (own zone only, ``tau[i]*target_rate/K[i,i]``,
+    same formula ``uncoupled_ff_hold_climb`` uses) -- deliberately not
+    extended to cross-zone credit. Sec 2's identified lag is evidenced from
+    settled DWELL tails (a hold/steady-state phenomenon); giving climb the
+    same delayed-credit treatment would be a second, unvalidated guess
+    stacked on this one, with no measurement behind it either way.
+
+    ``duty`` fed to ``record()`` is the zones' actually-commanded duty each
+    tick (post-PID, what really drove the plant) -- not the feedforward's own
+    guess -- since crediting a neighbour's REAL commanded duty from the past
+    is what "delayed duty" means physically; crediting its own past
+    feedforward guess would compound one candidate's error into another's
+    credit term.
+    """
+
+    def __init__(self, K, L_pair, dt, n_zones=N_ZONES):
+        self.K, self.L_pair, self.dt, self.n = K, L_pair, dt, n_zones
+        self.max_delay = int(np.max(L_pair) / dt) + 2
+        self.duty_hist = [np.zeros(self.n) for _ in range(self.max_delay)]
+
+    def record(self, duty):
+        self.duty_hist.append(np.array(duty, dtype=float).copy())
+        self.duty_hist.pop(0)
+
+    def _delayed_duty(self, j, L_ij):
+        delay_steps = min(int(round(L_ij / self.dt)), len(self.duty_hist) - 1)
+        return self.duty_hist[-1 - delay_steps][j]
+
+    def __call__(self, target_c, target_rate, i, ambient=20.0, tau_ff=None):
+        credit = 0.0
+        for j in range(self.n):
+            if j == i:
+                continue
+            credit += self.K[i, j] * self._delayed_duty(j, self.L_pair[i, j])
+        hold_i = (target_c - ambient - credit) / self.K[i, i]
+        tau_diag = tau if tau_ff is None else tau_ff
+        climb_i = target_rate * tau_diag[i] / self.K[i, i]
+        total = hold_i + climb_i
+        total_clamped = min(max(total, 0.0), 1.0)
+        hold_out = min(max(hold_i, 0.0), 1.0)
+        climb_out = total_clamped - hold_out
+        return hold_out, climb_out, total_clamped
+
+
 def run_profile(segs, start_temp, kp=0.06, ki=0.0003, kd=0.0,
                  climb_mode='coupled', integral_floor='ff_hold', ambient=20.0,
                  controller_K_inv=None, controller_tau=None, plant_regime='measured',
+                 controller_K=None, controller_L_pair=None,
                  fuzzy_strength_pct=0.0,
                  measurement_quantum_c=0.0, measurement_noise_std_c=0.0, measurement_seed=0):
     """Run the plant+PID loop over an explicit segment list.
@@ -1135,6 +1203,13 @@ def run_profile(segs, start_temp, kp=0.06, ki=0.0003, kd=0.0,
     (capture comparison, regression tests) always uses ``'measured'``, so
     the identical low-temperature code path this argument's default
     preserves is what keeps the five-capture calibration fit unchanged.
+
+    ``climb_mode='lag_compensated'``: opt-in candidate, SIMULATION ONLY (see
+    ``LagCompensatedFF``). ``controller_K``/``controller_L_pair`` let a
+    caller ask "what would this candidate compute if it believed a different
+    matrix/per-path delay" the same way ``controller_K_inv``/
+    ``controller_tau`` do for ``'coupled'`` -- default to the module's
+    ``K_full``/``L_PAIR``. Ignored for every other ``climb_mode``.
 
     ``fuzzy_strength_pct``: 0-100, applied uniformly to all three zones'
     ``PID`` instances -- see ``PID``'s docstring and ``pid_fuzzy_adjust()``
@@ -1178,7 +1253,14 @@ def run_profile(segs, start_temp, kp=0.06, ki=0.0003, kd=0.0,
         )
     pids = [PID(kp, ki, kd, d_tau=30.0, b=1.0, pid_range_c=1000.0,
                 fuzzy_strength_pct=fuzzy_strength_pct) for _ in range(N_ZONES)]
-    ff_fn = coupled_ff_hold_climb if climb_mode == 'coupled' else uncoupled_ff_hold_climb
+    lag_ff = None
+    if climb_mode == 'lag_compensated':
+        K_ctrl = K_full if controller_K is None else controller_K
+        L_pair_ctrl = L_PAIR if controller_L_pair is None else controller_L_pair
+        lag_ff = LagCompensatedFF(K_ctrl, L_pair_ctrl, DT, N_ZONES)
+        ff_fn = None
+    else:
+        ff_fn = coupled_ff_hold_climb if climb_mode == 'coupled' else uncoupled_ff_hold_climb
 
     total_t = segs[-1][1]
     times, targets, temps_log, duty_log, meas_log = [], [], [], [], []
@@ -1202,6 +1284,9 @@ def run_profile(segs, start_temp, kp=0.06, ki=0.0003, kd=0.0,
             if climb_mode == 'coupled':
                 hold, climb, ff = ff_fn(target_c, target_rate, i, ambient=ambient,
                                          K_inv=controller_K_inv, tau_ff=controller_tau)
+            elif climb_mode == 'lag_compensated':
+                hold, climb, ff = lag_ff(target_c, target_rate, i, ambient=ambient,
+                                          tau_ff=controller_tau)
             else:
                 hold, climb, ff = ff_fn(target_c, target_rate, i, ambient=ambient)
             meas_c = plant.temp[i]
@@ -1216,6 +1301,8 @@ def run_profile(segs, start_temp, kp=0.06, ki=0.0003, kd=0.0,
         temps_log.append(plant.temp.copy())
         duty_log.append(duty.copy())
         meas_log.append(meas_row.copy())
+        if lag_ff is not None:
+            lag_ff.record(duty)
         plant.step(duty)
         t += DT
 
