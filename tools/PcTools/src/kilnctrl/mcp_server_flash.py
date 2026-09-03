@@ -195,47 +195,56 @@ def flash_firmware(board_cfg: str = "board/esp32s3-builtin.cfg", retry_once: boo
 # ---------------------------------------------------------------------------
 # On-chip partition-table confirmation -- FLASH_BUDGET_PLAN.md section 8 item
 # 3. flash_firmware() above reports "flashed and verified OK (bootloader +
-# partition table + app)" after a program(), but nothing readable over this
-# board's HTTP surface reports the on-chip partition table afterwards, and
-# check_flash_partition_map.ps1 only validates the REPO's partitions.csv --
-# neither one is independent confirmation of what actually ended up on the
-# chip. This tool reads the partition-table bytes back over JTAG (same
-# OpenOCD/debug_probe substrate as every other debug_* tool -- never
-# esptool) and diffs them against partitions.csv entry by entry. See
-# partition_table.py for the parsing/diff logic (unit-tested against
-# synthetic blobs, no board required).
+# partition table + app)" after a program(), but that is OpenOCD's own
+# byte-compare during the flash operation, not independently re-checkable
+# later, and check_flash_partition_map.ps1 only validates the REPO's
+# partitions.csv -- neither confirms what actually ended up on the chip.
+#
+# This tool ORIGINALLY read the partition-table bytes back over JTAG at
+# flash offset 0x8000. That does not work on this chip -- 0x8000 is a FLASH
+# offset, not a memory-mapped address OpenOCD's read_memory can reach; see
+# partition_table.py's module docstring for the confirmed failure output.
+# It now asks the RUNNING FIRMWARE for its own live partition table over
+# GET /api/partitions (partition_info_http.c, via ESP-IDF's esp_partition
+# iterator from inside the app) -- no JTAG, no core halt, works while the
+# board is busy. See partition_table.py for the parsing/diff logic (unit-
+# tested against synthetic blobs, no board required) and
+# partition_http_client.py for the HTTP client.
 # ---------------------------------------------------------------------------
 @_srv._tool()
-def debug_check_partition_table(peer: str = "esp", csv_path: Optional[str] = None) -> str:
-    """Reads the on-chip partition table over JTAG (peer="esp" only makes
-    sense here -- the RP2040 has no partition table) and diffs it
-    entry-by-entry against `csv_path` (defaults to
-    firmware/KilnFW/partitions.csv). This is the only way to independently
-    confirm what partition table is actually written to the chip: neither
-    flash_firmware()'s own "verified OK" nor check_flash_partition_map.ps1
-    read anything off the board itself.
+def debug_check_partition_table(host: Optional[str] = None, csv_path: Optional[str] = None) -> str:
+    """Reads the RUNNING firmware's live partition table over
+    GET /api/partitions and diffs it entry-by-entry against `csv_path`
+    (defaults to firmware/KilnFW/partitions.csv). This is the way to
+    independently confirm what partition table the board is actually using:
+    neither flash_firmware()'s own "verified OK" nor
+    check_flash_partition_map.ps1 read anything off the board itself.
 
-    Read-only -- halts the ESP core briefly (OpenOCD requires this for any
-    memory read) and resumes it immediately after, same as debug_read_memory.
-    Safe to run while the board is idle and powered; do not run it while a
-    fire profile is in progress (the same brief-halt caveat as any other
-    debug_* JTAG operation -- it stops relay control and telemetry for the
-    ~1-2s of the read).
+    NOT a JTAG operation -- no core halt, safe to call even while a fire
+    profile is running (this only exercises the board's existing HTTP
+    server, same as get_dashboard_status or any other GET /api/* tool).
 
-    Reports MATCH if every partition's type/subtype/offset/size on the chip
-    agrees with the CSV, or a line-by-line MISMATCH otherwise (partitions
-    only on the chip, only in the CSV, or present in both with differing
-    fields)."""
+    Same host-resolution order as every ota_*/adaptive_tune_* tool
+    (`_ota_resolve_host`): explicit `host` argument, else the STA IP if
+    known, else the fallback AP address.
+
+    Reports MATCH if every partition's type/subtype/offset/size the
+    firmware reports agrees with the CSV, or a line-by-line MISMATCH
+    otherwise (partitions only on the chip, only in the CSV, or present in
+    both with differing fields)."""
+    from .mcp_server_ota import _ota_resolve_host  # local import: avoids a circular import with mcp_server_ota.py
+
+    resolved = _ota_resolve_host(host)
     try:
-        diff, chip_entries, csv_entries = partition_table.check_chip_partition_table(
-            peer=peer, csv_path=csv_path
+        diff, chip_entries, csv_entries = partition_table.check_chip_partition_table_via_http(
+            host=resolved, csv_path=csv_path
         )
     except (ValueError, RuntimeError, FileNotFoundError) as exc:
-        return f"error: {exc}"
+        return f"error: {exc} (host={resolved})"
     _srv._session_log.warning(
-        "debug_check_partition_table: peer=%s chip_entries=%d csv_entries=%d ok=%s",
-        peer, len(chip_entries), len(csv_entries), diff.ok,
+        "debug_check_partition_table: host=%s chip_entries=%d csv_entries=%d ok=%s",
+        resolved, len(chip_entries), len(csv_entries), diff.ok,
     )
-    return diff.report()
+    return f"host={resolved}\n{diff.report()}"
 
 

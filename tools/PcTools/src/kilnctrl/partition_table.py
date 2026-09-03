@@ -1,15 +1,45 @@
 """Read, parse, and diff the ESP32 partition table -- FLASH_BUDGET_PLAN.md
 section 8 item 3 ("confirm what table is actually on the chip").
 
-Nothing readable over the board's HTTP surface reports the on-chip partition
-table, and ``check_flash_partition_map.ps1`` only validates the REPO's
-``partitions.csv`` -- it never touches hardware. This module closes that gap:
-it reads the raw partition-table bytes off the chip over JTAG (via
-``debug_probe.read_memory``, the same OpenOCD substrate ``flash_firmware()``
-and every other debug tool in this codebase already use -- never esptool, per
-CLAUDE.md), parses them using the standard ESP-IDF binary partition-entry
-format, parses the repo's ``partitions.csv`` the same way
-``check_flash_partition_map.ps1`` does, and diffs the two entry by entry.
+STATUS (2026-09-02): the original chip-read mechanism here -- raw
+partition-table bytes over JTAG at flash offset 0x8000, via
+``debug_probe.read_memory`` -- DOES NOT WORK. Confirmed against the real
+board:
+
+    failed to read 4096 B from esp flash at 0x8000
+    DEPRECATED! use 'read_memory' not 'mem2array'
+    failed to read memory
+
+0x8000 is a FLASH offset, not a memory-mapped address on the ESP32-S3 --
+OpenOCD's ``read_memory`` reaches the CPU's address space, which cannot
+reach raw flash content at an arbitrary offset. This module's own tests
+never caught it because they inject a fake ``read_memory_fn`` that stands
+in for the OpenOCD call and never exercises a real board.
+``read_chip_partition_table_bytes()``/``check_chip_partition_table()``
+below are KEPT (their parse logic is correct and remains unit-tested
+against synthetic blobs) but are DEPRECATED as a chip-read mechanism -- see
+each function's own docstring. Nobody should call them expecting a real
+chip read to succeed.
+
+The current mechanism is ``check_chip_partition_table_via_http()`` /
+``read_chip_partition_table_from_http()`` below, which ask the RUNNING
+FIRMWARE for its own live partition table over GET /api/partitions
+(``firmware/KilnFW/App/drivers/partition_info_http.c``, via ESP-IDF's
+``esp_partition_find``/``esp_partition_next`` from inside the app -- no
+JTAG, no core halt, works while the board is busy). It also answers a
+better question: not "what raw bytes sit at 0x8000" but "what table is the
+firmware actually using right now" (including which OTA slot is running).
+
+Nothing else readable over the board's HTTP surface reported the on-chip
+partition table before ``/api/partitions`` was added, and
+``check_flash_partition_map.ps1`` only validates the REPO's
+``partitions.csv`` -- it never touches hardware. Both the JTAG path (kept,
+deprecated) and the HTTP path (current) share the same parse/diff core
+below: the standard ESP-IDF binary partition-entry format for the JTAG
+path, the JSON shape documented on ``read_chip_partition_table_from_http``
+for the HTTP path, and always the same ``partitions.csv`` parser and
+``diff_partition_tables()``/``PartitionDiff`` for the comparison against
+the repo's CSV.
 
 Binary format (``components/partition_table/gen_esp32part.py`` in ESP-IDF),
 32 bytes per entry, little-endian:
@@ -324,7 +354,16 @@ def read_chip_partition_table_bytes(
     size: int = DEFAULT_TABLE_SIZE,
     read_memory_fn=None,
 ) -> bytes:
-    """Reads ``size`` raw bytes starting at ``address`` from ``peer``'s flash
+    """DEPRECATED as a real chip-read mechanism -- see this module's
+    docstring. ``debug_probe.read_memory`` reaches the CPU's memory-mapped
+    address space, not raw flash content at an arbitrary offset; against
+    the real board this fails with "failed to read 4096 B from esp flash at
+    0x8000" / "failed to read memory". Kept only because its parsing logic
+    (``_bytes_from_memrd_output``) is correct and still unit-tested; do not
+    wire this into anything expecting a real read to succeed. Use
+    ``read_chip_partition_table_from_http()`` instead.
+
+    Reads ``size`` raw bytes starting at ``address`` from ``peer``'s flash
     over JTAG/SWD (via ``debug_probe.read_memory``, width=8) and returns them
     as a ``bytes`` object.
 
@@ -359,21 +398,101 @@ def check_chip_partition_table(
     size: int = DEFAULT_TABLE_SIZE,
     read_memory_fn=None,
 ) -> "tuple[PartitionDiff, list[PartitionEntry], list[PartitionEntry]]":
-    """Reads the on-chip partition table, parses ``csv_path`` (defaults to
+    """DEPRECATED as a real chip-read mechanism -- see this module's
+    docstring and ``read_chip_partition_table_bytes()``'s own deprecation
+    notice. Use ``check_chip_partition_table_via_http()`` instead; that is
+    what the MCP tool (``debug_check_partition_table``) and the CLI script
+    (``check_chip_partition_table.py``) call now.
+
+    Reads the on-chip partition table, parses ``csv_path`` (defaults to
     ``firmware/KilnFW/partitions.csv`` in this repo), and returns
     ``(diff, chip_entries, csv_entries)``.
-
-    This is the one function most callers (the MCP tool wrapper, the CLI
-    script) need -- everything else in this module exists to make this
-    testable piece by piece.
     """
     if csv_path is None:
-        # tools/PcTools/src/kilnctrl/partition_table.py -> repo root is 4 up
-        repo_root = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", "..", ".."))
-        csv_path = os.path.join(repo_root, "firmware", "KilnFW", "partitions.csv")
+        csv_path = _default_csv_path()
 
     chip_bytes = read_chip_partition_table_bytes(peer, address, size, read_memory_fn=read_memory_fn)
     chip_entries = parse_partition_table_binary(chip_bytes, base_address=address)
+    csv_entries = parse_partitions_csv(csv_path)
+    diff = diff_partition_tables(chip_entries, csv_entries)
+    return diff, chip_entries, csv_entries
+
+
+# --- HTTP read (current mechanism) -- GET /api/partitions from the running app ---
+
+
+def _default_csv_path() -> str:
+    # tools/PcTools/src/kilnctrl/partition_table.py -> repo root is 4 up
+    repo_root = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", "..", ".."))
+    return os.path.join(repo_root, "firmware", "KilnFW", "partitions.csv")
+
+
+def read_chip_partition_table_from_http(
+    host: str,
+    timeout: float = 5.0,
+    get_partitions_fn=None,
+) -> "list[PartitionEntry]":
+    """Reads the running firmware's own live partition table over
+    GET /api/partitions and returns it as :class:`PartitionEntry` objects,
+    same shape ``read_chip_partition_table_bytes()`` + ``parse_partition_
+    table_binary()`` used to produce from a raw JTAG read -- so
+    ``diff_partition_tables()`` and everything downstream of it (including
+    ``PartitionDiff.report()``) needs no changes to work with either source.
+
+    ``get_partitions_fn`` defaults to ``partition_http_client.get_partitions``
+    -- overridable so callers (and this module's own tests) can inject a
+    fake without a real socket or board, same "injected function" shape
+    ``read_chip_partition_table_bytes()``'s ``read_memory_fn`` parameter
+    used for the JTAG path. Imports ``partition_http_client`` lazily so this
+    module stays importable in an environment with no network dependency at
+    all.
+
+    Response shape expected from the endpoint (partition_info_http.c):
+    ``{"running": "<label>", "partitions": [{"label", "type", "subtype",
+    "offset", "size", "encrypted"}, ...]}``. Raises whatever
+    ``partition_http_client.PartitionHttpError`` raises on any transport
+    failure, non-2xx response, or malformed body -- this function adds no
+    further leniency, since a firmware/tool JSON-shape mismatch here should
+    fail loudly rather than silently report an empty or partial table.
+    """
+    if get_partitions_fn is None:
+        from . import partition_http_client
+
+        get_partitions_fn = partition_http_client.get_partitions
+
+    data = get_partitions_fn(host, timeout=timeout)
+    entries: "list[PartitionEntry]" = []
+    for item in data["partitions"]:
+        entries.append(
+            PartitionEntry(
+                name=item["label"],
+                type=int(item["type"]),
+                subtype=int(item["subtype"]),
+                offset=int(item["offset"]),
+                size=int(item["size"]),
+            )
+        )
+    return entries
+
+
+def check_chip_partition_table_via_http(
+    host: str,
+    csv_path: Optional[str] = None,
+    timeout: float = 5.0,
+    get_partitions_fn=None,
+) -> "tuple[PartitionDiff, list[PartitionEntry], list[PartitionEntry]]":
+    """Current top-level convenience: reads the running firmware's live
+    partition table over GET /api/partitions, parses ``csv_path`` (defaults
+    to ``firmware/KilnFW/partitions.csv``), and returns
+    ``(diff, chip_entries, csv_entries)`` -- the HTTP-sourced replacement
+    for the now-deprecated ``check_chip_partition_table()``. This is the
+    function the MCP tool wrapper (``debug_check_partition_table``) and the
+    CLI script (``check_chip_partition_table.py``) call.
+    """
+    if csv_path is None:
+        csv_path = _default_csv_path()
+
+    chip_entries = read_chip_partition_table_from_http(host, timeout=timeout, get_partitions_fn=get_partitions_fn)
     csv_entries = parse_partitions_csv(csv_path)
     diff = diff_partition_tables(chip_entries, csv_entries)
     return diff, chip_entries, csv_entries

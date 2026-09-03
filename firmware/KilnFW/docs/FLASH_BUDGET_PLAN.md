@@ -506,34 +506,71 @@ history and are not hypothetical — each has already caused a problem here once
    NVS partitions first, reflash the table and bootloader, erase `otadata`,
    and do not touch `coredump` in the process.
 
-   **Read-back mechanism, now built** (`tools/PcTools/src/kilnctrl/
-   partition_table.py`): reads the raw partition-table bytes off the chip
-   over JTAG via `debug_probe.read_memory()` — the same OpenOCD substrate
-   `flash_firmware()` already uses, never esptool — parses them with the
-   standard ESP-IDF binary entry format (32 B/entry, magic 0xAA50, LE
-   type/subtype/offset/size/label/flags), and diffs them entry-by-entry
-   against `firmware/KilnFW/partitions.csv`. Exposed two ways:
+   **Read-back mechanism — REVISED 2026-09-02.** The original approach (raw
+   partition-table bytes over JTAG at flash offset 0x8000, via
+   `debug_probe.read_memory()`) **does not work**: confirmed against the
+   real board with
+
+   ```
+   failed to read 4096 B from esp flash at 0x8000
+   DEPRECATED! use 'read_memory' not 'mem2array'
+   failed to read memory
+   ```
+
+   0x8000 is a FLASH offset, not a memory-mapped address on the ESP32-S3 —
+   OpenOCD's `read_memory` cannot reach it. The parse/diff logic that read
+   fed into was always correct (proven against synthetic blobs), but the
+   read itself was the one piece no test exercised for real, because the
+   tests inject a fake `read_memory_fn` in place of the OpenOCD call.
+
+   **Current mechanism**: `GET /api/partitions`
+   (`firmware/KilnFW/App/drivers/partition_info_http.c`), a new endpoint
+   that reports the RUNNING firmware's own live partition table via
+   ESP-IDF's `esp_partition_find()`/`esp_partition_next()` iterator, called
+   from inside the app itself — no JTAG, no core halt, works while the
+   board is busy serving other requests. It answers a strictly better
+   question than a raw flash dump: not "what bytes sit at 0x8000" but "what
+   table is the firmware actually using", plus which OTA slot
+   (`esp_ota_get_running_partition()`) is running. Response is chunked
+   (`httpd_resp_send_chunk()`, one chunk per partition entry) so there is no
+   fixed-size buffer to overrun regardless of table size.
+
+   `tools/PcTools/src/kilnctrl/partition_table.py` keeps its parse/diff
+   core unchanged — `parse_partitions_csv()`, `diff_partition_tables()`,
+   `PartitionDiff` — only the chip-side read is re-pointed at this
+   endpoint's JSON (`partition_http_client.py`,
+   `read_chip_partition_table_from_http()`,
+   `check_chip_partition_table_via_http()`). The old JTAG-based
+   `read_chip_partition_table_bytes()`/`check_chip_partition_table()` are
+   KEPT in the module (their logic is sound and still unit-tested) but are
+   explicitly marked deprecated in their own docstrings — nothing calls
+   them by default any more, and nobody should expect a real chip read from
+   them to succeed. Exposed two ways:
    - MCP tool: `kiln_call(name="debug_check_partition_table")` (optional
-     `peer`, `csv_path` args).
+     `host`, `csv_path` args — same host-resolution order as every
+     `ota_*`/`adaptive_tune_*` tool).
    - CLI: `uv run --project tools/PcTools python
-     tools/PcTools/scripts/check_chip_partition_table.py`.
+     tools/PcTools/scripts/check_chip_partition_table.py [--host ...]`.
 
    Reports `MATCH` or a `MISMATCH` naming exactly the partition(s) and
    field(s) that differ (type/subtype/offset/size), or any partition present
-   on only one side. Unit-tested against synthetic blobs
-   (`tools/PcTools/tests/test_partition_table.py`, 23 tests, no board
-   required) — including a proof that a single mutated field (`coredump`
-   size changed 0x100000 -> 0x200000 in a scratch CSV copy) is reported as
-   exactly that one entry/field and nothing else, then the mutation was
-   reverted.
+   on only one side. Unit-tested against synthetic blobs/mocked HTTP
+   responses (`tools/PcTools/tests/test_partition_table.py` and
+   `test_partition_http_client.py`, no board required) — including a proof
+   that a single mutated field (`coredump` size changed 0x100000 ->
+   0x200000 in a scratch CSV copy) is reported as exactly that one
+   entry/field and nothing else, then the mutation was reverted. Host-side
+   handler JSON emission is covered by
+   `firmware/KilnFW/App/test/test_partition_info_http.c`
+   (`build_host_tests.ps1`).
 
-   Read-only: halts the ESP core for the ~1-2 s the JTAG read takes and
-   resumes it immediately after, identical to any other `debug_read_memory`
-   call. Safe to run with the board idle and powered; do NOT run it while a
-   fire profile is active (briefly freezes relay control/telemetry, same as
-   every other `debug_*` JTAG tool). **Not yet run against the physical
-   board** — it was built and proven against synthetic data only; running it
-   for real is the next step, once the board is done cooling.
+   **After the next reflash** (this endpoint does not exist on the board
+   until it is reflashed with this change), run:
+   ```
+   uv run --project tools/PcTools python
+     tools/PcTools/scripts/check_chip_partition_table.py --host 192.168.1.156
+   ```
+   or `kiln_call(name="debug_check_partition_table", args={"host":"192.168.1.156"})`.
 4. Leave `coredump` (5.3) alone unless something forces the issue.
 5. ~~Revisit 5.4 only if 4.1 justifies it~~ — 4.1 does not justify it;
    decided not pursued.

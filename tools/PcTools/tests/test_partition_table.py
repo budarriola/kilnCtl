@@ -313,5 +313,90 @@ class CheckChipPartitionTableEndToEndTests(unittest.TestCase):
         self.assertEqual(len(chip_entries), 3)
 
 
+class ReadChipPartitionTableFromHttpTests(unittest.TestCase):
+    """Exercises the CURRENT chip-read mechanism -- read_chip_partition_
+    table_from_http()/check_chip_partition_table_via_http(), which replaced
+    the broken JTAG-based read (see this module's docstring). Same
+    "injected function" shape as ReadChipPartitionTableBytesTests above
+    (read_memory_fn there, get_partitions_fn here) -- no real socket, no
+    board, but this time proving the HTTP-JSON -> PartitionEntry conversion
+    end to end instead of the MEMRD-bytes -> PartitionEntry conversion."""
+
+    def _fake_get_partitions_for(self, running: str, entries: "list[tuple]"):
+        def fake_get_partitions(host, timeout=5.0):
+            return {
+                "running": running,
+                "partitions": [
+                    {"label": e[0], "type": e[1], "subtype": e[2], "offset": e[3], "size": e[4], "encrypted": False}
+                    for e in entries
+                ],
+            }
+        return fake_get_partitions
+
+    def test_converts_json_entries_to_partition_entries(self):
+        fake = self._fake_get_partitions_for("factory", _SAMPLE_ENTRIES)
+        entries = pt.read_chip_partition_table_from_http("192.168.1.156", get_partitions_fn=fake)
+        self.assertEqual(len(entries), 3)
+        self.assertEqual(entries[0], pt.PartitionEntry("nvs", 0x01, 0x02, 0x9000, 0x6000))
+        self.assertEqual(entries[2], pt.PartitionEntry("factory", 0x00, 0x00, 0x10000, 0x100000))
+
+    def test_matching_table_reports_ok_via_http(self):
+        fake = self._fake_get_partitions_for("factory", _SAMPLE_ENTRIES)
+        csv_path = _write_csv(_SAMPLE_CSV_TEXT)
+        try:
+            diff, chip_entries, csv_entries = pt.check_chip_partition_table_via_http(
+                "192.168.1.156", csv_path=csv_path, get_partitions_fn=fake,
+            )
+        finally:
+            os.remove(csv_path)
+        self.assertTrue(diff.ok)
+        self.assertEqual(len(chip_entries), 3)
+        self.assertEqual(len(csv_entries), 3)
+
+    def test_mutated_chip_entry_is_caught_and_named_exactly_via_http(self):
+        # Same mutated-offset proof as
+        # CheckChipPartitionTableEndToEndTests.test_mutated_chip_entry_is_caught_and_named_exactly,
+        # replayed against the HTTP path this module now uses by default --
+        # proves the diff logic re-pointed at JSON catches a real mismatch
+        # exactly as precisely as it did reading raw JTAG bytes.
+        mutated_entries = list(_SAMPLE_ENTRIES)
+        mutated_entries[2] = ("factory", 0x00, 0x00, 0xB10000, 0x100000)  # stale offset
+        fake = self._fake_get_partitions_for("factory", mutated_entries)
+        csv_path = _write_csv(_SAMPLE_CSV_TEXT)
+        try:
+            diff, _, _ = pt.check_chip_partition_table_via_http(
+                "192.168.1.156", csv_path=csv_path, get_partitions_fn=fake,
+            )
+        finally:
+            os.remove(csv_path)
+        self.assertFalse(diff.ok)
+        self.assertEqual(len(diff.mismatched), 1)
+        name, field_mismatches = diff.mismatched[0]
+        self.assertEqual(name, "factory")
+        self.assertTrue(any("offset" in m for m in field_mismatches))
+        self.assertEqual(diff.only_on_chip, [])
+        self.assertEqual(diff.only_in_csv, [])
+
+    def test_missing_partition_on_chip_via_http(self):
+        fake = self._fake_get_partitions_for("nvs", _SAMPLE_ENTRIES[:2])  # "factory" missing
+        csv_path = _write_csv(_SAMPLE_CSV_TEXT)
+        try:
+            diff, _, _ = pt.check_chip_partition_table_via_http(
+                "192.168.1.156", csv_path=csv_path, get_partitions_fn=fake,
+            )
+        finally:
+            os.remove(csv_path)
+        self.assertFalse(diff.ok)
+        self.assertEqual([e.name for e in diff.only_in_csv], ["factory"])
+
+    def test_defaults_to_real_repo_csv_via_http(self):
+        fake = self._fake_get_partitions_for("factory", _SAMPLE_ENTRIES)
+        diff, chip_entries, csv_entries = pt.check_chip_partition_table_via_http(
+            "192.168.1.156", get_partitions_fn=fake,
+        )
+        self.assertGreater(len(csv_entries), 3)  # real CSV has far more than 3 rows
+        self.assertEqual(len(chip_entries), 3)
+
+
 if __name__ == "__main__":
     unittest.main()
