@@ -2,29 +2,54 @@
 
 The board runs a single `esp_http_server` instance, started by
 `wifi_provision_http_start()` and shared by every other module that serves
-anything. Five HTML pages and thirty JSON/CSV/plain-text endpoints hang off
-it (plus two more in a simulated-plant build). This document is the wire
-reference for all of them.
+anything. 13 HTML pages and well over eighty JSON/CSV/plain-text endpoints
+hang off it (plus two more in a simulated-plant build). This document is the
+wire reference for all of them; see each `*_http.c`'s `.uri = "..."`
+registrations for the exact, current list — `grep -n '\.uri = "' App/drivers/*.c`
+is the ground truth this section summarizes.
+
+**`rules_http.c`/`rules_eval.c`/`rules_task.c` (the relay rule DSL editor,
+`/settings/relays`, `/api/rules`) were deleted 2026-08-27** — see
+`App/main.c`'s comment at the rule-evaluator init site and
+`App/drivers/CMakeLists.txt`'s "Relays &..." comment. `manual_page.html`
+(`/manual`) and its only backing endpoint were also removed the same day
+(`dashboard_http.c`'s 2026-08-27 comment). Neither route exists any more;
+don't look for them.
 
 Source of truth:
 - `App/drivers/wifi_provision_http.c` — owns the server, `/`, `/wifi`,
-  `/status`, `/scan`, `/provision`
-- `App/drivers/dashboard_http.c` — `/api/status`, `/api/relay`, the profile
-  executor and autotune endpoints, the CSV exports
-- `App/drivers/zones_http.c` — `/settings/zones`, `/api/zones`
-- `App/drivers/rules_http.c` — `/settings/relays`, `/api/rules`
+  `/status`, `/scan`, `/provision`, `/networks`, `/forget`, `/ip_config`,
+  and the shared static assets `theme.css`, `nav.js`, `app.js`
+- `App/drivers/dashboard_http.c` — `/api/status`, the profile executor and
+  autotune endpoints, the CSV exports, safety trip/log-level control
+- `App/drivers/zones_http.c` — `/settings/zones`, `/settings/safety`,
+  `/api/zones`, current-sweep, tuning-recommendation endpoints
 - `App/drivers/profiles_http.c` — `/profiles`, the profile CRUD API
+- `App/drivers/diagnostics_http.c` — `/diagnostics`, `/safety`, crash
+  report, watchdog config, thermo faults
+- `App/drivers/safety_cfg_http.c` — `/safety/commissioning`,
+  `/api/safety/commissioning`
+- `App/drivers/readiness_http.c` — `/readiness`, `/api/readiness`
+- `App/drivers/settings_http.c` — `/settings`, `/settings/display`
+- `App/drivers/backup_http.c` — `/settings/backup`, config export/import
+- `App/drivers/ota_http.c` — `/ota`, ESP/Pico OTA and rollback endpoints
+- `App/drivers/kiln_cfg_http.c`, `log_http.c`, `board_temps.c`,
+  `partition_info_http.c`, `factory_reset.c`, `adaptive_tune_http.c` — API-only,
+  no page of their own
 - `App/drivers/sim_backend.c` — `/api/sim`, `CONFIG_KILNCTL_SIM_PLANT` only
-- Pages: `App/drivers/*_page.html`, `main_page.html`
+- Pages: `App/drivers/*_page.html` (13 files — run `ls App/drivers/*_page.html`
+  rather than trusting a count restated here)
 
 TODO.md sections 2/3/5 remain the authoritative design docs and change logs
 for this UI, with dated "Implemented"/"Not built" notes; this file is the
 "what does the wire actually look like" companion to them. Where this file
 and the code disagree, the code wins — fix whichever one is wrong.
 
-**HARDWARE STATUS**: per `docs/PROJECT_STATUS.md`, all five page routes and
-the zones/rules/profiles JSON APIs were verified live against a real board on
-2026-08-11, and `GET /api/status` / `POST /api/relay` on 2026-08-10 — in every
+**HARDWARE STATUS**: per `docs/PROJECT_STATUS.md`, the page routes then
+existing and the zones/profiles JSON APIs (the relay-rule DSL editor was
+still present at the time; it was deleted 2026-08-27, see above) were
+verified live against a real board on 2026-08-11, and `GET /api/status` /
+the then-current manual relay-override endpoint on 2026-08-10 — in every
 case at first against a bench unit with **no thermocouple daughterboard,
 relay expander, display or safety peer physically attached**. That changed
 2026-08-20: three MAX31856 ICs and their thermocouples are now fitted on this
@@ -42,12 +67,13 @@ unverified against real hardware. `/api/sim`'s handlers have never run at all
 | Setting | Value | Why |
 |---|---|---|
 | `lru_purge_enable` | `true` | recycle the oldest connection under pressure rather than refusing new ones — a stuck client must not lock a phone out permanently |
-| `max_uri_handlers` | 40 | headroom over the current 30 routes. **Found the hard way (2026-08-11)**: 24 was exactly one too few, and because `httpd_register_uri_handler` failures are logged and non-fatal, `profiles_http.c` (registered last) silently lost all five of its routes and `/profiles` 404'd on the live board |
+| `max_uri_handlers` | 40 | this repeatedly turned out to be too tight as routes grew — **found the hard way (2026-08-11)** when 24 was exactly one too few and, because `httpd_register_uri_handler` failures are logged and non-fatal, `profiles_http.c` (registered last at the time) silently lost all five of its routes and `/profiles` 404'd on the live board. The route count has grown well past 30 since (this doc no longer restates a total — `grep -c '\.uri = "' App/drivers/*.c` is the live count); `tools/check_uri_handler_cap.ps1`, referenced in `wifi_provision_http.c`, is what actually guards this now, not a number in this doc |
 | `stack_size` | 8192 | `zones_post_handler` alone stacks a 3201-byte body buffer plus a `zones_cfg_t` scratch copy; the 4096 default was observed to hang/reset under load rather than assert — see `docs/PROJECT_STATUS.md` |
 
-Registration order is `wifi_prov` (5) → `dashboard_http` (14) → `zones_http`
-(3) → `rules_http` (3) → `profiles_http` (5) = 30, matching `app_main`'s
-bring-up order. `sim_backend_register_http()` adds 2 more in a sim build.
+Registration order follows `app_main`'s bring-up order across every module
+listed in "Source of truth" above; `rules_http.c` no longer exists (deleted
+2026-08-27) so it is not part of that order any more.
+`sim_backend_register_http()` adds 2 more routes in a sim build.
 
 Every module after `wifi_provision_http.c` calls
 `wifi_provision_http_get_server()` and returns `ESP_ERR_INVALID_STATE` if the
@@ -84,22 +110,32 @@ development.
 
 ## Pages
 
-All five are compiled into the binary via `EMBED_TXTFILES` and served
-straight out of flash as `text/html`; there is no filesystem and no
-templating.
+All 13 are compiled into the binary via `EMBED_TXTFILES` and served straight
+out of flash as `text/html`; there is no filesystem and no templating.
 
 | Route | Page | Notes |
 |---|---|---|
 | `GET /` | `main_page.html` **or** `wifi_provision_page.html` | `index_get_handler` picks: the dashboard if `wifi_prov_is_sta_connected()`, the setup page otherwise. A phone that just joined the fallback AP expects setup; a browser reaching an already-provisioned board expects the dashboard |
 | `GET /wifi` | `wifi_provision_page.html` | unconditional — the way back to setup from a working dashboard |
 | `GET /profiles` | `profiles_page.html` | profile editor; see [`docs/PROFILES.md`](PROFILES.md) |
-| `GET /settings/zones` | `zones_page.html` | zone/thermocouple config, PID gains, autotune UI |
-| `GET /settings/relays` | `rules_page.html` | the relay rule DSL editor |
+| `GET /settings/zones` | `zones_page.html` | zone/thermocouple config, PID gains, autotune UI, tuning-recommendation panel |
+| `GET /settings/safety` | `safety_config_page.html` | safety timing config, served by `zones_http.c` |
+| `GET /readiness` | `readiness_page.html` | pre-fire checklist |
+| `GET /diagnostics` | `diagnostics_page.html` | crash reports, watchdog config, Danger Zone manual relay control |
+| `GET /safety` | `safety_page.html` | safety processor live status |
+| `GET /safety/commissioning` | `safety_commissioning_page.html` | safety commissioning workflow |
+| `GET /settings` | `settings_page.html` | general settings, factory reset |
+| `GET /settings/display` | `settings_display_page.html` | theme and unit preference |
+| `GET /settings/backup` | `backup_page.html` | config export/import |
+| `GET /ota` | `ota_page.html` | ESP/Pico firmware update |
 
-The dashboard links to `/profiles`, `/settings/zones`, `/settings/relays` and
-`/wifi`; the three settings pages link back to `/`. There is no other
-navigation and no authentication of any kind — anyone who can reach the
-board's IP can switch a relay.
+`rules_page.html` (`/settings/relays`) and `manual_page.html` no longer
+exist — both were deleted 2026-08-27, see above.
+
+Cross-page navigation is `nav.js`'s `NAV_LINKS` table (`App/drivers/nav.js`),
+injected as a top-bar dropdown menu on every page — not the two or three
+hardcoded links this section used to describe. There is no authentication of
+any kind — anyone who can reach the board's IP can switch a relay.
 
 ## Request conventions
 
@@ -107,10 +143,6 @@ Every POST body on this server is `application/x-www-form-urlencoded`,
 parsed by `http_form_find_field()` / `http_form_url_decode()`
 (`App/drivers/http_form.h`) — **not JSON**, in either direction of a POST.
 Responses are JSON, `text/plain`, or `text/csv` depending on the endpoint.
-
-The one exception is **`POST /api/rules`**, whose body is the rule DSL text
-verbatim, not form-encoded (the field-count explosion made a flat form
-impractical — see `rules_http.h`).
 
 `http_form_find_field()` returns the decoded length, `-1` if the field is
 absent, or `-2` if it was present but too long to decode into the caller's
@@ -134,11 +166,17 @@ one should expect all four steps:
 4. NVS write failure is logged and the change is still applied live — the
    operator asked for it now, whether or not it survives a reboot.
 
-Body caps by handler: `/provision` 384, `/api/relay` 64,
-`/api/profile_exec/start` 32, `/api/autotune/start` **192** (raised from 64 on
-2026-08-12 when the relay method added `method`/`setpoint_c`/`relay_d`/
-`relay_h`/`rule` on top of `zone`), `/api/profile/delete` 64, `/api/profile`
-2048, `/api/rules` 2048, `/api/zones` 3200 (`ZONES_BODY_MAX`), `/api/sim` 256.
+Body caps by handler (representative, not exhaustive — grep `_BODY_MAX` /
+`content_len >` in each `*_http.c` for the current, authoritative list):
+`/provision` 384 (`PROV_BODY_MAX`), `/api/diagnostics/danger/start` 32
+(`DANGER_START_BODY_MAX`), `/api/profile_exec/start` 32,
+`/api/autotune/start` **192** (raised from 64 on 2026-08-12 when the relay
+method added `method`/`setpoint_c`/`relay_d`/`relay_h`/`rule` on top of
+`zone`), `/api/profile/delete` 64, `/api/profile` 2048, `/api/zones` 3200
+(`ZONES_BODY_MAX`), `/api/sim` 256. **`POST /api/relay` and `POST /api/rules`
+no longer exist** — both were removed 2026-08-27 along with `rules_http.c`
+and `manual_page.html`; manual relay control now goes through
+`diagnostics_http.c`'s Danger Zone (`/api/diagnostics/danger/relay`).
 
 **Numeric field parsing** must reject trailing garbage, not just a wholly
 non-numeric value: check `end == val` (nothing parsed at all) **and**
@@ -268,25 +306,34 @@ render.
 - The whole response is built into one 768-byte buffer with a truncate-on-
   overflow `APPEND` macro; a truncated response is sent rather than an error.
 
-### `POST /api/relay`
+### `POST /api/diagnostics/danger/relay` (`diagnostics_http.c`)
 
-Manual override. Body `relay=<1-4>&on=<0|1>`.
+`dashboard_http.c`'s old `POST /api/relay` manual-override endpoint was
+**removed 2026-08-27** along with `manual_page.html`, its only caller (see
+`dashboard_http.h`'s `dashboard_relay_result_t` comment). The replacement
+lives on the Diagnostics page's Danger Zone and is deliberately gated on that
+section being armed first, so an operator can never mistake "the section
+isn't armed" for "the relay refused to move":
+
+Body `relay=<1..KILN_IO_RELAY_COUNT>&on=<0|1>`.
 
 | Outcome | Status | Body |
 |---|---|---|
-| success | 200 | `ok` |
-| no expander attached | 400 | `no relay board attached` |
+| danger mode not active | **409** | `danger mode is not active` |
+| success | 200 | `{"ok":true,"remaining_ms":<n>}` |
 | body missing/oversized/short | 400 | `body missing or too large` / `body read failed` |
 | `relay` or `on` absent | 400 | `relay/on missing` |
 | `relay` outside 1..`KILN_IO_RELAY_COUNT` | 400 | `relay out of range` |
-| **refused by the safety gate** | **403** | `blocked by safety fault` |
-| `kiln_io_set_relay` failed | 500 | `relay command failed` |
+| `dashboard_set_relay` failed | 400 | `relay write failed` |
 
-`on` is tested as `on_val[0] == '1'` — anything else is OFF, including `true`
-and `on`. Only the ON direction is gated (`relay_authority_on_blocked()`);
-turning a relay OFF is never refused, so the safe direction is always
-reachable, including to recover from the fault that's blocking ON. The
-refusal is also logged with the fault-source bitmask.
+`on` is tested as `on_val[0] == '1'` — anything else is OFF. The actual write
+goes through the same `dashboard_set_relay()` the old endpoint used, which
+`kiln_io_owner.c`'s `relay_on_blocked()` already bypasses when
+`danger_mode_active()` is true — this handler adds only the up-front 409
+check and the `danger_mode_touch()` that extends the window, not a second
+copy of the gating logic. A successful call extends the danger-mode window;
+a refusal does not. See `App/drivers/diagnostics_page.html`'s Danger Zone
+section for the operator-facing arm/disarm flow this sits behind.
 
 ### `GET /api/profile_exec`
 
@@ -654,20 +701,6 @@ against one already running.
 `zone relay_mask references an unconfigured relay`, `zone pid_kp missing or
 out of range`). Nothing is applied unless everything validates.
 
-## Relay rules (`rules_http.c`)
-
-`GET /api/rules` returns the whole rule set as `text/plain` DSL, regenerated
-from the in-RAM config — always including a `RELAY n DRIVEN x` line for every
-relay, even unconfigured ones, so the full editable state is visible up
-front.
-
-`POST /api/rules` takes that text back verbatim as the raw request body (not
-form-encoded), and answers 200 `ok` or **400 `line <n>: <reason>`** with a
-1-based line number. Any bad line rejects the entire submission.
-
-Grammar, validation rules and the fact that **saved rules are never
-evaluated** are in [`docs/PROFILES.md`](PROFILES.md).
-
 ## Profiles (`profiles_http.c`)
 
 | Route | Shape |
@@ -744,8 +777,9 @@ Where they differ, and it matters:
   `cal_offset_c`; the UART bridge reports the MAX31856's raw value. Two
   clients can therefore legitimately disagree about the same channel's
   temperature by that offset.
-- **Scope.** Profiles, zone config, rules and autotune are HTTP-only —
-  there are no UART task IDs for any of them. Conversely the display
+- **Scope.** Profiles, zone config and autotune are HTTP-only — there are
+  no UART task IDs for any of them (the relay-rule DSL editor was too,
+  before it was deleted 2026-08-27). Conversely the display
   (task 4), raw SX1509 register access, link statistics and the firmware
   version/pin-config queries are UART-only, with no HTTP equivalent.
 - **Failure semantics.** A failed operation on the UART side produces no

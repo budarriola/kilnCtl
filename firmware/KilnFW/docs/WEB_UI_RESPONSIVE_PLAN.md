@@ -556,17 +556,19 @@ An esbuild bundling step is worth doing *with* a framework pilot and not before
 
 ## 10. Incidental findings
 
-- **`WEB_UI.md` is stale on pages and routes.** Its route table (lines 91-98)
-  lists 5 pages and states "there is no other navigation"; 13 pages exist and
-  `nav.js` drives cross-linking. Its API section remains the source of truth —
-  the page/route section should be corrected or deleted rather than left to
-  mislead.
-- **Four orphaned build artifacts.** `build/esp-idf/drivers/` holds 17
-  `*_page.html.gz` against 13 sources: `board_temps_page.html.gz`,
-  `manual_page.html.gz`, `rules_page.html.gz` and `thermo_faults_page.html.gz`
-  have no corresponding source file. Stale output from deleted pages. Harmless
-  — `EMBED_TXTFILES` only embeds what the CMake list names — but worth
-  confirming they are genuinely unreferenced rather than silently still linked.
+- **`WEB_UI.md` was stale on pages and routes — fixed 2026-09-02.** Its route
+  table listed 5 pages and claimed "there is no other navigation"; also still
+  documented `rules_http.c`/`POST /api/relay`, both deleted 2026-08-27. Now
+  lists all 13 pages, points at `nav.js`'s `NAV_LINKS` for cross-linking, and
+  the manual-relay section documents the current
+  `POST /api/diagnostics/danger/relay` endpoint instead of the removed one.
+- **Four orphaned build artifacts — deleted 2026-09-02.**
+  `build/esp-idf/drivers/board_temps_page.html.gz`, `manual_page.html.gz`,
+  `rules_page.html.gz` and `thermo_faults_page.html.gz` had no corresponding
+  source file (confirmed against `KILNCTL_GZIP_ASSETS` in
+  `App/drivers/CMakeLists.txt`, which no longer names any of them) and were
+  gitignored build output, not tracked files — removed locally, nothing to
+  commit.
 - **The body cap was never a considered global decision** — three pages had
   none and the rest used four different values. Phase 2 replaced all of it
   with one token.
