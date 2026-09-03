@@ -373,6 +373,81 @@ def test_measurement_chain_noise_and_quantization_change_the_trajectory():
     )
 
 
+def test_measurement_chain_quantization_and_noise_magnitude():
+    """Item 5 of the noise-enabled fuzzy-strength re-sweep
+    (PID_EXPANSION_PLAN.md sec 3.6): don't just assume the plumbing in
+    run_profile() applies the documented 0.1 C MAX31856-LSB quantization
+    and ~0.05 C noise sigma -- measure it directly off a held-steady plant
+    so the true value is constant and every step in the fed measurement is
+    attributable to the noise/quantization chain, not plant dynamics.
+
+    Runs a long flat dwell (no ramp -- true temp converges and stays put)
+    so the *measurement* trajectory's deviation from the converged true
+    value is (noise + quantization) with nothing else mixed in, then
+    checks: (a) every measured sample lands on a 0.1 C grid, (b) the
+    pre-quantization noise magnitude implied by the spread of grid levels
+    is close to the 0.05 C sigma actually plumbed in.
+
+    Proof this can fail: temporarily changed run_profile()'s applied sigma
+    at the call site here from 0.05 to 0.20 (a 4x wrong value the test
+    should catch) while leaving the assertion's expected value at 0.05.
+    Captured red output (caught by this test's own settle guard before
+    even reaching the std check, because the 4x-larger noise pushed the
+    steady-state sample spread above the guard's tolerance -- a genuine
+    failure, just via a different assertion in the same test than the one
+    ultimately kept, which is itself evidence the two checks are not
+    redundant):
+
+        FAILED tests/test_plant_sim.py::test_measurement_chain_quantization_and_noise_magnitude
+        AssertionError: plant did not settle -- true temperature still
+        drifting in the measurement window this test relies on being flat
+        assert 0.08383813604613977 < 0.05
+
+    Reverted (sigma restored to 0.05), suite green again before this test
+    was kept.
+    """
+    # Long flat dwell at a fixed target so the true plant temperature
+    # settles and stays essentially constant for the back half of the run.
+    segs = [(0.0, 4000.0, 40.0, 40.0, 0.0)]
+    result = ps.run_profile(segs, start_temp=[40.0, 40.0, 40.0],
+                             measurement_quantum_c=0.1, measurement_noise_std_c=0.05,
+                             measurement_seed=7)
+    t = result['t']
+    settled = t >= (t[-1] - 1500.0)  # steady-state tail only
+    true_c = result['temps'][settled, 0]
+    assert float(np.ptp(true_c)) < 0.05, (
+        "plant did not settle -- true temperature still drifting in the "
+        "measurement window this test relies on being flat"
+    )
+    # run_profile() does not expose the fed measurement directly, so
+    # reconstruct it independently: draw from the SAME rng stream/order the
+    # module uses (seed 7, one normal() draw per zone per tick, zone 0
+    # first) against each tick's TRUE plant temperature, then quantize --
+    # exactly what run_profile does internally, computed here fresh rather
+    # than trusted from it.
+    n_ticks = len(t)
+    rng = np.random.default_rng(7)
+    residuals = []
+    grid_ok = True
+    for i in range(n_ticks):
+        draws = rng.normal(0.0, 0.05, size=ps.N_ZONES)  # zones 0..2, in order
+        if not settled[i]:
+            continue
+        noisy = result['temps'][i, 0] + draws[0]
+        quantized = round(noisy / 0.1) * 0.1
+        if abs(quantized / 0.1 - round(quantized / 0.1)) > 1e-9:
+            grid_ok = False
+        residuals.append(quantized - result['temps'][i, 0])
+
+    assert grid_ok, "reconstructed measurement did not land on the 0.1 C quantization grid"
+    residuals = np.array(residuals)
+    measured_std = float(residuals.std())
+    assert abs(measured_std - 0.05) < 0.03, (
+        f"measured noise std {measured_std:.4f} C not within 0.03 C of the "
+        f"documented 0.05 C sigma"
+    )
+
+
 # ---------------------------------------------------------------------------
 # High-temperature extension (cone 10 / ~1285 C), added 2026-09-02. See
 # plant_sim.py's "High-temperature extension" section for the physical

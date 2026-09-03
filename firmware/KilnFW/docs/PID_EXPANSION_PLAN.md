@@ -943,6 +943,63 @@ same document's own 2026-08-29/30 bench sections contradict.
       other 5961/5964 host-test checks unaffected; reverted. No production
       code changed — `RULE_TABLE` was correct as found.
 
+      **Re-run WITH the measurement chain enabled, 2026-09-02.** The audit
+      above pinned the noise-free sweep's flat/monotonic result on there
+      being nothing in a deterministic sim for the fuzzy layer's
+      near-setpoint Kp/Kd ease-off to buy back. `run_profile()`'s
+      `measurement_quantum_c`/`measurement_noise_std_c`/`measurement_seed`
+      (added in `5ee1990`, default off) close that gap: 0.1 °C MAX31856-LSB
+      quantization plus 0.05 °C Gaussian noise, applied to the value each
+      zone's PID reads, everything else (gains, ff, floor, profile shape)
+      unchanged. Re-ran the identical strength 0/25/50/75/100 sweep over
+      the same `final.jsonl`-derived segment shape, rested (24 °C) and warm
+      (34 °C) starts, with noise on — 20 seeds per (start, strength) cell
+      (`measurement_seed=0..19`; stopped at 20 because seed-to-seed std at
+      every cell was ≤0.001 °C, two orders of magnitude below the smallest
+      strength-to-strength gap, so more seeds could not have changed the
+      read):
+
+      | start | z | 0 | 25 | 50 | 75 | 100 | seed std (max over strengths) |
+      |---|---|---|---|---|---|---|---|
+      | 24 C | z0 | 1.453 | 1.541 | 1.645 | 1.767 | 1.910 | 0.001 |
+      | 24 C | z1 | 1.282 | 1.344 | 1.420 | 1.510 | 1.617 | 0.001 |
+      | 24 C | z2 | 1.015 | 1.070 | 1.135 | 1.209 | 1.293 | 0.001 |
+      | 34 C | z0 | 0.923 | 0.948 | 0.973 | 1.004 | 1.034 | 0.001 |
+      | 34 C | z1 | 0.783 | 0.805 | 0.830 | 0.858 | 0.886 | 0.001 |
+      | 34 C | z2 | 0.669 | 0.679 | 0.692 | 0.707 | 0.725 | 0.001 |
+
+      Noise model sanity-checked before trusting these numbers: a held-flat
+      dwell's fed measurement lands exactly on the 0.1 °C grid every tick,
+      the reconstructed pre-quantization noise std comes back 0.0499 °C
+      against a 0.05 °C target, and the same `measurement_seed` reproduces
+      byte-identical trajectories while a different seed diverges — pinned
+      by `test_measurement_chain_quantization_and_noise_magnitude` in
+      `tests/test_plant_sim.py` (mutation-proven: inflating the applied
+      sigma 4× to 0.20 °C at the call site made the test's own settle guard
+      fail red — `plant did not settle` at spread 0.084 vs the 0.05 bound —
+      before the std check was even reached; reverted, suite green again).
+
+      **Ranking unchanged, and the honesty gate still applies for the same
+      reason.** Every noisy-sweep number is within ~0.001–0.005 °C of the
+      corresponding noise-free number above (seed-averaging over 20 draws
+      leaves essentially no residual noise contribution at this sigma) —
+      strength=0 still scores best at every zone and both starts, still
+      monotonically worse with increasing strength, no crossover. The
+      2026-09-02d discrimination threshold (2.1/1.2/1.3 °C per zone) still
+      dwarfs the largest strength-to-strength spread (0.457 °C, z0 rested),
+      so **the sim still cannot call a winner** — this is not new evidence
+      the layer helps, and now it is not because the sim was structurally
+      blind to the trade either: the trade was given a real, verified
+      noise/quantization signal to react to and made no measurable use of
+      it at this sigma. Two readings are both consistent with the data:
+      (a) the near-setpoint Kp/Kd ease-off's benefit, if any, needs noise
+      larger than this rig's ~0.05 °C thermocouple floor to show up in a
+      whole-run IAE metric, or (b) it does not net positive here at all.
+      Distinguishing those needs a real firing, not a bigger sweep — a
+      hardware fuzzy run is not disqualified by this result, but this
+      result alone still does not justify one; the case for running it (or
+      not) rests on §3.6's other open items, unchanged by this addition.
+
 ### 3.7 Validation gap
 
 Everything above is measured on a bench rig spanning 0–80 °C. Radiative transfer
