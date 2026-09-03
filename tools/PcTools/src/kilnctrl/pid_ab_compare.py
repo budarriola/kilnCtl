@@ -1213,7 +1213,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         else:
             print(format_single_run_text(args.path, metrics))
     elif args.cmd == "compare":
-        artifact = None if args.noise_floor_path.lower() == "none" else nf.load_artifact(args.noise_floor_path)
+        artifact = None
+        if args.noise_floor_path.lower() != "none":
+            artifact, load_reason = nf.load_artifact_diagnostic(args.noise_floor_path)
+            if artifact is None and load_reason is not None:
+                # Loud, not fatal: a failed load degrades every verdict below
+                # from "measured" to "UNKNOWN" (see NOISE_FLOOR_NOTE) -- that
+                # degradation must be visible here, not just inferable from
+                # the absence of the word "measured" further down.
+                print(
+                    f"WARNING: noise-floor artifact NOT LOADED ({load_reason}). "
+                    "Comparisons below fall back to NOISE FLOOR: UNKNOWN -- "
+                    "every verdict is PROVISIONAL, not a confirmed result."
+                )
         report = compare_runs(args.path_a, args.path_b, band_c=args.band,
                                run_index_a=args.run_a, run_index_b=args.run_b,
                                noise_floor_artifact=artifact,

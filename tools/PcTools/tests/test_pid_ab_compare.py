@@ -389,6 +389,29 @@ def test_cli_compare_missing_artifact_path_behaves_like_unknown(capsys, tmp_path
     assert rc == 0
     out = capsys.readouterr().out
     assert "NOISE FLOOR: UNKNOWN" in out
+    # The degradation from "measured" to "unknown" must be LOUD, not merely
+    # inferable from the absence of the word "measured" -- a genuinely
+    # absent artifact is reported as such, distinct from an unreadable one.
+    assert "WARNING" in out
+    assert "NOT LOADED" in out
+    assert "missing" in out
+
+
+def test_cli_compare_unreadable_artifact_reports_distinct_loud_warning(capsys, tmp_path):
+    """A file that EXISTS but fails to parse (corrupt/truncated JSON) is a
+    different failure mode than a missing file, and must be reported as
+    such -- both degrade to NOISE FLOOR: UNKNOWN, but the loud warning text
+    must say *unreadable*, not *missing*."""
+    bad = tmp_path / "corrupt_noise_floor.json"
+    bad.write_text("{not valid json")
+    rc = ab.main(["compare", EXCERPT, EXCERPT, "--noise-floor", str(bad)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "NOISE FLOOR: UNKNOWN" in out
+    assert "WARNING" in out
+    assert "NOT LOADED" in out
+    assert "unreadable" in out
+    assert "missing" not in out.split("WARNING")[1].split("\n")[0]
 
 
 # ---------------------------------------------------------------------------

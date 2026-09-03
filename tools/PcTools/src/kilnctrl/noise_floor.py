@@ -40,8 +40,9 @@ import argparse
 import dataclasses
 import json
 import math
+import pathlib
 import statistics
-from typing import Optional, Sequence
+from typing import Optional, Sequence, Tuple
 
 from kilnctrl import pid_ab_compare as ab
 from kilnctrl import http_capture_log as hc
@@ -49,7 +50,17 @@ from kilnctrl import http_capture_log as hc
 SCHEMA_VERSION = 2
 MIN_REPEATS_FOR_FLOOR = 2
 
-DEFAULT_ARTIFACT_PATH = "tools/PcTools/config_presets/noise_floor.json"
+#: This module lives at tools/PcTools/src/kilnctrl/noise_floor.py, four
+#: directories below the repo root. DEFAULT_ARTIFACT_PATH used to be a
+#: repo-root-relative string ("tools/PcTools/config_presets/noise_floor.json"),
+#: which only resolved when the process's CWD happened to BE the repo root.
+#: Run from anywhere else (e.g. `pytest` from tools/PcTools, or this tool
+#: invoked from a different directory) it silently missed -- load_artifact()
+#: deliberately swallows FileNotFoundError, so the miss produced no error,
+#: just a quietly downgraded "NOISE FLOOR: UNKNOWN" instead of "measured".
+#: Anchoring on __file__ makes the default correct regardless of CWD.
+_REPO_ROOT = pathlib.Path(__file__).resolve().parents[4]
+DEFAULT_ARTIFACT_PATH = str(_REPO_ROOT / "tools" / "PcTools" / "config_presets" / "noise_floor.json")
 
 #: schema_version 2 adds ``start_conditions`` (per-run starting temperature,
 #: read from each capture's first row -- see ``extract_start_conditions``)
@@ -534,15 +545,37 @@ def build_artifact(paths: Sequence[str], band_c: float = 1.0,
     }
 
 
+def load_artifact_diagnostic(path: str = DEFAULT_ARTIFACT_PATH) -> Tuple[Optional[dict], Optional[str]]:
+    """Load the checked-in noise-floor artifact, returning ``(artifact,
+    reason)``. ``reason`` is ``None`` on success; on failure it is a short,
+    human-readable string distinguishing the two ways a load can fail so a
+    caller can surface *why* the floor is unavailable instead of silently
+    treating every failure as "never measured":
+
+      * "missing" -- no file at ``path`` at all (wrong path, artifact never
+        generated).
+      * "unreadable" -- a file exists at ``path`` but couldn't be parsed as
+        the expected JSON (permission error, truncated/corrupt write).
+
+    Never raises -- same "unknown is a valid state, not a crash" contract as
+    ``load_artifact`` below, just with the reason preserved instead of
+    discarded."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f), None
+    except FileNotFoundError:
+        return None, f"missing -- no artifact file at {path}"
+    except (OSError, json.JSONDecodeError) as exc:
+        return None, f"unreadable -- {path} exists but failed to load ({exc})"
+
+
 def load_artifact(path: str = DEFAULT_ARTIFACT_PATH) -> Optional[dict]:
     """Load the checked-in noise-floor artifact, or ``None`` if it doesn't
     exist yet -- callers (``pid_ab_compare.py``) must treat that as "unknown"
-    exactly like before this module existed, never as a crash."""
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except (FileNotFoundError, OSError, json.JSONDecodeError):
-        return None
+    exactly like before this module existed, never as a crash. See
+    ``load_artifact_diagnostic`` for a variant that also reports *why*."""
+    artifact, _reason = load_artifact_diagnostic(path)
+    return artifact
 
 
 def floor_lookup(artifact: Optional[dict], zone: int, metric: str, segment: Optional[int]) -> Optional[float]:
