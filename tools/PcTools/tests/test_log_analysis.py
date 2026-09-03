@@ -772,3 +772,47 @@ def test_parse_profile_exec_uart_capture_drops_truncated_lines(tmp_path):
     rows = la.parse_profile_exec_uart_capture(str(p))
     assert len(rows) == 1
     assert rows[0].elapsed_s == pytest.approx(10.0)
+
+
+def test_parse_ktel_fire_line_skips_a_corrupted_float_field_instead_of_raising():
+    """Opus review round 3, finding 6: _KTEL_FIRE_RE/_KTEL_ZONE_RE's numeric
+    groups (``-?[\\d.]+``) are permissive enough that a corrupted capture
+    byte can still match the regex while producing text float() rejects,
+    e.g. "tgt=850.00" corrupted to "tgt=8.5.00" (two dots). This function's
+    own docstring promises tolerance for malformed lines (a truncated zone
+    tail already returns None rather than raising) -- a bad-float byte gets
+    the same skip treatment, not an uncaught ValueError out of a tool that
+    advertises tolerance for a flaky capture link.
+
+    Proof this can fail: with the try/except removed, this line raises
+    ValueError out of float("8.5.00") instead of parse_ktel_fire_line
+    returning None. Captured red:
+        ValueError: could not convert string to float: '8.5.00'
+    """
+    corrupted_tgt = (
+        "KTEL1 FIRE t=130 st=1 pid=3 seg=1 dwell=1 tgt=8.5.00 "
+        "z0_c=830.00 z0_v=1 z0_e=-25.00 z0_d=0.690 z0_fm=1 z0_fi=0"
+    )
+    assert la.parse_ktel_fire_line(corrupted_tgt) is None
+
+    corrupted_zone_c = (
+        "KTEL1 FIRE t=130 st=1 pid=3 seg=1 dwell=1 tgt=855.00 "
+        "z0_c=8.3.00 z0_v=1 z0_e=-25.00 z0_d=0.690 z0_fm=1 z0_fi=0"
+    )
+    assert la.parse_ktel_fire_line(corrupted_zone_c) is None
+
+
+def test_parse_profile_exec_uart_capture_skips_corrupted_float_line_not_the_whole_file(tmp_path):
+    p = tmp_path / "corrupted.log"
+    good = (
+        "08:00:00.000 I (1) KTEL: KTEL1 FIRE t=10 st=1 pid=0 seg=0 dwell=0 tgt=100.0 "
+        "z0_c=90.0 z0_v=1 z0_e=-10.0 z0_d=0.5 z0_fm=0 z0_fi=0\n"
+    )
+    corrupted = (
+        "08:00:05.000 I (2) KTEL: KTEL1 FIRE t=15 st=1 pid=0 seg=0 dwell=0 tgt=8.5.0 "
+        "z0_c=91.0 z0_v=1 z0_e=-9.0 z0_d=0.5 z0_fm=0 z0_fi=0\n"
+    )
+    p.write_text(good + corrupted, encoding="utf-8")
+    rows = la.parse_profile_exec_uart_capture(str(p))
+    assert len(rows) == 1
+    assert rows[0].elapsed_s == pytest.approx(10.0)

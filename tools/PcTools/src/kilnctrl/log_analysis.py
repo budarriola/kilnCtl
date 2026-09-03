@@ -267,16 +267,30 @@ def parse_ktel_fire_line(text: str) -> Optional[PollRow]:
     m = _KTEL_FIRE_RE.search(text)
     if m is None:
         return None
-    zones: dict[int, ZoneSample] = {}
-    for zm in _KTEL_ZONE_RE.finditer(m.group("zones")):
-        valid = zm.group("v") == "1"
-        zones[int(zm.group("zi"))] = ZoneSample(
-            zone=int(zm.group("zi")),
-            actual_c=float(zm.group("c")) if valid else math.nan,
-            duty=float(zm.group("d")),
-            ff_hold_used_matrix=zm.group("fm") == "1",
-            ff_hold_infeasible=zm.group("fi") == "1",
-        )
+    # REVIEW 2026-09-02 (Opus round 3, finding 6): _KTEL_FIRE_RE/_KTEL_ZONE_RE's
+    # numeric groups are permissive ("-?[\d.]+", to tolerate the odd extra
+    # digit) enough that a corrupted capture byte can still match while
+    # producing something float() rejects, e.g. a byte flip landing inside
+    # "tgt=850.00" as "tgt=8.5.0" -- two dots, matches the regex, raises
+    # ValueError out of float(). This function already promises tolerance
+    # for malformed lines (truncated zone tails return None below; the
+    # module docstring calls out "a blank/truncated line" as expected and
+    # skipped) -- a bad-float capture byte gets the same treatment, not a
+    # crash, so this whole block is one try/except around every float()/int()
+    # conversion rather than leaving this one path to raise.
+    try:
+        zones: dict[int, ZoneSample] = {}
+        for zm in _KTEL_ZONE_RE.finditer(m.group("zones")):
+            valid = zm.group("v") == "1"
+            zones[int(zm.group("zi"))] = ZoneSample(
+                zone=int(zm.group("zi")),
+                actual_c=float(zm.group("c")) if valid else math.nan,
+                duty=float(zm.group("d")),
+                ff_hold_used_matrix=zm.group("fm") == "1",
+                ff_hold_infeasible=zm.group("fi") == "1",
+            )
+    except ValueError:
+        return None
     # REVIEW 2026-09-02 (Opus round 3): refuse a FIRE line whose zone tail did
     # not decode completely, rather than returning a PollRow that is missing
     # zones but looks complete. Reachable, not hypothetical:
@@ -298,16 +312,19 @@ def parse_ktel_fire_line(text: str) -> Optional[PollRow]:
     claimed_zones = {int(z) for z in _KTEL_ZONE_START_RE.findall(m.group("zones"))}
     if claimed_zones != set(zones):
         return None
-    return PollRow(
-        wall_time="",  # filled in by the caller, which has the capture-line timestamp
-        elapsed_s=float(m.group("t")),
-        segment_index=int(m.group("seg")),
-        segment_count=0,
-        dwelling=m.group("dwell") != "0",
-        target_c=float(m.group("tgt")),
-        state=_profile_exec_state_name(int(m.group("st"))),
-        zones=zones,
-    )
+    try:
+        return PollRow(
+            wall_time="",  # filled in by the caller, which has the capture-line timestamp
+            elapsed_s=float(m.group("t")),
+            segment_index=int(m.group("seg")),
+            segment_count=0,
+            dwelling=m.group("dwell") != "0",
+            target_c=float(m.group("tgt")),
+            state=_profile_exec_state_name(int(m.group("st"))),
+            zones=zones,
+        )
+    except ValueError:
+        return None
 
 
 #: A capture line as ``telemetry_capture.py``'s CLI writes it:
