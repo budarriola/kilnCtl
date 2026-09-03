@@ -331,8 +331,8 @@ flash and survives a reboot; the setting is shown here and in the dashboard stat
 silently on. Starting a firing while this is disabled requires an extra confirmation.</p>
 
 <!-- ramp_assist_cfg.h -- the kiln-wide (not per-zone) on/off switch for the
-     forthcoming "ramp assist" feature (cone/heat-work-based ramp-stretch and
-     dwell-credit, not yet implemented -- this control is the flag only).
+     "ramp assist" feature (sustained-lag detection driving auto-stretch of
+     ramps and a gated dwell credit), persisted and defaulting OFF.
      Same GET/POST-toggle shape as the watchdog-panic control above, and the
      same class="danger-btn" language: PID tuning and A/B controller
      comparisons need this OFF so tracking-error numbers stay comparable

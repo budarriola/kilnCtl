@@ -300,6 +300,12 @@ function loadZones() {
       container.innerHTML = '<span class="empty">No zones configured</span>';
     }
     updateZoneCeiling();
+  }).catch(function () {
+    // Resolve rather than reject on failure: callers chain loadList()/
+    // loadCatalogue() off this promise (see the page-boot call below), and
+    // a network hiccup reading /api/zones must not leave those stuck on
+    // "Loading..." forever just because this fetch failed first.
+    document.getElementById('pzone').innerHTML = '<span class="empty">Could not load zones.</span>';
   });
 }
 
@@ -960,7 +966,9 @@ function loadIntoEditor(p) {
 function builtinPost(path, body) {
   return fetch(path, {
     method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body,
-  }).then(function () { loadCatalogue(); loadList(); });
+  }).then(function () { loadCatalogue(); loadList(); }).catch(function () {
+    document.getElementById('catMsg').innerHTML = '<span class="err">Could not reach the board.</span>';
+  });
 }
 
 function hideBuiltin(id) { builtinPost('/api/profile/builtin/hide', 'id=' + id + '&hidden=1'); }
@@ -997,7 +1005,9 @@ function editProfile(id) {
 function deleteProfile(id) {
   fetch('/api/profile/delete', {
     method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'id=' + id,
-  }).then(function () { loadList(); if (editingId === id) resetEditor(); });
+  }).then(function () { loadList(); if (editingId === id) resetEditor(); }).catch(function () {
+    document.getElementById('msg').innerHTML = '<span class="err">Could not reach the board -- delete not confirmed.</span>';
+  });
 }
 
 document.getElementById('newBtn').addEventListener('click', resetEditor);

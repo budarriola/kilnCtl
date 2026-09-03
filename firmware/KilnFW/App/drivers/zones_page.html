@@ -2783,7 +2783,12 @@ function pollAdaptiveTune() {
         }).catch(function () { pollAdaptiveTune(); });
       });
     });
-  }).catch(function () {});
+  }).catch(function () {
+    // Was silently swallowed before, which left this section stuck on
+    // "Loading..." forever on any fetch/parse failure (e.g. the truncated
+    // /api/adaptive_tune response) with nothing telling the operator why.
+    el.innerHTML = '<p class="empty">Could not load continuous-tuning status.</p>';
+  });
 }
 setInterval(pollAdaptiveTune, 5000);
 pollAdaptiveTune();
