@@ -37,10 +37,31 @@ design into the repo, add an entry here in the same pull request.
   incidental. The module's `cone_table_heat_work_weight()` Arrhenius-form weighting
   (Ea = 300 kJ/mol) is **not** Orton data — it is this project's own engineering
   approximation of cone kinetics, as the file's own header states; do not attribute it
-  to Orton.
+  to Orton. Ten of the 36 entries (cones 011-018 and 13/14) originally shipped wrong
+  (15-56°C off, in one case sourced from the wrong chart column entirely) and were
+  corrected against Orton's own Self-Supporting 108°F/hr chart as mirrored at
+  `hotkilns.com/sites/default/files/pdf/cone-chart.pdf` (rendered and read directly,
+  not OCR'd) — see commit `9362e84` and `firmware/KilnFW/docs/PID_EXPANSION_PLAN.md`
+  §7.3.1 for the correction detail.
 - **[LVGL](https://github.com/lvgl/lvgl)** — LVGL Kft — MIT licence — graphics/widget
   library vendored as a git submodule at `firmware/KilnFW/components/lvgl`; drives the
-  KilnFW front-panel display (`lvgl_port.c`, `ui_page_*.c`).
+  KilnFW front-panel display (`lvgl_port.c`, `ui_page_*.c`). Bundles **TJpgDec** (JPEG
+  decoder, `components/lvgl/src/libs/tjpgd/`) — © ChaN, 2021, permissive
+  "no restriction on use, retain the copyright notice" licence (see that directory's
+  own `LICENSE.txt`) — enabled via `LV_USE_TJPGD`/`CONFIG_LV_USE_TJPGD` for on-device
+  JPEG decoding.
+- **Vendor datasheets copied into `firmware/KilnFW/Datasheets/`** — respective
+  manufacturers — datasheets for ICs with a digital comm interface (I2C/SPI/UART) that
+  KilnFW talks to, kept alongside the firmware for reference; see that directory's own
+  `README.md` for the full per-file table and sources. Currently: `MAX31856.pdf`
+  (Maxim/Analog Devices, SPI thermocouple ADC), `SX1509.pdf` (Semtech, I2C GPIO
+  expander), `RaspberryPi_Pico.pdf` (Raspberry Pi Foundation, UART peer MCU),
+  `ILI9488.pdf` (Ilitek, SPI TFT controller), `XPT2046.pdf` (SPI touch controller,
+  mirrored copy), `ESP32-S3_datasheet.pdf` and `ESP32-S3-DevKitC-1_user_guide.pdf`
+  (Espressif), and the curated `4.0inch_SPI_Module_ST7796_MSP4030_MSP4031_V1.0_Keep/`
+  directory (LCDWIKI/Elecrow ST7796S + FT6336U candidate-display reference package,
+  pruned from an untracked ~394 MB vendor drop to ~11 MB of tracked files — see
+  `firmware/KilnFW/docs/DISPLAY_ST7796_PLAN.md`).
 
 - **PID tuning rules implemented in `firmware/KilnFW/App/drivers/pid_autotune.c`** —
   classic control-theory formulas coded directly into `pid_autotune_tune_from_fopdt()`
