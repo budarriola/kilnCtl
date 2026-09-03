@@ -203,6 +203,77 @@ function sampleArtifact() {
 })();
 
 // ---------------------------------------------------------------------------
+// Group 4: REVIEW 2026-09-02 (Opus round 4). A peak that exceeds EVERY row's
+// ceiling is, by definition, outside the range the campaign tested -- it is
+// answered with the highest-ceiling row (testPeakAbovePeakEverything above),
+// which is the right row to answer with, but it must NOT inherit that row's
+// 'measured' confidence. The panel's own header comment states the rule:
+// "a recommendation for a peak above the simulator's own checked range rests
+// on ASSUMED physics ... It must never look as certain as one that was."
+// Before this group, pickTuningRecommendation returned the row verbatim and
+// renderTuningRecommendation coloured it var(--ok) green with a MEASURED
+// badge and no caveat -- a green, measurement-badged recommendation for a
+// peak the campaign never simulated.
+// ---------------------------------------------------------------------------
+function measuredOnlyArtifact() {
+  return {
+    schema_version: 1,
+    sim_confidence: { extrapolation_boundary_c: 80 },
+    recommendations: [
+      { peak_temp_c_max: 1000, load: 'any', method: 'ziegler_nichols', rule: 'zn',
+        confidence: 'measured', why: 'Checked against held-out runs up to 1000C.' },
+    ],
+  };
+}
+
+(function testPeakWithinTopCeilingStaysMeasured() {
+  const ctx = loadFns(LOOKUP_SRC);
+  const r = ctx.pickTuningRecommendation(measuredOnlyArtifact(), 900, 'any');
+  assert(r.ok && r.confidence === 'measured',
+    'a peak INSIDE the top row ceiling keeps its measured confidence (the downgrade must not fire here) -- got ' + JSON.stringify(r.confidence));
+  assert(r.beyond_tested_range === false,
+    'a covered peak is not flagged beyond_tested_range -- got ' + JSON.stringify(r.beyond_tested_range));
+})();
+
+(function testPeakAboveEveryCeilingIsNotRenderedAsMeasured() {
+  const ctx = loadFns(LOOKUP_SRC);
+  const r = ctx.pickTuningRecommendation(measuredOnlyArtifact(), 1300, 'any');
+  assert(r.ok && r.row.peak_temp_c_max === 1000,
+    'a peak above every ceiling still answers with the highest-ceiling row -- got ' + JSON.stringify(r.row));
+  assert(r.beyond_tested_range === true,
+    'a peak above every row ceiling is flagged beyond_tested_range -- got ' + JSON.stringify(r.beyond_tested_range));
+  assert(r.confidence === 'extrapolated',
+    'a peak above every row ceiling is downgraded from measured to extrapolated -- got ' + JSON.stringify(r.confidence));
+  assert(ctx.tuningRecStatusClass(r.confidence) !== 'ok',
+    'the effective confidence for an out-of-range peak must not render green -- got ' + ctx.tuningRecStatusClass(r.confidence));
+})();
+
+(function testDowngradeNeverUpgrades() {
+  const ctx = loadFns(LOOKUP_SRC);
+  // An already-indistinguishable row stays indistinguishable when the peak
+  // runs past its ceiling: the downgrade must never overwrite a MORE
+  // cautious verdict with a less cautious one.
+  const art = measuredOnlyArtifact();
+  art.recommendations[0].confidence = 'indistinguishable';
+  art.recommendations[0].runner_up = 'step';
+  const r = ctx.pickTuningRecommendation(art, 1300, 'any');
+  assert(r.confidence === 'indistinguishable',
+    'an indistinguishable row is not rewritten to extrapolated by the out-of-range downgrade -- got ' + JSON.stringify(r.confidence));
+  assert(r.beyond_tested_range === true, 'it is still flagged beyond_tested_range');
+})();
+
+(function testMissingConfidenceFieldDoesNotCrash() {
+  const ctx = loadFns(LOOKUP_SRC);
+  const art = measuredOnlyArtifact();
+  delete art.recommendations[0].confidence;
+  const r = ctx.pickTuningRecommendation(art, 900, 'any');
+  assert(r.ok && typeof r.confidence === 'string',
+    'a row with no confidence field yields a STRING effective confidence (renderTuningRecommendation calls .toUpperCase() on it) -- got ' + JSON.stringify(r.confidence));
+  assert(ctx.tuningRecStatusClass(r.confidence) === 'bad',
+    'a row with no confidence field is treated as the least-trusted case -- got ' + ctx.tuningRecStatusClass(r.confidence));
+})();
+
+// ---------------------------------------------------------------------------
 console.log('');
 console.log(passed + ' passed, ' + failed + ' failed');
 if (failed) {

@@ -2004,14 +2004,38 @@ function pickTuningRecommendation(artifact, peakTempC, load) {
   // rows[rows.length-1] -- `rows` is sorted exact-load-first then by
   // ceiling within each group, so its last element is only the highest
   // ceiling within whichever priority group sorted last, not the true max.
+  var beyondTestedRange = false;
   if (!match) {
     match = rows.reduce(function (best, r) {
       return (!best || r.peak_temp_c_max > best.peak_temp_c_max) ? r : best;
     }, null);
+    // REVIEW 2026-09-02 (Opus round 4): reaching here means the requested
+    // peak is past EVERY row's ceiling, i.e. outside the range the campaign
+    // simulated at all. The row is still the right one to answer with, but
+    // its own `confidence` describes the range it covers, not this request.
+    // Returning it verbatim rendered "[MEASURED] Use ziegler_nichols" in
+    // var(--ok) green, with no caveat, for a peak the campaign never ran --
+    // exactly what this panel's header comment forbids ("must never look as
+    // certain as one that was"). So the CALLER is handed an EFFECTIVE
+    // confidence, downgraded here, rather than the raw field.
+    beyondTestedRange = true;
   }
   var boundary = (artifact.sim_confidence && typeof artifact.sim_confidence.extrapolation_boundary_c === 'number')
     ? artifact.sim_confidence.extrapolation_boundary_c : null;
-  return { ok: true, row: match, extrapolation_boundary_c: boundary };
+  // Effective confidence: the row's own value, except that (a) a non-string
+  // / absent field becomes the literal 'unknown' so the renderer's
+  // .toUpperCase() has something to call and tuningRecStatusClass() maps it
+  // to 'bad', and (b) a 'measured' claim is downgraded to 'extrapolated'
+  // when the request is past every tested ceiling. The downgrade only ever
+  // moves toward LESS confidence -- 'indistinguishable' and 'extrapolated'
+  // are left alone, never rewritten into each other or into 'measured'.
+  var confidence = (typeof match.confidence === 'string' && match.confidence) ? match.confidence : 'unknown';
+  if (beyondTestedRange && confidence === 'measured') confidence = 'extrapolated';
+  return {
+    ok: true, row: match, confidence: confidence,
+    beyond_tested_range: beyondTestedRange,
+    extrapolation_boundary_c: boundary,
+  };
 }
 
 // Maps the artifact's own confidence field to this page's shared status
@@ -2052,10 +2076,15 @@ function renderTuningRecommendation() {
     return;
   }
   var row = result.row;
-  var cls = tuningRecStatusClass(row.confidence);
-  var basisLabel = { measured: 'MEASURED', extrapolated: 'EXTRAPOLATED', indistinguishable: 'INDISTINGUISHABLE' }[row.confidence] || row.confidence.toUpperCase();
+  // result.confidence, NOT row.confidence -- the effective value, which
+  // downgrades a 'measured' row when the requested peak is past every tested
+  // ceiling and substitutes 'unknown' for a missing/non-string field (whose
+  // .toUpperCase() used to throw straight out of this handler). See
+  // pickTuningRecommendation().
+  var cls = tuningRecStatusClass(result.confidence);
+  var basisLabel = { measured: 'MEASURED', extrapolated: 'EXTRAPOLATED', indistinguishable: 'INDISTINGUISHABLE' }[result.confidence] || window.kcEscapeHtml(String(result.confidence).toUpperCase());
   var html = '<p><span style="color:var(--' + cls + ');font-weight:bold;">[' + basisLabel + ']</span> ';
-  if (row.confidence === 'indistinguishable') {
+  if (result.confidence === 'indistinguishable') {
     html += 'The campaign could not tell <b>' + window.kcEscapeHtml(row.method) + '</b> and ' +
       '<b>' + window.kcEscapeHtml(row.runner_up || 'the runner-up method') + '</b> apart here' +
       (typeof row.margin_c === 'number' ? (' (margin ' + row.margin_c.toFixed(2) + '°C, within noise)') : '') +
@@ -2063,12 +2092,17 @@ function renderTuningRecommendation() {
   } else {
     html += 'Use <b>' + window.kcEscapeHtml(row.method) + '</b>' +
       (row.rule ? (' (' + window.kcEscapeHtml(row.rule) + ' rule)') : '') + '.</p>';
-    if (row.confidence === 'extrapolated') {
+    if (result.confidence === 'extrapolated') {
       html += '<p class="hint">Past the simulator’s checked range' +
         (typeof result.extrapolation_boundary_c === 'number' ? (' (' + result.extrapolation_boundary_c + '°C)') : '') +
         ' -- this rests on assumed physics (emissivity, element power, insulation), not a held-out run. ' +
         'Treat it as a starting point, verify with a real firing.</p>';
     }
+  }
+  if (result.beyond_tested_range) {
+    html += '<p class="hint" style="color:var(--warn);">That peak is above every temperature the ' +
+      'campaign simulated (highest tested here: ' + row.peak_temp_c_max + '&deg;C). Showing the ' +
+      'highest-range recommendation there is; it was not checked at your peak.</p>';
   }
   if (row.why) html += '<p class="hint">' + window.kcEscapeHtml(row.why) + '</p>';
   el.innerHTML = html;
