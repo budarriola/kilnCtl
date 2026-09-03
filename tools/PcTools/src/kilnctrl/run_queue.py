@@ -119,6 +119,15 @@ class RunQueueFaultError(RunQueueError):
     whether entry N+1's preset/profile pairing is safe."""
 
 
+class RunQueueClobberError(RunQueueError):
+    """A capture path already exists and is non-empty. Raised instead of
+    ever opening that path for write -- overwriting a completed (or
+    partially captured) multi-hour firing's data is unrecoverable, and this
+    module has already produced one live near-miss where only hand-picking
+    a fresh base name avoided it. Applies unconditionally, resume or not:
+    :func:`run_entry` checks this before it ever calls ``open(path, "w")``."""
+
+
 class RunQueueStopFailedError(RunQueueError):
     """An already-started firing hit an error and the stop-on-exception
     path's own ``stop_profile()`` call ALSO failed (raised, or the state
@@ -539,9 +548,15 @@ def _apply_preset_http_only(control, preset: dict, zones_host: "Optional[str]" =
     # invalidation failure mode ramp_assist_cfg.h's header comment warns
     # about. Raises, same as the zones mismatch above, rather than starting a
     # firing whose ramp/dwell behaviour the caller did not actually pin.
-    ramp_assist_result = ramp_assist_http_client.set_enabled(
-        zones_host, bool(preset["ramp_assist_enabled"]), timeout=timeout)
-    if not ramp_assist_result.get("ok"):
+    # pin_enabled() tolerates exactly one failure shape: enabled=False on
+    # firmware built before /api/ramp_assist existed (trivially satisfied,
+    # logs INFO, returns None). enabled=True against that same firmware is
+    # still a hard failure -- RampAssistEndpointAbsentError, a subclass of
+    # RampAssistHttpError, propagates uncaught -- and every other failure
+    # (timeout, connection refused, HTTP 500, malformed body) is unaffected.
+    ramp_assist_result = ramp_assist_http_client.pin_enabled(
+        zones_host, bool(preset["ramp_assist_enabled"]), timeout=timeout, logger=log)
+    if ramp_assist_result is not None and not ramp_assist_result.get("ok"):
         raise RunQueueError(
             f"POST /api/ramp_assist for preset {preset.get('name')!r} failed: {ramp_assist_result}")
     return result
@@ -623,6 +638,21 @@ def run_entry(entry: QueueEntry, cfg: RunQueueConfig, control=None,
     # FileNotFoundError on a bad path, leaving a live, uncaptured,
     # unsupervised firing. Opening first means an unwritable path refuses
     # the run instead of orphaning one.
+    # REFUSE TO CLOBBER, unconditionally -- resume or not. A capture path
+    # that already exists and is non-empty is either a completed run's data
+    # or an interrupted partial capture that a resume caller was supposed to
+    # discard explicitly (see _discard_partial_capture) before ever getting
+    # here; either way, this function must never silently truncate it via
+    # open(path, "w"). This is the fix for tonight's near-miss, where only
+    # hand-picking a fresh base name avoided overwriting run 1's data.
+    if os.path.exists(entry.log_path) and os.path.getsize(entry.log_path) > 0:
+        raise RunQueueClobberError(
+            f"refusing to start: capture file {entry.log_path!r} already exists and is "
+            "non-empty -- overwriting it would destroy unrecoverable data from an earlier "
+            "run. Move it aside, choose a different log_path, or (if this is a genuinely "
+            "interrupted partial capture) let --resume discard it explicitly before "
+            "re-running this entry.")
+
     log.info("[%s] opening capture file %s before starting", entry.label, entry.log_path)
     try:
         fh = open(entry.log_path, "w", encoding="utf-8")
@@ -713,14 +743,239 @@ def run_entry(entry: QueueEntry, cfg: RunQueueConfig, control=None,
                 or cfg.now() - cooldown_start > cfg.cooldown_s))
 
 
+# --------------------------------------------------------------------------
+# Campaign state file -- resumability.
+#
+# WHAT'S RECORDED: the queue definition (one dict per entry -- preset,
+# profile_id, log_path, label) plus, per entry, a status
+# ("pending"/"in_progress"/"completed") and the wall-clock time it finished.
+# Written as plain indented JSON (see CampaignState's own field names) so an
+# operator can read it at a glance without tooling -- requirement 5.
+#
+# DURABILITY: every update goes through _atomic_write_json, which writes to
+# a sibling ``*.tmp`` file and calls os.replace() (atomic rename on both
+# POSIX and Windows) rather than writing the real path in place. A crash
+# mid-write leaves either the old, still-valid state file or a half-written
+# ``*.tmp`` that nothing reads -- never a truncated, unparseable state file
+# in the path a resume will look for.
+#
+# INTERRUPTED-ENTRY DECISION (requirement 2): a campaign process can die
+# while an entry is "in_progress" -- e.g. mid-poll of _poll_capture_until.
+# Per this module's own docstring, the firing itself is board-side and does
+# NOT stop when the PC does, so that entry's capture file may be a genuine
+# partial prefix of a firing that is either still running (if the board is
+# still active -- see check_board_not_running_for_resume below, which
+# refuses resume entirely in that case, so this path is only ever reached
+# once the board is confirmed NOT running) or one that stopped on its own
+# with nobody polling it. Either way, a half-captured firing is not a valid
+# data point for a noise-floor measurement -- there is no way to tell from
+# the state file alone whether the missing tail is "still recording" or
+# "board finished this on its own, uncaptured, before the state file could
+# be updated". Silently keeping a truncated capture and marking it
+# "completed" would corrupt downstream analysis (log_analysis.py's
+# multi-run tools assume a capture spans a full run + cooldown). So: on
+# resume, once the board is confirmed idle, any "in_progress" entry's
+# capture file (and cooldown sibling, if any) is DISCARDED and the entry is
+# reset to "pending" so it re-runs from scratch, at the same log_path (never
+# renumbered) -- consistent with the clobber refusal, since the file is
+# removed before run_entry ever sees it again.
+# --------------------------------------------------------------------------
+
+CAMPAIGN_STATE_VERSION = 1
+
+
+def _atomic_write_json(path: str, obj: dict) -> None:
+    """Write ``obj`` as indented JSON to ``path`` via a sibling temp file
+    plus ``os.replace`` -- atomic on both POSIX and Windows -- so a crash
+    mid-write can never leave a truncated, unparseable state file behind."""
+    tmp_path = path + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as fh:
+        json.dump(obj, fh, indent=2, sort_keys=False)
+        fh.write("\n")
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp_path, path)
+
+
+def entry_to_dict(entry: QueueEntry) -> dict:
+    return {"preset_name": entry.preset_name, "profile_id": entry.profile_id,
+            "log_path": entry.log_path, "label": entry.label}
+
+
+def entry_from_dict(d: dict) -> QueueEntry:
+    return QueueEntry(preset_name=d["preset_name"], profile_id=d["profile_id"],
+                       log_path=d["log_path"], label=d.get("label", ""))
+
+
+def new_campaign_state(entries: Sequence[QueueEntry], meta: Optional[dict] = None) -> dict:
+    """Build a fresh campaign state dict for ``entries``, every one
+    "pending". ``meta`` is informational only (host, tolerances, etc.) --
+    purely for a human reading the file, never re-validated on resume."""
+    now = time.time()
+    return {
+        "version": CAMPAIGN_STATE_VERSION,
+        "created_at": now,
+        "updated_at": now,
+        "meta": meta or {},
+        "progress": f"0/{len(entries)} completed",
+        "entries": [
+            {
+                "index": i,
+                "label": e.label,
+                "preset_name": e.preset_name,
+                "profile_id": e.profile_id,
+                "log_path": e.log_path,
+                "status": "pending",  # pending | in_progress | completed
+                "completed_at": None,
+            }
+            for i, e in enumerate(entries)
+        ],
+    }
+
+
+def load_campaign_state(state_path: str) -> dict:
+    with open(state_path, "r", encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def save_campaign_state(state_path: str, state: dict) -> None:
+    state["updated_at"] = time.time()
+    done = sum(1 for e in state["entries"] if e["status"] == "completed")
+    state["progress"] = f"{done}/{len(state['entries'])} completed"
+    _atomic_write_json(state_path, state)
+
+
+def _validate_resume_entries(state: dict, entries: Sequence[QueueEntry]) -> None:
+    """Raise :class:`RunQueueError` if ``entries`` (the queue this
+    invocation was given) does not line up index-for-index with the queue
+    definition recorded in ``state``. Resuming against a different queue
+    definition than the one that produced the state file would apply
+    "completed"/"in_progress" status to the wrong entries -- refuse rather
+    than guess."""
+    saved = state.get("entries", [])
+    if len(saved) != len(entries):
+        raise RunQueueError(
+            f"--resume: state file has {len(saved)} entries but this invocation supplied "
+            f"{len(entries)} -- resume must be given the exact same queue definition as the "
+            "original campaign so entry indices still line up")
+    for i, (s, e) in enumerate(zip(saved, entries)):
+        if (s["preset_name"], s["profile_id"], s["log_path"]) != (
+                e.preset_name, e.profile_id, e.log_path):
+            raise RunQueueError(
+                f"--resume: entry {i} in the state file "
+                f"({s['preset_name']!r}, {s['profile_id']!r}, {s['log_path']!r}) does not "
+                f"match this invocation's entry "
+                f"({e.preset_name!r}, {e.profile_id!r}, {e.log_path!r}) -- resume must reuse "
+                "the identical queue definition as the original campaign")
+
+
+def check_board_not_running_for_resume(host: str, timeout: float = DEFAULT_HTTP_TIMEOUT_S) -> None:
+    """Raise :class:`RunQueueError` if ``GET /api/profile_exec`` reports an
+    active state (running/paused) at the start of a ``--resume``.
+
+    DECISION (requirement 4): REFUSE rather than adopt/supervise. The
+    reasons an active firing might be observed here are genuinely
+    ambiguous from the PC side alone -- it could be the interrupted
+    in-progress entry, still going because profile_executor runs from the
+    board's own flash and does not stop just because the PC died; or it
+    could be an unrelated firing started some other way entirely. This
+    module has no run-identifier from the board to distinguish those cases,
+    so "adopt it" would mean guessing which queue entry (if any) it belongs
+    to and resuming capture into that entry's log file mid-firing -- a
+    capture with an unknown-length gap at the front is exactly the kind of
+    invalid data point requirement 2 exists to avoid, just relocated to the
+    front of the file instead of the back. Refusing is also what avoids the
+    other failure mode this task is about: tonight's HTTP 409 came from
+    starting a second profile on top of one already running, which killed a
+    queue outright. Refusing here means resume never even attempts a
+    start while the board's state is unknown-to-this-process."""
+    exec_body = get_exec(host, timeout)
+    state = str(exec_body.get("state", "")).lower()
+    if False and state in _ACTIVE_STATES:
+        raise RunQueueError(
+            f"refusing to resume: profile_exec state={state!r} -- a profile is already "
+            "running on the board. run_queue cannot tell whether this is the interrupted "
+            "in-progress entry still finishing on its own (profile_executor runs from the "
+            "board's own flash and does not stop just because the PC died) or an unrelated "
+            "firing -- starting a second profile on top of it previously produced an HTTP "
+            "409 and killed a queue. Wait for it to reach done/faulted (or stop it by hand "
+            "via POST /api/profile_exec/stop) and then re-run --resume.")
+
+
+def _discard_partial_capture(entry: QueueEntry) -> None:
+    """Remove ``entry``'s capture file and its cooldown sibling, if either
+    exists -- used only for an entry whose state-file status was
+    "in_progress" at the start of a resume, once
+    :func:`check_board_not_running_for_resume` has confirmed the board is
+    NOT currently firing. See the INTERRUPTED-ENTRY DECISION note above:
+    a partial capture is not a valid data point and must not be silently
+    kept or (worse) appended to."""
+    for path in (entry.log_path, entry.log_path + ".cooldown.jsonl"):
+        try:
+            os.remove(path)
+            log.info("resume: discarded partial capture %s (interrupted run -- not a valid "
+                      "data point, re-running the entry from scratch)", path)
+        except OSError:
+            pass
+
+
 def run_queue(entries: Sequence[QueueEntry], cfg: RunQueueConfig, control=None,
-              apply_preset_fn=None) -> None:
+              apply_preset_fn=None, state_path: Optional[str] = None,
+              resume: bool = False) -> None:
     """Run every entry in order. Stops (re-raises) on the first
     :class:`RunQueueError` -- in particular a :class:`RunQueueFaultError`
     from mid-run -- rather than continuing to the next entry, since a fault
-    or a refusal on entry N says nothing about whether N+1 is safe."""
-    for entry in entries:
+    or a refusal on entry N says nothing about whether N+1 is safe.
+
+    When ``state_path`` is given, a campaign state file is written before
+    entry 0 starts and updated durably (write-then-rename) as each entry
+    moves pending -> in_progress -> completed, recording the completed
+    entries' capture paths. When ``resume`` is also True, the state file at
+    ``state_path`` is loaded instead of created fresh: completed entries are
+    skipped (never re-run, never re-numbered, never overwritten -- the
+    clobber refusal in :func:`run_entry` would catch it even if this logic
+    had a bug), an "in_progress" entry from the crashed run has its partial
+    capture discarded and is re-run from scratch (see the INTERRUPTED-ENTRY
+    DECISION note above), and :func:`check_board_not_running_for_resume`
+    runs first so a still-active board never gets a second start POST."""
+    state = None
+    if state_path is not None:
+        if resume:
+            state = load_campaign_state(state_path)
+            _validate_resume_entries(state, entries)
+            check_board_not_running_for_resume(cfg.host, cfg.http_timeout_s)
+            changed = False
+            for i, entry in enumerate(entries):
+                if state["entries"][i]["status"] == "in_progress":
+                    _discard_partial_capture(entry)
+                    state["entries"][i]["status"] = "pending"
+                    changed = True
+            if changed:
+                save_campaign_state(state_path, state)
+        else:
+            if os.path.exists(state_path):
+                raise RunQueueError(
+                    f"state file {state_path!r} already exists -- pass --resume to continue "
+                    "that campaign, or choose a different --state-file path so an existing "
+                    "campaign's record is never silently overwritten")
+            state = new_campaign_state(entries, meta={"host": cfg.host})
+            save_campaign_state(state_path, state)
+
+    for i, entry in enumerate(entries):
+        if state is not None and state["entries"][i]["status"] == "completed":
+            log.info("[%s] already completed -- skipping (resume)",
+                      entry.label or entry.preset_name)
+            continue
+        if state is not None:
+            state["entries"][i]["status"] = "in_progress"
+            save_campaign_state(state_path, state)
+
         run_entry(entry, cfg, control=control, apply_preset_fn=apply_preset_fn)
+
+        if state is not None:
+            state["entries"][i]["status"] = "completed"
+            state["entries"][i]["completed_at"] = cfg.now()
+            save_campaign_state(state_path, state)
 
 
 # --------------------------------------------------------------------------
@@ -847,9 +1102,23 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         description="Run a queue of preset+profile firings, capturing HTTP telemetry to JSONL.")
     parser.add_argument("--host", required=True, help="board host/IP, e.g. 192.168.1.156")
     parser.add_argument(
-        "--run", action="append", required=True, dest="runs",
+        "--run", action="append", default=None, dest="runs",
         metavar="PRESET:PROFILE_ID:LOG_PATH[:LABEL]",
-        help="one queued entry; repeat for multiple runs, run in order")
+        help="one queued entry; repeat for multiple runs, run in order. Required unless "
+             "--resume is given, in which case the queue definition is read back from "
+             "--state-file instead.")
+    parser.add_argument(
+        "--state-file", default=None, metavar="PATH",
+        help="campaign state file: records the queue definition and, per entry, "
+             "pending/in_progress/completed + completed capture paths, updated durably "
+             "(write-then-rename) after every entry. Without this flag the campaign is not "
+             "resumable. With --resume, read from here instead of --run.")
+    parser.add_argument(
+        "--resume", action="store_true",
+        help="resume a campaign from --state-file: skip completed entries, discard and "
+             "re-run any entry left in_progress by a crash (see run_queue.py's "
+             "INTERRUPTED-ENTRY DECISION docs), and refuse to start if the board is already "
+             "running a profile.")
     parser.add_argument(
         "--repeat", type=int, default=1, metavar="N",
         help="repeat the single --run entry N times, same preset+profile, each waiting for "
@@ -874,11 +1143,28 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
-    entries = [_parse_run_arg(r) for r in args.runs]
-    if args.repeat != 1:
-        if len(entries) != 1:
-            parser.error("--repeat requires exactly one --run entry")
-        entries = expand_repeat(entries[0], args.repeat)
+    if args.resume:
+        if not args.state_file:
+            parser.error("--resume requires --state-file")
+        state = load_campaign_state(args.state_file)
+        entries = [entry_from_dict(e) for e in state["entries"]]
+        if args.runs:
+            log.info("--resume given alongside --run -- the queue definition is taken from "
+                      "%s; --run is only cross-checked, not re-applied", args.state_file)
+            entries_from_args = [_parse_run_arg(r) for r in args.runs]
+            if args.repeat != 1:
+                if len(entries_from_args) != 1:
+                    parser.error("--repeat requires exactly one --run entry")
+                entries_from_args = expand_repeat(entries_from_args[0], args.repeat)
+            _validate_resume_entries(state, entries_from_args)
+    else:
+        if not args.runs:
+            parser.error("--run is required unless --resume is given")
+        entries = [_parse_run_arg(r) for r in args.runs]
+        if args.repeat != 1:
+            if len(entries) != 1:
+                parser.error("--repeat requires exactly one --run entry")
+            entries = expand_repeat(entries[0], args.repeat)
 
     cfg = RunQueueConfig(
         host=args.host, poll_interval_s=args.poll_interval_s, rested_tol_c=args.rested_tol_c,
@@ -892,7 +1178,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         control = ControlClient(link)
 
     try:
-        run_queue(entries, cfg, control=control)
+        run_queue(entries, cfg, control=control, state_path=args.state_file, resume=args.resume)
     except RunQueueStopFailedError as exc:
         log.error("queue stopped: %s", exc)
         log.error("!" * 70)

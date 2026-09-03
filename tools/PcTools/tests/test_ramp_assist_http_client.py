@@ -150,5 +150,72 @@ class SetEnabledTest(unittest.TestCase):
                 ra.set_enabled("192.168.4.1", True)
 
 
+def _no_such_endpoint_http_error(status: int = 404):
+    body = json.dumps({"ok": False, "error": "no such endpoint"}).encode()
+    return urllib.error.HTTPError("http://x/api/ramp_assist", status, "not found",
+                                   hdrs=None, fp=io.BytesIO(body))
+
+
+class PinEnabledTest(unittest.TestCase):
+    """pin_enabled() -- the tolerant wrapper run_queue.py's preset-apply
+    path uses. Board firmware that predates /api/ramp_assist answers with
+    {"ok":false,"error":"no such endpoint"}; everything here is about
+    detecting exactly that shape and nothing looser."""
+
+    def test_false_pin_endpoint_absent_is_satisfied_not_raised(self):
+        # Pinning OFF against firmware that has never heard of the feature:
+        # already true by construction, so this must NOT raise, and must
+        # return None (nothing was actually written) rather than a fake
+        # {"ok": True} the caller might mistake for a real ack.
+        with unittest.mock.patch.object(ra.urllib.request, "urlopen",
+                                         side_effect=_no_such_endpoint_http_error()):
+            result = ra.pin_enabled("192.168.4.1", False)
+        self.assertIsNone(result)
+
+    def test_true_pin_endpoint_absent_raises_reflash_error(self):
+        # Pinning ON against firmware that cannot provide it: this is the
+        # silent-invalidation hazard, must hard-fail, and the message must
+        # name the reflash requirement so an operator isn't left guessing.
+        with unittest.mock.patch.object(ra.urllib.request, "urlopen",
+                                         side_effect=_no_such_endpoint_http_error()):
+            with self.assertRaises(ra.RampAssistEndpointAbsentError) as ctx:
+                ra.pin_enabled("192.168.4.1", True)
+        self.assertIn("reflash", str(ctx.exception).lower())
+        self.assertIsInstance(ctx.exception, ra.RampAssistHttpError)
+
+    def test_endpoint_present_true_unchanged_behaviour(self):
+        body = json.dumps({"ok": True, "enabled": True}).encode()
+        with unittest.mock.patch.object(ra.urllib.request, "urlopen",
+                                         return_value=_fake_response(body)):
+            result = ra.pin_enabled("192.168.4.1", True)
+        self.assertEqual(result, {"ok": True, "enabled": True})
+
+    def test_endpoint_present_false_unchanged_behaviour(self):
+        body = json.dumps({"ok": True, "enabled": False}).encode()
+        with unittest.mock.patch.object(ra.urllib.request, "urlopen",
+                                         return_value=_fake_response(body)):
+            result = ra.pin_enabled("192.168.4.1", False)
+        self.assertEqual(result, {"ok": True, "enabled": False})
+
+    def test_genuine_transport_error_not_swallowed(self):
+        # A real HTTP 500 must NOT be mistaken for the "no such endpoint"
+        # shape just because it is also a non-2xx failure -- the detection
+        # must match the response body, not merely "some 4xx/5xx happened".
+        err = urllib.error.HTTPError("http://x/api/ramp_assist", 500, "boom",
+                                      hdrs=None, fp=io.BytesIO(b"internal error"))
+        with unittest.mock.patch.object(ra.urllib.request, "urlopen", side_effect=err):
+            with self.assertRaises(ra.RampAssistHttpError) as ctx:
+                ra.pin_enabled("192.168.4.1", False)
+        self.assertNotIsInstance(ctx.exception, ra.RampAssistEndpointAbsentError)
+        self.assertEqual(ctx.exception.status, 500)
+
+    def test_timeout_not_swallowed(self):
+        err = urllib.error.URLError("timed out")
+        with unittest.mock.patch.object(ra.urllib.request, "urlopen", side_effect=err):
+            with self.assertRaises(ra.RampAssistHttpError) as ctx:
+                ra.pin_enabled("192.168.4.1", True)
+        self.assertNotIsInstance(ctx.exception, ra.RampAssistEndpointAbsentError)
+
+
 if __name__ == "__main__":
     unittest.main()

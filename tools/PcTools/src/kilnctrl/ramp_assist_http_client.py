@@ -29,10 +29,13 @@ config_presets/*.json for where every existing preset now pins this OFF."""
 from __future__ import annotations
 
 import json
+import logging
 import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Optional
+
+_module_log = logging.getLogger(__name__)
 
 #: Plain GET/POST against the board's own HTTP server, no long-running
 #: operation on the far side -- same default as adaptive_tune_http_client.py's
@@ -129,3 +132,88 @@ def set_enabled(host: str, enabled: bool, timeout: float = RAMP_ASSIST_HTTP_TIME
     if not isinstance(data, dict):
         raise RampAssistHttpError(f"POST {_RAMP_ASSIST_PATH} response was not a JSON object: {body_text!r}")
     return data
+
+
+#: The exact error string the board's ramp_assist_post_handler() (or the
+#: httpd router in front of it, for firmware that never registered the
+#: handler at all) returns in its JSON body when /api/ramp_assist does not
+#: exist. Matched verbatim -- see _is_no_such_endpoint_error() -- so this
+#: never swallows an unrelated 4xx.
+_NO_SUCH_ENDPOINT_ERROR = "no such endpoint"
+
+
+class RampAssistEndpointAbsentError(RampAssistHttpError):
+    """Raised by pin_enabled() when a preset pins ramp_assist_enabled=True
+    but the board's firmware predates the /api/ramp_assist endpoint. The
+    requested state cannot be provided by this firmware, so this is a hard
+    failure -- unlike the enabled=False case, there is no trivial way for a
+    caller to proceed without silently running a different configuration
+    than the one declared."""
+
+
+def _is_no_such_endpoint_error(exc: RampAssistHttpError) -> bool:
+    """True only when `exc` is the board's own
+    ``{"ok":false,"error":"no such endpoint"}`` response body -- the precise
+    signature of firmware built before this endpoint existed. Deliberately
+    narrow: matches on the decoded response shape, not on HTTP status (so an
+    unrelated 404 with a different body, or any other 4xx/5xx, does not
+    match) and not on a loose substring of the detail text. A timeout,
+    connection-refused, HTTP 500, or malformed/non-JSON body all return
+    False here so they keep propagating as hard failures."""
+    if not exc.detail:
+        return False
+    try:
+        data = json.loads(exc.detail)
+    except Exception:
+        return False
+    return (
+        isinstance(data, dict)
+        and data.get("ok") is False
+        and data.get("error") == _NO_SUCH_ENDPOINT_ERROR
+    )
+
+
+def pin_enabled(
+    host: str,
+    enabled: bool,
+    timeout: float = RAMP_ASSIST_HTTP_TIMEOUT_S,
+    logger: Optional[logging.Logger] = None,
+) -> Optional[dict]:
+    """Pin ramp_assist_enabled to `enabled`, the way callers that treat this
+    as a REQUIRED preset field (run_queue.py, config_presets.py) want it:
+    tolerant of one specific, precisely-detected failure -- a board running
+    firmware built before /api/ramp_assist existed -- and otherwise
+    identical to set_enabled().
+
+    - enabled=False and the endpoint is absent: the pin is trivially
+      satisfied (firmware without the feature cannot have it enabled), so
+      this logs at INFO and returns None instead of raising.
+    - enabled=True and the endpoint is absent: hard failure. The caller
+      asked for a state this firmware cannot provide; raises
+      RampAssistEndpointAbsentError naming the reflash requirement rather
+      than silently running a different configuration than the one
+      declared.
+    - endpoint present: unchanged behaviour -- returns set_enabled()'s
+      result dict for both True and False.
+    - any other failure (timeout, connection refused, HTTP 500, malformed
+      body): re-raised as the original RampAssistHttpError, untouched.
+    """
+    try:
+        return set_enabled(host, enabled, timeout=timeout)
+    except RampAssistHttpError as exc:
+        if not _is_no_such_endpoint_error(exc):
+            raise
+        if not enabled:
+            (logger or _module_log).info(
+                "ramp_assist_enabled=False pinned, but %s has no /api/ramp_assist endpoint "
+                "(firmware predates ramp assist) -- pin is trivially satisfied, continuing",
+                host,
+            )
+            return None
+        raise RampAssistEndpointAbsentError(
+            f"preset pins ramp_assist_enabled=True but {host} has no /api/ramp_assist "
+            "endpoint -- this firmware predates ramp assist and must be reflashed before "
+            "this preset can be applied",
+            exc.status,
+            exc.detail,
+        ) from exc
