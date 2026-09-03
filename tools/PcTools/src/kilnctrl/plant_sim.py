@@ -1169,6 +1169,32 @@ class LagCompensatedFF:
         return hold_out, climb_out, total_clamped
 
 
+def _broadcast_zone_param(x, n=None):
+    """Accept either a scalar (applied uniformly to every zone -- every
+    caller's behaviour before per-zone gains existed) or a length-``n``
+    sequence (one value per zone) for a PID gain, and return a length-``n``
+    numpy array either way.
+
+    Added for sec 3.4's per-zone gain sweep (PID_EXPANSION_PLAN.md): before
+    this, ``run_profile``'s ``kp``/``ki``/``kd`` were always a single float
+    applied to every zone's ``PID`` instance, so nothing in this module
+    could even ask "would zone 2's own gains, tuned for zone 2, do better
+    than the shared gain." A scalar still produces byte-identical output to
+    the old code path -- this is purely additive.
+    """
+    if n is None:
+        n = N_ZONES
+    arr = np.atleast_1d(np.asarray(x, dtype=float))
+    if arr.size == 1:
+        return np.full(n, arr[0])
+    if arr.size != n:
+        raise ValueError(
+            f"PID gain must be a scalar or exactly {n} values (one per zone), "
+            f"got {arr.size}"
+        )
+    return arr
+
+
 def run_profile(segs, start_temp, kp=0.06, ki=0.0003, kd=0.0,
                  climb_mode='coupled', integral_floor='ff_hold', ambient=20.0,
                  controller_K_inv=None, controller_tau=None, plant_regime='measured',
@@ -1211,6 +1237,12 @@ def run_profile(segs, start_temp, kp=0.06, ki=0.0003, kd=0.0,
     ``controller_tau`` do for ``'coupled'`` -- default to the module's
     ``K_full``/``L_PAIR``. Ignored for every other ``climb_mode``.
 
+    ``kp``/``ki``/``kd``: each is EITHER a scalar (applied to all three
+    zones, the only behaviour that existed before sec 3.4's per-zone gain
+    sweep -- see ``_broadcast_zone_param``) OR a length-3 sequence, one
+    value per zone. A scalar reproduces the old code path exactly; nothing
+    about the shared-gain default changes.
+
     ``fuzzy_strength_pct``: 0-100, applied uniformly to all three zones'
     ``PID`` instances -- see ``PID``'s docstring and ``pid_fuzzy_adjust()``
     above for the faithful mirror of ``pid_fuzzy.c``. Default 0.0 keeps
@@ -1251,8 +1283,11 @@ def run_profile(segs, start_temp, kp=0.06, ki=0.0003, kd=0.0,
             f"unknown plant_regime {plant_regime!r}, expected 'measured', "
             "'measured_per_path' or 'physical'"
         )
-    pids = [PID(kp, ki, kd, d_tau=30.0, b=1.0, pid_range_c=1000.0,
-                fuzzy_strength_pct=fuzzy_strength_pct) for _ in range(N_ZONES)]
+    kp_arr = _broadcast_zone_param(kp)
+    ki_arr = _broadcast_zone_param(ki)
+    kd_arr = _broadcast_zone_param(kd)
+    pids = [PID(kp_arr[i], ki_arr[i], kd_arr[i], d_tau=30.0, b=1.0, pid_range_c=1000.0,
+                fuzzy_strength_pct=fuzzy_strength_pct) for i in range(N_ZONES)]
     lag_ff = None
     if climb_mode == 'lag_compensated':
         K_ctrl = K_full if controller_K is None else controller_K
@@ -1396,6 +1431,160 @@ def sim_window_zone_stats(result: dict, t0: float, t1: float, zone: int) -> Opti
         max_overshoot_c=float(max(err.max(), 0.0)),
         max_undershoot_c=float(max(-err.min(), 0.0)),
     )
+
+
+def sim_whole_run_iae_normalized(result: dict, zone: int) -> float:
+    """Whole-run, time-weighted mean absolute error for ``zone`` -- the sim
+    side of firmware's ``iae_normalized_c`` (``iae_raw_c_s / duration_s``,
+    see ``firing_stats`` in a real capture and
+    ``PID_EXPANSION_PLAN.md`` sec 3.8/3.4 for the noise-floor numbers this
+    is meant to be comparable against). ``run_profile`` ticks at a uniform
+    ``DT=1.0`` s, so ``iae_raw`` (the trapezoidal integral of ``|error|``
+    over time) divided by the run's duration reduces exactly to the plain
+    mean of ``|error|`` over every tick -- no separate integration needed.
+    """
+    err = np.abs(result['temps'][:, zone] - result['target'])
+    return float(err.mean())
+
+
+# ---------------------------------------------------------------------------
+# Per-zone gain sweep (added for PID_EXPANSION_PLAN.md sec 3.4, ranked
+# improvement #3). Every sweep in this module before this point (the fuzzy
+# sweep, the load sweep, the tuning campaign) drives all three zones with
+# the SAME kp/ki/kd -- ``run_profile``'s ``kp``/``ki``/``kd`` were scalars
+# only until ``_broadcast_zone_param`` above. This section asks the
+# question directly: does letting each zone have its own gains, fit on one
+# real capture and VALIDATED on a different, held-out one, beat the shared
+# baseline by more than sec 3.4's own discrimination floor?
+#
+# Fit methodology, and why it is per-zone-independent rather than a joint
+# 3-zone search: a PID's gains only change ITS OWN commanded duty; that
+# duty reaches other zones only through the plant's cross-zone coupling
+# (a second-order effect next to a zone's own error response). The
+# project's own diagonal-only least-squares gain refinement (sec 3.3,
+# "Integral diagnosis from dwells") already makes exactly this
+# simplification for adaptive tuning on real hardware -- reusing it here
+# keeps the sweep's own assumptions consistent with what the project
+# already ships, rather than inventing a new one. Each zone's grid search
+# holds the OTHER two zones at the shared baseline gains while scoring only
+# the zone under test's own whole-run IAE.
+# ---------------------------------------------------------------------------
+
+#: Multiplicative grid applied to the shared baseline kp/ki (run_profile's
+#: own defaults, 0.06 / 0.0003) independently per zone. Kept small and
+#: round-number rather than fine-grained: the discrimination-floor logic
+#: below is what decides whether any of this is worth reading, not grid
+#: resolution.
+PER_ZONE_GAIN_GRID_MULT = (0.5, 0.75, 1.0, 1.25, 1.5, 2.0)
+
+
+def per_zone_gain_grid_search(rows_fit: Sequence[log_analysis.PollRow],
+                               base_kp: float = 0.06, base_ki: float = 0.0003,
+                               base_kd: float = 0.0,
+                               grid=PER_ZONE_GAIN_GRID_MULT,
+                               climb_mode: str = 'coupled',
+                               integral_floor: str = 'ff_hold') -> dict:
+    """For each zone independently, grid-searches ``kp``/``ki`` multipliers
+    (kd left at ``base_kd`` -- the shared baseline already runs kd=0.0, and
+    no capture in this repo exercises a non-zero kd) that minimize THAT
+    zone's own whole-run normalized IAE on ``rows_fit``, holding the other
+    two zones at the shared baseline gains (see module-level comment
+    above). Returns the best per-zone ``(kp, ki)`` plus the fit-set IAE at
+    baseline and at the chosen gains, for every zone.
+    """
+    best = {}
+    for zone in range(N_ZONES):
+        best_iae = None
+        best_mult = (1.0, 1.0)
+        for kp_mult in grid:
+            for ki_mult in grid:
+                kp_vec = [base_kp] * N_ZONES
+                ki_vec = [base_ki] * N_ZONES
+                kp_vec[zone] = base_kp * kp_mult
+                ki_vec[zone] = base_ki * ki_mult
+                result, _ = run_profile_from_capture(
+                    rows_fit, kp=kp_vec, ki=ki_vec, kd=base_kd,
+                    climb_mode=climb_mode, integral_floor=integral_floor,
+                )
+                iae = sim_whole_run_iae_normalized(result, zone)
+                if best_iae is None or iae < best_iae:
+                    best_iae = iae
+                    best_mult = (kp_mult, ki_mult)
+        baseline_result, _ = run_profile_from_capture(
+            rows_fit, kp=base_kp, ki=base_ki, kd=base_kd,
+            climb_mode=climb_mode, integral_floor=integral_floor,
+        )
+        baseline_iae = sim_whole_run_iae_normalized(baseline_result, zone)
+        best[zone] = dict(
+            kp=base_kp * best_mult[0], ki=base_ki * best_mult[1], kd=base_kd,
+            kp_mult=best_mult[0], ki_mult=best_mult[1],
+            fit_iae_baseline=baseline_iae, fit_iae_tuned=best_iae,
+        )
+    return best
+
+
+def per_zone_gain_holdout_report(rows_fit: Sequence[log_analysis.PollRow],
+                                  rows_test: Sequence[log_analysis.PollRow],
+                                  base_kp: float = 0.06, base_ki: float = 0.0003,
+                                  base_kd: float = 0.0,
+                                  grid=PER_ZONE_GAIN_GRID_MULT,
+                                  climb_mode: str = 'coupled',
+                                  integral_floor: str = 'ff_hold') -> dict:
+    """Fits per-zone gains on ``rows_fit`` (``per_zone_gain_grid_search``),
+    then scores BOTH the shared-baseline gains and the per-zone gains on
+    ``rows_test`` -- a capture the fit never saw. This is the only honest
+    comparison: scoring the tuned gains on the same capture they were fit
+    on would trivially favor per-zone gains (more free parameters, same
+    data) and cannot show whether the win generalizes.
+
+    Applies all three zones' per-zone-fit gains simultaneously when scoring
+    the "per-zone" row on the held-out capture (not one zone at a time) --
+    that is the actual deployment shape a per-zone-gains recommendation
+    would take.
+    """
+    fit = per_zone_gain_grid_search(
+        rows_fit, base_kp=base_kp, base_ki=base_ki, base_kd=base_kd,
+        grid=grid, climb_mode=climb_mode, integral_floor=integral_floor,
+    )
+    kp_vec = [fit[z]['kp'] for z in range(N_ZONES)]
+    ki_vec = [fit[z]['ki'] for z in range(N_ZONES)]
+
+    baseline_test, _ = run_profile_from_capture(
+        rows_test, kp=base_kp, ki=base_ki, kd=base_kd,
+        climb_mode=climb_mode, integral_floor=integral_floor,
+    )
+    tuned_test, _ = run_profile_from_capture(
+        rows_test, kp=kp_vec, ki=ki_vec, kd=base_kd,
+        climb_mode=climb_mode, integral_floor=integral_floor,
+    )
+
+    per_zone = {}
+    for zone in range(N_ZONES):
+        base_iae = sim_whole_run_iae_normalized(baseline_test, zone)
+        tuned_iae = sim_whole_run_iae_normalized(tuned_test, zone)
+        per_zone[zone] = dict(
+            fit=fit[zone],
+            test_iae_baseline=base_iae,
+            test_iae_tuned=tuned_iae,
+            test_delta_c=tuned_iae - base_iae,  # negative == per-zone gains won
+        )
+    return dict(per_zone=per_zone, base_kp=base_kp, base_ki=base_ki, base_kd=base_kd)
+
+
+def format_per_zone_gain_holdout_report_text(report: dict) -> str:
+    lines = ["=== Per-zone gain grid search: fit on one capture, scored on a held-out one ==="]
+    for zone, d in sorted(report["per_zone"].items()):
+        f = d["fit"]
+        lines.append(
+            f"z{zone}: fit kp_mult={f['kp_mult']:.2f} ki_mult={f['ki_mult']:.2f} "
+            f"(kp={f['kp']:.5f} ki={f['ki']:.6f})"
+        )
+        lines.append(
+            f"    held-out IAE: shared={d['test_iae_baseline']:.4f}C  "
+            f"per-zone={d['test_iae_tuned']:.4f}C  delta={d['test_delta_c']:+.4f}C "
+            f"({'per-zone better' if d['test_delta_c'] < 0 else 'shared better or tied'})"
+        )
+    return "\n".join(lines)
 
 
 def render_sim_report(segs, start_temp, kp=0.06, ki=0.0003, kd=0.0,

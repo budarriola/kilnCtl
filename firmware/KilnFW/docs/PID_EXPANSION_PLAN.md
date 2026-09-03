@@ -1463,6 +1463,104 @@ but it was never expected to: its value is making a future fuzzy-strength
 comparison exercise the layer it is meant to test at all, not shrinking
 today's held-out number.
 
+**Per-zone PID gains, tried 2026-09-03 — ranked improvement #3, now
+tested. Verdict: NEGATIVE.** Item (3) above ("per-zone rather than shared
+PID gains, untested this pass") is now built and run. Every sweep in this
+module before this point — the fuzzy sweep, the load sweep, the tuning
+campaign — drove all three zones with the same `kp`/`ki`/`kd`. `run_profile`
+gained per-zone support (`kp`/`ki`/`kd` each accept a scalar, unchanged
+byte-for-byte behaviour, or a length-3 sequence — `_broadcast_zone_param`),
+plus `per_zone_gain_grid_search()`/`per_zone_gain_holdout_report()`: for
+each zone independently, grid-search `kp`/`ki` multipliers (0.25–4.0×
+the shared baseline 0.06/0.0003, `kd` left at 0) that minimize that zone's
+own whole-run `iae_normalized`-equivalent metric on one capture, holding
+the other two zones at baseline (the same diagonal-only simplification
+§3.3's real adaptive-tuning refinement already makes on hardware), then
+SCORE both the shared baseline and the per-zone gains on a *different,
+held-out* capture — scoring on the same capture the gains were fit from
+would trivially favor more free parameters on the same data and prove
+nothing about generalization.
+
+*Simulator fidelity checked before trusting this result* (the specific
+failure mode this doc's own history warns about — a hardcoded ramp rate
+once inverted a conclusion here): `segs_from_capture` derives ramp rate
+from each capture's own segment boundaries, not a constant — confirmed
+0.0333 °C/s (`p7_oldmatrix_http.jsonl`) and 0.0324 °C/s
+(`p7_newmatrix_http.jsonl`), both inside the documented 2–3.5 °C/min
+(0.033–0.058 °C/s) real range, nowhere near the old 10 °C/min bug. `K_full`/
+`tau`/`L` are unchanged module constants (§3.2's matrix, the cooldown
+`tau`, the bench-rig `L` — same numbers this section's own held-out RMS
+figure above was computed from). Both captures split via the same
+`log_analysis.split_runs`/run-0 convention already used for the 1.05/0.61/
+0.67 °C held-out figure and the §3.2 hardware A/B, and both are rested-start,
+complete, single profile-7 firings (`p7_oldmatrix_http.jsonl` run 0,
+`p7_newmatrix_http.jsonl` run 0) — the only two complete rested full firings
+checked into `logs/coupling/` at the time of this pass (`p7_newmatrix2_http
+.jsonl` is a third, still `in_progress`, excluded). Fit/test roles were run
+BOTH ways (fit on old→test on new, and fit on new→test on old) specifically
+so a one-direction result could not be mistaken for a finding — this is the
+same discipline §3.2's own withdrawn coupling-matrix claims were burned by
+skipping.
+
+Fit-then-held-out result (grid 0.25×–4.0×, `climb_mode='coupled'`,
+`integral_floor='ff_hold'`), whole-run normalized-IAE delta = per-zone minus
+shared baseline on the HELD-OUT capture, negative = per-zone better:
+
+| | z0 | z1 | z2 |
+|---|---|---|---|
+| fit OLD → test NEW | −0.160 | −0.069 | +0.019 |
+| fit NEW → test OLD | −0.185 | −0.087 | +0.006 |
+| noise floor (§3.8, whole-run `iae_normalized_c`) | 0.116 | 0.077 | 0.147 |
+
+z0 and z2's deltas exceed their own noise floors in both directions
+(consistent sign); z1's is close to its floor (−0.069/−0.087 vs 0.077) —
+real but marginal. On its own this table reads like a 2-of-3 win, exactly
+the pattern this task was warned to distrust (a prior 1-of-3 simulated
+"win" here was later measured WORSE on every zone, on hardware, and tripped
+a thermal guard). Checking further is what turns it from a false positive
+into a correct negative:
+
+**Both z0 and z1 independently converged on the SAME grid corner in BOTH
+fit directions** (`kp_mult=2.00, ki_mult=0.25`, i.e. `kp=0.12, ki=0.000075`)
+— not two different per-zone optima that happen to both beat baseline, but
+one shared retune that helps both zones. Re-running that single shared
+`(kp=0.12, ki=0.000075)` gain UNIFORMLY across all three zones (no
+per-zone specialization at all) on both held-out captures:
+
+| | z0 | z1 | z2 |
+|---|---|---|---|
+| fit OLD → test NEW | −0.150 | −0.067 | +0.010 |
+| fit NEW → test OLD | −0.177 | −0.086 | −0.010 |
+
+Indistinguishable from the "per-zone" table above, including z2, whose own
+separately-searched optimum (`kp_mult=3.00`, a genuinely different corner
+from z0/z1's) does *not* outperform simply reusing z0/z1's shared retune —
+z2 gains nothing measurable over its own §3.8 noise floor (0.147 °C) under
+either treatment, and its sign is not even consistent between the two fit
+directions (+0.019/+0.006 "per-zone", +0.010/−0.010 "shared retune").
+
+**Conclusion: the win here is a plain shared-gain retune, not a per-zone
+effect.** Two of three zones (z0, z1) want the identical new gain in every
+condition tested; the one zone that searched somewhere else (z2) gained
+nothing distinguishable from noise for the trouble. Per-zone gains were
+tested honestly — fit on one real capture, validated on a different one,
+in both directions, checked against the measured noise floor — and they do
+not beat a single retuned shared gain by any margin this simulator can
+resolve. Per-zone gains would cost three times the tuning surface, three
+times the commissioning burden on a real kiln, and three times the chance
+of one zone shipping mistuned; this data does not justify that cost.
+**Recommendation, not a change to land:** if the shared-gain retune itself
+(`kp≈0.12, ki≈0.000075` against the current `0.06/0.0003`) is ever tried,
+it should go through a real hardware A/B like §3.2's, not ship from this
+simulator result alone — mirroring this section's own repeated finding
+that this simulator's mechanism comparisons are sound but its magnitudes
+are not calibration-grade, and per its own TRUST section, absolute values
+below the ~1 °C bench-identification noise floor are not to be trusted.
+No firmware change made here. Reproducible via
+`plant_sim.per_zone_gain_holdout_report()`/
+`per_zone_gain_grid_search()`, pinned by
+`tests/test_plant_sim.py`'s per-zone-gain test group.
+
 ### 3.5 Documentation — CLOSED 2026-09-01 (`d382b06`)
 
 `PID_CONTROL.md` now carries the strength-scaling formula for the fuzzy layer,

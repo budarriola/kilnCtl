@@ -1192,3 +1192,151 @@ def test_lag_compensated_held_out_rms_is_a_regression_not_an_improvement():
     assert rms[0] > 1.8, f"z0 RMS {rms[0]:.3f} no longer clearly worse than coupled baseline"
     assert rms[1] > 1.5, f"z1 RMS {rms[1]:.3f} no longer clearly worse than coupled baseline"
     assert rms[2] > 1.5, f"z2 RMS {rms[2]:.3f} no longer clearly worse than coupled baseline"
+
+
+# ---------------------------------------------------------------------------
+# Per-zone gains (PID_EXPANSION_PLAN.md sec 3.4, ranked improvement #3).
+# Everything above this point in the module drove all three zones with the
+# SAME kp/ki/kd -- these tests pin the added per-zone support
+# (_broadcast_zone_param / run_profile's kp/ki/kd accepting a length-3
+# sequence) and the fit/held-out-test comparison built on top of it.
+# ---------------------------------------------------------------------------
+
+def _one_zone_row(elapsed_s, target_c, seg_idx, dwelling, temps, duty=0.2):
+    return la.PollRow(
+        wall_time="00:00:00", elapsed_s=float(elapsed_s), segment_index=seg_idx,
+        segment_count=2, dwelling=dwelling, target_c=float(target_c), state="running",
+        zones={z: la.ZoneSample(zone=z, actual_c=float(t), duty=duty) for z, t in enumerate(temps)},
+    )
+
+
+def _synthetic_ramp_dwell_rows():
+    """A short, hand-built 3-zone ramp-then-dwell capture -- fast enough for
+    a grid search in a unit test (no dependency on the large real captures
+    under tests/fixtures/plant_sim/ or logs/coupling/, which are excluded
+    or skip-gated for size/availability reasons elsewhere in this file)."""
+    rows = []
+    start = [20.0, 20.0, 20.0]
+    for t in range(0, 121, 5):
+        c = 20.0 + 10.0 * (t / 120.0)  # 20 -> 30 C ramp over 120s
+        rows.append(_one_zone_row(t, c, 0, False, start))
+    for t in range(125, 241, 5):
+        rows.append(_one_zone_row(t, 30.0, 1, True, start))
+    return rows
+
+
+def test_broadcast_zone_param_scalar_and_vector():
+    scalar = ps._broadcast_zone_param(0.06)
+    assert scalar.shape == (3,)
+    assert (scalar == 0.06).all()
+
+    vec = ps._broadcast_zone_param([0.03, 0.06, 0.09])
+    assert list(vec) == [0.03, 0.06, 0.09]
+
+
+def test_broadcast_zone_param_wrong_length_raises():
+    with pytest.raises(ValueError):
+        ps._broadcast_zone_param([0.03, 0.06])
+
+
+def test_run_profile_per_zone_gains_match_scalar_when_uniform():
+    """A length-3 kp/ki/kd of identical values must reproduce the plain
+    scalar code path byte-for-byte -- the per-zone plumbing must not change
+    behaviour for every existing (scalar-gain) caller."""
+    segs = [(0.0, 300.0, 20.0, 40.0, (40.0 - 20.0) / 300.0)]
+    start_temp = [20.0, 20.0, 20.0]
+    r_scalar = ps.run_profile(segs, start_temp, kp=0.06, ki=0.0003, kd=0.0)
+    r_vector = ps.run_profile(segs, start_temp, kp=[0.06, 0.06, 0.06],
+                               ki=[0.0003, 0.0003, 0.0003], kd=[0.0, 0.0, 0.0])
+    assert np.array_equal(r_scalar["temps"], r_vector["temps"])
+    assert np.array_equal(r_scalar["duty"], r_vector["duty"])
+
+
+def test_run_profile_per_zone_gains_actually_diverge_per_zone():
+    """The core capability this section adds: giving one zone a very
+    different kp from its neighbours must change ITS OWN duty/temperature
+    trajectory while leaving the others running the shared baseline.
+
+    Proof this test can fail (repo policy -- every new check must be
+    provably able to fail): mutated run_profile's PID construction to index
+    kp_arr[0]/ki_arr[0]/kd_arr[0] for every zone instead of kp_arr[i]/
+    ki_arr[i]/kd_arr[i] -- i.e. every zone's PID silently used zone 0's
+    gain regardless of the per-zone vector passed in. Captured red:
+
+        FAILED test_run_profile_per_zone_gains_actually_diverge_per_zone
+        AssertionError: zone 1's duty moved almost as much as zone 0's own
+        (d0=0.3437, d1=0.2975) -- a per-zone gain change should be
+        localized, not spread across every zone's PID
+        assert np.float64(0.2974955040840415) < (np.float64(0.3437110496164986) / 3)
+
+    Reverted to `PID(kp_arr[i], ki_arr[i], kd_arr[i], ...)`, suite green
+    again.
+    """
+    segs = [(0.0, 300.0, 20.0, 40.0, (40.0 - 20.0) / 300.0)]
+    start_temp = [20.0, 20.0, 20.0]
+    r_uniform = ps.run_profile(segs, start_temp, kp=0.06, ki=0.0003, kd=0.0)
+    r_per_zone = ps.run_profile(segs, start_temp, kp=[0.30, 0.06, 0.06],
+                                 ki=[0.0003, 0.0003, 0.0003], kd=[0.0, 0.0, 0.0])
+    # Zone 0's trajectory must differ (its own gain changed a lot)...
+    assert not np.array_equal(r_uniform["duty"][:, 0], r_per_zone["duty"][:, 0]), (
+        "zone 0 duty identical after quadrupling its own kp -- per-zone kp had no effect"
+    )
+    # ...zone 1's own trajectory need not be identical (the plant couples
+    # zones), but it must be MUCH closer to the uniform-gain baseline than
+    # zone 0 is, proving the gain change is localized to the zone it was
+    # applied to rather than leaking uniformly to every PID.
+    d0 = np.abs(r_uniform["duty"][:, 0] - r_per_zone["duty"][:, 0]).mean()
+    d1 = np.abs(r_uniform["duty"][:, 1] - r_per_zone["duty"][:, 1]).mean()
+    assert d1 < d0 / 3, (
+        f"zone 1's duty moved almost as much as zone 0's own (d0={d0:.4f}, d1={d1:.4f}) "
+        "-- a per-zone gain change should be localized, not spread across every zone's PID"
+    )
+
+
+def test_sim_whole_run_iae_normalized_matches_manual_mean():
+    """Direct pin on the metric's definition: at DT=1.0s the trapezoidal
+    iae_raw/duration reduces to the plain mean of |error| per tick -- verify
+    against hand-computed numbers on a synthetic result dict rather than
+    trusting the reduction algebraically."""
+    result = dict(
+        temps=np.array([[21.0, 19.0], [22.0, 21.0], [20.0, 20.0]]),
+        target=np.array([20.0, 20.0, 20.0]),
+    )
+    # zone 0 errors: 1, 2, 0 -> mean 1.0 ; zone 1 errors: 1, 1, 0 -> mean 2/3
+    assert ps.sim_whole_run_iae_normalized(result, 0) == pytest.approx(1.0)
+    assert ps.sim_whole_run_iae_normalized(result, 1) == pytest.approx(2.0 / 3.0)
+
+
+def test_per_zone_gain_grid_search_never_worse_than_baseline_on_fit_set():
+    """The grid search always includes the baseline multiplier (1.0, 1.0)
+    in PER_ZONE_GAIN_GRID_MULT, so the FIT-set IAE at the chosen gains can
+    never be worse than the FIT-set IAE at the shared baseline -- a basic
+    sanity check on the search itself, independent of whether the result
+    generalizes to a held-out capture (that generalization is what
+    per_zone_gain_holdout_report is for, and is deliberately NOT assumed
+    here)."""
+    rows = _synthetic_ramp_dwell_rows()
+    grid = (0.5, 1.0, 1.5)
+    fit = ps.per_zone_gain_grid_search(rows, grid=grid)
+    for zone in range(3):
+        assert fit[zone]["fit_iae_tuned"] <= fit[zone]["fit_iae_baseline"] + 1e-9, (
+            f"zone {zone}: grid search picked a WORSE fit-set IAE than the baseline "
+            "it was supposed to include in its own search space"
+        )
+
+
+def test_per_zone_gain_holdout_report_shape_and_delta_arithmetic():
+    """Sanity-checks the held-out report's shape and that test_delta_c is
+    exactly tuned-minus-baseline (not, say, accidentally swapped -- a
+    swapped sign would silently report every regression as an improvement)."""
+    rows = _synthetic_ramp_dwell_rows()
+    grid = (0.5, 1.0, 1.5)
+    report = ps.per_zone_gain_holdout_report(rows, rows, grid=grid)
+    assert set(report["per_zone"].keys()) == {0, 1, 2}
+    for zone, d in report["per_zone"].items():
+        expected_delta = d["test_iae_tuned"] - d["test_iae_baseline"]
+        assert d["test_delta_c"] == pytest.approx(expected_delta)
+    # Rendering must not raise and must mention every zone.
+    text = ps.format_per_zone_gain_holdout_report_text(report)
+    for zone in range(3):
+        assert f"z{zone}:" in text
