@@ -345,6 +345,26 @@ def ota_status(host: Optional[str] = None) -> str:
         pico = ota_http.get_pico_status(resolved)
         pico_str = (f"phase={pico.get('phase')!r} percent={pico.get('percent')} "
                     f"last_error={pico.get('last_error')!r}")
+        # protocol_version_known/protocol_version/protocol_min_compatible/
+        # protocol_compatible come straight from safety_link_get_peer_version_status()
+        # (ota_http.c's ota_pico_status_get_handler()) -- the ESP's live view
+        # of what protocol version the Pico is actually running right now,
+        # independent of which image is staged/relaying. A caller pushing a
+        # new Pico image should check this BEFORE relying on the two
+        # processors being able to talk afterward; a hard mismatch here is
+        # surfaced with an explicit INCOMPATIBLE tag rather than folded into
+        # the same prose as a healthy status, so a caller cannot mistake one
+        # for the other by skimming.
+        if pico.get("protocol_version_known"):
+            compatible = bool(pico.get("protocol_compatible"))
+            tag = "compatible" if compatible else "INCOMPATIBLE"
+            pico_str += (f" protocol_version={pico.get('protocol_version')} "
+                         f"min_compatible={pico.get('protocol_min_compatible')} "
+                         f"[{tag}]")
+            if not compatible:
+                pico_str = f"INCOMPATIBLE PROTOCOL VERSION: {pico_str}"
+        else:
+            pico_str += " protocol_version=unknown (no version handshake yet)"
     except ota_http.OtaHttpError as exc:
         pico_str = f"error: {exc}"
 

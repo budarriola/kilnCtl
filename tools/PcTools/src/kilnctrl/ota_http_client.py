@@ -60,11 +60,21 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import logging
 import os
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from typing import Optional
+
+#: Every push/rollback/recovery call is logged here -- image SHA-256 and
+#: outcome on success, the board's refusal reason on failure. NEVER the
+#: password: nothing below ever passes `ap_password` (or the derived MAC key)
+#: to a log call, only the derived MAC hex (which is not the secret -- it's
+#: HMAC output over a single-use nonce) when useful for correlating with the
+#: board's own logs. See test_ota_http_client.py's LoggingTest for the
+#: negative proof.
+log = logging.getLogger(__name__)
 
 #: UPDATE_PROTOCOL.md section 2 step 2's literal KDF context string.
 OTA_KDF_CONTEXT = b"kilnctl-ota-v1"
@@ -199,6 +209,13 @@ def _push_image(host: str, path: str, endpoint: str, context: str, ap_password: 
     with open(path, "rb") as f:
         data = f.read()
 
+    #: Identifies exactly what image was pushed without ever touching the
+    #: password. Logged before the request so a failed/hung transfer still
+    #: leaves a record of what was attempted.
+    image_sha256 = hashlib.sha256(data).hexdigest()
+    log.info("OTA push starting: endpoint=%s host=%s path=%s size=%d sha256=%s",
+              endpoint, host, path, size, image_sha256)
+
     req = urllib.request.Request(
         _url(host, endpoint),
         data=data,
@@ -215,19 +232,32 @@ def _push_image(host: str, path: str, endpoint: str, context: str, ap_password: 
             body_text = resp.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as exc:
         status_code, detail = _http_error_detail(exc)
+        log.warning("OTA push refused: endpoint=%s host=%s sha256=%s status=%s detail=%s",
+                    endpoint, host, image_sha256, status_code, detail)
         raise OtaHttpError(f"{endpoint} refused: HTTP {status_code}: {detail}", status_code,
                             detail) from exc
     except urllib.error.URLError as exc:
         _, detail = _http_error_detail(exc)
+        log.warning("OTA push failed (unreachable): endpoint=%s host=%s sha256=%s detail=%s",
+                    endpoint, host, image_sha256, detail)
         raise OtaHttpError(f"{endpoint} unreachable: {detail}") from exc
 
     try:
         body = json.loads(body_text)
     except Exception as exc:
+        log.warning("OTA push response unparseable: endpoint=%s host=%s sha256=%s body=%r",
+                    endpoint, host, image_sha256, body_text)
         raise OtaHttpError(f"{endpoint} response was not valid JSON: {body_text!r}",
                             status_code, body_text) from exc
 
-    return OtaPushResult(ok=bool(body.get("ok")), status_code=status_code, body=body)
+    result = OtaPushResult(ok=bool(body.get("ok")), status_code=status_code, body=body)
+    if result.ok:
+        log.info("OTA push accepted: endpoint=%s host=%s sha256=%s status=%d body=%s",
+                  endpoint, host, image_sha256, status_code, body)
+    else:
+        log.warning("OTA push reported failure: endpoint=%s host=%s sha256=%s body=%s",
+                    endpoint, host, image_sha256, body)
+    return result
 
 
 def push_esp_image(host: str, path: str, ap_password: str,
@@ -344,21 +374,30 @@ def rollback_esp(host: str, ap_password: str, timeout: float = OTA_HTTP_TIMEOUT_
             "X-Ota-Mac": mac_hex,
         },
     )
+    log.info("OTA rollback requested: host=%s", host)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             body_text = resp.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as exc:
         status_code, detail = _http_error_detail(exc)
+        log.warning("OTA rollback refused: host=%s status=%s detail=%s", host, status_code, detail)
         raise OtaHttpError(f"/api/ota/esp/rollback refused: HTTP {status_code}: {detail}",
                             status_code, detail) from exc
     except urllib.error.URLError as exc:
         _, detail = _http_error_detail(exc)
+        log.warning("OTA rollback failed (unreachable): host=%s detail=%s", host, detail)
         raise OtaHttpError(f"/api/ota/esp/rollback unreachable: {detail}") from exc
 
     try:
-        return json.loads(body_text)
+        body = json.loads(body_text)
     except Exception as exc:
+        log.warning("OTA rollback response unparseable: host=%s body=%r", host, body_text)
         raise OtaHttpError(f"/api/ota/esp/rollback response was not valid JSON: {body_text!r}") from exc
+    if body.get("ok"):
+        log.info("OTA rollback accepted: host=%s body=%s", host, body)
+    else:
+        log.warning("OTA rollback reported failure: host=%s body=%s", host, body)
+    return body
 
 
 def recovery_exit_esp(host: str, ap_password: str, timeout: float = OTA_HTTP_TIMEOUT_S) -> dict:
@@ -399,19 +438,29 @@ def recovery_exit_esp(host: str, ap_password: str, timeout: float = OTA_HTTP_TIM
             "X-Ota-Mac": mac_hex,
         },
     )
+    log.info("OTA recovery-exit requested: host=%s", host)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             body_text = resp.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as exc:
         status_code, detail = _http_error_detail(exc)
+        log.warning("OTA recovery-exit refused: host=%s status=%s detail=%s",
+                    host, status_code, detail)
         raise OtaHttpError(f"/api/ota/esp/recovery_exit refused: HTTP {status_code}: {detail}",
                             status_code, detail) from exc
     except urllib.error.URLError as exc:
         _, detail = _http_error_detail(exc)
+        log.warning("OTA recovery-exit failed (unreachable): host=%s detail=%s", host, detail)
         raise OtaHttpError(f"/api/ota/esp/recovery_exit unreachable: {detail}") from exc
 
     try:
-        return json.loads(body_text)
+        body = json.loads(body_text)
     except Exception as exc:
+        log.warning("OTA recovery-exit response unparseable: host=%s body=%r", host, body_text)
         raise OtaHttpError(
             f"/api/ota/esp/recovery_exit response was not valid JSON: {body_text!r}") from exc
+    if body.get("ok"):
+        log.info("OTA recovery-exit accepted: host=%s body=%s", host, body)
+    else:
+        log.warning("OTA recovery-exit reported failure: host=%s body=%s", host, body)
+    return body

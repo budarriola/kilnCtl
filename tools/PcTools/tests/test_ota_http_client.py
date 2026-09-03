@@ -477,5 +477,60 @@ class RecoveryExitEspTest(unittest.TestCase):
                 ota.recovery_exit_esp("192.0.2.1", "hunter2")
 
 
+class PushImageLoggingTest(unittest.TestCase):
+    """TODO.md: 'Every call logged with the image's SHA-256, and refusals
+    logged too' / 'The password is never written to the log'."""
+
+    SECRET = "correct-horse-battery-staple"
+
+    def setUp(self):
+        self.tmp = tempfile.NamedTemporaryFile(suffix=".bin", delete=False)
+        self.image_bytes = b"\xe9\x00\x00\x00fake-image-bytes-for-logging"
+        self.tmp.write(self.image_bytes)
+        self.tmp.close()
+        self.addCleanup(os.unlink, self.tmp.name)
+        self.expected_sha256 = hashlib.sha256(self.image_bytes).hexdigest()
+
+    def _mock_challenge_then(self, post_response=None, post_side_effect=None):
+        challenge_body = json.dumps({"nonce": "44" * 16}).encode()
+        calls = {"n": 0}
+
+        def fake_urlopen(req, timeout=None):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return _fake_response(challenge_body)
+            if post_side_effect is not None:
+                raise post_side_effect
+            return post_response
+
+        return fake_urlopen
+
+    def test_successful_push_logs_sha256_and_never_the_password(self):
+        ok_body = json.dumps({"ok": True, "bytes": 29, "partition": "ota_0",
+                               "version": "1.2.3"}).encode()
+        fake_urlopen = self._mock_challenge_then(_fake_response(ok_body))
+        with unittest.mock.patch.object(ota.urllib.request, "urlopen", side_effect=fake_urlopen):
+            with self.assertLogs(ota.log, level="INFO") as cm:
+                ota.push_esp_image("kiln.local", self.tmp.name, self.SECRET)
+        all_output = "\n".join(cm.output)
+        self.assertIn(self.expected_sha256, all_output)
+        self.assertNotIn(self.SECRET, all_output)
+
+    def test_refusal_is_logged_with_sha256_and_never_the_password(self):
+        """A refused push must leave a record too -- not just successes."""
+        err = urllib.error.HTTPError(
+            "http://x/api/ota/esp", 409, "Conflict", hdrs=None,
+            fp=io.BytesIO(b"zone 2 is at 340 C"))
+        fake_urlopen = self._mock_challenge_then(post_side_effect=err)
+        with unittest.mock.patch.object(ota.urllib.request, "urlopen", side_effect=fake_urlopen):
+            with self.assertLogs(ota.log, level="WARNING") as cm:
+                with self.assertRaises(ota.OtaHttpError):
+                    ota.push_esp_image("kiln.local", self.tmp.name, self.SECRET)
+        all_output = "\n".join(cm.output)
+        self.assertIn(self.expected_sha256, all_output)
+        self.assertIn("zone 2 is at 340 C", all_output)
+        self.assertNotIn(self.SECRET, all_output)
+
+
 if __name__ == "__main__":
     unittest.main()
