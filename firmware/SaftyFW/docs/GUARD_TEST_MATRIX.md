@@ -453,6 +453,128 @@ in `safety_core.c`, or any time a guard's own inputs change, and update this
 table's "Reachable today?" column in the same change, per this file's own
 "keep this file current" rule at the top.
 
+## 6c. Reachability re-established (2026-09-03)
+
+ROADMAP.md flagged this: the E-stop polarity fix and the
+`current_sense_set_cal()` fix (both 2026-08-24) landed **after** the last
+top-line reachability count in this file was computed, and nobody had
+recomputed the count itself since — only the individual guard rows above got
+hand-patched with 2026-08-24 notes. This section is that recomputation, done
+fresh against today's `src/` by method 1 (direct source reading: for every
+guard, is there a real writer for every input its `safety_guards.c` gate
+reads, named file + symbol, not just a reader that a host test could be
+feeding by hand).
+
+**Old count (the one ROADMAP.md said to stop trusting): 6 of 13 guards
+structurally reachable**, computed against `src/` as it stood *before* the
+2026-08-24 fixes (S8 not implemented; S14 did not exist yet):
+
+| Reachable (6) | Blocked (7) | Why blocked |
+|---|---|---|
+| S2, S4, S5, S6b (hard backstop only), S10, S12 | S1 | commissioning gap (`abs_max_temp_c` = 0), unrelated to either fix |
+| | S3 | `any_current_present` permanently false — no calibration ever loaded |
+| | S6a | `main_fault_asserted` not yet wired into `safety_core_build_input()` at all |
+| | S7 | E-stop polarity inverted — a real press read as healthy |
+| | S9 | same `any_current_present` gap as S3 |
+| | S11 | `heat_commanded` was hardcoded `false` (own comment: "no current sense yet") |
+| | S13 | commissioning gap (`tc_source` = `OWN_J7`), plus `sample_counter_advancing` had no producer at all yet |
+
+**New count, verified against `src/` today: 11 of 14 guards structurally
+reachable** (S8 still has zero implementation — `grep S8 safety_guards.c` =
+0 hits beyond the enum comment — so it is excluded from both the numerator
+and the denominator the same way the old count excluded it; S14 is a new
+guard, added 2026-08-28, after both counts above, and is treated separately
+below rather than folded into either one):
+
+| Guard | Input(s) | Producer (file : symbol) | Verdict |
+|---|---|---|---|
+| S1 | `cfg->abs_max_temp_c` | `safety_core_load_guard_cfg()` (`safety_core.c:333`), gated on `CONFIG_STORE_SET_ABS_MAX_TEMP_C` | **(d) deliberately configured off** — no default by design, not a bug |
+| S2 | `context_valid`, `zone_count`, `max_zone_setpoint_c` | `link_task_get_context_snapshot()`/`context_reduce_zones()` (`safety_core.c:778-836`, `snapshots.h`) | **(a) reachable** |
+| S3 | `any_current_present`, `relay_commanded_recently` | `current_task_get_snapshot()`+`current_any_present()` (`safety_core.c:849-910`); `ctx.relay_recent_mask` (`safety_core.c:919`) | **(a) reachable** — confirmed `current_sense_set_cal()` is called (`current_task.c:197`) |
+| S4 | same as S3 plus `relay_commanded_continuously` | `link_task_get_relay_on_continuous_ms()` (`safety_core.c:923-924`) | **(a) reachable** |
+| S5 | `tc_valid`/`tc_c`/`fault_bits`/`spi_failed` | `thermo_task_get_snapshot()` (`safety_core.c:662`), unconditional | **(a) reachable** |
+| S6a | `main_fault_asserted` | `discrete_task_main_fault()` (`safety_core.c:1073`) | **(a) reachable in source; (b) not exercisable by any host fixture** — `SimFW`/`virtual_dut` are gone, so this is bench-hardware-only, same conclusion §6a already reached |
+| S6b | `link_up` | `link_task_link_up()` | **(a) reachable** — both the soft current-gated tier (via S3's `any_current_present` fix) and the unconditional hard backstop |
+| S7 | `estop_pressed` | `discrete_task_estop_pressed()` → `discrete_pin_policy_estop_asserted()` (`discrete_task.c:98`) | **(a) reachable** — confirmed polarity is correct: `gpio_get(SAFTYFW_PIN_ESTOP)` HIGH decodes to asserted, per `discrete_pin_policy.h` and `test_discrete_pin_policy.c` |
+| S8 | `max_rate_c_per_min` | none — no code path | **not implemented**, excluded from the count |
+| S9 | `relay_deenergized`, `any_current_present` | `!relay_owner_is_energized()` (`safety_core.c:1109`); current as S3 | **(a) reachable** |
+| S10 | same context reduction as S2 | same as S2 | **(a) reachable** |
+| S11 | `heat_commanded` (= `any_current_present`) | same as S3 (`safety_core.c:622-660`) | **(a) reachable** |
+| S12 | `cj_c` | `thermo_task_get_snapshot()`, ungated | **(a) reachable** |
+| S13 | `sample_counter_advancing`, `cfg->tc_source` | `context_borrowed_sample_counter_advancing()` (`safety_core.c:957-960`, `snapshots.h:288`), keyed off `cfg_rec.borrowed_zone_index` (`config_store.h:399`); `cfg->tc_source` from `safety_core_load_guard_cfg()` (`safety_core.c:350-357`) | **(d) deliberately configured off** — `tc_source` defaults to `OWN_J7`. **Correction to this file's own S13 row above (§6, line ~384): that row is stale.** It says `sample_counter_advancing` "has no `safety_guard_cfg_t` member... so `safety_core_build_input()` leaves `sample_counter_advancing` false rather than hardcoding zone 0." That is no longer true — `safety_core.c:940-960`'s own comment says explicitly this was fixed *because* this matrix's old S13 row found the gap: the code now reads `cfg_rec.borrowed_zone_index` directly off the config-store record (not through `safety_guard_cfg_t`, which is why grepping that struct alone still finds nothing) and calls the real producer. The only remaining block is `tc_source`, same commissioning-gap category as S1, not a missing-producer gap any more. |
+
+**S14 (added 2026-08-28, after both counts above — not part of the 6-of-13
+or 11-of-14 figures, reported separately):** per-channel `i_normal_valid[ch]`
+is fields-set-gated individually off `config_store` (`safety_core_load_guard_cfg()`,
+`safety_core.c:389-394`) — **(d) deliberately configured off** until each
+channel's `i_normal_a` is commissioned, same shape as S1/S13. Also forced
+inert by `cts_disabled` when `ct_installed` is explicitly answered "no"
+(§9) — that is case **(d)** too (a legitimate configured-off state), not a
+missing producer.
+
+**Per-guard delta, old → new:**
+
+| Guard | Old | New | What changed |
+|---|---|---|---|
+| S1 | blocked | blocked | unchanged — commissioning gap both times |
+| S2 | reachable | reachable | unchanged |
+| S3 | **blocked** | **reachable** | `current_sense_set_cal()` fix (`current_task.c:197`) |
+| S4 | reachable | reachable | unchanged |
+| S5 | reachable | reachable | unchanged |
+| S6a | **blocked** | **reachable (source), still needs hardware to exercise** | `main_fault_asserted` wiring landed (`safety_core.c:1073`) — a separate fix from the two ROADMAP named, same window |
+| S6b | reachable (hard backstop only) | **reachable, both tiers** | current-gated soft tier unblocked by the same `current_sense_set_cal()` fix |
+| S7 | **blocked** | **reachable** | E-stop polarity fix (`discrete_pin_policy.c`) |
+| S9 | **blocked** | **reachable** | `current_sense_set_cal()` fix, plus `relay_deenergized` wiring |
+| S10 | reachable | reachable | unchanged |
+| S11 | **blocked** | **reachable** | `heat_commanded` wired to `any_current_present`, plus the calibration fix |
+| S12 | reachable | reachable | unchanged |
+| S13 | blocked | blocked | unchanged bottom line, but the *reason* changed: `sample_counter_advancing` now has a real producer; only `tc_source` still blocks it (previously both were missing) |
+| S14 | did not exist | blocked (commissioning) | new guard, ships in the same configured-off state as S1/S13 by design |
+
+**Four states, kept distinct (this is the conflation that produced the stale
+number in the first place):**
+
+1. **(a) Reachable and exercised** — proven by a passing host test in §2
+   against the pure function, *and* a real producer confirmed above. All 11
+   reachable guards satisfy the host-test half; none has fresh hardware
+   evidence (see the honest gap below).
+2. **(b) Reachable but never exercised on real hardware** — S6a is the clear
+   case (no fixture can drive its input at all any more). More broadly:
+   *no* guard in this table has a post-2026-08-24-fix hardware trip on
+   record — §3.4's hardware-trip rows predate both fixes and have not been
+   re-run since (see the §3.4 note below). Source-reachable is not the same
+   claim as hardware-verified, and this file's own top banner says so.
+3. **(c) Unreachable — no producer** — **empty**, same as the pre-existing
+   2026-08-21 finding. Every guard's inputs, S8's exempted, now have a real
+   writer somewhere in `src/`. This is the category the two named fixes
+   emptied out (S7, S3/S9/S11); S6a's wiring emptied it further.
+4. **(d) Deliberately configured off** — S1, S13, S14, and (per §9)
+   S3/S4/S9/S14 again on a board that has explicitly answered
+   `ct_installed = no`. All are asked-and-answered commissioning states, not
+   defects. Do not count these as "broken" or fold them into (c).
+
+**§3.4 scope note.** The hardware-trip table only lists S1, S3, S6b, S7 and
+S9 to provoke on real hardware — it predates S6a's wiring, S10/S11's
+un-masking (§6a above), and S13/S14 entirely (both added after §3.4 was last
+edited). None of that is a defect in this pass — §3.4 is a checklist of what
+to *do*, not a reachability claim — but it means "provoke each one that is
+enabled" is currently under-scoped against the 11 reachable guards this
+section lists. Left as-is: expanding §3.4 is a hardware-test-planning task,
+out of scope for this source audit, and there is a live hardware experiment
+running that this pass was told not to touch.
+
+**§2 host-checklist count.** The checklist item citing "452/452 host checks
+pass" (2026-08-19, since grown to 409→434→452 across that pass's own edits)
+is stale as a *current* figure — it was never meant to track the suite
+forever, but re-running it as part of this audit is what "still accurate"
+means here. `test/build_host_tests.ps1` (run via bash per this repo's own
+convention — the PowerShell tool hangs on it) reports **1983/1983 checks
+pass** today (2026-09-03). The suite has grown roughly 4.4x since that
+checklist line was written (new coverage for the CT-optional path, the
+commissioning gate, discrete-pin polarity, the MAX31856 range/CR1 policies,
+and more); the *proportion* passing (452/452 → 1983/1983, both 100%) is the
+number worth trusting, not the absolute count in the old checklist line.
+
 ---
 
 ## 6a. The safety thermocouple was physically fitted (2026-08-24) — re-derivation

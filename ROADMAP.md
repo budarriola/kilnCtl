@@ -722,9 +722,24 @@ link, so it can run in parallel with M1 and M2 once M0 is out of the way.
       were found and fixed on 2026-08-24 — the E-stop polarity was inverted
       (S7 could not fire) and `current_sense_set_cal()` was never called, so
       `any_current_present` was permanently false (S3/S9/S11 and S6b's
-      current-gated trip could not fire). **The reachability count in
+      current-gated trip could not fire). ~~The reachability count in
       `GUARD_TEST_MATRIX.md` predates both fixes; re-establish it rather than
-      trusting the old number.**
+      trusting the old number.~~ **Re-established 2026-09-03**
+      (`GUARD_TEST_MATRIX.md` §6c): old count was 6 of 13 structurally
+      reachable (computed before either fix); current count, verified fresh
+      against today's `src/`, is 11 of 14 (S8 still unimplemented, excluded
+      from both; S14 is new since 2026-08-28 and tracked separately). S3,
+      S6a, S7, S9 and S11 moved from blocked to reachable — S6a's own
+      `main_fault_asserted` wiring is a third fix in the same window, beyond
+      the two named above. S1, S13 and S14 remain deliberately blocked by
+      commissioning gaps, not producer bugs — §6c distinguishes that from an
+      unreachable guard explicitly. One stale claim inside the matrix itself
+      was also caught and corrected in the same pass: S13's row said
+      `sample_counter_advancing` had no producer at all; it does now
+      (`safety_core.c:957-960`), and `tc_source` alone is what still blocks
+      S13. Host suite re-run in the same pass: 1983/1983 checks pass (the
+      matrix's old "452/452" checklist line was itself stale, from before
+      the suite grew ~4.4x).
 - [x] CI grep: `safety_core.c` never includes the link header — 2026-08-16,
       `firmware/SaftyFW/tools/check_isolation.ps1`
 
