@@ -757,6 +757,116 @@ def test_settle_criterion_audit_from_pair_matches_direct_extraction():
     assert [dataclasses.asdict(e) for e in actual] == [dataclasses.asdict(e) for e in expected]
 
 
+# ---------------------------------------------------------------------------
+# --allow-multi-session -- the single-zone CLI's escape hatch for
+# coupling_pair_log.MultiSessionError (finding 2, opus review round 3): a
+# capture pair with one legitimate long gap (PC sleep, Wi-Fi reconnect, MCP
+# restart, board reboot) used to abort `coupled-ident single-zone
+# --zone0-pair ...` with an uncaught traceback and no way forward short of
+# editing source, because neither single_zone_column_observations_from_pair
+# nor the CLI ever passed allow_multi_session through to load_pair_run().
+# ---------------------------------------------------------------------------
+
+def _session_gap_pair(tmp_path):
+    from kilnctrl import coupling_pair_log as cpl
+    t0 = 1_000_000.0
+
+    def exec_line(t, elapsed_text):
+        return json.dumps({
+            "t": t,
+            "s": (f"state=1 profile=#4 'cpl_z0' segment=0/1 dwelling=True "
+                  f"target=55.0C elapsed={elapsed_text}s dwell_remaining=1500s "
+                  f"ramp_lock=False fault_guard=0\n"
+                  f"  zone 0: mode=2 actual=55.0C (valid) duty=0.5 relay=on faulted=False"),
+        })
+
+    def thermo_line(t):
+        return json.dumps({"t": t, "s": "CH0: 30.0 C (CJ 25.0 C)\nCH1: 25.0 C (CJ 25.0 C)\nCH2: 25.0 C (CJ 25.0 C)"})
+
+    exec_lines = [exec_line(t0 + i * 20, 100 + i * 20) for i in range(5)]
+    exec_lines += [exec_line(t0 + 5 * 20 + 7200 + i * 20, i * 20) for i in range(5)]
+    thermo_lines = [thermo_line(t0 + i * 20) for i in range(5)]
+    thermo_lines += [thermo_line(t0 + 5 * 20 + 7200 + i * 20) for i in range(5)]
+
+    mcp_path = tmp_path / "gap_mcp.jsonl"
+    thermo_path = tmp_path / "gap_thermo.jsonl"
+    mcp_path.write_text("\n".join(exec_lines) + "\n")
+    thermo_path.write_text("\n".join(thermo_lines) + "\n")
+    return str(mcp_path), str(thermo_path)
+
+
+def test_single_zone_column_observations_from_pair_raises_on_session_gap(tmp_path):
+    """Without allow_multi_session, a --zoneN-pair capture whose exec log
+    has a >300s gap must surface MultiSessionError, not swallow it or crash
+    some other way -- this is the wrapper finding 2 says never forwarded the
+    flag at all.
+
+    Proof this can fail: reverted the forwarding fix (dropped
+    allow_multi_session from the call to load_pair_run inside the wrapper,
+    leaving the parameter accepted but unused). Captured red: the call
+    returns [] instead of raising, silently joining two fake firings into
+    one column observation set -- pytest.raises(MultiSessionError) itself
+    fails with `DID NOT RAISE <class 'coupling_pair_log.MultiSessionError'>`.
+    """
+    from kilnctrl import coupling_pair_log as cpl
+    mcp_path, thermo_path = _session_gap_pair(tmp_path)
+    with pytest.raises(cpl.MultiSessionError) as exc_info:
+        ci.single_zone_column_observations_from_pair(mcp_path, thermo_path, active_zone=0)
+    assert "allow_multi_session=True" in str(exc_info.value)
+
+
+def test_single_zone_column_observations_from_pair_allow_multi_session_bypasses(tmp_path):
+    """allow_multi_session=True on the wrapper must reach load_pair_run and
+    actually bypass the refusal (no MultiSessionError), same as calling
+    load_pair_run directly with the flag set -- proven by comparing against
+    that direct call rather than requiring specific settle-window contents
+    from a synthetic fixture that isn't trying to model real thermal
+    dynamics.
+
+    Proof this can fail: reverted the forwarding fix (dropped
+    allow_multi_session from the call to load_pair_run inside the wrapper).
+    Captured red:
+        coupling_pair_log.MultiSessionError: ...gap_mcp.jsonl: exec-status
+        log has 1 gap(s) over 300s...
+      raised out of a call that passed allow_multi_session=True and should
+      not have raised at all.
+    """
+    from kilnctrl import coupling_pair_log as cpl
+    mcp_path, thermo_path = _session_gap_pair(tmp_path)
+    expected_rows = cpl.load_pair_run(mcp_path, thermo_path, allow_multi_session=True)
+    obs = ci.single_zone_column_observations_from_pair(
+        mcp_path, thermo_path, active_zone=0, allow_multi_session=True)
+    expected = ci.single_zone_column_observations(expected_rows, active_zone=0,
+                                                    source=f"{mcp_path}+{thermo_path}")
+    assert obs == expected
+
+
+def test_single_zone_cli_requires_allow_multi_session_flag_for_gapped_pair(tmp_path, capsys):
+    """`coupled-ident single-zone --zone0-pair ...` on a gapped capture must
+    raise (not silently produce a matrix) unless --allow-multi-session is
+    passed -- and passing it must let the run through cleanly instead of
+    raising. This is finding 2's actual escape hatch: before this fix there
+    was no such flag anywhere in the argparse setup, so a real single
+    legitimate long gap left no way forward short of editing source.
+
+    Proof the flag threading can fail: had --allow-multi-session parsed but
+    not passed into single_zone_column_observations_from_pair at the call
+    site (hardcoded allow_multi_session=False there instead of
+    args.allow_multi_session). Captured red on that mutation: the second
+    `ci.main(...)` call below (WITH the flag) still raised
+    MultiSessionError instead of returning 0.
+    """
+    from kilnctrl import coupling_pair_log as cpl
+    mcp_path, thermo_path = _session_gap_pair(tmp_path)
+
+    with pytest.raises(cpl.MultiSessionError):
+        ci.main(["single-zone", "--zone0-pair", mcp_path, thermo_path, "--json"])
+
+    rc = ci.main(["single-zone", "--zone0-pair", mcp_path, thermo_path, "--allow-multi-session", "--json"])
+    assert rc == 0
+    json.loads(capsys.readouterr().out)  # must be valid JSON, no traceback interleaved
+
+
 def test_matrix_from_single_zone_columns_orientation():
     """matrix_from_single_zone_columns() must assemble cell (affected, active)
     -- i.e. [affected][stepped] -- not the transpose. Uses SEC2_IDENTIFICATION_HYBRID_MATRIX,

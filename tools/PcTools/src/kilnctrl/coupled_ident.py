@@ -769,6 +769,7 @@ def single_zone_column_observations_from_paths(paths: Sequence[str], active_zone
 
 def single_zone_column_observations_from_pair(mcp_path: str, thermo_path: str, active_zone: int,
                                                 max_skew_s: float = coupling_pair_log.DEFAULT_MAX_SKEW_S,
+                                                allow_multi_session: bool = False,
                                                 ) -> list[ColumnObservation]:
     """Same extraction as ``single_zone_column_observations``, sourced from
     the two-poller ``<name>_mcp.jsonl`` / ``<name>_thermo.jsonl`` capture
@@ -777,8 +778,15 @@ def single_zone_column_observations_from_pair(mcp_path: str, thermo_path: str, a
     excitation runs' native format -- see that module's docstring for the
     join rule and why an unmatched exec-status row is dropped whole rather
     than emitted with missing peer zones.
+
+    ``allow_multi_session`` is forwarded to ``load_pair_run`` -- pass
+    ``True`` for a capture pair you have already confirmed is one run with
+    a single legitimate long gap (PC sleep, Wi-Fi reconnect, MCP server
+    restart, board reboot mid-firing), not two firings concatenated into
+    one file.
     """
-    rows = coupling_pair_log.load_pair_run(mcp_path, thermo_path, max_skew_s=max_skew_s)
+    rows = coupling_pair_log.load_pair_run(mcp_path, thermo_path, max_skew_s=max_skew_s,
+                                            allow_multi_session=allow_multi_session)
     if not rows:
         return []
     label = f"{mcp_path}+{thermo_path}"
@@ -787,10 +795,12 @@ def single_zone_column_observations_from_pair(mcp_path: str, thermo_path: str, a
 
 def settle_criterion_audit_from_pair(mcp_path: str, thermo_path: str,
                                       max_skew_s: float = coupling_pair_log.DEFAULT_MAX_SKEW_S,
+                                      allow_multi_session: bool = False,
                                       ) -> list:
     """``settle_criterion_audit`` sourced from a two-poller capture pair --
     see ``single_zone_column_observations_from_pair``."""
-    rows = coupling_pair_log.load_pair_run(mcp_path, thermo_path, max_skew_s=max_skew_s)
+    rows = coupling_pair_log.load_pair_run(mcp_path, thermo_path, max_skew_s=max_skew_s,
+                                            allow_multi_session=allow_multi_session)
     if not rows:
         return []
     label = f"{mcp_path}+{thermo_path}"
@@ -1520,6 +1530,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                        default=[], help="same as --zone0-pair, zone 2 driven alone")
     p_sz.add_argument("--score-against", nargs="*", default=[],
                        help="ordinary poll captures to score the assembled matrix against (joint dwell observations)")
+    p_sz.add_argument("--allow-multi-session", action="store_true",
+                       help="allow a --zoneN-pair capture whose exec-status log has a gap over "
+                            "coupling_pair_log.DEFAULT_MAX_GAP_S between consecutive polls -- normally refused "
+                            "as MultiSessionError (looks like a poller left running across a cooldown and caught "
+                            "the next firing). Pass this only after confirming the gap is a single legitimate "
+                            "pause (PC sleep, Wi-Fi reconnect, MCP restart, board reboot), not two firings.")
     p_sz.add_argument("--json", action="store_true")
 
     p_audit = sub.add_parser("settle-audit", help="check whether the firmware's dwell-settle criterion "
@@ -1553,7 +1569,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             if by_zone.get(z):
                 obs.extend(single_zone_column_observations_from_paths(by_zone[z], z))
             for mcp_path, thermo_path in by_zone_pairs.get(z, []):
-                obs.extend(single_zone_column_observations_from_pair(mcp_path, thermo_path, z))
+                obs.extend(single_zone_column_observations_from_pair(
+                    mcp_path, thermo_path, z, allow_multi_session=args.allow_multi_session))
             if obs:
                 column_obs[z] = obs
         matrix, coverage = matrix_from_single_zone_columns(column_obs)
