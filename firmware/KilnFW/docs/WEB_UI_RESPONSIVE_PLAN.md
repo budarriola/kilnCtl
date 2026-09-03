@@ -339,6 +339,16 @@ invisible unstyled colour, not as an error.
 Deliverable: `theme.css` becomes the single place a colour or size decision is
 made. Everything after this is cheap; nothing before it is.
 
+**2026-09-02 follow-up on item 2:** `--neutral` has been added to
+`main_page.html` and `readiness_page.html`'s three `:root` blocks each
+(light, `prefers-color-scheme: dark`, `[data-theme="dark"]`), set to the
+exact same values `--off-color`/`--cannot-yet` already hold on those pages.
+Nothing was switched over to it — `grep -rn "var(--neutral)"` across
+`App/drivers/` returns no hits, so no rendered color changed; the sweep
+(78/78) and `run_all_checks.ps1` (26/26) confirm this. This is prep only:
+the rename from `--off-color`/`--cannot-yet` to `--neutral` is still the
+owner's call, same as item 1.
+
 ---
 
 ## 6. Phase 2 — earn the width above the cap — DONE
@@ -525,3 +535,17 @@ An esbuild bundling step is worth doing *with* a framework pilot and not before
 - **The body cap was never a considered global decision** — three pages had
   none and the rest used four different values. Phase 2 replaced all of it
   with one token.
+- **`zones_page.html`'s tuning-recommendation panel (`333dd4e`) checked
+  against sec 5/6 conventions — conforms.** It lives inside `<div
+  class="card">` (sec 6's container-query pattern) and its status color is
+  `var(--ok)` / `var(--warn)` / `var(--bad)`, the token names zones_page
+  already uses per sec 5's majority vocabulary — not a new palette. It does
+  not touch, override, or duplicate any of `check_ui_shell_layout.ps1`'s
+  required rules. The inline `style="color:var(--cls)"` on the result line
+  and the `style="margin-left:1em"` on its form controls are not a shell/
+  container violation — sec 6 governs page-level width/grid, not inline
+  spacing, and ad hoc inline `em`/color styling is the existing convention
+  elsewhere on this page and others (sec 7.2 item 6 already notes the
+  scattered ad hoc `em` values pending a shared scale). Verified in the
+  sweep (78/78) and `check_ui_shell_layout.ps1` (still passing) with the
+  panel present.

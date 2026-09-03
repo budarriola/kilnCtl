@@ -23,6 +23,11 @@
     --bg: #fff; --fg: #111; --muted: #444; --border: #888; --button-bg: #f2f2f2;
     --card-bg: #f7f7f7; --link: #06c; --ok: #1a7a1a; --bad: #b00; --cannot-yet: #888;
     --warn: #a67c00;
+    /* WEB_UI_RESPONSIVE_PLAN.md sec 5.1 item 2: --neutral introduced
+       alongside --cannot-yet with the identical value -- purely additive,
+       nothing repaints. --cannot-yet stays the token actually used until
+       the owner signs off on the rename. */
+    --neutral: #888;
   }
   @media (prefers-color-scheme: dark) {
     :root:not([data-theme="light"]) {
@@ -30,6 +35,7 @@
       --border: var(--ui-text-secondary); --button-bg: var(--ui-card); --card-bg: var(--ui-card);
       --link: var(--ui-accent-3); --ok: var(--ui-accent-4); --bad: var(--ui-accent-5);
       --cannot-yet: var(--ui-text-secondary); --warn: var(--ui-accent-1);
+      --neutral: var(--ui-text-secondary);
     }
   }
   :root[data-theme="dark"] {
@@ -37,6 +43,7 @@
     --border: var(--ui-text-secondary); --button-bg: var(--ui-card); --card-bg: var(--ui-card);
     --link: var(--ui-accent-3); --ok: var(--ui-accent-4); --bad: var(--ui-accent-5);
     --cannot-yet: var(--ui-text-secondary); --warn: var(--ui-accent-1);
+    --neutral: var(--ui-text-secondary);
   }
   /* box-sizing reset, page-local only. Fluid width via min() rather than a
      breakpoint: fills a 320px phone, caps at 640px on tablet/desktop

@@ -24,18 +24,25 @@
   :root {
     --bg: #fff; --fg: #111; --muted: #444; --border: #888; --button-bg: #f2f2f2;
     --card-bg: #f7f7f7; --ok: #1a7a1a; --off-color: #888; --bad: #b00;
+    /* WEB_UI_RESPONSIVE_PLAN.md sec 5.1 item 2: --neutral introduced
+       alongside --off-color with the identical value -- purely additive,
+       nothing repaints. --off-color stays the token actually used until the
+       owner signs off on the rename. */
+    --neutral: #888;
   }
   @media (prefers-color-scheme: dark) {
     :root:not([data-theme="light"]) {
       --bg: var(--ui-bg); --fg: var(--ui-text-primary); --muted: var(--ui-text-secondary);
       --border: var(--ui-text-secondary); --button-bg: var(--ui-card); --card-bg: var(--ui-card);
       --ok: var(--ui-accent-4); --off-color: var(--ui-text-secondary); --bad: var(--ui-accent-5);
+      --neutral: var(--ui-text-secondary);
     }
   }
   :root[data-theme="dark"] {
     --bg: var(--ui-bg); --fg: var(--ui-text-primary); --muted: var(--ui-text-secondary);
     --border: var(--ui-text-secondary); --button-bg: var(--ui-card); --card-bg: var(--ui-card);
     --ok: var(--ui-accent-4); --off-color: var(--ui-text-secondary); --bad: var(--ui-accent-5);
+    --neutral: var(--ui-text-secondary);
   }
   /* WEB_UI_RESPONSIVE_PLAN.md sec 6: fixed 480px cap replaced with the
      shared --kc-shell-max (theme.css) -- earns real width on a wide desktop
