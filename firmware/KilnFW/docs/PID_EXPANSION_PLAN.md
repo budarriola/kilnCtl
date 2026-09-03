@@ -1000,6 +1000,13 @@ same document's own 2026-08-29/30 bench sections contradict.
       result alone still does not justify one; the case for running it (or
       not) rests on §3.6's other open items, unchanged by this addition.
 
+      **Crossed with load, 2026-09-02 — see §3.8's closing subsection.**
+      This sweep and §3.8's load sweep each varied only one axis; crossing
+      them (`fuzzy_load_sweep.py`) still finds strength=0 best almost
+      everywhere across mass 1.0–4.0x, with one small, honesty-gate-failing
+      exception at the heaviest/most-shelved corner (4.0x mass, 0.7x
+      coupling) — not large enough to change this section's conclusion.
+
 ### 3.7 Validation gap
 
 Everything above is measured on a bench rig spanning 0–80 °C. Radiative transfer
@@ -1051,6 +1058,53 @@ Is load observable from data the firmware already has? Nothing here answers
 that with hardware evidence — it would need an in-flight step-response fit
 (commanded duty vs. temperature rate) compared against the identified τ, which
 this repo has no capture of. Flagged as the natural next step, not measured.
+
+**Gap closed 2026-09-02: fuzzy strength × load, never crossed before now.**
+§3.6's fuzzy sweep and this section's load sweep each varied one axis while
+holding the other at its single tested point (fuzzy at the identified/1.0x
+load; load at fuzzy=0). Neither answers whether the fuzzy layer — whose
+stated intent is robustness to a plant perturbation, just framed as
+temperature rather than mass — helps precisely where §3.2/this section found
+the fixed feedforward matrix degrading: z2's duty saturating first as load
+rises, while the matrix has no load input at all.
+
+`tools/PcTools/src/kilnctrl/fuzzy_load_sweep.py` (new, additive — does not
+edit `plant_sim.py` or `load_mass_sweep.py`) crosses fuzzy strength
+0/25/50/75/100 with mass 1.0/1.5/2.0/3.0/4.0x × coupling 1.0/0.7x, profile 7,
+current production gains, ADOPTED matrix, measurement chain always on (0.1 °C
+quantum + 0.05 °C noise, 5 seeds/cell — seed-to-seed IAE std ≤0.002 °C at
+every cell, i.e. the seed spread never bound anything below). 750 runs, whole-
+run normalized IAE per zone plus ramp/dwell/steady/settle/duty-saturation:
+
+**Strength=0 still wins at every load and coupling tested except one
+extreme corner: 4.0x mass with 0.7x coupling (heaviest mass, most
+shelved/damped coupling), where z1 and z2's mean IAE decrease
+*monotonically* as strength rises (z1: 3.418→3.340 °C strength 0→100; z2:
+3.864→3.785 °C)** — the one cell where the ranking from §3.6 actually
+reverses. **The reversal does not clear the honesty gate**: the margin
+(0.078 °C z1, 0.079 °C z2) is two orders of magnitude below both zones'
+discrimination thresholds (1.2/1.3 °C) and, separately, would need to beat
+the ~0.001–0.002 °C seed std by more to be trusted at all — it clears easily
+on seed spread alone but not on the threshold, so per the same honesty gate
+§3.6 established, **no winner is called even here**. Every other
+(mass, coupling) cell shows the flat/monotonic strength-0-best pattern §3.6
+already found, with gaps growing roughly with load (e.g. z0 at 1.0x/1.0
+coupling: 0.657→0.994 °C strength 0→100; at 3.0x/1.0: 2.595→3.134 °C) but
+never approaching threshold either.
+
+**Direct answer: no, no fuzzy strength beats strength 0 by a margin this sim
+can stand behind, at any load or coupling tested, 1.0x through 4.0x mass —
+a clean negative across the full load range, closing the gap the owner
+flagged.** The one sign of a genuine crossover (4.0x mass, 0.7x coupling,
+z1/z2, strength>0 wins) is worth recording as a hint of direction, not a
+result: it is real (monotonic, not noise — seed std two orders of magnitude
+below the margin) but far too small to matter, and it appears only at the
+single most extreme corner of the grid, not as a trend building up to it
+from 1.0x. Mutation-tested in `tests/test_fuzzy_load_sweep.py` (loop fidelity
+pinned bit-for-bit against `load_mass_sweep` at strength=0/no-noise; honesty-
+gate arithmetic checked against both bounds independently, mutating the
+seed-spread check out of the gate reproduced a failure at exactly the
+seed-spread test, reverted).
 
 **Bottom line: only the profile-7 (bench-rig-fit) results clear the honesty
 gate, and only at 1.5–2.0x load and up. The cone-schedule numbers are simulator
