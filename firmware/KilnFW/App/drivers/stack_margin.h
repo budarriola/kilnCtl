@@ -60,7 +60,10 @@ extern "C" {
  * registered. Exact occupancy after this change: 28/28, no spare slots left
  * -- the next task added here needs another bump, not a silent overflow (see
  * stack_margin.c's "registry full" log line, which is the failure mode this
- * comment exists to keep from being silent).
+ * comment exists to keep from being silent). SUPERSEDED by the section 7
+ * cap-raise pass immediately below: the cap is 40 today, not 28, so that
+ * "28/28, no spare slots left" figure is history, not current occupancy --
+ * it is the reason section 7 raised the cap, kept here for that context.
  *
  * DRAM_PSRAM_PLAN.md section 7 (cap-raise pass), 2026-09-02: raised 28 -> 40.
  * That 28/28-full state was the actual section 7.3 blocker: kiln_io_owner,
