@@ -1,6 +1,6 @@
 # PcTools — one GUI and MCP server for both processors
 
-> **Status:** planning · **Last reviewed:** 2026-08-21
+> **Status:** planning · **Last reviewed:** 2026-09-02
 > **Keep this file current.** If a tool, page or transport changes, update it in
 > the same commit. If it disagrees with the code, **the code wins.** Finished
 > items are removed from this file rather than left as a completed marker —
@@ -69,10 +69,14 @@ Needs a board and analyzer on the bench at once.
 - [ ] A page-by-page audit of `gui.py` against `mcp_server.py` is still open —
       the pass done so far diffed client instantiations, not every control.
 
-### 4. One-call board snapshot
+### 4. One-call board snapshot — DONE
 
-`get_board_state()` still only has one processor's data — `SaftyFW` still has
-no data source to add to it (no board, link is dead).
+`get_board_state()` (`mcp_server_codec.py`) reports both processors: it
+already carries `safety_status` and `safety_link_stats` alongside the ESP
+sections. Stale entry — this was written while the isolated link was still
+capped at 9600 baud (see the Pico-through-the-ESP item above); once that was
+fixed the Pico sections came along with the rest of the snapshot for free,
+nothing else had to be added here.
 
 ### 5. Software peer stub
 
@@ -149,25 +153,37 @@ traffic.
 ## Firmware updates from here
 
 Design: [`../../firmware/CommonFW/docs/UPDATE_PROTOCOL.md`](../../firmware/CommonFW/docs/UPDATE_PROTOCOL.md).
-`ota_rollback_esp()`/`ota_rollback_pico()` exist and are unit-tested (neither
-exercised against real hardware — no reboot has ever actually been triggered
-by these tools). SWD recovery is documented as the path for a Pico that will
-not boot into either app slot or its own bootloader at all.
+`ota_get_challenge()`, `ota_update_esp()`, `ota_update_pico()`, `ota_status()`,
+`ota_rollback_esp()`, and `ota_recovery_exit_esp()` all exist
+(`mcp_server_ota.py`, backed by `ota_http_client.py`) and are unit-tested
+against mocked HTTP (`tests/test_ota_http_client.py`,
+`tests/test_ota_status_protocol_version.py`) — this whole section was stale,
+not open. `ota_update_esp()` does NOT wait for the reboot or return the
+post-reboot version itself (that stays a separate `ota_status()`/
+`get_fw_version()` poll by the caller, by design — see that tool's
+docstring); `ota_update_pico()` returns as soon as the relay *starts*, same
+reasoning. Every push/rollback/recovery-exit call now logs the image's
+SHA-256 (or, for rollback/recovery, just host+outcome) and logs refusals too,
+never the password (`ota_http_client.py`'s `log.info`/`log.warning` calls,
+proved by `PushImageLoggingTest`). `ota_status()` now reports the Pico's
+`protocol_version`/`protocol_min_compatible` and tags a real mismatch
+`INCOMPATIBLE PROTOCOL VERSION` up front rather than folding it into normal
+status prose — the wire fields were already emitted by
+`ota_pico_status_get_handler()`, just not read on this side.
 
-- [ ] `ota_status()` — both processors: running version, build commit, active
-      slot, the version in the inactive slot, and **why an update is currently
-      refused**, naming the blocker
-- [ ] `ota_update_esp(image_path, password)` — streams, waits for the reboot,
-      returns the version actually running afterwards
-- [ ] `ota_update_pico(image_path, password)` — same, relayed over the link,
-      with progress surfaced at least every 2 s
-- [ ] Every call logged with the image's SHA-256, and refusals logged too
-- [ ] The password is never written to the log or to a settings file
-- [ ] A protocol-version mismatch between a Pico image and the running ESP is a
-      hard error here, not a warning
-- [ ] `ota_status()` reports **both** processors' protocol version and
-      `min_compatible`, and says plainly whether they are compatible and which
-      side is older
+None of the above has been exercised against real hardware — no reboot has
+ever actually been triggered by these tools. First hardware step: a board
+that is idle/cool/link-healthy (interlocks satisfied), then one real
+`ota_update_esp()` call followed by a manual reboot and `ota_status()` poll
+to confirm PENDING_VERIFY → confirmed actually happens as documented.
+
+- [ ] Live-hardware verification of all of the above (needs a board, see first
+      step above)
+- [ ] `min_compatible` field / cross-check itself is still open on the
+      **firmware** side (`UPDATE_PROTOCOL.md`'s own checklist,
+      "`min_compatible` field added to both version frames" / "Both sides
+      check both directions of `peer.protocol >= self.min_compatible`") —
+      out of scope here, owned by `firmware/CommonFW`
 
 ## What this does not become
 
@@ -201,7 +217,9 @@ not boot into either app slot or its own bootloader at all.
       deliberately, until a board + analyzer are on the bench together.
 - [ ] 3. GUI-vs-MCP capability audit — not exhaustive; a full page-by-page
       pass is still open.
-- [ ] 4. `get_board_state()` — only one processor's data exists to report.
+- [x] 4. `get_board_state()` — both processors reported (`safety_status`/
+      `safety_link_stats` alongside the ESP sections); this closed for free
+      once the isolated link's baud fix landed.
 
 **Logging and consoles**
 - [ ] Pico logs emitted as `kilnlink` LOG frames, relayed by the ESP
@@ -215,11 +233,16 @@ not boot into either app slot or its own bootloader at all.
 - [ ] Pico log emission best-effort and droppable — never blocking
 
 **Firmware updates**
-- [ ] `ota_status`, `ota_update_esp`, `ota_update_pico`
-- [ ] Tools call the ESP's endpoints; no second transfer implementation
-- [ ] Image SHA-256 logged on every call, refusals included
-- [ ] Password never persisted to log or settings
-- [ ] Protocol-version mismatch is a hard error, not a warning
+- [x] `ota_status`, `ota_update_esp`, `ota_update_pico`
+- [x] Tools call the ESP's endpoints; no second transfer implementation
+- [x] Image SHA-256 logged on every call, refusals included
+- [x] Password never persisted to log or settings
+- [x] `ota_status()` surfaces a Pico protocol-version mismatch as an explicit
+      `INCOMPATIBLE` flag, not folded into normal-status prose — the actual
+      version-negotiation enforcement (`peer.protocol >= self.min_compatible`
+      on both sides) is firmware work, tracked in `UPDATE_PROTOCOL.md`, not
+      here
+- [ ] Live-hardware verification (no board exercised yet)
 
 **Integrity**
 - [ ] Python codec checked against `firmware/CommonFW/test/vectors/`
