@@ -930,6 +930,83 @@ def test_bench_validation_report_reproduces_measured_asymmetry_direction():
     assert rise[0, 1] < 15.0
 
 
+# ---------------------------------------------------------------------------
+# Per-path dead time / tau (added 2026-09-03) -- PID_EXPANSION_PLAN.md sec
+# 3.2/3.8: cross-zone heat was being modeled with the RECEIVING zone's own
+# (short) dead time/tau, when sec 2 measured the cross-zone path runs
+# 3-4x slower (135-158 s / 620-730 s vs 34-53 s / 264-271 s diagonal).
+# ---------------------------------------------------------------------------
+
+def test_l_pair_diagonal_is_measured_off_diagonal_is_slower():
+    """``L_PAIR``/``TAU_PAIR`` diagonal must be the original per-zone
+    MEASURED L/tau; every off-diagonal cell must be the sec-2 range
+    midpoint and clearly SLOWER than any diagonal cell (labels not
+    swapped -- a transposed matrix would still pass a same-value check but
+    fail the ordering below).
+
+    Proof this can fail: dropped the ``np.fill_diagonal(L_PAIR, L)`` call
+    (diagonal left at the uniform off-diagonal fill, as if the MEASURED
+    per-zone dead time were never applied). Captured red output:
+
+        FAILED tests/test_plant_sim.py::test_l_pair_diagonal_is_measured_off_diagonal_is_slower
+        AssertionError: assert False
+         +  where False = <function allclose>(array([146.5, 146.5, 146.5]), array([52.8, 43.5, 33.9]))
+
+    Reverted, suite green again before this test was kept.
+    """
+    diag_mask = np.eye(3, dtype=bool)
+    assert np.allclose(ps.L_PAIR[diag_mask], ps.L)
+    assert np.allclose(ps.TAU_PAIR[diag_mask], ps.tau)
+    off_diag_L = ps.L_PAIR[~diag_mask]
+    off_diag_tau = ps.TAU_PAIR[~diag_mask]
+    assert np.allclose(off_diag_L, ps.OFFDIAG_L_S)
+    assert np.allclose(off_diag_tau, ps.OFFDIAG_TAU_S)
+    assert off_diag_L.min() > ps.L_PAIR[diag_mask].max(), (
+        f"off-diagonal L ({off_diag_L.min():.2f}) not slower than diagonal L "
+        f"({ps.L_PAIR[diag_mask].max():.2f})"
+    )
+    assert off_diag_tau.min() > ps.TAU_PAIR[diag_mask].max()
+
+
+def test_per_path_plant_neighbour_heat_arrives_later_than_own_heat():
+    """Stepping only zone 1's duty: zone 1's OWN temperature must start
+    rising (measurably) before zone 0's does, by roughly the difference
+    between the diagonal and off-diagonal dead times -- the physical
+    property sec 2 measured and ``FOPDTPlantPerPath`` exists to reproduce
+    (``FOPDTPlant``, by contrast, delays BOTH by zone 0's own short dead
+    time, since it applies one delay per receiving zone to every column).
+
+    Proof this can fail: passed ``ps.L`` broadcast to every column (the
+    OLD single-delay-per-zone reconstruction) as ``L_pair`` instead of
+    ``ps.L_PAIR``, collapsing the two arrival times together. Captured red
+    output:
+
+        FAILED tests/test_plant_sim.py::test_per_path_plant_neighbour_heat_arrives_later_than_own_heat
+        AssertionError: neighbour (zone 0) rise time 147s not later than own
+          (zone 1) rise time 146s by at least 60s
+        assert (147.0 - 146.0) >= 60.0
+
+    Reverted, suite green again before this test was kept.
+    """
+    plant = ps.FOPDTPlantPerPath(ps.K_full, ps.L_PAIR, ps.TAU_PAIR, ps.DT, ambient=20.0)
+    threshold_c = 0.05
+    own_rise_t = neighbour_rise_t = None
+    duty = np.array([0.0, 0.8, 0.0])
+    for step in range(1200):
+        temps = plant.step(duty)
+        if own_rise_t is None and temps[1] - 20.0 > threshold_c:
+            own_rise_t = step * ps.DT
+        if neighbour_rise_t is None and temps[0] - 20.0 > threshold_c:
+            neighbour_rise_t = step * ps.DT
+        if own_rise_t is not None and neighbour_rise_t is not None:
+            break
+    assert own_rise_t is not None and neighbour_rise_t is not None
+    assert neighbour_rise_t - own_rise_t >= 60.0, (
+        f"neighbour (zone 0) rise time {neighbour_rise_t:.0f}s not later than own "
+        f"(zone 1) rise time {own_rise_t:.0f}s by at least 60s"
+    )
+
+
 def test_bench_kiln_plant_zero_duty_decays_to_ambient():
     """No duty anywhere -> every zone must cool monotonically back to
     ambient, never grow (a broken sign on the loss term would runaway

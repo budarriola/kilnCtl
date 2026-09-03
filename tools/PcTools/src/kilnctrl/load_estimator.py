@@ -114,7 +114,7 @@ def estimate_zone_mass_mult(
     t: np.ndarray, temps: np.ndarray, duty: np.ndarray, zone: int,
     ambient: float = 20.0, K: Optional[np.ndarray] = None,
     tau_ref: Optional[np.ndarray] = None, L: Optional[np.ndarray] = None,
-    min_drive_c: float = 5.0,
+    min_drive_c: float = 5.0, L_pair: Optional[np.ndarray] = None,
 ) -> Optional[ZoneLoadEstimate]:
     """Fits ``dT/dt = (1/tau) * (u_ss - T)`` for one zone over the whole
     supplied capture (caller slices to whatever window -- e.g. one ramp
@@ -124,17 +124,37 @@ def estimate_zone_mass_mult(
 
     ``t`` must be uniformly spaced (as every capture used here is); ``dt``
     is taken from ``t[1] - t[0]``.
+
+    ``L_pair`` (added 2026-09-03): the ORIGINAL version of this function
+    delayed every column of ``duty`` by the same single ``L[zone]`` -- this
+    zone's OWN dead time -- before weighting by ``K[zone]``. Sec 2/3.8's
+    diagnosis is that this is exactly wrong for the off-diagonal (neighbour)
+    columns, whose real dead time (135-158 s, ASSUMED single 146.5 s
+    midpoint -- see ``plant_sim.L_PAIR``) runs 3-4x the diagonal's (34-53
+    s): a neighbour's duty from ~100 s ago was being credited to *this*
+    zone's drive term ~100 s too early. Passing ``L_pair`` delays column j
+    of the drive term by ``L_pair[zone, j]`` instead of a single scalar.
+    **Defaults to ``None``, which reproduces the ORIGINAL single-delay
+    behaviour exactly** (``L[zone]`` broadcast to every column) so every
+    existing caller -- including ``load_mass_sweep.py``'s simulated data,
+    generated with the single-delay ``FOPDTPlant`` -- is untouched; this
+    argument is purely additive. Pass ``plant_sim.L_PAIR`` explicitly to opt
+    into the per-path reconstruction (see
+    ``tests/test_load_estimator.py``'s per-path-vs-single-delay checks and
+    PID_EXPANSION_PLAN.md sec 3.8's 2026-09-03 update for what changes when
+    a caller does).
     """
     K = ps.K_full if K is None else K
     tau_ref = ps.tau if tau_ref is None else tau_ref
     L = ps.L if L is None else L
+    L_pair = np.tile(np.asarray(L).reshape(-1, 1), (1, len(L))) if L_pair is None else L_pair
 
     dt = float(t[1] - t[0])
-    # duty is (N, N_ZONES); delay each zone's own commanded duty by THIS
-    # zone's dead time (matches FOPDTPlant.step, which delays the whole
-    # duty vector by the RECEIVING zone's own L).
+    # duty is (N, N_ZONES); delay column j by L_pair[zone, j] -- the dead
+    # time on the PATH from stepped zone j to this (receiving) zone, not a
+    # single per-zone scalar applied to every column (see docstring above).
     duty_delayed = np.column_stack([
-        _delay_duty(duty[:, j], dt, L[zone]) for j in range(duty.shape[1])
+        _delay_duty(duty[:, j], dt, L_pair[zone, j]) for j in range(duty.shape[1])
     ])
     u_ss = ambient + duty_delayed @ K[zone]
     T = temps[:, zone]
@@ -142,19 +162,20 @@ def estimate_zone_mass_mult(
 
     dTdt = np.gradient(T, dt)
 
-    # The first L[zone] seconds of ANY window are unreliable: the delay
-    # reconstruction has no duty history predating the window, so it
-    # zero-order-holds the window's first sample backward. If the real
-    # (unknown) pre-window duty differed -- the ordinary case, since a
-    # window rarely starts exactly one dead-time after a duty change --
-    # the reconstructed u_ss is wrong for up to L[zone] seconds while
-    # T's actual response still reflects the true (unknown) history.
-    # These points combine a large, wrong drive with a near-zero real
-    # dT/dt and bias the through-origin slope down (tau up) when pooled
-    # with well-conditioned points; measured directly in validation
-    # (see test_load_estimator.py) -- without this exclusion a 4.0x sim
-    # run reads back as ~4.5x. Excluded rather than trusted.
-    warmup_steps = int(round(L[zone] / dt))
+    # The first max(L_pair[zone, :]) seconds of ANY window are unreliable:
+    # the delay reconstruction has no duty history predating the window, so
+    # it zero-order-holds the window's first sample backward for whichever
+    # column's delay is longest (now the OFF-DIAGONAL columns, ~146.5 s,
+    # not the ~34-53 s diagonal the original single-delay version excluded
+    # for). If the real (unknown) pre-window duty differed -- the ordinary
+    # case -- the reconstructed u_ss is wrong for up to that long while T's
+    # actual response still reflects the true (unknown) history. These
+    # points combine a large, wrong drive with a near-zero real dT/dt and
+    # bias the through-origin slope down (tau up) when pooled with
+    # well-conditioned points; measured directly in validation (see
+    # test_load_estimator.py) -- without this exclusion a 4.0x sim run
+    # reads back as ~4.5x. Excluded rather than trusted.
+    warmup_steps = int(round(np.max(L_pair[zone, :]) / dt))
     n_total = len(t)
     valid_start = np.zeros(n_total, dtype=bool)
     valid_start[warmup_steps:] = True
@@ -190,11 +211,12 @@ def estimate_zone_mass_mult(
 
 
 def estimate_all_zones(t, temps, duty, ambient=20.0, K=None, tau_ref=None, L=None,
-                        min_drive_c=3.0) -> list:
+                        min_drive_c=3.0, L_pair=None) -> list:
     out = []
     for z in range(temps.shape[1]):
         est = estimate_zone_mass_mult(t, temps, duty, z, ambient=ambient, K=K,
-                                       tau_ref=tau_ref, L=L, min_drive_c=min_drive_c)
+                                       tau_ref=tau_ref, L=L, min_drive_c=min_drive_c,
+                                       L_pair=L_pair)
         if est is not None:
             out.append(est)
     return out
@@ -234,15 +256,18 @@ def load_capture_rows(path: str) -> list:
 
 
 def estimate_from_capture_path(path: str, run_index: int = 0, ambient: float = 20.0,
-                                min_drive_c: float = 5.0, min_elapsed_s: float = 0.0) -> list:
+                                min_drive_c: float = 5.0, min_elapsed_s: float = 0.0,
+                                L_pair=None) -> list:
     """Convenience wrapper: parse a real capture (either on-disk envelope,
     see ``load_capture_rows``), split multi-run files, take ``run_index``,
     drop the first ``min_elapsed_s`` (dead-time/startup transient), and
-    estimate every zone's mass multiplier off the rest."""
+    estimate every zone's mass multiplier off the rest. ``L_pair`` defaults
+    to ``plant_sim.L_PAIR`` (per-path dead time, 2026-09-03) -- pass the old
+    single-delay-per-zone matrix explicitly for a side-by-side comparison."""
     rows_all = load_capture_rows(path)
     runs = la.split_runs(rows_all)
     rows = runs[run_index]
     t, temps, duty = arrays_from_capture(rows)
     keep = t >= (t[0] + min_elapsed_s)
     return estimate_all_zones(t[keep], temps[keep], duty[keep], ambient=ambient,
-                               min_drive_c=min_drive_c)
+                               min_drive_c=min_drive_c, L_pair=L_pair)

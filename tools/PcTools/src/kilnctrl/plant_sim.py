@@ -156,6 +156,41 @@ L = np.array([52.8, 43.5, 33.9])
 
 _K_INV = np.linalg.inv(K_full)
 
+# ---------------------------------------------------------------------------
+# Per-path dead time / tau (added 2026-09-03) -- two findings the same night
+# named this as the same missing piece: the load estimator's leading suspect
+# (PID_EXPANSION_PLAN.md sec 3.8, negative R^2 as low as -11.6 on real
+# captures against <1% error in simulation) and the zone-2 hardware A/B
+# mechanism (sec 3.2's 2026-09-03 entry) both trace to ONE dead time/tau per
+# RECEIVING zone being applied to every column of that zone's coupling row,
+# own-zone and cross-zone alike. Sec 2 measured the two paths are NOT the
+# same: diagonal (own-zone) dead time 34-53 s / tau 264-271 s vs off-diagonal
+# (cross-zone) dead time 135-158 s / tau 620-730 s -- neighbour heat arrives
+# 3-4x later than a zone's own element.
+#
+# L_PAIR[i][j] / TAU_PAIR[i][j]: dead time / tau on the path from stepped
+# zone j to affected zone i.
+#   diagonal (i==j):  MEASURED, same per-zone L/tau this module already used
+#                      (bench-rig L above; tau is the recalibrated own-zone
+#                      figure -- see the `tau` array's own comment).
+#   off-diagonal:      ASSUMED. Sec 2 gives only an aggregate RANGE across
+#                      all six cross-zone paths (135-158 s / 620-730 s), not
+#                      a per-pair breakdown -- no capture in this repo
+#                      isolates a single (i,j) cross-zone step response well
+#                      enough to fit a per-cell number. The range midpoint
+#                      (146.5 s / 675.0 s) is used uniformly for every
+#                      off-diagonal cell. This is a real limitation, stated
+#                      here rather than hidden behind six numbers that look
+#                      more precise than the data supports.
+OFFDIAG_L_S = 146.5    # ASSUMED: midpoint of sec 2's measured 135-158 s range
+OFFDIAG_TAU_S = 675.0  # ASSUMED: midpoint of sec 2's measured 620-730 s range
+
+L_PAIR = np.full((3, 3), OFFDIAG_L_S)
+np.fill_diagonal(L_PAIR, L)  # MEASURED (bench-rig dead time, diagonal)
+
+TAU_PAIR = np.full((3, 3), OFFDIAG_TAU_S)
+np.fill_diagonal(TAU_PAIR, tau)  # MEASURED (cooldown tau, diagonal)
+
 # The identified plant (K/tau/L above) comes from a 0-80 C bench rig -- see
 # module docstring's TRUST section. Any run whose commanded target leaves
 # that envelope is extrapolating beyond where the identification has ever
@@ -745,6 +780,71 @@ class FOPDTPlant:
         return self.temp.copy()
 
 
+class FOPDTPlantPerPath:
+    """Same physical structure as ``FOPDTPlant`` -- coupled first-order-plus-
+    dead-time zones -- but with an INDEPENDENT dead time and time constant
+    per (affected, stepped) PATH instead of one dead time/tau per receiving
+    zone applied uniformly to every column of its coupling row. See
+    ``L_PAIR``/``TAU_PAIR`` above for what is MEASURED (diagonal) vs ASSUMED
+    (off-diagonal, a single range-midpoint value -- sec 2 never isolated a
+    per-pair cross-zone step response).
+
+    Linear superposition: each zone's rise above ambient is the SUM of one
+    first-order response per source column, ``x[i,j]``, driven by column
+    j's own delayed duty, with the (i,j) path's own gain/tau:
+
+        dx_ij/dt = (K_full[i,j] * duty_j_delayed(L_PAIR[i,j]) - x_ij) / TAU_PAIR[i,j]
+        T_i = ambient + sum_j x_ij
+
+    ``FOPDTPlant`` is the single-delay-per-zone model this replaces for any
+    caller that opts in (``plant_regime='measured_per_path'``); it is left
+    unchanged so every existing caller/test stays on the original code path
+    -- this class is purely additive.
+    """
+
+    def __init__(self, K, L_pair, tau_pair, dt, ambient=20.0, start_temp=None):
+        self.K, self.L_pair, self.tau_pair, self.dt, self.ambient = K, L_pair, tau_pair, dt, ambient
+        self.n = K.shape[0]
+        if start_temp is None:
+            self.temp = np.full(self.n, ambient)
+            self.x = np.zeros((self.n, self.n))
+        else:
+            self.temp = np.array(start_temp, dtype=float)
+            # Seed each path's steady-state share so a non-ambient start
+            # (e.g. a rested-but-not-cold capture) does not have to climb
+            # back through a fake transient on tick 0 -- split the starting
+            # rise proportionally to each path's steady-state gain, the
+            # same assumption an unknown starting duty history implies.
+            rise = self.temp - ambient
+            k_row_sum = self.K.sum(axis=1)
+            k_row_sum_safe = np.where(k_row_sum == 0.0, 1.0, k_row_sum)
+            self.x = (self.K / k_row_sum_safe.reshape(-1, 1)) * rise.reshape(-1, 1)
+        self.max_delay = int(np.max(self.L_pair) / dt) + 2
+        self.duty_hist = [np.zeros(self.n) for _ in range(self.max_delay)]
+
+    def step(self, duty):
+        duty = np.clip(duty, 0.0, 1.0)
+        self.duty_hist.append(duty.copy())
+        self.duty_hist.pop(0)
+        new_x = self.x.copy()
+        for i in range(self.n):
+            # High-temperature extension: same conductance-scaling treatment
+            # as FOPDTPlant.step, applied per path off the RECEIVING zone's
+            # current temperature (the controller still never sees this --
+            # see FOPDTPlant.step's own note).
+            scale = loss_conductance_scale(self.temp[i])
+            for j in range(self.n):
+                delay_steps = min(int(round(self.L_pair[i, j] / self.dt)), len(self.duty_hist) - 1)
+                d_delayed = self.duty_hist[-1 - delay_steps][j]
+                k_eff = self.K[i, j] / scale
+                tau_eff = self.tau_pair[i, j] / scale
+                dxdt = (k_eff * d_delayed - self.x[i, j]) / tau_eff
+                new_x[i, j] = self.x[i, j] + dxdt * self.dt
+        self.x = new_x
+        self.temp = self.ambient + self.x.sum(axis=1)
+        return self.temp.copy()
+
+
 # ---------------------------------------------------------------------------
 # Fuzzy-PID layer -- FAITHFUL mirror of firmware/KilnFW/App/drivers/
 # pid_fuzzy.c's pid_fuzzy_adjust(), not an approximation. Constants, the 3x3
@@ -1069,8 +1169,13 @@ def run_profile(segs, start_temp, kp=0.06, ki=0.0003, kd=0.0,
         plant = PhysicalKilnPlant(DT, ambient=ambient, start_temp=start_temp)
     elif plant_regime == 'measured':
         plant = FOPDTPlant(K_full, tau, L, DT, ambient=ambient, start_temp=start_temp)
+    elif plant_regime == 'measured_per_path':
+        plant = FOPDTPlantPerPath(K_full, L_PAIR, TAU_PAIR, DT, ambient=ambient, start_temp=start_temp)
     else:
-        raise ValueError(f"unknown plant_regime {plant_regime!r}, expected 'measured' or 'physical'")
+        raise ValueError(
+            f"unknown plant_regime {plant_regime!r}, expected 'measured', "
+            "'measured_per_path' or 'physical'"
+        )
     pids = [PID(kp, ki, kd, d_tau=30.0, b=1.0, pid_range_c=1000.0,
                 fuzzy_strength_pct=fuzzy_strength_pct) for _ in range(N_ZONES)]
     ff_fn = coupled_ff_hold_climb if climb_mode == 'coupled' else uncoupled_ff_hold_climb

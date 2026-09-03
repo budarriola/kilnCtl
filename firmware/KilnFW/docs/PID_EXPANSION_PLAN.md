@@ -431,6 +431,74 @@ swing distinguishable from run-to-run noise at all" question, but not the
 transient-vs-steady-state question above — that needs the metric itself
 rebuilt over dynamic windows, not more repeats of the same static one.
 
+**TRANSIENT-AWARE METRIC BUILT, 2026-09-03 — does NOT retrodict the
+asymmetry.** `coupled_ident.py` gained `score_matrix_transient()` /
+`score_matrix_transient_from_http_paths()`: the SAME `u_pred = A⁻¹·(T −
+ambient)` algebra `score_matrix()` uses, sampled over
+`transient_window_row_indices()` — every ramp window plus each dwell's
+entry portion up to that zone's own post-transition overshoot peak,
+identical windows to `pid_ab_compare`'s ramp/dwell-entry metrics
+(`log_analysis.build_windows`/`ramp_to_dwell_transitions`, reused not
+reimplemented, so the two modules cannot silently disagree about what "the
+transient" means). Rationale: `score_matrix`'s settled-tail sampling can
+never see a matrix over-crediting a neighbour's heat, because by the time a
+dwell tail is sampled that heat has already arrived; sampling the ramp and
+dwell-entry instead — while the credited heat is still 620–730 s / 135–158 s
+out — is exactly where an over-generous off-diagonal should show up as a
+duty shortfall. `coupling-report`'s new section 7 reports it beside, not
+instead of, section 4's bias score, wired in via the checked-in matched
+A/B pair (`p7_oldmatrix_runC.jsonl` run 0 / `p7_newmatrix2_http.jsonl` run
+0, same pair as the hardware A/B above).
+
+Scored on that pair, transient-window mean `u_pred − u_actual`:
+
+| | z0 | z1 | z2 |
+|---|---|---|---|
+| pre-adoption hybrid | +0.051 | +0.034 | −0.041 |
+| adopted own-diagonal | −0.104 | −0.149 | −0.112 |
+| adopted hybrid (runs today) | −0.135 | −0.147 | −0.061 |
+
+**It does not retrodict.** Hardware: z1 improved (IAE 1.028→0.608), z2 got
+worse (0.820→0.899). This metric: bias magnitude grows for the adopted
+hybrid on **all three** zones (0.051→0.135, 0.034→0.147, 0.041→0.061) —
+correct direction only for z2, and it flags z1 as the *largest* of the
+three regressions, the exact zone that measurably improved. Per the honesty
+gate this section opened with: a metric that gets one of two zones
+backwards, and picks the wrong zone as the bigger loser, is no better than
+the settled-tail one for choosing between candidates — sampling the right
+*windows* was necessary but not sufficient. The residual problem is that
+`u_pred = A⁻¹·(T − ambient)` is still a **static** steady-state inversion;
+off equilibrium its bias is dominated by how far the plant is from
+steady state (thermal mass, ramp rate, where in the transient a poll
+landed) at least as much as by which matrix is driving it, and that
+confound doesn't average out just because the windows are now the right
+ones. Reproducible: `python -m kilnctrl.coupled_ident coupling-report`,
+section 7; `test_score_matrix_transient_ignores_post_peak_rows` and
+neighbors in `test_coupled_ident.py` pin the windowing itself (proven able
+to fail — see those tests' own docstrings for the captured red).
+
+**What still would settle it:** the doc's own numeric solve two paragraphs
+up (`zone_coupling_solve.c`'s actual `G·u=b`, hold-duty-offload
+percentages and row-sum growth) remains the more reliable evidence for
+*why* z2 got worse — it is dynamics-aware in the sense that it reasons
+about which zone's row depends on which lagging off-diagonal, where this
+metric is not. A metric that actually retrodicts would need to be dynamic
+(propagate each matrix through the identified per-cell tau/dead-time
+before comparing to observed duty), not a static inversion moved to a
+different sample set — that is future work, not shipped here.
+
+**Would the adopted matrix still have been chosen under this metric?** No
+differently than under the old one, and for the same reason: this metric,
+like the bias metric it supplements, says every zone got *worse* under
+the adopted hybrid — it would not have surfaced z1's real, measured
+improvement any more than the settled-tail metric surfaced z2's real
+regression. Neither metric, alone, would have produced today's actual
+(mixed, z1-up/z2-down) hardware outcome as a prediction. The honest
+conclusion is that no offline metric built so far — settled-tail or
+transient-window, both static inversions — is sufficient to gate this
+class of matrix change; the adoption decision remains, as recorded above,
+an owner call made with that caveat attached, not a metric-validated one.
+
 ### 3.3 Adaptive tuning — the layers not built
 
 Shipped (`fcc1fc0`, `a772d78`): dwell harvesting, diagonal-only least-squares
@@ -824,6 +892,61 @@ improvement over the cold-start number (which said the same thing more
 loudly), and it settles that the earlier failure was a capture artifact, not
 a plant defect, but the gap to a 0.4–0.5 °C effect size remains open on all
 three zones.
+
+**Per-path dead time, tried 2026-09-03 — makes held-out RMS WORSE, not
+better.** Two findings the same night named the single per-zone dead time
+above as the same missing piece (this section's own held-out figure and
+§3.8's load-estimator negative). `plant_sim.FOPDTPlantPerPath` (new,
+additive — `FOPDTPlant` is untouched) gives each coupling PATH its own dead
+time/tau instead of one per receiving zone: diagonal MEASURED (`L`/`tau`
+above, unchanged), off-diagonal ASSUMED at the range midpoint (146.5 s /
+675.0 s — §2 gives only an aggregate 135–158 s / 620–730 s range, not a
+per-pair breakdown; `plant_sim.L_PAIR`/`TAU_PAIR`). Re-run of the exact
+pooled held-out comparison above, same two captures, same segments, only
+`plant_regime` changed:
+
+| | z0 | z1 | z2 |
+|---|---|---|---|
+| single delay per zone (current) | 1.05 °C | 0.61 °C | 0.67 °C |
+| per-path (new) | **1.63 °C** | **1.09 °C** | **0.95 °C** |
+
+**Every zone gets worse**, by more than the 2.1/1.2/1.3 °C discrimination
+threshold's own margin — this is not noise. Reading of why: the controller's
+feedforward still uses one fixed, non-delayed `K_inv`/`tau` (exactly like
+real firmware — see `coupled_ff_hold_climb`'s own note), so slowing down the
+PLANT's cross-zone arrival without also modeling the controller's blindness
+to that lag widens the mismatch between what the controller assumes and
+what the plant does, rather than narrowing it. The single-delay model's
+better RMS looks like it was, in part, accidentally compensating for that
+mismatch by averaging cross-zone arrival time toward the (shorter) diagonal
+value. **No new discrimination threshold is reported — a model that fits
+worse does not get a tighter one.** The mechanism (§2's measured lag is
+real) is not in question; this specific way of injecting it into the sim
+is a regression against the tracking-RMS metric, and is NOT adopted as the
+default (`plant_regime='measured_per_path'` stays opt-in, `'measured'`
+unchanged and still what every existing caller uses).
+
+**Zone-2 A/B reproduction, checked with per-path delays in place: still
+does not reproduce the hardware direction.** §3.2's 2026-09-03 hardware A/B
+found z1 tracking improved and z2 worsened switching old→new matrix. Solved
+`coupled_ff_hold_climb` with the controller believing the old vs. new
+matrix (plant fixed to the real, new-matrix identification) over the
+`p7_newmatrix_http.jsonl` segment shape, whole-run mean |error| vs.
+commanded target:
+
+| plant model | z0 | z1 | z2 |
+|---|---|---|---|
+| single delay (current) | worse | **better** | **better** |
+| per-path (new) | worse | worse (flat) | **better** |
+
+Neither model reproduces z2 getting *worse* — both predict it improves.
+Per-path delays do not flip that sign; they instead turn z1's previously
+correct-direction "better" into "worse (flat)", which is a step away from
+the hardware result, not toward it. **This sim, single-delay or per-path,
+still cannot reproduce the one real hardware A/B result it would need to
+in order to be trusted for this kind of comparison** — unchanged verdict
+from the rest of this section, now checked against the specific mechanism
+this task named.
 
 Ranked improvements, by expected value per unit effort: (1) a proper
 per-zone re-identification using z2's dwell-entry dynamics (dead time/tau),
@@ -1264,6 +1387,47 @@ median 0.54x, R²>0.3 in only 4 of 17 windows. Zone 1: range 0.16x–1.11x,
 median 0.57x, R² never exceeds 0.3 (max 0.05) — essentially no linear
 relationship recovered. Zone 2: range 0.18x–1.8x, median 0.74x, R² as low as
 −11.6. This is the inconsistency the task anticipated as itself the finding.
+
+**Leading suspect tried 2026-09-03: per-path dead time — zone-dependent,
+does NOT flip the verdict to positive.** `estimate_zone_mass_mult()`
+delayed EVERY column of the drive term by the receiving zone's own (short,
+34–53 s) dead time, including the neighbour columns whose real path delay
+is 3–4x longer (§3.4's `plant_sim.L_PAIR`, 146.5 s ASSUMED off-diagonal
+midpoint) — exactly this section's own leading suspect. Fixed, additively:
+`estimate_zone_mass_mult()`/`estimate_all_zones()`/`estimate_from_capture_
+path()` take an optional `L_pair` (default `None`, reproduces the original
+single-delay reconstruction byte-for-byte — every existing caller,
+including `load_mass_sweep.py`'s simulated-truth tests, is unaffected);
+passing `plant_sim.L_PAIR` opts a caller into per-path delayed columns.
+
+Re-ran the same 17-window real-capture sweep with `L_pair=plant_sim.L_PAIR`:
+
+| | zone 0 | zone 1 | zone 2 |
+|---|---|---|---|
+| single delay (current), frac windows R²>0.3 | 0.24 (5/21) | 0.05 (1/21) | 0.05 (1/20) |
+| per-path (new), frac windows R²>0.3 | 0.10 (2/20) | **0.41 (7/17)** | 0.00 (0/11) |
+| single delay, max R² | 0.78 | 0.49 | 0.36 |
+| per-path, max R² | 0.61 | **0.91** | −0.14 |
+
+Zone 1 improves markedly (best R² 0.49→0.91, the fraction of windows
+clearing 0.3 goes 1-in-21 to 7-in-17) — the clearest positive result in
+either the sim-validation or real-capture columns of this whole section.
+Zone 0 is roughly a wash (slightly fewer usable windows, comparable R²
+range). **Zone 2 gets worse**, both in usable-window count (20→11, the
+`min_drive_c`/warmup filters now exclude more of it since the warmup
+exclusion is keyed to the longest per-row delay) and in fit quality (max R²
+0.36→−0.14, i.e. it no longer fits better than a flat line at all).
+
+**Verdict unchanged: still NOT actionably observable, and the fix is
+zone-dependent rather than a uniform win — §3.8 stays a negative, not
+flipped to positive.** Zone 1's improvement is real and worth keeping
+(`L_pair` is now available for a future zone-1-only attempt), but a
+per-zone estimator that works for one of three zones and gets measurably
+worse on the zone with the largest known plant-identification error already
+(§3.2's z2 cold-hold bias) does not clear the bar this section set for
+"observable." Zone 2 remains the next suspect named by this pass rather
+than closed by it: its warmup/dead-time filtering interacting badly with
+the longer off-diagonal delay is a plausible mechanism, not yet checked.
 
 *Why the sim result doesn't transfer, per the honesty gate:* the estimator
 is exact given the true K/tau/L; simulation validates only that the

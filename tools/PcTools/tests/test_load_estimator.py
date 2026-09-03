@@ -14,6 +14,7 @@ import pytest
 from kilnctrl import load_estimator as le
 from kilnctrl import load_mass_sweep as lms
 from kilnctrl import log_analysis as la
+from kilnctrl import plant_sim as ps
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 FIXTURES = os.path.join(os.path.dirname(__file__), "fixtures", "plant_sim")
@@ -99,6 +100,60 @@ def test_real_capture_loader_handles_both_envelopes():
     assert len(rows_wrapped) > 100
     assert len(rows_bare) > 100
     assert rows_wrapped[0].zones and rows_bare[0].zones
+
+
+# ---------------------------------------------------------------------------
+# Per-path dead time reconstruction (added 2026-09-03) -- sec 3.8's leading
+# suspect for the negative real-capture R^2 was that ``_delay_duty`` applied
+# one dead time per RECEIVING zone to every column, when a neighbour's true
+# dead time (135-158 s) runs 3-4x the diagonal's (34-53 s). Drives
+# ``FOPDTPlantPerPath`` (the per-path plant, ``plant_sim.py``) with duty on
+# zone 1 ONLY -- zone 0's whole drive term comes through the off-diagonal
+# path, so getting that path's dead time right is the entire test.
+# ---------------------------------------------------------------------------
+
+def test_per_path_l_pair_recovers_off_diagonal_drive_better_than_uniform_delay():
+    """Simulate ``FOPDTPlantPerPath`` (the true per-path model) with zone 1
+    duty stepped and zones 0/2 held at zero -- zone 0's whole temperature
+    rise is cross-zone (off-diagonal) heat. Estimating zone 0's mass
+    multiplier with the CORRECT per-path delay (``ps.L_PAIR``, ~146.5 s off
+    diagonal) must fit far better (higher R^2) than reconstructing the same
+    data with the OLD single-delay-per-zone assumption (every column
+    delayed by zone 0's own ~52.8 s dead time) -- exactly the mismatch sec
+    3.8 named as its leading suspect for the real captures' negative R^2.
+
+    Proof this can fail: passed ``L_pair=OLD_UNIFORM`` to BOTH calls (as if
+    ``estimate_zone_mass_mult``'s new ``L_pair`` argument were silently
+    ignored / not threaded through). Captured red output:
+
+        FAILED tests/test_load_estimator.py::test_per_path_l_pair_recovers_off_diagonal_drive_better_than_uniform_delay
+        AssertionError: correct per-path R2 (0.450) not clearly better than
+          uniform-delay R2 (0.450) -- L_pair argument looks inert
+        assert 0.44974222422830656 > (0.44974222422830656 + 0.2)
+
+    Reverted, suite green again before this test was kept.
+    """
+    plant = ps.FOPDTPlantPerPath(ps.K_full, ps.L_PAIR, ps.TAU_PAIR, ps.DT, ambient=20.0)
+    n_steps = 2400
+    duty = np.zeros(3)
+    duty[1] = 0.7
+    temps = np.zeros((n_steps, 3))
+    dutys = np.zeros((n_steps, 3))
+    for k in range(n_steps):
+        temps[k] = plant.step(duty)
+        dutys[k] = duty
+    t = np.arange(n_steps, dtype=float) * ps.DT
+
+    OLD_UNIFORM = np.tile(ps.L.reshape(-1, 1), (1, 3))  # old: one delay per receiving zone
+
+    est_correct = le.estimate_zone_mass_mult(t, temps, dutys, zone=0, min_drive_c=1.0, L_pair=ps.L_PAIR)
+    est_wrong = le.estimate_zone_mass_mult(t, temps, dutys, zone=0, min_drive_c=1.0, L_pair=OLD_UNIFORM)
+    assert est_correct is not None and est_wrong is not None
+    assert est_correct.r2 > est_wrong.r2 + 0.2, (
+        f"correct per-path R2 ({est_correct.r2:.3f}) not clearly better than "
+        f"uniform-delay R2 ({est_wrong.r2:.3f}) -- L_pair argument looks inert"
+    )
+    assert est_correct.r2 > 0.9
 
 
 def test_real_captures_produce_finite_estimates_no_crash():
