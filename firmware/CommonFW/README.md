@@ -192,7 +192,8 @@ firmware/CommonFW/
 │  ├─ kilnlink_get_param.h         ← ESP → Pico, SAFETY_CMD_GET_PARAM (0x23, own id since v7)
 │  ├─ kilnlink_param.h             ← Pico → ESP, SAFETY_CMD_PARAM (0x1E, reply)
 │  ├─ kilnlink_get_config_page.h   ← ESP → Pico, SAFETY_CMD_GET_CONFIG_PAGE (0x24, own id since v7)
-│  └─ kilnlink_config_page.h       ← Pico → ESP, SAFETY_CMD_CONFIG_PAGE (0x1F, reply)
+│  ├─ kilnlink_config_page.h       ← Pico → ESP, SAFETY_CMD_CONFIG_PAGE (0x1F, reply)
+│  └─ kilnlink_fw_version.h        ← Pico → ESP, Frame C, SAFETY_CMD_FW_VERSION (0x0B, reply)
 │  (no `kilnlink_ids.h` or `kilnlink_port.h` yet — see the Completion checklist)
 ├─ src/
 │  ├─ kilnlink_crc.c    kilnlink_frame.c     kilnlink_context.c
@@ -202,7 +203,7 @@ firmware/CommonFW/
 │  ├─ kilnlink_set_config.c  kilnlink_set_ct_cal.c  kilnlink_get_ct_cal.c  kilnlink_ct_cal.c
 │  └─ kilnlink_set_log_level.c  kilnlink_param_value.c  kilnlink_set_param.c
 │     kilnlink_commit_config.c  kilnlink_get_param.c  kilnlink_param.c
-│     kilnlink_get_config_page.c  kilnlink_config_page.c
+│     kilnlink_get_config_page.c  kilnlink_config_page.c  kilnlink_fw_version.c
 ├─ src/benchproto_crc.c  src/benchproto_frame.c  src/benchproto_link.c
 ├─ test/
 │  ├─ test_frame.c  test_fuzz.c  test_uart_protocol_delegate.c
@@ -212,6 +213,7 @@ firmware/CommonFW/
 │  ├─ test_set_config.c  test_set_ct_cal.c  test_get_ct_cal.c  test_ct_cal.c
 │  ├─ test_set_log_level.c  test_param_value.c  test_set_param.c  test_commit_config.c
 │  ├─ test_get_param.c  test_param.c  test_get_config_page.c  test_config_page.c
+│  ├─ test_fw_version.c
 │  ├─ test_benchproto_frame.c  test_benchproto_link.c
 │  └─ vectors/                     ← shared byte-exact test vectors, see below
 │     (kilnlink's `*_vectors.json` plus benchproto_frame_vectors.json)
@@ -522,16 +524,39 @@ Tick these as they land. Phase numbers refer to [`../SaftyFW/TODO.md`](../SaftyF
       `clear_trip` is wired receive-only (`SaftyFW`'s `link_task.c`) with no
       `KilnFW` send side yet. See the 2026-08-19 note above for the exact
       state of each
-- [ ] **Frame C (`SAFETY_CMD_FW_VERSION`, §6) has no `CommonFW` codec.**
-      `SaftyFW`'s `link_frame.c` (`link_frame_pack_fw_version()`) and
-      `KilnFW`'s `safety_link.c` still hand-roll it independently against
-      `LINK_PROTOCOL.md` §6's offset table — exactly the two-independent-
-      implementations risk this directory exists to close. Audited
-      2026-08-24: the two currently agree, so this is not a live bug, but
-      it is the one frame where a future silent misread would misinform
-      the ESP about whether the Pico is even safe to trust. Give it a real
-      `kilnlink_fw_version.{c,h}` and migrate both sides in one coordinated
-      commit — not safe to do piecemeal from one side of the link alone.
+- [x] **Frame C (`SAFETY_CMD_FW_VERSION`, §6) now has a `CommonFW` codec**
+      (2026-09-01): `kilnlink_fw_version.{c,h}` — same layout as
+      `kilnlink_announce.{c,h}` (both are the compatibility-floor's mirror
+      pair, sharing wire id `0x0B` deliberately, see §4's "Request/reply ids
+      must never be shared" rule for why this one pair is exempt), extended
+      past `boot_id` with `config_version` and `config_crc`. Host-tested
+      (`test_fw_version.c`, 12 checks: round trip, byte-exact vectors in
+      `test/vectors/fw_version_vectors.json`, and the hostile-input set —
+      too-short, wrong command byte, commit/datetime length fields that
+      claim more bytes than the buffer actually holds, a declared string
+      length past this codec's own cap, and a regression guard against the
+      exact failure class commit ca472fb fixed elsewhere in this repo: a
+      decoder that reads `min(declared_len, cap)` out of a buffer shorter
+      than that). Every one of those hostile cases was proven to fail
+      red by mutation (removing the length-prefix bounds check, flipping
+      `protocol_version`'s encode to big-endian, and dropping `config_crc`
+      from the encoder each turned green tests red before the mutation was
+      reverted) — this is not a codec that merely runs, it is one whose
+      tests can prove a defect.
+
+      **Still open, and deliberately not done in this pass:** `SaftyFW`'s
+      `link_frame.c` (`link_frame_pack_fw_version()`) and `KilnFW`'s
+      `safety_link.c` still hand-roll Frame C independently against
+      `LINK_PROTOCOL.md` §6's offset table — this codec is not yet wired
+      into either firmware's real send/receive dispatch, the same
+      codec-only state most of the other payload codecs in this checklist
+      shipped in first (see "Migration" below). Audited again 2026-08-24
+      (before this pass) and unaudited since: the two hand-rolled
+      implementations were still in agreement as of that date, so this is
+      not a known live bug, but LINK_PROTOCOL.md's own words on this frame
+      still apply — migrating both sides is "not safe to do piecemeal from
+      one side of the link alone" and needs a dedicated coordinated commit,
+      which is out of scope for adding the shared codec itself.
 
 ## Related
 

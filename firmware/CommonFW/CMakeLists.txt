@@ -60,6 +60,7 @@ add_library(kilnlink STATIC
     src/kilnlink_get_config_page.c
     src/kilnlink_config_page.c
     src/kilnlink_rollback_result.c
+    src/kilnlink_fw_version.c
 )
 target_include_directories(kilnlink PUBLIC include)
 set_target_properties(kilnlink PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
@@ -368,6 +369,15 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
         target_compile_options(test_inject_tc PRIVATE -Wall -Wextra -Werror)
     endif()
     add_test(NAME test_inject_tc COMMAND test_inject_tc)
+
+    add_executable(test_fw_version test/test_fw_version.c)
+    target_link_libraries(test_fw_version PRIVATE kilnlink)
+    if(MSVC)
+        target_compile_options(test_fw_version PRIVATE /W4 /WX)
+    else()
+        target_compile_options(test_fw_version PRIVATE -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME test_fw_version COMMAND test_fw_version)
 
     # -- benchproto host tests (independent of everything above) --------------
     add_executable(test_benchproto_frame test/test_benchproto_frame.c)
