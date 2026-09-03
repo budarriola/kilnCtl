@@ -3,10 +3,9 @@
 credit -- everything in ``test_ramp_assist.py`` runs at bench scale (profile
 7 tops out ~60 C, far below the lowest cone, 586 C), so none of it has ever
 actually driven a zone INSIDE a real cone band. This module runs the same
-mechanism (unmodified -- nothing in ``ramp_assist.py`` or ``cone_table.py``
-is touched to make these pass) against ``plant_sim.PhysicalKilnPlant`` at a
-bisque (~cone 04, 1062.8 C), a mid-fire glaze (cone 6, 1222.2 C) and a high
-fire (cone 10, 1285.0 C) target, matching the scenarios reported in
+mechanism against ``plant_sim.PhysicalKilnPlant`` at a bisque (~cone 04,
+1062.8 C), a mid-fire glaze (cone 6, 1222.2 C) and a high fire (cone 10,
+1285.0 C) target, matching the scenarios reported in
 ``firmware/KilnFW/docs/PID_EXPANSION_PLAN.md`` section 7.6.
 
 HONESTY NOTE, inherited from ``ramp_assist.py``'s own module docstring:
@@ -70,18 +69,40 @@ override -- it no longer has any bearing on credit):
 At light load (1x, and cone 10's slower rate also at 2x) credit is now real
 and material (10-24% of the nominal dwell) -- a sharp reversal from the
 "exactly zero, structurally" verdict the mutually-exclusive gate produced.
-At heavier load the figure collapses back to exactly zero: heavier mass
-makes the zone fall further behind DURING the ramp, so by the time the
-segment's commanded setpoint reaches ``step.target_c`` (ending the ramp
-step and starting the dwell) the zone's actual temperature has often not
-yet entered the half-cone-step in-band window at all -- it enters that
-window only after the dwell has already begun, where this ramp-phase
-accrual gate no longer runs (``ramping_now`` is false; see
-``ramp_assist_dwell_credit_tick()``'s own gate). This is a genuine
-model-dependent finding about WHEN a zone crosses into the credit band
-relative to the ramp/dwell boundary, not a re-introduction of the old
-mutual-exclusion defect -- the gate itself no longer references the 25 C
-band at all, and directly-observed accrual at 1x proves that.
+
+At heavier load the figure collapses back to exactly zero. THE PRECISE
+MECHANISM (not just "heavier mass makes the zone fall further behind" --
+that is true but not the actual gate the zero traces to): a ``RampStep``'s
+own freeze-and-resume releases -- ending the ramp step, advancing
+``z.seg_idx`` to the following ``DwellStep`` -- once the zone is back
+within the WIDE ``lag_band_c`` (25 C, mirroring firmware's
+``EXEC_RAMP_LOCK_BAND_C``). Credit's own gate is a MUCH NARROWER band --
+half a cone step below the segment target, well under 25 C for every
+target in this module. At heavy load the zone is still outside that
+narrower band at the exact tick the wide band releases the ramp step, so
+the zone enters its dwell before it has ever entered the credit band at
+all -- these are two genuinely different thresholds, not one blocking the
+other by construction.
+
+EXTENDED PAST THE NOMINAL RAMP END (2026-09-03, see PID_EXPANSION_PLAN.md
+section 7.3): credit accrual no longer stops the instant ``z.seg_idx``
+moves into the ``DwellStep`` -- it now keeps running through the dwell too,
+against the same held target, until the zone actually reaches it (see the
+``DwellStep`` branch in ``ramp_assist.py``'s ``run_ramp_assist``). This
+closes the gap above IN GENERAL (a multi-segment schedule can spend credit
+banked during one dwell against a LATER dwell's own entry -- confirmed
+directly: a synthetic two-``DwellStep`` cone-6-at-4x-mass schedule banks
+~0.2 s of credit during the first dwell and spends it against the second).
+It does NOT change any figure in the table above, because every schedule
+this module drives is a single ``RampStep`` + a single ``DwellStep`` --
+once that one dwell begins, there is no LATER dwell occurrence left in the
+schedule for in-dwell accrual to ever be spent against (the schedule ends,
+and any credit banked during that final dwell is simply discarded, the
+same safe "unspent credit is lost, never negative" direction
+``ramp_assist_dwell_credit_spend()`` already documents). The zeros in the
+table above are therefore still the correct, current, re-verified reading
+of the real shipped code as of 2026-09-03 -- re-run to confirm, not
+carried forward stale.
 """
 from __future__ import annotations
 
@@ -158,21 +179,33 @@ class CreditCollapsesAtHeavierLoadTests(unittest.TestCase):
     zero for bisque/cone 6 at 2x-4x and cone 10 at 4x -- NOT a return of the
     old mutual-exclusion defect (the gate no longer references the 25 C
     band at all; ``ShippedBandNowFiresAtLightLoadTests`` proves this same
-    code path fires at 1x). The mechanism finding here is that heavier mass
-    makes a zone fall further behind schedule during the ramp itself, so
-    the zone's actual temperature often does not enter the half-cone-step
-    in-band window until AFTER the ramp step has already ended and the
-    dwell has begun -- past this accrual gate's own ``ramping_now`` window.
-    See the module docstring's table.
+    code path fires at 1x). See the module docstring's "THE PRECISE
+    MECHANISM" paragraph for exactly which two thresholds this gap is
+    between -- the wide ramp-lock release band (25 C) vs. the much narrower
+    credit in-band test (half a cone step).
 
-    NEGATIVE-TESTED: temporarily forced ``ramping_now`` to stay ``True``
-    for one extra tick past the ramp->dwell transition (a boundary-off-by-
-    one). Re-ran ``test_bisque_zero_credit_at_heavier_load``; it did NOT
-    change the pinned zero values here (this scenario's zone crosses into
-    band well after the boundary at heavier load, not by one tick), so
-    that mutation is not evidence for or against this specific test --
-    documented for completeness; the meaningful negative test for the gate
-    ITSELF is in ``ShippedBandNowFiresAtLightLoadTests``.
+    RE-VERIFIED 2026-09-03 after extending credit accrual past the nominal
+    ramp end (accrual now also runs on ``DwellStep`` ticks, not just
+    ``RampStep`` ticks -- see ``ramp_assist.py``'s ``run_ramp_assist``,
+    ``DwellStep`` branch, and PID_EXPANSION_PLAN.md section 7.3): these
+    values are UNCHANGED. Every schedule this module drives is exactly one
+    ``RampStep`` followed by exactly one ``DwellStep`` -- once that single
+    dwell begins, there is no LATER dwell occurrence in the schedule for
+    credit banked during it to ever be spent against (the schedule simply
+    ends), so the extension has nothing to attach to here even though the
+    accrual itself now runs. See the module docstring's "EXTENDED PAST THE
+    NOMINAL RAMP END" paragraph for the synthetic two-dwell schedule that
+    DOES show the extension banking and spending real credit.
+
+    NEGATIVE-TESTED: temporarily forced the old ramp-phase-only accrual
+    gate to stay ``True`` for one extra tick past the ramp->dwell
+    transition (a boundary-off-by-one). Re-ran
+    ``test_bisque_zero_credit_at_heavier_load``; it did NOT change the
+    pinned zero values here (this scenario's zone crosses into band well
+    after the boundary at heavier load, not by one tick), so that mutation
+    is not evidence for or against this specific test -- documented for
+    completeness; the meaningful negative test for the gate ITSELF is in
+    ``ShippedBandNowFiresAtLightLoadTests``.
     """
 
     def test_bisque_zero_credit_at_heavier_load(self):

@@ -556,6 +556,23 @@ void executor_task_entry(void *arg)
                      * this feature existed. */
                     s_exec.dwell_credit_applied_s = ramp_assist_dwell_credit_spend(
                         &s_exec, (float)(seg->dwell_min * 60u), ramp_assist_cfg_enabled());
+                    /* CIRCULAR-DWELL HAZARD (2026-09-03, sec 7.3 extension --
+                     * see ramp_assist_credit_should_accrue()'s doc comment,
+                     * profile_executor_internal.h): dwell_credit_applied_s
+                     * above is a ONE-TIME snapshot, taken right here, the
+                     * single tick this dwell begins. Every zone's dwell_
+                     * credit_s keeps accruing AFTER this point (credit now
+                     * accrues through the whole ZONE_RAMP segment, dwelling
+                     * or not, until actual_c reaches seg->target_c) -- but
+                     * that later accrual must NEVER feed back into THIS
+                     * dwell's own threshold below, or time spent dwelling
+                     * in-band would shrink the very timer measuring it. The
+                     * `else` branch below enforces this by re-reading only
+                     * this frozen s_exec.dwell_credit_applied_s float, never
+                     * any zone's live dwell_credit_s -- do not "simplify" it
+                     * to read dwell_credit_s directly. Pinned by test_dwell_
+                     * credit_spend_snapshot_is_frozen_against_later_accrual
+                     * (test_profile_executor_prestart.c). */
                 }
             } else {
                 s_exec.target_c = seg->target_c;
@@ -650,7 +667,25 @@ void executor_task_entry(void *arg)
         {
             /* ramp_assist_on: read once, further up this tick (before
              * segment-stepping needed it too) -- not re-read here. */
-            bool ramping_now = (seg->seg_kind == PROFILE_SEG_KIND_ZONE_RAMP) && !s_exec.dwelling;
+            /* stretch_ramping_now stays gated on !s_exec.dwelling -- sec 7.2's
+             * auto-stretch time accounting is explicitly "during an actual
+             * ramp, not a dwell" (see profile_executor_ramp_assist.c's own
+             * doc comment on ramp_assist_stretch_tick()) and that is
+             * untouched by the sec 7.3 extension below. */
+            bool stretch_ramping_now = (seg->seg_kind == PROFILE_SEG_KIND_ZONE_RAMP) && !s_exec.dwelling;
+            /* credit_ramping_now: PID_EXPANSION_PLAN.md sec 7.3 extension
+             * (2026-09-03) -- deliberately DOES NOT check !s_exec.dwelling.
+             * See ramp_assist_credit_should_accrue()'s own doc comment
+             * (profile_executor_internal.h) for the gap this closes (ramp-
+             * lock releases, ending the ramp step, at a much wider band than
+             * credit's own in_band test, so a heavily-lagging zone routinely
+             * starts dwelling before it ever enters the credit band) and the
+             * hazard it does NOT create (credit banked during this segment's
+             * OWN dwell cannot shorten that same dwell -- dwell_credit_
+             * applied_s below is captured exactly once, at dwell entry, and
+             * every subsequent tick's threshold check reuses that frozen
+             * value; it is never recomputed from a live dwell_credit_s). */
+            bool credit_ramping_now = ramp_assist_credit_should_accrue(seg->seg_kind);
             for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
                 if (!s_exec.zones[zi].active || s_exec.zones[zi].faulted) continue;
                 /* NOT `lagging` (the 25C ramp-lock mask) -- that band decides
@@ -665,10 +700,10 @@ void executor_task_entry(void *arg)
                  * final target, not the still-interpolating commanded
                  * value -- see ramp_assist_dwell_credit_tick()'s doc
                  * comment (profile_executor_internal.h). */
-                ramp_assist_dwell_credit_tick(&s_exec.zones[zi], ramping_now, behind_schedule_now,
+                ramp_assist_dwell_credit_tick(&s_exec.zones[zi], credit_ramping_now, behind_schedule_now,
                                               seg->target_c, dt_s);
             }
-            ramp_assist_stretch_tick(&s_exec, s_exec.segment_index, ramp_assist_on, ramping_now,
+            ramp_assist_stretch_tick(&s_exec, s_exec.segment_index, ramp_assist_on, stretch_ramping_now,
                                      s_exec.ramp_lock_held, dt_s);
         }
 

@@ -2331,7 +2331,7 @@ distinguish strict hold from stretched, using the same
 paragraph used to call unsurfaced. Sec 7.6's real-firing validation of this
 specific control behaviour (as opposed to the credit) has not been run.
 
-### 7.3 Dwell credit — FIRMWARE LANDED (2026-09-03, see §7.3.3), CREDIT GATE FIXED (2026-09-03, see §7.6)
+### 7.3 Dwell credit — FIRMWARE LANDED (2026-09-03, see §7.3.3), CREDIT GATE FIXED (2026-09-03, see §7.6), ACCRUAL EXTENDED PAST THE NOMINAL RAMP END (2026-09-03, see §7.6.1)
 
 Heat-work-weighted accumulator, active only while the zone is BEHIND
 SCHEDULE AT ALL (`actual_c` below the moving commanded setpoint — see the
@@ -2340,6 +2340,65 @@ which stays exactly as it was for the lock itself), band from the segment
 target down half a cone step (uses the new `cone_table.c`/`.h`, Orton
 022-14, already landed by another agent — half-step band and Arrhenius
 heat-work weighting come from that module).
+
+**Extended past the nominal ramp end (2026-09-03).** A SECOND gap, distinct
+from §7.6's credit-gate fix: the ramp step formally ends (`s_exec.dwelling`
+flips true) once a lagging zone is back within the WIDE 25 °C ramp-lock
+band (`EXEC_RAMP_LOCK_BAND_C`), but the credit band above is the much
+NARROWER half-cone-step band. Under heavy thermal mass a zone routinely
+un-locks (ending the ramp) while still outside the credit band, and only
+crosses into it after dwelling has already begun — past the old
+`ramping_now = (seg_kind == ZONE_RAMP) && !dwelling` gate. Measured:
+credit was exactly 0.0 s at 2x/4x mass for bisque and cone 6, and at 4x for
+cone 10 (§7.6.1's table). **Owner decision:** keep accruing for as long as
+the current segment is a ZONE_RAMP, dwelling or not, until `actual_c`
+actually reaches the segment target — `ramp_assist_credit_should_accrue()`
+(`profile_executor_internal.h`) now gates on `seg_kind` alone, with no
+dwelling term at all (its signature does not accept one).
+
+**THE HAZARD, and how it is made impossible, not just avoided:** credit
+banked after a dwell's timer has already started must never be allowed to
+shorten THAT SAME dwell — that would let time spent dwelling (while still
+in-band) shrink the very timer measuring it, a circular, self-shortening
+loop, and one that would be very hard to notice in a real firing (the
+dwell just quietly ends early). This is prevented structurally, not by an
+extra runtime check: `s_exec.dwell_credit_applied_s` is captured EXACTLY
+ONCE, at the single tick a dwell is entered (`ramp_assist_dwell_credit_
+spend()`'s return value, `profile_executor.c`'s dwelling-transition code),
+and every later tick's dwell-end threshold (`dwell_min*60u -
+dwell_credit_applied_s`) re-reads only that one frozen float — never a
+zone's live `dwell_credit_s`. Because `ramp_assist_dwell_credit_spend()`
+is called nowhere else for that dwell occurrence, credit accrued after
+entry has no code path back into its own threshold: it is simply carried
+forward in `zone_runtime_t.dwell_credit_s` and can only ever be spent at
+the NEXT dwell entry — a segment boundary later in time, never the one it
+was earned during. `profile_executor.c` now carries an explicit
+CIRCULAR-DWELL HAZARD comment at both the freeze point (right after the
+`ramp_assist_dwell_credit_spend()` call) and the threshold read, so a
+future "simplification" to read live credit cannot land silently.
+**Pinned by `test_dwell_credit_spend_snapshot_is_frozen_against_later_
+accrual`** (`test_profile_executor_prestart.c`): banks credit before dwell
+entry, spends it (capturing the frozen snapshot), then runs several more
+ticks of in-dwell accrual and asserts the already-captured snapshot is
+untouched, that a live-recomputed threshold would have visibly drifted
+from it, and that the correct frozen threshold (560 s exactly, from a 40 s
+spend against a 600 s nominal) stays exactly 560 s throughout. Negative-
+tested: recomputing the test's own "frozen" threshold from the live
+post-accrual credit (i.e. simulating the circular bug directly) produced
+the real failure `the correct, frozen threshold must still be exactly
+560s -- unmoved by every tick of in-dwell accrual this test ran` — quoted
+verbatim, then reverted. A second negative test on the new gate function
+itself (`test_ramp_assist_credit_should_accrue_ignores_dwelling`, mutated
+to `return false` unconditionally) produced `a ZONE_RAMP segment must
+accrue -- this is the only kind dwell credit ever applies to...` — also
+quoted, then reverted. Simulator: `ramp_assist.py`'s `run_ramp_assist`
+mirrors this exactly — the `DwellStep` branch now also accrues into
+`z.credit_s` (same behind-schedule/in-band test, against the dwell's held
+target), and `z.dwell_remaining_s` is still computed once, from a frozen
+`spend`, and only ever decremented by `dt` afterward — never recomputed
+from `z.credit_s`. See §7.6.1 for the re-run cone-scale figures (mostly
+UNCHANGED, and why) and the audit-accumulator fix this extension required
+in `dwell_credit_parity()`.
 Blocker found in survey: `profile_executor.c` (~line 461-465) zeroes
 `segment_elapsed_s` exactly at the ramp→dwell transition, discarding the
 near-target history the credit needs to accrue from. New accumulator state is
@@ -3028,6 +3087,10 @@ and §7.3's dwell credit still need to be built and will read
 
 ### 7.6 Validation before defaulting ON — cone-scale exercise (2026-09-03)
 
+**See §7.6.1 for the credit-gate fix and the further 2026-09-03 accrual
+extension (past the nominal ramp end) — both correct the table below, and
+§7.6.1's own re-run table is the current, load-bearing set of figures.**
+
 Simulator can check: auto-stretch never produces a target above `max_temp_c`
 (hard-refusal path); dwell credit accrual/band arithmetic against known
 cone-table inputs; ramp-lock interaction (assist must not fight the existing
@@ -3281,6 +3344,96 @@ this task's own report). Full re-run:
 `powershell.exe -ExecutionPolicy Bypass -File firmware/KilnFW/App/test/build_host_tests.ps1`
 (21/21 host executables), `build_kilnfw` (OK), and
 `tools/PcTools/.venv/Scripts/python.exe -m pytest tools/PcTools/tests`.
+
+**Correction to the "heavier mass makes the zone fall further behind"
+sentence above:** that phrasing described a SYMPTOM, not the actual gate.
+The precise mechanism is two DIFFERENT thresholds, not one: the ramp step
+formally ends (`s_exec.dwelling` flips true) once a lagging zone is back
+within the WIDE 25 °C ramp-lock band, but credit's own `in_band` test
+requires being within the much NARROWER half-cone-step band. At heavy
+load the zone is still outside that narrower band at the exact tick the
+wide band releases the ramp step, so it starts dwelling before ever
+entering the credit band — two genuinely different thresholds, not one
+gate blocking itself. See §7.3's new "Extended past the nominal ramp end"
+paragraph, which fixes exactly this.
+
+#### 7.6.1a Accrual extended past the nominal ramp end (2026-09-03) — re-run figures
+
+Ran the full 9-scenario cone-scale scan (bisque/cone 6/cone 10 × 1x/2x/4x
+mass) in the FOREGROUND, three scenarios per batch, against the extended
+code (`ramp_assist_credit_should_accrue()` in firmware,
+`ramp_assist.py`'s `DwellStep` branch in the simulator — see §7.3):
+
+| target | mass_mult | credit_s (before §7.3 extension) | credit_s (after) | % of nominal dwell |
+|---|---|---:|---:|---:|
+| bisque (1062.8 °C, 150 °C/hr, 30 min dwell) | 1x | 180.6 s | 180.6 s | 10.0% |
+| bisque | 2x | 0.0 s | **0.0 s** | 0.0% |
+| bisque | 4x | 0.0 s | **0.0 s** | 0.0% |
+| cone 6 (1222.2 °C, 150 °C/hr, 15 min dwell) | 1x | 112.8 s | 112.8 s | 12.5% |
+| cone 6 | 2x | 0.0 s | **0.0 s** | 0.0% |
+| cone 6 | 4x | 0.0 s | **0.0 s** | 0.0% |
+| cone 10 (1285.0 °C, 100 °C/hr, 15 min dwell) | 1x | 218.7 s | 218.7 s | 24.3% |
+| cone 10 | 2x | 218.5 s | 218.5 s | 24.3% |
+| cone 10 | 4x | 0.0 s | **0.0 s** | 0.0% |
+
+**Heavy-load credit is still exactly zero, plainly — the extension does
+not change a single figure in this table, and that is the correct,
+honest result for these specific schedules, not a failure of the fix.**
+Every scenario above is exactly one ramp segment followed by exactly one
+dwell segment (`RampStep` + `DwellStep`, matching the real 3-segment
+firing shape this scan approximates). §7.3's extension lets credit keep
+accruing once dwelling begins, but that credit is only ever SPENT at the
+NEXT dwell entry (`ramp_assist_dwell_credit_spend()` is called exactly
+once per dwell occurrence, at its own start) — by construction, the same
+non-circularity guarantee §7.3 documents. When a dwell is the LAST segment
+in the schedule, as every scenario here is, there is no next dwell
+occurrence left for that in-dwell accrual to ever be spent against, so it
+is carried in `dwell_credit_s`/`z.credit_s` until the run ends and then
+simply discarded — the same safe "unspent credit is lost, never negative"
+direction `ramp_assist_dwell_credit_spend()`'s own doc comment already
+describes for ordinary end-of-run credit. **Confirmed the mechanism itself
+does work when there IS a following dwell to spend against:** a synthetic
+two-`DwellStep` schedule at cone 6/4x mass (`DwellStep(15.0),
+DwellStep(15.0)` back to back at the same target) banks ~0.2 s of credit
+during the first dwell occurrence and spends it against the second —
+small, because this synthetic case starts the second dwell already close
+to on-target, but nonzero, proving the extension is live and non-vacuous.
+A real multi-segment profile (ramp→dwell→ramp→dwell, the shape §7's
+worked examples actually use) is the case this extension is FOR — this
+scan's single-ramp-into-terminal-dwell shape happens not to exercise it,
+which is a property of the test schedule, not of the fix.
+
+**A real bug this extension exposed and fixed in `dwell_credit_parity()`
+(simulator only, no firmware equivalent — the firmware audit path does
+not have this accumulator):** `credit_audit_pct`'s independent audit
+accumulator (`z.credit_reference_heat_s`) used to accrue for the WHOLE
+run, never reset, while `credit_applied_s` only ever reflects credit that
+was actually spent. Before the extension the two were always equal for a
+terminal single-dwell schedule (all accrual happened during the ramp, all
+of it got spent at the one dwell). After the extension, `credit_reference_
+heat_s` also grows during a terminal dwell's own in-dwell accrual — heat
+work that (per the paragraph above) legitimately never gets spent — so
+the two diverged for a reason that has nothing to do with an accrual-
+formula defect, and `test_credit_audit_pct_is_zero_at_cone_scale` failed
+with `75.4961743744046 not less than 0.5` at bisque 1x. Fixed by adding
+`_ZoneState.credit_reference_applied_s`, reset in lockstep with
+`credit_s` at every dwell entry and accumulated the same way
+`credit_applied_s` is — `credit_audit_pct` now compares `credit_applied_s`
+against this "applied" variant instead of the raw whole-run accumulator.
+Re-run: all 7 `test_ramp_assist_cone_scale.py` tests pass, all 21
+`test_ramp_assist.py` tests pass (one of which —
+`test_credit_audit_pct_discriminates_scale_errors` — asserts an exact
+source-text occurrence count of the real accrual line and needed updating
+from 2 to 3, since the extension added a second, textually identical real
+accrual statement in the `DwellStep` branch), all 17
+`test_ramp_assist_http_client.py` tests pass.
+
+Full re-run for this extension:
+`powershell.exe -ExecutionPolicy Bypass -File firmware/KilnFW/App/test/build_host_tests.ps1`
+(21/21 host executables, including the two new tests above), `build_kilnfw`
+(OK, 26.5s), and `tools/PcTools/.venv/Scripts/python.exe -m pytest
+tools/PcTools/tests/test_ramp_assist.py tools/PcTools/tests/test_ramp_assist_cone_scale.py tools/PcTools/tests/test_ramp_assist_http_client.py`
+(45/45 passed).
 
 ## 2026-09-03: ramp-lock hot-start stall (confirmed executor defect, fixed)
 

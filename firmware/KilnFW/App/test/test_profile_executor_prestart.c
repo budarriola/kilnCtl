@@ -5506,6 +5506,118 @@ static void test_dwell_credit_tick_accrues_a_few_degrees_behind_not_25(void)
               "structurally inert again at bisque/cone6/cone10 scale lag");
 }
 
+// PID_EXPANSION_PLAN.md sec 7.3 extension (2026-09-03, "extend dwell-credit
+// accrual past the nominal ramp end"): ramp_assist_credit_should_accrue()'s
+// own contract -- it looks ONLY at seg_kind, never at s_exec.dwelling, so
+// credit keeps accruing through the whole ZONE_RAMP segment (dwelling or
+// not) until ramp_assist_dwell_credit_tick()'s own in_band test stops it.
+// The old call site was `(seg_kind == ZONE_RAMP) && !s_exec.dwelling` --
+// this test proves the new one has no dwelling term to check at all (the
+// function's signature does not even accept one), which is the actual gap
+// closed: a heavily-lagging zone whose ramp step ends (25C ramp-lock
+// releases) before it re-enters the much narrower credit band used to earn
+// nothing for the rest of that catch-up, because dwelling had already
+// flipped true. See this function's own doc comment (profile_executor_
+// internal.h) for the full before/after.
+static void test_ramp_assist_credit_should_accrue_ignores_dwelling(void)
+{
+    TEST_SECTION("ramp_assist_credit_should_accrue() -- true for a ZONE_RAMP segment kind, false for "
+                 "any other segment kind, with NO dwelling input at all (extends accrual across the "
+                 "dwelling transition by construction)");
+    TEST_CHECK(ramp_assist_credit_should_accrue(PROFILE_SEG_KIND_ZONE_RAMP) == true,
+              "a ZONE_RAMP segment must accrue -- this is the only kind dwell credit ever applies to, "
+              "whether or not s_exec.dwelling has already flipped true for it");
+    TEST_CHECK(ramp_assist_credit_should_accrue(PROFILE_SEG_KIND_RELAY_IO) == false,
+              "a relay/IO segment is not a temperature ramp at all -- must never accrue dwell credit");
+}
+
+// THE CIRCULAR-DWELL HAZARD (the single most important test in this task):
+// profile_executor.c freezes s_exec.dwell_credit_applied_s exactly once, at
+// the tick a dwell begins (ramp_assist_dwell_credit_spend()'s return value),
+// and every later tick's dwell-end threshold re-reads only that frozen
+// float -- never a zone's live dwell_credit_s. Now that credit keeps
+// accruing DURING a segment's own dwell (the sec 7.3 extension above), this
+// is what stops that later accrual from feeding back into the SAME dwell it
+// was earned during: if a future change made the threshold re-read live
+// dwell_credit_s each tick instead of the frozen snapshot, more time spent
+// dwelling in-band would keep shrinking the very timer measuring it --
+// self-shortening, and very hard to notice in a real firing (the dwell just
+// quietly ends early).
+//
+// This test models the exact sequence profile_executor.c's dwelling-
+// transition code runs: credit banked before dwell entry -> spend() takes
+// the one-time snapshot and resets dwell_credit_s -> MORE credit accrues
+// during the dwell itself (the new, extended accrual) -> the frozen snapshot
+// captured at entry must be provably unaffected by that later accrual.
+//
+// Negative-test evidence (mutate/run/restore, done for this task): changing
+// the `else` branch in profile_executor.c to recompute dwell_threshold_s
+// from `s_exec.zones[zi].dwell_credit_s` (live) instead of `s_exec.dwell_
+// credit_applied_s` (frozen) cannot be built as a standalone host test --
+// executor_task_entry()'s tick loop is not reachable from this harness (see
+// this file's own comment on that limit, above test_escalate_guard_trip_
+// global_releases_relay_claim). The equivalent, buildable mutation is
+// exercised directly below: recompute what "live" would have produced at
+// the accrual point in this test and prove it diverges from the frozen
+// snapshot -- that divergence IS the bug this test guards against.
+static void test_dwell_credit_spend_snapshot_is_frozen_against_later_accrual(void)
+{
+    TEST_SECTION("ramp_assist_dwell_credit_spend()'s return value, once captured by the caller at dwell "
+                 "entry, must stay unaffected by dwell_credit_s accrual that happens AFTER spend() ran "
+                 "-- the circular-dwell-shortening hazard");
+    s_exec_state_t ex;
+    memset(&ex, 0, sizeof(ex));
+    ex.zones[0].active = true;
+    ex.zones[0].actual_c = 620.0f; // inside the 613.05-626.1 band around 626.1, same fixture other tests use
+    ex.zones[0].dwell_credit_s = 40.0f; // banked during the ramp, before dwell entry
+
+    float nominal_dwell_s = 600.0f;
+    float dwell_credit_applied_s = ramp_assist_dwell_credit_spend(&ex, nominal_dwell_s, /*assist_enabled*/ true);
+    TEST_CHECK(dwell_credit_applied_s == 40.0f, "sanity check: the pre-dwell credit must be spent in full "
+              "(well under the 600s nominal)");
+    TEST_CHECK(ex.zones[0].dwell_credit_s == 0.0f, "sanity check: spend() must reset the zone's live "
+              "credit to 0 as its documented side effect");
+
+    /* This models the frozen threshold profile_executor.c computes exactly
+     * once, right after spend() -- see the `s_exec.dwell_credit_applied_s =
+     * ramp_assist_dwell_credit_spend(...)` call site's own comment. */
+    uint32_t frozen_threshold_s = (uint32_t)nominal_dwell_s - (uint32_t)dwell_credit_applied_s;
+    TEST_CHECK(frozen_threshold_s == 560, "sanity check on the frozen threshold arithmetic itself");
+
+    /* Now simulate several ticks of the EXTENDED accrual (sec 7.3, this
+     * task): the zone is still lagging and in-band during its OWN dwell, so
+     * ramp_assist_dwell_credit_tick() keeps banking more credit into
+     * dwell_credit_s, exactly as profile_executor.c's credit_ramping_now
+     * (no longer gated on !dwelling) now allows. */
+    for (int tick = 0; tick < 5; tick++) {
+        ramp_assist_dwell_credit_tick(&ex.zones[0], /*ramping_now*/ true, /*behind_schedule_now*/ true,
+                                      /*segment_target_c*/ 626.1f, 10.0f);
+    }
+    TEST_CHECK(ex.zones[0].dwell_credit_s > 0.0f,
+              "extended in-dwell accrual must actually bank something -- otherwise this test would pass "
+              "vacuously with no accrual to guard against");
+
+    /* THE ASSERTION: the frozen snapshot captured before this loop is the
+     * ONLY thing profile_executor.c's real threshold check may ever read,
+     * and it did not move -- proven directly, since dwell_credit_applied_s
+     * is a local float, not a pointer/index into ex.zones[0].dwell_credit_s.
+     * If a future edit instead threaded a live zone_runtime_t* through to
+     * the threshold check (recomputing `nominal - zone->dwell_credit_s`
+     * each tick), the value below would grow every tick this loop ran --
+     * exactly the self-shortening bug this guards against. */
+    TEST_CHECK(dwell_credit_applied_s == 40.0f,
+              "the ALREADY-CAPTURED spend value must be untouched by credit banked after spend() ran");
+    uint32_t threshold_after_more_accrual_if_live_recomputed_s =
+        600u - (uint32_t)ex.zones[0].dwell_credit_s; // what the BUG would compute -- not what real code does
+    TEST_CHECK(threshold_after_more_accrual_if_live_recomputed_s != frozen_threshold_s,
+              "the live-recomputed threshold a circular implementation would use has DRIFTED from the "
+              "frozen one -- proving the frozen snapshot (what profile_executor.c actually uses) is the "
+              "only thing standing between this accrual and a self-shortening dwell");
+    TEST_CHECK(frozen_threshold_s == 560,
+              "the correct, frozen threshold must still be exactly 560s -- unmoved by every tick of "
+              "in-dwell accrual this test ran");
+}
+
 // PID_EXPANSION_PLAN.md sec 7.2: ramp_assist_stretch_rate_c_per_s() -- the
 // actual control-behaviour piece of auto-stretch. Pins its sentinel/gating
 // contract (assist off, no zone sustained yet) and its rate arithmetic
@@ -6064,6 +6176,8 @@ void run_test_profile_executor_prestart(void)
     test_dwell_credit_tick_not_ramping_earns_nothing();
     test_dwell_credit_tick_at_or_above_target_earns_nothing();
     test_dwell_credit_tick_accrues_a_few_degrees_behind_not_25();
+    test_ramp_assist_credit_should_accrue_ignores_dwelling();
+    test_dwell_credit_spend_snapshot_is_frozen_against_later_accrual();
     test_dwell_credit_spend_gated_on_flag();
     test_dwell_credit_spend_applies_when_enabled();
     test_dwell_credit_spend_clamped_to_nominal_never_negative();

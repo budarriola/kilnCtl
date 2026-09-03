@@ -439,11 +439,16 @@ class ScaleSweepDiscriminatesCreditErrorsTests(unittest.TestCase):
         src_path = os.path.join(os.path.dirname(ra.__file__), "ramp_assist.py")
         src = open(src_path, encoding="utf-8").read()
         target = "z.credit_s += w * dt"
-        # Appears twice: once in the real accrual line, once inside a
-        # docstring discussing it. Mutating both is harmless (the
-        # docstring occurrence is not executable); what matters is that
-        # the REAL accrual line is the one under test.
-        assert src.count(target) == 2, src.count(target)
+        # Appears three times as of the sec 7.3 extension (2026-09-03,
+        # "extend dwell-credit accrual past the nominal ramp end"): the
+        # original real accrual line inside the RampStep branch, a SECOND
+        # real accrual line (identical text) inside the DwellStep branch
+        # that lets credit keep banking after the nominal ramp ends, and
+        # one docstring occurrence discussing it. Mutating all three is
+        # harmless -- the docstring occurrence is not executable, and
+        # scaling BOTH real accrual lines by the same factor is exactly
+        # what this sweep wants (a regression could land in either one).
+        assert src.count(target) == 3, src.count(target)
         mutated = src.replace(target, f"z.credit_s += ({scale}) * w * dt")
         mod_name = f"kilnctrl._scaled_ramp_assist_test_{str(scale).replace('.', '_')}"
         spec = importlib.util.spec_from_loader(mod_name, loader=None)

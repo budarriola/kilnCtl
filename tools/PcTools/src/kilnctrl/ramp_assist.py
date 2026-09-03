@@ -60,6 +60,27 @@ WHAT THIS MODELS, and how it maps onto the plan:
   (a candling hold) or chain two dwells back to back, and neither of those
   is reached via a ramp->dwell transition.
 
+  Extended past the nominal ramp end (2026-09-03, "extend dwell-credit
+  accrual past the nominal ramp end"): the RampStep's own freeze-and-resume
+  (§7.2 above) releases once a lagging zone is back within the WIDE
+  ``lag_band_c`` (25.0 C) -- but the credit band above is much NARROWER
+  (half a cone step). Under heavy thermal mass a zone routinely un-locks
+  (ending the ramp step, ``z.seg_idx`` moving on to the following
+  ``DwellStep``) while still outside the credit band, and only crosses into
+  it after the dwell has already begun -- gating credit on "still inside a
+  ``RampStep``" alone made that catch-up window uncreditable (measured:
+  exactly 0.0 s of credit at 2x/4x mass for bisque/cone 6, 4x for cone 10).
+  Credit now ALSO accrues on ``DwellStep`` ticks, using the same behind-
+  schedule/in-band test against ``seg_start_c[zi]`` (the dwell's own held
+  target, i.e. the just-finished ramp's ``step.target_c``) -- see the
+  ``DwellStep`` branch below for the accrual itself and the hazard note
+  guarding it. THE HAZARD: credit banked during a dwell occurrence must
+  never shorten THAT SAME occurrence -- ``z.dwell_remaining_s`` is computed
+  ONCE, from a frozen ``spend``, on the occurrence's own first tick, and is
+  only ever decremented by ``dt`` afterward, never recomputed from
+  ``z.credit_s``. Later accrual is only ever spent at the NEXT ``DwellStep``
+  occurrence's own first tick.
+
   Band-width note (DEFECT 2, RESOLVED): ``cone_table.band_bottom_c`` used
   to anchor the credit band's half-width on the distance from the segment
   target down to the nearest tabulated cone BELOW it, not on the local
@@ -210,7 +231,18 @@ class _ZoneState:
     credit_reference_heat_s: float = 0.0   # independent audit accumulator for the same accrual
                                             # gate/formula, tracked on its OWN statement so a
                                             # regression in the credit_s accrual line specifically
-                                            # does not also corrupt this one -- see credit_audit_pct
+                                            # does not also corrupt this one -- see credit_audit_pct.
+                                            # MUST be reset in lockstep with credit_s (2026-09-03,
+                                            # sec 7.3 extension) -- see credit_reference_applied_s.
+    credit_reference_applied_s: float = 0.0  # running total of credit_reference_heat_s actually
+                                              # "spent" (mirrors credit_applied_s's own accumulation,
+                                              # from the independent accumulator) -- see the
+                                              # credit_audit_pct note below for why this, not the
+                                              # raw whole-run credit_reference_heat_s, is what
+                                              # dwell_credit_parity() must compare credit_applied_s
+                                              # against once accrual can outlive a dwell it can
+                                              # never be spent against (a terminal dwell with no
+                                              # later dwell occurrence in the schedule).
     heat_work_s: float = 0.0        # Sigma weight*dt over the whole run (see run docstring)
     dwell_heat_work_s: float = 0.0  # Sigma weight*dt over DwellStep ticks ONLY (see
                                      # dwell_credit_parity -- isolates the dwell-window
@@ -516,6 +548,21 @@ def run_ramp_assist(schedule: Sequence[ScheduleStep], max_temp_c: float,
                     z.dwell_remaining_s = nominal_s - spend
                     z.credit_applied_s += spend
                     z.credit_s = 0.0
+                    # Mirror the above in lockstep, from the INDEPENDENT
+                    # audit accumulator, so credit_audit_pct keeps comparing
+                    # like with like now that accrual can outlive a dwell it
+                    # is never spent against (sec 7.3 extension, 2026-09-03):
+                    # credit_reference_heat_s must be reset here too, or a
+                    # terminal dwell's own in-dwell accrual (which credit_s
+                    # legitimately never spends, because there is no LATER
+                    # dwell occurrence left in the schedule to spend it
+                    # against) would sit in credit_reference_heat_s forever,
+                    # permanently outgrowing credit_applied_s for a reason
+                    # that has nothing to do with an accrual-formula defect
+                    # -- exactly the false positive this block prevents.
+                    spend_ref = min(z.credit_reference_heat_s, nominal_s) if apply_dwell_credit else 0.0
+                    z.credit_reference_applied_s += spend_ref
+                    z.credit_reference_heat_s = 0.0
                     # DEFECT 1 fix: open this dwell's fixed-length window,
                     # starting at the dwell's own entry (NOT band-entry
                     # during the preceding ramp tail -- a heavily-lagging
@@ -531,6 +578,59 @@ def run_ramp_assist(schedule: Sequence[ScheduleStep], max_temp_c: float,
                     z.window_pending_heat_s = 0.0
                 z.lagging = False
                 z.commanded_c = seg_start_c[zi]
+
+                # PID_EXPANSION_PLAN.md sec 7.3 extension (2026-09-03,
+                # "extend dwell-credit accrual past the nominal ramp end"):
+                # mirrors firmware's ramp_assist_credit_should_accrue() --
+                # keep banking credit for AS LONG AS actual_c has not yet
+                # reached this dwell's own held target, even after the
+                # RampStep formally ended (z.lagging released at the WIDE
+                # lag_band_c=25C band above) and z.seg_idx moved on to this
+                # DwellStep. Same gap as firmware: the ramp step's own
+                # freeze-and-resume releases at 25C, but credit's in_band
+                # test requires within half a cone step (well under 25C for
+                # every shipped Orton target) -- under heavy thermal mass a
+                # zone routinely un-locks (ending the ramp) while still
+                # outside the credit band, and only crosses into it after
+                # this dwell has already begun. seg_start_c[zi] here is the
+                # dwell's held target -- the SAME step.target_c the
+                # preceding RampStep branch above used, just read from the
+                # zone's own commanded temperature now that the step object
+                # itself has moved past the ramp.
+                #
+                # THE HAZARD (do not remove without re-reading): credit
+                # banked HERE, during THIS dwell occurrence, must never
+                # shorten THIS SAME occurrence -- z.dwell_remaining_s was
+                # already computed once, above, from a frozen `spend` at
+                # this occurrence's own first tick, and is only ever
+                # decremented by dt from here on, never recomputed from
+                # z.credit_s. Any further accrual this loop adds to
+                # z.credit_s is carried forward and can only ever be spent
+                # at the NEXT DwellStep occurrence's own first tick (the
+                # `if z.dwell_remaining_s is None:` block above) -- a
+                # structurally later point in time, so it cannot reach back
+                # and shorten the dwell it was earned during. See
+                # test_dwell_credit_accrual_during_dwell_does_not_shorten_
+                # that_dwell in test_ramp_assist_cone_scale.py for the
+                # pinned proof.
+                behind_schedule = actual_c < seg_start_c[zi]
+                try:
+                    band_bottom = ct.band_bottom_c(seg_start_c[zi])
+                    in_band = band_bottom <= actual_c < seg_start_c[zi]
+                except ct.ConeTableError:
+                    in_band = False  # target outside the cone table's range -- no credit, no crash
+                if behind_schedule and in_band:
+                    try:
+                        w = ct.heat_work_weight(actual_c, seg_start_c[zi])
+                    except ct.ConeTableError:
+                        w = 0.0
+                    z.credit_s += w * dt
+                    try:
+                        w_ref = ct.heat_work_weight(actual_c, seg_start_c[zi])
+                    except ct.ConeTableError:
+                        w_ref = 0.0
+                    z.credit_reference_heat_s += w_ref * dt
+
                 z.dwell_remaining_s -= dt
                 if z.dwell_remaining_s <= 0.0:
                     z.seg_idx += 1
@@ -613,6 +713,7 @@ def run_ramp_assist(schedule: Sequence[ScheduleStep], max_temp_c: float,
         stretched_s=[z.stretched_s for z in zones],
         credit_applied_s=[z.credit_applied_s for z in zones],
         credit_reference_heat_s=[z.credit_reference_heat_s for z in zones],
+        credit_reference_applied_s=[z.credit_reference_applied_s for z in zones],
         heat_work_s=[z.heat_work_s for z in zones],
         dwell_heat_work_s=[z.dwell_heat_work_s for z in zones],
         window_actual_heat_s=[z.window_actual_total_s for z in zones],
@@ -808,7 +909,16 @@ def dwell_credit_parity(schedule: Sequence[ScheduleStep], max_temp_c: float, **k
             100.0 * (window_actual_s - window_ideal_s) / window_ideal_s
             if window_ideal_s > 0 else float('nan'))
 
-        reference_heat_s = assisted['credit_reference_heat_s'][zi]
+        # credit_reference_applied_s (NOT the raw whole-run credit_reference_
+        # heat_s) -- see _ZoneState.credit_reference_applied_s's own doc
+        # comment: since the sec 7.3 extension (2026-09-03) let accrual
+        # outlive a dwell it may never be spent against (a terminal dwell
+        # with no later dwell occurrence in the schedule), the raw
+        # accumulator legitimately grows past what credit_applied_s could
+        # ever reflect, for a reason that has nothing to do with an
+        # accrual-formula defect. The "applied" variant is reset in lockstep
+        # with credit_s, so it stays the correct like-for-like comparison.
+        reference_heat_s = assisted['credit_reference_applied_s'][zi]
         credit_audit_pct = (
             100.0 * (credit_s - reference_heat_s) / reference_heat_s
             if reference_heat_s > 0 else float('nan'))

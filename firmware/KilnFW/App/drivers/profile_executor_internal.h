@@ -761,6 +761,46 @@ float ramp_assist_stretch_rate_c_per_s(s_exec_state_t *ex, uint8_t lagging_mask,
 void ramp_assist_dwell_credit_tick(zone_runtime_t *z, bool ramping_now, bool behind_schedule_now,
                                    float segment_target_c, float dt_s);
 
+/* PID_EXPANSION_PLAN.md sec 7.3 extension (2026-09-03, "extend dwell-credit
+ * accrual past the nominal ramp end"): the boolean the caller passes to
+ * ramp_assist_dwell_credit_tick() as `ramping_now` above. Deliberately takes
+ * ONLY `seg_kind` -- no dwelling flag -- because the owner's decision was to
+ * keep banking credit for as long as the CURRENT segment is a ZONE_RAMP,
+ * whether or not the shared schedule has already flipped s_exec.dwelling to
+ * true for it. The gap this closes: the ramp step ends (dwelling begins) the
+ * moment a lagging zone is back within the WIDE 25C ramp-lock band
+ * (EXEC_RAMP_LOCK_BAND_C), but credit itself only accrues within the much
+ * NARROWER half-cone-step in_band test inside ramp_assist_dwell_credit_tick()
+ * -- so under heavy thermal mass a zone routinely un-locks (ending the ramp)
+ * while still outside the credit band, and only crosses into it after
+ * dwelling has already started. Gating credit on `!dwelling` made that
+ * catch-up window uncreditable; measured result was exactly 0.0s of credit
+ * at 2x/4x mass for bisque/cone 6 and at 4x for cone 10. Once actual_c
+ * reaches segment_target_c, ramp_assist_dwell_credit_tick()'s own in_band
+ * test (`actual_c < segment_target_c`) stops accrual on its own -- no
+ * dwelling check is needed here to bound it.
+ *
+ * THE HAZARD (do not remove this gate without re-reading it): credit banked
+ * while s_exec.dwelling is already true for THIS segment must never be
+ * allowed to shorten THIS SAME dwell -- that would let time spent dwelling
+ * (while still in-band) shrink the very timer it is being measured against,
+ * a circular, self-shortening loop. This function does not create that risk
+ * by itself (it only decides whether to accrue, never what a dwell's
+ * threshold is), but the caller's invariant it depends on is: dwell_credit_
+ * applied_s is captured EXACTLY ONCE, at the tick a dwell is entered (via
+ * ramp_assist_dwell_credit_spend()'s return value), and every later tick's
+ * threshold check reuses that same frozen float -- never a live re-read of
+ * any zone's dwell_credit_s. See profile_executor.c's dwelling-transition
+ * comment (the `s_exec.dwell_credit_applied_s = ramp_assist_dwell_credit_
+ * spend(...)` call) and test_dwell_credit_spend_snapshot_is_frozen_against_
+ * later_accrual (test_profile_executor_prestart.c) for the pinned proof:
+ * credit accrued after spend() runs is visible in dwell_credit_s but the
+ * ALREADY-RETURNED spend value never changes. */
+static inline bool ramp_assist_credit_should_accrue(profile_seg_kind_t seg_kind)
+{
+    return seg_kind == PROFILE_SEG_KIND_ZONE_RAMP;
+}
+
 /* Computes the seconds to actually shorten a fresh dwell's timer by, given
  * every active/non-faulted zone's currently-banked dwell_credit_s, and
  * resets EVERY active zone's dwell_credit_s to
