@@ -1114,6 +1114,94 @@ multi-load firing, which has never been run.** See
 `tools/PcTools/src/kilnctrl/load_mass_sweep.py` (additive module, does not
 touch `plant_sim.py`'s core) and `tools/PcTools/tests/test_load_mass_sweep.py`.
 
+### 3.9 Tuning-method recommendation campaign — simulator-only 2026-09-02
+
+Owner request: try the different autotune methods this firmware implements,
+tuned on an EMPTY kiln (the only way `autotune_engine.c` ever runs one), then
+test-fire to different peak temperatures at different loads and turn the
+result into a recommendation the web GUI can show. The interesting question
+isn't "which method tunes best at the condition it was tuned at" — it's
+whether an empty-kiln gain set holds up once the kiln is loaded.
+
+**Methods simulated, mirroring `pid_autotune.c` exactly (no invented
+conversions):** SIMC and Cohen-Coon (FOPDT step-test path,
+`pid_autotune_tune_from_fopdt`) and Ziegler-Nichols and Tyreus-Luyben
+(relay-feedback path, `pid_autotune_tune_from_relay`). "step" itself is the
+test the first two are fitted from, not a fifth rule. The FOPDT fit uses the
+classic two-point (28.3%/63.2%) crossing method but not the firmware's
+iterative end-of-trace asymptote correction — a documented simplification
+(the campaign's step tests run to full settling, where that correction is a
+near no-op by the firmware code's own comment); the tuning-rule arithmetic
+consuming the fit is copied verbatim.
+
+**Plant + load model:** tuning and evaluation both reuse existing objects
+rather than inventing a new one. The one bench-scale peak (60 C, at or below
+`EXTRAPOLATION_BOUNDARY_C`) tunes and evaluates against the real bench-rig
+identification (`FOPDTPlant`, `K_full`/`tau`/`L`); the three firing peaks
+(bisque 1000 C, cone 6 1222 C, cone 10 1285 C) tune and evaluate against the
+ASSUMED full-kiln model (`PhysicalKilnPlant`). The load axis reuses
+`load_mass_sweep.py` (landed before this campaign was written) unmodified:
+`mass_mult` 1.0x/2.0x/4.0x, coupling fixed at its identified value. Evaluation
+runs pure PID (no feedforward) so the comparison isolates each method's own
+gains from the shared `ff_hold`/`ff_climb` formula. See
+`tools/PcTools/src/kilnctrl/tuning_campaign.py`.
+
+**Scoring, and a mistake caught before it shipped:** the first pass scored
+each method by worst-case *dwell overshoot* across loads. That metric is
+clamped at 0 on the undershoot side, so a method whose gains were too weak to
+ever approach the setpoint (SIMC at firing temperatures — see below) reported
+*zero* overshoot and ranked as "best," backwards from the truth. Fixed by
+scoring worst-case **absolute steady-state offset** instead, and by adding an
+explicit `unreachable` flag (>20 C chronic undershoot at dwell end) that
+excludes a cell from the ranking rather than letting it participate as a
+false zero.
+
+**Results.** At the bench-scale peak (measured regime, all four methods
+usable), Cohen-Coon and Ziegler-Nichols are within the sim's 2.1 C
+discrimination threshold of each other — **indistinguishable**, pick either.
+At all three firing peaks: SIMC's gains (tuned at the empty-kiln
+identification's own long lambda) were too weak to track this campaign's ramp
+rate even at the *identified* (1x) load — chronic hundreds-of-degrees
+undershoot on every evaluated load, `unreachable` at all three and therefore
+excluded from ranking entirely. Cohen-Coon overshoots badly at 1x/2x
+(guard-trip-worthy, ~35–38 C peak) — usable but clearly worse than the other
+two. Ziegler-Nichols and Tyreus-Luyben both track well at 1x/2x (steady
+offset under 2 C, no guard trips, no oscillation) and are within the 2.1 C
+discrimination threshold of *each other* — **indistinguishable**, pick
+either — at all three firing peaks. All four methods fail the same way at
+4x load (chronic undershoot, duty saturated): a shared ramp-rate-vs-thermal-
+mass ceiling this campaign's ramp schedule hits regardless of tuning method
+at the heaviest evaluated load, excluded from the ranking score (see the
+scoring fix above) rather than left to swamp the comparison between methods
+that both hit it equally. Read the full per-(method, peak, load) table by
+re-running `python -m kilnctrl.tuning_campaign` before trusting any specific
+number over what's in this paragraph.
+
+**Honesty gate.** Every recommendation row carries `confidence`:
+`measured` only below `EXTRAPOLATION_BOUNDARY_C` (80 C) — the sim's own
+z0/z1/z2 held-out RMS is 1.05/0.61/0.67 C, discrimination thresholds
+2.1/1.2/1.3 C — `extrapolated` above it (a mechanism comparison, not a
+calibrated prediction), and `indistinguishable` whenever the margin between
+the top two methods is under the threshold, which overrides both other
+labels. **Every firing-temperature (>80 C) row in the current artifact is
+`extrapolated`** — none is close enough to call `indistinguishable` — treat
+the SIMC/Cohen-Coon/Tyreus-Luyben/Ziegler-Nichols ranking at bisque/cone6/
+cone10 as which failure mode a method has, not a calibrated prediction of its
+margin.
+
+**Artifact:** `tools/PcTools/config_presets/tuning_recommendations.json`
+(schema documented in the generator's docstring — flat, no nested objects in
+any recommendation row, so it stays embeddable in firmware flash), validated
+by `tools/PcTools/tests/test_tuning_recommendations.py`. That test's honesty
+gate (`test_no_measured_claim_above_extrapolation_boundary`) was mutation
+tested: forcing the cone-10 row to `confidence: "measured"` fails it with
+`AssertionError: 'measured' == 'measured' : peak_temp_c_max=1285.0 exceeds
+the 80.0 C extrapolation boundary but claims 'measured'`. Regenerate with
+`python -m kilnctrl.tuning_campaign` from `tools/PcTools/src` on `PYTHONPATH`
+(takes several minutes — the empty-kiln step/relay identification runs alone
+simulate tens of thousands of seconds of plant time to reach genuine
+steady state).
+
 ---
 
 ## 4. Rejected approaches — do not re-propose without new evidence
