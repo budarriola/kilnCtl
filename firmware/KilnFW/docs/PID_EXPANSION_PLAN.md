@@ -2089,11 +2089,12 @@ built, run, real failure text captured, then reverted; reverted state
 re-verified clean (`grep MUTATION` empty, all 21 host-test executables
 green) before committing.
 
-**Not done in this pass:** sec 7.4's warning surfaces (still NOT STARTED,
-below) do not yet distinguish "strict hold" from "stretched" for an
-operator — both currently only show up as `ramp_lock_held`/`lag_sustained`/
-`stretch_by_segment_s`. Sec 7.6's real-firing validation of this specific
-control behaviour (as opposed to the credit) has not been run.
+**Not done in this pass:** sec 7.4's warning surfaces are now built (see
+§7.4 below, updated 2026-09-03) — the web banner and LCD notice do
+distinguish strict hold from stretched, using the same
+`ramp_lock_held`/`lag_sustained`/`stretch_by_segment_s` fields this
+paragraph used to call unsurfaced. Sec 7.6's real-firing validation of this
+specific control behaviour (as opposed to the credit) has not been run.
 
 ### 7.3 Dwell credit — FIRMWARE LANDED (2026-09-03, see §7.3.3)
 
@@ -2706,15 +2707,61 @@ pre-review suite's count, six new tests added, one deleted). `build_kilnfw`
 (ESP32-S3 target, via the `kilnctrl` MCP server) verified against these
 changes too — see this task's own report for the exact build output.
 
-### 7.4 Warning surfaces — NOT STARTED
+### 7.4 Warning surfaces — DONE (verified 2026-09-03)
 
-All three the owner asked for, all while ramp-lock is holding:
-- Web banner (dashboard_http.c already reports `ramp_assist_enabled`,
-  ~line 442/930 — the lagging/stretch state needs the same treatment).
-- Event-log entry with the actual numbers (target, actual, lag duration) so
-  it can be analysed after the firing, not just observed live.
-- LCD. Constraint: KilnFW LCD pages are 320x480 LVGL and must fit without
-  scrolling — split into a separate page rather than scroll an existing one.
+All three the owner asked for, all while ramp-lock is holding, are built and
+committed:
+- Web banner: `main_page.html`'s "Kiln is falling behind schedule" banner
+  (commit `6c284c5`, wired to the richer per-zone fields in `1e03448`) reads
+  `zones[].ramp_lag_sustained`/`ramp_lag_held_s`/`ramp_lag_commanded_rate_c_
+  per_hr`/`ramp_lag_achieved_rate_c_per_hr` and, when `ramp_assist_enabled`,
+  appends the run-level `ramp_stretch_segment_s`/`ramp_stretch_total_s`
+  sentence ("This segment has been stretched Xm so far (Ym total this
+  run)"). Debounced: the rich per-zone path shows the instant firmware's own
+  30s-sustained gate (`EXEC_SUSTAINED_LAG_S`) flips true, undebounced again
+  client-side; only the fallback path (an older board with no rich fields)
+  keeps a 6s client debounce. `fetchProfileFeas()`'s fetch has a real
+  `.catch()` that degrades to "no icon, no gate" rather than an eternal
+  loading state.
+- Event-log entry: `telemetry_log.c`'s per-zone edge tracking emits
+  `EVENT_CODE_FIRING_RAMP_LAG_STARTED`/`_CLEARED` (event_log.h) with the
+  actual commanded/achieved rate and held-duration numbers
+  (`telemetry_format.c`'s `telemetry_ramp_lag_event_for_transition()`),
+  independent of `ramp_assist_enabled`. `EVENT_CODE_FIRING_DONE` also
+  carries the run's total dwell-credit-applied seconds in its note field
+  when nonzero (sec 7.3's DEFECT 4 fix).
+- LCD: `ui_page_home.c`'s `s_lag_notice` strip (commit `bd7e9c8`), worded as
+  informational rather than alert-styled ("normal ramp-lock behaviour", not
+  "SAFETY TRIP"), single sustained zone shows the same commanded/achieved/
+  held numbers as the web banner, multiple zones falls back to a name list.
+  Fits the 320x480 no-scroll constraint via `LV_LABEL_LONG_DOT` truncation
+  rather than wrap/scroll — no separate page was needed since this is one
+  short strip on the existing home page, not new content that pushed
+  anything else off it.
+
+Selection-time and start-time surfaces (owner: "a profile known to be
+unachievable should also warn at SELECTION time... and again with a popup
+when the firing is STARTED") are also built, reusing `profile_feasibility.c`'s
+existing per-segment/per-zone verdict:
+- Selection-time clickable icon: `main_page.html`'s `#profileFeasIcon` next
+  to the profile picker (⚠ for a real too-fast/unreachable verdict, ⓘ for
+  unassessed/untuned) opens `openFeasInfoPopup()` on click, and
+  `profiles_page.html`'s catalogue cards carry the same `fz-too_fast`/
+  `fz-unreachable` badge plus an expandable `<details>` caption
+  (`FZ_WHY`) with the explanation text.
+- Start-time popup: `proceedToStart()`'s call site is gated by
+  `openFeasStartPopup()`, shown instead of the plain `confirm()` whenever
+  the selected profile has a non-OK verdict — "Start ... anyway?" with the
+  same explanation body, Cancel leaves the POST uncalled.
+
+Verified this pass: all 21 KilnFW host-test executables build and pass
+(`build_host_tests.ps1`, including `test_ui_page_home_graph.c`'s
+`lag_notice_active`/debounce tests and `test_lag_banner.js`'s 19 web-banner
+cases), `build_kilnfw` succeeds via the `kilnctrl` MCP server, and a live
+mutation of `ui_page_home_graph.c`'s `ui_page_home_lag_notice_active()`
+(forcing the rich-data branch to always return false) was caught immediately
+by `test_ui_page_home_graph.c` ("FAIL ... rich data, zone sustained, tick 0:
+shows immediately (no client debounce)"), then reverted.
 
 ### 7.5 `ramp_assist_enabled` setting — DONE (control surface only; §7.2/7.3 behaviour still not built)
 
