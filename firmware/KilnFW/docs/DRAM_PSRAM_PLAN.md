@@ -9,6 +9,114 @@ truth, not the checkboxes.** Nothing below is marked done until a commit is
 named. Every number is either measured and attributed, or explicitly labelled
 as an estimate.
 
+**Update 2026-09-03 (sixth pass) — first post-reflash measurements, taken
+mid-firing (read-only, A/B kiln campaign running; no write/reboot performed).**
+Board reflashed 07:36:20 same day (`fw_build`), uptime 130 s at read time,
+`fw_version V1.0_Purchased_This_Board-918-g`. `check_chip_partition_table.py
+--host 192.168.1.156` (read-only, `GET /api/partitions`) confirms 12/12 chip
+entries **MATCH** `partitions.csv` — the raised cap / paging build is
+confirmed on-chip, not just source.
+
+- **Heap (`GET /api/status`, `heap_internal`/`heap_dma`):** internal DRAM
+  free 35,391 B, largest free block 16,384 B, `min_free` (low-water) 27,015 B
+  of 296,363 B total. `heap_dma` (`MALLOC_CAP_DMA`): free 27,603 B, largest
+  16,384 B, min_free 19,227 B of 288,195 B. `heap_spiram`: free 8,066,112 B,
+  min_free 8,041,404 B of 8,388,608 B. **Verdict: comfortable margin under
+  real mid-firing load** — min_free of 27 kB internal is more than double
+  the historical 11.9 kB exhaustion line, and nowhere near the socket-reset
+  regime. This is however only 130 s into the firing, not a soak (see §5).
+- **`stack_margin` (`get_stack_margin`, paginated, all 26 entries returned —
+  cap-raise and reply-paging confirmed live):**
+
+  | task | free at worst | allocated | headroom | exercised by a firing? |
+  |---|---|---|---|---|
+  | `httpd_worker` | 3320 B | 8192 B | 40.5% | yes (web UI polling) |
+  | `i2c_owner` | 2796 B | 4096 B | 68.3% | idle-class (touch/IO expander) |
+  | `boot_button` | 2384 B | 3072 B | 77.6% | idle-class |
+  | `spi_owner` | 3048 B | 4096 B | 74.4% | yes (thermocouple reads) |
+  | `thermo_owner` | 2684 B | 4096 B | 65.5% | yes (thermocouple reads) |
+  | `i2c_owner` (2nd instance) | 1856 B | 3072 B | 60.4% | idle-class — see anomaly note below |
+  | `screen_idle` | 2300 B | 3072 B | 74.9% | idle-class (screen-blank timer) |
+  | `safety_owner_task` | 2168 B | 3072 B | 70.6% | yes (safety link) |
+  | `safety_owner_evt` | 2348 B | 3072 B | 76.4% | yes (safety link) |
+  | `safety_proto_rx` | 4632 B | 8192 B | 56.5% | yes (safety link) |
+  | `safety_poll` | 4328 B | 8192 B | 52.8% | yes (safety link) |
+  | `danger_mode` | 2464 B | 3072 B | 80.2% | idle-class (fault only) |
+  | `kiln_io_owner` | 2728 B | 4096 B | 66.6% | yes (relay/GPIO control) |
+  | `profile_executor` | 1412 B | 4096 B | 34.5% | yes — the task under test |
+  | `profile_exec_wdt` | 1840 B | 4096 B | 44.9% | yes (guard 9) |
+  | `autotune_engine` | 3316 B | 4096 B | 81.0% | no (autotune not running) |
+  | `bx_flash_worker` | 5180 B | 8192 B | 63.2% | yes (NVS persistence during run) |
+  | `uart_owner_task` | 2160 B | 3072 B | 70.3% | yes (PC link) |
+  | `uart_owner_evt_task` | 2340 B | 3072 B | 76.2% | yes (PC link) |
+  | `uart_proto_rx` | 3960 B | 8192 B | 48.3% | yes (PC link) |
+  | `info_uart_bridge` | 596 B | 3072 B | 19.4% — **LOW** | yes (MCP polling over UART) |
+  | `system_uart_bridge` | 880 B | 3072 B | 28.6% — **LOW** | yes |
+  | `lvgl` | 2592 B | 8192 B | 31.6% | yes (display) |
+  | `telemetry_log` | 984 B | 4096 B | 24.0% — **LOW** | yes (history logging during run) |
+  | `gpio_probe` | 3856 B | 6144 B | 62.8% | idle-class |
+  | `link_watchdog` | 2332 B | 3072 B | 75.9% | yes |
+
+  **`profile_exec_wdt`'s fourth-pass fix is confirmed on hardware:** 1840 B
+  free of 4096 B (44.9%), no longer the 368 B/2560 B (14.4%) CRITICAL reading
+  — the size bump landed and is no longer just "fixed, unflashed."
+
+  **Anomaly, not fixed (no source change made): two `i2c_owner` rows.** The
+  reply lists `i2c_owner` twice, with different allocated sizes (4096 B and
+  3072 B) — inconsistent with a single `xTaskCreate*` call site producing two
+  identical-stack instances (contrast `uart_owner_task`/`safety_owner_task`,
+  which report under disambiguated names). §7.2's cap-raise note already
+  flagged `i2c_owner_init()` firing twice at boot (SX1509 + NS2009); this
+  reading suggests the two registrations may not actually be same-named
+  same-sized instances, or a label collision exists in
+  `stack_margin_register()`'s call sites. Left as an open question for the
+  next pass with source access — not chased further here per the read-only
+  constraint on this pass.
+
+  **New LOW findings not in the plan's prior candidate list:**
+  `info_uart_bridge` (19.4%), `system_uart_bridge` (28.6%) and
+  `telemetry_log` (24.0%) are all below the 30% comfort line other §6/§7.3
+  candidates were judged against, and all three are firing-exercised, not
+  idle-class. None of these was previously called out as low. This one
+  mid-firing reading is not itself a soak result — flag for the next pass,
+  do not relocate or resize from a single reading.
+
+- **Display flush stats (`GET /api/status`, `flush_last_us`/`flush_max_us`/
+  `flush_count`):** last 6,932 µs, max 90,637 µs, count 1,152. This is the
+  **synchronous flush baseline** — both the async and zero-copy switches
+  landed last night are default-off, so this is the path actually running.
+  90.6 ms worst-case flush is the number any future async/zero-copy
+  evaluation must beat.
+
+**What this pass unblocks:** §3.1's table can now be filled with real numbers
+for all 21 previously-"needs a real boot" rows in §7.3 and §4.2 — done above.
+`kiln_io_owner`/`thermo_owner`/`spi_owner`/`i2c_owner`/`screen_idle` are no
+longer "unmeasured" (all firing-exercised except `i2c_owner`/`screen_idle`,
+which are idle-class and this reading is their best available so far). §9
+(`profile_exec_wdt`) is confirmed fixed and flashed — closed. §4.3's baseline
+capture is satisfied for the mid-firing condition (not idle, not web-UI-2-client
+specifically, see caveats).
+
+**What this pass does NOT unblock — still needs a write, reboot, or soak:**
+- **Phase 1** (`SPIRAM_MALLOC_ALWAYSINTERNAL` 8192, step to 4096/2048) is
+  still unsoaked — §5's soak definition requires a full firing cold-to-cooldown
+  plus 24 h idle-with-Wi-Fi; this pass is one firing still in progress at the
+  130 s mark, read-only, no config change made.
+- **`profile_executor` relocation** — still BLOCKED per §7.3: an HWM reading
+  (now confirmed 1412 B/34.5%, consistent with the prior 1388 B/33.9%
+  pre-reflash number) is necessary but not sufficient; the plan explicitly
+  requires a soak before relocating this task, not just a measured HWM.
+- **§6 (`uart_owner_*` stack trim)** — still blocked on an unmeasured Pico
+  OTA relay transfer; not exercised by this firing.
+- **The new `info_uart_bridge`/`system_uart_bridge`/`telemetry_log` LOW
+  findings** need a second reading (e.g. after this firing's soak, or under
+  concurrent MCP+web-UI load) before treating them as a real headroom
+  problem rather than a one-off busy tick.
+- **Idle-condition baseline** (`stack_margin_baseline.py`'s `idle` /
+  `web_ui_open` conditions) — this pass only captured `mid_firing`; running
+  the other two conditions and combining via `worst_case_across_conditions()`
+  is still open, needs a reboot to idle or a second board session.
+
 **Update 2026-09-02 (fifth pass) — doc cleanup only, no source change.**
 Sections 4.1 and 4.2 were already fully landed by `a698dc0` (heap-status MCP
 tool + `MALLOC_CAP_DMA` breakout; all sixteen previously-uninstrumented tasks
@@ -324,7 +432,13 @@ different from what was measured.
 
 ### 3.1 Live stack high-water marks
 
-Captured 2026-09-01 from the running board via the `get_stack_margin` MCP tool:
+**Superseded by the 2026-09-03 (sixth pass) table above** — same board,
+post-reflash (`fw_build Sep 3 2026 07:36:20`), read mid-firing, all 26
+registered tasks now included (paginated `get_stack_margin`, cap raised
+28→40). `profile_exec_wdt` moved from 368 B/2560 B (14.4% CRITICAL) to
+1840 B/4096 B (44.9%) — the fourth-pass fix is confirmed flashed. The
+2026-09-01 partial table below is kept only for the pre-fix historical
+comparison:
 
 | task | free at worst | allocated | headroom |
 |---|---|---|---|
@@ -334,14 +448,15 @@ Captured 2026-09-01 from the running board via the `get_stack_margin` MCP tool:
 | `safety_proto_rx` | 4632 B | 8192 B | 56.5% |
 | `safety_poll` | 4920 B | 8192 B | 60.1% |
 | `profile_executor` | 1388 B | 4096 B | 33.9% |
-| `profile_exec_wdt` | **368 B** | 2560 B | **14.4% — CRITICAL** |
+| `profile_exec_wdt` | **368 B** | 2560 B | **14.4% — CRITICAL (pre-fix)** |
 | `bx_flash_worker` | 3676 B | 8192 B | 44.9% |
 | `uart_owner_task` | 2164 B | 3072 B | 70.4% |
 | `uart_owner_evt_task` | 2344 B | 3072 B | 76.3% |
 
-Only instrumented tasks appear here. All long-lived tasks are now
-instrumented (§4.2, `a698dc0`) — what remains missing is a boot to actually
-read their HWM numbers, not further registration work.
+All 26 long-lived tasks are now instrumented (§4.2, `a698dc0`) and all 26
+have a real HWM reading as of the sixth pass (mid-firing condition only —
+idle and web-UI-open conditions are still open, see the sixth-pass update's
+unblocked/not-unblocked lists).
 
 ### 3.2 Internal heap
 
