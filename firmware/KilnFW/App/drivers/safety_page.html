@@ -136,11 +136,7 @@ on the web before this pass.</p>
 <h2>Temperatures &amp; power</h2>
 <div class="card">
   <div class="row"><span class="label">Safety-processor thermocouple</span><span class="value" id="safetyTemp">--</span></div>
-  <p class="placement-note" id="placementNote">Placement mode: not reported -- SaftyFW has no
-  commissioning read-back for <code>tc_placement_mode</code> yet (SaftyFW/TODO.md). Until that
-  exists this reading's relationship to the zone temperatures cannot be labelled either way --
-  see CommonFW/docs/LINK_PROTOCOL.md sec 7's "Label the safety temperature with its placement"
-  rule.</p>
+  <p class="placement-note" id="placementNote">Placement mode: loading...</p>
   <div class="row"><span class="label">Enclosure temp (MAX31856 cold junction)</span><span class="value" id="enclosureTemp">--</span></div>
   <div class="row"><span class="label">Power draw (estimate)</span><span class="value" id="powerW">--</span></div>
 </div>
@@ -403,17 +399,75 @@ if the Pico's diagnostics are too stale to trust.</p>
       if (lastGoodAt != null) setStale(Math.round((Date.now() - lastGoodAt) / 1000));
     });
   }
+
+  // tc_placement_mode (CONFIG_STORE_TC_PLACEMENT_* / SaftyFW's config_store.h)
+  // is a commissioning field, not a status-frame value, so it does not ride
+  // /api/status -- it comes from GET /api/safety/commissioning
+  // (safety_cfg_http.c's build_commissioning_json(), the same endpoint
+  // safety_commissioning_page.html reads), param id 259 (0x0103). A wrong
+  // label here is worse than no label at all (SaftyFW/TODO.md Phase 8b), so
+  // every branch below says exactly what is known and what is not, rather
+  // than guessing CHAMBER_AGREED as a default.
+  var TC_PLACEMENT_PARAM_ID = 259;
+  function placementLabel(mode) {
+    if (mode === 0) return 'Chamber -- this reading tracks the zone temperatures and can be compared against them.';
+    if (mode === 1) return 'External -- this sensor watches a separate location and will NOT track the zone temperatures. Do not compare it against them.';
+    return null;
+  }
+  function renderPlacement(state) {
+    var el = document.getElementById('placementNote');
+    if (state.error) {
+      el.textContent = 'Placement mode: could not load (' + state.error + ').';
+      return;
+    }
+    if (!state.reliable) {
+      el.textContent = 'Placement mode: unknown -- the safety processor has not reported a ' +
+        'protocol version new enough for this board to trust its "set" reporting, so this ' +
+        'reading’s relationship to the zone temperatures cannot be labelled either way.';
+      return;
+    }
+    if (!state.set) {
+      el.textContent = 'Placement mode: not commissioned -- tc_placement_mode has never been ' +
+        'set on the safety processor, so this reading’s relationship to the zone ' +
+        'temperatures cannot be labelled either way.';
+      return;
+    }
+    var label = placementLabel(state.mode);
+    if (label == null) {
+      el.textContent = 'Placement mode: unrecognised value (' + state.mode + ').';
+      return;
+    }
+    el.textContent = 'Placement mode: ' + label;
+  }
+  function pollPlacement() {
+    fetch('/api/safety/commissioning').then(function (r) { return r.json(); }).then(function (j) {
+      var p = null;
+      if (j && Array.isArray(j.params)) {
+        for (var i = 0; i < j.params.length; i++) {
+          if (j.params[i].id === TC_PLACEMENT_PARAM_ID) { p = j.params[i]; break; }
+        }
+      }
+      if (!p) {
+        renderPlacement({ error: 'field not present in response' });
+        return;
+      }
+      renderPlacement({ reliable: !!j.unset_reporting_reliable, set: !!p.set, mode: p.value });
+    }).catch(function () {
+      renderPlacement({ error: 'request failed' });
+    });
+  }
   var timer = null;
   function schedule() {
     if (timer) clearTimeout(timer);
     if (document.visibilityState === 'hidden') return;
     var delay = 1000 * Math.min(1 + failCount, 8);
-    timer = setTimeout(function () { poll(); schedule(); }, delay);
+    timer = setTimeout(function () { poll(); pollPlacement(); schedule(); }, delay);
   }
   document.addEventListener('visibilitychange', function () {
-    if (document.visibilityState === 'visible') { poll(); schedule(); }
+    if (document.visibilityState === 'visible') { poll(); pollPlacement(); schedule(); }
   });
   poll();
+  pollPlacement();
   schedule();
 
   // UI_PLAN.md item 7: re-render the two temperature rows in the new unit

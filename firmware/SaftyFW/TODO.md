@@ -469,8 +469,22 @@ safety + enclosure temperature, power draw, the DIAG card, the trip card, and
 the "Clear latched trip" flow with confirmation. What is still genuinely
 missing, confirmed by reading that file:
 
-- [ ] **Label the safety temperature with its placement mode.** In
-      `EXTERNAL_OVERHEAT` it will not track the zone temperatures and should not.
+- [x] **Label the safety temperature with its placement mode.** 2026-09-03.
+      `tc_placement_mode` was already exposed over HTTP — it rides the
+      existing `GET /api/safety/commissioning` per-param list
+      (`safety_cfg_http.c`'s `build_commissioning_json()`, param id 259 /
+      0x0103) that `safety_commissioning_page.html` already reads, so no
+      wire or C change was needed. `safety_page.html` now polls that
+      endpoint (own `.catch()`, alongside the existing `/api/status` poll)
+      and renders one of four honest states instead of the old static
+      "not reported" placeholder: `CHAMBER_AGREED` ("tracks the zone
+      temperatures, can be compared against them"), `EXTERNAL_OVERHEAT`
+      ("will NOT track the zone temperatures, do not compare"), "not
+      commissioned" (field genuinely unset), or "unknown" (peer protocol
+      version too old / not yet known to trust the wire's set-bit — same
+      `unset_reporting_reliable` gate `safety_cfg_http.c`'s 2026-08-27 M1
+      fix already added). No default is guessed in any of those last two
+      cases.
 All of the following landed 2026-08-22 and are listed here only because the
 section above still names open work:
 
@@ -499,8 +513,8 @@ section above still names open work:
       `test_safety_guards.c` instead `memcmp`s the whole verdict struct
       across two instances every tick of a long mixed sequence.
 
-(The placement-mode label bullet above stays open: it is blocked on the
-`tc_placement_mode` commissioning field of Phase 7 existing to label it
+(The placement-mode label bullet above closed 2026-09-03, once Phase 7's
+`tc_placement_mode` commissioning field gave it something real to label
 *with*.)
 
 ## Phase 9 — Commissioning and the honest gaps
