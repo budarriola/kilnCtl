@@ -816,3 +816,68 @@ def test_parse_profile_exec_uart_capture_skips_corrupted_float_line_not_the_whol
     rows = la.parse_profile_exec_uart_capture(str(p))
     assert len(rows) == 1
     assert rows[0].elapsed_s == pytest.approx(10.0)
+
+
+def test_parse_ktel_fire_line_nan_duty_is_refused_and_counted():
+    """Opus review round 4, finding 7: a NaN duty in one zone used to be
+    indistinguishable from a truncated zone tail -- before
+    _KTEL_ZONE_RE/_parse_wire_duty recognized "nan"/"-nan(ind)", that
+    zone's regex simply failed to match, the zone vanished from `zones`,
+    and the truncation guard discarded the whole row with no counter and
+    no log anywhere. Proves: (a) the row is still refused (unchanged
+    behavior -- a NaN duty is still not safe to hand downstream), (b) it
+    is now counted under its own reason key rather than silently folding
+    into "truncated" or vanishing with no signal at all.
+    """
+    line_with_nan_duty = (
+        "KTEL1 FIRE t=130 st=1 pid=3 seg=1 dwell=1 tgt=855.00 "
+        "z0_c=830.00 z0_v=1 z0_e=-25.00 z0_d=nan z0_fm=1 z0_fi=0"
+    )
+    counts = {}
+    assert la.parse_ktel_fire_line(line_with_nan_duty, skip_counts=counts) is None
+    assert counts == {"nan_duty": 1}, f"expected exactly one nan_duty skip, got {counts}"
+
+    # libc's alternate NaN spelling must be recognized too.
+    line_with_libc_nan = (
+        "KTEL1 FIRE t=131 st=1 pid=3 seg=1 dwell=1 tgt=855.00 "
+        "z0_c=830.00 z0_v=1 z0_e=-25.00 z0_d=-nan(ind) z0_fm=1 z0_fi=0"
+    )
+    counts2 = {}
+    assert la.parse_ktel_fire_line(line_with_libc_nan, skip_counts=counts2) is None
+    assert counts2 == {"nan_duty": 1}, f"expected exactly one nan_duty skip, got {counts2}"
+
+    # A completely normal line must not be counted as anything.
+    counts3 = {}
+    good = (
+        "KTEL1 FIRE t=130 st=1 pid=3 seg=1 dwell=1 tgt=855.00 "
+        "z0_c=830.00 z0_v=1 z0_e=-25.00 z0_d=0.690 z0_fm=1 z0_fi=0"
+    )
+    assert la.parse_ktel_fire_line(good, skip_counts=counts3) is not None
+    assert counts3 == {}, f"a clean line must not increment any skip counter, got {counts3}"
+
+
+def test_parse_profile_exec_uart_capture_surfaces_nan_duty_skip_count(tmp_path):
+    """The counter is threaded through the capture-file-level parser too
+    -- a caller can now tell "this capture had 1 clean sample and 1 NaN-
+    duty refusal" from just the returned row list, which used to look
+    identical to "this capture only ever had 1 sample"."""
+    p = tmp_path / "nan_duty.log"
+    good = (
+        "08:00:00.000 I (1) KTEL: KTEL1 FIRE t=10 st=1 pid=0 seg=0 dwell=0 tgt=100.0 "
+        "z0_c=90.0 z0_v=1 z0_e=-10.0 z0_d=0.5 z0_fm=0 z0_fi=0\n"
+    )
+    nan_duty = (
+        "08:00:05.000 I (2) KTEL: KTEL1 FIRE t=15 st=1 pid=0 seg=0 dwell=0 tgt=100.0 "
+        "z0_c=91.0 z0_v=1 z0_e=-9.0 z0_d=nan z0_fm=0 z0_fi=0\n"
+    )
+    p.write_text(good + nan_duty, encoding="utf-8")
+
+    # Without skip_counts, behavior (row count) is unchanged from before
+    # this finding was fixed -- only the visibility changes.
+    rows_no_counts = la.parse_profile_exec_uart_capture(str(p))
+    assert len(rows_no_counts) == 1
+
+    counts = {}
+    rows = la.parse_profile_exec_uart_capture(str(p), skip_counts=counts)
+    assert len(rows) == 1
+    assert counts == {"nan_duty": 1}, f"expected the NaN-duty line to be counted, got {counts}"

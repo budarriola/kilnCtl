@@ -47,10 +47,13 @@ import argparse
 import csv
 import dataclasses
 import json
+import logging
 import math
 import re
 import sys
 from typing import Iterable, Optional, Sequence
+
+_LOG = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -219,9 +222,18 @@ _KTEL_FIRE_RE = re.compile(
 )
 #: One zone's key=value run within a FIRE line's tail, e.g.
 #: "z0_c=820.15 z0_v=1 z0_e=-29.85 z0_d=0.720 z0_fm=1 z0_fi=0".
+#: The duty group additionally accepts a bare/prefixed "nan" -- printf's
+#: "%f" of a NaN duty (a real, reachable firmware state, not hypothetical:
+#: see the NaN-duty refusal note in parse_ktel_fire_line()) renders as
+#: "nan" or "-nan(ind)" on common libc's, neither of which the plain
+#: "-?[\d.]+" numeric pattern matches. Without this the whole zone's regex
+#: failed to match and the zone silently vanished from `zones`, which then
+#: tripped the TRUNCATION guard below for the wrong reason -- a NaN duty
+#: is not a truncated line, and conflating the two hid the real cause from
+#: whatever visibility this file offers.
 _KTEL_ZONE_RE = re.compile(
     r"z(?P<zi>\d+)_c=(?P<c>-?[\d.]+)\s+z\1_v=(?P<v>\d+)\s+z\1_e=-?[\d.]+\s+"
-    r"z\1_d=(?P<d>-?[\d.]+)\s+z\1_fm=(?P<fm>\d+)\s+z\1_fi=(?P<fi>\d+)"
+    r"z\1_d=(?P<d>-?nan(?:\([^)]*\))?|-?[\d.]+)\s+z\1_fm=(?P<fm>\d+)\s+z\1_fi=(?P<fi>\d+)"
 )
 #: Just the FIRST key of a zone's run. Used only to count how many zones a
 #: FIRE line CLAIMS, so a zone whose run started but did not fully decode can
@@ -240,10 +252,30 @@ def _profile_exec_state_name(value: int) -> str:
     return str(value)  # unknown enum value -- surface it rather than mask it
 
 
-def parse_ktel_fire_line(text: str) -> Optional[PollRow]:
+def _parse_wire_duty(s: str) -> float:
+    """``float()`` accepts a bare "nan" but rejects libc's "-nan(ind)"
+    spelling, which is exactly what printf("%f", NaN) can render depending
+    on platform -- match either without raising, so a NaN duty is a
+    recognized value (see the refusal note in ``parse_ktel_fire_line``),
+    not a parse failure indistinguishable from a corrupted byte."""
+    if "nan" in s.lower():
+        return math.nan
+    return float(s)
+
+
+def parse_ktel_fire_line(text: str, skip_counts: Optional[dict] = None) -> Optional[PollRow]:
     """Parse one ``telemetry_format_firing()`` FIRE line's text into a
     ``PollRow``, or ``None`` if ``text`` doesn't contain a FIRE line at all
     (a TUNE line, a plain boot/status log line, or a truncated capture).
+
+    ``skip_counts``, if given, is a caller-owned dict that gets
+    ``skip_counts[reason] += 1`` (creating the key at 0 first) whenever
+    this function refuses a line that DID match the FIRE-line shape but
+    was discarded for a specific, nameable reason (currently
+    ``"truncated_zone_tail"`` and ``"nan_duty"`` -- see below). A line that
+    is not a FIRE line at all is not counted here; that is routine, not a
+    refusal (matches this function's own docstring and
+    ``parse_profile_exec_uart_capture``'s "skipped, same tolerance" note).
 
     ``PollRow.segment_count`` is always 0 here -- the wire format
     (telemetry_format.c) never carries it, only ``segment_index``. Nothing
@@ -264,6 +296,11 @@ def parse_ktel_fire_line(text: str) -> Optional[PollRow]:
     guard at the end of this function. A short PollRow that looks complete is
     worse than a missing sample.
     """
+    def _note_skip(reason: str) -> None:
+        if skip_counts is not None:
+            skip_counts[reason] = skip_counts.get(reason, 0) + 1
+        _LOG.debug("parse_ktel_fire_line: refusing FIRE line (%s): %r", reason, text)
+
     m = _KTEL_FIRE_RE.search(text)
     if m is None:
         return None
@@ -285,11 +322,12 @@ def parse_ktel_fire_line(text: str) -> Optional[PollRow]:
             zones[int(zm.group("zi"))] = ZoneSample(
                 zone=int(zm.group("zi")),
                 actual_c=float(zm.group("c")) if valid else math.nan,
-                duty=float(zm.group("d")),
+                duty=_parse_wire_duty(zm.group("d")),
                 ff_hold_used_matrix=zm.group("fm") == "1",
                 ff_hold_infeasible=zm.group("fi") == "1",
             )
     except ValueError:
+        _note_skip("bad_float")
         return None
     # REVIEW 2026-09-02 (Opus round 3): refuse a FIRE line whose zone tail did
     # not decode completely, rather than returning a PollRow that is missing
@@ -311,6 +349,23 @@ def parse_ktel_fire_line(text: str) -> Optional[PollRow]:
     # matching and this refuses instead of quietly yielding zero-zone rows.
     claimed_zones = {int(z) for z in _KTEL_ZONE_START_RE.findall(m.group("zones"))}
     if claimed_zones != set(zones):
+        _note_skip("truncated_zone_tail")
+        return None
+    # REVIEW 2026-09-02 (Opus round 4, finding 7): a NaN duty in even one
+    # zone used to be indistinguishable from a truncated line -- before
+    # _KTEL_ZONE_RE/_parse_wire_duty recognized "nan"/"-nan(ind)", that
+    # zone's regex simply failed to match, the zone vanished from `zones`,
+    # and the claimed_zones check above discarded the WHOLE row (all
+    # zones, not just the NaN one) as if it had been truncated, with no
+    # counter and no log anywhere -- downstream just silently saw fewer
+    # samples. The zone tail decodes completely now, so this is reachable
+    # on its own line rather than folding into the truncation guard, and
+    # gets its own counted/logged reason. Still discards the whole row
+    # (same call as the truncation case: a PollRow claiming N zones but
+    # supplying a non-numeric duty for one of them is not safe to hand to
+    # downstream IAE/duty-cycle math either), but now it is VISIBLE.
+    if any(math.isnan(z.duty) for z in zones.values()):
+        _note_skip("nan_duty")
         return None
     try:
         return PollRow(
@@ -324,6 +379,7 @@ def parse_ktel_fire_line(text: str) -> Optional[PollRow]:
             zones=zones,
         )
     except ValueError:
+        _note_skip("bad_float")
         return None
 
 
@@ -335,7 +391,7 @@ def parse_ktel_fire_line(text: str) -> Optional[PollRow]:
 _UART_CAPTURE_LINE_RE = re.compile(r"^(?P<wall>\d{2}:\d{2}:\d{2}(?:\.\d+)?)\s+\S\s+(?P<text>.*)$")
 
 
-def parse_profile_exec_uart_capture(path: str) -> list[PollRow]:
+def parse_profile_exec_uart_capture(path: str, skip_counts: Optional[dict] = None) -> list[PollRow]:
     """Parse a ``telemetry_capture.py``-captured debug-UART temperature feed
     into ``PollRow`` records -- the third source kind this module's docstring
     (see "SOURCE KINDS" above) reserved a seam for.
@@ -349,6 +405,15 @@ def parse_profile_exec_uart_capture(path: str) -> list[PollRow]:
     function's only job is finding the wall-clock label and text for each
     line, the same division of labor ``http_capture_log.py`` uses for its
     own envelope.
+
+    ``skip_counts``, if given, is passed straight through to every
+    :func:`parse_ktel_fire_line` call, so a caller can see (and log/report)
+    how many otherwise-FIRE-shaped lines were refused and WHY (e.g.
+    ``{"nan_duty": 3, "truncated_zone_tail": 1}``) instead of just a
+    shorter row count with no way to tell "quiet capture" from "capture
+    dropping samples" -- see finding 7, opus review round 4: a NaN duty in
+    one zone used to discard the whole row with no counter and no log
+    anywhere.
     """
     rows: list[PollRow] = []
     with open(path, "r", encoding="utf-8") as fh:
@@ -359,10 +424,12 @@ def parse_profile_exec_uart_capture(path: str) -> list[PollRow]:
             m = _UART_CAPTURE_LINE_RE.match(line)
             text = m.group("text") if m is not None else line
             wall_time = m.group("wall") if m is not None else ""
-            row = parse_ktel_fire_line(text)
+            row = parse_ktel_fire_line(text, skip_counts=skip_counts)
             if row is None:
                 continue
             rows.append(dataclasses.replace(row, wall_time=wall_time))
+    if skip_counts:
+        _LOG.info("parse_profile_exec_uart_capture(%s): refused lines by reason: %s", path, skip_counts)
     return rows
 
 
