@@ -107,8 +107,26 @@ esp_err_t profile_executor_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo
      * reads status and forces relays off" missed run_state_note() on its own
      * abort path (~line 1728): when the safety link goes silent it aborts the
      * firing AND persists why. That is exactly the moment this task must not
-     * fail, so its stack must be reachable with the flash cache disabled. */
-    ok = xTaskCreatePinnedToCore(watchdog_task_entry, "profile_exec_wdt", 2560, NULL, 5,
+     * fail, so its stack must be reachable with the flash cache disabled.
+     *
+     * 2560 -> 4096 (DRAM_PSRAM_PLAN.md sec 9, 2026-09-02): the live board's
+     * 3.1 baseline measured this task's own worst case at 368 B free of
+     * 2560 B (14.4%, "CRITICAL") -- i.e. this task's real stack usage is
+     * ~2192 B, not a guess. That is close enough to the edge that guard 9
+     * (the thing that is supposed to still be running when other things are
+     * not) could plausibly overrun on a code path this pass did not exercise
+     * -- watchdog_task_entry() calls run_state_note()/safety_link_get_
+     * status()/safety_link_get_fault_sources()/kiln_io_all_relays_off()/
+     * io_segs_force_all_off()/guard9_assert_stale_tick_fault()/heat_enable_
+     * reconcile(), several of which are themselves multi-frame call chains,
+     * against a stack this small. 4096 gives back the same ~1900 B of
+     * headroom profile_executor itself runs with (1388 B free of 4096 B,
+     * 33.9%, same table) rather than inventing a new number: this is the
+     * fix, not just a bigger constant -- the next boot's stack_margin read
+     * should confirm the new worst case lands in the same ballpark as
+     * profile_executor's own. Unflashed as of this commit -- the board is
+     * mid-firing; this needs the same reboot §7's cap raise is waiting on. */
+    ok = xTaskCreatePinnedToCore(watchdog_task_entry, "profile_exec_wdt", 4096, NULL, 5,
                                  &s_exec.watchdog_task, tskNO_AFFINITY);
     if (ok != pdPASS) {
         ESP_LOGE(PE_TAG, "xTaskCreatePinnedToCoreWithCaps(profile_exec_wdt) failed -- guard 9 unavailable this boot");
@@ -116,8 +134,9 @@ esp_err_t profile_executor_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo
     /* Registered unconditionally, ok==pdPASS or not -- stack_margin_register()
      * reads *task_handle_slot fresh at report time (stack_margin.h's own
      * doc comment), so a creation failure just reads back alive=false
-     * rather than needing a second branch here. */
-    stack_margin_register("profile_exec_wdt", &s_exec.watchdog_task, 2560);
+     * rather than needing a second branch here. Must match the literal
+     * xTaskCreatePinnedToCore() argument two lines up exactly (4096). */
+    stack_margin_register("profile_exec_wdt", &s_exec.watchdog_task, 4096);
 
     ESP_LOGI(PE_TAG, "profile executor up (io_ready=%d, thermo_ready=%d, safety_ready=%d) -- "
                   "NOT YET VERIFIED AGAINST REAL RELAY/THERMOCOUPLE HARDWARE (single- or multi-zone), "
