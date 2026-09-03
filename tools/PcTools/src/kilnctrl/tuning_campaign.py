@@ -55,6 +55,7 @@ import concurrent.futures
 import dataclasses
 import json
 import math
+import pathlib
 import subprocess
 from typing import Optional, Sequence
 
@@ -65,6 +66,16 @@ from . import load_mass_sweep, plant_sim
 DT = plant_sim.DT
 N_ZONES = plant_sim.N_ZONES
 AMBIENT_C = 20.0
+
+#: Anchored on __file__, not the process CWD -- a bare relative literal here
+#: ("tools/PcTools/config_presets/...") only resolved when the process
+#: happened to be launched from the repo root; from anywhere else `open(...,
+#: "w")` either raises FileNotFoundError (parent dir absent) or, worse,
+#: silently writes into a same-named directory that exists for an unrelated
+#: reason. Same bug class fixed for noise_floor.py's DEFAULT_ARTIFACT_PATH in
+#: 9311f3c.
+_REPO_ROOT = pathlib.Path(__file__).resolve().parents[4]
+DEFAULT_OUT_PATH = str(_REPO_ROOT / "tools" / "PcTools" / "config_presets" / "tuning_recommendations.json")
 
 # ---------------------------------------------------------------------------
 # Load model -- reused from load_mass_sweep.py (see module docstring). Three
@@ -631,7 +642,7 @@ def main() -> int:
     print(f"  {len(eval_rows)} (method, peak, load) evaluations complete")
 
     artifact = build_recommendations(eval_rows)
-    out_path = "tools/PcTools/config_presets/tuning_recommendations.json"
+    out_path = DEFAULT_OUT_PATH
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(artifact, f, indent=2)
         f.write("\n")

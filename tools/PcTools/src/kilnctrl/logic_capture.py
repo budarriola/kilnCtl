@@ -24,6 +24,7 @@ import os
 import re
 import sys
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Iterator, Optional, Sequence
 
 from saleae import automation
@@ -35,6 +36,17 @@ log = logging.getLogger(__name__)
 #: or a remote machine.
 DEFAULT_HOST = os.environ.get("SALEAE_AUTOMATION_HOST", "127.0.0.1")
 DEFAULT_PORT = int(os.environ.get("SALEAE_AUTOMATION_PORT", "10430"))
+
+#: Anchored on __file__, not the process CWD -- capture()'s
+#: os.makedirs(output_dir, exist_ok=True) means a bare relative "logs/saleae"
+#: never raises from the wrong directory: it just silently creates a fresh,
+#: empty logs/saleae wherever the process happened to be launched from, and
+#: the capture "succeeds" into it. Same bug class as noise_floor.py's
+#: DEFAULT_ARTIFACT_PATH (fixed 9311f3c) and the tools/PcTools/logs/coupling
+#: vs logs/coupling split this sweep was triggered by. Matches the
+#: tools/PcTools/logs/<kind> convention console_capture.py, session_log.py
+#: and telemetry_capture.py already use (parents[2] of this file).
+DEFAULT_OUT_DIR = str(Path(__file__).resolve().parents[2] / "logs" / "saleae")
 
 
 class LogicNotRunning(RuntimeError):
@@ -207,7 +219,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         help="digital threshold in volts; omit to keep Logic's own setting "
         "(some devices reject an explicit value)",
     )
-    cap.add_argument("--out", default="logs/saleae")
+    cap.add_argument("--out", default=DEFAULT_OUT_DIR)
 
     rates = sub.add_parser(
         "rates", help="list legal sample rates for a channel count"

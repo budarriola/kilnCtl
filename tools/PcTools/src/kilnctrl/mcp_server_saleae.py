@@ -11,6 +11,7 @@ import functools
 import glob
 import json
 import math
+import pathlib
 import logging
 import os
 import subprocess
@@ -79,6 +80,18 @@ from . import mcp_server as _srv
 # so this wraps arm/capture/list only; decode is left as an explicit
 # follow-on for whoever has a board and a Logic analyzer both on the bench.
 # ---------------------------------------------------------------------------
+#: Anchored on __file__, not this MCP server process's CWD, which is
+#: whatever launched it (not necessarily the repo root) and is not something
+#: a tool caller can see or control. logic_capture.capture() does
+#: os.makedirs(output_dir, exist_ok=True), so a bare relative "logs/saleae"
+#: default never raises: it silently creates a fresh, empty logs/saleae
+#: wherever the server happened to start from, and the capture "succeeds"
+#: into it -- indistinguishable from a real one until someone goes looking
+#: for the file. Computed independently of logic_capture.DEFAULT_OUT_DIR
+#: (kept in sync manually) rather than importing it at module load time,
+#: since logic_capture pulls in the optional `saleae` automation package
+#: that the rest of this module deliberately imports lazily, function-local.
+_DEFAULT_SALEAE_OUT_DIR = str(pathlib.Path(__file__).resolve().parents[2] / "logs" / "saleae")
 @_srv._tool()
 def saleae_list_devices() -> str:
     """List Saleae devices Logic 2's automation server can see.
@@ -104,7 +117,7 @@ def saleae_list_devices() -> str:
 def saleae_capture(
     channels: str = "0,1", duration_seconds: float = 1.0,
     sample_rate: int = 25_000_000,
-    out_dir: str = "logs/saleae", filename: str = "capture.sal",
+    out_dir: str = _DEFAULT_SALEAE_OUT_DIR, filename: str = "capture.sal",
 ) -> str:
     """Arm a timed digital capture on the given channels and save it as a
     ``.sal`` file (open in Logic 2 to view/export).
