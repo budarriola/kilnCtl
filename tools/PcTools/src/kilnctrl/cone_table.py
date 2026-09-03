@@ -87,11 +87,14 @@ def cone_for_temp_c(temp_c: float) -> int:
 
 def band_bottom_c(target_c: float) -> float:
     """Mirrors ``cone_table_band_bottom_c``: half-cone-step band bottom --
-    halfway from ``target_c`` DOWN to the equivalent temperature of the next
-    lower cone. ``target_c`` need not be an exact table entry; the lower
-    bracketing cone is used directly (see cone_table.h's comment on this
-    function -- deliberately NOT a linear interpolation of the band width
-    itself, just of which lower cone anchors it)."""
+    ``target_c`` minus half the LOCAL cone spacing between the bracketing
+    pair of table entries. ``target_c`` need not be an exact table entry;
+    the lower bracketing cone (the hottest entry strictly below
+    ``target_c``) and the entry immediately above it anchor the half-width
+    -- NOT the distance from ``target_c`` down to the lower cone (that was
+    the bug: it collapses the band to near-zero width for a target a hair
+    above a tabulated cone). See cone_table.h's comment on this function
+    for the full rationale and the exactly-on-a-cone case."""
     if not math.isfinite(target_c):
         raise ConeTableError("invalid_input")  # CONE_TABLE_ERR_INVALID_INPUT
     if target_c <= CONE_TABLE[0][1]:
@@ -107,8 +110,14 @@ def band_bottom_c(target_c: float) -> float:
     if lower_idx is None:
         raise ConeTableError("out_of_range_low")  # unreachable, parity guard
 
+    # Upper bracketing cone. Always in range: target_c <= CONE_TABLE[-1][1]
+    # (checked above) and CONE_TABLE[lower_idx][1] < target_c together mean
+    # lower_idx <= CONE_TABLE_COUNT - 2.
+    upper_idx = lower_idx + 1
     lower_temp_c = CONE_TABLE[lower_idx][1]
-    return target_c - (target_c - lower_temp_c) / 2.0
+    upper_temp_c = CONE_TABLE[upper_idx][1]
+    half = (upper_temp_c - lower_temp_c) / 2.0
+    return target_c - half
 
 
 def _arrhenius_rate(temp_k: float) -> float:

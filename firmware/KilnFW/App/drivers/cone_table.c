@@ -139,8 +139,19 @@ cone_table_status_t cone_table_band_bottom_c(float target_c, float *out_band_bot
         return CONE_TABLE_ERR_OUT_OF_RANGE_LOW;
     }
 
+    // Upper bracketing cone. Always in range: target_c <=
+    // s_cones[COUNT-1].temp_c (checked above) and s_cones[lower_idx].temp_c
+    // < target_c together mean lower_idx <= COUNT-2.
+    int upper_idx = lower_idx + 1;
     float lower_temp_c = s_cones[lower_idx].temp_c;
-    *out_band_bottom_c = target_c - (target_c - lower_temp_c) / 2.0f;
+    float upper_temp_c = s_cones[upper_idx].temp_c;
+
+    // Half the LOCAL cone spacing between the bracketing pair, not half the
+    // distance from target_c down to the lower cone -- see cone_table.h's
+    // comment on this function for why (the latter collapses to near-zero
+    // width for a target a hair above a tabulated cone).
+    float half = (upper_temp_c - lower_temp_c) / 2.0f;
+    *out_band_bottom_c = target_c - half;
     return CONE_TABLE_OK;
 }
 

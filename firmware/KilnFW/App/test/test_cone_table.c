@@ -57,15 +57,46 @@ void run_test_cone_table(void)
                    "low-cone band is narrower than high-cone band (non-uniform spacing preserved)");
     }
 
-    /* Target between two cones: band bottom is measured against the lower
-     * bracketing cone, not rounded to either tabulated entry. */
+    /* Target between two cones: band half-width is half the LOCAL spacing
+     * between the bracketing pair, not half the distance down to the lower
+     * cone -- that was DEFECT 2 (see cone_table.h's comment on
+     * cone_table_band_bottom_c()). */
     {
         /* Between cone 06 (997.8) and cone 05 (1031.1); pick 1010.0. */
         float band_c;
         cone_table_status_t st = cone_table_band_bottom_c(1010.0f, &band_c);
         TEST_CHECK(st == CONE_TABLE_OK, "band bottom for target between cones -> OK");
-        float expected = 1010.0f - (1010.0f - 997.8f) / 2.0f;
-        TEST_CHECK_NEAR(band_c, expected, 1e-3, "between-cones band bottom == halfway to the lower bracketing cone (06)");
+        float expected = 1010.0f - (1031.1f - 997.8f) / 2.0f;
+        TEST_CHECK_NEAR(band_c, expected, 1e-3, "between-cones band bottom == target minus half the LOCAL spacing between cones 06 and 05");
+    }
+
+    /* DEFECT 2 regression: band width must not collapse for a target a
+     * hair above a tabulated cone. Under the broken formula (half = the
+     * distance from target_c down to the lower cone), 1222.21 -- one
+     * hundredth of a degree above cone 6's 1222.2 -- produced a ~0.005 C
+     * band instead of the ~8.35 C the surrounding spacing (cone 6->cone 7
+     * is 1222.2->1238.9) implies. Pin the corrected, non-cliff widths at
+     * three targets straddling cone 6. */
+    {
+        float band_below_c, band_just_above_c, band_further_above_c;
+        cone_table_status_t st;
+
+        st = cone_table_band_bottom_c(1222.19f, &band_below_c);
+        TEST_CHECK(st == CONE_TABLE_OK, "band bottom just below cone 6 -> OK");
+        float width_below = 1222.19f - band_below_c;
+
+        st = cone_table_band_bottom_c(1222.21f, &band_just_above_c);
+        TEST_CHECK(st == CONE_TABLE_OK, "band bottom just above cone 6 -> OK");
+        float width_just_above = 1222.21f - band_just_above_c;
+
+        st = cone_table_band_bottom_c(1223.00f, &band_further_above_c);
+        TEST_CHECK(st == CONE_TABLE_OK, "band bottom further above cone 6 -> OK");
+        float width_further_above = 1223.00f - band_further_above_c;
+
+        TEST_CHECK_NEAR(width_below, 18.05f, 1e-2, "band width just below cone 6 == half the 5->6 spacing (18.05 C)");
+        TEST_CHECK_NEAR(width_just_above, 8.35f, 1e-2, "band width just above cone 6 == half the 6->7 spacing (8.35 C), not a ~0.005 C cliff");
+        TEST_CHECK_NEAR(width_further_above, 8.35f, 1e-2, "band width further above cone 6 == half the 6->7 spacing (8.35 C)");
+        TEST_CHECK(width_just_above > 1.0f, "band width just above a tabulated cone is not collapsed to near-zero (the DEFECT 2 symptom)");
     }
 
     /* Out of range both directions. */

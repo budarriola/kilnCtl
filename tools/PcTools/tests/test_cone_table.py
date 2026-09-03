@@ -86,6 +86,59 @@ class ConeTableCrossLanguagePinTest(unittest.TestCase):
             )
 
 
+def _extract_c_function_body(text: str, func_name: str) -> str:
+    """Extracts the body of one C function by brace-matching from its
+    opening ``{`` -- used to scope a source-text check to
+    ``cone_table_band_bottom_c`` specifically, so it can't accidentally
+    match an unrelated snippet elsewhere in the file."""
+    sig_idx = text.index(func_name)
+    brace_start = text.index("{", sig_idx)
+    depth = 0
+    i = brace_start
+    while i < len(text):
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return text[brace_start:i + 1]
+        i += 1
+    raise AssertionError(f"unbalanced braces scanning {func_name} in C source")
+
+
+class ConeTableBandFormulaCrossLanguageTest(unittest.TestCase):
+    """Structural companion to ConeTableCrossLanguagePinTest: that test
+    covers only the static table values, not the band-width FORMULA -- a
+    formula regression (e.g. reverting to `(target_c - lower)/2`) would not
+    move any table entry, so the value-only pin cannot catch it. This test
+    greps cone_table.c's band-bottom function body for the fixed formula's
+    fingerprint (a subtraction between the upper and lower bracket
+    variables) and asserts the old broken fingerprint (subtracting the
+    lower cone from target_c) is gone. It is deliberately a text check, not
+    a numeric one -- there is no C compiler available to link cone_table.c
+    into this Python process, so exact-value cross-language pinning is not
+    possible here; ConeTableValuesTests.test_band_bottom_width_local_spacing_not_cliff
+    covers the numeric behaviour on the Python side, and this test's job is
+    only to keep the two files from silently diverging on WHICH formula is
+    implemented."""
+
+    def test_c_band_bottom_uses_local_spacing_not_target_minus_lower(self):
+        with open(_CONE_TABLE_C_PATH, "r", encoding="utf-8") as f:
+            text = f.read()
+        body = _extract_c_function_body(text, "cone_table_band_bottom_c(float target_c")
+
+        self.assertIn(
+            "upper_temp_c - lower_temp_c", body,
+            "cone_table_band_bottom_c no longer computes half-width from the "
+            "bracketing pair (upper - lower) -- formula regressed",
+        )
+        self.assertNotIn(
+            "target_c - lower_temp_c", body,
+            "cone_table_band_bottom_c has reverted to the broken "
+            "(target_c - lower)/2 formula -- this is DEFECT 2, the band-width cliff",
+        )
+
+
 class ConeTableValuesTests(unittest.TestCase):
     def test_table_size_and_endpoints(self):
         self.assertEqual(ct.CONE_TABLE_COUNT, 36)
@@ -109,6 +162,43 @@ class ConeTableValuesTests(unittest.TestCase):
     def test_band_bottom_cone021(self):
         # target = cone 021 (600.0), lower cone = cone 022 (586.1).
         self.assertAlmostEqual(ct.band_bottom_c(600.0), 593.05, places=6)
+
+    def test_band_bottom_width_local_spacing_not_cliff(self):
+        # DEFECT 2 regression: the band half-width must come from the LOCAL
+        # cone spacing at the bracketing pair, not from the distance between
+        # target_c and the lower cone. Under the old (broken) formula,
+        # half = (target_c - lower)/2, so a target a hair above a tabulated
+        # cone (1222.21, just above cone 6's 1222.2) collapsed to a ~0.005 C
+        # band while a target a hair below the same cone (1222.19) got an
+        # ~18 C band -- a >1000x swing from a 0.02 C difference in what a
+        # potter typed. The corrected formula anchors on the bracketing
+        # pair's spacing instead, so both sides of cone 6 (and a target well
+        # clear of any cone, 1223.00) get consistent, non-cliff widths.
+        #
+        # cone 5 = 1186.1, cone 6 = 1222.2, cone 7 = 1238.9.
+        width_below = 1222.19 - ct.band_bottom_c(1222.19)
+        width_just_above = 1222.21 - ct.band_bottom_c(1222.21)
+        width_further_above = 1223.00 - ct.band_bottom_c(1223.00)
+
+        self.assertAlmostEqual(width_below, 18.05, places=6)
+        self.assertAlmostEqual(width_just_above, 8.35, places=6)
+        self.assertAlmostEqual(width_further_above, 8.35, places=6)
+
+        # The old formula would have made width_just_above ~0.005 -- assert
+        # it is instead within the same order of magnitude as its neighbours,
+        # not orders of magnitude smaller (the actual symptom of the bug).
+        self.assertGreater(width_just_above, 1.0)
+
+    def test_band_bottom_exactly_on_cone_uses_spacing_below(self):
+        # target_c landing exactly on a tabulated cone (not the first or
+        # last entry) is NOT averaged between its two neighbours -- the
+        # search for "hottest entry strictly below target_c" skips the exact
+        # match itself, so the matched cone becomes the UPPER bracket and
+        # the width is half the spacing BELOW it. cone 6 = 1222.2, cone 5 =
+        # 1186.1 -> half = (1222.2 - 1186.1)/2 = 18.05, same value as the
+        # pre-existing test_band_bottom_cone6 pin above (this is the same
+        # case, just asserted from the "width" angle for clarity).
+        self.assertAlmostEqual(1222.2 - ct.band_bottom_c(1222.2), 18.05, places=6)
 
     def test_band_bottom_at_or_below_lowest_cone_raises(self):
         with self.assertRaises(ct.ConeTableError):

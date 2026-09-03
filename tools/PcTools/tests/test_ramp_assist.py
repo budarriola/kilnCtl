@@ -414,13 +414,26 @@ class BandWidthCliffTests(unittest.TestCase):
         self.assertGreater(half, 5.0)
         self.assertAlmostEqual(half, 8.35, places=2)
 
-    def test_old_cone_table_formula_does_collapse_here(self):
-        # Documents the actual defect this class exists to work around:
-        # cone_table.band_bottom_c (untouched -- owned by another agent
-        # concurrently) really does collapse at 1222.21, confirming the
-        # ramp-assist-side workaround is not fixing a phantom problem.
-        self.assertLess(1222.21 - ct.band_bottom_c(1222.21), 0.01)
+    def test_cone_table_formula_no_longer_collapses_here(self):
+        # UPDATE: cone_table.band_bottom_c (firmware/KilnFW/App/drivers/
+        # cone_table.c + its Python mirror) has since been corrected to the
+        # same bracketing-pair formula this module's own workaround uses
+        # (_local_band_half_c/_band_bottom_c_fixed above) -- see
+        # cone_table.h's cone_table_band_bottom_c() comment for the fix and
+        # tools/PcTools/tests/test_cone_table.py for its own regression pin.
+        # This test used to document the collapse at 1222.21 as proof the
+        # workaround wasn't fixing a phantom problem; now that the shared
+        # function agrees with the workaround, both should give the SAME
+        # (correct, non-collapsed) answer. This class's workaround
+        # (_local_band_half_c/_band_bottom_c_fixed) is therefore redundant
+        # and could be collapsed onto ct.band_bottom_c directly -- left in
+        # place here since this module is owned by another agent.
+        self.assertGreater(1222.21 - ct.band_bottom_c(1222.21), 5.0)
         self.assertGreater(1222.21 - ra._band_bottom_c_fixed(1222.21), 5.0)
+        self.assertAlmostEqual(
+            ct.band_bottom_c(1222.21), ra._band_bottom_c_fixed(1222.21), places=6,
+            msg="cone_table.band_bottom_c and ramp_assist's workaround should now agree exactly",
+        )
 
 
 class DwellStateMachineTests(unittest.TestCase):

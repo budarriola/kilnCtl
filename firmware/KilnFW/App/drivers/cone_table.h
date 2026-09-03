@@ -170,22 +170,46 @@ cone_table_status_t cone_table_cone_for_temp_c(float temp_c, int *out_index);
 
 // Half-cone-step band bottom: given a target temperature `target_c`
 // (which may fall exactly on a tabulated cone or between two), returns in
-// *out_band_bottom_c the temperature halfway from target_c DOWN toward the
-// equivalent temperature of the next lower cone. Because cone spacing is
-// non-uniform, this half-step width varies with where target_c falls in
-// the table -- that is intentional and must not be collapsed into a fixed
-// offset.
+// *out_band_bottom_c the temperature target_c minus half the LOCAL cone
+// spacing at that point in the table. Because cone spacing is non-uniform,
+// this half-step width varies with where target_c falls in the table --
+// that is intentional and must not be collapsed into a fixed offset.
 //
-// target_c between two tabulated cones is NOT handled by interpolating the
-// "next lower cone" temperature -- there is nothing to interpolate there,
-// since a cone's temperature is a fixed table entry, not a function of
-// target_c. What actually happens: the lower bracketing cone (the hottest
-// tabulated entry strictly below target_c) is used AS-IS, unmodified, as
-// the anchor for the halfway-down calculation above; target_c does not
-// have to be an exact table entry to look one up. (An earlier version of
-// this comment claimed linear interpolation here; it did not match the
-// implementation -- see cone_table.py's band_bottom_c() docstring, which
-// already described the real behaviour correctly.)
+// "Local spacing" means the gap between the BRACKETING PAIR of table
+// entries around target_c, not the distance from target_c down to the
+// lower one:
+//     lower = hottest tabulated entry strictly below target_c
+//     upper = the entry immediately above `lower` (always exists -- see
+//             below)
+//     half  = (upper - lower) / 2
+//     *out_band_bottom_c = target_c - half
+//
+// A PRIOR VERSION of this function computed half = (target_c - lower) / 2
+// instead -- i.e. half the distance from target_c down to the lower cone,
+// not half the local spacing. That formula collapses to a near-zero band
+// for any target a hair above a tabulated cone: target 1222.21 C (0.01 C
+// above cone 6's 1222.2 C) produced a 0.005 C band instead of the ~8.35 C
+// the surrounding cone spacing (cone 6->cone 7 is 1222.2->1238.9) implies,
+// while target 1222.19 C (0.01 C below the same cone) produced an 18.045 C
+// band -- a 3600x difference in dwell credit from a 0.02 C difference in
+// what the user typed. This was DEFECT 2 of the ramp-assist ^6 review; see
+// PID_EXPANSION_PLAN.md sec7.3 for the numeric writeup and
+// tools/PcTools/tests/test_cone_table.py for the regression test that pins
+// the corrected widths (1222.19 -> 18.05, 1222.21 -> 8.35, 1223.00 -> 8.35).
+//
+// target_c exactly on a tabulated cone (other than the first or last) is
+// NOT treated as the midpoint of the spacing on both sides of it -- the
+// search above finds `lower` strictly below target_c, so an exact match
+// becomes the UPPER bracket and the cone below it becomes `lower`; the
+// band width is half the spacing BELOW that cone, not an average of the
+// spacing above and below. This is a deliberate, simple choice (matching
+// the one already validated in ramp_assist.py's local workaround) rather
+// than an attempt to average both neighbours.
+//
+// The upper bracket always exists when this function does not return an
+// error: target_c <= the highest tabulated cone (checked below) together
+// with `lower` being strictly below target_c means `lower` cannot be the
+// last table entry, so `lower + 1` is always a valid index.
 //
 // Returns CONE_TABLE_ERR_OUT_OF_RANGE_LOW if target_c is at or below the
 // lowest tabulated cone (there is no lower cone to measure a band against).
