@@ -1936,6 +1936,153 @@ defaults to the measured chain); pinned by
 `test_gain_search_noise_actually_changes_the_ranking` in
 `tests/test_plant_sim.py`.
 
+**2026-09-03g — PWM window modeled, actuator-cost objective added; the
+optimum still pins, just at a different edge, and it is a genuinely
+disciplined fourth elimination, not a plumbing failure.**
+
+The 2026-09-03f addendum above named the exact missing ingredient: "an
+objective that scores something noise-amplified derivative action
+directly degrades and IAE does not — commanded-duty variance/chatter, a
+rate limit or PWM-window quantization on the actuator side (explicitly
+NOT modeled...)". Both pieces of that were built this pass.
+
+**The real PWM window** (`firmware/KilnFW/App/drivers/heater_output.c`'s
+`heater_output_duty_ex`, the ordinary non-`force_new_window` path every
+PID-driven zone calls): a fixed window (`HEATER_DEFAULT_WINDOW_MS` =
+60000 ms); at each window boundary, that window's on-time is
+`duty * window_ms`, quantized — below `max(min_on_ms,
+HEATER_MIN_ON_MS_FLOOR)` (10000 ms) renders OFF for the whole window (not
+rounded up), within `min_off_ms` (default 2000 ms) of the full window
+renders ON for the whole window; and a RUNNING min-on hold independent of
+the window boundary — once actually on, an off decision is deferred until
+10 s of continuous on-time has accumulated, even across a window edge.
+`plant_sim.py`'s `_pwm_render` is a line-for-line port of this (see its
+own docstring), driven into `FOPDTPlant.step()` in place of the
+continuous PID duty when `run_profile(..., pwm_window_ms>0)`. Default is
+`0.0` (off, byte-identical to every prior caller — confirmed by
+`test_run_profile_pwm_window_defaults_off_byte_identical`); the gain
+search entry points default it ON at `HEATER_DEFAULT_WINDOW_MS`, same
+convention as the noise defaults.
+
+**Actuator cost, TWO signals, because they disagree in sign.**
+`sim_relay_transitions_per_hour` (post-window relay transition count,
+`heater_output_state_t.cycle_count`'s own accounting, mirrored) is the
+obvious first candidate and IS physically grounded — but a sweep of
+`kp_mult` 0.25×–8.0× on `p7_oldmatrix_http.jsonl` z0 found it **DECREASES**
+as kp rises (98.5/hr at 0.25× down to 46.2/hr at 8.0×), the opposite of
+"more gain chatters the relay more." This is not a bug: the window samples
+duty ONCE per 60 s to decide that window's one on-time, so it is a hard
+low-pass filter on relay-visible chatter by construction, and a
+higher-gain loop that settles faster actually spends MORE time saturated
+near duty 0 or 1 (fewer window-boundary crossings). `sim_duty_chatter_rate`
+(mean `|Δduty|` per tick, measured on the continuous PID output BEFORE the
+window quantizes it) was added as the second signal and rises
+monotonically over the same sweep (~0.0027 to ~0.0170 duty/s, roughly
+6×) — it is what a large kp/kd actually does to the control signal,
+whether or not today's window happens to filter it into relay
+transitions. Both are reported, never just one.
+
+**Actuator-cost grounding, corrected mid-pass.** `RELAY_RATED_LIFE_CYCLES`
+was initially set to 1e6 from a `heater_output.h` comment aside ("their
+own loaded life is 1e6 operations"). Corrected to **1e5** after the
+project's own `firmware/KilnFW/App/drivers/relay_cycles.h` was pointed
+to — the module that actually performs persisted, per-relay lifetime
+contact-cycle accounting, not a comment aside: *"the EE2-12NUH relays on
+this board are electromechanical, with a contact life budget on the
+order of 10^5 operations (docs/HARDWARE.md). A 60 s time-proportioning
+window can spend that in a few hundred hours of firing... 'A kiln
+controller that silently eats a relay's contact life is a controller
+that fails mid-firing at cone temperature.'"* The arithmetic
+cross-checks 1e5, not 1e6 (see `sim_relay_cycle_life_fraction_per_hour`'s
+docstring): at a 10 s window, 1e5 / 360 cycles/hour = 278 hours — "a few
+hundred hours," matching; 1e6 would give 2,778 hours, which would not.
+The CONSEQUENCE this module states (a controller failing mid-firing at
+cone temperature, ruining the load) is what makes the relay-life signal a
+real cost, not merely a maintenance one — but note it is priced in
+**degrees of tracking error traded per hour of life-fraction consumed**,
+a value judgement this repo has no data to fix a single number for (see
+below), not a probability of that specific failure.
+
+**Composite objective, both weights swept, not invented.**
+`per_zone_gain_grid_search` gained
+`actuator_weight_c_per_life_fraction_per_hour` and
+`actuator_weight_c_per_duty_chatter_rate` (both default `0.0` — identical
+argmin to before these parameters existed unless a caller opts in) and
+now reports, per zone, BOTH the tracking-error and BOTH actuator
+components separately at baseline and at the chosen gains
+(`fit_iae_*`, `fit_life_fraction_per_hour_*`, `fit_transitions_per_hour_*`,
+`fit_duty_chatter_rate_*`) plus the composite actually used for argmin
+(`fit_composite_*`) — never only the blended number.
+`actuator_weight_sensitivity_sweep` runs the search across
+`GAIN_SEARCH_ACTUATOR_WEIGHTS_C_PER_DUTY_CHATTER_RATE = (0, 1, 10, 50,
+100, 300)` rather than committing to one invented C-per-duty-chatter
+trade rate.
+
+**Re-ran the gain search on `p7_oldmatrix_http.jsonl`, sweeping the
+duty-chatter weight, on both the narrow (0.5×–2.0×) and wide
+(0.25×–8.0×) grids:**
+
+| grid | weight | z0 kp_mult | z1 kp_mult | z2 kp_mult |
+|---|---|---|---|---|
+| narrow | 0 – 10 | 2.00 (edge) | 2.00 (edge) | 2.00 (edge) |
+| narrow | 50 | 1.50 (interior) | 0.50 (edge) | 0.50 (edge) |
+| narrow | 100 – 300 | 0.50–1.25 | 0.50 (edge) | 0.50 (edge) |
+| wide | 50 | 1.25 (interior) | 0.25 (NEW edge) | 0.25 (NEW edge) |
+| wide | 100 | 0.25 (NEW edge) | 0.25 (NEW edge) | 0.25 (NEW edge) |
+
+**The optimum still pins — the acceptance criterion (an interior optimum
+that stays put when the grid widens) is not met.** At low weight it pins
+at the same high-kp edge the 2026-09-03e/f addenda already found. At
+moderate weight one zone (z0) briefly lands interior on the narrow grid,
+but the SAME weight on the wide grid pins it at the new low-kp edge
+instead — not a stable point, a moving one. At high weight every zone
+pins at whichever edge has the lowest chatter. This is the expected shape
+for the objective actually built: `sim_duty_chatter_rate` rises
+monotonically in kp over the tested range with no floor or saturation of
+its own, and IAE's own interior structure (it does dip and rise again
+across 0.25×–8.0× — see the per-mult IAE column in the table this
+addendum's underlying sweep produced) is not strong enough curvature to
+pin a joint (kp, ki) composite against a linear, unsaturating actuator
+penalty. A linear cost plus a weight is mathematically guaranteed to push
+the argmin toward whichever grid edge the weight favors; it does not, by
+itself, manufacture an interior minimum that survives widening the
+search range.
+
+**What is still missing, stated plainly per this task's own instruction:**
+a genuinely curved (saturating, or floored) actuator-cost signal — one
+that itself has an interior minimum in kp, or a threshold below which
+chatter demonstrably does not matter — or independent evidence bounding
+the correct weight so the search is not free to slide along whichever
+edge an arbitrarily-swept constant favors. Absent either, **this
+simulator's gain search still cannot reject an ever-larger kp/kd on its
+own** — modeling the real PWM window and adding two real, differently-
+grounded actuator signals changed WHICH edge the search pins at (and
+proved the post-window relay-transition metric moves the wrong direction
+entirely, a finding worth keeping on its own), but did not produce the
+interior, grid-width-stable optimum this task set out to find. Four
+honest eliminations in a row (wrong gains, no noise model, noise at
+measured magnitude, and now actuator cost with a swept weight) is a
+result, not a search failure: **no retune candidate survives from this
+simulator**, and the missing piece is now specifically characterized
+(actuator-cost curvature/saturation, or an independently-sourced weight)
+rather than vaguely gestured at.
+
+No firmware change made here (constraint of this pass). Reproducible via
+`plant_sim.actuator_weight_sensitivity_sweep(rows_fit, weight_kind=
+'duty_chatter', grid=<...>)`; pinned by
+`test_pwm_render_matches_heater_output_c_constant_duty`,
+`test_pwm_render_below_min_on_floor_renders_off_not_rounded_up`,
+`test_pwm_render_near_full_duty_renders_full_window_on`,
+`test_pwm_running_min_on_hold_survives_a_window_boundary`,
+`test_run_profile_pwm_window_defaults_off_byte_identical`,
+`test_run_profile_pwm_window_changes_the_trajectory_when_enabled`,
+`test_sim_relay_transitions_and_life_fraction_consistent`,
+`test_sim_duty_chatter_rate_rises_monotonically_with_kp_on_this_capture`,
+`test_per_zone_gain_grid_search_reports_actuator_cost_components_separately`,
+`test_per_zone_gain_grid_search_pwm_default_is_firmware_window`,
+`test_actuator_weight_zero_with_pwm_on_matches_iae_only_argmin` and
+`test_actuator_weight_sensitivity_sweep_shape` in `tests/test_plant_sim.py`.
+
 ### 3.5 Documentation — CLOSED 2026-09-01 (`d382b06`)
 
 `PID_CONTROL.md` now carries the strength-scaling formula for the fuzzy layer,

@@ -1519,3 +1519,207 @@ def test_gain_search_noise_actually_changes_the_ranking():
         "enabling measured noise/quantization in the gain search had no "
         "effect on any zone's fit-set IAE -- looks inert"
     )
+
+
+# ---------------------------------------------------------------------------
+# PWM window model + actuator-cost objective (this task, 2026-09-03g).
+# ---------------------------------------------------------------------------
+
+def test_pwm_render_matches_heater_output_c_constant_duty():
+    """Line-for-line check of _pwm_render against heater_output_duty_ex's
+    documented behaviour at a constant mid-range duty: 0.5 duty on a 60 s
+    window with a 10 s min-on floor and 2 s min-off should render exactly
+    30 s on then 30 s off, repeating, with 2 transitions per window."""
+    st = ps._PwmZoneState()
+    on_pattern = [ps._pwm_render(st, 0.5, 60000.0, 0.0, 0.0, 1000.0) for _ in range(180)]
+    assert on_pattern[:30] == [True] * 30
+    assert on_pattern[30:60] == [False] * 30
+    assert st.cycle_count == 6  # 2 transitions/window * 3 windows
+
+
+def test_pwm_render_below_min_on_floor_renders_off_not_rounded_up():
+    """A duty whose computed on-time is below HEATER_MIN_ON_MS_FLOOR must
+    render OFF for the whole window (firmware's explicit rule -- see
+    heater_output.c's comment: "unachievably short -- render as off, not
+    rounded up"), not get rounded up to the floor.
+
+    NEGATIVE TEST (proof this can fail): temporarily changed _pwm_render's
+    `if on_ms < eff_min_on_ms: on_ms = 0.0` to `on_ms = eff_min_on_ms` (the
+    "round up" behaviour the firmware comment explicitly rejects).
+    Re-running this test then failed with `assert 2 == 0` (the relay now
+    turned on once per window instead of staying off). Reverted.
+    """
+    st = ps._PwmZoneState()
+    # 0.1 * 60000 = 6000 ms < 10000 ms floor.
+    for _ in range(120):
+        ps._pwm_render(st, 0.1, 60000.0, 0.0, 0.0, 1000.0)
+    assert st.cycle_count == 0
+    assert st.relay_on is False
+
+
+def test_pwm_render_near_full_duty_renders_full_window_on():
+    """An on-time within min_off_ms of the full window renders as ON for
+    the whole window (firmware's symmetric case for duty near 1), not as a
+    short on-pulse followed by an unachievable short off-pulse."""
+    st = ps._PwmZoneState()
+    for _ in range(120):
+        ps._pwm_render(st, 0.97, 60000.0, 0.0, 2000.0, 1000.0)
+    assert st.relay_on is True
+    assert st.cycle_count == 1  # one transition: off (initial) -> on, then held
+
+
+def test_pwm_running_min_on_hold_survives_a_window_boundary():
+    """Once actually on, the relay must stay on until HEATER_MIN_ON_MS_FLOOR
+    (10 s) of continuous on-time has accumulated, even if a new window's
+    quantized on-time would otherwise turn it off immediately -- the
+    "running min-on hold ... across window boundaries if need be" comment
+    in heater_output.c."""
+    st = ps._PwmZoneState()
+    on0 = ps._pwm_render(st, 1.0, 5000.0, 0.0, 0.0, 1000.0)
+    assert on0 is True
+    still_on_ticks = [ps._pwm_render(st, 0.0, 5000.0, 0.0, 0.0, 1000.0) for _ in range(9)]
+    assert all(still_on_ticks), "relay dropped before HEATER_MIN_ON_MS_FLOOR elapsed"
+    assert ps._pwm_render(st, 0.0, 5000.0, 0.0, 0.0, 1000.0) is False
+
+
+def test_run_profile_pwm_window_defaults_off_byte_identical():
+    """pwm_window_ms=0.0 (run_profile's own default) must reproduce the
+    exact old code path -- the plant sees the PID's continuous duty, not a
+    PWM-rendered relay state -- so every existing caller is unaffected."""
+    rows = _synthetic_ramp_dwell_rows()
+    r1, _ = ps.run_profile_from_capture(rows)
+    r2, _ = ps.run_profile_from_capture(rows, pwm_window_ms=0.0)
+    assert np.array_equal(r1['temps'], r2['temps'])
+    assert r1['pwm_active'] is False
+    assert r2['pwm_active'] is False
+    assert list(r1['relay_cycles']) == [0, 0, 0]
+
+
+def test_run_profile_pwm_window_changes_the_trajectory_when_enabled():
+    """pwm_window_ms>0 must actually drive the plant differently than
+    continuous duty -- proves the PWM path is wired to plant.step(), not
+    computed and discarded."""
+    rows = _synthetic_ramp_dwell_rows()
+    r_continuous, _ = ps.run_profile_from_capture(rows)
+    r_pwm, _ = ps.run_profile_from_capture(rows, pwm_window_ms=ps.HEATER_DEFAULT_WINDOW_MS)
+    assert r_pwm['pwm_active'] is True
+    assert not np.array_equal(r_continuous['temps'], r_pwm['temps'])
+    assert r_pwm['relay_on'].dtype == bool
+    assert r_pwm['relay_on'].shape == r_pwm['temps'].shape
+
+
+def test_sim_relay_transitions_and_life_fraction_consistent():
+    rows = _synthetic_ramp_dwell_rows()
+    result, _ = ps.run_profile_from_capture(rows, pwm_window_ms=ps.HEATER_DEFAULT_WINDOW_MS)
+    for zone in range(3):
+        trans_hr = ps.sim_relay_transitions_per_hour(result, zone)
+        life_hr = ps.sim_relay_cycle_life_fraction_per_hour(result, zone)
+        assert trans_hr >= 0.0
+        assert life_hr == pytest.approx((trans_hr / 2.0) / ps.RELAY_RATED_LIFE_CYCLES)
+
+
+def test_sim_duty_chatter_rate_rises_monotonically_with_kp_on_this_capture():
+    """Negative-tested finding (see sim_duty_chatter_rate's docstring): a
+    larger kp/kd combination must increase pre-window duty-derivative
+    chatter, even though it DECREASES post-window relay-transition count
+    (the window itself filters that mechanism out) -- this is the whole
+    reason both actuator signals exist.
+
+    NEGATIVE TEST (proof this can fail): temporarily changed the
+    `assert chatter == sorted(chatter)` line below to
+    `assert chatter == sorted(chatter, reverse=True)` (the wrong
+    direction) and re-ran. Captured red: `AssertionError: duty chatter not
+    monotonic in kp: [...]`. Reverted.
+    """
+    rows = _synthetic_ramp_dwell_rows()
+    chatter = []
+    for kp_mult in (0.5, 1.0, 2.0, 4.0):
+        kp_vec = [ps.BOARD_ZONE_KP[0] * kp_mult] + list(ps.BOARD_ZONE_KP[1:])
+        result, _ = ps.run_profile_from_capture(
+            rows, kp=kp_vec, ki=ps.BOARD_ZONE_KI, kd=ps.BOARD_ZONE_KD,
+            measurement_noise_std_c=ps.MEASURED_THERMO_NOISE_STD_C,
+            measurement_quantum_c=ps.MAX31856_QUANTUM_C, measurement_seed=0,
+        )
+        chatter.append(ps.sim_duty_chatter_rate(result, 0))
+    assert chatter == sorted(chatter), f"duty chatter not monotonic in kp: {chatter}"
+    assert chatter[-1] > chatter[0] * 1.5, "chatter did not grow meaningfully with kp"
+
+
+def test_per_zone_gain_grid_search_reports_actuator_cost_components_separately():
+    """The composite objective must never be the only number returned --
+    per_zone_gain_grid_search's own docstring requirement. Checks all the
+    separately-reported fields exist and the composite is arithmetically
+    consistent with its stated components."""
+    rows = _synthetic_ramp_dwell_rows()
+    grid = (0.5, 1.0, 2.0)
+    fit = ps.per_zone_gain_grid_search(
+        rows, grid=grid, pwm_window_ms=ps.HEATER_DEFAULT_WINDOW_MS,
+        actuator_weight_c_per_duty_chatter_rate=10.0,
+    )
+    for zone in range(3):
+        f = fit[zone]
+        for key in ("fit_iae_baseline", "fit_iae_tuned",
+                    "fit_life_fraction_per_hour_baseline", "fit_life_fraction_per_hour_tuned",
+                    "fit_transitions_per_hour_baseline", "fit_transitions_per_hour_tuned",
+                    "fit_duty_chatter_rate_baseline", "fit_duty_chatter_rate_tuned",
+                    "fit_composite_baseline", "fit_composite_tuned"):
+            assert key in f, f"missing {key} for zone {zone}"
+        expected = f["fit_iae_tuned"] + 10.0 * f["fit_duty_chatter_rate_tuned"]
+        assert f["fit_composite_tuned"] == pytest.approx(expected)
+
+
+def test_per_zone_gain_grid_search_pwm_default_is_firmware_window():
+    """per_zone_gain_grid_search (unlike run_profile itself) defaults
+    pwm_window_ms to HEATER_DEFAULT_WINDOW_MS, not 0.0 -- same convention
+    as the noise/quantization defaults -- because actuator_weight_... only
+    means anything when there is a PWM window to generate relay
+    transitions/duty chatter from."""
+    import inspect
+    sig = inspect.signature(ps.per_zone_gain_grid_search)
+    assert sig.parameters["pwm_window_ms"].default == ps.HEATER_DEFAULT_WINDOW_MS
+    rows = _synthetic_ramp_dwell_rows()
+    fit = ps.per_zone_gain_grid_search(rows, grid=(1.0,))
+    assert fit[0]["fit_transitions_per_hour_baseline"] >= 0.0
+
+
+def test_actuator_weight_zero_with_pwm_on_matches_iae_only_argmin():
+    """With PWM enabled, actuator_weight=0.0 must select the SAME candidate
+    as an equivalent search that only ever looks at the IAE component
+    (never at actuator cost) -- proves the composite's weighting really is
+    inert at weight 0.0, on the trajectories PWM produces."""
+    rows = _synthetic_ramp_dwell_rows()
+    grid = (0.5, 1.0, 1.5, 2.0)
+    fit = ps.per_zone_gain_grid_search(
+        rows, grid=grid, pwm_window_ms=ps.HEATER_DEFAULT_WINDOW_MS,
+        actuator_weight_c_per_duty_chatter_rate=0.0,
+        actuator_weight_c_per_life_fraction_per_hour=0.0,
+    )
+    for zone in range(3):
+        base_kp = list(ps.BOARD_ZONE_KP)
+        base_ki = list(ps.BOARD_ZONE_KI)
+        best_iae, best_mult = None, None
+        for kp_mult in grid:
+            for ki_mult in grid:
+                kp_vec = list(base_kp); kp_vec[zone] = base_kp[zone] * kp_mult
+                ki_vec = list(base_ki); ki_vec[zone] = base_ki[zone] * ki_mult
+                scores = ps._scores_over_seeds(
+                    rows, kp_vec, ki_vec, list(ps.BOARD_ZONE_KD), 'coupled', 'ff_hold', zone,
+                    ps.MEASURED_THERMO_NOISE_STD_C, ps.MAX31856_QUANTUM_C, ps.GAIN_SEARCH_NOISE_SEEDS,
+                    ps.HEATER_DEFAULT_WINDOW_MS, 0.0, 0.0,
+                )
+                if best_iae is None or scores['iae'] < best_iae:
+                    best_iae, best_mult = scores['iae'], (kp_mult, ki_mult)
+        assert fit[zone]["kp_mult"] == best_mult[0]
+        assert fit[zone]["ki_mult"] == best_mult[1]
+
+
+def test_actuator_weight_sensitivity_sweep_shape():
+    rows = _synthetic_ramp_dwell_rows()
+    sweep = ps.actuator_weight_sensitivity_sweep(
+        rows, weight_kind='duty_chatter', weights=(0.0, 50.0), grid=(0.5, 1.0, 2.0))
+    for zone in range(3):
+        assert len(sweep[zone]["mult_by_weight"]) == 2
+        for row in sweep[zone]["mult_by_weight"]:
+            assert "kp_mult" in row and "fit_duty_chatter_rate_tuned" in row
+    with pytest.raises(ValueError):
+        ps.actuator_weight_sensitivity_sweep(rows, weight_kind='bogus')

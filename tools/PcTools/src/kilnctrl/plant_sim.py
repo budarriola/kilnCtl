@@ -87,9 +87,21 @@ oracle.
   a specific gain change to the third decimal place, or to replace a
   firing for zone 2's dwell behavior specifically.
 
-Not modeled: PWM window quantization (``heater_output.c``) -- averages out
-under 10 s sampling and is not implicated by any of the five captures'
-error shape.
+PWM window quantization (``heater_output.c``) IS modeled (added
+2026-09-03g, see ``run_profile``'s ``pwm_window_ms``/``pwm_min_on_ms``/
+``pwm_min_off_ms`` and ``_pwm_render``/``HEATER_DEFAULT_WINDOW_MS`` below).
+Superseded reasoning: this was previously left unmodeled on the theory that
+it "averages out under 10 s sampling and is not implicated by any of the
+five captures' error shape" -- true for TRACKING error against those five
+captures (default OFF in ``run_profile`` keeps them byte-identical), but
+irrelevant to what the window actually damages, which is the RELAY, not
+the temperature curve. PID_EXPANSION_PLAN.md sec 3.4's 2026-09-03f addendum
+found the gain search's real defect was exactly this gap: an objective
+scored purely on tracking error cannot penalize actuator chatter, so it
+answers "more gain, always" regardless of noise. Default OFF in
+``run_profile`` itself (``pwm_window_ms=0.0``); default ON (at firmware's
+own 60 s window) in the gain-search entry points, same convention as the
+noise/quantization model below.
 
 Measurement noise/quantization IS modeled (added 2026-09-03, see
 ``run_profile``'s ``measurement_quantum_c``/``measurement_noise_std_c``/
@@ -1212,12 +1224,124 @@ def _broadcast_zone_param(x, n=None):
     return arr
 
 
+# ---------------------------------------------------------------------------
+# PWM (time-proportioning) window model -- added 2026-09-03g, closing the
+# "Not modeled" gap the module docstring and PID_EXPANSION_PLAN.md sec 3.4's
+# 2026-09-03f addendum both flagged: a gain search scored on whole-run mean
+# |error| alone cannot see relay chatter, so it correctly (given the
+# question it was asked) answers "more gain, always." This section gives the
+# duty command an actual relay to drive, faithfully mirroring
+# ``firmware/KilnFW/App/drivers/heater_output.c``'s ``heater_output_duty_ex``
+# (the non-``force_new_window`` path -- ``heater_output_duty()``, what every
+# ordinary PID-driven zone actually calls; the ``_relay_step`` early-window
+# variant used only by the bang-bang-mode fuzzy relay law is out of scope
+# here) line for line:
+#
+#   - a fixed window (default ``HEATER_DEFAULT_WINDOW_MS`` = 60 s);
+#   - at each window boundary, this window's on-time is
+#     ``duty * window_ms``, quantized: an on-time below
+#     ``max(min_on_ms, HEATER_MIN_ON_MS_FLOOR)`` renders as OFF for the
+#     whole window (not rounded up), and an on-time within ``min_off_ms`` of
+#     the full window renders as ON for the whole window;
+#   - a RUNNING min-on hold independent of the window boundary: once the
+#     relay is actually on, an off decision is deferred until
+#     ``HEATER_MIN_ON_MS_FLOOR`` (10 s) of continuous on-time has
+#     accumulated, even across a window boundary.
+#
+# ``HEATER_MIN_ON_MS_FLOOR``/``HEATER_DEFAULT_WINDOW_MS``/
+# ``HEATER_DEFAULT_MIN_OFF_MS`` below are the literal values from
+# ``heater_output.h`` (10000/60000/2000 ms), not re-derived.
+# ---------------------------------------------------------------------------
+
+HEATER_MIN_ON_MS_FLOOR = 10000.0
+HEATER_DEFAULT_WINDOW_MS = 60000.0
+HEATER_DEFAULT_MIN_OFF_MS = 2000.0
+
+#: Rated mechanical cycle life of the on-board relays (EE2-12NUH), from
+#: ``firmware/KilnFW/App/drivers/relay_cycles.h`` -- the firmware module
+#: that ACTUALLY performs lifetime contact-cycle accounting (persisted,
+#: shown to the operator), not just a comment aside. Its own words:
+#: "the EE2-12NUH relays on this board are electromechanical, with a
+#: contact life budget on the order of 10^5 operations (docs/HARDWARE.md).
+#: A 60 s time-proportioning window can spend that in a few hundred hours
+#: of firing. 'A kiln controller that silently eats a relay's contact
+#: life is a controller that fails mid-firing at cone temperature' -- so
+#: the count is kept, persisted, and shown to the operator." That last
+#: sentence is why this constant matters at all: the failure mode is not a
+#: maintenance inconvenience, it is a controller that can go dead at cone
+#: temperature and ruin the load in the kiln.
+#:
+#: ``heater_output.h``'s ``window_ms`` field comment separately states K1-K4
+#: itself is rated 1e6 operations ("their own loaded life") -- 10x this
+#: constant. Both are real firmware comments and they do not reconcile as
+#: written; ``relay_cycles.h`` is used here because it is the number wired
+#: into the actual persisted accounting logic and its own arithmetic
+#: cross-checks ("a few hundred hours of firing" at a 10 s window: 360
+#: windows/hour * 2 transitions/window = 720 transitions/hour = 360
+#: cycles/hour, and 1e5 / 360 = 278 hours -- "a few hundred hours" matches;
+#: 1e6 / 360 = 2,778 hours would not read as "a few hundred"). Treat this
+#: as the firmware's own stated OPERATING BUDGET (with margin below the
+#: manufacturer's absolute rating), not a from-scratch estimate.
+RELAY_RATED_LIFE_CYCLES = 1.0e5
+
+
+@dataclasses.dataclass
+class _PwmZoneState:
+    """Mirrors ``heater_output_state_t``'s time-proportioned fields."""
+    window_started: bool = False
+    window_elapsed_ms: float = 0.0
+    on_ms_this_window: float = 0.0
+    relay_on: bool = False
+    on_elapsed_ms: float = 0.0
+    cycle_count: int = 0  # transitions, matching heater_output.c's note_transition()
+
+
+def _pwm_render(state: _PwmZoneState, duty: float, window_ms: float, min_on_ms: float,
+                 min_off_ms: float, dt_ms: float) -> bool:
+    """One tick of ``heater_output_duty_ex(..., force_new_window=False)``,
+    translated line for line from ``heater_output.c``. Returns the relay
+    state to actually command (and drive the plant with) this tick; mutates
+    ``state`` in place, including ``cycle_count`` for actuator-cost
+    accounting."""
+    duty = min(max(duty, 0.0), 1.0)
+
+    eff_min_on_ms = max(min_on_ms, HEATER_MIN_ON_MS_FLOOR)
+    if eff_min_on_ms > window_ms:
+        eff_min_on_ms = window_ms
+
+    state.window_elapsed_ms += dt_ms
+    if not state.window_started or state.window_elapsed_ms >= window_ms:
+        state.window_started = True
+        state.window_elapsed_ms = 0.0
+        on_ms = duty * window_ms
+        if on_ms < eff_min_on_ms:
+            on_ms = 0.0
+        elif window_ms - on_ms < min_off_ms:
+            on_ms = window_ms
+        state.on_ms_this_window = on_ms
+
+    want_on = state.window_elapsed_ms < state.on_ms_this_window
+
+    if state.relay_on:
+        state.on_elapsed_ms += dt_ms
+        if not want_on and state.on_elapsed_ms < HEATER_MIN_ON_MS_FLOOR:
+            want_on = True
+    elif want_on:
+        state.on_elapsed_ms = 0.0
+
+    if want_on != state.relay_on:
+        state.cycle_count += 1
+    state.relay_on = want_on
+    return want_on
+
+
 def run_profile(segs, start_temp, kp=0.06, ki=0.0003, kd=0.0,
                  climb_mode='coupled', integral_floor='ff_hold', ambient=20.0,
                  controller_K_inv=None, controller_tau=None, plant_regime='measured',
                  controller_K=None, controller_L_pair=None,
                  fuzzy_strength_pct=0.0,
-                 measurement_quantum_c=0.0, measurement_noise_std_c=0.0, measurement_seed=0):
+                 measurement_quantum_c=0.0, measurement_noise_std_c=0.0, measurement_seed=0,
+                 pwm_window_ms=0.0, pwm_min_on_ms=0.0, pwm_min_off_ms=0.0):
     """Run the plant+PID loop over an explicit segment list.
 
     ``segs``: list of ``(t0, t1, c0, c1, rate)`` tuples, ``rate`` signed
@@ -1296,6 +1420,37 @@ def run_profile(segs, start_temp, kp=0.06, ki=0.0003, kd=0.0,
     (what each PID actually saw each tick, post noise+quantization) --
     identical to ``temps`` when both measurement args are 0.0, and the
     only honest way to test the noise/quantization chain end to end.
+
+    ``pwm_window_ms``/``pwm_min_on_ms``/``pwm_min_off_ms``: the PID's
+    continuous duty in [0,1] has always driven the plant directly -- no
+    model of ``heater_output.c``'s time-proportioning window, which is what
+    actually turns that duty into relay transitions on real hardware. This
+    was a deliberate, documented omission (see the module docstring's "Not
+    modeled" section, now superseded) until PID_EXPANSION_PLAN.md sec 3.4's
+    2026-09-03f addendum found it load-bearing: with no actuator downstream
+    of the duty command, nothing in the objective can register the chatter
+    a large kp/kd combination causes, so a gain search only ever answers
+    "more gain, always." ``pwm_window_ms=0.0`` (default) keeps the exact old
+    code path -- the plant sees the PID's continuous duty every tick,
+    byte-identical to every caller before this parameter existed.
+    ``pwm_window_ms>0`` renders EVERY zone's duty through ``_pwm_render``
+    (a line-for-line port of ``heater_output_duty_ex``'s ordinary,
+    non-``force_new_window`` path -- see that function's own docstring)
+    before the plant ever sees it: the plant is driven by the actual 0/1
+    relay state, not the continuous duty, so its own tau/lag is what
+    averages the PWM back out, exactly as on real hardware. ``pwm_min_on_ms``/
+    ``pwm_min_off_ms`` of ``0.0`` fall back to ``HEATER_DEFAULT_MIN_ON_MS``
+    (via the floor inside ``_pwm_render``) / ``HEATER_DEFAULT_MIN_OFF_MS``,
+    matching a zone with no per-zone heater timing configured (firmware's
+    own "0 = not configured" convention, see ``heater_output.h``).
+
+    The returned dict's ``relay_on`` array (bool, same shape as ``duty``) is
+    the actual 0/1 relay command each zone got each tick when PWM modeling
+    is active (all-``False``/unset when it is not); ``relay_cycles`` is each
+    zone's whole-run relay transition count (``heater_output_state_t``'s own
+    ``cycle_count`` field, mirrored here) -- see
+    ``sim_relay_transitions_per_hour``/``sim_relay_cycle_life_fraction_per_hour``
+    below for the actuator-cost figures the gain search reports.
     """
     if plant_regime == 'physical':
         plant = PhysicalKilnPlant(DT, ambient=ambient, start_temp=start_temp)
@@ -1336,6 +1491,10 @@ def run_profile(segs, start_temp, kp=0.06, ki=0.0003, kd=0.0,
     # scalar caller is unaffected.
     noise_std_arr = _broadcast_zone_param(measurement_noise_std_c)
     rng = np.random.default_rng(measurement_seed) if np.any(noise_std_arr > 0.0) else None
+    pwm_active = pwm_window_ms > 0.0
+    pwm_states = [_PwmZoneState() for _ in range(N_ZONES)] if pwm_active else None
+    dt_ms = DT * 1000.0
+    relay_log = []
     while t <= total_t:
         seg_idx = None
         for si, (t0, t1, c0, c1, rate) in enumerate(segs):
@@ -1372,18 +1531,34 @@ def run_profile(segs, start_temp, kp=0.06, ki=0.0003, kd=0.0,
         meas_log.append(meas_row.copy())
         if lag_ff is not None:
             lag_ff.record(duty)
-        plant.step(duty)
+        if pwm_active:
+            applied = np.array([
+                1.0 if _pwm_render(pwm_states[i], duty[i], pwm_window_ms, pwm_min_on_ms,
+                                    pwm_min_off_ms, dt_ms) else 0.0
+                for i in range(N_ZONES)
+            ])
+            relay_log.append(applied.astype(bool))
+            plant.step(applied)
+        else:
+            plant.step(duty)
         t += DT
 
     targets_arr = np.array(targets)
     max_target = float(targets_arr.max()) if len(targets_arr) else float(ambient)
+    relay_cycles = ([s.cycle_count for s in pwm_states] if pwm_active
+                     else [0, 0, 0])
+    relay_on_arr = (np.array(relay_log) if pwm_active
+                     else np.zeros((len(times), N_ZONES), dtype=bool))
     return dict(t=np.array(times), target=targets_arr,
                 temps=np.array(temps_log), duty=np.array(duty_log),
                 measured=np.array(meas_log),
                 seg_bounds=[s[1] for s in segs],
                 max_target_c=max_target,
                 extrapolation=is_extrapolation(max_target),
-                plant_regime=plant_regime)
+                plant_regime=plant_regime,
+                relay_on=relay_on_arr,
+                relay_cycles=relay_cycles,
+                pwm_active=pwm_active)
 
 
 def segs_from_capture(rows: Sequence[log_analysis.PollRow]):
@@ -1479,6 +1654,80 @@ def sim_whole_run_iae_normalized(result: dict, zone: int) -> float:
     """
     err = np.abs(result['temps'][:, zone] - result['target'])
     return float(err.mean())
+
+
+def sim_relay_transitions_per_hour(result: dict, zone: int) -> float:
+    """Actuator-chatter figure: ``zone``'s whole-run relay transition count
+    (``result['relay_cycles']``, only meaningful when ``run_profile`` was
+    called with ``pwm_window_ms>0`` -- otherwise 0) normalized to
+    transitions/hour by the run's own duration, so runs of different length
+    are comparable. Mirrors ``heater_output_state_t.cycle_count``'s own
+    accounting (see ``_pwm_render``) -- this is what physically wears K1-K4
+    (and whatever it switches downstream)."""
+    t = result['t']
+    duration_s = float(t[-1] - t[0]) if len(t) > 1 else 0.0
+    if duration_s <= 0.0:
+        return 0.0
+    return result['relay_cycles'][zone] * 3600.0 / duration_s
+
+
+def sim_relay_cycle_life_fraction_per_hour(result: dict, zone: int) -> float:
+    """``sim_relay_transitions_per_hour`` converted to a fraction of
+    ``RELAY_RATED_LIFE_CYCLES`` consumed per hour of firing (a relay
+    "cycle" is one full ON->OFF->ON, i.e. 2 transitions, matching how
+    ``relay_cycles.h``'s own "a 60 s time-proportioning window can spend
+    [the ~1e5-operation contact life budget] in a few hundred hours of
+    firing" reconciles against ``RELAY_RATED_LIFE_CYCLES``: at a 10 s
+    window (the smallest firmware allows, ``HEATER_MIN_ON_MS_FLOOR *
+    HEATER_MIN_WINDOW_MULTIPLE``-adjacent), 360 windows/hour * 2
+    transitions/window = 720 transitions/hour = 360 cycles/hour, and
+    1e5 / 360 = 278 hours -- "a few hundred hours", matching. This is the
+    physically GROUNDED half of the actuator-cost accounting (the number
+    itself, and the consequence of exhausting it -- ``relay_cycles.h``'s
+    own words: "a controller that fails mid-firing at cone temperature")
+    -- see ``GAIN_SEARCH_ACTUATOR_WEIGHTS_C_PER_LIFE_FRACTION_PER_HOUR``
+    below for why the C-per-life-fraction TRADE weight is deliberately NOT
+    similarly grounded and is swept instead."""
+    cycles_per_hour = sim_relay_transitions_per_hour(result, zone) / 2.0
+    return cycles_per_hour / RELAY_RATED_LIFE_CYCLES
+
+
+def sim_duty_chatter_rate(result: dict, zone: int) -> float:
+    """Whole-run mean absolute per-tick change in COMMANDED duty
+    (``|diff(duty)| / DT``, duty-fraction/s) -- a second, complementary
+    actuator-cost signal to ``sim_relay_transitions_per_hour``, measured on
+    the continuous PID output BEFORE the PWM window quantizes it, not
+    after.
+
+    Why both are needed: negative-tested this module's own PWM window
+    model (``_pwm_render``) by sweeping ``kp_mult`` 0.25x-8.0x on a real
+    fit capture and found ``sim_relay_transitions_per_hour`` DECREASES as
+    kp rises (98.5/hr at 0.25x down to 46.2/hr at 8.0x) -- the OPPOSITE of
+    what "higher gain chatters the relay more" would predict. This is not
+    a bug: ``heater_output_duty_ex`` samples ``duty`` only ONCE per 60 s
+    window to decide that window's single on-time, so intra-window
+    ringing at whatever rate a large kp/kd combination produces can never
+    reach the relay as extra transitions -- the window is a hard low-pass
+    filter on relay-visible chatter BY CONSTRUCTION, and a higher-gain
+    loop that settles faster/harder actually spends MORE time saturated
+    near duty 0 or 1 (fewer window-boundary crossings), not less. Real
+    relay transition COUNT is therefore not the right signal for the
+    "large kp/kd rings against sensor noise" mechanism this task exists to
+    price -- confirmed by the same sweep: ``mean(abs(diff(duty)))`` (this
+    function) rises MONOTONICALLY with kp_mult (0.0027 at 0.25x to 0.0170
+    at 8.0x, roughly 6x), tracking exactly the ringing the relay-transition
+    count cannot see. Both are reported (see ``per_zone_gain_grid_search``)
+    rather than picking one, since they measure different, both-real
+    things: relay contact life (post-window, physically grounded against
+    K1-K4's rated cycles) and control-loop aggressiveness/ringing
+    (pre-window, the mechanism actually driving whatever wear the window
+    does not filter out -- element inrush current, downstream contactor
+    chatter if the window is shortened later, etc).
+    """
+    duty = result['duty'][:, zone]
+    if len(duty) < 2:
+        return 0.0
+    return float(np.mean(np.abs(np.diff(duty))) / DT)
 
 
 # ---------------------------------------------------------------------------
@@ -1593,37 +1842,98 @@ MEASURED_THERMO_NOISE_STD_C = (0.0584, 0.0631, 0.0907)
 #: not two independent noisy samples.
 GAIN_SEARCH_NOISE_SEEDS = (0, 1, 2, 3, 4)
 
+#: Swept, NOT physically derived, weights converting
+#: ``sim_relay_cycle_life_fraction_per_hour`` (a physically grounded number
+#: -- see that function's docstring) into the same C units as whole-run IAE
+#: so the two can be added into one composite objective. The
+#: transitions/life-fraction accounting itself IS grounded
+#: (``relay_cycles.h``'s stated ~1e5-operation contact life budget, the
+#: SAME accounting the firmware persists for the operator); the TRADE --
+#: "how many degrees C of tracking error is one hour's worth of 100%
+#: rated-life consumption worth" -- is a value judgement this repo has no
+#: data to fix a single number for (relay_cycles.h states the CONSEQUENCE
+#: of exhausting the budget -- "a controller that fails mid-firing at cone
+#: temperature" -- but not a $ or degrees-C price on that risk), so per
+#: this task's own instruction
+#: ("if you cannot ground the weighting physically ... expose it as a swept
+#: parameter rather than inventing authority for a number") it is swept
+#: here rather than defaulted to one invented constant.
+#: ``per_zone_gain_grid_search``'s own ``actuator_weight_...`` argument
+#: still needs ONE value to pick an argmin with -- it defaults to 0.0
+#: (pure tracking-error argmin, i.e. today's behaviour) precisely so that
+#: choice is explicit and visible at the call site, not buried here.
+#: ``actuator_weight_sensitivity_sweep`` below runs the search at every
+#: weight in this tuple and reports how (or whether) the chosen gain moves.
+GAIN_SEARCH_ACTUATOR_WEIGHTS_C_PER_LIFE_FRACTION_PER_HOUR = (0.0, 1.0, 10.0, 100.0, 1000.0, 10000.0)
 
-def _iae_over_seeds(rows, kp_vec, ki_vec, kd_vec, climb_mode, integral_floor, zone,
-                     measurement_noise_std_c, measurement_quantum_c, measurement_seeds):
+#: Swept, NOT physically derived, weights converting
+#: ``sim_duty_chatter_rate`` (duty-fraction/s, pre-window control-signal
+#: ringing) into the same C units as whole-run IAE. See that function's
+#: docstring for why this SECOND actuator signal exists: the post-window
+#: relay-transition count (above) turns out to be a poor proxy for
+#: kp/kd-driven ringing, because the 60 s window itself is a hard low-pass
+#: filter on relay-visible transitions -- confirmed by a negative test
+#: (kp_mult 0.25x-8.0x on p7_oldmatrix_http.jsonl z0: transitions/hour FALL
+#: from 98.5 to 46.2 as kp rises, the opposite of "more gain chatters the
+#: relay more"), while ``sim_duty_chatter_rate`` rises monotonically
+#: (~0.0027 to ~0.0170 duty/s) over the same sweep -- it is what a large
+#: kp/kd actually does to the control signal, whether or not the window
+#: happens to filter it into relay transitions today. There is no data in
+#: this repo converting "duty/s of ringing" into a wear or dollar figure
+#: (unlike the relay-life weight above, which at least has K1-K4's rated
+#: cycle count to anchor one side of the trade), so this is swept, not
+#: defaulted to one number, same rationale as the life-fraction weights.
+GAIN_SEARCH_ACTUATOR_WEIGHTS_C_PER_DUTY_CHATTER_RATE = (0.0, 1.0, 10.0, 50.0, 100.0, 300.0)
+
+
+def _scores_over_seeds(rows, kp_vec, ki_vec, kd_vec, climb_mode, integral_floor, zone,
+                        measurement_noise_std_c, measurement_quantum_c, measurement_seeds,
+                        pwm_window_ms, pwm_min_on_ms, pwm_min_off_ms):
     """Runs ``run_profile_from_capture`` once per seed in ``measurement_seeds``
     (skipped entirely -- a single noise-free call -- when
     ``measurement_noise_std_c`` is all-zero, so a caller that explicitly
     disables noise pays no repeat-averaging cost and gets the exact old
-    single-call behaviour) and returns the mean whole-run normalized IAE
-    for ``zone``. See ``GAIN_SEARCH_NOISE_SEEDS`` for why a fixed seed set
-    rather than one draw or a persisted generator.
+    single-call behaviour) and returns the mean, over seeds, of ALL THREE
+    objective components for ``zone``: whole-run normalized IAE (tracking
+    error, degrees C), relay life-fraction consumed per hour (post-window
+    actuator cost, dimensionless -- see
+    ``sim_relay_cycle_life_fraction_per_hour``), and duty chatter rate
+    (pre-window actuator cost, duty-fraction/s -- see
+    ``sim_duty_chatter_rate``; both actuator signals exist because they
+    were found to disagree in sign -- see that function's docstring).
+    Averaging every term over the same noise seeds as IAE keeps all three
+    components paired on identical draws, same rationale as
+    ``GAIN_SEARCH_NOISE_SEEDS``'s common-random-numbers use for IAE alone.
+    PWM rendering (when ``pwm_window_ms>0``) is itself noise-independent
+    (it depends only on the PID's commanded duty, not the measurement it
+    was computed from) but is re-run per seed anyway since it shares the
+    ``run_profile_from_capture`` call that also needs the seeded
+    measurement chain.
     """
     noise_arr = _broadcast_zone_param(measurement_noise_std_c)
+    kwargs = dict(
+        climb_mode=climb_mode, integral_floor=integral_floor,
+        measurement_noise_std_c=measurement_noise_std_c,
+        measurement_quantum_c=measurement_quantum_c,
+        pwm_window_ms=pwm_window_ms, pwm_min_on_ms=pwm_min_on_ms,
+        pwm_min_off_ms=pwm_min_off_ms,
+    )
+
+    def _one(result):
+        return dict(iae=sim_whole_run_iae_normalized(result, zone),
+                    life_fraction_per_hour=sim_relay_cycle_life_fraction_per_hour(result, zone),
+                    transitions_per_hour=sim_relay_transitions_per_hour(result, zone),
+                    duty_chatter_rate=sim_duty_chatter_rate(result, zone))
+
     if not np.any(noise_arr > 0.0):
-        result, _ = run_profile_from_capture(
-            rows, kp=kp_vec, ki=ki_vec, kd=kd_vec,
-            climb_mode=climb_mode, integral_floor=integral_floor,
-            measurement_noise_std_c=measurement_noise_std_c,
-            measurement_quantum_c=measurement_quantum_c,
-        )
-        return sim_whole_run_iae_normalized(result, zone)
-    vals = []
+        result, _ = run_profile_from_capture(rows, kp=kp_vec, ki=ki_vec, kd=kd_vec, **kwargs)
+        return _one(result)
+    rows_scores = []
     for seed in measurement_seeds:
-        result, _ = run_profile_from_capture(
-            rows, kp=kp_vec, ki=ki_vec, kd=kd_vec,
-            climb_mode=climb_mode, integral_floor=integral_floor,
-            measurement_noise_std_c=measurement_noise_std_c,
-            measurement_quantum_c=measurement_quantum_c,
-            measurement_seed=seed,
-        )
-        vals.append(sim_whole_run_iae_normalized(result, zone))
-    return float(np.mean(vals))
+        result, _ = run_profile_from_capture(rows, kp=kp_vec, ki=ki_vec, kd=kd_vec,
+                                              measurement_seed=seed, **kwargs)
+        rows_scores.append(_one(result))
+    return {k: float(np.mean([r[k] for r in rows_scores])) for k in rows_scores[0]}
 
 
 def per_zone_gain_grid_search(rows_fit: Sequence[log_analysis.PollRow],
@@ -1634,20 +1944,30 @@ def per_zone_gain_grid_search(rows_fit: Sequence[log_analysis.PollRow],
                                integral_floor: str = 'ff_hold',
                                measurement_noise_std_c=MEASURED_THERMO_NOISE_STD_C,
                                measurement_quantum_c=MAX31856_QUANTUM_C,
-                               measurement_seeds=GAIN_SEARCH_NOISE_SEEDS) -> dict:
+                               measurement_seeds=GAIN_SEARCH_NOISE_SEEDS,
+                               pwm_window_ms=HEATER_DEFAULT_WINDOW_MS,
+                               pwm_min_on_ms=0.0, pwm_min_off_ms=0.0,
+                               actuator_weight_c_per_life_fraction_per_hour=0.0,
+                               actuator_weight_c_per_duty_chatter_rate=0.0) -> dict:
     """For each zone independently, grid-searches ``kp``/``ki`` multipliers
     (``kd`` left at ``base_kd`` -- the board's own per-zone ``kd`` is held
     fixed rather than swept, both because no capture in this repo was
     fit/scored with a non-default ``kd`` sweep grid and to keep this
     search's scope matched to sec 3.4's original method: only ``kp``/``ki``
-    are searched) that minimize THAT zone's own whole-run normalized IAE on
-    ``rows_fit``, holding the other two zones at the shared/per-zone
-    baseline gains (see module-level comment above). ``base_kp``/
-    ``base_ki``/``base_kd`` each accept a scalar (applied to all zones) or
-    a length-3 per-zone sequence -- default is ``BOARD_ZONE_KP``/``_KI``/
-    ``_KD``, what the live board actually runs, per zone. Returns the best
-    per-zone ``(kp, ki)`` plus the fit-set IAE at baseline and at the
-    chosen gains, for every zone.
+    are searched) that minimize THAT zone's own COMPOSITE objective on
+    ``rows_fit`` -- whole-run normalized IAE (tracking error) plus
+    ``actuator_weight_c_per_life_fraction_per_hour`` times the relay
+    life-fraction consumed per hour of firing (actuator/chatter cost, see
+    ``sim_relay_cycle_life_fraction_per_hour``) -- holding the other two
+    zones at the shared/per-zone baseline gains (see module-level comment
+    above). ``base_kp``/``base_ki``/``base_kd`` each accept a scalar
+    (applied to all zones) or a length-3 per-zone sequence -- default is
+    ``BOARD_ZONE_KP``/``_KI``/``_KD``, what the live board actually runs,
+    per zone. Returns the best per-zone ``(kp, ki)`` plus BOTH objective
+    components, reported SEPARATELY, at baseline and at the chosen gains,
+    for every zone -- never only the blended composite, so a caller does
+    not have to reverse-engineer how much of a "win" is tracking error vs.
+    actuator cost.
 
     ``measurement_noise_std_c``/``measurement_quantum_c``/
     ``measurement_seeds``: default ON here (unlike ``run_profile`` itself,
@@ -1663,40 +1983,144 @@ def per_zone_gain_grid_search(rows_fit: Sequence[log_analysis.PollRow],
     noise-amplified ringing. Pass ``measurement_noise_std_c=0.0`` (or an
     all-zero sequence) to recover the old noise-free, single-call-per-
     candidate search exactly.
+
+    ``pwm_window_ms``: also defaults ON here (to ``HEATER_DEFAULT_WINDOW_MS``,
+    the firmware's own default -- unlike ``run_profile`` itself, same
+    rationale as the noise defaults above), because it is what makes
+    ``actuator_weight_c_per_life_fraction_per_hour`` mean anything: with no
+    PWM window there ARE no relay transitions to count and every candidate's
+    actuator cost reads 0.0 regardless of gain. Pass ``pwm_window_ms=0.0``
+    to disable actuator modeling entirely (old behaviour, actuator terms
+    all read 0.0).
+
+    ``actuator_weight_c_per_life_fraction_per_hour``/
+    ``actuator_weight_c_per_duty_chatter_rate``: the two C-per-actuator-cost
+    TRADE weights -- NEITHER is physically derivable from anything in this
+    repo (see ``GAIN_SEARCH_ACTUATOR_WEIGHTS_C_PER_LIFE_FRACTION_PER_HOUR``/
+    ``GAIN_SEARCH_ACTUATOR_WEIGHTS_C_PER_DUTY_CHATTER_RATE``'s docstrings
+    for why -- and for why BOTH actuator signals exist: they disagree in
+    sign as kp rises, because the PWM window itself filters kp/kd-driven
+    ringing out of the relay-transition count before it can be measured
+    there). Both default to ``0.0``, i.e. pure tracking-error argmin --
+    IDENTICAL candidate selection to before these parameters existed, so an
+    existing caller sees no change unless it opts in. Use
+    ``actuator_weight_sensitivity_sweep`` to see how the chosen gain moves
+    as a weight is swept across
+    ``GAIN_SEARCH_ACTUATOR_WEIGHTS_C_PER_LIFE_FRACTION_PER_HOUR``/
+    ``GAIN_SEARCH_ACTUATOR_WEIGHTS_C_PER_DUTY_CHATTER_RATE`` rather than
+    committing to one value here.
     """
     base_kp_arr = _broadcast_zone_param(base_kp)
     base_ki_arr = _broadcast_zone_param(base_ki)
     base_kd_arr = _broadcast_zone_param(base_kd)
+
+    def _composite(scores):
+        return (scores['iae']
+                + actuator_weight_c_per_life_fraction_per_hour * scores['life_fraction_per_hour']
+                + actuator_weight_c_per_duty_chatter_rate * scores['duty_chatter_rate'])
+
+    def _score(kp_vec, ki_vec, zone):
+        return _scores_over_seeds(
+            rows_fit, kp_vec, ki_vec, list(base_kd_arr),
+            climb_mode, integral_floor, zone,
+            measurement_noise_std_c, measurement_quantum_c, measurement_seeds,
+            pwm_window_ms, pwm_min_on_ms, pwm_min_off_ms,
+        )
+
     best = {}
     for zone in range(N_ZONES):
-        best_iae = None
+        best_cost = None
         best_mult = (1.0, 1.0)
+        best_scores = None
         for kp_mult in grid:
             for ki_mult in grid:
                 kp_vec = list(base_kp_arr)
                 ki_vec = list(base_ki_arr)
                 kp_vec[zone] = base_kp_arr[zone] * kp_mult
                 ki_vec[zone] = base_ki_arr[zone] * ki_mult
-                iae = _iae_over_seeds(
-                    rows_fit, kp_vec, ki_vec, list(base_kd_arr),
-                    climb_mode, integral_floor, zone,
-                    measurement_noise_std_c, measurement_quantum_c, measurement_seeds,
-                )
-                if best_iae is None or iae < best_iae:
-                    best_iae = iae
+                scores = _score(kp_vec, ki_vec, zone)
+                cost = _composite(scores)
+                if best_cost is None or cost < best_cost:
+                    best_cost = cost
                     best_mult = (kp_mult, ki_mult)
-        baseline_iae = _iae_over_seeds(
-            rows_fit, list(base_kp_arr), list(base_ki_arr), list(base_kd_arr),
-            climb_mode, integral_floor, zone,
-            measurement_noise_std_c, measurement_quantum_c, measurement_seeds,
-        )
+                    best_scores = scores
+        baseline_scores = _score(list(base_kp_arr), list(base_ki_arr), zone)
         best[zone] = dict(
             kp=base_kp_arr[zone] * best_mult[0], ki=base_ki_arr[zone] * best_mult[1],
             kd=base_kd_arr[zone],
             kp_mult=best_mult[0], ki_mult=best_mult[1],
-            fit_iae_baseline=baseline_iae, fit_iae_tuned=best_iae,
+            # Tracking-error component (degrees C, whole-run mean |error|).
+            fit_iae_baseline=baseline_scores['iae'], fit_iae_tuned=best_scores['iae'],
+            # Actuator/chatter component, reported in TWO physical units:
+            # relay life-fraction consumed per hour of firing (the one used
+            # in the composite) and raw transitions/hour (easier to read at
+            # a glance -- see sim_relay_transitions_per_hour).
+            fit_life_fraction_per_hour_baseline=baseline_scores['life_fraction_per_hour'],
+            fit_life_fraction_per_hour_tuned=best_scores['life_fraction_per_hour'],
+            fit_transitions_per_hour_baseline=baseline_scores['transitions_per_hour'],
+            fit_transitions_per_hour_tuned=best_scores['transitions_per_hour'],
+            fit_duty_chatter_rate_baseline=baseline_scores['duty_chatter_rate'],
+            fit_duty_chatter_rate_tuned=best_scores['duty_chatter_rate'],
+            # Composite (what argmin actually selected on) -- never the
+            # only number reported, per this function's own docstring.
+            fit_composite_baseline=_composite(baseline_scores), fit_composite_tuned=best_cost,
+            actuator_weight_c_per_life_fraction_per_hour=actuator_weight_c_per_life_fraction_per_hour,
+            actuator_weight_c_per_duty_chatter_rate=actuator_weight_c_per_duty_chatter_rate,
         )
     return best
+
+
+def actuator_weight_sensitivity_sweep(rows_fit: Sequence[log_analysis.PollRow],
+                                       weight_kind: str = 'duty_chatter',
+                                       weights=None,
+                                       **kwargs) -> dict:
+    """Runs ``per_zone_gain_grid_search`` once per weight and returns, per
+    zone, the chosen ``(kp_mult, ki_mult)`` at every weight -- this IS the
+    "expose it as a swept parameter" alternative to inventing one trade
+    constant (see ``GAIN_SEARCH_ACTUATOR_WEIGHTS_C_PER_LIFE_FRACTION_PER_HOUR``/
+    ``GAIN_SEARCH_ACTUATOR_WEIGHTS_C_PER_DUTY_CHATTER_RATE``'s docstrings).
+    ``weight_kind``: ``'duty_chatter'`` (default -- sweeps
+    ``actuator_weight_c_per_duty_chatter_rate`` across
+    ``GAIN_SEARCH_ACTUATOR_WEIGHTS_C_PER_DUTY_CHATTER_RATE``; this is the
+    signal that actually rises with kp, see ``sim_duty_chatter_rate``) or
+    ``'relay_life'`` (sweeps ``actuator_weight_c_per_life_fraction_per_hour``
+    across ``GAIN_SEARCH_ACTUATOR_WEIGHTS_C_PER_LIFE_FRACTION_PER_HOUR`` --
+    kept for completeness/negative-testing even though that signal was
+    found to move the WRONG way with kp on this window model). ``weights``
+    overrides the default tuple for the chosen kind.
+
+    Read the returned ``mult_by_weight`` sequence to see whether any swept
+    weight pulls a zone's optimum off the grid edge and keeps it there (an
+    interior optimum, the acceptance criterion this sweep exists to test),
+    or whether it stays pinned at every weight up to the largest one swept
+    (meaning actuator cost alone, at any plausible trade rate, still cannot
+    explain a bounded optimum on this capture -- a genuine negative result,
+    not a search failure). ``**kwargs`` forwards to
+    ``per_zone_gain_grid_search`` (grid, climb_mode, noise/PWM settings,
+    etc).
+    """
+    if weight_kind not in ('duty_chatter', 'relay_life'):
+        raise ValueError(f"weight_kind must be 'duty_chatter' or 'relay_life', got {weight_kind!r}")
+    param_name = ('actuator_weight_c_per_duty_chatter_rate' if weight_kind == 'duty_chatter'
+                  else 'actuator_weight_c_per_life_fraction_per_hour')
+    if weights is None:
+        weights = (GAIN_SEARCH_ACTUATOR_WEIGHTS_C_PER_DUTY_CHATTER_RATE if weight_kind == 'duty_chatter'
+                   else GAIN_SEARCH_ACTUATOR_WEIGHTS_C_PER_LIFE_FRACTION_PER_HOUR)
+    kwargs.pop('actuator_weight_c_per_life_fraction_per_hour', None)
+    kwargs.pop('actuator_weight_c_per_duty_chatter_rate', None)
+    by_zone = {z: [] for z in range(N_ZONES)}
+    for w in weights:
+        result = per_zone_gain_grid_search(rows_fit, **{param_name: w}, **kwargs)
+        for zone in range(N_ZONES):
+            by_zone[zone].append(dict(
+                weight=w,
+                kp_mult=result[zone]['kp_mult'], ki_mult=result[zone]['ki_mult'],
+                fit_iae_tuned=result[zone]['fit_iae_tuned'],
+                fit_life_fraction_per_hour_tuned=result[zone]['fit_life_fraction_per_hour_tuned'],
+                fit_transitions_per_hour_tuned=result[zone]['fit_transitions_per_hour_tuned'],
+                fit_duty_chatter_rate_tuned=result[zone]['fit_duty_chatter_rate_tuned'],
+            ))
+    return {zone: dict(mult_by_weight=vals) for zone, vals in by_zone.items()}
 
 
 def per_zone_gain_holdout_report(rows_fit: Sequence[log_analysis.PollRow],
@@ -1708,7 +2132,11 @@ def per_zone_gain_holdout_report(rows_fit: Sequence[log_analysis.PollRow],
                                   integral_floor: str = 'ff_hold',
                                   measurement_noise_std_c=MEASURED_THERMO_NOISE_STD_C,
                                   measurement_quantum_c=MAX31856_QUANTUM_C,
-                                  measurement_seeds=GAIN_SEARCH_NOISE_SEEDS) -> dict:
+                                  measurement_seeds=GAIN_SEARCH_NOISE_SEEDS,
+                                  pwm_window_ms=HEATER_DEFAULT_WINDOW_MS,
+                                  pwm_min_on_ms=0.0, pwm_min_off_ms=0.0,
+                                  actuator_weight_c_per_life_fraction_per_hour=0.0,
+                                  actuator_weight_c_per_duty_chatter_rate=0.0) -> dict:
     """Fits per-zone gains on ``rows_fit`` (``per_zone_gain_grid_search``),
     then scores BOTH the shared-baseline gains and the per-zone gains on
     ``rows_test`` -- a capture the fit never saw. This is the only honest
@@ -1722,10 +2150,13 @@ def per_zone_gain_holdout_report(rows_fit: Sequence[log_analysis.PollRow],
     would take.
 
     ``measurement_noise_std_c``/``measurement_quantum_c``/
-    ``measurement_seeds``: forwarded to ``per_zone_gain_grid_search`` for
-    the fit, and used identically (same seed set, common random numbers)
+    ``measurement_seeds``/``pwm_window_ms``/``pwm_min_on_ms``/
+    ``pwm_min_off_ms``/``actuator_weight_c_per_life_fraction_per_hour``:
+    forwarded to ``per_zone_gain_grid_search`` for the fit, and used
+    identically (same seed set, common random numbers, same PWM window)
     when scoring baseline vs. tuned on the held-out capture -- see that
-    function's docstring.
+    function's docstring. Both tracking error AND actuator cost are
+    reported separately on the held-out set too, not just at fit time.
     """
     fit = per_zone_gain_grid_search(
         rows_fit, base_kp=base_kp, base_ki=base_ki, base_kd=base_kd,
@@ -1733,46 +2164,68 @@ def per_zone_gain_holdout_report(rows_fit: Sequence[log_analysis.PollRow],
         measurement_noise_std_c=measurement_noise_std_c,
         measurement_quantum_c=measurement_quantum_c,
         measurement_seeds=measurement_seeds,
+        pwm_window_ms=pwm_window_ms, pwm_min_on_ms=pwm_min_on_ms,
+        pwm_min_off_ms=pwm_min_off_ms,
+        actuator_weight_c_per_life_fraction_per_hour=actuator_weight_c_per_life_fraction_per_hour,
+        actuator_weight_c_per_duty_chatter_rate=actuator_weight_c_per_duty_chatter_rate,
     )
     kp_vec = [fit[z]['kp'] for z in range(N_ZONES)]
     ki_vec = [fit[z]['ki'] for z in range(N_ZONES)]
     base_kd_arr = list(_broadcast_zone_param(base_kd))
 
     # One simulation per seed covers all three zones at once (a single
-    # run_profile call reports every zone's temps/target) -- computed once
-    # here and re-used for every zone's IAE below, rather than re-running
-    # the identical trajectory per zone the way per-zone _iae_over_seeds
-    # calls would.
+    # run_profile call reports every zone's temps/target/relay state) --
+    # computed once here and re-used for every zone's IAE/actuator cost
+    # below, rather than re-running the identical trajectory per zone the
+    # way per-zone _scores_over_seeds calls would.
     noise_arr = _broadcast_zone_param(measurement_noise_std_c)
     seeds = measurement_seeds if np.any(noise_arr > 0.0) else (None,)
 
-    def _mean_iae_all_zones(kp_v, ki_v):
-        per_zone_vals = {z: [] for z in range(N_ZONES)}
+    def _mean_scores_all_zones(kp_v, ki_v):
+        per_zone_iae = {z: [] for z in range(N_ZONES)}
+        per_zone_life = {z: [] for z in range(N_ZONES)}
+        per_zone_trans = {z: [] for z in range(N_ZONES)}
+        per_zone_chatter = {z: [] for z in range(N_ZONES)}
         for seed in seeds:
             kwargs = dict(kp=kp_v, ki=ki_v, kd=base_kd_arr,
                            climb_mode=climb_mode, integral_floor=integral_floor,
                            measurement_noise_std_c=measurement_noise_std_c,
-                           measurement_quantum_c=measurement_quantum_c)
+                           measurement_quantum_c=measurement_quantum_c,
+                           pwm_window_ms=pwm_window_ms, pwm_min_on_ms=pwm_min_on_ms,
+                           pwm_min_off_ms=pwm_min_off_ms)
             if seed is not None:
                 kwargs["measurement_seed"] = seed
             result, _ = run_profile_from_capture(rows_test, **kwargs)
             for z in range(N_ZONES):
-                per_zone_vals[z].append(sim_whole_run_iae_normalized(result, z))
-        return {z: float(np.mean(vals)) for z, vals in per_zone_vals.items()}
+                per_zone_iae[z].append(sim_whole_run_iae_normalized(result, z))
+                per_zone_life[z].append(sim_relay_cycle_life_fraction_per_hour(result, z))
+                per_zone_trans[z].append(sim_relay_transitions_per_hour(result, z))
+                per_zone_chatter[z].append(sim_duty_chatter_rate(result, z))
+        return {z: dict(iae=float(np.mean(per_zone_iae[z])),
+                         life_fraction_per_hour=float(np.mean(per_zone_life[z])),
+                         transitions_per_hour=float(np.mean(per_zone_trans[z])),
+                         duty_chatter_rate=float(np.mean(per_zone_chatter[z])))
+                for z in range(N_ZONES)}
 
-    base_iae_all = _mean_iae_all_zones(list(_broadcast_zone_param(base_kp)),
-                                        list(_broadcast_zone_param(base_ki)))
-    tuned_iae_all = _mean_iae_all_zones(kp_vec, ki_vec)
+    base_scores_all = _mean_scores_all_zones(list(_broadcast_zone_param(base_kp)),
+                                              list(_broadcast_zone_param(base_ki)))
+    tuned_scores_all = _mean_scores_all_zones(kp_vec, ki_vec)
 
     per_zone = {}
     for zone in range(N_ZONES):
-        base_iae = base_iae_all[zone]
-        tuned_iae = tuned_iae_all[zone]
+        base_s = base_scores_all[zone]
+        tuned_s = tuned_scores_all[zone]
         per_zone[zone] = dict(
             fit=fit[zone],
-            test_iae_baseline=base_iae,
-            test_iae_tuned=tuned_iae,
-            test_delta_c=tuned_iae - base_iae,  # negative == per-zone gains won
+            test_iae_baseline=base_s['iae'],
+            test_iae_tuned=tuned_s['iae'],
+            test_delta_c=tuned_s['iae'] - base_s['iae'],  # negative == per-zone gains won on tracking error
+            test_life_fraction_per_hour_baseline=base_s['life_fraction_per_hour'],
+            test_life_fraction_per_hour_tuned=tuned_s['life_fraction_per_hour'],
+            test_transitions_per_hour_baseline=base_s['transitions_per_hour'],
+            test_transitions_per_hour_tuned=tuned_s['transitions_per_hour'],
+            test_duty_chatter_rate_baseline=base_s['duty_chatter_rate'],
+            test_duty_chatter_rate_tuned=tuned_s['duty_chatter_rate'],
         )
     return dict(per_zone=per_zone, base_kp=base_kp, base_ki=base_ki, base_kd=base_kd)
 
@@ -1786,9 +2239,15 @@ def format_per_zone_gain_holdout_report_text(report: dict) -> str:
             f"(kp={f['kp']:.5f} ki={f['ki']:.6f})"
         )
         lines.append(
-            f"    held-out IAE: shared={d['test_iae_baseline']:.4f}C  "
+            f"    held-out tracking IAE: shared={d['test_iae_baseline']:.4f}C  "
             f"per-zone={d['test_iae_tuned']:.4f}C  delta={d['test_delta_c']:+.4f}C "
             f"({'per-zone better' if d['test_delta_c'] < 0 else 'shared better or tied'})"
+        )
+        lines.append(
+            f"    held-out actuator cost: shared={d['test_transitions_per_hour_baseline']:.1f}/hr  "
+            f"per-zone={d['test_transitions_per_hour_tuned']:.1f}/hr "
+            f"(life-fraction/hr shared={d['test_life_fraction_per_hour_baseline']:.6f} "
+            f"per-zone={d['test_life_fraction_per_hour_tuned']:.6f})"
         )
     return "\n".join(lines)
 
