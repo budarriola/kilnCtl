@@ -1,0 +1,10 @@
+{
+  "_comment": "Pre-existing --ok/--warn/--bad/--neutral vs background contrast gaps found by the 2026-09 colour-dependence audit (WEB_UI_RESPONSIVE_PLAN.md). Each entry is a KNOWN gap this check logs but does not fail on. Fixing one changes that page's rendered colour, which this audit pass is not authorized to do -- these are left for the owner alongside the still-open --fault-color/--bad and --neutral decisions. A new page/token combination that fails the floor is NOT covered by this file and will fail the build.",
+  "ota_page.html": [
+    {
+      "theme": "light",
+      "token": "ok",
+      "note": "--ok: #2a7 vs #f7f7f7 card background is 2.77:1, below the 3.0:1 floor. Distinct from the ok/warn pairwise decision (sec 7): this page's --ok hex is simply lighter/less saturated than every other page's (#1a7a1a/#1a7f37 elsewhere), an independent gap. Not fixed here because narrowing it changes ota_page.html's rendered green."
+    }
+  ]
+}

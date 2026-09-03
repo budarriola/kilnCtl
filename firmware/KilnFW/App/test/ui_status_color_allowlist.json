@@ -1,0 +1,32 @@
+{
+  "_comment": "Every CSS rule that ui_status_color_check.mjs's colour-only scan flags (a status-ish selector whose declaration block is only color/background/border-color pointing at --ok/--warn/--bad/--neutral) has to be listed here with a one-line note on why it's already safe -- usually because a sibling text/glyph at the call site carries the same information. The scan can't see the JS/HTML side, only the CSS shape, so it can't verify these notes itself; a human added them during the 2026-09 colour-dependence audit by reading each call site. A NEW rule of this shape is NOT in this file and fails the build until reviewed the same way.",
+  "diagnostics_page.html": [
+    { "selector": ".chan .subrow .bad", "note": "always renders next to its own text, e.g. 'FAULT pin: yes' -- the word carries the state, colour is reinforcement." }
+  ],
+  "main_page.html": [
+    { "selector": "#kcConfigMsg.kc-error", "note": "the element's text content is the error message itself; the class only recolours it." }
+  ],
+  "profiles_page.html": [
+    { "selector": "#msg .warn", "note": "wraps a full warning sentence set by JS; colour only recolours existing text." },
+    { "selector": ".s-ramp.near-ceiling", "note": "2026-09 audit fix: checkRamp() now also sets input.title on this state (see profiles_page.html), a non-colour cue this CSS-only scan can't see." }
+  ],
+  "readiness_page.html": [
+    { "selector": ".item.status-ok .mark", "note": "readiness_page.html's MARK[] map gives every status (ok/not_done/deliberately_off/cannot_yet) its own glyph (✓/✗/—/⋯); colour only reinforces an already-distinct glyph." }
+  ],
+  "safety_commissioning_page.html": [
+    { "selector": ".field.unset input, .field.unset select", "note": "co-occurs with a '⚠ not set' badge (.field.unset::before-style label in the same rule block) and border-width 2px -- not colour alone." }
+  ],
+  "safety_page.html": [
+    { "selector": ".row .value.ok", "note": "the value text itself differs per state (e.g. 'linked'/'OK' vs 'not linked'/'INCOMPATIBLE'); colour only reinforces text that already differs." },
+    { "selector": ".row .value.near", "note": "2026-09 audit fix: render() now appends ' -- WARN'/' -- NEAR LIMIT' etc. to the value text for this class (see safety_page.html), a non-colour cue this CSS-only scan can't see." },
+    { "selector": ".card.ineffective", "note": "always paired with the bold '!! TRIP_INEFFECTIVE !!' row text and a separate breaker-warning banner -- not colour alone." }
+  ],
+  "zones_page.html": [
+    { "selector": "table.coupling td.rga-ok", "note": "PROPOSAL, not yet fixed (see WEB_UI_RESPONSIVE_PLAN.md): the RGA matrix's diagonal cell is genuinely colour-only today -- only the plain number, no glyph. Left as a documented proposal because a fix here (appending a character to a table cell) risks widening the matrix's fixed-width columns, which is a repaint this pass is not authorized to make. The verdict paragraph directly below the table (verdict-ok/warn/bad, also in this file) already carries the full explanation in text for the worst cell, which is the load-bearing read." },
+    { "selector": "table.coupling td.rga-warn", "note": "see rga-ok above." },
+    { "selector": "table.coupling td.rga-bad", "note": "see rga-ok above." },
+    { "selector": "p.verdict-ok", "note": "full explanatory sentence, e.g. 'Every diagonal element is within...'; colour only reinforces text." },
+    { "selector": "p.verdict-warn, div.verdict-warn", "note": "full explanatory sentence; colour only reinforces text." },
+    { "selector": "p.verdict-bad", "note": "full explanatory sentence; colour only reinforces text." }
+  ]
+}
