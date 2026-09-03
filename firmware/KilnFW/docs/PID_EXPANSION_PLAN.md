@@ -684,6 +684,52 @@ HTTP endpoint and zones-page UI.
       behavior, unchanged. `--noise-floor none` on the `compare` CLI disables
       the lookup entirely, for a caller that wants the pre-floor behavior on
       purpose.
+
+      **2026-09-02f — the start-temperature confound is real, measured, and
+      now accounted for rather than removed.** The "rested" precondition is
+      relative to the on-board cold junction, not ambient, so it certifies
+      "cooled to wherever the board is now" — three captures claimed to be
+      the same repeated configuration started at 27.60/28.64/28.78 °C (1.18 °C
+      range against the 1.00 °C confound threshold this module already
+      refuses on). The owner's call: keep the firing protocol unchanged and
+      make the comparison machinery account for the confound instead.
+      `pid_ab_compare.py` gained two additions, both deliberately
+      conservative and both purely additive — neither can loosen a REFUSED
+      or INDISTINGUISHABLE verdict, which are still computed from the raw
+      delta and measured floor only, unchanged:
+      - `fit_start_temp_sensitivity` — an OLS regression of
+        `iae_normalized_whole_c` (the one metric with a comparatively tight
+        floor, see below) on start temperature, fit only across a caller-
+        asserted same-config repeat set (typically the noise-floor
+        artifact's own `generated_from`), refusing below
+        `MIN_N_FOR_SENSITIVITY=3` points. Reported alongside a whole-run IAE
+        comparison as raw delta / predicted-from-start-temp / residual — the
+        "regress the outcome and report the residual" option, letting a
+        reader see how much of a raw delta the known start-temp difference
+        already explains. Verified this cannot manufacture significance: run
+        against the real three-repeat noise-floor set both with and without
+        the fit attached, the verdicts are byte-identical either way
+        (`test_sensitivity_does_not_manufacture_effect_between_same_config_runs`).
+      - `summarize_metric_floor_reliability` — this rig's own measured floor
+        is internally consistent for some metrics and not others:
+        `iae_normalized_whole_c`/`ramp_mean_error_c` vary ~4.4–4.6x across
+        zones/segments, while `dwell_steady_state_offset_c` and most other
+        metrics vary 8–30x (the observed `dwell_steady_state_offset_c` floor
+        spans 0.044–0.550 °C — comparable to or larger than the 0.4–0.5 °C
+        differences this project has been treating as real). Flagged
+        UNSTABLE above `FLOOR_RELIABILITY_RATIO=5.0`, computed directly from
+        the artifact and printed with every `compare` — so a reader can see
+        which metrics can currently support a conclusion (`iae_normalized_*`)
+        and which cannot yet (`dwell_*`, `settle_time_s`,
+        `ramp_worst_error_c`) rather than presenting them as equally
+        trustworthy. A genuine defect fixed along the way: real HTTP
+        captures often have `actual_valid=false` on row 0 (poll landed
+        before the first thermocouple read), which the firmware wire-format
+        carries as a literal `0.0` placeholder — `compute_run_metrics` used
+        to take `rows[0]` unconditionally, so an affected run's start temp
+        silently read as `0.0 °C`, defeating the confound gate on exactly
+        the real captures this section is about. Fixed to use the first
+        genuinely valid row per zone.
 - [x] **One-click revert** to the last accepted gain set (`5b44403`). Snapshots
       Kp/Ki/Kd, K_dc/tau/dead_time and `ki_baseline` before each commit point and
       restores them exactly, `ki_baseline` included — restoring gains while

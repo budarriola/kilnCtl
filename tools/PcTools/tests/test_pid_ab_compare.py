@@ -15,7 +15,15 @@ import pytest
 from kilnctrl import log_analysis as la
 from kilnctrl import pid_ab_compare as ab
 
+from kilnctrl import noise_floor as nf
+
 FIXTURES = os.path.join(os.path.dirname(__file__), "fixtures")
+REPO_ROOT = os.path.join(os.path.dirname(__file__), "..", "..", "..")
+REAL_REPEAT_SET = [
+    os.path.join(REPO_ROOT, "logs", "coupling", "noise_floor_p7_run1.jsonl"),
+    os.path.join(REPO_ROOT, "logs", "coupling", "noise_floor_p7b_run1.jsonl"),
+    os.path.join(REPO_ROOT, "logs", "coupling", "noise_floor_p7c_run1.jsonl"),
+]
 EXCERPT = os.path.join(FIXTURES, "p7_fuzzy0_http_excerpt.jsonl")
 # Trimmed excerpt of the REAL logs/coupling/p7_oldmatrix_http.jsonl that
 # produced the actual near-miss this refusal exists to prevent: a poller
@@ -262,6 +270,11 @@ def test_cmp_below_floor_is_indistinguishable():
                 start_delta_c=0.0, floor_c=0.2)
     assert c.verdict.startswith("INDISTINGUISHABLE")
     assert c.delta == pytest.approx(0.05)
+    # the structured field must agree with the verdict text -- a caller
+    # reading report["comparisons"] programmatically (not just format_compare_text)
+    # needs this to be correct on its own.
+    assert c.distinguishable is False
+    assert c.floor_c == pytest.approx(0.2)
 
 
 def test_cmp_above_floor_stays_provisional_not_indistinguishable():
@@ -269,6 +282,8 @@ def test_cmp_above_floor_stays_provisional_not_indistinguishable():
                 start_delta_c=0.0, floor_c=0.2)
     assert c.verdict.startswith("PROVISIONAL")
     assert "INDISTINGUISHABLE" not in c.verdict
+    assert "DISTINGUISHABLE" in c.verdict
+    assert c.distinguishable is True
 
 
 def test_cmp_exactly_at_floor_is_not_indistinguishable():
@@ -368,3 +383,248 @@ def test_cli_compare_missing_artifact_path_behaves_like_unknown(capsys, tmp_path
     assert rc == 0
     out = capsys.readouterr().out
     assert "NOISE FLOOR: UNKNOWN" in out
+
+
+# ---------------------------------------------------------------------------
+# 2026-09-02f -- the start-temperature covariate: sensitivity fit, the
+# residual decomposition reported alongside a comparison, and the metric
+# floor-reliability summary. Uses REAL_REPEAT_SET (the three real
+# noise-floor repeat captures on hand: 27.60/28.64/28.78 C start temps for
+# the same preset+profile) wherever a genuine same-config repeat set is
+# needed, per the task's instruction to demonstrate the method on real data.
+# ---------------------------------------------------------------------------
+
+def test_real_repeat_set_files_exist():
+    """Sanity check the fixture list above actually points at the real
+    captures this test module's docstring claims to use -- a silently
+    missing file would make every test below vacuously pass on empty data."""
+    for p in REAL_REPEAT_SET:
+        assert os.path.isfile(p), p
+
+
+def test_first_valid_start_temp_skips_invalid_placeholder_row():
+    """Real HTTP captures often have actual_valid=false on row 0 (the poll
+    landed before the first thermocouple read completed); the firmware's own
+    wire convention (documented in log_analysis.PollRow) is to carry that as
+    a literal 0.0 placeholder, not a real temperature. compute_run_metrics
+    must not treat that placeholder as a real starting temperature."""
+    rows = ab.load_run(REAL_REPEAT_SET[0])
+    assert rows[0].zones[0].actual_c == 0.0  # confirm the fixture actually has the placeholder row
+    metrics = ab.compute_run_metrics(rows)
+    for z, m in metrics.items():
+        assert m.start_temp_c != 0.0
+        assert m.start_temp_c > 20.0  # a real rested kiln reading, not the placeholder
+
+
+def test_fit_start_temp_sensitivity_insufficient_n_reports_no_slope(tmp_path):
+    two_paths = REAL_REPEAT_SET[:2]
+    sens = ab.fit_start_temp_sensitivity(two_paths)
+    for z, s in sens.items():
+        assert s.n == 2
+        assert s.slope_c_per_c is None
+        assert "insufficient" in s.note
+
+
+def test_fit_start_temp_sensitivity_exact_linear_fit_recovers_known_slope(tmp_path):
+    """Synthetic exact-linear data (not the noisy real captures) to verify
+    the OLS math itself is correct, independent of real-world noise."""
+    lines = []
+    base = json.loads(open(EXCERPT).readline())
+    # start_temp = 20, 22, 24 -> outcome (iae_normalized_whole_c) known exactly
+    # via a synthetic single-row-per-run capture with a hand-picked duty/error
+    # trace is fiddly; instead drive _ols directly with a controlled input to
+    # prove the regression math, and separately prove
+    # fit_start_temp_sensitivity wires that same math up correctly using the
+    # shifted-copy fixtures (next test).
+    xs = [20.0, 22.0, 24.0]
+    ys = [1.0, 1.5, 2.0]  # slope = 0.25 exactly, intercept = -4.0
+    fit = ab._ols(xs, ys)
+    assert fit is not None
+    slope, intercept = fit
+    assert slope == pytest.approx(0.25)
+    assert intercept == pytest.approx(-4.0)
+
+
+def test_fit_start_temp_sensitivity_uses_real_repeat_set():
+    """End-to-end on the real captures: a per-zone slope, n=3, and a
+    (necessarily loose, n=3) Pearson r are reported for every zone that has
+    3 usable points."""
+    sens = ab.fit_start_temp_sensitivity(REAL_REPEAT_SET)
+    assert set(sens) == {0, 1, 2}
+    for z, s in sens.items():
+        assert s.n == 3
+        assert s.slope_c_per_c is not None
+        assert s.r is not None
+        assert -1.0 <= s.r <= 1.0
+
+
+def test_start_temp_adjustment_none_without_a_fit():
+    assert ab._start_temp_adjustment(None, 20.0, 21.0, 0.5) is None
+    no_slope = ab.StartTempSensitivity(0, 2, None, None, None, "insufficient")
+    assert ab._start_temp_adjustment(no_slope, 20.0, 21.0, 0.5) is None
+
+
+def test_start_temp_adjustment_decomposes_delta_correctly():
+    sens = ab.StartTempSensitivity(0, 5, slope_c_per_c=0.1, intercept=0.0, r=0.9, note="fit")
+    adj = ab._start_temp_adjustment(sens, start_a=20.0, start_b=25.0, raw_delta=1.0)
+    assert adj["start_delta_c"] == pytest.approx(5.0)
+    assert adj["predicted_from_start_temp"] == pytest.approx(0.5)  # 0.1 * 5.0
+    assert adj["residual_after_adjustment"] == pytest.approx(0.5)  # 1.0 - 0.5
+
+
+def _real_artifact():
+    return nf.build_artifact(REAL_REPEAT_SET)
+
+
+def test_sensitivity_does_not_manufacture_effect_between_same_config_runs():
+    """THE SANITY CHECK: the three real captures are all the SAME controller
+    configuration (same preset, same profile -- see
+    logs/coupling/noise_floor_campaign_state.json / PID_EXPANSION_PLAN.md
+    SS3.3), differing only in start temperature and run-to-run noise.
+
+    The concrete failure mode being guarded against: attaching a start-temp
+    sensitivity fit must not change which comparisons get REFUSED /
+    INDISTINGUISHABLE / PROVISIONAL, and must not flip
+    ``distinguishable`` -- the verdict is computed from the RAW delta and
+    the measured floor only (see _cmp / compare_runs), same as before this
+    feature existed. Proved directly: run compare_runs on every same-config
+    pair TWICE, once with the sensitivity fit attached and once without
+    (``sensitivity_paths=[]``), and require byte-identical verdicts. This
+    would fail immediately if the adjustment were ever wired into the gate
+    instead of being purely explanatory."""
+    artifact = _real_artifact()
+    for a, b in ((REAL_REPEAT_SET[0], REAL_REPEAT_SET[1]),
+                 (REAL_REPEAT_SET[0], REAL_REPEAT_SET[2]),
+                 (REAL_REPEAT_SET[1], REAL_REPEAT_SET[2])):
+        with_sens = ab.compare_runs(a, b, noise_floor_artifact=artifact)
+        without_sens = ab.compare_runs(a, b, noise_floor_artifact=artifact, sensitivity_paths=[])
+        assert "error" not in with_sens and "error" not in without_sens
+        whole_with = [c for c in with_sens["comparisons"]
+                      if c.metric == "iae_normalized_whole_c" and c.segment is None]
+        whole_without = [c for c in without_sens["comparisons"]
+                         if c.metric == "iae_normalized_whole_c" and c.segment is None]
+        assert whole_with, "expected a whole-run iae comparison for every zone"
+        assert len(whole_with) == len(whole_without)
+        for c_with, c_without in zip(
+            sorted(whole_with, key=lambda c: c.zone), sorted(whole_without, key=lambda c: c.zone),
+        ):
+            assert c_with.zone == c_without.zone
+            assert c_with.verdict == c_without.verdict, (a, b, c_with, c_without)
+            assert c_with.distinguishable == c_without.distinguishable
+            assert c_without.start_temp_adjustment is None
+            # sensitivity IS present on the with_sens side (proving the fit
+            # actually ran, not that it was silently skipped)
+            assert c_with.start_temp_adjustment is not None
+            assert "residual" in ab.format_compare_text(with_sens)
+
+
+def test_genuine_large_effect_still_detected_with_sensitivity_attached():
+    """A large, real delta must still come back DISTINGUISHABLE/PROVISIONAL
+    even when a start-temp sensitivity is fit and attached -- the adjustment
+    must never suppress a genuine effect either."""
+    artifact = _real_artifact()
+    # Build a synthetic 'B' run: a copy of the first real repeat with a huge
+    # (obviously not start-temp-driven) shift applied to actual_c, but with
+    # matching start temp to A so the confound gate does not fire and the
+    # comparison isn't refused outright.
+    import tempfile
+    src = REAL_REPEAT_SET[0]
+    lines = []
+    with open(src) as fh:
+        for line in fh:
+            line = line.strip()
+            if not line or not line.startswith("{"):
+                continue
+            obj = json.loads(line)
+            body = obj.get("exec")
+            if not isinstance(body, dict) or "zones" not in body:
+                continue
+            elapsed_s = body.get("elapsed_s", 0)
+            if elapsed_s > 30:  # leave the starting rows alone so start_temp_c matches A
+                for z in body["zones"]:
+                    z["actual_c"] = z["actual_c"] + 5.0  # huge, deliberately not a start-temp-only effect
+            lines.append(json.dumps(obj))
+    tmpdir = tempfile.mkdtemp()
+    shifted_path = os.path.join(tmpdir, "shifted_large_effect.jsonl")
+    with open(shifted_path, "w") as fh:
+        fh.write("\n".join(lines) + "\n")
+
+    report = ab.compare_runs(src, shifted_path, noise_floor_artifact=artifact)
+    assert "error" not in report
+    whole_run = [c for c in report["comparisons"]
+                 if c.metric == "iae_normalized_whole_c" and c.segment is None]
+    assert whole_run
+    for c in whole_run:
+        # start temps match closely (both come from the same source row 1),
+        # so this must not be REFUSED, and the huge actual_c shift must
+        # produce a large, DISTINGUISHABLE (or at minimum non-indistinguishable) delta.
+        assert not c.verdict.startswith("REFUSED"), c
+        assert c.verdict.startswith("PROVISIONAL"), c
+        assert c.distinguishable is True, c
+
+
+def test_metric_floor_reliability_flags_unstable_metric():
+    artifact = _real_artifact()
+    reliability = ab.summarize_metric_floor_reliability(artifact)
+    assert "dwell_steady_state_offset_c" in reliability
+    dwell = reliability["dwell_steady_state_offset_c"]
+    assert dwell["reliable"] is False
+    assert dwell["ratio"] > ab.FLOOR_RELIABILITY_RATIO
+    iae_whole = reliability["iae_normalized_whole_c"]
+    assert iae_whole["reliable"] is True
+    assert iae_whole["ratio"] < dwell["ratio"]
+
+
+def test_metric_floor_reliability_empty_without_artifact():
+    assert ab.summarize_metric_floor_reliability(None) == {}
+    assert ab.summarize_metric_floor_reliability({"entries": {}}) == {}
+
+
+def test_metric_floor_reliability_single_entry_reports_none_not_a_ratio():
+    artifact = {"entries": {
+        "z0:foo_metric:whole": {"zone": 0, "metric": "foo_metric", "segment": None, "noise_floor_c": 0.1},
+    }}
+    r = ab.summarize_metric_floor_reliability(artifact)
+    assert r["foo_metric"]["reliable"] is None
+    assert r["foo_metric"]["ratio"] is None
+
+
+def test_compare_runs_confound_refusal_still_fires_alongside_sensitivity(tmp_path):
+    """The confound gate (REFUSED above CONFOUND_THRESHOLD_C) must survive
+    unchanged even when a start-temp sensitivity artifact is supplied --
+    the strengthening requirement: adjustment machinery must never be able
+    to talk its way past a refusal."""
+    shifted = _write_shifted_copy(tmp_path, EXCERPT, temp_shift_c=4.8, name="shifted_refuse.jsonl")
+    artifact = _real_artifact()
+    report = ab.compare_runs(EXCERPT, shifted, noise_floor_artifact=artifact)
+    assert "error" not in report
+    zone0 = [c for c in report["comparisons"] if c.zone == 0 and c.metric == "iae_normalized_whole_c"]
+    assert zone0
+    for c in zone0:
+        assert c.verdict.startswith("REFUSED"), c
+        assert c.distinguishable is None
+
+
+def test_format_compare_text_includes_floor_reliability_section():
+    artifact = _real_artifact()
+    report = ab.compare_runs(REAL_REPEAT_SET[0], REAL_REPEAT_SET[1], noise_floor_artifact=artifact)
+    text = ab.format_compare_text(report)
+    assert "metric floor reliability" in text
+    assert "UNSTABLE" in text
+
+
+def test_cli_compare_end_to_end_on_real_repeat_set(capsys, tmp_path):
+    """Full CLI smoke test on the real repeat set, building the artifact
+    on the fly, matching how a real invocation would work."""
+    artifact_path = os.path.join(tmp_path, "real_artifact.json")
+    art = _real_artifact()
+    with open(artifact_path, "w") as fh:
+        json.dump(ab._jsonable(art), fh)
+    rc = ab.main([
+        "compare", REAL_REPEAT_SET[0], REAL_REPEAT_SET[1],
+        "--noise-floor", artifact_path,
+    ])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "start-temp sensitivity" in out
+    assert "metric floor reliability" in out
