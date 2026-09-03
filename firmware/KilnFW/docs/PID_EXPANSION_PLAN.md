@@ -437,6 +437,71 @@ HTTP endpoint and zones-page UI.
       would have accepted that very pair.
       **The experiment that would settle it:** N ≥ 5 firings of one profile,
       gains fixed, each from a genuinely rested start with every zone at ambient.
+
+      **2026-09-02e — audit of every profile-7 capture on hand, and why none of
+      them supply this.** All six `logs/coupling/p7_*_http.jsonl` files, run
+      through `log_analysis.split_runs`/`describe_runs` (the same multi-run
+      detector `pid_ab_compare.load_run` refuses on now):
+
+      | file | matrix | run start temp (°C) | complete? | multi-run? |
+      |---|---|---|---|---|
+      | `p7_fuzzy0_http.jsonl` | (era before newmatrix) | capture starts 342 s into the firing, not from a rest | done | no |
+      | `p7_oldmatrix_http.jsonl` run0 (= `p7_oldmatrix_runA.jsonl`) | oldmatrix | 28.66/28.77/28.83 | done | — |
+      | `p7_oldmatrix_http.jsonl` run1 | oldmatrix | 30.10/30.15/30.25 | done | yes, 2 runs in this file |
+      | `p7_oldmatrix_runC.jsonl` run0 | oldmatrix | 31.06/31.16/31.08 | done | yes, 1-row idle tail |
+      | `p7_newmatrix_http.jsonl` | newmatrix | 25.24/25.32/25.46 | done | no |
+      | `p7_newmatrix2_http.jsonl` run0 | newmatrix | 30.04/30.23/30.19 | done | yes, 2 runs in this file |
+      | `p7_newmatrix2_http.jsonl` run1 | newmatrix | 31.08/31.17/31.16 | **running, not done** | — |
+
+      Three files hold two runs each and would have handed
+      `pid_ab_compare` a silent-second-run-vs-itself comparison before the
+      multi-run refusal existed. `fuzzy0` is excluded outright (truncated
+      start). `newmatrix2` run1 never finished. That leaves five genuinely
+      complete, rested-from-`t≈0` candidates split across **two different
+      coupling matrices** — oldmatrix (3 runs, 28.7→31.1 °C, ambient drifting
+      2.4 °C over the session) and newmatrix (2 runs, 25.2 °C and 30.0 °C, a
+      4.8 °C gap). A true repeat needs the same matrix AND a start temp within
+      a tight tolerance of the other repeat(s): only `p7_oldmatrix_http.jsonl`
+      run1 (30.10 °C) and `p7_oldmatrix_runC.jsonl` run0 (31.06 °C) — same
+      matrix, 0.96 °C apart — clear that bar. **At most two true repeats exist
+      today; N ≥ 5 has never been run.** (`p7_oldmatrix_http.jsonl` run0 is a
+      third oldmatrix data point but 2.4 °C from the other two — plausible
+      evidence for, not proof of, the same "ambient drifted 3 °C tonight"
+      problem this section already names.)
+
+      **The campaign now has a turn-key form**, so the gap above can be closed
+      unattended: `run_queue.py --repeat N` (extended for this — see its own
+      docstring) takes ONE `--run PRESET:PROFILE_ID:LOG_PATH[:LABEL]` entry and
+      expands it into N `QueueEntry`s, same preset and profile, each with its
+      own `_run1.jsonl`..`_runN.jsonl` log path so two repeats can never land in
+      one file (the exact failure this table found three of, after the fact).
+      `run_entry` already waits for every zone to be rested (within
+      `--rested-tol-c`, default 1.0 °C of its own cold junction — not an
+      absolute ambient number, since ambient itself drifts night to night)
+      before every single entry, so repeating the entry N times gets "rest
+      between every repeat" for free:
+
+      ```
+      python -m kilnctrl.run_queue --host <board-ip> \
+          --run p7_floor:7:logs/coupling/noise_floor_p7.jsonl:noise_floor \
+          --repeat 6 --rested-tol-c 1.0
+      ```
+
+      Then `python -m kilnctrl.noise_floor build logs/coupling/noise_floor_p7_run*.jsonl
+      --out tools/PcTools/config_presets/noise_floor.json` turns the N captures
+      into the checked-in floor artifact (currently a placeholder with
+      `entries: {}` — this campaign has not been run for real yet). Per
+      `(zone, metric, segment)` — the same keys `pid_ab_compare.py`'s own
+      comparisons use — it reports `n`, `mean`, `std_c`, and `noise_floor_c`
+      (the observed range, max−min, deliberately the wider of the two on N as
+      small as an overnight campaign realistically produces). `pid_ab_compare`
+      loads that artifact by default: a metric delta smaller than its measured
+      floor is now reported `INDISTINGUISHABLE`, not `PROVISIONAL` — see its
+      module docstring and `NOISE_FLOOR_KNOWN_NOTE`. A key the campaign never
+      covered still falls back to the old "noise floor unknown, PROVISIONAL"
+      behavior, unchanged. `--noise-floor none` on the `compare` CLI disables
+      the lookup entirely, for a caller that wants the pre-floor behavior on
+      purpose.
 - [x] **One-click revert** to the last accepted gain set (`5b44403`). Snapshots
       Kp/Ki/Kd, K_dc/tau/dead_time and `ki_baseline` before each commit point and
       restores them exactly, `ki_baseline` included — restoring gains while
