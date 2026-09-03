@@ -1,0 +1,410 @@
+#!/usr/bin/env python3
+"""capability_preflight.py -- ask a board what it actually supports BEFORE a
+long unattended run starts, instead of finding out mid-campaign from a
+Python traceback.
+
+THE INCIDENT THIS EXISTS FOR: commit 906d026 added ``ramp_assist_enabled``
+as a REQUIRED preset field (config_presets.py) whose apply path
+(``apply_preset(..., zones_host=...)``) calls ``POST /api/ramp_assist``. A
+board running firmware built before that endpoint existed answered with
+``{"ok":false,"error":"no such endpoint"}``, and the campaign died mid-
+unattended-run. ``ramp_assist_http_client.pin_enabled()`` already knows how
+to tell a FATAL missing capability (preset pins ``True``, firmware cannot
+provide it) from a BENIGN one (preset pins ``False``, which firmware that
+has never heard of the feature trivially satisfies) -- but nothing calls
+that check before a run starts. This module is that check, generalised
+beyond ramp_assist to any HTTP capability a preset's apply path might need,
+and run as a PREFLIGHT rather than discovered by falling over.
+
+HOW A CAPABILITY IS DETECTED: by probing the specific endpoint the apply
+path would call, the same way ``ramp_assist_http_client._is_no_such_endpoint_
+error()`` already does for that one case -- a GET against the endpoint,
+checked against the board's own precise ``{"ok":false,"error":"no such
+endpoint"}`` body (never against HTTP status alone, so an unrelated 4xx/5xx
+never gets misread as "board is fine, feature is just off"). ``GET /api/
+status`` is also read once per preflight and surfaced in the report
+(``fw_version``/``fw_build``/``self_protocol_version`` when the board knows
+them) -- useful context for an operator deciding whether a reflash is the
+right move, but NOT used to decide fatal/benign: this project has no
+firmware-version-to-feature-set table anywhere, and building one would be
+exactly the kind of hand-maintained mapping that rots the moment a preset
+gains a field (see DERIVATION below). Endpoint probing needs no such table:
+it asks the board directly, every time.
+
+HOW REQUIRED CAPABILITIES ARE DERIVED FROM A PRESET: automatically, for the
+part that can be automatic. ``derive_required_capabilities()`` walks a small
+manifest (``_CAPABILITY_MANIFEST``) of ``{preset field name: Capability}``
+against the ACTUAL preset dict handed to it -- a capability is only required
+when its trigger field is present in the preset AND the apply-path
+precondition that would actually reach the endpoint holds (e.g. ramp_assist
+is only pinned over HTTP when ``zones_host`` is given -- see
+``config_presets.apply_preset()``). Adding a new PRESET (a new JSON file) or
+a new plain field on an EXISTING write path needs no code change here at
+all -- the manifest is keyed on field names, not preset names, and the same
+handful of fields recur across every preset.
+
+THE ONE MANUAL STEP THAT REMAINS, stated plainly because a fully automatic
+derivation is not achievable: when ``config_presets.apply_preset()`` (or
+another apply path) gains a NEW HTTP write for a NEW preset field -- the
+same kind of change 906d026 made -- a matching ``Capability`` entry must be
+added to ``_CAPABILITY_MANIFEST`` by hand, in the same commit. Nothing here
+can infer "this Python code now calls a new endpoint" from the preset
+schema alone; the schema is just JSON, and the mapping from a JSON field to
+an HTTP call lives in ``apply_preset()``'s logic, not in any data this
+module can walk. This is the same shape of maintenance burden as
+``_REQUIRED_ZONE_FIELDS``/``_REQUIRED_TOP_FIELDS`` in config_presets.py
+already carries, kept in ONE place (this manifest) rather than duplicated,
+and covered by ``test_capability_preflight.py``'s
+``test_manifest_matches_apply_preset_ramp_assist_pin`` as a tripwire: that
+test fails loudly if ``apply_preset`` starts pinning ramp_assist under a
+different condition than this manifest assumes.
+
+FATAL VS. BENIGN: a missing capability is BENIGN exactly when the preset's
+own pinned value is what firmware lacking the feature already does by
+default (``Capability.benign_when(preset_value)`` -- for ramp_assist that is
+``preset_value is False``, mirroring ``pin_enabled()``'s own rule). It is
+FATAL when the preset pins a state the board cannot provide -- the exact
+906d026 failure mode. A capability with no ``benign_when`` predicate is
+always fatal when missing (there is no trivially-satisfied-by-absence case
+for it)."""
+from __future__ import annotations
+
+import json
+import logging
+import urllib.error
+import urllib.request
+from dataclasses import dataclass, field
+from typing import Callable, Optional
+
+_module_log = logging.getLogger(__name__)
+
+#: Same "board's fallback-AP address" default every other HTTP client in
+#: this package uses (ramp_assist_http_client.RAMP_ASSIST_AP_DEFAULT_HOST,
+#: dashboard_http_client.DASHBOARD_AP_DEFAULT_HOST, ...).
+PREFLIGHT_AP_DEFAULT_HOST = "192.168.4.1"
+
+PREFLIGHT_HTTP_TIMEOUT_S = 8.0
+
+#: The board's own precise error body for a route the httpd never
+#: registered -- matched verbatim, never on HTTP status alone, so an
+#: unrelated 4xx/5xx is never misread as "feature absent". Identical string
+#: to ramp_assist_http_client._NO_SUCH_ENDPOINT_ERROR; kept as a separate
+#: literal (not imported) so this module has no import-time dependency on
+#: any one feature's client -- it probes raw HTTP itself.
+_NO_SUCH_ENDPOINT_ERROR = "no such endpoint"
+
+
+class PreflightTransportError(Exception):
+    """A capability probe or the /api/status read could not get an answer
+    from the board at all -- unreachable host, timeout, non-JSON body, or
+    any HTTP status/error that is NOT the board's own precise "no such
+    endpoint" shape. Distinct from "capability absent": this means the
+    board did not answer the question, not that it answered "no"."""
+
+
+def _url(host: str, path: str) -> str:
+    return f"http://{host}{path}"
+
+
+def _get_json(host: str, path: str, timeout: float) -> "tuple[Optional[dict], Optional[str]]":
+    """GET ``path``. Returns ``(decoded_json_or_None, raw_body_text)`` for a
+    clean 2xx response OR for the board's own precise "no such endpoint"
+    body (that specific shape is a successful transport result -- the board
+    answered, just in the negative -- so it is returned rather than
+    raised). Raises :class:`PreflightTransportError` for everything else:
+    unreachable host, timeout, a non-JSON body, or ANY OTHER non-2xx status
+    -- including a 4xx/5xx that happens to carry a JSON body, which must
+    NOT be misread as "capability present" just because it parsed. Only the
+    board's own exact ``{"ok":false,"error":"no such endpoint"}`` shape is
+    treated as a meaningful negative answer; every other error status is
+    "board did not answer this question", full stop."""
+    req = urllib.request.Request(_url(host, path), method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body_text = resp.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        try:
+            body_text = exc.read().decode("utf-8", errors="replace")
+        except Exception:
+            raise PreflightTransportError(f"GET {path} failed: HTTP {exc.code}") from exc
+        try:
+            data = json.loads(body_text)
+        except Exception:
+            data = None
+        if not _is_no_such_endpoint(data):
+            raise PreflightTransportError(
+                f"GET {path} failed: HTTP {exc.code}: {body_text!r}") from exc
+        return data, body_text
+    except urllib.error.URLError as exc:
+        raise PreflightTransportError(f"GET {path} unreachable: {exc.reason}") from exc
+    except Exception as exc:  # noqa: BLE001
+        raise PreflightTransportError(f"GET {path} failed: {exc}") from exc
+    try:
+        return json.loads(body_text), body_text
+    except Exception:
+        return None, body_text
+
+
+def _is_no_such_endpoint(data: Optional[dict]) -> bool:
+    return (
+        isinstance(data, dict)
+        and data.get("ok") is False
+        and data.get("error") == _NO_SUCH_ENDPOINT_ERROR
+    )
+
+
+@dataclass(frozen=True)
+class Capability:
+    """One probeable HTTP feature. ``name`` is what shows up in reports and
+    what preset/manifest code refers to it by; ``probe_path`` is the GET
+    endpoint whose absence signature (``{"ok":false,"error":"no such
+    endpoint"}``) is checked; ``description`` is the operator-facing
+    sentence explaining what the feature does; ``benign_when`` (optional)
+    decides whether a MISSING capability is tolerable for a given preset
+    value -- omit it for a capability that is always fatal when absent."""
+
+    name: str
+    probe_path: str
+    description: str
+    benign_when: Optional[Callable[[object], bool]] = None
+
+
+#: preset field name -> (Capability, precondition). The precondition
+#: mirrors the actual gating in config_presets.apply_preset(): a preset can
+#: carry ``ramp_assist_enabled`` and still never reach the HTTP write if the
+#: caller didn't pass ``zones_host`` (see that function's ``not_written``
+#: accounting) -- so a preflight that ignored the precondition would flag a
+#: capability the run was never going to touch. See this module's docstring
+#: for what "add an entry here" means and when it is required.
+_CAPABILITY_MANIFEST: "dict[str, tuple[Capability, Callable[[bool, bool], bool]]]" = {
+    "ramp_assist_enabled": (
+        Capability(
+            name="ramp_assist",
+            probe_path="/api/ramp_assist",
+            description=(
+                "kiln-wide ramp-assist on/off flag (ramp_assist_cfg.h, "
+                "POST /api/ramp_assist) -- lets the executor stretch a ramp "
+                "or shorten a dwell when the kiln can't keep up with the "
+                "commanded rate"
+            ),
+            benign_when=lambda preset_value: preset_value is False,
+        ),
+        # precondition(have_zones_host, have_safety_host): apply_preset()
+        # only calls POST /api/ramp_assist when zones_host is given.
+        lambda have_zones_host, have_safety_host: have_zones_host,
+    ),
+}
+
+
+@dataclass(frozen=True)
+class CapabilityCheck:
+    capability: Capability
+    required: bool
+    present: Optional[bool]  # None when the board never answered (unreachable)
+    preset_value: object
+    fatal: bool
+    message: str
+
+
+@dataclass(frozen=True)
+class BoardInfo:
+    reachable: bool
+    fw_version: Optional[str] = None
+    fw_build: Optional[str] = None
+    self_protocol_version: Optional[int] = None
+    error: str = ""
+
+
+@dataclass(frozen=True)
+class PreflightReport:
+    preset_name: str
+    host: str
+    board: BoardInfo
+    checks: "list[CapabilityCheck]" = field(default_factory=list)
+
+    @property
+    def ok(self) -> bool:
+        """False if the board never answered at all, or if any required
+        capability is FATALLY missing. A board that fails to answer is
+        never reported as fine -- there is nothing to base "fine" on."""
+        if not self.board.reachable:
+            return False
+        return not any(c.fatal for c in self.checks)
+
+    @property
+    def fatal_checks(self) -> "list[CapabilityCheck]":
+        return [c for c in self.checks if c.fatal]
+
+    def describe(self) -> str:
+        """Human-readable report: legible to an operator who has not read
+        this module's code. Named for exactly what CLAUDE.md's constraint 3
+        asked for -- missing capability, what it means, and that a reflash
+        is the remedy."""
+        lines = [f"capability preflight for preset {self.preset_name!r} against {self.host}:"]
+        if not self.board.reachable:
+            lines.append(f"  BOARD UNREACHABLE: {self.board.error}")
+            lines.append("  -- no capability could be checked; do not start this run.")
+            return "\n".join(lines)
+        fw = self.board.fw_version or "(unknown)"
+        build = self.board.fw_build or "(unknown)"
+        proto = self.board.self_protocol_version
+        proto_s = str(proto) if proto is not None else "(unknown)"
+        lines.append(f"  board firmware: version={fw} build={build} link_protocol={proto_s}")
+        if not self.checks:
+            lines.append("  no HTTP-gated capabilities required by this preset/apply plan.")
+        for c in self.checks:
+            if not c.required:
+                continue
+            if c.present:
+                lines.append(f"  [ok]     {c.capability.name}: present")
+            elif c.fatal:
+                lines.append(
+                    f"  [FATAL]  {c.capability.name}: MISSING -- {c.capability.description}. "
+                    f"This preset needs it (pinned value={c.preset_value!r}) and this board's "
+                    f"firmware does not have it. REMEDY: reflash this board with firmware that "
+                    f"includes {c.capability.probe_path}, or change the preset."
+                )
+            else:
+                lines.append(
+                    f"  [benign] {c.capability.name}: missing, but trivially satisfied -- "
+                    f"preset pins {c.preset_value!r}, which is what firmware lacking "
+                    f"{c.capability.description} already does. No action needed."
+                )
+        if self.fatal_checks:
+            lines.append(
+                f"  RESULT: {len(self.fatal_checks)} FATAL capability gap(s) -- do not start this run."
+            )
+        else:
+            lines.append("  RESULT: ok to start.")
+        return "\n".join(lines)
+
+
+def get_board_info(host: str, timeout: float = PREFLIGHT_HTTP_TIMEOUT_S) -> BoardInfo:
+    """GET /api/status once, for the operator-facing firmware identity
+    fields (dashboard_http.c: fw_version/fw_build/self_protocol_version).
+    Purely informational -- see this module's docstring for why it is never
+    used to decide fatal/benign."""
+    try:
+        data, _raw = _get_json(host, "/api/status", timeout)
+    except PreflightTransportError as exc:
+        return BoardInfo(reachable=False, error=str(exc))
+    if not isinstance(data, dict):
+        return BoardInfo(reachable=False, error="GET /api/status did not return a JSON object")
+    return BoardInfo(
+        reachable=True,
+        fw_version=data.get("fw_version") or None,
+        fw_build=data.get("fw_build") or None,
+        self_protocol_version=data.get("self_protocol_version"),
+    )
+
+
+def derive_required_capabilities(
+    preset: dict, zones_host: Optional[str], safety_host: Optional[str] = None
+) -> "list[tuple[Capability, object]]":
+    """Walk ``_CAPABILITY_MANIFEST`` against this preset and these apply-
+    call arguments, returning ``[(Capability, preset_value), ...]`` for
+    every capability the apply path would actually reach. See this module's
+    docstring (DERIVATION / THE ONE MANUAL STEP THAT REMAINS) for what is
+    and is not automatic here."""
+    out = []
+    have_zones = bool(zones_host)
+    have_safety = bool(safety_host)
+    for field_name, (capability, precondition) in _CAPABILITY_MANIFEST.items():
+        if field_name not in preset:
+            continue
+        if not precondition(have_zones, have_safety):
+            continue
+        out.append((capability, preset[field_name]))
+    return out
+
+
+def run_preflight(
+    preset: dict,
+    host: str,
+    zones_host: Optional[str] = None,
+    safety_host: Optional[str] = None,
+    preset_name: str = "(unnamed)",
+    timeout: float = PREFLIGHT_HTTP_TIMEOUT_S,
+) -> PreflightReport:
+    """The main entry point. Probes ``host`` once for board identity and
+    once per required capability, and returns a :class:`PreflightReport`.
+    Never raises for a board-side "capability absent" or "unreachable"
+    result -- those are reported, not exceptions; see
+    :func:`preflight_or_raise` for the fail-fast wrapper a caller like
+    run_queue.py wants."""
+    board = get_board_info(host, timeout=timeout)
+    required = derive_required_capabilities(preset, zones_host, safety_host)
+    checks: "list[CapabilityCheck]" = []
+    if not board.reachable:
+        for capability, preset_value in required:
+            checks.append(CapabilityCheck(
+                capability=capability, required=True, present=None,
+                preset_value=preset_value, fatal=True,
+                message="board unreachable, capability could not be checked",
+            ))
+        return PreflightReport(preset_name=preset.get("name", preset_name), host=host,
+                                board=board, checks=checks)
+
+    for capability, preset_value in required:
+        try:
+            data, _raw = _get_json(host, capability.probe_path, timeout)
+        except PreflightTransportError as exc:
+            # The board answered /api/status but not this endpoint -- still
+            # "could not determine", not "confirmed absent". Treated as
+            # fatal-and-unresolved rather than silently benign.
+            checks.append(CapabilityCheck(
+                capability=capability, required=True, present=None,
+                preset_value=preset_value, fatal=True,
+                message=f"probe failed: {exc}",
+            ))
+            continue
+        if _is_no_such_endpoint(data):
+            present = False
+        else:
+            present = True
+        if present:
+            fatal = False
+        else:
+            benign = capability.benign_when is not None and capability.benign_when(preset_value)
+            fatal = not benign
+        checks.append(CapabilityCheck(
+            capability=capability, required=True, present=present,
+            preset_value=preset_value, fatal=fatal,
+            message="present" if present else ("benign" if not fatal else "FATAL"),
+        ))
+    return PreflightReport(preset_name=preset.get("name", preset_name), host=host,
+                            board=board, checks=checks)
+
+
+class PreflightFailed(Exception):
+    """Raised by :func:`preflight_or_raise`. ``report`` carries the full
+    :class:`PreflightReport`; ``str(exc)`` is the human-readable
+    ``report.describe()`` text, so a bare ``print(exc)`` in a run-queue
+    failure path already gives an operator everything constraint 3 asked
+    for without any extra plumbing."""
+
+    def __init__(self, report: PreflightReport):
+        super().__init__(report.describe())
+        self.report = report
+
+
+def preflight_or_raise(
+    preset: dict,
+    host: str,
+    zones_host: Optional[str] = None,
+    safety_host: Optional[str] = None,
+    preset_name: str = "(unnamed)",
+    timeout: float = PREFLIGHT_HTTP_TIMEOUT_S,
+) -> PreflightReport:
+    """Same as :func:`run_preflight`, but raises :class:`PreflightFailed`
+    when ``report.ok`` is False (board unreachable, or any fatal capability
+    gap). This is the fail-fast form meant to run once, before a long
+    unattended queue starts -- see this module's docstring for the exact
+    one-line wiring recommended for run_queue.py."""
+    report = run_preflight(preset, host, zones_host=zones_host, safety_host=safety_host,
+                            preset_name=preset_name, timeout=timeout)
+    if not report.ok:
+        _module_log.error("capability preflight failed:\n%s", report.describe())
+        raise PreflightFailed(report)
+    _module_log.info("capability preflight ok:\n%s", report.describe())
+    return report

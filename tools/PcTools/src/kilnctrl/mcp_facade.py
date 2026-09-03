@@ -76,6 +76,7 @@ GROUP_OVERRIDES = {
     # Known-good config presets -- a consistent starting point for tests.
     "list_config_presets": "presets",
     "load_config_preset": "presets",
+    "capability_preflight_check": "presets",
     "factory_default_then_load_preset": "presets",
 }
 
@@ -127,6 +128,9 @@ KEYWORDS = {
     "run_repo_checks": ("lint", "guard", "invariant", "ci", "grep", "audit"),
     "list_config_presets": ("bench", "fixture", "known", "good", "default", "json"),
     "load_config_preset": ("bench", "fixture", "known", "good", "default", "consistent", "zones"),
+    "capability_preflight_check": ("preflight", "capability", "endpoint", "missing", "fatal",
+                                   "benign", "reflash", "firmware", "version", "campaign",
+                                   "unattended", "ramp_assist", "no such endpoint"),
     "factory_default_then_load_preset": ("factory", "reset", "consistent", "baseline", "bench", "fixture"),
     "ui_list_scripts": ("regression", "script", "test", "lcd", "web", "json"),
     "ui_run_script": ("regression", "script", "click", "tap-target", "wait", "assert", "lcd", "web"),
