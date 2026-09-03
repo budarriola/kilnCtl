@@ -59,6 +59,44 @@
 #define DASHBOARD_JSON_PROFILE_EXEC_BUF_SIZE (960 + MAX31856_CHANNEL_COUNT * 1024)
 #define DASHBOARD_JSON_CONTROL_BUF_SIZE      (256 + MAX31856_CHANNEL_COUNT * 448)
 
+/* GET /api/status's own buffer (dashboard_http.c's status_get_handler()) --
+ * NOT a per-zone allowance like the two macros above (this endpoint has no
+ * zones array), it is the whole response's worst-case size, moved here for
+ * the same reason DASHBOARD_JSON_PROFILE_EXEC_BUF_SIZE/DASHBOARD_JSON_
+ * CONTROL_BUF_SIZE already live here rather than as a local #define in
+ * dashboard_http.c: so a host test (test_dashboard_json.c's
+ * test_status_json_worst_case_render_fits_documented_buffer() and friends)
+ * can reference the SAME constant the handler mallocs, and a revert/shrink
+ * of one is a revert/shrink of both. status_get_handler() itself cannot be
+ * host-tested directly (dashboard_http.c #includes lvgl_port.h at file
+ * scope -- see this file's own top comment), so that test instead renders a
+ * field-by-field MIRROR of the handler's APPEND sequence using the same
+ * literal format strings and the same real helper functions this handler
+ * calls (json_escape(), safety_trip_words_*(), safety_fault_source_words())
+ * -- see that test for the exact worst-case value chosen per field, and
+ * dashboard_http.c's own status_get_handler() doc comment (right above its
+ * `#define DASHBOARD_STATUS_JSON_BUF_SIZE`) for the running sizing math
+ * that PREVIOUSLY arrived at 4224. Sizing bug found by the opus review this
+ * constant's move addresses: that number was folklore ("~100B headroom"),
+ * never defended by anything that would go red on a revert or an
+ * unbudgeted field addition -- and once it WAS actually checked (this
+ * macro's own test, test_dashboard_json.c's
+ * test_status_json_worst_case_render_fits_documented_buffer(), which
+ * renders every field, including trip_reason_cause, at its true worst
+ * width rather than assuming the byte count of its enclosing buffer), 4224
+ * turned out to be 99 bytes too small: the dominant term the old hand
+ * arithmetic approximated as "trip_reason_cause at its FULL cause_buf[320]-1
+ * capacity" is actually reachable much closer to that cap than the rest of
+ * the hand sum assumed once safety_trip_words_cause_numbered()'s S3 case
+ * (4 embedded floats) is fed a hostile/corrupted current-sense reading over
+ * the isolated UART link (the exact "hostile/uncommissioned current
+ * reading" threat this file's own trip_reason_cause sizing comment already
+ * named) -- measured 4323 bytes worst case, not "under 4224". Raised to
+ * 4480 (same 128-byte-step convention as the earlier 4096->4224 bump) for
+ * ~157 bytes of real, test-measured headroom rather than a folklore
+ * figure. */
+#define DASHBOARD_JSON_STATUS_BUF_SIZE 4480
+
 /* Escapes '"' and '\\' for JSON string embedding. Truncates (never writes
  * past out_cap, always NUL-terminates) rather than overflow -- src is
  * sometimes an operator- or peer-supplied string (profile names, safety-link

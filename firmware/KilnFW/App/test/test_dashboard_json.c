@@ -32,6 +32,7 @@ int g_test_failures = 0;
 int g_test_count = 0;
 
 #include "../drivers/dashboard_json.c"
+#include "../drivers/safety_trip_words.h"
 
 // ---------------------------------------------------------------------------
 // Small helpers: fill a profile_exec_status_t with the WORST-CASE field
@@ -513,6 +514,374 @@ static void test_autotune_status_json_reports_sub_phase_distinctly(void)
               "sub_phase must read empty outside STEPPING, even for a target-mode run that just finished");
 }
 
+// ---------------------------------------------------------------------------
+// GET /api/status worst-case render -- opus review, "the ~100B headroom
+// figure everyone has been reasoning from was a one-off manual measurement,
+// not a check". status_get_handler() itself (dashboard_http.c) cannot be
+// host-tested directly (that file #includes lvgl_port.h at file scope --
+// see this file's own top comment / dashboard_json.h's DASHBOARD_JSON_
+// STATUS_BUF_SIZE comment), so this mirrors its APPEND sequence field by
+// field, using the SAME literal format strings dashboard_http.c's
+// status_get_handler() uses (copy them back in sync by hand if that
+// handler's field list ever changes -- there is no other seam) and, where
+// the handler calls a real shared helper (json_escape(), safety_trip_
+// words_short/_cause/_remedy/_cause_numbered(), safety_fault_source_
+// words()), THIS test calls that same real, production function rather
+// than reimplementing its output -- only the plain %-format fields (counter
+// widths, bool literals) are hand-picked worst-case literals, matching this
+// project's own documented sizing method (dashboard_http.c's
+// status_get_handler() doc comment: "a standalone harness mirroring this
+// file's own APPEND macro against every field above at its documented
+// worst width").
+//
+// worst_of_all_reasons() finds the actual longest output any of these
+// functions can produce over every reason code, rather than hand-counting
+// characters in a table entry that can silently grow past whatever was
+// counted by hand.
+static uint8_t worst_of_all_reasons(const char *(*fn)(uint8_t), size_t *out_len)
+{
+    uint8_t best = 0;
+    size_t best_len = 0;
+    for (int r = 0; r <= 255; r++) {
+        size_t l = strlen(fn((uint8_t)r));
+        if (l > best_len) { best_len = l; best = (uint8_t)r; }
+    }
+    if (out_len) *out_len = best_len;
+    return best;
+}
+
+#define STATUS_APPEND(...)                                                                          \
+    do {                                                                                             \
+        int n_ = snprintf(json + o, cap - o, __VA_ARGS__);                                           \
+        if (n_ < 0 || (size_t)n_ >= cap - o) { return false; }                                        \
+        o += (size_t)n_;                                                                              \
+    } while (0)
+
+/* Renders the worst-case /api/status body into json[cap]. Returns false
+ * (mirroring status_get_handler()'s own `goto truncated`) the instant any
+ * one field would not fit -- never writes a partial/invalid document past
+ * that point, same discipline the real handler has. `extra_field` appends
+ * one more plausible field (same shape as the flush_last_us/flush_max_us/
+ * flush_count trio DISPLAY_ST7796_PLAN.md 9.1 actually added) AFTER every
+ * other field, to prove the field-creep failure mode: a real field added
+ * without re-running this sizing check. */
+static bool render_worst_case_status_json(char *json, size_t cap, size_t channel_count,
+                                          bool extra_field, size_t *out_len)
+{
+    size_t o = 0;
+
+    STATUS_APPEND("{\"io_ready\":%s", "true");
+
+    /* relays: KILN_IO_RELAY_COUNT objects, "false" (5 chars) is wider than
+     * "true" (4) for the worst case. */
+    STATUS_APPEND(",\"relays\":[");
+    for (uint8_t relay = 1; relay <= KILN_IO_RELAY_COUNT; relay++) {
+        STATUS_APPEND("%s{\"relay\":%u,\"on\":%s}", relay == 1 ? "" : ",", relay, "false");
+    }
+    STATUS_APPEND("]");
+    STATUS_APPEND(",\"io_read_failed\":true");
+
+    STATUS_APPEND(",\"relay_cycles\":[");
+    for (uint8_t r = 0; r < KILN_IO_RELAY_COUNT; r++) {
+        STATUS_APPEND("%s%lu", r == 0 ? "" : ",", (unsigned long)0xFFFFFFFFu);
+    }
+    STATUS_APPEND("]");
+
+    STATUS_APPEND(",\"thermo_ready\":%s", "true");
+    STATUS_APPEND(",\"thermo_spi_wedged\":%s", "true");
+    STATUS_APPEND(",\"flush_last_us\":%u,\"flush_max_us\":%u,\"flush_count\":%u",
+                  0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu);
+
+    STATUS_APPEND(",\"channels\":[");
+    for (size_t i = 0; i < channel_count; i++) {
+        STATUS_APPEND(
+            "%s{\"channel\":%u,\"temp_c\":%s,\"cj_c\":%s,\"valid\":%s,\"fault_status\":%u,"
+            "\"spi_failed\":%s,\"stale\":%s,\"age_ms\":%s}",
+            i == 0 ? "" : ",", 255u, "-1234.56", "-1234.56", "false", 255u, "false", "false",
+            "4294967295");
+    }
+    STATUS_APPEND("]");
+
+    STATUS_APPEND(",\"safety_ready\":%s", "false");
+    STATUS_APPEND(",\"zones_config_valid\":%s", "false");
+
+    STATUS_APPEND(",\"safety_temp_c\":%.2f", -1234.56);
+    STATUS_APPEND(",\"enclosure_temp_c\":%.2f", -1234.56);
+    STATUS_APPEND(",\"power_w\":%.1f", -1234.5);
+
+    STATUS_APPEND(",\"ct_current_a\":[");
+    for (unsigned ci = 0; ci < 3; ci++) {
+        STATUS_APPEND("%s%.3f", ci == 0 ? "" : ",", -1234.567);
+    }
+    STATUS_APPEND("]");
+
+    STATUS_APPEND(",\"safety_relay_energized\":%s", "false");
+    STATUS_APPEND(",\"safety_heating_enabled\":%s", "false");
+    STATUS_APPEND(",\"heat_block_sources\":%lu", (unsigned long)0xFFFFFFFFu);
+    {
+        char hb_words[160];
+        STATUS_APPEND(",\"heat_block_sources_words\":\"%s\"",
+                      safety_fault_source_words(0x3Fu, hb_words, sizeof(hb_words)));
+    }
+    STATUS_APPEND(",\"zone_blocked_mask\":%u", 255u);
+
+    STATUS_APPEND(",\"self_protocol_version\":%u", 65535u);
+    STATUS_APPEND(",\"link_version_known\":%s", "true");
+    STATUS_APPEND(",\"link_version_compatible\":%s", "false");
+    STATUS_APPEND(",\"peer_protocol_version\":%u", 65535u);
+
+    STATUS_APPEND(",\"diag_ever_received\":%s", "true");
+    {
+        size_t wlen;
+        uint8_t reason = worst_of_all_reasons(safety_trip_words_short, &wlen);
+        STATUS_APPEND(",\"diag_trip_reason\":%u", 255u);
+        STATUS_APPEND(",\"diag_trip_reason_words\":\"%s\"", safety_trip_words_short(reason));
+        uint8_t reason_cause = worst_of_all_reasons(safety_trip_words_cause, &wlen);
+        STATUS_APPEND(",\"diag_trip_reason_cause\":\"%s\"", safety_trip_words_cause(reason_cause));
+        uint8_t reason_remedy = worst_of_all_reasons(safety_trip_words_remedy, &wlen);
+        STATUS_APPEND(",\"diag_trip_reason_remedy\":\"%s\"", safety_trip_words_remedy(reason_remedy));
+        STATUS_APPEND(",\"diag_warn_mask\":%u", 65535u);
+        STATUS_APPEND(",\"diag_trip_mask\":%u", 65535u);
+        STATUS_APPEND(",\"diag_state\":%u", 255u);
+        STATUS_APPEND(",\"diag_age_ms\":%u", 65535u);
+        STATUS_APPEND(",\"diag_context_age_100ms\":%u", 255u);
+        STATUS_APPEND(",\"diag_context_frames_ok\":%lu", (unsigned long)0xFFFFFFFFu);
+        STATUS_APPEND(",\"diag_context_frames_bad\":%lu", (unsigned long)0xFFFFFFFFu);
+        STATUS_APPEND(",\"diag_tx_frames_dropped\":%lu", (unsigned long)0xFFFFFFFFu);
+    }
+
+    STATUS_APPEND(",\"trip_event_ever_received\":%s", "true");
+    {
+        size_t wlen;
+        uint8_t reason = worst_of_all_reasons(safety_trip_words_short, &wlen);
+        STATUS_APPEND(",\"trip_reason\":%u", 255u);
+        STATUS_APPEND(",\"trip_reason_words\":\"%s\"", safety_trip_words_short(reason));
+        {
+            /* Real safety_trip_words_cause_numbered(), pathological float
+             * magnitude on every numbered field it can carry (this header's
+             * own comment: "%.2f of 1e38 is ~45 chars") -- brute-forced
+             * over every reason code for the actual longest sentence this
+             * function can produce, same worst_of_all_reasons() discipline
+             * as the plain tables above. */
+            char cause_buf[320];
+            size_t best_len = 0;
+            uint8_t best_reason = 0;
+            char best_buf[320];
+            for (int r = 0; r <= 255; r++) {
+                const float huge3[3] = { -1e38f, -1e38f, -1e38f };
+                safety_trip_words_cause_numbered((uint8_t)r, -1e38f, -1e38f, huge3, 254u,
+                                                 cause_buf, sizeof(cause_buf));
+                size_t l = strlen(cause_buf);
+                if (l > best_len) { best_len = l; best_reason = (uint8_t)r; memcpy(best_buf, cause_buf, l + 1); }
+            }
+            (void)best_reason;
+            STATUS_APPEND(",\"trip_reason_cause\":\"%s\"", best_buf);
+        }
+        uint8_t reason_remedy = worst_of_all_reasons(safety_trip_words_remedy, &wlen);
+        STATUS_APPEND(",\"trip_reason_remedy\":\"%s\"", safety_trip_words_remedy(reason_remedy));
+        STATUS_APPEND(",\"trip_event_age_ms\":%lu", (unsigned long)0xFFFFFFFFu);
+        STATUS_APPEND(",\"trip_safety_tc_c\":%.1f", -1234.5);
+        STATUS_APPEND(",\"trip_deciding_threshold\":%.1f", -1234.5);
+        STATUS_APPEND(",\"trip_fault_sources\":%lu", (unsigned long)0xFFFFFFFFu);
+        STATUS_APPEND(",\"trip_fault_sources_valid\":%s", "true");
+        {
+            char tf_words[160];
+            STATUS_APPEND(",\"trip_fault_sources_words\":\"%s\"",
+                          safety_fault_source_words(0x3Fu, tf_words, sizeof(tf_words)));
+        }
+    }
+
+    STATUS_APPEND(",\"safety_build_known\":%s", "true");
+    {
+        char commit_raw[65], commit_esc[65 * 2 + 1];
+        char dt_raw[33], dt_esc[33 * 2 + 1];
+        memset(commit_raw, '"', sizeof(commit_raw) - 1); commit_raw[sizeof(commit_raw) - 1] = '\0';
+        memset(dt_raw, '"', sizeof(dt_raw) - 1); dt_raw[sizeof(dt_raw) - 1] = '\0';
+        json_escape(commit_raw, commit_esc, sizeof(commit_esc));
+        json_escape(dt_raw, dt_esc, sizeof(dt_esc));
+        STATUS_APPEND(",\"safety_build_dirty\":%s", "false");
+        STATUS_APPEND(",\"safety_build_commit\":\"%s\"", commit_esc);
+        STATUS_APPEND(",\"safety_build_datetime\":\"%s\"", dt_esc);
+        STATUS_APPEND(",\"safety_config_version\":%u", 255u);
+        STATUS_APPEND(",\"safety_config_crc\":%u", 65535u);
+    }
+
+    STATUS_APPEND(",\"nvs_sections\":[");
+    for (size_t i = 0; i < 4; i++) {
+        STATUS_APPEND("%s{\"name\":\"%s\",\"present\":%s,\"mounted\":%s}", i == 0 ? "" : ",",
+                      "profiles_nvs", "false", "false");
+    }
+    STATUS_APPEND("]");
+
+    {
+        char fwv_raw[32], fwv_esc[32 * 2 + 1];
+        char fwb_raw[40], fwb_esc[40 * 2 + 1];
+        memset(fwv_raw, '"', sizeof(fwv_raw) - 1); fwv_raw[sizeof(fwv_raw) - 1] = '\0';
+        memset(fwb_raw, '"', sizeof(fwb_raw) - 1); fwb_raw[sizeof(fwb_raw) - 1] = '\0';
+        json_escape(fwv_raw, fwv_esc, sizeof(fwv_esc));
+        json_escape(fwb_raw, fwb_esc, sizeof(fwb_esc));
+        STATUS_APPEND(",\"fw_version_known\":%s", "true");
+        STATUS_APPEND(",\"fw_version\":\"%s\"", fwv_esc);
+        STATUS_APPEND(",\"fw_build\":\"%s\"", fwb_esc);
+    }
+    STATUS_APPEND(",\"uptime_s\":%lu", (unsigned long)0xFFFFFFFFu);
+    /* Longest of reset_reason_name()'s fixed set (dashboard_http.c) --
+     * "software (esp_restart)", not escaped in the real handler either
+     * (fixed internal strings, never operator/peer-supplied). */
+    STATUS_APPEND(",\"reset_reason\":\"%s\"", "software (esp_restart)");
+    STATUS_APPEND(",\"heap_internal\":{\"free\":%lu,\"largest_free_block\":%lu,\"min_free\":%lu,\"total\":%lu}",
+                  (unsigned long)0xFFFFFFFFu, (unsigned long)0xFFFFFFFFu, (unsigned long)0xFFFFFFFFu,
+                  (unsigned long)0xFFFFFFFFu);
+    STATUS_APPEND(",\"heap_spiram\":{\"free\":%lu,\"largest_free_block\":%lu,\"min_free\":%lu,\"total\":%lu}",
+                  (unsigned long)0xFFFFFFFFu, (unsigned long)0xFFFFFFFFu, (unsigned long)0xFFFFFFFFu,
+                  (unsigned long)0xFFFFFFFFu);
+    STATUS_APPEND(",\"heap_dma\":{\"free\":%lu,\"largest_free_block\":%lu,\"min_free\":%lu,\"total\":%lu}",
+                  (unsigned long)0xFFFFFFFFu, (unsigned long)0xFFFFFFFFu, (unsigned long)0xFFFFFFFFu,
+                  (unsigned long)0xFFFFFFFFu);
+
+    STATUS_APPEND(",\"flash_size\":%lu", (unsigned long)0xFFFFFFFFu);
+    STATUS_APPEND(",\"flash_partition_size\":%lu", (unsigned long)0xFFFFFFFFu);
+    STATUS_APPEND(",\"flash_used\":%lu", (unsigned long)0xFFFFFFFFu);
+
+    STATUS_APPEND(",\"temp_unit\":\"%s\"", "F");
+
+    STATUS_APPEND(",\"time_synced\":%s", "true");
+    STATUS_APPEND(",\"time_now_epoch\":%lld", (long long)9999999999LL);
+    STATUS_APPEND(",\"time_last_sync_epoch\":%lld", (long long)9999999999LL);
+    {
+        char tz[64];
+        memset(tz, 'Z', sizeof(tz) - 1);
+        tz[sizeof(tz) - 1] = '\0';
+        STATUS_APPEND(",\"time_tz\":\"%s\"", tz);
+    }
+
+    STATUS_APPEND(",\"watchdog_panic_disabled\":%s", "true");
+    STATUS_APPEND(",\"boot_button_bypass_active\":%s", "true");
+    STATUS_APPEND(",\"ota_auth_disabled\":%s", "true");
+    STATUS_APPEND(",\"boot_button_bypass_remaining_s\":%lu", (unsigned long)0xFFFFFFFFu);
+    STATUS_APPEND(",\"touch_calibrated\":%s", "false");
+
+    if (extra_field) {
+        /* A plausible future field of the same shape/width as the real
+         * flush_last_us/flush_max_us/flush_count trio this endpoint already
+         * grew once (DISPLAY_ST7796_PLAN.md 9.1) -- exercises the exact
+         * failure mode the opus review is worried about: a field added
+         * without re-running the sizing check. */
+        STATUS_APPEND(",\"mock_new_stat_us\":%u,\"mock_new_stat_max_us\":%u", 0xFFFFFFFFu, 0xFFFFFFFFu);
+    }
+
+    STATUS_APPEND("}");
+
+    if (out_len) *out_len = o;
+    return true;
+}
+#undef STATUS_APPEND
+
+static void test_status_json_worst_case_render_fits_documented_buffer(void)
+{
+    TEST_SECTION("render_worst_case_status_json() -- GET /api/status's actual worst-case render "
+                 "(opus review: the '~100B headroom' figure was folklore, never defended by a "
+                 "check) must fit DASHBOARD_JSON_STATUS_BUF_SIZE, with real, measured headroom "
+                 "reported here rather than assumed");
+
+    char big[8192];
+    size_t worst_len = 0;
+    bool ok = render_worst_case_status_json(big, sizeof(big), MAX31856_CHANNEL_COUNT, false, &worst_len);
+    TEST_CHECK(ok, "the worst-case render must fit comfortably in an 8192-byte scratch buffer, or "
+              "this test's own measurement buffer is too small (raise `big`, not a real bug)");
+    TEST_CHECK(worst_len == strlen(big), "the returned length must match the rendered string");
+
+    printf("  /api/status worst-case render: %zu bytes (strlen), against "
+          "DASHBOARD_JSON_STATUS_BUF_SIZE=%d -- measured headroom = %ld bytes\n",
+          worst_len, (int)DASHBOARD_JSON_STATUS_BUF_SIZE,
+          (long)DASHBOARD_JSON_STATUS_BUF_SIZE - (long)worst_len);
+
+    TEST_CHECK(worst_len < DASHBOARD_JSON_STATUS_BUF_SIZE, "the real worst-case render must fit "
+              "DASHBOARD_JSON_STATUS_BUF_SIZE with room for the NUL terminator -- a failure here "
+              "means the shipped buffer is genuinely too small, not a test artifact");
+    /* A minimum real margin, not just ">0": catches the buffer being sized
+     * down to a hair's width of the worst case, same "too tight by this
+     * file's own rule of thumb" standard dashboard_http.c's own comment
+     * applies to itself (it grew 4096->4224 rather than leave ~19B). */
+    TEST_CHECK((long)DASHBOARD_JSON_STATUS_BUF_SIZE - (long)worst_len >= 50,
+              "headroom has shrunk below this file's own 50-byte minimum margin -- raise "
+              "DASHBOARD_JSON_STATUS_BUF_SIZE in dashboard_json.h");
+
+    /* Sanity: this really did render the full, complete document, not a
+     * truncated one that happened to return true. */
+    TEST_CHECK(json_looks_complete(big), "the worst-case render must itself be complete, balanced "
+              "JSON -- a bug in this mirror, not the production handler, would show up here");
+}
+
+static void test_status_json_mutation_shrink_buffer_goes_red(void)
+{
+    TEST_SECTION("MUTATION 1/2 -- shrinking the buffer to just under the measured worst case must "
+                 "make the worst-case render fail (prove the check can actually fail)");
+
+    char big[8192];
+    size_t worst_len = 0;
+    bool ok0 = render_worst_case_status_json(big, sizeof(big), MAX31856_CHANNEL_COUNT, false, &worst_len);
+    TEST_CHECK(ok0, "setup: the unshrunk render must succeed, or this mutation test proves nothing");
+
+    /* Exactly the measured worst length -- one byte short of what
+     * STATUS_APPEND's `n_ >= cap - o` check needs to leave room for the
+     * final NUL. Must go red. */
+    char *tight = malloc(worst_len);
+    TEST_CHECK(tight != NULL, "malloc must succeed on a host with plenty of heap");
+    if (tight != NULL) {
+        size_t got_len = 0;
+        bool ok = render_worst_case_status_json(tight, worst_len, MAX31856_CHANNEL_COUNT, false, &got_len);
+        printf("  RED (expected): render_worst_case_status_json() into a %zu-byte buffer (worst "
+              "case is %zu bytes) returned %s\n", worst_len, worst_len, ok ? "true (BUG)" : "false");
+        TEST_CHECK(!ok, "a buffer exactly at (not over) the worst-case length must be reported as "
+                  "too small -- this is the exact class of bug a stale/reverted "
+                  "DASHBOARD_JSON_STATUS_BUF_SIZE would reintroduce");
+        free(tight);
+    }
+}
+
+static void test_status_json_mutation_field_creep_goes_red(void)
+{
+    TEST_SECTION("MUTATION 2/2 -- a plausible new field added to /api/status without re-running "
+                 "this sizing check must overflow a buffer sized for the OLD worst case (the real "
+                 "failure mode: 'fields were added all night')");
+
+    char big[8192];
+    size_t worst_len_before = 0;
+    bool ok0 = render_worst_case_status_json(big, sizeof(big), MAX31856_CHANNEL_COUNT, false,
+                                             &worst_len_before);
+    TEST_CHECK(ok0, "setup: the render without the new field must succeed");
+
+    /* A buffer sized to exactly hold the OLD worst case (+1 for the NUL --
+     * this is what "the field list grew but nobody bumped the constant"
+     * looks like: the buffer is the same size it always was). */
+    char *old_size_buf = malloc(worst_len_before + 1);
+    TEST_CHECK(old_size_buf != NULL, "malloc must succeed on a host with plenty of heap");
+    if (old_size_buf != NULL) {
+        size_t got_len = 0;
+        bool ok = render_worst_case_status_json(old_size_buf, worst_len_before + 1,
+                                                 MAX31856_CHANNEL_COUNT, /*extra_field=*/true, &got_len);
+        printf("  RED (expected): adding one plausible new field (~%d bytes) without raising the "
+              "buffer from its old %zu-byte worst case returned %s\n",
+              (int)strlen(",\"mock_new_stat_us\":4294967295,\"mock_new_stat_max_us\":4294967295"),
+              worst_len_before, ok ? "true (BUG -- field creep would go undetected)" : "false");
+        TEST_CHECK(!ok, "adding a new field without raising the buffer size must be caught, not "
+                  "silently absorbed by unaccounted headroom");
+        free(old_size_buf);
+    }
+
+    /* And the positive control: the SAME new field, in a buffer that DOES
+     * budget for it, must succeed -- proves the field itself isn't simply
+     * broken/unreachable in this mirror. */
+    char with_room[8192];
+    size_t got_len2 = 0;
+    bool ok2 = render_worst_case_status_json(with_room, sizeof(with_room), MAX31856_CHANNEL_COUNT,
+                                             /*extra_field=*/true, &got_len2);
+    TEST_CHECK(ok2, "the new field must render successfully once the buffer actually budgets for it");
+    TEST_CHECK(got_len2 > worst_len_before, "the new field must actually add bytes, or this whole "
+              "mutation test is vacuous");
+}
+
 static void run_test_dashboard_json(void)
 {
     test_json_escape_doubles_every_quote_and_backslash();
@@ -523,6 +892,9 @@ static void run_test_dashboard_json(void)
     test_heap_allocated_worst_case_render_matches_stack_sizing();
     test_firing_history_json_is_complete_and_well_formed_at_full_depth();
     test_autotune_status_json_reports_sub_phase_distinctly();
+    test_status_json_worst_case_render_fits_documented_buffer();
+    test_status_json_mutation_shrink_buffer_goes_red();
+    test_status_json_mutation_field_creep_goes_red();
 }
 
 int main(void)

@@ -483,6 +483,24 @@ static const char *json_f(char *buf, size_t buf_len, const char *fmt, float v)
 
 static esp_err_t status_get_handler(httpd_req_t *req)
 {
+    /* SUPERSEDED 2026-09-02: the "4096... headroom of ~100B... fits at 4096"
+     * paragraph below was a one-off manual measurement, never a check --
+     * opus review. It is now: dashboard_json.h's DASHBOARD_JSON_STATUS_
+     * BUF_SIZE (this file's DASHBOARD_STATUS_JSON_BUF_SIZE is that same
+     * macro, aliased so the rest of this function needed no other edit),
+     * with test_dashboard_json.c's
+     * test_status_json_worst_case_render_fits_documented_buffer() rendering
+     * every field below at its real worst width (calling the SAME helper
+     * functions this handler calls -- json_escape(), safety_trip_words_*(),
+     * safety_fault_source_words() -- not reimplementing them) and asserting
+     * the result against the buffer, plus two mutation tests proving that
+     * check can actually go red (a shrunk buffer, and a field added without
+     * a size bump). Running that check found the paragraph below's hand sum
+     * was itself wrong by 99 bytes -- see dashboard_json.h's own comment on
+     * DASHBOARD_JSON_STATUS_BUF_SIZE for the corrected number (4480, not
+     * 4224) and why. The field-by-field prose below is kept for the
+     * per-field reasoning it still gets right, not for its arithmetic. */
+
     /* 2026-08-28 (live regression, same day as the fault-cause/remedy pass
      * that caused it): bumped from 1700 to 2200/2300/2500 previously -- see
      * git history for that running tally -- but the numbered-cause field
@@ -537,7 +555,11 @@ static esp_err_t status_get_handler(httpd_req_t *req)
      * elsewhere. Heap-allocated instead: freed on every return path below
      * (success, truncated, and the new malloc-failure path), same
      * "diagnosable 500, never a hang" property truncated: already has. */
-#define DASHBOARD_STATUS_JSON_BUF_SIZE 4224
+    /* The actual size lives in dashboard_json.h's DASHBOARD_JSON_STATUS_BUF_
+     * SIZE now (moved there so test_dashboard_json.c can reach it -- see
+     * that macro's own doc comment) -- this local name is kept so every
+     * other reference in this function below did not need touching. */
+#define DASHBOARD_STATUS_JSON_BUF_SIZE DASHBOARD_JSON_STATUS_BUF_SIZE
     char *json = malloc(DASHBOARD_STATUS_JSON_BUF_SIZE);
     if (json == NULL) {
         ESP_LOGE(TAG, "GET /api/status: malloc(%u) failed for the response buffer",
