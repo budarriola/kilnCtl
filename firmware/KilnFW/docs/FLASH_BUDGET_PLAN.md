@@ -435,6 +435,17 @@ The 261,777 B of embedded web assets in `libdrivers.a` are **not** a target —
 they are already gzipped, and they are the reason the pages cost zero RAM. See
 `DRAM_PSRAM_PLAN.md` section 1.
 
+**Re-verified 2026-09-02, not reopened:** `App/drivers/CMakeLists.txt`
+pre-gzips every embedded page/`theme.css` at build time (`gzip.open(...,
+'wb', 9)`, level 9) into `KILNCTL_GZIP_ASSET_FILES`, which is what
+`EMBED_TXTFILES` actually embeds; `page_get_handler` serves the `.gz` body
+directly with a `Content-Encoding: gzip` header via
+`web_client_accepts_gzip()`/`web_send_gzip_not_acceptable()`, same as every
+other `*_http.c` handler. The one exception is `tuning_recommendations`
+(new in `333dd4e`), served plain because it is a ~400 B–few-KB JSON blob —
+not worth a second content-negotiation path, per that commit's own
+reasoning. There is no remaining uncompressed asset to gzip.
+
 ---
 
 ## 6. What this plan does not propose
