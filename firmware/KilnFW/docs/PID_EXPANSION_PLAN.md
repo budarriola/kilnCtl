@@ -1007,6 +1007,59 @@ goes as `T⁴`, so the plant at kiln temperatures is not the plant identified he
 Every result in §2 validates the **mechanism**, not the behaviour at firing
 temperature. This stays open until a real firing.
 
+### 3.8 Load sensitivity — never tested on hardware, simulator-only 2026-09-02
+
+The bench identification (K_full/tau §3.2) and the ADOPTED matrix were measured
+at whatever load happened to be on the rig for the excitation/cooldown runs, and
+the bench kiln has never since been fired at a different one. `load_mass_sweep.py`
+sweeps two ASSUMED axes off that one anchor point (module docstring has the full
+model): **mass_mult** scales `tau` only (more thermal mass ⇒ slower response, DC
+gain unaffected — follows from `tau = C/G_loss`, `K = P_max/G_loss` sharing
+`G_loss`, which IS measured); **coupling_mult** scales K_full's OFF-diagonal only
+(shelves/ware blocking inter-zone view factor — the owner's own framing).
+Controller feedforward always uses the fixed, unloaded matrix, exactly like the
+firmware (no load sensor).
+
+Profile 7 (measured/bench-rig plant, trustworthy — current production gains,
+ADOPTED matrix), coupling held at 1.0 (pure mass effect): worst |mean ramp/dwell
+error| across zones grows roughly linearly with mass — 0.65 °C at 1.0x (the
+identified load) → 1.49 °C at 1.5x → 2.26 °C at 2.0x → 3.52 °C at 3.0x → 4.43 °C
+at 4.0x. **z0's error crosses its 2.1 °C discrimination threshold between 1.5x
+and 2.0x load**; z1 (1.2 °C threshold) and z2 (1.3 °C threshold) cross earlier,
+around 1.0–1.5x, driven by z2's already-documented cold hold bias (§3.2)
+compounding with mass. Below 1.5x nothing here clears the honesty gate. Duty
+saturation on z2's second ramp is the earliest-moving metric, not tracking error:
+it is already 41–78% at 1.0–2.0x load and pinned at 100% by 3.0x, before the
+mean-error metrics clearly separate from noise — **saturation, not ramp/dwell
+error, is the first symptom of an underloaded kiln getting heavier.** No
+oscillation appeared at any swept mass/coupling combination — the feedforward
+mismatch shows up as a growing steady bias and slower ramp tracking, not
+instability. The coupled hold solve's feasibility is unaffected by load in this
+model (the controller's K_inv never sees the load), so that failure mode stays
+purely temperature-driven (§3.4), not mass-driven.
+
+The cone-6 built-in schedule (C6DHSC, PhysicalKilnPlant/ASSUMED regime above
+80 °C) is **not a usable load-sensitivity test as built**: even at the reference
+1.0x load this schedule's own climb segments already duty-saturate (~98%) and
+run 12–50 °C behind target from the ASSUMED element wattage/thermal-mass
+constants alone (§3.4/3.7's open validation gap), before load is varied at all.
+Comparing 1.0x against 4.0x on top of that pre-existing mismatch is not a clean
+signal — it is reported here as a limitation, not a finding, so it doesn't get
+mistaken for a real high-temperature load result.
+
+Is load observable from data the firmware already has? Nothing here answers
+that with hardware evidence — it would need an in-flight step-response fit
+(commanded duty vs. temperature rate) compared against the identified τ, which
+this repo has no capture of. Flagged as the natural next step, not measured.
+
+**Bottom line: only the profile-7 (bench-rig-fit) results clear the honesty
+gate, and only at 1.5–2.0x load and up. The cone-schedule numbers are simulator
+artifacts of an already-unvalidated high-temperature model, not a load result.
+Gain scheduling by load is not justified by this alone — it would need a real
+multi-load firing, which has never been run.** See
+`tools/PcTools/src/kilnctrl/load_mass_sweep.py` (additive module, does not
+touch `plant_sim.py`'s core) and `tools/PcTools/tests/test_load_mass_sweep.py`.
+
 ---
 
 ## 4. Rejected approaches — do not re-propose without new evidence
