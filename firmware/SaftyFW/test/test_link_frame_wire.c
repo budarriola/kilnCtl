@@ -48,13 +48,18 @@
 #define MIRROR_SAFETY_FLAG_RELAY      0x08u
 #define MIRROR_SAFETY_FLAG_ENABLED    0x10u
 #define MIRROR_SAFETY_FLAG_TEMP_VALID 0x20u
+#define MIRROR_SAFETY_FLAG_TC_NOT_INSTALLED 0x40u
+#define MIRROR_SAFETY_FLAG_TC_INJECTED      0x80u
+#define MIRROR_SAFETY_FLAG2_BORROWED        0x01u
 
-// safety_link.h's SAFETY_LINK_STATUS_FRAME_LEN_V1/_V2, restated here (not
+// safety_link.h's SAFETY_LINK_STATUS_FRAME_LEN_V1/_V2/_V3, restated here (not
 // #included -- that header pulls in ESP-IDF-adjacent types) since they must
-// equal LINK_FRAME_STATUS_LEN_V1/_V2 for the two sides to agree at all; the
-// very first assertions in test_status_frame_round_trip() below prove that.
+// equal LINK_FRAME_STATUS_LEN_V1/_V2/_V3 for the two sides to agree at all;
+// the very first assertions in test_status_frame_round_trip() below prove
+// that.
 #define SAFETY_LINK_STATUS_FRAME_LEN_V1_MIRROR 23u
 #define SAFETY_LINK_STATUS_FRAME_LEN_V2_MIRROR 24u
+#define SAFETY_LINK_STATUS_FRAME_LEN_V3_MIRROR 26u
 
 typedef struct {
     bool ok;
@@ -63,8 +68,11 @@ typedef struct {
     float cj_temp_c;
     uint8_t tc_fault;
     float current_a[3];
-    bool tx_dropped_known; // true iff a V2 (24-byte) frame was parsed
+    bool tx_dropped_known; // true iff a V2 (24-byte) or wider frame was parsed
     uint8_t tx_dropped_sat; // meaningless when tx_dropped_known is false
+    bool borrowed_known; // true iff a V3 (26-byte) frame was parsed
+    bool borrowed;       // meaningless when borrowed_known is false
+    uint8_t borrowed_zone_index; // meaningless when borrowed_known is false
 } mirror_status_t;
 
 static float mirror_read_f32_le(const uint8_t *p)
@@ -88,7 +96,8 @@ static mirror_status_t mirror_apply_status(const uint8_t *payload, uint8_t lengt
     memset(&out, 0, sizeof(out));
 
     if ((length != SAFETY_LINK_STATUS_FRAME_LEN_V1_MIRROR &&
-         length != SAFETY_LINK_STATUS_FRAME_LEN_V2_MIRROR) ||
+         length != SAFETY_LINK_STATUS_FRAME_LEN_V2_MIRROR &&
+         length != SAFETY_LINK_STATUS_FRAME_LEN_V3_MIRROR) ||
         payload[0] != LINK_FRAME_STATUS_CMD) {
         out.ok = false;
         return out;
@@ -106,12 +115,22 @@ static mirror_status_t mirror_apply_status(const uint8_t *payload, uint8_t lengt
     out.current_a[0] = mirror_read_f32_le(&p[11]);
     out.current_a[1] = mirror_read_f32_le(&p[15]);
     out.current_a[2] = mirror_read_f32_le(&p[19]);
-    if (length == SAFETY_LINK_STATUS_FRAME_LEN_V2_MIRROR) {
+    if (length == SAFETY_LINK_STATUS_FRAME_LEN_V2_MIRROR ||
+        length == SAFETY_LINK_STATUS_FRAME_LEN_V3_MIRROR) {
         out.tx_dropped_known = true;
         out.tx_dropped_sat = p[23];
     } else {
         out.tx_dropped_known = false;
         out.tx_dropped_sat = 0;
+    }
+    if (length == SAFETY_LINK_STATUS_FRAME_LEN_V3_MIRROR) {
+        out.borrowed_known = true;
+        out.borrowed = (p[24] & MIRROR_SAFETY_FLAG2_BORROWED) != 0u;
+        out.borrowed_zone_index = p[25];
+    } else {
+        out.borrowed_known = false;
+        out.borrowed = false;
+        out.borrowed_zone_index = 0;
     }
     out.ok = true;
     return out;
@@ -231,7 +250,7 @@ static void test_status_frame_round_trip(void)
     link_frame_pack_status(payload, /*estop=*/true, /*relay_energized=*/true,
                             /*heating_enabled=*/false, /*temp_valid=*/true, 851.25f, 23.5f,
                             0x03u, 1.25f, 2.5f, 3.75f, /*tc_not_installed=*/false, /*tc_injected=*/false,
-                            /*peer_supports_status_v2=*/false, /*tx_dropped_sat=*/0);
+                            /*peer_supports_status_v2=*/false, /*tx_dropped_sat=*/0, /*peer_supports_status_v3=*/false, /*is_borrowed=*/false, LINK_FRAME_STATUS_BORROWED_ZONE_UNKNOWN);
 
     // link_frame_pack_status() never sets bits 0/1 (LINK_UP/FAULT are
     // documented as "the ESP's to own", link_frame.h) -- so on its own this
@@ -287,7 +306,7 @@ static void test_status_frame_nan_when_invalid(void)
     // enforce it here rather than trusting the far side to have been
     // careful" -- is what makes the assertions below pass, not the packer.
     link_frame_pack_status(payload, false, false, false, /*temp_valid=*/false, 777.0f, 888.0f, 0,
-                            0.0f, 0.0f, 0.0f, false, false, /*peer_supports_status_v2=*/false, 0);
+                            0.0f, 0.0f, 0.0f, false, false, /*peer_supports_status_v2=*/false, 0, false, false, LINK_FRAME_STATUS_BORROWED_ZONE_UNKNOWN);
 
     uint8_t wire_payload[LINK_FRAME_STATUS_LEN];
     uint8_t wire_length = 0;
@@ -305,7 +324,7 @@ static void test_status_frame_nan_when_invalid(void)
     // flag, not just always emitted.
     uint8_t payload2[LINK_FRAME_STATUS_LEN];
     link_frame_pack_status(payload2, false, false, false, /*temp_valid=*/true, 100.0f, 20.0f, 0,
-                            0.0f, 0.0f, 0.0f, false, false, /*peer_supports_status_v2=*/false, 0);
+                            0.0f, 0.0f, 0.0f, false, false, /*peer_supports_status_v2=*/false, 0, false, false, LINK_FRAME_STATUS_BORROWED_ZONE_UNKNOWN);
     uint8_t wire2[LINK_FRAME_STATUS_LEN];
     uint8_t wire2_len = 0;
     TEST_CHECK(wire_round_trip(payload2, LINK_FRAME_STATUS_LEN, wire2, &wire2_len),
@@ -322,7 +341,7 @@ static void test_status_frame_negative(void)
 
     uint8_t payload[LINK_FRAME_STATUS_LEN_V1];
     link_frame_pack_status(payload, false, false, false, true, 1.0f, 2.0f, 0, 0.0f, 0.0f, 0.0f,
-                            false, false, /*peer_supports_status_v2=*/false, 0);
+                            false, false, /*peer_supports_status_v2=*/false, 0, false, false, LINK_FRAME_STATUS_BORROWED_ZONE_UNKNOWN);
 
     // Truncated payload: one byte short of the (still valid) V1 length.
     {
@@ -440,7 +459,7 @@ static void test_status_frame_v2_tx_dropped(void)
         memset(payload, 0xAAu, sizeof(payload)); // poison byte 23 so "untouched" is provable
         size_t len = link_frame_pack_status(payload, false, false, false, true, 1.0f, 2.0f, 0,
                                              0.0f, 0.0f, 0.0f, false, false,
-                                             /*peer_supports_status_v2=*/false, /*tx_dropped_sat=*/77u);
+                                             /*peer_supports_status_v2=*/false, /*tx_dropped_sat=*/77u, false, false, LINK_FRAME_STATUS_BORROWED_ZONE_UNKNOWN);
         TEST_CHECK(len == LINK_FRAME_STATUS_LEN_V1,
                    "peer_supports_status_v2=false -> returns the V1 (23) length");
         TEST_CHECK(payload[LINK_FRAME_STATUS_LEN_V1] == 0xAAu,
@@ -458,7 +477,7 @@ static void test_status_frame_v2_tx_dropped(void)
         uint8_t payload[LINK_FRAME_STATUS_LEN_V2];
         size_t len = link_frame_pack_status(payload, false, false, false, true, 1.0f, 2.0f, 0,
                                              0.0f, 0.0f, 0.0f, false, false,
-                                             /*peer_supports_status_v2=*/true, /*tx_dropped_sat=*/200u);
+                                             /*peer_supports_status_v2=*/true, /*tx_dropped_sat=*/200u, false, false, LINK_FRAME_STATUS_BORROWED_ZONE_UNKNOWN);
         TEST_CHECK(len == LINK_FRAME_STATUS_LEN_V2,
                    "peer_supports_status_v2=true -> returns the V2 (24) length");
         TEST_CHECK(payload[LINK_FRAME_STATUS_LEN_V1] == 200u, "byte 23 carries tx_dropped_sat exactly");
@@ -473,6 +492,128 @@ static void test_status_frame_v2_tx_dropped(void)
         TEST_CHECK(parsed.ok, "V2-length frame parses");
         TEST_CHECK(parsed.tx_dropped_known, "mirror correctly reports tx_dropped_known == true for a V2 frame");
         TEST_CHECK(parsed.tx_dropped_sat == 200u, "tx_dropped_sat survives pack->wire->parse");
+    }
+}
+
+// link_frame_status_v3_supported() -- same boundary shape as
+// link_frame_status_v2_supported() above, one protocol version higher.
+static void test_status_v3_supported_gate(void)
+{
+    TEST_SECTION("link_frame_status_v3_supported -- peer protocol_version gate boundary");
+
+    TEST_CHECK(!link_frame_status_v3_supported(0u),
+               "0 (never announced) is NOT supported: the safe default before any "
+               "ANNOUNCE_VERSION has arrived");
+    TEST_CHECK(!link_frame_status_v3_supported(9u),
+               "protocol_version 9 (the pre-V3/BORROWED version this whole repo shipped "
+               "until now) is NOT supported");
+    TEST_CHECK(link_frame_status_v3_supported(10u),
+               "protocol_version 10 (LINK_FRAME_STATUS_V3_MIN_PROTOCOL itself) IS supported");
+    TEST_CHECK(link_frame_status_v3_supported(11u), "protocol_version 11 (above the floor) IS supported");
+}
+
+// V3 (26-byte) Frame A, the BORROWED status flag -- TASK 1's actual point.
+// Same "verify the byte both ways" shape as test_status_frame_v2_tx_dropped()
+// above, plus the V2-gate-implies-V3-gate interaction: a peer known to
+// support V2 but NOT V3 must still get exactly the 24-byte V2 frame, never a
+// half-grown 25/26-byte one.
+static void test_status_frame_v3_borrowed(void)
+{
+    TEST_SECTION("status frame -- V3 BORROWED flag (bytes 24/25), every peer-support combination");
+
+    TEST_CHECK(LINK_FRAME_STATUS_LEN_V3 == SAFETY_LINK_STATUS_FRAME_LEN_V3_MIRROR,
+               "LINK_FRAME_STATUS_LEN_V3 (SaftyFW) == SAFETY_LINK_STATUS_FRAME_LEN_V3 (KilnFW)");
+
+    // Peer supports V2 but NOT V3 -- must stay 24 bytes, bytes 24/25 never
+    // written, even though is_borrowed=true and a real zone index are passed
+    // in. This is the case that would silently overrun/desync the wire if
+    // link_frame_pack_status() trusted peer_supports_status_v3 without also
+    // gating on peer_supports_status_v2 having been the caller's basis for
+    // it (see this function's own doc comment, link_frame.h).
+    {
+        uint8_t payload[LINK_FRAME_STATUS_LEN_V3];
+        memset(payload, 0xAAu, sizeof(payload)); // poison bytes 24/25
+        size_t len = link_frame_pack_status(payload, false, false, false, true, 1.0f, 2.0f, 0,
+                                             0.0f, 0.0f, 0.0f, false, false,
+                                             /*peer_supports_status_v2=*/true, /*tx_dropped_sat=*/5u,
+                                             /*peer_supports_status_v3=*/false, /*is_borrowed=*/true,
+                                             /*borrowed_zone_index=*/1u);
+        TEST_CHECK(len == LINK_FRAME_STATUS_LEN_V2,
+                   "peer_supports_status_v3=false -> returns the V2 (24) length even though "
+                   "is_borrowed=true was passed in");
+        TEST_CHECK(payload[24] == 0xAAu && payload[25] == 0xAAu,
+                   "bytes 24/25 are left untouched (still poisoned) when V3 is not emitted");
+
+        mirror_status_t parsed = mirror_apply_status(payload, (uint8_t)len);
+        TEST_CHECK(parsed.ok, "V2-length frame still parses");
+        TEST_CHECK(!parsed.borrowed_known, "mirror correctly reports borrowed_known == false for a V2 frame");
+    }
+
+    // Peer supports V2 but is_borrowed=false / zone unknown -- proves the bit
+    // and sentinel are both driven by the arguments, not hard-coded true.
+    {
+        uint8_t payload[LINK_FRAME_STATUS_LEN_V3];
+        size_t len = link_frame_pack_status(payload, false, false, false, true, 1.0f, 2.0f, 0,
+                                             0.0f, 0.0f, 0.0f, false, false,
+                                             /*peer_supports_status_v2=*/true, /*tx_dropped_sat=*/0u,
+                                             /*peer_supports_status_v3=*/true, /*is_borrowed=*/false,
+                                             LINK_FRAME_STATUS_BORROWED_ZONE_UNKNOWN);
+        TEST_CHECK(len == LINK_FRAME_STATUS_LEN_V3, "peer_supports_status_v3=true -> returns the V3 (26) length");
+        TEST_CHECK(payload[24] == 0u, "flags2 byte is 0 when is_borrowed=false");
+        TEST_CHECK(payload[25] == LINK_FRAME_STATUS_BORROWED_ZONE_UNKNOWN,
+                   "borrowed_zone_index sentinel (0xFF) survives pack when the zone is unknown");
+
+        mirror_status_t parsed = mirror_apply_status(payload, (uint8_t)len);
+        TEST_CHECK(parsed.ok, "V3-length frame parses");
+        TEST_CHECK(parsed.borrowed_known, "mirror reports borrowed_known == true for a V3 frame");
+        TEST_CHECK(!parsed.borrowed, "borrowed bit is clear when is_borrowed=false");
+        TEST_CHECK(parsed.borrowed_zone_index == LINK_FRAME_STATUS_BORROWED_ZONE_UNKNOWN,
+                   "sentinel round-trips through the mirror parse");
+    }
+
+    // Peer supports V3 AND is_borrowed=true with a real, commissioned zone
+    // index -- the actual "S13's condition is visible on the wire" proof,
+    // taken all the way through the real kilnlink wire codec, not just the
+    // packer.
+    {
+        uint8_t payload[LINK_FRAME_STATUS_LEN_V3];
+        size_t len = link_frame_pack_status(payload, false, false, false, true, 1.0f, 2.0f, 0,
+                                             0.0f, 0.0f, 0.0f, false, false,
+                                             /*peer_supports_status_v2=*/true, /*tx_dropped_sat=*/0u,
+                                             /*peer_supports_status_v3=*/true, /*is_borrowed=*/true,
+                                             /*borrowed_zone_index=*/2u);
+        TEST_CHECK(len == LINK_FRAME_STATUS_LEN_V3, "V3 length returned");
+        TEST_CHECK((payload[24] & 0x01u) != 0u, "flags2 bit 0 (BORROWED) is set when is_borrowed=true");
+        TEST_CHECK(payload[25] == 2u, "borrowed_zone_index (2) survives pack exactly");
+
+        uint8_t wire_payload[LINK_FRAME_STATUS_LEN_V3];
+        uint8_t wire_length = 0;
+        TEST_CHECK(wire_round_trip(payload, (uint8_t)len, wire_payload, &wire_length),
+                   "V3 status frame survives the real kilnlink wire round trip");
+        TEST_CHECK(wire_length == LINK_FRAME_STATUS_LEN_V3, "wire length is 26, unchanged by the codec");
+
+        mirror_status_t parsed = mirror_apply_status(wire_payload, wire_length);
+        TEST_CHECK(parsed.ok, "V3-length frame parses after a real wire round trip");
+        TEST_CHECK(parsed.borrowed_known, "mirror reports borrowed_known == true");
+        TEST_CHECK(parsed.borrowed, "borrowed bit survives pack->wire->parse");
+        TEST_CHECK(parsed.borrowed_zone_index == 2u, "borrowed_zone_index (2) survives pack->wire->parse");
+    }
+
+    // Negative proof this isn't vacuous: peer NOT known to support V2 at all
+    // (the safe pre-ANNOUNCE_VERSION default) -- must stay 23 bytes even if
+    // both v2 and v3 support flags were (incorrectly) passed true, mirroring
+    // the same defense-in-depth link_frame_pack_status() already applies via
+    // the peer_supports_status_v2 outer gate.
+    {
+        uint8_t payload[LINK_FRAME_STATUS_LEN_V3];
+        size_t len = link_frame_pack_status(payload, false, false, false, true, 1.0f, 2.0f, 0,
+                                             0.0f, 0.0f, 0.0f, false, false,
+                                             /*peer_supports_status_v2=*/false, /*tx_dropped_sat=*/0u,
+                                             /*peer_supports_status_v3=*/true, /*is_borrowed=*/true,
+                                             /*borrowed_zone_index=*/0u);
+        TEST_CHECK(len == LINK_FRAME_STATUS_LEN_V1,
+                   "peer_supports_status_v2=false wins even when peer_supports_status_v3=true is "
+                   "(wrongly) also passed -- V3 can never be emitted without V2");
     }
 }
 
@@ -723,7 +864,7 @@ static void test_telemetry_keeps_flowing_on_version_mismatch(void)
     uint8_t payload[LINK_FRAME_STATUS_LEN_V1];
     link_frame_pack_status(payload, /*estop=*/false, /*relay_energized=*/false,
                             /*heating_enabled=*/false, /*temp_valid=*/true, 500.0f, 22.0f, 0, 0.1f,
-                            0.2f, 0.3f, false, false, /*peer_supports_status_v2=*/false, 0);
+                            0.2f, 0.3f, false, false, /*peer_supports_status_v2=*/false, 0, false, false, LINK_FRAME_STATUS_BORROWED_ZONE_UNKNOWN);
     uint8_t wire_payload[LINK_FRAME_STATUS_LEN_V1];
     uint8_t wire_length = 0;
     TEST_CHECK(wire_round_trip(payload, LINK_FRAME_STATUS_LEN_V1, wire_payload, &wire_length),
@@ -757,9 +898,11 @@ void run_test_link_frame_wire(void)
     test_status_frame_nan_when_invalid();
     test_status_frame_negative();
     test_status_v2_supported_gate();
+    test_status_v3_supported_gate();
     test_rollback_result_supported_gate();
     test_saturate_tx_dropped();
     test_status_frame_v2_tx_dropped();
+    test_status_frame_v3_borrowed();
     test_fw_version_round_trip();
     test_fw_version_negative();
     test_version_compatibility_named_matrix();

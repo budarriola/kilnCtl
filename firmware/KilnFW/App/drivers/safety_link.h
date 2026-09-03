@@ -193,7 +193,44 @@ extern "C" {
  * every existing reference wants "the original, always-valid prefix". */
 #define SAFETY_LINK_STATUS_FRAME_LEN_V1 23u
 #define SAFETY_LINK_STATUS_FRAME_LEN_V2 24u
+/* V3 (V2 + bytes 24/25, the BORROWED status flag -- 2026-09-03). Byte 24 is a
+ * flags2 byte (bit0 SAFETY_LINK_STATUS_FLAG2_BORROWED), byte 25 is
+ * borrowed_zone_index verbatim (SAFETY_LINK_BORROWED_ZONE_UNKNOWN (0xFF) =
+ * not commissioned / not known). Same skew-safety contract as V1/V2:
+ * safety_apply_status() accepts V1, V2, OR V3 -- an older Pico (23 or 24
+ * bytes) and a newer one (26 bytes) must both keep working regardless of
+ * which side is flashed first. SaftyFW only ever sends V3 once it has
+ * positively confirmed, via ANNOUNCE_VERSION, that this ESP peer is built
+ * against protocol_version >= 10 (SaftyFW's link_frame.h
+ * LINK_FRAME_STATUS_V3_MIN_PROTOCOL) -- see link_frame_pack_status()'s own
+ * doc comment there for the full argument, applied a second time to this
+ * same frame.
+ *
+ * ABSENT-BYTE SAFETY: whenever the applied frame is V1 or V2 length (no byte
+ * 24/25 at all -- an older Pico, or a newer one not yet confirmed for V3),
+ * this driver reports borrowed_known == false, NOT borrowed == false. A
+ * caller that read the absence of the byte as "not borrowed" would be
+ * reading a plausible-looking, confidently WRONG safe-sounding answer into a
+ * field that was simply never sent -- the exact `min_compatible` precedent
+ * (a too-short frame must read as UNKNOWN and fail closed, never as a zero
+ * that silently means "fine") applied here: "no data yet" and "confirmed not
+ * borrowed" are different facts, and only the peer's own V3 byte can tell
+ * them apart. Every renderer of this field (safety_cfg_http.c) must check
+ * borrowed_known first, exactly as tx_dropped_known already gates
+ * tx_dropped_sat above. */
+#define SAFETY_LINK_STATUS_FRAME_LEN_V3 26u
 #define SAFETY_LINK_STATUS_FRAME_LEN    SAFETY_LINK_STATUS_FRAME_LEN_V1
+
+/* flags2 byte (offset 24, V3 only) -- mirrors SaftyFW's link_frame.h
+ * LINK_FLAG2_BORROWED exactly (same numeric value, same "byte 1 has no room
+ * left" reasoning for why this is a whole new byte, not a reused bit). */
+#define SAFETY_LINK_STATUS_FLAG2_BORROWED 0x01u
+
+/* borrowed_zone_index sentinel (byte 25) -- mirrors SaftyFW's link_frame.h
+ * LINK_FRAME_STATUS_BORROWED_ZONE_UNKNOWN exactly. A real value is always
+ * 0..2 (config_store.h borrowed_zone_index's own range), so 0xFF can never
+ * collide with one. */
+#define SAFETY_LINK_BORROWED_ZONE_UNKNOWN 0xFFu
 
 /* Length of the Pico's power frame (SAFETY_CMD_POWER / Frame E,
  * CommonFW/docs/LINK_PROTOCOL.md sec 6), byte-for-byte
@@ -673,6 +710,23 @@ typedef struct {
      * instead of a whole separate frame's. */
     bool     tx_dropped_known;
     uint8_t  tx_dropped_sat; /* saturating uart_owner TX-ring-drop count, Pico-side; 255 = "254 or more" */
+
+    /* V3 status frame (bytes 24/25, SAFETY_LINK_STATUS_FRAME_LEN_V3) --
+     * 2026-09-03, the BORROWED status flag. borrowed_known is false (and
+     * borrowed/borrowed_zone_index meaningless) whenever the most recently
+     * applied status frame was V1 or V2 length -- an older Pico, or one that
+     * has not yet confirmed this ESP supports V3 (see safety_link.h's
+     * SAFETY_LINK_STATUS_FRAME_LEN_V3 comment for why this is UNKNOWN, never
+     * a false "not borrowed"). Same "false/meaningless until proven
+     * otherwise" convention as tx_dropped_known above, one byte further out.
+     * borrowed_zone_index is SAFETY_LINK_BORROWED_ZONE_UNKNOWN (0xFF)
+     * whenever the Pico itself does not know it (borrowed_zone_index not
+     * commissioned there), even on a V3 frame -- "known to be borrowed, but
+     * from an unknown zone" is a real, distinct state from "not borrowed"
+     * and from "unknown whether borrowed at all". */
+    bool     borrowed_known;
+    bool     borrowed;
+    uint8_t  borrowed_zone_index; /* SAFETY_LINK_BORROWED_ZONE_UNKNOWN (0xFF) if not commissioned on the Pico */
 
     /* SAFETY_CMD_POWER (Frame E) telemetry -- ROADMAP.md M5/M6, TODO.md
      * 10.10. NaN/false fields below mean "never received" or "not a valid

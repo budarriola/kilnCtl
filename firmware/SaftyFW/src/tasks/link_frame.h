@@ -46,6 +46,16 @@ extern "C" {
 // which is still true of a V2 frame's first 23 bytes too.
 #define LINK_FRAME_STATUS_LEN_V1 23u
 #define LINK_FRAME_STATUS_LEN_V2 24u
+// V3 (V2 + bytes 24/25, BORROWED status) -- 2026-09-03. Extends the frame
+// with a NEW byte, following the V1->V2 precedent this header cites, rather
+// than reassigning or overloading either of byte 1's two remaining bits
+// (LINK_FLAG_TC_NOT_INSTALLED/LINK_FLAG_TC_INJECTED, already spent -- see
+// their own comment below). Aliasing "borrowed reading" onto "TC not
+// installed" would put two different safety-relevant conditions on one bit,
+// defeating the point of a distinct flag. See link_frame_pack_status()'s own
+// doc comment for the byte 24/25 layout and the same skew-safety argument the
+// V1->V2 step made, applied here a second time.
+#define LINK_FRAME_STATUS_LEN_V3 26u
 #define LINK_FRAME_STATUS_LEN    LINK_FRAME_STATUS_LEN_V1
 
 // Byte 23 (V2 only): uart_owner_get_tx_dropped(), saturating -- 254 is the
@@ -77,6 +87,22 @@ uint8_t link_frame_saturate_tx_dropped(uint32_t tx_dropped);
 // and its boundary, is pinned down by a test rather than left as an inline
 // comparison only ever exercised indirectly through link_task_send_status().
 bool link_frame_status_v2_supported(uint16_t peer_protocol_version);
+
+// Same gate, mirrored for the V3 (26-byte, BORROWED) status frame extension
+// below -- link_task_send_status() must not emit byte 24/25 at a peer that
+// has not positively confirmed protocol_version >= this floor, exactly the
+// same skew-safety reasoning LINK_FRAME_STATUS_V2_MIN_PROTOCOL's own comment
+// gives for byte 23.
+#define LINK_FRAME_STATUS_V3_MIN_PROTOCOL 10u
+bool link_frame_status_v3_supported(uint16_t peer_protocol_version);
+
+// Sentinel for byte 25 (borrowed_zone_index) meaning "not commissioned /
+// unknown" -- config_store.h's borrowed_zone_index is only ever 0..2
+// (CONFIG_STORE_SET_BORROWED_ZONE_INDEX gates whether it has been
+// commissioned at all, config_params.c's CHECK_U8_MAX(2u)), so 0xFF can never
+// collide with a real value. Mirrors LINK_FRAME_STATUS_TX_DROPPED_SAT_MAX's
+// "255 is never a real saturating count either" sentinel discipline.
+#define LINK_FRAME_STATUS_BORROWED_ZONE_UNKNOWN 0xFFu
 
 // Same pure peer-version gate, mirrored for SAFETY_CMD_ROLLBACK_RESULT
 // (0x25, kilnlink_rollback_result.h) instead of the V2 status field --
@@ -117,6 +143,14 @@ bool link_frame_rollback_result_supported(uint16_t peer_protocol_version);
 #define LINK_FLAG_TC_NOT_INSTALLED 0x40u /* safety_tc_installed == 0 -- heat is refused (safety_core_request_enable()) */
 #define LINK_FLAG_TC_INJECTED      0x80u /* thermo_task_injection_active() -- reading is synthetic, not from the part */
 
+// flags2 byte (offset 24, V3 only) -- 2026-09-03. Byte 1 has no room left
+// (comment above), so this is a NEW byte (V1->V2 precedent), not a ninth bit
+// squeezed somewhere. Only bit 0 defined so far; bits 1-7 are reserved for
+// future flags rather than this byte being sized for exactly one bit.
+#define LINK_FLAG2_BORROWED 0x01u /* tc_source is BORROWED_ZONE or BOTH -- this reading is (partly) sourced
+                                    * from another zone's probe, not this board's own J7 input
+                                    * (SAFETY_MODEL.md sec 3, THERMOCOUPLE.md's tc_source table). */
+
 // Packs the status payload into `out` (must have room for
 // LINK_FRAME_STATUS_LEN_V2 bytes, whether or not this call ends up using all
 // of them). `safety_tc_c`/`cj_c` should already be NaN when `temp_valid` is
@@ -135,6 +169,27 @@ bool link_frame_rollback_result_supported(uint16_t peer_protocol_version);
 // nothing past byte 22 -- the caller must send back exactly the returned
 // length, not a fixed constant, or a V1-peer receiver's exact-length check
 // will reject the frame outright.
+//
+// `peer_supports_status_v3`/`is_borrowed`/`borrowed_zone_index` control bytes
+// 24/25 (2026-09-03, the BORROWED status flag). Only ever considered when
+// `peer_supports_status_v2` is ALSO true -- byte 24/25 sit right after byte
+// 23, so a peer this function has not confirmed can even receive a V2 frame
+// must not be handed a V3 one either (LINK_FRAME_STATUS_V3_MIN_PROTOCOL (10)
+// is numerically above LINK_FRAME_STATUS_V2_MIN_PROTOCOL (6), so any peer
+// that has announced itself new enough for V3 has necessarily also announced
+// itself new enough for V2, but this function does not assume the caller
+// enforces that ordering -- it enforces it itself). When both gates pass,
+// returns LINK_FRAME_STATUS_LEN_V3 (26): byte 24 is a flags2 byte (bit 0
+// LINK_FLAG2_BORROWED, set iff `is_borrowed`) and byte 25 is
+// `borrowed_zone_index` verbatim (pass LINK_FRAME_STATUS_BORROWED_ZONE_UNKNOWN
+// when the caller does not know it, e.g. borrowed_zone_index is not
+// commissioned -- see link_task.c's call site for how it decides this).
+// `is_borrowed` derives from `tc_source` (config_store.h): true iff tc_source
+// is CONFIG_STORE_TC_SOURCE_BORROWED_ZONE or _BOTH, i.e. the safety
+// processor's own reported reading is (at least partly) another zone's
+// probe, not this board's own J7 input -- this is the exact condition guard
+// S13 polices and that an operator seeing an unlabelled reading would
+// otherwise have no way to tell apart from an honest own-sensor reading.
 //
 // SKEW SAFETY, both directions -- this is why the length is chosen HERE, by
 // the sender, rather than the receiver simply tolerating either length
@@ -163,11 +218,13 @@ bool link_frame_rollback_result_supported(uint16_t peer_protocol_version);
 //     from this function's point of view -- the asymmetry is deliberately
 //     all on "do I know the peer is new", never on which side has which
 //     build.
-size_t link_frame_pack_status(uint8_t out[LINK_FRAME_STATUS_LEN_V2], bool estop, bool relay_energized,
+size_t link_frame_pack_status(uint8_t out[LINK_FRAME_STATUS_LEN_V3], bool estop, bool relay_energized,
                                bool heating_enabled, bool temp_valid, float safety_tc_c, float cj_c,
                                uint8_t tc_fault_bits, float amps1, float amps2, float amps3,
                                bool tc_not_installed, bool tc_injected,
-                               bool peer_supports_status_v2, uint8_t tx_dropped_sat);
+                               bool peer_supports_status_v2, uint8_t tx_dropped_sat,
+                               bool peer_supports_status_v3, bool is_borrowed,
+                               uint8_t borrowed_zone_index);
 
 // --- Frame C: SAFETY_CMD_FW_VERSION (0x0B) -----------------------------------
 // Also the reply to, and identical command byte as, SAFETY_CMD_GET_FW_VERSION

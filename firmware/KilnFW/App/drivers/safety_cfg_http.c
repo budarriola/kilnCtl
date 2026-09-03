@@ -11,6 +11,7 @@
 #include "http_form.h"
 #include "kilnlink/kilnlink_commit_config_rejected.h"
 #include "safety_cfg_store.h"
+#include "uart_task_ids.h" // SAFETY_FLAG_TC_NOT_INSTALLED/SAFETY_FLAG_TC_INJECTED
 #include "web_encoding.h"
 #include "wifi_provision_http.h"
 
@@ -76,6 +77,23 @@ typedef struct {
     bool commissioned;
     int64_t fetched_ms_ago_or_neg1;
     bool unset_reliable; /* see peer_reports_unset_reliably()'s comment (M1) */
+
+    /* Live status-frame flags (2026-09-03) -- TASK 2's "writer without a
+     * reader" fix for SAFETY_FLAG_TC_NOT_INSTALLED/_TC_INJECTED (both were
+     * SET by SaftyFW's link_frame_pack_status() with no name/consumer on
+     * this side), plus TASK 1's new BORROWED status. These ride this
+     * endpoint (not /api/status, dashboard_http.c) for the same reason
+     * tc_placement_mode already does -- see safety_page.html's own comment
+     * on pollPlacement(). tc_not_installed/tc_injected are only meaningful
+     * when link_up is true (a dead link's last-cached flags byte is stale);
+     * borrowed_known follows safety_link_status_t's own "V1/V2 frame -> not
+     * yet known, never a false not-borrowed" contract regardless of
+     * link_up. */
+    bool tc_not_installed;
+    bool tc_injected;
+    bool borrowed_known;
+    bool borrowed;
+    uint8_t borrowed_zone_index; /* SAFETY_LINK_BORROWED_ZONE_UNKNOWN if not commissioned on the Pico */
 } safety_cfg_http_snapshot_t;
 
 /* KILNLINK_CONFIG_PAGE_UNSET_BIT (the per-entry "this field is genuinely
@@ -158,6 +176,18 @@ static size_t build_commissioning_json(const safety_cfg_http_snapshot_t *s, char
      * "cannot tell what's really set" banner rather than silently rendering
      * stale-but-plausible values as confirmed commissioning. */
     APPEND(",\"unset_reporting_reliable\":%s", s->unset_reliable ? "true" : "false");
+    /* 2026-09-03: live status-frame flags, gated on link_up the same way the
+     * page's other live readings already are -- a stale flags byte from a
+     * dead link must not be rendered as current. */
+    APPEND(",\"tc_not_installed\":%s", (s->link_up && s->tc_not_installed) ? "true" : "false");
+    APPEND(",\"tc_injected\":%s", (s->link_up && s->tc_injected) ? "true" : "false");
+    APPEND(",\"borrowed_known\":%s", s->borrowed_known ? "true" : "false");
+    if (s->borrowed_known) {
+        APPEND(",\"borrowed\":%s", s->borrowed ? "true" : "false");
+        if (s->borrowed && s->borrowed_zone_index != SAFETY_LINK_BORROWED_ZONE_UNKNOWN) {
+            APPEND(",\"borrowed_zone_index\":%u", (unsigned)s->borrowed_zone_index);
+        }
+    }
     APPEND(",\"params\":[");
 
     size_t count = safety_cfg_store_param_count();
@@ -227,6 +257,11 @@ static esp_err_t commissioning_get_handler(httpd_req_t *req)
             snap.link_up = st.link_up;
             snap.commissioned =
                 st.diag_ever_received && !(st.diag_flags & SAFETY_LINK_DIAG_FLAG_CALIBRATION_MISSING);
+            snap.tc_not_installed = (st.flags & SAFETY_FLAG_TC_NOT_INSTALLED) != 0u;
+            snap.tc_injected = (st.flags & SAFETY_FLAG_TC_INJECTED) != 0u;
+            snap.borrowed_known = st.borrowed_known;
+            snap.borrowed = st.borrowed;
+            snap.borrowed_zone_index = st.borrowed_zone_index;
         }
         uint16_t peer_crc = 0;
         bool peer_known = false;

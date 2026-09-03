@@ -380,6 +380,101 @@ static void test_build_json_set_param_includes_value(void)
     TEST_CHECK(strstr(json, "\"value\":1300") != NULL, "the real value is present");
 }
 
+// 2026-09-03, TASK 1/2: the live status-frame flags (BORROWED, TC_NOT_
+// INSTALLED, TC_INJECTED) commissioning_get_handler() now folds into this
+// same JSON. build_commissioning_json() is the pure half that host-tests
+// directly; commissioning_get_handler()'s own snapshot-filling code (which
+// reads st.flags/st.borrowed_known/etc. from a real SafetyLinkClass) is
+// exercised end-to-end by test_safety_link_compile.c's
+// test_apply_status_v3_borrowed() -- Pico pack -> wire -> KilnFW decode --
+// so this file only needs to prove the JSON RENDERING side: given a
+// snapshot, does the right shape come out.
+static void test_build_json_borrowed_unknown(void)
+{
+    TEST_SECTION("build_commissioning_json -- borrowed_known:false (V1/V2 peer, or link never up) "
+                 "omits \"borrowed\"/\"borrowed_zone_index\" entirely -- never a false 'not borrowed'");
+    reset_all();
+    safety_cfg_http_snapshot_t snap = {0};
+    snap.borrowed_known = false;
+    // Deliberately also seed the fields that would be printed IF borrowed_known
+    // were (wrongly) ignored, so a bug that renders them anyway is caught.
+    snap.borrowed = true;
+    snap.borrowed_zone_index = 2;
+
+    static char json[SAFETY_CFG_JSON_MAX];
+    size_t len = build_commissioning_json(&snap, json, sizeof(json));
+    TEST_CHECK(len > 0, "JSON built successfully");
+    TEST_CHECK(strstr(json, "\"borrowed_known\":false") != NULL, "borrowed_known:false is reported");
+    TEST_CHECK(strstr(json, "\"borrowed\":") == NULL,
+               "\"borrowed\" is OMITTED when unknown -- even though snap.borrowed was (wrongly, for "
+               "this test) set true, proving the omission is really gated on borrowed_known");
+    TEST_CHECK(strstr(json, "\"borrowed_zone_index\"") == NULL,
+               "\"borrowed_zone_index\" is also omitted when borrowed_known is false");
+}
+
+static void test_build_json_borrowed_known_true_with_zone(void)
+{
+    TEST_SECTION("build_commissioning_json -- borrowed_known:true, borrowed:true, a real zone index");
+    reset_all();
+    safety_cfg_http_snapshot_t snap = {0};
+    snap.borrowed_known = true;
+    snap.borrowed = true;
+    snap.borrowed_zone_index = 1;
+
+    static char json[SAFETY_CFG_JSON_MAX];
+    size_t len = build_commissioning_json(&snap, json, sizeof(json));
+    TEST_CHECK(len > 0, "JSON built successfully");
+    TEST_CHECK(strstr(json, "\"borrowed_known\":true") != NULL, "borrowed_known:true is reported");
+    TEST_CHECK(strstr(json, "\"borrowed\":true") != NULL, "borrowed:true is reported");
+    TEST_CHECK(strstr(json, "\"borrowed_zone_index\":1") != NULL, "the real zone index (1) is reported");
+}
+
+static void test_build_json_borrowed_known_true_zone_unknown(void)
+{
+    TEST_SECTION("build_commissioning_json -- borrowed_known:true, borrowed:true, but the ZONE itself "
+                 "is not commissioned on the Pico (SAFETY_LINK_BORROWED_ZONE_UNKNOWN) -- "
+                 "borrowed_zone_index must still be omitted, not printed as 255");
+    reset_all();
+    safety_cfg_http_snapshot_t snap = {0};
+    snap.borrowed_known = true;
+    snap.borrowed = true;
+    snap.borrowed_zone_index = SAFETY_LINK_BORROWED_ZONE_UNKNOWN;
+
+    static char json[SAFETY_CFG_JSON_MAX];
+    size_t len = build_commissioning_json(&snap, json, sizeof(json));
+    TEST_CHECK(len > 0, "JSON built successfully");
+    TEST_CHECK(strstr(json, "\"borrowed\":true") != NULL, "borrowed:true is still reported");
+    TEST_CHECK(strstr(json, "\"borrowed_zone_index\"") == NULL,
+               "borrowed_zone_index is omitted, never printed as the raw 255 sentinel");
+}
+
+static void test_build_json_tc_flags_gated_on_link_up(void)
+{
+    TEST_SECTION("build_commissioning_json -- tc_not_installed/tc_injected are forced false when "
+                 "link_up is false, even if the (stale, cached) snapshot fields say otherwise");
+    reset_all();
+    safety_cfg_http_snapshot_t snap = {0};
+    snap.link_up = false;
+    snap.tc_not_installed = true; // stale cached value from before the link dropped
+    snap.tc_injected = true;
+
+    static char json[SAFETY_CFG_JSON_MAX];
+    size_t len = build_commissioning_json(&snap, json, sizeof(json));
+    TEST_CHECK(len > 0, "JSON built successfully");
+    TEST_CHECK(strstr(json, "\"tc_not_installed\":false") != NULL,
+               "tc_not_installed reads false while the link is down, despite the stale true field");
+    TEST_CHECK(strstr(json, "\"tc_injected\":false") != NULL,
+               "tc_injected reads false while the link is down, despite the stale true field");
+
+    snap.link_up = true;
+    len = build_commissioning_json(&snap, json, sizeof(json));
+    TEST_CHECK(len > 0, "JSON built successfully with link_up=true");
+    TEST_CHECK(strstr(json, "\"tc_not_installed\":true") != NULL,
+               "tc_not_installed reads true once the link is up -- proves the false case above was "
+               "really gated on link_up, not the field always reading false");
+    TEST_CHECK(strstr(json, "\"tc_injected\":true") != NULL, "tc_injected reads true once the link is up");
+}
+
 static void test_stale_flag_reflects_crc_mismatch(void)
 {
     TEST_SECTION("snapshot_is_stale -- true on any mismatch or unknown-live-crc, false only when they agree");
@@ -709,6 +804,10 @@ int main(void)
     test_parse_value_for_type_bounds();
     test_build_json_unset_param_omits_value();
     test_build_json_set_param_includes_value();
+    test_build_json_borrowed_unknown();
+    test_build_json_borrowed_known_true_with_zone();
+    test_build_json_borrowed_known_true_zone_unknown();
+    test_build_json_tc_flags_gated_on_link_up();
     test_peer_reports_unset_reliably_gates_on_known_and_version();
     test_build_json_forces_unset_when_peer_too_old();
     test_build_json_still_reports_set_when_peer_reliable();

@@ -55,6 +55,11 @@ bool link_frame_status_v2_supported(uint16_t peer_protocol_version)
     return peer_protocol_version >= LINK_FRAME_STATUS_V2_MIN_PROTOCOL;
 }
 
+bool link_frame_status_v3_supported(uint16_t peer_protocol_version)
+{
+    return peer_protocol_version >= LINK_FRAME_STATUS_V3_MIN_PROTOCOL;
+}
+
 bool link_frame_rollback_result_supported(uint16_t peer_protocol_version)
 {
     return peer_protocol_version >= LINK_FRAME_ROLLBACK_RESULT_MIN_PROTOCOL;
@@ -67,11 +72,13 @@ uint8_t link_frame_saturate_tx_dropped(uint32_t tx_dropped)
                : (uint8_t)tx_dropped;
 }
 
-size_t link_frame_pack_status(uint8_t out[LINK_FRAME_STATUS_LEN_V2], bool estop, bool relay_energized,
+size_t link_frame_pack_status(uint8_t out[LINK_FRAME_STATUS_LEN_V3], bool estop, bool relay_energized,
                                bool heating_enabled, bool temp_valid, float safety_tc_c, float cj_c,
                                uint8_t tc_fault_bits, float amps1, float amps2, float amps3,
                                bool tc_not_installed, bool tc_injected,
-                               bool peer_supports_status_v2, uint8_t tx_dropped_sat)
+                               bool peer_supports_status_v2, uint8_t tx_dropped_sat,
+                               bool peer_supports_status_v3, bool is_borrowed,
+                               uint8_t borrowed_zone_index)
 {
     out[0] = LINK_FRAME_STATUS_CMD;
 
@@ -110,6 +117,19 @@ size_t link_frame_pack_status(uint8_t out[LINK_FRAME_STATUS_LEN_V2], bool estop,
     // this function only ever acts on that verdict.
     if (peer_supports_status_v2) {
         out[23] = tx_dropped_sat;
+        // Only ever considered once the V2 gate above has already passed --
+        // see this function's own doc comment (link_frame.h) for why bytes
+        // 24/25 must never be emitted at a peer not already confirmed for
+        // byte 23.
+        if (peer_supports_status_v3) {
+            uint8_t flags2 = 0;
+            if (is_borrowed) {
+                flags2 |= LINK_FLAG2_BORROWED;
+            }
+            out[24] = flags2;
+            out[25] = borrowed_zone_index;
+            return LINK_FRAME_STATUS_LEN_V3;
+        }
         return LINK_FRAME_STATUS_LEN_V2;
     }
     return LINK_FRAME_STATUS_LEN_V1;

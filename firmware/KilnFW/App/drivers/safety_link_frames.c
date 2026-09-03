@@ -588,9 +588,14 @@ bool safety_apply_status(SafetyLinkClass *link, const uart_proto_message_t *msg)
      * Frame A itself, the one channel this whole investigation proved still
      * works when Frame B (DIAG) does not. See safety_link.h's
      * SAFETY_LINK_STATUS_FRAME_LEN comment for the Pico-side half of this
-     * same skew-safety argument. */
+     * same skew-safety argument.
+     *
+     * 2026-09-03: also accepts _V3 (26, BORROWED status), same reasoning one
+     * more step out -- see safety_link.h's SAFETY_LINK_STATUS_FRAME_LEN_V3
+     * comment. */
     if ((msg->length != SAFETY_LINK_STATUS_FRAME_LEN_V1 &&
-         msg->length != SAFETY_LINK_STATUS_FRAME_LEN_V2) ||
+         msg->length != SAFETY_LINK_STATUS_FRAME_LEN_V2 &&
+         msg->length != SAFETY_LINK_STATUS_FRAME_LEN_V3) ||
         msg->payload[0] != SAFETY_CMD_GET_STATUS) {
         if (safety_lock(link)) {
             link->stats.frame_errors++;
@@ -631,12 +636,26 @@ bool safety_apply_status(SafetyLinkClass *link, const uart_proto_message_t *msg)
      * rather than only on the true branch -- a peer that regresses from V2
      * to V1 mid-session (e.g. a rollback) must not leave a stale "known"
      * flag pointing at a now-meaningless stale byte. */
-    if (msg->length == SAFETY_LINK_STATUS_FRAME_LEN_V2) {
+    if (msg->length == SAFETY_LINK_STATUS_FRAME_LEN_V2 || msg->length == SAFETY_LINK_STATUS_FRAME_LEN_V3) {
         link->cached.tx_dropped_known = true;
         link->cached.tx_dropped_sat = p[23];
     } else {
         link->cached.tx_dropped_known = false;
         link->cached.tx_dropped_sat = 0;
+    }
+    /* Bytes 24/25 -- only present on a V3-length frame. Same "unconditional
+     * else, not only on the true branch" discipline as tx_dropped_known just
+     * above: a peer that regresses from V3 to V1/V2 mid-session (a rollback,
+     * or simply an ESP that stops confirming V3 support) must not leave a
+     * stale borrowed_known=true pointing at a now-meaningless stale byte. */
+    if (msg->length == SAFETY_LINK_STATUS_FRAME_LEN_V3) {
+        link->cached.borrowed_known = true;
+        link->cached.borrowed = (p[24] & SAFETY_LINK_STATUS_FLAG2_BORROWED) != 0u;
+        link->cached.borrowed_zone_index = p[25];
+    } else {
+        link->cached.borrowed_known = false;
+        link->cached.borrowed = false;
+        link->cached.borrowed_zone_index = SAFETY_LINK_BORROWED_ZONE_UNKNOWN;
     }
     link->cached_tick = xTaskGetTickCount();
     link->ever_received = true;

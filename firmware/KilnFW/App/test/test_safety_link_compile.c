@@ -228,7 +228,7 @@ static inline BaseType_t safety_link_test_xSemaphoreTake(SemaphoreHandle_t sem, 
 static void set_status_frame(uint8_t *p, uint8_t flags, float tc_c, float cj_c,
                               uint8_t tc_fault, float ia, float ib, float ic)
 {
-    memset(p, 0, SAFETY_LINK_STATUS_FRAME_LEN_V2);
+    memset(p, 0, SAFETY_LINK_STATUS_FRAME_LEN_V3);
     p[0] = SAFETY_CMD_GET_STATUS;
     p[1] = flags;
     memcpy(&p[2], &tc_c, sizeof(float));
@@ -282,8 +282,64 @@ static void test_apply_status_accepts_v1_and_v2_lengths(void)
 
     msg.length = 22;
     link.stats.frame_errors = 0;
-    TEST_CHECK(safety_apply_status(&link, &msg) == false, "a length that is neither V1 nor V2 is rejected");
+    TEST_CHECK(safety_apply_status(&link, &msg) == false, "a length that is neither V1, V2, nor V3 is rejected");
     TEST_CHECK(link.stats.frame_errors == 1, "the rejection is counted as a frame error");
+}
+
+static void test_apply_status_v3_borrowed(void)
+{
+    TEST_SECTION("safety_apply_status -- V3 (26B) BORROWED status frame: absent-byte contract "
+                 "reads as UNKNOWN (never a false 'not borrowed'), present byte decodes correctly, "
+                 "and a V3->V1/V2 regression clears the stale known-flag (2026-09-03, TASK 1)");
+
+    SafetyLinkClass link = make_link();
+    uart_proto_message_t msg;
+    memset(&msg, 0, sizeof(msg));
+
+    // V1 (23 bytes): no byte 24/25 at all -- must read as borrowed_known ==
+    // false, the "not yet known" state, never a confident "not borrowed".
+    set_status_frame(msg.payload, (uint8_t)(SAFETY_FLAG_TEMP_VALID), 123.5f, 24.0f, 0, 1.0f, 2.0f, 3.0f);
+    msg.length = SAFETY_LINK_STATUS_FRAME_LEN_V1;
+    TEST_CHECK(safety_apply_status(&link, &msg) == true, "V1 frame is accepted");
+    TEST_CHECK(link.cached.borrowed_known == false, "V1 frame leaves borrowed_known false (no byte 24/25 to read)");
+
+    // V2 (24 bytes): tx_dropped_sat is present, but STILL no byte 24/25 --
+    // borrowed_known must still be false. This is the case that would look
+    // like an off-by-one if the length check were written as ">= V2" instead
+    // of an exact per-version match.
+    msg.payload[23] = 9;
+    msg.length = SAFETY_LINK_STATUS_FRAME_LEN_V2;
+    TEST_CHECK(safety_apply_status(&link, &msg) == true, "V2 frame is accepted");
+    TEST_CHECK(link.cached.borrowed_known == false, "V2 frame ALSO leaves borrowed_known false (byte 24/25 still absent)");
+
+    // V3 (26 bytes), is_borrowed=true, a real committed zone index.
+    msg.payload[24] = SAFETY_LINK_STATUS_FLAG2_BORROWED;
+    msg.payload[25] = 1u;
+    msg.length = SAFETY_LINK_STATUS_FRAME_LEN_V3;
+    TEST_CHECK(safety_apply_status(&link, &msg) == true, "V3 (26-byte) frame is accepted");
+    TEST_CHECK(link.cached.borrowed_known == true, "V3 frame sets borrowed_known true");
+    TEST_CHECK(link.cached.borrowed == true, "V3 frame's flags2 bit0 becomes cached.borrowed");
+    TEST_CHECK(link.cached.borrowed_zone_index == 1u, "V3 frame's byte 25 becomes borrowed_zone_index");
+
+    // Same V3 frame but is_borrowed=false and the zone-unknown sentinel --
+    // proves the bit/byte are read from the wire, not hard-coded true by
+    // this decode path.
+    msg.payload[24] = 0u;
+    msg.payload[25] = SAFETY_LINK_BORROWED_ZONE_UNKNOWN;
+    TEST_CHECK(safety_apply_status(&link, &msg) == true, "second V3 frame decodes");
+    TEST_CHECK(link.cached.borrowed_known == true, "still borrowed_known == true (a V3 frame was received)");
+    TEST_CHECK(link.cached.borrowed == false, "flags2 bit0 clear -> cached.borrowed == false");
+    TEST_CHECK(link.cached.borrowed_zone_index == SAFETY_LINK_BORROWED_ZONE_UNKNOWN,
+               "sentinel round-trips when the Pico itself doesn't know the zone");
+
+    // Regression V3 -> V1: a peer that stops sending V3 (rollback, or an ESP
+    // that stops confirming V3 support) must not leave a stale
+    // borrowed_known=true pointing at the last V3 frame's now-stale bytes.
+    set_status_frame(msg.payload, (uint8_t)(SAFETY_FLAG_TEMP_VALID), 123.5f, 24.0f, 0, 1.0f, 2.0f, 3.0f);
+    msg.length = SAFETY_LINK_STATUS_FRAME_LEN_V1;
+    TEST_CHECK(safety_apply_status(&link, &msg) == true, "V1 frame after a V3 frame is still accepted");
+    TEST_CHECK(link.cached.borrowed_known == false,
+               "a peer regressing from V3 to V1 mid-session clears the stale borrowed_known flag");
 }
 
 static void test_apply_status_temp_valid_flag_is_sole_authority(void)
@@ -817,6 +873,7 @@ int main(void)
     TEST_SECTION("safety_link.c host build -- safety_apply_status() / safety_link_versions_compatible()");
 
     test_apply_status_accepts_v1_and_v2_lengths();
+    test_apply_status_v3_borrowed();
     test_apply_status_temp_valid_flag_is_sole_authority();
     test_apply_status_ignores_peer_link_up_and_fault_bits();
     test_fw_version_unknown_before_any_frame_arrives();

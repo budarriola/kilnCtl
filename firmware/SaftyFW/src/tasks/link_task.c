@@ -788,6 +788,24 @@ static void link_task_send_status(void)
     bool tc_not_installed = (status_cfg.safety_tc_installed == 0u);
     bool tc_injected = thermo_task_injection_active();
 
+    // BORROWED status (2026-09-03) -- true iff this board's reported reading
+    // is (at least partly) sourced from another zone's probe rather than its
+    // own J7 input. Mirrors safety_core.c's own S13 gating (tc_source ==
+    // CONFIG_STORE_TC_SOURCE_BORROWED_ZONE or _BOTH), read from the same
+    // cached config_store record already fetched above for tc_not_installed
+    // -- no extra flash/NVS access. borrowed_zone_index is sent verbatim only
+    // when it has actually been commissioned (CONFIG_STORE_SET_BORROWED_
+    // ZONE_INDEX set); otherwise LINK_FRAME_STATUS_BORROWED_ZONE_UNKNOWN is
+    // sent rather than the field's uninitialized-to-0 default, which would
+    // otherwise look exactly like a real, commissioned "zone 0".
+    bool is_borrowed = (status_cfg.tc_source == CONFIG_STORE_TC_SOURCE_BORROWED_ZONE) ||
+                        (status_cfg.tc_source == CONFIG_STORE_TC_SOURCE_BOTH);
+    bool borrowed_zone_index_known =
+        (status_cfg.fields_set & CONFIG_STORE_SET_BORROWED_ZONE_INDEX) != 0u;
+    uint8_t borrowed_zone_index_wire = borrowed_zone_index_known
+                                            ? status_cfg.borrowed_zone_index
+                                            : LINK_FRAME_STATUS_BORROWED_ZONE_UNKNOWN;
+
     // V2 (24-byte, tx_dropped_sat) status frame gate -- see
     // link_frame_pack_status()'s own doc comment (link_frame.h) for the full
     // skew-safety argument. Only ever true once this boot has positively
@@ -798,15 +816,22 @@ static void link_task_send_status(void)
     // check.
     bool peer_supports_status_v2 = link_frame_status_v2_supported(s_peer_protocol_version);
     uint8_t tx_dropped_sat = link_frame_saturate_tx_dropped(uart_owner_get_tx_dropped());
+    // Same gate, one protocol version higher -- see link_frame_status_v3_
+    // supported()'s own doc comment (link_frame.h) for why this must never
+    // be true unless peer_supports_status_v2 is also true (numerically
+    // guaranteed by LINK_FRAME_STATUS_V3_MIN_PROTOCOL > _V2_MIN_PROTOCOL, but
+    // link_frame_pack_status() itself does not trust that ordering blindly).
+    bool peer_supports_status_v3 = link_frame_status_v3_supported(s_peer_protocol_version);
 
-    uint8_t payload[LINK_FRAME_STATUS_LEN_V2];
+    uint8_t payload[LINK_FRAME_STATUS_LEN_V3];
     bool energized_bit = false;
     bool enabled_bit = false;
     safety_core_get_output_status(&energized_bit, &enabled_bit);
     size_t len = link_frame_pack_status(payload, estop, energized_bit, enabled_bit, temp_valid, tc_c, cj_c,
                                          fault_bits, cur.amps[0], cur.amps[1], cur.amps[2],
                                          tc_not_installed, tc_injected,
-                                         peer_supports_status_v2, tx_dropped_sat);
+                                         peer_supports_status_v2, tx_dropped_sat,
+                                         peer_supports_status_v3, is_borrowed, borrowed_zone_index_wire);
 
     if (link_task_send_broadcast(payload, (uint8_t)len)) {
         s_status_tx_ok_count++;

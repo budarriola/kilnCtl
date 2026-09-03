@@ -375,12 +375,28 @@ real wire** — the pi↔ESP UART link is currently dead on the bench
       host-tested. S13/S1 do stay dormant until commissioning sets a real
       `tc_source`/`tc_placement_mode` — that part of the parenthetical is
       still accurate.
-- [ ] `SAFETY_FLAG_BORROWED` in every status frame when borrowing, and the GUI
-      labels the temperature accordingly. **Still genuinely open** — grepped
-      2026-09-03, no `FLAG_BORROWED`/`SAFETY_FLAG_BORROWED` anywhere in
-      `CommonFW`; this needs a new wire bit (status frame flags byte has free
-      bits 0x40/0x80) plus `KilnFW` GUI work, so it wants an owner decision on
-      the bit assignment rather than a unilateral wire change.
+- [x] `SAFETY_FLAG_BORROWED` in every status frame when borrowing, and the GUI
+      labels the temperature accordingly. **Landed 2026-09-03**, via a NEW
+      byte, not bits 0x40/0x80 (those turned out to already be spent by
+      `LINK_FLAG_TC_NOT_INSTALLED`/`LINK_FLAG_TC_INJECTED` — the "free bits"
+      note above was written against a stale reading of `kilnlink_status.h`,
+      not the real wire producer in `link_frame.c`). Frame A grew a V3 (26-
+      byte) extension: byte 24 flags2 bit0 `LINK_FLAG2_BORROWED`
+      (`link_frame.h`), byte 25 `borrowed_zone_index`
+      (`LINK_FRAME_STATUS_BORROWED_ZONE_UNKNOWN` = 0xFF sentinel), gated on
+      `LINK_FRAME_STATUS_V3_MIN_PROTOCOL` (10) exactly like the V1->V2
+      `tx_dropped_sat` precedent. `link_task_send_status()` derives
+      `is_borrowed` from `tc_source` (`BORROWED_ZONE`/`BOTH`) and
+      `borrowed_zone_index` from the same commissioned config record S13
+      already reads. `KilnFW`'s `safety_apply_status()` reads an absent V3
+      byte as UNKNOWN (`borrowed_known=false`), never a false "not borrowed",
+      and `safety_page.html` renders "Reading source: ..." from
+      `/api/safety/commissioning`. `CommonFW/docs/LINK_PROTOCOL.md`'s Frame A
+      table has the byte layout. `LINK_FLAG_TC_NOT_INSTALLED`/
+      `LINK_FLAG_TC_INJECTED` (existing bits 0x40/0x80) were ALSO given a
+      `KilnFW`-side reader this same pass (`SAFETY_FLAG_TC_NOT_INSTALLED`/
+      `SAFETY_FLAG_TC_INJECTED`, `uart_task_ids.h`) — both were being set on
+      the wire with nothing on the ESP side ever naming them.
 - [x] Compare the borrowed channel's reported `tc_type` against
       `borrowed_type_expected`; warn on a change. **Done 2026-09-03** —
       genuinely open until now (confirmed: `borrowed_type_expected` was a

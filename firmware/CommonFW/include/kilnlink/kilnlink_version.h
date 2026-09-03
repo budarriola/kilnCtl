@@ -118,8 +118,40 @@
  *     discipline can make that safe, and this codebase's discipline for it
  *     already assumes "no reply" is not evidence of anything.
  * KILNLINK_MIN_COMPATIBLE is NOT raised alongside this bump -- see its own
+ * comment below.
+ *
+ * 9 -> 10 (2026-09-03): Frame A (SAFETY_CMD_GET_STATUS, isolated Pico<->ESP
+ * link only) grew two optional bytes (24/25, link_frame.h's LINK_FRAME_
+ * STATUS_LEN_V3 -- 26 bytes total) carrying the new
+ * BORROWED status flag (flags2 byte 24, bit 0) plus its borrowed_zone_index
+ * (byte 25, 0xFF sentinel = unknown/uncommissioned) -- surfacing whether the
+ * safety processor's reading is (at least partly) sourced from another
+ * zone's probe (tc_source == BORROWED_ZONE or BOTH), which guard S13
+ * polices and which an operator looking at an unlabelled reading has no way
+ * to tell from an honest own-sensor reading otherwise. EXACT same shape as
+ * the 5->6 step: ADDITIVE, not breaking. A receiver that only knows the old
+ * 24-byte V2 layout keeps working unmodified (KILNLINK_MIN_COMPATIBLE stays
+ * at 7, not bumped alongside this), and SaftyFW's sender only emits bytes
+ * 24/25 once it has positively learned, via ANNOUNCE_VERSION, that the peer
+ * ESP is built against 10+ (link_frame.h's LINK_FRAME_STATUS_V3_MIN_
+ * PROTOCOL) -- see link_frame_pack_status()'s own doc comment for the full
+ * skew-safety argument, identical in shape to the 5->6 step's, applied a
+ * second time to the same frame. A newer Pico talking to an ESP it has not
+ * yet confirmed as v10+ sends the 24-byte V2 frame it already knows that
+ * peer accepts -- never silently upgrades the length and risks silencing
+ * Frame A itself. An older Pico (predates V3 entirely) simply never sets
+ * peer_supports_status_v3 true, bump or no bump -- same "a version bump
+ * cannot make an old peer speak a frame it was never built to send" limit
+ * the 8->9 entry's own comment already states for ROLLBACK_RESULT. This is
+ * why safety_link.c's absent-byte handling on the ESP side treats "V1/V2
+ * frame, no byte 24/25" as UNKNOWN and fails closed (never assumes
+ * not-borrowed) -- see safety_link.h's SAFETY_LINK_STATUS_FRAME_LEN_V3
+ * comment for that reasoning, mirroring the `min_compatible` precedent that
+ * a too-short frame must read as UNKNOWN, never as a zero that silently
+ * means "fine".
+ * KILNLINK_MIN_COMPATIBLE is NOT raised alongside this bump -- see its own
  * comment below. */
-#define KILNLINK_PROTOCOL_VERSION 9
+#define KILNLINK_PROTOCOL_VERSION 10
 
 /* The oldest peer this build will talk to (docs/LINK_PROTOCOL.md section 4,
  * "What 'compatible' means"). Deliberately NOT bumped alongside the 5 -> 6
@@ -156,7 +188,12 @@
  * frame working -- see KILNLINK_PROTOCOL_VERSION's own 8->9 comment for the
  * full two-direction skew argument), so a peer built against 7 or 8 remains
  * fully compatible with a 9-built peer and must not be locked out over a
- * feature it simply predates. */
+ * feature it simply predates.
+ *
+ * NOT bumped alongside the 9 -> 10 step above either, same reasoning again:
+ * that step is purely additive (two new optional bytes on an existing frame,
+ * gated the same way the 5->6 step's byte 23 was), so a peer built against
+ * 7, 8, or 9 remains fully compatible with a 10-built peer. */
 #define KILNLINK_MIN_COMPATIBLE 7
 
 #endif /* KILNLINK_VERSION_H */

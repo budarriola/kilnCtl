@@ -137,6 +137,8 @@ on the web before this pass.</p>
 <div class="card">
   <div class="row"><span class="label">Safety-processor thermocouple</span><span class="value" id="safetyTemp">--</span></div>
   <p class="placement-note" id="placementNote">Placement mode: loading...</p>
+  <p class="placement-note" id="borrowedNote">Reading source: loading...</p>
+  <p class="placement-note" id="tcInstalledNote"></p>
   <div class="row"><span class="label">Enclosure temp (MAX31856 cold junction)</span><span class="value" id="enclosureTemp">--</span></div>
   <div class="row"><span class="label">Power draw (estimate)</span><span class="value" id="powerW">--</span></div>
 </div>
@@ -439,6 +441,57 @@ if the Pico's diagnostics are too stale to trust.</p>
     }
     el.textContent = 'Placement mode: ' + label;
   }
+
+  // BORROWED status (2026-09-03, TASK 1) -- like tc_placement_mode above,
+  // this rides GET /api/safety/commissioning (safety_cfg_http.c), not
+  // /api/status: it is TASK 1's new byte on the isolated Pico<->ESP link
+  // frame, surfaced here rather than in dashboard_http.c. borrowed_known
+  // false means "not yet known" (an older Pico, or one this ESP hasn't
+  // confirmed as new enough for the V3 frame) -- distinct from, and NOT
+  // rendered the same as, a confirmed "not borrowed". Absence of a positive
+  // fact is shown as unknown, never silently defaulted to "fine".
+  function renderBorrowed(state) {
+    var el = document.getElementById('borrowedNote');
+    if (state.error) {
+      el.textContent = 'Reading source: could not load (' + state.error + ').';
+      return;
+    }
+    if (!state.known) {
+      el.textContent = 'Reading source: unknown -- the safety processor has not reported a ' +
+        'protocol version new enough for this board to know whether this reading is borrowed ' +
+        'from another zone.';
+      return;
+    }
+    if (!state.borrowed) {
+      el.textContent = 'Reading source: this board’s own thermocouple input.';
+      return;
+    }
+    if (state.zoneIndex == null) {
+      el.textContent = 'Reading source: BORROWED from another zone’s probe -- which zone is not ' +
+        'commissioned on the safety processor.';
+    } else {
+      el.textContent = 'Reading source: BORROWED from zone ' + (state.zoneIndex + 1) + '’s probe -- ' +
+        'not this board’s own sensor.';
+    }
+  }
+
+  // SAFETY_FLAG_TC_NOT_INSTALLED / SAFETY_FLAG_TC_INJECTED (2026-09-03, TASK
+  // 2) -- both were already SET by SaftyFW's link_frame_pack_status(), but
+  // this ESP had no name or reader for either bit until this pass. Only
+  // rendered when at least one is true (an empty note otherwise, rather than
+  // a permanent "nothing wrong" line crowding the card).
+  function renderTcInstalled(state) {
+    var el = document.getElementById('tcInstalledNote');
+    if (state.error) {
+      el.textContent = 'Safety TC status: could not load (' + state.error + ').';
+      return;
+    }
+    var parts = [];
+    if (state.notInstalled) parts.push('declared NOT INSTALLED -- heat is refused');
+    if (state.injected) parts.push('reading is a bench-injected synthetic value, not the real part');
+    el.textContent = parts.length ? ('Safety TC status: ' + parts.join('; ') + '.') : '';
+  }
+
   function pollPlacement() {
     fetch('/api/safety/commissioning').then(function (r) { return r.json(); }).then(function (j) {
       var p = null;
@@ -449,11 +502,29 @@ if the Pico's diagnostics are too stale to trust.</p>
       }
       if (!p) {
         renderPlacement({ error: 'field not present in response' });
-        return;
+      } else {
+        renderPlacement({ reliable: !!j.unset_reporting_reliable, set: !!p.set, mode: p.value });
       }
-      renderPlacement({ reliable: !!j.unset_reporting_reliable, set: !!p.set, mode: p.value });
+
+      if (!j || typeof j.borrowed_known === 'undefined') {
+        renderBorrowed({ error: 'field not present in response' });
+      } else {
+        renderBorrowed({
+          known: !!j.borrowed_known,
+          borrowed: !!j.borrowed,
+          zoneIndex: (typeof j.borrowed_zone_index === 'number') ? j.borrowed_zone_index : null
+        });
+      }
+
+      if (!j || typeof j.tc_not_installed === 'undefined') {
+        renderTcInstalled({ error: 'field not present in response' });
+      } else {
+        renderTcInstalled({ notInstalled: !!j.tc_not_installed, injected: !!j.tc_injected });
+      }
     }).catch(function () {
       renderPlacement({ error: 'request failed' });
+      renderBorrowed({ error: 'request failed' });
+      renderTcInstalled({ error: 'request failed' });
     });
   }
   var timer = null;

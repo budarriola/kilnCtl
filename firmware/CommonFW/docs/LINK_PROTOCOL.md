@@ -879,7 +879,7 @@ guards trip identically whether or not anything is listening — the host tests
 assert that by running the guard suite with the TX path stubbed out. What
 depends on it is the *ESP's* permission to heat, which is the point.
 
-### Frame A: `SAFETY_CMD_GET_STATUS` = `0x01` — the existing 23-byte layout
+### Frame A: `SAFETY_CMD_GET_STATUS` = `0x01` — the existing 23-byte layout, now optionally 24 or 26
 
 Byte-for-byte the frame `KilnFW` already parses (`safety_link.h:102`,
 `SAFETY_LINK_STATUS_FRAME_LEN = 23`). Emitting the *existing* layout unchanged
@@ -896,14 +896,35 @@ is what makes phase 2 of `TODO.md` possible before any ESP work lands.
 | 11..14 | f32 LE | current 1, A |
 | 15..18 | f32 LE | current 2, A |
 | 19..22 | f32 LE | current 3, A |
+| 23 | u8 | **V2 only** (24 bytes total) — `tx_dropped_sat`, saturating uart_owner TX-ring-drop count, 255 = "254 or more" |
+| 24 | u8 | **V3 only** (26 bytes total) — flags2: bit0 `BORROWED` (this reading is sourced, at least partly, from another zone's probe — `tc_source` is `BORROWED_ZONE` or `BOTH`) |
+| 25 | u8 | **V3 only** — `borrowed_zone_index` (0..2), or `0xFF` if the borrowed zone itself is not commissioned on the Pico |
 
 Flags: bits 0 (`LINK_UP`) and 1 (`FAULT`) are the **ESP's** to own — the Pico
 sends them as **0** and the ESP clears them on receipt regardless. The Pico
 owns bit 2 `ESTOP`, bit 3 `RELAY` (K4 energized), bit 4 `ENABLED` (heating
-permitted), bit 5 `TEMP_VALID`.
+permitted), bit 5 `TEMP_VALID`, bit 6 `TC_NOT_INSTALLED` (`safety_tc_installed
+== 0`, heat refused), bit 7 `TC_INJECTED` (a bench TC-injection dev switch is
+active — the reading is synthetic, not from the part).
 
 **Send NaN, never 0, when `TEMP_VALID` is clear.** An explicit not-a-number is
 much harder to mistake for a cold kiln than a plausible-looking zero.
+
+**V1/V2/V3 length, additive, sender-gated (2026-08-23 / 2026-09-03).** Byte 1
+has no room left for more flag bits, so both extensions grow the frame by a
+whole byte instead — the same "new byte, not a reused/overloaded bit"
+discipline both times, because aliasing two different safety-relevant
+conditions onto one bit would defeat the point of a distinct flag. A receiver
+must accept **any** of 23/24/26 bytes, never rejecting one length in favor of
+another. The sender (SaftyFW's `link_task_send_status()`) only emits the wider
+length once it has positively learned, via `ANNOUNCE_VERSION`, that the peer's
+`protocol_version` is new enough (`LINK_FRAME_STATUS_V2_MIN_PROTOCOL` = 6,
+`LINK_FRAME_STATUS_V3_MIN_PROTOCOL` = 10) — before that, the safe default is
+the shorter frame every older receiver already accepts. On the receiving side,
+an absent byte 24/25 (a V1/V2 frame) must read as **UNKNOWN** whether the
+reading is borrowed, never as a confident "not borrowed" — the same
+`min_compatible` precedent that a too-short frame fails closed to UNKNOWN,
+never to a zero that silently means "fine".
 
 ### Frame B: `SAFETY_CMD_DIAG` = `0x08` — new, additive
 

@@ -1062,6 +1062,18 @@
 #define SAFETY_FLAG_RELAY        0x08u
 #define SAFETY_FLAG_ENABLED      0x10u
 #define SAFETY_FLAG_TEMP_VALID   0x20u
+/* Set by SaftyFW's link_frame_pack_status() (SaftyFW's link_frame.h
+ * LINK_FLAG_TC_NOT_INSTALLED/LINK_FLAG_TC_INJECTED, same numeric values) --
+ * these two bits already survive safety_apply_status()'s bit-0/1 mask
+ * unchanged (only LINK_UP/FAULT are stripped), so no frame-decode change was
+ * needed to make them reach link->cached.flags; this codebase's own
+ * "writer without a reader" bug class is exactly what having them arrive on
+ * the wire with no name here for TWO PICO FEATURES was -- safety_tc_
+ * installed==0 (heat refused) and a bench TC-injection dev switch, both
+ * invisible to the operator until this pass named and rendered them (see
+ * safety_cfg_http.c's commissioning_get_handler()/safety_page.html). */
+#define SAFETY_FLAG_TC_NOT_INSTALLED 0x40u
+#define SAFETY_FLAG_TC_INJECTED      0x80u
 
 /* --- LOG (task_id = UART_TASK_ID_LOG) ---
  * Firmware -> PC only, unsolicited (fire-and-forget, no reply expected and
