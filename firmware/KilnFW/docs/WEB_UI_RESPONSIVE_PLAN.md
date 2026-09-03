@@ -635,11 +635,13 @@ columns don't widen; `App/test/ui_status_color_allowlist.json`'s three
 `rga-*` entries are now stale (no longer colour-only) but untouched here —
 out of this pass's confined scope.
 
-`ota_page.html`'s light-mode `--ok: #2a7` also independently fails the
+`ota_page.html`'s light-mode `--ok` was `#2a7`, independently failing the
 background-contrast floor (2.77:1 vs `#f7f7f7`, below 3:1) — a page-local hex
-that's simply lighter than every other page's `--ok`, unrelated to the
-sec 5.1 decision. Tracked, not fixed (narrowing it repaints the page), in
-`ui_status_color_contrast_exceptions.json`.
+that was simply lighter than every other page's `--ok`, unrelated to the
+sec 5.1 decision. **Fixed 2026-09-02**: aligned to the value every other page
+already uses, `#1a7a1a` (5.10:1); dark mode already used the shared
+`--ui-accent-4` token and was untouched. `ui_status_color_contrast_exceptions.json`'s
+entry for this gap no longer applies.
 
 **New standing check**: `firmware/KilnFW/App/test/check_ui_status_color.ps1`
 runs `ui_status_color_check.mjs`, which (1) asserts every `--ok/--warn/--bad/
