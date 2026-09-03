@@ -267,15 +267,66 @@ confirmed OK after the change (no target-build regression).
 Still open, unchanged from before this pass: an on-board identification
 pass to actually populate `coupling_diag_k_dc` (today it can only be set by
 hand or by a PC-side preset built from `coupled_ident.py`'s offline
-analysis, never by autotune), and a decision on whether the uncoupled 1x1
-fallback (`diagonal_hold`/`diagonal_climb`, which never routes through this
-flag) switches too or keeps `ff_k_dc` deliberately — the seam-sizing
-paragraph above (2026-09-02e) is why that decision needs its own pass, not
-a byproduct of this one. Flipping `s_coupling_use_measured_diag_k_dc` to
+analysis, never by autotune). Flipping `s_coupling_use_measured_diag_k_dc` to
 true today would only change behaviour on a board that already has
 `coupling_diag_k_dc` populated by hand/preset for at least one zone; on
 every other board it is a no-op by construction (the unmeasured-fallback
 case above).
+
+**UNCOUPLED 1x1 FALLBACK — CLOSED 2026-09-03. Verdict: switch it, and it has
+been switched.** `diagonal_hold`/`diagonal_climb` (`zone_coupling_solve.c`,
+~lines 229/394) now compute their diagonal via
+`coupling_diagonal_k_dc(zi, z_ff_k_dc, use_measured_diag_k_dc)` — the exact
+same guarded-fallback helper the n>1 matrix path already uses for
+`G[row][row]` when `row == zi` — instead of dividing by `z_ff_k_dc` directly.
+
+Reasoning, reusing the seam-sizing methodology from 2026-09-02e rather than
+inventing a new one:
+
+- **When is the fallback actually taken?** Every time `zi` has zero
+  qualifying neighbours (`COUPLING_SOLVE_FALLBACK_NO_NEIGHBORS`), is itself
+  unqualified, is out of range, or the matrix solve degrades
+  (`_SINGULAR`/`_NONFINITE`). All of these are exactly the boundary cases
+  that sit right next to the n>1 matrix path in time — a zone drops in and
+  out of the fallback as neighbours qualify/unqualify at tick rate
+  (`heat_blocked` churn, "already absorbed" above). It is not a rare,
+  isolated code path; it is the OTHER side of the same seam 2026-09-02e
+  measured.
+- **Do the two constants mean the same thing?** Yes, when `coupling_diag_k_dc`
+  is populated: it comes from the SAME rested single-zone excitation runs as
+  the off-diagonals sitting beside it in the matrix (2026-09-02's dataset),
+  the same argument already used above to prefer it for the matrix diagonal.
+  There is no reason that argument stops applying the instant a zone's
+  neighbour count drops to zero — `coupling_diag_k_dc` is a per-zone
+  property, not a property of the coupled system.
+- **Unset/defaulted case.** Handled explicitly, not silently: `zi`'s own
+  `coupling_diagonal_k_dc()` call reuses the identical `isfinite() && > 0.0f`
+  guard already shipped for the matrix path, backed by the identical
+  "getter reports true with an unwritten 0.0f default" board reality
+  documented above (2026-09-02f) — an unmeasured zone falls through to
+  `z_ff_k_dc` exactly as it always has. No new zero/garbage-gain path was
+  introduced; `test_zone_coupling_solve.c` pins this for the fallback
+  specifically (tests 15–17: flag-on+measured, flag-on+unmeasured, and
+  out-of-range `zi` with the flag on), mutation-proven the same way tests
+  1–14 were (reverting the fallback's divisor to `z_ff_k_dc` alone
+  reproduces `got 0.7644, want 0.7867` — RED; restoring the fix turns the
+  suite green again, 45/45).
+- **Does this change behaviour on any currently shipping config?** No.
+  `s_coupling_use_measured_diag_k_dc` is still `false` at the one call site
+  (`profile_executor_feedforward.c`) — this pass did not flip it — so
+  `coupling_diagonal_k_dc()`'s first argument check (`!use_measured`) makes
+  every fallback call degrade to `z_ff_k_dc` exactly as before, on every
+  board shipping today. The change is a no-op until the SAME rollout gate
+  already established for the matrix path is cleared (flag flipped true AND
+  `coupling_diag_k_dc` populated for a given zone) — at which point it does
+  what it was always supposed to: it CLOSES the seam 2026-09-02e sized,
+  rather than leaving the fallback and the matrix path disagreeing about
+  `zi`'s own gain at every membership edge. `build_kilnfw` confirmed OK
+  after the change.
+
+This directly resolves the "not a drop-in change" caveat above: the seam
+that made switching only the coupled-solve diagonal risky is gone, because
+both paths now source `zi`'s own diagonal from the identical function call.
 
 **ADOPTED 2026-09-02 (owner decision).** Every cell has exactly one
 observation — no redundancy, no error bar — and that caveat travels with the

@@ -540,6 +540,99 @@ static void test_climb_measured_diag_flag_falls_back_when_unmeasured(void)
                     "hybrid climb solve");
 }
 
+// ---- test 15: 1x1 fallback (no qualifying neighbours) now honours
+// use_measured_diag_k_dc too -- PID_EXPANSION_PLAN.md sec 3.2, "CLOSED
+// 2026-09-03" -----------------------------------------------------------
+//
+// Before this pass, `diagonal_hold` always divided by `z_ff_k_dc` and never
+// consulted the flag at all -- the exact seam sec 3.2's 2026-09-02e pass
+// sized rather than closed (1x1 always ff_k_dc-diagonal, n>1
+// coupling_diag_k_dc-diagonal when measured, disagreeing about zi's own gain
+// right at the membership edge). z0 alone (no qualifying neighbours), flag
+// on, coupling_diag_k_dc populated: dT/OWN_DIAG_Z0 = 30/38.13 = 0.7867,
+// NOT dT/FF_K_DC_Z0 = 30/39.2459 = 0.7644 (test 3's pinned 1x1 value). If
+// diagonal_hold silently kept reading z_ff_k_dc regardless of the flag, this
+// test would read 0.7644 and fail.
+static void test_hold_no_neighbors_fallback_honours_measured_diag_flag(void)
+{
+    TEST_SECTION("zone_coupling_solve: 1x1 fallback honours use_measured_diag_k_dc when set");
+    setup_adopted_matrix();
+    set_diag_k_dc(0, OWN_DIAG_Z0);
+
+    zone_coupling_neighbor_t zones[MAX31856_CHANNEL_COUNT];
+    zones[0] = neighbor(true, FF_K_DC_Z0);
+    zones[1] = neighbor(false, FF_K_DC_Z1);
+    zones[2] = neighbor(false, FF_K_DC_Z2);
+
+    zone_coupling_hold_cache_t cache;
+    memset(&cache, 0, sizeof(cache));
+    uint16_t prev_sig = 0;
+    bool used_matrix = false, infeasible = false, changed = false;
+    coupling_solve_reason_t reason;
+
+    float u0 = zone_coupling_solve_hold(true, FF_K_DC_Z0, 0, true, zones, 3, 55.0f, 25.0f, &used_matrix,
+                                        &infeasible, &reason, &changed, &cache, &prev_sig);
+
+    TEST_CHECK(reason == COUPLING_SOLVE_FALLBACK_NO_NEIGHBORS, "no neighbours -- 1x1 fallback expected");
+    TEST_CHECK_NEAR(u0, 0.7867, 0.001, "1x1 fallback should use the measured diagonal when the flag is on");
+    TEST_CHECK(fabs((double)u0 - 0.7644) > 0.01, "1x1 fallback should NOT match the ff_k_dc-diagonal value");
+}
+
+// ---- test 16: 1x1 fallback, flag on but coupling_diag_k_dc unmeasured --
+// falls back to ff_k_dc, reproducing test 3's exact 1x1 value ------------
+static void test_hold_no_neighbors_fallback_falls_back_when_unmeasured(void)
+{
+    TEST_SECTION("zone_coupling_solve: 1x1 fallback stays ff_k_dc when flag on but unmeasured");
+    setup_adopted_matrix(); // clears the diag stub -- nothing set for any zone
+
+    zone_coupling_neighbor_t zones[MAX31856_CHANNEL_COUNT];
+    zones[0] = neighbor(true, FF_K_DC_Z0);
+    zones[1] = neighbor(false, FF_K_DC_Z1);
+    zones[2] = neighbor(false, FF_K_DC_Z2);
+
+    zone_coupling_hold_cache_t cache;
+    memset(&cache, 0, sizeof(cache));
+    uint16_t prev_sig = 0;
+    bool used_matrix = false, infeasible = false, changed = false;
+    coupling_solve_reason_t reason;
+
+    float u0 = zone_coupling_solve_hold(true, FF_K_DC_Z0, 0, true, zones, 3, 55.0f, 25.0f, &used_matrix,
+                                        &infeasible, &reason, &changed, &cache, &prev_sig);
+
+    TEST_CHECK(reason == COUPLING_SOLVE_FALLBACK_NO_NEIGHBORS, "no neighbours -- 1x1 fallback expected");
+    TEST_CHECK_NEAR(u0, 0.7644, 0.001, "unmeasured diag should fall back to ff_k_dc, matching test 3's 1x1 value");
+}
+
+// ---- test 17: climb-side counterpart of test 15/16 -- out-of-range zi still
+// safely degrades to ff_k_dc even with the flag on (coupling_diagonal_k_dc's
+// own bound check against the config layer's zone count, not this file's
+// MAX31856_CHANNEL_COUNT bound, is what is actually exercised here) --------
+static void test_climb_out_of_range_zi_falls_back_even_with_flag_on(void)
+{
+    TEST_SECTION("zone_coupling_solve_climb: out-of-range zi ignores the flag, stays legacy formula");
+    setup_adopted_matrix();
+    set_diag_k_dc(0, OWN_DIAG_Z0); // irrelevant -- zi below is out of range
+
+    zone_coupling_neighbor_t zones[MAX31856_CHANNEL_COUNT];
+    zones[0] = neighbor(true, FF_K_DC_Z0);
+    zones[1] = neighbor(true, FF_K_DC_Z1);
+    zones[2] = neighbor(true, FF_K_DC_Z2);
+
+    zone_coupling_climb_cache_t cache;
+    memset(&cache, 0, sizeof(cache));
+    uint16_t prev_sig = 0;
+    bool used_matrix = false, infeasible = false, changed = false;
+    coupling_solve_reason_t reason;
+
+    // zi = MAX31856_CHANNEL_COUNT is out of range by construction.
+    float climb = zone_coupling_solve_climb(true, FF_K_DC_Z0, 120.0f, MAX31856_CHANNEL_COUNT, true, zones, 3,
+                                            0.05f, &used_matrix, &infeasible, &reason, &changed, &cache, &prev_sig);
+
+    TEST_CHECK(reason == COUPLING_SOLVE_FALLBACK_OUT_OF_RANGE, "out-of-range zi -- fallback expected");
+    TEST_CHECK_NEAR(climb, (double)(0.05f * 120.0f) / (double)FF_K_DC_Z0, 0.0005,
+                    "out-of-range zi should degrade to the legacy ff_k_dc formula, not crash or read garbage");
+}
+
 int main(void)
 {
     test_hold_diagonal_is_ff_k_dc();
@@ -556,6 +649,9 @@ int main(void)
     test_climb_diagonal_is_ff_k_dc();
     test_climb_measured_diag_flag_switches_diagonal();
     test_climb_measured_diag_flag_falls_back_when_unmeasured();
+    test_hold_no_neighbors_fallback_honours_measured_diag_flag();
+    test_hold_no_neighbors_fallback_falls_back_when_unmeasured();
+    test_climb_out_of_range_zi_falls_back_even_with_flag_on();
 
     printf("zone_coupling_solve: %d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     return g_test_failures == 0 ? 0 : 1;

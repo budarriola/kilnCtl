@@ -214,9 +214,13 @@ coupling_solve_reason_t zone_coupling_gauss_solve_partial_pivot_vec(uint8_t n,
  * SEPARATE from s_exec.zones[] specifically so its host tests could drive a
  * zone's own state without populating s_exec.zones[] for it (see the
  * original's doc comment, carried into this header's own notes above), and
- * computing diagonal_hold from z_ff_k_dc directly -- before zi is even
- * range-checked -- means an out-of-range zi can never index `zones[]`
- * out of bounds while computing it. `zones` supplies every OTHER
+ * computing diagonal_hold from z_ff_k_dc/coupling_diagonal_k_dc(zi, ...)
+ * (never `zones[zi]`) -- before zi is even range-checked -- means an
+ * out-of-range zi can never index `zones[]` out of bounds while computing
+ * it (coupling_diagonal_k_dc()'s own call into
+ * zones_config_get_coupling_diag_k_dc() bound-checks zi against the config
+ * layer's zone count independently and degrades to z_ff_k_dc on failure, so
+ * an out-of-range zi is still safe here). `zones` supplies every OTHER
  * (neighbour) zone's fields; zones[zi] itself is never read.
  *
  * *out_reason is COUPLING_SOLVE_OK exactly when the return value came from a
@@ -247,51 +251,38 @@ coupling_solve_reason_t zone_coupling_gauss_solve_partial_pivot_vec(uint8_t n,
  * G[row][row] tries `zones_config_get_coupling_diag_k_dc(member, &v)` first
  * and uses it if that call reports success AND `v` is finite and > 0.0f --
  * the SAME guarded-fallback shape this file's own diagonal_hold/
- * diagonal_climb already use for `ff_k_dc` (0.0f/not-finite/not-measured
- * falls through). Any other outcome (getter reports false, or the stored
- * value is not usable) falls back to `ff_k_dc` exactly as when this flag is
- * false. False reproduces every caller's pre-existing behaviour bit-for-bit
- * (the hybrid this codebase has run since 2026-09-02d): a caller must
- * opt in per call, there is no compiled-in default that changes shipped
- * behaviour by itself. See the header's own analysis for why this is not
- * (yet) the shipped default: `coupling_diag_k_dc` has no autotune writer on
- * this board today, only a PC-side preset or hand-set value, and the
- * uncoupled 1x1 fallback's own diagonal choice is a separate, unresolved
- * question this flag deliberately does not touch.
+ * diagonal_climb use for `ff_k_dc` (0.0f/not-finite/not-measured falls
+ * through). Any other outcome (getter reports false, or the stored value is
+ * not usable) falls back to `ff_k_dc` exactly as when this flag is false.
+ * False reproduces every caller's pre-existing behaviour bit-for-bit (the
+ * hybrid this codebase has run since 2026-09-02d): a caller must opt in per
+ * call, there is no compiled-in default that changes shipped behaviour by
+ * itself. See the header's own analysis for why this is not (yet) the
+ * shipped default: `coupling_diag_k_dc` has no autotune writer on this
+ * board today, only a PC-side preset or hand-set value.
  *
- * OPEN QUESTION, disclosed not fixed (test-fidelity review, 2026-09-02):
- * `diagonal_hold` (this function, computed at the very top before zi is even
- * range-checked) and `diagonal_climb` (zone_coupling_solve_climb(), same
- * spot) ALWAYS divide by `z_ff_k_dc` and NEVER consult
- * `use_measured_diag_k_dc` -- the flag only ever reaches the n>1 matrix
- * path's G[row][row] cells via coupling_diagonal_k_dc(), never these two
- * scalar fallbacks. Two concrete consequences once the flag is ever flipped
- * true:
- *   1. The instant a neighbour joins or leaves zi's coupled system, the
- *      diagonal source the returned duty is built from SWITCHES underneath
- *      it -- 1x1 (no neighbours) is always `z_ff_k_dc`-diagonal, n>1
- *      (neighbours present) is `coupling_diag_k_dc`-diagonal when measured.
- *      That membership transition already steps the duty for other reasons
- *      (see this function's own membership-transition doc/tests); with the
- *      flag on, the step also carries a diagonal-source change riding along
- *      with it, sized by however far apart the two candidate k_dc values
- *      happen to be for that zone.
- *   2. Every solver-failure fallback (COUPLING_SOLVE_FALLBACK_SINGULAR /
- *      _NONFINITE / _OUT_OF_RANGE / _UNQUALIFIED / _NO_NEIGHBORS, at this
- *      function's `return diagonal_hold;` sites and
- *      zone_coupling_solve_climb()'s equivalents) lands on the OTHER source
- *      (`z_ff_k_dc`) even while a genuine matrix solve moments earlier was
- *      using `coupling_diag_k_dc` -- so a transient solver failure on a
- *      flag-on board silently reverts that tick's diagonal choice too, not
- *      just the "used the matrix at all" question the fallback reason
- *      already communicates.
- * Neither is a defect in the code as shipped -- the flag is off, so both
- * scalar fallbacks are exactly the pre-flag legacy formula, unconditionally,
- * as they always were. Recorded here so whoever flips the flag sees it
- * before doing so, not after. Not fixed here: fixing it is a design decision
- * (should the 1x1 fallback read `coupling_diag_k_dc` too?) explicitly out of
- * this flag's scope -- see "the uncoupled 1x1 fallback's own diagonal
- * choice" just above. */
+ * CLOSED, 2026-09-03: the uncoupled 1x1 fallback's own diagonal choice.
+ * `diagonal_hold` (this function) and `diagonal_climb`
+ * (zone_coupling_solve_climb()) now compute their diagonal via
+ * `coupling_diagonal_k_dc(zi, z_ff_k_dc, use_measured_diag_k_dc)` -- the
+ * SAME helper the n>1 matrix path's G[row][row] uses for row==zi -- instead
+ * of reading z_ff_k_dc directly. This removes the seam sec 3.2's
+ * 2026-09-02e pass sized rather than closed: previously the diagonal source
+ * SWITCHED at every membership edge (1x1 always `z_ff_k_dc`, n>1
+ * `coupling_diag_k_dc`-when-measured); now both paths agree on zi's own
+ * diagonal by construction, for every value of the flag, because they call
+ * the identical function. Every solver-failure fallback
+ * (COUPLING_SOLVE_FALLBACK_SINGULAR / _NONFINITE / _OUT_OF_RANGE /
+ * _UNQUALIFIED / _NO_NEIGHBORS) now lands on the SAME source a genuine
+ * solve moments earlier would have used, not a different one. Safe on every
+ * board shipping today: the helper degrades to `z_ff_k_dc` whenever the
+ * flag is off (the shipped default, `s_coupling_use_measured_diag_k_dc =
+ * false`) or `coupling_diag_k_dc` is unset/non-finite/<=0 -- i.e. this
+ * change is a no-op everywhere except a board that both flips the flag on
+ * AND has `coupling_diag_k_dc` populated for zi, same rollout gate sec 3.2
+ * already established for the matrix path. See
+ * test_zone_coupling_solve.c's fallback-diagonal cases (n==1 and
+ * out-of-range/unqualified paths, flag on vs off, measured vs unmeasured). */
 float zone_coupling_solve_hold(bool z_qualifies, float z_ff_k_dc, uint8_t zi, bool use_measured_diag_k_dc,
                                const zone_coupling_neighbor_t *zones, uint8_t zone_count,
                                float setpoint_c, float ambient_c, bool *out_used_matrix, bool *out_infeasible,

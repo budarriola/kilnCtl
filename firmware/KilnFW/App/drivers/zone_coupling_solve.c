@@ -211,7 +211,22 @@ float zone_coupling_solve_hold(bool z_qualifies, float z_ff_k_dc, uint8_t zi, bo
                                coupling_solve_reason_t *out_reason, bool *out_membership_changed,
                                zone_coupling_hold_cache_t *cache_row, uint16_t *prev_membership_sig)
 {
-    float diagonal_hold = (setpoint_c - ambient_c) / z_ff_k_dc;
+    /* PID_EXPANSION_PLAN.md sec 3.2 ("the uncoupled 1x1 fallback... switches
+     * too or keeps ff_k_dc deliberately" -- the question this closes): route
+     * the fallback's own diagonal through the SAME coupling_diagonal_k_dc()
+     * guarded-fallback the n>1 path already uses for G[row][row] when
+     * row==zi, instead of reading z_ff_k_dc directly. Before this, the two
+     * paths disagreed about zi's own gain exactly at the membership seam
+     * (n==1 always ff_k_dc; n>1 used the measured diagonal when the flag was
+     * on and the field was populated) -- the seam 2026-09-02e sized rather
+     * than closed. Reusing the identical helper here removes the seam
+     * outright rather than bounding it: both paths now agree on zi's
+     * diagonal by construction, for every value of use_measured_diag_k_dc.
+     * Safe on every board shipping today because the helper's own guard
+     * degrades to z_ff_k_dc whenever the flag is off (default) or
+     * coupling_diag_k_dc is unset/non-finite/<=0 -- see coupling_diagonal_k_dc()
+     * above and test_zone_coupling_solve.c's fallback-diagonal cases. */
+    float diagonal_hold = (setpoint_c - ambient_c) / coupling_diagonal_k_dc(zi, z_ff_k_dc, use_measured_diag_k_dc);
     *out_used_matrix = false;
     *out_infeasible = false;
     *out_membership_changed = false;
@@ -374,10 +389,9 @@ float zone_coupling_solve_climb(bool z_qualifies, float z_ff_k_dc, float z_ff_ta
                                 coupling_solve_reason_t *out_reason, bool *out_membership_changed,
                                 zone_coupling_climb_cache_t *cache_row, uint16_t *prev_membership_sig)
 {
-    float diagonal_climb = (rate_c_per_s * z_ff_tau_s) / z_ff_k_dc; /* legacy per-zone formula --
-                                                                     * profile_executor.c's original
-                                                                     * `(rate_c_per_s * z->ff_tau_s) /
-                                                                     * z->ff_k_dc`, unchanged */
+    /* Sec 3.2's fallback-diagonal question, climb side -- see the identical
+     * comment on diagonal_hold above; same helper, same seam closed. */
+    float diagonal_climb = (rate_c_per_s * z_ff_tau_s) / coupling_diagonal_k_dc(zi, z_ff_k_dc, use_measured_diag_k_dc);
     *out_used_matrix = false;
     *out_infeasible = false;
     *out_membership_changed = false;
