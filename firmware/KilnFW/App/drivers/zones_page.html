@@ -236,6 +236,14 @@ of guessing.</p>
 
 <label for="thermoCount">Thermocouples in use (0-3)</label>
 <input type="number" id="thermoCount" min="0" max="3" value="0">
+<label>Zones enabled -- must stay a contiguous block starting at zone 0 (e.g. a
+3-zone board can run as 1, 2 or 3 zones, never zone 0 + zone 2 with zone 1
+skipped); this is the SAME setting as "Thermocouples in use" above, just
+click-to-toggle. Disabling a zone here also drives its relay(s) off. A save
+is refused if a firing is running or if any zone about to be disabled is
+still hot or has a relay commanded on -- turn the heat off and let it cool
+first.</label>
+<div id="zoneEnableToggles"></div>
 <label for="relayCount">Relays in use (0-4)</label>
 <input type="number" id="relayCount" min="0" max="4" value="0">
 <label for="maxSimultaneous">Max relays energized at once (0 = unlimited) -- if your
@@ -1364,9 +1372,63 @@ function renderRelayNames() {
   }
 }
 
+/* Enable/disable-by-contiguous-prefix toggle row -- pure sugar over the
+ * thermoCount number input, which is already the board's real "how many
+ * zones exist" setting (parse_zone_fields()/zones_config_json_validate() in
+ * zones_http_handlers.c/zones_config_json.c already enforce 0..thermo_
+ * count-1 as the only valid zone range, already preserve a disabled zone's
+ * stored config rather than deleting it, and POST /api/zones is already
+ * refused by ota_http_check_interlocks() whenever a firing is running OR
+ * any zone -- including one this save would disable -- is still hot or has
+ * a relay commanded on, which is what guarantees a disabled zone's relay is
+ * already off before this toggle can take effect). No new persisted field,
+ * no version bump: this function only ever reads/writes the existing
+ * thermoCount input and calls the existing renderZones(), so it cannot
+ * drift out of sync with the one real source of truth. */
+function renderZoneEnableToggles() {
+  var thermoInput = document.getElementById('thermoCount');
+  var cap = parseInt(thermoInput.getAttribute('max'), 10) || 0;
+  var thermoCount = parseInt(thermoInput.value, 10) || 0;
+  var el = document.getElementById('zoneEnableToggles');
+  if (!el) return;
+  el.innerHTML = '';
+  for (var i = 0; i < cap; i++) {
+    var id = 'zoneEnableToggle' + i;
+    var label = document.createElement('label');
+    label.style.cssText = 'display:inline-flex;align-items:center;min-height:32px;gap:0.4em;margin-right:1em;';
+    var cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.id = id;
+    cb.style.width = 'auto';
+    cb.checked = (i < thermoCount);
+    cb.dataset.zoneIndex = String(i);
+    cb.addEventListener('change', onZoneEnableToggleChanged);
+    label.appendChild(cb);
+    label.appendChild(document.createTextNode(' Zone ' + i +
+      (current.zones && current.zones[i] && current.zones[i].name ? ' (' + current.zones[i].name + ')' : '')));
+    el.appendChild(label);
+  }
+}
+
+function onZoneEnableToggleChanged(ev) {
+  var zi = parseInt(ev.target.dataset.zoneIndex, 10);
+  var thermoInput = document.getElementById('thermoCount');
+  /* Enforce the contiguous-prefix constraint here rather than merely
+   * relying on the backend to reject a gap: checking zone i means "zones
+   * 0..i must all be enabled" (raise the count to i+1); unchecking zone i
+   * means "zones i..cap-1 must all be disabled" (lower the count to i) --
+   * either way there is exactly one legal thermoCount value that matches
+   * the box the operator just clicked, so compute it directly instead of
+   * asking the operator to also fix up neighbors by hand. */
+  var newCount = ev.target.checked ? (zi + 1) : zi;
+  thermoInput.value = String(newCount);
+  renderZones(); /* re-renders zone cards AND calls renderZoneEnableToggles() again */
+}
+
 function renderZones() {
   var thermoCount = parseInt(document.getElementById('thermoCount').value, 10) || 0;
   var relayCount = parseInt(document.getElementById('relayCount').value, 10) || 0;
+  renderZoneEnableToggles();
   var el = document.getElementById('zones');
   el.innerHTML = '';
   if (thermoCount === 0) {
