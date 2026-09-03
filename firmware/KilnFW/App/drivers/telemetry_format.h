@@ -13,9 +13,12 @@
 #ifndef TELEMETRY_FORMAT_H
 #define TELEMETRY_FORMAT_H
 
+#include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #include "autotune_engine.h"
+#include "event_log.h"
 #include "profile_executor.h"
 
 #ifdef __cplusplus
@@ -68,6 +71,34 @@ int telemetry_format_firing(const profile_exec_status_t *st, char *out, size_t c
  * termination/truncation-safety and snprintf-return convention as
  * telemetry_format_firing() above. */
 int telemetry_format_autotune(const autotune_engine_status_t *st, char *out, size_t cap);
+
+/* PID_EXPANSION_PLAN.md sec 7.1/7.4: EVENT_CODE_FIRING_RAMP_LAG_STARTED/
+ * CLEARED's note-byte encoding -- see event_log.h's doc comment on those
+ * two codes for why +128 with a clamp to [-126,126] rather than a raw
+ * signed byte (avoids event_log_emit()'s strncpy() truncating the note on
+ * an embedded 0x00). Pure, split out here (not telemetry_log.c, which
+ * needs FreeRTOS/ESP_LOGI and is not host-testable) for the same reason
+ * telemetry_format_firing()/telemetry_format_autotune() above are. */
+uint8_t telemetry_ramp_lag_encode_rate_byte(float rate_c_per_hr);
+
+/* Pure edge detector for one zone's ramp_lag_sustained, mirroring
+ * telemetry_log.c's own firing_event_code_for_transition()'s shape:
+ * returns -1 (out_note left untouched) if this tick is not a rising/
+ * falling edge, else the event_log_code_t and the arg/note the caller
+ * should pass to event_log_emit(). Takes the CURRENT tick's status fields
+ * for a rising edge (STARTED) and the CALLER-REMEMBERED previous-tick
+ * fields for a falling edge (CLEARED) -- profile_exec_zone_status_t reads
+ * 0 for held_s/rates the instant ramp_lag_sustained clears (profile_
+ * executor_ramp_assist.c's ramp_assist_zone_lag_tick() resets on the very
+ * same tick), so the numbers a CLEARED event needs to report must be
+ * captured BEFORE that reset, by the caller's own per-zone tracking
+ * (telemetry_log.c's lag_prev_* arrays), not read back out of this tick's
+ * snapshot. */
+int telemetry_ramp_lag_event_for_transition(bool prev_sustained, bool cur_sustained, float actual_c,
+                                            float cur_commanded_rate, float cur_achieved_rate,
+                                            float prev_held_s, float prev_commanded_rate,
+                                            float prev_achieved_rate, int32_t *out_arg,
+                                            uint8_t out_note[EVENT_LOG_NOTE_LEN]);
 
 #ifdef __cplusplus
 }

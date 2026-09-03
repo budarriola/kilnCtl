@@ -136,6 +136,16 @@ static void telemetry_log_task(void *arg)
     uint32_t autotune_next_s = 0;
     profile_exec_state_t firing_prev_state = PROFILE_EXEC_IDLE;
     autotune_engine_state_t autotune_prev_state = AUTOTUNE_ENGINE_IDLE;
+    /* PID_EXPANSION_PLAN.md sec 7.1/7.4: per-zone sustained-lag edge
+     * tracking. lag_prev_* hold the LAST tick's values while sustained was
+     * true, so a CLEARED event (fired the tick ramp_lag_sustained flips
+     * back to false, at which point profile_exec_zone_status_t's own
+     * held_s/rate fields already read 0 -- see ramp_lag_event_for_
+     * transition()'s doc comment) still has real numbers to report. */
+    bool lag_prev_sustained[MAX31856_CHANNEL_COUNT] = {0};
+    float lag_prev_held_s[MAX31856_CHANNEL_COUNT] = {0};
+    float lag_prev_commanded[MAX31856_CHANNEL_COUNT] = {0};
+    float lag_prev_achieved[MAX31856_CHANNEL_COUNT] = {0};
 
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(TELEMETRY_LOG_TICK_MS));
@@ -187,6 +197,36 @@ static void telemetry_log_task(void *arg)
                             EVENT_LOG_ZONE_NONE, arg, NULL);
         }
         firing_prev_state = fst.state;
+
+        /* PID_EXPANSION_PLAN.md sec 7.1/7.4: sustained-lag warning event,
+         * ALWAYS checked (not gated on ramp_assist_enabled -- see
+         * profile_exec_zone_status_t.ramp_lag_sustained's own doc
+         * comment). Reset to "not lagging" whenever the run itself is not
+         * live, same reasoning as firing_next_s's re-arm just above --
+         * without this, a zone that was still mid-lag when a run ended
+         * would report a spurious CLEARED (or never report the CLEARED for
+         * a lag that was genuinely still open) against the NEXT run's own
+         * numbers. */
+        bool firing_live = (fst.state == PROFILE_EXEC_RUNNING || fst.state == PROFILE_EXEC_PAUSED);
+        for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+            bool cur_sustained = firing_live && fst.zones[zi].active && fst.zones[zi].ramp_lag_sustained;
+            int32_t arg = 0;
+            uint8_t note[EVENT_LOG_NOTE_LEN];
+            int lag_code = telemetry_ramp_lag_event_for_transition(
+                lag_prev_sustained[zi], cur_sustained, fst.zones[zi].actual_c,
+                fst.zones[zi].ramp_lag_commanded_rate_c_per_hr, fst.zones[zi].ramp_lag_achieved_rate_c_per_hr,
+                lag_prev_held_s[zi], lag_prev_commanded[zi], lag_prev_achieved[zi], &arg, note);
+            if (lag_code >= 0) {
+                event_log_emit(LOG_STORE_KIND_FIRING, EVENT_LOG_SEV_WARN, EVENT_LOG_SRC_FIRING,
+                                (event_log_code_t)lag_code, zi, arg, (const char *)note);
+            }
+            lag_prev_sustained[zi] = cur_sustained;
+            if (cur_sustained) {
+                lag_prev_held_s[zi] = fst.zones[zi].ramp_lag_held_s;
+                lag_prev_commanded[zi] = fst.zones[zi].ramp_lag_commanded_rate_c_per_hr;
+                lag_prev_achieved[zi] = fst.zones[zi].ramp_lag_achieved_rate_c_per_hr;
+            }
+        }
 
         autotune_engine_get_status(&ast);
         bool at_active = (ast.state != AUTOTUNE_ENGINE_IDLE);

@@ -24,6 +24,7 @@
 #include "ota_http.h" /* ota_http_heat_blocked_by_update() -- heat_interlock.h's own doc comment */
 #include "pid.h"
 #include "pid_fuzzy.h"
+#include "ramp_assist_cfg.h"
 #include "relay_authority.h"
 #include "relay_cycles.h"
 #include "run_state.h"
@@ -526,6 +527,26 @@ void executor_task_entry(void *arg)
              * this tick. */
             adaptive_tune_zone_tick(zi, s_exec.zones[zi].actual_c, s_exec.zones[zi].actual_valid,
                                      s_exec.zones[zi].duty, s_exec.dwelling, s_exec.ambient_c, dt_s);
+        }
+
+        /* --- Ramp assist (PID_EXPANSION_PLAN.md sec 7): sustained-lag
+         * detection, per zone, ALWAYS -- and auto-stretch instrumentation,
+         * gated on the flag. Placed here for the same reason the firing-
+         * stats loop just above is: target_c/dwelling/segment_index and
+         * every zone's actual_c/lagging bit are already final for this
+         * tick. See profile_executor_ramp_assist.c's own doc comment for
+         * why neither call below is new schedule-altering control
+         * behaviour. */
+        {
+            bool ramp_assist_on = ramp_assist_cfg_enabled();
+            bool ramping_now = (seg->seg_kind == PROFILE_SEG_KIND_ZONE_RAMP) && !s_exec.dwelling;
+            for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+                if (!s_exec.zones[zi].active || s_exec.zones[zi].faulted) continue;
+                bool lagging_now = (lagging & (1u << zi)) != 0;
+                ramp_assist_zone_lag_tick(&s_exec.zones[zi], lagging_now, dt_s);
+            }
+            ramp_assist_stretch_tick(&s_exec, s_exec.segment_index, ramp_assist_on, ramping_now,
+                                     s_exec.ramp_lock_held, dt_s);
         }
 
         /* --- Control mode, per active zone (pass 1: decide, don't apply yet)

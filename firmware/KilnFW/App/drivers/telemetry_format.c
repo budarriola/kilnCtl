@@ -1,6 +1,8 @@
 #include "telemetry_format.h"
 
+#include <math.h>
 #include <stdio.h>
+#include <string.h>
 
 /* Replaces any byte that would break this format's whitespace-delimited
  * key=value parsing (space/tab, '=', '"') with '_', in place, so a free-text
@@ -140,4 +142,41 @@ int telemetry_format_autotune(const autotune_engine_status_t *st, char *out, siz
     }
 
     return total;
+}
+
+uint8_t telemetry_ramp_lag_encode_rate_byte(float rate_c_per_hr)
+{
+    long v = lroundf(rate_c_per_hr);
+    if (v > 126) v = 126;
+    if (v < -126) v = -126;
+    return (uint8_t)(v + 128);
+}
+
+int telemetry_ramp_lag_event_for_transition(bool prev_sustained, bool cur_sustained, float actual_c,
+                                            float cur_commanded_rate, float cur_achieved_rate,
+                                            float prev_held_s, float prev_commanded_rate,
+                                            float prev_achieved_rate, int32_t *out_arg,
+                                            uint8_t out_note[EVENT_LOG_NOTE_LEN])
+{
+    if (prev_sustained == cur_sustained) {
+        return -1;
+    }
+    memset(out_note, 0, EVENT_LOG_NOTE_LEN);
+    if (cur_sustained) {
+        /* Rising edge -- this tick's own fields are the live, meaningful
+         * ones (profile_exec_zone_status_t only fills them in while
+         * ramp_lag_sustained is true). */
+        out_note[0] = telemetry_ramp_lag_encode_rate_byte(cur_commanded_rate);
+        out_note[1] = telemetry_ramp_lag_encode_rate_byte(cur_achieved_rate);
+        *out_arg = (int32_t)lroundf(actual_c * 100.0f);
+        return EVENT_CODE_FIRING_RAMP_LAG_STARTED;
+    }
+    /* Falling edge -- this tick's fields already read 0 (reset the same
+     * tick ramp_lag_sustained cleared, see profile_executor_ramp_assist.c's
+     * ramp_assist_zone_lag_tick()), so report what the CALLER remembered
+     * from the last tick sustained was still true. */
+    out_note[0] = telemetry_ramp_lag_encode_rate_byte(prev_commanded_rate);
+    out_note[1] = telemetry_ramp_lag_encode_rate_byte(prev_achieved_rate);
+    *out_arg = (int32_t)lroundf(prev_held_s);
+    return EVENT_CODE_FIRING_RAMP_LAG_CLEARED;
 }

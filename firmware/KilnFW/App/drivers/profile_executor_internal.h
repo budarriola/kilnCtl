@@ -337,6 +337,20 @@ typedef struct {
     uint32_t fs_sample_count;        /* valid samples */
     uint32_t fs_excluded_sample_count; /* actual_valid == false samples */
     uint32_t fs_duration_s;          /* wall-clock seconds accumulated over */
+
+    /* PID_EXPANSION_PLAN.md sec 7.1/7.4: ramp assist's sustained-lag
+     * detection, ALWAYS updated regardless of ramp_assist_cfg_enabled()
+     * (the owner wants to see raw lag behaviour during PID testing with
+     * assist off). See profile_executor_ramp_assist.c's ramp_assist_zone_
+     * lag_tick() for the update rule; this is deliberately a SEPARATE
+     * accumulator from the existing s_exec.ramp_lock_held/lagging_mask
+     * (7.1's already-built instantaneous per-tick signal) -- lag_held_s is
+     * how long THIS zone has been continuously on the wrong side of that
+     * signal, which the instantaneous bit alone cannot answer. */
+    float    lag_held_s;          /* continuous seconds this zone has been lagging; 0 when not */
+    bool     lag_sustained;       /* lag_held_s >= EXEC_SUSTAINED_LAG_S -- the reportable condition */
+    float    lag_start_actual_c;  /* actual_c snapshot at the tick lag_held_s left 0, for the
+                                   * achieved-rate arithmetic reported alongside lag_sustained */
 } zone_runtime_t;
 
 /* TODO relay/IO segments: per-segment runtime tracking, one slot per
@@ -439,6 +453,20 @@ typedef struct {
 
     bool ramp_lock_held;
     uint8_t ramp_lock_lagging_mask;
+
+    /* PID_EXPANSION_PLAN.md sec 7.2: auto-stretch INSTRUMENTATION -- the
+     * ramp-lock above (7.1, already built) is what actually stretches the
+     * schedule, by holding target_c/segment_elapsed_s still; these two
+     * fields only RECORD how much wall-clock time that has cost, in
+     * seconds, so the stretch is a deliberate, reported figure rather than
+     * an invisible side effect. Accumulated only while ramp_assist_cfg_
+     * enabled() is true (see profile_executor_ramp_assist.c's ramp_assist_
+     * stretch_tick()) -- with the flag off, the same lock still holds the
+     * setpoint exactly as it always has (7.1's guarantee is unconditional),
+     * this just stops counting it as "assist". Zeroed by profile_executor_
+     * run() like the rest of this struct's per-run state. */
+    float stretch_by_segment_s[PROFILE_MAX_SEGMENTS];
+    float stretch_total_s;
 
     /* zones_config_generation() as of the last time this run read zone
      * settings (TODO.md 6A.7, "config reload while running"). Comparing one
@@ -587,6 +615,27 @@ float pid_family_zone_tick(zone_runtime_t *z, uint8_t zi, const pid_cfg_t *cfg,
                            bool sensor_ok_zi, float dt_s, uint32_t dt_ms,
                            bool *out_want_relay_on);
 void pid_fuzzy_prepare_gains(zone_runtime_t *z, uint8_t zi, pid_cfg_t *out_cfg);
+
+/* ---- ramp assist: sustained-lag detection + auto-stretch instrumentation
+ * (profile_executor_ramp_assist.c) -- PID_EXPANSION_PLAN.md sec 7.1/7.2/7.4.
+ * See that file's own doc comment for the honest new-behaviour-vs-
+ * instrumentation split. */
+/* How long a zone must sit continuously outside EXEC_RAMP_LOCK_BAND_C
+ * before its lag is "sustained" rather than a brief, unremarkable hold --
+ * ramp-lock (7.1) can legitimately flick on for a tick or two during normal
+ * PID settling (thermocouple noise crossing the 3C band, a load-cap-
+ * deferred window landing on an unlucky tick), and that is not news. 30s
+ * is 30 control ticks at the 1Hz rate (PROFILE_EXECUTOR_TICK_MS) -- long
+ * enough that noise/settling on the scale this repo's own zone models
+ * report (tau_s in the hundreds of seconds, see zone_runtime_t.ff_tau_s'
+ * doc comment) cannot cross it by accident, short enough that an operator
+ * watching a live firing sees the warning well before a ramp segment (which
+ * can run for hours) is meaningfully behind. Not yet per-zone/per-profile
+ * configurable, same status as PROFILE_EXECUTOR_RAMP_LOCK_BAND_C. */
+#define EXEC_SUSTAINED_LAG_S 30.0f
+void ramp_assist_zone_lag_tick(zone_runtime_t *z, bool lagging_now, float dt_s);
+void ramp_assist_stretch_tick(s_exec_state_t *ex, uint8_t segment_index, bool assist_enabled,
+                              bool ramping_now, bool lock_held_now, float dt_s);
 
 /* ---- history ring buffer unpack (profile_executor.c; history_pack()/the
  * pack-temp/unpack-temp helpers stay static there, only used by the same

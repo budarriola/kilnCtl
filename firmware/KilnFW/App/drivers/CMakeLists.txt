@@ -290,6 +290,7 @@ idf_component_register(SRCS "MAX31856.c"
                        "profile_executor_start.c"
                        "profile_executor_run.c"
                        "profile_executor_status.c"
+                       "profile_executor_ramp_assist.c"
                        "adaptive_tune.c"
                        # adaptive_tune.c split 2026-09-01 ("files over 1500
                        # lines should be broken up where it makes sense" --

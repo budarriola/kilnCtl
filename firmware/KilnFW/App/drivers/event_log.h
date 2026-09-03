@@ -71,6 +71,26 @@ typedef enum {
     EVENT_CODE_FIRING_DONE = 3,
     EVENT_CODE_FIRING_FAULTED = 4,   /* arg = fault_guard (thermal_guard_trip_t) */
 
+    /* PID_EXPANSION_PLAN.md sec 7.1/7.4: ramp assist's sustained-lag
+     * warning, reported REGARDLESS of ramp_assist_enabled (see
+     * ramp_assist_cfg.h) -- the owner wants raw lag visibility during PID
+     * testing even with the assist feature off. `zone` is the lagging
+     * zone. STARTED's arg = actual_c*100 (centidegC, int32) at the tick
+     * the lag became sustained; CLEARED's arg = total seconds the lag was
+     * continuously sustained. Both carry note[0] = commanded ramp rate,
+     * note[1] = achieved rate, each degC/hr rounded to the nearest whole
+     * degree and offset by +128 (so the stored byte is always 2..254,
+     * NEVER 0) -- event_log_emit() copies note via strncpy(), which stops
+     * at the first NUL byte, so a signed value that legitimately encodes to
+     * a raw 0x00 (rate == -128) would otherwise silently truncate/zero
+     * everything after it; the +128 offset with a clamp to [-126,126]
+     * guarantees that never happens. Coarse (whole-degree) on purpose --
+     * this is a flash breadcrumb naming roughly what happened, not a
+     * measurement channel (the dashboard JSON's ramp_lag_*_rate_c_per_hr
+     * fields carry the full-precision live figures). */
+    EVENT_CODE_FIRING_RAMP_LAG_STARTED = 5,
+    EVENT_CODE_FIRING_RAMP_LAG_CLEARED = 6,
+
     EVENT_CODE_TUNE_STARTED = 16,
     EVENT_CODE_TUNE_DONE = 17,
     EVENT_CODE_TUNE_ABORTED = 18,

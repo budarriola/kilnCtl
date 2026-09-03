@@ -53,9 +53,15 @@
  * max_undershoot_segment, both uint8_t) at up to 3 bytes each ("255") = 6B,
  * 1x "%.4f" (iae_normalized) at up to 10 bytes ("-1234.5678") = 10B --
  * 130B of values. Static text (keys + punctuation, format specifiers
- * subtracted out) is 342B. 130+342 = 472B worst case; 1024/zone leaves over
- * 2x headroom. See test_dashboard_json.c's fill_worst_case_zone() for the
- * exact widths this measures against. */
+ * subtracted out) is 342B. 130+342 = 472B worst case.
+ *
+ * PID_EXPANSION_PLAN.md sec 7.1/7.4 added four more fields to this same
+ * shape (ramp_lag_sustained/ramp_lag_held_s/ramp_lag_commanded_rate_c_per_hr/
+ * ramp_lag_achieved_rate_c_per_hr): 1x bool (5B "false") + 3x "%.2f" at up
+ * to 8B each ("-1234.56") = 24B of values, plus ~115B of keys/punctuation =
+ * ~144B more, bringing the worst case to 472+144 = 616B. 1024/zone still
+ * leaves >400B headroom. See test_dashboard_json.c's fill_worst_case_zone()
+ * for the exact widths this measures against. */
 #define DASHBOARD_JSON_PROFILE_EXEC_BUF_SIZE (960 + MAX31856_CHANNEL_COUNT * 1024)
 #define DASHBOARD_JSON_CONTROL_BUF_SIZE      (256 + MAX31856_CHANNEL_COUNT * 448)
 

@@ -250,6 +250,10 @@ void profile_executor_get_status(profile_exec_status_t *out)
         out->segment_elapsed_s = s_exec.segment_elapsed_s;
         out->ramp_lock_held = s_exec.ramp_lock_held;
         out->ramp_lock_lagging_mask = s_exec.ramp_lock_lagging_mask;
+        out->ramp_stretch_segment_s = (s_exec.segment_index < PROFILE_MAX_SEGMENTS)
+                                           ? s_exec.stretch_by_segment_s[s_exec.segment_index]
+                                           : 0.0f;
+        out->ramp_stretch_total_s = s_exec.stretch_total_s;
         out->run_start_c = s_exec.run_start_c;
         out->total_elapsed_s = s_exec.total_elapsed_s;
         out->warm_started = s_exec.warm_started;
@@ -311,6 +315,29 @@ void profile_executor_get_status(profile_exec_status_t *out)
                     span = 0.0f;
                 }
                 firing_stats_snapshot(z, span, &zo->firing_stats);
+            }
+
+            /* PID_EXPANSION_PLAN.md sec 7.1/7.4: sustained-lag reporting,
+             * ALWAYS (not gated on ramp_assist_enabled -- see profile_
+             * executor.h's field comment). Commanded rate is this segment's
+             * own signed ramp_c_per_hr (direction toward its target, same
+             * sign convention the control loop's target_rate_c_per_s
+             * uses); achieved is measured from lag_start_actual_c over the
+             * time the lag has been held. Both 0 while not sustained. */
+            zo->ramp_lag_sustained = z->lag_sustained;
+            zo->ramp_lag_held_s = z->lag_held_s;
+            zo->ramp_lag_commanded_rate_c_per_hr = 0.0f;
+            zo->ramp_lag_achieved_rate_c_per_hr = 0.0f;
+            if (z->lag_sustained && s_exec.segment_index < s_exec.profile.segment_count) {
+                const profile_segment_t *lag_seg = &s_exec.profile.segments[s_exec.segment_index];
+                if (lag_seg->seg_kind == PROFILE_SEG_KIND_ZONE_RAMP) {
+                    float direction = (lag_seg->target_c >= s_exec.target_c) ? 1.0f : -1.0f;
+                    zo->ramp_lag_commanded_rate_c_per_hr = direction * lag_seg->ramp_c_per_hr;
+                    if (z->lag_held_s > 0.0f) {
+                        zo->ramp_lag_achieved_rate_c_per_hr =
+                            (z->actual_c - z->lag_start_actual_c) / (z->lag_held_s / 3600.0f);
+                    }
+                }
             }
         }
 

@@ -235,7 +235,19 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
      * max_temp_c == 0 on purpose: that zone is uncommissioned, and the
      * profile_zones_have_ceiling() refusal a few lines below is the one that
      * owns refusing to start on it -- this check only means anything once a
-     * real ceiling exists to compare against. A REFUSAL, never a silent
+     * real ceiling exists to compare against.
+     *
+     * PID_EXPANSION_PLAN.md sec 7.2: this is ALSO ramp assist's hard-
+     * refusal path -- "a target above the kiln's permitted maximum is
+     * refused and NEVER stretched," unconditionally, whether or not
+     * ramp_assist_cfg_enabled(). There is no separate ramp-assist check
+     * beside this one: profile_executor_ramp_assist.c's auto-stretch
+     * instrumentation never writes target_c/seg->target_c, so nothing
+     * downstream of this refusal can ever command a target this check
+     * would have rejected -- the same segment target this REFUSAL compares
+     * against max_temp_c is the same target_c the ramp-lock (sec 7.1)
+     * asymptotically approaches and auto-stretch (sec 7.2) only measures
+     * the approach time of. A REFUSAL, never a silent
      * clamp, naming the offending segment and the zone's current limit. */
     for (uint8_t i = 0; i < p.segment_count; i++) {
         if (p.segments[i].seg_kind != PROFILE_SEG_KIND_ZONE_RAMP) continue;
@@ -333,6 +345,8 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
     s_exec.segment_elapsed_s = 0;
     s_exec.ramp_lock_held = false;
     s_exec.ramp_lock_lagging_mask = 0;
+    memset(s_exec.stretch_by_segment_s, 0, sizeof(s_exec.stretch_by_segment_s));
+    s_exec.stretch_total_s = 0.0f;
     s_exec.fault_reason[0] = '\0';
     s_exec.fault_guard = THERMAL_GUARD_TRIP_NONE;
     s_exec.global_fault_source = 0;

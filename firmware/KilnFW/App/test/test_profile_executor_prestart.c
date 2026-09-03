@@ -88,6 +88,7 @@ static void spy_adaptive_tune_run_end(const profile_firing_run_record_t *rec, bo
 #include "../drivers/profile_executor_start.c"
 #include "../drivers/profile_executor_run.c"
 #include "../drivers/profile_executor_status.c"
+#include "../drivers/profile_executor_ramp_assist.c"
 
 // ---------------------------------------------------------------------------
 // Stub bodies for every extern symbol profile_executor.c references that
@@ -101,6 +102,18 @@ esp_err_t kiln_io_all_relays_off(kiln_io_t *io)
 {
     (void)io;
     return ESP_OK;
+}
+
+// PID_EXPANSION_PLAN.md sec 7.2: profile_executor.c's tick loop now calls
+// ramp_assist_cfg_enabled() (ramp_assist_cfg.h) once per tick -- that
+// module's real implementation needs NVS, which this test executable does
+// not link (same reason every OTHER *_config_get_*() below is a fake, not
+// the real body). Settable by the ramp-assist tests further down so they
+// can exercise both the gated-on and gated-off paths.
+static bool g_stub_ramp_assist_enabled = false;
+bool ramp_assist_cfg_enabled(void)
+{
+    return g_stub_ramp_assist_enabled;
 }
 
 uint8_t kiln_io_get_relay_shadow(kiln_io_t *io)
@@ -5073,6 +5086,112 @@ static void test_firing_stats_normalized_iae_is_length_invariant(void)
     // before/after numbers.
 }
 
+// ---------------------------------------------------------------------------
+// PID_EXPANSION_PLAN.md sec 7.1/7.2 -- profile_executor_ramp_assist.c's two
+// pure functions. Order-independent: each test builds its own fresh
+// zone_runtime_t/s_exec_state_t slice and never calls profile_executor_run().
+
+static void test_ramp_assist_lag_tick_not_lagging_resets(void)
+{
+    TEST_SECTION("ramp_assist_zone_lag_tick() -- lagging_now == false always resets to 0/not-sustained");
+    zone_runtime_t z;
+    memset(&z, 0, sizeof(z));
+    z.lag_held_s = 45.0f;
+    z.lag_sustained = true;
+
+    ramp_assist_zone_lag_tick(&z, false, 1.0f);
+
+    TEST_CHECK(z.lag_held_s == 0.0f, "lag_held_s must reset to 0 the instant lagging stops");
+    TEST_CHECK(!z.lag_sustained, "lag_sustained must clear the instant lagging stops");
+}
+
+static void test_ramp_assist_lag_tick_accumulates_and_sustains(void)
+{
+    TEST_SECTION("ramp_assist_zone_lag_tick() -- accumulates dt_s while lagging, and crosses "
+                 "EXEC_SUSTAINED_LAG_S at exactly the tick it reaches the threshold, not before");
+    zone_runtime_t z;
+    memset(&z, 0, sizeof(z));
+    z.actual_c = 100.0f;
+
+    // 29 one-second ticks: below the 30s threshold, must not be sustained yet.
+    for (int i = 0; i < 29; i++) {
+        ramp_assist_zone_lag_tick(&z, true, 1.0f);
+    }
+    TEST_CHECK(!z.lag_sustained, "must NOT be sustained one tick before the threshold (29s < 30s)");
+    TEST_CHECK(fabsf(z.lag_held_s - 29.0f) < 0.001f, "lag_held_s must equal the summed dt_s so far");
+
+    // The 30th tick crosses the threshold.
+    ramp_assist_zone_lag_tick(&z, true, 1.0f);
+    TEST_CHECK(z.lag_sustained, "must become sustained exactly at the 30s threshold");
+}
+
+static void test_ramp_assist_lag_tick_snapshot_taken_once_at_onset(void)
+{
+    TEST_SECTION("ramp_assist_zone_lag_tick() -- lag_start_actual_c is captured ONCE, on the rising "
+                 "edge, and does not drift as actual_c keeps changing while the lag continues");
+    zone_runtime_t z;
+    memset(&z, 0, sizeof(z));
+    z.actual_c = 200.0f;
+
+    ramp_assist_zone_lag_tick(&z, true, 1.0f); // rising edge -- snapshot taken here
+    TEST_CHECK(z.lag_start_actual_c == 200.0f, "lag_start_actual_c must snapshot actual_c at onset");
+
+    z.actual_c = 210.0f; // kiln kept heating while still lagging
+    ramp_assist_zone_lag_tick(&z, true, 1.0f);
+    TEST_CHECK(z.lag_start_actual_c == 200.0f,
+              "lag_start_actual_c must NOT be re-snapshotted on a later still-lagging tick");
+}
+
+static void test_ramp_assist_stretch_tick_gated_on_flag(void)
+{
+    TEST_SECTION("ramp_assist_stretch_tick() -- accumulates only when assist_enabled is true");
+    s_exec_state_t ex;
+    memset(&ex, 0, sizeof(ex));
+
+    ramp_assist_stretch_tick(&ex, 0, /*assist_enabled*/ false, /*ramping_now*/ true,
+                             /*lock_held_now*/ true, 5.0f);
+    TEST_CHECK(ex.stretch_total_s == 0.0f, "assist_enabled == false must accumulate nothing, "
+              "even though the lock IS held during a ramp");
+    TEST_CHECK(ex.stretch_by_segment_s[0] == 0.0f, "same for the per-segment slot");
+
+    ramp_assist_stretch_tick(&ex, 0, /*assist_enabled*/ true, /*ramping_now*/ true,
+                             /*lock_held_now*/ true, 5.0f);
+    TEST_CHECK(ex.stretch_total_s == 5.0f, "assist_enabled == true must accumulate dt_s");
+    TEST_CHECK(ex.stretch_by_segment_s[0] == 5.0f, "and credit the current segment's own slot");
+}
+
+static void test_ramp_assist_stretch_tick_requires_ramping_and_locked(void)
+{
+    TEST_SECTION("ramp_assist_stretch_tick() -- must not accumulate outside an actively-locked ramp "
+                 "(dwelling, or the lock not actually held) even with assist on");
+    s_exec_state_t ex;
+    memset(&ex, 0, sizeof(ex));
+
+    ramp_assist_stretch_tick(&ex, 2, true, /*ramping_now*/ false, /*lock_held_now*/ true, 5.0f);
+    TEST_CHECK(ex.stretch_total_s == 0.0f, "not ramping (e.g. dwelling) must not accumulate -- "
+              "sec 7.3's dwell credit is a SEPARATE, not-yet-landed feature, not this one");
+
+    ramp_assist_stretch_tick(&ex, 2, true, /*ramping_now*/ true, /*lock_held_now*/ false, 5.0f);
+    TEST_CHECK(ex.stretch_total_s == 0.0f, "ramping but the lock is NOT held (kiln is keeping up) "
+              "must not accumulate -- there is nothing being stretched");
+}
+
+static void test_ramp_assist_stretch_tick_indexes_the_right_segment(void)
+{
+    TEST_SECTION("ramp_assist_stretch_tick() -- credits ONLY the passed segment_index's own slot, "
+                 "and totals across every call regardless of which segment");
+    s_exec_state_t ex;
+    memset(&ex, 0, sizeof(ex));
+
+    ramp_assist_stretch_tick(&ex, 3, true, true, true, 2.0f);
+    ramp_assist_stretch_tick(&ex, 5, true, true, true, 4.0f);
+
+    TEST_CHECK(ex.stretch_by_segment_s[3] == 2.0f, "segment 3's own slot must hold only its own ticks");
+    TEST_CHECK(ex.stretch_by_segment_s[5] == 4.0f, "segment 5's own slot must hold only its own ticks");
+    TEST_CHECK(ex.stretch_by_segment_s[0] == 0.0f, "an untouched segment slot must stay 0");
+    TEST_CHECK(ex.stretch_total_s == 6.0f, "the running total must sum across every segment");
+}
+
 static void test_firing_stats_persist_load_round_trip_and_ring_depth(void)
 {
     TEST_SECTION("firing_stats_persist()/profile_executor_get_firing_history() -- round-trips a run record "
@@ -5331,6 +5450,15 @@ void run_test_profile_executor_prestart(void)
     test_firing_stats_ramp_and_dwell_buckets_are_kept_separate();
     test_firing_stats_normalized_iae_is_length_invariant();
     test_firing_stats_persist_load_round_trip_and_ring_depth();
+
+    // PID_EXPANSION_PLAN.md sec 7.1/7.2 -- ramp assist's sustained-lag
+    // detection and auto-stretch instrumentation, order-independent.
+    test_ramp_assist_lag_tick_not_lagging_resets();
+    test_ramp_assist_lag_tick_accumulates_and_sustains();
+    test_ramp_assist_lag_tick_snapshot_taken_once_at_onset();
+    test_ramp_assist_stretch_tick_gated_on_flag();
+    test_ramp_assist_stretch_tick_requires_ramping_and_locked();
+    test_ramp_assist_stretch_tick_indexes_the_right_segment();
 }
 
 

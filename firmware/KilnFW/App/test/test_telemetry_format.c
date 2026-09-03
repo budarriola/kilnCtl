@@ -321,6 +321,79 @@ static void test_autotune_undersized_buffer_never_overflows(void)
     }
 }
 
+// ---------------------------------------------------------------------------
+// PID_EXPANSION_PLAN.md sec 7.1/7.4: telemetry_ramp_lag_encode_rate_byte()/
+// telemetry_ramp_lag_event_for_transition() -- the EVENT_CODE_FIRING_RAMP_
+// LAG_STARTED/CLEARED note encoding and edge detector, split into this
+// already-host-tested file for the same reason telemetry_format_firing()
+// above was (telemetry_log.c itself needs FreeRTOS/ESP_LOGI).
+
+static void test_encode_rate_byte_never_produces_zero(void)
+{
+    TEST_SECTION("telemetry_ramp_lag_encode_rate_byte() -- must never return 0 "
+                 "(event_log_emit()'s strncpy() would truncate the note on an embedded NUL)");
+    TEST_CHECK(telemetry_ramp_lag_encode_rate_byte(0.0f) == 128, "0 C/hr encodes to the +128 offset midpoint");
+    TEST_CHECK(telemetry_ramp_lag_encode_rate_byte(-128.0f) != 0,
+              "the exact value that WOULD raw-encode to 0 (-128 + 128) must be clamped away from it");
+    TEST_CHECK(telemetry_ramp_lag_encode_rate_byte(-128.0f) == 2, "clamped to -126, encodes to 2");
+    TEST_CHECK(telemetry_ramp_lag_encode_rate_byte(9999.0f) == 254, "large positive rate clamps to 126 -> 254");
+    TEST_CHECK(telemetry_ramp_lag_encode_rate_byte(-9999.0f) == 2, "large negative rate clamps to -126 -> 2");
+    TEST_CHECK(telemetry_ramp_lag_encode_rate_byte(50.4f) == 178, "rounds to nearest whole degree before offsetting");
+}
+
+static void test_lag_event_no_edge_returns_none(void)
+{
+    TEST_SECTION("telemetry_ramp_lag_event_for_transition() -- prev==cur is never an event");
+    int32_t arg = -1;
+    uint8_t note[EVENT_LOG_NOTE_LEN];
+    memset(note, 0xAA, sizeof(note));
+    int code = telemetry_ramp_lag_event_for_transition(false, false, 200.0f, 10.0f, 8.0f, 0.0f, 0.0f, 0.0f,
+                                                        &arg, note);
+    TEST_CHECK(code == -1, "sustained false->false must not be an event");
+    code = telemetry_ramp_lag_event_for_transition(true, true, 200.0f, 10.0f, 8.0f, 30.0f, 10.0f, 8.0f,
+                                                    &arg, note);
+    TEST_CHECK(code == -1, "sustained true->true must not be an event");
+}
+
+static void test_lag_event_started_uses_current_fields(void)
+{
+    TEST_SECTION("telemetry_ramp_lag_event_for_transition() -- rising edge (STARTED) reports the "
+                 "CURRENT tick's temperature and rates, arg = actual_c*100");
+    int32_t arg = 0;
+    uint8_t note[EVENT_LOG_NOTE_LEN];
+    memset(note, 0xAA, sizeof(note));
+    int code = telemetry_ramp_lag_event_for_transition(false, true, 312.5f, 60.0f, 12.0f,
+                                                        /*prev_held_s*/ 0.0f, /*prev_commanded*/ 0.0f,
+                                                        /*prev_achieved*/ 0.0f, &arg, note);
+    TEST_CHECK(code == EVENT_CODE_FIRING_RAMP_LAG_STARTED, "rising edge must report STARTED");
+    TEST_CHECK(arg == 31250, "arg must be actual_c*100 rounded (312.5 -> 31250)");
+    TEST_CHECK(note[0] == telemetry_ramp_lag_encode_rate_byte(60.0f), "note[0] must be the CURRENT commanded rate");
+    TEST_CHECK(note[1] == telemetry_ramp_lag_encode_rate_byte(12.0f), "note[1] must be the CURRENT achieved rate");
+}
+
+static void test_lag_event_cleared_uses_remembered_prev_fields(void)
+{
+    TEST_SECTION("telemetry_ramp_lag_event_for_transition() -- falling edge (CLEARED) reports the "
+                 "CALLER-REMEMBERED previous fields, NOT the current (already-reset-to-0) ones -- "
+                 "this is the bug this function's own doc comment exists to prevent");
+    int32_t arg = 0;
+    uint8_t note[EVENT_LOG_NOTE_LEN];
+    memset(note, 0xAA, sizeof(note));
+    /* Current-tick fields are 0/0 (as profile_exec_zone_status_t genuinely
+     * reads the instant ramp_lag_sustained clears) -- only the prev_*
+     * arguments carry real numbers. */
+    int code = telemetry_ramp_lag_event_for_transition(true, false, 305.0f, /*cur_commanded*/ 0.0f,
+                                                        /*cur_achieved*/ 0.0f, /*prev_held_s*/ 145.0f,
+                                                        /*prev_commanded*/ 60.0f, /*prev_achieved*/ 22.0f,
+                                                        &arg, note);
+    TEST_CHECK(code == EVENT_CODE_FIRING_RAMP_LAG_CLEARED, "falling edge must report CLEARED");
+    TEST_CHECK(arg == 145, "arg must be the remembered held duration, not 0");
+    TEST_CHECK(note[0] == telemetry_ramp_lag_encode_rate_byte(60.0f),
+              "note[0] must be the REMEMBERED commanded rate (60), not the current-tick 0");
+    TEST_CHECK(note[1] == telemetry_ramp_lag_encode_rate_byte(22.0f),
+              "note[1] must be the REMEMBERED achieved rate (22), not the current-tick 0");
+}
+
 int main(void)
 {
     test_firing_well_formed();
@@ -330,6 +403,10 @@ int main(void)
     test_autotune_aborted_sanitizes_reason();
     test_firing_undersized_buffer_never_overflows();
     test_autotune_undersized_buffer_never_overflows();
+    test_encode_rate_byte_never_produces_zero();
+    test_lag_event_no_edge_returns_none();
+    test_lag_event_started_uses_current_fields();
+    test_lag_event_cleared_uses_remembered_prev_fields();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     return g_test_failures == 0 ? 0 : 1;

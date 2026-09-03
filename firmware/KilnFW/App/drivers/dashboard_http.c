@@ -1424,7 +1424,11 @@ static esp_err_t profile_exec_status_get_handler(httpd_req_t *req)
      * is 401B, already over the 320 it shipped at, before this fix's own
      * three new fields (ff_hold_used_matrix/ff_hold_infeasible/
      * ff_membership_change_count, another ~95B) pushed it to 496B worst
-     * case. 512 leaves real headroom. The 960-byte fixed part covers the
+     * case. 512 leaves real headroom. PID_EXPANSION_PLAN.md sec 7.2 added
+     * two more (ramp_stretch_segment_s/ramp_stretch_total_s, 2x "%.2f" up
+     * to 8B each = 16B of values + ~55B of keys = ~71B more), 567B worst
+     * case now -- still real headroom against the 960-byte fixed part
+     * below. The 960-byte fixed part covers the
      * run-level line (its own escaped reason, plus the four duration-model
      * fields added for the profile-plan contract -- at most ~48 bytes more)
      * plus the "last_run" object at ITS worst case. The httpd task runs on
@@ -1454,12 +1458,14 @@ static esp_err_t profile_exec_status_get_handler(httpd_req_t *req)
         "{\"state\":\"%s\",\"profile_id\":%u,\"profile_name\":\"%s\",\"zone_mask\":%u,"
         "\"segment_index\":%u,\"segment_count\":%u,\"dwelling\":%s,\"target_c\":%.2f,"
         "\"segment_elapsed_s\":%lu,\"dwell_remaining_s\":%lu,\"ramp_lock_held\":%s,"
-        "\"ramp_lock_lagging_mask\":%u,\"fault_reason\":\"%s\",\"fault_guard\":%u,"
+        "\"ramp_lock_lagging_mask\":%u,\"ramp_stretch_segment_s\":%.2f,\"ramp_stretch_total_s\":%.2f,"
+        "\"fault_reason\":\"%s\",\"fault_guard\":%u,"
         "\"total_planned_s\":%s,\"elapsed_s\":%lu,\"remaining_s\":%s,\"remaining_is_estimate\":%s,",
         exec_state_name(st.state), st.profile_id, name_escaped, st.zone_mask, st.segment_index,
         st.segment_count, st.dwelling ? "true" : "false", (double)st.target_c,
         (unsigned long)st.segment_elapsed_s, (unsigned long)st.dwell_remaining_s,
-        st.ramp_lock_held ? "true" : "false", st.ramp_lock_lagging_mask, reason_escaped, st.fault_guard,
+        st.ramp_lock_held ? "true" : "false", st.ramp_lock_lagging_mask,
+        (double)st.ramp_stretch_segment_s, (double)st.ramp_stretch_total_s, reason_escaped, st.fault_guard,
         total_planned_buf, (unsigned long)elapsed_s, remaining_buf, remaining_is_estimate ? "true" : "false");
     size_t o = (n < 0 || (size_t)n >= DASHBOARD_JSON_PROFILE_EXEC_BUF_SIZE)
                    ? DASHBOARD_JSON_PROFILE_EXEC_BUF_SIZE - 1

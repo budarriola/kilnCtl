@@ -489,6 +489,22 @@ typedef struct {
      * zone for "this firing's tracking quality so far" -- see each field's
      * comment for units and sign. */
     profile_exec_firing_stats_t firing_stats;
+
+    /* PID_EXPANSION_PLAN.md sec 7.1/7.4: sustained-lag detection, reported
+     * REGARDLESS of ramp_assist_enabled (dashboard_http.c's own field of
+     * that name) -- see profile_executor_ramp_assist.c and EXEC_SUSTAINED_
+     * LAG_S (profile_executor_internal.h) for the threshold and reasoning.
+     * ramp_lag_held_s is 0/false-sustained for a zone that is not currently
+     * inside s_exec.ramp_lock_lagging_mask, or that has been for less than
+     * EXEC_SUSTAINED_LAG_S continuously -- a brief hold during normal PID
+     * settling is not reported as sustained. The two rate fields are only
+     * meaningful while ramp_lag_sustained is true: commanded is this
+     * segment's own signed ramp_c_per_hr, achieved is measured from actual_c
+     * over the time this lag has been held. */
+    bool     ramp_lag_sustained;
+    float    ramp_lag_held_s;
+    float    ramp_lag_commanded_rate_c_per_hr;
+    float    ramp_lag_achieved_rate_c_per_hr;
 } profile_exec_zone_status_t;
 
 typedef struct {
@@ -507,6 +523,18 @@ typedef struct {
                                  * because at least one active, non-faulted zone is outside
                                  * PROFILE_EXECUTOR_RAMP_LOCK_BAND_C of target_c */
     uint8_t  ramp_lock_lagging_mask; /* which zone(s) are the reason, if ramp_lock_held */
+
+    /* PID_EXPANSION_PLAN.md sec 7.2: auto-stretch INSTRUMENTATION -- how
+     * much of segment_elapsed_s/target_c's real-world advance has been
+     * "extra" time the ramp-lock (sec 7.1) spent holding the setpoint,
+     * because ramp_assist_cfg_enabled() was true while this run needed it.
+     * Both 0 for the whole life of a run started with the flag off, or for
+     * any run that never lagged. See s_exec_state_t.stretch_by_segment_s/
+     * stretch_total_s (profile_executor_internal.h) for the accumulation
+     * rule -- this is CURRENT segment / running total, not the full
+     * per-segment array (dashboard_json.h's per-field buffer budget). */
+    float    ramp_stretch_segment_s;
+    float    ramp_stretch_total_s;
     profile_exec_zone_status_t zones[MAX31856_CHANNEL_COUNT];
 
     /* Duration-model inputs for /api/profile_exec's total_planned_s/
