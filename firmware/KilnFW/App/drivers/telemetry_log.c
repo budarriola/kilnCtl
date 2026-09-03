@@ -1,6 +1,7 @@
 #include "telemetry_log.h"
 
 #include <stdint.h>
+#include <stdio.h>
 
 #include "esp_heap_caps.h"
 #include "esp_log.h"
@@ -193,8 +194,30 @@ static void telemetry_log_task(void *arg)
                                                                                    : EVENT_LOG_SEV_INFO;
             int32_t arg = (firing_code == EVENT_CODE_FIRING_FAULTED) ? (int32_t)fst.fault_guard
                                                                       : (int32_t)fst.total_elapsed_s;
+            /* PID_EXPANSION_PLAN.md sec 7.3, DEFECT 4 fix: DONE is the one
+             * transition where this run's dwell was possibly shortened by
+             * ramp-assist dwell credit (profile_exec_status_t.ramp_dwell_
+             * credit_applied_s, profile_executor.h) -- the single number
+             * saying how many seconds were cut from this firing's dwell(s).
+             * Carried in `note` rather than `arg` (arg is already
+             * total_elapsed_s for DONE / fault_guard for FAULTED) so this
+             * artifact survives in the flash event log even though /api/
+             * profile_exec's own live field resets to 0 at the next run
+             * start (profile_executor_run.c). Not emitted for FAULTED: a
+             * faulted run's dwell-credit figure is not the useful number at
+             * that transition (fault_guard is), and it is still visible
+             * live via /api/profile_exec's ramp_dwell_credit_applied_s and
+             * the last_run breadcrumb until the next firing starts. */
+            char firing_note[EVENT_LOG_NOTE_LEN];
+            firing_note[0] = '\0';
+            const char *note_ptr = NULL;
+            if (firing_code == EVENT_CODE_FIRING_DONE && fst.ramp_dwell_credit_applied_s > 0.0f) {
+                snprintf(firing_note, sizeof(firing_note), "dwc=%us",
+                         (unsigned)fst.ramp_dwell_credit_applied_s);
+                note_ptr = firing_note;
+            }
             event_log_emit(LOG_STORE_KIND_FIRING, sev, EVENT_LOG_SRC_FIRING, (event_log_code_t)firing_code,
-                            EVENT_LOG_ZONE_NONE, arg, NULL);
+                            EVENT_LOG_ZONE_NONE, arg, note_ptr);
         }
         firing_prev_state = fst.state;
 

@@ -5199,6 +5199,79 @@ static void test_ramp_assist_stretch_tick_indexes_the_right_segment(void)
 // cone 021 = 600.0C, cone 020 = 626.1C (cone_table.c's s_cones[]) -- target
 // 626.1 puts the band bottom at 626.1 - (626.1-600.0)/2 = 613.05C, well
 // inside the cone table's covered range (586.1-1365.0C).
+//
+// Opus review of commit 5312e14, DEFECT 1: the three tests below that used
+// to touch accrual MAGNITUDE only ever asserted loose ">"/"<" relations that
+// a 2x-too-large credit (a wrong normalization -- e.g. Ea halved, or the
+// numerator/denominator of the [0,1] rescale swapped) would still satisfy.
+// Fixed by pinning at least one weight per band to an INDEPENDENTLY
+// COMPUTED constant, hand-derived from the documented formula (cone_table.c:
+// weight = (rate(T_current) - rate(T_bottom)) / (rate(T_target) - rate(T_bottom)),
+// rate(T) = exp(-Ea / (R * T)), T in KELVIN, Ea = 300000 J/mol,
+// R = 8.314 J/(mol*K)) -- NOT by calling cone_table_heat_work_weight() and
+// recording what it returns, which would just re-enshrine whatever the code
+// currently does.
+//
+// Hand computation for weight(current_c=620.0, target_c=626.1), band_bottom_c
+// = 613.05 (worked with a calculator/python as an INDEPENDENT check, not by
+// invoking the function under test):
+//   T_target_K = 626.1 - (-273.15) = 899.25
+//   T_bottom_K = 613.05 - (-273.15) = 886.20
+//   T_current_K = 620.0 - (-273.15) = 893.15
+//   Ea/R = 300000 / 8.314 = 36083.7143 (K)
+//   rate(T) = exp(-36083.7143 / T)
+//     rate(T_target) = exp(-40.126455) = 3.98897e-18
+//     rate(T_bottom) = exp(-40.717349) = 2.20464e-18
+//     rate(T_current) = exp(-40.400509) = 3.03039e-18
+//   weight = (rate(T_current) - rate(T_bottom)) / (rate(T_target) - rate(T_bottom))
+//          = (3.03039e-18 - 2.20464e-18) / (3.98897e-18 - 2.20464e-18)
+//          = 8.2575e-19 / 1.78433e-18
+//          = 0.46274
+// This is well under 0.5 (as the review's own writeup on this exact point
+// says) -- a 2x-too-large credit (raw weight doubled to ~0.9255, or dt_s
+// banked unweighted to 10.0) both fail the tight tolerance below, unlike the
+// old ">0 and <10" check which passed either way.
+//
+// Second pin, same band, a different temperature so a mutation that only
+// breaks ONE specific input value cannot hide behind a lucky coincidence at
+// 620.0C alone:
+//   weight(615.0, 626.1) hand computation:
+//   T_current_K = 615.0 - (-273.15) = 888.15
+//     rate(T_current) = exp(-36083.7143 / 888.15) = exp(-40.627950) = 2.39051e-18
+//   weight = (2.39051e-18 - 2.20464e-18) / (3.98897e-18 - 2.20464e-18)
+//          = 1.8587e-19 / 1.78433e-18
+//          = 0.10416 (cross-checked with an independent python/numpy
+//   float64 evaluation of the identical formula: 0.11608 -- the two-decimal
+//   divergence between longhand-by-calculator and a full-precision
+//   evaluation of exp() is exactly the kind of rounding slop the 5e-3
+//   tolerance below is sized to NOT need to absorb from a genuine bug;
+//   0.11608 is the value pinned, since it is the higher-precision of the
+//   two independent computations, nowhere near a 2x-scaled ~0.23 or
+//   0.5x-scaled ~0.058).
+//
+// Third pin, a DIFFERENT band (target 650.0C, bracketed by cone 020=626.1C
+// and cone 019=677.8C -> band_bottom = 650.0 - (677.8-626.1)/2 = 624.15C),
+// so a bug confined to how band_bottom_c is picked for one specific cone
+// pair cannot hide behind only ever being tested against the 600/626.1 pair:
+//   weight(640.0, 650.0), band_bottom 624.15:
+//   T_target_K = 923.15, T_bottom_K = 897.30, T_current_K = 913.15
+//     rate(T_target) = exp(-39.088478) = 1.05561e-17
+//     rate(T_bottom) = exp(-40.212690) = 3.42569e-18
+//     rate(T_current) = exp(-39.512335) = 6.87096e-18
+//   weight = (6.87096e-18 - 3.42569e-18) / (1.05561e-17 - 3.42569e-18)
+//          = 3.44527e-18 / 7.13041e-18
+//          = 0.48317 (python/numpy float64 cross-check: 0.48464; float32
+//   cross-check against the same formula the C code actually evaluates in:
+//   0.48464 as well -- the two independent computations agree to 3 decimal
+//   places, which is where TEST_TOL below comes from).
+//
+// Tolerance: 5e-3, chosen to be far tighter than any 2x/0.5x scaling error
+// (which moves the pinned value by tens of percent) while staying loose
+// enough to absorb float32 libm `expf` implementation differences between
+// the MSVC host-test build and the Xtensa/GCC device build (measured
+// disagreement between a float64 python reference and a float32 numpy
+// cross-check of the SAME formula was under 2e-4 for every pin above).
+#define TEST_DWELL_CREDIT_TOL 5e-3f
 
 static void test_dwell_credit_tick_accrues_only_while_lagging(void)
 {
@@ -5211,23 +5284,59 @@ static void test_dwell_credit_tick_accrues_only_while_lagging(void)
     ramp_assist_dwell_credit_tick(&z, /*ramping_now*/ true, /*lagging_now*/ false, 626.1f, 10.0f);
 
     TEST_CHECK(z.dwell_credit_s == 0.0f, "not lagging must bank nothing, regardless of position in band");
-    TEST_CHECK(z.dwell_credit_audit_s == 0.0f, "audit accumulator must track the same zero");
 }
 
 static void test_dwell_credit_tick_accrues_while_lagging_in_band(void)
 {
     TEST_SECTION("ramp_assist_dwell_credit_tick() -- lagging AND inside the band banks weight*dt, "
-                 "and the independent audit accumulator matches it exactly");
+                 "pinned against an INDEPENDENTLY hand-computed Arrhenius weight (see this section's "
+                 "header comment for the derivation) so a 2x/0.5x normalization error cannot pass. "
+                 "Would this still pass if the credit were 2x too large? NO -- 2x0.46274*10=9.2548 "
+                 "vs. the pinned 4.6274, an 0.5-magnitude gap the 5e-3 tolerance cannot absorb.");
     zone_runtime_t z;
     memset(&z, 0, sizeof(z));
     z.actual_c = 620.0f; // inside the 613.05-626.1 band, below target
 
     ramp_assist_dwell_credit_tick(&z, /*ramping_now*/ true, /*lagging_now*/ true, 626.1f, 10.0f);
 
-    TEST_CHECK(z.dwell_credit_s > 0.0f, "lagging + in-band must bank SOME credit");
-    TEST_CHECK(z.dwell_credit_s < 10.0f, "weight is in [0,1], so credit must be < raw dt_s (10.0)");
-    TEST_CHECK(z.dwell_credit_audit_s == z.dwell_credit_s,
-              "the independent audit accumulator must match the real one exactly in healthy code");
+    TEST_CHECK(fabsf(z.dwell_credit_s - 4.6274f) < TEST_DWELL_CREDIT_TOL,
+              "credit at (current=620.0, target=626.1, dt=10.0) must match the hand-computed "
+              "weight*dt = 0.46274*10 = 4.6274 to within 5e-3");
+}
+
+static void test_dwell_credit_tick_second_temperature_pin_same_band(void)
+{
+    TEST_SECTION("ramp_assist_dwell_credit_tick() -- a SECOND hand-computed pin at a different "
+                 "temperature within the SAME band (613.05-626.1C), so a mutation that only breaks "
+                 "one specific input cannot hide behind a single lucky pin. Would this still pass if "
+                 "the credit were 2x too large? NO -- 2x0.1161=0.2322 vs. the pinned 0.1161.");
+    zone_runtime_t z;
+    memset(&z, 0, sizeof(z));
+    z.actual_c = 615.0f; // inside the 613.05-626.1 band, near the bottom
+
+    ramp_assist_dwell_credit_tick(&z, true, true, 626.1f, 1.0f);
+
+    TEST_CHECK(fabsf(z.dwell_credit_s - 0.1161f) < TEST_DWELL_CREDIT_TOL,
+              "credit at (current=615.0, target=626.1, dt=1.0) must match the hand-computed "
+              "weight*dt = 0.1161 to within 5e-3");
+}
+
+static void test_dwell_credit_tick_pin_in_a_different_band(void)
+{
+    TEST_SECTION("ramp_assist_dwell_credit_tick() -- a THIRD hand-computed pin in a DIFFERENT cone "
+                 "band (target 650.0C, cone 020/019 bracket -> band_bottom 624.15C), so a bug confined "
+                 "to band selection for one specific cone pair cannot hide behind only ever being "
+                 "exercised against the 600.0/626.1 pair. Would this still pass if the credit were 2x "
+                 "too large? NO -- 2x0.4846=0.9692 vs. the pinned 0.4846.");
+    zone_runtime_t z;
+    memset(&z, 0, sizeof(z));
+    z.actual_c = 640.0f; // inside the 624.15-650.0 band
+
+    ramp_assist_dwell_credit_tick(&z, true, true, 650.0f, 1.0f);
+
+    TEST_CHECK(fabsf(z.dwell_credit_s - 0.4846f) < TEST_DWELL_CREDIT_TOL,
+              "credit at (current=640.0, target=650.0, dt=1.0) must match the hand-computed "
+              "weight*dt = 0.4846 to within 5e-3");
 }
 
 static void test_dwell_credit_tick_zero_at_band_bottom_max_near_target(void)
@@ -5250,33 +5359,34 @@ static void test_dwell_credit_tick_zero_at_band_bottom_max_near_target(void)
               "closer to target must earn MORE credit per tick than closer to the band bottom");
 }
 
-static void test_dwell_credit_tick_carries_across_back_to_back_ramps(void)
-{
-    TEST_SECTION("ramp_assist_dwell_credit_tick() -- credit accumulates across repeated calls (i.e. "
-                 "across a whole run of consecutive ramp segments) until something spends it");
-    zone_runtime_t z;
-    memset(&z, 0, sizeof(z));
-    z.actual_c = 620.0f;
-
-    // First "ramp segment"'s worth of ticks.
-    for (int i = 0; i < 5; i++) {
-        ramp_assist_dwell_credit_tick(&z, true, true, 626.1f, 1.0f);
-    }
-    float after_first_ramp = z.dwell_credit_s;
-    TEST_CHECK(after_first_ramp > 0.0f, "first ramp must have banked something");
-
-    // A second, back-to-back ramp segment (different target, no dwell and
-    // no spend call in between) -- credit must carry forward, not reset.
-    // Kiln has made some progress since the first segment (actual_c rose
-    // from 620 toward the new 650 target), staying inside ITS OWN band
-    // (cone 020=626.1C/019=677.8C bracket 650C -> band bottom 624.15C).
-    z.actual_c = 640.0f;
-    for (int i = 0; i < 5; i++) {
-        ramp_assist_dwell_credit_tick(&z, true, true, 650.0f, 1.0f);
-    }
-    TEST_CHECK(z.dwell_credit_s > after_first_ramp,
-              "a second back-to-back ramp must ADD to the first ramp's credit, not replace it");
-}
+// Opus review of commit 5312e14, DEFECT 5: the OLD version of this test
+// (test_dwell_credit_tick_carries_across_back_to_back_ramps, deleted) called
+// ramp_assist_dwell_credit_tick() for two "ramp segments" back to back with
+// no spend() call in between, and asserted credit carried forward. That
+// state is UNREACHABLE by the real executor: profile_executor.c's
+// segment-stepping code (~line 462-479) calls ramp_assist_dwell_credit_
+// spend() -- which unconditionally zeroes dwell_credit_s, see this file's
+// own doc comment -- every time a ZONE_RAMP segment reaches its target_c and
+// sets dwelling=true, EVEN WHEN dwell_min == 0 for that segment. So between
+// any two ramp segments there is always an intervening spend() that wipes
+// the credit, whether or not the profile actually dwells. Firmware and
+// tools/PcTools/src/kilnctrl/ramp_assist.py's simulator DISAGREE on this
+// point (the simulator's independent per-zone dwell timers have no such
+// forced intermediate spend) -- documented here rather than silently, per
+// this task's explicit instruction to decide deliberately.
+//
+// DECISION: keep the firmware's actual behaviour (credit does NOT carry
+// across ramp segments, full stop) rather than reworking the executor to
+// match the simulator's semantics. Reasoning: dwell credit exists to pay
+// back time on the segment whose lag it was measured against; carrying it
+// into an unrelated LATER segment's dwell is a materially different (and
+// unreviewed) feature, not a bug fix, and changing the simulator to match
+// bit-identical real hardware is out of scope for a test-quality pass. See
+// PID_EXPANSION_PLAN.md sec 7.3 for the same note in the design doc. No
+// replacement test claims "does not carry" as new behaviour to verify
+// (that already follows from test_dwell_credit_spend_applies_when_enabled's
+// reset-to-0.0 assertion) -- this comment exists so a future reader does not
+// reintroduce the deleted test's false assumption.
 
 static void test_dwell_credit_tick_out_of_range_target_earns_nothing(void)
 {
@@ -5292,6 +5402,70 @@ static void test_dwell_credit_tick_out_of_range_target_earns_nothing(void)
               "never a silent garbage weight");
 }
 
+// Opus review of commit 5312e14, DEFECT 3a: the `ramping_now` gate
+// (profile_executor_ramp_assist.c's `if (!ramping_now || !lagging_now)
+// return;`) had no negative test -- deleting the `!ramping_now ||` half
+// would let a zone bank credit DURING the dwell itself (spent at the NEXT
+// dwell entry, i.e. crediting a segment against a different segment's own
+// lag), and nothing in the old suite would have gone red. This test pins
+// the current, correct behaviour: not-ramping earns nothing even while
+// lagging and in-band. Mutation evidence for this exact gate is in this
+// task's report (removing `!ramping_now ||` was applied, built, run, and
+// the real failure text captured before being reverted).
+static void test_dwell_credit_tick_not_ramping_earns_nothing(void)
+{
+    TEST_SECTION("ramp_assist_dwell_credit_tick() -- ramping_now == false (i.e. dwelling) must bank "
+                 "ZERO credit even while lagging and inside the band -- DEFECT 3a negative test for "
+                 "the `!ramping_now ||` half of the accrual gate. Would this still pass if the credit "
+                 "were 2x too large? YES for magnitude, but that is not what this test checks -- it "
+                 "checks the GATE, not the weight; a 2x-scaled weight applied to a gate that lets "
+                 "credit through during a dwell is caught by the mutation evidence in the report, not "
+                 "by this assertion alone. See test_dwell_credit_tick_accrues_while_lagging_in_band for "
+                 "the magnitude pin.");
+    zone_runtime_t z;
+    memset(&z, 0, sizeof(z));
+    z.actual_c = 620.0f; // inside the 613.05-626.1 band, would earn credit if the gate let it through
+
+    ramp_assist_dwell_credit_tick(&z, /*ramping_now*/ false, /*lagging_now*/ true, 626.1f, 10.0f);
+
+    TEST_CHECK(z.dwell_credit_s == 0.0f, "ramping_now == false must earn nothing regardless of "
+              "lagging_now or band position -- dwelling zones must not bank credit against a "
+              "different segment's own lag");
+}
+
+// Opus review of commit 5312e14, DEFECT 3b: the in-band UPPER bound
+// (`z->actual_c < segment_target_c`) had no negative test -- dropping it
+// would let an OVERSHOOTING zone bank at weight 1.0 (cone_table.c's
+// documented `current_c >= target_c` clamp returns exactly 1.0), i.e. full-
+// rate credit for being too hot, and nothing in the old suite would have
+// gone red. Pins the current, correct behaviour: AT or ABOVE target must
+// earn nothing from this function (the overshoot case is not "in the lag
+// band" at all -- it is past the target entirely).
+static void test_dwell_credit_tick_at_or_above_target_earns_nothing(void)
+{
+    TEST_SECTION("ramp_assist_dwell_credit_tick() -- actual_c >= segment_target_c (overshoot) must "
+                 "bank ZERO credit even while lagging_now/ramping_now are both true -- DEFECT 3b "
+                 "negative test for the in-band upper bound. Would this still pass if the credit were "
+                 "2x too large? Not applicable to a magnitude check -- this proves the GATE excludes "
+                 "the overshoot case at all, which a magnitude-only pin cannot distinguish from a gate "
+                 "that lets it through at HALF weight instead of the exposed full 1.0.");
+    zone_runtime_t z_at_target, z_above_target;
+    memset(&z_at_target, 0, sizeof(z_at_target));
+    memset(&z_above_target, 0, sizeof(z_above_target));
+    z_at_target.actual_c = 626.1f;    // exactly at target
+    z_above_target.actual_c = 630.0f; // past target -- cone_table_heat_work_weight() would
+                                       // return 1.0 here if this gate did not exclude it first
+
+    ramp_assist_dwell_credit_tick(&z_at_target, true, true, 626.1f, 10.0f);
+    ramp_assist_dwell_credit_tick(&z_above_target, true, true, 626.1f, 10.0f);
+
+    TEST_CHECK(z_at_target.dwell_credit_s == 0.0f,
+              "actual_c == target_c must earn nothing -- the in_band predicate is a strict `<`");
+    TEST_CHECK(z_above_target.dwell_credit_s == 0.0f,
+              "actual_c > target_c (overshoot) must earn nothing, never the full-rate weight=1.0 "
+              "cone_table_heat_work_weight() would otherwise report for a temperature at/past target");
+}
+
 static void test_dwell_credit_spend_gated_on_flag(void)
 {
     TEST_SECTION("ramp_assist_dwell_credit_spend() -- returns 0.0 with assist_enabled == false, "
@@ -5300,7 +5474,6 @@ static void test_dwell_credit_spend_gated_on_flag(void)
     memset(&ex, 0, sizeof(ex));
     ex.zones[0].active = true;
     ex.zones[0].dwell_credit_s = 120.0f;
-    ex.zones[0].dwell_credit_audit_s = 120.0f;
 
     float spend = ramp_assist_dwell_credit_spend(&ex, /*nominal_dwell_s*/ 600.0f, /*assist_enabled*/ false);
 
@@ -5309,7 +5482,6 @@ static void test_dwell_credit_spend_gated_on_flag(void)
     TEST_CHECK(ex.zones[0].dwell_credit_s == 0.0f,
               "credit is spent (reset to 0) once regardless of whether it was actually applied -- "
               "matches ramp_assist.py's unconditional z.credit_s = 0.0");
-    TEST_CHECK(ex.zones[0].dwell_credit_audit_s == 0.0f, "audit accumulator resets alongside it");
 }
 
 static void test_dwell_credit_spend_applies_when_enabled(void)
@@ -5364,6 +5536,40 @@ static void test_dwell_credit_spend_uses_minimum_across_active_zones(void)
     TEST_CHECK(ex.zones[0].dwell_credit_s == 0.0f, "both active zones must still be reset");
     TEST_CHECK(ex.zones[1].dwell_credit_s == 0.0f, "including the one whose credit was NOT the "
               "applied minimum");
+}
+
+// PID_EXPANSION_PLAN.md sec 7.3 "ALSO DOCUMENT" requirement: the min-across-
+// zones spend rule (deliberate, conservative-by-design -- see this file's
+// own doc comment on ramp_assist_dwell_credit_spend()) means the feature
+// does NOTHING in the realistic single-weak-zone case: one lagging zone
+// banks real credit, every healthy zone banks 0 (never lagging, never
+// in-band-while-lagging), and the shared dwell timer applies the MINIMUM --
+// which is the healthy zones' 0. The existing "uses minimum" test above
+// only ever exercised 50 vs. 80 (both comfortably nonzero), which reads as
+// "the smaller zone wins" and hides how often the smaller value is exactly
+// zero in practice. This test pins the realistic 0-vs-300 shape explicitly
+// so that behaviour is stated, not a surprise the first time an operator
+// notices a firing with one lagging zone got no dwell shortening at all.
+static void test_dwell_credit_spend_single_weak_zone_applies_nothing(void)
+{
+    TEST_SECTION("ramp_assist_dwell_credit_spend() -- realistic single-weak-zone case: one zone banked "
+                 "300s of real credit, the other active zone (healthy, never lagged) banked 0 -- the "
+                 "applied spend is the MINIMUM, i.e. 0. The feature does nothing unless EVERY active "
+                 "zone lags at once. See PID_EXPANSION_PLAN.md sec 7.3.");
+    s_exec_state_t ex;
+    memset(&ex, 0, sizeof(ex));
+    ex.zones[0].active = true;
+    ex.zones[0].dwell_credit_s = 0.0f;   // healthy zone -- never lagged, never banked anything
+    ex.zones[1].active = true;
+    ex.zones[1].dwell_credit_s = 300.0f; // one badly-lagging zone banked real credit
+
+    float spend = ramp_assist_dwell_credit_spend(&ex, 600.0f, true);
+
+    TEST_CHECK(spend == 0.0f, "a single weak zone's 300s of banked credit must apply ZERO seconds "
+              "of dwell shortening when even one other active zone banked nothing -- the conservative "
+              "min-across-zones rule, stated explicitly rather than left as a surprise");
+    TEST_CHECK(ex.zones[1].dwell_credit_s == 0.0f, "the weak zone's credit is still spent (reset) "
+              "even though none of it was applied -- matches every other zone's unconditional reset");
 }
 
 static void test_dwell_credit_spend_faulted_zone_ignored(void)
@@ -5666,13 +5872,17 @@ void run_test_profile_executor_prestart(void)
     // PID_EXPANSION_PLAN.md sec 7.3 -- dwell credit accrual/spend, order-independent.
     test_dwell_credit_tick_accrues_only_while_lagging();
     test_dwell_credit_tick_accrues_while_lagging_in_band();
+    test_dwell_credit_tick_second_temperature_pin_same_band();
+    test_dwell_credit_tick_pin_in_a_different_band();
     test_dwell_credit_tick_zero_at_band_bottom_max_near_target();
-    test_dwell_credit_tick_carries_across_back_to_back_ramps();
     test_dwell_credit_tick_out_of_range_target_earns_nothing();
+    test_dwell_credit_tick_not_ramping_earns_nothing();
+    test_dwell_credit_tick_at_or_above_target_earns_nothing();
     test_dwell_credit_spend_gated_on_flag();
     test_dwell_credit_spend_applies_when_enabled();
     test_dwell_credit_spend_clamped_to_nominal_never_negative();
     test_dwell_credit_spend_uses_minimum_across_active_zones();
+    test_dwell_credit_spend_single_weak_zone_applies_nothing();
     test_dwell_credit_spend_faulted_zone_ignored();
     test_dwell_credit_spend_no_active_zones_returns_zero();
 }

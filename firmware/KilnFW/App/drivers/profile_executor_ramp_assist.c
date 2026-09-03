@@ -25,9 +25,9 @@
 //     unconditional), this file just does not count that time as "assist".
 //   - ramp_assist_dwell_credit_tick() banks heat-work-weighted credit,
 //     ALWAYS (same "report regardless of the flag" convention as the lag
-//     functions above) -- it writes only zone_runtime_t.dwell_credit_s/
-//     dwell_credit_audit_s, never target_c/segment_elapsed_s/dwelling, so
-//     dwell TIMING cannot be affected by this function running or not.
+//     functions above) -- it writes only zone_runtime_t.dwell_credit_s,
+//     never target_c/segment_elapsed_s/dwelling, so dwell TIMING cannot be
+//     affected by this function running or not.
 //   - ramp_assist_dwell_credit_spend() is the one function in this file
 //     whose RETURN VALUE is gated on ramp_assist_cfg_enabled() -- see its
 //     own doc comment (profile_executor_internal.h) for exactly what stays
@@ -108,33 +108,16 @@ void ramp_assist_dwell_credit_tick(zone_runtime_t *z, bool ramping_now, bool lag
     if (!in_band) {
         return;
     }
+    /* REMOVED (2026-09-03, opus review of commit 5312e14, "DEFECT 2"): this
+     * used to also fill a second "audit" accumulator via its own duplicate
+     * cone_table_heat_work_weight() call. Deleted rather than kept -- see
+     * zone_runtime_t's doc comment (profile_executor_internal.h, right
+     * after dwell_credit_s) for the full justification. Real protection
+     * against a wrong Ea/band/weight-function/dt now comes from
+     * test_profile_executor_prestart.c's hand-computed weight pins. */
     float w;
     if (cone_table_heat_work_weight(z->actual_c, segment_target_c, &w) == CONE_TABLE_OK) {
         z->dwell_credit_s += w * dt_s;
-    }
-    /* Independent audit accumulator -- its own separate cone_table call, its
-     * own separate `+=`, deliberately not derived from the line above (or
-     * from `w`) so a regression confined to the real accrual does not also
-     * corrupt this reference value. See this field's doc comment
-     * (profile_executor_internal.h) and PID_EXPANSION_PLAN.md sec 7.3's
-     * "DEFECT 1" writeup for why that independence is the whole point.
-     *
-     * SCOPE: this catches an ACCRUAL/SPEND IMPLEMENTATION SLIP between the
-     * two `+=` statements above and nothing more -- both calls share the
-     * same cone_table_heat_work_weight() function, the same band
-     * (cone_table_band_bottom_c(segment_target_c, ...)), the same target,
-     * the same `ramping_now && lagging_now` gate, and the same tick. A
-     * wrong Ea, a wrong band width, or a wrong weight function moves both
-     * accumulators identically and the audit reads 0.0 regardless -- proven
-     * on the Python original this ports (tools/PcTools/src/kilnctrl/
-     * ramp_assist.py's credit_reference_heat_s / credit_audit_pct) by two
-     * mutations that left the audit at exactly 0.0% while credit_s itself
-     * moved -16% (Ea 300k -> 500k) and +307% (band half-width doubled).
-     * Neither Ea nor the band width is validated by this accumulator, or by
-     * any metric in this file or in cone_table.c/.h. */
-    float w_audit;
-    if (cone_table_heat_work_weight(z->actual_c, segment_target_c, &w_audit) == CONE_TABLE_OK) {
-        z->dwell_credit_audit_s += w_audit * dt_s;
     }
 }
 
@@ -172,7 +155,6 @@ float ramp_assist_dwell_credit_spend(s_exec_state_t *ex, float nominal_dwell_s, 
          * false (matches ramp_assist.py's z.credit_s = 0.0 outside its own
          * apply_dwell_credit branch). */
         z->dwell_credit_s = 0.0f;
-        z->dwell_credit_audit_s = 0.0f;
     }
     if (min_credit_s < 0.0f) {
         return 0.0f; /* no active zones -- nothing to spend */

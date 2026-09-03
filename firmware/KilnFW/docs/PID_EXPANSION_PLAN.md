@@ -711,25 +711,105 @@ HTTP endpoint and zones-page UI.
         the fit attached, the verdicts are byte-identical either way
         (`test_sensitivity_does_not_manufacture_effect_between_same_config_runs`).
       - `summarize_metric_floor_reliability` — this rig's own measured floor
-        is internally consistent for some metrics and not others:
-        `iae_normalized_whole_c`/`ramp_mean_error_c` vary ~4.4–4.6x across
-        zones/segments, while `dwell_steady_state_offset_c` and most other
-        metrics vary 8–30x (the observed `dwell_steady_state_offset_c` floor
-        spans 0.044–0.550 °C — comparable to or larger than the 0.4–0.5 °C
-        differences this project has been treating as real). Flagged
-        UNSTABLE above `FLOOR_RELIABILITY_RATIO=5.0`, computed directly from
-        the artifact and printed with every `compare` — so a reader can see
-        which metrics can currently support a conclusion (`iae_normalized_*`)
-        and which cannot yet (`dwell_*`, `settle_time_s`,
-        `ramp_worst_error_c`) rather than presenting them as equally
-        trustworthy. A genuine defect fixed along the way: real HTTP
-        captures often have `actual_valid=false` on row 0 (poll landed
-        before the first thermocouple read), which the firmware wire-format
-        carries as a literal `0.0` placeholder — `compute_run_metrics` used
-        to take `rows[0]` unconditionally, so an affected run's start temp
-        silently read as `0.0 °C`, defeating the confound gate on exactly
-        the real captures this section is about. Fixed to use the first
-        genuinely valid row per zone.
+        is internally consistent for some metrics and not others. A genuine
+        defect fixed along the way: real HTTP captures often have
+        `actual_valid=false` on row 0 (poll landed before the first
+        thermocouple read), which the firmware wire-format carries as a
+        literal `0.0` placeholder — `compute_run_metrics` used to take
+        `rows[0]` unconditionally, so an affected run's start temp silently
+        read as `0.0 °C`, defeating the confound gate on exactly the real
+        captures this section is about. Fixed to use the first genuinely
+        valid row per zone. (See the 2026-09-03 note below for the current,
+        6-run version of this metric's ratio table — the numbers originally
+        written here were from the 3-run era and are superseded.)
+
+      **2026-09-03 — adversarial statistical review, re-measured against the
+      checked-in 6-run repeat campaign
+      (`logs/coupling/noise_floor_p7*_run*.jsonl`).** Every number in this
+      subsection above predates that campaign; below is what actually holds
+      today, after a second, unrelated fix landed the same day (see next
+      paragraph) also changed one of these numbers a second time.
+      - **Start temperatures across the 6-run set: 27.60–28.88 °C (1.29 °C
+        range)** — still over the 1.00 °C confound threshold, same
+        conclusion as the 3-run figure above, just re-measured.
+      - **Metric floor reliability ratios (max/min noise floor, across
+        zones/segments, per metric), current artifact:**
+        | metric | ratio | cluster |
+        |---|---|---|
+        | `iae_normalized_whole_c` | 1.91x | reliable |
+        | `ramp_worst_error_c` | 2.57x | reliable |
+        | `iae_normalized_c` | 4.30x | reliable |
+        | `dwell_entry_time_to_peak_s` | 4.73x | reliable |
+        | `ramp_mean_error_c` | 5.49x | reliable |
+        | `dwell_entry_overshoot_peak_c` | 6.55x | UNSTABLE |
+        | `dwell_steady_state_offset_c` | 13.98x | UNSTABLE |
+        | `settle_time_s` | 15.27x | UNSTABLE |
+
+        `ramp_worst_error_c` was previously reported (3-run era, then again
+        on the first 6-run artifact) as ~118x / "cannot resolve anything
+        useful" — that was itself an artifact of a since-fixed defect: the
+        HTTP-capture parser in `log_analysis.py` read `actual_c` while
+        ignoring `actual_valid`, so the firmware's literal `0.0` "no reading
+        yet" placeholder leaked into segment-0 windows as a spurious ~27 °C
+        outlier on 5 of the 6 captures (target was already near 28 °C).
+        Fixed 2026-09-03; the artifact was regenerated from the same 6
+        captures. `ramp_worst_error_c` is now one of the TIGHTEST metrics.
+        `tools/PcTools/config_presets/tuning_recommendations.json` and the
+        `zones_page.html` reliability panel were written from the pre-fix
+        floors and still claim `ramp_worst_error_c` "cannot resolve
+        anything useful" — that is now false and those need regenerating
+        (tracked separately; not `pid_ab_compare.py`'s files).
+        `FLOOR_RELIABILITY_RATIO` stays at 6.0 (was 5.0 in the 3-run era) —
+        the gap between the reliable and unstable clusters above (5.49x to
+        6.55x) is unchanged by the parser fix, since only segment-0 windows
+        were affected.
+      - **The 1.0 °C confound threshold's justification, replaced.** It used
+        to be argued from a single 4.8 °C confounded pair, which bounds
+        nothing. The real argument: `fit_start_temp_sensitivity` against the
+        6-run set gives per-zone sensitivities of roughly 0.009–0.133 °C
+        per °C of start-temp delta; at the 1.0 °C threshold that predicts a
+        0.009–0.133 °C shift in `iae_normalized_whole_c`, against that same
+        metric's measured whole-run floors of 0.077–0.147 °C — the top of
+        the predicted range falls inside the measured floor range. 1.0 °C
+        is roughly where the confound's own predicted contribution reaches
+        the noise floor. The threshold value is UNCHANGED, only its
+        justification.
+      - **Multiplicity.** A `compare` evaluates 48 `(zone, metric, segment)`
+        keys with no correction. The range-floor statistic's own per-key
+        false-positive rate is not 5% — it is roughly 12% at n=6 (Monte
+        Carlo; `pid_ab_compare.summarize_multiplicity`), so a single
+        DISTINGUISHABLE key in a report this size is close to the expected
+        outcome under pure chance, not a finding on its own. `compare`'s
+        text/JSON output now reports the family size, the per-key rate, the
+        probability at least one spurious DISTINGUISHABLE verdict appears
+        (both assuming independence, which overstates the risk, and at the
+        review's estimated effective family size of 10–15 correlated
+        tests), and flags the one pattern treated as potentially
+        actionable: the same metric DISTINGUISHABLE in the same direction
+        across several zones/segments.
+      - **The range floor is not scale-stable across n.** `E[range]/sigma`
+        grows with n (1.69 at n=3, 2.53 at n=6, 3.07 at n=10) — and the
+        checked-in artifact already mixes n (`z0:settle_time_s:1` has n=3,
+        every other key has n=6). Every comparison now carries `floor_n`,
+        and `prediction_interval_floor` computes the scale-stable
+        alternative — `t(.975, n−1) * std_c * sqrt(2)`, the honest "could
+        two new same-config runs differ by this much?" question — reported
+        alongside the range floor as `pi_floor_c` / `pi_distinguishable`.
+        This is wider than the range floor by construction, so switching to
+        it as the verdict floor would lose some currently-DISTINGUISHABLE
+        findings; that is the statistically correct direction but it stays
+        the owner's call — `compare`'s actual verdict still uses the range
+        floor, unchanged.
+      - **Start-temperature unit mismatch.** `noise_floor.py`'s
+        `extract_start_conditions` (used by its own like-for-like check,
+        `LIKE_FOR_LIKE_THRESHOLD_C = 1.0`) computes the MEAN across ALL
+        status channels; `pid_ab_compare.py`'s `_first_valid_start_temp`
+        (used by `CONFOUND_THRESHOLD_C = 1.0`) computes the PER-ZONE
+        first-valid `actual_c`. Both constants are 1.0 °C but gate two
+        different quantities — `pid_ab_compare.py` now prints an explicit
+        note (`START_TEMP_METRIC_NOTE`) on every `compare` so the two are
+        not conflated; unifying the two modules' start-temperature
+        extraction is out of scope for this pass.
 - [x] **One-click revert** to the last accepted gain set (`5b44403`). Snapshots
       Kp/Ki/Kd, K_dc/tau/dead_time and `ki_baseline` before each commit point and
       restores them exactly, `ki_baseline` included — restoring gains while
@@ -2312,9 +2392,7 @@ the two functions that changed, not an end-to-end run.
 Reporting (dashboard only, per the buffer budget below -- **not** added to
 `GET /api/status`, which the plan flagged as having only ~129B headroom):
 `profile_exec_zone_status_t.ramp_dwell_credit_s` (live per-zone banked
-credit, always reported) and `profile_exec_status_t.ramp_dwell_credit_
-applied_s` (top-level, last spend actually applied -- 0.0 unless assist
-was on at that dwell's own entry), both wired into `GET /api/profile_exec`
+credit, always reported), wired into `GET /api/profile_exec`
 (`dashboard_json.c`'s `append_zone_status_json()`, `control_fields==false`
 shape only -- `/api/control` untouched). `dashboard_json.h`'s
 `DASHBOARD_JSON_PROFILE_EXEC_BUF_SIZE` worst-case-per-zone figure was
@@ -2324,6 +2402,15 @@ punctuation), still against the 1024B/zone allowance -- >375B headroom
 remains. `test_dashboard_json.c`'s `fill_worst_case_zone()`/worst-case
 render test were extended with the new field so a future addition is
 caught the same way §7.1/7.4's fields already are.
+
+**Correction (2026-09-03, see §7.3.4): the paragraph above previously also
+claimed `profile_exec_status_t.ramp_dwell_credit_applied_s` (the run-level
+"last spend actually applied" figure) was wired into `GET /api/profile_exec`
+here. It was not -- the field was assigned in
+`profile_executor_status.c:257` and read into the handler's local `st`, but
+`dashboard_http.c`'s `profile_exec_status_get_handler()` never actually
+serialized it into the JSON. §7.3.4 below is the real fix and the real
+buffer arithmetic for it.**
 
 Host-side discrimination check (owner asked whether an equivalent to
 `ramp_assist.py`'s `ScaleSweepDiscriminatesCreditErrorsTests` -- proving
@@ -2390,6 +2477,160 @@ attributable to this change.
 (banner/event-log/LCD) for the credit specifically, and §7.6's real-firing
 validation. `dwell_credit_applied_s`/`ramp_dwell_credit_s` are new
 plumbing those can build on, not a replacement for them.
+
+### 7.3.4 Adversarial opus review of §7.3.3 — five defects fixed (2026-09-03)
+
+An adversarial opus review of the §7.3.3 firmware port (commit `5312e14`)
+found the arithmetic sound but flagged the tests as vacuous on the one
+dimension that matters most (accrual magnitude) and one field as claimed-
+but-not-actually-emitted. All five findings, and what was done about each:
+
+**DEFECT 1 — all 11 tests passed even if the credit were 2x too large.**
+The three tests that touched accrual magnitude
+(`test_dwell_credit_tick_accrues_while_lagging_in_band`,
+`test_dwell_credit_tick_zero_at_band_bottom_max_near_target`, and the old
+`_carries_across_back_to_back_ramps`) only ever asserted loose `>`/`<`
+relations, every one of which a uniformly 2x-scaled (or halved) weight
+still satisfies. Fixed by pinning THREE independently hand-computed
+weights (Arrhenius formula worked out by hand from `cone_table.c`'s
+documented `rate(T) = exp(-Ea/(R*T))`, Ea=300000 J/mol, R=8.314 J/(mol*K),
+T in Kelvin, min-max rescaled across the band) rather than by calling
+`cone_table_heat_work_weight()` and recording what it returns: two
+temperatures within the 613.05-626.1C band (target 626.1C) and one in a
+DIFFERENT band (target 650.0C, band_bottom 624.15C) so a bug confined to
+one cone-pair's band selection cannot hide behind only ever being tested
+against one pair. See `test_profile_executor_prestart.c`'s dwell-credit
+section header comment for the full derivation and
+`test_dwell_credit_tick_accrues_while_lagging_in_band()`/
+`test_dwell_credit_tick_second_temperature_pin_same_band()`/
+`test_dwell_credit_tick_pin_in_a_different_band()` for the pins themselves.
+Mutation evidence: doubling the accrual weight
+(`z->dwell_credit_s += 2.0f * w * dt_s;`) failed all three pins (real
+failure text captured in this task's report), and reverted clean.
+
+**DEFECT 2 — the audit accumulator was a two-writer test of nothing.**
+`zone_runtime_t.dwell_credit_audit_s` and its `w_audit` computation in
+`ramp_assist_dwell_credit_tick()` called the identical
+`cone_table_heat_work_weight()` with the identical arguments as the real
+accrual line, so it could only ever catch a mutation confined to ONE of the
+two duplicate `+=` statements — it was blind by construction to a wrong
+Ea, a wrong band width, a wrong weight function, a wrong dt, or a wrong
+in-band predicate, i.e. every shape DEFECT 1 could actually take. §7.3.3's
+own writeup above (mutation #1) had described this as "the audit-catches-
+a-scaled-regression property" — true of that one specific mutation
+(unweighted `+= dt_s`, which happened to only touch the non-audit line),
+not of the property in general, and this was exactly the kind of overclaim
+the docs had already been corrected for once before. **Decision: deleted**
+(`zone_runtime_t.dwell_credit_audit_s`, the `w_audit` computation, its
+dashboard/API surface — there was none, it was never exposed — and its
+reset in `ramp_assist_dwell_credit_spend()`), rather than kept and
+re-documented. Rationale: its actual protective value (a copy-paste typo
+between two duplicate lines calling the same function) is far smaller than
+the false confidence its name implied, and real protection against DEFECT
+1's actual failure shapes now comes from the independently hand-computed
+pins above, which do not share any code path with the accrual line they
+verify.
+
+**DEFECT 3 — two untested gates, either one silently doubling or shifting
+the credit.** (a) The `ramping_now` gate
+(`profile_executor_ramp_assist.c`'s `if (!ramping_now || !lagging_now)
+return;`) had no negative test — dropping the `!ramping_now ||` half would
+let a zone bank credit DURING a dwell (spent at the NEXT dwell entry,
+crediting one segment's dwell against a different segment's own lag), and
+nothing in the suite would have gone red. (b) The in-band upper bound
+(`z->actual_c < segment_target_c`) had no negative test — dropping it would
+let an OVERSHOOTING zone bank at `cone_table_heat_work_weight()`'s
+documented weight=1.0 clamp for `current_c >= target_c`, i.e. full-rate
+credit for being too hot. Fixed: added
+`test_dwell_credit_tick_not_ramping_earns_nothing()` and
+`test_dwell_credit_tick_at_or_above_target_earns_nothing()`. Mutation
+evidence: removing `!ramping_now ||` failed the first test (real failure
+text captured, reverted); dropping the upper-bound clause from `in_band`
+failed the second test's both assertions (real failure text captured,
+reverted).
+
+**DEFECT 4 — `ramp_dwell_credit_applied_s` was emitted nowhere.** Assigned
+at `profile_executor_status.c:257` into `profile_exec_status_t.
+ramp_dwell_credit_applied_s`, but read by nobody: `dashboard_json.c`,
+`dashboard_http.c`'s `profile_exec_status_get_handler()`, `main_page.html`
+and `telemetry_format.c` all left it out, despite this section (above)
+claiming it was reported run-wide on `/api/profile_exec`. Fixed two ways:
+(1) `dashboard_http.c`'s `profile_exec_status_get_handler()` now serializes
+`"ramp_dwell_credit_applied_s":%.2f,` into the run-level (not per-zone)
+part of the `/api/profile_exec` JSON, sourced from `st.
+ramp_dwell_credit_applied_s`. Buffer arithmetic: the run-level fixed part's
+prior documented worst case was 567B (see `dashboard_http.c`'s own sizing
+comment above `profile_exec_status_get_handler()`); this field's
+key+punctuation (`"ramp_dwell_credit_applied_s":` + trailing comma, 28-char
+key + 2 quotes + colon + comma) is 32B, plus an 8B `"%.2f"` worst-case value
+("-1234.56", same convention as every other float in that format string) =
+40B more, bringing the fixed part to 567+40 = **607B**, still well under
+the 960B fixed allowance (`DASHBOARD_JSON_PROFILE_EXEC_BUF_SIZE = 960 +
+MAX31856_CHANNEL_COUNT * 1024`) that base covers — no `#define` change
+needed. (2) `telemetry_log.c`'s `telemetry_log_task()` now attaches a
+`"dwc=<N>s"` note (max 15 chars + NUL, fits `EVENT_LOG_NOTE_LEN`==16) to
+the `EVENT_CODE_FIRING_DONE` flash event record when
+`ramp_dwell_credit_applied_s > 0.0f`, so a firing whose dwell was
+shortened leaves a permanent, post-hoc-readable artifact in the flash
+event log (`log_http.c`'s `/api/log` route) — not just a live JSON field
+that resets to 0.0 at the next run's start
+(`profile_executor_run.c:355`). Not attached to `EVENT_CODE_FIRING_FAULTED`
+(the fault_guard already carried in `arg` is the more useful number at
+that specific transition; the credit figure stays visible live via
+`/api/profile_exec` and the `last_run` breadcrumb until the next firing
+starts). `GET /api/status` was deliberately NOT touched (per this section's
+own earlier note, it had only ~129B headroom — adding to it risks the
+truncate-into-500 failure mode `dashboard_json.h`'s buffer-sizing comments
+already warn about).
+
+**DEFECT 5 — a test for a state the executor cannot reach.** The old
+`test_dwell_credit_tick_carries_across_back_to_back_ramps` called
+`ramp_assist_dwell_credit_tick()` for two "ramp segments" back to back with
+no `spend()` call in between and asserted credit carried forward. That
+sequence is unreachable in the real executor: `profile_executor.c`'s
+segment-stepping code calls `ramp_assist_dwell_credit_spend()` — which
+unconditionally zeroes `dwell_credit_s` — every time a `ZONE_RAMP` segment
+reaches its `target_c` and sets `dwelling=true`, **even when `dwell_min ==
+0`** for that segment. So credit never actually carries between ramp
+segments in firmware, contradicting `ramp_assist.py`'s simulator, whose
+independent per-zone dwell timers have no such forced intermediate spend.
+**Decision: kept the firmware's real behaviour (credit does NOT carry
+across ramp segments) and deleted the test**, rather than reworking the
+executor's segment-stepping to match the simulator. Reasoning: dwell
+credit exists to pay back time on the segment whose OWN lag it was
+measured against; carrying it into a later, unrelated segment's dwell
+would be a materially different and unreviewed feature, not a bug fix.
+This leaves the simulator and the firmware in disagreement on this one
+point — noted here explicitly per this pass's instruction to decide
+deliberately rather than silently, and left as a known, accepted gap
+between the two rather than something either side needs to change.
+
+**ALSO DOCUMENTED — the min-across-zones spend rule does nothing in the
+realistic single-weak-zone case.** `ramp_assist_dwell_credit_spend()`
+applies the MINIMUM of every active, non-faulted zone's own banked credit
+(the conservative direction — see that function's own doc comment). In the
+common real-world shape where exactly ONE zone lags and every other active
+zone tracks its ramp on-rate, the lagging zone banks real credit (say
+300s) while every healthy zone banks exactly 0 (never lagging, so
+`ramp_assist_dwell_credit_tick()`'s gate never lets it accrue anything) —
+the applied minimum is 0, and the feature shortens nothing. It only acts
+when EVERY active zone lags at once. The pre-existing "uses minimum" test
+only ever exercised 50 vs. 80 (both nonzero), which demonstrates "the
+smaller wins" without showing how often that smaller value is exactly
+zero in practice. `test_dwell_credit_spend_single_weak_zone_applies_nothing()`
+now pins the realistic 0-vs-300 case explicitly. This is defensible as the
+conservative choice (never credits a zone for heat work another zone
+accrued but it did not) but must not be a silent surprise the first time
+an operator notices a firing with one lagging zone got no dwell
+shortening at all — hence this note.
+
+Host tests: all 20 host-test executables built and passed after every fix
+above (`build_host_tests.ps1`, run via bash per this repo's own "PowerShell
+tool can silently no-op" caution), including
+`test_profile_executor_prestart.c` at 740/740 checks (up from the
+pre-review suite's count, six new tests added, one deleted). `build_kilnfw`
+(ESP32-S3 target, via the `kilnctrl` MCP server) verified against these
+changes too — see this task's own report for the exact build output.
 
 ### 7.4 Warning surfaces — NOT STARTED
 

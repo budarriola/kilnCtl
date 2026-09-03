@@ -368,28 +368,27 @@ typedef struct {
      * "z.credit_s = 0.0" unconditional reset ramp_assist.py's DwellStep
      * branch uses regardless of its own apply_dwell_credit flag). */
     float    dwell_credit_s;
-    /* Independent audit accumulator: computed at the IDENTICAL accrual
-     * gate as dwell_credit_s above, on its OWN separate cone_table_heat_
-     * work_weight() call and its own separate `+=` statement -- never
-     * derived from dwell_credit_s. This is the firmware analogue of
-     * ramp_assist.py's credit_reference_heat_s / credit_audit_pct
-     * (PID_EXPANSION_PLAN.md sec 7.3's "DEFECT 1" writeup): in correct
-     * code the two totals track each other to float precision for any
-     * schedule, but a regression confined to the real dwell_credit_s
-     * accrual line leaves this one untouched, so the two diverge by
-     * exactly the size of the regression -- see test_dwell_credit_audit_
-     * tracks_real_accrual() (and its adversarial negative test) in
-     * test_profile_executor_prestart.c. Reset alongside dwell_credit_s.
-     *
-     * SCOPE (do not oversell this): it detects an ACCRUAL/SPEND
-     * IMPLEMENTATION SLIP between the two `+=` statements ONLY -- both
-     * share the same weight function, the same band, the same target and
-     * the same accrual gate, so it is blind to any error common to both
-     * (wrong Ea, wrong band width, wrong weight function). See the SCOPE
-     * comment on the `+=` in ramp_assist_dwell_credit_tick()
-     * (profile_executor_ramp_assist.c) for the two mutations that proved
-     * this on the ramp_assist.py original this ports. */
-    float    dwell_credit_audit_s;
+    /* REMOVED (2026-09-03, opus review of commit 5312e14, "DEFECT 2"): this
+     * field used to be a second "audit" accumulator, computed at the same
+     * gate as dwell_credit_s above via its own separate cone_table_heat_
+     * work_weight() call and its own separate `+=`. It was deleted rather
+     * than kept, deliberately: both `+=` statements shared the same weight
+     * function, the same band, the same target and the same accrual gate,
+     * so it could only ever catch a copy-paste slip confined to ONE of the
+     * two duplicate lines -- it was blind by construction to a wrong Ea, a
+     * wrong band width, a wrong weight function, a wrong dt or a wrong
+     * in-band predicate, i.e. every real shape DEFECT 1 (the 2x-too-large
+     * credit) could take. PID_EXPANSION_PLAN.md sec 7.3.3 had described it
+     * as "the audit-catches-a-scaled-regression property" for exactly one
+     * mutation (an unweighted accrual line) that happened to touch only the
+     * non-audit `+=` -- true of that one mutation, not of the property in
+     * general, and indistinguishable from real protection without reading
+     * this comment. Real protection against DEFECT 1 now comes from
+     * test_profile_executor_prestart.c's independently hand-computed
+     * weight pins (Arrhenius formula worked out by hand against the
+     * documented Ea/R constants, NOT by calling cone_table_heat_work_
+     * weight() and recording what it returns) -- see
+     * test_dwell_credit_tick_accrues_while_lagging_in_band()'s comment. */
 } zone_runtime_t;
 
 /* TODO relay/IO segments: per-segment runtime tracking, one slot per
@@ -710,7 +709,7 @@ void ramp_assist_dwell_credit_tick(zone_runtime_t *z, bool ramping_now, bool lag
 
 /* Computes the seconds to actually shorten a fresh dwell's timer by, given
  * every active/non-faulted zone's currently-banked dwell_credit_s, and
- * resets EVERY active zone's dwell_credit_s (and dwell_credit_audit_s) to
+ * resets EVERY active zone's dwell_credit_s to
  * 0.0f as a side effect -- "spent once", whether or not the spend this call
  * returns is ever applied (ramp_assist.py's DwellStep branch does the same
  * unconditional `z.credit_s = 0.0` regardless of apply_dwell_credit). When
