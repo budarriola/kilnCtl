@@ -683,6 +683,17 @@ static bool parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_count,
     z->tuning_raw_rise_c = current_z->tuning_raw_rise_c;
     z->tuning_rise_inf_c = current_z->tuning_rise_inf_c;
     z->tuning_seq = current_z->tuning_seq;
+    /* ZONES_CFG_VERSION 13->14's adaptive_tune_enabled, carried through for
+     * exactly the same reason as the tuning_* block just above and for the
+     * same reason coupling_diag_k_dc/fuzzy_strength_pct take the
+     * omit-preserves branch below: it has NO z%u_ POST key at all (its only
+     * writer is adaptive_tune.c via zones_config_set_adaptive_tune_enabled()),
+     * and this path builds z field-by-field out of a caller-zeroed scratch
+     * struct. Without this line every whole-page save from the zones page
+     * silently cleared an operator's adaptive-tune opt-in for every in-range
+     * zone and persisted the clear to NVS -- a reset-one-side defect, the
+     * enable side having no idea the save happened. */
+    z->adaptive_tune_enabled = current_z->adaptive_tune_enabled;
     if (fabsf(z->pid_kp - current_z->pid_kp) > 0.0001f || fabsf(z->pid_ki - current_z->pid_ki) > 0.0001f ||
         fabsf(z->pid_kd - current_z->pid_kd) > 0.0001f) {
         z->tuning_valid = 0;

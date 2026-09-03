@@ -2887,6 +2887,11 @@ static void test_post_omitting_new_fields_preserves_stored_values(void)
      * survive the same "omit preserves" rule as the four fields already
      * covered by this test. */
     current.coupling_diag_k_dc = 18.75f;
+    /* ZONES_CFG_VERSION 13->14: the operator's adaptive-tune opt-in. It has
+     * NO z%u_ POST key at all (adaptive_tune.c is its only writer), so this
+     * is the strongest form of "omitted": a client CANNOT send it even if it
+     * wanted to, and a whole-page save must therefore never clear it. */
+    current.adaptive_tune_enabled = 1;
 
     zone_cfg_t out;
     memset(&out, 0, sizeof(out));
@@ -2906,6 +2911,10 @@ static void test_post_omitting_new_fields_preserves_stored_values(void)
     TEST_CHECK_NEAR(out.coupling_diag_k_dc, 18.75f, 1e-6,
                     "coupling_diag_k_dc must be PRESERVED, not zeroed, when omitted -- it is a "
                     "measured quantity, same as fuzzy_strength_pct/coupling_coeff above");
+    TEST_CHECK(out.adaptive_tune_enabled == 1,
+              "adaptive_tune_enabled must be PRESERVED by a whole-page save -- it has no POST key "
+              "at all, so a save that clears it silently disables adaptive tuning behind the "
+              "operator's back and persists that to NVS");
 }
 
 // End-to-end round trip through the real handlers: a POST carrying real
