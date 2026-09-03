@@ -14,6 +14,35 @@
     ],
     "extrapolation_boundary_c": 80.0
   },
+  "noise_floor": {
+    "rig": "bench fixture (~60C peak firing) -- not a claim about a full-size kiln at cone temperature",
+    "source": "tools/PcTools/config_presets/noise_floor.json",
+    "n_repeats": 6,
+    "like_for_like": false,
+    "like_for_like_threshold_c": 1.0,
+    "start_temp_c_range": 1.29,
+    "warning": "The six repeat runs behind this floor started 1.29C apart, exceeding the tool's own 1.0C like-for-like threshold -- these were NOT a like-for-like repeat set, and the floor below may be inflated by start-temperature drift (cold-junction self-heating) rather than measuring controller noise alone.",
+    "stat_caveat": "Each floor is the max-minus-min RANGE across 6 runs. That statistic grows with sample size, so it is not a fixed property of the kiln and is not directly comparable to a floor built from a different number of runs.",
+    "transfer_caveat": "Measured on the reference bench rig only, at bench temperatures. It does not transfer to your own kiln, geometry, or firing temperature -- your own repeat campaign (pid_ab_compare.py / noise_floor.py) is what would give you your own floor.",
+    "metrics": {
+      "iae_normalized_whole_c": { "reliable": true, "min_c": 0.112, "max_c": 0.167, "unit": "C",
+        "note": "stable across zones (1.5x spread) -- can resolve differences of roughly 0.2C and up" },
+      "iae_normalized_c": { "reliable": true, "min_c": 0.067, "max_c": 0.299, "unit": "C",
+        "note": "4.5x spread across zones/segments but consistently sub-0.3C" },
+      "dwell_entry_time_to_peak_s": { "reliable": true, "min_c": 11, "max_c": 52, "unit": "s",
+        "note": "4.7x spread but bounded well under a minute" },
+      "dwell_entry_overshoot_peak_c": { "reliable": false, "min_c": 0.110, "max_c": 0.720, "unit": "C",
+        "note": "6.5x spread -- floor too unstable to support a conclusion" },
+      "dwell_steady_state_offset_c": { "reliable": false, "min_c": 0.060, "max_c": 0.840, "unit": "C",
+        "note": "14.0x spread -- floor too unstable to support a conclusion" },
+      "ramp_mean_error_c": { "reliable": false, "min_c": 0.094, "max_c": 0.514, "unit": "C",
+        "note": "5.5x spread -- floor too unstable to support a conclusion" },
+      "settle_time_s": { "reliable": false, "min_c": 11, "max_c": 168, "unit": "s",
+        "note": "15.3x spread -- floor too unstable to support a conclusion" },
+      "ramp_worst_error_c": { "reliable": false, "min_c": 0.230, "max_c": 27.110, "unit": "C",
+        "note": "117.9x spread -- cannot resolve anything useful; do not compare tunings on this metric" }
+    }
+  },
   "recommendations": [
     {
       "peak_temp_c_max": 60.0,

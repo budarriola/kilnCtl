@@ -389,6 +389,26 @@ point and neither is picked.</p>
   <div id="tuningRecResult"><p class="empty">Enter a peak temperature above and click Recommend.</p></div>
 </div>
 
+<h3>How much can a small difference actually tell you?</h3>
+<!-- REAL MEASUREMENT 2026-09-03: a six-firing repeat campaign on the bench
+     kiln (same preset, same profile) gives an actual measured noise floor
+     per metric -- see tools/PcTools/config_presets/noise_floor.json, folded
+     into the same tuning_recommendations.json artifact above as
+     `noise_floor` (schema-additive: schema_version stays 1, older
+     consumers/pages that don't know this field simply never read it). The
+     recommendation panel above answers "which method to start from"; this
+     one answers "given the number the board just reported, is that
+     difference even real, or is it noise this rig itself produces
+     firing-to-firing". Same idiom as the panel above on purpose (bracket
+     badge + hint paragraphs, var(--ok)/var(--bad), no new visual language) --
+     see noiseFloorUsable()/renderNoiseFloorHtml() below, and
+     test/test_noise_floor_panel.js. -->
+<p class="hint">This is a measured bench result, not simulator output: six back-to-back
+firings of the exact same tuning on the reference bench rig, showing how much each metric
+moved between runs that should have agreed. A difference smaller than a metric's floor is
+not attributable to whatever you are comparing.</p>
+<div class="card" id="noiseFloorPanel"><p class="empty">Loading&hellip;</p></div>
+
 <h3>Step test (start here)</h3>
 <p>Runs an open-loop step test on one zone: holds heat off to settle, then
 applies a fixed duty and records the response until it looks settled or 4
@@ -2073,11 +2093,79 @@ function tuningRecStatusClass(confidence) {
 }
 // TUNING_REC_LOOKUP_END
 
+// -----------------------------------------------------------------------
+// Measured noise-floor panel (2026-09-03). Reads the same artifact's
+// optional `noise_floor` field (see tuning_recommendations.json's own
+// comment on it) -- absent entirely on an artifact built before this field
+// existed, or on the fallback placeholder, in which case this degrades to
+// "no data" exactly like the recommendation panel above does for its own
+// missing/unusable cases. Pure (no DOM) between the NOISE_FLOOR_START/END
+// markers so test/test_noise_floor_panel.js can exercise it directly --
+// same extraction convention as TUNING_REC_LOOKUP above.
+// -----------------------------------------------------------------------
+// NOISE_FLOOR_START
+function noiseFloorUsable(artifact) {
+  return !!(artifact && artifact.noise_floor && typeof artifact.noise_floor === 'object' &&
+    artifact.noise_floor.metrics && typeof artifact.noise_floor.metrics === 'object');
+}
+
+// Looks up one metric's floor row. Returns null when the artifact is
+// unusable OR the metric simply has no entry (e.g. a metric this page
+// knows about but the campaign never measured) -- callers must treat both
+// the same way: no claim, not an error.
+function noiseFloorMetricRow(artifact, metric) {
+  if (!noiseFloorUsable(artifact)) return null;
+  var m = artifact.noise_floor.metrics[metric];
+  if (!m || typeof m !== 'object' || typeof m.min_c !== 'number' || typeof m.max_c !== 'number') return null;
+  return m;
+}
+
+function renderNoiseFloorHtml(artifact) {
+  if (!noiseFloorUsable(artifact)) {
+    return '<p class="empty">No measured noise-floor data on this board yet (evidence artifact not built in, ' +
+      'older than this field, or its schema is newer than this page understands).</p>';
+  }
+  var nf = artifact.noise_floor;
+  var html = '';
+  html += '<p class="hint">Measured on the <b>' + window.kcEscapeHtml(nf.rig || 'reference bench rig') + '</b>, n=' +
+    (typeof nf.n_repeats === 'number' ? nf.n_repeats : '?') + ' repeat firings. ' +
+    window.kcEscapeHtml(nf.transfer_caveat || 'This does not transfer to your own kiln -- run your own repeat campaign for your own floor.') +
+    '</p>';
+  if (nf.like_for_like === false && nf.warning) {
+    html += '<p class="hint" style="color:var(--warn);">' + window.kcEscapeHtml(nf.warning) + '</p>';
+  }
+  if (nf.stat_caveat) {
+    html += '<p class="hint">' + window.kcEscapeHtml(nf.stat_caveat) + '</p>';
+  }
+  var names = Object.keys(nf.metrics).sort();
+  names.forEach(function (name) {
+    var m = nf.metrics[name];
+    if (!m || typeof m.min_c !== 'number' || typeof m.max_c !== 'number') return;
+    var cls = m.reliable ? 'ok' : 'bad';
+    var badge = m.reliable ? 'RESOLVES' : 'UNRELIABLE';
+    var unit = (typeof m.unit === 'string' && m.unit) ? m.unit : 'C';
+    html += '<p><span style="color:var(--' + cls + ');font-weight:bold;">[' + badge + ']</span> <b>' +
+      window.kcEscapeHtml(name) + '</b>: measured floor ' + m.min_c + '–' + m.max_c + '°' + unit +
+      (m.reliable
+        ? ' -- a smaller difference is likely real.'
+        : ' -- floor too large/unstable here; do not read a small difference on this metric as real.') +
+      (m.note ? ' <span class="hint">(' + window.kcEscapeHtml(m.note) + ')</span>' : '') + '</p>';
+  });
+  return html;
+}
+// NOISE_FLOOR_END
+
 var tuningRecArtifact = null;
 fetch('/api/tuning_recommendations').then(function (r) {
   if (!r.ok) throw new Error('http ' + r.status);
   return r.json();
-}).then(function (data) { tuningRecArtifact = data; }).catch(function () { tuningRecArtifact = null; });
+}).then(function (data) {
+  tuningRecArtifact = data;
+  document.getElementById('noiseFloorPanel').innerHTML = renderNoiseFloorHtml(tuningRecArtifact);
+}).catch(function () {
+  tuningRecArtifact = null;
+  document.getElementById('noiseFloorPanel').innerHTML = renderNoiseFloorHtml(null);
+});
 
 function renderTuningRecommendation() {
   var el = document.getElementById('tuningRecResult');
