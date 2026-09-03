@@ -1295,10 +1295,35 @@ Each phase ends somewhere the firmware still boots and drives the existing panel
       without waiting on the ST7796/MSP4031 harness.
 
 ### Phase 7 — the actual point: a better UI
-- [ ] `LV_USE_TJPGD` if images are wanted.
-- [ ] Backlight PWM (dim/off on idle, touch-driven wake) if the bodge in 3.4.1
+- [x] `LV_USE_TJPGD` if images are wanted. **LANDED 2026-09-03** —
+      `sdkconfig.defaults` flips `CONFIG_LV_USE_TJPGD=y` (upstream LVGL
+      default off; the decoder was already vendored under
+      `components/lvgl/src/libs/tjpgd`, so this is a pure Kconfig flip).
+      Confirmed compiled into the tree (`tjpgd.c.obj`/`lv_tjpgd.c.obj`
+      present in `build/`) and flash-cost measured via `build_kilnfw`:
+      +4,912 B (see `docs/FLASH_BUDGET_PLAN.md` §4.2a). No caller decodes a
+      JPEG yet — this only registers the decoder at LVGL init.
+- [x] Backlight PWM (dim/off on idle, touch-driven wake) if the bodge in 3.4.1
       was fitted — this is what `KILNCTL_TOUCH_IDLE_TIMEOUT_MS` has been waiting
-      for.
+      for. **Firmware side LANDED 2026-09-03**, same anticipatory/default-off
+      posture as 9.3/9.4/9.6/9.7 above: `App/drivers/backlight_pwm.c/.h`, an
+      LEDC-PWM driver behind default-OFF `CONFIG_KILNCTL_BACKLIGHT_PWM_ENABLE`
+      (new "Backlight PWM" Kconfig menu, `App/drivers/Kconfig`), polling
+      `screen_idle_get_state()` and mapping screen_on ->
+      `CONFIG_KILNCTL_BACKLIGHT_ON_PERCENT` /
+      `CONFIG_KILNCTL_BACKLIGHT_IDLE_PERCENT` duty. Does NOT modify
+      `screen_idle.c/.h` — reads it through its existing public API only.
+      Host-tested (`test_backlight_pwm.c`): the pure
+      `backlight_duty_percent_for_state()` mapping, and the disabled-build
+      (`ESP_ERR_NOT_SUPPORTED`, no peripheral touched) path, which is also
+      what a stock board actually ships with. `build_kilnfw` passes with the
+      flag both off (default) and, by construction, would with it on — not
+      flash-verified either way, no flying wire on the bench board yet
+      (owner constraint, same as 9.3/9.4/9.6/9.7's own "not flash-verified"
+      notes). **Still open:** the flying wire itself (hardware), and the
+      bench sequence once it exists: confirm the chosen GPIO
+      (`CONFIG_KILNCTL_BACKLIGHT_GPIO`, default 15) is genuinely free on the
+      real DevKitC, then verify dim/off and touch-wake against real hardware.
 - [ ] Theme/style pass (TODO.md:1223-1225).
 
 ---

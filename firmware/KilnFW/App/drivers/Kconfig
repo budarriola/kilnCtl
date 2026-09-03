@@ -425,6 +425,78 @@ menu "KilnCtrl Hardware Configuration"
             depends on KILNCTL_DISPLAY_DC_RESET_DIRECT_GPIO
     endmenu
 
+    menu "Backlight PWM (flying-wire bodge, DISPLAY_ST7796_PLAN.md 3.4.1)"
+        config KILNCTL_BACKLIGHT_PWM_ENABLE
+            bool "Drive the panel backlight via LEDC PWM"
+            default n
+            help
+                DISPLAY_ST7796_PLAN.md 3.4.1: neither panel this board has
+                ever run (ILI9488 or the anticipated ST7796/MSP4031 module)
+                has a backlight control line reaching the main board -- the
+                module's backlight pin (module pin 8) is left open, so the
+                backlight is permanently on and screen_idle.c can only ever
+                paint the frame black, never actually dim anything
+                (screen_idle.h/.c explain why at length). The plan's fix is
+                an 11th flying wire from a spare ESP32 GPIO (15 or 16
+                preferred) straight to that pin, through the module's own
+                3.3V push-pull / 10k-pulled-up MOSFET gate.
+
+                That wire is NOT fitted on the bench board as of this
+                writing. With this OFF (the default), backlight_pwm.c's
+                init/start calls are no-ops that return
+                ESP_ERR_NOT_SUPPORTED and never touch a GPIO or the LEDC
+                peripheral -- an unmodified board's boot is bit-for-bit
+                unaffected by this option existing. Turn it on only after
+                the flying wire is soldered and KILNCTL_BACKLIGHT_GPIO below
+                is set to whichever pin it actually landed on.
+
+                When on, backlight_pwm.c polls screen_idle_get_state() (the
+                same screen_on flag TOUCH_CMD_GET_STATE already reports) and
+                drives LEDC duty to KILNCTL_BACKLIGHT_ON_PERCENT while the
+                screen is on, KILNCTL_BACKLIGHT_IDLE_PERCENT once
+                CONFIG_KILNCTL_TOUCH_IDLE_TIMEOUT_MS has elapsed with no
+                touch -- the timeout that Kconfig help text has said "closes
+                to a real blank" was still waiting on this option since
+                2026-08-18. A touch (real or MCP-injected) waking the screen
+                restores ON-percent on the very next poll, same edge
+                screen_idle_mark_active() already reacts to.
+
+                Not flash-verified -- there is no flying wire on the bench
+                board to drive (same posture as 9.3/9.4/9.6/9.7 in
+                DISPLAY_ST7796_PLAN.md: written and host-tested ahead of the
+                hardware, not bench-confirmed).
+
+        config KILNCTL_BACKLIGHT_GPIO
+            int "Backlight PWM GPIO (flying wire target)"
+            default 15
+            range 0 48
+            depends on KILNCTL_BACKLIGHT_PWM_ENABLE
+            help
+                Where the flying wire from 3.4.1 actually lands. The plan
+                prefers GPIO15 or GPIO16 as "likely free" on the DevKitC,
+                pending confirmation against the real module's octal-PSRAM
+                pin allocation (DISPLAY_ST7796_PLAN.md section 4's open
+                decision item) -- confirm before wiring, this default is a
+                starting guess, not a verified-free pin.
+
+        config KILNCTL_BACKLIGHT_ON_PERCENT
+            int "Backlight duty while the screen is on (%)"
+            default 100
+            range 1 100
+            depends on KILNCTL_BACKLIGHT_PWM_ENABLE
+
+        config KILNCTL_BACKLIGHT_IDLE_PERCENT
+            int "Backlight duty after the idle timeout (%, 0 = fully off)"
+            default 0
+            range 0 100
+            depends on KILNCTL_BACKLIGHT_PWM_ENABLE
+            help
+                Applied once CONFIG_KILNCTL_TOUCH_IDLE_TIMEOUT_MS has
+                elapsed with no real or injected touch. 0 is a genuine
+                backlight-off, unlike screen_idle.c's paint-it-black
+                fallback -- the actual point of fitting the flying wire.
+    endmenu
+
     menu "NS2009 Touch Controller (on the TFT35 SPI panel, J2)"
         config KILNCTL_TOUCH_IDLE_TIMEOUT_MS
             int "Screen auto-blank timeout (ms, 0 = disabled)"

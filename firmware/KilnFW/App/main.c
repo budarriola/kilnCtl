@@ -38,6 +38,7 @@
 #include "NS2009.h"
 #include "SX1509.h"
 #include "screen_idle.h"
+#include "backlight_pwm.h"
 #include "autotune_engine.h"
 #include "i2c_scan.h"
 #include "kiln_io.h"
@@ -992,6 +993,23 @@ void app_main(void)
         } else {
             screen_idle_ready = true;
         }
+    }
+
+    // --- Backlight PWM (DISPLAY_ST7796_PLAN.md 3.4.1) -----------------------
+    // Default-OFF (CONFIG_KILNCTL_BACKLIGHT_PWM_ENABLE) -- no-op with the
+    // flying wire not fitted. Reads screen_idle's screen_on flag; needs
+    // screen_idle_ready, not just display_ready.
+    static backlight_pwm_t backlight;
+    if (screen_idle_ready) {
+        esp_err_t bl_err = backlight_pwm_init(&backlight, &screen_idle);
+        if (bl_err == ESP_OK) {
+            if (backlight_pwm_start(&backlight) != ESP_OK) {
+                ESP_LOGE(TAG, "Failed to start backlight_pwm task -- backlight stays as bring-up left it");
+            }
+        } else if (bl_err != ESP_ERR_NOT_SUPPORTED) {
+            ESP_LOGE(TAG, "backlight_pwm_init failed: %s -- backlight stays as bring-up left it",
+                     esp_err_to_name(bl_err));
+        } /* ESP_ERR_NOT_SUPPORTED: flag off, expected, nothing to log */
     }
 
     heap_stage("display+touch");

@@ -96,6 +96,17 @@ CONFIG_LV_USE_CUSTOM_MALLOC=y
 # see TODO.md 10.9's checklist status note).
 CONFIG_LV_USE_QRCODE=y
 
+# CONFIG_LV_USE_TJPGD: DISPLAY_ST7796_PLAN.md Phase 7 ("LV_USE_TJPGD if
+# images are wanted"). Off in upstream LVGL by default; the decoder itself
+# is already vendored (components/lvgl's bundled tjpgd), so this is a pure
+# Kconfig flip, no new source. Flash cost measured 2026-09-03 via
+# build_kilnfw, same build tree, only this flag toggled: KilnCtrl.bin
+# 0x1e3f90 bytes (off) -> 0x1e52c0 bytes (on), +4,912 bytes (~4.8 KB, +0.25%
+# of the 0x300000 factory app partition). No caller decodes a JPEG yet --
+# lv_img/lv_tjpgd's own decoder registration runs at LVGL init regardless,
+# so the cost lands whether or not any page ever loads a .jpg.
+CONFIG_LV_USE_TJPGD=y
+
 # CONFIG_ESP_MAIN_TASK_STACK_SIZE: found the hard way 2026-08-19, on real
 # hardware. Board booted, printed ILI9488's "kilnCtl ready" boot banner to
 # the panel (App/drivers/ILI9488.c), then hung there forever -- looked from

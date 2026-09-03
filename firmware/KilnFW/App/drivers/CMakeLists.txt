@@ -180,6 +180,7 @@ idf_component_register(SRCS "MAX31856.c"
                        # board that exists today, which is still the NS2009.
                        "FT6336U.c"
                        "screen_idle.c"
+                       "backlight_pwm.c"
                        "safety_link.c"
                        "safety_link_frame.c"
                        "safety_link_frames.c"
@@ -316,7 +317,7 @@ idf_component_register(SRCS "MAX31856.c"
                        PRIV_INCLUDE_DIRS "${CMAKE_CURRENT_BINARY_DIR}"
                        EMBED_TXTFILES ${KILNCTL_GZIP_ASSET_FILES} "${kilnctl_tuning_rec_out}"
                        REQUIRES esp_driver_i2c esp_driver_spi esp_driver_uart esp_driver_gpio
-                                esp_driver_tsens
+                                esp_driver_tsens esp_driver_ledc
                                 esp_wifi esp_netif esp_event nvs_flash esp_http_server esp_timer
                                 esp_partition kilnlink mbedtls lwip app_update esp_rom lvgl mdns
                                 esp_hw_support esp_hal_wdt

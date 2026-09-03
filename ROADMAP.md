@@ -549,9 +549,15 @@ soldering session.
 - [ ] **HW change: LCD backlight control.** No GPIO/PWM path exists on the
       current panel. `DISPLAY_ST7796_PLAN.md` §3.4.1 scopes the fix as one
       flying wire (GPIO15 or GPIO16 to module pin 8) riding along with the
-      second-panel harness, buying dim/off on idle plus PWM brightness — not
-      yet built, and gated on the STOP-block 5V I2C hazard measurement in
-      that plan's §4 before any harness is connected
+      second-panel harness, buying dim/off on idle plus PWM brightness — the
+      wire itself is still **not fitted**, and gated on the STOP-block 5V I2C
+      hazard measurement in that plan's §4 before any harness is connected.
+      The firmware side (`App/drivers/backlight_pwm.c/.h`, LEDC PWM driven
+      off `screen_idle_get_state()`) landed 2026-09-03, host-tested, behind
+      default-OFF `CONFIG_KILNCTL_BACKLIGHT_PWM_ENABLE` — same
+      anticipatory/default-off posture as `DISPLAY_ST7796_PLAN.md`'s
+      9.3/9.4/9.6/9.7. Not flash-verified; there is no flying wire on the
+      bench board yet.
 - [~] **Second LCD panel (ST7796/MSP4031), auto-detection, display SPI
       async/DMA.** `firmware/KilnFW/docs/DISPLAY_ST7796_PLAN.md`, sequenced
       Phase 0 (bench facts/hazard measurement) through Phase 7 (UI). Phases 1

@@ -336,6 +336,31 @@ partition shape; this section is a doc-only baseline capture using existing
 tooling (`attribute_str_pool.py`, `esp_idf_size`), per the task's instruction
 to reuse rather than write new.
 
+### 4.2a `CONFIG_LV_USE_TJPGD` cost — measured 2026-09-03
+
+DISPLAY_ST7796_PLAN.md Phase 7 ("`LV_USE_TJPGD` if images are wanted").
+Flipped on in `sdkconfig.defaults` (default OFF in upstream LVGL); the
+decoder itself is already vendored under `components/lvgl/src/libs/tjpgd`,
+so this costs nothing to add beyond the Kconfig flip. Measured with
+`build_kilnfw`, same tree, only the flag toggled:
+
+```
+KilnCtrl.bin, CONFIG_LV_USE_TJPGD off   0x1e3f90 (1,982,352 B)
+KilnCtrl.bin, CONFIG_LV_USE_TJPGD on    0x1e52c0 (1,987,264 B)
+delta                                   +4,912 B  (+0.25% of the 3,145,728 B app slot)
+```
+
+Confirmed the decoder actually compiled into the tree, not just accepted by
+Kconfig: `build/esp-idf/lvgl/CMakeFiles/__idf_lvgl.dir/src/libs/tjpgd/
+tjpgd.c.obj` and `lv_tjpgd.c.obj` are present after the ON build. No caller
+decodes a JPEG yet (no page uses `lv_image`/`lv_img` with a `.jpg` source) --
+this only registers the decoder at LVGL init, so the ~4.9 KB is paid whether
+or not anything ever calls it. Negligible next to §2's ~38% free headroom on
+the app slot; not worth gating behind its own flag the way the panel-facing
+Kconfig options in `App/drivers/Kconfig` are, since it has no wire-behavior
+or bring-up risk -- it is pure decoder-table/code, inert until an image path
+calls into it.
+
 ### 4.3 A partition-map check
 
 The arithmetic in section 2 was done by hand from the CSV comments. That is
