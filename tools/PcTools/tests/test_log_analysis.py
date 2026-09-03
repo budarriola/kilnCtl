@@ -724,3 +724,51 @@ def test_parse_profile_exec_uart_capture_equivalent_to_http_capture(tmp_path):
     # The one field that is NOT equivalent, and why.
     assert http_row.segment_count == 5
     assert uart_row.segment_count == 0
+
+
+def test_parse_ktel_fire_line_refuses_a_truncated_zone_tail():
+    """Opus review round 3 (2026-09-02): telemetry_format.c's own header
+    comment records that a firing with enough active zones overruns
+    UART_LOG_TEXT_MAX (uart_log_bridge.c, 252B) and truncates. On the PC side
+    that cut lands mid-zone-run, and before this guard the severed zone simply
+    vanished: the parser returned a PollRow that looked like a complete
+    2-zone reading of a 3-zone firing, and every downstream stat (IAE, settle
+    time, per-zone comparison) was silently computed over the wrong zone set.
+    A missing sample is recoverable; a short one that looks complete is not.
+    """
+    full = (
+        "KTEL1 FIRE t=130 st=1 pid=3 seg=1 dwell=1 tgt=855.00 "
+        "z0_c=830.00 z0_v=1 z0_e=-25.00 z0_d=0.690 z0_fm=1 z0_fi=0 "
+        "z1_c=819.00 z1_v=1 z1_e=-36.00 z1_d=0.500 z1_fm=0 z1_fi=0 "
+        "z2_c=812.00 z2_v=1 z2_e=-43.00 z2_d=0.400 z2_fm=1 z2_fi=0"
+    )
+    complete = la.parse_ktel_fire_line(full)
+    assert complete is not None and set(complete.zones) == {0, 1, 2}
+
+    # Cut anywhere inside z2's run -- z2 started (z2_c= is present) but never
+    # finished, so the whole line must be refused, not silently downgraded.
+    # LIMITATION, stated so it is not mistaken for coverage: a cut landing
+    # BEFORE the severed zone's "z<i>_c=" leaves a line that is
+    # indistinguishable from a genuine shorter-zone-count firing, and this
+    # guard cannot catch it. It catches the mid-run case, which is the large
+    # majority of a fixed-width truncation across a fixed-width zone run.
+    for cut in (5, 20, 30, 40):
+        truncated = full[:-cut]
+        assert "z2_c=" in truncated, "this case must still CLAIM z2, or it proves nothing"
+        assert la.parse_ktel_fire_line(truncated) is None, f"truncation at -{cut} must be refused"
+
+
+def test_parse_profile_exec_uart_capture_drops_truncated_lines(tmp_path):
+    p = tmp_path / "truncated.log"
+    good = (
+        "08:00:00.000 I (1) KTEL: KTEL1 FIRE t=10 st=1 pid=0 seg=0 dwell=0 tgt=100.0 "
+        "z0_c=90.0 z0_v=1 z0_e=-10.0 z0_d=0.5 z0_fm=0 z0_fi=0\n"
+    )
+    cut = (
+        "08:00:05.000 I (2) KTEL: KTEL1 FIRE t=15 st=1 pid=0 seg=0 dwell=0 tgt=100.0 "
+        "z0_c=91.0 z0_v=1 z0_e=-9.0 z0_d=0.5 z0_fm=0 z0_fi=0 z1_c=88.0 z1_v=1 z1_e=-12.0 z1_d=0\n"
+    )
+    p.write_text(good + cut, encoding="utf-8")
+    rows = la.parse_profile_exec_uart_capture(str(p))
+    assert len(rows) == 1
+    assert rows[0].elapsed_s == pytest.approx(10.0)

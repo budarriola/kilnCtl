@@ -223,6 +223,10 @@ _KTEL_ZONE_RE = re.compile(
     r"z(?P<zi>\d+)_c=(?P<c>-?[\d.]+)\s+z\1_v=(?P<v>\d+)\s+z\1_e=-?[\d.]+\s+"
     r"z\1_d=(?P<d>-?[\d.]+)\s+z\1_fm=(?P<fm>\d+)\s+z\1_fi=(?P<fi>\d+)"
 )
+#: Just the FIRST key of a zone's run. Used only to count how many zones a
+#: FIRE line CLAIMS, so a zone whose run started but did not fully decode can
+#: be detected -- see parse_ktel_fire_line()'s truncation guard.
+_KTEL_ZONE_START_RE = re.compile(r"z(\d+)_c=")
 
 #: profile_exec_state_t (profile_executor.h) enum order, matching
 #: dashboard_http.c's own profile_exec_state_str() string mapping exactly --
@@ -254,6 +258,11 @@ def parse_ktel_fire_line(text: str) -> Optional[PollRow]:
     telemetry_format.c: ``float actual = z->actual_valid ? z->actual_c :
     0.0f;``) -- this function undoes that placeholder rather than passing
     it through as a real temperature.
+
+    Returns ``None`` for a FIRE line whose zone tail is TRUNCATED (a zone's
+    ``z<i>_c=`` run starts but does not decode to a complete zone) -- see the
+    guard at the end of this function. A short PollRow that looks complete is
+    worse than a missing sample.
     """
     m = _KTEL_FIRE_RE.search(text)
     if m is None:
@@ -268,6 +277,27 @@ def parse_ktel_fire_line(text: str) -> Optional[PollRow]:
             ff_hold_used_matrix=zm.group("fm") == "1",
             ff_hold_infeasible=zm.group("fi") == "1",
         )
+    # REVIEW 2026-09-02 (Opus round 3): refuse a FIRE line whose zone tail did
+    # not decode completely, rather than returning a PollRow that is missing
+    # zones but looks complete. Reachable, not hypothetical:
+    # telemetry_format.c's own header comment records that a firing with
+    # enough active zones overruns UART_LOG_TEXT_MAX (uart_log_bridge.c,
+    # 252B) and "truncates SAFELY ... rather than losing zones outright" --
+    # true on the firmware side, but the cut lands mid-zone-run on THIS side,
+    # where _KTEL_ZONE_RE simply fails to match the severed zone and it
+    # vanishes with no signal. Every stat downstream (IAE, settle time,
+    # per-zone comparisons) would then be computed over fewer zones than the
+    # firing actually ran. Same rule coupling_pair_log.load_pair_run()
+    # already applies to its own join: "a PollRow with silently-missing peer
+    # zones would masquerade as a complete reading to every downstream
+    # consumer, which never checks for that" -- so drop the row rather than
+    # hand back a short one. Counting zone STARTS (z<i>_c=) instead of
+    # assuming a fixed zone count also catches format drift: if a future
+    # firmware reorders or inserts a per-zone key, _KTEL_ZONE_RE stops
+    # matching and this refuses instead of quietly yielding zero-zone rows.
+    claimed_zones = {int(z) for z in _KTEL_ZONE_START_RE.findall(m.group("zones"))}
+    if claimed_zones != set(zones):
+        return None
     return PollRow(
         wall_time="",  # filled in by the caller, which has the capture-line timestamp
         elapsed_s=float(m.group("t")),
