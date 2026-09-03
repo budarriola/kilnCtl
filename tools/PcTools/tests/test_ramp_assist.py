@@ -210,5 +210,67 @@ class DwellCreditGateTests(unittest.TestCase):
         self.assertEqual(ct.heat_work_weight(target, target), 1.0)
 
 
+class DwellCreditParityTests(unittest.TestCase):
+    """Pins ``ramp_assist.dwell_credit_parity``: the credit mechanism banks
+    and spends the SAME unit (heat-work seconds, i.e. ``weight * dt`` while
+    lagging and in-band), so the dwell-window heat work it actually
+    delivers should track the achievable unassisted-dwell baseline closely
+    -- NOT the idealized ``dwell_nominal_s`` figure, which even a
+    zero-credit run falls short of whenever the plant is still catching up
+    to target at dwell entry (see ``test_zero_credit_still_shows_a_nominal_
+    gap_from_catchup_lag`` below; that gap is a plant-dynamics effect, not a
+    credit-accounting bug, and this module's own PID_EXPANSION_PLAN.md
+    write-up under §7.3 quantifies it separately).
+
+    NEGATIVE-TESTED: changed ``z.credit_s += w * dt`` (ramp_assist.py, the
+    dwell-credit accrual line) to ``z.credit_s += dt`` -- i.e. banking raw
+    in-band-and-lagging SECONDS instead of heat-work seconds, exactly the
+    unit-mismatch bug this test exists to catch a regression to. Ran
+    ``test_credit_parity_is_near_exact_against_achievable_baseline``; it
+    failed with:
+        AssertionError: 4.380232859005497 not less than 1.0 : zone 2 parity_vs_unassisted_pct
+    (parity blew out from ~0.15% to ~4.4% on zone 2 once credit started
+    banking a full second of "value" for ticks that were only earning a
+    fraction of a weight-second -- the dwell got over-shortened relative to
+    what the ramp tail actually earned). Reverted the mutation; this test
+    passes again with the real ``w * dt`` accrual.
+    """
+
+    _SCHED = [
+        ra.RampStep(700.0, 300.0), ra.RampStep(803.9, 500.0), ra.DwellStep(10.0),
+    ]
+    _KW = dict(start_temp_c=20.0, max_temp_c=1300.0, plant_regime='physical', max_sim_s=15 * 3600.0)
+
+    def test_credit_parity_is_near_exact_against_achievable_baseline(self):
+        res = ra.dwell_credit_parity(self._SCHED, **self._KW)
+        for zi, z in enumerate(res['per_zone']):
+            self.assertGreater(z['credit_s'], 0.0, f"zone {zi} should have accrued real credit")
+            self.assertLess(
+                abs(z['parity_vs_unassisted_pct']), 1.0,
+                f"zone {zi} parity_vs_unassisted_pct")
+
+    def test_zero_credit_still_shows_a_nominal_gap_from_catchup_lag(self):
+        # A fast, hard ramp straight into a dwell where the zone is STILL
+        # below target (still catching up) when the dwell begins: this
+        # produces zero dwell credit (physical_hard-style profile below the
+        # cone band, so no in-band gate ever opens), yet
+        # parity_vs_nominal_pct is still negative -- proof the nominal-gap
+        # metric alone conflates a genuine second-order plant-lag effect
+        # with the credit mechanism, even when the credit mechanism did
+        # nothing at all.
+        sched = [ra.RampStep(900.0, 500.0), ra.DwellStep(30.0)]
+        res = ra.dwell_credit_parity(sched, start_temp_c=20.0, max_temp_c=1300.0,
+                                      plant_regime='physical', max_sim_s=15 * 3600.0)
+        for zi, z in enumerate(res['per_zone']):
+            self.assertEqual(z['credit_s'], 0.0, f"zone {zi} should have earned no credit here")
+            self.assertLess(
+                z['parity_vs_nominal_pct'], -1.0,
+                f"zone {zi} parity_vs_nominal_pct should show a real catch-up gap")
+            self.assertGreater(z['catchup_deficit_s'], 0.0, f"zone {zi} catchup_deficit_s")
+            # And the achievable-baseline metric agrees there's no
+            # credit-caused problem, since none was applied.
+            self.assertAlmostEqual(z['parity_vs_unassisted_pct'], 0.0, places=6)
+
+
 if __name__ == "__main__":
     unittest.main()

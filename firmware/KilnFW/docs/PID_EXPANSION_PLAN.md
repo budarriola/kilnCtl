@@ -1882,6 +1882,91 @@ Blocker found in survey: `profile_executor.c` (~line 461-465) zeroes
 near-target history the credit needs to accrue from. New accumulator state is
 required; it cannot be reconstructed from `segment_elapsed_s` after the fact.
 
+**Simulator-side validation (2026-09-02)**, `tools/PcTools/src/kilnctrl/ramp_assist.py`:
+before this lands in firmware, the algorithm was prototyped against the
+calibrated simulator (`plant_sim.py`) to check the credit's arithmetic in
+isolation. First pass over that harness's own `compare_heat_work` helper
+(whole-run heat work, assisted vs. unassisted) reported what looked like a
+systematic under-fire — roughly 0.3-0.7% on an easy single-ramp cone-scale
+scenario, 4.9-14.4% on a fast ramp straight into a dwell, and 13-22% on a
+back-to-back-ramps scenario — worse on more heavily lagging zones in every
+case. The working theory going in was a **unit mismatch**: banking credit in
+raw in-band seconds but spending it as if each second were worth a full
+weight-second.
+
+That theory does not hold for this code. `ramp_assist.py`'s accumulator
+(~line 301) already banks `weight * dt` — heat-work seconds, not raw
+seconds — and spends exactly that many seconds off the following dwell
+(~line 313: `spend = z.credit_s`). There is no unit conversion missing
+between the two. Instrumenting the harness to separate the dwell's own
+heat work from the ramp's (new `dwell_heat_work_s` field, exposed through
+the new `dwell_credit_parity()` function) shows why `compare_heat_work`
+was misleading: it compares *whole-run* heat work, and the ramp phase is
+bit-for-bit identical whether or not credit is applied (`apply_dwell_credit`
+only changes the dwell's spent duration, nothing upstream). Shortening a
+period spent near 1.0 weight by `credit_s` seconds necessarily removes
+close to `credit_s` weight-seconds from the whole-run total, regardless of
+what unit the credit was banked in — there is no "give-back" to measure at
+that granularity, so the metric was reporting an unavoidable arithmetic
+artifact, not a defect in the credit.
+
+Measured against the *actual* question — does `credit_s + (dwell heat work
+during the shortened dwell)` match what the dwell would have delivered on
+its own, uncredited (`dwell_credit_parity()`'s `parity_vs_unassisted_pct`)
+— the credit is correct to within simulator noise:
+
+| scenario | zone | naive whole-run delta (misleading) | parity vs. achievable dwell baseline | parity vs. idealized nominal | catch-up deficit |
+|---|---|---:|---:|---:|---:|
+| physical_cone (700 C, 300 C/min, 20 min dwell) | 0/1/2 | −0.34% / −0.52% / −0.71% | **+0.073% / +0.028% / +0.075%** | −3.4% / −4.6% / −6.3% | 42.1 / 56.0 / 76.3 s |
+| back-to-back (700→803.9 C, 10 min dwell) | 0/1/2 | −13.3% / −17.0% / −22.4% | **+0.075% / +0.088% / +0.149%** | −2.7% / −3.5% / −4.8% | 16.4 / 21.6 / 29.5 s |
+| physical_hard (900 C, 500 C/min, 30 min dwell) | 0/1/2 | 0.00% (zero credit earned) | 0.000% | −4.9% / −6.6% / −14.4% | 88.7 / 117.9 / 260.0 s |
+
+`parity_vs_unassisted_pct` (the correct metric) is ≤0.15% in every scenario
+that earns any credit at all — effectively exact, with the residual
+attributable to 1-second tick discretization, not a systematic bias.
+**Conclusion: no unit-mismatch bug exists in the credit's bank/spend
+arithmetic.** The naive whole-run comparison is kept (as `compare_heat_work`,
+now documented as such) because it is still useful bookkeeping, but it must
+not be read as an under/over-fire signal on its own.
+
+**Second-order effect (real, and separate from the credit):** even at ZERO
+credit (`physical_hard` row above — the ramp is fast enough that it never
+enters the in-band-and-lagging gate, so `credit_s == 0` for every zone),
+`parity_vs_nominal_pct` is still −4.9% to −14.4%. This is the effect flagged
+as a risk before this investigation started: the zone is often still
+climbing toward target when the dwell timer starts, so the EARLY seconds of
+*any* dwell — credited or not — are worth less than 1.0 weight too. The
+`catchup_deficit_s` column quantifies it directly (`dwell_nominal_s -`
+achieved heat work in a full, uncredited dwell): 16-30 s on the cone-scale
+scenarios, 89-260 s (up to ~14% of a 30-minute dwell) on the fast-ramp one,
+worse on more heavily lagging/coupled zones — the same "worse when lagging
+more" pattern the original naive metric showed, but here it is a genuine
+plant-dynamics effect, unrelated to whether ramp assist is enabled at all.
+Because it is identical in the assisted and unassisted runs (both enter the
+dwell in the same physical state), it cancels out of
+`parity_vs_unassisted_pct` — the credit mechanism neither causes nor fixes
+it. Whether it argues for the minimum-dwell floor the owner asked about is
+a separate, pre-existing question about dwell timers in general (does a
+kiln recipe's `dwell_min` promise "N minutes of timer" or "N minutes at
+temperature"?) — it is not evidence that ramp assist's credit needs a floor,
+since the credit's own parity is already exact. Recommend surfacing it
+alongside auto-stretch's warnings (§7.4) if a real firing (§7.6) confirms
+the same pattern, rather than baking a floor into the credit formula itself.
+
+Coverage: `tools/PcTools/tests/test_ramp_assist.py`'s `DwellCreditParityTests`
+pins both results — near-exact parity against the achievable baseline, and
+a nonzero-but-explained nominal gap even at zero credit — and is
+negative-tested against exactly the raw-seconds regression this
+investigation ruled out (mutating the accrual from `weight * dt` to a bare
+`dt` reintroduces a ~4.4% parity error, caught immediately).
+
+(Note: the two sub-80 C `measured_*` scenarios in the harness fall below
+the cone table's covered range — Orton 022 and up — so `heat_work_weight`
+raises `ConeTableError` on every tick and both `heat_work_s` and
+`dwell_heat_work_s` are exactly 0 there; `dwell_credit_parity` reports
+`nan`/-100% for those, which is the cone table's known low-temperature
+floor, not a new finding.)
+
 ### 7.4 Warning surfaces — NOT STARTED
 
 All three the owner asked for, all while ramp-lock is holding:

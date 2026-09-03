@@ -151,6 +151,9 @@ class _ZoneState:
     stretched_s: float = 0.0        # total extra ramp time spent lagging
     credit_applied_s: float = 0.0   # total credit actually spent reducing a dwell
     heat_work_s: float = 0.0        # Sigma weight*dt over the whole run (see run docstring)
+    dwell_heat_work_s: float = 0.0  # Sigma weight*dt over DwellStep ticks ONLY (see
+                                     # dwell_parity_report -- isolates the dwell-window
+                                     # budget from the ramp's own workload)
 
 
 def _step_direction(start_c: float, target_c: float) -> float:
@@ -192,9 +195,11 @@ def run_ramp_assist(schedule: Sequence[ScheduleStep], max_temp_c: float,
     Returns a dict of time series (``t``, ``target`` per zone, ``temp`` per
     zone, ``duty`` per zone, ``lagging`` per zone) plus per-zone summary
     stats (``stretched_s``, ``credit_applied_s``, ``heat_work_s``,
-    ``dwell_nominal_s``, ``dwell_effective_s``) and ``targets_reached``
-    (bool, per zone -- proof every ramp endpoint was actually hit, not just
-    commanded).
+    ``dwell_heat_work_s`` -- heat work accumulated during DwellStep ticks
+    only, used by ``dwell_credit_parity`` to isolate the dwell's own
+    workload from the ramp's -- and ``dwell_nominal_s``) and
+    ``targets_reached`` (bool, per zone -- proof every ramp endpoint was
+    actually hit, not just commanded).
     """
     check_schedule_feasible(schedule, max_temp_c)
     if not schedule:
@@ -338,9 +343,13 @@ def run_ramp_assist(schedule: Sequence[ScheduleStep], max_temp_c: float,
             # totals to answer "does the credit under/over-fire".
             if not z.done:
                 try:
-                    z.heat_work_s += ct.heat_work_weight(actual_c, zone_active_target_c(zi)) * dt
+                    tick_hw = ct.heat_work_weight(actual_c, zone_active_target_c(zi)) * dt
                 except ct.ConeTableError:
-                    pass  # outside the cone table's covered range -- not counted, not fatal
+                    tick_hw = None  # outside the cone table's covered range -- not counted, not fatal
+                if tick_hw is not None:
+                    z.heat_work_s += tick_hw
+                    if isinstance(step, DwellStep):
+                        z.dwell_heat_work_s += tick_hw
 
         meas = plant.temp.copy()
         # Solve the coupled hold/climb jointly, per-zone independent
@@ -382,6 +391,7 @@ def run_ramp_assist(schedule: Sequence[ScheduleStep], max_temp_c: float,
         stretched_s=[z.stretched_s for z in zones],
         credit_applied_s=[z.credit_applied_s for z in zones],
         heat_work_s=[z.heat_work_s for z in zones],
+        dwell_heat_work_s=[z.dwell_heat_work_s for z in zones],
         targets_reached=targets_reached,
         dwell_nominal_s=dwell_nominal_s,
         wall_clock_s=t,
@@ -393,14 +403,24 @@ def run_ramp_assist(schedule: Sequence[ScheduleStep], max_temp_c: float,
 def compare_heat_work(schedule: Sequence[ScheduleStep], max_temp_c: float, **kwargs) -> dict:
     """Runs ``schedule`` twice -- once with dwell credit applied, once
     without -- and reports total accumulated heat-work (weight-seconds, per
-    zone) for both, plus the delta. This is the number that answers "does
-    crediting the dwell leave total heat work approximately equal to the
-    intended firing, or does it systematically under/over-fire" (see this
-    module's docstring and ``firmware/KilnFW/docs/PID_EXPANSION_PLAN.md``
-    §7.6): the unassisted run's heat work IS "the intended firing" (full
-    nominal dwell, nothing shortened), so the assisted run's heat work
-    relative to it is a direct under/over-fire measurement in this
-    simulator's terms.
+    zone) for the WHOLE run (ramp + dwell), plus the delta.
+
+    CAUTION -- this metric is NOT a valid under/over-fire measurement on its
+    own, and using it that way produced a misleading "4.5-16% under-fire"
+    read during this module's own validation pass (see
+    ``firmware/KilnFW/docs/PID_EXPANSION_PLAN.md`` §7.3 "credit unit
+    investigation" for the full writeup). The ramp phase is bit-for-bit
+    identical between the two runs (``apply_dwell_credit`` only changes the
+    ``dwell_remaining_s`` computed at the ramp->dwell transition, nothing
+    upstream of it), so whole-run heat work necessarily differs from the
+    unassisted run by close to ``-credit_applied_s`` REGARDLESS of what unit
+    the credit was banked or spent in -- shortening a period spent near 1.0
+    weight by C seconds always removes close to C weight-seconds of total
+    run heat work; there is nothing for the credited ramp-tail work to
+    "give back" here because that ramp-tail work is already counted
+    equally in both runs' totals. Kept for back-compat / whole-run
+    bookkeeping; use ``dwell_credit_parity`` to actually answer "does the
+    credit under/over-fire the dwell".
     """
     kwargs.pop('apply_dwell_credit', None)
     assisted = run_ramp_assist(schedule, max_temp_c, apply_dwell_credit=True, **kwargs)
@@ -413,3 +433,85 @@ def compare_heat_work(schedule: Sequence[ScheduleStep], max_temp_c: float, **kwa
     ]
     return dict(assisted=assisted, unassisted=unassisted, delta_heat_work_s=delta,
                 delta_heat_work_pct=pct)
+
+
+def dwell_credit_parity(schedule: Sequence[ScheduleStep], max_temp_c: float, **kwargs) -> dict:
+    """The metric that actually answers "does dwell credit under/over-fire":
+    isolates the DWELL-WINDOW heat-work budget from the ramp's own workload,
+    instead of comparing whole-run totals (see ``compare_heat_work``'s
+    caution note for why that comparison is not valid here).
+
+    Runs ``schedule`` twice (credit applied / not applied -- ramp phase is
+    identical in both, only the dwell's spent duration differs) and reports,
+    per zone:
+
+      ``credit_s``            -- W, the heat-work (weight*dt) banked while
+                                  lagging AND in-band during the ramp tail,
+                                  and the exact number of SECONDS spent off
+                                  the following dwell (``credit_applied_s``
+                                  from the assisted run -- this module banks
+                                  and spends the same unit, see the module
+                                  docstring's §7.3 note).
+      ``dwell_heat_work_assisted_s``   -- heat work actually accumulated
+                                  during the shortened dwell.
+      ``dwell_heat_work_unassisted_s`` -- heat work actually accumulated
+                                  during the FULL nominal dwell, credit off.
+                                  This is the real achievable baseline --
+                                  NOT ``dwell_nominal_s``, because the plant
+                                  is often still catching up to target when
+                                  the dwell begins (see
+                                  ``catchup_deficit_s`` below), so even an
+                                  uncredited dwell does not deliver
+                                  ``dwell_nominal_s`` of heat work.
+      ``recipe_total_s``       -- ``credit_s + dwell_heat_work_assisted_s``,
+                                  i.e. what the credited ramp tail plus the
+                                  shortened dwell actually delivered toward
+                                  the dwell's workload.
+      ``parity_vs_unassisted_pct`` -- ``recipe_total_s`` against
+                                  ``dwell_heat_work_unassisted_s`` (the
+                                  achievable baseline) -- the real
+                                  under/over-fire number. Near 0 means the
+                                  credit mechanism is unit-consistent.
+      ``parity_vs_nominal_pct`` -- ``recipe_total_s`` against
+                                  ``dwell_nominal_s`` (the idealized
+                                  recipe-book target) -- always shows a
+                                  negative residual whenever
+                                  ``catchup_deficit_s`` > 0, WITH OR WITHOUT
+                                  ramp assist (see the zero-credit sanity
+                                  check in this module's tests); do not
+                                  mistake this for a credit-accounting bug.
+      ``catchup_deficit_s``    -- ``dwell_nominal_s -
+                                  dwell_heat_work_unassisted_s``: how much
+                                  heat work the plant's own catch-up lag at
+                                  dwell entry costs, independent of ramp
+                                  assist entirely (measurable with
+                                  ``apply_dwell_credit`` irrelevant since
+                                  it's the SAME in the unassisted run, which
+                                  never shortens anything).
+    """
+    kwargs.pop('apply_dwell_credit', None)
+    assisted = run_ramp_assist(schedule, max_temp_c, apply_dwell_credit=True, **kwargs)
+    unassisted = run_ramp_assist(schedule, max_temp_c, apply_dwell_credit=False, **kwargs)
+    n = ps.N_ZONES
+    dwell_nominal_s = sum(assisted['dwell_nominal_s'])
+    out = []
+    for zi in range(n):
+        credit_s = assisted['credit_applied_s'][zi]
+        dhw_a = assisted['dwell_heat_work_s'][zi]
+        dhw_u = unassisted['dwell_heat_work_s'][zi]
+        recipe_total_s = credit_s + dhw_a
+        parity_vs_unassisted_pct = (
+            100.0 * (recipe_total_s - dhw_u) / dhw_u if dhw_u > 0 else float('nan'))
+        parity_vs_nominal_pct = (
+            100.0 * (recipe_total_s - dwell_nominal_s) / dwell_nominal_s
+            if dwell_nominal_s > 0 else float('nan'))
+        catchup_deficit_s = dwell_nominal_s - dhw_u
+        out.append(dict(
+            credit_s=credit_s, dwell_heat_work_assisted_s=dhw_a,
+            dwell_heat_work_unassisted_s=dhw_u, dwell_nominal_s=dwell_nominal_s,
+            recipe_total_s=recipe_total_s,
+            parity_vs_unassisted_pct=parity_vs_unassisted_pct,
+            parity_vs_nominal_pct=parity_vs_nominal_pct,
+            catchup_deficit_s=catchup_deficit_s,
+        ))
+    return dict(per_zone=out, assisted=assisted, unassisted=unassisted)
