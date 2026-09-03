@@ -1,6 +1,7 @@
 #include "ui_page_home_graph.h"
 
 #include <math.h>
+#include <stdint.h>
 #include <stdio.h>
 
 void ui_page_home_format_mmss(uint32_t seconds, char *out, size_t out_cap)
@@ -195,4 +196,36 @@ void ui_page_home_active_y_axis_range(float lo, float hi, float floor_disp, bool
 
     *out_axis_lo = q_lo;
     *out_axis_hi = q_hi;
+}
+
+uint32_t ui_page_home_lag_notice_tick(bool ramp_lock_held, uint32_t prev_consecutive_ticks)
+{
+    if (!ramp_lock_held) {
+        return 0u;
+    }
+    if (prev_consecutive_ticks >= UINT32_MAX) {
+        return UINT32_MAX; /* saturate, never wrap */
+    }
+    return prev_consecutive_ticks + 1u;
+}
+
+bool ui_page_home_lag_notice_should_show(uint32_t consecutive_ticks)
+{
+    return consecutive_ticks >= UI_PAGE_HOME_LAG_NOTICE_DEBOUNCE_TICKS;
+}
+
+size_t ui_page_home_lagging_zone_indices(uint8_t mask, uint8_t max_zones, uint8_t *out_indices,
+                                          size_t out_cap)
+{
+    size_t n = 0;
+    for (uint8_t zi = 0; zi < max_zones && zi < 8u; zi++) {
+        if (!(mask & (1u << zi))) {
+            continue;
+        }
+        if (n >= out_cap) {
+            break;
+        }
+        out_indices[n++] = zi;
+    }
+    return n;
 }

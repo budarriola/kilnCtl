@@ -6,6 +6,7 @@
 #include "../drivers/ui_page_home_graph.h"
 
 #include <math.h>
+#include <stdint.h>
 #include <string.h>
 
 void run_test_ui_page_home_graph(void)
@@ -349,5 +350,82 @@ void run_test_ui_page_home_graph(void)
                    "same run, elapsed_s flat across a PAUSE tick: no reset");
         TEST_CHECK(!ui_page_home_axis_ratchet_should_reset(true, true, 1600, 10),
                    "same run, elapsed_s far advanced from an early tick: no reset");
+    }
+
+    TEST_SECTION("ui_page_home_graph: lag_notice debounce (PID_EXPANSION_PLAN.md 7.4)");
+    {
+        // Counter climbs one per held tick, resets instantly the moment the
+        // lock clears -- no debounce on the way down.
+        uint32_t ticks = 0;
+        ticks = ui_page_home_lag_notice_tick(true, ticks);
+        TEST_CHECK(ticks == 1, "1st held tick -> counter 1");
+        ticks = ui_page_home_lag_notice_tick(true, ticks);
+        ticks = ui_page_home_lag_notice_tick(true, ticks);
+        ticks = ui_page_home_lag_notice_tick(true, ticks);
+        TEST_CHECK(ticks == 4, "4 consecutive held ticks -> counter 4");
+        TEST_CHECK(!ui_page_home_lag_notice_should_show(ticks),
+                   "below UI_PAGE_HOME_LAG_NOTICE_DEBOUNCE_TICKS (5): not shown yet -- "
+                   "a momentary lock must not flicker the notice on");
+
+        ticks = ui_page_home_lag_notice_tick(true, ticks);
+        TEST_CHECK(ticks == UI_PAGE_HOME_LAG_NOTICE_DEBOUNCE_TICKS,
+                   "5th consecutive held tick reaches the threshold");
+        TEST_CHECK(ui_page_home_lag_notice_should_show(ticks),
+                   "threshold reached: notice shows");
+
+        // Clearing is immediate, not debounced -- one non-held tick zeroes
+        // the counter and the notice hides on the very next refresh.
+        ticks = ui_page_home_lag_notice_tick(false, ticks);
+        TEST_CHECK(ticks == 0, "lock clears: counter resets to 0 immediately");
+        TEST_CHECK(!ui_page_home_lag_notice_should_show(ticks),
+                   "counter 0: notice hidden the instant the lock clears");
+
+        // A single noisy tick that flickers the lock momentarily (held, then
+        // clear, then held again) must never accumulate across the gap --
+        // each held run starts counting from 0 again.
+        ticks = ui_page_home_lag_notice_tick(true, 0);
+        ticks = ui_page_home_lag_notice_tick(true, ticks);
+        ticks = ui_page_home_lag_notice_tick(false, ticks); // momentary clear
+        TEST_CHECK(ticks == 0, "momentary clear mid-run resets the count, not just held-back one tick");
+        ticks = ui_page_home_lag_notice_tick(true, ticks);
+        ticks = ui_page_home_lag_notice_tick(true, ticks);
+        ticks = ui_page_home_lag_notice_tick(true, ticks);
+        ticks = ui_page_home_lag_notice_tick(true, ticks);
+        TEST_CHECK(!ui_page_home_lag_notice_should_show(ticks),
+                   "re-accumulating from the reset: still below threshold after only 4 more held ticks");
+
+        // Saturation: never wraps back to a small value after a very long
+        // sustained lag (a multi-day firing kept behind schedule).
+        TEST_CHECK(ui_page_home_lag_notice_tick(true, UINT32_MAX) == UINT32_MAX,
+                   "counter saturates at UINT32_MAX rather than wrapping");
+    }
+
+    TEST_SECTION("ui_page_home_graph: lagging_zone_indices");
+    {
+        uint8_t idx[8];
+        // No zones lagging -- mask 0.
+        TEST_CHECK(ui_page_home_lagging_zone_indices(0x00, 8, idx, 8) == 0,
+                   "empty mask -> 0 zones");
+
+        // Zone 0 only.
+        size_t n = ui_page_home_lagging_zone_indices(0x01, 8, idx, 8);
+        TEST_CHECK(n == 1 && idx[0] == 0, "mask 0x01 -> zone 0 only");
+
+        // Zones 1 and 3, lowest-index-first.
+        n = ui_page_home_lagging_zone_indices(0x0Au /* 0b1010 */, 8, idx, 8);
+        TEST_CHECK(n == 2 && idx[0] == 1 && idx[1] == 3, "mask 0x0A -> zones 1,3 in index order");
+
+        // All 5 real MAX31856 channels lagging (max_zones caps the scan --
+        // this codebase's channel count, not the full 8 mask bits).
+        n = ui_page_home_lagging_zone_indices(0xFFu, 5, idx, 8);
+        TEST_CHECK(n == 5 && idx[0] == 0 && idx[4] == 4,
+                   "max_zones=5 caps the scan even though the mask has bits set above it");
+
+        // out_cap smaller than the number of set bits truncates rather than
+        // overflowing the caller's buffer.
+        uint8_t small[2];
+        n = ui_page_home_lagging_zone_indices(0xFFu, 8, small, 2);
+        TEST_CHECK(n == 2 && small[0] == 0 && small[1] == 1,
+                   "out_cap=2 truncates to the first 2 zones, does not overflow");
     }
 }

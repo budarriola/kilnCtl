@@ -249,6 +249,60 @@ void ui_page_home_legend_visibility(bool has_span, bool has_actual_multi, bool h
 bool ui_page_home_axis_ratchet_should_reset(bool active, bool prev_active, uint32_t elapsed_s,
                                              uint32_t prev_elapsed_s);
 
+/* PID_EXPANSION_PLAN.md 7.4's LCD warning surface: an INFORMATIONAL (not
+ * fault) notice that the shared setpoint has stopped advancing because at
+ * least one zone is lagging behind it -- profile_exec_status_t's own
+ * ramp_lock_held/ramp_lock_lagging_mask, which the executor already treats
+ * as normal, healthy behaviour (the setpoint pauses so every zone reaches
+ * the target; see profile_executor.h's header comment). Deliberately NOT
+ * styled or worded like s_trip_strip's safety-trip banner in ui_page_home.c
+ * -- that strip means a real fault; this one means "the plan is waiting on a
+ * zone," which happens on essentially every normal ramp.
+ *
+ * DEBOUNCE: ramp_lock_held can flip on a single noisy tick (a momentary
+ * excursion just past EXEC_RAMP_LOCK_BAND_C) without the kiln genuinely
+ * being "behind" in any way an operator should be told about. This function
+ * counts CONSECUTIVE held ticks (ui_page_home.c's refresh_cb() runs at
+ * UI_PAGE_HOME_REFRESH_MS == 1000, so one tick == ~1s) and only reports
+ * "show" once UI_PAGE_HOME_LAG_NOTICE_DEBOUNCE_TICKS have been held in a
+ * row -- chosen as 5 (~5s): long enough that a single noisy sample or a
+ * brief crossing right at the ramp-lock band edge cannot trip it, short
+ * enough that a genuinely lagging zone is surfaced well within one
+ * PROFILE_EXECUTOR_TICK_MS control cycle's neighbourhood, not held back for
+ * tens of seconds. Clearing is NOT debounced -- ramp_lock_held going false
+ * resets the counter to 0 and the caller hides the notice on the very next
+ * tick, same "hidden = zero flicker" bias as s_trip_strip's own gating; a
+ * lag that has genuinely resolved should disappear immediately, not linger.
+ *
+ * consecutive_ticks is the caller's own running counter (static state lives
+ * in ui_page_home.c, same "counting stays with the pure function, storage
+ * stays with the caller" split axis_ratchet_should_reset() above uses) --
+ * this function only ever reads it to decide, the tick function below
+ * updates it. */
+#define UI_PAGE_HOME_LAG_NOTICE_DEBOUNCE_TICKS 5u
+
+/* Advances the debounce counter for one refresh tick: held -> prev+1
+ * (saturating so a firing that lags for hours cannot wrap), not held -> 0.
+ * Pure counter arithmetic, no decision -- see
+ * ui_page_home_lag_notice_should_show() for the threshold check. */
+uint32_t ui_page_home_lag_notice_tick(bool ramp_lock_held, uint32_t prev_consecutive_ticks);
+
+/* True once consecutive_ticks has reached the debounce threshold -- the
+ * notice should be shown. False (including consecutive_ticks == 0, the
+ * lock-clear case) means hidden. */
+bool ui_page_home_lag_notice_should_show(uint32_t consecutive_ticks);
+
+/* Extracts the set bits of a ramp_lock_lagging_mask (profile_exec_status_t's
+ * uint8_t bitmask, one bit per zone index) into out_indices, lowest zone
+ * index first, capped at max_zones bits and out_cap slots (whichever is
+ * smaller) -- returns the count written. Pure bit-scan, factored out so the
+ * "which zones does this mask name" question is host tested independently
+ * of ui_page_home.c's zone-name lookup (zones_config_get_name(), which needs
+ * NVS and cannot run at host-test level) -- this function only ever hands
+ * back zone INDICES, never names or formatted text. */
+size_t ui_page_home_lagging_zone_indices(uint8_t mask, uint8_t max_zones, uint8_t *out_indices,
+                                          size_t out_cap);
+
 #ifdef __cplusplus
 }
 #endif

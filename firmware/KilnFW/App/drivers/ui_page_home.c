@@ -241,6 +241,22 @@ static uint8_t s_zone_count; /* zones_config_get_thermo_count() at build time */
 /* Trip strip -- hidden unless a live trip is present; see its creation in
  * ui_page_home_build() for why it is hidden rather than absent. */
 static lv_obj_t *s_trip_strip;
+
+/* PID_EXPANSION_PLAN.md 7.4's LCD warning surface: "kiln is behind schedule"
+ * -- INFORMATIONAL, not a fault, so deliberately NOT styled like
+ * s_trip_strip above (solid ACCENT_5 red, white text, "SAFETY TRIP"
+ * wording). Same "built once, hidden = zero flex height" idiom as
+ * s_trip_strip/s_progress_wrap, placed directly below the trip strip so a
+ * real safety trip still reads above it. See build()'s creation site for
+ * the exact styling choice and refresh_cb() for the debounce this reads
+ * from ui_page_home_graph.c's ui_page_home_lag_notice_tick()/
+ * _should_show(). */
+static lv_obj_t *s_lag_notice;
+/* Consecutive-tick counter feeding the debounce -- see
+ * ui_page_home_lag_notice_tick()'s header comment (ui_page_home_graph.h) for
+ * why the counting stays pure/testable there while the storage lives here,
+ * same split ui_page_home_axis_ratchet_should_reset() already uses. */
+static uint32_t s_lag_notice_ticks;
 static lv_obj_t *s_chart;                     /* home page's compact chart -- actual + planned-ahead */
 static lv_chart_series_t *s_chart_actual_series;
 static lv_chart_series_t *s_chart_planned_series;
@@ -1183,6 +1199,60 @@ static void refresh_cb(lv_timer_t *timer)
         }
     }
 
+    /* PID_EXPANSION_PLAN.md 7.4's LCD lag notice -- INFORMATIONAL, not a
+     * fault (see s_lag_notice's own build()-site comment for the styling
+     * rationale). Debounced via ui_page_home_graph.c's pure counter/
+     * threshold pair so a single noisy tick right at the ramp-lock band
+     * edge cannot flicker this on; clearing is immediate (no debounce) the
+     * moment ramp_lock_held goes false, same "hidden costs nothing, so
+     * default to hidden fast" bias as s_trip_strip. profile_exec_status_t's
+     * ramp_lock_held/ramp_lock_lagging_mask are read whether or not a run
+     * is active -- both are false/0 while IDLE, so this is a no-op then. */
+    if (s_lag_notice != NULL) {
+        s_lag_notice_ticks = ui_page_home_lag_notice_tick(st.ramp_lock_held, s_lag_notice_ticks);
+        if (!ui_page_home_lag_notice_should_show(s_lag_notice_ticks)) {
+            lv_obj_add_flag(s_lag_notice, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            /* Zone names, not just indices -- ui_page_home_lagging_zone_indices()
+             * (ui_page_home_graph.c) only hands back the pure index list;
+             * looking a name up per index is this file's job (needs
+             * zones_config_get_name(), NVS-backed, not host-testable) same
+             * split show_start_confirm()'s zones_buf loop above already
+             * uses for a different list of zone indices. */
+            uint8_t idx[MAX31856_CHANNEL_COUNT];
+            size_t n = ui_page_home_lagging_zone_indices(st.ramp_lock_lagging_mask, MAX31856_CHANNEL_COUNT, idx,
+                                                          MAX31856_CHANNEL_COUNT);
+            char zones_buf[96];
+            size_t zlen = 0;
+            zones_buf[0] = '\0';
+            for (size_t i = 0; i < n && zlen < sizeof(zones_buf) - 1; i++) {
+                char name[16];
+                const char *zname =
+                    (zones_config_get_name(idx[i], name, sizeof(name)) && name[0]) ? name : NULL;
+                char piece[24];
+                if (zname) {
+                    snprintf(piece, sizeof(piece), "%s%s", zlen ? ", " : "", zname);
+                } else {
+                    snprintf(piece, sizeof(piece), "%sZone %u", zlen ? ", " : "", (unsigned)idx[i]);
+                }
+                size_t piece_len = strlen(piece);
+                if (zlen + piece_len < sizeof(zones_buf)) {
+                    memcpy(zones_buf + zlen, piece, piece_len + 1);
+                    zlen += piece_len;
+                }
+            }
+            char notice_buf[160];
+            /* Plain sentence, lower-case lead word -- deliberately not
+             * "SAFETY TRIP"-style all-caps: this is normal, expected
+             * behaviour (profile_executor.h's own header comment calls the
+             * ramp lock "healthy"), not an alert. */
+            snprintf(notice_buf, sizeof(notice_buf), "Waiting on %s to catch up -- setpoint paused",
+                     zones_buf[0] ? zones_buf : "a zone");
+            lv_label_set_text(s_lag_notice, notice_buf);
+            lv_obj_remove_flag(s_lag_notice, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+
     /* Compact home chart -- see this file's header comment ("DESIRED SERIES
      * + PROGRESS BAR RETURN, part 2") for the idle-dot vs. whole-run-timeline
      * split. Same state==IDLE && history_count==0 gate ui_page_history.c
@@ -1782,6 +1852,37 @@ lv_obj_t *ui_page_home_build(void)
     lv_obj_set_style_radius(s_trip_strip, UI_THEME_CORNER_RADIUS_PX, 0);
     lv_obj_set_style_pad_all(s_trip_strip, 3, 0);
     lv_label_set_text(s_trip_strip, "");
+
+    /* PID_EXPANSION_PLAN.md 7.4's LCD lag notice. Same hidden-until-needed,
+     * zero-height-while-hidden strip idiom as s_trip_strip immediately
+     * above (LVGL skips hidden children in flex layout -- this is what
+     * keeps the chart still reaching the Start button when nothing is
+     * lagging, exactly the reasoning s_trip_strip's own comment gives).
+     * Second child, so a real safety trip still reads first if somehow both
+     * are live at once.
+     *
+     * STYLING, deliberately NOT s_trip_strip's alarm treatment: this page
+     * has no separate "informational" visual language anywhere else to
+     * reuse (grepped every ui_page_*.c for one before adding this -- none
+     * exists), so this follows the closest existing INFORMATIONAL (not
+     * fault) precedent instead: s_progress_label/s_status_label's own
+     * muted-secondary-text-on-card look (UI_THEME_COLOR_TEXT_SECONDARY on
+     * UI_THEME_COLOR_CARD, no bg_opa COVER fill, no white-on-solid-color).
+     * That is the opposite of s_trip_strip's white-on-solid-ACCENT_5 by
+     * every axis that distinguishes them (fill vs. card tone, alert vs.
+     * secondary text color, "SAFETY TRIP"/all-caps wording vs. a plain
+     * sentence) -- a glance must read this as a status readout, not a
+     * fault banner. */
+    s_lag_notice = lv_label_create(content);
+    lv_obj_add_flag(s_lag_notice, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_set_width(s_lag_notice, lv_pct(100));
+    lv_label_set_long_mode(s_lag_notice, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_bg_color(s_lag_notice, UI_THEME_COLOR_CARD, 0);
+    lv_obj_set_style_bg_opa(s_lag_notice, LV_OPA_COVER, 0);
+    lv_obj_set_style_text_color(s_lag_notice, UI_THEME_COLOR_TEXT_SECONDARY, 0);
+    lv_obj_set_style_radius(s_lag_notice, UI_THEME_CORNER_RADIUS_PX, 0);
+    lv_obj_set_style_pad_all(s_lag_notice, 3, 0);
+    lv_label_set_text(s_lag_notice, "");
 
     s_chart = lv_chart_create(content);
     lv_obj_set_width(s_chart, lv_pct(100));
