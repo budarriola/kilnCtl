@@ -447,6 +447,51 @@ any DMA/flush work in Phase 6, still need the real numbers below.)*
 - [ ] **RDDID (`0x04`) bytes from the ST7796** on this wiring, recorded here.
       If ambiguous, also try `0xD3` (RDID4). All-`0x00`/all-`0xFF` means MISO
       undriven, i.e. "no panel", not "panel 1" (`ILI9488.c:1641`).
+
+  **How to actually read these bytes (2026-09-02):** the previous version of
+  this checklist, and a comment in `panel_detect.h`, both said "boot the
+  board as it is today (`KILNCTL_DISPLAY_PANEL=ili9488`, the default) and
+  read the WARN logged on fallback" — that is wrong. `panel_spi.c`'s
+  `ILI9488_start()` only calls `ILI9488_read_id()` inside the
+  `CONFIG_KILNCTL_DISPLAY_PANEL_AUTO` branch; the explicit-ILI9488 default
+  branch never reads RDDID at all, so a default-config boot logs nothing to
+  record. The corrected one-step procedure, using a checked-in debug-only
+  sdkconfig fragment (`firmware/KilnFW/sdkconfig.paneldetect.defaults`,
+  never referenced by `sdkconfig.defaults` itself, so it changes nothing
+  unless explicitly passed):
+  1. `idf.py -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.paneldetect.defaults" build`
+     (or `kiln_call(name="build_kilnfw")` with that override) — selects AUTO
+     instead of the shipped ILI9488 default. AUTO's own bootstrap panel is
+     ILI9488, so reading the ILI9488's ID needs no wiring change.
+  2. Flash and read the boot log for `panel auto-detect: no RDDID match
+     (read 0x.. 0x.. 0x.. ...)` from `panel_spi.c` — that is the exact
+     triple to record above. (An all-`0x00`/all-`0xFF` read still means
+     "MISO not driven", not a real ID — see the bullet above.)
+  3. For the ST7796 row: wire the MSP4031 to J2 (only after the STOP-block
+     5 V hazard check earlier in this document) and rebuild with
+     `CONFIG_KILNCTL_DISPLAY_PANEL_ST7796` forced explicitly instead of the
+     AUTO fragment, so the panel actually initializes while its ID is read
+     the same way.
+  4. Rebuild WITHOUT the fragment (plain `idf.py build`) before flashing
+     again — AUTO is a bench detection tool, not the shipped configuration.
+
+  **Filling in the table once both rows exist (one step, ready now):**
+  `panel_detect.h` has a new `panel_detect_id_equals(id, b0, b1, b2)` helper
+  (host-tested, rejects all-`0x00`/all-`0xFF` centrally so no per-descriptor
+  matcher has to remember to). For each panel, replace `.id_matches = NULL,`
+  in `panel_spi.c` (`ili9488_panel_desc`) / `st7796_panel.c`
+  (`st7796_panel_desc`) with a matcher built on it:
+  ```c
+  static bool ili9488_id_matches(const uint8_t id[3]) {
+      return panel_detect_id_equals(id, 0x??, 0x??, 0x??); /* this row's bytes */
+  }
+  ```
+  and point `.id_matches` at it. `test_panel_detect.c`'s
+  `test_recorded_id_matcher_pattern()` already proves this exact recipe
+  against a synthetic ID, and
+  `test_id_equals_guard_beats_pathological_recorded_zero()` proves a
+  transcribed-wrong or all-`0x00`/all-`0xFF` recorded value is caught rather
+  than silently matching — both green today, ahead of the real bytes.
 - [ ] **Does `0x38` answer** on the shared I²C bus with the module attached?
       The existing `i2c_scan_bus()` boot output already prints this.
 - [ ] **Does the ST7796 blank black or white on DISPOFF + sleep-in?** The
@@ -953,6 +998,21 @@ Each phase ends somewhere the firmware still boots and drives the existing panel
       With both NULL, `panel_detect_choose()` always falls back to the
       Kconfig default; this is inert on the currently-attached ILI9488 by
       construction, not by omission.
+- [x] **Tooling to take the bench measurement, and the one-step fill-in once
+      it exists — LANDED 2026-09-02.** §4 above now has the corrected
+      procedure (the old "read the WARN on a default boot" claim was wrong;
+      that WARN only fires in `CONFIG_KILNCTL_DISPLAY_PANEL_AUTO`) plus a
+      checked-in debug-only sdkconfig fragment
+      (`sdkconfig.paneldetect.defaults`) that reuses the existing, already
+      owner-arbitrated `ILI9488_read_id()`/`spi_owner_transfer()` path —
+      no new SPI code, no change to MAX31856 timing or CS behavior. The
+      fill-in step is `panel_detect_id_equals()` (new, host-tested helper in
+      `panel_detect.h`) plus a one-line matcher per descriptor; the recipe
+      and its negative case are proven now against a synthetic ID in
+      `test_panel_detect.c` (`test_recorded_id_matcher_pattern()`,
+      `test_id_equals_guard_beats_pathological_recorded_zero()`), so only
+      the real bytes are still missing, not the code path that consumes
+      them.
 
 ### Phase 5 — FT6336U and touch abstraction — DONE 2026-09-01/02
 - [x] `touch_dev_t` with a `self_calibrating` flag.

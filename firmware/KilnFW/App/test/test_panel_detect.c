@@ -188,6 +188,95 @@ static void test_ambiguous_spi_no_touch_falls_back(void)
     TEST_CHECK(r.disagreement, "ambiguous SPI, no touch: flagged so an operator can see it");
 }
 
+/* This is the exact recipe panel_detect.h's Sec.4 TODO asks the owner to
+ * follow once the real bench bytes exist: a static matcher built on
+ * panel_detect_id_equals(), wired into a panel_desc_t's .id_matches. Proven
+ * here against a SYNTHETIC id (0x94, 0x88, 0x00 -- chosen only to look
+ * plausible, not a real bench reading) so the pattern is known-good before
+ * any real RDDID bytes are recorded, and so a wrong value written into the
+ * real descriptor later has a test shape already on file to catch it. */
+static bool matches_synthetic_bench_id(const uint8_t id[3])
+{
+    return panel_detect_id_equals(id, 0x94, 0x88, 0x00);
+}
+
+static const panel_desc_t stub_panel_synthetic = {
+    .name = "StubSynthetic", .id_matches = matches_synthetic_bench_id,
+};
+
+static void test_recorded_id_matcher_pattern(void)
+{
+    TEST_SECTION("panel_detect_choose: id_matches built on panel_detect_id_equals()");
+
+    const panel_detect_candidate_t table[] = {
+        { .panel = &stub_panel_synthetic, .touch = PANEL_DETECT_TOUCH_UNKNOWN },
+    };
+
+    const uint8_t exact[3] = { 0x94, 0x88, 0x00 };
+    panel_detect_result_t r = panel_detect_choose(exact, false, false, table, 1, &stub_kconfig_default);
+    TEST_CHECK(r.panel == &stub_panel_synthetic, "exact recorded bytes: matches the real panel");
+    TEST_CHECK(r.source == PANEL_DETECT_SOURCE_SPI_MATCH, "exact recorded bytes: source is SPI_MATCH");
+
+    /* A wrong value in the real descriptor -- e.g. one byte transcribed
+     * wrong off the bench -- must NOT match. Each single-byte perturbation
+     * of the recorded triple below is exactly that mistake. */
+    const uint8_t off_byte0[3] = { 0x95, 0x88, 0x00 };
+    const uint8_t off_byte1[3] = { 0x94, 0x89, 0x00 };
+    const uint8_t off_byte2[3] = { 0x94, 0x88, 0x01 };
+    const uint8_t *wrong[] = { off_byte0, off_byte1, off_byte2 };
+    for (int i = 0; i < 3; ++i) {
+        panel_detect_result_t rw =
+            panel_detect_choose(wrong[i], false, false, table, 1, &stub_kconfig_default);
+        TEST_CHECK(rw.panel == &stub_kconfig_default,
+                   "single-byte-wrong recorded id: falls back instead of false-matching");
+        TEST_CHECK(rw.source == PANEL_DETECT_SOURCE_FALLBACK,
+                   "single-byte-wrong recorded id: source is FALLBACK");
+    }
+
+    /* All-0x00/all-0xFF must never match even a descriptor whose recorded
+     * bytes happen to look like one of those triples -- panel_detect_id_
+     * equals() guards this centrally so no per-descriptor matcher has to
+     * remember to. */
+    const uint8_t all_zero[3] = { 0x00, 0x00, 0x00 };
+    const uint8_t all_ff[3] = { 0xFF, 0xFF, 0xFF };
+    panel_detect_result_t rz =
+        panel_detect_choose(all_zero, false, false, table, 1, &stub_kconfig_default);
+    panel_detect_result_t rf =
+        panel_detect_choose(all_ff, false, false, table, 1, &stub_kconfig_default);
+    TEST_CHECK(rz.source == PANEL_DETECT_SOURCE_FALLBACK, "all-0x00 id: never matches, falls back");
+    TEST_CHECK(rf.source == PANEL_DETECT_SOURCE_FALLBACK, "all-0xFF id: never matches, falls back");
+}
+
+/* The guard above is only exercised for real if a matcher's OWN target
+ * bytes are the all-0x00/all-0xFF triple -- test_recorded_id_matcher_pattern
+ * uses 0x94/0x88/0x00 as its target, so removing the guard would not have
+ * turned that test red (0x00,0x00,0x00 != {0x94,0x88,0x00} either way).
+ * This test pins the guard itself: a (deliberately pathological) matcher
+ * recorded as {0x00,0x00,0x00} must still refuse to match an all-zero read,
+ * because that reading means "no panel wired", never "this exact panel". */
+static bool matches_pathological_all_zero(const uint8_t id[3])
+{
+    return panel_detect_id_equals(id, 0x00, 0x00, 0x00);
+}
+
+static const panel_desc_t stub_panel_pathological = {
+    .name = "StubPathological", .id_matches = matches_pathological_all_zero,
+};
+
+static void test_id_equals_guard_beats_pathological_recorded_zero(void)
+{
+    TEST_SECTION("panel_detect_id_equals: all-0x00 guard holds even if a matcher's own target is all-0x00");
+
+    const panel_detect_candidate_t table[] = {
+        { .panel = &stub_panel_pathological, .touch = PANEL_DETECT_TOUCH_UNKNOWN },
+    };
+    const uint8_t all_zero[3] = { 0x00, 0x00, 0x00 };
+    panel_detect_result_t r = panel_detect_choose(all_zero, false, false, table, 1, &stub_kconfig_default);
+    TEST_CHECK(r.source == PANEL_DETECT_SOURCE_FALLBACK,
+               "all-0x00 id against an all-0x00-recorded matcher: still falls back, not a false match");
+    TEST_CHECK(r.matched_count == 0, "all-0x00 id against an all-0x00-recorded matcher: matched_count stays 0");
+}
+
 void run_test_panel_detect(void)
 {
     test_empty_table_falls_back();
@@ -198,4 +287,6 @@ void run_test_panel_detect(void)
     test_both_touch_addresses_present_is_not_a_signal();
     test_ambiguous_spi_broken_by_touch();
     test_ambiguous_spi_no_touch_falls_back();
+    test_recorded_id_matcher_pattern();
+    test_id_equals_guard_beats_pathological_recorded_zero();
 }

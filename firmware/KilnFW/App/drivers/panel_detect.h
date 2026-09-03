@@ -92,24 +92,54 @@ typedef struct {
  * ili9488_panel_desc.id_matches and st7796_panel.c's st7796_panel_desc.
  * id_matches, both currently NULL --------------------------------------
  *
- *   1. "RDDID (0x04) bytes from the ILI9488 on this wiring" -- boot the
- *      board as it is today (KILNCTL_DISPLAY_PANEL=ili9488, the default),
- *      read the WARN this file's caller logs on fallback (it names the
- *      bytes it read), and record them in DISPLAY_ST7796_PLAN.md Sec.4.
+ * CORRECTION (2026-09-02): this block used to say "boot the board as it is
+ * today (KILNCTL_DISPLAY_PANEL=ili9488, the default) and read the WARN this
+ * file's caller logs on fallback". That is wrong -- panel_spi.c's
+ * ILI9488_start() only calls ILI9488_read_id() inside the
+ * `#elif CONFIG_KILNCTL_DISPLAY_PANEL_AUTO` branch. The explicit-ILI9488
+ * default branch (`#else`, today's shipped config) calls ILI9488_init()
+ * directly and never reads RDDID at all, so nothing is ever logged on a
+ * default-config boot. See firmware/KilnFW/sdkconfig.paneldetect.defaults
+ * and DISPLAY_ST7796_PLAN.md Sec.4 for the corrected one-build procedure
+ * that actually exercises the read (build with AUTO selected for exactly
+ * one flash, capture the boot log line, then rebuild normally).
+ *
+ *   1. "RDDID (0x04) bytes from the ILI9488 on this wiring" -- build with
+ *      the AUTO sdkconfig fragment (ILI9488 is AUTO's own bootstrap/
+ *      fallback panel, so no wiring change is needed), flash, and read the
+ *      "panel auto-detect: no RDDID match (read 0x.. 0x.. 0x.. ...)" WARN
+ *      it logs. Record those three bytes in DISPLAY_ST7796_PLAN.md Sec.4.
  *   2. "RDDID (0x04) bytes from the ST7796 on this wiring" -- same, with the
  *      MSP4031 wired to J2 (only after the STOP-block 5V hazard check) and
  *      KILNCTL_DISPLAY_PANEL=st7796 forced explicitly (skips probing, see
  *      Sec.6 Step 3 point 1) so the panel actually inits while its ID gets
  *      read and recorded the same way.
  *
- * Once both are recorded, write id_matches functions that compare against
- * those exact bytes (all-0x00/all-0xFF still means "no panel", per
- * panel_spi.c's ILI9488_read_id() comment -- neither matcher should ever
- * match that case) and wire them into the two descriptors. Nothing else in
- * this file, or its call site, needs to change: an empty table already
- * exercises the fallback path this function was built around, and a
+ * Once both are recorded, the one-step fill-in is: add a small static
+ * matcher next to each panel_desc_t built on panel_detect_id_equals() below
+ * (it already rejects all-0x00/all-0xFF, so the matcher body is just the
+ * three bench bytes -- see panel_spi.c/st7796_panel.c for the exact
+ * before/after) and point that descriptor's `.id_matches` at it. Nothing
+ * else in this file, or its call site, needs to change: an empty table
+ * already exercises the fallback path this function was built around, and a
  * populated one exercises the match path the same tests below already
- * cover with synthetic candidates. */
+ * cover with synthetic candidates -- see
+ * test_panel_detect.c:test_recorded_id_matcher_pattern() for that exact
+ * recipe proven against a synthetic ID ahead of the real bytes existing. */
+
+/* Convenience equality check for id_matches implementations: true iff `id`
+ * exactly equals {b0,b1,b2}. Guards the same "no panel wired" case
+ * panel_spi.c's ILI9488_read_id() already treats specially -- all-0x00 or
+ * all-0xFF never matches, even if a caller passes one of those triples as
+ * b0..b2, because a bench-recorded RDDID that came back all-0x00/all-0xFF
+ * would mean the read failed, not that this is a real ID. This is the one
+ * piece of logic every id_matches implementation needs, so it lives here
+ * (pure, host-testable) rather than being hand-rolled per descriptor. */
+static inline bool panel_detect_id_equals(const uint8_t id[3], uint8_t b0, uint8_t b1, uint8_t b2)
+{
+    if ((id[0] | id[1] | id[2]) == 0x00 || (id[0] & id[1] & id[2]) == 0xFF) return false;
+    return id[0] == b0 && id[1] == b1 && id[2] == b2;
+}
 
 /* Pure decision function -- no I/O, no logging, safe to call from a host
  * test with fabricated inputs.
