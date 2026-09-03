@@ -1983,6 +1983,103 @@ now checked, and it does not flip §3.8's z2 conclusion — z2's dead time is
 still not observable from this repo's captures well enough to trust, by
 this method or the flat one.** No firmware change made here.
 
+**Both surviving leads (z0 per-source, z1 flat `L_pair`) checked 2026-09-03
+— zone 1's R² gain is real but the recovered value is not physically
+plausible as load; zone 0's lead does not survive a consistency check on
+top of the R²/window-count gate. Neither is adopted; no firmware or
+default-argument change made.** Both were re-run against the same
+23-ramp-window real-capture set (`logs/coupling/p7_*_http.jsonl` +
+`tests/fixtures/plant_sim/*.jsonl`, superset of the 17-21 windows the
+passages above scored — the window construction here also drops dwell
+segments via `plant_sim.segs_from_capture`, same convention) with a tighter
+grid, `min_drive_c` sweeps, and, this time, a check the two passages above
+did not run: whether the fitted `mass_mult` value is *consistent* across the
+independently-fitted windows, not just whether each window's own R² clears
+0.3. A firing's real load did not change between windows or between
+captures, so a genuinely-observed mass multiplier should cluster; one that
+scatters is noise that happens to fit a line, the same failure shape as the
+z2 n=3 collapse, just showing up in the fitted value instead of the sample
+count.
+
+*Zone 0, per-source dead time (`estimate_zone_mass_mult_per_source`).* The
+baseline grid (60–220 s, step 20, `min_drive_c=5.0`, matching the passage
+above) scores 8 windows at `n_samples_used≥8` on this superset (doc's
+n=7 was scored on the smaller 20-window set) — **6/8 clear R²>0.3**,
+consistent with the "5/7" already recorded. A tighter grid (step 10) and a
+narrow grid centered on sec 2's measured 135–158 s range (100–200, step 5)
+were tried next: neither moves the win rate outside 5/7–7/10, i.e. finer
+resolution does not buy a cleaner signal, which argues this is sampling
+noise rather than a discretization artifact hiding a sharper true delay.
+Widening `min_drive_c` (3.0→10.0) trades window count for a *worse* win
+rate at every step except a single n=1 window (11→8→4→1 windows at
+n≥8, win rate 6/11→6/8→2/4→1/1) — no setting recovers a consistent >80%
+clearance the way a real, well-conditioned signal should. **The consistency
+check:** the 6 windows that pass n≥8 and R²>0.3 on the baseline grid report
+`mass_mult` = 0.159, 0.415, 0.436, 0.460, 0.492, 0.516 — no cluster, a
+3.2x spread across windows drawn from the same (constant, unknown) real
+load. That is not a converging physical estimate; it is six different
+answers that each individually happen to fit their own window well. **n=6-8
+is exactly the regime this doc has already burned itself on** (max-min
+range at n=6 is 2.53σ, not 1σ; an n=3 r=0.97 here collapsed to r=0.031 at
+n=6) — a spread this wide at this n is unsurprising under pure noise, not
+evidence against it. **Verdict: the zone-0 lead does not hold up.** It
+clears the same window-count/R² bar the previous pass recorded, but the
+value it produces is not a number a controller could trust — closing this
+as a second negative, not a promotion to actionable.
+
+*Zone 1, flat per-path delay (`L_pair`).* Re-scoring at the doc's own
+`offdiag=146.5s` (the adopted `plant_sim.L_PAIR` midpoint) with
+`min_drive_c=3.0` on the same window set reproduces the recorded number
+exactly: **17 windows at n≥8, 7/17 (41%) clear R²>0.3** — this pass changed
+nothing about the method and got the same answer, a useful sanity check
+that the earlier number was not itself a fluke of a different window set.
+A grid search over the flat off-diagonal value from 80 s to 210 s (step 10,
+same `min_drive_c=3.0`) shows the win rate is NOT flat across that range —
+it rises through the search: 0/22-23 for 80–110 s, 0.14–0.26 for 120–140 s,
+peaking at **0.56 (5/9) at 180 s** before falling again at 190 s+ as the
+window count collapses (n≥8 drops to 5, then 3). 180 s sits above sec 2's
+own measured 135–158 s aggregate range — the current `L_PAIR` (146.5 s) is
+not the value this data best supports, though the higher win rate at 180 s
+also costs windows (9 vs 17), so it is not simply a better setting, only a
+different point on the same count-vs-quality tradeoff already documented
+for the per-source search. **The consistency check, run at the doc's own
+146.5 s/`min_drive_c=3.0` setting:** the 7 windows clearing R²>0.3 report
+`mass_mult` = 0.215, 0.303, 0.334, 0.347, 0.348, 0.367, 0.367 — five of the
+seven sit in a genuinely tight 0.303–0.367 band (spread 0.064), a real
+cluster and the closest thing to a converging physical estimate anywhere in
+this section, zone 0 included. **But the cluster sits at ≈0.33x, not near
+1.0x.** No load was added or removed on the bench rig between the capture
+that produced the ADOPTED `K`/`tau` identification and these p7 captures —
+by the model's own assumption (mass scales `tau` only, §3.8 top), a stable
+~0.33x reading would mean the rig itself changed mass by roughly 3x between
+runs, which did not happen. The far more likely explanation is that this
+fit is absorbing a **structural bias in the reference `K`/`tau`/`L` model
+itself** (already known to carry z1 0.61 °C held-out RMS, §3.2, and an
+own-zone `L=43.5s` that is itself a single fixed value, not searched here)
+rather than measuring real thermal mass. A consistent-but-wrong number is
+a different failure mode from zone 0's inconsistent one, but it is still a
+failure mode: **this is not an observable load signal, it is a repeatable
+model-mismatch artifact.**
+
+**What either number would have been used for.** Per §7's ramp-assist
+plan, a load estimate's only named consumer is an advisory "loaded kiln"
+warning (banner/event-log/LCD) — never gain scheduling or feedforward,
+which stay recommend-only per this doc's own rule (§5). Even the more
+convincing zone-1 cluster is not fit for that: five values in a 0.303–0.367
+band is tight *relative to zone 0*, but the underlying number is
+physically wrong (§ above), so a warning built on it would fire on a
+model-error signature at constant real load, not on an actual heavier
+firing — worse than no warning, since it teaches the operator to distrust
+a banner that is right by construction. Zone 0's 3.2x window-to-window
+spread would swing the same binary warning on and off within a single
+firing depending on which ramp segment happened to be in progress when it
+was last recomputed. Neither result changes anything usable in the
+controller or the UI; both close as documented negatives, matching this
+section's standing bottom line that load is not observable from what this
+repo's captures and model support today. No change to
+`load_estimator.py`'s defaults, argument signatures, or `coupled_ident.py`
+was made — both leads were checked, neither adopted.
+
 **Gap closed 2026-09-02: fuzzy strength × load, never crossed before now.**
 §3.6's fuzzy sweep and this section's load sweep each varied one axis while
 holding the other at its single tested point (fuzzy at the identified/1.0x
