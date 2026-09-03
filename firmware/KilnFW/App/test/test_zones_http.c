@@ -2882,13 +2882,18 @@ static void test_post_omitting_new_fields_preserves_stored_values(void)
     current.coupling_coeff[1] = 5.0f;
     current.coupling_coeff[2] = 7.5f;
     current.settings_source = 1; /* "copies zone 1" -- a real, previously-chosen value */
+    /* ZONES_CFG_VERSION 14->15: a real, previously-measured diagonal cell --
+     * z0_coupling_diag_k_dc is also absent from body above, so this must
+     * survive the same "omit preserves" rule as the four fields already
+     * covered by this test. */
+    current.coupling_diag_k_dc = 18.75f;
 
     zone_cfg_t out;
     memset(&out, 0, sizeof(out));
     const char *err_reason = "unset";
     bool ok = parse_zone_fields(body, 0, 1, 4, 1, &current, &out, &err_reason);
 
-    TEST_CHECK(ok, "a POST omitting all four new fields must still succeed (optionality)");
+    TEST_CHECK(ok, "a POST omitting all five new fields must still succeed (optionality)");
     TEST_CHECK_NEAR(out.fuzzy_strength_pct, 42.0f, 1e-6,
                     "fuzzy_strength_pct must be PRESERVED, not zeroed, when omitted");
     TEST_CHECK_NEAR(out.coupling_coeff[1], 5.0f, 1e-6,
@@ -2898,6 +2903,9 @@ static void test_post_omitting_new_fields_preserves_stored_values(void)
     TEST_CHECK(out.settings_source == 1,
               "settings_source must be PRESERVED at its previously-chosen value, not reset to CUSTOM "
               "or zeroed to \"copies zone 0\"");
+    TEST_CHECK_NEAR(out.coupling_diag_k_dc, 18.75f, 1e-6,
+                    "coupling_diag_k_dc must be PRESERVED, not zeroed, when omitted -- it is a "
+                    "measured quantity, same as fuzzy_strength_pct/coupling_coeff above");
 }
 
 // End-to-end round trip through the real handlers: a POST carrying real
@@ -2916,6 +2924,7 @@ static void test_post_then_get_round_trips_new_fields(void)
              "z0_cal=0&z0_kp=1&z0_ki=0&z0_kd=0&z0_ramp=0&z0_sanity=0&z0_mode=3&"
              "z0_maxtemp=1300&z0_mintemp=-20&z0_window=0&z0_minon=0&z0_minoff=0&"
              "z0_fuzzy_strength=12.5&z0_coupling_c1=1.5&z0_coupling_c2=3.25&"
+             "z0_coupling_diag_k_dc=25.75&"
              "z0_settings_source=255");
     run_zones_post(body);
     TEST_CHECK(s_test_ok_called && !s_test_err_called, "the whole-page POST with new fields must be accepted");
@@ -2935,6 +2944,8 @@ static void test_post_then_get_round_trips_new_fields(void)
               "GET reports the posted coupling_coeff[2] exactly");
     TEST_CHECK(strstr(s_last_resp_body, "\"coupling_c0\":0.0000") != NULL,
               "GET reports the untouched diagonal cell as 0 (never omitted)");
+    TEST_CHECK(strstr(s_last_resp_body, "\"coupling_diag_k_dc\":25.7500") != NULL,
+              "GET reports the posted coupling_diag_k_dc exactly");
     TEST_CHECK(strstr(s_last_resp_body, "\"settings_source\":255") != NULL,
               "GET reports the posted settings_source (CUSTOM) exactly");
 }
@@ -3577,6 +3588,101 @@ static void test_nvs_load_from_v12_blob_defaults_tuning_quality_to_unknown(void)
     TEST_CHECK_NEAR(out_cfg.zones[0].coupling_tau_s[1], 42.0f, 1e-6, "zones[0].coupling_tau_s[1] survives");
     TEST_CHECK(out_cfg.zones[0].settings_source == ZONE_SETTINGS_SOURCE_CUSTOM,
               "zones[0].settings_source is carried through verbatim");
+
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
+// ZONES_CFG_VERSION 14->15 (PID_EXPANSION_PLAN.md section 3.2 follow-up): a
+// v14 blob (predates coupling_diag_k_dc entirely -- adaptive_tune_enabled
+// and everything before it, but no diagonal cell of its own) must migrate
+// cleanly, with coupling_diag_k_dc defaulting to 0.0 ("not measured", same
+// convention coupling_coeff[]/coupling_tau_s[] already use) for every zone,
+// while every pre-existing field -- including adaptive_tune_enabled and the
+// existing coupling_coeff[]/coupling_tau_s[] rows -- survives unchanged.
+// sizeof(src) is zone_cfg_v14_t/zones_cfg_v14_t -- frozen, historical types,
+// never the live zone_cfg_t/zones_cfg_t (already the v15 shape by now),
+// mirroring test_nvs_load_from_v12_blob_defaults_tuning_quality_to_unknown()
+// above exactly.
+static void test_nvs_load_from_v14_blob_defaults_coupling_diag_k_dc_to_zero(void)
+{
+    TEST_SECTION("nvs_load_from -- a v14 blob upconverts to v15: coupling_diag_k_dc defaults to 0.0 "
+                 "(\"not measured\") for every zone, while adaptive_tune_enabled/coupling_coeff[]/"
+                 "coupling_tau_s[]/model_k_dc/etc survive unchanged");
+    nvs_test_enable(true);
+    nvs_test_clear();
+
+    zones_cfg_v14_t src;
+    memset(&src, 0, sizeof(src));
+    src.version = 14;
+    src.thermo_count = 3;
+    src.relay_count = 3;
+    src.continue_on_zone_trip = 1;
+    src.safety_tc_type = 3;
+    src.pc_link_abort_silence_ms = 45000.0f;
+    src.timing_profile_count = 1;
+    snprintf(src.timing_profiles[0].name, sizeof(src.timing_profiles[0].name), "Default");
+
+    src.zones[0].relay_mask = 0x01;
+    src.zones[0].thermo_mask = 0x01;
+    src.zones[0].max_temp_c = 1300.0f;
+    src.zones[0].model_k_dc = 20.969f;
+    src.zones[0].model_tau_s = 640.0f;
+    src.zones[0].model_dead_time_s = 45.0f;
+    src.zones[0].coupling_coeff[1] = 10.887f;
+    src.zones[0].coupling_tau_s[1] = 42.0f;
+    src.zones[0].settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
+    src.zones[0].adaptive_tune_enabled = 1;
+
+    src.zones[1].relay_mask = 0x02;
+    src.zones[1].thermo_mask = 0x02;
+    src.zones[1].max_temp_c = 1250.0f;
+    src.zones[1].settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
+
+    src.zones[2].relay_mask = 0x04;
+    src.zones[2].thermo_mask = 0x04;
+    src.zones[2].max_temp_c = 1200.0f;
+    src.zones[2].settings_source = ZONE_SETTINGS_SOURCE_CUSTOM;
+
+    src.crc32 = 0; // v14's own CRC is not checked on the old-version path
+
+    stage_zones_blob(&src, sizeof(src));
+
+    zones_cfg_t out_cfg;
+    bool found = false, valid = false;
+    esp_err_t err = nvs_load_from("kiln_nvs", &out_cfg, &found, &valid);
+
+    TEST_CHECK(err == ESP_OK, "no NVS error");
+    TEST_CHECK(found && valid, "a well-formed v14 blob must migrate to a valid current (v15) config");
+    TEST_CHECK(out_cfg.version == ZONES_CFG_VERSION, "migrated config is stamped the current version");
+
+    // THE thing this test is really about: coupling_diag_k_dc must be at its
+    // "not measured" zero default for every zone -- not garbage, not
+    // uninitialized memory -- since no version before v15 ever stored it.
+    for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
+        char msg[96];
+        snprintf(msg, sizeof(msg), "zones[%u].coupling_diag_k_dc reads 0.0 (v14 never stored it)", i);
+        TEST_CHECK(out_cfg.zones[i].coupling_diag_k_dc == 0.0f, msg);
+    }
+    // Pre-existing v14 fields must survive the upgrade completely unchanged
+    // -- the same "everything else carries through" proof
+    // test_nvs_load_from_v12_blob_defaults_tuning_quality_to_unknown() makes
+    // for the v12->v13 migration.
+    TEST_CHECK(out_cfg.thermo_count == 3 && out_cfg.relay_count == 3, "counts carried through");
+    TEST_CHECK(out_cfg.continue_on_zone_trip == 1, "continue_on_zone_trip carried through");
+    TEST_CHECK_NEAR(out_cfg.pc_link_abort_silence_ms, 45000.0f, 1e-6, "pc_link_abort_silence_ms carried through");
+    TEST_CHECK(strcmp(out_cfg.timing_profiles[0].name, "Default") == 0, "timing profile name carried through");
+    TEST_CHECK(out_cfg.zones[0].relay_mask == 0x01 && out_cfg.zones[1].relay_mask == 0x02 &&
+              out_cfg.zones[2].relay_mask == 0x04, "relay_mask must NOT be shifted for any zone");
+    TEST_CHECK_NEAR(out_cfg.zones[0].model_k_dc, 20.969f, 1e-6, "zones[0].model_k_dc survives");
+    TEST_CHECK_NEAR(out_cfg.zones[0].coupling_coeff[1], 10.887f, 1e-6, "zones[0].coupling_coeff[1] survives");
+    TEST_CHECK_NEAR(out_cfg.zones[0].coupling_tau_s[1], 42.0f, 1e-6, "zones[0].coupling_tau_s[1] survives");
+    TEST_CHECK(out_cfg.zones[0].settings_source == ZONE_SETTINGS_SOURCE_CUSTOM,
+              "zones[0].settings_source is carried through verbatim");
+    TEST_CHECK(out_cfg.zones[0].adaptive_tune_enabled == 1,
+              "zones[0].adaptive_tune_enabled survives -- a real prior opt-in choice must not be lost");
+    TEST_CHECK(out_cfg.zones[1].adaptive_tune_enabled == 0,
+              "zones[1].adaptive_tune_enabled stays 0 (never opted in)");
 
     nvs_test_enable(false);
     nvs_test_clear();
@@ -6314,6 +6420,7 @@ void run_test_zones_http(void)
     test_tuning_quality_round_trip_asymmetric_per_zone();
     test_zones_config_set_pid_invalidates_tuning_quality();
     test_nvs_load_from_v12_blob_defaults_tuning_quality_to_unknown();
+    test_nvs_load_from_v14_blob_defaults_coupling_diag_k_dc_to_zero();
     test_settings_source_save_reload_inheritance_round_trip();
     test_settings_source_two_and_three_zone_cycles_are_refused();
     test_tc_type_write_is_identity_independent_of_settings_source();

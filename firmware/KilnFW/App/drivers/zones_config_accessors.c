@@ -435,6 +435,39 @@ bool zones_config_set_fuzzy_strength_pct(uint8_t zone_index, float pct)
     return nvs_save() == ESP_OK;
 }
 
+/* PID_EXPANSION_PLAN.md section 3.2 follow-up (ZONES_CFG_VERSION 14->15) --
+ * see zone_cfg_t::coupling_diag_k_dc's own doc comment for what this is and
+ * why it is a separate field from model_k_dc/ff_k_dc. STORAGE ONLY: no
+ * control-loop consumer reads this yet, same as coupling_coeff[] was itself
+ * pure storage for one pass before profile_executor.c's Phase 3b wired it
+ * into the feedforward. */
+bool zones_config_get_coupling_diag_k_dc(uint8_t zone_index, float *out_k_dc)
+{
+    if (!out_k_dc || zone_index >= s_zones.cfg.thermo_count) {
+        return false;
+    }
+    *out_k_dc = s_zones.cfg.zones[zone_index].coupling_diag_k_dc;
+    return true;
+}
+
+/* Writer for the getter above. Same bound validate_zones_cfg()'s
+ * coupling_diag_k_dc check enforces (0..ZONE_MODEL_K_MAX) -- refused, never
+ * clamped, matching every other setter in this file. backup_http.c's import
+ * needs this to round-trip the field, the same reason every other setter in
+ * this file exists. */
+bool zones_config_set_coupling_diag_k_dc(uint8_t zone_index, float k_dc)
+{
+    if (zone_index >= s_zones.cfg.thermo_count) {
+        return false;
+    }
+    if (!isfinite(k_dc) || k_dc < 0.0f || k_dc > ZONE_MODEL_K_MAX) {
+        return false;
+    }
+    s_zones.cfg.zones[zone_index].coupling_diag_k_dc = k_dc;
+    s_config_generation++;
+    return nvs_save() == ESP_OK;
+}
+
 /* Row-based (ZONES_CFG_VERSION 10->11) -- see zone_cfg_t::coupling_coeff's
  * own doc comment for what each cell means. out_row must have room for
  * MAX31856_CHANNEL_COUNT floats; the diagonal (out_row[zone_index]) is

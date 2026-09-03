@@ -221,21 +221,40 @@ discontinuity, so switching the diagonal source does not introduce a new
 *class* of risk here — the seam sizes above bound how much MORE work the
 reseed is doing, not whether a bump escapes it.
 
-**Not implemented.** The remaining blocker is data availability, not the
-discontinuity: `zones_config_get_coupling()`'s diagonal cell is
-contractually 0 and `zones_config_set_coupling()` refuses a nonzero one, so
-the matrix's own diagonal has nowhere to live on the board today — sec 3.2's
-own-diagonal figures came from offline analysis (`coupled_ident.py`), never
-from an on-board identification pass. Making the switch real needs: a new
-per-zone persisted field (one float, not a full row — the off-diagonals
-already have one), a `zones_config_get/set_coupling_own_diag()` pair
-mirroring `zones_config_get/set_model()`'s discipline, a `ZONES_CFG_VERSION`
-bump with a migration step (12->13, following the 10->11/11->12 pattern
-above), an HTTP field to let the owner post a measured value, and a
-`backup_http.c` round-trip for it — roughly the same size as the v10->v11
-coupling-matrix widening already shipped. Proposed as the next step, not
-done here: `backup_http.c` is out of scope for this pass and a schema bump
-touching it should not be split across two authors' commits.
+**STORAGE LANDED, 2026-09-02f — the solver itself is still unchanged.**
+The data-availability blocker described in the paragraph above is now
+closed: `zone_cfg_t` carries a new `coupling_diag_k_dc` field (`zone_index`
+of the matrix's own diagonal cell, ZONES_CFG_VERSION 14->15, migration
+tested against a frozen v14 blob — `coupling_diag_k_dc` defaults to 0.0,
+"not measured," identical to `coupling_coeff[]`'s own convention), with a
+`zones_config_get/set_coupling_diag_k_dc()` pair mirroring
+`zones_config_get/set_fuzzy_strength_pct()`'s discipline, a GET/POST
+`/api/zones` field (`z%u_coupling_diag_k_dc`, omitted-preserves, same rule
+`fuzzy_strength_pct`/`coupling_c%u` already use), a `backup_http.c`
+export/import round trip (no `BACKUP_FORMAT_VERSION` bump — purely
+additive, same as the 11->12 `coupling_tau_c%u`/`coupling_dead_time_c%u`
+addition), and a `tools/PcTools/src/kilnctrl/zones_http_client.py` mapping
+plus preset-override entry so a PC-side preset can carry it without the
+client refusing the POST body as an unknown field. Deliberately named
+`coupling_diag_k_dc`, not folded into `model_k_dc`/`ff_k_dc` — those are a
+*different* identification (single-zone step/relay test) and can disagree
+with this field on a real board (that disagreement is exactly what this
+section measured above).
+
+**Still not implemented: the solver switch itself.** `zone_coupling_solve.c`
+is untouched by this pass — `G[row][row] = ff_k_dc` still runs, on purpose;
+this pass only makes the alternative persistable. The seam sized above
+(2026-09-02e) still applies unchanged. What is left, now that storage
+exists, is a small, separately reviewed change: read `coupling_diag_k_dc`
+where it is nonzero (falling back to `ff_k_dc` where it is still 0, i.e.
+"not measured" — the same guarded-fallback shape `diagonal_hold`/
+`diagonal_climb`'s own `ff_k_dc` reads already use) behind a flag, an
+on-board identification pass to actually populate the field (today it can
+only be set by hand or by a PC-side preset built from `coupled_ident.py`'s
+offline analysis, never by autotune), and a decision on whether the
+uncoupled 1x1 fallback switches too or keeps `ff_k_dc` deliberately (the
+seam-sizing paragraph above is the reason that decision needs its own
+pass, not a byproduct of this one).
 
 Made explicit in code instead (`zone_coupling_solve.c`, the `G[row][row]`
 assignment): a doc comment naming both candidates, why `ff_k_dc` is the one

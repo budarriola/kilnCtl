@@ -682,6 +682,24 @@ bool zones_config_get_fuzzy_strength_pct(uint8_t zone_index, float *out_pct);
  * every other setter in this file exists. */
 bool zones_config_set_fuzzy_strength_pct(uint8_t zone_index, float pct);
 
+/* zone_cfg_t::coupling_diag_k_dc (PID_EXPANSION_PLAN.md section 3.2 follow-up,
+ * ZONES_CFG_VERSION 14->15, 2026-09-02) -- the diagonal cell of the SAME
+ * three-run settled-excitation identification that fits coupling_coeff[]'s
+ * off-diagonal cross-gains. See zone_cfg_t::coupling_diag_k_dc's own doc
+ * comment for the full unit convention and why this is a SEPARATE field from
+ * model_k_dc/ff_k_dc (different identification, can legitimately disagree).
+ * STORAGE ONLY: zone_coupling_solve.c still substitutes ff_k_dc for the
+ * matrix diagonal and is unchanged by this pass -- these accessors exist so
+ * the alternative can be persisted ahead of a later, separately reviewed
+ * switch. 0 = "not measured", same convention coupling_coeff[] uses. */
+bool zones_config_get_coupling_diag_k_dc(uint8_t zone_index, float *out_k_dc);
+
+/* Writer for the getter above. Same bound (0..ZONE_MODEL_K_MAX) validate_
+ * zones_cfg()'s coupling_diag_k_dc check enforces -- refused, never clamped,
+ * matching every other setter in this file. backup_http.c's import needs
+ * this to round-trip the field. */
+bool zones_config_set_coupling_diag_k_dc(uint8_t zone_index, float k_dc);
+
 /* zone_cfg_t::coupling_coeff[] (PID_EXPANSION_PLAN.md section 2c's cross-zone
  * feedforward row, widened to a full directed row ZONES_CFG_VERSION 10->11,
  * 2026-08-30 -- a single (coeff, neighbor) pair could not represent the

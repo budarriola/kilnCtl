@@ -310,6 +310,11 @@ typedef struct {
     float coupling_dead_time_s[MAX31856_CHANNEL_COUNT];
     bool set_settings_source_called;
     uint8_t settings_source;
+    /* ZONES_CFG_VERSION 14->15 (PID_EXPANSION_PLAN.md 3.2 follow-up): the
+     * coupling identification's own diagonal cell -- same "settable, called
+     * flag observable" convention as set_fuzzy_strength_called above. */
+    bool set_coupling_diag_k_dc_called;
+    float coupling_diag_k_dc;
 } zone_write_t;
 
 static zone_write_t s_writes[STUB_ZONE_COUNT];
@@ -564,6 +569,15 @@ bool zones_config_get_coupling_dead_time(uint8_t zone_index, float out_row[MAX31
     return true;
 }
 
+bool zones_config_get_coupling_diag_k_dc(uint8_t zone_index, float *out_k_dc)
+{
+    if (!out_k_dc || zone_index >= STUB_ZONE_COUNT) {
+        return false;
+    }
+    *out_k_dc = s_writes[zone_index].coupling_diag_k_dc;
+    return true;
+}
+
 bool zones_config_get_settings_source(uint8_t zone_index, uint8_t *out_settings_source)
 {
     if (!out_settings_source || zone_index >= STUB_ZONE_COUNT) {
@@ -722,6 +736,14 @@ bool zones_config_set_fuzzy_strength_pct(uint8_t zone_index, float pct)
     if (zone_index >= STUB_ZONE_COUNT) return false;
     s_writes[zone_index].set_fuzzy_strength_called = true;
     s_writes[zone_index].fuzzy_strength_pct = pct;
+    g_total_write_calls++;
+    return true;
+}
+bool zones_config_set_coupling_diag_k_dc(uint8_t zone_index, float k_dc)
+{
+    if (zone_index >= STUB_ZONE_COUNT) return false;
+    s_writes[zone_index].set_coupling_diag_k_dc_called = true;
+    s_writes[zone_index].coupling_diag_k_dc = k_dc;
     g_total_write_calls++;
     return true;
 }
@@ -1144,6 +1166,31 @@ static void test_v4_new_fields_round_trip_distinct_values(void)
     TEST_CHECK(s_writes[1].settings_source == 0, "settings_source comes back exactly (zone 1 copies zone 0)");
 }
 
+// ZONES_CFG_VERSION 14->15 (PID_EXPANSION_PLAN.md 3.2 follow-up): the
+// coupling identification's own diagonal cell, coupling_diag_k_dc -- ordinary
+// optional-field convention, no BACKUP_FORMAT_VERSION bump (see backup_http.c's
+// own comment on the matching parse/commit).
+static void test_coupling_diag_k_dc_round_trips_distinct_value(void)
+{
+    TEST_SECTION("backup_import_apply -- coupling_diag_k_dc committed exactly, distinct from "
+                 "fuzzy_strength_pct/coupling_c0 in the same entry");
+    reset_stub_state();
+
+    const char *body =
+        "{\"kind\":\"kilnctl_backup\",\"version\":4,\"profiles\":[],"
+        "\"zones\":[{\"index\":1,\"pid_kp\":1,\"pid_ki\":0,\"pid_kd\":0,"
+        "\"fuzzy_strength_pct\":37.25,\"coupling_c0\":10.887,"
+        "\"coupling_diag_k_dc\":21.6,\"settings_source\":0}]}";
+    char err[160];
+    bool ok = backup_import_apply(body, err, sizeof(err));
+
+    TEST_CHECK(ok, "a well-formed coupling_diag_k_dc entry must import");
+    TEST_CHECK(s_writes[1].set_coupling_diag_k_dc_called, "coupling_diag_k_dc was committed");
+    TEST_CHECK_NEAR(s_writes[1].coupling_diag_k_dc, 21.6, 1e-6,
+                    "coupling_diag_k_dc comes back exactly, DISTINCT from fuzzy_strength_pct/coupling_c0 "
+                    "in the same entry");
+}
+
 static void test_v2_body_imports_new_fields_default_floats_zero_source_custom(void)
 {
     TEST_SECTION("backup_import_apply -- an OLDER-format (v2) backup, with none of the four new keys, "
@@ -1163,6 +1210,8 @@ static void test_v2_body_imports_new_fields_default_floats_zero_source_custom(vo
     for (uint8_t j = 0; j < MAX31856_CHANNEL_COUNT; j++) {
         TEST_CHECK(!s_writes[0].set_coupling_cell_called[j], "no coupling keys present -- no cell setter must run");
     }
+    TEST_CHECK(!s_writes[0].set_coupling_diag_k_dc_called,
+              "no coupling_diag_k_dc key present -- setter must not run");
     /* settings_source is UNLIKE the three floats: it has no has_* flag and is
      * ALWAYS committed (see zone_candidate_t's own comment in backup_http.c)
      * -- this is the field the task brief calls out as "the identical trap
@@ -1506,6 +1555,7 @@ static void test_export_emits_expected_keys_and_values_for_a_known_config(void)
     TEST_CHECK(zones_config_set_coupling_cell(1, 0, 10.5f, 0.0f, 0.0f), "seed zone 1 coupling cell (1,0)");
     TEST_CHECK(zones_config_set_coupling_cell(1, 2, 3.25f, 0.0f, 0.0f), "seed zone 1 coupling cell (1,2)");
     TEST_CHECK(zones_config_set_settings_source(1, 2), "seed zone 1 settings_source (copies zone 2)");
+    TEST_CHECK(zones_config_set_coupling_diag_k_dc(1, 33.5f), "seed zone 1 coupling_diag_k_dc");
 
     /* Model is the one field this stub setup cannot control from this file
      * (zones_config_get_model() is defined in test_profile_feasibility.c,
@@ -1553,6 +1603,8 @@ static void test_export_emits_expected_keys_and_values_for_a_known_config(void)
               "the diagonal cell coupling_c1 (zone 1's own index) is emitted as 0, never omitted");
     TEST_CHECK(strstr(s_export_body, "\"coupling_c2\":3.2500") != NULL,
               "coupling_c2 is emitted exactly, DISTINCT from coupling_c0");
+    TEST_CHECK(strstr(s_export_body, "\"coupling_diag_k_dc\":33.5000") != NULL,
+              "coupling_diag_k_dc is emitted exactly (ZONES_CFG_VERSION 14->15 field)");
     TEST_CHECK(strstr(s_export_body, "\"settings_source\":2") != NULL,
               "settings_source is emitted exactly");
 
@@ -1606,6 +1658,7 @@ static void test_export_round_trips_through_import_to_identical_config(void)
     zones_config_set_coupling_cell(1, 0, 10.5f, 0.0f, 0.0f);
     zones_config_set_coupling_cell(1, 2, 3.25f, 0.0f, 0.0f);
     zones_config_set_settings_source(1, 2);
+    zones_config_set_coupling_diag_k_dc(1, 33.5f);
 
     esp_err_t err = run_export();
     TEST_CHECK(err == ESP_OK, "export must succeed");
@@ -1641,6 +1694,8 @@ static void test_export_round_trips_through_import_to_identical_config(void)
     TEST_CHECK_NEAR(s_writes[1].coupling_coeff[0], 10.5, 1e-3, "coupling_c0 round-trips (through the .4f/.4f wire format)");
     TEST_CHECK_NEAR(s_writes[1].coupling_coeff[2], 3.25, 1e-3, "coupling_c2 round-trips, DISTINCT from coupling_c0");
     TEST_CHECK(s_writes[1].coupling_coeff[1] == 0.0f, "the diagonal cell round-trips as 0");
+    TEST_CHECK_NEAR(s_writes[1].coupling_diag_k_dc, 33.5, 1e-3,
+                    "coupling_diag_k_dc round-trips through export->import");
     TEST_CHECK(s_writes[1].settings_source == 2, "settings_source round-trips (NOT the 0 left over from the "
               "pre-import poison state above, proving import actually ran, not a no-op that left it alone)");
 
@@ -1775,6 +1830,7 @@ void run_test_backup_import(void)
     test_profile_name_at_limit_accepted();
 
     test_v4_new_fields_round_trip_distinct_values();
+    test_coupling_diag_k_dc_round_trips_distinct_value();
     test_v2_body_imports_new_fields_default_floats_zero_source_custom();
     test_v3_fuzzy_strength_out_of_range_rejected();
     test_v3_coupling_neighbor_fractional_rejected();

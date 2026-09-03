@@ -353,6 +353,15 @@ static esp_err_t backup_export_get_handler(httpd_req_t *req)
             for (uint8_t j = 0; j < MAX31856_CHANNEL_COUNT; j++) {
                 backup_stream_printf(&s, "\"coupling_dead_time_c%u\":%.1f,", (unsigned)j, (double)coupling_dead_row[j]);
             }
+            /* ZONES_CFG_VERSION 14->15 (PID_EXPANSION_PLAN.md 3.2 follow-up):
+             * the coupling identification's own diagonal cell -- see
+             * zone_cfg_t::coupling_diag_k_dc's own doc comment. No
+             * BACKUP_FORMAT_VERSION bump, same reasoning as coupling_tau_c%u/
+             * coupling_dead_time_c%u above -- purely an OPTIONAL additive key,
+             * see backup_import_apply()'s own comment on the matching parse. */
+            float coupling_diag_k_dc = 0.0f;
+            zones_config_get_coupling_diag_k_dc(zi, &coupling_diag_k_dc);
+            backup_stream_printf(&s, "\"coupling_diag_k_dc\":%.4f,", (double)coupling_diag_k_dc);
             backup_stream_printf(&s, "\"settings_source\":%u", (unsigned)settings_source);
         }
         /* settings_source above is the last key of this object now (it was
@@ -881,6 +890,12 @@ static bool backup_import_apply(const char *body, char *err_msg, size_t err_cap)
         float coupling_tau_row[MAX31856_CHANNEL_COUNT];
         bool has_coupling_dead_cell[MAX31856_CHANNEL_COUNT];
         float coupling_dead_row[MAX31856_CHANNEL_COUNT];
+        /* ZONES_CFG_VERSION 14->15 (PID_EXPANSION_PLAN.md 3.2 follow-up): the
+         * coupling identification's own diagonal cell -- ordinary optional-
+         * field convention, same as has_fuzzy_strength above (absent -> not
+         * written, an older board's stored value survives untouched). */
+        bool has_coupling_diag_k_dc;
+        float coupling_diag_k_dc;
         uint8_t settings_source; /* defaults to ZONE_SETTINGS_SOURCE_CUSTOM -- see comment above */
     } zone_candidate_t;
     zone_candidate_t zone_candidates[MAX31856_CHANNEL_COUNT];
@@ -1248,6 +1263,20 @@ static bool backup_import_apply(const char *body, char *err_msg, size_t err_cap)
                 zc->coupling_dead_row[j] = (float)ddead;
             }
         }
+        /* ZONES_CFG_VERSION 14->15 (PID_EXPANSION_PLAN.md 3.2 follow-up):
+         * coupling_diag_k_dc, the coupling identification's own diagonal
+         * cell -- ordinary optional-field convention, same as
+         * fuzzy_strength_pct above. No BACKUP_FORMAT_VERSION bump, same
+         * reasoning as coupling_tau_c%u/coupling_dead_time_c%u above. */
+        double ddiag;
+        if (json_field_opt_num(ze, "coupling_diag_k_dc", 0, (double)ZONE_MODEL_K_MAX, &ddiag,
+                               &zc->has_coupling_diag_k_dc, "coupling_diag_k_dc", err_msg, err_cap,
+                               (unsigned)zone_candidate_count) == false) {
+            return false;
+        }
+        if (zc->has_coupling_diag_k_dc) {
+            zc->coupling_diag_k_dc = (float)ddiag;
+        }
         /* Version <=3 LOSSLESS backward compat: an old export's single
          * coupling_coeff/coupling_neighbor_zone pair maps onto exactly one
          * cell of the row, same "one neighbor, everything else 0" mapping
@@ -1556,6 +1585,17 @@ static bool backup_import_apply(const char *body, char *err_msg, size_t err_cap)
                         (unsigned)i, zc->index, (unsigned)j);
                 return false;
             }
+        }
+        /* ZONES_CFG_VERSION 14->15 (PID_EXPANSION_PLAN.md 3.2 follow-up):
+         * coupling_diag_k_dc -- same "omit preserves the current value"
+         * convention as fuzzy_strength_pct above (this is a measured
+         * quantity, not a setting an absent import should reset). */
+        if (zc->has_coupling_diag_k_dc &&
+            !zones_config_set_coupling_diag_k_dc(zc->index, zc->coupling_diag_k_dc)) {
+            snprintf(err_msg, err_cap,
+                    "zone tuning entry %u (channel %u) rejected at commit setting coupling_diag_k_dc",
+                    (unsigned)i, zc->index);
+            return false;
         }
         /* No has_* guard -- zc->settings_source is ALWAYS a real value (either
          * the imported one, or the ZONE_SETTINGS_SOURCE_CUSTOM default seeded

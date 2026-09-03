@@ -319,6 +319,13 @@ esp_err_t zones_get_handler(httpd_req_t *req)
             (double)z->model_tau_s, (double)z->model_dead_time_s, z->tc_type, z->ct_mask,
             z->timing_profile, normal_measured ? "true" : "false", (double)normal_a,
             (double)z->fuzzy_strength_pct);
+        /* ZONES_CFG_VERSION 14->15 (PID_EXPANSION_PLAN.md 3.2 follow-up): the
+         * coupling identification's own diagonal cell -- see zone_cfg_t::
+         * coupling_diag_k_dc's own doc comment. Always emitted, same always-
+         * emit/read-back-and-repost reasoning as fuzzy_strength_pct/
+         * coupling_c%u above. %.4f matches model_k_dc's own precision -- same
+         * unit, same small-gain-zone concern. */
+        APPEND("\"coupling_diag_k_dc\":%.4f,", (double)z->coupling_diag_k_dc);
         /* 2026-08-30 (ZONES_CFG_VERSION 10->11): the coupling row, one
          * indexed key per cell (z%u_coupling_c%u is the matching POST-side
          * wire name -- see parse_zone_fields()) rather than a JSON array, so
@@ -942,6 +949,23 @@ static bool parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_count,
             }
         } else {
             z->fuzzy_strength_pct = current_z->fuzzy_strength_pct;
+        }
+    }
+    /* 2026-09-02 (ZONES_CFG_VERSION 14->15, PID_EXPANSION_PLAN.md 3.2
+     * follow-up): the coupling identification's own diagonal cell -- see
+     * zone_cfg_t::coupling_diag_k_dc's own doc comment. Same OPTIONAL,
+     * omit-PRESERVES convention as z%u_fuzzy_strength/z%u_coupling_c%u just
+     * above: this is a measured quantity, and a whole-page save from a
+     * client that predates this field must not silently delete it. */
+    snprintf(key, sizeof(key), "z%u_coupling_diag_k_dc", i);
+    {
+        if (zones_config_json_field_present(body, key)) {
+            if (!zones_config_json_parse_float_field(body, key, 0.0f, ZONE_MODEL_K_MAX, &z->coupling_diag_k_dc)) {
+                *err_reason = "zone coupling_diag_k_dc out of range";
+                return false;
+            }
+        } else {
+            z->coupling_diag_k_dc = current_z->coupling_diag_k_dc;
         }
     }
     /* 2026-08-30 (ZONES_CFG_VERSION 10->11): one indexed key per cell,

@@ -59,7 +59,7 @@ extern "C" {
  * value. Shared because both files must agree on what "the current version"
  * means: nvs_save() writes it, decode_zones_blob() decides whether a stored
  * blob needs migrating against it. */
-#define ZONES_CFG_VERSION 14
+#define ZONES_CFG_VERSION 15
 
 
 /* MAX31856 CR1.TC[3:0] nibble values 0x00-0x07 name a real thermocouple type
@@ -371,6 +371,43 @@ typedef struct {
      * completely different NVS namespace this file has no reason to know
      * about. */
     uint8_t  adaptive_tune_enabled;
+    /* ---- ZONES_CFG_VERSION 14->15 (2026-09-02, PID_EXPANSION_PLAN.md 3.2
+     * follow-up: "the matrix's OWN diagonal is better supported by the data
+     * than substituting ff_k_dc"). STORAGE ONLY -- zone_coupling_solve.c
+     * still substitutes ff_k_dc for G[row][row] and is UNCHANGED by this
+     * pass; this field only makes the alternative persistable so a later,
+     * separately reviewed pass can switch the solver behind a flag.
+     *
+     * coupling_diag_k_dc is THIS zone's own steady-state DC gain (degC per
+     * unit commanded duty, exactly model_k_dc's/coupling_coeff[]'s unit
+     * convention) as fitted by the SAME three-run settled-excitation
+     * identification that produced this zone's row of coupling_coeff[] --
+     * i.e. it is the diagonal cell of that identification's matrix, the one
+     * cell coupling_coeff[own index] is contractually forbidden to hold (see
+     * that field's own "MUST stay 0" comment). It is measured from the SAME
+     * data as the off-diagonal cross-gains, at the same time, by the same
+     * fit.
+     *
+     * Deliberately NOT named anything with "k_dc" alone, and deliberately
+     * not folded into model_k_dc or ff_k_dc -- both of those are a DIFFERENT
+     * identification (a single-zone step/relay test with every other zone
+     * held at rest) and can legitimately disagree with this field on a real
+     * board (measured condition number 4.64 vs 5.51, feasibility 65 degC vs
+     * 60 degC, favoring THIS field over ff_k_dc in the analysis that
+     * motivated adding it -- see PID_EXPANSION_PLAN.md section 3.2). A
+     * caller that confused the two would silently swap one plant model for
+     * another that happens to share units; see this repo's "split-module
+     * missing name" bug class for why that ambiguity is worth a longer name.
+     *
+     * 0 = "not measured by the coupling identification" -- the same
+     * convention coupling_coeff[]/coupling_tau_s[]/coupling_dead_time_s[]
+     * already use, and the only value an older (pre-v15) blob's migrated
+     * zones can carry, since no prior version stored this at all. Bounded by
+     * ZONE_MODEL_K_MAX, the same ceiling model_k_dc already uses -- this is
+     * the same physical quantity (a zone's own DC gain) from a different
+     * fit, so it has no reason to need a different order-of-magnitude
+     * ceiling. */
+    float coupling_diag_k_dc;
 } zone_cfg_t;
 
 
@@ -965,6 +1002,75 @@ typedef struct {
 _Static_assert(sizeof(zone_cfg_v13_t) == 184,
                "zone_cfg_v13_t must match the on-flash v13 layout byte-for-byte (184 bytes)"); /* v13 -- predates adaptive_tune_enabled */
 
+/* Frozen v14 layout -- what zone_cfg_t looked like immediately before THIS
+ * pass (ZONES_CFG_VERSION 14->15), adaptive_tune_enabled and all, predating
+ * coupling_diag_k_dc. Same discipline as zone_cfg_v13_t just above: field
+ * order hand-copied from v14's actual shape, never derived from the live
+ * struct. */
+typedef struct {
+    char name[ZONE_NAME_MAX_LEN + 1];
+    float cal_offset_c;
+    float pid_kp;
+    float pid_ki;
+    float pid_kd;
+    float max_ramp_c_per_hr;
+    float sanity_rate_c_per_min;
+    float max_temp_c;
+    float min_temp_c;
+    float heater_window_ms;
+    float heater_min_on_ms;
+    float heater_min_off_ms;
+    float guard_wrong_dir_window_s;
+    float guard_wrong_dir_rate_c_per_min;
+    float guard_off_settle_s;
+    float guard_runaway_rate_c_per_min;
+    float guard_runaway_margin_c;
+    float guard_drift_period_s;
+    float guard_sensor_fault_debounce_ticks;
+    float guard_frozen_window_s;
+    float cross_zone_max_delta_c;
+    float model_k_dc;
+    float model_tau_s;
+    float model_dead_time_s;
+    float fuzzy_strength_pct;
+    float coupling_coeff[MAX31856_CHANNEL_COUNT];
+    float coupling_tau_s[MAX31856_CHANNEL_COUNT];
+    float coupling_dead_time_s[MAX31856_CHANNEL_COUNT];
+    /* ---- uint8_t tail, exactly as v9/v10/v11/v12/v13 grouped them ---- */
+    uint8_t relay_mask;
+    uint8_t control_mode;
+    uint8_t tc_type;
+    uint8_t thermo_mask;
+    uint8_t ct_mask;
+    uint8_t timing_profile;
+    uint8_t settings_source;
+    /* ---- ZONES_CFG_VERSION 12->13's tuning-quality record, unchanged by
+     * v13->14 or THIS pass -- see zone_cfg_t::tuning_valid's own comment. ---- */
+    uint8_t  tuning_valid;
+    uint8_t  tuning_method;
+    uint8_t  tuning_rule;
+    uint8_t  tuning_settled;
+    uint8_t  tuning_extrapolation_converged;
+    uint8_t  tuning_tau_consistent;
+    float    tuning_baseline_c;
+    float    tuning_step_ambient_c;
+    float    tuning_raw_rise_c;
+    float    tuning_rise_inf_c;
+    uint32_t tuning_seq;
+    /* ---- ZONES_CFG_VERSION 13->14's adaptive-tune opt-in, unchanged by
+     * THIS pass. ---- */
+    uint8_t  adaptive_tune_enabled;
+} zone_cfg_v14_t;
+
+/* 188 = 184's raw content (184 bytes, itself already a multiple of 4) + 1
+ * (adaptive_tune_enabled) rounded back up to 4-byte alignment for the
+ * struct's own tail padding = 188. Hand-computed the same way as
+ * zone_cfg_v13_t's own assert comment -- never sizeof(zone_cfg_t), which by
+ * the time this pass lands is already the v15 (coupling_diag_k_dc) shape,
+ * not v14's. */
+_Static_assert(sizeof(zone_cfg_v14_t) == 188,
+               "zone_cfg_v14_t must match the on-flash v14 layout byte-for-byte (188 bytes)"); /* v14 -- predates coupling_diag_k_dc */
+
 typedef struct {
     uint8_t version;
     uint8_t thermo_count;
@@ -1125,6 +1231,23 @@ typedef struct {
                      * pass; predates adaptive_tune_enabled. zone_timing_profile_t
                      * unchanged again, reused verbatim same as v9/v10/v11/v12's own
                      * comment. */
+
+typedef struct {
+    uint8_t version;
+    uint8_t thermo_count;
+    uint8_t relay_count;
+    uint8_t max_simultaneous_relays;
+    uint8_t continue_on_zone_trip;
+    uint8_t safety_tc_type;
+    zone_cfg_v14_t zones[MAX31856_CHANNEL_COUNT];
+    uint8_t timing_profile_count;
+    zone_timing_profile_t timing_profiles[MAX31856_CHANNEL_COUNT];
+    float pc_link_abort_silence_ms;
+    uint32_t crc32;
+} zones_cfg_v14_t; /* v14 -- what zones_cfg_t looked like immediately before THIS
+                     * pass; predates coupling_diag_k_dc. zone_timing_profile_t
+                     * unchanged again, reused verbatim same as v9/v10/v11/v12/v13's
+                     * own comment. */
 
 
 typedef enum {

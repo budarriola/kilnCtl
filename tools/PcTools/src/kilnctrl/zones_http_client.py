@@ -239,6 +239,16 @@ _ZONE_FIELD_FORM_KEY = {
     # 0xFF (ZONE_SETTINGS_SOURCE_CUSTOM) or another zone's index; self-reference
     # and cycle-forming chains are refused by the firmware itself.
     "settings_source": "settings_source",
+    # ZONES_CFG_VERSION 14->15 (PID_EXPANSION_PLAN.md section 3.2 follow-up,
+    # 2026-09-02): coupling_diag_k_dc -- the coupling identification's own
+    # diagonal cell, a SEPARATE measured DC gain from model_k_dc/ff_k_dc (see
+    # zone_cfg_t::coupling_diag_k_dc's own doc comment in zones_config_json.h
+    # for why). zones_http_handlers.c: snprintf(key, ..., "z%u_coupling_diag_k_dc", i)
+    # -- unlike coupling_tau_c%u/coupling_dead_time_c%u below, this DOES have a
+    # real POST wire field (parse_zone_fields() accepts it, omitted preserves
+    # the current value -- same convention as fuzzy_strength_pct/coupling_c%u
+    # above). Same JSON key and form-key suffix, no name translation needed.
+    "coupling_diag_k_dc": "coupling_diag_k_dc",
 }
 #: Integer-valued zone fields -- posted as a plain int string (parse_u8_field()
 #: on the firmware side), never a float repr like "2.0".
@@ -476,6 +486,13 @@ _PRESET_ZONE_OVERRIDE_FIELDS = {
     # see build_post_body()'s timing-profile loop).
     "name", "thermo_mask", "tc_type", "ct_mask", "timing_profile", "heater_min_off_ms",
     "fuzzy_strength_pct",
+    # ZONES_CFG_VERSION 14->15 (PID_EXPANSION_PLAN.md section 3.2 follow-up,
+    # 2026-09-02): coupling_diag_k_dc, the coupling identification's own
+    # diagonal cell -- a scalar GET/POST field, same class as
+    # fuzzy_strength_pct just above, not the whole-row coupling_coeff
+    # handling below (this is a single measured DC gain per zone, not a
+    # matrix row).
+    "coupling_diag_k_dc",
     # guard_* family: thermal_guard.c's per-zone guard thresholds
     # (guard 1's dead-element rate lives in sanity_rate_c_per_min above;
     # these are guards 2-7ish -- wrong-direction, off-settle, runaway,

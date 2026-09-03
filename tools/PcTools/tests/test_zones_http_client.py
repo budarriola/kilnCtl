@@ -54,6 +54,10 @@ def _sample_zone(index: int, **overrides) -> dict:
         "tc_type": 3, "ct_mask": 0, "timing_profile": 0,
         "normal_current_measured": False, "normal_current_a": 0.0,
         "fuzzy_strength_pct": 0.0,
+        # ZONES_CFG_VERSION 14->15 (PID_EXPANSION_PLAN.md section 3.2
+        # follow-up): coupling_diag_k_dc, always emitted alongside
+        # fuzzy_strength_pct/coupling_c%u above.
+        "coupling_diag_k_dc": 0.0,
         # Coupling row: MAX31856_CHANNEL_COUNT (3, uart_task_ids.h's
         # THERMO_CHANNEL_COUNT) cells, diagonal (j == index) always 0 --
         # zones_http.c always emits the full row for every zone regardless
@@ -275,11 +279,13 @@ class BuildPostBodyTest(unittest.TestCase):
         current["zones"][1]["coupling_c0"] = 0.0     # diagonal for zone 0, off-diag for zone 1
         current["zones"][1]["coupling_c2"] = 1.25
         current["zones"][1]["settings_source"] = 0
+        current["zones"][1]["coupling_diag_k_dc"] = 18.75
         form = _decode_body(zh.build_post_body(current, {"name": "p", "zones": []}))
         self.assertEqual(form["z1_fuzzy_strength"], repr(37.5))
         self.assertEqual(form["z1_coupling_c0"], repr(0.0))
         self.assertEqual(form["z1_coupling_c2"], repr(1.25))
         self.assertEqual(form["z1_settings_source"], "0")
+        self.assertEqual(form["z1_coupling_diag_k_dc"], repr(18.75))
         # settings_source == 0 is a REAL distinct value (a chain link to
         # zone 0), not the "not set" sentinel -- must round-trip as "0",
         # never coerced to something else or dropped as falsy.
@@ -872,6 +878,20 @@ class CapturedLiveGetFixtureTest(unittest.TestCase):
         form = _decode_body(body)
         for i in range(len(current["zones"])):
             self.assertEqual(form[f"z{i}_fuzzy_strength"], repr(50.0))
+
+    def test_coupling_diag_k_dc_override_round_trips(self):
+        """ZONES_CFG_VERSION 14->15 (PID_EXPANSION_PLAN.md section 3.2
+        follow-up): a preset naming coupling_diag_k_dc must reach the POST
+        body -- same class of check as
+        test_fuzzy_strength_override_matches_the_hardware_repro_command
+        above, for the new scalar field."""
+        current = self._load_fixture()
+        preset = {"zones": [{"index": i, "coupling_diag_k_dc": 21.6}
+                             for i in range(len(current["zones"]))]}
+        body = zh.build_post_body(current, preset)
+        form = _decode_body(body)
+        for i in range(len(current["zones"])):
+            self.assertEqual(form[f"z{i}_coupling_diag_k_dc"], repr(21.6))
 
     def test_MUTATION_a_new_unmapped_get_field_is_caught_BREAK_PROOF(self):
         """THE regression guard, proved red then green: inject a fake field
