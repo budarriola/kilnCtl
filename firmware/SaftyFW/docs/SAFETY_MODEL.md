@@ -609,11 +609,62 @@ element power and insulation, and nobody has ever measured this kiln's
 maximum legitimate ramp rate. A small test kiln on full power can genuinely
 exceed 15 °C/min; a large one struggles past 5. Hard-coding a plausible number
 and calling the guard done is the mistake `thermal_guard.h` explicitly refuses
-to make for its guard 8, and the same discipline applies here.
+to make for its guard 8, and the same discipline applies here — `0.0f` here
+is not a "substitute a default" zero, it is the same "no default exists"
+convention `abs_max_temp_c` uses for S1, and `config_store_default()` ships it
+that way.
 
 Enable it after a full-power ramp has been logged and the real maximum rate is
 known — set the threshold at roughly 2 × that, and the guard becomes genuinely
 useful. `TODO.md` phase 6 tracks this.
+
+**Built and host-tested, 2026-09-03.** `safety_guards.c` now implements the
+pure guard: rather than an instantaneous per-tick derivative — which at this
+module's ~100 ms tick would amplify a fraction of a degree of ordinary
+MAX31856 read noise into a triple-digit apparent °C/min, exactly the
+nuisance-trip generator §2 forbids — it measures the **average rate over one
+whole `rate_window_s` window** using a baseline-sample-and-hold (remember the
+reading at the window's start, compare against the reading `rate_window_s`
+later, then slide to a fresh window). A single glitchy sample landing on a
+window boundary can inflate one window's average, so the trip condition
+additionally requires **two consecutive over-threshold window evaluations**
+before latching — the same "magnitude and duration, one alone is never
+enough" doctrine applied across windows instead of within one: a real
+runaway keeps climbing every window and clears both bars with margin, while a
+glitch that reverts by the next sample becomes the *starting* value of the
+following window and measures back down, never compounding into a second
+consecutive over-threshold window. An invalid/stale/NaN reading cannot poison
+either endpoint: S5's bad-read check already returns before this guard's
+block runs on any tick that is not `tc_valid`, so the window is left
+**paused**, not corrupted, across a bad-read burst, and resumes from its
+original baseline once the sensor recovers.
+
+**Honest scope limit on the "legitimate full-power ramp" margin:** this repo
+has no logged full-power ramp on any real kiln to read a number from — this
+section's own preceding paragraph says so plainly. The host test suite
+therefore proves the margin against the number *this document itself*
+already commits to (a small kiln's stated worst case, "can genuinely exceed
+15 °C/min") rather than a measured one: `max_rate_c_per_min` commissioned at
+2× that (30 °C/min) does not trip on a 30-minute ramp held exactly at
+15 °C/min. That is a proof of the *design's* margin, not a substitute for
+the bench measurement this section still calls for before the threshold is
+ever actually commissioned on a real board.
+
+**Integrated, 2026-09-03.** `safety_core.c`'s `safety_core_load_guard_cfg()` —
+the function that copies commissioned `config_store` fields into
+`s_guard_cfg`, the same one a 2026-08-27 audit found missing for S1 — now
+copies `max_rate_c_per_min` (0x0204, fields_set-gated, same "0 = never
+commissioned" idiom as `abs_max_temp_c`) and `rate_window_s` (0x0205,
+ordinary "0 → documented default" field) into the guard config it hands the
+pure module. `test_safety_core_s8_wiring.c` proves the whole chain: a value
+staged through `config_store`'s real `SET_PARAM` path reaches
+`safety_guards_tick()` and changes its verdict, and the same test proves the
+converse — an uncommissioned board (config_store's shipped default, the bit
+clear) runs the identical implausible ramp and stays silent. **Still ships
+inert by default**: nothing about this wiring pass changes
+`config_store_default()`'s `max_rate_c_per_min = 0.0f`, so S8 remains off on
+every board until an operator actually commissions a threshold from a
+measured full-power ramp, per this section's own guidance above.
 
 ### S9 — Trip ineffective / contactor welded · **TRIP-ESCALATE** · loudest thing here
 
@@ -1087,7 +1138,7 @@ Provocation methods are in [`GUARD_TEST_MATRIX.md`](GUARD_TEST_MATRIX.md).
 | S5 | Safety thermocouple invalid | WARN→TRIP | [x] | [x] | [x] | [ ] |
 | S6 | Main controller unhealthy | TRIP | [x] | [x] | [x] | [ ] |
 | S7 | E-stop | TRIP | [x] | [x] | [x] | [ ] |
-| S8 | Implausible rate of rise | TRIP, off by default | [ ] | [ ] | [ ] | [ ] |
+| S8 | Implausible rate of rise | TRIP, off by default | [x] *(2026-09-03; two-window average-rate design, see S8's own section above)* | [x] | [x] *(2026-09-03; `safety_core_load_guard_cfg()` now copies `max_rate_c_per_min`/`rate_window_s` from config_store -- `test_safety_core_s8_wiring.c` proves the whole chain and the still-inert default, see S8's own section above)* | [ ] |
 | S9 | Trip ineffective / contactor welded | ESCALATE | [x] | [x] | [x] | [ ] |
 | S10 | Safety TC vs zone TC disagreement | WARN | [x] | [x] | [x] *(same `tc_placement_valid` gate as S2)* | [ ] |
 | S11 | Frozen safety reading | TRIP | [x] | [x] | [x] | [ ] |

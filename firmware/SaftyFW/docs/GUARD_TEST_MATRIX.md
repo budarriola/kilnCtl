@@ -103,7 +103,7 @@ Pure `safety_guards.c`, MSVC, no SDK, no hardware — same setup as
 | S6b | Link dead 11 s, no current | WARN only |
 | S6b | Link dead 11 s, current present | **TRIP** |
 | S6b | Link dead 121 s, no current | **TRIP** — the unconditional backstop |
-| S8 | Rate above threshold with `max_rate_c_per_min` = 0 | **No trip** — disabled means disabled |
+| S8 | Rate above threshold with `max_rate_c_per_min` = 0 | **No trip** — disabled means disabled. Host-tested 2026-09-03 (`test_s8()`, `test/test_safety_guards.c`) |
 | S9 | Trip, then current persists 11 s | `TRIP_INEFFECTIVE` |
 | S9 | Trip, current decays with τ=1 s | No escalation |
 | S10 | Disagreement in `EXTERNAL_OVERHEAT` | Guard inactive |
@@ -184,9 +184,21 @@ With the kiln empty and someone present.
 table below predated the S6a/S9/S11 reachability wiring and §6a's reachability
 re-derivation, and never covered S10, S11, S13 or S14 at all. §6c's
 recomputation puts 11 of 14 implemented guards structurally reachable
-(S8 unimplemented; S1/S13/S14 deliberately configured off by default, §6
-category (d)) — this table now has a row, or an explicit refusal, for every
-one of those 11.
+(S8 was unimplemented at that recomputation's own time; S1/S13/S14
+deliberately configured off by default, §6 category (d)) — this table now has
+a row, or an explicit refusal, for every one of those 11.
+
+**S8 gained a pure-module implementation the same day** (`safety_guards.c`,
+this file's own §3.4 row below is updated accordingly) but is **still not
+integrated**: `safety_core_load_guard_cfg()` does not yet copy
+`max_rate_c_per_min`/`rate_window_s` out of `config_store` into the guard
+config the pure module reads, so on real hardware today it still evaluates
+against the zero-initialised default regardless of what an operator
+commissions — the guard stays inert exactly as it did before this pass,
+just for a slightly different reason (uncopied config rather than absent
+code). This is the same "built and host-tested" vs. "integrated" distinction
+`SAFETY_MODEL.md`'s completion checklist already tracks for every other
+guard, applied to a brand-new one instead of a regression in an old one.
 
 **Read each row's Precondition column before touching anything.** Several
 guards are deliberately shipped inert and must be armed first — restore every
@@ -209,9 +221,24 @@ write, both of which end that run.
 | S13 | **Commissioning gap, must be armed first**: `tc_source` set to `SAFETY_TC_SOURCE_BORROWED_ZONE` (or `BOTH`) and `borrowed_zone_index` set to the specific KilnFW zone (0..2) under test — both default off (`OWN_J7`, category (d) in §6c) | Stall or unplug **that specific zone's** thermocouple on the main board (same physical technique as §3.2's "Stopped converting" row), while the link and every other zone stay healthy so `context_valid` stays true | Graduated like S5: `s13_warn` at `borrowed_stale_s` (default 10 s), trip (`SAFETY_TRIP_BORROWED_STALE`) at `borrowed_stale_trip_s` (default 60 s) once KilnFW's own `sample_counter` for that zone stops incrementing (`safety_link_frames.c`: increments only when a fresh, non-stale conversion is consumed) | Reconnect/unstall only the one zone's thermocouple used for the test. Restore `tc_source` and `borrowed_zone_index` to their prior (or intended production) values afterwards and confirm via the config CRC in telemetry, same as any other temporarily-changed commissioning field |
 | S14 | Per channel: `i_normal_a[ch]` commissioned (`i_normal_valid[ch]` true, a real measured baseline) and `ct_installed = yes`; inert on a `ct_installed = no` board (§9) | With the channel's relay commanded on, add a known extra load in the same CT-monitored leg (a second heater or resistive load clamped in parallel through the same loop) to push measured current above `overcurrent_pct` (default 150 %) of the commissioned normal | **WARN only**, per channel — `s14_warn[ch]` sets after `overcurrent_time_s` (default 30 s) of sustained overcurrent; no relay effect, non-latching | Safe by construction. Remove the extra load and confirm the per-channel WARN clears on its own |
 
-**S8 cannot be provoked at all, on the bench or otherwise**: `safety_guards.c`
-has zero lines implementing it (`grep S8 safety_guards.c` = 0 hits beyond the
-enum comment, §6c). There is nothing to trip until it is written.
+**S8 is now integrated (2026-09-03) but still cannot be provoked on the
+bench — the reason changed again, to the one this document's other rows
+share.** `safety_guards.c` implements the pure guard (two-window
+average-rate design, `SAFETY_MODEL.md` §4's S8 section has the full
+reasoning) and is host-tested (`test_s8()`). `safety_core_load_guard_cfg()`
+(`safety_core.c`) now copies `max_rate_c_per_min`/`rate_window_s` from
+`config_store` into the guard config — the same "producer without consumer"
+shape S1's 2026-08-27 audit found is fixed for S8 too, and
+`test_safety_core_s8_wiring.c` proves the whole chain (a value staged
+through config_store's real `SET_PARAM` path changes `safety_guards_tick()`'s
+verdict) and the still-inert default (an uncommissioned board runs the same
+implausible ramp and does not trip). What remains before a bench provocation
+is purely the design's own precondition, unchanged by this wiring pass: this
+repo has no logged full-power ramp on any real kiln to set
+`max_rate_c_per_min` from, so the guard ships genuinely off
+(`config_store_default()`'s `0.0f`) until an operator measures one and
+commissions a threshold at roughly 2× it, per `SAFETY_MODEL.md` §4's own
+guidance.
 
 Restore every temporarily-lowered threshold or commissioning field afterwards,
 and **re-read the config CRC from telemetry to prove it** — a test threshold
@@ -522,7 +549,7 @@ below rather than folded into either one):
 | S6a | `main_fault_asserted` | `discrete_task_main_fault()` (`safety_core.c:1073`) | **(a) reachable in source; (b) not exercisable by any host fixture** — `SimFW`/`virtual_dut` are gone, so this is bench-hardware-only, same conclusion §6a already reached |
 | S6b | `link_up` | `link_task_link_up()` | **(a) reachable** — both the soft current-gated tier (via S3's `any_current_present` fix) and the unconditional hard backstop |
 | S7 | `estop_pressed` | `discrete_task_estop_pressed()` → `discrete_pin_policy_estop_asserted()` (`discrete_task.c:98`) | **(a) reachable** — confirmed polarity is correct: `gpio_get(SAFTYFW_PIN_ESTOP)` HIGH decodes to asserted, per `discrete_pin_policy.h` and `test_discrete_pin_policy.c` |
-| S8 | `max_rate_c_per_min` | none — no code path | **not implemented**, excluded from the count |
+| S8 | `max_rate_c_per_min`, `rate_window_s` | `safety_core_load_guard_cfg()` (`safety_core.c`), gated on `CONFIG_STORE_SET_MAX_RATE_C_PER_MIN`, wired 2026-09-03 | **(d) deliberately configured off** — implemented and integrated (`test_safety_core_s8_wiring.c` proves the whole chain), same "no default by design" shape as S1, not a bug |
 | S9 | `relay_deenergized`, `any_current_present` | `!relay_owner_is_energized()` (`safety_core.c:1109`); current as S3 | **(a) reachable** |
 | S10 | same context reduction as S2 | same as S2 | **(a) reachable** |
 | S11 | `heat_commanded` (= `any_current_present`) | same as S3 (`safety_core.c:622-660`) | **(a) reachable** |
@@ -666,7 +693,7 @@ pass (no hardware was touched); it is a now-open door, not a result.
 | S11 | Yes | **Yes**, needs `heat_commanded` (`any_current_present`) true for the full `frozen_window_s` | Current flowing — same as S3/S4/S9 |
 | S12 | Yes | **Yes** — `cj_c` is read ungated by context or link | None |
 | S13 | Yes | **Yes** — `sample_counter_advancing` now produced from a real context-frame comparison (`context_borrowed_sample_counter_advancing()`, `src/snapshots.h`, called from `safety_core_build_input()`); `tc_source` still defaults to `OWN_J7` until BORROWED_ZONE/BOTH + `borrowed_zone_index` are commissioned | Requires `tc_source` = BORROWED_ZONE/BOTH and `borrowed_zone_index` both commissioned on a real board — same commissioning requirement every other config-gated guard (S1, S2/S10) has |
-| S8 | Would have been masked too, had it existed | **N/A — not implemented.** `safety_guards.c` has no S8 code at all (`safety_guards.h`: "NOT implemented here") | `max_rate_c_per_min` defaulting to 0 is a *design* "ships disabled" choice (`SAFETY_MODEL.md` §4, `CONFIG_REFERENCE.md` §2), not a missing wire — needs a measured kiln ramp before it can even be written |
+| S8 | Would have been masked too, had it existed at the time | **N/A at the time of this audit row — implemented and integrated 2026-09-03.** `safety_guards.c` now has the S8 guard (`safety_guards.h` no longer says "NOT implemented here"), and `safety_core_load_guard_cfg()` now copies `max_rate_c_per_min`/`rate_window_s` from `config_store` (`test_safety_core_s8_wiring.c` proves the whole chain) | `max_rate_c_per_min` defaulting to 0 is still a *design* "ships disabled" choice (`SAFETY_MODEL.md` §4) — that has not changed and is not a bug. Nothing is open on the wiring any more; the threshold itself still needs a measured full-power kiln ramp before anyone should set it to a non-zero value, per that same section |
 
 **Checked explicitly: does any other guard share S1's "0 means not
 commissioned, never trip" shape?** No. `safety_guards.c`'s `effective_f()`/
@@ -674,9 +701,10 @@ commissioned, never trip" shape?** No. `safety_guards.c`'s `effective_f()`/
 *other* threshold field is 0 — S5/S11/S12/S2/S3/S6b/S9/S10/S13's thresholds
 all do this (see the `_DEFAULT` macros at the top of that file).
 **`max_rate_c_per_min` (S8) is the one other field with the same
-deliberate "0 = disabled" shape**, but it disables an entire guard that has
-no implementation to gate, rather than leaving one threshold inside an
-otherwise-active guard unset. `tc_source` defaulting to `OWN_J7` (S13) and
+deliberate "0 = disabled" shape**, and as of 2026-09-03 it disables an
+entire *integrated* guard — `safety_core_load_guard_cfg()` copies it the
+same way `abs_max_temp_c` is copied for S1 — rather than leaving one
+threshold inside an otherwise-active guard unset. `tc_source` defaulting to `OWN_J7` (S13) and
 `tc_placement_mode` defaulting to `CHAMBER_AGREED` (S2/S10) are enum
 defaults, not the numeric "0/unset" convention, though `tc_source`'s default
 has the same practical effect of leaving S13 keyed to an uncommissioned
@@ -688,8 +716,15 @@ and, as a direct consequence, un-masks eleven others (S2, S3, S4, S6a, S6b,
 S7, S9, S10, S11, S12, and S5 itself) that were always reachable in source
 but had never once run their own condition on this physical board. It
 commissions nothing: S1 and S13 remain exactly as blocked as
-`SCENARIO_RESULTS.md` already recorded, and S8 remains entirely
-unimplemented.
+`SCENARIO_RESULTS.md` already recorded. S8 was entirely unimplemented as of
+this bottom line; it gained a pure-module implementation and host tests
+2026-09-03 (`SAFETY_MODEL.md` §4's S8 section, `test_s8()`) and, the same
+day, `safety_core_load_guard_cfg()` was wired to copy
+`max_rate_c_per_min`/`rate_window_s` from `config_store`
+(`test_safety_core_s8_wiring.c`). S8 is now integrated and inert-by-default,
+same as S1 — commissioning is still required to arm it, and this repo still
+has no logged full-power ramp to set that threshold from, but there is no
+remaining wiring gap.
 
 
 ## 8. The commissioning interlock (2026-08-28)

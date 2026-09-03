@@ -378,6 +378,22 @@ static void safety_core_load_guard_cfg(const config_store_record_t *rec)
     s_guard_cfg.tc_disagreement_c      = rec->tc_disagreement_c;
     s_guard_cfg.tc_disagreement_time_s = (float)rec->tc_disagreement_time_s;
 
+    // S8. max_rate_c_per_min follows the exact abs_max_temp_c idiom above:
+    // fields_set-gated, no substituted default, because CONFIG_REFERENCE.md
+    // section 7 says it ships genuinely UNSET (not merely zero) and 0.0f is
+    // also the value that means "never trips" (safety_guards.c's own gate,
+    // `if (cfg->max_rate_c_per_min > 0.0f)`). Copying a genuine 0 through
+    // when the bit IS set is still correct -- that is an operator explicitly
+    // leaving S8 off, same distinction SAFETY_MODEL.md section 1 draws for
+    // S1. rate_window_s is NOT fields_set-gated, same as blind_grace_s/
+    // frozen_window_s/etc above: it is a "0 -> documented default" field per
+    // safety_guards.c's own effective_f(RATE_WINDOW_S_DEFAULT), so copying a
+    // genuine 0 through is correct and keeps that single source of defaults
+    // authoritative here.
+    s_guard_cfg.max_rate_c_per_min =
+        (rec->fields_set & CONFIG_STORE_SET_MAX_RATE_C_PER_MIN) ? rec->max_rate_c_per_min : 0.0f;
+    s_guard_cfg.rate_window_s = (float)rec->rate_window_s;
+
     // S14 (COMMISSIONING_UX.md section 3.3). Per-channel i_normal_a is
     // fields_set-gated INDIVIDUALLY (three separate bits, not one group
     // bit -- config_store.h's own comment on why) -- a channel whose bit is

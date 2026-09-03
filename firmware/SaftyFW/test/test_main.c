@@ -37,6 +37,7 @@ void run_test_link_diag_flags(void);
 void run_test_current_presence_policy(void);
 void run_test_discrete_pin_policy(void);
 void run_test_commissioning_gate(void);
+void run_test_safety_core_s8_wiring(void);
 
 int main(void)
 {
@@ -69,6 +70,7 @@ int main(void)
     run_test_current_presence_policy();
     run_test_discrete_pin_policy();
     run_test_commissioning_gate();
+    run_test_safety_core_s8_wiring();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     if (g_test_failures > 0) {
