@@ -14,24 +14,44 @@
 
 static const char *TAG = "adaptive_tune_http";
 
-/* Memory budget: ONE status-response buffer, sized generously per zone
- * (96 bytes/zone covers every field printed below with room to spare) and
- * allocated from PSRAM (MALLOC_CAP_SPIRAM), never the request handler's own
- * internal-DRAM stack -- same discipline log_http.c documents, following the
- * internal-DRAM-exhaustion incident that truncated /app.js (see project
- * memory "ESP internal DRAM exhaustion" and the documented httpd stack
- * near-overflow, 64 bytes free under real load). At MAX31856_CHANNEL_COUNT
- * (<=5) zones this is comfortably under 1.5KB, once, freed before the
- * handler returns -- the per-zone budget below was widened from 96 to 320
- * bytes when the coupled-solve/Ki-diagnosis fields (PID_EXPANSION_PLAN.md
- * 3.3) were added, to cover two more ~96-byte refusal-reason strings per
- * zone plus their surrounding numeric fields. The enable-POST body buffer
+/* Memory budget: ONE status-response buffer, allocated from PSRAM
+ * (MALLOC_CAP_SPIRAM), never the request handler's own internal-DRAM stack
+ * -- same discipline log_http.c documents, following the internal-DRAM-
+ * exhaustion incident that truncated /app.js (see project memory "ESP
+ * internal DRAM exhaustion" and the documented httpd stack near-overflow,
+ * 64 bytes free under real load).
+ *
+ * The prior "320 bytes/zone, generously" comment here was never measured
+ * against the actual snprintf() below and was wrong: at MAX31856_CHANNEL_
+ * COUNT==3 the real per-zone object is exactly 778 bytes at its worst case
+ * (measured by this file's host test, render_worst_case_adaptive_tune_
+ * json() in test_adaptive_tune_http.c, which builds the widest value every
+ * %-spec below can produce and asserts this constant against it) --
+ * against a 320-byte/zone budget that clamped and served 1023 bytes of
+ * truncated JSON to /api/adaptive_tune, invalid JSON that hung the zones
+ * page's Continuous Tuning panel on "Loading...". The 778-byte figure comes
+ * from: three char[96] reason strings (last_refusal_reason/coupled_
+ * refusal_reason/ki_refusal_reason, adaptive_tune.h) each at their full
+ * 95-char capacity, every %.4f/%.2f float at a 6-digit-plus-sign-plus-
+ * decimals worst case, every %u at its type's max (uint32_t observation
+ * counts print up to 10 digits), plus the ~424 literal JSON bytes
+ * (field names/punctuation) the format string itself contributes.
+ *
+ * Budgeted at 900 bytes/zone (headroom: 900*3+64=2764 vs the measured
+ * 10+3*778+2=2346 needed for the full array at 3 zones -- 418 bytes,
+ * ~15%, well above the 50-byte minimum margin test_dashboard_json.c's
+ * sibling test enforces for the analogous /api/status buffer) plus a
+ * 64-byte fixed allowance for the "{"zones":[" / "]}" wrapper. Still PSRAM
+ * (MALLOC_CAP_SPIRAM), not internal DRAM -- 2764 bytes is trivialy inside
+ * this board's PSRAM budget and does not touch the scarce internal-DRAM
+ * pool at all, so the internal-DRAM-exhaustion risk this comment opened
+ * with is unaffected by this file's growth. The enable-POST body buffer
  * below stays a small fixed stack array (<=65 bytes) -- consistent with the
  * tiny form-body buffers already used elsewhere in this codebase (e.g.
  * adaptive_tune.c's own prior version of this handler, settings_http.c) and
  * far below anything that would threaten the documented near-overflow
  * margin. */
-#define ADAPTIVE_TUNE_STATUS_BUF_BYTES (320 * MAX31856_CHANNEL_COUNT + 64)
+#define ADAPTIVE_TUNE_STATUS_BUF_BYTES (900 * MAX31856_CHANNEL_COUNT + 64)
 
 static esp_err_t status_get_handler(httpd_req_t *req)
 {
@@ -42,11 +62,21 @@ static esp_err_t status_get_handler(httpd_req_t *req)
     }
 
     size_t off = 0;
-    off += (size_t)snprintf(buf + off, ADAPTIVE_TUNE_STATUS_BUF_BYTES - off, "{\"zones\":[");
+    int n = snprintf(buf + off, ADAPTIVE_TUNE_STATUS_BUF_BYTES - off, "{\"zones\":[");
+    if (n < 0 || (size_t)n >= ADAPTIVE_TUNE_STATUS_BUF_BYTES - off) {
+        // Can't happen with the fixed literal above and any sane buffer size, but
+        // treat it exactly like the per-zone check below: fail loudly, never
+        // serve a truncated body -- see the loop's own comment on why.
+        ESP_LOGE(TAG, "adaptive_tune status buffer too small for even the fixed preamble (%d)", n);
+        free(buf);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "response too large");
+        return ESP_OK;
+    }
+    off += (size_t)n;
     for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
         adaptive_tune_zone_status_t st;
         adaptive_tune_get_status(zi, &st);
-        off += (size_t)snprintf(
+        n = snprintf(
             buf + off, ADAPTIVE_TUNE_STATUS_BUF_BYTES - off,
             "%s{\"zone\":%u,\"enabled\":%s,\"observation_count\":%u,\"observations_lifetime\":%u,"
             "\"has_applied\":%s,\"prior_k_dc\":%.4f,\"applied_k_dc\":%.4f,\"delta_pct\":%.2f,"
@@ -67,13 +97,28 @@ static esp_err_t status_get_handler(httpd_req_t *req)
             st.coupled_applied ? "true" : "false", (unsigned)st.coupled_cells_changed, st.coupled_refusal_reason,
             (unsigned)st.ki_verdict, (double)st.ki_correction_pct, st.ki_applied ? "true" : "false",
             st.ki_refusal_reason, st.revert_available ? "true" : "false");
-        if (off >= ADAPTIVE_TUNE_STATUS_BUF_BYTES) {
-            off = ADAPTIVE_TUNE_STATUS_BUF_BYTES - 1; // truncated -- MAX31856_CHANNEL_COUNT is small (<=5) and
-                                                        // the buffer sized generously, so this should not trigger
-            break;
+        // Never silently truncate: a client cannot distinguish a truncated body
+        // from a corrupt one, and this exact defect (the 320-byte/zone budget
+        // clamping mid-key, on the wire as 1023 bytes of invalid JSON) hid
+        // behind /api/adaptive_tune looking like a permanently-loading fetch
+        // rather than a visible failure. Fail loudly instead: free the buffer
+        // and answer 500, no body written.
+        if (n < 0 || (size_t)n >= ADAPTIVE_TUNE_STATUS_BUF_BYTES - off) {
+            ESP_LOGE(TAG, "adaptive_tune status buffer too small at zone %u (need %d, have %u left)", (unsigned)zi,
+                      n, (unsigned)(ADAPTIVE_TUNE_STATUS_BUF_BYTES - off));
+            free(buf);
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "response too large");
+            return ESP_OK;
         }
+        off += (size_t)n;
     }
-    snprintf(buf + off, ADAPTIVE_TUNE_STATUS_BUF_BYTES - off, "]}");
+    n = snprintf(buf + off, ADAPTIVE_TUNE_STATUS_BUF_BYTES - off, "]}");
+    if (n < 0 || (size_t)n >= ADAPTIVE_TUNE_STATUS_BUF_BYTES - off) {
+        ESP_LOGE(TAG, "adaptive_tune status buffer too small for closing brace (%d)", n);
+        free(buf);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "response too large");
+        return ESP_OK;
+    }
 
     httpd_resp_set_type(req, "application/json");
     esp_err_t err = httpd_resp_sendstr(req, buf);

@@ -78,6 +78,7 @@ $sources = @(
     (Join-Path $testDir "test_bx_worker_reentrancy.c"),
     (Join-Path $testDir "test_iter_tune.c"),
     (Join-Path $testDir "test_cone_table.c"),
+    (Join-Path $testDir "test_ramp_lock_onesided.c"),
     (Join-Path $testDir "sim_plant.c"),
     (Join-Path $driversDir "pid.c"),
     (Join-Path $driversDir "cone_table.c"),
@@ -593,17 +594,42 @@ $cmd21 = "call `"$vcvars`" x64 >nul && cl /nologo /W3 /EHsc /std:c11 /I`"$stubDi
 
 Invoke-HostTestExe -Name "partition_info_http" -ExePath $exe21 -BuildCmd $cmd21
 
+# ---- test_adaptive_tune_http.c: its own TWENTY-SECOND, separate executable
+# Live bug: GET /api/adaptive_tune (adaptive_tune_http.c's status_get_
+# handler()) was serving exactly 1023 bytes of TRUNCATED JSON -- the
+# 320*MAX31856_CHANNEL_COUNT+64 buffer budget was a guess never measured
+# against the real per-zone snprintf(), and the old code CLAMPED on
+# overflow instead of failing, so the truncation was silent (200 OK, hung
+# the zones page's "Continuous Tuning" panel on "Loading..." instead of
+# erroring visibly). Same dashboard_json.c/test_dashboard_json.c
+# mirror-render pattern as exe15 above -- adaptive_tune_http.c's status_
+# get_handler() is `static` with no other seam, so this file hand-mirrors
+# its exact snprintf() format string rather than pulling in the whole
+# translation unit's stub surface (wifi_provision_http_get_server()/
+# adaptive_tune_get_status()/set_enabled()/revert(), none of which this
+# test exercises). Same "stubDir + commonInc only" include story as exe15:
+# adaptive_tune.h's own #include chain (profile_executor.h -> MAX31856.h)
+# is already proven host-compilable by dashboard_json.c/exe15's identical
+# chain, resolved via the including file's own directory, not driversDir.
+$exe22 = Join-Path $outDir "kilnctl_host_tests_adaptive_tune_http.exe"
+$athObjDir = Join-Path $outDir "ath"
+New-Item -ItemType Directory -Force -Path $athObjDir | Out-Null
+$cmd22 = "call `"$vcvars`" x64 >nul && cl /nologo /W3 /EHsc /std:c11 /I`"$stubDir`" /I`"$commonInc`" " +
+        "/Fo:`"$athObjDir\\`" /Fe:`"$exe22`" `"$(Join-Path $testDir 'test_adaptive_tune_http.c')`""
+
+Invoke-HostTestExe -Name "adaptive_tune_http" -ExePath $exe22 -BuildCmd $cmd22
+
 # ---- summary ----------------------------------------------------------
 #
-# 20 executables are attempted above (main + zones_http + safety_cfg_http +
+# 21 executables are attempted above (main + zones_http + safety_cfg_http +
 # profile_executor_prestart + autotune_engine_prestart + profiles_http +
 # ota_http + uart_protocol_link_delegate + board_temps + kiln_io_owner +
 # safety_trip_words + safety_trip_decision + safety_link + dashboard_json +
 # telemetry_format + adaptive_tune + event_log + run_state_relay_cycles +
-# zone_coupling_solve + partition_info_http).
+# zone_coupling_solve + partition_info_http + adaptive_tune_http).
 # Report how many of those were even built, separately from how many of the
 # built ones passed, so a partial run can never read as a full green suite.
-$totalExpected = 20
+$totalExpected = 21
 Write-Host ""
 Write-Host "Built: $($script:builtExes.Count)/$totalExpected executables"
 if ($script:buildFailures.Count -gt 0) {
