@@ -163,6 +163,20 @@
                  border-left: 4px solid var(--warn); border-radius: var(--ui-radius);
                  padding: 0.6em 0.9em; margin-bottom: 0.6em; font-size: 0.9em; }
   .credits { font-size: 0.85em; color: var(--muted); }
+  /* Live segment preview graph (owner request 2026-09-02): sits directly
+     above the segment rows -- the first row's own "Segment type" label is
+     the first thing below it -- and is only ever in the DOM's flow when
+     segPreviewChart.js decides there is something worth drawing (see
+     renderSegPreview() below); an untouched "New profile" form shows no box
+     at all, not an empty one, so this wrapper is display:none by default
+     rather than an empty bordered area. width:100%/box-sizing keeps a
+     narrow phone viewport from growing a horizontal scrollbar the way a
+     fixed-px canvas would. */
+  #segPreviewWrap { display: none; background: var(--card-bg); border: 1px solid var(--border);
+                     border-radius: var(--ui-radius); padding: 0.5em 0.6em; margin-top: 0.8em;
+                     box-sizing: border-box; }
+  #segPreviewWrap canvas { display: block; width: 100%; height: 120px; box-sizing: border-box; }
+  #segPreviewWrap .hint { margin: 0.3em 0 0; }
 </style>
 </head>
 <body>
@@ -199,6 +213,10 @@ selected zone has caught up, TODO.md 6A.5)</label>
 <div id="pzone"></div>
 <p class="hint" id="zoneCeiling"></p>
 
+<div id="segPreviewWrap">
+  <canvas id="segPreviewChart" width="600" height="120"></canvas>
+  <p class="hint">Preview only -- built from what's entered below, not a live reading.</p>
+</div>
 <div id="segments"></div>
 <button id="addSegBtn" type="button" class="small">+ Add segment</button>
 
@@ -466,6 +484,190 @@ function renderSegFields(fields, kind, seg) {
   }
 }
 
+// ---- Live segment preview graph (owner request 2026-09-02) ---------------
+// Pure data-shaping half lives here with no DOM access so it can be copied
+// verbatim into a standalone harness for testing (see the commit message /
+// task report for the harness run) -- segRowToData()/renderSegPreview()
+// below are the only DOM-touching pieces.
+//
+// clampNum: every numeric field on this page is free-typed by an operator,
+// so this is the one guard that keeps a blank box, a stray letter, or a
+// pasted negative from ever reaching Math -- non-finite collapses to `def`
+// rather than throwing or drawing NaN/Infinity garbage on the canvas.
+function clampNum(v, def) {
+  var n = parseFloat(v);
+  return isFinite(n) ? n : def;
+}
+
+// segProfileCurve: turns the parsed segment list into a temp-vs-time
+// polyline (time in minutes, temp in Celsius -- same unit convention as the
+// rest of this editor, UI_PLAN.md item 2). There is no live kiln
+// temperature available client-side without an extra round trip, so the
+// FIRST ramp/dwell segment with any real data is treated as the curve's
+// starting point (flat at its own target) rather than guessing a ramp up
+// from an unknown ambient -- every segment after that ramps from the
+// previous segment's target, same as the board will actually run it.
+//
+// Relay/IO segments contribute no temperature of their own: a blocking one
+// just holds the timeline flat at whatever temp came before it for its
+// dwell (the profile literally waits there before advancing); a
+// non-blocking one runs alongside the next segment and adds no time at all.
+// A row with no usable target yet (blank/non-numeric) is skipped outright --
+// "half-entered" must not throw, and must not fabricate a target of 0 for a
+// field the operator hasn't touched.
+function segProfileCurve(segs) {
+  var t = 0;
+  var temp = null;
+  var points = [];
+  var any = false;
+  (segs || []).forEach(function (s) {
+    if (s.kind === 1) {
+      var iDwell = Math.max(0, clampNum(s.dwell_min, 0));
+      if (iDwell > 0) any = true;
+      if (s.io_blocking !== 0 && iDwell > 0 && temp !== null) {
+        if (points.length === 0) points.push({ t: t, temp: temp });
+        t += iDwell;
+        points.push({ t: t, temp: temp });
+      }
+      return;
+    }
+    var target = clampNum(s.target_c, NaN);
+    if (!isFinite(target)) return; // no target entered on this row yet
+    var ramp = Math.max(0, clampNum(s.ramp_c_per_hr, 0));
+    var dwell = Math.max(0, clampNum(s.dwell_min, 0));
+    if (target !== 0 || ramp !== 0 || dwell !== 0) any = true;
+    if (temp === null) {
+      temp = target;
+      points.push({ t: t, temp: temp });
+    }
+    var rampMin = ramp > 0 ? Math.abs(target - temp) / ramp * 60 : 0;
+    t += rampMin;
+    temp = target;
+    points.push({ t: t, temp: temp });
+    if (dwell > 0) {
+      t += dwell;
+      points.push({ t: t, temp: temp });
+    }
+  });
+  // hasData gates the whole graph's visibility (brief: no box at all until
+  // there is something to draw) -- "any" alone isn't enough because a lone
+  // IO segment's dwell can set it true while producing zero drawable points
+  // (nothing ramp/dwell has set a starting temp yet).
+  return { points: points, hasData: any && points.length >= 2 };
+}
+
+// segRowToData: the only bit that touches the DOM, mapping one .seg row to
+// the plain-object shape segProfileCurve() consumes. Field lookups use the
+// same classes the save handler already reads (kind-specific, never both --
+// see renderSegFields()'s comment), so a row mid-kind-switch with fields not
+// yet rebuilt simply yields undefineds here, which clampNum() turns into
+// "skip this row" rather than a thrown error.
+function segRowToData(row) {
+  var kindSel = row.querySelector('.seg-kind');
+  var kind = kindSel ? parseInt(kindSel.value, 10) : 0;
+  if (kind === 1) {
+    var dwellEl = row.querySelector('.io-dwell');
+    var blockingEl = row.querySelector('.io-blocking');
+    return {
+      kind: 1,
+      dwell_min: dwellEl ? dwellEl.value : undefined,
+      io_blocking: blockingEl ? parseInt(blockingEl.value, 10) : 1,
+    };
+  }
+  var targetEl = row.querySelector('.s-target');
+  var rampEl = row.querySelector('.s-ramp');
+  var sDwellEl = row.querySelector('.s-dwell');
+  return {
+    kind: 0,
+    target_c: targetEl ? targetEl.value : undefined,
+    ramp_c_per_hr: rampEl ? rampEl.value : undefined,
+    dwell_min: sDwellEl ? sDwellEl.value : undefined,
+  };
+}
+
+// renderSegPreview: reads every current .seg row, builds the curve, and
+// shows/hides+draws #segPreviewWrap accordingly. Called after every edit
+// (delegated input/change listener below) and after every structural change
+// (add/remove/kind-switch/load-into-editor/reset) so it always reflects
+// exactly what the form holds right now -- brief's "must update live"
+// requirement.
+function renderSegPreview() {
+  var wrap = document.getElementById('segPreviewWrap');
+  var rows = document.getElementById('segments').querySelectorAll('.seg');
+  var segs = [];
+  rows.forEach(function (row) { segs.push(segRowToData(row)); });
+  var curve = segProfileCurve(segs);
+  if (!curve.hasData) {
+    wrap.style.display = 'none';
+    return;
+  }
+  wrap.style.display = '';
+  drawSegPreview(curve.points);
+}
+
+// drawSegPreview: same canvas idiom main_page.html's history/autotune charts
+// use (devicePixelRatio-scaled backing store, CSS-pixel-sized layout,
+// strokeRect axes box) -- kept deliberately much simpler since this is a
+// small inline sketch, not the dashboard's multi-series chart. Colours come
+// only from this page's own --link/--muted/--border tokens (declared at the
+// top of the file), no new literals.
+function drawSegPreview(points) {
+  var canvas = document.getElementById('segPreviewChart');
+  var dpr = window.devicePixelRatio || 1;
+  var cssW = canvas.clientWidth || 600, cssH = 120;
+  canvas.width = cssW * dpr;
+  canvas.height = cssH * dpr;
+  var ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, cssW, cssH);
+
+  var style = getComputedStyle(document.documentElement);
+  var line = style.getPropertyValue('--link').trim() || '#06c';
+  var muted = style.getPropertyValue('--muted').trim() || '#444';
+  var border = style.getPropertyValue('--border').trim() || '#888';
+
+  var padL = 34, padR = 6, padT = 6, padB = 14;
+  var plotW = Math.max(1, cssW - padL - padR);
+  var plotH = Math.max(1, cssH - padT - padB);
+
+  var tMax = 0, tMin = 0, vMax = 0, vMin = 0;
+  points.forEach(function (p, i) {
+    if (i === 0) { tMin = tMax = p.t; vMin = vMax = p.temp; }
+    if (p.t > tMax) tMax = p.t;
+    if (p.t < tMin) tMin = p.t;
+    if (p.temp > vMax) vMax = p.temp;
+    if (p.temp < vMin) vMin = p.temp;
+  });
+  if (tMax <= tMin) tMax = tMin + 1; // degenerate (all-flat/zero-duration) -- keep the axes finite
+  if (vMax <= vMin) vMax = vMin + 1;
+
+  function x(t) { return padL + (t - tMin) / (tMax - tMin) * plotW; }
+  function y(v) { return padT + plotH - (v - vMin) / (vMax - vMin) * plotH; }
+
+  ctx.strokeStyle = border; ctx.lineWidth = 1;
+  ctx.strokeRect(padL, padT, plotW, plotH);
+
+  ctx.fillStyle = muted; ctx.font = '9px sans-serif';
+  ctx.fillText(vMax.toFixed(0) + '°C', 2, padT + 8);
+  ctx.fillText(vMin.toFixed(0) + '°C', 2, padT + plotH);
+  ctx.fillText('0 min', padL, cssH - 3);
+  ctx.fillText(tMax.toFixed(0) + ' min', cssW - padR - 30, cssH - 3);
+
+  ctx.beginPath();
+  points.forEach(function (p, i) {
+    var px = x(p.t), py = y(p.temp);
+    if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+  });
+  ctx.strokeStyle = line; ctx.lineWidth = 1.5; ctx.stroke();
+}
+
+// Delegated so it fires for every field in every row (present or future)
+// without a per-input listener to wire up and tear down on every kind
+// switch -- 'input' catches live typing in the number fields, 'change'
+// catches the <select> kind/state/timing pickers.
+document.getElementById('segments').addEventListener('input', renderSegPreview);
+document.getElementById('segments').addEventListener('change', renderSegPreview);
+
 function segmentRow(seg) {
   var div = document.createElement('div');
   div.className = 'seg';
@@ -479,7 +681,7 @@ function segmentRow(seg) {
       '<button type="button" class="small remove">&times;</button>' +
     '</div>' +
     '<div class="fields"></div>';
-  div.querySelector('.remove').addEventListener('click', function () { div.remove(); });
+  div.querySelector('.remove').addEventListener('click', function () { div.remove(); renderSegPreview(); });
   var fields = div.querySelector('.fields');
   renderSegFields(fields, kind, seg);
   div.querySelector('.seg-kind').addEventListener('change', function (ev) {
@@ -491,9 +693,10 @@ function segmentRow(seg) {
     // page) was last loaded, so refetch it live before offering the
     // relay/IO dropdown (brief item 2's "compute that live" requirement).
     if (newKind === 1) {
-      loadZones().then(function () { renderSegFields(fields, newKind, {}); });
+      loadZones().then(function () { renderSegFields(fields, newKind, {}); renderSegPreview(); });
     } else {
       renderSegFields(fields, newKind, {});
+      renderSegPreview();
     }
   });
   return div;
@@ -507,7 +710,7 @@ function segmentRow(seg) {
 document.getElementById('addSegBtn').addEventListener('click', function () {
   var container = document.getElementById('segments');
   if (container.children.length >= MAX_SEGMENTS) return;
-  loadZones().then(function () { container.appendChild(segmentRow({})); });
+  loadZones().then(function () { container.appendChild(segmentRow({})); renderSegPreview(); });
 });
 
 function resetEditor() {
@@ -749,6 +952,7 @@ function loadIntoEditor(p) {
   // this keeps the same guarantee if that ever changes.
   loadZones().then(function () {
     p.segments.forEach(function (seg) { container.appendChild(segmentRow(seg)); });
+    renderSegPreview();
   });
   window.scrollTo(0, document.body.scrollHeight);
 }
@@ -782,6 +986,7 @@ function editProfile(id) {
     var container = document.getElementById('segments');
     container.innerHTML = '';
     p.segments.forEach(function (seg) { container.appendChild(segmentRow(seg)); });
+    renderSegPreview();
     document.getElementById('msg').innerHTML = '';
     window.scrollTo(0, document.body.scrollHeight);
   }).catch(function () {
